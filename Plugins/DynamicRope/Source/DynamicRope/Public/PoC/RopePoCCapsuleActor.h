@@ -7,6 +7,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "PoC/RopeCapsuleProvider.h"
 #include "RopePoCCapsuleActor.generated.h"
 
 class UCapsuleComponent;
@@ -17,7 +18,7 @@ class UCapsuleComponent;
  * solver can push particles out of it. Stand-in for a character limb's physics-asset capsule.
  */
 UCLASS()
-class DYNAMICROPE_API ARopePoCCapsuleActor : public AActor
+class DYNAMICROPE_API ARopePoCCapsuleActor : public AActor, public IRopeCapsuleProvider
 {
 	GENERATED_BODY()
 
@@ -67,6 +68,9 @@ public:
 	 * A point is inside the capsule when its distance to segment [OutA, OutB] is < OutRadius.
 	 */
 	void GetCapsuleSegment(FVector& OutA, FVector& OutB, float& OutRadius) const;
+
+	//~ IRopeCapsuleProvider
+	virtual void GatherRopeCapsules(TArray<FRopeCapsule>& OutCapsules) const override;
 
 private:
 	UPROPERTY(VisibleAnywhere, Category = "Capsule")

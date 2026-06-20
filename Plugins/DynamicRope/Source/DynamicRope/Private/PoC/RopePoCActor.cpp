@@ -91,32 +91,76 @@ void ARopePoCActor::InitializeRope()
 	}
 
 	RebuildSegmentMeshes();
-	GatherColliders();
+	GatherProviders();
 	ApplyPinning();
 
 	bInitialized = true;
 }
 
-void ARopePoCActor::GatherColliders()
+void ARopePoCActor::GatherProviders()
 {
-	ActiveColliders.Reset();
+	CapsuleProviders.Reset();
 
+	// Explicit providers (test capsule actors).
 	for (ARopePoCCapsuleActor* C : Colliders)
 	{
 		if (C)
 		{
-			ActiveColliders.AddUnique(C);
+			CapsuleProviders.AddUnique(C);
 		}
 	}
 
-	if (bAutoFindColliders)
+	if (!bAutoFindColliders)
 	{
-		if (UWorld* World = GetWorld())
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Any actor or component in the level implementing IRopeCapsuleProvider.
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!Actor)
 		{
-			for (TActorIterator<ARopePoCCapsuleActor> It(World); It; ++It)
+			continue;
+		}
+
+		if (Actor->Implements<URopeCapsuleProvider>())
+		{
+			CapsuleProviders.AddUnique(Actor);
+		}
+
+		TArray<UActorComponent*> Components;
+		Actor->GetComponents(Components);
+		for (UActorComponent* Comp : Components)
+		{
+			if (Comp && Comp->Implements<URopeCapsuleProvider>())
 			{
-				ActiveColliders.AddUnique(*It);
+				CapsuleProviders.AddUnique(Comp);
 			}
+		}
+	}
+}
+
+void ARopePoCActor::BuildFrameCapsules()
+{
+	FrameCapsules.Reset();
+
+	for (const TWeakObjectPtr<UObject>& Weak : CapsuleProviders)
+	{
+		UObject* Obj = Weak.Get();
+		if (!Obj)
+		{
+			continue;
+		}
+		if (const IRopeCapsuleProvider* Provider = Cast<IRopeCapsuleProvider>(Obj))
+		{
+			Provider->GatherRopeCapsules(FrameCapsules);
 		}
 	}
 }
@@ -241,8 +285,9 @@ void ARopePoCActor::SimulateStep(float DeltaSeconds)
 		Positions[i] = NewPos;
 	}
 
-	// Re-pin endpoints, then satisfy distance + collision constraints.
+	// Re-pin endpoints, gather this frame's capsules once, then satisfy distance + collision constraints.
 	ApplyPinning();
+	BuildFrameCapsules();
 	for (int32 Iter = 0; Iter < SolverIterations; ++Iter)
 	{
 		SolveConstraints();
@@ -280,23 +325,9 @@ void ARopePoCActor::SolveConstraints()
 
 void ARopePoCActor::SolveCollisions()
 {
-	if (ActiveColliders.Num() == 0)
+	for (const FRopeCapsule& Cap : FrameCapsules)
 	{
-		return;
-	}
-
-	for (const TWeakObjectPtr<ARopePoCCapsuleActor>& WeakC : ActiveColliders)
-	{
-		const ARopePoCCapsuleActor* C = WeakC.Get();
-		if (!C)
-		{
-			continue;
-		}
-
-		FVector SegA, SegB;
-		float CapsuleRadius;
-		C->GetCapsuleSegment(SegA, SegB, CapsuleRadius);
-		const float MinDist = CapsuleRadius + RopeCollisionRadius;
+		const float MinDist = Cap.Radius + RopeCollisionRadius;
 
 		for (int32 i = 0; i < Positions.Num(); ++i)
 		{
@@ -305,7 +336,7 @@ void ARopePoCActor::SolveCollisions()
 				continue; // don't push pinned particles
 			}
 
-			const FVector Closest = FMath::ClosestPointOnSegment(Positions[i], SegA, SegB);
+			const FVector Closest = FMath::ClosestPointOnSegment(Positions[i], Cap.A, Cap.B);
 			FVector ToParticle = Positions[i] - Closest;
 			const float Dist = ToParticle.Size();
 			if (Dist >= MinDist)
@@ -322,7 +353,7 @@ void ARopePoCActor::SolveCollisions()
 			else
 			{
 				// Degenerate: particle on the axis — pick an arbitrary perpendicular.
-				const FVector Axis = (SegB - SegA).GetSafeNormal(1e-4f, FVector::UpVector);
+				const FVector Axis = (Cap.B - Cap.A).GetSafeNormal(1e-4f, FVector::UpVector);
 				Normal = FVector::CrossProduct(Axis, FVector::ForwardVector).GetSafeNormal(1e-4f, FVector::RightVector);
 			}
 			Positions[i] = Closest + Normal * MinDist;
@@ -419,8 +450,8 @@ void ARopePoCActor::Tick(float DeltaSeconds)
 			const FColor BudgetColor = (AvgSolveMs < 0.3f) ? FColor::Green : FColor::Orange;
 			GEngine->AddOnScreenDebugMessage(
 				reinterpret_cast<uint64>(this), 0.0f, BudgetColor,
-				FString::Printf(TEXT("[Rope] solve %.3f ms (avg) | particles %d | iters %d | colliders %d"),
-					AvgSolveMs, NumParticles, SolverIterations, ActiveColliders.Num()));
+				FString::Printf(TEXT("[Rope] solve %.3f ms (avg) | particles %d | iters %d | capsules %d"),
+					AvgSolveMs, NumParticles, SolverIterations, FrameCapsules.Num()));
 		}
 	}
 }

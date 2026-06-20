@@ -7,6 +7,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "PoC/RopeCapsuleProvider.h"
 #include "RopePoCActor.generated.h"
 
 class USplineMeshComponent;
@@ -74,11 +75,11 @@ public:
 	TObjectPtr<AActor> EndAnchorActor = nullptr;
 
 	//~ Collision ---------------------------------------------------------
-	/** Capsules the rope collides against. Leave empty and rely on bAutoFindColliders to auto-gather. */
+	/** Explicit capsule providers (test capsule actors). Leave empty and rely on bAutoFindColliders. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision")
 	TArray<TObjectPtr<ARopePoCCapsuleActor>> Colliders;
 
-	/** Also collide against every ARopePoCCapsuleActor found in the level. */
+	/** Also collide against every IRopeCapsuleProvider (test capsules, skeletal limbs) found in the level. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision")
 	bool bAutoFindColliders = true;
 
@@ -124,12 +125,16 @@ private:
 	float           LastSolveMs = 0.0f;
 	float           AvgSolveMs = 0.0f;
 
-	/** Capsules actually used this run (explicit list + auto-found), built on init. */
-	TArray<TWeakObjectPtr<ARopePoCCapsuleActor>> ActiveColliders;
+	/** Capsule providers used this run (explicit list + auto-found), resolved on init. */
+	TArray<TWeakObjectPtr<UObject>> CapsuleProviders;
+
+	/** Capsules gathered from providers once per frame, reused across solver iterations. */
+	TArray<FRopeCapsule> FrameCapsules;
 
 	void InitializeRope();
 	void RebuildSegmentMeshes();
-	void GatherColliders();
+	void GatherProviders();
+	void BuildFrameCapsules();
 	void SimulateStep(float DeltaSeconds);
 	void SolveConstraints();
 	void SolveCollisions();

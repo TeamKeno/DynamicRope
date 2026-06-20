@@ -93,3 +93,10 @@ void ARopePoCCapsuleActor::GetCapsuleSegment(FVector& OutA, FVector& OutB, float
 	OutA = Center - Up * SegmentHalf;
 	OutB = Center + Up * SegmentHalf;
 }
+
+void ARopePoCCapsuleActor::GatherRopeCapsules(TArray<FRopeCapsule>& OutCapsules) const
+{
+	FRopeCapsule Cap;
+	GetCapsuleSegment(Cap.A, Cap.B, Cap.Radius);
+	OutCapsules.Add(Cap);
+}
