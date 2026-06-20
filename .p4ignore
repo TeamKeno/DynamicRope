@@ -1,0 +1,14 @@
+Binaries/
+Build/
+Intermediate/
+DerivedDataCache/
+Saved/
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.VC.db
+*.VC.opendb
+*.opensdf
+*.sdf
