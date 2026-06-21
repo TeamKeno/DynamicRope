@@ -87,6 +87,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision", meta = (ClampMin = "0.0", UIMin = "0.0", Units = "cm"))
 	float RopeCollisionRadius = 2.0f;
 
+	/**
+	 * How strongly a contacting rope sticks to the (moving) capsule surface.
+	 * 0 = frictionless (slides off), 1 = fully grips (moves with the limb → wrap stays). Key knob for "감김 유지".
+	 */
+	UPROPERTY(EditAnywhere, Category = "Rope|Collision", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WrapFriction = 0.6f;
+
+	/** Distance beyond the capsule surface still treated as "in contact" for friction (cm). */
+	UPROPERTY(EditAnywhere, Category = "Rope|Collision", meta = (ClampMin = "0.0", UIMin = "0.0", Units = "cm"))
+	float FrictionContactBand = 2.0f;
+
 	//~ Render ------------------------------------------------------------
 	/** Mesh used per segment. Defaults to the engine cylinder if left empty. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Render")
@@ -131,6 +142,9 @@ private:
 	/** Capsules gathered from providers once per frame, reused across solver iterations. */
 	TArray<FRopeCapsule> FrameCapsules;
 
+	/** Last frame's capsules (same order), used to estimate surface velocity for friction. */
+	TArray<FRopeCapsule> PrevFrameCapsules;
+
 	void InitializeRope();
 	void RebuildSegmentMeshes();
 	void GatherProviders();
@@ -138,6 +152,7 @@ private:
 	void SimulateStep(float DeltaSeconds);
 	void SolveConstraints();
 	void SolveCollisions();
+	void ApplyFriction();
 	void ApplyPinning();
 	void UpdateSegmentMeshes();
 	void DrawDebugRope() const;

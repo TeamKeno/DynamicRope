@@ -293,6 +293,12 @@ void ARopePoCActor::SimulateStep(float DeltaSeconds)
 		SolveConstraints();
 		SolveCollisions();
 	}
+
+	// Friction is a once-per-frame velocity adjustment, after contacts are resolved.
+	ApplyFriction();
+
+	// Remember this frame's capsules so next frame can estimate surface velocity.
+	PrevFrameCapsules = FrameCapsules;
 }
 
 void ARopePoCActor::SolveConstraints()
@@ -357,6 +363,62 @@ void ARopePoCActor::SolveCollisions()
 				Normal = FVector::CrossProduct(Axis, FVector::ForwardVector).GetSafeNormal(1e-4f, FVector::RightVector);
 			}
 			Positions[i] = Closest + Normal * MinDist;
+		}
+	}
+}
+
+void ARopePoCActor::ApplyFriction()
+{
+	if (WrapFriction <= 0.0f)
+	{
+		return;
+	}
+
+	// Need same-order previous capsules to estimate how the surface moved this frame.
+	if (PrevFrameCapsules.Num() != FrameCapsules.Num())
+	{
+		return;
+	}
+
+	for (int32 c = 0; c < FrameCapsules.Num(); ++c)
+	{
+		const FRopeCapsule& Cur = FrameCapsules[c];
+		const FRopeCapsule& Prev = PrevFrameCapsules[c];
+		const float ContactDist = Cur.Radius + RopeCollisionRadius + FrictionContactBand;
+
+		const FVector Seg = Cur.B - Cur.A;
+		const float SegLenSq = Seg.SizeSquared();
+
+		for (int32 i = 0; i < Positions.Num(); ++i)
+		{
+			if (InvMasses[i] <= 0.0f)
+			{
+				continue;
+			}
+
+			const FVector Closest = FMath::ClosestPointOnSegment(Positions[i], Cur.A, Cur.B);
+			const FVector ToParticle = Positions[i] - Closest;
+			const float Dist = ToParticle.Size();
+			if (Dist > ContactDist)
+			{
+				continue; // not in contact — no friction
+			}
+
+			const FVector Normal = (Dist > KINDA_SMALL_NUMBER) ? (ToParticle / Dist) : FVector::UpVector;
+
+			// Sample the surface velocity at the contact point (same parameter on prev/cur segment).
+			const float T = (SegLenSq > KINDA_SMALL_NUMBER)
+				? FMath::Clamp(FVector::DotProduct(Positions[i] - Cur.A, Seg) / SegLenSq, 0.0f, 1.0f)
+				: 0.0f;
+			const FVector SurfaceVel = FMath::Lerp(Cur.A, Cur.B, T) - FMath::Lerp(Prev.A, Prev.B, T);
+
+			// Relative tangential motion between the rope particle and the moving surface.
+			const FVector ParticleVel = Positions[i] - OldPositions[i];
+			const FVector RelVel = ParticleVel - SurfaceVel;
+			const FVector RelTangent = RelVel - FVector::DotProduct(RelVel, Normal) * Normal;
+
+			// Cancel a fraction of it. In Verlet, shifting OldPosition toward Position lowers velocity.
+			OldPositions[i] += RelTangent * WrapFriction;
 		}
 	}
 }
