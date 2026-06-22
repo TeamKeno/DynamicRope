@@ -63,6 +63,27 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Swing", meta = (EditCondition = "bAutoSwing"))
 	FVector SwingPivotOffset = FVector(0.0f, 0.0f, 60.0f);
 
+	//~ Pull / draggable (S4) — respond to the rope's contact reaction ------
+
+	/** Let the rope drag this capsule (the "limb gets pulled"). Reaction is integrated as a soft body. */
+	UPROPERTY(EditAnywhere, Category = "Pull")
+	bool bDraggable = true;
+
+	/** Heavier = harder to drag. Reaction impulse is divided by this. Low = the limb gets reeled in. */
+	UPROPERTY(EditAnywhere, Category = "Pull", meta = (EditCondition = "bDraggable", ClampMin = "0.1"))
+	float Mass = 10.0f;
+
+	/** Velocity damping of the drag offset (per second). Higher = settles faster / less drift. */
+	UPROPERTY(EditAnywhere, Category = "Pull", meta = (EditCondition = "bDraggable", ClampMin = "0.0"))
+	float DragDamping = 2.0f;
+
+	/**
+	 * Spring pulling the capsule back to its rest pose (per second^2).
+	 * 0 = the limb stays where it was dragged (capture feel — recommended). Raise it for an elastic snap-back.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Pull", meta = (EditCondition = "bDraggable", ClampMin = "0.0"))
+	float ReturnStiffness = 0.0f;
+
 	/**
 	 * World-space inner segment of the capsule (the two sphere centers) and its radius.
 	 * A point is inside the capsule when its distance to segment [OutA, OutB] is < OutRadius.
@@ -71,6 +92,7 @@ public:
 
 	//~ IRopeCapsuleProvider
 	virtual void GatherRopeCapsules(TArray<FRopeCapsule>& OutCapsules) const override;
+	virtual void ApplyRopeReaction(const FVector& WorldImpulse, const FVector& WorldLocation) override;
 
 private:
 	UPROPERTY(VisibleAnywhere, Category = "Capsule")
@@ -79,4 +101,11 @@ private:
 	/** Captured rest pose the swing oscillates around. */
 	FTransform RestTransform = FTransform::Identity;
 	float SwingElapsed = 0.0f;
+
+	// --- S4 drag state (world space) ---
+	/** Impulse received from the rope since the last Tick. */
+	FVector PendingImpulse = FVector::ZeroVector;
+	/** Current drag velocity and accumulated offset from the rest/swing pose. */
+	FVector DragVelocity = FVector::ZeroVector;
+	FVector DragOffset = FVector::ZeroVector;
 };

@@ -90,6 +90,15 @@ void ARopePoCActor::InitializeRope()
 		InvMasses[i] = 1.0f;
 	}
 
+	// Wrap-latch state starts empty (no node latched yet).
+	LatchCapsule.Init(-1, NumParticles);
+	LatchAlong.Init(0.0f, NumParticles);
+	LatchRadialDir.Init(FVector::UpVector, NumParticles);
+	LatchRadialDist.Init(0.0f, NumParticles);
+	LatchAxis.Init(FVector::UpVector, NumParticles);
+	ContactDwell.Init(0.0f, NumParticles);
+	bHasPrevPins = false;
+
 	RebuildSegmentMeshes();
 	GatherProviders();
 	ApplyPinning();
@@ -150,19 +159,31 @@ void ARopePoCActor::GatherProviders()
 void ARopePoCActor::BuildFrameCapsules()
 {
 	FrameCapsules.Reset();
+	FrameCapsuleOwner.Reset();
 
-	for (const TWeakObjectPtr<UObject>& Weak : CapsuleProviders)
+	for (int32 ProviderIdx = 0; ProviderIdx < CapsuleProviders.Num(); ++ProviderIdx)
 	{
-		UObject* Obj = Weak.Get();
+		UObject* Obj = CapsuleProviders[ProviderIdx].Get();
 		if (!Obj)
 		{
 			continue;
 		}
 		if (const IRopeCapsuleProvider* Provider = Cast<IRopeCapsuleProvider>(Obj))
 		{
+			const int32 Before = FrameCapsules.Num();
 			Provider->GatherRopeCapsules(FrameCapsules);
+			// Tag every capsule this provider just appended with its provider index.
+			for (int32 c = Before; c < FrameCapsules.Num(); ++c)
+			{
+				FrameCapsuleOwner.Add(ProviderIdx);
+			}
 		}
 	}
+
+	// Reset this frame's pull-reaction accumulators to match the capsule set.
+	CapsuleReaction.Init(FVector::ZeroVector, FrameCapsules.Num());
+	CapsuleReactionPoint.Init(FVector::ZeroVector, FrameCapsules.Num());
+	CapsuleReactionWeight.Init(0.0f, FrameCapsules.Num());
 }
 
 void ARopePoCActor::RebuildSegmentMeshes()
@@ -237,6 +258,11 @@ void ARopePoCActor::RebuildSegmentMeshes()
 
 void ARopePoCActor::ApplyPinning()
 {
+	SetPinnedTargets(GetStartWorld(), GetEndWorld());
+}
+
+void ARopePoCActor::SetPinnedTargets(const FVector& StartW, const FVector& EndW)
+{
 	if (Positions.Num() == 0)
 	{
 		return;
@@ -244,8 +270,8 @@ void ARopePoCActor::ApplyPinning()
 
 	if (bPinStart)
 	{
-		Positions[0] = GetStartWorld();
-		OldPositions[0] = Positions[0];
+		Positions[0] = StartW;
+		OldPositions[0] = StartW;
 		InvMasses[0] = 0.0f;
 	}
 	else
@@ -256,8 +282,8 @@ void ARopePoCActor::ApplyPinning()
 	const int32 Last = Positions.Num() - 1;
 	if (bPinEnd && EndAnchorActor)
 	{
-		Positions[Last] = EndAnchorActor->GetActorLocation();
-		OldPositions[Last] = Positions[Last];
+		Positions[Last] = EndW;
+		OldPositions[Last] = EndW;
 		InvMasses[Last] = 0.0f;
 	}
 	else
@@ -268,36 +294,90 @@ void ARopePoCActor::ApplyPinning()
 
 void ARopePoCActor::SimulateStep(float DeltaSeconds)
 {
-	const float Dt = FMath::Min(DeltaSeconds, MaxSimDeltaSeconds);
-	const float Dt2 = Dt * Dt;
+	const float FrameDt = FMath::Min(DeltaSeconds, MaxSimDeltaSeconds);
+	const int32 Sub = FMath::Clamp(SimSubsteps, 1, 16);
+	const float SubDt = FrameDt / static_cast<float>(Sub);
+	const float SubDt2 = SubDt * SubDt;
 	const float DampFactor = 1.0f - FMath::Clamp(Damping, 0.0f, 1.0f);
+	const int32 ItersPerSub = FMath::Max(1, SolverIterations / Sub);
 
-	// Verlet integration for free particles.
-	for (int32 i = 0; i < Positions.Num(); ++i)
-	{
-		if (InvMasses[i] <= 0.0f)
-		{
-			continue;
-		}
-		const FVector Velocity = (Positions[i] - OldPositions[i]) * DampFactor;
-		const FVector NewPos = Positions[i] + Velocity + Gravity * Dt2;
-		OldPositions[i] = Positions[i];
-		Positions[i] = NewPos;
-	}
-
-	// Re-pin endpoints, gather this frame's capsules once, then satisfy distance + collision constraints.
-	ApplyPinning();
+	// This frame's capsules (current pose) + reset the per-frame reaction accumulators.
 	BuildFrameCapsules();
-	for (int32 Iter = 0; Iter < SolverIterations; ++Iter)
+
+	// Pinned-end targets: sweep from last frame's pose (Prev) to this frame's (Target).
+	const FVector StartTarget = GetStartWorld();
+	const FVector EndTarget = GetEndWorld();
+	if (!bHasPrevPins)
 	{
-		SolveConstraints();
-		SolveCollisions();
+		PrevStartWorld = StartTarget;
+		PrevEndWorld = EndTarget;
+		bHasPrevPins = true;
 	}
 
-	// Friction is a once-per-frame velocity adjustment, after contacts are resolved.
-	ApplyFriction();
+	const bool bCanInterpCapsules = (PrevFrameCapsules.Num() == FrameCapsules.Num());
 
-	// Remember this frame's capsules so next frame can estimate surface velocity.
+	for (int32 s = 1; s <= Sub; ++s)
+	{
+		const float Alpha = static_cast<float>(s) / static_cast<float>(Sub);
+		const float AlphaPrev = static_cast<float>(s - 1) / static_cast<float>(Sub);
+
+		// Capsule poses for this substep, and the substep before (friction surface velocity).
+		ActiveCapsules = FrameCapsules;
+		PrevActiveCapsules = FrameCapsules;
+		if (bCanInterpCapsules)
+		{
+			for (int32 c = 0; c < FrameCapsules.Num(); ++c)
+			{
+				const FRopeCapsule& P = PrevFrameCapsules[c];
+				const FRopeCapsule& F = FrameCapsules[c];
+				ActiveCapsules[c].A = FMath::Lerp(P.A, F.A, Alpha);
+				ActiveCapsules[c].B = FMath::Lerp(P.B, F.B, Alpha);
+				PrevActiveCapsules[c].A = FMath::Lerp(P.A, F.A, AlphaPrev);
+				PrevActiveCapsules[c].B = FMath::Lerp(P.B, F.B, AlphaPrev);
+			}
+		}
+
+		// Verlet integrate free particles by the (smaller) substep timestep.
+		for (int32 i = 0; i < Positions.Num(); ++i)
+		{
+			if (InvMasses[i] <= 0.0f)
+			{
+				continue;
+			}
+			const FVector Velocity = (Positions[i] - OldPositions[i]) * DampFactor;
+			const FVector NewPos = Positions[i] + Velocity + Gravity * SubDt2;
+			OldPositions[i] = Positions[i];
+			Positions[i] = NewPos;
+		}
+
+		// Sweep the pinned ends to their interpolated targets.
+		SetPinnedTargets(FMath::Lerp(PrevStartWorld, StartTarget, Alpha),
+		                 FMath::Lerp(PrevEndWorld, EndTarget, Alpha));
+
+		// Hold: keep latched wrap nodes glued to the (moving) capsule surface this substep.
+		UpdateLatchedPositions();
+
+		for (int32 Iter = 0; Iter < ItersPerSub; ++Iter)
+		{
+			SolveConstraints();
+			SolveCollisions();
+		}
+
+		// Friction is a per-substep velocity adjustment, after contacts are resolved.
+		ApplyFriction();
+	}
+
+	// Latch newly-established wraps / break yanked-off ones, using the resolved frame state.
+	ManageWrapLatch(FrameDt);
+	// Latched nodes don't get push-out reaction (they're pinned) — feed their tension instead.
+	AccumulateLatchReaction();
+
+	// S4: reaction was accumulated across all substeps — hand it to the providers once.
+	ApplyPullReaction();
+
+	// Remember this frame's pin targets and capsule poses for next frame's sweep.
+	PrevStartWorld = StartTarget;
+	PrevEndWorld = EndTarget;
 	PrevFrameCapsules = FrameCapsules;
 }
 
@@ -331,8 +411,9 @@ void ARopePoCActor::SolveConstraints()
 
 void ARopePoCActor::SolveCollisions()
 {
-	for (const FRopeCapsule& Cap : FrameCapsules)
+	for (int32 c = 0; c < ActiveCapsules.Num(); ++c)
 	{
+		const FRopeCapsule& Cap = ActiveCapsules[c];
 		const float MinDist = Cap.Radius + RopeCollisionRadius;
 
 		for (int32 i = 0; i < Positions.Num(); ++i)
@@ -362,7 +443,19 @@ void ARopePoCActor::SolveCollisions()
 				const FVector Axis = (Cap.B - Cap.A).GetSafeNormal(1e-4f, FVector::UpVector);
 				Normal = FVector::CrossProduct(Axis, FVector::ForwardVector).GetSafeNormal(1e-4f, FVector::RightVector);
 			}
-			Positions[i] = Closest + Normal * MinDist;
+
+			const FVector Target = Closest + Normal * MinDist;
+			const FVector PushOut = Target - Positions[i]; // displacement applied to the particle
+			Positions[i] = Target;
+
+			// S4: the body pushed the particle out by +PushOut, so the rope pushes the
+			// body by -PushOut (Newton's 3rd law). Accumulate it for ApplyPullReaction.
+			if (bEnableTwoWayPull && CapsuleReaction.IsValidIndex(c))
+			{
+				CapsuleReaction[c] += -PushOut;
+				CapsuleReactionPoint[c] += Closest;
+				CapsuleReactionWeight[c] += 1.0f;
+			}
 		}
 	}
 }
@@ -374,16 +467,16 @@ void ARopePoCActor::ApplyFriction()
 		return;
 	}
 
-	// Need same-order previous capsules to estimate how the surface moved this frame.
-	if (PrevFrameCapsules.Num() != FrameCapsules.Num())
+	// Need same-order previous-substep capsules to estimate how the surface moved.
+	if (PrevActiveCapsules.Num() != ActiveCapsules.Num())
 	{
 		return;
 	}
 
-	for (int32 c = 0; c < FrameCapsules.Num(); ++c)
+	for (int32 c = 0; c < ActiveCapsules.Num(); ++c)
 	{
-		const FRopeCapsule& Cur = FrameCapsules[c];
-		const FRopeCapsule& Prev = PrevFrameCapsules[c];
+		const FRopeCapsule& Cur = ActiveCapsules[c];
+		const FRopeCapsule& Prev = PrevActiveCapsules[c];
 		const float ContactDist = Cur.Radius + RopeCollisionRadius + FrictionContactBand;
 
 		const FVector Seg = Cur.B - Cur.A;
@@ -419,6 +512,238 @@ void ARopePoCActor::ApplyFriction()
 
 			// Cancel a fraction of it. In Verlet, shifting OldPosition toward Position lowers velocity.
 			OldPositions[i] += RelTangent * WrapFriction;
+		}
+	}
+}
+
+void ARopePoCActor::ApplyPullReaction()
+{
+	if (!bEnableTwoWayPull || PullReactionGain <= 0.0f)
+	{
+		return;
+	}
+
+	for (int32 c = 0; c < FrameCapsules.Num(); ++c)
+	{
+		const float Weight = CapsuleReactionWeight.IsValidIndex(c) ? CapsuleReactionWeight[c] : 0.0f;
+		if (Weight <= 0.0f)
+		{
+			continue; // no contact this frame
+		}
+
+		// Resolve the provider that owns this capsule.
+		if (!FrameCapsuleOwner.IsValidIndex(c))
+		{
+			continue;
+		}
+		const int32 ProviderIdx = FrameCapsuleOwner[c];
+		if (!CapsuleProviders.IsValidIndex(ProviderIdx))
+		{
+			continue;
+		}
+		UObject* Obj = CapsuleProviders[ProviderIdx].Get();
+		IRopeCapsuleProvider* Provider = Obj ? Cast<IRopeCapsuleProvider>(Obj) : nullptr;
+		if (!Provider)
+		{
+			continue;
+		}
+
+		const FVector Impulse = CapsuleReaction[c] * PullReactionGain;
+		const FVector AppPoint = CapsuleReactionPoint[c] / Weight; // averaged contact point
+		Provider->ApplyRopeReaction(Impulse, AppPoint);
+
+		if (bDrawDebug)
+		{
+			if (const UWorld* World = GetWorld())
+			{
+				DrawDebugDirectionalArrow(World, AppPoint, AppPoint + Impulse * 20.0f,
+					12.0f, FColor::Magenta, false, -1.0f, SDPG_World, 1.5f);
+			}
+		}
+	}
+}
+
+void ARopePoCActor::UpdateLatchedPositions()
+{
+	if (!bEnableWrapLatch)
+	{
+		return;
+	}
+
+	for (int32 i = 0; i < Positions.Num(); ++i)
+	{
+		const int32 c = LatchCapsule[i];
+		if (c < 0)
+		{
+			continue;
+		}
+		if (!ActiveCapsules.IsValidIndex(c))
+		{
+			// Capsule set changed under us — drop the latch (interior nodes only get latched).
+			LatchCapsule[i] = -1;
+			InvMasses[i] = 1.0f;
+			continue;
+		}
+
+		const FRopeCapsule& Cap = ActiveCapsules[c];
+		const FVector AxisVec = Cap.B - Cap.A;
+		const float AxisLen = AxisVec.Size();
+		const FVector CurAxis = (AxisLen > KINDA_SMALL_NUMBER) ? (AxisVec / AxisLen) : LatchAxis[i];
+
+		// Rotate the stored radial offset by however the capsule axis turned since last step,
+		// so the wrap follows the limb as it swings (capsule is symmetric about its axis).
+		const FQuat Turn = FQuat::FindBetweenNormals(LatchAxis[i], CurAxis);
+		const FVector NewRadial = Turn.RotateVector(LatchRadialDir[i]).GetSafeNormal(1e-4f, CurAxis);
+		LatchRadialDir[i] = NewRadial;
+		LatchAxis[i] = CurAxis;
+
+		// Surface point = point along the axis + radial offset.
+		const float Along = FMath::Clamp(LatchAlong[i], 0.0f, AxisLen);
+		const FVector Surface = Cap.A + CurAxis * Along + NewRadial * LatchRadialDist[i];
+
+		Positions[i] = Surface;
+		OldPositions[i] = Surface; // pinned: don't carry velocity while held
+		InvMasses[i] = 0.0f;
+	}
+}
+
+void ARopePoCActor::ManageWrapLatch(float FrameDt)
+{
+	if (!bEnableWrapLatch)
+	{
+		// Disabled: release every latch so the rope is fully dynamic again.
+		for (int32 i = 0; i < Positions.Num(); ++i)
+		{
+			if (LatchCapsule[i] >= 0)
+			{
+				LatchCapsule[i] = -1;
+				InvMasses[i] = 1.0f;
+			}
+			ContactDwell[i] = 0.0f;
+		}
+		return;
+	}
+
+	const float MaxLen = SegmentLength * LatchReleaseStrain;
+
+	// Never latch the (user-controlled) endpoints.
+	for (int32 i = 1; i < Positions.Num() - 1; ++i)
+	{
+		// Already latched → break it if a neighbouring segment is stretched past the limit.
+		if (LatchCapsule[i] >= 0)
+		{
+			const bool bYanked =
+				(Positions[i] - Positions[i - 1]).Size() > MaxLen ||
+				(Positions[i + 1] - Positions[i]).Size() > MaxLen;
+			if (bYanked)
+			{
+				LatchCapsule[i] = -1;
+				InvMasses[i] = 1.0f;
+				ContactDwell[i] = 0.0f;
+			}
+			continue;
+		}
+
+		// Not latched → find the closest capsule currently in contact.
+		int32 BestCap = -1;
+		float BestDist = TNumericLimits<float>::Max();
+		FVector BestClosest = FVector::ZeroVector;
+		FVector BestAxis = FVector::UpVector;
+		float BestAxisLen = 0.0f;
+
+		for (int32 c = 0; c < ActiveCapsules.Num(); ++c)
+		{
+			const FRopeCapsule& Cap = ActiveCapsules[c];
+			const float ContactDist = Cap.Radius + RopeCollisionRadius + LatchContactBand;
+			const FVector Closest = FMath::ClosestPointOnSegment(Positions[i], Cap.A, Cap.B);
+			const float Dist = (Positions[i] - Closest).Size();
+			if (Dist <= ContactDist && Dist < BestDist)
+			{
+				const FVector AxisVec = Cap.B - Cap.A;
+				const float AxisLen = AxisVec.Size();
+				BestDist = Dist;
+				BestCap = c;
+				BestClosest = Closest;
+				BestAxisLen = AxisLen;
+				BestAxis = (AxisLen > KINDA_SMALL_NUMBER) ? (AxisVec / AxisLen) : FVector::UpVector;
+			}
+		}
+
+		if (BestCap < 0)
+		{
+			ContactDwell[i] = 0.0f; // not touching anything — reset dwell
+			continue;
+		}
+
+		// Dwell long enough → establish the latch, storing the contact relative to the capsule.
+		ContactDwell[i] += FrameDt;
+		if (ContactDwell[i] >= LatchContactTime)
+		{
+			const FVector Radial = Positions[i] - BestClosest;
+			const float RadialDist = Radial.Size();
+
+			LatchCapsule[i] = BestCap;
+			// Along = distance of the closest point from the capsule's A end, projected on the axis.
+			LatchAlong[i] = FMath::Clamp(FVector::DotProduct(BestClosest - ActiveCapsules[BestCap].A, BestAxis), 0.0f, BestAxisLen);
+			LatchRadialDir[i] = (RadialDist > KINDA_SMALL_NUMBER)
+				? (Radial / RadialDist)
+				: FVector::CrossProduct(BestAxis, FVector::ForwardVector).GetSafeNormal(1e-4f, FVector::RightVector);
+			LatchRadialDist[i] = FMath::Max(RadialDist, 1e-3f);
+			LatchAxis[i] = BestAxis;
+			InvMasses[i] = 0.0f;
+		}
+	}
+}
+
+void ARopePoCActor::AccumulateLatchReaction()
+{
+	if (!bEnableTwoWayPull || !bEnableWrapLatch)
+	{
+		return;
+	}
+
+	for (int32 i = 1; i < Positions.Num() - 1; ++i)
+	{
+		const int32 c = LatchCapsule[i];
+		if (c < 0 || !CapsuleReaction.IsValidIndex(c))
+		{
+			continue;
+		}
+
+		// A latched node is pinned to the limb, so it gets no push-out reaction. Instead the
+		// rope tension at this node (its segments stretched toward the neighbours) is the force
+		// the rope exerts on the limb — pull the capsule that way.
+		FVector Pull = FVector::ZeroVector;
+		const int32 Neighbours[2] = { i - 1, i + 1 };
+		for (int32 j : Neighbours)
+		{
+			const FVector D = Positions[j] - Positions[i];
+			const float Len = D.Size();
+			const float Stretch = Len - SegmentLength;
+			if (Stretch > 0.0f && Len > KINDA_SMALL_NUMBER)
+			{
+				Pull += (D / Len) * Stretch;
+			}
+		}
+
+		CapsuleReaction[c] += Pull;
+		CapsuleReactionPoint[c] += Positions[i];
+		CapsuleReactionWeight[c] += 1.0f;
+	}
+}
+
+void ARopePoCActor::ReleaseAllWraps()
+{
+	for (int32 i = 0; i < LatchCapsule.Num(); ++i)
+	{
+		if (LatchCapsule[i] >= 0)
+		{
+			LatchCapsule[i] = -1;
+			InvMasses[i] = 1.0f;
+		}
+		if (ContactDwell.IsValidIndex(i))
+		{
+			ContactDwell[i] = 0.0f;
 		}
 	}
 }
@@ -476,7 +801,10 @@ void ARopePoCActor::DrawDebugRope() const
 
 	for (int32 i = 0; i < Positions.Num(); ++i)
 	{
-		const FColor PointColor = (InvMasses[i] <= 0.0f) ? FColor::Red : FColor::Yellow;
+		// Orange = latched wrap node, Red = pinned endpoint, Yellow = free particle.
+		const bool bLatched = LatchCapsule.IsValidIndex(i) && LatchCapsule[i] >= 0;
+		const FColor PointColor = bLatched ? FColor(255, 128, 0)
+			: (InvMasses[i] <= 0.0f) ? FColor::Red : FColor::Yellow;
 		DrawDebugPoint(World, Positions[i], 6.0f, PointColor, false, -1.0f, SDPG_World);
 		if (i < Positions.Num() - 1)
 		{
@@ -510,10 +838,12 @@ void ARopePoCActor::Tick(float DeltaSeconds)
 		if (GEngine)
 		{
 			const FColor BudgetColor = (AvgSolveMs < 0.3f) ? FColor::Green : FColor::Orange;
+			int32 LatchedCount = 0;
+			for (int32 LC : LatchCapsule) { if (LC >= 0) { ++LatchedCount; } }
 			GEngine->AddOnScreenDebugMessage(
 				reinterpret_cast<uint64>(this), 0.0f, BudgetColor,
-				FString::Printf(TEXT("[Rope] solve %.3f ms (avg) | particles %d | iters %d | capsules %d"),
-					AvgSolveMs, NumParticles, SolverIterations, FrameCapsules.Num()));
+				FString::Printf(TEXT("[Rope] solve %.3f ms (avg) | particles %d | iters %d | sub %d | capsules %d | latched %d"),
+					AvgSolveMs, NumParticles, SolverIterations, FMath::Clamp(SimSubsteps, 1, 16), FrameCapsules.Num(), LatchedCount));
 		}
 	}
 }

@@ -53,6 +53,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Rope|Solver", meta = (ClampMin = "1", UIMin = "1"))
 	int32 SolverIterations = 12;
 
+	/**
+	 * Physics substeps per frame. The frame is split into N steps, sweeping the pinned ends
+	 * and the capsules between their previous and current poses each step. Higher = no
+	 * tunneling at speed (the main fix for "fast rope passes through"). Cost scales ~linearly.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "16", UIMin = "1", UIMax = "16"))
+	int32 SimSubsteps = 4;
+
 	/** Gravity applied to free particles. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Solver")
 	FVector Gravity = FVector(0.0f, 0.0f, -980.0f);
@@ -98,6 +106,43 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision", meta = (ClampMin = "0.0", UIMin = "0.0", Units = "cm"))
 	float FrictionContactBand = 2.0f;
 
+	//~ Pull / two-way coupling (S4) --------------------------------------
+	/**
+	 * S4: feed the rope's contact reaction back into the capsule providers, so pulling the
+	 * rope's end actually drags the wrapped limb. Needs a draggable provider (test capsule).
+	 */
+	UPROPERTY(EditAnywhere, Category = "Rope|Pull")
+	bool bEnableTwoWayPull = true;
+
+	/** Scales the reaction (collision push-out + latched-node tension) into the impulse handed to the capsule. */
+	UPROPERTY(EditAnywhere, Category = "Rope|Pull", meta = (EditCondition = "bEnableTwoWayPull", ClampMin = "0.0"))
+	float PullReactionGain = 8.0f;
+
+	//~ Wrap latch / Hold state (S4 — doc 4.1) ----------------------------
+	/**
+	 * Once a contact node has stayed on a capsule long enough, latch it to that surface as
+	 * data: it then holds the wrap regardless of tension/gravity (the production "Hold" model),
+	 * follows the moving limb, and transmits pull to the capsule. The fix for "감아도 바로 풀림".
+	 */
+	UPROPERTY(EditAnywhere, Category = "Rope|Wrap")
+	bool bEnableWrapLatch = true;
+
+	/** Continuous contact time before a node latches (s). */
+	UPROPERTY(EditAnywhere, Category = "Rope|Wrap", meta = (EditCondition = "bEnableWrapLatch", ClampMin = "0.0", Units = "s"))
+	float LatchContactTime = 0.15f;
+
+	/** Extra distance beyond the capsule surface that still counts as contact for latching (cm). */
+	UPROPERTY(EditAnywhere, Category = "Rope|Wrap", meta = (EditCondition = "bEnableWrapLatch", ClampMin = "0.0", Units = "cm"))
+	float LatchContactBand = 1.5f;
+
+	/** Break the latch when an adjacent segment is stretched past this multiple of its rest length (yanked off). */
+	UPROPERTY(EditAnywhere, Category = "Rope|Wrap", meta = (EditCondition = "bEnableWrapLatch", ClampMin = "1.0"))
+	float LatchReleaseStrain = 1.8f;
+
+	/** Release every latched wrap (e.g. on an "unwrap" input). doc 4.3 explicit release. */
+	UFUNCTION(BlueprintCallable, Category = "Rope|Wrap")
+	void ReleaseAllWraps();
+
 	//~ Render ------------------------------------------------------------
 	/** Mesh used per segment. Defaults to the engine cylinder if left empty. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Render")
@@ -132,6 +177,19 @@ private:
 	float           SegmentLength = 0.0f;
 	bool            bInitialized = false;
 
+	// --- Wrap latch state (per particle) ---
+	/** Capsule index this particle is latched to, or -1 if free. */
+	TArray<int32>   LatchCapsule;
+	/** Latched contact expressed relative to the capsule: distance along the axis from A... */
+	TArray<float>   LatchAlong;
+	/** ...and a radial direction + distance (world space, rotated to follow the axis each step). */
+	TArray<FVector> LatchRadialDir;
+	TArray<float>   LatchRadialDist;
+	/** Capsule axis at the last update, to compute the incremental rotation as the limb moves. */
+	TArray<FVector> LatchAxis;
+	/** How long each particle has been continuously in contact (for the latch dwell test). */
+	TArray<float>   ContactDwell;
+
 	// Perf readout for the S2 GO/NO-GO budget check.
 	float           LastSolveMs = 0.0f;
 	float           AvgSolveMs = 0.0f;
@@ -139,11 +197,32 @@ private:
 	/** Capsule providers used this run (explicit list + auto-found), resolved on init. */
 	TArray<TWeakObjectPtr<UObject>> CapsuleProviders;
 
-	/** Capsules gathered from providers once per frame, reused across solver iterations. */
+	/** Capsules gathered from providers once per frame (current pose). */
 	TArray<FRopeCapsule> FrameCapsules;
 
-	/** Last frame's capsules (same order), used to estimate surface velocity for friction. */
+	/** Provider index (into CapsuleProviders) that produced each FrameCapsules entry. */
+	TArray<int32> FrameCapsuleOwner;
+
+	/** Last frame's capsules (same order), the start pose substeps interpolate from. */
 	TArray<FRopeCapsule> PrevFrameCapsules;
+
+	/** Capsules at the current substep (interpolated Prev→Frame); what collision/friction read. */
+	TArray<FRopeCapsule> ActiveCapsules;
+	/** Capsules at the previous substep, for friction's surface-velocity estimate. */
+	TArray<FRopeCapsule> PrevActiveCapsules;
+
+	/** Pinned-endpoint targets from last frame, so substeps can sweep the ends (anti-tunneling). */
+	FVector PrevStartWorld = FVector::ZeroVector;
+	FVector PrevEndWorld = FVector::ZeroVector;
+	bool    bHasPrevPins = false;
+
+	// --- S4 pull reaction accumulators (per FrameCapsules entry, reset each frame) ---
+	/** Sum of reaction impulses the rope exerts on each capsule this frame. */
+	TArray<FVector> CapsuleReaction;
+	/** Contact-weighted application point for each capsule's reaction (world space). */
+	TArray<FVector> CapsuleReactionPoint;
+	/** Total contact weight, to average the application point. */
+	TArray<float> CapsuleReactionWeight;
 
 	void InitializeRope();
 	void RebuildSegmentMeshes();
@@ -153,7 +232,17 @@ private:
 	void SolveConstraints();
 	void SolveCollisions();
 	void ApplyFriction();
+	void ApplyPullReaction();
 	void ApplyPinning();
+	/** Pin endpoints to explicit world targets (used while sweeping ends across substeps). */
+	void SetPinnedTargets(const FVector& StartW, const FVector& EndW);
+
+	/** Re-place latched particles on their (moving) capsule surface; keep them pinned. */
+	void UpdateLatchedPositions();
+	/** Latch new long-contact nodes; break over-stretched ones. Once per frame. */
+	void ManageWrapLatch(float FrameDt);
+	/** Feed latched-node tension back to the capsules as pull reaction. Once per frame. */
+	void AccumulateLatchReaction();
 	void UpdateSegmentMeshes();
 	void DrawDebugRope() const;
 

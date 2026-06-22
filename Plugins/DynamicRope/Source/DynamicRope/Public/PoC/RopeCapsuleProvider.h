@@ -33,4 +33,12 @@ class IRopeCapsuleProvider
 public:
 	/** Append this provider's current world-space capsules to OutCapsules. */
 	virtual void GatherRopeCapsules(TArray<FRopeCapsule>& OutCapsules) const = 0;
+
+	/**
+	 * S4 two-way coupling: the rope reports the reaction it exerts on this provider's
+	 * capsule(s) — a world-space impulse at a world-space contact point. Newton's 3rd law:
+	 * what the rope pushed out of the body, the body feels pushed in the opposite sense.
+	 * Default no-op so providers that don't move (e.g. animated skeletal limbs) just ignore it.
+	 */
+	virtual void ApplyRopeReaction(const FVector& WorldImpulse, const FVector& WorldLocation) {}
 };

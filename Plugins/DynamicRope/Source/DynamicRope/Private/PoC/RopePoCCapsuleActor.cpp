@@ -55,30 +55,57 @@ void ARopePoCCapsuleActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	// 1) Base pose (un-dragged): either the hand-placed rest transform, or the swing of it.
+	FVector BaseLoc;
+	FQuat BaseRot;
+
 	if (!bAutoSwing)
 	{
-		// Not swinging: keep the rest pose tracking the (possibly hand-placed) transform.
-		RestTransform = GetActorTransform();
+		// Recover the rest pose by removing the current drag offset, so dragging never
+		// drifts the rest anchor and the spring can always pull back to where it was placed.
+		BaseLoc = GetActorLocation() - DragOffset;
+		BaseRot = GetActorQuat();
+		RestTransform.SetLocation(BaseLoc);
+		RestTransform.SetRotation(BaseRot);
 		SwingElapsed = 0.0f;
-		return;
+	}
+	else
+	{
+		SwingElapsed += DeltaSeconds;
+
+		const float Period = FMath::Max(SwingPeriod, 0.05f);
+		const float Phase = FMath::Sin(2.0f * PI * SwingElapsed / Period);
+		const float AngleRad = FMath::DegreesToRadians(SwingAngleDeg * Phase);
+
+		const FVector AxisWorld = RestTransform.TransformVectorNoScale(SwingAxis).GetSafeNormal(1e-4f, FVector::RightVector);
+		const FQuat SwingQuat(AxisWorld, AngleRad);
+
+		const FVector PivotWorld = RestTransform.TransformPosition(SwingPivotOffset);
+		const FVector RestLoc = RestTransform.GetLocation();
+
+		BaseLoc = PivotWorld + SwingQuat.RotateVector(RestLoc - PivotWorld);
+		BaseRot = SwingQuat * RestTransform.GetRotation();
 	}
 
-	SwingElapsed += DeltaSeconds;
+	// 2) S4: integrate the rope's pull as a soft body — impulse → velocity, spring back to
+	//    rest, damping. Lets the limb get dragged but recover when the pull eases.
+	if (bDraggable)
+	{
+		const float Dt = FMath::Min(DeltaSeconds, 1.0f / 30.0f);
+		DragVelocity += PendingImpulse / FMath::Max(Mass, 0.1f);
+		DragVelocity += -ReturnStiffness * DragOffset * Dt;   // spring toward rest pose
+		DragVelocity *= FMath::Exp(-DragDamping * Dt);        // velocity damping
+		DragOffset += DragVelocity * Dt;
+	}
+	else
+	{
+		DragOffset = FVector::ZeroVector;
+		DragVelocity = FVector::ZeroVector;
+	}
+	PendingImpulse = FVector::ZeroVector;
 
-	const float Period = FMath::Max(SwingPeriod, 0.05f);
-	const float Phase = FMath::Sin(2.0f * PI * SwingElapsed / Period);
-	const float AngleRad = FMath::DegreesToRadians(SwingAngleDeg * Phase);
-
-	const FVector AxisWorld = RestTransform.TransformVectorNoScale(SwingAxis).GetSafeNormal(1e-4f, FVector::RightVector);
-	const FQuat SwingQuat(AxisWorld, AngleRad);
-
-	const FVector PivotWorld = RestTransform.TransformPosition(SwingPivotOffset);
-	const FVector RestLoc = RestTransform.GetLocation();
-
-	const FVector NewLoc = PivotWorld + SwingQuat.RotateVector(RestLoc - PivotWorld);
-	const FQuat NewRot = SwingQuat * RestTransform.GetRotation();
-
-	SetActorLocationAndRotation(NewLoc, NewRot);
+	// 3) Final pose = base pose + accumulated drag.
+	SetActorLocationAndRotation(BaseLoc + DragOffset, BaseRot);
 }
 
 void ARopePoCCapsuleActor::GetCapsuleSegment(FVector& OutA, FVector& OutB, float& OutRadius) const
@@ -99,4 +126,14 @@ void ARopePoCCapsuleActor::GatherRopeCapsules(TArray<FRopeCapsule>& OutCapsules)
 	FRopeCapsule Cap;
 	GetCapsuleSegment(Cap.A, Cap.B, Cap.Radius);
 	OutCapsules.Add(Cap);
+}
+
+void ARopePoCCapsuleActor::ApplyRopeReaction(const FVector& WorldImpulse, const FVector& /*WorldLocation*/)
+{
+	if (!bDraggable)
+	{
+		return;
+	}
+	// Accumulate; Tick integrates it (tick order between rope and capsule is undefined).
+	PendingImpulse += WorldImpulse;
 }
