@@ -69,6 +69,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Damping = 0.02f;
 
+	/**
+	 * Bending stiffness [0..1] via Jakobsen support sticks (i↔i+2 distance constraints).
+	 * 0 = limp chain, 1 = stiff rope that resists bending and holds its shape. Key knob for
+	 * "looks like a rope, not a noodle" (RDR2-quality gap).
+	 */
+	UPROPERTY(EditAnywhere, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BendStiffness = 0.3f;
+
 	//~ Endpoints ---------------------------------------------------------
 	/** Pin the first particle to this actor's origin. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Endpoints")
@@ -94,6 +102,14 @@ public:
 	/** Contact thickness of the rope used for collision push-out (cm). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision", meta = (ClampMin = "0.0", UIMin = "0.0", Units = "cm"))
 	float RopeCollisionRadius = 2.0f;
+
+	/**
+	 * Collide the rope SEGMENTS (not just the nodes) against the capsule, distributing the
+	 * push-out to both end nodes (Jakobsen §5.2). Stops the rope sinking through between nodes
+	 * on a curved limb — the key "wrap looks convincing" detail. Off = legacy node-only test.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Rope|Collision")
+	bool bUseSegmentCollision = true;
 
 	/**
 	 * How strongly a contacting rope sticks to the (moving) capsule surface.
@@ -229,7 +245,8 @@ private:
 	void GatherProviders();
 	void BuildFrameCapsules();
 	void SimulateStep(float DeltaSeconds);
-	void SolveConstraints();
+	void SolveConstraints(bool bReverse);
+	void SolveBendingConstraints(bool bReverse);
 	void SolveCollisions();
 	void ApplyFriction();
 	void ApplyPullReaction();

@@ -359,7 +359,11 @@ void ARopePoCActor::SimulateStep(float DeltaSeconds)
 
 		for (int32 Iter = 0; Iter < ItersPerSub; ++Iter)
 		{
-			SolveConstraints();
+			// Alternate the solve direction each iteration so neither end "wins" the
+			// Gauss-Seidel sweep — removes the one-sided sag / asymmetric wrap bias.
+			const bool bReverse = (Iter & 1) != 0;
+			SolveConstraints(bReverse);
+			SolveBendingConstraints(bReverse);
 			SolveCollisions();
 		}
 
@@ -381,10 +385,12 @@ void ARopePoCActor::SimulateStep(float DeltaSeconds)
 	PrevFrameCapsules = FrameCapsules;
 }
 
-void ARopePoCActor::SolveConstraints()
+void ARopePoCActor::SolveConstraints(bool bReverse)
 {
-	for (int32 i = 0; i < Positions.Num() - 1; ++i)
+	const int32 Count = Positions.Num() - 1; // distance constraints between i and i+1
+	for (int32 k = 0; k < Count; ++k)
 	{
+		const int32 i = bReverse ? (Count - 1 - k) : k;
 		FVector& A = Positions[i];
 		FVector& B = Positions[i + 1];
 		const float WA = InvMasses[i];
@@ -409,52 +415,147 @@ void ARopePoCActor::SolveConstraints()
 	}
 }
 
+void ARopePoCActor::SolveBendingConstraints(bool bReverse)
+{
+	if (BendStiffness <= 0.0f)
+	{
+		return;
+	}
+
+	// Jakobsen "support stick": a distance constraint between i and i+2 whose rest length is
+	// the straight-line span (2 segments). When the rope bends, those two nodes get closer than
+	// the straight span, so the constraint pushes them apart → resists bending = stiffness.
+	// BendStiffness [0..1] scales the correction (1 = stiff, 0 = limp chain).
+	const float BendRest = SegmentLength * 2.0f;
+
+	const int32 Count = Positions.Num() - 2; // support sticks between i and i+2
+	for (int32 k = 0; k < Count; ++k)
+	{
+		const int32 i = bReverse ? (Count - 1 - k) : k;
+		FVector& A = Positions[i];
+		FVector& B = Positions[i + 2];
+		const float WA = InvMasses[i];
+		const float WB = InvMasses[i + 2];
+		const float WSum = WA + WB;
+		if (WSum <= 0.0f)
+		{
+			continue;
+		}
+
+		const FVector Delta = B - A;
+		const float Dist = Delta.Size();
+		if (Dist <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+
+		const float Diff = (Dist - BendRest) / Dist;
+		const FVector Correction = Delta * Diff * BendStiffness;
+		A += Correction * (WA / WSum);
+		B -= Correction * (WB / WSum);
+	}
+}
+
 void ARopePoCActor::SolveCollisions()
 {
+	// Pick a capsule-axis normal when the contact is degenerate (rope exactly on the axis).
+	auto FallbackNormal = [](const FRopeCapsule& Cap) -> FVector
+	{
+		const FVector Axis = (Cap.B - Cap.A).GetSafeNormal(1e-4f, FVector::UpVector);
+		return FVector::CrossProduct(Axis, FVector::ForwardVector).GetSafeNormal(1e-4f, FVector::RightVector);
+	};
+
 	for (int32 c = 0; c < ActiveCapsules.Num(); ++c)
 	{
 		const FRopeCapsule& Cap = ActiveCapsules[c];
 		const float MinDist = Cap.Radius + RopeCollisionRadius;
 
-		for (int32 i = 0; i < Positions.Num(); ++i)
+		if (bUseSegmentCollision)
 		{
-			if (InvMasses[i] <= 0.0f)
+			// --- Segment-vs-capsule: test each rope segment as a swept sphere against the
+			//     capsule axis, and split the push-out between its two end nodes. ---
+			const int32 NumSegments = Positions.Num() - 1;
+			for (int32 i = 0; i < NumSegments; ++i)
 			{
-				continue; // don't push pinned particles
-			}
+				const float W0 = InvMasses[i];
+				const float W1 = InvMasses[i + 1];
+				if (W0 <= 0.0f && W1 <= 0.0f)
+				{
+					continue; // both ends pinned — segment can't move
+				}
 
-			const FVector Closest = FMath::ClosestPointOnSegment(Positions[i], Cap.A, Cap.B);
-			FVector ToParticle = Positions[i] - Closest;
-			const float Dist = ToParticle.Size();
-			if (Dist >= MinDist)
-			{
-				continue;
-			}
+				// Closest points between the rope segment and the capsule's inner axis segment.
+				FVector OnRope, OnAxis;
+				FMath::SegmentDistToSegmentSafe(Positions[i], Positions[i + 1], Cap.A, Cap.B, OnRope, OnAxis);
 
-			// Project the particle out to the capsule surface.
-			FVector Normal;
-			if (Dist > KINDA_SMALL_NUMBER)
-			{
-				Normal = ToParticle / Dist;
-			}
-			else
-			{
-				// Degenerate: particle on the axis — pick an arbitrary perpendicular.
-				const FVector Axis = (Cap.B - Cap.A).GetSafeNormal(1e-4f, FVector::UpVector);
-				Normal = FVector::CrossProduct(Axis, FVector::ForwardVector).GetSafeNormal(1e-4f, FVector::RightVector);
-			}
+				const FVector Dir = OnRope - OnAxis;
+				const float Dist = Dir.Size();
+				if (Dist >= MinDist)
+				{
+					continue;
+				}
 
-			const FVector Target = Closest + Normal * MinDist;
-			const FVector PushOut = Target - Positions[i]; // displacement applied to the particle
-			Positions[i] = Target;
+				const FVector Normal = (Dist > KINDA_SMALL_NUMBER) ? (Dir / Dist) : FallbackNormal(Cap);
+				const float Penetration = MinDist - Dist;
 
-			// S4: the body pushed the particle out by +PushOut, so the rope pushes the
-			// body by -PushOut (Newton's 3rd law). Accumulate it for ApplyPullReaction.
-			if (bEnableTwoWayPull && CapsuleReaction.IsValidIndex(c))
+				// Barycentric position of the contact along the rope segment → distribute the
+				// correction so the whole segment leaves the surface, not just one node.
+				const FVector Seg = Positions[i + 1] - Positions[i];
+				const float SegLenSq = Seg.SizeSquared();
+				const float S = (SegLenSq > KINDA_SMALL_NUMBER)
+					? FMath::Clamp(FVector::DotProduct(OnRope - Positions[i], Seg) / SegLenSq, 0.0f, 1.0f)
+					: 0.0f;
+				const float C0 = 1.0f - S;
+				const float C1 = S;
+
+				// Virtual inverse mass at the contact point: C0^2*W0 + C1^2*W1.
+				const float WSum = C0 * C0 * W0 + C1 * C1 * W1;
+				if (WSum <= 0.0f)
+				{
+					continue;
+				}
+				const float Lambda = Penetration / WSum;
+				Positions[i]     += Normal * (W0 * C0 * Lambda);
+				Positions[i + 1] += Normal * (W1 * C1 * Lambda);
+
+				// S4: rope pushes the body opposite to the push-out, at the contact point.
+				if (bEnableTwoWayPull && CapsuleReaction.IsValidIndex(c))
+				{
+					CapsuleReaction[c] += -Normal * Penetration;
+					CapsuleReactionPoint[c] += OnAxis;
+					CapsuleReactionWeight[c] += 1.0f;
+				}
+			}
+		}
+		else
+		{
+			// --- Legacy node-only test (kept for before/after comparison). ---
+			for (int32 i = 0; i < Positions.Num(); ++i)
 			{
-				CapsuleReaction[c] += -PushOut;
-				CapsuleReactionPoint[c] += Closest;
-				CapsuleReactionWeight[c] += 1.0f;
+				if (InvMasses[i] <= 0.0f)
+				{
+					continue; // don't push pinned particles
+				}
+
+				const FVector Closest = FMath::ClosestPointOnSegment(Positions[i], Cap.A, Cap.B);
+				const FVector ToParticle = Positions[i] - Closest;
+				const float Dist = ToParticle.Size();
+				if (Dist >= MinDist)
+				{
+					continue;
+				}
+
+				const FVector Normal = (Dist > KINDA_SMALL_NUMBER) ? (ToParticle / Dist) : FallbackNormal(Cap);
+				const FVector Target = Closest + Normal * MinDist;
+				const FVector PushOut = Target - Positions[i];
+				Positions[i] = Target;
+
+				if (bEnableTwoWayPull && CapsuleReaction.IsValidIndex(c))
+				{
+					CapsuleReaction[c] += -PushOut;
+					CapsuleReactionPoint[c] += Closest;
+					CapsuleReactionWeight[c] += 1.0f;
+				}
 			}
 		}
 	}
