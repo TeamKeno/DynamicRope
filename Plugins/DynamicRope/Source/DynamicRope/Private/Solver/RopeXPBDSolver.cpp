@@ -19,6 +19,17 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 	{
 		Integrate(State, Config, SubDt);
 
+		// Sweep the pinned start to its interpolated target this substep (anti-explosion when
+		// the anchor jumps). Zero velocity at the pin so it doesn't inject motion.
+		if (State.bStartPinned && State.Num() > 0)
+		{
+			const float Alpha = static_cast<float>(s + 1) / static_cast<float>(Sub);
+			const FVector Pin = FMath::Lerp(State.StartPinPrev, State.StartPinTarget, Alpha);
+			State.Positions[0] = Pin;
+			State.PrevPositions[0] = Pin;
+			State.InvMass[0] = 0.0f;
+		}
+
 		for (int32 It = 0; It < Iters; ++It)
 		{
 			// Alternate sweep direction to remove Gauss-Seidel bias.
@@ -34,6 +45,9 @@ void FRopeXPBDSolver::Integrate(FRopeSimState& State, const FRopeSolverConfig& C
 {
 	const float Damp = 1.0f - FMath::Clamp(Config.Damping, 0.0f, 1.0f);
 	const float Dt2 = SubDt * SubDt;
+	// Cap per-substep displacement so the chain can never diverge/explode.
+	const float MaxStep = FMath::Max(State.SegmentLength * 2.0f, 1.0f);
+	const float MaxStepSq = MaxStep * MaxStep;
 
 	for (int32 i = 0; i < State.Num(); ++i)
 	{
@@ -41,7 +55,11 @@ void FRopeXPBDSolver::Integrate(FRopeSimState& State, const FRopeSolverConfig& C
 		{
 			continue;
 		}
-		const FVector Velocity = (State.Positions[i] - State.PrevPositions[i]) * Damp;
+		FVector Velocity = (State.Positions[i] - State.PrevPositions[i]) * Damp;
+		if (Velocity.SizeSquared() > MaxStepSq)
+		{
+			Velocity = Velocity.GetSafeNormal() * MaxStep;
+		}
 		const FVector NewPos = State.Positions[i] + Velocity + Config.Gravity * Dt2;
 		State.PrevPositions[i] = State.Positions[i];
 		State.Positions[i] = NewPos;

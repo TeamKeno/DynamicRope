@@ -14,6 +14,7 @@
 
 class IRopeCollider;
 class IRopeColliderProvider;
+class UMaterialInterface;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
@@ -29,10 +30,13 @@ public:
 
 	//~ UActorComponent
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+	virtual void SendRenderDynamicData_Concurrent() override;
 
-	//~ UPrimitiveComponent (render proxy lands in M1)
+	//~ UPrimitiveComponent / UMeshComponent
 	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
 	virtual int32 GetNumMaterials() const override;
+	virtual UMaterialInterface* GetMaterial(int32 ElementIndex) const override;
+	virtual void SetMaterial(int32 ElementIndex, UMaterialInterface* Material) override;
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
 
 	//~ Setup -------------------------------------------------------------
@@ -47,6 +51,23 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	FRopeThrowParams ThrowParams;
+
+	//~ Render ------------------------------------------------------------
+	/** Visual tube radius (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render", meta = (ClampMin = "0.1", Units = "cm"))
+	float Radius = 2.0f;
+
+	/** Cross-section sides of the tube. Higher = rounder. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render", meta = (ClampMin = "3", ClampMax = "32"))
+	int32 NumSides = 8;
+
+	/** Material applied to the rope tube. Defaults to the engine default material if unset. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render")
+	TObjectPtr<UMaterialInterface> RopeMaterial = nullptr;
+
+	/** Draw the simulated centerline as debug lines (ground-truth position vs the rendered tube). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render")
+	bool bDrawDebugCenterline = false;
 
 	//~ API ---------------------------------------------------------------
 	/** Launch the rope: enters Flight phase with an initial tip velocity along AimDir. */

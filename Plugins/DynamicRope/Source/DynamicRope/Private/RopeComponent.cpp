@@ -3,11 +3,16 @@
 #include "RopeComponent.h"
 #include "Collision/RopeCollider.h"
 #include "Collision/RopeColliderProvider.h"
+#include "Render/RopeSceneProxy.h"
+#include "DrawDebugHelpers.h"
 
 URopeComponent::URopeComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
+
+	// Movable so the primitive outputs motion vectors (TAA/TSR keeps the moving rope).
+	Mobility = EComponentMobility::Movable;
 }
 
 void URopeComponent::InitRope()
@@ -29,8 +34,11 @@ void URopeComponent::InitRope()
 		Sim.InvMass[i] = 1.0f;
 	}
 
-	// Pin the start to the component (hand/socket).
+	// Pin the start to the component (hand/socket); the solver sweeps it across substeps.
 	Sim.InvMass[0] = 0.0f;
+	Sim.bStartPinned = true;
+	Sim.StartPinTarget = Start;
+	Sim.StartPinPrev = Start;
 }
 
 void URopeComponent::GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) const
@@ -59,15 +67,17 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 		InitRope();
 	}
 
-	// Keep the pinned start following the component.
-	if (Sim.Num() > 0 && Sim.InvMass[0] <= 0.0f)
+	// Advance the pinned-start target; the solver sweeps Prev->Target across substeps so a fast
+	// character move doesn't yank (and explode) the chain.
+	if (Sim.bStartPinned)
 	{
-		Sim.Positions[0] = GetComponentLocation();
-		Sim.PrevPositions[0] = Sim.Positions[0];
+		Sim.StartPinPrev = Sim.StartPinTarget;
+		Sim.StartPinTarget = GetComponentLocation();
 	}
 
 	switch (Phase)
 	{
+	case ERopePhase::Free:        // dangles from the hand and follows the character
 	case ERopePhase::Flight:
 	case ERopePhase::Contacting:
 	{
@@ -88,7 +98,50 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 		break;
 	}
 
-	MarkRenderStateDirty(); // refresh bounds; real geometry update lands with the scene proxy.
+	// Push the new centerline to the render proxy and refresh bounds.
+	MarkRenderDynamicDataDirty();
+	MarkRenderTransformDirty();
+
+	if (bDrawDebugCenterline)
+	{
+		if (const UWorld* World = GetWorld())
+		{
+			for (int32 i = 0; i < Sim.Num(); ++i)
+			{
+				DrawDebugPoint(World, Sim.Positions[i], 6.0f, FColor::Yellow, false, -1.0f, SDPG_Foreground);
+				if (i + 1 < Sim.Num())
+				{
+					DrawDebugLine(World, Sim.Positions[i], Sim.Positions[i + 1], FColor::Cyan, false, -1.0f, SDPG_Foreground, 0.5f);
+				}
+			}
+		}
+	}
+}
+
+void URopeComponent::SendRenderDynamicData_Concurrent()
+{
+	Super::SendRenderDynamicData_Concurrent();
+
+	if (!SceneProxy || Sim.Num() < 2)
+	{
+		return;
+	}
+
+	// Send the centerline in component-local space; the proxy renders via GetLocalToWorld().
+	const FTransform Xform = GetComponentTransform();
+	FRopeDynamicData* DynamicData = new FRopeDynamicData;
+	DynamicData->Points.SetNumUninitialized(Sim.Num());
+	for (int32 i = 0; i < Sim.Num(); ++i)
+	{
+		DynamicData->Points[i] = Xform.InverseTransformPosition(Sim.Positions[i]);
+	}
+
+	FRopeSceneProxy* Proxy = static_cast<FRopeSceneProxy*>(SceneProxy);
+	ENQUEUE_RENDER_COMMAND(RopeUpdateCenterline)(
+		[Proxy, DynamicData](FRHICommandListBase& RHICmdList)
+		{
+			Proxy->SetDynamicData_RenderThread(RHICmdList, DynamicData);
+		});
 }
 
 void URopeComponent::Throw(const FVector& AimDir)
@@ -120,8 +173,7 @@ void URopeComponent::ReleaseWrap()
 
 FPrimitiveSceneProxy* URopeComponent::CreateSceneProxy()
 {
-	// TODO(M1): FRopeSceneProxy — tube mesh from the centerline (parallel-transport frames).
-	return nullptr;
+	return new FRopeSceneProxy(this);
 }
 
 int32 URopeComponent::GetNumMaterials() const
@@ -129,17 +181,29 @@ int32 URopeComponent::GetNumMaterials() const
 	return 1;
 }
 
+UMaterialInterface* URopeComponent::GetMaterial(int32 /*ElementIndex*/) const
+{
+	return RopeMaterial;
+}
+
+void URopeComponent::SetMaterial(int32 /*ElementIndex*/, UMaterialInterface* Material)
+{
+	RopeMaterial = Material;
+	MarkRenderStateDirty();
+}
+
 FBoxSphereBounds URopeComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
+	// Geometry is component-local; build a local box from the world sim points, then transform.
 	if (Sim.Num() == 0)
 	{
 		return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector(RopeLength), RopeLength);
 	}
 
-	FBox Box(ForceInit);
+	FBox LocalBox(ForceInit);
 	for (const FVector& P : Sim.Positions)
 	{
-		Box += P;
+		LocalBox += LocalToWorld.InverseTransformPosition(P);
 	}
-	return FBoxSphereBounds(Box.ExpandBy(RopeLength * 0.05f));
+	return FBoxSphereBounds(LocalBox.ExpandBy(Radius + 1.0f)).TransformBy(LocalToWorld);
 }

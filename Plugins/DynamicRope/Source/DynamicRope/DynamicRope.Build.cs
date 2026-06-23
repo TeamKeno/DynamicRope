@@ -39,6 +39,8 @@ public class DynamicRope : ModuleRules
 				"Engine",
 				"PhysicsCore",
 				"InputCore",
+				"RenderCore",
+				"RHI",
 				"Slate",
 				"SlateCore",
 				// ... add private dependencies that you statically link with here ...

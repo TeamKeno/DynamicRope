@@ -70,6 +70,12 @@ struct FRopeSimState
 	float           SegmentLength = 0.0f;
 	float           RopeLength = 0.0f;
 
+	// Pinned start (hand/socket). The solver sweeps it Prev->Target across substeps so a fast
+	// anchor jump is absorbed instead of injecting energy (which would explode the chain).
+	bool            bStartPinned = false;
+	FVector         StartPinPrev = FVector::ZeroVector;
+	FVector         StartPinTarget = FVector::ZeroVector;
+
 	int32 Num() const { return Positions.Num(); }
 	void  Reset() { Positions.Reset(); PrevPositions.Reset(); InvMass.Reset(); }
 };
