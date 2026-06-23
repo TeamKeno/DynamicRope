@@ -46,6 +46,20 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 		Material = UMaterial::GetDefaultMaterial(MD_Surface);
 	}
 
+	// We rewrite the vertex buffers directly each frame (RHI lock), which the renderer's Auto
+	// shadow-cache heuristics (WPO / transform deltas) cannot see, so Virtual Shadow Maps keep a
+	// stale cached page and the rope's shadow leaves a duplicated afterimage on the floor until a
+	// nearby move invalidates the page. `Always` puts this primitive in ShadowScene's
+	// AlwaysInvalidatingPrimitives, which VSM invalidates unconditionally every frame
+	// (VirtualShadowMapCacheManager: GetAlwaysInvalidatingPrimitives -> UpdatedTransform).
+	bHasDeformableMesh = true;
+	ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Always;
+	// The rope deforms every frame via direct buffer writes, so its shadow must never be cached.
+	// Forcing this false makes IsMeshShapeOftenMoving() == true regardless of the component's Mobility
+	// (which a Blueprint/instance can silently set to Static), keeping the rope on the uncached
+	// dynamic VSM shadow path (VirtualShadowMapCacheManager sets CachePrimitiveAsDynamic from it).
+	bGoodCandidateForCachedShadowmap = false;
+
 	ENQUEUE_RENDER_COMMAND(InitRopeResources)(
 		[this](FRHICommandListBase& RHICmdList)
 		{
@@ -176,6 +190,36 @@ void FRopeSceneProxy::SetDynamicData_RenderThread(FRHICommandListBase& RHICmdLis
 	}
 }
 
+void FRopeSceneProxy::DrawStaticElements(FStaticPrimitiveDrawInterface* PDI)
+{
+	// Cable-style static draw path: cached mesh draw command over the persistent vertex factory.
+	// The per-frame BuildTube() updates the vertex buffers in place, so the cached command renders
+	// current geometry. Static relevance (not Movable/dynamic) avoids spurious motion-vector ghosting.
+	if (HasViewDependentDPG())
+	{
+		return;
+	}
+
+	FMeshBatch Mesh;
+	Mesh.VertexFactory = &VertexFactory;
+	Mesh.MaterialRenderProxy = Material->GetRenderProxy();
+	Mesh.ReverseCulling = IsLocalToWorldDeterminantNegative();
+	Mesh.Type = PT_TriangleList;
+	Mesh.DepthPriorityGroup = SDPG_World;
+	Mesh.LODIndex = 0;
+	Mesh.MeshIdInPrimitive = 0;
+	Mesh.SegmentIndex = 0;
+
+	FMeshBatchElement& BatchElement = Mesh.Elements[0];
+	BatchElement.IndexBuffer = &IndexBuffer;
+	BatchElement.FirstIndex = 0;
+	BatchElement.NumPrimitives = GetRequiredIndexCount() / 3;
+	BatchElement.MinVertexIndex = 0;
+	BatchElement.MaxVertexIndex = GetRequiredVertexCount() - 1;
+
+	PDI->DrawMesh(Mesh, FLT_MAX);
+}
+
 void FRopeSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView*>& Views, const FSceneViewFamily& ViewFamily,
 	uint32 VisibilityMap, FMeshElementCollector& Collector) const
 {
@@ -228,12 +272,25 @@ void FRopeSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView*>& Vi
 
 FPrimitiveViewRelevance FRopeSceneProxy::GetViewRelevance(const FSceneView* View) const
 {
+	// Mirror FCableSceneProxy: static relevance for normal views (cached draw via DrawStaticElements),
+	// dynamic only for wireframe / rich / debug views (handled by GetDynamicMeshElements).
 	FPrimitiveViewRelevance Result;
 	Result.bDrawRelevance = IsShown(View);
 	Result.bShadowRelevance = IsShadowCast(View);
-	Result.bDynamicRelevance = true;
 	Result.bRenderInMainPass = ShouldRenderInMainPass();
 	Result.bRenderCustomDepth = ShouldRenderCustomDepth();
+	Result.bUsesLightingChannels = GetLightingChannelMask() != GetDefaultLightingChannelMask();
+
+	const bool bWireframe = AllowDebugViewmodes() && View->Family->EngineShowFlags.Wireframe;
+	if (IsRichView(*View->Family) || bWireframe || View->Family->EngineShowFlags.Bounds || HasViewDependentDPG())
+	{
+		Result.bDynamicRelevance = true;
+	}
+	else
+	{
+		Result.bStaticRelevance = true;
+	}
+
 	MaterialRelevance.SetPrimitiveViewRelevance(Result);
 	Result.bVelocityRelevance = DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
 	return Result;

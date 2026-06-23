@@ -194,16 +194,13 @@ void URopeComponent::SetMaterial(int32 /*ElementIndex*/, UMaterialInterface* Mat
 
 FBoxSphereBounds URopeComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
-	// Geometry is component-local; build a local box from the world sim points, then transform.
-	if (Sim.Num() == 0)
-	{
-		return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector(RopeLength), RopeLength);
-	}
-
-	FBox LocalBox(ForceInit);
-	for (const FVector& P : Sim.Positions)
-	{
-		LocalBox += LocalToWorld.InverseTransformPosition(P);
-	}
-	return FBoxSphereBounds(LocalBox.ExpandBy(Radius + 1.0f)).TransformBy(LocalToWorld);
+	// Anchor the bounds to the component (the pinned start) with a radius that always contains the
+	// rope no matter how it deforms: the chain is inextensible, so no particle is ever farther than
+	// RopeLength from the pin (+ tube radius). Deriving bounds from the per-frame sim points instead
+	// makes them lag the render thread by a frame; during fast character motion the rope outruns that
+	// tight box and gets culled from the shadow/main pass -> the shadow vanishes while moving and the
+	// VSM cache keeps a stale afterimage. Anchoring to the component transform moves the bounds with
+	// the character via the engine's tracked transform, so there is no lag and no spurious culling.
+	const float Reach = RopeLength + Radius + 1.0f;
+	return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector(Reach), Reach);
 }

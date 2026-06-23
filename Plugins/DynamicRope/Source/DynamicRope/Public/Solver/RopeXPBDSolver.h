@@ -19,7 +19,15 @@ public:
 
 private:
 	void Integrate(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt) const;
-	void SolveDistance(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse) const;
-	void SolveBending(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse) const;
+
+	// XPBD distance: enforces segment length with StretchCompliance. Lambda accumulates across the
+	// substep's iterations (one entry per segment constraint), making stiffness step/iter-independent.
+	void SolveDistance(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
+		TArray<float>& Lambda) const;
+
+	// XPBD bending: i<->i+2 "support stick" (rest = 2*SegmentLength) with BendCompliance.
+	void SolveBending(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
+		TArray<float>& Lambda) const;
+
 	void SolveCollisions(FRopeSimState& State, const TArray<IRopeCollider*>& Colliders) const;
 };

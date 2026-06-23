@@ -15,6 +15,14 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 	const float SubDt = FMath::Min(DeltaSeconds, 1.0f / 30.0f) / static_cast<float>(Sub);
 	const int32 Iters = FMath::Max(1, Config.Iterations);
 
+	// Per-constraint Lagrange multipliers (XPBD). Reset each substep, accumulated over its iterations.
+	const int32 NumDist = State.Num() - 1;
+	const int32 NumBend = FMath::Max(0, State.Num() - 2);
+	TArray<float> LambdaDist;
+	TArray<float> LambdaBend;
+	LambdaDist.SetNumZeroed(NumDist);
+	LambdaBend.SetNumZeroed(NumBend);
+
 	for (int32 s = 0; s < Sub; ++s)
 	{
 		Integrate(State, Config, SubDt);
@@ -30,12 +38,16 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 			State.InvMass[0] = 0.0f;
 		}
 
+		// XPBD: lambda accumulates within a substep, so zero it before this substep's iterations.
+		for (float& L : LambdaDist) { L = 0.0f; }
+		for (float& L : LambdaBend) { L = 0.0f; }
+
 		for (int32 It = 0; It < Iters; ++It)
 		{
 			// Alternate sweep direction to remove Gauss-Seidel bias.
 			const bool bReverse = (It & 1) != 0;
-			SolveDistance(State, Config, SubDt, bReverse);
-			SolveBending(State, Config, SubDt, bReverse);
+			SolveDistance(State, Config, SubDt, bReverse, LambdaDist);
+			SolveBending(State, Config, SubDt, bReverse, LambdaBend);
 			SolveCollisions(State, Colliders);
 		}
 	}
@@ -66,10 +78,12 @@ void FRopeXPBDSolver::Integrate(FRopeSimState& State, const FRopeSolverConfig& C
 	}
 }
 
-void FRopeXPBDSolver::SolveDistance(FRopeSimState& State, const FRopeSolverConfig& /*Config*/, float /*SubDt*/, bool bReverse) const
+void FRopeXPBDSolver::SolveDistance(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
+	TArray<float>& Lambda) const
 {
-	// TODO(XPBD): use StretchCompliance + per-constraint Lagrange multiplier (α/dt²) for
-	// iteration/timestep-independent stiffness. Scaffold uses plain PBD projection.
+	// XPBD distance constraint C = |x_{i+1} - x_i| - L, solved with a compliant Lagrange multiplier.
+	// alpha_tilde = compliance / dt^2 (0 => rigid PBD). dLambda = (-C - alpha_tilde*Lambda) / (wA+wB+alpha_tilde).
+	const float AlphaTilde = (SubDt > KINDA_SMALL_NUMBER) ? (Config.StretchCompliance / (SubDt * SubDt)) : 0.0f;
 	const int32 Count = State.Num() - 1;
 	for (int32 k = 0; k < Count; ++k)
 	{
@@ -89,15 +103,56 @@ void FRopeXPBDSolver::SolveDistance(FRopeSimState& State, const FRopeSolverConfi
 			continue;
 		}
 
-		const FVector Correction = Delta * ((Dist - State.SegmentLength) / Dist);
-		State.Positions[i] += Correction * (WA / WSum);
-		State.Positions[i + 1] -= Correction * (WB / WSum);
+		const FVector N = Delta / Dist;
+		const float C = Dist - State.SegmentLength;
+		const float DLambda = (-C - AlphaTilde * Lambda[i]) / (WSum + AlphaTilde);
+		Lambda[i] += DLambda;
+
+		// grad_i = -N, grad_{i+1} = +N.
+		State.Positions[i]     -= N * (WA * DLambda);
+		State.Positions[i + 1] += N * (WB * DLambda);
 	}
 }
 
-void FRopeXPBDSolver::SolveBending(FRopeSimState& /*State*/, const FRopeSolverConfig& /*Config*/, float /*SubDt*/, bool /*bReverse*/) const
+void FRopeXPBDSolver::SolveBending(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
+	TArray<float>& Lambda) const
 {
-	// TODO(M1): XPBD bending (or i<->i+2 support stick) using BendCompliance.
+	// Support-stick bending: an XPBD distance constraint across i..i+2 with rest length 2*SegmentLength.
+	// Straight => C=0; folding shortens the span => C<0 => the constraint pushes the ends apart
+	// (straightens), softly per BendCompliance. Cheap and stable for a 1D chain.
+	const int32 Count = State.Num() - 2;
+	if (Count <= 0)
+	{
+		return;
+	}
+	const float AlphaTilde = (SubDt > KINDA_SMALL_NUMBER) ? (Config.BendCompliance / (SubDt * SubDt)) : 0.0f;
+	const float Rest = 2.0f * State.SegmentLength;
+	for (int32 k = 0; k < Count; ++k)
+	{
+		const int32 i = bReverse ? (Count - 1 - k) : k;
+		const float WA = State.InvMass[i];
+		const float WB = State.InvMass[i + 2];
+		const float WSum = WA + WB;
+		if (WSum <= 0.0f)
+		{
+			continue;
+		}
+
+		const FVector Delta = State.Positions[i + 2] - State.Positions[i];
+		const float Dist = Delta.Size();
+		if (Dist <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+
+		const FVector N = Delta / Dist;
+		const float C = Dist - Rest;
+		const float DLambda = (-C - AlphaTilde * Lambda[i]) / (WSum + AlphaTilde);
+		Lambda[i] += DLambda;
+
+		State.Positions[i]     -= N * (WA * DLambda);
+		State.Positions[i + 2] += N * (WB * DLambda);
+	}
 }
 
 void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const TArray<IRopeCollider*>& Colliders) const
