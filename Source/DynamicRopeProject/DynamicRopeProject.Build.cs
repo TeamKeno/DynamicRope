@@ -10,7 +10,9 @@ public class DynamicRopeProject : ModuleRules
 	
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] {  });
+		// DynamicRope: rope plugin (URopeComponent, URopeBoneCapsuleProvider).
+		// AIModule/NavigationSystem/GameplayTasks: wander AI target (MoveTo on NavMesh).
+		PrivateDependencyModuleNames.AddRange(new string[] { "DynamicRope", "AIModule", "NavigationSystem", "GameplayTasks" });
 
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
