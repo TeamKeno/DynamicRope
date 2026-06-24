@@ -12,7 +12,7 @@ FRopeContact FCapsuleCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	const float   MinDist = Radius + NodeRadius;
 	if (Dist >= MinDist)
 	{
-		return Contact; // bHit = false
+		return Contact; // bHit = false (히트 없음)
 	}
 
 	Contact.bHit = true;

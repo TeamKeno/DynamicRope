@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// PoC — experimental, not shipping. See Docs/PoC/01_PostWrapModel.md.
+// PoC — 실험용이며 출시 대상 아님. Docs/PoC/01_PostWrapModel.md 참고.
 
 #include "PoC/RopePoCActor.h"
 #include "PoC/RopePoCCapsuleActor.h"
@@ -16,9 +16,9 @@
 
 namespace
 {
-	// Base cross-section radius (cm) of /Engine/BasicShapes/Cylinder.
+	// /Engine/BasicShapes/Cylinder의 기본 단면 radius(cm).
 	constexpr float EngineCylinderBaseRadius = 50.0f;
-	// Clamp the simulated timestep so large frame hitches can't explode the solver.
+	// 큰 프레임 hitch가 solver를 폭주시키지 못하도록 시뮬레이션 timestep을 clamp한다.
 	constexpr float MaxSimDeltaSeconds = 1.0f / 30.0f;
 }
 
@@ -35,7 +35,7 @@ void ARopePoCActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 
-	// Lay out a fresh straight rope whenever the actor is placed/moved/edited.
+	// 액터가 배치/이동/편집될 때마다 새로운 직선 rope를 배치한다.
 	bInitialized = false;
 }
 
@@ -50,7 +50,7 @@ void ARopePoCActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChange
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
-	// Any property tweak rebuilds the rope on the next tick.
+	// 어떤 프로퍼티를 수정하든 다음 tick에서 rope를 재생성한다.
 	bInitialized = false;
 }
 #endif
@@ -66,7 +66,7 @@ FVector ARopePoCActor::GetEndWorld() const
 	{
 		return EndAnchorActor->GetActorLocation();
 	}
-	// Free end: lay the rope out along the actor's forward axis.
+	// Free end: 액터의 forward axis를 따라 rope를 펼친다.
 	return GetActorLocation() + GetActorForwardVector() * RopeLength;
 }
 
@@ -90,7 +90,7 @@ void ARopePoCActor::InitializeRope()
 		InvMasses[i] = 1.0f;
 	}
 
-	// Wrap-latch state starts empty (no node latched yet).
+	// Wrap-latch 상태는 비어서 시작한다(아직 latch된 노드 없음).
 	LatchCapsule.Init(-1, NumParticles);
 	LatchAlong.Init(0.0f, NumParticles);
 	LatchRadialDir.Init(FVector::UpVector, NumParticles);
@@ -110,7 +110,7 @@ void ARopePoCActor::GatherProviders()
 {
 	CapsuleProviders.Reset();
 
-	// Explicit providers (test capsule actors).
+	// 명시적 provider(테스트용 capsule 액터).
 	for (ARopePoCCapsuleActor* C : Colliders)
 	{
 		if (C)
@@ -130,7 +130,7 @@ void ARopePoCActor::GatherProviders()
 		return;
 	}
 
-	// Any actor or component in the level implementing IRopeCapsuleProvider.
+	// 레벨에서 IRopeCapsuleProvider를 구현한 모든 액터 또는 컴포넌트.
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
 		AActor* Actor = *It;
@@ -172,7 +172,7 @@ void ARopePoCActor::BuildFrameCapsules()
 		{
 			const int32 Before = FrameCapsules.Num();
 			Provider->GatherRopeCapsules(FrameCapsules);
-			// Tag every capsule this provider just appended with its provider index.
+			// 이 provider가 방금 추가한 모든 capsule에 자신의 provider 인덱스를 태깅한다.
 			for (int32 c = Before; c < FrameCapsules.Num(); ++c)
 			{
 				FrameCapsuleOwner.Add(ProviderIdx);
@@ -180,7 +180,7 @@ void ARopePoCActor::BuildFrameCapsules()
 		}
 	}
 
-	// Reset this frame's pull-reaction accumulators to match the capsule set.
+	// 이번 프레임의 pull-reaction 누산기를 capsule 집합에 맞춰 reset한다.
 	CapsuleReaction.Init(FVector::ZeroVector, FrameCapsules.Num());
 	CapsuleReactionPoint.Init(FVector::ZeroVector, FrameCapsules.Num());
 	CapsuleReactionWeight.Init(0.0f, FrameCapsules.Num());
@@ -188,7 +188,7 @@ void ARopePoCActor::BuildFrameCapsules()
 
 void ARopePoCActor::RebuildSegmentMeshes()
 {
-	// Fall back to engine assets so the rope is visible with zero setup.
+	// 별도 설정 없이도 rope가 보이도록 엔진 에셋으로 fallback한다.
 	if (!RopeMesh)
 	{
 		RopeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
@@ -201,8 +201,8 @@ void ARopePoCActor::RebuildSegmentMeshes()
 	const int32 DesiredSegments = NumParticles - 1;
 	const float RadiusScale = RopeRadius / EngineCylinderBaseRadius;
 
-	// Reuse existing components when the segment count is unchanged (e.g. the actor is
-	// just being dragged): only refresh the per-segment visual settings.
+	// segment 개수가 그대로일 때(예: 액터를 단순히 드래그하는 중)는 기존 컴포넌트를
+	// 재사용하고, segment별 시각 설정만 갱신한다.
 	bool bCountMatches = (SegmentMeshes.Num() == DesiredSegments);
 	for (USplineMeshComponent* SM : SegmentMeshes)
 	{
@@ -220,7 +220,7 @@ void ARopePoCActor::RebuildSegmentMeshes()
 		return;
 	}
 
-	// Segment count changed: drop stale components and rebuild from scratch.
+	// segment 개수가 바뀜: 낡은 컴포넌트를 버리고 처음부터 재생성한다.
 	for (USplineMeshComponent* SM : SegmentMeshes)
 	{
 		if (SM)
@@ -301,10 +301,10 @@ void ARopePoCActor::SimulateStep(float DeltaSeconds)
 	const float DampFactor = 1.0f - FMath::Clamp(Damping, 0.0f, 1.0f);
 	const int32 ItersPerSub = FMath::Max(1, SolverIterations / Sub);
 
-	// This frame's capsules (current pose) + reset the per-frame reaction accumulators.
+	// 이번 프레임의 capsule(현재 포즈) + 프레임별 반작용 누산기 reset.
 	BuildFrameCapsules();
 
-	// Pinned-end targets: sweep from last frame's pose (Prev) to this frame's (Target).
+	// Pinned-end target: 직전 프레임 포즈(Prev)에서 이번 프레임 포즈(Target)로 sweep한다.
 	const FVector StartTarget = GetStartWorld();
 	const FVector EndTarget = GetEndWorld();
 	if (!bHasPrevPins)
@@ -321,7 +321,7 @@ void ARopePoCActor::SimulateStep(float DeltaSeconds)
 		const float Alpha = static_cast<float>(s) / static_cast<float>(Sub);
 		const float AlphaPrev = static_cast<float>(s - 1) / static_cast<float>(Sub);
 
-		// Capsule poses for this substep, and the substep before (friction surface velocity).
+		// 이번 substep의 capsule 포즈와 직전 substep의 포즈(friction 표면 속도용).
 		ActiveCapsules = FrameCapsules;
 		PrevActiveCapsules = FrameCapsules;
 		if (bCanInterpCapsules)
@@ -337,7 +337,7 @@ void ARopePoCActor::SimulateStep(float DeltaSeconds)
 			}
 		}
 
-		// Verlet integrate free particles by the (smaller) substep timestep.
+		// (더 작은) substep timestep으로 free 파티클을 Verlet integration한다.
 		for (int32 i = 0; i < Positions.Num(); ++i)
 		{
 			if (InvMasses[i] <= 0.0f)
@@ -350,36 +350,36 @@ void ARopePoCActor::SimulateStep(float DeltaSeconds)
 			Positions[i] = NewPos;
 		}
 
-		// Sweep the pinned ends to their interpolated targets.
+		// pinned 끝을 보간된 target으로 sweep한다.
 		SetPinnedTargets(FMath::Lerp(PrevStartWorld, StartTarget, Alpha),
 		                 FMath::Lerp(PrevEndWorld, EndTarget, Alpha));
 
-		// Hold: keep latched wrap nodes glued to the (moving) capsule surface this substep.
+		// Hold: 이번 substep 동안 latch된 wrap 노드를 (움직이는) capsule 표면에 붙여둔다.
 		UpdateLatchedPositions();
 
 		for (int32 Iter = 0; Iter < ItersPerSub; ++Iter)
 		{
-			// Alternate the solve direction each iteration so neither end "wins" the
-			// Gauss-Seidel sweep — removes the one-sided sag / asymmetric wrap bias.
+			// 반복마다 solve 방향을 번갈아, 어느 끝도 Gauss-Seidel sweep을 "이기지" 않게
+			// 한다 — 한쪽으로 처지는 현상 / 비대칭 wrap 편향을 제거한다.
 			const bool bReverse = (Iter & 1) != 0;
 			SolveConstraints(bReverse);
 			SolveBendingConstraints(bReverse);
 			SolveCollisions();
 		}
 
-		// Friction is a per-substep velocity adjustment, after contacts are resolved.
+		// Friction은 contact가 해결된 뒤에 적용하는 substep별 속도 보정이다.
 		ApplyFriction();
 	}
 
-	// Latch newly-established wraps / break yanked-off ones, using the resolved frame state.
+	// 해결된 프레임 상태를 이용해, 새로 성립된 wrap을 latch / 뜯겨나간 것은 해제한다.
 	ManageWrapLatch(FrameDt);
-	// Latched nodes don't get push-out reaction (they're pinned) — feed their tension instead.
+	// latch된 노드는 push-out 반작용을 받지 않으므로(pin됨) 대신 그들의 tension을 되먹인다.
 	AccumulateLatchReaction();
 
-	// S4: reaction was accumulated across all substeps — hand it to the providers once.
+	// S4: 반작용은 모든 substep에 걸쳐 누적되었다 — provider에게 한 번에 전달한다.
 	ApplyPullReaction();
 
-	// Remember this frame's pin targets and capsule poses for next frame's sweep.
+	// 다음 프레임의 sweep을 위해 이번 프레임의 pin target과 capsule 포즈를 기억해둔다.
 	PrevStartWorld = StartTarget;
 	PrevEndWorld = EndTarget;
 	PrevFrameCapsules = FrameCapsules;
@@ -387,7 +387,7 @@ void ARopePoCActor::SimulateStep(float DeltaSeconds)
 
 void ARopePoCActor::SolveConstraints(bool bReverse)
 {
-	const int32 Count = Positions.Num() - 1; // distance constraints between i and i+1
+	const int32 Count = Positions.Num() - 1; // i와 i+1 사이의 distance constraint
 	for (int32 k = 0; k < Count; ++k)
 	{
 		const int32 i = bReverse ? (Count - 1 - k) : k;
@@ -398,7 +398,7 @@ void ARopePoCActor::SolveConstraints(bool bReverse)
 		const float WSum = WA + WB;
 		if (WSum <= 0.0f)
 		{
-			continue; // both endpoints pinned
+			continue; // 양쪽 끝점 모두 pin됨
 		}
 
 		const FVector Delta = B - A;
@@ -422,13 +422,13 @@ void ARopePoCActor::SolveBendingConstraints(bool bReverse)
 		return;
 	}
 
-	// Jakobsen "support stick": a distance constraint between i and i+2 whose rest length is
-	// the straight-line span (2 segments). When the rope bends, those two nodes get closer than
-	// the straight span, so the constraint pushes them apart → resists bending = stiffness.
-	// BendStiffness [0..1] scales the correction (1 = stiff, 0 = limp chain).
+	// Jakobsen "support stick": i와 i+2 사이의 distance constraint로, rest length는
+	// 직선 거리(2 segment)다. rope가 휘면 이 두 노드는 직선 거리보다 가까워지므로,
+	// constraint가 둘을 밀어낸다 → 휨에 저항 = stiffness.
+	// BendStiffness [0..1]가 보정량을 스케일한다(1 = 뻣뻣, 0 = 흐물거리는 체인).
 	const float BendRest = SegmentLength * 2.0f;
 
-	const int32 Count = Positions.Num() - 2; // support sticks between i and i+2
+	const int32 Count = Positions.Num() - 2; // i와 i+2 사이의 support stick
 	for (int32 k = 0; k < Count; ++k)
 	{
 		const int32 i = bReverse ? (Count - 1 - k) : k;
@@ -458,7 +458,7 @@ void ARopePoCActor::SolveBendingConstraints(bool bReverse)
 
 void ARopePoCActor::SolveCollisions()
 {
-	// Pick a capsule-axis normal when the contact is degenerate (rope exactly on the axis).
+	// 접촉이 degenerate할 때(rope가 정확히 axis 위) capsule-axis 기준 normal을 고른다.
 	auto FallbackNormal = [](const FRopeCapsule& Cap) -> FVector
 	{
 		const FVector Axis = (Cap.B - Cap.A).GetSafeNormal(1e-4f, FVector::UpVector);
@@ -472,8 +472,8 @@ void ARopePoCActor::SolveCollisions()
 
 		if (bUseSegmentCollision)
 		{
-			// --- Segment-vs-capsule: test each rope segment as a swept sphere against the
-			//     capsule axis, and split the push-out between its two end nodes. ---
+			// --- Segment-vs-capsule: 각 rope segment를 swept sphere로 보아 capsule axis에
+			//     대해 테스트하고, push-out을 양쪽 끝 노드로 나눈다. ---
 			const int32 NumSegments = Positions.Num() - 1;
 			for (int32 i = 0; i < NumSegments; ++i)
 			{
@@ -481,10 +481,10 @@ void ARopePoCActor::SolveCollisions()
 				const float W1 = InvMasses[i + 1];
 				if (W0 <= 0.0f && W1 <= 0.0f)
 				{
-					continue; // both ends pinned — segment can't move
+					continue; // 양쪽 끝 모두 pin됨 — segment가 움직일 수 없음
 				}
 
-				// Closest points between the rope segment and the capsule's inner axis segment.
+				// rope segment와 capsule의 내부 axis segment 사이의 최근접점.
 				FVector OnRope, OnAxis;
 				FMath::SegmentDistToSegmentSafe(Positions[i], Positions[i + 1], Cap.A, Cap.B, OnRope, OnAxis);
 
@@ -498,8 +498,8 @@ void ARopePoCActor::SolveCollisions()
 				const FVector Normal = (Dist > KINDA_SMALL_NUMBER) ? (Dir / Dist) : FallbackNormal(Cap);
 				const float Penetration = MinDist - Dist;
 
-				// Barycentric position of the contact along the rope segment → distribute the
-				// correction so the whole segment leaves the surface, not just one node.
+				// rope segment를 따라가는 접촉의 barycentric 위치 → 한 노드만이 아니라
+				// segment 전체가 표면에서 떨어지도록 보정을 분배한다.
 				const FVector Seg = Positions[i + 1] - Positions[i];
 				const float SegLenSq = Seg.SizeSquared();
 				const float S = (SegLenSq > KINDA_SMALL_NUMBER)
@@ -508,7 +508,7 @@ void ARopePoCActor::SolveCollisions()
 				const float C0 = 1.0f - S;
 				const float C1 = S;
 
-				// Virtual inverse mass at the contact point: C0^2*W0 + C1^2*W1.
+				// 접촉점에서의 가상 inverse mass: C0^2*W0 + C1^2*W1.
 				const float WSum = C0 * C0 * W0 + C1 * C1 * W1;
 				if (WSum <= 0.0f)
 				{
@@ -518,7 +518,7 @@ void ARopePoCActor::SolveCollisions()
 				Positions[i]     += Normal * (W0 * C0 * Lambda);
 				Positions[i + 1] += Normal * (W1 * C1 * Lambda);
 
-				// S4: rope pushes the body opposite to the push-out, at the contact point.
+				// S4: rope는 접촉점에서 push-out과 반대 방향으로 바디를 민다.
 				if (bEnableTwoWayPull && CapsuleReaction.IsValidIndex(c))
 				{
 					CapsuleReaction[c] += -Normal * Penetration;
@@ -529,12 +529,12 @@ void ARopePoCActor::SolveCollisions()
 		}
 		else
 		{
-			// --- Legacy node-only test (kept for before/after comparison). ---
+			// --- Legacy 노드 전용 테스트(before/after 비교용으로 남겨둠). ---
 			for (int32 i = 0; i < Positions.Num(); ++i)
 			{
 				if (InvMasses[i] <= 0.0f)
 				{
-					continue; // don't push pinned particles
+					continue; // pin된 파티클은 밀지 않는다
 				}
 
 				const FVector Closest = FMath::ClosestPointOnSegment(Positions[i], Cap.A, Cap.B);
@@ -568,7 +568,7 @@ void ARopePoCActor::ApplyFriction()
 		return;
 	}
 
-	// Need same-order previous-substep capsules to estimate how the surface moved.
+	// 표면이 어떻게 움직였는지 추정하려면 같은 순서의 직전 substep capsule이 필요하다.
 	if (PrevActiveCapsules.Num() != ActiveCapsules.Num())
 	{
 		return;
@@ -595,23 +595,23 @@ void ARopePoCActor::ApplyFriction()
 			const float Dist = ToParticle.Size();
 			if (Dist > ContactDist)
 			{
-				continue; // not in contact — no friction
+				continue; // 접촉 아님 — friction 없음
 			}
 
 			const FVector Normal = (Dist > KINDA_SMALL_NUMBER) ? (ToParticle / Dist) : FVector::UpVector;
 
-			// Sample the surface velocity at the contact point (same parameter on prev/cur segment).
+			// 접촉점에서의 표면 속도를 샘플링한다(prev/cur segment에서 동일 파라미터).
 			const float T = (SegLenSq > KINDA_SMALL_NUMBER)
 				? FMath::Clamp(FVector::DotProduct(Positions[i] - Cur.A, Seg) / SegLenSq, 0.0f, 1.0f)
 				: 0.0f;
 			const FVector SurfaceVel = FMath::Lerp(Cur.A, Cur.B, T) - FMath::Lerp(Prev.A, Prev.B, T);
 
-			// Relative tangential motion between the rope particle and the moving surface.
+			// rope 파티클과 움직이는 표면 사이의 상대 tangential 운동.
 			const FVector ParticleVel = Positions[i] - OldPositions[i];
 			const FVector RelVel = ParticleVel - SurfaceVel;
 			const FVector RelTangent = RelVel - FVector::DotProduct(RelVel, Normal) * Normal;
 
-			// Cancel a fraction of it. In Verlet, shifting OldPosition toward Position lowers velocity.
+			// 그중 일부를 상쇄한다. Verlet에서는 OldPosition을 Position 쪽으로 옮기면 속도가 줄어든다.
 			OldPositions[i] += RelTangent * WrapFriction;
 		}
 	}
@@ -629,10 +629,10 @@ void ARopePoCActor::ApplyPullReaction()
 		const float Weight = CapsuleReactionWeight.IsValidIndex(c) ? CapsuleReactionWeight[c] : 0.0f;
 		if (Weight <= 0.0f)
 		{
-			continue; // no contact this frame
+			continue; // 이번 프레임에 접촉 없음
 		}
 
-		// Resolve the provider that owns this capsule.
+		// 이 capsule을 소유한 provider를 resolve한다.
 		if (!FrameCapsuleOwner.IsValidIndex(c))
 		{
 			continue;
@@ -650,7 +650,7 @@ void ARopePoCActor::ApplyPullReaction()
 		}
 
 		const FVector Impulse = CapsuleReaction[c] * PullReactionGain;
-		const FVector AppPoint = CapsuleReactionPoint[c] / Weight; // averaged contact point
+		const FVector AppPoint = CapsuleReactionPoint[c] / Weight; // 평균낸 접촉점
 		Provider->ApplyRopeReaction(Impulse, AppPoint);
 
 		if (bDrawDebug)
@@ -680,7 +680,7 @@ void ARopePoCActor::UpdateLatchedPositions()
 		}
 		if (!ActiveCapsules.IsValidIndex(c))
 		{
-			// Capsule set changed under us — drop the latch (interior nodes only get latched).
+			// capsule 집합이 도중에 바뀜 — latch를 해제한다(내부 노드만 latch됨).
 			LatchCapsule[i] = -1;
 			InvMasses[i] = 1.0f;
 			continue;
@@ -691,19 +691,19 @@ void ARopePoCActor::UpdateLatchedPositions()
 		const float AxisLen = AxisVec.Size();
 		const FVector CurAxis = (AxisLen > KINDA_SMALL_NUMBER) ? (AxisVec / AxisLen) : LatchAxis[i];
 
-		// Rotate the stored radial offset by however the capsule axis turned since last step,
-		// so the wrap follows the limb as it swings (capsule is symmetric about its axis).
+		// 저장된 radial offset을 직전 step 이후 capsule axis가 회전한 만큼 회전시켜,
+		// wrap이 swing하는 limb를 따라가게 한다(capsule은 axis 기준 대칭).
 		const FQuat Turn = FQuat::FindBetweenNormals(LatchAxis[i], CurAxis);
 		const FVector NewRadial = Turn.RotateVector(LatchRadialDir[i]).GetSafeNormal(1e-4f, CurAxis);
 		LatchRadialDir[i] = NewRadial;
 		LatchAxis[i] = CurAxis;
 
-		// Surface point = point along the axis + radial offset.
+		// 표면점 = axis를 따라가는 점 + radial offset.
 		const float Along = FMath::Clamp(LatchAlong[i], 0.0f, AxisLen);
 		const FVector Surface = Cap.A + CurAxis * Along + NewRadial * LatchRadialDist[i];
 
 		Positions[i] = Surface;
-		OldPositions[i] = Surface; // pinned: don't carry velocity while held
+		OldPositions[i] = Surface; // pin됨: hold 중에는 속도를 이어가지 않는다
 		InvMasses[i] = 0.0f;
 	}
 }
@@ -712,7 +712,7 @@ void ARopePoCActor::ManageWrapLatch(float FrameDt)
 {
 	if (!bEnableWrapLatch)
 	{
-		// Disabled: release every latch so the rope is fully dynamic again.
+		// 비활성화: 모든 latch를 해제해 rope를 다시 완전히 동적으로 만든다.
 		for (int32 i = 0; i < Positions.Num(); ++i)
 		{
 			if (LatchCapsule[i] >= 0)
@@ -727,10 +727,10 @@ void ARopePoCActor::ManageWrapLatch(float FrameDt)
 
 	const float MaxLen = SegmentLength * LatchReleaseStrain;
 
-	// Never latch the (user-controlled) endpoints.
+	// (사용자가 제어하는) 끝점은 절대 latch하지 않는다.
 	for (int32 i = 1; i < Positions.Num() - 1; ++i)
 	{
-		// Already latched → break it if a neighbouring segment is stretched past the limit.
+		// 이미 latch됨 → 인접 segment가 한계를 넘어 늘어나면 해제한다.
 		if (LatchCapsule[i] >= 0)
 		{
 			const bool bYanked =
@@ -745,7 +745,7 @@ void ARopePoCActor::ManageWrapLatch(float FrameDt)
 			continue;
 		}
 
-		// Not latched → find the closest capsule currently in contact.
+		// latch 안 됨 → 현재 접촉 중인 가장 가까운 capsule을 찾는다.
 		int32 BestCap = -1;
 		float BestDist = TNumericLimits<float>::Max();
 		FVector BestClosest = FVector::ZeroVector;
@@ -772,11 +772,11 @@ void ARopePoCActor::ManageWrapLatch(float FrameDt)
 
 		if (BestCap < 0)
 		{
-			ContactDwell[i] = 0.0f; // not touching anything — reset dwell
+			ContactDwell[i] = 0.0f; // 아무것에도 닿지 않음 — dwell reset
 			continue;
 		}
 
-		// Dwell long enough → establish the latch, storing the contact relative to the capsule.
+		// 충분히 오래 dwell → latch를 성립시키고, 접촉을 capsule 기준으로 저장한다.
 		ContactDwell[i] += FrameDt;
 		if (ContactDwell[i] >= LatchContactTime)
 		{
@@ -784,7 +784,7 @@ void ARopePoCActor::ManageWrapLatch(float FrameDt)
 			const float RadialDist = Radial.Size();
 
 			LatchCapsule[i] = BestCap;
-			// Along = distance of the closest point from the capsule's A end, projected on the axis.
+			// Along = 최근접점을 axis에 투영했을 때 capsule의 A 끝으로부터의 거리.
 			LatchAlong[i] = FMath::Clamp(FVector::DotProduct(BestClosest - ActiveCapsules[BestCap].A, BestAxis), 0.0f, BestAxisLen);
 			LatchRadialDir[i] = (RadialDist > KINDA_SMALL_NUMBER)
 				? (Radial / RadialDist)
@@ -811,9 +811,9 @@ void ARopePoCActor::AccumulateLatchReaction()
 			continue;
 		}
 
-		// A latched node is pinned to the limb, so it gets no push-out reaction. Instead the
-		// rope tension at this node (its segments stretched toward the neighbours) is the force
-		// the rope exerts on the limb — pull the capsule that way.
+		// latch된 노드는 limb에 pin되어 있어 push-out 반작용을 받지 않는다. 대신 이 노드의
+		// rope tension(이웃 쪽으로 늘어난 segment)이 rope가 limb에 가하는 힘이다 —
+		// capsule을 그 방향으로 당긴다.
 		FVector Pull = FVector::ZeroVector;
 		const int32 Neighbours[2] = { i - 1, i + 1 };
 		for (int32 j : Neighbours)
@@ -858,7 +858,7 @@ void ARopePoCActor::UpdateSegmentMeshes()
 
 	const FTransform ActorXf = GetActorTransform();
 
-	// Per-particle tangents (Catmull-style), in local space, for smooth segments.
+	// 부드러운 segment를 위한, 로컬 공간에서의 파티클별 tangent(Catmull 방식).
 	const int32 N = Positions.Num();
 	TArray<FVector, TInlineAllocator<64>> Local;
 	Local.SetNum(N);
@@ -902,7 +902,7 @@ void ARopePoCActor::DrawDebugRope() const
 
 	for (int32 i = 0; i < Positions.Num(); ++i)
 	{
-		// Orange = latched wrap node, Red = pinned endpoint, Yellow = free particle.
+		// Orange = latch된 wrap 노드, Red = pin된 끝점, Yellow = free 파티클.
 		const bool bLatched = LatchCapsule.IsValidIndex(i) && LatchCapsule[i] >= 0;
 		const FColor PointColor = bLatched ? FColor(255, 128, 0)
 			: (InvMasses[i] <= 0.0f) ? FColor::Red : FColor::Yellow;

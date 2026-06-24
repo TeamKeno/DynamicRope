@@ -46,18 +46,18 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 		Material = UMaterial::GetDefaultMaterial(MD_Surface);
 	}
 
-	// We rewrite the vertex buffers directly each frame (RHI lock), which the renderer's Auto
-	// shadow-cache heuristics (WPO / transform deltas) cannot see, so Virtual Shadow Maps keep a
-	// stale cached page and the rope's shadow leaves a duplicated afterimage on the floor until a
-	// nearby move invalidates the page. `Always` puts this primitive in ShadowScene's
-	// AlwaysInvalidatingPrimitives, which VSM invalidates unconditionally every frame
+	// 우리는 매 프레임 vertex buffer를 직접 다시 쓴다(RHI lock). 렌더러의 Auto
+	// shadow-cache 휴리스틱(WPO / transform 델타)은 이를 감지하지 못하므로, Virtual Shadow Map은
+	// 오래된 cached page를 유지하고, 근처에서 움직임이 발생해 page가 무효화될 때까지 rope의 그림자가
+	// 바닥에 중복된 잔상을 남긴다. `Always`는 이 primitive를 ShadowScene의
+	// AlwaysInvalidatingPrimitives에 넣어, VSM이 매 프레임 무조건 무효화하게 한다
 	// (VirtualShadowMapCacheManager: GetAlwaysInvalidatingPrimitives -> UpdatedTransform).
 	bHasDeformableMesh = true;
 	ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Always;
-	// The rope deforms every frame via direct buffer writes, so its shadow must never be cached.
-	// Forcing this false makes IsMeshShapeOftenMoving() == true regardless of the component's Mobility
-	// (which a Blueprint/instance can silently set to Static), keeping the rope on the uncached
-	// dynamic VSM shadow path (VirtualShadowMapCacheManager sets CachePrimitiveAsDynamic from it).
+	// rope는 직접 buffer 쓰기로 매 프레임 변형되므로 그 그림자는 절대 캐싱되어서는 안 된다.
+	// 이를 false로 강제하면 component의 Mobility(블루프린트/인스턴스가 조용히 Static으로 설정할 수 있음)와
+	// 무관하게 IsMeshShapeOftenMoving() == true가 되어, rope를 캐싱되지 않는
+	// dynamic VSM shadow 경로에 유지한다(VirtualShadowMapCacheManager가 이로부터 CachePrimitiveAsDynamic를 설정).
 	bGoodCandidateForCachedShadowmap = false;
 
 	ENQUEUE_RENDER_COMMAND(InitRopeResources)(
@@ -81,12 +81,12 @@ void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDyna
 	const TArray<FVector>& Points = Data.Points;
 	if (Points.Num() != NumRings)
 	{
-		// Centerline must match the fixed topology this proxy was built for.
+		// centerline은 이 proxy가 생성된 기준인 고정 topology와 일치해야 한다.
 		return;
 	}
 
-	// Seed a frame perpendicular to the first tangent, then parallel-transport it ring to ring
-	// (minimal rotation) so the tube doesn't twist-pop like a Frenet frame would.
+	// 첫 tangent에 수직인 frame을 시드한 뒤, ring 단위로 parallel-transport한다
+	// (최소 회전). 그러면 tube가 Frenet frame처럼 twist-pop하지 않는다.
 	FVector3f PrevTangent = FVector3f(Points[1] - Points[0]).GetSafeNormal();
 	if (PrevTangent.IsNearlyZero())
 	{
@@ -133,7 +133,7 @@ void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDyna
 	}
 	check(VertIdx == static_cast<uint32>(GetRequiredVertexCount()));
 
-	// Upload vertex streams.
+	// vertex stream을 업로드한다.
 	{
 		FPositionVertexBuffer& VB = VertexBuffers.PositionVertexBuffer;
 		void* Dst = RHICmdList.LockBuffer(VB.VertexBufferRHI, 0, VB.GetNumVertices() * VB.GetStride(), RLM_WriteOnly);
@@ -159,7 +159,7 @@ void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDyna
 		RHICmdList.UnlockBuffer(SB.TexCoordVertexBuffer.VertexBufferRHI);
 	}
 
-	// Build + upload indices (topology is constant, but cheap to refill).
+	// index를 만들고 업로드한다(topology은 일정하지만 다시 채우는 비용이 저렴하다).
 	int32* Indices = static_cast<int32*>(RHICmdList.LockBuffer(IndexBuffer.IndexBufferRHI, 0, GetRequiredIndexCount() * sizeof(int32), RLM_WriteOnly));
 	uint32 Out = 0;
 	for (int32 i = 0; i < NumRings - 1; ++i)
@@ -192,9 +192,9 @@ void FRopeSceneProxy::SetDynamicData_RenderThread(FRHICommandListBase& RHICmdLis
 
 void FRopeSceneProxy::DrawStaticElements(FStaticPrimitiveDrawInterface* PDI)
 {
-	// Cable-style static draw path: cached mesh draw command over the persistent vertex factory.
-	// The per-frame BuildTube() updates the vertex buffers in place, so the cached command renders
-	// current geometry. Static relevance (not Movable/dynamic) avoids spurious motion-vector ghosting.
+	// Cable 스타일의 static draw 경로: 지속적인 vertex factory에 대한 cached mesh draw command.
+	// 매 프레임 BuildTube()가 vertex buffer를 제자리에서 갱신하므로, cached command가
+	// 현재 geometry를 렌더링한다. static relevance(Movable/dynamic이 아님)는 잘못된 motion-vector ghosting을 피한다.
 	if (HasViewDependentDPG())
 	{
 		return;
@@ -272,8 +272,8 @@ void FRopeSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView*>& Vi
 
 FPrimitiveViewRelevance FRopeSceneProxy::GetViewRelevance(const FSceneView* View) const
 {
-	// Mirror FCableSceneProxy: static relevance for normal views (cached draw via DrawStaticElements),
-	// dynamic only for wireframe / rich / debug views (handled by GetDynamicMeshElements).
+	// FCableSceneProxy를 그대로 따른다: 일반 view에는 static relevance(DrawStaticElements를 통한 cached draw),
+	// wireframe / rich / debug view에만 dynamic(GetDynamicMeshElements에서 처리).
 	FPrimitiveViewRelevance Result;
 	Result.bDrawRelevance = IsShown(View);
 	Result.bShadowRelevance = IsShadowCast(View);

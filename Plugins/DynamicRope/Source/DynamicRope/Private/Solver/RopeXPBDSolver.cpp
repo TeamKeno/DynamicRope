@@ -15,7 +15,7 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 	const float SubDt = FMath::Min(DeltaSeconds, 1.0f / 30.0f) / static_cast<float>(Sub);
 	const int32 Iters = FMath::Max(1, Config.Iterations);
 
-	// Per-constraint Lagrange multipliers (XPBD). Reset each substep, accumulated over its iterations.
+	// 제약별 Lagrange multiplier(XPBD). substep마다 리셋되며, 해당 iteration들에 걸쳐 누적된다.
 	const int32 NumDist = State.Num() - 1;
 	const int32 NumBend = FMath::Max(0, State.Num() - 2);
 	TArray<float> LambdaDist;
@@ -27,8 +27,8 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 	{
 		Integrate(State, Config, SubDt);
 
-		// Sweep the pinned start to its interpolated target this substep (anti-explosion when
-		// the anchor jumps). Zero velocity at the pin so it doesn't inject motion.
+		// 이번 substep에서 고정된 시작점을 보간된 target까지 sweep한다(anchor가 점프할 때의 explosion 방지).
+		// pin에서 velocity를 0으로 두어 motion을 주입하지 않도록 한다.
 		if (State.bStartPinned && State.Num() > 0)
 		{
 			const float Alpha = static_cast<float>(s + 1) / static_cast<float>(Sub);
@@ -38,13 +38,13 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 			State.InvMass[0] = 0.0f;
 		}
 
-		// XPBD: lambda accumulates within a substep, so zero it before this substep's iterations.
+		// XPBD: lambda는 substep 내에서 누적되므로, 이번 substep의 iteration 전에 0으로 초기화한다.
 		for (float& L : LambdaDist) { L = 0.0f; }
 		for (float& L : LambdaBend) { L = 0.0f; }
 
 		for (int32 It = 0; It < Iters; ++It)
 		{
-			// Alternate sweep direction to remove Gauss-Seidel bias.
+			// Gauss-Seidel bias를 제거하기 위해 sweep 방향을 번갈아 바꾼다.
 			const bool bReverse = (It & 1) != 0;
 			SolveDistance(State, Config, SubDt, bReverse, LambdaDist);
 			SolveBending(State, Config, SubDt, bReverse, LambdaBend);
@@ -57,7 +57,7 @@ void FRopeXPBDSolver::Integrate(FRopeSimState& State, const FRopeSolverConfig& C
 {
 	const float Damp = 1.0f - FMath::Clamp(Config.Damping, 0.0f, 1.0f);
 	const float Dt2 = SubDt * SubDt;
-	// Cap per-substep displacement so the chain can never diverge/explode.
+	// substep당 변위를 제한하여 chain이 절대 발산/explode하지 않도록 한다.
 	const float MaxStep = FMath::Max(State.SegmentLength * 2.0f, 1.0f);
 	const float MaxStepSq = MaxStep * MaxStep;
 
@@ -81,7 +81,7 @@ void FRopeXPBDSolver::Integrate(FRopeSimState& State, const FRopeSolverConfig& C
 void FRopeXPBDSolver::SolveDistance(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
 	TArray<float>& Lambda) const
 {
-	// XPBD distance constraint C = |x_{i+1} - x_i| - L, solved with a compliant Lagrange multiplier.
+	// XPBD distance 제약 C = |x_{i+1} - x_i| - L 을 compliant Lagrange multiplier로 푼다.
 	// alpha_tilde = compliance / dt^2 (0 => rigid PBD). dLambda = (-C - alpha_tilde*Lambda) / (wA+wB+alpha_tilde).
 	const float AlphaTilde = (SubDt > KINDA_SMALL_NUMBER) ? (Config.StretchCompliance / (SubDt * SubDt)) : 0.0f;
 	const int32 Count = State.Num() - 1;
@@ -117,9 +117,9 @@ void FRopeXPBDSolver::SolveDistance(FRopeSimState& State, const FRopeSolverConfi
 void FRopeXPBDSolver::SolveBending(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
 	TArray<float>& Lambda) const
 {
-	// Support-stick bending: an XPBD distance constraint across i..i+2 with rest length 2*SegmentLength.
-	// Straight => C=0; folding shortens the span => C<0 => the constraint pushes the ends apart
-	// (straightens), softly per BendCompliance. Cheap and stable for a 1D chain.
+	// Support-stick bending: rest 길이가 2*SegmentLength인, i..i+2 구간에 걸친 XPBD distance 제약.
+	// 곧게 펴지면 => C=0; 접히면 span이 짧아져 => C<0 => 제약이 양 끝을 서로 밀어내어
+	// (펴주며), BendCompliance에 따라 부드럽게 작용한다. 1D chain에 대해 저렴하고 안정적이다.
 	const int32 Count = State.Num() - 2;
 	if (Count <= 0)
 	{

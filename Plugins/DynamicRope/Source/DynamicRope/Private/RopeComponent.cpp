@@ -14,7 +14,7 @@ URopeComponent::URopeComponent()
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
 
-	// Movable so the primitive outputs motion vectors (TAA/TSR keeps the moving rope).
+	// primitive가 motion vector를 출력하도록 Movable로 설정한다(TAA/TSR가 움직이는 rope를 유지하게 한다).
 	Mobility = EComponentMobility::Movable;
 }
 
@@ -37,7 +37,7 @@ void URopeComponent::InitRope()
 		Sim.InvMass[i] = 1.0f;
 	}
 
-	// Pin the start to the component (hand/socket); the solver sweeps it across substeps.
+	// 시작점을 컴포넌트(hand/socket)에 pin한다; solver가 substep에 걸쳐 이를 sweep한다.
 	Sim.InvMass[0] = 0.0f;
 	Sim.bStartPinned = true;
 	Sim.StartPinTarget = Start;
@@ -52,9 +52,9 @@ void URopeComponent::GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) 
 	{
 		RopeBounds += P;
 	}
-	// Expand by the contact reach: a tight box around a near-straight rope is ~zero-thickness and
-	// would wrongly cull capsules that are actually within contact distance. Match the narrow phase
-	// (node ContactRadius; the capsule's own radius is already in its GetWorldBounds()).
+	// contact reach만큼 확장한다: 거의 직선인 rope를 감싼 tight box는 두께가 ~0이라, 실제로는 contact
+	// 거리 안에 있는 capsule을 잘못 cull해 버린다. narrow phase와 맞춘다
+	// (node ContactRadius; capsule 자신의 반지름은 이미 GetWorldBounds()에 포함되어 있다).
 	if (RopeBounds.IsValid)
 	{
 		RopeBounds = RopeBounds.ExpandBy(Radius + WrapConfig.ContactRadius + 5.0f);
@@ -105,9 +105,9 @@ void URopeComponent::EnsureColliderProviders()
 		}
 	};
 
-	// Cross-actor: when the rope is anchored to one actor but should catch a *different* body, the
-	// provider lives on that other actor. Use the explicit list when set; otherwise default to our
-	// own owner (same-actor case).
+	// Cross-actor: rope가 한 actor에 고정되어 있지만 *다른* body를 잡아야 할 때, provider는 그 다른
+	// actor 위에 존재한다. 명시적 리스트가 설정되어 있으면 그것을 사용하고, 그렇지 않으면 우리
+	// 자신의 owner로 기본 설정한다(same-actor 경우).
 	if (ColliderSourceActors.Num() > 0)
 	{
 		for (AActor* Actor : ColliderSourceActors)
@@ -120,8 +120,8 @@ void URopeComponent::EnsureColliderProviders()
 		AddFrom(GetOwner());
 	}
 
-	// Only follow an explicitly-assigned wrap-target mesh's owner; never auto-resolve here (that
-	// would re-add our own owner and let the rope latch onto itself).
+	// 명시적으로 지정된 wrap-target mesh의 owner만 따라간다; 여기서는 절대 auto-resolve 하지 않는다(그러면
+	// 우리 자신의 owner를 다시 추가하게 되어 rope가 자기 자신에게 latch하도록 만든다).
 	if (WrapTargetMesh)
 	{
 		AddFrom(WrapTargetMesh->GetOwner());
@@ -149,8 +149,8 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 		InitRope();
 	}
 
-	// Advance the pinned-start target; the solver sweeps Prev->Target across substeps so a fast
-	// character move doesn't yank (and explode) the chain.
+	// pinned-start target을 전진시킨다; solver가 substep에 걸쳐 Prev->Target을 sweep하므로 빠른
+	// 캐릭터 이동이 chain을 홱 잡아당겨(폭주시켜) 버리지 않는다.
 	if (Sim.bStartPinned)
 	{
 		Sim.StartPinPrev = Sim.StartPinTarget;
@@ -161,7 +161,7 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 
 	switch (Phase)
 	{
-	case ERopePhase::Free:        // dangles from the hand and follows the character
+	case ERopePhase::Free:        // 손에서 늘어뜨려진 채 캐릭터를 따라간다
 	case ERopePhase::Flight:
 	case ERopePhase::Contacting:
 	{
@@ -169,8 +169,8 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 		GatherFrameColliders(Colliders);
 		Solver.Step(Sim, SolverConfig, Colliders, DeltaTime);
 
-		// Contact decision (physics → logic gate). Only after a throw; a freely dangling rope
-		// brushing the body shouldn't latch.
+		// Contact decision(physics → logic gate). throw 이후에만 동작한다; 자유롭게 늘어진 rope가
+		// body를 스치는 것만으로 latch해서는 안 된다.
 		if (Phase != ERopePhase::Free)
 		{
 			FRopeWrapState Seed;
@@ -185,8 +185,8 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 	}
 	case ERopePhase::Wrapped:
 	{
-		// Logic owns the latched nodes (ride the skinned bone); the solver still settles the free
-		// span so the rope drapes and stays attached to the hand at node 0.
+		// logic이 latch된 node들을 소유한다(skinned bone에 올라탄다); solver는 여전히 free span을
+		// settle하여 rope가 늘어지고 node 0에서 손에 붙어 있도록 유지한다.
 		WrapController.Hold(Sim, ResolveWrapTargetMesh(), DeltaTime);
 		TArray<IRopeCollider*> Colliders;
 		GatherFrameColliders(Colliders);
@@ -194,7 +194,7 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 		break;
 	}
 	case ERopePhase::Releasing:
-		// Hand every node back to the solver (keep only the hand pin), then resume free simulation.
+		// 모든 node를 solver에 다시 넘긴다(hand pin만 유지), 그런 다음 free simulation을 재개한다.
 		for (int32 i = 0; i < Sim.Num(); ++i)
 		{
 			Sim.InvMass[i] = (i == 0 && Sim.bStartPinned) ? 0.0f : 1.0f;
@@ -205,7 +205,7 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 		break;
 	}
 
-	// Push the new centerline to the render proxy and refresh bounds.
+	// 새 centerline을 render proxy로 push하고 bounds를 갱신한다.
 	MarkRenderDynamicDataDirty();
 	MarkRenderTransformDirty();
 
@@ -234,7 +234,7 @@ void URopeComponent::SendRenderDynamicData_Concurrent()
 		return;
 	}
 
-	// Send the centerline in component-local space; the proxy renders via GetLocalToWorld().
+	// centerline을 component-local 공간으로 보낸다; proxy는 GetLocalToWorld()를 통해 렌더링한다.
 	const FTransform Xform = GetComponentTransform();
 	FRopeDynamicData* DynamicData = new FRopeDynamicData;
 	DynamicData->Points.SetNumUninitialized(Sim.Num());
@@ -260,7 +260,7 @@ void URopeComponent::Throw(const FVector& AimDir)
 
 	Phase = ERopePhase::Flight;
 
-	// Scaffold launch: give the free tip an initial velocity via Verlet prev-position offset.
+	// Scaffold launch: Verlet prev-position offset을 통해 free tip에 초기 속도를 부여한다.
 	const int32 Last = Sim.Num() - 1;
 	if (Last > 0)
 	{
@@ -281,8 +281,8 @@ bool URopeComponent::DebugForceWrap()
 	TArray<IRopeCollider*> Colliders;
 	GatherFrameColliders(Colliders);
 
-	// Relax the decision gate so a single touching node commits this frame (DecideWrap commits when
-	// the candidate's accumulated time >= WrapDecisionTime; 0 means "right now").
+	// 단일 접촉 node가 이번 frame에 commit되도록 decision gate를 완화한다(DecideWrap은 candidate의
+	// 누적 시간이 >= WrapDecisionTime일 때 commit한다; 0은 "지금 즉시"를 의미한다).
 	FRopeWrapConfig Relaxed = WrapConfig;
 	Relaxed.WrapDecisionTime = 0.0f;
 	Relaxed.MinLatchNodes = 1;
@@ -290,7 +290,7 @@ bool URopeComponent::DebugForceWrap()
 	FRopeWrapState Seed;
 	if (!WrapController.DecideWrap(Sim, Colliders, Relaxed, 0.0f, Seed))
 	{
-		return false; // nothing in contact; move the rope/capsules so they overlap first
+		return false; // 접촉 중인 것이 없다; 먼저 rope/capsule을 움직여 겹치게 한다
 	}
 
 	WrapController.BeginWrap(Sim, Seed, ResolveWrapTargetMesh());
@@ -330,13 +330,12 @@ void URopeComponent::SetMaterial(int32 /*ElementIndex*/, UMaterialInterface* Mat
 
 FBoxSphereBounds URopeComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
-	// Anchor the bounds to the component (the pinned start) with a radius that always contains the
-	// rope no matter how it deforms: the chain is inextensible, so no particle is ever farther than
-	// RopeLength from the pin (+ tube radius). Deriving bounds from the per-frame sim points instead
-	// makes them lag the render thread by a frame; during fast character motion the rope outruns that
-	// tight box and gets culled from the shadow/main pass -> the shadow vanishes while moving and the
-	// VSM cache keeps a stale afterimage. Anchoring to the component transform moves the bounds with
-	// the character via the engine's tracked transform, so there is no lag and no spurious culling.
+	// bounds를 컴포넌트(pinned start)에 anchor하되, rope가 어떻게 변형되든 항상 rope를 포함하는 반지름을
+	// 사용한다: chain은 inextensible하므로 어떤 particle도 pin으로부터 RopeLength(+ tube radius)보다 멀리
+	// 떨어지지 않는다. 대신 per-frame sim point로부터 bounds를 도출하면 render thread보다 한 frame 뒤처지며;
+	// 빠른 캐릭터 모션 중에는 rope가 그 tight box를 앞질러 shadow/main pass에서 cull된다 -> 움직이는 동안
+	// shadow가 사라지고 VSM cache는 오래된 afterimage를 유지한다. component transform에 anchor하면 엔진의
+	// 추적되는 transform을 통해 bounds가 캐릭터와 함께 움직이므로, lag도 없고 잘못된 culling도 없다.
 	const float Reach = RopeLength + Radius + 1.0f;
 	return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector(Reach), Reach);
 }

@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// PoC — experimental, not shipping. See Docs/PoC/01_PostWrapModel.md.
+// PoC — 실험용이며 출시 대상 아님. Docs/PoC/01_PostWrapModel.md 참고.
 
 #include "PoC/RopePoCWhipComponent.h"
 #include "PoC/RopePoCActor.h"
@@ -14,7 +14,7 @@
 
 URopePoCWhipComponent::URopePoCWhipComponent()
 {
-	// Tick is used only to retry the input binding until the pawn's InputComponent exists.
+	// Tick은 pawn의 InputComponent가 생길 때까지 input binding을 재시도하는 데만 쓰인다.
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
 }
@@ -40,7 +40,7 @@ void URopePoCWhipComponent::BeginPlay()
 
 	if (!bAutoBindLeftMouse || TryBindLeftMouse())
 	{
-		// Nothing left to retry — input is bound (or auto-bind disabled).
+		// 더 재시도할 것이 없음 — input이 bind됨(또는 auto-bind 비활성화).
 		PrimaryComponentTick.SetTickFunctionEnable(false);
 	}
 }
@@ -49,7 +49,7 @@ void URopePoCWhipComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// The pawn's InputComponent may not exist until it is possessed; retry until it does.
+	// pawn의 InputComponent는 possess되기 전까지 없을 수 있으니, 생길 때까지 재시도한다.
 	if (TryBindLeftMouse())
 	{
 		PrimaryComponentTick.SetTickFunctionEnable(false);
@@ -100,7 +100,7 @@ void URopePoCWhipComponent::AttachRopeToHand()
 
 	Rope->AttachToComponent(Mesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, HandSocketName);
 
-	// Pin the rope's start to the hand; leave the far end free so it trails like a whip.
+	// rope의 start를 손에 pin하고, 먼 쪽 끝은 free로 두어 whip처럼 따라 휘날리게 한다.
 	Rope->bPinStart = true;
 	Rope->bPinEnd = false;
 }

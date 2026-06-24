@@ -30,8 +30,8 @@ void URopeBoneCapsuleProvider::GatherColliders(const FBox& RopeBounds, TArray<IR
 		return;
 	}
 
-	// Include every listed bone; the precise per-node capsule narrow-phase decides actual contact.
-	// (No AABB broad-phase cull here: with a handful of bones it would only risk false negatives.)
+	// 나열된 모든 본을 포함한다. 실제 contact 여부는 정밀한 per-node capsule narrow-phase가 결정한다.
+	// (여기서는 AABB broad-phase 컬링을 하지 않는다. 본이 몇 개뿐이라 false negative 위험만 키울 뿐이다.)
 	Capsules.Reset();
 	for (const FName& Bone : Bones)
 	{
@@ -58,7 +58,7 @@ void URopeBoneCapsuleProvider::GatherColliders(const FBox& RopeBounds, TArray<IR
 #endif
 	}
 
-	// Hand out pointers only after Capsules is fully built (no reallocation past this point).
+	// Capsules가 완전히 구성된 뒤에만 포인터를 넘긴다(이 지점 이후로는 재할당 없음).
 	OutColliders.Reserve(OutColliders.Num() + Capsules.Num());
 	for (FCapsuleCollider& Cap : Capsules)
 	{

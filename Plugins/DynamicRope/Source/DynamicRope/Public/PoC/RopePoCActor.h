@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// PoC — experimental, not shipping. Everything under PoC/ is disposable.
-// S0: straight-rope PBD/Verlet solver + spline-mesh rendering. No body collision yet.
+// PoC — 실험용이며 출시 대상 아님. PoC/ 아래의 모든 것은 폐기 가능한 코드다.
+// S0: 직선 rope PBD/Verlet solver + spline-mesh 렌더링. 아직 바디 collision 없음.
 
 #pragma once
 
@@ -16,11 +16,11 @@ class UMaterialInterface;
 class ARopePoCCapsuleActor;
 
 /**
- * Proof-of-concept straight rope.
- * Simulates a chain of particles with Verlet integration + Position-Based-Dynamics
- * distance constraints, and renders the result as a chain of spline meshes.
+ * Proof-of-concept 직선 rope.
+ * Verlet integration + Position-Based-Dynamics distance constraint로 파티클 체인을
+ * 시뮬레이션하고, 그 결과를 spline mesh 체인으로 렌더링한다.
  *
- * Ticks in the editor viewport (no PIE required) for fast iteration.
+ * 빠른 반복 작업을 위해 (PIE 없이) 에디터 뷰포트에서 tick한다.
  */
 UCLASS()
 class DYNAMICROPE_API ARopePoCActor : public AActor
@@ -34,210 +34,210 @@ public:
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
-	virtual bool ShouldTickIfViewportsOnly() const override { return true; } // tick in editor viewport
+	virtual bool ShouldTickIfViewportsOnly() const override { return true; } // 에디터 뷰포트에서 tick
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 
 	//~ Setup -------------------------------------------------------------
-	/** Number of simulated particles along the rope (>= 2). */
+	/** rope를 따라 시뮬레이션되는 파티클 개수(>= 2). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Setup", meta = (ClampMin = "2", UIMin = "2"))
 	int32 NumParticles = 24;
 
-	/** Total rest length of the rope (cm). */
+	/** rope의 전체 rest length(cm). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Setup", meta = (ClampMin = "1.0", UIMin = "1.0", Units = "cm"))
 	float RopeLength = 200.0f;
 
 	//~ Solver ------------------------------------------------------------
-	/** Constraint solver iterations per frame. More = stiffer / more stable. */
+	/** 프레임당 constraint solver 반복 횟수. 클수록 더 뻣뻣하고/더 안정적. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Solver", meta = (ClampMin = "1", UIMin = "1"))
 	int32 SolverIterations = 12;
 
 	/**
-	 * Physics substeps per frame. The frame is split into N steps, sweeping the pinned ends
-	 * and the capsules between their previous and current poses each step. Higher = no
-	 * tunneling at speed (the main fix for "fast rope passes through"). Cost scales ~linearly.
+	 * 프레임당 물리 substep. 프레임을 N개의 step으로 분할해, 각 step마다 pinned 끝과
+	 * capsule을 이전 포즈와 현재 포즈 사이로 sweep한다. 클수록 고속에서 tunneling이
+	 * 없어진다("빠른 rope가 관통하는" 문제의 핵심 해법). 비용은 대략 선형으로 증가한다.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "16", UIMin = "1", UIMax = "16"))
 	int32 SimSubsteps = 4;
 
-	/** Gravity applied to free particles. */
+	/** free 파티클에 적용되는 중력. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Solver")
 	FVector Gravity = FVector(0.0f, 0.0f, -980.0f);
 
-	/** Velocity damping per frame [0..1]. 0 = no damping. */
+	/** 프레임당 속도 damping [0..1]. 0 = damping 없음. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Damping = 0.02f;
 
 	/**
-	 * Bending stiffness [0..1] via Jakobsen support sticks (i↔i+2 distance constraints).
-	 * 0 = limp chain, 1 = stiff rope that resists bending and holds its shape. Key knob for
-	 * "looks like a rope, not a noodle" (RDR2-quality gap).
+	 * Jakobsen support stick(i↔i+2 distance constraint)을 통한 bending stiffness [0..1].
+	 * 0 = 흐물거리는 체인, 1 = 휘는 것을 버티며 형태를 유지하는 뻣뻣한 rope. "면발이 아니라
+	 * rope처럼 보이게" 하는 핵심 노브(RDR2급 품질과의 격차).
 	 */
 	UPROPERTY(EditAnywhere, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float BendStiffness = 0.3f;
 
 	//~ Endpoints ---------------------------------------------------------
-	/** Pin the first particle to this actor's origin. */
+	/** 첫 번째 파티클을 이 액터의 원점에 pin한다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Endpoints")
 	bool bPinStart = true;
 
-	/** Pin the last particle to EndAnchorActor (if set). Drag that actor to move the rope's free end. */
+	/** 마지막 파티클을 EndAnchorActor에 pin한다(설정된 경우). 해당 액터를 드래그하면 rope의 free end가 움직인다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Endpoints")
 	bool bPinEnd = false;
 
-	/** Optional actor the last particle is pinned to when bPinEnd is true. */
+	/** bPinEnd가 true일 때 마지막 파티클이 pin되는 선택적 액터. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Endpoints")
 	TObjectPtr<AActor> EndAnchorActor = nullptr;
 
 	//~ Collision ---------------------------------------------------------
-	/** Explicit capsule providers (test capsule actors). Leave empty and rely on bAutoFindColliders. */
+	/** 명시적 capsule provider(테스트용 capsule 액터). 비워두고 bAutoFindColliders에 의존해도 된다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision")
 	TArray<TObjectPtr<ARopePoCCapsuleActor>> Colliders;
 
-	/** Also collide against every IRopeCapsuleProvider (test capsules, skeletal limbs) found in the level. */
+	/** 레벨에서 발견되는 모든 IRopeCapsuleProvider(테스트용 capsule, skeletal limb)와도 collision한다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision")
 	bool bAutoFindColliders = true;
 
-	/** Contact thickness of the rope used for collision push-out (cm). */
+	/** collision push-out에 사용되는 rope의 접촉 두께(cm). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision", meta = (ClampMin = "0.0", UIMin = "0.0", Units = "cm"))
 	float RopeCollisionRadius = 2.0f;
 
 	/**
-	 * Collide the rope SEGMENTS (not just the nodes) against the capsule, distributing the
-	 * push-out to both end nodes (Jakobsen §5.2). Stops the rope sinking through between nodes
-	 * on a curved limb — the key "wrap looks convincing" detail. Off = legacy node-only test.
+	 * (노드뿐 아니라) rope SEGMENT를 capsule에 대해 collision시키고, push-out을 양쪽 끝
+	 * 노드에 분배한다(Jakobsen §5.2). 휘어진 limb에서 rope가 노드 사이로 파고들어가는 것을
+	 * 막아준다 — "wrap이 그럴듯해 보이는" 핵심 디테일. 끄면 legacy 노드 전용 테스트.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision")
 	bool bUseSegmentCollision = true;
 
 	/**
-	 * How strongly a contacting rope sticks to the (moving) capsule surface.
-	 * 0 = frictionless (slides off), 1 = fully grips (moves with the limb → wrap stays). Key knob for "감김 유지".
+	 * 접촉 중인 rope가 (움직이는) capsule 표면에 얼마나 강하게 달라붙는지.
+	 * 0 = 마찰 없음(미끄러져 빠짐), 1 = 완전히 grip(limb와 함께 움직임 → wrap 유지). "감김 유지"의 핵심 노브.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float WrapFriction = 0.6f;
 
-	/** Distance beyond the capsule surface still treated as "in contact" for friction (cm). */
+	/** capsule 표면을 넘어서도 friction에서 여전히 "접촉 중"으로 취급하는 거리(cm). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision", meta = (ClampMin = "0.0", UIMin = "0.0", Units = "cm"))
 	float FrictionContactBand = 2.0f;
 
 	//~ Pull / two-way coupling (S4) --------------------------------------
 	/**
-	 * S4: feed the rope's contact reaction back into the capsule providers, so pulling the
-	 * rope's end actually drags the wrapped limb. Needs a draggable provider (test capsule).
+	 * S4: rope의 접촉 반작용을 capsule provider로 되먹임해, rope의 끝을 당기면 실제로
+	 * 감긴 limb가 끌려오게 한다. draggable provider(테스트용 capsule)가 필요하다.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Rope|Pull")
 	bool bEnableTwoWayPull = true;
 
-	/** Scales the reaction (collision push-out + latched-node tension) into the impulse handed to the capsule. */
+	/** 반작용(collision push-out + latch된 노드의 tension)을 capsule에 전달되는 impulse로 스케일한다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Pull", meta = (EditCondition = "bEnableTwoWayPull", ClampMin = "0.0"))
 	float PullReactionGain = 8.0f;
 
 	//~ Wrap latch / Hold state (S4 — doc 4.1) ----------------------------
 	/**
-	 * Once a contact node has stayed on a capsule long enough, latch it to that surface as
-	 * data: it then holds the wrap regardless of tension/gravity (the production "Hold" model),
-	 * follows the moving limb, and transmits pull to the capsule. The fix for "감아도 바로 풀림".
+	 * 접촉 노드가 capsule 위에 충분히 오래 머무르면, 그 표면에 데이터로 latch한다:
+	 * 그 이후로는 tension/중력과 무관하게 wrap을 유지하고(프로덕션 "Hold" 모델),
+	 * 움직이는 limb를 따라가며, pull을 capsule로 전달한다. "감아도 바로 풀림"의 해법.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Rope|Wrap")
 	bool bEnableWrapLatch = true;
 
-	/** Continuous contact time before a node latches (s). */
+	/** 노드가 latch되기 전까지의 연속 접촉 시간(s). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Wrap", meta = (EditCondition = "bEnableWrapLatch", ClampMin = "0.0", Units = "s"))
 	float LatchContactTime = 0.15f;
 
-	/** Extra distance beyond the capsule surface that still counts as contact for latching (cm). */
+	/** latch 판정 시 capsule 표면을 넘어서도 여전히 접촉으로 인정하는 추가 거리(cm). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Wrap", meta = (EditCondition = "bEnableWrapLatch", ClampMin = "0.0", Units = "cm"))
 	float LatchContactBand = 1.5f;
 
-	/** Break the latch when an adjacent segment is stretched past this multiple of its rest length (yanked off). */
+	/** 인접 segment가 rest length의 이 배수를 넘어 늘어나면 latch를 해제한다(뜯겨 빠짐). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Wrap", meta = (EditCondition = "bEnableWrapLatch", ClampMin = "1.0"))
 	float LatchReleaseStrain = 1.8f;
 
-	/** Release every latched wrap (e.g. on an "unwrap" input). doc 4.3 explicit release. */
+	/** latch된 모든 wrap을 해제한다(예: "unwrap" 입력 시). doc 4.3의 명시적 해제. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Wrap")
 	void ReleaseAllWraps();
 
 	//~ Render ------------------------------------------------------------
-	/** Mesh used per segment. Defaults to the engine cylinder if left empty. */
+	/** segment마다 사용되는 mesh. 비워두면 엔진 cylinder가 기본값. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Render")
 	TObjectPtr<UStaticMesh> RopeMesh = nullptr;
 
-	/** Material applied to the rope segments. Defaults to a basic material if left empty. */
+	/** rope segment에 적용되는 material. 비워두면 basic material이 기본값. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Render")
 	TObjectPtr<UMaterialInterface> RopeMaterial = nullptr;
 
-	/** Visual rope radius (cm). Assumes a cylinder mesh of base radius 50. */
+	/** 시각적 rope radius(cm). base radius 50의 cylinder mesh를 가정한다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Render", meta = (ClampMin = "0.1", UIMin = "0.1", Units = "cm"))
 	float RopeRadius = 2.0f;
 
 	//~ Debug -------------------------------------------------------------
-	/** Draw the particle chain as debug lines/points. */
+	/** 파티클 체인을 debug line/point로 그린다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Debug")
 	bool bDrawDebug = true;
 
 private:
-	/** Root so the rope can be placed/moved as a whole. */
+	/** rope 전체를 배치/이동할 수 있게 해주는 root. */
 	UPROPERTY()
 	TObjectPtr<USceneComponent> RopeRoot = nullptr;
 
-	/** One spline mesh per segment (NumParticles - 1). Transient — rebuilt, never saved. */
+	/** segment당 하나의 spline mesh(NumParticles - 1). Transient — 재생성되며 저장되지 않음. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<USplineMeshComponent>> SegmentMeshes;
 
-	// --- Transient simulation state (world space) ---
+	// --- Transient 시뮬레이션 상태(월드 공간) ---
 	TArray<FVector> Positions;
 	TArray<FVector> OldPositions;
 	TArray<float>   InvMasses;
 	float           SegmentLength = 0.0f;
 	bool            bInitialized = false;
 
-	// --- Wrap latch state (per particle) ---
-	/** Capsule index this particle is latched to, or -1 if free. */
+	// --- Wrap latch 상태(파티클별) ---
+	/** 이 파티클이 latch된 capsule 인덱스, free면 -1. */
 	TArray<int32>   LatchCapsule;
-	/** Latched contact expressed relative to the capsule: distance along the axis from A... */
+	/** capsule 기준으로 표현한 latch 접촉: A로부터 axis를 따라가는 거리... */
 	TArray<float>   LatchAlong;
-	/** ...and a radial direction + distance (world space, rotated to follow the axis each step). */
+	/** ...그리고 radial 방향 + 거리(월드 공간, 매 step axis를 따라 회전됨). */
 	TArray<FVector> LatchRadialDir;
 	TArray<float>   LatchRadialDist;
-	/** Capsule axis at the last update, to compute the incremental rotation as the limb moves. */
+	/** 직전 업데이트 시점의 capsule axis. limb가 움직일 때 증분 회전을 계산하는 데 사용. */
 	TArray<FVector> LatchAxis;
-	/** How long each particle has been continuously in contact (for the latch dwell test). */
+	/** 각 파티클이 얼마나 연속으로 접촉해 왔는지(latch dwell 판정용). */
 	TArray<float>   ContactDwell;
 
-	// Perf readout for the S2 GO/NO-GO budget check.
+	// S2 GO/NO-GO budget 체크를 위한 성능 readout.
 	float           LastSolveMs = 0.0f;
 	float           AvgSolveMs = 0.0f;
 
-	/** Capsule providers used this run (explicit list + auto-found), resolved on init. */
+	/** 이번 실행에 사용된 capsule provider(명시적 리스트 + auto-found), init 시 resolve됨. */
 	TArray<TWeakObjectPtr<UObject>> CapsuleProviders;
 
-	/** Capsules gathered from providers once per frame (current pose). */
+	/** 프레임당 한 번 provider에서 수집한 capsule(현재 포즈). */
 	TArray<FRopeCapsule> FrameCapsules;
 
-	/** Provider index (into CapsuleProviders) that produced each FrameCapsules entry. */
+	/** 각 FrameCapsules 항목을 만든 provider 인덱스(CapsuleProviders 기준). */
 	TArray<int32> FrameCapsuleOwner;
 
-	/** Last frame's capsules (same order), the start pose substeps interpolate from. */
+	/** 직전 프레임의 capsule(같은 순서). substep이 보간을 시작하는 start 포즈. */
 	TArray<FRopeCapsule> PrevFrameCapsules;
 
-	/** Capsules at the current substep (interpolated Prev→Frame); what collision/friction read. */
+	/** 현재 substep의 capsule(Prev→Frame 보간); collision/friction이 읽는 대상. */
 	TArray<FRopeCapsule> ActiveCapsules;
-	/** Capsules at the previous substep, for friction's surface-velocity estimate. */
+	/** 직전 substep의 capsule. friction의 표면 속도 추정용. */
 	TArray<FRopeCapsule> PrevActiveCapsules;
 
-	/** Pinned-endpoint targets from last frame, so substeps can sweep the ends (anti-tunneling). */
+	/** 직전 프레임의 pinned 끝 target. substep이 끝을 sweep할 수 있게 한다(anti-tunneling). */
 	FVector PrevStartWorld = FVector::ZeroVector;
 	FVector PrevEndWorld = FVector::ZeroVector;
 	bool    bHasPrevPins = false;
 
-	// --- S4 pull reaction accumulators (per FrameCapsules entry, reset each frame) ---
-	/** Sum of reaction impulses the rope exerts on each capsule this frame. */
+	// --- S4 pull 반작용 누산기(FrameCapsules 항목별, 매 프레임 reset) ---
+	/** 이번 프레임에 rope가 각 capsule에 가하는 반작용 impulse의 합. */
 	TArray<FVector> CapsuleReaction;
-	/** Contact-weighted application point for each capsule's reaction (world space). */
+	/** 각 capsule 반작용의 접촉 가중 적용점(월드 공간). */
 	TArray<FVector> CapsuleReactionPoint;
-	/** Total contact weight, to average the application point. */
+	/** 적용점을 평균내기 위한 전체 접촉 가중치. */
 	TArray<float> CapsuleReactionWeight;
 
 	void InitializeRope();
@@ -251,14 +251,14 @@ private:
 	void ApplyFriction();
 	void ApplyPullReaction();
 	void ApplyPinning();
-	/** Pin endpoints to explicit world targets (used while sweeping ends across substeps). */
+	/** 끝점을 명시적인 월드 target에 pin한다(substep 전반에 걸쳐 끝을 sweep할 때 사용). */
 	void SetPinnedTargets(const FVector& StartW, const FVector& EndW);
 
-	/** Re-place latched particles on their (moving) capsule surface; keep them pinned. */
+	/** latch된 파티클을 (움직이는) capsule 표면에 다시 배치하고 pin을 유지한다. */
 	void UpdateLatchedPositions();
-	/** Latch new long-contact nodes; break over-stretched ones. Once per frame. */
+	/** 새로 오래 접촉한 노드를 latch하고, 과도하게 늘어난 것은 해제한다. 프레임당 한 번. */
 	void ManageWrapLatch(float FrameDt);
-	/** Feed latched-node tension back to the capsules as pull reaction. Once per frame. */
+	/** latch된 노드의 tension을 pull 반작용으로 capsule에 되먹인다. 프레임당 한 번. */
 	void AccumulateLatchReaction();
 	void UpdateSegmentMeshes();
 	void DrawDebugRope() const;

@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
-/** Editor module for the Dynamic Rope plugin. Hosts editor tooling, customizations and visualizers. */
+/** Dynamic Rope 플러그인의 에디터 module. 에디터 툴링, 커스터마이제이션, 비주얼라이저를 호스팅한다. */
 class FDynamicRopeEditorModule : public IModuleInterface
 {
 public:

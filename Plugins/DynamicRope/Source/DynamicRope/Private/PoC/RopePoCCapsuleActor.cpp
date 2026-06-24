@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// PoC — experimental, not shipping. See Docs/PoC/01_PostWrapModel.md.
+// PoC — 실험용이며 출시 대상 아님. Docs/PoC/01_PostWrapModel.md 참고.
 
 #include "PoC/RopePoCCapsuleActor.h"
 
@@ -14,12 +14,12 @@ ARopePoCCapsuleActor::ARopePoCCapsuleActor()
 	Capsule = CreateDefaultSubobject<UCapsuleComponent>(TEXT("Capsule"));
 	SetRootComponent(Capsule);
 
-	// Visualization only — the rope solver reads the geometry directly, so this
-	// component itself does no physics collision.
+	// 시각화 전용 — rope solver가 지오메트리를 직접 읽으므로, 이 컴포넌트
+	// 자체는 물리 collision을 하지 않는다.
 	Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Capsule->SetCapsuleSize(Radius, HalfHeight);
 	Capsule->ShapeColor = FColor::Green;
-	Capsule->bDrawOnlyIfSelected = false; // always visible in editor
+	Capsule->bDrawOnlyIfSelected = false; // 에디터에서 항상 보임
 	Capsule->SetHiddenInGame(false);
 }
 
@@ -45,7 +45,7 @@ void ARopePoCCapsuleActor::PostEditChangeProperty(FPropertyChangedEvent& Propert
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
-	// Re-anchor the swing to wherever the capsule currently sits.
+	// swing을 capsule이 현재 위치한 곳에 다시 anchor한다.
 	RestTransform = GetActorTransform();
 	SwingElapsed = 0.0f;
 }
@@ -55,14 +55,14 @@ void ARopePoCCapsuleActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	// 1) Base pose (un-dragged): either the hand-placed rest transform, or the swing of it.
+	// 1) Base 포즈(드래그 안 된 상태): 손으로 배치한 rest transform이거나, 그것의 swing.
 	FVector BaseLoc;
 	FQuat BaseRot;
 
 	if (!bAutoSwing)
 	{
-		// Recover the rest pose by removing the current drag offset, so dragging never
-		// drifts the rest anchor and the spring can always pull back to where it was placed.
+		// 현재 drag offset을 제거해 rest 포즈를 복원한다. 그래야 드래그가 rest anchor를
+		// 떠밀지 않고, spring이 항상 배치된 자리로 되돌릴 수 있다.
 		BaseLoc = GetActorLocation() - DragOffset;
 		BaseRot = GetActorQuat();
 		RestTransform.SetLocation(BaseLoc);
@@ -87,14 +87,14 @@ void ARopePoCCapsuleActor::Tick(float DeltaSeconds)
 		BaseRot = SwingQuat * RestTransform.GetRotation();
 	}
 
-	// 2) S4: integrate the rope's pull as a soft body — impulse → velocity, spring back to
-	//    rest, damping. Lets the limb get dragged but recover when the pull eases.
+	// 2) S4: rope의 pull을 soft body로 integration한다 — impulse → 속도, rest로 spring
+	//    복귀, damping. limb가 끌려가되 pull이 약해지면 회복하게 한다.
 	if (bDraggable)
 	{
 		const float Dt = FMath::Min(DeltaSeconds, 1.0f / 30.0f);
 		DragVelocity += PendingImpulse / FMath::Max(Mass, 0.1f);
-		DragVelocity += -ReturnStiffness * DragOffset * Dt;   // spring toward rest pose
-		DragVelocity *= FMath::Exp(-DragDamping * Dt);        // velocity damping
+		DragVelocity += -ReturnStiffness * DragOffset * Dt;   // rest 포즈 쪽으로 spring
+		DragVelocity *= FMath::Exp(-DragDamping * Dt);        // 속도 damping
 		DragOffset += DragVelocity * Dt;
 	}
 	else
@@ -104,7 +104,7 @@ void ARopePoCCapsuleActor::Tick(float DeltaSeconds)
 	}
 	PendingImpulse = FVector::ZeroVector;
 
-	// 3) Final pose = base pose + accumulated drag.
+	// 3) 최종 포즈 = base 포즈 + 누적된 drag.
 	SetActorLocationAndRotation(BaseLoc + DragOffset, BaseRot);
 }
 
@@ -113,9 +113,9 @@ void ARopePoCCapsuleActor::GetCapsuleSegment(FVector& OutA, FVector& OutB, float
 	OutRadius = Radius;
 
 	const FVector Center = GetActorLocation();
-	const FVector Up = GetActorQuat().GetAxisZ(); // capsule axis is local Z
+	const FVector Up = GetActorQuat().GetAxisZ(); // capsule axis는 로컬 Z
 
-	// Inner segment half-length: the cylindrical part between the two hemispherical caps.
+	// 내부 segment half-length: 두 반구형 cap 사이의 cylinder 부분.
 	const float SegmentHalf = FMath::Max(0.0f, HalfHeight - Radius);
 	OutA = Center - Up * SegmentHalf;
 	OutB = Center + Up * SegmentHalf;
@@ -134,6 +134,6 @@ void ARopePoCCapsuleActor::ApplyRopeReaction(const FVector& WorldImpulse, const 
 	{
 		return;
 	}
-	// Accumulate; Tick integrates it (tick order between rope and capsule is undefined).
+	// 누적만 한다; Tick이 integration한다(rope와 capsule 사이의 tick 순서는 정의되지 않음).
 	PendingImpulse += WorldImpulse;
 }

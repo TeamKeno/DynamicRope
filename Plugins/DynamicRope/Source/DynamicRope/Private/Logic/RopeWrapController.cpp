@@ -15,8 +15,8 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 		return false;
 	}
 
-	// Per-node nearest contact: which bone is this node touching (deepest penetration wins)?
-	// Track the mesh that owns each contacted bone so the wrap can follow the right mesh later.
+	// 노드별 최근접 접촉: 이 노드는 어떤 bone 에 닿고 있는가(가장 깊은 침투가 우선)?
+	// 나중에 wrap 이 올바른 mesh 를 따라갈 수 있도록 각 접촉 bone 을 소유한 mesh 를 추적한다.
 	TMap<FName, TArray<int32>>                      NodesByBone;
 	TMap<FName, const USkeletalMeshComponent*>      MeshByBone;
 	for (int32 i = 0; i < Sim.Num(); ++i)
@@ -45,7 +45,7 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 		}
 	}
 
-	// Dominant bone = the one the most nodes are touching.
+	// dominant bone = 가장 많은 노드가 닿고 있는 bone.
 	FName DominantBone = NAME_None;
 	const TArray<int32>* DominantNodes = nullptr;
 	for (const TPair<FName, TArray<int32>>& Pair : NodesByBone)
@@ -66,7 +66,7 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 		return false;
 	}
 
-	// Accumulate sustained contact on the same bone; a bone switch restarts the timer.
+	// 같은 bone 에 대한 지속 접촉을 누적한다. bone 이 바뀌면 타이머를 재시작한다.
 	if (DominantBone == CandidateBone)
 	{
 		CandidateTime += Dt;
@@ -83,7 +83,7 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 		return false;
 	}
 
-	// Commit: seed the wrap with the contacting nodes (BoneLocalPos filled in BeginWrap).
+	// 커밋: 접촉 중인 노드들로 wrap 을 시드한다(BoneLocalPos 는 BeginWrap 에서 채워진다).
 	OutSeed.Reset();
 	OutSeed.BoneName = CandidateBone;
 	OutSeed.Mesh = MeshByBone.FindRef(CandidateBone);
@@ -106,8 +106,8 @@ void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Se
 	State = Seed;
 	State.TimeWrapped = 0.0f;
 
-	// Prefer the mesh that owns the caught bone (carried in the seed); the rope-owner mesh is only
-	// a fallback for the same-actor case. This is what lets the wrap follow a *different* actor.
+	// 붙잡힌 bone 을 소유한 mesh 를 우선한다(시드에 실려 있다). rope-owner mesh 는 same-actor 케이스를
+	// 위한 폴백일 뿐이다. 이것이 wrap 이 *다른* actor 를 따라갈 수 있게 해주는 부분이다.
 	const USkeletalMeshComponent* Mesh = State.Mesh ? State.Mesh : FallbackMesh;
 	State.Mesh = Mesh;
 	if (!Mesh)
@@ -115,8 +115,8 @@ void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Se
 		return;
 	}
 
-	// Convert each contact node's current world position into bone-local and freeze it (InvMass 0).
-	// From here the node is driven by logic (the skinned bone), not the solver.
+	// 각 접촉 노드의 현재 월드 위치를 bone-local 로 변환하여 동결한다(InvMass 0).
+	// 이 시점부터 노드는 솔버가 아니라 logic(skinning 된 bone)에 의해 구동된다.
 	FVector Centroid = FVector::ZeroVector;
 	for (FRopeLatchNode& Latch : State.Latched)
 	{
@@ -133,7 +133,7 @@ void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Se
 	if (State.Latched.Num() > 0)
 	{
 		Centroid /= static_cast<double>(State.Latched.Num());
-		// Rough metrics; refined in M3 (true wrap-angle integration).
+		// 대략적인 메트릭. M3 에서 정밀화된다(true wrap-angle 적분).
 		State.AnchorDistance = Sim.Num() > 0 ? FVector::Dist(Sim.Positions[0], Centroid) : 0.0f;
 		State.WrapTurns = 0.0f;
 	}
@@ -141,15 +141,15 @@ void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Se
 
 void FRopeWrapController::Hold(FRopeSimState& Sim, const USkeletalMeshComponent* FallbackMesh, float Dt)
 {
-	// Follow the mesh the bone was caught on; fall back to the rope-owner mesh (same-actor case).
+	// bone 이 붙잡힌 mesh 를 따라간다. rope-owner mesh 로 폴백한다(same-actor 케이스).
 	const USkeletalMeshComponent* Mesh = State.Mesh ? State.Mesh : FallbackMesh;
 	if (!Mesh)
 	{
 		return;
 	}
 
-	// Re-place each latched node on its (animated) bone every frame so the wrap rides the skinning.
-	// Zero velocity at the node (Prev = Pos) so the bone motion doesn't get injected into the solver.
+	// wrap 이 skinning 을 타고 가도록 매 프레임 각 latched 노드를 자신의 (애니메이션된) bone 위에 재배치한다.
+	// bone 의 움직임이 솔버로 주입되지 않도록 노드의 속도를 0 으로 둔다(Prev = Pos).
 	for (const FRopeLatchNode& Latch : State.Latched)
 	{
 		if (!Sim.Positions.IsValidIndex(Latch.NodeIndex))
@@ -168,7 +168,7 @@ void FRopeWrapController::Hold(FRopeSimState& Sim, const USkeletalMeshComponent*
 
 void FRopeWrapController::Pull(FRopeSimState& /*Sim*/, const FVector& /*PullTarget*/)
 {
-	// TODO(M3): procedural drag of the captured limb toward PullTarget, keep wrap taut.
+	// TODO(M3): 붙잡힌 limb 를 PullTarget 쪽으로 절차적으로 끌어당기고, wrap 을 팽팽하게 유지한다.
 }
 
 void FRopeWrapController::Release(ERopeReleaseReason /*Reason*/)

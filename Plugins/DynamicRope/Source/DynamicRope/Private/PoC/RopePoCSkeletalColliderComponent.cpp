@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// PoC — experimental, not shipping. See Docs/PoC/01_PostWrapModel.md.
+// PoC — 실험용이며 출시 대상 아님. Docs/PoC/01_PostWrapModel.md 참고.
 
 #include "PoC/RopePoCSkeletalColliderComponent.h"
 
@@ -13,7 +13,7 @@
 
 URopePoCSkeletalColliderComponent::URopePoCSkeletalColliderComponent()
 {
-	PrimaryComponentTick.bCanEverTick = false; // pulled by the rope, no tick needed
+	PrimaryComponentTick.bCanEverTick = false; // rope가 끌어다 쓰므로 tick 불필요
 }
 
 USkeletalMeshComponent* URopePoCSkeletalColliderComponent::ResolveMesh() const
@@ -110,7 +110,7 @@ void URopePoCSkeletalColliderComponent::GatherFromPhysicsAsset(USkeletalMeshComp
 			Cap.Radius = Sphere.Radius * Scale;
 			OutCapsules.Add(Cap);
 		}
-		// Boxes / convex bodies are ignored for the PoC — limbs are sphyls/spheres.
+		// box / convex body는 PoC에서 무시한다 — limb는 sphyl/sphere다.
 	}
 }
 
@@ -132,7 +132,7 @@ void URopePoCSkeletalColliderComponent::GatherManual(USkeletalMeshComponent* Mes
 			continue;
 		}
 
-		// Capsule from this bone to its first child, so it spans the limb segment.
+		// 이 bone에서 첫 child까지 이어지는 capsule이라, limb segment를 가로지른다.
 		const int32 RefBoneIndex = Ref.FindBoneIndex(BoneName);
 		int32 ChildRefIndex = INDEX_NONE;
 		for (int32 i = 0; i < Ref.GetNum(); ++i)

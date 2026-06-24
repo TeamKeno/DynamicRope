@@ -6,13 +6,13 @@
 
 void FDynamicRopeModule::StartupModule()
 {
-	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
+	// 이 코드는 module이 메모리에 로드된 후 실행된다. 정확한 시점은 .uplugin 파일에 module별로 지정된다
 }
 
 void FDynamicRopeModule::ShutdownModule()
 {
-	// This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
-	// we call this function before unloading the module.
+	// 이 함수는 shutdown 중에 module을 정리하기 위해 호출될 수 있다.  동적 리로딩을 지원하는 module의 경우,
+	// module을 언로드하기 전에 이 함수를 호출한다.
 }
 
 #undef LOCTEXT_NAMESPACE

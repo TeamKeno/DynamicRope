@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Position-based (XPBD) rope solver. Operates purely on FRopeSimState with no UObject deps,
-// so it is unit-testable and portable to a compute shader later. Runs only in Flight/Contacting.
+// Position-based(XPBD) 로프 solver. UObject 의존성 없이 오직 FRopeSimState 위에서만 동작하므로,
+// 유닛 테스트가 가능하고 추후 compute shader로 이식할 수 있다. Flight/Contacting 상태에서만 실행된다.
 
 #pragma once
 
@@ -13,19 +13,19 @@ class IRopeCollider;
 class DYNAMICROPE_API FRopeXPBDSolver
 {
 public:
-	/** Advance one frame: substepped integrate + distance/bending/collision constraints. */
+	/** 한 프레임 진행: substep 단위 integrate + distance/bending/collision 제약. */
 	void Step(FRopeSimState& State, const FRopeSolverConfig& Config,
 		const TArray<IRopeCollider*>& Colliders, float DeltaSeconds) const;
 
 private:
 	void Integrate(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt) const;
 
-	// XPBD distance: enforces segment length with StretchCompliance. Lambda accumulates across the
-	// substep's iterations (one entry per segment constraint), making stiffness step/iter-independent.
+	// XPBD distance: StretchCompliance로 segment 길이를 강제한다. Lambda는 substep의 iteration 전반에 걸쳐
+	// 누적되며(segment 제약마다 한 항목), 이로써 강성이 step/iter 수에 독립적이게 된다.
 	void SolveDistance(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
 		TArray<float>& Lambda) const;
 
-	// XPBD bending: i<->i+2 "support stick" (rest = 2*SegmentLength) with BendCompliance.
+	// XPBD bending: BendCompliance를 적용한 i<->i+2 "support stick"(rest = 2*SegmentLength).
 	void SolveBending(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
 		TArray<float>& Lambda) const;
 
