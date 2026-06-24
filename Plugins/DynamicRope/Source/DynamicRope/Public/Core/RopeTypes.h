@@ -31,7 +31,29 @@ enum class ERopeReleaseReason : uint8
 	Broken
 };
 
-/** Narrow-phase contact result from an IRopeCollider. */
+/**
+ * Narrow-phase contact: one rope node vs one collider, returned by IRopeCollider::Query.
+ *
+ * CONTRACT — FROZEN 2026-06-24. Every IRopeCollider (capsule, bone-SDF, world-GDF) MUST honor it.
+ * Describes a single (node, collider) pair; aggregation is the caller's job (solver sums push-outs,
+ * DecideWrap picks the deepest-penetration bone per node).
+ *
+ *   bHit         node sphere (center = query WorldPos, radius = query Radius) overlaps the collider.
+ *                false => ALL other fields are undefined; callers must ignore them.
+ *   Normal       UNIT, points OUT of the collider toward the node (the push-out direction).
+ *                Invariant: NodePos += Normal*Penetration lands the node ON the surface.
+ *                *** Sign is load-bearing: an inward normal sucks the rope into the body. ***
+ *                Degenerate (node on the medial axis) => any stable unit vector (capsule: +Z).
+ *   Penetration  overlap depth along Normal, > 0 when bHit. Measured against the QUERY radius:
+ *                (ColliderRadius + QueryRadius) - Distance. Callers pass QueryRadius 0 for the
+ *                solver push-out and WrapConfig.ContactRadius for the wrap-decision skin.
+ *   SurfacePoint nearest point ON the collider surface to the node (aux/debug). Not required by
+ *                the solver; fill it when cheap.
+ *   Bone         REQUIRED non-None for skeletal colliders — the bone-attribution DecideWrap wraps
+ *                on. A multi-bone SDF MUST report which bone owns the nearest surface. world => None.
+ *   SourceMesh   skeletal mesh that owns Bone; carries cross-actor follow (-> FRopeWrapState::Mesh).
+ *                null for non-skeletal colliders.
+ */
 struct FRopeContact
 {
 	bool    bHit = false;
@@ -39,9 +61,6 @@ struct FRopeContact
 	float   Penetration = 0.0f;
 	FVector SurfacePoint = FVector::ZeroVector;
 	FName   Bone = NAME_None;
-
-	// Skeletal mesh that owns Bone (null for non-skeletal colliders). Lets the wrap follow the
-	// mesh the bone actually lives on instead of guessing from the rope's owner.
 	const USkeletalMeshComponent* SourceMesh = nullptr;
 };
 

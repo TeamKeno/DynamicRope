@@ -16,7 +16,11 @@ class DYNAMICROPE_API IRopeCollider
 public:
 	virtual ~IRopeCollider() = default;
 
-	/** Closest-surface query for a rope node of the given radius. Returns penetration + normal. */
+	/**
+	 * Closest-surface query for a rope node sphere (center WorldPos, radius Radius).
+	 * Fills FRopeContact per that struct's FROZEN contract. MUST be const / side-effect free
+	 * (called per node x substep x iteration). Radius == 0 is valid (solver push-out path).
+	 */
 	virtual FRopeContact Query(const FVector& WorldPos, float Radius) const = 0;
 
 	/** World-space bounds for broad-phase culling. */
