@@ -20,6 +20,7 @@ FRopeContact FCapsuleCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	Contact.Penetration = MinDist - Dist;
 	Contact.SurfacePoint = Closest + Contact.Normal * Radius;
 	Contact.Bone = Bone;
+	Contact.SourceMesh = SourceMesh;
 	return Contact;
 }
 

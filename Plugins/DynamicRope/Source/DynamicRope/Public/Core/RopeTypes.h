@@ -8,6 +8,8 @@
 #include "CoreMinimal.h"
 #include "RopeTypes.generated.h"
 
+class USkeletalMeshComponent;
+
 /** Lifecycle phase. Free/Flight/Contacting = physics (solver). Wrapped/Releasing = logic (wrap controller). */
 UENUM(BlueprintType)
 enum class ERopePhase : uint8
@@ -37,6 +39,10 @@ struct FRopeContact
 	float   Penetration = 0.0f;
 	FVector SurfacePoint = FVector::ZeroVector;
 	FName   Bone = NAME_None;
+
+	// Skeletal mesh that owns Bone (null for non-skeletal colliders). Lets the wrap follow the
+	// mesh the bone actually lives on instead of guessing from the rope's owner.
+	const USkeletalMeshComponent* SourceMesh = nullptr;
 };
 
 /** A latched wrap node, fixed in bone-local space so it follows skinning without re-collision. */
@@ -56,6 +62,10 @@ struct FRopeWrapState
 	float                   Tension = 0.0f;
 	float                   TimeWrapped = 0.0f;
 	float                   AnchorDistance = 0.0f;
+
+	// Mesh that owns BoneName; the wrap is held/followed against this mesh (may be a different
+	// actor than the rope's owner). Resolved from the contact at decision time.
+	const USkeletalMeshComponent* Mesh = nullptr;
 
 	bool IsWrapped() const { return Latched.Num() > 0; }
 	void Reset() { *this = FRopeWrapState(); }
@@ -111,6 +121,25 @@ struct FRopeSolverConfig
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Damping = 0.02f;
+};
+
+/** Contact-decision tuning: when does a draped rope count as "wrapped" on a limb? */
+USTRUCT(BlueprintType)
+struct FRopeWrapConfig
+{
+	GENERATED_BODY()
+
+	/** Node radius used for the contact-decision query (cm). Separate from the visual tube radius. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
+	float ContactRadius = 3.0f;
+
+	/** Minimum number of rope nodes touching one bone to treat it as a catch (not a glancing brush). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "1"))
+	int32 MinLatchNodes = 3;
+
+	/** Contact must persist on the same bone this long before committing the wrap (seconds). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	float WrapDecisionTime = 0.15f;
 };
 
 /** Throw / launch parameters for the flight phase. */

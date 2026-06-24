@@ -12,9 +12,11 @@
 #include "Logic/RopeWrapController.h"
 #include "RopeComponent.generated.h"
 
+class AActor;
 class IRopeCollider;
 class IRopeColliderProvider;
 class UMaterialInterface;
+class USkeletalMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
@@ -52,6 +54,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	FRopeThrowParams ThrowParams;
 
+	/** Contact-decision tuning for the physics → logic (wrap) handoff. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
+	FRopeWrapConfig WrapConfig;
+
+	/** Skeletal mesh the rope can wrap onto. Auto-resolved from the owner if left null. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
+	TObjectPtr<USkeletalMeshComponent> WrapTargetMesh = nullptr;
+
+	/**
+	 * Actors whose IRopeColliderProvider components feed this rope. Set this when the rope lives on a
+	 * *different* actor than the body it should catch (e.g. rope anchored to a static prop, wrapping
+	 * a separate character). If empty, falls back to this component's own owner.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
+	TArray<TObjectPtr<AActor>> ColliderSourceActors;
+
 	//~ Render ------------------------------------------------------------
 	/** Visual tube radius (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render", meta = (ClampMin = "0.1", Units = "cm"))
@@ -81,6 +99,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	ERopePhase GetPhase() const { return Phase; }
 
+	/**
+	 * Debug: immediately commit a wrap onto whichever bone the rope is currently nearest/touching,
+	 * bypassing the sustained-contact gate (MinLatchNodes / WrapDecisionTime). Lets you observe the
+	 * BeginWrap handoff and Hold (bone-follow) without tuning the throw. Returns false if no contact.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope|Debug")
+	bool DebugForceWrap();
+
 	//~ Events ------------------------------------------------------------
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnWrapped OnRopeWrapped;
@@ -105,4 +131,10 @@ private:
 
 	void InitRope();
 	void GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) const;
+
+	/** Collect IRopeColliderProvider components from the owner (cached) into ColliderProviders. */
+	void EnsureColliderProviders();
+
+	/** Resolve (and cache) the skeletal mesh the rope wraps onto: explicit WrapTargetMesh or owner's. */
+	USkeletalMeshComponent* ResolveWrapTargetMesh();
 };

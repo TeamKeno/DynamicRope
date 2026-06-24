@@ -8,6 +8,8 @@
 #include "CoreMinimal.h"
 #include "Core/RopeTypes.h"
 
+class USkeletalMeshComponent;
+
 /** Abstract collider the rope solver queries. */
 class DYNAMICROPE_API IRopeCollider
 {
@@ -30,9 +32,14 @@ public:
 	float   Radius = 0.0f;
 	FName   Bone = NAME_None;
 
+	// Skeletal mesh this capsule's bone belongs to. Carried into the contact so the wrap can
+	// follow the *correct* mesh (the one that owns the caught bone), even across actors.
+	const USkeletalMeshComponent* SourceMesh = nullptr;
+
 	FCapsuleCollider() = default;
-	FCapsuleCollider(const FVector& InA, const FVector& InB, float InRadius, FName InBone = NAME_None)
-		: A(InA), B(InB), Radius(InRadius), Bone(InBone) {}
+	FCapsuleCollider(const FVector& InA, const FVector& InB, float InRadius, FName InBone = NAME_None,
+		const USkeletalMeshComponent* InSourceMesh = nullptr)
+		: A(InA), B(InB), Radius(InRadius), Bone(InBone), SourceMesh(InSourceMesh) {}
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
 	virtual FBox GetWorldBounds() const override;
