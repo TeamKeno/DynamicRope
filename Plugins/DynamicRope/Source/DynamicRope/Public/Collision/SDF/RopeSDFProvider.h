@@ -15,6 +15,15 @@
 class URopeSDFData;
 class USkeletalMeshComponent;
 
+/** SDF slice heatmap이 통과하는 축(평면은 나머지 두 축에 평행). */
+UENUM()
+enum class ERopeSDFSliceAxis : uint8
+{
+	X,
+	Y,
+	Z
+};
+
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeSDFProvider : public UActorComponent, public IRopeColliderProvider
 {
@@ -59,6 +68,36 @@ public:
 	/** 합성 미리보기 구의 반지름(cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "1.0", Units = "cm"))
 	float SDFSyntheticRadius = 10.0f;
+
+	//~ Slice plane heatmap -------------------------------------------------
+	/** 볼륨을 가로지르는 평면 위 distance를 발산형 색(음=파랑, 0=흰, 양=빨강)으로 표시한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug")
+	bool bDrawSDFSlice = false;
+
+	/** slice 평면이 통과하는 축. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug", meta = (EditCondition = "bDrawSDFSlice"))
+	ERopeSDFSliceAxis SDFSliceAxis = ERopeSDFSliceAxis::Z;
+
+	/** 축을 따른 slice 위치(0~1, 정규화). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bDrawSDFSlice"))
+	float SDFSlicePosition = 0.5f;
+
+	/** slice 샘플 격자 한 변의 개수. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "2", EditCondition = "bDrawSDFSlice"))
+	int32 SDFSliceResolution = 24;
+
+	/** 색 매핑 스케일(cm): |distance| = 이 값에서 완전 포화. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "0.1", Units = "cm", EditCondition = "bDrawSDFSlice"))
+	float SDFSliceColorScale = 10.0f;
+
+	//~ Gradient arrows (= Query 법선) --------------------------------------
+	/** 좁은밴드 샘플에서 gradient(바깥쪽 = Query가 반환할 법선) 방향을 화살표로 그린다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug")
+	bool bDrawSDFGradient = false;
+
+	/** gradient 화살표 길이(cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "0.5", Units = "cm", EditCondition = "bDrawSDFGradient"))
+	float SDFGradientLength = 4.0f;
 
 	//~ IRopeColliderProvider
 	virtual void GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders) override;
