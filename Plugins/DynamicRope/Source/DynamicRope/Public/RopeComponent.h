@@ -99,6 +99,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	ERopePhase GetPhase() const { return Phase; }
 
+	/** 현재 wrap된 bone(없으면 None). 디버그/인트로스펙션(Gameplay Debugger, 비주얼라이저)용. */
+	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
+
+	/** 시뮬레이션된 centerline 위치(read-only). 디버그/인트로스펙션용. */
+	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
+
 	/**
 	 * Debug: sustained-contact gate(MinLatchNodes / WrapDecisionTime)를 우회하여, rope가 현재 가장
 	 * 가깝거나 접촉 중인 bone에 즉시 wrap을 commit한다. throw를 튜닝하지 않고도 BeginWrap 핸드오프와

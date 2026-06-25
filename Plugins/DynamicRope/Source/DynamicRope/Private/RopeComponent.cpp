@@ -4,10 +4,9 @@
 #include "Collision/RopeCollider.h"
 #include "Collision/RopeColliderProvider.h"
 #include "Render/RopeSceneProxy.h"
+#include "Debug/RopeDebugDraw.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
-#include "Engine/Engine.h"
-#include "DrawDebugHelpers.h"
 
 URopeComponent::URopeComponent()
 {
@@ -60,12 +59,7 @@ void URopeComponent::GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) 
 		RopeBounds = RopeBounds.ExpandBy(Radius + WrapConfig.ContactRadius + 5.0f);
 	}
 
-#if !UE_BUILD_SHIPPING
-	if (bDrawDebugCenterline && RopeBounds.IsValid)
-	{
-		DrawDebugBox(GetWorld(), RopeBounds.GetCenter(), RopeBounds.GetExtent(), FColor::Orange, false, -1.0f, 0, 0.5f);
-	}
-#endif
+	RopeDebug::DrawBounds(GetWorld(), RopeBounds, bDrawDebugCenterline);
 
 	for (const TScriptInterface<IRopeColliderProvider>& Provider : ColliderProviders)
 	{
@@ -75,15 +69,8 @@ void URopeComponent::GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) 
 		}
 	}
 
-#if !UE_BUILD_SHIPPING
-	if (bDrawDebugCenterline && GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(reinterpret_cast<uint64>(this), 0.0f, FColor::Yellow,
-			FString::Printf(TEXT("[Rope] phase=%d providers=%d colliders=%d wrapBone=%s"),
-				static_cast<int32>(Phase), ColliderProviders.Num(), OutColliders.Num(),
-				*WrapController.State.BoneName.ToString()));
-	}
-#endif
+	RopeDebug::DrawStats(GetWorld(), reinterpret_cast<uint64>(this), Phase,
+		ColliderProviders.Num(), OutColliders.Num(), WrapController.State.BoneName, bDrawDebugCenterline);
 }
 
 void URopeComponent::EnsureColliderProviders()
@@ -209,20 +196,7 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 	MarkRenderDynamicDataDirty();
 	MarkRenderTransformDirty();
 
-	if (bDrawDebugCenterline)
-	{
-		if (const UWorld* World = GetWorld())
-		{
-			for (int32 i = 0; i < Sim.Num(); ++i)
-			{
-				DrawDebugPoint(World, Sim.Positions[i], 6.0f, FColor::Yellow, false, -1.0f, SDPG_Foreground);
-				if (i + 1 < Sim.Num())
-				{
-					DrawDebugLine(World, Sim.Positions[i], Sim.Positions[i + 1], FColor::Cyan, false, -1.0f, SDPG_Foreground, 0.5f);
-				}
-			}
-		}
-	}
+	RopeDebug::DrawCenterline(GetWorld(), Sim, Phase, WrapController.State, bDrawDebugCenterline);
 }
 
 void URopeComponent::SendRenderDynamicData_Concurrent()

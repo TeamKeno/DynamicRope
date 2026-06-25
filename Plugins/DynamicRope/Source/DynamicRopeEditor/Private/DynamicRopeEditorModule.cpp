@@ -2,6 +2,8 @@
 
 #include "DynamicRopeEditorModule.h"
 #include "SDF/SRopeSDFAuthoringPanel.h"
+#include "Visualizers/RopeComponentVisualizer.h"
+#include "RopeComponent.h"
 
 #include "Framework/Docking/TabManager.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -10,6 +12,8 @@
 #include "ToolMenus.h"
 #include "WorkspaceMenuStructure.h"
 #include "WorkspaceMenuStructureModule.h"
+#include "Editor/UnrealEdEngine.h"
+#include "UnrealEdGlobals.h"
 
 #define LOCTEXT_NAMESPACE "FDynamicRopeEditorModule"
 
@@ -30,12 +34,24 @@ void FDynamicRopeEditorModule::StartupModule()
 	// Add the Tools menu entry once ToolMenus is ready.
 	UToolMenus::RegisterStartupCallback(
 		FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FDynamicRopeEditorModule::RegisterMenus));
+
+	// Editor viewport visualizer for URopeComponent (centerline / rest line on selection).
+	if (GUnrealEd)
+	{
+		GUnrealEd->RegisterComponentVisualizer(URopeComponent::StaticClass()->GetFName(),
+			MakeShared<FRopeComponentVisualizer>());
+	}
 }
 
 void FDynamicRopeEditorModule::ShutdownModule()
 {
 	UToolMenus::UnRegisterStartupCallback(this);
 	UToolMenus::UnregisterOwner(this);
+
+	if (GUnrealEd)
+	{
+		GUnrealEd->UnregisterComponentVisualizer(URopeComponent::StaticClass()->GetFName());
+	}
 
 	if (FSlateApplication::IsInitialized())
 	{

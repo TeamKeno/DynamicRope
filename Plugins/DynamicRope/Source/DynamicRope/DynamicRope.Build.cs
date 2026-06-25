@@ -54,5 +54,9 @@ public class DynamicRope : ModuleRules
 				// ... add any modules that your module loads dynamically here ...
 			}
 			);
+
+		// Gameplay Debugger 카테고리(rope 인트로스펙션) — 의존성 + WITH_GAMEPLAY_DEBUGGER 매크로를
+		// 타깃에 맞게 설정한다(shipping에서는 자동으로 빠진다).
+		SetupGameplayDebuggerSupport(Target);
 	}
 }
