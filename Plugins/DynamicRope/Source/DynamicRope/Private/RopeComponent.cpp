@@ -9,11 +9,12 @@
 #include "GameFramework/Actor.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "EngineUtils.h" // TActorIterator (월드 전체 provider 수집)
+#include "Subsystem/RopeSimSubsystem.h"
 
 URopeComponent::URopeComponent()
 {
-	PrimaryComponentTick.bCanEverTick = true;
-	PrimaryComponentTick.bStartWithTickEnabled = true;
+	// 컴포넌트가 직접 tick하지 않는다 — URopeSimSubsystem이 매 프레임 SimulateFrame()을 구동한다(단일 오케스트레이션).
+	PrimaryComponentTick.bCanEverTick = false;
 
 	// primitive가 motion vector를 출력하도록 Movable로 설정한다(TAA/TSR가 움직이는 rope를 유지하게 한다).
 	Mobility = EComponentMobility::Movable;
@@ -144,10 +145,27 @@ USkeletalMeshComponent* URopeComponent::ResolveWrapTargetMesh()
 	return WrapTargetMesh;
 }
 
-void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+void URopeComponent::BeginPlay()
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Tick);
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	Super::BeginPlay();
+	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+	{
+		SimSubsystem->RegisterRope(this);
+	}
+}
+
+void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+	{
+		SimSubsystem->UnregisterRope(this);
+	}
+	Super::EndPlay(EndPlayReason);
+}
+
+void URopeComponent::SimulateFrame(float DeltaTime)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Simulate);
 
 	if (Sim.Num() == 0)
 	{

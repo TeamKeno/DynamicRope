@@ -31,8 +31,15 @@ public:
 	URopeComponent();
 
 	//~ UActorComponent
-	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void SendRenderDynamicData_Concurrent() override;
+
+	/**
+	 * 시뮬레이션 1스텝(과거 TickComponent 본문). 컴포넌트가 직접 tick하지 않고 URopeSimSubsystem이
+	 * 매 프레임 호출한다(단일 오케스트레이션 지점 → 추후 배치/병렬화).
+	 */
+	void SimulateFrame(float DeltaTime);
 
 	//~ UPrimitiveComponent / UMeshComponent
 	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
