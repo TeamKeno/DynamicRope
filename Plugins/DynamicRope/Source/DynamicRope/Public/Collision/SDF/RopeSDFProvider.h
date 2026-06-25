@@ -35,6 +35,31 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	bool bDrawDebug = false;
 
+	//~ SDF 시각화(에디터 전용 비주얼라이저가 읽는 토글) -----------------
+	/** 본별 SDF 볼륨의 bounds 박스를 그린다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug")
+	bool bDrawSDFBounds = false;
+
+	/** 볼륨 안에 coarse 격자를 그린다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug")
+	bool bDrawSDFGrid = false;
+
+	/** 좁은밴드 voxel을 부호별 색 점으로 그린다(안=빨강, 밖=파랑, ≈0=흰색). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug")
+	bool bDrawSDFVoxels = false;
+
+	/** voxel 표시 밴드 두께(cm). |distance| <= 이 값인 voxel만 그린다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "0.0", Units = "cm"))
+	float SDFBandThreshold = 3.0f;
+
+	/** 베이크 전 미리보기: 각 볼륨 본에 해석적 구 SDF를 합성해 그린다(실제 데이터 대신). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug")
+	bool bSDFSyntheticPreview = false;
+
+	/** 합성 미리보기 구의 반지름(cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "1.0", Units = "cm"))
+	float SDFSyntheticRadius = 10.0f;
+
 	//~ IRopeColliderProvider
 	virtual void GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders) override;
 

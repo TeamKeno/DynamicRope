@@ -2,8 +2,10 @@
 
 #include "DynamicRopeEditorModule.h"
 #include "SDF/SRopeSDFAuthoringPanel.h"
+#include "SDF/RopeSDFVisualizer.h"
 #include "Visualizers/RopeComponentVisualizer.h"
 #include "RopeComponent.h"
+#include "Collision/SDF/RopeSDFProvider.h"
 
 #include "Framework/Docking/TabManager.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -35,11 +37,13 @@ void FDynamicRopeEditorModule::StartupModule()
 	UToolMenus::RegisterStartupCallback(
 		FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FDynamicRopeEditorModule::RegisterMenus));
 
-	// Editor viewport visualizer for URopeComponent (centerline / rest line on selection).
+	// Editor viewport visualizers (drawn on selection).
 	if (GUnrealEd)
 	{
 		GUnrealEd->RegisterComponentVisualizer(URopeComponent::StaticClass()->GetFName(),
 			MakeShared<FRopeComponentVisualizer>());
+		GUnrealEd->RegisterComponentVisualizer(URopeSDFProvider::StaticClass()->GetFName(),
+			MakeShared<FRopeSDFVisualizer>());
 	}
 }
 
@@ -51,6 +55,7 @@ void FDynamicRopeEditorModule::ShutdownModule()
 	if (GUnrealEd)
 	{
 		GUnrealEd->UnregisterComponentVisualizer(URopeComponent::StaticClass()->GetFName());
+		GUnrealEd->UnregisterComponentVisualizer(URopeSDFProvider::StaticClass()->GetFName());
 	}
 
 	if (FSlateApplication::IsInitialized())
