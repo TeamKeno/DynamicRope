@@ -23,7 +23,7 @@ USkeletalMeshComponent* URopeSDFProvider::ResolveMesh()
 	return SkeletalMesh;
 }
 
-void URopeSDFProvider::GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders)
+void URopeSDFProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeCollider*>& OutColliders)
 {
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh || !SDFData)
@@ -31,37 +31,37 @@ void URopeSDFProvider::GatherColliders(const FBox& RopeBounds, TArray<IRopeColli
 		return;
 	}
 
-	Colliders.Reset();
-	for (const FRopeBoneSDFVolume& Volume : SDFData->BoneVolumes)
+	// 프레임당 1회만 빌드(디둡). per-rope 컬링은 solver의 collider AABB broad-phase가 담당하므로,
+	// 여기서는 RopeBounds 컬 없이 베이크된 모든 볼륨을 빌드한다(collider 구성은 저렴 — 비싼 Query를 solver가 컬).
+	const uint64 Frame = GFrameCounter;
+	if (BuiltFrame != Frame)
 	{
-		if (Volume.Bone.IsNone() || !Volume.IsBaked())
+		BuiltFrame = Frame;
+		Colliders.Reset();
+		for (const FRopeBoneSDFVolume& Volume : SDFData->BoneVolumes)
 		{
-			continue; // 미베이크/무효 볼륨은 건너뛴다.
-		}
+			if (Volume.Bone.IsNone() || !Volume.IsBaked())
+			{
+				continue; // 미베이크/무효 볼륨은 건너뛴다.
+			}
 
-		const FTransform BoneToWorld = Mesh->GetSocketTransform(Volume.Bone);
-
-		// 브로드페이즈(B2): 본 로컬 bounds를 월드로 변환해 rope bounds와 겹칠 때만 narrow-phase 대상.
-		const FBox WorldBounds = Volume.LocalBounds.TransformBy(BoneToWorld);
-		if (!WorldBounds.Intersect(RopeBounds))
-		{
-			continue;
-		}
-
-		Colliders.Add(FRopeSDFCollider(&Volume, BoneToWorld, Volume.Bone, Mesh));
+			const FTransform BoneToWorld = Mesh->GetSocketTransform(Volume.Bone);
+			Colliders.Add(FRopeSDFCollider(&Volume, BoneToWorld, Volume.Bone, Mesh));
 
 #if ENABLE_DRAW_DEBUG
-		if (bDrawDebug)
-		{
-			if (UWorld* World = GetWorld())
+			if (bDrawDebug)
 			{
-				DrawDebugBox(World, WorldBounds.GetCenter(), WorldBounds.GetExtent(), FColor::Green, false, -1.0f, 0, 0.5f);
+				if (UWorld* World = GetWorld())
+				{
+					const FBox WorldBounds = Volume.LocalBounds.TransformBy(BoneToWorld);
+					DrawDebugBox(World, WorldBounds.GetCenter(), WorldBounds.GetExtent(), FColor::Green, false, -1.0f, 0, 0.5f);
+				}
 			}
-		}
 #endif
+		}
 	}
 
-	// Colliders가 완전히 구성된 뒤에만 포인터를 넘긴다(이 지점 이후로는 재할당 없음).
+	// 캐시된 collider 포인터를 넘긴다(해당 프레임 동안 유효).
 	OutColliders.Reserve(OutColliders.Num() + Colliders.Num());
 	for (FRopeSDFCollider& Collider : Colliders)
 	{

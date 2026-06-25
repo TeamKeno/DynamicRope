@@ -22,7 +22,7 @@ USkeletalMeshComponent* URopeBoneCapsuleProvider::ResolveMesh()
 	return SkeletalMesh;
 }
 
-void URopeBoneCapsuleProvider::GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders)
+void URopeBoneCapsuleProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeCollider*>& OutColliders)
 {
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh)
@@ -30,35 +30,40 @@ void URopeBoneCapsuleProvider::GatherColliders(const FBox& RopeBounds, TArray<IR
 		return;
 	}
 
-	// 나열된 모든 본을 포함한다. 실제 contact 여부는 정밀한 per-node capsule narrow-phase가 결정한다.
-	// (여기서는 AABB broad-phase 컬링을 하지 않는다. 본이 몇 개뿐이라 false negative 위험만 키울 뿐이다.)
-	Capsules.Reset();
-	for (const FName& Bone : Bones)
+	// 프레임당 1회만 빌드(디둡): 같은 메시를 잡는 여러 로프가 호출해도 capsule을 재구성하지 않는다.
+	// per-rope 컬링은 solver의 collider AABB broad-phase가 담당하므로 RopeBounds는 여기서 쓰지 않는다.
+	const uint64 Frame = GFrameCounter;
+	if (BuiltFrame != Frame)
 	{
-		if (Bone.IsNone())
+		BuiltFrame = Frame;
+		Capsules.Reset();
+		for (const FName& Bone : Bones)
 		{
-			continue;
-		}
-		const FName    Parent = Mesh->GetParentBone(Bone);
-		const FVector  P0 = Mesh->GetSocketTransform(Bone).GetLocation();
-		const FVector  P1 = Parent.IsNone() ? P0 : Mesh->GetSocketTransform(Parent).GetLocation();
-		Capsules.Add(FCapsuleCollider(P0, P1, CapsuleRadius, Bone, Mesh));
+			if (Bone.IsNone())
+			{
+				continue;
+			}
+			const FName    Parent = Mesh->GetParentBone(Bone);
+			const FVector  P0 = Mesh->GetSocketTransform(Bone).GetLocation();
+			const FVector  P1 = Parent.IsNone() ? P0 : Mesh->GetSocketTransform(Parent).GetLocation();
+			Capsules.Add(FCapsuleCollider(P0, P1, CapsuleRadius, Bone, Mesh));
 
 #if ENABLE_DRAW_DEBUG
-		if (bDrawDebug)
-		{
-			if (UWorld* World = GetWorld())
+			if (bDrawDebug)
 			{
-				const FVector Center = (P0 + P1) * 0.5f;
-				const float   HalfHeight = static_cast<float>((P1 - P0).Size()) * 0.5f + CapsuleRadius;
-				const FQuat   Rot = FRotationMatrix::MakeFromZ(P1 - P0).ToQuat();
-				DrawDebugCapsule(World, Center, HalfHeight, CapsuleRadius, Rot, FColor::Green, false, -1.0f, 0, 0.5f);
+				if (UWorld* World = GetWorld())
+				{
+					const FVector Center = (P0 + P1) * 0.5f;
+					const float   HalfHeight = static_cast<float>((P1 - P0).Size()) * 0.5f + CapsuleRadius;
+					const FQuat   Rot = FRotationMatrix::MakeFromZ(P1 - P0).ToQuat();
+					DrawDebugCapsule(World, Center, HalfHeight, CapsuleRadius, Rot, FColor::Green, false, -1.0f, 0, 0.5f);
+				}
 			}
-		}
 #endif
+		}
 	}
 
-	// Capsules가 완전히 구성된 뒤에만 포인터를 넘긴다(이 지점 이후로는 재할당 없음).
+	// 캐시된 capsule 포인터를 넘긴다(해당 프레임 동안 유효).
 	OutColliders.Reserve(OutColliders.Num() + Capsules.Num());
 	for (FCapsuleCollider& Cap : Capsules)
 	{
