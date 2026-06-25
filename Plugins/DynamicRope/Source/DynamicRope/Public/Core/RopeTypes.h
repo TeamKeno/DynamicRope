@@ -122,7 +122,7 @@ struct FRopeSolverConfig
 
 	/** 프레임당 물리 substep 수(anti-tunneling; "small steps"가 iteration을 늘리는 것보다 낫다). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "16"))
-	int32 Substeps = 4;
+	int32 Substeps = 12;
 
 	/** substep당 constraint iteration 수. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "1"))
@@ -144,6 +144,15 @@ struct FRopeSolverConfig
 	 *  이만큼 떨어뜨려 유지한다(0이면 무한히 얇은 점 → 대부분 관통). narrow-band보다 작게 둘 것. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", Units = "cm"))
 	float CollisionRadius = 2.0f;
+
+	/** Swept(연속) 충돌 샘플 간격(cm). 작을수록 빠른 노드의 터널링이 줄지만 query가 늘어 비싸진다.
+	 *  노드 구간이 이 간격보다 짧으면 끝점만 검사한다(느린 접촉 = 추가비용 0). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.1", Units = "cm"))
+	float SweepStep = 2.0f;
+
+	/** Swept 충돌 구간당 최대 샘플 수(매우 빠른 노드에 대한 비용 상한). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "64"))
+	int32 MaxSweepSamples = 16;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver")
 	FVector Gravity = FVector(0.0f, 0.0f, -980.0f);

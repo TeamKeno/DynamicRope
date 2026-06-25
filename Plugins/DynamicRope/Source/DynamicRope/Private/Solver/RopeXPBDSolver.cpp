@@ -205,12 +205,25 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 	const float Friction = FMath::Clamp(Config.Friction, 0.0f, 1.0f);
 	const bool bHasBounds = ColliderBounds.Num() == Colliders.Num();
 
+	// Swept(연속) 충돌: 노드를 점이 아니라 PrevPos->Pos 구간으로 본다. 빠른 노드가 한 substep에 얇은
+	// 표면을 가로질러도(이산 점검사로는 터널링) 구간을 따라 샘플해 첫 접촉에서 멈춘다. 느린 접촉(L 작음)은
+	// 샘플 1개 = 끝점만 검사하므로 추가 비용이 없다.
+	const float SweepStep = FMath::Max(Config.SweepStep, 0.1f);     // 샘플 간격(cm), 디자이너 튜닝
+	const int32 MaxSweepSamples = FMath::Max(1, Config.MaxSweepSamples); // 구간당 샘플 상한
+
 	for (int32 i = 0; i < State.Num(); ++i)
 	{
 		if (State.InvMass[i] <= 0.0f)
 		{
 			continue;
 		}
+
+		const FVector A = State.PrevPositions[i]; // substep 시작 위치
+		// 구간 broad-phase용 AABB. collider bounds는 이미 Radius만큼 확장돼 있다.
+		FBox SweepBox(ForceInit);
+		SweepBox += A;
+		SweepBox += State.Positions[i];
+
 		for (int32 c = 0; c < Colliders.Num(); ++c)
 		{
 			const IRopeCollider* Collider = Colliders[c];
@@ -218,28 +231,40 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 			{
 				continue;
 			}
-			// Broad-phase: 노드가 collider의 월드 AABB(+Radius) 밖이면 비싼 Query를 건너뛴다.
-			if (bHasBounds && !ColliderBounds[c].IsInsideOrOn(State.Positions[i]))
+			// Broad-phase: 구간이 collider AABB(+Radius)와 안 겹치면 스킵. 끝점만 보면 가로질러 통과한
+			// 노드를 놓치므로 반드시 구간 AABB로 판단한다.
+			if (bHasBounds && !ColliderBounds[c].Intersect(SweepBox))
 			{
 				continue;
 			}
 
-			// Radius만큼 query: 노드 구체가 표면에서 Radius 이내면 hit, 표면 밖 Radius 거리까지 밀어낸다.
-			const FRopeContact Contact = Collider->Query(State.Positions[i], Radius);
-			if (!Contact.bHit)
-			{
-				continue;
-			}
+			const FVector B = State.Positions[i]; // 현재 끝점(앞선 collider가 밀었을 수 있음)
+			const double L = FVector::Dist(A, B);
+			const int32 NumSamples = FMath::Clamp(1 + FMath::FloorToInt(L / SweepStep), 1, MaxSweepSamples);
 
-			// 법선 방향 push-out(겹친 깊이만큼).
-			State.Positions[i] += Contact.Normal * Contact.Penetration;
-
-			// 접선 방향 friction: 이번 step 변위(Pos-Prev)의 접선 성분을 Friction만큼 깎아 그립을 만든다.
-			if (Friction > 0.0f)
+			for (int32 k = 0; k < NumSamples; ++k)
 			{
-				const FVector Delta = State.Positions[i] - State.PrevPositions[i];
-				const FVector Tangent = Delta - (Delta | Contact.Normal) * Contact.Normal;
-				State.PrevPositions[i] += Tangent * Friction;
+				// A->B를 따라 첫 접촉을 찾는다. NumSamples==1이면 끝점만(느린 접촉 = 기존 동작, 추가비용 0).
+				const double T = (NumSamples <= 1) ? 1.0 : static_cast<double>(k) / static_cast<double>(NumSamples - 1);
+				const FVector P = FMath::Lerp(A, B, T);
+
+				const FRopeContact Contact = Collider->Query(P, Radius);
+				if (!Contact.bHit)
+				{
+					continue;
+				}
+
+				// 첫 접촉 지점에서 표면 밖으로 밀어 멈춘다(가로질러 통과하지 못하게).
+				State.Positions[i] = P + Contact.Normal * Contact.Penetration;
+
+				// 접선 방향 friction: 변위(Pos-Prev)의 접선 성분을 Friction만큼 깎아 그립을 만든다.
+				if (Friction > 0.0f)
+				{
+					const FVector Delta = State.Positions[i] - State.PrevPositions[i];
+					const FVector Tangent = Delta - (Delta | Contact.Normal) * Contact.Normal;
+					State.PrevPositions[i] += Tangent * Friction;
+				}
+				break; // 이 collider에 대한 첫 접촉에서 종료
 			}
 		}
 	}
