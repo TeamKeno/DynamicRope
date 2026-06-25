@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
 // 단일 UE 통합 지점(Facade). sim 상태, solver, wrap controller, 그리고 physics와 logic을
 // 분기하는 phase state machine을 소유한다. 캐릭터에 붙이고 Throw()로 사용한다.
@@ -69,6 +69,14 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
 	TArray<TObjectPtr<AActor>> ColliderSourceActors;
+
+	/**
+	 * [임시/테스트 편의] 켜면 ColliderSourceActors/owner를 무시하고 월드의 *모든* IRopeColliderProvider를
+	 * 수집한다. provider 붙은 actor를 일일이 등록하지 않고도 바로 테스트할 수 있다. 자기 owner도 포함되어
+	 * rope가 자기 몸에 latch할 수 있으니 주의(제품 경로에서는 끄고 명시적 소스를 쓸 것).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
+	bool bGatherProvidersFromWholeWorld = true;
 
 	//~ Render(렌더) ------------------------------------------------------
 	/** 시각적 tube 반지름(cm). */

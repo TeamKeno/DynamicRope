@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
 // Dynamic Rope 시스템의 핵심 데이터 타입. 핫 루프(sim/contact/wrap 상태)에 있는 것은
 // 순수 POD로, 디자이너용 설정에만 USTRUCT를 사용한다.
@@ -43,6 +43,7 @@ enum class ERopeReleaseReason : uint8
  *   Normal       UNIT, collider에서 노드를 향해 바깥쪽을 가리킨다(push-out 방향).
  *                불변식: NodePos += Normal*Penetration 은 노드를 표면 위에 올려놓는다.
  *                *** 부호가 load-bearing이다: 안쪽을 향하는 normal은 rope를 몸체 안으로 빨아들인다. ***
+ *                SDF collider는 ∇φ를 그대로 쓰되, 베이크를 outside-positive로 고정해야 이 규약과 일치한다(아니면 ∇φ가 반전됨).
  *                축퇴(노드가 medial axis 위에 있음) => 임의의 안정적인 단위 벡터(capsule: +Z).
  *   Penetration  Normal을 따른 overlap 깊이, bHit일 때 > 0. QUERY 반지름 기준으로 측정된다:
  *                (ColliderRadius + QueryRadius) - Distance. 호출자는 solver push-out에는 QueryRadius 0을,

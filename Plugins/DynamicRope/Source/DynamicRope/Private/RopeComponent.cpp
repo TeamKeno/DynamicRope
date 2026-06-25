@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RopeComponent.h"
 #include "Collision/RopeCollider.h"
@@ -7,6 +7,7 @@
 #include "Debug/RopeDebugDraw.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
+#include "EngineUtils.h" // TActorIterator (월드 전체 provider 수집)
 
 URopeComponent::URopeComponent()
 {
@@ -91,6 +92,20 @@ void URopeComponent::EnsureColliderProviders()
 			ColliderProviders.AddUnique(TScriptInterface<IRopeColliderProvider>(Comp));
 		}
 	};
+
+	// [임시/테스트] 월드 전체에서 provider를 수집한다. 소스 actor를 수동 등록하지 않고도 provider 붙은
+	// 모든 actor를 자동으로 잡는다. 이후 로직은 건너뛴다(이 경로가 owner/wrap-target을 이미 포함한다).
+	if (bGatherProvidersFromWholeWorld)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			for (TActorIterator<AActor> It(World); It; ++It)
+			{
+				AddFrom(*It);
+			}
+		}
+		return;
+	}
 
 	// Cross-actor: rope가 한 actor에 고정되어 있지만 *다른* body를 잡아야 할 때, provider는 그 다른
 	// actor 위에 존재한다. 명시적 리스트가 설정되어 있으면 그것을 사용하고, 그렇지 않으면 우리

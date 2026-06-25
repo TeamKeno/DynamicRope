@@ -1,7 +1,8 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Collision/SDF/RopeSDFCollider.h"
 #include "Collision/SDF/RopeSDFData.h"
+#include "Collision/SDF/RopeSDFSampler.h"
 
 FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) const
 {
@@ -9,7 +10,7 @@ FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 	if (!Volume || !Volume->IsBaked())
 	{
-		return Contact; // 미베이크 볼륨 → 컨택트 없음.
+		return Contact; // 미베이크/무효 볼륨 → 컨택트 없음.
 	}
 
 	// 월드 → 본 로컬 공간. grid는 본 로컬에 구워져 있다.
@@ -21,16 +22,23 @@ FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) 
 		return Contact;
 	}
 
-	// TODO(B3): trilinear 샘플로 signed distance d를, central-difference로 gradient(=바깥 방향)를 구한다.
-	//   d  = SampleTrilinear(*Volume, LocalPos)
-	//   N  = normalize(gradient)                              // 축퇴 시 안정 폴백
-	//   Contact.bHit        = d < NodeRadius
-	//   Contact.Penetration = NodeRadius - d                  // query 반지름 기준 (FRopeContact 계약)
-	//   Contact.Normal      = BoneToWorld.TransformVectorNoScale(N)  // 월드로, 바깥쪽 단위 유지
-	//   Contact.Bone        = Bone;
-	//   Contact.SourceMesh  = SourceMesh;                     // skeletal collider는 비-None 필수
-	//   Contact.SurfacePoint = WorldPos - Contact.Normal * d; // 보조/디버그
-	// 현재는 스캐폴딩 단계 → 컨택트 없음으로 반환(narrow-phase는 캡슐 경로가 담당).
+	// signed distance(바깥 +). 샘플링은 시각화와 공유하는 단일 진실 공급원(RopeSDFSampler)에 위임한다.
+	// 노드 구체가 표면에 못 미치면 gradient는 계산조차 않고 빠진다(Query는 node×substep×iteration마다 호출).
+	const float Dist = RopeSDFSampler::SampleTrilinear(*Volume, LocalPos);
+	if (Dist >= NodeRadius)
+	{
+		return Contact;
+	}
+
+	// 바깥쪽 단위 법선(샘플러가 축퇴 시 +Z로 폴백). 본 로컬 → 월드(스케일 무시, 단위 유지).
+	const FVector NLocal = RopeSDFSampler::SampleGradient(*Volume, LocalPos);
+
+	Contact.bHit = true;
+	Contact.Normal = BoneToWorld.TransformVectorNoScale(NLocal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	Contact.Penetration = NodeRadius - Dist;                  // 양수: query 반지름 기준 겹침 깊이
+	Contact.SurfacePoint = WorldPos - Contact.Normal * Dist;  // 표면 위 최근접점(보조/디버그)
+	Contact.Bone = Bone;                                      // 본 귀속(DecideWrap dominant bone 입력, 비-None 필수)
+	Contact.SourceMesh = SourceMesh;                          // 본을 소유한 메시(액터 간 wrap follow)
 	return Contact;
 }
 
