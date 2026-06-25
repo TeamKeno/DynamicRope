@@ -29,5 +29,9 @@ private:
 	void SolveBending(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
 		TArray<float>& Lambda) const;
 
-	void SolveCollisions(FRopeSimState& State, const TArray<IRopeCollider*>& Colliders) const;
+	// Config.CollisionRadius로 query하여(로프 두께) 노드를 표면 밖으로 push-out하고, Config.Friction으로
+	// 접선 속도를 감쇠한다. ColliderBounds는 collider별 월드 AABB(+Radius)로, broad-phase에서 먼 collider의
+	// 비싼 Query(역변환+SDF 샘플)를 건너뛰는 데 쓴다(Step에서 1회 계산해 전달).
+	void SolveCollisions(FRopeSimState& State, const FRopeSolverConfig& Config,
+		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds) const;
 };

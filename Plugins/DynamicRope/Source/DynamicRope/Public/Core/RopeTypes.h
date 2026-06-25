@@ -46,8 +46,8 @@ enum class ERopeReleaseReason : uint8
  *                SDF collider는 ∇φ를 그대로 쓰되, 베이크를 outside-positive로 고정해야 이 규약과 일치한다(아니면 ∇φ가 반전됨).
  *                축퇴(노드가 medial axis 위에 있음) => 임의의 안정적인 단위 벡터(capsule: +Z).
  *   Penetration  Normal을 따른 overlap 깊이, bHit일 때 > 0. QUERY 반지름 기준으로 측정된다:
- *                (ColliderRadius + QueryRadius) - Distance. 호출자는 solver push-out에는 QueryRadius 0을,
- *                wrap-decision skin에는 WrapConfig.ContactRadius를 전달한다.
+ *                (ColliderRadius + QueryRadius) - Distance. 호출자는 solver push-out에는 SolverConfig.CollisionRadius를
+ *                (= 로프 충돌 두께, 노드를 표면에서 그만큼 떨어뜨림), wrap-decision skin에는 WrapConfig.ContactRadius를 전달한다.
  *   SurfacePoint 노드에서 가장 가까운 collider 표면 위의 점(보조/디버그). solver에는 필수가 아니며,
  *                저렴하게 구할 수 있을 때 채운다.
  *   Bone         skeletal collider에서는 반드시 non-None — bone 귀속(attribution)으로 DecideWrap이
@@ -106,8 +106,12 @@ struct FRopeSimState
 	FVector         StartPinPrev = FVector::ZeroVector;
 	FVector         StartPinTarget = FVector::ZeroVector;
 
+	// 고정 timestep 누적기: solver는 frame당 실제 경과 시간을 누적해 고정 크기 substep으로 소비한다
+	// (frame rate 독립). 남는 시간은 다음 frame으로 이월된다.
+	float           TimeAccumulator = 0.0f;
+
 	int32 Num() const { return Positions.Num(); }
-	void  Reset() { Positions.Reset(); PrevPositions.Reset(); InvMass.Reset(); }
+	void  Reset() { Positions.Reset(); PrevPositions.Reset(); InvMass.Reset(); TimeAccumulator = 0.0f; }
 };
 
 /** XPBD solver 튜닝(디자이너용). */
@@ -135,6 +139,11 @@ struct FRopeSolverConfig
 	/** collider에 대한 접선 방향 friction [0..1]. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Friction = 0.5f;
+
+	/** 충돌 query 반지름(cm) = 로프의 충돌 두께. solver는 이 값으로 push-out하여 노드를 표면에서
+	 *  이만큼 떨어뜨려 유지한다(0이면 무한히 얇은 점 → 대부분 관통). narrow-band보다 작게 둘 것. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", Units = "cm"))
+	float CollisionRadius = 2.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver")
 	FVector Gravity = FVector(0.0f, 0.0f, -980.0f);
