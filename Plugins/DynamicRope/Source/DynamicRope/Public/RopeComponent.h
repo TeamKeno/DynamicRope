@@ -36,9 +36,14 @@ public:
 	virtual void SendRenderDynamicData_Concurrent() override;
 
 	/**
-	 * 시뮬레이션 1스텝. 컴포넌트가 직접 tick하지 않고 URopeSimSubsystem이 매 프레임 호출한다.
+	 * 시뮬레이션 한 프레임을 3단계로 나눠 URopeSimSubsystem이 구동한다(컴포넌트는 직접 tick하지 않음).
+	 *  Prepare(GT)  : init/pin/provider gather + collider 스냅샷 + 로직 phase 처리.
+	 *  Solve(병렬)  : Free/Flight의 Solver.Step만 — POD + const collider라 스레드 안전.
+	 *  Finalize(GT) : Flight 접촉 감지/캡처(UObject·이벤트) + 렌더 dirty.
 	 */
-	void SimulateFrame(float DeltaTime);
+	void PrepareSimFrame(float DeltaTime);
+	void SolveSimFrame(float DeltaTime);
+	void FinalizeSimFrame(float DeltaTime);
 
 	//~ UPrimitiveComponent / UMeshComponent
 	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
@@ -177,6 +182,12 @@ private:
 	/** 매 frame solver에 collider(skeletal bone, world)를 공급하는 source들. */
 	UPROPERTY()
 	TArray<TScriptInterface<IRopeColliderProvider>> ColliderProviders;
+
+	// 한 프레임 collider 스냅샷(Prepare에서 gather → Solve/Finalize에서 사용). provider 소유라 raw 포인터.
+	TArray<IRopeCollider*> FrameColliders;
+
+	// 이번 프레임에 Solver.Step을 돌릴지(Free/Flight만 true).
+	bool bSolveThisFrame = false;
 
 	void InitRope();
 	void GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) const;

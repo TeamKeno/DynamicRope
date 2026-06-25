@@ -315,9 +315,9 @@ bool URopeComponent::ShouldCommitWrap(const FRopeContactTracker& Tracker) const
 		&& IsWrappableBone(Tracker.CandidateBone);
 }
 
-void URopeComponent::SimulateFrame(float DeltaTime)
+void URopeComponent::PrepareSimFrame(float DeltaTime)
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Simulate);
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Prepare);
 
 	EnsureRopeInitialized();
 
@@ -331,51 +331,32 @@ void URopeComponent::SimulateFrame(float DeltaTime)
 
 	EnsureColliderProviders();
 
-	TArray<IRopeCollider*> Colliders;
-	GatherFrameColliders(Colliders);
+	// collider 스냅샷(GetSocketTransform)은 GT에서. 이후 Solver.Step(Solve 단계)은 병렬로 돈다.
+	FrameColliders.Reset();
+	GatherFrameColliders(FrameColliders);
+
+	bSolveThisFrame = false;
 
 	switch (Phase)
 	{
 	case ERopePhase::Free:        // 손에서 늘어뜨려진 채 캐릭터를 따라간다
-	{
-		//TArray<IRopeCollider*> WorldColliders;
-		//GatherWorldColliders(WorldColliders);
-
-		Solver.Step(Sim, SolverConfig, /*optional*/ Colliders, DeltaTime);
-
+		bSolveThisFrame = true;
 		break;
-	}
+
 	case ERopePhase::Flight:
-	{
 		if (bWhipSwingActive)
 		{
 			ApplyWhipSwing(DeltaTime);
 		}
-
-		Solver.Step(Sim, SolverConfig, /*optional*/ Colliders, DeltaTime);
-
-		// 1. 빠른 노드/끝단 노드에 대해 이동 경로 기반 후보 감지
-		TArray<FRopeContactCandidate> Candidates;
-		DetectContactCandidates(Sim.PrevPositions, Sim.Positions, Colliders, Candidates);
-		EvaluateRelativeMotion(Candidates);
-
-		if (ShouldCapture(Candidates))
-		{
-			BuildContactingState(Candidates);
-			Phase = ERopePhase::Contacting;
-			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
-		}
-
+		bSolveThisFrame = true; // 솔브 후 접촉 감지는 FinalizeSimFrame에서.
 		break;
-	}
+
 	case ERopePhase::Contacting:
 	{
-
-		// 감기 진행 상태
-	// 여기서 감김 노드/위치/방향을 점진적으로 보정
+		// 감기 진행 상태 — 감김 노드/위치/방향을 점진적으로 보정(솔브 없음, 로직 구동).
 		AdvanceWrappingMotion(DeltaTime);
 
-		if (ShouldDismissContacting()) 
+		if (ShouldDismissContacting())
 		{
 			Phase = ERopePhase::Flight;
 			break;
@@ -391,37 +372,61 @@ void URopeComponent::SimulateFrame(float DeltaTime)
 		break;
 	}
 	case ERopePhase::Wrapped:
-	{
-		// logic이 latch된 node들을 소유한다(skinned bone에 올라탄다); solver는 여전히 free span을
-		// settle하여 rope가 늘어지고 node 0에서 손에 붙어 있도록 유지한다.
-		// 1. 감긴 노드는 bone-local 위치를 따라감
+		// latch된 node는 skinned bone을 따라간다(GT). 솔브 없음.
 		WrapController.Hold(Sim, ResolveWrapTargetMesh(), DeltaTime);
-
 		UpdateWrappedKinematicShape(DeltaTime); // 선택: 찰랑임 연출만
-
 		break;
-	}
+
 	case ERopePhase::Releasing:
 		// 모든 node를 solver에 다시 넘긴다(hand pin만 유지), 그런 다음 free simulation을 재개한다.
 		for (int32 i = 0; i < Sim.Num(); ++i)
 		{
 			Sim.InvMass[i] = (i == 0 && Sim.bStartPinned) ? 0.0f : 1.0f;
 
-			// 2. 이전 고정점 때문에 튀지 않게 PrevPositions 보정
+			// 이전 고정점 때문에 튀지 않게 PrevPositions 보정.
 			Sim.PrevPositions[i] = Sim.Positions[i];
 		}
-		// 3. 짧은 쿨다운
-		ReleaseCooldown -= DeltaTime;	//static으로 할까 고민 중
-
+		ReleaseCooldown -= DeltaTime;
 		if (ReleaseCooldown <= 0)
 		{
 			Phase = ERopePhase::Free;
 		}
-
-
 		break;
+
 	default:
 		break;
+	}
+}
+
+void URopeComponent::SolveSimFrame(float DeltaTime)
+{
+	// 병렬 단계: POD 상태(Sim) + collider 스냅샷(FrameColliders)만 만진다. Query는 const → 스레드 안전.
+	// Free/Flight만 물리 솔브(Contacting/Wrapped/Releasing은 로직 구동 = Prepare에서 GT 처리).
+	if (!bSolveThisFrame)
+	{
+		return;
+	}
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Solve);
+	Solver.Step(Sim, SolverConfig, /*optional*/ FrameColliders, DeltaTime);
+}
+
+void URopeComponent::FinalizeSimFrame(float DeltaTime)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Finalize);
+
+	// Flight: 솔브 후 이동 경로 기반 접촉 후보 감지 → 캡처. UObject·이벤트라 GT에서.
+	if (Phase == ERopePhase::Flight)
+	{
+		TArray<FRopeContactCandidate> Candidates;
+		DetectContactCandidates(Sim.PrevPositions, Sim.Positions, FrameColliders, Candidates);
+		EvaluateRelativeMotion(Candidates);
+
+		if (ShouldCapture(Candidates))
+		{
+			BuildContactingState(Candidates);
+			Phase = ERopePhase::Contacting;
+			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
+		}
 	}
 
 	// 새 centerline을 render proxy로 push하고 bounds를 갱신한다.

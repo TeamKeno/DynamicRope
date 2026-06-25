@@ -3,6 +3,7 @@
 #include "Subsystem/RopeSimSubsystem.h"
 #include "RopeComponent.h"
 #include "Engine/World.h"
+#include "Async/ParallelFor.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
 void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
@@ -27,23 +28,48 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SubsystemTick);
 
-	// 단일 오케스트레이션 지점. 현재는 순차 구동.
-	// TODO(Tier2): collider gather를 소스 메시별로 1회 디둡 → ParallelFor로 로프별 Solver.Step 병렬화
-	//              (Query는 const, collider는 스냅샷이라 스레드 안전. WrapController::Hold의 본 트랜스폼만
-	//              GT에서 스냅샷 필요).
-	// TODO: LOD/sleep(멀거나 안정된 로프 스킵), 프레임당 총 솔브 비용 상한.
-	// TODO: tick 순서 — 충돌은 애니메이션(본 트랜스폼) 이후가 필요. 현재는 FTickableGameObject 타이밍에
-	//       의존하므로, 정밀 정렬이 필요하면 TG_PostPhysics tick function으로 전환.
+	// 무효 항목 정리.
 	for (int32 i = Ropes.Num() - 1; i >= 0; --i)
 	{
-		URopeComponent* Rope = Ropes[i];
-		if (!IsValid(Rope))
+		if (!IsValid(Ropes[i]))
 		{
 			Ropes.RemoveAtSwap(i);
-			continue;
 		}
-		Rope->SimulateFrame(DeltaTime);
 	}
+	if (Ropes.Num() == 0)
+	{
+		return;
+	}
+
+	// Phase 1 (GT): 준비 — init/pin/provider gather + collider 스냅샷 + 로직 phase 처리.
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Prepare);
+		for (URopeComponent* Rope : Ropes)
+		{
+			Rope->PrepareSimFrame(DeltaTime);
+		}
+	}
+
+	// Phase 2 (병렬): Free/Flight의 Solver.Step만. 로프는 서로 독립 + collider 스냅샷 read-only → 스레드 안전.
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SolveParallel);
+		ParallelFor(Ropes.Num(), [this, DeltaTime](int32 Index)
+		{
+			Ropes[Index]->SolveSimFrame(DeltaTime);
+		});
+	}
+
+	// Phase 3 (GT): 마무리 — Flight 접촉 감지/캡처(UObject·이벤트) + 렌더 dirty.
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Finalize);
+		for (URopeComponent* Rope : Ropes)
+		{
+			Rope->FinalizeSimFrame(DeltaTime);
+		}
+	}
+
+	// TODO: LOD/sleep(멀거나 안정된 로프 스킵), 프레임당 총 솔브 비용 상한.
+	// TODO: tick 순서 — 충돌은 애니메이션(본 트랜스폼) 이후가 필요. 정밀 정렬은 TG_PostPhysics tick function.
 }
 
 TStatId URopeSimSubsystem::GetStatId() const
