@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SRopeSDFAuthoringPanel.h"
 #include "RopeSDFBaker.h"
@@ -16,7 +16,7 @@
 #include "Framework/Notifications/NotificationManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
 
-// Temporary auto-save after bake.
+// 베이크 후 임시 자동저장.
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 #include "Misc/PackageName.h"
@@ -52,7 +52,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					"skinned bone into per-bone volumes and auto-saves the asset."))
 			]
 
-			// Target asset picker.
+			// 타깃 에셋 피커.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(0.0f, 0.0f, 0.0f, 8.0f)
@@ -74,7 +74,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				.OnClicked(this, &SRopeSDFAuthoringPanel::OnBakeClicked)
 			]
 
-			// Bake settings (editable before baking).
+			// 베이크 설정(베이크 전 편집 가능).
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(0.0f, 14.0f, 0.0f, 4.0f)
@@ -188,8 +188,8 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 	Data->BoneVolumes = MoveTemp(Volumes);
 	Data->MarkPackageDirty();
 
-	// Temporary: auto-save the package right after baking. (A read-only Perforce file will fail to
-	// write here — proper source-control checkout is a later refinement.)
+	// 임시: 베이크 직후 패키지를 자동저장한다. (read-only Perforce 파일이면 여기서 쓰기 실패 —
+	// 소스컨트롤 체크아웃 연동은 추후 개선.)
 	bool bSaved = false;
 	if (UPackage* Package = Data->GetPackage())
 	{

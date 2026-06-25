@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RopeSDFBaker.h"
 #include "Collision/SDF/RopeSDFData.h"
@@ -9,10 +9,9 @@
 
 namespace
 {
-	// Signed solid angle subtended by triangle (A,B,C) at the origin. The vertices must already
-	// be relative to the query point. Summed over a mesh and divided by 4*PI this yields the
-	// generalized winding number (Jacobson et al.): > 0.5 => the query point is inside the
-	// surface. Robust on open / non-watertight patches, which a single bone's triangles are.
+	// 삼각형 (A,B,C)이 원점에서 두르는 부호 있는 입체각. 정점은 이미 query점 기준 상대좌표여야 한다.
+	// 메시 전체에 대해 합산한 뒤 4*PI로 나누면 generalized winding number(Jacobson et al.)가 되며,
+	// > 0.5 이면 query점이 표면 안쪽. 닫히지 않은(non-watertight) 패치 — 본 하나의 삼각형 — 에서도 강건하다.
 	double SolidAngle(const FVector& A, const FVector& B, const FVector& C)
 	{
 		const double la = A.Size(), lb = B.Size(), lc = C.Size();
@@ -37,15 +36,15 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 	FSkeletalMeshModel* Model = Mesh->GetImportedModel();
 	if (!Model || Model->LODModels.Num() == 0)
 	{
-		return false; // no CPU geometry (cooked / stripped)
+		return false; // CPU 지오메트리 없음(쿡/스트립)
 	}
 
 	const FSkeletalMeshLODModel& LOD = Model->LODModels[0];
 	const FReferenceSkeleton& Ref = Mesh->GetRefSkeleton();
 
-	// --- (1) Component-space ref-pose transform per bone, by parent-chain accumulation.
-	// Vertices are stored in component space at the ref pose; the inverse of this places them
-	// into bone-local space, the same frame the runtime provider rebuilds via GetSocketTransform.
+	// --- (1) 본별 컴포넌트 공간 ref-pose 트랜스폼을 부모 체인 누적으로 구한다.
+	// 정점은 ref 포즈의 컴포넌트 공간에 저장돼 있다. 이 트랜스폼의 역이 정점을 본 로컬 공간으로 옮기며,
+	// 런타임 provider가 GetSocketTransform으로 재구성하는 프레임과 동일하다.
 	const TArray<FTransform>& LocalPose = Ref.GetRefBonePose();
 	TArray<FTransform> CompSpace;
 	CompSpace.SetNum(LocalPose.Num());
@@ -55,8 +54,8 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 		CompSpace[b] = (Parent == INDEX_NONE) ? LocalPose[b] : LocalPose[b] * CompSpace[Parent];
 	}
 
-	// --- (2) Flat vertex list (global index order, matches the index buffer) + the owning
-	// section per vertex, needed to resolve section-local influence indices through BoneMap.
+	// --- (2) 평탄 정점 리스트(전역 인덱스 순, 인덱스 버퍼와 일치) + 정점별 소속 섹션.
+	// 섹션 로컬 influence 인덱스를 BoneMap을 거쳐 스켈레톤 본 인덱스로 풀려면 소속 섹션이 필요하다.
 	TArray<FSoftSkinVertex> Verts;
 	LOD.GetVertices(Verts);
 
@@ -71,8 +70,8 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 		}
 	}
 
-	// Normalized skin weight of a vertex toward a skeleton bone index (scale-independent:
-	// works whether InfluenceWeights are 8- or 16-bit because we divide by their sum).
+	// 정점이 특정 스켈레톤 본에 대해 갖는 정규화 스킨 가중치(스케일 무관: 가중치 합으로 나누므로
+	// InfluenceWeights가 8비트든 16비트든 동작).
 	auto WeightFor = [&](int32 Vtx, int32 BoneIdx) -> float
 	{
 		const FSoftSkinVertex& V = Verts[Vtx];
@@ -91,7 +90,7 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 		return Sum > 0.0f ? Match / Sum : 0.0f;
 	};
 
-	// --- Target bone set. Empty input => every bone that appears in a section BoneMap (skinned).
+	// --- 타깃 본 집합. 입력이 비면 => 섹션 BoneMap에 등장하는 모든 본(= 스킨된 본).
 	TArray<int32> Targets;
 	if (BonesIn.Num() > 0)
 	{
@@ -127,7 +126,7 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 		}
 		const FTransform InvBone = CompSpace[BoneIdx].Inverse();
 
-		// --- (3) Gather this bone's triangles in bone-local space + their AABB.
+		// --- (3) 이 본의 삼각형을 본 로컬 공간으로 모으고 AABB도 함께 키운다.
 		TArray<FVector> TriA, TriB, TriC;
 		FBox Local(ForceInit);
 		for (const FSkelMeshSection& Sec : LOD.Sections)
@@ -153,10 +152,10 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 		}
 		if (TriA.Num() == 0)
 		{
-			continue; // no skin for this bone
+			continue; // 이 본에 귀속된 스킨 없음
 		}
 
-		// --- (4a) Grid sizing. Cubic voxels; raise VoxelSize if the band would exceed the cap.
+		// --- (4a) grid 크기 산정. 큐브 voxel; 밴드가 상한을 넘으면 VoxelSize를 키운다.
 		Local = Local.ExpandBy(S.BoundsPadding + S.NarrowBand);
 		float Vox = FMath::Max(S.VoxelSize, KINDA_SMALL_NUMBER);
 		const FVector Size = Local.GetSize();
@@ -179,15 +178,15 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 		Res.Y = FMath::Max(Res.Y, 2);
 		Res.Z = FMath::Max(Res.Z, 2);
 
-		// Snap bounds so spacing is EXACTLY Vox and samples sit on corners:
+		// 간격이 정확히 Vox가 되고 샘플이 코너에 놓이도록 bounds를 스냅한다:
 		// sample(x,y,z) = Min + (x,y,z) * Vox,  Max = Min + (Res - 1) * Vox.
 		const FVector Min = Local.Min;
 		const FVector Max = Min + FVector(Res.X - 1, Res.Y - 1, Res.Z - 1) * Vox;
 
-		// --- (4b) Voxelize. Per sample: unsigned distance = min point-triangle distance,
-		// sign from the winding number. Parallelized over Z slices (read-only triangle soup).
-		// TArray is int32-counted, so the linear index stays int32. Res is capped by MaxResolution
-		// (default 48 => 48^3 ~ 110k), well within range.
+		// --- (4b) voxel화. 샘플마다: unsigned 거리 = 최소 점-삼각형 거리, 부호 = winding number.
+		// Z 슬라이스로 병렬화(삼각형 수프는 읽기 전용이라 경쟁 없음).
+		// TArray는 int32 카운트라 선형 인덱스도 int32 유지. Res는 MaxResolution으로 상한
+		// (기본 48 => 48^3 ~ 110k)이라 범위 내.
 		const int32 Count = Res.X * Res.Y * Res.Z;
 		TArray<float> Distances;
 		Distances.SetNumUninitialized(Count);
@@ -209,7 +208,7 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 						Omega += SolidAngle(TriA[k] - P, TriB[k] - P, TriC[k] - P);
 					}
 					const bool bInside = (Omega / (4.0 * PI)) > 0.5;
-					float D = bInside ? -Best : Best;            // outside-positive, per the frozen FRopeContact contract
+					float D = bInside ? -Best : Best;            // 바깥쪽 양수(frozen FRopeContact 계약)
 					D = FMath::Clamp(D, -S.NarrowBand, S.NarrowBand);
 					Distances[x + y * Res.X + z * Res.X * Res.Y] = D;
 				}
