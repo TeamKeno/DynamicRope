@@ -7,6 +7,7 @@
 #include "Debug/RopeDebugDraw.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "EngineUtils.h" // TActorIterator (월드 전체 provider 수집)
 
 URopeComponent::URopeComponent()
@@ -46,6 +47,7 @@ void URopeComponent::InitRope()
 
 void URopeComponent::GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_GatherColliders);
 	OutColliders.Reset();
 	FBox RopeBounds(ForceInit);
 	for (const FVector& P : Sim.Positions)
@@ -144,6 +146,7 @@ USkeletalMeshComponent* URopeComponent::ResolveWrapTargetMesh()
 
 void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Tick);
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	if (Sim.Num() == 0)
@@ -175,6 +178,7 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 		// body를 스치는 것만으로 latch해서는 안 된다.
 		if (Phase != ERopePhase::Free)
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_DecideWrap);
 			FRopeWrapState Seed;
 			if (WrapController.DecideWrap(Sim, Colliders, WrapConfig, DeltaTime, Seed))
 			{
@@ -189,7 +193,10 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 	{
 		// logic이 latch된 node들을 소유한다(skinned bone에 올라탄다); solver는 여전히 free span을
 		// settle하여 rope가 늘어지고 node 0에서 손에 붙어 있도록 유지한다.
-		WrapController.Hold(Sim, ResolveWrapTargetMesh(), DeltaTime);
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_WrapHold);
+			WrapController.Hold(Sim, ResolveWrapTargetMesh(), DeltaTime);
+		}
 		TArray<IRopeCollider*> Colliders;
 		GatherFrameColliders(Colliders);
 		Solver.Step(Sim, SolverConfig, Colliders, DeltaTime);
@@ -208,8 +215,11 @@ void URopeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 	}
 
 	// 새 centerline을 render proxy로 push하고 bounds를 갱신한다.
-	MarkRenderDynamicDataDirty();
-	MarkRenderTransformDirty();
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_MarkRenderDirty);
+		MarkRenderDynamicDataDirty();
+		MarkRenderTransformDirty();
+	}
 
 	RopeDebug::DrawCenterline(GetWorld(), Sim, Phase, WrapController.State, bDrawDebugCenterline);
 }
