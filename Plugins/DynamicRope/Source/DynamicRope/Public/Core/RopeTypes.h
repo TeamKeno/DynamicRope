@@ -43,11 +43,10 @@ enum class ERopeReleaseReason : uint8
  *   Normal       UNIT, collider에서 노드를 향해 바깥쪽을 가리킨다(push-out 방향).
  *                불변식: NodePos += Normal*Penetration 은 노드를 표면 위에 올려놓는다.
  *                *** 부호가 load-bearing이다: 안쪽을 향하는 normal은 rope를 몸체 안으로 빨아들인다. ***
- *                SDF collider는 ∇φ를 그대로 쓰되, 베이크를 outside-positive로 고정해야 이 규약과 일치한다(아니면 ∇φ가 반전됨).
  *                축퇴(노드가 medial axis 위에 있음) => 임의의 안정적인 단위 벡터(capsule: +Z).
  *   Penetration  Normal을 따른 overlap 깊이, bHit일 때 > 0. QUERY 반지름 기준으로 측정된다:
- *                (ColliderRadius + QueryRadius) - Distance. 호출자는 solver push-out에는 SolverConfig.CollisionRadius를
- *                (= 로프 충돌 두께, 노드를 표면에서 그만큼 떨어뜨림), wrap-decision skin에는 WrapConfig.ContactRadius를 전달한다.
+ *                (ColliderRadius + QueryRadius) - Distance. 호출자는 solver push-out에는 QueryRadius 0을,
+ *                wrap-decision skin에는 WrapConfig.ContactRadius를 전달한다.
  *   SurfacePoint 노드에서 가장 가까운 collider 표면 위의 점(보조/디버그). solver에는 필수가 아니며,
  *                저렴하게 구할 수 있을 때 채운다.
  *   Bone         skeletal collider에서는 반드시 non-None — bone 귀속(attribution)으로 DecideWrap이
@@ -106,8 +105,7 @@ struct FRopeSimState
 	FVector         StartPinPrev = FVector::ZeroVector;
 	FVector         StartPinTarget = FVector::ZeroVector;
 
-	// 고정 timestep 누적기: solver는 frame당 실제 경과 시간을 누적해 고정 크기 substep으로 소비한다
-	// (frame rate 독립). 남는 시간은 다음 frame으로 이월된다.
+	// Fixed timestep accumulator. The solver consumes real frame time in fixed-size substeps.
 	float           TimeAccumulator = 0.0f;
 
 	int32 Num() const { return Positions.Num(); }
@@ -140,17 +138,15 @@ struct FRopeSolverConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Friction = 0.5f;
 
-	/** 충돌 query 반지름(cm) = 로프의 충돌 두께. solver는 이 값으로 push-out하여 노드를 표면에서
-	 *  이만큼 떨어뜨려 유지한다(0이면 무한히 얇은 점 → 대부분 관통). narrow-band보다 작게 둘 것. */
+	/** Collision query radius in cm. The solver keeps nodes this far off contact surfaces. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", Units = "cm"))
 	float CollisionRadius = 2.0f;
 
-	/** Swept(연속) 충돌 샘플 간격(cm). 작을수록 빠른 노드의 터널링이 줄지만 query가 늘어 비싸진다.
-	 *  노드 구간이 이 간격보다 짧으면 끝점만 검사한다(느린 접촉 = 추가비용 0). */
+	/** Swept collision sample spacing in cm. Lower values reduce tunneling at higher query cost. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.1", Units = "cm"))
 	float SweepStep = 2.0f;
 
-	/** Swept 충돌 구간당 최대 샘플 수(매우 빠른 노드에 대한 비용 상한). */
+	/** Maximum swept samples per segment, used as a cost cap for very fast nodes. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxSweepSamples = 16;
 
@@ -194,4 +190,113 @@ struct FRopeThrowParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0", Units = "cm"))
 	float AimAssistRadius = 100.0f;
+};
+
+//TODO 주석 추가
+struct FRopeContactCandidate
+{
+	bool bValid = false;
+	int32 NodeIndex = INDEX_NONE;
+	FName Bone = NAME_None;
+	const USkeletalMeshComponent* Mesh = nullptr;
+
+	FVector WorldPoint = FVector::ZeroVector;
+	FVector Normal = FVector::UpVector;
+	FVector SurfaceVelocity = FVector::ZeroVector;
+
+	float Penetration = 0.0f;
+	float RelativeTangentialSpeed = 0.0f;
+	float WrapDirectionScore = 0.0f; // 감김 방향이면 +, 반대면 -
+};
+
+//TODO 주석 추가
+struct FRopeContactTracker
+{
+	FName CandidateBone = NAME_None;
+	const USkeletalMeshComponent* CandidateMesh = nullptr;
+
+	TArray<int32> CandidateNodes;
+	float DwellTime = 0.0f;
+	float BestWrapScore = 0.0f;
+
+	void Reset()
+	{
+		CandidateBone = NAME_None;
+		CandidateMesh = nullptr;
+		CandidateNodes.Reset();
+		DwellTime = 0.0f;
+		BestWrapScore = 0.0f;
+	}
+
+	void BeginOrUpdate(const TArray<FRopeContactCandidate>& Candidates)
+	{
+		Update(Candidates, 0.0f);
+	}
+
+	void Decay(float DeltaTime)
+	{
+		DwellTime = FMath::Max(0.0f, DwellTime - DeltaTime);
+		if (DwellTime <= 0.0f)
+		{
+			Reset();
+		}
+	}
+
+	void Update(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime)
+	{
+		if (Candidates.Num() == 0)
+		{
+			Decay(DeltaTime);
+			return;
+		}
+
+		TMap<FName, TArray<int32>> NodesByBone;
+		TMap<FName, const USkeletalMeshComponent*> MeshByBone;
+		TMap<FName, float> ScoreByBone;
+		for (const FRopeContactCandidate& Candidate : Candidates)
+		{
+			if (!Candidate.bValid || Candidate.Bone.IsNone())
+			{
+				continue;
+			}
+
+			NodesByBone.FindOrAdd(Candidate.Bone).Add(Candidate.NodeIndex);
+			MeshByBone.FindOrAdd(Candidate.Bone) = Candidate.Mesh;
+			ScoreByBone.FindOrAdd(Candidate.Bone) += Candidate.Penetration + FMath::Max(0.0f, Candidate.WrapDirectionScore);
+		}
+
+		FName BestBone = NAME_None;
+		int32 BestCount = 0;
+		float BestScore = 0.0f;
+		for (const TPair<FName, TArray<int32>>& Pair : NodesByBone)
+		{
+			const float Score = ScoreByBone.FindRef(Pair.Key);
+			if (Pair.Value.Num() > BestCount || (Pair.Value.Num() == BestCount && Score > BestScore))
+			{
+				BestBone = Pair.Key;
+				BestCount = Pair.Value.Num();
+				BestScore = Score;
+			}
+		}
+
+		if (BestBone.IsNone())
+		{
+			Decay(DeltaTime);
+			return;
+		}
+
+		if (BestBone == CandidateBone)
+		{
+			DwellTime += DeltaTime;
+		}
+		else
+		{
+			CandidateBone = BestBone;
+			DwellTime = 0.0f;
+		}
+
+		CandidateMesh = MeshByBone.FindRef(BestBone);
+		CandidateNodes = NodesByBone.FindRef(BestBone);
+		BestWrapScore = BestScore;
+	}
 };

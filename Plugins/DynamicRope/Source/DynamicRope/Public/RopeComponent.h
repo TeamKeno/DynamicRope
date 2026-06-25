@@ -36,8 +36,7 @@ public:
 	virtual void SendRenderDynamicData_Concurrent() override;
 
 	/**
-	 * 시뮬레이션 1스텝(과거 TickComponent 본문). 컴포넌트가 직접 tick하지 않고 URopeSimSubsystem이
-	 * 매 프레임 호출한다(단일 오케스트레이션 지점 → 추후 배치/병렬화).
+	 * 시뮬레이션 1스텝. 컴포넌트가 직접 tick하지 않고 URopeSimSubsystem이 매 프레임 호출한다.
 	 */
 	void SimulateFrame(float DeltaTime);
 
@@ -78,9 +77,7 @@ public:
 	TArray<TObjectPtr<AActor>> ColliderSourceActors;
 
 	/**
-	 * [임시/테스트 편의] 켜면 ColliderSourceActors/owner를 무시하고 월드의 *모든* IRopeColliderProvider를
-	 * 수집한다. provider 붙은 actor를 일일이 등록하지 않고도 바로 테스트할 수 있다. 자기 owner도 포함되어
-	 * rope가 자기 몸에 latch할 수 있으니 주의(제품 경로에서는 끄고 명시적 소스를 쓸 것).
+	 * 테스트 편의: 켜면 ColliderSourceActors/owner를 무시하고 월드의 모든 IRopeColliderProvider를 수집한다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
 	bool bGatherProvidersFromWholeWorld = true;
@@ -114,10 +111,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	ERopePhase GetPhase() const { return Phase; }
 
-	/** 현재 wrap된 bone(없으면 None). 디버그/인트로스펙션(Gameplay Debugger, 비주얼라이저)용. */
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
-	/** 시뮬레이션된 centerline 위치(read-only). 디버그/인트로스펙션용. */
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
 
 	/**
@@ -138,6 +133,27 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnReleased OnRopeReleased;
 
+	//whip swing
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Whip")
+	float WhipElapsed = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.01", ClampMax = "1.0", Units = "s"))
+	float WhipDuration = 0.35f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "0.95"))
+	float WhipGuidedLength = 0.65f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0"))
+	float WhipFollowRate = 18.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.01", ClampMax = "1.0", Units = "s"))
+	float WhipWaveTravelTime = 0.18f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
+	float WhipArcHeight = 120.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
+	float WhipSideOffset = 35.0f;
 private:
 	ERopePhase Phase = ERopePhase::Free;
 
@@ -145,6 +161,18 @@ private:
 	FRopeSimState       Sim;
 	FRopeXPBDSolver     Solver;
 	FRopeWrapController WrapController;
+	FRopeContactTracker ContactTracker;
+	FRopeWrapState      PendingWrapSeed;
+
+	float ReleaseCooldown = 0.0f;
+	float ContactingElapsed = 0.0f;
+	float WrappedSwayTime = 0.0f;
+	FVector WrappedSwayImpulse = FVector::ZeroVector;
+
+	//whip swing
+	bool bWhipSwingActive = false;
+
+	FVector WhipAimDir = FVector::ForwardVector;
 
 	/** 매 frame solver에 collider(skeletal bone, world)를 공급하는 source들. */
 	UPROPERTY()
@@ -156,6 +184,77 @@ private:
 	/** owner로부터 IRopeColliderProvider 컴포넌트를 모아 ColliderProviders에 캐싱한다. */
 	void EnsureColliderProviders();
 
+	//TODO 주석 추가
+	void EnsureRopeInitialized(){if (Sim.Num() == 0)InitRope();	}
+
 	/** rope가 wrap할 skeletal mesh를 해석(및 캐싱)한다: 명시적 WrapTargetMesh 또는 owner의 것. */
 	USkeletalMeshComponent* ResolveWrapTargetMesh();
+
+#pragma region Throw 관련 함수
+	void StartFreshThrow(const FVector& AimDir);
+
+	void ThrowFreeSpanWhileWrapped(const FVector& AimDir);
+
+	FVector FindBestTargetDirectionNearAim(const FVector& Dir) const { return Dir; }
+
+	float TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const;
+
+#pragma endregion
+
+#pragma region Free 관련 함수
+
+	void GatherWorldColliders(TArray<IRopeCollider*>& OutColliders) const;
+
+#pragma endregion
+
+#pragma region Flight 관련 함수
+	void ApplyWhipSwing(float DeltaTime);
+
+	void DetectContactCandidates(const TArray<FVector>& PrevPositions, const TArray<FVector>& Positions,
+		const TArray<IRopeCollider*>& Colliders, TArray<FRopeContactCandidate>& OutCandidates) const;
+
+	void EvaluateRelativeMotion(TArray<FRopeContactCandidate>& Candidates) const;
+
+	FVector ExpectedWrapTangent(const FRopeContactCandidate& Candidate) const;
+
+	bool ShouldCapture(const TArray<FRopeContactCandidate>& Candidates) const;
+
+	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates);
+
+	bool IsTailNode(int32 NodeIndex) const;
+
+	float NodeSpeed(int32 NodeIndex) const;
+
+	bool IsNearAnyColliderSegment(const FVector& PrevPosition, const FVector& Position, const TArray<IRopeCollider*>& Colliders) const;
+
+	FRopeContact SweepOrSampleContact(const FVector& PrevPosition, const FVector& Position, const TArray<IRopeCollider*>& Colliders) const;
+
+	FRopeContactCandidate MakeCandidate(int32 NodeIndex, const FRopeContact& Contact) const;
+
+	bool IsWrappableBone(FName Bone) const { return !Bone.IsNone(); }
+
+#pragma endregion
+
+#pragma region Contacting 관련 함수
+
+	void AdvanceWrappingMotion(float DeltaTime);
+
+	bool ShouldDismissContacting() const;
+
+	bool ShouldFinishWrapping() const;
+
+	FRopeWrapState BuildWrapSeedFromContactingState() const;
+
+	bool ShouldCommitWrap(const FRopeContactTracker& Tracker) const;
+
+#pragma endregion
+
+#pragma region Wrapped 관련 함수
+
+	void UpdateWrappedKinematicShape(float DeltaTime);
+
+#pragma endregion
+
+	void CachePreviousRopePositions() const {}
+	void CachePreviousColliderTransforms() const {}
 };
