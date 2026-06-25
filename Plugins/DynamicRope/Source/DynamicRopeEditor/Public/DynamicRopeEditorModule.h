@@ -5,10 +5,20 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
-/** Dynamic Rope 플러그인의 에디터 module. 에디터 툴링, 커스터마이제이션, 비주얼라이저를 호스팅한다. */
+class SDockTab;
+class FSpawnTabArgs;
+
+/** Editor module for the Dynamic Rope plugin. Hosts editor tooling, customizations, and visualizers. */
 class FDynamicRopeEditorModule : public IModuleInterface
 {
 public:
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
+
+private:
+	/** Registers the SDF authoring tab entry point under the Tools menu (callback once ToolMenus is ready). */
+	void RegisterMenus();
+
+	/** Builds the content of the SDF authoring dock tab. */
+	TSharedRef<SDockTab> SpawnSDFAuthoringTab(const FSpawnTabArgs& Args);
 };
