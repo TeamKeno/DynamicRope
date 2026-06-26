@@ -8,6 +8,8 @@
 #include "Camera/CameraComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
 
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -200,6 +202,18 @@ FVector URopeWielderComponent::GetAimDirection() const
 
 void URopeWielderComponent::Throw()
 {
+	if (ThrowMontage)
+	{
+		PlayThrowMontage(); // 실제 던지기는 몽타주의 UAnimNotify_RopeThrow → ThrowNow().
+	}
+	else
+	{
+		ThrowNow();
+	}
+}
+
+void URopeWielderComponent::ThrowNow()
+{
 	ThrowInDirection(GetAimDirection());
 }
 
@@ -208,6 +222,28 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 	if (Rope)
 	{
 		Rope->Throw(AimDir);
+	}
+}
+
+void URopeWielderComponent::PlayThrowMontage()
+{
+	if (!ThrowMontage)
+	{
+		return;
+	}
+	if (!AttachMesh)
+	{
+		ResolveRefs();
+	}
+	UAnimInstance* Anim = AttachMesh ? AttachMesh->GetAnimInstance() : nullptr;
+	if (Anim)
+	{
+		Anim->Montage_Play(ThrowMontage, ThrowMontagePlayRate);
+	}
+	else
+	{
+		UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: no AnimInstance to play ThrowMontage."),
+			*GetNameSafe(GetOwner()));
 	}
 }
 

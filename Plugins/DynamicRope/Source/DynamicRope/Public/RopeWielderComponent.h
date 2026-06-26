@@ -19,6 +19,7 @@ class URopeComponent;
 class USkeletalMeshComponent;
 class UInputAction;
 class UInputMappingContext;
+class UAnimMontage;
 
 /** 던질 때 조준 방향을 어디서 가져올지. */
 UENUM(BlueprintType)
@@ -89,14 +90,37 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	bool bThrowActionToggles = true;
 
+	//~ Animation(선택) ----------------------------------------------------
+	/**
+	 * 설정하면 Throw()가 즉시 던지지 않고 이 몽타주를 재생한다. 실제 로프 던지기는 몽타주 안에 배치한
+	 * UAnimNotify_RopeThrow가 ThrowNow()를 호출해 일어난다(던지는 모션의 손 떼는 순간에 맞춤).
+	 * 비우면 Throw()가 즉시 던진다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation")
+	TObjectPtr<UAnimMontage> ThrowMontage = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation", meta = (ClampMin = "0.1"))
+	float ThrowMontagePlayRate = 1.0f;
+
 	//~ API ----------------------------------------------------------------
-	/** 현재 AimSource 방향으로 로프를 던진다. */
+	/**
+	 * 던지기 시작. ThrowMontage가 설정돼 있으면 몽타주를 재생(실제 던지기는 몽타주의 UAnimNotify_RopeThrow가
+	 * ThrowNow() 호출), 없으면 즉시 ThrowNow(). 입력/게임플레이가 호출하는 진입점.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Throw();
 
-	/** 지정 방향으로 던진다(AimSource 무시). */
+	/** 실제 로프 던지기를 *지금* 실행한다(현재 AimSource 방향). 던지는 모션 몽타주의 AnimNotify가 호출. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void ThrowNow();
+
+	/** 지정 방향으로 *지금* 던진다(AimSource 무시). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowInDirection(const FVector& AimDir);
+
+	/** ThrowMontage를 owner 메시의 AnimInstance에서 재생한다(설정돼 있을 때). */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void PlayThrowMontage();
 
 	/** 현재 wrap을 해제한다. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
