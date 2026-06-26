@@ -28,11 +28,11 @@ enum class ERopeSDFSliceAxis : uint8
 UENUM()
 enum class ERopeSDFBoneFilterMode : uint8
 {
-	/** 베이크된 모든 본을 사용(기본 — 필터 없음). */
+	/** Use every baked bone (default - no filtering). */
 	All,
-	/** BoneFilter에 나열된 본만 collider화. */
+	/** Collide only with the bones listed in Bone Filter. */
 	Include,
-	/** BoneFilter에 나열된 본만 제외. */
+	/** Collide with every baked bone except those listed in Bone Filter. */
 	Exclude
 };
 
@@ -53,16 +53,16 @@ public:
 	TObjectPtr<USkeletalMeshComponent> SkeletalMesh = nullptr;
 
 	/**
-	 * 베이크는 그대로 둔 채, 어떤 본을 실제 collider로 노출할지 고르는 런타임 필터(디버깅/격리용).
-	 * All이면 베이크된 모든 본 사용(기존 동작). Include/Exclude면 아래 BoneFilter로 본을 가린다.
-	 * 재베이크 없이 디테일 패널에서 즉시 토글 가능.
+	 * Runtime filter selecting which baked bones are exposed as colliders (for debugging / isolation).
+	 * All = use every baked bone (existing behaviour); Include/Exclude apply the Bone Filter list below.
+	 * Baking is left untouched - toggles live in the details panel with no re-bake.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	ERopeSDFBoneFilterMode BoneFilterMode = ERopeSDFBoneFilterMode::All;
 
 	/**
-	 * Include/Exclude 모드에서 대상이 되는 본 목록. All 모드에서는 무시된다.
-	 * GetOptions로 SDFData에 실제 베이크된 본 이름만 드롭다운에 노출한다(스켈레톤 전체가 아님).
+	 * Bones targeted in Include/Exclude mode (ignored when mode is All).
+	 * The dropdown lists only bones actually baked into the SDFData asset, not the whole skeleton.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision",
 		meta = (EditCondition = "BoneFilterMode != ERopeSDFBoneFilterMode::All", GetOptions = "GetBakedBoneNames"))
