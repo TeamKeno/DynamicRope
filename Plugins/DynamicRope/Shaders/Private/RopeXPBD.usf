@@ -23,18 +23,39 @@ struct FRopeGPUParams
 	float BendCompliance;
 	float Damping;
 	int   bStartPinned;
-	float Pad0;
-	float Pad1;
+	int   CapsuleOffset;     // 이 로프의 capsule이 시작하는 글로벌 인덱스(M2)
+	int   NumCapsules;       // 이 로프에 적용할 capsule 수(0이면 충돌 없음)
+	float CollisionRadius;   // 로프 노드 두께
+	float Friction;          // 접선 감쇠 [0..1]
+	float SweepStep;         // swept 샘플 간격(cm)
+	int   MaxSweepSamples;   // 세그먼트당 샘플 상한
 	float4 Gravity;   // xyz 사용
 	float4 PinPrev;   // xyz 사용
 	float4 PinTarget; // xyz 사용
 };
 
+// GPU 충돌(M2)용 해석적 capsule. xyz=세그먼트 끝점, B.w=반지름.
+struct FRopeCapsule
+{
+	float4 A;
+	float4 B; // w = Radius
+};
+
 uint NumRopes;
 StructuredBuffer<FRopeGPUParams> Params;
+StructuredBuffer<FRopeCapsule>   Capsules;       // 전 로프 capsule 평탄 배열(per-rope offset/count는 Params)
 StructuredBuffer<float>          InvMass;
 RWStructuredBuffer<float4>        Positions;     // xyz 사용(w=0)
 RWStructuredBuffer<float4>        PrevPositions; // xyz 사용(w=0)
+
+// 점 P에서 세그먼트 A-B 위 최근접점. CPU FMath::ClosestPointOnSegment 미러(t를 [0,1]로 clamp).
+float3 RopeClosestPointOnSegment(float3 P, float3 A, float3 B)
+{
+	const float3 AB = B - A;
+	const float Denom = max(dot(AB, AB), 1e-8f);
+	const float T = saturate(dot(P - A, AB) / Denom);
+	return A + T * AB;
+}
 
 groupshared float3 gPos[ROPE_MAX_NODES];
 groupshared float3 gPrev[ROPE_MAX_NODES];
@@ -165,6 +186,49 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 				GroupMemoryBarrierWithGroupSync();
 			}
 		}
+
+		// --- Collision(M2): substep당 1회(iteration 루프 뒤). capsule push-out + friction.
+		// CPU SolveCollisions 미러: A=substep 시작(gPrev), 각 capsule마다 A->현재 위치를 swept 샘플,
+		// 첫 접촉에서 표면 밖으로 밀고 접선 속도를 friction만큼 깎는다. 노드별 독립이라 그룹 동기는 불필요.
+		if (bActiveNode && gInvMass[i] > 0.0f && P.NumCapsules > 0)
+		{
+			const float3 SegA = gPrev[i];
+			const float  Friction = clamp(P.Friction, 0.0f, 1.0f);
+			const float  SweepStep = max(P.SweepStep, 0.1f);
+			const int    MaxSamples = max(P.MaxSweepSamples, 1);
+
+			for (int c = 0; c < P.NumCapsules; ++c)
+			{
+				const FRopeCapsule Cap = Capsules[P.CapsuleOffset + c];
+				const float3 SegB = gPos[i]; // 앞선 capsule이 밀었을 수 있음
+				const float  L = distance(SegA, SegB);
+				const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
+
+				for (int k = 0; k < NumSamples; ++k)
+				{
+					const float  T = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
+					const float3 Pt = lerp(SegA, SegB, T);
+					const float3 Closest = RopeClosestPointOnSegment(Pt, Cap.A.xyz, Cap.B.xyz);
+					const float3 ToNode = Pt - Closest;
+					const float  Dist = length(ToNode);
+					const float  MinDist = Cap.B.w + P.CollisionRadius; // capsule 반지름 + 노드 두께
+					if (Dist < MinDist)
+					{
+						const float3 Normal = (Dist > 1e-4f) ? (ToNode / Dist) : float3(0.0f, 0.0f, 1.0f);
+						const float  Pen = MinDist - Dist;
+						gPos[i] = Pt + Normal * Pen;
+						if (Friction > 0.0f)
+						{
+							const float3 Delta = gPos[i] - gPrev[i];
+							const float3 Tangent = Delta - dot(Delta, Normal) * Normal;
+							gPrev[i] += Tangent * Friction;
+						}
+						break; // 이 capsule의 첫 접촉에서 종료
+					}
+				}
+			}
+		}
+		GroupMemoryBarrierWithGroupSync();
 	}
 
 	// --- write-back

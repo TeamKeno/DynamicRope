@@ -27,13 +27,25 @@ struct FRopeGPUParamsGPU
 	float     BendCompliance;
 	float     Damping;
 	int32     bStartPinned;
-	float     Pad0 = 0.0f;
-	float     Pad1 = 0.0f;
+	int32     CapsuleOffset;   // M2: 이 로프의 capsule 글로벌 시작 인덱스
+	int32     NumCapsules;     // M2: capsule 수(0이면 충돌 없음)
+	float     CollisionRadius; // M2: 노드 두께
+	float     Friction;        // M2: 접선 감쇠
+	float     SweepStep;       // M2: swept 샘플 간격
+	int32     MaxSweepSamples; // M2: 세그먼트당 샘플 상한
 	FVector4f Gravity;
 	FVector4f PinPrev;
 	FVector4f PinTarget;
 };
 static_assert(sizeof(FRopeGPUParamsGPU) % 16 == 0, "FRopeGPUParamsGPU must be 16-byte aligned to match HLSL structured buffer.");
+
+// HLSL FRopeCapsule와 1:1 미러. xyz=세그먼트 끝점, B.w=반지름.
+struct FRopeCapsuleGPU
+{
+	FVector4f A;
+	FVector4f B; // w = Radius
+};
+static_assert(sizeof(FRopeCapsuleGPU) % 16 == 0, "FRopeCapsuleGPU must be 16-byte aligned to match HLSL structured buffer.");
 
 class FRopeXPBDSolveCS : public FGlobalShader
 {
@@ -44,6 +56,7 @@ public:
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, NumRopes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeGPUParams>, Params)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeCapsule>, Capsules)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, InvMass)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, Positions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, PrevPositions)
@@ -72,6 +85,7 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 	TArray<FVector4f>          Positions;
 	TArray<FVector4f>          PrevPositions;
 	TArray<float>              InvMass;
+	TArray<FRopeCapsuleGPU>    CapsulesFlat;
 	TArray<FRopeGPUParamsGPU>  Params;
 	TArray<FFlatRope>          Flat;
 
@@ -96,6 +110,18 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 			InvMass.Add(Job.InvMass[k]);
 		}
 
+		// 충돌(M2): 이 로프의 capsule을 글로벌 배열에 평탄화하고 per-rope offset/count 기록.
+		const int32 CapOffset = CapsulesFlat.Num();
+		const int32 CapCount = (Job.Capsules != nullptr) ? FMath::Max(0, Job.NumCapsules) : 0;
+		for (int32 c = 0; c < CapCount; ++c)
+		{
+			const FRopeGPUCapsule& Cap = Job.Capsules[c];
+			FRopeCapsuleGPU G;
+			G.A = FVector4f((float)Cap.A.X, (float)Cap.A.Y, (float)Cap.A.Z, 0.0f);
+			G.B = FVector4f((float)Cap.B.X, (float)Cap.B.Y, (float)Cap.B.Z, Cap.Radius);
+			CapsulesFlat.Add(G);
+		}
+
 		FRopeGPUParamsGPU P;
 		P.NodeOffset        = Offset;
 		P.NumNodes          = N;
@@ -107,6 +133,12 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 		P.BendCompliance    = Job.BendCompliance;
 		P.Damping           = Job.Damping;
 		P.bStartPinned      = Job.bStartPinned ? 1 : 0;
+		P.CapsuleOffset     = CapOffset;
+		P.NumCapsules       = CapCount;
+		P.CollisionRadius   = Job.CollisionRadius;
+		P.Friction          = Job.Friction;
+		P.SweepStep         = Job.SweepStep;
+		P.MaxSweepSamples   = FMath::Max(1, Job.MaxSweepSamples);
 		P.Gravity           = FVector4f((float)Job.Gravity.X, (float)Job.Gravity.Y, (float)Job.Gravity.Z, 0.0f);
 		P.PinPrev           = FVector4f((float)Job.StartPinPrev.X, (float)Job.StartPinPrev.Y, (float)Job.StartPinPrev.Z, 0.0f);
 		P.PinTarget         = FVector4f((float)Job.StartPinTarget.X, (float)Job.StartPinTarget.Y, (float)Job.StartPinTarget.Z, 0.0f);
@@ -120,8 +152,15 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 		return;
 	}
 
+	// 구조화 버퍼는 원소 >=1 이어야 한다 — capsule이 하나도 없으면 더미 1개(어느 로프도 참조 안 함).
+	if (CapsulesFlat.Num() == 0)
+	{
+		CapsulesFlat.AddZeroed(1);
+	}
+
 	const int32 TotalNodes = Positions.Num();
 	const int32 NumRopes = Params.Num();
+	const int32 NumCapsulesTotal = CapsulesFlat.Num();
 
 	// 리드백 결과를 받을 GT 스택 버퍼. FlushRenderingCommands가 커맨드 완료를 보장하므로 포인터 캡처가 안전하다.
 	TArray<FVector4f> OutPos;
@@ -133,12 +172,15 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 
 	ENQUEUE_RENDER_COMMAND(RopeGPUSolveBatch)(
 		[Params = MoveTemp(Params), Positions = MoveTemp(Positions), PrevPositions = MoveTemp(PrevPositions),
-		 InvMass = MoveTemp(InvMass), TotalNodes, NumRopes, OutPosPtr, OutPrevPtr](FRHICommandListImmediate& RHICmdList)
+		 InvMass = MoveTemp(InvMass), CapsulesFlat = MoveTemp(CapsulesFlat), TotalNodes, NumRopes, NumCapsulesTotal,
+		 OutPosPtr, OutPrevPtr](FRHICommandListImmediate& RHICmdList)
 		{
 			FRDGBuilder GraphBuilder(RHICmdList);
 
 			FRDGBufferRef ParamsBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Params"),
 				sizeof(FRopeGPUParamsGPU), NumRopes, Params.GetData(), (uint64)NumRopes * sizeof(FRopeGPUParamsGPU));
+			FRDGBufferRef CapsulesBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Capsules"),
+				sizeof(FRopeCapsuleGPU), NumCapsulesTotal, CapsulesFlat.GetData(), (uint64)NumCapsulesTotal * sizeof(FRopeCapsuleGPU));
 			FRDGBufferRef InvMassBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.InvMass"),
 				sizeof(float), TotalNodes, InvMass.GetData(), (uint64)TotalNodes * sizeof(float));
 			FRDGBufferRef PosBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Positions"),
@@ -149,6 +191,7 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 			FRopeXPBDSolveCS::FParameters* PassParams = GraphBuilder.AllocParameters<FRopeXPBDSolveCS::FParameters>();
 			PassParams->NumRopes      = (uint32)NumRopes;
 			PassParams->Params        = GraphBuilder.CreateSRV(ParamsBuf);
+			PassParams->Capsules      = GraphBuilder.CreateSRV(CapsulesBuf);
 			PassParams->InvMass       = GraphBuilder.CreateSRV(InvMassBuf);
 			PassParams->Positions     = GraphBuilder.CreateUAV(PosBuf);
 			PassParams->PrevPositions = GraphBuilder.CreateUAV(PrevBuf);

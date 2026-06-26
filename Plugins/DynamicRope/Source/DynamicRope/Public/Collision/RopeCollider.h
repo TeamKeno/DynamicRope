@@ -25,6 +25,13 @@ public:
 
 	/** broad-phase culling용 월드 공간 bounds. */
 	virtual FBox GetWorldBounds() const = 0;
+
+	/**
+	 * GPU 솔버(M2)용: 이 collider가 해석적 capsule이면 월드 공간 세그먼트(A-B)와 반지름을 채우고 true.
+	 * 기본은 false(미지원) — RTTI가 꺼져 있어 dynamic_cast 대신 이 가상 accessor로 capsule을 식별한다.
+	 * SDF/기타 collider는 GPU capsule 경로에서 제외된다(M3에서 Texture3D SDF로 별도 처리).
+	 */
+	virtual bool GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRadius) const { return false; }
 };
 
 /** 해석적 capsule(swept-sphere 세그먼트). v1 / fallback. 추후 per-bone SDF로 대체된다. */
@@ -47,4 +54,5 @@ public:
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
 	virtual FBox GetWorldBounds() const override;
+	virtual bool GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRadius) const override;
 };

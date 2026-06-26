@@ -38,3 +38,12 @@ FBox FCapsuleCollider::GetWorldBounds() const
 	Box += B;
 	return Box.ExpandBy(Radius);
 }
+
+bool FCapsuleCollider::GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRadius) const
+{
+	// 월드 공간 세그먼트 + 반지름을 그대로 넘긴다. GPU 솔버가 CPU Query와 동일한 segment 최근접 push-out을 수행한다.
+	OutA = A;
+	OutB = B;
+	OutRadius = Radius;
+	return true;
+}
