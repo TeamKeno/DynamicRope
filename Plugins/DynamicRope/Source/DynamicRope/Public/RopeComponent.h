@@ -205,8 +205,6 @@ private:
 
 	void ThrowFreeSpanWhileWrapped(const FVector& AimDir);
 
-	FVector FindBestTargetDirectionNearAim(const FVector& Dir) const { return Dir; }
-
 	float TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const;
 
 #pragma endregion
@@ -258,7 +256,4 @@ private:
 	void UpdateWrappedKinematicShape(float DeltaTime);
 
 #pragma endregion
-
-	void CachePreviousRopePositions() const {}
-	void CachePreviousColliderTransforms() const {}
 };

@@ -17,13 +17,9 @@ namespace
 		TEXT("r.DynamicRope.Debug.Centerline"), 1,
 		TEXT("중심선/노드/latch 노드 표시."), ECVF_Cheat);
 
-	TAutoConsoleVariable<int32> CVarRopeDebugBounds(
-		TEXT("r.DynamicRope.Debug.Bounds"), 0,
-		TEXT("브로드페이즈 bounds 박스 표시."), ECVF_Cheat);
-
-	TAutoConsoleVariable<int32> CVarRopeDebugStats(
-		TEXT("r.DynamicRope.Debug.Stats"), 1,
-		TEXT("온스크린 phase/collider/wrap 통계 표시."), ECVF_Cheat);
+	TAutoConsoleVariable<int32> CVarRopeDebugColliders(
+		TEXT("r.DynamicRope.Debug.Colliders"), 1,
+		TEXT("provider collider(capsule / SDF 볼륨 bounds) 표시. provider별 bDrawDebug과 OR된다."), ECVF_Cheat);
 
 	FColor PhaseColor(ERopePhase Phase)
 	{
@@ -72,32 +68,32 @@ void RopeDebug::DrawCenterline(const UWorld* World, const FRopeSimState& Sim, ER
 	}
 }
 
-void RopeDebug::DrawBounds(const UWorld* World, const FBox& Bounds, bool bInstanceForce)
+void RopeDebug::DrawCapsule(const UWorld* World, const FVector& A, const FVector& B, float Radius, bool bInstanceForce)
 {
-	if (!World || !Bounds.IsValid || !IsEnabled(bInstanceForce) || CVarRopeDebugBounds.GetValueOnGameThread() == 0)
+	if (!World || !IsEnabled(bInstanceForce) || CVarRopeDebugColliders.GetValueOnGameThread() == 0)
 	{
 		return;
 	}
-	DrawDebugBox(World, Bounds.GetCenter(), Bounds.GetExtent(), FColor::Orange, false, -1.0f, 0, 0.5f);
+	const FVector Center = (A + B) * 0.5f;
+	const float   HalfHeight = static_cast<float>((B - A).Size()) * 0.5f + Radius;
+	const FQuat   Rot = FRotationMatrix::MakeFromZ(B - A).ToQuat();
+	DrawDebugCapsule(World, Center, HalfHeight, Radius, Rot, FColor::Green, false, -1.0f, 0, 0.5f);
 }
 
-void RopeDebug::DrawStats(const UWorld* World, uint64 Key, ERopePhase Phase,
-	int32 ProviderCount, int32 ColliderCount, FName WrapBone, bool bInstanceForce)
+void RopeDebug::DrawColliderBounds(const UWorld* World, const FBox& WorldBounds, bool bInstanceForce)
 {
-	if (!World || !GEngine || !IsEnabled(bInstanceForce) || CVarRopeDebugStats.GetValueOnGameThread() == 0)
+	if (!World || !WorldBounds.IsValid || !IsEnabled(bInstanceForce) || CVarRopeDebugColliders.GetValueOnGameThread() == 0)
 	{
 		return;
 	}
-	GEngine->AddOnScreenDebugMessage(static_cast<uint64>(Key), 0.0f, PhaseColor(Phase),
-		FString::Printf(TEXT("[Rope] phase=%d providers=%d colliders=%d wrapBone=%s"),
-			static_cast<int32>(Phase), ProviderCount, ColliderCount, *WrapBone.ToString()));
+	DrawDebugBox(World, WorldBounds.GetCenter(), WorldBounds.GetExtent(), FColor::Green, false, -1.0f, 0, 0.5f);
 }
 
 #else // UE_BUILD_SHIPPING — 모두 no-op
 
 bool RopeDebug::IsEnabled(bool) { return false; }
 void RopeDebug::DrawCenterline(const UWorld*, const FRopeSimState&, ERopePhase, const FRopeWrapState&, bool) {}
-void RopeDebug::DrawBounds(const UWorld*, const FBox&, bool) {}
-void RopeDebug::DrawStats(const UWorld*, uint64, ERopePhase, int32, int32, FName, bool) {}
+void RopeDebug::DrawCapsule(const UWorld*, const FVector&, const FVector&, float, bool) {}
+void RopeDebug::DrawColliderBounds(const UWorld*, const FBox&, bool) {}
 
 #endif

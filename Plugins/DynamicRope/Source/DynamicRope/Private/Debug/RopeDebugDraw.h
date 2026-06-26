@@ -20,10 +20,9 @@ namespace RopeDebug
 	void DrawCenterline(const UWorld* World, const FRopeSimState& Sim, ERopePhase Phase,
 		const FRopeWrapState& Wrap, bool bInstanceForce);
 
-	/** 브로드페이즈 bounds 박스. */
-	void DrawBounds(const UWorld* World, const FBox& Bounds, bool bInstanceForce);
+	/** provider collider 시각화(중앙화): 본 capsule(A-B 세그먼트 + 반지름). r.DynamicRope.Debug.Colliders로 게이트. */
+	void DrawCapsule(const UWorld* World, const FVector& A, const FVector& B, float Radius, bool bInstanceForce);
 
-	/** 온스크린 통계 텍스트(phase / provider·collider 수 / wrap bone). Key는 메시지 슬롯 식별자. */
-	void DrawStats(const UWorld* World, uint64 Key, ERopePhase Phase,
-		int32 ProviderCount, int32 ColliderCount, FName WrapBone, bool bInstanceForce);
+	/** provider collider 시각화: collider 월드 bounds 박스(예: SDF 볼륨). */
+	void DrawColliderBounds(const UWorld* World, const FBox& WorldBounds, bool bInstanceForce);
 }

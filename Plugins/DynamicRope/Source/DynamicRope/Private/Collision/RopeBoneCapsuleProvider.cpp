@@ -3,9 +3,9 @@
 #include "Collision/RopeBoneCapsuleProvider.h"
 #include "DynamicRopeLog.h"
 #include "Subsystem/RopeSimSubsystem.h"
+#include "Debug/RopeDebugDraw.h" // 디버그 드로우 중앙화(RopeDebug::DrawCapsule)
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
-#include "DrawDebugHelpers.h"
 
 URopeBoneCapsuleProvider::URopeBoneCapsuleProvider()
 {
@@ -70,18 +70,8 @@ void URopeBoneCapsuleProvider::GatherColliders(const FBox& /*RopeBounds*/, TArra
 			const FVector  P1 = Parent.IsNone() ? P0 : Mesh->GetSocketTransform(Parent).GetLocation();
 			Capsules.Add(FCapsuleCollider(P0, P1, CapsuleRadius, Bone, Mesh));
 
-#if ENABLE_DRAW_DEBUG
-			if (bDrawDebug)
-			{
-				if (UWorld* World = GetWorld())
-				{
-					const FVector Center = (P0 + P1) * 0.5f;
-					const float   HalfHeight = static_cast<float>((P1 - P0).Size()) * 0.5f + CapsuleRadius;
-					const FQuat   Rot = FRotationMatrix::MakeFromZ(P1 - P0).ToQuat();
-					DrawDebugCapsule(World, Center, HalfHeight, CapsuleRadius, Rot, FColor::Green, false, -1.0f, 0, 0.5f);
-				}
-			}
-#endif
+			// 디버그 드로우 중앙화: bDrawDebug(per-instance) 또는 r.DynamicRope.Debug(.Colliders)로 게이트.
+			RopeDebug::DrawCapsule(GetWorld(), P0, P1, CapsuleRadius, bDrawDebug);
 		}
 
 		UE_LOG(LogRopeCollision, VeryVerbose, TEXT("CapsuleProvider on %s: built %d capsule(s) from %d bone(s)."),

@@ -108,7 +108,7 @@ void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void URopeComponent::StartFreshThrow(const FVector& AimDir)
 {
-	WhipAimDir = FindBestTargetDirectionNearAim(AimDir.GetSafeNormal()).GetSafeNormal();
+	WhipAimDir = AimDir.GetSafeNormal();
 	if (WhipAimDir.IsNearlyZero())
 	{
 		WhipAimDir = GetForwardVector();
