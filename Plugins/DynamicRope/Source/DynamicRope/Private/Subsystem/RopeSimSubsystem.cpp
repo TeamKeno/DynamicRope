@@ -99,6 +99,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			// GPU 상주 대상: Free/Flight(bSolveThisFrame)이고 whip이 아니며 노드수가 한도 내일 때.
 			const bool bGpuRope = Rope->bSolveThisFrame && !Rope->bWhipSwingActive
 				&& S.Num() >= 2 && S.Num() <= FRopeGPUSolver::MaxNodes;
+			// M5b: 이 프레임에 GPU step되는 로프만 렌더가 resident PosBuf를 직접 읽는다(아니면 stale → CPU 미러).
+			Rope->bGpuSteppedThisFrame = bGpuRope;
 			if (!bGpuRope)
 			{
 				// whip/폴백: CPU 솔브(Free/Flight일 때만). logic phase는 bSolveThisFrame=false라 자동 스킵.
@@ -201,6 +203,7 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SolveParallel);
 		ParallelFor(Ropes.Num(), [this, DeltaTime](int32 Index)
 		{
+			Ropes[Index]->bGpuSteppedThisFrame = false; // CPU 경로 → resident 렌더 안 함(M5b).
 			Ropes[Index]->SolveSimFrame(DeltaTime);
 		});
 	}

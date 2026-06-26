@@ -97,6 +97,7 @@ struct FRopeResidentLatest
  * 월드별 1개를 소유한다. CPU 솔버는 ground-truth로 유지.
  */
 class FRHIGPUBufferReadback;
+class FRHIShaderResourceView;
 
 class DYNAMICROPESHADERS_API FRopeGPUSolver
 {
@@ -106,6 +107,13 @@ public:
 
 	FRopeGPUSolver();
 	~FRopeGPUSolver();
+
+	/**
+	 * 렌더 스레드. 로프의 resident PosBuf(StructuredBuffer<float4>, 월드 위치) SRV를 반환(없으면 null).
+	 * M5b B2-lite: scene proxy가 이 SRV를 직접 읽어 튜브를 GPU 생성 → 위치 무지연(렌더 리드백 없음).
+	 * 솔버가 이 로프를 step한 적이 없으면(= GPU 솔버 off) null → 호출자는 CPU 경로로 폴백한다.
+	 */
+	FRHIShaderResourceView* GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes);
 
 	/** 이번 프레임 상주 step들을 렌더 스레드로 넘겨 GPU에서 in-place 전진(블록 없음). step은 소비된다(MoveTemp). */
 	void Step(TArray<FRopeGPUResidentStep>&& Steps);

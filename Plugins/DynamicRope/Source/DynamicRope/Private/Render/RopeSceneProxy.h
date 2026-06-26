@@ -17,11 +17,15 @@
 
 class URopeComponent;
 class UMaterialInterface;
+class FRopeGPUSolver;
 
 /** render thread로 넘기는 dynamic 데이터: component-local 공간의 centerline. */
 struct FRopeDynamicData
 {
 	TArray<FVector> Points;
+	// M5b: 이 프레임에 로프가 GPU에서 step됐는가 → true면 GPU 튜브가 resident PosBuf를 직접 읽어도 됨(무지연).
+	// false(whip/CPU-폴백/솔버 off)면 resident는 stale이므로 위 Points(CPU 미러)로 그린다.
+	bool bGpuResident = false;
 };
 
 /** Dynamic index buffer (topology은 proxy의 수명 동안 고정된다). */
@@ -30,6 +34,33 @@ class FRopeIndexBuffer final : public FIndexBuffer
 public:
 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	int32 NumIndices = 0;
+};
+
+/**
+ * M5b: 컴퓨트가 써넣는 UAV 가능 position vertex buffer(VF의 position stream). GPU write라 non-dynamic.
+ * R32_FLOAT 타입 SRV(PositionComponentSRV) + UAV(컴퓨트 write). 정점 v 위치 = float[v*3..].
+ */
+class FRopeGpuPositionBuffer final : public FVertexBuffer
+{
+public:
+	int32 NumVertices = 0;
+	FShaderResourceViewRHIRef SRV;
+	FUnorderedAccessViewRHIRef UAV;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	virtual void ReleaseRHI() override;
+};
+
+/**
+ * M5b(B1 임시): 매 프레임 CPU centerline(component-local)을 올려 튜브 컴퓨트가 읽는 버퍼. Dynamic + R32_FLOAT SRV.
+ * (B2에서 센터라인 소스를 솔버 PosBuf로 바꾸면 제거된다.)
+ */
+class FRopeCenterlineBuffer final : public FVertexBuffer
+{
+public:
+	int32 NumFloats = 0;
+	FShaderResourceViewRHIRef SRV;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	virtual void ReleaseRHI() override;
 };
 
 class FRopeSceneProxy final : public FPrimitiveSceneProxy
@@ -55,14 +86,29 @@ private:
 	int32 GetRequiredIndexCount() const { return (NumRings - 1) * NumSides * 2 * 3; }
 	int32 GetVertIndex(int32 RingIdx, int32 SideIdx) const { return RingIdx * (NumSides + 1) + SideIdx; }
 
-	/** Render-thread: tube의 vertex/index를 재생성해 GPU buffer로 업로드한다. */
+	/** Render-thread: tube의 vertex/index를 재생성해 GPU buffer로 업로드한다(CPU 경로). */
 	void BuildTube(FRHICommandListBase& RHICmdList, const FRopeDynamicData& Data);
+
+	/**
+	 * M5b(B1): position을 GPU 컴퓨트로 생성(tangent/UV/color는 CPU 유지). centerline을 업로드해 RopeBuildTube
+	 * 디스패치로 GpuPositionBuffer(UAV)에 기록. UAV binding 검증용 — r.DynamicRope.GPUTube로 켠다.
+	 */
+	void BuildTubeGPU(FRHICommandListBase& RHICmdList, const FRopeDynamicData& Data);
 
 	UMaterialInterface* Material;
 	FStaticMeshVertexBuffers VertexBuffers;
 	FRopeIndexBuffer IndexBuffer;
 	FLocalVertexFactory VertexFactory;
 	FMaterialRelevance MaterialRelevance;
+
+	// M5b: GPU 튜브 경로(r.DynamicRope.GPUTube). proxy 생성 시점에 한 번 결정(런타임 토글은 재생성 후 반영).
+	bool bUseGpuTube = false;
+	FRopeGpuPositionBuffer GpuPositionBuffer;
+	FRopeCenterlineBuffer  CenterlineBuffer;
+
+	// M5b B2-lite: 솔버 resident PosBuf를 직접 읽어 위치 무지연. 솔버는 월드 수명이라 proxy 동안 유효(없으면 B1 폴백).
+	FRopeGPUSolver* SolverPtr = nullptr;
+	uint32 RopeId = 0;
 
 	int32 NumRings;
 	int32 NumSides;

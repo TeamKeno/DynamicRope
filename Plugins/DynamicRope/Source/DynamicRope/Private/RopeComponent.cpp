@@ -564,6 +564,7 @@ void URopeComponent::SendRenderDynamicData_Concurrent()
 	// centerline을 component-local 공간으로 보낸다; proxy는 GetLocalToWorld()를 통해 렌더링한다.
 	const FTransform Xform = GetComponentTransform();
 	FRopeDynamicData* DynamicData = new FRopeDynamicData;
+	DynamicData->bGpuResident = bGpuSteppedThisFrame; // M5b: GPU step된 프레임만 resident PosBuf 직접 렌더 허용.
 	DynamicData->Points.SetNumUninitialized(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{

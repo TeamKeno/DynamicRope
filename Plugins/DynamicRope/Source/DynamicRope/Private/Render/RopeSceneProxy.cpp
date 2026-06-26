@@ -12,6 +12,20 @@
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveUniformShaderParametersBuilder.h"
 #include "Engine/Engine.h"
+#include "RopeTubeBuilder.h"        // RopeGPU::BuildTube_RenderThread (DynamicRopeShaders 모듈) — M5b
+#include "RopeGPUSolver.h"          // FRopeGPUSolver::GetResidentPositionSRV_RenderThread — M5b B2-lite
+#include "Subsystem/RopeSimSubsystem.h"
+#include "RHICommandList.h"         // FRHITransitionInfo
+#include "HAL/IConsoleManager.h"
+
+// M5b: 1이면 튜브 position을 GPU 컴퓨트로 생성(UAV vertex buffer)해 렌더 리드백을 줄인다(검증 단계 B1: position만,
+// tangent/UV/color는 CPU 유지). 0이면 기존 CPU BuildTube. proxy 생성 시점에 한 번 읽으므로, 토글 후엔 렌더 상태
+// 재생성(예: 재PIE/가시성 토글)이 필요하다.
+static TAutoConsoleVariable<int32> CVarRopeGPUTube(
+	TEXT("r.DynamicRope.GPUTube"),
+	0,
+	TEXT("DynamicRope: 0=CPU 튜브 빌드(기본), 1=GPU 컴퓨트로 position 생성(M5b UAV vertex buffer 검증)."),
+	ECVF_Default);
 
 void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
@@ -21,6 +35,51 @@ void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 		.DetermineInitialState();
 
 	IndexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+}
+
+// M5b: UAV 가능 position vertex buffer. 컴퓨트가 R32_FLOAT UAV로 쓰고, VF가 R32_FLOAT SRV/stream으로 읽는다.
+void FRopeGpuPositionBuffer::InitRHI(FRHICommandListBase& RHICmdList)
+{
+	const uint32 Bytes = static_cast<uint32>(NumVertices) * sizeof(FVector3f);
+	const FRHIBufferCreateDesc CreateDesc =
+		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuPositionBuffer"), Bytes)
+		.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
+		.DetermineInitialState();
+	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+
+	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
+		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R32_FLOAT));
+	UAV = RHICmdList.CreateUnorderedAccessView(VertexBufferRHI,
+		FRHIViewDesc::CreateBufferUAV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R32_FLOAT));
+}
+
+void FRopeGpuPositionBuffer::ReleaseRHI()
+{
+	SRV.SafeRelease();
+	UAV.SafeRelease();
+	FVertexBuffer::ReleaseRHI();
+}
+
+// M5b(B1 임시): 매 프레임 CPU centerline을 올려 컴퓨트가 읽는 버퍼. R32_FLOAT SRV.
+// Dynamic 미사용 — Dynamic은 lock 시 backing을 orphan해 영속 SRV를 무효화할 수 있다(FPositionVertexBuffer와
+// 동일하게 static+ShaderResource를 매 프레임 lock하면 SRV가 유지된다).
+void FRopeCenterlineBuffer::InitRHI(FRHICommandListBase& RHICmdList)
+{
+	const uint32 Bytes = static_cast<uint32>(NumFloats) * sizeof(float);
+	const FRHIBufferCreateDesc CreateDesc =
+		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeCenterlineBuffer"), Bytes)
+		.AddUsage(EBufferUsageFlags::ShaderResource)
+		.DetermineInitialState();
+	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+
+	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
+		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R32_FLOAT));
+}
+
+void FRopeCenterlineBuffer::ReleaseRHI()
+{
+	SRV.SafeRelease();
+	FVertexBuffer::ReleaseRHI();
 }
 
 SIZE_T FRopeSceneProxy::GetTypeHash() const
@@ -40,6 +99,16 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 {
 	VertexBuffers.InitWithDummyData(&VertexFactory, GetRequiredVertexCount());
 	IndexBuffer.NumIndices = GetRequiredIndexCount();
+
+	// M5b: GPU 튜브 경로 여부를 생성 시점에 한 번 결정(런타임 토글은 렌더 상태 재생성 후 반영).
+	bUseGpuTube = CVarRopeGPUTube.GetValueOnGameThread() != 0 && NumRings <= 256;
+
+	// B2-lite: 솔버 resident PosBuf를 직접 읽기 위한 핸들(GT에서 캡처). 솔버는 월드 수명이라 proxy 동안 유효.
+	RopeId = Component->GetUniqueID();
+	if (URopeSimSubsystem* Sub = URopeSimSubsystem::Get(Component->GetWorld()))
+	{
+		SolverPtr = Sub->GetGpuSolver();
+	}
 
 	if (!Material)
 	{
@@ -64,6 +133,25 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 		[this](FRHICommandListBase& RHICmdList)
 		{
 			IndexBuffer.InitResource(RHICmdList);
+
+			if (bUseGpuTube)
+			{
+				// position stream을 GPU 컴퓨트가 쓰는 UAV 버퍼로 교체(tangent/UV/color는 VertexBuffers에서 바인딩).
+				GpuPositionBuffer.NumVertices = GetRequiredVertexCount();
+				GpuPositionBuffer.InitResource(RHICmdList);
+				CenterlineBuffer.NumFloats = NumRings * 3;
+				CenterlineBuffer.InitResource(RHICmdList);
+
+				// GetData()는 protected라 FDataType을 새로 구성: position만 커스텀 UAV 버퍼, 나머지는 VertexBuffers
+				// (InitWithDummyData가 먼저 enqueue돼 이 커맨드 시점엔 초기화됨)에서 public Bind* 헬퍼로 채운다.
+				FLocalVertexFactory::FDataType Data;
+				Data.PositionComponent = FVertexStreamComponent(&GpuPositionBuffer, 0, sizeof(FVector3f), VET_Float3);
+				Data.PositionComponentSRV = GpuPositionBuffer.SRV;
+				VertexBuffers.StaticMeshVertexBuffer.BindTangentVertexBuffer(&VertexFactory, Data);
+				VertexBuffers.StaticMeshVertexBuffer.BindTexCoordVertexBuffer(&VertexFactory, Data);
+				VertexBuffers.ColorVertexBuffer.BindColorVertexBuffer(&VertexFactory, Data);
+				VertexFactory.SetData(RHICmdList, Data);
+			}
 		});
 }
 
@@ -74,6 +162,9 @@ FRopeSceneProxy::~FRopeSceneProxy()
 	VertexBuffers.ColorVertexBuffer.ReleaseResource();
 	IndexBuffer.ReleaseResource();
 	VertexFactory.ReleaseResource();
+	// M5b: GPU 튜브 버퍼(미초기화여도 ReleaseResource는 안전).
+	GpuPositionBuffer.ReleaseResource();
+	CenterlineBuffer.ReleaseResource();
 }
 
 void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDynamicData& Data)
@@ -185,9 +276,65 @@ void FRopeSceneProxy::SetDynamicData_RenderThread(FRHICommandListBase& RHICmdLis
 	check(IsInRenderingThread());
 	if (NewData)
 	{
-		BuildTube(RHICmdList, *NewData);
+		if (bUseGpuTube)
+		{
+			BuildTubeGPU(RHICmdList, *NewData);
+		}
+		else
+		{
+			BuildTube(RHICmdList, *NewData);
+		}
 		delete NewData;
 	}
+}
+
+void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, const FRopeDynamicData& Data)
+{
+	// 렌더 스레드. 컴퓨트 디스패치/transition엔 즉시 커맨드리스트가 필요(전달된 base list와 동일 객체).
+	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+
+	// tangent/UV/color/index는 CPU 경로 그대로 사용(positions는 unbound VertexBuffers.Position으로 가 낭비되지만 무해).
+	BuildTube(RHICmdList, Data);
+	if (Data.Points.Num() != NumRings)
+	{
+		return;
+	}
+
+	// B2-lite: 솔버 resident PosBuf(월드)를 직접 읽어 위치 무지연. 단 이번 프레임에 실제로 GPU step된 로프만
+	// (Data.bGpuResident) — whip/throw/CPU-폴백 프레임엔 PosBuf가 stale이라 CPU 미러(B1: Data.Points)로 그린다.
+	int32 ResidentNodes = 0;
+	FRHIShaderResourceView* ResidentSRV = (Data.bGpuResident && SolverPtr)
+		? SolverPtr->GetResidentPositionSRV_RenderThread(RopeId, ResidentNodes) : nullptr;
+	const bool bResident = (ResidentSRV != nullptr && ResidentNodes == NumRings);
+
+	if (!bResident)
+	{
+		const int32 NumFloats = NumRings * 3;
+		float* Dst = static_cast<float*>(RHICmdList.LockBuffer(CenterlineBuffer.VertexBufferRHI, 0, NumFloats * sizeof(float), RLM_WriteOnly));
+		for (int32 i = 0; i < NumRings; ++i)
+		{
+			Dst[i * 3 + 0] = static_cast<float>(Data.Points[i].X);
+			Dst[i * 3 + 1] = static_cast<float>(Data.Points[i].Y);
+			Dst[i * 3 + 2] = static_cast<float>(Data.Points[i].Z);
+		}
+		RHICmdList.UnlockBuffer(CenterlineBuffer.VertexBufferRHI);
+	}
+
+	// position UAV에 GPU 튜브 생성. UAV write → vertex stream read 사이 배리어.
+	RHICmdList.Transition(FRHITransitionInfo(GpuPositionBuffer.VertexBufferRHI, ERHIAccess::Unknown, ERHIAccess::UAVCompute));
+	if (bResident)
+	{
+		// 월드 PosBuf → component-local 변환. proxy는 GetLocalToWorld()로 렌더하므로 WorldToLocal = inverse.
+		const FMatrix44f WorldToLocal(GetLocalToWorld().Inverse());
+		RopeGPU::BuildTubeFromResident_RenderThread(RHICmdList, ResidentSRV, GpuPositionBuffer.UAV, NumRings, NumSides, Radius, WorldToLocal);
+	}
+	else
+	{
+		RopeGPU::BuildTube_RenderThread(RHICmdList, CenterlineBuffer.SRV, GpuPositionBuffer.UAV, NumRings, NumSides, Radius);
+	}
+	RHICmdList.Transition(FRHITransitionInfo(GpuPositionBuffer.VertexBufferRHI, ERHIAccess::UAVCompute, ERHIAccess::SRVGraphics | ERHIAccess::VertexOrIndexBuffer));
+
+	bHasData = true;
 }
 
 void FRopeSceneProxy::DrawStaticElements(FStaticPrimitiveDrawInterface* PDI)

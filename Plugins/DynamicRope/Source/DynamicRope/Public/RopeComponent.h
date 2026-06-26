@@ -196,6 +196,10 @@ private:
 	// 증가시킨다 → 서브시스템이 변화를 감지해 GPU 영속 버퍼를 재시드한다. 정상 Free/Flight(비-whip)에선 불변(상주 유지).
 	uint32 SimGeneration = 0;
 
+	// 이번 프레임에 이 로프가 실제로 GPU에서 step됐는가(서브시스템이 매 프레임 설정). M5b: GPU 튜브 렌더가
+	// resident PosBuf를 직접 읽을지(true) CPU Sim 미러로 그릴지(false, whip/CPU-폴백/솔버 off) 가른다.
+	bool bGpuSteppedThisFrame = false;
+
 	void InitRope();
 	void GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) const;
 

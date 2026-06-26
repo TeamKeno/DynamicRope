@@ -1,0 +1,138 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+//
+// 센터라인에서 튜브 정점 위치를 생성하는 compute(M5b). CPU FRopeSceneProxy::BuildTube와 동일 수식:
+// 첫 tangent에 수직인 frame을 시드 후 ring 단위로 parallel-transport(최소 회전 → Frenet twist-pop 없음).
+// frame 전파는 ring 간 순차 의존이라 thread 0가 직렬로 groupshared에 채운 뒤(barrier), 모든 thread가
+// 정점을 strided로 기록한다. 로프 1개 = 스레드그룹 1개.
+//
+// 엔트리 2개:
+//  - RopeBuildTubeCS         (B1): 입력 = Buffer<float> InCenterline(component-local, ring r = [r*3..]).
+//  - RopeBuildTubeResidentCS (B2): 입력 = StructuredBuffer<float4> InCenterline4(월드) + WorldToLocal 변환.
+// 두 엔트리는 gCenter[](component-local)만 다르게 채우고 동일한 frame/write 로직을 공유한다.
+
+#include "/Engine/Public/Platform.ush"
+
+// ROPE_TUBE_MAX_RINGS 는 C++ ModifyCompilationEnvironment에서 정의(groupshared 사이징 == 최대 ring 수).
+
+uint  NumRings;
+uint  NumSides;
+float Radius;
+
+Buffer<float>          InCenterline;   // B1: ring r 위치 = (InCenterline[r*3+0..2]). component-local.
+StructuredBuffer<float4> InCenterline4; // B2: ring r 위치 = InCenterline4[r].xyz. 월드.
+float4x4               WorldToLocal;   // B2: 월드 → component-local.
+RWBuffer<float>        OutPositions;   // 정점 v 위치 = OutPositions[v*3+0..2]. VET_Float3 vertex stream(UAV).
+
+groupshared float3 gCenter[ROPE_TUBE_MAX_RINGS]; // component-local
+groupshared float3 gU[ROPE_TUBE_MAX_RINGS];
+groupshared float3 gV[ROPE_TUBE_MAX_RINGS];
+
+// 단위 벡터 From->To 최소회전으로 v 회전(FQuat4f::FindBetweenNormals + RotateVector 미러). 안정적 fallback 포함.
+float3 RotateBetween(float3 From, float3 To, float3 v)
+{
+	const float d = dot(From, To);
+	if (d > 0.99999f)
+	{
+		return v; // 거의 동일 → 회전 없음
+	}
+	if (d < -0.99999f)
+	{
+		// 정반대 → From에 수직인 임의 축으로 180도 회전: v' = 2*(v·Axis)*Axis - v.
+		float3 Axis = abs(From.x) < 0.9f ? cross(From, float3(1, 0, 0)) : cross(From, float3(0, 1, 0));
+		Axis = normalize(Axis);
+		return 2.0f * dot(v, Axis) * Axis - v;
+	}
+	// quat(axis=cross(From,To), w=1+d) 정규화 후 v 회전: v' = v + 2w(q×v) + 2(q×(q×v)).
+	const float3 Axis = cross(From, To);
+	const float  W = 1.0f + d;
+	const float  InvLen = rsqrt(Axis.x * Axis.x + Axis.y * Axis.y + Axis.z * Axis.z + W * W);
+	const float3 q = Axis * InvLen;
+	const float  qw = W * InvLen;
+	const float3 t = 2.0f * cross(q, v);
+	return v + qw * t + cross(q, t);
+}
+
+// gCenter[]가 채워진 뒤 공통: thread 0가 frame 전파 → barrier → 모든 thread가 정점 기록.
+void BuildTubeFrameAndWrite(uint tid, uint N)
+{
+	if (tid == 0)
+	{
+		float3 PrevTangent = normalize(gCenter[1] - gCenter[0]);
+		if (!any(abs(PrevTangent) > 1e-6f))
+		{
+			PrevTangent = float3(1, 0, 0);
+		}
+		const float3 SeedUp = (abs(PrevTangent.z) < 0.99f) ? float3(0, 0, 1) : float3(1, 0, 0);
+		float3 U = normalize(cross(SeedUp, PrevTangent));
+		float3 V = normalize(cross(PrevTangent, U));
+
+		for (uint i = 0; i < N; ++i)
+		{
+			float3 Tangent = (i < N - 1) ? normalize(gCenter[i + 1] - gCenter[i])
+										 : normalize(gCenter[i] - gCenter[i - 1]);
+			if (!any(abs(Tangent) > 1e-6f))
+			{
+				Tangent = PrevTangent;
+			}
+			if (i > 0)
+			{
+				U = RotateBetween(PrevTangent, Tangent, U);
+				V = RotateBetween(PrevTangent, Tangent, V);
+			}
+			PrevTangent = Tangent;
+			gU[i] = U;
+			gV[i] = V;
+		}
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	const uint VertsPerRing = NumSides + 1;
+	const uint TotalVerts = N * VertsPerRing;
+	for (uint v = tid; v < TotalVerts; v += ROPE_TUBE_MAX_RINGS)
+	{
+		const uint ring = v / VertsPerRing;
+		const uint side = v % VertsPerRing;
+		const float AroundFrac = (float)side / (float)NumSides;
+		const float Angle = 2.0f * 3.14159265358979f * AroundFrac;
+		const float3 Radial = normalize(gU[ring] * cos(Angle) + gV[ring] * sin(Angle));
+		const float3 Pos = gCenter[ring] + Radial * Radius;
+		OutPositions[v * 3 + 0] = Pos.x;
+		OutPositions[v * 3 + 1] = Pos.y;
+		OutPositions[v * 3 + 2] = Pos.z;
+	}
+}
+
+// B1: component-local centerline(Buffer<float>).
+[numthreads(ROPE_TUBE_MAX_RINGS, 1, 1)]
+void RopeBuildTubeCS(uint3 GroupThreadId : SV_GroupThreadID)
+{
+	const uint tid = GroupThreadId.x;
+	const uint N = NumRings;
+	if (N < 2) { return; }
+
+	for (uint r = tid; r < N; r += ROPE_TUBE_MAX_RINGS)
+	{
+		gCenter[r] = float3(InCenterline[r * 3 + 0], InCenterline[r * 3 + 1], InCenterline[r * 3 + 2]);
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	BuildTubeFrameAndWrite(tid, N);
+}
+
+// B2: world-space resident centerline(StructuredBuffer<float4>) → WorldToLocal로 component-local 변환.
+[numthreads(ROPE_TUBE_MAX_RINGS, 1, 1)]
+void RopeBuildTubeResidentCS(uint3 GroupThreadId : SV_GroupThreadID)
+{
+	const uint tid = GroupThreadId.x;
+	const uint N = NumRings;
+	if (N < 2) { return; }
+
+	for (uint r = tid; r < N; r += ROPE_TUBE_MAX_RINGS)
+	{
+		const float3 World = InCenterline4[r].xyz;
+		gCenter[r] = mul(float4(World, 1.0f), WorldToLocal).xyz;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	BuildTubeFrameAndWrite(tid, N);
+}

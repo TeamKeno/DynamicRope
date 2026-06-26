@@ -9,6 +9,7 @@
 #include "RenderGraphUtils.h"
 #include "RHIGPUReadback.h"
 #include "RenderingThread.h"
+#include "RHICommandList.h"          // FRHICommandListExecutor, CreateShaderResourceView
 #include "DataDrivenShaderPlatformInfo.h"
 #include "Misc/ScopeLock.h"
 
@@ -126,6 +127,7 @@ struct FRopeResidentRope
 	FRHIGPUBufferReadback* PosReadback = nullptr;
 	FRHIGPUBufferReadback* PrevReadback = nullptr;
 	bool bReadbackArmed = false;          // 리드백 copy가 enqueue되어 결과 대기 중인가.
+	FShaderResourceViewRHIRef PosSRV;     // M5b: PosBuf StructuredBuffer<float4> SRV(렌더용). 재시드 시 무효화.
 };
 
 // GT<->RT 공유 결과. RT가 채우고 GT GetLatest가 락 하에 읽는다.
@@ -189,6 +191,28 @@ void FRopeGPUSolver::GetLatest(TMap<uint32, FRopeResidentLatest>& Out)
 {
 	FScopeLock SL(&Impl->Results->Lock);
 	Out = Impl->Results->Map; // 작은 데이터 — 매 프레임 복사. (스왑 대신 복사로 호출자가 누적분 유지)
+}
+
+FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes)
+{
+	check(IsInRenderingThread());
+	OutNumNodes = 0;
+
+	FRopeResidentRope* R = Impl->RtRopes.Find(RopeId);
+	if (!R || !R->PosBuf.IsValid())
+	{
+		return nullptr;
+	}
+	OutNumNodes = R->NumNodes;
+
+	if (!R->PosSRV.IsValid())
+	{
+		// PosBuf는 StructuredBuffer<float4>(stride 16) — structured SRV로 본다.
+		FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+		R->PosSRV = RHICmdList.CreateShaderResourceView(R->PosBuf->GetRHI(),
+			FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Structured));
+	}
+	return R->PosSRV.GetReference();
 }
 
 void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
@@ -305,6 +329,7 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 					R.NumNodes   = N;
 					R.Generation = S.Generation;
 					R.bReadbackArmed = false; // 재시드 후 직전 리드백은 stale.
+					R.PosSRV.SafeRelease();   // PosBuf 새로 생성 → 캐시된 SRV 무효(렌더가 다음에 재생성).
 				}
 				else
 				{

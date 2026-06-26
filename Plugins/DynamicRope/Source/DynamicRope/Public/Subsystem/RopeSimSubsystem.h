@@ -26,6 +26,9 @@ public:
 	/** 월드의 rope sim subsystem(게임/PIE 월드에서 유효, 그 외엔 nullptr). */
 	static URopeSimSubsystem* Get(const UWorld* World);
 
+	/** GPU 상주 솔버 포인터(월드 수명). M5b: scene proxy가 resident PosBuf SRV를 가져오는 데 쓴다. */
+	FRopeGPUSolver* GetGpuSolver() { return &GpuSolver; }
+
 	//~ UTickableWorldSubsystem
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
