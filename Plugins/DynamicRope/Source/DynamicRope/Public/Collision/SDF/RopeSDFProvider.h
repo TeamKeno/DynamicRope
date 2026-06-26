@@ -24,6 +24,18 @@ enum class ERopeSDFSliceAxis : uint8
 	Z
 };
 
+/** 베이크된 본 중 어떤 본을 실제 collider로 노출할지 고르는 모드(베이크는 그대로, 런타임 필터). */
+UENUM()
+enum class ERopeSDFBoneFilterMode : uint8
+{
+	/** 베이크된 모든 본을 사용(기본 — 필터 없음). */
+	All,
+	/** BoneFilter에 나열된 본만 collider화. */
+	Include,
+	/** BoneFilter에 나열된 본만 제외. */
+	Exclude
+};
+
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeSDFProvider : public UActorComponent, public IRopeColliderProvider
 {
@@ -39,6 +51,22 @@ public:
 	/** 본 트랜스폼을 제공하는 메시. null로 두면 owner에서 자동 해석된다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	TObjectPtr<USkeletalMeshComponent> SkeletalMesh = nullptr;
+
+	/**
+	 * 베이크는 그대로 둔 채, 어떤 본을 실제 collider로 노출할지 고르는 런타임 필터(디버깅/격리용).
+	 * All이면 베이크된 모든 본 사용(기존 동작). Include/Exclude면 아래 BoneFilter로 본을 가린다.
+	 * 재베이크 없이 디테일 패널에서 즉시 토글 가능.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
+	ERopeSDFBoneFilterMode BoneFilterMode = ERopeSDFBoneFilterMode::All;
+
+	/**
+	 * Include/Exclude 모드에서 대상이 되는 본 목록. All 모드에서는 무시된다.
+	 * GetOptions로 SDFData에 실제 베이크된 본 이름만 드롭다운에 노출한다(스켈레톤 전체가 아님).
+	 */
+	UPROPERTY(EditAnywhere, Category = "Rope|Collision",
+		meta = (EditCondition = "BoneFilterMode != ERopeSDFBoneFilterMode::All", GetOptions = "GetBakedBoneNames"))
+	TArray<FName> BoneFilter;
 
 	/** 빌드된 볼륨의 월드 bounds를 매 프레임 그린다(녹색 = rope bounds와 겹침). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
@@ -103,6 +131,10 @@ public:
 	virtual void GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders) override;
 
 private:
+	/** BoneFilter 드롭다운(GetOptions)에 노출할 후보: SDFData에 베이크된 본 이름들. */
+	UFUNCTION()
+	TArray<FName> GetBakedBoneNames() const;
+
 	// 프레임당 1회 재구성되는 백킹 스토리지. 넘겨준 포인터는 해당 프레임 동안 유효하다.
 	TArray<FRopeSDFCollider> Colliders;
 

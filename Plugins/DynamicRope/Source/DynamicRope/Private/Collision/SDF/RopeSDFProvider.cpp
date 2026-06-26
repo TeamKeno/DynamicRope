@@ -24,6 +24,23 @@ USkeletalMeshComponent* URopeSDFProvider::ResolveMesh()
 	return SkeletalMesh;
 }
 
+TArray<FName> URopeSDFProvider::GetBakedBoneNames() const
+{
+	// BoneFilter 드롭다운 후보: SDFData에 실제 베이크된 본 이름만(스켈레톤 전체가 아님).
+	TArray<FName> Names;
+	if (SDFData)
+	{
+		for (const FRopeBoneSDFVolume& Volume : SDFData->BoneVolumes)
+		{
+			if (!Volume.Bone.IsNone() && Volume.IsBaked())
+			{
+				Names.AddUnique(Volume.Bone);
+			}
+		}
+	}
+	return Names;
+}
+
 void URopeSDFProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeCollider*>& OutColliders)
 {
 	USkeletalMeshComponent* Mesh = ResolveMesh();
@@ -46,6 +63,17 @@ void URopeSDFProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeC
 			if (Volume.Bone.IsNone() || !Volume.IsBaked())
 			{
 				continue; // 미베이크/무효 볼륨은 건너뛴다.
+			}
+
+			// 런타임 본 필터(베이크는 그대로, collider 노출만 가린다 — 디버깅 격리용).
+			if (BoneFilterMode != ERopeSDFBoneFilterMode::All)
+			{
+				const bool bListed = BoneFilter.Contains(Volume.Bone);
+				const bool bKeep = (BoneFilterMode == ERopeSDFBoneFilterMode::Include) ? bListed : !bListed;
+				if (!bKeep)
+				{
+					continue;
+				}
 			}
 
 			const FTransform BoneToWorld = Mesh->GetSocketTransform(Volume.Bone);
