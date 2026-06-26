@@ -10,6 +10,7 @@
 #include "RHIGPUReadback.h"
 #include "RenderingThread.h"
 #include "DataDrivenShaderPlatformInfo.h"
+#include "Misc/ScopeLock.h"
 
 // 스레드그룹 크기 == 지원하는 최대 노드 수. groupshared 정적 사이징과 numthreads에 함께 쓰인다.
 static constexpr int32 ROPE_MAX_NODES = 256;
@@ -110,227 +111,342 @@ public:
 // 파일은 Shaders/Private/RopeXPBD.usf, 가상경로는 /Plugin/DynamicRope -> Shaders 이므로 /Private/ 포함.
 IMPLEMENT_GLOBAL_SHADER(FRopeXPBDSolveCS, "/Plugin/DynamicRope/Private/RopeXPBD.usf", "RopeXPBDSolveCS", SF_Compute);
 
-void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
+// ---------------------------------------------------------------------------------------------------
+// 상주 상태 정의
+// ---------------------------------------------------------------------------------------------------
+
+// 렌더 스레드 전용. 로프 1개의 영속 GPU 버퍼 + 리드백(단일 in-flight, consume 후 재무장).
+struct FRopeResidentRope
 {
-	// --- (1) GT에서 평탄화: 전 로프 노드를 하나의 글로벌 배열로, per-rope 파라미터를 별도 배열로.
-	struct FFlatRope { FVector* Pos; FVector* Prev; int32 Offset; int32 NumNodes; };
-	TArray<FVector4f>           Positions;
-	TArray<FVector4f>           PrevPositions;
-	TArray<float>               InvMass;
-	TArray<FRopeCapsuleGPU>     CapsulesFlat;
-	TArray<float>               SDFDistances;   // M3: 전 볼륨 distance grid 연결(볼륨 dedup).
-	TArray<FRopeSDFVolumeGPU>   SDFVolumes;     // M3: 볼륨 헤더.
-	TArray<FRopeSDFColliderGPU> SDFCollidersFlat; // M3: 로프별 SDF collider 인스턴스.
-	TMap<const void*, int32>    VolumeKeyToIndex; // 볼륨 dedup(VolumeKey -> SDFVolumes 인덱스).
-	TArray<FRopeGPUParamsGPU>   Params;
-	TArray<FFlatRope>           Flat;
+	TRefCountPtr<FRDGPooledBuffer> PosBuf;
+	TRefCountPtr<FRDGPooledBuffer> PrevBuf;
+	TRefCountPtr<FRDGPooledBuffer> InvMassBuf;
+	int32  NumNodes = 0;
+	uint32 Generation = 0xFFFFFFFFu;     // 마지막으로 시드한 generation(다르면 재시드)
+	FRHIGPUBufferReadback* PosReadback = nullptr;
+	FRHIGPUBufferReadback* PrevReadback = nullptr;
+	bool bReadbackArmed = false;          // 리드백 copy가 enqueue되어 결과 대기 중인가.
+};
 
-	for (const FRopeGPUJob& Job : Jobs)
+// GT<->RT 공유 결과. RT가 채우고 GT GetLatest가 락 하에 읽는다.
+struct FRopeResidentSharedResults
+{
+	FCriticalSection Lock;
+	TMap<uint32, FRopeResidentLatest> Map;
+};
+
+// pimpl: 영속 버퍼 맵(RT 전용) + 공유 결과(GT<->RT). RDG/RHI 타입을 헤더에서 숨긴다.
+struct FRopeGPUSolver::FImpl
+{
+	TMap<uint32, FRopeResidentRope>                          RtRopes;  // 렌더 스레드에서만 접근.
+	TSharedRef<FRopeResidentSharedResults, ESPMode::ThreadSafe> Results
+		= MakeShared<FRopeResidentSharedResults, ESPMode::ThreadSafe>();
+};
+
+FRopeGPUSolver::FRopeGPUSolver()
+{
+	Impl = MakeUnique<FImpl>();
+}
+
+FRopeGPUSolver::~FRopeGPUSolver()
+{
+	// 상주 버퍼/리드백을 만지기 전에 in-flight 렌더 커맨드를 모두 drain → 이후 GT에서 직접 정리 OK.
+	FlushRenderingCommands();
+	ReleaseAll_RenderThread();
+}
+
+void FRopeGPUSolver::ReleaseAll_RenderThread()
+{
+	for (TPair<uint32, FRopeResidentRope>& Pair : Impl->RtRopes)
 	{
-		if (!Job.Positions || !Job.PrevPositions || !Job.InvMass || Job.NumSub <= 0 || Job.NumNodes < 2)
-		{
-			continue;
-		}
-		const int32 N = Job.NumNodes;
-		if (N > ROPE_MAX_NODES)
-		{
-			UE_LOG(LogDynamicRopeGPU, Warning, TEXT("GPU solve skipped a rope: %d nodes > ROPE_MAX_NODES(%d)."), N, ROPE_MAX_NODES);
-			continue;
-		}
-
-		const int32 Offset = Positions.Num();
-		for (int32 k = 0; k < N; ++k)
-		{
-			Positions.Add(FVector4f((float)Job.Positions[k].X, (float)Job.Positions[k].Y, (float)Job.Positions[k].Z, 0.0f));
-			PrevPositions.Add(FVector4f((float)Job.PrevPositions[k].X, (float)Job.PrevPositions[k].Y, (float)Job.PrevPositions[k].Z, 0.0f));
-			InvMass.Add(Job.InvMass[k]);
-		}
-
-		// 충돌(M2): 이 로프의 capsule을 글로벌 배열에 평탄화하고 per-rope offset/count 기록.
-		const int32 CapOffset = CapsulesFlat.Num();
-		const int32 CapCount = (Job.Capsules != nullptr) ? FMath::Max(0, Job.NumCapsules) : 0;
-		for (int32 c = 0; c < CapCount; ++c)
-		{
-			const FRopeGPUCapsule& Cap = Job.Capsules[c];
-			FRopeCapsuleGPU G;
-			G.A = FVector4f((float)Cap.A.X, (float)Cap.A.Y, (float)Cap.A.Z, 0.0f);
-			G.B = FVector4f((float)Cap.B.X, (float)Cap.B.Y, (float)Cap.B.Z, Cap.Radius);
-			CapsulesFlat.Add(G);
-		}
-
-		// 충돌(M3): 이 로프의 SDF collider를 평탄화. 같은 볼륨(VolumeKey)은 distance grid를 1회만 업로드(dedup).
-		const int32 SDFOffset = SDFCollidersFlat.Num();
-		const int32 SDFInCount = (Job.SDFColliders != nullptr) ? FMath::Max(0, Job.NumSDFColliders) : 0;
-		for (int32 c = 0; c < SDFInCount; ++c)
-		{
-			const FRopeGPUSDFCollider& S = Job.SDFColliders[c];
-			const int64 Voxels = (int64)S.ResX * S.ResY * S.ResZ;
-			if (!S.Distances || S.ResX < 2 || S.ResY < 2 || S.ResZ < 2 || Voxels <= 0)
-			{
-				continue; // 무효 볼륨 스킵.
-			}
-
-			int32 VolIdx;
-			if (const int32* Found = VolumeKeyToIndex.Find(S.VolumeKey))
-			{
-				VolIdx = *Found;
-			}
-			else
-			{
-				VolIdx = SDFVolumes.Num();
-				FRopeSDFVolumeGPU V;
-				V.DistOffset = SDFDistances.Num();
-				V.ResX = S.ResX;
-				V.ResY = S.ResY;
-				V.ResZ = S.ResZ;
-				V.LocalMin  = FVector4f((float)S.LocalMin.X, (float)S.LocalMin.Y, (float)S.LocalMin.Z, 0.0f);
-				V.LocalSize = FVector4f((float)S.LocalSize.X, (float)S.LocalSize.Y, (float)S.LocalSize.Z, 0.0f);
-				SDFVolumes.Add(V);
-				SDFDistances.Append(S.Distances, (int32)Voxels);
-				VolumeKeyToIndex.Add(S.VolumeKey, VolIdx);
-			}
-
-			const FQuat   Q = S.BoneToWorld.GetRotation();
-			const FVector T = S.BoneToWorld.GetTranslation();
-			const FVector Sc = S.BoneToWorld.GetScale3D();
-			FRopeSDFColliderGPU C;
-			C.VolumeIndex = VolIdx;
-			C.Rotation    = FVector4f((float)Q.X, (float)Q.Y, (float)Q.Z, (float)Q.W);
-			C.Translation = FVector4f((float)T.X, (float)T.Y, (float)T.Z, 0.0f);
-			C.Scale       = FVector4f((float)Sc.X, (float)Sc.Y, (float)Sc.Z, 0.0f);
-			SDFCollidersFlat.Add(C);
-		}
-		const int32 SDFCount = SDFCollidersFlat.Num() - SDFOffset;
-
-		FRopeGPUParamsGPU P;
-		P.NodeOffset        = Offset;
-		P.NumNodes          = N;
-		P.NumSub            = Job.NumSub;
-		P.Iters             = FMath::Max(1, Job.Iterations);
-		P.FixedDt           = Job.FixedDt;
-		P.SegmentLength     = Job.SegmentLength;
-		P.StretchCompliance = Job.StretchCompliance;
-		P.BendCompliance    = Job.BendCompliance;
-		P.Damping           = Job.Damping;
-		P.bStartPinned      = Job.bStartPinned ? 1 : 0;
-		P.CapsuleOffset     = CapOffset;
-		P.NumCapsules       = CapCount;
-		P.CollisionRadius   = Job.CollisionRadius;
-		P.Friction          = Job.Friction;
-		P.SweepStep         = Job.SweepStep;
-		P.MaxSweepSamples   = FMath::Max(1, Job.MaxSweepSamples);
-		P.SDFColliderOffset = SDFOffset;
-		P.NumSDFColliders   = SDFCount;
-		P.Gravity           = FVector4f((float)Job.Gravity.X, (float)Job.Gravity.Y, (float)Job.Gravity.Z, 0.0f);
-		P.PinPrev           = FVector4f((float)Job.StartPinPrev.X, (float)Job.StartPinPrev.Y, (float)Job.StartPinPrev.Z, 0.0f);
-		P.PinTarget         = FVector4f((float)Job.StartPinTarget.X, (float)Job.StartPinTarget.Y, (float)Job.StartPinTarget.Z, 0.0f);
-		Params.Add(P);
-
-		Flat.Add({ Job.Positions, Job.PrevPositions, Offset, N });
+		delete Pair.Value.PosReadback;  Pair.Value.PosReadback = nullptr;
+		delete Pair.Value.PrevReadback; Pair.Value.PrevReadback = nullptr;
 	}
+	Impl->RtRopes.Empty();
+}
 
-	if (Params.Num() == 0)
+void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
+{
+	// 공유 결과는 GT에서 즉시 제거.
+	{
+		FScopeLock SL(&Impl->Results->Lock);
+		Impl->Results->Map.Remove(RopeId);
+	}
+	// 영속 버퍼/리드백은 렌더 스레드에서 해제(this 캡처 — destructor가 flush하므로 수명 안전).
+	ENQUEUE_RENDER_COMMAND(RopeGPUReleaseRope)(
+		[this, RopeId](FRHICommandListImmediate&)
+		{
+			if (FRopeResidentRope* R = Impl->RtRopes.Find(RopeId))
+			{
+				delete R->PosReadback;
+				delete R->PrevReadback;
+				Impl->RtRopes.Remove(RopeId);
+			}
+		});
+}
+
+void FRopeGPUSolver::GetLatest(TMap<uint32, FRopeResidentLatest>& Out)
+{
+	FScopeLock SL(&Impl->Results->Lock);
+	Out = Impl->Results->Map; // 작은 데이터 — 매 프레임 복사. (스왑 대신 복사로 호출자가 누적분 유지)
+}
+
+void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
+{
+	if (Steps.Num() == 0)
 	{
 		return;
 	}
 
-	// 구조화 버퍼는 원소 >=1 이어야 한다 — 비면 더미 1개(어느 로프도 참조 안 함).
-	if (CapsulesFlat.Num() == 0)     { CapsulesFlat.AddZeroed(1); }
-	if (SDFDistances.Num() == 0)     { SDFDistances.AddZeroed(1); }
-	if (SDFVolumes.Num() == 0)       { SDFVolumes.AddZeroed(1); }
-	if (SDFCollidersFlat.Num() == 0) { SDFCollidersFlat.AddZeroed(1); }
-
-	const int32 TotalNodes = Positions.Num();
-	const int32 NumRopes = Params.Num();
-	const int32 NumCapsulesTotal = CapsulesFlat.Num();
-	const int32 NumSDFDistances = SDFDistances.Num();
-	const int32 NumSDFVolumes = SDFVolumes.Num();
-	const int32 NumSDFColliders = SDFCollidersFlat.Num();
-
-	// 리드백 결과를 받을 GT 스택 버퍼. FlushRenderingCommands가 커맨드 완료를 보장하므로 포인터 캡처가 안전하다.
-	TArray<FVector4f> OutPos;
-	TArray<FVector4f> OutPrev;
-	OutPos.SetNumUninitialized(TotalNodes);
-	OutPrev.SetNumUninitialized(TotalNodes);
-	FVector4f* OutPosPtr  = OutPos.GetData();
-	FVector4f* OutPrevPtr = OutPrev.GetData();
-
-	ENQUEUE_RENDER_COMMAND(RopeGPUSolveBatch)(
-		[Params = MoveTemp(Params), Positions = MoveTemp(Positions), PrevPositions = MoveTemp(PrevPositions),
-		 InvMass = MoveTemp(InvMass), CapsulesFlat = MoveTemp(CapsulesFlat), SDFDistances = MoveTemp(SDFDistances),
-		 SDFVolumes = MoveTemp(SDFVolumes), SDFCollidersFlat = MoveTemp(SDFCollidersFlat),
-		 TotalNodes, NumRopes, NumCapsulesTotal, NumSDFDistances, NumSDFVolumes, NumSDFColliders,
-		 OutPosPtr, OutPrevPtr](FRHICommandListImmediate& RHICmdList)
+	ENQUEUE_RENDER_COMMAND(RopeResidentStep)(
+		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate& RHICmdList)
 		{
+			// --- Loop 1: 직전 프레임 리드백 consume(immediate Lock — RDG 빌더 구성 *전*에 처리해 immediate RHI와
+			// 열린 그래프의 인터리브를 피한다. 렌더 스레드라 Lock 합법, IsReady 게이트라 stall 없음).
+			for (const FRopeGPUResidentStep& S : Steps)
+			{
+				FRopeResidentRope* Rp = Impl->RtRopes.Find(S.RopeId);
+				if (!Rp)
+				{
+					continue;
+				}
+				FRopeResidentRope& R = *Rp;
+				const bool bWillReseed = !R.PosBuf.IsValid() || R.NumNodes != S.NumNodes || R.Generation != S.Generation;
+				if (bWillReseed || !R.bReadbackArmed || !R.PosReadback || !R.PrevReadback)
+				{
+					continue;
+				}
+				if (!R.PosReadback->IsReady() || !R.PrevReadback->IsReady())
+				{
+					continue; // 아직 복사 중 — 다음 프레임에 consume(레이턴시 1프레임 더 허용).
+				}
+
+				const int32 N = R.NumNodes;
+				const uint32 Bytes = (uint32)N * sizeof(FVector4f);
+				TArray<FVector> TmpPos, TmpPrev;
+				TmpPos.SetNumUninitialized(N);
+				TmpPrev.SetNumUninitialized(N);
+				if (const FVector4f* Src = (const FVector4f*)R.PosReadback->Lock(Bytes))
+				{
+					for (int32 k = 0; k < N; ++k) { TmpPos[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
+					R.PosReadback->Unlock();
+				}
+				if (const FVector4f* Src = (const FVector4f*)R.PrevReadback->Lock(Bytes))
+				{
+					for (int32 k = 0; k < N; ++k) { TmpPrev[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
+					R.PrevReadback->Unlock();
+				}
+				R.bReadbackArmed = false; // 소비 완료 — 아래 dispatch 블록에서 재무장.
+
+				// 락 구간은 맵 대입만(리드백 Lock은 위에서 끝냄) → GT GetLatest 블로킹 최소화.
+				FScopeLock SL(&Impl->Results->Lock);
+				FRopeResidentLatest& L = Impl->Results->Map.FindOrAdd(S.RopeId);
+				L.Positions     = MoveTemp(TmpPos);
+				L.PrevPositions = MoveTemp(TmpPrev);
+				L.NumNodes      = N;
+				L.Generation    = R.Generation;
+			}
+
+			// 이제부터 그래프 빌드(seed/register/dispatch/재무장). consume(immediate Lock)은 위에서 끝냈다.
 			FRDGBuilder GraphBuilder(RHICmdList);
 
-			FRDGBufferRef ParamsBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Params"),
-				sizeof(FRopeGPUParamsGPU), NumRopes, Params.GetData(), (uint64)NumRopes * sizeof(FRopeGPUParamsGPU));
-			FRDGBufferRef CapsulesBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Capsules"),
-				sizeof(FRopeCapsuleGPU), NumCapsulesTotal, CapsulesFlat.GetData(), (uint64)NumCapsulesTotal * sizeof(FRopeCapsuleGPU));
-			FRDGBufferRef SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances"),
-				sizeof(float), NumSDFDistances, SDFDistances.GetData(), (uint64)NumSDFDistances * sizeof(float));
-			FRDGBufferRef SDFVolBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFVolumes"),
-				sizeof(FRopeSDFVolumeGPU), NumSDFVolumes, SDFVolumes.GetData(), (uint64)NumSDFVolumes * sizeof(FRopeSDFVolumeGPU));
-			FRDGBufferRef SDFColBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFColliders"),
-				sizeof(FRopeSDFColliderGPU), NumSDFColliders, SDFCollidersFlat.GetData(), (uint64)NumSDFColliders * sizeof(FRopeSDFColliderGPU));
-			FRDGBufferRef InvMassBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.InvMass"),
-				sizeof(float), TotalNodes, InvMass.GetData(), (uint64)TotalNodes * sizeof(float));
-			FRDGBufferRef PosBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Positions"),
-				sizeof(FVector4f), TotalNodes, Positions.GetData(), (uint64)TotalNodes * sizeof(FVector4f));
-			FRDGBufferRef PrevBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.PrevPositions"),
-				sizeof(FVector4f), TotalNodes, PrevPositions.GetData(), (uint64)TotalNodes * sizeof(FVector4f));
+			// 업로드 버퍼는 Execute()까지 살아 있어야 한다(RDG가 실행 시 복사) → keep-alive 컨테이너에 보관.
+			// Reserve로 외부 배열 재할당을 막아 내부 데이터 포인터를 안정화(CreateStructuredBuffer에 넘긴 GetData 유효).
+			const int32 NumSteps = Steps.Num();
+			TArray<TArray<FVector4f>>           KPos;     KPos.Reserve(NumSteps);
+			TArray<TArray<FVector4f>>           KPrev;    KPrev.Reserve(NumSteps);
+			TArray<TArray<float>>               KInv;     KInv.Reserve(NumSteps);
+			TArray<TArray<FRopeGPUParamsGPU>>   KParams;  KParams.Reserve(NumSteps);
+			TArray<TArray<FRopeCapsuleGPU>>     KCaps;    KCaps.Reserve(NumSteps);
+			TArray<TArray<float>>               KSDFDist; KSDFDist.Reserve(NumSteps);
+			TArray<TArray<FRopeSDFVolumeGPU>>   KSDFVol;  KSDFVol.Reserve(NumSteps);
+			TArray<TArray<FRopeSDFColliderGPU>> KSDFCol;  KSDFCol.Reserve(NumSteps);
 
-			FRopeXPBDSolveCS::FParameters* PassParams = GraphBuilder.AllocParameters<FRopeXPBDSolveCS::FParameters>();
-			PassParams->NumRopes      = (uint32)NumRopes;
-			PassParams->Params        = GraphBuilder.CreateSRV(ParamsBuf);
-			PassParams->Capsules      = GraphBuilder.CreateSRV(CapsulesBuf);
-			PassParams->SDFDistances  = GraphBuilder.CreateSRV(SDFDistBuf);
-			PassParams->SDFVolumes    = GraphBuilder.CreateSRV(SDFVolBuf);
-			PassParams->SDFColliders  = GraphBuilder.CreateSRV(SDFColBuf);
-			PassParams->InvMass       = GraphBuilder.CreateSRV(InvMassBuf);
-			PassParams->Positions     = GraphBuilder.CreateUAV(PosBuf);
-			PassParams->PrevPositions = GraphBuilder.CreateUAV(PrevBuf);
+			// --- Loop 2: seed/register + dispatch + 리드백 재무장(graph 패스).
+			for (const FRopeGPUResidentStep& S : Steps)
+			{
+				const int32 N = S.NumNodes;
+				if (N < 2 || N > ROPE_MAX_NODES)
+				{
+					UE_LOG(LogDynamicRopeGPU, Warning, TEXT("GPU resident step skipped: %d nodes out of [2, %d]."), N, ROPE_MAX_NODES);
+					continue;
+				}
 
-			TShaderMapRef<FRopeXPBDSolveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-			// 로프 1개당 스레드그룹 1개.
-			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeXPBDSolve"),
-				ComputeShader, PassParams, FIntVector(NumRopes, 1, 1));
+				FRopeResidentRope& R = Impl->RtRopes.FindOrAdd(S.RopeId);
+				const bool bSeed = !R.PosBuf.IsValid() || R.NumNodes != N || R.Generation != S.Generation;
 
-			// --- 동기 리드백(M1): 결과 버퍼를 CPU로 복사하는 패스 추가 후, GPU idle 대기 + Lock.
-			FRHIGPUBufferReadback PosReadback(TEXT("Rope.PosReadback"));
-			FRHIGPUBufferReadback PrevReadback(TEXT("Rope.PrevReadback"));
-			const uint32 NodeBytes = (uint32)TotalNodes * sizeof(FVector4f);
-			AddEnqueueCopyPass(GraphBuilder, &PosReadback, PosBuf, NodeBytes);
-			AddEnqueueCopyPass(GraphBuilder, &PrevReadback, PrevBuf, NodeBytes);
+				FRDGBufferRef PosRDG = nullptr;
+				FRDGBufferRef PrevRDG = nullptr;
+				FRDGBufferRef InvMassRDG = nullptr;
+
+				if (bSeed)
+				{
+					const bool bHaveSeed = S.SeedPositions.Num() == N && S.SeedPrevPositions.Num() == N && S.InvMass.Num() == N;
+					TArray<FVector4f>& SeedPos  = KPos.AddDefaulted_GetRef();
+					TArray<FVector4f>& SeedPrev = KPrev.AddDefaulted_GetRef();
+					TArray<float>&     SeedInv  = KInv.AddDefaulted_GetRef();
+					SeedPos.SetNumUninitialized(N);
+					SeedPrev.SetNumUninitialized(N);
+					SeedInv.SetNumUninitialized(N);
+					for (int32 k = 0; k < N; ++k)
+					{
+						const FVector P  = bHaveSeed ? S.SeedPositions[k]     : FVector::ZeroVector;
+						const FVector Pp = bHaveSeed ? S.SeedPrevPositions[k] : FVector::ZeroVector;
+						SeedPos[k]  = FVector4f((float)P.X,  (float)P.Y,  (float)P.Z,  0.0f);
+						SeedPrev[k] = FVector4f((float)Pp.X, (float)Pp.Y, (float)Pp.Z, 0.0f);
+						SeedInv[k]  = bHaveSeed ? S.InvMass[k] : 1.0f;
+					}
+					PosRDG     = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Pos"),     sizeof(FVector4f), N, SeedPos.GetData(),  (uint64)N * sizeof(FVector4f));
+					PrevRDG    = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Prev"),    sizeof(FVector4f), N, SeedPrev.GetData(), (uint64)N * sizeof(FVector4f));
+					InvMassRDG = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.InvMass"), sizeof(float),     N, SeedInv.GetData(),  (uint64)N * sizeof(float));
+					R.PosBuf     = GraphBuilder.ConvertToExternalBuffer(PosRDG);
+					R.PrevBuf    = GraphBuilder.ConvertToExternalBuffer(PrevRDG);
+					R.InvMassBuf = GraphBuilder.ConvertToExternalBuffer(InvMassRDG);
+					R.NumNodes   = N;
+					R.Generation = S.Generation;
+					R.bReadbackArmed = false; // 재시드 후 직전 리드백은 stale.
+				}
+				else
+				{
+					PosRDG     = GraphBuilder.RegisterExternalBuffer(R.PosBuf);
+					PrevRDG    = GraphBuilder.RegisterExternalBuffer(R.PrevBuf);
+					InvMassRDG = GraphBuilder.RegisterExternalBuffer(R.InvMassBuf);
+				}
+
+				if (S.NumSub <= 0)
+				{
+					continue; // 이번 프레임 적분 없음 — 위치 불변, 리드백도 그대로 둠.
+				}
+
+				// --- per-rope 파라미터/충돌 버퍼(transient). NodeOffset/CapsuleOffset/SDFColliderOffset = 0(로프당 버퍼).
+				TArray<FRopeCapsuleGPU>&     CapsFlat = KCaps.AddDefaulted_GetRef();
+				for (const FRopeGPUCapsule& Cap : S.Capsules)
+				{
+					FRopeCapsuleGPU G;
+					G.A = FVector4f((float)Cap.A.X, (float)Cap.A.Y, (float)Cap.A.Z, 0.0f);
+					G.B = FVector4f((float)Cap.B.X, (float)Cap.B.Y, (float)Cap.B.Z, Cap.Radius);
+					CapsFlat.Add(G);
+				}
+
+				TArray<float>&               SDFDist = KSDFDist.AddDefaulted_GetRef();
+				TArray<FRopeSDFVolumeGPU>&   SDFVol  = KSDFVol.AddDefaulted_GetRef();
+				TArray<FRopeSDFColliderGPU>& SDFCol  = KSDFCol.AddDefaulted_GetRef();
+				TMap<const void*, int32>     VolumeKeyToIndex; // 이 로프 내 볼륨 dedup.
+				for (const FRopeGPUSDFCollider& Src : S.SDFColliders)
+				{
+					const int64 Voxels = (int64)Src.ResX * Src.ResY * Src.ResZ;
+					if (!Src.Distances || Src.ResX < 2 || Src.ResY < 2 || Src.ResZ < 2 || Voxels <= 0)
+					{
+						continue;
+					}
+					int32 VolIdx;
+					if (const int32* Found = VolumeKeyToIndex.Find(Src.VolumeKey))
+					{
+						VolIdx = *Found;
+					}
+					else
+					{
+						VolIdx = SDFVol.Num();
+						FRopeSDFVolumeGPU V;
+						V.DistOffset = SDFDist.Num();
+						V.ResX = Src.ResX;
+						V.ResY = Src.ResY;
+						V.ResZ = Src.ResZ;
+						V.LocalMin  = FVector4f((float)Src.LocalMin.X,  (float)Src.LocalMin.Y,  (float)Src.LocalMin.Z,  0.0f);
+						V.LocalSize = FVector4f((float)Src.LocalSize.X, (float)Src.LocalSize.Y, (float)Src.LocalSize.Z, 0.0f);
+						SDFVol.Add(V);
+						SDFDist.Append(Src.Distances, (int32)Voxels);
+						VolumeKeyToIndex.Add(Src.VolumeKey, VolIdx);
+					}
+					const FQuat   Q  = Src.BoneToWorld.GetRotation();
+					const FVector T  = Src.BoneToWorld.GetTranslation();
+					const FVector Sc = Src.BoneToWorld.GetScale3D();
+					FRopeSDFColliderGPU C;
+					C.VolumeIndex = VolIdx;
+					C.Rotation    = FVector4f((float)Q.X, (float)Q.Y, (float)Q.Z, (float)Q.W);
+					C.Translation = FVector4f((float)T.X, (float)T.Y, (float)T.Z, 0.0f);
+					C.Scale       = FVector4f((float)Sc.X, (float)Sc.Y, (float)Sc.Z, 0.0f);
+					SDFCol.Add(C);
+				}
+
+				// 유효 개수(SDF 루프는 무효 볼륨을 skip하므로 S.SDFColliders.Num()와 다를 수 있음) — 더미 패딩 *전* 확정.
+				const int32 NumValidCaps   = CapsFlat.Num();
+				const int32 NumValidSDFCol = SDFCol.Num();
+
+				// 구조화 버퍼는 원소 >=1 이어야 한다 — 비면 더미 1개(어느 노드도 참조 안 함; count는 위에서 0으로 고정).
+				if (CapsFlat.Num() == 0) { CapsFlat.AddZeroed(1); }
+				if (SDFDist.Num() == 0)  { SDFDist.AddZeroed(1); }
+				if (SDFVol.Num() == 0)   { SDFVol.AddZeroed(1); }
+				if (SDFCol.Num() == 0)   { SDFCol.AddZeroed(1); }
+
+				TArray<FRopeGPUParamsGPU>& ParamsArr = KParams.AddDefaulted_GetRef();
+				FRopeGPUParamsGPU P;
+				P.NodeOffset        = 0;
+				P.NumNodes          = N;
+				P.NumSub            = S.NumSub;
+				P.Iters             = FMath::Max(1, S.Iterations);
+				P.FixedDt           = S.FixedDt;
+				P.SegmentLength     = S.SegmentLength;
+				P.StretchCompliance = S.StretchCompliance;
+				P.BendCompliance    = S.BendCompliance;
+				P.Damping           = S.Damping;
+				P.bStartPinned      = S.bStartPinned ? 1 : 0;
+				P.CapsuleOffset     = 0;
+				P.NumCapsules       = NumValidCaps;
+				P.CollisionRadius   = S.CollisionRadius;
+				P.Friction          = S.Friction;
+				P.SweepStep         = S.SweepStep;
+				P.MaxSweepSamples   = FMath::Max(1, S.MaxSweepSamples);
+				P.SDFColliderOffset = 0;
+				P.NumSDFColliders   = NumValidSDFCol;
+				P.Gravity           = FVector4f((float)S.Gravity.X, (float)S.Gravity.Y, (float)S.Gravity.Z, 0.0f);
+				P.PinPrev           = FVector4f((float)S.StartPinPrev.X,   (float)S.StartPinPrev.Y,   (float)S.StartPinPrev.Z,   0.0f);
+				P.PinTarget         = FVector4f((float)S.StartPinTarget.X, (float)S.StartPinTarget.Y, (float)S.StartPinTarget.Z, 0.0f);
+				ParamsArr.Add(P);
+
+				const int32 NumCapsulesTotal = CapsFlat.Num();
+				const int32 NumSDFDistances  = SDFDist.Num();
+				const int32 NumSDFVolumes    = SDFVol.Num();
+				const int32 NumSDFColliders  = SDFCol.Num();
+
+				FRDGBufferRef ParamsBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Params"),
+					sizeof(FRopeGPUParamsGPU), 1, ParamsArr.GetData(), sizeof(FRopeGPUParamsGPU));
+				FRDGBufferRef CapsulesBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Capsules"),
+					sizeof(FRopeCapsuleGPU), NumCapsulesTotal, CapsFlat.GetData(), (uint64)NumCapsulesTotal * sizeof(FRopeCapsuleGPU));
+				FRDGBufferRef SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances"),
+					sizeof(float), NumSDFDistances, SDFDist.GetData(), (uint64)NumSDFDistances * sizeof(float));
+				FRDGBufferRef SDFVolBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFVolumes"),
+					sizeof(FRopeSDFVolumeGPU), NumSDFVolumes, SDFVol.GetData(), (uint64)NumSDFVolumes * sizeof(FRopeSDFVolumeGPU));
+				FRDGBufferRef SDFColBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFColliders"),
+					sizeof(FRopeSDFColliderGPU), NumSDFColliders, SDFCol.GetData(), (uint64)NumSDFColliders * sizeof(FRopeSDFColliderGPU));
+
+				FRopeXPBDSolveCS::FParameters* PassParams = GraphBuilder.AllocParameters<FRopeXPBDSolveCS::FParameters>();
+				PassParams->NumRopes      = 1;
+				PassParams->Params        = GraphBuilder.CreateSRV(ParamsBuf);
+				PassParams->Capsules      = GraphBuilder.CreateSRV(CapsulesBuf);
+				PassParams->SDFDistances  = GraphBuilder.CreateSRV(SDFDistBuf);
+				PassParams->SDFVolumes    = GraphBuilder.CreateSRV(SDFVolBuf);
+				PassParams->SDFColliders  = GraphBuilder.CreateSRV(SDFColBuf);
+				PassParams->InvMass       = GraphBuilder.CreateSRV(InvMassRDG);
+				PassParams->Positions     = GraphBuilder.CreateUAV(PosRDG);
+				PassParams->PrevPositions = GraphBuilder.CreateUAV(PrevRDG);
+
+				TShaderMapRef<FRopeXPBDSolveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeXPBDResident"),
+					ComputeShader, PassParams, FIntVector(1, 1, 1)); // 로프 1개 = 스레드그룹 1개
+
+				// --- 리드백 재무장: in-flight가 없을 때만(이번 프레임 stepped 위치를 비동기 copy). consume은 Loop1에서.
+				if (!R.bReadbackArmed)
+				{
+					if (!R.PosReadback)  { R.PosReadback  = new FRHIGPUBufferReadback(TEXT("Rope.PosReadback")); }
+					if (!R.PrevReadback) { R.PrevReadback = new FRHIGPUBufferReadback(TEXT("Rope.PrevReadback")); }
+					const uint32 NodeBytes = (uint32)N * sizeof(FVector4f);
+					AddEnqueueCopyPass(GraphBuilder, R.PosReadback,  PosRDG,  NodeBytes);
+					AddEnqueueCopyPass(GraphBuilder, R.PrevReadback, PrevRDG, NodeBytes);
+					R.bReadbackArmed = true;
+				}
+			}
 
 			GraphBuilder.Execute();
-			RHICmdList.BlockUntilGPUIdle(); // 스파이크: 동기 완료 보장(스톨 — 후속에서 제거).
-
-			{
-				const void* Src = PosReadback.Lock(NodeBytes);
-				FMemory::Memcpy(OutPosPtr, Src, NodeBytes);
-				PosReadback.Unlock();
-			}
-			{
-				const void* Src = PrevReadback.Lock(NodeBytes);
-				FMemory::Memcpy(OutPrevPtr, Src, NodeBytes);
-				PrevReadback.Unlock();
-			}
 		});
-
-	// 동기: 위 커맨드(디스패치+리드백 Lock)가 끝날 때까지 GT 블록 → OutPos/OutPrev 채워짐 보장.
-	FlushRenderingCommands();
-
-	// --- (2) 결과를 각 로프 버퍼에 써넣는다(InvMass/SegmentLength 등 나머지는 GPU가 안 건드림).
-	for (const FFlatRope& R : Flat)
-	{
-		for (int32 k = 0; k < R.NumNodes; ++k)
-		{
-			const FVector4f& Pn = OutPos[R.Offset + k];
-			const FVector4f& Pp = OutPrev[R.Offset + k];
-			R.Pos[k]  = FVector(Pn.X, Pn.Y, Pn.Z);
-			R.Prev[k] = FVector(Pp.X, Pp.Y, Pp.Z);
-		}
-	}
 }

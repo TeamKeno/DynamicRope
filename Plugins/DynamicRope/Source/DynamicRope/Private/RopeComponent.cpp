@@ -67,6 +67,8 @@ void URopeComponent::InitRope()
 	Sim.StartPinTarget = Start;
 	Sim.StartPinPrev = Start;
 
+	++SimGeneration; // Sim 전면 재구성 → GPU 상주 버퍼 재시드(M5).
+
 	UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] InitRope: %d particles, length=%.1f, segment=%.2f"),
 		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);
 }
@@ -201,6 +203,8 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 
 	WhipElapsed = 0.0f;
 	bWhipSwingActive = true;
+
+	++SimGeneration; // throw로 tail 위치를 재설정 → GPU 상주 버퍼 재시드(M5).
 
 	if (WrapController.IsActive())
 	{
@@ -494,6 +498,14 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 
 	default:
 		break;
+	}
+
+	// GPU 상주(M5): logic phase(Contacting/Wrapped/Releasing)는 Sim을 out-of-band로 바꾸고, whip은 CPU에서
+	// 위치를 가이드한다 → 다음 GPU step에서 재시드되도록 generation을 올린다. 정상 Free/Flight(비-whip)에선
+	// 불변이라 GPU 버퍼가 상주된 채 매 프레임 in-place로 전진한다.
+	if (!bSolveThisFrame || bWhipSwingActive)
+	{
+		++SimGeneration;
 	}
 }
 

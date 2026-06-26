@@ -192,6 +192,10 @@ private:
 	// 이번 프레임에 Solver.Step을 돌릴지(Free/Flight만 true).
 	bool bSolveThisFrame = false;
 
+	// GPU 상주 솔버(M5)용 시드 generation. Sim을 out-of-band로 바꾼 시점(init/throw/logic phase/whip)에
+	// 증가시킨다 → 서브시스템이 변화를 감지해 GPU 영속 버퍼를 재시드한다. 정상 Free/Flight(비-whip)에선 불변(상주 유지).
+	uint32 SimGeneration = 0;
+
 	void InitRope();
 	void GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) const;
 

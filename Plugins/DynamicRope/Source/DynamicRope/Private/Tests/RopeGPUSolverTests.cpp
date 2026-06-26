@@ -14,6 +14,7 @@
 #include "Collision/RopeCollider.h"
 #include "RopeTestHelpers.h"
 #include "RHI.h"
+#include "RenderingThread.h" // FlushRenderingCommands
 #include "Misc/App.h"
 
 namespace
@@ -65,33 +66,76 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	const FRopeXPBDSolver Solver;
 	const TArray<IRopeCollider*> NoColliders;
 
+	// GPU 솔버는 상주(M5): 매 프레임 Step으로 영속 버퍼를 in-place 전진, 결과는 RT 리드백→GetLatest로 회수(지연).
+	// 테스트는 동기 검증이라 매 Step 후 FlushRenderingCommands로 RT를 진행시킨다. generation은 1로 고정(첫 프레임만 시드).
+	FRopeGPUSolver GpuSolver;
+	const uint32 RopeId = 1;
+	const uint32 Gen = 1;
+
+	auto MakeStep = [&](const FRopeSimState& Src, int32 NumSub, float FixedDt) -> FRopeGPUResidentStep
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId            = RopeId;
+		Step.Generation        = Gen;
+		Step.NumNodes          = Src.Num();
+		Step.SeedPositions     = Src.Positions;
+		Step.SeedPrevPositions = Src.PrevPositions;
+		Step.InvMass           = Src.InvMass;
+		Step.SegmentLength     = Src.SegmentLength;
+		Step.bStartPinned      = Src.bStartPinned;
+		Step.StartPinPrev      = Src.StartPinPrev;
+		Step.StartPinTarget    = Src.StartPinTarget;
+		Step.StretchCompliance = Config.StretchCompliance;
+		Step.BendCompliance    = Config.BendCompliance;
+		Step.Damping           = Config.Damping;
+		Step.Iterations        = Config.Iterations;
+		Step.Gravity           = Config.Gravity;
+		Step.NumSub            = NumSub;
+		Step.FixedDt           = FixedDt;
+		return Step;
+	};
+
 	for (int32 Frame = 0; Frame < 120; ++Frame)
 	{
 		// CPU: ground-truth.
 		Solver.Step(CpuSim, Config, NoColliders, 1.0f / 60.0f);
 
-		// GPU: CPU와 동일한 고정-timestep 스케줄을 같은 함수로 구해 잡 구성(누적 진화가 동일 → 동일 NumSub).
+		// GPU: CPU와 동일한 고정-timestep 스케줄(누적 진화 동일 → 동일 NumSub)로 상주 step 1회.
 		const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(GpuSim, Config, 1.0f / 60.0f);
-		if (Schedule.NumSub > 0)
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(MakeStep(GpuSim, Schedule.NumSub, Schedule.FixedDt));
+		GpuSolver.Step(MoveTemp(Steps));
+		FlushRenderingCommands(); // RT가 dispatch + 리드백 copy를 처리하도록 진행.
+	}
+
+	// 마지막 step의 리드백을 drain: consume은 다음 Step의 loop1에서 일어나므로 NumSub=0 step으로 펌프한다.
+	TMap<uint32, FRopeResidentLatest> Latest;
+	bool bGot = false;
+	for (int32 Spin = 0; Spin < 64 && !bGot; ++Spin)
+	{
+		FlushRenderingCommands();
+		TArray<FRopeGPUResidentStep> Drain;
+		Drain.Add(MakeStep(GpuSim, 0, 1.0f / 60.0f)); // NumSub=0 → 적분 없이 직전 리드백만 consume.
+		GpuSolver.Step(MoveTemp(Drain));
+		FlushRenderingCommands();
+		GpuSolver.GetLatest(Latest);
+		if (const FRopeResidentLatest* L = Latest.Find(RopeId))
 		{
-			FRopeGPUJob Job;
-			Job.Positions         = GpuSim.Positions.GetData();
-			Job.PrevPositions     = GpuSim.PrevPositions.GetData();
-			Job.InvMass           = GpuSim.InvMass.GetData();
-			Job.NumNodes          = GpuSim.Num();
-			Job.SegmentLength     = GpuSim.SegmentLength;
-			Job.bStartPinned      = GpuSim.bStartPinned;
-			Job.StartPinPrev      = GpuSim.StartPinPrev;
-			Job.StartPinTarget    = GpuSim.StartPinTarget;
-			Job.StretchCompliance = Config.StretchCompliance;
-			Job.BendCompliance    = Config.BendCompliance;
-			Job.Damping           = Config.Damping;
-			Job.Iterations        = Config.Iterations;
-			Job.Gravity           = Config.Gravity;
-			Job.NumSub            = Schedule.NumSub;
-			Job.FixedDt           = Schedule.FixedDt;
-			FRopeGPUSolver::SolveBatch(MakeArrayView(&Job, 1));
+			if (L->Generation == Gen && L->Positions.Num() == GpuSim.Num() && L->PrevPositions.Num() == GpuSim.Num())
+			{
+				for (int32 i = 0; i < GpuSim.Num(); ++i)
+				{
+					GpuSim.Positions[i]     = L->Positions[i];
+					GpuSim.PrevPositions[i] = L->PrevPositions[i];
+				}
+				bGot = true;
+			}
 		}
+	}
+	if (!bGot)
+	{
+		AddError(TEXT("GPU 상주 결과를 회수하지 못함(리드백 drain 실패)."));
+		return false;
 	}
 
 	// (1) 안정성: NaN 없음.

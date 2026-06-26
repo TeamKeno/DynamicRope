@@ -5,18 +5,18 @@
 #include "DynamicRopeLog.h"
 #include "Solver/RopeXPBDSolver.h" // RopeSolverSubsteps
 #include "Collision/RopeCollider.h" // IRopeCollider::GetGPUCapsule
-#include "RopeGPUSolver.h"          // FRopeGPUSolver / FRopeGPUJob / FRopeGPUCapsule (DynamicRopeShaders 모듈)
+#include "RopeGPUSolver.h"          // FRopeGPUSolver / FRopeGPUResidentStep / FRopeGPUCapsule (DynamicRopeShaders 모듈)
 #include "Engine/World.h"
 #include "Async/ParallelFor.h"
 #include "HAL/IConsoleManager.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
-// 0=CPU(ParallelFor) 솔버, 1=GPU compute 솔버(M1: 물리 전용 — integrate/distance/bending; 충돌은 여전히 CPU).
-// 런타임 토글. CPU 경로는 ground-truth로 유지된다.
+// 0=CPU(ParallelFor) 솔버, 1=GPU compute 솔버(M5: 센터라인 GPU 상주 — 매 프레임 in-place 전진, 결과는 약간 지연된
+// 미러로 회수). whip 프레임은 CPU 폴백. 런타임 토글. CPU 경로는 ground-truth로 유지된다.
 static TAutoConsoleVariable<int32> CVarRopeGPUSolver(
 	TEXT("r.DynamicRope.GPUSolver"),
 	0,
-	TEXT("DynamicRope: 0=CPU ParallelFor 솔버(기본), 1=GPU compute 솔버(물리 전용, 충돌 CPU 유지)."),
+	TEXT("DynamicRope: 0=CPU ParallelFor 솔버(기본), 1=GPU 상주 compute 솔버(M5, 충돌 포함; whip은 CPU 폴백)."),
 	ECVF_Default);
 
 void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
@@ -31,6 +31,13 @@ void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
 void URopeSimSubsystem::UnregisterRope(URopeComponent* Rope)
 {
 	Ropes.RemoveSingleSwap(Rope);
+	if (Rope)
+	{
+		// GPU 상주 버퍼/리드백 해제(렌더 스레드에서). 캐시에서도 제거.
+		const uint32 RopeId = Rope->GetUniqueID();
+		GpuSolver.ReleaseRope(RopeId);
+		GpuLatest.Remove(RopeId);
+	}
 	UE_LOG(LogDynamicRope, Verbose, TEXT("UnregisterRope: %s (%d remaining)"),
 		Rope ? *Rope->GetName() : TEXT("null"), Ropes.Num());
 }
@@ -57,6 +64,16 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		return;
 	}
 
+	const bool bUseGPU = CVarRopeGPUSolver.GetValueOnGameThread() != 0;
+
+	// GPU 상주(M5): RT 리드백이 채운 RopeId별 최신(약 1~2프레임 지연) 위치를 회수해 캐시. 아래 Phase 2에서
+	// Free/Flight 로프의 Sim(렌더/충돌 미러)에 반영한다. 순차 의존성은 GPU 영속 버퍼 안에서 충족된다.
+	if (bUseGPU)
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_GPUGetLatest);
+		GpuSolver.GetLatest(GpuLatest);
+	}
+
 	// Phase 1 (GT): 준비 — init/pin/provider gather + collider 스냅샷 + 로직 phase 처리.
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Prepare);
@@ -66,36 +83,83 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		}
 	}
 
-	// Phase 2: Free/Flight의 solver step. 두 경로 모두 POD(Sim) + const collider 스냅샷만 만진다.
-	if (CVarRopeGPUSolver.GetValueOnGameThread() != 0)
+	// Phase 2: Free/Flight의 solver step.
+	if (bUseGPU)
 	{
-		// GPU 경로(M1: 물리 전용 — integrate/distance/bending). 단일 디스패치로 전 로프 배치.
-		// ENQUEUE_RENDER_COMMAND는 워커스레드 불가 → ParallelFor 대신 GT에서 잡 수집 후 1회 호출.
-		// 충돌/접촉은 GPU가 건드리지 않으므로 Finalize의 CPU 경로가 그대로 처리한다.
+		// GPU 상주 경로(M5a). 로프별 영속 버퍼를 매 프레임 in-place로 전진(라운드트립 스톨/슬로모 없음).
+		// whip 프레임은 CPU가 위치를 가이드하므로 그 로프만 CPU 솔브로 폴백(가이드 위치 보존). 충돌/접촉은
+		// Finalize의 CPU 경로가 (약간 지연된) 미러로 처리한다.
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SolveGPU);
-		TArray<FRopeGPUJob>        Jobs;
-		TArray<FRopeGPUCapsule>    AllCaps;   // 전 로프 capsule 평탄 배열(완성 후 Job.Capsules 포인터 fixup).
-		TArray<FRopeGPUSDFCollider> AllSDF;   // 전 로프 SDF collider 평탄 배열(완성 후 Job.SDFColliders fixup).
-		TArray<int32>              JobCapOffset;
-		TArray<int32>              JobSDFOffset;
-		Jobs.Reserve(Ropes.Num());
+
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Reserve(Ropes.Num());
 		for (URopeComponent* Rope : Ropes)
 		{
-			if (!Rope->bSolveThisFrame || Rope->Sim.Num() < 2)
+			FRopeSimState& S = Rope->Sim;
+			// GPU 상주 대상: Free/Flight(bSolveThisFrame)이고 whip이 아니며 노드수가 한도 내일 때.
+			const bool bGpuRope = Rope->bSolveThisFrame && !Rope->bWhipSwingActive
+				&& S.Num() >= 2 && S.Num() <= FRopeGPUSolver::MaxNodes;
+			if (!bGpuRope)
 			{
-				continue;
-			}
-			// CPU와 동일한 고정-timestep 부킹(accumulator 소비). NumSub<=0이면 이번 frame 솔브 없음.
-			const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(Rope->Sim, Rope->SolverConfig, DeltaTime);
-			if (Schedule.NumSub <= 0)
-			{
+				// whip/폴백: CPU 솔브(Free/Flight일 때만). logic phase는 bSolveThisFrame=false라 자동 스킵.
+				if (Rope->bSolveThisFrame)
+				{
+					Rope->SolveSimFrame(DeltaTime);
+				}
 				continue;
 			}
 
-			// 충돌: 이 로프의 collider를 capsule(M2)/SDF(M3)로 분류해 추출. 둘 다 아니면 GPU 충돌에서 제외.
-			// FrameColliders는 Prepare에서 GT로 gather된 per-rope 스냅샷(GPU 토글과 무관하게 채워짐).
-			const int32 CapOffset = AllCaps.Num();
-			const int32 SDFOffset = AllSDF.Num();
+			const uint32 RopeId = Rope->GetUniqueID();
+
+			// 직전 회수분을 Sim(미러)에 반영. generation이 현재와 일치할 때만(= GPU가 현재 시드를 따라잡음);
+			// 재시드 직후 catch-up 중이면 CPU Sim을 그대로 둬 시드 소스를 보존한다.
+			if (const FRopeResidentLatest* L = GpuLatest.Find(RopeId))
+			{
+				if (L->Generation == Rope->SimGeneration && L->NumNodes == S.Num()
+					&& L->Positions.Num() == S.Num() && L->PrevPositions.Num() == S.Num())
+				{
+					S.Positions     = L->Positions;
+					S.PrevPositions = L->PrevPositions;
+				}
+			}
+
+			// 잡은 끝(node 0)을 현재 핀 위치로 정확히 맞춘다 — GPU 미러는 ~1~2프레임 지연이라 손과 어긋난다.
+			// 렌더/접촉용 보정(GPU 솔브 자체는 PinTarget으로 매 스텝 핀을 처리하므로 시뮬레이션엔 영향 없음).
+			if (S.bStartPinned && S.Num() > 0)
+			{
+				S.Positions[0]     = S.StartPinTarget;
+				S.PrevPositions[0] = S.StartPinPrev;
+			}
+
+			// 고정-timestep 스케줄(CPU accumulator) — 매 프레임 계산이라 시간손실 없음.
+			const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(S, Rope->SolverConfig, DeltaTime);
+
+			// 상주 step 구성(self-contained). 시드 데이터는 매 프레임 제공(RT는 재시드 시에만 GPU 업로드).
+			const FRopeSolverConfig& Cfg = Rope->SolverConfig;
+			FRopeGPUResidentStep Step;
+			Step.RopeId            = RopeId;
+			Step.Generation        = Rope->SimGeneration;
+			Step.NumNodes          = S.Num();
+			Step.SeedPositions     = S.Positions;
+			Step.SeedPrevPositions = S.PrevPositions;
+			Step.InvMass           = S.InvMass;
+			Step.SegmentLength     = S.SegmentLength;
+			Step.bStartPinned      = S.bStartPinned;
+			Step.StartPinPrev      = S.StartPinPrev;
+			Step.StartPinTarget    = S.StartPinTarget;
+			Step.StretchCompliance = Cfg.StretchCompliance;
+			Step.BendCompliance    = Cfg.BendCompliance;
+			Step.Damping           = Cfg.Damping;
+			Step.Iterations        = Cfg.Iterations;
+			Step.Gravity           = Cfg.Gravity;
+			Step.CollisionRadius   = Cfg.CollisionRadius;
+			Step.Friction          = Cfg.Friction;
+			Step.SweepStep         = Cfg.SweepStep;
+			Step.MaxSweepSamples   = Cfg.MaxSweepSamples;
+			Step.NumSub            = Schedule.NumSub;
+			Step.FixedDt           = Schedule.FixedDt;
+
+			// 충돌: 이 로프의 collider를 capsule(M2)/SDF(M3)로 분류. FrameColliders는 Prepare에서 GT gather된 스냅샷.
 			for (IRopeCollider* Collider : Rope->FrameColliders)
 			{
 				if (!Collider)
@@ -105,66 +169,30 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 				FRopeGPUCapsule Cap;
 				if (Collider->GetGPUCapsule(Cap.A, Cap.B, Cap.Radius))
 				{
-					AllCaps.Add(Cap);
+					Step.Capsules.Add(Cap);
 					continue;
 				}
 				FRopeSDFColliderView View;
 				if (Collider->GetGPUSDF(View))
 				{
-					FRopeGPUSDFCollider S;
-					S.Distances   = View.Distances;
-					S.ResX        = View.ResX;
-					S.ResY        = View.ResY;
-					S.ResZ        = View.ResZ;
-					S.LocalMin    = View.LocalMin;
-					S.LocalSize   = View.LocalSize;
-					S.BoneToWorld = View.BoneToWorld;
-					S.VolumeKey   = View.VolumeKey;
-					AllSDF.Add(S);
+					FRopeGPUSDFCollider Sdf;
+					Sdf.Distances   = View.Distances;
+					Sdf.ResX        = View.ResX;
+					Sdf.ResY        = View.ResY;
+					Sdf.ResZ        = View.ResZ;
+					Sdf.LocalMin    = View.LocalMin;
+					Sdf.LocalSize   = View.LocalSize;
+					Sdf.BoneToWorld = View.BoneToWorld;
+					Sdf.VolumeKey   = View.VolumeKey;
+					Step.SDFColliders.Add(Sdf);
 				}
 			}
-			const int32 CapCount = AllCaps.Num() - CapOffset;
-			const int32 SDFCount = AllSDF.Num() - SDFOffset;
 
-			// POD 잡 구성(DynamicRopeShaders는 런타임 타입에 의존하지 않으므로 raw 포인터+스칼라로 전달).
-			// SolveBatch는 동기라 GetData() 포인터가 호출 동안 유효하다.
-			FRopeSimState& S = Rope->Sim;
-			const FRopeSolverConfig& Cfg = Rope->SolverConfig;
-			FRopeGPUJob Job;
-			Job.Positions         = S.Positions.GetData();
-			Job.PrevPositions     = S.PrevPositions.GetData();
-			Job.InvMass           = S.InvMass.GetData();
-			Job.NumNodes          = S.Num();
-			Job.SegmentLength     = S.SegmentLength;
-			Job.bStartPinned      = S.bStartPinned;
-			Job.StartPinPrev      = S.StartPinPrev;
-			Job.StartPinTarget    = S.StartPinTarget;
-			Job.StretchCompliance = Cfg.StretchCompliance;
-			Job.BendCompliance    = Cfg.BendCompliance;
-			Job.Damping           = Cfg.Damping;
-			Job.Iterations        = Cfg.Iterations;
-			Job.Gravity           = Cfg.Gravity;
-			Job.NumCapsules       = CapCount;
-			Job.CollisionRadius   = Cfg.CollisionRadius;
-			Job.Friction          = Cfg.Friction;
-			Job.SweepStep         = Cfg.SweepStep;
-			Job.MaxSweepSamples   = Cfg.MaxSweepSamples;
-			Job.NumSDFColliders   = SDFCount;
-			Job.NumSub            = Schedule.NumSub;
-			Job.FixedDt           = Schedule.FixedDt;
-			Jobs.Add(Job);
-			JobCapOffset.Add(CapOffset);
-			JobSDFOffset.Add(SDFOffset);
+			Steps.Add(MoveTemp(Step));
 		}
-		if (Jobs.Num() > 0)
+		if (Steps.Num() > 0)
 		{
-			// AllCaps/AllSDF 완성 후 포인터 fixup(앞서 Add 중 재할당으로 무효화될 수 있어 여기서 한다).
-			for (int32 j = 0; j < Jobs.Num(); ++j)
-			{
-				Jobs[j].Capsules     = (Jobs[j].NumCapsules > 0)     ? (AllCaps.GetData() + JobCapOffset[j]) : nullptr;
-				Jobs[j].SDFColliders = (Jobs[j].NumSDFColliders > 0) ? (AllSDF.GetData() + JobSDFOffset[j]) : nullptr;
-			}
-			FRopeGPUSolver::SolveBatch(Jobs);
+			GpuSolver.Step(MoveTemp(Steps));
 		}
 	}
 	else
