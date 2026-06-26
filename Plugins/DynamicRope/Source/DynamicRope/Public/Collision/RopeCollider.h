@@ -10,6 +10,22 @@
 
 class USkeletalMeshComponent;
 
+/**
+ * GPU 솔버(M3)용 SDF collider 뷰. 본 로컬 distance grid + 본→월드 트랜스폼을 런타임 타입 없이 노출한다.
+ * Distances는 collider/asset 소유 포인터(해당 프레임 동안 유효). VolumeKey는 GPU 업로드 dedup용 식별자.
+ */
+struct FRopeSDFColliderView
+{
+	const float* Distances = nullptr; // 길이 ResX*ResY*ResZ, 행 우선(x + y*ResX + z*ResX*ResY), 바깥 +
+	int32        ResX = 0;
+	int32        ResY = 0;
+	int32        ResZ = 0;
+	FVector      LocalMin = FVector::ZeroVector;  // LocalBounds.Min
+	FVector      LocalSize = FVector::ZeroVector; // LocalBounds 크기
+	FTransform   BoneToWorld = FTransform::Identity;
+	const void*  VolumeKey = nullptr; // 같은 볼륨 dedup 식별자(보통 FRopeBoneSDFVolume*)
+};
+
 /** rope solver가 query하는 추상 collider. */
 class DYNAMICROPE_API IRopeCollider
 {
@@ -32,6 +48,12 @@ public:
 	 * SDF/기타 collider는 GPU capsule 경로에서 제외된다(M3에서 Texture3D SDF로 별도 처리).
 	 */
 	virtual bool GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRadius) const { return false; }
+
+	/**
+	 * GPU 솔버(M3)용: 이 collider가 per-bone SDF면 grid/transform 뷰를 채우고 true. 기본은 false.
+	 * 캡슐과 마찬가지로 RTTI 없이 SDF collider를 식별하는 경로다(GetGPUCapsule과 상호 배타적).
+	 */
+	virtual bool GetGPUSDF(FRopeSDFColliderView& OutView) const { return false; }
 };
 
 /** 해석적 capsule(swept-sphere 세그먼트). v1 / fallback. 추후 per-bone SDF로 대체된다. */

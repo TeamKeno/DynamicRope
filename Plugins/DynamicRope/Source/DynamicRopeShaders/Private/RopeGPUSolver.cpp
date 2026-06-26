@@ -33,6 +33,10 @@ struct FRopeGPUParamsGPU
 	float     Friction;        // M2: 접선 감쇠
 	float     SweepStep;       // M2: swept 샘플 간격
 	int32     MaxSweepSamples; // M2: 세그먼트당 샘플 상한
+	int32     SDFColliderOffset; // M3: 이 로프의 SDF collider 글로벌 시작 인덱스
+	int32     NumSDFColliders;   // M3: SDF collider 수(0이면 SDF 충돌 없음)
+	int32     Pad0 = 0;
+	int32     Pad1 = 0;
 	FVector4f Gravity;
 	FVector4f PinPrev;
 	FVector4f PinTarget;
@@ -47,6 +51,31 @@ struct FRopeCapsuleGPU
 };
 static_assert(sizeof(FRopeCapsuleGPU) % 16 == 0, "FRopeCapsuleGPU must be 16-byte aligned to match HLSL structured buffer.");
 
+// HLSL FRopeSDFVolume와 1:1 미러. 본 로컬 grid 헤더(distance는 SDFDistances 버퍼에 DistOffset부터).
+struct FRopeSDFVolumeGPU
+{
+	int32     DistOffset;
+	int32     ResX;
+	int32     ResY;
+	int32     ResZ;
+	FVector4f LocalMin;  // xyz
+	FVector4f LocalSize; // xyz
+};
+static_assert(sizeof(FRopeSDFVolumeGPU) % 16 == 0, "FRopeSDFVolumeGPU must be 16-byte aligned to match HLSL structured buffer.");
+
+// HLSL FRopeSDFCollider와 1:1 미러. 볼륨 인덱스 + 본→월드 트랜스폼(quat/trans/scale, 행렬 레이아웃 회피).
+struct FRopeSDFColliderGPU
+{
+	int32     VolumeIndex;
+	int32     Pad0 = 0;
+	int32     Pad1 = 0;
+	int32     Pad2 = 0;
+	FVector4f Rotation;    // quat (x,y,z,w)
+	FVector4f Translation; // xyz
+	FVector4f Scale;       // xyz
+};
+static_assert(sizeof(FRopeSDFColliderGPU) % 16 == 0, "FRopeSDFColliderGPU must be 16-byte aligned to match HLSL structured buffer.");
+
 class FRopeXPBDSolveCS : public FGlobalShader
 {
 public:
@@ -57,6 +86,9 @@ public:
 		SHADER_PARAMETER(uint32, NumRopes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeGPUParams>, Params)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeCapsule>, Capsules)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SDFDistances)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFVolume>, SDFVolumes)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, InvMass)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, Positions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, PrevPositions)
@@ -82,12 +114,16 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 {
 	// --- (1) GT에서 평탄화: 전 로프 노드를 하나의 글로벌 배열로, per-rope 파라미터를 별도 배열로.
 	struct FFlatRope { FVector* Pos; FVector* Prev; int32 Offset; int32 NumNodes; };
-	TArray<FVector4f>          Positions;
-	TArray<FVector4f>          PrevPositions;
-	TArray<float>              InvMass;
-	TArray<FRopeCapsuleGPU>    CapsulesFlat;
-	TArray<FRopeGPUParamsGPU>  Params;
-	TArray<FFlatRope>          Flat;
+	TArray<FVector4f>           Positions;
+	TArray<FVector4f>           PrevPositions;
+	TArray<float>               InvMass;
+	TArray<FRopeCapsuleGPU>     CapsulesFlat;
+	TArray<float>               SDFDistances;   // M3: 전 볼륨 distance grid 연결(볼륨 dedup).
+	TArray<FRopeSDFVolumeGPU>   SDFVolumes;     // M3: 볼륨 헤더.
+	TArray<FRopeSDFColliderGPU> SDFCollidersFlat; // M3: 로프별 SDF collider 인스턴스.
+	TMap<const void*, int32>    VolumeKeyToIndex; // 볼륨 dedup(VolumeKey -> SDFVolumes 인덱스).
+	TArray<FRopeGPUParamsGPU>   Params;
+	TArray<FFlatRope>           Flat;
 
 	for (const FRopeGPUJob& Job : Jobs)
 	{
@@ -122,6 +158,50 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 			CapsulesFlat.Add(G);
 		}
 
+		// 충돌(M3): 이 로프의 SDF collider를 평탄화. 같은 볼륨(VolumeKey)은 distance grid를 1회만 업로드(dedup).
+		const int32 SDFOffset = SDFCollidersFlat.Num();
+		const int32 SDFInCount = (Job.SDFColliders != nullptr) ? FMath::Max(0, Job.NumSDFColliders) : 0;
+		for (int32 c = 0; c < SDFInCount; ++c)
+		{
+			const FRopeGPUSDFCollider& S = Job.SDFColliders[c];
+			const int64 Voxels = (int64)S.ResX * S.ResY * S.ResZ;
+			if (!S.Distances || S.ResX < 2 || S.ResY < 2 || S.ResZ < 2 || Voxels <= 0)
+			{
+				continue; // 무효 볼륨 스킵.
+			}
+
+			int32 VolIdx;
+			if (const int32* Found = VolumeKeyToIndex.Find(S.VolumeKey))
+			{
+				VolIdx = *Found;
+			}
+			else
+			{
+				VolIdx = SDFVolumes.Num();
+				FRopeSDFVolumeGPU V;
+				V.DistOffset = SDFDistances.Num();
+				V.ResX = S.ResX;
+				V.ResY = S.ResY;
+				V.ResZ = S.ResZ;
+				V.LocalMin  = FVector4f((float)S.LocalMin.X, (float)S.LocalMin.Y, (float)S.LocalMin.Z, 0.0f);
+				V.LocalSize = FVector4f((float)S.LocalSize.X, (float)S.LocalSize.Y, (float)S.LocalSize.Z, 0.0f);
+				SDFVolumes.Add(V);
+				SDFDistances.Append(S.Distances, (int32)Voxels);
+				VolumeKeyToIndex.Add(S.VolumeKey, VolIdx);
+			}
+
+			const FQuat   Q = S.BoneToWorld.GetRotation();
+			const FVector T = S.BoneToWorld.GetTranslation();
+			const FVector Sc = S.BoneToWorld.GetScale3D();
+			FRopeSDFColliderGPU C;
+			C.VolumeIndex = VolIdx;
+			C.Rotation    = FVector4f((float)Q.X, (float)Q.Y, (float)Q.Z, (float)Q.W);
+			C.Translation = FVector4f((float)T.X, (float)T.Y, (float)T.Z, 0.0f);
+			C.Scale       = FVector4f((float)Sc.X, (float)Sc.Y, (float)Sc.Z, 0.0f);
+			SDFCollidersFlat.Add(C);
+		}
+		const int32 SDFCount = SDFCollidersFlat.Num() - SDFOffset;
+
 		FRopeGPUParamsGPU P;
 		P.NodeOffset        = Offset;
 		P.NumNodes          = N;
@@ -139,6 +219,8 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 		P.Friction          = Job.Friction;
 		P.SweepStep         = Job.SweepStep;
 		P.MaxSweepSamples   = FMath::Max(1, Job.MaxSweepSamples);
+		P.SDFColliderOffset = SDFOffset;
+		P.NumSDFColliders   = SDFCount;
 		P.Gravity           = FVector4f((float)Job.Gravity.X, (float)Job.Gravity.Y, (float)Job.Gravity.Z, 0.0f);
 		P.PinPrev           = FVector4f((float)Job.StartPinPrev.X, (float)Job.StartPinPrev.Y, (float)Job.StartPinPrev.Z, 0.0f);
 		P.PinTarget         = FVector4f((float)Job.StartPinTarget.X, (float)Job.StartPinTarget.Y, (float)Job.StartPinTarget.Z, 0.0f);
@@ -152,15 +234,18 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 		return;
 	}
 
-	// 구조화 버퍼는 원소 >=1 이어야 한다 — capsule이 하나도 없으면 더미 1개(어느 로프도 참조 안 함).
-	if (CapsulesFlat.Num() == 0)
-	{
-		CapsulesFlat.AddZeroed(1);
-	}
+	// 구조화 버퍼는 원소 >=1 이어야 한다 — 비면 더미 1개(어느 로프도 참조 안 함).
+	if (CapsulesFlat.Num() == 0)     { CapsulesFlat.AddZeroed(1); }
+	if (SDFDistances.Num() == 0)     { SDFDistances.AddZeroed(1); }
+	if (SDFVolumes.Num() == 0)       { SDFVolumes.AddZeroed(1); }
+	if (SDFCollidersFlat.Num() == 0) { SDFCollidersFlat.AddZeroed(1); }
 
 	const int32 TotalNodes = Positions.Num();
 	const int32 NumRopes = Params.Num();
 	const int32 NumCapsulesTotal = CapsulesFlat.Num();
+	const int32 NumSDFDistances = SDFDistances.Num();
+	const int32 NumSDFVolumes = SDFVolumes.Num();
+	const int32 NumSDFColliders = SDFCollidersFlat.Num();
 
 	// 리드백 결과를 받을 GT 스택 버퍼. FlushRenderingCommands가 커맨드 완료를 보장하므로 포인터 캡처가 안전하다.
 	TArray<FVector4f> OutPos;
@@ -172,7 +257,9 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 
 	ENQUEUE_RENDER_COMMAND(RopeGPUSolveBatch)(
 		[Params = MoveTemp(Params), Positions = MoveTemp(Positions), PrevPositions = MoveTemp(PrevPositions),
-		 InvMass = MoveTemp(InvMass), CapsulesFlat = MoveTemp(CapsulesFlat), TotalNodes, NumRopes, NumCapsulesTotal,
+		 InvMass = MoveTemp(InvMass), CapsulesFlat = MoveTemp(CapsulesFlat), SDFDistances = MoveTemp(SDFDistances),
+		 SDFVolumes = MoveTemp(SDFVolumes), SDFCollidersFlat = MoveTemp(SDFCollidersFlat),
+		 TotalNodes, NumRopes, NumCapsulesTotal, NumSDFDistances, NumSDFVolumes, NumSDFColliders,
 		 OutPosPtr, OutPrevPtr](FRHICommandListImmediate& RHICmdList)
 		{
 			FRDGBuilder GraphBuilder(RHICmdList);
@@ -181,6 +268,12 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 				sizeof(FRopeGPUParamsGPU), NumRopes, Params.GetData(), (uint64)NumRopes * sizeof(FRopeGPUParamsGPU));
 			FRDGBufferRef CapsulesBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Capsules"),
 				sizeof(FRopeCapsuleGPU), NumCapsulesTotal, CapsulesFlat.GetData(), (uint64)NumCapsulesTotal * sizeof(FRopeCapsuleGPU));
+			FRDGBufferRef SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances"),
+				sizeof(float), NumSDFDistances, SDFDistances.GetData(), (uint64)NumSDFDistances * sizeof(float));
+			FRDGBufferRef SDFVolBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFVolumes"),
+				sizeof(FRopeSDFVolumeGPU), NumSDFVolumes, SDFVolumes.GetData(), (uint64)NumSDFVolumes * sizeof(FRopeSDFVolumeGPU));
+			FRDGBufferRef SDFColBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFColliders"),
+				sizeof(FRopeSDFColliderGPU), NumSDFColliders, SDFCollidersFlat.GetData(), (uint64)NumSDFColliders * sizeof(FRopeSDFColliderGPU));
 			FRDGBufferRef InvMassBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.InvMass"),
 				sizeof(float), TotalNodes, InvMass.GetData(), (uint64)TotalNodes * sizeof(float));
 			FRDGBufferRef PosBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Positions"),
@@ -192,6 +285,9 @@ void FRopeGPUSolver::SolveBatch(TArrayView<const FRopeGPUJob> Jobs)
 			PassParams->NumRopes      = (uint32)NumRopes;
 			PassParams->Params        = GraphBuilder.CreateSRV(ParamsBuf);
 			PassParams->Capsules      = GraphBuilder.CreateSRV(CapsulesBuf);
+			PassParams->SDFDistances  = GraphBuilder.CreateSRV(SDFDistBuf);
+			PassParams->SDFVolumes    = GraphBuilder.CreateSRV(SDFVolBuf);
+			PassParams->SDFColliders  = GraphBuilder.CreateSRV(SDFColBuf);
 			PassParams->InvMass       = GraphBuilder.CreateSRV(InvMassBuf);
 			PassParams->Positions     = GraphBuilder.CreateUAV(PosBuf);
 			PassParams->PrevPositions = GraphBuilder.CreateUAV(PrevBuf);

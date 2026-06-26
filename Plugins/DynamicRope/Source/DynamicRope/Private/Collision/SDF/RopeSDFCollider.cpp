@@ -50,3 +50,20 @@ FBox FRopeSDFCollider::GetWorldBounds() const
 	}
 	return Volume->LocalBounds.TransformBy(BoneToWorld);
 }
+
+bool FRopeSDFCollider::GetGPUSDF(FRopeSDFColliderView& OutView) const
+{
+	if (!Volume || !Volume->IsBaked())
+	{
+		return false; // 미베이크/무효 볼륨은 GPU 충돌에서 제외(CPU Query와 동일 가드).
+	}
+	OutView.Distances    = Volume->Distances.GetData();
+	OutView.ResX         = Volume->Resolution.X;
+	OutView.ResY         = Volume->Resolution.Y;
+	OutView.ResZ         = Volume->Resolution.Z;
+	OutView.LocalMin     = Volume->LocalBounds.Min;
+	OutView.LocalSize    = Volume->LocalBounds.GetSize();
+	OutView.BoneToWorld  = BoneToWorld;
+	OutView.VolumeKey    = Volume; // 프레임 내 동일 볼륨 업로드 dedup용 키.
+	return true;
+}

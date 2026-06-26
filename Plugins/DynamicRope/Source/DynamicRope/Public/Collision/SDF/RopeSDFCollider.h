@@ -35,4 +35,5 @@ public:
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
 	virtual FBox GetWorldBounds() const override;
+	virtual bool GetGPUSDF(FRopeSDFColliderView& OutView) const override;
 };

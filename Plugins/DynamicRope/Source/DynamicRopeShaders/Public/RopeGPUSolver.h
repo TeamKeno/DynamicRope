@@ -18,6 +18,22 @@ struct FRopeGPUCapsule
 };
 
 /**
+ * GPU 충돌(M3)용 per-bone SDF collider. 본 로컬 distance grid + 본→월드 트랜스폼.
+ * Distances는 호출자(에셋) 소유 포인터(동기 호출 동안 유효). VolumeKey가 같으면 GPU 업로드를 공유(dedup)한다.
+ */
+struct FRopeGPUSDFCollider
+{
+	const float* Distances = nullptr; // 길이 ResX*ResY*ResZ, 행 우선, 바깥 +
+	int32        ResX = 0;
+	int32        ResY = 0;
+	int32        ResZ = 0;
+	FVector      LocalMin = FVector::ZeroVector;
+	FVector      LocalSize = FVector::ZeroVector;
+	FTransform   BoneToWorld = FTransform::Identity;
+	const void*  VolumeKey = nullptr;
+};
+
+/**
  * GPU 배치 솔브 1건. Positions/PrevPositions는 in/out(리드백 결과를 같은 버퍼에 써넣는다), InvMass는 in.
  * 포인터는 호출자 소유 버퍼(예: FRopeSimState의 TArray<FVector>)를 가리킨다. SolveBatch가 동기라 호출 동안 유효해야 한다.
  */
@@ -47,6 +63,10 @@ struct FRopeGPUJob
 	float Friction = 0.0f;        // 접선 감쇠 [0..1].
 	float SweepStep = 2.0f;       // swept 샘플 간격(cm).
 	int32 MaxSweepSamples = 16;   // 세그먼트당 샘플 상한.
+
+	// 충돌(M3). 이 로프에 적용할 per-bone SDF collider 목록(호출자 소유). 비면 SDF 충돌 없음.
+	const FRopeGPUSDFCollider* SDFColliders = nullptr;
+	int32 NumSDFColliders = 0;
 
 	// 이번 프레임 substep 스케줄(호출자가 RopeSolverSubsteps로 계산해 전달).
 	int32 NumSub = 0;
