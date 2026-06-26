@@ -3,13 +3,11 @@
 #include "RopeComponent.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
-#include "Collision/RopeColliderProvider.h"
 #include "Render/RopeSceneProxy.h"
 #include "Debug/RopeDebugDraw.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
-#include "EngineUtils.h" // TActorIterator (world-wide provider collection)
 #include "Subsystem/RopeSimSubsystem.h"
 namespace {
 	float SmoothStep(float T)
@@ -71,91 +69,6 @@ void URopeComponent::InitRope()
 
 	UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] InitRope: %d particles, length=%.1f, segment=%.2f"),
 		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);
-}
-
-void URopeComponent::GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) const
-{
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_GatherColliders);
-	OutColliders.Reset();
-	FBox RopeBounds(ForceInit);
-	for (const FVector& P : Sim.Positions)
-	{
-		RopeBounds += P;
-	}
-	// contact reach만큼 확장한다: 거의 직선인 rope를 감싼 tight box는 두께가 ~0이라, 실제로는 contact
-	// 거리 안에 있는 capsule을 잘못 cull해 버린다. narrow phase와 맞춘다
-	// (node ContactRadius; capsule 자신의 반지름은 이미 GetWorldBounds()에 포함되어 있다).
-	if (RopeBounds.IsValid)
-	{
-		RopeBounds = RopeBounds.ExpandBy(Radius + WrapConfig.ContactRadius + 5.0f);
-	}
-
-	RopeDebug::DrawBounds(GetWorld(), RopeBounds, bDrawDebugCenterline);
-
-	for (const TScriptInterface<IRopeColliderProvider>& Provider : ColliderProviders)
-	{
-		if (IRopeColliderProvider* Raw = Provider.GetInterface())
-		{
-			Raw->GatherColliders(RopeBounds, OutColliders);
-		}
-	}
-
-	RopeDebug::DrawStats(GetWorld(), reinterpret_cast<uint64>(this), Phase,
-		ColliderProviders.Num(), OutColliders.Num(), WrapController.State.BoneName, bDrawDebugCenterline);
-}
-
-void URopeComponent::EnsureColliderProviders()
-{
-	if (ColliderProviders.Num() > 0)
-	{
-		return;
-	}
-
-	auto AddFrom = [this](AActor* Actor)
-	{
-		if (!Actor)
-		{
-			return;
-		}
-		for (UActorComponent* Comp : Actor->GetComponentsByInterface(URopeColliderProvider::StaticClass()))
-		{
-			ColliderProviders.AddUnique(TScriptInterface<IRopeColliderProvider>(Comp));
-		}
-	};
-
-	// Cross-actor: rope가 한 actor에 고정되어 있지만 *다른* body를 잡아야 할 때, provider는 그 다른
-	// actor 위에 존재한다. 명시적 리스트가 설정되어 있으면 그것을 사용하고, 그렇지 않으면 우리
-	// 자신의 owner로 기본 설정한다(same-actor 경우).
-	if (bGatherProvidersFromWholeWorld)
-	{
-		if (UWorld* World = GetWorld())
-		{
-			for (TActorIterator<AActor> It(World); It; ++It)
-			{
-				AddFrom(*It);
-			}
-		}
-		return;
-	}
-
-	if (ColliderSourceActors.Num() > 0)
-	{
-		for (AActor* Actor : ColliderSourceActors)
-		{
-			AddFrom(Actor);
-		}
-	}
-	else
-	{
-		AddFrom(GetOwner());
-	}
-
-	// 명시적으로 지정된 wrap-target mesh의 owner만 따라간다; 여기서는 절대 auto-resolve 하지 않는다(그러면
-	// 우리 자신의 owner를 다시 추가하게 되어 rope가 자기 자신에게 latch하도록 만든다).
-	if (WrapTargetMesh)
-	{
-		AddFrom(WrapTargetMesh->GetOwner());
-	}
 }
 
 USkeletalMeshComponent* URopeComponent::ResolveWrapTargetMesh()
@@ -428,11 +341,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		Sim.StartPinTarget = GetComponentLocation();
 	}
 
-	EnsureColliderProviders();
-
-	// collider 스냅샷(GetSocketTransform)은 GT에서. 이후 Solver.Step(Solve 단계)은 병렬로 돈다.
-	FrameColliders.Reset();
-	GatherFrameColliders(FrameColliders);
+	// collider 스냅샷은 RopeSimSubsystem이 Tick의 collider 단계에서 중앙 수집해 FrameColliders에 채워둔다
+	// (Prepare 이전). 여기서 로프마다 provider를 탐색/gather하지 않는다.
 
 	bSolveThisFrame = false;
 
@@ -594,12 +504,6 @@ void URopeComponent::ThrowFreeSpanWhileWrapped(const FVector& AimDir)
 	WrappedSwayTime = 0.0f;
 }
 
-void URopeComponent::GatherWorldColliders(TArray<IRopeCollider*>& OutColliders) const
-{
-	// Reserved for floor/world providers. Keeping this separate prevents idle rope from latching to character limbs.
-	OutColliders.Reset();
-}
-
 float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const
 {
 	if (LastNode <= FirstTailNode)
@@ -759,9 +663,8 @@ bool URopeComponent::DebugForceWrap()
 		InitRope();
 	}
 
-	EnsureColliderProviders();
-	TArray<IRopeCollider*> Colliders;
-	GatherFrameColliders(Colliders);
+	// collider는 RopeSimSubsystem이 Tick에서 중앙 수집해 FrameColliders에 채워둔 것을 쓴다(가장 최근 프레임).
+	const TArray<IRopeCollider*>& Colliders = FrameColliders;
 
 	// 단일 접촉 node가 이번 frame에 commit되도록 decision gate를 완화한다(DecideWrap은 candidate의
 	// 누적 시간이 >= WrapDecisionTime일 때 commit한다; 0은 "지금 즉시"를 의미한다).

@@ -182,11 +182,8 @@ private:
 
 	FVector WhipAimDir = FVector::ForwardVector;
 
-	/** 매 frame solver에 collider(skeletal bone, world)를 공급하는 source들. */
-	UPROPERTY()
-	TArray<TScriptInterface<IRopeColliderProvider>> ColliderProviders;
-
-	// 한 프레임 collider 스냅샷(Prepare에서 gather → Solve/Finalize에서 사용). provider 소유라 raw 포인터.
+	// 한 프레임 collider 스냅샷. RopeSimSubsystem이 Tick에서 중앙 수집해 채운다(provider 레지스트리 → 로프 필터).
+	// Solve/Finalize에서 read. provider 소유라 raw 포인터(해당 프레임 동안 유효).
 	TArray<IRopeCollider*> FrameColliders;
 
 	// 이번 프레임에 Solver.Step을 돌릴지(Free/Flight만 true).
@@ -201,10 +198,6 @@ private:
 	bool bGpuSteppedThisFrame = false;
 
 	void InitRope();
-	void GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) const;
-
-	/** owner로부터 IRopeColliderProvider 컴포넌트를 모아 ColliderProviders에 캐싱한다. */
-	void EnsureColliderProviders();
 
 	//TODO 주석 추가
 	void EnsureRopeInitialized(){if (Sim.Num() == 0)InitRope();	}
@@ -220,12 +213,6 @@ private:
 	FVector FindBestTargetDirectionNearAim(const FVector& Dir) const { return Dir; }
 
 	float TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const;
-
-#pragma endregion
-
-#pragma region Free 관련 함수
-
-	void GatherWorldColliders(TArray<IRopeCollider*>& OutColliders) const;
 
 #pragma endregion
 

@@ -5,8 +5,12 @@
 #include "DynamicRopeLog.h"
 #include "Solver/RopeXPBDSolver.h" // RopeSolverSubsteps
 #include "Collision/RopeCollider.h" // IRopeCollider::GetGPUCapsule
+#include "Collision/RopeColliderProvider.h" // IRopeColliderProvider (중앙 collider gather)
 #include "RopeGPUSolver.h"          // FRopeGPUSolver / FRopeGPUResidentStep / FRopeGPUCapsule (DynamicRopeShaders 모듈)
 #include "Engine/World.h"
+#include "GameFramework/Actor.h"    // AActor::GetOwner (provider 소스 필터링)
+#include "Components/ActorComponent.h"
+#include "Components/SkeletalMeshComponent.h" // WrapTargetMesh->GetOwner()
 #include "Async/ParallelFor.h"
 #include "HAL/IConsoleManager.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -47,6 +51,112 @@ URopeSimSubsystem* URopeSimSubsystem::Get(const UWorld* World)
 	return World ? World->GetSubsystem<URopeSimSubsystem>() : nullptr;
 }
 
+void URopeSimSubsystem::RegisterColliderProvider(UActorComponent* Provider)
+{
+	if (Provider)
+	{
+		ColliderProviders.AddUnique(Provider);
+		UE_LOG(LogRopeCollision, Verbose, TEXT("RegisterColliderProvider: %s (%d total)"),
+			*Provider->GetName(), ColliderProviders.Num());
+	}
+}
+
+void URopeSimSubsystem::UnregisterColliderProvider(UActorComponent* Provider)
+{
+	ColliderProviders.RemoveSingleSwap(Provider);
+}
+
+void URopeSimSubsystem::BuildFrameColliders()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_BuildColliders);
+	FrameProviders.Reset();
+
+	// 전 로프 bounds 합집합(provider broad-phase용). 현 provider들은 무시하지만 인터페이스 계약 유지 — 향후
+	// bounds-aware provider는 활성 영역으로 컬할 수 있다. 솔버가 다시 per-rope로 좁힌다.
+	FBox AllBounds(ForceInit);
+	for (URopeComponent* Rope : Ropes)
+	{
+		if (!IsValid(Rope))
+		{
+			continue;
+		}
+		for (const FVector& P : Rope->Sim.Positions)
+		{
+			AllBounds += P;
+		}
+	}
+	if (AllBounds.IsValid)
+	{
+		AllBounds = AllBounds.ExpandBy(50.0f); // contact reach 여유.
+	}
+
+	// 등록된 provider마다 1회 gather(프레임당 1회 — 로프 수와 무관). 죽은 provider는 정리.
+	for (int32 i = ColliderProviders.Num() - 1; i >= 0; --i)
+	{
+		UActorComponent* Comp = ColliderProviders[i];
+		if (!IsValid(Comp))
+		{
+			ColliderProviders.RemoveAtSwap(i);
+			continue;
+		}
+		IRopeColliderProvider* Provider = Cast<IRopeColliderProvider>(Comp);
+		if (!Provider)
+		{
+			continue;
+		}
+		FFrameProviderColliders FP;
+		FP.Owner = Comp->GetOwner();
+		Provider->GatherColliders(AllBounds, FP.Colliders);
+		if (FP.Colliders.Num() > 0)
+		{
+			FrameProviders.Add(MoveTemp(FP));
+		}
+	}
+}
+
+void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArray<IRopeCollider*>& OutColliders) const
+{
+	OutColliders.Reset();
+
+	if (Rope.bGatherProvidersFromWholeWorld)
+	{
+		for (const FFrameProviderColliders& FP : FrameProviders)
+		{
+			OutColliders.Append(FP.Colliders);
+		}
+		return;
+	}
+
+	// 소스 한정: ColliderSourceActors(비면 owner) ∪ WrapTargetMesh owner의 provider만. cross-actor wrap 보존.
+	TArray<const AActor*, TInlineAllocator<4>> Allowed;
+	if (Rope.ColliderSourceActors.Num() > 0)
+	{
+		for (const AActor* A : Rope.ColliderSourceActors)
+		{
+			if (A) { Allowed.Add(A); }
+		}
+	}
+	else if (const AActor* Owner = Rope.GetOwner())
+	{
+		Allowed.Add(Owner);
+	}
+	if (Rope.WrapTargetMesh)
+	{
+		if (const AActor* WrapOwner = Rope.WrapTargetMesh->GetOwner())
+		{
+			Allowed.Add(WrapOwner);
+		}
+	}
+
+	for (const FFrameProviderColliders& FP : FrameProviders)
+	{
+		if (FP.Owner && Allowed.Contains(FP.Owner))
+		{
+			OutColliders.Append(FP.Colliders);
+		}
+	}
+}
+
 void URopeSimSubsystem::Tick(float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SubsystemTick);
@@ -74,7 +184,18 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		GpuSolver.GetLatest(GpuLatest);
 	}
 
-	// Phase 1 (GT): 준비 — init/pin/provider gather + collider 스냅샷 + 로직 phase 처리.
+	// Phase 1a (GT): collider 중앙 수집 — 등록된 provider에서 프레임당 1회 빌드 후 로프별 필터로 FrameColliders 채움.
+	// (로프마다 월드를 스캔하던 것을 대체. collider 포인터는 provider 소유라 이번 프레임 solve/finalize 동안 유효.)
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_GatherColliders);
+		BuildFrameColliders();
+		for (URopeComponent* Rope : Ropes)
+		{
+			GatherCollidersForRope(*Rope, Rope->FrameColliders);
+		}
+	}
+
+	// Phase 1b (GT): 준비 — init/pin + 로직 phase 처리(collider는 위에서 이미 채워짐).
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Prepare);
 		for (URopeComponent* Rope : Ropes)

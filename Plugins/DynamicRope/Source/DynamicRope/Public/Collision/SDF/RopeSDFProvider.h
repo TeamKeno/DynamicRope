@@ -44,6 +44,10 @@ class DYNAMICROPE_API URopeSDFProvider : public UActorComponent, public IRopeCol
 public:
 	URopeSDFProvider();
 
+	//~ UActorComponent — RopeSimSubsystem 중앙 레지스트리에 등록/해제(프레임당 1회 중앙 gather).
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
 	/** 본별 SDF 볼륨 에셋. 비어 있으면 collider를 공급하지 않는다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	TObjectPtr<URopeSDFData> SDFData = nullptr;

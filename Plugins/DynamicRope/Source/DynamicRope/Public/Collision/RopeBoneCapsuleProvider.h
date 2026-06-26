@@ -22,6 +22,10 @@ class DYNAMICROPE_API URopeBoneCapsuleProvider : public UActorComponent, public 
 public:
 	URopeBoneCapsuleProvider();
 
+	//~ UActorComponent — RopeSimSubsystem 중앙 레지스트리에 등록/해제(프레임당 1회 중앙 gather).
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
 	/** 본들이 collider가 되는 mesh. null로 두면 owner로부터 자동으로 해석된다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	TObjectPtr<USkeletalMeshComponent> SkeletalMesh = nullptr;

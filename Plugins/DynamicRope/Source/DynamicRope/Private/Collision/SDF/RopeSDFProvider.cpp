@@ -3,6 +3,7 @@
 #include "Collision/SDF/RopeSDFProvider.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "DynamicRopeLog.h"
+#include "Subsystem/RopeSimSubsystem.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "DrawDebugHelpers.h"
@@ -10,6 +11,24 @@
 URopeSDFProvider::URopeSDFProvider()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+}
+
+void URopeSDFProvider::BeginPlay()
+{
+	Super::BeginPlay();
+	if (URopeSimSubsystem* Sim = URopeSimSubsystem::Get(GetWorld()))
+	{
+		Sim->RegisterColliderProvider(this);
+	}
+}
+
+void URopeSDFProvider::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (URopeSimSubsystem* Sim = URopeSimSubsystem::Get(GetWorld()))
+	{
+		Sim->UnregisterColliderProvider(this);
+	}
+	Super::EndPlay(EndPlayReason);
 }
 
 USkeletalMeshComponent* URopeSDFProvider::ResolveMesh()

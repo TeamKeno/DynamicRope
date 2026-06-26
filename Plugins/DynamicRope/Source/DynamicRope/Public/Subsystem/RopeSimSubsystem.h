@@ -12,6 +12,9 @@
 #include "RopeSimSubsystem.generated.h"
 
 class URopeComponent;
+class UActorComponent;
+class IRopeCollider;
+class AActor;
 
 UCLASS()
 class DYNAMICROPE_API URopeSimSubsystem : public UTickableWorldSubsystem
@@ -22,6 +25,13 @@ public:
 	/** 활성 로프를 시뮬레이션 목록에 등록/해제한다(컴포넌트 BeginPlay/EndPlay에서 호출). */
 	void RegisterRope(URopeComponent* Rope);
 	void UnregisterRope(URopeComponent* Rope);
+
+	/**
+	 * collider provider(IRopeColliderProvider를 구현한 UActorComponent)를 중앙 레지스트리에 등록/해제한다
+	 * (provider BeginPlay/EndPlay에서 호출). 로프마다 월드를 스캔하던 것을 대체 — 프레임당 1회 중앙 빌드.
+	 */
+	void RegisterColliderProvider(UActorComponent* Provider);
+	void UnregisterColliderProvider(UActorComponent* Provider);
 
 	/** 월드의 rope sim subsystem(게임/PIE 월드에서 유효, 그 외엔 nullptr). */
 	static URopeSimSubsystem* Get(const UWorld* World);
@@ -38,6 +48,23 @@ private:
 	// 등록된 활성 로프(컴포넌트는 UObject → GC 추적).
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<URopeComponent>> Ropes;
+
+	// 등록된 collider provider(IRopeColliderProvider 구현 컴포넌트). GC 추적.
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UActorComponent>> ColliderProviders;
+
+	// 프레임당 1회 중앙 빌드한 collider(provider별 소유 액터 + collider 포인터). 포인터는 provider 소유라 해당 프레임만 유효.
+	struct FFrameProviderColliders
+	{
+		AActor* Owner = nullptr;          // 소스 필터링용(provider 컴포넌트의 owner 액터).
+		TArray<IRopeCollider*> Colliders; // provider->GatherColliders가 채운 포인터(provider 백킹 스토리지를 가리킴).
+	};
+	TArray<FFrameProviderColliders> FrameProviders;
+
+	// 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). RopeBounds는 전 로프 bounds 합집합을 넘긴다.
+	void BuildFrameColliders();
+	// 한 로프의 필터(whole-world / ColliderSourceActors / WrapTargetMesh owner)에 맞는 collider를 중앙 빌드에서 모은다.
+	void GatherCollidersForRope(const URopeComponent& Rope, TArray<IRopeCollider*>& OutColliders) const;
 
 	// GPU 상주 솔버(M5). 영속 버퍼(로프별)를 매 프레임 in-place 전진. 인스턴스 상태라 월드별 1개.
 	// r.DynamicRope.GPUSolver로 켤 때만 사용. CPU 솔버는 ground-truth로 유지.

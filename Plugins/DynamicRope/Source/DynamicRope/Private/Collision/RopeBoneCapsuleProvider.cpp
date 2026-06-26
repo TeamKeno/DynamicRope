@@ -2,6 +2,7 @@
 
 #include "Collision/RopeBoneCapsuleProvider.h"
 #include "DynamicRopeLog.h"
+#include "Subsystem/RopeSimSubsystem.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "DrawDebugHelpers.h"
@@ -9,6 +10,24 @@
 URopeBoneCapsuleProvider::URopeBoneCapsuleProvider()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+}
+
+void URopeBoneCapsuleProvider::BeginPlay()
+{
+	Super::BeginPlay();
+	if (URopeSimSubsystem* Sim = URopeSimSubsystem::Get(GetWorld()))
+	{
+		Sim->RegisterColliderProvider(this);
+	}
+}
+
+void URopeBoneCapsuleProvider::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (URopeSimSubsystem* Sim = URopeSimSubsystem::Get(GetWorld()))
+	{
+		Sim->UnregisterColliderProvider(this);
+	}
+	Super::EndPlay(EndPlayReason);
 }
 
 USkeletalMeshComponent* URopeBoneCapsuleProvider::ResolveMesh()
