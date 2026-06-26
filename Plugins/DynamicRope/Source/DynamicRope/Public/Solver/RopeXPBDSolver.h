@@ -10,6 +10,20 @@
 
 class IRopeCollider;
 
+/** 한 프레임의 고정 timestep substep 스케줄. CPU 솔버와 GPU 솔버가 공유한다. */
+struct FRopeSubstepSchedule
+{
+	int32 NumSub = 0;     // 이번 프레임에 돌릴 substep 수(0이면 이번 프레임 솔브 스킵).
+	float FixedDt = 0.0f; // substep당 고정 dt(초).
+};
+
+/**
+ * State.TimeAccumulator에 DeltaSeconds를 누적하고, 고정 크기 substep 단위로 소비하여 이번 프레임의
+ * 스케줄을 반환한다(spiral-of-death 상한 포함). accumulator를 갱신(차감)하므로 State는 비-const.
+ * CPU(FRopeXPBDSolver::Step)와 GPU(FRopeGPUSolver) 양쪽이 동일 스케줄을 쓰도록 한 곳으로 추출한 것.
+ */
+DYNAMICROPE_API FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverConfig& Config, float DeltaSeconds);
+
 class DYNAMICROPE_API FRopeXPBDSolver
 {
 public:

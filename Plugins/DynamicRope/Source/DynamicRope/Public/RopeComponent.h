@@ -27,6 +27,9 @@ class DYNAMICROPE_API URopeComponent : public UMeshComponent
 {
 	GENERATED_BODY()
 
+	// 서브시스템이 GPU 배치 솔브를 위해 Sim/SolverConfig/bSolveThisFrame에 직접 접근한다(CPU 경로는 SolveSimFrame 사용).
+	friend class URopeSimSubsystem;
+
 public:
 	URopeComponent();
 

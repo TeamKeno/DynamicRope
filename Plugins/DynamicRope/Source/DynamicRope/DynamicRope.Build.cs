@@ -39,8 +39,9 @@ public class DynamicRope : ModuleRules
 				"Engine",
 				"PhysicsCore",
 				"InputCore",
-				"RenderCore",
-				"RHI",
+				"RenderCore",         // RopeSceneProxy
+				"RHI",                // RopeSceneProxy
+				"DynamicRopeShaders", // GPU 솔버(FRopeGPUSolver) — 별도 PostConfigInit 모듈
 				"Slate",
 				"SlateCore",
 				// ... add private dependencies that you statically link with here ...

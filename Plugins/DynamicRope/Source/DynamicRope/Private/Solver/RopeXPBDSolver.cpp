@@ -5,15 +5,8 @@
 #include "Collision/RopeCollider.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 
-void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config,
-	const TArray<IRopeCollider*>& Colliders, float DeltaSeconds) const
+FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverConfig& Config, float DeltaSeconds)
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_Step);
-	if (State.Num() < 2)
-	{
-		return;
-	}
-
 	// 고정 timestep: substep 크기를 frame rate와 무관하게 고정한다(Substeps = "60fps frame당 substep 수"로
 	// 해석). 실제 경과 시간을 누적해 고정 크기로 소비하므로 저fps면 더 많은 substep을, 고fps면 더 적은
 	// substep을 돌린다 → substep당 변위가 항상 일정 → 충돌/터널링이 frame rate에 의존하지 않는다.
@@ -31,9 +24,28 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 	const int32 NumSub = FMath::FloorToInt(State.TimeAccumulator / FixedDt);
 	if (NumSub <= 0)
 	{
-		return; // 아직 한 substep 분량이 안 모임(고fps) → 누적해 다음 frame으로 이월
+		return FRopeSubstepSchedule{ 0, FixedDt }; // 아직 한 substep 분량이 안 모임(고fps) → 다음 frame으로 이월
 	}
 	State.TimeAccumulator -= static_cast<float>(NumSub) * FixedDt;
+	return FRopeSubstepSchedule{ NumSub, FixedDt };
+}
+
+void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config,
+	const TArray<IRopeCollider*>& Colliders, float DeltaSeconds) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_Step);
+	if (State.Num() < 2)
+	{
+		return;
+	}
+
+	const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(State, Config, DeltaSeconds);
+	const int32 NumSub = Schedule.NumSub;
+	const float FixedDt = Schedule.FixedDt;
+	if (NumSub <= 0)
+	{
+		return;
+	}
 
 	const int32 Iters = FMath::Max(1, Config.Iterations);
 
