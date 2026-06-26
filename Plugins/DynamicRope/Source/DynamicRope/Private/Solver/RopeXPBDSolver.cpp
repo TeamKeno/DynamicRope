@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Solver/RopeXPBDSolver.h"
+#include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 
@@ -35,6 +36,10 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 	State.TimeAccumulator -= static_cast<float>(NumSub) * FixedDt;
 
 	const int32 Iters = FMath::Max(1, Config.Iterations);
+
+	// hot-path: 기본 비활성(VeryVerbose). r.LogRopeSolver를 켜야 보인다.
+	UE_LOG(LogRopeSolver, VeryVerbose, TEXT("Step: %d node(s), %d substep(s) x %d iter(s), %d collider(s)"),
+		State.Num(), NumSub, Iters, Colliders.Num());
 
 	// 제약별 Lagrange multiplier(XPBD). substep마다 리셋되며, 해당 iteration들에 걸쳐 누적된다.
 	const int32 NumDist = State.Num() - 1;

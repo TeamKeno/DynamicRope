@@ -2,6 +2,7 @@
 
 #include "Collision/SDF/RopeSDFProvider.h"
 #include "Collision/SDF/RopeSDFData.h"
+#include "DynamicRopeLog.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "DrawDebugHelpers.h"
@@ -28,6 +29,8 @@ void URopeSDFProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeC
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh || !SDFData)
 	{
+		UE_LOG(LogRopeCollision, Verbose, TEXT("SDFProvider on %s: %s missing — no colliders."),
+			*GetNameSafe(GetOwner()), !Mesh ? TEXT("skeletal mesh") : TEXT("SDFData asset"));
 		return;
 	}
 
@@ -59,6 +62,9 @@ void URopeSDFProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeC
 			}
 #endif
 		}
+
+		UE_LOG(LogRopeCollision, VeryVerbose, TEXT("SDFProvider on %s: built %d collider(s) from %d baked volume(s)."),
+			*GetNameSafe(GetOwner()), Colliders.Num(), SDFData->BoneVolumes.Num());
 	}
 
 	// 캐시된 collider 포인터를 넘긴다(해당 프레임 동안 유효).

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeWrapController.h"
+#include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "Components/SkeletalMeshComponent.h"
 
@@ -95,6 +96,9 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 		OutSeed.Latched.Add(Latch);
 	}
 
+	UE_LOG(LogRopeWrap, Log, TEXT("DecideWrap committed: bone=%s, %d node(s), dwell=%.3fs >= %.3fs"),
+		*CandidateBone.ToString(), CandidateNodes.Num(), CandidateTime, Config.WrapDecisionTime);
+
 	CandidateBone = NAME_None;
 	CandidateTime = 0.0f;
 	CandidateNodes.Reset();
@@ -112,8 +116,13 @@ void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Se
 	State.Mesh = Mesh;
 	if (!Mesh)
 	{
+		UE_LOG(LogRopeWrap, Warning, TEXT("BeginWrap aborted: no mesh for bone %s (seed/fallback both null) — nodes stay dynamic."),
+			*State.BoneName.ToString());
 		return;
 	}
+
+	UE_LOG(LogRopeWrap, Log, TEXT("BeginWrap: bone=%s, %d latched node(s), mesh=%s"),
+		*State.BoneName.ToString(), State.Latched.Num(), *Mesh->GetName());
 
 	// 각 접촉 노드의 현재 월드 위치를 bone-local 로 변환하여 동결한다(InvMass 0).
 	// 이 시점부터 노드는 솔버가 아니라 logic(skinning 된 bone)에 의해 구동된다.
@@ -171,8 +180,9 @@ void FRopeWrapController::Pull(FRopeSimState& /*Sim*/, const FVector& /*PullTarg
 	// TODO(M3): 붙잡힌 limb 를 PullTarget 쪽으로 절차적으로 끌어당기고, wrap 을 팽팽하게 유지한다.
 }
 
-void FRopeWrapController::Release(ERopeReleaseReason /*Reason*/)
+void FRopeWrapController::Release(ERopeReleaseReason Reason)
 {
+	UE_LOG(LogRopeWrap, Log, TEXT("Release: bone=%s, reason=%d"), *State.BoneName.ToString(), static_cast<int32>(Reason));
 	State.Reset();
 	CandidateBone = NAME_None;
 	CandidateTime = 0.0f;

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RopeSDFDataFactory.h"
+#include "DynamicRopeEditorLog.h"
 #include "Collision/SDF/RopeSDFData.h"
 
 URopeSDFDataFactory::URopeSDFDataFactory()
@@ -13,5 +14,6 @@ URopeSDFDataFactory::URopeSDFDataFactory()
 UObject* URopeSDFDataFactory::FactoryCreateNew(UClass* InClass, UObject* InParent, FName InName,
 	EObjectFlags Flags, UObject* Context, FFeedbackContext* Warn)
 {
+	UE_LOG(LogDynamicRopeEditor, Verbose, TEXT("Created Rope SDF Data asset '%s'."), *InName.ToString());
 	return NewObject<URopeSDFData>(InParent, InClass, InName, Flags);
 }

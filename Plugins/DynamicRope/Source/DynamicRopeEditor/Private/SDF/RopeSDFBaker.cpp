@@ -1,6 +1,7 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RopeSDFBaker.h"
+#include "DynamicRopeEditorLog.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "Engine/SkeletalMesh.h"
 #include "Rendering/SkeletalMeshModel.h"
@@ -30,14 +31,19 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 	Out.Reset();
 	if (!Mesh)
 	{
+		UE_LOG(LogRopeSDFBake, Warning, TEXT("BakeMesh aborted: null mesh."));
 		return false;
 	}
 
 	FSkeletalMeshModel* Model = Mesh->GetImportedModel();
 	if (!Model || Model->LODModels.Num() == 0)
 	{
+		UE_LOG(LogRopeSDFBake, Warning, TEXT("BakeMesh aborted: %s has no CPU geometry (cooked/stripped)."), *Mesh->GetName());
 		return false; // CPU 지오메트리 없음(쿡/스트립)
 	}
+
+	UE_LOG(LogRopeSDFBake, Log, TEXT("BakeMesh start: %s (voxel=%.2fcm, maxRes=%d, narrowBand=%.1fcm)"),
+		*Mesh->GetName(), S.VoxelSize, S.MaxResolution, S.NarrowBand);
 
 	const FSkeletalMeshLODModel& LOD = Model->LODModels[0];
 	const FReferenceSkeleton& Ref = Mesh->GetRefSkeleton();
@@ -221,8 +227,12 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 		Volume.Resolution = Res;
 		Volume.VoxelSize = Vox;
 		Volume.Distances = MoveTemp(Distances);
+		UE_LOG(LogRopeSDFBake, Verbose, TEXT("  bone %s: res=%dx%dx%d, voxel=%.2fcm, %d tri(s)"),
+			*Volume.Bone.ToString(), Res.X, Res.Y, Res.Z, Vox, NumTris);
 		Out.Add(MoveTemp(Volume));
 	}
 
+	UE_LOG(LogRopeSDFBake, Log, TEXT("BakeMesh done: %s -> %d bone volume(s) (of %d target bone(s))."),
+		*Mesh->GetName(), Out.Num(), Targets.Num());
 	return true;
 }

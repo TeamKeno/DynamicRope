@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Collision/RopeBoneCapsuleProvider.h"
+#include "DynamicRopeLog.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "DrawDebugHelpers.h"
@@ -27,6 +28,8 @@ void URopeBoneCapsuleProvider::GatherColliders(const FBox& /*RopeBounds*/, TArra
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh)
 	{
+		UE_LOG(LogRopeCollision, Verbose, TEXT("CapsuleProvider on %s: no skeletal mesh resolved — no colliders."),
+			*GetNameSafe(GetOwner()));
 		return;
 	}
 
@@ -61,6 +64,9 @@ void URopeBoneCapsuleProvider::GatherColliders(const FBox& /*RopeBounds*/, TArra
 			}
 #endif
 		}
+
+		UE_LOG(LogRopeCollision, VeryVerbose, TEXT("CapsuleProvider on %s: built %d capsule(s) from %d bone(s)."),
+			*GetNameSafe(GetOwner()), Capsules.Num(), Bones.Num());
 	}
 
 	// 캐시된 capsule 포인터를 넘긴다(해당 프레임 동안 유효).

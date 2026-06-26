@@ -1,6 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DynamicRope.h"
+#include "DynamicRopeLog.h"
+
+// 런타임 로그 카테고리 정의(선언은 DynamicRopeLog.h).
+DEFINE_LOG_CATEGORY(LogDynamicRope);
+DEFINE_LOG_CATEGORY(LogRopeSolver);
+DEFINE_LOG_CATEGORY(LogRopeWrap);
+DEFINE_LOG_CATEGORY(LogRopeCollision);
 
 #if WITH_GAMEPLAY_DEBUGGER
 #include "GameplayDebugger.h"
@@ -12,12 +19,14 @@
 void FDynamicRopeModule::StartupModule()
 {
 	// 이 코드는 module이 메모리에 로드된 후 실행된다. 정확한 시점은 .uplugin 파일에 module별로 지정된다
+	UE_LOG(LogDynamicRope, Log, TEXT("DynamicRope runtime module started."));
 #if WITH_GAMEPLAY_DEBUGGER
 	IGameplayDebugger& GameplayDebugger = IGameplayDebugger::Get();
 	GameplayDebugger.RegisterCategory(TEXT("Rope"),
 		IGameplayDebugger::FOnGetCategory::CreateStatic(&FGameplayDebuggerCategory_Rope::MakeInstance),
 		EGameplayDebuggerCategoryState::EnabledInGameAndSimulate);
 	GameplayDebugger.NotifyCategoriesChanged();
+	UE_LOG(LogDynamicRope, Verbose, TEXT("Registered GameplayDebugger category 'Rope'."));
 #endif
 }
 
@@ -31,6 +40,7 @@ void FDynamicRopeModule::ShutdownModule()
 		IGameplayDebugger::Get().UnregisterCategory(TEXT("Rope"));
 	}
 #endif
+	UE_LOG(LogDynamicRope, Log, TEXT("DynamicRope runtime module shut down."));
 }
 
 #undef LOCTEXT_NAMESPACE

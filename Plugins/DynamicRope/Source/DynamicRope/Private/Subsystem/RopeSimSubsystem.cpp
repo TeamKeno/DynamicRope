@@ -2,6 +2,7 @@
 
 #include "Subsystem/RopeSimSubsystem.h"
 #include "RopeComponent.h"
+#include "DynamicRopeLog.h"
 #include "Engine/World.h"
 #include "Async/ParallelFor.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -11,12 +12,15 @@ void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
 	if (Rope)
 	{
 		Ropes.AddUnique(Rope);
+		UE_LOG(LogDynamicRope, Verbose, TEXT("RegisterRope: %s (%d total)"), *Rope->GetName(), Ropes.Num());
 	}
 }
 
 void URopeSimSubsystem::UnregisterRope(URopeComponent* Rope)
 {
 	Ropes.RemoveSingleSwap(Rope);
+	UE_LOG(LogDynamicRope, Verbose, TEXT("UnregisterRope: %s (%d remaining)"),
+		Rope ? *Rope->GetName() : TEXT("null"), Ropes.Num());
 }
 
 URopeSimSubsystem* URopeSimSubsystem::Get(const UWorld* World)

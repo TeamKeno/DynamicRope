@@ -2,6 +2,7 @@
 
 #include "SRopeSDFAuthoringPanel.h"
 #include "RopeSDFBaker.h"
+#include "DynamicRopeEditorLog.h"
 #include "Collision/SDF/RopeSDFData.h"
 
 #include "Widgets/SBoxPanel.h"
@@ -165,6 +166,7 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 	USkeletalMesh* Mesh = Data->SourceMesh.LoadSynchronous();
 	if (!Mesh)
 	{
+		UE_LOG(LogRopeSDFBake, Warning, TEXT("Bake clicked on %s: SourceMesh not set or failed to load."), *Data->GetName());
 		FNotificationInfo Info(LOCTEXT("NoMesh", "Bake failed: SourceMesh is not set or failed to load."));
 		Info.ExpireDuration = 4.0f;
 		FSlateNotificationManager::Get().AddNotification(Info);
@@ -199,6 +201,17 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
 		SaveArgs.SaveFlags = SAVE_NoError;
 		bSaved = UPackage::SavePackage(Package, Data, *FileName, SaveArgs);
+	}
+
+	if (bSaved)
+	{
+		UE_LOG(LogRopeSDFBake, Log, TEXT("Baked %s: %d bone volume(s), auto-saved."),
+			*Data->GetName(), Data->BoneVolumes.Num());
+	}
+	else
+	{
+		UE_LOG(LogRopeSDFBake, Warning, TEXT("Baked %s: %d bone volume(s), but auto-save failed (read-only? save manually)."),
+			*Data->GetName(), Data->BoneVolumes.Num());
 	}
 
 	FNotificationInfo Info(FText::Format(

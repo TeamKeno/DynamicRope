@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DynamicRopeEditorModule.h"
+#include "DynamicRopeEditorLog.h"
 #include "SDF/SRopeSDFAuthoringPanel.h"
 #include "SDF/RopeSDFVisualizer.h"
 #include "Visualizers/RopeComponentVisualizer.h"
@@ -16,6 +17,10 @@
 #include "WorkspaceMenuStructureModule.h"
 #include "Editor/UnrealEdEngine.h"
 #include "UnrealEdGlobals.h"
+
+// Editor log category definitions (declarations in DynamicRopeEditorLog.h).
+DEFINE_LOG_CATEGORY(LogDynamicRopeEditor);
+DEFINE_LOG_CATEGORY(LogRopeSDFBake);
 
 #define LOCTEXT_NAMESPACE "FDynamicRopeEditorModule"
 
@@ -45,6 +50,8 @@ void FDynamicRopeEditorModule::StartupModule()
 		GUnrealEd->RegisterComponentVisualizer(URopeSDFProvider::StaticClass()->GetFName(),
 			MakeShared<FRopeSDFVisualizer>());
 	}
+
+	UE_LOG(LogDynamicRopeEditor, Log, TEXT("DynamicRopeEditor module started (SDF authoring tab + component visualizers registered)."));
 }
 
 void FDynamicRopeEditorModule::ShutdownModule()
@@ -62,6 +69,8 @@ void FDynamicRopeEditorModule::ShutdownModule()
 	{
 		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(RopeSDFAuthoringTabId);
 	}
+
+	UE_LOG(LogDynamicRopeEditor, Log, TEXT("DynamicRopeEditor module shut down."));
 }
 
 void FDynamicRopeEditorModule::RegisterMenus()

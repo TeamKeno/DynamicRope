@@ -1,6 +1,7 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RopeComponent.h"
+#include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "Collision/RopeColliderProvider.h"
 #include "Render/RopeSceneProxy.h"
@@ -15,6 +16,20 @@ namespace {
 	{
 		T = FMath::Clamp(T, 0.0f, 1.0f);
 		return T * T * (3.0f - 2.0f * T);
+	}
+
+	// phase 전이 로그용 짧은 이름(UEnum 리플렉션 없이 hot-path에서도 안전).
+	const TCHAR* PhaseName(ERopePhase Phase)
+	{
+		switch (Phase)
+		{
+		case ERopePhase::Free:       return TEXT("Free");
+		case ERopePhase::Flight:     return TEXT("Flight");
+		case ERopePhase::Contacting: return TEXT("Contacting");
+		case ERopePhase::Wrapped:    return TEXT("Wrapped");
+		case ERopePhase::Releasing:  return TEXT("Releasing");
+		default:                     return TEXT("?");
+		}
 	}
 
 }
@@ -51,6 +66,9 @@ void URopeComponent::InitRope()
 	Sim.bStartPinned = true;
 	Sim.StartPinTarget = Start;
 	Sim.StartPinPrev = Start;
+
+	UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] InitRope: %d particles, length=%.1f, segment=%.2f"),
+		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);
 }
 
 void URopeComponent::GatherFrameColliders(TArray<IRopeCollider*>& OutColliders) const
@@ -157,6 +175,11 @@ void URopeComponent::BeginPlay()
 	{
 		SimSubsystem->RegisterRope(this);
 	}
+	else
+	{
+		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] BeginPlay: RopeSimSubsystem unavailable — rope will not be simulated."),
+			*GetName());
+	}
 }
 
 void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -183,6 +206,8 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 	PendingWrapSeed.Reset();
 	ContactingElapsed = 0.0f;
 
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> Flight (fresh throw, aim=%s)"),
+		*GetName(), PhaseName(Phase), *WhipAimDir.ToCompactString());
 	Phase = ERopePhase::Flight;
 }
 
@@ -358,6 +383,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 
 		if (ShouldDismissContacting())
 		{
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Flight (contact lost before wrap)"), *GetName());
 			Phase = ERopePhase::Flight;
 			break;
 		}
@@ -366,6 +392,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		{
 			const FRopeWrapState Seed = BuildWrapSeedFromContactingState();
 			WrapController.BeginWrap(Sim, Seed, ResolveWrapTargetMesh());
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Wrapped (bone=%s, %d latched node(s))"),
+				*GetName(), *Seed.BoneName.ToString(), Seed.Latched.Num());
 			Phase = ERopePhase::Wrapped;
 			OnRopeWrapped.Broadcast(Seed.BoneName);
 		}
@@ -389,6 +417,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		ReleaseCooldown -= DeltaTime;
 		if (ReleaseCooldown <= 0)
 		{
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Releasing -> Free"), *GetName());
 			Phase = ERopePhase::Free;
 		}
 		break;
@@ -424,6 +453,8 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		if (ShouldCapture(Candidates))
 		{
 			BuildContactingState(Candidates);
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Flight -> Contacting (bone=%s, %d node(s))"),
+				*GetName(), *ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num());
 			Phase = ERopePhase::Contacting;
 			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
 		}
@@ -467,6 +498,8 @@ void URopeComponent::SendRenderDynamicData_Concurrent()
 
 void URopeComponent::Throw(const FVector& AimDir)
 {
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Throw requested (phase=%s, aim=%s)"),
+		*GetName(), PhaseName(Phase), *AimDir.GetSafeNormal().ToCompactString());
 
 	EnsureRopeInitialized();
 
@@ -717,10 +750,14 @@ bool URopeComponent::DebugForceWrap()
 	FRopeWrapState Seed;
 	if (!WrapController.DecideWrap(Sim, Colliders, Relaxed, 0.0f, Seed))
 	{
+		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] DebugForceWrap: no node in contact (%d collider(s)) — move rope/body to overlap first."),
+			*GetName(), Colliders.Num());
 		return false; // 접촉 중인 것이 없다; 먼저 rope/capsule을 움직여 겹치게 한다
 	}
 
 	WrapController.BeginWrap(Sim, Seed, ResolveWrapTargetMesh());
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] DebugForceWrap -> Wrapped (bone=%s)"),
+		*GetName(), *WrapController.State.BoneName.ToString());
 	Phase = ERopePhase::Wrapped;
 	OnRopeWrapped.Broadcast(WrapController.State.BoneName);
 	return true;
@@ -732,6 +769,8 @@ void URopeComponent::ReleaseWrap()
 		return;
 
 	const FName Bone = (Phase == ERopePhase::Wrapped) ? WrapController.State.BoneName : ContactTracker.CandidateBone;
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> Releasing (manual, bone=%s)"),
+		*GetName(), PhaseName(Phase), *Bone.ToString());
 	WrapController.Release(ERopeReleaseReason::Manual);
 	ContactTracker.Reset();
 	PendingWrapSeed.Reset();
