@@ -193,7 +193,7 @@ void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void URopeComponent::StartFreshThrow(const FVector& AimDir)
 {
-	WhipAimDir = AimDir.GetSafeNormal();
+	WhipAimDir = FindBestTargetDirectionNearAim(AimDir.GetSafeNormal()).GetSafeNormal();
 	if (WhipAimDir.IsNearlyZero())
 	{
 		WhipAimDir = GetForwardVector();
@@ -202,95 +202,165 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 	WhipElapsed = 0.0f;
 	bWhipSwingActive = true;
 
+	if (WrapController.IsActive())
+	{
+		WrapController.Release(ERopeReleaseReason::Manual);
+	}
 	ContactTracker.Reset();
 	PendingWrapSeed.Reset();
 	ContactingElapsed = 0.0f;
+	ReleaseCooldown = 0.0f;
+	WrappedSwayImpulse = FVector::ZeroVector;
+	WrappedSwayTime = 0.0f;
 
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> Flight (fresh throw, aim=%s)"),
-		*GetName(), PhaseName(Phase), *WhipAimDir.ToCompactString());
+	const int32 LastNode = Sim.Num() - 1;
+	if (LastNode >= 1)
+	{
+		const FVector Start = GetComponentLocation();
+		Sim.bStartPinned = true;
+		Sim.StartPinPrev = Start;
+		Sim.StartPinTarget = Start;
+		Sim.Positions[0] = Start;
+		Sim.PrevPositions[0] = Start;
+
+		for (int32 i = 0; i < Sim.Num(); ++i)
+		{
+			Sim.InvMass[i] = (i == 0) ? 0.0f : 1.0f;
+			Sim.PrevPositions[i] = Sim.Positions[i];
+		}
+
+		// Prime the guided span behind the hand so the visible throw reads back-to-front.
+		FVector Up = FVector::UpVector;
+		if (FMath::Abs(FVector::DotProduct(WhipAimDir, Up)) > 0.96f)
+		{
+			Up = GetRightVector().GetSafeNormal();
+		}
+		FVector Side = FVector::CrossProduct(Up, WhipAimDir).GetSafeNormal();
+		if (Side.IsNearlyZero())
+		{
+			Side = GetRightVector().GetSafeNormal();
+		}
+		Up = FVector::CrossProduct(WhipAimDir, Side).GetSafeNormal();
+
+		const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * WhipGuidedLength), 1, LastNode);
+		for (int32 i = 1; i <= LastGuidedNode; ++i)
+		{
+			const float S = static_cast<float>(i) / static_cast<float>(LastNode);
+			const float Arc = FMath::Sin(S * PI);
+			const FVector Primed =
+				Start
+				- WhipAimDir * (S * Sim.RopeLength * 0.85f)
+				+ Up * (Arc * WhipArcHeight * 0.25f)
+				- Side * (Arc * WhipSideOffset);
+			Sim.Positions[i] = Primed;
+			Sim.PrevPositions[i] = Primed;
+		}
+
+		// Temporary throw: inject Verlet velocity by moving previous positions opposite the aim.
+		const float ReferenceDt = 1.0f / 60.0f;
+		const float BaseImpulse = ThrowParams.ThrowSpeed * ReferenceDt;
+		const float TipBoost = FMath::Clamp(ThrowParams.TipMass / 5.0f, 0.25f, 3.0f);
+		const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipGuidedLength), 1, LastNode);
+		for (int32 i = 1; i <= LastNode; ++i)
+		{
+			const float AlongRope = static_cast<float>(i) / static_cast<float>(LastNode);
+			const float TailWeight = TailWeightByIndex(i, FirstTailNode, LastNode);
+			const float Weight = FMath::Lerp(SmoothStep(AlongRope), 1.0f, TailWeight * 0.5f);
+			const float Impulse = BaseImpulse * Weight * FMath::Lerp(1.0f, TipBoost, TailWeight);
+			Sim.PrevPositions[i] -= WhipAimDir * Impulse;
+		}
+	}
+
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> Flight (fresh throw impulse, aim=%s, speed=%.1f)"),
+		*GetName(), PhaseName(Phase), *WhipAimDir.ToCompactString(), ThrowParams.ThrowSpeed);
 	Phase = ERopePhase::Flight;
 }
 
 void URopeComponent::ApplyWhipSwing(float DeltaTime)
 {
-	WhipElapsed += DeltaTime;
-
-	const float SafeDuration = FMath::Max(WhipDuration, UE_SMALL_NUMBER);
-	if (WhipElapsed >= SafeDuration)
+	if (Sim.Num() < 3)
 	{
 		bWhipSwingActive = false;
-	}
-
-	const FVector Forward = WhipAimDir.GetSafeNormal();
-	FVector Up = FVector::UpVector;
-	if (FMath::Abs(FVector::DotProduct(Forward, Up)) > 0.92f)
-	{
-		Up = GetUpVector();
-	}
-	const FVector Side = FVector::CrossProduct(Up, Forward).GetSafeNormal();
-	Up = FVector::CrossProduct(Forward, Side).GetSafeNormal();
-
-	// 손이 호를 그리며 휘두르는 방향.
-	// 초반엔 아래/뒤쪽, 후반엔 앞쪽으로 넘어오는 느낌.
-	const FVector HandPos = GetComponentLocation();
-	const int32 LastNode = Sim.Num() - 1;
-	if (LastNode <= 0)
-	{
 		return;
 	}
 
-	const float GuidedLength = FMath::Clamp(WhipGuidedLength, 0.1f, 0.95f);
-	const float FollowAlpha = 1.0f - FMath::Exp(-FMath::Max(0.0f, WhipFollowRate) * DeltaTime);
-	const float SafeTravelTime = FMath::Max(WhipWaveTravelTime, UE_SMALL_NUMBER);
+	WhipElapsed += DeltaTime;
+	const float Duration = FMath::Max(WhipDuration, KINDA_SMALL_NUMBER);
+	const float T = FMath::Clamp(WhipElapsed / Duration, 0.0f, 1.0f);
+	const float EaseT = SmoothStep(T);
+
+	const FVector Forward = WhipAimDir.GetSafeNormal();
+	if (Forward.IsNearlyZero())
+	{
+		bWhipSwingActive = false;
+		return;
+	}
+
+	FVector Up = FVector::UpVector;
+	if (FMath::Abs(FVector::DotProduct(Forward, Up)) > 0.96f)
+	{
+		Up = GetRightVector().GetSafeNormal();
+	}
+
+	FVector Side = FVector::CrossProduct(Up, Forward).GetSafeNormal();
+	if (Side.IsNearlyZero())
+	{
+		Side = GetRightVector().GetSafeNormal();
+	}
+	Up = FVector::CrossProduct(Forward, Side).GetSafeNormal();
+
+	const FVector HandPos = GetComponentLocation();
+	const int32 LastNode = Sim.Num() - 1;
+	const float GuidedEnd = FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f);
+	const float FollowAlpha = FMath::Clamp(1.0f - FMath::Exp(-FMath::Max(0.0f, WhipFollowRate) * DeltaTime), 0.0f, 0.8f);
+	const float WaveTravel = FMath::Max(WhipWaveTravelTime / Duration, 0.05f);
+	const float WaveHead = FMath::Clamp(EaseT / WaveTravel, 0.0f, 1.35f);
+	const float ThrowReach = FMath::Max(Sim.RopeLength, RopeLength) * (0.2f + 0.8f * EaseT);
 
 	for (int32 i = 1; i <= LastNode; ++i)
 	{
-		if (!Sim.Positions.IsValidIndex(i) || !Sim.PrevPositions.IsValidIndex(i) || !Sim.InvMass.IsValidIndex(i) || Sim.InvMass[i] <= 0.0f)
+		if (Sim.InvMass.IsValidIndex(i) && Sim.InvMass[i] <= 0.0f)
 		{
 			continue;
 		}
 
-		const float RopeAlpha = static_cast<float>(i) / static_cast<float>(LastNode);
-		if (RopeAlpha >= GuidedLength)
+		const float S = static_cast<float>(i) / static_cast<float>(LastNode);
+		if (S > GuidedEnd)
+		{
+			break;
+		}
+
+		const float StrongGuideEnd = GuidedEnd * 0.55f;
+		const float GuideFade = (S <= StrongGuideEnd)
+			? 1.0f
+			: 1.0f - SmoothStep((S - StrongGuideEnd) / FMath::Max(GuidedEnd - StrongGuideEnd, KINDA_SMALL_NUMBER));
+		const float RootFade = SmoothStep(S / FMath::Max(StrongGuideEnd, KINDA_SMALL_NUMBER));
+		const float GuideWeight = GuideFade * FMath::Lerp(0.65f, 1.0f, RootFade);
+		if (GuideWeight <= KINDA_SMALL_NUMBER)
 		{
 			continue;
 		}
 
-		const float GuideAlpha = RopeAlpha / GuidedLength;
-		const float GuideWeight = FMath::Clamp(1.0f - SmoothStep((GuideAlpha - 0.62f) / 0.38f), 0.0f, 1.0f);
-		if (GuideWeight <= 0.0f)
-		{
-			continue;
-		}
+		const float RestDistance = S * Sim.RopeLength;
+		const float Behind = (1.0f - EaseT) * RestDistance * 0.7f;
+		const float Ahead = ThrowReach * S * EaseT;
+		const float ArcEnvelope = FMath::Sin(S * PI);
+		const float TravelingWave = FMath::Sin(FMath::Clamp((S - WaveHead + 0.35f) / 0.7f, 0.0f, 1.0f) * PI);
+		const float Lift = ArcEnvelope * TravelingWave * FMath::Sin(T * PI) * WhipArcHeight;
+		const float SideSweep = ArcEnvelope * FMath::Sin((S - EaseT) * PI) * WhipSideOffset;
 
-		const float Delay = GuideAlpha * SafeTravelTime;
-		const float LocalT = FMath::Clamp((WhipElapsed - Delay) / FMath::Max(SafeDuration - Delay, UE_SMALL_NUMBER), 0.0f, 1.0f);
-		const float CurveT = SmoothStep(LocalT);
-		const float RestDistance = RopeAlpha * Sim.RopeLength;
-		const float ArcProfile = FMath::Sin(FMath::Clamp(GuideAlpha, 0.0f, 1.0f) * PI);
-
-		const FVector BackPose =
+		const FVector Target =
 			HandPos
-			- Forward * (RestDistance * 0.85f)
-			- Up * (RestDistance * 0.35f);
+			- Forward * Behind
+			+ Forward * Ahead
+			+ Up * Lift
+			+ Side * SideSweep;
 
-		const FVector ForwardPose =
-			HandPos
-			+ Forward * (RestDistance * 0.95f)
-			+ Up * (ArcProfile * WhipArcHeight * 0.20f);
-
-		const FVector ArcOffset =
-			Up * (ArcProfile * FMath::Sin(CurveT * PI) * WhipArcHeight)
-			+ Side * (ArcProfile * FMath::Sin(CurveT * PI) * WhipSideOffset);
-
-		const FVector TargetPosition = FMath::Lerp(BackPose, ForwardPose, CurveT) + ArcOffset;
-		const FVector Correction = TargetPosition - Sim.Positions[i];
-		const FVector Delta = Correction * GuideWeight * FollowAlpha;
-
-		Sim.Positions[i] += Delta;
-		Sim.PrevPositions[i] += Delta * 0.35f;
-		// 손 근처 노드에 강하게, 조금 떨어진 노드엔 약하게.
+		const FVector Delta = Target - Sim.Positions[i];
+		Sim.Positions[i] += Delta * FollowAlpha * GuideWeight;
 	}
+
+	bWhipSwingActive = WhipElapsed < WhipDuration;
 }
 
 void URopeComponent::DetectContactCandidates(const TArray<FVector>& PrevPositions, const TArray<FVector>& Positions,
@@ -502,63 +572,12 @@ void URopeComponent::Throw(const FVector& AimDir)
 		*GetName(), PhaseName(Phase), *AimDir.GetSafeNormal().ToCompactString());
 
 	EnsureRopeInitialized();
-
-	switch (Phase)		
-	{
-	case ERopePhase::Free:
-	{
-		StartFreshThrow(AimDir);
-		break;
-	}
-	case ERopePhase::Flight:
-	{
-		StartFreshThrow(AimDir);
-		break;
-	}
-	case ERopePhase::Contacting:
-	{
-		//아직 감긴 건 아니므로 후보만 버리고 새 throw를 시작한다.
-		ContactTracker.Reset();
-		PendingWrapSeed.Reset();
-		ContactingElapsed = 0.0f;
-
-		StartFreshThrow(AimDir);
-
-		break;
-	}
-	case ERopePhase::Wrapped:
-	{
-		//감긴 상태 유지 latched node는 건드리징 않음
-		ThrowFreeSpanWhileWrapped(AimDir);
-
-		break;
-	}
-	case ERopePhase::Releasing:
-		// 무시하거나 pending throw 저장
-		break;
-	default:
-		break;
-	}
-
-	// Scaffold launch: Verlet prev-position offset을 통해 free tip에 초기 속도를 부여한다.
-	//const int32 Last = Sim.Num() - 1;
-	//if (Last > 0)
-	//{
-	//	Sim.InvMass[Last] = 1.0f;
-	//	const FVector Velocity = AimDir.GetSafeNormal() * ThrowParams.ThrowSpeed * (1.0f / 60.0f);
-	//	Sim.PrevPositions[Last] = Sim.Positions[Last] - Velocity;
-	//}
+	StartFreshThrow(AimDir);
 }
 
 void URopeComponent::ThrowFreeSpanWhileWrapped(const FVector& AimDir)
 {
-	FVector Dir = AimDir.GetSafeNormal();
-	if (Dir.IsNearlyZero())
-	{
-		Dir = GetForwardVector();
-	}
-
-	WrappedSwayImpulse = Dir * ThrowParams.ThrowSpeed * (1.0f / 60.0f);
+	WrappedSwayImpulse = FVector::ZeroVector;
 	WrappedSwayTime = 0.0f;
 }
 
@@ -570,9 +589,13 @@ void URopeComponent::GatherWorldColliders(TArray<IRopeCollider*>& OutColliders) 
 
 float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const
 {
-	const float Denom = FMath::Max(1, LastNode - FirstTailNode);
-	const float Alpha = static_cast<float>(NodeIndex - FirstTailNode) / Denom;
-	return FMath::Lerp(0.35f, 1.0f, Alpha);
+	if (LastNode <= FirstTailNode)
+	{
+		return NodeIndex >= LastNode ? 1.0f : 0.0f;
+	}
+
+	const float T = static_cast<float>(NodeIndex - FirstTailNode) / static_cast<float>(LastNode - FirstTailNode);
+	return SmoothStep(T);
 }
 
 bool URopeComponent::IsTailNode(int32 NodeIndex) const
@@ -713,21 +736,7 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState() const
 void URopeComponent::UpdateWrappedKinematicShape(float DeltaTime)
 {
 	WrappedSwayTime += DeltaTime;
-	WrappedSwayImpulse *= FMath::Exp(-DeltaTime * 6.0f);
-	if (WrappedSwayImpulse.IsNearlyZero())
-	{
-		return;
-	}
-
-	const FVector Offset = WrappedSwayImpulse * FMath::Sin(WrappedSwayTime * 18.0f) * 0.05f;
-	for (int32 i = 1; i < Sim.Num(); ++i)
-	{
-		if (Sim.InvMass.IsValidIndex(i) && Sim.InvMass[i] > 0.0f)
-		{
-			Sim.Positions[i] += Offset;
-			Sim.PrevPositions[i] = Sim.Positions[i];
-		}
-	}
+	WrappedSwayImpulse = FVector::ZeroVector;
 }
 
 bool URopeComponent::DebugForceWrap()
