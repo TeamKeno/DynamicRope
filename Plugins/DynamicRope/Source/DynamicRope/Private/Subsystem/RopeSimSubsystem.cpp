@@ -10,7 +10,6 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"    // AActor::GetOwner (provider 소스 필터링)
 #include "Components/ActorComponent.h"
-#include "Components/SkeletalMeshComponent.h" // WrapTargetMesh->GetOwner()
 #include "Async/ParallelFor.h"
 #include "HAL/IConsoleManager.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -118,42 +117,17 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArra
 {
 	OutColliders.Reset();
 
-	if (Rope.bGatherProvidersFromWholeWorld)
-	{
-		for (const FFrameProviderColliders& FP : FrameProviders)
-		{
-			OutColliders.Append(FP.Colliders);
-		}
-		return;
-	}
-
-	// 소스 한정: ColliderSourceActors(비면 owner) ∪ WrapTargetMesh owner의 provider만. cross-actor wrap 보존.
-	TArray<const AActor*, TInlineAllocator<4>> Allowed;
-	if (Rope.ColliderSourceActors.Num() > 0)
-	{
-		for (const AActor* A : Rope.ColliderSourceActors)
-		{
-			if (A) { Allowed.Add(A); }
-		}
-	}
-	else if (const AActor* Owner = Rope.GetOwner())
-	{
-		Allowed.Add(Owner);
-	}
-	if (Rope.WrapTargetMesh)
-	{
-		if (const AActor* WrapOwner = Rope.WrapTargetMesh->GetOwner())
-		{
-			Allowed.Add(WrapOwner);
-		}
-	}
+	// 기본: 월드의 모든 provider와 충돌하되 자기 owner(던진 본인) provider는 제외(throw 시 self-tangle 방지).
+	// 다른 액터 body 잡기(cross-actor)는 그 액터가 "전체"에 포함되므로 자동. owner 충돌이 필요하면 옵트인.
+	const AActor* OwnerToExclude = Rope.bIncludeOwnerColliders ? nullptr : Rope.GetOwner();
 
 	for (const FFrameProviderColliders& FP : FrameProviders)
 	{
-		if (FP.Owner && Allowed.Contains(FP.Owner))
+		if (FP.Owner == OwnerToExclude && OwnerToExclude != nullptr)
 		{
-			OutColliders.Append(FP.Colliders);
+			continue; // 자기 owner provider 제외.
 		}
+		OutColliders.Append(FP.Colliders);
 	}
 }
 

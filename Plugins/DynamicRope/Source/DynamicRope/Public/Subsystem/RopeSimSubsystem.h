@@ -63,7 +63,7 @@ private:
 
 	// 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). RopeBounds는 전 로프 bounds 합집합을 넘긴다.
 	void BuildFrameColliders();
-	// 한 로프의 필터(whole-world / ColliderSourceActors / WrapTargetMesh owner)에 맞는 collider를 중앙 빌드에서 모은다.
+	// 한 로프의 collider를 중앙 빌드에서 모은다: 기본은 전체, 자기 owner provider만 제외(bIncludeOwnerColliders로 옵트인).
 	void GatherCollidersForRope(const URopeComponent& Rope, TArray<IRopeCollider*>& OutColliders) const;
 
 	// GPU 상주 솔버(M5). 영속 버퍼(로프별)를 매 프레임 in-place 전진. 인스턴스 상태라 월드별 1개.

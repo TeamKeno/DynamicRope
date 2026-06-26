@@ -88,8 +88,11 @@ same interface.
 2. **Cross-actor wrap**: `FRopeContact::SourceMesh` (and `FCapsuleCollider::SourceMesh`) carry the
    `USkeletalMeshComponent` that owns the contacted bone. This propagates to `FRopeWrapState::Mesh`,
    so a rope owned by actor A can wrap and *follow* a bone on a different actor B (e.g. a rope pinned
-   to a static prop tethering a moving character). When wiring colliders from a separate actor, set
-   `URopeComponent::ColliderSourceActors`.
+   to a static prop tethering a moving character). Collider gathering is centralized in
+   `URopeSimSubsystem` (providers register on BeginPlay/EndPlay; built once per frame). A rope collides
+   with *every* registered provider **except its own owner's** (so a thrown rope doesn't tangle on the
+   thrower) — cross-actor "just works" since actor B is included; opt back in with
+   `URopeComponent::bIncludeOwnerColliders`.
 
 ### Data types worth knowing (`Core/RopeTypes.h`)
 

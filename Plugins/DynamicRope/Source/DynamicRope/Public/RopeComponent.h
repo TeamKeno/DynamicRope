@@ -77,18 +77,13 @@ public:
 	TObjectPtr<USkeletalMeshComponent> WrapTargetMesh = nullptr;
 
 	/**
-	 * IRopeColliderProvider 컴포넌트가 이 rope에 collider를 공급하는 actor들. rope가 잡아야 할 body와
-	 * *다른* actor 위에 존재할 때 설정한다(예: static prop에 고정된 rope가 별개의 캐릭터를 wrap하는 경우).
-	 * 비어 있으면 이 컴포넌트 자신의 owner로 폴백한다.
+	 * 기본적으로 rope는 월드의 모든 collider provider와 충돌하되 **자기 owner(던진 본인)의 provider는 제외**한다
+	 * — throw 시 늘어진 로프가 던진 사람 팔다리에 엉키는 것을 막기 위함. cross-actor wrap(다른 액터 body 잡기)은
+	 * 그 액터가 "전체"에 포함되므로 자동으로 동작한다.
+	 * 켜면 owner provider도 포함한다(로프가 자기 owner 몸을 일부러 감아야 하는 드문 경우).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
-	TArray<TObjectPtr<AActor>> ColliderSourceActors;
-
-	/**
-	 * 테스트 편의: 켜면 ColliderSourceActors/owner를 무시하고 월드의 모든 IRopeColliderProvider를 수집한다.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
-	bool bGatherProvidersFromWholeWorld = true;
+	bool bIncludeOwnerColliders = false;
 
 	//~ Render(렌더) ------------------------------------------------------
 	/** 시각적 tube 반지름(cm). */
