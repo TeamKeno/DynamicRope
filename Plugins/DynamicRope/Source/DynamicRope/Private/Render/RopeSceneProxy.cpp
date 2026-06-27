@@ -27,6 +27,18 @@ static TAutoConsoleVariable<int32> CVarRopeGPUTube(
 	TEXT("DynamicRope: 0=CPU 튜브 빌드(기본), 1=GPU 컴퓨트로 position 생성(M5b UAV vertex buffer 검증)."),
 	ECVF_Default);
 
+// 모션블러 잔상 대응. 로프는 매 프레임 정점을 in-place로 갱신하지만 per-vertex 변형 velocity를 만들지
+// 못한다(prev-position 스트림 없음). Movable이라 DrawsVelocity()==true가 되면 transform 기반 velocity만
+// 찍혀 velocity 패스에 들어가고, 빠르게 이동하는 프레임에 per-object 모션블러가 로프를 번지게 한다(잔상).
+// 0(기본)=velocity 미출력 → 모션블러 대상에서 제외. 1=레거시(velocity 출력, 빠른 이동 시 모션블러).
+// 트레이드오프: 0이면 TSR이 이 픽셀을 카메라 재투영으로 처리하므로 정지 카메라 + 빠른 로프에서 약한
+// TSR 고스팅이 생길 수 있다 → 1로 토글해 A/B 비교 가능. GetViewRelevance(렌더 스레드)에서 읽는다.
+static TAutoConsoleVariable<int32> CVarRopeWriteVelocity(
+	TEXT("r.DynamicRope.WriteVelocity"),
+	0,
+	TEXT("DynamicRope: 0=velocity 미출력(모션블러 잔상 제거, 기본), 1=velocity 출력(레거시, 빠른 이동 시 모션블러)."),
+	ECVF_RenderThreadSafe);
+
 void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	const FRHIBufferCreateDesc CreateDesc =
@@ -439,6 +451,9 @@ FPrimitiveViewRelevance FRopeSceneProxy::GetViewRelevance(const FSceneView* View
 	}
 
 	MaterialRelevance.SetPrimitiveViewRelevance(Result);
-	Result.bVelocityRelevance = DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
+	// (A) 모션블러 잔상 제거: 기본적으로 velocity를 출력하지 않아 per-object 모션블러 대상에서 제외한다.
+	// r.DynamicRope.WriteVelocity 1로 레거시(velocity 출력) 동작과 A/B 비교 가능.
+	Result.bVelocityRelevance = (CVarRopeWriteVelocity.GetValueOnRenderThread() != 0)
+		&& DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
 	return Result;
 }
