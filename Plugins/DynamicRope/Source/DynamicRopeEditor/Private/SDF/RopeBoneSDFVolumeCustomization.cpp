@@ -59,6 +59,11 @@ void FRopeBoneSDFVolumeCustomization::CustomizeChildren(TSharedRef<IPropertyHand
 	{
 		if (const TSharedPtr<IPropertyHandle> Child = PropertyHandle->GetChildHandle(Index))
 		{
+			if(Child->GetProperty()->GetFName() == GET_MEMBER_NAME_CHECKED(FRopeBoneSDFVolume, Bone))
+			{
+				// 헤더 행에서 이미 Bone을 표시했으므로, 펼친 자식 행에서는 Bone을 생략한다.
+				continue;
+			}
 			ChildBuilder.AddProperty(Child.ToSharedRef());
 		}
 	}
