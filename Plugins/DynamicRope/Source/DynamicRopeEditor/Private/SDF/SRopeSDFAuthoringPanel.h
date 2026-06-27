@@ -35,9 +35,22 @@ private:
 	/** 베이크할 본. 비우면 = 스킨된 모든 본(v1). 본 선택 UI는 추후. */
 	TArray<FName> BoneFilter;
 
+	/** true면 현재 베이크 설정으로 (자산에 쓰지 않고) 구운 결과를 프리뷰에 표시하고, 설정 변경 시 갱신한다. */
+	bool bLivePreview = false;
+
 	FString GetTargetPath() const;
 	void OnTargetChanged(const FAssetData& InAssetData);
 	bool CanBake() const;
+
+	/** Live Preview 체크박스 상태/토글. 켜면 설정대로 미저장 베이크를 돌려 프리뷰에 띄운다. */
+	ECheckBoxState IsLivePreviewChecked() const;
+	void OnLivePreviewChanged(ECheckBoxState NewState);
+
+	/** bLivePreview일 때 현재 설정으로 미저장 베이크를 돌려 프리뷰 볼륨을 갱신한다(아니면 프리뷰 클리어). */
+	void RebuildPreviewBake();
+
+	/** 베이크 설정 값이 commit될 때 호출 — Live Preview가 켜져 있으면 다시 굽는다. */
+	void OnBakeSettingCommitted();
 
 	/** 현재 타깃의 SourceMesh를 동기 로드해 프리뷰 뷰포트에 반영한다(없으면 빈 뷰 + 안내). */
 	void RefreshPreviewMesh();
