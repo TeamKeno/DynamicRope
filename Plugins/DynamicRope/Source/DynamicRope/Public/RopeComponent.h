@@ -42,6 +42,10 @@ public:
 	// 렌더 상태 생성 직후 센터라인을 1회 푸시한다(틱 없이도 BuildTube가 돌아 bHasData=true).
 	virtual void OnRegister() override;
 	virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
+#if WITH_EDITOR
+	// 에디터에서 NumParticles/RopeLength를 바꾸면 Sim을 새 값으로 재구성한다(프록시 토폴로지와 매칭).
+	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
 
 	/**
 	 * 시뮬레이션 한 프레임을 3단계로 나눠 URopeSimSubsystem이 구동한다(컴포넌트는 직접 tick하지 않음).

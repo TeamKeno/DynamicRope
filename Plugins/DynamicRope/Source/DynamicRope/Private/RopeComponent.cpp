@@ -88,6 +88,24 @@ void URopeComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Con
 	SendRenderDynamicData_Concurrent();
 }
 
+#if WITH_EDITOR
+void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	// NumParticles/RopeLength가 바뀌면 프록시는 새 토폴로지(NumRings)로 재생성되지만 Sim은 옛 개수라
+	// BuildTube가 Points.Num()!=NumRings로 건너뛰어 미리보기가 사라진다. EnsureRopeInitialized는 비어있을
+	// 때만 init하므로, 여기선 Sim을 새 값으로 강제 재구성해 토폴로지를 맞춘다. 이후 Super가 렌더 상태를
+	// 재생성하며 CreateRenderState_Concurrent에서 센터라인을 다시 푸시한다.
+	const FName PropertyName = PropertyChangedEvent.GetPropertyName();
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, NumParticles) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, RopeLength))
+	{
+		InitRope();
+	}
+
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+}
+#endif
+
 USkeletalMeshComponent* URopeComponent::ResolveWrapTargetMesh()
 {
 	if (!WrapTargetMesh)
