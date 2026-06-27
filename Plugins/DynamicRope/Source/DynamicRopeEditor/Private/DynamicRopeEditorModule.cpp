@@ -4,9 +4,14 @@
 #include "DynamicRopeEditorLog.h"
 #include "SDF/SRopeSDFAuthoringPanel.h"
 #include "SDF/RopeSDFVisualizer.h"
+#include "SDF/RopeBoneSDFVolumeCustomization.h"
 #include "Visualizers/RopeComponentVisualizer.h"
 #include "RopeComponent.h"
 #include "Collision/SDF/RopeSDFProvider.h"
+#include "Collision/SDF/RopeSDFData.h"
+
+#include "PropertyEditorModule.h"
+#include "Modules/ModuleManager.h"
 
 #include "Framework/Docking/TabManager.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -51,6 +56,16 @@ void FDynamicRopeEditorModule::StartupModule()
 			MakeShared<FRopeSDFVisualizer>());
 	}
 
+	// 디테일 패널 프로퍼티 타입 커스터마이즈: FRopeBoneSDFVolume 배열 요소 헤더에 본 이름 표시.
+	{
+		FPropertyEditorModule& PropertyModule =
+			FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
+		PropertyModule.RegisterCustomPropertyTypeLayout(
+			FRopeBoneSDFVolume::StaticStruct()->GetFName(),
+			FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FRopeBoneSDFVolumeCustomization::MakeInstance));
+		PropertyModule.NotifyCustomizationModuleChanged();
+	}
+
 	UE_LOG(LogDynamicRopeEditor, Log, TEXT("DynamicRopeEditor module started (SDF authoring tab + component visualizers registered)."));
 }
 
@@ -63,6 +78,14 @@ void FDynamicRopeEditorModule::ShutdownModule()
 	{
 		GUnrealEd->UnregisterComponentVisualizer(URopeComponent::StaticClass()->GetFName());
 		GUnrealEd->UnregisterComponentVisualizer(URopeSDFProvider::StaticClass()->GetFName());
+	}
+
+	if (FModuleManager::Get().IsModuleLoaded("PropertyEditor"))
+	{
+		FPropertyEditorModule& PropertyModule =
+			FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
+		PropertyModule.UnregisterCustomPropertyTypeLayout(FRopeBoneSDFVolume::StaticStruct()->GetFName());
+		PropertyModule.NotifyCustomizationModuleChanged();
 	}
 
 	if (FSlateApplication::IsInitialized())
