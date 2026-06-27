@@ -3,6 +3,9 @@ Build/
 Intermediate/
 DerivedDataCache/
 Saved/
+Windows/
+.claude/
+UpgradeLog.htm
 .vs/
 .vscode/
 .idea/

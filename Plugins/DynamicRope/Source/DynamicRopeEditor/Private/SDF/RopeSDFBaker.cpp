@@ -161,7 +161,7 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 			continue; // 이 본에 귀속된 스킨 없음
 		}
 
-		// --- (4a) grid 크기 산정. 큐브 voxel; 밴드가 상한을 넘으면 VoxelSize를 키운다.
+		// --- (4a) grid 크기 산정. 큐브 voxel; 축당 샘플 수가 MaxResolution(상한)을 넘으면 VoxelSize를 키워 맞춘다.
 		Local = Local.ExpandBy(S.BoundsPadding + S.NarrowBand);
 		float Vox = FMath::Max(S.VoxelSize, KINDA_SMALL_NUMBER);
 		const FVector Size = Local.GetSize();
