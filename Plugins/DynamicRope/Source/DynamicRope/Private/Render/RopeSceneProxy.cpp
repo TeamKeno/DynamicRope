@@ -47,6 +47,18 @@ void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 		.DetermineInitialState();
 
 	IndexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+
+	// BuildTube가 채우기 전(예: PIE 밖, 서브시스템 틱이 없어 센터라인이 안 올라온 상태)에 캐시된 정적
+	// 드로우가 미초기화 인덱스(쓰레기 값)를 그리면 원점을 가로지르는 degenerate 삼각형 = 월드를 가르는
+	// 검은 번짐이 생긴다. 0으로 초기화하면 모든 삼각형이 정점 0으로 수축한 zero-area라 아무것도 안 그려진다
+	// (정상 데이터가 채워지면 그대로 렌더). 정적 드로우는 버퍼를 in-place로 갱신하는 설계라 DrawStaticElements를
+	// bHasData로 가드하면 커맨드가 재캐싱되지 않아 영영 안 그려지므로, 가드 대신 안전한 초기 상태로 둔다.
+	if (NumIndices > 0)
+	{
+		void* Dst = RHICmdList.LockBuffer(IndexBufferRHI, 0, NumIndices * sizeof(int32), RLM_WriteOnly);
+		FMemory::Memzero(Dst, NumIndices * sizeof(int32));
+		RHICmdList.UnlockBuffer(IndexBufferRHI);
+	}
 }
 
 // M5b: UAV 가능 position vertex buffer. 컴퓨트가 R32_FLOAT UAV로 쓰고, VF가 R32_FLOAT SRV/stream으로 읽는다.

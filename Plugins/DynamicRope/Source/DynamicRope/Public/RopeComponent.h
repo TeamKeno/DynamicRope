@@ -17,6 +17,7 @@ class IRopeCollider;
 class IRopeColliderProvider;
 class UMaterialInterface;
 class USkeletalMeshComponent;
+class FRegisterComponentContext;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
@@ -37,6 +38,10 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void SendRenderDynamicData_Concurrent() override;
+	// 에디터(서브시스템 틱 없음)·스폰 직후에도 로프가 보이도록: 등록 시 Sim을 초기화하고,
+	// 렌더 상태 생성 직후 센터라인을 1회 푸시한다(틱 없이도 BuildTube가 돌아 bHasData=true).
+	virtual void OnRegister() override;
+	virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
 
 	/**
 	 * 시뮬레이션 한 프레임을 3단계로 나눠 URopeSimSubsystem이 구동한다(컴포넌트는 직접 tick하지 않음).

@@ -71,6 +71,23 @@ void URopeComponent::InitRope()
 		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);
 }
 
+void URopeComponent::OnRegister()
+{
+	Super::OnRegister();
+	// 에디터에서도 Sim에 기본 직선 포즈를 채워 둔다(서브시스템 틱은 PIE에서만 돌기 때문).
+	// 이미 채워져 있으면(InitRope 후/PIE 진행 중) 그대로 둔다.
+	EnsureRopeInitialized();
+}
+
+void URopeComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
+{
+	Super::CreateRenderState_Concurrent(Context);
+	// 프록시가 막 생성됐다. 틱이 없는 에디터/스폰 직후에도 한 번은 센터라인을 밀어 BuildTube가 돌게 한다
+	// (그래야 bHasData=true가 되어 정적 드로우가 유효 지오메트리를 그린다). SendRenderDynamicData_Concurrent는
+	// SceneProxy/Sim 유효성을 자체 검사하고 렌더 커맨드만 enqueue하므로 이 시점 호출이 안전하다.
+	SendRenderDynamicData_Concurrent();
+}
+
 USkeletalMeshComponent* URopeComponent::ResolveWrapTargetMesh()
 {
 	if (!WrapTargetMesh)
