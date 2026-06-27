@@ -128,6 +128,13 @@ struct FRopeResidentRope
 	FRHIGPUBufferReadback* PrevReadback = nullptr;
 	bool bReadbackArmed = false;          // 리드백 copy가 enqueue되어 결과 대기 중인가.
 	FShaderResourceViewRHIRef PosSRV;     // M5b: PosBuf StructuredBuffer<float4> SRV(렌더용). 재시드 시 무효화.
+
+	// SDF 볼륨 그리드/헤더 resident(정적 베이크 데이터 — 볼륨 집합이 바뀔 때만 재업로드). 인스턴스(본
+	// 트랜스폼)는 매 프레임 작은 버퍼로 따로 올린다. 이로써 매 프레임 multi-MB 그리드 재업로드를 없앤다.
+	TRefCountPtr<FRDGPooledBuffer> SDFDistBuf;
+	TRefCountPtr<FRDGPooledBuffer> SDFVolBuf;
+	uint32 SDFSetSig = 0;                       // 볼륨 집합 시그니처(키+복셀수). 다르면 재빌드.
+	TMap<const void*, int32> SDFVolKeyToIndex;  // VolumeKey -> SDFVol 인덱스(매 프레임 인스턴스 VolumeIndex 산정).
 };
 
 // GT<->RT 공유 결과. RT가 채우고 GT GetLatest가 락 하에 읽는다.
@@ -353,10 +360,14 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 					CapsFlat.Add(G);
 				}
 
-				TArray<float>&               SDFDist = KSDFDist.AddDefaulted_GetRef();
-				TArray<FRopeSDFVolumeGPU>&   SDFVol  = KSDFVol.AddDefaulted_GetRef();
-				TArray<FRopeSDFColliderGPU>& SDFCol  = KSDFCol.AddDefaulted_GetRef();
-				TMap<const void*, int32>     VolumeKeyToIndex; // 이 로프 내 볼륨 dedup.
+				// --- SDF 콜라이더(M3). 정적 베이크 그리드/헤더는 resident — 볼륨 집합 시그니처가 같으면
+				// 재업로드하지 않는다(매 프레임 multi-MB 그리드 업로드 제거). 인스턴스(본 트랜스폼)만 매 프레임.
+				TArray<FRopeSDFColliderGPU>& SDFCol = KSDFCol.AddDefaulted_GetRef();
+
+				// 1) 고유 볼륨 dedup + 집합 시그니처(키/복셀수만 — distance 데이터는 만지지 않는다).
+				TArray<const FRopeGPUSDFCollider*> UniqueVols; // 인덱스 = (재빌드 시) VolumeIndex
+				TMap<const void*, int32>           FreshKeyToIndex;
+				uint32 VolSig = 0;
 				for (const FRopeGPUSDFCollider& Src : S.SDFColliders)
 				{
 					const int64 Voxels = (int64)Src.ResX * Src.ResY * Src.ResZ;
@@ -364,45 +375,89 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 					{
 						continue;
 					}
-					int32 VolIdx;
-					if (const int32* Found = VolumeKeyToIndex.Find(Src.VolumeKey))
+					if (!FreshKeyToIndex.Contains(Src.VolumeKey))
 					{
-						VolIdx = *Found;
+						FreshKeyToIndex.Add(Src.VolumeKey, UniqueVols.Num());
+						UniqueVols.Add(&Src);
+						VolSig = HashCombine(VolSig, PointerHash(Src.VolumeKey));
+						VolSig = HashCombine(VolSig, ::GetTypeHash((uint64)Voxels));
 					}
-					else
+				}
+
+				// 2) 볼륨 distance/header 버퍼: 시그니처가 같으면 resident 재사용(업로드 0), 아니면 1회 재빌드.
+				const bool bVolReuse = R.SDFDistBuf.IsValid() && R.SDFVolBuf.IsValid()
+					&& R.SDFSetSig == VolSig && UniqueVols.Num() > 0;
+				const TMap<const void*, int32>& KeyToIndex = bVolReuse ? R.SDFVolKeyToIndex : FreshKeyToIndex;
+
+				FRDGBufferRef SDFDistBuf = nullptr;
+				FRDGBufferRef SDFVolBuf  = nullptr;
+				if (bVolReuse)
+				{
+					SDFDistBuf = GraphBuilder.RegisterExternalBuffer(R.SDFDistBuf);
+					SDFVolBuf  = GraphBuilder.RegisterExternalBuffer(R.SDFVolBuf);
+				}
+				else if (UniqueVols.Num() > 0)
+				{
+					TArray<float>&             SDFDist = KSDFDist.AddDefaulted_GetRef();
+					TArray<FRopeSDFVolumeGPU>& SDFVol  = KSDFVol.AddDefaulted_GetRef();
+					SDFVol.Reserve(UniqueVols.Num());
+					for (const FRopeGPUSDFCollider* Vp : UniqueVols)
 					{
-						VolIdx = SDFVol.Num();
 						FRopeSDFVolumeGPU V;
 						V.DistOffset = SDFDist.Num();
-						V.ResX = Src.ResX;
-						V.ResY = Src.ResY;
-						V.ResZ = Src.ResZ;
-						V.LocalMin  = FVector4f((float)Src.LocalMin.X,  (float)Src.LocalMin.Y,  (float)Src.LocalMin.Z,  0.0f);
-						V.LocalSize = FVector4f((float)Src.LocalSize.X, (float)Src.LocalSize.Y, (float)Src.LocalSize.Z, 0.0f);
+						V.ResX = Vp->ResX; V.ResY = Vp->ResY; V.ResZ = Vp->ResZ;
+						V.LocalMin  = FVector4f((float)Vp->LocalMin.X,  (float)Vp->LocalMin.Y,  (float)Vp->LocalMin.Z,  0.0f);
+						V.LocalSize = FVector4f((float)Vp->LocalSize.X, (float)Vp->LocalSize.Y, (float)Vp->LocalSize.Z, 0.0f);
 						SDFVol.Add(V);
-						SDFDist.Append(Src.Distances, (int32)Voxels);
-						VolumeKeyToIndex.Add(Src.VolumeKey, VolIdx);
+						SDFDist.Append(Vp->Distances, (int32)((int64)Vp->ResX * Vp->ResY * Vp->ResZ));
+					}
+					SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances"),
+						sizeof(float), SDFDist.Num(), SDFDist.GetData(), (uint64)SDFDist.Num() * sizeof(float));
+					SDFVolBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFVolumes"),
+						sizeof(FRopeSDFVolumeGPU), SDFVol.Num(), SDFVol.GetData(), (uint64)SDFVol.Num() * sizeof(FRopeSDFVolumeGPU));
+					R.SDFDistBuf = GraphBuilder.ConvertToExternalBuffer(SDFDistBuf);
+					R.SDFVolBuf  = GraphBuilder.ConvertToExternalBuffer(SDFVolBuf);
+					R.SDFSetSig  = VolSig;
+					R.SDFVolKeyToIndex = FreshKeyToIndex; // 복사(아래 인스턴스 루프가 KeyToIndex=FreshKeyToIndex를 계속 참조).
+				}
+
+				// 3) 인스턴스(매 프레임): VolumeIndex(캐시/신규 맵) + 현재 본 트랜스폼.
+				for (const FRopeGPUSDFCollider& Src : S.SDFColliders)
+				{
+					const int32* VolIdx = KeyToIndex.Find(Src.VolumeKey);
+					if (!VolIdx)
+					{
+						continue; // 무효 볼륨(위 dedup 조건과 일치).
 					}
 					const FQuat   Q  = Src.BoneToWorld.GetRotation();
 					const FVector T  = Src.BoneToWorld.GetTranslation();
 					const FVector Sc = Src.BoneToWorld.GetScale3D();
 					FRopeSDFColliderGPU C;
-					C.VolumeIndex = VolIdx;
+					C.VolumeIndex = *VolIdx;
 					C.Rotation    = FVector4f((float)Q.X, (float)Q.Y, (float)Q.Z, (float)Q.W);
 					C.Translation = FVector4f((float)T.X, (float)T.Y, (float)T.Z, 0.0f);
 					C.Scale       = FVector4f((float)Sc.X, (float)Sc.Y, (float)Sc.Z, 0.0f);
 					SDFCol.Add(C);
 				}
 
-				// 유효 개수(SDF 루프는 무효 볼륨을 skip하므로 S.SDFColliders.Num()와 다를 수 있음) — 더미 패딩 *전* 확정.
+				// 유효 개수 — 더미 패딩 *전* 확정.
 				const int32 NumValidCaps   = CapsFlat.Num();
 				const int32 NumValidSDFCol = SDFCol.Num();
 
-				// 구조화 버퍼는 원소 >=1 이어야 한다 — 비면 더미 1개(어느 노드도 참조 안 함; count는 위에서 0으로 고정).
+				// 구조화 버퍼는 원소 >=1 — 비면 더미 1개(어느 노드도 참조 안 함; count는 0으로 고정).
 				if (CapsFlat.Num() == 0) { CapsFlat.AddZeroed(1); }
-				if (SDFDist.Num() == 0)  { SDFDist.AddZeroed(1); }
-				if (SDFVol.Num() == 0)   { SDFVol.AddZeroed(1); }
 				if (SDFCol.Num() == 0)   { SDFCol.AddZeroed(1); }
+
+				// 이 로프에 SDF 볼륨이 없으면 distance/header도 더미 1개 transient 생성(셰이더는 NumSDFColliders=0이라 미참조).
+				if (!SDFDistBuf)
+				{
+					TArray<float>&             DummyDist = KSDFDist.AddDefaulted_GetRef(); DummyDist.AddZeroed(1);
+					TArray<FRopeSDFVolumeGPU>& DummyVol  = KSDFVol.AddDefaulted_GetRef();  DummyVol.AddZeroed(1);
+					SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances.Dummy"),
+						sizeof(float), 1, DummyDist.GetData(), sizeof(float));
+					SDFVolBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFVolumes.Dummy"),
+						sizeof(FRopeSDFVolumeGPU), 1, DummyVol.GetData(), sizeof(FRopeSDFVolumeGPU));
+				}
 
 				TArray<FRopeGPUParamsGPU>& ParamsArr = KParams.AddDefaulted_GetRef();
 				FRopeGPUParamsGPU P;
@@ -430,20 +485,14 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 				ParamsArr.Add(P);
 
 				const int32 NumCapsulesTotal = CapsFlat.Num();
-				const int32 NumSDFDistances  = SDFDist.Num();
-				const int32 NumSDFVolumes    = SDFVol.Num();
-				const int32 NumSDFColliders  = SDFCol.Num();
 
 				FRDGBufferRef ParamsBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Params"),
 					sizeof(FRopeGPUParamsGPU), 1, ParamsArr.GetData(), sizeof(FRopeGPUParamsGPU));
 				FRDGBufferRef CapsulesBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Capsules"),
 					sizeof(FRopeCapsuleGPU), NumCapsulesTotal, CapsFlat.GetData(), (uint64)NumCapsulesTotal * sizeof(FRopeCapsuleGPU));
-				FRDGBufferRef SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances"),
-					sizeof(float), NumSDFDistances, SDFDist.GetData(), (uint64)NumSDFDistances * sizeof(float));
-				FRDGBufferRef SDFVolBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFVolumes"),
-					sizeof(FRopeSDFVolumeGPU), NumSDFVolumes, SDFVol.GetData(), (uint64)NumSDFVolumes * sizeof(FRopeSDFVolumeGPU));
+				// SDFDistBuf/SDFVolBuf는 위에서 resident(또는 더미)로 준비됨. 매 프레임은 인스턴스 버퍼만 생성.
 				FRDGBufferRef SDFColBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFColliders"),
-					sizeof(FRopeSDFColliderGPU), NumSDFColliders, SDFCol.GetData(), (uint64)NumSDFColliders * sizeof(FRopeSDFColliderGPU));
+					sizeof(FRopeSDFColliderGPU), SDFCol.Num(), SDFCol.GetData(), (uint64)SDFCol.Num() * sizeof(FRopeSDFColliderGPU));
 
 				FRopeXPBDSolveCS::FParameters* PassParams = GraphBuilder.AllocParameters<FRopeXPBDSolveCS::FParameters>();
 				PassParams->NumRopes      = 1;

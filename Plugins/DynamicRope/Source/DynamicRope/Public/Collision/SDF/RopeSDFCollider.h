@@ -47,4 +47,9 @@ public:
 	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const override;
 	virtual FBox GetWorldBounds() const override;
 	virtual bool GetGPUSDF(FRopeSDFColliderView& OutView) const override;
+	// 이번 프레임 본 모션(prev->curr). solver가 substep sub-포즈를 호이스팅하는 데 쓴다.
+	virtual bool GetFrameMotion(FTransform& OutPrev, FTransform& OutCurr) const override
+	{
+		OutPrev = PrevBoneToWorld; OutCurr = BoneToWorld; return true;
+	}
 };

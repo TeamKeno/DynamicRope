@@ -78,11 +78,14 @@ FVector RopeSDFSampler::SampleGradient(const FRopeBoneSDFVolume& V, const FVecto
 	const double Hy = (V.Resolution.Y > 1) ? (Size.Y / (V.Resolution.Y - 1)) : 1.0;
 	const double Hz = (V.Resolution.Z > 1) ? (Size.Z / (V.Resolution.Z - 1)) : 1.0;
 
-	const float Dx = SampleTrilinear(V, LocalPos + FVector(Hx, 0, 0)) - SampleTrilinear(V, LocalPos - FVector(Hx, 0, 0));
-	const float Dy = SampleTrilinear(V, LocalPos + FVector(0, Hy, 0)) - SampleTrilinear(V, LocalPos - FVector(0, Hy, 0));
-	const float Dz = SampleTrilinear(V, LocalPos + FVector(0, 0, Hz)) - SampleTrilinear(V, LocalPos - FVector(0, 0, Hz));
+	// Forward difference(center + 축당 1샘플 = 4) — 기존 central(6)보다 trilinear 2회 적다(핫패스 비용↓).
+	// SDF 내부는 단조로워 push-out 법선 방향엔 충분(완전 대칭 정확도는 약간 손해).
+	const float C  = SampleTrilinear(V, LocalPos);
+	const float Dx = SampleTrilinear(V, LocalPos + FVector(Hx, 0, 0)) - C;
+	const float Dy = SampleTrilinear(V, LocalPos + FVector(0, Hy, 0)) - C;
+	const float Dz = SampleTrilinear(V, LocalPos + FVector(0, 0, Hz)) - C;
 
-	const FVector Grad(Dx / (2.0 * Hx), Dy / (2.0 * Hy), Dz / (2.0 * Hz));
+	const FVector Grad(Dx / Hx, Dy / Hy, Dz / Hz);
 	const FVector N = Grad.GetSafeNormal();
 	return N.IsNearlyZero() ? FVector::UpVector : N;
 }

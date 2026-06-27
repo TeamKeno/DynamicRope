@@ -37,10 +37,15 @@ struct FRopeSweptQuery
 	FVector WorldStart = FVector::ZeroVector; // substep 시작 노드 위치(PrevPos)
 	FVector WorldEnd   = FVector::ZeroVector; // substep 끝 노드 위치(Pos)
 	float   NodeRadius = 0.0f;                // 로프 두께(query 반지름)
-	float   SubAlpha0  = 0.0f;                // 이 substep의 collider 모션 시작 비율(s/NumSub)
-	float   SubAlpha1  = 1.0f;                // 이 substep의 collider 모션 끝 비율((s+1)/NumSub)
 	float   SweepStep  = 2.0f;                // 샘플 간격(cm)
 	int32   MaxSamples = 16;                  // 구간당 샘플 상한
+
+	// 움직이는 collider의 이 substep용 sub-포즈. solver가 GetFrameMotion으로 받은 prev/curr를 알파로 Blend해
+	// 콜라이더당 1회 미리 계산한다(노드 루프 밖 호이스팅 → 노드마다 Blend 재계산 방지). bUseSubPose=false면
+	// collider는 단일(현재) 포즈로 본다(정지 본/비-SDF). 공유 collider를 mutate하지 않으므로 병렬 솔브에 안전.
+	bool       bUseSubPose  = false;
+	FTransform SubPoseStart = FTransform::Identity;
+	FTransform SubPoseEnd   = FTransform::Identity;
 };
 
 /** rope solver가 query하는 추상 collider. */
@@ -96,6 +101,13 @@ public:
 	 * 캡슐과 마찬가지로 RTTI 없이 SDF collider를 식별하는 경로다(GetGPUCapsule과 상호 배타적).
 	 */
 	virtual bool GetGPUSDF(FRopeSDFColliderView& OutView) const { return false; }
+
+	/**
+	 * 움직이는 collider의 이번 프레임 모션(prev->curr 월드 트랜스폼)을 채우고 true. 기본은 false(정적/모션없음).
+	 * solver가 swept 충돌에서 substep별 sub-포즈를 노드 루프 밖에서 1회 계산하는 데 쓴다(상대 운동 CCD 호이스팅).
+	 * 반드시 const(읽기 전용) — collider는 로프 간 공유되며 병렬 솔브된다.
+	 */
+	virtual bool GetFrameMotion(FTransform& OutPrev, FTransform& OutCurr) const { return false; }
 };
 
 /** 해석적 capsule(swept-sphere 세그먼트). v1 / fallback. 추후 per-bone SDF로 대체된다. */

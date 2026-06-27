@@ -232,43 +232,71 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 	const float SweepStep = FMath::Max(Config.SweepStep, 0.1f);     // 샘플 간격(cm), 디자이너 튜닝
 	const int32 MaxSweepSamples = FMath::Max(1, Config.MaxSweepSamples); // 구간당 샘플 상한
 
+	// 이 substep 로프 AABB(콜라이더 1회 컬용). 실제 노드 위치(Prev/Pos) 기반이라 관통 위험 없이,
+	// 로프와 안 겹치는 본은 노드 루프/Blend 진입 전에 통째로 스킵한다(매달려도 떨어져 있으면 거의 무비용).
+	FBox RopeBounds(ForceInit);
 	for (int32 i = 0; i < State.Num(); ++i)
 	{
-		if (State.InvMass[i] <= 0.0f)
+		RopeBounds += State.PrevPositions[i];
+		RopeBounds += State.Positions[i];
+	}
+
+	// 콜라이더-아우터: substep sub-포즈(움직이는 본의 prev->curr를 알파로 Blend)를 콜라이더당 1회 계산해
+	// 노드 루프 밖으로 호이스팅한다(노드마다 Blend 재계산 방지). 충돌 push-out은 노드별 독립이라 노드-아우터와
+	// 결과가 동일하다(동작 무변경). sub-포즈는 스택 로컬이라 공유 collider를 mutate하지 않음 → 병렬 솔브 안전.
+	for (int32 c = 0; c < Colliders.Num(); ++c)
+	{
+		const IRopeCollider* Collider = Colliders[c];
+		if (!Collider)
+		{
+			continue;
+		}
+		const FBox ColBounds = bHasBounds ? ColliderBounds[c] : FBox(ForceInit);
+
+		// 이 substep 로프 AABB와 안 겹치는 collider는 통째로 스킵(노드 루프/Blend 진입조차 안 함).
+		if (bHasBounds && !ColBounds.Intersect(RopeBounds))
 		{
 			continue;
 		}
 
-		const FVector A = State.PrevPositions[i]; // substep 시작 위치
-		// 구간 broad-phase용 AABB. collider bounds는 이미 Radius만큼 확장돼 있다.
-		FBox SweepBox(ForceInit);
-		SweepBox += A;
-		SweepBox += State.Positions[i];
-
-		for (int32 c = 0; c < Colliders.Num(); ++c)
+		// 이 collider의 이번 substep sub-포즈 1회 계산. 움직이는 본만 Blend(정지면 단일 현재 포즈로 무비용 폴백).
+		FRopeSweptQuery SQ;
+		SQ.NodeRadius = Radius;
+		SQ.SweepStep  = SweepStep;
+		SQ.MaxSamples = MaxSweepSamples;
+		FTransform PrevX, CurrX;
+		if (Collider->GetFrameMotion(PrevX, CurrX) && !PrevX.Equals(CurrX))
 		{
-			const IRopeCollider* Collider = Colliders[c];
-			if (!Collider)
-			{
-				continue;
-			}
-			// Broad-phase: 구간이 collider AABB(+Radius)와 안 겹치면 스킵. 끝점만 보면 가로질러 통과한
-			// 노드를 놓치므로 반드시 구간 AABB로 판단한다.
-			if (bHasBounds && !ColliderBounds[c].Intersect(SweepBox))
+			SQ.bUseSubPose = true;
+			SQ.SubPoseStart.Blend(PrevX, CurrX, SubAlpha0);
+			SQ.SubPoseEnd.Blend(PrevX, CurrX, SubAlpha1);
+		}
+
+		for (int32 i = 0; i < State.Num(); ++i)
+		{
+			if (State.InvMass[i] <= 0.0f)
 			{
 				continue;
 			}
 
-			// Swept query: 노드의 substep 경로 + collider의 상대 운동(prev->curr를 substep 알파로 분배)을
-			// 따라 첫 접촉을 찾는다. 정지 collider는 기본 구현(직선 단일 포즈 스윕)으로 폴백된다.
-			FRopeSweptQuery SQ;
+			const FVector A = State.PrevPositions[i];  // substep 시작 위치
+			const FVector B = State.Positions[i];      // 끝점(앞선 collider가 밀었을 수 있어 매번 현재값).
+
+			// Broad-phase: 노드 구간 AABB가 collider AABB(+Radius)와 안 겹치면 스킵. 끝점만 보면 가로질러
+			// 통과한 노드를 놓치므로 반드시 구간 AABB로 판단한다.
+			if (bHasBounds)
+			{
+				FBox SweepBox(ForceInit);
+				SweepBox += A;
+				SweepBox += B;
+				if (!ColBounds.Intersect(SweepBox))
+				{
+					continue;
+				}
+			}
+
 			SQ.WorldStart = A;
-			SQ.WorldEnd   = State.Positions[i]; // 현재 끝점(앞선 collider가 밀었을 수 있어 매번 갱신).
-			SQ.NodeRadius = Radius;
-			SQ.SubAlpha0  = SubAlpha0;
-			SQ.SubAlpha1  = SubAlpha1;
-			SQ.SweepStep  = SweepStep;
-			SQ.MaxSamples = MaxSweepSamples;
+			SQ.WorldEnd   = B;
 
 			FVector HitPos;
 			const FRopeContact Contact = Collider->QuerySwept(SQ, HitPos);
@@ -280,10 +308,8 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 			// 첫 접촉 지점에서 표면 밖으로 밀어 멈춘다(가로질러 통과하지 못하게).
 			State.Positions[i] = HitPos + Contact.Normal * Contact.Penetration;
 
-			// 접선 방향 friction: 노드와 표면의 *상대* 접선 변위를 Friction만큼 깎아 그립을 만든다.
-			// 정지 표면(SurfaceVelocity 0)이면 노드 변위만 깎는 기존 동작과 동일. 움직이는 collider는
-			// SurfaceVelocity*SubDt 만큼의 표면 변위가 상대 변위에서 빠지므로, 정지한 로프가 표면 접선
-			// 방향으로 끌려간다(빠르게 지나가는 몸이 로프를 좌우로 쓸어냄).
+			// 접선 friction: 노드와 표면의 *상대* 접선 변위를 Friction만큼 깎는다(움직이는 표면이 로프를 끌어
+			// 쓸어냄). 정지 표면(SurfaceVelocity 0)이면 노드 변위만 깎는 기존 동작과 동일.
 			if (Friction > 0.0f)
 			{
 				const FVector NodeDelta = State.Positions[i] - State.PrevPositions[i]; // 이번 substep 노드 변위

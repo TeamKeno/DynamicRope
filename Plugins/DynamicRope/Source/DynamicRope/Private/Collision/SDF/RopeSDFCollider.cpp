@@ -65,9 +65,10 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		return Contact;
 	}
 
-	// 이 substep이 차지하는 collider sub-포즈(프레임 모션 prev->curr 를 substep에 분배).
-	FTransform PoseStart; PoseStart.Blend(PrevBoneToWorld, BoneToWorld, FMath::Clamp(Q.SubAlpha0, 0.0f, 1.0f));
-	FTransform PoseEnd;   PoseEnd.Blend(PrevBoneToWorld, BoneToWorld, FMath::Clamp(Q.SubAlpha1, 0.0f, 1.0f));
+	// substep sub-포즈는 solver가 콜라이더당 1회 계산해 넘긴다(노드 루프 밖 호이스팅 → 노드마다 Blend 안 함).
+	// 정지 본(bUseSubPose=false)이면 Blend 없이 단일 현재 포즈로 본다 → 서 있는 캐릭터의 대부분 본이 무비용.
+	const FTransform& PoseStart = Q.bUseSubPose ? Q.SubPoseStart : BoneToWorld;
+	const FTransform& PoseEnd   = Q.bUseSubPose ? Q.SubPoseEnd   : BoneToWorld;
 
 	// 노드 substep 경로를 collider 로컬 상대 프레임으로: 시작은 시작 sub-포즈, 끝은 끝 sub-포즈 기준.
 	// 이 하나의 로컬 세그먼트가 노드 모션 + collider 모션(상대 운동)을 모두 담는다 → 빠른 본이 노드를
@@ -82,7 +83,6 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 
 	const FBox Band = Volume->LocalBounds.ExpandBy(Q.NodeRadius);
 
-	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSDF_SweptSampleLoop); // SDF 샘플(trilinear/gradient) 비용. QuerySwept과의 차이 = transform 셋업(Blend×2+역변환).
 	for (int32 k = 0; k < NumSamples; ++k)
 	{
 		const double T = (NumSamples <= 1) ? 1.0 : static_cast<double>(k) / static_cast<double>(NumSamples - 1);
