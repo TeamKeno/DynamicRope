@@ -1,11 +1,14 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SRopeSDFAuthoringPanel.h"
+#include "SRopeSDFPreviewViewport.h"
 #include "RopeSDFBaker.h"
 #include "DynamicRopeEditorLog.h"
 #include "Collision/SDF/RopeSDFData.h"
 
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SButton.h"
@@ -28,6 +31,13 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 {
 	ChildSlot
 	[
+		SNew(SSplitter)
+		.Orientation(Orient_Horizontal)
+
+		// 좌: 컨트롤(타깃 피커 + 베이크 + 설정).
+		+ SSplitter::Slot()
+		.Value(0.4f)
+		[
 		SNew(SBorder)
 		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 		.Padding(12.0f)
@@ -99,7 +109,36 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 			[ MakeFloatRow(LOCTEXT("BoundsPad", "Bounds Padding (cm)"), &FRopeSDFBakeSettings::BoundsPadding, 0.0f, 20.0f) ]
 		]
+		]
+
+		// 우: 3D 프리뷰 뷰포트(베이크 대상 메시 + 향후 SDF 오버레이).
+		+ SSplitter::Slot()
+		.Value(0.6f)
+		[
+			SNew(SOverlay)
+
+			+ SOverlay::Slot()
+			[
+				SAssignNew(PreviewViewport, SRopeSDFPreviewViewport)
+			]
+
+			// 프리뷰할 메시가 없을 때만 보이는 안내.
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Visibility(this, &SRopeSDFAuthoringPanel::GetPreviewHintVisibility)
+				.AutoWrapText(true)
+				.Justification(ETextJustify::Center)
+				.Text(LOCTEXT("PreviewHint",
+					"Pick a Rope SDF Data asset whose SourceMesh is set to preview it here."))
+			]
+		]
 	];
+
+	// 패널 생성 시점에 타깃이 이미 있을 수 있으니 한 번 반영.
+	RefreshPreviewMesh();
 }
 
 TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeFloatRow(const FText& Label,
@@ -148,6 +187,29 @@ FString SRopeSDFAuthoringPanel::GetTargetPath() const
 void SRopeSDFAuthoringPanel::OnTargetChanged(const FAssetData& InAssetData)
 {
 	Target = Cast<URopeSDFData>(InAssetData.GetAsset());
+	RefreshPreviewMesh();
+}
+
+void SRopeSDFAuthoringPanel::RefreshPreviewMesh()
+{
+	if (!PreviewViewport.IsValid())
+	{
+		return;
+	}
+
+	USkeletalMesh* Mesh = nullptr;
+	if (URopeSDFData* Data = Target.Get())
+	{
+		// soft 참조이므로 오써링 시점에 동기 로드(없거나 로드 실패면 nullptr → 빈 뷰).
+		Mesh = Data->SourceMesh.LoadSynchronous();
+	}
+	PreviewViewport->SetPreviewMesh(Mesh);
+}
+
+EVisibility SRopeSDFAuthoringPanel::GetPreviewHintVisibility() const
+{
+	const bool bHasMesh = Target.IsValid() && !Target->SourceMesh.IsNull();
+	return bHasMesh ? EVisibility::Collapsed : EVisibility::HitTestInvisible;
 }
 
 bool SRopeSDFAuthoringPanel::CanBake() const

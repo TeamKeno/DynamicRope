@@ -10,6 +10,7 @@
 #include "RopeSDFBaker.h"
 
 class URopeSDFData;
+class SRopeSDFPreviewViewport;
 struct FAssetData;
 
 class SRopeSDFAuthoringPanel : public SCompoundWidget
@@ -36,6 +37,15 @@ private:
 	FString GetTargetPath() const;
 	void OnTargetChanged(const FAssetData& InAssetData);
 	bool CanBake() const;
+
+	/** 현재 타깃의 SourceMesh를 동기 로드해 프리뷰 뷰포트에 반영한다(없으면 빈 뷰 + 안내). */
+	void RefreshPreviewMesh();
+
+	/** 프리뷰할 메시가 없을 때만 보이는 안내 오버레이의 가시성. */
+	EVisibility GetPreviewHintVisibility() const;
+
+	/** 우측 3D 프리뷰 뷰포트(베이크 대상 메시 + 향후 SDF 오버레이). */
+	TSharedPtr<SRopeSDFPreviewViewport> PreviewViewport;
 
 	/** FRopeSDFBakeSettings 멤버에 바인딩된 라벨+숫자 입력 행을 만든다(필드별 중복 제거). */
 	TSharedRef<class SWidget> MakeFloatRow(const FText& Label, float FRopeSDFBakeSettings::* Member, float MinVal, float MaxVal);
