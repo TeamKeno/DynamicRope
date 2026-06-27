@@ -33,7 +33,7 @@ void FRopeSDFVisualizer::DrawVisualization(const UActorComponent* Component, con
 	{
 		return;
 	}
-	if (!Provider->bDrawSDFBounds && !Provider->bDrawSDFGrid && !Provider->bDrawSDFVoxels
+	if (!Provider->bDrawSDFBounds && !Provider->bDrawSDFVoxels
 		&& !Provider->bDrawSDFSlice && !Provider->bDrawSDFGradient)
 	{
 		return;
@@ -66,10 +66,6 @@ void FRopeSDFVisualizer::DrawVisualization(const UActorComponent* Component, con
 		if (Provider->bDrawSDFBounds)
 		{
 			RopeSDFDraw::DrawBounds(PDI, DrawVol->LocalBounds, Xform, FLinearColor(1.0f, 0.6f, 0.0f));
-		}
-		if (Provider->bDrawSDFGrid)
-		{
-			RopeSDFDraw::DrawCoarseGrid(PDI, DrawVol->LocalBounds, Xform, FLinearColor(0.3f, 0.3f, 0.3f), 4);
 		}
 		if (Provider->bDrawSDFVoxels && DrawVol->IsBaked())
 		{

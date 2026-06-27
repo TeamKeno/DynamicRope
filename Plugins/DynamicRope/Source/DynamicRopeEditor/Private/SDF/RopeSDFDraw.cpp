@@ -48,29 +48,6 @@ void RopeSDFDraw::DrawBounds(FPrimitiveDrawInterface* PDI, const FBox& Local, co
 	}
 }
 
-void RopeSDFDraw::DrawCoarseGrid(FPrimitiveDrawInterface* PDI, const FBox& Local, const FTransform& Xform,
-	const FLinearColor& Color, int32 Div)
-{
-	Div = FMath::Max(1, Div);
-	const FVector Mn = Local.Min;
-	const FVector Sz = Local.GetSize();
-	auto P = [&](double tx, double ty, double tz)
-	{
-		return Xform.TransformPosition(FVector(Mn.X + Sz.X * tx, Mn.Y + Sz.Y * ty, Mn.Z + Sz.Z * tz));
-	};
-	for (int32 i = 0; i <= Div; ++i)
-	{
-		const double ti = static_cast<double>(i) / Div;
-		for (int32 j = 0; j <= Div; ++j)
-		{
-			const double tj = static_cast<double>(j) / Div;
-			PDI->DrawLine(P(ti, tj, 0.0), P(ti, tj, 1.0), Color, SDPG_World, 0.25f); // along Z
-			PDI->DrawLine(P(ti, 0.0, tj), P(ti, 1.0, tj), Color, SDPG_World, 0.25f); // along Y
-			PDI->DrawLine(P(0.0, ti, tj), P(1.0, ti, tj), Color, SDPG_World, 0.25f); // along X
-		}
-	}
-}
-
 void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& V, const FTransform& Xform, float Band)
 {
 	const FVector Mn = V.LocalBounds.Min;

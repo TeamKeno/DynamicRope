@@ -83,10 +83,6 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
 	bool bDrawSDFBounds = false;
 
-	/** 볼륨 안에 coarse 격자를 그린다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
-	bool bDrawSDFGrid = false;
-
 	/** 좁은밴드 voxel을 부호별 색 점으로 그린다(안=빨강, 밖=파랑, ≈0=흰색). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
 	bool bDrawSDFVoxels = false;

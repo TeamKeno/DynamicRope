@@ -17,9 +17,6 @@ namespace RopeSDFDraw
 	/** 로컬 AABB의 12개 모서리. */
 	void DrawBounds(FPrimitiveDrawInterface* PDI, const FBox& LocalBounds, const FTransform& Xform, const FLinearColor& Color);
 
-	/** 로컬 AABB 내부 coarse 격자(축당 Div 분할). */
-	void DrawCoarseGrid(FPrimitiveDrawInterface* PDI, const FBox& LocalBounds, const FTransform& Xform, const FLinearColor& Color, int32 Div);
-
 	/** 좁은밴드 voxel을 부호별 색 점으로(안=빨강, 밖=파랑, ≈0=흰색). |distance| <= Band 인 것만. */
 	void DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& Volume, const FTransform& Xform, float Band);
 
