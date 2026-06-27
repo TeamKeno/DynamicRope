@@ -148,6 +148,19 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 	{
 		WhipAimDir = GetForwardVector();
 	}
+	WhipGuideOrigin = GetComponentLocation();
+	WhipGuideForward = WhipAimDir;
+	WhipGuideUp = FVector::UpVector;
+	if (FMath::Abs(FVector::DotProduct(WhipGuideForward, WhipGuideUp)) > 0.96f)
+	{
+		WhipGuideUp = GetUpVector().GetSafeNormal();
+	}
+	FVector WhipGuideSide = FVector::CrossProduct(WhipGuideUp, WhipGuideForward).GetSafeNormal();
+	if (WhipGuideSide.IsNearlyZero())
+	{
+		WhipGuideSide = GetRightVector().GetSafeNormal();
+	}
+	WhipGuideUp = FVector::CrossProduct(WhipGuideForward, WhipGuideSide).GetSafeNormal();
 
 	WhipElapsed = 0.0f;
 	bWhipSwingActive = true;
@@ -181,31 +194,19 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 			Sim.PrevPositions[i] = Sim.Positions[i];
 		}
 
-		// Prime the guided span behind the hand so the visible throw reads back-to-front.
-		FVector Up = FVector::UpVector;
-		if (FMath::Abs(FVector::DotProduct(WhipAimDir, Up)) > 0.96f)
-		{
-			Up = GetRightVector().GetSafeNormal();
-		}
-		FVector Side = FVector::CrossProduct(Up, WhipAimDir).GetSafeNormal();
-		if (Side.IsNearlyZero())
-		{
-			Side = GetRightVector().GetSafeNormal();
-		}
-		Up = FVector::CrossProduct(WhipAimDir, Side).GetSafeNormal();
-
 		const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * WhipGuidedLength), 1, LastNode);
+		TArray<FVector> GuideTargets;
+		BuildWhipGuideTargets(0.0f, LastGuidedNode, GuideTargets);
+		PreviousWhipGuideTargets = GuideTargets;
 		for (int32 i = 1; i <= LastGuidedNode; ++i)
 		{
-			const float S = static_cast<float>(i) / static_cast<float>(LastNode);
-			const float Arc = FMath::Sin(S * PI);
-			const FVector Primed =
-				Start
-				- WhipAimDir * (S * Sim.RopeLength * 0.85f)
-				+ Up * (Arc * WhipArcHeight * 0.25f)
-				- Side * (Arc * WhipSideOffset);
-			Sim.Positions[i] = Primed;
-			Sim.PrevPositions[i] = Primed;
+			if (!GuideTargets.IsValidIndex(i))
+			{
+				break;
+			}
+
+			Sim.Positions[i] = GuideTargets[i];
+			Sim.PrevPositions[i] = GuideTargets[i];
 		}
 
 		// Temporary throw: inject Verlet velocity by moving previous positions opposite the aim.
@@ -228,6 +229,109 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 	Phase = ERopePhase::Flight;
 }
 
+void URopeComponent::BuildWhipGuideTargets(float NormalizedTime, int32 LastGuidedNode, TArray<FVector>& OutTargets) const
+{
+	OutTargets.Reset();
+	if (Sim.Num() < 2 || LastGuidedNode < 0)
+	{
+		return;
+	}
+
+	const float T = FMath::Clamp(NormalizedTime, 0.0f, 1.0f);
+	const FVector Forward = WhipGuideForward.GetSafeNormal();
+	if (Forward.IsNearlyZero())
+	{
+		return;
+	}
+
+	FVector Up = WhipGuideUp.GetSafeNormal();
+	if (Up.IsNearlyZero())
+	{
+		Up = FVector::UpVector;
+	}
+
+	const FVector HandPos = WhipGuideOrigin;
+	const float GuidedEnd = FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f);
+	const int32 DesiredPointCount = FMath::Clamp(LastGuidedNode + 1, 1, Sim.Num());
+	const int32 RawSampleCount = FMath::Max(DesiredPointCount * 4, 16);
+	const float GuideLength = FMath::Max(Sim.RopeLength, RopeLength) * GuidedEnd;
+	const float SweepRadians = FMath::DegreesToRadians(FMath::Clamp(WhipSweepAngleDegrees, 1.0f, 180.0f));
+	const float AngleFromAim = SweepRadians * (1.0f - T);
+	FVector SweepDir = (Forward * FMath::Cos(AngleFromAim) + Up * FMath::Sin(AngleFromAim)).GetSafeNormal();
+	if (T <= KINDA_SMALL_NUMBER)
+	{
+		SweepDir = (Forward * FMath::Cos(SweepRadians) + Up * FMath::Sin(SweepRadians)).GetSafeNormal();
+	}
+	else if (T >= 1.0f - KINDA_SMALL_NUMBER)
+	{
+		SweepDir = Forward;
+	}
+
+	TArray<FVector> RawPoints;
+	RawPoints.Reserve(RawSampleCount);
+	for (int32 SampleIdx = 0; SampleIdx < RawSampleCount; ++SampleIdx)
+	{
+		const float RawAlpha = (RawSampleCount > 1)
+			? static_cast<float>(SampleIdx) / static_cast<float>(RawSampleCount - 1)
+			: 0.0f;
+		RawPoints.Add(HandPos + SweepDir * (RawAlpha * GuideLength));
+	}
+
+	ResampleGuideByNodeSpacing(RawPoints, Sim.RopeLength, Sim.Num(), DesiredPointCount, OutTargets);
+}
+
+void URopeComponent::ResampleGuideByNodeSpacing(const TArray<FVector>& SourcePoints, float TotalLength, int32 NodeCount,
+	int32 DesiredPointCount, TArray<FVector>& OutPoints) const
+{
+	OutPoints.Reset();
+	if (SourcePoints.Num() == 0 || NodeCount < 2 || DesiredPointCount <= 0)
+	{
+		return;
+	}
+
+	const float SegmentLength = TotalLength > KINDA_SMALL_NUMBER
+		? TotalLength / static_cast<float>(NodeCount - 1)
+		: Sim.SegmentLength;
+	OutPoints.SetNum(DesiredPointCount);
+	OutPoints[0] = SourcePoints[0];
+	if (DesiredPointCount == 1)
+	{
+		return;
+	}
+
+	TArray<float> Accumulated;
+	Accumulated.SetNum(SourcePoints.Num());
+	Accumulated[0] = 0.0f;
+	for (int32 i = 1; i < SourcePoints.Num(); ++i)
+	{
+		Accumulated[i] = Accumulated[i - 1] + FVector::Dist(SourcePoints[i - 1], SourcePoints[i]);
+	}
+
+	int32 SegmentIdx = 1;
+	for (int32 PointIdx = 1; PointIdx < DesiredPointCount; ++PointIdx)
+	{
+		const float TargetDistance = SegmentLength * static_cast<float>(PointIdx);
+		while (SegmentIdx < Accumulated.Num() && Accumulated[SegmentIdx] < TargetDistance)
+		{
+			++SegmentIdx;
+		}
+
+		if (SegmentIdx < Accumulated.Num())
+		{
+			const float SegmentStartDistance = Accumulated[SegmentIdx - 1];
+			const float SegmentDistance = FMath::Max(Accumulated[SegmentIdx] - SegmentStartDistance, KINDA_SMALL_NUMBER);
+			const float Alpha = (TargetDistance - SegmentStartDistance) / SegmentDistance;
+			OutPoints[PointIdx] = FMath::Lerp(SourcePoints[SegmentIdx - 1], SourcePoints[SegmentIdx], Alpha);
+			continue;
+		}
+
+		const FVector TailDir = (SourcePoints.Num() >= 2)
+			? (SourcePoints.Last() - SourcePoints[SourcePoints.Num() - 2]).GetSafeNormal()
+			: WhipAimDir.GetSafeNormal();
+		OutPoints[PointIdx] = SourcePoints.Last() + TailDir * (TargetDistance - Accumulated.Last());
+	}
+}
+
 void URopeComponent::ApplyWhipSwing(float DeltaTime)
 {
 	DebugWhipGuideNodeIndices.Reset();
@@ -242,38 +346,19 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 	WhipElapsed += DeltaTime;
 	const float Duration = FMath::Max(WhipDuration, KINDA_SMALL_NUMBER);
 	const float T = FMath::Clamp(WhipElapsed / Duration, 0.0f, 1.0f);
-	const float EaseT = SmoothStep(T);
-
-	const FVector Forward = WhipAimDir.GetSafeNormal();
-	if (Forward.IsNearlyZero())
+	const int32 LastNode = Sim.Num() - 1;
+	const float GuidedEnd = FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f);
+	const bool bCaptureGuideTargets = RopeDebug::IsFlightStatEnabled();
+	const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * GuidedEnd), 1, LastNode);
+	TArray<FVector> GuideTargets;
+	BuildWhipGuideTargets(T, LastGuidedNode, GuideTargets);
+	if (GuideTargets.Num() == 0)
 	{
 		bWhipSwingActive = false;
 		return;
 	}
 
-	FVector Up = FVector::UpVector;
-	if (FMath::Abs(FVector::DotProduct(Forward, Up)) > 0.96f)
-	{
-		Up = GetRightVector().GetSafeNormal();
-	}
-
-	FVector Side = FVector::CrossProduct(Up, Forward).GetSafeNormal();
-	if (Side.IsNearlyZero())
-	{
-		Side = GetRightVector().GetSafeNormal();
-	}
-	Up = FVector::CrossProduct(Forward, Side).GetSafeNormal();
-
-	const FVector HandPos = GetComponentLocation();
-	const int32 LastNode = Sim.Num() - 1;
-	const float GuidedEnd = FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f);
-	const float FollowAlpha = FMath::Clamp(1.0f - FMath::Exp(-FMath::Max(0.0f, WhipFollowRate) * DeltaTime), 0.0f, 0.8f);
-	const float WaveTravel = FMath::Max(WhipWaveTravelTime / Duration, 0.05f);
-	const float WaveHead = FMath::Clamp(EaseT / WaveTravel, 0.0f, 1.35f);
-	const float ThrowReach = FMath::Max(Sim.RopeLength, RopeLength) * (0.2f + 0.8f * EaseT);
-	const bool bCaptureGuideTargets = RopeDebug::IsFlightStatEnabled();
-
-	for (int32 i = 1; i <= LastNode; ++i)
+	for (int32 i = 1; i <= LastGuidedNode; ++i)
 	{
 		if (Sim.InvMass.IsValidIndex(i) && Sim.InvMass[i] <= 0.0f)
 		{
@@ -281,7 +366,7 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 		}
 
 		const float S = static_cast<float>(i) / static_cast<float>(LastNode);
-		if (S > GuidedEnd)
+		if (!GuideTargets.IsValidIndex(i))
 		{
 			break;
 		}
@@ -297,23 +382,10 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 			continue;
 		}
 
-		const float RestDistance = S * Sim.RopeLength;
-		const float Behind = (1.0f - EaseT) * RestDistance * 0.7f;
-		const float Ahead = ThrowReach * S * EaseT;
-		const float ArcEnvelope = FMath::Sin(S * PI);
-		const float TravelingWave = FMath::Sin(FMath::Clamp((S - WaveHead + 0.35f) / 0.7f, 0.0f, 1.0f) * PI);
-		const float Lift = ArcEnvelope * TravelingWave * FMath::Sin(T * PI) * WhipArcHeight;
-		const float SideSweep = ArcEnvelope * FMath::Sin((S - EaseT) * PI) * WhipSideOffset;
+		const FVector Target = GuideTargets[i];
 
-		const FVector Target =
-			HandPos
-			- Forward * Behind
-			+ Forward * Ahead
-			+ Up * Lift
-			+ Side * SideSweep;
-
-		const FVector Delta = Target - Sim.Positions[i];
-		Sim.Positions[i] += Delta * FollowAlpha * GuideWeight;
+		Sim.PrevPositions[i] = PreviousWhipGuideTargets.IsValidIndex(i) ? PreviousWhipGuideTargets[i] : Sim.Positions[i];
+		Sim.Positions[i] = Target;
 
 		if (bCaptureGuideTargets)
 		{
@@ -322,6 +394,7 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 		}
 	}
 
+	PreviousWhipGuideTargets = GuideTargets;
 	bWhipSwingActive = WhipElapsed < WhipDuration;
 }
 

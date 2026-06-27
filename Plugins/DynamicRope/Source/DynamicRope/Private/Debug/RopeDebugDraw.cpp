@@ -41,7 +41,7 @@ namespace
 		TEXT("r.DynamicRope.Debug.Colliders"), 1,
 		TEXT("provider collider(capsule / SDF 볼륨 bounds) 표시. provider별 bDrawDebug과 OR된다."), ECVF_Cheat);
 
-	const TCHAR* PhaseName(ERopePhase Phase)
+	const TCHAR* DebugPhaseName(ERopePhase Phase)
 	{
 		switch (Phase)
 		{
@@ -201,7 +201,7 @@ void RopeDebug::DrawFlight(const UWorld* World, uint64 DebugKey, const FString& 
 		const FString Text = FString::Printf(
 			TEXT("[RopeFlight] %s  phase=%s  colliders=%d  nodes=%d  solve=%d\n")
 			TEXT("candidates=%d  trackerBone=%s  trackerNodes=%d/%d [%s]  capture=%s"),
-			*RopeName, PhaseName(Phase), FrameColliderCount, Sim.Num(), bSolveThisFrame ? 1 : 0,
+			*RopeName, DebugPhaseName(Phase), FrameColliderCount, Sim.Num(), bSolveThisFrame ? 1 : 0,
 			Candidates.Num(), *ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num(),
 			WrapConfig.MinLatchNodes, *NodeListString(ContactTracker.CandidateNodes),
 			bShouldCapture ? TEXT("yes") : TEXT("no"));

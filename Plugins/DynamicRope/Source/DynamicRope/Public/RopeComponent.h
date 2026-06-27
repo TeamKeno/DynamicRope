@@ -155,6 +155,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "0.95"))
 	float WhipGuidedLength = 0.65f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
+	float WhipSweepAngleDegrees = 180.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0"))
 	float WhipFollowRate = 18.0f;
 
@@ -185,9 +188,13 @@ private:
 	bool bWhipSwingActive = false;
 
 	FVector WhipAimDir = FVector::ForwardVector;
+	FVector WhipGuideOrigin = FVector::ZeroVector;
+	FVector WhipGuideForward = FVector::ForwardVector;
+	FVector WhipGuideUp = FVector::UpVector;
 
 	TArray<int32> DebugWhipGuideNodeIndices;
 	TArray<FVector> DebugWhipGuideTargets;
+	TArray<FVector> PreviousWhipGuideTargets;
 
 	// 한 프레임 collider 스냅샷. RopeSimSubsystem이 Tick에서 중앙 수집해 채운다(provider 레지스트리 → 로프 필터).
 	// Solve/Finalize에서 read. provider 소유라 raw 포인터(해당 프레임 동안 유효).
@@ -216,6 +223,11 @@ private:
 	void StartFreshThrow(const FVector& AimDir);
 
 	void ThrowFreeSpanWhileWrapped(const FVector& AimDir);
+
+	void BuildWhipGuideTargets(float NormalizedTime, int32 LastGuidedNode, TArray<FVector>& OutTargets) const;
+
+	void ResampleGuideByNodeSpacing(const TArray<FVector>& SourcePoints, float TotalLength, int32 NodeCount,
+		int32 DesiredPointCount, TArray<FVector>& OutPoints) const;
 
 	float TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const;
 
