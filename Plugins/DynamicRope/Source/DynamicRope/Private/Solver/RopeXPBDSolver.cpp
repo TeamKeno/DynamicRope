@@ -100,7 +100,7 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 
 		// 충돌은 substep당 1회(매 iteration이 아니라). Query가 비싸고, push-out이 침투를 한 번에
 		// 해소하므로 substep 끝에서 한 번이면 충분하다(다음 substep이 재수렴). friction 과적용도 방지.
-		SolveCollisions(State, Config, Colliders, ColliderBounds);
+		SolveCollisions(State, Config, Colliders, ColliderBounds, FixedDt);
 	}
 }
 
@@ -209,7 +209,7 @@ void FRopeXPBDSolver::SolveBending(FRopeSimState& State, const FRopeSolverConfig
 }
 
 void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverConfig& Config,
-	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds) const
+	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds, float SubDt) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_Collisions);
 	if (Colliders.Num() == 0)
@@ -274,12 +274,17 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 				// 첫 접촉 지점에서 표면 밖으로 밀어 멈춘다(가로질러 통과하지 못하게).
 				State.Positions[i] = P + Contact.Normal * Contact.Penetration;
 
-				// 접선 방향 friction: 변위(Pos-Prev)의 접선 성분을 Friction만큼 깎아 그립을 만든다.
+				// 접선 방향 friction: 노드와 표면의 *상대* 접선 변위를 Friction만큼 깎아 그립을 만든다.
+				// 정지 표면(SurfaceVelocity 0)이면 노드 변위만 깎는 기존 동작과 동일. 움직이는 collider는
+				// SurfaceVelocity*SubDt 만큼의 표면 변위가 상대 변위에서 빠지므로, 정지한 로프가 표면 접선
+				// 방향으로 끌려간다(빠르게 지나가는 몸이 로프를 좌우로 쓸어냄).
 				if (Friction > 0.0f)
 				{
-					const FVector Delta = State.Positions[i] - State.PrevPositions[i];
-					const FVector Tangent = Delta - (Delta | Contact.Normal) * Contact.Normal;
-					State.PrevPositions[i] += Tangent * Friction;
+					const FVector NodeDelta = State.Positions[i] - State.PrevPositions[i]; // 이번 substep 노드 변위
+					const FVector SurfDelta = Contact.SurfaceVelocity * SubDt;             // 이번 substep 표면 변위
+					const FVector RelDelta = NodeDelta - SurfDelta;
+					const FVector RelTangent = RelDelta - (RelDelta | Contact.Normal) * Contact.Normal;
+					State.PrevPositions[i] += RelTangent * Friction;
 				}
 				break; // 이 collider에 대한 첫 접촉에서 종료
 			}

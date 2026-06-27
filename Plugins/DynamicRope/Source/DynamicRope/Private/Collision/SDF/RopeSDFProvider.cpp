@@ -77,6 +77,11 @@ void URopeSDFProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeC
 	{
 		BuiltFrame = Frame;
 		Colliders.Reset();
+
+		// 표면 속도(드래그) 산출용 프레임 dt. 본별 (현재-이전)/dt 로 콜라이더가 표면 속도를 만든다.
+		const float FrameDt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
+		const float InvDt = (FrameDt > KINDA_SMALL_NUMBER) ? (1.0f / FrameDt) : 0.0f;
+
 		for (const FRopeBoneSDFVolume& Volume : SDFData->BoneVolumes)
 		{
 			if (Volume.Bone.IsNone() || !Volume.IsBaked())
@@ -96,7 +101,11 @@ void URopeSDFProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeC
 			}
 
 			const FTransform BoneToWorld = Mesh->GetSocketTransform(Volume.Bone);
-			Colliders.Add(FRopeSDFCollider(&Volume, BoneToWorld, Volume.Bone, Mesh));
+			// 이전 프레임 트랜스폼(없으면 현재 = 첫 프레임 속도 0). lookup 후 다음 프레임용으로 갱신.
+			const FTransform* PrevPtr = PrevBoneToWorld.Find(Volume.Bone);
+			const FTransform PrevXform = PrevPtr ? *PrevPtr : BoneToWorld;
+			PrevBoneToWorld.Add(Volume.Bone, BoneToWorld);
+			Colliders.Add(FRopeSDFCollider(&Volume, BoneToWorld, PrevXform, InvDt, Volume.Bone, Mesh));
 
 			// 디버그 드로우 중앙화: bDrawDebug(per-instance) 또는 r.DynamicRope.Debug(.Colliders)로 게이트.
 			RopeDebug::DrawColliderBounds(GetWorld(), Volume.LocalBounds.TransformBy(BoneToWorld), bDrawDebug);

@@ -35,7 +35,8 @@ enum class ERopeReleaseReason : uint8
 /**
  * narrow-phase 컨택트: rope 노드 하나 vs collider 하나, IRopeCollider::Query가 반환한다.
  *
- * CONTRACT — FROZEN 2026-06-24. 모든 IRopeCollider(capsule, bone-SDF, world-GDF)는 이를 반드시 준수해야 한다.
+ * CONTRACT — FROZEN 2026-06-24 (2026-06-27 SurfaceVelocity 추가: 기본 0인 가산 필드라 하위호환).
+ * 모든 IRopeCollider(capsule, bone-SDF, world-GDF)는 이를 반드시 준수해야 한다.
  * 단일 (node, collider) 쌍을 기술한다. 집계는 호출자의 몫이다(solver는 push-out을 합산하고,
  * DecideWrap은 노드별로 penetration이 가장 깊은 bone을 선택한다).
  *
@@ -54,6 +55,9 @@ enum class ERopeReleaseReason : uint8
  *                wrap을 건다. 멀티-bone SDF는 가장 가까운 표면을 소유한 bone을 반드시 보고해야 한다. world => None.
  *   SourceMesh   Bone을 소유한 skeletal mesh. 액터 간 follow를 전달한다(-> FRopeWrapState::Mesh).
  *                비-skeletal collider에서는 null.
+ *   SurfaceVelocity 접촉점에서 collider 표면의 월드 속도(cm/s). solver가 상대 접선 속도 마찰로
+ *                로프를 끌고 가는 데 쓴다(움직이는 몸이 정지한 로프를 좌우로 쓸어내게 함).
+ *                정적/미지원 collider는 0(= 정적 표면)으로 둔다 — 기존 동작과 동일.
  */
 struct FRopeContact
 {
@@ -63,6 +67,7 @@ struct FRopeContact
 	FVector SurfacePoint = FVector::ZeroVector;
 	FName   Bone = NAME_None;
 	const USkeletalMeshComponent* SourceMesh = nullptr;
+	FVector SurfaceVelocity = FVector::ZeroVector;
 };
 
 /** latch된 wrap 노드. bone-local 공간에 고정되어 재충돌 없이 skinning을 따라간다. */

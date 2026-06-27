@@ -39,6 +39,15 @@ FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	Contact.SurfacePoint = WorldPos - Contact.Normal * Dist;  // 표면 위 최근접점(보조/디버그)
 	Contact.Bone = Bone;                                      // 본 귀속(DecideWrap dominant bone 입력, 비-None 필수)
 	Contact.SourceMesh = SourceMesh;                          // 본을 소유한 메시(액터 간 wrap follow)
+
+	// 표면 속도(cm/s): 지금 WorldPos에 있는 본 위의 물질점은 이전 프레임엔 PrevBoneToWorld 기준 같은
+	// 로컬 좌표(LocalPos)에 있었다. (현재 - 이전) / dt 가 그 점의 월드 속도. solver가 상대 접선 속도
+	// 마찰로 로프를 끌어 좌우로 쓸어내는 데 쓴다. InvDeltaTime==0(첫 프레임/정지)이면 0 → 기존 동작.
+	if (InvDeltaTime > 0.0f)
+	{
+		const FVector PrevWorld = PrevBoneToWorld.TransformPosition(LocalPos);
+		Contact.SurfaceVelocity = (WorldPos - PrevWorld) * InvDeltaTime;
+	}
 	return Contact;
 }
 

@@ -44,8 +44,10 @@ private:
 		TArray<float>& Lambda) const;
 
 	// Config.CollisionRadius로 query하여(로프 두께) 노드를 표면 밖으로 push-out하고, Config.Friction으로
-	// 접선 속도를 감쇠한다. ColliderBounds는 collider별 월드 AABB(+Radius)로, broad-phase에서 먼 collider의
-	// 비싼 Query(역변환+SDF 샘플)를 건너뛰는 데 쓴다(Step에서 1회 계산해 전달).
+	// 접선 속도를 감쇠한다. 마찰은 노드와 표면의 *상대* 접선 속도에 작용하므로, 움직이는 collider(컨택트의
+	// SurfaceVelocity)는 정지한 로프를 끌어 좌우로 쓸어낸다. ColliderBounds는 collider별 월드 AABB(+Radius)로,
+	// broad-phase에서 먼 collider의 비싼 Query를 건너뛰는 데 쓴다(Step에서 1회 계산해 전달). SubDt는 표면
+	// 속도(cm/s)를 이번 substep 변위로 환산하는 데 쓴다.
 	void SolveCollisions(FRopeSimState& State, const FRopeSolverConfig& Config,
-		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds) const;
+		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds, float SubDt) const;
 };

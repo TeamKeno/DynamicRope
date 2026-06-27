@@ -22,6 +22,12 @@ public:
 	// 본 → 월드 트랜스폼(grid를 월드에 배치). 매 프레임 메시에서 갱신.
 	FTransform BoneToWorld = FTransform::Identity;
 
+	// 이전 프레임의 본 → 월드 트랜스폼. 표면 속도(드래그) 산출용. 첫 프레임엔 BoneToWorld와 동일(속도 0).
+	FTransform PrevBoneToWorld = FTransform::Identity;
+
+	// 1/프레임dt. 표면 변위를 속도(cm/s)로 환산. 0이면 표면 속도 0(정적 취급).
+	float InvDeltaTime = 0.0f;
+
 	// 이 볼륨이 귀속된 본. FRopeContact.Bone으로 전파된다.
 	FName Bone = NAME_None;
 
@@ -30,8 +36,10 @@ public:
 
 	FRopeSDFCollider() = default;
 	FRopeSDFCollider(const FRopeBoneSDFVolume* InVolume, const FTransform& InBoneToWorld,
+		const FTransform& InPrevBoneToWorld, float InInvDeltaTime,
 		FName InBone, const USkeletalMeshComponent* InSourceMesh)
-		: Volume(InVolume), BoneToWorld(InBoneToWorld), Bone(InBone), SourceMesh(InSourceMesh) {}
+		: Volume(InVolume), BoneToWorld(InBoneToWorld), PrevBoneToWorld(InPrevBoneToWorld)
+		, InvDeltaTime(InInvDeltaTime), Bone(InBone), SourceMesh(InSourceMesh) {}
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
 	virtual FBox GetWorldBounds() const override;

@@ -142,6 +142,9 @@ private:
 	// 프레임당 1회 재구성되는 백킹 스토리지. 넘겨준 포인터는 해당 프레임 동안 유효하다.
 	TArray<FRopeSDFCollider> Colliders;
 
+	// 본별 이전 프레임 BoneToWorld. 표면 속도(드래그) 산출용 — collider 빌드 시 (현재, 이전)으로 속도를 만든다.
+	TMap<FName, FTransform> PrevBoneToWorld;
+
 	// 마지막으로 collider를 빌드한 GFrameCounter. 같은 프레임에 여러 로프가 호출해도 재빌드 안 함(디둡).
 	uint64 BuiltFrame = static_cast<uint64>(-1);
 

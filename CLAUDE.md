@@ -93,11 +93,15 @@ volume (authored in the editor module). Pick the provider per rope; the solver i
 
 ### Two contracts to respect when touching collision/wrap
 
-1. **`FRopeContact` is a FROZEN contract** (`Core/RopeTypes.h`, frozen 2026-06-24). Every
+1. **`FRopeContact` is a FROZEN contract** (`Core/RopeTypes.h`, frozen 2026-06-24; extended 2026-06-27
+   with an additive `SurfaceVelocity` field — default `ZeroVector`, so backward-compatible). Every
    `IRopeCollider` must obey it exactly. Key invariants: `Normal` is unit and points *outward*
    (collider→node) — the sign is load-bearing, an inward normal sucks the rope into the body;
    `Penetration` is measured against the *query* radius; skeletal colliders must report a non-None
-   `Bone` (that's how `DecideWrap` attributes the wrap). Read the struct's comment block before changing it.
+   `Bone` (that's how `DecideWrap` attributes the wrap); `SurfaceVelocity` is the collider surface's
+   world velocity (cm/s) at the contact point — the solver uses it for *relative*-tangential friction so
+   a moving body drags/sweeps the rope aside (leave it `0` for static colliders; the v1 capsule does,
+   the SDF collider derives it from the bone's per-frame motion). Read the struct's comment block before changing it.
 
 2. **Cross-actor wrap**: `FRopeContact::SourceMesh` (and `FCapsuleCollider::SourceMesh`) carry the
    `USkeletalMeshComponent` that owns the contacted bone. This propagates to `FRopeWrapState::Mesh`,
