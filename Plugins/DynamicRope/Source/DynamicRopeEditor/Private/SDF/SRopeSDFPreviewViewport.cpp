@@ -1,11 +1,13 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SDF/SRopeSDFPreviewViewport.h"
+#include "SDF/RopeSDFDraw.h"
 
 #include "AdvancedPreviewScene.h"
 #include "EditorViewportClient.h"
 #include "Animation/DebugSkelMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
+#include "Collision/SDF/RopeSDFData.h"
 
 #define LOCTEXT_NAMESPACE "RopeSDFPreviewViewport"
 
@@ -19,6 +21,7 @@ public:
 		const TSharedRef<SRopeSDFPreviewViewport>& InViewport)
 		: FEditorViewportClient(nullptr, &InPreviewScene, StaticCastSharedRef<SEditorViewport>(InViewport))
 		, AdvancedScene(&InPreviewScene)
+		, ViewportWidget(InViewport)
 	{
 		// 프리뷰는 항상 실시간(애니/본 갱신이 멈추지 않도록).
 		SetRealtime(true);
@@ -40,15 +43,27 @@ public:
 	{
 		FEditorViewportClient::Tick(DeltaSeconds);
 
-		// 프리뷰 월드를 직접 틱해 본 트랜스폼이 갱신되게 한다(3b 오버레이가 의존).
+		// 프리뷰 월드를 직접 틱해 본 트랜스폼이 갱신되게 한다(SDF 오버레이가 의존).
 		if (AdvancedScene && !GIntraFrameDebuggingGameThread)
 		{
 			AdvancedScene->GetWorld()->Tick(LEVELTICK_All, DeltaSeconds);
 		}
 	}
 
+	virtual void Draw(const FSceneView* View, FPrimitiveDrawInterface* PDI) override
+	{
+		FEditorViewportClient::Draw(View, PDI);
+
+		// 본별 SDF 오버레이는 위젯이 그린다(데이터/메시 컴포넌트 소유자). 레벨 비주얼라이저와 동일 헬퍼.
+		if (TSharedPtr<SRopeSDFPreviewViewport> PreviewWidget = ViewportWidget.Pin())
+		{
+			PreviewWidget->DrawSDFOverlay(PDI);
+		}
+	}
+
 private:
 	FAdvancedPreviewScene* AdvancedScene = nullptr;
+	TWeakPtr<SRopeSDFPreviewViewport> ViewportWidget;
 };
 
 //////////////////////////////////////////////////////////////////////////
@@ -98,6 +113,59 @@ void SRopeSDFPreviewViewport::SetPreviewMesh(USkeletalMesh* InMesh)
 			ViewportClient->FocusViewportOnBox(Bounds.GetBox());
 		}
 		ViewportClient->Invalidate();
+	}
+}
+
+void SRopeSDFPreviewViewport::SetPreviewData(URopeSDFData* InData)
+{
+	PreviewData = InData;
+	InvalidatePreview();
+}
+
+void SRopeSDFPreviewViewport::InvalidatePreview()
+{
+	if (ViewportClient.IsValid())
+	{
+		ViewportClient->Invalidate();
+	}
+}
+
+void SRopeSDFPreviewViewport::DrawSDFOverlay(FPrimitiveDrawInterface* PDI)
+{
+	URopeSDFData* Data = PreviewData.Get();
+	if (!PDI || !Data || !PreviewMeshComponent || !DrawOptions.AnyEnabled())
+	{
+		return;
+	}
+
+	for (const FRopeBoneSDFVolume& Vol : Data->BoneVolumes)
+	{
+		if (Vol.Bone.IsNone())
+		{
+			continue;
+		}
+
+		// 프리뷰 메시의 본 월드 트랜스폼. SDF는 본 로컬에 구워져 있으므로 그대로 월드 배치에 쓴다
+		// (레벨 비주얼라이저 FRopeSDFVisualizer와 동일한 GetSocketTransform 경로).
+		const FTransform Xform = PreviewMeshComponent->GetSocketTransform(Vol.Bone);
+
+		if (DrawOptions.bDrawBounds)
+		{
+			RopeSDFDraw::DrawBounds(PDI, Vol.LocalBounds, Xform, FLinearColor(1.0f, 0.6f, 0.0f));
+		}
+		if (DrawOptions.bDrawVoxels && Vol.IsBaked())
+		{
+			RopeSDFDraw::DrawVoxels(PDI, Vol, Xform, DrawOptions.BandThreshold);
+		}
+		if (DrawOptions.bDrawSlice && Vol.IsBaked())
+		{
+			RopeSDFDraw::DrawSlice(PDI, Vol, Xform, DrawOptions.SliceAxis, DrawOptions.SlicePosition,
+				DrawOptions.SliceResolution, DrawOptions.SliceColorScale);
+		}
+		if (DrawOptions.bDrawGradient && Vol.IsBaked())
+		{
+			RopeSDFDraw::DrawGradients(PDI, Vol, Xform, DrawOptions.BandThreshold, DrawOptions.GradientLength);
+		}
 	}
 }
 

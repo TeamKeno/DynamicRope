@@ -12,6 +12,7 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SNumericEntryBox.h"
 #include "Styling/AppStyle.h"
 #include "PropertyCustomizationHelpers.h"   // SObjectPropertyEntryBox
@@ -108,6 +109,59 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 			[ MakeFloatRow(LOCTEXT("BoundsPad", "Bounds Padding (cm)"), &FRopeSDFBakeSettings::BoundsPadding, 0.0f, 20.0f) ]
+
+			// 프리뷰 오버레이(자산 비변경 · 패널 로컬). 레벨 FRopeSDFVisualizer와 동일 RopeSDFDraw 공유.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 14.0f, 0.0f, 4.0f)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("OverlayHeader", "Preview Overlay"))
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakeOverlayToggleRow(LOCTEXT("DrawBounds", "Bounds"), &FRopeSDFPreviewDrawOptions::bDrawBounds) ]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakeOverlayToggleRow(LOCTEXT("DrawVoxels", "Voxels (narrow band)"), &FRopeSDFPreviewDrawOptions::bDrawVoxels) ]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakeOverlayToggleRow(LOCTEXT("DrawSlice", "Slice heatmap"), &FRopeSDFPreviewDrawOptions::bDrawSlice) ]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakeOverlayToggleRow(LOCTEXT("DrawGradient", "Gradients"), &FRopeSDFPreviewDrawOptions::bDrawGradient) ]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakePreviewFloatRow(LOCTEXT("Band", "Band Threshold (cm)"), &FRopeSDFPreviewDrawOptions::BandThreshold, 0.0f, 50.0f) ]
+
+			// Slice 파라미터: 축(순환 버튼) / 위치 / 해상도 / 색 스케일.
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
+				[ SNew(STextBlock).Text(LOCTEXT("SliceAxisLabel", "Slice Axis")) ]
+				+ SHorizontalBox::Slot().FillWidth(0.45f)
+				[
+					SNew(SButton)
+					.HAlign(HAlign_Center)
+					.OnClicked(this, &SRopeSDFAuthoringPanel::OnCycleSliceAxis)
+					[
+						SNew(STextBlock).Text(this, &SRopeSDFAuthoringPanel::GetSliceAxisLabel)
+					]
+				]
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakePreviewFloatRow(LOCTEXT("SlicePos", "Slice Position (0-1)"), &FRopeSDFPreviewDrawOptions::SlicePosition, 0.0f, 1.0f) ]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakePreviewIntRow(LOCTEXT("SliceRes", "Slice Resolution"), &FRopeSDFPreviewDrawOptions::SliceResolution, 2, 128) ]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakePreviewFloatRow(LOCTEXT("SliceScale", "Slice Color Scale (cm)"), &FRopeSDFPreviewDrawOptions::SliceColorScale, 0.1f, 50.0f) ]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakePreviewFloatRow(LOCTEXT("GradLen", "Gradient Length (cm)"), &FRopeSDFPreviewDrawOptions::GradientLength, 0.5f, 20.0f) ]
 		]
 		]
 
@@ -179,6 +233,113 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeIntRow(const FText& Label,
 		];
 }
 
+TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeOverlayToggleRow(const FText& Label,
+	bool FRopeSDFPreviewDrawOptions::* Member)
+{
+	return SNew(SCheckBox)
+		.IsChecked_Lambda([this, Member]()
+		{
+			const bool bOn = PreviewViewport.IsValid() && PreviewViewport->AccessDrawOptions().*Member;
+			return bOn ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+		})
+		.OnCheckStateChanged_Lambda([this, Member](ECheckBoxState State)
+		{
+			if (PreviewViewport.IsValid())
+			{
+				PreviewViewport->AccessDrawOptions().*Member = (State == ECheckBoxState::Checked);
+				PreviewViewport->InvalidatePreview();
+			}
+		})
+		[
+			SNew(STextBlock).Text(Label)
+		];
+}
+
+TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakePreviewFloatRow(const FText& Label,
+	float FRopeSDFPreviewDrawOptions::* Member, float MinVal, float MaxVal)
+{
+	return SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
+		[
+			SNew(STextBlock).Text(Label)
+		]
+		+ SHorizontalBox::Slot().FillWidth(0.45f)
+		[
+			SNew(SNumericEntryBox<float>)
+			.AllowSpin(true)
+			.MinValue(MinVal).MaxValue(MaxVal)
+			.MinSliderValue(MinVal).MaxSliderValue(MaxVal)
+			.Value_Lambda([this, Member]()
+			{
+				return TOptional<float>(PreviewViewport.IsValid() ? PreviewViewport->AccessDrawOptions().*Member : 0.0f);
+			})
+			.OnValueChanged_Lambda([this, Member](float NewVal)
+			{
+				if (PreviewViewport.IsValid())
+				{
+					PreviewViewport->AccessDrawOptions().*Member = NewVal;
+					PreviewViewport->InvalidatePreview();
+				}
+			})
+		];
+}
+
+TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakePreviewIntRow(const FText& Label,
+	int32 FRopeSDFPreviewDrawOptions::* Member, int32 MinVal, int32 MaxVal)
+{
+	return SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
+		[
+			SNew(STextBlock).Text(Label)
+		]
+		+ SHorizontalBox::Slot().FillWidth(0.45f)
+		[
+			SNew(SNumericEntryBox<int32>)
+			.AllowSpin(true)
+			.MinValue(MinVal).MaxValue(MaxVal)
+			.MinSliderValue(MinVal).MaxSliderValue(MaxVal)
+			.Value_Lambda([this, Member]()
+			{
+				return TOptional<int32>(PreviewViewport.IsValid() ? PreviewViewport->AccessDrawOptions().*Member : 0);
+			})
+			.OnValueChanged_Lambda([this, Member](int32 NewVal)
+			{
+				if (PreviewViewport.IsValid())
+				{
+					PreviewViewport->AccessDrawOptions().*Member = NewVal;
+					PreviewViewport->InvalidatePreview();
+				}
+			})
+		];
+}
+
+FReply SRopeSDFAuthoringPanel::OnCycleSliceAxis()
+{
+	if (PreviewViewport.IsValid())
+	{
+		FRopeSDFPreviewDrawOptions& Options = PreviewViewport->AccessDrawOptions();
+		const uint8 Next = (static_cast<uint8>(Options.SliceAxis) + 1) % 3;
+		Options.SliceAxis = static_cast<ERopeSDFSliceAxis>(Next);
+		PreviewViewport->InvalidatePreview();
+	}
+	return FReply::Handled();
+}
+
+FText SRopeSDFAuthoringPanel::GetSliceAxisLabel() const
+{
+	ERopeSDFSliceAxis Axis = ERopeSDFSliceAxis::Z;
+	if (PreviewViewport.IsValid())
+	{
+		Axis = PreviewViewport->AccessDrawOptions().SliceAxis;
+	}
+	switch (Axis)
+	{
+	case ERopeSDFSliceAxis::X: return LOCTEXT("AxisX", "X");
+	case ERopeSDFSliceAxis::Y: return LOCTEXT("AxisY", "Y");
+	default:                   return LOCTEXT("AxisZ", "Z");
+	}
+}
+
 FString SRopeSDFAuthoringPanel::GetTargetPath() const
 {
 	return Target.IsValid() ? Target->GetPathName() : FString();
@@ -204,6 +365,7 @@ void SRopeSDFAuthoringPanel::RefreshPreviewMesh()
 		Mesh = Data->SourceMesh.LoadSynchronous();
 	}
 	PreviewViewport->SetPreviewMesh(Mesh);
+	PreviewViewport->SetPreviewData(Target.Get());
 }
 
 EVisibility SRopeSDFAuthoringPanel::GetPreviewHintVisibility() const

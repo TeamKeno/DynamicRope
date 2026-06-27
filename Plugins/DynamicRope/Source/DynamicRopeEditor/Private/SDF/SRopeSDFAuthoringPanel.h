@@ -12,6 +12,7 @@
 class URopeSDFData;
 class SRopeSDFPreviewViewport;
 struct FAssetData;
+struct FRopeSDFPreviewDrawOptions;
 
 class SRopeSDFAuthoringPanel : public SCompoundWidget
 {
@@ -50,4 +51,14 @@ private:
 	/** FRopeSDFBakeSettings 멤버에 바인딩된 라벨+숫자 입력 행을 만든다(필드별 중복 제거). */
 	TSharedRef<class SWidget> MakeFloatRow(const FText& Label, float FRopeSDFBakeSettings::* Member, float MinVal, float MaxVal);
 	TSharedRef<class SWidget> MakeIntRow(const FText& Label, int32 FRopeSDFBakeSettings::* Member, int32 MinVal, int32 MaxVal);
+
+	//~ 프리뷰 오버레이(패널 로컬 상태 = PreviewViewport->AccessDrawOptions())에 바인딩되는 컨트롤들.
+	/** 오버레이 토글 체크박스 행(bounds/voxels/slice/gradient). */
+	TSharedRef<class SWidget> MakeOverlayToggleRow(const FText& Label, bool FRopeSDFPreviewDrawOptions::* Member);
+	/** 오버레이 float/int 파라미터 행(band/slice/gradient). */
+	TSharedRef<class SWidget> MakePreviewFloatRow(const FText& Label, float FRopeSDFPreviewDrawOptions::* Member, float MinVal, float MaxVal);
+	TSharedRef<class SWidget> MakePreviewIntRow(const FText& Label, int32 FRopeSDFPreviewDrawOptions::* Member, int32 MinVal, int32 MaxVal);
+	/** slice 축을 X→Y→Z로 순환시키는 버튼 + 현재 축 라벨. */
+	FReply OnCycleSliceAxis();
+	FText GetSliceAxisLabel() const;
 };
