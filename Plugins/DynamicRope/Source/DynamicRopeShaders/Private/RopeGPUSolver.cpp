@@ -37,7 +37,7 @@ struct FRopeGPUParamsGPU
 	int32     MaxSweepSamples; // M2: 세그먼트당 샘플 상한
 	int32     SDFColliderOffset; // M3: 이 로프의 SDF collider 글로벌 시작 인덱스
 	int32     NumSDFColliders;   // M3: SDF collider 수(0이면 SDF 충돌 없음)
-	int32     Pad0 = 0;
+	float     TipFrictionScale = 1.0f; // 자유단 마찰 배율(고정점=1, 끝=이 값). Pad0 슬롯 재사용.
 	int32     Pad1 = 0;
 	FVector4f Gravity;
 	FVector4f PinPrev;
@@ -481,6 +481,7 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 				P.NumCapsules       = NumValidCaps;
 				P.CollisionRadius   = S.CollisionRadius;
 				P.Friction          = S.Friction;
+				P.TipFrictionScale  = S.TipFrictionScale;
 				P.SweepStep         = S.SweepStep;
 				P.MaxSweepSamples   = FMath::Max(1, S.MaxSweepSamples);
 				P.SDFColliderOffset = 0;

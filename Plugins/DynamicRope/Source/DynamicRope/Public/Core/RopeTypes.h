@@ -143,9 +143,14 @@ struct FRopeSolverConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0"))
 	float BendCompliance = 0.02f;
 
-	/** collider에 대한 접선 방향 friction [0..1]. */
+	/** collider에 대한 접선 방향 friction [0..1](Coulomb 계수 μ). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Friction = 0.5f;
+
+	/** 자유단(끝)으로 갈수록 friction을 약화시키는 배율(고정점=1, 끝=이 값). 끝 노드는 장력이 가장 낮아
+	 *  마찰에 잘 붙잡히므로, 끝쪽 그립만 낮춰 잘 놔주게 한다. 1.0이면 테이퍼 없음(균일 friction). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TipFrictionScale = 1.0f;
 
 	/** Collision query radius in cm. The solver keeps nodes this far off contact surfaces. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", Units = "cm"))

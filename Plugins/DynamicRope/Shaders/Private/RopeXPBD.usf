@@ -31,7 +31,7 @@ struct FRopeGPUParams
 	int   MaxSweepSamples;   // 세그먼트당 샘플 상한
 	int   SDFColliderOffset; // M3: 이 로프의 SDF collider 글로벌 시작 인덱스
 	int   NumSDFColliders;   // M3: SDF collider 수(0이면 SDF 충돌 없음)
-	int   Pad0;
+	float TipFrictionScale;  // 자유단 마찰 배율(고정점=1, 끝=이 값). C++ Pad0 슬롯과 1:1.
 	int   Pad1;
 	float4 Gravity;   // xyz 사용
 	float4 PinPrev;   // xyz 사용
@@ -344,6 +344,9 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			const float  NodeR = P.CollisionRadius;
 			const float  A0 = (float)s / (float)P.NumSub;        // 이 substep의 collider 모션 시작 비율
 			const float  A1 = (float)(s + 1) / (float)P.NumSub;  // 끝 비율
+			// 자유단 마찰 테이퍼: 끝 노드(장력 최소)는 μ를 낮춰 잘 놔주게(고정점 frac=0 →1, 끝 frac=1 →TipFrictionScale).
+			const float  Frac  = (N > 1) ? ((float)i / (float)(N - 1)) : 0.0f;
+			const float  MuEff = Friction * lerp(1.0f, clamp(P.TipFrictionScale, 0.0f, 1.0f), Frac);
 
 			for (int sc = 0; sc < P.NumSDFColliders; ++sc)
 			{
@@ -364,6 +367,16 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 				const float3 L1 = RopeQuatRotate(float4(-RotE.xyz, RotE.w), gPos[i] - TrE) * InvScale;
 				const float  RelLen = distance(L0, L1);
 				const int    NumSamples = clamp(1 + (int)floor(RelLen / SweepStep), 1, MaxSamples);
+
+				// 분리: 시작 접촉(L0 밴드 내·침투) + 끝 표면 밖(L1 밴드 밖/비침투)이면 재-핀하지 않고 놔줌
+				// (접촉 노드가 매 substep 시작점으로 다시 핀돼 영영 못 떨어지는 것 방지). CPU QuerySwept 미러.
+				{
+					const float3 BMn = Vol.LocalMin.xyz - NodeR;
+					const float3 BMx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + NodeR;
+					const bool StartIn = all(L0 >= BMn) && all(L0 <= BMx) && (RopeSDFTrilinear(Vol, L0) < NodeR);
+					const bool EndOut  = any(L1 < BMn) || any(L1 > BMx) || (RopeSDFTrilinear(Vol, L1) >= NodeR);
+					if (StartIn && EndOut) { continue; }
+				}
 
 				for (int k = 0; k < NumSamples; ++k)
 				{
@@ -397,8 +410,8 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 							const float3 SurfDisp  = SurfVel * P.FixedDt;
 							const float3 RelDelta  = NodeDelta - SurfDisp;
 							float3 Tangent = RelDelta - dot(RelDelta, NWorld) * NWorld;
-							// Coulomb 한계: 접선 보정량을 μ(Friction)*Pen으로 상한 → 장력이 그립을 넘으면 슬립(놔줌).
-							const float MaxSlip = Friction * Pen;
+							// Coulomb 한계: 접선 보정량을 μ(테이퍼된 MuEff)*Pen으로 상한 → 장력이 그립을 넘으면 슬립(놔줌).
+							const float MaxSlip = MuEff * Pen;
 							const float TLen = length(Tangent);
 							if (TLen > MaxSlip && TLen > 1e-6f) { Tangent *= (MaxSlip / TLen); }
 							gPrev[i] += Tangent;

@@ -316,9 +316,13 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 				const FVector SurfDelta = Contact.SurfaceVelocity * SubDt;             // 이번 substep 표면 변위
 				const FVector RelDelta = NodeDelta - SurfDelta;
 				FVector RelTangent = RelDelta - (RelDelta | Contact.Normal) * Contact.Normal;
-				// Coulomb 한계: 접선 보정량을 μ(Friction)*침투깊이로 상한. 작은 상대 운동은 전량 제거(정지마찰=그립),
+				// 자유단 테이퍼: 끝 노드는 장력이 가장 낮아 마찰에 잘 붙잡히므로, 노드 위치에 따라 μ를 낮춘다
+				// (고정점 frac=0 → 1.0, 끝 frac=1 → TipFrictionScale).
+				const float Frac = (State.Num() > 1) ? (static_cast<float>(i) / static_cast<float>(State.Num() - 1)) : 0.0f;
+				const float MuEff = Friction * FMath::Lerp(1.0f, FMath::Clamp(Config.TipFrictionScale, 0.0f, 1.0f), Frac);
+				// Coulomb 한계: 접선 보정량을 μ*침투깊이로 상한. 작은 상대 운동은 전량 제거(정지마찰=그립),
 				// 장력이 그립(원뿔)을 넘으면 초과분은 슬립 → 노드가 표면을 미끄러져 자연스럽게 놔준다(영구 그립 방지).
-				const float MaxSlip = Friction * Contact.Penetration;
+				const float MaxSlip = MuEff * Contact.Penetration;
 				const float TLen = RelTangent.Size();
 				if (TLen > MaxSlip && TLen > KINDA_SMALL_NUMBER)
 				{

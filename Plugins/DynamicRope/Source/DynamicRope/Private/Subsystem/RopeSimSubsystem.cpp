@@ -251,6 +251,7 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			Step.Gravity           = Cfg.Gravity;
 			Step.CollisionRadius   = Cfg.CollisionRadius;
 			Step.Friction          = Cfg.Friction;
+			Step.TipFrictionScale  = Cfg.TipFrictionScale;
 			Step.SweepStep         = Cfg.SweepStep;
 			Step.MaxSweepSamples   = Cfg.MaxSweepSamples;
 			Step.NumSub            = Schedule.NumSub;
