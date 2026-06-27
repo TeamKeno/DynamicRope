@@ -186,6 +186,9 @@ private:
 
 	FVector WhipAimDir = FVector::ForwardVector;
 
+	TArray<int32> DebugWhipGuideNodeIndices;
+	TArray<FVector> DebugWhipGuideTargets;
+
 	// 한 프레임 collider 스냅샷. RopeSimSubsystem이 Tick에서 중앙 수집해 채운다(provider 레지스트리 → 로프 필터).
 	// Solve/Finalize에서 read. provider 소유라 raw 포인터(해당 프레임 동안 유효).
 	TArray<IRopeCollider*> FrameColliders;

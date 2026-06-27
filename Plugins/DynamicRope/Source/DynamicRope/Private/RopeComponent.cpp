@@ -230,6 +230,9 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 
 void URopeComponent::ApplyWhipSwing(float DeltaTime)
 {
+	DebugWhipGuideNodeIndices.Reset();
+	DebugWhipGuideTargets.Reset();
+
 	if (Sim.Num() < 3)
 	{
 		bWhipSwingActive = false;
@@ -268,6 +271,7 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 	const float WaveTravel = FMath::Max(WhipWaveTravelTime / Duration, 0.05f);
 	const float WaveHead = FMath::Clamp(EaseT / WaveTravel, 0.0f, 1.35f);
 	const float ThrowReach = FMath::Max(Sim.RopeLength, RopeLength) * (0.2f + 0.8f * EaseT);
+	const bool bCaptureGuideTargets = RopeDebug::IsFlightStatEnabled();
 
 	for (int32 i = 1; i <= LastNode; ++i)
 	{
@@ -310,6 +314,12 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 
 		const FVector Delta = Target - Sim.Positions[i];
 		Sim.Positions[i] += Delta * FollowAlpha * GuideWeight;
+
+		if (bCaptureGuideTargets)
+		{
+			DebugWhipGuideNodeIndices.Add(i);
+			DebugWhipGuideTargets.Add(Target);
+		}
 	}
 
 	bWhipSwingActive = WhipElapsed < WhipDuration;
@@ -491,16 +501,62 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	if (Phase == ERopePhase::Flight)
 	{
 		TArray<FRopeContactCandidate> Candidates;
+		TArray<RopeDebug::FRopeFlightNodeDebug> FlightNodeDebug;
+		const bool bDrawFlightStat = RopeDebug::IsFlightStatEnabled();
+		if (bDrawFlightStat)
+		{
+			for (int32 i = 0; i < Sim.Num(); ++i)
+			{
+				if (!Sim.PrevPositions.IsValidIndex(i) || !Sim.Positions.IsValidIndex(i))
+				{
+					continue;
+				}
+
+				RopeDebug::FRopeFlightNodeDebug NodeDebug;
+				NodeDebug.NodeIndex = i;
+				NodeDebug.PrevPosition = Sim.PrevPositions[i];
+				NodeDebug.Position = Sim.Positions[i];
+				NodeDebug.NodeSpeed = NodeSpeed(i);
+				NodeDebug.bFast = IsTailNode(i) || NodeDebug.NodeSpeed > Sim.SegmentLength;
+				NodeDebug.bNearBody = IsNearAnyColliderSegment(NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders);
+				if (NodeDebug.bFast || NodeDebug.bNearBody)
+				{
+					NodeDebug.Contact = SweepOrSampleContact(NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders);
+				}
+
+				if (NodeDebug.bFast || NodeDebug.bNearBody || NodeDebug.Contact.bHit)
+				{
+					FlightNodeDebug.Add(NodeDebug);
+				}
+			}
+		}
+
 		DetectContactCandidates(Sim.PrevPositions, Sim.Positions, FrameColliders, Candidates);
 		EvaluateRelativeMotion(Candidates);
 
-		if (ShouldCapture(Candidates))
+		FRopeContactTracker FlightDebugTracker;
+		FlightDebugTracker.Update(Candidates, 0.0f);
+		const bool bShouldCapture = ShouldCapture(Candidates);
+
+		if (bShouldCapture)
 		{
 			BuildContactingState(Candidates);
 			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Flight -> Contacting (bone=%s, %d node(s))"),
 				*GetName(), *ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num());
 			Phase = ERopePhase::Contacting;
 			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
+		}
+
+		if (bDrawFlightStat)
+		{
+			const FString RopeName = GetOwner()
+				? FString::Printf(TEXT("%s.%s"), *GetOwner()->GetName(), *GetName())
+				: GetName();
+			RopeDebug::DrawFlight(GetWorld(), static_cast<uint64>(GetUniqueID()) + 0x10000000ull, RopeName, Sim,
+				ERopePhase::Flight, bSolveThisFrame, FrameColliders.Num(), FlightNodeDebug, Candidates,
+				bShouldCapture ? ContactTracker : FlightDebugTracker, WrapConfig, bShouldCapture);
+			RopeDebug::DrawFlightWhipGuide(GetWorld(), Sim, DebugWhipGuideNodeIndices, DebugWhipGuideTargets,
+				FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f), DebugWhipGuideTargets.Num() > 0);
 		}
 	}
 
@@ -512,6 +568,14 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	}
 
 	RopeDebug::DrawCenterline(GetWorld(), Sim, Phase, WrapController.State, bDrawDebugCenterline);
+	if (Phase == ERopePhase::Wrapped)
+	{
+		const FString RopeName = GetOwner()
+			? FString::Printf(TEXT("%s.%s"), *GetOwner()->GetName(), *GetName())
+			: GetName();
+		RopeDebug::DrawWrappedTable(GetWorld(), static_cast<uint64>(GetUniqueID()) + 0x20000000ull,
+			RopeName, Sim, WrapController.State);
+	}
 }
 
 void URopeComponent::SendRenderDynamicData_Concurrent()
