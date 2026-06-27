@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "RopeWielderComponent.h"
+#include "Gameplay/RopeWielderComponent.h"
 #include "RopeComponent.h"
 #include "DynamicRopeLog.h"
 

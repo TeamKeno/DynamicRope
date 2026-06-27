@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "AnimNotify_RopeThrow.h"
-#include "RopeWielderComponent.h"
+#include "Gameplay/AnimNotify_RopeThrow.h"
+#include "Gameplay/RopeWielderComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 
