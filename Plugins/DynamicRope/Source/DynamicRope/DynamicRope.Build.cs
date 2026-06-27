@@ -37,8 +37,6 @@ public class DynamicRope : ModuleRules
 			{
 				"CoreUObject",
 				"Engine",
-				"PhysicsCore",
-				"InputCore",
 				"RenderCore",         // RopeSceneProxy
 				"RHI",                // RopeSceneProxy
 				"DynamicRopeShaders", // GPU 솔버(FRopeGPUSolver) — 별도 PostConfigInit 모듈

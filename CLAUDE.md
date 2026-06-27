@@ -49,9 +49,9 @@ To run/iterate behavior, open the `.uproject` in the editor and Play.
     `URopeSDFData` baker/factory/asset-definition, and component visualizers. **Not** an empty stub.
 - `Source/DynamicRopeProject/` — thin game module (game mode + module boilerplate). Depends only on
   `DynamicRope`.
-- `Plugins/DynamicRope/Source/DynamicRope/.../PoC/` — throwaway proof-of-concept actors/components.
-  Not part of the production path; don't build new features on top of them.
-- `Plugins/DynamicRope/Docs/PoC/` — design notes (Korean) defining the post-wrap behavior model.
+- `Plugins/DynamicRope/Docs/PoC/` — design notes (Korean) defining the post-wrap behavior model. The
+  throwaway PoC *code* (`Source/DynamicRope/{Public,Private}/PoC/`) has been removed; these notes are
+  kept as production design rationale.
 
 ## Architecture (the big picture)
 
