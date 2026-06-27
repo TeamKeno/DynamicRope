@@ -3,9 +3,11 @@
 #include "Collision/SDF/RopeSDFCollider.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "Collision/SDF/RopeSDFSampler.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 
 FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSDF_Query); // 점 query(접촉 감지/wrap 경로). solver 충돌은 QuerySwept 사용.
 	FRopeContact Contact;
 
 	if (!Volume || !Volume->IsBaked())
@@ -53,6 +55,9 @@ FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 {
+	// solver 충돌의 주 비용 지점(정지 로프 + 접촉 시 여기로 몰린다). 호출당 비용 = 포즈 Blend×2 +
+	// 역변환 + 샘플 루프. 아래 RopeSDF_SweptSampleLoop와의 차이가 transform 셋업 비용이다.
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSDF_QuerySwept);
 	FRopeContact Contact;
 	OutHitWorldPos = Q.WorldEnd; // 기본값(미접촉 시 미정의 사용 방지).
 	if (!Volume || !Volume->IsBaked())
@@ -77,6 +82,7 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 
 	const FBox Band = Volume->LocalBounds.ExpandBy(Q.NodeRadius);
 
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSDF_SweptSampleLoop); // SDF 샘플(trilinear/gradient) 비용. QuerySwept과의 차이 = transform 셋업(Blend×2+역변환).
 	for (int32 k = 0; k < NumSamples; ++k)
 	{
 		const double T = (NumSamples <= 1) ? 1.0 : static_cast<double>(k) / static_cast<double>(NumSamples - 1);
