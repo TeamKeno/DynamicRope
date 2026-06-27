@@ -384,10 +384,27 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		break;
 	}
 	case ERopePhase::Wrapped:
+	{
 		// latch된 node는 skinned bone을 따라간다(GT). 솔브 없음.
-		WrapController.Hold(Sim, ResolveWrapTargetMesh(), DeltaTime);
+		// Hold가 false면 wrap 대상 mesh가 사라진 것(예: cross-actor 대상 액터 파괴) →
+		// 노드를 솔버에 되돌려 안전하게 release한다(dangling 포인터 역참조 방지는 Hold 내부에서).
+		if (!WrapController.Hold(Sim, ResolveWrapTargetMesh(), DeltaTime))
+		{
+			const FName Bone = WrapController.State.BoneName;
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapped -> Releasing (wrap target mesh lost, bone=%s)"),
+				*GetName(), *Bone.ToString());
+			WrapController.Release(ERopeReleaseReason::Broken);
+			ContactTracker.Reset();
+			PendingWrapSeed.Reset();
+			ContactingElapsed = 0.0f;
+			ReleaseCooldown = 0.08f;
+			Phase = ERopePhase::Releasing;
+			OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Broken);
+			break;
+		}
 		UpdateWrappedKinematicShape(DeltaTime); // 선택: 찰랑임 연출만
 		break;
+	}
 
 	case ERopePhase::Releasing:
 		// 모든 node를 solver에 다시 넘긴다(hand pin만 유지), 그런 다음 free simulation을 재개한다.

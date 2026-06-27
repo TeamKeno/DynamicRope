@@ -6,6 +6,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "RopeTypes.generated.h"
 
 class USkeletalMeshComponent;
@@ -84,7 +85,10 @@ struct FRopeWrapState
 
 	// BoneName을 소유한 Mesh. wrap은 이 mesh에 대해 유지/추적된다(rope 소유자와 다른
 	// 액터일 수 있음). 결정 시점에 컨택트로부터 해석된다.
-	const USkeletalMeshComponent* Mesh = nullptr;
+	// cross-actor wrap에서는 대상 액터가 Wrapped 도중 파괴될 수 있다. raw 포인터로 보관하면
+	// Hold가 매 프레임 dangling 포인터를 역참조(use-after-free)하므로, 파괴 시 안전하게 null이
+	// 되는 weak 포인터로 보관한다(POD 유지: hard 레퍼런스가 아니라 GC를 막지 않는다).
+	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
 
 	bool IsWrapped() const { return Latched.Num() > 0; }
 	void Reset() { *this = FRopeWrapState(); }
