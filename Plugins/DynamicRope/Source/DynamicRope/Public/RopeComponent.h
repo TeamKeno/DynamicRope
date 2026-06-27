@@ -111,6 +111,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render")
 	bool bDrawDebugCenterline = false;
 
+#if WITH_EDITORONLY_DATA
+	/** 에디터에서 이 로프 액터를 선택했을 때 배치-보조 가이드(앵커·조준·도달범위·wrap 타깃·던지기 아크)를
+	 *  FRopeComponentVisualizer가 그릴지 여부. 레벨 에디터 전용(런타임/쿠킹 제외). */
+	UPROPERTY(EditAnywhere, Category = "Rope|Debug")
+	bool bShowPlacementGuides = true;
+#endif
+
 	//~ API ---------------------------------------------------------------
 	/** rope를 발사한다: AimDir 방향의 초기 tip 속도를 가지고 Flight phase로 진입한다. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
