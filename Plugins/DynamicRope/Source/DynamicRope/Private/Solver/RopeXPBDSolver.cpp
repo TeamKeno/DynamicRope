@@ -100,7 +100,10 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 
 		// 충돌은 substep당 1회(매 iteration이 아니라). Query가 비싸고, push-out이 침투를 한 번에
 		// 해소하므로 substep 끝에서 한 번이면 충분하다(다음 substep이 재수렴). friction 과적용도 방지.
-		SolveCollisions(State, Config, Colliders, ColliderBounds, FixedDt);
+		// 알파: 이 substep이 차지하는 collider 모션 구간(프레임 모션을 substep에 균등 분배).
+		const float SubAlpha0 = static_cast<float>(s) / static_cast<float>(NumSub);
+		const float SubAlpha1 = static_cast<float>(s + 1) / static_cast<float>(NumSub);
+		SolveCollisions(State, Config, Colliders, ColliderBounds, FixedDt, SubAlpha0, SubAlpha1);
 	}
 }
 
@@ -209,7 +212,8 @@ void FRopeXPBDSolver::SolveBending(FRopeSimState& State, const FRopeSolverConfig
 }
 
 void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverConfig& Config,
-	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds, float SubDt) const
+	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
+	float SubDt, float SubAlpha0, float SubAlpha1) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_Collisions);
 	if (Colliders.Num() == 0)
@@ -255,38 +259,38 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 				continue;
 			}
 
-			const FVector B = State.Positions[i]; // 현재 끝점(앞선 collider가 밀었을 수 있음)
-			const double L = FVector::Dist(A, B);
-			const int32 NumSamples = FMath::Clamp(1 + FMath::FloorToInt(L / SweepStep), 1, MaxSweepSamples);
+			// Swept query: 노드의 substep 경로 + collider의 상대 운동(prev->curr를 substep 알파로 분배)을
+			// 따라 첫 접촉을 찾는다. 정지 collider는 기본 구현(직선 단일 포즈 스윕)으로 폴백된다.
+			FRopeSweptQuery SQ;
+			SQ.WorldStart = A;
+			SQ.WorldEnd   = State.Positions[i]; // 현재 끝점(앞선 collider가 밀었을 수 있어 매번 갱신).
+			SQ.NodeRadius = Radius;
+			SQ.SubAlpha0  = SubAlpha0;
+			SQ.SubAlpha1  = SubAlpha1;
+			SQ.SweepStep  = SweepStep;
+			SQ.MaxSamples = MaxSweepSamples;
 
-			for (int32 k = 0; k < NumSamples; ++k)
+			FVector HitPos;
+			const FRopeContact Contact = Collider->QuerySwept(SQ, HitPos);
+			if (!Contact.bHit)
 			{
-				// A->B를 따라 첫 접촉을 찾는다. NumSamples==1이면 끝점만(느린 접촉 = 기존 동작, 추가비용 0).
-				const double T = (NumSamples <= 1) ? 1.0 : static_cast<double>(k) / static_cast<double>(NumSamples - 1);
-				const FVector P = FMath::Lerp(A, B, T);
+				continue;
+			}
 
-				const FRopeContact Contact = Collider->Query(P, Radius);
-				if (!Contact.bHit)
-				{
-					continue;
-				}
+			// 첫 접촉 지점에서 표면 밖으로 밀어 멈춘다(가로질러 통과하지 못하게).
+			State.Positions[i] = HitPos + Contact.Normal * Contact.Penetration;
 
-				// 첫 접촉 지점에서 표면 밖으로 밀어 멈춘다(가로질러 통과하지 못하게).
-				State.Positions[i] = P + Contact.Normal * Contact.Penetration;
-
-				// 접선 방향 friction: 노드와 표면의 *상대* 접선 변위를 Friction만큼 깎아 그립을 만든다.
-				// 정지 표면(SurfaceVelocity 0)이면 노드 변위만 깎는 기존 동작과 동일. 움직이는 collider는
-				// SurfaceVelocity*SubDt 만큼의 표면 변위가 상대 변위에서 빠지므로, 정지한 로프가 표면 접선
-				// 방향으로 끌려간다(빠르게 지나가는 몸이 로프를 좌우로 쓸어냄).
-				if (Friction > 0.0f)
-				{
-					const FVector NodeDelta = State.Positions[i] - State.PrevPositions[i]; // 이번 substep 노드 변위
-					const FVector SurfDelta = Contact.SurfaceVelocity * SubDt;             // 이번 substep 표면 변위
-					const FVector RelDelta = NodeDelta - SurfDelta;
-					const FVector RelTangent = RelDelta - (RelDelta | Contact.Normal) * Contact.Normal;
-					State.PrevPositions[i] += RelTangent * Friction;
-				}
-				break; // 이 collider에 대한 첫 접촉에서 종료
+			// 접선 방향 friction: 노드와 표면의 *상대* 접선 변위를 Friction만큼 깎아 그립을 만든다.
+			// 정지 표면(SurfaceVelocity 0)이면 노드 변위만 깎는 기존 동작과 동일. 움직이는 collider는
+			// SurfaceVelocity*SubDt 만큼의 표면 변위가 상대 변위에서 빠지므로, 정지한 로프가 표면 접선
+			// 방향으로 끌려간다(빠르게 지나가는 몸이 로프를 좌우로 쓸어냄).
+			if (Friction > 0.0f)
+			{
+				const FVector NodeDelta = State.Positions[i] - State.PrevPositions[i]; // 이번 substep 노드 변위
+				const FVector SurfDelta = Contact.SurfaceVelocity * SubDt;             // 이번 substep 표면 변위
+				const FVector RelDelta = NodeDelta - SurfDelta;
+				const FVector RelTangent = RelDelta - (RelDelta | Contact.Normal) * Contact.Normal;
+				State.PrevPositions[i] += RelTangent * Friction;
 			}
 		}
 	}

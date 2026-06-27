@@ -26,6 +26,23 @@ struct FRopeSDFColliderView
 	const void*  VolumeKey = nullptr; // 같은 볼륨 dedup 식별자(보통 FRopeBoneSDFVolume*)
 };
 
+/**
+ * Swept(연속) collision 질의 파라미터. 노드가 이 substep에 WorldStart->WorldEnd로 움직이는 동안의
+ * 첫 접촉을 찾는다. 움직이는 collider는 SubAlpha0/1로 프레임 모션(prev->curr)을 substep에 분배해
+ * 노드-collider 상대 운동까지 본다(정지 collider는 알파 무시). 빠른 본이 정지한 로프를 추월할 때
+ * 뒷면으로 밀어 관통시키는 대신 접근(앞)면에서 잡는 것이 목적.
+ */
+struct FRopeSweptQuery
+{
+	FVector WorldStart = FVector::ZeroVector; // substep 시작 노드 위치(PrevPos)
+	FVector WorldEnd   = FVector::ZeroVector; // substep 끝 노드 위치(Pos)
+	float   NodeRadius = 0.0f;                // 로프 두께(query 반지름)
+	float   SubAlpha0  = 0.0f;                // 이 substep의 collider 모션 시작 비율(s/NumSub)
+	float   SubAlpha1  = 1.0f;                // 이 substep의 collider 모션 끝 비율((s+1)/NumSub)
+	float   SweepStep  = 2.0f;                // 샘플 간격(cm)
+	int32   MaxSamples = 16;                  // 구간당 샘플 상한
+};
+
 /** rope solver가 query하는 추상 collider. */
 class DYNAMICROPE_API IRopeCollider
 {
@@ -38,6 +55,31 @@ public:
 	 * (node x substep x iteration마다 호출됨). Radius == 0 도 유효하다(solver push-out 경로).
 	 */
 	virtual FRopeContact Query(const FVector& WorldPos, float Radius) const = 0;
+
+	/**
+	 * Swept query: 노드의 substep 경로(+움직이는 collider의 상대 운동)를 따라 첫 접촉을 찾는다.
+	 * 기본 구현은 정적 폴백 — collider 모션(알파)을 무시하고 WorldStart->WorldEnd 직선을 현재 포즈로
+	 * 샘플한다(기존 solver 동작과 동일). 움직이는 SDF collider는 이를 override해 상대 운동을 반영한다.
+	 * 첫 접촉 시 bHit=true, OutHitWorldPos = 그 접촉 지점의 노드 월드 위치. solver는
+	 * OutHitWorldPos + Normal*Penetration 으로 노드를 배치한다.
+	 */
+	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
+	{
+		const double L = FVector::Dist(Q.WorldStart, Q.WorldEnd);
+		const int32 NumSamples = FMath::Clamp(1 + FMath::FloorToInt(L / FMath::Max(Q.SweepStep, 0.1f)), 1, FMath::Max(1, Q.MaxSamples));
+		for (int32 k = 0; k < NumSamples; ++k)
+		{
+			const double T = (NumSamples <= 1) ? 1.0 : static_cast<double>(k) / static_cast<double>(NumSamples - 1);
+			const FVector P = FMath::Lerp(Q.WorldStart, Q.WorldEnd, T);
+			const FRopeContact Contact = Query(P, Q.NodeRadius);
+			if (Contact.bHit)
+			{
+				OutHitWorldPos = P;
+				return Contact;
+			}
+		}
+		return FRopeContact();
+	}
 
 	/** broad-phase culling용 월드 공간 bounds. */
 	virtual FBox GetWorldBounds() const = 0;

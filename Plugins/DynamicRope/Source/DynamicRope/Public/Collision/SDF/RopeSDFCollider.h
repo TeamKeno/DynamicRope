@@ -42,6 +42,9 @@ public:
 		, InvDeltaTime(InInvDeltaTime), Bone(InBone), SourceMesh(InSourceMesh) {}
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
+	// 상대 운동 swept query: prev/curr 본 트랜스폼을 substep 알파로 보간해, 노드 경로를 collider
+	// 로컬 상대 프레임에서 샘플한다(움직이는 본이 노드를 앞면에서 잡음). 표면 속도도 함께 채운다.
+	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const override;
 	virtual FBox GetWorldBounds() const override;
 	virtual bool GetGPUSDF(FRopeSDFColliderView& OutView) const override;
 };

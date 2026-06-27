@@ -51,6 +51,69 @@ FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	return Contact;
 }
 
+FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
+{
+	FRopeContact Contact;
+	OutHitWorldPos = Q.WorldEnd; // 기본값(미접촉 시 미정의 사용 방지).
+	if (!Volume || !Volume->IsBaked())
+	{
+		return Contact;
+	}
+
+	// 이 substep이 차지하는 collider sub-포즈(프레임 모션 prev->curr 를 substep에 분배).
+	FTransform PoseStart; PoseStart.Blend(PrevBoneToWorld, BoneToWorld, FMath::Clamp(Q.SubAlpha0, 0.0f, 1.0f));
+	FTransform PoseEnd;   PoseEnd.Blend(PrevBoneToWorld, BoneToWorld, FMath::Clamp(Q.SubAlpha1, 0.0f, 1.0f));
+
+	// 노드 substep 경로를 collider 로컬 상대 프레임으로: 시작은 시작 sub-포즈, 끝은 끝 sub-포즈 기준.
+	// 이 하나의 로컬 세그먼트가 노드 모션 + collider 모션(상대 운동)을 모두 담는다 → 빠른 본이 노드를
+	// 추월해도 로컬에서는 노드가 표면을 가로지르므로 첫 접촉(앞면)에서 잡힌다.
+	const FVector L0 = PoseStart.InverseTransformPosition(Q.WorldStart);
+	const FVector L1 = PoseEnd.InverseTransformPosition(Q.WorldEnd);
+
+	// 상대 변위 기반 샘플 수(정지 로프 + 빠른 본도 충분히 샘플 → 추월 관통 방지).
+	const double RelLen = FVector::Dist(L0, L1);
+	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
+	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
+
+	const FBox Band = Volume->LocalBounds.ExpandBy(Q.NodeRadius);
+
+	for (int32 k = 0; k < NumSamples; ++k)
+	{
+		const double T = (NumSamples <= 1) ? 1.0 : static_cast<double>(k) / static_cast<double>(NumSamples - 1);
+		const FVector Lp = FMath::Lerp(L0, L1, T);
+		if (!Band.IsInsideOrOn(Lp))
+		{
+			continue; // 좁은밴드(볼륨 + 노드반경) 밖 → 접촉 없음.
+		}
+
+		const float Dist = RopeSDFSampler::SampleTrilinear(*Volume, Lp);
+		if (Dist >= Q.NodeRadius)
+		{
+			continue; // 아직 표면에 못 미침.
+		}
+
+		// 첫 접촉. 법선/위치는 substep 끝 포즈(노드가 도달하는 현재 프레임) 기준으로 환산한다.
+		const FVector NLocal = RopeSDFSampler::SampleGradient(*Volume, Lp);
+		Contact.bHit = true;
+		Contact.Normal = PoseEnd.TransformVectorNoScale(NLocal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		Contact.Penetration = Q.NodeRadius - Dist;
+		OutHitWorldPos = PoseEnd.TransformPosition(Lp);              // 노드 배치 기준점(현재 포즈 월드)
+		Contact.SurfacePoint = OutHitWorldPos - Contact.Normal * Dist;
+		Contact.Bone = Bone;
+		Contact.SourceMesh = SourceMesh;
+
+		// 표면 속도(드래그): 접촉 물질점(Lp)의 prev->curr 프레임 변위 / dt.
+		if (InvDeltaTime > 0.0f)
+		{
+			const FVector WCurr = BoneToWorld.TransformPosition(Lp);
+			const FVector WPrev = PrevBoneToWorld.TransformPosition(Lp);
+			Contact.SurfaceVelocity = (WCurr - WPrev) * InvDeltaTime;
+		}
+		break;
+	}
+	return Contact;
+}
+
 FBox FRopeSDFCollider::GetWorldBounds() const
 {
 	if (!Volume)

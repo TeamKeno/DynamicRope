@@ -48,6 +48,9 @@ private:
 	// SurfaceVelocity)는 정지한 로프를 끌어 좌우로 쓸어낸다. ColliderBounds는 collider별 월드 AABB(+Radius)로,
 	// broad-phase에서 먼 collider의 비싼 Query를 건너뛰는 데 쓴다(Step에서 1회 계산해 전달). SubDt는 표면
 	// 속도(cm/s)를 이번 substep 변위로 환산하는 데 쓴다.
+	// SubAlpha0/1은 이 substep이 프레임 내에서 차지하는 collider 모션 구간[s/NumSub,(s+1)/NumSub]로,
+	// 움직이는 collider의 prev->curr 모션을 substep에 분배해 상대 운동 swept query(QuerySwept)에 넘긴다.
 	void SolveCollisions(FRopeSimState& State, const FRopeSolverConfig& Config,
-		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds, float SubDt) const;
+		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
+		float SubDt, float SubAlpha0, float SubAlpha1) const;
 };
