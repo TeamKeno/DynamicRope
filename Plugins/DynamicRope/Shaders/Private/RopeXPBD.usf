@@ -63,9 +63,11 @@ struct FRopeSDFCollider
 	int    Pad0;
 	int    Pad1;
 	int    Pad2;
-	float4 Rotation;    // quat (x,y,z,w)
-	float4 Translation; // xyz
-	float4 Scale;       // xyz
+	float4 Rotation;        // quat (x,y,z,w) — 현재 프레임
+	float4 Translation;     // xyz
+	float4 Scale;           // xyz
+	float4 PrevRotation;    // quat (x,y,z,w) — 이전 프레임(CCD 상대 운동/표면속도)
+	float4 PrevTranslation; // xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
 };
 
 uint NumRopes;
@@ -83,6 +85,14 @@ float3 RopeQuatRotate(float4 q, float3 v)
 {
 	const float3 t = 2.0f * cross(q.xyz, v);
 	return v + q.w * t + cross(q.xyz, t);
+}
+
+// 두 단위 quat의 nlerp(최단경로): 부호 정렬 후 lerp+정규화. slerp 근사(substep당 작은 회전엔 충분).
+// CPU FTransform::Blend(slerp)와 비트일치하진 않으나 수렴/거동은 동등.
+float4 RopeQuatNlerp(float4 a, float4 b, float t)
+{
+	if (dot(a, b) < 0.0f) { b = -b; }
+	return normalize(lerp(a, b, t));
 }
 
 // SDF grid 한 점 정수 인덱스 샘플(경계 clamp). 행 우선 idx = x + y*ResX + z*ResX*ResY.
@@ -127,17 +137,18 @@ float RopeSDFTrilinear(FRopeSDFVolume Vol, float3 LocalPos)
 	return lerp(Y0V, Y1V, Fz);
 }
 
-// 본 로컬 central-difference gradient를 정규화(바깥 방향). CPU SampleGradient 미러. 축퇴 시 +Z.
+// 본 로컬 forward-difference gradient를 정규화(바깥 방향). CPU SampleGradient 미러(6->4 샘플). 축퇴 시 +Z.
 float3 RopeSDFGradient(FRopeSDFVolume Vol, float3 LocalPos)
 {
 	const float3 Sz = Vol.LocalSize.xyz;
 	const float Hx = (Vol.ResX > 1) ? (Sz.x / (Vol.ResX - 1)) : 1.0f;
 	const float Hy = (Vol.ResY > 1) ? (Sz.y / (Vol.ResY - 1)) : 1.0f;
 	const float Hz = (Vol.ResZ > 1) ? (Sz.z / (Vol.ResZ - 1)) : 1.0f;
-	const float Dx = RopeSDFTrilinear(Vol, LocalPos + float3(Hx,0,0)) - RopeSDFTrilinear(Vol, LocalPos - float3(Hx,0,0));
-	const float Dy = RopeSDFTrilinear(Vol, LocalPos + float3(0,Hy,0)) - RopeSDFTrilinear(Vol, LocalPos - float3(0,Hy,0));
-	const float Dz = RopeSDFTrilinear(Vol, LocalPos + float3(0,0,Hz)) - RopeSDFTrilinear(Vol, LocalPos - float3(0,0,Hz));
-	const float3 Grad = float3(Dx / (2.0f*Hx), Dy / (2.0f*Hy), Dz / (2.0f*Hz));
+	const float C  = RopeSDFTrilinear(Vol, LocalPos);
+	const float Dx = RopeSDFTrilinear(Vol, LocalPos + float3(Hx,0,0)) - C;
+	const float Dy = RopeSDFTrilinear(Vol, LocalPos + float3(0,Hy,0)) - C;
+	const float Dz = RopeSDFTrilinear(Vol, LocalPos + float3(0,0,Hz)) - C;
+	const float3 Grad = float3(Dx / Hx, Dy / Hy, Dz / Hz);
 	const float Len = length(Grad);
 	return (Len > 1e-6f) ? (Grad / Len) : float3(0.0f, 0.0f, 1.0f);
 }
@@ -331,43 +342,66 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			const float  SweepStep = max(P.SweepStep, 0.1f);
 			const int    MaxSamples = max(P.MaxSweepSamples, 1);
 			const float  NodeR = P.CollisionRadius;
+			const float  A0 = (float)s / (float)P.NumSub;        // 이 substep의 collider 모션 시작 비율
+			const float  A1 = (float)(s + 1) / (float)P.NumSub;  // 끝 비율
 
 			for (int sc = 0; sc < P.NumSDFColliders; ++sc)
 			{
 				const FRopeSDFCollider Col = SDFColliders[P.SDFColliderOffset + sc];
 				const FRopeSDFVolume   Vol = SDFVolumes[Col.VolumeIndex];
-				const float4 qInv = float4(-Col.Rotation.xyz, Col.Rotation.w); // 단위 quat 역 = 켤레
-				const float3 InvScale = 1.0f / max(Col.Scale.xyz, float3(1e-6f, 1e-6f, 1e-6f));
-				const float3 SegB = gPos[i];
-				const float  L = distance(SegA, SegB);
-				const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
+
+				// substep sub-포즈(prev->curr 보간). 정지 본이면 prev==curr라 보간 결과 = 현재 포즈.
+				const float4 RotS = RopeQuatNlerp(Col.PrevRotation, Col.Rotation, A0);
+				const float4 RotE = RopeQuatNlerp(Col.PrevRotation, Col.Rotation, A1);
+				const float3 TrS  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A0);
+				const float3 TrE  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A1);
+				const float3 Scl      = Col.Scale.xyz;
+				const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
+
+				// 노드 substep 경로를 collider 로컬 상대 프레임으로(시작=시작 sub-포즈, 끝=끝 sub-포즈).
+				// 한 세그먼트에 노드+collider 상대 운동을 모두 담는다. InvTransform=(qInv*(P-T))/Scale.
+				const float3 L0 = RopeQuatRotate(float4(-RotS.xyz, RotS.w), SegA    - TrS) * InvScale;
+				const float3 L1 = RopeQuatRotate(float4(-RotE.xyz, RotE.w), gPos[i] - TrE) * InvScale;
+				const float  RelLen = distance(L0, L1);
+				const int    NumSamples = clamp(1 + (int)floor(RelLen / SweepStep), 1, MaxSamples);
 
 				for (int k = 0; k < NumSamples; ++k)
 				{
-					const float  T = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
-					const float3 Pt = lerp(SegA, SegB, T);
-					// 월드 -> 본 로컬: InverseTransformPosition = (qInv * (P - T)) / Scale.
-					const float3 Local = RopeQuatRotate(qInv, Pt - Col.Translation.xyz) * InvScale;
+					const float  T  = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
+					const float3 Lp = lerp(L0, L1, T);
 					// 좁은밴드 박스 컬(노드 반지름 여유). CPU: LocalBounds.ExpandBy(NodeRadius).IsInsideOrOn.
 					const float3 Mn = Vol.LocalMin.xyz - NodeR;
 					const float3 Mx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + NodeR;
-					if (any(Local < Mn) || any(Local > Mx))
+					if (any(Lp < Mn) || any(Lp > Mx))
 					{
 						continue;
 					}
-					const float Dist = RopeSDFTrilinear(Vol, Local);
+					const float Dist = RopeSDFTrilinear(Vol, Lp);
 					if (Dist < NodeR)
 					{
-						const float3 NLocal = RopeSDFGradient(Vol, Local);
-						// 본 로컬 법선 -> 월드(TransformVectorNoScale = q 회전), 정규화.
-						const float3 NWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal));
+						const float3 NLocal = RopeSDFGradient(Vol, Lp);
+						const float3 NWorld = normalize(RopeQuatRotate(RotE, NLocal)); // 끝 sub-포즈 기준 월드 법선
 						const float  Pen = NodeR - Dist;
-						gPos[i] = Pt + NWorld * Pen;
+						// 끝 sub-포즈 기준 월드 접촉점(노드 배치). World = Rot*(Scale*Local) + Trans.
+						const float3 HitWorld = RopeQuatRotate(RotE, Lp * Scl) + TrE;
+						gPos[i] = HitWorld + NWorld * Pen;
 						if (Friction > 0.0f)
 						{
-							const float3 Delta = gPos[i] - gPrev[i];
-							const float3 Tangent = Delta - dot(Delta, NWorld) * NWorld;
-							gPrev[i] += Tangent * Friction;
+							// 표면 속도(cm/s): 접촉 물질점 Lp의 prev->curr 프레임 변위 * InvDt. (정지 본이면 0)
+							const float  InvDt = Col.PrevTranslation.w;
+							const float3 Wcur  = RopeQuatRotate(Col.Rotation,     Lp * Scl) + Col.Translation.xyz;
+							const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Scl) + Col.PrevTranslation.xyz;
+							const float3 SurfVel = (Wcur - Wprev) * InvDt;
+							// 상대 접선 드래그(움직이는 표면이 로프를 끌어 좌우로 쓸어냄). CPU SolveCollisions 미러.
+							const float3 NodeDelta = gPos[i] - gPrev[i];
+							const float3 SurfDisp  = SurfVel * P.FixedDt;
+							const float3 RelDelta  = NodeDelta - SurfDisp;
+							float3 Tangent = RelDelta - dot(RelDelta, NWorld) * NWorld;
+							// Coulomb 한계: 접선 보정량을 μ(Friction)*Pen으로 상한 → 장력이 그립을 넘으면 슬립(놔줌).
+							const float MaxSlip = Friction * Pen;
+							const float TLen = length(Tangent);
+							if (TLen > MaxSlip && TLen > 1e-6f) { Tangent *= (MaxSlip / TLen); }
+							gPrev[i] += Tangent;
 						}
 						break; // 이 SDF collider의 첫 접촉에서 종료
 					}

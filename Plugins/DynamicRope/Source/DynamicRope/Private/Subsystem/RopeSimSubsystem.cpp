@@ -280,6 +280,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 					Sdf.LocalMin    = View.LocalMin;
 					Sdf.LocalSize   = View.LocalSize;
 					Sdf.BoneToWorld = View.BoneToWorld;
+					Sdf.PrevBoneToWorld = View.PrevBoneToWorld; // GPU CCD/표면속도 드래그.
+					Sdf.InvDeltaTime    = View.InvDeltaTime;
 					Sdf.VolumeKey   = View.VolumeKey;
 					Step.SDFColliders.Add(Sdf);
 				}

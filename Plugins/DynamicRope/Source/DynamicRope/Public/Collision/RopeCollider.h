@@ -23,6 +23,8 @@ struct FRopeSDFColliderView
 	FVector      LocalMin = FVector::ZeroVector;  // LocalBounds.Min
 	FVector      LocalSize = FVector::ZeroVector; // LocalBounds 크기
 	FTransform   BoneToWorld = FTransform::Identity;
+	FTransform   PrevBoneToWorld = FTransform::Identity; // 이전 프레임 본 트랜스폼(GPU CCD/표면속도 드래그용)
+	float        InvDeltaTime = 0.0f;                    // 1/프레임dt(표면 속도 = (curr-prev)*InvDeltaTime). 0이면 정적.
 	const void*  VolumeKey = nullptr; // 같은 볼륨 dedup 식별자(보통 FRopeBoneSDFVolume*)
 };
 

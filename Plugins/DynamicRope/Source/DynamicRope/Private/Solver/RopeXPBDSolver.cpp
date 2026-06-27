@@ -315,8 +315,16 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 				const FVector NodeDelta = State.Positions[i] - State.PrevPositions[i]; // 이번 substep 노드 변위
 				const FVector SurfDelta = Contact.SurfaceVelocity * SubDt;             // 이번 substep 표면 변위
 				const FVector RelDelta = NodeDelta - SurfDelta;
-				const FVector RelTangent = RelDelta - (RelDelta | Contact.Normal) * Contact.Normal;
-				State.PrevPositions[i] += RelTangent * Friction;
+				FVector RelTangent = RelDelta - (RelDelta | Contact.Normal) * Contact.Normal;
+				// Coulomb 한계: 접선 보정량을 μ(Friction)*침투깊이로 상한. 작은 상대 운동은 전량 제거(정지마찰=그립),
+				// 장력이 그립(원뿔)을 넘으면 초과분은 슬립 → 노드가 표면을 미끄러져 자연스럽게 놔준다(영구 그립 방지).
+				const float MaxSlip = Friction * Contact.Penetration;
+				const float TLen = RelTangent.Size();
+				if (TLen > MaxSlip && TLen > KINDA_SMALL_NUMBER)
+				{
+					RelTangent *= (MaxSlip / TLen);
+				}
+				State.PrevPositions[i] += RelTangent;
 			}
 		}
 	}

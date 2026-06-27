@@ -34,6 +34,8 @@ struct FRopeGPUSDFCollider
 	FVector      LocalMin = FVector::ZeroVector;
 	FVector      LocalSize = FVector::ZeroVector;
 	FTransform   BoneToWorld = FTransform::Identity;
+	FTransform   PrevBoneToWorld = FTransform::Identity; // 이전 프레임 본 트랜스폼(CCD/표면속도 드래그).
+	float        InvDeltaTime = 0.0f;                    // 1/프레임dt(표면 속도용). 0이면 정적.
 	const void*  VolumeKey = nullptr;
 };
 

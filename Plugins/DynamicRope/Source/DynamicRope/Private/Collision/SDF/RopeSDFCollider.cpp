@@ -142,6 +142,8 @@ bool FRopeSDFCollider::GetGPUSDF(FRopeSDFColliderView& OutView) const
 	OutView.LocalMin     = Volume->LocalBounds.Min;
 	OutView.LocalSize    = Volume->LocalBounds.GetSize();
 	OutView.BoneToWorld  = BoneToWorld;
+	OutView.PrevBoneToWorld = PrevBoneToWorld; // GPU CCD/표면속도 드래그용(CPU QuerySwept와 동일 소스).
+	OutView.InvDeltaTime = InvDeltaTime;
 	OutView.VolumeKey    = Volume; // 프레임 내 동일 볼륨 업로드 dedup용 키.
 	return true;
 }

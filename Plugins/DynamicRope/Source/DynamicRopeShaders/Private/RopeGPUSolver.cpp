@@ -72,9 +72,11 @@ struct FRopeSDFColliderGPU
 	int32     Pad0 = 0;
 	int32     Pad1 = 0;
 	int32     Pad2 = 0;
-	FVector4f Rotation;    // quat (x,y,z,w)
-	FVector4f Translation; // xyz
-	FVector4f Scale;       // xyz
+	FVector4f Rotation;        // quat (x,y,z,w) — 현재 프레임
+	FVector4f Translation;     // xyz
+	FVector4f Scale;           // xyz
+	FVector4f PrevRotation;    // quat (x,y,z,w) — 이전 프레임(CCD 상대 운동/표면속도용)
+	FVector4f PrevTranslation; // xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
 };
 static_assert(sizeof(FRopeSDFColliderGPU) % 16 == 0, "FRopeSDFColliderGPU must be 16-byte aligned to match HLSL structured buffer.");
 
@@ -432,11 +434,15 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 					const FQuat   Q  = Src.BoneToWorld.GetRotation();
 					const FVector T  = Src.BoneToWorld.GetTranslation();
 					const FVector Sc = Src.BoneToWorld.GetScale3D();
+					const FQuat   PQ = Src.PrevBoneToWorld.GetRotation();
+					const FVector PT = Src.PrevBoneToWorld.GetTranslation();
 					FRopeSDFColliderGPU C;
 					C.VolumeIndex = *VolIdx;
-					C.Rotation    = FVector4f((float)Q.X, (float)Q.Y, (float)Q.Z, (float)Q.W);
-					C.Translation = FVector4f((float)T.X, (float)T.Y, (float)T.Z, 0.0f);
-					C.Scale       = FVector4f((float)Sc.X, (float)Sc.Y, (float)Sc.Z, 0.0f);
+					C.Rotation        = FVector4f((float)Q.X, (float)Q.Y, (float)Q.Z, (float)Q.W);
+					C.Translation     = FVector4f((float)T.X, (float)T.Y, (float)T.Z, 0.0f);
+					C.Scale           = FVector4f((float)Sc.X, (float)Sc.Y, (float)Sc.Z, 0.0f);
+					C.PrevRotation    = FVector4f((float)PQ.X, (float)PQ.Y, (float)PQ.Z, (float)PQ.W);
+					C.PrevTranslation = FVector4f((float)PT.X, (float)PT.Y, (float)PT.Z, Src.InvDeltaTime); // w=InvDt
 					SDFCol.Add(C);
 				}
 
