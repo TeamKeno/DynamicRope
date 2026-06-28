@@ -48,6 +48,7 @@ namespace
 		case ERopePhase::Free:       return TEXT("Free");
 		case ERopePhase::Flight:     return TEXT("Flight");
 		case ERopePhase::Contacting: return TEXT("Contacting");
+		case ERopePhase::Wrapping: return TEXT("Wrapping");
 		case ERopePhase::Wrapped:    return TEXT("Wrapped");
 		case ERopePhase::Releasing:  return TEXT("Releasing");
 		default:                     return TEXT("?");
@@ -80,6 +81,7 @@ namespace
 		case ERopePhase::Flight:     return FColor::Cyan;
 		case ERopePhase::Contacting: return FColor::Yellow;
 		case ERopePhase::Wrapped:    return FColor::Green;
+		case ERopePhase::Wrapping:   return FColor(255, 160, 0);
 		case ERopePhase::Releasing:  return FColor::Orange;
 		case ERopePhase::Free:
 		default:                     return FColor(160, 160, 160);
@@ -151,9 +153,9 @@ void RopeDebug::DrawFlight(const UWorld* World, uint64 DebugKey, const FString& 
 
 	TArray<FRopeContactCandidate> SortedCandidates = Candidates;
 	SortedCandidates.Sort([](const FRopeContactCandidate& A, const FRopeContactCandidate& B)
-	{
-		return A.Penetration > B.Penetration;
-	});
+		{
+			return A.Penetration > B.Penetration;
+		});
 
 	TSet<int32> ValidCandidateNodes;
 	for (const FRopeContactCandidate& Candidate : Candidates)
@@ -349,9 +351,11 @@ bool RopeDebug::IsWrappedStatEnabled() { return false; }
 void RopeDebug::DrawCenterline(const UWorld*, const FRopeSimState&, ERopePhase, const FRopeWrapState&, bool) {}
 void RopeDebug::DrawFlight(const UWorld*, uint64, const FString&, const FRopeSimState&, ERopePhase, bool, int32,
 	const TArray<FRopeFlightNodeDebug>&, const TArray<FRopeContactCandidate>&, const FRopeContactTracker&,
-	const FRopeWrapConfig&, bool) {}
+	const FRopeWrapConfig&, bool) {
+}
 void RopeDebug::DrawFlightWhipGuide(const UWorld*, const FRopeSimState&, const TArray<int32>&,
-	const TArray<FVector>&, float, bool) {}
+	const TArray<FVector>&, float, bool) {
+}
 void RopeDebug::DrawWrappedTable(const UWorld*, uint64, const FString&, const FRopeSimState&, const FRopeWrapState&) {}
 void RopeDebug::DrawCapsule(const UWorld*, const FVector&, const FVector&, float, bool) {}
 void RopeDebug::DrawColliderBounds(const UWorld*, const FBox&, bool) {}

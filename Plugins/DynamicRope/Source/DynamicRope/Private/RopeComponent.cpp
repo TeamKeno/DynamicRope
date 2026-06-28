@@ -24,6 +24,7 @@ namespace {
 		case ERopePhase::Free:       return TEXT("Free");
 		case ERopePhase::Flight:     return TEXT("Flight");
 		case ERopePhase::Contacting: return TEXT("Contacting");
+		case ERopePhase::Wrapping: return TEXT("Wrapping");
 		case ERopePhase::Wrapped:    return TEXT("Wrapped");
 		case ERopePhase::Releasing:  return TEXT("Releasing");
 		default:                     return TEXT("?");
@@ -173,6 +174,7 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 	}
 	ContactTracker.Reset();
 	PendingWrapSeed.Reset();
+	WrappingState.Reset();
 	ContactingElapsed = 0.0f;
 	ReleaseCooldown = 0.0f;
 	WrappedSwayImpulse = FVector::ZeroVector;
@@ -403,6 +405,11 @@ void URopeComponent::DetectContactCandidates(const TArray<FVector>& PrevPosition
 {
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
+		if (!PrevPositions.IsValidIndex(i) || !Positions.IsValidIndex(i))
+		{
+			continue;
+		}
+
 		bool bFast = IsTailNode(i) || NodeSpeed(i) > Sim.SegmentLength;
 		bool bNearBody = IsNearAnyColliderSegment(PrevPositions[i], Positions[i], Colliders);
 
@@ -416,6 +423,55 @@ void URopeComponent::DetectContactCandidates(const TArray<FVector>& PrevPosition
 
 		if (Contact.bHit)
 			OutCandidates.Add(MakeCandidate(i, Contact));
+	}
+}
+
+void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>& InOutCandidates) const
+{
+	const float PredictionFrames = FMath::Max(0.0f, WrapConfig.PredictiveContactFrames);
+	if (PredictionFrames <= KINDA_SMALL_NUMBER || Sim.Num() == 0)
+	{
+		return;
+	}
+
+	TArray<FVector> PredictedPositions;
+	PredictedPositions.SetNumUninitialized(Sim.Num());
+	for (int32 i = 0; i < Sim.Num(); ++i)
+	{
+		if (!Sim.Positions.IsValidIndex(i) || !Sim.PrevPositions.IsValidIndex(i))
+		{
+			PredictedPositions[i] = Sim.Positions.IsValidIndex(i) ? Sim.Positions[i] : FVector::ZeroVector;
+			continue;
+		}
+
+		const FVector FrameDisplacement = Sim.Positions[i] - Sim.PrevPositions[i];
+		PredictedPositions[i] = Sim.Positions[i] + FrameDisplacement * PredictionFrames;
+	}
+
+	TArray<FRopeContactCandidate> PredictedCandidates;
+	DetectContactCandidates(Sim.Positions, PredictedPositions, FrameColliders, PredictedCandidates);
+
+	for (FRopeContactCandidate& Candidate : PredictedCandidates)
+	{
+		if (!Candidate.bValid)
+		{
+			continue;
+		}
+
+		bool bDuplicate = false;
+		for (const FRopeContactCandidate& Existing : InOutCandidates)
+		{
+			if (Existing.NodeIndex == Candidate.NodeIndex && Existing.Bone == Candidate.Bone && Existing.Mesh == Candidate.Mesh)
+			{
+				bDuplicate = true;
+				break;
+			}
+		}
+
+		if (!bDuplicate)
+		{
+			InOutCandidates.Add(Candidate);
+		}
 	}
 }
 
@@ -443,6 +499,385 @@ bool URopeComponent::ShouldCommitWrap(const FRopeContactTracker& Tracker) const
 		&& Tracker.CandidateNodes.Num() >= WrapConfig.MinLatchNodes
 		&& Tracker.BestWrapScore >= 0.0f
 		&& IsWrappableBone(Tracker.CandidateBone);
+}
+
+//Contacting을 후보 판정만 하도록
+void URopeComponent::UpdateContacting(float DeltaTime)
+{
+	// 지금 단계에서는 기존 함수를 재사용한다.
+	// 나중에 여기서 매 프레임 접촉 후보를 다시 수집하고,
+	// tangential speed / winding angle까지 갱신하게 만들면 된다.
+	AdvanceWrappingMotion(DeltaTime);
+
+	if (ShouldDismissContacting())
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Flight (contact lost before wrapping)"), *GetName());
+		ContactTracker.Reset();
+		PendingWrapSeed.Reset();
+		ContactingElapsed = 0.0f;
+		Phase = ERopePhase::Flight;
+		return;
+	}
+
+	if (ShouldStartWrapping())
+	{
+		StartWrappingFromContacting();
+		return;
+	}
+}
+
+void URopeComponent::StartWrappingFromContacting()
+{
+	//PendingWrapSeed를 바로 BeginWrap에 넣지 않고, WrappingState로 변환한다.
+
+
+	WrappingState.Reset();
+
+	const USkeletalMeshComponent* Mesh = PendingWrapSeed.Mesh.Get();
+	if (!Mesh)
+	{
+		Mesh = ResolveWrapTargetMesh();
+	}
+
+	if (!Mesh || PendingWrapSeed.BoneName.IsNone() || PendingWrapSeed.Latched.Num() == 0)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Flight (invalid wrapping seed)"), *GetName());
+		ContactTracker.Reset();
+		PendingWrapSeed.Reset();
+		ContactingElapsed = 0.0f;
+		Phase = ERopePhase::Flight;
+		return;
+	}
+
+	WrappingState.BoneName = PendingWrapSeed.BoneName;
+	WrappingState.Mesh = Mesh;
+	WrappingState.Elapsed = 0.0f;
+	WrappingState.Duration = 0.16f; // 나중에 WrapConfig로 빼면 됨.
+	WrappingState.FirstNode = TNumericLimits<int32>::Max();
+	WrappingState.LastNode = INDEX_NONE;
+
+	for (const FRopeLatchNode& Latch : PendingWrapSeed.Latched)
+	{
+		if (!Sim.Positions.IsValidIndex(Latch.NodeIndex))
+		{
+			continue;
+		}
+
+		const FTransform BoneXform = Mesh->GetSocketTransform(Latch.Bone);
+		//const FVector StartWorld = Sim.Positions[Latch.NodeIndex];
+
+		FRopeSurfaceAnchor Anchor;
+		Anchor.NodeIndex = Latch.NodeIndex;
+		Anchor.Bone = Latch.Bone;
+		Anchor.Mesh = Mesh;
+		Anchor.StartWorldPosition = Sim.Positions[Latch.NodeIndex];
+
+		// 1차 구조용 임시 anchor.
+		// 아직 SDF surface projection을 넣기 전이라 현재 노드 위치를 bone-local로 저장한다.
+			// 다음 단계에서 SDF SurfacePoint/Normal 기반으로 바꿀 자리.
+		Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Anchor.StartWorldPosition);
+		Anchor.LocalNormal = FVector::UpVector;
+		Anchor.LocalTangent = FVector::ForwardVector;
+		Anchor.SurfaceOffset = 0.0;
+		/** TODO
+		나중에 SDF 표면점으로 바꿀 때만:
+		Anchor.LocalSurfacePosition = SurfaceLocalPosition;
+		Anchor.LocalNormal = SurfaceLocalNormal;
+		Anchor.SurfaceOffset = Radius;
+		**/
+		Anchor.RopeDistance = static_cast<float>(Latch.NodeIndex) * Sim.SegmentLength;
+
+		WrappingState.FirstNode = FMath::Min(WrappingState.FirstNode, Latch.NodeIndex);
+		WrappingState.LastNode = FMath::Max(WrappingState.LastNode, Latch.NodeIndex);
+
+		WrappingState.Anchors.Add(Anchor);
+	}
+
+	if (WrappingState.Anchors.Num() == 0)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Flight (no valid wrapping anchors)"), *GetName());
+		WrappingState.Reset();
+		ContactTracker.Reset();
+		PendingWrapSeed.Reset();
+		ContactingElapsed = 0.0f;
+		Phase = ERopePhase::Flight;
+		return;
+	}
+
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Wrapping (bone=%s, %d anchor(s))"),
+		*GetName(), *WrappingState.BoneName.ToString(), WrappingState.Anchors.Num());
+
+	WrappingState.StableTime = 0.0f;
+	WrappingState.LostContactTime = 0.0f;
+	WrappingState.LastStableFirstNode = WrappingState.FirstNode;
+	WrappingState.LastStableLastNode = WrappingState.LastNode;
+	WrappingState.LastStableAnchorCount = WrappingState.Anchors.Num();
+
+	Phase = ERopePhase::Wrapping;
+
+}
+
+void URopeComponent::UpdateWrapping(float DeltaTime)
+{
+	WrappingState.Elapsed += DeltaTime;
+
+	if (!IsWrappingStillValid())
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapping -> Releasing (invalid wrapping state)"), *GetName());
+		AbortWrapping(ERopeReleaseReason::Broken);
+		Phase = ERopePhase::Releasing;
+		return;
+	}
+
+	TArray<FRopeContactCandidate> Candidates;
+	DetectContactCandidates(Sim.PrevPositions, Sim.Positions, FrameColliders, Candidates);
+	AddPredictedContactCandidates(Candidates);
+	EvaluateRelativeMotion(Candidates);
+
+	const bool bSawWrappingContact = UpdateWrappingAnchorsFromCandidates(Candidates);
+	if (bSawWrappingContact)
+	{
+		WrappingState.LostContactTime = 0.0f;
+	}
+	else
+	{
+		WrappingState.LostContactTime += DeltaTime;
+	}
+
+	if (WrappingState.LostContactTime > WrapConfig.WrappingContactGraceTime)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapping -> Releasing (contact lost while settling)"), *GetName());
+		AbortWrapping(ERopeReleaseReason::Broken);
+		Phase = ERopePhase::Releasing;
+		return;
+	}
+
+	// 지금 단계에서는 일단 anchor 위치로만 부드럽게 이동시킨다.
+	for (const FRopeSurfaceAnchor& Anchor : WrappingState.Anchors)
+	{
+		if (!Sim.Positions.IsValidIndex(Anchor.NodeIndex) ||
+			!Sim.PrevPositions.IsValidIndex(Anchor.NodeIndex) ||
+			!Sim.InvMass.IsValidIndex(Anchor.NodeIndex))
+		{
+			continue;
+		}
+
+		const USkeletalMeshComponent* Mesh = Anchor.Mesh.Get();
+		if (!Mesh)
+		{
+			continue;
+		}
+
+		const FTransform BoneXform = Mesh->GetSocketTransform(Anchor.Bone);
+
+		const FVector SurfaceWorld = BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
+		const FVector NormalWorld = BoneXform.TransformVectorNoScale(Anchor.LocalNormal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+
+		const FVector Target = SurfaceWorld + NormalWorld * Anchor.SurfaceOffset;
+
+		Sim.Positions[Anchor.NodeIndex] = Target;
+		Sim.PrevPositions[Anchor.NodeIndex] = Target;
+		Sim.InvMass[Anchor.NodeIndex] = 0.0f;
+	}
+
+	ApplyWrappingMassMask();
+
+	const bool bSameStableSpan =
+		WrappingState.FirstNode == WrappingState.LastStableFirstNode &&
+		WrappingState.LastNode == WrappingState.LastStableLastNode &&
+		WrappingState.Anchors.Num() == WrappingState.LastStableAnchorCount;
+
+	if (bSameStableSpan)
+	{
+		WrappingState.StableTime += DeltaTime;
+	}
+	else
+	{
+		WrappingState.StableTime = 0.0f;
+		WrappingState.LastStableFirstNode = WrappingState.FirstNode;
+		WrappingState.LastStableLastNode = WrappingState.LastNode;
+		WrappingState.LastStableAnchorCount = WrappingState.Anchors.Num();
+	}
+
+	const bool bHasEnoughAnchors = WrappingState.Anchors.Num() >= FMath::Max(1, WrapConfig.MinLatchNodes);
+	const bool bStable = WrappingState.StableTime >= WrapConfig.WrappingStableTime;
+	const bool bTimedOutWithAnchors =
+		WrapConfig.WrappingMaxSettleTime > 0.0f &&
+		WrappingState.Elapsed >= WrapConfig.WrappingMaxSettleTime;
+
+	if (bHasEnoughAnchors && (bStable || bTimedOutWithAnchors))
+	{
+		CommitWrapping();
+		return;
+	}
+}
+
+bool URopeComponent::IsWrappingStillValid() const
+{
+	return WrappingState.IsActive()
+		&& WrappingState.Mesh.IsValid()
+		&& !WrappingState.BoneName.IsNone();
+}
+
+bool URopeComponent::UpdateWrappingAnchorsFromCandidates(const TArray<FRopeContactCandidate>& Candidates)
+{
+	bool bSawWrappingContact = false;
+	for (const FRopeContactCandidate& Candidate : Candidates)
+	{
+		if (!Candidate.bValid ||
+			Candidate.Bone != WrappingState.BoneName ||
+			!Sim.Positions.IsValidIndex(Candidate.NodeIndex))
+		{
+			continue;
+		}
+
+		const USkeletalMeshComponent* Mesh = Candidate.Mesh ? Candidate.Mesh : WrappingState.Mesh.Get();
+		if (!Mesh)
+		{
+			continue;
+		}
+
+		bSawWrappingContact = true;
+
+		FRopeSurfaceAnchor* ExistingAnchor = WrappingState.Anchors.FindByPredicate(
+			[&Candidate, Mesh](const FRopeSurfaceAnchor& Anchor)
+			{
+				return Anchor.NodeIndex == Candidate.NodeIndex && Anchor.Bone == Candidate.Bone && Anchor.Mesh.Get() == Mesh;
+			});
+
+		if (ExistingAnchor)
+		{
+			continue;
+		}
+
+		const FTransform BoneXform = Mesh->GetSocketTransform(Candidate.Bone);
+
+		FRopeSurfaceAnchor Anchor;
+		Anchor.NodeIndex = Candidate.NodeIndex;
+		Anchor.Bone = Candidate.Bone;
+		Anchor.Mesh = Mesh;
+		Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Candidate.WorldPoint);
+		Anchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(Candidate.Normal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		Anchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(ExpectedWrapTangent(Candidate)).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		Anchor.StartWorldPosition = Sim.Positions[Candidate.NodeIndex];
+		Anchor.SurfaceOffset = FMath::Max(0.0f, Radius);
+		Anchor.RopeDistance = static_cast<float>(Candidate.NodeIndex) * Sim.SegmentLength;
+
+		WrappingState.Anchors.Add(Anchor);
+	}
+
+	WrappingState.FirstNode = TNumericLimits<int32>::Max();
+	WrappingState.LastNode = INDEX_NONE;
+	for (const FRopeSurfaceAnchor& Anchor : WrappingState.Anchors)
+	{
+		WrappingState.FirstNode = FMath::Min(WrappingState.FirstNode, Anchor.NodeIndex);
+		WrappingState.LastNode = FMath::Max(WrappingState.LastNode, Anchor.NodeIndex);
+	}
+	if (WrappingState.Anchors.Num() == 0)
+	{
+		WrappingState.FirstNode = INDEX_NONE;
+	}
+
+	return bSawWrappingContact;
+}
+
+void URopeComponent::ApplyWrappingMassMask()
+{
+	TSet<int32> AnchorNodes;
+	for (const FRopeSurfaceAnchor& Anchor : WrappingState.Anchors)
+	{
+		if (Sim.InvMass.IsValidIndex(Anchor.NodeIndex))
+		{
+			AnchorNodes.Add(Anchor.NodeIndex);
+		}
+	}
+
+	for (int32 i = 0; i < Sim.Num(); ++i)
+	{
+		const bool bStartPin = (i == 0 && Sim.bStartPinned);
+		Sim.InvMass[i] = (bStartPin || AnchorNodes.Contains(i)) ? 0.0f : 1.0f;
+	}
+}
+
+void URopeComponent::CommitWrapping()
+{
+	const USkeletalMeshComponent* Mesh = WrappingState.Mesh.Get();
+
+	//Wrapping 정보가 적절하지 않으면 바로 releasing
+	if (!Mesh || WrappingState.BoneName.IsNone() || WrappingState.Anchors.Num() == 0)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapping -> Releasing (commit failed)"), *GetName());
+		AbortWrapping(ERopeReleaseReason::Broken);
+		Phase = ERopePhase::Releasing;
+		return;
+	}
+
+	FRopeWrapState Seed;
+	Seed.BoneName = WrappingState.BoneName;
+	Seed.Mesh = Mesh;
+
+	//각 LatchedNode에 정보 입력
+	for (const FRopeSurfaceAnchor& Anchor : WrappingState.Anchors)
+	{
+		if (!Sim.Positions.IsValidIndex(Anchor.NodeIndex))
+		{
+			continue;
+		}
+
+		FRopeLatchNode Latch;
+		Latch.NodeIndex = Anchor.NodeIndex;
+		Latch.Bone = Anchor.Bone;
+		Seed.Latched.Add(Latch);
+		Seed.Anchors.Add(Anchor);
+	}
+
+	if (Seed.Anchors.Num() == 0)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapping -> Releasing (no valid latches)"), *GetName());
+		AbortWrapping(ERopeReleaseReason::Broken);
+		Phase = ERopePhase::Releasing;
+		return;
+	}
+
+	WrapController.BeginWrap(Sim, Seed, Mesh);
+
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapping -> Wrapped (bone=%s, %d latched node(s))"),
+		*GetName(), *Seed.BoneName.ToString(), Seed.Latched.Num());
+
+	WrappingState.Reset();
+	ContactTracker.Reset();
+	PendingWrapSeed.Reset();
+	ContactingElapsed = 0.0f;
+
+	Phase = ERopePhase::Wrapped;
+	OnRopeWrapped.Broadcast(Seed.BoneName);
+}
+
+void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
+{
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] AbortWrapping reason=%d"),
+		*GetName(), static_cast<int32>(Reason));
+
+	for (const FRopeSurfaceAnchor& Anchor : WrappingState.Anchors)
+	{
+		if (!Sim.InvMass.IsValidIndex(Anchor.NodeIndex) ||
+			!Sim.PrevPositions.IsValidIndex(Anchor.NodeIndex) ||
+			!Sim.Positions.IsValidIndex(Anchor.NodeIndex))
+		{
+			continue;
+		}
+
+		Sim.InvMass[Anchor.NodeIndex] = 1.0f;
+		Sim.PrevPositions[Anchor.NodeIndex] = Sim.Positions[Anchor.NodeIndex];
+	}
+
+	WrappingState.Reset();
+	ContactTracker.Reset();
+	PendingWrapSeed.Reset();
+	ContactingElapsed = 0.0f;
+
+	ReleaseCooldown = 0.08f;
+
 }
 
 void URopeComponent::PrepareSimFrame(float DeltaTime)
@@ -479,28 +914,13 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		break;
 
 	case ERopePhase::Contacting:
-	{
-		// 감기 진행 상태 — 감김 노드/위치/방향을 점진적으로 보정(솔브 없음, 로직 구동).
-		AdvanceWrappingMotion(DeltaTime);
-
-		if (ShouldDismissContacting())
-		{
-			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Flight (contact lost before wrap)"), *GetName());
-			Phase = ERopePhase::Flight;
-			break;
-		}
-
-		if (ShouldFinishWrapping())
-		{
-			const FRopeWrapState Seed = BuildWrapSeedFromContactingState();
-			WrapController.BeginWrap(Sim, Seed, ResolveWrapTargetMesh());
-			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Wrapped (bone=%s, %d latched node(s))"),
-				*GetName(), *Seed.BoneName.ToString(), Seed.Latched.Num());
-			Phase = ERopePhase::Wrapped;
-			OnRopeWrapped.Broadcast(Seed.BoneName);
-		}
+		UpdateContacting(DeltaTime);
 		break;
-	}
+
+	case ERopePhase::Wrapping:
+		UpdateWrapping(DeltaTime);
+		break;
+
 	case ERopePhase::Wrapped:
 	{
 		// latch된 node는 skinned bone을 따라간다(GT). 솔브 없음.
@@ -514,12 +934,15 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 			WrapController.Release(ERopeReleaseReason::Broken);
 			ContactTracker.Reset();
 			PendingWrapSeed.Reset();
+			WrappingState.Reset();
 			ContactingElapsed = 0.0f;
 			ReleaseCooldown = 0.08f;
 			Phase = ERopePhase::Releasing;
 			OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Broken);
 			break;
 		}
+		ApplyWrappedMassMask();
+		bSolveThisFrame = true;
 		UpdateWrappedKinematicShape(DeltaTime); // 선택: 찰랑임 연출만
 		break;
 	}
@@ -548,7 +971,11 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	// GPU 상주(M5): logic phase(Contacting/Wrapped/Releasing)는 Sim을 out-of-band로 바꾸고, whip은 CPU에서
 	// 위치를 가이드한다 → 다음 GPU step에서 재시드되도록 generation을 올린다. 정상 Free/Flight(비-whip)에선
 	// 불변이라 GPU 버퍼가 상주된 채 매 프레임 in-place로 전진한다.
-	if (!bSolveThisFrame || bWhipSwingActive)
+	const bool bLogicMutatedSim =
+		!bSolveThisFrame ||
+		Phase == ERopePhase::Wrapping ||
+		Phase == ERopePhase::Wrapped;
+	if (bLogicMutatedSim || bWhipSwingActive)
 	{
 		++SimGeneration;
 	}
@@ -605,6 +1032,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		}
 
 		DetectContactCandidates(Sim.PrevPositions, Sim.Positions, FrameColliders, Candidates);
+		AddPredictedContactCandidates(Candidates);
 		EvaluateRelativeMotion(Candidates);
 
 		FRopeContactTracker FlightDebugTracker;
@@ -774,6 +1202,10 @@ FRopeContactCandidate URopeComponent::MakeCandidate(int32 NodeIndex, const FRope
 	Candidate.Normal = Contact.Normal.GetSafeNormal();
 	Candidate.Penetration = Contact.Penetration;
 	Candidate.WrapDirectionScore = 0.0f;
+
+	//움직이는 bone 위에서 로프가 상대적으로 어떻게 미끄러지는지 판단할 때 필요함.
+	Candidate.SurfaceVelocity = Contact.SurfaceVelocity;
+
 	return Candidate;
 }
 
@@ -814,9 +1246,16 @@ bool URopeComponent::ShouldDismissContacting() const
 	return ContactTracker.CandidateBone.IsNone() || ContactTracker.CandidateNodes.Num() == 0;
 }
 
-bool URopeComponent::ShouldFinishWrapping() const
+//bool URopeComponent::ShouldFinishWrapping() const
+//{
+//	return false;
+//}
+
+bool URopeComponent::ShouldStartWrapping() const
 {
-	return ContactingElapsed >= WrapConfig.WrapDecisionTime && PendingWrapSeed.Latched.Num() > 0;
+	return ContactingElapsed >= WrapConfig.WrapDecisionTime
+		&& PendingWrapSeed.Latched.Num() > 0
+		&& !PendingWrapSeed.BoneName.IsNone();
 }
 
 FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState() const
@@ -845,8 +1284,44 @@ void URopeComponent::UpdateWrappedKinematicShape(float DeltaTime)
 	WrappedSwayImpulse = FVector::ZeroVector;
 }
 
+void URopeComponent::ApplyWrappedMassMask()
+{
+	TSet<int32> AnchorNodes;
+
+	for (const FRopeSurfaceAnchor& Anchor : WrapController.State.Anchors)
+	{
+		if (Sim.InvMass.IsValidIndex(Anchor.NodeIndex))
+		{
+			AnchorNodes.Add(Anchor.NodeIndex);
+		}
+	}
+
+	for (const FRopeLatchNode& Latch : WrapController.State.Latched)
+	{
+		if (Sim.InvMass.IsValidIndex(Latch.NodeIndex))
+		{
+			AnchorNodes.Add(Latch.NodeIndex);
+		}
+	}
+
+	for (int32 i = 0; i < Sim.Num(); ++i)
+	{
+		const bool bStartPin = (i == 0 && Sim.bStartPinned);
+		const bool bAnchor = AnchorNodes.Contains(i);
+		Sim.InvMass[i] = (bStartPin || bAnchor) ? 0.0f : 1.0f;
+	}
+}
+
 bool URopeComponent::DebugForceWrap()
 {
+	/** TODO
+일단 그대로 둬도 돼.
+왜냐면 DebugForceWrap은 “Wrapped hold를 바로 확인하는 용도”로 유용하거든.
+다만 새 구조를 확인하고 싶으면 나중에 이렇게 바꿔.
+PendingWrapSeed = Seed;
+StartWrappingFromContacting();
+return true;
+**/
 	if (Sim.Num() == 0)
 	{
 		InitRope();
@@ -879,15 +1354,30 @@ bool URopeComponent::DebugForceWrap()
 
 void URopeComponent::ReleaseWrap()
 {
-	if (Phase != ERopePhase::Wrapped && Phase != ERopePhase::Contacting)
+	if (Phase != ERopePhase::Wrapped && Phase != ERopePhase::Contacting && Phase != ERopePhase::Wrapping)
 		return;
 
-	const FName Bone = (Phase == ERopePhase::Wrapped) ? WrapController.State.BoneName : ContactTracker.CandidateBone;
+	FName Bone = NAME_None;
+
+	if (Phase == ERopePhase::Wrapped)
+	{
+		Bone = WrapController.State.BoneName;
+	}
+	else if (Phase == ERopePhase::Wrapping)
+	{
+		Bone = WrappingState.BoneName;
+	}
+	else
+	{
+		Bone = ContactTracker.CandidateBone;
+	}
+
 	UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> Releasing (manual, bone=%s)"),
 		*GetName(), PhaseName(Phase), *Bone.ToString());
 	WrapController.Release(ERopeReleaseReason::Manual);
 	ContactTracker.Reset();
 	PendingWrapSeed.Reset();
+	WrappingState.Reset();
 	ContactingElapsed = 0.0f;
 	ReleaseCooldown = 0.08f;
 	Phase = ERopePhase::Releasing;

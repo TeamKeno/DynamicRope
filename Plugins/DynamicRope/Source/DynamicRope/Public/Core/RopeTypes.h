@@ -17,7 +17,8 @@ enum class ERopePhase : uint8
 {
 	Free,
 	Flight,
-	Contacting,
+	Contacting,		//접촉 후보 감지
+	Wrapping,		//감기는 중
 	Wrapped,
 	Releasing
 };
@@ -78,11 +79,69 @@ struct FRopeLatchNode
 	FVector BoneLocalPos = FVector::ZeroVector;
 };
 
+struct FRopeSurfaceAnchor
+{
+	int32 NodeIndex = INDEX_NONE;
+
+	FName Bone = NAME_None;
+	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
+
+	//SDF 표면 기준 bone-local anchor;
+	FVector LocalSurfacePosition = FVector::ZeroVector;
+	FVector LocalNormal = FVector::UpVector;
+	FVector LocalTangent = FVector::ForwardVector;
+
+	//Wrapping 시작 순간의 월드 위치 Lerp 시작점으로 사용
+	FVector StartWorldPosition = FVector::ZeroVector;
+
+	//나중에 여러 번 감김/ 길이 계산이 사용할 값
+	float RopeDistance = 0.f;
+	float WindingAngle = 0.f;
+
+	//표면에서 로프 중심선을 얼마나 띄울지. 보통 rope radius
+	float SurfaceOffset = 0.0f;
+};
+
+struct FRopeWrappingState
+{
+	FName BoneName = NAME_None;
+	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
+
+	TArray<FRopeSurfaceAnchor> Anchors;
+
+	float Elapsed = 0.0f;
+	float Duration = 0.16f;
+	float StableTime = 0.0f;
+	float LostContactTime = 0.0f;
+
+	int32 WindingSign = 1;
+
+	int32 FirstNode = INDEX_NONE;
+	int32 LastNode = INDEX_NONE;
+	int32 LastStableFirstNode = INDEX_NONE;
+	int32 LastStableLastNode = INDEX_NONE;
+	int32 LastStableAnchorCount = 0;
+
+	void Reset()
+	{
+		*this = FRopeWrappingState();
+	}
+
+	bool IsActive() const
+	{
+		return !BoneName.IsNone() && Anchors.Num() > 0;
+	}
+};
+
 /** wrap 이후 데이터 모델(바인딩 시맨틱). 물리→로직 핸드오프 시점에 생성된다. */
+//TODO 추후 수정사항 : 나중에 Wrapped까지 surface anchor 기반으로 갈아엎을 때 FRopeWrapState의 Latched를 Anchors로 바꾸면 돼.
 struct FRopeWrapState
 {
 	FName                   BoneName = NAME_None;
-	TArray<FRopeLatchNode>  Latched;
+
+	TArray<FRopeLatchNode>  Latched;// 기존 fallback용
+	TArray<FRopeSurfaceAnchor> Anchors; // 새 방식
+
 	float                   WrapTurns = 0.0f;
 	float                   Tension = 0.0f;
 	float                   TimeWrapped = 0.0f;
@@ -95,7 +154,7 @@ struct FRopeWrapState
 	// 되는 weak 포인터로 보관한다(POD 유지: hard 레퍼런스가 아니라 GC를 막지 않는다).
 	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
 
-	bool IsWrapped() const { return Latched.Num() > 0; }
+	bool IsWrapped() const { return Anchors.Num() > 0 || Latched.Num() > 0; }
 	void Reset() { *this = FRopeWrapState(); }
 };
 
@@ -188,6 +247,22 @@ struct FRopeWrapConfig
 	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrapDecisionTime = 0.15f;
+
+	/** Wrapping phase must keep the same accumulated latch span stable this long before committing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	float WrappingStableTime = 0.10f;
+
+	/** Upper bound for physics-based wrapping settle before committing the best accumulated anchors. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	float WrappingMaxSettleTime = 0.45f;
+
+	/** Temporary contact loss tolerated while the rope is settling into a wrap. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	float WrappingContactGraceTime = 0.20f;
+
+	/** Extra Flight lookahead in frame-displacements for thin limb/SDF candidate detection. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float PredictiveContactFrames = 1.0f;
 };
 
 /** flight 단계의 Throw / launch 파라미터. */

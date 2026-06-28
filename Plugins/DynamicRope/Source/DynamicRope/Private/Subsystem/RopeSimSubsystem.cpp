@@ -192,7 +192,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		{
 			FRopeSimState& S = Rope->Sim;
 			// GPU 상주 대상: Free/Flight(bSolveThisFrame)이고 whip이 아니며 노드수가 한도 내일 때.
-			const bool bGpuRope = Rope->bSolveThisFrame && !Rope->bWhipSwingActive
+			const bool bGpuPhase = Rope->Phase == ERopePhase::Free || Rope->Phase == ERopePhase::Flight;
+			const bool bGpuRope = bGpuPhase && Rope->bSolveThisFrame && !Rope->bWhipSwingActive
 				&& S.Num() >= 2 && S.Num() <= FRopeGPUSolver::MaxNodes;
 			// M5b: 이 프레임에 GPU step되는 로프만 렌더가 resident PosBuf를 직접 읽는다(아니면 stale → CPU 미러).
 			Rope->bGpuSteppedThisFrame = bGpuRope;

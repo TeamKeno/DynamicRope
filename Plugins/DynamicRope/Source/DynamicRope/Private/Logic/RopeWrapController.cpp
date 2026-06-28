@@ -126,26 +126,98 @@ void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Se
 
 	// 각 접촉 노드의 현재 월드 위치를 bone-local 로 변환하여 동결한다(InvMass 0).
 	// 이 시점부터 노드는 솔버가 아니라 logic(skinning 된 bone)에 의해 구동된다.
-	FVector Centroid = FVector::ZeroVector;
-	for (FRopeLatchNode& Latch : State.Latched)
+// Anchor가 없는 legacy seed면 Latched에서 임시 Anchor를 만든다.
+	if (State.Anchors.Num() == 0)
 	{
-		if (!Sim.Positions.IsValidIndex(Latch.NodeIndex))
+		for (const FRopeLatchNode& Latch : State.Latched)
+		{
+			if (!Sim.Positions.IsValidIndex(Latch.NodeIndex))
+			{
+				continue;
+			}
+
+			const FName Bone = Latch.Bone.IsNone() ? State.BoneName : Latch.Bone;
+			const FTransform BoneXform = Mesh->GetSocketTransform(Bone);
+			const FVector World = Sim.Positions[Latch.NodeIndex];
+
+			FRopeSurfaceAnchor Anchor;
+			Anchor.NodeIndex = Latch.NodeIndex;
+			Anchor.Bone = Bone;
+			Anchor.Mesh = Mesh;
+			Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(World);
+			Anchor.LocalNormal = FVector::UpVector;
+			Anchor.LocalTangent = FVector::ForwardVector;
+			Anchor.StartWorldPosition = World;
+			Anchor.SurfaceOffset = 0.0f;
+			Anchor.RopeDistance = static_cast<float>(Latch.NodeIndex) * Sim.SegmentLength;
+
+			State.Anchors.Add(Anchor);
+		}
+	}
+
+
+	FVector Centroid = FVector::ZeroVector;
+	int32 ValidAnchorCount = 0;
+
+	for (FRopeSurfaceAnchor& Anchor : State.Anchors)
+	{
+		if (!Sim.Positions.IsValidIndex(Anchor.NodeIndex) ||
+			!Sim.PrevPositions.IsValidIndex(Anchor.NodeIndex) ||
+			!Sim.InvMass.IsValidIndex(Anchor.NodeIndex))
 		{
 			continue;
 		}
-		const FTransform BoneXform = Mesh->GetSocketTransform(Latch.Bone);
-		Latch.BoneLocalPos = BoneXform.InverseTransformPosition(Sim.Positions[Latch.NodeIndex]);
-		Sim.InvMass[Latch.NodeIndex] = 0.0f;
-		Centroid += Sim.Positions[Latch.NodeIndex];
+
+		if (Anchor.Bone.IsNone())
+		{
+			Anchor.Bone = State.BoneName;
+		}
+
+		if (!Anchor.Mesh.IsValid())
+		{
+			Anchor.Mesh = Mesh;
+		}
+
+		const USkeletalMeshComponent* AnchorMesh = Anchor.Mesh.Get();
+		if (!AnchorMesh)
+		{
+			AnchorMesh = Mesh;
+		}
+
+		const FTransform BoneXform = AnchorMesh->GetSocketTransform(Anchor.Bone);
+
+		const FVector SurfaceWorld =
+			BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
+
+		const FVector NormalWorld =
+			BoneXform.TransformVectorNoScale(Anchor.LocalNormal)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+
+		const FVector World =
+			SurfaceWorld + NormalWorld * Anchor.SurfaceOffset;
+
+		Sim.Positions[Anchor.NodeIndex] = World;
+		Sim.PrevPositions[Anchor.NodeIndex] = World;
+		Sim.InvMass[Anchor.NodeIndex] = 0.0f;
+
+		Centroid += World;
+		++ValidAnchorCount;
 	}
 
-	if (State.Latched.Num() > 0)
+	if (ValidAnchorCount == 0)
 	{
-		Centroid /= static_cast<double>(State.Latched.Num());
-		// 대략적인 메트릭. M3 에서 정밀화된다(true wrap-angle 적분).
-		State.AnchorDistance = Sim.Num() > 0 ? FVector::Dist(Sim.Positions[0], Centroid) : 0.0f;
-		State.WrapTurns = 0.0f;
+		UE_LOG(LogRopeWrap, Warning, TEXT("BeginWrap aborted: no valid anchors for bone %s"),
+			*State.BoneName.ToString());
+		State.Reset();
+		return;
 	}
+
+	Centroid /= static_cast<double>(ValidAnchorCount);
+	State.AnchorDistance = Sim.Num() > 0 ? FVector::Dist(Sim.Positions[0], Centroid) : 0.0f;
+	State.WrapTurns = 0.0f;
+
+	UE_LOG(LogRopeWrap, Log, TEXT("BeginWrap: bone=%s, anchors=%d, mesh=%s"),
+		*State.BoneName.ToString(), State.Anchors.Num(), *Mesh->GetName());
 }
 
 bool FRopeWrapController::Hold(FRopeSimState& Sim, const USkeletalMeshComponent* FallbackMesh, float Dt)
@@ -170,6 +242,47 @@ bool FRopeWrapController::Hold(FRopeSimState& Sim, const USkeletalMeshComponent*
 		return false;
 	}
 
+	// 새 방식: surface anchor 기반 hold
+	if (State.Anchors.Num() > 0)
+	{
+		for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
+		{
+			if (!Sim.Positions.IsValidIndex(Anchor.NodeIndex) ||
+				!Sim.PrevPositions.IsValidIndex(Anchor.NodeIndex) ||
+				!Sim.InvMass.IsValidIndex(Anchor.NodeIndex))
+			{
+				continue;
+			}
+
+			const USkeletalMeshComponent* AnchorMesh = Anchor.Mesh.Get();
+			if (!AnchorMesh)
+			{
+				AnchorMesh = Mesh;
+			}
+
+			const FName Bone = Anchor.Bone.IsNone() ? State.BoneName : Anchor.Bone;
+			const FTransform BoneXform = AnchorMesh->GetSocketTransform(Bone);
+
+			const FVector SurfaceWorld =
+				BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
+
+			const FVector NormalWorld =
+				BoneXform.TransformVectorNoScale(Anchor.LocalNormal)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+
+			const FVector World =
+				SurfaceWorld + NormalWorld * Anchor.SurfaceOffset;
+
+			Sim.Positions[Anchor.NodeIndex] = World;
+			Sim.PrevPositions[Anchor.NodeIndex] = World;
+			Sim.InvMass[Anchor.NodeIndex] = 0.0f;
+		}
+
+		State.TimeWrapped += Dt;
+		return true;
+	}
+
+	// 기존 방식 fallback
 	// wrap 이 skinning 을 타고 가도록 매 프레임 각 latched 노드를 자신의 (애니메이션된) bone 위에 재배치한다.
 	// bone 의 움직임이 솔버로 주입되지 않도록 노드의 속도를 0 으로 둔다(Prev = Pos).
 	for (const FRopeLatchNode& Latch : State.Latched)
@@ -179,7 +292,7 @@ bool FRopeWrapController::Hold(FRopeSimState& Sim, const USkeletalMeshComponent*
 			continue;
 		}
 		const FTransform BoneXform = Mesh->GetSocketTransform(Latch.Bone);
-		const FVector World = BoneXform.TransformPosition(Latch.BoneLocalPos);
+		FVector World = BoneXform.TransformPosition(Latch.BoneLocalPos);
 		Sim.Positions[Latch.NodeIndex] = World;
 		Sim.PrevPositions[Latch.NodeIndex] = World;
 		Sim.InvMass[Latch.NodeIndex] = 0.0f;

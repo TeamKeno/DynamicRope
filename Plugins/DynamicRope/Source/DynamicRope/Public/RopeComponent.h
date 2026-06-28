@@ -184,7 +184,8 @@ private:
 	FRopeXPBDSolver     Solver;
 	FRopeWrapController WrapController;
 	FRopeContactTracker ContactTracker;
-	FRopeWrapState      PendingWrapSeed;
+	FRopeWrapState      PendingWrapSeed;	//초기 연결용, 임시 Seed
+	FRopeWrappingState  WrappingState;
 
 	float ReleaseCooldown = 0.0f;
 	float ContactingElapsed = 0.0f;
@@ -246,6 +247,8 @@ private:
 	void DetectContactCandidates(const TArray<FVector>& PrevPositions, const TArray<FVector>& Positions,
 		const TArray<IRopeCollider*>& Colliders, TArray<FRopeContactCandidate>& OutCandidates) const;
 
+	void AddPredictedContactCandidates(TArray<FRopeContactCandidate>& InOutCandidates) const;
+
 	void EvaluateRelativeMotion(TArray<FRopeContactCandidate>& Candidates) const;
 
 	FVector ExpectedWrapTangent(const FRopeContactCandidate& Candidate) const;
@@ -274,7 +277,11 @@ private:
 
 	bool ShouldDismissContacting() const;
 
-	bool ShouldFinishWrapping() const;
+	// 기존(legacy)
+	//bool ShouldFinishWrapping() const;
+
+	// 변경
+	bool ShouldStartWrapping() const;
 
 	FRopeWrapState BuildWrapSeedFromContactingState() const;
 
@@ -282,9 +289,31 @@ private:
 
 #pragma endregion
 
+#pragma region Wrapping 관련 함수
+
+	void UpdateContacting(float DeltaTime);
+
+	void StartWrappingFromContacting();
+
+	void UpdateWrapping(float DeltaTime);
+
+	bool IsWrappingStillValid() const;
+
+	bool UpdateWrappingAnchorsFromCandidates(const TArray<FRopeContactCandidate>& Candidates);
+
+	void ApplyWrappingMassMask();
+
+	void CommitWrapping();
+
+	void AbortWrapping(ERopeReleaseReason Reason);
+
+#pragma endregion
+
 #pragma region Wrapped 관련 함수
 
 	void UpdateWrappedKinematicShape(float DeltaTime);
+
+	void ApplyWrappedMassMask();
 
 #pragma endregion
 };
