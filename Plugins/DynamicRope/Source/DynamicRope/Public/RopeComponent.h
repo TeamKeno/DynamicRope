@@ -189,6 +189,7 @@ private:
 
 	float ReleaseCooldown = 0.0f;
 	float ContactingElapsed = 0.0f;
+	float FlightNoContactElapsed = 0.0f;
 	float WrappedSwayTime = 0.0f;
 	FVector WrappedSwayImpulse = FVector::ZeroVector;
 

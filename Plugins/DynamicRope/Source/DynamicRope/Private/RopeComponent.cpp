@@ -176,6 +176,7 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 	PendingWrapSeed.Reset();
 	WrappingState.Reset();
 	ContactingElapsed = 0.0f;
+	FlightNoContactElapsed = 0.0f;
 	ReleaseCooldown = 0.0f;
 	WrappedSwayImpulse = FVector::ZeroVector;
 	WrappedSwayTime = 0.0f;
@@ -593,6 +594,7 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 		ContactTracker.Reset();
 		PendingWrapSeed.Reset();
 		ContactingElapsed = 0.0f;
+		FlightNoContactElapsed = 0.0f;
 		Phase = ERopePhase::Flight;
 		return;
 	}
@@ -623,6 +625,7 @@ void URopeComponent::StartWrappingFromContacting()
 		ContactTracker.Reset();
 		PendingWrapSeed.Reset();
 		ContactingElapsed = 0.0f;
+		FlightNoContactElapsed = 0.0f;
 		Phase = ERopePhase::Flight;
 		return;
 	}
@@ -678,6 +681,7 @@ void URopeComponent::StartWrappingFromContacting()
 		ContactTracker.Reset();
 		PendingWrapSeed.Reset();
 		ContactingElapsed = 0.0f;
+		FlightNoContactElapsed = 0.0f;
 		Phase = ERopePhase::Flight;
 		return;
 	}
@@ -1129,10 +1133,30 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		if (bShouldCapture)
 		{
 			BuildContactingState(Candidates);
+			FlightNoContactElapsed = 0.0f;
 			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Flight -> Contacting (bone=%s, %d node(s))"),
 				*GetName(), *ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num());
 			Phase = ERopePhase::Contacting;
 			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
+		}
+		else if (!bWhipSwingActive && Candidates.Num() == 0 && WrapConfig.FlightNoContactReturnTime > 0.0f)
+		{
+			FlightNoContactElapsed += DeltaTime;
+			if (FlightNoContactElapsed >= WrapConfig.FlightNoContactReturnTime)
+			{
+				UE_LOG(LogDynamicRope, Log, TEXT("[%s] Flight -> Free (no contact candidates for %.2fs)"),
+					*GetName(), FlightNoContactElapsed);
+				ContactTracker.Reset();
+				PendingWrapSeed.Reset();
+				WrappingState.Reset();
+				ContactingElapsed = 0.0f;
+				FlightNoContactElapsed = 0.0f;
+				Phase = ERopePhase::Free;
+			}
+		}
+		else
+		{
+			FlightNoContactElapsed = 0.0f;
 		}
 
 		if (bDrawFlightVisual || bDrawFlightStat)
