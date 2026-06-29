@@ -1,8 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
 // SDF 볼륨 시각화 드로잉 헬퍼(에디터 전용, PDI 기반). 본별 SDF 볼륨을 bounds/grid/voxel/slice/gradient로
-// 그린다. FRopeSDFVisualizer(레벨 에디터 컴포넌트 비주얼라이저)와 장차 오써링 패널 프리뷰 뷰포트가
-// 동일 코드로 그리도록 분리. 모든 좌표는 본 로컬 → Xform으로 월드 배치한다.
+// 그린다. 오써링 패널 프리뷰 뷰포트가 이 헬퍼로 그린다. 모든 좌표는 본 로컬 → Xform으로 월드 배치한다.
 
 #pragma once
 

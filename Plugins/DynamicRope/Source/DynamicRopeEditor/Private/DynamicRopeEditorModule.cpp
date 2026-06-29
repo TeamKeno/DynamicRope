@@ -3,7 +3,6 @@
 #include "DynamicRopeEditorModule.h"
 #include "DynamicRopeEditorLog.h"
 #include "SDF/SRopeSDFAuthoringPanel.h"
-#include "SDF/RopeSDFVisualizer.h"
 #include "SDF/RopeBoneSDFVolumeCustomization.h"
 #include "Visualizers/RopeComponentVisualizer.h"
 #include "RopeComponent.h"
@@ -52,8 +51,6 @@ void FDynamicRopeEditorModule::StartupModule()
 	{
 		GUnrealEd->RegisterComponentVisualizer(URopeComponent::StaticClass()->GetFName(),
 			MakeShared<FRopeComponentVisualizer>());
-		GUnrealEd->RegisterComponentVisualizer(URopeSDFProvider::StaticClass()->GetFName(),
-			MakeShared<FRopeSDFVisualizer>());
 	}
 
 	// 디테일 패널 프로퍼티 타입 커스터마이즈: FRopeBoneSDFVolume 배열 요소 헤더에 본 이름 표시.
@@ -77,7 +74,6 @@ void FDynamicRopeEditorModule::ShutdownModule()
 	if (GUnrealEd)
 	{
 		GUnrealEd->UnregisterComponentVisualizer(URopeComponent::StaticClass()->GetFName());
-		GUnrealEd->UnregisterComponentVisualizer(URopeSDFProvider::StaticClass()->GetFName());
 	}
 
 	if (FModuleManager::Get().IsModuleLoaded("PropertyEditor"))

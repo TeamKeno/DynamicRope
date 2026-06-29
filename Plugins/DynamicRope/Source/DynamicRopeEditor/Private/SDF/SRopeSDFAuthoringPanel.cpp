@@ -142,7 +142,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 			[ MakeFloatRow(LOCTEXT("BoundsPad", "Bounds Padding (cm)"), &FRopeSDFBakeSettings::BoundsPadding, 0.0f, 20.0f) ]
 
-			// 프리뷰 오버레이(자산 비변경 · 패널 로컬). 레벨 FRopeSDFVisualizer와 동일 RopeSDFDraw 공유.
+			// 프리뷰 오버레이(자산 비변경 · 패널 로컬). RopeSDFDraw 헬퍼로 그린다.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(0.0f, 14.0f, 0.0f, 4.0f)

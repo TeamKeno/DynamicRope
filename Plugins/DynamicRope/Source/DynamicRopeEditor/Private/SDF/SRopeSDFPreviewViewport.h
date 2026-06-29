@@ -3,7 +3,7 @@
 // SDF 오써링 패널에 박히는 3D 프리뷰 뷰포트. FAdvancedPreviewScene(조명/바닥) 위에 베이크 대상
 // 스켈레탈 메시(URopeSDFData::SourceMesh)를 ref 포즈로 띄워 orbit 카메라로 검수한다.
 // SDF 오버레이(bounds/voxels/slice/gradient)는 뷰포트 클라이언트의 Draw(View, PDI)에서 본별
-// 볼륨을 RopeSDFDraw 헬퍼로 그린다 — 레벨 비주얼라이저(FRopeSDFVisualizer)와 동일 코드 공유.
+// 볼륨을 RopeSDFDraw 헬퍼로 그린다.
 // 토글/파라미터는 자산이 아니라 이 위젯의 FRopeSDFPreviewDrawOptions(패널 로컬 상태)에 둔다.
 
 #pragma once

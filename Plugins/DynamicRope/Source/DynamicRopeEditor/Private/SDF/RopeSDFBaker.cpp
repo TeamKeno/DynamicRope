@@ -1,13 +1,86 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RopeSDFBaker.h"
-#include "SDF/RopeSDFBakeSign.h"
 #include "DynamicRopeEditorLog.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "Engine/SkeletalMesh.h"
 #include "Rendering/SkeletalMeshModel.h"
 #include "Rendering/SkeletalMeshLODModel.h"
 #include "Async/ParallelFor.h"
+
+// 부호 판정용 fast winding number(GeometryCore).
+#include "DynamicMesh/DynamicMesh3.h"
+#include "IndexTypes.h"
+#include "Spatial/MeshAABBTree3.h"
+#include "Spatial/FastWinding.h"
+
+namespace
+{
+	using UE::Geometry::FDynamicMesh3;
+	using UE::Geometry::TMeshAABBTree3;
+	using UE::Geometry::TFastWindingTree;
+	using UE::Geometry::FIndex3i;
+
+	// 메시 전체 generalized winding number로 점의 안/밖을 판정한다. "안/밖"은 몸 전체(닫힌 표면)에 대한
+	// 전역 속성이라, 본별 열린 패치가 아니라 전체 메시로 winding을 봐야 강건하다(짧고 넓은 본 토막의 내부가
+	// 열린 패치에선 w<0.5로 바깥 오판됨). GeometryCore fast winding(BVH + 다극 근사)으로 query당 O(log T).
+	// 베이크 1회에 한 번 빌드해 voxel마다 질의한다. 빌드 후 동시(read-only) 질의 안전.
+	class FRopeSDFWindingClassifier
+	{
+	public:
+		// 삼각형 소프로 빌드(정점을 삼각형마다 복제 → 시임/비매니폴드에도 강건; winding은 연결성과 무관).
+		// 삼각형 t = Positions[Indices[3t+0..2]]. 정점/질의점은 같은 좌표 공간(여기선 컴포넌트 공간)이어야 한다.
+		FRopeSDFWindingClassifier(TConstArrayView<FVector3f> Positions, TConstArrayView<uint32> Indices)
+		{
+			if (Positions.Num() == 0 || Indices.Num() < 3)
+			{
+				return;
+			}
+			const int32 NumTris = Indices.Num() / 3;
+			for (int32 t = 0; t < NumTris; ++t)
+			{
+				const int32 I0 = static_cast<int32>(Indices[3 * t + 0]);
+				const int32 I1 = static_cast<int32>(Indices[3 * t + 1]);
+				const int32 I2 = static_cast<int32>(Indices[3 * t + 2]);
+				if (!Positions.IsValidIndex(I0) || !Positions.IsValidIndex(I1) || !Positions.IsValidIndex(I2))
+				{
+					continue;
+				}
+				const FVector3f& P0 = Positions[I0];
+				const FVector3f& P1 = Positions[I1];
+				const FVector3f& P2 = Positions[I2];
+				const int32 V0 = Mesh.AppendVertex(FVector3d(P0.X, P0.Y, P0.Z));
+				const int32 V1 = Mesh.AppendVertex(FVector3d(P1.X, P1.Y, P1.Z));
+				const int32 V2 = Mesh.AppendVertex(FVector3d(P2.X, P2.Y, P2.Z));
+				Mesh.AppendTriangle(FIndex3i(V0, V1, V2));
+			}
+			if (Mesh.TriangleCount() == 0)
+			{
+				return;
+			}
+			// Tree는 &Mesh를, Winding은 Tree를 가리킨다. 멤버라 객체 수명 동안 주소가 안정적이어야 하므로
+			// 이 분류기는 복사/이동하지 않고 제자리에서 쓴다(BakeMesh에서 지역 const로 생성).
+			Tree = MakeUnique<TMeshAABBTree3<FDynamicMesh3>>(&Mesh, true);
+			Winding = MakeUnique<TFastWindingTree<FDynamicMesh3>>(Tree.Get(), true);
+		}
+
+		// |generalized winding number(P)| > 0.5 이면 안쪽. 닫힌 메시 내부 |w|≈1, 바깥 ≈0의 중점이며,
+		// abs라 메시 삼각형 방향(CW/CCW)과 무관하다.
+		bool IsInside(const FVector& P) const
+		{
+			if (!Winding)
+			{
+				return false;
+			}
+			return FMath::Abs(Winding->FastWindingNumber(FVector3d(P.X, P.Y, P.Z))) > 0.5;
+		}
+
+	private:
+		FDynamicMesh3 Mesh;
+		TUniquePtr<TMeshAABBTree3<FDynamicMesh3>> Tree;
+		TUniquePtr<TFastWindingTree<FDynamicMesh3>> Winding;
+	};
+}
 
 ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 	const FRopeSDFBakeSettings& S, TArray<FRopeBoneSDFVolume>& Out,

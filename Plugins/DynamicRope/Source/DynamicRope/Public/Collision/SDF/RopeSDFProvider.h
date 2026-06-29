@@ -76,60 +76,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	bool bDrawDebug = false;
 
-#if WITH_EDITORONLY_DATA
-	//~ SDF 시각화(에디터 전용 비주얼라이저 FRopeSDFVisualizer가 읽는 토글). 런타임 충돌과 무관 — 쿠킹 빌드에서
-	//~ 제외되도록 WITH_EDITORONLY_DATA로 감싼다(BP 런타임 접근 불가라 BlueprintReadWrite도 뺀다). ----------------
-	/** 본별 SDF 볼륨의 bounds 박스를 그린다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
-	bool bDrawSDFBounds = false;
-
-	/** 좁은밴드 voxel을 부호별 색 점으로 그린다(안=빨강, 밖=파랑, ≈0=흰색 — slice heatmap과 동일 규약). */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
-	bool bDrawSDFVoxels = false;
-
-	/** voxel 표시 밴드 두께(cm). |distance| <= 이 값인 voxel만 그린다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "0.0", Units = "cm"))
-	float SDFBandThreshold = 3.0f;
-
-	/** 베이크 전 미리보기: 각 볼륨 본에 해석적 구 SDF를 합성해 그린다(실제 데이터 대신). */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
-	bool bSDFSyntheticPreview = false;
-
-	/** 합성 미리보기 구의 반지름(cm). */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "1.0", Units = "cm"))
-	float SDFSyntheticRadius = 10.0f;
-
-	//~ Slice plane heatmap -------------------------------------------------
-	/** 볼륨을 가로지르는 평면 위 distance를 발산형 색(음=빨강, 0=흰, 양=파랑)으로 표시한다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
-	bool bDrawSDFSlice = false;
-
-	/** slice 평면이 통과하는 축. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug", meta = (EditCondition = "bDrawSDFSlice"))
-	ERopeSDFSliceAxis SDFSliceAxis = ERopeSDFSliceAxis::Z;
-
-	/** 축을 따른 slice 위치(0~1, 정규화). */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bDrawSDFSlice"))
-	float SDFSlicePosition = 0.5f;
-
-	/** slice 샘플 격자 한 변의 개수. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "2", EditCondition = "bDrawSDFSlice"))
-	int32 SDFSliceResolution = 24;
-
-	/** 색 매핑 스케일(cm): |distance| = 이 값에서 완전 포화. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "0.1", Units = "cm", EditCondition = "bDrawSDFSlice"))
-	float SDFSliceColorScale = 10.0f;
-
-	//~ Gradient arrows (= Query 법선) --------------------------------------
-	/** 좁은밴드 샘플에서 gradient(바깥쪽 = Query가 반환할 법선) 방향을 화살표로 그린다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
-	bool bDrawSDFGradient = false;
-
-	/** gradient 화살표 길이(cm). */
-	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug", meta = (ClampMin = "0.5", Units = "cm", EditCondition = "bDrawSDFGradient"))
-	float SDFGradientLength = 4.0f;
-#endif // WITH_EDITORONLY_DATA
-
 	//~ IRopeColliderProvider
 	virtual void GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders) override;
 

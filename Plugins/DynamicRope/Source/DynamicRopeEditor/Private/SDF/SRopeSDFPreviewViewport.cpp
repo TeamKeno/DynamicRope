@@ -155,7 +155,7 @@ void SRopeSDFPreviewViewport::DrawSDFOverlay(FPrimitiveDrawInterface* PDI)
 		}
 
 		// 프리뷰 메시의 본 월드 트랜스폼. SDF는 본 로컬에 구워져 있으므로 그대로 월드 배치에 쓴다
-		// (레벨 비주얼라이저 FRopeSDFVisualizer와 동일한 GetSocketTransform 경로).
+		// (GetSocketTransform으로 본 월드 트랜스폼 재구성 — 베이크가 구운 본 로컬 프레임과 정합).
 		const FTransform Xform = PreviewMeshComponent->GetSocketTransform(Vol.Bone);
 
 		if (DrawOptions.bDrawBounds)
