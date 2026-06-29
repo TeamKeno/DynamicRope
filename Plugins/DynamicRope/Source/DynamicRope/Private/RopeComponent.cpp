@@ -425,6 +425,8 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 void URopeComponent::DetectContactCandidates(const TArray<FVector>& PrevPositions, const TArray<FVector>& Positions,
 	const TArray<IRopeCollider*>& Colliders, TArray<FRopeContactCandidate>& OutCandidates) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightDetectContactCandidates);
+	TArray<IRopeCollider*> NearbyColliders;
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		if (!PrevPositions.IsValidIndex(i) || !Positions.IsValidIndex(i))
@@ -433,15 +435,18 @@ void URopeComponent::DetectContactCandidates(const TArray<FVector>& PrevPosition
 		}
 
 		bool bFast = IsTailNode(i) || NodeSpeed(i) > Sim.SegmentLength;
-		bool bNearBody = IsNearAnyColliderSegment(PrevPositions[i], Positions[i], Colliders);
+		GatherNearbyColliders(PrevPositions[i], Positions[i], Colliders, NearbyColliders);
+		bool bNearBody = NearbyColliders.Num() > 0;
 
 		if (!bFast && !bNearBody)
+			continue;
+		if (!bNearBody)
 			continue;
 
 		// 현재 위치만 보지 않고 이동 경로를 본다.
 		// 캡슐은 segment-vs-capsule로 가능.
 		// SDF는 path를 몇 개 샘플링하거나 SweepQuery adapter가 필요.
-		FRopeContact Contact = SweepOrSampleContact(PrevPositions[i], Positions[i], Colliders);
+		FRopeContact Contact = SweepOrSampleContact(PrevPositions[i], Positions[i], NearbyColliders);
 
 		if (Contact.bHit)
 		{
@@ -455,6 +460,7 @@ void URopeComponent::DetectContactCandidates(const TArray<FVector>& PrevPosition
 
 void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>& InOutCandidates, float DeltaTime) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightAddPredictedContactCandidates);
 	const float PredictionFrames = FMath::Max(0.0f, WrapConfig.PredictiveContactFrames);
 	if (PredictionFrames <= KINDA_SMALL_NUMBER || Sim.Num() == 0)
 	{
@@ -481,6 +487,7 @@ void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>
 	};
 
 	TArray<FVector> NextGuideTargets;
+	TArray<IRopeCollider*> NearbyColliders;
 	const bool bHasGuidedNodes = Phase == ERopePhase::Flight && WhipGuidedNodesThisFrame.Num() > 0;
 	if (bHasGuidedNodes)
 	{
@@ -501,10 +508,20 @@ void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>
 
 		FVector CurrentPosition = Sim.Positions[i];
 		FVector PredictedPosition = CurrentPosition;
+		const FVector FrameDisplacement = Sim.Positions[i] - Sim.PrevPositions[i];
+		if (!ShouldRunPredictiveContactForNode(i, bHasGuidedNodes, FrameDisplacement))
+		{
+			continue;
+		}
+
+		const bool bGuidedNode = bHasGuidedNodes && IsWhipGuidedNodeThisFrame(i);
+		const bool bTailNode = IsTailNode(i);
+		const bool bFastNode = FrameDisplacement.Size() > Sim.SegmentLength;
+
 		bool bFastEnoughForPrediction = false;
 		ERopeContactCandidateSource Source = ERopeContactCandidateSource::PredictiveFree;
 
-		if (bHasGuidedNodes && IsWhipGuidedNodeThisFrame(i) && WhipGuideCurrentTargetsThisFrame.IsValidIndex(i))
+		if (bGuidedNode && WhipGuideCurrentTargetsThisFrame.IsValidIndex(i))
 		{
 			Source = ERopeContactCandidateSource::PredictiveGuided;
 			CurrentPosition = WhipGuideCurrentTargetsThisFrame[i];
@@ -524,12 +541,12 @@ void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>
 		}
 		else
 		{
-			const FVector FrameDisplacement = Sim.Positions[i] - Sim.PrevPositions[i];
 			PredictedPosition = CurrentPosition + FrameDisplacement * PredictionFrames;
-			bFastEnoughForPrediction = IsTailNode(i) || FrameDisplacement.Size() > Sim.SegmentLength;
+			bFastEnoughForPrediction = bTailNode || bFastNode;
 		}
 
-		const bool bPredictedPathNearBody = IsNearAnyColliderSegment(CurrentPosition, PredictedPosition, FrameColliders);
+		GatherNearbyColliders(CurrentPosition, PredictedPosition, FrameColliders, NearbyColliders);
+		const bool bPredictedPathNearBody = NearbyColliders.Num() > 0;
 		if (!bFastEnoughForPrediction && !bPredictedPathNearBody)
 		{
 			continue;
@@ -541,7 +558,7 @@ void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>
 
 		// If a bone surface exists between the current node position and predicted next position,
 		// promote it to the same candidate path that later builds the latch seed.
-		const FRopeContact Contact = SweepOrSampleContact(CurrentPosition, PredictedPosition, FrameColliders);
+		const FRopeContact Contact = SweepOrSampleContact(CurrentPosition, PredictedPosition, NearbyColliders);
 		if (!Contact.bHit || Contact.Bone.IsNone())
 		{
 			continue;
@@ -556,6 +573,7 @@ void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>
 
 void URopeComponent::EvaluateRelativeMotion(TArray<FRopeContactCandidate>& Candidates) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateRelativeMotion);
 	for (FRopeContactCandidate& Candidate : Candidates)
 	{
 		if (!Sim.Positions.IsValidIndex(Candidate.NodeIndex) || !Sim.PrevPositions.IsValidIndex(Candidate.NodeIndex))
@@ -1090,12 +1108,14 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	// Flight: 솔브 후 이동 경로 기반 접촉 후보 감지 → 캡처. UObject·이벤트라 GT에서.
 	if (Phase == ERopePhase::Flight)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FinalizeFlight);
 		TArray<FRopeContactCandidate> Candidates;
 		TArray<RopeDebug::FRopeFlightNodeDebug> FlightNodeDebug;
 		const bool bDrawFlightVisual = RopeDebug::IsFlightVisualEnabled();
 		const bool bDrawFlightStat = RopeDebug::IsFlightStatEnabled();
 		if (bDrawFlightVisual)
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightDebugGather);
 			for (int32 i = 0; i < Sim.Num(); ++i)
 			{
 				if (!Sim.PrevPositions.IsValidIndex(i) || !Sim.Positions.IsValidIndex(i))
@@ -1122,16 +1142,34 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			}
 		}
 
-		DetectContactCandidates(Sim.PrevPositions, Sim.Positions, FrameColliders, Candidates);
-		AddPredictedContactCandidates(Candidates, DeltaTime);
-		EvaluateRelativeMotion(Candidates);
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightActualContacts);
+			DetectContactCandidates(Sim.PrevPositions, Sim.Positions, FrameColliders, Candidates);
+		}
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightPredictiveContacts);
+			AddPredictedContactCandidates(Candidates, DeltaTime);
+		}
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCandidates);
+			EvaluateRelativeMotion(Candidates);
+		}
 
 		FRopeContactTracker FlightDebugTracker;
-		FlightDebugTracker.Update(Candidates, 0.0f);
-		const bool bShouldCapture = ShouldCapture(Candidates);
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightTrackerUpdate);
+			FlightDebugTracker.Update(Candidates, 0.0f);
+		}
+		bool bShouldCapture = false;
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCapture);
+			bShouldCapture = ShouldCapture(Candidates);
+		}
+		constexpr bool bEnableFlightNoContactReturn = false;
 
 		if (bShouldCapture)
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightBuildContactingState);
 			BuildContactingState(Candidates);
 			FlightNoContactElapsed = 0.0f;
 			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Flight -> Contacting (bone=%s, %d node(s))"),
@@ -1139,7 +1177,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			Phase = ERopePhase::Contacting;
 			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
 		}
-		else if (!bWhipSwingActive && Candidates.Num() == 0 && WrapConfig.FlightNoContactReturnTime > 0.0f)
+		else if (bEnableFlightNoContactReturn && !bWhipSwingActive && Candidates.Num() == 0 && WrapConfig.FlightNoContactReturnTime > 0.0f)
 		{
 			FlightNoContactElapsed += DeltaTime;
 			if (FlightNoContactElapsed >= WrapConfig.FlightNoContactReturnTime)
@@ -1161,6 +1199,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 
 		if (bDrawFlightVisual || bDrawFlightStat)
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightDrawDebug);
 			const FString RopeName = GetOwner()
 				? FString::Printf(TEXT("%s.%s"), *GetOwner()->GetName(), *GetName())
 				: GetName();
@@ -1253,6 +1292,16 @@ bool URopeComponent::IsWhipGuidedNodeThisFrame(int32 NodeIndex) const
 	return WhipGuidedNodesThisFrame.IsValidIndex(NodeIndex) && WhipGuidedNodesThisFrame[NodeIndex] != 0;
 }
 
+bool URopeComponent::ShouldRunPredictiveContactForNode(int32 NodeIndex, bool bHasGuidedNodes, const FVector& FrameDisplacement) const
+{
+	if (!bHasGuidedNodes)
+	{
+		return true;
+	}
+
+	return IsWhipGuidedNodeThisFrame(NodeIndex) || IsTailNode(NodeIndex) || FrameDisplacement.Size() > Sim.SegmentLength;
+}
+
 float URopeComponent::NodeSpeed(int32 NodeIndex) const
 {
 	if (!Sim.Positions.IsValidIndex(NodeIndex) || !Sim.PrevPositions.IsValidIndex(NodeIndex))
@@ -1264,19 +1313,28 @@ float URopeComponent::NodeSpeed(int32 NodeIndex) const
 
 bool URopeComponent::IsNearAnyColliderSegment(const FVector& PrevPosition, const FVector& Position, const TArray<IRopeCollider*>& Colliders) const
 {
+	TArray<IRopeCollider*> NearbyColliders;
+	GatherNearbyColliders(PrevPosition, Position, Colliders, NearbyColliders);
+	return NearbyColliders.Num() > 0;
+}
+
+void URopeComponent::GatherNearbyColliders(const FVector& PrevPosition, const FVector& Position,
+	const TArray<IRopeCollider*>& Colliders, TArray<IRopeCollider*>& OutNearbyColliders) const
+{
+	OutNearbyColliders.Reset();
+
 	FBox SegmentBounds(ForceInit);
 	SegmentBounds += PrevPosition;
 	SegmentBounds += Position;
 	SegmentBounds = SegmentBounds.ExpandBy(WrapConfig.ContactRadius + Radius + 5.0f);
 
-	for (const IRopeCollider* Collider : Colliders)
+	for (IRopeCollider* Collider : Colliders)
 	{
 		if (Collider && SegmentBounds.Intersect(Collider->GetWorldBounds().ExpandBy(WrapConfig.ContactRadius + Radius)))
 		{
-			return true;
+			OutNearbyColliders.Add(Collider);
 		}
 	}
-	return false;
 }
 
 FRopeContact URopeComponent::SweepOrSampleContact(const FVector& PrevPosition, const FVector& Position, const TArray<IRopeCollider*>& Colliders) const
@@ -1336,6 +1394,7 @@ FVector URopeComponent::ExpectedWrapTangent(const FRopeContactCandidate& Candida
 
 bool URopeComponent::ShouldCapture(const TArray<FRopeContactCandidate>& Candidates) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCaptureImpl);
 	FRopeContactTracker TempTracker;
 	TempTracker.Update(Candidates, 0.0f);
 	return TempTracker.CandidateNodes.Num() >= FMath::Max(1, WrapConfig.MinLatchNodes)

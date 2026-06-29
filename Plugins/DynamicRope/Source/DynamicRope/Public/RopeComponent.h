@@ -265,9 +265,14 @@ private:
 
 	bool IsWhipGuidedNodeThisFrame(int32 NodeIndex) const;
 
+	bool ShouldRunPredictiveContactForNode(int32 NodeIndex, bool bHasGuidedNodes, const FVector& FrameDisplacement) const;
+
 	float NodeSpeed(int32 NodeIndex) const;
 
 	bool IsNearAnyColliderSegment(const FVector& PrevPosition, const FVector& Position, const TArray<IRopeCollider*>& Colliders) const;
+
+	void GatherNearbyColliders(const FVector& PrevPosition, const FVector& Position,
+		const TArray<IRopeCollider*>& Colliders, TArray<IRopeCollider*>& OutNearbyColliders) const;
 
 	FRopeContact SweepOrSampleContact(const FVector& PrevPosition, const FVector& Position, const TArray<IRopeCollider*>& Colliders) const;
 

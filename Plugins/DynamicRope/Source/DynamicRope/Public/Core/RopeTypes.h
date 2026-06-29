@@ -266,7 +266,7 @@ struct FRopeWrapConfig
 
 	/** Flight returns to Free after this much post-whip time with no contact candidates. 0 disables. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
-	float FlightNoContactReturnTime = 0.12f;
+	float FlightNoContactReturnTime = 0.0f;
 };
 
 /** flight 단계의 Throw / launch 파라미터. */
