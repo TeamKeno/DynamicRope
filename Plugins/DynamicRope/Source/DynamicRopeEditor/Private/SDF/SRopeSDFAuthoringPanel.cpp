@@ -80,10 +80,42 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			[
-				SNew(SButton)
-				.Text(LOCTEXT("Bake", "Bake"))
-				.IsEnabled(this, &SRopeSDFAuthoringPanel::CanBake)
-				.OnClicked(this, &SRopeSDFAuthoringPanel::OnBakeClicked)
+				SNew(SHorizontalBox)
+
+				// Bake: 현재 설정으로 본별 SDF를 굽는다(자산 메모리에만 반영 — 디스크 저장은 Save).
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.Padding(0.0f, 0.0f, 4.0f, 0.0f)
+				[
+					SNew(SButton)
+					.HAlign(HAlign_Center)
+					.Text(LOCTEXT("Bake", "Bake"))
+					.IsEnabled(this, &SRopeSDFAuthoringPanel::CanBake)
+					.OnClicked(this, &SRopeSDFAuthoringPanel::OnBakeClicked)
+				]
+
+				// Save: 베이크 결과를 디스크에 쓴다. 저장할 변경이 있을 때만 활성화되고 "Save *"로 표시.
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.Padding(0.0f, 0.0f, 4.0f, 0.0f)
+				[
+					SNew(SButton)
+					.HAlign(HAlign_Center)
+					.Text(this, &SRopeSDFAuthoringPanel::GetSaveButtonText)
+					.IsEnabled(this, &SRopeSDFAuthoringPanel::CanSave)
+					.OnClicked(this, &SRopeSDFAuthoringPanel::OnSaveClicked)
+				]
+
+				// Refresh: 현재 베이크된 데이터 기준으로 프리뷰 뷰포트를 다시 그린다.
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				[
+					SNew(SButton)
+					.HAlign(HAlign_Center)
+					.Text(LOCTEXT("Refresh", "Refresh"))
+					.IsEnabled(this, &SRopeSDFAuthoringPanel::CanRefresh)
+					.OnClicked(this, &SRopeSDFAuthoringPanel::OnRefreshClicked)
+				]
 			]
 
 			// 베이크 설정(베이크 전 편집 가능).
@@ -438,12 +470,45 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 		return FReply::Handled();
 	}
 
+	// 베이크 결과는 자산 메모리에만 반영하고 패키지를 dirty로 표시한다. 디스크 저장은 Save 버튼이,
+	// 뷰포트 반영은 Refresh 버튼이 담당한다(자동 저장 제거).
 	Data->Modify();
 	Data->BoneVolumes = MoveTemp(Volumes);
 	Data->MarkPackageDirty();
 
-	// 임시: 베이크 직후 패키지를 자동저장한다. (read-only Perforce 파일이면 여기서 쓰기 실패 —
-	// 소스컨트롤 체크아웃 연동은 추후 개선.)
+	UE_LOG(LogRopeSDFBake, Log, TEXT("Baked %s: %d bone volume(s) (unsaved — press Save)."),
+		*Data->GetName(), Data->BoneVolumes.Num());
+
+	FNotificationInfo Info(FText::Format(
+		LOCTEXT("Baked", "Baked {0} bone volume(s). Press Save to write to disk, Refresh to preview."),
+		FText::AsNumber(Data->BoneVolumes.Num())));
+	Info.ExpireDuration = 5.0f;
+	FSlateNotificationManager::Get().AddNotification(Info);
+	return FReply::Handled();
+}
+
+bool SRopeSDFAuthoringPanel::CanSave() const
+{
+	const URopeSDFData* Data = Target.Get();
+	const UPackage* Package = Data ? Data->GetPackage() : nullptr;
+	return Package && Package->IsDirty();
+}
+
+FText SRopeSDFAuthoringPanel::GetSaveButtonText() const
+{
+	// 저장이 필요하면(=dirty) "Save *"로 미저장 상태를 알린다.
+	return CanSave() ? LOCTEXT("SaveDirty", "Save *") : LOCTEXT("Save", "Save");
+}
+
+FReply SRopeSDFAuthoringPanel::OnSaveClicked()
+{
+	URopeSDFData* Data = Target.Get();
+	if (!Data)
+	{
+		return FReply::Handled();
+	}
+
+	// (read-only Perforce 파일이면 쓰기 실패 — 소스컨트롤 체크아웃 연동은 추후 개선.)
 	bool bSaved = false;
 	if (UPackage* Package = Data->GetPackage())
 	{
@@ -457,21 +522,34 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 
 	if (bSaved)
 	{
-		UE_LOG(LogRopeSDFBake, Log, TEXT("Baked %s: %d bone volume(s), auto-saved."),
-			*Data->GetName(), Data->BoneVolumes.Num());
+		UE_LOG(LogRopeSDFBake, Log, TEXT("Saved %s: %d bone volume(s)."), *Data->GetName(), Data->BoneVolumes.Num());
 	}
 	else
 	{
-		UE_LOG(LogRopeSDFBake, Warning, TEXT("Baked %s: %d bone volume(s), but auto-save failed (read-only? save manually)."),
-			*Data->GetName(), Data->BoneVolumes.Num());
+		UE_LOG(LogRopeSDFBake, Warning, TEXT("Save failed for %s (read-only? check out the file)."), *Data->GetName());
 	}
 
-	FNotificationInfo Info(FText::Format(
-		LOCTEXT("Baked", "Baked {0} bone volume(s).{1}"),
-		FText::AsNumber(Data->BoneVolumes.Num()),
-		bSaved ? FText::GetEmpty() : LOCTEXT("SaveFailed", " (auto-save failed — save manually)")));
-	Info.ExpireDuration = 5.0f;
+	FNotificationInfo Info(bSaved
+		? FText::Format(LOCTEXT("Saved", "Saved {0}."), FText::FromString(Data->GetName()))
+		: LOCTEXT("SaveFail", "Save failed — file may be read-only (check out, then Save again)."));
+	Info.ExpireDuration = 4.0f;
 	FSlateNotificationManager::Get().AddNotification(Info);
+	return FReply::Handled();
+}
+
+bool SRopeSDFAuthoringPanel::CanRefresh() const
+{
+	return Target.IsValid() && !Target->SourceMesh.IsNull();
+}
+
+FReply SRopeSDFAuthoringPanel::OnRefreshClicked()
+{
+	// 메시는 그대로 두어 카메라를 유지하고, 베이크된 데이터 출처만 다시 지정해 오버레이를 다시 그린다.
+	if (PreviewViewport.IsValid())
+	{
+		PreviewViewport->SetPreviewData(Target.Get());
+		PreviewViewport->InvalidatePreview();
+	}
 	return FReply::Handled();
 }
 

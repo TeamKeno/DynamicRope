@@ -118,7 +118,16 @@ void SRopeSDFPreviewViewport::SetPreviewMesh(USkeletalMesh* InMesh)
 
 void SRopeSDFPreviewViewport::SetPreviewData(URopeSDFData* InData)
 {
-	PreviewData = InData;
+	// 호출 시점의 베이크 결과를 사본으로 고정한다(라이브 자산을 매 프레임 읽지 않음). 이렇게 해야
+	// Bake가 자산을 바꿔도 뷰포트가 즉시 갱신되지 않고, Refresh(=재호출) 시에만 반영된다.
+	if (InData)
+	{
+		PreviewVolumes = InData->BoneVolumes;
+	}
+	else
+	{
+		PreviewVolumes.Reset();
+	}
 	InvalidatePreview();
 }
 
@@ -132,13 +141,13 @@ void SRopeSDFPreviewViewport::InvalidatePreview()
 
 void SRopeSDFPreviewViewport::DrawSDFOverlay(FPrimitiveDrawInterface* PDI)
 {
-	URopeSDFData* Data = PreviewData.Get();
-	if (!PDI || !Data || !PreviewMeshComponent || !DrawOptions.AnyEnabled())
+	if (!PDI || !PreviewMeshComponent || !DrawOptions.AnyEnabled())
 	{
 		return;
 	}
 
-	for (const FRopeBoneSDFVolume& Vol : Data->BoneVolumes)
+	// 라이브 자산이 아니라 SetPreviewData로 고정된 스냅샷을 그린다(Bake는 Refresh 전까지 반영 안 됨).
+	for (const FRopeBoneSDFVolume& Vol : PreviewVolumes)
 	{
 		if (Vol.Bone.IsNone())
 		{

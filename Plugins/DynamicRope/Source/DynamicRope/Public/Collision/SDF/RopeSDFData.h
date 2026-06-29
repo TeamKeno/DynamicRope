@@ -56,7 +56,8 @@ struct FRopeBoneSDFVolume
  * 한 스켈레탈 메시에 대한 본별 SDF 묶음. URopeSDFProvider가 참조하여 매 프레임 collider를 공급한다.
  * Content Browser에서 생성(팩토리)하고 SDF 도크탭에서 메시를 지정해 베이크한다.
  */
-UCLASS(BlueprintType)
+// 에디터 UI(에셋 피커 등) tooltip은 영어로 노출한다 — 한국어 주석 대신 명시적 ToolTip 메타를 사용.
+UCLASS(BlueprintType, meta = (ToolTip = "Per-bone signed distance field set baked from one skeletal mesh. URopeSDFProvider references it to supply a collider per bone each frame. Create it in the Content Browser, then assign a Source Mesh and bake it from the Rope SDF Authoring tab."))
 class DYNAMICROPE_API URopeSDFData : public UDataAsset
 {
 	GENERATED_BODY()

@@ -23,7 +23,7 @@ public:
 	void Construct(const FArguments& InArgs);
 
 private:
-	/** 선택된 타깃에 대해 본별 베이크를 실행하고, 결과를 다시 써넣은 뒤 (임시로) 저장한다. */
+	/** 선택된 타깃에 대해 본별 베이크를 실행해 결과를 자산 메모리에 써넣는다(디스크 저장은 Save 버튼). */
 	FReply OnBakeClicked();
 
 	/** 에셋 입력 박스에서 선택한 타깃 URopeSDFData. */
@@ -38,6 +38,18 @@ private:
 	FString GetTargetPath() const;
 	void OnTargetChanged(const FAssetData& InAssetData);
 	bool CanBake() const;
+
+	//~ Save / Refresh 버튼.
+	/** 저장할 변경이 있는가(타깃 패키지가 dirty인가). Save 버튼 활성화 및 "Save *" 표시 기준. */
+	bool CanSave() const;
+	/** 저장이 필요하면 "Save *", 아니면 "Save". */
+	FText GetSaveButtonText() const;
+	/** 타깃 패키지를 디스크에 저장한다(베이크 결과 커밋). 성공 시 패키지 dirty가 해제된다. */
+	FReply OnSaveClicked();
+	/** 프리뷰 뷰포트를 다시 그릴 수 있는가(타깃 + SourceMesh 존재). */
+	bool CanRefresh() const;
+	/** 현재 베이크된 데이터 기준으로 프리뷰 뷰포트 오버레이를 다시 그린다(카메라는 유지). */
+	FReply OnRefreshClicked();
 
 	/** 현재 타깃의 SourceMesh를 동기 로드해 프리뷰 뷰포트에 반영한다(없으면 빈 뷰 + 안내). */
 	void RefreshPreviewMesh();

@@ -12,6 +12,7 @@
 #include "SEditorViewport.h"
 #include "UObject/GCObject.h"
 #include "Collision/SDF/RopeSDFProvider.h" // ERopeSDFSliceAxis (오버레이 옵션 기본값)
+#include "Collision/SDF/RopeSDFData.h"     // FRopeBoneSDFVolume (오버레이 스냅샷 보관)
 
 class FAdvancedPreviewScene;
 class FRopeSDFPreviewViewportClient;
@@ -67,7 +68,11 @@ public:
 	/** 프리뷰할 메시를 교체한다. nullptr이면 빈 씬(메시 제거)으로 둔다. */
 	void SetPreviewMesh(USkeletalMesh* InMesh);
 
-	/** SDF 오버레이가 순회할 본별 볼륨의 출처 자산을 지정한다. nullptr이면 오버레이 없음. */
+	/**
+	 * SDF 오버레이가 그릴 본별 볼륨을, 이 자산의 현재 BoneVolumes로 스냅샷한다(사본 보관). 호출 시점의
+	 * 데이터로 고정되므로, 이후 자산이 베이크돼 바뀌어도 SetPreviewData를 다시 부를 때까지 갱신되지 않는다
+	 * (Bake는 뷰포트에 즉시 반영 X, Refresh 시 반영). nullptr이면 오버레이를 비운다.
+	 */
 	void SetPreviewData(URopeSDFData* InData);
 
 	/** 패널 UI가 토글/파라미터를 읽고 쓰는 진입점. 변경 후 InvalidatePreview() 호출 권장. */
@@ -97,8 +102,8 @@ private:
 	/** 카메라/렌더링을 담당하는 뷰포트 클라이언트. */
 	TSharedPtr<FRopeSDFPreviewViewportClient> ViewportClient;
 
-	/** 오버레이가 그릴 본별 볼륨의 출처(약참조 — 자산 수명에 관여하지 않음). */
-	TWeakObjectPtr<URopeSDFData> PreviewData;
+	/** 오버레이가 그릴 본별 볼륨의 스냅샷 사본. SetPreviewData 호출 때만 갱신된다(라이브 자산과 디커플링). */
+	TArray<FRopeBoneSDFVolume> PreviewVolumes;
 
 	/** 오버레이 표시 토글/파라미터(패널 로컬 상태). */
 	FRopeSDFPreviewDrawOptions DrawOptions;
