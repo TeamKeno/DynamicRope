@@ -86,21 +86,6 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				.OnClicked(this, &SRopeSDFAuthoringPanel::OnBakeClicked)
 			]
 
-			// 미저장 미리보기: 현재 설정대로 베이크해 프리뷰에만 표시(자산 비변경). 설정 변경 시 자동 갱신.
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(0.0f, 6.0f, 0.0f, 0.0f)
-			[
-				SNew(SCheckBox)
-				.IsEnabled(this, &SRopeSDFAuthoringPanel::CanBake)
-				.IsChecked(this, &SRopeSDFAuthoringPanel::IsLivePreviewChecked)
-				.OnCheckStateChanged(this, &SRopeSDFAuthoringPanel::OnLivePreviewChanged)
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("LivePreview", "Live Preview (bake settings, no save)"))
-				]
-			]
-
 			// 베이크 설정(베이크 전 편집 가능).
 			+ SVerticalBox::Slot()
 			.AutoHeight()
@@ -226,7 +211,6 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeFloatRow(const FText& Label,
 			.MinSliderValue(MinVal).MaxSliderValue(MaxVal)
 			.Value_Lambda([this, Member]() { return TOptional<float>(Settings.*Member); })
 			.OnValueChanged_Lambda([this, Member](float NewVal) { Settings.*Member = NewVal; })
-			.OnValueCommitted_Lambda([this, Member](float NewVal, ETextCommit::Type) { Settings.*Member = NewVal; OnBakeSettingCommitted(); })
 		];
 }
 
@@ -246,7 +230,6 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeIntRow(const FText& Label,
 			.MinSliderValue(MinVal).MaxSliderValue(MaxVal)
 			.Value_Lambda([this, Member]() { return TOptional<int32>(Settings.*Member); })
 			.OnValueChanged_Lambda([this, Member](int32 NewVal) { Settings.*Member = NewVal; })
-			.OnValueCommitted_Lambda([this, Member](int32 NewVal, ETextCommit::Type) { Settings.*Member = NewVal; OnBakeSettingCommitted(); })
 		];
 }
 
@@ -383,68 +366,12 @@ void SRopeSDFAuthoringPanel::RefreshPreviewMesh()
 	}
 	PreviewViewport->SetPreviewMesh(Mesh);
 	PreviewViewport->SetPreviewData(Target.Get());
-
-	// 타깃이 바뀌면 미저장 프리뷰도 새 설정/메시 기준으로 다시 굽거나(켜져 있으면) 클리어한다.
-	RebuildPreviewBake();
 }
 
 EVisibility SRopeSDFAuthoringPanel::GetPreviewHintVisibility() const
 {
 	const bool bHasMesh = Target.IsValid() && !Target->SourceMesh.IsNull();
 	return bHasMesh ? EVisibility::Collapsed : EVisibility::HitTestInvisible;
-}
-
-ECheckBoxState SRopeSDFAuthoringPanel::IsLivePreviewChecked() const
-{
-	return bLivePreview ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-}
-
-void SRopeSDFAuthoringPanel::OnLivePreviewChanged(ECheckBoxState NewState)
-{
-	bLivePreview = (NewState == ECheckBoxState::Checked);
-	RebuildPreviewBake();
-}
-
-void SRopeSDFAuthoringPanel::OnBakeSettingCommitted()
-{
-	if (bLivePreview)
-	{
-		RebuildPreviewBake();
-	}
-}
-
-void SRopeSDFAuthoringPanel::RebuildPreviewBake()
-{
-	if (!PreviewViewport.IsValid())
-	{
-		return;
-	}
-
-	// 미리보기가 꺼져 있으면 미저장 볼륨을 비워 자산의 베이크 결과를 보여준다.
-	if (!bLivePreview)
-	{
-		PreviewViewport->ClearPreviewVolumes();
-		return;
-	}
-
-	URopeSDFData* Data = Target.Get();
-	USkeletalMesh* Mesh = Data ? Data->SourceMesh.LoadSynchronous() : nullptr;
-	if (!Mesh)
-	{
-		PreviewViewport->ClearPreviewVolumes();
-		return;
-	}
-
-	// 현재 설정으로 굽되 자산에는 쓰지 않는다(미저장 프리뷰).
-	TArray<FRopeBoneSDFVolume> Volumes;
-	if (FRopeSDFBaker::BakeMesh(Mesh, BoneFilter, Settings, Volumes))
-	{
-		PreviewViewport->SetPreviewVolumes(Volumes);
-	}
-	else
-	{
-		PreviewViewport->ClearPreviewVolumes();
-	}
 }
 
 bool SRopeSDFAuthoringPanel::CanBake() const
@@ -486,13 +413,6 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 	Data->Modify();
 	Data->BoneVolumes = MoveTemp(Volumes);
 	Data->MarkPackageDirty();
-
-	// 실제 베이크가 자산에 반영됐으니 미저장 프리뷰를 끄고 자산 결과를 그대로 보여준다.
-	bLivePreview = false;
-	if (PreviewViewport.IsValid())
-	{
-		PreviewViewport->ClearPreviewVolumes();
-	}
 
 	// 임시: 베이크 직후 패키지를 자동저장한다. (read-only Perforce 파일이면 여기서 쓰기 실패 —
 	// 소스컨트롤 체크아웃 연동은 추후 개선.)

@@ -122,20 +122,6 @@ void SRopeSDFPreviewViewport::SetPreviewData(URopeSDFData* InData)
 	InvalidatePreview();
 }
 
-void SRopeSDFPreviewViewport::SetPreviewVolumes(const TArray<FRopeBoneSDFVolume>& InVolumes)
-{
-	PreviewVolumes = InVolumes;
-	bUsePreviewVolumes = true;
-	InvalidatePreview();
-}
-
-void SRopeSDFPreviewViewport::ClearPreviewVolumes()
-{
-	PreviewVolumes.Reset();
-	bUsePreviewVolumes = false;
-	InvalidatePreview();
-}
-
 void SRopeSDFPreviewViewport::InvalidatePreview()
 {
 	if (ViewportClient.IsValid())
@@ -146,27 +132,13 @@ void SRopeSDFPreviewViewport::InvalidatePreview()
 
 void SRopeSDFPreviewViewport::DrawSDFOverlay(FPrimitiveDrawInterface* PDI)
 {
-	if (!PDI || !PreviewMeshComponent || !DrawOptions.AnyEnabled())
+	URopeSDFData* Data = PreviewData.Get();
+	if (!PDI || !Data || !PreviewMeshComponent || !DrawOptions.AnyEnabled())
 	{
 		return;
 	}
 
-	// 미저장 프리뷰 볼륨이 있으면 그것을, 없으면 자산의 베이크 결과를 그린다.
-	const TArray<FRopeBoneSDFVolume>* Source = nullptr;
-	if (bUsePreviewVolumes)
-	{
-		Source = &PreviewVolumes;
-	}
-	else if (const URopeSDFData* Data = PreviewData.Get())
-	{
-		Source = &Data->BoneVolumes;
-	}
-	if (!Source)
-	{
-		return;
-	}
-
-	for (const FRopeBoneSDFVolume& Vol : *Source)
+	for (const FRopeBoneSDFVolume& Vol : Data->BoneVolumes)
 	{
 		if (Vol.Bone.IsNone())
 		{

@@ -12,7 +12,6 @@
 #include "SEditorViewport.h"
 #include "UObject/GCObject.h"
 #include "Collision/SDF/RopeSDFProvider.h" // ERopeSDFSliceAxis (오버레이 옵션 기본값)
-#include "Collision/SDF/RopeSDFData.h"     // FRopeBoneSDFVolume (미저장 프리뷰 볼륨 보관)
 
 class FAdvancedPreviewScene;
 class FRopeSDFPreviewViewportClient;
@@ -71,15 +70,6 @@ public:
 	/** SDF 오버레이가 순회할 본별 볼륨의 출처 자산을 지정한다. nullptr이면 오버레이 없음. */
 	void SetPreviewData(URopeSDFData* InData);
 
-	/**
-	 * 미저장 프리뷰 볼륨을 오버레이 출처로 사용한다(현재 베이크 설정으로 구운 결과를 자산에 쓰지 않고
-	 * 미리 보기 위함). 설정되면 자산의 BoneVolumes 대신 이 볼륨을 그린다.
-	 */
-	void SetPreviewVolumes(const TArray<FRopeBoneSDFVolume>& InVolumes);
-
-	/** 미저장 프리뷰 볼륨을 비우고 오버레이 출처를 다시 자산으로 되돌린다. */
-	void ClearPreviewVolumes();
-
 	/** 패널 UI가 토글/파라미터를 읽고 쓰는 진입점. 변경 후 InvalidatePreview() 호출 권장. */
 	FRopeSDFPreviewDrawOptions& AccessDrawOptions() { return DrawOptions; }
 
@@ -109,12 +99,6 @@ private:
 
 	/** 오버레이가 그릴 본별 볼륨의 출처(약참조 — 자산 수명에 관여하지 않음). */
 	TWeakObjectPtr<URopeSDFData> PreviewData;
-
-	/** true면 자산 대신 PreviewVolumes(미저장 프리뷰)를 그린다. */
-	bool bUsePreviewVolumes = false;
-
-	/** 현재 베이크 설정으로 구운 미저장 프리뷰 볼륨(자산에 쓰지 않음). */
-	TArray<FRopeBoneSDFVolume> PreviewVolumes;
 
 	/** 오버레이 표시 토글/파라미터(패널 로컬 상태). */
 	FRopeSDFPreviewDrawOptions DrawOptions;
