@@ -2,8 +2,10 @@
 //
 // URopeSDFData를 본별 signed distance 볼륨으로 채우는 에디터 전용 CPU 베이커.
 // 스켈레탈 메시의 에디터 소스 모델(WITH_EDITOR)을 읽어, 삼각형을 스킨 가중치로 본에 배정하고,
-// 본 로컬 공간으로 변환한 뒤, generalized winding number로 부호를 매긴 좁은밴드 SDF를 voxel화한다
-// (닫히지 않은 본별 삼각형 패치에서도 강건한 부호 판정).
+// 본 로컬 공간으로 변환한 뒤 좁은밴드 SDF를 voxel화한다. 거리(unsigned)는 본별 삼각형으로 재서 본 귀속을
+// 유지하되, 부호(안/밖)는 메시 전체(닫힌 표면)에 대한 generalized winding number(GeometryCore fast
+// winding)로 매긴다 — 본별 열린 패치로 적분하면 짧고 넓은 본 토막의 내부가 w<0.5로 바깥 오판되므로,
+// 전역 메시로 적분해야 강건하다.
 //
 // 규약(런타임 FRopeSDFCollider::Query 샘플러와 반드시 일치): 샘플은 grid 코너에 놓인다.
 // 즉 인덱스 (x,y,z)의 샘플 위치 = LocalBounds.Min + (x,y,z) * VoxelSize,

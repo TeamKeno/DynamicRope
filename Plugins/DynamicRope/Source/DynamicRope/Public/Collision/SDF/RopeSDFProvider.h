@@ -83,7 +83,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
 	bool bDrawSDFBounds = false;
 
-	/** 좁은밴드 voxel을 부호별 색 점으로 그린다(안=빨강, 밖=파랑, ≈0=흰색). */
+	/** 좁은밴드 voxel을 부호별 색 점으로 그린다(안=빨강, 밖=파랑, ≈0=흰색 — slice heatmap과 동일 규약). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
 	bool bDrawSDFVoxels = false;
 
@@ -100,7 +100,7 @@ public:
 	float SDFSyntheticRadius = 10.0f;
 
 	//~ Slice plane heatmap -------------------------------------------------
-	/** 볼륨을 가로지르는 평면 위 distance를 발산형 색(음=파랑, 0=흰, 양=빨강)으로 표시한다. */
+	/** 볼륨을 가로지르는 평면 위 distance를 발산형 색(음=빨강, 0=흰, 양=파랑)으로 표시한다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Collision|SDF Debug")
 	bool bDrawSDFSlice = false;
 

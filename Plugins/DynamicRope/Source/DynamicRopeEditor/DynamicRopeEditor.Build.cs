@@ -29,6 +29,7 @@ public class DynamicRopeEditor : ModuleRules
 			"AssetTools",           // 에셋 등록(팩토리)
 			"AssetDefinition",      // UAssetDefinition (Content Browser 카테고리/색)
 			"AdvancedPreviewScene", // 오써링 패널 3D 프리뷰 뷰포트(조명/바닥 프리뷰 씬)
+			"GeometryCore",         // 베이크 부호 판정용 fast winding number(FDynamicMesh3 + AABB/winding 트리)
 		});
 	}
 }

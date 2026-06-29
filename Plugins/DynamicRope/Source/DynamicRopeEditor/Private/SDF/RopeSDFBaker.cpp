@@ -1,29 +1,13 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RopeSDFBaker.h"
+#include "SDF/RopeSDFBakeSign.h"
 #include "DynamicRopeEditorLog.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "Engine/SkeletalMesh.h"
 #include "Rendering/SkeletalMeshModel.h"
 #include "Rendering/SkeletalMeshLODModel.h"
 #include "Async/ParallelFor.h"
-
-namespace
-{
-	// 삼각형 (A,B,C)이 원점에서 두르는 부호 있는 입체각. 정점은 이미 query점 기준 상대좌표여야 한다.
-	// 메시 전체에 대해 합산한 뒤 4*PI로 나누면 generalized winding number(Jacobson et al.)가 되며,
-	// > 0.5 이면 query점이 표면 안쪽. 닫히지 않은(non-watertight) 패치 — 본 하나의 삼각형 — 에서도 강건하다.
-	double SolidAngle(const FVector& A, const FVector& B, const FVector& C)
-	{
-		const double la = A.Size(), lb = B.Size(), lc = C.Size();
-		const double Num = FVector::DotProduct(A, FVector::CrossProduct(B, C));
-		const double Den = la * lb * lc
-			+ FVector::DotProduct(A, B) * lc
-			+ FVector::DotProduct(B, C) * la
-			+ FVector::DotProduct(C, A) * lb;
-		return 2.0 * FMath::Atan2(Num, Den);
-	}
-}
 
 ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 	const FRopeSDFBakeSettings& S, TArray<FRopeBoneSDFVolume>& Out,
@@ -125,6 +109,17 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 
 	const TArray<uint32>& Indices = LOD.IndexBuffer;
 
+	// --- 부호 판정용: 메시 전체로 fast-winding 분류기를 한 번 빌드한다. "안/밖"은 몸 전체(닫힌 표면)에
+	// 대한 전역 속성이라, 본별 열린 패치가 아니라 전체 메시로 winding을 봐야 강건하다(거리는 여전히 본별
+	// 삼각형으로 재므로 본 귀속은 유지된다). 정점은 컴포넌트 공간(Verts 저장 공간) 그대로, query도 동일 공간.
+	TArray<FVector3f> AllPositions;
+	AllPositions.Reserve(Verts.Num());
+	for (const FSoftSkinVertex& V : Verts)
+	{
+		AllPositions.Add(V.Position);
+	}
+	const FRopeSDFWindingClassifier WindingClassifier(AllPositions, Indices);
+
 	const int32 TotalTargets = Targets.Num();
 	int32 DoneTargets = 0;
 	for (int32 BoneIdx : Targets)
@@ -206,15 +201,16 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		const FVector Min = Local.Min;
 		const FVector Max = Min + FVector(Res.X - 1, Res.Y - 1, Res.Z - 1) * Vox;
 
-		// --- (4b) voxel화. 샘플마다: unsigned 거리 = 최소 점-삼각형 거리, 부호 = winding number.
-		// 평탄 인덱스 배치 단위로 병렬화한다(삼각형 수프는 읽기 전용이라 경쟁 없음).
+		// --- (4b) voxel화. 샘플마다: unsigned 거리 = (이 본) 최소 점-삼각형 거리, 부호 = 전체 메시 fast-winding.
+		// 평탄 인덱스 배치 단위로 병렬화한다(거리 삼각형·winding 트리 모두 읽기 전용이라 경쟁 없음).
 		// TArray는 int32 카운트라 선형 인덱스도 int32 유지. Res는 MaxResolution으로 상한
 		// (기본 48 => 48^3 ~ 110k)이라 범위 내.
 		const int32 Count = Res.X * Res.Y * Res.Z;
 		TArray<float> Distances;
 		Distances.SetNumUninitialized(Count);
 
-		const int32 NumTris = TriA.Num();
+		const int32 NumTris = TriA.Num();                  // 거리(unsigned)는 이 본 삼각형으로
+		const FTransform& BoneToComp = CompSpace[BoneIdx]; // 본 로컬 샘플점 → 컴포넌트 공간(분류기와 동일 프레임)
 
 		// 평탄 인덱스(Flat = x + y*X + z*X*Y) 하나의 거리/부호를 계산해 기록한다.
 		auto ComputeSample = [&](int32 Flat)
@@ -222,25 +218,27 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 			const int32 x = Flat % Res.X;
 			const int32 y = (Flat / Res.X) % Res.Y;
 			const int32 z = Flat / (Res.X * Res.Y);
-			const FVector P = Min + FVector(x, y, z) * Vox;
+			const FVector P = Min + FVector(x, y, z) * Vox; // 본 로컬
+
+			// 거리(unsigned): 이 본 삼각형까지의 최소 점-삼각형 거리 → 본 귀속 유지.
 			float Best = BIG_NUMBER;
-			double Omega = 0.0;
 			for (int32 k = 0; k < NumTris; ++k)
 			{
 				const FVector CP = FMath::ClosestPointOnTriangleToPoint(P, TriA[k], TriB[k], TriC[k]);
 				Best = FMath::Min(Best, static_cast<float>(FVector::Dist(P, CP)));
-				Omega += SolidAngle(TriA[k] - P, TriB[k] - P, TriC[k] - P);
 			}
-			const bool bInside = (Omega / (4.0 * PI)) > 0.5;
-			float D = bInside ? -Best : Best;            // 바깥쪽 양수(frozen FRopeContact 계약)
-			D = FMath::Clamp(D, -S.NarrowBand, S.NarrowBand);
-			Distances[Flat] = D;
+
+			// 부호(안/밖): 전체 메시 fast-winding으로 가른다(본별 열린 패치는 짧고 넓은 토막의 내부를
+			// 바깥 오판하므로 전역 메시로 봐야 강건). 샘플점을 컴포넌트 공간으로 올려 질의한다.
+			const FVector Pc = BoneToComp.TransformPosition(P);
+			const float D = WindingClassifier.IsInside(Pc) ? -Best : Best; // 안쪽 음수 / 바깥 양수
+			Distances[Flat] = FMath::Clamp(D, -S.NarrowBand, S.NarrowBand); // 바깥쪽 양수(frozen FRopeContact 계약)
 		};
 
 		// 게임 스레드가 취소 버튼을 처리할 수 있도록 무거운 본을 여러 배치로 쪼개고, 배치 사이에서 취소를
 		// 폴링한다. 배치 내부는 그대로 ParallelFor로 전 코어를 쓰며(평탄 인덱스 분할은 결과에 영향 없음),
 		// 가벼운 본은 NumBatches==1이라 기존과 동일한 단일 ParallelFor가 된다.
-		const int64 Work = static_cast<int64>(Count) * FMath::Max(1, NumTris);
+		const int64 Work = static_cast<int64>(Count) * static_cast<int64>(FMath::Max(NumTris, 64));
 		// 배치당 대략의 연산량. UI 갱신 throttle(0.2s)보다 짧게 유지해 취소가 즉각 반응하도록 작게 잡는다.
 		const int64 TargetOpsPerBatch = 1024 * 1024;
 		const int32 NumBatches = static_cast<int32>(FMath::Clamp<int64>(Work / TargetOpsPerBatch, 1, Count));

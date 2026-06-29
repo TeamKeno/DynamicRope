@@ -17,10 +17,10 @@ namespace RopeSDFDraw
 	/** 로컬 AABB의 12개 모서리. */
 	void DrawBounds(FPrimitiveDrawInterface* PDI, const FBox& LocalBounds, const FTransform& Xform, const FLinearColor& Color);
 
-	/** 좁은밴드 voxel을 부호별 색 점으로(안=빨강, 밖=파랑, ≈0=흰색). |distance| <= Band 인 것만. */
+	/** 좁은밴드 voxel을 부호별 색 점으로(안=빨강, 밖=파랑, ≈0=흰색 — slice heatmap과 동일 규약). |distance| <= Band 인 것만. */
 	void DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& Volume, const FTransform& Xform, float Band);
 
-	/** 한 축 슬라이스 평면의 distance heatmap(음=파랑, 0=흰, 양=빨강). Pos01 0~1, Res 격자, Scale(cm)에서 포화. */
+	/** 한 축 슬라이스 평면의 distance heatmap(음=빨강, 0=흰, 양=파랑). Pos01 0~1, Res 격자, Scale(cm)에서 포화. */
 	void DrawSlice(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& Volume, const FTransform& Xform,
 		ERopeSDFSliceAxis Axis, float Pos01, int32 Res, float Scale);
 

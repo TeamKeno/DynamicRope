@@ -16,13 +16,13 @@ namespace
 		return FVector(Mn.X + Sz.X * Tx, Mn.Y + Sz.Y * Ty, Mn.Z + Sz.Z * Tz);
 	}
 
-	// 발산형 heatmap: 음=파랑, 0=흰, 양=빨강. Scale(cm)에서 포화.
+	// 발산형 heatmap: 음(안)=빨강, 0=흰, 양(밖)=파랑. Scale(cm)에서 포화.
 	FLinearColor HeatColor(float D, float Scale)
 	{
 		const float T = FMath::Clamp(D / FMath::Max(Scale, KINDA_SMALL_NUMBER), -1.0f, 1.0f);
 		return (T >= 0.0f)
-			? FMath::Lerp(FLinearColor::White, FLinearColor::Red, T)
-			: FMath::Lerp(FLinearColor::White, FLinearColor(0.0f, 0.4f, 1.0f), -T);
+			? FMath::Lerp(FLinearColor::White, FLinearColor(0.0f, 0.4f, 1.0f), T)
+			: FMath::Lerp(FLinearColor::White, FLinearColor::Red, -T);
 	}
 }
 
@@ -88,6 +88,7 @@ void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVol
 					Mn.X + Sz.X * (static_cast<double>(X) / (NX - 1)),
 					Mn.Y + Sz.Y * (static_cast<double>(Y) / (NY - 1)),
 					Mn.Z + Sz.Z * (static_cast<double>(Z) / (NZ - 1)));
+				// slice heatmap(HeatColor)과 동일 규약: 안(음)=빨강, 밖(양)=파랑, ≈0=흰색.
 				const FLinearColor C = (D < -0.01f) ? FLinearColor::Red
 					: (D > 0.01f) ? FLinearColor(0.0f, 0.4f, 1.0f)
 					: FLinearColor::White;
