@@ -12,6 +12,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Templates/Function.h" // FRopeSDFBakeProgress(TFunction) 진행 콜백
 
 class USkeletalMesh;
 struct FRopeBoneSDFVolume;
@@ -35,6 +36,30 @@ struct FRopeSDFBakeSettings
 	float BoundsPadding = 3.0f;
 };
 
+/**
+ * 본 단위 진행/취소 콜백. 타깃 본 하나의 voxel화를 시작할 때마다 한 번 호출된다.
+ *  - Done : 지금 시작하는 본의 0-기반 순번(0..Total).
+ *  - Total: 전체 타깃 본 수.
+ *  - Bone : 지금 시작하는 본 이름.
+ * 반환값이 false면 베이크를 즉시 중단한다(true=계속). 비어 있으면(기본) 보고/취소 없이 끝까지 굽는다.
+ */
+using FRopeSDFBakeProgress = TFunction<bool(int32 /*Done*/, int32 /*Total*/, const FName& /*Bone*/)>;
+
+/**
+ * 베이크 도중 자주(본 내부 voxel 배치 사이마다) 호출되는 취소 폴. true면 즉시 중단한다.
+ * 무거운 본의 voxel화가 게임 스레드를 오래 점유하지 않도록, 배치 사이에서 이 폴을 통해 슬로우 태스크
+ * UI를 펌프하고 취소 버튼 입력을 처리한다. 비어 있으면(기본) 본 단위 취소(Progress 반환값)만 동작한다.
+ */
+using FRopeSDFBakeCancelPoll = TFunction<bool()>;
+
+/** BakeMesh 결과. */
+enum class ERopeSDFBakeResult : uint8
+{
+	Success,    // 정상 완료(결과가 0개 본일 수도 있음).
+	NoGeometry, // CPU 지오메트리 없음(쿡/스트립) 또는 null 메시 — 베이크 불가.
+	Cancelled,  // 진행 콜백이 중단 요청 — OutVolumes는 미완성이므로 자산에 반영하지 말 것.
+};
+
 /** 무상태 본별 SDF 베이커. 에디터 전용(임포트 소스 모델 사용). */
 class FRopeSDFBaker
 {
@@ -43,8 +68,13 @@ public:
 	 * 요청된 본마다 본 로컬 볼륨 하나를 OutVolumes에 굽는다.
 	 *  - Bones가 비면 => 스킨 지오메트리가 있는 모든 본.
 	 *  - 자격 삼각형이 없는 본은 조용히 건너뛴다.
-	 * 메시에 CPU 지오메트리가 없을 때만(예: 쿡/스트립) false를 반환한다.
+	 *  - Progress가 있으면 본 하나를 처리하기 직전마다 호출한다(진행률 표시 + 본 단위 취소, 옵션).
+	 *  - CancelPoll이 있으면 본 내부 voxel 배치 사이마다 호출해 무거운 본 도중에도 취소를 받는다(옵션).
+	 *    Progress나 CancelPoll이 취소를 신호하면 Cancelled를 반환하며 OutVolumes는 미완성 상태로 남는다.
+	 * 메시에 CPU 지오메트리가 없으면(예: 쿡/스트립) NoGeometry를 반환한다.
 	 */
-	static bool BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& Bones,
-		const FRopeSDFBakeSettings& Settings, TArray<FRopeBoneSDFVolume>& OutVolumes);
+	static ERopeSDFBakeResult BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& Bones,
+		const FRopeSDFBakeSettings& Settings, TArray<FRopeBoneSDFVolume>& OutVolumes,
+		const FRopeSDFBakeProgress& Progress = FRopeSDFBakeProgress(),
+		const FRopeSDFBakeCancelPoll& CancelPoll = FRopeSDFBakeCancelPoll());
 };

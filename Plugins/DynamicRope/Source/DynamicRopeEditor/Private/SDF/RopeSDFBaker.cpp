@@ -25,21 +25,22 @@ namespace
 	}
 }
 
-bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
-	const FRopeSDFBakeSettings& S, TArray<FRopeBoneSDFVolume>& Out)
+ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
+	const FRopeSDFBakeSettings& S, TArray<FRopeBoneSDFVolume>& Out,
+	const FRopeSDFBakeProgress& Progress, const FRopeSDFBakeCancelPoll& CancelPoll)
 {
 	Out.Reset();
 	if (!Mesh)
 	{
 		UE_LOG(LogRopeSDFBake, Warning, TEXT("BakeMesh aborted: null mesh."));
-		return false;
+		return ERopeSDFBakeResult::NoGeometry;
 	}
 
 	FSkeletalMeshModel* Model = Mesh->GetImportedModel();
 	if (!Model || Model->LODModels.Num() == 0)
 	{
 		UE_LOG(LogRopeSDFBake, Warning, TEXT("BakeMesh aborted: %s has no CPU geometry (cooked/stripped)."), *Mesh->GetName());
-		return false; // CPU 지오메트리 없음(쿡/스트립)
+		return ERopeSDFBakeResult::NoGeometry; // CPU 지오메트리 없음(쿡/스트립)
 	}
 
 	UE_LOG(LogRopeSDFBake, Log, TEXT("BakeMesh start: %s (voxel=%.2fcm, maxRes=%d, narrowBand=%.1fcm)"),
@@ -124,8 +125,24 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 
 	const TArray<uint32>& Indices = LOD.IndexBuffer;
 
+	const int32 TotalTargets = Targets.Num();
+	int32 DoneTargets = 0;
 	for (int32 BoneIdx : Targets)
 	{
+		// 본 처리 직전에 진행 상황을 보고하고(스킵될 본 포함 — 진행률 단위는 '타깃 본'),
+		// 콜백이 false를 반환하면 즉시 중단한다.
+		if (Progress)
+		{
+			const FName BoneName = CompSpace.IsValidIndex(BoneIdx) ? Ref.GetBoneName(BoneIdx) : NAME_None;
+			if (!Progress(DoneTargets, TotalTargets, BoneName))
+			{
+				UE_LOG(LogRopeSDFBake, Log, TEXT("BakeMesh cancelled: %s at bone %d/%d (%s)."),
+					*Mesh->GetName(), DoneTargets, TotalTargets, *BoneName.ToString());
+				return ERopeSDFBakeResult::Cancelled;
+			}
+		}
+		++DoneTargets;
+
 		if (!CompSpace.IsValidIndex(BoneIdx))
 		{
 			continue;
@@ -190,7 +207,7 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 		const FVector Max = Min + FVector(Res.X - 1, Res.Y - 1, Res.Z - 1) * Vox;
 
 		// --- (4b) voxel화. 샘플마다: unsigned 거리 = 최소 점-삼각형 거리, 부호 = winding number.
-		// Z 슬라이스로 병렬화(삼각형 수프는 읽기 전용이라 경쟁 없음).
+		// 평탄 인덱스 배치 단위로 병렬화한다(삼각형 수프는 읽기 전용이라 경쟁 없음).
 		// TArray는 int32 카운트라 선형 인덱스도 int32 유지. Res는 MaxResolution으로 상한
 		// (기본 48 => 48^3 ~ 110k)이라 범위 내.
 		const int32 Count = Res.X * Res.Y * Res.Z;
@@ -198,28 +215,48 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 		Distances.SetNumUninitialized(Count);
 
 		const int32 NumTris = TriA.Num();
-		ParallelFor(Res.Z, [&](int32 z)
+
+		// 평탄 인덱스(Flat = x + y*X + z*X*Y) 하나의 거리/부호를 계산해 기록한다.
+		auto ComputeSample = [&](int32 Flat)
 		{
-			for (int32 y = 0; y < Res.Y; ++y)
+			const int32 x = Flat % Res.X;
+			const int32 y = (Flat / Res.X) % Res.Y;
+			const int32 z = Flat / (Res.X * Res.Y);
+			const FVector P = Min + FVector(x, y, z) * Vox;
+			float Best = BIG_NUMBER;
+			double Omega = 0.0;
+			for (int32 k = 0; k < NumTris; ++k)
 			{
-				for (int32 x = 0; x < Res.X; ++x)
-				{
-					const FVector P = Min + FVector(x, y, z) * Vox;
-					float Best = BIG_NUMBER;
-					double Omega = 0.0;
-					for (int32 k = 0; k < NumTris; ++k)
-					{
-						const FVector CP = FMath::ClosestPointOnTriangleToPoint(P, TriA[k], TriB[k], TriC[k]);
-						Best = FMath::Min(Best, static_cast<float>(FVector::Dist(P, CP)));
-						Omega += SolidAngle(TriA[k] - P, TriB[k] - P, TriC[k] - P);
-					}
-					const bool bInside = (Omega / (4.0 * PI)) > 0.5;
-					float D = bInside ? -Best : Best;            // 바깥쪽 양수(frozen FRopeContact 계약)
-					D = FMath::Clamp(D, -S.NarrowBand, S.NarrowBand);
-					Distances[x + y * Res.X + z * Res.X * Res.Y] = D;
-				}
+				const FVector CP = FMath::ClosestPointOnTriangleToPoint(P, TriA[k], TriB[k], TriC[k]);
+				Best = FMath::Min(Best, static_cast<float>(FVector::Dist(P, CP)));
+				Omega += SolidAngle(TriA[k] - P, TriB[k] - P, TriC[k] - P);
 			}
-		});
+			const bool bInside = (Omega / (4.0 * PI)) > 0.5;
+			float D = bInside ? -Best : Best;            // 바깥쪽 양수(frozen FRopeContact 계약)
+			D = FMath::Clamp(D, -S.NarrowBand, S.NarrowBand);
+			Distances[Flat] = D;
+		};
+
+		// 게임 스레드가 취소 버튼을 처리할 수 있도록 무거운 본을 여러 배치로 쪼개고, 배치 사이에서 취소를
+		// 폴링한다. 배치 내부는 그대로 ParallelFor로 전 코어를 쓰며(평탄 인덱스 분할은 결과에 영향 없음),
+		// 가벼운 본은 NumBatches==1이라 기존과 동일한 단일 ParallelFor가 된다.
+		const int64 Work = static_cast<int64>(Count) * FMath::Max(1, NumTris);
+		// 배치당 대략의 연산량. UI 갱신 throttle(0.2s)보다 짧게 유지해 취소가 즉각 반응하도록 작게 잡는다.
+		const int64 TargetOpsPerBatch = 1024 * 1024;
+		const int32 NumBatches = static_cast<int32>(FMath::Clamp<int64>(Work / TargetOpsPerBatch, 1, Count));
+		const int32 PerBatch = FMath::DivideAndRoundUp(Count, NumBatches);
+
+		for (int32 Start = 0; Start < Count; Start += PerBatch)
+		{
+			if (CancelPoll && CancelPoll())
+			{
+				UE_LOG(LogRopeSDFBake, Log, TEXT("BakeMesh cancelled: %s during bone %s voxelization."),
+					*Mesh->GetName(), *Ref.GetBoneName(BoneIdx).ToString());
+				return ERopeSDFBakeResult::Cancelled;
+			}
+			const int32 End = FMath::Min(Start + PerBatch, Count);
+			ParallelFor(End - Start, [&](int32 i) { ComputeSample(Start + i); });
+		}
 
 		FRopeBoneSDFVolume Volume;
 		Volume.Bone = Ref.GetBoneName(BoneIdx);
@@ -234,5 +271,5 @@ bool FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 
 	UE_LOG(LogRopeSDFBake, Log, TEXT("BakeMesh done: %s -> %d bone volume(s) (of %d target bone(s))."),
 		*Mesh->GetName(), Out.Num(), Targets.Num());
-	return true;
+	return ERopeSDFBakeResult::Success;
 }

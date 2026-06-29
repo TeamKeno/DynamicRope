@@ -397,14 +397,42 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 		return FReply::Handled();
 	}
 
+	// 진행률 총량을 1.0으로 두고, 베이커가 본 하나를 시작할 때마다 1/Total씩 진행시킨다.
+	// 취소 버튼을 띄우고, 콜백에서 ShouldCancel()을 보고 false를 반환하면 베이커가 중단한다.
 	FScopedSlowTask Slow(1.0f, LOCTEXT("Baking", "Baking per-bone SDF..."));
-	Slow.MakeDialog();
+	Slow.MakeDialog(true /*bShowCancelButton*/);
+
+	// 베이크 중에는 슬로우 태스크가 주기적으로 Slate를 펌프하므로(취소 버튼 처리), 그 틈에 사용자가
+	// 설정/본 필터를 바꿔도 베이크 도중 입력값이 흔들리지 않도록 호출 시점 값으로 스냅샷해 넘긴다.
+	const FRopeSDFBakeSettings SettingsSnapshot = Settings;
+	const TArray<FName> BoneFilterSnapshot = BoneFilter;
 
 	TArray<FRopeBoneSDFVolume> Volumes;
-	const bool bOk = FRopeSDFBaker::BakeMesh(Mesh, BoneFilter, Settings, Volumes);
-	if (!bOk)
+	const ERopeSDFBakeResult Result = FRopeSDFBaker::BakeMesh(Mesh, BoneFilterSnapshot, SettingsSnapshot, Volumes,
+		// 본 단위: 진행률 한 칸 전진(+ UI 펌프) 후 취소 여부를 읽는다.
+		[&Slow](int32 Done, int32 Total, const FName& Bone) -> bool
+		{
+			const float Frac = (Total > 0) ? (1.0f / static_cast<float>(Total)) : 1.0f;
+			Slow.EnterProgressFrame(Frac, FText::Format(
+				LOCTEXT("BakingBone", "Baking SDF: {0} ({1}/{2})"),
+				FText::FromName(Bone), FText::AsNumber(Done + 1), FText::AsNumber(Total)));
+			return !Slow.ShouldCancel();
+		},
+		// 본 내부 voxel 배치 사이: UI를 펌프(ShouldCancel 내부)하고 취소 클릭을 처리한다.
+		[&Slow]() -> bool { return Slow.ShouldCancel(); });
+
+	if (Result == ERopeSDFBakeResult::NoGeometry)
 	{
 		FNotificationInfo Info(LOCTEXT("NoGeom", "Bake failed: mesh has no CPU geometry (cooked/stripped)."));
+		Info.ExpireDuration = 4.0f;
+		FSlateNotificationManager::Get().AddNotification(Info);
+		return FReply::Handled();
+	}
+
+	if (Result == ERopeSDFBakeResult::Cancelled)
+	{
+		// 자산은 건드리지 않는다(부분 결과 버림) — 기존 베이크 결과 유지.
+		FNotificationInfo Info(LOCTEXT("BakeCancelled", "Bake cancelled — asset unchanged."));
 		Info.ExpireDuration = 4.0f;
 		FSlateNotificationManager::Get().AddNotification(Info);
 		return FReply::Handled();
