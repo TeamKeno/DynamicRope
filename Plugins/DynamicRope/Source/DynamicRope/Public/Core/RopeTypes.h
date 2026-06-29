@@ -242,7 +242,7 @@ struct FRopeWrapConfig
 
 	/** 스치는 접촉이 아니라 catch로 간주하기 위해 한 bone에 닿아야 하는 최소 rope 노드 수. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "1"))
-	int32 MinLatchNodes = 3;
+	int32 MinLatchNodes = 1;
 
 	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
@@ -282,12 +282,21 @@ struct FRopeThrowParams
 };
 
 //TODO 주석 추가
+enum class ERopeContactCandidateSource : uint8
+{
+	Actual = 1,
+	PredictiveFree = 2,
+	PredictiveGuided = 4
+};
+
 struct FRopeContactCandidate
 {
 	bool bValid = false;
 	int32 NodeIndex = INDEX_NONE;
 	FName Bone = NAME_None;
 	const USkeletalMeshComponent* Mesh = nullptr;
+	ERopeContactCandidateSource Source = ERopeContactCandidateSource::Actual;
+	uint8 SourceMask = static_cast<uint8>(ERopeContactCandidateSource::Actual);
 
 	FVector WorldPoint = FVector::ZeroVector;
 	FVector Normal = FVector::UpVector;

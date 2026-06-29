@@ -179,6 +179,9 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 	ReleaseCooldown = 0.0f;
 	WrappedSwayImpulse = FVector::ZeroVector;
 	WrappedSwayTime = 0.0f;
+	WhipGuidePrevTargetsThisFrame.Reset();
+	WhipGuideCurrentTargetsThisFrame.Reset();
+	WhipGuidedNodesThisFrame.Reset();
 
 	const int32 LastNode = Sim.Num() - 1;
 	if (LastNode >= 1)
@@ -200,6 +203,9 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 		TArray<FVector> GuideTargets;
 		BuildWhipGuideTargets(0.0f, LastGuidedNode, GuideTargets);
 		PreviousWhipGuideTargets = GuideTargets;
+		WhipGuidePrevTargetsThisFrame = GuideTargets;
+		WhipGuideCurrentTargetsThisFrame = GuideTargets;
+		WhipGuidedNodesThisFrame.SetNumZeroed(Sim.Num());
 		for (int32 i = 1; i <= LastGuidedNode; ++i)
 		{
 			if (!GuideTargets.IsValidIndex(i))
@@ -209,6 +215,10 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 
 			Sim.Positions[i] = GuideTargets[i];
 			Sim.PrevPositions[i] = GuideTargets[i];
+			if (WhipGuidedNodesThisFrame.IsValidIndex(i))
+			{
+				WhipGuidedNodesThisFrame[i] = 1;
+			}
 		}
 
 		// Temporary throw: inject Verlet velocity by moving previous positions opposite the aim.
@@ -338,6 +348,9 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 {
 	DebugWhipGuideNodeIndices.Reset();
 	DebugWhipGuideTargets.Reset();
+	WhipGuidePrevTargetsThisFrame.Reset();
+	WhipGuideCurrentTargetsThisFrame.Reset();
+	WhipGuidedNodesThisFrame.Reset();
 
 	if (Sim.Num() < 3)
 	{
@@ -350,7 +363,7 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 	const float T = FMath::Clamp(WhipElapsed / Duration, 0.0f, 1.0f);
 	const int32 LastNode = Sim.Num() - 1;
 	const float GuidedEnd = FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f);
-	const bool bCaptureGuideTargets = RopeDebug::IsFlightStatEnabled();
+	const bool bCaptureGuideTargets = RopeDebug::IsFlightVisualEnabled() || RopeDebug::IsFlightStatEnabled();
 	const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * GuidedEnd), 1, LastNode);
 	TArray<FVector> GuideTargets;
 	BuildWhipGuideTargets(T, LastGuidedNode, GuideTargets);
@@ -359,6 +372,10 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 		bWhipSwingActive = false;
 		return;
 	}
+
+	WhipGuidePrevTargetsThisFrame = PreviousWhipGuideTargets;
+	WhipGuideCurrentTargetsThisFrame = GuideTargets;
+	WhipGuidedNodesThisFrame.SetNumZeroed(Sim.Num());
 
 	for (int32 i = 1; i <= LastGuidedNode; ++i)
 	{
@@ -388,6 +405,10 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 
 		Sim.PrevPositions[i] = PreviousWhipGuideTargets.IsValidIndex(i) ? PreviousWhipGuideTargets[i] : Sim.Positions[i];
 		Sim.Positions[i] = Target;
+		if (WhipGuidedNodesThisFrame.IsValidIndex(i))
+		{
+			WhipGuidedNodesThisFrame[i] = 1;
+		}
 
 		if (bCaptureGuideTargets)
 		{
@@ -422,11 +443,16 @@ void URopeComponent::DetectContactCandidates(const TArray<FVector>& PrevPosition
 		FRopeContact Contact = SweepOrSampleContact(PrevPositions[i], Positions[i], Colliders);
 
 		if (Contact.bHit)
-			OutCandidates.Add(MakeCandidate(i, Contact));
+		{
+			FRopeContactCandidate Candidate = MakeCandidate(i, Contact);
+			Candidate.Source = ERopeContactCandidateSource::Actual;
+			Candidate.SourceMask = static_cast<uint8>(Candidate.Source);
+			OutCandidates.Add(Candidate);
+		}
 	}
 }
 
-void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>& InOutCandidates) const
+void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>& InOutCandidates, float DeltaTime) const
 {
 	const float PredictionFrames = FMath::Max(0.0f, WrapConfig.PredictiveContactFrames);
 	if (PredictionFrames <= KINDA_SMALL_NUMBER || Sim.Num() == 0)
@@ -434,44 +460,96 @@ void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>
 		return;
 	}
 
-	TArray<FVector> PredictedPositions;
-	PredictedPositions.SetNumUninitialized(Sim.Num());
+	auto AddUniqueCandidate = [&InOutCandidates](const FRopeContactCandidate& Candidate)
+	{
+		for (FRopeContactCandidate& Existing : InOutCandidates)
+		{
+			if (Existing.NodeIndex == Candidate.NodeIndex && Existing.Bone == Candidate.Bone && Existing.Mesh == Candidate.Mesh)
+			{
+				Existing.SourceMask |= Candidate.SourceMask;
+				if (Candidate.Source == ERopeContactCandidateSource::PredictiveGuided ||
+					(Existing.Source == ERopeContactCandidateSource::Actual && Candidate.Source == ERopeContactCandidateSource::PredictiveFree))
+				{
+					Existing.Source = Candidate.Source;
+				}
+				return;
+			}
+		}
+
+		InOutCandidates.Add(Candidate);
+	};
+
+	TArray<FVector> NextGuideTargets;
+	const bool bHasGuidedNodes = Phase == ERopePhase::Flight && WhipGuidedNodesThisFrame.Num() > 0;
+	if (bHasGuidedNodes)
+	{
+		const int32 LastNode = Sim.Num() - 1;
+		const float GuidedEnd = FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f);
+		const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * GuidedEnd), 1, LastNode);
+		const float Duration = FMath::Max(WhipDuration, KINDA_SMALL_NUMBER);
+		const float NextT = FMath::Clamp((WhipElapsed + DeltaTime) / Duration, 0.0f, 1.0f);
+		BuildWhipGuideTargets(NextT, LastGuidedNode, NextGuideTargets);
+	}
+
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		if (!Sim.Positions.IsValidIndex(i) || !Sim.PrevPositions.IsValidIndex(i))
 		{
-			PredictedPositions[i] = Sim.Positions.IsValidIndex(i) ? Sim.Positions[i] : FVector::ZeroVector;
 			continue;
 		}
 
-		const FVector FrameDisplacement = Sim.Positions[i] - Sim.PrevPositions[i];
-		PredictedPositions[i] = Sim.Positions[i] + FrameDisplacement * PredictionFrames;
-	}
+		FVector CurrentPosition = Sim.Positions[i];
+		FVector PredictedPosition = CurrentPosition;
+		bool bFastEnoughForPrediction = false;
+		ERopeContactCandidateSource Source = ERopeContactCandidateSource::PredictiveFree;
 
-	TArray<FRopeContactCandidate> PredictedCandidates;
-	DetectContactCandidates(Sim.Positions, PredictedPositions, FrameColliders, PredictedCandidates);
-
-	for (FRopeContactCandidate& Candidate : PredictedCandidates)
-	{
-		if (!Candidate.bValid)
+		if (bHasGuidedNodes && IsWhipGuidedNodeThisFrame(i) && WhipGuideCurrentTargetsThisFrame.IsValidIndex(i))
 		{
-			continue;
-		}
-
-		bool bDuplicate = false;
-		for (const FRopeContactCandidate& Existing : InOutCandidates)
-		{
-			if (Existing.NodeIndex == Candidate.NodeIndex && Existing.Bone == Candidate.Bone && Existing.Mesh == Candidate.Mesh)
+			Source = ERopeContactCandidateSource::PredictiveGuided;
+			CurrentPosition = WhipGuideCurrentTargetsThisFrame[i];
+			if (NextGuideTargets.IsValidIndex(i))
 			{
-				bDuplicate = true;
-				break;
+				PredictedPosition = CurrentPosition + (NextGuideTargets[i] - CurrentPosition) * PredictionFrames;
 			}
+			else
+			{
+				const FVector PrevGuidePosition = WhipGuidePrevTargetsThisFrame.IsValidIndex(i)
+					? WhipGuidePrevTargetsThisFrame[i]
+					: Sim.PrevPositions[i];
+				PredictedPosition = CurrentPosition + (CurrentPosition - PrevGuidePosition) * PredictionFrames;
+			}
+
+			bFastEnoughForPrediction = FVector::Dist(CurrentPosition, PredictedPosition) > KINDA_SMALL_NUMBER;
+		}
+		else
+		{
+			const FVector FrameDisplacement = Sim.Positions[i] - Sim.PrevPositions[i];
+			PredictedPosition = CurrentPosition + FrameDisplacement * PredictionFrames;
+			bFastEnoughForPrediction = IsTailNode(i) || FrameDisplacement.Size() > Sim.SegmentLength;
 		}
 
-		if (!bDuplicate)
+		const bool bPredictedPathNearBody = IsNearAnyColliderSegment(CurrentPosition, PredictedPosition, FrameColliders);
+		if (!bFastEnoughForPrediction && !bPredictedPathNearBody)
 		{
-			InOutCandidates.Add(Candidate);
+			continue;
 		}
+		if (!bPredictedPathNearBody)
+		{
+			continue;
+		}
+
+		// If a bone surface exists between the current node position and predicted next position,
+		// promote it to the same candidate path that later builds the latch seed.
+		const FRopeContact Contact = SweepOrSampleContact(CurrentPosition, PredictedPosition, FrameColliders);
+		if (!Contact.bHit || Contact.Bone.IsNone())
+		{
+			continue;
+		}
+
+		FRopeContactCandidate Candidate = MakeCandidate(i, Contact);
+		Candidate.Source = Source;
+		Candidate.SourceMask = static_cast<uint8>(Source);
+		AddUniqueCandidate(Candidate);
 	}
 }
 
@@ -631,7 +709,7 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 
 	TArray<FRopeContactCandidate> Candidates;
 	DetectContactCandidates(Sim.PrevPositions, Sim.Positions, FrameColliders, Candidates);
-	AddPredictedContactCandidates(Candidates);
+	AddPredictedContactCandidates(Candidates, DeltaTime);
 	EvaluateRelativeMotion(Candidates);
 
 	const bool bSawWrappingContact = UpdateWrappingAnchorsFromCandidates(Candidates);
@@ -910,6 +988,14 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		{
 			ApplyWhipSwing(DeltaTime);
 		}
+		else
+		{
+			DebugWhipGuideNodeIndices.Reset();
+			DebugWhipGuideTargets.Reset();
+			WhipGuidePrevTargetsThisFrame.Reset();
+			WhipGuideCurrentTargetsThisFrame.Reset();
+			WhipGuidedNodesThisFrame.Reset();
+		}
 		bSolveThisFrame = true; // 솔브 후 접촉 감지는 FinalizeSimFrame에서.
 		break;
 
@@ -1002,8 +1088,9 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	{
 		TArray<FRopeContactCandidate> Candidates;
 		TArray<RopeDebug::FRopeFlightNodeDebug> FlightNodeDebug;
+		const bool bDrawFlightVisual = RopeDebug::IsFlightVisualEnabled();
 		const bool bDrawFlightStat = RopeDebug::IsFlightStatEnabled();
-		if (bDrawFlightStat)
+		if (bDrawFlightVisual)
 		{
 			for (int32 i = 0; i < Sim.Num(); ++i)
 			{
@@ -1032,7 +1119,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		}
 
 		DetectContactCandidates(Sim.PrevPositions, Sim.Positions, FrameColliders, Candidates);
-		AddPredictedContactCandidates(Candidates);
+		AddPredictedContactCandidates(Candidates, DeltaTime);
 		EvaluateRelativeMotion(Candidates);
 
 		FRopeContactTracker FlightDebugTracker;
@@ -1048,7 +1135,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
 		}
 
-		if (bDrawFlightStat)
+		if (bDrawFlightVisual || bDrawFlightStat)
 		{
 			const FString RopeName = GetOwner()
 				? FString::Printf(TEXT("%s.%s"), *GetOwner()->GetName(), *GetName())
@@ -1137,6 +1224,11 @@ bool URopeComponent::IsTailNode(int32 NodeIndex) const
 	return NodeIndex >= FMath::Max(1, Sim.Num() - 4);
 }
 
+bool URopeComponent::IsWhipGuidedNodeThisFrame(int32 NodeIndex) const
+{
+	return WhipGuidedNodesThisFrame.IsValidIndex(NodeIndex) && WhipGuidedNodesThisFrame[NodeIndex] != 0;
+}
+
 float URopeComponent::NodeSpeed(int32 NodeIndex) const
 {
 	if (!Sim.Positions.IsValidIndex(NodeIndex) || !Sim.PrevPositions.IsValidIndex(NodeIndex))
@@ -1198,6 +1290,8 @@ FRopeContactCandidate URopeComponent::MakeCandidate(int32 NodeIndex, const FRope
 	Candidate.NodeIndex = NodeIndex;
 	Candidate.Bone = Contact.Bone;
 	Candidate.Mesh = Contact.SourceMesh;
+	Candidate.Source = ERopeContactCandidateSource::Actual;
+	Candidate.SourceMask = static_cast<uint8>(Candidate.Source);
 	Candidate.WorldPoint = Contact.SurfacePoint;
 	Candidate.Normal = Contact.Normal.GetSafeNormal();
 	Candidate.Penetration = Contact.Penetration;

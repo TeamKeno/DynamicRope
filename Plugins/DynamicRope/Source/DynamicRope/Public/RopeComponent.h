@@ -203,6 +203,9 @@ private:
 	TArray<int32> DebugWhipGuideNodeIndices;
 	TArray<FVector> DebugWhipGuideTargets;
 	TArray<FVector> PreviousWhipGuideTargets;
+	TArray<FVector> WhipGuidePrevTargetsThisFrame;
+	TArray<FVector> WhipGuideCurrentTargetsThisFrame;
+	TArray<uint8> WhipGuidedNodesThisFrame;
 
 	// 한 프레임 collider 스냅샷. RopeSimSubsystem이 Tick에서 중앙 수집해 채운다(provider 레지스트리 → 로프 필터).
 	// Solve/Finalize에서 read. provider 소유라 raw 포인터(해당 프레임 동안 유효).
@@ -247,7 +250,7 @@ private:
 	void DetectContactCandidates(const TArray<FVector>& PrevPositions, const TArray<FVector>& Positions,
 		const TArray<IRopeCollider*>& Colliders, TArray<FRopeContactCandidate>& OutCandidates) const;
 
-	void AddPredictedContactCandidates(TArray<FRopeContactCandidate>& InOutCandidates) const;
+	void AddPredictedContactCandidates(TArray<FRopeContactCandidate>& InOutCandidates, float DeltaTime) const;
 
 	void EvaluateRelativeMotion(TArray<FRopeContactCandidate>& Candidates) const;
 
@@ -258,6 +261,8 @@ private:
 	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates);
 
 	bool IsTailNode(int32 NodeIndex) const;
+
+	bool IsWhipGuidedNodeThisFrame(int32 NodeIndex) const;
 
 	float NodeSpeed(int32 NodeIndex) const;
 

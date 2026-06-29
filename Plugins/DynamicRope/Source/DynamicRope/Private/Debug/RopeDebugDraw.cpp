@@ -14,6 +14,9 @@ DECLARE_DWORD_COUNTER_STAT(TEXT("Frame Colliders"), STAT_RopeFlightFrameCollider
 DECLARE_DWORD_COUNTER_STAT(TEXT("Num Particles"), STAT_RopeFlightNumParticles, STATGROUP_RopeFlight);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Solve This Frame"), STAT_RopeFlightSolveThisFrame, STATGROUP_RopeFlight);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Candidates"), STAT_RopeFlightCandidates, STATGROUP_RopeFlight);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Actual Candidates"), STAT_RopeFlightActualCandidates, STATGROUP_RopeFlight);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Predictive Free Candidates"), STAT_RopeFlightPredictiveFreeCandidates, STATGROUP_RopeFlight);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Predictive Guided Candidates"), STAT_RopeFlightPredictiveGuidedCandidates, STATGROUP_RopeFlight);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Candidate Nodes"), STAT_RopeFlightCandidateNodes, STATGROUP_RopeFlight);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Min Latch Nodes"), STAT_RopeFlightMinLatchNodes, STATGROUP_RopeFlight);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Should Capture"), STAT_RopeFlightShouldCapture, STATGROUP_RopeFlight);
@@ -40,6 +43,26 @@ namespace
 	TAutoConsoleVariable<int32> CVarRopeDebugColliders(
 		TEXT("r.DynamicRope.Debug.Colliders"), 1,
 		TEXT("provider collider(capsule / SDF 볼륨 bounds) 표시. provider별 bDrawDebug과 OR된다."), ECVF_Cheat);
+
+	TAutoConsoleVariable<int32> CVarRopeDebugFlight(
+		TEXT("r.DynamicRope.Debug.Flight"), 1,
+		TEXT("Flight contact-path debug lines/points. Requires r.DynamicRope.Debug=1. 0=off, 1=on."),
+		ECVF_Cheat);
+
+	TAutoConsoleVariable<int32> CVarRopeDebugWrapped(
+		TEXT("r.DynamicRope.Debug.Wrapped"), 1,
+		TEXT("Wrapped-state debug points/table. Requires r.DynamicRope.Debug=1. 0=off, 1=on."),
+		ECVF_Cheat);
+
+	TAutoConsoleVariable<int32> CVarRopeDebugLabels(
+		TEXT("r.DynamicRope.Debug.Labels"), 1,
+		TEXT("World-space debug text labels for DynamicRope visual debug. 0=off, 1=on."),
+		ECVF_Cheat);
+
+	TAutoConsoleVariable<int32> CVarRopeDebugScreenText(
+		TEXT("r.DynamicRope.Debug.ScreenText"), 1,
+		TEXT("On-screen DynamicRope debug messages. 0=off, 1=on."),
+		ECVF_Cheat);
 
 	const TCHAR* DebugPhaseName(ERopePhase Phase)
 	{
@@ -69,6 +92,56 @@ namespace
 		return Result;
 	}
 
+	const TCHAR* CandidateSourceName(ERopeContactCandidateSource Source)
+	{
+		switch (Source)
+		{
+		case ERopeContactCandidateSource::Actual: return TEXT("actual");
+		case ERopeContactCandidateSource::PredictiveFree: return TEXT("predFree");
+		case ERopeContactCandidateSource::PredictiveGuided: return TEXT("predGuided");
+		default: return TEXT("?");
+		}
+	}
+
+	FString CandidateSourceMaskName(uint8 SourceMask)
+	{
+		TArray<const TCHAR*> Parts;
+		if ((SourceMask & static_cast<uint8>(ERopeContactCandidateSource::Actual)) != 0)
+		{
+			Parts.Add(TEXT("actual"));
+		}
+		if ((SourceMask & static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree)) != 0)
+		{
+			Parts.Add(TEXT("predFree"));
+		}
+		if ((SourceMask & static_cast<uint8>(ERopeContactCandidateSource::PredictiveGuided)) != 0)
+		{
+			Parts.Add(TEXT("predGuided"));
+		}
+
+		FString Result;
+		for (int32 i = 0; i < Parts.Num(); ++i)
+		{
+			if (i > 0)
+			{
+				Result += TEXT("+");
+			}
+			Result += Parts[i];
+		}
+		return Result.IsEmpty() ? FString(TEXT("?")) : Result;
+	}
+
+	FColor CandidateSourceColor(ERopeContactCandidateSource Source)
+	{
+		switch (Source)
+		{
+		case ERopeContactCandidateSource::Actual: return FColor::Cyan;
+		case ERopeContactCandidateSource::PredictiveFree: return FColor::Green;
+		case ERopeContactCandidateSource::PredictiveGuided: return FColor(255, 80, 255);
+		default: return FColor::White;
+		}
+	}
+
 	bool IsStatEnabled(TStatId StatId)
 	{
 		return FThreadStats::IsCollectingData(StatId);
@@ -92,6 +165,16 @@ namespace
 bool RopeDebug::IsEnabled(bool bInstanceForce)
 {
 	return bInstanceForce || CVarRopeDebug.GetValueOnGameThread() != 0;
+}
+
+bool RopeDebug::IsFlightVisualEnabled()
+{
+	return CVarRopeDebug.GetValueOnGameThread() != 0 && CVarRopeDebugFlight.GetValueOnGameThread() != 0;
+}
+
+bool RopeDebug::IsWrappedVisualEnabled()
+{
+	return CVarRopeDebug.GetValueOnGameThread() != 0 && CVarRopeDebugWrapped.GetValueOnGameThread() != 0;
 }
 
 bool RopeDebug::IsFlightStatEnabled()
@@ -137,19 +220,51 @@ void RopeDebug::DrawFlight(const UWorld* World, uint64 DebugKey, const FString& 
 	const TArray<FRopeFlightNodeDebug>& NodeDebug, const TArray<FRopeContactCandidate>& Candidates,
 	const FRopeContactTracker& ContactTracker, const FRopeWrapConfig& WrapConfig, bool bShouldCapture)
 {
-	if (!World || !IsFlightStatEnabled())
+	const bool bStatEnabled = IsFlightStatEnabled();
+	const bool bVisualEnabled = IsFlightVisualEnabled();
+	if (!World || (!bStatEnabled && !bVisualEnabled))
 	{
 		return;
 	}
 
-	INC_DWORD_STAT(STAT_RopeFlightComponents);
-	INC_DWORD_STAT_BY(STAT_RopeFlightFrameColliders, FrameColliderCount);
-	INC_DWORD_STAT_BY(STAT_RopeFlightNumParticles, Sim.Num());
-	INC_DWORD_STAT_BY(STAT_RopeFlightSolveThisFrame, bSolveThisFrame ? 1 : 0);
-	INC_DWORD_STAT_BY(STAT_RopeFlightCandidates, Candidates.Num());
-	INC_DWORD_STAT_BY(STAT_RopeFlightCandidateNodes, ContactTracker.CandidateNodes.Num());
-	INC_DWORD_STAT_BY(STAT_RopeFlightMinLatchNodes, WrapConfig.MinLatchNodes);
-	INC_DWORD_STAT_BY(STAT_RopeFlightShouldCapture, bShouldCapture ? 1 : 0);
+	int32 ActualCandidateCount = 0;
+	int32 PredictiveFreeCandidateCount = 0;
+	int32 PredictiveGuidedCandidateCount = 0;
+	for (const FRopeContactCandidate& Candidate : Candidates)
+	{
+		if ((Candidate.SourceMask & static_cast<uint8>(ERopeContactCandidateSource::Actual)) != 0)
+		{
+			++ActualCandidateCount;
+		}
+		if ((Candidate.SourceMask & static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree)) != 0)
+		{
+			++PredictiveFreeCandidateCount;
+		}
+		if ((Candidate.SourceMask & static_cast<uint8>(ERopeContactCandidateSource::PredictiveGuided)) != 0)
+		{
+			++PredictiveGuidedCandidateCount;
+		}
+	}
+
+	if (bStatEnabled)
+	{
+		INC_DWORD_STAT(STAT_RopeFlightComponents);
+		INC_DWORD_STAT_BY(STAT_RopeFlightFrameColliders, FrameColliderCount);
+		INC_DWORD_STAT_BY(STAT_RopeFlightNumParticles, Sim.Num());
+		INC_DWORD_STAT_BY(STAT_RopeFlightSolveThisFrame, bSolveThisFrame ? 1 : 0);
+		INC_DWORD_STAT_BY(STAT_RopeFlightCandidates, Candidates.Num());
+		INC_DWORD_STAT_BY(STAT_RopeFlightActualCandidates, ActualCandidateCount);
+		INC_DWORD_STAT_BY(STAT_RopeFlightPredictiveFreeCandidates, PredictiveFreeCandidateCount);
+		INC_DWORD_STAT_BY(STAT_RopeFlightPredictiveGuidedCandidates, PredictiveGuidedCandidateCount);
+		INC_DWORD_STAT_BY(STAT_RopeFlightCandidateNodes, ContactTracker.CandidateNodes.Num());
+		INC_DWORD_STAT_BY(STAT_RopeFlightMinLatchNodes, WrapConfig.MinLatchNodes);
+		INC_DWORD_STAT_BY(STAT_RopeFlightShouldCapture, bShouldCapture ? 1 : 0);
+	}
+
+	if (!bVisualEnabled)
+	{
+		return;
+	}
 
 	TArray<FRopeContactCandidate> SortedCandidates = Candidates;
 	SortedCandidates.Sort([](const FRopeContactCandidate& A, const FRopeContactCandidate& B)
@@ -189,22 +304,34 @@ void RopeDebug::DrawFlight(const UWorld* World, uint64 DebugKey, const FString& 
 	for (int32 i = 0; i < MaxLabels; ++i)
 	{
 		const FRopeContactCandidate& Candidate = SortedCandidates[i];
-		const FColor CandidateColor = (Candidate.Bone == ContactTracker.CandidateBone) ? FColor(180, 80, 255) : FColor::Green;
+		const FColor SourceColor = CandidateSourceColor(Candidate.Source);
+		const FColor CandidateColor = (Candidate.Bone == ContactTracker.CandidateBone)
+			? FColor(
+				FMath::Min(255, SourceColor.R + 40),
+				FMath::Min(255, SourceColor.G + 20),
+				FMath::Min(255, SourceColor.B + 40))
+			: SourceColor;
 		DrawDebugBox(World, Candidate.WorldPoint, FVector(3.5f), CandidateColor, false, -1.0f, SDPG_Foreground, 0.75f);
-		const FString Label = FString::Printf(TEXT("node=%d bone=%s pen=%.2f relTan=%.1f wrap=%.2f"),
-			Candidate.NodeIndex, *Candidate.Bone.ToString(), Candidate.Penetration,
-			Candidate.RelativeTangentialSpeed, Candidate.WrapDirectionScore);
-		DrawDebugString(World, Candidate.WorldPoint + FVector(0.0f, 0.0f, 10.0f), Label, nullptr,
-			CandidateColor, 0.0f, true);
+		if (CVarRopeDebugLabels.GetValueOnGameThread() != 0)
+		{
+			const FString SourceLabel = CandidateSourceMaskName(Candidate.SourceMask);
+			const FString Label = FString::Printf(TEXT("node=%d src=%s primary=%s bone=%s pen=%.2f relTan=%.1f wrap=%.2f"),
+				Candidate.NodeIndex, *SourceLabel, CandidateSourceName(Candidate.Source), *Candidate.Bone.ToString(), Candidate.Penetration,
+				Candidate.RelativeTangentialSpeed, Candidate.WrapDirectionScore);
+			DrawDebugString(World, Candidate.WorldPoint + FVector(0.0f, 0.0f, 10.0f), Label, nullptr,
+				CandidateColor, 0.0f, true);
+		}
 	}
 
-	if (GEngine)
+	if (GEngine && CVarRopeDebugScreenText.GetValueOnGameThread() != 0)
 	{
 		const FString Text = FString::Printf(
 			TEXT("[RopeFlight] %s  phase=%s  colliders=%d  nodes=%d  solve=%d\n")
-			TEXT("candidates=%d  trackerBone=%s  trackerNodes=%d/%d [%s]  capture=%s"),
+			TEXT("candidates=%d  actual=%d  predFree=%d  predGuided=%d\n")
+			TEXT("trackerBone=%s  trackerNodes=%d/%d [%s]  capture=%s"),
 			*RopeName, DebugPhaseName(Phase), FrameColliderCount, Sim.Num(), bSolveThisFrame ? 1 : 0,
-			Candidates.Num(), *ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num(),
+			Candidates.Num(), ActualCandidateCount, PredictiveFreeCandidateCount, PredictiveGuidedCandidateCount,
+			*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num(),
 			WrapConfig.MinLatchNodes, *NodeListString(ContactTracker.CandidateNodes),
 			bShouldCapture ? TEXT("yes") : TEXT("no"));
 		GEngine->AddOnScreenDebugMessage(DebugKey, 0.05f, FColor::Cyan, Text, false);
@@ -214,7 +341,9 @@ void RopeDebug::DrawFlight(const UWorld* World, uint64 DebugKey, const FString& 
 void RopeDebug::DrawFlightWhipGuide(const UWorld* World, const FRopeSimState& Sim, const TArray<int32>& GuideNodeIndices,
 	const TArray<FVector>& GuideTargets, float GuidedEnd, bool bWhipActive)
 {
-	if (!World || !IsFlightStatEnabled() || !bWhipActive)
+	const bool bStatEnabled = IsFlightStatEnabled();
+	const bool bVisualEnabled = IsFlightVisualEnabled();
+	if (!World || (!bStatEnabled && !bVisualEnabled) || !bWhipActive)
 	{
 		return;
 	}
@@ -229,9 +358,17 @@ void RopeDebug::DrawFlightWhipGuide(const UWorld* World, const FRopeSimState& Si
 	const int32 LastGuidedNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * GuidedEnd), 0, LastNode);
 	const int32 SolverOnlyCount = FMath::Max(0, LastNode - LastGuidedNode);
 
-	INC_DWORD_STAT_BY(STAT_RopeFlightWhipGuidedNodes, GuidedNodeCount);
-	INC_DWORD_STAT_BY(STAT_RopeFlightWhipGuidePoints, GuideTargets.Num());
-	INC_DWORD_STAT_BY(STAT_RopeFlightWhipSolverOnlyNodes, SolverOnlyCount);
+	if (bStatEnabled)
+	{
+		INC_DWORD_STAT_BY(STAT_RopeFlightWhipGuidedNodes, GuidedNodeCount);
+		INC_DWORD_STAT_BY(STAT_RopeFlightWhipGuidePoints, GuideTargets.Num());
+		INC_DWORD_STAT_BY(STAT_RopeFlightWhipSolverOnlyNodes, SolverOnlyCount);
+	}
+
+	if (!bVisualEnabled)
+	{
+		return;
+	}
 
 	DrawDebugBox(World, Sim.Positions[0], FVector(4.5f), FColor::White, false, -1.0f, SDPG_Foreground, 0.75f);
 
@@ -267,14 +404,24 @@ void RopeDebug::DrawFlightWhipGuide(const UWorld* World, const FRopeSimState& Si
 void RopeDebug::DrawWrappedTable(const UWorld* World, uint64 DebugKey, const FString& RopeName,
 	const FRopeSimState& Sim, const FRopeWrapState& Wrap)
 {
-	if (!World || !IsWrappedStatEnabled() || !Wrap.IsWrapped())
+	const bool bStatEnabled = IsWrappedStatEnabled();
+	const bool bVisualEnabled = IsWrappedVisualEnabled();
+	if (!World || !Wrap.IsWrapped() || (!bStatEnabled && !bVisualEnabled))
 	{
 		return;
 	}
 
-	INC_DWORD_STAT(STAT_RopeWrappedComponents);
-	INC_DWORD_STAT_BY(STAT_RopeWrappedNumParticles, Sim.Num());
-	INC_DWORD_STAT_BY(STAT_RopeWrappedLatchedNodes, Wrap.Latched.Num());
+	if (bStatEnabled)
+	{
+		INC_DWORD_STAT(STAT_RopeWrappedComponents);
+		INC_DWORD_STAT_BY(STAT_RopeWrappedNumParticles, Sim.Num());
+		INC_DWORD_STAT_BY(STAT_RopeWrappedLatchedNodes, Wrap.Latched.Num());
+	}
+
+	if (!bVisualEnabled)
+	{
+		return;
+	}
 
 	TSet<int32> LatchedNodes;
 	for (const FRopeLatchNode& Latch : Wrap.Latched)
@@ -294,7 +441,7 @@ void RopeDebug::DrawWrappedTable(const UWorld* World, uint64 DebugKey, const FSt
 		}
 	}
 
-	if (GEngine)
+	if (GEngine && CVarRopeDebugScreenText.GetValueOnGameThread() != 0)
 	{
 		const USkeletalMeshComponent* Mesh = Wrap.Mesh.Get();
 		FString Text = FString::Printf(TEXT("[RopeWrapped] %s  bone=%s  mesh=%s  latched=%d\n"),
@@ -346,6 +493,8 @@ void RopeDebug::DrawColliderBounds(const UWorld* World, const FBox& WorldBounds,
 #else // UE_BUILD_SHIPPING — 모두 no-op
 
 bool RopeDebug::IsEnabled(bool) { return false; }
+bool RopeDebug::IsFlightVisualEnabled() { return false; }
+bool RopeDebug::IsWrappedVisualEnabled() { return false; }
 bool RopeDebug::IsFlightStatEnabled() { return false; }
 bool RopeDebug::IsWrappedStatEnabled() { return false; }
 void RopeDebug::DrawCenterline(const UWorld*, const FRopeSimState&, ERopePhase, const FRopeWrapState&, bool) {}

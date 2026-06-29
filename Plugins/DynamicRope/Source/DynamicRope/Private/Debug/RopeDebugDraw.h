@@ -26,6 +26,8 @@ namespace RopeDebug
 
 	/** 마스터 토글(per-instance 강제 또는 r.DynamicRope.Debug). */
 	bool IsEnabled(bool bInstanceForce);
+	bool IsFlightVisualEnabled();
+	bool IsWrappedVisualEnabled();
 	bool IsFlightStatEnabled();
 	bool IsWrappedStatEnabled();
 
