@@ -32,8 +32,13 @@ namespace RopeSDFSynthetic
 		const int32 NX = V.Resolution.X;
 		const int32 NY = V.Resolution.Y;
 		const int32 NZ = V.Resolution.Z;
-		V.Distances.SetNumUninitialized(NX * NY * NZ);
+		const int32 N = NX * NY * NZ;
 
+		// 1패스: 해석적 거리(float)를 임시로 모으며 최대 |거리|를 구한다. 합성 데이터는 클램프되지 않으므로
+		// 양자화 범위(NarrowBand)를 데이터 최댓값에 맞춰, 클램프 없이 양자화 rounding 손실만 남긴다.
+		TArray<float> Raw;
+		Raw.SetNumUninitialized(N);
+		float MaxAbs = KINDA_SMALL_NUMBER;
 		for (int32 Z = 0; Z < NZ; ++Z)
 		{
 			for (int32 Y = 0; Y < NY; ++Y)
@@ -45,9 +50,19 @@ namespace RopeSDFSynthetic
 						Min.Y + Size.Y * (static_cast<double>(Y) / (NY - 1)),
 						Min.Z + Size.Z * (static_cast<double>(Z) / (NZ - 1)));
 					const int32 Idx = X + Y * NX + Z * NX * NY;
-					V.Distances[Idx] = static_cast<float>((P - Center).Size()) - Radius;
+					const float D = static_cast<float>((P - Center).Size()) - Radius;
+					Raw[Idx] = D;
+					MaxAbs = FMath::Max(MaxAbs, FMath::Abs(D));
 				}
 			}
+		}
+
+		// 2패스: 실제 베이커와 동일하게 uint8로 양자화(NarrowBand = 데이터 최대 |거리|).
+		V.NarrowBand = MaxAbs;
+		V.Distances.SetNumUninitialized(N);
+		for (int32 i = 0; i < N; ++i)
+		{
+			V.Distances[i] = FRopeBoneSDFVolume::EncodeDistance(Raw[i], V.NarrowBand);
 		}
 		return V;
 	}

@@ -23,11 +23,13 @@ struct FRopeGPUCapsule
 /**
  * GPU 충돌(M3)용 per-bone SDF collider. 본 로컬 distance grid + 본→월드 트랜스폼.
  * Distances는 호출자(에셋) 소유 포인터(Step 호출 동안 유효 — 렌더 커맨드로 옮기기 전 GT에서 복사된다).
+ * Distances는 uint8 양자화 코드 — GT 평탄화 시 NarrowBand로 dequant해 float 버퍼로 업로드한다.
  * VolumeKey가 같으면 같은 step 내에서 GPU 업로드를 공유(dedup)한다.
  */
 struct FRopeGPUSDFCollider
 {
-	const float* Distances = nullptr; // 길이 ResX*ResY*ResZ, 행 우선, 바깥 +
+	const uint8* Distances = nullptr; // 길이 ResX*ResY*ResZ, 행 우선. uint8 코드(NarrowBand로 dequant, 바깥 +).
+	float        NarrowBand = 0.0f;   // dequant 스케일(cm). 코드 0..255 → -NarrowBand..+NarrowBand.
 	int32        ResX = 0;
 	int32        ResY = 0;
 	int32        ResZ = 0;

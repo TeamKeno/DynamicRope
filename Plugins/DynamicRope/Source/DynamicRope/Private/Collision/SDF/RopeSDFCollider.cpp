@@ -159,7 +159,8 @@ bool FRopeSDFCollider::GetGPUSDF(FRopeSDFColliderView& OutView) const
 	{
 		return false; // 미베이크/무효 볼륨은 GPU 충돌에서 제외(CPU Query와 동일 가드).
 	}
-	OutView.Distances    = Volume->Distances.GetData();
+	OutView.Distances    = Volume->Distances.GetData(); // uint8 코드(소비자가 NarrowBand로 dequant)
+	OutView.NarrowBand   = Volume->NarrowBand;
 	OutView.ResX         = Volume->Resolution.X;
 	OutView.ResY         = Volume->Resolution.Y;
 	OutView.ResZ         = Volume->Resolution.Z;

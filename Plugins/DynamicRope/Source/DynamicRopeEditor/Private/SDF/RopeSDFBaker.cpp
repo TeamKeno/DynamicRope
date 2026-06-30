@@ -308,7 +308,7 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		// TArray는 int32 카운트라 선형 인덱스도 int32 유지. Res는 MaxResolution으로 상한
 		// (기본 48 => 48^3 ~ 110k)이라 범위 내.
 		const int32 Count = Res.X * Res.Y * Res.Z;
-		TArray<float> Distances;
+		TArray<uint8> Distances; // 양자화 코드(uint8, [-NB,+NB]→[0,255]). dequant 스케일은 볼륨 NarrowBand.
 		Distances.SetNumUninitialized(Count);
 
 		const int32 NumTris = TriA.Num();                  // 거리(unsigned)는 이 본 삼각형으로
@@ -334,7 +334,8 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 			// 바깥 오판하므로 전역 메시로 봐야 강건). 샘플점을 컴포넌트 공간으로 올려 질의한다.
 			const FVector Pc = BoneToComp.TransformPosition(P);
 			const float D = WindingClassifier.IsInside(Pc) ? -Best : Best; // 안쪽 음수 / 바깥 양수
-			Distances[Flat] = FMath::Clamp(D, -S.NarrowBand, S.NarrowBand); // 바깥쪽 양수(frozen FRopeContact 계약)
+			// [-NB,+NB] clamp + uint8 양자화(EncodeDistance가 clamp 포함). 바깥쪽 양수(frozen FRopeContact 계약).
+			Distances[Flat] = FRopeBoneSDFVolume::EncodeDistance(D, S.NarrowBand);
 		};
 
 		// 게임 스레드가 취소 버튼을 처리할 수 있도록 무거운 본을 여러 배치로 쪼개고, 배치 사이에서 취소를
@@ -363,6 +364,7 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		Volume.LocalBounds = FBox(Min, Max);
 		Volume.Resolution = Res;
 		Volume.VoxelSize = Vox;
+		Volume.NarrowBand = S.NarrowBand; // dequant 스케일(샘플러/콜라이더가 코드→cm 복원에 사용)
 		Volume.Distances = MoveTemp(Distances);
 		UE_LOG(LogRopeSDFBake, Verbose, TEXT("  bone %s: res=%dx%dx%d, voxel=%.2fcm, %d tri(s)"),
 			*Volume.Bone.ToString(), Res.X, Res.Y, Res.Z, Vox, NumTris);

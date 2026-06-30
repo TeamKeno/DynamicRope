@@ -79,15 +79,42 @@ struct FRopeBoneSDFVolume
 	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Voxel edge length (cm). Cached value derived from LocalBounds/Resolution."))
 	float VoxelSize = 0.0f;
 
-	/** signed distance 샘플(cm, 바깥쪽 +). 길이 = Resolution.X*Y*Z. 비어 있으면 미베이크. */
+	/** signed distance 양자화 코드(uint8). [-NarrowBand,+NarrowBand]를 [0,255]로 선형 매핑(바깥 +).
+	    길이 = Resolution.X*Y*Z. 비어 있으면 미베이크. DecodeDistance로 cm 거리 복원(float32 대비 4× 압축). */
 	UPROPERTY()
-	TArray<float> Distances;
+	TArray<uint8> Distances;
 
-	/** 베이크가 끝나 샘플 수가 해상도와 일치하는가. */
+	/** 양자화 dequant 스케일(cm) — 베이크 시 사용한 narrow-band. 코드 0..255가 -NarrowBand..+NarrowBand에 대응.
+	    0이면 미베이크/무효(또는 구 float 포맷에서 로드 실패 → 재베이크 필요). */
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Quantization range in cm (the narrow-band used at bake). Distance codes 0..255 map to -NarrowBand..+NarrowBand."))
+	float NarrowBand = 0.0f;
+
+	/** 베이크가 끝나 샘플 수가 해상도와 일치하고 dequant 스케일이 유효한가. */
 	bool IsBaked() const
 	{
 		const int64 Expected = static_cast<int64>(Resolution.X) * Resolution.Y * Resolution.Z;
-		return Expected > 0 && Distances.Num() == Expected;
+		return Expected > 0 && NarrowBand > 0.0f && Distances.Num() == Expected;
+	}
+
+	/** uint8 코드 → signed distance(cm, 바깥 +). 스케일/인덱스가 무효면 0. */
+	FORCEINLINE float DecodeDistance(int32 Index) const
+	{
+		if (NarrowBand <= 0.0f || !Distances.IsValidIndex(Index))
+		{
+			return 0.0f;
+		}
+		return static_cast<float>(Distances[Index]) * (2.0f * NarrowBand / 255.0f) - NarrowBand;
+	}
+
+	/** signed distance(cm) → uint8 코드. [-NarrowBandCm,+NarrowBandCm]로 clamp 후 [0,255]로 round. */
+	static FORCEINLINE uint8 EncodeDistance(float Distance, float NarrowBandCm)
+	{
+		if (NarrowBandCm <= 0.0f)
+		{
+			return 128; // 중앙(≈0) — 무효 스케일 폴백.
+		}
+		const float T = (Distance + NarrowBandCm) * (0.5f / NarrowBandCm); // [-NB,+NB] -> [0,1]
+		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(T * 255.0f), 0, 255));
 	}
 };
 

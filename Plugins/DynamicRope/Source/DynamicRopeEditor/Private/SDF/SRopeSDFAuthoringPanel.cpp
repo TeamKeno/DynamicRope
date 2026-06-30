@@ -64,8 +64,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				SNew(STextBlock)
 				.AutoWrapText(true)
 				.Text(LOCTEXT("Help",
-					"Pick a Rope SDF Data asset (its SourceMesh must be set), then Bake. v1 bakes every "
-					"skinned bone into per-bone volumes and auto-saves the asset."))
+					"Pick a Rope SDF Data asset (its SourceMesh must be set), then Bake."))
 			]
 
 			// 타깃 에셋 피커.

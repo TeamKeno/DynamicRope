@@ -276,7 +276,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 				if (Collider->GetGPUSDF(View))
 				{
 					FRopeGPUSDFCollider Sdf;
-					Sdf.Distances   = View.Distances;
+					Sdf.Distances   = View.Distances;   // uint8 코드(업로드 평탄화 시 dequant)
+					Sdf.NarrowBand  = View.NarrowBand;
 					Sdf.ResX        = View.ResX;
 					Sdf.ResY        = View.ResY;
 					Sdf.ResZ        = View.ResZ;

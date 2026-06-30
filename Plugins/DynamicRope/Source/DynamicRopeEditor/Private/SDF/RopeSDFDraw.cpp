@@ -79,7 +79,7 @@ void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVol
 				{
 					continue;
 				}
-				const float D = V.Distances[Idx];
+				const float D = V.DecodeDistance(Idx);
 				if (FMath::Abs(D) > Band)
 				{
 					continue;
@@ -149,13 +149,18 @@ void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDF
 			for (int32 X = 0; X < NX; X += SX)
 			{
 				const int32 Idx = X + Y * NX + Z * NX * NY;
-				if (!V.Distances.IsValidIndex(Idx) || FMath::Abs(V.Distances[Idx]) > Band)
+				if (!V.Distances.IsValidIndex(Idx))
+				{
+					continue;
+				}
+				const float D = V.DecodeDistance(Idx);
+				if (FMath::Abs(D) > Band)
 				{
 					continue;
 				}
 				// 포화(±NarrowBand 도달) 샘플은 방향 정보가 없으므로(평탄=up 폴백, 경계=노이즈) 스킵한다.
 				// NarrowBand <= 0이면 미상(구 에셋 등) → 스킵 비활성, 기존대로 그린다.
-				if (NarrowBand > 0.0f && FMath::Abs(V.Distances[Idx]) >= NarrowBand - KINDA_SMALL_NUMBER)
+				if (NarrowBand > 0.0f && FMath::Abs(D) >= NarrowBand - KINDA_SMALL_NUMBER)
 				{
 					continue;
 				}
