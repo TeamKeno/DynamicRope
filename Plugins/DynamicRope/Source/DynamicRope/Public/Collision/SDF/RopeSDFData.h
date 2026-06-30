@@ -13,6 +13,37 @@
 class USkeletalMesh;
 
 /**
+ * 베이크 1회에 대한 디자이너용 설정 값. 베이크 입력이자, 에셋에 함께 저장되어 재오써링 시
+ * "이 에셋이 어떤 설정으로 구워졌는가"를 알려주는 비교 기준이 된다(URopeSDFData::LastBakeSettings).
+ * 기본값은 신규 베이크의 출발점이다. 에디터 베이커(FRopeSDFBaker)가 이 타입을 그대로 입력으로 받는다.
+ */
+USTRUCT(BlueprintType)
+struct FRopeSDFBakeSettings
+{
+	GENERATED_BODY()
+
+	/** 샘플 간격(cm, 큐브 voxel). 작을수록 표면이 선명해지고 메모리/시간이 늘어난다. */
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	float VoxelSize = 1.5f;
+
+	/** 축당 샘플 상한. 본 grid가 이를 넘으면 VoxelSize를 키워 맞춘다. */
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	int32 MaxResolution = 48;
+
+	/** |거리|를 이 밴드(cm)로 clamp. 밴드 밖 값은 충돌과 무관하다. */
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	float NarrowBand = 6.0f;
+
+	/** 삼각형을 본에 배정하기 위한 최소 평균 스킨 가중치 [0..1]. */
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	float WeightThreshold = 0.2f;
+
+	/** voxel화 전 본 삼각형 AABB를 확장(cm) — 스킨 바깥에도 밴드 여유를 둔다. */
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	float BoundsPadding = 3.0f;
+};
+
+/**
  * 단일 본에 귀속된 좁은밴드 signed distance grid. 본 로컬 공간에 구워지며, 샘플은 행 우선
  * (idx = x + y*Res.X + z*Res.X*Res.Y)으로 저장된다. distance 단위는 cm, 바깥쪽이 양수.
  * Distances가 비어 있으면(미베이크) provider는 이 본의 collider를 만들지 않는다.
@@ -70,6 +101,14 @@ public:
 	/** 본별 distance 볼륨. provider가 본 트랜스폼으로 월드 변환해 노출한다. */
 	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF")
 	TArray<FRopeBoneSDFVolume> BoneVolumes;
+
+	/**
+	 * 마지막 베이크에 사용된 설정. 오써링 패널이 타깃 로드 시 읽어와 현재 결과와 비교/조정의 기준으로
+	 * 삼는다. 이 필드가 추가되기 전 구워진 에셋은 기본값이 직렬화되어 있어, 한 번 다시 베이크해야
+	 * 실제 값이 기록된다.
+	 */
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF")
+	FRopeSDFBakeSettings LastBakeSettings;
 
 	/** 본 이름으로 볼륨을 찾는다. 없으면 nullptr. */
 	const FRopeBoneSDFVolume* FindVolume(FName Bone) const;

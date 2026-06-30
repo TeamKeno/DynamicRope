@@ -124,7 +124,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 			.Padding(0.0f, 14.0f, 0.0f, 4.0f)
 			[
 				SNew(STextBlock)
-				.Text(LOCTEXT("SettingsHeader", "Bake Settings"))
+				.Text(LOCTEXT("SettingsHeader", "Bake Settings (last bake)"))
 			]
 
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
@@ -380,6 +380,18 @@ FString SRopeSDFAuthoringPanel::GetTargetPath() const
 void SRopeSDFAuthoringPanel::OnTargetChanged(const FAssetData& InAssetData)
 {
 	Target = Cast<URopeSDFData>(InAssetData.GetAsset());
+
+	// 이미 베이크된 에셋이면 그 당시 설정을 패널로 복원해, 디자이너가 현재 결과와 비교하며 값을
+	// 조정할 수 있게 한다. 미베이크 에셋이면 기본값(신규 베이크 출발점)을 유지한다.
+	if (URopeSDFData* Data = Target.Get(); Data && Data->HasAnyBakedVolume())
+	{
+		Settings = Data->LastBakeSettings;
+	}
+	else
+	{
+		Settings = FRopeSDFBakeSettings();
+	}
+
 	RefreshPreviewMesh();
 }
 
@@ -474,6 +486,9 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 	// 뷰포트 반영은 Refresh 버튼이 담당한다(자동 저장 제거).
 	Data->Modify();
 	Data->BoneVolumes = MoveTemp(Volumes);
+	// 베이크에 실제로 사용된 설정을 에셋에 기록 — 다음에 이 에셋을 열면 패널이 이 값을 복원해
+	// 현재 결과와 비교하며 재조정할 수 있다.
+	Data->LastBakeSettings = SettingsSnapshot;
 	Data->MarkPackageDirty();
 
 	UE_LOG(LogRopeSDFBake, Log, TEXT("Baked %s: %d bone volume(s) (unsaved — press Save)."),

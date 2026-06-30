@@ -15,28 +15,14 @@
 
 #include "CoreMinimal.h"
 #include "Templates/Function.h" // FRopeSDFBakeProgress(TFunction) 진행 콜백
+#include "Collision/SDF/RopeSDFData.h" // FRopeSDFBakeSettings(런타임 USTRUCT, 에셋에 저장)
 
 class USkeletalMesh;
 struct FRopeBoneSDFVolume;
 
-/** 베이크 1회에 대한 디자이너용 설정 값. */
-struct FRopeSDFBakeSettings
-{
-	/** 샘플 간격(cm, 큐브 voxel). 작을수록 표면이 선명해지고 메모리/시간이 늘어난다. */
-	float VoxelSize = 1.5f;
-
-	/** 축당 샘플 상한. 본 grid가 이를 넘으면 VoxelSize를 키워 맞춘다. */
-	int32 MaxResolution = 48;
-
-	/** |거리|를 이 밴드(cm)로 clamp. 밴드 밖 값은 충돌과 무관하다. */
-	float NarrowBand = 6.0f;
-
-	/** 삼각형을 본에 배정하기 위한 최소 평균 스킨 가중치 [0..1]. */
-	float WeightThreshold = 0.2f;
-
-	/** voxel화 전 본 삼각형 AABB를 확장(cm) — 스킨 바깥에도 밴드 여유를 둔다. */
-	float BoundsPadding = 3.0f;
-};
+// FRopeSDFBakeSettings는 런타임 모듈(RopeSDFData.h)로 승격되었다 — 베이크 설정을 에셋에 함께
+// 저장(URopeSDFData::LastBakeSettings)해 재오써링 시 비교 기준으로 쓰기 위함. 여기서는 그 타입을
+// 그대로 입력으로 받는다.
 
 /**
  * 본 단위 진행/취소 콜백. 타깃 본 하나의 voxel화를 시작할 때마다 한 번 호출된다.
