@@ -50,7 +50,9 @@ private:
 	// 속도(cm/s)를 이번 substep 변위로 환산하는 데 쓴다.
 	// SubAlpha0/1은 이 substep이 프레임 내에서 차지하는 collider 모션 구간[s/NumSub,(s+1)/NumSub]로,
 	// 움직이는 collider의 prev->curr 모션을 substep에 분배해 상대 운동 swept query(QuerySwept)에 넘긴다.
+	// LambdaDist: 현재까지 누적된 distance 제약의 XPBD Lagrange multiplier(= 세그먼트 장력). Coulomb 마찰의
+	// 법선력을 penetration(외력/무게분) + 장력 안쪽 성분으로 산정하는 데 쓴다 → 장력이 클수록 그립이 커진다.
 	void SolveCollisions(FRopeSimState& State, const FRopeSolverConfig& Config,
 		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
-		float SubDt, float SubAlpha0, float SubAlpha1) const;
+		const TArray<float>& LambdaDist, float SubDt, float SubAlpha0, float SubAlpha1) const;
 };

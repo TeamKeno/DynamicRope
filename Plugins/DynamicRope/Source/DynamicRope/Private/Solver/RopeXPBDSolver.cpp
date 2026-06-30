@@ -110,7 +110,7 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 				SolveDistance(State, Config, FixedDt, bReverse, LambdaDist);
 				SolveBending(State, Config, FixedDt, bReverse, LambdaBend);
 			}
-			SolveCollisions(State, Config, Colliders, ColliderBounds, FixedDt, SubAlpha0, SubAlpha1);
+			SolveCollisions(State, Config, Colliders, ColliderBounds, LambdaDist, FixedDt, SubAlpha0, SubAlpha1);
 		}
 	}
 }
@@ -221,7 +221,7 @@ void FRopeXPBDSolver::SolveBending(FRopeSimState& State, const FRopeSolverConfig
 
 void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverConfig& Config,
 	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
-	float SubDt, float SubAlpha0, float SubAlpha1) const
+	const TArray<float>& LambdaDist, float SubDt, float SubAlpha0, float SubAlpha1) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_Collisions);
 	if (Colliders.Num() == 0)
@@ -328,9 +328,26 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 				// (고정점 frac=0 → 1.0, 끝 frac=1 → TipFrictionScale).
 				const float Frac = (State.Num() > 1) ? (static_cast<float>(i) / static_cast<float>(State.Num() - 1)) : 0.0f;
 				const float MuEff = Friction * FMath::Lerp(1.0f, FMath::Clamp(Config.TipFrictionScale, 0.0f, 1.0f), Frac);
-				// Coulomb 한계: 접선 보정량을 μ*침투깊이로 상한. 작은 상대 운동은 전량 제거(정지마찰=그립),
-				// 장력이 그립(원뿔)을 넘으면 초과분은 슬립 → 노드가 표면을 미끄러져 자연스럽게 놔준다(영구 그립 방지).
-				const float MaxSlip = MuEff * Contact.Penetration;
+
+				// 법선력 ≈ penetration(외력/무게분) + 인접 distance 제약력(LambdaDist=장력)의 안쪽 성분.
+				// XPBD에서 λ가 곧 제약력 → 장력이 클수록 그립이 커진다(닿은 채 당겨도 옆으로 안 빠짐).
+				// 단위: λ는 cm·mass, ×InvMass로 displacement화 → MaxSlip(cm)과 일치(매직 상수 없음).
+				const int32 NodeCount = State.Num();
+				FVector NetPull = FVector::ZeroVector;
+				if (i > 0 && LambdaDist.IsValidIndex(i - 1))
+				{
+					NetPull += FMath::Abs(LambdaDist[i - 1]) * (State.Positions[i - 1] - State.Positions[i]).GetSafeNormal();
+				}
+				if (i + 1 < NodeCount && LambdaDist.IsValidIndex(i))
+				{
+					NetPull += FMath::Abs(LambdaDist[i]) * (State.Positions[i + 1] - State.Positions[i]).GetSafeNormal();
+				}
+				NetPull *= State.InvMass[i];
+				const float TensionNormal = FMath::Max(0.0f, -(NetPull | Contact.Normal)); // 표면 안쪽(−Normal) 성분만
+
+				// Coulomb 한계: 접선 보정량을 μ*(penetration + 장력 법선력)으로 상한. 작은 상대 운동은 전량 제거
+				// (정지마찰=그립), 그립을 넘으면 초과분은 슬립 → 표면을 미끄러져 자연스럽게 놔준다(영구 그립 방지).
+				const float MaxSlip = MuEff * (Contact.Penetration + TensionNormal);
 				const float TLen = RelTangent.Size();
 				if (TLen > MaxSlip && TLen > KINDA_SMALL_NUMBER)
 				{

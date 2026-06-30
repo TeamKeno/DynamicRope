@@ -427,8 +427,25 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 							const float3 SurfDisp  = SurfVel * P.FixedDt;
 							const float3 RelDelta  = NodeDelta - SurfDisp;
 							float3 Tangent = RelDelta - dot(RelDelta, NWorld) * NWorld;
-							// Coulomb 한계: 접선 보정량을 μ(테이퍼된 MuEff)*Pen으로 상한 → 장력이 그립을 넘으면 슬립(놔줌).
-							const float MaxSlip = MuEff * Pen;
+							// 법선력 ≈ Pen(외력/무게분) + 인접 distance 제약력(gLambdaDist=장력)의 안쪽 성분.
+							// λ가 곧 제약력 → 장력이 클수록 그립↑. λ×InvMass로 displacement화(CPU SolveCollisions 미러).
+							float3 NetPull = (float3)0;
+							if (i > 0)
+							{
+								const float3 d0 = gPos[i - 1] - gPos[i];
+								const float  l0 = length(d0);
+								if (l0 > 1e-4f) { NetPull += abs(gLambdaDist[i - 1]) * (d0 / l0); }
+							}
+							if (i + 1 < (uint)N)
+							{
+								const float3 d1 = gPos[i + 1] - gPos[i];
+								const float  l1 = length(d1);
+								if (l1 > 1e-4f) { NetPull += abs(gLambdaDist[i]) * (d1 / l1); }
+							}
+							NetPull *= gInvMass[i];
+							const float TensionNormal = max(0.0f, -dot(NetPull, NWorld)); // 표면 안쪽 성분만
+							// Coulomb 한계: 접선 보정량을 μ(테이퍼된 MuEff)*(Pen+장력 법선력)으로 상한 → 그립 넘으면 슬립.
+							const float MaxSlip = MuEff * (Pen + TensionNormal);
 							const float TLen = length(Tangent);
 							if (TLen > MaxSlip && TLen > 1e-6f) { Tangent *= (MaxSlip / TLen); }
 							gPrev[i] += Tangent;
