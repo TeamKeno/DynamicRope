@@ -249,6 +249,7 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			Step.BendCompliance    = Cfg.BendCompliance;
 			Step.Damping           = Cfg.Damping;
 			Step.Iterations        = Cfg.Iterations;
+			Step.CollisionPasses   = Cfg.CollisionPassesPerSubstep;
 			Step.Gravity           = Cfg.Gravity;
 			Step.CollisionRadius   = Cfg.CollisionRadius;
 			Step.Friction          = Cfg.Friction;

@@ -65,6 +65,7 @@ struct FRopeGPUResidentStep
 	float   BendCompliance = 0.0f;
 	float   Damping = 0.0f;
 	int32   Iterations = 1;
+	int32   CollisionPasses = 1; // substep당 충돌 해소 패스 수(Iterations로 상한). 1=substep 끝 1회(기존).
 	FVector Gravity = FVector::ZeroVector;
 
 	// 충돌(M2/M3). 이 로프에 적용할 collider 목록(값 복사라 step 수명 동안 유효).

@@ -90,20 +90,28 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 		for (float& L : LambdaDist) { L = 0.0f; }
 		for (float& L : LambdaBend) { L = 0.0f; }
 
-		for (int32 It = 0; It < Iters; ++It)
-		{
-			// Gauss-Seidel bias를 제거하기 위해 sweep 방향을 번갈아 바꾼다.
-			const bool bReverse = (It & 1) != 0;
-			SolveDistance(State, Config, FixedDt, bReverse, LambdaDist);
-			SolveBending(State, Config, FixedDt, bReverse, LambdaBend);
-		}
-
-		// 충돌은 substep당 1회(매 iteration이 아니라). Query가 비싸고, push-out이 침투를 한 번에
-		// 해소하므로 substep 끝에서 한 번이면 충분하다(다음 substep이 재수렴). friction 과적용도 방지.
 		// 알파: 이 substep이 차지하는 collider 모션 구간(프레임 모션을 substep에 균등 분배).
 		const float SubAlpha0 = static_cast<float>(s) / static_cast<float>(NumSub);
 		const float SubAlpha1 = static_cast<float>(s + 1) / static_cast<float>(NumSub);
-		SolveCollisions(State, Config, Colliders, ColliderBounds, FixedDt, SubAlpha0, SubAlpha1);
+
+		// 충돌 해소 빈도(CollisionPassesPerSubstep): 제약 iteration을 CollPasses개 구간으로 나눠 구간마다
+		// collision을 1회 끼운다. substep 끝에 1회만(K=1, 기존)이면 sharp 굴곡에서 안쪽 장력(distance/bending
+		// ×Iters)이 단일 push-out을 이겨 관통한다 → 사이사이 collision을 넣어 끼인각 임계치를 낮춘다.
+		// K>1이면 friction도 패스마다 적용되나(접촉 지속 노드에 한함) Coulomb 한계가 있어 과적용은 제한적.
+		const int32 CollPasses = FMath::Clamp(Config.CollisionPassesPerSubstep, 1, Iters);
+		int32 ItDone = 0;
+		for (int32 p = 0; p < CollPasses; ++p)
+		{
+			const int32 ItTarget = ((p + 1) * Iters) / CollPasses; // 누적 목표(마지막 패스가 Iters를 보장)
+			for (; ItDone < ItTarget; ++ItDone)
+			{
+				// Gauss-Seidel bias를 제거하기 위해 sweep 방향을 번갈아 바꾼다.
+				const bool bReverse = (ItDone & 1) != 0;
+				SolveDistance(State, Config, FixedDt, bReverse, LambdaDist);
+				SolveBending(State, Config, FixedDt, bReverse, LambdaBend);
+			}
+			SolveCollisions(State, Config, Colliders, ColliderBounds, FixedDt, SubAlpha0, SubAlpha1);
+		}
 	}
 }
 

@@ -83,14 +83,28 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 
 	const FBox Band = Volume->LocalBounds.ExpandBy(Q.NodeRadius);
 
-	// 분리(separation): 노드가 표면에 접촉한 채 시작했지만(L0 밴드 내·침투) substep 끝엔 표면 밖으로 나가는
-	// 중이면(L1 밴드 밖 또는 비침투) 재-핀하지 않고 놔준다. 안 그러면 접촉 노드가 매 substep 시작점으로
-	// 다시 핀돼 영영 못 떨어진다(장력이 낮은 끝 노드에서 특히 심함). 접근(L0 밴드 밖)·정지(L1도 침투)는 영향 없음.
+	// 분리(separation): 노드가 표면에 접촉한 채 시작했고(L0 밴드 내·침투) substep 동안 표면 *바깥쪽*으로
+	// 빠져나가는 중이면 재-핀하지 않고 놔준다. 안 그러면 접촉 노드가 매 substep 시작점으로 다시 핀돼 영영
+	// 못 떨어진다(장력이 낮은 끝 노드에서 특히 심함). 접근(L0 밴드 밖)·정지(L1도 침투)는 영향 없음.
+	//
+	// BUGFIX: 끝점 L1만으로 "표면 밖"을 판정하면 *관통*(L0 안쪽 → L1 몸 반대편 바깥)도 분리로 오판한다 —
+	// L1이 반대편 자유공간이라 dist(L1) >= NodeRadius가 되어 sweep을 통째로 건너뛰고 로프가 몸을 그대로
+	// 통과한다(고장력 시 발생). 진짜 분리는 노드가 표면 바깥 법선 방향으로 움직일 때뿐이므로, L0의 바깥
+	// gradient에 대해 상대 변위가 양수인 경우로 한정한다. 안쪽(관통)이면 early-out하지 않고 아래 sweep이
+	// 첫 접촉에서 잡아 표면 밖으로 민다(= 관통 차단).
 	const bool bStartInContact = Band.IsInsideOrOn(L0) && RopeSDFSampler::SampleTrilinear(*Volume, L0) < Q.NodeRadius;
-	const bool bEndOutside     = !Band.IsInsideOrOn(L1) || RopeSDFSampler::SampleTrilinear(*Volume, L1) >= Q.NodeRadius;
-	if (bStartInContact && bEndOutside)
+	if (bStartInContact)
 	{
-		return Contact; // bHit=false — 분리 중이므로 충돌 해소(재-핀) 안 함.
+		const bool bEndOutside = !Band.IsInsideOrOn(L1) || RopeSDFSampler::SampleTrilinear(*Volume, L1) >= Q.NodeRadius;
+		if (bEndOutside)
+		{
+			// L0 바깥 법선(gradient)에 대한 상대 변위 부호로 "진짜 분리 vs 관통"을 가른다.
+			const FVector OutwardLocal = RopeSDFSampler::SampleGradient(*Volume, L0);
+			if (FVector::DotProduct(L1 - L0, OutwardLocal) > 0.0f)
+			{
+				return Contact; // bHit=false — 바깥으로 이동하는 진짜 분리만 재-핀 생략.
+			}
+		}
 	}
 
 	for (int32 k = 0; k < NumSamples; ++k)

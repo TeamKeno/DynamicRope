@@ -32,7 +32,7 @@ struct FRopeGPUParams
 	int   SDFColliderOffset; // M3: 이 로프의 SDF collider 글로벌 시작 인덱스
 	int   NumSDFColliders;   // M3: SDF collider 수(0이면 SDF 충돌 없음)
 	float TipFrictionScale;  // 자유단 마찰 배율(고정점=1, 끝=이 값). C++ Pad0 슬롯과 1:1.
-	int   Pad1;
+	int   CollisionPasses;   // substep당 충돌 해소 패스 수(Iters로 상한). C++ Pad1 슬롯과 1:1.
 	float4 Gravity;   // xyz 사용
 	float4 PinPrev;   // xyz 사용
 	float4 PinTarget; // xyz 사용
@@ -235,8 +235,16 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		}
 		GroupMemoryBarrierWithGroupSync();
 
-		for (int It = 0; It < P.Iters; ++It)
+		// 충돌 해소 빈도(CollisionPasses): 제약 iteration을 CollPasses개 구간으로 나눠 구간마다 collision을 1회
+		// 끼운다(K=1이면 substep 끝 1회=기존). sharp 굴곡에서 안쪽 장력이 단일 push-out을 이겨 관통하는 걸 막음.
+		// CPU SolveCollisions 미러. 루프 bound가 uniform이라 모든 스레드가 같은 횟수 barrier를 탄다(데드락 없음).
+		const int CollPasses = clamp(P.CollisionPasses, 1, P.Iters);
+		int ItDone = 0;
+		for (int pass = 0; pass < CollPasses; ++pass)
 		{
+			const int ItTarget = ((pass + 1) * P.Iters) / CollPasses; // 누적 목표(마지막 패스가 Iters 보장)
+			for (; ItDone < ItTarget; ++ItDone)
+			{
 			// --- Distance: segment k는 노드 {k,k+1}. 충돌은 인접(차이 0/1) → 2색(k%2).
 			[unroll(2)]
 			for (int dc = 0; dc < 2; ++dc)
@@ -292,7 +300,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			}
 		}
 
-		// --- Collision(M2): substep당 1회(iteration 루프 뒤). capsule push-out + friction.
+		// --- Collision(M2): 각 collision pass 끝(아래 friction 포함). capsule push-out + friction.
 		// CPU SolveCollisions 미러: A=substep 시작(gPrev), 각 capsule마다 A->현재 위치를 swept 샘플,
 		// 첫 접촉에서 표면 밖으로 밀고 접선 속도를 friction만큼 깎는다. 노드별 독립이라 그룹 동기는 불필요.
 		if (bActiveNode && gInvMass[i] > 0.0f && P.NumCapsules > 0)
@@ -368,14 +376,23 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 				const float  RelLen = distance(L0, L1);
 				const int    NumSamples = clamp(1 + (int)floor(RelLen / SweepStep), 1, MaxSamples);
 
-				// 분리: 시작 접촉(L0 밴드 내·침투) + 끝 표면 밖(L1 밴드 밖/비침투)이면 재-핀하지 않고 놔줌
-				// (접촉 노드가 매 substep 시작점으로 다시 핀돼 영영 못 떨어지는 것 방지). CPU QuerySwept 미러.
+				// 분리: 시작 접촉(L0 밴드 내·침투)이고 노드가 표면 *바깥쪽*으로 빠져나가는 중이면 재-핀하지 않고
+				// 놔줌(접촉 노드가 매 substep 시작점으로 다시 핀돼 영영 못 떨어지는 것 방지). CPU QuerySwept 미러.
+				// BUGFIX: 끝점만 보면 관통(L0 안쪽 → L1 반대편 바깥)도 분리로 오판해 몸을 통과한다. L0 바깥
+				// gradient에 대한 변위가 양수일 때만 분리로 인정 → 안쪽(관통)이면 아래 sweep이 첫 접촉에서 막는다.
 				{
 					const float3 BMn = Vol.LocalMin.xyz - NodeR;
 					const float3 BMx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + NodeR;
 					const bool StartIn = all(L0 >= BMn) && all(L0 <= BMx) && (RopeSDFTrilinear(Vol, L0) < NodeR);
-					const bool EndOut  = any(L1 < BMn) || any(L1 > BMx) || (RopeSDFTrilinear(Vol, L1) >= NodeR);
-					if (StartIn && EndOut) { continue; }
+					if (StartIn)
+					{
+						const bool EndOut = any(L1 < BMn) || any(L1 > BMx) || (RopeSDFTrilinear(Vol, L1) >= NodeR);
+						if (EndOut)
+						{
+							const float3 OutwardLocal = RopeSDFGradient(Vol, L0); // 바깥 방향 단위(로컬)
+							if (dot(L1 - L0, OutwardLocal) > 0.0f) { continue; } // 바깥으로 이동하는 진짜 분리만 생략.
+						}
+					}
 				}
 
 				for (int k = 0; k < NumSamples; ++k)
@@ -421,7 +438,8 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 				}
 			}
 		}
-		GroupMemoryBarrierWithGroupSync();
+			GroupMemoryBarrierWithGroupSync(); // 충돌 결과 가시화 → 다음 collision pass / 다음 substep
+		} // for pass (CollisionPasses)
 	}
 
 	// --- write-back
