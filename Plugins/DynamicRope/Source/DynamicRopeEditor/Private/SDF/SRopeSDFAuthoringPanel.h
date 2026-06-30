@@ -73,4 +73,17 @@ private:
 	/** slice 축을 X→Y→Z로 순환시키는 버튼 + 현재 축 라벨. */
 	FReply OnCycleSliceAxis();
 	FText GetSliceAxisLabel() const;
+
+	//~ 오버레이 활성/가시성(베이크 데이터 유무 + 토글 종속).
+	/** 오버레이 컨트롤을 편집할 수 있는가(프리뷰 볼륨 스냅샷 존재). 없으면 섹션 전체를 비활성(회색)한다. */
+	bool CanEditOverlay() const;
+	/** 편집 불가일 때만 보이는 안내("Bake + Refresh") 텍스트의 가시성. */
+	EVisibility GetOverlayDisabledHintVisibility() const;
+	/** 토글 종속 그룹(설명/범례/수치)의 가시성: 해당 토글이 켜져 있으면 Visible, 아니면 Collapsed. */
+	EVisibility GetToggleGroupVisibility(bool FRopeSDFPreviewDrawOptions::* Member) const;
+
+	/** 오버레이 설명 한 줄(연한 텍스트). 토글 그룹 안에 들어가 무엇을 그리는지 알려준다. */
+	TSharedRef<class SWidget> MakeOverlayDescription(const FText& Text);
+	/** 색상 범례 한 줄: 색 스와치 + 라벨. 디버그 색이 무엇을 뜻하는지 알려준다. */
+	TSharedRef<class SWidget> MakeLegendRow(const FLinearColor& Color, const FText& Label);
 };

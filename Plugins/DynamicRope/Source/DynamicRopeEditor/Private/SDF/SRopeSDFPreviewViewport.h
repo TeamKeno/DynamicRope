@@ -78,6 +78,13 @@ public:
 	/** 패널 UI가 토글/파라미터를 읽고 쓰는 진입점. 변경 후 InvalidatePreview() 호출 권장. */
 	FRopeSDFPreviewDrawOptions& AccessDrawOptions() { return DrawOptions; }
 
+	/**
+	 * 오버레이가 실제로 그릴 본별 볼륨 스냅샷이 있는가. 패널이 오버레이 컨트롤의 활성/비활성을 정하는
+	 * 기준 — 베이크 여부가 아니라 "지금 뷰포트가 그릴 데이터가 있는가"가 정확한 조건이다(스냅샷은
+	 * SetPreviewData/Refresh 때만 갱신되므로).
+	 */
+	bool HasPreviewVolumes() const { return PreviewVolumes.Num() > 0; }
+
 	/** 다음 프레임 리드로우를 강제한다(토글/파라미터 변경 반영). */
 	void InvalidatePreview();
 

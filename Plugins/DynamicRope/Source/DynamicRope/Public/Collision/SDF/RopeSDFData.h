@@ -17,29 +17,30 @@ class USkeletalMesh;
  * "이 에셋이 어떤 설정으로 구워졌는가"를 알려주는 비교 기준이 된다(URopeSDFData::LastBakeSettings).
  * 기본값은 신규 베이크의 출발점이다. 에디터 베이커(FRopeSDFBaker)가 이 타입을 그대로 입력으로 받는다.
  */
-USTRUCT(BlueprintType)
+// 에디터 UI(에셋 에디터 details 등) tooltip은 영어로 노출한다 — 한국어 주석 대신 명시적 ToolTip 메타를 사용.
+USTRUCT(BlueprintType, meta = (ToolTip = "Designer-facing settings for a single bake. Used as bake input and stored on the asset (URopeSDFData.LastBakeSettings) as the comparison baseline when re-authoring."))
 struct FRopeSDFBakeSettings
 {
 	GENERATED_BODY()
 
 	/** 샘플 간격(cm, 큐브 voxel). 작을수록 표면이 선명해지고 메모리/시간이 늘어난다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Sample spacing in cm (cube voxel). Smaller sharpens the surface but increases memory and bake time."))
 	float VoxelSize = 1.5f;
 
 	/** 축당 샘플 상한. 본 grid가 이를 넘으면 VoxelSize를 키워 맞춘다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Maximum samples per axis. If a bone's grid would exceed this, VoxelSize is increased to fit."))
 	int32 MaxResolution = 48;
 
 	/** |거리|를 이 밴드(cm)로 clamp. 밴드 밖 값은 충돌과 무관하다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Clamp |distance| to this band (cm). Values outside the band are irrelevant to collision."))
 	float NarrowBand = 6.0f;
 
 	/** 삼각형을 본에 배정하기 위한 최소 평균 스킨 가중치 [0..1]. */
-	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Minimum average skin weight [0..1] for a triangle to be assigned to a bone."))
 	float WeightThreshold = 0.2f;
 
 	/** voxel화 전 본 삼각형 AABB를 확장(cm) — 스킨 바깥에도 밴드 여유를 둔다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Expand each bone's triangle AABB by this much (cm) before voxelizing, leaving band margin beyond the skin."))
 	float BoundsPadding = 3.0f;
 };
 
@@ -50,25 +51,26 @@ struct FRopeSDFBakeSettings
  *
  * NOTE: 이 단계에서는 float 평면 배열로 둔다. FFloat16/uint16 좁은밴드 압축은 베이크 본작업(B3)에서.
  */
-USTRUCT()
+// 에디터 UI(에셋 에디터 details 등) tooltip은 영어로 노출한다 — 한국어 주석 대신 명시적 ToolTip 메타를 사용.
+USTRUCT(meta = (ToolTip = "Narrow-band signed distance grid attributed to a single bone, baked in bone-local space. Distance is in cm, positive outside."))
 struct FRopeBoneSDFVolume
 {
 	GENERATED_BODY()
 
 	/** 이 볼륨이 귀속되는 본. FRopeContact.Bone으로 전파되어 DecideWrap이 wrap을 attribute한다. */
-	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF")
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Bone this volume is attributed to. Propagates to FRopeContact.Bone so DecideWrap can attribute the wrap."))
 	FName Bone = NAME_None;
 
 	/** distance grid가 덮는 본 로컬 공간 AABB. */
-	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF")
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Bone-local AABB covered by the distance grid."))
 	FBox LocalBounds = FBox(ForceInit);
 
 	/** grid 해상도(voxel 개수, 축별). */
-	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF")
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Grid resolution (voxel count per axis)."))
 	FIntVector Resolution = FIntVector::ZeroValue;
 
 	/** voxel 한 변 길이(cm). LocalBounds/Resolution에서 유도되는 캐시 값. */
-	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF")
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Voxel edge length (cm). Cached value derived from LocalBounds/Resolution."))
 	float VoxelSize = 0.0f;
 
 	/** signed distance 샘플(cm, 바깥쪽 +). 길이 = Resolution.X*Y*Z. 비어 있으면 미베이크. */
@@ -95,11 +97,11 @@ class DYNAMICROPE_API URopeSDFData : public UDataAsset
 
 public:
 	/** SDF가 구워진 원본 메시(soft — 런타임 강제 로드 안 함, 오써링/검증 참조용). */
-	UPROPERTY(EditAnywhere, Category = "Rope|SDF")
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Skeletal mesh the SDF was baked from (soft reference — not force-loaded at runtime; used for authoring/validation)."))
 	TSoftObjectPtr<USkeletalMesh> SourceMesh;
 
 	/** 본별 distance 볼륨. provider가 본 트랜스폼으로 월드 변환해 노출한다. */
-	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF")
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Per-bone distance volumes. The provider transforms each into world space by its bone transform."))
 	TArray<FRopeBoneSDFVolume> BoneVolumes;
 
 	/**
@@ -107,7 +109,7 @@ public:
 	 * 삼는다. 이 필드가 추가되기 전 구워진 에셋은 기본값이 직렬화되어 있어, 한 번 다시 베이크해야
 	 * 실제 값이 기록된다.
 	 */
-	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF")
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Settings used for the last bake. The authoring panel restores these when the asset is loaded so you can compare and adjust. Assets baked before this field existed serialize defaults until re-baked."))
 	FRopeSDFBakeSettings LastBakeSettings;
 
 	/** 본 이름으로 볼륨을 찾는다. 없으면 nullptr. */

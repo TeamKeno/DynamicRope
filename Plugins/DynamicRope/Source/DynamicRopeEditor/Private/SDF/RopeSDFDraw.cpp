@@ -132,10 +132,10 @@ void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDF
 	{
 		return;
 	}
-	// 축당 ~8개로 스트라이드(빽빽함 방지).
-	const int32 SX = FMath::Max(1, (NX - 1) / 8);
-	const int32 SY = FMath::Max(1, (NY - 1) / 8);
-	const int32 SZ = FMath::Max(1, (NZ - 1) / 8);
+	// 축당 ~6개로 스트라이드(빽빽함 방지).
+	const int32 SX = FMath::Max(1, (NX - 1) / 6);
+	const int32 SY = FMath::Max(1, (NY - 1) / 6);
+	const int32 SZ = FMath::Max(1, (NZ - 1) / 6);
 	for (int32 Z = 0; Z < NZ; Z += SZ)
 	{
 		for (int32 Y = 0; Y < NY; Y += SY)
@@ -152,8 +152,17 @@ void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDF
 					static_cast<double>(Y) / (NY - 1),
 					static_cast<double>(Z) / (NZ - 1));
 				const FVector G = RopeSDFSampler::SampleGradient(V, L);
-				PDI->DrawLine(Xform.TransformPosition(L), Xform.TransformPosition(L + G * Length),
-					FLinearColor::Green, SDPG_World, 0.5f);
+				// 머리 달린 화살표로 그려 push-out(바깥) 방향이 보이게 한다. +X축을 그라디언트 방향으로
+				// 회전시킨 행렬을 만들고 샘플 위치를 원점으로 둔다(스케일 비균등 대비 NoScale 변환).
+				const FVector WorldDir = Xform.TransformVectorNoScale(G).GetSafeNormal();
+				if (WorldDir.IsNearlyZero())
+				{
+					continue;
+				}
+				FMatrix ArrowToWorld = FRotationMatrix::MakeFromX(WorldDir);
+				ArrowToWorld.SetOrigin(Xform.TransformPosition(L));
+				DrawDirectionalArrow(PDI, ArrowToWorld, FLinearColor::Green,
+					Length /*길이(cm)*/, Length * 0.05f /*화살촉 크기*/, SDPG_World, 0.2f /*두께*/);
 			}
 		}
 	}

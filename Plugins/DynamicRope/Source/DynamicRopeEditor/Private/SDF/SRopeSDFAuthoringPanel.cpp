@@ -14,6 +14,8 @@
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/Colors/SColorBlock.h"     // 범례 색 스와치
+#include "Widgets/Layout/SBox.h"            // 색 스와치 크기 고정
 #include "Styling/AppStyle.h"
 #include "PropertyCustomizationHelpers.h"   // SObjectPropertyEntryBox
 #include "Engine/SkeletalMesh.h"
@@ -151,49 +153,131 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				.Text(LOCTEXT("OverlayHeader", "Preview Overlay"))
 			]
 
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeOverlayToggleRow(LOCTEXT("DrawBounds", "Bounds"), &FRopeSDFPreviewDrawOptions::bDrawBounds) ]
-
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeOverlayToggleRow(LOCTEXT("DrawVoxels", "Voxels (narrow band)"), &FRopeSDFPreviewDrawOptions::bDrawVoxels) ]
-
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeOverlayToggleRow(LOCTEXT("DrawSlice", "Slice heatmap"), &FRopeSDFPreviewDrawOptions::bDrawSlice) ]
-
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeOverlayToggleRow(LOCTEXT("DrawGradient", "Gradients"), &FRopeSDFPreviewDrawOptions::bDrawGradient) ]
-
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakePreviewFloatRow(LOCTEXT("Band", "Band Threshold (cm)"), &FRopeSDFPreviewDrawOptions::BandThreshold, 0.0f, 50.0f) ]
-
-			// Slice 파라미터: 축(순환 버튼) / 위치 / 해상도 / 색 스케일.
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			// 베이크 데이터(프리뷰 볼륨 스냅샷)가 없으면 컨트롤은 보이되 비활성. 이유를 안내한다.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 0.0f, 0.0f, 4.0f)
 			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
-				[ SNew(STextBlock).Text(LOCTEXT("SliceAxisLabel", "Slice Axis")) ]
-				+ SHorizontalBox::Slot().FillWidth(0.45f)
-				[
-					SNew(SButton)
-					.HAlign(HAlign_Center)
-					.OnClicked(this, &SRopeSDFAuthoringPanel::OnCycleSliceAxis)
-					[
-						SNew(STextBlock).Text(this, &SRopeSDFAuthoringPanel::GetSliceAxisLabel)
-					]
-				]
+				SNew(STextBlock)
+				.Visibility(this, &SRopeSDFAuthoringPanel::GetOverlayDisabledHintVisibility)
+				.AutoWrapText(true)
+				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				.Text(LOCTEXT("OverlayDisabledHint",
+					"No baked data to preview. Bake the asset and press Refresh to enable these overlays."))
 			]
 
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakePreviewFloatRow(LOCTEXT("SlicePos", "Slice Position (0-1)"), &FRopeSDFPreviewDrawOptions::SlicePosition, 0.0f, 1.0f) ]
+			// 오버레이 컨트롤 전체를 한 컨테이너로 감싼다. 프리뷰 볼륨이 없으면 IsEnabled가 자식 전체로
+			// 전파되어 통째로 회색 비활성된다(어떤 디버그가 있는지는 계속 보이되 못 쓰는 상태).
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			[
+				SNew(SVerticalBox)
+				.IsEnabled(this, &SRopeSDFAuthoringPanel::CanEditOverlay)
 
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakePreviewIntRow(LOCTEXT("SliceRes", "Slice Resolution"), &FRopeSDFPreviewDrawOptions::SliceResolution, 2, 128) ]
+				// ── Bounds ──
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+				[ MakeOverlayToggleRow(LOCTEXT("DrawBounds", "Bounds"), &FRopeSDFPreviewDrawOptions::bDrawBounds) ]
 
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakePreviewFloatRow(LOCTEXT("SliceScale", "Slice Color Scale (cm)"), &FRopeSDFPreviewDrawOptions::SliceColorScale, 0.1f, 50.0f) ]
+				+ SVerticalBox::Slot().AutoHeight().Padding(16.0f, 0.0f, 0.0f, 4.0f)
+				[
+					SNew(SVerticalBox)
+					.Visibility_Lambda([this]() { return GetToggleGroupVisibility(&FRopeSDFPreviewDrawOptions::bDrawBounds); })
 
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakePreviewFloatRow(LOCTEXT("GradLen", "Gradient Length (cm)"), &FRopeSDFPreviewDrawOptions::GradientLength, 0.5f, 20.0f) ]
+					+ SVerticalBox::Slot().AutoHeight()
+					[ MakeOverlayDescription(LOCTEXT("BoundsDesc",
+						"Wireframe box of each baked volume's bone-local bounds.")) ]
+				]
+
+				// ── Voxels ──
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+				[ MakeOverlayToggleRow(LOCTEXT("DrawVoxels", "Voxels (narrow band)"), &FRopeSDFPreviewDrawOptions::bDrawVoxels) ]
+
+				+ SVerticalBox::Slot().AutoHeight().Padding(16.0f, 0.0f, 0.0f, 4.0f)
+				[
+					SNew(SVerticalBox)
+					.Visibility_Lambda([this]() { return GetToggleGroupVisibility(&FRopeSDFPreviewDrawOptions::bDrawVoxels); })
+
+					+ SVerticalBox::Slot().AutoHeight()
+					[ MakeOverlayDescription(LOCTEXT("VoxelsDesc",
+						"Narrow-band samples drawn as points, colored by signed distance.")) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
+					[ MakeLegendRow(FLinearColor::Red, LOCTEXT("LegendInside", "Inside (negative)")) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 1.0f, 0.0f, 0.0f)
+					[ MakeLegendRow(FLinearColor::White, LOCTEXT("LegendSurface", "Surface (~0)")) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 1.0f, 0.0f, 0.0f)
+					[ MakeLegendRow(FLinearColor(0.0f, 0.4f, 1.0f), LOCTEXT("LegendOutside", "Outside (positive)")) ]
+
+					// Band Threshold는 Voxels·Gradients 공용 파라미터다. 양쪽 그룹에 함께 노출하되 같은
+					// 멤버(BandThreshold)에 바인딩되므로 한쪽을 바꾸면 다른 쪽도 자동으로 따라온다.
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
+					[ MakePreviewFloatRow(LOCTEXT("BandVoxels", "Band Threshold (cm)"), &FRopeSDFPreviewDrawOptions::BandThreshold, 0.0f, 50.0f) ]
+				]
+
+				// ── Slice ──
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+				[ MakeOverlayToggleRow(LOCTEXT("DrawSlice", "Slice heatmap"), &FRopeSDFPreviewDrawOptions::bDrawSlice) ]
+
+				+ SVerticalBox::Slot().AutoHeight().Padding(16.0f, 0.0f, 0.0f, 4.0f)
+				[
+					SNew(SVerticalBox)
+					.Visibility_Lambda([this]() { return GetToggleGroupVisibility(&FRopeSDFPreviewDrawOptions::bDrawSlice); })
+
+					+ SVerticalBox::Slot().AutoHeight()
+					[ MakeOverlayDescription(LOCTEXT("SliceDesc",
+						"Heatmap of a sampled plane cutting through each volume.")) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
+					[ MakeLegendRow(FLinearColor::Red, LOCTEXT("LegendInside2", "Inside (negative)")) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 1.0f, 0.0f, 0.0f)
+					[ MakeLegendRow(FLinearColor::White, LOCTEXT("LegendSurface2", "Surface (~0)")) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 1.0f, 0.0f, 0.0f)
+					[ MakeLegendRow(FLinearColor(0.0f, 0.4f, 1.0f), LOCTEXT("LegendOutside2", "Outside (positive)")) ]
+
+					// Slice 파라미터: 축(순환 버튼) / 위치 / 해상도 / 색 스케일.
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
+						[ SNew(STextBlock).Text(LOCTEXT("SliceAxisLabel", "Slice Axis")) ]
+						+ SHorizontalBox::Slot().FillWidth(0.45f)
+						[
+							SNew(SButton)
+							.HAlign(HAlign_Center)
+							.OnClicked(this, &SRopeSDFAuthoringPanel::OnCycleSliceAxis)
+							[
+								SNew(STextBlock).Text(this, &SRopeSDFAuthoringPanel::GetSliceAxisLabel)
+							]
+						]
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+					[ MakePreviewFloatRow(LOCTEXT("SlicePos", "Slice Position (0-1)"), &FRopeSDFPreviewDrawOptions::SlicePosition, 0.0f, 1.0f) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+					[ MakePreviewIntRow(LOCTEXT("SliceRes", "Slice Resolution"), &FRopeSDFPreviewDrawOptions::SliceResolution, 2, 128) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+					[ MakePreviewFloatRow(LOCTEXT("SliceScale", "Slice Color Scale (cm)"), &FRopeSDFPreviewDrawOptions::SliceColorScale, 0.1f, 50.0f) ]
+				]
+
+				// ── Gradients ──
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+				[ MakeOverlayToggleRow(LOCTEXT("DrawGradient", "Gradients"), &FRopeSDFPreviewDrawOptions::bDrawGradient) ]
+
+				+ SVerticalBox::Slot().AutoHeight().Padding(16.0f, 0.0f, 0.0f, 4.0f)
+				[
+					SNew(SVerticalBox)
+					.Visibility_Lambda([this]() { return GetToggleGroupVisibility(&FRopeSDFPreviewDrawOptions::bDrawGradient); })
+
+					+ SVerticalBox::Slot().AutoHeight()
+					[ MakeOverlayDescription(LOCTEXT("GradientDesc",
+						"Arrows showing the outward distance gradient at narrow-band samples.")) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
+					[ MakeLegendRow(FLinearColor::Green, LOCTEXT("LegendGradient", "Gradient direction (outward)")) ]
+
+					// Voxels 그룹과 공유하는 Band Threshold(같은 멤버 바인딩 → 자동 동기화).
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
+					[ MakePreviewFloatRow(LOCTEXT("BandGradient", "Band Threshold (cm)"), &FRopeSDFPreviewDrawOptions::BandThreshold, 0.0f, 50.0f) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
+					[ MakePreviewFloatRow(LOCTEXT("GradLen", "Gradient Length (cm)"), &FRopeSDFPreviewDrawOptions::GradientLength, 0.5f, 20.0f) ]
+				]
+			]
 		]
 		]
 
@@ -370,6 +454,48 @@ FText SRopeSDFAuthoringPanel::GetSliceAxisLabel() const
 	case ERopeSDFSliceAxis::Y: return LOCTEXT("AxisY", "Y");
 	default:                   return LOCTEXT("AxisZ", "Z");
 	}
+}
+
+bool SRopeSDFAuthoringPanel::CanEditOverlay() const
+{
+	// 베이크 여부가 아니라 "지금 뷰포트가 그릴 볼륨 스냅샷이 있는가"가 정확한 기준이다. 베이크 직후라도
+	// Refresh로 스냅샷을 갱신하기 전엔 그릴 게 없으므로 컨트롤을 비활성으로 둔다.
+	return PreviewViewport.IsValid() && PreviewViewport->HasPreviewVolumes();
+}
+
+EVisibility SRopeSDFAuthoringPanel::GetOverlayDisabledHintVisibility() const
+{
+	return CanEditOverlay() ? EVisibility::Collapsed : EVisibility::Visible;
+}
+
+EVisibility SRopeSDFAuthoringPanel::GetToggleGroupVisibility(bool FRopeSDFPreviewDrawOptions::* Member) const
+{
+	const bool bOn = PreviewViewport.IsValid() && PreviewViewport->AccessDrawOptions().*Member;
+	return bOn ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeOverlayDescription(const FText& Text)
+{
+	return SNew(STextBlock)
+		.Text(Text)
+		.AutoWrapText(true)
+		.ColorAndOpacity(FSlateColor::UseSubduedForeground());
+}
+
+TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeLegendRow(const FLinearColor& Color, const FText& Label)
+{
+	return SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 6.0f, 0.0f)
+		[
+			SNew(SBox).WidthOverride(12.0f).HeightOverride(12.0f)
+			[
+				SNew(SColorBlock).Color(Color)
+			]
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[
+			SNew(STextBlock).Text(Label).ColorAndOpacity(FSlateColor::UseSubduedForeground())
+		];
 }
 
 FString SRopeSDFAuthoringPanel::GetTargetPath() const
