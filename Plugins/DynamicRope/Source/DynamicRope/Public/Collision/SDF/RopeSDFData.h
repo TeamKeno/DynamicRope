@@ -25,7 +25,7 @@ struct FRopeSDFBakeSettings
 
 	/** 샘플 간격(cm, 큐브 voxel). 작을수록 표면이 선명해지고 메모리/시간이 늘어난다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Sample spacing in cm (cube voxel). Smaller sharpens the surface but increases memory and bake time."))
-	float VoxelSize = 1.5f;
+	float VoxelSize = 2.0f;
 
 	/** 축당 샘플 상한. 본 grid가 이를 넘으면 VoxelSize를 키워 맞춘다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Maximum samples per axis. If a bone's grid would exceed this, VoxelSize is increased to fit."))
@@ -33,7 +33,7 @@ struct FRopeSDFBakeSettings
 
 	/** |거리|를 이 밴드(cm)로 clamp. 밴드 밖 값은 충돌과 무관하다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Clamp |distance| to this band (cm). Values outside the band are irrelevant to collision."))
-	float NarrowBand = 6.0f;
+	float NarrowBand = 3.0f;
 
 	/** 삼각형을 본에 배정하기 위한 최소 평균 스킨 가중치 [0..1]. */
 	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Minimum average skin weight [0..1] for a triangle to be assigned to a bone."))
@@ -41,7 +41,7 @@ struct FRopeSDFBakeSettings
 
 	/** voxel화 전 본 삼각형 AABB를 확장(cm) — 스킨 바깥에도 밴드 여유를 둔다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Expand each bone's triangle AABB by this much (cm) before voxelizing, leaving band margin beyond the skin."))
-	float BoundsPadding = 3.0f;
+	float BoundsPadding = 0.0f;
 };
 
 /**
