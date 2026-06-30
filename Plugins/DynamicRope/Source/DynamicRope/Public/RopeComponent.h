@@ -296,7 +296,7 @@ private:
 	// 변경
 	bool ShouldStartWrapping() const;
 
-	FRopeWrapState BuildWrapSeedFromContactingState() const;
+	FRopeWrapState BuildWrapSeedFromContactingState(const TArray<FRopeContactCandidate>& Candidates) const;
 
 	bool ShouldCommitWrap(const FRopeContactTracker& Tracker) const;
 
@@ -311,6 +311,30 @@ private:
 	void UpdateWrapping(float DeltaTime);
 
 	bool IsWrappingStillValid() const;
+
+	bool BuildWrappingAnchorsFromLatch(const FRopeSurfaceAnchor& LatchAnchor);
+
+	bool ComputeWrapSurfaceTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
+		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
+
+	bool ComputeSurfaceWalkWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
+		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
+
+	bool ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
+		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
+
+	bool ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
+		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
+
+	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor,
+		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;
+
+	ERopeWrappingPathMode GetWrappingPathMode() const;
+
+	bool ProjectWrapPointToSurface(FName Bone, const USkeletalMeshComponent* Mesh,
+		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld) const;
+
+	void ApplyWrappingTargetMotion(float DeltaTime);
 
 	bool UpdateWrappingAnchorsFromCandidates(const TArray<FRopeContactCandidate>& Candidates);
 

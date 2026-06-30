@@ -33,6 +33,20 @@ enum class ERopeReleaseReason : uint8
 	Broken
 };
 
+/** Wrapping 중 tail node의 목표 surface path를 생성하는 방식. Project Settings에서 전역 선택한다. */
+UENUM(BlueprintType)
+enum class ERopeWrappingPathMode : uint8
+{
+	/** 최초 latch tangent 방향으로 SDF 표면을 한 걸음씩 따라간다. 가장 보수적인 기본 폴백 경로. */
+	SurfaceWalk UMETA(DisplayName = "Surface Walk"),
+
+	/** bone-parent 축을 기준으로 수학적 helix를 만든 뒤 SDF 표면에 투영한다. 일정한 나선 실루엣을 얻기 쉽다. */
+	AnalyticHelix UMETA(DisplayName = "Analytic Helix"),
+
+	/** 매 step마다 축 기준 원주 방향 벡터장을 만들고 SDF tangent plane에 투영한다. 의도적으로 원주를 돌면서 표면 굴곡도 따라간다. */
+	SurfaceVectorField UMETA(DisplayName = "Surface Vector Field")
+};
+
 /**
  * narrow-phase 컨택트: rope 노드 하나 vs collider 하나, IRopeCollider::Query가 반환한다.
  *
@@ -251,6 +265,18 @@ struct FRopeWrapConfig
 	/** Wrapping phase must keep the same accumulated latch span stable this long before committing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrappingStableTime = 0.10f;
+
+	/** Time used to pull tail nodes onto their generated surface wrap targets. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.01", Units = "s"))
+	float WrappingMotionDuration = 0.25f;
+
+	/** Per-segment delay while tail nodes settle onto the surface path. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	float WrappingTailDelayPerSegment = 0.012f;
+
+	/** Axis distance advanced per circumference distance for analytic helix wrapping. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "-2.0", ClampMax = "2.0"))
+	float WrappingHelixPitchScale = 0.25f;
 
 	/** Upper bound for physics-based wrapping settle before committing the best accumulated anchors. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
