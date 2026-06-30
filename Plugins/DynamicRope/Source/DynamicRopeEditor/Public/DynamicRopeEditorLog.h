@@ -10,9 +10,16 @@
 #pragma once
 
 #include "Logging/LogMacros.h"
+#include "UObject/NameTypes.h"
 
 /** General editor tooling: module startup, tab/menu registration, component visualizers, factories. */
 DECLARE_LOG_CATEGORY_EXTERN(LogDynamicRopeEditor, Log, All);
 
 /** SDF authoring/baking pipeline (sampling, bake progress, asset write-out). */
 DECLARE_LOG_CATEGORY_EXTERN(LogRopeSDFBake, Log, All);
+
+/**
+ * SDF 베이크 결과(coarsening된 본 등)를 사용자에게 보고하는 Message Log 리스닝 이름.
+ * 모듈 startup에서 등록하고, 패널이 베이크 후 이 이름으로 기록한다.
+ */
+inline const FName RopeSDFMessageLogName(TEXT("DynamicRopeSDF"));

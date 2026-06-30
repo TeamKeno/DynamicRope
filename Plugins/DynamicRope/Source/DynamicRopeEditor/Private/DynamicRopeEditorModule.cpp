@@ -11,6 +11,7 @@
 
 #include "PropertyEditorModule.h"
 #include "Modules/ModuleManager.h"
+#include "MessageLogModule.h"
 
 #include "Framework/Docking/TabManager.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -63,6 +64,16 @@ void FDynamicRopeEditorModule::StartupModule()
 		PropertyModule.NotifyCustomizationModuleChanged();
 	}
 
+	// 베이크 결과(coarsening된 본 목록 등)를 보고할 Message Log 리스닝 등록.
+	{
+		FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
+		FMessageLogInitializationOptions Options;
+		Options.bShowPages = true;   // 베이크마다 페이지를 분리해 이력을 남긴다.
+		Options.bAllowClear = true;
+		Options.bShowFilters = true;
+		MessageLogModule.RegisterLogListing(RopeSDFMessageLogName, LOCTEXT("RopeSDFLogLabel", "Dynamic Rope SDF"), Options);
+	}
+
 	UE_LOG(LogDynamicRopeEditor, Log, TEXT("DynamicRopeEditor module started (SDF authoring tab + component visualizers registered)."));
 }
 
@@ -87,6 +98,12 @@ void FDynamicRopeEditorModule::ShutdownModule()
 	if (FSlateApplication::IsInitialized())
 	{
 		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(RopeSDFAuthoringTabId);
+	}
+
+	if (FModuleManager::Get().IsModuleLoaded("MessageLog"))
+	{
+		FModuleManager::GetModuleChecked<FMessageLogModule>("MessageLog")
+			.UnregisterLogListing(RopeSDFMessageLogName);
 	}
 
 	UE_LOG(LogDynamicRopeEditor, Log, TEXT("DynamicRopeEditor module shut down."));

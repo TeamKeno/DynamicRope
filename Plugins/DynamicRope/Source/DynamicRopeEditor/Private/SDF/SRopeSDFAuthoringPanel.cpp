@@ -6,10 +6,12 @@
 #include "DynamicRopeEditorLog.h"
 #include "Collision/SDF/RopeSDFData.h"
 
+#include "Logging/MessageLog.h"             // 베이크 결과(coarsening) 보고
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SExpandableArea.h" // 고급 베이크 설정 접이식 섹션
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
@@ -129,20 +131,37 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				.Text(LOCTEXT("SettingsHeader", "Bake Settings (last bake)"))
 			]
 
+			// 메인 노브: 일상 사용자가 다루는 두 값(품질 목표 + 충돌 밴드)만 노출한다.
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 			[ MakeFloatRow(LOCTEXT("VoxelSize", "Voxel Size (cm)"), &FRopeSDFBakeSettings::VoxelSize, 0.25f, 10.0f) ]
 
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeIntRow(LOCTEXT("MaxRes", "Max Resolution"), &FRopeSDFBakeSettings::MaxResolution, 8, 256) ]
-
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 			[ MakeFloatRow(LOCTEXT("NarrowBand", "Narrow Band (cm)"), &FRopeSDFBakeSettings::NarrowBand, 1.0f, 50.0f) ]
 
+			// 고급 설정: Max Resolution(메모리/시간 상한 — Voxel Size를 덮어쓸 수 있음)과
+			// 잘 안 건드리는 튜닝값들은 기본 접힘으로 숨긴다.
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeFloatRow(LOCTEXT("WeightThresh", "Weight Threshold"), &FRopeSDFBakeSettings::WeightThreshold, 0.0f, 1.0f) ]
+			[
+				SNew(SExpandableArea)
+				.InitiallyCollapsed(true)
+				.HeaderContent()
+				[
+					SNew(STextBlock).Text(LOCTEXT("AdvancedHdr", "Advanced"))
+				]
+				.BodyContent()
+				[
+					SNew(SVerticalBox)
 
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeFloatRow(LOCTEXT("BoundsPad", "Bounds Padding (cm)"), &FRopeSDFBakeSettings::BoundsPadding, 0.0f, 20.0f) ]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+					[ MakeIntRow(LOCTEXT("MaxRes", "Max Resolution"), &FRopeSDFBakeSettings::MaxResolution, 8, 256) ]
+
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+					[ MakeFloatRow(LOCTEXT("WeightThresh", "Weight Threshold"), &FRopeSDFBakeSettings::WeightThreshold, 0.0f, 1.0f) ]
+
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+					[ MakeFloatRow(LOCTEXT("BoundsPad", "Bounds Padding (cm)"), &FRopeSDFBakeSettings::BoundsPadding, 0.0f, 20.0f) ]
+				]
+			]
 
 			// 프리뷰 오버레이(자산 비변경 · 패널 로컬). RopeSDFDraw 헬퍼로 그린다.
 			+ SVerticalBox::Slot()
@@ -632,6 +651,7 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 	const TArray<FName> BoneFilterSnapshot = BoneFilter;
 
 	TArray<FRopeBoneSDFVolume> Volumes;
+	FRopeSDFBakeStats Stats;
 	const ERopeSDFBakeResult Result = FRopeSDFBaker::BakeMesh(Mesh, BoneFilterSnapshot, SettingsSnapshot, Volumes,
 		// 본 단위: 진행률 한 칸 전진(+ UI 펌프) 후 취소 여부를 읽는다.
 		[&Slow](int32 Done, int32 Total, const FName& Bone) -> bool
@@ -643,7 +663,8 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 			return !Slow.ShouldCancel();
 		},
 		// 본 내부 voxel 배치 사이: UI를 펌프(ShouldCancel 내부)하고 취소 클릭을 처리한다.
-		[&Slow]() -> bool { return Slow.ShouldCancel(); });
+		[&Slow]() -> bool { return Slow.ShouldCancel(); },
+		&Stats);
 
 	if (Result == ERopeSDFBakeResult::NoGeometry)
 	{
@@ -673,6 +694,38 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 
 	UE_LOG(LogRopeSDFBake, Log, TEXT("Baked %s: %d bone volume(s) (unsaved — press Save)."),
 		*Data->GetName(), Data->BoneVolumes.Num());
+
+	// 베이크 결과를 Message Log로 보고한다. Max Resolution 상한 때문에 사용자가 요청한 Voxel Size보다
+	// 굵게 구워진(coarsen된) 본이 있으면, 그 본 이름과 요청→실제 크기를 경고로 나열하고 로그 창을 띄운다.
+	// (조용한 덮어쓰기를 가시화 — 상세는 토스트에 넣지 않고 Message Log에만 둔다.)
+	{
+		FMessageLog Log(RopeSDFMessageLogName);
+		Log.NewPage(FText::Format(LOCTEXT("BakePage", "SDF bake: {0}"), FText::FromString(Data->GetName())));
+		if (Stats.CoarsenedBones.Num() > 0)
+		{
+			Log.Warning(FText::Format(
+				LOCTEXT("CoarsenSummary",
+					"{0} of {1} bone(s) were coarsened beyond your requested Voxel Size ({2} cm) "
+					"to fit Max Resolution ({3}). Increase Max Resolution (Advanced) or Voxel Size to keep your target."),
+				FText::AsNumber(Stats.CoarsenedBones.Num()), FText::AsNumber(Stats.BonesBaked),
+				FText::AsNumber(SettingsSnapshot.VoxelSize), FText::AsNumber(SettingsSnapshot.MaxResolution)));
+			for (const FRopeSDFCoarsenedBone& C : Stats.CoarsenedBones)
+			{
+				Log.Warning(FText::Format(
+					LOCTEXT("CoarsenBone", "  {0}:  {1} cm -> {2} cm   (res {3}x{4}x{5})"),
+					FText::FromName(C.Bone),
+					FText::AsNumber(C.RequestedVoxelSize), FText::AsNumber(C.ActualVoxelSize),
+					FText::AsNumber(C.Resolution.X), FText::AsNumber(C.Resolution.Y), FText::AsNumber(C.Resolution.Z)));
+			}
+			Log.Open(EMessageSeverity::Warning); // coarsening이 있으면 로그 창을 앞으로 꺼내 알린다.
+		}
+		else
+		{
+			Log.Info(FText::Format(
+				LOCTEXT("BakeClean", "Baked {0} bone volume(s) at {1} cm — no coarsening."),
+				FText::AsNumber(Stats.BonesBaked), FText::AsNumber(SettingsSnapshot.VoxelSize)));
+		}
+	}
 
 	FNotificationInfo Info(FText::Format(
 		LOCTEXT("Baked", "Baked {0} bone volume(s). Press Save to write to disk, Refresh to preview."),

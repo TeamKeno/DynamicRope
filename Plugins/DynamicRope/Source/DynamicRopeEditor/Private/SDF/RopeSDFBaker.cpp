@@ -84,9 +84,14 @@ namespace
 
 ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& BonesIn,
 	const FRopeSDFBakeSettings& S, TArray<FRopeBoneSDFVolume>& Out,
-	const FRopeSDFBakeProgress& Progress, const FRopeSDFBakeCancelPoll& CancelPoll)
+	const FRopeSDFBakeProgress& Progress, const FRopeSDFBakeCancelPoll& CancelPoll,
+	FRopeSDFBakeStats* OutStats)
 {
 	Out.Reset();
+	if (OutStats)
+	{
+		*OutStats = FRopeSDFBakeStats();
+	}
 	if (!Mesh)
 	{
 		UE_LOG(LogRopeSDFBake, Warning, TEXT("BakeMesh aborted: null mesh."));
@@ -260,10 +265,12 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		};
 		FIntVector Res = ResFor(Vox);
 		const int32 MaxAxis = FMath::Max3(Res.X, Res.Y, Res.Z);
+		bool bCoarsened = false; // 상한 때문에 요청 VoxelSize를 키웠는가(보고용)
 		if (MaxAxis > S.MaxResolution)
 		{
 			Vox *= static_cast<float>(MaxAxis) / static_cast<float>(S.MaxResolution);
 			Res = ResFor(Vox);
+			bCoarsened = true;
 		}
 		Res.X = FMath::Max(Res.X, 2);
 		Res.Y = FMath::Max(Res.Y, 2);
@@ -337,6 +344,14 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		Volume.Distances = MoveTemp(Distances);
 		UE_LOG(LogRopeSDFBake, Verbose, TEXT("  bone %s: res=%dx%dx%d, voxel=%.2fcm, %d tri(s)"),
 			*Volume.Bone.ToString(), Res.X, Res.Y, Res.Z, Vox, NumTris);
+		if (OutStats)
+		{
+			++OutStats->BonesBaked;
+			if (bCoarsened)
+			{
+				OutStats->CoarsenedBones.Add({ Volume.Bone, S.VoxelSize, Vox, Res });
+			}
+		}
 		Out.Add(MoveTemp(Volume));
 	}
 

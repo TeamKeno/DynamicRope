@@ -30,6 +30,7 @@ public class DynamicRopeEditor : ModuleRules
 			"AssetDefinition",      // UAssetDefinition (Content Browser 카테고리/색)
 			"AdvancedPreviewScene", // 오써링 패널 3D 프리뷰 뷰포트(조명/바닥 프리뷰 씬)
 			"GeometryCore",         // 베이크 부호 판정용 fast winding number(FDynamicMesh3 + AABB/winding 트리)
+			"MessageLog",           // 베이크 결과 보고(coarsening된 본 목록)용 메시지 로그 리스닝
 		});
 	}
 }

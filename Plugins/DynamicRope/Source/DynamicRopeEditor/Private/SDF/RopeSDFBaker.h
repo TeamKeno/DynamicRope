@@ -48,6 +48,25 @@ enum class ERopeSDFBakeResult : uint8
 	Cancelled,  // 진행 콜백이 중단 요청 — OutVolumes는 미완성이므로 자산에 반영하지 말 것.
 };
 
+/**
+ * 요청 VoxelSize가 MaxResolution 상한 때문에 키워진(coarsen된) 본 하나의 기록.
+ * 사용자가 "내가 넣은 간격이 왜 더 굵게 구워졌나"를 Message Log로 확인할 수 있게 한다.
+ */
+struct FRopeSDFCoarsenedBone
+{
+	FName      Bone;               // 해당 본 이름
+	float      RequestedVoxelSize; // 사용자가 입력한 S.VoxelSize(cm)
+	float      ActualVoxelSize;    // 상한에 맞추느라 키워진 실제 voxel 크기(cm)
+	FIntVector Resolution;         // 최종 grid 해상도(축별 샘플 수)
+};
+
+/** BakeMesh 한 번의 집계 통계(에디터 보고용, 에셋에 저장하지 않는 plain 타입). */
+struct FRopeSDFBakeStats
+{
+	int32 BonesBaked = 0;                         // 실제로 볼륨이 구워진 본 수
+	TArray<FRopeSDFCoarsenedBone> CoarsenedBones; // coarsening이 발생한 본만 기록
+};
+
 /** 무상태 본별 SDF 베이커. 에디터 전용(임포트 소스 모델 사용). */
 class FRopeSDFBaker
 {
@@ -59,10 +78,12 @@ public:
 	 *  - Progress가 있으면 본 하나를 처리하기 직전마다 호출한다(진행률 표시 + 본 단위 취소, 옵션).
 	 *  - CancelPoll이 있으면 본 내부 voxel 배치 사이마다 호출해 무거운 본 도중에도 취소를 받는다(옵션).
 	 *    Progress나 CancelPoll이 취소를 신호하면 Cancelled를 반환하며 OutVolumes는 미완성 상태로 남는다.
+	 *  - OutStats가 있으면 구워진 본 수와 coarsening이 발생한 본 목록을 채운다(옵션, 보고용).
 	 * 메시에 CPU 지오메트리가 없으면(예: 쿡/스트립) NoGeometry를 반환한다.
 	 */
 	static ERopeSDFBakeResult BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& Bones,
 		const FRopeSDFBakeSettings& Settings, TArray<FRopeBoneSDFVolume>& OutVolumes,
 		const FRopeSDFBakeProgress& Progress = FRopeSDFBakeProgress(),
-		const FRopeSDFBakeCancelPoll& CancelPoll = FRopeSDFBakeCancelPoll());
+		const FRopeSDFBakeCancelPoll& CancelPoll = FRopeSDFBakeCancelPoll(),
+		FRopeSDFBakeStats* OutStats = nullptr);
 };
