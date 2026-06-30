@@ -210,7 +210,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					// Band Threshold는 Voxels·Gradients 공용 파라미터다. 양쪽 그룹에 함께 노출하되 같은
 					// 멤버(BandThreshold)에 바인딩되므로 한쪽을 바꾸면 다른 쪽도 자동으로 따라온다.
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
-					[ MakePreviewFloatRow(LOCTEXT("BandVoxels", "Band Threshold (cm)"), &FRopeSDFPreviewDrawOptions::BandThreshold, 0.0f, 50.0f) ]
+					[ MakeBandThresholdRow() ]
 				]
 
 				// ── Slice ──
@@ -273,7 +273,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 
 					// Voxels 그룹과 공유하는 Band Threshold(같은 멤버 바인딩 → 자동 동기화).
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
-					[ MakePreviewFloatRow(LOCTEXT("BandGradient", "Band Threshold (cm)"), &FRopeSDFPreviewDrawOptions::BandThreshold, 0.0f, 50.0f) ]
+					[ MakeBandThresholdRow() ]
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
 					[ MakePreviewFloatRow(LOCTEXT("GradLen", "Gradient Length (cm)"), &FRopeSDFPreviewDrawOptions::GradientLength, 0.5f, 20.0f) ]
 				]
@@ -498,6 +498,52 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeLegendRow(const FLinearColor& Co
 		];
 }
 
+float SRopeSDFAuthoringPanel::GetBandThresholdMax() const
+{
+	// 베이크 당시 NarrowBand가 유효 표시 범위의 상한. 그 밖은 ±NarrowBand로 포화돼 의미가 없다.
+	if (const URopeSDFData* Data = Target.Get())
+	{
+		return FMath::Max(Data->LastBakeSettings.NarrowBand, KINDA_SMALL_NUMBER);
+	}
+	return 50.0f; // 타깃 없음(편집 불가 상태) 폴백.
+}
+
+TOptional<float> SRopeSDFAuthoringPanel::GetBandThresholdMaxOpt() const
+{
+	return TOptional<float>(GetBandThresholdMax());
+}
+
+TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeBandThresholdRow()
+{
+	return SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
+		[
+			SNew(STextBlock).Text(LOCTEXT("Band", "Band Threshold (cm)"))
+		]
+		+ SHorizontalBox::Slot().FillWidth(0.45f)
+		[
+			SNew(SNumericEntryBox<float>)
+			.AllowSpin(true)
+			.MinValue(0.0f)
+			.MaxValue(this, &SRopeSDFAuthoringPanel::GetBandThresholdMaxOpt)
+			.MinSliderValue(0.0f)
+			.MaxSliderValue(this, &SRopeSDFAuthoringPanel::GetBandThresholdMaxOpt)
+			.Value_Lambda([this]()
+			{
+				return TOptional<float>(PreviewViewport.IsValid() ? PreviewViewport->AccessDrawOptions().BandThreshold : 0.0f);
+			})
+			.OnValueChanged_Lambda([this](float NewVal)
+			{
+				if (PreviewViewport.IsValid())
+				{
+					// 상한(NarrowBand)을 넘겨 입력돼도 잘라 저장한다.
+					PreviewViewport->AccessDrawOptions().BandThreshold = FMath::Clamp(NewVal, 0.0f, GetBandThresholdMax());
+					PreviewViewport->InvalidatePreview();
+				}
+			})
+		];
+}
+
 FString SRopeSDFAuthoringPanel::GetTargetPath() const
 {
 	return Target.IsValid() ? Target->GetPathName() : FString();
@@ -516,6 +562,14 @@ void SRopeSDFAuthoringPanel::OnTargetChanged(const FAssetData& InAssetData)
 	else
 	{
 		Settings = FRopeSDFBakeSettings();
+	}
+
+	// 타깃이 바뀌면 NarrowBand(=Band Threshold 상한)도 바뀌므로, 이전 타깃에서 남은 값이 새 상한을
+	// 넘지 않도록 잘라준다(슬라이더 상한은 입력만 막을 뿐 기존 저장값은 안 줄이므로).
+	if (PreviewViewport.IsValid())
+	{
+		float& Band = PreviewViewport->AccessDrawOptions().BandThreshold;
+		Band = FMath::Clamp(Band, 0.0f, GetBandThresholdMax());
 	}
 
 	RefreshPreviewMesh();

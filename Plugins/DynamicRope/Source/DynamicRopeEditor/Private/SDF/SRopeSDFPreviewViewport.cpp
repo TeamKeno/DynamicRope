@@ -123,10 +123,12 @@ void SRopeSDFPreviewViewport::SetPreviewData(URopeSDFData* InData)
 	if (InData)
 	{
 		PreviewVolumes = InData->BoneVolumes;
+		PreviewNarrowBand = InData->LastBakeSettings.NarrowBand; // 포화 스킵 기준(그라디언트)
 	}
 	else
 	{
 		PreviewVolumes.Reset();
+		PreviewNarrowBand = 0.0f;
 	}
 	InvalidatePreview();
 }
@@ -164,7 +166,7 @@ void SRopeSDFPreviewViewport::DrawSDFOverlay(FPrimitiveDrawInterface* PDI)
 		}
 		if (DrawOptions.bDrawVoxels && Vol.IsBaked())
 		{
-			RopeSDFDraw::DrawVoxels(PDI, Vol, Xform, DrawOptions.BandThreshold);
+			RopeSDFDraw::DrawVoxels(PDI, Vol, Xform, DrawOptions.BandThreshold, PreviewNarrowBand);
 		}
 		if (DrawOptions.bDrawSlice && Vol.IsBaked())
 		{
@@ -173,7 +175,7 @@ void SRopeSDFPreviewViewport::DrawSDFOverlay(FPrimitiveDrawInterface* PDI)
 		}
 		if (DrawOptions.bDrawGradient && Vol.IsBaked())
 		{
-			RopeSDFDraw::DrawGradients(PDI, Vol, Xform, DrawOptions.BandThreshold, DrawOptions.GradientLength);
+			RopeSDFDraw::DrawGradients(PDI, Vol, Xform, DrawOptions.BandThreshold, DrawOptions.GradientLength, PreviewNarrowBand);
 		}
 	}
 }

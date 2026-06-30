@@ -86,4 +86,13 @@ private:
 	TSharedRef<class SWidget> MakeOverlayDescription(const FText& Text);
 	/** 색상 범례 한 줄: 색 스와치 + 라벨. 디버그 색이 무엇을 뜻하는지 알려준다. */
 	TSharedRef<class SWidget> MakeLegendRow(const FLinearColor& Color, const FText& Label);
+
+	/**
+	 * Band Threshold 행. 상한을 베이크 당시 NarrowBand로 제한한다 — 그 밖은 ±NarrowBand로 포화돼
+	 * 방향/거리 정보가 없으므로 더 올려봐야 무의미하다. Voxels·Gradients 그룹 양쪽에서 같은 멤버를 공유.
+	 */
+	TSharedRef<class SWidget> MakeBandThresholdRow();
+	/** Band Threshold 상한 = 타깃의 LastBakeSettings.NarrowBand(타깃 없으면 폴백). */
+	float GetBandThresholdMax() const;
+	TOptional<float> GetBandThresholdMaxOpt() const;
 };

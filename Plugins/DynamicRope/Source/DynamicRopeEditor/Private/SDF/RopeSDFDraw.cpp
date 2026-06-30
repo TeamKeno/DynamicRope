@@ -48,7 +48,7 @@ void RopeSDFDraw::DrawBounds(FPrimitiveDrawInterface* PDI, const FBox& Local, co
 	}
 }
 
-void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& V, const FTransform& Xform, float Band)
+void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& V, const FTransform& Xform, float Band, float NarrowBand)
 {
 	const FVector Mn = V.LocalBounds.Min;
 	const FVector Sz = V.LocalBounds.GetSize();
@@ -81,6 +81,12 @@ void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVol
 				}
 				const float D = V.Distances[Idx];
 				if (FMath::Abs(D) > Band)
+				{
+					continue;
+				}
+				// 포화(±NarrowBand 도달) 샘플은 클램프된 placeholder라 스킵 — Band 최댓값에서 plateau가
+				// 통째로 들어와 박스를 채우며 튀는 현상을 막는다. NarrowBand <= 0이면 미상 → 스킵 비활성.
+				if (NarrowBand > 0.0f && FMath::Abs(D) >= NarrowBand - KINDA_SMALL_NUMBER)
 				{
 					continue;
 				}
@@ -123,7 +129,7 @@ void RopeSDFDraw::DrawSlice(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolu
 }
 
 void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& V, const FTransform& Xform,
-	float Band, float Length)
+	float Band, float Length, float NarrowBand)
 {
 	const int32 NX = V.Resolution.X;
 	const int32 NY = V.Resolution.Y;
@@ -144,6 +150,12 @@ void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDF
 			{
 				const int32 Idx = X + Y * NX + Z * NX * NY;
 				if (!V.Distances.IsValidIndex(Idx) || FMath::Abs(V.Distances[Idx]) > Band)
+				{
+					continue;
+				}
+				// 포화(±NarrowBand 도달) 샘플은 방향 정보가 없으므로(평탄=up 폴백, 경계=노이즈) 스킵한다.
+				// NarrowBand <= 0이면 미상(구 에셋 등) → 스킵 비활성, 기존대로 그린다.
+				if (NarrowBand > 0.0f && FMath::Abs(V.Distances[Idx]) >= NarrowBand - KINDA_SMALL_NUMBER)
 				{
 					continue;
 				}
