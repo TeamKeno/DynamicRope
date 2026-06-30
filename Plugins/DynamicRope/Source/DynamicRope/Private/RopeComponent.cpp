@@ -18,6 +18,24 @@ namespace {
 		return T * T * (3.0f - 2.0f * T);
 	}
 
+	int32 FindHeadValidNodeIndex(const TArray<int32>& NodeIndices, const FRopeSimState& Sim)
+	{
+		int32 HeadNodeIndex = INDEX_NONE;
+		for (const int32 NodeIndex : NodeIndices)
+		{
+			if (!Sim.Positions.IsValidIndex(NodeIndex))
+			{
+				continue;
+			}
+
+			if (HeadNodeIndex == INDEX_NONE || NodeIndex < HeadNodeIndex)
+			{
+				HeadNodeIndex = NodeIndex;
+			}
+		}
+		return HeadNodeIndex;
+	}
+
 	// phase 전이 로그용 짧은 이름(UEnum 리플렉션 없이 hot-path에서도 안전).
 	const TCHAR* PhaseName(ERopePhase Phase)
 	{
@@ -807,7 +825,7 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 		WrappingState.LastStableAnchorCount = WrappingState.Anchors.Num();
 	}
 
-	const bool bHasEnoughAnchors = WrappingState.Anchors.Num() >= FMath::Max(1, WrapConfig.MinLatchNodes);
+	const bool bHasEnoughAnchors = WrappingState.Anchors.Num() > 0;
 	const bool bStable = WrappingState.StableTime >= WrapConfig.WrappingStableTime;
 	const bool bTimedOutWithAnchors =
 		WrapConfig.WrappingMaxSettleTime > 0.0f &&
@@ -830,10 +848,12 @@ bool URopeComponent::IsWrappingStillValid() const
 bool URopeComponent::UpdateWrappingAnchorsFromCandidates(const TArray<FRopeContactCandidate>& Candidates)
 {
 	bool bSawWrappingContact = false;
+	const int32 HeadAnchorNode = WrappingState.FirstNode;
 	for (const FRopeContactCandidate& Candidate : Candidates)
 	{
 		if (!Candidate.bValid ||
 			Candidate.Bone != WrappingState.BoneName ||
+			Candidate.NodeIndex != HeadAnchorNode ||
 			!Sim.Positions.IsValidIndex(Candidate.NodeIndex))
 		{
 			continue;
@@ -1523,13 +1543,9 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState() const
 	FRopeWrapState Seed;
 	Seed.BoneName = ContactTracker.CandidateBone;
 	Seed.Mesh = ContactTracker.CandidateMesh;
-	for (int32 NodeIndex : ContactTracker.CandidateNodes)
+	const int32 NodeIndex = FindHeadValidNodeIndex(ContactTracker.CandidateNodes, Sim);
+	if (NodeIndex != INDEX_NONE)
 	{
-		if (!Sim.Positions.IsValidIndex(NodeIndex))
-		{
-			continue;
-		}
-
 		FRopeLatchNode Latch;
 		Latch.NodeIndex = NodeIndex;
 		Latch.Bone = ContactTracker.CandidateBone;

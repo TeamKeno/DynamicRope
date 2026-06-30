@@ -43,7 +43,11 @@ bool FRopeWrapCommitTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("wrap commits after sustained contact"), bCommitted);
 	TestTrue(TEXT("committed bone is arm"), Seed.BoneName == FName("arm"));
-	TestTrue(TEXT(">= MinLatchNodes latched"), Seed.Latched.Num() >= Config.MinLatchNodes);
+	TestEqual(TEXT("single head latch node"), Seed.Latched.Num(), 1);
+	if (Seed.Latched.Num() > 0)
+	{
+		TestEqual(TEXT("head-most contact node wins"), Seed.Latched[0].NodeIndex, 2);
+	}
 	return true;
 }
 
@@ -94,6 +98,11 @@ bool FRopeWrapTieBreakTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("commits on tie"), bCommitted);
 	TestTrue(TEXT("stable tie-break picks armA (C3 contract)"), Seed.BoneName == FName("armA"));
+	TestEqual(TEXT("tie-break still latches only the head node"), Seed.Latched.Num(), 1);
+	if (Seed.Latched.Num() > 0)
+	{
+		TestEqual(TEXT("armA head contact node"), Seed.Latched[0].NodeIndex, 1);
+	}
 	return true;
 }
 

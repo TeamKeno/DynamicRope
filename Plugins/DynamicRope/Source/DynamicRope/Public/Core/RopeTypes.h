@@ -355,6 +355,7 @@ struct FRopeContactTracker
 		TMap<FName, TArray<int32>> NodesByBone;
 		TMap<FName, const USkeletalMeshComponent*> MeshByBone;
 		TMap<FName, float> ScoreByBone;
+		TMap<FName, int32> HeadNodeByBone;
 		for (const FRopeContactCandidate& Candidate : Candidates)
 		{
 			if (!Candidate.bValid || Candidate.Bone.IsNone())
@@ -365,18 +366,32 @@ struct FRopeContactTracker
 			NodesByBone.FindOrAdd(Candidate.Bone).Add(Candidate.NodeIndex);
 			MeshByBone.FindOrAdd(Candidate.Bone) = Candidate.Mesh;
 			ScoreByBone.FindOrAdd(Candidate.Bone) += Candidate.Penetration + FMath::Max(0.0f, Candidate.WrapDirectionScore);
+			if (int32* ExistingHeadNode = HeadNodeByBone.Find(Candidate.Bone))
+			{
+				*ExistingHeadNode = FMath::Min(*ExistingHeadNode, Candidate.NodeIndex);
+			}
+			else
+			{
+				HeadNodeByBone.Add(Candidate.Bone, Candidate.NodeIndex);
+			}
 		}
 
 		FName BestBone = NAME_None;
 		int32 BestCount = 0;
+		int32 BestHeadNode = INDEX_NONE;
 		float BestScore = 0.0f;
 		for (const TPair<FName, TArray<int32>>& Pair : NodesByBone)
 		{
 			const float Score = ScoreByBone.FindRef(Pair.Key);
-			if (Pair.Value.Num() > BestCount || (Pair.Value.Num() == BestCount && Score > BestScore))
+			const int32 HeadNode = HeadNodeByBone.FindRef(Pair.Key);
+			if (Pair.Value.Num() > BestCount ||
+				(Pair.Value.Num() == BestCount &&
+					(BestHeadNode == INDEX_NONE || HeadNode < BestHeadNode ||
+						(HeadNode == BestHeadNode && Score > BestScore))))
 			{
 				BestBone = Pair.Key;
 				BestCount = Pair.Value.Num();
+				BestHeadNode = HeadNode;
 				BestScore = Score;
 			}
 		}

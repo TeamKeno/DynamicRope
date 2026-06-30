@@ -5,6 +5,27 @@
 #include "Collision/RopeCollider.h"
 #include "Components/SkeletalMeshComponent.h"
 
+namespace
+{
+	int32 FindHeadNodeIndex(const TArray<int32>& NodeIndices)
+	{
+		int32 HeadNodeIndex = INDEX_NONE;
+		for (const int32 NodeIndex : NodeIndices)
+		{
+			if (NodeIndex == INDEX_NONE)
+			{
+				continue;
+			}
+
+			if (HeadNodeIndex == INDEX_NONE || NodeIndex < HeadNodeIndex)
+			{
+				HeadNodeIndex = NodeIndex;
+			}
+		}
+		return HeadNodeIndex;
+	}
+}
+
 bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
 	const FRopeWrapConfig& Config, float Dt, FRopeWrapState& OutSeed)
 {
@@ -49,12 +70,18 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 	// dominant bone = 가장 많은 노드가 닿고 있는 bone.
 	FName DominantBone = NAME_None;
 	const TArray<int32>* DominantNodes = nullptr;
+	int32 DominantHeadNode = INDEX_NONE;
 	for (const TPair<FName, TArray<int32>>& Pair : NodesByBone)
 	{
-		if (!DominantNodes || Pair.Value.Num() > DominantNodes->Num())
+		const int32 PairHeadNode = FindHeadNodeIndex(Pair.Value);
+		if (!DominantNodes ||
+			Pair.Value.Num() > DominantNodes->Num() ||
+			(Pair.Value.Num() == DominantNodes->Num() &&
+				(DominantHeadNode == INDEX_NONE || PairHeadNode < DominantHeadNode)))
 		{
 			DominantBone = Pair.Key;
 			DominantNodes = &Pair.Value;
+			DominantHeadNode = PairHeadNode;
 		}
 	}
 
@@ -88,16 +115,17 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 	OutSeed.Reset();
 	OutSeed.BoneName = CandidateBone;
 	OutSeed.Mesh = MeshByBone.FindRef(CandidateBone);
-	for (int32 NodeIndex : CandidateNodes)
+	const int32 LatchNodeIndex = FindHeadNodeIndex(CandidateNodes);
+	if (LatchNodeIndex != INDEX_NONE)
 	{
 		FRopeLatchNode Latch;
-		Latch.NodeIndex = NodeIndex;
+		Latch.NodeIndex = LatchNodeIndex;
 		Latch.Bone = CandidateBone;
 		OutSeed.Latched.Add(Latch);
 	}
 
-	UE_LOG(LogRopeWrap, Log, TEXT("DecideWrap committed: bone=%s, %d node(s), dwell=%.3fs >= %.3fs"),
-		*CandidateBone.ToString(), CandidateNodes.Num(), CandidateTime, Config.WrapDecisionTime);
+	UE_LOG(LogRopeWrap, Log, TEXT("DecideWrap committed: bone=%s, contact=%d node(s), latch=%d, dwell=%.3fs >= %.3fs"),
+		*CandidateBone.ToString(), CandidateNodes.Num(), LatchNodeIndex, CandidateTime, Config.WrapDecisionTime);
 
 	CandidateBone = NAME_None;
 	CandidateTime = 0.0f;
