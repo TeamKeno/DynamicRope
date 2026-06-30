@@ -131,12 +131,19 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				.Text(LOCTEXT("SettingsHeader", "Bake Settings (last bake)"))
 			]
 
-			// 메인 노브: 일상 사용자가 다루는 두 값(품질 목표 + 충돌 밴드)만 노출한다.
+			// 메인 노브: 일상 사용자가 다루는 값(품질 목표 + 충돌 밴드 + 가는 본 drop)을 노출한다.
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeFloatRow(LOCTEXT("VoxelSize", "Voxel Size (cm)"), &FRopeSDFBakeSettings::VoxelSize, 0.25f, 10.0f) ]
+			[ MakeFloatRow(LOCTEXT("VoxelSize", "Voxel Size (cm)"), &FRopeSDFBakeSettings::VoxelSize, 0.25f, 10.0f,
+				LOCTEXT("VoxelSizeTip", "Sample spacing in cm (cube voxel). Smaller sharpens the surface but increases memory and bake time.")) ]
 
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeFloatRow(LOCTEXT("NarrowBand", "Narrow Band (cm)"), &FRopeSDFBakeSettings::NarrowBand, 1.0f, 50.0f) ]
+			[ MakeFloatRow(LOCTEXT("NarrowBand", "Narrow Band (cm)"), &FRopeSDFBakeSettings::NarrowBand, 1.0f, 50.0f,
+				LOCTEXT("NarrowBandTip", "Clamps |distance| to this band (cm). Values beyond the band are irrelevant to collision.")) ]
+
+			// 가는 본 drop 임계값. 단면 girth가 이 값 미만인 본은 baking에서 제외 → 손가락 등 군더더기 볼륨 제거.
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakeFloatRow(LOCTEXT("MinGirth", "Min Bone Girth (cm)"), &FRopeSDFBakeSettings::MinBoneGirth, 0.0f, 20.0f,
+				LOCTEXT("MinGirthTip", "Bones whose cross-section girth is thinner than this (cm) are dropped from baking (not merged into the parent). A rope cannot catch features finer than its radius, so set this near (or above) the CollisionRadius of the thinnest rope that will use this SDF. 0 bakes every bone.")) ]
 
 			// 고급 설정: Max Resolution(메모리/시간 상한 — Voxel Size를 덮어쓸 수 있음)과
 			// 잘 안 건드리는 튜닝값들은 기본 접힘으로 숨긴다.
@@ -153,13 +160,16 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					SNew(SVerticalBox)
 
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-					[ MakeIntRow(LOCTEXT("MaxRes", "Max Resolution"), &FRopeSDFBakeSettings::MaxResolution, 8, 256) ]
+					[ MakeIntRow(LOCTEXT("MaxRes", "Max Resolution"), &FRopeSDFBakeSettings::MaxResolution, 8, 256,
+						LOCTEXT("MaxResTip", "Maximum samples per axis. If a bone's grid would exceed this, Voxel Size is increased to fit (memory/time cap).")) ]
 
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-					[ MakeFloatRow(LOCTEXT("WeightThresh", "Weight Threshold"), &FRopeSDFBakeSettings::WeightThreshold, 0.0f, 1.0f) ]
+					[ MakeFloatRow(LOCTEXT("WeightThresh", "Weight Threshold"), &FRopeSDFBakeSettings::WeightThreshold, 0.0f, 1.0f,
+						LOCTEXT("WeightThreshTip", "Minimum average skin weight [0..1] for a triangle to be assigned to a bone.")) ]
 
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-					[ MakeFloatRow(LOCTEXT("BoundsPad", "Bounds Padding (cm)"), &FRopeSDFBakeSettings::BoundsPadding, 0.0f, 20.0f) ]
+					[ MakeFloatRow(LOCTEXT("BoundsPad", "Bounds Padding (cm)"), &FRopeSDFBakeSettings::BoundsPadding, 0.0f, 20.0f,
+						LOCTEXT("BoundsPadTip", "Expands each bone's triangle AABB by this much (cm) before voxelizing, leaving band margin beyond the skin.")) ]
 				]
 			]
 
@@ -331,9 +341,12 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 }
 
 TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeFloatRow(const FText& Label,
-	float FRopeSDFBakeSettings::* Member, float MinVal, float MaxVal)
+	float FRopeSDFBakeSettings::* Member, float MinVal, float MaxVal, const FText& Tip)
 {
+	// 툴팁은 행 컨테이너에 단다 — Slate가 hover 위젯에서 부모로 올라가며 툴팁을 찾으므로
+	// 라벨/입력칸 어디에 마우스를 올려도 동일하게 보인다. Tip이 비면 표시되지 않는다.
 	return SNew(SHorizontalBox)
+		.ToolTipText(Tip)
 		+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
 		[
 			SNew(STextBlock).Text(Label)
@@ -350,9 +363,11 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeFloatRow(const FText& Label,
 }
 
 TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeIntRow(const FText& Label,
-	int32 FRopeSDFBakeSettings::* Member, int32 MinVal, int32 MaxVal)
+	int32 FRopeSDFBakeSettings::* Member, int32 MinVal, int32 MaxVal, const FText& Tip)
 {
+	// 툴팁은 행 컨테이너에 단다(MakeFloatRow와 동일 규약). Tip이 비면 표시되지 않는다.
 	return SNew(SHorizontalBox)
+		.ToolTipText(Tip)
 		+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
 		[
 			SNew(STextBlock).Text(Label)
@@ -724,6 +739,22 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 			Log.Info(FText::Format(
 				LOCTEXT("BakeClean", "Baked {0} bone volume(s) at {1} cm — no coarsening."),
 				FText::AsNumber(Stats.BonesBaked), FText::AsNumber(SettingsSnapshot.VoxelSize)));
+		}
+
+		// MinBoneGirth로 제외(drop)된 가는 본들을 한 줄로 보고(쉼표 구분). drop이 0개면 보고 안 함.
+		if (Stats.DroppedThinBones.Num() > 0)
+		{
+			TArray<FString> DroppedNames;
+			DroppedNames.Reserve(Stats.DroppedThinBones.Num());
+			for (const FName& B : Stats.DroppedThinBones)
+			{
+				DroppedNames.Add(B.ToString());
+			}
+			Log.Info(FText::Format(
+				LOCTEXT("DropSummary", "{0} thin bone(s) dropped (girth < {1} cm): {2}"),
+				FText::AsNumber(Stats.DroppedThinBones.Num()),
+				FText::AsNumber(SettingsSnapshot.MinBoneGirth),
+				FText::FromString(FString::Join(DroppedNames, TEXT(", ")))));
 		}
 	}
 

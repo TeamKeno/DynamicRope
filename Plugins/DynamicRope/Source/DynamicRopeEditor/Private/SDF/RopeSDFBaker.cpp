@@ -251,6 +251,28 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 			continue; // 이 본에 귀속된 스킨 없음
 		}
 
+		// --- (3b) 가는 본 drop. AABB(확장 전 raw 살 크기) 세 변 중 가장 긴 변(=본 축)을 빼고 남은
+		// 두 단면 변의 '큰 쪽'(= 중간값)이 MinBoneGirth 미만이면 사방으로 가늘다 → 굽지 않는다(drop).
+		// 작은 변이 아니라 중간 변으로 보는 이유: 한 방향만 얇은 납작한 본을 catchable로 살려, 실수로
+		// 떨구지 않게 보수적으로 판정. (drop은 absorb와 달리 삼각형을 부모로 넘기지 않고 그냥 제외.)
+		if (S.MinBoneGirth > 0.0f)
+		{
+			const FVector E = Local.GetSize(); // raw 삼각형 AABB(BoundsPadding/NarrowBand 확장 전)
+			const double Girth = (E.X + E.Y + E.Z)
+				- FMath::Max3(E.X, E.Y, E.Z)   // 최장변(본 축) 제거
+				- FMath::Min3(E.X, E.Y, E.Z);  // 최단변 제거 → 중간값만 남음
+			if (Girth < S.MinBoneGirth)
+			{
+				if (OutStats)
+				{
+					OutStats->DroppedThinBones.Add(Ref.GetBoneName(BoneIdx));
+				}
+				UE_LOG(LogRopeSDFBake, Verbose, TEXT("  drop thin bone %s (girth %.2fcm < %.2fcm)"),
+					*Ref.GetBoneName(BoneIdx).ToString(), Girth, S.MinBoneGirth);
+				continue;
+			}
+		}
+
 		// --- (4a) grid 크기 산정. 큐브 voxel; 축당 샘플 수가 MaxResolution(상한)을 넘으면 VoxelSize를 키워 맞춘다.
 		Local = Local.ExpandBy(S.BoundsPadding + S.NarrowBand);
 		float Vox = FMath::Max(S.VoxelSize, KINDA_SMALL_NUMBER);

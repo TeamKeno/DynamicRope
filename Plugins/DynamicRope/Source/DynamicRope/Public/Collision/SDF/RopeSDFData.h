@@ -42,6 +42,12 @@ struct FRopeSDFBakeSettings
 	/** voxel화 전 본 삼각형 AABB를 확장(cm) — 스킨 바깥에도 밴드 여유를 둔다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Expand each bone's triangle AABB by this much (cm) before voxelizing, leaving band margin beyond the skin."))
 	float BoundsPadding = 0.0f;
+
+	/** 단면 girth(가는 쪽 두께)가 이 값(cm) 미만인 본은 baking에서 제외(drop)한다 — 부모로 합치지 않고
+	    그냥 굽지 않는다. 로프는 자기 굵기보다 가는 특징엔 못 걸리므로, 이 SDF를 쓸 가장 가는 로프의
+	    CollisionRadius 정도(또는 그 이상)로 둔다. 0이면 drop 비활성(전체 본 baking). */
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ClampMin = "0.0", Units = "cm", ToolTip = "Bones whose cross-section girth is thinner than this (cm) are dropped from baking (not merged into the parent - just not baked). A rope cannot catch features finer than its own radius, so set this near (or above) the CollisionRadius of the thinnest rope that will use this SDF. 0 disables dropping (bake every bone)."))
+	float MinBoneGirth = 8.0f;
 };
 
 /**

@@ -65,6 +65,7 @@ struct FRopeSDFBakeStats
 {
 	int32 BonesBaked = 0;                         // 실제로 볼륨이 구워진 본 수
 	TArray<FRopeSDFCoarsenedBone> CoarsenedBones; // coarsening이 발생한 본만 기록
+	TArray<FName> DroppedThinBones;               // girth < MinBoneGirth 로 제외(drop)된 본
 };
 
 /** 무상태 본별 SDF 베이커. 에디터 전용(임포트 소스 모델 사용). */

@@ -60,9 +60,11 @@ private:
 	/** 우측 3D 프리뷰 뷰포트(베이크 대상 메시 + 향후 SDF 오버레이). */
 	TSharedPtr<SRopeSDFPreviewViewport> PreviewViewport;
 
-	/** FRopeSDFBakeSettings 멤버에 바인딩된 라벨+숫자 입력 행을 만든다(필드별 중복 제거). */
-	TSharedRef<class SWidget> MakeFloatRow(const FText& Label, float FRopeSDFBakeSettings::* Member, float MinVal, float MaxVal);
-	TSharedRef<class SWidget> MakeIntRow(const FText& Label, int32 FRopeSDFBakeSettings::* Member, int32 MinVal, int32 MaxVal);
+	/** FRopeSDFBakeSettings 멤버에 바인딩된 라벨+숫자 입력 행을 만든다(필드별 중복 제거).
+	    Tip을 주면 행 전체에 hover 툴팁을 단다(비우면 툴팁 없음 — 오써링 탭은 커스텀 Slate라
+	    UPROPERTY ToolTip 메타를 읽지 않으므로 여기서 직접 단다). */
+	TSharedRef<class SWidget> MakeFloatRow(const FText& Label, float FRopeSDFBakeSettings::* Member, float MinVal, float MaxVal, const FText& Tip = FText::GetEmpty());
+	TSharedRef<class SWidget> MakeIntRow(const FText& Label, int32 FRopeSDFBakeSettings::* Member, int32 MinVal, int32 MaxVal, const FText& Tip = FText::GetEmpty());
 
 	//~ 프리뷰 오버레이(패널 로컬 상태 = PreviewViewport->AccessDrawOptions())에 바인딩되는 컨트롤들.
 	/** 오버레이 토글 체크박스 행(bounds/voxels/slice/gradient). */
