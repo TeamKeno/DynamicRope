@@ -18,6 +18,7 @@ class IRopeColliderProvider;
 class UMaterialInterface;
 class USkeletalMeshComponent;
 class FRegisterComponentContext;
+struct FRopeDebugSnapshot;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
@@ -106,10 +107,6 @@ public:
 	/** rope tube에 적용되는 material. 설정하지 않으면 엔진 기본 material을 사용한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render")
 	TObjectPtr<UMaterialInterface> RopeMaterial = nullptr;
-
-	/** 시뮬레이션된 centerline을 debug line으로 그린다(ground-truth 위치 vs 렌더링된 tube). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render")
-	bool bDrawDebugCenterline = false;
 
 #if WITH_EDITORONLY_DATA
 	/** 에디터에서 이 로프 액터를 선택했을 때 배치-보조 가이드(앵커·조준·도달범위·wrap 타깃·던지기 아크)를
@@ -224,6 +221,11 @@ private:
 	bool bGpuSteppedThisFrame = false;
 
 	void InitRope();
+
+#if WITH_GAMEPLAY_DEBUGGER
+	// 디버그 캡처 대상일 때 centerline/wrapped/collider 공통 필드를 스냅샷에 채운다(FinalizeSimFrame에서 호출).
+	void FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const;
+#endif
 
 	//TODO 주석 추가
 	void EnsureRopeInitialized(){if (Sim.Num() == 0)InitRope();	}

@@ -4,7 +4,6 @@
 #include "Collision/SDF/RopeSDFData.h"
 #include "DynamicRopeLog.h"
 #include "Subsystem/RopeSimSubsystem.h"
-#include "Debug/RopeDebugDraw.h" // 디버그 드로우 중앙화(RopeDebug::DrawColliderBounds)
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 
@@ -106,9 +105,6 @@ void URopeSDFProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeC
 			const FTransform PrevXform = PrevPtr ? *PrevPtr : BoneToWorld;
 			PrevBoneToWorld.Add(Volume.Bone, BoneToWorld);
 			Colliders.Add(FRopeSDFCollider(&Volume, BoneToWorld, PrevXform, InvDt, Volume.Bone, Mesh));
-
-			// 디버그 드로우 중앙화: bDrawDebug(per-instance) 또는 r.DynamicRope.Debug(.Colliders)로 게이트.
-			RopeDebug::DrawColliderBounds(GetWorld(), Volume.LocalBounds.TransformBy(BoneToWorld), bDrawDebug);
 		}
 
 		UE_LOG(LogRopeCollision, VeryVerbose, TEXT("SDFProvider on %s: built %d collider(s) from %d baked volume(s)."),

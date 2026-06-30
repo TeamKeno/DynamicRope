@@ -4,11 +4,13 @@
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "Render/RopeSceneProxy.h"
-#include "Debug/RopeDebugDraw.h"
+#include "Debug/RopeDebugDraw.h"       // stat 카운터(RopeDebug::Record*)
+#include "Debug/RopeDebugSnapshot.h"   // 게이트플레이 디버거용 한 프레임 디버그 스냅샷
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "Subsystem/RopeSimSubsystem.h"
+#include "Subsystem/RopeDebugSubsystem.h" // 디버그 캡처 게이트 + 스냅샷 보관소
 namespace {
 	float SmoothStep(float T)
 	{
@@ -364,7 +366,13 @@ void URopeComponent::ApplyWhipSwing(float DeltaTime)
 	const float T = FMath::Clamp(WhipElapsed / Duration, 0.0f, 1.0f);
 	const int32 LastNode = Sim.Num() - 1;
 	const float GuidedEnd = FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f);
-	const bool bCaptureGuideTargets = RopeDebug::IsFlightVisualEnabled() || RopeDebug::IsFlightStatEnabled();
+	// whip 가이드 타깃 캡처: 이 로프가 디버거 대상이거나(시각화) stat 수집 중일 때만(비용 절약).
+#if WITH_GAMEPLAY_DEBUGGER
+	const URopeDebugSubsystem* DebugSub = URopeDebugSubsystem::Get(GetWorld());
+	const bool bCaptureGuideTargets = (DebugSub && DebugSub->ShouldCapture(this)) || RopeDebug::IsFlightStatEnabled();
+#else
+	const bool bCaptureGuideTargets = RopeDebug::IsFlightStatEnabled();
+#endif
 	const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * GuidedEnd), 1, LastNode);
 	TArray<FVector> GuideTargets;
 	BuildWhipGuideTargets(T, LastGuidedNode, GuideTargets);
@@ -1105,15 +1113,23 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Finalize);
 
+	// 디버그 캡처 게이트: 이 로프가 게이트플레이 디버거의 대상 액터일 때만 비주얼 데이터를 모은다.
+	// 대상이 아닌 로프는 아래 flight sweep 등 캡처 비용을 전혀 내지 않는다(타깃 1개 로프만 부담).
+#if WITH_GAMEPLAY_DEBUGGER
+	URopeDebugSubsystem* DebugSub = URopeDebugSubsystem::Get(GetWorld());
+	const bool bDebugCapture = DebugSub && DebugSub->ShouldCapture(this);
+	FRopeDebugSnapshot DebugSnapshot;
+#else
+	constexpr bool bDebugCapture = false;
+#endif
+
 	// Flight: 솔브 후 이동 경로 기반 접촉 후보 감지 → 캡처. UObject·이벤트라 GT에서.
 	if (Phase == ERopePhase::Flight)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FinalizeFlight);
 		TArray<FRopeContactCandidate> Candidates;
-		TArray<RopeDebug::FRopeFlightNodeDebug> FlightNodeDebug;
-		const bool bDrawFlightVisual = RopeDebug::IsFlightVisualEnabled();
-		const bool bDrawFlightStat = RopeDebug::IsFlightStatEnabled();
-		if (bDrawFlightVisual)
+		TArray<FRopeFlightNodeDebug> FlightNodeDebug;
+		if (bDebugCapture)
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightDebugGather);
 			for (int32 i = 0; i < Sim.Num(); ++i)
@@ -1123,7 +1139,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 					continue;
 				}
 
-				RopeDebug::FRopeFlightNodeDebug NodeDebug;
+				FRopeFlightNodeDebug NodeDebug;
 				NodeDebug.NodeIndex = i;
 				NodeDebug.PrevPosition = Sim.PrevPositions[i];
 				NodeDebug.Position = Sim.Positions[i];
@@ -1197,18 +1213,32 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			FlightNoContactElapsed = 0.0f;
 		}
 
-		if (bDrawFlightVisual || bDrawFlightStat)
+		// stat 카운터(stat 시스템이 수집 중일 때만; 디버그 캡처와 독립).
+		const FRopeContactTracker& DebugTracker = bShouldCapture ? ContactTracker : FlightDebugTracker;
+		const float WhipGuidedEnd = FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f);
+		const bool bWhipActive = DebugWhipGuideTargets.Num() > 0;
+		RopeDebug::RecordFlightStats(Sim, bSolveThisFrame, FrameColliders.Num(), Candidates,
+			DebugTracker, WrapConfig, bShouldCapture);
+		RopeDebug::RecordWhipStats(Sim, DebugWhipGuideNodeIndices, DebugWhipGuideTargets, WhipGuidedEnd, bWhipActive);
+
+#if WITH_GAMEPLAY_DEBUGGER
+		if (bDebugCapture)
 		{
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightDrawDebug);
-			const FString RopeName = GetOwner()
-				? FString::Printf(TEXT("%s.%s"), *GetOwner()->GetName(), *GetName())
-				: GetName();
-			RopeDebug::DrawFlight(GetWorld(), static_cast<uint64>(GetUniqueID()) + 0x10000000ull, RopeName, Sim,
-				ERopePhase::Flight, bSolveThisFrame, FrameColliders.Num(), FlightNodeDebug, Candidates,
-				bShouldCapture ? ContactTracker : FlightDebugTracker, WrapConfig, bShouldCapture);
-			RopeDebug::DrawFlightWhipGuide(GetWorld(), Sim, DebugWhipGuideNodeIndices, DebugWhipGuideTargets,
-				FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f), DebugWhipGuideTargets.Num() > 0);
+			DebugSnapshot.bHasFlight = true;
+			DebugSnapshot.bSolveThisFrame = bSolveThisFrame;
+			DebugSnapshot.bShouldCapture = bShouldCapture;
+			DebugSnapshot.FrameColliderCount = FrameColliders.Num();
+			DebugSnapshot.MinLatchNodes = WrapConfig.MinLatchNodes;
+			DebugSnapshot.TrackerBone = DebugTracker.CandidateBone;
+			DebugSnapshot.TrackerNodes = DebugTracker.CandidateNodes;
+			DebugSnapshot.NodeDebug = MoveTemp(FlightNodeDebug);
+			DebugSnapshot.Candidates = Candidates;
+			DebugSnapshot.bWhipActive = bWhipActive;
+			DebugSnapshot.WhipGuidedEnd = WhipGuidedEnd;
+			DebugSnapshot.WhipGuideNodeIndices = DebugWhipGuideNodeIndices;
+			DebugSnapshot.WhipGuideTargets = DebugWhipGuideTargets;
 		}
+#endif
 	}
 
 	// 새 centerline을 render proxy로 push하고 bounds를 갱신한다.
@@ -1218,16 +1248,69 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		MarkRenderTransformDirty();
 	}
 
-	RopeDebug::DrawCenterline(GetWorld(), Sim, Phase, WrapController.State, bDrawDebugCenterline);
+	// wrapped stat 카운터(독립).
 	if (Phase == ERopePhase::Wrapped)
 	{
-		const FString RopeName = GetOwner()
-			? FString::Printf(TEXT("%s.%s"), *GetOwner()->GetName(), *GetName())
-			: GetName();
-		RopeDebug::DrawWrappedTable(GetWorld(), static_cast<uint64>(GetUniqueID()) + 0x20000000ull,
-			RopeName, Sim, WrapController.State);
+		RopeDebug::RecordWrappedStats(Sim, WrapController.State);
+	}
+
+	// 디버그 스냅샷 제출: centerline/collider/wrapped 공통 필드를 채워 디버거 보관소로 넘긴다.
+#if WITH_GAMEPLAY_DEBUGGER
+	if (bDebugCapture)
+	{
+		FillDebugSnapshot(DebugSnapshot);
+		DebugSub->SubmitSnapshot(this, MoveTemp(DebugSnapshot));
+	}
+#endif
+}
+
+#if WITH_GAMEPLAY_DEBUGGER
+void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
+{
+	Snapshot.Phase = Phase;
+	Snapshot.Positions = Sim.Positions;
+
+	// centerline 상에서 강조할 latch 노드 인덱스.
+	const FRopeWrapState& Wrap = WrapController.State;
+	Snapshot.LatchedNodes.Reset();
+	for (const FRopeLatchNode& Latch : Wrap.Latched)
+	{
+		Snapshot.LatchedNodes.Add(Latch.NodeIndex);
+	}
+
+	// wrapped 상세(테이블용)는 Wrapped phase일 때만.
+	if (Phase == ERopePhase::Wrapped && Wrap.IsWrapped())
+	{
+		Snapshot.bHasWrapped = true;
+		Snapshot.WrapBone = Wrap.BoneName;
+		const USkeletalMeshComponent* Mesh = Wrap.Mesh.Get();
+		Snapshot.MeshName = Mesh ? Mesh->GetName() : TEXT("None");
+		Snapshot.Latched = Wrap.Latched;
+	}
+
+	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). capsule이면 세그먼트,
+	// 그 외(SDF 등)는 월드 bounds 박스. FrameColliders는 provider 소유라 이 프레임 동안만 유효.
+	Snapshot.Colliders.Reset();
+	for (const IRopeCollider* Collider : FrameColliders)
+	{
+		if (!Collider)
+		{
+			continue;
+		}
+		FRopeDebugCollider DC;
+		if (Collider->GetGPUCapsule(DC.A, DC.B, DC.Radius))
+		{
+			DC.bIsCapsule = true;
+		}
+		else
+		{
+			DC.bIsCapsule = false;
+			DC.Bounds = Collider->GetWorldBounds();
+		}
+		Snapshot.Colliders.Add(DC);
 	}
 }
+#endif
 
 void URopeComponent::SendRenderDynamicData_Concurrent()
 {

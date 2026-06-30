@@ -72,10 +72,6 @@ public:
 		meta = (EditCondition = "BoneFilterMode != ERopeSDFBoneFilterMode::All", GetOptions = "GetBakedBoneNames"))
 	TArray<FName> BoneFilter;
 
-	/** 빌드된 볼륨의 월드 bounds를 매 프레임 그린다(녹색 = rope bounds와 겹침). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
-	bool bDrawDebug = false;
-
 	//~ IRopeColliderProvider
 	virtual void GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders) override;
 

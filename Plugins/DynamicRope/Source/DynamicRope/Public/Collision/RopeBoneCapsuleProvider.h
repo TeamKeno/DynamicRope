@@ -38,10 +38,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (ClampMin = "0.0", Units = "cm"))
 	float CapsuleRadius = 8.0f;
 
-	/** 생성된 본 capsule들을 매 프레임 그린다(녹색 = rope bounds와 겹침, 회색 = 컬링됨). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
-	bool bDrawDebug = false;
-
 	//~ IRopeColliderProvider
 	virtual void GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders) override;
 
