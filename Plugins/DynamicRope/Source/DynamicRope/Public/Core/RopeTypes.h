@@ -37,9 +37,6 @@ enum class ERopeReleaseReason : uint8
 UENUM(BlueprintType)
 enum class ERopeWrappingPathMode : uint8
 {
-	/** 최초 latch tangent 방향으로 SDF 표면을 한 걸음씩 따라간다. 가장 보수적인 기본 폴백 경로. */
-	SurfaceWalk UMETA(DisplayName = "Surface Walk"),
-
 	/** bone-parent 축을 기준으로 수학적 helix를 만든 뒤 SDF 표면에 투영한다. 일정한 나선 실루엣을 얻기 쉽다. */
 	AnalyticHelix UMETA(DisplayName = "Analytic Helix"),
 

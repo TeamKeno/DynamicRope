@@ -870,24 +870,26 @@ bool URopeComponent::ComputeWrapSurfaceTarget(const FRopeSurfaceAnchor& LatchAnc
 	FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const
 {
 	const ERopeWrappingPathMode PathMode = GetWrappingPathMode();
-	if (PathMode == ERopeWrappingPathMode::AnalyticHelix &&
-		ComputeAnalyticHelixWrapTarget(LatchAnchor, DistanceFromLatch,
-			OutSurfaceWorld, OutNormalWorld, OutTangentWorld))
+	if (PathMode == ERopeWrappingPathMode::AnalyticHelix)
 	{
-		return true;
+		if (ComputeAnalyticHelixWrapTarget(LatchAnchor, DistanceFromLatch,
+			OutSurfaceWorld, OutNormalWorld, OutTangentWorld))
+		{
+			return true;
+		}
+
+		return ComputeSurfaceVectorFieldWrapTarget(LatchAnchor, DistanceFromLatch,
+			OutSurfaceWorld, OutNormalWorld, OutTangentWorld);
 	}
 
-	if (PathMode == ERopeWrappingPathMode::SurfaceVectorField &&
-		ComputeSurfaceVectorFieldWrapTarget(LatchAnchor, DistanceFromLatch,
-			OutSurfaceWorld, OutNormalWorld, OutTangentWorld))
-	{
-		return true;
-	}
-
-	return ComputeSurfaceWalkWrapTarget(LatchAnchor, DistanceFromLatch,
+	return ComputeSurfaceVectorFieldWrapTarget(LatchAnchor, DistanceFromLatch,
 		OutSurfaceWorld, OutNormalWorld, OutTangentWorld);
 }
 
+/*
+ * Surface Walk은 Project Settings 선택지에서 제거했다.
+ * 최초 latch tangent만 따라 SDF 표면을 걷는 방식이라 축 기준 원주 감김을 의도적으로 만들기 어렵다.
+ * 비교/복구가 필요할 수 있어 구현은 주석으로 보관한다.
 bool URopeComponent::ComputeSurfaceWalkWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 	FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const
 {
@@ -939,6 +941,7 @@ bool URopeComponent::ComputeSurfaceWalkWrapTarget(const FRopeSurfaceAnchor& Latc
 	OutTangentWorld = TangentWorld;
 	return true;
 }
+ */
 
 bool URopeComponent::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 	FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const

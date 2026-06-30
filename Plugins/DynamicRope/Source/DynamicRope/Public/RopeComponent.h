@@ -317,8 +317,13 @@ private:
 	bool ComputeWrapSurfaceTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
 
+	/*
+	 * Surface Walk은 Project Settings 선택지에서 제거했다.
+	 * 최초 latch tangent만 따라가서 원주를 의도적으로 도는 힘이 약하므로,
+	 * 현재는 Analytic Helix / Surface Vector Field 두 방식만 사용한다.
 	bool ComputeSurfaceWalkWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
+	 */
 
 	bool ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
