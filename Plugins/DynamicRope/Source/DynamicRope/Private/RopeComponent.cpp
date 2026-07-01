@@ -944,7 +944,10 @@ bool URopeComponent::ComputeSurfaceWalkWrapTarget(const FRopeSurfaceAnchor& Latc
 		RemainingDistance -= StepDistance;
 
 		SurfaceWorld += TangentWorld * StepDistance;
-		ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, SurfaceWorld, NormalWorld);
+		if (!ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, SurfaceWorld, NormalWorld))
+		{
+			return false;
+		}
 
 		TangentWorld = TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld;
 		TangentWorld = TangentWorld.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(NormalWorld));
@@ -1046,7 +1049,10 @@ bool URopeComponent::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAncho
 			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
 
 		SurfaceWorld += TangentWorld * StepDistance;
-		ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, SurfaceWorld, NormalWorld);
+		if (!ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, SurfaceWorld, NormalWorld))
+		{
+			return false;
+		}
 	}
 
 	//11. 최종 위치에서 tangent 다시 계산
@@ -1148,7 +1154,10 @@ bool URopeComponent::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor& La
 
 	//9. SDF 표면에 붙이기
 	FVector NormalWorld = RotatedRadial;
-	ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, SurfaceWorld, NormalWorld);	//마지막으로 SDF 표면에 붙임
+	if (!ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, SurfaceWorld, NormalWorld))	//마지막으로 SDF 표면에 붙임
+	{
+		return false;
+	}
 
 	//10. 보정된 표면에서 tangent 다시 계산
 	const float SurfaceAxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
@@ -1213,7 +1222,7 @@ ERopeWrappingPathMode URopeComponent::GetWrappingPathMode() const
 bool URopeComponent::ProjectWrapPointToSurface(FName Bone, const USkeletalMeshComponent* Mesh,
 	FVector& InOutSurfaceWorld, FVector& InOutNormalWorld) const
 {
-	FRopeContact BestContact;
+	FRopeSurfaceProjection BestProjection;
 	bool bFound = false;
 
 	const float QueryRadius = FMath::Max(FMath::Max(WrapConfig.ContactRadius, Radius), Sim.SegmentLength);
@@ -1224,20 +1233,20 @@ bool URopeComponent::ProjectWrapPointToSurface(FName Bone, const USkeletalMeshCo
 			continue;
 		}
 
-		const FRopeContact Contact = Collider->Query(InOutSurfaceWorld, QueryRadius);
-		if (!Contact.bHit || Contact.Bone != Bone)
+		const FRopeSurfaceProjection Projection = Collider->ProjectToSurface(InOutSurfaceWorld, QueryRadius);
+		if (!Projection.bHit || Projection.Bone != Bone)
 		{
 			continue;
 		}
 
-		if (Mesh && Contact.SourceMesh && Contact.SourceMesh != Mesh)
+		if (Mesh && Projection.SourceMesh && Projection.SourceMesh != Mesh)
 		{
 			continue;
 		}
 
-		if (!bFound || Contact.Penetration > BestContact.Penetration)
+		if (!bFound || Projection.Distance < BestProjection.Distance)
 		{
-			BestContact = Contact;
+			BestProjection = Projection;
 			bFound = true;
 		}
 	}
@@ -1247,8 +1256,8 @@ bool URopeComponent::ProjectWrapPointToSurface(FName Bone, const USkeletalMeshCo
 		return false;
 	}
 
-	InOutSurfaceWorld = BestContact.SurfacePoint;
-	InOutNormalWorld = BestContact.Normal.GetSafeNormal(KINDA_SMALL_NUMBER, InOutNormalWorld);
+	InOutSurfaceWorld = BestProjection.SurfacePoint;
+	InOutNormalWorld = BestProjection.Normal.GetSafeNormal(KINDA_SMALL_NUMBER, InOutNormalWorld);
 	return true;
 }
 

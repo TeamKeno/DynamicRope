@@ -53,6 +53,42 @@ FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	return Contact;
 }
 
+FRopeSurfaceProjection FRopeSDFCollider::ProjectToSurface(const FVector& WorldPos, float MaxDistance) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSDF_ProjectToSurface);
+	FRopeSurfaceProjection Projection;
+
+	if (!Volume || !Volume->IsBaked())
+	{
+		return Projection;
+	}
+
+	const FVector LocalPos = BoneToWorld.InverseTransformPosition(WorldPos);
+	if (!Volume->LocalBounds.IsInsideOrOn(LocalPos))
+	{
+		return Projection;
+	}
+
+	const float Dist = RopeSDFSampler::SampleTrilinear(*Volume, LocalPos);
+	const float AbsDist = FMath::Abs(Dist);
+	if (MaxDistance > 0.0f && AbsDist > MaxDistance)
+	{
+		return Projection;
+	}
+
+	const FVector NLocal = RopeSDFSampler::SampleGradient(*Volume, LocalPos);
+	const FVector NormalWorld = BoneToWorld.TransformVectorNoScale(NLocal)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+
+	Projection.bHit = true;
+	Projection.SurfacePoint = WorldPos - NormalWorld * Dist;
+	Projection.Normal = NormalWorld;
+	Projection.Distance = AbsDist;
+	Projection.Bone = Bone;
+	Projection.SourceMesh = SourceMesh;
+	return Projection;
+}
+
 FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 {
 	// solver 충돌의 주 비용 지점(정지 로프 + 접촉 시 여기로 몰린다). 호출당 비용 = 포즈 Blend×2 +

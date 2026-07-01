@@ -31,6 +31,30 @@ FRopeContact FCapsuleCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	return Contact;
 }
 
+FRopeSurfaceProjection FCapsuleCollider::ProjectToSurface(const FVector& WorldPos, float MaxDistance) const
+{
+	FRopeSurfaceProjection Projection;
+
+	const FVector Closest = FMath::ClosestPointOnSegment(WorldPos, A, B);
+	const FVector ToNode = WorldPos - Closest;
+	const float DistToAxis = ToNode.Size();
+	const FVector Normal = (DistToAxis > KINDA_SMALL_NUMBER) ? (ToNode / DistToAxis) : FVector::UpVector;
+	const FVector SurfacePoint = Closest + Normal * Radius;
+	const float SurfaceDistance = FMath::Abs(DistToAxis - Radius);
+	if (MaxDistance > 0.0f && SurfaceDistance > MaxDistance)
+	{
+		return Projection;
+	}
+
+	Projection.bHit = true;
+	Projection.SurfacePoint = SurfacePoint;
+	Projection.Normal = Normal;
+	Projection.Distance = SurfaceDistance;
+	Projection.Bone = Bone;
+	Projection.SourceMesh = SourceMesh;
+	return Projection;
+}
+
 FBox FCapsuleCollider::GetWorldBounds() const
 {
 	FBox Box(ForceInit);

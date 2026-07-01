@@ -55,6 +55,17 @@ struct FRopeSweptQuery
 	FTransform SubPoseEnd   = FTransform::Identity;
 };
 
+/** collider 표면 projection 결과. 접촉 판정과 달리, 주어진 점에서 가장 가까운 표면점을 기술한다. */
+struct FRopeSurfaceProjection
+{
+	bool bHit = false;
+	FVector SurfacePoint = FVector::ZeroVector;
+	FVector Normal = FVector::UpVector;
+	float Distance = 0.0f;
+	FName Bone = NAME_None;
+	const USkeletalMeshComponent* SourceMesh = nullptr;
+};
+
 /** rope solver가 query하는 추상 collider. */
 class DYNAMICROPE_API IRopeCollider
 {
@@ -67,6 +78,28 @@ public:
 	 * (node x substep x iteration마다 호출됨). Radius == 0 도 유효하다(solver push-out 경로).
 	 */
 	virtual FRopeContact Query(const FVector& WorldPos, float Radius) const = 0;
+
+	/**
+	 * 표면 projection 전용 query. collision Query와 달리 "겹쳤는가"가 아니라 WorldPos에서 가까운 표면점을 찾는다.
+	 * MaxDistance보다 멀면 false를 반환할 수 있다. wrapping path 생성처럼 표면에 계속 붙이는 용도로 사용한다.
+	 */
+	virtual FRopeSurfaceProjection ProjectToSurface(const FVector& WorldPos, float MaxDistance) const
+	{
+		FRopeSurfaceProjection Projection;
+		const FRopeContact Contact = Query(WorldPos, MaxDistance);
+		if (!Contact.bHit)
+		{
+			return Projection;
+		}
+
+		Projection.bHit = true;
+		Projection.SurfacePoint = Contact.SurfacePoint;
+		Projection.Normal = Contact.Normal;
+		Projection.Distance = FVector::Dist(WorldPos, Contact.SurfacePoint);
+		Projection.Bone = Contact.Bone;
+		Projection.SourceMesh = Contact.SourceMesh;
+		return Projection;
+	}
 
 	/**
 	 * Swept query: 노드의 substep 경로(+움직이는 collider의 상대 운동)를 따라 첫 접촉을 찾는다.
@@ -136,6 +169,7 @@ public:
 		: A(InA), B(InB), Radius(InRadius), Bone(InBone), SourceMesh(InSourceMesh) {}
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
+	virtual FRopeSurfaceProjection ProjectToSurface(const FVector& WorldPos, float MaxDistance) const override;
 	virtual FBox GetWorldBounds() const override;
 	virtual bool GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRadius) const override;
 };
