@@ -139,10 +139,6 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 			[ MakeFloatRow(LOCTEXT("NarrowBand", "Narrow Band - outward (cm)"), &FRopeSDFBakeSettings::NarrowBand, 1.0f, 50.0f,
 				LOCTEXT("NarrowBandTip", "Outward (free-space) detection band in cm: how far outside the surface the rope starts reacting to the body. Contact happens at CollisionRadius, so ~2-3x that is stable. The inward (inside-body) band is auto-sized per bone to the deepest interior distance at bake, so the whole interior is covered - no setting needed.")) ]
 
-			// 양자화 비트수(uint8/uint16). 출력 용량/정밀도에 직결되는 메인 선택.
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeQuantizationRow() ]
-
 			// 가는 본 drop 임계값. 단면 girth가 이 값 미만인 본은 baking에서 제외 → 손가락 등 군더더기 볼륨 제거.
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 			[ MakeFloatRow(LOCTEXT("MinGirth", "Min Bone Girth (cm)"), &FRopeSDFBakeSettings::MinBoneGirth, 0.0f, 20.0f,
@@ -161,6 +157,10 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				.BodyContent()
 				[
 					SNew(SVerticalBox)
+
+					// 양자화 비트수(uint8/uint16). 출력 용량/정밀도 트레이드오프 — 기본값으로 충분해 고급으로 숨긴다.
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+					[ MakeQuantizationRow() ]
 
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 					[ MakeIntRow(LOCTEXT("MaxRes", "Max Resolution"), &FRopeSDFBakeSettings::MaxResolution, 8, 256,
@@ -411,18 +411,18 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeQuantizationRow()
 	};
 
 	return SNew(SHorizontalBox)
-		.ToolTipText(LOCTEXT("QuantTip", "SDF distance quantization bit depth. 16-bit is 256x finer than 8-bit but doubles asset/RAM size; 8-bit is the smallest. Default 16-bit."))
+		.ToolTipText(LOCTEXT("QuantTip", "How precisely each SDF distance is stored. Standard (16-bit) is 256x finer than Low (8-bit) but doubles asset/RAM size; Low is the smallest. Default Standard."))
 		+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
 		[
-			SNew(STextBlock).Text(LOCTEXT("Quant", "Quantization"))
+			SNew(STextBlock).Text(LOCTEXT("Quant", "Distance Precision"))
 		]
 		+ SHorizontalBox::Slot().FillWidth(0.225f).VAlign(VAlign_Center)
 		[
-			MakeOpt(ERopeSDFQuantBits::UInt8, LOCTEXT("Quant8", "8-bit"))
+			MakeOpt(ERopeSDFQuantBits::UInt8, LOCTEXT("Quant8", "Low (8-bit)"))
 		]
 		+ SHorizontalBox::Slot().FillWidth(0.225f).VAlign(VAlign_Center)
 		[
-			MakeOpt(ERopeSDFQuantBits::UInt16, LOCTEXT("Quant16", "16-bit"))
+			MakeOpt(ERopeSDFQuantBits::UInt16, LOCTEXT("Quant16", "Standard (16-bit)"))
 		];
 }
 

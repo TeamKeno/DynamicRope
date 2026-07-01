@@ -1,7 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 해석적 SDF로 FRopeBoneSDFVolume를 채우는 헬퍼. 진짜 베이커(B3)가 없어도 샘플러/시각화를
-// 개발·검증할 수 있게 해 준다(병렬 트랙의 핵심). 테스트 fixture로도 쓴다. 헤더 전용(inline).
+// 해석적 SDF로 FRopeBoneSDFVolume를 채우는 헬퍼. 정답 거리를 아는 구 SDF를 즉석에서 만들어,
+// 샘플러(RopeSDFSampler)의 trilinear·gradient 정확도를 골든 값과 대조하는 회귀 테스트
+// (Tests/RopeSDFSamplerTests)의 픽스처로 쓴다 — 실제 베이크 볼륨은 정답 거리가 없어 검증 불가.
+// 런타임 경로엔 관여하지 않는 테스트 전용 코드다. 헤더 전용(inline).
 
 #pragma once
 
