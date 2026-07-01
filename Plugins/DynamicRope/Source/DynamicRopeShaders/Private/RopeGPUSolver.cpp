@@ -412,13 +412,15 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 						V.LocalSize = FVector4f((float)Vp->LocalSize.X, (float)Vp->LocalSize.Y, (float)Vp->LocalSize.Z, 0.0f);
 						SDFVol.Add(V);
 						// uint8 코드 → float(cm) dequant 후 업로드(셰이더 SDFDistances는 float 유지 → .usf 무변경).
+						// 비대칭 밴드: d = code*(range/255) - NBIn, range = NBIn+NBOut.
 						const int32 VoxN = (int32)((int64)Vp->ResX * Vp->ResY * Vp->ResZ);
-						const float NB = Vp->NarrowBand;
-						const float DeqScale = (NB > 0.0f) ? (2.0f * NB / 255.0f) : 0.0f;
+						const float NBIn = Vp->NarrowBandInner;
+						const float Range = NBIn + Vp->NarrowBandOuter;
+						const float DeqScale = (Range > 0.0f) ? (Range / 255.0f) : 0.0f;
 						SDFDist.Reserve(SDFDist.Num() + VoxN);
 						for (int32 Vi = 0; Vi < VoxN; ++Vi)
 						{
-							SDFDist.Add(static_cast<float>(Vp->Distances[Vi]) * DeqScale - NB); // 바깥 +
+							SDFDist.Add(static_cast<float>(Vp->Distances[Vi]) * DeqScale - NBIn); // 바깥 +
 						}
 					}
 					SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances"),

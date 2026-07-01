@@ -308,13 +308,15 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		// TArray는 int32 카운트라 선형 인덱스도 int32 유지. Res는 MaxResolution으로 상한
 		// (기본 48 => 48^3 ~ 110k)이라 범위 내.
 		const int32 Count = Res.X * Res.Y * Res.Z;
-		TArray<uint8> Distances; // 양자화 코드(uint8, [-NB,+NB]→[0,255]). dequant 스케일은 볼륨 NarrowBand.
-		Distances.SetNumUninitialized(Count);
+		// 1패스: 부호 있는 거리(cm, float)를 임시로 모은다 → 본별 안쪽 밴드(NB_in)를 데이터에서 산출한 뒤
+		// 2패스에서 비대칭 양자화한다(안쪽=내부 최대 깊이, 바깥=설정 감지 밴드). RawDist는 인덱스별 독립이라 병렬 안전.
+		TArray<float> RawDist;
+		RawDist.SetNumUninitialized(Count);
 
 		const int32 NumTris = TriA.Num();                  // 거리(unsigned)는 이 본 삼각형으로
 		const FTransform& BoneToComp = CompSpace[BoneIdx]; // 본 로컬 샘플점 → 컴포넌트 공간(분류기와 동일 프레임)
 
-		// 평탄 인덱스(Flat = x + y*X + z*X*Y) 하나의 거리/부호를 계산해 기록한다.
+		// 평탄 인덱스(Flat = x + y*X + z*X*Y) 하나의 부호 있는 거리를 계산해 기록한다.
 		auto ComputeSample = [&](int32 Flat)
 		{
 			const int32 x = Flat % Res.X;
@@ -333,9 +335,7 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 			// 부호(안/밖): 전체 메시 fast-winding으로 가른다(본별 열린 패치는 짧고 넓은 토막의 내부를
 			// 바깥 오판하므로 전역 메시로 봐야 강건). 샘플점을 컴포넌트 공간으로 올려 질의한다.
 			const FVector Pc = BoneToComp.TransformPosition(P);
-			const float D = WindingClassifier.IsInside(Pc) ? -Best : Best; // 안쪽 음수 / 바깥 양수
-			// [-NB,+NB] clamp + uint8 양자화(EncodeDistance가 clamp 포함). 바깥쪽 양수(frozen FRopeContact 계약).
-			Distances[Flat] = FRopeBoneSDFVolume::EncodeDistance(D, S.NarrowBand);
+			RawDist[Flat] = WindingClassifier.IsInside(Pc) ? -Best : Best; // 안쪽 음수 / 바깥 양수
 		};
 
 		// 게임 스레드가 취소 버튼을 처리할 수 있도록 무거운 본을 여러 배치로 쪼개고, 배치 사이에서 취소를
@@ -359,15 +359,36 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 			ParallelFor(End - Start, [&](int32 i) { ComputeSample(Start + i); });
 		}
 
+		// --- (4c) 본별 비대칭 밴드 확정 + uint8 양자화(2패스). 바깥 밴드(NB_out)=설정 감지 밴드,
+		// 안쪽 밴드(NB_in)=이 본 내부 최대 깊이(가장 음수인 거리의 크기)로 자동 → 몸통 내부 전체가 밴드
+		// 안에 들어와 깊이 박힌 노드도 최근접 표면 방향으로 회복한다. 안쪽 복셀은 이미 그리드에 존재하므로
+		// 밴드를 넓혀도 복셀 수 불변(0 비용); 대가는 양자화 스텝 = (NB_in+NB_out)/255 가 커지는 것뿐이다.
+		float MinD = 0.0f; // 가장 음수인 거리(내부 최대 깊이). 내부가 없으면 0 유지 → NB_in 0(바깥에 전체 코드 배분).
+		for (int32 i = 0; i < Count; ++i)
+		{
+			MinD = FMath::Min(MinD, RawDist[i]);
+		}
+		const float NBIn = -FMath::Min(MinD, 0.0f);                       // >= 0 (내부 최대 깊이)
+		const float NBOut = FMath::Max(S.NarrowBand, KINDA_SMALL_NUMBER); // 설정 바깥 감지 밴드(0 나눗셈 방지)
+
+		TArray<uint8> Distances; // 양자화 코드(uint8, [-NBIn,+NBOut]→[0,255]). dequant는 볼륨 두 밴드로.
+		Distances.SetNumUninitialized(Count);
+		ParallelFor(Count, [&](int32 i)
+		{
+			// [-NBIn,+NBOut] clamp + uint8 양자화(EncodeDistance가 clamp 포함). 바깥쪽 양수(frozen FRopeContact 계약).
+			Distances[i] = FRopeBoneSDFVolume::EncodeDistance(RawDist[i], NBIn, NBOut);
+		});
+
 		FRopeBoneSDFVolume Volume;
 		Volume.Bone = Ref.GetBoneName(BoneIdx);
 		Volume.LocalBounds = FBox(Min, Max);
 		Volume.Resolution = Res;
 		Volume.VoxelSize = Vox;
-		Volume.NarrowBand = S.NarrowBand; // dequant 스케일(샘플러/콜라이더가 코드→cm 복원에 사용)
+		Volume.NarrowBandInner = NBIn;  // dequant: 코드 0 → -NBIn (본별 자동, 내부 커버)
+		Volume.NarrowBandOuter = NBOut; // dequant: 코드 255 → +NBOut (설정 감지 밴드)
 		Volume.Distances = MoveTemp(Distances);
-		UE_LOG(LogRopeSDFBake, Verbose, TEXT("  bone %s: res=%dx%dx%d, voxel=%.2fcm, %d tri(s)"),
-			*Volume.Bone.ToString(), Res.X, Res.Y, Res.Z, Vox, NumTris);
+		UE_LOG(LogRopeSDFBake, Verbose, TEXT("  bone %s: res=%dx%dx%d, voxel=%.2fcm, %d tri(s), band[-%.2f,+%.2f]cm (step %.3fcm)"),
+			*Volume.Bone.ToString(), Res.X, Res.Y, Res.Z, Vox, NumTris, NBIn, NBOut, (NBIn + NBOut) / 255.0f);
 		if (OutStats)
 		{
 			++OutStats->BonesBaked;

@@ -277,7 +277,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 				{
 					FRopeGPUSDFCollider Sdf;
 					Sdf.Distances   = View.Distances;   // uint8 코드(업로드 평탄화 시 dequant)
-					Sdf.NarrowBand  = View.NarrowBand;
+					Sdf.NarrowBandInner = View.NarrowBandInner;
+					Sdf.NarrowBandOuter = View.NarrowBandOuter;
 					Sdf.ResX        = View.ResX;
 					Sdf.ResY        = View.ResY;
 					Sdf.ResZ        = View.ResZ;

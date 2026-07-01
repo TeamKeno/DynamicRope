@@ -109,15 +109,9 @@ private:
 	/** 카메라/렌더링을 담당하는 뷰포트 클라이언트. */
 	TSharedPtr<FRopeSDFPreviewViewportClient> ViewportClient;
 
-	/** 오버레이가 그릴 본별 볼륨의 스냅샷 사본. SetPreviewData 호출 때만 갱신된다(라이브 자산과 디커플링). */
+	/** 오버레이가 그릴 본별 볼륨의 스냅샷 사본. SetPreviewData 호출 때만 갱신된다(라이브 자산과 디커플링).
+	    포화 스킵/회색 처리는 각 볼륨의 비대칭 밴드(NarrowBandInner/Outer)에서 직접 판정한다(별도 필드 불필요). */
 	TArray<FRopeBoneSDFVolume> PreviewVolumes;
-
-	/**
-	 * 베이크 당시 NarrowBand(±포화 거리, cm). 그라디언트 오버레이가 |distance| >= 이 값인 포화 샘플을
-	 * 스킵해 가짜 화살표를 제거하는 데 쓴다. PreviewVolumes와 함께 SetPreviewData에서 스냅샷한다.
-	 * 0이면 미상(스킵 비활성).
-	 */
-	float PreviewNarrowBand = 0.0f;
 
 	/** 오버레이 표시 토글/파라미터(패널 로컬 상태). */
 	FRopeSDFPreviewDrawOptions DrawOptions;

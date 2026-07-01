@@ -31,8 +31,10 @@ struct FRopeSDFBakeSettings
 	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Maximum samples per axis. If a bone's grid would exceed this, VoxelSize is increased to fit."))
 	int32 MaxResolution = 48;
 
-	/** |거리|를 이 밴드(cm)로 clamp. 밴드 밖 값은 충돌과 무관하다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Clamp |distance| to this band (cm). Values outside the band are irrelevant to collision."))
+	/** 바깥(자유공간) 방향 감지 밴드(cm). 표면 밖으로 이 거리까지 유효한 거리/법선을 저장한다 → 로프가
+	    이만큼 떨어진 지점부터 몸을 감지·반응한다. 접촉은 CollisionRadius에서 일어나므로 그 2~3배가 안정.
+	    안쪽(몸 속) 밴드는 베이크 시 본별 내부 최대 깊이로 자동 산출되어(설정 불필요) 내부 전체를 덮는다. */
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ClampMin = "0.1", Units = "cm", ToolTip = "Outward (free-space) detection band in cm. Stores valid distance/normal up to this far outside the surface, so the rope starts reacting to the body from this distance. Contact happens at CollisionRadius, so ~2-3x that is stable. The inward (inside-body) band is auto-sized per bone at bake time to the deepest interior distance (no setting needed), so the whole interior is covered."))
 	float NarrowBand = 3.0f;
 
 	/** 삼각형을 본에 배정하기 위한 최소 평균 스킨 가중치 [0..1]. */
@@ -79,41 +81,51 @@ struct FRopeBoneSDFVolume
 	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Voxel edge length (cm). Cached value derived from LocalBounds/Resolution."))
 	float VoxelSize = 0.0f;
 
-	/** signed distance 양자화 코드(uint8). [-NarrowBand,+NarrowBand]를 [0,255]로 선형 매핑(바깥 +).
-	    길이 = Resolution.X*Y*Z. 비어 있으면 미베이크. DecodeDistance로 cm 거리 복원(float32 대비 4× 압축). */
+	/** signed distance 양자화 코드(uint8). 비대칭 밴드 [-NarrowBandInner,+NarrowBandOuter]를 [0,255]로
+	    선형 매핑(바깥 +). 길이 = Resolution.X*Y*Z. 비어 있으면 미베이크. DecodeDistance로 cm 거리 복원. */
 	UPROPERTY()
 	TArray<uint8> Distances;
 
-	/** 양자화 dequant 스케일(cm) — 베이크 시 사용한 narrow-band. 코드 0..255가 -NarrowBand..+NarrowBand에 대응.
-	    0이면 미베이크/무효(또는 구 float 포맷에서 로드 실패 → 재베이크 필요). */
-	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Quantization range in cm (the narrow-band used at bake). Distance codes 0..255 map to -NarrowBand..+NarrowBand."))
-	float NarrowBand = 0.0f;
+	/** 안쪽(몸 속) dequant 밴드(cm). 코드 0이 -NarrowBandInner에 대응. 베이크 시 본별 내부 최대 깊이로
+	    자동 산출 → 몸통 내부 전체가 밴드 안(깊이 박힌 노드도 최근접 표면 방향으로 회복). 내부가 없으면 0. */
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Inward (inside-body) dequant band in cm. Code 0 maps to -NarrowBandInner. Auto-sized per bone at bake to the deepest interior distance, so the whole interior is covered (a deeply-penetrating node still recovers toward the nearest surface). 0 if the bone has no interior."))
+	float NarrowBandInner = 0.0f;
 
-	/** 베이크가 끝나 샘플 수가 해상도와 일치하고 dequant 스케일이 유효한가. */
+	/** 바깥(자유공간) dequant 밴드(cm). 코드 255가 +NarrowBandOuter에 대응. 베이크 설정의 감지 밴드값.
+	    0이면 미베이크/무효(또는 구 포맷 로드 실패 → 재베이크 필요). */
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Outward (free-space) dequant band in cm. Code 255 maps to +NarrowBandOuter. Equals the bake detection band. 0 means unbaked/invalid (or a load from the old format failed - rebake needed)."))
+	float NarrowBandOuter = 0.0f;
+
+	/** 양자화 전체 범위(cm) = 안쪽 + 바깥쪽. 코드 0..255가 -Inner..+Outer에 대응. 0이면 무효. */
+	FORCEINLINE float QuantRange() const { return NarrowBandInner + NarrowBandOuter; }
+
+	/** 베이크가 끝나 샘플 수가 해상도와 일치하고 dequant 범위가 유효한가. */
 	bool IsBaked() const
 	{
 		const int64 Expected = static_cast<int64>(Resolution.X) * Resolution.Y * Resolution.Z;
-		return Expected > 0 && NarrowBand > 0.0f && Distances.Num() == Expected;
+		return Expected > 0 && QuantRange() > 0.0f && Distances.Num() == Expected;
 	}
 
-	/** uint8 코드 → signed distance(cm, 바깥 +). 스케일/인덱스가 무효면 0. */
+	/** uint8 코드 → signed distance(cm, 바깥 +). 범위/인덱스가 무효면 0. */
 	FORCEINLINE float DecodeDistance(int32 Index) const
 	{
-		if (NarrowBand <= 0.0f || !Distances.IsValidIndex(Index))
+		const float Range = QuantRange();
+		if (Range <= 0.0f || !Distances.IsValidIndex(Index))
 		{
 			return 0.0f;
 		}
-		return static_cast<float>(Distances[Index]) * (2.0f * NarrowBand / 255.0f) - NarrowBand;
+		return static_cast<float>(Distances[Index]) * (Range / 255.0f) - NarrowBandInner;
 	}
 
-	/** signed distance(cm) → uint8 코드. [-NarrowBandCm,+NarrowBandCm]로 clamp 후 [0,255]로 round. */
-	static FORCEINLINE uint8 EncodeDistance(float Distance, float NarrowBandCm)
+	/** signed distance(cm) → uint8 코드. [-NBInner,+NBOuter]로 clamp 후 [0,255]로 round. */
+	static FORCEINLINE uint8 EncodeDistance(float Distance, float NBInnerCm, float NBOuterCm)
 	{
-		if (NarrowBandCm <= 0.0f)
+		const float Range = NBInnerCm + NBOuterCm;
+		if (Range <= 0.0f)
 		{
-			return 128; // 중앙(≈0) — 무효 스케일 폴백.
+			return 128; // 무효 범위 폴백.
 		}
-		const float T = (Distance + NarrowBandCm) * (0.5f / NarrowBandCm); // [-NB,+NB] -> [0,1]
+		const float T = (Distance + NBInnerCm) / Range; // [-NBInner,+NBOuter] -> [0,1]
 		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(T * 255.0f), 0, 255));
 	}
 };

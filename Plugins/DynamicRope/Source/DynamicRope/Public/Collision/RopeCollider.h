@@ -13,12 +13,14 @@ class USkeletalMeshComponent;
 /**
  * GPU 솔버(M3)용 SDF collider 뷰. 본 로컬 distance grid + 본→월드 트랜스폼을 런타임 타입 없이 노출한다.
  * Distances는 collider/asset 소유 포인터(해당 프레임 동안 유효). VolumeKey는 GPU 업로드 dedup용 식별자.
- * Distances는 uint8 양자화 코드 — 소비자가 NarrowBand로 dequant(d = code*(2*NB/255) - NB, 바깥 +).
+ * Distances는 uint8 양자화 코드 — 소비자가 비대칭 밴드로 dequant(d = code*(range/255) - NBInner,
+ * range = NBInner+NBOuter, 바깥 +). 안쪽/바깥 밴드가 달라 offset은 -NBInner.
  */
 struct FRopeSDFColliderView
 {
-	const uint8* Distances = nullptr; // 길이 ResX*ResY*ResZ, 행 우선(x + y*ResX + z*ResX*ResY). uint8 코드, NarrowBand로 dequant.
-	float        NarrowBand = 0.0f;   // dequant 스케일(cm). 코드 0..255 → -NarrowBand..+NarrowBand.
+	const uint8* Distances = nullptr;    // 길이 ResX*ResY*ResZ, 행 우선(x + y*ResX + z*ResX*ResY). uint8 코드.
+	float        NarrowBandInner = 0.0f; // 안쪽 dequant 밴드(cm). 코드 0 → -NarrowBandInner.
+	float        NarrowBandOuter = 0.0f; // 바깥 dequant 밴드(cm). 코드 255 → +NarrowBandOuter.
 	int32        ResX = 0;
 	int32        ResY = 0;
 	int32        ResZ = 0;

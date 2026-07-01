@@ -57,12 +57,13 @@ namespace RopeSDFSynthetic
 			}
 		}
 
-		// 2패스: 실제 베이커와 동일하게 uint8로 양자화(NarrowBand = 데이터 최대 |거리|).
-		V.NarrowBand = MaxAbs;
+		// 2패스: uint8로 양자화. 구는 대칭이라 안쪽/바깥 밴드 모두 데이터 최대 |거리|로 둔다(대칭 [-MaxAbs,+MaxAbs]).
+		V.NarrowBandInner = MaxAbs;
+		V.NarrowBandOuter = MaxAbs;
 		V.Distances.SetNumUninitialized(N);
 		for (int32 i = 0; i < N; ++i)
 		{
-			V.Distances[i] = FRopeBoneSDFVolume::EncodeDistance(Raw[i], V.NarrowBand);
+			V.Distances[i] = FRopeBoneSDFVolume::EncodeDistance(Raw[i], V.NarrowBandInner, V.NarrowBandOuter);
 		}
 		return V;
 	}

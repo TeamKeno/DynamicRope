@@ -136,8 +136,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				LOCTEXT("VoxelSizeTip", "Sample spacing in cm (cube voxel). Smaller sharpens the surface but increases memory and bake time.")) ]
 
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
-			[ MakeFloatRow(LOCTEXT("NarrowBand", "Narrow Band (cm)"), &FRopeSDFBakeSettings::NarrowBand, 1.0f, 50.0f,
-				LOCTEXT("NarrowBandTip", "Clamps |distance| to this band (cm). Values beyond the band are irrelevant to collision.")) ]
+			[ MakeFloatRow(LOCTEXT("NarrowBand", "Narrow Band - outward (cm)"), &FRopeSDFBakeSettings::NarrowBand, 1.0f, 50.0f,
+				LOCTEXT("NarrowBandTip", "Outward (free-space) detection band in cm: how far outside the surface the rope starts reacting to the body. Contact happens at CollisionRadius, so ~2-3x that is stable. The inward (inside-body) band is auto-sized per bone to the deepest interior distance at bake, so the whole interior is covered - no setting needed.")) ]
 
 			// 가는 본 drop 임계값. 단면 girth가 이 값 미만인 본은 baking에서 제외 → 손가락 등 군더더기 볼륨 제거.
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)

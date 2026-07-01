@@ -24,6 +24,20 @@ namespace
 			? FMath::Lerp(FLinearColor::White, FLinearColor(0.0f, 0.4f, 1.0f), T)
 			: FMath::Lerp(FLinearColor::White, FLinearColor::Red, -T);
 	}
+
+	// 볼륨 비대칭 밴드에서 포화(클램프된 placeholder) 여부: 바깥 D >= +NBOuter 또는 안쪽 D <= -NBInner.
+	// 그 영역은 실제 거리/방향 정보가 없다. 범위(Inner+Outer)가 무효면 판정 비활성(false).
+	FORCEINLINE bool IsSaturatedSample(const FRopeBoneSDFVolume& V, float D)
+	{
+		const float NBIn = V.NarrowBandInner;
+		const float NBOut = V.NarrowBandOuter;
+		if (NBIn + NBOut <= 0.0f)
+		{
+			return false;
+		}
+		return (NBOut > 0.0f && D >= NBOut - KINDA_SMALL_NUMBER)
+			|| (NBIn  > 0.0f && D <= -NBIn + KINDA_SMALL_NUMBER);
+	}
 }
 
 void RopeSDFDraw::DrawBounds(FPrimitiveDrawInterface* PDI, const FBox& Local, const FTransform& Xform, const FLinearColor& Color)
@@ -48,7 +62,7 @@ void RopeSDFDraw::DrawBounds(FPrimitiveDrawInterface* PDI, const FBox& Local, co
 	}
 }
 
-void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& V, const FTransform& Xform, float Band, float NarrowBand)
+void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& V, const FTransform& Xform, float Band)
 {
 	const FVector Mn = V.LocalBounds.Min;
 	const FVector Sz = V.LocalBounds.GetSize();
@@ -84,9 +98,10 @@ void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVol
 				{
 					continue;
 				}
-				// 포화(±NarrowBand 도달) 샘플은 클램프된 placeholder라 스킵 — Band 최댓값에서 plateau가
-				// 통째로 들어와 박스를 채우며 튀는 현상을 막는다. NarrowBand <= 0이면 미상 → 스킵 비활성.
-				if (NarrowBand > 0.0f && FMath::Abs(D) >= NarrowBand - KINDA_SMALL_NUMBER)
+				// 포화(바깥 +NBOuter / 안쪽 -NBInner 도달) 샘플은 클램프된 placeholder라 스킵 — Band 최댓값에서
+				// 바깥 plateau가 통째로 들어와 박스를 채우며 튀는 현상을 막는다(안쪽은 자동 밴드가 내부를 덮어
+				// 최심점만 해당). 밴드 무효면 스킵 비활성.
+				if (IsSaturatedSample(V, D))
 				{
 					continue;
 				}
@@ -105,9 +120,9 @@ void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVol
 }
 
 void RopeSDFDraw::DrawSlice(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& V, const FTransform& Xform,
-	ERopeSDFSliceAxis Axis, float Pos01, int32 Res, float Scale, float NarrowBand)
+	ERopeSDFSliceAxis Axis, float Pos01, int32 Res, float Scale)
 {
-	// 포화(±NarrowBand 도달) 샘플용 흐린 회색 — 무의미 plateau를 유의미 밴드와 시각적으로 분리한다.
+	// 포화(바깥 +NBOuter / 안쪽 -NBInner 도달) 샘플용 흐린 회색 — 무의미 plateau를 유의미 밴드와 시각적으로 분리한다.
 	static const FLinearColor SaturatedColor(0.15f, 0.15f, 0.15f);
 	Res = FMath::Max(2, Res);
 	for (int32 I = 0; I < Res; ++I)
@@ -125,17 +140,16 @@ void RopeSDFDraw::DrawSlice(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolu
 			}
 			const FVector L = LocalFromNorm(V.LocalBounds, Tx, Ty, Tz);
 			const float D = RopeSDFSampler::SampleTrilinear(V, L);
-			// ±NarrowBand로 포화된 샘플은 실제 거리 정보가 없는 상수 plateau → 회색으로 그려 유의미
-			// 밴드(표면·연속장)와 구분한다. NarrowBand <= 0(미상/구 에셋)이면 기존대로 전부 heatmap.
-			const bool bSaturated = (NarrowBand > 0.0f) && (FMath::Abs(D) >= NarrowBand - KINDA_SMALL_NUMBER);
-			const FLinearColor C = bSaturated ? SaturatedColor : HeatColor(D, Scale);
+			// 포화(바깥 +NBOuter / 안쪽 -NBInner)된 샘플은 실제 거리 정보가 없는 상수 plateau → 회색으로 그려
+			// 유의미 밴드(표면·연속장·내부)와 구분한다. 밴드 무효면 기존대로 전부 heatmap.
+			const FLinearColor C = IsSaturatedSample(V, D) ? SaturatedColor : HeatColor(D, Scale);
 			PDI->DrawPoint(Xform.TransformPosition(L), C, 5.0f, SDPG_World);
 		}
 	}
 }
 
 void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& V, const FTransform& Xform,
-	float Band, float Length, float NarrowBand)
+	float Band, float Length)
 {
 	const int32 NX = V.Resolution.X;
 	const int32 NY = V.Resolution.Y;
@@ -164,9 +178,9 @@ void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDF
 				{
 					continue;
 				}
-				// 포화(±NarrowBand 도달) 샘플은 방향 정보가 없으므로(평탄=up 폴백, 경계=노이즈) 스킵한다.
-				// NarrowBand <= 0이면 미상(구 에셋 등) → 스킵 비활성, 기존대로 그린다.
-				if (NarrowBand > 0.0f && FMath::Abs(D) >= NarrowBand - KINDA_SMALL_NUMBER)
+				// 포화(바깥 +NBOuter / 안쪽 -NBInner 도달) 샘플은 방향 정보가 없으므로(평탄=up 폴백, 경계=노이즈)
+				// 스킵한다. 밴드 무효면 스킵 비활성, 기존대로 그린다.
+				if (IsSaturatedSample(V, D))
 				{
 					continue;
 				}
