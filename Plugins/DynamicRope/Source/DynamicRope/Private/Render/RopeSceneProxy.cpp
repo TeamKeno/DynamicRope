@@ -39,6 +39,16 @@ static TAutoConsoleVariable<int32> CVarRopeWriteVelocity(
 	TEXT("DynamicRope: 0=velocity 미출력(모션블러 잔상 제거, 기본), 1=velocity 출력(레거시, 빠른 이동 시 모션블러)."),
 	ECVF_RenderThreadSafe);
 
+// 렌더 튜브 스무딩: 세그먼트당 Catmull-Rom 서브분할 수(1=off=노드당 링 1개, 기본 3). 시뮬 노드는 그대로 두고
+// 렌더 센터라인만 이웃 노드로 곡률을 추정해 매끄럽게 편다(물리와 분리 → 리스크 0). 링 수/토폴로지가 바뀌므로
+// proxy 생성 시 1회 읽는다 → 런타임 토글은 렌더 상태 재생성(재PIE/가시성 토글) 후 반영. Subdiv>1이면 GPU
+// resident 튜브(노드 직독)는 링수 불일치로 자동 비활성 → 스무딩된 CPU 센터라인 업로드 경로로 폴백한다.
+static TAutoConsoleVariable<int32> CVarRopeTubeSmoothing(
+	TEXT("r.DynamicRope.TubeSmoothing"),
+	3,
+	TEXT("DynamicRope: 렌더 튜브 Catmull-Rom 서브분할(세그먼트당). 1=off. 물리 무관(렌더 전용)."),
+	ECVF_Default);
+
 void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	const FRHIBufferCreateDesc CreateDesc =
@@ -117,7 +127,9 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	, Material(Component->GetMaterial(0))
 	, VertexFactory(GetScene().GetFeatureLevel(), "FRopeSceneProxy")
 	, MaterialRelevance(Component->GetMaterialRelevance(GetScene().GetShaderPlatform()))
-	, NumRings(FMath::Max(2, Component->NumParticles))
+	, NumNodes(FMath::Max(2, Component->NumParticles))
+	, Subdiv(FMath::Clamp(CVarRopeTubeSmoothing.GetValueOnGameThread(), 1, 8))
+	, NumRings((NumNodes - 1) * Subdiv + 1) // 스무딩된 렌더 링 수(Subdiv=1이면 NumNodes와 동일).
 	, NumSides(FMath::Max(3, Component->NumSides))
 	, Radius(Component->Radius)
 {
@@ -191,14 +203,58 @@ FRopeSceneProxy::~FRopeSceneProxy()
 	CenterlineBuffer.ReleaseResource();
 }
 
-void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDynamicData& Data)
+void FRopeSceneProxy::BuildSmoothedCenterline(const TArray<FVector>& Nodes, TArray<FVector>& Out) const
 {
-	const TArray<FVector>& Points = Data.Points;
-	if (Points.Num() != NumRings)
+	Out.SetNumUninitialized(NumRings);
+
+	// Subdiv=1: 스무딩 없음 → 노드를 그대로 복사(1:1). (방어적으로 개수 불일치 시 clamp)
+	if (Subdiv <= 1 || Nodes.Num() < 2)
 	{
-		// centerline은 이 proxy가 생성된 기준인 고정 topology와 일치해야 한다.
+		for (int32 r = 0; r < NumRings; ++r)
+		{
+			Out[r] = Nodes[FMath::Clamp(r, 0, Nodes.Num() - 1)];
+		}
 		return;
 	}
+
+	const int32 LastNode = NumNodes - 1;
+	for (int32 r = 0; r < NumRings; ++r)
+	{
+		const int32 Seg = r / Subdiv;      // 이 링이 속한 세그먼트(노드 Seg..Seg+1).
+		const int32 Sub = r % Subdiv;      // 세그먼트 내 서브 인덱스.
+		if (Seg >= LastNode)
+		{
+			Out[r] = Nodes[LastNode];      // 마지막 노드에 정확히 놓이는 끝 링.
+			continue;
+		}
+		const float T = static_cast<float>(Sub) / static_cast<float>(Subdiv);
+
+		// Catmull-Rom 제어점(끝에서 clamp). 접선은 이웃 노드로부터 → 국소 곡률 추정.
+		const FVector P0 = Nodes[FMath::Max(Seg - 1, 0)];
+		const FVector P1 = Nodes[Seg];
+		const FVector P2 = Nodes[Seg + 1];
+		const FVector P3 = Nodes[FMath::Min(Seg + 2, LastNode)];
+
+		const float T2 = T * T;
+		const float T3 = T2 * T;
+		// 표준 Catmull-Rom(장력 0.5): 0.5*(2P1 + (P2-P0)t + (2P0-5P1+4P2-P3)t^2 + (-P0+3P1-3P2+P3)t^3).
+		Out[r] = (P1 * 2.0
+			+ (P2 - P0) * T
+			+ (P0 * 2.0 - P1 * 5.0 + P2 * 4.0 - P3) * T2
+			+ (P1 * 3.0 - P0 - P2 * 3.0 + P3) * T3) * 0.5;
+	}
+}
+
+void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDynamicData& Data)
+{
+	if (Data.Points.Num() != NumNodes)
+	{
+		// centerline(시뮬 노드)은 proxy 생성 기준 노드 수와 일치해야 한다.
+		return;
+	}
+	// 시뮬 노드 → 스무딩된 렌더 센터라인(NumRings). Subdiv=1이면 노드 그대로(1:1). 이하 링 빌드는 스무딩 점을 쓴다.
+	TArray<FVector> Points;
+	BuildSmoothedCenterline(Data.Points, Points);
 
 	// 첫 tangent에 수직인 frame을 시드한 뒤, ring 단위로 parallel-transport한다
 	// (최소 회전). 그러면 tube가 Frenet frame처럼 twist-pop하지 않는다.
@@ -319,7 +375,7 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 
 	// tangent/UV/color/index는 CPU 경로 그대로 사용(positions는 unbound VertexBuffers.Position으로 가 낭비되지만 무해).
 	BuildTube(RHICmdList, Data);
-	if (Data.Points.Num() != NumRings)
+	if (Data.Points.Num() != NumNodes)
 	{
 		return;
 	}
@@ -333,13 +389,16 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 
 	if (!bResident)
 	{
+		// 스무딩된 렌더 센터라인(NumRings)을 업로드한다(Data.Points는 노드 NumNodes개 → Catmull-Rom 서브분할).
+		TArray<FVector> Smoothed;
+		BuildSmoothedCenterline(Data.Points, Smoothed);
 		const int32 NumFloats = NumRings * 3;
 		float* Dst = static_cast<float*>(RHICmdList.LockBuffer(CenterlineBuffer.VertexBufferRHI, 0, NumFloats * sizeof(float), RLM_WriteOnly));
 		for (int32 i = 0; i < NumRings; ++i)
 		{
-			Dst[i * 3 + 0] = static_cast<float>(Data.Points[i].X);
-			Dst[i * 3 + 1] = static_cast<float>(Data.Points[i].Y);
-			Dst[i * 3 + 2] = static_cast<float>(Data.Points[i].Z);
+			Dst[i * 3 + 0] = static_cast<float>(Smoothed[i].X);
+			Dst[i * 3 + 1] = static_cast<float>(Smoothed[i].Y);
+			Dst[i * 3 + 2] = static_cast<float>(Smoothed[i].Z);
 		}
 		RHICmdList.UnlockBuffer(CenterlineBuffer.VertexBufferRHI);
 	}

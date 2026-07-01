@@ -95,6 +95,12 @@ private:
 	 */
 	void BuildTubeGPU(FRHICommandListBase& RHICmdList, const FRopeDynamicData& Data);
 
+	/**
+	 * 시뮬 노드(NumNodes)를 Catmull-Rom으로 세그먼트당 Subdiv회 서브분할해 렌더 센터라인(NumRings)을 만든다.
+	 * 곡률은 이웃 노드로 추정(접선 ≈ (P[i+1]-P[i-1])/2) — 물리와 완전 분리된 렌더 전용 스무딩. Subdiv=1이면 1:1.
+	 */
+	void BuildSmoothedCenterline(const TArray<FVector>& Nodes, TArray<FVector>& Out) const;
+
 	UMaterialInterface* Material;
 	FStaticMeshVertexBuffers VertexBuffers;
 	FRopeIndexBuffer IndexBuffer;
@@ -110,7 +116,9 @@ private:
 	FRopeGPUSolver* SolverPtr = nullptr;
 	uint32 RopeId = 0;
 
-	int32 NumRings;
+	int32 NumNodes;  // 시뮬 센터라인 노드 수(= Component->NumParticles). Data.Points가 이 개수여야 한다.
+	int32 Subdiv;    // 렌더 튜브 세그먼트당 Catmull-Rom 서브분할(1=off). r.DynamicRope.TubeSmoothing.
+	int32 NumRings;  // 렌더 링(스무딩된 센터라인) 수 = (NumNodes-1)*Subdiv+1. vertex/index 토폴로지 기준.
 	int32 NumSides;
 	float Radius;
 	bool  bHasData = false;
