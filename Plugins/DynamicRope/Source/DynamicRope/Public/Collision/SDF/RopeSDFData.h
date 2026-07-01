@@ -12,6 +12,16 @@
 
 class USkeletalMesh;
 
+/** SDF 거리 양자화 비트수. 코드 범위와 복셀당 바이트 수(1 or 2)를 결정한다. */
+UENUM()
+enum class ERopeSDFQuantBits : uint8
+{
+	/** 복셀당 1바이트(0..255). 최소 용량. 스텝 = 밴드범위/255. */
+	UInt8  UMETA(DisplayName = "8-bit (smallest)"),
+	/** 복셀당 2바이트(0..65535, 리틀엔디안). 스텝 = 밴드범위/65535 (256× 미세). 용량 2배. */
+	UInt16 UMETA(DisplayName = "16-bit (finer)"),
+};
+
 /**
  * 베이크 1회에 대한 디자이너용 설정 값. 베이크 입력이자, 에셋에 함께 저장되어 재오써링 시
  * "이 에셋이 어떤 설정으로 구워졌는가"를 알려주는 비교 기준이 된다(URopeSDFData::LastBakeSettings).
@@ -30,6 +40,10 @@ struct FRopeSDFBakeSettings
 	/** 축당 샘플 상한. 본 grid가 이를 넘으면 VoxelSize를 키워 맞춘다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Maximum samples per axis. If a bone's grid would exceed this, VoxelSize is increased to fit."))
 	int32 MaxResolution = 48;
+
+	/** 거리 양자화 비트수. 16-bit는 8-bit보다 256배 미세하지만 에셋/RAM 용량 2배. 8-bit가 최소. 기본 16-bit. */
+	UPROPERTY(EditAnywhere, Category = "Rope|SDF", meta = (ToolTip = "SDF distance quantization bit depth. 16-bit is 256x finer than 8-bit but doubles asset/RAM size; 8-bit is the smallest. Default 16-bit."))
+	ERopeSDFQuantBits Quantization = ERopeSDFQuantBits::UInt16;
 
 	/** 바깥(자유공간) 방향 감지 밴드(cm). 표면 밖으로 이 거리까지 유효한 거리/법선을 저장한다 → 로프가
 	    이만큼 떨어진 지점부터 몸을 감지·반응한다. 접촉은 CollisionRadius에서 일어나므로 그 2~3배가 안정.
@@ -81,10 +95,19 @@ struct FRopeBoneSDFVolume
 	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Voxel edge length (cm). Cached value derived from LocalBounds/Resolution."))
 	float VoxelSize = 0.0f;
 
-	/** signed distance 양자화 코드(uint8). 비대칭 밴드 [-NarrowBandInner,+NarrowBandOuter]를 [0,255]로
-	    선형 매핑(바깥 +). 길이 = Resolution.X*Y*Z. 비어 있으면 미베이크. DecodeDistance로 cm 거리 복원. */
+	/** signed distance 양자화 코드 바이트 블롭. 복셀당 BytesPerCode(1=uint8, 2=uint16 리틀엔디안) 바이트,
+	    행 우선. 비대칭 밴드 [-NarrowBandInner,+NarrowBandOuter]를 [0, MaxCode]로 선형 매핑(바깥 +).
+	    길이 = Resolution.X*Y*Z * BytesPerCode. 비어 있으면 미베이크. DecodeDistance로 cm 거리 복원. */
 	UPROPERTY()
 	TArray<uint8> Distances;
+
+	/** 이 볼륨이 구워진 양자화 비트수 → Distances 바이트 레이아웃(1 or 2바이트/복셀)을 결정. 기본 UInt8:
+	    이 필드가 없던 구 에셋(uint8 1바이트/복셀)이 재베이크 없이 그대로 디코드되도록 한다. */
+	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Quantization bit depth this volume was baked with. Determines the Distances byte layout (1 or 2 bytes per voxel)."))
+	ERopeSDFQuantBits QuantBits = ERopeSDFQuantBits::UInt8;
+
+	/** 복셀당 바이트 수(1=uint8, 2=uint16). */
+	FORCEINLINE int32 BytesPerCode() const { return QuantBits == ERopeSDFQuantBits::UInt16 ? 2 : 1; }
 
 	/** 안쪽(몸 속) dequant 밴드(cm). 코드 0이 -NarrowBandInner에 대응. 베이크 시 본별 내부 최대 깊이로
 	    자동 산출 → 몸통 내부 전체가 밴드 안(깊이 박힌 노드도 최근접 표면 방향으로 회복). 내부가 없으면 0. */
@@ -99,34 +122,57 @@ struct FRopeBoneSDFVolume
 	/** 양자화 전체 범위(cm) = 안쪽 + 바깥쪽. 코드 0..255가 -Inner..+Outer에 대응. 0이면 무효. */
 	FORCEINLINE float QuantRange() const { return NarrowBandInner + NarrowBandOuter; }
 
-	/** 베이크가 끝나 샘플 수가 해상도와 일치하고 dequant 범위가 유효한가. */
+	/** 베이크가 끝나 바이트 수가 (해상도 × BytesPerCode)와 일치하고 dequant 범위가 유효한가. */
 	bool IsBaked() const
 	{
 		const int64 Expected = static_cast<int64>(Resolution.X) * Resolution.Y * Resolution.Z;
-		return Expected > 0 && QuantRange() > 0.0f && Distances.Num() == Expected;
+		return Expected > 0 && QuantRange() > 0.0f
+			&& static_cast<int64>(Distances.Num()) == Expected * BytesPerCode();
 	}
 
-	/** uint8 코드 → signed distance(cm, 바깥 +). 범위/인덱스가 무효면 0. */
+	/** 코드 → signed distance(cm, 바깥 +). 범위/인덱스가 무효면 0. BytesPerCode에 따라 1 or 2바이트 읽음. */
 	FORCEINLINE float DecodeDistance(int32 Index) const
 	{
 		const float Range = QuantRange();
-		if (Range <= 0.0f || !Distances.IsValidIndex(Index))
+		const int32 Bpc = BytesPerCode();
+		const int32 Base = Index * Bpc;
+		if (Range <= 0.0f || Index < 0 || !Distances.IsValidIndex(Base + Bpc - 1))
 		{
 			return 0.0f;
 		}
-		return static_cast<float>(Distances[Index]) * (Range / 255.0f) - NarrowBandInner;
+		uint32 Code = Distances[Base];
+		if (Bpc >= 2)
+		{
+			Code |= static_cast<uint32>(Distances[Base + 1]) << 8; // 리틀엔디안
+		}
+		const float MaxCodeF = (Bpc >= 2) ? 65535.0f : 255.0f;
+		return static_cast<float>(Code) * (Range / MaxCodeF) - NarrowBandInner;
 	}
 
-	/** signed distance(cm) → uint8 코드. [-NBInner,+NBOuter]로 clamp 후 [0,255]로 round. */
-	static FORCEINLINE uint8 EncodeDistance(float Distance, float NBInnerCm, float NBOuterCm)
+	/** signed distance(cm) → 정수 코드 [0, MaxCode]. [-NBInner,+NBOuter]로 clamp. */
+	static FORCEINLINE uint32 EncodeCode(float Distance, float NBInnerCm, float NBOuterCm, uint32 MaxCode)
 	{
 		const float Range = NBInnerCm + NBOuterCm;
 		if (Range <= 0.0f)
 		{
-			return 128; // 무효 범위 폴백.
+			return MaxCode / 2; // 무효 범위 폴백(중앙 ≈ 0).
 		}
 		const float T = (Distance + NBInnerCm) / Range; // [-NBInner,+NBOuter] -> [0,1]
-		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(T * 255.0f), 0, 255));
+		return static_cast<uint32>(FMath::Clamp(FMath::RoundToInt(T * static_cast<float>(MaxCode)), 0, static_cast<int32>(MaxCode)));
+	}
+
+	/** D를 인코딩해 blob의 Index 위치(복셀 단위)에 BytesPerCode 바이트로 리틀엔디안 저장.
+	    Out은 Count*BytesPerCode 크기여야 한다. 인덱스별 바이트 범위가 겹치지 않아 병렬 안전. */
+	static FORCEINLINE void EncodeInto(TArray<uint8>& Out, int32 Index, float Distance, float NBInnerCm, float NBOuterCm, int32 BytesPerCode)
+	{
+		const uint32 MaxCode = (BytesPerCode >= 2) ? 65535u : 255u;
+		const uint32 Code = EncodeCode(Distance, NBInnerCm, NBOuterCm, MaxCode);
+		const int32 Base = Index * BytesPerCode;
+		Out[Base] = static_cast<uint8>(Code & 0xFF);
+		if (BytesPerCode >= 2)
+		{
+			Out[Base + 1] = static_cast<uint8>((Code >> 8) & 0xFF);
+		}
 	}
 };
 

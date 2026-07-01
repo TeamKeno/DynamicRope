@@ -57,13 +57,16 @@ namespace RopeSDFSynthetic
 			}
 		}
 
-		// 2패스: uint8로 양자화. 구는 대칭이라 안쪽/바깥 밴드 모두 데이터 최대 |거리|로 둔다(대칭 [-MaxAbs,+MaxAbs]).
+		// 2패스: 양자화. 구는 대칭이라 안쪽/바깥 밴드 모두 데이터 최대 |거리|로 둔다(대칭 [-MaxAbs,+MaxAbs]).
+		// 합성/테스트는 uint8로 충분(기본값이지만 명시).
 		V.NarrowBandInner = MaxAbs;
 		V.NarrowBandOuter = MaxAbs;
-		V.Distances.SetNumUninitialized(N);
+		V.QuantBits = ERopeSDFQuantBits::UInt8;
+		const int32 Bpc = V.BytesPerCode();
+		V.Distances.SetNumUninitialized(N * Bpc);
 		for (int32 i = 0; i < N; ++i)
 		{
-			V.Distances[i] = FRopeBoneSDFVolume::EncodeDistance(Raw[i], V.NarrowBandInner, V.NarrowBandOuter);
+			FRopeBoneSDFVolume::EncodeInto(V.Distances, i, Raw[i], V.NarrowBandInner, V.NarrowBandOuter, Bpc);
 		}
 		return V;
 	}

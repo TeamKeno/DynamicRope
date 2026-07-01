@@ -370,13 +370,14 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		}
 		const float NBIn = -FMath::Min(MinD, 0.0f);                       // >= 0 (내부 최대 깊이)
 		const float NBOut = FMath::Max(S.NarrowBand, KINDA_SMALL_NUMBER); // 설정 바깥 감지 밴드(0 나눗셈 방지)
+		const int32 BytesPerCode = (S.Quantization == ERopeSDFQuantBits::UInt16) ? 2 : 1; // 설정 비트수
 
-		TArray<uint8> Distances; // 양자화 코드(uint8, [-NBIn,+NBOut]→[0,255]). dequant는 볼륨 두 밴드로.
-		Distances.SetNumUninitialized(Count);
+		TArray<uint8> Distances; // 양자화 코드 바이트 블롭(복셀당 BytesPerCode, [-NBIn,+NBOut]→[0,MaxCode]).
+		Distances.SetNumUninitialized(Count * BytesPerCode);
 		ParallelFor(Count, [&](int32 i)
 		{
-			// [-NBIn,+NBOut] clamp + uint8 양자화(EncodeDistance가 clamp 포함). 바깥쪽 양수(frozen FRopeContact 계약).
-			Distances[i] = FRopeBoneSDFVolume::EncodeDistance(RawDist[i], NBIn, NBOut);
+			// [-NBIn,+NBOut] clamp + 양자화(EncodeInto가 clamp/바이트 저장 포함). 바깥쪽 양수(frozen FRopeContact 계약).
+			FRopeBoneSDFVolume::EncodeInto(Distances, i, RawDist[i], NBIn, NBOut, BytesPerCode);
 		});
 
 		FRopeBoneSDFVolume Volume;
@@ -384,11 +385,13 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		Volume.LocalBounds = FBox(Min, Max);
 		Volume.Resolution = Res;
 		Volume.VoxelSize = Vox;
-		Volume.NarrowBandInner = NBIn;  // dequant: 코드 0 → -NBIn (본별 자동, 내부 커버)
-		Volume.NarrowBandOuter = NBOut; // dequant: 코드 255 → +NBOut (설정 감지 밴드)
+		Volume.NarrowBandInner = NBIn;         // dequant: 코드 0 → -NBIn (본별 자동, 내부 커버)
+		Volume.NarrowBandOuter = NBOut;        // dequant: 코드 max → +NBOut (설정 감지 밴드)
+		Volume.QuantBits = S.Quantization;     // 바이트 레이아웃(1 or 2바이트/복셀)
 		Volume.Distances = MoveTemp(Distances);
-		UE_LOG(LogRopeSDFBake, Verbose, TEXT("  bone %s: res=%dx%dx%d, voxel=%.2fcm, %d tri(s), band[-%.2f,+%.2f]cm (step %.3fcm)"),
-			*Volume.Bone.ToString(), Res.X, Res.Y, Res.Z, Vox, NumTris, NBIn, NBOut, (NBIn + NBOut) / 255.0f);
+		const float StepCm = (NBIn + NBOut) / static_cast<float>((BytesPerCode >= 2) ? 65535 : 255);
+		UE_LOG(LogRopeSDFBake, Verbose, TEXT("  bone %s: res=%dx%dx%d, voxel=%.2fcm, %d tri(s), band[-%.2f,+%.2f]cm (%d-bit, step %.4fcm)"),
+			*Volume.Bone.ToString(), Res.X, Res.Y, Res.Z, Vox, NumTris, NBIn, NBOut, BytesPerCode * 8, StepCm);
 		if (OutStats)
 		{
 			++OutStats->BonesBaked;

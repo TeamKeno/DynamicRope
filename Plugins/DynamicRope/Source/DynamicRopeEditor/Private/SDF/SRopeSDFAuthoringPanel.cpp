@@ -139,6 +139,10 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 			[ MakeFloatRow(LOCTEXT("NarrowBand", "Narrow Band - outward (cm)"), &FRopeSDFBakeSettings::NarrowBand, 1.0f, 50.0f,
 				LOCTEXT("NarrowBandTip", "Outward (free-space) detection band in cm: how far outside the surface the rope starts reacting to the body. Contact happens at CollisionRadius, so ~2-3x that is stable. The inward (inside-body) band is auto-sized per bone to the deepest interior distance at bake, so the whole interior is covered - no setting needed.")) ]
 
+			// 양자화 비트수(uint8/uint16). 출력 용량/정밀도에 직결되는 메인 선택.
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+			[ MakeQuantizationRow() ]
+
 			// 가는 본 drop 임계값. 단면 girth가 이 값 미만인 본은 baking에서 제외 → 손가락 등 군더더기 볼륨 제거.
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 			[ MakeFloatRow(LOCTEXT("MinGirth", "Min Bone Girth (cm)"), &FRopeSDFBakeSettings::MinBoneGirth, 0.0f, 20.0f,
@@ -379,6 +383,46 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeIntRow(const FText& Label,
 			.MinSliderValue(MinVal).MaxSliderValue(MaxVal)
 			.Value_Lambda([this, Member]() { return TOptional<int32>(Settings.*Member); })
 			.OnValueChanged_Lambda([this, Member](int32 NewVal) { Settings.*Member = NewVal; })
+		];
+}
+
+TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeQuantizationRow()
+{
+	// 두 옵션(8/16-bit)을 라디오처럼: 켜진 것만 checked, 다른 걸 켜면 Settings.Quantization이 바뀌며
+	// 이전 것이 자동으로 unchecked된다(이미 켜진 걸 다시 눌러 끄는 건 무시 → 항상 하나는 선택).
+	auto MakeOpt = [this](ERopeSDFQuantBits Bits, const FText& Label)
+	{
+		return SNew(SCheckBox)
+			.Style(&FAppStyle::Get().GetWidgetStyle<FCheckBoxStyle>("RadioButton"))
+			.IsChecked_Lambda([this, Bits]()
+			{
+				return Settings.Quantization == Bits ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+			})
+			.OnCheckStateChanged_Lambda([this, Bits](ECheckBoxState NewState)
+			{
+				if (NewState == ECheckBoxState::Checked)
+				{
+					Settings.Quantization = Bits;
+				}
+			})
+			[
+				SNew(STextBlock).Text(Label)
+			];
+	};
+
+	return SNew(SHorizontalBox)
+		.ToolTipText(LOCTEXT("QuantTip", "SDF distance quantization bit depth. 16-bit is 256x finer than 8-bit but doubles asset/RAM size; 8-bit is the smallest. Default 16-bit."))
+		+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
+		[
+			SNew(STextBlock).Text(LOCTEXT("Quant", "Quantization"))
+		]
+		+ SHorizontalBox::Slot().FillWidth(0.225f).VAlign(VAlign_Center)
+		[
+			MakeOpt(ERopeSDFQuantBits::UInt8, LOCTEXT("Quant8", "8-bit"))
+		]
+		+ SHorizontalBox::Slot().FillWidth(0.225f).VAlign(VAlign_Center)
+		[
+			MakeOpt(ERopeSDFQuantBits::UInt16, LOCTEXT("Quant16", "16-bit"))
 		];
 }
 

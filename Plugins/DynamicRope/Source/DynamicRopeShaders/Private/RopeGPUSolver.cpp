@@ -411,16 +411,24 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 						V.LocalMin  = FVector4f((float)Vp->LocalMin.X,  (float)Vp->LocalMin.Y,  (float)Vp->LocalMin.Z,  0.0f);
 						V.LocalSize = FVector4f((float)Vp->LocalSize.X, (float)Vp->LocalSize.Y, (float)Vp->LocalSize.Z, 0.0f);
 						SDFVol.Add(V);
-						// uint8 코드 → float(cm) dequant 후 업로드(셰이더 SDFDistances는 float 유지 → .usf 무변경).
-						// 비대칭 밴드: d = code*(range/255) - NBIn, range = NBIn+NBOut.
+						// 코드 → float(cm) dequant 후 업로드(셰이더 SDFDistances는 float 유지 → .usf 무변경).
+						// 비대칭 밴드: d = code*(range/MaxCode) - NBIn, range = NBIn+NBOut. 코드는 복셀당
+						// BytesPerCode 바이트(리틀엔디안): 1=uint8(max255), 2=uint16(max65535).
 						const int32 VoxN = (int32)((int64)Vp->ResX * Vp->ResY * Vp->ResZ);
+						const int32 Bpc = Vp->BytesPerCode;
+						const float MaxCodeF = (Bpc >= 2) ? 65535.0f : 255.0f;
 						const float NBIn = Vp->NarrowBandInner;
 						const float Range = NBIn + Vp->NarrowBandOuter;
-						const float DeqScale = (Range > 0.0f) ? (Range / 255.0f) : 0.0f;
+						const float DeqScale = (Range > 0.0f) ? (Range / MaxCodeF) : 0.0f;
 						SDFDist.Reserve(SDFDist.Num() + VoxN);
 						for (int32 Vi = 0; Vi < VoxN; ++Vi)
 						{
-							SDFDist.Add(static_cast<float>(Vp->Distances[Vi]) * DeqScale - NBIn); // 바깥 +
+							uint32 Code = Vp->Distances[Vi * Bpc];
+							if (Bpc >= 2)
+							{
+								Code |= static_cast<uint32>(Vp->Distances[Vi * Bpc + 1]) << 8;
+							}
+							SDFDist.Add(static_cast<float>(Code) * DeqScale - NBIn); // 바깥 +
 						}
 					}
 					SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances"),

@@ -28,9 +28,10 @@ struct FRopeGPUCapsule
  */
 struct FRopeGPUSDFCollider
 {
-	const uint8* Distances = nullptr;    // 길이 ResX*ResY*ResZ, 행 우선. uint8 코드(비대칭 밴드로 dequant, 바깥 +).
+	const uint8* Distances = nullptr;    // 코드 바이트 블롭(복셀당 BytesPerCode, 행 우선, 리틀엔디안). 바깥 +.
+	int32        BytesPerCode = 1;       // 복셀당 바이트(1=uint8 max255, 2=uint16 max65535).
 	float        NarrowBandInner = 0.0f; // 안쪽 dequant 밴드(cm). 코드 0 → -NarrowBandInner.
-	float        NarrowBandOuter = 0.0f; // 바깥 dequant 밴드(cm). 코드 255 → +NarrowBandOuter.
+	float        NarrowBandOuter = 0.0f; // 바깥 dequant 밴드(cm). 코드 max → +NarrowBandOuter.
 	int32        ResX = 0;
 	int32        ResY = 0;
 	int32        ResZ = 0;

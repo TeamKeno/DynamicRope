@@ -66,6 +66,9 @@ private:
 	TSharedRef<class SWidget> MakeFloatRow(const FText& Label, float FRopeSDFBakeSettings::* Member, float MinVal, float MaxVal, const FText& Tip = FText::GetEmpty());
 	TSharedRef<class SWidget> MakeIntRow(const FText& Label, int32 FRopeSDFBakeSettings::* Member, int32 MinVal, int32 MaxVal, const FText& Tip = FText::GetEmpty());
 
+	/** Settings.Quantization(uint8/uint16) 선택 행: 라벨 + 두 개의 상호배타 옵션(라디오처럼 동작). */
+	TSharedRef<class SWidget> MakeQuantizationRow();
+
 	//~ 프리뷰 오버레이(패널 로컬 상태 = PreviewViewport->AccessDrawOptions())에 바인딩되는 컨트롤들.
 	/** 오버레이 토글 체크박스 행(bounds/voxels/slice/gradient). */
 	TSharedRef<class SWidget> MakeOverlayToggleRow(const FText& Label, bool FRopeSDFPreviewDrawOptions::* Member);
