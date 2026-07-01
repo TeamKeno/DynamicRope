@@ -24,6 +24,22 @@ struct FRopeSubstepSchedule
  */
 DYNAMICROPE_API FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverConfig& Config, float DeltaSeconds);
 
+/**
+ * 노드 1개의 접촉 제약 상태. DetectContacts(substep당 1회 swept, CCD)가 어느 collider에 닿았는지
+ * (ColliderIndex)와 활성 여부를 정한다. SolveContacts는 매 iteration 그 collider를 *fresh로 재질의*해
+ * 현재 위치의 실제 표면 거리/법선을 얻어 재투영한다 → 곡면/오목 크리스에서도 캐시 평면 staleness 없이
+ * collision이 distance/bending과 동등하게 경쟁한다. Lambda는 누적 법선 임펄스(= 접촉 법선력)로 마찰
+ * Coulomb 한계 μ·Lambda·w에 쓰인다(XPBD: λ가 곧 제약력). Normal/SurfaceVel은 매 재질의마다 갱신.
+ */
+struct FRopeContactState
+{
+	bool    bActive = false;
+	int32   ColliderIndex = INDEX_NONE; // SolveContacts가 매 iteration 재질의할 collider.
+	FVector Normal = FVector::ZeroVector;
+	FVector SurfaceVel = FVector::ZeroVector;
+	float   Lambda = 0.0f;
+};
+
 class DYNAMICROPE_API FRopeXPBDSolver
 {
 public:
@@ -43,16 +59,31 @@ private:
 	void SolveBending(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
 		TArray<float>& Lambda) const;
 
-	// Config.CollisionRadius로 query하여(로프 두께) 노드를 표면 밖으로 push-out하고, Config.Friction으로
-	// 접선 속도를 감쇠한다. 마찰은 노드와 표면의 *상대* 접선 속도에 작용하므로, 움직이는 collider(컨택트의
-	// SurfaceVelocity)는 정지한 로프를 끌어 좌우로 쓸어낸다. ColliderBounds는 collider별 월드 AABB(+Radius)로,
-	// broad-phase에서 먼 collider의 비싼 Query를 건너뛰는 데 쓴다(Step에서 1회 계산해 전달). SubDt는 표면
-	// 속도(cm/s)를 이번 substep 변위로 환산하는 데 쓴다.
-	// SubAlpha0/1은 이 substep이 프레임 내에서 차지하는 collider 모션 구간[s/NumSub,(s+1)/NumSub]로,
-	// 움직이는 collider의 prev->curr 모션을 substep에 분배해 상대 운동 swept query(QuerySwept)에 넘긴다.
-	// LambdaDist: 현재까지 누적된 distance 제약의 XPBD Lagrange multiplier(= 세그먼트 장력). Coulomb 마찰의
-	// 법선력을 penetration(외력/무게분) + 장력 안쪽 성분으로 산정하는 데 쓴다 → 장력이 클수록 그립이 커진다.
-	void SolveCollisions(FRopeSimState& State, const FRopeSolverConfig& Config,
+	// 접촉 검출(substep당 1회 또는 CollisionPasses회): swept query(CCD)로 각 노드의 첫 접촉을 찾아 표면 밖으로
+	// 즉시 push-out하고, 접촉면을 평면(RestPoint/Normal)으로 캐시한다(Out Contacts). ColliderBounds는 broad-phase
+	// AABB(+Radius), SubAlpha0/1은 움직이는 collider의 substep sub-포즈 구간. 이후 SolveContacts가 매 iteration
+	// 이 캐시 평면을 싸게 강제하고, ApplyContactFriction이 substep 끝에 Coulomb 마찰을 적용한다.
+	void DetectContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
 		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
-		const TArray<float>& LambdaDist, float SubDt, float SubAlpha0, float SubAlpha1) const;
+		float SubAlpha0, float SubAlpha1, TArray<FRopeContactState>& Contacts) const;
+
+	// 활성 노드에 *근접한 모든* collider를 매 iteration fresh로 재질의(point query)해 각각 표면 밖으로 재투영하고
+	// 법선 임펄스 Lambda(>=0, 한쪽 접촉)를 누적한다. rigid(compliance 0). 캐시 하나가 아니라 겹치는 뼈들을 모두
+	// 방어하므로(단일-캐시 관통 버그 수정 — GPU .usf의 노드당 전 collider 루프와 일치), distance/bending과 같은
+	// Gauss-Seidel sweep에서 경쟁 → 장력에 안 밀린다. ColliderBounds는 노드-점 broad-phase 컬(먼 collider 스킵).
+	void SolveContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
+		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
+		TArray<FRopeContactState>& Contacts) const;
+
+	// 세그먼트(에지) 충돌: 노드 점 충돌은 두 노드 사이 직선이 얇은 표면(팔·다리 등)을 가로지르는 chording을
+	// 못 막는다(양 끝 노드는 표면 밖, 사이 직선만 관통). 각 세그먼트를 내부 샘플점(길이/SweepStep 기반)으로
+	// 보고, 침투한 샘플을 표면 밖으로 밀며 보정을 barycentric((1-t):t)으로 양 끝 노드에 분배한다. 양 끝이 모두
+	// pin(invMass 0)인 wrap 구간은 못 움직이므로 스킵. distance/bending과 같은 sweep에서 경쟁하도록 매 iteration 호출.
+	void SolveSegmentContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
+		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds, bool bReverse) const;
+
+	// substep 끝에 Coulomb 마찰 1회 적용: 접선 보정량을 μ(테이퍼)·Lambda·w로 상한(Lambda=누적 법선력). 작은
+	// 상대 운동은 전량 제거(정지마찰), 그립 초과분은 슬립. SubDt로 표면 속도(cm/s)를 substep 변위로 환산.
+	void ApplyContactFriction(FRopeSimState& State, const FRopeSolverConfig& Config,
+		const TArray<FRopeContactState>& Contacts, float SubDt) const;
 };

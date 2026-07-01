@@ -4,6 +4,13 @@
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
+#include "HAL/IConsoleManager.h"
+
+// 세그먼트(에지) 충돌 on/off. 1=활성(기본). chording(두 노드 사이 직선이 얇은 표면 관통) 방어. A/B 검증용.
+static TAutoConsoleVariable<int32> CVarRopeSegmentCollision(
+	TEXT("r.DynamicRope.SegmentCollision"), 1,
+	TEXT("1이면 세그먼트(에지) 충돌로 노드 사이 직선 chording을 막는다. 0이면 노드 점 충돌만(기존)."),
+	ECVF_Default);
 
 FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverConfig& Config, float DeltaSeconds)
 {
@@ -61,6 +68,10 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 	LambdaDist.SetNumZeroed(NumDist);
 	LambdaBend.SetNumZeroed(NumBend);
 
+	// 노드별 캐시된 접촉 제약(substep마다 검출 → iteration마다 강제 → 끝에 마찰 1회).
+	TArray<FRopeContactState> Contacts;
+	Contacts.SetNum(State.Num());
+
 	// Broad-phase: collider별 월드 AABB(+CollisionRadius)를 1회만 계산한다. SolveCollisions가
 	// node/iteration/substep마다 먼 collider까지 역변환 query하던 비용을 싼 박스 테스트로 컷.
 	const float CollRadius = FMath::Max(0.0f, Config.CollisionRadius);
@@ -89,19 +100,21 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 		// XPBD: lambda는 substep 내에서 누적되므로, 이번 substep의 iteration 전에 0으로 초기화한다.
 		for (float& L : LambdaDist) { L = 0.0f; }
 		for (float& L : LambdaBend) { L = 0.0f; }
+		for (FRopeContactState& C : Contacts) { C.bActive = false; C.Lambda = 0.0f; }
 
 		// 알파: 이 substep이 차지하는 collider 모션 구간(프레임 모션을 substep에 균등 분배).
 		const float SubAlpha0 = static_cast<float>(s) / static_cast<float>(NumSub);
 		const float SubAlpha1 = static_cast<float>(s + 1) / static_cast<float>(NumSub);
 
-		// 충돌 해소 빈도(CollisionPassesPerSubstep): 제약 iteration을 CollPasses개 구간으로 나눠 구간마다
-		// collision을 1회 끼운다. substep 끝에 1회만(K=1, 기존)이면 sharp 굴곡에서 안쪽 장력(distance/bending
-		// ×Iters)이 단일 push-out을 이겨 관통한다 → 사이사이 collision을 넣어 끼인각 임계치를 낮춘다.
-		// K>1이면 friction도 패스마다 적용되나(접촉 지속 노드에 한함) Coulomb 한계가 있어 과적용은 제한적.
+		// CollisionPassesPerSubstep = substep당 접촉 *재검출* 횟수(캐시 평면 갱신). 1=시작에 1회 검출(기본).
+		// 검출(swept)은 비싸므로 가끔만, 그 사이 SolveContacts가 매 iteration 캐시 평면을 싸게 강제한다 → K=1에서도
+		// collision이 매 iteration distance/bending과 동등하게 경쟁해 장력에 안 밀린다(관통 차단). 노드가 substep
+		// 안에서 많이 움직여 평면이 낡으면 K>1로 중간 갱신.
 		const int32 CollPasses = FMath::Clamp(Config.CollisionPassesPerSubstep, 1, Iters);
 		int32 ItDone = 0;
 		for (int32 p = 0; p < CollPasses; ++p)
 		{
+			DetectContacts(State, Config, Colliders, ColliderBounds, SubAlpha0, SubAlpha1, Contacts);
 			const int32 ItTarget = ((p + 1) * Iters) / CollPasses; // 누적 목표(마지막 패스가 Iters를 보장)
 			for (; ItDone < ItTarget; ++ItDone)
 			{
@@ -109,9 +122,13 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 				const bool bReverse = (ItDone & 1) != 0;
 				SolveDistance(State, Config, FixedDt, bReverse, LambdaDist);
 				SolveBending(State, Config, FixedDt, bReverse, LambdaBend);
+				SolveContacts(State, Config, Colliders, ColliderBounds, Contacts);
+					SolveSegmentContacts(State, Config, Colliders, ColliderBounds, bReverse);
 			}
-			SolveCollisions(State, Config, Colliders, ColliderBounds, LambdaDist, FixedDt, SubAlpha0, SubAlpha1);
 		}
+
+		// 마찰은 substep 끝 1회: 누적된 접촉 법선력(Lambda)으로 Coulomb 한계를 잡는다.
+		ApplyContactFriction(State, Config, Contacts, FixedDt);
 	}
 }
 
@@ -219,11 +236,14 @@ void FRopeXPBDSolver::SolveBending(FRopeSimState& State, const FRopeSolverConfig
 	}
 }
 
-void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverConfig& Config,
+void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
 	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
-	const TArray<float>& LambdaDist, float SubDt, float SubAlpha0, float SubAlpha1) const
+	float SubAlpha0, float SubAlpha1, TArray<FRopeContactState>& Contacts) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_Collisions);
+
+	// 재검출: 이전 패스의 활성 플래그만 지운다(Lambda는 substep 시작에만 리셋되어 substep 내 누적 유지).
+	for (FRopeContactState& C : Contacts) { C.bActive = false; }
 	if (Colliders.Num() == 0)
 	{
 		return;
@@ -231,7 +251,6 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 
 	// 로프의 충돌 두께. 0이면 노드가 표면 안에 들어가야만 hit → 얇은 limb/희소 노드에서 대부분 관통.
 	const float Radius = FMath::Max(0.0f, Config.CollisionRadius);
-	const float Friction = FMath::Clamp(Config.Friction, 0.0f, 1.0f);
 	const bool bHasBounds = ColliderBounds.Num() == Colliders.Num();
 
 	// Swept(연속) 충돌: 노드를 점이 아니라 PrevPos->Pos 구간으로 본다. 빠른 노드가 한 substep에 얇은
@@ -249,9 +268,13 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 		RopeBounds += State.Positions[i];
 	}
 
+	// 이번 검출에서 노드가 실제 swept hit를 받았는지. hit가 proximity-watch(아래)를 덮어쓰도록 구분한다.
+	TArray<bool> bHitThisDetect;
+	bHitThisDetect.Init(false, State.Num());
+
 	// 콜라이더-아우터: substep sub-포즈(움직이는 본의 prev->curr를 알파로 Blend)를 콜라이더당 1회 계산해
-	// 노드 루프 밖으로 호이스팅한다(노드마다 Blend 재계산 방지). 충돌 push-out은 노드별 독립이라 노드-아우터와
-	// 결과가 동일하다(동작 무변경). sub-포즈는 스택 로컬이라 공유 collider를 mutate하지 않음 → 병렬 솔브 안전.
+	// 노드 루프 밖으로 호이스팅한다(노드마다 Blend 재계산 방지). 한 노드가 여러 collider에 닿으면 마지막 hit가
+	// 캐시를 덮어쓴다(노드당 단일 접촉 평면 — pinch 다접촉은 단순화). sub-포즈는 스택 로컬이라 병렬 솔브 안전.
 	for (int32 c = 0; c < Colliders.Num(); ++c)
 	{
 		const IRopeCollider* Collider = Colliders[c];
@@ -308,53 +331,195 @@ void FRopeXPBDSolver::SolveCollisions(FRopeSimState& State, const FRopeSolverCon
 
 			FVector HitPos;
 			const FRopeContact Contact = Collider->QuerySwept(SQ, HitPos);
-			if (!Contact.bHit)
+
+			FRopeContactState& CC = Contacts[i];
+			if (Contact.bHit)
+			{
+				// CCD: 첫 접촉에서 표면 밖으로 즉시 밀고(가로질러 통과 방지), 이 collider를 접촉으로 확정한다
+				// (hit가 proximity-watch를 덮어씀). 이후 SolveContacts가 매 iteration fresh 재질의로 강제.
+				State.Positions[i] = HitPos + Contact.Normal * Contact.Penetration;
+				CC.bActive        = true;
+				CC.ColliderIndex  = c;
+				CC.Normal         = Contact.Normal;
+				CC.SurfaceVel     = Contact.SurfaceVelocity;
+				bHitThisDetect[i] = true;
+			}
+			else if (!bHitThisDetect[i])
+			{
+				// swept 미접촉이지만 broad-phase 근접 → watch만 등록한다. iteration 도중 distance/bending이
+				// 노드를 표면으로 끌어들이거나(처음엔 밖이라 hit 아님), 분리 휴리스틱이 swept를 억제한 경우라도,
+				// SolveContacts가 매 iteration point-query로 실제 침투를 직접 판정해 밀어낸다(밖이면 무동작 —
+				// 한쪽 접촉). 이미 hit로 확정된 collider는 덮어쓰지 않는다.
+				CC.bActive       = true;
+				CC.ColliderIndex = c;
+			}
+			// CC.Lambda는 그대로 둔다(substep 시작에만 0으로 리셋되어 누적).
+		}
+	}
+}
+
+void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
+	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
+	TArray<FRopeContactState>& Contacts) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_Contacts);
+	const float Radius = FMath::Max(0.0f, Config.CollisionRadius);
+	const bool bHasBounds = ColliderBounds.Num() == Colliders.Num();
+	const int32 Count = State.Num();
+	for (int32 i = 0; i < Count; ++i)
+	{
+		FRopeContactState& CC = Contacts[i];
+		if (!CC.bActive) // DetectContacts가 "이 노드는 어떤 collider엔가 근접" 표시한 노드만.
+		{
+			continue;
+		}
+		const float W = State.InvMass[i];
+		if (W <= 0.0f)
+		{
+			continue;
+		}
+
+		// 노드에 근접한 *모든* collider를 재질의해 각각 표면 밖으로 민다(겹치는 뼈 다중 접촉을 전부 방어).
+		// 캐시된 collider 하나만 보던 버그(다른 뼈 관통을 못 막음, colIdx≠cached로 확인됨) 수정 —
+		// 캐시 평면이 아니라 매번 실제 표면을 보므로 곡면/오목에서도 정확. GPU .usf의 노드당 전 collider 루프와 일치.
+		const FVector& P = State.Positions[i];
+		for (int32 c = 0; c < Colliders.Num(); ++c)
+		{
+			const IRopeCollider* Collider = Colliders[c];
+			if (!Collider)
 			{
 				continue;
 			}
-
-			// 첫 접촉 지점에서 표면 밖으로 밀어 멈춘다(가로질러 통과하지 못하게).
-			State.Positions[i] = HitPos + Contact.Normal * Contact.Penetration;
-
-			// 접선 friction: 노드와 표면의 *상대* 접선 변위를 Friction만큼 깎는다(움직이는 표면이 로프를 끌어
-			// 쓸어냄). 정지 표면(SurfaceVelocity 0)이면 노드 변위만 깎는 기존 동작과 동일.
-			if (Friction > 0.0f)
+			// broad-phase: collider 월드 bounds(+Radius로 확장됨)에 노드 점이 없으면 스킵(먼 collider 컷).
+			if (bHasBounds && !ColliderBounds[c].IsInsideOrOn(P))
 			{
-				const FVector NodeDelta = State.Positions[i] - State.PrevPositions[i]; // 이번 substep 노드 변위
-				const FVector SurfDelta = Contact.SurfaceVelocity * SubDt;             // 이번 substep 표면 변위
-				const FVector RelDelta = NodeDelta - SurfDelta;
-				FVector RelTangent = RelDelta - (RelDelta | Contact.Normal) * Contact.Normal;
-				// 자유단 테이퍼: 끝 노드는 장력이 가장 낮아 마찰에 잘 붙잡히므로, 노드 위치에 따라 μ를 낮춘다
-				// (고정점 frac=0 → 1.0, 끝 frac=1 → TipFrictionScale).
-				const float Frac = (State.Num() > 1) ? (static_cast<float>(i) / static_cast<float>(State.Num() - 1)) : 0.0f;
-				const float MuEff = Friction * FMath::Lerp(1.0f, FMath::Clamp(Config.TipFrictionScale, 0.0f, 1.0f), Frac);
+				continue;
+			}
+			const FRopeContact Contact = Collider->Query(P, Radius);
+			if (!Contact.bHit)
+			{
+				continue; // 이 collider 표면 밖 → 접촉력 없음(한쪽 접촉).
+			}
 
-				// 법선력 ≈ penetration(외력/무게분) + 인접 distance 제약력(LambdaDist=장력)의 안쪽 성분.
-				// XPBD에서 λ가 곧 제약력 → 장력이 클수록 그립이 커진다(닿은 채 당겨도 옆으로 안 빠짐).
-				// 단위: λ는 cm·mass, ×InvMass로 displacement화 → MaxSlip(cm)과 일치(매직 상수 없음).
-				const int32 NodeCount = State.Num();
-				FVector NetPull = FVector::ZeroVector;
-				if (i > 0 && LambdaDist.IsValidIndex(i - 1))
-				{
-					NetPull += FMath::Abs(LambdaDist[i - 1]) * (State.Positions[i - 1] - State.Positions[i]).GetSafeNormal();
-				}
-				if (i + 1 < NodeCount && LambdaDist.IsValidIndex(i))
-				{
-					NetPull += FMath::Abs(LambdaDist[i]) * (State.Positions[i + 1] - State.Positions[i]).GetSafeNormal();
-				}
-				NetPull *= State.InvMass[i];
-				const float TensionNormal = FMath::Max(0.0f, -(NetPull | Contact.Normal)); // 표면 안쪽(−Normal) 성분만
+			// XPBD rigid 접촉(compliance 0): C = -Penetration(<0). ΔLambda = Penetration/W. Lambda는 >=0 클램프.
+			// 위치 갱신 = Normal*Penetration: 노드를 표면으로 재투영. Lambda는 노드별 누적 법선 임펄스(마찰용).
+			const float DLambda = Contact.Penetration / W;
+			const float NewLambda = FMath::Max(0.0f, CC.Lambda + DLambda);
+			const float Applied = NewLambda - CC.Lambda;
+			CC.Lambda  = NewLambda;
+			CC.Normal  = Contact.Normal;             // 마찰용으로 최신(마지막 접촉) 법선 캐시.
+			CC.SurfaceVel = Contact.SurfaceVelocity; // 최신 표면 속도.
+			CC.ColliderIndex = c;                    // 마지막 접촉 collider(디버그/마찰 힌트).
+			State.Positions[i] += Contact.Normal * (W * Applied);
+		}
+	}
+}
 
-				// Coulomb 한계: 접선 보정량을 μ*(penetration + 장력 법선력)으로 상한. 작은 상대 운동은 전량 제거
-				// (정지마찰=그립), 그립을 넘으면 초과분은 슬립 → 표면을 미끄러져 자연스럽게 놔준다(영구 그립 방지).
-				const float MaxSlip = MuEff * (Contact.Penetration + TensionNormal);
-				const float TLen = RelTangent.Size();
-				if (TLen > MaxSlip && TLen > KINDA_SMALL_NUMBER)
+void FRopeXPBDSolver::SolveSegmentContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
+	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds, bool bReverse) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_SegContacts);
+	if (CVarRopeSegmentCollision.GetValueOnAnyThread() == 0)
+	{
+		return; // 토글 off → 노드 점 충돌만(기존).
+	}
+	const float Radius = FMath::Max(0.0f, Config.CollisionRadius);
+	const bool bHasBounds = ColliderBounds.Num() == Colliders.Num();
+	const float SweepStep = FMath::Max(Config.SweepStep, 0.1f);       // 샘플 간격(cm) — 노드 점 충돌과 동일 config 재사용.
+	const int32 MaxSamples = FMath::Max(1, Config.MaxSweepSamples);   // 세그먼트당 내부 샘플 상한.
+	const int32 Count = State.Num() - 1;
+	for (int32 k = 0; k < Count; ++k)
+	{
+		const int32 i = bReverse ? (Count - 1 - k) : k;
+		const float W0 = State.InvMass[i];
+		const float W1 = State.InvMass[i + 1];
+		if (W0 + W1 <= 0.0f)
+		{
+			continue; // 양 끝 모두 pin(wrap 구간) → 세그먼트를 못 움직임. 스킵.
+		}
+
+		const FVector P0 = State.Positions[i];
+		const FVector P1 = State.Positions[i + 1];
+		const float SegLen = static_cast<float>(FVector::Dist(P0, P1));
+		// 내부 샘플 수(양 끝 노드는 SolveContacts가 이미 처리 → 내부만). 세그먼트가 길수록 촘촘히.
+		const int32 NumInner = FMath::Clamp(FMath::FloorToInt(SegLen / SweepStep), 1, MaxSamples);
+		for (int32 s = 1; s <= NumInner; ++s)
+		{
+			const float T = static_cast<float>(s) / static_cast<float>(NumInner + 1); // (0,1) 내부.
+			// barycentric 유효 역질량: 내부점을 delta만큼 밀려면 두 끝을 (1-T),(T) 비율로 움직인다.
+			const float WEff = (1.0f - T) * (1.0f - T) * W0 + T * T * W1;
+			if (WEff <= 0.0f)
+			{
+				continue;
+			}
+			// 현재 위치로 매 샘플 재계산(앞 샘플이 끝 노드를 이미 움직였을 수 있음).
+			const FVector Mid = FMath::Lerp(State.Positions[i], State.Positions[i + 1], T);
+			for (int32 c = 0; c < Colliders.Num(); ++c)
+			{
+				const IRopeCollider* Collider = Colliders[c];
+				if (!Collider)
 				{
-					RelTangent *= (MaxSlip / TLen);
+					continue;
 				}
-				State.PrevPositions[i] += RelTangent;
+				if (bHasBounds && !ColliderBounds[c].IsInsideOrOn(Mid))
+				{
+					continue;
+				}
+				const FRopeContact Contact = Collider->Query(Mid, Radius);
+				if (!Contact.bHit)
+				{
+					continue;
+				}
+				// 샘플점을 표면 밖으로 Penetration만큼: 보정을 barycentric으로 양 끝에 분배.
+				// 이동합 = ((1-T)^2 W0 + T^2 W1)/WEff * Pen = Pen → 내부점이 정확히 표면으로.
+				const float DLambda = Contact.Penetration / WEff;
+				State.Positions[i]     += Contact.Normal * ((1.0f - T) * W0 * DLambda);
+				State.Positions[i + 1] += Contact.Normal * (T * W1 * DLambda);
 			}
 		}
+	}
+}
+
+void FRopeXPBDSolver::ApplyContactFriction(FRopeSimState& State, const FRopeSolverConfig& Config,
+	const TArray<FRopeContactState>& Contacts, float SubDt) const
+{
+	const float Friction = FMath::Clamp(Config.Friction, 0.0f, 1.0f);
+	if (Friction <= 0.0f)
+	{
+		return;
+	}
+	const int32 Count = State.Num();
+	for (int32 i = 0; i < Count; ++i)
+	{
+		const FRopeContactState& CC = Contacts[i];
+		if (!CC.bActive || CC.Lambda <= 0.0f)
+		{
+			continue;
+		}
+		const float W = State.InvMass[i];
+		if (W <= 0.0f)
+		{
+			continue;
+		}
+
+		// 노드와 표면의 *상대* 접선 변위(움직이는 표면이 로프를 끌어 쓸어냄). 정지 표면(SurfaceVel 0)이면 노드 변위만.
+		const FVector NodeDelta = State.Positions[i] - State.PrevPositions[i];
+		const FVector SurfDelta = CC.SurfaceVel * SubDt;
+		const FVector RelDelta = NodeDelta - SurfDelta;
+		FVector RelTangent = RelDelta - (RelDelta | CC.Normal) * CC.Normal;
+
+		// 자유단 테이퍼: 끝 노드는 장력이 가장 낮아 잘 붙잡히므로 μ를 낮춘다(고정점 frac=0→1, 끝 frac=1→TipFrictionScale).
+		const float Frac = (Count > 1) ? (static_cast<float>(i) / static_cast<float>(Count - 1)) : 0.0f;
+		const float MuEff = Friction * FMath::Lerp(1.0f, FMath::Clamp(Config.TipFrictionScale, 0.0f, 1.0f), Frac);
+
+		// Coulomb 한계: μ·(누적 접촉 법선력 Lambda)·w. λ는 cm·mass, ×w로 displacement화 → MaxSlip(cm) 동차(매직 상수 없음).
+		// 장력이 클수록 Lambda↑(매 iteration 평면을 더 세게 밀어야 하므로) → 그립↑. 그립 초과분은 슬립(영구 그립 방지).
+		const float MaxSlip = MuEff * CC.Lambda * W;
+		const float TLen = RelTangent.Size();
+		if (TLen > MaxSlip && TLen > KINDA_SMALL_NUMBER)
+		{
+			RelTangent *= (MaxSlip / TLen);
+		}
+		State.PrevPositions[i] += RelTangent;
 	}
 }
