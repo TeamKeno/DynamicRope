@@ -702,8 +702,9 @@ void URopeComponent::StartWrappingFromContacting()
 		LatchAnchor = PendingWrapSeed.Anchors[0];
 		LatchAnchor.Mesh = Mesh;
 	}
-	//fallback입니다. 즉 contact candidate로 만든 정확한 surface anchor가 없을 때, 
-	// 최소한 현재 rope particle 위치를 기준으로 임시 anchor를 만드는 코드입니다.
+	// 비상비상: 아래 fallback은 contact candidate 기반의 정확한 SDF surface anchor가 없을 때만 쓰는 임시 anchor 경로다.
+	// 현재 rope particle 위치와 임시 normal/tangent로 시작점을 때우므로, wrapping 품질/방향이 흔들릴 수 있다.
+	// 정상 경로는 PendingWrapSeed.Anchors[0]에 실제 contact surface point/normal/tangent가 들어오는 것이다.
 	else if (Sim.Positions.IsValidIndex(Latch.NodeIndex))
 	{
 		const FVector NormalWorld = FVector::UpVector;
@@ -959,6 +960,7 @@ bool URopeComponent::ComputeSurfaceWalkWrapTarget(const FRopeSurfaceAnchor& Latc
 bool URopeComponent::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 	FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const
 {
+	//1. Mesh / Bone 확인
 	const USkeletalMeshComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
 	{
@@ -972,35 +974,43 @@ bool URopeComponent::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAncho
 	FVector AxisOrigin = FVector::ZeroVector;
 	FVector AxisDirection = FVector::ForwardVector;
 
-	//감김 축 정의
+	//2. 감김 축 구하기
 	if (!ResolveWrappingAxis(LatchAnchor, AxisOrigin, AxisDirection))
 	{
 		return false;
 	}
 
+	//3. latch anchor를 world 좌표로 복원
 	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
 	FVector SurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
 	FVector NormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+
+	//4. 최초 rope tangent를 표면 위 방향으로 정리
 	FVector LatchTangentWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalTangent);
 	LatchTangentWorld = (LatchTangentWorld - FVector::DotProduct(LatchTangentWorld, NormalWorld) * NormalWorld)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(NormalWorld));
 
+	//5. latch 지점의 radial 구하기
 	const float LatchAxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
 	const FVector LatchAxisPoint = AxisOrigin + AxisDirection * LatchAxisDistance;
 	const FVector LatchRadial = (SurfaceWorld - LatchAxisPoint)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, NormalWorld);
 
+	//6. 최초 원주 방향과 감김 방향 결정
 	FVector CircumferenceDir = FVector::CrossProduct(AxisDirection, LatchRadial)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(NormalWorld));
 	const float WindingSign = FVector::DotProduct(CircumferenceDir, LatchTangentWorld) < 0.0f ? -1.0f : 1.0f;
 	CircumferenceDir *= WindingSign;
 
+	//7. 최초 tangent field 만들기
 	FVector TangentWorld = (CircumferenceDir + AxisDirection * WrapConfig.WrappingHelixPitchScale)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
+	//SDF 표면 밖으로 튀어나가는 성분 제거
 	TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
 
+	//8. 거리 0이면 바로 latch point 반환
 	if (DistanceFromLatch <= KINDA_SMALL_NUMBER)
 	{
 		OutSurfaceWorld = SurfaceWorld;
@@ -1009,23 +1019,29 @@ bool URopeComponent::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAncho
 		return true;
 	}
 
+	//9. 걷기 step 계산
 	const float StepSize = FMath::Max(1.0f, Sim.SegmentLength * 0.5f);
 	const int32 StepCount = FMath::Max(1, FMath::CeilToInt(DistanceFromLatch / StepSize));
 	float RemainingDistance = DistanceFromLatch;
 
+	//10. 표면 위를 실제로 걷는 루프
 	for (int32 StepIndex = 0; StepIndex < StepCount; ++StepIndex)
 	{
 		const float StepDistance = FMath::Min(StepSize, RemainingDistance);
 		RemainingDistance -= StepDistance;
 
+		//현재 위치에서 radial을 다시 구함. 현재 표면 위치에서 매번 radial을 다시 계산
 		const float AxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
 		const FVector AxisPoint = AxisOrigin + AxisDirection * AxisDistance;
 		const FVector Radial = (SurfaceWorld - AxisPoint).GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);
 
+		//원주 방향 재계산:
 		CircumferenceDir = FVector::CrossProduct(AxisDirection, Radial)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir) * WindingSign;
+		//pitch를 섞어 걸어갈 방향을 다시 만듦:
 		TangentWorld = (CircumferenceDir + AxisDirection * WrapConfig.WrappingHelixPitchScale)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
+		//표면 tangent plane에 다시 눕힘:
 		TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
 
@@ -1033,6 +1049,7 @@ bool URopeComponent::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAncho
 		ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, SurfaceWorld, NormalWorld);
 	}
 
+	//11. 최종 위치에서 tangent 다시 계산
 	const float FinalAxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
 	const FVector FinalAxisPoint = AxisOrigin + AxisDirection * FinalAxisDistance;
 	const FVector FinalRadial = (SurfaceWorld - FinalAxisPoint).GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);
@@ -1079,7 +1096,8 @@ bool URopeComponent::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor& La
 	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
 	//LatchSurfaceWorld가 나선의 시작점
 	const FVector LatchSurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
-	//LatchNormalWorld normal / tangent 복원
+	
+	//4. LatchNormalWorld normal / tangent 복원
 	//LatchNormalWorld는 접촉 표면 normal.
 	//LatchTangentWorld는 최초 latch 순간 로프가 tail 방향으로 뻗던 방향
 	const FVector LatchNormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
@@ -1088,6 +1106,7 @@ bool URopeComponent::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor& La
 	//tangent를 normal plane에 투영해
 	LatchTangentWorld = (LatchTangentWorld - FVector::DotProduct(LatchTangentWorld, LatchNormalWorld) * LatchNormalWorld)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(LatchNormalWorld));
+
 	//5. latch 점을 축 기준으로 분해
 	const float LatchAxisDistance = FVector::DotProduct(LatchSurfaceWorld - AxisOrigin, AxisDirection);//먼저 latch point가 축 위에서 어느 높이에 있는지 구함:
 	const FVector LatchAxisPoint = AxisOrigin + AxisDirection * LatchAxisDistance;//그 축 위의 점:
@@ -1119,9 +1138,12 @@ bool URopeComponent::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor& La
 	const float AngleRadians = WindingSign * CircumferenceDistance / FMath::Max(HelixRadius, KINDA_SMALL_NUMBER);
 
 	//8. 축을 중심으로 radial 벡터를 회전시켜 나선 위의 점을 만듦 = 나선점 생성
+	//축을 중심으로 LatchRadial 방향을 AngleRadians만큼 돌린다
 	const FQuat AxisRotation(AxisDirection, AngleRadians);
 	const FVector RotatedRadial = AxisRotation.RotateVector(LatchRadial).GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);	//원주 중의 한 점
+	//TargetAxisPoint = 축 위에서, latch 높이보다 AxisDistance만큼 이동한 점
 	const FVector TargetAxisPoint = AxisOrigin + AxisDirection * (LatchAxisDistance + AxisDistance);	//축 이동
+	//// 축 위 중심점에서 바깥 방향으로 반지름만큼 나가면 나선 위의 world 위치가 된다.
 	FVector SurfaceWorld = TargetAxisPoint + RotatedRadial * HelixRadius;
 
 	//9. SDF 표면에 붙이기
