@@ -171,7 +171,7 @@ void SRopeSDFPreviewViewport::DrawSDFOverlay(FPrimitiveDrawInterface* PDI)
 		if (DrawOptions.bDrawSlice && Vol.IsBaked())
 		{
 			RopeSDFDraw::DrawSlice(PDI, Vol, Xform, DrawOptions.SliceAxis, DrawOptions.SlicePosition,
-				DrawOptions.SliceResolution, DrawOptions.SliceColorScale);
+				DrawOptions.SliceResolution, DrawOptions.SliceColorScale, PreviewNarrowBand);
 		}
 		if (DrawOptions.bDrawGradient && Vol.IsBaked())
 		{

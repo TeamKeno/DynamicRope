@@ -24,9 +24,14 @@ namespace RopeSDFDraw
 	 */
 	void DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& Volume, const FTransform& Xform, float Band, float NarrowBand);
 
-	/** 한 축 슬라이스 평면의 distance heatmap(음=빨강, 0=흰, 양=파랑). Pos01 0~1, Res 격자, Scale(cm)에서 포화. */
+	/**
+	 * 한 축 슬라이스 평면의 distance heatmap(음=빨강, 0=흰, 양=파랑). Pos01 0~1, Res 격자, Scale(cm)에서 포화.
+	 * NarrowBand > 0이면 |distance| >= NarrowBand 인 포화 샘플은 heatmap 대신 흐린 회색으로 그린다 —
+	 * 그 영역은 ±NarrowBand로 클램프된 무의미 plateau라, 유의미한 밴드(표면·연속장)와 구분해 보여준다
+	 * (Voxels/Gradients의 포화 스킵과 동일 규약). 0이면 비활성 → 기존대로 전체를 heatmap으로 채운다.
+	 */
 	void DrawSlice(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& Volume, const FTransform& Xform,
-		ERopeSDFSliceAxis Axis, float Pos01, int32 Res, float Scale);
+		ERopeSDFSliceAxis Axis, float Pos01, int32 Res, float Scale, float NarrowBand);
 
 	/**
 	 * 좁은밴드 샘플의 gradient(바깥쪽 = Query 법선) 방향을 화살표로. |distance| <= Band 인 것만 그린다.

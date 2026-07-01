@@ -105,8 +105,10 @@ void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVol
 }
 
 void RopeSDFDraw::DrawSlice(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& V, const FTransform& Xform,
-	ERopeSDFSliceAxis Axis, float Pos01, int32 Res, float Scale)
+	ERopeSDFSliceAxis Axis, float Pos01, int32 Res, float Scale, float NarrowBand)
 {
+	// 포화(±NarrowBand 도달) 샘플용 흐린 회색 — 무의미 plateau를 유의미 밴드와 시각적으로 분리한다.
+	static const FLinearColor SaturatedColor(0.15f, 0.15f, 0.15f);
 	Res = FMath::Max(2, Res);
 	for (int32 I = 0; I < Res; ++I)
 	{
@@ -123,7 +125,11 @@ void RopeSDFDraw::DrawSlice(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolu
 			}
 			const FVector L = LocalFromNorm(V.LocalBounds, Tx, Ty, Tz);
 			const float D = RopeSDFSampler::SampleTrilinear(V, L);
-			PDI->DrawPoint(Xform.TransformPosition(L), HeatColor(D, Scale), 5.0f, SDPG_World);
+			// ±NarrowBand로 포화된 샘플은 실제 거리 정보가 없는 상수 plateau → 회색으로 그려 유의미
+			// 밴드(표면·연속장)와 구분한다. NarrowBand <= 0(미상/구 에셋)이면 기존대로 전부 heatmap.
+			const bool bSaturated = (NarrowBand > 0.0f) && (FMath::Abs(D) >= NarrowBand - KINDA_SMALL_NUMBER);
+			const FLinearColor C = bSaturated ? SaturatedColor : HeatColor(D, Scale);
+			PDI->DrawPoint(Xform.TransformPosition(L), C, 5.0f, SDPG_World);
 		}
 	}
 }
