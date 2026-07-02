@@ -314,6 +314,34 @@ private:
 
 	bool BuildWrappingAnchorsFromLatch(const FRopeSurfaceAnchor& LatchAnchor);
 
+	bool BuildWrapPathFromLatch(const FRopeSurfaceAnchor& LatchAnchor,
+		int32 NumTailNodes, TArray<FRopeWrapPathPoint>& OutPath) const;
+
+	bool BuildAnalyticHelixPath(const FRopeSurfaceAnchor& LatchAnchor,
+		int32 NumTailNodes, TArray<FRopeWrapPathPoint>& OutPath) const;
+
+	bool BuildSurfaceVectorFieldPath(const FRopeSurfaceAnchor& LatchAnchor,
+		int32 NumTailNodes, TArray<FRopeWrapPathPoint>& OutPath) const;
+
+	bool BuildWrappingAnchorsFromPath(const FRopeSurfaceAnchor& LatchAnchor,
+		const TArray<FRopeWrapPathPoint>& Path);
+
+	bool BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor& LatchAnchor);
+
+	void AdvanceProgressiveWrapPathBuild();
+
+	bool AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex);
+
+	bool InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor);
+
+	bool AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 StepBudget);
+
+	bool AppendWrappingAnchorFromPathPoint(int32 PathIndex);
+
+	FVector ComputeSurfaceVectorFieldTangent(const FVector& AxisOrigin, const FVector& AxisDirection,
+		const FVector& LatchRadial, float WindingSign, const FVector& SurfaceWorld,
+		const FVector& NormalWorld, FVector& InOutCircumferenceDir) const;
+
 	bool ComputeWrapSurfaceTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
 
@@ -339,7 +367,11 @@ private:
 	bool ProjectWrapPointToSurface(FName Bone, const USkeletalMeshComponent* Mesh,
 		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld) const;
 
-	void ApplyWrappingTargetMotion(float DeltaTime);
+	void AdvanceWrappingFront(float DeltaTime);
+
+	bool SampleWrappingPath(float DistanceFromLatch, FRopeWrapPathPoint& OutPoint) const;
+
+	void ApplyWrappingFrontMotion(float DeltaTime);
 
 	bool UpdateWrappingAnchorsFromCandidates(const TArray<FRopeContactCandidate>& Candidates);
 

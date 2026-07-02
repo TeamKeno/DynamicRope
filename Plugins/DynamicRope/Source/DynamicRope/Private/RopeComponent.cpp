@@ -734,7 +734,7 @@ void URopeComponent::StartWrappingFromContacting()
 		LatchAnchor.RopeDistance = 0.0f;
 	}
 
-	if (!BuildWrappingAnchorsFromLatch(LatchAnchor))
+	if (!BeginProgressiveWrapPathBuild(LatchAnchor))
 	{
 		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Flight (no valid wrapping anchors)"), *GetName());
 		WrappingState.Reset();
@@ -772,7 +772,8 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	}
 
 	WrappingState.LostContactTime = 0.0f;
-	ApplyWrappingTargetMotion(DeltaTime);
+	AdvanceProgressiveWrapPathBuild();
+	ApplyWrappingFrontMotion(DeltaTime);
 
 	ApplyWrappingMassMask();
 
@@ -795,18 +796,31 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 
 	const bool bHasEnoughAnchors = WrappingState.Anchors.Num() > 0;
 	float MaxTailDelay = 0.0f;
+	float BuiltPathMaxDistance = 0.0f;
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
 	for (const FRopeSurfaceAnchor& Anchor : WrappingState.Anchors)
 	{
+		BuiltPathMaxDistance = FMath::Max(BuiltPathMaxDistance, Anchor.RopeDistance);
 		MaxTailDelay = FMath::Max(MaxTailDelay,
 			(Anchor.RopeDistance / SegmentLength) * WrapConfig.WrappingTailDelayPerSegment);
 	}
+	const float RequestedFrontDistance = WrappingState.NumTailNodes > 0
+		? static_cast<float>(WrappingState.NumTailNodes - 1) * Sim.SegmentLength
+		: 0.0f;
+	const float CommitFrontDistance = WrappingState.bPathBuildFailed
+		? BuiltPathMaxDistance
+		: RequestedFrontDistance;
+	const bool bFrontDone = WrappingState.FrontDistance + KINDA_SMALL_NUMBER >= CommitFrontDistance;
 	const bool bMotionDone = WrappingState.Elapsed >= WrappingState.Duration + MaxTailDelay;
 	const bool bTimedOutWithAnchors =
 		WrapConfig.WrappingMaxSettleTime > 0.0f &&
 		WrappingState.Elapsed >= WrapConfig.WrappingMaxSettleTime;
+	const bool bPathReadyToCommit =
+		!WrappingState.bPathBuildActive ||
+		WrappingState.bPathBuildComplete ||
+		WrappingState.bPathBuildFailed;
 
-	if (bHasEnoughAnchors && (bMotionDone || bTimedOutWithAnchors))
+	if (bHasEnoughAnchors && bPathReadyToCommit && bFrontDone && (bMotionDone || bTimedOutWithAnchors))
 	{
 		CommitWrapping();
 		return;
@@ -828,42 +842,203 @@ bool URopeComponent::BuildWrappingAnchorsFromLatch(const FRopeSurfaceAnchor& Lat
 		return false;
 	}
 
+	const int32 LatchNode = LatchAnchor.NodeIndex;
+	const int32 NumTailNodes = Sim.Num() - LatchNode;
+
+	TArray<FRopeWrapPathPoint> Path;
+	if (!BuildWrapPathFromLatch(LatchAnchor, NumTailNodes, Path))
+	{
+		return false;
+	}
+
+	return BuildWrappingAnchorsFromPath(LatchAnchor, Path);
+}
+
+bool URopeComponent::BuildWrapPathFromLatch(const FRopeSurfaceAnchor& LatchAnchor,
+	int32 NumTailNodes, TArray<FRopeWrapPathPoint>& OutPath) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_WrapBuildPath);
+
+	OutPath.Reset();
+	if (NumTailNodes <= 0)
+	{
+		return false;
+	}
+
+	const ERopeWrappingPathMode PathMode = GetWrappingPathMode();
+	if (PathMode == ERopeWrappingPathMode::AnalyticHelix)
+	{
+		if (BuildAnalyticHelixPath(LatchAnchor, NumTailNodes, OutPath))
+		{
+			return true;
+		}
+	}
+
+	return BuildSurfaceVectorFieldPath(LatchAnchor, NumTailNodes, OutPath);
+}
+
+bool URopeComponent::BuildAnalyticHelixPath(const FRopeSurfaceAnchor& LatchAnchor,
+	int32 NumTailNodes, TArray<FRopeWrapPathPoint>& OutPath) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_WrapBuildAnalyticHelixPath);
+
+	OutPath.Reset();
+	if (NumTailNodes <= 0)
+	{
+		return false;
+	}
+
+	OutPath.Reserve(NumTailNodes);
+	for (int32 PathIndex = 0; PathIndex < NumTailNodes; ++PathIndex)
+	{
+		const float DistanceFromLatch = static_cast<float>(PathIndex) * Sim.SegmentLength;
+
+		FRopeWrapPathPoint Point;
+		Point.DistanceFromLatch = DistanceFromLatch;
+		if (!ComputeAnalyticHelixWrapTarget(LatchAnchor, DistanceFromLatch,
+			Point.SurfaceWorld, Point.NormalWorld, Point.TangentWorld) &&
+			!ComputeSurfaceVectorFieldWrapTarget(LatchAnchor, DistanceFromLatch,
+				Point.SurfaceWorld, Point.NormalWorld, Point.TangentWorld))
+		{
+			break;
+		}
+
+		OutPath.Add(Point);
+	}
+
+	return OutPath.Num() > 0;
+}
+
+bool URopeComponent::BuildSurfaceVectorFieldPath(const FRopeSurfaceAnchor& LatchAnchor,
+	int32 NumTailNodes, TArray<FRopeWrapPathPoint>& OutPath) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_WrapBuildSurfaceVectorFieldPath);
+
+	OutPath.Reset();
+	const USkeletalMeshComponent* Mesh = LatchAnchor.Mesh.Get();
+	if (!Mesh)
+	{
+		Mesh = WrappingState.Mesh.Get();
+	}
+	if (!Mesh || LatchAnchor.Bone.IsNone() || NumTailNodes <= 0)
+	{
+		return false;
+	}
+
+	FVector AxisOrigin = FVector::ZeroVector;
+	FVector AxisDirection = FVector::ForwardVector;
+	if (!ResolveWrappingAxis(LatchAnchor, AxisOrigin, AxisDirection))
+	{
+		return false;
+	}
+
+	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+	FVector SurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
+	FVector NormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	FVector LatchTangentWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalTangent);
+	LatchTangentWorld = (LatchTangentWorld - FVector::DotProduct(LatchTangentWorld, NormalWorld) * NormalWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(NormalWorld));
+
+	const float LatchAxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
+	const FVector LatchAxisPoint = AxisOrigin + AxisDirection * LatchAxisDistance;
+	const FVector LatchRadial = (SurfaceWorld - LatchAxisPoint)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, NormalWorld);
+
+	FVector CircumferenceDir = FVector::CrossProduct(AxisDirection, LatchRadial)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(NormalWorld));
+	const float WindingSign = FVector::DotProduct(CircumferenceDir, LatchTangentWorld) < 0.0f ? -1.0f : 1.0f;
+	CircumferenceDir *= WindingSign;
+
+	FVector TangentWorld = ComputeSurfaceVectorFieldTangent(AxisOrigin, AxisDirection, LatchRadial,
+		WindingSign, SurfaceWorld, NormalWorld, CircumferenceDir);
+
+	OutPath.Reserve(NumTailNodes);
+	FRopeWrapPathPoint LatchPoint;
+	LatchPoint.SurfaceWorld = SurfaceWorld;
+	LatchPoint.NormalWorld = NormalWorld;
+	LatchPoint.TangentWorld = TangentWorld;
+	LatchPoint.DistanceFromLatch = 0.0f;
+	OutPath.Add(LatchPoint);
+
+	const float StepSize = FMath::Max(1.0f, Sim.SegmentLength * 0.5f);
+	float CurrentDistance = 0.0f;
+
+	for (int32 PathIndex = 1; PathIndex < NumTailNodes; ++PathIndex)
+	{
+		const float TargetDistance = static_cast<float>(PathIndex) * Sim.SegmentLength;
+		while (CurrentDistance + KINDA_SMALL_NUMBER < TargetDistance)
+		{
+			const float StepDistance = FMath::Min(StepSize, TargetDistance - CurrentDistance);
+			TangentWorld = ComputeSurfaceVectorFieldTangent(AxisOrigin, AxisDirection, LatchRadial,
+				WindingSign, SurfaceWorld, NormalWorld, CircumferenceDir);
+
+			SurfaceWorld += TangentWorld * StepDistance;
+			if (!ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, SurfaceWorld, NormalWorld))
+			{
+				return OutPath.Num() > 0;
+			}
+
+			CurrentDistance += StepDistance;
+		}
+
+		TangentWorld = ComputeSurfaceVectorFieldTangent(AxisOrigin, AxisDirection, LatchRadial,
+			WindingSign, SurfaceWorld, NormalWorld, CircumferenceDir);
+
+		FRopeWrapPathPoint Point;
+		Point.SurfaceWorld = SurfaceWorld;
+		Point.NormalWorld = NormalWorld;
+		Point.TangentWorld = TangentWorld;
+		Point.DistanceFromLatch = TargetDistance;
+		OutPath.Add(Point);
+	}
+
+	return OutPath.Num() > 0;
+}
+
+bool URopeComponent::BuildWrappingAnchorsFromPath(const FRopeSurfaceAnchor& LatchAnchor,
+	const TArray<FRopeWrapPathPoint>& Path)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_WrapBuildAnchorsFromPath);
+
+	const USkeletalMeshComponent* Mesh = WrappingState.Mesh.Get();
+	if (!Mesh)
+	{
+		Mesh = LatchAnchor.Mesh.Get();
+	}
+	if (!Mesh || LatchAnchor.Bone.IsNone() || !Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex) || Path.Num() == 0)
+	{
+		return false;
+	}
+
 	WrappingState.Anchors.Reset();
 	WrappingState.FirstNode = TNumericLimits<int32>::Max();
 	WrappingState.LastNode = INDEX_NONE;
 
 	const int32 LatchNode = LatchAnchor.NodeIndex;
 	const FName Bone = LatchAnchor.Bone;
+	const FTransform BoneXform = Mesh->GetSocketTransform(Bone);
 
-	for (int32 NodeIndex = LatchNode; NodeIndex < Sim.Num(); ++NodeIndex)
+	for (int32 PathIndex = 0; PathIndex < Path.Num(); ++PathIndex)
 	{
+		const int32 NodeIndex = LatchNode + PathIndex;
 		if (!Sim.Positions.IsValidIndex(NodeIndex))
 		{
 			continue;
 		}
 
-		const float DistanceFromLatch = static_cast<float>(NodeIndex - LatchNode) * Sim.SegmentLength;
-
-		FVector SurfaceWorld = FVector::ZeroVector;
-		FVector NormalWorld = FVector::UpVector;
-		FVector TangentWorld = FVector::ForwardVector;
-		if (!ComputeWrapSurfaceTarget(LatchAnchor, DistanceFromLatch, SurfaceWorld, NormalWorld, TangentWorld))
-		{
-			continue;
-		}
-
-		const FTransform BoneXform = Mesh->GetSocketTransform(Bone);
+		const FRopeWrapPathPoint& Point = Path[PathIndex];
 
 		FRopeSurfaceAnchor Anchor;
 		Anchor.NodeIndex = NodeIndex;
 		Anchor.Bone = Bone;
 		Anchor.Mesh = Mesh;
-		Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(SurfaceWorld);
-		Anchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-		Anchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Point.SurfaceWorld);
+		Anchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(Point.NormalWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		Anchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(Point.TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 		Anchor.StartWorldPosition = Sim.Positions[NodeIndex];
 		Anchor.SurfaceOffset = FMath::Max(0.0f, Radius);
-		Anchor.RopeDistance = DistanceFromLatch;
+		Anchor.RopeDistance = Point.DistanceFromLatch;
 
 		WrappingState.FirstNode = FMath::Min(WrappingState.FirstNode, NodeIndex);
 		WrappingState.LastNode = FMath::Max(WrappingState.LastNode, NodeIndex);
@@ -874,9 +1049,370 @@ bool URopeComponent::BuildWrappingAnchorsFromLatch(const FRopeSurfaceAnchor& Lat
 	{
 		WrappingState.FirstNode = INDEX_NONE;
 		WrappingState.LastNode = INDEX_NONE;
+		WrappingState.LastAnchoredPathPointCount = 0;
 		return false;
 	}
 
+	WrappingState.LastAnchoredPathPointCount = WrappingState.Anchors.Num();
+	return true;
+}
+
+FVector URopeComponent::ComputeSurfaceVectorFieldTangent(const FVector& AxisOrigin, const FVector& AxisDirection,
+	const FVector& LatchRadial, float WindingSign, const FVector& SurfaceWorld,
+	const FVector& NormalWorld, FVector& InOutCircumferenceDir) const
+{
+	const float AxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
+	const FVector AxisPoint = AxisOrigin + AxisDirection * AxisDistance;
+	const FVector Radial = (SurfaceWorld - AxisPoint).GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);
+
+	InOutCircumferenceDir = FVector::CrossProduct(AxisDirection, Radial)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, InOutCircumferenceDir) * WindingSign;
+
+	FVector TangentWorld = (InOutCircumferenceDir + AxisDirection * WrapConfig.WrappingHelixPitchScale)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, InOutCircumferenceDir);
+	TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, InOutCircumferenceDir);
+	return TangentWorld;
+}
+
+bool URopeComponent::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor& LatchAnchor)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_BeginProgressiveWrapPathBuild);
+
+	const USkeletalMeshComponent* Mesh = WrappingState.Mesh.Get();
+	if (!Mesh)
+	{
+		Mesh = LatchAnchor.Mesh.Get();
+	}
+	if (!Mesh || !Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex) || LatchAnchor.Bone.IsNone())
+	{
+		return false;
+	}
+
+	FRopeSurfaceAnchor StoredLatchAnchor = LatchAnchor;
+	StoredLatchAnchor.Mesh = Mesh;
+
+	WrappingState.Anchors.Reset();
+	WrappingState.Path.Reset();
+	WrappingState.LatchAnchor = StoredLatchAnchor;
+	WrappingState.PathMode = GetWrappingPathMode();
+	WrappingState.NumTailNodes = Sim.Num() - StoredLatchAnchor.NodeIndex;
+	WrappingState.LastAnchoredPathPointCount = 0;
+	WrappingState.bPathBuildActive = true;
+	WrappingState.bPathBuildComplete = false;
+	WrappingState.bPathBuildFailed = false;
+	WrappingState.PathCurrentDistance = 0.0f;
+	WrappingState.FrontDistance = 0.0f;
+	WrappingState.FirstNode = TNumericLimits<int32>::Max();
+	WrappingState.LastNode = INDEX_NONE;
+
+	if (WrappingState.NumTailNodes <= 0)
+	{
+		return false;
+	}
+
+	WrappingState.Path.Reserve(WrappingState.NumTailNodes);
+
+	const bool bInitialized =
+		WrappingState.PathMode == ERopeWrappingPathMode::AnalyticHelix
+			? AppendAnalyticProgressiveWrapPathPoint(0)
+			: InitializeSurfaceVectorFieldProgressiveWrapPath(StoredLatchAnchor);
+	if (!bInitialized || !AppendWrappingAnchorFromPathPoint(0))
+	{
+		return false;
+	}
+
+	return true;
+}
+
+void URopeComponent::AdvanceProgressiveWrapPathBuild()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AdvanceProgressiveWrapPathBuild);
+
+	if (!WrappingState.bPathBuildActive ||
+		WrappingState.bPathBuildComplete ||
+		WrappingState.bPathBuildFailed ||
+		WrappingState.NumTailNodes <= 0)
+	{
+		return;
+	}
+
+	const int32 StepBudget = FMath::Max(1, WrapConfig.WrappingPathBuildStepsPerFrame);
+	if (WrappingState.PathMode == ERopeWrappingPathMode::AnalyticHelix)
+	{
+		for (int32 StepIndex = 0;
+			StepIndex < StepBudget && WrappingState.Path.Num() < WrappingState.NumTailNodes;
+			++StepIndex)
+		{
+			const int32 PathIndex = WrappingState.Path.Num();
+			if (!AppendAnalyticProgressiveWrapPathPoint(PathIndex))
+			{
+				break;
+			}
+
+			AppendWrappingAnchorFromPathPoint(PathIndex);
+		}
+
+		if (WrappingState.Path.Num() >= WrappingState.NumTailNodes)
+		{
+			WrappingState.bPathBuildComplete = true;
+			WrappingState.bPathBuildActive = false;
+		}
+		return;
+	}
+
+	AdvanceSurfaceVectorFieldProgressiveWrapPath(StepBudget);
+}
+
+bool URopeComponent::AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex)
+{
+	if (PathIndex < 0 ||
+		PathIndex >= WrappingState.NumTailNodes ||
+		PathIndex != WrappingState.Path.Num())
+	{
+		return false;
+	}
+
+	const float DistanceFromLatch = static_cast<float>(PathIndex) * Sim.SegmentLength;
+
+	FRopeWrapPathPoint Point;
+	Point.DistanceFromLatch = DistanceFromLatch;
+	if (!ComputeAnalyticHelixWrapTarget(WrappingState.LatchAnchor, DistanceFromLatch,
+		Point.SurfaceWorld, Point.NormalWorld, Point.TangentWorld) &&
+		!ComputeSurfaceVectorFieldWrapTarget(WrappingState.LatchAnchor, DistanceFromLatch,
+			Point.SurfaceWorld, Point.NormalWorld, Point.TangentWorld))
+	{
+		WrappingState.bPathBuildFailed = true;
+		WrappingState.bPathBuildComplete = true;
+		WrappingState.bPathBuildActive = false;
+		return false;
+	}
+
+	WrappingState.Path.Add(Point);
+	if (WrappingState.Path.Num() >= WrappingState.NumTailNodes)
+	{
+		WrappingState.bPathBuildComplete = true;
+		WrappingState.bPathBuildActive = false;
+	}
+	return true;
+}
+
+bool URopeComponent::InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_InitSurfaceVectorFieldProgressivePath);
+
+	const USkeletalMeshComponent* Mesh = LatchAnchor.Mesh.Get();
+	if (!Mesh)
+	{
+		Mesh = WrappingState.Mesh.Get();
+	}
+	if (!Mesh || LatchAnchor.Bone.IsNone())
+	{
+		return false;
+	}
+
+	if (!ResolveWrappingAxis(LatchAnchor, WrappingState.PathAxisOrigin, WrappingState.PathAxisDirection))
+	{
+		return false;
+	}
+
+	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+	WrappingState.PathSurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
+	WrappingState.PathNormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	FVector LatchTangentWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalTangent);
+	LatchTangentWorld = (LatchTangentWorld - FVector::DotProduct(LatchTangentWorld, WrappingState.PathNormalWorld) * WrappingState.PathNormalWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(WrappingState.PathNormalWorld));
+
+	const float LatchAxisDistance = FVector::DotProduct(
+		WrappingState.PathSurfaceWorld - WrappingState.PathAxisOrigin,
+		WrappingState.PathAxisDirection);
+	const FVector LatchAxisPoint = WrappingState.PathAxisOrigin + WrappingState.PathAxisDirection * LatchAxisDistance;
+	WrappingState.PathLatchRadial = (WrappingState.PathSurfaceWorld - LatchAxisPoint)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, WrappingState.PathNormalWorld);
+
+	WrappingState.PathCircumferenceDir = FVector::CrossProduct(
+		WrappingState.PathAxisDirection,
+		WrappingState.PathLatchRadial)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(WrappingState.PathNormalWorld));
+	WrappingState.PathWindingSign =
+		FVector::DotProduct(WrappingState.PathCircumferenceDir, LatchTangentWorld) < 0.0f ? -1.0f : 1.0f;
+	WrappingState.PathCircumferenceDir *= WrappingState.PathWindingSign;
+
+	WrappingState.PathTangentWorld = ComputeSurfaceVectorFieldTangent(
+		WrappingState.PathAxisOrigin,
+		WrappingState.PathAxisDirection,
+		WrappingState.PathLatchRadial,
+		WrappingState.PathWindingSign,
+		WrappingState.PathSurfaceWorld,
+		WrappingState.PathNormalWorld,
+		WrappingState.PathCircumferenceDir);
+
+	FRopeWrapPathPoint LatchPoint;
+	LatchPoint.SurfaceWorld = WrappingState.PathSurfaceWorld;
+	LatchPoint.NormalWorld = WrappingState.PathNormalWorld;
+	LatchPoint.TangentWorld = WrappingState.PathTangentWorld;
+	LatchPoint.DistanceFromLatch = 0.0f;
+	WrappingState.Path.Add(LatchPoint);
+	WrappingState.PathCurrentDistance = 0.0f;
+
+	if (WrappingState.Path.Num() >= WrappingState.NumTailNodes)
+	{
+		WrappingState.bPathBuildComplete = true;
+		WrappingState.bPathBuildActive = false;
+	}
+
+	return true;
+}
+
+bool URopeComponent::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 StepBudget)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AdvanceSurfaceVectorFieldProgressivePath);
+
+	const USkeletalMeshComponent* Mesh = WrappingState.LatchAnchor.Mesh.Get();
+	if (!Mesh)
+	{
+		Mesh = WrappingState.Mesh.Get();
+	}
+	if (!Mesh || WrappingState.LatchAnchor.Bone.IsNone())
+	{
+		WrappingState.bPathBuildFailed = true;
+		WrappingState.bPathBuildComplete = true;
+		WrappingState.bPathBuildActive = false;
+		return false;
+	}
+
+	const float StepSize = FMath::Max(1.0f, Sim.SegmentLength * 0.5f);
+	int32 StepsRemaining = FMath::Max(1, StepBudget);
+
+	while (StepsRemaining > 0 && WrappingState.Path.Num() < WrappingState.NumTailNodes)
+	{
+		const int32 PathIndex = WrappingState.Path.Num();
+		const float TargetDistance = static_cast<float>(PathIndex) * Sim.SegmentLength;
+		bool bConsumedStep = false;
+
+		while (StepsRemaining > 0 &&
+			WrappingState.PathCurrentDistance + KINDA_SMALL_NUMBER < TargetDistance)
+		{
+			const float StepDistance = FMath::Min(
+				StepSize,
+				TargetDistance - WrappingState.PathCurrentDistance);
+
+			WrappingState.PathTangentWorld = ComputeSurfaceVectorFieldTangent(
+				WrappingState.PathAxisOrigin,
+				WrappingState.PathAxisDirection,
+				WrappingState.PathLatchRadial,
+				WrappingState.PathWindingSign,
+				WrappingState.PathSurfaceWorld,
+				WrappingState.PathNormalWorld,
+				WrappingState.PathCircumferenceDir);
+
+			WrappingState.PathSurfaceWorld += WrappingState.PathTangentWorld * StepDistance;
+			if (!ProjectWrapPointToSurface(WrappingState.LatchAnchor.Bone, Mesh,
+				WrappingState.PathSurfaceWorld, WrappingState.PathNormalWorld))
+			{
+				WrappingState.bPathBuildFailed = true;
+				WrappingState.bPathBuildComplete = true;
+				WrappingState.bPathBuildActive = false;
+				UE_LOG(LogDynamicRope, Log,
+					TEXT("[%s] Progressive wrap path stopped by projection failure (bone=%s, path=%d/%d, anchors=%d)"),
+					*GetName(),
+					*WrappingState.LatchAnchor.Bone.ToString(),
+					WrappingState.Path.Num(),
+					WrappingState.NumTailNodes,
+					WrappingState.Anchors.Num());
+				return false;
+			}
+
+			WrappingState.PathCurrentDistance += StepDistance;
+			--StepsRemaining;
+			bConsumedStep = true;
+		}
+
+		if (WrappingState.PathCurrentDistance + KINDA_SMALL_NUMBER < TargetDistance)
+		{
+			break;
+		}
+
+		WrappingState.PathTangentWorld = ComputeSurfaceVectorFieldTangent(
+			WrappingState.PathAxisOrigin,
+			WrappingState.PathAxisDirection,
+			WrappingState.PathLatchRadial,
+			WrappingState.PathWindingSign,
+			WrappingState.PathSurfaceWorld,
+			WrappingState.PathNormalWorld,
+			WrappingState.PathCircumferenceDir);
+
+		FRopeWrapPathPoint Point;
+		Point.SurfaceWorld = WrappingState.PathSurfaceWorld;
+		Point.NormalWorld = WrappingState.PathNormalWorld;
+		Point.TangentWorld = WrappingState.PathTangentWorld;
+		Point.DistanceFromLatch = TargetDistance;
+		WrappingState.Path.Add(Point);
+		AppendWrappingAnchorFromPathPoint(PathIndex);
+
+		if (!bConsumedStep)
+		{
+			--StepsRemaining;
+		}
+	}
+
+	if (WrappingState.Path.Num() >= WrappingState.NumTailNodes)
+	{
+		WrappingState.bPathBuildComplete = true;
+		WrappingState.bPathBuildActive = false;
+	}
+
+	return !WrappingState.bPathBuildFailed;
+}
+
+bool URopeComponent::AppendWrappingAnchorFromPathPoint(int32 PathIndex)
+{
+	if (PathIndex < WrappingState.LastAnchoredPathPointCount)
+	{
+		return true;
+	}
+	if (PathIndex != WrappingState.LastAnchoredPathPointCount ||
+		!WrappingState.Path.IsValidIndex(PathIndex))
+	{
+		return false;
+	}
+
+	const FRopeSurfaceAnchor& LatchAnchor = WrappingState.LatchAnchor;
+	const USkeletalMeshComponent* Mesh = WrappingState.Mesh.Get();
+	if (!Mesh)
+	{
+		Mesh = LatchAnchor.Mesh.Get();
+	}
+	if (!Mesh || LatchAnchor.Bone.IsNone())
+	{
+		return false;
+	}
+
+	const int32 NodeIndex = LatchAnchor.NodeIndex + PathIndex;
+	if (!Sim.Positions.IsValidIndex(NodeIndex))
+	{
+		return false;
+	}
+
+	const FRopeWrapPathPoint& Point = WrappingState.Path[PathIndex];
+	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+
+	FRopeSurfaceAnchor Anchor;
+	Anchor.NodeIndex = NodeIndex;
+	Anchor.Bone = LatchAnchor.Bone;
+	Anchor.Mesh = Mesh;
+	Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Point.SurfaceWorld);
+	Anchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(Point.NormalWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	Anchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(Point.TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	Anchor.StartWorldPosition = Sim.Positions[NodeIndex];
+	Anchor.SurfaceOffset = FMath::Max(0.0f, Radius);
+	Anchor.RopeDistance = Point.DistanceFromLatch;
+
+	WrappingState.FirstNode = FMath::Min(WrappingState.FirstNode, NodeIndex);
+	WrappingState.LastNode = FMath::Max(WrappingState.LastNode, NodeIndex);
+	WrappingState.Anchors.Add(Anchor);
+	WrappingState.LastAnchoredPathPointCount = PathIndex + 1;
 	return true;
 }
 
@@ -1261,40 +1797,182 @@ bool URopeComponent::ProjectWrapPointToSurface(FName Bone, const USkeletalMeshCo
 	return true;
 }
 
-void URopeComponent::ApplyWrappingTargetMotion(float /*DeltaTime*/)
+void URopeComponent::AdvanceWrappingFront(float DeltaTime)
 {
-	const float Duration = FMath::Max(WrappingState.Duration, KINDA_SMALL_NUMBER);
-	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
+	if (WrappingState.Anchors.Num() == 0 || WrappingState.NumTailNodes <= 0)
+	{
+		WrappingState.FrontDistance = 0.0f;
+		return;
+	}
 
+	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
+	const float FullDistance = static_cast<float>(FMath::Max(0, WrappingState.NumTailNodes - 1)) * SegmentLength;
+	float BuiltPathMaxDistance = 0.0f;
 	for (const FRopeSurfaceAnchor& Anchor : WrappingState.Anchors)
 	{
-		if (!Sim.Positions.IsValidIndex(Anchor.NodeIndex) ||
-			!Sim.PrevPositions.IsValidIndex(Anchor.NodeIndex) ||
-			!Sim.InvMass.IsValidIndex(Anchor.NodeIndex))
-		{
-			continue;
-		}
+		BuiltPathMaxDistance = FMath::Max(BuiltPathMaxDistance, Anchor.RopeDistance);
+	}
 
+	const float TargetFrontDistance = FMath::Min(FullDistance, BuiltPathMaxDistance);
+	if (TargetFrontDistance <= KINDA_SMALL_NUMBER)
+	{
+		WrappingState.FrontDistance = 0.0f;
+		return;
+	}
+
+	const float FullTailDelay = (FullDistance / SegmentLength) * WrapConfig.WrappingTailDelayPerSegment;
+	const float TotalDuration = FMath::Max(WrappingState.Duration + FullTailDelay, KINDA_SMALL_NUMBER);
+	const float FrontSpeed = FullDistance / TotalDuration;
+	WrappingState.FrontDistance = FMath::Min(
+		WrappingState.FrontDistance + FrontSpeed * FMath::Max(0.0f, DeltaTime),
+		TargetFrontDistance);
+}
+
+bool URopeComponent::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPathPoint& OutPoint) const
+{
+	if (WrappingState.Anchors.Num() == 0)
+	{
+		return false;
+	}
+
+	const auto AnchorToPoint = [this](const FRopeSurfaceAnchor& Anchor, FRopeWrapPathPoint& Point) -> bool
+	{
 		const USkeletalMeshComponent* Mesh = Anchor.Mesh.Get();
 		if (!Mesh)
 		{
-			continue;
+			Mesh = WrappingState.Mesh.Get();
+		}
+		if (!Mesh || Anchor.Bone.IsNone())
+		{
+			return false;
 		}
 
 		const FTransform BoneXform = Mesh->GetSocketTransform(Anchor.Bone);
-		const FVector SurfaceWorld = BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
-		const FVector NormalWorld = BoneXform.TransformVectorNoScale(Anchor.LocalNormal)
+		Point.SurfaceWorld = BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
+		Point.NormalWorld = BoneXform.TransformVectorNoScale(Anchor.LocalNormal)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-		const FVector TargetWorld = SurfaceWorld + NormalWorld * Anchor.SurfaceOffset;
+		Point.TangentWorld = BoneXform.TransformVectorNoScale(Anchor.LocalTangent);
+		Point.TangentWorld = (Point.TangentWorld - FVector::DotProduct(Point.TangentWorld, Point.NormalWorld) * Point.NormalWorld)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(Point.NormalWorld));
+		Point.DistanceFromLatch = Anchor.RopeDistance;
+		return true;
+	};
 
-		const float TailSegment = Anchor.RopeDistance / SegmentLength;
-		const float TailDelay = TailSegment * WrapConfig.WrappingTailDelayPerSegment;
-		const float Alpha = SmoothStep(FMath::Clamp((WrappingState.Elapsed - TailDelay) / Duration, 0.0f, 1.0f));
-		const FVector World = FMath::Lerp(Anchor.StartWorldPosition, TargetWorld, Alpha);
+	const float SampleDistance = FMath::Max(0.0f, DistanceFromLatch);
+	const FRopeSurfaceAnchor* LowerAnchor = nullptr;
+	const FRopeSurfaceAnchor* UpperAnchor = nullptr;
+	for (const FRopeSurfaceAnchor& Anchor : WrappingState.Anchors)
+	{
+		if (Anchor.RopeDistance <= SampleDistance &&
+			(!LowerAnchor || Anchor.RopeDistance > LowerAnchor->RopeDistance))
+		{
+			LowerAnchor = &Anchor;
+		}
+		if (Anchor.RopeDistance >= SampleDistance &&
+			(!UpperAnchor || Anchor.RopeDistance < UpperAnchor->RopeDistance))
+		{
+			UpperAnchor = &Anchor;
+		}
+	}
 
-		Sim.Positions[Anchor.NodeIndex] = World;
-		Sim.PrevPositions[Anchor.NodeIndex] = World;
-		Sim.InvMass[Anchor.NodeIndex] = 0.0f;
+	if (!LowerAnchor)
+	{
+		LowerAnchor = UpperAnchor;
+	}
+	if (!UpperAnchor)
+	{
+		UpperAnchor = LowerAnchor;
+	}
+	if (!LowerAnchor || !UpperAnchor)
+	{
+		return false;
+	}
+
+	FRopeWrapPathPoint LowerPoint;
+	if (!AnchorToPoint(*LowerAnchor, LowerPoint))
+	{
+		return false;
+	}
+
+	if (LowerAnchor == UpperAnchor ||
+		FMath::Abs(UpperAnchor->RopeDistance - LowerAnchor->RopeDistance) <= KINDA_SMALL_NUMBER)
+	{
+		OutPoint = LowerPoint;
+		OutPoint.DistanceFromLatch = SampleDistance;
+		return true;
+	}
+
+	FRopeWrapPathPoint UpperPoint;
+	if (!AnchorToPoint(*UpperAnchor, UpperPoint))
+	{
+		return false;
+	}
+
+	const float Alpha = FMath::Clamp(
+		(SampleDistance - LowerAnchor->RopeDistance) / (UpperAnchor->RopeDistance - LowerAnchor->RopeDistance),
+		0.0f,
+		1.0f);
+	OutPoint.SurfaceWorld = FMath::Lerp(LowerPoint.SurfaceWorld, UpperPoint.SurfaceWorld, Alpha);
+	OutPoint.NormalWorld = FMath::Lerp(LowerPoint.NormalWorld, UpperPoint.NormalWorld, Alpha)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.NormalWorld);
+	OutPoint.TangentWorld = FMath::Lerp(LowerPoint.TangentWorld, UpperPoint.TangentWorld, Alpha);
+	OutPoint.TangentWorld = (OutPoint.TangentWorld - FVector::DotProduct(OutPoint.TangentWorld, OutPoint.NormalWorld) * OutPoint.NormalWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.TangentWorld);
+	OutPoint.DistanceFromLatch = SampleDistance;
+	return true;
+}
+
+void URopeComponent::ApplyWrappingFrontMotion(float DeltaTime)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_ApplyWrappingFrontMotion);
+
+	AdvanceWrappingFront(DeltaTime);
+
+	const int32 LatchNode = WrappingState.LatchAnchor.NodeIndex;
+	if (WrappingState.Anchors.Num() == 0 ||
+		!Sim.Positions.IsValidIndex(LatchNode) ||
+		!Sim.PrevPositions.IsValidIndex(LatchNode))
+	{
+		return;
+	}
+
+	FRopeWrapPathPoint FrontPoint;
+	if (!SampleWrappingPath(WrappingState.FrontDistance, FrontPoint))
+	{
+		return;
+	}
+
+	const float SurfaceOffset = FMath::Max(0.0f, Radius);
+	const FVector FrontWorld = FrontPoint.SurfaceWorld + FrontPoint.NormalWorld * SurfaceOffset;
+	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
+	const int32 TailEndNode = Sim.Num() - 1;
+
+	for (int32 NodeIndex = LatchNode; NodeIndex <= TailEndNode; ++NodeIndex)
+	{
+		if (!Sim.Positions.IsValidIndex(NodeIndex) ||
+			!Sim.PrevPositions.IsValidIndex(NodeIndex))
+		{
+			continue;
+		}
+
+		const float NodeDistance = static_cast<float>(NodeIndex - LatchNode) * SegmentLength;
+		FVector World = FVector::ZeroVector;
+		if (NodeDistance <= WrappingState.FrontDistance + KINDA_SMALL_NUMBER)
+		{
+			FRopeWrapPathPoint NodePoint;
+			if (!SampleWrappingPath(NodeDistance, NodePoint))
+			{
+				continue;
+			}
+			World = NodePoint.SurfaceWorld + NodePoint.NormalWorld * SurfaceOffset;
+		}
+		else
+		{
+			World = FrontWorld + FrontPoint.TangentWorld * (NodeDistance - WrappingState.FrontDistance);
+		}
+
+		Sim.Positions[NodeIndex] = World;
+		Sim.PrevPositions[NodeIndex] = World;
 	}
 }
 

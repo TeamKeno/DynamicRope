@@ -113,12 +113,40 @@ struct FRopeSurfaceAnchor
 	float SurfaceOffset = 0.0f;
 };
 
+struct FRopeWrapPathPoint
+{
+	FVector SurfaceWorld = FVector::ZeroVector;
+	FVector NormalWorld = FVector::UpVector;
+	FVector TangentWorld = FVector::ForwardVector;
+	float DistanceFromLatch = 0.0f;
+};
+
 struct FRopeWrappingState
 {
 	FName BoneName = NAME_None;
 	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
 
 	TArray<FRopeSurfaceAnchor> Anchors;
+	FRopeSurfaceAnchor LatchAnchor;
+	TArray<FRopeWrapPathPoint> Path;
+
+	int32 NumTailNodes = 0;
+	int32 LastAnchoredPathPointCount = 0;
+	bool bPathBuildActive = false;
+	bool bPathBuildComplete = false;
+	bool bPathBuildFailed = false;
+
+	float PathCurrentDistance = 0.0f;
+	float FrontDistance = 0.0f;
+	ERopeWrappingPathMode PathMode = ERopeWrappingPathMode::SurfaceVectorField;
+	FVector PathSurfaceWorld = FVector::ZeroVector;
+	FVector PathNormalWorld = FVector::UpVector;
+	FVector PathTangentWorld = FVector::ForwardVector;
+	FVector PathCircumferenceDir = FVector::ForwardVector;
+	FVector PathAxisOrigin = FVector::ZeroVector;
+	FVector PathAxisDirection = FVector::ForwardVector;
+	FVector PathLatchRadial = FVector::ForwardVector;
+	float PathWindingSign = 1.0f;
 
 	float Elapsed = 0.0f;
 	float Duration = 0.16f;
@@ -263,7 +291,7 @@ struct FRopeWrapConfig
 
 	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
-	float WrapDecisionTime = 0.15f;
+	float WrapDecisionTime = 0.016f;
 
 	/** Wrapping phase must keep the same accumulated latch span stable this long before committing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
@@ -271,11 +299,15 @@ struct FRopeWrapConfig
 
 	/** Time used to pull tail nodes onto their generated surface wrap targets. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.01", Units = "s"))
-	float WrappingMotionDuration = 0.25f;
+	float WrappingMotionDuration = 0.50f;
 
 	/** Per-segment delay while tail nodes settle onto the surface path. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
-	float WrappingTailDelayPerSegment = 0.012f;
+	float WrappingTailDelayPerSegment = 0.024f;
+
+	/** Wrapping 중 한 프레임에 진행할 surface path 적분 step 수. 높이면 빨라지지만 순간 비용이 커진다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "1", ClampMax = "256"))
+	int32 WrappingPathBuildStepsPerFrame = 8;
 
 	/** Axis distance advanced per circumference distance for analytic helix wrapping. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "-2.0", ClampMax = "2.0"))
@@ -283,7 +315,7 @@ struct FRopeWrapConfig
 
 	/** Upper bound for physics-based wrapping settle before committing the best accumulated anchors. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
-	float WrappingMaxSettleTime = 0.45f;
+	float WrappingMaxSettleTime = 0.90f;
 
 	/** Temporary contact loss tolerated while the rope is settling into a wrap. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
