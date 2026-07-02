@@ -206,10 +206,7 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 	PendingWrapSeed.Reset();
 	WrappingState.Reset();
 	ContactingElapsed = 0.0f;
-	FlightNoContactElapsed = 0.0f;
 	ReleaseCooldown = 0.0f;
-	WrappedSwayImpulse = FVector::ZeroVector;
-	WrappedSwayTime = 0.0f;
 	WhipGuidePrevTargetsThisFrame.Reset();
 	WhipGuideCurrentTargetsThisFrame.Reset();
 	WhipGuidedNodesThisFrame.Reset();
@@ -626,14 +623,6 @@ void URopeComponent::EvaluateRelativeMotion(TArray<FRopeContactCandidate>& Candi
 	}
 }
 
-bool URopeComponent::ShouldCommitWrap(const FRopeContactTracker& Tracker) const
-{
-	return Tracker.DwellTime >= WrapConfig.WrapDecisionTime
-		&& Tracker.CandidateNodes.Num() >= WrapConfig.MinLatchNodes
-		&& Tracker.BestWrapScore >= 0.0f
-		&& IsWrappableBone(Tracker.CandidateBone);
-}
-
 //Contacting을 후보 판정만 하도록
 void URopeComponent::UpdateContacting(float DeltaTime)
 {
@@ -648,7 +637,6 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 		ContactTracker.Reset();
 		PendingWrapSeed.Reset();
 		ContactingElapsed = 0.0f;
-		FlightNoContactElapsed = 0.0f;
 		Phase = ERopePhase::Flight;
 		return;
 	}
@@ -679,7 +667,6 @@ void URopeComponent::StartWrappingFromContacting()
 		ContactTracker.Reset();
 		PendingWrapSeed.Reset();
 		ContactingElapsed = 0.0f;
-		FlightNoContactElapsed = 0.0f;
 		Phase = ERopePhase::Flight;
 		return;
 	}
@@ -741,7 +728,6 @@ void URopeComponent::StartWrappingFromContacting()
 		ContactTracker.Reset();
 		PendingWrapSeed.Reset();
 		ContactingElapsed = 0.0f;
-		FlightNoContactElapsed = 0.0f;
 		Phase = ERopePhase::Flight;
 		return;
 	}
@@ -1436,66 +1422,6 @@ bool URopeComponent::ComputeWrapSurfaceTarget(const FRopeSurfaceAnchor& LatchAnc
 		OutSurfaceWorld, OutNormalWorld, OutTangentWorld);
 }
 
-/*
- * Surface Walk은 Project Settings 선택지에서 제거했다.
- * 최초 latch tangent만 따라 SDF 표면을 걷는 방식이라 축 기준 원주 감김을 의도적으로 만들기 어렵다.
- * 비교/복구가 필요할 수 있어 구현은 주석으로 보관한다.
-bool URopeComponent::ComputeSurfaceWalkWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
-	FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const
-{
-	const USkeletalMeshComponent* Mesh = LatchAnchor.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = WrappingState.Mesh.Get();
-	}
-	if (!Mesh || LatchAnchor.Bone.IsNone())
-	{
-		return false;
-	}
-
-	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
-
-	FVector SurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
-	FVector NormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-	FVector TangentWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalTangent);
-	TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(NormalWorld));
-
-	if (DistanceFromLatch <= KINDA_SMALL_NUMBER)
-	{
-		OutSurfaceWorld = SurfaceWorld;
-		OutNormalWorld = NormalWorld;
-		OutTangentWorld = TangentWorld;
-		return true;
-	}
-
-	const float StepSize = FMath::Max(1.0f, Sim.SegmentLength * 0.5f);
-	const int32 StepCount = FMath::Max(1, FMath::CeilToInt(DistanceFromLatch / StepSize));
-	float RemainingDistance = DistanceFromLatch;
-
-	for (int32 StepIndex = 0; StepIndex < StepCount; ++StepIndex)
-	{
-		const float StepDistance = FMath::Min(StepSize, RemainingDistance);
-		RemainingDistance -= StepDistance;
-
-		SurfaceWorld += TangentWorld * StepDistance;
-		if (!ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, SurfaceWorld, NormalWorld))
-		{
-			return false;
-		}
-
-		TangentWorld = TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld;
-		TangentWorld = TangentWorld.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(NormalWorld));
-	}
-
-	OutSurfaceWorld = SurfaceWorld;
-	OutNormalWorld = NormalWorld;
-	OutTangentWorld = TangentWorld;
-	return true;
-}
- */
-
 bool URopeComponent::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 	FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const
 {
@@ -1976,70 +1902,6 @@ void URopeComponent::ApplyWrappingFrontMotion(float DeltaTime)
 	}
 }
 
-bool URopeComponent::UpdateWrappingAnchorsFromCandidates(const TArray<FRopeContactCandidate>& Candidates)
-{
-	bool bSawWrappingContact = false;
-	const int32 HeadAnchorNode = WrappingState.FirstNode;
-	for (const FRopeContactCandidate& Candidate : Candidates)
-	{
-		if (!Candidate.bValid ||
-			Candidate.Bone != WrappingState.BoneName ||
-			Candidate.NodeIndex != HeadAnchorNode ||
-			!Sim.Positions.IsValidIndex(Candidate.NodeIndex))
-		{
-			continue;
-		}
-
-		const USkeletalMeshComponent* Mesh = Candidate.Mesh ? Candidate.Mesh : WrappingState.Mesh.Get();
-		if (!Mesh)
-		{
-			continue;
-		}
-
-		bSawWrappingContact = true;
-
-		FRopeSurfaceAnchor* ExistingAnchor = WrappingState.Anchors.FindByPredicate(
-			[&Candidate, Mesh](const FRopeSurfaceAnchor& Anchor)
-			{
-				return Anchor.NodeIndex == Candidate.NodeIndex && Anchor.Bone == Candidate.Bone && Anchor.Mesh.Get() == Mesh;
-			});
-
-		if (ExistingAnchor)
-		{
-			continue;
-		}
-
-		const FTransform BoneXform = Mesh->GetSocketTransform(Candidate.Bone);
-
-		FRopeSurfaceAnchor Anchor;
-		Anchor.NodeIndex = Candidate.NodeIndex;
-		Anchor.Bone = Candidate.Bone;
-		Anchor.Mesh = Mesh;
-		Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Candidate.WorldPoint);
-		Anchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(Candidate.Normal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-		Anchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(ExpectedWrapTangent(Candidate)).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-		Anchor.StartWorldPosition = Sim.Positions[Candidate.NodeIndex];
-		Anchor.SurfaceOffset = FMath::Max(0.0f, Radius);
-		Anchor.RopeDistance = static_cast<float>(Candidate.NodeIndex) * Sim.SegmentLength;
-
-		WrappingState.Anchors.Add(Anchor);
-	}
-
-	WrappingState.FirstNode = TNumericLimits<int32>::Max();
-	WrappingState.LastNode = INDEX_NONE;
-	for (const FRopeSurfaceAnchor& Anchor : WrappingState.Anchors)
-	{
-		WrappingState.FirstNode = FMath::Min(WrappingState.FirstNode, Anchor.NodeIndex);
-		WrappingState.LastNode = FMath::Max(WrappingState.LastNode, Anchor.NodeIndex);
-	}
-	if (WrappingState.Anchors.Num() == 0)
-	{
-		WrappingState.FirstNode = INDEX_NONE;
-	}
-
-	return bSawWrappingContact;
-}
-
 void URopeComponent::ApplyWrappingMassMask()
 {
 	TSet<int32> AnchorNodes;
@@ -2210,7 +2072,6 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		}
 		ApplyWrappedMassMask();
 		bSolveThisFrame = true;
-		UpdateWrappedKinematicShape(DeltaTime); // 선택: 찰랑임 연출만
 		break;
 	}
 
@@ -2332,36 +2193,14 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCapture);
 			bShouldCapture = ShouldCapture(Candidates);
 		}
-		constexpr bool bEnableFlightNoContactReturn = false;
-
 		if (bShouldCapture)
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightBuildContactingState);
 			BuildContactingState(Candidates);
-			FlightNoContactElapsed = 0.0f;
 			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Flight -> Contacting (bone=%s, %d node(s))"),
 				*GetName(), *ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num());
 			Phase = ERopePhase::Contacting;
 			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
-		}
-		else if (bEnableFlightNoContactReturn && !bWhipSwingActive && Candidates.Num() == 0 && WrapConfig.FlightNoContactReturnTime > 0.0f)
-		{
-			FlightNoContactElapsed += DeltaTime;
-			if (FlightNoContactElapsed >= WrapConfig.FlightNoContactReturnTime)
-			{
-				UE_LOG(LogDynamicRope, Log, TEXT("[%s] Flight -> Free (no contact candidates for %.2fs)"),
-					*GetName(), FlightNoContactElapsed);
-				ContactTracker.Reset();
-				PendingWrapSeed.Reset();
-				WrappingState.Reset();
-				ContactingElapsed = 0.0f;
-				FlightNoContactElapsed = 0.0f;
-				Phase = ERopePhase::Free;
-			}
-		}
-		else
-		{
-			FlightNoContactElapsed = 0.0f;
 		}
 
 		// stat 카운터(stat 시스템이 수집 중일 때만; 디버그 캡처와 독립).
@@ -2497,12 +2336,6 @@ void URopeComponent::Throw(const FVector& AimDir)
 
 	EnsureRopeInitialized();
 	StartFreshThrow(AimDir);
-}
-
-void URopeComponent::ThrowFreeSpanWhileWrapped(const FVector& AimDir)
-{
-	WrappedSwayImpulse = FVector::ZeroVector;
-	WrappedSwayTime = 0.0f;
 }
 
 float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const
@@ -2653,11 +2486,6 @@ bool URopeComponent::ShouldDismissContacting() const
 	return ContactTracker.CandidateBone.IsNone() || ContactTracker.CandidateNodes.Num() == 0;
 }
 
-//bool URopeComponent::ShouldFinishWrapping() const
-//{
-//	return false;
-//}
-
 bool URopeComponent::ShouldStartWrapping() const
 {
 	return ContactingElapsed >= WrapConfig.WrapDecisionTime
@@ -2730,12 +2558,6 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 	return Seed;
 }
 
-void URopeComponent::UpdateWrappedKinematicShape(float DeltaTime)
-{
-	WrappedSwayTime += DeltaTime;
-	WrappedSwayImpulse = FVector::ZeroVector;
-}
-
 void URopeComponent::ApplyWrappedMassMask()
 {
 	TSet<int32> AnchorNodes;
@@ -2762,46 +2584,6 @@ void URopeComponent::ApplyWrappedMassMask()
 		const bool bAnchor = AnchorNodes.Contains(i);
 		Sim.InvMass[i] = (bStartPin || bAnchor) ? 0.0f : 1.0f;
 	}
-}
-
-bool URopeComponent::DebugForceWrap()
-{
-	/** TODO
-일단 그대로 둬도 돼.
-왜냐면 DebugForceWrap은 “Wrapped hold를 바로 확인하는 용도”로 유용하거든.
-다만 새 구조를 확인하고 싶으면 나중에 이렇게 바꿔.
-PendingWrapSeed = Seed;
-StartWrappingFromContacting();
-return true;
-**/
-	if (Sim.Num() == 0)
-	{
-		InitRope();
-	}
-
-	// collider는 RopeSimSubsystem이 Tick에서 중앙 수집해 FrameColliders에 채워둔 것을 쓴다(가장 최근 프레임).
-	const TArray<IRopeCollider*>& Colliders = FrameColliders;
-
-	// 단일 접촉 node가 이번 frame에 commit되도록 decision gate를 완화한다(DecideWrap은 candidate의
-	// 누적 시간이 >= WrapDecisionTime일 때 commit한다; 0은 "지금 즉시"를 의미한다).
-	FRopeWrapConfig Relaxed = WrapConfig;
-	Relaxed.WrapDecisionTime = 0.0f;
-	Relaxed.MinLatchNodes = 1;
-
-	FRopeWrapState Seed;
-	if (!WrapController.DecideWrap(Sim, Colliders, Relaxed, 0.0f, Seed))
-	{
-		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] DebugForceWrap: no node in contact (%d collider(s)) — move rope/body to overlap first."),
-			*GetName(), Colliders.Num());
-		return false; // 접촉 중인 것이 없다; 먼저 rope/capsule을 움직여 겹치게 한다
-	}
-
-	WrapController.BeginWrap(Sim, Seed, ResolveWrapTargetMesh());
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] DebugForceWrap -> Wrapped (bone=%s)"),
-		*GetName(), *WrapController.State.BoneName.ToString());
-	Phase = ERopePhase::Wrapped;
-	OnRopeWrapped.Broadcast(WrapController.State.BoneName);
-	return true;
 }
 
 void URopeComponent::ReleaseWrap()

@@ -131,14 +131,6 @@ public:
 
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
 
-	/**
-	 * Debug: sustained-contact gate(MinLatchNodes / WrapDecisionTime)를 우회하여, rope가 현재 가장
-	 * 가깝거나 접촉 중인 bone에 즉시 wrap을 commit한다. throw를 튜닝하지 않고도 BeginWrap 핸드오프와
-	 * Hold(bone-follow)를 관찰할 수 있게 해 준다. 접촉이 없으면 false를 반환한다.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Rope|Debug")
-	bool DebugForceWrap();
-
 	//~ Events(이벤트) ----------------------------------------------------
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnWrapped OnRopeWrapped;
@@ -162,12 +154,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
 	float WhipSweepAngleDegrees = 180.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0"))
-	float WhipFollowRate = 18.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.01", ClampMax = "1.0", Units = "s"))
-	float WhipWaveTravelTime = 0.18f;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
 	float WhipArcHeight = 120.0f;
 
@@ -186,9 +172,6 @@ private:
 
 	float ReleaseCooldown = 0.0f;
 	float ContactingElapsed = 0.0f;
-	float FlightNoContactElapsed = 0.0f;
-	float WrappedSwayTime = 0.0f;
-	FVector WrappedSwayImpulse = FVector::ZeroVector;
 
 	//whip swing
 	bool bWhipSwingActive = false;
@@ -235,8 +218,6 @@ private:
 
 #pragma region Throw 관련 함수
 	void StartFreshThrow(const FVector& AimDir);
-
-	void ThrowFreeSpanWhileWrapped(const FVector& AimDir);
 
 	void BuildWhipGuideTargets(float NormalizedTime, int32 LastGuidedNode, TArray<FVector>& OutTargets) const;
 
@@ -290,15 +271,9 @@ private:
 
 	bool ShouldDismissContacting() const;
 
-	// 기존(legacy)
-	//bool ShouldFinishWrapping() const;
-
-	// 변경
 	bool ShouldStartWrapping() const;
 
 	FRopeWrapState BuildWrapSeedFromContactingState(const TArray<FRopeContactCandidate>& Candidates) const;
-
-	bool ShouldCommitWrap(const FRopeContactTracker& Tracker) const;
 
 #pragma endregion
 
@@ -345,14 +320,6 @@ private:
 	bool ComputeWrapSurfaceTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
 
-	/*
-	 * Surface Walk은 Project Settings 선택지에서 제거했다.
-	 * 최초 latch tangent만 따라가서 원주를 의도적으로 도는 힘이 약하므로,
-	 * 현재는 Analytic Helix / Surface Vector Field 두 방식만 사용한다.
-	bool ComputeSurfaceWalkWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
-		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
-	 */
-
 	bool ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
 
@@ -373,8 +340,6 @@ private:
 
 	void ApplyWrappingFrontMotion(float DeltaTime);
 
-	bool UpdateWrappingAnchorsFromCandidates(const TArray<FRopeContactCandidate>& Candidates);
-
 	void ApplyWrappingMassMask();
 
 	void CommitWrapping();
@@ -384,8 +349,6 @@ private:
 #pragma endregion
 
 #pragma region Wrapped 관련 함수
-
-	void UpdateWrappedKinematicShape(float DeltaTime);
 
 	void ApplyWrappedMassMask();
 
