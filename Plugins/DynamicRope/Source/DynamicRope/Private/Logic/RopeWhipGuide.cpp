@@ -1,15 +1,7 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeWhipGuide.h"
-
-namespace
-{
-	float SmoothStep(float T)
-	{
-		T = FMath::Clamp(T, 0.0f, 1.0f);
-		return T * T * (3.0f - 2.0f * T);
-	}
-}
+#include "RopeMathHelpers.h" // RopeMath::SmoothStep (unity 빌드 중복 정의 방지)
 
 void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
 	const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide)
@@ -121,8 +113,8 @@ void FRopeWhipGuide::Advance(float DeltaTime, FRopeSimState& Sim, const FConfig&
 		const float StrongGuideEnd = GuidedEnd * 0.55f;
 		const float GuideFade = (S <= StrongGuideEnd)
 			? 1.0f
-			: 1.0f - SmoothStep((S - StrongGuideEnd) / FMath::Max(GuidedEnd - StrongGuideEnd, KINDA_SMALL_NUMBER));
-		const float RootFade = SmoothStep(S / FMath::Max(StrongGuideEnd, KINDA_SMALL_NUMBER));
+			: 1.0f - RopeMath::SmoothStep((S - StrongGuideEnd) / FMath::Max(GuidedEnd - StrongGuideEnd, KINDA_SMALL_NUMBER));
+		const float RootFade = RopeMath::SmoothStep(S / FMath::Max(StrongGuideEnd, KINDA_SMALL_NUMBER));
 		const float GuideWeight = GuideFade * FMath::Lerp(0.65f, 1.0f, RootFade);
 		if (GuideWeight <= KINDA_SMALL_NUMBER)
 		{

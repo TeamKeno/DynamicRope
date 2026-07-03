@@ -5,18 +5,7 @@
 #include "Collision/RopeCollider.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
-
-namespace
-{
-	FVector AnyTangentFromNormal(const FVector& Normal)
-	{
-		const FVector N = Normal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-		const FVector Reference = FMath::Abs(FVector::DotProduct(N, FVector::UpVector)) < 0.9f
-			? FVector::UpVector
-			: FVector::RightVector;
-		return FVector::CrossProduct(Reference, N).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-	}
-}
+#include "RopeMathHelpers.h" // RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
 
 bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USkeletalMeshComponent* Mesh, FName Bone,
 	float Duration, const FRopeSimState& Sim, const FContext& Ctx)
@@ -352,7 +341,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 	FVector LatchTangentWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalTangent);
 	LatchTangentWorld = (LatchTangentWorld - FVector::DotProduct(LatchTangentWorld, State.PathNormalWorld) * State.PathNormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(State.PathNormalWorld));
+		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(State.PathNormalWorld));
 
 	const float LatchAxisDistance = FVector::DotProduct(
 		State.PathSurfaceWorld - State.PathAxisOrigin,
@@ -364,7 +353,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 	State.PathCircumferenceDir = FVector::CrossProduct(
 		State.PathAxisDirection,
 		State.PathLatchRadial)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(State.PathNormalWorld));
+		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(State.PathNormalWorld));
 	State.PathWindingSign =
 		FVector::DotProduct(State.PathCircumferenceDir, LatchTangentWorld) < 0.0f ? -1.0f : 1.0f;
 	State.PathCircumferenceDir *= State.PathWindingSign;
@@ -600,7 +589,7 @@ bool FRopeWrappingPhase::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceA
 	//4. 최초 rope tangent를 표면 위 방향으로 정리
 	FVector LatchTangentWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalTangent);
 	LatchTangentWorld = (LatchTangentWorld - FVector::DotProduct(LatchTangentWorld, NormalWorld) * NormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(NormalWorld));
+		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
 
 	//5. latch 지점의 radial 구하기
 	const float LatchAxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
@@ -610,7 +599,7 @@ bool FRopeWrappingPhase::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceA
 
 	//6. 최초 원주 방향과 감김 방향 결정
 	FVector CircumferenceDir = FVector::CrossProduct(AxisDirection, LatchRadial)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(NormalWorld));
+		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
 	const float WindingSign = FVector::DotProduct(CircumferenceDir, LatchTangentWorld) < 0.0f ? -1.0f : 1.0f;
 	CircumferenceDir *= WindingSign;
 
@@ -720,7 +709,7 @@ bool FRopeWrappingPhase::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor
 	FVector LatchTangentWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalTangent);
 	//tangent를 normal plane에 투영해
 	LatchTangentWorld = (LatchTangentWorld - FVector::DotProduct(LatchTangentWorld, LatchNormalWorld) * LatchNormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(LatchNormalWorld));
+		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(LatchNormalWorld));
 
 	//5. latch 점을 축 기준으로 분해
 	const float LatchAxisDistance = FVector::DotProduct(LatchSurfaceWorld - AxisOrigin, AxisDirection);//먼저 latch point가 축 위에서 어느 높이에 있는지 구함:
@@ -736,7 +725,7 @@ bool FRopeWrappingPhase::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor
 
 	//6. 감기는 방향 결정
 	FVector CircumferenceDir = FVector::CrossProduct(AxisDirection, LatchRadial)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(LatchNormalWorld));
+		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(LatchNormalWorld));
 	//최초 latch rope tangent방향과 외적이 일치하나 안하냐.
 	const float WindingSign = FVector::DotProduct(CircumferenceDir, LatchTangentWorld) < 0.0f ? -1.0f : 1.0f;
 	CircumferenceDir *= WindingSign;
@@ -921,7 +910,7 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 		Point.TangentWorld = BoneXform.TransformVectorNoScale(Anchor.LocalTangent);
 		Point.TangentWorld = (Point.TangentWorld - FVector::DotProduct(Point.TangentWorld, Point.NormalWorld) * Point.NormalWorld)
-			.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(Point.NormalWorld));
+			.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(Point.NormalWorld));
 		Point.DistanceFromLatch = Anchor.RopeDistance;
 		return true;
 	};

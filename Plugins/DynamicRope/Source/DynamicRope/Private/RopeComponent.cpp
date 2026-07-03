@@ -12,13 +12,8 @@
 #include "Subsystem/RopeSimSubsystem.h"
 #include "Subsystem/RopeDebugSubsystem.h" // 디버그 캡처 게이트 + 스냅샷 보관소
 #include "Settings/DynamicRopeSettings.h"
+#include "RopeMathHelpers.h" // RopeMath::SmoothStep / AnyTangentFromNormal (unity 빌드 중복 정의 방지)
 namespace {
-	float SmoothStep(float T)
-	{
-		T = FMath::Clamp(T, 0.0f, 1.0f);
-		return T * T * (3.0f - 2.0f * T);
-	}
-
 	int32 FindHeadValidNodeIndex(const TArray<int32>& NodeIndices, const FRopeSimState& Sim)
 	{
 		int32 HeadNodeIndex = INDEX_NONE;
@@ -35,15 +30,6 @@ namespace {
 			}
 		}
 		return HeadNodeIndex;
-	}
-
-	FVector AnyTangentFromNormal(const FVector& Normal)
-	{
-		const FVector N = Normal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-		const FVector Reference = FMath::Abs(FVector::DotProduct(N, FVector::UpVector)) < 0.9f
-			? FVector::UpVector
-			: FVector::RightVector;
-		return FVector::CrossProduct(Reference, N).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 	}
 
 	// Releasing 진입 시 Free 복귀까지의 쿨다운(초). Abort/Hold 실패/수동 해제 공통.
@@ -242,7 +228,7 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 		{
 			const float AlongRope = static_cast<float>(i) / static_cast<float>(LastNode);
 			const float TailWeight = TailWeightByIndex(i, FirstTailNode, LastNode);
-			const float Weight = FMath::Lerp(SmoothStep(AlongRope), 1.0f, TailWeight * 0.5f);
+			const float Weight = FMath::Lerp(RopeMath::SmoothStep(AlongRope), 1.0f, TailWeight * 0.5f);
 			const float Impulse = BaseImpulse * Weight * FMath::Lerp(1.0f, TipBoost, TailWeight);
 			Sim.PrevPositions[i] -= ThrowDir * Impulse;
 		}
@@ -807,7 +793,7 @@ float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, in
 	}
 
 	const float T = static_cast<float>(NodeIndex - FirstTailNode) / static_cast<float>(LastNode - FirstTailNode);
-	return SmoothStep(T);
+	return RopeMath::SmoothStep(T);
 }
 
 void URopeComponent::BuildContactingState(const TArray<FRopeContactCandidate>& Candidates)
@@ -880,7 +866,7 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 				TangentWorld = Sim.Positions[NodeIndex + 1] - Sim.Positions[NodeIndex];
 			}
 			TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
-				.GetSafeNormal(KINDA_SMALL_NUMBER, AnyTangentFromNormal(NormalWorld));
+				.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
 
 			const FTransform BoneXform = Mesh->GetSocketTransform(ContactTracker.CandidateBone);
 
