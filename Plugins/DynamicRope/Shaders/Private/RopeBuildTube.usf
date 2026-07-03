@@ -17,9 +17,11 @@
 uint  NumRings;
 uint  NumSides;
 float Radius;
+uint  NumSrcNodes;  // B2-full 스무딩: resident PosBuf의 시뮬 노드 수(NumRings의 스무딩 소스).
+uint  Subdiv;       // 세그먼트당 Catmull-Rom 서브분할(1=off). NumRings=(NumSrcNodes-1)*Subdiv+1.
 
-Buffer<float>          InCenterline;   // B1: ring r 위치 = (InCenterline[r*3+0..2]). component-local.
-StructuredBuffer<float4> InCenterline4; // B2: ring r 위치 = InCenterline4[r].xyz. 월드.
+Buffer<float>          InCenterline;   // B1: ring r 위치 = (InCenterline[r*3+0..2]). component-local(CPU 스무딩 완료).
+StructuredBuffer<float4> InCenterline4; // B2: 시뮬 노드 r 위치 = InCenterline4[r].xyz. 월드(GPU에서 스무딩).
 float4x4               WorldToLocal;   // B2: 월드 → component-local.
 RWBuffer<float>        OutPositions;   // 정점 v 위치 = OutPositions[v*3+0..2]. VET_Float3 vertex stream(UAV).
 // B2-full: tangent basis + UV도 GPU 생성 → CPU BuildTube 불필요. tangent는 high-precision SNORM16
@@ -33,6 +35,7 @@ groupshared float3 gCenter[ROPE_TUBE_MAX_RINGS]; // component-local
 groupshared float3 gU[ROPE_TUBE_MAX_RINGS];
 groupshared float3 gV[ROPE_TUBE_MAX_RINGS];
 groupshared float3 gTangent[ROPE_TUBE_MAX_RINGS]; // ring 전방 접선(정점 TangentX)
+groupshared float3 gSrc[ROPE_TUBE_MAX_RINGS];     // B2 스무딩: 시뮬 노드(component-local) 소스
 
 // 성분 c(-1..1) → SNORM16 int16: round(clamp(c,-1,1)*32767). 두 개를 하나의 uint에 팩(하위=a, 상위=b).
 uint RopePackSnorm16x2(float a, float b)
@@ -149,18 +152,46 @@ void RopeBuildTubeCS(uint3 GroupThreadId : SV_GroupThreadID)
 	BuildTubeFrameAndWrite(tid, N);
 }
 
-// B2: world-space resident centerline(StructuredBuffer<float4>) → WorldToLocal로 component-local 변환.
+// B2-full: world-space resident 시뮬 노드(StructuredBuffer<float4>)를 GPU에서 Catmull-Rom 스무딩해 렌더
+// 센터라인(NumRings)을 만든 뒤 튜브를 생성한다. CPU 미러 업로드/스무딩 불필요 → 위치 무지연.
+// 스무딩 수식은 CPU FRopeSceneProxy::BuildSmoothedCenterline 미러(장력 0.5 표준 Catmull-Rom).
 [numthreads(ROPE_TUBE_MAX_RINGS, 1, 1)]
 void RopeBuildTubeResidentCS(uint3 GroupThreadId : SV_GroupThreadID)
 {
 	const uint tid = GroupThreadId.x;
 	const uint N = NumRings;
-	if (N < 2) { return; }
+	if (N < 2 || NumSrcNodes < 2) { return; }
 
+	// 1) 시뮬 노드(월드) → component-local, gSrc에 로드.
+	for (uint s = tid; s < NumSrcNodes; s += ROPE_TUBE_MAX_RINGS)
+	{
+		const float3 World = InCenterline4[s].xyz;
+		gSrc[s] = mul(float4(World, 1.0f), WorldToLocal).xyz;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	// 2) Catmull-Rom 스무딩: gSrc(NumSrcNodes) → gCenter(NumRings). Subdiv=1이면 T=0이라 gSrc 그대로.
+	const int LastNode = (int)NumSrcNodes - 1;
+	const uint Sub = max(Subdiv, 1u);
 	for (uint r = tid; r < N; r += ROPE_TUBE_MAX_RINGS)
 	{
-		const float3 World = InCenterline4[r].xyz;
-		gCenter[r] = mul(float4(World, 1.0f), WorldToLocal).xyz;
+		const int Seg = (int)(r / Sub);
+		if (Seg >= LastNode)
+		{
+			gCenter[r] = gSrc[LastNode]; // 마지막 노드에 정확히 놓이는 끝 링
+			continue;
+		}
+		const float T = (float)(r % Sub) / (float)Sub;
+		const float3 P0 = gSrc[max(Seg - 1, 0)];
+		const float3 P1 = gSrc[Seg];
+		const float3 P2 = gSrc[Seg + 1];
+		const float3 P3 = gSrc[min(Seg + 2, LastNode)];
+		const float T2 = T * T;
+		const float T3 = T2 * T;
+		gCenter[r] = (P1 * 2.0f
+			+ (P2 - P0) * T
+			+ (P0 * 2.0f - P1 * 5.0f + P2 * 4.0f - P3) * T2
+			+ (P1 * 3.0f - P0 - P2 * 3.0f + P3) * T3) * 0.5f;
 	}
 	GroupMemoryBarrierWithGroupSync();
 

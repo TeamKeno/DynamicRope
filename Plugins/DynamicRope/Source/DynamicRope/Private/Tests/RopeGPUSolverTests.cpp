@@ -861,4 +861,139 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// GPU 튜브 스무딩(B2-full): resident 엔트리가 시뮬 노드(NumNodes)를 GPU에서 Catmull-Rom 스무딩한 결과가
+// CPU 스무딩 후 B1 엔트리로 만든 튜브와 일치하는가(정점 위치 비교). 프레임/정점 수식은 공유하므로 편차는
+// 스무딩 포팅의 정확도만 반영한다. 곡선 노드로 스무딩이 실제로 작동하는 케이스.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUTubeSmoothingTest,
+	"DynamicRope.Solver.GPUTubeSmoothing",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU 튜브 스무딩 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	const int32 NumNodes = 5;
+	const int32 Subdiv = 3;
+	const int32 NumRings = (NumNodes - 1) * Subdiv + 1; // 13
+	const int32 NumSides = 6;
+	const float Radius = 4.0f;
+	const int32 VertsPerRing = NumSides + 1;
+	const int32 NumVerts = NumRings * VertsPerRing;
+
+	// 곡선 시뮬 노드(월드=로컬, WorldToLocal=identity). 지그재그로 곡률을 준다.
+	TArray<FVector3f> Nodes;
+	Nodes.Add(FVector3f(0, 0, 0));
+	Nodes.Add(FVector3f(10, 8, 0));
+	Nodes.Add(FVector3f(20, -6, 4));
+	Nodes.Add(FVector3f(30, 5, -3));
+	Nodes.Add(FVector3f(40, 0, 6));
+
+	// CPU 스무딩(FRopeSceneProxy::BuildSmoothedCenterline 미러).
+	TArray<FVector3f> Smoothed;
+	Smoothed.SetNum(NumRings);
+	{
+		const int32 LastNode = NumNodes - 1;
+		for (int32 r = 0; r < NumRings; ++r)
+		{
+			const int32 Seg = r / Subdiv;
+			if (Seg >= LastNode) { Smoothed[r] = Nodes[LastNode]; continue; }
+			const float T = static_cast<float>(r % Subdiv) / static_cast<float>(Subdiv);
+			const FVector3f P0 = Nodes[FMath::Max(Seg - 1, 0)];
+			const FVector3f P1 = Nodes[Seg];
+			const FVector3f P2 = Nodes[Seg + 1];
+			const FVector3f P3 = Nodes[FMath::Min(Seg + 2, LastNode)];
+			const float T2 = T * T, T3 = T2 * T;
+			Smoothed[r] = (P1 * 2.0f + (P2 - P0) * T + (P0 * 2.0f - P1 * 5.0f + P2 * 4.0f - P3) * T2
+				+ (P1 * 3.0f - P0 - P2 * 3.0f + P3) * T3) * 0.5f;
+		}
+	}
+
+	TArray<float> PosA, PosB; // A=B1(CPU 스무딩), B=resident(GPU 스무딩)
+	PosA.SetNumZeroed(NumVerts * 3);
+	PosB.SetNumZeroed(NumVerts * 3);
+
+	ENQUEUE_RENDER_COMMAND(RopeTubeSmoothTest)(
+		[&](FRHICommandListImmediate& RHICmdList)
+		{
+			auto MakeTyped = [&](const TCHAR* Name, uint32 Bytes, EPixelFormat Fmt, bool bUAV,
+				FShaderResourceViewRHIRef& OutSRV, FUnorderedAccessViewRHIRef& OutUAV) -> FBufferRHIRef
+			{
+				FRHIBufferCreateDesc Desc = FRHIBufferCreateDesc::CreateVertex(Name, Bytes)
+					.AddUsage(EBufferUsageFlags::ShaderResource | (bUAV ? EBufferUsageFlags::UnorderedAccess : EBufferUsageFlags::None))
+					.DetermineInitialState();
+				FBufferRHIRef Buf = RHICmdList.CreateBuffer(Desc);
+				OutSRV = RHICmdList.CreateShaderResourceView(Buf,
+					FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(Fmt));
+				if (bUAV) { OutUAV = RHICmdList.CreateUnorderedAccessView(Buf,
+					FRHIViewDesc::CreateBufferUAV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(Fmt)); }
+				return Buf;
+			};
+			auto MakeStructured = [&](const TCHAR* Name, uint32 Stride, uint32 Count, FShaderResourceViewRHIRef& OutSRV) -> FBufferRHIRef
+			{
+				FRHIBufferCreateDesc Desc = FRHIBufferCreateDesc::CreateStructured(Name, Stride * Count, Stride)
+					.AddUsage(EBufferUsageFlags::ShaderResource)
+					.DetermineInitialState();
+				FBufferRHIRef Buf = RHICmdList.CreateBuffer(Desc);
+				OutSRV = RHICmdList.CreateShaderResourceView(Buf,
+					FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Structured));
+				return Buf;
+			};
+
+			FShaderResourceViewRHIRef InSRV, ResSRV, PSRVa, TSRVa, USRVa, PSRVb, TSRVb, USRVb;
+			FUnorderedAccessViewRHIRef DummyUAV, PUAVa, TUAVa, UUAVa, PUAVb, TUAVb, UUAVb;
+			FBufferRHIRef InBuf  = MakeTyped(TEXT("Sm.In"),  NumRings * 3 * sizeof(float), PF_R32_FLOAT, false, InSRV, DummyUAV);
+			FBufferRHIRef ResBuf = MakeStructured(TEXT("Sm.Res"), sizeof(FVector4f), NumNodes, ResSRV);
+			FBufferRHIRef PBufA  = MakeTyped(TEXT("Sm.PA"), NumVerts * 3 * sizeof(float), PF_R32_FLOAT, true, PSRVa, PUAVa);
+			FBufferRHIRef TBufA  = MakeTyped(TEXT("Sm.TA"), NumVerts * 4 * sizeof(uint32), PF_R32_UINT, true, TSRVa, TUAVa);
+			FBufferRHIRef UBufA  = MakeTyped(TEXT("Sm.UA"), NumVerts * 2 * sizeof(float), PF_R32_FLOAT, true, USRVa, UUAVa);
+			FBufferRHIRef PBufB  = MakeTyped(TEXT("Sm.PB"), NumVerts * 3 * sizeof(float), PF_R32_FLOAT, true, PSRVb, PUAVb);
+			FBufferRHIRef TBufB  = MakeTyped(TEXT("Sm.TB"), NumVerts * 4 * sizeof(uint32), PF_R32_UINT, true, TSRVb, TUAVb);
+			FBufferRHIRef UBufB  = MakeTyped(TEXT("Sm.UB"), NumVerts * 2 * sizeof(float), PF_R32_FLOAT, true, USRVb, UUAVb);
+
+			// A 입력: CPU 스무딩 센터라인(component-local).
+			{
+				float* Dst = static_cast<float*>(RHICmdList.LockBuffer(InBuf, 0, NumRings * 3 * sizeof(float), RLM_WriteOnly));
+				for (int32 i = 0; i < NumRings; ++i) { Dst[i*3+0]=Smoothed[i].X; Dst[i*3+1]=Smoothed[i].Y; Dst[i*3+2]=Smoothed[i].Z; }
+				RHICmdList.UnlockBuffer(InBuf);
+			}
+			// B 입력: resident 시뮬 노드(월드=로컬, float4).
+			{
+				FVector4f* Dst = static_cast<FVector4f*>(RHICmdList.LockBuffer(ResBuf, 0, NumNodes * sizeof(FVector4f), RLM_WriteOnly));
+				for (int32 i = 0; i < NumNodes; ++i) { Dst[i] = FVector4f(Nodes[i].X, Nodes[i].Y, Nodes[i].Z, 0.0f); }
+				RHICmdList.UnlockBuffer(ResBuf);
+			}
+
+			RopeGPU::BuildTube_RenderThread(RHICmdList, InSRV, PUAVa, TUAVa, UUAVa, NumRings, NumSides, Radius);
+			RopeGPU::BuildTubeFromResident_RenderThread(RHICmdList, ResSRV, PUAVb, TUAVb, UUAVb,
+				NumRings, NumSides, Radius, NumNodes, Subdiv, FMatrix44f::Identity);
+			RHICmdList.BlockUntilGPUIdle();
+
+			auto Read = [&](FBufferRHIRef Buf, uint32 Bytes, void* Dst)
+			{
+				FRHIGPUBufferReadback RB(TEXT("Sm.RB"));
+				RB.EnqueueCopy(RHICmdList, Buf, Bytes);
+				RHICmdList.BlockUntilGPUIdle();
+				if (const void* Src = RB.Lock(Bytes)) { FMemory::Memcpy(Dst, Src, Bytes); RB.Unlock(); }
+			};
+			Read(PBufA, NumVerts * 3 * sizeof(float), PosA.GetData());
+			Read(PBufB, NumVerts * 3 * sizeof(float), PosB.GetData());
+		});
+	FlushRenderingCommands();
+
+	float MaxDev = 0.0f;
+	for (int32 v = 0; v < NumVerts; ++v)
+	{
+		const FVector3f A(PosA[v*3+0], PosA[v*3+1], PosA[v*3+2]);
+		const FVector3f B(PosB[v*3+0], PosB[v*3+1], PosB[v*3+2]);
+		MaxDev = FMath::Max(MaxDev, (A - B).Size());
+	}
+	AddInfo(FString::Printf(TEXT("GPU-스무딩 vs CPU-스무딩 최대 정점 편차 %.5f cm"), MaxDev));
+	TestTrue(FString::Printf(TEXT("GPU Catmull-Rom 스무딩이 CPU와 일치(편차 %.5f)"), MaxDev), MaxDev < 0.05f);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

@@ -30,9 +30,9 @@ namespace RopeGPU
 		int32 NumRings, int32 NumSides, float Radius);
 
 	/**
-	 * 렌더 스레드(M5b B2-lite / B2-full). 솔버 resident PosBuf(StructuredBuffer<float4>, 월드)에서 직접 튜브
-	 * 위치를 OutPositionsUAV에 기록. WorldToLocal로 component-local 변환 → 위치 무지연(리드백 없음).
-	 * OutTangentsUAV/OutTexCoordsUAV를 주면 tangent/UV도 GPU 생성(B2-full). 호출자가 UAV 배리어를 책임진다.
+	 * 렌더 스레드(B2-full). 솔버 resident PosBuf(StructuredBuffer<float4>, 월드, 시뮬 노드 NumSrcNodes개)를
+	 * GPU에서 Catmull-Rom 스무딩(Subdiv)해 렌더 센터라인(NumRings)을 만든 뒤 튜브 pos/tangent/UV를 생성한다.
+	 * CPU 미러 업로드/스무딩 불필요 → 위치 무지연. WorldToLocal로 component-local 변환. 호출자가 UAV 배리어 책임.
 	 */
 	DYNAMICROPESHADERS_API void BuildTubeFromResident_RenderThread(
 		FRHICommandList& RHICmdList,
@@ -41,5 +41,6 @@ namespace RopeGPU
 		FRHIUnorderedAccessView* OutTangentsUAV,
 		FRHIUnorderedAccessView* OutTexCoordsUAV,
 		int32 NumRings, int32 NumSides, float Radius,
+		int32 NumSrcNodes, int32 Subdiv,
 		const FMatrix44f& WorldToLocal);
 }

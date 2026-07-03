@@ -477,16 +477,17 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 		BuildGpuStaticBuffers(RHICmdList);
 	}
 
-	// B2-lite: 솔버 resident PosBuf(월드)를 직접 읽어 위치 무지연. 단 이번 프레임에 실제로 GPU step된 로프만
-	// (Data.bGpuResident) — whip/throw/CPU-폴백 프레임엔 PosBuf가 stale이라 CPU 미러(B1: Data.Points)로 그린다.
+	// B2-full: 솔버 resident PosBuf(월드, 시뮬 노드 NumNodes개)를 직접 읽어 GPU에서 스무딩 → 위치 무지연.
+	// 단 이번 프레임에 실제로 GPU step된 로프만(Data.bGpuResident) — whip/throw/CPU-폴백 프레임엔 PosBuf가
+	// stale이라 CPU 미러(Data.Points)를 CPU 스무딩해 업로드하는 B1 경로로 그린다.
 	int32 ResidentNodes = 0;
 	FRHIShaderResourceView* ResidentSRV = (Data.bGpuResident && SolverPtr)
 		? SolverPtr->GetResidentPositionSRV_RenderThread(RopeId, ResidentNodes) : nullptr;
-	const bool bResident = (ResidentSRV != nullptr && ResidentNodes == NumRings);
+	const bool bResident = (ResidentSRV != nullptr && ResidentNodes == NumNodes);
 
 	if (!bResident)
 	{
-		// 스무딩된 렌더 센터라인(NumRings)을 업로드한다(Data.Points는 노드 NumNodes개 → Catmull-Rom 서브분할).
+		// 비-resident 폴백: CPU 미러(Data.Points)를 Catmull-Rom 스무딩해 CenterlineBuffer에 업로드(B1).
 		TArray<FVector> Smoothed;
 		BuildSmoothedCenterline(Data.Points, Smoothed);
 		const int32 NumFloats = NumRings * 3;
@@ -511,9 +512,11 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 	if (bResident)
 	{
 		// 월드 PosBuf → component-local 변환. proxy는 GetLocalToWorld()로 렌더하므로 WorldToLocal = inverse.
+		// GPU가 시뮬 노드(NumNodes)를 Subdiv로 Catmull-Rom 스무딩해 NumRings 센터라인 → 튜브 생성.
 		const FMatrix44f WorldToLocal(GetLocalToWorld().Inverse());
 		RopeGPU::BuildTubeFromResident_RenderThread(RHICmdList, ResidentSRV,
-			GpuPositionBuffer.UAV, GpuTangentBuffer.UAV, GpuTexCoordBuffer.UAV, NumRings, NumSides, Radius, WorldToLocal);
+			GpuPositionBuffer.UAV, GpuTangentBuffer.UAV, GpuTexCoordBuffer.UAV,
+			NumRings, NumSides, Radius, NumNodes, Subdiv, WorldToLocal);
 	}
 	else
 	{
