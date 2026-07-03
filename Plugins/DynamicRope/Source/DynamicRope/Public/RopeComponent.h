@@ -1,7 +1,10 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 단일 UE 통합 지점(Facade). sim 상태, solver, wrap controller, 그리고 physics와 logic을
-// 분기하는 phase state machine을 소유한다. 캐릭터에 붙이고 Throw()로 사용한다.
+// 단일 UE 통합 지점(Facade). sim 상태(FRopeSimState)와 솔버, 페이즈별 로직 F-클래스들
+// (WhipGuide/WrappingPhase/WrapController)을 값으로 소유하고, physics와 logic을 분기하는
+// phase state machine(ERopePhase)을 굴린다. 페이즈별 실제 동작은 Logic/ 클래스에 있고,
+// 이 컴포넌트에는 전이·이벤트 브로드캐스트를 결정하는 오케스트레이션만 남는다.
+// 캐릭터에 붙이고 Throw()로 사용한다.
 
 #pragma once
 
@@ -32,7 +35,8 @@ class DYNAMICROPE_API URopeComponent : public UMeshComponent
 {
 	GENERATED_BODY()
 
-	// 서브시스템이 GPU 배치 솔브를 위해 Sim/SolverConfig/bSolveThisFrame에 직접 접근한다(CPU 경로는 SolveSimFrame 사용).
+	// 서브시스템이 프레임 구동을 위해 Sim/SolverConfig/Phase/bSolveThisFrame/SimGeneration/
+	// bGpuSteppedThisFrame/WhipGuide에 직접 접근한다(GPU 배치 솔브 포함; CPU 경로는 SolveSimFrame 사용).
 	friend class URopeSimSubsystem;
 
 public:
@@ -53,8 +57,10 @@ public:
 
 	/**
 	 * 시뮬레이션 한 프레임을 3단계로 나눠 URopeSimSubsystem이 구동한다(컴포넌트는 직접 tick하지 않음).
-	 *  Prepare(GT)  : init/pin/provider gather + collider 스냅샷 + 로직 phase 처리.
-	 *  Solve(병렬)  : Free/Flight의 Solver.Step만 — POD + const collider라 스레드 안전.
+	 *  Prepare(GT)  : init/pin 전진 + 로직 phase 처리. collider 스냅샷(FrameColliders)은
+	 *                 서브시스템이 이 호출 전에 중앙 수집해 채워 둔다.
+	 *  Solve(병렬)  : bSolveThisFrame(Free/Flight/Wrapped)일 때 Solver.Step — POD + const collider라
+	 *                 스레드 안전. Wrapped는 latch 노드가 InvMass=0이라 자유 구간만 물리로 움직인다.
 	 *  Finalize(GT) : Flight 접촉 감지/캡처(UObject·이벤트) + 렌더 dirty.
 	 */
 	void PrepareSimFrame(float DeltaTime);
@@ -98,6 +104,31 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
 	bool bIncludeOwnerColliders = false;
 
+	//~ Whip(던지기 스윙 설정) ----------------------------------------------
+	// 설정은 여기 UPROPERTY로 유지(직렬화 경로 보존) — 런타임 상태는 WhipGuide가 소유하고,
+	// 호출 시 MakeWhipGuideConfig()로 스냅샷을 만들어 넘긴다.
+
+	/** WhipGuide.GetElapsed()의 BP 노출용 미러(매 프레임 갱신). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Whip")
+	float WhipElapsed = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.01", ClampMax = "1.0", Units = "s"))
+	float WhipDuration = 0.35f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "0.95"))
+	float WhipGuidedLength = 0.65f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
+	float WhipSweepAngleDegrees = 180.0f;
+
+	/** 현재 런타임 미사용 — 에디터 배치 가이드(FRopeComponentVisualizer)의 던지기 아크 표시에만 쓰인다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
+	float WhipArcHeight = 120.0f;
+
+	/** 현재 런타임 미사용 — 에디터 배치 가이드(FRopeComponentVisualizer)의 던지기 아크 표시에만 쓰인다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
+	float WhipSideOffset = 35.0f;
+
 	//~ Render(렌더) ------------------------------------------------------
 	/** 시각적 tube 반지름(cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render", meta = (ClampMin = "0.1", Units = "cm"))
@@ -123,7 +154,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Throw(const FVector& AimDir);
 
-	/** 현재 wrap을 수동으로 해제한다(Releasing phase). */
+	/** 현재 진행 중인 잡기/감기(Contacting/Wrapping/Wrapped)를 수동으로 해제한다(Releasing phase). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ReleaseWrap();
 
@@ -144,66 +175,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnReleased OnRopeReleased;
 
-	//whip swing (설정은 여기 UPROPERTY로 유지 — 직렬화 경로 보존; 런타임 상태는 WhipGuide가 소유)
-	/** WhipGuide.GetElapsed()의 BP 노출용 미러(매 프레임 갱신). */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Whip")
-	float WhipElapsed = 0.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.01", ClampMax = "1.0", Units = "s"))
-	float WhipDuration = 0.35f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "0.95"))
-	float WhipGuidedLength = 0.65f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
-	float WhipSweepAngleDegrees = 180.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
-	float WhipArcHeight = 120.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
-	float WhipSideOffset = 35.0f;
 private:
+	//~ 페이즈 상태 머신 ----------------------------------------------------
 	ERopePhase Phase = ERopePhase::Free;
 
-	// Non-UObject sim/solver/logic — 값으로 소유하며, GC 추적 대상이 아니다(POD).
-	FRopeSimState       Sim;
-	FRopeXPBDSolver     Solver;
-	FRopeWrapController WrapController;
-	FRopeContactTracker ContactTracker;
-	FRopeWrapState      PendingWrapSeed;	//초기 연결용, 임시 Seed
-	FRopeWrappingPhase  WrappingPhase;		//Wrapping 페이즈 로직(경로 점진 생성+front 모션+마스크). 작업 상태는 .State
-	FRopeWhipGuide      WhipGuide;			//던지기 초반 채찍 스윙(가이드 타깃 계산+적용)
-
-	float ReleaseCooldown = 0.0f;
-	float ContactingElapsed = 0.0f;
-
-	// 한 프레임 collider 스냅샷. RopeSimSubsystem이 Tick에서 중앙 수집해 채운다(provider 레지스트리 → 로프 필터).
-	// Solve/Finalize에서 read. provider 소유라 raw 포인터(해당 프레임 동안 유효).
-	TArray<IRopeCollider*> FrameColliders;
-
-	// 이번 프레임에 Solver.Step을 돌릴지(Free/Flight만 true).
-	bool bSolveThisFrame = false;
-
-	// GPU 상주 솔버(M5)용 시드 generation. Sim을 out-of-band로 바꾼 시점(init/throw/logic phase/whip)에
-	// 증가시킨다 → 서브시스템이 변화를 감지해 GPU 영속 버퍼를 재시드한다. 정상 Free/Flight(비-whip)에선 불변(상주 유지).
-	uint32 SimGeneration = 0;
-
-	// 이번 프레임에 이 로프가 실제로 GPU에서 step됐는가(서브시스템이 매 프레임 설정). M5b: GPU 튜브 렌더가
-	// resident PosBuf를 직접 읽을지(true) CPU Sim 미러로 그릴지(false, whip/CPU-폴백/솔버 off) 가른다.
-	bool bGpuSteppedThisFrame = false;
-
-	void InitRope();
-
-#if WITH_GAMEPLAY_DEBUGGER
-	// 디버그 캡처 대상일 때 centerline/wrapped/collider 공통 필드를 스냅샷에 채운다(FinalizeSimFrame에서 호출).
-	void FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const;
-#endif
-
-	//TODO 주석 추가
-	void EnsureRopeInitialized(){if (Sim.Num() == 0)InitRope();	}
-
-	//~ 페이즈 전이 중앙화 -------------------------------------------------
 	/**
 	 * Phase 대입의 단일 지점. 전이 로그("[이름] Old -> New (Reason)")를 일원화한다.
 	 * Reason은 로그용 부가 설명(nullptr이면 생략). 전이에 딸린 이벤트 브로드캐스트와
@@ -219,32 +194,72 @@ private:
 	 */
 	void ResetTransientPhaseState();
 
+	//~ 시뮬레이션 상태 + 페이즈별 로직 소유물 -------------------------------
+	// Non-UObject — 값으로 소유하며 GC 추적 대상이 아니다(POD/약참조만 보유).
+	// 아래 로직 4개는 로프 수명 순서와 1:1 대응한다: Throw/Flight → Contacting → Wrapping → Wrapped.
+	FRopeSimState       Sim;				// 단일 진실: 솔버/로직/렌더가 공유하는 파티클 체인
+	FRopeXPBDSolver     Solver;				// XPBD 물리(Free/Flight/Wrapped 자유 구간)
+	FRopeWhipGuide      WhipGuide;			// Throw/Flight: 채찍 스윙(가이드 타깃 계산+적용)
+	FRopeContactTracker ContactTracker;		// Flight/Contacting: 접촉 후보의 dominant bone 추적
+	FRopeWrapState      PendingWrapSeed;	// Contacting: 캡처 시 만들어 둔 wrap 시드(Wrapping 진입 재료)
+	FRopeWrappingPhase  WrappingPhase;		// Wrapping: 경로 점진 생성+front 모션+마스크(작업 상태는 .State)
+	FRopeWrapController WrapController;		// Wrapped: bone-local latch 유지/해제
+
+	//~ 페이즈 타이머 --------------------------------------------------------
+	float ContactingElapsed = 0.0f;	// Contacting 체류 시간(WrapDecisionTime 판정)
+	float ReleaseCooldown = 0.0f;	// Releasing → Free 복귀까지 남은 시간
+
+	//~ 서브시스템 프레임 계약(RopeSimSubsystem이 쓰거나 읽는다) --------------
+	// 한 프레임 collider 스냅샷. RopeSimSubsystem이 Tick에서 중앙 수집해 채운다(provider 레지스트리 → 로프 필터).
+	// Prepare/Solve/Finalize에서 read. provider 소유라 raw 포인터(해당 프레임 동안 유효).
+	TArray<IRopeCollider*> FrameColliders;
+
+	// 이번 프레임에 Solver.Step을 돌릴지. Free/Flight/Wrapped true(Wrapped는 latch 노드 InvMass=0),
+	// Contacting/Wrapping/Releasing은 로직 구동이라 false.
+	bool bSolveThisFrame = false;
+
+	// GPU 상주 솔버(M5)용 시드 generation. Sim을 out-of-band로 바꾼 시점(init/throw/로직 페이즈/whip)에
+	// 증가시킨다 → 서브시스템이 변화를 감지해 GPU 영속 버퍼를 재시드한다. 정상 Free/Flight(비-whip)에선 불변(상주 유지).
+	uint32 SimGeneration = 0;
+
+	// 이번 프레임에 이 로프가 실제로 GPU에서 step됐는가(서브시스템이 매 프레임 설정). M5b: GPU 튜브 렌더가
+	// resident PosBuf를 직접 읽을지(true) CPU Sim 미러로 그릴지(false, whip/CPU-폴백/솔버 off) 가른다.
+	bool bGpuSteppedThisFrame = false;
+
+	//~ 초기화/유틸 ----------------------------------------------------------
+	void InitRope();
+
+	/** Sim이 비어 있으면 1회 초기화한다(OnRegister/Throw/Prepare 초입의 안전 가드). */
+	void EnsureRopeInitialized() { if (Sim.Num() == 0) { InitRope(); } }
+
 	/** rope가 wrap할 skeletal mesh를 해석(및 캐싱)한다: 명시적 WrapTargetMesh 또는 owner의 것. */
 	USkeletalMeshComponent* ResolveWrapTargetMesh();
 
-#pragma region Throw 관련 함수
+#if WITH_GAMEPLAY_DEBUGGER
+	// 디버그 캡처 대상일 때 centerline/wrapped/collider 공통 필드를 스냅샷에 채운다(FinalizeSimFrame에서 호출).
+	void FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const;
+#endif
+
+	//~ Throw ----------------------------------------------------------------
 	void StartFreshThrow(const FVector& AimDir);
 
 	/** WhipGuide에 넘길 설정 스냅샷을 Rope|Whip UPROPERTY들로부터 만든다. */
 	FRopeWhipGuide::FConfig MakeWhipGuideConfig() const;
 
+	/** 던지기 임펄스의 tail 가중치(FirstTailNode부터 끝까지 0→1 스무스). */
 	float TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const;
 
-#pragma endregion
-
-#pragma region Flight 관련 함수
+	//~ Flight ---------------------------------------------------------------
 	// 접촉 감지 파이프라인 자체는 FRopeFlightContactDetector(정적, UObject 비의존)로 분리됐다.
 	// 여기엔 UObject 컨텍스트가 필요한 조립 코드만 남는다.
 
 	/** 검출기에 넘길 파라미터 스냅샷(WrapConfig + 튜브 반지름 + 컴포넌트 전방). */
 	FRopeFlightContactDetector::FParams MakeFlightDetectParams() const;
 
+	/** 캡처 확정 시 Contacting 진입 상태(ContactTracker/PendingWrapSeed/타이머)를 구성한다. */
 	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates);
 
-#pragma endregion
-
-#pragma region Contacting 관련 함수
-
+	//~ Contacting -----------------------------------------------------------
 	void UpdateContacting(float DeltaTime);
 
 	void AdvanceWrappingMotion(float DeltaTime);
@@ -255,9 +270,7 @@ private:
 
 	FRopeWrapState BuildWrapSeedFromContactingState(const TArray<FRopeContactCandidate>& Candidates) const;
 
-#pragma endregion
-
-#pragma region Wrapping 관련 함수
+	//~ Wrapping -------------------------------------------------------------
 	// 경로 생성/front 모션/마스크 등 Wrapping 페이즈의 실제 로직은 FRopeWrappingPhase(WrappingPhase)로
 	// 분리됐다. 여기엔 페이즈 전이·이벤트를 결정하는 오케스트레이션만 남는다.
 
@@ -275,11 +288,7 @@ private:
 
 	void AbortWrapping(ERopeReleaseReason Reason);
 
-#pragma endregion
-
-#pragma region Wrapped 관련 함수
-
+	//~ Wrapped --------------------------------------------------------------
+	/** latch/anchor 노드 InvMass=0, 나머지 1 — Wrapped 중 자유 구간만 솔버가 움직이게. */
 	void ApplyWrappedMassMask();
-
-#pragma endregion
 };

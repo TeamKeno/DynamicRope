@@ -13,7 +13,10 @@
 #include "Subsystem/RopeDebugSubsystem.h" // 디버그 캡처 게이트 + 스냅샷 보관소
 #include "Settings/DynamicRopeSettings.h"
 #include "RopeMathHelpers.h" // RopeMath::SmoothStep / AnyTangentFromNormal (unity 빌드 중복 정의 방지)
-namespace {
+
+namespace
+{
+	// 접촉 후보 노드들 중 가장 손(node 0)에 가까운 유효 인덱스.
 	int32 FindHeadValidNodeIndex(const TArray<int32>& NodeIndices, const FRopeSimState& Sim)
 	{
 		int32 HeadNodeIndex = INDEX_NONE;
@@ -43,52 +46,74 @@ namespace {
 		case ERopePhase::Free:       return TEXT("Free");
 		case ERopePhase::Flight:     return TEXT("Flight");
 		case ERopePhase::Contacting: return TEXT("Contacting");
-		case ERopePhase::Wrapping: return TEXT("Wrapping");
+		case ERopePhase::Wrapping:   return TEXT("Wrapping");
 		case ERopePhase::Wrapped:    return TEXT("Wrapped");
 		case ERopePhase::Releasing:  return TEXT("Releasing");
 		default:                     return TEXT("?");
 		}
 	}
-
 }
+
 URopeComponent::URopeComponent()
 {
-	// URopeSimSubsystem drives SimulateFrame() so all ropes share one orchestration point.
+	// 컴포넌트는 스스로 tick하지 않는다 — URopeSimSubsystem이 모든 로프를
+	// Prepare/Solve/Finalize 3단계로 한 곳에서 구동한다.
 	PrimaryComponentTick.bCanEverTick = false;
 
 	// primitive가 motion vector를 출력하도록 Movable로 설정한다(TAA/TSR가 움직이는 rope를 유지하게 한다).
 	Mobility = EComponentMobility::Movable;
 }
 
-void URopeComponent::InitRope()
-{
-	const int32 N = FMath::Max(2, NumParticles);
-	Sim.Positions.SetNum(N);
-	Sim.PrevPositions.SetNum(N);
-	Sim.InvMass.SetNum(N);
-	Sim.RopeLength = RopeLength;
-	Sim.SegmentLength = RopeLength / static_cast<float>(N - 1);
+// ===== UActorComponent ======================================================
 
-	const FVector Start = GetComponentLocation();
-	const FVector End = Start + GetForwardVector() * RopeLength;
-	for (int32 i = 0; i < N; ++i)
+void URopeComponent::BeginPlay()
+{
+	Super::BeginPlay();
+	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
 	{
-		const float Alpha = static_cast<float>(i) / static_cast<float>(N - 1);
-		Sim.Positions[i] = FMath::Lerp(Start, End, Alpha);
-		Sim.PrevPositions[i] = Sim.Positions[i];
-		Sim.InvMass[i] = 1.0f;
+		SimSubsystem->RegisterRope(this);
+	}
+	else
+	{
+		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] BeginPlay: RopeSimSubsystem unavailable — rope will not be simulated."),
+			*GetName());
+	}
+}
+
+void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+	{
+		SimSubsystem->UnregisterRope(this);
+	}
+	Super::EndPlay(EndPlayReason);
+}
+
+void URopeComponent::SendRenderDynamicData_Concurrent()
+{
+	Super::SendRenderDynamicData_Concurrent();
+
+	if (!SceneProxy || Sim.Num() < 2)
+	{
+		return;
 	}
 
-	// 시작점을 컴포넌트(hand/socket)에 pin한다; solver가 substep에 걸쳐 이를 sweep한다.
-	Sim.InvMass[0] = 0.0f;
-	Sim.bStartPinned = true;
-	Sim.StartPinTarget = Start;
-	Sim.StartPinPrev = Start;
+	// centerline을 component-local 공간으로 보낸다; proxy는 GetLocalToWorld()를 통해 렌더링한다.
+	const FTransform Xform = GetComponentTransform();
+	FRopeDynamicData* DynamicData = new FRopeDynamicData;
+	DynamicData->bGpuResident = bGpuSteppedThisFrame; // M5b: GPU step된 프레임만 resident PosBuf 직접 렌더 허용.
+	DynamicData->Points.SetNumUninitialized(Sim.Num());
+	for (int32 i = 0; i < Sim.Num(); ++i)
+	{
+		DynamicData->Points[i] = Xform.InverseTransformPosition(Sim.Positions[i]);
+	}
 
-	++SimGeneration; // Sim 전면 재구성 → GPU 상주 버퍼 재시드(M5).
-
-	UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] InitRope: %d particles, length=%.1f, segment=%.2f"),
-		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);
+	FRopeSceneProxy* Proxy = static_cast<FRopeSceneProxy*>(SceneProxy);
+	ENQUEUE_RENDER_COMMAND(RopeUpdateCenterline)(
+		[Proxy, DynamicData](FRHICommandListBase& RHICmdList)
+		{
+			Proxy->SetDynamicData_RenderThread(RHICmdList, DynamicData);
+		});
 }
 
 void URopeComponent::OnRegister()
@@ -126,311 +151,7 @@ void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 }
 #endif
 
-USkeletalMeshComponent* URopeComponent::ResolveWrapTargetMesh()
-{
-	if (!WrapTargetMesh)
-	{
-		if (AActor* Owner = GetOwner())
-		{
-			WrapTargetMesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
-		}
-	}
-	return WrapTargetMesh;
-}
-
-void URopeComponent::SetPhase(ERopePhase NewPhase, const TCHAR* Reason)
-{
-	if (Reason)
-	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> %s (%s)"),
-			*GetName(), PhaseName(Phase), PhaseName(NewPhase), Reason);
-	}
-	else
-	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> %s"),
-			*GetName(), PhaseName(Phase), PhaseName(NewPhase));
-	}
-	Phase = NewPhase;
-}
-
-void URopeComponent::ResetTransientPhaseState()
-{
-	ContactTracker.Reset();
-	PendingWrapSeed.Reset();
-	WrappingPhase.State.Reset();
-	ContactingElapsed = 0.0f;
-}
-
-void URopeComponent::BeginPlay()
-{
-	Super::BeginPlay();
-	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
-	{
-		SimSubsystem->RegisterRope(this);
-	}
-	else
-	{
-		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] BeginPlay: RopeSimSubsystem unavailable — rope will not be simulated."),
-			*GetName());
-	}
-}
-
-void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
-{
-	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
-	{
-		SimSubsystem->UnregisterRope(this);
-	}
-	Super::EndPlay(EndPlayReason);
-}
-
-void URopeComponent::StartFreshThrow(const FVector& AimDir)
-{
-	// 채찍 스윙 가이드 좌표계 구성 + 활성화(퇴화 케이스 fallback은 컴포넌트 축).
-	WhipGuide.Begin(AimDir, GetComponentLocation(), GetForwardVector(), GetUpVector(), GetRightVector());
-	WhipElapsed = WhipGuide.GetElapsed();
-
-	++SimGeneration; // throw로 tail 위치를 재설정 → GPU 상주 버퍼 재시드(M5).
-
-	if (WrapController.IsActive())
-	{
-		WrapController.Release(ERopeReleaseReason::Manual);
-	}
-	ResetTransientPhaseState();
-	ReleaseCooldown = 0.0f;
-
-	const int32 LastNode = Sim.Num() - 1;
-	if (LastNode >= 1)
-	{
-		const FVector Start = GetComponentLocation();
-		Sim.bStartPinned = true;
-		Sim.StartPinPrev = Start;
-		Sim.StartPinTarget = Start;
-		Sim.Positions[0] = Start;
-		Sim.PrevPositions[0] = Start;
-
-		for (int32 i = 0; i < Sim.Num(); ++i)
-		{
-			Sim.InvMass[i] = (i == 0) ? 0.0f : 1.0f;
-			Sim.PrevPositions[i] = Sim.Positions[i];
-		}
-
-		// 가이드 구간 노드를 T=0 가이드 곡선 위에 스냅(속도 0).
-		WhipGuide.SnapToInitialPose(Sim, MakeWhipGuideConfig());
-
-		// Temporary throw: inject Verlet velocity by moving previous positions opposite the aim.
-		const FVector ThrowDir = WhipGuide.GetAimDir();
-		const float ReferenceDt = 1.0f / 60.0f;
-		const float BaseImpulse = ThrowParams.ThrowSpeed * ReferenceDt;
-		const float TipBoost = FMath::Clamp(ThrowParams.TipMass / 5.0f, 0.25f, 3.0f);
-		const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipGuidedLength), 1, LastNode);
-		for (int32 i = 1; i <= LastNode; ++i)
-		{
-			const float AlongRope = static_cast<float>(i) / static_cast<float>(LastNode);
-			const float TailWeight = TailWeightByIndex(i, FirstTailNode, LastNode);
-			const float Weight = FMath::Lerp(RopeMath::SmoothStep(AlongRope), 1.0f, TailWeight * 0.5f);
-			const float Impulse = BaseImpulse * Weight * FMath::Lerp(1.0f, TipBoost, TailWeight);
-			Sim.PrevPositions[i] -= ThrowDir * Impulse;
-		}
-	}
-
-	SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("fresh throw impulse, aim=%s, speed=%.1f"),
-		*WhipGuide.GetAimDir().ToCompactString(), ThrowParams.ThrowSpeed));
-}
-
-FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
-{
-	FRopeWhipGuide::FConfig Config;
-	Config.Duration = WhipDuration;
-	Config.GuidedLength = WhipGuidedLength;
-	Config.SweepAngleDegrees = WhipSweepAngleDegrees;
-	Config.ComponentRopeLength = RopeLength;
-	return Config;
-}
-
-FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams() const
-{
-	FRopeFlightContactDetector::FParams Params;
-	Params.ContactRadius = WrapConfig.ContactRadius;
-	Params.RopeRadius = Radius;
-	Params.PredictiveContactFrames = WrapConfig.PredictiveContactFrames;
-	Params.MinLatchNodes = WrapConfig.MinLatchNodes;
-	Params.FallbackForward = GetForwardVector();
-	return Params;
-}
-
-//Contacting을 후보 판정만 하도록
-void URopeComponent::UpdateContacting(float DeltaTime)
-{
-	// 지금 단계에서는 기존 함수를 재사용한다.
-	// 나중에 여기서 매 프레임 접촉 후보를 다시 수집하고,
-	// tangential speed / winding angle까지 갱신하게 만들면 된다.
-	AdvanceWrappingMotion(DeltaTime);
-
-	if (ShouldDismissContacting())
-	{
-		SetPhase(ERopePhase::Flight, TEXT("contact lost before wrapping"));
-		ResetTransientPhaseState();
-		return;
-	}
-
-	if (ShouldStartWrapping())
-	{
-		StartWrappingFromContacting();
-		return;
-	}
-}
-
-void URopeComponent::StartWrappingFromContacting()
-{
-	//PendingWrapSeed를 바로 BeginWrap에 넣지 않고, WrappingPhase 상태로 변환한다.
-
-	WrappingPhase.State.Reset();
-
-	const USkeletalMeshComponent* Mesh = PendingWrapSeed.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = ResolveWrapTargetMesh();
-	}
-
-	if (!Mesh || PendingWrapSeed.BoneName.IsNone() || PendingWrapSeed.Latched.Num() == 0)
-	{
-		SetPhase(ERopePhase::Flight, TEXT("invalid wrapping seed"));
-		ResetTransientPhaseState();
-		return;
-	}
-
-	const FRopeLatchNode& Latch = PendingWrapSeed.Latched[0];	//무조건 첫 번째 latch node 하나만 기준으로 잡는다
-	FRopeSurfaceAnchor LatchAnchor;
-
-	//좋은 케이스입니다.
-	// 이미 BuildWrapSeedFromContactingState()에서
-	// 실제 contact candidate 기반으로 surface anchor를 만들어둔 경우예요.
-	if (PendingWrapSeed.Anchors.Num() > 0)
-	{
-		LatchAnchor = PendingWrapSeed.Anchors[0];
-		LatchAnchor.Mesh = Mesh;
-	}
-	// 비상비상: 아래 fallback은 contact candidate 기반의 정확한 SDF surface anchor가 없을 때만 쓰는 임시 anchor 경로다.
-	// 현재 rope particle 위치와 임시 normal/tangent로 시작점을 때우므로, wrapping 품질/방향이 흔들릴 수 있다.
-	// 정상 경로는 PendingWrapSeed.Anchors[0]에 실제 contact surface point/normal/tangent가 들어오는 것이다.
-	else if (Sim.Positions.IsValidIndex(Latch.NodeIndex))
-	{
-		const FVector NormalWorld = FVector::UpVector;
-		FVector TangentWorld = FVector::ForwardVector;
-
-		if (Sim.Positions.IsValidIndex(Latch.NodeIndex + 1))
-		{
-			//tangent는 가능하면 다음 rope node 방향을 씁니다.
-			/*이건 “로프가 tail 방향으로 어느 쪽으로 뻗어 있는가”를 잡기 위한 값입니다.
-			이후 Analytic Helix나 Surface Vector Field에서 감기는 방향 WindingSign을 정할 때
-			이 tangent가 중요합니다.*/
-			TangentWorld = (Sim.Positions[Latch.NodeIndex + 1] - Sim.Positions[Latch.NodeIndex])
-				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-		}
-
-		const FTransform BoneXform = Mesh->GetSocketTransform(Latch.Bone);
-		LatchAnchor.NodeIndex = Latch.NodeIndex;
-		LatchAnchor.Bone = Latch.Bone;
-		LatchAnchor.Mesh = Mesh;
-		//현재 latch node 위치를 그냥 bone local surface position처럼 저장합니다.
-		LatchAnchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Sim.Positions[Latch.NodeIndex]);
-		//normal도 실제 SDF normal이 아니라: 임시로 UpVector를 씁니다.
-		LatchAnchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-		LatchAnchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-		LatchAnchor.StartWorldPosition = Sim.Positions[Latch.NodeIndex];
-		LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Radius);
-		LatchAnchor.RopeDistance = 0.0f;
-	}
-
-	if (!WrappingPhase.Begin(LatchAnchor, Mesh, PendingWrapSeed.BoneName,
-		FMath::Max(0.01f, WrapConfig.WrappingMotionDuration), Sim, MakeWrappingContext()))
-	{
-		SetPhase(ERopePhase::Flight, TEXT("no valid wrapping anchors"));
-		ResetTransientPhaseState();
-		return;
-	}
-
-	SetPhase(ERopePhase::Wrapping, *FString::Printf(TEXT("bone=%s, %d anchor(s)"),
-		*WrappingPhase.State.BoneName.ToString(), WrappingPhase.State.Anchors.Num()));
-}
-
-void URopeComponent::UpdateWrapping(float DeltaTime)
-{
-	WrappingPhase.State.Elapsed += DeltaTime;
-
-	if (!WrappingPhase.IsStillValid())
-	{
-		SetPhase(ERopePhase::Releasing, TEXT("invalid wrapping state"));
-		AbortWrapping(ERopeReleaseReason::Broken);
-		return;
-	}
-
-	WrappingPhase.State.LostContactTime = 0.0f;
-	const FRopeWrappingPhase::FContext WrappingCtx = MakeWrappingContext();
-	WrappingPhase.AdvancePathBuild(Sim, WrappingCtx);
-	WrappingPhase.ApplyFrontMotion(Sim, DeltaTime, WrappingCtx);
-
-	WrappingPhase.ApplyMassMask(Sim);
-
-	WrappingPhase.UpdateStability(DeltaTime);
-
-	if (WrappingPhase.IsReadyToCommit(Sim, WrapConfig))
-	{
-		CommitWrapping();
-		return;
-	}
-}
-
-ERopeWrappingPathMode URopeComponent::GetWrappingPathMode() const
-{
-	const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
-	return Settings ? Settings->WrappingPathMode : ERopeWrappingPathMode::SurfaceVectorField;
-}
-
-FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
-{
-	return FRopeWrappingPhase::FContext{ WrapConfig, FrameColliders, GetWrappingPathMode(), Radius, GetName() };
-}
-
-void URopeComponent::CommitWrapping()
-{
-	const USkeletalMeshComponent* Mesh = WrappingPhase.State.Mesh.Get();
-
-	//Wrapping 정보가 적절하지 않으면 바로 releasing
-	if (!Mesh || WrappingPhase.State.BoneName.IsNone() || WrappingPhase.State.Anchors.Num() == 0)
-	{
-		SetPhase(ERopePhase::Releasing, TEXT("commit failed"));
-		AbortWrapping(ERopeReleaseReason::Broken);
-		return;
-	}
-
-	const FRopeWrapState Seed = WrappingPhase.BuildCommitSeed(Sim, Mesh);
-	if (Seed.Anchors.Num() == 0)
-	{
-		SetPhase(ERopePhase::Releasing, TEXT("no valid latches"));
-		AbortWrapping(ERopeReleaseReason::Broken);
-		return;
-	}
-
-	WrapController.BeginWrap(Sim, Seed, Mesh);
-
-	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s)"),
-		*Seed.BoneName.ToString(), Seed.Latched.Num()));
-	ResetTransientPhaseState();
-	OnRopeWrapped.Broadcast(Seed.BoneName);
-}
-
-void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
-{
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] AbortWrapping reason=%d"),
-		*GetName(), static_cast<int32>(Reason));
-
-	WrappingPhase.ReturnNodesToSolver(Sim);
-
-	ResetTransientPhaseState();
-	ReleaseCooldown = ReleaseCooldownSeconds;
-}
+// ===== 시뮬레이션 프레임(서브시스템이 3단계로 구동) ===========================
 
 void URopeComponent::PrepareSimFrame(float DeltaTime)
 {
@@ -489,7 +210,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 
 	case ERopePhase::Wrapped:
 	{
-		// latch된 node는 skinned bone을 따라간다(GT). 솔브 없음.
+		// latch된 node는 skinned bone을 따라간다(GT). latch 노드는 InvMass=0이라 솔브는 자유 구간만.
 		// Hold가 false면 wrap 대상 mesh가 사라진 것(예: cross-actor 대상 액터 파괴) →
 		// 노드를 솔버에 되돌려 안전하게 release한다(dangling 포인터 역참조 방지는 Hold 내부에서).
 		if (!WrapController.Hold(Sim, ResolveWrapTargetMesh(), DeltaTime))
@@ -527,9 +248,9 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		break;
 	}
 
-	// GPU 상주(M5): logic phase(Contacting/Wrapped/Releasing)는 Sim을 out-of-band로 바꾸고, whip은 CPU에서
-	// 위치를 가이드한다 → 다음 GPU step에서 재시드되도록 generation을 올린다. 정상 Free/Flight(비-whip)에선
-	// 불변이라 GPU 버퍼가 상주된 채 매 프레임 in-place로 전진한다.
+	// GPU 상주(M5): 로직 페이즈(Contacting/Wrapping/Wrapped/Releasing)는 Sim을 out-of-band로 바꾸고,
+	// whip은 CPU에서 위치를 가이드한다 → 다음 GPU step에서 재시드되도록 generation을 올린다.
+	// 정상 Free/Flight(비-whip)에선 불변이라 GPU 버퍼가 상주된 채 매 프레임 in-place로 전진한다.
 	const bool bLogicMutatedSim =
 		!bSolveThisFrame ||
 		Phase == ERopePhase::Wrapping ||
@@ -543,7 +264,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 void URopeComponent::SolveSimFrame(float DeltaTime)
 {
 	// 병렬 단계: POD 상태(Sim) + collider 스냅샷(FrameColliders)만 만진다. Query는 const → 스레드 안전.
-	// Free/Flight만 물리 솔브(Contacting/Wrapped/Releasing은 로직 구동 = Prepare에서 GT 처리).
+	// bSolveThisFrame(Free/Flight/Wrapped)일 때만 물리 솔브 — Wrapped는 latch 노드가 InvMass=0이라
+	// 자유 구간만 움직이고, Contacting/Wrapping/Releasing은 로직 구동(Prepare에서 GT 처리)이라 스킵.
 	if (!bSolveThisFrame)
 	{
 		return;
@@ -566,7 +288,8 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	constexpr bool bDebugCapture = false;
 #endif
 
-	// Flight: 솔브 후 이동 경로 기반 접촉 후보 감지 → 캡처. UObject·이벤트라 GT에서.
+	// Flight: 솔브 후 이동 경로 기반 접촉 후보 감지 → 캡처. 파이프라인 자체는
+	// FRopeFlightContactDetector(UObject 비의존)이고, 여기서는 입력 조립 + 전이/이벤트만 한다.
 	if (Phase == ERopePhase::Flight)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FinalizeFlight);
@@ -701,6 +424,149 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 #endif
 }
 
+// ===== UPrimitiveComponent / UMeshComponent =================================
+
+FPrimitiveSceneProxy* URopeComponent::CreateSceneProxy()
+{
+	return new FRopeSceneProxy(this);
+}
+
+int32 URopeComponent::GetNumMaterials() const
+{
+	return 1;
+}
+
+UMaterialInterface* URopeComponent::GetMaterial(int32 /*ElementIndex*/) const
+{
+	return RopeMaterial;
+}
+
+void URopeComponent::SetMaterial(int32 /*ElementIndex*/, UMaterialInterface* Material)
+{
+	RopeMaterial = Material;
+	MarkRenderStateDirty();
+}
+
+FBoxSphereBounds URopeComponent::CalcBounds(const FTransform& LocalToWorld) const
+{
+	// bounds를 컴포넌트(pinned start)에 anchor하되, rope가 어떻게 변형되든 항상 rope를 포함하는 반지름을
+	// 사용한다: chain은 inextensible하므로 어떤 particle도 pin으로부터 RopeLength(+ tube radius)보다 멀리
+	// 떨어지지 않는다. 대신 per-frame sim point로부터 bounds를 도출하면 render thread보다 한 frame 뒤처지며;
+	// 빠른 캐릭터 모션 중에는 rope가 그 tight box를 앞질러 shadow/main pass에서 cull된다 -> 움직이는 동안
+	// shadow가 사라지고 VSM cache는 오래된 afterimage를 유지한다. component transform에 anchor하면 엔진의
+	// 추적되는 transform을 통해 bounds가 캐릭터와 함께 움직이므로, lag도 없고 잘못된 culling도 없다.
+	const float Reach = RopeLength + Radius + 1.0f;
+	return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector(Reach), Reach);
+}
+
+// ===== API ==================================================================
+
+void URopeComponent::Throw(const FVector& AimDir)
+{
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Throw requested (phase=%s, aim=%s)"),
+		*GetName(), PhaseName(Phase), *AimDir.GetSafeNormal().ToCompactString());
+
+	EnsureRopeInitialized();
+	StartFreshThrow(AimDir);
+}
+
+void URopeComponent::ReleaseWrap()
+{
+	if (Phase != ERopePhase::Wrapped && Phase != ERopePhase::Contacting && Phase != ERopePhase::Wrapping)
+		return;
+
+	FName Bone = NAME_None;
+
+	if (Phase == ERopePhase::Wrapped)
+	{
+		Bone = WrapController.State.BoneName;
+	}
+	else if (Phase == ERopePhase::Wrapping)
+	{
+		Bone = WrappingPhase.State.BoneName;
+	}
+	else
+	{
+		Bone = ContactTracker.CandidateBone;
+	}
+
+	SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("manual, bone=%s"), *Bone.ToString()));
+	WrapController.Release(ERopeReleaseReason::Manual);
+	ResetTransientPhaseState();
+	ReleaseCooldown = ReleaseCooldownSeconds;
+	OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Manual);
+}
+
+// ===== 페이즈 상태 머신 ======================================================
+
+void URopeComponent::SetPhase(ERopePhase NewPhase, const TCHAR* Reason)
+{
+	if (Reason)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> %s (%s)"),
+			*GetName(), PhaseName(Phase), PhaseName(NewPhase), Reason);
+	}
+	else
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> %s"),
+			*GetName(), PhaseName(Phase), PhaseName(NewPhase));
+	}
+	Phase = NewPhase;
+}
+
+void URopeComponent::ResetTransientPhaseState()
+{
+	ContactTracker.Reset();
+	PendingWrapSeed.Reset();
+	WrappingPhase.State.Reset();
+	ContactingElapsed = 0.0f;
+}
+
+// ===== 초기화/유틸 ===========================================================
+
+void URopeComponent::InitRope()
+{
+	const int32 N = FMath::Max(2, NumParticles);
+	Sim.Positions.SetNum(N);
+	Sim.PrevPositions.SetNum(N);
+	Sim.InvMass.SetNum(N);
+	Sim.RopeLength = RopeLength;
+	Sim.SegmentLength = RopeLength / static_cast<float>(N - 1);
+
+	const FVector Start = GetComponentLocation();
+	const FVector End = Start + GetForwardVector() * RopeLength;
+	for (int32 i = 0; i < N; ++i)
+	{
+		const float Alpha = static_cast<float>(i) / static_cast<float>(N - 1);
+		Sim.Positions[i] = FMath::Lerp(Start, End, Alpha);
+		Sim.PrevPositions[i] = Sim.Positions[i];
+		Sim.InvMass[i] = 1.0f;
+	}
+
+	// 시작점을 컴포넌트(hand/socket)에 pin한다; solver가 substep에 걸쳐 이를 sweep한다.
+	Sim.InvMass[0] = 0.0f;
+	Sim.bStartPinned = true;
+	Sim.StartPinTarget = Start;
+	Sim.StartPinPrev = Start;
+
+	++SimGeneration; // Sim 전면 재구성 → GPU 상주 버퍼 재시드(M5).
+
+	UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] InitRope: %d particles, length=%.1f, segment=%.2f"),
+		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);
+}
+
+USkeletalMeshComponent* URopeComponent::ResolveWrapTargetMesh()
+{
+	if (!WrapTargetMesh)
+	{
+		if (AActor* Owner = GetOwner())
+		{
+			WrapTargetMesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
+		}
+	}
+	return WrapTargetMesh;
+}
+
 #if WITH_GAMEPLAY_DEBUGGER
 void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 {
@@ -749,40 +615,71 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 }
 #endif
 
-void URopeComponent::SendRenderDynamicData_Concurrent()
+// ===== Throw ================================================================
+
+void URopeComponent::StartFreshThrow(const FVector& AimDir)
 {
-	Super::SendRenderDynamicData_Concurrent();
+	// 채찍 스윙 가이드 좌표계 구성 + 활성화(퇴화 케이스 fallback은 컴포넌트 축).
+	WhipGuide.Begin(AimDir, GetComponentLocation(), GetForwardVector(), GetUpVector(), GetRightVector());
+	WhipElapsed = WhipGuide.GetElapsed();
 
-	if (!SceneProxy || Sim.Num() < 2)
+	++SimGeneration; // throw로 tail 위치를 재설정 → GPU 상주 버퍼 재시드(M5).
+
+	if (WrapController.IsActive())
 	{
-		return;
+		WrapController.Release(ERopeReleaseReason::Manual);
 	}
+	ResetTransientPhaseState();
+	ReleaseCooldown = 0.0f;
 
-	// centerline을 component-local 공간으로 보낸다; proxy는 GetLocalToWorld()를 통해 렌더링한다.
-	const FTransform Xform = GetComponentTransform();
-	FRopeDynamicData* DynamicData = new FRopeDynamicData;
-	DynamicData->bGpuResident = bGpuSteppedThisFrame; // M5b: GPU step된 프레임만 resident PosBuf 직접 렌더 허용.
-	DynamicData->Points.SetNumUninitialized(Sim.Num());
-	for (int32 i = 0; i < Sim.Num(); ++i)
+	const int32 LastNode = Sim.Num() - 1;
+	if (LastNode >= 1)
 	{
-		DynamicData->Points[i] = Xform.InverseTransformPosition(Sim.Positions[i]);
-	}
+		const FVector Start = GetComponentLocation();
+		Sim.bStartPinned = true;
+		Sim.StartPinPrev = Start;
+		Sim.StartPinTarget = Start;
+		Sim.Positions[0] = Start;
+		Sim.PrevPositions[0] = Start;
 
-	FRopeSceneProxy* Proxy = static_cast<FRopeSceneProxy*>(SceneProxy);
-	ENQUEUE_RENDER_COMMAND(RopeUpdateCenterline)(
-		[Proxy, DynamicData](FRHICommandListBase& RHICmdList)
+		for (int32 i = 0; i < Sim.Num(); ++i)
 		{
-			Proxy->SetDynamicData_RenderThread(RHICmdList, DynamicData);
-		});
+			Sim.InvMass[i] = (i == 0) ? 0.0f : 1.0f;
+			Sim.PrevPositions[i] = Sim.Positions[i];
+		}
+
+		// 가이드 구간 노드를 T=0 가이드 곡선 위에 스냅(속도 0).
+		WhipGuide.SnapToInitialPose(Sim, MakeWhipGuideConfig());
+
+		// 던지기 임펄스: PrevPositions를 조준 반대 방향으로 밀어 Verlet 속도를 주입한다.
+		// tail로 갈수록 가중치를 높이고 TipMass로 끝부분을 부스트한다.
+		const FVector ThrowDir = WhipGuide.GetAimDir();
+		const float ReferenceDt = 1.0f / 60.0f;
+		const float BaseImpulse = ThrowParams.ThrowSpeed * ReferenceDt;
+		const float TipBoost = FMath::Clamp(ThrowParams.TipMass / 5.0f, 0.25f, 3.0f);
+		const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipGuidedLength), 1, LastNode);
+		for (int32 i = 1; i <= LastNode; ++i)
+		{
+			const float AlongRope = static_cast<float>(i) / static_cast<float>(LastNode);
+			const float TailWeight = TailWeightByIndex(i, FirstTailNode, LastNode);
+			const float Weight = FMath::Lerp(RopeMath::SmoothStep(AlongRope), 1.0f, TailWeight * 0.5f);
+			const float Impulse = BaseImpulse * Weight * FMath::Lerp(1.0f, TipBoost, TailWeight);
+			Sim.PrevPositions[i] -= ThrowDir * Impulse;
+		}
+	}
+
+	SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("fresh throw impulse, aim=%s, speed=%.1f"),
+		*WhipGuide.GetAimDir().ToCompactString(), ThrowParams.ThrowSpeed));
 }
 
-void URopeComponent::Throw(const FVector& AimDir)
+FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
 {
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Throw requested (phase=%s, aim=%s)"),
-		*GetName(), PhaseName(Phase), *AimDir.GetSafeNormal().ToCompactString());
-
-	EnsureRopeInitialized();
-	StartFreshThrow(AimDir);
+	FRopeWhipGuide::FConfig Config;
+	Config.Duration = WhipDuration;
+	Config.GuidedLength = WhipGuidedLength;
+	Config.SweepAngleDegrees = WhipSweepAngleDegrees;
+	Config.ComponentRopeLength = RopeLength;
+	return Config;
 }
 
 float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const
@@ -796,12 +693,47 @@ float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, in
 	return RopeMath::SmoothStep(T);
 }
 
+// ===== Flight ===============================================================
+
+FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams() const
+{
+	FRopeFlightContactDetector::FParams Params;
+	Params.ContactRadius = WrapConfig.ContactRadius;
+	Params.RopeRadius = Radius;
+	Params.PredictiveContactFrames = WrapConfig.PredictiveContactFrames;
+	Params.MinLatchNodes = WrapConfig.MinLatchNodes;
+	Params.FallbackForward = GetForwardVector();
+	return Params;
+}
+
 void URopeComponent::BuildContactingState(const TArray<FRopeContactCandidate>& Candidates)
 {
 	ContactTracker.Reset();
 	ContactTracker.Update(Candidates, 0.0f);
 	ContactingElapsed = 0.0f;
 	PendingWrapSeed = BuildWrapSeedFromContactingState(Candidates);
+}
+
+// ===== Contacting ===========================================================
+
+void URopeComponent::UpdateContacting(float DeltaTime)
+{
+	// 현재는 체류 타이머만 전진시켜 판정한다.
+	// TODO: 매 프레임 접촉 후보를 재수집하고 tangential speed / winding angle까지 갱신.
+	AdvanceWrappingMotion(DeltaTime);
+
+	if (ShouldDismissContacting())
+	{
+		SetPhase(ERopePhase::Flight, TEXT("contact lost before wrapping"));
+		ResetTransientPhaseState();
+		return;
+	}
+
+	if (ShouldStartWrapping())
+	{
+		StartWrappingFromContacting();
+		return;
+	}
 }
 
 void URopeComponent::AdvanceWrappingMotion(float DeltaTime)
@@ -886,6 +818,158 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 	return Seed;
 }
 
+// ===== Wrapping =============================================================
+
+void URopeComponent::StartWrappingFromContacting()
+{
+	// PendingWrapSeed를 바로 BeginWrap에 넣지 않고, WrappingPhase 상태로 변환한다.
+	WrappingPhase.State.Reset();
+
+	const USkeletalMeshComponent* Mesh = PendingWrapSeed.Mesh.Get();
+	if (!Mesh)
+	{
+		Mesh = ResolveWrapTargetMesh();
+	}
+
+	if (!Mesh || PendingWrapSeed.BoneName.IsNone() || PendingWrapSeed.Latched.Num() == 0)
+	{
+		SetPhase(ERopePhase::Flight, TEXT("invalid wrapping seed"));
+		ResetTransientPhaseState();
+		return;
+	}
+
+	const FRopeLatchNode& Latch = PendingWrapSeed.Latched[0];	//무조건 첫 번째 latch node 하나만 기준으로 잡는다
+	FRopeSurfaceAnchor LatchAnchor;
+
+	// 정상 경로: BuildWrapSeedFromContactingState()가 실제 contact candidate 기반으로
+	// surface anchor를 이미 만들어 둔 경우 — 그대로 사용한다.
+	if (PendingWrapSeed.Anchors.Num() > 0)
+	{
+		LatchAnchor = PendingWrapSeed.Anchors[0];
+		LatchAnchor.Mesh = Mesh;
+	}
+	// 비상비상: 아래 fallback은 contact candidate 기반의 정확한 SDF surface anchor가 없을 때만 쓰는 임시 anchor 경로다.
+	// 현재 rope particle 위치와 임시 normal/tangent로 시작점을 때우므로, wrapping 품질/방향이 흔들릴 수 있다.
+	// 정상 경로는 PendingWrapSeed.Anchors[0]에 실제 contact surface point/normal/tangent가 들어오는 것이다.
+	else if (Sim.Positions.IsValidIndex(Latch.NodeIndex))
+	{
+		const FVector NormalWorld = FVector::UpVector;
+		FVector TangentWorld = FVector::ForwardVector;
+
+		if (Sim.Positions.IsValidIndex(Latch.NodeIndex + 1))
+		{
+			// tangent는 가능하면 다음 rope node 방향을 쓴다 — "로프가 tail 방향으로 어느 쪽으로
+			// 뻗어 있는가"를 잡기 위한 값으로, 이후 Analytic Helix / Surface Vector Field에서
+			// 감기는 방향(WindingSign)을 정할 때 중요하다.
+			TangentWorld = (Sim.Positions[Latch.NodeIndex + 1] - Sim.Positions[Latch.NodeIndex])
+				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		}
+
+		const FTransform BoneXform = Mesh->GetSocketTransform(Latch.Bone);
+		LatchAnchor.NodeIndex = Latch.NodeIndex;
+		LatchAnchor.Bone = Latch.Bone;
+		LatchAnchor.Mesh = Mesh;
+		// 현재 latch node 위치를 bone-local surface position처럼 저장하고,
+		// normal은 실제 SDF normal이 아니라 임시로 UpVector를 쓴다.
+		LatchAnchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Sim.Positions[Latch.NodeIndex]);
+		LatchAnchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		LatchAnchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		LatchAnchor.StartWorldPosition = Sim.Positions[Latch.NodeIndex];
+		LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Radius);
+		LatchAnchor.RopeDistance = 0.0f;
+	}
+
+	if (!WrappingPhase.Begin(LatchAnchor, Mesh, PendingWrapSeed.BoneName,
+		FMath::Max(0.01f, WrapConfig.WrappingMotionDuration), Sim, MakeWrappingContext()))
+	{
+		SetPhase(ERopePhase::Flight, TEXT("no valid wrapping anchors"));
+		ResetTransientPhaseState();
+		return;
+	}
+
+	SetPhase(ERopePhase::Wrapping, *FString::Printf(TEXT("bone=%s, %d anchor(s)"),
+		*WrappingPhase.State.BoneName.ToString(), WrappingPhase.State.Anchors.Num()));
+}
+
+void URopeComponent::UpdateWrapping(float DeltaTime)
+{
+	WrappingPhase.State.Elapsed += DeltaTime;
+
+	if (!WrappingPhase.IsStillValid())
+	{
+		SetPhase(ERopePhase::Releasing, TEXT("invalid wrapping state"));
+		AbortWrapping(ERopeReleaseReason::Broken);
+		return;
+	}
+
+	WrappingPhase.State.LostContactTime = 0.0f;
+	const FRopeWrappingPhase::FContext WrappingCtx = MakeWrappingContext();
+	WrappingPhase.AdvancePathBuild(Sim, WrappingCtx);
+	WrappingPhase.ApplyFrontMotion(Sim, DeltaTime, WrappingCtx);
+
+	WrappingPhase.ApplyMassMask(Sim);
+
+	WrappingPhase.UpdateStability(DeltaTime);
+
+	if (WrappingPhase.IsReadyToCommit(Sim, WrapConfig))
+	{
+		CommitWrapping();
+		return;
+	}
+}
+
+ERopeWrappingPathMode URopeComponent::GetWrappingPathMode() const
+{
+	const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
+	return Settings ? Settings->WrappingPathMode : ERopeWrappingPathMode::SurfaceVectorField;
+}
+
+FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
+{
+	return FRopeWrappingPhase::FContext{ WrapConfig, FrameColliders, GetWrappingPathMode(), Radius, GetName() };
+}
+
+void URopeComponent::CommitWrapping()
+{
+	const USkeletalMeshComponent* Mesh = WrappingPhase.State.Mesh.Get();
+
+	//Wrapping 정보가 적절하지 않으면 바로 releasing
+	if (!Mesh || WrappingPhase.State.BoneName.IsNone() || WrappingPhase.State.Anchors.Num() == 0)
+	{
+		SetPhase(ERopePhase::Releasing, TEXT("commit failed"));
+		AbortWrapping(ERopeReleaseReason::Broken);
+		return;
+	}
+
+	const FRopeWrapState Seed = WrappingPhase.BuildCommitSeed(Sim, Mesh);
+	if (Seed.Anchors.Num() == 0)
+	{
+		SetPhase(ERopePhase::Releasing, TEXT("no valid latches"));
+		AbortWrapping(ERopeReleaseReason::Broken);
+		return;
+	}
+
+	WrapController.BeginWrap(Sim, Seed, Mesh);
+
+	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s)"),
+		*Seed.BoneName.ToString(), Seed.Latched.Num()));
+	ResetTransientPhaseState();
+	OnRopeWrapped.Broadcast(Seed.BoneName);
+}
+
+void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
+{
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] AbortWrapping reason=%d"),
+		*GetName(), static_cast<int32>(Reason));
+
+	WrappingPhase.ReturnNodesToSolver(Sim);
+
+	ResetTransientPhaseState();
+	ReleaseCooldown = ReleaseCooldownSeconds;
+}
+
+// ===== Wrapped ==============================================================
+
 void URopeComponent::ApplyWrappedMassMask()
 {
 	TSet<int32> AnchorNodes;
@@ -913,64 +997,3 @@ void URopeComponent::ApplyWrappedMassMask()
 		Sim.InvMass[i] = (bStartPin || bAnchor) ? 0.0f : 1.0f;
 	}
 }
-
-void URopeComponent::ReleaseWrap()
-{
-	if (Phase != ERopePhase::Wrapped && Phase != ERopePhase::Contacting && Phase != ERopePhase::Wrapping)
-		return;
-
-	FName Bone = NAME_None;
-
-	if (Phase == ERopePhase::Wrapped)
-	{
-		Bone = WrapController.State.BoneName;
-	}
-	else if (Phase == ERopePhase::Wrapping)
-	{
-		Bone = WrappingPhase.State.BoneName;
-	}
-	else
-	{
-		Bone = ContactTracker.CandidateBone;
-	}
-
-	SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("manual, bone=%s"), *Bone.ToString()));
-	WrapController.Release(ERopeReleaseReason::Manual);
-	ResetTransientPhaseState();
-	ReleaseCooldown = ReleaseCooldownSeconds;
-	OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Manual);
-}
-
-FPrimitiveSceneProxy* URopeComponent::CreateSceneProxy()
-{
-	return new FRopeSceneProxy(this);
-}
-
-int32 URopeComponent::GetNumMaterials() const
-{
-	return 1;
-}
-
-UMaterialInterface* URopeComponent::GetMaterial(int32 /*ElementIndex*/) const
-{
-	return RopeMaterial;
-}
-
-void URopeComponent::SetMaterial(int32 /*ElementIndex*/, UMaterialInterface* Material)
-{
-	RopeMaterial = Material;
-	MarkRenderStateDirty();
-}
-
-FBoxSphereBounds URopeComponent::CalcBounds(const FTransform& LocalToWorld) const
-{
-	// bounds를 컴포넌트(pinned start)에 anchor하되, rope가 어떻게 변형되든 항상 rope를 포함하는 반지름을
-	// 사용한다: chain은 inextensible하므로 어떤 particle도 pin으로부터 RopeLength(+ tube radius)보다 멀리
-	// 떨어지지 않는다. 대신 per-frame sim point로부터 bounds를 도출하면 render thread보다 한 frame 뒤처지며;
-	// 빠른 캐릭터 모션 중에는 rope가 그 tight box를 앞질러 shadow/main pass에서 cull된다 -> 움직이는 동안
-	// shadow가 사라지고 VSM cache는 오래된 afterimage를 유지한다. component transform에 anchor하면 엔진의
-	// 추적되는 transform을 통해 bounds가 캐릭터와 함께 움직이므로, lag도 없고 잘못된 culling도 없다.
-	const float Reach = RopeLength + Radius + 1.0f;
-	return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector(Reach), Reach);
-}
-
