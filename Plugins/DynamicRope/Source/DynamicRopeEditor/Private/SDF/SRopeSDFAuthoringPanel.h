@@ -50,6 +50,8 @@ private:
 	bool CanRefresh() const;
 	/** 현재 베이크된 데이터 기준으로 프리뷰 뷰포트 오버레이를 다시 그린다(카메라는 유지). */
 	FReply OnRefreshClicked();
+	/** 오버레이 갱신 본체(베이크 직후 자동 반영 + Refresh 버튼 공용). */
+	void RefreshPreviewOverlay();
 
 	/** 현재 타깃의 SourceMesh를 동기 로드해 프리뷰 뷰포트에 반영한다(없으면 빈 뷰 + 안내). */
 	void RefreshPreviewMesh();

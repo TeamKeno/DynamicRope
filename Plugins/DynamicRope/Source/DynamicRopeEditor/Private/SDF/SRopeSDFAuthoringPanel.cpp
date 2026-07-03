@@ -110,6 +110,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				]
 
 				// Refresh: 현재 베이크된 데이터 기준으로 프리뷰 뷰포트를 다시 그린다.
+				// (베이크 직후에는 자동 반영되므로, 수동 갱신이 필요할 때만 쓴다.)
 				+ SHorizontalBox::Slot()
 				.FillWidth(1.0f)
 				[
@@ -195,7 +196,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				.AutoWrapText(true)
 				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 				.Text(LOCTEXT("OverlayDisabledHint",
-					"No baked data to preview. Bake the asset and press Refresh to enable these overlays."))
+					"No baked data to preview. Bake the asset to enable these overlays."))
 			]
 
 			// 오버레이 컨트롤 전체를 한 컨테이너로 감싼다. 프리뷰 볼륨이 없으면 IsEnabled가 자식 전체로
@@ -535,8 +536,8 @@ FText SRopeSDFAuthoringPanel::GetSliceAxisLabel() const
 
 bool SRopeSDFAuthoringPanel::CanEditOverlay() const
 {
-	// 베이크 여부가 아니라 "지금 뷰포트가 그릴 볼륨 스냅샷이 있는가"가 정확한 기준이다. 베이크 직후라도
-	// Refresh로 스냅샷을 갱신하기 전엔 그릴 게 없으므로 컨트롤을 비활성으로 둔다.
+	// 베이크 여부가 아니라 "지금 뷰포트가 그릴 볼륨 스냅샷이 있는가"가 정확한 기준이다. 베이크 직후에는
+	// 자동 Refresh로 스냅샷이 채워지지만, 그 전(에셋만 선택한 상태 등)엔 그릴 게 없으므로 비활성으로 둔다.
 	return PreviewViewport.IsValid() && PreviewViewport->HasPreviewVolumes();
 }
 
@@ -741,14 +742,17 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 		return FReply::Handled();
 	}
 
-	// 베이크 결과는 자산 메모리에만 반영하고 패키지를 dirty로 표시한다. 디스크 저장은 Save 버튼이,
-	// 뷰포트 반영은 Refresh 버튼이 담당한다(자동 저장 제거).
+	// 베이크 결과는 자산 메모리에만 반영하고 패키지를 dirty로 표시한다. 디스크 저장은 Save 버튼 담당
+	// (자동 저장 제거). 뷰포트에는 아래에서 바로 반영한다.
 	Data->Modify();
 	Data->BoneVolumes = MoveTemp(Volumes);
 	// 베이크에 실제로 사용된 설정을 에셋에 기록 — 다음에 이 에셋을 열면 패널이 이 값을 복원해
 	// 현재 결과와 비교하며 재조정할 수 있다.
 	Data->LastBakeSettings = SettingsSnapshot;
 	Data->MarkPackageDirty();
+
+	// 베이크 결과를 프리뷰 뷰포트에 즉시 반영한다(Refresh 버튼을 따로 누를 필요 없음).
+	RefreshPreviewOverlay();
 
 	UE_LOG(LogRopeSDFBake, Log, TEXT("Baked %s: %d bone volume(s) (unsaved — press Save)."),
 		*Data->GetName(), Data->BoneVolumes.Num());
@@ -802,7 +806,7 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 	}
 
 	FNotificationInfo Info(FText::Format(
-		LOCTEXT("Baked", "Baked {0} bone volume(s). Press Save to write to disk, Refresh to preview."),
+		LOCTEXT("Baked", "Baked {0} bone volume(s). Press Save to write to disk."),
 		FText::AsNumber(Data->BoneVolumes.Num())));
 	Info.ExpireDuration = 5.0f;
 	FSlateNotificationManager::Get().AddNotification(Info);
@@ -866,13 +870,18 @@ bool SRopeSDFAuthoringPanel::CanRefresh() const
 
 FReply SRopeSDFAuthoringPanel::OnRefreshClicked()
 {
+	RefreshPreviewOverlay();
+	return FReply::Handled();
+}
+
+void SRopeSDFAuthoringPanel::RefreshPreviewOverlay()
+{
 	// 메시는 그대로 두어 카메라를 유지하고, 베이크된 데이터 출처만 다시 지정해 오버레이를 다시 그린다.
 	if (PreviewViewport.IsValid())
 	{
 		PreviewViewport->SetPreviewData(Target.Get());
 		PreviewViewport->InvalidatePreview();
 	}
-	return FReply::Handled();
 }
 
 #undef LOCTEXT_NAMESPACE
