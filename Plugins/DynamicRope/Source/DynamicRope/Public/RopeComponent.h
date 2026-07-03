@@ -12,6 +12,7 @@
 #include "Logic/RopeWrapController.h"
 #include "Logic/RopeWhipGuide.h"
 #include "Logic/RopeFlightContactDetector.h"
+#include "Logic/RopeWrappingPhase.h"
 #include "RopeComponent.generated.h"
 
 class AActor;
@@ -171,7 +172,7 @@ private:
 	FRopeWrapController WrapController;
 	FRopeContactTracker ContactTracker;
 	FRopeWrapState      PendingWrapSeed;	//초기 연결용, 임시 Seed
-	FRopeWrappingState  WrappingState;
+	FRopeWrappingPhase  WrappingPhase;		//Wrapping 페이즈 로직(경로 점진 생성+front 모션+마스크). 작업 상태는 .State
 	FRopeWhipGuide      WhipGuide;			//던지기 초반 채찍 스윙(가이드 타깃 계산+적용)
 
 	float ReleaseCooldown = 0.0f;
@@ -212,7 +213,7 @@ private:
 
 	/**
 	 * 페이즈 전이 시 함께 폐기해야 하는 "진행 중 작업" 일시 상태 세트를 리셋한다:
-	 * ContactTracker / PendingWrapSeed / WrappingState / ContactingElapsed.
+	 * ContactTracker / PendingWrapSeed / WrappingPhase.State / ContactingElapsed.
 	 * 유휴 상태의 멤버에 대해서는 no-op이라 어떤 전이에서 불러도 안전하다.
 	 * (ReleaseCooldown은 전이마다 값이 달라 호출자가 직접 설정한다.)
 	 */
@@ -255,6 +256,8 @@ private:
 #pragma endregion
 
 #pragma region Wrapping 관련 함수
+	// 경로 생성/front 모션/마스크 등 Wrapping 페이즈의 실제 로직은 FRopeWrappingPhase(WrappingPhase)로
+	// 분리됐다. 여기엔 페이즈 전이·이벤트를 결정하는 오케스트레이션만 남는다.
 
 	void UpdateContacting(float DeltaTime);
 
@@ -262,62 +265,11 @@ private:
 
 	void UpdateWrapping(float DeltaTime);
 
-	bool IsWrappingStillValid() const;
-
-	bool BuildWrappingAnchorsFromLatch(const FRopeSurfaceAnchor& LatchAnchor);
-
-	bool BuildWrapPathFromLatch(const FRopeSurfaceAnchor& LatchAnchor,
-		int32 NumTailNodes, TArray<FRopeWrapPathPoint>& OutPath) const;
-
-	bool BuildAnalyticHelixPath(const FRopeSurfaceAnchor& LatchAnchor,
-		int32 NumTailNodes, TArray<FRopeWrapPathPoint>& OutPath) const;
-
-	bool BuildSurfaceVectorFieldPath(const FRopeSurfaceAnchor& LatchAnchor,
-		int32 NumTailNodes, TArray<FRopeWrapPathPoint>& OutPath) const;
-
-	bool BuildWrappingAnchorsFromPath(const FRopeSurfaceAnchor& LatchAnchor,
-		const TArray<FRopeWrapPathPoint>& Path);
-
-	bool BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor& LatchAnchor);
-
-	void AdvanceProgressiveWrapPathBuild();
-
-	bool AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex);
-
-	bool InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor);
-
-	bool AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 StepBudget);
-
-	bool AppendWrappingAnchorFromPathPoint(int32 PathIndex);
-
-	FVector ComputeSurfaceVectorFieldTangent(const FVector& AxisOrigin, const FVector& AxisDirection,
-		const FVector& LatchRadial, float WindingSign, const FVector& SurfaceWorld,
-		const FVector& NormalWorld, FVector& InOutCircumferenceDir) const;
-
-	bool ComputeWrapSurfaceTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
-		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
-
-	bool ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
-		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
-
-	bool ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
-		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
-
-	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor,
-		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;
-
+	/** 프로젝트 설정(UDynamicRopeSettings)에서 감김 경로 모드를 해석한다. */
 	ERopeWrappingPathMode GetWrappingPathMode() const;
 
-	bool ProjectWrapPointToSurface(FName Bone, const USkeletalMeshComponent* Mesh,
-		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld) const;
-
-	void AdvanceWrappingFront(float DeltaTime);
-
-	bool SampleWrappingPath(float DistanceFromLatch, FRopeWrapPathPoint& OutPoint) const;
-
-	void ApplyWrappingFrontMotion(float DeltaTime);
-
-	void ApplyWrappingMassMask();
+	/** WrappingPhase에 넘길 호출 컨텍스트(WrapConfig/collider 스냅샷/경로 모드/튜브 반지름/로그 이름). */
+	FRopeWrappingPhase::FContext MakeWrappingContext() const;
 
 	void CommitWrapping();
 
