@@ -98,6 +98,8 @@ public:
 protected:
 	// SEditorViewport
 	virtual TSharedRef<FEditorViewportClient> MakeEditorViewportClient() override;
+	/** 상단 뷰포트 툴바(UE 5.7 통합 툴바): 카메라(스피드 포함) + 뷰 모드(와이어프레임 전환) 메뉴. */
+	virtual TSharedPtr<SWidget> BuildViewportToolbar() override;
 
 private:
 	/** 조명/바닥/환경을 제공하는 프리뷰 월드. */
