@@ -245,6 +245,8 @@ private:
 
 #pragma region Contacting 관련 함수
 
+	void UpdateContacting(float DeltaTime);
+
 	void AdvanceWrappingMotion(float DeltaTime);
 
 	bool ShouldDismissContacting() const;
@@ -258,8 +260,6 @@ private:
 #pragma region Wrapping 관련 함수
 	// 경로 생성/front 모션/마스크 등 Wrapping 페이즈의 실제 로직은 FRopeWrappingPhase(WrappingPhase)로
 	// 분리됐다. 여기엔 페이즈 전이·이벤트를 결정하는 오케스트레이션만 남는다.
-
-	void UpdateContacting(float DeltaTime);
 
 	void StartWrappingFromContacting();
 

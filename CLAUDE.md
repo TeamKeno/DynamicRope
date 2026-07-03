@@ -56,15 +56,17 @@ To run/iterate behavior, open the `.uproject` in the editor and Play.
 ## Architecture (the big picture)
 
 `URopeComponent` (`RopeComponent.h`) is the **Facade** and the single UE integration point. Attach it
-to an actor, call `Throw()`. It owns the sim state, the solver, the wrap controller, and a
-**phase state machine** (`ERopePhase`). The component does **not** tick itself: `URopeSimSubsystem`
+to an actor, call `Throw()`. It owns the sim state, the solver, the logic-side F-classes, and a
+**phase state machine** (`ERopePhase`) — all `Phase` assignments go through `SetPhase()` (uniform
+transition log), and the transient per-attempt state (tracker/seed/wrapping state/timer) is dropped
+together via `ResetTransientPhaseState()`. The component does **not** tick itself: `URopeSimSubsystem`
 drives every registered rope each frame via `PrepareSimFrame` → `SolveSimFrame` (run in parallel
 across ropes) → `FinalizeSimFrame`, and gathers colliders once per frame for all of them. Each phase
 decides whether the rope is governed by *physics* or by *logic*:
 
 ```
-Free → Flight → Contacting → Wrapped → Releasing → Free
-└─ physics (solver) ─┘ └──── logic (wrap controller) ────┘
+Free → Flight → Contacting → Wrapping → Wrapped → Releasing → Free
+└─ physics (solver) ─┘ └───────── logic (Logic/ F-classes) ─────────┘
 ```
 
 The hard split — **"during the wrap = physics, after the wrap = data + constraints"** — is the
@@ -76,12 +78,25 @@ unit-testable and portable to a compute shader (see `DynamicRopeShaders`). Runs 
 Contacting/Wrapped/Releasing are logic-driven (no solve). Uses substeps ("small steps") +
 distance/bending/collision constraints.
 
-**Logic side (`FRopeWrapController`, `Logic/`)**: everything *after* a wrap is decided. `DecideWrap`
-is the physics→logic gate (requires `MinLatchNodes` nodes in sustained contact with one bone for
-`WrapDecisionTime`). `BeginWrap` freezes the contact nodes into **bone-local** space; `Hold`
-re-places them on the skinned bone each frame so the wrap follows animation (returning `false` if the
-wrapped mesh was destroyed, so the caller releases); `Release` hands the nodes back to the solver.
-`Pull` is declared but currently a stub.
+**Logic side (`Logic/`)** — one UObject-free F-class per phase behavior; the component only
+orchestrates transitions/broadcasts. UObject context (config, collider snapshot, fallback axes,
+owner name for logs) is injected per call as params/context structs, so all of these are
+unit-testable without a world:
+- `FRopeWhipGuide`: the throw's whip-swing presentation (Flight). Computes guide-curve targets +
+  guided-node mask as *data* (GPU-port seam: only its apply-loop becomes a kernel later) and snaps
+  guided nodes to them each frame while active.
+- `FRopeFlightContactDetector` (stateless, all static): the Flight contact pipeline — actual +
+  predicted contact candidates, relative-motion scoring, capture decision. Consumes positions only,
+  so it survives the CPU→GPU solver switch. Unit tests in `Tests/RopeFlightContactDetectorTests.cpp`.
+- `FRopeWrappingPhase`: the Wrapping phase — owns `FRopeWrappingState` (`.State`), progressive wrap
+  path build (AnalyticHelix / SurfaceVectorField), front motion along the path, mass masking,
+  commit-readiness, and commit-seed assembly for the handoff to the wrap controller.
+- `FRopeWrapController`: everything *after* a wrap is decided. `DecideWrap` is the physics→logic
+  gate (requires `MinLatchNodes` nodes in sustained contact with one bone for `WrapDecisionTime`).
+  `BeginWrap` freezes the contact nodes into **bone-local** space; `Hold` re-places them on the
+  skinned bone each frame so the wrap follows animation (returning `false` if the wrapped mesh was
+  destroyed, so the caller releases); `Release` hands the nodes back to the solver. `Pull` is
+  declared but currently a stub.
 
 **Collision abstraction (`Collision/`)**: the solver only ever calls `IRopeCollider::Query()` — it
 never knows whether the collider is a capsule, a per-bone SDF, or a world distance field.
