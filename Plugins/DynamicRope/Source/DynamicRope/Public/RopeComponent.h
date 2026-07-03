@@ -11,6 +11,7 @@
 #include "Solver/RopeXPBDSolver.h"
 #include "Logic/RopeWrapController.h"
 #include "Logic/RopeWhipGuide.h"
+#include "Logic/RopeFlightContactDetector.h"
 #include "RopeComponent.generated.h"
 
 class AActor;
@@ -231,35 +232,13 @@ private:
 #pragma endregion
 
 #pragma region Flight 관련 함수
-	void DetectContactCandidates(const TArray<FVector>& PrevPositions, const TArray<FVector>& Positions,
-		const TArray<IRopeCollider*>& Colliders, TArray<FRopeContactCandidate>& OutCandidates) const;
+	// 접촉 감지 파이프라인 자체는 FRopeFlightContactDetector(정적, UObject 비의존)로 분리됐다.
+	// 여기엔 UObject 컨텍스트가 필요한 조립 코드만 남는다.
 
-	void AddPredictedContactCandidates(TArray<FRopeContactCandidate>& InOutCandidates, float DeltaTime) const;
-
-	void EvaluateRelativeMotion(TArray<FRopeContactCandidate>& Candidates) const;
-
-	FVector ExpectedWrapTangent(const FRopeContactCandidate& Candidate) const;
-
-	bool ShouldCapture(const TArray<FRopeContactCandidate>& Candidates) const;
+	/** 검출기에 넘길 파라미터 스냅샷(WrapConfig + 튜브 반지름 + 컴포넌트 전방). */
+	FRopeFlightContactDetector::FParams MakeFlightDetectParams() const;
 
 	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates);
-
-	bool IsTailNode(int32 NodeIndex) const;
-
-	bool ShouldRunPredictiveContactForNode(int32 NodeIndex, bool bHasGuidedNodes, const FVector& FrameDisplacement) const;
-
-	float NodeSpeed(int32 NodeIndex) const;
-
-	bool IsNearAnyColliderSegment(const FVector& PrevPosition, const FVector& Position, const TArray<IRopeCollider*>& Colliders) const;
-
-	void GatherNearbyColliders(const FVector& PrevPosition, const FVector& Position,
-		const TArray<IRopeCollider*>& Colliders, TArray<IRopeCollider*>& OutNearbyColliders) const;
-
-	FRopeContact SweepOrSampleContact(const FVector& PrevPosition, const FVector& Position, const TArray<IRopeCollider*>& Colliders) const;
-
-	FRopeContactCandidate MakeCandidate(int32 NodeIndex, const FRopeContact& Contact) const;
-
-	bool IsWrappableBone(FName Bone) const { return !Bone.IsNone(); }
 
 #pragma endregion
 

@@ -262,167 +262,15 @@ FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
 	return Config;
 }
 
-void URopeComponent::DetectContactCandidates(const TArray<FVector>& PrevPositions, const TArray<FVector>& Positions,
-	const TArray<IRopeCollider*>& Colliders, TArray<FRopeContactCandidate>& OutCandidates) const
+FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams() const
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightDetectContactCandidates);
-	TArray<IRopeCollider*> NearbyColliders;
-	for (int32 i = 0; i < Sim.Num(); ++i)
-	{
-		if (!PrevPositions.IsValidIndex(i) || !Positions.IsValidIndex(i))
-		{
-			continue;
-		}
-
-		bool bFast = IsTailNode(i) || NodeSpeed(i) > Sim.SegmentLength;
-		GatherNearbyColliders(PrevPositions[i], Positions[i], Colliders, NearbyColliders);
-		bool bNearBody = NearbyColliders.Num() > 0;
-
-		if (!bFast && !bNearBody)
-			continue;
-		if (!bNearBody)
-			continue;
-
-		// 현재 위치만 보지 않고 이동 경로를 본다.
-		// 캡슐은 segment-vs-capsule로 가능.
-		// SDF는 path를 몇 개 샘플링하거나 SweepQuery adapter가 필요.
-		FRopeContact Contact = SweepOrSampleContact(PrevPositions[i], Positions[i], NearbyColliders);
-
-		if (Contact.bHit)
-		{
-			FRopeContactCandidate Candidate = MakeCandidate(i, Contact);
-			Candidate.Source = ERopeContactCandidateSource::Actual;
-			Candidate.SourceMask = static_cast<uint8>(Candidate.Source);
-			OutCandidates.Add(Candidate);
-		}
-	}
-}
-
-void URopeComponent::AddPredictedContactCandidates(TArray<FRopeContactCandidate>& InOutCandidates, float DeltaTime) const
-{
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightAddPredictedContactCandidates);
-	const float PredictionFrames = FMath::Max(0.0f, WrapConfig.PredictiveContactFrames);
-	if (PredictionFrames <= KINDA_SMALL_NUMBER || Sim.Num() == 0)
-	{
-		return;
-	}
-
-	auto AddUniqueCandidate = [&InOutCandidates](const FRopeContactCandidate& Candidate)
-	{
-		for (FRopeContactCandidate& Existing : InOutCandidates)
-		{
-			if (Existing.NodeIndex == Candidate.NodeIndex && Existing.Bone == Candidate.Bone && Existing.Mesh == Candidate.Mesh)
-			{
-				Existing.SourceMask |= Candidate.SourceMask;
-				if (Candidate.Source == ERopeContactCandidateSource::PredictiveGuided ||
-					(Existing.Source == ERopeContactCandidateSource::Actual && Candidate.Source == ERopeContactCandidateSource::PredictiveFree))
-				{
-					Existing.Source = Candidate.Source;
-				}
-				return;
-			}
-		}
-
-		InOutCandidates.Add(Candidate);
-	};
-
-	TArray<FVector> NextGuideTargets;
-	TArray<IRopeCollider*> NearbyColliders;
-	const bool bHasGuidedNodes = Phase == ERopePhase::Flight && WhipGuide.GetGuidedNodeMask().Num() > 0;
-	if (bHasGuidedNodes)
-	{
-		WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargets);
-	}
-
-	for (int32 i = 0; i < Sim.Num(); ++i)
-	{
-		if (!Sim.Positions.IsValidIndex(i) || !Sim.PrevPositions.IsValidIndex(i))
-		{
-			continue;
-		}
-
-		FVector CurrentPosition = Sim.Positions[i];
-		FVector PredictedPosition = CurrentPosition;
-		const FVector FrameDisplacement = Sim.Positions[i] - Sim.PrevPositions[i];
-		if (!ShouldRunPredictiveContactForNode(i, bHasGuidedNodes, FrameDisplacement))
-		{
-			continue;
-		}
-
-		const bool bGuidedNode = bHasGuidedNodes && WhipGuide.IsGuidedNodeThisFrame(i);
-		const bool bTailNode = IsTailNode(i);
-		const bool bFastNode = FrameDisplacement.Size() > Sim.SegmentLength;
-
-		bool bFastEnoughForPrediction = false;
-		ERopeContactCandidateSource Source = ERopeContactCandidateSource::PredictiveFree;
-
-		if (bGuidedNode && WhipGuide.GetCurrentTargets().IsValidIndex(i))
-		{
-			Source = ERopeContactCandidateSource::PredictiveGuided;
-			CurrentPosition = WhipGuide.GetCurrentTargets()[i];
-			if (NextGuideTargets.IsValidIndex(i))
-			{
-				PredictedPosition = CurrentPosition + (NextGuideTargets[i] - CurrentPosition) * PredictionFrames;
-			}
-			else
-			{
-				const FVector PrevGuidePosition = WhipGuide.GetPrevTargets().IsValidIndex(i)
-					? WhipGuide.GetPrevTargets()[i]
-					: Sim.PrevPositions[i];
-				PredictedPosition = CurrentPosition + (CurrentPosition - PrevGuidePosition) * PredictionFrames;
-			}
-
-			bFastEnoughForPrediction = FVector::Dist(CurrentPosition, PredictedPosition) > KINDA_SMALL_NUMBER;
-		}
-		else
-		{
-			PredictedPosition = CurrentPosition + FrameDisplacement * PredictionFrames;
-			bFastEnoughForPrediction = bTailNode || bFastNode;
-		}
-
-		GatherNearbyColliders(CurrentPosition, PredictedPosition, FrameColliders, NearbyColliders);
-		const bool bPredictedPathNearBody = NearbyColliders.Num() > 0;
-		if (!bFastEnoughForPrediction && !bPredictedPathNearBody)
-		{
-			continue;
-		}
-		if (!bPredictedPathNearBody)
-		{
-			continue;
-		}
-
-		// If a bone surface exists between the current node position and predicted next position,
-		// promote it to the same candidate path that later builds the latch seed.
-		const FRopeContact Contact = SweepOrSampleContact(CurrentPosition, PredictedPosition, NearbyColliders);
-		if (!Contact.bHit || Contact.Bone.IsNone())
-		{
-			continue;
-		}
-
-		FRopeContactCandidate Candidate = MakeCandidate(i, Contact);
-		Candidate.Source = Source;
-		Candidate.SourceMask = static_cast<uint8>(Source);
-		AddUniqueCandidate(Candidate);
-	}
-}
-
-void URopeComponent::EvaluateRelativeMotion(TArray<FRopeContactCandidate>& Candidates) const
-{
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateRelativeMotion);
-	for (FRopeContactCandidate& Candidate : Candidates)
-	{
-		if (!Sim.Positions.IsValidIndex(Candidate.NodeIndex) || !Sim.PrevPositions.IsValidIndex(Candidate.NodeIndex))
-		{
-			continue;
-		}
-
-		const FVector RopeVelocity = Sim.Positions[Candidate.NodeIndex] - Sim.PrevPositions[Candidate.NodeIndex];
-		const FVector RelativeVelocity = RopeVelocity - Candidate.SurfaceVelocity;
-		const FVector TangentVelocity = RelativeVelocity - FVector::DotProduct(RelativeVelocity, Candidate.Normal) * Candidate.Normal;
-
-		Candidate.RelativeTangentialSpeed = TangentVelocity.Size();
-		Candidate.WrapDirectionScore = FVector::DotProduct(TangentVelocity.GetSafeNormal(), ExpectedWrapTangent(Candidate));
-	}
+	FRopeFlightContactDetector::FParams Params;
+	Params.ContactRadius = WrapConfig.ContactRadius;
+	Params.RopeRadius = Radius;
+	Params.PredictiveContactFrames = WrapConfig.PredictiveContactFrames;
+	Params.MinLatchNodes = WrapConfig.MinLatchNodes;
+	Params.FallbackForward = GetForwardVector();
+	return Params;
 }
 
 //Contacting을 후보 판정만 하도록
@@ -1914,6 +1762,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	if (Phase == ERopePhase::Flight)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FinalizeFlight);
+		const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams();
 		TArray<FRopeContactCandidate> Candidates;
 		TArray<FRopeFlightNodeDebug> FlightNodeDebug;
 		if (bDebugCapture)
@@ -1930,12 +1779,14 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 				NodeDebug.NodeIndex = i;
 				NodeDebug.PrevPosition = Sim.PrevPositions[i];
 				NodeDebug.Position = Sim.Positions[i];
-				NodeDebug.NodeSpeed = NodeSpeed(i);
-				NodeDebug.bFast = IsTailNode(i) || NodeDebug.NodeSpeed > Sim.SegmentLength;
-				NodeDebug.bNearBody = IsNearAnyColliderSegment(NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders);
+				NodeDebug.NodeSpeed = FRopeFlightContactDetector::NodeSpeed(Sim, i);
+				NodeDebug.bFast = FRopeFlightContactDetector::IsTailNode(Sim, i) || NodeDebug.NodeSpeed > Sim.SegmentLength;
+				NodeDebug.bNearBody = FRopeFlightContactDetector::IsNearAnyColliderSegment(
+					NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders, DetectParams);
 				if (NodeDebug.bFast || NodeDebug.bNearBody)
 				{
-					NodeDebug.Contact = SweepOrSampleContact(NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders);
+					NodeDebug.Contact = FRopeFlightContactDetector::SweepOrSampleContact(
+						Sim, NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders, DetectParams);
 				}
 
 				if (NodeDebug.bFast || NodeDebug.bNearBody || NodeDebug.Contact.bHit)
@@ -1945,17 +1796,30 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			}
 		}
 
+		// whip 가이드 활성 프레임엔 예측 접촉용 데이터 뷰를 구성한다(다음 프레임 타깃 미리보기 포함).
+		// 예측이 꺼져 있으면(PredictiveContactFrames<=0) 검출기가 어차피 early-out이라 미리보기를 만들지 않는다.
+		FRopeFlightContactDetector::FWhipGuideView WhipView;
+		TArray<FVector> NextGuideTargets;
+		if (WrapConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
+		{
+			WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargets);
+			WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
+			WhipView.CurrentTargets = &WhipGuide.GetCurrentTargets();
+			WhipView.PrevTargets = &WhipGuide.GetPrevTargets();
+			WhipView.NextTargets = &NextGuideTargets;
+		}
+
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightActualContacts);
-			DetectContactCandidates(Sim.PrevPositions, Sim.Positions, FrameColliders, Candidates);
+			FRopeFlightContactDetector::DetectContactCandidates(Sim, FrameColliders, DetectParams, Candidates);
 		}
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightPredictiveContacts);
-			AddPredictedContactCandidates(Candidates, DeltaTime);
+			FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, FrameColliders, DetectParams, WhipView, Candidates);
 		}
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCandidates);
-			EvaluateRelativeMotion(Candidates);
+			FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
 		}
 
 		FRopeContactTracker FlightDebugTracker;
@@ -1966,7 +1830,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		bool bShouldCapture = false;
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCapture);
-			bShouldCapture = ShouldCapture(Candidates);
+			bShouldCapture = FRopeFlightContactDetector::ShouldCapture(Candidates, DetectParams);
 		}
 		if (bShouldCapture)
 		{
@@ -2124,120 +1988,6 @@ float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, in
 	return SmoothStep(T);
 }
 
-bool URopeComponent::IsTailNode(int32 NodeIndex) const
-{
-	return NodeIndex >= FMath::Max(1, Sim.Num() - 4);
-}
-
-bool URopeComponent::ShouldRunPredictiveContactForNode(int32 NodeIndex, bool bHasGuidedNodes, const FVector& FrameDisplacement) const
-{
-	if (!bHasGuidedNodes)
-	{
-		return true;
-	}
-
-	return WhipGuide.IsGuidedNodeThisFrame(NodeIndex) || IsTailNode(NodeIndex) || FrameDisplacement.Size() > Sim.SegmentLength;
-}
-
-float URopeComponent::NodeSpeed(int32 NodeIndex) const
-{
-	if (!Sim.Positions.IsValidIndex(NodeIndex) || !Sim.PrevPositions.IsValidIndex(NodeIndex))
-	{
-		return 0.0f;
-	}
-	return (Sim.Positions[NodeIndex] - Sim.PrevPositions[NodeIndex]).Size();
-}
-
-bool URopeComponent::IsNearAnyColliderSegment(const FVector& PrevPosition, const FVector& Position, const TArray<IRopeCollider*>& Colliders) const
-{
-	TArray<IRopeCollider*> NearbyColliders;
-	GatherNearbyColliders(PrevPosition, Position, Colliders, NearbyColliders);
-	return NearbyColliders.Num() > 0;
-}
-
-void URopeComponent::GatherNearbyColliders(const FVector& PrevPosition, const FVector& Position,
-	const TArray<IRopeCollider*>& Colliders, TArray<IRopeCollider*>& OutNearbyColliders) const
-{
-	OutNearbyColliders.Reset();
-
-	FBox SegmentBounds(ForceInit);
-	SegmentBounds += PrevPosition;
-	SegmentBounds += Position;
-	SegmentBounds = SegmentBounds.ExpandBy(WrapConfig.ContactRadius + Radius + 5.0f);
-
-	for (IRopeCollider* Collider : Colliders)
-	{
-		if (Collider && SegmentBounds.Intersect(Collider->GetWorldBounds().ExpandBy(WrapConfig.ContactRadius + Radius)))
-		{
-			OutNearbyColliders.Add(Collider);
-		}
-	}
-}
-
-FRopeContact URopeComponent::SweepOrSampleContact(const FVector& PrevPosition, const FVector& Position, const TArray<IRopeCollider*>& Colliders) const
-{
-	FRopeContact Best;
-	const float Travel = FVector::Dist(PrevPosition, Position);
-	const int32 SampleCount = FMath::Clamp(FMath::CeilToInt(Travel / FMath::Max(Sim.SegmentLength, 1.0f)), 1, 4);
-
-	for (int32 SampleIdx = 0; SampleIdx <= SampleCount; ++SampleIdx)
-	{
-		const float Alpha = static_cast<float>(SampleIdx) / static_cast<float>(SampleCount);
-		const FVector SamplePos = FMath::Lerp(PrevPosition, Position, Alpha);
-		for (const IRopeCollider* Collider : Colliders)
-		{
-			if (!Collider)
-			{
-				continue;
-			}
-
-			const FRopeContact Contact = Collider->Query(SamplePos, WrapConfig.ContactRadius);
-			if (Contact.bHit && (!Best.bHit || Contact.Penetration > Best.Penetration))
-			{
-				Best = Contact;
-			}
-		}
-	}
-
-	return Best;
-}
-
-FRopeContactCandidate URopeComponent::MakeCandidate(int32 NodeIndex, const FRopeContact& Contact) const
-{
-	FRopeContactCandidate Candidate;
-	Candidate.bValid = Contact.bHit && !Contact.Bone.IsNone();
-	Candidate.NodeIndex = NodeIndex;
-	Candidate.Bone = Contact.Bone;
-	Candidate.Mesh = Contact.SourceMesh;
-	Candidate.Source = ERopeContactCandidateSource::Actual;
-	Candidate.SourceMask = static_cast<uint8>(Candidate.Source);
-	Candidate.WorldPoint = Contact.SurfacePoint;
-	Candidate.Normal = Contact.Normal.GetSafeNormal();
-	Candidate.Penetration = Contact.Penetration;
-	Candidate.WrapDirectionScore = 0.0f;
-
-	//움직이는 bone 위에서 로프가 상대적으로 어떻게 미끄러지는지 판단할 때 필요함.
-	Candidate.SurfaceVelocity = Contact.SurfaceVelocity;
-
-	return Candidate;
-}
-
-FVector URopeComponent::ExpectedWrapTangent(const FRopeContactCandidate& Candidate) const
-{
-	const FVector ToHand = (Sim.Num() > 0) ? (Sim.Positions[0] - Candidate.WorldPoint).GetSafeNormal() : GetForwardVector();
-	const FVector Tangent = ToHand - FVector::DotProduct(ToHand, Candidate.Normal) * Candidate.Normal;
-	return Tangent.GetSafeNormal(UE_SMALL_NUMBER, GetForwardVector());
-}
-
-bool URopeComponent::ShouldCapture(const TArray<FRopeContactCandidate>& Candidates) const
-{
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCaptureImpl);
-	FRopeContactTracker TempTracker;
-	TempTracker.Update(Candidates, 0.0f);
-	return TempTracker.CandidateNodes.Num() >= FMath::Max(1, WrapConfig.MinLatchNodes)
-		&& IsWrappableBone(TempTracker.CandidateBone);
-}
-
 void URopeComponent::BuildContactingState(const TArray<FRopeContactCandidate>& Candidates)
 {
 	ContactTracker.Reset();
@@ -2302,7 +2052,7 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 		if (LatchCandidate && Mesh)
 		{
 			const FVector NormalWorld = LatchCandidate->Normal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-			FVector TangentWorld = ExpectedWrapTangent(*LatchCandidate);
+			FVector TangentWorld = FRopeFlightContactDetector::ExpectedWrapTangent(Sim, *LatchCandidate, GetForwardVector());
 			if (Sim.Positions.IsValidIndex(NodeIndex + 1))
 			{
 				TangentWorld = Sim.Positions[NodeIndex + 1] - Sim.Positions[NodeIndex];
