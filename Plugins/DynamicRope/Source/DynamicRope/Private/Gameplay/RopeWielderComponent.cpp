@@ -216,6 +216,7 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& /*AimD
 	Context.FrameMode = ThrowFrameMode;
 	Context.SwingPlane = SwingPlane;
 	Context.CustomSwingPlaneNormal = CustomSwingPlaneNormal;
+	Context.ThrowSpeed = ThrowSpeed;
 
 	if (AttachMesh)
 	{

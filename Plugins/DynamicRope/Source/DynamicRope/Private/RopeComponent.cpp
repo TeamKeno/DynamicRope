@@ -660,6 +660,7 @@ FRopeThrowContext URopeComponent::MakeDefaultThrowContext(const FVector& /*AimDi
 	FRopeThrowContext Context;
 	Context.Origin = GetComponentLocation();
 	Context.FrameMode = ThrowParams.FrameMode;
+	Context.ThrowSpeed = ThrowParams.ThrowSpeed;
 	Context.FrameForward = GetForwardVector();
 	Context.FrameUp = ThrowParams.FrameMode == ERopeThrowFrameMode::World ? FVector::UpVector : GetUpVector();
 	Context.FrameRight = ThrowParams.FrameMode == ERopeThrowFrameMode::World ? FVector::RightVector : GetRightVector();
@@ -700,6 +701,10 @@ FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& T
 	Resolved.FrameUp = FRopeWhipGuide::SafeNormalOr(Resolved.FrameUp, FVector::UpVector);
 	Resolved.FrameRight = FRopeWhipGuide::SafeNormalOr(Resolved.FrameRight, FVector::CrossProduct(Resolved.FrameUp, Resolved.FrameForward));
 	Resolved.AimDirection = Resolved.FrameForward;
+	if (Resolved.ThrowSpeed <= 0.0f)
+	{
+		Resolved.ThrowSpeed = ThrowParams.ThrowSpeed;
+	}
 	if (Resolved.Origin.IsNearlyZero())
 	{
 		Resolved.Origin = GetComponentLocation();
@@ -722,7 +727,7 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 
 	// 채찍 스윙 가이드 좌표계 구성 + 활성화(퇴화 케이스 fallback은 컴포넌트 축).
 	WhipGuide.Begin(SwingBasis.AimDir, ResolvedThrow.Origin,
-		ResolvedThrow.FrameForward, SwingBasis.GuideUp, SwingBasis.GuideRight);
+		ResolvedThrow.FrameForward, SwingBasis.GuideUp, SwingBasis.GuideRight, ResolvedThrow.ThrowSpeed);
 	WhipElapsed = WhipGuide.GetElapsed();
 
 	++SimGeneration; // throw로 tail 위치를 재설정 → GPU 상주 버퍼 재시드(M5).
@@ -757,7 +762,7 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 		// tail로 갈수록 가중치를 높이고 TipMass로 끝부분을 부스트한다.
 		const FVector ThrowDir = WhipGuide.GetAimDir();
 		const float ReferenceDt = 1.0f / 60.0f;
-		const float BaseImpulse = ThrowParams.ThrowSpeed * ReferenceDt;
+		const float BaseImpulse = ResolvedThrow.ThrowSpeed * ReferenceDt;
 		const float TipBoost = FMath::Clamp(ThrowParams.TipMass / 5.0f, 0.25f, 3.0f);
 		const FVector InheritedVelocityImpulse = ComputeThrowInheritedVelocity(ResolvedThrow) * ReferenceDt;
 		const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipConfig.GuidedLength), 1, LastNode);
@@ -772,7 +777,7 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 	}
 
 	SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("fresh throw impulse, aim=%s, speed=%.1f"),
-		*WhipGuide.GetAimDir().ToCompactString(), ThrowParams.ThrowSpeed));
+		*WhipGuide.GetAimDir().ToCompactString(), ResolvedThrow.ThrowSpeed));
 }
 
 FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
@@ -781,6 +786,7 @@ FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
 	Config.Duration = WhipConfig.Duration;
 	Config.GuidedLength = WhipConfig.GuidedLength;
 	Config.SweepAngleDegrees = WhipConfig.SweepAngleDegrees;
+	Config.ReferenceThrowSpeed = ThrowParams.ThrowSpeed;
 	Config.ComponentRopeLength = RopeLength;
 	return Config;
 }

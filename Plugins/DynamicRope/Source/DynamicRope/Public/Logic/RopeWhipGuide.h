@@ -24,6 +24,7 @@ public:
 		float Duration = 0.35f;           // 스윙 전체 시간(s)
 		float GuidedLength = 0.65f;       // 가이드가 잡는 로프 길이 비율(0~1)
 		float SweepAngleDegrees = 180.0f; // 시작 각도(조준 반대편)에서 조준 방향까지의 스윕 각
+		float ReferenceThrowSpeed = 1500.0f; // 이 속도일 때 Duration 그대로 사용한다
 		float ComponentRopeLength = 0.0f; // 가이드 길이 산정용: max(Sim.RopeLength, 이 값) 사용
 	};
 
@@ -46,7 +47,8 @@ public:
 	 * Fallback* 벡터들은 퇴화 케이스(조준이 0이거나 수직에 가까울 때)에 쓸 컴포넌트 축.
 	 */
 	void Begin(const FVector& InAimDir, const FVector& InOrigin,
-		const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide);
+		const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide,
+		float InThrowSpeed = 0.0f);
 
 	/**
 	 * throw 직후 초기 포즈(T=0) 스냅: 가이드 타깃을 계산해 프레임 산출물을 채우고, 가이드 구간
@@ -110,6 +112,7 @@ private:
 	FVector Origin = FVector::ZeroVector;
 	FVector GuideForward = FVector::ForwardVector;
 	FVector GuideUp = FVector::UpVector;
+	float GuideThrowSpeed = 0.0f;
 
 	// 직전 프레임의 가이드 타깃(가이드 노드의 Verlet 속도 주입: PrevPositions ← 이 값).
 	TArray<FVector> PreviousTargets;

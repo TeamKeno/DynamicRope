@@ -20,6 +20,18 @@ FVector ProjectAxisOffAim(const FVector& Axis, const FVector& AimDir, const FVec
 	return Projected.GetSafeNormal();
 }
 
+float ResolveGuideDuration(const FRopeWhipGuide::FConfig& Config, float ThrowSpeed)
+{
+	const float BaseDuration = FMath::Max(Config.Duration, KINDA_SMALL_NUMBER);
+	if (ThrowSpeed <= KINDA_SMALL_NUMBER)
+	{
+		return BaseDuration;
+	}
+
+	const float ReferenceSpeed = FMath::Max(Config.ReferenceThrowSpeed, KINDA_SMALL_NUMBER);
+	return FMath::Clamp(BaseDuration * ReferenceSpeed / ThrowSpeed, KINDA_SMALL_NUMBER, 10.0f);
+}
+
 }
 
 FVector FRopeWhipGuide::SafeNormalOr(const FVector& Value, const FVector& Fallback)
@@ -75,7 +87,8 @@ FRopeWhipGuide::FSwingBasis FRopeWhipGuide::ResolveSwingBasis(const FRopeThrowCo
 }
 
 void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
-	const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide)
+	const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide,
+	float InThrowSpeed)
 {
 	AimDir = InAimDir.GetSafeNormal();
 	if (AimDir.IsNearlyZero())
@@ -103,6 +116,7 @@ void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
 		GuideSide = FallbackSide.GetSafeNormal();
 	}
 	GuideUp = FVector::CrossProduct(GuideForward, GuideSide).GetSafeNormal();
+	GuideThrowSpeed = InThrowSpeed;
 
 	Elapsed = 0.0f;
 	bActive = true;
@@ -156,7 +170,7 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 	}
 
 	Elapsed += DeltaTime;
-	const float Duration = FMath::Max(Config.Duration, KINDA_SMALL_NUMBER);
+	const float Duration = ResolveGuideDuration(Config, GuideThrowSpeed);
 	const float T = FMath::Clamp(Elapsed / Duration, 0.0f, 1.0f);
 	const int32 LastNode = Sim.Num() - 1;
 	const float GuidedEnd = FMath::Clamp(Config.GuidedLength, 0.05f, 0.95f);
@@ -213,7 +227,7 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 	}
 
 	PreviousTargets = GuideTargets;
-	bActive = Elapsed < Config.Duration;
+	bActive = Elapsed < Duration;
 }
 
 void FRopeWhipGuide::ApplyToSim(FRopeSimState& Sim) const
@@ -238,7 +252,7 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 	const int32 LastNode = Sim.Num() - 1;
 	const float GuidedEnd = FMath::Clamp(Config.GuidedLength, 0.05f, 0.95f);
 	const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * GuidedEnd), 1, LastNode);
-	const float Duration = FMath::Max(Config.Duration, KINDA_SMALL_NUMBER);
+	const float Duration = ResolveGuideDuration(Config, GuideThrowSpeed);
 	const float NextT = FMath::Clamp((Elapsed + DeltaTime) / Duration, 0.0f, 1.0f);
 	BuildGuideTargets(NextT, LastGuidedNode, Sim, Config, OutTargets);
 }
