@@ -346,6 +346,33 @@ struct FRopeThrowParams
 	float AimAssistRadius = 100.0f;
 };
 
+/** 던지기 초반 채찍 스윙(FRopeWhipGuide) 튜닝 값. 런타임 상태는 URopeComponent::WhipGuide가 소유한다. */
+USTRUCT(BlueprintType)
+struct FRopeWhipConfig
+{
+	GENERATED_BODY()
+
+	/** 스윙 전체 시간(s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.01", ClampMax = "1.0", Units = "s"))
+	float Duration = 0.35f;
+
+	/** 가이드가 잡는 로프 길이 비율(0~1). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "0.95"))
+	float GuidedLength = 0.65f;
+
+	/** 시작 각도(조준 반대편)에서 조준 방향까지의 스윕 각. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
+	float SweepAngleDegrees = 180.0f;
+
+	/** 현재 런타임 미사용 — 에디터 배치 가이드(FRopeComponentVisualizer)의 던지기 아크 표시 전용. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
+	float ArcHeight = 120.0f;
+
+	/** 현재 런타임 미사용 — 에디터 배치 가이드(FRopeComponentVisualizer)의 던지기 아크 표시 전용. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
+	float SideOffset = 35.0f;
+};
+
 //TODO 주석 추가
 enum class ERopeContactCandidateSource : uint8
 {

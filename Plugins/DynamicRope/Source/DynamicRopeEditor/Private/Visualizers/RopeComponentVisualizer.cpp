@@ -87,8 +87,8 @@ void FRopeComponentVisualizer::DrawVisualization(const UActorComponent* Componen
 
 	// --- 던지기 예상 아크: whip 파라미터로 던질 때의 대략 궤적(정확한 sim 아님, 방향/높이 미리보기).
 	{
-		const float ArcHeight = Rope->WhipArcHeight;
-		const float SideOff   = Rope->WhipSideOffset;
+		const float ArcHeight = Rope->WhipConfig.ArcHeight;
+		const float SideOff   = Rope->WhipConfig.SideOffset;
 		const FLinearColor ArcColor(1.0f, 0.5f, 0.0f); // 주황
 		const int32 Seg = 24;
 		FVector Prev = Anchor;

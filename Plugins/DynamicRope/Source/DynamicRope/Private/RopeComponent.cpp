@@ -64,92 +64,43 @@ URopeComponent::URopeComponent()
 	Mobility = EComponentMobility::Movable;
 }
 
-// ===== UActorComponent ======================================================
+// ===== API ==================================================================
 
-void URopeComponent::BeginPlay()
+void URopeComponent::Throw(const FVector& AimDir)
 {
-	Super::BeginPlay();
-	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Throw requested (phase=%s, aim=%s)"),
+		*GetName(), PhaseName(Phase), *AimDir.GetSafeNormal().ToCompactString());
+
+	EnsureRopeInitialized();
+	StartFreshThrow(AimDir);
+}
+
+void URopeComponent::ReleaseWrap()
+{
+	if (Phase != ERopePhase::Wrapped && Phase != ERopePhase::Contacting && Phase != ERopePhase::Wrapping)
+		return;
+
+	FName Bone = NAME_None;
+
+	if (Phase == ERopePhase::Wrapped)
 	{
-		SimSubsystem->RegisterRope(this);
+		Bone = WrapController.State.BoneName;
+	}
+	else if (Phase == ERopePhase::Wrapping)
+	{
+		Bone = WrappingPhase.State.BoneName;
 	}
 	else
 	{
-		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] BeginPlay: RopeSimSubsystem unavailable — rope will not be simulated."),
-			*GetName());
-	}
-}
-
-void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
-{
-	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
-	{
-		SimSubsystem->UnregisterRope(this);
-	}
-	Super::EndPlay(EndPlayReason);
-}
-
-void URopeComponent::SendRenderDynamicData_Concurrent()
-{
-	Super::SendRenderDynamicData_Concurrent();
-
-	if (!SceneProxy || Sim.Num() < 2)
-	{
-		return;
+		Bone = ContactTracker.CandidateBone;
 	}
 
-	// centerline을 component-local 공간으로 보낸다; proxy는 GetLocalToWorld()를 통해 렌더링한다.
-	const FTransform Xform = GetComponentTransform();
-	FRopeDynamicData* DynamicData = new FRopeDynamicData;
-	DynamicData->bGpuResident = bGpuSteppedThisFrame; // M5b: GPU step된 프레임만 resident PosBuf 직접 렌더 허용.
-	DynamicData->Points.SetNumUninitialized(Sim.Num());
-	for (int32 i = 0; i < Sim.Num(); ++i)
-	{
-		DynamicData->Points[i] = Xform.InverseTransformPosition(Sim.Positions[i]);
-	}
-
-	FRopeSceneProxy* Proxy = static_cast<FRopeSceneProxy*>(SceneProxy);
-	ENQUEUE_RENDER_COMMAND(RopeUpdateCenterline)(
-		[Proxy, DynamicData](FRHICommandListBase& RHICmdList)
-		{
-			Proxy->SetDynamicData_RenderThread(RHICmdList, DynamicData);
-		});
+	SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("manual, bone=%s"), *Bone.ToString()));
+	WrapController.Release(ERopeReleaseReason::Manual);
+	ResetTransientPhaseState();
+	ReleaseCooldown = ReleaseCooldownSeconds;
+	OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Manual);
 }
-
-void URopeComponent::OnRegister()
-{
-	Super::OnRegister();
-	// 에디터에서도 Sim에 기본 직선 포즈를 채워 둔다(서브시스템 틱은 PIE에서만 돌기 때문).
-	// 이미 채워져 있으면(InitRope 후/PIE 진행 중) 그대로 둔다.
-	EnsureRopeInitialized();
-}
-
-void URopeComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
-{
-	Super::CreateRenderState_Concurrent(Context);
-	// 프록시가 막 생성됐다. 틱이 없는 에디터/스폰 직후에도 한 번은 센터라인을 밀어 BuildTube가 돌게 한다
-	// (그래야 bHasData=true가 되어 정적 드로우가 유효 지오메트리를 그린다). SendRenderDynamicData_Concurrent는
-	// SceneProxy/Sim 유효성을 자체 검사하고 렌더 커맨드만 enqueue하므로 이 시점 호출이 안전하다.
-	SendRenderDynamicData_Concurrent();
-}
-
-#if WITH_EDITOR
-void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
-{
-	// NumParticles/RopeLength가 바뀌면 프록시는 새 토폴로지(NumRings)로 재생성되지만 Sim은 옛 개수라
-	// BuildTube가 Points.Num()!=NumRings로 건너뛰어 미리보기가 사라진다. EnsureRopeInitialized는 비어있을
-	// 때만 init하므로, 여기선 Sim을 새 값으로 강제 재구성해 토폴로지를 맞춘다. 이후 Super가 렌더 상태를
-	// 재생성하며 CreateRenderState_Concurrent에서 센터라인을 다시 푸시한다.
-	const FName PropertyName = PropertyChangedEvent.GetPropertyName();
-	if (PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, NumParticles) ||
-		PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, RopeLength))
-	{
-		InitRope();
-	}
-
-	Super::PostEditChangeProperty(PropertyChangedEvent);
-}
-#endif
 
 // ===== 시뮬레이션 프레임(서브시스템이 3단계로 구동) ===========================
 
@@ -374,7 +325,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 
 		// stat 카운터(stat 시스템이 수집 중일 때만; 디버그 캡처와 독립).
 		const FRopeContactTracker& DebugTracker = bShouldCapture ? ContactTracker : FlightDebugTracker;
-		const float WhipGuidedEnd = FMath::Clamp(WhipGuidedLength, 0.05f, 0.95f);
+		const float WhipGuidedEnd = FMath::Clamp(WhipConfig.GuidedLength, 0.05f, 0.95f);
 		const bool bWhipActive = WhipGuide.GetDebugGuideTargets().Num() > 0;
 		RopeDebug::RecordFlightStats(Sim, bSolveThisFrame, FrameColliders.Num(), Candidates,
 			DebugTracker, WrapConfig, bShouldCapture);
@@ -424,6 +375,93 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 #endif
 }
 
+// ===== UActorComponent ======================================================
+
+void URopeComponent::BeginPlay()
+{
+	Super::BeginPlay();
+	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+	{
+		SimSubsystem->RegisterRope(this);
+	}
+	else
+	{
+		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] BeginPlay: RopeSimSubsystem unavailable — rope will not be simulated."),
+			*GetName());
+	}
+}
+
+void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+	{
+		SimSubsystem->UnregisterRope(this);
+	}
+	Super::EndPlay(EndPlayReason);
+}
+
+void URopeComponent::SendRenderDynamicData_Concurrent()
+{
+	Super::SendRenderDynamicData_Concurrent();
+
+	if (!SceneProxy || Sim.Num() < 2)
+	{
+		return;
+	}
+
+	// centerline을 component-local 공간으로 보낸다; proxy는 GetLocalToWorld()를 통해 렌더링한다.
+	const FTransform Xform = GetComponentTransform();
+	FRopeDynamicData* DynamicData = new FRopeDynamicData;
+	DynamicData->bGpuResident = bGpuSteppedThisFrame; // M5b: GPU step된 프레임만 resident PosBuf 직접 렌더 허용.
+	DynamicData->Points.SetNumUninitialized(Sim.Num());
+	for (int32 i = 0; i < Sim.Num(); ++i)
+	{
+		DynamicData->Points[i] = Xform.InverseTransformPosition(Sim.Positions[i]);
+	}
+
+	FRopeSceneProxy* Proxy = static_cast<FRopeSceneProxy*>(SceneProxy);
+	ENQUEUE_RENDER_COMMAND(RopeUpdateCenterline)(
+		[Proxy, DynamicData](FRHICommandListBase& RHICmdList)
+		{
+			Proxy->SetDynamicData_RenderThread(RHICmdList, DynamicData);
+		});
+}
+
+void URopeComponent::OnRegister()
+{
+	Super::OnRegister();
+	// 에디터에서도 Sim에 기본 직선 포즈를 채워 둔다(서브시스템 틱은 PIE에서만 돌기 때문).
+	// 이미 채워져 있으면(InitRope 후/PIE 진행 중) 그대로 둔다.
+	EnsureRopeInitialized();
+}
+
+void URopeComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
+{
+	Super::CreateRenderState_Concurrent(Context);
+	// 프록시가 막 생성됐다. 틱이 없는 에디터/스폰 직후에도 한 번은 센터라인을 밀어 BuildTube가 돌게 한다
+	// (그래야 bHasData=true가 되어 정적 드로우가 유효 지오메트리를 그린다). SendRenderDynamicData_Concurrent는
+	// SceneProxy/Sim 유효성을 자체 검사하고 렌더 커맨드만 enqueue하므로 이 시점 호출이 안전하다.
+	SendRenderDynamicData_Concurrent();
+}
+
+#if WITH_EDITOR
+void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	// NumParticles/RopeLength가 바뀌면 프록시는 새 토폴로지(NumRings)로 재생성되지만 Sim은 옛 개수라
+	// BuildTube가 Points.Num()!=NumRings로 건너뛰어 미리보기가 사라진다. EnsureRopeInitialized는 비어있을
+	// 때만 init하므로, 여기선 Sim을 새 값으로 강제 재구성해 토폴로지를 맞춘다. 이후 Super가 렌더 상태를
+	// 재생성하며 CreateRenderState_Concurrent에서 센터라인을 다시 푸시한다.
+	const FName PropertyName = PropertyChangedEvent.GetPropertyName();
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, NumParticles) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, RopeLength))
+	{
+		InitRope();
+	}
+
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+}
+#endif
+
 // ===== UPrimitiveComponent / UMeshComponent =================================
 
 FPrimitiveSceneProxy* URopeComponent::CreateSceneProxy()
@@ -457,44 +495,6 @@ FBoxSphereBounds URopeComponent::CalcBounds(const FTransform& LocalToWorld) cons
 	// 추적되는 transform을 통해 bounds가 캐릭터와 함께 움직이므로, lag도 없고 잘못된 culling도 없다.
 	const float Reach = RopeLength + Radius + 1.0f;
 	return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector(Reach), Reach);
-}
-
-// ===== API ==================================================================
-
-void URopeComponent::Throw(const FVector& AimDir)
-{
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Throw requested (phase=%s, aim=%s)"),
-		*GetName(), PhaseName(Phase), *AimDir.GetSafeNormal().ToCompactString());
-
-	EnsureRopeInitialized();
-	StartFreshThrow(AimDir);
-}
-
-void URopeComponent::ReleaseWrap()
-{
-	if (Phase != ERopePhase::Wrapped && Phase != ERopePhase::Contacting && Phase != ERopePhase::Wrapping)
-		return;
-
-	FName Bone = NAME_None;
-
-	if (Phase == ERopePhase::Wrapped)
-	{
-		Bone = WrapController.State.BoneName;
-	}
-	else if (Phase == ERopePhase::Wrapping)
-	{
-		Bone = WrappingPhase.State.BoneName;
-	}
-	else
-	{
-		Bone = ContactTracker.CandidateBone;
-	}
-
-	SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("manual, bone=%s"), *Bone.ToString()));
-	WrapController.Release(ERopeReleaseReason::Manual);
-	ResetTransientPhaseState();
-	ReleaseCooldown = ReleaseCooldownSeconds;
-	OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Manual);
 }
 
 // ===== 페이즈 상태 머신 ======================================================
@@ -657,7 +657,7 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 		const float ReferenceDt = 1.0f / 60.0f;
 		const float BaseImpulse = ThrowParams.ThrowSpeed * ReferenceDt;
 		const float TipBoost = FMath::Clamp(ThrowParams.TipMass / 5.0f, 0.25f, 3.0f);
-		const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipGuidedLength), 1, LastNode);
+		const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipConfig.GuidedLength), 1, LastNode);
 		for (int32 i = 1; i <= LastNode; ++i)
 		{
 			const float AlongRope = static_cast<float>(i) / static_cast<float>(LastNode);
@@ -675,9 +675,9 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
 {
 	FRopeWhipGuide::FConfig Config;
-	Config.Duration = WhipDuration;
-	Config.GuidedLength = WhipGuidedLength;
-	Config.SweepAngleDegrees = WhipSweepAngleDegrees;
+	Config.Duration = WhipConfig.Duration;
+	Config.GuidedLength = WhipConfig.GuidedLength;
+	Config.SweepAngleDegrees = WhipConfig.SweepAngleDegrees;
 	Config.ComponentRopeLength = RopeLength;
 	return Config;
 }

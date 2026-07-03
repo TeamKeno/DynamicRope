@@ -42,38 +42,6 @@ class DYNAMICROPE_API URopeComponent : public UMeshComponent
 public:
 	URopeComponent();
 
-	//~ UActorComponent
-	virtual void BeginPlay() override;
-	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-	virtual void SendRenderDynamicData_Concurrent() override;
-	// 에디터(서브시스템 틱 없음)·스폰 직후에도 로프가 보이도록: 등록 시 Sim을 초기화하고,
-	// 렌더 상태 생성 직후 센터라인을 1회 푸시한다(틱 없이도 BuildTube가 돌아 bHasData=true).
-	virtual void OnRegister() override;
-	virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
-#if WITH_EDITOR
-	// 에디터에서 NumParticles/RopeLength를 바꾸면 Sim을 새 값으로 재구성한다(프록시 토폴로지와 매칭).
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
-#endif
-
-	/**
-	 * 시뮬레이션 한 프레임을 3단계로 나눠 URopeSimSubsystem이 구동한다(컴포넌트는 직접 tick하지 않음).
-	 *  Prepare(GT)  : init/pin 전진 + 로직 phase 처리. collider 스냅샷(FrameColliders)은
-	 *                 서브시스템이 이 호출 전에 중앙 수집해 채워 둔다.
-	 *  Solve(병렬)  : bSolveThisFrame(Free/Flight/Wrapped)일 때 Solver.Step — POD + const collider라
-	 *                 스레드 안전. Wrapped는 latch 노드가 InvMass=0이라 자유 구간만 물리로 움직인다.
-	 *  Finalize(GT) : Flight 접촉 감지/캡처(UObject·이벤트) + 렌더 dirty.
-	 */
-	void PrepareSimFrame(float DeltaTime);
-	void SolveSimFrame(float DeltaTime);
-	void FinalizeSimFrame(float DeltaTime);
-
-	//~ UPrimitiveComponent / UMeshComponent
-	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
-	virtual int32 GetNumMaterials() const override;
-	virtual UMaterialInterface* GetMaterial(int32 ElementIndex) const override;
-	virtual void SetMaterial(int32 ElementIndex, UMaterialInterface* Material) override;
-	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
-
 	//~ Setup(설정) -------------------------------------------------------
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "2"))
 	int32 NumParticles = 24;
@@ -105,29 +73,14 @@ public:
 	bool bIncludeOwnerColliders = false;
 
 	//~ Whip(던지기 스윙 설정) ----------------------------------------------
-	// 설정은 여기 UPROPERTY로 유지(직렬화 경로 보존) — 런타임 상태는 WhipGuide가 소유하고,
-	// 호출 시 MakeWhipGuideConfig()로 스냅샷을 만들어 넘긴다.
+	/** 던지기 초반 채찍 스윙 튜닝. 런타임 상태는 WhipGuide가 소유하고, 호출 시
+	 *  MakeWhipGuideConfig()로 스냅샷을 만들어 넘긴다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip")
+	FRopeWhipConfig WhipConfig;
 
 	/** WhipGuide.GetElapsed()의 BP 노출용 미러(매 프레임 갱신). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Whip")
 	float WhipElapsed = 0.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.01", ClampMax = "1.0", Units = "s"))
-	float WhipDuration = 0.35f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "0.95"))
-	float WhipGuidedLength = 0.65f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
-	float WhipSweepAngleDegrees = 180.0f;
-
-	/** 현재 런타임 미사용 — 에디터 배치 가이드(FRopeComponentVisualizer)의 던지기 아크 표시에만 쓰인다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
-	float WhipArcHeight = 120.0f;
-
-	/** 현재 런타임 미사용 — 에디터 배치 가이드(FRopeComponentVisualizer)의 던지기 아크 표시에만 쓰인다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
-	float WhipSideOffset = 35.0f;
 
 	//~ Render(렌더) ------------------------------------------------------
 	/** 시각적 tube 반지름(cm). */
@@ -174,6 +127,41 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnReleased OnRopeReleased;
+
+private:
+	/**
+	 * 시뮬레이션 한 프레임을 3단계로 나눠 URopeSimSubsystem이 구동한다(friend 접근;
+	 * 컴포넌트는 직접 tick하지 않고, 외부 게임 코드가 부를 일도 없어 private).
+	 *  Prepare(GT)  : init/pin 전진 + 로직 phase 처리. collider 스냅샷(FrameColliders)은
+	 *                 서브시스템이 이 호출 전에 중앙 수집해 채워 둔다.
+	 *  Solve(병렬)  : bSolveThisFrame(Free/Flight/Wrapped)일 때 Solver.Step — POD + const collider라
+	 *                 스레드 안전. Wrapped는 latch 노드가 InvMass=0이라 자유 구간만 물리로 움직인다.
+	 *  Finalize(GT) : Flight 접촉 감지/캡처(UObject·이벤트) + 렌더 dirty.
+	 */
+	void PrepareSimFrame(float DeltaTime);
+	void SolveSimFrame(float DeltaTime);
+	void FinalizeSimFrame(float DeltaTime);
+
+public:
+	//~ UActorComponent
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void SendRenderDynamicData_Concurrent() override;
+	// 에디터(서브시스템 틱 없음)·스폰 직후에도 로프가 보이도록: 등록 시 Sim을 초기화하고,
+	// 렌더 상태 생성 직후 센터라인을 1회 푸시한다(틱 없이도 BuildTube가 돌아 bHasData=true).
+	virtual void OnRegister() override;
+	virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
+#if WITH_EDITOR
+	// 에디터에서 NumParticles/RopeLength를 바꾸면 Sim을 새 값으로 재구성한다(프록시 토폴로지와 매칭).
+	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
+	//~ UPrimitiveComponent / UMeshComponent
+	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
+	virtual int32 GetNumMaterials() const override;
+	virtual UMaterialInterface* GetMaterial(int32 ElementIndex) const override;
+	virtual void SetMaterial(int32 ElementIndex, UMaterialInterface* Material) override;
+	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
 
 private:
 	//~ 페이즈 상태 머신 ----------------------------------------------------
