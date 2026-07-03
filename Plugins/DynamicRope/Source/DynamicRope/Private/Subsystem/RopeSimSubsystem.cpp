@@ -532,9 +532,12 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Finalize);
 		for (URopeComponent* Rope : Ropes)
 		{
-			// G3: GPU 감지 결과를 귀속해 Finalize의 Flight 접촉 소스를 GPU 후보로 채운다(아니면 CPU 스윕).
+			// G3: GPU 감지 결과를 귀속해 Finalize의 Flight 접촉 소스를 GPU 후보로 채운다.
+			// 게이트는 전역이 아니라 로프별 bGpuSteppedThisFrame — 이 프레임 실제로 GPU step된 로프만
+			// GPU 감지를 쓴다. GPU step 못 한 로프(노드>256 등)는 CPU 솔브됐으므로 여기서도 GPU 후보를
+			// 강제하지 않아, FinalizeSimFrame이 CPU 스윕 감지로 폴백한다(안 그러면 감지 자체가 누락돼 캡처 불가).
 			Rope->bGpuContactsThisFrame = false;
-			if (bUseGPUContacts && Rope->Phase == ERopePhase::Flight)
+			if (Rope->bGpuSteppedThisFrame && Rope->Phase == ERopePhase::Flight)
 			{
 				BuildGpuFlightCandidates(*Rope);
 			}
