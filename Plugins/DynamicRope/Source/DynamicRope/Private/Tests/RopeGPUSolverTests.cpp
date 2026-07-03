@@ -12,8 +12,10 @@
 #include "Solver/RopeXPBDSolver.h"
 #include "RopeGPUSolver.h" // DynamicRopeShaders 모듈
 #include "Collision/RopeCollider.h"
+#include "Logic/RopeFlightContactDetector.h" // CPU 감지(패리티 ground-truth)
 #include "RopeTestHelpers.h"
 #include "RHI.h"
+#include "RHICommandList.h" // BlockUntilGPUIdle
 #include "RenderingThread.h" // FlushRenderingCommands
 #include "Misc/App.h"
 
@@ -332,6 +334,137 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 	const float MovedDev = static_cast<float>(FVector::Dist(AfterRestore.Positions[4], Targets[4]));
 	TestTrue(FString::Printf(TEXT("restored node resumes physics (moved %.2f cm off target)"), MovedDev),
 		MovedDev > 1.0f);
+
+	return true;
+}
+
+// 접촉 감지 패리티(G3): GPU 감지 커널이 CPU FRopeFlightContactDetector::DetectContactCandidates와
+// 같은 접촉(히트 노드 집합 + 노드별 침투/법선)을 산출하는가. 정적 로프 + 캡슐로 결정적 비교.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUContactParityTest,
+	"DynamicRope.Solver.GPUContactParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU 접촉 감지 패리티 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	const int32 N = 8;
+	const float Length = 140.0f;
+	const float ContactRadius = 3.0f;
+
+	// 정적 로프(prev==pos)를 z=15에 둔다. 캡슐: x=60에서 Y축을 따라, 반지름 30 → 노드 2/3/4가 침투.
+	FRopeSimState Sim = RopeTest::MakeStraightRope(N, Length, FVector(0, 0, 15));
+	FCapsuleCollider Capsule(FVector(60, -50, 0), FVector(60, 50, 0), 30.0f, FName("arm"));
+	TArray<IRopeCollider*> Colliders = { &Capsule };
+
+	// --- CPU ground-truth 감지.
+	FRopeFlightContactDetector::FParams Params;
+	Params.ContactRadius = ContactRadius;
+	Params.RopeRadius = 2.0f;
+	Params.PredictiveContactFrames = 0.0f;
+	Params.MinLatchNodes = 1;
+	TArray<FRopeContactCandidate> CpuCandidates;
+	FRopeFlightContactDetector::DetectContactCandidates(Sim, Colliders, Params, CpuCandidates);
+
+	// --- GPU 감지: 감지 전용 step(NumSub=0, bDetectContacts). 상주 버퍼를 시드 위치로 채우고 감지.
+	FRopeGPUSolver GpuSolver;
+	const uint32 RopeId = 11;
+	const uint32 Gen = 1;
+
+	auto MakeDetectStep = [&]() -> FRopeGPUResidentStep
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId            = RopeId;
+		Step.Generation        = Gen;
+		Step.NumNodes          = Sim.Num();
+		Step.SeedPositions     = Sim.Positions;
+		Step.SeedPrevPositions = Sim.PrevPositions;
+		Step.InvMass           = Sim.InvMass;
+		Step.SegmentLength     = Sim.SegmentLength;
+		Step.NumSub            = 0; // 적분 없음 — 시드 위치 그대로 감지.
+		Step.FixedDt           = 1.0f / 60.0f;
+		Step.bDetectContacts   = true;
+		Step.ContactRadius     = ContactRadius;
+		for (const IRopeCollider* C : Colliders)
+		{
+			FRopeGPUCapsule Cap;
+			FVector A, B; float R;
+			if (const_cast<IRopeCollider*>(C)->GetGPUCapsule(A, B, R))
+			{
+				Cap.A = A; Cap.B = B; Cap.Radius = R;
+				Step.Capsules.Add(Cap);
+			}
+		}
+		return Step;
+	};
+	auto SyncGPU = []()
+	{
+		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
+			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.BlockUntilGPUIdle(); });
+		FlushRenderingCommands();
+	};
+	auto Pump = [&]()
+	{
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(MakeDetectStep());
+		GpuSolver.Step(MoveTemp(Steps));
+		FlushRenderingCommands();
+	};
+
+	// 여러 번 펌프해 감지 리드백이 도착하게 한다(단일 in-flight → sync + 재무장 사이클).
+	FRopeResidentContacts GpuContacts;
+	bool bGot = false;
+	for (int32 Spin = 0; Spin < 16 && !bGot; ++Spin)
+	{
+		SyncGPU();
+		Pump();
+		SyncGPU();
+		TMap<uint32, FRopeResidentContacts> Latest;
+		GpuSolver.GetLatestContacts(Latest);
+		if (const FRopeResidentContacts* C = Latest.Find(RopeId))
+		{
+			if (C->Generation == Gen)
+			{
+				GpuContacts = *C;
+				bGot = true;
+			}
+		}
+	}
+	if (!bGot)
+	{
+		AddError(TEXT("GPU 접촉 감지 결과를 회수하지 못함."));
+		return false;
+	}
+
+	// --- 비교: 히트 노드 집합 일치 + 노드별 침투/법선 근사 일치.
+	TMap<int32, const FRopeContactCandidate*> CpuByNode;
+	for (const FRopeContactCandidate& C : CpuCandidates) { CpuByNode.Add(C.NodeIndex, &C); }
+	TMap<int32, const FRopeGPUContactResult*> GpuByNode;
+	for (const FRopeGPUContactResult& C : GpuContacts.Contacts) { GpuByNode.Add(C.NodeIndex, &C); }
+
+	AddInfo(FString::Printf(TEXT("CPU 접촉 %d개, GPU 접촉 %d개"), CpuCandidates.Num(), GpuContacts.Contacts.Num()));
+	TestTrue(TEXT("적어도 하나의 접촉이 감지됨"), CpuCandidates.Num() > 0);
+	TestEqual(TEXT("히트 노드 수 일치"), GpuContacts.Contacts.Num(), CpuCandidates.Num());
+
+	for (const TPair<int32, const FRopeContactCandidate*>& Pair : CpuByNode)
+	{
+		const int32 Node = Pair.Key;
+		const FRopeGPUContactResult** GpuC = GpuByNode.Find(Node);
+		if (!TestTrue(FString::Printf(TEXT("GPU도 노드 %d를 히트"), Node), GpuC != nullptr))
+		{
+			continue;
+		}
+		const float PenDev = FMath::Abs((*GpuC)->Penetration - Pair.Value->Penetration);
+		TestTrue(FString::Printf(TEXT("노드 %d 침투 일치(차 %.3f)"), Node, PenDev), PenDev < 0.1f);
+		const float NormalDot = FVector::DotProduct((*GpuC)->Normal.GetSafeNormal(), Pair.Value->Normal.GetSafeNormal());
+		TestTrue(FString::Printf(TEXT("노드 %d 법선 일치(dot %.3f)"), Node, NormalDot), NormalDot > 0.99f);
+		const float PointDev = static_cast<float>(FVector::Dist((*GpuC)->WorldPoint, Pair.Value->WorldPoint));
+		TestTrue(FString::Printf(TEXT("노드 %d 접촉점 일치(차 %.3f cm)"), Node, PointDev), PointDev < 0.5f);
+	}
 
 	return true;
 }

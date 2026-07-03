@@ -148,6 +148,17 @@ public:
 	 * 반드시 const(읽기 전용) — collider는 로프 간 공유되며 병렬 솔브된다.
 	 */
 	virtual bool GetFrameMotion(FTransform& OutPrev, FTransform& OutCurr) const { return false; }
+
+	/**
+	 * GPU 접촉 감지(G3)용 귀속(attribution): 이 collider가 어느 bone/mesh에 속하는지. GPU는 콜라이더
+	 * 인덱스만 emit하므로, 호출자가 인덱스 → (bone, mesh)를 이걸로 복원한다. FRopeContact.Bone/SourceMesh와
+	 * 동일 값이어야 한다(같은 판정 파이프라인에 먹인다). 기본은 None/null.
+	 */
+	virtual void GetGPUAttribution(FName& OutBone, const USkeletalMeshComponent*& OutMesh) const
+	{
+		OutBone = NAME_None;
+		OutMesh = nullptr;
+	}
 };
 
 /** 해석적 capsule(swept-sphere 세그먼트). v1 / fallback. 추후 per-bone SDF로 대체된다. */
@@ -172,4 +183,9 @@ public:
 	virtual FRopeSurfaceProjection ProjectToSurface(const FVector& WorldPos, float MaxDistance) const override;
 	virtual FBox GetWorldBounds() const override;
 	virtual bool GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRadius) const override;
+	virtual void GetGPUAttribution(FName& OutBone, const USkeletalMeshComponent*& OutMesh) const override
+	{
+		OutBone = Bone;
+		OutMesh = SourceMesh;
+	}
 };

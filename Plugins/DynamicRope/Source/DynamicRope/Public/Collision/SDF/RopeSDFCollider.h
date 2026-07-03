@@ -53,4 +53,9 @@ public:
 	{
 		OutPrev = PrevBoneToWorld; OutCurr = BoneToWorld; return true;
 	}
+	virtual void GetGPUAttribution(FName& OutBone, const USkeletalMeshComponent*& OutMesh) const override
+	{
+		OutBone = Bone;
+		OutMesh = SourceMesh;
+	}
 };

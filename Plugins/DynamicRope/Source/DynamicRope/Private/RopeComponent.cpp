@@ -300,17 +300,28 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			WhipView.NextTargets = &NextGuideTargets;
 		}
 
+		if (bGpuContactsThisFrame)
 		{
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightActualContacts);
-			FRopeFlightContactDetector::DetectContactCandidates(Sim, FrameColliders, DetectParams, Candidates);
-		}
-		{
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightPredictiveContacts);
-			FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, FrameColliders, DetectParams, WhipView, Candidates);
-		}
-		{
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCandidates);
+			// GPU 감지 경로(G3): 실제 접촉 후보는 GPU 커널이 산출한 것을 그대로 쓴다(귀속은 서브시스템이 복원).
+			// 예측 접촉(AddPredicted)은 G3b에서 GPU화 예정 — 그 전까지 GPU 경로는 실제 접촉만 사용한다.
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightGpuContacts);
+			Candidates = GpuFlightCandidates;
 			FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
+		}
+		else
+		{
+			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightActualContacts);
+				FRopeFlightContactDetector::DetectContactCandidates(Sim, FrameColliders, DetectParams, Candidates);
+			}
+			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightPredictiveContacts);
+				FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, FrameColliders, DetectParams, WhipView, Candidates);
+			}
+			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCandidates);
+				FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
+			}
 		}
 
 		FRopeContactTracker FlightDebugTracker;

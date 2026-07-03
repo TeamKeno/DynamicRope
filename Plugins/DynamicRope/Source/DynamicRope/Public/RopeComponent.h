@@ -225,6 +225,23 @@ private:
 	// whip 프레임도 G1부터 GPU(override 주입)라 true — PosBuf가 가이드 타깃을 같은 프레임에 반영한다.
 	bool bGpuSteppedThisFrame = false;
 
+	// GPU 접촉 감지(G3) 귀속 테이블: GPU가 emit한 콜라이더 인덱스 → (bone, mesh) 복원용.
+	// 서브시스템이 GPU step 프레임마다 Step.Capsules/SDFColliders와 같은 순서로 채운다. mesh는 지연
+	// 동안 파괴될 수 있어 weak. (콜라이더 집합이 프레임 간 바뀌면 인덱스가 어긋날 수 있으나 순서가
+	//  안정적이고 범위 밖은 무시 → stale 미러 감지와 동일한 관용도. 최악의 경우 한 프레임 오귀속, 자기수정.)
+	struct FGpuColliderAttribution
+	{
+		FName Bone = NAME_None;
+		TWeakObjectPtr<const USkeletalMeshComponent> Mesh;
+	};
+	TArray<FGpuColliderAttribution> GpuCapsuleAttribution; // GPU Capsules와 평행
+	TArray<FGpuColliderAttribution> GpuSdfAttribution;     // GPU SDFColliders와 평행
+
+	// GPU 감지(G3) 프레임 산출: 서브시스템이 GetLatestContacts를 귀속해 Finalize 전에 채운다.
+	// bValid면 FinalizeSimFrame의 Flight 접촉 소스가 CPU 스윕 대신 이 후보들을 쓴다(GPU 경로).
+	TArray<FRopeContactCandidate> GpuFlightCandidates;
+	bool bGpuContactsThisFrame = false;
+
 	//~ 초기화/유틸 ----------------------------------------------------------
 	void InitRope();
 

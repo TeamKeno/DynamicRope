@@ -80,4 +80,11 @@ private:
 
 	// GetLatest로 회수한 RopeId별 최신(약간 지연) 위치 캐시. 매 프레임 갱신분을 각 Sim에 매핑한다.
 	TMap<uint32, FRopeResidentLatest> GpuLatest;
+
+	// GetLatestContacts로 회수한 RopeId별 최신(약간 지연) GPU 접촉 감지 결과(G3). Finalize 전에 귀속.
+	TMap<uint32, FRopeResidentContacts> GpuLatestContacts;
+
+	// GPU 감지 결과(콜라이더 인덱스)를 로프의 귀속 테이블로 FRopeContactCandidate로 복원해 컴포넌트에
+	// 채운다(Finalize의 Flight 접촉 소스). 지연분이 현재 시드 generation과 맞을 때만 유효.
+	void BuildGpuFlightCandidates(URopeComponent& Rope);
 };

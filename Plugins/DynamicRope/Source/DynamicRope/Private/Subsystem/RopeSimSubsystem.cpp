@@ -22,6 +22,14 @@ static TAutoConsoleVariable<int32> CVarRopeGPUSolver(
 	TEXT("DynamicRope: 0=CPU ParallelFor 솔버(기본), 1=GPU 상주 compute 솔버(M5, 충돌/whip/로직 페이즈 포함)."),
 	ECVF_Default);
 
+// 0=CPU 접촉 감지(FinalizeSimFrame의 스윕), 1=GPU 접촉 감지(G3, GPUSolver=1일 때만 유효). 실제 접촉만
+// GPU화(예측 접촉은 G3b). CPU 감지는 ground-truth로 유지(패리티 테스트 기준). 런타임 토글.
+static TAutoConsoleVariable<int32> CVarRopeGPUContacts(
+	TEXT("r.DynamicRope.GPUContacts"),
+	0,
+	TEXT("DynamicRope: 0=CPU 접촉 감지(기본), 1=GPU 접촉 감지(G3; r.DynamicRope.GPUSolver=1 필요; 실제 접촉만)."),
+	ECVF_Default);
+
 // FRopeNodeOverrideFrame(Core 모듈) 비트는 ERopeGPUOverride(Shaders 모듈)와 수치 1:1이어야 한다 —
 // Core가 Shaders에 의존하지 않으려고 상수를 미러로 두었고, 여기(둘 다 보이는 곳)서 검증한다.
 static_assert(RopeNodeOverride::Position == static_cast<uint8>(ERopeGPUOverride::Position)
@@ -139,6 +147,50 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArra
 	}
 }
 
+void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
+{
+	Rope.GpuFlightCandidates.Reset();
+
+	const FRopeResidentContacts* Contacts = GpuLatestContacts.Find(Rope.GetUniqueID());
+	if (!Contacts || Contacts->Generation != Rope.SimGeneration)
+	{
+		// 아직 회수분이 없거나 재시드 catch-up 중 — 이번 프레임은 GPU 후보 없음(캡처는 다음 프레임).
+		Rope.bGpuContactsThisFrame = true; // 소스는 GPU(빈 후보) — CPU 스윕으로 되돌아가지 않는다.
+		return;
+	}
+
+	for (const FRopeGPUContactResult& C : Contacts->Contacts)
+	{
+		// 콜라이더 인덱스 → (bone, mesh) 귀속. 범위 밖(콜라이더 집합 변화)은 건너뛴다(자기수정).
+		const TArray<URopeComponent::FGpuColliderAttribution>& Attr =
+			(C.ColliderType == 0) ? Rope.GpuCapsuleAttribution : Rope.GpuSdfAttribution;
+		if (!Attr.IsValidIndex(C.ColliderIndex))
+		{
+			continue;
+		}
+		const URopeComponent::FGpuColliderAttribution& A = Attr[C.ColliderIndex];
+		if (A.Bone.IsNone())
+		{
+			continue; // 귀속 불가(비-스켈레탈 collider) — 캡처 대상 아님.
+		}
+
+		FRopeContactCandidate Cand;
+		Cand.bValid          = true;
+		Cand.NodeIndex       = C.NodeIndex;
+		Cand.Bone            = A.Bone;
+		Cand.Mesh            = A.Mesh.Get(); // weak — 지연 중 파괴됐으면 null(판정은 bone으로 진행).
+		Cand.Source          = ERopeContactCandidateSource::Actual;
+		Cand.SourceMask      = static_cast<uint8>(ERopeContactCandidateSource::Actual);
+		Cand.WorldPoint      = C.WorldPoint;
+		Cand.Normal          = C.Normal.GetSafeNormal();
+		Cand.Penetration     = C.Penetration;
+		Cand.SurfaceVelocity = C.SurfaceVelocity;
+		Cand.WrapDirectionScore = 0.0f; // EvaluateRelativeMotion(GT)이 채운다.
+		Rope.GpuFlightCandidates.Add(Cand);
+	}
+	Rope.bGpuContactsThisFrame = true;
+}
+
 bool URopeSimSubsystem::SyncGpuPositionsForHandoff(URopeComponent& Rope)
 {
 	if (CVarRopeGPUSolver.GetValueOnGameThread() == 0)
@@ -188,6 +240,7 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	}
 
 	const bool bUseGPU = CVarRopeGPUSolver.GetValueOnGameThread() != 0;
+	const bool bUseGPUContacts = bUseGPU && CVarRopeGPUContacts.GetValueOnGameThread() != 0;
 
 	// GPU 상주(M5): RT 리드백이 채운 RopeId별 최신(약 1~2프레임 지연) 위치를 회수해 캐시. 아래 Phase 2에서
 	// Free/Flight 로프의 Sim(렌더/충돌 미러)에 반영한다. 순차 의존성은 GPU 영속 버퍼 안에서 충족된다.
@@ -195,6 +248,10 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_GPUGetLatest);
 		GpuSolver.GetLatest(GpuLatest);
+		if (bUseGPUContacts)
+		{
+			GpuSolver.GetLatestContacts(GpuLatestContacts); // G3: 접촉 감지 결과 회수(Finalize 전에 귀속).
+		}
 	}
 
 	// Phase 1a (GT): collider 중앙 수집 — 등록된 provider에서 프레임당 1회 빌드 후 로프별 필터로 FrameColliders 채움.
@@ -316,6 +373,17 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			Step.NumSub            = Schedule.NumSub;
 			Step.FixedDt           = Schedule.FixedDt;
 
+			// G3: 접촉 감지 요청은 GPUContacts on + Flight 로프에만(캡처는 Flight에서만 일어난다).
+			// 귀속 테이블(콜라이더 인덱스 → bone/mesh)을 Step.Capsules/SDFColliders와 같은 순서로 채운다.
+			const bool bDetectThisRope = bUseGPUContacts && Rope->Phase == ERopePhase::Flight;
+			if (bDetectThisRope)
+			{
+				Step.bDetectContacts = true;
+				Step.ContactRadius = Rope->WrapConfig.ContactRadius;
+				Rope->GpuCapsuleAttribution.Reset();
+				Rope->GpuSdfAttribution.Reset();
+			}
+
 			// 충돌: 이 로프의 collider를 capsule(M2)/SDF(M3)로 분류. FrameColliders는 Prepare에서 GT gather된 스냅샷.
 			for (IRopeCollider* Collider : Rope->FrameColliders)
 			{
@@ -327,6 +395,14 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 				if (Collider->GetGPUCapsule(Cap.A, Cap.B, Cap.Radius))
 				{
 					Step.Capsules.Add(Cap);
+					if (bDetectThisRope)
+					{
+						URopeComponent::FGpuColliderAttribution Attr;
+						const USkeletalMeshComponent* Mesh = nullptr;
+						Collider->GetGPUAttribution(Attr.Bone, Mesh);
+						Attr.Mesh = Mesh;
+						Rope->GpuCapsuleAttribution.Add(Attr);
+					}
 					continue;
 				}
 				FRopeSDFColliderView View;
@@ -347,6 +423,14 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 					Sdf.InvDeltaTime    = View.InvDeltaTime;
 					Sdf.VolumeKey   = View.VolumeKey;
 					Step.SDFColliders.Add(Sdf);
+					if (bDetectThisRope)
+					{
+						URopeComponent::FGpuColliderAttribution Attr;
+						const USkeletalMeshComponent* Mesh = nullptr;
+						Collider->GetGPUAttribution(Attr.Bone, Mesh);
+						Attr.Mesh = Mesh;
+						Rope->GpuSdfAttribution.Add(Attr);
+					}
 				}
 			}
 
@@ -411,6 +495,12 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Finalize);
 		for (URopeComponent* Rope : Ropes)
 		{
+			// G3: GPU 감지 결과를 귀속해 Finalize의 Flight 접촉 소스를 GPU 후보로 채운다(아니면 CPU 스윕).
+			Rope->bGpuContactsThisFrame = false;
+			if (bUseGPUContacts && Rope->Phase == ERopePhase::Flight)
+			{
+				BuildGpuFlightCandidates(*Rope);
+			}
 			Rope->FinalizeSimFrame(DeltaTime);
 		}
 	}

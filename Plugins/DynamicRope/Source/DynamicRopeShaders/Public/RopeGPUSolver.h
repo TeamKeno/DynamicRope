@@ -101,6 +101,12 @@ struct FRopeGPUResidentStep
 	int32 NumSub = 0;
 	float FixedDt = 0.0f;
 
+	// --- 접촉 감지(G3): Flight에서 솔브 후 PosBuf/PrevBuf를 스윕해 노드당 최심 접촉을 감지한다.
+	// bDetectContacts면 솔브 dispatch 뒤에 감지 커널을 돌리고 결과를 리드백한다(GetLatestContacts).
+	// ContactRadius는 감지 질의 반경(= FRopeWrapConfig::ContactRadius; 솔버의 CollisionRadius와 별개).
+	bool  bDetectContacts = false;
+	float ContactRadius = 0.0f;
+
 	// --- Override(G0): 로직 페이즈(GT)가 계산한 노드별 타깃을 상주 버퍼에 직접 기록(재시드 대체).
 	// 비어 있으면 오버라이드 없음. 채울 때 OverrideFlags는 정확히 NumNodes 길이(불일치 시 전체 무시+경고),
 	// 값 배열은 해당 비트를 쓰는 노드가 있을 때만 NumNodes 길이로 제공하면 된다.
@@ -120,6 +126,29 @@ struct FRopeResidentLatest
 	TArray<FVector> PrevPositions;
 	uint32 Generation = 0; // 이 위치가 대응하는 시드 generation(재시드 경계의 stale 적용 방지).
 	int32  NumNodes = 0;
+};
+
+/**
+ * GPU 접촉 감지(G3) 결과 1건 — 노드당 최대 1개(최심 접촉). GPU는 bone/mesh(FName/포인터,
+ * GT 개념)를 만들 수 없으므로 콜라이더 인덱스만 emit하고, 호출자(런타임)가 인덱스 → (bone, mesh)
+ * 귀속 테이블로 복원한다. HLSL FRopeGPUContact와 1:1 미러(레이아웃/의미 동일).
+ */
+struct FRopeGPUContactResult
+{
+	int32   NodeIndex = INDEX_NONE;
+	int32   ColliderType = 0;   // 0=capsule, 1=SDF (step의 Capsules/SDFColliders 배열 구분)
+	int32   ColliderIndex = 0;  // 해당 배열 내 인덱스(귀속 복원 키)
+	float   Penetration = 0.0f;
+	FVector WorldPoint = FVector::ZeroVector;      // 표면 접촉점(FRopeContact.SurfacePoint 대응)
+	FVector Normal = FVector::UpVector;            // 바깥(collider→node) 단위 법선
+	FVector SurfaceVelocity = FVector::ZeroVector; // 접촉점 표면 속도(cm/s; 정적이면 0)
+};
+
+/** GT가 회수하는 상주 로프의 최신(약간 지연) 접촉 감지 결과. GetLatestContacts로 복사. */
+struct FRopeResidentContacts
+{
+	TArray<FRopeGPUContactResult> Contacts; // bHit 슬롯만(GPU가 채운 유효 접촉).
+	uint32 Generation = 0;                  // 대응 시드 generation(stale 적용 방지).
 };
 
 /**
@@ -155,6 +184,9 @@ public:
 
 	/** RT 리드백이 채운 최신 위치를 RopeId별로 복사(락). 새로 도착한 게 없으면 직전 값을 유지한 채 반환할 수 있다. */
 	void GetLatest(TMap<uint32, FRopeResidentLatest>& Out);
+
+	/** RT 리드백이 채운 최신 접촉 감지 결과를 RopeId별로 복사(락). GetLatest와 같은 지연 특성(약 1~2프레임). */
+	void GetLatestContacts(TMap<uint32, FRopeResidentContacts>& Out);
 
 	/**
 	 * GT 블로킹 동기 리드백(M5c): 이 로프의 상주 Pos/Prev를 *지금* 값으로 가져온다(GPU idle 대기 포함).

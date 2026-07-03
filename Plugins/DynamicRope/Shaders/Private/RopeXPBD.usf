@@ -556,3 +556,125 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		InvMass[P.NodeOffset + i]       = gInvMass[i];
 	}
 }
+
+// =====================================================================================================
+// 접촉 감지(G3): 솔브 후 상주 위치를 스윕해 노드당 최심 접촉을 감지한다. CPU
+// FRopeFlightContactDetector::DetectContactCandidates 미러 — prev->pos를 sampleCount+1점 스윕하고,
+// 각 콜라이더에 대해 DetectContactRadius로 질의해 가장 깊은 침투를 노드 슬롯에 기록한다.
+// GPU는 bone/mesh를 만들 수 없으므로 콜라이더 인덱스만 emit하고 GT가 귀속을 복원한다.
+// =====================================================================================================
+
+// C++ FRopeGPUContactResult(RopeGPUSolver.h)와 1:1 미러. 16바이트 정렬.
+struct FRopeGPUContact
+{
+	int    bHit;
+	int    ColliderType;  // 0=capsule, 1=SDF
+	int    ColliderIndex;
+	float  Penetration;
+	float4 WorldPoint;    // xyz — 표면 접촉점
+	float4 Normal;        // xyz — 바깥 단위 법선
+	float4 SurfaceVel;    // xyz — 접촉점 표면 속도(cm/s)
+};
+
+int   DetectNumNodes;
+int   DetectNumCapsules;
+int   DetectNumSDF;
+float DetectContactRadius;
+float DetectSegmentLength;
+StructuredBuffer<float4>       DetectPositions;     // 상주 Pos(월드)
+StructuredBuffer<float4>       DetectPrevPositions; // 상주 Prev(월드)
+RWStructuredBuffer<FRopeGPUContact> OutContacts;    // 노드당 1슬롯(최심 접촉 또는 bHit=0)
+
+[numthreads(ROPE_THREADS, 1, 1)]
+void RopeContactDetectCS(uint3 GroupThreadId : SV_GroupThreadID) // 로프 1개 = 스레드그룹 1개
+{
+	const uint i = GroupThreadId.x;
+	if (i >= (uint)DetectNumNodes)
+	{
+		return;
+	}
+
+	const float3 PrevP = DetectPrevPositions[i].xyz;
+	const float3 CurP  = DetectPositions[i].xyz;
+
+	// CPU SweepOrSampleContact: sampleCount = clamp(ceil(travel/max(seg,1)), 1, 4), 표본은 [0..sampleCount].
+	const float Travel = distance(PrevP, CurP);
+	const int SampleCount = clamp((int)ceil(Travel / max(DetectSegmentLength, 1.0f)), 1, 4);
+
+	FRopeGPUContact Best;
+	Best.bHit = 0;
+	Best.ColliderType = 0;
+	Best.ColliderIndex = 0;
+	Best.Penetration = 0.0f;
+	Best.WorldPoint = float4(0, 0, 0, 0);
+	Best.Normal = float4(0, 0, 1, 0);
+	Best.SurfaceVel = float4(0, 0, 0, 0);
+
+	for (int s = 0; s <= SampleCount; ++s)
+	{
+		const float Alpha = (float)s / (float)SampleCount;
+		const float3 P = lerp(PrevP, CurP, Alpha);
+
+		// --- capsule (CPU FCapsuleCollider::Query 미러; 정적 → SurfaceVel=0)
+		for (int c = 0; c < DetectNumCapsules; ++c)
+		{
+			const FRopeCapsule Cap = Capsules[c];
+			const float3 Closest = RopeClosestPointOnSegment(P, Cap.A.xyz, Cap.B.xyz);
+			const float3 ToNode = P - Closest;
+			const float  Dist = length(ToNode);
+			const float  MinDist = Cap.B.w + DetectContactRadius;
+			if (Dist < MinDist)
+			{
+				const float Pen = MinDist - Dist;
+				if (Pen > Best.Penetration)
+				{
+					const float3 Nrm = (Dist > 1e-4f) ? (ToNode / Dist) : float3(0.0f, 0.0f, 1.0f);
+					Best.bHit = 1;
+					Best.Penetration = Pen;
+					Best.ColliderType = 0;
+					Best.ColliderIndex = c;
+					Best.Normal = float4(Nrm, 0.0f);
+					Best.WorldPoint = float4(Closest + Nrm * Cap.B.w, 0.0f); // 표면점(캡슐 반지름)
+					Best.SurfaceVel = float4(0, 0, 0, 0);
+				}
+			}
+		}
+
+		// --- SDF (CPU FRopeSDFCollider::Query 미러: SurfacePoint = P - N*Dist, SurfVel = (P - Wprev)*InvDt)
+		for (int sc = 0; sc < DetectNumSDF; ++sc)
+		{
+			const FRopeSDFCollider Col = SDFColliders[sc];
+			const FRopeSDFVolume   Vol = SDFVolumes[Col.VolumeIndex];
+			const float3 Scl = Col.Scale.xyz;
+			const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
+			const float3 Lp = RopeQuatRotate(float4(-Col.Rotation.xyz, Col.Rotation.w), P - Col.Translation.xyz) * InvScale;
+			const float3 Mn = Vol.LocalMin.xyz - DetectContactRadius;
+			const float3 Mx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + DetectContactRadius;
+			if (any(Lp < Mn) || any(Lp > Mx))
+			{
+				continue;
+			}
+			const float Dist = RopeSDFTrilinear(Vol, Lp);
+			if (Dist < DetectContactRadius)
+			{
+				const float Pen = DetectContactRadius - Dist;
+				if (Pen > Best.Penetration)
+				{
+					const float3 NLocal = RopeSDFGradient(Vol, Lp);
+					const float3 NWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal));
+					Best.bHit = 1;
+					Best.Penetration = Pen;
+					Best.ColliderType = 1;
+					Best.ColliderIndex = sc;
+					Best.Normal = float4(NWorld, 0.0f);
+					Best.WorldPoint = float4(P - NWorld * Dist, 0.0f); // 표면점(월드)
+					const float  InvDt = Col.PrevTranslation.w;
+					const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Scl) + Col.PrevTranslation.xyz;
+					Best.SurfaceVel = float4((P - Wprev) * InvDt, 0.0f);
+				}
+			}
+		}
+	}
+
+	OutContacts[i] = Best;
+}

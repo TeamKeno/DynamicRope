@@ -122,6 +122,57 @@ public:
 // 파일은 Shaders/Private/RopeXPBD.usf, 가상경로는 /Plugin/DynamicRope -> Shaders 이므로 /Private/ 포함.
 IMPLEMENT_GLOBAL_SHADER(FRopeXPBDSolveCS, "/Plugin/DynamicRope/Private/RopeXPBD.usf", "RopeXPBDSolveCS", SF_Compute);
 
+// HLSL FRopeGPUContact(RopeXPBD.usf)와 1:1 미러. 노드당 1슬롯. 16바이트 정렬.
+struct FRopeGPUContactGPU
+{
+	int32     bHit;
+	int32     ColliderType;
+	int32     ColliderIndex;
+	float     Penetration;
+	FVector4f WorldPoint;
+	FVector4f Normal;
+	FVector4f SurfaceVel;
+};
+static_assert(sizeof(FRopeGPUContactGPU) % 16 == 0, "FRopeGPUContactGPU must be 16-byte aligned to match HLSL structured buffer.");
+
+// 접촉 감지 컴퓨트(G3). 솔브 후 상주 위치를 스윕해 노드당 최심 접촉을 OutContacts에 기록한다.
+// 솔브 셰이더의 헬퍼/충돌 버퍼를 공유(같은 .usf)하되, 별도 엔트리라 자체 파라미터만 바인딩한다.
+class FRopeContactDetectCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FRopeContactDetectCS);
+	SHADER_USE_PARAMETER_STRUCT(FRopeContactDetectCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(int32, DetectNumNodes)
+		SHADER_PARAMETER(int32, DetectNumCapsules)
+		SHADER_PARAMETER(int32, DetectNumSDF)
+		SHADER_PARAMETER(float, DetectContactRadius)
+		SHADER_PARAMETER(float, DetectSegmentLength)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeCapsule>, Capsules)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SDFDistances)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFVolume>, SDFVolumes)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPositions)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPrevPositions)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FRopeGPUContact>, OutContacts)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("ROPE_MAX_NODES"), ROPE_MAX_NODES);
+		OutEnvironment.SetDefine(TEXT("ROPE_THREADS"), ROPE_MAX_NODES);
+	}
+};
+
+IMPLEMENT_GLOBAL_SHADER(FRopeContactDetectCS, "/Plugin/DynamicRope/Private/RopeXPBD.usf", "RopeContactDetectCS", SF_Compute);
+
 // ---------------------------------------------------------------------------------------------------
 // 상주 상태 정의
 // ---------------------------------------------------------------------------------------------------
@@ -145,6 +196,11 @@ struct FRopeResidentRope
 	TRefCountPtr<FRDGPooledBuffer> SDFVolBuf;
 	uint32 SDFSetSig = 0;                       // 볼륨 집합 시그니처(키+복셀수). 다르면 재빌드.
 	TMap<const void*, int32> SDFVolKeyToIndex;  // VolumeKey -> SDFVol 인덱스(매 프레임 인스턴스 VolumeIndex 산정).
+
+	// 접촉 감지(G3): 노드당 1슬롯 출력 버퍼(resident, N 변할 때만 재생성) + 리드백(위치와 같은 ring).
+	TRefCountPtr<FRDGPooledBuffer> ContactBuf;
+	FRHIGPUBufferReadback* ContactReadback = nullptr;
+	bool bContactArmed = false;
 };
 
 // GT<->RT 공유 결과. RT가 채우고 GT GetLatest가 락 하에 읽는다.
@@ -152,6 +208,7 @@ struct FRopeResidentSharedResults
 {
 	FCriticalSection Lock;
 	TMap<uint32, FRopeResidentLatest> Map;
+	TMap<uint32, FRopeResidentContacts> Contacts; // G3: 접촉 감지 결과(GetLatestContacts).
 };
 
 // pimpl: 영속 버퍼 맵(RT 전용) + 공유 결과(GT<->RT). RDG/RHI 타입을 헤더에서 숨긴다.
@@ -178,8 +235,9 @@ void FRopeGPUSolver::ReleaseAll_RenderThread()
 {
 	for (TPair<uint32, FRopeResidentRope>& Pair : Impl->RtRopes)
 	{
-		delete Pair.Value.PosReadback;  Pair.Value.PosReadback = nullptr;
-		delete Pair.Value.PrevReadback; Pair.Value.PrevReadback = nullptr;
+		delete Pair.Value.PosReadback;     Pair.Value.PosReadback = nullptr;
+		delete Pair.Value.PrevReadback;    Pair.Value.PrevReadback = nullptr;
+		delete Pair.Value.ContactReadback; Pair.Value.ContactReadback = nullptr;
 	}
 	Impl->RtRopes.Empty();
 }
@@ -190,6 +248,7 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 	{
 		FScopeLock SL(&Impl->Results->Lock);
 		Impl->Results->Map.Remove(RopeId);
+		Impl->Results->Contacts.Remove(RopeId);
 	}
 	// 영속 버퍼/리드백은 렌더 스레드에서 해제(this 캡처 — destructor가 flush하므로 수명 안전).
 	ENQUEUE_RENDER_COMMAND(RopeGPUReleaseRope)(
@@ -199,6 +258,7 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 			{
 				delete R->PosReadback;
 				delete R->PrevReadback;
+				delete R->ContactReadback;
 				Impl->RtRopes.Remove(RopeId);
 			}
 		});
@@ -208,6 +268,12 @@ void FRopeGPUSolver::GetLatest(TMap<uint32, FRopeResidentLatest>& Out)
 {
 	FScopeLock SL(&Impl->Results->Lock);
 	Out = Impl->Results->Map; // 작은 데이터 — 매 프레임 복사. (스왑 대신 복사로 호출자가 누적분 유지)
+}
+
+void FRopeGPUSolver::GetLatestContacts(TMap<uint32, FRopeResidentContacts>& Out)
+{
+	FScopeLock SL(&Impl->Results->Lock);
+	Out = Impl->Results->Contacts; // 노드당 최대 1건이라 작다 — 매 프레임 복사.
 }
 
 bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, TArray<FVector>& OutPrevPositions, uint32& OutGeneration)
@@ -309,39 +375,90 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 				}
 				FRopeResidentRope& R = *Rp;
 				const bool bWillReseed = !R.PosBuf.IsValid() || R.NumNodes != S.NumNodes || R.Generation != S.Generation;
-				if (bWillReseed || !R.bReadbackArmed || !R.PosReadback || !R.PrevReadback)
+				// 재시드 프레임에는 직전 리드백이 stale이라 무시(위치/접촉 모두). 무장 해제해 다음 dispatch가 재무장.
+				if (bWillReseed)
 				{
+					R.bReadbackArmed = false;
+					R.bContactArmed = false;
 					continue;
-				}
-				if (!R.PosReadback->IsReady() || !R.PrevReadback->IsReady())
-				{
-					continue; // 아직 복사 중 — 다음 프레임에 consume(레이턴시 1프레임 더 허용).
 				}
 
 				const int32 N = R.NumNodes;
-				const uint32 Bytes = (uint32)N * sizeof(FVector4f);
+
+				// 위치 리드백 consume(무장·준비됐을 때만) — 실패해도 접촉 consume은 독립 진행.
 				TArray<FVector> TmpPos, TmpPrev;
-				TmpPos.SetNumUninitialized(N);
-				TmpPrev.SetNumUninitialized(N);
-				if (const FVector4f* Src = (const FVector4f*)R.PosReadback->Lock(Bytes))
+				bool bHavePos = false;
+				if (R.bReadbackArmed && R.PosReadback && R.PrevReadback
+					&& R.PosReadback->IsReady() && R.PrevReadback->IsReady())
 				{
-					for (int32 k = 0; k < N; ++k) { TmpPos[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
-					R.PosReadback->Unlock();
+					const uint32 Bytes = (uint32)N * sizeof(FVector4f);
+					TmpPos.SetNumUninitialized(N);
+					TmpPrev.SetNumUninitialized(N);
+					if (const FVector4f* Src = (const FVector4f*)R.PosReadback->Lock(Bytes))
+					{
+						for (int32 k = 0; k < N; ++k) { TmpPos[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
+						R.PosReadback->Unlock();
+					}
+					if (const FVector4f* Src = (const FVector4f*)R.PrevReadback->Lock(Bytes))
+					{
+						for (int32 k = 0; k < N; ++k) { TmpPrev[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
+						R.PrevReadback->Unlock();
+					}
+					R.bReadbackArmed = false; // 소비 완료 — 아래 dispatch 블록에서 재무장.
+					bHavePos = true;
 				}
-				if (const FVector4f* Src = (const FVector4f*)R.PrevReadback->Lock(Bytes))
+
+				// 접촉 감지 리드백(G3): 위치와 독립 consume(감지는 Flight만 무장하므로 없을 수 있다).
+				TArray<FRopeGPUContactResult> TmpContacts;
+				bool bHaveContacts = false;
+				if (R.bContactArmed && R.ContactReadback && R.ContactReadback->IsReady())
 				{
-					for (int32 k = 0; k < N; ++k) { TmpPrev[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
-					R.PrevReadback->Unlock();
+					const uint32 CBytes = (uint32)N * sizeof(FRopeGPUContactGPU);
+					if (const FRopeGPUContactGPU* Src = (const FRopeGPUContactGPU*)R.ContactReadback->Lock(CBytes))
+					{
+						for (int32 k = 0; k < N; ++k)
+						{
+							if (Src[k].bHit == 0)
+							{
+								continue;
+							}
+							FRopeGPUContactResult C;
+							C.NodeIndex       = k;
+							C.ColliderType    = Src[k].ColliderType;
+							C.ColliderIndex   = Src[k].ColliderIndex;
+							C.Penetration     = Src[k].Penetration;
+							C.WorldPoint      = FVector(Src[k].WorldPoint.X, Src[k].WorldPoint.Y, Src[k].WorldPoint.Z);
+							C.Normal          = FVector(Src[k].Normal.X, Src[k].Normal.Y, Src[k].Normal.Z);
+							C.SurfaceVelocity = FVector(Src[k].SurfaceVel.X, Src[k].SurfaceVel.Y, Src[k].SurfaceVel.Z);
+							TmpContacts.Add(C);
+						}
+						R.ContactReadback->Unlock();
+						bHaveContacts = true;
+					}
+					R.bContactArmed = false; // 소비 완료 — 아래 dispatch 블록에서 재무장.
 				}
-				R.bReadbackArmed = false; // 소비 완료 — 아래 dispatch 블록에서 재무장.
+
+				if (!bHavePos && !bHaveContacts)
+				{
+					continue; // 이번 프레임 회수분 없음.
+				}
 
 				// 락 구간은 맵 대입만(리드백 Lock은 위에서 끝냄) → GT GetLatest 블로킹 최소화.
 				FScopeLock SL(&Impl->Results->Lock);
-				FRopeResidentLatest& L = Impl->Results->Map.FindOrAdd(S.RopeId);
-				L.Positions     = MoveTemp(TmpPos);
-				L.PrevPositions = MoveTemp(TmpPrev);
-				L.NumNodes      = N;
-				L.Generation    = R.Generation;
+				if (bHavePos)
+				{
+					FRopeResidentLatest& L = Impl->Results->Map.FindOrAdd(S.RopeId);
+					L.Positions     = MoveTemp(TmpPos);
+					L.PrevPositions = MoveTemp(TmpPrev);
+					L.NumNodes      = N;
+					L.Generation    = R.Generation;
+				}
+				if (bHaveContacts)
+				{
+					FRopeResidentContacts& CL = Impl->Results->Contacts.FindOrAdd(S.RopeId);
+					CL.Contacts   = MoveTemp(TmpContacts);
+					CL.Generation = R.Generation;
+				}
 			}
 
 			// 이제부터 그래프 빌드(seed/register/dispatch/재무장). consume(immediate Lock)은 위에서 끝냈다.
@@ -423,9 +540,9 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 						S.OverrideFlags.Num(), N);
 				}
 
-				if (S.NumSub <= 0 && !bHasOverrides)
+				if (S.NumSub <= 0 && !bHasOverrides && !S.bDetectContacts)
 				{
-					continue; // 이번 프레임 적분/기록 없음 — 위치 불변, 리드백도 그대로 둠.
+					continue; // 이번 프레임 적분/기록/감지 없음 — 위치 불변, 리드백도 그대로 둠.
 				}
 
 				// --- per-rope 파라미터/충돌 버퍼(transient). NodeOffset/CapsuleOffset/SDFColliderOffset = 0(로프당 버퍼).
@@ -666,6 +783,50 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 					AddEnqueueCopyPass(GraphBuilder, R.PosReadback,  PosRDG,  NodeBytes);
 					AddEnqueueCopyPass(GraphBuilder, R.PrevReadback, PrevRDG, NodeBytes);
 					R.bReadbackArmed = true;
+				}
+
+				// --- 접촉 감지(G3): 솔브 뒤 post-solve 위치를 스윕. RDG가 solve(UAV)→detect(SRV) 순서를 보장한다.
+				// 감지가 있을 때만 ContactBuf(resident, N슬롯)를 확보하고 감지 커널 dispatch + 리드백 재무장.
+				if (S.bDetectContacts)
+				{
+					const bool bContactSeed = !R.ContactBuf.IsValid() || bSeed;
+					FRDGBufferRef ContactRDG = nullptr;
+					if (bContactSeed)
+					{
+						ContactRDG = GraphBuilder.CreateBuffer(
+							FRDGBufferDesc::CreateStructuredDesc(sizeof(FRopeGPUContactGPU), N), TEXT("Rope.Contacts"));
+						R.ContactBuf = GraphBuilder.ConvertToExternalBuffer(ContactRDG);
+						R.bContactArmed = false; // 재생성 → 직전 접촉 리드백은 stale.
+					}
+					else
+					{
+						ContactRDG = GraphBuilder.RegisterExternalBuffer(R.ContactBuf);
+					}
+
+					FRopeContactDetectCS::FParameters* DetectParams = GraphBuilder.AllocParameters<FRopeContactDetectCS::FParameters>();
+					DetectParams->DetectNumNodes     = N;
+					DetectParams->DetectNumCapsules  = NumValidCaps;
+					DetectParams->DetectNumSDF       = NumValidSDFCol;
+					DetectParams->DetectContactRadius = S.ContactRadius;
+					DetectParams->DetectSegmentLength = S.SegmentLength;
+					DetectParams->Capsules            = GraphBuilder.CreateSRV(CapsulesBuf);
+					DetectParams->SDFDistances        = GraphBuilder.CreateSRV(SDFDistBuf);
+					DetectParams->SDFVolumes          = GraphBuilder.CreateSRV(SDFVolBuf);
+					DetectParams->SDFColliders        = GraphBuilder.CreateSRV(SDFColBuf);
+					DetectParams->DetectPositions     = GraphBuilder.CreateSRV(PosRDG);
+					DetectParams->DetectPrevPositions = GraphBuilder.CreateSRV(PrevRDG);
+					DetectParams->OutContacts         = GraphBuilder.CreateUAV(ContactRDG);
+
+					TShaderMapRef<FRopeContactDetectCS> DetectShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+					FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeContactDetect"),
+						DetectShader, DetectParams, FIntVector(1, 1, 1));
+
+					if (!R.bContactArmed)
+					{
+						if (!R.ContactReadback) { R.ContactReadback = new FRHIGPUBufferReadback(TEXT("Rope.ContactReadback")); }
+						AddEnqueueCopyPass(GraphBuilder, R.ContactReadback, ContactRDG, (uint32)N * sizeof(FRopeGPUContactGPU));
+						R.bContactArmed = true;
+					}
 				}
 			}
 
