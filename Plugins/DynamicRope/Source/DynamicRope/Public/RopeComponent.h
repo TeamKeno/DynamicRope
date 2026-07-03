@@ -199,7 +199,7 @@ private:
 
 	//~ 페이즈 타이머 --------------------------------------------------------
 	float ContactingElapsed = 0.0f;	// Contacting 체류 시간(WrapDecisionTime 판정)
-	float FlightNoContactElapsed = 0.0f;	// Whip 종료 후 접촉 후보 없이 Flight에 머문 시간
+	float FlightNoContactElapsed = 0.0f;	// Whip 종료 후 캡처 없이 Flight에 머문 시간
 	float ReleaseCooldown = 0.0f;	// Releasing → Free 복귀까지 남은 시간
 
 	//~ 서브시스템 프레임 계약(RopeSimSubsystem이 쓰거나 읽는다) --------------

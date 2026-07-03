@@ -334,7 +334,6 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCapture);
 			bShouldCapture = FRopeFlightContactDetector::ShouldCapture(Candidates, DetectParams);
 		}
-		const bool bHasFlightCandidates = Candidates.Num() > 0;
 		if (bShouldCapture)
 		{
 			FlightNoContactElapsed = 0.0f;
@@ -346,17 +345,17 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		}
 		else
 		{
-			// Whip이 끝난 뒤 후보가 아예 없을 때만 Flight 실패 시간을 누적한다.
-			const bool bShouldReturnAfterNoContact =
-				WrapConfig.FlightNoContactReturnTime > 0.0f &&
-				!WhipGuide.IsActive() &&
-				!bHasFlightCandidates;
-			if (bShouldReturnAfterNoContact)
+			// Whip이 끝난 뒤 캡처하지 못하고 남아 있으면 실패로 보고 Free로 복귀한다.
+			// 후보가 계속 있어도 MinLatchNodes/품질 조건을 넘지 못하면 Flight에 갇힐 수 있으므로 리셋하지 않는다.
+			if (!WhipGuide.IsActive())
 			{
+				const float FlightReturnTime = WrapConfig.FlightNoContactReturnTime > 0.0f
+					? WrapConfig.FlightNoContactReturnTime
+					: ReleaseCooldownSeconds;
 				FlightNoContactElapsed += DeltaTime;
-				if (FlightNoContactElapsed >= WrapConfig.FlightNoContactReturnTime)
+				if (FlightNoContactElapsed >= FlightReturnTime)
 				{
-					SetPhase(ERopePhase::Free, *FString::Printf(TEXT("flight no contact %.3fs"), FlightNoContactElapsed));
+					SetPhase(ERopePhase::Free, *FString::Printf(TEXT("flight failed %.3fs"), FlightNoContactElapsed));
 					ResetTransientPhaseState();
 				}
 			}
