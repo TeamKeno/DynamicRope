@@ -11,24 +11,20 @@
 #include "GameFramework/Actor.h"    // AActor::GetOwner (provider 소스 필터링)
 #include "Components/ActorComponent.h"
 #include "Async/ParallelFor.h"
-#include "HAL/IConsoleManager.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "RHI.h"        // GDynamicRHI
+#include "Misc/App.h"   // FApp::CanEverRender
 
-// 0=CPU(ParallelFor) 솔버, 1=GPU compute 솔버(M5: 센터라인 GPU 상주 — 매 프레임 in-place 전진, 결과는 약간 지연된
-// 미러로 회수). whip(G1)/로직 페이즈(G2)도 override 패스로 GPU 상주 유지. 런타임 토글. CPU 경로는 ground-truth.
-static TAutoConsoleVariable<int32> CVarRopeGPUSolver(
-	TEXT("r.DynamicRope.GPUSolver"),
-	0,
-	TEXT("DynamicRope: 0=CPU ParallelFor 솔버(기본), 1=GPU 상주 compute 솔버(M5, 충돌/whip/로직 페이즈 포함)."),
-	ECVF_Default);
-
-// 0=CPU 접촉 감지(FinalizeSimFrame의 스윕), 1=GPU 접촉 감지(G3, GPUSolver=1일 때만 유효). 실제 접촉만
-// GPU화(예측 접촉은 G3b). CPU 감지는 ground-truth로 유지(패리티 테스트 기준). 런타임 토글.
-static TAutoConsoleVariable<int32> CVarRopeGPUContacts(
-	TEXT("r.DynamicRope.GPUContacts"),
-	0,
-	TEXT("DynamicRope: 0=CPU 접촉 감지(기본), 1=GPU 접촉 감지(G3; r.DynamicRope.GPUSolver=1 필요; 실제 접촉만)."),
-	ECVF_Default);
+namespace
+{
+	// G4: GPU가 런타임 유일 경로. 렌더 가능한 RHI가 있으면 GPU 상주 솔브+감지, 없으면(쿡/-nullrhi/
+	// 서버 빌드) 자동으로 CPU 솔브+감지로 폴백한다. 클라이언트 토글(CVar) 없음 — GPU가 THE 경로.
+	// FRopeXPBDSolver는 이 폴백과 패리티 테스트를 위해 유지된다(런타임 클라이언트에선 사실상 미사용).
+	bool RopeGpuRuntimeAvailable()
+	{
+		return GDynamicRHI != nullptr && FApp::CanEverRender();
+	}
+}
 
 // FRopeNodeOverrideFrame(Core 모듈) 비트는 ERopeGPUOverride(Shaders 모듈)와 수치 1:1이어야 한다 —
 // Core가 Shaders에 의존하지 않으려고 상수를 미러로 두었고, 여기(둘 다 보이는 곳)서 검증한다.
@@ -219,9 +215,9 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 
 bool URopeSimSubsystem::SyncGpuPositionsForHandoff(URopeComponent& Rope)
 {
-	if (CVarRopeGPUSolver.GetValueOnGameThread() == 0)
+	if (!RopeGpuRuntimeAvailable())
 	{
-		return false; // CPU 경로 — Sim이 이미 최신.
+		return false; // CPU 폴백 — Sim이 이미 최신.
 	}
 
 	FRopeSimState& S = Rope.Sim;
@@ -265,8 +261,9 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		return;
 	}
 
-	const bool bUseGPU = CVarRopeGPUSolver.GetValueOnGameThread() != 0;
-	const bool bUseGPUContacts = bUseGPU && CVarRopeGPUContacts.GetValueOnGameThread() != 0;
+	// G4: GPU가 유일 런타임 경로. 렌더 가능 RHI면 GPU, 아니면 CPU 폴백(자동). 감지도 GPU와 함께 켜진다.
+	const bool bUseGPU = RopeGpuRuntimeAvailable();
+	const bool bUseGPUContacts = bUseGPU; // GPU 솔브 시 감지도 GPU(별도 토글 없음).
 
 	// GPU 상주(M5): RT 리드백이 채운 RopeId별 최신(약 1~2프레임 지연) 위치를 회수해 캐시. 아래 Phase 2에서
 	// Free/Flight 로프의 Sim(렌더/충돌 미러)에 반영한다. 순차 의존성은 GPU 영속 버퍼 안에서 충족된다.

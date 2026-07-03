@@ -75,7 +75,7 @@ private:
 	void GatherCollidersForRope(const URopeComponent& Rope, TArray<IRopeCollider*>& OutColliders) const;
 
 	// GPU 상주 솔버(M5). 영속 버퍼(로프별)를 매 프레임 in-place 전진. 인스턴스 상태라 월드별 1개.
-	// r.DynamicRope.GPUSolver로 켤 때만 사용. CPU 솔버는 ground-truth로 유지.
+	// G4: 렌더 가능 RHI면 이게 유일 런타임 경로. RHI 없으면(쿡/-nullrhi/서버) CPU 솔버로 자동 폴백.
 	FRopeGPUSolver GpuSolver;
 
 	// GetLatest로 회수한 RopeId별 최신(약간 지연) 위치 캐시. 매 프레임 갱신분을 각 Sim에 매핑한다.

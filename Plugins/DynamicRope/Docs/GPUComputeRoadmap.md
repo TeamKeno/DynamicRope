@@ -25,18 +25,19 @@ DynamicRope 시뮬레이션을 CPU 단일 → 중앙 구동 → 병렬 → **GPU
 
 ---
 
-## 1. 가장 중요한 그림: **독립된 두 토글**
+## 1. 가장 중요한 그림: **시뮬레이션(자동) + 렌더(토글)**
 
-GPU화는 *시뮬레이션*과 *렌더*가 **별개 스위치**다. 직교한다.
+GPU화는 *시뮬레이션*과 *렌더*가 **직교**한다.
 
-| CVar | 0 (기본) | 1 |
-|---|---|---|
-| `r.DynamicRope.GPUSolver` | CPU `ParallelFor` 솔브 | GPU 상주 컴퓨트 솔브 |
-| `r.DynamicRope.GPUTube` | CPU `BuildTube`(렌더 스레드) | GPU 컴퓨트로 튜브 정점 생성 |
+| 축 | 선택 방식 | 폴백/기본 | GPU |
+|---|---|---|---|
+| 시뮬레이션(솔브+감지) | **G4: 자동** — CVar 없음 | 렌더 불가 RHI(쿡/-nullrhi/서버)면 CPU `ParallelFor` | 렌더 가능 RHI면 GPU 상주(항상) |
+| 렌더(튜브) | `r.DynamicRope.GPUTube` | 0: CPU `BuildTube`(렌더 스레드) | 1: GPU 컴퓨트 정점(G5에서 상시화 예정) |
 
-- 둘 다 0 = **원본 CPU 경로와 바이트 동일**(추가분은 `SimGeneration++` 같은 무해 코드뿐).
-- **위치 무지연 GPU = 둘 다 1**. (Tube만 1이면 CPU 미러를 읽어 여전히 지연; Solver만 1이면 시뮬은 GPU지만 렌더는 CPU 미러)
-- CPU 솔버는 **ground-truth**로 영구 유지(패리티 테스트 기준).
+- **G4 이전**엔 `r.DynamicRope.GPUSolver` 토글로 CPU/GPU를 골랐으나(둘 다 0이면 원본 CPU와 바이트 동일),
+  G0~G3에서 whip/로직 페이즈/감지까지 전부 GPU 상주로 옮긴 뒤 G4에서 토글을 없애고 자동 선택으로 전환했다.
+- **위치 무지연 GPU = GPUTube 1**. (GPUTube 0이면 CPU 미러를 읽어 여전히 1~2프레임 지연)
+- CPU 솔버(`FRopeXPBDSolver`)는 렌더 불가 환경 폴백 + 패리티/단위 테스트 기준으로 **영구 유지**.
 
 ---
 

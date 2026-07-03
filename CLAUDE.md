@@ -43,8 +43,11 @@ To run/iterate behavior, open the `.uproject` in the editor and Play.
     `URopeSimSubsystem` that centrally ticks every rope, `URopeWielderComponent` (gameplay wielder +
     Enhanced Input), `UAnimNotify_RopeThrow`, and the Gameplay Debugger category.
   - `DynamicRopeShaders` (Runtime, loads at `PostConfigInit`) — the GPU compute path: XPBD solver and
-    tube builder on RDG (`FRopeGPUSolver`, `FRopeTubeBuilder`, `.usf` in `Shaders/`). Off by default;
-    toggled by the `r.DynamicRope.GPUSolver` / `r.DynamicRope.GPUTube` CVars. CPU is the ground truth.
+    tube builder on RDG (`FRopeGPUSolver`, `FRopeTubeBuilder`, `.usf` in `Shaders/`). **G4: GPU is the
+    single runtime solve+detect path** — the subsystem auto-selects GPU when a renderable RHI exists
+    and falls back to the CPU `FRopeXPBDSolver` only when it doesn't (cook / `-nullrhi` / server build).
+    There is no `r.DynamicRope.GPUSolver` toggle anymore. `FRopeXPBDSolver` is kept as that fallback +
+    the parity/unit-test reference. Tube rendering is still `r.DynamicRope.GPUTube`-gated (G5).
   - `DynamicRopeEditor` (Editor) — SDF authoring: a nomad tab (`SRopeSDFAuthoringPanel`), the
     `URopeSDFData` baker/factory/asset-definition, and component visualizers. **Not** an empty stub.
 - `Source/DynamicRopeProject/` — thin game module (game mode + module boilerplate). Depends only on
