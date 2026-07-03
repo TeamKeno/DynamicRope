@@ -215,7 +215,8 @@ private:
 	uint32 SimGeneration = 0;
 
 	// 이번 프레임에 이 로프가 실제로 GPU에서 step됐는가(서브시스템이 매 프레임 설정). M5b: GPU 튜브 렌더가
-	// resident PosBuf를 직접 읽을지(true) CPU Sim 미러로 그릴지(false, whip/CPU-폴백/솔버 off) 가른다.
+	// resident PosBuf를 직접 읽을지(true) CPU Sim 미러로 그릴지(false, CPU-폴백/솔버 off) 가른다.
+	// whip 프레임도 G1부터 GPU(override 주입)라 true — PosBuf가 가이드 타깃을 같은 프레임에 반영한다.
 	bool bGpuSteppedThisFrame = false;
 
 	//~ 초기화/유틸 ----------------------------------------------------------

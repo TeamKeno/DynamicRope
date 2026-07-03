@@ -66,7 +66,7 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 	}
 }
 
-void FRopeWhipGuide::Advance(float DeltaTime, FRopeSimState& Sim, const FConfig& Config, bool bCaptureDebugTargets)
+void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config, bool bCaptureDebugTargets)
 {
 	ResetFrameOutputs();
 
@@ -94,8 +94,8 @@ void FRopeWhipGuide::Advance(float DeltaTime, FRopeSimState& Sim, const FConfig&
 	CurrentTargetsThisFrame = GuideTargets;
 	GuidedNodesThisFrame.SetNumZeroed(Sim.Num());
 
-	// 적용 루프: 계산된 타깃/마스크를 Sim에 쓴다. GPU 포팅 시 이 루프가 커널로 대체된다
-	// (마스크된 노드마다 PrevPositions ← 직전 타깃, Positions ← 현재 타깃).
+	// 마스크/디버그 계산만 — 실제 기록은 CPU 경로의 ApplyToSim 또는 GPU override 패스가
+	// 같은 산출물(CurrentTargets/PrevTargets/mask)을 소비해서 수행한다.
 	for (int32 i = 1; i <= LastGuidedNode; ++i)
 	{
 		if (Sim.InvMass.IsValidIndex(i) && Sim.InvMass[i] <= 0.0f)
@@ -121,10 +121,6 @@ void FRopeWhipGuide::Advance(float DeltaTime, FRopeSimState& Sim, const FConfig&
 			continue;
 		}
 
-		const FVector Target = GuideTargets[i];
-
-		Sim.PrevPositions[i] = PreviousTargets.IsValidIndex(i) ? PreviousTargets[i] : Sim.Positions[i];
-		Sim.Positions[i] = Target;
 		if (GuidedNodesThisFrame.IsValidIndex(i))
 		{
 			GuidedNodesThisFrame[i] = 1;
@@ -133,12 +129,26 @@ void FRopeWhipGuide::Advance(float DeltaTime, FRopeSimState& Sim, const FConfig&
 		if (bCaptureDebugTargets)
 		{
 			DebugGuideNodeIndices.Add(i);
-			DebugGuideTargets.Add(Target);
+			DebugGuideTargets.Add(GuideTargets[i]);
 		}
 	}
 
 	PreviousTargets = GuideTargets;
 	bActive = Elapsed < Config.Duration;
+}
+
+void FRopeWhipGuide::ApplyToSim(FRopeSimState& Sim) const
+{
+	for (int32 i = 0; i < GuidedNodesThisFrame.Num() && i < Sim.Num(); ++i)
+	{
+		if (GuidedNodesThisFrame[i] == 0 || !CurrentTargetsThisFrame.IsValidIndex(i))
+		{
+			continue;
+		}
+
+		Sim.PrevPositions[i] = PrevTargetsThisFrame.IsValidIndex(i) ? PrevTargetsThisFrame[i] : Sim.Positions[i];
+		Sim.Positions[i] = CurrentTargetsThisFrame[i];
+	}
 }
 
 void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config,

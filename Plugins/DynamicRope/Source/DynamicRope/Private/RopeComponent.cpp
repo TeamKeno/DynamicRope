@@ -140,6 +140,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 #else
 			const bool bCaptureGuideTargets = RopeDebug::IsFlightStatEnabled();
 #endif
+			// 타깃/마스크 계산만(Sim 불변) — 적용은 CPU 경로 SolveSimFrame(ApplyToSim) 또는
+			// GPU 상주 경로의 override 패스(서브시스템이 step에 실음)가 담당한다(G1).
 			WhipGuide.Advance(DeltaTime, Sim, MakeWhipGuideConfig(), bCaptureGuideTargets);
 			WhipElapsed = WhipGuide.GetElapsed(); // BP 노출용 미러.
 		}
@@ -199,14 +201,14 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		break;
 	}
 
-	// GPU 상주(M5): 로직 페이즈(Contacting/Wrapping/Wrapped/Releasing)는 Sim을 out-of-band로 바꾸고,
-	// whip은 CPU에서 위치를 가이드한다 → 다음 GPU step에서 재시드되도록 generation을 올린다.
-	// 정상 Free/Flight(비-whip)에선 불변이라 GPU 버퍼가 상주된 채 매 프레임 in-place로 전진한다.
+	// GPU 상주(M5): 로직 페이즈(Contacting/Wrapping/Wrapped/Releasing)는 Sim을 out-of-band로 바꾼다
+	// → 다음 GPU step에서 재시드되도록 generation을 올린다. Free/Flight에선 불변이라 GPU 버퍼가
+	// 상주된 채 매 프레임 in-place로 전진한다 — whip도 G1부터 override 패스로 주입되므로 재시드 없음.
 	const bool bLogicMutatedSim =
 		!bSolveThisFrame ||
 		Phase == ERopePhase::Wrapping ||
 		Phase == ERopePhase::Wrapped;
-	if (bLogicMutatedSim || WhipGuide.IsActive())
+	if (bLogicMutatedSim)
 	{
 		++SimGeneration;
 	}
@@ -222,6 +224,15 @@ void URopeComponent::SolveSimFrame(float DeltaTime)
 		return;
 	}
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Solve);
+
+	// whip 타깃 적용(CPU 경로, POD만 — 스레드 안전). Prepare의 Advance가 계산한 산출물을 솔브 시작
+	// 위치로 기록한다. GPU 로프는 이 함수 대신 override 패스가 같은 데이터를 커널에서 적용한다(G1).
+	// Flight 게이트: 다른 페이즈에 남은 stale 마스크(직전 whip 프레임 산출물)가 적용되는 것을 막는다.
+	if (Phase == ERopePhase::Flight)
+	{
+		WhipGuide.ApplyToSim(Sim);
+	}
+
 	Solver.Step(Sim, SolverConfig, /*optional*/ FrameColliders, DeltaTime);
 }
 

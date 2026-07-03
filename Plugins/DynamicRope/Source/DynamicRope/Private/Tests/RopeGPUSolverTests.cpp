@@ -214,22 +214,41 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 		GpuSolver.Step(MoveTemp(Steps));
 		FlushRenderingCommands();
 	};
-	// 최신 리드백 회수(consume은 다음 Step의 loop1이므로 NumSub=0·오버라이드 없는 step으로 펌프).
+	// GPU idle까지 동기화 — 리드백 IsReady를 결정적으로 만든다(헤드리스 고속 실행에서 GPU가
+	// 뒤처지면 in-flight 복사본이 오래된 프레임 것일 수 있다).
+	auto SyncGPU = []()
+	{
+		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
+			[](FRHICommandListImmediate& RHICmdList)
+			{
+				RHICmdList.BlockUntilGPUIdle();
+			});
+		FlushRenderingCommands();
+	};
+	// 최신(최종 상태) 리드백 회수. 주의: 단일 in-flight 리드백은 무장 시점의 버퍼를 복사하므로,
+	// (1) GPU idle 동기화로 기존 복사본을 consume 가능하게 만들고 (2) no-op override dispatch로
+	// 재무장을 유도하는 사이클을 여러 번 돌려야 "마지막 실제 상태"의 복사본이 확실히 도착한다.
+	// (no-op = 플래그 전부 0: 아무 노드도 쓰지 않지만 dispatch는 발생 → consume+재무장.)
 	auto Drain = [&](FRopeResidentLatest& OutLatest) -> bool
 	{
-		TMap<uint32, FRopeResidentLatest> Latest;
-		for (int32 Spin = 0; Spin < 64; ++Spin)
+		for (int32 Spin = 0; Spin < 8; ++Spin)
 		{
-			FlushRenderingCommands();
-			Pump(MakeStep(0, 1.0f / 60.0f));
-			GpuSolver.GetLatest(Latest);
-			if (const FRopeResidentLatest* L = Latest.Find(RopeId))
+			SyncGPU();
+			FRopeGPUResidentStep Noop = MakeStep(0, 1.0f / 60.0f);
+			Noop.OverrideFlags.SetNumZeroed(Sim.Num());
+			Pump(MoveTemp(Noop));
+		}
+		SyncGPU();
+		Pump(MakeStep(0, 1.0f / 60.0f)); // 마지막 consume(오버라이드 없음 — dispatch 없이 회수만).
+
+		TMap<uint32, FRopeResidentLatest> Latest;
+		GpuSolver.GetLatest(Latest);
+		if (const FRopeResidentLatest* L = Latest.Find(RopeId))
+		{
+			if (L->Generation == Gen && L->Positions.Num() == Sim.Num())
 			{
-				if (L->Generation == Gen && L->Positions.Num() == Sim.Num())
-				{
-					OutLatest = *L;
-					return true;
-				}
+				OutLatest = *L;
+				return true;
 			}
 		}
 		return false;

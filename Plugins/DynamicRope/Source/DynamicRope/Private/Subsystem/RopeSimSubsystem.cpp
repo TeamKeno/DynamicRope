@@ -182,8 +182,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	if (bUseGPU)
 	{
 		// GPU 상주 경로(M5a). 로프별 영속 버퍼를 매 프레임 in-place로 전진(라운드트립 스톨/슬로모 없음).
-		// whip 프레임은 CPU가 위치를 가이드하므로 그 로프만 CPU 솔브로 폴백(가이드 위치 보존). 충돌/접촉은
-		// Finalize의 CPU 경로가 (약간 지연된) 미러로 처리한다.
+		// whip 프레임도 G1부터 GPU 상주 — 가이드 타깃을 override 패스(적분 전 주입)로 실어 보낸다.
+		// 충돌/접촉 감지는 Finalize의 CPU 경로가 (약간 지연된) 미러로 처리한다.
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SolveGPU);
 
 		TArray<FRopeGPUResidentStep> Steps;
@@ -191,15 +191,15 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		for (URopeComponent* Rope : Ropes)
 		{
 			FRopeSimState& S = Rope->Sim;
-			// GPU 상주 대상: Free/Flight(bSolveThisFrame)이고 whip이 아니며 노드수가 한도 내일 때.
+			// GPU 상주 대상: Free/Flight(bSolveThisFrame)이고 노드수가 한도 내일 때(whip 포함 — G1).
 			const bool bGpuPhase = Rope->Phase == ERopePhase::Free || Rope->Phase == ERopePhase::Flight;
-			const bool bGpuRope = bGpuPhase && Rope->bSolveThisFrame && !Rope->WhipGuide.IsActive()
+			const bool bGpuRope = bGpuPhase && Rope->bSolveThisFrame
 				&& S.Num() >= 2 && S.Num() <= FRopeGPUSolver::MaxNodes;
 			// M5b: 이 프레임에 GPU step되는 로프만 렌더가 resident PosBuf를 직접 읽는다(아니면 stale → CPU 미러).
 			Rope->bGpuSteppedThisFrame = bGpuRope;
 			if (!bGpuRope)
 			{
-				// whip/폴백: CPU 솔브(Free/Flight일 때만). logic phase는 bSolveThisFrame=false라 자동 스킵.
+				// 폴백(노드수 초과 등): CPU 솔브(Free/Flight일 때만). logic phase는 bSolveThisFrame=false라 자동 스킵.
 				if (Rope->bSolveThisFrame)
 				{
 					Rope->SolveSimFrame(DeltaTime);
@@ -290,6 +290,33 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 					Sdf.InvDeltaTime    = View.InvDeltaTime;
 					Sdf.VolumeKey   = View.VolumeKey;
 					Step.SDFColliders.Add(Sdf);
+				}
+			}
+
+			// G1: whip 가이드 타깃을 override로 주입 — 재시드/CPU 폴백 없이 상주 유지(적분 전 적용).
+			// Prepare의 Advance가 계산한 산출물을 그대로 싣는다(CPU 경로의 ApplyToSim과 동일 데이터).
+			// Flight 게이트: 다른 페이즈에 남은 stale 마스크가 적용되는 것을 막는다.
+			if (Rope->Phase == ERopePhase::Flight)
+			{
+				const TArray<uint8>& WhipMask = Rope->WhipGuide.GetGuidedNodeMask();
+				if (WhipMask.Num() > 0)
+				{
+					const TArray<FVector>& WhipCur  = Rope->WhipGuide.GetCurrentTargets();
+					const TArray<FVector>& WhipPrev = Rope->WhipGuide.GetPrevTargets();
+					Step.OverrideFlags.SetNumZeroed(S.Num());
+					Step.OverridePositions.SetNumZeroed(S.Num());
+					Step.OverridePrevPositions.SetNumZeroed(S.Num());
+					for (int32 k = 0; k < S.Num() && k < WhipMask.Num(); ++k)
+					{
+						if (WhipMask[k] == 0 || !WhipCur.IsValidIndex(k))
+						{
+							continue;
+						}
+						Step.OverrideFlags[k] = static_cast<uint8>(ERopeGPUOverride::Position | ERopeGPUOverride::Prev);
+						Step.OverridePositions[k]     = WhipCur[k];
+						// 직전 타깃이 없으면(엣지 케이스) 속도 0 — CPU 폴백("직전 위치")과 근사.
+						Step.OverridePrevPositions[k] = WhipPrev.IsValidIndex(k) ? WhipPrev[k] : WhipCur[k];
+					}
 				}
 			}
 

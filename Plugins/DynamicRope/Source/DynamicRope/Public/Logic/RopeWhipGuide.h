@@ -41,11 +41,19 @@ public:
 	void SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config);
 
 	/**
-	 * 매 프레임(Flight, GT): Elapsed 전진 → 가이드 타깃/마스크 계산 → Sim에 적용.
+	 * 매 프레임(Flight, GT): Elapsed 전진 → 가이드 타깃/마스크 *계산만* 한다(Sim 불변).
+	 * 적용은 두 갈래가 같은 산출물을 소비한다: CPU 솔브 경로는 ApplyToSim, GPU 상주 경로는
+	 * override 패스(ERopeGPUOverride::Position|Prev — 서브시스템이 step에 실어 보냄).
 	 * 스윙이 끝나면(Elapsed >= Duration) 스스로 비활성화된다.
 	 * bCaptureDebugTargets가 참일 때만 디버그 배열(GetDebugGuide*)을 채운다(비용 절약).
 	 */
-	void Advance(float DeltaTime, FRopeSimState& Sim, const FConfig& Config, bool bCaptureDebugTargets);
+	void Advance(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config, bool bCaptureDebugTargets);
+
+	/**
+	 * CPU 경로의 적용 절반: Advance가 계산한 타깃/마스크를 Sim에 기록한다(가이드 노드만,
+	 * Pos=현재 타깃 / Prev=직전 타깃 → 차이가 Verlet 속도). GPU 로프에는 호출하지 않는다.
+	 */
+	void ApplyToSim(FRopeSimState& Sim) const;
 
 	/** 예측 접촉용: 다음 프레임 시점(Elapsed + DeltaTime)의 가이드 타깃 미리보기(상태 불변). */
 	void PreviewNextTargets(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config,
