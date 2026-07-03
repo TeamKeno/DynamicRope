@@ -116,6 +116,53 @@ void FRopeCenterlineBuffer::ReleaseRHI()
 	FVertexBuffer::ReleaseRHI();
 }
 
+// B2-full: tangent basis 버퍼. 컴퓨트는 R32_UINT UAV로 v당 uint4(SNORM16 packed)를 쓰고, VF는 VET_Short4N
+// 스트림(TangentX@0, TangentZ@8, stride 16) + R16G16B16A16_SNORM SRV(매뉴얼 페치)로 읽는다.
+void FRopeGpuTangentBuffer::InitRHI(FRHICommandListBase& RHICmdList)
+{
+	const uint32 Bytes = static_cast<uint32>(NumVertices) * 16; // TangentX(8) + TangentZ(8)
+	const FRHIBufferCreateDesc CreateDesc =
+		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuTangentBuffer"), Bytes)
+		.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
+		.DetermineInitialState();
+	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+
+	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
+		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R16G16B16A16_SNORM));
+	UAV = RHICmdList.CreateUnorderedAccessView(VertexBufferRHI,
+		FRHIViewDesc::CreateBufferUAV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R32_UINT));
+}
+
+void FRopeGpuTangentBuffer::ReleaseRHI()
+{
+	SRV.SafeRelease();
+	UAV.SafeRelease();
+	FVertexBuffer::ReleaseRHI();
+}
+
+// B2-full: UV 버퍼. 컴퓨트는 R32_FLOAT UAV로 v당 float2, VF는 VET_Float2 스트림 + G32R32F SRV(매뉴얼 페치)로 읽는다.
+void FRopeGpuTexCoordBuffer::InitRHI(FRHICommandListBase& RHICmdList)
+{
+	const uint32 Bytes = static_cast<uint32>(NumVertices) * sizeof(FVector2f);
+	const FRHIBufferCreateDesc CreateDesc =
+		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuTexCoordBuffer"), Bytes)
+		.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
+		.DetermineInitialState();
+	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+
+	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
+		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_G32R32F));
+	UAV = RHICmdList.CreateUnorderedAccessView(VertexBufferRHI,
+		FRHIViewDesc::CreateBufferUAV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R32_FLOAT));
+}
+
+void FRopeGpuTexCoordBuffer::ReleaseRHI()
+{
+	SRV.SafeRelease();
+	UAV.SafeRelease();
+	FVertexBuffer::ReleaseRHI();
+}
+
 SIZE_T FRopeSceneProxy::GetTypeHash() const
 {
 	static size_t UniquePointer;
@@ -172,19 +219,35 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 
 			if (bUseGpuTube)
 			{
-				// position stream을 GPU 컴퓨트가 쓰는 UAV 버퍼로 교체(tangent/UV/color는 VertexBuffers에서 바인딩).
-				GpuPositionBuffer.NumVertices = GetRequiredVertexCount();
+				// B2-full: position/tangent/UV 스트림을 모두 GPU 컴퓨트가 쓰는 UAV 버퍼로 교체(color만 VertexBuffers).
+				const int32 VertCount = GetRequiredVertexCount();
+				GpuPositionBuffer.NumVertices = VertCount;
 				GpuPositionBuffer.InitResource(RHICmdList);
+				GpuTangentBuffer.NumVertices = VertCount;
+				GpuTangentBuffer.InitResource(RHICmdList);
+				GpuTexCoordBuffer.NumVertices = VertCount;
+				GpuTexCoordBuffer.InitResource(RHICmdList);
 				CenterlineBuffer.NumFloats = NumRings * 3;
 				CenterlineBuffer.InitResource(RHICmdList);
 
-				// GetData()는 protected라 FDataType을 새로 구성: position만 커스텀 UAV 버퍼, 나머지는 VertexBuffers
-				// (InitWithDummyData가 먼저 enqueue돼 이 커맨드 시점엔 초기화됨)에서 public Bind* 헬퍼로 채운다.
+				// FDataType 직접 구성: position/tangent/texcoord는 커스텀 UAV 버퍼(스트림 + 매뉴얼 페치 SRV),
+				// color는 VertexBuffers.ColorVertexBuffer(InitWithDummyData가 먼저 enqueue돼 이 시점 초기화됨).
 				FLocalVertexFactory::FDataType Data;
 				Data.PositionComponent = FVertexStreamComponent(&GpuPositionBuffer, 0, sizeof(FVector3f), VET_Float3);
 				Data.PositionComponentSRV = GpuPositionBuffer.SRV;
-				VertexBuffers.StaticMeshVertexBuffer.BindTangentVertexBuffer(&VertexFactory, Data);
-				VertexBuffers.StaticMeshVertexBuffer.BindTexCoordVertexBuffer(&VertexFactory, Data);
+
+				// tangent basis: TangentX@0, TangentZ@8, stride 16, VET_Short4N(SNORM16). SRV = R16G16B16A16_SNORM.
+				Data.TangentBasisComponents[0] = FVertexStreamComponent(&GpuTangentBuffer, 0, 16, VET_Short4N);
+				Data.TangentBasisComponents[1] = FVertexStreamComponent(&GpuTangentBuffer, 8, 16, VET_Short4N);
+				Data.TangentsSRV = GpuTangentBuffer.SRV;
+
+				// UV: VET_Float2, stride 8. SRV = G32R32F. TexCoord 1개.
+				Data.TextureCoordinates.Empty();
+				Data.TextureCoordinates.Add(FVertexStreamComponent(&GpuTexCoordBuffer, 0, sizeof(FVector2f), VET_Float2));
+				Data.TextureCoordinatesSRV = GpuTexCoordBuffer.SRV;
+				Data.NumTexCoords = 1;
+				Data.LightMapCoordinateIndex = 0;
+
 				VertexBuffers.ColorVertexBuffer.BindColorVertexBuffer(&VertexFactory, Data);
 				VertexFactory.SetData(RHICmdList, Data);
 			}
@@ -200,6 +263,8 @@ FRopeSceneProxy::~FRopeSceneProxy()
 	VertexFactory.ReleaseResource();
 	// M5b: GPU 튜브 버퍼(미초기화여도 ReleaseResource는 안전).
 	GpuPositionBuffer.ReleaseResource();
+	GpuTangentBuffer.ReleaseResource();
+	GpuTexCoordBuffer.ReleaseResource();
 	CenterlineBuffer.ReleaseResource();
 }
 
@@ -368,16 +433,53 @@ void FRopeSceneProxy::SetDynamicData_RenderThread(FRHICommandListBase& RHICmdLis
 	}
 }
 
+void FRopeSceneProxy::BuildGpuStaticBuffers(FRHICommandListBase& RHICmdList)
+{
+	// B2-full: 매 프레임 불변인 index topology + 상수 color(white)를 1회만 채운다(CPU BuildTube 대체).
+	{
+		int32* Indices = static_cast<int32*>(RHICmdList.LockBuffer(IndexBuffer.IndexBufferRHI, 0, GetRequiredIndexCount() * sizeof(int32), RLM_WriteOnly));
+		uint32 Out = 0;
+		for (int32 i = 0; i < NumRings - 1; ++i)
+		{
+			for (int32 s = 0; s < NumSides; ++s)
+			{
+				const int32 A = GetVertIndex(i, s);
+				const int32 B = GetVertIndex(i, s + 1);
+				const int32 C = GetVertIndex(i + 1, s);
+				const int32 D = GetVertIndex(i + 1, s + 1);
+				Indices[Out++] = A; Indices[Out++] = C; Indices[Out++] = B;
+				Indices[Out++] = B; Indices[Out++] = C; Indices[Out++] = D;
+			}
+		}
+		RHICmdList.UnlockBuffer(IndexBuffer.IndexBufferRHI);
+	}
+	{
+		FColorVertexBuffer& CB = VertexBuffers.ColorVertexBuffer;
+		for (uint32 v = 0; v < CB.GetNumVertices(); ++v)
+		{
+			CB.VertexColor(v) = FColor::White;
+		}
+		void* Dst = RHICmdList.LockBuffer(CB.VertexBufferRHI, 0, CB.GetNumVertices() * CB.GetStride(), RLM_WriteOnly);
+		FMemory::Memcpy(Dst, CB.GetVertexData(), CB.GetNumVertices() * CB.GetStride());
+		RHICmdList.UnlockBuffer(CB.VertexBufferRHI);
+	}
+	bGpuStaticsBuilt = true;
+}
+
 void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, const FRopeDynamicData& Data)
 {
 	// 렌더 스레드. 컴퓨트 디스패치/transition엔 즉시 커맨드리스트가 필요(전달된 base list와 동일 객체).
 	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
 
-	// tangent/UV/color/index는 CPU 경로 그대로 사용(positions는 unbound VertexBuffers.Position으로 가 낭비되지만 무해).
-	BuildTube(RHICmdList, Data);
 	if (Data.Points.Num() != NumNodes)
 	{
 		return;
+	}
+
+	// B2-full: index topology + color를 1회 채운다(이후 프레임은 위치/tangent/UV만 GPU 재생성).
+	if (!bGpuStaticsBuilt)
+	{
+		BuildGpuStaticBuffers(RHICmdList);
 	}
 
 	// B2-lite: 솔버 resident PosBuf(월드)를 직접 읽어 위치 무지연. 단 이번 프레임에 실제로 GPU step된 로프만
@@ -403,19 +505,34 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 		RHICmdList.UnlockBuffer(CenterlineBuffer.VertexBufferRHI);
 	}
 
-	// position UAV에 GPU 튜브 생성. UAV write → vertex stream read 사이 배리어.
-	RHICmdList.Transition(FRHITransitionInfo(GpuPositionBuffer.VertexBufferRHI, ERHIAccess::Unknown, ERHIAccess::UAVCompute));
+	// pos/tangent/UV UAV에 GPU 튜브 생성. UAV write → vertex stream read 사이 배리어(세 버퍼 모두).
+	FRHITransitionInfo ToUAV[3] = {
+		FRHITransitionInfo(GpuPositionBuffer.VertexBufferRHI, ERHIAccess::Unknown, ERHIAccess::UAVCompute),
+		FRHITransitionInfo(GpuTangentBuffer.VertexBufferRHI,  ERHIAccess::Unknown, ERHIAccess::UAVCompute),
+		FRHITransitionInfo(GpuTexCoordBuffer.VertexBufferRHI, ERHIAccess::Unknown, ERHIAccess::UAVCompute),
+	};
+	RHICmdList.Transition(MakeArrayView(ToUAV, 3));
+
 	if (bResident)
 	{
 		// 월드 PosBuf → component-local 변환. proxy는 GetLocalToWorld()로 렌더하므로 WorldToLocal = inverse.
 		const FMatrix44f WorldToLocal(GetLocalToWorld().Inverse());
-		RopeGPU::BuildTubeFromResident_RenderThread(RHICmdList, ResidentSRV, GpuPositionBuffer.UAV, NumRings, NumSides, Radius, WorldToLocal);
+		RopeGPU::BuildTubeFromResident_RenderThread(RHICmdList, ResidentSRV,
+			GpuPositionBuffer.UAV, GpuTangentBuffer.UAV, GpuTexCoordBuffer.UAV, NumRings, NumSides, Radius, WorldToLocal);
 	}
 	else
 	{
-		RopeGPU::BuildTube_RenderThread(RHICmdList, CenterlineBuffer.SRV, GpuPositionBuffer.UAV, NumRings, NumSides, Radius);
+		RopeGPU::BuildTube_RenderThread(RHICmdList, CenterlineBuffer.SRV,
+			GpuPositionBuffer.UAV, GpuTangentBuffer.UAV, GpuTexCoordBuffer.UAV, NumRings, NumSides, Radius);
 	}
-	RHICmdList.Transition(FRHITransitionInfo(GpuPositionBuffer.VertexBufferRHI, ERHIAccess::UAVCompute, ERHIAccess::SRVGraphics | ERHIAccess::VertexOrIndexBuffer));
+
+	const ERHIAccess ToRead = ERHIAccess::SRVGraphics | ERHIAccess::VertexOrIndexBuffer;
+	FRHITransitionInfo ToVtx[3] = {
+		FRHITransitionInfo(GpuPositionBuffer.VertexBufferRHI, ERHIAccess::UAVCompute, ToRead),
+		FRHITransitionInfo(GpuTangentBuffer.VertexBufferRHI,  ERHIAccess::UAVCompute, ToRead),
+		FRHITransitionInfo(GpuTexCoordBuffer.VertexBufferRHI, ERHIAccess::UAVCompute, ToRead),
+	};
+	RHICmdList.Transition(MakeArrayView(ToVtx, 3));
 
 	bHasData = true;
 }

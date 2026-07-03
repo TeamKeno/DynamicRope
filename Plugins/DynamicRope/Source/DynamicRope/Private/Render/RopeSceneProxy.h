@@ -63,6 +63,31 @@ public:
 	virtual void ReleaseRHI() override;
 };
 
+/**
+ * B2-full: 컴퓨트가 써넣는 tangent basis 버퍼(VET_Short4N ×2 = TangentX/TangentZ, high-precision SNORM16).
+ * v당 16바이트(TangentX@0, TangentZ@8). UAV는 R32_UINT(컴퓨트 v당 uint4), 매뉴얼 페치 SRV는 R16G16B16A16_SNORM.
+ */
+class FRopeGpuTangentBuffer final : public FVertexBuffer
+{
+public:
+	int32 NumVertices = 0;
+	FShaderResourceViewRHIRef SRV; // PF_R16G16B16A16_SNORM(매뉴얼 페치)
+	FUnorderedAccessViewRHIRef UAV; // PF_R32_UINT(컴퓨트 write)
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	virtual void ReleaseRHI() override;
+};
+
+/** B2-full: 컴퓨트가 써넣는 UV 버퍼(VET_Float2). v당 2 float. UAV/SRV 모두 R32_FLOAT(SRV는 매뉴얼 페치용 G32R32F). */
+class FRopeGpuTexCoordBuffer final : public FVertexBuffer
+{
+public:
+	int32 NumVertices = 0;
+	FShaderResourceViewRHIRef SRV; // PF_G32R32F(매뉴얼 페치)
+	FUnorderedAccessViewRHIRef UAV; // PF_R32_FLOAT(컴퓨트 write)
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	virtual void ReleaseRHI() override;
+};
+
 class FRopeSceneProxy final : public FPrimitiveSceneProxy
 {
 public:
@@ -110,7 +135,13 @@ private:
 	// M5b: GPU 튜브 경로(r.DynamicRope.GPUTube). proxy 생성 시점에 한 번 결정(런타임 토글은 재생성 후 반영).
 	bool bUseGpuTube = false;
 	FRopeGpuPositionBuffer GpuPositionBuffer;
+	FRopeGpuTangentBuffer  GpuTangentBuffer;  // B2-full
+	FRopeGpuTexCoordBuffer GpuTexCoordBuffer; // B2-full
 	FRopeCenterlineBuffer  CenterlineBuffer;
+	bool bGpuStaticsBuilt = false; // B2-full: index topology + white color를 GPU 경로에서 1회만 채운다.
+
+	/** B2-full: GPU 튜브 경로의 index topology + 상수 color(white)를 1회 채운다(매 프레임 CPU BuildTube 대체). */
+	void BuildGpuStaticBuffers(FRHICommandListBase& RHICmdList);
 
 	// M5b B2-lite: 솔버 resident PosBuf를 직접 읽어 위치 무지연. 솔버는 월드 수명이라 proxy 동안 유효(없으면 B1 폴백).
 	FRopeGPUSolver* SolverPtr = nullptr;

@@ -11,6 +11,7 @@
 
 #include "Solver/RopeXPBDSolver.h"
 #include "RopeGPUSolver.h" // DynamicRopeShaders 모듈
+#include "RopeTubeBuilder.h" // B2-full 튜브 컴퓨트
 #include "Collision/RopeCollider.h"
 #include "Collision/SDF/RopeSDFCollider.h"
 #include "Collision/SDF/RopeSDFSynthetic.h" // MakeSphere(합성 SDF 볼륨)
@@ -732,6 +733,131 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("노드 %d SDF 법선 일치(dot %.3f)"), Cpu.NodeIndex, NormalDot), NormalDot > 0.98f);
 	}
 
+	return true;
+}
+
+// B2-full 튜브 컴퓨트: 셰이더가 컴파일되고 (1) 위치가 CPU parallel-transport 결과와 일치, (2) tangent(SNORM16
+// 언팩)가 단위이며 TangentX=전방접선/TangentZ=radial, (3) UV가 (ring/(N-1), side/NumSides)인지 검증.
+// 직선 센터라인(전방=+X)이라 프레임이 상수(U=+Y, V=+Z)여서 기대값이 결정적이다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUTubeTangentUVTest,
+	"DynamicRope.Solver.GPUTubeTangentUV",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU 튜브 tangent/UV 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	const int32 NumRings = 4;
+	const int32 NumSides = 6;
+	const float Radius = 5.0f;
+	const int32 VertsPerRing = NumSides + 1;
+	const int32 NumVerts = NumRings * VertsPerRing;
+
+	// 직선 센터라인(+X). 전방접선=+X, U=cross(+Z,+X)=+Y, V=cross(+X,+Y)=+Z.
+	TArray<FVector3f> Centerline;
+	Centerline.SetNum(NumRings);
+	for (int32 i = 0; i < NumRings; ++i) { Centerline[i] = FVector3f(10.0f * i, 0, 0); }
+
+	// GPU 디스패치 + 리드백(렌더 스레드).
+	TArray<float> OutPos, OutUV;
+	TArray<uint32> OutTan;
+	OutPos.SetNumZeroed(NumVerts * 3);
+	OutTan.SetNumZeroed(NumVerts * 4);
+	OutUV.SetNumZeroed(NumVerts * 2);
+
+	ENQUEUE_RENDER_COMMAND(RopeTubeTest)(
+		[&](FRHICommandListImmediate& RHICmdList)
+		{
+			auto MakeBuf = [&](const TCHAR* Name, uint32 Bytes, EPixelFormat Fmt, bool bUAV,
+				FShaderResourceViewRHIRef& OutSRV, FUnorderedAccessViewRHIRef& OutUAV) -> FBufferRHIRef
+			{
+				FRHIBufferCreateDesc Desc = FRHIBufferCreateDesc::CreateVertex(Name, Bytes)
+					.AddUsage(EBufferUsageFlags::ShaderResource | (bUAV ? EBufferUsageFlags::UnorderedAccess : EBufferUsageFlags::None))
+					.DetermineInitialState();
+				FBufferRHIRef Buf = RHICmdList.CreateBuffer(Desc);
+				OutSRV = RHICmdList.CreateShaderResourceView(Buf,
+					FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(Fmt));
+				if (bUAV)
+				{
+					OutUAV = RHICmdList.CreateUnorderedAccessView(Buf,
+						FRHIViewDesc::CreateBufferUAV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(Fmt));
+				}
+				return Buf;
+			};
+
+			FShaderResourceViewRHIRef InSRV, PosSRV, TanSRV, UVSRV;
+			FUnorderedAccessViewRHIRef DummyUAV, PosUAV, TanUAV, UVUAV;
+			FBufferRHIRef InBuf  = MakeBuf(TEXT("TubeTest.In"),  NumRings * 3 * sizeof(float), PF_R32_FLOAT, false, InSRV, DummyUAV);
+			FBufferRHIRef PosBuf = MakeBuf(TEXT("TubeTest.Pos"), NumVerts * 3 * sizeof(float), PF_R32_FLOAT, true,  PosSRV, PosUAV);
+			FBufferRHIRef TanBuf = MakeBuf(TEXT("TubeTest.Tan"), NumVerts * 4 * sizeof(uint32), PF_R32_UINT,  true,  TanSRV, TanUAV);
+			FBufferRHIRef UVBuf  = MakeBuf(TEXT("TubeTest.UV"),  NumVerts * 2 * sizeof(float), PF_R32_FLOAT, true,  UVSRV, UVUAV);
+
+			// 입력 센터라인 업로드.
+			{
+				float* Dst = static_cast<float*>(RHICmdList.LockBuffer(InBuf, 0, NumRings * 3 * sizeof(float), RLM_WriteOnly));
+				for (int32 i = 0; i < NumRings; ++i) { Dst[i * 3 + 0] = Centerline[i].X; Dst[i * 3 + 1] = Centerline[i].Y; Dst[i * 3 + 2] = Centerline[i].Z; }
+				RHICmdList.UnlockBuffer(InBuf);
+			}
+
+			RopeGPU::BuildTube_RenderThread(RHICmdList, InSRV, PosUAV, TanUAV, UVUAV, NumRings, NumSides, Radius);
+			RHICmdList.BlockUntilGPUIdle();
+
+			auto Read = [&](FBufferRHIRef Buf, uint32 Bytes, void* Dst)
+			{
+				FRHIGPUBufferReadback RB(TEXT("TubeTest.RB"));
+				RB.EnqueueCopy(RHICmdList, Buf, Bytes);
+				RHICmdList.BlockUntilGPUIdle();
+				if (const void* Src = RB.Lock(Bytes)) { FMemory::Memcpy(Dst, Src, Bytes); RB.Unlock(); }
+			};
+			Read(PosBuf, NumVerts * 3 * sizeof(float),  OutPos.GetData());
+			Read(TanBuf, NumVerts * 4 * sizeof(uint32), OutTan.GetData());
+			Read(UVBuf,  NumVerts * 2 * sizeof(float),  OutUV.GetData());
+		});
+	FlushRenderingCommands();
+
+	// SNORM16 언팩.
+	auto Snorm = [](uint32 packed, int half) -> float
+	{
+		const int16 s = static_cast<int16>((packed >> (half * 16)) & 0xFFFF);
+		return FMath::Clamp(static_cast<float>(s) / 32767.0f, -1.0f, 1.0f);
+	};
+
+	float MaxPosDev = 0.0f, MaxTanLenDev = 0.0f, MaxTxDev = 0.0f, MaxUVDev = 0.0f;
+	for (int32 ring = 0; ring < NumRings; ++ring)
+	{
+		for (int32 side = 0; side < VertsPerRing; ++side)
+		{
+			const int32 v = ring * VertsPerRing + side;
+			const float Angle = 2.0f * PI * static_cast<float>(side) / static_cast<float>(NumSides);
+			const FVector3f Radial(0.0f, FMath::Cos(Angle), FMath::Sin(Angle)); // U=+Y, V=+Z
+			const FVector3f ExpPos = Centerline[ring] + Radial * Radius;
+			const FVector3f GpuPos(OutPos[v * 3 + 0], OutPos[v * 3 + 1], OutPos[v * 3 + 2]);
+			MaxPosDev = FMath::Max(MaxPosDev, (GpuPos - ExpPos).Size());
+
+			// TangentX = uint[0..1], TangentZ = uint[2..3].
+			const FVector3f TX(Snorm(OutTan[v * 4 + 0], 0), Snorm(OutTan[v * 4 + 0], 1), Snorm(OutTan[v * 4 + 1], 0));
+			const FVector3f TZ(Snorm(OutTan[v * 4 + 2], 0), Snorm(OutTan[v * 4 + 2], 1), Snorm(OutTan[v * 4 + 3], 0));
+			MaxTanLenDev = FMath::Max(MaxTanLenDev, FMath::Abs(TZ.Size() - 1.0f));
+			MaxTxDev = FMath::Max(MaxTxDev, (TX - FVector3f(1, 0, 0)).Size());       // 전방접선 +X
+			MaxTanLenDev = FMath::Max(MaxTanLenDev, (TZ - Radial).Size());            // 법선 = radial
+
+			const float ExpU = static_cast<float>(ring) / static_cast<float>(NumRings - 1);
+			const float ExpV = static_cast<float>(side) / static_cast<float>(NumSides);
+			MaxUVDev = FMath::Max(MaxUVDev, FMath::Abs(OutUV[v * 2 + 0] - ExpU));
+			MaxUVDev = FMath::Max(MaxUVDev, FMath::Abs(OutUV[v * 2 + 1] - ExpV));
+		}
+	}
+
+	AddInfo(FString::Printf(TEXT("pos dev %.4f, tangentX dev %.4f, normal/len dev %.4f, UV dev %.5f"),
+		MaxPosDev, MaxTxDev, MaxTanLenDev, MaxUVDev));
+	TestTrue(TEXT("위치가 CPU parallel-transport와 일치"), MaxPosDev < 0.01f);
+	TestTrue(TEXT("TangentX = 전방접선(+X)"), MaxTxDev < 0.01f);
+	TestTrue(TEXT("TangentZ = radial 법선(단위)"), MaxTanLenDev < 0.01f);
+	TestTrue(TEXT("UV = (ring/(N-1), side/NumSides)"), MaxUVDev < 0.001f);
 	return true;
 }
 

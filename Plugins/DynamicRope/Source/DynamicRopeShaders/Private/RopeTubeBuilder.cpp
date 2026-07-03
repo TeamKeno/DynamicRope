@@ -24,6 +24,8 @@ public:
 		SHADER_PARAMETER(float, Radius)
 		SHADER_PARAMETER_SRV(Buffer<float>, InCenterline)
 		SHADER_PARAMETER_UAV(RWBuffer<float>, OutPositions)
+		SHADER_PARAMETER_UAV(RWBuffer<uint>, OutTangents)
+		SHADER_PARAMETER_UAV(RWBuffer<float>, OutTexCoords)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -54,6 +56,8 @@ public:
 		SHADER_PARAMETER(FMatrix44f, WorldToLocal)
 		SHADER_PARAMETER_SRV(StructuredBuffer<float4>, InCenterline4)
 		SHADER_PARAMETER_UAV(RWBuffer<float>, OutPositions)
+		SHADER_PARAMETER_UAV(RWBuffer<uint>, OutTangents)
+		SHADER_PARAMETER_UAV(RWBuffer<float>, OutTexCoords)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -74,10 +78,13 @@ void RopeGPU::BuildTube_RenderThread(
 	FRHICommandList& RHICmdList,
 	FRHIShaderResourceView* InCenterlineSRV,
 	FRHIUnorderedAccessView* OutPositionsUAV,
+	FRHIUnorderedAccessView* OutTangentsUAV,
+	FRHIUnorderedAccessView* OutTexCoordsUAV,
 	int32 NumRings, int32 NumSides, float Radius)
 {
 	check(IsInRenderingThread());
-	if (!InCenterlineSRV || !OutPositionsUAV || NumRings < 2 || NumRings > ROPE_TUBE_MAX_RINGS || NumSides < 3)
+	if (!InCenterlineSRV || !OutPositionsUAV || !OutTangentsUAV || !OutTexCoordsUAV
+		|| NumRings < 2 || NumRings > ROPE_TUBE_MAX_RINGS || NumSides < 3)
 	{
 		return;
 	}
@@ -90,6 +97,8 @@ void RopeGPU::BuildTube_RenderThread(
 	Params.Radius       = Radius;
 	Params.InCenterline = InCenterlineSRV;
 	Params.OutPositions = OutPositionsUAV;
+	Params.OutTangents  = OutTangentsUAV;
+	Params.OutTexCoords = OutTexCoordsUAV;
 
 	// 로프 1개 = 스레드그룹 1개(numthreads=ROPE_TUBE_MAX_RINGS). UAV 배리어는 호출자(proxy)가 처리.
 	FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, Params, FIntVector(1, 1, 1));
@@ -99,11 +108,14 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 	FRHICommandList& RHICmdList,
 	FRHIShaderResourceView* InResidentPositionsSRV,
 	FRHIUnorderedAccessView* OutPositionsUAV,
+	FRHIUnorderedAccessView* OutTangentsUAV,
+	FRHIUnorderedAccessView* OutTexCoordsUAV,
 	int32 NumRings, int32 NumSides, float Radius,
 	const FMatrix44f& WorldToLocal)
 {
 	check(IsInRenderingThread());
-	if (!InResidentPositionsSRV || !OutPositionsUAV || NumRings < 2 || NumRings > ROPE_TUBE_MAX_RINGS || NumSides < 3)
+	if (!InResidentPositionsSRV || !OutPositionsUAV || !OutTangentsUAV || !OutTexCoordsUAV
+		|| NumRings < 2 || NumRings > ROPE_TUBE_MAX_RINGS || NumSides < 3)
 	{
 		return;
 	}
@@ -117,6 +129,8 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 	Params.WorldToLocal  = WorldToLocal;
 	Params.InCenterline4 = InResidentPositionsSRV;
 	Params.OutPositions  = OutPositionsUAV;
+	Params.OutTangents   = OutTangentsUAV;
+	Params.OutTexCoords  = OutTexCoordsUAV;
 
 	FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, Params, FIntVector(1, 1, 1));
 }

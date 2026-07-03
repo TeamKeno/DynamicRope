@@ -22,10 +22,25 @@ Buffer<float>          InCenterline;   // B1: ring r 위치 = (InCenterline[r*3+
 StructuredBuffer<float4> InCenterline4; // B2: ring r 위치 = InCenterline4[r].xyz. 월드.
 float4x4               WorldToLocal;   // B2: 월드 → component-local.
 RWBuffer<float>        OutPositions;   // 정점 v 위치 = OutPositions[v*3+0..2]. VET_Float3 vertex stream(UAV).
+// B2-full: tangent basis + UV도 GPU 생성 → CPU BuildTube 불필요. tangent는 high-precision SNORM16
+// (Short4N) — 정점 스트림(VET_Short4N)과 manual-vertex-fetch(SNORM16 SRV)가 모두 signed-normalized로
+// 일관(low-precision UBYTE4N은 두 경로 해석이 달라 불가). v당 uint 4개: [0]=TangentX.xy, [1]=TangentX.zw,
+// [2]=TangentZ.xy, [3]=TangentZ.zw. UV는 v당 float2(VET_Float2).
+RWBuffer<uint>         OutTangents;
+RWBuffer<float>        OutTexCoords;
 
 groupshared float3 gCenter[ROPE_TUBE_MAX_RINGS]; // component-local
 groupshared float3 gU[ROPE_TUBE_MAX_RINGS];
 groupshared float3 gV[ROPE_TUBE_MAX_RINGS];
+groupshared float3 gTangent[ROPE_TUBE_MAX_RINGS]; // ring 전방 접선(정점 TangentX)
+
+// 성분 c(-1..1) → SNORM16 int16: round(clamp(c,-1,1)*32767). 두 개를 하나의 uint에 팩(하위=a, 상위=b).
+uint RopePackSnorm16x2(float a, float b)
+{
+	const int ia = (int)round(clamp(a, -1.0f, 1.0f) * 32767.0f);
+	const int ib = (int)round(clamp(b, -1.0f, 1.0f) * 32767.0f);
+	return ((uint)(ia & 0xFFFF)) | (((uint)(ib & 0xFFFF)) << 16);
+}
 
 // 단위 벡터 From->To 최소회전으로 v 회전(FQuat4f::FindBetweenNormals + RotateVector 미러). 안정적 fallback 포함.
 float3 RotateBetween(float3 From, float3 To, float3 v)
@@ -82,12 +97,14 @@ void BuildTubeFrameAndWrite(uint tid, uint N)
 			PrevTangent = Tangent;
 			gU[i] = U;
 			gV[i] = V;
+			gTangent[i] = Tangent;
 		}
 	}
 	GroupMemoryBarrierWithGroupSync();
 
 	const uint VertsPerRing = NumSides + 1;
 	const uint TotalVerts = N * VertsPerRing;
+	const float InvRingSpan = 1.0f / (float)(N - 1);
 	for (uint v = tid; v < TotalVerts; v += ROPE_TUBE_MAX_RINGS)
 	{
 		const uint ring = v / VertsPerRing;
@@ -99,6 +116,19 @@ void BuildTubeFrameAndWrite(uint tid, uint N)
 		OutPositions[v * 3 + 0] = Pos.x;
 		OutPositions[v * 3 + 1] = Pos.y;
 		OutPositions[v * 3 + 2] = Pos.z;
+
+		// B2-full: tangent basis (CPU SetVertexTangents(Tangent, Radial^Tangent, Radial) 미러). TangentX=ring
+		// 전방 접선, TangentZ=Radial(법선), w=+1(오른손 basis: Y=cross(Z,X)로 복원되도록 부호 +).
+		const float3 TX = gTangent[ring];
+		const float3 TZ = Radial;
+		OutTangents[v * 4 + 0] = RopePackSnorm16x2(TX.x, TX.y);
+		OutTangents[v * 4 + 1] = RopePackSnorm16x2(TX.z, 0.0f); // TangentX.w 미사용
+		OutTangents[v * 4 + 2] = RopePackSnorm16x2(TZ.x, TZ.y);
+		OutTangents[v * 4 + 3] = RopePackSnorm16x2(TZ.z, 1.0f); // TangentZ.w = +1(basis 부호)
+
+		// UV: (AlongFrac, AroundFrac). CPU와 동일.
+		OutTexCoords[v * 2 + 0] = (float)ring * InvRingSpan;
+		OutTexCoords[v * 2 + 1] = AroundFrac;
 	}
 }
 
