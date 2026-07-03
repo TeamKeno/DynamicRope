@@ -67,6 +67,13 @@ public:
 	/** dominant bone에 MinLatchNodes 이상이 접촉했으면 캡처(Flight → Contacting) 판정. */
 	static bool ShouldCapture(const TArray<FRopeContactCandidate>& Candidates, const FParams& Params);
 
+	/**
+	 * 접촉 후보가 "그냥 닿음"을 넘어 실제 감김으로 볼 만한지 검사하는 품질 게이트.
+	 * 현재는 감김 폴리싱 우선이라 항상 통과시키고, 나중에 점수/속도/방향 기준을 여기 안에 채운다.
+	 */
+	static bool PassesCaptureQualityGate(const FRopeContactTracker& Tracker,
+		const TArray<FRopeContactCandidate>& Candidates, const FParams& Params);
+
 	//~ 개별 헬퍼 — 디버그 수집(FinalizeSimFrame)과 Contacting 시드 빌드에서도 쓰인다.
 	/** 로프 끝(tail) 근처 노드인가(마지막 4개). tail은 속도와 무관하게 항상 검사 대상. */
 	static bool IsTailNode(const FRopeSimState& Sim, int32 NodeIndex);
