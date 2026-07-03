@@ -106,16 +106,47 @@ async가 맞는 경우는 "처리량(많은 로프) + 지연 허용"이지, 손�
 - `Source/DynamicRope/`
   - `Subsystem/RopeSimSubsystem` — 중앙 구동 + GPU 솔버 소유 + **collider 레지스트리/중앙 수집(CL57)**.
   - `RopeComponent` — Facade, phase machine, `SimGeneration`/`bGpuSteppedThisFrame`.
-  - `Render/RopeSceneProxy` — 튜브 렌더(CPU `BuildTube` / GPU `BuildTubeGPU`), UAV position buffer 바인딩.
+  - `Render/RopeSceneProxy` — 튜브 렌더. GPU 경로(자동, 렌더 가능 RHI+링<=256): pos+tangent+UV UAV 버퍼를
+    컴퓨트로 채우고 resident PosBuf를 GPU 스무딩(무지연). 폴백: CPU `BuildTube`.
   - `Collision/` — `IRopeCollider`(FROZEN contract), provider(캡슐/SDF), GPU 추출자(`GetGPUCapsule`/`GetGPUSDF`).
 
 ---
 
-## 6. 남은 작업
+## 6. GPU 전환 트랙 — 완료 상태(G0~G5)
 
-- **B2-full**: tangent도 GPU 생성(packed normal 컴퓨트) → 완전 무지연 + CPU `BuildTube`/렌더 리드백 완전 제거.
-- **M5c**: DecideWrap용 contact만 작은 async 리드백 + wrap 핸드오프 시 GPU→CPU 위치 정밀 동기.
-- (선택) 대량 로프 throughput: per-rope dispatch → 슬랩 할당 단일 dispatch.
+런타임은 이제 **GPU 단일 경로**(솔브+감지+튜브+스무딩), CPU는 렌더 불가 환경/오버사이즈 폴백 + 테스트 기준.
+
+| 단계 | 내용 | CL |
+|---|---|---|
+| G0 | override 패스(로직 타깃/질량을 재시드 없이 상주 버퍼에 주입) | 152 |
+| G1 | whip 커널화(제외조건 제거, override로 가이드 타깃 주입) | 153 |
+| G2 | 로직 페이즈 통합(FRopeNodeOverrideFrame; Wrapped도 GPU 상주; M5c 핸드오프 동기 리드백) | 155 |
+| G3a/b | 접촉 감지 GPU화(actual+predictive, capsule+SDF; 콜라이더 인덱스→bone/mesh 귀속) | 156/157 |
+| G4 | GPU 단일 런타임(CVar 제거, RHI 유무 자동 선택, CPU 자동 폴백) + >256 감지 게이트 픽스 | 159/160 |
+| G5 | B2-full 튜브(pos+tangent+UV GPU) 165 · GPUTube 상시화 166 · GPU 튜브 스무딩(무지연) 167 | 165~167 |
+
+- **미해결(트랙 밖)**: 미러(`GetLatest`) 완전 제거 — 비-resident 폴백 + 디버그/GT 로직이 아직 읽음.
+- **보류(수요 시)**: 다중 로프 단일 dispatch(per-rope resident PosBuf 구조와 충돌 → 슬랩 재설계),
+  256노드 초과(단일 스레드그룹 한도 → multi-threadgroup 재설계; 현재는 >256 자동 CPU 폴백).
+
+## 6a. GDF 월드 충돌 — 도입 난이도 가늠(현 아키텍처 기준)
+
+`Docs/PoC/02_GDF_GoNoGo.md` 참조. GPU 전환 완료가 GDF를 **쉽게 만든 부분과 안 만든 부분**이 갈린다.
+
+- **쉬워진 것(셰이더 충돌)**: GDF 밀어내기는 `RopeXPBD.usf`의 기존 SDF push-out을 월드 공간으로 미러하면
+  된다(~30~50줄). 런타임이 GPU 단일 경로라 CPU/GPU 이중 구현도 불필요(GDF는 본질적으로 GPU; CPU 폴백은
+  렌더 불가 환경이라 GDF 없어도 무방). 상주 버퍼 패턴은 PoC(2)가 씬 렌더러 그래프에서도 유효 확인.
+- **여전히 어려운 것(구조 2가지, 전환 작업이 건드리지 않음)**:
+  1. **솔버 dispatch를 뷰 확장으로 이전**: 현재 `FRopeGPUSolver::Step`은 서브시스템 Tick가 트리거하는
+     독립 렌더 커맨드(자체 FRDGBuilder). GDF 파라미터(page atlas 등)는 씬 렌더러 그래프 안에서만 유효 →
+     솔브 dispatch를 `PrePostProcessPass_RenderThread` 뷰 확장으로 옮겨야 바인딩 가능. 중간 규모 재구조.
+  2. **GDF 빌드 보장(소비자 등록)**: 읽기만으론 GDF가 안 빌드됨(문서의 최대 리스크). public API 없음 →
+     (a)전역 강제=성능 비용, (b)씬 머티리얼 규약=취약, (c)Niagara식 FXSystem 소비자 모사=엔진 내부 복제.
+     이 항목은 전환 작업과 무관하게 미해결이며 사실상의 blocker.
+- **본질적 한계(불변)**: 해상도(clipmap voxel > CollisionRadius → 얇은 벽 터널링), SurfaceVelocity 없음,
+  본 귀속 없음(wrap 불가) → **per-bone SDF 대체 아님, 정적 월드(벽/바닥) 광역 보완재 한정**.
+- **한 줄 가늠**: 충돌 커널만 보면 간단하지만, 전체 통합은 **뷰 확장 이전 + GDF 빌드 보장**이 지배 —
+  전자는 중간, 후자는 어렵고 미해결. 마일스톤화 시 "GDF 빌드 보장"을 최우선 설계 항목으로 못 박을 것.
 
 ---
 
