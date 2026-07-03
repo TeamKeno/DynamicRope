@@ -13,6 +13,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Core/RopeTypes.h"
 #include "RopeWielderComponent.generated.h"
 
 class URopeComponent;
@@ -66,6 +67,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
 	ERopeAimSource AimSource = ERopeAimSource::ControlRotation;
 
+	//~ Throw --------------------------------------------------------------
+	/** 던질 때 Up/Right 기준축을 어디서 가져올지. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	ERopeThrowFrameMode ThrowFrameMode = ERopeThrowFrameMode::Owner;
+
+	/** AimDir과 기준축을 조합해 스윙 호가 놓일 평면을 고른다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	ERopeSwingPlane SwingPlane = ERopeSwingPlane::AimAndFrameUp;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "ThrowFrameMode == ERopeThrowFrameMode::Custom"))
+	FVector CustomFrameForward = FVector::ForwardVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "ThrowFrameMode == ERopeThrowFrameMode::Custom"))
+	FVector CustomFrameUp = FVector::UpVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "ThrowFrameMode == ERopeThrowFrameMode::Custom"))
+	FVector CustomFrameRight = FVector::RightVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "SwingPlane == ERopeSwingPlane::CustomNormal"))
+	FVector CustomSwingPlaneNormal = FVector::RightVector;
+
 	//~ Input(선택) — 비우면 무시, Throw()를 직접 호출하면 된다 ------------
 	/** Action/MappingContext가 설정돼 있으면 BeginPlay에 자동 바인딩할지. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
@@ -110,11 +132,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Throw();
 
-	/** 실제 로프 던지기를 *지금* 실행한다(현재 AimSource 방향). 던지는 모션 몽타주의 AnimNotify가 호출. */
+	/** 실제 로프 던지기를 *지금* 실행한다. 방향은 ThrowFrameMode의 Forward를 사용한다. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowNow();
 
-	/** 지정 방향으로 *지금* 던진다(AimSource 무시). */
+	/** 현재 Wielder/Rope 설정으로 throw 순간의 origin/frame/속도 context를 만든다. AimDir은 legacy 호환용이며 내부에서는 무시한다. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	FRopeThrowContext BuildThrowContext(const FVector& AimDir) const;
+
+	/** Legacy API. AimDir은 더 이상 주 방향이 아니며, 실제 방향은 ThrowFrameMode의 Forward를 사용한다. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowInDirection(const FVector& AimDir);
 

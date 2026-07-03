@@ -6,6 +6,7 @@
 #include "Render/RopeSceneProxy.h"
 #include "Debug/RopeDebugDraw.h"       // stat 카운터(RopeDebug::Record*)
 #include "Debug/RopeDebugSnapshot.h"   // 게이트플레이 디버거용 한 프레임 디버그 스냅샷
+#include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
@@ -52,6 +53,7 @@ namespace
 		default:                     return TEXT("?");
 		}
 	}
+
 }
 
 URopeComponent::URopeComponent()
@@ -68,11 +70,16 @@ URopeComponent::URopeComponent()
 
 void URopeComponent::Throw(const FVector& AimDir)
 {
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Throw requested (phase=%s, aim=%s)"),
-		*GetName(), PhaseName(Phase), *AimDir.GetSafeNormal().ToCompactString());
+	ThrowWithContext(MakeDefaultThrowContext(AimDir));
+}
+
+void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
+{
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Throw requested (phase=%s, forward=%s)"),
+		*GetName(), PhaseName(Phase), *ThrowContext.FrameForward.GetSafeNormal().ToCompactString());
 
 	EnsureRopeInitialized();
-	StartFreshThrow(AimDir);
+	StartFreshThrow(ThrowContext);
 }
 
 void URopeComponent::ReleaseWrap()
@@ -648,10 +655,74 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 
 // ===== Throw ================================================================
 
-void URopeComponent::StartFreshThrow(const FVector& AimDir)
+FRopeThrowContext URopeComponent::MakeDefaultThrowContext(const FVector& /*AimDir*/) const
 {
+	FRopeThrowContext Context;
+	Context.Origin = GetComponentLocation();
+	Context.FrameMode = ThrowParams.FrameMode;
+	Context.FrameForward = GetForwardVector();
+	Context.FrameUp = ThrowParams.FrameMode == ERopeThrowFrameMode::World ? FVector::UpVector : GetUpVector();
+	Context.FrameRight = ThrowParams.FrameMode == ERopeThrowFrameMode::World ? FVector::RightVector : GetRightVector();
+	if (ThrowParams.FrameMode == ERopeThrowFrameMode::World)
+	{
+		Context.FrameForward = FVector::ForwardVector;
+		Context.FrameRight = FVector::RightVector;
+	}
+	if (ThrowParams.FrameMode == ERopeThrowFrameMode::OwnerCamera)
+	{
+		if (const AActor* Owner = GetOwner())
+		{
+			if (const UCameraComponent* Camera = Owner->FindComponentByClass<UCameraComponent>())
+			{
+				Context.FrameForward = Camera->GetForwardVector();
+				Context.FrameUp = Camera->GetUpVector();
+				Context.FrameRight = Camera->GetRightVector();
+			}
+		}
+	}
+	if (ThrowParams.FrameMode == ERopeThrowFrameMode::Custom)
+	{
+		Context.FrameForward = ThrowParams.CustomFrameForward;
+		Context.FrameUp = ThrowParams.CustomFrameUp;
+		Context.FrameRight = ThrowParams.CustomFrameRight;
+	}
+	Context.SwingPlane = ThrowParams.SwingPlane;
+	Context.CustomSwingPlaneNormal = ThrowParams.CustomSwingPlaneNormal;
+	Context.AimDirection = Context.FrameForward;
+	return Context;
+}
+
+FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& ThrowContext) const
+{
+	FRopeThrowContext Resolved = ThrowContext;
+
+	Resolved.FrameForward = FRopeWhipGuide::SafeNormalOr(Resolved.FrameForward, GetForwardVector());
+	Resolved.FrameUp = FRopeWhipGuide::SafeNormalOr(Resolved.FrameUp, FVector::UpVector);
+	Resolved.FrameRight = FRopeWhipGuide::SafeNormalOr(Resolved.FrameRight, FVector::CrossProduct(Resolved.FrameUp, Resolved.FrameForward));
+	Resolved.AimDirection = Resolved.FrameForward;
+	if (Resolved.Origin.IsNearlyZero())
+	{
+		Resolved.Origin = GetComponentLocation();
+	}
+
+	return Resolved;
+}
+
+FVector URopeComponent::ComputeThrowInheritedVelocity(const FRopeThrowContext& ThrowContext) const
+{
+	return ThrowContext.OwnerVelocity * ThrowParams.OwnerVelocityScale +
+		ThrowContext.SocketVelocity * ThrowParams.SocketVelocityScale;
+}
+
+void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
+{
+	const FRopeThrowContext ResolvedThrow = ResolveThrowContext(ThrowContext);
+	const FRopeWhipGuide::FSwingBasis SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
+		ResolvedThrow, ResolvedThrow.SwingPlane, ResolvedThrow.CustomSwingPlaneNormal);
+
 	// 채찍 스윙 가이드 좌표계 구성 + 활성화(퇴화 케이스 fallback은 컴포넌트 축).
-	WhipGuide.Begin(AimDir, GetComponentLocation(), GetForwardVector(), GetUpVector(), GetRightVector());
+	WhipGuide.Begin(SwingBasis.AimDir, ResolvedThrow.Origin,
+		ResolvedThrow.FrameForward, SwingBasis.GuideUp, SwingBasis.GuideRight);
 	WhipElapsed = WhipGuide.GetElapsed();
 
 	++SimGeneration; // throw로 tail 위치를 재설정 → GPU 상주 버퍼 재시드(M5).
@@ -666,7 +737,7 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 	const int32 LastNode = Sim.Num() - 1;
 	if (LastNode >= 1)
 	{
-		const FVector Start = GetComponentLocation();
+		const FVector Start = ResolvedThrow.Origin;
 		Sim.bStartPinned = true;
 		Sim.StartPinPrev = Start;
 		Sim.StartPinTarget = Start;
@@ -688,6 +759,7 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 		const float ReferenceDt = 1.0f / 60.0f;
 		const float BaseImpulse = ThrowParams.ThrowSpeed * ReferenceDt;
 		const float TipBoost = FMath::Clamp(ThrowParams.TipMass / 5.0f, 0.25f, 3.0f);
+		const FVector InheritedVelocityImpulse = ComputeThrowInheritedVelocity(ResolvedThrow) * ReferenceDt;
 		const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipConfig.GuidedLength), 1, LastNode);
 		for (int32 i = 1; i <= LastNode; ++i)
 		{
@@ -695,7 +767,7 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 			const float TailWeight = TailWeightByIndex(i, FirstTailNode, LastNode);
 			const float Weight = FMath::Lerp(RopeMath::SmoothStep(AlongRope), 1.0f, TailWeight * 0.5f);
 			const float Impulse = BaseImpulse * Weight * FMath::Lerp(1.0f, TipBoost, TailWeight);
-			Sim.PrevPositions[i] -= ThrowDir * Impulse;
+			Sim.PrevPositions[i] -= ThrowDir * Impulse + InheritedVelocityImpulse;
 		}
 	}
 

@@ -428,17 +428,101 @@ struct FRopeWrapConfig
 	float FlightNoContactReturnTime = 0.0f;
 };
 
+/** 던질 때 기준축을 어느 좌표계에서 가져올지. */
+UENUM(BlueprintType)
+enum class ERopeThrowFrameMode : uint8
+{
+	World = 0 UMETA(DisplayName = "World"),
+	Owner = 1 UMETA(DisplayName = "Owner"),
+	OwnerCamera = 3 UMETA(DisplayName = "Owner Camera"),
+	Socket = 2 UMETA(DisplayName = "Socket"),
+	Custom = 4 UMETA(DisplayName = "Custom")
+};
+
+/** AimDir과 조합해 스윙 호가 놓일 평면/방향을 고르는 5개 드롭다운. */
+UENUM(BlueprintType)
+enum class ERopeSwingPlane : uint8
+{
+	AimAndFrameUp UMETA(DisplayName = "Aim + Frame Up"),
+	AimAndFrameDown UMETA(DisplayName = "Aim + Frame Down"),
+	AimAndFrameRight UMETA(DisplayName = "Aim + Frame Right"),
+	AimAndFrameLeft UMETA(DisplayName = "Aim + Frame Left"),
+	CustomNormal UMETA(DisplayName = "Custom Plane Normal")
+};
+
+/** throw 순간 Wielder/Component가 계산해 넘기는 런타임 값. 설정값(FRopeThrowParams)과 분리한다. */
+USTRUCT(BlueprintType)
+struct FRopeThrowContext
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	FVector Origin = FVector::ZeroVector;
+
+	/** Legacy 입력값. 현재 throw 방향은 FrameForward를 사용한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	FVector AimDirection = FVector::ForwardVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	FVector FrameForward = FVector::ForwardVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	FVector FrameUp = FVector::UpVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	FVector FrameRight = FVector::RightVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	FVector OwnerVelocity = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	FVector SocketVelocity = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	ERopeThrowFrameMode FrameMode = ERopeThrowFrameMode::Owner;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	ERopeSwingPlane SwingPlane = ERopeSwingPlane::AimAndFrameUp;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	FVector CustomSwingPlaneNormal = FVector::RightVector;
+};
+
 /** flight 단계의 Throw / launch 파라미터. */
 USTRUCT(BlueprintType)
 struct FRopeThrowParams
 {
 	GENERATED_BODY()
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	ERopeThrowFrameMode FrameMode = ERopeThrowFrameMode::Owner;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	ERopeSwingPlane SwingPlane = ERopeSwingPlane::AimAndFrameUp;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
 	float ThrowSpeed = 1500.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.1"))
 	float TipMass = 5.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
+	float OwnerVelocityScale = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
+	float SocketVelocityScale = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
+	FVector CustomFrameForward = FVector::ForwardVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
+	FVector CustomFrameUp = FVector::UpVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
+	FVector CustomFrameRight = FVector::RightVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "SwingPlane == ERopeSwingPlane::CustomNormal"))
+	FVector CustomSwingPlaneNormal = FVector::RightVector;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0", Units = "cm"))
 	float AimAssistRadius = 100.0f;

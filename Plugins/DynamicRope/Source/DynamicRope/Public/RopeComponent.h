@@ -111,6 +111,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Throw(const FVector& AimDir);
 
+	/** Wielder가 origin/frame/속도까지 계산해 넘기는 확장 throw 진입점. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void ThrowWithContext(const FRopeThrowContext& ThrowContext);
+
 	/** 현재 진행 중인 잡기/감기(Contacting/Wrapping/Wrapped)를 수동으로 해제한다(Releasing phase). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ReleaseWrap();
@@ -255,7 +259,13 @@ private:
 #endif
 
 	//~ Throw ----------------------------------------------------------------
-	void StartFreshThrow(const FVector& AimDir);
+	FRopeThrowContext MakeDefaultThrowContext(const FVector& AimDir) const;
+
+	void StartFreshThrow(const FRopeThrowContext& ThrowContext);
+
+	FRopeThrowContext ResolveThrowContext(const FRopeThrowContext& ThrowContext) const;
+
+	FVector ComputeThrowInheritedVelocity(const FRopeThrowContext& ThrowContext) const;
 
 	/** WhipGuide에 넘길 설정 스냅샷을 Rope|Whip UPROPERTY들로부터 만든다. */
 	FRopeWhipGuide::FConfig MakeWhipGuideConfig() const;

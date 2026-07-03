@@ -27,6 +27,20 @@ public:
 		float ComponentRopeLength = 0.0f; // 가이드 길이 산정용: max(Sim.RopeLength, 이 값) 사용
 	};
 
+	struct FSwingBasis
+	{
+		FVector AimDir = FVector::ForwardVector;
+		FVector GuideUp = FVector::UpVector;
+		FVector GuideRight = FVector::RightVector;
+	};
+
+	/** 퇴화 벡터를 fallback으로 정규화한다. throw frame/swing basis 해석 공용. */
+	static FVector SafeNormalOr(const FVector& Value, const FVector& Fallback);
+
+	/** ThrowContext와 SwingPlane 설정을 WhipGuide가 실제로 쓰는 Aim/Up/Right 기준축으로 해석한다. */
+	static FSwingBasis ResolveSwingBasis(const FRopeThrowContext& ThrowContext,
+		ERopeSwingPlane SwingPlane, const FVector& CustomPlaneNormal);
+
 	/**
 	 * throw 시 호출: 조준 방향 기준의 가이드 좌표계(Forward/Up)를 구성하고 스윙을 활성화한다.
 	 * Fallback* 벡터들은 퇴화 케이스(조준이 0이거나 수직에 가까울 때)에 쓸 컴포넌트 축.

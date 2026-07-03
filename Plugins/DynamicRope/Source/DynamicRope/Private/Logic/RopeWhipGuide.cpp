@@ -3,6 +3,77 @@
 #include "Logic/RopeWhipGuide.h"
 #include "RopeMathHelpers.h" // RopeMath::SmoothStep (unity 빌드 중복 정의 방지)
 
+namespace
+{
+FVector ProjectAxisOffAim(const FVector& Axis, const FVector& AimDir, const FVector& Fallback)
+{
+	const FVector Aim = FRopeWhipGuide::SafeNormalOr(AimDir, FVector::ForwardVector);
+	FVector Projected = Axis - FVector::DotProduct(Axis, Aim) * Aim;
+	if (Projected.IsNearlyZero())
+	{
+		Projected = Fallback - FVector::DotProduct(Fallback, Aim) * Aim;
+	}
+	if (Projected.IsNearlyZero())
+	{
+		Projected = RopeMath::AnyTangentFromNormal(Aim);
+	}
+	return Projected.GetSafeNormal();
+}
+
+}
+
+FVector FRopeWhipGuide::SafeNormalOr(const FVector& Value, const FVector& Fallback)
+{
+	const FVector Normalized = Value.GetSafeNormal();
+	return Normalized.IsNearlyZero() ? Fallback.GetSafeNormal() : Normalized;
+}
+
+FRopeWhipGuide::FSwingBasis FRopeWhipGuide::ResolveSwingBasis(const FRopeThrowContext& ThrowContext,
+	ERopeSwingPlane SwingPlane, const FVector& CustomPlaneNormal)
+{
+	FSwingBasis Basis;
+	Basis.AimDir = SafeNormalOr(ThrowContext.FrameForward, FVector::ForwardVector);
+
+	const FVector FrameUp = ProjectAxisOffAim(ThrowContext.FrameUp, Basis.AimDir, FVector::UpVector);
+	const FVector FrameRight = ProjectAxisOffAim(ThrowContext.FrameRight, Basis.AimDir, FVector::CrossProduct(FrameUp, Basis.AimDir));
+
+	switch (SwingPlane)
+	{
+	case ERopeSwingPlane::AimAndFrameDown:
+		Basis.GuideUp = -FrameUp;
+		break;
+	case ERopeSwingPlane::AimAndFrameRight:
+		Basis.GuideUp = FrameRight;
+		break;
+	case ERopeSwingPlane::AimAndFrameLeft:
+		Basis.GuideUp = -FrameRight;
+		break;
+	case ERopeSwingPlane::CustomNormal:
+	{
+		const FVector PlaneNormal = SafeNormalOr(CustomPlaneNormal, FVector::CrossProduct(Basis.AimDir, FrameUp));
+		Basis.GuideUp = FVector::CrossProduct(PlaneNormal, Basis.AimDir).GetSafeNormal();
+		if (Basis.GuideUp.IsNearlyZero())
+		{
+			Basis.GuideUp = FrameUp;
+		}
+		break;
+	}
+	case ERopeSwingPlane::AimAndFrameUp:
+	default:
+		Basis.GuideUp = FrameUp;
+		break;
+	}
+
+	Basis.GuideUp = ProjectAxisOffAim(Basis.GuideUp, Basis.AimDir, FrameUp);
+	Basis.GuideRight = FVector::CrossProduct(Basis.GuideUp, Basis.AimDir).GetSafeNormal();
+	if (Basis.GuideRight.IsNearlyZero())
+	{
+		Basis.GuideRight = FrameRight;
+	}
+
+	return Basis;
+}
+
 void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
 	const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide)
 {
@@ -13,10 +84,18 @@ void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
 	}
 	Origin = InOrigin;
 	GuideForward = AimDir;
-	GuideUp = FVector::UpVector;
+	GuideUp = FallbackUp.GetSafeNormal();
+	if (GuideUp.IsNearlyZero())
+	{
+		GuideUp = FVector::UpVector;
+	}
 	if (FMath::Abs(FVector::DotProduct(GuideForward, GuideUp)) > 0.96f)
 	{
-		GuideUp = FallbackUp.GetSafeNormal();
+		GuideUp = FallbackSide.GetSafeNormal();
+		if (GuideUp.IsNearlyZero() || FMath::Abs(FVector::DotProduct(GuideForward, GuideUp)) > 0.96f)
+		{
+			GuideUp = FVector::UpVector;
+		}
 	}
 	FVector GuideSide = FVector::CrossProduct(GuideUp, GuideForward).GetSafeNormal();
 	if (GuideSide.IsNearlyZero())

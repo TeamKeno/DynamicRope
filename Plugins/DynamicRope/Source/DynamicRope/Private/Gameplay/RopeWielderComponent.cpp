@@ -6,6 +6,7 @@
 
 #include "Components/SkeletalMeshComponent.h"
 #include "Camera/CameraComponent.h"
+#include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Animation/AnimInstance.h"
@@ -200,6 +201,78 @@ FVector URopeWielderComponent::GetAimDirection() const
 	}
 }
 
+FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& /*AimDir*/) const
+{
+	FRopeThrowContext Context;
+
+	const AActor* Owner = GetOwner();
+
+	Context.Origin = Rope ? Rope->GetComponentLocation() : (Owner ? Owner->GetActorLocation() : FVector::ZeroVector);
+	Context.FrameForward = Owner ? Owner->GetActorForwardVector() : FVector::ForwardVector;
+	Context.FrameUp = Owner ? Owner->GetActorUpVector() : FVector::UpVector;
+	Context.FrameRight = Owner ? Owner->GetActorRightVector() : FVector::RightVector;
+	Context.OwnerVelocity = Owner ? Owner->GetVelocity() : FVector::ZeroVector;
+	Context.SocketVelocity = Context.OwnerVelocity;
+	Context.FrameMode = ThrowFrameMode;
+	Context.SwingPlane = SwingPlane;
+	Context.CustomSwingPlaneNormal = CustomSwingPlaneNormal;
+
+	if (AttachMesh)
+	{
+		Context.Origin = AttachMesh->GetSocketLocation(HandSocketName);
+		Context.SocketVelocity = AttachMesh->GetPhysicsLinearVelocity(HandSocketName);
+	}
+
+	switch (ThrowFrameMode)
+	{
+	case ERopeThrowFrameMode::Owner:
+		if (Owner)
+		{
+			Context.FrameForward = Owner->GetActorForwardVector();
+			Context.FrameUp = Owner->GetActorUpVector();
+			Context.FrameRight = Owner->GetActorRightVector();
+		}
+		break;
+
+	case ERopeThrowFrameMode::OwnerCamera:
+		if (const UCameraComponent* Camera = Owner ? Owner->FindComponentByClass<UCameraComponent>() : nullptr)
+		{
+			Context.FrameForward = Camera->GetForwardVector();
+			Context.FrameUp = Camera->GetUpVector();
+			Context.FrameRight = Camera->GetRightVector();
+		}
+		break;
+
+	case ERopeThrowFrameMode::Socket:
+		if (AttachMesh)
+		{
+			const FTransform SocketTransform = AttachMesh->GetSocketTransform(HandSocketName);
+			Context.FrameForward = SocketTransform.GetUnitAxis(EAxis::X);
+			Context.FrameRight = SocketTransform.GetUnitAxis(EAxis::Y);
+			Context.FrameUp = SocketTransform.GetUnitAxis(EAxis::Z);
+		}
+		break;
+
+	case ERopeThrowFrameMode::Custom:
+		Context.FrameForward = CustomFrameForward;
+		Context.FrameUp = CustomFrameUp;
+		Context.FrameRight = CustomFrameRight;
+		break;
+
+	case ERopeThrowFrameMode::World:
+	default:
+		Context.FrameForward = FVector::ForwardVector;
+		Context.FrameUp = FVector::UpVector;
+		Context.FrameRight = FVector::RightVector;
+		break;
+	}
+
+	// AimDir는 legacy 입력값으로만 남긴다. 실제 던지는 방향은 선택한 frame의 forward다.
+	Context.AimDirection = Context.FrameForward;
+
+	return Context;
+}
+
 void URopeWielderComponent::Throw()
 {
 	if (ThrowMontage)
@@ -214,14 +287,14 @@ void URopeWielderComponent::Throw()
 
 void URopeWielderComponent::ThrowNow()
 {
-	ThrowInDirection(GetAimDirection());
+	ThrowInDirection(FVector::ZeroVector);
 }
 
 void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 {
 	if (Rope)
 	{
-		Rope->Throw(AimDir);
+		Rope->ThrowWithContext(BuildThrowContext(AimDir));
 	}
 }
 
