@@ -160,4 +160,161 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Override 패스(G0): NumSub=0 오버라이드 dispatch가 위치/질량을 상주 버퍼에 기록하고,
+// InvMass=0으로 고정한 노드가 이후 중력 솔브에서도 타깃에 정확히 남으며(질량 마스크 영속),
+// InvMass 복원 오버라이드 후에는 다시 물리로 돌아오는지 본다. "타깃 계산은 GT, 적용은 GPU" 계약 검증.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUOverridePassTest,
+	"DynamicRope.Solver.GPUOverridePass",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
+{
+	// GPU 디스패치는 RHI 필요 — 렌더 불가(헤드리스/널 RHI) 환경에선 스킵(실패가 아님).
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU override 패스 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	const int32 N = 8;
+	const float Length = 140.0f;
+	const FRopeSolverConfig Config = MakeHangConfig();
+	const FRopeSimState Sim = MakePinnedRope(N, Length);
+
+	FRopeGPUSolver GpuSolver;
+	const uint32 RopeId = 7;
+	const uint32 Gen = 1;
+
+	auto MakeStep = [&](int32 NumSub, float FixedDt) -> FRopeGPUResidentStep
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId            = RopeId;
+		Step.Generation        = Gen;
+		Step.NumNodes          = Sim.Num();
+		Step.SeedPositions     = Sim.Positions;
+		Step.SeedPrevPositions = Sim.PrevPositions;
+		Step.InvMass           = Sim.InvMass;
+		Step.SegmentLength     = Sim.SegmentLength;
+		Step.bStartPinned      = Sim.bStartPinned;
+		Step.StartPinPrev      = Sim.StartPinPrev;
+		Step.StartPinTarget    = Sim.StartPinTarget;
+		Step.StretchCompliance = Config.StretchCompliance;
+		Step.BendCompliance    = Config.BendCompliance;
+		Step.Damping           = Config.Damping;
+		Step.Iterations        = Config.Iterations;
+		Step.Gravity           = Config.Gravity;
+		Step.NumSub            = NumSub;
+		Step.FixedDt           = FixedDt;
+		return Step;
+	};
+	auto Pump = [&](FRopeGPUResidentStep&& Step)
+	{
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(MoveTemp(Step));
+		GpuSolver.Step(MoveTemp(Steps));
+		FlushRenderingCommands();
+	};
+	// 최신 리드백 회수(consume은 다음 Step의 loop1이므로 NumSub=0·오버라이드 없는 step으로 펌프).
+	auto Drain = [&](FRopeResidentLatest& OutLatest) -> bool
+	{
+		TMap<uint32, FRopeResidentLatest> Latest;
+		for (int32 Spin = 0; Spin < 64; ++Spin)
+		{
+			FlushRenderingCommands();
+			Pump(MakeStep(0, 1.0f / 60.0f));
+			GpuSolver.GetLatest(Latest);
+			if (const FRopeResidentLatest* L = Latest.Find(RopeId))
+			{
+				if (L->Generation == Gen && L->Positions.Num() == Sim.Num())
+				{
+					OutLatest = *L;
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+
+	// 1) 시드 + 정상 솔브 몇 프레임.
+	for (int32 Frame = 0; Frame < 4; ++Frame)
+	{
+		Pump(MakeStep(Config.Substeps, (1.0f / 60.0f) / Config.Substeps));
+	}
+
+	// 2) 오버라이드: 노드 3..5를 임의 타깃에 고정(Pos + Prev=Pos + InvMass=0). NumSub=0 — 적분 없이 기록만.
+	TArray<FVector> Targets;
+	Targets.SetNumZeroed(N);
+	const uint8 FixFlags = static_cast<uint8>(
+		ERopeGPUOverride::Position | ERopeGPUOverride::PrevFromPosition | ERopeGPUOverride::InvMass);
+	{
+		FRopeGPUResidentStep Ov = MakeStep(0, 1.0f / 60.0f);
+		Ov.OverrideFlags.SetNumZeroed(N);
+		Ov.OverridePositions.SetNumZeroed(N);
+		Ov.OverrideInvMass.SetNumZeroed(N);
+		for (int32 i = 3; i <= 5; ++i)
+		{
+			Targets[i] = FVector(20.0f * i, 35.0f, -25.0f);
+			Ov.OverrideFlags[i]     = FixFlags;
+			Ov.OverridePositions[i] = Targets[i];
+			Ov.OverrideInvMass[i]   = 0.0f;
+		}
+		Pump(MoveTemp(Ov));
+	}
+
+	// 3) 중력 솔브 20프레임 — 고정 노드는 1mm도 움직이면 안 된다(InvMass 마스크가 영속되는지).
+	for (int32 Frame = 0; Frame < 20; ++Frame)
+	{
+		Pump(MakeStep(Config.Substeps, (1.0f / 60.0f) / Config.Substeps));
+	}
+
+	FRopeResidentLatest AfterFix;
+	if (!Drain(AfterFix))
+	{
+		AddError(TEXT("override 후 리드백 drain 실패."));
+		return false;
+	}
+	for (int32 i = 3; i <= 5; ++i)
+	{
+		const float Dev = static_cast<float>(FVector::Dist(AfterFix.Positions[i], Targets[i]));
+		TestTrue(FString::Printf(TEXT("fixed node %d stays on target (dev %.4f cm)"), i, Dev), Dev < 0.1f);
+	}
+	for (const FVector& P : AfterFix.Positions)
+	{
+		if (P.ContainsNaN())
+		{
+			AddError(TEXT("override 후 NaN 발생."));
+			return false;
+		}
+	}
+
+	// 4) 질량 복원(InvMass=1만 오버라이드) 후 중력 솔브 — 노드가 타깃에서 다시 벗어나야 한다.
+	{
+		FRopeGPUResidentStep Restore = MakeStep(0, 1.0f / 60.0f);
+		Restore.OverrideFlags.SetNumZeroed(N);
+		Restore.OverrideInvMass.SetNumZeroed(N);
+		for (int32 i = 3; i <= 5; ++i)
+		{
+			Restore.OverrideFlags[i]   = static_cast<uint8>(ERopeGPUOverride::InvMass);
+			Restore.OverrideInvMass[i] = 1.0f;
+		}
+		Pump(MoveTemp(Restore));
+	}
+	for (int32 Frame = 0; Frame < 20; ++Frame)
+	{
+		Pump(MakeStep(Config.Substeps, (1.0f / 60.0f) / Config.Substeps));
+	}
+
+	FRopeResidentLatest AfterRestore;
+	if (!Drain(AfterRestore))
+	{
+		AddError(TEXT("복원 후 리드백 drain 실패."));
+		return false;
+	}
+	const float MovedDev = static_cast<float>(FVector::Dist(AfterRestore.Positions[4], Targets[4]));
+	TestTrue(FString::Printf(TEXT("restored node resumes physics (moved %.2f cm off target)"), MovedDev),
+		MovedDev > 1.0f);
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

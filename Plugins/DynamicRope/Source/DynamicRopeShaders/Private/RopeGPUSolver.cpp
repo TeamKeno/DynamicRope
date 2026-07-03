@@ -39,6 +39,10 @@ struct FRopeGPUParamsGPU
 	int32     NumSDFColliders;   // M3: SDF collider 수(0이면 SDF 충돌 없음)
 	float     TipFrictionScale = 1.0f; // 자유단 마찰 배율(고정점=1, 끝=이 값). Pad0 슬롯 재사용.
 	int32     CollisionPasses = 1;     // substep당 충돌 해소 패스 수(Iters로 상한). Pad1 슬롯 재사용.
+	int32     bHasOverrides = 0;       // G0: 이 로프에 노드별 override(타깃/질량 주입)가 있는가.
+	int32     Pad2 = 0;
+	int32     Pad3 = 0;
+	int32     Pad4 = 0;
 	FVector4f Gravity;
 	FVector4f PinPrev;
 	FVector4f PinTarget;
@@ -93,7 +97,11 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SDFDistances)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFVolume>, SDFVolumes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, InvMass)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, OverrideFlags)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, OverridePositions)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, OverridePrevPositions)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, OverrideInvMass)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, InvMass) // G0: override가 질량 마스크를 영속시키므로 RW.
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, Positions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, PrevPositions)
 	END_SHADER_PARAMETER_STRUCT()
@@ -294,6 +302,10 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 			TArray<TArray<float>>               KSDFDist; KSDFDist.Reserve(NumSteps);
 			TArray<TArray<FRopeSDFVolumeGPU>>   KSDFVol;  KSDFVol.Reserve(NumSteps);
 			TArray<TArray<FRopeSDFColliderGPU>> KSDFCol;  KSDFCol.Reserve(NumSteps);
+			TArray<TArray<uint32>>              KOvFlags; KOvFlags.Reserve(NumSteps);
+			TArray<TArray<FVector4f>>           KOvPos;   KOvPos.Reserve(NumSteps);
+			TArray<TArray<FVector4f>>           KOvPrev;  KOvPrev.Reserve(NumSteps);
+			TArray<TArray<float>>               KOvInv;   KOvInv.Reserve(NumSteps);
 
 			// --- Loop 2: seed/register + dispatch + 리드백 재무장(graph 패스).
 			for (const FRopeGPUResidentStep& S : Steps)
@@ -347,9 +359,17 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 					InvMassRDG = GraphBuilder.RegisterExternalBuffer(R.InvMassBuf);
 				}
 
-				if (S.NumSub <= 0)
+				// G0: 오버라이드는 적분 없이도(NumSub=0) 기록해야 한다 — 로직 페이즈 프레임(Wrapping/Releasing 등).
+				const bool bHasOverrides = S.HasOverrides() && S.OverrideFlags.Num() == N;
+				if (S.HasOverrides() && !bHasOverrides)
 				{
-					continue; // 이번 프레임 적분 없음 — 위치 불변, 리드백도 그대로 둠.
+					UE_LOG(LogDynamicRopeGPU, Warning, TEXT("GPU override ignored: flags %d != nodes %d."),
+						S.OverrideFlags.Num(), N);
+				}
+
+				if (S.NumSub <= 0 && !bHasOverrides)
+				{
+					continue; // 이번 프레임 적분/기록 없음 — 위치 불변, 리드백도 그대로 둠.
 				}
 
 				// --- per-rope 파라미터/충돌 버퍼(transient). NodeOffset/CapsuleOffset/SDFColliderOffset = 0(로프당 버퍼).
@@ -483,6 +503,47 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 						sizeof(FRopeSDFVolumeGPU), 1, DummyVol.GetData(), sizeof(FRopeSDFVolumeGPU));
 				}
 
+				// --- Override(G0) 업로드: 노드별 플래그/타깃/질량(transient, 오버라이드 프레임만 실데이터).
+				// 없으면 더미 1개 + bHasOverrides=0 → 셰이더가 참조하지 않는다.
+				TArray<uint32>&    OvFlags = KOvFlags.AddDefaulted_GetRef();
+				TArray<FVector4f>& OvPos   = KOvPos.AddDefaulted_GetRef();
+				TArray<FVector4f>& OvPrev  = KOvPrev.AddDefaulted_GetRef();
+				TArray<float>&     OvInv   = KOvInv.AddDefaulted_GetRef();
+				if (bHasOverrides)
+				{
+					const bool bHavePos  = S.OverridePositions.Num() == N;
+					const bool bHavePrev = S.OverridePrevPositions.Num() == N;
+					const bool bHaveInv  = S.OverrideInvMass.Num() == N;
+					OvFlags.SetNumUninitialized(N);
+					OvPos.SetNumUninitialized(N);
+					OvPrev.SetNumUninitialized(N);
+					OvInv.SetNumUninitialized(N);
+					for (int32 k = 0; k < N; ++k)
+					{
+						OvFlags[k] = S.OverrideFlags[k];
+						const FVector Pv  = bHavePos  ? S.OverridePositions[k]     : FVector::ZeroVector;
+						const FVector Ppv = bHavePrev ? S.OverridePrevPositions[k] : FVector::ZeroVector;
+						OvPos[k]  = FVector4f((float)Pv.X,  (float)Pv.Y,  (float)Pv.Z,  0.0f);
+						OvPrev[k] = FVector4f((float)Ppv.X, (float)Ppv.Y, (float)Ppv.Z, 0.0f);
+						OvInv[k]  = bHaveInv ? S.OverrideInvMass[k] : 1.0f;
+					}
+				}
+				else
+				{
+					OvFlags.AddZeroed(1);
+					OvPos.AddZeroed(1);
+					OvPrev.AddZeroed(1);
+					OvInv.AddZeroed(1);
+				}
+				FRDGBufferRef OvFlagsBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.OverrideFlags"),
+					sizeof(uint32), OvFlags.Num(), OvFlags.GetData(), (uint64)OvFlags.Num() * sizeof(uint32));
+				FRDGBufferRef OvPosBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.OverridePositions"),
+					sizeof(FVector4f), OvPos.Num(), OvPos.GetData(), (uint64)OvPos.Num() * sizeof(FVector4f));
+				FRDGBufferRef OvPrevBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.OverridePrevPositions"),
+					sizeof(FVector4f), OvPrev.Num(), OvPrev.GetData(), (uint64)OvPrev.Num() * sizeof(FVector4f));
+				FRDGBufferRef OvInvBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.OverrideInvMass"),
+					sizeof(float), OvInv.Num(), OvInv.GetData(), (uint64)OvInv.Num() * sizeof(float));
+
 				TArray<FRopeGPUParamsGPU>& ParamsArr = KParams.AddDefaulted_GetRef();
 				FRopeGPUParamsGPU P;
 				P.NodeOffset        = 0;
@@ -505,6 +566,7 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 				P.MaxSweepSamples   = FMath::Max(1, S.MaxSweepSamples);
 				P.SDFColliderOffset = 0;
 				P.NumSDFColliders   = NumValidSDFCol;
+				P.bHasOverrides     = bHasOverrides ? 1 : 0;
 				P.Gravity           = FVector4f((float)S.Gravity.X, (float)S.Gravity.Y, (float)S.Gravity.Z, 0.0f);
 				P.PinPrev           = FVector4f((float)S.StartPinPrev.X,   (float)S.StartPinPrev.Y,   (float)S.StartPinPrev.Z,   0.0f);
 				P.PinTarget         = FVector4f((float)S.StartPinTarget.X, (float)S.StartPinTarget.Y, (float)S.StartPinTarget.Z, 0.0f);
@@ -527,7 +589,11 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 				PassParams->SDFDistances  = GraphBuilder.CreateSRV(SDFDistBuf);
 				PassParams->SDFVolumes    = GraphBuilder.CreateSRV(SDFVolBuf);
 				PassParams->SDFColliders  = GraphBuilder.CreateSRV(SDFColBuf);
-				PassParams->InvMass       = GraphBuilder.CreateSRV(InvMassRDG);
+				PassParams->OverrideFlags         = GraphBuilder.CreateSRV(OvFlagsBuf);
+				PassParams->OverridePositions     = GraphBuilder.CreateSRV(OvPosBuf);
+				PassParams->OverridePrevPositions = GraphBuilder.CreateSRV(OvPrevBuf);
+				PassParams->OverrideInvMass       = GraphBuilder.CreateSRV(OvInvBuf);
+				PassParams->InvMass       = GraphBuilder.CreateUAV(InvMassRDG);
 				PassParams->Positions     = GraphBuilder.CreateUAV(PosRDG);
 				PassParams->PrevPositions = GraphBuilder.CreateUAV(PrevRDG);
 

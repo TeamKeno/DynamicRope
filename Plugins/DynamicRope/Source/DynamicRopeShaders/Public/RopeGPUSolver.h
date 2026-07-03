@@ -44,6 +44,22 @@ struct FRopeGPUSDFCollider
 };
 
 /**
+ * FRopeGPUResidentStep::OverrideFlags의 노드별 비트(G0). RopeXPBD.usf의 override 스테이지와 1:1.
+ * "타깃 계산은 GT, 적용은 GPU" — 로직 페이즈(whip/wrapping/hold/releasing)가 계산한 노드별
+ * 타깃/질량을 재시드 없이 상주 버퍼에 직접 기록하는 통로다. 적용 순서: Position → Prev →
+ * PrevFromPosition → InvMass (PrevFromPosition은 Position 적용 *후*의 Pos를 복사한다).
+ */
+enum class ERopeGPUOverride : uint8
+{
+	None             = 0,
+	Position         = 1 << 0, // Pos[i]  = OverridePositions[i]
+	Prev             = 1 << 1, // Prev[i] = OverridePrevPositions[i] (Pos와의 차이가 Verlet 속도가 된다 — whip)
+	PrevFromPosition = 1 << 2, // Prev[i] = Pos[i] — 속도 0 고정(wrapping/hold). GPU측 현재 Pos 기준(CPU 미러 아님).
+	InvMass          = 1 << 3, // InvMass[i] = OverrideInvMass[i] — 상주 InvMass 버퍼에 영속(질량 마스크/복원)
+};
+ENUM_CLASS_FLAGS(ERopeGPUOverride)
+
+/**
  * 상주 로프 1개의 한 프레임 step 입력. self-contained(전부 값/TArray) — GT에서 채워 렌더 스레드로 MoveTemp.
  * RopeId는 영속 버퍼를 식별하는 안정 키(예: 컴포넌트 UniqueID). Generation은 throw/리사이즈 등 CPU가 Sim을
  * out-of-band로 바꿨을 때 증가시킨다 → RT가 generation 변화/노드수 변화/최초를 감지해 GPU 버퍼를 재시드한다.
@@ -84,6 +100,17 @@ struct FRopeGPUResidentStep
 	// 이번 프레임 substep 스케줄(호출자가 RopeSolverSubsteps로 계산해 전달). NumSub<=0이면 적분 없이 유지.
 	int32 NumSub = 0;
 	float FixedDt = 0.0f;
+
+	// --- Override(G0): 로직 페이즈(GT)가 계산한 노드별 타깃을 상주 버퍼에 직접 기록(재시드 대체).
+	// 비어 있으면 오버라이드 없음. 채울 때 OverrideFlags는 정확히 NumNodes 길이(불일치 시 전체 무시+경고),
+	// 값 배열은 해당 비트를 쓰는 노드가 있을 때만 NumNodes 길이로 제공하면 된다.
+	// NumSub=0이어도 오버라이드가 있으면 dispatch되어 적분 없이 기록만 한다(예: Wrapping/Releasing 프레임).
+	TArray<uint8>   OverrideFlags;         // 노드별 ERopeGPUOverride 비트 OR
+	TArray<FVector> OverridePositions;     // Position 비트 노드만 유효
+	TArray<FVector> OverridePrevPositions; // Prev 비트 노드만 유효
+	TArray<float>   OverrideInvMass;       // InvMass 비트 노드만 유효
+
+	bool HasOverrides() const { return OverrideFlags.Num() > 0; }
 };
 
 /** GT가 회수하는 상주 로프의 최신(약간 지연) 위치. RT 리드백이 채우고 GT가 락 하에 복사한다. */
