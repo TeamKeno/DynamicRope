@@ -10,6 +10,7 @@
 #include "Core/RopeTypes.h"
 #include "Solver/RopeXPBDSolver.h"
 #include "Logic/RopeWrapController.h"
+#include "Logic/RopeWhipGuide.h"
 #include "RopeComponent.generated.h"
 
 class AActor;
@@ -141,7 +142,8 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnReleased OnRopeReleased;
 
-	//whip swing
+	//whip swing (설정은 여기 UPROPERTY로 유지 — 직렬화 경로 보존; 런타임 상태는 WhipGuide가 소유)
+	/** WhipGuide.GetElapsed()의 BP 노출용 미러(매 프레임 갱신). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Whip")
 	float WhipElapsed = 0.0f;
 
@@ -169,24 +171,10 @@ private:
 	FRopeContactTracker ContactTracker;
 	FRopeWrapState      PendingWrapSeed;	//초기 연결용, 임시 Seed
 	FRopeWrappingState  WrappingState;
+	FRopeWhipGuide      WhipGuide;			//던지기 초반 채찍 스윙(가이드 타깃 계산+적용)
 
 	float ReleaseCooldown = 0.0f;
 	float ContactingElapsed = 0.0f;
-
-	//whip swing
-	bool bWhipSwingActive = false;
-
-	FVector WhipAimDir = FVector::ForwardVector;
-	FVector WhipGuideOrigin = FVector::ZeroVector;
-	FVector WhipGuideForward = FVector::ForwardVector;
-	FVector WhipGuideUp = FVector::UpVector;
-
-	TArray<int32> DebugWhipGuideNodeIndices;
-	TArray<FVector> DebugWhipGuideTargets;
-	TArray<FVector> PreviousWhipGuideTargets;
-	TArray<FVector> WhipGuidePrevTargetsThisFrame;
-	TArray<FVector> WhipGuideCurrentTargetsThisFrame;
-	TArray<uint8> WhipGuidedNodesThisFrame;
 
 	// 한 프레임 collider 스냅샷. RopeSimSubsystem이 Tick에서 중앙 수집해 채운다(provider 레지스트리 → 로프 필터).
 	// Solve/Finalize에서 read. provider 소유라 raw 포인터(해당 프레임 동안 유효).
@@ -235,18 +223,14 @@ private:
 #pragma region Throw 관련 함수
 	void StartFreshThrow(const FVector& AimDir);
 
-	void BuildWhipGuideTargets(float NormalizedTime, int32 LastGuidedNode, TArray<FVector>& OutTargets) const;
-
-	void ResampleGuideByNodeSpacing(const TArray<FVector>& SourcePoints, float TotalLength, int32 NodeCount,
-		int32 DesiredPointCount, TArray<FVector>& OutPoints) const;
+	/** WhipGuide에 넘길 설정 스냅샷을 Rope|Whip UPROPERTY들로부터 만든다. */
+	FRopeWhipGuide::FConfig MakeWhipGuideConfig() const;
 
 	float TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const;
 
 #pragma endregion
 
 #pragma region Flight 관련 함수
-	void ApplyWhipSwing(float DeltaTime);
-
 	void DetectContactCandidates(const TArray<FVector>& PrevPositions, const TArray<FVector>& Positions,
 		const TArray<IRopeCollider*>& Colliders, TArray<FRopeContactCandidate>& OutCandidates) const;
 
@@ -261,8 +245,6 @@ private:
 	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates);
 
 	bool IsTailNode(int32 NodeIndex) const;
-
-	bool IsWhipGuidedNodeThisFrame(int32 NodeIndex) const;
 
 	bool ShouldRunPredictiveContactForNode(int32 NodeIndex, bool bHasGuidedNodes, const FVector& FrameDisplacement) const;
 
