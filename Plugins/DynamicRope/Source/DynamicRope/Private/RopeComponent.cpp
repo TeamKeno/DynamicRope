@@ -162,9 +162,11 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	case ERopePhase::Wrapped:
 	{
 		// latch된 node는 skinned bone을 따라간다(GT). latch 노드는 InvMass=0이라 솔브는 자유 구간만.
+		// 감긴 메시는 커밋 시점에 State.Mesh(weak)로 항상 확정돼 있으므로 폴백 메시는 넘기지 않는다
+		// — owner 메시 폴백은 cross-actor 상황에서 오히려 엉뚱한 본을 잡는다.
 		// Hold가 false면 wrap 대상 mesh가 사라진 것(예: cross-actor 대상 액터 파괴) →
 		// 노드를 솔버에 되돌려 안전하게 release한다(dangling 포인터 역참조 방지는 Hold 내부에서).
-		if (!WrapController.Hold(Sim, ResolveWrapTargetMesh(), DeltaTime))
+		if (!WrapController.Hold(Sim, /*FallbackMesh*/ nullptr, DeltaTime))
 		{
 			const FName Bone = WrapController.State.BoneName;
 			SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("wrap target mesh lost, bone=%s"), *Bone.ToString()));
@@ -555,18 +557,6 @@ void URopeComponent::InitRope()
 		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);
 }
 
-USkeletalMeshComponent* URopeComponent::ResolveWrapTargetMesh()
-{
-	if (!WrapTargetMesh)
-	{
-		if (AActor* Owner = GetOwner())
-		{
-			WrapTargetMesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
-		}
-	}
-	return WrapTargetMesh;
-}
-
 #if WITH_GAMEPLAY_DEBUGGER
 void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 {
@@ -825,12 +815,9 @@ void URopeComponent::StartWrappingFromContacting()
 	// PendingWrapSeed를 바로 BeginWrap에 넣지 않고, WrappingPhase 상태로 변환한다.
 	WrappingPhase.State.Reset();
 
+	// 감길 메시는 접촉에서 확정된다(FRopeContact.SourceMesh → seed). 여기 비어 있으면 시드가
+	// 비정상인 것 — owner 메시로 때우면 cross-actor에서 엉뚱한 본에 붙으므로 폴백 없이 복귀한다.
 	const USkeletalMeshComponent* Mesh = PendingWrapSeed.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = ResolveWrapTargetMesh();
-	}
-
 	if (!Mesh || PendingWrapSeed.BoneName.IsNone() || PendingWrapSeed.Latched.Num() == 0)
 	{
 		SetPhase(ERopePhase::Flight, TEXT("invalid wrapping seed"));

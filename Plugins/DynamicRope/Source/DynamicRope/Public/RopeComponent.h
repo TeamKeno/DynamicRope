@@ -59,7 +59,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
 	FRopeWrapConfig WrapConfig;
 
-	/** rope가 wrap될 수 있는 skeletal mesh. null로 두면 owner로부터 자동 해석된다. */
+	/**
+	 * 에디터 배치 가이드용(비주얼라이저가 이 메시로 wrap 타깃 링크를 그린다) + bIncludeOwnerColliders로
+	 * 자기 몸을 감는 드문 케이스의 명시 지정용. 런타임에 실제로 감기는 메시는 이 값이 아니라 접촉에서
+	 * 확정된다(FRopeContact.SourceMesh → PendingWrapSeed → FRopeWrapState.Mesh) — cross-actor 포함.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
 	TObjectPtr<USkeletalMeshComponent> WrapTargetMesh = nullptr;
 
@@ -219,9 +223,6 @@ private:
 
 	/** Sim이 비어 있으면 1회 초기화한다(OnRegister/Throw/Prepare 초입의 안전 가드). */
 	void EnsureRopeInitialized() { if (Sim.Num() == 0) { InitRope(); } }
-
-	/** rope가 wrap할 skeletal mesh를 해석(및 캐싱)한다: 명시적 WrapTargetMesh 또는 owner의 것. */
-	USkeletalMeshComponent* ResolveWrapTargetMesh();
 
 #if WITH_GAMEPLAY_DEBUGGER
 	// 디버그 캡처 대상일 때 centerline/wrapped/collider 공통 필드를 스냅샷에 채운다(FinalizeSimFrame에서 호출).
