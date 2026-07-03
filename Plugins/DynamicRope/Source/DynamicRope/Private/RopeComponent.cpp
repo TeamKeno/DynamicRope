@@ -46,6 +46,9 @@ namespace {
 		return FVector::CrossProduct(Reference, N).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 	}
 
+	// Releasing 진입 시 Free 복귀까지의 쿨다운(초). Abort/Hold 실패/수동 해제 공통.
+	constexpr float ReleaseCooldownSeconds = 0.08f;
+
 	// phase 전이 로그용 짧은 이름(UEnum 리플렉션 없이 hot-path에서도 안전).
 	const TCHAR* PhaseName(ERopePhase Phase)
 	{
@@ -149,6 +152,29 @@ USkeletalMeshComponent* URopeComponent::ResolveWrapTargetMesh()
 	return WrapTargetMesh;
 }
 
+void URopeComponent::SetPhase(ERopePhase NewPhase, const TCHAR* Reason)
+{
+	if (Reason)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> %s (%s)"),
+			*GetName(), PhaseName(Phase), PhaseName(NewPhase), Reason);
+	}
+	else
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> %s"),
+			*GetName(), PhaseName(Phase), PhaseName(NewPhase));
+	}
+	Phase = NewPhase;
+}
+
+void URopeComponent::ResetTransientPhaseState()
+{
+	ContactTracker.Reset();
+	PendingWrapSeed.Reset();
+	WrappingState.Reset();
+	ContactingElapsed = 0.0f;
+}
+
 void URopeComponent::BeginPlay()
 {
 	Super::BeginPlay();
@@ -202,10 +228,7 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 	{
 		WrapController.Release(ERopeReleaseReason::Manual);
 	}
-	ContactTracker.Reset();
-	PendingWrapSeed.Reset();
-	WrappingState.Reset();
-	ContactingElapsed = 0.0f;
+	ResetTransientPhaseState();
 	ReleaseCooldown = 0.0f;
 	WhipGuidePrevTargetsThisFrame.Reset();
 	WhipGuideCurrentTargetsThisFrame.Reset();
@@ -264,9 +287,8 @@ void URopeComponent::StartFreshThrow(const FVector& AimDir)
 		}
 	}
 
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> Flight (fresh throw impulse, aim=%s, speed=%.1f)"),
-		*GetName(), PhaseName(Phase), *WhipAimDir.ToCompactString(), ThrowParams.ThrowSpeed);
-	Phase = ERopePhase::Flight;
+	SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("fresh throw impulse, aim=%s, speed=%.1f"),
+		*WhipAimDir.ToCompactString(), ThrowParams.ThrowSpeed));
 }
 
 void URopeComponent::BuildWhipGuideTargets(float NormalizedTime, int32 LastGuidedNode, TArray<FVector>& OutTargets) const
@@ -633,11 +655,8 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 
 	if (ShouldDismissContacting())
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Flight (contact lost before wrapping)"), *GetName());
-		ContactTracker.Reset();
-		PendingWrapSeed.Reset();
-		ContactingElapsed = 0.0f;
-		Phase = ERopePhase::Flight;
+		SetPhase(ERopePhase::Flight, TEXT("contact lost before wrapping"));
+		ResetTransientPhaseState();
 		return;
 	}
 
@@ -663,11 +682,8 @@ void URopeComponent::StartWrappingFromContacting()
 
 	if (!Mesh || PendingWrapSeed.BoneName.IsNone() || PendingWrapSeed.Latched.Num() == 0)
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Flight (invalid wrapping seed)"), *GetName());
-		ContactTracker.Reset();
-		PendingWrapSeed.Reset();
-		ContactingElapsed = 0.0f;
-		Phase = ERopePhase::Flight;
+		SetPhase(ERopePhase::Flight, TEXT("invalid wrapping seed"));
+		ResetTransientPhaseState();
 		return;
 	}
 
@@ -723,17 +739,10 @@ void URopeComponent::StartWrappingFromContacting()
 
 	if (!BeginProgressiveWrapPathBuild(LatchAnchor))
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Flight (no valid wrapping anchors)"), *GetName());
-		WrappingState.Reset();
-		ContactTracker.Reset();
-		PendingWrapSeed.Reset();
-		ContactingElapsed = 0.0f;
-		Phase = ERopePhase::Flight;
+		SetPhase(ERopePhase::Flight, TEXT("no valid wrapping anchors"));
+		ResetTransientPhaseState();
 		return;
 	}
-
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Contacting -> Wrapping (bone=%s, %d anchor(s))"),
-		*GetName(), *WrappingState.BoneName.ToString(), WrappingState.Anchors.Num());
 
 	WrappingState.StableTime = 0.0f;
 	WrappingState.LostContactTime = 0.0f;
@@ -741,8 +750,8 @@ void URopeComponent::StartWrappingFromContacting()
 	WrappingState.LastStableLastNode = WrappingState.LastNode;
 	WrappingState.LastStableAnchorCount = WrappingState.Anchors.Num();
 
-	Phase = ERopePhase::Wrapping;
-
+	SetPhase(ERopePhase::Wrapping, *FString::Printf(TEXT("bone=%s, %d anchor(s)"),
+		*WrappingState.BoneName.ToString(), WrappingState.Anchors.Num()));
 }
 
 void URopeComponent::UpdateWrapping(float DeltaTime)
@@ -751,9 +760,8 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 
 	if (!IsWrappingStillValid())
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapping -> Releasing (invalid wrapping state)"), *GetName());
+		SetPhase(ERopePhase::Releasing, TEXT("invalid wrapping state"));
 		AbortWrapping(ERopeReleaseReason::Broken);
-		Phase = ERopePhase::Releasing;
 		return;
 	}
 
@@ -1927,9 +1935,8 @@ void URopeComponent::CommitWrapping()
 	//Wrapping 정보가 적절하지 않으면 바로 releasing
 	if (!Mesh || WrappingState.BoneName.IsNone() || WrappingState.Anchors.Num() == 0)
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapping -> Releasing (commit failed)"), *GetName());
+		SetPhase(ERopePhase::Releasing, TEXT("commit failed"));
 		AbortWrapping(ERopeReleaseReason::Broken);
-		Phase = ERopePhase::Releasing;
 		return;
 	}
 
@@ -1954,23 +1961,16 @@ void URopeComponent::CommitWrapping()
 
 	if (Seed.Anchors.Num() == 0)
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapping -> Releasing (no valid latches)"), *GetName());
+		SetPhase(ERopePhase::Releasing, TEXT("no valid latches"));
 		AbortWrapping(ERopeReleaseReason::Broken);
-		Phase = ERopePhase::Releasing;
 		return;
 	}
 
 	WrapController.BeginWrap(Sim, Seed, Mesh);
 
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapping -> Wrapped (bone=%s, %d latched node(s))"),
-		*GetName(), *Seed.BoneName.ToString(), Seed.Latched.Num());
-
-	WrappingState.Reset();
-	ContactTracker.Reset();
-	PendingWrapSeed.Reset();
-	ContactingElapsed = 0.0f;
-
-	Phase = ERopePhase::Wrapped;
+	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s)"),
+		*Seed.BoneName.ToString(), Seed.Latched.Num()));
+	ResetTransientPhaseState();
 	OnRopeWrapped.Broadcast(Seed.BoneName);
 }
 
@@ -1992,13 +1992,8 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 		Sim.PrevPositions[Anchor.NodeIndex] = Sim.Positions[Anchor.NodeIndex];
 	}
 
-	WrappingState.Reset();
-	ContactTracker.Reset();
-	PendingWrapSeed.Reset();
-	ContactingElapsed = 0.0f;
-
-	ReleaseCooldown = 0.08f;
-
+	ResetTransientPhaseState();
+	ReleaseCooldown = ReleaseCooldownSeconds;
 }
 
 void URopeComponent::PrepareSimFrame(float DeltaTime)
@@ -2058,15 +2053,10 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		if (!WrapController.Hold(Sim, ResolveWrapTargetMesh(), DeltaTime))
 		{
 			const FName Bone = WrapController.State.BoneName;
-			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Wrapped -> Releasing (wrap target mesh lost, bone=%s)"),
-				*GetName(), *Bone.ToString());
+			SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("wrap target mesh lost, bone=%s"), *Bone.ToString()));
 			WrapController.Release(ERopeReleaseReason::Broken);
-			ContactTracker.Reset();
-			PendingWrapSeed.Reset();
-			WrappingState.Reset();
-			ContactingElapsed = 0.0f;
-			ReleaseCooldown = 0.08f;
-			Phase = ERopePhase::Releasing;
+			ResetTransientPhaseState();
+			ReleaseCooldown = ReleaseCooldownSeconds;
 			OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Broken);
 			break;
 		}
@@ -2087,8 +2077,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		ReleaseCooldown -= DeltaTime;
 		if (ReleaseCooldown <= 0)
 		{
-			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Releasing -> Free"), *GetName());
-			Phase = ERopePhase::Free;
+			SetPhase(ERopePhase::Free);
 		}
 		break;
 
@@ -2197,9 +2186,8 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightBuildContactingState);
 			BuildContactingState(Candidates);
-			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Flight -> Contacting (bone=%s, %d node(s))"),
-				*GetName(), *ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num());
-			Phase = ERopePhase::Contacting;
+			SetPhase(ERopePhase::Contacting, *FString::Printf(TEXT("bone=%s, %d node(s)"),
+				*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num()));
 			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
 		}
 
@@ -2606,15 +2594,10 @@ void URopeComponent::ReleaseWrap()
 		Bone = ContactTracker.CandidateBone;
 	}
 
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> Releasing (manual, bone=%s)"),
-		*GetName(), PhaseName(Phase), *Bone.ToString());
+	SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("manual, bone=%s"), *Bone.ToString()));
 	WrapController.Release(ERopeReleaseReason::Manual);
-	ContactTracker.Reset();
-	PendingWrapSeed.Reset();
-	WrappingState.Reset();
-	ContactingElapsed = 0.0f;
-	ReleaseCooldown = 0.08f;
-	Phase = ERopePhase::Releasing;
+	ResetTransientPhaseState();
+	ReleaseCooldown = ReleaseCooldownSeconds;
 	OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Manual);
 }
 

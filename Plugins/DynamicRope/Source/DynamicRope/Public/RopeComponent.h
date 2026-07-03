@@ -213,6 +213,22 @@ private:
 	//TODO 주석 추가
 	void EnsureRopeInitialized(){if (Sim.Num() == 0)InitRope();	}
 
+	//~ 페이즈 전이 중앙화 -------------------------------------------------
+	/**
+	 * Phase 대입의 단일 지점. 전이 로그("[이름] Old -> New (Reason)")를 일원화한다.
+	 * Reason은 로그용 부가 설명(nullptr이면 생략). 전이에 딸린 이벤트 브로드캐스트와
+	 * cleanup은 전이마다 다르므로 호출자가 결정한다 — 여기서 암묵적으로 하지 않는다.
+	 */
+	void SetPhase(ERopePhase NewPhase, const TCHAR* Reason = nullptr);
+
+	/**
+	 * 페이즈 전이 시 함께 폐기해야 하는 "진행 중 작업" 일시 상태 세트를 리셋한다:
+	 * ContactTracker / PendingWrapSeed / WrappingState / ContactingElapsed.
+	 * 유휴 상태의 멤버에 대해서는 no-op이라 어떤 전이에서 불러도 안전하다.
+	 * (ReleaseCooldown은 전이마다 값이 달라 호출자가 직접 설정한다.)
+	 */
+	void ResetTransientPhaseState();
+
 	/** rope가 wrap할 skeletal mesh를 해석(및 캐싱)한다: 명시적 WrapTargetMesh 또는 owner의 것. */
 	USkeletalMeshComponent* ResolveWrapTargetMesh();
 
