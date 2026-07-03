@@ -133,19 +133,19 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 	return true;
 }
 
-void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Seed, const USkeletalMeshComponent* FallbackMesh)
+void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Seed)
 {
 	State = Seed;
 	State.TimeWrapped = 0.0f;
 
-	// 붙잡힌 bone 을 소유한 mesh 를 우선한다(시드에 실려 있다). rope-owner mesh 는 same-actor 케이스를
-	// 위한 폴백일 뿐이다. 이것이 wrap 이 *다른* actor 를 따라갈 수 있게 해주는 부분이다.
-	const USkeletalMeshComponent* Mesh = State.Mesh.Get() ? State.Mesh.Get() : FallbackMesh;
-	State.Mesh = Mesh;
+	// 붙잡힌 bone 을 소유한 mesh 는 시드에 실려 온다(접촉의 SourceMesh 에서 전파 — cross-actor 포함).
+	// 없으면 잘못된 시드다: 아무것도 latch 하지 않고 상태를 비워 "감긴 척"하는 상태를 남기지 않는다.
+	const USkeletalMeshComponent* Mesh = State.Mesh.Get();
 	if (!Mesh)
 	{
-		UE_LOG(LogRopeWrap, Warning, TEXT("BeginWrap aborted: no mesh for bone %s (seed/fallback both null) — nodes stay dynamic."),
+		UE_LOG(LogRopeWrap, Warning, TEXT("BeginWrap aborted: no mesh for bone %s (seed has no mesh) — nodes stay dynamic."),
 			*State.BoneName.ToString());
+		State.Reset();
 		return;
 	}
 
@@ -248,23 +248,13 @@ void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Se
 		*State.BoneName.ToString(), State.Anchors.Num(), *Mesh->GetName());
 }
 
-bool FRopeWrapController::Hold(FRopeSimState& Sim, const USkeletalMeshComponent* FallbackMesh, float Dt)
+bool FRopeWrapController::Hold(FRopeSimState& Sim, float Dt)
 {
-	// bone 이 붙잡힌 mesh 를 따라간다. State.Mesh 는 BeginWrap 에서 해석되어 weak 포인터로
+	// bone 이 붙잡힌 mesh 를 따라간다. State.Mesh 는 BeginWrap 에서 확정되어 weak 포인터로
 	// 영속화된다(cross-actor 대상일 수 있다). 대상 액터가 파괴되면 weak 가 null 이 되어
-	// raw 포인터 역참조(use-after-free) 없이 안전하게 감지된다.
+	// raw 포인터 역참조(use-after-free) 없이 안전하게 감지된다 — 엉뚱한 bone 으로 노드를
+	// 끌어당기지 않도록 폴백 없이 false 를 반환해 호출자가 release 하게 한다.
 	const USkeletalMeshComponent* Mesh = State.Mesh.Get();
-	if (!Mesh)
-	{
-		// State.Mesh 가 애초에 설정된 적 없는 same-actor 케이스만 owner mesh 로 폴백한다.
-		// 이미 묶였던 mesh 가 파괴된 경우라면(IsExplicitlyNull == false) 엉뚱한 bone 으로
-		// 노드를 끌어당기지 않도록 폴백하지 않고 false 를 반환해 호출자가 release 하게 한다.
-		if (!State.Mesh.IsExplicitlyNull())
-		{
-			return false;
-		}
-		Mesh = FallbackMesh;
-	}
 	if (!Mesh)
 	{
 		return false;

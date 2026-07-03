@@ -60,7 +60,9 @@ namespace RopeTest
 
 	/**
 	 * 스크립트된 구체 collider. center 반경 Radius 안의 query에 바깥쪽 normal로 컨택트를 보고한다.
-	 * SourceMesh는 nullptr — DecideWrap은 이를 저장만 하고 역참조하지 않으므로 단위 테스트에 안전하다.
+	 * FRopeContact 계약대로 SourceMesh도 보고한다(스켈레탈 콜라이더는 소유 mesh를 채워야 하고,
+	 * wrap 파이프라인이 이 값으로 감길 mesh를 확정한다). 테스트에서는 NewObject로 만든
+	 * 빈 USkeletalMeshComponent를 넘기면 된다(저장/식별용 — 역참조는 latch 시점에만 일어난다).
 	 */
 	class FSphereMockCollider : public IRopeCollider
 	{
@@ -68,10 +70,12 @@ namespace RopeTest
 		FVector Center = FVector::ZeroVector;
 		float   Radius = 0.0f;
 		FName   Bone = NAME_None;
+		const USkeletalMeshComponent* SourceMesh = nullptr;
 
 		FSphereMockCollider() = default;
-		FSphereMockCollider(const FVector& InCenter, float InRadius, FName InBone)
-			: Center(InCenter), Radius(InRadius), Bone(InBone) {}
+		FSphereMockCollider(const FVector& InCenter, float InRadius, FName InBone,
+			const USkeletalMeshComponent* InSourceMesh = nullptr)
+			: Center(InCenter), Radius(InRadius), Bone(InBone), SourceMesh(InSourceMesh) {}
 
 		virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override
 		{
@@ -86,7 +90,7 @@ namespace RopeTest
 				C.Normal = (Dist > KINDA_SMALL_NUMBER) ? (D / Dist) : FVector::UpVector;
 				C.SurfacePoint = Center + C.Normal * Radius;
 				C.Bone = Bone;
-				C.SourceMesh = nullptr;
+				C.SourceMesh = SourceMesh;
 			}
 			return C;
 		}

@@ -6,6 +6,7 @@
 
 #include "Logic/RopeWrapController.h"
 #include "Collision/RopeCollider.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "RopeTestHelpers.h"
 
 namespace
@@ -18,6 +19,12 @@ namespace
 		C.WrapDecisionTime = DecisionTime;
 		return C;
 	}
+
+	/** 계약상 SourceMesh 자리에 넣을 빈 스켈레탈 메시 컴포넌트(월드 불필요 — 식별/전파 검증용). */
+	USkeletalMeshComponent* MakeMockMesh()
+	{
+		return NewObject<USkeletalMeshComponent>();
+	}
 }
 
 // MinLatchNodes 이상이 WrapDecisionTime 동안 지속 접촉하면 wrap을 커밋하는가.
@@ -29,7 +36,8 @@ bool FRopeWrapCommitTest::RunTest(const FString& Parameters)
 {
 	// 노드 x = 0,20,...,140. Arm(center 60, r25)+ContactRadius 3 = reach 28 → 노드 40/60/80 접촉(3개).
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
-	RopeTest::FSphereMockCollider Arm(FVector(60.0f, 0.0f, 0.0f), 25.0f, FName("arm"));
+	const USkeletalMeshComponent* Mesh = MakeMockMesh();
+	RopeTest::FSphereMockCollider Arm(FVector(60.0f, 0.0f, 0.0f), 25.0f, FName("arm"), Mesh);
 	TArray<IRopeCollider*> Colliders = { &Arm };
 
 	FRopeWrapController Wrap;
@@ -43,6 +51,7 @@ bool FRopeWrapCommitTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("wrap commits after sustained contact"), bCommitted);
 	TestTrue(TEXT("committed bone is arm"), Seed.BoneName == FName("arm"));
+	TestTrue(TEXT("contact SourceMesh propagates into seed"), Seed.Mesh.Get() == Mesh);
 	TestEqual(TEXT("single head latch node"), Seed.Latched.Num(), 1);
 	if (Seed.Latched.Num() > 0)
 	{
@@ -60,7 +69,7 @@ bool FRopeWrapNoCommitTest::RunTest(const FString& Parameters)
 {
 	// Arm(center 60, r8)+3 = reach 11 → 노드 60만 접촉(1개) < MinLatchNodes 3.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
-	RopeTest::FSphereMockCollider Arm(FVector(60.0f, 0.0f, 0.0f), 8.0f, FName("arm"));
+	RopeTest::FSphereMockCollider Arm(FVector(60.0f, 0.0f, 0.0f), 8.0f, FName("arm"), MakeMockMesh());
 	TArray<IRopeCollider*> Colliders = { &Arm };
 
 	FRopeWrapController Wrap;
@@ -87,8 +96,9 @@ bool FRopeWrapTieBreakTest::RunTest(const FString& Parameters)
 {
 	// 노드 x = 0,20,...,220. ArmA(40)→노드 20/40/60, ArmB(160)→노드 140/160/180. 3:3 동점.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(12, 220.0f);
-	RopeTest::FSphereMockCollider ArmA(FVector(40.0f, 0.0f, 0.0f), 25.0f, FName("armA"));
-	RopeTest::FSphereMockCollider ArmB(FVector(160.0f, 0.0f, 0.0f), 25.0f, FName("armB"));
+	USkeletalMeshComponent* Mesh = MakeMockMesh();
+	RopeTest::FSphereMockCollider ArmA(FVector(40.0f, 0.0f, 0.0f), 25.0f, FName("armA"), Mesh);
+	RopeTest::FSphereMockCollider ArmB(FVector(160.0f, 0.0f, 0.0f), 25.0f, FName("armB"), Mesh);
 	TArray<IRopeCollider*> Colliders = { &ArmA, &ArmB };
 
 	FRopeWrapController Wrap;
