@@ -115,8 +115,9 @@ private:
 	void BuildTube(FRHICommandListBase& RHICmdList, const FRopeDynamicData& Data);
 
 	/**
-	 * M5b(B1): position을 GPU 컴퓨트로 생성(tangent/UV/color는 CPU 유지). centerline을 업로드해 RopeBuildTube
-	 * 디스패치로 GpuPositionBuffer(UAV)에 기록. UAV binding 검증용 — r.DynamicRope.GPUTube로 켠다.
+	 * GPU 컴퓨트로 튜브 정점(position/tangent basis/UV)을 생성한다(B2-full). CPU BuildTube 불필요.
+	 * 센터라인 소스: resident PosBuf(Subdiv=1 + GPU step 프레임) 또는 CPU 미러(Data.Points, Catmull-Rom
+	 * 스무딩). GPU 튜브 상시화(RHI+링<=256) 시 이 경로가 기본이고, 아니면 CPU BuildTube로 폴백한다.
 	 */
 	void BuildTubeGPU(FRHICommandListBase& RHICmdList, const FRopeDynamicData& Data);
 
@@ -132,7 +133,8 @@ private:
 	FLocalVertexFactory VertexFactory;
 	FMaterialRelevance MaterialRelevance;
 
-	// M5b: GPU 튜브 경로(r.DynamicRope.GPUTube). proxy 생성 시점에 한 번 결정(런타임 토글은 재생성 후 반영).
+	// GPU 튜브 경로 여부. 상시화: 렌더 가능 RHI + NumRings<=256이면 true(자동), 아니면 CPU BuildTube 폴백.
+	// proxy 생성 시점에 한 번 결정(링 수는 proxy 수명 동안 고정).
 	bool bUseGpuTube = false;
 	FRopeGpuPositionBuffer GpuPositionBuffer;
 	FRopeGpuTangentBuffer  GpuTangentBuffer;  // B2-full

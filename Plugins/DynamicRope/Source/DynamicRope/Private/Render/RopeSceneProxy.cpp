@@ -16,16 +16,9 @@
 #include "RopeGPUSolver.h"          // FRopeGPUSolver::GetResidentPositionSRV_RenderThread — M5b B2-lite
 #include "Subsystem/RopeSimSubsystem.h"
 #include "RHICommandList.h"         // FRHITransitionInfo
+#include "RHI.h"                    // GDynamicRHI
 #include "HAL/IConsoleManager.h"
-
-// M5b: 1이면 튜브 position을 GPU 컴퓨트로 생성(UAV vertex buffer)해 렌더 리드백을 줄인다(검증 단계 B1: position만,
-// tangent/UV/color는 CPU 유지). 0이면 기존 CPU BuildTube. proxy 생성 시점에 한 번 읽으므로, 토글 후엔 렌더 상태
-// 재생성(예: 재PIE/가시성 토글)이 필요하다.
-static TAutoConsoleVariable<int32> CVarRopeGPUTube(
-	TEXT("r.DynamicRope.GPUTube"),
-	0,
-	TEXT("DynamicRope: 0=CPU 튜브 빌드(기본), 1=GPU 컴퓨트로 position 생성(M5b UAV vertex buffer 검증)."),
-	ECVF_Default);
+#include "Misc/App.h"               // FApp::CanEverRender
 
 // 모션블러 잔상 대응. 로프는 매 프레임 정점을 in-place로 갱신하지만 per-vertex 변형 velocity를 만들지
 // 못한다(prev-position 스트림 없음). Movable이라 DrawsVelocity()==true가 되면 transform 기반 velocity만
@@ -183,8 +176,10 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	VertexBuffers.InitWithDummyData(&VertexFactory, GetRequiredVertexCount());
 	IndexBuffer.NumIndices = GetRequiredIndexCount();
 
-	// M5b: GPU 튜브 경로 여부를 생성 시점에 한 번 결정(런타임 토글은 렌더 상태 재생성 후 반영).
-	bUseGpuTube = CVarRopeGPUTube.GetValueOnGameThread() != 0 && NumRings <= 256;
+	// GPU 튜브 상시화: 렌더 가능 RHI + NumRings<=256(단일 스레드그룹 한도)이면 GPU 튜브(pos/tangent/UV 컴퓨트),
+	// 아니면(쿡/-nullrhi/서버, 또는 링>256) CPU BuildTube 폴백. CVar 토글 없음 — G4 솔버와 동일한 자동 선택.
+	// 생성 시점에 한 번 결정(링 수는 proxy 수명 동안 고정).
+	bUseGpuTube = (GDynamicRHI != nullptr && FApp::CanEverRender()) && NumRings <= 256;
 
 	// B2-lite: 솔버 resident PosBuf를 직접 읽기 위한 핸들(GT에서 캡처). 솔버는 월드 수명이라 proxy 동안 유효.
 	RopeId = Component->GetUniqueID();

@@ -31,13 +31,15 @@ GPU화는 *시뮬레이션*과 *렌더*가 **직교**한다.
 
 | 축 | 선택 방식 | 폴백/기본 | GPU |
 |---|---|---|---|
-| 시뮬레이션(솔브+감지) | **G4: 자동** — CVar 없음 | 렌더 불가 RHI(쿡/-nullrhi/서버)면 CPU `ParallelFor` | 렌더 가능 RHI면 GPU 상주(항상) |
-| 렌더(튜브) | `r.DynamicRope.GPUTube` | 0: CPU `BuildTube`(렌더 스레드) | 1: GPU 컴퓨트 정점(G5에서 상시화 예정) |
+| 시뮬레이션(솔브+감지) | **자동** — CVar 없음 | 렌더 불가 RHI(쿡/-nullrhi/서버)면 CPU `ParallelFor` | 렌더 가능 RHI면 GPU 상주(항상) |
+| 렌더(튜브) | **자동** — CVar 없음 | 렌더 불가 RHI 또는 링>256이면 CPU `BuildTube` | GPU 컴퓨트 정점(pos+tangent+UV, B2-full) |
 
-- **G4 이전**엔 `r.DynamicRope.GPUSolver` 토글로 CPU/GPU를 골랐으나(둘 다 0이면 원본 CPU와 바이트 동일),
-  G0~G3에서 whip/로직 페이즈/감지까지 전부 GPU 상주로 옮긴 뒤 G4에서 토글을 없애고 자동 선택으로 전환했다.
-- **위치 무지연 GPU = GPUTube 1**. (GPUTube 0이면 CPU 미러를 읽어 여전히 1~2프레임 지연)
-- CPU 솔버(`FRopeXPBDSolver`)는 렌더 불가 환경 폴백 + 패리티/단위 테스트 기준으로 **영구 유지**.
+- **초기엔** `r.DynamicRope.GPUSolver` / `.GPUTube` 토글로 CPU/GPU를 골랐으나(둘 다 0이면 원본 CPU와 바이트 동일),
+  G0~G3에서 whip/로직 페이즈/감지를, B2-full에서 튜브 tangent/UV까지 전부 GPU로 옮긴 뒤 토글을 없애고 자동 선택으로 전환했다.
+- CPU 솔버(`FRopeXPBDSolver`) + CPU `BuildTube`는 렌더 불가 환경/오버사이즈 폴백 + 패리티/단위 테스트 기준으로 **영구 유지**.
+- **남은 것(미러 제거)**: 기본 Subdiv=3에선 튜브 센터라인 소스가 CPU 미러(Data.Points)를 Catmull-Rom 스무딩한 것이라,
+  매 프레임 미러 업로드가 남는다. resident PosBuf를 GPU에서 스무딩하면 미러 렌더 의존을 없앨 수 있다(별도 단계).
+  단 미러(GetLatest)는 디버그/GT 로직도 읽으므로 완전 제거는 그보다 큰 작업.
 
 ---
 
