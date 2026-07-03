@@ -4,6 +4,17 @@
 #include "Collision/RopeCollider.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 
+namespace
+{
+bool BypassCaptureQualityGateForNow()
+{
+	// 지금은 접촉 판정 폴리싱 전이라 항상 통과시킨다.
+	// volatile로 읽어 아래 스캐폴드 계산식이 unreachable code 경고로 죽지 않게 둔다.
+	static volatile bool bBypassCaptureQualityGate = true;
+	return bBypassCaptureQualityGate;
+}
+}
+
 void FRopeFlightContactDetector::DetectContactCandidates(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
 	const FParams& Params, TArray<FRopeContactCandidate>& OutCandidates)
 {
@@ -178,10 +189,13 @@ bool FRopeFlightContactDetector::ShouldCapture(const TArray<FRopeContactCandidat
 bool FRopeFlightContactDetector::PassesCaptureQualityGate(const FRopeContactTracker& Tracker,
 	const TArray<FRopeContactCandidate>& Candidates, const FParams& Params)
 {
-	return true;
+	if (BypassCaptureQualityGateForNow())
+	{
+		return true;
+	}
 
 	// 아래는 나중에 접촉 판정을 빡세게 만들 때 켤 재료들이다.
-	// 지금은 감김 애니메이션/경로 폴리싱이 우선이라, 함수 첫 줄에서 항상 통과시킨다.
+	// 지금은 감김 애니메이션/경로 폴리싱이 우선이라, 위 게이트에서 항상 통과시킨다.
 
 	// 1. 접촉 노드 수/분포:
 	//    MinLatchNodes는 이미 ShouldCapture에서 보고 있다. 여기에 더해 연속된 노드 구간인지,

@@ -423,7 +423,7 @@ struct FRopeWrapConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "4.0"))
 	float PredictiveContactFrames = 1.0f;
 
-	/** Flight returns to Free after this much post-whip time with no contact candidates. 0 disables. */
+	/** Whip 종료 후 이 시간 동안 Flight 접촉 후보가 없으면 Free로 복귀한다. 0이면 비활성. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float FlightNoContactReturnTime = 0.0f;
 };

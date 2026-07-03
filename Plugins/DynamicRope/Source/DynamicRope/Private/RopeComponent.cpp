@@ -334,13 +334,36 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCapture);
 			bShouldCapture = FRopeFlightContactDetector::ShouldCapture(Candidates, DetectParams);
 		}
+		const bool bHasFlightCandidates = Candidates.Num() > 0;
 		if (bShouldCapture)
 		{
+			FlightNoContactElapsed = 0.0f;
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightBuildContactingState);
 			BuildContactingState(Candidates);
 			SetPhase(ERopePhase::Contacting, *FString::Printf(TEXT("bone=%s, %d node(s)"),
 				*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num()));
 			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
+		}
+		else
+		{
+			// Whip이 끝난 뒤 후보가 아예 없을 때만 Flight 실패 시간을 누적한다.
+			const bool bShouldReturnAfterNoContact =
+				WrapConfig.FlightNoContactReturnTime > 0.0f &&
+				!WhipGuide.IsActive() &&
+				!bHasFlightCandidates;
+			if (bShouldReturnAfterNoContact)
+			{
+				FlightNoContactElapsed += DeltaTime;
+				if (FlightNoContactElapsed >= WrapConfig.FlightNoContactReturnTime)
+				{
+					SetPhase(ERopePhase::Free, *FString::Printf(TEXT("flight no contact %.3fs"), FlightNoContactElapsed));
+					ResetTransientPhaseState();
+				}
+			}
+			else
+			{
+				FlightNoContactElapsed = 0.0f;
+			}
 		}
 
 		// stat 카운터(stat 시스템이 수집 중일 때만; 디버그 캡처와 독립).
@@ -540,6 +563,7 @@ void URopeComponent::ResetTransientPhaseState()
 	PendingWrapSeed.Reset();
 	WrappingPhase.State.Reset();
 	ContactingElapsed = 0.0f;
+	FlightNoContactElapsed = 0.0f;
 }
 
 // ===== 초기화/유틸 ===========================================================
