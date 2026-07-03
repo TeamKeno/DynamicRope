@@ -122,14 +122,15 @@ public:
 // 파일은 Shaders/Private/RopeXPBD.usf, 가상경로는 /Plugin/DynamicRope -> Shaders 이므로 /Private/ 포함.
 IMPLEMENT_GLOBAL_SHADER(FRopeXPBDSolveCS, "/Plugin/DynamicRope/Private/RopeXPBD.usf", "RopeXPBDSolveCS", SF_Compute);
 
-// HLSL FRopeGPUContact(RopeXPBD.usf)와 1:1 미러. 노드당 1슬롯. 16바이트 정렬.
+// HLSL FRopeGPUContact(RopeXPBD.usf)와 1:1 미러. 노드당 2슬롯(actual/predictive). 16바이트 정렬.
+// Penetration은 WorldPoint.W에 팩(정렬 유지).
 struct FRopeGPUContactGPU
 {
 	int32     bHit;
 	int32     ColliderType;
 	int32     ColliderIndex;
-	float     Penetration;
-	FVector4f WorldPoint;
+	int32     Source;
+	FVector4f WorldPoint; // xyz 접촉점, w Penetration
 	FVector4f Normal;
 	FVector4f SurfaceVel;
 };
@@ -149,12 +150,18 @@ public:
 		SHADER_PARAMETER(int32, DetectNumSDF)
 		SHADER_PARAMETER(float, DetectContactRadius)
 		SHADER_PARAMETER(float, DetectSegmentLength)
+		SHADER_PARAMETER(float, DetectPredictionFrames)
+		SHADER_PARAMETER(int32, DetectHasGuidedNodes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeCapsule>, Capsules)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SDFDistances)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFVolume>, SDFVolumes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPrevPositions)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, DetectGuidedMask)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectWhipCur)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectWhipPrev)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectWhipNext)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FRopeGPUContact>, OutContacts)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -413,23 +420,25 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 				bool bHaveContacts = false;
 				if (R.bContactArmed && R.ContactReadback && R.ContactReadback->IsReady())
 				{
-					const uint32 CBytes = (uint32)N * sizeof(FRopeGPUContactGPU);
+					// 노드당 2슬롯: [0..N) actual, [N..2N) predictive. 슬롯 인덱스 % N = 노드 인덱스.
+					const uint32 CBytes = (uint32)(2 * N) * sizeof(FRopeGPUContactGPU);
 					if (const FRopeGPUContactGPU* Src = (const FRopeGPUContactGPU*)R.ContactReadback->Lock(CBytes))
 					{
-						for (int32 k = 0; k < N; ++k)
+						for (int32 slot = 0; slot < 2 * N; ++slot)
 						{
-							if (Src[k].bHit == 0)
+							if (Src[slot].bHit == 0)
 							{
 								continue;
 							}
 							FRopeGPUContactResult C;
-							C.NodeIndex       = k;
-							C.ColliderType    = Src[k].ColliderType;
-							C.ColliderIndex   = Src[k].ColliderIndex;
-							C.Penetration     = Src[k].Penetration;
-							C.WorldPoint      = FVector(Src[k].WorldPoint.X, Src[k].WorldPoint.Y, Src[k].WorldPoint.Z);
-							C.Normal          = FVector(Src[k].Normal.X, Src[k].Normal.Y, Src[k].Normal.Z);
-							C.SurfaceVelocity = FVector(Src[k].SurfaceVel.X, Src[k].SurfaceVel.Y, Src[k].SurfaceVel.Z);
+							C.NodeIndex       = slot % N;
+							C.ColliderType    = Src[slot].ColliderType;
+							C.ColliderIndex   = Src[slot].ColliderIndex;
+							C.Source          = (uint8)Src[slot].Source;
+							C.Penetration     = Src[slot].WorldPoint.W; // w에 팩된 침투.
+							C.WorldPoint      = FVector(Src[slot].WorldPoint.X, Src[slot].WorldPoint.Y, Src[slot].WorldPoint.Z);
+							C.Normal          = FVector(Src[slot].Normal.X, Src[slot].Normal.Y, Src[slot].Normal.Z);
+							C.SurfaceVelocity = FVector(Src[slot].SurfaceVel.X, Src[slot].SurfaceVel.Y, Src[slot].SurfaceVel.Z);
 							TmpContacts.Add(C);
 						}
 						R.ContactReadback->Unlock();
@@ -479,6 +488,11 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 			TArray<TArray<FVector4f>>           KOvPos;   KOvPos.Reserve(NumSteps);
 			TArray<TArray<FVector4f>>           KOvPrev;  KOvPrev.Reserve(NumSteps);
 			TArray<TArray<float>>               KOvInv;   KOvInv.Reserve(NumSteps);
+			// 감지 예측(G3b) whip 버퍼 keep-alive(전용 — 다른 K*와 공유 시 Reserve 초과 재할당 위험).
+			TArray<TArray<uint32>>              KDetMask; KDetMask.Reserve(NumSteps);
+			TArray<TArray<FVector4f>>           KDetCur;  KDetCur.Reserve(NumSteps);
+			TArray<TArray<FVector4f>>           KDetPrev; KDetPrev.Reserve(NumSteps);
+			TArray<TArray<FVector4f>>           KDetNext; KDetNext.Reserve(NumSteps);
 
 			// --- Loop 2: seed/register + dispatch + 리드백 재무장(graph 패스).
 			for (const FRopeGPUResidentStep& S : Steps)
@@ -786,7 +800,7 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 				}
 
 				// --- 접촉 감지(G3): 솔브 뒤 post-solve 위치를 스윕. RDG가 solve(UAV)→detect(SRV) 순서를 보장한다.
-				// 감지가 있을 때만 ContactBuf(resident, N슬롯)를 확보하고 감지 커널 dispatch + 리드백 재무장.
+				// 노드당 2슬롯(actual+predictive) 출력. 감지가 있을 때만 ContactBuf(resident, 2N슬롯) 확보.
 				if (S.bDetectContacts)
 				{
 					const bool bContactSeed = !R.ContactBuf.IsValid() || bSeed;
@@ -794,7 +808,7 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 					if (bContactSeed)
 					{
 						ContactRDG = GraphBuilder.CreateBuffer(
-							FRDGBufferDesc::CreateStructuredDesc(sizeof(FRopeGPUContactGPU), N), TEXT("Rope.Contacts"));
+							FRDGBufferDesc::CreateStructuredDesc(sizeof(FRopeGPUContactGPU), 2 * N), TEXT("Rope.Contacts"));
 						R.ContactBuf = GraphBuilder.ConvertToExternalBuffer(ContactRDG);
 						R.bContactArmed = false; // 재생성 → 직전 접촉 리드백은 stale.
 					}
@@ -803,19 +817,64 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 						ContactRDG = GraphBuilder.RegisterExternalBuffer(R.ContactBuf);
 					}
 
+					// 예측 접촉용 whip 가이드 버퍼(G3b). whip 활성 시 노드별 마스크/타깃, 아니면 더미 1개.
+					const bool bHasWhip = S.WhipGuidedMask.Num() == N && S.PredictionFrames > 0.0f;
+					TArray<uint32>&    GMask = KDetMask.AddDefaulted_GetRef();
+					TArray<FVector4f>& WCur  = KDetCur.AddDefaulted_GetRef();
+					TArray<FVector4f>& WPrev = KDetPrev.AddDefaulted_GetRef();
+					TArray<FVector4f>& WNext = KDetNext.AddDefaulted_GetRef();
+					if (bHasWhip)
+					{
+						const bool bHaveCur  = S.WhipCurrentTargets.Num() == N;
+						const bool bHavePrev = S.WhipPrevTargets.Num() == N;
+						const bool bHaveNext = S.WhipNextTargets.Num() == N;
+						GMask.SetNumUninitialized(N);
+						WCur.SetNumUninitialized(N);
+						WPrev.SetNumUninitialized(N);
+						WNext.SetNumUninitialized(N);
+						for (int32 k = 0; k < N; ++k)
+						{
+							GMask[k] = S.WhipGuidedMask[k];
+							const FVector Cv = bHaveCur  ? S.WhipCurrentTargets[k] : FVector::ZeroVector;
+							const FVector Pv = bHavePrev ? S.WhipPrevTargets[k]    : FVector::ZeroVector;
+							const FVector Nv = bHaveNext ? S.WhipNextTargets[k]    : FVector::ZeroVector;
+							WCur[k]  = FVector4f((float)Cv.X, (float)Cv.Y, (float)Cv.Z, 0.0f);
+							WPrev[k] = FVector4f((float)Pv.X, (float)Pv.Y, (float)Pv.Z, 0.0f);
+							WNext[k] = FVector4f((float)Nv.X, (float)Nv.Y, (float)Nv.Z, 0.0f);
+						}
+					}
+					else
+					{
+						GMask.AddZeroed(1); WCur.AddZeroed(1); WPrev.AddZeroed(1); WNext.AddZeroed(1);
+					}
+					FRDGBufferRef GMaskBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.DetectGuidedMask"),
+						sizeof(uint32), GMask.Num(), GMask.GetData(), (uint64)GMask.Num() * sizeof(uint32));
+					FRDGBufferRef WCurBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.DetectWhipCur"),
+						sizeof(FVector4f), WCur.Num(), WCur.GetData(), (uint64)WCur.Num() * sizeof(FVector4f));
+					FRDGBufferRef WPrevBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.DetectWhipPrev"),
+						sizeof(FVector4f), WPrev.Num(), WPrev.GetData(), (uint64)WPrev.Num() * sizeof(FVector4f));
+					FRDGBufferRef WNextBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.DetectWhipNext"),
+						sizeof(FVector4f), WNext.Num(), WNext.GetData(), (uint64)WNext.Num() * sizeof(FVector4f));
+
 					FRopeContactDetectCS::FParameters* DetectParams = GraphBuilder.AllocParameters<FRopeContactDetectCS::FParameters>();
-					DetectParams->DetectNumNodes     = N;
-					DetectParams->DetectNumCapsules  = NumValidCaps;
-					DetectParams->DetectNumSDF       = NumValidSDFCol;
-					DetectParams->DetectContactRadius = S.ContactRadius;
-					DetectParams->DetectSegmentLength = S.SegmentLength;
-					DetectParams->Capsules            = GraphBuilder.CreateSRV(CapsulesBuf);
-					DetectParams->SDFDistances        = GraphBuilder.CreateSRV(SDFDistBuf);
-					DetectParams->SDFVolumes          = GraphBuilder.CreateSRV(SDFVolBuf);
-					DetectParams->SDFColliders        = GraphBuilder.CreateSRV(SDFColBuf);
-					DetectParams->DetectPositions     = GraphBuilder.CreateSRV(PosRDG);
-					DetectParams->DetectPrevPositions = GraphBuilder.CreateSRV(PrevRDG);
-					DetectParams->OutContacts         = GraphBuilder.CreateUAV(ContactRDG);
+					DetectParams->DetectNumNodes       = N;
+					DetectParams->DetectNumCapsules    = NumValidCaps;
+					DetectParams->DetectNumSDF         = NumValidSDFCol;
+					DetectParams->DetectContactRadius  = S.ContactRadius;
+					DetectParams->DetectSegmentLength  = S.SegmentLength;
+					DetectParams->DetectPredictionFrames = FMath::Max(0.0f, S.PredictionFrames);
+					DetectParams->DetectHasGuidedNodes = bHasWhip ? 1 : 0;
+					DetectParams->Capsules             = GraphBuilder.CreateSRV(CapsulesBuf);
+					DetectParams->SDFDistances         = GraphBuilder.CreateSRV(SDFDistBuf);
+					DetectParams->SDFVolumes           = GraphBuilder.CreateSRV(SDFVolBuf);
+					DetectParams->SDFColliders         = GraphBuilder.CreateSRV(SDFColBuf);
+					DetectParams->DetectPositions      = GraphBuilder.CreateSRV(PosRDG);
+					DetectParams->DetectPrevPositions  = GraphBuilder.CreateSRV(PrevRDG);
+					DetectParams->DetectGuidedMask     = GraphBuilder.CreateSRV(GMaskBuf);
+					DetectParams->DetectWhipCur        = GraphBuilder.CreateSRV(WCurBuf);
+					DetectParams->DetectWhipPrev       = GraphBuilder.CreateSRV(WPrevBuf);
+					DetectParams->DetectWhipNext       = GraphBuilder.CreateSRV(WNextBuf);
+					DetectParams->OutContacts          = GraphBuilder.CreateUAV(ContactRDG);
 
 					TShaderMapRef<FRopeContactDetectCS> DetectShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 					FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeContactDetect"),
@@ -824,7 +883,7 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 					if (!R.bContactArmed)
 					{
 						if (!R.ContactReadback) { R.ContactReadback = new FRHIGPUBufferReadback(TEXT("Rope.ContactReadback")); }
-						AddEnqueueCopyPass(GraphBuilder, R.ContactReadback, ContactRDG, (uint32)N * sizeof(FRopeGPUContactGPU));
+						AddEnqueueCopyPass(GraphBuilder, R.ContactReadback, ContactRDG, (uint32)(2 * N) * sizeof(FRopeGPUContactGPU));
 						R.bContactArmed = true;
 					}
 				}

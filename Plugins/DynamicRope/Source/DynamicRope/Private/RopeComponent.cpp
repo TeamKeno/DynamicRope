@@ -302,8 +302,8 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 
 		if (bGpuContactsThisFrame)
 		{
-			// GPU 감지 경로(G3): 실제 접촉 후보는 GPU 커널이 산출한 것을 그대로 쓴다(귀속은 서브시스템이 복원).
-			// 예측 접촉(AddPredicted)은 G3b에서 GPU화 예정 — 그 전까지 GPU 경로는 실제 접촉만 사용한다.
+			// GPU 감지 경로(G3): actual+predictive 후보 모두 GPU 커널이 산출한 것을 쓴다(귀속·중복제거는
+			// 서브시스템이 복원). 상대운동 평가(ExpectedWrapTangent는 hand=node0 위치 필요)만 GT에서 돌린다.
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightGpuContacts);
 			Candidates = GpuFlightCandidates;
 			FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);

@@ -107,6 +107,16 @@ struct FRopeGPUResidentStep
 	bool  bDetectContacts = false;
 	float ContactRadius = 0.0f;
 
+	// --- 예측 접촉(G3b): 노드의 다음 위치를 외삽한 경로도 스윕해 곧 닿을 접촉을 감지한다. 노드당 2슬롯
+	// (actual + predictive) 출력. PredictionFrames<=0이면 예측 없음. whip 활성 프레임엔 가이드 노드의
+	// 현재/직전/다음 타깃으로 외삽하고(PredictiveGuided), 그 외엔 프레임 변위로 외삽한다(PredictiveFree).
+	// WhipGuided*는 whip 활성 시에만 NumNodes 길이로 채운다(아니면 비움 → free 예측만).
+	float           PredictionFrames = 0.0f;
+	TArray<uint8>   WhipGuidedMask;    // 노드별 가이드 여부(1=guided)
+	TArray<FVector> WhipCurrentTargets;
+	TArray<FVector> WhipPrevTargets;
+	TArray<FVector> WhipNextTargets;
+
 	// --- Override(G0): 로직 페이즈(GT)가 계산한 노드별 타깃을 상주 버퍼에 직접 기록(재시드 대체).
 	// 비어 있으면 오버라이드 없음. 채울 때 OverrideFlags는 정확히 NumNodes 길이(불일치 시 전체 무시+경고),
 	// 값 배열은 해당 비트를 쓰는 노드가 있을 때만 NumNodes 길이로 제공하면 된다.
@@ -138,6 +148,7 @@ struct FRopeGPUContactResult
 	int32   NodeIndex = INDEX_NONE;
 	int32   ColliderType = 0;   // 0=capsule, 1=SDF (step의 Capsules/SDFColliders 배열 구분)
 	int32   ColliderIndex = 0;  // 해당 배열 내 인덱스(귀속 복원 키)
+	uint8   Source = 1;         // ERopeContactCandidateSource: 1=Actual, 2=PredictiveFree, 4=PredictiveGuided
 	float   Penetration = 0.0f;
 	FVector WorldPoint = FVector::ZeroVector;      // 표면 접촉점(FRopeContact.SurfacePoint 대응)
 	FVector Normal = FVector::UpVector;            // 바깥(collider→node) 단위 법선

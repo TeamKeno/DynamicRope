@@ -159,6 +159,9 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 		return;
 	}
 
+	// Contacts는 슬롯 순서(actual 먼저, predictive 뒤)라 actual이 우선 처리된다. CPU AddUniqueCandidate와
+	// 동일하게 (node, bone, mesh) 중복은 병합한다(SourceMask OR + Source 우선순위 Guided>Actual>Free) —
+	// 트래커의 노드 중복 카운트를 막고 판정을 CPU와 일치시킨다.
 	for (const FRopeGPUContactResult& C : Contacts->Contacts)
 	{
 		// 콜라이더 인덱스 → (bone, mesh) 귀속. 범위 밖(콜라이더 집합 변화)은 건너뛴다(자기수정).
@@ -173,14 +176,37 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 		{
 			continue; // 귀속 불가(비-스켈레탈 collider) — 캡처 대상 아님.
 		}
+		const USkeletalMeshComponent* Mesh = A.Mesh.Get(); // weak — 지연 중 파괴됐으면 null(판정은 bone으로 진행).
+
+		// 병합: 같은 (node, bone, mesh) 후보가 있으면 SourceMask OR + Source 우선순위 갱신, 새 후보는 추가 안 함.
+		FRopeContactCandidate* Existing = nullptr;
+		for (FRopeContactCandidate& E : Rope.GpuFlightCandidates)
+		{
+			if (E.NodeIndex == C.NodeIndex && E.Bone == A.Bone && E.Mesh == Mesh)
+			{
+				Existing = &E;
+				break;
+			}
+		}
+		if (Existing)
+		{
+			Existing->SourceMask |= C.Source;
+			if (C.Source == static_cast<uint8>(ERopeContactCandidateSource::PredictiveGuided) ||
+				(Existing->Source == ERopeContactCandidateSource::Actual &&
+					C.Source == static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree)))
+			{
+				Existing->Source = static_cast<ERopeContactCandidateSource>(C.Source);
+			}
+			continue;
+		}
 
 		FRopeContactCandidate Cand;
 		Cand.bValid          = true;
 		Cand.NodeIndex       = C.NodeIndex;
 		Cand.Bone            = A.Bone;
-		Cand.Mesh            = A.Mesh.Get(); // weak — 지연 중 파괴됐으면 null(판정은 bone으로 진행).
-		Cand.Source          = ERopeContactCandidateSource::Actual;
-		Cand.SourceMask      = static_cast<uint8>(ERopeContactCandidateSource::Actual);
+		Cand.Mesh            = Mesh;
+		Cand.Source          = static_cast<ERopeContactCandidateSource>(C.Source);
+		Cand.SourceMask      = C.Source;
 		Cand.WorldPoint      = C.WorldPoint;
 		Cand.Normal          = C.Normal.GetSafeNormal();
 		Cand.Penetration     = C.Penetration;
@@ -380,8 +406,22 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			{
 				Step.bDetectContacts = true;
 				Step.ContactRadius = Rope->WrapConfig.ContactRadius;
+				Step.PredictionFrames = Rope->WrapConfig.PredictiveContactFrames;
 				Rope->GpuCapsuleAttribution.Reset();
 				Rope->GpuSdfAttribution.Reset();
+
+				// 예측 접촉(G3b): whip 활성 프레임엔 가이드 마스크/현재·직전·다음 타깃을 실어 GPU가
+				// 가이드 노드를 외삽하게 한다(CPU AddPredictedContactCandidates와 동일 입력).
+				const TArray<uint8>& WhipMask = Rope->WhipGuide.GetGuidedNodeMask();
+				if (Step.PredictionFrames > KINDA_SMALL_NUMBER && WhipMask.Num() == S.Num())
+				{
+					TArray<FVector> NextTargets;
+					Rope->WhipGuide.PreviewNextTargets(DeltaTime, S, Rope->MakeWhipGuideConfig(), NextTargets);
+					Step.WhipGuidedMask     = WhipMask;
+					Step.WhipCurrentTargets = Rope->WhipGuide.GetCurrentTargets();
+					Step.WhipPrevTargets    = Rope->WhipGuide.GetPrevTargets();
+					Step.WhipNextTargets    = MoveTemp(NextTargets);
+				}
 			}
 
 			// 충돌: 이 로프의 collider를 capsule(M2)/SDF(M3)로 분류. FrameColliders는 Prepare에서 GT gather된 스냅샷.

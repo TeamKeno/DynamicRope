@@ -12,6 +12,9 @@
 #include "Solver/RopeXPBDSolver.h"
 #include "RopeGPUSolver.h" // DynamicRopeShaders 모듈
 #include "Collision/RopeCollider.h"
+#include "Collision/SDF/RopeSDFCollider.h"
+#include "Collision/SDF/RopeSDFSynthetic.h" // MakeSphere(합성 SDF 볼륨)
+#include "Collision/SDF/RopeSDFData.h"
 #include "Logic/RopeFlightContactDetector.h" // CPU 감지(패리티 ground-truth)
 #include "RopeTestHelpers.h"
 #include "RHI.h"
@@ -464,6 +467,269 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("노드 %d 법선 일치(dot %.3f)"), Node, NormalDot), NormalDot > 0.99f);
 		const float PointDev = static_cast<float>(FVector::Dist((*GpuC)->WorldPoint, Pair.Value->WorldPoint));
 		TestTrue(FString::Printf(TEXT("노드 %d 접촉점 일치(차 %.3f cm)"), Node, PointDev), PointDev < 0.5f);
+	}
+
+	return true;
+}
+
+// 예측 접촉 패리티(G3b): 아직 안 닿았지만 외삽 경로가 캡슐을 지나는 tail 노드가 predictive 슬롯에
+// 잡히고, CPU AddPredictedContactCandidates와 침투/소스가 일치하는가. actual 슬롯은 비어야 한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUPredictiveParityTest,
+	"DynamicRope.Solver.GPUPredictiveParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU 예측 접촉 패리티 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	const int32 N = 8;
+	const float Length = 140.0f;
+	const float ContactRadius = 3.0f;
+	const float PredictionFrames = 3.0f;
+
+	// tail 노드 7만 +X로 이동(prev 120 → pos 140). 캡슐은 x=175(도달 전) → actual 미스, 예측 경로가 관통.
+	FRopeSimState Sim = RopeTest::MakeStraightRope(N, Length, FVector(0, 0, 15));
+	Sim.PrevPositions[7] = FVector(120, 0, 15);
+	Sim.Positions[7]     = FVector(140, 0, 15);
+	FCapsuleCollider Capsule(FVector(175, -50, 0), FVector(175, 50, 0), 30.0f, FName("arm"));
+	TArray<IRopeCollider*> Colliders = { &Capsule };
+
+	// --- CPU ground-truth: actual + predictive.
+	FRopeFlightContactDetector::FParams Params;
+	Params.ContactRadius = ContactRadius;
+	Params.RopeRadius = 2.0f;
+	Params.PredictiveContactFrames = PredictionFrames;
+	Params.MinLatchNodes = 1;
+	TArray<FRopeContactCandidate> CpuCandidates;
+	FRopeFlightContactDetector::DetectContactCandidates(Sim, Colliders, Params, CpuCandidates);
+	const int32 CpuActualCount = CpuCandidates.Num();
+	FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, Colliders, Params,
+		FRopeFlightContactDetector::FWhipGuideView(), CpuCandidates);
+
+	// CPU: actual 0개, predictive로 노드 7 하나 추가되어야 한다.
+	TestEqual(TEXT("CPU actual 접촉 없음"), CpuActualCount, 0);
+	const FRopeContactCandidate* CpuPred = nullptr;
+	for (const FRopeContactCandidate& C : CpuCandidates)
+	{
+		if (C.NodeIndex == 7) { CpuPred = &C; }
+	}
+	if (!TestTrue(TEXT("CPU 예측 후보(노드 7) 존재"), CpuPred != nullptr))
+	{
+		return false;
+	}
+
+	// --- GPU: 예측 포함 감지 step(whip 없음 → free 예측).
+	FRopeGPUSolver GpuSolver;
+	const uint32 RopeId = 13;
+	const uint32 Gen = 1;
+	auto MakeDetectStep = [&]() -> FRopeGPUResidentStep
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId            = RopeId;
+		Step.Generation        = Gen;
+		Step.NumNodes          = Sim.Num();
+		Step.SeedPositions     = Sim.Positions;
+		Step.SeedPrevPositions = Sim.PrevPositions;
+		Step.InvMass           = Sim.InvMass;
+		Step.SegmentLength     = Sim.SegmentLength;
+		Step.NumSub            = 0;
+		Step.FixedDt           = 1.0f / 60.0f;
+		Step.bDetectContacts   = true;
+		Step.ContactRadius     = ContactRadius;
+		Step.PredictionFrames  = PredictionFrames;
+		FVector A, B; float R;
+		Capsule.GetGPUCapsule(A, B, R);
+		FRopeGPUCapsule Cap; Cap.A = A; Cap.B = B; Cap.Radius = R;
+		Step.Capsules.Add(Cap);
+		return Step;
+	};
+	auto SyncGPU = []()
+	{
+		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
+			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.BlockUntilGPUIdle(); });
+		FlushRenderingCommands();
+	};
+
+	FRopeResidentContacts GpuContacts;
+	bool bGot = false;
+	for (int32 Spin = 0; Spin < 16 && !bGot; ++Spin)
+	{
+		SyncGPU();
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(MakeDetectStep());
+		GpuSolver.Step(MoveTemp(Steps));
+		FlushRenderingCommands();
+		SyncGPU();
+		TMap<uint32, FRopeResidentContacts> Latest;
+		GpuSolver.GetLatestContacts(Latest);
+		if (const FRopeResidentContacts* C = Latest.Find(RopeId))
+		{
+			if (C->Generation == Gen) { GpuContacts = *C; bGot = true; }
+		}
+	}
+	if (!bGot)
+	{
+		AddError(TEXT("GPU 예측 접촉 결과를 회수하지 못함."));
+		return false;
+	}
+
+	// GPU: 노드 7의 predictive(Source=2) 접촉이 있어야 하고 actual(Source=1)은 없어야 한다.
+	const FRopeGPUContactResult* GpuPred = nullptr;
+	bool bAnyActual = false;
+	for (const FRopeGPUContactResult& C : GpuContacts.Contacts)
+	{
+		if (C.Source == static_cast<uint8>(ERopeContactCandidateSource::Actual)) { bAnyActual = true; }
+		if (C.NodeIndex == 7 && C.Source == static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree)) { GpuPred = &C; }
+	}
+	TestFalse(TEXT("GPU actual 접촉 없음"), bAnyActual);
+	if (!TestTrue(TEXT("GPU 예측 후보(노드 7, PredictiveFree) 존재"), GpuPred != nullptr))
+	{
+		return false;
+	}
+
+	const float PenDev = FMath::Abs(GpuPred->Penetration - CpuPred->Penetration);
+	AddInfo(FString::Printf(TEXT("예측 침투 CPU %.3f / GPU %.3f"), CpuPred->Penetration, GpuPred->Penetration));
+	TestTrue(FString::Printf(TEXT("예측 침투 일치(차 %.3f)"), PenDev), PenDev < 0.1f);
+	const float PointDev = static_cast<float>(FVector::Dist(GpuPred->WorldPoint, CpuPred->WorldPoint));
+	TestTrue(FString::Printf(TEXT("예측 접촉점 일치(차 %.3f cm)"), PointDev), PointDev < 0.5f);
+
+	return true;
+}
+
+// SDF 접촉 감지 패리티(G3b): GPU SDF 감지가 CPU FRopeSDFCollider::Query 기반 감지와 같은 접촉을
+// 산출하는가. 합성 구 볼륨 + 정적 로프로 결정적 비교(침투/법선/접촉점).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUSDFContactParityTest,
+	"DynamicRope.Solver.GPUSDFContactParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU SDF 접촉 패리티 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	const float ContactRadius = 3.0f;
+
+	// 반지름 20 구(본 로컬), BoneToWorld=identity. 로프 노드를 표면 근처에 배치해 몇 개가 침투하게 한다.
+	const FRopeBoneSDFVolume Volume =
+		RopeSDFSynthetic::MakeSphere(FName("arm"), FVector::ZeroVector, 20.0f, FIntVector(31), 10.0f);
+	FRopeSDFCollider Sdf(&Volume, FTransform::Identity, FTransform::Identity, 0.0f, FName("arm"), nullptr);
+	TArray<IRopeCollider*> Colliders = { &Sdf };
+
+	// 정적 로프(prev==pos): x = -25,-21,-19,19,21,25 (z=0). 표면(20)에서 노드 1/2/3/4가 반경 3 이내.
+	const int32 N = 6;
+	FRopeSimState Sim = RopeTest::MakeStraightRope(N, 100.0f);
+	const float Xs[N] = { -25.0f, -21.0f, -19.0f, 19.0f, 21.0f, 25.0f };
+	for (int32 i = 0; i < N; ++i)
+	{
+		Sim.Positions[i] = FVector(Xs[i], 0, 0);
+		Sim.PrevPositions[i] = Sim.Positions[i];
+	}
+
+	// --- CPU ground-truth.
+	FRopeFlightContactDetector::FParams Params;
+	Params.ContactRadius = ContactRadius;
+	Params.RopeRadius = 2.0f;
+	Params.PredictiveContactFrames = 0.0f;
+	Params.MinLatchNodes = 1;
+	TArray<FRopeContactCandidate> CpuCandidates;
+	FRopeFlightContactDetector::DetectContactCandidates(Sim, Colliders, Params, CpuCandidates);
+
+	// --- GPU SDF collider 뷰 → step.
+	FRopeSDFColliderView View;
+	if (!Sdf.GetGPUSDF(View))
+	{
+		AddError(TEXT("GetGPUSDF 실패(볼륨 미베이크?)."));
+		return false;
+	}
+
+	FRopeGPUSolver GpuSolver;
+	const uint32 RopeId = 17;
+	const uint32 Gen = 1;
+	auto MakeDetectStep = [&]() -> FRopeGPUResidentStep
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId            = RopeId;
+		Step.Generation        = Gen;
+		Step.NumNodes          = Sim.Num();
+		Step.SeedPositions     = Sim.Positions;
+		Step.SeedPrevPositions = Sim.PrevPositions;
+		Step.InvMass           = Sim.InvMass;
+		Step.SegmentLength     = Sim.SegmentLength;
+		Step.NumSub            = 0;
+		Step.FixedDt           = 1.0f / 60.0f;
+		Step.bDetectContacts   = true;
+		Step.ContactRadius     = ContactRadius;
+		FRopeGPUSDFCollider G;
+		G.Distances       = View.Distances;
+		G.BytesPerCode    = View.BytesPerCode;
+		G.NarrowBandInner = View.NarrowBandInner;
+		G.NarrowBandOuter = View.NarrowBandOuter;
+		G.ResX = View.ResX; G.ResY = View.ResY; G.ResZ = View.ResZ;
+		G.LocalMin = View.LocalMin; G.LocalSize = View.LocalSize;
+		G.BoneToWorld = View.BoneToWorld; G.PrevBoneToWorld = View.PrevBoneToWorld;
+		G.InvDeltaTime = View.InvDeltaTime; G.VolumeKey = View.VolumeKey;
+		Step.SDFColliders.Add(G);
+		return Step;
+	};
+	auto SyncGPU = []()
+	{
+		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
+			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.BlockUntilGPUIdle(); });
+		FlushRenderingCommands();
+	};
+
+	FRopeResidentContacts GpuContacts;
+	bool bGot = false;
+	for (int32 Spin = 0; Spin < 16 && !bGot; ++Spin)
+	{
+		SyncGPU();
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(MakeDetectStep());
+		GpuSolver.Step(MoveTemp(Steps));
+		FlushRenderingCommands();
+		SyncGPU();
+		TMap<uint32, FRopeResidentContacts> Latest;
+		GpuSolver.GetLatestContacts(Latest);
+		if (const FRopeResidentContacts* C = Latest.Find(RopeId))
+		{
+			if (C->Generation == Gen) { GpuContacts = *C; bGot = true; }
+		}
+	}
+	if (!bGot)
+	{
+		AddError(TEXT("GPU SDF 접촉 결과를 회수하지 못함."));
+		return false;
+	}
+
+	// GPU actual 접촉만(정적 → 예측 없음).
+	TMap<int32, const FRopeGPUContactResult*> GpuByNode;
+	for (const FRopeGPUContactResult& C : GpuContacts.Contacts)
+	{
+		if (C.Source == static_cast<uint8>(ERopeContactCandidateSource::Actual)) { GpuByNode.Add(C.NodeIndex, &C); }
+	}
+
+	AddInfo(FString::Printf(TEXT("CPU SDF 접촉 %d개, GPU %d개"), CpuCandidates.Num(), GpuByNode.Num()));
+	TestTrue(TEXT("적어도 하나의 SDF 접촉"), CpuCandidates.Num() > 0);
+	TestEqual(TEXT("SDF 히트 노드 수 일치"), GpuByNode.Num(), CpuCandidates.Num());
+
+	for (const FRopeContactCandidate& Cpu : CpuCandidates)
+	{
+		const FRopeGPUContactResult** GpuC = GpuByNode.Find(Cpu.NodeIndex);
+		if (!TestTrue(FString::Printf(TEXT("GPU도 노드 %d를 히트"), Cpu.NodeIndex), GpuC != nullptr))
+		{
+			continue;
+		}
+		const float PenDev = FMath::Abs((*GpuC)->Penetration - Cpu.Penetration);
+		TestTrue(FString::Printf(TEXT("노드 %d SDF 침투 일치(차 %.3f)"), Cpu.NodeIndex, PenDev), PenDev < 0.3f);
+		const float NormalDot = FVector::DotProduct((*GpuC)->Normal.GetSafeNormal(), Cpu.Normal.GetSafeNormal());
+		TestTrue(FString::Printf(TEXT("노드 %d SDF 법선 일치(dot %.3f)"), Cpu.NodeIndex, NormalDot), NormalDot > 0.98f);
 	}
 
 	return true;
