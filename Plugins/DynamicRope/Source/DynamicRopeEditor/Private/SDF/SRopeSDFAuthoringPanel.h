@@ -9,9 +9,11 @@
 #include "Widgets/SCompoundWidget.h"
 #include "RopeSDFBaker.h"
 
+class IDetailsView;
 class URopeSDFData;
 class SRopeSDFPreviewViewport;
 struct FAssetData;
+struct FPropertyChangedEvent;
 struct FRopeSDFPreviewDrawOptions;
 
 class SRopeSDFAuthoringPanel : public SCompoundWidget
@@ -21,6 +23,10 @@ public:
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
+
+	/** 타깃 에셋을 외부에서 지정한다(에셋 더블클릭 → 탭 연결 진입점). nullptr이면 타깃 해제.
+	    베이크 설정 복원/프리뷰 갱신 등 픽커로 고른 것과 동일한 경로를 탄다. */
+	void SetTargetAsset(URopeSDFData* InData);
 
 private:
 	/** 선택된 타깃에 대해 본별 베이크를 실행해 결과를 자산 메모리에 써넣는다(디스크 저장은 Save 버튼). */
@@ -55,6 +61,13 @@ private:
 
 	/** 현재 타깃의 SourceMesh를 동기 로드해 프리뷰 뷰포트에 반영한다(없으면 빈 뷰 + 안내). */
 	void RefreshPreviewMesh();
+
+	/** 내장 디테일 뷰에서 에셋 프로퍼티가 바뀌었을 때 — SourceMesh 변경이면 프리뷰 메시를 갱신한다. */
+	void OnAssetPropertyChanged(const FPropertyChangedEvent& Event);
+
+	/** 타깃 에셋의 원본 프로퍼티(SourceMesh/Bone Volumes)를 보여주는 내장 디테일 뷰.
+	    더블클릭이 제네릭 프로퍼티 에디터 대신 이 탭을 열므로, 확인·편집은 여기서 한다. */
+	TSharedPtr<IDetailsView> DetailsView;
 
 	/** 프리뷰할 메시가 없을 때만 보이는 안내 오버레이의 가시성. */
 	EVisibility GetPreviewHintVisibility() const;

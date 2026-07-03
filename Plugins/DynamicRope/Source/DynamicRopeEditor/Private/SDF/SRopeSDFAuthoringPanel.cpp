@@ -20,6 +20,9 @@
 #include "Widgets/Layout/SBox.h"            // 색 스와치 크기 고정
 #include "Styling/AppStyle.h"
 #include "PropertyCustomizationHelpers.h"   // SObjectPropertyEntryBox
+#include "PropertyEditorModule.h"           // 내장 디테일 뷰 생성
+#include "IDetailsView.h"
+#include "Modules/ModuleManager.h"
 #include "Engine/SkeletalMesh.h"
 #include "Misc/ScopedSlowTask.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -34,6 +37,19 @@
 
 void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 {
+	// 내장 디테일 뷰(타깃 에셋의 원본 프로퍼티). 더블클릭이 제네릭 프로퍼티 에디터 대신 이 탭을
+	// 열므로 SourceMesh/Bone Volumes 확인·편집은 여기서 한다. ChildSlot에 넣기 전에 먼저 만든다.
+	{
+		FPropertyEditorModule& PropertyModule =
+			FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
+		FDetailsViewArgs DetailsArgs;
+		DetailsArgs.bHideSelectionTip = true;
+		DetailsArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea; // 타깃 이름은 위 픽커가 이미 보여준다.
+		DetailsView = PropertyModule.CreateDetailView(DetailsArgs);
+		// 디테일 뷰 경유로 SourceMesh가 바뀌는 경로 대응(픽커 경유가 아니므로 별도 훅이 필요).
+		DetailsView->OnFinishedChangingProperties().AddSP(this, &SRopeSDFAuthoringPanel::OnAssetPropertyChanged);
+	}
+
 	ChildSlot
 	[
 		SNew(SSplitter)
@@ -310,6 +326,23 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
 					[ MakePreviewFloatRow(LOCTEXT("GradLen", "Gradient Length (cm)"), &FRopeSDFPreviewDrawOptions::GradientLength, 0.5f, 20.0f) ]
 				]
+			]
+
+			// 타깃 에셋 원본 프로퍼티(SourceMesh/Bone Volumes). 라이브 에셋을 직접 보므로 Bake 결과가
+			// 즉시 반영된다. FRopeBoneSDFVolume 커스터마이즈(배열 요소 헤더에 본 이름)도 그대로 적용.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 14.0f, 0.0f, 4.0f)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("DetailsHeader", "Asset Details"))
+			]
+
+			// 남는 세로 공간을 차지하며 내부 스크롤을 가진다(좌측 컬럼 자체는 스크롤이 없다).
+			+ SVerticalBox::Slot()
+			.FillHeight(1.0f)
+			[
+				DetailsView.ToSharedRef()
 			]
 		]
 		]
@@ -629,7 +662,12 @@ FString SRopeSDFAuthoringPanel::GetTargetPath() const
 
 void SRopeSDFAuthoringPanel::OnTargetChanged(const FAssetData& InAssetData)
 {
-	Target = Cast<URopeSDFData>(InAssetData.GetAsset());
+	SetTargetAsset(Cast<URopeSDFData>(InAssetData.GetAsset()));
+}
+
+void SRopeSDFAuthoringPanel::SetTargetAsset(URopeSDFData* InData)
+{
+	Target = InData;
 
 	// 이미 베이크된 에셋이면 그 당시 설정을 패널로 복원해, 디자이너가 현재 결과와 비교하며 값을
 	// 조정할 수 있게 한다. 미베이크 에셋이면 기본값(신규 베이크 출발점)을 유지한다.
@@ -650,7 +688,22 @@ void SRopeSDFAuthoringPanel::OnTargetChanged(const FAssetData& InAssetData)
 		Band = FMath::Clamp(Band, 0.0f, GetBandThresholdMax());
 	}
 
+	// 내장 디테일 뷰도 새 타깃을 보게 한다(nullptr이면 빈 디테일 뷰).
+	if (DetailsView.IsValid())
+	{
+		DetailsView->SetObject(InData);
+	}
+
 	RefreshPreviewMesh();
+}
+
+void SRopeSDFAuthoringPanel::OnAssetPropertyChanged(const FPropertyChangedEvent& Event)
+{
+	// 디테일 뷰에서 SourceMesh를 바꾸면 픽커 경로(OnTargetChanged)를 타지 않으므로 여기서 프리뷰를 갱신.
+	if (Event.GetPropertyName() == GET_MEMBER_NAME_CHECKED(URopeSDFData, SourceMesh))
+	{
+		RefreshPreviewMesh();
+	}
 }
 
 void SRopeSDFAuthoringPanel::RefreshPreviewMesh()

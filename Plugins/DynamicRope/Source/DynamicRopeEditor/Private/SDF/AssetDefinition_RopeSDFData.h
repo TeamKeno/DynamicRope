@@ -20,4 +20,6 @@ public:
 	virtual FLinearColor GetAssetColor() const override;
 	virtual TSoftClassPtr<UObject> GetAssetClass() const override;
 	virtual TConstArrayView<FAssetCategoryPath> GetAssetCategories() const override;
+	/** 더블클릭 시 제네릭 프로퍼티 에디터 대신 SDF 오써링 탭을 열어 해당 에셋을 타깃으로 지정한다. */
+	virtual EAssetCommandResult OpenAssets(const FAssetOpenArgs& OpenArgs) const override;
 };

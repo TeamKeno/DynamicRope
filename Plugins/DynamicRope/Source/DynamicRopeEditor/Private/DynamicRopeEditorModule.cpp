@@ -135,6 +135,16 @@ TSharedRef<SDockTab> FDynamicRopeEditorModule::SpawnSDFAuthoringTab(const FSpawn
 		];
 }
 
+void FDynamicRopeEditorModule::OpenSDFAuthoringTabForAsset(URopeSDFData* InData)
+{
+	// 탭을 열거나(없으면 생성) 앞으로 가져온 뒤 콘텐츠 패널에 타깃을 지정한다.
+	// SpawnSDFAuthoringTab이 콘텐츠로 항상 SRopeSDFAuthoringPanel을 넣으므로 캐스트는 안전하다.
+	if (TSharedPtr<SDockTab> Tab = FGlobalTabmanager::Get()->TryInvokeTab(RopeSDFAuthoringTabId))
+	{
+		StaticCastSharedRef<SRopeSDFAuthoringPanel>(Tab->GetContent())->SetTargetAsset(InData);
+	}
+}
+
 #undef LOCTEXT_NAMESPACE
 
 IMPLEMENT_MODULE(FDynamicRopeEditorModule, DynamicRopeEditor)
