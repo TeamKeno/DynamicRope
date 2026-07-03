@@ -2,8 +2,12 @@
 
 #include "Modules/ModuleManager.h"
 #include "DynamicRopeShadersLog.h"
+#include "RopeGDFFXSystem.h"       // 커스텀 FX 시스템(GDF 온디맨드 소비자)
+#include "RopeGDFViewExtension.h"  // GDF 씬 뷰 확장
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
+#include "Misc/CoreDelegates.h"    // OnPostEngineInit (뷰 확장 생성 타이밍)
+#include "FXSystem.h"              // FFXSystemInterface::RegisterCustomFXSystem
 #include "ShaderCore.h" // AddShaderSourceDirectoryMapping
 
 DEFINE_LOG_CATEGORY(LogDynamicRopeGPU);
@@ -28,10 +32,21 @@ public:
 		{
 			UE_LOG(LogDynamicRopeGPU, Warning, TEXT("Could not find 'DynamicRope' plugin to map shader directory — GPU solver shaders will fail to compile."));
 		}
+
+		// 커스텀 FX 시스템을 등록한다(GDF 온디맨드 소비자). 씬의 FFXSystemSet은 월드/씬 생성 시 1회 빌드되므로
+		// PostConfigInit(월드 생성 전)에 등록해야 이후 모든 씬에 sibling으로 들어간다.
+		FFXSystemInterface::RegisterCustomFXSystem(
+			FRopeGDFFXSystem::Name,
+			FCreateCustomFXSystemDelegate::CreateStatic(&CreateRopeGDFFXSystem));
+
+		// 뷰 확장은 GEngine이 필요하므로 엔진 초기화 이후 생성한다(PostConfigInit은 너무 이름).
+		FCoreDelegates::OnPostEngineInit.AddStatic(&FRopeGDFViewExtension::EnsureRegistered);
 	}
 
 	virtual void ShutdownModule() override
 	{
+		FRopeGDFViewExtension::Shutdown();
+		FFXSystemInterface::UnregisterCustomFXSystem(FRopeGDFFXSystem::Name);
 	}
 };
 

@@ -25,6 +25,8 @@ public class DynamicRopeShaders : ModuleRules
 				"RenderCore", // FGlobalShader / RDG (RenderGraph)
 				"RHI",        // GPU 버퍼 / 리드백
 				"Projects",   // IPluginManager — .usf 가상경로 매핑
+				"Engine",     // FSceneViewExtension / FFXSystemInterface (GDF 월드 충돌)
+				"Renderer",   // UE::FXRenderingUtils::GetGlobalDistanceFieldParameterData + FGlobalDistanceFieldParameters2
 			}
 			);
 	}
