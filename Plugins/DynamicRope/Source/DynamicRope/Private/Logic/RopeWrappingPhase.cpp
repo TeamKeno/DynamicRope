@@ -69,7 +69,7 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 	AdvanceSurfaceVectorFieldProgressiveWrapPath(StepBudget, Sim, Ctx);
 }
 
-void FRopeWrappingPhase::ApplyFrontMotion(FRopeSimState& Sim, float DeltaTime, const FContext& Ctx)
+void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaTime, const FContext& Ctx, FRopeNodeOverrideFrame& OutFrame)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_ApplyWrappingFrontMotion);
 
@@ -94,6 +94,7 @@ void FRopeWrappingPhase::ApplyFrontMotion(FRopeSimState& Sim, float DeltaTime, c
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
 	const int32 TailEndNode = Sim.Num() - 1;
 
+	OutFrame.EnsureSize(Sim.Num());
 	for (int32 NodeIndex = LatchNode; NodeIndex <= TailEndNode; ++NodeIndex)
 	{
 		if (!Sim.Positions.IsValidIndex(NodeIndex) ||
@@ -118,12 +119,11 @@ void FRopeWrappingPhase::ApplyFrontMotion(FRopeSimState& Sim, float DeltaTime, c
 			World = FrontWorld + FrontPoint.TangentWorld * (NodeDistance - State.FrontDistance);
 		}
 
-		Sim.Positions[NodeIndex] = World;
-		Sim.PrevPositions[NodeIndex] = World;
+		OutFrame.SetPosition(NodeIndex, World, /*bZeroVelocity*/ true);
 	}
 }
 
-void FRopeWrappingPhase::ApplyMassMask(FRopeSimState& Sim) const
+void FRopeWrappingPhase::ApplyMassMask(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const
 {
 	TSet<int32> AnchorNodes;
 	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
@@ -134,10 +134,11 @@ void FRopeWrappingPhase::ApplyMassMask(FRopeSimState& Sim) const
 		}
 	}
 
+	OutFrame.EnsureSize(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		const bool bStartPin = (i == 0 && Sim.bStartPinned);
-		Sim.InvMass[i] = (bStartPin || AnchorNodes.Contains(i)) ? 0.0f : 1.0f;
+		OutFrame.SetInvMass(i, (bStartPin || AnchorNodes.Contains(i)) ? 0.0f : 1.0f);
 	}
 }
 
@@ -216,8 +217,9 @@ FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim, con
 	return Seed;
 }
 
-void FRopeWrappingPhase::ReturnNodesToSolver(FRopeSimState& Sim) const
+void FRopeWrappingPhase::ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const
 {
+	OutFrame.EnsureSize(Sim.Num());
 	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
 	{
 		if (!Sim.InvMass.IsValidIndex(Anchor.NodeIndex) ||
@@ -227,8 +229,8 @@ void FRopeWrappingPhase::ReturnNodesToSolver(FRopeSimState& Sim) const
 			continue;
 		}
 
-		Sim.InvMass[Anchor.NodeIndex] = 1.0f;
-		Sim.PrevPositions[Anchor.NodeIndex] = Sim.Positions[Anchor.NodeIndex];
+		OutFrame.SetInvMass(Anchor.NodeIndex, 1.0f);
+		OutFrame.SetPrevFromPosition(Anchor.NodeIndex);
 	}
 }
 

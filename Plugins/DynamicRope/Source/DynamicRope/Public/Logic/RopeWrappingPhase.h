@@ -52,11 +52,11 @@ public:
 	/** 프레임 예산(WrappingPathBuildStepsPerFrame)만큼 경로/앵커 점진 생성을 전진시킨다. */
 	void AdvancePathBuild(const FRopeSimState& Sim, const FContext& Ctx);
 
-	/** front를 경로 따라 전진시키고 latch 이후 노드들을 경로 위(+표면 오프셋)에 배치한다(위치 직접 조작). */
-	void ApplyFrontMotion(FRopeSimState& Sim, float DeltaTime, const FContext& Ctx);
+	/** front를 경로 따라 전진시키고 latch 이후 노드들의 경로 위 타깃(+표면 오프셋)을 OutFrame에 담는다(G2). */
+	void ApplyFrontMotion(const FRopeSimState& Sim, float DeltaTime, const FContext& Ctx, FRopeNodeOverrideFrame& OutFrame);
 
-	/** 감긴(anchor) 노드 InvMass=0, 나머지 1(시작 핀 유지) — 솔버가 감긴 구간을 건드리지 않게. */
-	void ApplyMassMask(FRopeSimState& Sim) const;
+	/** 감긴(anchor) 노드 InvMass=0, 나머지 1(시작 핀 유지)을 OutFrame에 담는다 — 솔버가 감긴 구간을 건드리지 않게. */
+	void ApplyMassMask(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
 	/** 앵커 span이 변하지 않는 시간(StableTime)을 누적한다. 커밋 판정 보조 지표. */
 	void UpdateStability(float DeltaTime);
@@ -70,8 +70,8 @@ public:
 	 */
 	FRopeWrapState BuildCommitSeed(const FRopeSimState& Sim, const USkeletalMeshComponent* Mesh) const;
 
-	/** abort 시 앵커 노드들을 솔버에 되돌린다(InvMass 복원 + PrevPos 보정으로 튐 방지). */
-	void ReturnNodesToSolver(FRopeSimState& Sim) const;
+	/** abort 시 앵커 노드들의 솔버 복귀(InvMass=1 + Prev=Pos 튐 방지)를 OutFrame에 담는다. */
+	void ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
 private:
 	//~ progressive 경로 빌드(프레임 분할). Begin이 개시하고 AdvancePathBuild가 예산만큼 전진.

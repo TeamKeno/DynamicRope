@@ -15,12 +15,20 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
 // 0=CPU(ParallelFor) 솔버, 1=GPU compute 솔버(M5: 센터라인 GPU 상주 — 매 프레임 in-place 전진, 결과는 약간 지연된
-// 미러로 회수). whip 프레임은 CPU 폴백. 런타임 토글. CPU 경로는 ground-truth로 유지된다.
+// 미러로 회수). whip(G1)/로직 페이즈(G2)도 override 패스로 GPU 상주 유지. 런타임 토글. CPU 경로는 ground-truth.
 static TAutoConsoleVariable<int32> CVarRopeGPUSolver(
 	TEXT("r.DynamicRope.GPUSolver"),
 	0,
-	TEXT("DynamicRope: 0=CPU ParallelFor 솔버(기본), 1=GPU 상주 compute 솔버(M5, 충돌 포함; whip은 CPU 폴백)."),
+	TEXT("DynamicRope: 0=CPU ParallelFor 솔버(기본), 1=GPU 상주 compute 솔버(M5, 충돌/whip/로직 페이즈 포함)."),
 	ECVF_Default);
+
+// FRopeNodeOverrideFrame(Core 모듈) 비트는 ERopeGPUOverride(Shaders 모듈)와 수치 1:1이어야 한다 —
+// Core가 Shaders에 의존하지 않으려고 상수를 미러로 두었고, 여기(둘 다 보이는 곳)서 검증한다.
+static_assert(RopeNodeOverride::Position == static_cast<uint8>(ERopeGPUOverride::Position)
+	&& RopeNodeOverride::Prev == static_cast<uint8>(ERopeGPUOverride::Prev)
+	&& RopeNodeOverride::PrevFromPosition == static_cast<uint8>(ERopeGPUOverride::PrevFromPosition)
+	&& RopeNodeOverride::InvMass == static_cast<uint8>(ERopeGPUOverride::InvMass),
+	"RopeNodeOverride bits must mirror ERopeGPUOverride");
 
 void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
 {
@@ -131,6 +139,37 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArra
 	}
 }
 
+bool URopeSimSubsystem::SyncGpuPositionsForHandoff(URopeComponent& Rope)
+{
+	if (CVarRopeGPUSolver.GetValueOnGameThread() == 0)
+	{
+		return false; // CPU 경로 — Sim이 이미 최신.
+	}
+
+	FRopeSimState& S = Rope.Sim;
+	TArray<FVector> Pos;
+	TArray<FVector> Prev;
+	uint32 Generation = 0;
+	if (!GpuSolver.ReadbackNow(Rope.GetUniqueID(), Pos, Prev, Generation))
+	{
+		return false; // 상주 버퍼 없음(GPU로 step된 적 없음) — 미러가 곧 진실.
+	}
+	if (Generation != Rope.SimGeneration || Pos.Num() != S.Num() || Prev.Num() != S.Num())
+	{
+		return false; // 재시드 catch-up 중이거나 노드 수 불일치 — stale 적용 방지.
+	}
+
+	S.Positions     = MoveTemp(Pos);
+	S.PrevPositions = MoveTemp(Prev);
+	// 잡은 끝(node 0)은 미러 규약과 동일하게 현재 핀으로 스냅.
+	if (S.bStartPinned && S.Num() > 0)
+	{
+		S.Positions[0]     = S.StartPinTarget;
+		S.PrevPositions[0] = S.StartPinPrev;
+	}
+	return true;
+}
+
 void URopeSimSubsystem::Tick(float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SubsystemTick);
@@ -182,8 +221,9 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	if (bUseGPU)
 	{
 		// GPU 상주 경로(M5a). 로프별 영속 버퍼를 매 프레임 in-place로 전진(라운드트립 스톨/슬로모 없음).
-		// whip 프레임도 G1부터 GPU 상주 — 가이드 타깃을 override 패스(적분 전 주입)로 실어 보낸다.
-		// 충돌/접촉 감지는 Finalize의 CPU 경로가 (약간 지연된) 미러로 처리한다.
+		// whip(G1)과 로직 페이즈(G2 — Wrapping/Wrapped/Releasing)도 GPU 상주: 로직 산출물
+		// (OverrideFrame)을 override 패스로 실어 재시드 없이 커널에서 적용한다. 적분이 없는
+		// 로직 프레임은 NumSub=0 override-only dispatch. 접촉 감지는 Finalize가 지연 미러로 처리(G3).
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SolveGPU);
 
 		TArray<FRopeGPUResidentStep> Steps;
@@ -191,15 +231,18 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		for (URopeComponent* Rope : Ropes)
 		{
 			FRopeSimState& S = Rope->Sim;
-			// GPU 상주 대상: Free/Flight(bSolveThisFrame)이고 노드수가 한도 내일 때(whip 포함 — G1).
-			const bool bGpuPhase = Rope->Phase == ERopePhase::Free || Rope->Phase == ERopePhase::Flight;
-			const bool bGpuRope = bGpuPhase && Rope->bSolveThisFrame
+			// GPU 상주 대상: 솔브 프레임(Free/Flight/Wrapped) 또는 로직 산출물이 있는 프레임
+			// (Wrapping/Releasing 등 — override-only). Contacting(산출물 없음)은 dispatch 자체가
+			// 없어 GPU 버퍼가 동결 상태로 유지된다(CPU의 "솔브 없음"과 동일).
+			const bool bSolvePhase = Rope->bSolveThisFrame &&
+				(Rope->Phase == ERopePhase::Free || Rope->Phase == ERopePhase::Flight || Rope->Phase == ERopePhase::Wrapped);
+			const bool bGpuRope = (bSolvePhase || Rope->OverrideFrame.HasAny())
 				&& S.Num() >= 2 && S.Num() <= FRopeGPUSolver::MaxNodes;
 			// M5b: 이 프레임에 GPU step되는 로프만 렌더가 resident PosBuf를 직접 읽는다(아니면 stale → CPU 미러).
 			Rope->bGpuSteppedThisFrame = bGpuRope;
 			if (!bGpuRope)
 			{
-				// 폴백(노드수 초과 등): CPU 솔브(Free/Flight일 때만). logic phase는 bSolveThisFrame=false라 자동 스킵.
+				// 폴백(노드수 초과 등): CPU 솔브. logic phase는 bSolveThisFrame=false라 자동 스킵.
 				if (Rope->bSolveThisFrame)
 				{
 					Rope->SolveSimFrame(DeltaTime);
@@ -229,8 +272,22 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 				S.PrevPositions[0] = S.StartPinPrev;
 			}
 
-			// 고정-timestep 스케줄(CPU accumulator) — 매 프레임 계산이라 시간손실 없음.
-			const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(S, Rope->SolverConfig, DeltaTime);
+			// 미러가 Prepare의 로직 산출물(앵커 위치 등)을 덮었으면 재적용 — CPU Sim 미러를
+			// "최신 본 기준 로직 쓰기 + 지연된 자유 구간"의 최선 조합으로 유지한다(G2).
+			if (Rope->OverrideFrame.HasAny())
+			{
+				Rope->OverrideFrame.ApplyToSim(S);
+			}
+
+			// 고정-timestep 스케줄(CPU accumulator). 로직 프레임(bSolveThisFrame=false)은 적분 없이
+			// override만 기록한다(NumSub=0) — CPU 경로의 "솔브 없음"과 동일한 시간 처리.
+			FRopeSubstepSchedule Schedule;
+			Schedule.NumSub = 0;
+			Schedule.FixedDt = 0.0f;
+			if (Rope->bSolveThisFrame)
+			{
+				Schedule = RopeSolverSubsteps(S, Rope->SolverConfig, DeltaTime);
+			}
 
 			// 상주 step 구성(self-contained). 시드 데이터는 매 프레임 제공(RT는 재시드 시에만 GPU 업로드).
 			const FRopeSolverConfig& Cfg = Rope->SolverConfig;
@@ -293,9 +350,20 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 				}
 			}
 
+			// G2: 로직 페이즈 산출물(OverrideFrame)을 override로 주입 — 로직 페이즈 재시드 대체.
+			// CPU Sim에 적용된 것과 완전히 같은 데이터(비트 미러는 위 static_assert로 보증).
+			if (Rope->OverrideFrame.HasAny() && Rope->OverrideFrame.Flags.Num() == S.Num())
+			{
+				Step.OverrideFlags         = Rope->OverrideFrame.Flags;
+				Step.OverridePositions     = Rope->OverrideFrame.Positions;
+				Step.OverridePrevPositions = Rope->OverrideFrame.PrevPositions;
+				Step.OverrideInvMass       = Rope->OverrideFrame.InvMass;
+			}
+
 			// G1: whip 가이드 타깃을 override로 주입 — 재시드/CPU 폴백 없이 상주 유지(적분 전 적용).
 			// Prepare의 Advance가 계산한 산출물을 그대로 싣는다(CPU 경로의 ApplyToSim과 동일 데이터).
 			// Flight 게이트: 다른 페이즈에 남은 stale 마스크가 적용되는 것을 막는다.
+			// (Flight는 OverrideFrame을 채우지 않으므로 위 G2 패킹과 겹치지 않는다.)
 			if (Rope->Phase == ERopePhase::Flight)
 			{
 				const TArray<uint8>& WhipMask = Rope->WhipGuide.GetGuidedNodeMask();

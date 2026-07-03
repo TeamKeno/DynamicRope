@@ -219,6 +219,104 @@ struct FRopeSimState
 	void  Reset() { Positions.Reset(); PrevPositions.Reset(); InvMass.Reset(); TimeAccumulator = 0.0f; }
 };
 
+/**
+ * FRopeNodeOverrideFrame::Flags의 노드별 비트. ERopeGPUOverride(RopeGPUSolver.h)와 수치 1:1이어야
+ * 한다(서브시스템이 검증) — Core는 Shaders 모듈에 의존하지 않으므로 상수를 미러로 둔다.
+ */
+namespace RopeNodeOverride
+{
+	constexpr uint8 Position         = 1 << 0; // Pos[i]  = Positions[i]
+	constexpr uint8 Prev             = 1 << 1; // Prev[i] = PrevPositions[i] (Verlet 속도 주입)
+	constexpr uint8 PrevFromPosition = 1 << 2; // Prev[i] = Pos[i] (속도 0; Position 적용 *후* 값)
+	constexpr uint8 InvMass          = 1 << 3; // InvMass[i] = InvMass[i]
+}
+
+/**
+ * 로직 페이즈의 한 프레임 산출물(G2): "타깃 계산은 GT, 적용은 통로 하나로".
+ * Wrapping/Wrapped/Releasing 등 로직이 Sim에 쓰고 싶은 위치·속도·질량을 여기에 scatter하면,
+ * PrepareSimFrame 끝에서 CPU Sim에 1회 적용되고(ApplyToSim — 기존 직접 쓰기와 동일한 결과),
+ * GPU 상주 로프에는 같은 데이터가 override 패스(FRopeGPUResidentStep)로 실려 재시드 없이
+ * 커널에서 적용된다. 같은 노드를 여러 번 채우면 나중 것이 이긴다(순차 Sim 쓰기와 동일).
+ * 주의: Prev(명시)와 PrevFromPosition을 한 프레임에 섞어 채우지 말 것 — 커널 적용 순서상
+ * PrevFromPosition이 항상 이겨 채운 순서와 무관해진다(로직 페이즈는 PrevFromPosition만 쓴다).
+ */
+struct FRopeNodeOverrideFrame
+{
+	TArray<uint8>   Flags;         // 노드별 RopeNodeOverride 비트 OR(비어 있으면 이번 프레임 산출물 없음)
+	TArray<FVector> Positions;
+	TArray<FVector> PrevPositions;
+	TArray<float>   InvMass;
+
+	bool HasAny() const { return Flags.Num() > 0; }
+
+	void Reset()
+	{
+		Flags.Reset();
+		Positions.Reset();
+		PrevPositions.Reset();
+		InvMass.Reset();
+	}
+
+	/** 첫 scatter 시 노드 수만큼 0으로 확보(프레임 내 재호출은 no-op). */
+	void EnsureSize(int32 NumNodes)
+	{
+		if (Flags.Num() != NumNodes)
+		{
+			Flags.SetNumZeroed(NumNodes);
+			Positions.SetNumZeroed(NumNodes);
+			PrevPositions.SetNumZeroed(NumNodes);
+			InvMass.SetNumZeroed(NumNodes);
+		}
+	}
+
+	/** 위치 고정: Pos=World, bZeroVelocity면 Prev=Pos(속도 0 — wrapping/hold의 표준 쓰기). */
+	void SetPosition(int32 NodeIndex, const FVector& World, bool bZeroVelocity)
+	{
+		if (Flags.IsValidIndex(NodeIndex))
+		{
+			Flags[NodeIndex] |= RopeNodeOverride::Position | (bZeroVelocity ? RopeNodeOverride::PrevFromPosition : 0);
+			Positions[NodeIndex] = World;
+		}
+	}
+
+	/** 질량 덮어쓰기(마스크/복원). */
+	void SetInvMass(int32 NodeIndex, float Value)
+	{
+		if (Flags.IsValidIndex(NodeIndex))
+		{
+			Flags[NodeIndex] |= RopeNodeOverride::InvMass;
+			InvMass[NodeIndex] = Value;
+		}
+	}
+
+	/** 속도 제거만(Prev=현재 Pos — 위치는 그대로). release 계열의 튐 방지. */
+	void SetPrevFromPosition(int32 NodeIndex)
+	{
+		if (Flags.IsValidIndex(NodeIndex))
+		{
+			Flags[NodeIndex] |= RopeNodeOverride::PrevFromPosition;
+		}
+	}
+
+	/** CPU 적용 — GPU 커널의 override 스테이지와 같은 순서(Pos → Prev → Prev=Pos → InvMass). */
+	void ApplyToSim(FRopeSimState& Sim) const
+	{
+		const int32 N = FMath::Min(Flags.Num(), Sim.Num());
+		for (int32 i = 0; i < N; ++i)
+		{
+			const uint8 F = Flags[i];
+			if (F == 0)
+			{
+				continue;
+			}
+			if (F & RopeNodeOverride::Position)         { Sim.Positions[i] = Positions[i]; }
+			if (F & RopeNodeOverride::Prev)             { Sim.PrevPositions[i] = PrevPositions[i]; }
+			if (F & RopeNodeOverride::PrevFromPosition) { Sim.PrevPositions[i] = Sim.Positions[i]; }
+			if (F & RopeNodeOverride::InvMass)          { Sim.InvMass[i] = InvMass[i]; }
+		}
+	}
+};
+
 /** XPBD solver 튜닝(디자이너용). */
 USTRUCT(BlueprintType)
 struct FRopeSolverConfig

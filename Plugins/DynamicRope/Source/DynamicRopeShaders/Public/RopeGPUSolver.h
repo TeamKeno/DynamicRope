@@ -156,6 +156,14 @@ public:
 	/** RT 리드백이 채운 최신 위치를 RopeId별로 복사(락). 새로 도착한 게 없으면 직전 값을 유지한 채 반환할 수 있다. */
 	void GetLatest(TMap<uint32, FRopeResidentLatest>& Out);
 
+	/**
+	 * GT 블로킹 동기 리드백(M5c): 이 로프의 상주 Pos/Prev를 *지금* 값으로 가져온다(GPU idle 대기 포함).
+	 * wrap 핸드오프처럼 "이벤트당 1회, 최신 위치가 꼭 필요한" 곳 전용 — 매 프레임 호출 금지.
+	 * OutGeneration은 버퍼가 대응하는 시드 generation(호출자가 자기 generation과 대조해 stale 거부).
+	 * @return 상주 버퍼가 있고 회수에 성공하면 true.
+	 */
+	bool ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, TArray<FVector>& OutPrevPositions, uint32& OutGeneration);
+
 	/** 로프의 영속 버퍼/리드백을 해제(렌더 스레드에서). 컴포넌트 EndPlay/Unregister에서 호출. */
 	void ReleaseRope(uint32 RopeId);
 

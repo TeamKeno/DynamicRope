@@ -210,6 +210,62 @@ void FRopeGPUSolver::GetLatest(TMap<uint32, FRopeResidentLatest>& Out)
 	Out = Impl->Results->Map; // 작은 데이터 — 매 프레임 복사. (스왑 대신 복사로 호출자가 누적분 유지)
 }
 
+bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, TArray<FVector>& OutPrevPositions, uint32& OutGeneration)
+{
+	// GT 블로킹(M5c): RT에서 즉석 copy pass + GPU idle 대기 + Lock까지 끝내고, GT는 Flush로 그 완료를
+	// 기다린다. 이벤트당 1회(wrap 핸드오프) 전용 — 상주 리드백(GetLatest)과 달리 지연이 없다.
+	bool bOk = false;
+	uint32 Generation = 0;
+	ENQUEUE_RENDER_COMMAND(RopeGPUReadbackNow)(
+		[this, RopeId, &OutPositions, &OutPrevPositions, &Generation, &bOk](FRHICommandListImmediate& RHICmdList)
+		{
+			FRopeResidentRope* Rp = Impl->RtRopes.Find(RopeId);
+			if (!Rp || !Rp->PosBuf.IsValid() || !Rp->PrevBuf.IsValid() || Rp->NumNodes < 2)
+			{
+				return;
+			}
+			const int32 N = Rp->NumNodes;
+			const uint32 Bytes = (uint32)N * sizeof(FVector4f);
+
+			// 상주(in-flight) 리드백과 독립인 일회용 리드백 — RDG로 등록해 상태 전이를 맡긴다.
+			FRHIGPUBufferReadback PosRb(TEXT("Rope.PosReadbackNow"));
+			FRHIGPUBufferReadback PrevRb(TEXT("Rope.PrevReadbackNow"));
+			{
+				FRDGBuilder GraphBuilder(RHICmdList);
+				FRDGBufferRef PosRDG  = GraphBuilder.RegisterExternalBuffer(Rp->PosBuf);
+				FRDGBufferRef PrevRDG = GraphBuilder.RegisterExternalBuffer(Rp->PrevBuf);
+				AddEnqueueCopyPass(GraphBuilder, &PosRb,  PosRDG,  Bytes);
+				AddEnqueueCopyPass(GraphBuilder, &PrevRb, PrevRDG, Bytes);
+				GraphBuilder.Execute();
+			}
+			RHICmdList.BlockUntilGPUIdle();
+
+			OutPositions.SetNumUninitialized(N);
+			OutPrevPositions.SetNumUninitialized(N);
+			bool bLocked = false;
+			if (const FVector4f* Src = (const FVector4f*)PosRb.Lock(Bytes))
+			{
+				for (int32 k = 0; k < N; ++k) { OutPositions[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
+				PosRb.Unlock();
+				bLocked = true;
+			}
+			if (const FVector4f* Src = (const FVector4f*)PrevRb.Lock(Bytes))
+			{
+				for (int32 k = 0; k < N; ++k) { OutPrevPositions[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
+				PrevRb.Unlock();
+			}
+			else
+			{
+				bLocked = false;
+			}
+			Generation = Rp->Generation;
+			bOk = bLocked;
+		});
+	FlushRenderingCommands(); // RT 커맨드 완료까지 GT 대기(참조 캡처 안전 + 결과 확정).
+	OutGeneration = Generation;
+	return bOk;
+}
+
 FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes)
 {
 	check(IsInRenderingThread());

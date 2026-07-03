@@ -210,8 +210,14 @@ private:
 	// Contacting/Wrapping/Releasing은 로직 구동이라 false.
 	bool bSolveThisFrame = false;
 
-	// GPU 상주 솔버(M5)용 시드 generation. Sim을 out-of-band로 바꾼 시점(init/throw/로직 페이즈/whip)에
-	// 증가시킨다 → 서브시스템이 변화를 감지해 GPU 영속 버퍼를 재시드한다. 정상 Free/Flight(비-whip)에선 불변(상주 유지).
+	// 로직 페이즈의 한 프레임 산출물(G2). Prepare 동안 로직(Wrapping/Wrapped/Releasing 등)이 위치·질량을
+	// 여기에 scatter하면 Prepare 끝에서 CPU Sim에 1회 적용되고, GPU 상주 로프에는 서브시스템이 같은
+	// 데이터를 override 패스로 실어 재시드 없이 커널에서 적용한다. 매 Prepare 시작에 리셋(프레임 스코프).
+	FRopeNodeOverrideFrame OverrideFrame;
+
+	// GPU 상주 솔버(M5)용 시드 generation. 진짜 시드(init/throw/노드 수 변경)에만 증가한다 →
+	// 서브시스템이 변화를 감지해 GPU 영속 버퍼를 재시드한다. 로직 페이즈/whip의 위치·질량 쓰기는
+	// override 패스로 주입되므로(G1/G2) 재시드하지 않는다 — 상주가 페이즈 전체에 걸쳐 유지된다.
 	uint32 SimGeneration = 0;
 
 	// 이번 프레임에 이 로프가 실제로 GPU에서 step됐는가(서브시스템이 매 프레임 설정). M5b: GPU 튜브 렌더가

@@ -133,7 +133,7 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 	return true;
 }
 
-void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Seed)
+void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapState& Seed, FRopeNodeOverrideFrame& OutFrame)
 {
 	State = Seed;
 	State.TimeWrapped = 0.0f;
@@ -224,9 +224,9 @@ void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Se
 		const FVector World =
 			SurfaceWorld + NormalWorld * Anchor.SurfaceOffset;
 
-		Sim.Positions[Anchor.NodeIndex] = World;
-		Sim.PrevPositions[Anchor.NodeIndex] = World;
-		Sim.InvMass[Anchor.NodeIndex] = 0.0f;
+		OutFrame.EnsureSize(Sim.Num());
+		OutFrame.SetPosition(Anchor.NodeIndex, World, /*bZeroVelocity*/ true);
+		OutFrame.SetInvMass(Anchor.NodeIndex, 0.0f);
 
 		Centroid += World;
 		++ValidAnchorCount;
@@ -248,7 +248,7 @@ void FRopeWrapController::BeginWrap(FRopeSimState& Sim, const FRopeWrapState& Se
 		*State.BoneName.ToString(), State.Anchors.Num(), *Mesh->GetName());
 }
 
-bool FRopeWrapController::Hold(FRopeSimState& Sim, float Dt)
+bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOverrideFrame& OutFrame)
 {
 	// bone 이 붙잡힌 mesh 를 따라간다. State.Mesh 는 BeginWrap 에서 확정되어 weak 포인터로
 	// 영속화된다(cross-actor 대상일 수 있다). 대상 액터가 파괴되면 weak 가 null 이 되어
@@ -291,9 +291,9 @@ bool FRopeWrapController::Hold(FRopeSimState& Sim, float Dt)
 			const FVector World =
 				SurfaceWorld + NormalWorld * Anchor.SurfaceOffset;
 
-			Sim.Positions[Anchor.NodeIndex] = World;
-			Sim.PrevPositions[Anchor.NodeIndex] = World;
-			Sim.InvMass[Anchor.NodeIndex] = 0.0f;
+			OutFrame.EnsureSize(Sim.Num());
+			OutFrame.SetPosition(Anchor.NodeIndex, World, /*bZeroVelocity*/ true);
+			OutFrame.SetInvMass(Anchor.NodeIndex, 0.0f);
 		}
 
 		State.TimeWrapped += Dt;
@@ -310,10 +310,10 @@ bool FRopeWrapController::Hold(FRopeSimState& Sim, float Dt)
 			continue;
 		}
 		const FTransform BoneXform = Mesh->GetSocketTransform(Latch.Bone);
-		FVector World = BoneXform.TransformPosition(Latch.BoneLocalPos);
-		Sim.Positions[Latch.NodeIndex] = World;
-		Sim.PrevPositions[Latch.NodeIndex] = World;
-		Sim.InvMass[Latch.NodeIndex] = 0.0f;
+		const FVector World = BoneXform.TransformPosition(Latch.BoneLocalPos);
+		OutFrame.EnsureSize(Sim.Num());
+		OutFrame.SetPosition(Latch.NodeIndex, World, /*bZeroVelocity*/ true);
+		OutFrame.SetInvMass(Latch.NodeIndex, 0.0f);
 	}
 
 	State.TimeWrapped += Dt;

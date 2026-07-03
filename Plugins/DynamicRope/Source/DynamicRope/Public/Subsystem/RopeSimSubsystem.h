@@ -39,6 +39,14 @@ public:
 	/** GPU 상주 솔버 포인터(월드 수명). M5b: scene proxy가 resident PosBuf SRV를 가져오는 데 쓴다. */
 	FRopeGPUSolver* GetGpuSolver() { return &GpuSolver; }
 
+	/**
+	 * wrap 핸드오프 정밀 동기(M5c): GPU 상주 로프의 CPU 미러(Sim)는 1~2프레임 낡으므로,
+	 * Wrapping 진입 순간 1회 동기 리드백으로 최신 위치를 Sim에 반영한다(시드 정밀도 확보).
+	 * GPU 솔버가 꺼져 있거나 상주 버퍼가 없거나 generation이 어긋나면 no-op(false).
+	 * 블로킹(GPU idle 대기) — 이벤트당 1회 용도로만 호출할 것.
+	 */
+	bool SyncGpuPositionsForHandoff(URopeComponent& Rope);
+
 	//~ UTickableWorldSubsystem
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;

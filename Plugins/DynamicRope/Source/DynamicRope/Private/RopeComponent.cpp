@@ -109,6 +109,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Prepare);
 
 	EnsureRopeInitialized();
+	OverrideFrame.Reset(); // 프레임 스코프 — 이번 프레임 로직 산출물을 새로 모은다(G2).
 
 	// pinned-start target을 전진시킨다; solver가 substep에 걸쳐 Prev->Target을 sweep하므로 빠른
 	// 캐릭터 이동이 chain을 홱 잡아당겨(폭주시켜) 버리지 않는다.
@@ -166,7 +167,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		// latch된 node는 skinned bone을 따라간다(GT). latch 노드는 InvMass=0이라 솔브는 자유 구간만.
 		// Hold가 false면 wrap 대상 mesh가 사라진 것(예: cross-actor 대상 액터 파괴) →
 		// 노드를 솔버에 되돌려 안전하게 release한다(dangling 포인터 역참조 방지는 Hold 내부에서).
-		if (!WrapController.Hold(Sim, DeltaTime))
+		if (!WrapController.Hold(Sim, DeltaTime, OverrideFrame))
 		{
 			const FName Bone = WrapController.State.BoneName;
 			SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("wrap target mesh lost, bone=%s"), *Bone.ToString()));
@@ -182,13 +183,13 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	}
 
 	case ERopePhase::Releasing:
-		// 모든 node를 solver에 다시 넘긴다(hand pin만 유지), 그런 다음 free simulation을 재개한다.
+		// 모든 node를 solver에 다시 넘긴다(hand pin만 유지) — InvMass 복원 + Prev=Pos(튐 방지)를
+		// 프레임 산출물로 담고, cooldown이 끝나면 free simulation을 재개한다.
+		OverrideFrame.EnsureSize(Sim.Num());
 		for (int32 i = 0; i < Sim.Num(); ++i)
 		{
-			Sim.InvMass[i] = (i == 0 && Sim.bStartPinned) ? 0.0f : 1.0f;
-
-			// 이전 고정점 때문에 튀지 않게 PrevPositions 보정.
-			Sim.PrevPositions[i] = Sim.Positions[i];
+			OverrideFrame.SetInvMass(i, (i == 0 && Sim.bStartPinned) ? 0.0f : 1.0f);
+			OverrideFrame.SetPrevFromPosition(i);
 		}
 		ReleaseCooldown -= DeltaTime;
 		if (ReleaseCooldown <= 0)
@@ -201,16 +202,13 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		break;
 	}
 
-	// GPU 상주(M5): 로직 페이즈(Contacting/Wrapping/Wrapped/Releasing)는 Sim을 out-of-band로 바꾼다
-	// → 다음 GPU step에서 재시드되도록 generation을 올린다. Free/Flight에선 불변이라 GPU 버퍼가
-	// 상주된 채 매 프레임 in-place로 전진한다 — whip도 G1부터 override 패스로 주입되므로 재시드 없음.
-	const bool bLogicMutatedSim =
-		!bSolveThisFrame ||
-		Phase == ERopePhase::Wrapping ||
-		Phase == ERopePhase::Wrapped;
-	if (bLogicMutatedSim)
+	// 로직 페이즈의 프레임 산출물을 CPU Sim에 1회 적용한다 — 기존 "핸들러 안에서 직접 쓰기"와
+	// 같은 결과(같은 노드 중복 시 나중 fill이 이김 = 순차 쓰기와 동일). GPU 상주 로프에는
+	// 서브시스템이 같은 프레임을 override 패스로 실어 커널에서 적용한다(G2).
+	// 로직 페이즈 재시드(SimGeneration 증가)는 소멸 — 재시드는 진짜 시드(Init/Throw)뿐이다.
+	if (OverrideFrame.HasAny())
 	{
-		++SimGeneration;
+		OverrideFrame.ApplyToSim(Sim);
 	}
 }
 
@@ -834,6 +832,13 @@ void URopeComponent::StartWrappingFromContacting()
 		return;
 	}
 
+	// M5c: GPU 상주 로프의 CPU 미러는 1~2프레임 낡다 — wrap 핸드오프 순간만 1회 동기 리드백으로
+	// 최신 위치를 받아 시드(StartWorldPosition/fallback 앵커)의 정밀도를 확보한다(이벤트당 1회, 블로킹).
+	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+	{
+		SimSubsystem->SyncGpuPositionsForHandoff(*this);
+	}
+
 	const FRopeLatchNode& Latch = PendingWrapSeed.Latched[0];	//무조건 첫 번째 latch node 하나만 기준으로 잡는다
 	FRopeSurfaceAnchor LatchAnchor;
 
@@ -901,9 +906,9 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	WrappingPhase.State.LostContactTime = 0.0f;
 	const FRopeWrappingPhase::FContext WrappingCtx = MakeWrappingContext();
 	WrappingPhase.AdvancePathBuild(Sim, WrappingCtx);
-	WrappingPhase.ApplyFrontMotion(Sim, DeltaTime, WrappingCtx);
+	WrappingPhase.ApplyFrontMotion(Sim, DeltaTime, WrappingCtx, OverrideFrame);
 
-	WrappingPhase.ApplyMassMask(Sim);
+	WrappingPhase.ApplyMassMask(Sim, OverrideFrame);
 
 	WrappingPhase.UpdateStability(DeltaTime);
 
@@ -945,7 +950,7 @@ void URopeComponent::CommitWrapping()
 		return;
 	}
 
-	WrapController.BeginWrap(Sim, Seed); // 감길 mesh는 Seed.Mesh로 전파(접촉 유래, cross-actor 포함).
+	WrapController.BeginWrap(Sim, Seed, OverrideFrame); // 감길 mesh는 Seed.Mesh로 전파(접촉 유래, cross-actor 포함).
 
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s)"),
 		*Seed.BoneName.ToString(), Seed.Latched.Num()));
@@ -958,7 +963,7 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 	UE_LOG(LogDynamicRope, Log, TEXT("[%s] AbortWrapping reason=%d"),
 		*GetName(), static_cast<int32>(Reason));
 
-	WrappingPhase.ReturnNodesToSolver(Sim);
+	WrappingPhase.ReturnNodesToSolver(Sim, OverrideFrame);
 
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
@@ -986,10 +991,11 @@ void URopeComponent::ApplyWrappedMassMask()
 		}
 	}
 
+	OverrideFrame.EnsureSize(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		const bool bStartPin = (i == 0 && Sim.bStartPinned);
 		const bool bAnchor = AnchorNodes.Contains(i);
-		Sim.InvMass[i] = (bStartPin || bAnchor) ? 0.0f : 1.0f;
+		OverrideFrame.SetInvMass(i, (bStartPin || bAnchor) ? 0.0f : 1.0f);
 	}
 }
