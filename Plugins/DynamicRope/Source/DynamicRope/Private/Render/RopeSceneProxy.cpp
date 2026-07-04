@@ -12,11 +12,14 @@
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveUniformShaderParametersBuilder.h"
 #include "Engine/Engine.h"
-#include "RopeTubeBuilder.h"        // RopeGPU::BuildTube_RenderThread (DynamicRopeShaders 모듈) — M5b
+#include "RopeTubeBuilder.h"        // RopeGPU::BuildTube_RenderThread / BuildTubeFromResidentRDG_RenderThread — M5b/2b
 #include "RopeGPUSolver.h"          // FRopeGPUSolver::GetResidentPositionSRV_RenderThread — M5b B2-lite
+#include "RopeGPUSolverRegistry.h"  // RopeGDF::RegisterTubeProxy / IsDispatchInVE (GDF 통합 튜브)
 #include "Subsystem/RopeSimSubsystem.h"
 #include "RHICommandList.h"         // FRHITransitionInfo
 #include "RHI.h"                    // GDynamicRHI
+#include "RenderGraphBuilder.h"     // FRDGBuilder / RegisterExternalBuffer / UseExternalAccessMode (2b)
+#include "RenderGraphUtils.h"       // AllocatePooledBuffer (2b)
 #include "HAL/IConsoleManager.h"
 #include "Misc/App.h"               // FApp::CanEverRender
 
@@ -67,12 +70,22 @@ void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 // M5b: UAV 가능 position vertex buffer. 컴퓨트가 R32_FLOAT UAV로 쓰고, VF가 R32_FLOAT SRV/stream으로 읽는다.
 void FRopeGpuPositionBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
-	const uint32 Bytes = static_cast<uint32>(NumVertices) * sizeof(FVector3f);
-	const FRHIBufferCreateDesc CreateDesc =
-		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuPositionBuffer"), Bytes)
-		.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
-		.DetermineInitialState();
-	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	if (bUsePooled)
+	{
+		// Phase 2b: pooled 버퍼(Vertex|UAV|SRV usage)로 할당 → 씬 그래프에 RegisterExternalBuffer 가능.
+		// R32_FLOAT typed 뷰 기준 원소 수 = NumVertices*3(v당 float3). VertexBufferRHI는 pooled의 RHI를 가리킨다.
+		Pooled = AllocatePooledBuffer(FRDGBufferDesc::CreateBufferDesc(sizeof(float), NumVertices * 3), TEXT("FRopeGpuPositionBuffer.Pooled"));
+		VertexBufferRHI = Pooled->GetRHI();
+	}
+	else
+	{
+		const uint32 Bytes = static_cast<uint32>(NumVertices) * sizeof(FVector3f);
+		const FRHIBufferCreateDesc CreateDesc =
+			FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuPositionBuffer"), Bytes)
+			.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
+			.DetermineInitialState();
+		VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	}
 
 	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
 		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R32_FLOAT));
@@ -84,6 +97,7 @@ void FRopeGpuPositionBuffer::ReleaseRHI()
 {
 	SRV.SafeRelease();
 	UAV.SafeRelease();
+	Pooled.SafeRelease();
 	FVertexBuffer::ReleaseRHI();
 }
 
@@ -113,12 +127,21 @@ void FRopeCenterlineBuffer::ReleaseRHI()
 // 스트림(TangentX@0, TangentZ@8, stride 16) + R16G16B16A16_SNORM SRV(매뉴얼 페치)로 읽는다.
 void FRopeGpuTangentBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
-	const uint32 Bytes = static_cast<uint32>(NumVertices) * 16; // TangentX(8) + TangentZ(8)
-	const FRHIBufferCreateDesc CreateDesc =
-		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuTangentBuffer"), Bytes)
-		.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
-		.DetermineInitialState();
-	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	if (bUsePooled)
+	{
+		// R32_UINT UAV 기준 원소 수 = NumVertices*4(v당 16바이트 = uint4).
+		Pooled = AllocatePooledBuffer(FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), NumVertices * 4), TEXT("FRopeGpuTangentBuffer.Pooled"));
+		VertexBufferRHI = Pooled->GetRHI();
+	}
+	else
+	{
+		const uint32 Bytes = static_cast<uint32>(NumVertices) * 16; // TangentX(8) + TangentZ(8)
+		const FRHIBufferCreateDesc CreateDesc =
+			FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuTangentBuffer"), Bytes)
+			.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
+			.DetermineInitialState();
+		VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	}
 
 	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
 		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R16G16B16A16_SNORM));
@@ -130,18 +153,28 @@ void FRopeGpuTangentBuffer::ReleaseRHI()
 {
 	SRV.SafeRelease();
 	UAV.SafeRelease();
+	Pooled.SafeRelease();
 	FVertexBuffer::ReleaseRHI();
 }
 
 // B2-full: UV 버퍼. 컴퓨트는 R32_FLOAT UAV로 v당 float2, VF는 VET_Float2 스트림 + G32R32F SRV(매뉴얼 페치)로 읽는다.
 void FRopeGpuTexCoordBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
-	const uint32 Bytes = static_cast<uint32>(NumVertices) * sizeof(FVector2f);
-	const FRHIBufferCreateDesc CreateDesc =
-		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuTexCoordBuffer"), Bytes)
-		.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
-		.DetermineInitialState();
-	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	if (bUsePooled)
+	{
+		// R32_FLOAT UAV 기준 원소 수 = NumVertices*2(v당 float2).
+		Pooled = AllocatePooledBuffer(FRDGBufferDesc::CreateBufferDesc(sizeof(float), NumVertices * 2), TEXT("FRopeGpuTexCoordBuffer.Pooled"));
+		VertexBufferRHI = Pooled->GetRHI();
+	}
+	else
+	{
+		const uint32 Bytes = static_cast<uint32>(NumVertices) * sizeof(FVector2f);
+		const FRHIBufferCreateDesc CreateDesc =
+			FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuTexCoordBuffer"), Bytes)
+			.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
+			.DetermineInitialState();
+		VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	}
 
 	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
 		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_G32R32F));
@@ -153,6 +186,7 @@ void FRopeGpuTexCoordBuffer::ReleaseRHI()
 {
 	SRV.SafeRelease();
 	UAV.SafeRelease();
+	Pooled.SafeRelease();
 	FVertexBuffer::ReleaseRHI();
 }
 
@@ -180,6 +214,10 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	// 아니면(쿡/-nullrhi/서버, 또는 링>256) CPU BuildTube 폴백. CVar 토글 없음 — G4 솔버와 동일한 자동 선택.
 	// 생성 시점에 한 번 결정(링 수는 proxy 수명 동안 고정).
 	bUseGpuTube = (GDynamicRHI != nullptr && FApp::CanEverRender()) && NumRings <= 256;
+
+	// Phase 2b(GDF 통합): GPU 튜브 + 씬 그래프 dispatch 경로(CVar 1)면, 튜브를 뷰 확장이 솔브 뒤 씬 그래프로
+	// (재)빌드해 지연을 없앤다. 생성 시 고정 — CVar 런타임 토글은 재스폰 필요.
+	bGdfTubeMode = bUseGpuTube && RopeGDF::IsDispatchInVE();
 
 	// B2-lite: 솔버 resident PosBuf를 직접 읽기 위한 핸들(GT에서 캡처). 솔버는 월드 수명이라 proxy 동안 유효.
 	RopeId = Component->GetUniqueID();
@@ -216,6 +254,13 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 			{
 				// B2-full: position/tangent/UV 스트림을 모두 GPU 컴퓨트가 쓰는 UAV 버퍼로 교체(color만 VertexBuffers).
 				const int32 VertCount = GetRequiredVertexCount();
+				// Phase 2b: GDF 통합 경로면 세 스트림을 pooled 백킹으로(씬 그래프에 RegisterExternalBuffer 가능).
+				if (bGdfTubeMode)
+				{
+					GpuPositionBuffer.bUsePooled = true;
+					GpuTangentBuffer.bUsePooled  = true;
+					GpuTexCoordBuffer.bUsePooled = true;
+				}
 				GpuPositionBuffer.NumVertices = VertCount;
 				GpuPositionBuffer.InitResource(RHICmdList);
 				GpuTangentBuffer.NumVertices = VertCount;
@@ -245,12 +290,26 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 
 				VertexBuffers.ColorVertexBuffer.BindColorVertexBuffer(&VertexFactory, Data);
 				VertexFactory.SetData(RHICmdList, Data);
+
+				// Phase 2b: 씬 그래프 튜브 경로면 이 프록시를 씬 레지스트리에 등록 → 뷰 확장이 솔브 뒤 순회하며 빌드.
+				if (bGdfTubeMode)
+				{
+					SceneForRegistry = &GetScene();
+					RopeGDF::RegisterTubeProxy(SceneForRegistry, this);
+				}
 			}
 		});
 }
 
 FRopeSceneProxy::~FRopeSceneProxy()
 {
+	// Phase 2b: 씬 튜브 레지스트리에서 먼저 등록 해제(리소스 해제 전). 소멸은 렌더 스레드.
+	if (bGdfTubeMode && SceneForRegistry)
+	{
+		RopeGDF::UnregisterTubeProxy(SceneForRegistry, this);
+		SceneForRegistry = nullptr;
+	}
+
 	VertexBuffers.PositionVertexBuffer.ReleaseResource();
 	VertexBuffers.StaticMeshVertexBuffer.ReleaseResource();
 	VertexBuffers.ColorVertexBuffer.ReleaseResource();
@@ -416,6 +475,10 @@ void FRopeSceneProxy::SetDynamicData_RenderThread(FRHICommandListBase& RHICmdLis
 	check(IsInRenderingThread());
 	if (NewData)
 	{
+		// Phase 2b: 이번 프레임이 resident였는지 기록 — GDF 모드에서 뷰 확장이 resident 프레임만 씬 그래프로
+		// 덮어쓴다(비-resident/CVar off면 아래 raw 결과가 그대로 유지). raw 빌드는 그대로 두어 statics/bHasData를
+		// 처리하고, resident 프레임의 raw 튜브(솔브 전 PosBuf)는 뷰 확장이 솔브 후 값으로 덮어쓴다.
+		bLastResident = NewData->bGpuResident;
 		if (bUseGpuTube)
 		{
 			BuildTubeGPU(RHICmdList, *NewData);
@@ -533,6 +596,45 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 	RHICmdList.Transition(MakeArrayView(ToVtx, 3));
 
 	bHasData = true;
+}
+
+void FRopeSceneProxy::BuildTubeInSceneGraph_RenderThread(FRDGBuilder& GraphBuilder, FRopeGPUSolver& Solver)
+{
+	check(IsInRenderingThread());
+	// GDF 통합 경로에서 뷰 확장이 솔브 뒤 호출. resident 프레임만 씬 그래프로 튜브를 (재)빌드해 지연 제거
+	// (비-resident/데이터 없음이면 SetDynamicData의 raw 결과 유지).
+	if (!bGdfTubeMode || !bHasData || !bLastResident)
+	{
+		return;
+	}
+	if (!GpuPositionBuffer.Pooled.IsValid() || !GpuTangentBuffer.Pooled.IsValid() || !GpuTexCoordBuffer.Pooled.IsValid())
+	{
+		return;
+	}
+
+	// 솔버 resident PosBuf를 이 그래프에 등록 → 같은 프레임 solve 패스와 dedup되어 solve→tube 순서 자동 보장.
+	int32 NumSrcNodes = 0;
+	FRDGBufferRef ResidentPos = Solver.RegisterResidentPos_RenderThread(GraphBuilder, RopeId, NumSrcNodes);
+	if (!ResidentPos || NumSrcNodes != NumNodes)
+	{
+		return; // 상주 버퍼 없음/노드수 불일치 — raw 결과 유지.
+	}
+
+	// 출력 정점 스트림(pooled)을 등록. raw 경로가 이번 프레임에 쓴 값(솔브 전)을 솔브-후 값으로 덮어쓴다.
+	FRDGBufferRef Pos = GraphBuilder.RegisterExternalBuffer(GpuPositionBuffer.Pooled);
+	FRDGBufferRef Tan = GraphBuilder.RegisterExternalBuffer(GpuTangentBuffer.Pooled);
+	FRDGBufferRef UV  = GraphBuilder.RegisterExternalBuffer(GpuTexCoordBuffer.Pooled);
+
+	// 월드 PosBuf → component-local 변환(프록시는 GetLocalToWorld()로 렌더).
+	const FMatrix44f WorldToLocal(GetLocalToWorld().Inverse());
+	RopeGPU::BuildTubeFromResidentRDG_RenderThread(GraphBuilder, ResidentPos, Pos, Tan, UV,
+		NumRings, NumSides, Radius, NumNodes, Subdiv, WorldToLocal);
+
+	// base pass 정점 팩토리가 raw로 읽으므로 read 상태로 고정(RDG가 UAV→VtxRead 전이를 보장).
+	const ERHIAccess ReadAccess = ERHIAccess::VertexOrIndexBuffer | ERHIAccess::SRVGraphics;
+	GraphBuilder.UseExternalAccessMode(Pos, ReadAccess);
+	GraphBuilder.UseExternalAccessMode(Tan, ReadAccess);
+	GraphBuilder.UseExternalAccessMode(UV,  ReadAccess);
 }
 
 void FRopeSceneProxy::DrawStaticElements(FStaticPrimitiveDrawInterface* PDI)

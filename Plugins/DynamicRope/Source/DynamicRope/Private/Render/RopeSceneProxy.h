@@ -14,10 +14,13 @@
 #include "StaticMeshResources.h"
 #include "LocalVertexFactory.h"
 #include "RHIResources.h"
+#include "RenderGraphFwd.h"        // FRDGBuilder / FRDGBufferRef (Phase 2b: GDF 통합 튜브)
+#include "RopeGPUSolverRegistry.h" // IRopeGDFTubeProxy (씬 그래프 튜브 빌드 인터페이스)
 
 class URopeComponent;
 class UMaterialInterface;
 class FRopeGPUSolver;
+class FRDGPooledBuffer;
 
 /** render thread로 넘기는 dynamic 데이터: component-local 공간의 centerline. */
 struct FRopeDynamicData
@@ -46,6 +49,10 @@ public:
 	int32 NumVertices = 0;
 	FShaderResourceViewRHIRef SRV;
 	FUnorderedAccessViewRHIRef UAV;
+	// Phase 2b(GDF 통합): true면 RHI를 pooled 버퍼로 할당해 씬 그래프에 RegisterExternalBuffer 가능하게 한다
+	// (VertexBufferRHI = Pooled->GetRHI() → 정점 팩토리 바인딩은 동일). InitResource 전에 설정.
+	bool bUsePooled = false;
+	TRefCountPtr<FRDGPooledBuffer> Pooled;
 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	virtual void ReleaseRHI() override;
 };
@@ -73,6 +80,8 @@ public:
 	int32 NumVertices = 0;
 	FShaderResourceViewRHIRef SRV; // PF_R16G16B16A16_SNORM(매뉴얼 페치)
 	FUnorderedAccessViewRHIRef UAV; // PF_R32_UINT(컴퓨트 write)
+	bool bUsePooled = false; // Phase 2b: RDG 등록용 pooled 백킹(설명은 FRopeGpuPositionBuffer 참조).
+	TRefCountPtr<FRDGPooledBuffer> Pooled;
 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	virtual void ReleaseRHI() override;
 };
@@ -84,17 +93,23 @@ public:
 	int32 NumVertices = 0;
 	FShaderResourceViewRHIRef SRV; // PF_G32R32F(매뉴얼 페치)
 	FUnorderedAccessViewRHIRef UAV; // PF_R32_FLOAT(컴퓨트 write)
+	bool bUsePooled = false; // Phase 2b: RDG 등록용 pooled 백킹(설명은 FRopeGpuPositionBuffer 참조).
+	TRefCountPtr<FRDGPooledBuffer> Pooled;
 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	virtual void ReleaseRHI() override;
 };
 
-class FRopeSceneProxy final : public FPrimitiveSceneProxy
+class FRopeSceneProxy final : public FPrimitiveSceneProxy, public IRopeGDFTubeProxy
 {
 public:
 	SIZE_T GetTypeHash() const override;
 
 	explicit FRopeSceneProxy(URopeComponent* Component);
 	virtual ~FRopeSceneProxy() override;
+
+	//~ IRopeGDFTubeProxy: GDF 통합 경로에서 뷰 확장이 솔브 뒤 이 프록시의 튜브를 씬 그래프로 (재)빌드해
+	//  지연을 없앤다(resident 프레임만; 비-resident/CVar off면 SetDynamicData의 raw 결과가 그대로 유지).
+	virtual void BuildTubeInSceneGraph_RenderThread(FRDGBuilder& GraphBuilder, FRopeGPUSolver& Solver) override;
 
 	/** 새 centerline(component-local)로부터 tube를 다시 만든다. NewData의 소유권을 가져간다. */
 	void SetDynamicData_RenderThread(FRHICommandListBase& RHICmdList, FRopeDynamicData* NewData);
@@ -148,6 +163,14 @@ private:
 	// M5b B2-lite: 솔버 resident PosBuf를 직접 읽어 위치 무지연. 솔버는 월드 수명이라 proxy 동안 유효(없으면 B1 폴백).
 	FRopeGPUSolver* SolverPtr = nullptr;
 	uint32 RopeId = 0;
+
+	// Phase 2b(GDF 통합): 이 프록시가 씬 그래프 튜브 경로를 쓰는가(= bUseGpuTube && r.DynamicRope.GDFDispatchInVE,
+	// 생성 시 고정 — 런타임 CVar 토글은 재스폰 필요). true면 pooled 버퍼 사용 + 씬 레지스트리에 등록된다.
+	bool bGdfTubeMode = false;
+	// 직전 SetDynamicData의 bGpuResident. 비-resident 프레임엔 VE가 덮어쓰지 않는다(raw B1 결과 유지).
+	bool bLastResident = false;
+	// 등록 해제용 씬 포인터(소멸이 GetScene() 이후일 수 있어 캡처).
+	class FSceneInterface* SceneForRegistry = nullptr;
 
 	int32 NumNodes;  // 시뮬 센터라인 노드 수(= Component->NumParticles). Data.Points가 이 개수여야 한다.
 	int32 Subdiv;    // 렌더 튜브 세그먼트당 Catmull-Rom 서브분할(1=off). r.DynamicRope.TubeSmoothing.
