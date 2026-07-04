@@ -1,0 +1,73 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+//
+// Phase 2c: 엔진 Global Distance Field로 정적 월드(벽/바닥)에서 로프를 밀어내는 별도 post-solve 패스.
+// 메인 솔브(RopeXPBD.usf) 뒤, GPU 튜브 빌드 앞에 씬 렌더러 그래프(뷰 확장)에서 dispatch된다 — GDF/View가
+// 유효한 타이밍 + 지연 없음. 본 귀속·표면속도 없음(정적 스냅샷) → per-bone SDF 대체가 아니라 광역 보완재.
+//
+// GDF .ush는 View UB(ResolvedView)/LWC/전역 샘플러/ComputeDistanceFromBoxToPointInside에 의존하므로
+// Common.ush + SceneTexturesCommon.ush를 포함하고 View UB를 바인딩한다(엔진 파티클 sim과 동일 패턴).
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/SceneTexturesCommon.ush"
+#include "/Engine/Private/DistanceField/GlobalDistanceFieldShared.ush"
+
+// ROPE_GDF_THREADS는 C++ ModifyCompilationEnvironment에서 정의(= 로프당 최대 노드 수, 스레드그룹 크기).
+float3 GDFPreViewTranslation; // 월드 → TranslatedWorld 오프셋(GDF 좌표계).
+uint   NumNodes;
+float  CollisionRadius;       // 로프 노드 두께(= FRopeSolverConfig::CollisionRadius).
+float  Friction;              // 접선 감쇠 [0..1](Coulomb μ).
+float  TipFrictionScale;      // 자유단 마찰 배율(고정점=1, 끝=이 값).
+uint   bWorldGDFValid;        // 1=GDF 유효(클립맵>0). 0이면 no-op.
+StructuredBuffer<float>  InvMass;      // 핀/latch 노드(<=0) 제외용.
+RWStructuredBuffer<float4> Positions;     // 상주 PosBuf(월드) — in-place 밀어내기.
+RWStructuredBuffer<float4> PrevPositions; // 상주 PrevBuf(월드) — 마찰(접선 감쇠)로 조정.
+
+[numthreads(ROPE_GDF_THREADS, 1, 1)]
+void RopeGDFCollisionCS(uint3 GroupThreadId : SV_GroupThreadID) // 로프 1개 = 스레드그룹 1개
+{
+	const uint i = GroupThreadId.x;
+	if (i >= NumNodes)
+	{
+		return;
+	}
+
+#if PLATFORM_SUPPORTS_DISTANCE_FIELDS
+	if (bWorldGDFValid == 0 || InvMass[i] <= 0.0f)
+	{
+		return; // GDF 미빌드 또는 핀/latch 노드 → 밀어내지 않음.
+	}
+
+	float3 Pos = Positions[i].xyz;
+	const float  NodeR = CollisionRadius;
+	const float3 TWP   = Pos + GDFPreViewTranslation; // 월드 → TranslatedWorld
+	const float  Dist  = GetDistanceToNearestSurfaceGlobal(TWP);
+	if (Dist < NodeR)
+	{
+		const float3 Grad = GetDistanceFieldGradientGlobal(TWP); // 표면 바깥(거리 증가) 방향(비정규)
+		const float  GLen = length(Grad);
+		if (GLen > 1e-4f)
+		{
+			const float3 Nrm = Grad / GLen;
+			const float  Pen = NodeR - Dist;
+			Pos += Nrm * Pen;
+
+			// 간이 마찰: 접선 성분을 Coulomb 한계(tip 테이퍼)로 감쇠. 정적 월드라 표면속도 0.
+			const float Fr = clamp(Friction, 0.0f, 1.0f);
+			if (Fr > 0.0f)
+			{
+				float3 Prev = PrevPositions[i].xyz;
+				const float  Frac  = (NumNodes > 1) ? ((float)i / (float)(NumNodes - 1)) : 0.0f;
+				const float  MuEff = Fr * lerp(1.0f, clamp(TipFrictionScale, 0.0f, 1.0f), Frac);
+				float3 Tangent = (Pos - Prev) - dot(Pos - Prev, Nrm) * Nrm;
+				const float MaxSlip = MuEff * Pen;
+				const float TLen = length(Tangent);
+				if (TLen > MaxSlip && TLen > 1e-6f) { Tangent *= (MaxSlip / TLen); }
+				Prev += Tangent;
+				PrevPositions[i] = float4(Prev, 0.0f);
+			}
+
+			Positions[i] = float4(Pos, 0.0f);
+		}
+	}
+#endif
+}

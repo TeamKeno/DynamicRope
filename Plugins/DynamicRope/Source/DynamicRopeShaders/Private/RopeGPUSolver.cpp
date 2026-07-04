@@ -10,6 +10,10 @@
 #include "RHIGPUReadback.h"
 #include "RenderingThread.h"
 #include "RHICommandList.h"          // FRHICommandListExecutor, CreateShaderResourceView
+#include "RHIStaticStates.h"         // TStaticSamplerState (GDF 샘플러) — Phase 2c
+#include "GlobalDistanceFieldParameters.h" // FGlobalDistanceFieldParameters2 / _Minimal — Phase 2c
+#include "GlobalRenderResources.h"   // GBlackVolumeTexture / GBlackUintVolumeTexture — Phase 2c
+#include "SceneView.h"               // FSceneView / FViewUniformShaderParameters (GDF 패스 View UB) — Phase 2c
 #include "DataDrivenShaderPlatformInfo.h"
 #include "Misc/ScopeLock.h"
 
@@ -180,6 +184,42 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FRopeContactDetectCS, "/Plugin/DynamicRope/Private/RopeXPBD.usf", "RopeContactDetectCS", SF_Compute);
 
+// Phase 2c: 엔진 GDF로 정적 월드에서 밀어내는 별도 post-solve 패스. View UB가 필요(GDF .ush의 ResolvedView) →
+// 메인 솔브 CS(View 없는 Step 경로 겸용)와 분리한다. 뷰 확장이 솔브 뒤·튜브 앞에 로프별 dispatch한다.
+class FRopeGDFCollisionCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FRopeGDFCollisionCS);
+	SHADER_USE_PARAMETER_STRUCT(FRopeGDFCollisionCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)     // ResolvedView(GDF .ush LWC 오버로드).
+		SHADER_PARAMETER_STRUCT_INCLUDE(FGlobalDistanceFieldParameters2, GDF)
+		SHADER_PARAMETER(FVector3f, GDFPreViewTranslation)
+		SHADER_PARAMETER(uint32, NumNodes)
+		SHADER_PARAMETER(float, CollisionRadius)
+		SHADER_PARAMETER(float, Friction)
+		SHADER_PARAMETER(float, TipFrictionScale)
+		SHADER_PARAMETER(uint32, bWorldGDFValid)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, InvMass)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, Positions)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, PrevPositions)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("ROPE_GDF_THREADS"), ROPE_MAX_NODES);
+	}
+};
+
+IMPLEMENT_GLOBAL_SHADER(FRopeGDFCollisionCS, "/Plugin/DynamicRope/Private/RopeGDFCollision.usf", "RopeGDFCollisionCS", SF_Compute);
+
 // ---------------------------------------------------------------------------------------------------
 // 상주 상태 정의
 // ---------------------------------------------------------------------------------------------------
@@ -192,6 +232,11 @@ struct FRopeResidentRope
 	TRefCountPtr<FRDGPooledBuffer> InvMassBuf;
 	int32  NumNodes = 0;
 	uint32 Generation = 0xFFFFFFFFu;     // 마지막으로 시드한 generation(다르면 재시드)
+	// Phase 2c: 별도 post-solve GDF 밀어내기 패스가 순회 시 참조(매 step에서 갱신).
+	bool  bUseWorldGDF = false;
+	float GDFCollisionRadius = 0.0f;
+	float GDFFriction = 0.0f;
+	float GDFTipFrictionScale = 1.0f;
 	FRHIGPUBufferReadback* PosReadback = nullptr;
 	FRHIGPUBufferReadback* PrevReadback = nullptr;
 	bool bReadbackArmed = false;          // 리드백 copy가 enqueue되어 결과 대기 중인가.
@@ -380,6 +425,33 @@ FRDGBufferRef FRopeGPUSolver::RegisterResidentPos_RenderThread(FRDGBuilder& Grap
 	return GraphBuilder.RegisterExternalBuffer(R->PosBuf);
 }
 
+// Phase 2c: GDF 셰이더 파라미터 구성. 엔진 SetupGlobalDistanceFieldParameters(전체)는 RENDERER_API가 아니라
+// 링크 불가 → inline _Minimal을 쓰고 그것이 빠뜨리는 CoverageAtlas 텍스처 + 샘플러 3개를 직접 보강한다.
+// GDF가 null/클립맵 0이면 검은 볼륨 텍스처를 바인딩하고 OutValid=0(셰이더가 GDF 블록을 건너뛴다).
+static void FillGDFShaderParams(const FGlobalDistanceFieldParameterData* GDF, FGlobalDistanceFieldParameters2& Out, uint32& OutValid)
+{
+	if (GDF && GDF->NumGlobalSDFClipmaps > 0)
+	{
+		Out = SetupGlobalDistanceFieldParameters_Minimal(*GDF);
+		Out.GlobalDistanceFieldCoverageAtlasTexture = GDF->CoverageAtlasTexture
+			? GDF->CoverageAtlasTexture : GBlackVolumeTexture->TextureRHI.GetReference();
+		OutValid = 1;
+	}
+	else
+	{
+		Out = FGlobalDistanceFieldParameters2{};
+		Out.GlobalDistanceFieldPageAtlasTexture     = GBlackVolumeTexture->TextureRHI.GetReference();
+		Out.GlobalDistanceFieldCoverageAtlasTexture = GBlackVolumeTexture->TextureRHI.GetReference();
+		Out.GlobalDistanceFieldPageTableTexture     = GBlackUintVolumeTexture->TextureRHI.GetReference();
+		Out.GlobalDistanceFieldMipTexture           = GBlackVolumeTexture->TextureRHI.GetReference();
+		OutValid = 0;
+	}
+	// 샘플러 3개는 _Minimal이 채우지 않는다(미세팅 시 검은 샘플). 항상 세팅.
+	Out.GlobalDistanceFieldPageAtlasTextureSampler     = TStaticSamplerState<SF_Trilinear, AM_Wrap,  AM_Wrap,  AM_Wrap >::GetRHI();
+	Out.GlobalDistanceFieldCoverageAtlasTextureSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap,  AM_Wrap,  AM_Wrap >::GetRHI();
+	Out.GlobalDistanceFieldMipTextureSampler           = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+}
+
 // 상주 step들의 공용 실행부(RT). 전용 그래프(Step)든 씬 렌더러 그래프(DispatchPending_RenderThread)든
 // 동일 본체를 전달받은 GraphBuilder에 얹는다(Execute는 호출자). GDF/PreViewTranslation은 GDF 월드 충돌(Phase 2c)에서 사용.
 void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRopeGPUResidentStep>& Steps,
@@ -485,8 +557,10 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 			}
 
 			// 이제부터 그래프 빌드(seed/register/dispatch/재무장). consume은 위에서 끝냈다. GraphBuilder는 인자
-			// (전용 그래프=Step, 씬 렌더러 그래프=DispatchPending_RenderThread). GDF는 Phase 2c에서 사용.
+			// (전용 그래프=Step, 씬 렌더러 그래프=DispatchPending_RenderThread). GDF 월드 충돌은 별도 post-solve
+			// 패스(DispatchGDFCollision_RenderThread)에서 처리하므로 여기선 GDF/PreViewTranslation를 쓰지 않는다.
 			(void)GDF; (void)PreViewTranslation;
+			// 이 프레임 stepped 로프에 GDF 플래그/충돌 파라미터를 상주 상태에 기록(별도 GDF 패스가 순회에 사용).
 
 			// 업로드 버퍼는 Execute()까지 살아 있어야 한다(RDG가 실행 시 복사) → keep-alive 컨테이너에 보관.
 			// Reserve로 외부 배열 재할당을 막아 내부 데이터 포인터를 안정화(CreateStructuredBuffer에 넘긴 GetData 유효).
@@ -521,6 +595,12 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 
 				FRopeResidentRope& R = Impl->RtRopes.FindOrAdd(S.RopeId);
 				const bool bSeed = !R.PosBuf.IsValid() || R.NumNodes != N || R.Generation != S.Generation;
+
+				// Phase 2c: 별도 GDF 패스가 순회 시 쓸 플래그/충돌 파라미터를 상주 상태에 기록.
+				R.bUseWorldGDF        = S.bUseWorldGDF;
+				R.GDFCollisionRadius  = S.CollisionRadius;
+				R.GDFFriction         = S.Friction;
+				R.GDFTipFrictionScale = S.TipFrictionScale;
 
 				FRDGBufferRef PosRDG = nullptr;
 				FRDGBufferRef PrevRDG = nullptr;
@@ -949,4 +1029,48 @@ void FRopeGPUSolver::DispatchPending_RenderThread(FRDGBuilder& GraphBuilder,
 	}
 	RunSteps_RenderThread(GraphBuilder, Impl->PendingSteps, GDF, PreViewTranslation);
 	Impl->PendingSteps.Reset();
+}
+
+void FRopeGPUSolver::DispatchGDFCollision_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
+	const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
+{
+	check(IsInRenderingThread());
+
+	// 프레임 공용 GDF 셰이더 파라미터(미빌드면 bWorldGDFValid=0 → 셰이더 no-op).
+	FGlobalDistanceFieldParameters2 GDFShaderParams;
+	uint32 bWorldGDFValid = 0;
+	FillGDFShaderParams(GDF, GDFShaderParams, bWorldGDFValid);
+
+	// 상주 로프 중 GDF 대상만 순회. PosBuf는 같은 그래프에서 솔브가 이미 등록(UAV)했으므로 dedup → solve→GDF
+	// 순서 자동. 이후 튜브가 PosBuf를 읽으므로 GDF→tube 순서도 RDG가 보장한다.
+	for (TPair<uint32, FRopeResidentRope>& Pair : Impl->RtRopes)
+	{
+		FRopeResidentRope& R = Pair.Value;
+		if (!R.bUseWorldGDF || R.NumNodes < 2
+			|| !R.PosBuf.IsValid() || !R.PrevBuf.IsValid() || !R.InvMassBuf.IsValid())
+		{
+			continue;
+		}
+
+		FRDGBufferRef PosRDG = GraphBuilder.RegisterExternalBuffer(R.PosBuf);
+		FRDGBufferRef PrevRDG = GraphBuilder.RegisterExternalBuffer(R.PrevBuf);
+		FRDGBufferRef InvRDG  = GraphBuilder.RegisterExternalBuffer(R.InvMassBuf);
+
+		FRopeGDFCollisionCS::FParameters* P = GraphBuilder.AllocParameters<FRopeGDFCollisionCS::FParameters>();
+		P->View                = View.ViewUniformBuffer;
+		P->GDF                 = GDFShaderParams;
+		P->GDFPreViewTranslation = PreViewTranslation;
+		P->NumNodes            = (uint32)R.NumNodes;
+		P->CollisionRadius     = R.GDFCollisionRadius;
+		P->Friction            = R.GDFFriction;
+		P->TipFrictionScale    = R.GDFTipFrictionScale;
+		P->bWorldGDFValid      = bWorldGDFValid;
+		P->InvMass             = GraphBuilder.CreateSRV(InvRDG);
+		P->Positions           = GraphBuilder.CreateUAV(PosRDG);
+		P->PrevPositions       = GraphBuilder.CreateUAV(PrevRDG);
+
+		TShaderMapRef<FRopeGDFCollisionCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()));
+		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeGDFCollision"),
+			Shader, P, FIntVector(1, 1, 1)); // 로프 1개 = 스레드그룹 1개
+	}
 }

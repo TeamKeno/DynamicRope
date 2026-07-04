@@ -83,10 +83,13 @@ void FRopeGDFViewExtension::PreRenderBasePass_RenderThread(FRDGBuilder& GraphBui
 	// GDF 함수는 TranslatedWorld를 받으므로 월드→TranslatedWorld 오프셋을 넘긴다.
 	const FVector3f PreViewTranslation = (FVector3f)View->ViewMatrices.GetPreViewTranslation();
 
-	// 1) 솔브(+GDF 충돌)를 씬 그래프에 얹는다.
+	// 1) 솔브를 씬 그래프에 얹는다.
 	Solver->DispatchPending_RenderThread(GraphBuilder, GDF, PreViewTranslation);
 
-	// 2) 솔브 뒤, 이 씬의 튜브 프록시들이 솔브-후 PosBuf로 튜브를 (재)빌드하게 한다(RDG가 solve→tube 순서 보장).
+	// 2) 솔브 뒤: GDF 월드 밀어내기(정적 벽/바닥). PosBuf를 in-place 보정 → RDG가 solve→GDF 순서 보장.
+	Solver->DispatchGDFCollision_RenderThread(GraphBuilder, *View, GDF, PreViewTranslation);
+
+	// 3) GDF 뒤: 이 씬의 튜브 프록시들이 (GDF 보정된) PosBuf로 튜브를 (재)빌드한다(RDG가 GDF→tube 순서 보장).
 	//    resident 프레임만 덮어쓰므로 지연이 없다(비-resident는 프록시가 스스로 스킵).
 	RopeGDF::ForEachTubeProxy(Scene, [&GraphBuilder, Solver](IRopeGDFTubeProxy* Proxy)
 	{

@@ -95,6 +95,7 @@ struct FRopeGPUResidentStep
 	float TipFrictionScale = 1.0f; // 자유단 마찰 배율(고정점=1, 끝=이 값). 끝 노드를 잘 놔주게 함.
 	float SweepStep = 2.0f;       // swept 샘플 간격(cm).
 	int32 MaxSweepSamples = 16;   // 세그먼트당 샘플 상한.
+	bool  bUseWorldGDF = false;   // Phase 2c: 엔진 GDF로 정적 월드 밀어내기(씬 그래프 dispatch에서만 유효).
 	TArray<FRopeGPUCapsule>     Capsules;
 	TArray<FRopeGPUSDFCollider> SDFColliders;
 
@@ -176,6 +177,7 @@ class FRHIGPUBufferReadback;
 class FRHIShaderResourceView;
 class FRDGBuilder;
 class FGlobalDistanceFieldParameterData;
+class FSceneView;
 
 class DYNAMICROPESHADERS_API FRopeGPUSolver
 {
@@ -214,6 +216,11 @@ public:
 	/** 렌더 스레드. 쌓인 pending step들을 전달받은 (씬 렌더러) GraphBuilder에 얹는다(자체 Execute 안 함).
 	    GDF는 이 뷰의 Global Distance Field 파라미터(null 가능), PreViewTranslation은 월드→TranslatedWorld 오프셋. */
 	void DispatchPending_RenderThread(FRDGBuilder& GraphBuilder,
+		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
+
+	/** 렌더 스레드(Phase 2c). 솔브 뒤·튜브 앞에 호출. GDF 대상 상주 로프의 PosBuf를 엔진 Global Distance Field로
+	    정적 월드에서 밀어낸다(별도 CS, View UB 필요). 뷰 확장이 DispatchPending 직후 호출한다. */
+	void DispatchGDFCollision_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
 		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 
 	/** RT 리드백이 채운 최신 위치를 RopeId별로 복사(락). 새로 도착한 게 없으면 직전 값을 유지한 채 반환할 수 있다. */

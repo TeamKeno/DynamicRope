@@ -73,6 +73,7 @@ namespace
 		Step.TipFrictionScale  = Cfg.TipFrictionScale;
 		Step.SweepStep         = Cfg.SweepStep;
 		Step.MaxSweepSamples   = Cfg.MaxSweepSamples;
+		Step.bUseWorldGDF      = Cfg.bUseWorldGDF; // Phase 2c: 엔진 GDF 월드 밀어내기(씬 그래프 dispatch에서만 유효).
 		Step.NumSub            = Schedule.NumSub;
 		Step.FixedDt           = Schedule.FixedDt;
 	}
@@ -254,13 +255,23 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 
 		TArray<FRopeGPUResidentStep> Steps;
 		Steps.Reserve(Ropes.Num());
+		int32 NumGdfRopes = 0; // Phase 2c: GDF 소비자 게이트 — 활성 GDF 로프 수(엔진 온디맨드 빌드 신호).
 		for (URopeComponent* Rope : Ropes)
 		{
 			FRopeGPUResidentStep Step;
 			if (TryBuildResidentStep(*Rope, DeltaTime, Step))
 			{
+				if (Step.bUseWorldGDF)
+				{
+					++NumGdfRopes;
+				}
 				Steps.Add(MoveTemp(Step));
 			}
+		}
+		// 이 씬에 활성 GDF 로프가 있으면 커스텀 FX 시스템이 GDF를 요구 → 엔진이 온디맨드로 빌드한다.
+		if (const UWorld* World = GetWorld())
+		{
+			RopeGDF::SetGDFActiveCount(World->Scene, NumGdfRopes);
 		}
 		if (Steps.Num() > 0)
 		{
