@@ -2,16 +2,87 @@
 
 #include "Logic/RopeFlightContactDetector.h"
 #include "Collision/RopeCollider.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 
 namespace
 {
+constexpr float MaxBoneAxisPlaneNormalDotForMiss = 0.5f; // sin(30deg): 축-평면 각도 30도 이내면 miss.
+
 bool BypassCaptureQualityGateForNow()
 {
 	// 지금은 접촉 판정 폴리싱 전이라 항상 통과시킨다.
 	// volatile로 읽어 아래 스캐폴드 계산식이 unreachable code 경고로 죽지 않게 둔다.
 	static volatile bool bBypassCaptureQualityGate = true;
 	return bBypassCaptureQualityGate;
+}
+
+void KeepLargestPlaneNormal(const FVector& A, const FVector& B, FVector& InOutNormal, float& InOutSizeSq)
+{
+	const FVector Normal = FVector::CrossProduct(A, B);
+	const float SizeSq = Normal.SizeSquared();
+	if (SizeSq > InOutSizeSq)
+	{
+		InOutNormal = Normal;
+		InOutSizeSq = SizeSq;
+	}
+}
+
+FVector ComputeRopeSplinePlaneNormal(const FRopeSimState& Sim, int32 NodeIndex, const FVector& RelativeVelocity)
+{
+	if (!Sim.Positions.IsValidIndex(NodeIndex))
+	{
+		return FVector::ZeroVector;
+	}
+
+	const FVector Origin = Sim.Positions[NodeIndex];
+	const FVector ToHead = Sim.Positions.IsValidIndex(0) ? Sim.Positions[0] - Origin : FVector::ZeroVector;
+	const FVector ToTail = Sim.Positions.Num() > 0 ? Sim.Positions.Last() - Origin : FVector::ZeroVector;
+	const FVector ToPrev = Sim.Positions.IsValidIndex(NodeIndex - 1) ? Sim.Positions[NodeIndex - 1] - Origin : FVector::ZeroVector;
+	const FVector ToNext = Sim.Positions.IsValidIndex(NodeIndex + 1) ? Sim.Positions[NodeIndex + 1] - Origin : FVector::ZeroVector;
+
+	FVector BestNormal = FVector::ZeroVector;
+	float BestSizeSq = 0.0f;
+
+	// 로프/스플라인이 그리는 평면을 현재 곡선 형태에서 우선 추정하고, 거의 일직선이면 이동 방향까지 보조로 쓴다.
+	KeepLargestPlaneNormal(ToHead, ToTail, BestNormal, BestSizeSq);
+	KeepLargestPlaneNormal(ToPrev, ToNext, BestNormal, BestSizeSq);
+	KeepLargestPlaneNormal(ToHead, RelativeVelocity, BestNormal, BestSizeSq);
+	KeepLargestPlaneNormal(ToTail, RelativeVelocity, BestNormal, BestSizeSq);
+
+	return BestNormal.GetSafeNormal();
+}
+
+FVector ComputeBoneParentAxis(const FRopeContactCandidate& Candidate)
+{
+	if (!Candidate.Mesh || Candidate.Bone.IsNone())
+	{
+		return FVector::ZeroVector;
+	}
+
+	const FName ParentBone = Candidate.Mesh->GetParentBone(Candidate.Bone);
+	if (ParentBone.IsNone())
+	{
+		return FVector::ZeroVector;
+	}
+
+	const FVector BoneLocation = Candidate.Mesh->GetSocketLocation(Candidate.Bone);
+	const FVector ParentLocation = Candidate.Mesh->GetSocketLocation(ParentBone);
+	return (BoneLocation - ParentLocation).GetSafeNormal();
+}
+
+bool IsBoneAxisNearlyParallelToRopePlane(const FRopeSimState& Sim, const FRopeContactCandidate& Candidate,
+	const FVector& RelativeVelocity)
+{
+	const FVector RopePlaneNormal = ComputeRopeSplinePlaneNormal(Sim, Candidate.NodeIndex, RelativeVelocity);
+	const FVector BoneAxis = ComputeBoneParentAxis(Candidate);
+	if (RopePlaneNormal.IsNearlyZero() || BoneAxis.IsNearlyZero())
+	{
+		return false;
+	}
+
+	const float AxisPlaneNormalDot = FMath::Abs(FVector::DotProduct(BoneAxis, RopePlaneNormal));
+	return AxisPlaneNormalDot <= MaxBoneAxisPlaneNormalDotForMiss;
 }
 }
 
@@ -173,6 +244,14 @@ void FRopeFlightContactDetector::EvaluateRelativeMotion(const FRopeSimState& Sim
 		Candidate.RelativeTangentialSpeed = TangentVelocity.Size();
 		Candidate.WrapDirectionScore = FVector::DotProduct(TangentVelocity.GetSafeNormal(),
 			ExpectedWrapTangent(Sim, Candidate, Params.FallbackForward));
+
+		// 로프/스플라인 평면과 bone-parent 축이 거의 평행하면, 축을 따라 스치거나 찍는 접촉이라 감김 후보에서 제외한다.
+		// 축-평면 각도 30도 이내를 miss cone으로 본다. 축이 평면에 수직에 가까울수록 실제 감김 후보로 남긴다.
+		if (IsBoneAxisNearlyParallelToRopePlane(Sim, Candidate, RelativeVelocity))
+		{
+			Candidate.bValid = false;
+			continue;
+		}
 	}
 }
 
