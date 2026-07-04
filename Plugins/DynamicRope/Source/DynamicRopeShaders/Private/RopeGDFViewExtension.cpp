@@ -2,6 +2,7 @@
 
 #include "RopeGDFViewExtension.h"
 #include "RopeGPUSolverRegistry.h"
+#include "RopeGPUSolver.h"
 #include "DynamicRopeShadersLog.h"
 
 #include "SceneView.h"
@@ -30,47 +31,57 @@ void FRopeGDFViewExtension::Shutdown()
 	}
 }
 
-void FRopeGDFViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessingInputs& Inputs)
+void FRopeGDFViewExtension::PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily)
+{
+	// GDF 빌드 이전 시점 — 여기선 dispatch하지 않고, base pass 훅에서 쓸 패밀리만 캡처한다.
+	CurrentFamily = &InViewFamily;
+}
+
+void FRopeGDFViewExtension::PreRenderBasePass_RenderThread(FRDGBuilder& GraphBuilder, bool /*bDepthBufferIsPopulated*/)
 {
 	check(IsInRenderingThread());
 
-	FSceneInterface* Scene = View.Family ? View.Family->Scene : nullptr;
-	if (!Scene)
+	// 캡처한 패밀리는 이번 훅에서 1회만 소비(뒤따르는 base pass 없는 경로에서 stale 재사용 방지).
+	FSceneViewFamily* Family = CurrentFamily;
+	CurrentFamily = nullptr;
+
+	if (!RopeGDF::IsDispatchInVE() || !Family)
 	{
 		return;
 	}
 
-	// 프라이머리 뷰만(분할화면 보조 뷰 제외), 씬/리플렉션 캡처 제외.
-	if (View.Family->Views.Num() == 0 || View.Family->Views[0] != &View)
-	{
-		return;
-	}
-	if (View.bIsSceneCapture || View.bIsReflectionCapture)
+	FSceneInterface* Scene = Family->Scene;
+	if (!Scene || Family->Views.Num() == 0)
 	{
 		return;
 	}
 
-	// 씬별 프레임당 1회로 dedup(같은 프레임에 여러 뷰 패밀리가 올 수 있음).
-	const uint32 FrameNumber = View.Family->FrameNumber;
+	const FSceneView* View = Family->Views[0];
+	if (!View || View->bIsSceneCapture || View->bIsReflectionCapture)
+	{
+		return;
+	}
+
+	// 씬별 프레임당 1회(한 프레임에 여러 패밀리/뷰가 올 수 있음).
+	const uint32 FrameNumber = Family->FrameNumber;
 	if (const uint32* Last = LastDispatchedFrame.Find(Scene); Last && *Last == FrameNumber)
 	{
 		return;
 	}
 	LastDispatchedFrame.Add(Scene, FrameNumber);
 
-	// 이 뷰의 GDF 파라미터(카메라 중심 clipmap). 소비자 신호가 없으면 null이거나 클립맵 0.
-	const FGlobalDistanceFieldParameterData* GDF =
-		UE::FXRenderingUtils::GetGlobalDistanceFieldParameterData(MakeStridedView(sizeof(FSceneView), &View, 1));
-
-	// Phase 1 프로브: 온디맨드 빌드가 실제로 일어나는지 확인(과다 로그 방지 위해 가끔만).
-	static uint32 ProbeThrottle = 0;
-	if ((ProbeThrottle++ % 60) == 0)
+	FRopeGPUSolver* Solver = RopeGDF::FindSolver(Scene);
+	if (!Solver)
 	{
-		UE_LOG(LogDynamicRopeGPU, Log, TEXT("[GDF] probe: NumClipmaps=%d, PageAtlas=%s"),
-			GDF ? GDF->NumGlobalSDFClipmaps : -1,
-			(GDF && GDF->PageAtlasTexture) ? TEXT("valid") : TEXT("null"));
+		return;
 	}
 
-	// Phase 2에서: FRopeGPUSolver* Solver = RopeGDF::FindSolver(Scene);
-	//             Solver->DispatchPending_RenderThread(GraphBuilder, GDF, (FVector3f)View.ViewMatrices.GetPreViewTranslation());
+	// 이 뷰의 GDF 파라미터(카메라 중심 clipmap; 미빌드면 null 또는 클립맵 0). 솔버가 null-체크해 스킵.
+	const FGlobalDistanceFieldParameterData* GDF =
+		UE::FXRenderingUtils::GetGlobalDistanceFieldParameterData(MakeStridedView(sizeof(FSceneView), View, 1));
+
+	// GDF 함수는 TranslatedWorld를 받으므로 월드→TranslatedWorld 오프셋을 넘긴다.
+	const FVector3f PreViewTranslation = (FVector3f)View->ViewMatrices.GetPreViewTranslation();
+
+	Solver->DispatchPending_RenderThread(GraphBuilder, GDF, PreViewTranslation);
 }

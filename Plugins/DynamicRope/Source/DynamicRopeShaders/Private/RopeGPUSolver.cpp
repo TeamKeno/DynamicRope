@@ -224,6 +224,9 @@ struct FRopeGPUSolver::FImpl
 	TMap<uint32, FRopeResidentRope>                          RtRopes;  // 렌더 스레드에서만 접근.
 	TSharedRef<FRopeResidentSharedResults, ESPMode::ThreadSafe> Results
 		= MakeShared<FRopeResidentSharedResults, ESPMode::ThreadSafe>();
+
+	// GDF 경로(EnqueueSteps)로 쌓인 이번 프레임 step들. 뷰 확장이 DispatchPending_RenderThread에서 소비. RT 전용.
+	TArray<FRopeGPUResidentStep> PendingSteps;
 };
 
 FRopeGPUSolver::FRopeGPUSolver()
@@ -361,16 +364,11 @@ FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint
 	return R->PosSRV.GetReference();
 }
 
-void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
+// 상주 step들의 공용 실행부(RT). 전용 그래프(Step)든 씬 렌더러 그래프(DispatchPending_RenderThread)든
+// 동일 본체를 전달받은 GraphBuilder에 얹는다(Execute는 호출자). GDF/PreViewTranslation은 GDF 월드 충돌(Phase 2c)에서 사용.
+void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRopeGPUResidentStep>& Steps,
+	const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
 {
-	if (Steps.Num() == 0)
-	{
-		return;
-	}
-
-	ENQUEUE_RENDER_COMMAND(RopeResidentStep)(
-		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate& RHICmdList)
-		{
 			// --- Loop 1: 직전 프레임 리드백 consume(immediate Lock — RDG 빌더 구성 *전*에 처리해 immediate RHI와
 			// 열린 그래프의 인터리브를 피한다. 렌더 스레드라 Lock 합법, IsReady 게이트라 stall 없음).
 			for (const FRopeGPUResidentStep& S : Steps)
@@ -470,8 +468,9 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 				}
 			}
 
-			// 이제부터 그래프 빌드(seed/register/dispatch/재무장). consume(immediate Lock)은 위에서 끝냈다.
-			FRDGBuilder GraphBuilder(RHICmdList);
+			// 이제부터 그래프 빌드(seed/register/dispatch/재무장). consume은 위에서 끝냈다. GraphBuilder는 인자
+			// (전용 그래프=Step, 씬 렌더러 그래프=DispatchPending_RenderThread). GDF는 Phase 2c에서 사용.
+			(void)GDF; (void)PreViewTranslation;
 
 			// 업로드 버퍼는 Execute()까지 살아 있어야 한다(RDG가 실행 시 복사) → keep-alive 컨테이너에 보관.
 			// Reserve로 외부 배열 재할당을 막아 내부 데이터 포인터를 안정화(CreateStructuredBuffer에 넘긴 GetData 유효).
@@ -889,6 +888,49 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 				}
 			}
 
+}
+
+void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
+{
+	if (Steps.Num() == 0)
+	{
+		return;
+	}
+	// 전용(자체) 그래프 경로 — 서브시스템 Tick 트리거(G4 기본). 씬 렌더 타이밍과 무관하게 즉시 실행.
+	ENQUEUE_RENDER_COMMAND(RopeResidentStep)(
+		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate& RHICmdList) mutable
+		{
+			FRDGBuilder GraphBuilder(RHICmdList);
+			RunSteps_RenderThread(GraphBuilder, Steps, nullptr, FVector3f::ZeroVector);
 			GraphBuilder.Execute();
 		});
+}
+
+void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
+{
+	if (Steps.Num() == 0)
+	{
+		return;
+	}
+	// 씬 렌더러 그래프 경로(GDF 월드 충돌): dispatch는 안 하고 RT pending 큐에 쌓아둔다. 뷰 확장이 이번
+	// 프레임 PreRenderBasePass에서 씬 그래프로 flush(GDF 파라미터가 유효한 타이밍 + 튜브 무지연).
+	ENQUEUE_RENDER_COMMAND(RopeEnqueueSteps)(
+		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate&) mutable
+		{
+			// 교체 시맨틱: 이번 프레임 step으로 대체한다(직전 프레임분이 뷰 확장에서 소비 안 됐어도 — 씬
+			// 렌더가 없던 프레임 등 — 최신만 유효하므로 누적하지 않는다).
+			Impl->PendingSteps = MoveTemp(Steps);
+		});
+}
+
+void FRopeGPUSolver::DispatchPending_RenderThread(FRDGBuilder& GraphBuilder,
+	const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
+{
+	check(IsInRenderingThread());
+	if (Impl->PendingSteps.Num() == 0)
+	{
+		return;
+	}
+	RunSteps_RenderThread(GraphBuilder, Impl->PendingSteps, GDF, PreViewTranslation);
+	Impl->PendingSteps.Reset();
 }

@@ -29,4 +29,9 @@ namespace RopeGDF
 	DYNAMICROPESHADERS_API void SetGDFActiveCount(FSceneInterface* Scene, int32 Count);
 	/** 이 씬이 GDF를 필요로 하는가(활성 카운트>0 또는 강제 CVar). FFXSystem::UsesGlobalDistanceField()가 읽음. */
 	bool IsGDFActive(FSceneInterface* Scene);
+
+	//~ 경로 선택.
+	/** GPU 솔브 dispatch를 씬 뷰 확장 경로(EnqueueSteps→DispatchPending)로 돌릴지 여부. r.DynamicRope.GDFDispatchInVE.
+	    0(기본)=Step() 전용 그래프(현행), 1=뷰 확장에서 씬 그래프로 dispatch(GDF 월드 충돌 통합). */
+	DYNAMICROPESHADERS_API bool IsDispatchInVE();
 }

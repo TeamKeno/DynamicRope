@@ -7,7 +7,9 @@
 #include "Collision/RopeCollider.h" // IRopeCollider::GetGPUCapsule
 #include "Collision/RopeColliderProvider.h" // IRopeColliderProvider (중앙 collider gather)
 #include "RopeGPUSolver.h"          // FRopeGPUSolver / FRopeGPUResidentStep / FRopeGPUCapsule (DynamicRopeShaders 모듈)
+#include "RopeGPUSolverRegistry.h"  // RopeGDF::RegisterSolver / IsDispatchInVE (GDF 통합 경로)
 #include "Engine/World.h"
+#include "SceneInterface.h"         // FSceneInterface (씬→솔버 등록 키)
 #include "GameFramework/Actor.h"    // AActor::GetOwner (provider 소스 필터링)
 #include "Components/ActorComponent.h"
 #include "Async/ParallelFor.h"
@@ -513,7 +515,15 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		}
 		if (Steps.Num() > 0)
 		{
-			GpuSolver.Step(MoveTemp(Steps));
+			// GDF 통합 경로(r.DynamicRope.GDFDispatchInVE=1)면 dispatch를 뷰 확장(씬 그래프)으로 미룬다(기본 0은 현행).
+				if (RopeGDF::IsDispatchInVE())
+				{
+					GpuSolver.EnqueueSteps(MoveTemp(Steps));
+				}
+				else
+				{
+					GpuSolver.Step(MoveTemp(Steps));
+				}
 		}
 	}
 	else
@@ -558,4 +568,21 @@ bool URopeSimSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) c
 {
 	// 게임/PIE에서만 시뮬레이션(에디터 프리뷰/인스펙터 월드 제외 → 컴포넌트도 그때만 BeginPlay 등록).
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
+}
+
+void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
+{
+	Super::OnWorldBeginPlay(InWorld);
+	// GDF 통합 경로에서 뷰 확장이 씬→솔버로 찾아 dispatch할 수 있게 이 월드의 씬에 솔버를 등록한다.
+	// (씬은 이 시점에 렌더링용으로 생성돼 있다.) 경로가 off여도 등록은 무해(pending이 비어 no-op).
+	RopeGDF::RegisterSolver(InWorld.Scene, &GpuSolver);
+}
+
+void URopeSimSubsystem::Deinitialize()
+{
+	if (const UWorld* World = GetWorld())
+	{
+		RopeGDF::UnregisterSolver(World->Scene);
+	}
+	Super::Deinitialize();
 }

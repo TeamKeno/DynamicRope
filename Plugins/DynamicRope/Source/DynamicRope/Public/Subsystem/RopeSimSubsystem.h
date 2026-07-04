@@ -51,6 +51,9 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
+	//~ 씬→솔버 등록(GDF 통합 경로에서 뷰 확장이 솔버를 찾는 용도). 씬 생성 이후/해제 시점에 등록·해제.
+	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
+	virtual void Deinitialize() override;
 
 private:
 	// 등록된 활성 로프(컴포넌트는 UObject → GC 추적).

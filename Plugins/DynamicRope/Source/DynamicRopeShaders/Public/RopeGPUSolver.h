@@ -173,6 +173,8 @@ struct FRopeResidentContacts
  */
 class FRHIGPUBufferReadback;
 class FRHIShaderResourceView;
+class FRDGBuilder;
+class FGlobalDistanceFieldParameterData;
 
 class DYNAMICROPESHADERS_API FRopeGPUSolver
 {
@@ -190,8 +192,21 @@ public:
 	 */
 	FRHIShaderResourceView* GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes);
 
-	/** 이번 프레임 상주 step들을 렌더 스레드로 넘겨 GPU에서 in-place 전진(블록 없음). step은 소비된다(MoveTemp). */
+	/** 이번 프레임 상주 step들을 렌더 스레드로 넘겨 GPU에서 in-place 전진(블록 없음). step은 소비된다(MoveTemp).
+	    전용(자체) RDG 그래프에서 즉시 실행 — 서브시스템 Tick이 트리거하는 G4 기본 경로. */
 	void Step(TArray<FRopeGPUResidentStep>&& Steps);
+
+	/**
+	 * GDF 월드 충돌 경로: step을 렌더 스레드 pending 큐에 쌓아만 둔다(dispatch 안 함). 뷰 확장이 이번 프레임
+	 * PreRenderBasePass에서 씬 렌더러 그래프에 DispatchPending_RenderThread로 flush한다(GDF 파라미터 유효 타이밍).
+	 * r.DynamicRope.GDFDispatchInVE로 이 경로 vs Step() 전용 그래프 경로를 고른다.
+	 */
+	void EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps);
+
+	/** 렌더 스레드. 쌓인 pending step들을 전달받은 (씬 렌더러) GraphBuilder에 얹는다(자체 Execute 안 함).
+	    GDF는 이 뷰의 Global Distance Field 파라미터(null 가능), PreViewTranslation은 월드→TranslatedWorld 오프셋. */
+	void DispatchPending_RenderThread(FRDGBuilder& GraphBuilder,
+		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 
 	/** RT 리드백이 채운 최신 위치를 RopeId별로 복사(락). 새로 도착한 게 없으면 직전 값을 유지한 채 반환할 수 있다. */
 	void GetLatest(TMap<uint32, FRopeResidentLatest>& Out);
@@ -217,4 +232,9 @@ private:
 	TUniquePtr<FImpl> Impl;
 
 	void ReleaseAll_RenderThread();
+
+	/** Step()/DispatchPending_RenderThread 공용 실행부: 상주 seed/register/dispatch/리드백을 전달받은
+	    GraphBuilder에 얹는다(Execute는 호출자 책임). Steps는 소비 후 호출자가 비운다. */
+	void RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRopeGPUResidentStep>& Steps,
+		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 };
