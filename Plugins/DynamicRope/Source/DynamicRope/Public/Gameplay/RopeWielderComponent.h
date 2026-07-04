@@ -14,9 +14,11 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Core/RopeTypes.h"
+#include "Engine/EngineTypes.h"
 #include "RopeWielderComponent.generated.h"
 
 class URopeComponent;
+class URopeArcPreviewComponent;
 class USkeletalMeshComponent;
 class UInputAction;
 class UInputMappingContext;
@@ -45,6 +47,7 @@ public:
 	//~ UActorComponent
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	//~ Setup --------------------------------------------------------------
 	/** 들 로프. 비우면 BeginPlay에 owner의 URopeComponent를 자동 탐색한다. */
@@ -91,6 +94,49 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "SwingPlane == ERopeSwingPlane::CustomNormal"))
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
+
+	//~ Preview ------------------------------------------------------------
+	/** 던지기 전 로프 길이 기반 부채꼴 preview를 표시한다. Rope 본체 렌더링과 별도 컴포넌트로 그린다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
+	bool bShowThrowPreviewArc = false;
+
+	/** 비어 있으면 owner에서 찾고, bAutoCreatePreviewComponent가 켜져 있으면 런타임에 자동 생성한다. */
+	UPROPERTY(EditAnywhere, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopeArcPreviewComponent", DisplayName = "Preview Component"))
+	FComponentReference PreviewComponentReference;
+
+	UPROPERTY(Transient)
+	TObjectPtr<URopeArcPreviewComponent> PreviewComponent = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
+	bool bAutoCreatePreviewComponent = true;
+
+	/** Free/Releasing 상태에서만 preview를 표시한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
+	bool bPreviewOnlyWhenIdle = true;
+
+	/** preview 반지름 = RopeLength * 이 값. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0"))
+	float PreviewReachScale = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "1", ClampMax = "128"))
+	int32 PreviewSegmentCount = 32;
+
+	/** Preview 충돌 검사 갱신 주기. 0이면 매 프레임 검사하므로 SDF 대상이 많을 때는 매우 비싸다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s"))
+	float PreviewUpdateInterval = 0.1f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "1.0", Units = "cm"))
+	float PreviewSampleStep = 80.0f;
+
+	/** 0 이하이면 RopeComponent의 ContactRadius/Radius 기반 fallback을 사용한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "cm"))
+	float PreviewQueryRadius = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
+	bool bLastPreviewBlocked = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
+	FVector LastPreviewHitPoint = FVector::ZeroVector;
 
 	//~ Input(선택) — 비우면 무시, Throw()를 직접 호출하면 된다 ------------
 	/** Action/MappingContext가 설정돼 있으면 BeginPlay에 자동 바인딩할지. */
@@ -173,13 +219,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope|Input")
 	void BindInput();
 
+	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
+	void SetThrowPreviewEnabled(bool bEnabled);
+
 private:
 	void ResolveRefs();        // Rope/AttachMesh 해석(미설정 시 owner에서 탐색).
 	void AttachRopeToSocket(); // Rope를 AttachMesh의 HandSocketName에 부착.
 	void AddMappingContext();  // MappingContext를 로컬 플레이어 Enhanced Input 서브시스템에 추가.
 
+	void ResolvePreviewComponent();
+	void UpdateThrowPreview();
+	void ClearThrowPreview();
+
 	void OnThrowInput();
 	void OnReleaseInput();
 
 	bool bInputBound = false;
+	float PreviewUpdateCooldown = 0.0f;
 };

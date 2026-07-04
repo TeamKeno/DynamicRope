@@ -526,6 +526,60 @@ struct FRopeThrowContext
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
 };
 
+/** 던지기 전 미리보기 호를 정의하는 런타임 데이터. 렌더 컴포넌트는 이 값만 받아 그린다. */
+USTRUCT(BlueprintType)
+struct FRopeArcPreviewData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
+	FVector Origin = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
+	FVector AimDir = FVector::ForwardVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
+	FVector GuideUp = FVector::UpVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "cm"))
+	float Radius = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
+	float SweepAngleDegrees = 180.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "1", ClampMax = "128"))
+	int32 SegmentCount = 32;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
+	bool bBlocked = false;
+
+	/** 0~1. 이 각도 비율부터 blocked material로 그린다. 1이면 막힌 구간 없음. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BlockedStartAlpha = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
+	FVector HitPoint = FVector::ZeroVector;
+};
+
+/** 미리보기 호가 현재 collider 스냅샷에 닿았는지와, 닿은 각도 비율. */
+USTRUCT(BlueprintType)
+struct FRopeArcPreviewHitResult
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
+	bool bHit = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
+	FVector HitPoint = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
+	float AngleAlpha = 1.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
+	float DistanceAlpha = 1.0f;
+};
+
 /** flight 단계의 Throw / launch 파라미터. */
 USTRUCT(BlueprintType)
 struct FRopeThrowParams
@@ -546,10 +600,10 @@ struct FRopeThrowParams
 	float TipMass = 5.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
-	float OwnerVelocityScale = 0.0f;
+	float OwnerVelocityScale = 5.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
-	float SocketVelocityScale = 0.0f;
+	float SocketVelocityScale = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
 	FVector CustomFrameForward = FVector::ForwardVector;

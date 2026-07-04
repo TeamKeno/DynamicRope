@@ -88,7 +88,7 @@ FRopeWhipGuide::FSwingBasis FRopeWhipGuide::ResolveSwingBasis(const FRopeThrowCo
 
 void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
 	const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide,
-	float InThrowSpeed)
+	float InThrowSpeed, const FVector& InInheritedVelocity)
 {
 	AimDir = InAimDir.GetSafeNormal();
 	if (AimDir.IsNearlyZero())
@@ -117,6 +117,7 @@ void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
 	}
 	GuideUp = FVector::CrossProduct(GuideForward, GuideSide).GetSafeNormal();
 	GuideThrowSpeed = InThrowSpeed;
+	GuideInheritedVelocity = InInheritedVelocity;
 
 	Elapsed = 0.0f;
 	bActive = true;
@@ -293,6 +294,8 @@ void FRopeWhipGuide::BuildGuideTargets(float NormalizedTime, int32 LastGuidedNod
 	const int32 DesiredPointCount = FMath::Clamp(LastGuidedNode + 1, 1, Sim.Num());
 	const int32 RawSampleCount = FMath::Max(DesiredPointCount * 4, 16);
 	const float GuideLength = FMath::Max(Sim.RopeLength, Config.ComponentRopeLength) * GuidedEnd;
+	const float GuideDuration = ResolveGuideDuration(Config, GuideThrowSpeed);
+	const FVector InheritedDrift = GuideInheritedVelocity * (GuideDuration * T);
 	const float SweepRadians = FMath::DegreesToRadians(FMath::Clamp(Config.SweepAngleDegrees, 1.0f, 180.0f));
 	const float AngleFromAim = SweepRadians * (1.0f - T);
 	FVector SweepDir = (Forward * FMath::Cos(AngleFromAim) + Up * FMath::Sin(AngleFromAim)).GetSafeNormal();
@@ -312,7 +315,9 @@ void FRopeWhipGuide::BuildGuideTargets(float NormalizedTime, int32 LastGuidedNod
 		const float RawAlpha = (RawSampleCount > 1)
 			? static_cast<float>(SampleIdx) / static_cast<float>(RawSampleCount - 1)
 			: 0.0f;
-		RawPoints.Add(HandPos + SweepDir * (RawAlpha * GuideLength));
+		// 손에 가까운 루트는 고정하고, 멀어지는 가이드 구간만 주행/소켓 속도 드리프트를 따라가게 한다.
+		const float DriftWeight = RopeMath::SmoothStep(RawAlpha);
+		RawPoints.Add(HandPos + SweepDir * (RawAlpha * GuideLength) + InheritedDrift * DriftWeight);
 	}
 
 	ResampleGuideByNodeSpacing(RawPoints, Sim.RopeLength, Sim.Num(), DesiredPointCount, Sim.SegmentLength, OutTargets);

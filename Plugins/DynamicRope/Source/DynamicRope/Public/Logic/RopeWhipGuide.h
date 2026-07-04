@@ -48,7 +48,7 @@ public:
 	 */
 	void Begin(const FVector& InAimDir, const FVector& InOrigin,
 		const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide,
-		float InThrowSpeed = 0.0f);
+		float InThrowSpeed = 0.0f, const FVector& InInheritedVelocity = FVector::ZeroVector);
 
 	/**
 	 * throw 직후 초기 포즈(T=0) 스냅: 가이드 타깃을 계산해 프레임 산출물을 채우고, 가이드 구간
@@ -112,6 +112,7 @@ private:
 	FVector Origin = FVector::ZeroVector;
 	FVector GuideForward = FVector::ForwardVector;
 	FVector GuideUp = FVector::UpVector;
+	FVector GuideInheritedVelocity = FVector::ZeroVector;
 	float GuideThrowSpeed = 0.0f;
 
 	// 직전 프레임의 가이드 타깃(가이드 노드의 Verlet 속도 주입: PrevPositions ← 이 값).

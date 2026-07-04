@@ -3,7 +3,9 @@
 #include "Gameplay/RopeWielderComponent.h"
 #include "RopeComponent.h"
 #include "DynamicRopeLog.h"
+#include "Render/RopeArcPreviewComponent.h"
 
+#include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/Actor.h"
@@ -17,7 +19,8 @@
 
 URopeWielderComponent::URopeWielderComponent()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 }
 
 void URopeWielderComponent::BeginPlay()
@@ -25,6 +28,7 @@ void URopeWielderComponent::BeginPlay()
 	Super::BeginPlay();
 
 	ResolveRefs();
+	ResolvePreviewComponent();
 
 	if (!Rope)
 	{
@@ -41,6 +45,12 @@ void URopeWielderComponent::BeginPlay()
 	{
 		AddMappingContext();
 		BindInput();
+	}
+
+	SetComponentTickEnabled(bShowThrowPreviewArc);
+	if (bShowThrowPreviewArc)
+	{
+		UpdateThrowPreview();
 	}
 }
 
@@ -68,8 +78,26 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		}
 	}
 	bInputBound = false;
+	ClearThrowPreview();
 
 	Super::EndPlay(EndPlayReason);
+}
+
+void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	if (PreviewUpdateInterval > 0.0f)
+	{
+		PreviewUpdateCooldown -= DeltaTime;
+		if (PreviewUpdateCooldown > 0.0f)
+		{
+			return;
+		}
+		PreviewUpdateCooldown = PreviewUpdateInterval;
+	}
+
+	UpdateThrowPreview();
 }
 
 void URopeWielderComponent::ResolveRefs()
@@ -86,6 +114,35 @@ void URopeWielderComponent::ResolveRefs()
 	if (!AttachMesh)
 	{
 		AttachMesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
+	}
+}
+
+void URopeWielderComponent::ResolvePreviewComponent()
+{
+	AActor* Owner = GetOwner();
+	if (!Owner || PreviewComponent)
+	{
+		return;
+	}
+
+	if (UActorComponent* ReferencedComponent = PreviewComponentReference.GetComponent(Owner))
+	{
+		PreviewComponent = Cast<URopeArcPreviewComponent>(ReferencedComponent);
+	}
+
+	if (!PreviewComponent)
+	{
+		PreviewComponent = Owner->FindComponentByClass<URopeArcPreviewComponent>();
+	}
+	if (!PreviewComponent && bAutoCreatePreviewComponent)
+	{
+		PreviewComponent = NewObject<URopeArcPreviewComponent>(Owner, TEXT("RopeArcPreviewComponent"));
+		Owner->AddInstanceComponent(PreviewComponent);
+		if (USceneComponent* RootComponent = Owner->GetRootComponent())
+		{
+			PreviewComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepWorldTransform);
+		}
+		PreviewComponent->RegisterComponent();
 	}
 }
 
@@ -295,6 +352,7 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 {
 	if (Rope)
 	{
+		ClearThrowPreview();
 		Rope->ThrowWithContext(BuildThrowContext(AimDir));
 	}
 }
@@ -343,5 +401,93 @@ void URopeWielderComponent::ToggleThrow()
 	else
 	{
 		Throw();
+	}
+}
+
+void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
+{
+	bShowThrowPreviewArc = bEnabled;
+	if (bShowThrowPreviewArc)
+	{
+		ResolveRefs();
+		ResolvePreviewComponent();
+		PreviewUpdateCooldown = 0.0f;
+		SetComponentTickEnabled(true);
+		UpdateThrowPreview();
+	}
+	else
+	{
+		ClearThrowPreview();
+		SetComponentTickEnabled(false);
+	}
+}
+
+void URopeWielderComponent::UpdateThrowPreview()
+{
+	if (!bShowThrowPreviewArc)
+	{
+		ClearThrowPreview();
+		return;
+	}
+
+	if (!Rope)
+	{
+		ResolveRefs();
+	}
+	if (!PreviewComponent)
+	{
+		ResolvePreviewComponent();
+	}
+	if (!Rope || !PreviewComponent)
+	{
+		ClearThrowPreview();
+		return;
+	}
+
+	if (bPreviewOnlyWhenIdle)
+	{
+		const ERopePhase Phase = Rope->GetPhase();
+		if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing)
+		{
+			ClearThrowPreview();
+			return;
+		}
+	}
+
+	FRopeArcPreviewData Preview;
+	if (!Rope->BuildThrowArcPreview(BuildThrowContext(FVector::ZeroVector),
+		PreviewReachScale, PreviewSegmentCount, Preview))
+	{
+		ClearThrowPreview();
+		return;
+	}
+
+	FRopeArcPreviewHitResult Hit;
+	bLastPreviewBlocked = Rope->FindThrowArcPreviewHit(Preview, PreviewSampleStep, PreviewQueryRadius, Hit);
+	if (bLastPreviewBlocked)
+	{
+		Preview.bBlocked = true;
+		Preview.BlockedStartAlpha = Hit.AngleAlpha;
+		Preview.HitPoint = Hit.HitPoint;
+		LastPreviewHitPoint = Hit.HitPoint;
+	}
+	else
+	{
+		Preview.bBlocked = false;
+		Preview.BlockedStartAlpha = 1.0f;
+		LastPreviewHitPoint = FVector::ZeroVector;
+	}
+
+	PreviewComponent->SetArcPreviewWorld(Preview);
+}
+
+void URopeWielderComponent::ClearThrowPreview()
+{
+	bLastPreviewBlocked = false;
+	LastPreviewHitPoint = FVector::ZeroVector;
+	PreviewUpdateCooldown = 0.0f;
+	if (PreviewComponent)
+	{
+		PreviewComponent->ClearArcPreview();
 	}
 }

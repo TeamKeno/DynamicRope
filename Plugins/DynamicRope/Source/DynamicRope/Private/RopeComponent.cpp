@@ -881,6 +881,11 @@ FRopeThrowContext URopeComponent::MakeDefaultThrowContext(const FVector& /*AimDi
 {
 	FRopeThrowContext Context;
 	Context.Origin = GetComponentLocation();
+	if (const AActor* Owner = GetOwner())
+	{
+		Context.OwnerVelocity = Owner->GetVelocity();
+		Context.SocketVelocity = Context.OwnerVelocity;
+	}
 	Context.FrameMode = ThrowParams.FrameMode;
 	Context.ThrowSpeed = ThrowParams.ThrowSpeed;
 	Context.FrameForward = GetForwardVector();
@@ -946,10 +951,12 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 	const FRopeThrowContext ResolvedThrow = ResolveThrowContext(ThrowContext);
 	const FRopeWhipGuide::FSwingBasis SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
 		ResolvedThrow, ResolvedThrow.SwingPlane, ResolvedThrow.CustomSwingPlaneNormal);
+	const FVector InheritedVelocity = ComputeThrowInheritedVelocity(ResolvedThrow);
 
 	// 채찍 스윙 가이드 좌표계 구성 + 활성화(퇴화 케이스 fallback은 컴포넌트 축).
 	WhipGuide.Begin(SwingBasis.AimDir, ResolvedThrow.Origin,
-		ResolvedThrow.FrameForward, SwingBasis.GuideUp, SwingBasis.GuideRight, ResolvedThrow.ThrowSpeed);
+		ResolvedThrow.FrameForward, SwingBasis.GuideUp, SwingBasis.GuideRight,
+		ResolvedThrow.ThrowSpeed, InheritedVelocity);
 	WhipElapsed = WhipGuide.GetElapsed();
 
 	++SimGeneration; // throw로 tail 위치를 재설정 → GPU 상주 버퍼 재시드(M5).
@@ -986,7 +993,7 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 		const float ReferenceDt = 1.0f / 60.0f;
 		const float BaseImpulse = ResolvedThrow.ThrowSpeed * ReferenceDt;
 		const float TipBoost = FMath::Clamp(ThrowParams.TipMass / 5.0f, 0.25f, 3.0f);
-		const FVector InheritedVelocityImpulse = ComputeThrowInheritedVelocity(ResolvedThrow) * ReferenceDt;
+		const FVector InheritedVelocityImpulse = InheritedVelocity * ReferenceDt;
 		const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipConfig.GuidedLength), 1, LastNode);
 		for (int32 i = 1; i <= LastNode; ++i)
 		{
