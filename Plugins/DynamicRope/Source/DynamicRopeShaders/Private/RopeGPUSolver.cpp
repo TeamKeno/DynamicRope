@@ -364,6 +364,22 @@ FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint
 	return R->PosSRV.GetReference();
 }
 
+FRDGBufferRef FRopeGPUSolver::RegisterResidentPos_RenderThread(FRDGBuilder& GraphBuilder, uint32 RopeId, int32& OutNumNodes)
+{
+	check(IsInRenderingThread());
+	OutNumNodes = 0;
+
+	FRopeResidentRope* R = Impl->RtRopes.Find(RopeId);
+	if (!R || !R->PosBuf.IsValid())
+	{
+		return nullptr;
+	}
+	OutNumNodes = R->NumNodes;
+	// 같은 그래프에서 DispatchPending의 solve 패스가 이 PosBuf를 UAV로 등록했으면 RDG가 dedup해 동일 노드를
+	// 돌려주고 solve→tube 의존성을 자동으로 건다.
+	return GraphBuilder.RegisterExternalBuffer(R->PosBuf);
+}
+
 // 상주 step들의 공용 실행부(RT). 전용 그래프(Step)든 씬 렌더러 그래프(DispatchPending_RenderThread)든
 // 동일 본체를 전달받은 GraphBuilder에 얹는다(Execute는 호출자). GDF/PreViewTranslation은 GDF 월드 충돌(Phase 2c)에서 사용.
 void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRopeGPUResidentStep>& Steps,

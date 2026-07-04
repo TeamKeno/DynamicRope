@@ -13,6 +13,20 @@
 
 class FRopeGPUSolver;
 class FSceneInterface;
+class FRDGBuilder;
+
+/**
+ * Phase 2b: GDF 통합 경로에서 뷰 확장이 솔브 뒤에 프록시별 튜브를 씬 그래프로 빌드하기 위한 추상 인터페이스.
+ * DynamicRopeShaders(하위 모듈)가 정의하고 런타임 FRopeSceneProxy가 구현한다(모듈 의존 방향 유지 — shaders는
+ * 런타임 렌더 타입을 몰라도 이 인터페이스 포인터만 순회하면 된다).
+ */
+class IRopeGDFTubeProxy
+{
+public:
+	virtual ~IRopeGDFTubeProxy() = default;
+	/** 렌더 스레드. 전달받은 씬 렌더러 그래프에 이 프록시의 튜브 생성 패스를 얹는다(Solver로 resident PosBuf 획득). */
+	virtual void BuildTubeInSceneGraph_RenderThread(FRDGBuilder& GraphBuilder, FRopeGPUSolver& Solver) = 0;
+};
 
 namespace RopeGDF
 {
@@ -34,4 +48,12 @@ namespace RopeGDF
 	/** GPU 솔브 dispatch를 씬 뷰 확장 경로(EnqueueSteps→DispatchPending)로 돌릴지 여부. r.DynamicRope.GDFDispatchInVE.
 	    0(기본)=Step() 전용 그래프(현행), 1=뷰 확장에서 씬 그래프로 dispatch(GDF 월드 충돌 통합). */
 	DYNAMICROPESHADERS_API bool IsDispatchInVE();
+
+	//~ 튜브 프록시 레지스트리(Phase 2b, GDF 통합 경로에서 솔브 뒤 튜브를 씬 그래프로 빌드).
+	/** 씬에 튜브 프록시를 등록한다(렌더 스레드 — 프록시 생성 시). */
+	DYNAMICROPESHADERS_API void RegisterTubeProxy(FSceneInterface* Scene, IRopeGDFTubeProxy* Proxy);
+	/** 씬에서 튜브 프록시 등록을 해제한다(렌더 스레드 — 프록시 소멸 시). */
+	DYNAMICROPESHADERS_API void UnregisterTubeProxy(FSceneInterface* Scene, IRopeGDFTubeProxy* Proxy);
+	/** 씬의 등록된 튜브 프록시를 순회한다(렌더 스레드 — 뷰 확장). */
+	void ForEachTubeProxy(FSceneInterface* Scene, TFunctionRef<void(IRopeGDFTubeProxy*)> Fn);
 }

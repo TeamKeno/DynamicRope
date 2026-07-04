@@ -25,6 +25,8 @@ namespace RopeGDF
 	static FCriticalSection GRegistryCS;
 	static TMap<FSceneInterface*, FRopeGPUSolver*> GSolvers;
 	static TMap<FSceneInterface*, int32>           GGDFActiveCounts;
+	// 튜브 프록시(Phase 2b) — 등록/순회 모두 렌더 스레드지만 위 락을 공유해 보호한다.
+	static TMap<FSceneInterface*, TArray<IRopeGDFTubeProxy*>> GTubeProxies;
 
 	void RegisterSolver(FSceneInterface* Scene, FRopeGPUSolver* Solver)
 	{
@@ -91,5 +93,53 @@ namespace RopeGDF
 	bool IsDispatchInVE()
 	{
 		return CVarGDFDispatchInVE.GetValueOnAnyThread() != 0;
+	}
+
+	void RegisterTubeProxy(FSceneInterface* Scene, IRopeGDFTubeProxy* Proxy)
+	{
+		if (!Scene || !Proxy)
+		{
+			return;
+		}
+		FScopeLock Lock(&GRegistryCS);
+		GTubeProxies.FindOrAdd(Scene).AddUnique(Proxy);
+	}
+
+	void UnregisterTubeProxy(FSceneInterface* Scene, IRopeGDFTubeProxy* Proxy)
+	{
+		if (!Scene || !Proxy)
+		{
+			return;
+		}
+		FScopeLock Lock(&GRegistryCS);
+		if (TArray<IRopeGDFTubeProxy*>* List = GTubeProxies.Find(Scene))
+		{
+			List->RemoveSingleSwap(Proxy);
+			if (List->Num() == 0)
+			{
+				GTubeProxies.Remove(Scene);
+			}
+		}
+	}
+
+	void ForEachTubeProxy(FSceneInterface* Scene, TFunctionRef<void(IRopeGDFTubeProxy*)> Fn)
+	{
+		if (!Scene)
+		{
+			return;
+		}
+		// 콜백이 프록시별 RDG 패스를 얹는 동안 맵 변경이 없도록 스냅샷을 떠 락 밖에서 순회한다.
+		TArray<IRopeGDFTubeProxy*> Snapshot;
+		{
+			FScopeLock Lock(&GRegistryCS);
+			if (const TArray<IRopeGDFTubeProxy*>* List = GTubeProxies.Find(Scene))
+			{
+				Snapshot = *List;
+			}
+		}
+		for (IRopeGDFTubeProxy* Proxy : Snapshot)
+		{
+			Fn(Proxy);
+		}
 	}
 }

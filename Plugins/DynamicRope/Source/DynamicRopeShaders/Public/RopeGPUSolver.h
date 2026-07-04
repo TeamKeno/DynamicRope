@@ -11,6 +11,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "RenderGraphFwd.h" // FRDGBuilder / FRDGBufferRef (Phase 2b: resident 버퍼를 씬 그래프에 등록)
 
 /** GPU 충돌(M2)용 해석적 capsule. 월드 공간 세그먼트(A-B) + 반지름. 호출자가 collider에서 추출해 채운다. */
 struct FRopeGPUCapsule
@@ -191,6 +192,13 @@ public:
 	 * 솔버가 이 로프를 step한 적이 없으면(= GPU 솔버 off) null → 호출자는 CPU 경로로 폴백한다.
 	 */
 	FRHIShaderResourceView* GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes);
+
+	/**
+	 * 렌더 스레드(Phase 2b). 이 로프의 resident PosBuf를 전달받은 (씬 렌더러) 그래프에 등록해 RDG 핸들을
+	 * 반환한다(없으면 null, OutNumNodes=0). 같은 프레임 DispatchPending이 같은 PosBuf를 UAV로 등록했다면
+	 * RDG가 solve→튜브 읽기 순서를 자동 보장한다 → 튜브가 이번 프레임 결과를 봐 지연이 없다.
+	 */
+	FRDGBufferRef RegisterResidentPos_RenderThread(FRDGBuilder& GraphBuilder, uint32 RopeId, int32& OutNumNodes);
 
 	/** 이번 프레임 상주 step들을 렌더 스레드로 넘겨 GPU에서 in-place 전진(블록 없음). step은 소비된다(MoveTemp).
 	    전용(자체) RDG 그래프에서 즉시 실행 — 서브시스템 Tick이 트리거하는 G4 기본 경로. */
