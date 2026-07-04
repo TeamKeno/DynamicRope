@@ -129,24 +129,34 @@ async가 맞는 경우는 "처리량(많은 로프) + 지연 허용"이지, 손�
 - **보류(수요 시)**: 다중 로프 단일 dispatch(per-rope resident PosBuf 구조와 충돌 → 슬랩 재설계),
   256노드 초과(단일 스레드그룹 한도 → multi-threadgroup 재설계; 현재는 >256 자동 CPU 폴백).
 
-## 6a. GDF 월드 충돌 — 도입 난이도 가늠(현 아키텍처 기준)
+## 6a. GDF 월드 충돌 — 구현됨 (CL 170+, 기본 OFF)
 
-`Docs/PoC/02_GDF_GoNoGo.md` 참조. GPU 전환 완료가 GDF를 **쉽게 만든 부분과 안 만든 부분**이 갈린다.
+`Docs/PoC/02_GDF_GoNoGo.md`가 blocker로 지목했던 두 구조 문제가 **모두 해결되어 프로덕션 경로로 존재**한다
+(`03_GDF_SpikeResults.md` 상단 갱신 참조). 정적 월드(벽/바닥) 광역 밀어내기 보완재이며, per-bone SDF 대체는 아니다.
 
-- **쉬워진 것(셰이더 충돌)**: GDF 밀어내기는 `RopeXPBD.usf`의 기존 SDF push-out을 월드 공간으로 미러하면
-  된다(~30~50줄). 런타임이 GPU 단일 경로라 CPU/GPU 이중 구현도 불필요(GDF는 본질적으로 GPU; CPU 폴백은
-  렌더 불가 환경이라 GDF 없어도 무방). 상주 버퍼 패턴은 PoC(2)가 씬 렌더러 그래프에서도 유효 확인.
-- **여전히 어려운 것(구조 2가지, 전환 작업이 건드리지 않음)**:
-  1. **솔버 dispatch를 뷰 확장으로 이전**: 현재 `FRopeGPUSolver::Step`은 서브시스템 Tick가 트리거하는
-     독립 렌더 커맨드(자체 FRDGBuilder). GDF 파라미터(page atlas 등)는 씬 렌더러 그래프 안에서만 유효 →
-     솔브 dispatch를 `PrePostProcessPass_RenderThread` 뷰 확장으로 옮겨야 바인딩 가능. 중간 규모 재구조.
-  2. **GDF 빌드 보장(소비자 등록)**: 읽기만으론 GDF가 안 빌드됨(문서의 최대 리스크). public API 없음 →
-     (a)전역 강제=성능 비용, (b)씬 머티리얼 규약=취약, (c)Niagara식 FXSystem 소비자 모사=엔진 내부 복제.
-     이 항목은 전환 작업과 무관하게 미해결이며 사실상의 blocker.
-- **본질적 한계(불변)**: 해상도(clipmap voxel > CollisionRadius → 얇은 벽 터널링), SurfaceVelocity 없음,
-  본 귀속 없음(wrap 불가) → **per-bone SDF 대체 아님, 정적 월드(벽/바닥) 광역 보완재 한정**.
-- **한 줄 가늠**: 충돌 커널만 보면 간단하지만, 전체 통합은 **뷰 확장 이전 + GDF 빌드 보장**이 지배 —
-  전자는 중간, 후자는 어렵고 미해결. 마일스톤화 시 "GDF 빌드 보장"을 최우선 설계 항목으로 못 박을 것.
+- **push-out 커널(별도 셰이더)**: `Shaders/Private/RopeGDFCollision.usf`(`RopeGDFCollisionCS`, 노드당 1스레드).
+  `GetDistanceToNearestSurfaceGlobal` 질의 → `Dist<CollisionRadius`면 `GetDistanceFieldGradientGlobal` 방향으로
+  penetration만큼 밀어냄 + 법선 방향 Verlet 속도 제거(비탄성) + tip-taper 간이 마찰. 핀/latch(`InvMass<=0`) 제외.
+  `RopeXPBD.usf`가 아니라 **post-solve 별도 패스**다. C++ `FRopeGDFCollisionCS`, `FillGDFShaderParams`가
+  `SetupGlobalDistanceFieldParameters_Minimal` + CoverageAtlas/샘플러 3개 수동 보강(GDF null이면 검은 볼륨+`OutValid=0`로 no-op).
+- **blocker 1 해결 — 뷰 확장 이전**: `FRopeGDFViewExtension`가 `PreRenderViewFamily_RenderThread`에서 family를
+  캡처하고, **`PreRenderBasePass_RenderThread`**(GDF 빌드 후·base pass 전)에서 씬 렌더러 `GraphBuilder`에
+  세 패스를 순서대로: `DispatchPending`(=**메인 솔브 전체 이관**) → `DispatchGDFCollision`(push-out) →
+  `BuildTubeInSceneGraph`(튜브). 같은 RDG·같은 PosBuf라 **솔브→GDF→튜브** 자동 정렬 → 스파이크의 1프레임 지연 제거.
+  솔버는 dispatch 모드 2개: `GpuSolver.Step`(전용 그래프, 즉시, GDF off) vs `GpuSolver.EnqueueSteps`(→`PendingSteps`,
+  뷰 확장이 소비). 선택은 `RopeGDF::IsDispatchInVE()`.
+- **blocker 2 해결 — GDF 빌드 보장**: 전역 강제 대신 커스텀 `FRopeGDFFXSystem : FFXSystemInterface`가
+  `UsesGlobalDistanceField()`를 `RopeGDF::IsGDFActive(Scene)`로 반환(엔진 `ShouldPrepareGlobalDistanceField`가 OR로 읽음).
+  모듈 startup `RegisterCustomFXSystem`, tick이 매 프레임 `bUseWorldGDF` 로프 수로 `SetGDFActiveCount`를 먹임 →
+  엔진이 **온디맨드**로 GDF 빌드(성능 강제 없음). `r.DynamicRope.ForceGDFConsumer`(기본 0)로 강제 검증.
+- **씬→솔버 레지스트리**: 솔버는 월드별, 뷰 확장은 전역 → `RopeGPUSolverRegistry`(`TMap<FSceneInterface*,FRopeGPUSolver*>`),
+  `URopeSimSubsystem::OnWorldBeginPlay`→`RegisterSolver`, `Deinitialize`→`UnregisterSolver`.
+- **게이트/기본값**: `r.DynamicRope.GDFDispatchInVE`(기본 **0**) → 기본은 `Step()` 전용 그래프(GDF off). `=1`이고
+  로프별 `Cfg.bUseWorldGDF`일 때만 push-out 실행. 모듈: `DynamicRopeShaders.Build.cs`에 `Renderer`+`Engine`.
+- **본질적 한계(불변)**: 클립맵 해상도(voxel > CollisionRadius → 얇은 벽 터널링), SurfaceVelocity 없음,
+  본 귀속 없음(wrap 불가) → **per-bone SDF 대체 아님, 정적 월드 광역 보완재 한정**.
+- **파일 맵**: `RopeGDFViewExtension.{h,cpp}`, `RopeGPUSolverRegistry.{h,cpp}`, `RopeGDFFXSystem.{h,cpp}`,
+  `Shaders/Private/RopeGDFCollision.usf`, `RopeGPUSolver.cpp`(EnqueueSteps/DispatchPending/DispatchGDFCollision).
 
 ---
 

@@ -1,13 +1,40 @@
-# 03. GDF 월드 충돌 스파이크 — 실측 결과 (2026-07-03)
+# 03. GDF 월드 충돌 — 스파이크 실측(2026-07-03) → 프로덕션 재구현(2026-07-04, CL 170+)
+
+> ## ⚠️ 갱신 (2026-07-04, CL 170+): 프로덕션 재구현됨 — 두 blocker 해결
+>
+> 아래 원문(2026-07-03)은 스파이크를 revert한 시점의 기록이다. 그 뒤 **GDF 월드 충돌이 프로덕션에
+> 재구현됐고, "정식 도입을 막던 두 구조적 blocker를 실제로 해결했다."** 현재 depot의 실제 상태:
+>
+> - **push-out 커널은 별도 셰이더** `Shaders/Private/RopeGDFCollision.usf`(`RopeGDFCollisionCS`) —
+>   `RopeXPBD.usf` 안이 아니다. C++는 `FRopeGDFCollisionCS`(RopeGPUSolver.cpp),
+>   `FillGDFShaderParams`가 `SetupGlobalDistanceFieldParameters_Minimal` + CoverageAtlas/샘플러 수동 보강.
+> - **blocker 1(뷰 확장 이전) 해결**: 스파이크의 `PrePostProcessPass` 별도 패스(1프레임 지연)가 아니라,
+>   `FRopeGDFViewExtension`가 `PreRenderViewFamily_RenderThread`에서 family 캡처 → **`PreRenderBasePass_RenderThread`**
+>   (GDF 빌드 후·base pass 전)에서 **메인 솔브까지 통째로** 씬 그래프로 이관. 한 RDG에서
+>   `DispatchPending`(솔브) → `DispatchGDFCollision`(push-out) → `BuildTubeInSceneGraph`(튜브)를 순서
+>   정렬 → **1프레임 지연 제거**(튜브가 push-out된 PosBuf를 같은 프레임에 읽음).
+> - **blocker 2(GDF 빌드 보장) 해결**: 전역 강제(`DetailedNecessityCheck 0`) 대신
+>   **커스텀 `FRopeGDFFXSystem : FFXSystemInterface`**가 `UsesGlobalDistanceField()`를 `IsGDFActive(Scene)`로
+>   반환(모듈 startup에 `RegisterCustomFXSystem`). tick이 매 프레임 `bUseWorldGDF` 로프 수로
+>   `SetGDFActiveCount`를 먹여 엔진이 온디맨드로 GDF를 빌드한다(성능 강제 없음). `r.DynamicRope.ForceGDFConsumer`로 강제 검증 가능.
+> - **씬→솔버 레지스트리**: 솔버는 월드별, 뷰 확장은 전역 → `RopeGPUSolverRegistry`(`TMap<FSceneInterface*,FRopeGPUSolver*>`),
+>   `URopeSimSubsystem::OnWorldBeginPlay`/`Deinitialize`에서 등록/해제.
+> - **게이트**: `r.DynamicRope.GDFDispatchInVE`(기본 **0** = 솔버 전용 그래프 경로, GDF off). `=1`이고
+>   로프별 `bUseWorldGDF`일 때만 GDF push-out 실행.
+> - **불변 한계**(아래와 동일): 정적 월드 전용 · 클립맵 해상도 터널링 · SurfaceVelocity 없음 · 본 귀속 없음(wrap 불가).
+>
+> 아래는 스파이크 시점의 역사적 기록으로 남긴다(설계 근거·API 레시피 참고용).
+
+---
+
+## (역사) 스파이크 실측 원문 — 2026-07-03
 
 `02_GDF_GoNoGo.md`의 Go/NoGo 판단 뒤, "일단 넣어보고 느낌부터 본다"로 GDF 월드 충돌을
 스파이크 구현해 PIE에서 실측했다. **느낌은 확인(정적 벽/바닥 밀어내기 동작 OK)**. 스파이크 코드는
-프로덕션에 남기지 않고 revert했고, 이 문서가 그 기록이자 재구현 레시피다.
+당시 프로덕션에 남기지 않고 revert했다(이후 CL 170+에서 재구현 — 위 갱신 참조).
 
-> 결론 요약: 충돌 커널은 예상대로 간단(~40줄)했고 느낌도 났다. 하지만 **정식 도입을 막는 두
-> 구조적 문제(뷰 확장 이전, GDF 빌드 보장)는 스파이크가 우회했을 뿐 풀지 않았다.** GDF는 여전히
-> per-bone SDF 대체가 아니라 정적 월드 광역 보완재. 실제 채택은 별도 마일스톤에서 두 blocker를
-> 먼저 설계 항목으로 못 박고 진행할 것.
+> 결론 요약(스파이크 시점): 충돌 커널은 예상대로 간단(~40줄)했고 느낌도 났다. 하지만 **정식 도입을 막는 두
+> 구조적 문제(뷰 확장 이전, GDF 빌드 보장)는 스파이크가 우회했을 뿐 풀지 않았다.** (→ 두 문제 모두 CL 170+에서 해결됨.)
 
 ## 무엇을 만들었나 (스파이크 구조)
 
@@ -64,6 +91,9 @@ GDF는 소비자(Lumen/Niagara 등)가 플래그하지 않으면 빌드되지 �
 - GDF 해상도 한계로 얇은 벽은 RadiusScale를 키우지 않으면 통과 가능(터널링).
 
 ## 정식 도입 시 남는 문제 (스파이크가 우회한 것 = 진짜 작업)
+
+> ✅ **아래 두 항목 모두 CL 170+ 프로덕션 구현에서 해결됨**(상단 갱신 배너 참조). 이 절은 스파이크 시점의
+> 문제 정의로 남긴다.
 
 1. **솔버 dispatch를 뷰 확장으로 이전(중간 규모)**: 스파이크는 push-out을 *별도 패스*로 씬 그래프에
    얹어 1프레임 지연을 감수했다. 지연 없이 하려면 메인 솔브 자체가 GDF 파라미터를 봐야 하고, 그 파라미터는
