@@ -102,8 +102,8 @@ private:
 		const FRopeSimState& Sim, const FConfig& Config, TArray<FVector>& OutTargets) const;
 
 	/** 원시 곡선 점들을 로프 노드 간격(세그먼트 길이)에 맞춰 등간격 리샘플한다. */
-	void ResampleGuideByNodeSpacing(const TArray<FVector>& SourcePoints, float TotalLength, int32 NodeCount,
-		int32 DesiredPointCount, float FallbackSegmentLength, TArray<FVector>& OutPoints) const;
+	void ResampleGuideByNodeSpacing(const TArray<FVector>& SourcePoints, float NodeSpacing,
+		int32 DesiredPointCount, TArray<FVector>& OutPoints) const;
 
 	bool bActive = false;
 	float Elapsed = 0.0f;

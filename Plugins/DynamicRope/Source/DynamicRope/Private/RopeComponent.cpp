@@ -42,6 +42,30 @@ namespace
 	// Releasing 진입 시 Free 복귀까지의 쿨다운(초). Abort/Hold 실패/수동 해제 공통.
 	constexpr float ReleaseCooldownSeconds = 0.08f;
 
+	void InjectPinnedFrameVelocityForFreeReturn(FRopeSimState& Sim)
+	{
+		if (!Sim.bStartPinned || Sim.Num() < 2)
+		{
+			return;
+		}
+
+		const FVector PinDelta = Sim.StartPinTarget - Sim.StartPinPrev;
+		if (PinDelta.IsNearlyZero())
+		{
+			return;
+		}
+
+		for (int32 i = 1; i < Sim.Num(); ++i)
+		{
+			if (!Sim.PrevPositions.IsValidIndex(i) || !Sim.InvMass.IsValidIndex(i) || Sim.InvMass[i] <= 0.0f)
+			{
+				continue;
+			}
+
+			Sim.PrevPositions[i] -= PinDelta;
+		}
+	}
+
 	// phase 전이 로그용 짧은 이름(UEnum 리플렉션 없이 hot-path에서도 안전).
 	const TCHAR* PhaseName(ERopePhase Phase)
 	{
@@ -529,6 +553,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 				FlightNoContactElapsed += DeltaTime;
 				if (FlightNoContactElapsed >= FlightReturnTime)
 				{
+					InjectPinnedFrameVelocityForFreeReturn(Sim);
 					SetPhase(ERopePhase::Free, *FString::Printf(TEXT("flight failed %.3fs"), FlightNoContactElapsed));
 					ResetTransientPhaseState();
 				}

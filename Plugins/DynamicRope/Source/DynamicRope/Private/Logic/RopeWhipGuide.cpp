@@ -320,21 +320,19 @@ void FRopeWhipGuide::BuildGuideTargets(float NormalizedTime, int32 LastGuidedNod
 		RawPoints.Add(HandPos + SweepDir * (RawAlpha * GuideLength) + InheritedDrift * DriftWeight);
 	}
 
-	ResampleGuideByNodeSpacing(RawPoints, Sim.RopeLength, Sim.Num(), DesiredPointCount, Sim.SegmentLength, OutTargets);
+	ResampleGuideByNodeSpacing(RawPoints, Sim.SegmentLength, DesiredPointCount, OutTargets);
 }
 
-void FRopeWhipGuide::ResampleGuideByNodeSpacing(const TArray<FVector>& SourcePoints, float TotalLength, int32 NodeCount,
-	int32 DesiredPointCount, float FallbackSegmentLength, TArray<FVector>& OutPoints) const
+void FRopeWhipGuide::ResampleGuideByNodeSpacing(const TArray<FVector>& SourcePoints, float NodeSpacing,
+	int32 DesiredPointCount, TArray<FVector>& OutPoints) const
 {
 	OutPoints.Reset();
-	if (SourcePoints.Num() == 0 || NodeCount < 2 || DesiredPointCount <= 0)
+	if (SourcePoints.Num() == 0 || DesiredPointCount <= 0)
 	{
 		return;
 	}
 
-	const float SegmentLength = TotalLength > KINDA_SMALL_NUMBER
-		? TotalLength / static_cast<float>(NodeCount - 1)
-		: FallbackSegmentLength;
+	const float SegmentLength = FMath::Max(NodeSpacing, KINDA_SMALL_NUMBER);
 	OutPoints.SetNum(DesiredPointCount);
 	OutPoints[0] = SourcePoints[0];
 	if (DesiredPointCount == 1)
