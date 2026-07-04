@@ -57,14 +57,14 @@ GPU 상주는 **물리 phase(Free/Flight)만**, 그것도 **whip 아닐 때만**
 Phase 0   GPU GetLatest   : 지난 프레임 RT 리드백 결과를 GpuLatest 캐시로 회수
 Phase 1a  Collider 수집   : provider 레지스트리에서 1회 빌드 → 로프별 FrameColliders (CL57)
 Phase 1b  Prepare(GT)     : init/pin 전진/whip/로직 phase
-Phase 2   Solve           : GPU면 resident step(whip 로프는 CPU 폴백) / 아니면 ParallelFor CPU
+Phase 2   Solve           : GPU면 resident step(whip·로직 phase는 override 패스) / 아니면 ParallelFor CPU(노드수 초과 등 폴백)
 Phase 3   Finalize(GT)    : Flight 접촉 감지·캡처 + 렌더 dirty
 ```
 
 ### 핵심 원리 (M5a)
 로프 솔브는 **순차적**(N+1은 N의 *풀린* 결과 필요). 그래서 위치 버퍼(`PosBuf`)를 **GPU에 상주**시켜
 매 프레임 **in-place로 전진**한다 → 순차 의존성이 GPU 안에서 충족, CPU 왕복 불필요.
-- 재시드 트리거: `URopeComponent::SimGeneration`(init/throw/logic phase/whip에서 증가). 정상 Free/Flight(비-whip)엔 불변 → 상주 유지.
+- 재시드 트리거: `URopeComponent::SimGeneration`(**init/throw = 진짜 시드일 때만 증가**). G2 이후 로직 phase·whip은 override 패스로 실려 재시드하지 않으므로 전체 phase 사이클(throw→wrap→release→re-throw)이 상주 유지된다. 서브시스템은 이 세대를 GPU step에 실어(`Step.Generation`) 회수분의 세대가 현재와 일치할 때만 CPU 미러에 반영한다 → 재시드 catch-up(1~2프레임) 동안 stale 회수분이 새 시드를 덮는 것을 막는다.
 - CPU `Sim`은 렌더/충돌용 **지연 미러**(RT 리드백을 GT로 회수, ~1~2프레임). node 0은 현재 핀으로 덮어써 잡은 끝이 손을 정확히 추종.
 - 리드백 Lock/consume/재무장은 **전부 렌더 스레드**에서(매 프레임 step 커맨드가 직전 리드백 처리) → GT 스톨 없음.
 
