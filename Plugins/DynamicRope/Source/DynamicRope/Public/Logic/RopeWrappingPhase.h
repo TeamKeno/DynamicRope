@@ -80,7 +80,8 @@ private:
 
 	bool AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
 
-	bool InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx);
+	bool InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor,
+		const FRopeSimState& Sim, const FContext& Ctx);
 
 	bool AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 StepBudget, const FRopeSimState& Sim, const FContext& Ctx);
 
@@ -101,6 +102,9 @@ private:
 
 	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;
+
+	void OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
+		const USkeletalMeshComponent* Mesh, FVector& InOutAxisDirection) const;
 
 	bool ProjectWrapPointToSurface(FName Bone, const USkeletalMeshComponent* Mesh,
 		const FRopeSimState& Sim, const FContext& Ctx,

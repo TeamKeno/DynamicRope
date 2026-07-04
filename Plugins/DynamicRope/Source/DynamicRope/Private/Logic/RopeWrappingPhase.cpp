@@ -276,7 +276,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	const bool bInitialized =
 		State.PathMode == ERopeWrappingPathMode::AnalyticHelix
 			? AppendAnalyticProgressiveWrapPathPoint(0, Sim, Ctx)
-			: InitializeSurfaceVectorFieldProgressiveWrapPath(StoredLatchAnchor, Ctx);
+			: InitializeSurfaceVectorFieldProgressiveWrapPath(StoredLatchAnchor, Sim, Ctx);
 	if (!bInitialized || !AppendWrappingAnchorFromPathPoint(0, Sim, Ctx))
 	{
 		return false;
@@ -318,7 +318,8 @@ bool FRopeWrappingPhase::AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex,
 	return true;
 }
 
-bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx)
+bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor,
+	const FRopeSimState& Sim, const FContext& Ctx)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_InitSurfaceVectorFieldProgressivePath);
 
@@ -336,6 +337,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 	{
 		return false;
 	}
+	OrientWrappingAxisByTail(LatchAnchor, Sim, Mesh, State.PathAxisDirection);
 
 	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
 	State.PathSurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
@@ -581,6 +583,7 @@ bool FRopeWrappingPhase::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceA
 	{
 		return false;
 	}
+	OrientWrappingAxisByTail(LatchAnchor, Sim, Mesh, AxisDirection);
 
 	//3. latch anchor를 world 좌표로 복원
 	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
@@ -697,6 +700,7 @@ bool FRopeWrappingPhase::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor
 	{
 		return false;
 	}
+	OrientWrappingAxisByTail(LatchAnchor, Sim, Mesh, AxisDirection);
 
 	//3. latch anchor를 world 좌표로 복원
 	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
@@ -811,6 +815,56 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 	OutAxisOrigin = BoneLocation;
 	OutAxisDirection = BoneXform.GetUnitAxis(EAxis::X).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 	return true;
+}
+
+void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
+	const USkeletalMeshComponent* Mesh, FVector& InOutAxisDirection) const
+{
+	if (!Mesh || LatchAnchor.Bone.IsNone())
+	{
+		return;
+	}
+
+	const FName ParentBone = Mesh->GetParentBone(LatchAnchor.Bone);
+	if (ParentBone.IsNone())
+	{
+		return;
+	}
+
+	float ParentScore = 0.0f;
+	float BoneScore = 0.0f;
+	float TotalWeight = 0.0f;
+	const FVector ParentWorld = Mesh->GetSocketTransform(ParentBone).GetLocation();
+	const FVector BoneWorld = Mesh->GetSocketTransform(LatchAnchor.Bone).GetLocation();
+
+	const auto AddProbe = [&](int32 NodeIndex, float Weight)
+	{
+		if (!Sim.Positions.IsValidIndex(NodeIndex) || Weight <= 0.0f)
+		{
+			return;
+		}
+
+		const FVector ProbeWorld = Sim.Positions[NodeIndex];
+		ParentScore += FVector::DistSquared(ProbeWorld, ParentWorld) * Weight;
+		BoneScore += FVector::DistSquared(ProbeWorld, BoneWorld) * Weight;
+		TotalWeight += Weight;
+	};
+
+	AddProbe(LatchAnchor.NodeIndex + 1, 2.0f);
+	AddProbe(Sim.Num() - 1, 1.0f);
+
+	if (TotalWeight <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	ParentScore /= TotalWeight;
+	BoneScore /= TotalWeight;
+
+	if (ParentScore < BoneScore)
+	{
+		InOutAxisDirection *= -1.0f;
+	}
 }
 
 bool FRopeWrappingPhase::ProjectWrapPointToSurface(FName Bone, const USkeletalMeshComponent* Mesh,
