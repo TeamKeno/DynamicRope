@@ -22,6 +22,7 @@ class AActor;
 class IRopeCollider;
 class IRopeColliderProvider;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
 class USkeletalMeshComponent;
 class FRegisterComponentContext;
 struct FRopeDebugSnapshot;
@@ -99,6 +100,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render")
 	TObjectPtr<UMaterialInterface> RopeMaterial = nullptr;
 
+	/** 꼬임(strand) 패턴 밀도를 rope length에 비례시켜 자동 조정할지. 켜면 런타임에 dynamic material instance로
+	 *  머티리얼이 저작한 TwistTurns에 (RopeLength / 기준 200cm)를 곱해 세팅한다 → 로프가 길어져도 꼬임 간격이
+	 *  일정하고, 프리셋별 상대 밀도(예: 파라코드가 더 촘촘)는 보존된다. 끄면 머티리얼 원본을 그대로 사용. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render")
+	bool bScaleTwistByLength = true;
+
 #if WITH_EDITORONLY_DATA
 	/** 에디터에서 이 로프 액터를 선택했을 때 배치-보조 가이드(앵커·조준·도달범위·wrap 타깃·던지기 아크)를
 	 *  FRopeComponentVisualizer가 그릴지 여부. 레벨 에디터 전용(런타임/쿠킹 제외). */
@@ -172,6 +179,16 @@ public:
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
 
 private:
+	// 길이 의존 머티리얼 파라미터(꼬임 밀도)를 dynamic material instance로 갱신한다:
+	// 저작된 TwistTurns × (RopeLength / 기준 200cm) → rope가 길어져도 꼬임 간격이 일정(프리셋 밀도 보존).
+	// RopeMaterial/RopeLength/bScaleTwistByLength 변경 시 호출. GetMaterial은 이 MID를 우선 반환한다.
+	void UpdateRopeMaterialDynamicParams();
+
+	// UpdateRopeMaterialDynamicParams가 만드는 런타임 인스턴스(부모 = RopeMaterial/프리셋). 길이 의존 파라미터용.
+	// bScaleTwistByLength=false거나 RopeMaterial에 TwistTurns가 없으면 nullptr(원본 머티리얼을 그대로 사용).
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> RopeMID = nullptr;
+
 	//~ 페이즈 상태 머신 ----------------------------------------------------
 	ERopePhase Phase = ERopePhase::Free;
 
