@@ -90,4 +90,14 @@ private:
 	// GPU 감지 결과(콜라이더 인덱스)를 로프의 귀속 테이블로 FRopeContactCandidate로 복원해 컴포넌트에
 	// 채운다(Finalize의 Flight 접촉 소스). 지연분이 현재 시드 generation과 맞을 때만 유효.
 	void BuildGpuFlightCandidates(URopeComponent& Rope);
+
+	// Phase 2(GPU) 헬퍼 — 한 로프의 GPU 상주 step을 구성한다. GPU 상주 대상이면 OutStep을 채우고 true를
+	// 반환(디스패치 목록에 추가), 노드수 초과 등 폴백이면 내부에서 CPU 솔브 후 false. Rope.bGpuSteppedThisFrame도 세팅.
+	bool TryBuildResidentStep(URopeComponent& Rope, float DeltaTime, FRopeGPUResidentStep& OutStep);
+	// G3: Flight 로프의 접촉 감지 요청(+ whip 예측 입력)을 Step에 세팅하고 귀속 테이블을 리셋한다.
+	void RequestContactDetection(URopeComponent& Rope, float DeltaTime, FRopeGPUResidentStep& Step) const;
+	// 이 로프의 FrameColliders를 capsule/SDF로 분류해 Step에 싣는다. bDetectThisRope면 귀속 테이블도 병행 채움.
+	void PackStepColliders(URopeComponent& Rope, bool bDetectThisRope, FRopeGPUResidentStep& Step) const;
+	// G1: Flight whip 가이드 타깃을 override로 Step에 패킹한다(적분 전 적용, 비-Flight면 no-op).
+	void PackWhipOverride(const URopeComponent& Rope, FRopeGPUResidentStep& Step) const;
 };
