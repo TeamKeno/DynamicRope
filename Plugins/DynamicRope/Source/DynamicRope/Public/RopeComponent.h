@@ -122,12 +122,25 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowWithContext(const FRopeThrowContext& ThrowContext);
 
+	/** 로프 길이와 현재 whip/swing 설정을 반영한 던지기 전 미리보기 호 데이터를 만든다. */
+	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
+	bool BuildThrowArcPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
+		FRopeArcPreviewData& OutPreview) const;
+
+	/** 현재 프레임 collider 스냅샷 기준으로 미리보기 호가 막히는 첫 각도를 찾는다. */
+	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
+	bool FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, float SampleStep, float QueryRadius,
+		FRopeArcPreviewHitResult& OutHit) const;
+
 	/** 현재 진행 중인 잡기/감기(Contacting/Wrapping/Wrapped)를 수동으로 해제한다(Releasing phase). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ReleaseWrap();
 
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	ERopePhase GetPhase() const { return Phase; }
+
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	bool IsTensioned(float SlackTolerance = 5.0f) const;
 
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
@@ -332,4 +345,6 @@ private:
 	//~ Wrapped --------------------------------------------------------------
 	/** latch/anchor 노드 InvMass=0, 나머지 1 — Wrapped 중 자유 구간만 솔버가 움직이게. */
 	void ApplyWrappedMassMask();
+
+	bool ComputeTensionSlack(float& OutSlack, float& OutStraightDistance, float& OutAvailableLength) const;
 };

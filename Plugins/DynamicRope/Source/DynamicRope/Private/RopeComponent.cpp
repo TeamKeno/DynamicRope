@@ -57,6 +57,18 @@ namespace
 		}
 	}
 
+	FVector ArcPreviewDirectionAtAlpha(const FRopeArcPreviewData& Preview, float Alpha)
+	{
+		const FVector Aim = FRopeWhipGuide::SafeNormalOr(Preview.AimDir, FVector::ForwardVector);
+		FVector Up = Preview.GuideUp - FVector::DotProduct(Preview.GuideUp, Aim) * Aim;
+		Up = FRopeWhipGuide::SafeNormalOr(Up, FVector::UpVector);
+
+		const float ClampedAlpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
+		const float SweepRadians = FMath::DegreesToRadians(FMath::Clamp(Preview.SweepAngleDegrees, 1.0f, 180.0f));
+		const float Angle = SweepRadians * (1.0f - ClampedAlpha);
+		return (Aim * FMath::Cos(Angle) + Up * FMath::Sin(Angle)).GetSafeNormal();
+	}
+
 }
 
 URopeComponent::URopeComponent()
@@ -93,6 +105,127 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 
 	EnsureRopeInitialized();
 	StartFreshThrow(ThrowContext);
+}
+
+bool URopeComponent::IsTensioned(float SlackTolerance) const
+{
+	float Slack = 0.0f;
+	float StraightDistance = 0.0f;
+	float AvailableLength = 0.0f;
+	if (!ComputeTensionSlack(Slack, StraightDistance, AvailableLength))
+	{
+		return false;
+	}
+
+	return Slack <= FMath::Max(0.0f, SlackTolerance);
+}
+
+bool URopeComponent::BuildThrowArcPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
+	FRopeArcPreviewData& OutPreview) const
+{
+	OutPreview = FRopeArcPreviewData();
+
+	const float ClampedReachScale = FMath::Max(ReachScale, 0.0f);
+	if (ClampedReachScale <= KINDA_SMALL_NUMBER)
+	{
+		return false;
+	}
+
+	const FRopeThrowContext ResolvedThrow = ResolveThrowContext(ThrowContext);
+	const FRopeWhipGuide::FSwingBasis SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
+		ResolvedThrow, ResolvedThrow.SwingPlane, ResolvedThrow.CustomSwingPlaneNormal);
+	const FRopeWhipGuide::FConfig WhipGuideConfig = MakeWhipGuideConfig();
+	const float SourceRopeLength = FMath::Max(Sim.RopeLength, RopeLength);
+
+	OutPreview.Origin = ResolvedThrow.Origin;
+	OutPreview.AimDir = SwingBasis.AimDir;
+	OutPreview.GuideUp = SwingBasis.GuideUp;
+	OutPreview.Radius = SourceRopeLength * ClampedReachScale;
+	OutPreview.SweepAngleDegrees = WhipGuideConfig.SweepAngleDegrees;
+	OutPreview.SegmentCount = FMath::Clamp(SegmentCount, 1, 128);
+	return OutPreview.Radius > KINDA_SMALL_NUMBER;
+}
+
+bool URopeComponent::FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, float SampleStep, float QueryRadius,
+	FRopeArcPreviewHitResult& OutHit) const
+{
+	OutHit = FRopeArcPreviewHitResult();
+	if (Preview.Radius <= KINDA_SMALL_NUMBER || FrameColliders.Num() == 0)
+	{
+		return false;
+	}
+
+	// Preview는 게임플레이 확정 판정이 아니라 조준 보조라서, SDF query가 프레임을 먹지 않도록 상한을 둔다.
+	constexpr int32 MaxPreviewAngleSamples = 24;
+	constexpr int32 MaxPreviewRadialSamples = 16;
+	constexpr int32 MaxPreviewTotalSamples = 256;
+
+	const int32 AngleSamples = FMath::Clamp(Preview.SegmentCount, 1, MaxPreviewAngleSamples);
+	const float RadialStep = FMath::Max(SampleStep, 1.0f);
+	const int32 RequestedRadialSamples = FMath::Max(1, FMath::CeilToInt(Preview.Radius / RadialStep));
+	const int32 TotalLimitedRadialSamples = FMath::Max(1, MaxPreviewTotalSamples / (AngleSamples + 1));
+	const int32 RadialSamples = FMath::Clamp(RequestedRadialSamples, 1,
+		FMath::Min(MaxPreviewRadialSamples, TotalLimitedRadialSamples));
+	const float EffectiveQueryRadius = QueryRadius > KINDA_SMALL_NUMBER
+		? QueryRadius
+		: FMath::Max(Radius, WrapConfig.ContactRadius);
+
+	FBox PreviewBounds(EForceInit::ForceInit);
+	PreviewBounds += Preview.Origin;
+	for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
+	{
+		const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
+		const FVector Direction = ArcPreviewDirectionAtAlpha(Preview, AngleAlpha);
+		if (!Direction.IsNearlyZero())
+		{
+			PreviewBounds += Preview.Origin + Direction * Preview.Radius;
+		}
+	}
+	PreviewBounds = PreviewBounds.ExpandBy(EffectiveQueryRadius);
+
+	TArray<const IRopeCollider*, TInlineAllocator<8>> CandidateColliders;
+	for (const IRopeCollider* Collider : FrameColliders)
+	{
+		if (Collider && Collider->GetWorldBounds().ExpandBy(EffectiveQueryRadius).Intersect(PreviewBounds))
+		{
+			CandidateColliders.Add(Collider);
+		}
+	}
+	if (CandidateColliders.Num() == 0)
+	{
+		return false;
+	}
+
+	for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
+	{
+		const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
+		const FVector Direction = ArcPreviewDirectionAtAlpha(Preview, AngleAlpha);
+		if (Direction.IsNearlyZero())
+		{
+			continue;
+		}
+
+		for (int32 RadialIndex = 1; RadialIndex <= RadialSamples; ++RadialIndex)
+		{
+			const float DistanceAlpha = static_cast<float>(RadialIndex) / static_cast<float>(RadialSamples);
+			const FVector SamplePoint = Preview.Origin + Direction * (Preview.Radius * DistanceAlpha);
+
+			for (const IRopeCollider* Collider : CandidateColliders)
+			{
+				const FRopeContact Contact = Collider->Query(SamplePoint, EffectiveQueryRadius);
+				if (Contact.bHit)
+				{
+					OutHit.bHit = true;
+					OutHit.HitPoint = Contact.SurfacePoint;
+					OutHit.AngleAlpha = AngleAlpha;
+					OutHit.DistanceAlpha = DistanceAlpha;
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
 }
 
 void URopeComponent::ReleaseWrap()
@@ -267,6 +400,27 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 #else
 	constexpr bool bDebugCapture = false;
 #endif
+
+	// Test log for per-tick tension checks. Re-enable while tuning if needed.
+	// if (Phase == ERopePhase::Wrapping || Phase == ERopePhase::Wrapped)
+	// {
+	// 	constexpr float TensionLogTolerance = 5.0f;
+	// 	float Slack = 0.0f;
+	// 	float StraightDistance = 0.0f;
+	// 	float AvailableLength = 0.0f;
+	// 	const bool bHasTensionData = ComputeTensionSlack(Slack, StraightDistance, AvailableLength);
+	// 	const bool bTensioned = bHasTensionData && Slack <= TensionLogTolerance;
+	// 	UE_LOG(LogDynamicRope, Log,
+	// 		TEXT("[%s] TensionTick phase=%s valid=%s tension=%s slack=%.2fcm straight=%.2fcm available=%.2fcm tolerance=%.2fcm"),
+	// 		*GetName(),
+	// 		PhaseName(Phase),
+	// 		bHasTensionData ? TEXT("true") : TEXT("false"),
+	// 		bTensioned ? TEXT("true") : TEXT("false"),
+	// 		Slack,
+	// 		StraightDistance,
+	// 		AvailableLength,
+	// 		TensionLogTolerance);
+	// }
 
 	// Flight: 솔브 후 이동 경로 기반 접촉 후보 감지 → 캡처. 파이프라인 자체는
 	// FRopeFlightContactDetector(UObject 비의존)이고, 여기서는 입력 조립 + 전이/이벤트만 한다.
@@ -1178,4 +1332,95 @@ void URopeComponent::ApplyWrappedMassMask()
 		const bool bAnchor = AnchorNodes.Contains(i);
 		OverrideFrame.SetInvMass(i, (bStartPin || bAnchor) ? 0.0f : 1.0f);
 	}
+}
+
+bool URopeComponent::ComputeTensionSlack(float& OutSlack, float& OutStraightDistance, float& OutAvailableLength) const
+{
+	OutSlack = 0.0f;
+	OutStraightDistance = 0.0f;
+	OutAvailableLength = 0.0f;
+
+	if (Phase != ERopePhase::Wrapping && Phase != ERopePhase::Wrapped)
+	{
+		return false;
+	}
+
+	if (!Sim.Positions.IsValidIndex(0))
+	{
+		return false;
+	}
+
+	int32 AnchorNodeIndex = INDEX_NONE;
+	FVector AnchorWorld = FVector::ZeroVector;
+	bool bHasAnchor = false;
+
+	const auto ResolveSurfaceAnchor = [this](const FRopeSurfaceAnchor& Anchor, FVector& OutWorld, int32& OutNodeIndex) -> bool
+	{
+		OutNodeIndex = Anchor.NodeIndex;
+		if (!Sim.Positions.IsValidIndex(OutNodeIndex))
+		{
+			return false;
+		}
+
+		OutWorld = Sim.Positions[OutNodeIndex];
+		const USkeletalMeshComponent* Mesh = Anchor.Mesh.Get();
+		if (Mesh && !Anchor.Bone.IsNone())
+		{
+			const FTransform BoneXform = Mesh->GetSocketTransform(Anchor.Bone);
+			const FVector SurfaceWorld = BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
+			const FVector NormalWorld = BoneXform.TransformVectorNoScale(Anchor.LocalNormal)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+			OutWorld = SurfaceWorld + NormalWorld * Anchor.SurfaceOffset;
+		}
+
+		return true;
+	};
+
+	if (Phase == ERopePhase::Wrapped)
+	{
+		if (WrapController.State.Anchors.Num() > 0)
+		{
+			bHasAnchor = ResolveSurfaceAnchor(WrapController.State.Anchors[0], AnchorWorld, AnchorNodeIndex);
+		}
+		else if (WrapController.State.Latched.Num() > 0)
+		{
+			const FRopeLatchNode& Latch = WrapController.State.Latched[0];
+			AnchorNodeIndex = Latch.NodeIndex;
+			if (Sim.Positions.IsValidIndex(AnchorNodeIndex))
+			{
+				AnchorWorld = Sim.Positions[AnchorNodeIndex];
+				if (const USkeletalMeshComponent* Mesh = WrapController.State.Mesh.Get())
+				{
+					const FName Bone = Latch.Bone.IsNone() ? WrapController.State.BoneName : Latch.Bone;
+					if (!Bone.IsNone())
+					{
+						AnchorWorld = Mesh->GetSocketTransform(Bone).TransformPosition(Latch.BoneLocalPos);
+					}
+				}
+				bHasAnchor = true;
+			}
+		}
+	}
+	else
+	{
+		if (WrappingPhase.State.Anchors.Num() > 0)
+		{
+			bHasAnchor = ResolveSurfaceAnchor(WrappingPhase.State.Anchors[0], AnchorWorld, AnchorNodeIndex);
+		}
+		else if (WrappingPhase.State.LatchAnchor.NodeIndex != INDEX_NONE)
+		{
+			bHasAnchor = ResolveSurfaceAnchor(WrappingPhase.State.LatchAnchor, AnchorWorld, AnchorNodeIndex);
+		}
+	}
+
+	if (!bHasAnchor || AnchorNodeIndex <= 0)
+	{
+		return false;
+	}
+
+	const FVector PinWorld = Sim.bStartPinned ? Sim.StartPinTarget : Sim.Positions[0];
+	OutStraightDistance = FVector::Dist(PinWorld, AnchorWorld);
+	OutAvailableLength = static_cast<float>(AnchorNodeIndex) * FMath::Max(Sim.SegmentLength, 0.0f);
+	OutSlack = OutAvailableLength - OutStraightDistance;
+	return OutAvailableLength > KINDA_SMALL_NUMBER;
 }
