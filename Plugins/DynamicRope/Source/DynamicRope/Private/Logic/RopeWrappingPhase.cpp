@@ -935,7 +935,20 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 
 	const float FullTailDelay = (FullDistance / SegmentLength) * Ctx.Config.WrappingTailDelayPerSegment;
 	const float TotalDuration = FMath::Max(State.Duration + FullTailDelay, KINDA_SMALL_NUMBER);
-	const float FrontSpeed = FullDistance / TotalDuration;
+	const float BaseFrontSpeed = FullDistance / TotalDuration;
+
+	// Accelerate the visual wrap front as more of the tail is already wound.
+	// Use the full requested distance, not the currently built path cap, so early path-build frames do not spike speed.
+	const float ProgressAlpha = FMath::Clamp(
+		State.FrontDistance / FMath::Max(FullDistance, KINDA_SMALL_NUMBER),
+		0.0f,
+		1.0f);
+
+	const float StartSpeedScale = 0.5f;
+	const float EndSpeedScale = 3.0f;
+	const float SpeedScale = FMath::Lerp(StartSpeedScale, EndSpeedScale, RopeMath::SmoothStep(ProgressAlpha));
+
+	const float FrontSpeed = BaseFrontSpeed * SpeedScale;
 	State.FrontDistance = FMath::Min(
 		State.FrontDistance + FrontSpeed * FMath::Max(0.0f, DeltaTime),
 		TargetFrontDistance);
