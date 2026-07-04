@@ -344,7 +344,7 @@ private:
 
 	//~ Wrapped --------------------------------------------------------------
 	/** latch/anchor 노드 InvMass=0, 나머지 1 — Wrapped 중 자유 구간만 솔버가 움직이게. */
-	void ApplyWrappedMassMask();
+	void ApplyWrappedMassMask(bool bResetDynamicNodeVelocity = false);
 
 	bool ComputeTensionSlack(float& OutSlack, float& OutStraightDistance, float& OutAvailableLength) const;
 };

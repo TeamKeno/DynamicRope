@@ -125,20 +125,15 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 
 void FRopeWrappingPhase::ApplyMassMask(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const
 {
-	TSet<int32> AnchorNodes;
-	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
-	{
-		if (Sim.InvMass.IsValidIndex(Anchor.NodeIndex))
-		{
-			AnchorNodes.Add(Anchor.NodeIndex);
-		}
-	}
+	const int32 LatchNode = State.LatchAnchor.NodeIndex;
+	const bool bHasValidLatch = Sim.InvMass.IsValidIndex(LatchNode);
 
 	OutFrame.EnsureSize(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		const bool bStartPin = (i == 0 && Sim.bStartPinned);
-		OutFrame.SetInvMass(i, (bStartPin || AnchorNodes.Contains(i)) ? 0.0f : 1.0f);
+		const bool bWrappingDrivenNode = bHasValidLatch && i >= LatchNode;
+		OutFrame.SetInvMass(i, (bStartPin || bWrappingDrivenNode) ? 0.0f : 1.0f);
 	}
 }
 

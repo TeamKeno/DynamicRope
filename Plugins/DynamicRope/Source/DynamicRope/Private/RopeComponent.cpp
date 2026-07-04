@@ -337,6 +337,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 
 	case ERopePhase::Wrapping:
 		UpdateWrapping(DeltaTime);
+		// latch 이전 구간은 solver가 계속 처리한다. latch~tail은 OverrideFrame mass mask로 고정된다.
+		bSolveThisFrame = (Phase == ERopePhase::Wrapping || Phase == ERopePhase::Wrapped);
 		break;
 
 	case ERopePhase::Wrapped:
@@ -392,8 +394,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 void URopeComponent::SolveSimFrame(float DeltaTime)
 {
 	// 병렬 단계: POD 상태(Sim) + collider 스냅샷(FrameColliders)만 만진다. Query는 const → 스레드 안전.
-	// bSolveThisFrame(Free/Flight/Wrapped)일 때만 물리 솔브 — Wrapped는 latch 노드가 InvMass=0이라
-	// 자유 구간만 움직이고, Contacting/Wrapping/Releasing은 로직 구동(Prepare에서 GT 처리)이라 스킵.
+	// bSolveThisFrame(Free/Flight/Wrapping/Wrapped)일 때만 물리 솔브 — Wrapping/Wrapped는
+	// 고정 노드가 InvMass=0이라 자유 구간만 움직이고, Contacting/Releasing은 로직 구동이라 스킵.
 	if (!bSolveThisFrame)
 	{
 		return;
@@ -1317,6 +1319,7 @@ void URopeComponent::CommitWrapping()
 	}
 
 	WrapController.BeginWrap(Sim, Seed, OverrideFrame); // 감길 mesh는 Seed.Mesh로 전파(접촉 유래, cross-actor 포함).
+	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
 
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s)"),
 		*Seed.BoneName.ToString(), Seed.Latched.Num()));
@@ -1337,7 +1340,7 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 
 // ===== Wrapped ==============================================================
 
-void URopeComponent::ApplyWrappedMassMask()
+void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 {
 	TSet<int32> AnchorNodes;
 
@@ -1362,7 +1365,12 @@ void URopeComponent::ApplyWrappedMassMask()
 	{
 		const bool bStartPin = (i == 0 && Sim.bStartPinned);
 		const bool bAnchor = AnchorNodes.Contains(i);
-		OverrideFrame.SetInvMass(i, (bStartPin || bAnchor) ? 0.0f : 1.0f);
+		const bool bFixed = bStartPin || bAnchor;
+		OverrideFrame.SetInvMass(i, bFixed ? 0.0f : 1.0f);
+		if (bResetDynamicNodeVelocity && !bFixed)
+		{
+			OverrideFrame.SetPrevFromPosition(i);
+		}
 	}
 }
 
