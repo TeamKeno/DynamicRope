@@ -14,6 +14,8 @@
 #include "Subsystem/RopeDebugSubsystem.h" // 디버그 캡처 게이트 + 스냅샷 보관소
 #include "Settings/DynamicRopeSettings.h"
 #include "RopeMathHelpers.h" // RopeMath::SmoothStep / AnyTangentFromNormal (unity 빌드 중복 정의 방지)
+#include "Materials/MaterialInterface.h"
+#include "UObject/ConstructorHelpers.h" // 기본 머티리얼 로드(FObjectFinder)
 
 namespace
 {
@@ -64,6 +66,16 @@ URopeComponent::URopeComponent()
 
 	// primitive가 motion vector를 출력하도록 Movable로 설정한다(TAA/TSR가 움직이는 rope를 유지하게 한다).
 	Mobility = EComponentMobility::Movable;
+
+	// 플러그인 제공 기본 머티리얼(헴프 밧줄). 설정 안 하면 씬 프록시가 엔진 기본(회색)으로 폴백하므로
+	// 여기서 기본값을 채운다 — 인스턴스/BP에서 RopeMaterial을 바꾸면 그대로 오버라이드된다.
+	// 에셋이 없으면(.Succeeded()==false) null 유지 → 회색 폴백(빌드/쿠킹 안전).
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> DefaultRopeMaterial(
+		TEXT("/DynamicRope/Materials/M_RopeDefault.M_RopeDefault"));
+	if (DefaultRopeMaterial.Succeeded())
+	{
+		RopeMaterial = DefaultRopeMaterial.Object;
+	}
 }
 
 // ===== API ==================================================================
