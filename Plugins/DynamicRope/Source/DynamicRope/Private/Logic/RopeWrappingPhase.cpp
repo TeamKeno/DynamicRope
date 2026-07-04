@@ -188,6 +188,23 @@ bool FRopeWrappingPhase::IsReadyToCommit(const FRopeSimState& Sim, const FRopeWr
 	return bHasEnoughAnchors && bPathReadyToCommit && bFrontDone && (bMotionDone || bTimedOutWithAnchors);
 }
 
+bool FRopeWrappingPhase::ShouldAbortFailedShortWrap(const FRopeSimState& Sim, const FContext& Ctx,
+	float MinRequiredTurns, float& OutTurns) const
+{
+	OutTurns = 0.0f;
+	if (MinRequiredTurns <= 0.0f || !State.bPathBuildFailed)
+	{
+		return false;
+	}
+
+	if (!ComputeHelixTurnsAtLastBuiltPoint(Sim, Ctx, OutTurns))
+	{
+		return false;
+	}
+
+	return OutTurns < MinRequiredTurns;
+}
+
 FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim, const USkeletalMeshComponent* Mesh) const
 {
 	FRopeWrapState Seed;
@@ -775,6 +792,62 @@ bool FRopeWrappingPhase::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor
 	OutSurfaceWorld = SurfaceWorld;
 	OutNormalWorld = NormalWorld;
 	OutTangentWorld = TangentWorld;
+	return true;
+}
+
+bool FRopeWrappingPhase::ComputeHelixTurnsAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutTurns) const
+{
+	OutTurns = 0.0f;
+	if (State.Anchors.Num() == 0 && State.Path.Num() == 0)
+	{
+		return false;
+	}
+
+	const FRopeSurfaceAnchor& LatchAnchor = State.LatchAnchor;
+	const USkeletalMeshComponent* Mesh = LatchAnchor.Mesh.Get();
+	if (!Mesh)
+	{
+		Mesh = State.Mesh.Get();
+	}
+	if (!Mesh || LatchAnchor.Bone.IsNone())
+	{
+		return false;
+	}
+
+	FVector AxisOrigin = FVector::ZeroVector;
+	FVector AxisDirection = FVector::ForwardVector;
+	if (!ResolveWrappingAxis(LatchAnchor, AxisOrigin, AxisDirection))
+	{
+		return false;
+	}
+	OrientWrappingAxisByTail(LatchAnchor, Sim, Mesh, AxisDirection);
+
+	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+	const FVector LatchSurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
+	const float LatchAxisDistance = FVector::DotProduct(LatchSurfaceWorld - AxisOrigin, AxisDirection);
+	const FVector LatchAxisPoint = AxisOrigin + AxisDirection * LatchAxisDistance;
+	const float HelixRadius = (LatchSurfaceWorld - LatchAxisPoint).Size();
+	if (HelixRadius <= KINDA_SMALL_NUMBER)
+	{
+		return false;
+	}
+
+	float LastBuiltDistance = 0.0f;
+	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
+	{
+		LastBuiltDistance = FMath::Max(LastBuiltDistance, Anchor.RopeDistance);
+	}
+	if (State.Path.Num() > 0)
+	{
+		LastBuiltDistance = FMath::Max(LastBuiltDistance, State.Path.Last().DistanceFromLatch);
+	}
+
+	// 실제 SurfaceVectorField 경로가 얼마나 울퉁불퉁했는지와 별개로, 실패 판정은 helix 기준 누적 회전량만 본다.
+	const float PitchScale = Ctx.Config.WrappingHelixPitchScale;
+	const float LengthScale = FMath::Sqrt(1.0f + PitchScale * PitchScale);
+	const float CircumferenceDistance = LastBuiltDistance / FMath::Max(LengthScale, KINDA_SMALL_NUMBER);
+	const float AngleRadians = CircumferenceDistance / FMath::Max(HelixRadius, KINDA_SMALL_NUMBER);
+	OutTurns = FMath::Abs(AngleRadians) / (2.0f * PI);
 	return true;
 }
 

@@ -65,6 +65,13 @@ public:
 	bool IsReadyToCommit(const FRopeSimState& Sim, const FRopeWrapConfig& Config) const;
 
 	/**
+	 * 경로 생성이 실패했을 때, 마지막으로 성공한 지점이 helix 기준 최소 회전량에 못 미치면
+	 * "감긴 척 붙는" 상태로 커밋하지 않도록 abort 여부를 알려준다.
+	 */
+	bool ShouldAbortFailedShortWrap(const FRopeSimState& Sim, const FContext& Ctx,
+		float MinRequiredTurns, float& OutTurns) const;
+
+	/**
 	 * 현재 앵커들로 Wrapped 핸드오프용 시드를 조립한다(FRopeWrapController::BeginWrap 입력).
 	 * 유효 노드가 없으면 Anchors가 빈 시드가 반환된다 — 호출자가 검사해 abort한다.
 	 */
@@ -99,6 +106,9 @@ private:
 	bool ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 		const FRopeSimState& Sim, const FContext& Ctx,
 		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
+
+	/** 마지막 성공 path/anchor 거리를 helix 공식에 넣어 누적 회전 수를 계산한다. */
+	bool ComputeHelixTurnsAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutTurns) const;
 
 	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;
