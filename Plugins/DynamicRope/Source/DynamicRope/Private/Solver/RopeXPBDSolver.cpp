@@ -472,9 +472,16 @@ void FRopeXPBDSolver::SolveSegmentContacts(FRopeSimState& State, const FRopeSolv
 				}
 				// 샘플점을 표면 밖으로 Penetration만큼: 보정을 barycentric으로 양 끝에 분배.
 				// 이동합 = ((1-T)^2 W0 + T^2 W1)/WEff * Pen = Pen → 내부점이 정확히 표면으로.
+				// 속도 중립 보정(GPU 세그먼트 충돌 미러): 현(chord)은 곡면 위 rest에서도 항상 침투해 보정이
+				// 계속 발생 → Positions만 밀면 그만큼 바깥 속도가 주입돼 정지 콜라이더 위에서도 노드가 튄다.
+				// PrevPositions도 같이 옮겨 위치만 고치고 속도는 보존한다.
 				const float DLambda = Contact.Penetration / WEff;
-				State.Positions[i]     += Contact.Normal * ((1.0f - T) * W0 * DLambda);
-				State.Positions[i + 1] += Contact.Normal * (T * W1 * DLambda);
+				const FVector D0 = Contact.Normal * ((1.0f - T) * W0 * DLambda);
+				const FVector D1 = Contact.Normal * (T * W1 * DLambda);
+				State.Positions[i]         += D0;
+				State.PrevPositions[i]     += D0;
+				State.Positions[i + 1]     += D1;
+				State.PrevPositions[i + 1] += D1;
 			}
 		}
 	}

@@ -51,11 +51,21 @@ void RopeGDFCollisionCS(uint3 GroupThreadId : SV_GroupThreadID) // 로프 1개 =
 			const float  Pen = NodeR - Dist;
 			Pos += Nrm * Pen;
 
+			float3 Prev = PrevPositions[i].xyz;
+
+			// 비탄성 접촉: 이 패스는 프레임당 1회 post-solve라 한 프레임치 침투가 통째로 push-out되는데,
+			// Prev를 안 옮기면 그 변위 전부가 다음 프레임 바깥(위) 속도로 변환돼 정지 바닥 위에서도
+			// 트램폴린처럼 튄다. 바깥 법선 속도를 제거해 비탄성으로(정적 월드 — 표면 법선 운동 없음).
+			const float VnOut = dot(Pos - Prev, Nrm);
+			if (VnOut > 0.0f)
+			{
+				Prev += Nrm * VnOut;
+			}
+
 			// 간이 마찰: 접선 성분을 Coulomb 한계(tip 테이퍼)로 감쇠. 정적 월드라 표면속도 0.
 			const float Fr = clamp(Friction, 0.0f, 1.0f);
 			if (Fr > 0.0f)
 			{
-				float3 Prev = PrevPositions[i].xyz;
 				const float  Frac  = (NumNodes > 1) ? ((float)i / (float)(NumNodes - 1)) : 0.0f;
 				const float  MuEff = Fr * lerp(1.0f, clamp(TipFrictionScale, 0.0f, 1.0f), Frac);
 				float3 Tangent = (Pos - Prev) - dot(Pos - Prev, Nrm) * Nrm;
@@ -63,8 +73,8 @@ void RopeGDFCollisionCS(uint3 GroupThreadId : SV_GroupThreadID) // 로프 1개 =
 				const float TLen = length(Tangent);
 				if (TLen > MaxSlip && TLen > 1e-6f) { Tangent *= (MaxSlip / TLen); }
 				Prev += Tangent;
-				PrevPositions[i] = float4(Prev, 0.0f);
 			}
+			PrevPositions[i] = float4(Prev, 0.0f);
 
 			Positions[i] = float4(Pos, 0.0f);
 		}

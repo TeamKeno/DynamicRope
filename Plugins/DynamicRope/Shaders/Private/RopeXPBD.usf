@@ -353,6 +353,14 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 						const float3 Normal = (Dist > 1e-4f) ? (ToNode / Dist) : float3(0.0f, 0.0f, 1.0f);
 						const float  Pen = MinDist - Dist;
 						gPos[i] = Pt + Normal * Pen;
+						// 비탄성 접촉: push-out이 gPrev 대비 +N 변위를 만들면 그대로 다음 substep 속도가 된다
+						// (깊은 접촉은 첫 샘플 Pt==gPrev라 매 substep +N*Pen 주입) → 정지 캡슐 위에서도 노드가
+						// 튄다. 바깥 법선 속도만 제거(v1 캡슐은 정적 — 표면 법선 운동 없음). 접선은 아래 마찰 담당.
+						const float VnOut = dot(gPos[i] - gPrev[i], Normal);
+						if (VnOut > 0.0f)
+						{
+							gPrev[i] += Normal * VnOut;
+						}
 						if (Friction > 0.0f)
 						{
 							const float3 Delta = gPos[i] - gPrev[i];
@@ -438,16 +446,27 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 						// 끝 sub-포즈 기준 월드 접촉점(노드 배치). World = Rot*(Scale*Local) + Trans.
 						const float3 HitWorld = RopeQuatRotate(RotE, Lp * Scl) + TrE;
 						gPos[i] = HitWorld + NWorld * Pen;
+
+						// 접촉 물질점 Lp의 이번 substep 표면 변위(prev->curr 포즈 프레임 변위 * InvDt * FixedDt,
+						// 정지 본이면 0). 아래 법선(비탄성)/접선(마찰) 응답이 공용으로 쓴다.
+						const float  InvDt = Col.PrevTranslation.w;
+						const float3 Wcur  = RopeQuatRotate(Col.Rotation,     Lp * Scl) + Col.Translation.xyz;
+						const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Scl) + Col.PrevTranslation.xyz;
+						const float3 SurfDisp = (Wcur - Wprev) * (InvDt * P.FixedDt);
+
+						// 비탄성 접촉: push-out이 gPrev 대비 +N 변위를 만들면 그대로 다음 substep 속도가 된다
+						// (깊은 접촉은 첫 샘플==gPrev라 매 substep +N*Pen 주입) → 정지 본 위에서도 노드가 튄다.
+						// *상대* 바깥 법선 속도만 제거 — 표면 자신의 법선 운동(본이 미는 것)은 보존.
+						const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, NWorld);
+						if (VnOut > 0.0f)
+						{
+							gPrev[i] += NWorld * VnOut;
+						}
+
 						if (Friction > 0.0f)
 						{
-							// 표면 속도(cm/s): 접촉 물질점 Lp의 prev->curr 프레임 변위 * InvDt. (정지 본이면 0)
-							const float  InvDt = Col.PrevTranslation.w;
-							const float3 Wcur  = RopeQuatRotate(Col.Rotation,     Lp * Scl) + Col.Translation.xyz;
-							const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Scl) + Col.PrevTranslation.xyz;
-							const float3 SurfVel = (Wcur - Wprev) * InvDt;
 							// 상대 접선 드래그(움직이는 표면이 로프를 끌어 좌우로 쓸어냄). CPU SolveCollisions 미러.
 							const float3 NodeDelta = gPos[i] - gPrev[i];
-							const float3 SurfDisp  = SurfVel * P.FixedDt;
 							const float3 RelDelta  = NodeDelta - SurfDisp;
 							float3 Tangent = RelDelta - dot(RelDelta, NWorld) * NWorld;
 							// 법선력 ≈ Pen(외력/무게분) + 인접 distance 제약력(gLambdaDist=장력)의 안쪽 성분.
@@ -515,8 +534,15 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 								{
 									const float3 Nrm = (DistC > 1e-4f) ? (ToN / DistC) : float3(0.0f, 0.0f, 1.0f);
 									const float  DL = (MinDist - DistC) / WEff;
-									gPos[i]     += Nrm * ((1.0f - T) * SW0 * DL);
-									gPos[i + 1] += Nrm * (T * SW1 * DL);
+									// 속도 중립 보정: 현(chord)은 곡면 위 rest에서도 항상 침투해 매 substep 보정이
+									// 발생한다 → gPos만 밀면 그만큼 바깥 속도가 주입돼 정지 콜라이더 위에서도 노드가
+									// 튄다. gPrev도 같이 옮겨 위치만 고치고 속도는 보존(2색 처리라 race 없음).
+									const float3 D0 = Nrm * ((1.0f - T) * SW0 * DL);
+									const float3 D1 = Nrm * (T * SW1 * DL);
+									gPos[i]      += D0;
+									gPrev[i]     += D0;
+									gPos[i + 1]  += D1;
+									gPrev[i + 1] += D1;
 								}
 							}
 
@@ -537,8 +563,13 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 								const float3 NLocal = RopeSDFGradient(Vol, Lp);
 								const float3 NWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal));
 								const float  DL = (P.CollisionRadius - DistS) / WEff;
-								gPos[i]     += NWorld * ((1.0f - T) * SW0 * DL);
-								gPos[i + 1] += NWorld * (T * SW1 * DL);
+								// 속도 중립 보정(위 capsule 세그먼트와 동일 이유 — gPrev 동반 이동으로 주입 차단).
+								const float3 D0 = NWorld * ((1.0f - T) * SW0 * DL);
+								const float3 D1 = NWorld * (T * SW1 * DL);
+								gPos[i]      += D0;
+								gPrev[i]     += D0;
+								gPos[i + 1]  += D1;
+								gPrev[i + 1] += D1;
 							}
 						}
 					}
