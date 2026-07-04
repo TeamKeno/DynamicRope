@@ -29,6 +29,11 @@ struct FRopeDynamicData
 	// M5b: 이 프레임에 로프가 GPU에서 step됐는가 → true면 GPU 튜브가 resident PosBuf를 직접 읽어도 됨(무지연).
 	// false(whip/CPU-폴백/솔버 off)면 resident는 stale이므로 위 Points(CPU 미러)로 그린다.
 	bool bGpuResident = false;
+	// resident 튜브(월드 PosBuf → component-local)용 변환 — Points를 로컬화한 것과 *같은* GT 프레임의
+	// GetComponentTransform() 역행렬. 프록시의 GetLocalToWorld()를 쓰면 안 된다: SetDynamicData 렌더 커맨드는
+	// 이번 프레임 트랜스폼이 프록시에 적용되는 UpdateAllPrimitiveSceneInfos보다 먼저 실행돼 한 프레임 이전
+	// 값을 읽는다 → 빌드(N-1)와 드로우(N) 트랜스폼이 어긋나 월드 고정점(wrap 노드)이 컴포넌트 이동량만큼 떨린다.
+	FMatrix44f WorldToLocal = FMatrix44f::Identity;
 };
 
 /** Dynamic index buffer (topology은 proxy의 수명 동안 고정된다). */

@@ -574,12 +574,14 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 
 	if (bResident)
 	{
-		// 월드 PosBuf → component-local 변환. proxy는 GetLocalToWorld()로 렌더하므로 WorldToLocal = inverse.
+		// 월드 PosBuf → component-local 변환. GT가 이번 프레임 GetComponentTransform()으로 만든 역행렬을
+		// 쓴다(Data.WorldToLocal) — 여기서 GetLocalToWorld().Inverse()를 읽으면 안 된다: 이 커맨드는
+		// UpdateAllPrimitiveSceneInfos(이번 프레임 트랜스폼 적용)보다 먼저 실행돼 한 프레임 이전 값이라,
+		// 빌드(N-1)/드로우(N) 불일치로 월드 고정점(wrap 노드)이 컴포넌트 이동량만큼 떨린다.
 		// GPU가 시뮬 노드(NumNodes)를 Subdiv로 Catmull-Rom 스무딩해 NumRings 센터라인 → 튜브 생성.
-		const FMatrix44f WorldToLocal(GetLocalToWorld().Inverse());
 		RopeGPU::BuildTubeFromResident_RenderThread(RHICmdList, ResidentSRV,
 			GpuPositionBuffer.UAV, GpuTangentBuffer.UAV, GpuTexCoordBuffer.UAV,
-			NumRings, NumSides, Radius, NumNodes, Subdiv, WorldToLocal);
+			NumRings, NumSides, Radius, NumNodes, Subdiv, Data.WorldToLocal);
 	}
 	else
 	{

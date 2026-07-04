@@ -651,7 +651,10 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 
 				if (S.NumSub <= 0 && !bHasOverrides && !S.bDetectContacts)
 				{
-					continue; // 이번 프레임 적분/기록/감지 없음 — 위치 불변, 리드백도 그대로 둠.
+					// 이번 프레임 적분/기록/감지 없음 — 위치 불변, 리드백도 그대로 둠. 상태만 외부 읽기(SRV)로
+					// 확정한다(시드 업로드 직후 조기 종료 프레임 포함) — 아래 dispatch 경로의 호출과 동일 목적.
+					GraphBuilder.UseExternalAccessMode(PosRDG, ERHIAccess::SRVMask);
+					continue;
 				}
 
 				// --- per-rope 파라미터/충돌 버퍼(transient). NodeOffset/CapsuleOffset/SDFColliderOffset = 0(로프당 버퍼).
@@ -982,6 +985,13 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 						R.bContactArmed = true;
 					}
 				}
+
+				// 렌더 raw 튜브 경로(M5b/B2)가 이 그래프 *밖에서* PosBuf를 SRV로 직독한다 — 외부 접근 모드로
+				// 마지막 패스(solve/copy/detect) 뒤 SRV 전이(배리어)를 매 프레임 확정한다. 이게 없으면 그래프
+				// 종료 상태가 리드백 copy 유무에 따라 UAVCompute/CopySrc로 오락가락해, 배리어 없는 프레임에
+				// 튜브가 이전/미완성 위치를 읽어 wrap 노드가 떨린다(CL167 회귀). VE(GDF) 경로의 후속 쓰기는
+				// DispatchGDFCollision이 UseInternalAccessMode로 재획득 후 다시 외부로 되돌린다.
+				GraphBuilder.UseExternalAccessMode(PosRDG, ERHIAccess::SRVMask);
 			}
 
 }
@@ -1056,6 +1066,10 @@ void FRopeGPUSolver::DispatchGDFCollision_RenderThread(FRDGBuilder& GraphBuilder
 		FRDGBufferRef PrevRDG = GraphBuilder.RegisterExternalBuffer(R.PrevBuf);
 		FRDGBufferRef InvRDG  = GraphBuilder.RegisterExternalBuffer(R.InvMassBuf);
 
+		// RunSteps가 PosBuf를 외부 접근(SRVMask)으로 확정했으므로 UAV 쓰기 전에 내부 추적으로 재획득한다
+		// (외부 접근 상태의 쓰기는 RDG validation 위반). 미확정 상태여도 no-op라 안전.
+		GraphBuilder.UseInternalAccessMode(PosRDG);
+
 		FRopeGDFCollisionCS::FParameters* P = GraphBuilder.AllocParameters<FRopeGDFCollisionCS::FParameters>();
 		P->View                = View.ViewUniformBuffer;
 		P->GDF                 = GDFShaderParams;
@@ -1072,5 +1086,8 @@ void FRopeGPUSolver::DispatchGDFCollision_RenderThread(FRDGBuilder& GraphBuilder
 		TShaderMapRef<FRopeGDFCollisionCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()));
 		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeGDFCollision"),
 			Shader, P, FIntVector(1, 1, 1)); // 로프 1개 = 스레드그룹 1개
+
+		// GDF 쓰기 완료 — 다시 외부 읽기(SRV)로 확정: 같은 그래프의 튜브 SRV 읽기 + 다음 프레임 렌더 raw 직독 유효.
+		GraphBuilder.UseExternalAccessMode(PosRDG, ERHIAccess::SRVMask);
 	}
 }
