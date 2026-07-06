@@ -203,6 +203,13 @@ void URopeWielderComponent::BindInput()
 	{
 		EIC->BindAction(ReleaseAction, ETriggerEvent::Started, this, &URopeWielderComponent::OnReleaseInput);
 	}
+	if (PullAction)
+	{
+		// 홀드 시맨틱: 누르면 시작, 떼거나(Completed) 중단되면(Canceled) 정지.
+		EIC->BindAction(PullAction, ETriggerEvent::Started,   this, &URopeWielderComponent::OnPullInputStarted);
+		EIC->BindAction(PullAction, ETriggerEvent::Completed, this, &URopeWielderComponent::OnPullInputCompleted);
+		EIC->BindAction(PullAction, ETriggerEvent::Canceled,  this, &URopeWielderComponent::OnPullInputCompleted);
+	}
 	bInputBound = true;
 }
 
@@ -222,6 +229,32 @@ void URopeWielderComponent::OnThrowInput()
 void URopeWielderComponent::OnReleaseInput()
 {
 	Release();
+}
+
+void URopeWielderComponent::StartPull()
+{
+	if (Rope)
+	{
+		Rope->SetActivePull(PullForce);
+	}
+}
+
+void URopeWielderComponent::StopPull()
+{
+	if (Rope)
+	{
+		Rope->SetActivePull(0.0f);
+	}
+}
+
+void URopeWielderComponent::OnPullInputStarted()
+{
+	StartPull();
+}
+
+void URopeWielderComponent::OnPullInputCompleted()
+{
+	StopPull();
 }
 
 FVector URopeWielderComponent::GetAimDirection() const

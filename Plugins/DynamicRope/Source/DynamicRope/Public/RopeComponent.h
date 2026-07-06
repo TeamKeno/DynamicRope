@@ -154,6 +154,27 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	float GetMaxTension() const;
 
+	/**
+	 * 이번 프레임 Pull(당김) 데이터: 손 쪽 첫 앵커가 받는 당김 방향(단위)과 그 세그먼트 장력.
+	 * Wrapped 동안 매 프레임 산출된다. 게임 효과(포획 진행도, 이동 방해 등) 판정용.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	bool GetPullSample(FVector& OutDirection, float& OutTension) const
+	{
+		OutDirection = LastPullSample.Direction;
+		OutTension = LastPullSample.Tension;
+		return LastPullSample.bValid;
+	}
+
+	/**
+	 * 능동 Pull(당김) 힘 설정 — Wrapped + 로프가 팽팽할 때 매 프레임 이 크기의 *상수* 힘을 감긴
+	 * 대상에 인가한다(장력과 무관 → 피드백 폭주 없음). 0 = 정지. 입력 홀드 동안 켜고 떼면 끄는
+	 * 용도(URopeWielderComponent의 PullAction이 이걸 호출). 캐릭터 대상은 CharacterMovement가
+	 * 질량으로 나누고 지면 마찰과 경쟁하므로 수만~수십만 단위가 체감 구간이다.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void SetActivePull(float Force);
+
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
@@ -248,6 +269,24 @@ private:
 	float FlightNoContactElapsed = 0.0f;	// Whip 종료 후 캡처 없이 Flight에 머문 시간
 	float ReleaseCooldown = 0.0f;	// Releasing → Free 복귀까지 남은 시간
 	float TensionOverTime = 0.0f;	// Wrapped 중 최대 장력이 TensionReleaseForce를 연속 초과한 시간
+
+	// 이번 프레임 Pull 산출물(Wrapped 동안 매 프레임 산출). BP 조회/디버거 화살표 소스.
+	FRopePullSample LastPullSample;
+
+	// 능동 Pull의 현재 힘(SetActivePull이 설정, 0=꺼짐). Wrapped + 팽팽할 때만 인가된다.
+	float ActivePullForce = 0.0f;
+
+	// 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용.
+	float LastTetherOvershoot = 0.0f;
+
+	// Pull 힘 수신자 없음 경고를 wrap당 1회만 내보내기 위한 래치(ResetTransientPhaseState에서 리셋).
+	bool bLoggedPullNoReceiver = false;
+
+	// 동작 1 — 자동 견인(테더): 가용 로프 길이 초과분을 위치/속도 동기로 회수(수렴, 폭주 없음).
+	void UpdateTether(float DeltaTime);
+
+	// 동작 2 — Pull 힘 인가(GT, UObject): 물리 시뮬 본 → 캐릭터 무브먼트 → 시뮬 루트 순으로 시도한다.
+	void ApplyPullForce(const FVector& Force, const FRopePullSample& Pull);
 
 	//~ 서브시스템 프레임 계약(RopeSimSubsystem이 쓰거나 읽는다) --------------
 	// 한 프레임 collider 스냅샷. RopeSimSubsystem이 Tick에서 중앙 수집해 채운다(provider 레지스트리 → 로프 필터).

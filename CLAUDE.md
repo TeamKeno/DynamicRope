@@ -101,8 +101,14 @@ unit-testable without a world:
   gate (requires `MinLatchNodes` nodes in sustained contact with one bone for `WrapDecisionTime`).
   `BeginWrap` freezes the contact nodes into **bone-local** space; `Hold` re-places them on the
   skinned bone each frame so the wrap follows animation (returning `false` if the wrapped mesh was
-  destroyed, so the caller releases); `Release` hands the nodes back to the solver. `Pull` is
-  declared but currently a stub.
+  destroyed, so the caller releases); `Release` hands the nodes back to the solver. `ComputePull`
+  derives the pull on the hand-side head anchor (direction + adjacent-segment tension) as pure data;
+  the component consumes it two ways each Wrapped frame: (1) *tether* (`TetherResponse`, 0 = off) —
+  position/velocity sync that recovers the overshoot past the available rope length (convergent by
+  construction; a tension-proportional force would runaway), and (2) *active pull*
+  (`URopeComponent::SetActivePull`, held input via `URopeWielderComponent::PullAction`) — a constant
+  user-set force applied only while taut. Receivers: simulating bone → character movement →
+  simulating root.
 
 **Collision abstraction (`Collision/`)**: the solver only ever calls `IRopeCollider::Query()` — it
 never knows whether the collider is a capsule, a per-bone SDF, or a world distance field.

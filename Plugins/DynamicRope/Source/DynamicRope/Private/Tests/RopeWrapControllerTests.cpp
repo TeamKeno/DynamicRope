@@ -116,4 +116,48 @@ bool FRopeWrapTieBreakTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Pull 산출(ComputePull): 손 쪽 첫 앵커에서 손 쪽 인접 노드 방향 + 해당 세그먼트 장력을 데이터로 내는가.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrapComputePullTest,
+	"DynamicRope.Wrap.ComputePullDirectionAndTension",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
+{
+	// 노드 x = 0,20,...,140(+X 직선). 앵커 2개(노드 5, 노드 3) → 손 쪽 첫 앵커 = 노드 3.
+	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
+	Sim.SegmentTension.SetNumZeroed(Sim.Num() - 1);
+	Sim.SegmentTension[2] = 1234.0f; // 앵커(3)-손 쪽 인접 노드(2) 세그먼트
+	Sim.SegmentTension[4] = 9999.0f; // 다른 세그먼트(선택되면 안 됨)
+
+	FRopeWrapController Wrap;
+	Wrap.State.BoneName = FName("arm");
+	for (const int32 NodeIndex : { 5, 3 })
+	{
+		FRopeSurfaceAnchor Anchor;
+		Anchor.NodeIndex = NodeIndex;
+		Anchor.Bone = FName("arm");
+		Wrap.State.Anchors.Add(Anchor);
+	}
+
+	FRopePullSample Pull;
+	TestTrue(TEXT("ComputePull succeeds"), Wrap.ComputePull(Sim, Pull));
+	TestTrue(TEXT("pull sample valid"), Pull.bValid);
+	TestEqual(TEXT("hand-side head anchor wins"), Pull.AnchorNode, 3);
+	TestTrue(TEXT("bone attributed"), Pull.Bone == FName("arm"));
+	// 손(노드 0, x=0)은 앵커(노드 3, x=60)에서 -X 방향(chord).
+	TestTrue(FString::Printf(TEXT("direction %s points toward hand (-X)"), *Pull.Direction.ToCompactString()),
+		Pull.Direction.Equals(FVector(-1, 0, 0), 0.01f));
+	TestEqual(TEXT("tension from anchor-hand segment"), Pull.Tension, 1234.0f);
+
+	// 앵커가 노드 0(손 핀)뿐이면 손 쪽 세그먼트가 없어 무효.
+	FRopeWrapController WrapAtHand;
+	WrapAtHand.State.BoneName = FName("arm");
+	FRopeSurfaceAnchor HandAnchor;
+	HandAnchor.NodeIndex = 0;
+	WrapAtHand.State.Anchors.Add(HandAnchor);
+	FRopePullSample InvalidPull;
+	TestFalse(TEXT("anchor at hand node yields no pull"), WrapAtHand.ComputePull(Sim, InvalidPull));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

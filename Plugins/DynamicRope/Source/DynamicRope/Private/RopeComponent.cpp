@@ -9,6 +9,8 @@
 #include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Character.h"                    // Pull: 캐릭터 견인(CharacterMovement AddForce)
+#include "GameFramework/CharacterMovementComponent.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "Subsystem/RopeSimSubsystem.h"
 #include "Subsystem/RopeDebugSubsystem.h" // 디버그 캡처 게이트 + 스냅샷 보관소
@@ -376,6 +378,21 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		// 장력 모델: 솔버가 채운 세그먼트 장력(F=λ/h², GPU 로프는 1~2프레임 지연 미러)의 최대치를
 		// wrap 상태에 반영한다. 게임플레이(당김/절단 판정)와 디버거가 이 값을 읽는다.
 		WrapController.State.Tension = GetMaxTension();
+
+		// Pull 샘플 산출(항상 — 디버거/BP 관찰 + 아래 두 동작의 공용 입력).
+		LastPullSample = FRopePullSample();
+		WrapController.ComputePull(Sim, LastPullSample);
+
+		// 동작 1 — 자동 견인(테더, 위치/속도 동기): 가용 로프 길이 초과분만큼 대상을 되돌린다.
+		// 장력 비례 힘(폭주: 힘→스트레치→장력↑→힘↑)을 대체 — 초과분 기반이라 수렴한다.
+		UpdateTether(DeltaTime);
+
+		// 동작 2 — 능동 Pull(상수 힘): 사용자 입력(SetActivePull/Wielder)이 준 힘을 팽팽할 때만
+		// 인가한다. 장력과 무관한 상수라 피드백 폭주가 없다.
+		if (ActivePullForce > 0.0f && LastPullSample.bValid && LastPullSample.Tension > KINDA_SMALL_NUMBER)
+		{
+			ApplyPullForce(LastPullSample.Direction * ActivePullForce, LastPullSample);
+		}
 
 		// 임계 장력 release: 최대 장력이 TensionReleaseForce를 TensionReleaseTime 동안 지속해 넘으면
 		// 풀린다(순간 스파이크 무시). 0 = 비활성. 흐름은 위 mesh-lost release와 동일, 사유만 Tension.
@@ -855,6 +872,8 @@ void URopeComponent::ResetTransientPhaseState()
 	ContactingElapsed = 0.0f;
 	FlightNoContactElapsed = 0.0f;
 	TensionOverTime = 0.0f;
+	LastPullSample = FRopePullSample();
+	bLoggedPullNoReceiver = false;
 }
 
 // ===== 초기화/유틸 ===========================================================
@@ -917,6 +936,13 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.Latched = Wrap.Latched;
 		Snapshot.WrapTension = Wrap.Tension;
 		Snapshot.TensionReleaseForce = WrapConfig.TensionReleaseForce;
+		Snapshot.bPullValid = LastPullSample.bValid;
+		Snapshot.PullPoint = LastPullSample.WorldPoint;
+		Snapshot.PullDirection = LastPullSample.Direction;
+		Snapshot.PullTension = LastPullSample.Tension;
+		Snapshot.TetherResponse = WrapConfig.TetherResponse;
+		Snapshot.TetherOvershoot = LastTetherOvershoot;
+		Snapshot.ActivePullForce = ActivePullForce;
 	}
 
 	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). capsule이면 세그먼트,
@@ -1429,6 +1455,114 @@ void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 		{
 			OverrideFrame.SetPrevFromPosition(i);
 		}
+	}
+}
+
+void URopeComponent::SetActivePull(float Force)
+{
+	ActivePullForce = FMath::Max(0.0f, Force);
+}
+
+void URopeComponent::UpdateTether(float DeltaTime)
+{
+	// 가용 로프 길이(손→앵커 세그먼트 수 × 길이 + 여유) 대비 실제 직선 거리의 초과분(overshoot).
+	// 스냅샷/BP 관찰을 위해 테더가 꺼져 있어도 초과분은 항상 계산한다.
+	LastTetherOvershoot = 0.0f;
+	if (!LastPullSample.bValid)
+	{
+		return;
+	}
+	const FVector Hand = Sim.bStartPinned ? Sim.StartPinTarget : (Sim.Positions.Num() > 0 ? Sim.Positions[0] : FVector::ZeroVector);
+	const FVector Span = LastPullSample.WorldPoint - Hand;
+	const float Dist = static_cast<float>(Span.Size());
+	const float AvailLen = static_cast<float>(LastPullSample.AnchorNode) * Sim.SegmentLength + WrapConfig.TetherSlack;
+	const float Overshoot = Dist - AvailLen;
+	LastTetherOvershoot = FMath::Max(0.0f, Overshoot);
+	if (WrapConfig.TetherResponse <= 0.0f || Overshoot <= 0.0f || Dist <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	// 초과분의 일부를 이번 프레임에 회수(위치/속도 동기). 남은 초과분이 다음 프레임 입력이므로 수렴한다.
+	const FVector DirToHand = -Span / Dist;
+	const FVector Correction = DirToHand * (Overshoot * FMath::Clamp(WrapConfig.TetherResponse, 0.0f, 1.0f));
+
+	USkeletalMeshComponent* Mesh = const_cast<USkeletalMeshComponent*>(WrapController.State.Mesh.Get());
+	if (!Mesh)
+	{
+		return;
+	}
+
+	// 물리 시뮬 대상(본/루트): 텔레포트 대신 질량 무관 속도 변경으로 같은 프레임 변위를 만든다.
+	if (Mesh->IsSimulatingPhysics(LastPullSample.Bone))
+	{
+		const FVector VelChange = Correction / FMath::Max(DeltaTime, 1e-4f);
+		Mesh->AddImpulse(VelChange, LastPullSample.Bone, /*bVelChange*/ true);
+		return;
+	}
+	AActor* Owner = Mesh->GetOwner();
+	if (UPrimitiveComponent* Root = Owner ? Cast<UPrimitiveComponent>(Owner->GetRootComponent()) : nullptr)
+	{
+		if (Root->IsSimulatingPhysics())
+		{
+			Root->AddImpulse(Correction / FMath::Max(DeltaTime, 1e-4f), NAME_None, /*bVelChange*/ true);
+			return;
+		}
+	}
+
+	// 캐릭터/비시뮬 대상: 위치 보정(스윕 — 벽 통과 방지). 캐릭터 캡슐도 이 경로로 끌려온다.
+	if (Owner)
+	{
+		Owner->AddActorWorldOffset(Correction, /*bSweep*/ true);
+	}
+}
+
+void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample& Pull)
+{
+	// wrap 대상 mesh(cross-actor 가능). 계약상 로프는 대상을 읽기만 하므로 weak가 const지만,
+	// Pull은 의도된 게임플레이 개입(힘 인가)이라 여기서만 명시적으로 non-const로 푼다.
+	USkeletalMeshComponent* Mesh = const_cast<USkeletalMeshComponent*>(WrapController.State.Mesh.Get());
+	if (!Mesh)
+	{
+		return;
+	}
+
+	// 1) 감긴 본이 물리 시뮬 중(래그돌/물리 프랍)이면 그 본에 직접 — 가장 정확한 인가점.
+	if (Mesh->IsSimulatingPhysics(Pull.Bone))
+	{
+		Mesh->AddForceAtLocation(Force, Pull.WorldPoint, Pull.Bone);
+		return;
+	}
+
+	// 2) 캐릭터면 무브먼트에 힘 — 애니메이션 구동 본에는 힘을 줄 수 없으므로 이동체 전체를 견인한다
+	//    (PoC 4.2: 본/루트에 단순 힘 전달까지. 팔다리 IK/래그돌 반응은 후속).
+	if (ACharacter* Character = Cast<ACharacter>(Mesh->GetOwner()))
+	{
+		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+		{
+			Movement->AddForce(Force);
+			return;
+		}
+	}
+
+	// 3) 그 외: 시뮬 중인 루트 프리미티브(물리 액터에 붙은 skeletal mesh 구성).
+	AActor* Owner = Mesh->GetOwner();
+	if (UPrimitiveComponent* Root = Owner ? Cast<UPrimitiveComponent>(Owner->GetRootComponent()) : nullptr)
+	{
+		if (Root->IsSimulatingPhysics())
+		{
+			Root->AddForceAtLocation(Force, Pull.WorldPoint);
+			return;
+		}
+	}
+
+	// 수신자 없음(애니메이션 구동 본 + 비캐릭터 + 비시뮬 루트): 힘이 조용히 사라지는 걸 wrap당 1회 알린다.
+	if (!bLoggedPullNoReceiver)
+	{
+		bLoggedPullNoReceiver = true;
+		UE_LOG(LogDynamicRope, Warning,
+			TEXT("[%s] Pull has no force receiver: mesh=%s bone=%s is not simulating, owner=%s is not a Character and its root is not simulating — pull force is dropped."),
+			*GetName(), *Mesh->GetName(), *Pull.Bone.ToString(), *GetNameSafe(Owner));
 	}
 }
 

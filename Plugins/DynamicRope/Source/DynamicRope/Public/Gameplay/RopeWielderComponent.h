@@ -162,6 +162,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	bool bThrowActionToggles = true;
 
+	/** 능동 Pull 액션(홀드). 누르는 동안 PullForce로 감긴 대상을 끌어당기고 떼면 멈춘다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
+	TObjectPtr<UInputAction> PullAction = nullptr;
+
+	/**
+	 * 능동 Pull의 힘(상수 — 장력과 무관해 피드백 폭주 없음). Wrapped + 로프가 팽팽할 때만 인가된다.
+	 * 캐릭터 대상은 CharacterMovement가 질량으로 나누고 지면 마찰과 경쟁하므로 수만~수십만이 체감 구간.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input", meta = (ClampMin = "0.0"))
+	float PullForce = 100000.0f;
+
 	//~ Animation(선택) ----------------------------------------------------
 	/**
 	 * 설정하면 Throw()가 즉시 던지지 않고 이 몽타주를 재생한다. 실제 로프 던지기는 몽타주 안에 배치한
@@ -202,6 +213,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Release();
 
+	/** 능동 Pull 시작(PullForce로 견인 — Wrapped + 팽팽할 때만 실제 인가). 입력 홀드/게임플레이용. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void StartPull();
+
+	/** 능동 Pull 정지. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void StopPull();
+
 	/** wrap/contact 중이면 Release, 아니면 Throw. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ToggleThrow();
@@ -233,6 +252,8 @@ private:
 
 	void OnThrowInput();
 	void OnReleaseInput();
+	void OnPullInputStarted();
+	void OnPullInputCompleted();
 
 	bool bInputBound = false;
 	float PreviewUpdateCooldown = 0.0f;

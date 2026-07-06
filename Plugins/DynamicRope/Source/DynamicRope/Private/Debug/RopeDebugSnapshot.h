@@ -67,6 +67,13 @@ struct FRopeDebugSnapshot
 	TArray<FRopeLatchNode> Latched;
 	float WrapTension = 0.0f;         // 최대 세그먼트 장력(FRopeWrapState::Tension 미러)
 	float TensionReleaseForce = 0.0f; // 임계 장력(0=비활성) — 표시용
+	bool bPullValid = false;          // ComputePull 성공(앵커/방향 유효 — 장력 0이어도 true)
+	FVector PullPoint = FVector::ZeroVector;     // 힘 인가점(앵커 월드)
+	FVector PullDirection = FVector::ZeroVector; // 당김 단위 방향
+	float PullTension = 0.0f;                    // 앵커 세그먼트 장력
+	float TetherResponse = 0.0f;                 // 테더 반응(0=비활성) — 표시용
+	float TetherOvershoot = 0.0f;                // 가용 로프 길이 초과분(cm, 0=팽팽하지 않음)
+	float ActivePullForce = 0.0f;                // 능동 Pull 힘(0=입력 없음)
 
 	//~ colliders(이 로프가 이번 프레임 질의한 collider들) ----------------
 	TArray<FRopeDebugCollider> Colliders;

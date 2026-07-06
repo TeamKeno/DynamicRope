@@ -197,6 +197,20 @@ struct FRopeWrapState
 	void Reset() { *this = FRopeWrapState(); }
 };
 
+/**
+ * Pull(당김) 샘플: wrap 앵커가 로프로부터 받는 당김을 데이터로 기술한다(Docs/PoC/01_PostWrapModel.md 4.2).
+ * FRopeWrapController::ComputePull이 채우고(UObject-free), 컴포넌트가 힘 인가(캐릭터/물리 본)로 변환한다.
+ */
+struct FRopePullSample
+{
+	bool    bValid = false;
+	int32   AnchorNode = INDEX_NONE;          // 손 쪽 첫 앵커 노드(힘 인가 지점의 노드)
+	FName   Bone = NAME_None;                 // 앵커가 붙은 본(물리 본 힘 인가 대상)
+	FVector WorldPoint = FVector::ZeroVector; // 앵커 노드 월드 위치(힘 인가점)
+	FVector Direction = FVector::ZeroVector;  // 당김 단위 방향(앵커 → 손 직선 chord — 세그먼트 방향은 지터로 부적합)
+	float   Tension = 0.0f;                   // 앵커-손 쪽 인접 세그먼트 장력(FRopeSimState::SegmentTension 단위)
+};
+
 /** rope 중심선: 파티클의 체인. solver / 로직 / 렌더의 단일 진실 공급원(single source of truth). */
 struct FRopeSimState
 {
@@ -453,6 +467,19 @@ struct FRopeWrapConfig
 	/** 장력 release 판정의 지속 시간(초). 순간 스파이크(충격 프레임)로 풀리는 것을 막는다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float TensionReleaseTime = 0.05f;
+
+	/**
+	 * 자동 견인(테더) 반응 [0..1]. Wrapped 중 손~앵커 직선 거리가 가용 로프 길이(앵커까지 세그먼트 수 ×
+	 * SegmentLength + TetherSlack)를 넘으면 초과분 × 이 값만큼 대상을 손 쪽으로 되돌린다(프레임당).
+	 * 힘이 아니라 위치/속도 동기라 장력→힘→스트레치→장력 피드백 폭주가 없다(초과분이 줄면 보정도
+	 * 준다 — 수렴). 1 = 즉시 스냅, 0 = 비활성(기본). 물리 시뮬 대상은 같은 수렴을 속도 주입으로 만든다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TetherResponse = 0.0f;
+
+	/** 테더 발동 전 허용 여유(cm). 경계 지터/미세 슬랙에서 발동하는 것을 막는다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
+	float TetherSlack = 5.0f;
 };
 
 /** 던질 때 기준축을 어느 좌표계에서 가져올지. */

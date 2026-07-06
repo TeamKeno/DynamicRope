@@ -320,9 +320,65 @@ bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOver
 	return true;
 }
 
-void FRopeWrapController::Pull(FRopeSimState& /*Sim*/, const FVector& /*PullTarget*/)
+bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, FRopePullSample& Out) const
 {
-	// TODO(M3): 붙잡힌 limb 를 PullTarget 쪽으로 절차적으로 끌어당기고, wrap 을 팽팽하게 유지한다.
+	Out = FRopePullSample();
+	if (!State.IsWrapped())
+	{
+		return false;
+	}
+
+	// 손 쪽 첫 앵커(최소 노드 인덱스): 손~앵커 사이 자유 구간의 장력이 여기로 전달된다.
+	// 새 방식(Anchors) 우선, legacy(Latched) 폴백 — Hold와 동일한 우선순위.
+	int32 AnchorNode = INDEX_NONE;
+	FName AnchorBone = NAME_None;
+	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
+	{
+		if (Sim.Positions.IsValidIndex(Anchor.NodeIndex)
+			&& (AnchorNode == INDEX_NONE || Anchor.NodeIndex < AnchorNode))
+		{
+			AnchorNode = Anchor.NodeIndex;
+			AnchorBone = Anchor.Bone.IsNone() ? State.BoneName : Anchor.Bone;
+		}
+	}
+	if (AnchorNode == INDEX_NONE)
+	{
+		for (const FRopeLatchNode& Latch : State.Latched)
+		{
+			if (Sim.Positions.IsValidIndex(Latch.NodeIndex)
+				&& (AnchorNode == INDEX_NONE || Latch.NodeIndex < AnchorNode))
+			{
+				AnchorNode = Latch.NodeIndex;
+				AnchorBone = Latch.Bone.IsNone() ? State.BoneName : Latch.Bone;
+			}
+		}
+	}
+
+	// 앵커가 노드 0(손 핀 자체)이면 손 쪽 세그먼트가 없다 → 당김 없음.
+	if (AnchorNode <= 0)
+	{
+		return false;
+	}
+
+	// 당김 방향 = 앵커 → 손(노드 0) 직선(chord). 인접 세그먼트 방향이 물리적으로는 맞지만, 앵커 옆
+	// 자유 노드는 wrap 주변에서 흔들리고 로프 처짐(catenary)에 따라 옆/아래를 향해 프레임마다 사실상
+	// 랜덤해진다(+GPU 미러 지연 지터). 게임플레이 견인은 안정적인 chord를 쓴다 — 손~앵커 자유 구간에
+	// 장애물이 없는 한(앵커가 첫 접촉점이므로 일반적으로 없음) 의도("플레이어 쪽으로")와 일치한다.
+	const FVector ToHand = Sim.Positions[0] - Sim.Positions[AnchorNode];
+	const FVector Direction = ToHand.GetSafeNormal();
+	if (Direction.IsNearlyZero())
+	{
+		return false; // 축퇴(손과 앵커 겹침) — 방향 정의 불가.
+	}
+
+	Out.bValid = true;
+	Out.AnchorNode = AnchorNode;
+	Out.Bone = AnchorBone;
+	Out.WorldPoint = Sim.Positions[AnchorNode];
+	Out.Direction = Direction;
+	// 앵커-손 쪽 인접 세그먼트(인덱스 AnchorNode-1)의 장력. 아직 솔브 전이면(배열 비어 있음) 0.
+	Out.Tension = Sim.SegmentTension.IsValidIndex(AnchorNode - 1) ? Sim.SegmentTension[AnchorNode - 1] : 0.0f;
+	return true;
 }
 
 void FRopeWrapController::Release(ERopeReleaseReason Reason)

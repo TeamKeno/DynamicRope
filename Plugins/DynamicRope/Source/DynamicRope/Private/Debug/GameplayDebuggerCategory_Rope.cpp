@@ -353,6 +353,26 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			AddTextLine(FString::Printf(TEXT("    tension=%.0f (release off)"), S.WrapTension));
 		}
 
+		// Pull 상태(샘플은 항상 산출) — 유효+장력>0(화살표), 유효+슬랙, 무효(앵커가 손 노드거나 없음).
+		// tether = 가용 로프 길이 초과분(자동 견인 입력), active = 능동 Pull 힘(입력 홀드).
+		if (S.bPullValid && S.PullTension > KINDA_SMALL_NUMBER)
+		{
+			const float ArrowLen = FMath::Clamp(S.PullTension * 0.01f, 15.0f, 120.0f);
+			AddShape(FGameplayDebuggerShape::MakeArrow(S.PullPoint, S.PullPoint + S.PullDirection * ArrowLen,
+				8.0f, 2.0f, FColor::Orange));
+			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f dir=%s tether=%.0fcm(x%.2f) active=%.0f"),
+				S.PullTension, *S.PullDirection.ToCompactString(), S.TetherOvershoot, S.TetherResponse, S.ActivePullForce));
+		}
+		else if (S.bPullValid)
+		{
+			AddTextLine(FString::Printf(TEXT("    {grey}pull slack (tension 0, tether=%.0fcm x%.2f)"),
+				S.TetherOvershoot, S.TetherResponse));
+		}
+		else
+		{
+			AddTextLine(TEXT("    {grey}pull n/a (no hand-side anchor)"));
+		}
+
 		const int32 MaxRows = FMath::Min(12, S.Latched.Num());
 		for (int32 i = 0; i < MaxRows; ++i)
 		{

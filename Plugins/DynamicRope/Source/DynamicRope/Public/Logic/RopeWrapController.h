@@ -42,8 +42,15 @@ public:
 	 */
 	bool Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOverrideFrame& OutFrame);
 
-	/** 붙잡힌 limb 를 절차적으로 타깃 쪽으로 끌어당긴다(IK/tension). */
-	void Pull(FRopeSimState& Sim, const FVector& PullTarget);
+	/**
+	 * Pull(당김) 산출: 손 쪽 첫 앵커가 로프로부터 받는 당김(방향 + 장력)을 데이터로 채운다.
+	 * 방향 = 앵커 → 손(노드 0) 직선(chord — 인접 세그먼트 방향은 로프 처짐/wrap 지터로 랜덤해져
+	 * 게임플레이에 부적합), 장력 = 손 쪽 인접 세그먼트의 SegmentTension(솔버 산출 — 슬랙이면 0이라
+	 * 힘도 자연히 0). 힘 인가(캐릭터/물리 본)는 UObject 작업이라 호출자(컴포넌트) 몫이다 — 여기는
+	 * 순수 데이터(unit-test 가능).
+	 * @return 유효한 앵커/세그먼트가 있어 Out이 채워졌으면 true(장력 0이어도 true).
+	 */
+	bool ComputePull(const FRopeSimState& Sim, FRopePullSample& Out) const;
 
 	/** unlatch 하고 제어권을 솔버에게 돌려준다. */
 	void Release(ERopeReleaseReason Reason);
