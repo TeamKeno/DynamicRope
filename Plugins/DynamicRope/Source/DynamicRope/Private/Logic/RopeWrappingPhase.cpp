@@ -276,7 +276,9 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.PathCurrentDistance = 0.0f;
 	State.FrontDistance = 0.0f;
 	State.PathCurrentBone = StoredLatchAnchor.Bone;
+	State.PathPreviousBone = NAME_None;
 	State.PathCurrentMesh = Mesh;
+	State.PathDistanceSinceBoneTransition = 0.0f;
 	State.FirstNode = TNumericLimits<int32>::Max();
 	State.LastNode = INDEX_NONE;
 
@@ -388,7 +390,9 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 		Ctx,
 		State.PathCircumferenceDir);
 	State.PathCurrentBone = LatchAnchor.Bone;
+	State.PathPreviousBone = NAME_None;
 	State.PathCurrentMesh = Mesh;
+	State.PathDistanceSinceBoneTransition = 0.0f;
 
 	FRopeWrapPathPoint LatchPoint;
 	LatchPoint.SurfaceWorld = State.PathSurfaceWorld;
@@ -461,10 +465,21 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 			{
 				ProjectedMesh = Mesh;
 			}
+
+			// projection query 자체는 tangent field가 예측한 다음 표면 위치(State.PathSurfaceWorld)에서 시작한다.
+			// 다만 같은 query 지점에서 여러 후보 본이 모두 맞을 수 있으므로, 실제 rope node가 현재 프레임에
+			// 어디에 있는지도 scoring에 넣는다. 이 항목이 없으면 예측 path만 믿고 로프 몸체와 먼 본으로
+			// 넘어가는 일이 생길 수 있다.
+			const int32 RopeNodeIndex = State.LatchAnchor.NodeIndex + PathIndex;
+			const FVector RopeNodeWorld = Sim.Positions.IsValidIndex(RopeNodeIndex)
+				? Sim.Positions[RopeNodeIndex]
+				: State.PathSurfaceWorld;
+			FName ProjectedBone = CurrentBone;
 			if (!ProjectWrapPointToSurfaceMultiBone(CurrentBone, Mesh, Sim, Ctx,
+				State.PathPreviousBone, State.PathDistanceSinceBoneTransition, RopeNodeWorld,
 				State.PathNormalWorld, State.PathTangentWorld,
 				State.PathSurfaceWorld, State.PathNormalWorld, State.PathTangentWorld,
-				State.PathCircumferenceDir, State.PathCurrentBone, ProjectedMesh))
+				State.PathCircumferenceDir, ProjectedBone, ProjectedMesh))
 			{
 				State.bPathBuildFailed = true;
 				State.bPathBuildComplete = true;
@@ -477,6 +492,21 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 					State.NumTailNodes,
 					State.Anchors.Num());
 				return false;
+			}
+
+			// ProjectWrapPointToSurfaceMultiBone이 hysteresis까지 적용해 최종 본을 돌려준다.
+			// 여기서는 상태만 갱신한다. 전환했다면 직전 본을 기록해 다음 step에서 바로 되돌아가는 후보에
+			// penalty를 줄 수 있게 하고, 전환 거리 누적은 0으로 다시 시작한다.
+			if (ProjectedBone != CurrentBone)
+			{
+				State.PathPreviousBone = CurrentBone;
+				State.PathCurrentBone = ProjectedBone;
+				State.PathDistanceSinceBoneTransition = 0.0f;
+			}
+			else
+			{
+				State.PathCurrentBone = ProjectedBone;
+				State.PathDistanceSinceBoneTransition += StepDistance;
 			}
 			State.PathCurrentMesh = ProjectedMesh;
 
@@ -973,7 +1003,7 @@ void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& Latc
 }
 
 void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USkeletalMeshComponent* Mesh,
-	TArray<FName>& OutCandidates) const
+	TArray<FSurfaceVectorFieldBoneCandidate>& OutCandidates, const FContext& Ctx) const
 {
 	OutCandidates.Reset();
 	if (!Mesh || CurrentBone.IsNone())
@@ -985,36 +1015,99 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 	{
 		FName Bone = NAME_None;
 		int32 Depth = 0;
+		float Cost = 0.0f;
 	};
 
 	const int32 NumBones = Mesh->GetNumBones();
-	constexpr int32 MaxCandidateDepth = 3;
+	const int32 MaxCandidateDepth = Ctx.Config.bEnableMultiBoneWrapping
+		? FMath::Max(0, Ctx.Config.MaxBoneTransitionDepth)
+		: 0;
+	const float MaxCandidateCost = Ctx.Config.bEnableMultiBoneWrapping
+		? FMath::Max(0.0f, Ctx.Config.MaxBoneTransitionCost)
+		: 0.0f;
+	const float EdgePenalty = FMath::Max(0.0f, Ctx.Config.AutoParentChildTransitionPenalty);
 
-	// SurfaceVectorField MVP는 "지금 붙어 있는 본 주변"으로만 전이를 허용한다.
-	// 기본 parent/child만 쓰면 thigh_twist_02_l 같은 twist bone에서 calf_l이 후보에
-	// 안 들어올 수 있으므로, skeleton graph를 짧게 BFS하여 조상/자식/근처 sibling을 함께 본다.
-	// 너무 멀리 보면 팔->몸통->반대팔 같은 bridge까지 우연히 열릴 수 있어 MVP에서는 3-depth로 제한한다.
+	// SurfaceVectorField의 본 후보를 "가까운 본 이름 목록"이 아니라 작은 graph 탐색 결과로 다룬다.
+	// 지금은 자동 parent/child edge만 쓰지만, 후보가 Depth/GraphCost를 들고 다니므로 이후 디자이너
+	// transition edge를 같은 경로에 섞어 넣을 수 있다. 탐색은 bounded Dijkstra에 가깝게 비용이 낮은
+	// 항목부터 확장하고, depth/cost 상한으로 팔->몸통->반대팔 같은 먼 bridge가 우연히 열리는 것을 막는다.
 	TArray<FBoneQueueEntry, TInlineAllocator<16>> Queue;
-	Queue.Add({ CurrentBone, 0 });
-	OutCandidates.AddUnique(CurrentBone);
+	TMap<FName, float> BestCostByBone;
+	TMap<FName, int32> BestDepthByBone;
+	Queue.Add({ CurrentBone, 0, 0.0f });
+	BestCostByBone.Add(CurrentBone, 0.0f);
+	BestDepthByBone.Add(CurrentBone, 0);
 
-	for (int32 QueueIndex = 0; QueueIndex < Queue.Num(); ++QueueIndex)
+	// 후보 수가 매우 작다는 전제의 Dijkstra-lite 구현이다.
+	// Unreal 쪽 priority queue 의존을 늘리지 않고 TInlineAllocator 배열에서 가장 싼 항목을 직접 고른다.
+	// 현재 parent/child edge 비용은 모두 같지만, 이 형태로 두면 designer transition edge에 다른
+	// penalty를 붙였을 때도 함수 구조를 바꾸지 않고 그대로 확장할 수 있다.
+	while (Queue.Num() > 0)
 	{
-		const FBoneQueueEntry Entry = Queue[QueueIndex];
-		if (Entry.Depth >= MaxCandidateDepth)
+		int32 BestQueueIndex = 0;
+		for (int32 QueueIndex = 1; QueueIndex < Queue.Num(); ++QueueIndex)
+		{
+			if (Queue[QueueIndex].Cost < Queue[BestQueueIndex].Cost)
+			{
+				BestQueueIndex = QueueIndex;
+			}
+		}
+
+		const FBoneQueueEntry Entry = Queue[BestQueueIndex];
+		Queue.RemoveAtSwap(BestQueueIndex, 1, EAllowShrinking::No);
+
+		const float* KnownBestCost = BestCostByBone.Find(Entry.Bone);
+		if (KnownBestCost && Entry.Cost > *KnownBestCost + KINDA_SMALL_NUMBER)
 		{
 			continue;
 		}
 
+		FSurfaceVectorFieldBoneCandidate Candidate;
+		Candidate.Bone = Entry.Bone;
+		Candidate.Depth = Entry.Depth;
+		Candidate.GraphCost = Entry.Cost;
+		Candidate.bCurrentBone = Entry.Bone == CurrentBone;
+		OutCandidates.Add(Candidate);
+
+		if (Entry.Depth >= MaxCandidateDepth)
+		{
+			continue;
+		}
+		if (Entry.Cost >= MaxCandidateCost)
+		{
+			continue;
+		}
+
+		// 지금 구현의 graph edge는 skeleton parent/child뿐이다.
+		// 나중에 AllowedBoneTransitions/TransitionChains를 추가하면 여기에서 AddNeighbor(ToBone, Penalty)처럼
+		// designer edge도 같이 넣으면 된다. 후보 구조가 이미 GraphCost를 들고 있어서 projection/scoring
+		// 쪽은 edge 출처를 몰라도 된다.
 		const auto AddNeighbor = [&](FName Bone)
 		{
-			if (Bone.IsNone() || OutCandidates.Contains(Bone))
+			if (Bone.IsNone())
 			{
 				return;
 			}
 
-			OutCandidates.Add(Bone);
-			Queue.Add({ Bone, Entry.Depth + 1 });
+			const int32 NextDepth = Entry.Depth + 1;
+			const float NextCost = Entry.Cost + EdgePenalty;
+			if (NextDepth > MaxCandidateDepth || NextCost > MaxCandidateCost)
+			{
+				return;
+			}
+
+			const float* ExistingCost = BestCostByBone.Find(Bone);
+			const int32* ExistingDepth = BestDepthByBone.Find(Bone);
+			if (ExistingCost &&
+				(*ExistingCost < NextCost - KINDA_SMALL_NUMBER ||
+					(FMath::IsNearlyEqual(*ExistingCost, NextCost) && ExistingDepth && *ExistingDepth <= NextDepth)))
+			{
+				return;
+			}
+
+			BestCostByBone.Add(Bone, NextCost);
+			BestDepthByBone.Add(Bone, NextDepth);
+			Queue.Add({ Bone, NextDepth, NextCost });
 		};
 
 		AddNeighbor(Mesh->GetParentBone(Entry.Bone));
@@ -1032,13 +1125,14 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 
 bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USkeletalMeshComponent* Mesh,
 	const FRopeSimState& Sim, const FContext& Ctx,
+	FName PreviousBone, float DistanceSinceLastTransition, const FVector& RopeNodeWorld,
 	const FVector& PreviousNormalWorld, const FVector& PreviousTangentWorld,
 	FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
 	FVector& InOutCircumferenceDir, FName& InOutBone, const USkeletalMeshComponent*& OutMesh) const
 {
-	TArray<FName> CandidateBones;
-	GatherSurfaceVectorFieldBoneCandidates(CurrentBone, Mesh, CandidateBones);
-	if (CandidateBones.Num() == 0)
+	TArray<FSurfaceVectorFieldBoneCandidate> Candidates;
+	GatherSurfaceVectorFieldBoneCandidates(CurrentBone, Mesh, Candidates, Ctx);
+	if (Candidates.Num() == 0)
 	{
 		return false;
 	}
@@ -1052,17 +1146,15 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 		FName Bone = NAME_None;
 		const USkeletalMeshComponent* Mesh = nullptr;
 		float Distance = 0.0f;
+		float RopeNodeDistance = 0.0f;
+		float GraphCost = 0.0f;
 		float Score = TNumericLimits<float>::Max();
 	};
 
 	FScoredProjection BestProjection;
+	FScoredProjection CurrentBoneProjection;
 	bool bFound = false;
-
-	constexpr float ProjectionDistanceWeight = 0.35f;
-	constexpr float TangentContinuityWeight = 8.0f;
-	constexpr float NormalContinuityWeight = 5.0f;
-	constexpr float CurrentBoneBonus = 0.1f;
-	constexpr float AdjacentBoneTransitionBonus = 0.75f;
+	bool bFoundCurrentBone = false;
 
 	// 이 함수는 SurfaceVectorField 전용 projection 선택기다.
 	// 기존 단일 본 방식은 LatchAnchor.Bone만 통과시켰지만, 여기서는 후보 본마다
@@ -1070,10 +1162,11 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 	//
 	// 점수 항목:
 	// - Projection.Distance: 예측 위치에서 표면까지 얼마나 멀리 튀었는지. 낮을수록 좋다.
-	// - TangentPenalty: 이전 tangent와 새 tangent가 얼마나 꺾였는지. 낮을수록 경로가 부드럽다.
-	// - NormalPenalty: 표면 normal이 얼마나 갑자기 바뀌는지. 낮을수록 안정적이다.
-	// - CurrentBoneBonus: 아주 작은 유지 보너스. 같은 점수라면 흔들림을 줄이되 전이를 막지는 않는다.
-	// - AdjacentBoneTransitionBonus: 후보 graph 안의 다른 본이 충분히 좋으면 넘어가도록 약한 보너스를 준다.
+	// - RopeNodeDistance: 실제 rope node와 표면점이 가까운 후보를 선호한다.
+	// - GraphCost: parent/child graph를 많이 건넌 후보일수록 불리하다.
+	// - Tangent/NormalPenalty: 이전 frame/step의 surface field와 갑자기 꺾이는 후보를 줄인다.
+	// - CurrentBoneBonus + hysteresis: 현재 본이 아직 쓸 만하면 새 본이 확실히 좋아야 전환한다.
+	// - ImmediateBoneReturnPenalty: 직전 본으로 바로 돌아가는 A->B->A 왕복을 줄인다.
 	const FVector PreviousTangent = PreviousTangentWorld.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 	const FVector PreviousNormal = PreviousNormalWorld.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 	const float QueryRadius = FMath::Max3(
@@ -1094,7 +1187,12 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 			continue;
 		}
 
-		if (!CandidateBones.Contains(Projection.Bone))
+		const FSurfaceVectorFieldBoneCandidate* Candidate = Candidates.FindByPredicate(
+			[&Projection](const FSurfaceVectorFieldBoneCandidate& Item)
+			{
+				return Item.Bone == Projection.Bone;
+			});
+		if (!Candidate)
 		{
 			continue;
 		}
@@ -1119,14 +1217,25 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 		const float TangentPenalty = 1.0f - FMath::Clamp(FVector::DotProduct(CandidateTangent, PreviousTangent), -1.0f, 1.0f);
 		const float NormalPenalty = 1.0f - FMath::Clamp(FVector::DotProduct(CandidateNormal, PreviousNormal), -1.0f, 1.0f);
 		const bool bCurrentBone = Projection.Bone == CurrentBone;
-		const float StayBonus = bCurrentBone ? CurrentBoneBonus : 0.0f;
-		const float TransitionBonus = bCurrentBone ? 0.0f : AdjacentBoneTransitionBonus;
-		const float Score =
-			Projection.Distance * ProjectionDistanceWeight +
-			TangentPenalty * TangentContinuityWeight +
-			NormalPenalty * NormalContinuityWeight -
-			StayBonus -
-			TransitionBonus;
+
+		// 낮은 Score가 이긴다.
+		// distance 계열은 "예측 path/실제 node에서 얼마나 멀어졌는가"이고,
+		// continuity 계열은 "표면 field가 얼마나 갑자기 꺾였는가"다.
+		// CurrentBoneBonus는 실제 보너스이므로 마지막에 빼서, 동점 근처에서는 현재 본을 유지하게 한다.
+		float Score =
+			Projection.Distance * Ctx.Config.ProjectionDistanceWeight +
+			FVector::Dist(Projection.SurfacePoint, RopeNodeWorld) * Ctx.Config.RopeNodeDistanceWeight +
+			Candidate->GraphCost * Ctx.Config.BoneTransitionPenaltyWeight +
+			TangentPenalty * Ctx.Config.TangentContinuityWeight +
+			NormalPenalty * Ctx.Config.NormalContinuityWeight -
+			(bCurrentBone ? Ctx.Config.CurrentBoneBonus : 0.0f);
+
+		if (!PreviousBone.IsNone() && Projection.Bone == PreviousBone && Projection.Bone != CurrentBone)
+		{
+			// 방금 떠난 본으로 바로 돌아가는 후보는 표면 projection이 조금 좋아 보여도
+			// A->B->A 왕복 떨림을 만들 가능성이 높다. 완전 금지는 아니고 점수만 불리하게 만든다.
+			Score += Ctx.Config.ImmediateBoneReturnPenalty;
+		}
 
 		if (!bFound || Score < BestProjection.Score)
 		{
@@ -1137,14 +1246,48 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 			BestProjection.Bone = Projection.Bone;
 			BestProjection.Mesh = Projection.SourceMesh ? Projection.SourceMesh : Mesh;
 			BestProjection.Distance = Projection.Distance;
+			BestProjection.RopeNodeDistance = FVector::Dist(Projection.SurfacePoint, RopeNodeWorld);
+			BestProjection.GraphCost = Candidate->GraphCost;
 			BestProjection.Score = Score;
 			bFound = true;
+		}
+
+		if (bCurrentBone && (!bFoundCurrentBone || Score < CurrentBoneProjection.Score))
+		{
+			CurrentBoneProjection.SurfaceWorld = Projection.SurfacePoint;
+			CurrentBoneProjection.NormalWorld = CandidateNormal;
+			CurrentBoneProjection.TangentWorld = CandidateTangent;
+			CurrentBoneProjection.CircumferenceDir = CandidateCircumferenceDir;
+			CurrentBoneProjection.Bone = Projection.Bone;
+			CurrentBoneProjection.Mesh = Projection.SourceMesh ? Projection.SourceMesh : Mesh;
+			CurrentBoneProjection.Distance = Projection.Distance;
+			CurrentBoneProjection.RopeNodeDistance = FVector::Dist(Projection.SurfacePoint, RopeNodeWorld);
+			CurrentBoneProjection.GraphCost = Candidate->GraphCost;
+			CurrentBoneProjection.Score = Score;
+			bFoundCurrentBone = true;
 		}
 	}
 
 	if (!bFound)
 	{
 		return false;
+	}
+
+	if (bFoundCurrentBone && BestProjection.Bone != CurrentBone)
+	{
+		// 현재 본 projection도 아직 성공했다면 전환은 보수적으로 한다.
+		// 새 본이 hysteresis만큼 확실히 좋고, 마지막 전환 이후 최소 거리도 지난 경우에만 Best를 유지한다.
+		// 둘 중 하나라도 부족하면 CurrentBoneProjection으로 되돌려, path point/anchor가 짧은 구간에서
+		// 여러 본 사이를 흔들며 저장되는 것을 막는다.
+		const bool bEnoughScoreMargin =
+			BestProjection.Score + Ctx.Config.BoneTransitionHysteresis < CurrentBoneProjection.Score;
+		const bool bEnoughDistanceSinceTransition =
+			DistanceSinceLastTransition >= Ctx.Config.MinBoneTransitionPathDistance;
+
+		if (!bEnoughScoreMargin || !bEnoughDistanceSinceTransition)
+		{
+			BestProjection = CurrentBoneProjection;
+		}
 	}
 
 	InOutSurfaceWorld = BestProjection.SurfaceWorld;

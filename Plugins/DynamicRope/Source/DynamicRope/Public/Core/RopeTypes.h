@@ -157,7 +157,16 @@ struct FRopeWrappingState
 	// SurfaceVectorField 적분 중 현재 surface point가 어느 본 위에 있는지 추적한다.
 	// 다음 step의 후보 본은 이 값을 중심으로 skeleton graph 근방에서 고른다.
 	FName PathCurrentBone = NAME_None;
+
+	// 마지막으로 떠난 본. 새 후보가 바로 이 본이면 A->B->A 왕복 가능성이 높으므로
+	// scoring 단계에서 ImmediateBoneReturnPenalty를 더해 전환 떨림을 줄인다.
+	FName PathPreviousBone = NAME_None;
 	TWeakObjectPtr<const USkeletalMeshComponent> PathCurrentMesh = nullptr;
+
+	// 마지막 본 전환 이후 path가 표면을 따라 진행한 거리(cm).
+	// 새 본 후보가 좋아 보여도 MinBoneTransitionPathDistance 전에는 현재 본을 유지해
+	// 한두 step마다 본이 바뀌는 flicker를 막는다.
+	float PathDistanceSinceBoneTransition = 0.0f;
 
 	float PathWindingSign = 1.0f;
 
@@ -486,6 +495,72 @@ struct FRopeWrapConfig
 	/** Axis distance advanced per circumference distance for analytic helix wrapping. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "-2.0", ClampMax = "2.0"))
 	float WrappingHelixPitchScale = 0.25f;
+
+	/**
+	 * SurfaceVectorField path point가 latch bone 하나에 고정되지 않고 graph 후보 본으로 넘어갈지 여부.
+	 * false면 후보 graph depth/cost가 0이 되어 현재 본만 평가하므로 기존 단일 본 동작에 가깝게 돌아간다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone")
+	bool bEnableMultiBoneWrapping = true;
+
+	/**
+	 * 현재 본에서 몇 edge까지 후보로 볼지.
+	 * 지금은 skeleton parent/child edge만 사용한다. 이후 디자이너 지정 transition을 추가해도
+	 * 같은 depth 제한을 통과하므로, 너무 먼 bridge가 한 번에 열리는 것을 막는 1차 안전장치다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0", ClampMax = "16"))
+	int32 MaxBoneTransitionDepth = 3;
+
+	/**
+	 * 후보 graph 누적 비용 상한.
+	 * depth가 같아도 edge별 penalty가 다르면 비용이 달라질 수 있다. 지금은 parent/child edge 비용만
+	 * 누적하지만, 나중에 designer edge / 금지에 가까운 edge를 섞을 때 projection 전에 후보를 잘라내는 역할을 한다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	float MaxBoneTransitionCost = 5.0f;
+
+	/**
+	 * 자동 parent/child edge 하나를 지날 때의 비용.
+	 * 값이 클수록 graph cost가 커져 같은 본 유지가 쉬워지고, 낮추면 parent/child chain을 더 적극적으로 탄다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	float AutoParentChildTransitionPenalty = 1.0f;
+
+	/** projection 거리 점수 가중치. 예측 위치에서 표면까지 멀수록 불리하다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	float ProjectionDistanceWeight = 0.35f;
+
+	/** 실제 rope node 위치와 projection 표면점 사이 거리 가중치. 로프가 실제로 있는 쪽의 본을 선호한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	float RopeNodeDistanceWeight = 0.25f;
+
+	/** 이전 tangent와 새 tangent가 꺾이는 정도의 가중치. 값이 클수록 부드러운 진행을 선호한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	float TangentContinuityWeight = 8.0f;
+
+	/** 이전 normal과 새 normal이 꺾이는 정도의 가중치. 값이 클수록 표면 normal 연속성을 선호한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	float NormalContinuityWeight = 5.0f;
+
+	/** graph 비용 가중치. parent/child를 많이 건너는 후보일수록 불리하게 만든다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	float BoneTransitionPenaltyWeight = 1.0f;
+
+	/** 현재 본 유지 보너스. 동점 근처에서 본이 흔들리는 것을 줄인다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	float CurrentBoneBonus = 0.35f;
+
+	/** 새 본이 현재 본보다 이 점수만큼 더 좋아야 전환한다. 전환 hysteresis. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	float BoneTransitionHysteresis = 0.75f;
+
+	/** 직전 본으로 바로 돌아가는 후보에 더하는 penalty. A->B->A 왕복을 줄인다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	float ImmediateBoneReturnPenalty = 1.5f;
+
+	/** 마지막 본 전환 이후 이 거리(cm) 이상 진행해야 다음 전환을 허용한다. 0이면 비활성. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0", Units = "cm"))
+	float MinBoneTransitionPathDistance = 8.0f;
 
 	/** Upper bound for physics-based wrapping settle before committing the best accumulated anchors. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))

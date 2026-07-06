@@ -81,6 +81,14 @@ public:
 	void ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
 private:
+	struct FSurfaceVectorFieldBoneCandidate
+	{
+		FName Bone = NAME_None;
+		int32 Depth = 0;
+		float GraphCost = 0.0f;
+		bool bCurrentBone = false;
+	};
+
 	//~ progressive 경로 빌드(프레임 분할). Begin이 개시하고 AdvancePathBuild가 예산만큼 전진.
 	bool BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor& LatchAnchor,
 		const FRopeSimState& Sim, const FContext& Ctx);
@@ -116,13 +124,14 @@ private:
 	void OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
 		const USkeletalMeshComponent* Mesh, FVector& InOutAxisDirection) const;
 
-	/** SurfaceVectorField MVP용 후보 본 수집. CurrentBone 주변의 짧은 skeleton graph만 허용한다. */
+	/** SurfaceVectorField 후보 본 수집. parent/child graph를 제한 비용 탐색해 전환 비용을 함께 넘긴다. */
 	void GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USkeletalMeshComponent* Mesh,
-		TArray<FName>& OutCandidates) const;
+		TArray<FSurfaceVectorFieldBoneCandidate>& OutCandidates, const FContext& Ctx) const;
 
-	/** 후보 본들의 표면 projection을 점수화해 path point가 소유할 Bone/Mesh까지 함께 선택한다. */
+	/** 후보 본들의 표면 projection을 graph 비용/hysteresis와 함께 점수화해 path point의 Bone/Mesh를 선택한다. */
 	bool ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USkeletalMeshComponent* Mesh,
 		const FRopeSimState& Sim, const FContext& Ctx,
+		FName PreviousBone, float DistanceSinceLastTransition, const FVector& RopeNodeWorld,
 		const FVector& PreviousNormalWorld, const FVector& PreviousTangentWorld,
 		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
 		FVector& InOutCircumferenceDir, FName& InOutBone, const USkeletalMeshComponent*& OutMesh) const;
