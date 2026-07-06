@@ -11,12 +11,12 @@ static TAutoConsoleVariable<int32> CVarForceGDFConsumer(
 	TEXT("DynamicRope: 1이면 GDF 로프 유무와 무관하게 커스텀 FX 시스템이 GDF를 요구한다(온디맨드 빌드 경로 검증용)."),
 	ECVF_RenderThreadSafe);
 
-// GPU 솔브 dispatch 경로: 0=Step() 전용 그래프(현행), 1=뷰 확장에서 씬 렌더러 그래프로 dispatch(GDF 통합).
-// GT(서브시스템)와 RT(뷰 확장) 양쪽에서 읽으므로 RenderThreadSafe.
+// GPU 솔브 dispatch 경로: 0=Step() 전용 그래프, 1=뷰 확장에서 씬 렌더러 그래프로 dispatch(GDF 통합, 기본).
+// GT(서브시스템)와 RT(뷰 확장) 양쪽에서 읽으므로 RenderThreadSafe. 기본 1 — GDF 월드 충돌/통합 튜브가 이 프로젝트 정규 경로.
 static TAutoConsoleVariable<int32> CVarGDFDispatchInVE(
 	TEXT("r.DynamicRope.GDFDispatchInVE"),
-	0,
-	TEXT("DynamicRope: 0=GPU 솔브를 자체 RDG 그래프에서 실행(기본), 1=씬 뷰 확장(PreRenderBasePass)에서 씬 그래프로 실행."),
+	1,
+	TEXT("DynamicRope: 0=GPU 솔브를 자체 RDG 그래프에서 실행, 1=씬 뷰 확장(PreRenderBasePass)에서 씬 그래프로 실행(기본, GDF 통합)."),
 	ECVF_RenderThreadSafe);
 
 namespace RopeGDF

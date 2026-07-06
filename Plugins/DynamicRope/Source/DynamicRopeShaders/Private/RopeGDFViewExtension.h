@@ -2,7 +2,7 @@
 //
 // GDF 월드 충돌용 씬 뷰 확장. GPU 솔브 dispatch를 씬 렌더러 그래프 안(PreRenderBasePass — GDF 빌드 이후·
 // base pass 이전)으로 옮겨, GDF 파라미터가 유효한 타이밍에 돌린다. base pass 이전이라 GPU 튜브가 이번 프레임
-// 결과를 봐 지연이 없다. r.DynamicRope.GDFDispatchInVE=1일 때만 동작(기본 0은 솔버 전용 그래프 경로).
+// 결과를 봐 지연이 없다. r.DynamicRope.GDFDispatchInVE로 게이트(기본 1=이 경로; 0이면 솔버 전용 그래프 경로).
 //
 // PreRenderBasePass 훅은 뷰 인자가 없으므로, PreRenderViewFamily에서 이번 패밀리를 캡처해 둔다.
 

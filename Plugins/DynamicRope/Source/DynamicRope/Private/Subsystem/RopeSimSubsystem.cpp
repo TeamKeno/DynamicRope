@@ -349,7 +349,7 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		}
 		if (Steps.Num() > 0)
 		{
-			// GDF 통합 경로(r.DynamicRope.GDFDispatchInVE=1)면 dispatch를 뷰 확장(씬 그래프)으로 미룬다(기본 0은 현행).
+			// GDF 통합 경로(r.DynamicRope.GDFDispatchInVE, 기본 1)면 dispatch를 뷰 확장(씬 그래프)으로 미룬다(0이면 전용 그래프).
 			if (RopeGDF::IsDispatchInVE())
 			{
 				GpuSolver.EnqueueSteps(MoveTemp(Steps));

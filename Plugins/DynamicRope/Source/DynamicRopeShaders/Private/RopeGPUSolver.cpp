@@ -42,12 +42,12 @@ static TAutoConsoleVariable<int32> CVarRopeGDFSweep(
 	TEXT("GDF 월드 충돌에서 프레임 시작→끝 스윕(터널링 방지). 0=off(끝점만), 1=on(기본)."),
 	ECVF_RenderThreadSafe);
 
-// GDF 월드 충돌을 솔버 substep 제약으로 처리(Phase 3). on이면 bUseWorldGDF 로프의 솔브가 GDF permutation으로
+// GDF 월드 충돌을 솔버 substep 제약으로 처리(Phase 3, 기본 on). bUseWorldGDF 로프의 솔브가 GDF permutation으로
 // 돌아 매 substep 벽을 투영하고, post-solve GDF 패스는 비활성(중복 방지) — 장력과 같은 solve에서 균형(떨림 제거).
-// off(기본)는 기존 post-solve 패스(진입-면 되밀기/스윕). View 없는 Step 경로에선 무효(GDF는 뷰 확장 경로 전용).
+// 0으로 끄면 기존 post-solve 패스(진입-면 되밀기/스윕). View 없는 Step 경로에선 무효(GDF는 뷰 확장 경로 전용).
 static TAutoConsoleVariable<int32> CVarRopeGDFInSolver(
-	TEXT("r.DynamicRope.GDFInSolver"), 0,
-	TEXT("GDF 월드 충돌을 솔버 substep 제약으로 처리. 0=off(post-solve 패스), 1=on(in-solver, post-solve 비활성)."),
+	TEXT("r.DynamicRope.GDFInSolver"), 1,
+	TEXT("GDF 월드 충돌을 솔버 substep 제약으로 처리. 0=off(post-solve 패스), 1=on(in-solver, post-solve 비활성; 기본)."),
 	ECVF_RenderThreadSafe);
 
 // HLSL FRopeGPUParams(RopeXPBD.usf)와 1:1 미러. 레이아웃 변경 시 .usf 동시 수정. 16바이트 정렬.
