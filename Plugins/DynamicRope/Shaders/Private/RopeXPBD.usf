@@ -21,6 +21,10 @@ uint   bWorldGDFValid;        // 1=GDF 유효(클립맵>0). 0이면 GDF 제약 n
 
 // ROPE_MAX_NODES / ROPE_THREADS 는 C++ ModifyCompilationEnvironment에서 정의(스레드그룹 크기 == 최대 노드 수).
 
+// 콜라이더 데이터 모델(캡슐/SDF 구조체 + Capsules/SDFDistances/SDFVolumes/SDFColliders 버퍼) +
+// 수학/점질의 헬퍼. 솔브/감지 커널이 공유하고, 다른 로프 셰이더도 재사용할 수 있는 공용 모듈.
+#include "/Plugin/DynamicRope/Private/RopeColliderCommon.ush"
+
 // FRopeGPUParamsGPU(C++)와 1:1 미러. 레이아웃 변경 시 양쪽 동시 수정. 16바이트 정렬.
 struct FRopeGPUParams
 {
@@ -53,48 +57,8 @@ struct FRopeGPUParams
 	float4 PinTarget; // xyz 사용
 };
 
-// GPU 충돌(M2)용 해석적 capsule. xyz=세그먼트 끝점, B.w=반지름, PrevB.w=InvDeltaTime(0이면 정적).
-// 캡슐은 리지드 트랜스폼이 없어(두 관절점이 따로 움직임) SDF의 prev quat/trans 대신 prev 끝점을 직접
-// 싣는다. 정적이면 패킹(C++)이 PrevA/PrevB=A/B로 채우므로 커널은 유효성 분기 없이 항상 lerp한다.
-struct FRopeCapsule
-{
-	float4 A;
-	float4 B;     // w = Radius
-	float4 PrevA; // 이전 프레임 끝점(표면 속도 드래그/substep 상대 운동 CCD)
-	float4 PrevB; // w = InvDeltaTime
-};
-
-// GPU 충돌(M3)용 SDF 볼륨 헤더. distance는 SDFDistances[DistOffset..]에 행 우선 저장.
-struct FRopeSDFVolume
-{
-	int    DistOffset;
-	int    ResX;
-	int    ResY;
-	int    ResZ;
-	float4 LocalMin;  // xyz
-	float4 LocalSize; // xyz
-};
-
-// GPU 충돌(M3)용 SDF collider 인스턴스. 볼륨 인덱스 + 본→월드 트랜스폼(quat/trans/scale).
-struct FRopeSDFCollider
-{
-	int    VolumeIndex;
-	int    Pad0;
-	int    Pad1;
-	int    Pad2;
-	float4 Rotation;        // quat (x,y,z,w) — 현재 프레임
-	float4 Translation;     // xyz
-	float4 Scale;           // xyz
-	float4 PrevRotation;    // quat (x,y,z,w) — 이전 프레임(CCD 상대 운동/표면속도)
-	float4 PrevTranslation; // xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
-};
-
 uint NumRopes;
 StructuredBuffer<FRopeGPUParams> Params;
-StructuredBuffer<FRopeCapsule>   Capsules;       // 전 로프 capsule 평탄 배열(per-rope offset/count는 Params)
-StructuredBuffer<float>          SDFDistances;   // 전 볼륨 distance grid 연결(볼륨 dedup, 행 우선)
-StructuredBuffer<FRopeSDFVolume> SDFVolumes;     // 볼륨 헤더
-StructuredBuffer<FRopeSDFCollider> SDFColliders; // 로프별 SDF collider 인스턴스
 // --- Override(G0): 로직 페이즈(GT)가 계산한 노드별 타깃/질량. bHasOverrides=0이면 미참조(더미 1개).
 // 비트: 1=Pos, 2=Prev(명시 — Verlet 속도 주입), 4=Prev=Pos(속도 0), 8=InvMass. C++ ERopeGPUOverride와 1:1.
 StructuredBuffer<uint>           OverrideFlags;
@@ -107,155 +71,6 @@ RWStructuredBuffer<float4>        PrevPositions; // xyz 사용(w=0)
 // 장력 리드백: 마지막 substep의 세그먼트별 distance λ(수렴 임펄스). 호출자가 F=max(0,-λ)/h²로 힘 변환.
 // NumSub=0(override-only) 프레임엔 0이 쓰인다(로드 시 0 초기화) — 호출자는 그 프레임 리드백을 무장하지 않는다.
 RWStructuredBuffer<float>         OutLambdaDist;
-
-// 단위 quat q로 벡터 v 회전(v' = v + 2w(q×v) + 2(q×(q×v))).
-float3 RopeQuatRotate(float4 q, float3 v)
-{
-	const float3 t = 2.0f * cross(q.xyz, v);
-	return v + q.w * t + cross(q.xyz, t);
-}
-
-// 두 단위 quat의 nlerp(최단경로): 부호 정렬 후 lerp+정규화. slerp 근사(substep당 작은 회전엔 충분).
-// CPU FTransform::Blend(slerp)와 비트일치하진 않으나 수렴/거동은 동등.
-float4 RopeQuatNlerp(float4 a, float4 b, float t)
-{
-	if (dot(a, b) < 0.0f) { b = -b; }
-	return normalize(lerp(a, b, t));
-}
-
-// SDF grid 한 점 정수 인덱스 샘플(경계 clamp). 행 우선 idx = x + y*ResX + z*ResX*ResY.
-float RopeSDFSampleAt(FRopeSDFVolume Vol, int x, int y, int z)
-{
-	x = clamp(x, 0, Vol.ResX - 1);
-	y = clamp(y, 0, Vol.ResY - 1);
-	z = clamp(z, 0, Vol.ResZ - 1);
-	return SDFDistances[Vol.DistOffset + x + y * Vol.ResX + z * Vol.ResX * Vol.ResY];
-}
-
-// 본 로컬 위치에서 trilinear signed distance(cm, 바깥 +). CPU RopeSDFSampler::SampleTrilinear 미러.
-float RopeSDFTrilinear(FRopeSDFVolume Vol, float3 LocalPos)
-{
-	const float3 Mn = Vol.LocalMin.xyz;
-	const float3 Sz = Vol.LocalSize.xyz;
-	const int3 Res = int3(Vol.ResX, Vol.ResY, Vol.ResZ);
-	// grid 좌표: T = clamp((P-Min)/Size, 0,1) * (Res-1).
-	float3 G;
-	G.x = (Sz.x > 1e-4f && Res.x >= 2) ? saturate((LocalPos.x - Mn.x) / Sz.x) * (Res.x - 1) : 0.0f;
-	G.y = (Sz.y > 1e-4f && Res.y >= 2) ? saturate((LocalPos.y - Mn.y) / Sz.y) * (Res.y - 1) : 0.0f;
-	G.z = (Sz.z > 1e-4f && Res.z >= 2) ? saturate((LocalPos.z - Mn.z) / Sz.z) * (Res.z - 1) : 0.0f;
-
-	const int X0 = (int)floor(G.x); const int Y0 = (int)floor(G.y); const int Z0 = (int)floor(G.z);
-	const float Fx = G.x - X0; const float Fy = G.y - Y0; const float Fz = G.z - Z0;
-
-	const float C000 = RopeSDFSampleAt(Vol, X0,   Y0,   Z0);
-	const float C100 = RopeSDFSampleAt(Vol, X0+1, Y0,   Z0);
-	const float C010 = RopeSDFSampleAt(Vol, X0,   Y0+1, Z0);
-	const float C110 = RopeSDFSampleAt(Vol, X0+1, Y0+1, Z0);
-	const float C001 = RopeSDFSampleAt(Vol, X0,   Y0,   Z0+1);
-	const float C101 = RopeSDFSampleAt(Vol, X0+1, Y0,   Z0+1);
-	const float C011 = RopeSDFSampleAt(Vol, X0,   Y0+1, Z0+1);
-	const float C111 = RopeSDFSampleAt(Vol, X0+1, Y0+1, Z0+1);
-
-	const float X00 = lerp(C000, C100, Fx);
-	const float X10 = lerp(C010, C110, Fx);
-	const float X01 = lerp(C001, C101, Fx);
-	const float X11 = lerp(C011, C111, Fx);
-	const float Y0V = lerp(X00, X10, Fy);
-	const float Y1V = lerp(X01, X11, Fy);
-	return lerp(Y0V, Y1V, Fz);
-}
-
-// 본 로컬 forward-difference gradient를 정규화(바깥 방향). CPU SampleGradient 미러(6->4 샘플). 축퇴 시 +Z.
-float3 RopeSDFGradient(FRopeSDFVolume Vol, float3 LocalPos)
-{
-	const float3 Sz = Vol.LocalSize.xyz;
-	const float Hx = (Vol.ResX > 1) ? (Sz.x / (Vol.ResX - 1)) : 1.0f;
-	const float Hy = (Vol.ResY > 1) ? (Sz.y / (Vol.ResY - 1)) : 1.0f;
-	const float Hz = (Vol.ResZ > 1) ? (Sz.z / (Vol.ResZ - 1)) : 1.0f;
-	const float C  = RopeSDFTrilinear(Vol, LocalPos);
-	const float Dx = RopeSDFTrilinear(Vol, LocalPos + float3(Hx,0,0)) - C;
-	const float Dy = RopeSDFTrilinear(Vol, LocalPos + float3(0,Hy,0)) - C;
-	const float Dz = RopeSDFTrilinear(Vol, LocalPos + float3(0,0,Hz)) - C;
-	const float3 Grad = float3(Dx / Hx, Dy / Hy, Dz / Hz);
-	const float Len = length(Grad);
-	return (Len > 1e-6f) ? (Grad / Len) : float3(0.0f, 0.0f, 1.0f);
-}
-
-// 점 P에서 세그먼트 A-B 위 최근접점. CPU FMath::ClosestPointOnSegment 미러(t를 [0,1]로 clamp).
-float3 RopeClosestPointOnSegment(float3 P, float3 A, float3 B)
-{
-	const float3 AB = B - A;
-	const float Denom = max(dot(AB, AB), 1e-8f);
-	const float T = saturate(dot(P - A, AB) / Denom);
-	return A + T * AB;
-}
-
-// 점 P의 세그먼트 A-B 위 최근접 파라미터 t(0..1). 캡슐 접촉 재질점 식별(prev 끝점 보간)용.
-float RopeSegmentParam(float3 P, float3 A, float3 B)
-{
-	const float3 AB = B - A;
-	return saturate(dot(P - A, AB) / max(dot(AB, AB), 1e-8f));
-}
-
-// ===== 공용 콜라이더 점질의(point query) =============================================================
-// 솔브 노드 스윕 샘플 / 세그먼트(chord) 충돌 / 접촉 감지가 같은 질의 수식을 각자 복붙하던 것을 통합.
-// HLSL 함수는 전부 인라인이라 비용 변화 없음. 수식은 기존 블록과 문자 그대로 동일(GPU 패리티 보존).
-
-// 캡슐 점질의: 점 P vs 캡슐(CapA-CapB, 반지름 CapRadius) + 질의 반경 NodeR. 침투 시 true.
-// OutNormal = 바깥 단위(축퇴 시 +Z), OutPen > 0, OutTSeg = 재질점 파라미터(표면속도/이월용),
-// OutClosest = 축 위 최근접점. 비침투에서도 out은 유효한 값으로 채워진다(Pen <= 0).
-bool RopeQueryCapsulePoint(float3 CapA, float3 CapB, float CapRadius, float3 P, float NodeR,
-	out float3 OutNormal, out float OutPen, out float OutTSeg, out float3 OutClosest)
-{
-	OutTSeg = RopeSegmentParam(P, CapA, CapB);
-	OutClosest = lerp(CapA, CapB, OutTSeg);
-	const float3 ToNode = P - OutClosest;
-	const float  Dist = length(ToNode);
-	const float  MinDist = CapRadius + NodeR;
-	OutNormal = (Dist > 1e-4f) ? (ToNode / Dist) : float3(0.0f, 0.0f, 1.0f);
-	OutPen = MinDist - Dist;
-	return Dist < MinDist;
-}
-
-// SDF 로컬 점질의: 좁은밴드 박스 컬(+NodeR 여유) 후 trilinear. 침투 시에만 gradient 계산(기존 블록과
-// 동일 비용 구조 — 비침투 샘플은 gradient를 만들지 않는다). 컬 시 OutDist = NodeR(비침투 안전값).
-bool RopeQuerySDFLocal(FRopeSDFVolume Vol, float3 Lp, float NodeR, out float OutDist, out float3 OutNLocal)
-{
-	OutDist = NodeR;
-	OutNLocal = float3(0.0f, 0.0f, 1.0f);
-	const float3 Mn = Vol.LocalMin.xyz - NodeR;
-	const float3 Mx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + NodeR;
-	if (any(Lp < Mn) || any(Lp > Mx))
-	{
-		return false;
-	}
-	OutDist = RopeSDFTrilinear(Vol, Lp);
-	if (OutDist >= NodeR)
-	{
-		return false;
-	}
-	OutNLocal = RopeSDFGradient(Vol, Lp);
-	return true;
-}
-
-// SDF 월드 점질의(현재 포즈): 월드 P를 collider 로컬로 역변환(InvTransform = qInv*(P-T)/Scale) 후 로컬
-// 점질의, 침투 시 법선을 월드로 회전. sub-포즈가 필요 없는 호출자(세그먼트 충돌/접촉 감지)용.
-// OutLp는 표면점(P - N*Dist)/표면속도(Wprev) 재구성에 쓴다.
-bool RopeQuerySDFWorld(FRopeSDFCollider Col, FRopeSDFVolume Vol, float3 P, float NodeR,
-	out float3 OutNWorld, out float OutDist, out float3 OutLp)
-{
-	const float3 Scl = Col.Scale.xyz;
-	const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
-	OutLp = RopeQuatRotate(float4(-Col.Rotation.xyz, Col.Rotation.w), P - Col.Translation.xyz) * InvScale;
-	float3 NLocal;
-	if (!RopeQuerySDFLocal(Vol, OutLp, NodeR, OutDist, NLocal))
-	{
-		OutNWorld = float3(0.0f, 0.0f, 1.0f);
-		return false;
-	}
-	OutNWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal));
-	return true;
-}
 
 groupshared float3 gPos[ROPE_MAX_NODES];
 groupshared float3 gPrev[ROPE_MAX_NODES];
