@@ -364,9 +364,22 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		{
 			if (C.bIsCapsule)
 			{
-				AddShape(FGameplayDebuggerShape::MakeSegment(C.A, C.B, 1.0f, FColor::Green));
-				AddShape(FGameplayDebuggerShape::MakePoint(C.A, C.Radius, FColor::Green));
-				AddShape(FGameplayDebuggerShape::MakePoint(C.B, C.Radius, FColor::Green));
+				// 실제 충돌 볼륨(sphyl) 그대로 그린다: 세그먼트+끝점 구만 그리면 원통 몸통이 빠져
+				// 팔다리처럼 가늘고 긴 캡슐이 본을 못 덮는 것처럼 보인다. DrawDebugCapsule의
+				// HalfHeight는 반구 포함 전체 절반이므로 세그먼트 절반 + Radius. 축퇴(A==B,
+				// physics asset 구 셰이프)는 방향이 없으므로 구(Point)로 그린다.
+				const FVector Axis = C.B - C.A;
+				const float SegLen = static_cast<float>(Axis.Size());
+				if (SegLen > KINDA_SMALL_NUMBER)
+				{
+					const FVector Center = (C.A + C.B) * 0.5f;
+					const FRotator Rot = FRotationMatrix::MakeFromZ(Axis).Rotator();
+					AddShape(FGameplayDebuggerShape::MakeCapsule(Center, Rot, C.Radius, SegLen * 0.5f + C.Radius, FColor::Green));
+				}
+				else
+				{
+					AddShape(FGameplayDebuggerShape::MakePoint(C.A, C.Radius, FColor::Green));
+				}
 			}
 			else if (C.Bounds.IsValid)
 			{
