@@ -118,6 +118,11 @@ public:
 	DECLARE_GLOBAL_SHADER(FRopeXPBDSolveCS);
 	SHADER_USE_PARAMETER_STRUCT(FRopeXPBDSolveCS, FGlobalShader);
 
+	// GDF 월드 충돌을 substep 제약으로 통합하는 permutation. on일 때만 GDF 헤더 include + View/GDF 바인딩.
+	// off(기본, View 없는 Step 경로 겸용)는 GDF 미참조 → View 없이 기존대로 컴파일된다.
+	class FGDFDim : SHADER_PERMUTATION_BOOL("ROPE_USE_GDF");
+	using FPermutationDomain = TShaderPermutationDomain<FGDFDim>;
+
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, NumRopes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeGPUParams>, Params)
@@ -133,6 +138,11 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, Positions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, PrevPositions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, OutLambdaDist) // 장력 리드백(마지막 substep 세그먼트 λ).
+		// --- GDF 통합 경로(FGDFDim on일 때만 셰이더가 참조; off면 미사용 → 언바운드 허용). FRopeGDFCollisionCS 레시피 미러.
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FGlobalDistanceFieldParameters2, GDF)
+		SHADER_PARAMETER(FVector3f, GDFPreViewTranslation)
+		SHADER_PARAMETER(uint32, bWorldGDFValid)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -1009,7 +1019,10 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 					FRDGBufferDesc::CreateStructuredDesc(sizeof(float), N), TEXT("Rope.LambdaDist"));
 				PassParams->OutLambdaDist = GraphBuilder.CreateUAV(LambdaRDG);
 
-				TShaderMapRef<FRopeXPBDSolveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+				// Phase 1: 항상 lean permutation(GDF off) — 기존 동작 유지. GDF 경로 선택은 Phase 3(View/GDF 주입 후).
+				FRopeXPBDSolveCS::FPermutationDomain PermVec;
+				PermVec.Set<FRopeXPBDSolveCS::FGDFDim>(false);
+				TShaderMapRef<FRopeXPBDSolveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), PermVec);
 				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeXPBDResident"),
 					ComputeShader, PassParams, FIntVector(1, 1, 1)); // 로프 1개 = 스레드그룹 1개
 

@@ -8,6 +8,17 @@
 
 #include "/Engine/Public/Platform.ush"
 
+// GDF 월드 충돌을 substep 제약으로 통합하는 경로(C++ FRopeXPBDSolveCS::FGDFDim). GDF .ush는 View UB(ResolvedView)/
+// LWC/전역 샘플러에 의존하므로 Common.ush + SceneTexturesCommon.ush를 포함하고 View UB를 바인딩한다(별도 GDF 패스
+// RopeGDFCollision.usf와 동일 패턴). off(기본) permutation은 이 include가 없어 View 없이 그대로 컴파일된다.
+#if ROPE_USE_GDF
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/SceneTexturesCommon.ush"
+#include "/Engine/Private/DistanceField/GlobalDistanceFieldShared.ush"
+float3 GDFPreViewTranslation; // 월드 → TranslatedWorld 오프셋(GDF 좌표계).
+uint   bWorldGDFValid;        // 1=GDF 유효(클립맵>0). 0이면 GDF 제약 no-op.
+#endif
+
 // ROPE_MAX_NODES / ROPE_THREADS 는 C++ ModifyCompilationEnvironment에서 정의(스레드그룹 크기 == 최대 노드 수).
 
 // FRopeGPUParamsGPU(C++)와 1:1 미러. 레이아웃 변경 시 양쪽 동시 수정. 16바이트 정렬.
@@ -536,6 +547,37 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 				}
 			}
 		}
+#if ROPE_USE_GDF && PLATFORM_SUPPORTS_DISTANCE_FIELDS
+		// GDF 월드 충돌(정적 벽/바닥) — per-substep 제약. 캡슐/SDF와 같은 충돌 pass 위치·같은 응답 패턴, query만 GDF로
+		// 교체. 정적 월드라 표면속도 0(상대속도 마찰 불필요). small-step이라 부호-뒤집힘/터널링이 구조적으로 없음
+		// (post-solve 패스의 스윕/되밀기가 불필요해지는 지점). Phase 1: dispatch는 아직 lean이라 런타임 미실행.
+		if (bActiveNode && gInvMass[i] > 0.0f && bWorldGDFValid != 0)
+		{
+			const float  GdfNodeR = P.CollisionRadius;
+			const float3 GdfTWP   = gPos[i] + GDFPreViewTranslation;
+			const float  GdfDist  = GetDistanceToNearestSurfaceGlobal(GdfTWP);
+			if (GdfDist < GdfNodeR)
+			{
+				const float3 GdfGrad = GetDistanceFieldGradientGlobal(GdfTWP);
+				const float  GdfGLen = length(GdfGrad);
+				if (GdfGLen > 1e-4f)
+				{
+					const float3 GdfN = GdfGrad / GdfGLen;        // 표면 바깥(거리 증가) 방향
+					gPos[i] += GdfN * (GdfNodeR - GdfDist);        // 표면 밖으로 투영
+					// 비탄성: 바깥 법선 속도 제거(정적 월드 — 표면 자체 운동 없음). 캡슐/SDF 응답 미러.
+					const float GdfVnOut = dot(gPos[i] - gPrev[i], GdfN);
+					if (GdfVnOut > 0.0f) { gPrev[i] += GdfN * GdfVnOut; }
+					// 마찰: 접선 성분 감쇠(정적 월드라 상대 접선 = 노드 접선).
+					const float GdfFr = clamp(P.Friction, 0.0f, 1.0f);
+					if (GdfFr > 0.0f)
+					{
+						const float3 GdfTan = (gPos[i] - gPrev[i]) - dot(gPos[i] - gPrev[i], GdfN) * GdfN;
+						gPrev[i] += GdfTan * GdfFr;
+					}
+				}
+			}
+		}
+#endif
 			GroupMemoryBarrierWithGroupSync(); // 충돌 결과 가시화 → 다음 collision pass / 다음 substep
 
 			// --- 세그먼트(에지) 충돌: 두 노드 사이 직선 chording(양 끝은 표면 밖인데 사이 직선이 얇은 표면을
