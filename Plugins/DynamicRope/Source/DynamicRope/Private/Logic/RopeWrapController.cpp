@@ -184,7 +184,6 @@ void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapSta
 	}
 
 
-	FVector Centroid = FVector::ZeroVector;
 	int32 ValidAnchorCount = 0;
 
 	for (FRopeSurfaceAnchor& Anchor : State.Anchors)
@@ -228,7 +227,6 @@ void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapSta
 		OutFrame.SetPosition(Anchor.NodeIndex, World, /*bZeroVelocity*/ true);
 		OutFrame.SetInvMass(Anchor.NodeIndex, 0.0f);
 
-		Centroid += World;
 		++ValidAnchorCount;
 	}
 
@@ -239,10 +237,6 @@ void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapSta
 		State.Reset();
 		return;
 	}
-
-	Centroid /= static_cast<double>(ValidAnchorCount);
-	State.AnchorDistance = Sim.Num() > 0 ? FVector::Dist(Sim.Positions[0], Centroid) : 0.0f;
-	State.WrapTurns = 0.0f;
 
 	UE_LOG(LogRopeWrap, Log, TEXT("BeginWrap: bone=%s, anchors=%d, mesh=%s"),
 		*State.BoneName.ToString(), State.Anchors.Num(), *Mesh->GetName());

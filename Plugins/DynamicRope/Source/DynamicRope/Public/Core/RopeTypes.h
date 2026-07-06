@@ -106,9 +106,8 @@ struct FRopeSurfaceAnchor
 	//Wrapping 시작 순간의 월드 위치 Lerp 시작점으로 사용
 	FVector StartWorldPosition = FVector::ZeroVector;
 
-	//나중에 여러 번 감김/ 길이 계산이 사용할 값
+	//나중에 여러 번 감김/ 길이 계산이 사용할 값. 커밋 시점 눈금으로 저장되므로 reel(길이 변경) 후엔 stale.
 	float RopeDistance = 0.f;
-	float WindingAngle = 0.f;
 
 	//표면에서 로프 중심선을 얼마나 띄울지. 보통 rope radius
 	float SurfaceOffset = 0.0f;
@@ -195,10 +194,8 @@ struct FRopeWrapState
 	TArray<FRopeLatchNode>  Latched;// 기존 fallback용
 	TArray<FRopeSurfaceAnchor> Anchors; // 새 방식
 
-	float                   WrapTurns = 0.0f;
-	float                   Tension = 0.0f;
-	float                   TimeWrapped = 0.0f;
-	float                   AnchorDistance = 0.0f;
+	float                   Tension = 0.0f;     // 최대 세그먼트 장력(Wrapped 중 매 프레임 갱신)
+	float                   TimeWrapped = 0.0f; // 감긴 누적 시간(Hold가 증가 — 포획 성공 판정 등 게임 소비 예정)
 
 	// BoneName을 소유한 Mesh. wrap은 이 mesh에 대해 유지/추적된다(rope 소유자와 다른
 	// 액터일 수 있음). 결정 시점에 컨택트로부터 해석된다.
@@ -720,9 +717,6 @@ struct FRopeThrowParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "SwingPlane == ERopeSwingPlane::CustomNormal"))
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0", Units = "cm"))
-	float AimAssistRadius = 100.0f;
 };
 
 /** 던지기 초반 채찍 스윙(FRopeWhipGuide) 튜닝 값. 런타임 상태는 URopeComponent::WhipGuide가 소유한다. */
@@ -786,7 +780,6 @@ struct FRopeContactTracker
 
 	TArray<int32> CandidateNodes;
 	float DwellTime = 0.0f;
-	float BestWrapScore = 0.0f;
 
 	void Reset()
 	{
@@ -794,7 +787,6 @@ struct FRopeContactTracker
 		CandidateMesh = nullptr;
 		CandidateNodes.Reset();
 		DwellTime = 0.0f;
-		BestWrapScore = 0.0f;
 	}
 
 	void BeginOrUpdate(const TArray<FRopeContactCandidate>& Candidates)
@@ -881,6 +873,5 @@ struct FRopeContactTracker
 
 		CandidateMesh = MeshByBone.FindRef(BestBone);
 		CandidateNodes = NodesByBone.FindRef(BestBone);
-		BestWrapScore = BestScore;
 	}
 };
