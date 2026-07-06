@@ -263,6 +263,288 @@ groupshared float  gInvMass[ROPE_MAX_NODES];
 groupshared float  gLambdaDist[ROPE_MAX_NODES]; // segment k(노드 k,k+1) 당 1개
 groupshared float  gLambdaBend[ROPE_MAX_NODES]; // stick k(노드 k,k+2) 당 1개
 
+// ===== 충돌 스테이지 본체(커널에서 분리) ==============================================================
+// RopeXPBDSolveCS의 collision pass 본체. 게이트(활성/질량/개수)와 배리어는 커널이 소유하고 — 배리어는
+// 균일 실행이 필수라 발산 가능한 함수 안으로 옮기면 안 된다 — 여기는 한 노드의 순차 로직만 담는다.
+// groupshared(gPos/gPrev/gInvMass/gLambdaDist)는 파일 스코프라 직접 접근한다. 노드 스테이지의 쓰기는
+// 자기 슬롯 i에 한정, 세그먼트(chord) 스테이지의 i/i+1 쓰기는 커널의 2색+배리어가 race를 막는다.
+
+// 캡슐 노드 충돌(M2): substep 시작(gPrev)→현재(gPos) 경로를 캡슐 sub-포즈 끝점과 함께 상대 스윕,
+// 첫 접촉에서 push-out + *상대* 법선 속도 제거 + *상대* 접선 마찰. CPU SolveCollisions 미러.
+// s = substep 인덱스(콜라이더 프레임 모션을 substep 구간으로 나누는 비율 계산용).
+void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s)
+{
+	const float3 SegA = gPrev[i];
+	const float  Friction = clamp(P.Friction, 0.0f, 1.0f);
+	const float  SweepStep = max(P.SweepStep, 0.1f);
+	const int    MaxSamples = max(P.MaxSweepSamples, 1);
+	const float  CA0 = (float)s / (float)P.NumSub;       // 이 substep의 collider 모션 시작 비율
+	const float  CA1 = (float)(s + 1) / (float)P.NumSub; // 끝 비율
+
+	for (int c = 0; c < P.NumCapsules; ++c)
+	{
+		const FRopeCapsule Cap = Capsules[P.CapsuleOffset + c];
+		// substep sub-포즈 끝점(prev->curr 선형 보간). 정지 캡슐은 prev==curr(패킹 보장) → 기존과 동일.
+		const float3 CapAS = lerp(Cap.PrevA.xyz, Cap.A.xyz, CA0);
+		const float3 CapBS = lerp(Cap.PrevB.xyz, Cap.B.xyz, CA0);
+		const float3 CapAE = lerp(Cap.PrevA.xyz, Cap.A.xyz, CA1);
+		const float3 CapBE = lerp(Cap.PrevB.xyz, Cap.B.xyz, CA1);
+		const float3 SegB = gPos[i]; // 앞선 capsule이 밀었을 수 있음
+		// 상대 운동 반영 샘플 수: 노드 이동 + 캡슐 끝점 이동 최대치(과대추정은 안전 — MaxSamples 상한).
+		const float  L = distance(SegA, SegB) + max(distance(CapAS, CapAE), distance(CapBS, CapBE));
+		const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
+
+		for (int k = 0; k < NumSamples; ++k)
+		{
+			const float  T = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
+			const float3 Pt = lerp(SegA, SegB, T);
+			const float3 CapAT = lerp(CapAS, CapAE, T);
+			const float3 CapBT = lerp(CapBS, CapBE, T);
+			float3 Normal; float Pen; float TSeg; float3 Closest;
+			if (RopeQueryCapsulePoint(CapAT, CapBT, Cap.B.w, Pt, P.CollisionRadius, Normal, Pen, TSeg, Closest))
+			{
+				// 접촉 재질점(TSeg)을 substep 끝 포즈로 이월 — 노드를 표면과 함께 남은 모션만큼 옮겨
+				// 배치한다(SDF가 로컬 접촉점을 끝 포즈로 재환산하는 것의 대응). 정지 캡슐이면 이월량 0.
+				const float3 ClosestE = lerp(CapAE, CapBE, TSeg);
+				gPos[i] = Pt + (ClosestE - Closest) + Normal * Pen;
+
+				// 재질점의 이번 substep 표면 변위(프레임 전체 prev->curr 변위 * InvDt * FixedDt).
+				// 정지 캡슐은 0. 아래 법선(비탄성)/접선(마찰) 응답이 공용으로 쓴다.
+				const float  InvDt = Cap.PrevB.w;
+				const float3 SurfDisp = (lerp(Cap.A.xyz, Cap.B.xyz, TSeg)
+					- lerp(Cap.PrevA.xyz, Cap.PrevB.xyz, TSeg)) * (InvDt * P.FixedDt);
+
+				// 비탄성 접촉: push-out이 gPrev 대비 +N 변위를 만들면 그대로 다음 substep 속도가 된다
+				// (깊은 접촉은 첫 샘플 Pt==gPrev라 매 substep +N*Pen 주입) → 정지 캡슐 위에서도 노드가
+				// 튄다. *상대* 바깥 법선 속도만 제거 — 표면 자신의 법선 운동(본이 미는 것)은 보존.
+				const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, Normal);
+				if (VnOut > 0.0f)
+				{
+					gPrev[i] += Normal * VnOut;
+				}
+				if (Friction > 0.0f)
+				{
+					// 상대 접선 감쇠(움직이는 표면이 로프를 끌어 좌우로 쓸어냄). 정지 캡슐이면 기존과 동일.
+					const float3 RelDelta = (gPos[i] - gPrev[i]) - SurfDisp;
+					const float3 Tangent = RelDelta - dot(RelDelta, Normal) * Normal;
+					gPrev[i] += Tangent * Friction;
+				}
+				break; // 이 capsule의 첫 접촉에서 종료
+			}
+		}
+	}
+}
+
+// SDF 노드 충돌(M3): 캡슐과 동일한 swept 구조 — 노드 경로를 collider 로컬 상대 프레임으로 옮겨
+// sub-포즈까지 한 세그먼트에 담고, 분리 휴리스틱 후 첫 접촉에서 push-out + 상대 응답 + 장력 그립
+// 마찰(Coulomb, gLambdaDist 소비). CPU FRopeSDFCollider::QuerySwept/SolveCollisions 미러.
+void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N)
+{
+	const float3 SegA = gPrev[i];
+	const float  Friction = clamp(P.Friction, 0.0f, 1.0f);
+	const float  SweepStep = max(P.SweepStep, 0.1f);
+	const int    MaxSamples = max(P.MaxSweepSamples, 1);
+	const float  NodeR = P.CollisionRadius;
+	const float  A0 = (float)s / (float)P.NumSub;        // 이 substep의 collider 모션 시작 비율
+	const float  A1 = (float)(s + 1) / (float)P.NumSub;  // 끝 비율
+	// 자유단 마찰 테이퍼: 끝 노드(장력 최소)는 μ를 낮춰 잘 놔주게(고정점 frac=0 →1, 끝 frac=1 →TipFrictionScale).
+	const float  Frac  = (N > 1) ? ((float)i / (float)(N - 1)) : 0.0f;
+	const float  MuEff = Friction * lerp(1.0f, clamp(P.TipFrictionScale, 0.0f, 1.0f), Frac);
+
+	for (int sc = 0; sc < P.NumSDFColliders; ++sc)
+	{
+		const FRopeSDFCollider Col = SDFColliders[P.SDFColliderOffset + sc];
+		const FRopeSDFVolume   Vol = SDFVolumes[Col.VolumeIndex];
+
+		// substep sub-포즈(prev->curr 보간). 정지 본이면 prev==curr라 보간 결과 = 현재 포즈.
+		const float4 RotS = RopeQuatNlerp(Col.PrevRotation, Col.Rotation, A0);
+		const float4 RotE = RopeQuatNlerp(Col.PrevRotation, Col.Rotation, A1);
+		const float3 TrS  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A0);
+		const float3 TrE  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A1);
+		const float3 Scl      = Col.Scale.xyz;
+		const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
+
+		// 노드 substep 경로를 collider 로컬 상대 프레임으로(시작=시작 sub-포즈, 끝=끝 sub-포즈).
+		// 한 세그먼트에 노드+collider 상대 운동을 모두 담는다. InvTransform=(qInv*(P-T))/Scale.
+		const float3 L0 = RopeQuatRotate(float4(-RotS.xyz, RotS.w), SegA    - TrS) * InvScale;
+		const float3 L1 = RopeQuatRotate(float4(-RotE.xyz, RotE.w), gPos[i] - TrE) * InvScale;
+		const float  RelLen = distance(L0, L1);
+		const int    NumSamples = clamp(1 + (int)floor(RelLen / SweepStep), 1, MaxSamples);
+
+		// 분리: 시작 접촉(L0 밴드 내·침투)이고 노드가 표면 *바깥쪽*으로 빠져나가는 중이면 재-핀하지 않고
+		// 놔줌(접촉 노드가 매 substep 시작점으로 다시 핀돼 영영 못 떨어지는 것 방지). CPU QuerySwept 미러.
+		// BUGFIX: 끝점만 보면 관통(L0 안쪽 → L1 반대편 바깥)도 분리로 오판해 몸을 통과한다. L0 바깥
+		// gradient에 대한 변위가 양수일 때만 분리로 인정 → 안쪽(관통)이면 아래 sweep이 첫 접촉에서 막는다.
+		{
+			const float3 BMn = Vol.LocalMin.xyz - NodeR;
+			const float3 BMx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + NodeR;
+			const bool StartIn = all(L0 >= BMn) && all(L0 <= BMx) && (RopeSDFTrilinear(Vol, L0) < NodeR);
+			if (StartIn)
+			{
+				const bool EndOut = any(L1 < BMn) || any(L1 > BMx) || (RopeSDFTrilinear(Vol, L1) >= NodeR);
+				if (EndOut)
+				{
+					const float3 OutwardLocal = RopeSDFGradient(Vol, L0); // 바깥 방향 단위(로컬)
+					if (dot(L1 - L0, OutwardLocal) > 0.0f) { continue; } // 바깥으로 이동하는 진짜 분리만 생략.
+				}
+			}
+		}
+
+		for (int k = 0; k < NumSamples; ++k)
+		{
+			const float  T  = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
+			const float3 Lp = lerp(L0, L1, T);
+			// 밴드 컬 + trilinear + gradient(침투 시) — 공용 로컬 점질의.
+			float Dist; float3 NLocal;
+			if (RopeQuerySDFLocal(Vol, Lp, NodeR, Dist, NLocal))
+			{
+				const float3 NWorld = normalize(RopeQuatRotate(RotE, NLocal)); // 끝 sub-포즈 기준 월드 법선
+				const float  Pen = NodeR - Dist;
+				// 끝 sub-포즈 기준 월드 접촉점(노드 배치). World = Rot*(Scale*Local) + Trans.
+				const float3 HitWorld = RopeQuatRotate(RotE, Lp * Scl) + TrE;
+				gPos[i] = HitWorld + NWorld * Pen;
+
+				// 접촉 물질점 Lp의 이번 substep 표면 변위(prev->curr 포즈 프레임 변위 * InvDt * FixedDt,
+				// 정지 본이면 0). 아래 법선(비탄성)/접선(마찰) 응답이 공용으로 쓴다.
+				const float  InvDt = Col.PrevTranslation.w;
+				const float3 Wcur  = RopeQuatRotate(Col.Rotation,     Lp * Scl) + Col.Translation.xyz;
+				const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Scl) + Col.PrevTranslation.xyz;
+				const float3 SurfDisp = (Wcur - Wprev) * (InvDt * P.FixedDt);
+
+				// 비탄성 접촉: push-out이 gPrev 대비 +N 변위를 만들면 그대로 다음 substep 속도가 된다
+				// (깊은 접촉은 첫 샘플==gPrev라 매 substep +N*Pen 주입) → 정지 본 위에서도 노드가 튄다.
+				// *상대* 바깥 법선 속도만 제거 — 표면 자신의 법선 운동(본이 미는 것)은 보존.
+				const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, NWorld);
+				if (VnOut > 0.0f)
+				{
+					gPrev[i] += NWorld * VnOut;
+				}
+
+				if (Friction > 0.0f)
+				{
+					// 상대 접선 드래그(움직이는 표면이 로프를 끌어 좌우로 쓸어냄). CPU SolveCollisions 미러.
+					const float3 NodeDelta = gPos[i] - gPrev[i];
+					const float3 RelDelta  = NodeDelta - SurfDisp;
+					float3 Tangent = RelDelta - dot(RelDelta, NWorld) * NWorld;
+					// 법선력 ≈ Pen(외력/무게분) + 인접 distance 제약력(gLambdaDist=장력)의 안쪽 성분.
+					// λ가 곧 제약력 → 장력이 클수록 그립↑. λ×InvMass로 displacement화(CPU SolveCollisions 미러).
+					float3 NetPull = (float3)0;
+					if (i > 0)
+					{
+						const float3 d0 = gPos[i - 1] - gPos[i];
+						const float  l0 = length(d0);
+						if (l0 > 1e-4f) { NetPull += abs(gLambdaDist[i - 1]) * (d0 / l0); }
+					}
+					if (i + 1 < (uint)N)
+					{
+						const float3 d1 = gPos[i + 1] - gPos[i];
+						const float  l1 = length(d1);
+						if (l1 > 1e-4f) { NetPull += abs(gLambdaDist[i]) * (d1 / l1); }
+					}
+					NetPull *= gInvMass[i];
+					const float TensionNormal = max(0.0f, -dot(NetPull, NWorld)); // 표면 안쪽 성분만
+					// Coulomb 한계: 접선 보정량을 μ(테이퍼된 MuEff)*(Pen+장력 법선력)으로 상한 → 그립 넘으면 슬립.
+					const float MaxSlip = MuEff * (Pen + TensionNormal);
+					const float TLen = length(Tangent);
+					if (TLen > MaxSlip && TLen > 1e-6f) { Tangent *= (MaxSlip / TLen); }
+					gPrev[i] += Tangent;
+				}
+				break; // 이 SDF collider의 첫 접촉에서 종료
+			}
+		}
+	}
+}
+
+// 세그먼트(에지/chord) 충돌: 노드 i-i+1 직선의 내부 샘플이 얇은 표면을 가로지르는 것을 방어.
+// 침투 샘플을 표면 밖으로 밀고 (1-T):(T)로 양 끝 노드에 분배 — gPrev 동반 이동(속도 중립, 곡면 위
+// rest 없는 chord가 매 substep 속도를 주입하는 것 차단). i/i+1 동시 쓰기는 커널의 2색+배리어가 보호.
+void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
+{
+	const float SW0 = gInvMass[i];
+	const float SW1 = gInvMass[i + 1];
+	if (SW0 + SW1 <= 0.0f)
+	{
+		return; // 양 끝 모두 pin — 보정 불가.
+	}
+
+	const float SegLen  = distance(gPos[i], gPos[i + 1]);
+	const float SegStep = max(P.SweepStep, 0.1f);
+	const int   NumInner = clamp((int)floor(SegLen / SegStep), 1, max(P.MaxSweepSamples, 1));
+	for (int si = 1; si <= NumInner; ++si)
+	{
+		const float T = (float)si / (float)(NumInner + 1);
+		const float WEff = (1.0f - T) * (1.0f - T) * SW0 + T * T * SW1;
+		if (WEff <= 0.0f) { continue; }
+		const float3 Mid = lerp(gPos[i], gPos[i + 1], T);
+
+		// capsule (M2)
+		for (int scap = 0; scap < P.NumCapsules; ++scap)
+		{
+			const FRopeCapsule Cap = Capsules[P.CapsuleOffset + scap];
+			float3 Nrm; float PenC; float TSegC; float3 ClosestC;
+			if (RopeQueryCapsulePoint(Cap.A.xyz, Cap.B.xyz, Cap.B.w, Mid, P.CollisionRadius,
+				Nrm, PenC, TSegC, ClosestC))
+			{
+				const float DL = PenC / WEff;
+				// 속도 중립 보정: 현(chord)은 곡면 위 rest에서도 항상 침투해 매 substep 보정이
+				// 발생한다 → gPos만 밀면 그만큼 바깥 속도가 주입돼 정지 콜라이더 위에서도 노드가
+				// 튄다. gPrev도 같이 옮겨 위치만 고치고 속도는 보존(2색 처리라 race 없음).
+				const float3 D0 = Nrm * ((1.0f - T) * SW0 * DL);
+				const float3 D1 = Nrm * (T * SW1 * DL);
+				gPos[i]      += D0;
+				gPrev[i]     += D0;
+				gPos[i + 1]  += D1;
+				gPrev[i + 1] += D1;
+			}
+		}
+
+		// SDF (M3) — 현재 포즈 점질의(공용 월드 헬퍼).
+		for (int ssdf = 0; ssdf < P.NumSDFColliders; ++ssdf)
+		{
+			const FRopeSDFCollider Col = SDFColliders[P.SDFColliderOffset + ssdf];
+			const FRopeSDFVolume   Vol = SDFVolumes[Col.VolumeIndex];
+			float3 NWorld; float DistS; float3 Lp;
+			if (!RopeQuerySDFWorld(Col, Vol, Mid, P.CollisionRadius, NWorld, DistS, Lp)) { continue; }
+			const float  DL = (P.CollisionRadius - DistS) / WEff;
+			// 속도 중립 보정(위 capsule 세그먼트와 동일 이유 — gPrev 동반 이동으로 주입 차단).
+			const float3 D0 = NWorld * ((1.0f - T) * SW0 * DL);
+			const float3 D1 = NWorld * (T * SW1 * DL);
+			gPos[i]      += D0;
+			gPrev[i]     += D0;
+			gPos[i + 1]  += D1;
+			gPrev[i + 1] += D1;
+		}
+
+		// GDF (world) — 세그먼트 chording: 얇은 벽을 두 노드 사이 직선이 가로지르는 경우 방어.
+		// SDF 세그먼트 케이스와 동일 패턴, query만 GDF로. small-step 노드 충돌이 대부분 잡지만
+		// SegmentLength보다 얇은 벽은 노드가 양옆 바깥이라 여기서만 잡힌다. 정적 월드라 표면속도 0.
+		// (CL 221에서 병합 — 커널 chord 블록이 이 함수로 이동한 뒤라 위치만 재배치, 수식 동일.)
+#if ROPE_USE_GDF && PLATFORM_SUPPORTS_DISTANCE_FIELDS
+		if (bWorldGDFValid != 0)
+		{
+			const float3 GdfTWP  = Mid + GDFPreViewTranslation;
+			const float  GdfDist = GetDistanceToNearestSurfaceGlobal(GdfTWP);
+			if (GdfDist < P.CollisionRadius)
+			{
+				const float3 GdfGrad = GetDistanceFieldGradientGlobal(GdfTWP);
+				const float  GdfGLen = length(GdfGrad);
+				if (GdfGLen > 1e-4f)
+				{
+					const float3 GdfN  = GdfGrad / GdfGLen;
+					const float  GdfDL = (P.CollisionRadius - GdfDist) / WEff;
+					const float3 GdfD0 = GdfN * ((1.0f - T) * SW0 * GdfDL);
+					const float3 GdfD1 = GdfN * (T * SW1 * GdfDL);
+					gPos[i]      += GdfD0;
+					gPrev[i]     += GdfD0;
+					gPos[i + 1]  += GdfD1;
+					gPrev[i + 1] += GdfD1;
+				}
+			}
+		}
+#endif
+	}
+}
+
 [numthreads(ROPE_THREADS, 1, 1)]
 void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
 {
@@ -409,190 +691,16 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			}
 		}
 
-		// --- Collision(M2): 각 collision pass 끝(아래 friction 포함). capsule push-out + friction.
-		// CPU SolveCollisions 미러: A=substep 시작(gPrev), 각 capsule마다 A->현재 위치를 swept 샘플,
-		// 첫 접촉에서 표면 밖으로 밀고 접선 속도를 friction만큼 깎는다. 노드별 독립이라 그룹 동기는 불필요.
-		// 움직이는 캡슐(prev 끝점 ≠ 현재): 끝점을 substep sub-포즈로 보간해 노드+캡슐 상대 운동을 함께
-		// 스윕하고(SDF의 로컬 프레임 트릭 대응), 재질점(tSeg) 표면 속도로 상대 법선/접선 응답을 만든다.
+		// --- Collision(M2/M3): 노드 충돌 스테이지(본체는 파일 상단 RopeSolveNode* 함수).
+		// 노드별 독립(자기 슬롯 i만 쓰기)이라 그룹 동기 불필요 — 게이트만 여기서 건다.
 		if (bActiveNode && gInvMass[i] > 0.0f && P.NumCapsules > 0)
 		{
-			const float3 SegA = gPrev[i];
-			const float  Friction = clamp(P.Friction, 0.0f, 1.0f);
-			const float  SweepStep = max(P.SweepStep, 0.1f);
-			const int    MaxSamples = max(P.MaxSweepSamples, 1);
-			const float  CA0 = (float)s / (float)P.NumSub;       // 이 substep의 collider 모션 시작 비율
-			const float  CA1 = (float)(s + 1) / (float)P.NumSub; // 끝 비율
-
-			for (int c = 0; c < P.NumCapsules; ++c)
-			{
-				const FRopeCapsule Cap = Capsules[P.CapsuleOffset + c];
-				// substep sub-포즈 끝점(prev->curr 선형 보간). 정지 캡슐은 prev==curr(패킹 보장) → 기존과 동일.
-				const float3 CapAS = lerp(Cap.PrevA.xyz, Cap.A.xyz, CA0);
-				const float3 CapBS = lerp(Cap.PrevB.xyz, Cap.B.xyz, CA0);
-				const float3 CapAE = lerp(Cap.PrevA.xyz, Cap.A.xyz, CA1);
-				const float3 CapBE = lerp(Cap.PrevB.xyz, Cap.B.xyz, CA1);
-				const float3 SegB = gPos[i]; // 앞선 capsule이 밀었을 수 있음
-				// 상대 운동 반영 샘플 수: 노드 이동 + 캡슐 끝점 이동 최대치(과대추정은 안전 — MaxSamples 상한).
-				const float  L = distance(SegA, SegB) + max(distance(CapAS, CapAE), distance(CapBS, CapBE));
-				const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
-
-				for (int k = 0; k < NumSamples; ++k)
-				{
-					const float  T = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
-					const float3 Pt = lerp(SegA, SegB, T);
-					const float3 CapAT = lerp(CapAS, CapAE, T);
-					const float3 CapBT = lerp(CapBS, CapBE, T);
-					float3 Normal; float Pen; float TSeg; float3 Closest;
-					if (RopeQueryCapsulePoint(CapAT, CapBT, Cap.B.w, Pt, P.CollisionRadius, Normal, Pen, TSeg, Closest))
-					{
-						// 접촉 재질점(TSeg)을 substep 끝 포즈로 이월 — 노드를 표면과 함께 남은 모션만큼 옮겨
-						// 배치한다(SDF가 로컬 접촉점을 끝 포즈로 재환산하는 것의 대응). 정지 캡슐이면 이월량 0.
-						const float3 ClosestE = lerp(CapAE, CapBE, TSeg);
-						gPos[i] = Pt + (ClosestE - Closest) + Normal * Pen;
-
-						// 재질점의 이번 substep 표면 변위(프레임 전체 prev->curr 변위 * InvDt * FixedDt).
-						// 정지 캡슐은 0. 아래 법선(비탄성)/접선(마찰) 응답이 공용으로 쓴다.
-						const float  InvDt = Cap.PrevB.w;
-						const float3 SurfDisp = (lerp(Cap.A.xyz, Cap.B.xyz, TSeg)
-							- lerp(Cap.PrevA.xyz, Cap.PrevB.xyz, TSeg)) * (InvDt * P.FixedDt);
-
-						// 비탄성 접촉: push-out이 gPrev 대비 +N 변위를 만들면 그대로 다음 substep 속도가 된다
-						// (깊은 접촉은 첫 샘플 Pt==gPrev라 매 substep +N*Pen 주입) → 정지 캡슐 위에서도 노드가
-						// 튄다. *상대* 바깥 법선 속도만 제거 — 표면 자신의 법선 운동(본이 미는 것)은 보존.
-						const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, Normal);
-						if (VnOut > 0.0f)
-						{
-							gPrev[i] += Normal * VnOut;
-						}
-						if (Friction > 0.0f)
-						{
-							// 상대 접선 감쇠(움직이는 표면이 로프를 끌어 좌우로 쓸어냄). 정지 캡슐이면 기존과 동일.
-							const float3 RelDelta = (gPos[i] - gPrev[i]) - SurfDisp;
-							const float3 Tangent = RelDelta - dot(RelDelta, Normal) * Normal;
-							gPrev[i] += Tangent * Friction;
-						}
-						break; // 이 capsule의 첫 접촉에서 종료
-					}
-				}
-			}
+			RopeSolveNodeCapsules(P, i, s);
 		}
 
-		// --- SDF 충돌(M3): capsule과 동일한 swept 구조, query만 SDF trilinear로 교체. CPU FRopeSDFCollider::Query 미러.
 		if (bActiveNode && gInvMass[i] > 0.0f && P.NumSDFColliders > 0)
 		{
-			const float3 SegA = gPrev[i];
-			const float  Friction = clamp(P.Friction, 0.0f, 1.0f);
-			const float  SweepStep = max(P.SweepStep, 0.1f);
-			const int    MaxSamples = max(P.MaxSweepSamples, 1);
-			const float  NodeR = P.CollisionRadius;
-			const float  A0 = (float)s / (float)P.NumSub;        // 이 substep의 collider 모션 시작 비율
-			const float  A1 = (float)(s + 1) / (float)P.NumSub;  // 끝 비율
-			// 자유단 마찰 테이퍼: 끝 노드(장력 최소)는 μ를 낮춰 잘 놔주게(고정점 frac=0 →1, 끝 frac=1 →TipFrictionScale).
-			const float  Frac  = (N > 1) ? ((float)i / (float)(N - 1)) : 0.0f;
-			const float  MuEff = Friction * lerp(1.0f, clamp(P.TipFrictionScale, 0.0f, 1.0f), Frac);
-
-			for (int sc = 0; sc < P.NumSDFColliders; ++sc)
-			{
-				const FRopeSDFCollider Col = SDFColliders[P.SDFColliderOffset + sc];
-				const FRopeSDFVolume   Vol = SDFVolumes[Col.VolumeIndex];
-
-				// substep sub-포즈(prev->curr 보간). 정지 본이면 prev==curr라 보간 결과 = 현재 포즈.
-				const float4 RotS = RopeQuatNlerp(Col.PrevRotation, Col.Rotation, A0);
-				const float4 RotE = RopeQuatNlerp(Col.PrevRotation, Col.Rotation, A1);
-				const float3 TrS  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A0);
-				const float3 TrE  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A1);
-				const float3 Scl      = Col.Scale.xyz;
-				const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
-
-				// 노드 substep 경로를 collider 로컬 상대 프레임으로(시작=시작 sub-포즈, 끝=끝 sub-포즈).
-				// 한 세그먼트에 노드+collider 상대 운동을 모두 담는다. InvTransform=(qInv*(P-T))/Scale.
-				const float3 L0 = RopeQuatRotate(float4(-RotS.xyz, RotS.w), SegA    - TrS) * InvScale;
-				const float3 L1 = RopeQuatRotate(float4(-RotE.xyz, RotE.w), gPos[i] - TrE) * InvScale;
-				const float  RelLen = distance(L0, L1);
-				const int    NumSamples = clamp(1 + (int)floor(RelLen / SweepStep), 1, MaxSamples);
-
-				// 분리: 시작 접촉(L0 밴드 내·침투)이고 노드가 표면 *바깥쪽*으로 빠져나가는 중이면 재-핀하지 않고
-				// 놔줌(접촉 노드가 매 substep 시작점으로 다시 핀돼 영영 못 떨어지는 것 방지). CPU QuerySwept 미러.
-				// BUGFIX: 끝점만 보면 관통(L0 안쪽 → L1 반대편 바깥)도 분리로 오판해 몸을 통과한다. L0 바깥
-				// gradient에 대한 변위가 양수일 때만 분리로 인정 → 안쪽(관통)이면 아래 sweep이 첫 접촉에서 막는다.
-				{
-					const float3 BMn = Vol.LocalMin.xyz - NodeR;
-					const float3 BMx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + NodeR;
-					const bool StartIn = all(L0 >= BMn) && all(L0 <= BMx) && (RopeSDFTrilinear(Vol, L0) < NodeR);
-					if (StartIn)
-					{
-						const bool EndOut = any(L1 < BMn) || any(L1 > BMx) || (RopeSDFTrilinear(Vol, L1) >= NodeR);
-						if (EndOut)
-						{
-							const float3 OutwardLocal = RopeSDFGradient(Vol, L0); // 바깥 방향 단위(로컬)
-							if (dot(L1 - L0, OutwardLocal) > 0.0f) { continue; } // 바깥으로 이동하는 진짜 분리만 생략.
-						}
-					}
-				}
-
-				for (int k = 0; k < NumSamples; ++k)
-				{
-					const float  T  = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
-					const float3 Lp = lerp(L0, L1, T);
-					// 밴드 컬 + trilinear + gradient(침투 시) — 공용 로컬 점질의.
-					float Dist; float3 NLocal;
-					if (RopeQuerySDFLocal(Vol, Lp, NodeR, Dist, NLocal))
-					{
-						const float3 NWorld = normalize(RopeQuatRotate(RotE, NLocal)); // 끝 sub-포즈 기준 월드 법선
-						const float  Pen = NodeR - Dist;
-						// 끝 sub-포즈 기준 월드 접촉점(노드 배치). World = Rot*(Scale*Local) + Trans.
-						const float3 HitWorld = RopeQuatRotate(RotE, Lp * Scl) + TrE;
-						gPos[i] = HitWorld + NWorld * Pen;
-
-						// 접촉 물질점 Lp의 이번 substep 표면 변위(prev->curr 포즈 프레임 변위 * InvDt * FixedDt,
-						// 정지 본이면 0). 아래 법선(비탄성)/접선(마찰) 응답이 공용으로 쓴다.
-						const float  InvDt = Col.PrevTranslation.w;
-						const float3 Wcur  = RopeQuatRotate(Col.Rotation,     Lp * Scl) + Col.Translation.xyz;
-						const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Scl) + Col.PrevTranslation.xyz;
-						const float3 SurfDisp = (Wcur - Wprev) * (InvDt * P.FixedDt);
-
-						// 비탄성 접촉: push-out이 gPrev 대비 +N 변위를 만들면 그대로 다음 substep 속도가 된다
-						// (깊은 접촉은 첫 샘플==gPrev라 매 substep +N*Pen 주입) → 정지 본 위에서도 노드가 튄다.
-						// *상대* 바깥 법선 속도만 제거 — 표면 자신의 법선 운동(본이 미는 것)은 보존.
-						const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, NWorld);
-						if (VnOut > 0.0f)
-						{
-							gPrev[i] += NWorld * VnOut;
-						}
-
-						if (Friction > 0.0f)
-						{
-							// 상대 접선 드래그(움직이는 표면이 로프를 끌어 좌우로 쓸어냄). CPU SolveCollisions 미러.
-							const float3 NodeDelta = gPos[i] - gPrev[i];
-							const float3 RelDelta  = NodeDelta - SurfDisp;
-							float3 Tangent = RelDelta - dot(RelDelta, NWorld) * NWorld;
-							// 법선력 ≈ Pen(외력/무게분) + 인접 distance 제약력(gLambdaDist=장력)의 안쪽 성분.
-							// λ가 곧 제약력 → 장력이 클수록 그립↑. λ×InvMass로 displacement화(CPU SolveCollisions 미러).
-							float3 NetPull = (float3)0;
-							if (i > 0)
-							{
-								const float3 d0 = gPos[i - 1] - gPos[i];
-								const float  l0 = length(d0);
-								if (l0 > 1e-4f) { NetPull += abs(gLambdaDist[i - 1]) * (d0 / l0); }
-							}
-							if (i + 1 < (uint)N)
-							{
-								const float3 d1 = gPos[i + 1] - gPos[i];
-								const float  l1 = length(d1);
-								if (l1 > 1e-4f) { NetPull += abs(gLambdaDist[i]) * (d1 / l1); }
-							}
-							NetPull *= gInvMass[i];
-							const float TensionNormal = max(0.0f, -dot(NetPull, NWorld)); // 표면 안쪽 성분만
-							// Coulomb 한계: 접선 보정량을 μ(테이퍼된 MuEff)*(Pen+장력 법선력)으로 상한 → 그립 넘으면 슬립.
-							const float MaxSlip = MuEff * (Pen + TensionNormal);
-							const float TLen = length(Tangent);
-							if (TLen > MaxSlip && TLen > 1e-6f) { Tangent *= (MaxSlip / TLen); }
-							gPrev[i] += Tangent;
-						}
-						break; // 이 SDF collider의 첫 접촉에서 종료
-					}
-				}
-			}
+			RopeSolveNodeSDFs(P, i, s, N);
 		}
 #if ROPE_USE_GDF && PLATFORM_SUPPORTS_DISTANCE_FIELDS
 		// GDF 월드 충돌(정적 벽/바닥) — per-substep 제약. 캡슐/SDF와 같은 충돌 pass 위치·같은 응답 패턴, query만 GDF로
@@ -636,86 +744,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			{
 				if (bActiveNode && i < (uint)(N - 1) && (int)(i % 2) == sgc)
 				{
-					const float SW0 = gInvMass[i];
-					const float SW1 = gInvMass[i + 1];
-					if (SW0 + SW1 > 0.0f)
-					{
-						const float SegLen  = distance(gPos[i], gPos[i + 1]);
-						const float SegStep = max(P.SweepStep, 0.1f);
-						const int   NumInner = clamp((int)floor(SegLen / SegStep), 1, max(P.MaxSweepSamples, 1));
-						for (int si = 1; si <= NumInner; ++si)
-						{
-							const float T = (float)si / (float)(NumInner + 1);
-							const float WEff = (1.0f - T) * (1.0f - T) * SW0 + T * T * SW1;
-							if (WEff <= 0.0f) { continue; }
-							const float3 Mid = lerp(gPos[i], gPos[i + 1], T);
-
-							// capsule (M2)
-							for (int scap = 0; scap < P.NumCapsules; ++scap)
-							{
-								const FRopeCapsule Cap = Capsules[P.CapsuleOffset + scap];
-								float3 Nrm; float PenC; float TSegC; float3 ClosestC;
-								if (RopeQueryCapsulePoint(Cap.A.xyz, Cap.B.xyz, Cap.B.w, Mid, P.CollisionRadius,
-									Nrm, PenC, TSegC, ClosestC))
-								{
-									const float DL = PenC / WEff;
-									// 속도 중립 보정: 현(chord)은 곡면 위 rest에서도 항상 침투해 매 substep 보정이
-									// 발생한다 → gPos만 밀면 그만큼 바깥 속도가 주입돼 정지 콜라이더 위에서도 노드가
-									// 튄다. gPrev도 같이 옮겨 위치만 고치고 속도는 보존(2색 처리라 race 없음).
-									const float3 D0 = Nrm * ((1.0f - T) * SW0 * DL);
-									const float3 D1 = Nrm * (T * SW1 * DL);
-									gPos[i]      += D0;
-									gPrev[i]     += D0;
-									gPos[i + 1]  += D1;
-									gPrev[i + 1] += D1;
-								}
-							}
-
-							// SDF (M3) — 현재 포즈 점질의(공용 월드 헬퍼).
-							for (int ssdf = 0; ssdf < P.NumSDFColliders; ++ssdf)
-							{
-								const FRopeSDFCollider Col = SDFColliders[P.SDFColliderOffset + ssdf];
-								const FRopeSDFVolume   Vol = SDFVolumes[Col.VolumeIndex];
-								float3 NWorld; float DistS; float3 Lp;
-								if (!RopeQuerySDFWorld(Col, Vol, Mid, P.CollisionRadius, NWorld, DistS, Lp)) { continue; }
-								const float  DL = (P.CollisionRadius - DistS) / WEff;
-								// 속도 중립 보정(위 capsule 세그먼트와 동일 이유 — gPrev 동반 이동으로 주입 차단).
-								const float3 D0 = NWorld * ((1.0f - T) * SW0 * DL);
-								const float3 D1 = NWorld * (T * SW1 * DL);
-								gPos[i]      += D0;
-								gPrev[i]     += D0;
-								gPos[i + 1]  += D1;
-								gPrev[i + 1] += D1;
-							}
-
-							// GDF (world) — 세그먼트 chording: 얇은 벽을 두 노드 사이 직선이 가로지르는 경우 방어.
-							// SDF 세그먼트 케이스와 동일 패턴, query만 GDF로. small-step 노드 충돌이 대부분 잡지만
-							// SegmentLength보다 얇은 벽은 노드가 양옆 바깥이라 여기서만 잡힌다. 정적 월드라 표면속도 0.
-#if ROPE_USE_GDF && PLATFORM_SUPPORTS_DISTANCE_FIELDS
-							if (bWorldGDFValid != 0)
-							{
-								const float3 GdfTWP  = Mid + GDFPreViewTranslation;
-								const float  GdfDist = GetDistanceToNearestSurfaceGlobal(GdfTWP);
-								if (GdfDist < P.CollisionRadius)
-								{
-									const float3 GdfGrad = GetDistanceFieldGradientGlobal(GdfTWP);
-									const float  GdfGLen = length(GdfGrad);
-									if (GdfGLen > 1e-4f)
-									{
-										const float3 GdfN  = GdfGrad / GdfGLen;
-										const float  GdfDL = (P.CollisionRadius - GdfDist) / WEff;
-										const float3 GdfD0 = GdfN * ((1.0f - T) * SW0 * GdfDL);
-										const float3 GdfD1 = GdfN * (T * SW1 * GdfDL);
-										gPos[i]      += GdfD0;
-										gPrev[i]     += GdfD0;
-										gPos[i + 1]  += GdfD1;
-										gPrev[i + 1] += GdfD1;
-									}
-								}
-							}
-#endif
-						}
-					}
+					RopeSolveSegmentChord(P, i, N); // 본체는 파일 상단 — i/i+1 쓰기는 이 2색+배리어가 보호.
 				}
 				GroupMemoryBarrierWithGroupSync();
 			}
