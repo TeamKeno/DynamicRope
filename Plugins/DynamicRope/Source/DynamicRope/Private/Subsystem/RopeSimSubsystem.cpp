@@ -207,6 +207,12 @@ void URopeSimSubsystem::BuildFrameColliders()
 		Provider->GatherColliders(AllBounds, FP.Colliders);
 		if (FP.Colliders.Num() > 0)
 		{
+			// collider별 월드 bounds를 프레임당 1회 캐시 — 아래 로프별 컬링이 로프 수만큼 재계산하지 않게.
+			FP.Bounds.Reserve(FP.Colliders.Num());
+			for (const IRopeCollider* Collider : FP.Colliders)
+			{
+				FP.Bounds.Add(Collider ? Collider->GetWorldBounds() : FBox(ForceInit));
+			}
 			FrameProviders.Add(MoveTemp(FP));
 		}
 	}
@@ -220,13 +226,47 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArra
 	// 다른 액터 body 잡기(cross-actor)는 그 액터가 "전체"에 포함되므로 자동. owner 충돌이 필요하면 옵트인.
 	const AActor* OwnerToExclude = Rope.bIncludeOwnerColliders ? nullptr : Rope.GetOwner();
 
+	// 거리 컬링: 로프 AABB(Pos∪Prev — 프레임 모션 포함)와 안 겹치는 collider는 아예 안 싣는다.
+	// CPU 솔버는 자체 broad-phase가 또 있지만, GPU 커널은 콜라이더 전량을 노드마다 루프하므로
+	// 여기서 거르는 것이 스케일링의 핵심이다(멀리 있는 캐릭터들의 캡슐/SDF가 스텝에 안 실림).
+	FBox RopeBounds(ForceInit);
+	float MaxFrameDispSq = 0.0f; // 예측 접촉(전방 외삽) 여유 계산용 — 이번 프레임 최대 노드 변위.
+	for (int32 i = 0; i < Rope.Sim.Num(); ++i)
+	{
+		RopeBounds += Rope.Sim.Positions[i];
+		RopeBounds += Rope.Sim.PrevPositions[i];
+		MaxFrameDispSq = FMath::Max(MaxFrameDispSq,
+			static_cast<float>(FVector::DistSquared(Rope.Sim.Positions[i], Rope.Sim.PrevPositions[i])));
+	}
+	const bool bCull = RopeBounds.IsValid != 0;
+	if (bCull)
+	{
+		// 여유: 접촉 질의 반경 + 스윕 여유 + 예측 접촉의 전방 외삽 거리(프레임 변위 × 예측 프레임).
+		// 넉넉히 잡는다 — 과대 컬링 여유는 안전(콜라이더가 몇 개 더 실릴 뿐).
+		const float Margin = Rope.SolverConfig.CollisionRadius + Rope.WrapConfig.ContactRadius
+			+ FMath::Max(2.0f * Rope.Sim.SegmentLength, 50.0f)
+			+ FMath::Sqrt(MaxFrameDispSq) * FMath::Max(Rope.WrapConfig.PredictiveContactFrames, 1.0f);
+		RopeBounds = RopeBounds.ExpandBy(Margin);
+	}
+
 	for (const FFrameProviderColliders& FP : FrameProviders)
 	{
 		if (FP.Owner == OwnerToExclude && OwnerToExclude != nullptr)
 		{
 			continue; // 자기 owner provider 제외.
 		}
-		OutColliders.Append(FP.Colliders);
+		if (!bCull || FP.Bounds.Num() != FP.Colliders.Num())
+		{
+			OutColliders.Append(FP.Colliders); // 컬 불가(빈 로프/bounds 캐시 불일치) → 전체 폴백.
+			continue;
+		}
+		for (int32 c = 0; c < FP.Colliders.Num(); ++c)
+		{
+			if (FP.Colliders[c] && FP.Bounds[c].IsValid && FP.Bounds[c].Intersect(RopeBounds))
+			{
+				OutColliders.Add(FP.Colliders[c]);
+			}
+		}
 	}
 }
 
@@ -349,8 +389,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		}
 	}
 
-	// TODO: LOD/sleep(멀거나 안정된 로프 스킵), 프레임당 총 솔브 비용 상한.
-	// TODO: tick 순서 — 충돌은 애니메이션(본 트랜스폼) 이후가 필요. 정밀 정렬은 TG_PostPhysics tick function.
+	// 슬립(Free 정지 로프 솔브 스킵)/거리 LOD(iteration 감쇠)/gather 거리 컬링은 구현됨 — 컴포넌트
+	// (UpdateSleepState/ComputeSolverLOD) + GatherCollidersForRope. TODO: 프레임당 총 솔브 비용 상한.
 }
 
 void FRopeSimTickFunction::ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type /*CurrentThread*/,
@@ -582,6 +622,8 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 
 	// 상주 step 구성(self-contained). 시드 데이터는 매 프레임 제공(RT는 재시드 시에만 GPU 업로드).
 	SeedResidentStep(OutStep, RopeId, Rope.SimGeneration, S, Rope.SolverConfig, Schedule);
+	// 거리 LOD: 원거리 로프는 iteration 감쇠(Prepare에서 계산). CollisionPasses는 패킹에서 Iterations로 클램프됨.
+	OutStep.Iterations = Rope.GetLODScaledIterations();
 
 	// G3: 접촉 감지는 Flight 로프에만(캡처는 Flight에서만). 이 함수는 GPU 경로에서만 호출되므로
 	// GPUContacts는 항상 켜져 있다 — 게이트는 phase == Flight 하나로 충분.

@@ -11,6 +11,8 @@
 #include "GameFramework/Actor.h"
 #include "GameFramework/Character.h"                    // Pull: 캐릭터 견인(CharacterMovement AddForce)
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Camera/PlayerCameraManager.h"                 // 거리 LOD(카메라 거리 기준 iteration 감쇠)
+#include "Kismet/GameplayStatics.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "Subsystem/RopeSimSubsystem.h"
 #include "Subsystem/RopeDebugSubsystem.h" // 디버그 캡처 게이트 + 스냅샷 보관소
@@ -338,12 +340,27 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	// 재시드 없이 CPU/GPU 동일 적용). Wrapped에서는 가용 로프 길이가 줄어 테더/장력으로 전파된다.
 	UpdateReel(DeltaTime);
 
+	// 거리 LOD 배율(iteration 감쇠) — 솔브 판정 전에 이번 프레임 값 확정(GPU 스텝/CPU 솔브 공용).
+	ComputeSolverLOD();
+
+	// 슬립은 Free 전용 — 다른 페이즈로 넘어가면 즉시 해제(전이 자체가 활동).
+	if (Phase != ERopePhase::Free && bAsleep)
+	{
+		bAsleep = false;
+		SleepTimer = 0.0f;
+	}
+
 	bSolveThisFrame = false;
 
 	switch (Phase)
 	{
 	case ERopePhase::Free:        // 손에서 늘어뜨려진 채 캐릭터를 따라간다
-		bSolveThisFrame = true;
+		if (bAsleep && ShouldWakeFromSleep())
+		{
+			bAsleep = false;
+			SleepTimer = 0.0f;
+		}
+		bSolveThisFrame = !bAsleep; // 슬립 중엔 솔브 스킵(GPU 로프는 dispatch 자체가 없음).
 		break;
 
 	case ERopePhase::Flight:
@@ -492,7 +509,10 @@ void URopeComponent::SolveSimFrame(float DeltaTime)
 		WhipGuide.ApplyToSim(Sim);
 	}
 
-	Solver.Step(Sim, SolverConfig, /*optional*/ FrameColliders, DeltaTime);
+	// 거리 LOD: 원거리에서 constraint iteration만 감쇠(substep은 유지 — 안정성은 substep이 지배).
+	FRopeSolverConfig LODConfig = SolverConfig;
+	LODConfig.Iterations = GetLODScaledIterations();
+	Solver.Step(Sim, LODConfig, /*optional*/ FrameColliders, DeltaTime);
 }
 
 void URopeComponent::FinalizeSimFrame(float DeltaTime)
@@ -689,6 +709,9 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	{
 		RopeDebug::RecordWrappedStats(Sim, WrapController.State);
 	}
+
+	// 슬립 전이 측정(Free 전용 — 프레임간 노드 변위 기반이라 이번 프레임 결과가 확정된 여기서).
+	UpdateSleepState(DeltaTime);
 
 	// 디버그 스냅샷 제출: centerline/collider/wrapped 공통 필드를 채워 디버거 보관소로 넘긴다.
 #if WITH_GAMEPLAY_DEBUGGER
@@ -1513,6 +1536,103 @@ void URopeComponent::SetRopeLength(float NewLength)
 void URopeComponent::SetReelRate(float CmPerSecond)
 {
 	ReelRate = CmPerSecond;
+}
+
+void URopeComponent::ComputeSolverLOD()
+{
+	SolverLODScale = 1.0f;
+	const FRopeSolverConfig& Cfg = SolverConfig;
+	if (!Cfg.bEnableDistanceLOD || Cfg.LODStartDistance <= 0.0f)
+	{
+		return;
+	}
+	// 로컬 플레이어 카메라 기준(멀티 로컬 플레이어는 0번만 — LOD는 근사여도 무방). 서버/카메라 없음 = 풀 품질.
+	const APlayerCameraManager* Camera = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0);
+	if (!Camera)
+	{
+		return;
+	}
+	const float Dist = static_cast<float>(FVector::Dist(Camera->GetCameraLocation(), GetComponentLocation()));
+	const float Range = FMath::Max(Cfg.LODEndDistance - Cfg.LODStartDistance, 1.0f);
+	const float Alpha = FMath::Clamp((Dist - Cfg.LODStartDistance) / Range, 0.0f, 1.0f);
+	SolverLODScale = FMath::Lerp(1.0f, FMath::Clamp(Cfg.LODMinIterationScale, 0.05f, 1.0f), Alpha);
+}
+
+void URopeComponent::UpdateSleepState(float DeltaTime)
+{
+	// Free + 슬립 허용에서만 측정. 그 외에는 누적을 버려 상태 오염을 막는다(캐시는 다음 Free 진입 시 재구축).
+	if (Phase != ERopePhase::Free || !SolverConfig.bAllowSleep || bAsleep || DeltaTime <= KINDA_SMALL_NUMBER)
+	{
+		SleepTimer = 0.0f;
+		SleepPrevFramePositions.Reset();
+		return;
+	}
+
+	// 프레임간 최대 노드 변위 → 속도. Verlet substep 변위가 아니라 프레임 캐시 비교라 substep 수/GPU
+	// 미러 지연과 무관하게 동작한다.
+	if (SleepPrevFramePositions.Num() == Sim.Num())
+	{
+		float MaxDistSq = 0.0f;
+		for (int32 i = 0; i < Sim.Num(); ++i)
+		{
+			MaxDistSq = FMath::Max(MaxDistSq, static_cast<float>(FVector::DistSquared(Sim.Positions[i], SleepPrevFramePositions[i])));
+		}
+		const float MaxSpeed = FMath::Sqrt(MaxDistSq) / DeltaTime;
+		SleepTimer = (MaxSpeed < SolverConfig.SleepVelocityThreshold) ? SleepTimer + DeltaTime : 0.0f;
+		if (SleepTimer >= SolverConfig.SleepDelay)
+		{
+			bAsleep = true;
+			SleepPinPos = Sim.StartPinTarget;
+			UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] rope asleep (max speed < %.1f cm/s for %.2fs)"),
+				*GetName(), SolverConfig.SleepVelocityThreshold, SolverConfig.SleepDelay);
+		}
+	}
+	SleepPrevFramePositions = Sim.Positions;
+}
+
+bool URopeComponent::ShouldWakeFromSleep() const
+{
+	if (!SolverConfig.bAllowSleep)
+	{
+		return true;
+	}
+	// 핀(손)이 슬립 시점에서 이동 — 캐릭터가 움직였다.
+	if (FVector::DistSquared(Sim.StartPinTarget, SleepPinPos) > FMath::Square(1.0f))
+	{
+		return true;
+	}
+	// 되감기/풀기 중.
+	if (!FMath::IsNearlyZero(ReelRate))
+	{
+		return true;
+	}
+	// 움직이는 collider 근접: FrameColliders는 이미 로프 bounds로 컬링돼 있어(서브시스템) 근접분만 남는다.
+	// 정지 본(prev==curr)은 무시 — 애니 idle 미세 흔들림은 0.5cm 임계로 걸러진다.
+	for (const IRopeCollider* Collider : FrameColliders)
+	{
+		if (!Collider)
+		{
+			continue;
+		}
+		FTransform PrevX, CurrX;
+		if (Collider->GetFrameMotion(PrevX, CurrX) && !PrevX.Equals(CurrX, 0.5f))
+		{
+			return true;
+		}
+		FVector PrevA, PrevB;
+		float InvDt = 0.0f;
+		if (Collider->GetGPUCapsuleMotion(PrevA, PrevB, InvDt))
+		{
+			FVector A, B;
+			float R = 0.0f;
+			if (Collider->GetGPUCapsule(A, B, R)
+				&& (FVector::DistSquared(A, PrevA) > 0.25 || FVector::DistSquared(B, PrevB) > 0.25))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 void URopeComponent::UpdateReel(float DeltaTime)

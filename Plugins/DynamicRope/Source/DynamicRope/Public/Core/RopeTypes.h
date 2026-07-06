@@ -401,6 +401,42 @@ struct FRopeSolverConfig
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Damping = 0.02f;
+
+	//~ 스케일링(슬립/LOD) — 다수 로프가 존재할 때 유휴/원거리 비용을 줄인다 ------------------
+
+	/**
+	 * 슬립: Free 페이즈에서 모든 노드 속도가 SleepVelocityThreshold 미만으로 SleepDelay 동안 유지되면
+	 * 솔브를 통째로 스킵한다(GPU 로프는 dispatch 자체가 없음). 핀 이동/되감기/움직이는 collider 근접
+	 * /페이즈 전환에서 깨어난다. 다른 페이즈(Flight~Releasing)는 항상 활성.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Scaling")
+	bool bAllowSleep = true;
+
+	/** 슬립 진입 판정 속도(cm/s) — 프레임간 최대 노드 변위 / dt가 이 값 미만이어야 한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Scaling", meta = (ClampMin = "0.1"))
+	float SleepVelocityThreshold = 3.0f;
+
+	/** 슬립 진입까지 저속 상태가 유지되어야 하는 시간(초). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Scaling", meta = (ClampMin = "0.0", Units = "s"))
+	float SleepDelay = 0.5f;
+
+	/**
+	 * 거리 LOD: 플레이어 카메라와의 거리가 LODStartDistance를 넘으면 constraint iteration을 줄이기
+	 * 시작해 LODEndDistance에서 LODMinIterationScale까지 선형 감소한다(멀리서는 수렴 오차가 안 보임).
+	 * 카메라가 없으면(데디 서버) 항상 풀 iteration.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Scaling")
+	bool bEnableDistanceLOD = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Scaling", meta = (ClampMin = "0.0", Units = "cm"))
+	float LODStartDistance = 3000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Scaling", meta = (ClampMin = "0.0", Units = "cm"))
+	float LODEndDistance = 8000.0f;
+
+	/** 최원거리에서의 iteration 배율(1=감소 없음). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Scaling", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float LODMinIterationScale = 0.25f;
 };
 
 /** 컨택트 결정 튜닝: 걸쳐진 rope가 언제 사지(limb)에 "wrapped"된 것으로 간주되는가? */

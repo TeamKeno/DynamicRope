@@ -208,6 +208,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void SetReelRate(float CmPerSecond);
 
+	/** 슬립 중인가(Free 페이즈에서 정지 판정 — 솔브 스킵 상태). */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	bool IsSleeping() const { return bAsleep; }
+
+	/** 현재 거리 LOD의 iteration 배율(1=풀 품질). 디버그/프로파일 확인용. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	float GetSolverLODScale() const { return SolverLODScale; }
+
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
@@ -314,6 +322,25 @@ private:
 
 	// 되감기 프레임 적용(Prepare 초입): 허용 페이즈에서 ReelRate × dt만큼 길이를 조정한다.
 	void UpdateReel(float DeltaTime);
+
+	//~ 슬립/LOD(스케일링) ---------------------------------------------------
+	bool  bAsleep = false;                    // Free 정지 판정으로 솔브 스킵 중
+	float SleepTimer = 0.0f;                  // 저속 유지 누적(초)
+	FVector SleepPinPos = FVector::ZeroVector; // 슬립 진입 시 핀 위치(이동 시 wake)
+	TArray<FVector> SleepPrevFramePositions;  // 프레임간 변위 측정 캐시(Finalize에서 갱신)
+	float SolverLODScale = 1.0f;              // 거리 LOD iteration 배율(Prepare가 계산, 1=풀)
+
+	// 거리 LOD 배율 계산(Prepare, GT — 카메라 접근). 카메라 없으면(서버) 1 유지.
+	void ComputeSolverLOD();
+	// 슬립 전이 측정(Finalize, Free 전용): 프레임간 최대 노드 속도가 임계 미만이 SleepDelay 지속 → 슬립.
+	void UpdateSleepState(float DeltaTime);
+	// 슬립 해제 판정(Prepare): 핀 이동/되감기/움직이는 근접 collider.
+	bool ShouldWakeFromSleep() const;
+	// LOD 반영된 유효 iteration(CPU 솔브/GPU 스텝 공용).
+	int32 GetLODScaledIterations() const
+	{
+		return FMath::Max(1, FMath::RoundToInt(static_cast<float>(SolverConfig.Iterations) * SolverLODScale));
+	}
 
 	// 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용.
 	float LastTetherOvershoot = 0.0f;

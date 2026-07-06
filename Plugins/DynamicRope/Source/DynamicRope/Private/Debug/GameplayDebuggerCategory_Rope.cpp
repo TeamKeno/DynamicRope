@@ -179,10 +179,14 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 	const FName Bone = Rope.GetWrappedBoneName();
 	const TArray<FVector>& Points = Rope.GetCenterlinePositions();
 
+	// 스케일링 상태: 슬립(솔브 스킵) 여부 + 거리 LOD iteration 배율(1 미만이면 감쇠 중).
+	const float LODScale = Rope.GetSolverLODScale();
 	AddTextLine(FString::Printf(
-		TEXT("{yellow}Rope #%d{white} phase=%s nodes=%d wrapBone=%s%s"),
+		TEXT("{yellow}Rope #%d{white} phase=%s nodes=%d wrapBone=%s%s%s%s"),
 		Index, DebugPhaseName(LivePhase), Points.Num(),
 		Bone.IsNone() ? TEXT("-") : *Bone.ToString(),
+		Rope.IsSleeping() ? TEXT("  {cyan}asleep") : TEXT(""),
+		LODScale < 0.999f ? *FString::Printf(TEXT("  {cyan}lod=x%.2f"), LODScale) : TEXT(""),
 		Snap ? TEXT("") : TEXT("  {grey}(diag pending)")));
 
 	//~ centerline(라이브 위치/페이즈) -----------------------------------
