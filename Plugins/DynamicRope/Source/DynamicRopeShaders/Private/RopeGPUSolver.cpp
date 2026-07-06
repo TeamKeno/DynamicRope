@@ -42,6 +42,14 @@ static TAutoConsoleVariable<int32> CVarRopeGDFSweep(
 	TEXT("GDF 월드 충돌에서 프레임 시작→끝 스윕(터널링 방지). 0=off(끝점만), 1=on(기본)."),
 	ECVF_RenderThreadSafe);
 
+// GDF 월드 충돌을 솔버 substep 제약으로 처리(Phase 3). on이면 bUseWorldGDF 로프의 솔브가 GDF permutation으로
+// 돌아 매 substep 벽을 투영하고, post-solve GDF 패스는 비활성(중복 방지) — 장력과 같은 solve에서 균형(떨림 제거).
+// off(기본)는 기존 post-solve 패스(진입-면 되밀기/스윕). View 없는 Step 경로에선 무효(GDF는 뷰 확장 경로 전용).
+static TAutoConsoleVariable<int32> CVarRopeGDFInSolver(
+	TEXT("r.DynamicRope.GDFInSolver"), 0,
+	TEXT("GDF 월드 충돌을 솔버 substep 제약으로 처리. 0=off(post-solve 패스), 1=on(in-solver, post-solve 비활성)."),
+	ECVF_RenderThreadSafe);
+
 // HLSL FRopeGPUParams(RopeXPBD.usf)와 1:1 미러. 레이아웃 변경 시 .usf 동시 수정. 16바이트 정렬.
 struct FRopeGPUParamsGPU
 {
@@ -509,7 +517,7 @@ static void FillGDFShaderParams(const FGlobalDistanceFieldParameterData* GDF, FG
 // 상주 step들의 공용 실행부(RT). 전용 그래프(Step)든 씬 렌더러 그래프(DispatchPending_RenderThread)든
 // 동일 본체를 전달받은 GraphBuilder에 얹는다(Execute는 호출자). GDF/PreViewTranslation은 GDF 월드 충돌(Phase 2c)에서 사용.
 void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRopeGPUResidentStep>& Steps,
-	const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
+	const FSceneView* View, const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
 {
 			// --- Loop 1: 직전 프레임 리드백 consume(immediate Lock — RDG 빌더 구성 *전*에 처리해 immediate RHI와
 			// 열린 그래프의 인터리브를 피한다. 렌더 스레드라 Lock 합법, IsReady 게이트라 stall 없음).
@@ -683,10 +691,17 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 			}
 
 			// 이제부터 그래프 빌드(seed/register/dispatch/재무장). consume은 위에서 끝냈다. GraphBuilder는 인자
-			// (전용 그래프=Step, 씬 렌더러 그래프=DispatchPending_RenderThread). GDF 월드 충돌은 별도 post-solve
-			// 패스(DispatchGDFCollision_RenderThread)에서 처리하므로 여기선 GDF/PreViewTranslation를 쓰지 않는다.
-			(void)GDF; (void)PreViewTranslation;
-			// 이 프레임 stepped 로프에 GDF 플래그/충돌 파라미터를 상주 상태에 기록(별도 GDF 패스가 순회에 사용).
+			// (전용 그래프=Step, 씬 렌더러 그래프=DispatchPending_RenderThread).
+			// GDF in-solver(Phase 3): View가 있고(=뷰 확장 경로) cvar on이면 GDF permutation으로 솔브해 매 substep
+			// 벽을 투영한다. 프레임 공용 GDF 셰이더 파라미터를 1회 산정(미빌드면 bWorldGDFValid=0 → 로프별 lean 폴백).
+			// off/Step 경로(View 없음)에선 기존 post-solve 패스가 처리 → 여기선 GDF 미사용.
+			const bool bGDFInSolver = (View != nullptr) && (CVarRopeGDFInSolver.GetValueOnRenderThread() != 0);
+			FGlobalDistanceFieldParameters2 GDFSolverParams;
+			uint32 bGDFSolverValid = 0;
+			if (bGDFInSolver)
+			{
+				FillGDFShaderParams(GDF, GDFSolverParams, bGDFSolverValid);
+			}
 
 			// 업로드 버퍼는 Execute()까지 살아 있어야 한다(RDG가 실행 시 복사) → keep-alive 컨테이너에 보관.
 			// Reserve로 외부 배열 재할당을 막아 내부 데이터 포인터를 안정화(CreateStructuredBuffer에 넘긴 GetData 유효).
@@ -1019,9 +1034,18 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 					FRDGBufferDesc::CreateStructuredDesc(sizeof(float), N), TEXT("Rope.LambdaDist"));
 				PassParams->OutLambdaDist = GraphBuilder.CreateUAV(LambdaRDG);
 
-				// Phase 1: 항상 lean permutation(GDF off) — 기존 동작 유지. GDF 경로 선택은 Phase 3(View/GDF 주입 후).
+				// GDF in-solver(Phase 3): bUseWorldGDF 로프 + GDF 유효 시 GDF permutation 선택 + View/GDF 바인딩.
+				// 아니면 lean(기존 동작). 로프당 개별 AddPass라 permutation을 로프 단위로 자유 선택한다.
+				const bool bUseGDFPerm = bGDFInSolver && R.bUseWorldGDF && (bGDFSolverValid != 0);
+				if (bUseGDFPerm)
+				{
+					PassParams->View                  = View->ViewUniformBuffer;
+					PassParams->GDF                   = GDFSolverParams;
+					PassParams->GDFPreViewTranslation = PreViewTranslation;
+					PassParams->bWorldGDFValid        = bGDFSolverValid;
+				}
 				FRopeXPBDSolveCS::FPermutationDomain PermVec;
-				PermVec.Set<FRopeXPBDSolveCS::FGDFDim>(false);
+				PermVec.Set<FRopeXPBDSolveCS::FGDFDim>(bUseGDFPerm);
 				TShaderMapRef<FRopeXPBDSolveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), PermVec);
 				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeXPBDResident"),
 					ComputeShader, PassParams, FIntVector(1, 1, 1)); // 로프 1개 = 스레드그룹 1개
@@ -1157,7 +1181,8 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate& RHICmdList) mutable
 		{
 			FRDGBuilder GraphBuilder(RHICmdList);
-			RunSteps_RenderThread(GraphBuilder, Steps, nullptr, FVector3f::ZeroVector);
+			// 전용 그래프 경로 — View/GDF 없음(GDF in-solver는 뷰 확장 경로 전용). View=nullptr → 항상 lean.
+			RunSteps_RenderThread(GraphBuilder, Steps, nullptr, nullptr, FVector3f::ZeroVector);
 			GraphBuilder.Execute();
 		});
 }
@@ -1179,7 +1204,7 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 		});
 }
 
-void FRopeGPUSolver::DispatchPending_RenderThread(FRDGBuilder& GraphBuilder,
+void FRopeGPUSolver::DispatchPending_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView* View,
 	const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
 {
 	check(IsInRenderingThread());
@@ -1187,7 +1212,7 @@ void FRopeGPUSolver::DispatchPending_RenderThread(FRDGBuilder& GraphBuilder,
 	{
 		return;
 	}
-	RunSteps_RenderThread(GraphBuilder, Impl->PendingSteps, GDF, PreViewTranslation);
+	RunSteps_RenderThread(GraphBuilder, Impl->PendingSteps, View, GDF, PreViewTranslation);
 	Impl->PendingSteps.Reset();
 }
 
@@ -1195,6 +1220,12 @@ void FRopeGPUSolver::DispatchGDFCollision_RenderThread(FRDGBuilder& GraphBuilder
 	const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
 {
 	check(IsInRenderingThread());
+
+	// GDF in-solver(Phase 3) on이면 솔브 substep에서 이미 벽을 처리했으므로 이 post-solve 패스는 비활성(중복 방지).
+	if (CVarRopeGDFInSolver.GetValueOnRenderThread() != 0)
+	{
+		return;
+	}
 
 	// 프레임 공용 GDF 셰이더 파라미터(미빌드면 bWorldGDFValid=0 → 셰이더 no-op).
 	FGlobalDistanceFieldParameters2 GDFShaderParams;

@@ -83,8 +83,9 @@ void FRopeGDFViewExtension::PreRenderBasePass_RenderThread(FRDGBuilder& GraphBui
 	// GDF 함수는 TranslatedWorld를 받으므로 월드→TranslatedWorld 오프셋을 넘긴다.
 	const FVector3f PreViewTranslation = (FVector3f)View->ViewMatrices.GetPreViewTranslation();
 
-	// 1) 솔브를 씬 그래프에 얹는다.
-	Solver->DispatchPending_RenderThread(GraphBuilder, GDF, PreViewTranslation);
+	// 1) 솔브를 씬 그래프에 얹는다. View 전달 — GDF in-solver(r.DynamicRope.GDFInSolver) 경로가 GDF permutation
+	//    선택 + View/GDF 바인딩에 사용(off면 무시). GDF는 이 뷰 확장 경로에서만 유효.
+	Solver->DispatchPending_RenderThread(GraphBuilder, View, GDF, PreViewTranslation);
 
 	// 2) 솔브 뒤: GDF 월드 밀어내기(정적 벽/바닥). PosBuf를 in-place 보정 → RDG가 solve→GDF 순서 보장.
 	Solver->DispatchGDFCollision_RenderThread(GraphBuilder, *View, GDF, PreViewTranslation);

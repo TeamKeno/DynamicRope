@@ -224,7 +224,7 @@ public:
 
 	/** 렌더 스레드. 쌓인 pending step들을 전달받은 (씬 렌더러) GraphBuilder에 얹는다(자체 Execute 안 함).
 	    GDF는 이 뷰의 Global Distance Field 파라미터(null 가능), PreViewTranslation은 월드→TranslatedWorld 오프셋. */
-	void DispatchPending_RenderThread(FRDGBuilder& GraphBuilder,
+	void DispatchPending_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView* View,
 		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 
 	/** 렌더 스레드(Phase 2c). 솔브 뒤·튜브 앞에 호출. GDF 대상 상주 로프의 PosBuf를 엔진 Global Distance Field로
@@ -260,5 +260,5 @@ private:
 	/** Step()/DispatchPending_RenderThread 공용 실행부: 상주 seed/register/dispatch/리드백을 전달받은
 	    GraphBuilder에 얹는다(Execute는 호출자 책임). Steps는 소비 후 호출자가 비운다. */
 	void RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRopeGPUResidentStep>& Steps,
-		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
+		const FSceneView* View, const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 };
