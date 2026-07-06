@@ -154,7 +154,7 @@ struct FRopeGPUContactGPU
 static_assert(sizeof(FRopeGPUContactGPU) % 16 == 0, "FRopeGPUContactGPU must be 16-byte aligned to match HLSL structured buffer.");
 
 // 접촉 감지 컴퓨트(G3). 솔브 후 상주 위치를 스윕해 노드당 최심 접촉을 OutContacts에 기록한다.
-// 솔브 셰이더의 헬퍼/충돌 버퍼를 공유(같은 .usf)하되, 별도 엔트리라 자체 파라미터만 바인딩한다.
+// 별도 파일(RopeContactDetect.usf) — 솔브 셰이더와는 콜라이더 모델/질의(RopeColliderCommon.ush)만 공유한다.
 class FRopeContactDetectCS : public FGlobalShader
 {
 public:
@@ -195,7 +195,7 @@ public:
 	}
 };
 
-IMPLEMENT_GLOBAL_SHADER(FRopeContactDetectCS, "/Plugin/DynamicRope/Private/RopeXPBD.usf", "RopeContactDetectCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FRopeContactDetectCS, "/Plugin/DynamicRope/Private/RopeContactDetect.usf", "RopeContactDetectCS", SF_Compute);
 
 // ---------------------------------------------------------------------------------------------------
 // 상주 상태 정의
