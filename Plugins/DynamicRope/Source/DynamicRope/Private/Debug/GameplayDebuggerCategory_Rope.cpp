@@ -340,6 +340,18 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 
 		AddTextLine(FString::Printf(TEXT("  {green}wrapped{white} bone=%s mesh=%s latched=%d"),
 			*S.WrapBone.ToString(), *S.MeshName, S.Latched.Num()));
+		// 장력(λ/h² 상대 힘): 임계치가 켜져 있으면 초과 여부를 색으로(노랑=근접 80%+, 빨강=초과).
+		if (S.TensionReleaseForce > 0.0f)
+		{
+			const TCHAR* Color = (S.WrapTension > S.TensionReleaseForce) ? TEXT("{red}")
+				: (S.WrapTension > S.TensionReleaseForce * 0.8f) ? TEXT("{yellow}") : TEXT("{white}");
+			AddTextLine(FString::Printf(TEXT("    tension=%s%.0f{white} / release=%.0f"),
+				Color, S.WrapTension, S.TensionReleaseForce));
+		}
+		else
+		{
+			AddTextLine(FString::Printf(TEXT("    tension=%.0f (release off)"), S.WrapTension));
+		}
 
 		const int32 MaxRows = FMath::Min(12, S.Latched.Num());
 		for (int32 i = 0; i < MaxRows; ++i)

@@ -110,6 +110,7 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, InvMass) // G0: override가 질량 마스크를 영속시키므로 RW.
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, Positions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, PrevPositions)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, OutLambdaDist) // 장력 리드백(마지막 substep 세그먼트 λ).
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -242,6 +243,12 @@ struct FRopeResidentRope
 	FRHIGPUBufferReadback* PosReadback = nullptr;
 	FRHIGPUBufferReadback* PrevReadback = nullptr;
 	bool bReadbackArmed = false;          // 리드백 copy가 enqueue되어 결과 대기 중인가.
+
+	// 장력(λ) 리드백: 솔브(NumSub>0) 프레임에만 무장(override-only 프레임의 0을 안 내보내 직전 값 유지).
+	// LambdaFixedDt = 무장 당시 substep dt — consume 시 F = max(0,-λ)/h² 변환에 쓴다.
+	FRHIGPUBufferReadback* LambdaReadback = nullptr;
+	bool  bLambdaArmed = false;
+	float LambdaFixedDt = 0.0f;
 	FShaderResourceViewRHIRef PosSRV;     // M5b: PosBuf StructuredBuffer<float4> SRV(렌더용). 재시드 시 무효화.
 
 	// SDF 볼륨 그리드/헤더 resident(정적 베이크 데이터 — 볼륨 집합이 바뀔 때만 재업로드). 인스턴스(본
@@ -294,6 +301,7 @@ void FRopeGPUSolver::ReleaseAll_RenderThread()
 	{
 		delete Pair.Value.PosReadback;     Pair.Value.PosReadback = nullptr;
 		delete Pair.Value.PrevReadback;    Pair.Value.PrevReadback = nullptr;
+		delete Pair.Value.LambdaReadback;  Pair.Value.LambdaReadback = nullptr;
 		delete Pair.Value.ContactReadback; Pair.Value.ContactReadback = nullptr;
 	}
 	Impl->RtRopes.Empty();
@@ -315,6 +323,7 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 			{
 				delete R->PosReadback;
 				delete R->PrevReadback;
+				delete R->LambdaReadback;
 				delete R->ContactReadback;
 				Impl->RtRopes.Remove(RopeId);
 			}
@@ -474,6 +483,7 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 				if (bWillReseed)
 				{
 					R.bReadbackArmed = false;
+					R.bLambdaArmed = false;
 					R.bContactArmed = false;
 					continue;
 				}
@@ -501,6 +511,27 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 					}
 					R.bReadbackArmed = false; // 소비 완료 — 아래 dispatch 블록에서 재무장.
 					bHavePos = true;
+				}
+
+				// 장력(λ) 리드백: 위치와 독립 consume(솔브 프레임에만 무장). 무장 당시 dt로 힘 변환.
+				TArray<float> TmpTension;
+				bool bHaveTension = false;
+				if (R.bLambdaArmed && R.LambdaReadback && R.LambdaReadback->IsReady())
+				{
+					const uint32 LBytes = (uint32)N * sizeof(float);
+					if (const float* Src = (const float*)R.LambdaReadback->Lock(LBytes))
+					{
+						// 세그먼트 수 = N-1(슬롯 N-1은 커널이 항상 0). F = max(0,-λ)/h² — CPU Step과 동일 변환.
+						const float InvDt2 = (R.LambdaFixedDt > 1e-6f) ? (1.0f / (R.LambdaFixedDt * R.LambdaFixedDt)) : 0.0f;
+						TmpTension.SetNumUninitialized(N - 1);
+						for (int32 k = 0; k < N - 1; ++k)
+						{
+							TmpTension[k] = FMath::Max(0.0f, -Src[k]) * InvDt2;
+						}
+						R.LambdaReadback->Unlock();
+						bHaveTension = true;
+					}
+					R.bLambdaArmed = false; // 소비 완료 — 아래 dispatch 블록에서 재무장.
 				}
 
 				// 접촉 감지 리드백(G3): 위치와 독립 consume(감지는 Flight만 무장하므로 없을 수 있다).
@@ -535,20 +566,29 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 					R.bContactArmed = false; // 소비 완료 — 아래 dispatch 블록에서 재무장.
 				}
 
-				if (!bHavePos && !bHaveContacts)
+				if (!bHavePos && !bHaveContacts && !bHaveTension)
 				{
 					continue; // 이번 프레임 회수분 없음.
 				}
 
 				// 락 구간은 맵 대입만(리드백 Lock은 위에서 끝냄) → GT GetLatest 블로킹 최소화.
 				FScopeLock SL(&Impl->Results->Lock);
-				if (bHavePos)
+				if (bHavePos || bHaveTension)
 				{
 					FRopeResidentLatest& L = Impl->Results->Map.FindOrAdd(S.RopeId);
-					L.Positions     = MoveTemp(TmpPos);
-					L.PrevPositions = MoveTemp(TmpPrev);
-					L.NumNodes      = N;
-					L.Generation    = R.Generation;
+					if (bHavePos)
+					{
+						L.Positions     = MoveTemp(TmpPos);
+						L.PrevPositions = MoveTemp(TmpPrev);
+						L.NumNodes      = N;
+						L.Generation    = R.Generation; // generation 승격은 위치와 함께만(재시드 직후 stale 위치 승격 방지).
+					}
+					if (bHaveTension)
+					{
+						// 장력은 entry generation을 건드리지 않는다 — 재시드 직후 위치보다 먼저 도착하면
+						// GT가 (구 generation으로) 한 프레임 거부하고, 위치가 따라잡으면 함께 소비된다.
+						L.SegmentTension = MoveTemp(TmpTension);
+					}
 				}
 				if (bHaveContacts)
 				{
@@ -889,6 +929,10 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 				PassParams->InvMass       = GraphBuilder.CreateUAV(InvMassRDG);
 				PassParams->Positions     = GraphBuilder.CreateUAV(PosRDG);
 				PassParams->PrevPositions = GraphBuilder.CreateUAV(PrevRDG);
+				// 장력(λ) 출력: 프레임 transient(N 슬롯, 커널이 매 dispatch 전체를 다시 쓴다 — 영속 불필요).
+				FRDGBufferRef LambdaRDG = GraphBuilder.CreateBuffer(
+					FRDGBufferDesc::CreateStructuredDesc(sizeof(float), N), TEXT("Rope.LambdaDist"));
+				PassParams->OutLambdaDist = GraphBuilder.CreateUAV(LambdaRDG);
 
 				TShaderMapRef<FRopeXPBDSolveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeXPBDResident"),
@@ -903,6 +947,16 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 					AddEnqueueCopyPass(GraphBuilder, R.PosReadback,  PosRDG,  NodeBytes);
 					AddEnqueueCopyPass(GraphBuilder, R.PrevReadback, PrevRDG, NodeBytes);
 					R.bReadbackArmed = true;
+				}
+
+				// --- 장력(λ) 리드백 무장: 솔브 프레임(NumSub>0)에만 — override-only 프레임은 λ가 0이라
+				// 무장하지 않고 직전 장력을 유지한다(GT는 갱신분이 있을 때만 덮어씀).
+				if (!R.bLambdaArmed && S.NumSub > 0)
+				{
+					if (!R.LambdaReadback) { R.LambdaReadback = new FRHIGPUBufferReadback(TEXT("Rope.LambdaReadback")); }
+					AddEnqueueCopyPass(GraphBuilder, R.LambdaReadback, LambdaRDG, (uint32)N * sizeof(float));
+					R.LambdaFixedDt = S.FixedDt;
+					R.bLambdaArmed = true;
 				}
 
 				// --- 접촉 감지(G3): 솔브 뒤 post-solve 위치를 스윕. RDG가 solve(UAV)→detect(SRV) 순서를 보장한다.

@@ -107,6 +107,61 @@ bool FRopeSolverStabilityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 세그먼트 장력(XPBD distance λ → F=max(0,-λ)/h²): 매달린 로프에서 위 세그먼트일수록 커야 하고
+// (아래 매달린 질량이 많음), 상단 장력은 이론값(아래 노드 수 × g)에 근접해야 한다. 무중력 슬랙은 ~0.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverTensionTest,
+	"DynamicRope.Solver.SegmentTensionHangingRope",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSolverTensionTest::RunTest(const FString& Parameters)
+{
+	constexpr int32 NumNodes = 10;
+	constexpr float Gravity = 980.0f;
+	FRopeSimState Sim = RopeTest::MakeStraightRope(NumNodes, 180.0f);
+	Sim.bStartPinned = true;
+	Sim.StartPinPrev = Sim.Positions[0];
+	Sim.StartPinTarget = Sim.Positions[0];
+	Sim.InvMass[0] = 0.0f;
+
+	FRopeSolverConfig Config = MakeStiffConfig();
+	Config.Gravity = FVector(0.0f, 0.0f, -Gravity);
+	Config.Iterations = 32; // 장력(λ) 수렴 판정이므로 넉넉히.
+	const FRopeXPBDSolver Solver;
+	const TArray<IRopeCollider*> NoColliders;
+	for (int32 Frame = 0; Frame < 240; ++Frame)
+	{
+		Solver.Step(Sim, Config, NoColliders, 1.0f / 60.0f);
+	}
+
+	TestTrue(TEXT("tension array sized to segments"), Sim.SegmentTension.Num() == NumNodes - 1);
+
+	// 정적 평형에서 세그먼트 k의 장력 = 아래에 매달린 질량 × g = (N-1-k) × 980 (노드 질량 1).
+	const float TopExpected = static_cast<float>(NumNodes - 1) * Gravity;
+	const float Top = Sim.SegmentTension[0];
+	TestTrue(FString::Printf(TEXT("top tension %.0f should be within 50%% of %.0f"), Top, TopExpected),
+		Top > TopExpected * 0.5f && Top < TopExpected * 1.5f);
+
+	// 위에서 아래로 단조 감소(수렴 오차 여유 10%).
+	for (int32 k = 1; k < Sim.SegmentTension.Num(); ++k)
+	{
+		TestTrue(FString::Printf(TEXT("tension[%d]=%.0f <= tension[%d]=%.0f (+10%%)"),
+			k, Sim.SegmentTension[k], k - 1, Sim.SegmentTension[k - 1]),
+			Sim.SegmentTension[k] <= Sim.SegmentTension[k - 1] * 1.1f + 1.0f);
+	}
+
+	// 무중력 rest 길이 로프(슬랙) → 장력 ~0.
+	FRopeSimState Slack = RopeTest::MakeStraightRope(8, 140.0f);
+	FRopeSolverConfig SlackConfig = MakeStiffConfig(); // Gravity = 0
+	for (int32 Frame = 0; Frame < 30; ++Frame)
+	{
+		Solver.Step(Slack, SlackConfig, NoColliders, 1.0f / 60.0f);
+	}
+	float SlackMax = 0.0f;
+	for (const float T : Slack.SegmentTension) { SlackMax = FMath::Max(SlackMax, T); }
+	TestTrue(FString::Printf(TEXT("slack rope max tension %.1f should be ~0"), SlackMax), SlackMax < 1.0f);
+	return true;
+}
+
 // 움직이는 캡슐의 Query가 접촉 재질점의 표면 속도를 보고하는가(FRopeContact 계약: cm/s, 정적이면 0).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeCapsuleSurfaceVelocityTest,
 	"DynamicRope.Collision.CapsuleSurfaceVelocity",

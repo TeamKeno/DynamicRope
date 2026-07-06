@@ -130,6 +130,15 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 		// 마찰은 substep 끝 1회: 누적된 접촉 법선력(Lambda)으로 Coulomb 한계를 잡는다.
 		ApplyContactFriction(State, Config, Contacts, FixedDt);
 	}
+
+	// 장력(마지막 substep의 수렴 λ → 힘): XPBD에서 F = λ/h². 스트레치는 C>0 → λ<0이므로 -λ의 양수부만
+	// 장력이다(압축/슬랙은 0). 단위는 질량 1 노드 기준 상대 힘 — FRopeSimState::SegmentTension 주석 참고.
+	State.SegmentTension.SetNumUninitialized(NumDist);
+	const float InvDt2 = 1.0f / (FixedDt * FixedDt);
+	for (int32 k = 0; k < NumDist; ++k)
+	{
+		State.SegmentTension[k] = FMath::Max(0.0f, -LambdaDist[k]) * InvDt2;
+	}
 }
 
 void FRopeXPBDSolver::Integrate(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt) const

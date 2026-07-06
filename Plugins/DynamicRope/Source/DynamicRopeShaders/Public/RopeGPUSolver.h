@@ -142,6 +142,9 @@ struct FRopeResidentLatest
 {
 	TArray<FVector> Positions;
 	TArray<FVector> PrevPositions;
+	// 세그먼트별 장력(NumNodes-1개, F = max(0,-λ)/h² — FRopeSimState::SegmentTension과 동일 단위/의미).
+	// 솔브(NumSub>0) 프레임에만 무장·회수되므로 위치보다 드물게 갱신될 수 있다(비어 있으면 미회수).
+	TArray<float>   SegmentTension;
 	uint32 Generation = 0; // 이 위치가 대응하는 시드 generation(재시드 경계의 stale 적용 방지).
 	int32  NumNodes = 0;
 };

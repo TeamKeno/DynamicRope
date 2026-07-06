@@ -142,6 +142,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	bool IsTensioned(float SlackTolerance = 5.0f) const;
 
+	/**
+	 * 세그먼트(SegmentIndex = 노드 i~i+1) 장력. 솔버의 XPBD distance λ에서 유도한 힘(F=max(0,-λ)/h²,
+	 * 질량 1 노드 기준 상대 단위 — 매달린 노드 1개의 중력 하중 ≈ 980). 스트레치만 양수, 슬랙/압축 = 0.
+	 * GPU 상주 로프는 1~2프레임 지연 미러. 솔브가 없는 페이즈(Contacting/Releasing)는 직전 값 유지.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	float GetSegmentTension(int32 SegmentIndex) const;
+
+	/** 전체 세그먼트 중 최대 장력. Wrapped 중에는 매 프레임 FRopeWrapState::Tension에도 반영된다. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	float GetMaxTension() const;
+
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
@@ -214,7 +226,7 @@ private:
 
 	/**
 	 * 페이즈 전이 시 함께 폐기해야 하는 "진행 중 작업" 일시 상태 세트를 리셋한다:
-	 * ContactTracker / PendingWrapSeed / WrappingPhase.State / ContactingElapsed / FlightNoContactElapsed.
+	 * ContactTracker / PendingWrapSeed / WrappingPhase.State / ContactingElapsed / FlightNoContactElapsed / TensionOverTime.
 	 * 유휴 상태의 멤버에 대해서는 no-op이라 어떤 전이에서 불러도 안전하다.
 	 * (ReleaseCooldown은 전이마다 값이 달라 호출자가 직접 설정한다.)
 	 */
@@ -235,6 +247,7 @@ private:
 	float ContactingElapsed = 0.0f;	// Contacting 체류 시간(WrapDecisionTime 판정)
 	float FlightNoContactElapsed = 0.0f;	// Whip 종료 후 캡처 없이 Flight에 머문 시간
 	float ReleaseCooldown = 0.0f;	// Releasing → Free 복귀까지 남은 시간
+	float TensionOverTime = 0.0f;	// Wrapped 중 최대 장력이 TensionReleaseForce를 연속 초과한 시간
 
 	//~ 서브시스템 프레임 계약(RopeSimSubsystem이 쓰거나 읽는다) --------------
 	// 한 프레임 collider 스냅샷. RopeSimSubsystem이 Tick에서 중앙 수집해 채운다(provider 레지스트리 → 로프 필터).

@@ -215,8 +215,14 @@ struct FRopeSimState
 	// Fixed timestep accumulator. The solver consumes real frame time in fixed-size substeps.
 	float           TimeAccumulator = 0.0f;
 
+	// 세그먼트별 장력(힘, 스트레치=양수만). XPBD distance 제약의 수렴 λ에서 유도: F = max(0, -λ)/h².
+	// 단위는 질량 1 노드 기준 mass·cm/s²(상대값) — 임계치는 실측으로 튜닝한다. CPU 솔버가 Step 끝에
+	// 채우고, GPU 상주 로프는 λ 리드백(1~2프레임 지연)이 채운다. 솔브 없는 프레임은 직전 값 유지.
+	// 크기 = Num()-1(비어 있을 수 있음 — 아직 한 번도 솔브 안 됨).
+	TArray<float>   SegmentTension;
+
 	int32 Num() const { return Positions.Num(); }
-	void  Reset() { Positions.Reset(); PrevPositions.Reset(); InvMass.Reset(); TimeAccumulator = 0.0f; }
+	void  Reset() { Positions.Reset(); PrevPositions.Reset(); InvMass.Reset(); SegmentTension.Reset(); TimeAccumulator = 0.0f; }
 };
 
 /**
@@ -435,6 +441,18 @@ struct FRopeWrapConfig
 	/** Whip 종료 후 이 시간 동안 캡처하지 못하면 Free로 복귀한다. 0이면 기본 실패 복귀 쿨다운을 쓴다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float FlightNoContactReturnTime = 0.0f;
+
+	/**
+	 * Wrapped 중 로프 최대 장력(FRopeSimState::SegmentTension 단위 — 질량 1 노드 기준 상대 힘)이 이 값을
+	 * TensionReleaseTime 동안 지속해서 넘으면 자동 release한다(ERopeReleaseReason::Tension). 0 = 비활성.
+	 * 값 감: 매달린 노드 1개의 중력 하중이 약 980이므로, 로프 전체 무게의 몇 배를 버틸지로 잡는다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0"))
+	float TensionReleaseForce = 0.0f;
+
+	/** 장력 release 판정의 지속 시간(초). 순간 스파이크(충격 프레임)로 풀리는 것을 막는다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	float TensionReleaseTime = 0.05f;
 };
 
 /** 던질 때 기준축을 어느 좌표계에서 가져올지. */

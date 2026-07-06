@@ -547,6 +547,11 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 		{
 			S.Positions = L->Positions;
 			S.PrevPositions = L->PrevPositions;
+			// 장력 미러(있을 때만 — 솔브 프레임에만 회수되므로 위치보다 드물 수 있다. 없으면 직전 값 유지).
+			if (L->SegmentTension.Num() == S.Num() - 1)
+			{
+				S.SegmentTension = L->SegmentTension;
+			}
 		}
 	}
 

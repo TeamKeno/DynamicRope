@@ -131,6 +131,21 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 	StartFreshThrow(ThrowContext);
 }
 
+float URopeComponent::GetSegmentTension(int32 SegmentIndex) const
+{
+	return Sim.SegmentTension.IsValidIndex(SegmentIndex) ? Sim.SegmentTension[SegmentIndex] : 0.0f;
+}
+
+float URopeComponent::GetMaxTension() const
+{
+	float MaxTension = 0.0f;
+	for (const float T : Sim.SegmentTension)
+	{
+		MaxTension = FMath::Max(MaxTension, T);
+	}
+	return MaxTension;
+}
+
 bool URopeComponent::IsTensioned(float SlackTolerance) const
 {
 	float Slack = 0.0f;
@@ -357,6 +372,29 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 			break;
 		}
 		ApplyWrappedMassMask();
+
+		// 장력 모델: 솔버가 채운 세그먼트 장력(F=λ/h², GPU 로프는 1~2프레임 지연 미러)의 최대치를
+		// wrap 상태에 반영한다. 게임플레이(당김/절단 판정)와 디버거가 이 값을 읽는다.
+		WrapController.State.Tension = GetMaxTension();
+
+		// 임계 장력 release: 최대 장력이 TensionReleaseForce를 TensionReleaseTime 동안 지속해 넘으면
+		// 풀린다(순간 스파이크 무시). 0 = 비활성. 흐름은 위 mesh-lost release와 동일, 사유만 Tension.
+		if (WrapConfig.TensionReleaseForce > 0.0f)
+		{
+			TensionOverTime = (WrapController.State.Tension > WrapConfig.TensionReleaseForce)
+				? TensionOverTime + DeltaTime : 0.0f;
+			if (TensionOverTime >= WrapConfig.TensionReleaseTime)
+			{
+				const FName Bone = WrapController.State.BoneName;
+				SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("tension release %.0f > %.0f, bone=%s"),
+					WrapController.State.Tension, WrapConfig.TensionReleaseForce, *Bone.ToString()));
+				WrapController.Release(ERopeReleaseReason::Tension);
+				ResetTransientPhaseState();
+				ReleaseCooldown = ReleaseCooldownSeconds;
+				OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Tension);
+				break;
+			}
+		}
 		bSolveThisFrame = true;
 		break;
 	}
@@ -816,6 +854,7 @@ void URopeComponent::ResetTransientPhaseState()
 	WrappingPhase.State.Reset();
 	ContactingElapsed = 0.0f;
 	FlightNoContactElapsed = 0.0f;
+	TensionOverTime = 0.0f;
 }
 
 // ===== 초기화/유틸 ===========================================================
@@ -876,6 +915,8 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		const USkeletalMeshComponent* Mesh = Wrap.Mesh.Get();
 		Snapshot.MeshName = Mesh ? Mesh->GetName() : TEXT("None");
 		Snapshot.Latched = Wrap.Latched;
+		Snapshot.WrapTension = Wrap.Tension;
+		Snapshot.TensionReleaseForce = WrapConfig.TensionReleaseForce;
 	}
 
 	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). capsule이면 세그먼트,

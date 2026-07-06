@@ -65,6 +65,8 @@ struct FRopeDebugSnapshot
 	FName WrapBone = NAME_None;
 	FString MeshName;
 	TArray<FRopeLatchNode> Latched;
+	float WrapTension = 0.0f;         // 최대 세그먼트 장력(FRopeWrapState::Tension 미러)
+	float TensionReleaseForce = 0.0f; // 임계 장력(0=비활성) — 표시용
 
 	//~ colliders(이 로프가 이번 프레임 질의한 collider들) ----------------
 	TArray<FRopeDebugCollider> Colliders;
