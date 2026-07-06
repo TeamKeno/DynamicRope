@@ -97,6 +97,150 @@ namespace
 		return (Aim * FMath::Cos(Angle) + Up * FMath::Sin(Angle)).GetSafeNormal();
 	}
 
+	struct FThrowPreviewContactCandidate
+	{
+		FRopeContactCandidate Candidate;
+		float AngleAlpha = 1.0f;
+		float DistanceAlpha = 1.0f;
+		FVector Direction = FVector::ForwardVector;
+	};
+
+	bool FindThrowPreviewContactCandidate(const FRopeArcPreviewData& Preview, const TArray<IRopeCollider*>& Colliders,
+		float RopeRadius, const FRopeWrapConfig& WrapConfig, const FRopeSimState& Sim,
+		float SampleStep, float QueryRadius, FThrowPreviewContactCandidate& OutCandidate)
+	{
+		OutCandidate = FThrowPreviewContactCandidate();
+		if (Preview.Radius <= KINDA_SMALL_NUMBER || Colliders.Num() == 0 || Sim.Num() < 2)
+		{
+			return false;
+		}
+
+		constexpr int32 MaxPreviewAngleSamples = 24;
+		constexpr int32 MaxPreviewRadialSamples = 16;
+		constexpr int32 MaxPreviewTotalSamples = 256;
+
+		const int32 AngleSamples = FMath::Clamp(Preview.SegmentCount, 1, MaxPreviewAngleSamples);
+		const float RadialStep = FMath::Max(SampleStep, 1.0f);
+		const int32 RequestedRadialSamples = FMath::Max(1, FMath::CeilToInt(Preview.Radius / RadialStep));
+		const int32 TotalLimitedRadialSamples = FMath::Max(1, MaxPreviewTotalSamples / (AngleSamples + 1));
+		const int32 RadialSamples = FMath::Clamp(RequestedRadialSamples, 1,
+			FMath::Min(MaxPreviewRadialSamples, TotalLimitedRadialSamples));
+		const float EffectiveQueryRadius = QueryRadius > KINDA_SMALL_NUMBER
+			? QueryRadius
+			: FMath::Max(RopeRadius, WrapConfig.ContactRadius);
+
+		FBox PreviewBounds(EForceInit::ForceInit);
+		PreviewBounds += Preview.Origin;
+		for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
+		{
+			const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
+			const FVector Direction = ArcPreviewDirectionAtAlpha(Preview, AngleAlpha);
+			if (!Direction.IsNearlyZero())
+			{
+				PreviewBounds += Preview.Origin + Direction * Preview.Radius;
+			}
+		}
+		PreviewBounds = PreviewBounds.ExpandBy(EffectiveQueryRadius);
+
+		TArray<IRopeCollider*, TInlineAllocator<8>> CandidateColliders;
+		for (IRopeCollider* Collider : Colliders)
+		{
+			if (Collider && Collider->GetWorldBounds().ExpandBy(EffectiveQueryRadius).Intersect(PreviewBounds))
+			{
+				CandidateColliders.Add(Collider);
+			}
+		}
+		if (CandidateColliders.Num() == 0)
+		{
+			return false;
+		}
+
+		const float SegmentLength = FMath::Max(Sim.SegmentLength, 1.0f);
+		for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
+		{
+			const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
+			const FVector Direction = ArcPreviewDirectionAtAlpha(Preview, AngleAlpha);
+			if (Direction.IsNearlyZero())
+			{
+				continue;
+			}
+
+			for (int32 RadialIndex = 1; RadialIndex <= RadialSamples; ++RadialIndex)
+			{
+				const float DistanceAlpha = static_cast<float>(RadialIndex) / static_cast<float>(RadialSamples);
+				const float Distance = Preview.Radius * DistanceAlpha;
+				const FVector SamplePoint = Preview.Origin + Direction * Distance;
+
+				for (const IRopeCollider* Collider : CandidateColliders)
+				{
+					const FRopeContact Contact = Collider->Query(SamplePoint, EffectiveQueryRadius);
+					if (!Contact.bHit || Contact.Bone.IsNone() || !Contact.SourceMesh)
+					{
+						continue;
+					}
+
+					OutCandidate.Candidate = FRopeFlightContactDetector::MakeCandidate(
+						FMath::Clamp(FMath::RoundToInt(Distance / SegmentLength), 1, Sim.Num() - 1),
+						Contact);
+					OutCandidate.Candidate.Source = ERopeContactCandidateSource::PredictiveFree;
+					OutCandidate.Candidate.SourceMask = static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree);
+					OutCandidate.AngleAlpha = AngleAlpha;
+					OutCandidate.DistanceAlpha = DistanceAlpha;
+					OutCandidate.Direction = Direction;
+					return OutCandidate.Candidate.bValid;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	FRopeSimState BuildThrowPreviewSim(const FRopeSimState& SourceSim, const FRopeArcPreviewData& Preview,
+		const FThrowPreviewContactCandidate& ContactCandidate)
+	{
+		FRopeSimState PreviewSim = SourceSim;
+		const int32 NumNodes = SourceSim.Num();
+		if (NumNodes < 2)
+		{
+			return PreviewSim;
+		}
+
+		PreviewSim.Positions.SetNum(NumNodes);
+		PreviewSim.PrevPositions.SetNum(NumNodes);
+		PreviewSim.InvMass.SetNum(NumNodes);
+
+		const int32 LatchNode = FMath::Clamp(ContactCandidate.Candidate.NodeIndex, 1, NumNodes - 1);
+		const float SegmentLength = FMath::Max(SourceSim.SegmentLength, 1.0f);
+		const FVector SurfacePoint = ContactCandidate.Candidate.WorldPoint;
+		const FVector ToSurface = SurfacePoint - Preview.Origin;
+		const FVector ApproachDir = ToSurface.GetSafeNormal(KINDA_SMALL_NUMBER, ContactCandidate.Direction);
+		const FVector TailDir = ContactCandidate.Direction.GetSafeNormal(KINDA_SMALL_NUMBER, ApproachDir);
+
+		for (int32 NodeIndex = 0; NodeIndex < NumNodes; ++NodeIndex)
+		{
+			FVector Position = FVector::ZeroVector;
+			if (NodeIndex <= LatchNode)
+			{
+				const float Alpha = LatchNode > 0
+					? static_cast<float>(NodeIndex) / static_cast<float>(LatchNode)
+					: 0.0f;
+				Position = FMath::Lerp(Preview.Origin, SurfacePoint, Alpha);
+			}
+			else
+			{
+				Position = SurfacePoint + TailDir * (static_cast<float>(NodeIndex - LatchNode) * SegmentLength);
+			}
+
+			PreviewSim.Positions[NodeIndex] = Position;
+			PreviewSim.PrevPositions[NodeIndex] = Position;
+			PreviewSim.InvMass[NodeIndex] = (NodeIndex == 0 && SourceSim.bStartPinned) ? 0.0f : 1.0f;
+		}
+
+		PreviewSim.SegmentLength = SegmentLength;
+		PreviewSim.RopeLength = SegmentLength * static_cast<float>(NumNodes - 1);
+		return PreviewSim;
+	}
+
 }
 
 URopeComponent::URopeComponent()
@@ -269,6 +413,234 @@ bool URopeComponent::FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, 
 	}
 
 	return false;
+}
+
+bool URopeComponent::BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) const
+{
+	OutPreview = FRopeWrapPreviewData();
+	if (Sim.Num() < 2)
+	{
+		return false;
+	}
+
+	if (Phase == ERopePhase::Flight)
+	{
+		return BuildFlightWrappingPreview(OutPreview);
+	}
+
+	const USkeletalMeshComponent* Mesh = nullptr;
+	FName Bone = NAME_None;
+	FRopeSurfaceAnchor LatchAnchor;
+
+	if (Phase == ERopePhase::Wrapping && WrappingPhase.State.IsActive())
+	{
+		Mesh = WrappingPhase.State.Mesh.Get();
+		Bone = WrappingPhase.State.BoneName;
+		LatchAnchor = WrappingPhase.State.LatchAnchor;
+	}
+	else if (Phase == ERopePhase::Contacting)
+	{
+		Mesh = PendingWrapSeed.Mesh.Get();
+		Bone = PendingWrapSeed.BoneName;
+		if (PendingWrapSeed.Anchors.Num() > 0)
+		{
+			LatchAnchor = PendingWrapSeed.Anchors[0];
+		}
+		else if (PendingWrapSeed.Latched.Num() > 0)
+		{
+			const FRopeLatchNode& Latch = PendingWrapSeed.Latched[0];
+			if (Mesh && Sim.Positions.IsValidIndex(Latch.NodeIndex))
+			{
+				const FTransform BoneXform = Mesh->GetSocketTransform(Latch.Bone);
+				const FVector NormalWorld = FVector::UpVector;
+				FVector TangentWorld = FVector::ForwardVector;
+				if (Sim.Positions.IsValidIndex(Latch.NodeIndex + 1))
+				{
+					TangentWorld = (Sim.Positions[Latch.NodeIndex + 1] - Sim.Positions[Latch.NodeIndex])
+						.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+				}
+
+				LatchAnchor.NodeIndex = Latch.NodeIndex;
+				LatchAnchor.Bone = Latch.Bone;
+				LatchAnchor.Mesh = Mesh;
+				LatchAnchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Sim.Positions[Latch.NodeIndex]);
+				LatchAnchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld)
+					.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+				LatchAnchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld)
+					.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+				LatchAnchor.StartWorldPosition = Sim.Positions[Latch.NodeIndex];
+				LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Radius);
+				LatchAnchor.RopeDistance = 0.0f;
+			}
+		}
+	}
+	else
+	{
+		return false;
+	}
+
+	if (!Mesh)
+	{
+		Mesh = LatchAnchor.Mesh.Get();
+	}
+	if (!Mesh || Bone.IsNone() || LatchAnchor.Bone.IsNone() ||
+		!Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex))
+	{
+		return false;
+	}
+
+	LatchAnchor.Mesh = Mesh;
+	LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Radius);
+
+	TArray<FVector> PreviewPoints;
+	if (!WrappingPhase.BuildPreviewCenterline(LatchAnchor, Mesh, Bone, Sim, MakeWrappingContext(), PreviewPoints))
+	{
+		return false;
+	}
+
+	OutPreview.Points = MoveTemp(PreviewPoints);
+	OutPreview.Radius = FMath::Max(0.1f, Radius * 1.05f);
+	OutPreview.NumSides = FMath::Clamp(NumSides, 3, 32);
+	return OutPreview.IsValid();
+}
+
+bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
+	float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview) const
+{
+	OutPreview = FRopeWrapPreviewData();
+
+	if (Phase == ERopePhase::Free || Phase == ERopePhase::Releasing)
+	{
+		return BuildFreeWrappingPreview(ThrowContext, ReachScale, SegmentCount, SampleStep, QueryRadius, OutPreview);
+	}
+
+	if (Phase == ERopePhase::Flight)
+	{
+		return BuildFlightWrappingPreview(OutPreview);
+	}
+
+	return BuildWrappingPreview(OutPreview);
+}
+
+bool URopeComponent::BuildWrappingPreviewFromCandidate(const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim,
+	FRopeWrapPreviewData& OutPreview) const
+{
+	OutPreview = FRopeWrapPreviewData();
+	const USkeletalMeshComponent* Mesh = Candidate.Mesh;
+	if (!Candidate.bValid || !Mesh || Candidate.Bone.IsNone() ||
+		!SourceSim.Positions.IsValidIndex(Candidate.NodeIndex))
+	{
+		return false;
+	}
+
+	const FVector NormalWorld = Candidate.Normal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	FVector TangentWorld = FVector::ForwardVector;
+	if (SourceSim.Positions.IsValidIndex(Candidate.NodeIndex + 1))
+	{
+		TangentWorld = SourceSim.Positions[Candidate.NodeIndex + 1] - SourceSim.Positions[Candidate.NodeIndex];
+	}
+	else if (SourceSim.Positions.IsValidIndex(Candidate.NodeIndex - 1))
+	{
+		TangentWorld = SourceSim.Positions[Candidate.NodeIndex] - SourceSim.Positions[Candidate.NodeIndex - 1];
+	}
+	else
+	{
+		TangentWorld = FRopeFlightContactDetector::ExpectedWrapTangent(SourceSim, Candidate, GetForwardVector());
+	}
+	TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
+
+	const FTransform BoneXform = Mesh->GetSocketTransform(Candidate.Bone);
+
+	FRopeSurfaceAnchor LatchAnchor;
+	LatchAnchor.NodeIndex = Candidate.NodeIndex;
+	LatchAnchor.Bone = Candidate.Bone;
+	LatchAnchor.Mesh = Mesh;
+	LatchAnchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Candidate.WorldPoint);
+	LatchAnchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	LatchAnchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	LatchAnchor.StartWorldPosition = SourceSim.Positions[Candidate.NodeIndex];
+	LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Radius);
+	LatchAnchor.RopeDistance = 0.0f;
+
+	TArray<FVector> PreviewPoints;
+	if (!WrappingPhase.BuildPreviewCenterline(LatchAnchor, Mesh, Candidate.Bone,
+		SourceSim, MakeWrappingContext(), PreviewPoints))
+	{
+		return false;
+	}
+
+	OutPreview.Points = MoveTemp(PreviewPoints);
+	OutPreview.Radius = FMath::Max(0.1f, Radius * 1.05f);
+	OutPreview.NumSides = FMath::Clamp(NumSides, 3, 32);
+	return OutPreview.IsValid();
+}
+
+bool URopeComponent::BuildFreeWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
+	float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview) const
+{
+	OutPreview = FRopeWrapPreviewData();
+	FRopeArcPreviewData ArcPreview;
+	if (!BuildThrowArcPreview(ThrowContext, ReachScale, SegmentCount, ArcPreview))
+	{
+		return false;
+	}
+
+	FThrowPreviewContactCandidate ContactCandidate;
+	if (!FindThrowPreviewContactCandidate(ArcPreview, FrameColliders, Radius, WrapConfig, Sim,
+		SampleStep, QueryRadius, ContactCandidate))
+	{
+		return false;
+	}
+
+	FRopeSimState PreviewSim = BuildThrowPreviewSim(Sim, ArcPreview, ContactCandidate);
+	ContactCandidate.Candidate.NodeIndex = FMath::Clamp(ContactCandidate.Candidate.NodeIndex, 1, PreviewSim.Num() - 1);
+	return BuildWrappingPreviewFromCandidate(ContactCandidate.Candidate, PreviewSim, OutPreview);
+}
+
+bool URopeComponent::BuildFlightWrappingPreview(FRopeWrapPreviewData& OutPreview) const
+{
+	OutPreview = FRopeWrapPreviewData();
+	if (FrameColliders.Num() == 0 || Sim.Num() < 2)
+	{
+		return false;
+	}
+
+	TArray<FRopeContactCandidate> Candidates;
+	const FRopeFlightContactDetector::FParams Params = MakeFlightDetectParams();
+	FRopeFlightContactDetector::DetectContactCandidates(Sim, FrameColliders, Params, Candidates);
+	FRopeFlightContactDetector::FWhipGuideView EmptyWhip;
+	FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, FrameColliders, Params, EmptyWhip, Candidates);
+	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, Params, Candidates);
+
+	FRopeContactTracker PreviewTracker;
+	PreviewTracker.Update(Candidates, 0.0f);
+	if (PreviewTracker.CandidateBone.IsNone() || PreviewTracker.CandidateNodes.Num() == 0)
+	{
+		return false;
+	}
+
+	const int32 NodeIndex = FindHeadValidNodeIndex(PreviewTracker.CandidateNodes, Sim);
+	const FRopeContactCandidate* BestCandidate = nullptr;
+	for (const FRopeContactCandidate& Candidate : Candidates)
+	{
+		if (!Candidate.bValid ||
+			Candidate.NodeIndex != NodeIndex ||
+			Candidate.Bone != PreviewTracker.CandidateBone ||
+			Candidate.Mesh != PreviewTracker.CandidateMesh)
+		{
+			continue;
+		}
+
+		if (!BestCandidate || Candidate.Penetration > BestCandidate->Penetration)
+		{
+			BestCandidate = &Candidate;
+		}
+	}
+
+	return BestCandidate ? BuildWrappingPreviewFromCandidate(*BestCandidate, Sim, OutPreview) : false;
 }
 
 void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog)

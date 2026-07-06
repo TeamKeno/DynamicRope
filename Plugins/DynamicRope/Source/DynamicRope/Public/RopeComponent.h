@@ -136,6 +136,14 @@ public:
 	bool FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, float SampleStep, float QueryRadius,
 		FRopeArcPreviewHitResult& OutHit) const;
 
+	/** Builds the current pre-wrapped rope centerline preview from the active/contacting wrap seed. */
+	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
+	bool BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) const;
+
+	/** Builds a pre-wrapped preview for idle/flight aiming using the same throw context as ThrowWithContext. */
+	bool BuildWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
+		float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview) const;
+
 	/** 현재 진행 중인 잡기/감기(Contacting/Wrapping/Wrapped)를 수동으로 해제한다(Releasing phase). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ReleaseWrap();
@@ -461,6 +469,14 @@ private:
 
 	/** WrappingPhase에 넘길 호출 컨텍스트(WrapConfig/collider 스냅샷/경로 모드/튜브 반지름/로그 이름). */
 	FRopeWrappingPhase::FContext MakeWrappingContext() const;
+
+	bool BuildWrappingPreviewFromCandidate(const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim,
+		FRopeWrapPreviewData& OutPreview) const;
+
+	bool BuildFreeWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
+		float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview) const;
+
+	bool BuildFlightWrappingPreview(FRopeWrapPreviewData& OutPreview) const;
 
 	void CommitWrapping();
 

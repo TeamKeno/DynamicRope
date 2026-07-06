@@ -5,19 +5,20 @@
 #include "CoreMinimal.h"
 #include "Components/MeshComponent.h"
 #include "Core/RopeTypes.h"
-#include "RopeArcPreviewComponent.generated.h"
+#include "RopePreviewComponent.generated.h"
 
 class UMaterialInterface;
 
 /** 미리보기 호 전용 material slot. Rope 본체 material과 분리한다. */
 UENUM(BlueprintType)
-enum class ERopeArcPreviewMaterialSlot : uint8
+enum class ERopePreviewMaterialSlot : uint8
 {
 	ArcFill UMETA(DisplayName = "Arc Fill"),
 	ArcRim UMETA(DisplayName = "Arc Rim"),
 	BlockedArcFill UMETA(DisplayName = "Blocked Arc Fill"),
 	BlockedArcRim UMETA(DisplayName = "Blocked Arc Rim"),
-	HitPoint UMETA(DisplayName = "Hit Point")
+	HitPoint UMETA(DisplayName = "Hit Point"),
+	WrapPreview UMETA(DisplayName = "Wrap Preview")
 };
 
 /**
@@ -25,12 +26,12 @@ enum class ERopeArcPreviewMaterialSlot : uint8
  * RopeSceneProxy의 static/dynamic relevance 계약을 건드리지 않기 위해 로프 본체 렌더링과 분리한다.
  */
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
-class DYNAMICROPE_API URopeArcPreviewComponent : public UMeshComponent
+class DYNAMICROPE_API URopePreviewComponent : public UMeshComponent
 {
 	GENERATED_BODY()
 
 public:
-	URopeArcPreviewComponent();
+	URopePreviewComponent();
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Material")
 	TObjectPtr<UMaterialInterface> ArcFillMaterial = nullptr;
@@ -47,6 +48,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Material")
 	TObjectPtr<UMaterialInterface> HitPointMaterial = nullptr;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Material")
+	TObjectPtr<UMaterialInterface> WrapPreviewMaterial = nullptr;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Shape", meta = (ClampMin = "0.1", Units = "cm"))
 	float RimThickness = 3.0f;
 
@@ -56,14 +60,29 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Shape", meta = (ClampMin = "0.0", Units = "cm"))
 	float RimPlaneOffset = 0.25f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Shape", meta = (ClampMin = "0.1", Units = "cm"))
+	float WrapPreviewRadius = 2.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Shape", meta = (ClampMin = "3", ClampMax = "32"))
+	int32 WrapPreviewSides = 8;
+
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
 	void SetArcPreviewWorld(const FRopeArcPreviewData& InPreview);
 
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
-	void ClearArcPreview();
+	void SetWrapPreviewWorld(const FRopeWrapPreviewData& InPreview);
 
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
-	bool IsArcPreviewVisible() const { return bPreviewVisible; }
+	void ClearPreview();
+
+	UFUNCTION(BlueprintCallable, Category = "Rope|Preview", meta = (DeprecatedFunction, DeprecationMessage = "Use ClearPreview."))
+	void ClearArcPreview() { ClearPreview(); }
+
+	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
+	bool IsPreviewVisible() const { return bPreviewVisible; }
+
+	UFUNCTION(BlueprintCallable, Category = "Rope|Preview", meta = (DeprecatedFunction, DeprecationMessage = "Use IsPreviewVisible."))
+	bool IsArcPreviewVisible() const { return IsPreviewVisible(); }
 
 	//~ UPrimitiveComponent
 	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
@@ -79,6 +98,16 @@ private:
 	void RebuildLocalBounds();
 
 	FRopeArcPreviewData PreviewLocal;
+	FRopeWrapPreviewData WrapPreviewLocal;
 	bool bPreviewVisible = false;
 	FBoxSphereBounds LocalPreviewBounds;
+};
+
+UCLASS(ClassGroup = (DynamicRope), meta = (DeprecatedNode, DeprecationMessage = "Use RopePreviewComponent."))
+class DYNAMICROPE_API URopeArcPreviewComponent : public URopePreviewComponent
+{
+	GENERATED_BODY()
+
+public:
+	URopeArcPreviewComponent();
 };

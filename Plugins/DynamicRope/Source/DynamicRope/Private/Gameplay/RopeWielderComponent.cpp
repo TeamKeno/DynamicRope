@@ -3,7 +3,7 @@
 #include "Gameplay/RopeWielderComponent.h"
 #include "RopeComponent.h"
 #include "DynamicRopeLog.h"
-#include "Render/RopeArcPreviewComponent.h"
+#include "Render/RopePreviewComponent.h"
 
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -47,6 +47,7 @@ void URopeWielderComponent::BeginPlay()
 		BindInput();
 	}
 
+	bShowThrowPreviewArc = PreviewComponent != nullptr;
 	SetComponentTickEnabled(bShowThrowPreviewArc);
 	if (bShowThrowPreviewArc)
 	{
@@ -87,16 +88,6 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (PreviewUpdateInterval > 0.0f)
-	{
-		PreviewUpdateCooldown -= DeltaTime;
-		if (PreviewUpdateCooldown > 0.0f)
-		{
-			return;
-		}
-		PreviewUpdateCooldown = PreviewUpdateInterval;
-	}
-
 	UpdateThrowPreview();
 }
 
@@ -127,16 +118,16 @@ void URopeWielderComponent::ResolvePreviewComponent()
 
 	if (UActorComponent* ReferencedComponent = PreviewComponentReference.GetComponent(Owner))
 	{
-		PreviewComponent = Cast<URopeArcPreviewComponent>(ReferencedComponent);
+		PreviewComponent = Cast<URopePreviewComponent>(ReferencedComponent);
 	}
 
 	if (!PreviewComponent)
 	{
-		PreviewComponent = Owner->FindComponentByClass<URopeArcPreviewComponent>();
+		PreviewComponent = Owner->FindComponentByClass<URopePreviewComponent>();
 	}
 	if (!PreviewComponent && bAutoCreatePreviewComponent)
 	{
-		PreviewComponent = NewObject<URopeArcPreviewComponent>(Owner, TEXT("RopeArcPreviewComponent"));
+		PreviewComponent = NewObject<URopePreviewComponent>(Owner, TEXT("RopePreviewComponent"));
 		Owner->AddInstanceComponent(PreviewComponent);
 		if (USceneComponent* RootComponent = Owner->GetRootComponent())
 		{
@@ -536,41 +527,17 @@ void URopeWielderComponent::UpdateThrowPreview()
 		return;
 	}
 
-	if (bPreviewOnlyWhenIdle)
-	{
-		const ERopePhase Phase = Rope->GetPhase();
-		if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing)
-		{
-			ClearThrowPreview();
-			return;
-		}
-	}
-
-	FRopeArcPreviewData Preview;
-	if (!Rope->BuildThrowArcPreview(BuildThrowContext(FVector::ZeroVector),
-		PreviewReachScale, PreviewSegmentCount, Preview))
+	FRopeWrapPreviewData Preview;
+	if (!Rope->BuildWrappingPreview(BuildThrowContext(FVector::ZeroVector),
+		PreviewReachScale, PreviewSegmentCount, PreviewSampleStep, PreviewQueryRadius, Preview))
 	{
 		ClearThrowPreview();
 		return;
 	}
 
-	FRopeArcPreviewHitResult Hit;
-	bLastPreviewBlocked = Rope->FindThrowArcPreviewHit(Preview, PreviewSampleStep, PreviewQueryRadius, Hit);
-	if (bLastPreviewBlocked)
-	{
-		Preview.bBlocked = true;
-		Preview.BlockedStartAlpha = Hit.AngleAlpha;
-		Preview.HitPoint = Hit.HitPoint;
-		LastPreviewHitPoint = Hit.HitPoint;
-	}
-	else
-	{
-		Preview.bBlocked = false;
-		Preview.BlockedStartAlpha = 1.0f;
-		LastPreviewHitPoint = FVector::ZeroVector;
-	}
-
-	PreviewComponent->SetArcPreviewWorld(Preview);
+	bLastPreviewBlocked = false;
+	LastPreviewHitPoint = FVector::ZeroVector;
+	PreviewComponent->SetWrapPreviewWorld(Preview);
 }
 
 void URopeWielderComponent::ClearThrowPreview()
@@ -580,6 +547,6 @@ void URopeWielderComponent::ClearThrowPreview()
 	PreviewUpdateCooldown = 0.0f;
 	if (PreviewComponent)
 	{
-		PreviewComponent->ClearArcPreview();
+		PreviewComponent->ClearPreview();
 	}
 }

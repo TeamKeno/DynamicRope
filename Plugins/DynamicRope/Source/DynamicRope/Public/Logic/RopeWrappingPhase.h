@@ -80,6 +80,10 @@ public:
 	/** abort 시 앵커 노드들의 솔버 복귀(InvMass=1 + Prev=Pos 튐 방지)를 OutFrame에 담는다. */
 	void ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
+	/** Builds a complete target centerline using the same helix/vector-field path code as runtime wrapping. */
+	bool BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor, const USkeletalMeshComponent* Mesh, FName Bone,
+		const FRopeSimState& Sim, const FContext& Ctx, TArray<FVector>& OutCenterline) const;
+
 private:
 	struct FSurfaceVectorFieldBoneCandidate
 	{

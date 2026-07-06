@@ -18,7 +18,7 @@
 #include "RopeWielderComponent.generated.h"
 
 class URopeComponent;
-class URopeArcPreviewComponent;
+class URopePreviewComponent;
 class USkeletalMeshComponent;
 class UInputAction;
 class UInputMappingContext;
@@ -101,11 +101,11 @@ public:
 	bool bShowThrowPreviewArc = false;
 
 	/** 비어 있으면 owner에서 찾고, bAutoCreatePreviewComponent가 켜져 있으면 런타임에 자동 생성한다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopeArcPreviewComponent", DisplayName = "Preview Component"))
+	UPROPERTY(EditAnywhere, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopePreviewComponent,/Script/DynamicRope.RopeArcPreviewComponent", DisplayName = "Preview Component"))
 	FComponentReference PreviewComponentReference;
 
 	UPROPERTY(Transient)
-	TObjectPtr<URopeArcPreviewComponent> PreviewComponent = nullptr;
+	TObjectPtr<URopePreviewComponent> PreviewComponent = nullptr;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
 	bool bAutoCreatePreviewComponent = true;

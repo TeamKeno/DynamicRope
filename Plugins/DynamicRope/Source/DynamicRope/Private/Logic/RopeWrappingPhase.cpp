@@ -246,6 +246,59 @@ void FRopeWrappingPhase::ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNode
 	}
 }
 
+bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor, const USkeletalMeshComponent* Mesh, FName Bone,
+	const FRopeSimState& Sim, const FContext& Ctx, TArray<FVector>& OutCenterline) const
+{
+	OutCenterline.Reset();
+	if (!Mesh || Bone.IsNone() || !Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex) || Sim.Num() < 2)
+	{
+		return false;
+	}
+
+	FRopeWrapConfig PreviewConfig = Ctx.Config;
+	PreviewConfig.WrappingPathBuildStepsPerFrame = 4096;
+	const FContext PreviewCtx{ PreviewConfig, Ctx.Colliders, Ctx.PathMode, Ctx.SurfaceOffset, Ctx.OwnerName };
+
+	FRopeWrappingPhase PreviewPhase;
+	if (!PreviewPhase.Begin(LatchAnchor, Mesh, Bone,
+		FMath::Max(0.01f, PreviewConfig.WrappingMotionDuration), Sim, PreviewCtx))
+	{
+		return false;
+	}
+
+	const int32 MaxIterations = FMath::Max(1, Sim.Num() * 4);
+	for (int32 Iteration = 0;
+		Iteration < MaxIterations &&
+		PreviewPhase.State.bPathBuildActive &&
+		!PreviewPhase.State.bPathBuildComplete &&
+		!PreviewPhase.State.bPathBuildFailed;
+		++Iteration)
+	{
+		PreviewPhase.AdvancePathBuild(Sim, PreviewCtx);
+	}
+
+	if (PreviewPhase.State.Path.Num() == 0)
+	{
+		return false;
+	}
+
+	OutCenterline = Sim.Positions;
+	const float SurfaceOffset = FMath::Max(0.0f, PreviewCtx.SurfaceOffset);
+	for (int32 PathIndex = 0; PathIndex < PreviewPhase.State.Path.Num(); ++PathIndex)
+	{
+		const int32 NodeIndex = LatchAnchor.NodeIndex + PathIndex;
+		if (!OutCenterline.IsValidIndex(NodeIndex))
+		{
+			break;
+		}
+
+		const FRopeWrapPathPoint& Point = PreviewPhase.State.Path[PathIndex];
+		OutCenterline[NodeIndex] = Point.SurfaceWorld + Point.NormalWorld * SurfaceOffset;
+	}
+
+	return OutCenterline.Num() >= 2;
+}
+
 bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor& LatchAnchor,
 	const FRopeSimState& Sim, const FContext& Ctx)
 {

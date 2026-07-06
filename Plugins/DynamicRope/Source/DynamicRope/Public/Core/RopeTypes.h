@@ -737,6 +737,27 @@ struct FRopeArcPreviewData
 	FVector HitPoint = FVector::ZeroVector;
 };
 
+/** Runtime centerline data for the pre-wrapped rope preview. */
+USTRUCT(BlueprintType)
+struct FRopeWrapPreviewData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
+	TArray<FVector> Points;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.1", Units = "cm"))
+	float Radius = 2.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "3", ClampMax = "32"))
+	int32 NumSides = 8;
+
+	bool IsValid() const
+	{
+		return Points.Num() >= 2 && Radius > KINDA_SMALL_NUMBER;
+	}
+};
+
 /** 미리보기 호가 현재 collider 스냅샷에 닿았는지와, 닿은 각도 비율. */
 USTRUCT(BlueprintType)
 struct FRopeArcPreviewHitResult
