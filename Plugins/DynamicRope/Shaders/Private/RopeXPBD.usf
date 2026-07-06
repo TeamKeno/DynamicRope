@@ -197,6 +197,66 @@ float RopeSegmentParam(float3 P, float3 A, float3 B)
 	return saturate(dot(P - A, AB) / max(dot(AB, AB), 1e-8f));
 }
 
+// ===== 공용 콜라이더 점질의(point query) =============================================================
+// 솔브 노드 스윕 샘플 / 세그먼트(chord) 충돌 / 접촉 감지가 같은 질의 수식을 각자 복붙하던 것을 통합.
+// HLSL 함수는 전부 인라인이라 비용 변화 없음. 수식은 기존 블록과 문자 그대로 동일(GPU 패리티 보존).
+
+// 캡슐 점질의: 점 P vs 캡슐(CapA-CapB, 반지름 CapRadius) + 질의 반경 NodeR. 침투 시 true.
+// OutNormal = 바깥 단위(축퇴 시 +Z), OutPen > 0, OutTSeg = 재질점 파라미터(표면속도/이월용),
+// OutClosest = 축 위 최근접점. 비침투에서도 out은 유효한 값으로 채워진다(Pen <= 0).
+bool RopeQueryCapsulePoint(float3 CapA, float3 CapB, float CapRadius, float3 P, float NodeR,
+	out float3 OutNormal, out float OutPen, out float OutTSeg, out float3 OutClosest)
+{
+	OutTSeg = RopeSegmentParam(P, CapA, CapB);
+	OutClosest = lerp(CapA, CapB, OutTSeg);
+	const float3 ToNode = P - OutClosest;
+	const float  Dist = length(ToNode);
+	const float  MinDist = CapRadius + NodeR;
+	OutNormal = (Dist > 1e-4f) ? (ToNode / Dist) : float3(0.0f, 0.0f, 1.0f);
+	OutPen = MinDist - Dist;
+	return Dist < MinDist;
+}
+
+// SDF 로컬 점질의: 좁은밴드 박스 컬(+NodeR 여유) 후 trilinear. 침투 시에만 gradient 계산(기존 블록과
+// 동일 비용 구조 — 비침투 샘플은 gradient를 만들지 않는다). 컬 시 OutDist = NodeR(비침투 안전값).
+bool RopeQuerySDFLocal(FRopeSDFVolume Vol, float3 Lp, float NodeR, out float OutDist, out float3 OutNLocal)
+{
+	OutDist = NodeR;
+	OutNLocal = float3(0.0f, 0.0f, 1.0f);
+	const float3 Mn = Vol.LocalMin.xyz - NodeR;
+	const float3 Mx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + NodeR;
+	if (any(Lp < Mn) || any(Lp > Mx))
+	{
+		return false;
+	}
+	OutDist = RopeSDFTrilinear(Vol, Lp);
+	if (OutDist >= NodeR)
+	{
+		return false;
+	}
+	OutNLocal = RopeSDFGradient(Vol, Lp);
+	return true;
+}
+
+// SDF 월드 점질의(현재 포즈): 월드 P를 collider 로컬로 역변환(InvTransform = qInv*(P-T)/Scale) 후 로컬
+// 점질의, 침투 시 법선을 월드로 회전. sub-포즈가 필요 없는 호출자(세그먼트 충돌/접촉 감지)용.
+// OutLp는 표면점(P - N*Dist)/표면속도(Wprev) 재구성에 쓴다.
+bool RopeQuerySDFWorld(FRopeSDFCollider Col, FRopeSDFVolume Vol, float3 P, float NodeR,
+	out float3 OutNWorld, out float OutDist, out float3 OutLp)
+{
+	const float3 Scl = Col.Scale.xyz;
+	const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
+	OutLp = RopeQuatRotate(float4(-Col.Rotation.xyz, Col.Rotation.w), P - Col.Translation.xyz) * InvScale;
+	float3 NLocal;
+	if (!RopeQuerySDFLocal(Vol, OutLp, NodeR, OutDist, NLocal))
+	{
+		OutNWorld = float3(0.0f, 0.0f, 1.0f);
+		return false;
+	}
+	OutNWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal));
+	return true;
+}
+
 groupshared float3 gPos[ROPE_MAX_NODES];
 groupshared float3 gPrev[ROPE_MAX_NODES];
 groupshared float  gInvMass[ROPE_MAX_NODES];
@@ -382,15 +442,9 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 					const float3 Pt = lerp(SegA, SegB, T);
 					const float3 CapAT = lerp(CapAS, CapAE, T);
 					const float3 CapBT = lerp(CapBS, CapBE, T);
-					const float  TSeg = RopeSegmentParam(Pt, CapAT, CapBT);
-					const float3 Closest = lerp(CapAT, CapBT, TSeg);
-					const float3 ToNode = Pt - Closest;
-					const float  Dist = length(ToNode);
-					const float  MinDist = Cap.B.w + P.CollisionRadius; // capsule 반지름 + 노드 두께
-					if (Dist < MinDist)
+					float3 Normal; float Pen; float TSeg; float3 Closest;
+					if (RopeQueryCapsulePoint(CapAT, CapBT, Cap.B.w, Pt, P.CollisionRadius, Normal, Pen, TSeg, Closest))
 					{
-						const float3 Normal = (Dist > 1e-4f) ? (ToNode / Dist) : float3(0.0f, 0.0f, 1.0f);
-						const float  Pen = MinDist - Dist;
 						// 접촉 재질점(TSeg)을 substep 끝 포즈로 이월 — 노드를 표면과 함께 남은 모션만큼 옮겨
 						// 배치한다(SDF가 로컬 접촉점을 끝 포즈로 재환산하는 것의 대응). 정지 캡슐이면 이월량 0.
 						const float3 ClosestE = lerp(CapAE, CapBE, TSeg);
@@ -480,17 +534,10 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 				{
 					const float  T  = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
 					const float3 Lp = lerp(L0, L1, T);
-					// 좁은밴드 박스 컬(노드 반지름 여유). CPU: LocalBounds.ExpandBy(NodeRadius).IsInsideOrOn.
-					const float3 Mn = Vol.LocalMin.xyz - NodeR;
-					const float3 Mx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + NodeR;
-					if (any(Lp < Mn) || any(Lp > Mx))
+					// 밴드 컬 + trilinear + gradient(침투 시) — 공용 로컬 점질의.
+					float Dist; float3 NLocal;
+					if (RopeQuerySDFLocal(Vol, Lp, NodeR, Dist, NLocal))
 					{
-						continue;
-					}
-					const float Dist = RopeSDFTrilinear(Vol, Lp);
-					if (Dist < NodeR)
-					{
-						const float3 NLocal = RopeSDFGradient(Vol, Lp);
 						const float3 NWorld = normalize(RopeQuatRotate(RotE, NLocal)); // 끝 sub-포즈 기준 월드 법선
 						const float  Pen = NodeR - Dist;
 						// 끝 sub-포즈 기준 월드 접촉점(노드 배치). World = Rot*(Scale*Local) + Trans.
@@ -607,14 +654,11 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 							for (int scap = 0; scap < P.NumCapsules; ++scap)
 							{
 								const FRopeCapsule Cap = Capsules[P.CapsuleOffset + scap];
-								const float3 Closest = RopeClosestPointOnSegment(Mid, Cap.A.xyz, Cap.B.xyz);
-								const float3 ToN  = Mid - Closest;
-								const float  DistC = length(ToN);
-								const float  MinDist = Cap.B.w + P.CollisionRadius;
-								if (DistC < MinDist)
+								float3 Nrm; float PenC; float TSegC; float3 ClosestC;
+								if (RopeQueryCapsulePoint(Cap.A.xyz, Cap.B.xyz, Cap.B.w, Mid, P.CollisionRadius,
+									Nrm, PenC, TSegC, ClosestC))
 								{
-									const float3 Nrm = (DistC > 1e-4f) ? (ToN / DistC) : float3(0.0f, 0.0f, 1.0f);
-									const float  DL = (MinDist - DistC) / WEff;
+									const float DL = PenC / WEff;
 									// 속도 중립 보정: 현(chord)은 곡면 위 rest에서도 항상 침투해 매 substep 보정이
 									// 발생한다 → gPos만 밀면 그만큼 바깥 속도가 주입돼 정지 콜라이더 위에서도 노드가
 									// 튄다. gPrev도 같이 옮겨 위치만 고치고 속도는 보존(2색 처리라 race 없음).
@@ -627,22 +671,13 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 								}
 							}
 
-							// SDF (M3)
+							// SDF (M3) — 현재 포즈 점질의(공용 월드 헬퍼).
 							for (int ssdf = 0; ssdf < P.NumSDFColliders; ++ssdf)
 							{
 								const FRopeSDFCollider Col = SDFColliders[P.SDFColliderOffset + ssdf];
 								const FRopeSDFVolume   Vol = SDFVolumes[Col.VolumeIndex];
-								const float3 Scl = Col.Scale.xyz;
-								const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
-								// 월드 Mid → collider 로컬(현재 포즈). InvTransform = qInv*(P-T)/Scale.
-								const float3 Lp = RopeQuatRotate(float4(-Col.Rotation.xyz, Col.Rotation.w), Mid - Col.Translation.xyz) * InvScale;
-								const float3 Mn = Vol.LocalMin.xyz - P.CollisionRadius;
-								const float3 Mx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + P.CollisionRadius;
-								if (any(Lp < Mn) || any(Lp > Mx)) { continue; }
-								const float DistS = RopeSDFTrilinear(Vol, Lp);
-								if (DistS >= P.CollisionRadius) { continue; }
-								const float3 NLocal = RopeSDFGradient(Vol, Lp);
-								const float3 NWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal));
+								float3 NWorld; float DistS; float3 Lp;
+								if (!RopeQuerySDFWorld(Col, Vol, Mid, P.CollisionRadius, NWorld, DistS, Lp)) { continue; }
 								const float  DL = (P.CollisionRadius - DistS) / WEff;
 								// 속도 중립 보정(위 capsule 세그먼트와 동일 이유 — gPrev 동반 이동으로 주입 차단).
 								const float3 D0 = NWorld * ((1.0f - T) * SW0 * DL);
@@ -735,27 +770,20 @@ FRopeGPUContact RopeDetectSweep(float3 A, float3 B, int SourceFlag)
 		for (int c = 0; c < DetectNumCapsules; ++c)
 		{
 			const FRopeCapsule Cap = Capsules[c];
-			const float  TSeg = RopeSegmentParam(P, Cap.A.xyz, Cap.B.xyz);
-			const float3 Closest = lerp(Cap.A.xyz, Cap.B.xyz, TSeg);
-			const float3 ToNode = P - Closest;
-			const float  Dist = length(ToNode);
-			const float  MinDist = Cap.B.w + DetectContactRadius;
-			if (Dist < MinDist)
+			float3 Nrm; float Pen; float TSeg; float3 Closest;
+			if (RopeQueryCapsulePoint(Cap.A.xyz, Cap.B.xyz, Cap.B.w, P, DetectContactRadius,
+					Nrm, Pen, TSeg, Closest)
+				&& Pen > BestPen)
 			{
-				const float Pen = MinDist - Dist;
-				if (Pen > BestPen)
-				{
-					BestPen = Pen;
-					const float3 Nrm = (Dist > 1e-4f) ? (ToNode / Dist) : float3(0.0f, 0.0f, 1.0f);
-					Best.bHit = 1;
-					Best.ColliderType = 0;
-					Best.ColliderIndex = c;
-					Best.Normal = float4(Nrm, 0.0f);
-					Best.WorldPoint = float4(Closest + Nrm * Cap.B.w, Pen); // 표면점 + w=Pen
-					const float  InvDt = Cap.PrevB.w; // 0이면 정적 → SurfVel 0
-					const float3 Wprev = lerp(Cap.PrevA.xyz, Cap.PrevB.xyz, TSeg);
-					Best.SurfaceVel = float4((Closest - Wprev) * InvDt, 0.0f);
-				}
+				BestPen = Pen;
+				Best.bHit = 1;
+				Best.ColliderType = 0;
+				Best.ColliderIndex = c;
+				Best.Normal = float4(Nrm, 0.0f);
+				Best.WorldPoint = float4(Closest + Nrm * Cap.B.w, Pen); // 표면점 + w=Pen
+				const float  InvDt = Cap.PrevB.w; // 0이면 정적 → SurfVel 0
+				const float3 Wprev = lerp(Cap.PrevA.xyz, Cap.PrevB.xyz, TSeg);
+				Best.SurfaceVel = float4((Closest - Wprev) * InvDt, 0.0f);
 			}
 		}
 
@@ -764,33 +792,23 @@ FRopeGPUContact RopeDetectSweep(float3 A, float3 B, int SourceFlag)
 		{
 			const FRopeSDFCollider Col = SDFColliders[sc];
 			const FRopeSDFVolume   Vol = SDFVolumes[Col.VolumeIndex];
-			const float3 Scl = Col.Scale.xyz;
-			const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
-			const float3 Lp = RopeQuatRotate(float4(-Col.Rotation.xyz, Col.Rotation.w), P - Col.Translation.xyz) * InvScale;
-			const float3 Mn = Vol.LocalMin.xyz - DetectContactRadius;
-			const float3 Mx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + DetectContactRadius;
-			if (any(Lp < Mn) || any(Lp > Mx))
+			float3 NWorld; float Dist; float3 Lp;
+			if (!RopeQuerySDFWorld(Col, Vol, P, DetectContactRadius, NWorld, Dist, Lp))
 			{
 				continue;
 			}
-			const float Dist = RopeSDFTrilinear(Vol, Lp);
-			if (Dist < DetectContactRadius)
+			const float Pen = DetectContactRadius - Dist;
+			if (Pen > BestPen)
 			{
-				const float Pen = DetectContactRadius - Dist;
-				if (Pen > BestPen)
-				{
-					BestPen = Pen;
-					const float3 NLocal = RopeSDFGradient(Vol, Lp);
-					const float3 NWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal));
-					Best.bHit = 1;
-					Best.ColliderType = 1;
-					Best.ColliderIndex = sc;
-					Best.Normal = float4(NWorld, 0.0f);
-					Best.WorldPoint = float4(P - NWorld * Dist, Pen); // 표면점 + w=Pen
-					const float  InvDt = Col.PrevTranslation.w;
-					const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Scl) + Col.PrevTranslation.xyz;
-					Best.SurfaceVel = float4((P - Wprev) * InvDt, 0.0f);
-				}
+				BestPen = Pen;
+				Best.bHit = 1;
+				Best.ColliderType = 1;
+				Best.ColliderIndex = sc;
+				Best.Normal = float4(NWorld, 0.0f);
+				Best.WorldPoint = float4(P - NWorld * Dist, Pen); // 표면점 + w=Pen
+				const float  InvDt = Col.PrevTranslation.w;
+				const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Col.Scale.xyz) + Col.PrevTranslation.xyz;
+				Best.SurfaceVel = float4((P - Wprev) * InvDt, 0.0f);
 			}
 		}
 	}
