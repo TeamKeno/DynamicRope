@@ -334,6 +334,10 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	// collider 스냅샷은 RopeSimSubsystem이 Tick의 collider 단계에서 중앙 수집해 FrameColliders에 채워둔다
 	// (Prepare 이전). 여기서 로프마다 provider를 탐색/gather하지 않는다.
 
+	// 되감기(reel): 솔브 전에 이번 프레임 길이 변화를 반영한다(세그먼트 rest 길이 균일 변경 —
+	// 재시드 없이 CPU/GPU 동일 적용). Wrapped에서는 가용 로프 길이가 줄어 테더/장력으로 전파된다.
+	UpdateReel(DeltaTime);
+
 	bSolveThisFrame = false;
 
 	switch (Phase)
@@ -1485,6 +1489,45 @@ void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 void URopeComponent::SetActivePull(float Force)
 {
 	ActivePullForce = FMath::Max(0.0f, Force);
+}
+
+void URopeComponent::SetRopeLength(float NewLength)
+{
+	if (Sim.Num() < 2)
+	{
+		return;
+	}
+	// 상한 = 초기(디자이너) 길이 — 풀기는 감았던 만큼만 되돌린다. 하한 = MinRopeLength.
+	const float MaxLen = FMath::Max(RopeLength, MinRopeLength);
+	const float Clamped = FMath::Clamp(NewLength, FMath::Min(MinRopeLength, MaxLen), MaxLen);
+	if (FMath::IsNearlyEqual(Clamped, Sim.RopeLength))
+	{
+		return;
+	}
+	Sim.RopeLength = Clamped;
+	Sim.SegmentLength = Clamped / static_cast<float>(Sim.Num() - 1);
+	// 길이 의존 머티리얼 파라미터(꼬임 밀도) 갱신 — 감아도 꼬임 간격이 일정하게 유지된다.
+	UpdateRopeMaterialDynamicParams();
+}
+
+void URopeComponent::SetReelRate(float CmPerSecond)
+{
+	ReelRate = CmPerSecond;
+}
+
+void URopeComponent::UpdateReel(float DeltaTime)
+{
+	if (FMath::IsNearlyZero(ReelRate))
+	{
+		return;
+	}
+	// Contacting/Wrapping/Releasing은 보류: wrapping 경로 생성/커밋이 SegmentLength 기반 거리
+	// (RopeDistance = idx × SegmentLength)를 쓰는 중이라 밑에서 눈금을 바꾸면 경로가 뒤틀린다.
+	if (Phase != ERopePhase::Free && Phase != ERopePhase::Flight && Phase != ERopePhase::Wrapped)
+	{
+		return;
+	}
+	SetRopeLength(Sim.RopeLength - ReelRate * DeltaTime);
 }
 
 void URopeComponent::UpdateTether(float DeltaTime)

@@ -210,6 +210,18 @@ void URopeWielderComponent::BindInput()
 		EIC->BindAction(PullAction, ETriggerEvent::Completed, this, &URopeWielderComponent::OnPullInputCompleted);
 		EIC->BindAction(PullAction, ETriggerEvent::Canceled,  this, &URopeWielderComponent::OnPullInputCompleted);
 	}
+	if (ReelInAction)
+	{
+		EIC->BindAction(ReelInAction, ETriggerEvent::Started,   this, &URopeWielderComponent::OnReelInStarted);
+		EIC->BindAction(ReelInAction, ETriggerEvent::Completed, this, &URopeWielderComponent::OnReelCompleted);
+		EIC->BindAction(ReelInAction, ETriggerEvent::Canceled,  this, &URopeWielderComponent::OnReelCompleted);
+	}
+	if (ReelOutAction)
+	{
+		EIC->BindAction(ReelOutAction, ETriggerEvent::Started,   this, &URopeWielderComponent::OnReelOutStarted);
+		EIC->BindAction(ReelOutAction, ETriggerEvent::Completed, this, &URopeWielderComponent::OnReelCompleted);
+		EIC->BindAction(ReelOutAction, ETriggerEvent::Canceled,  this, &URopeWielderComponent::OnReelCompleted);
+	}
 	bInputBound = true;
 }
 
@@ -253,6 +265,45 @@ void URopeWielderComponent::Cut()
 	{
 		Rope->CutRope();
 	}
+}
+
+void URopeWielderComponent::StartReelIn()
+{
+	if (Rope)
+	{
+		Rope->SetReelRate(ReelSpeed);
+	}
+}
+
+void URopeWielderComponent::StartReelOut()
+{
+	if (Rope)
+	{
+		Rope->SetReelRate(-ReelSpeed);
+	}
+}
+
+void URopeWielderComponent::StopReel()
+{
+	if (Rope)
+	{
+		Rope->SetReelRate(0.0f);
+	}
+}
+
+void URopeWielderComponent::OnReelInStarted()
+{
+	StartReelIn();
+}
+
+void URopeWielderComponent::OnReelOutStarted()
+{
+	StartReelOut();
+}
+
+void URopeWielderComponent::OnReelCompleted()
+{
+	StopReel();
 }
 
 void URopeWielderComponent::OnPullInputStarted()

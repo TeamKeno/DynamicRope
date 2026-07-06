@@ -173,6 +173,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input", meta = (ClampMin = "0.0"))
 	float PullForce = 100000.0f;
 
+	/** 되감기 액션(홀드). 누르는 동안 ReelSpeed로 로프를 감고(짧아짐) 떼면 멈춘다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
+	TObjectPtr<UInputAction> ReelInAction = nullptr;
+
+	/** 풀기 액션(홀드). 누르는 동안 ReelSpeed로 로프를 풀고(초기 길이까지) 떼면 멈춘다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
+	TObjectPtr<UInputAction> ReelOutAction = nullptr;
+
+	/** 되감기/풀기 속도(cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input", meta = (ClampMin = "0.0"))
+	float ReelSpeed = 150.0f;
+
 	//~ Animation(선택) ----------------------------------------------------
 	/**
 	 * 설정하면 Throw()가 즉시 던지지 않고 이 몽타주를 재생한다. 실제 로프 던지기는 몽타주 안에 배치한
@@ -225,6 +237,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Cut();
 
+	/** 되감기 시작(로프가 ReelSpeed로 짧아짐). 입력 홀드/게임플레이용. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void StartReelIn();
+
+	/** 풀기 시작(로프가 ReelSpeed로 초기 길이까지 길어짐). */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void StartReelOut();
+
+	/** 되감기/풀기 정지. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void StopReel();
+
 	/** wrap/contact 중이면 Release, 아니면 Throw. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ToggleThrow();
@@ -258,6 +282,9 @@ private:
 	void OnReleaseInput();
 	void OnPullInputStarted();
 	void OnPullInputCompleted();
+	void OnReelInStarted();
+	void OnReelOutStarted();
+	void OnReelCompleted();
 
 	bool bInputBound = false;
 	float PreviewUpdateCooldown = 0.0f;

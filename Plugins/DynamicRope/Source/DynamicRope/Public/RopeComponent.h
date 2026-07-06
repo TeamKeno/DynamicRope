@@ -50,6 +50,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "1.0", Units = "cm"))
 	float RopeLength = 200.0f;
 
+	/** 되감기(reel-in)로 줄일 수 있는 최소 길이(cm). RopeLength(초기)가 상한이다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "10.0", Units = "cm"))
+	float MinRopeLength = 100.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	FRopeSolverConfig SolverConfig;
 
@@ -183,6 +187,27 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void SetActivePull(float Force);
 
+	/** 현재(런타임) 로프 길이(cm). 되감기/풀기로 변한다 — 초기값/상한은 RopeLength. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	float GetCurrentRopeLength() const { return Sim.RopeLength; }
+
+	/**
+	 * 로프 길이를 직접 설정(되감기/풀기의 즉시형). [MinRopeLength, RopeLength(초기)]로 클램프.
+	 * 노드 수는 유지되고 세그먼트 rest 길이가 균일하게 변한다 — 재시드 없이 솔버(CPU/GPU 동일)에
+	 * 다음 프레임부터 반영된다. Wrapped 중 줄이면 가용 로프 길이가 줄어 테더가 대상을 끌어오고,
+	 * 테더가 없으면 장력이 오른다(TensionRelease와 조합 가능).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void SetRopeLength(float NewLength);
+
+	/**
+	 * 되감기 속도 설정(cm/s). 양수 = 감기(짧아짐), 음수 = 풀기(길어짐, 초기 길이까지), 0 = 정지.
+	 * Free/Flight/Wrapped에서 매 프레임 적용된다(Contacting/Wrapping/Releasing은 일시 보류 —
+	 * 경로 생성이 SegmentLength에 의존). 입력 홀드 용도(URopeWielderComponent의 ReelIn/Out 액션).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void SetReelRate(float CmPerSecond);
+
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
@@ -283,6 +308,12 @@ private:
 
 	// 능동 Pull의 현재 힘(SetActivePull이 설정, 0=꺼짐). Wrapped + 팽팽할 때만 인가된다.
 	float ActivePullForce = 0.0f;
+
+	// 되감기 속도(cm/s, +감기/-풀기, 0=정지). SetReelRate가 설정, UpdateReel이 프레임마다 적용.
+	float ReelRate = 0.0f;
+
+	// 되감기 프레임 적용(Prepare 초입): 허용 페이즈에서 ReelRate × dt만큼 길이를 조정한다.
+	void UpdateReel(float DeltaTime);
 
 	// 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용.
 	float LastTetherOvershoot = 0.0f;
