@@ -652,6 +652,8 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		FRopeGPUCapsule Cap;
 		if (Collider->GetGPUCapsule(Cap.A, Cap.B, Cap.Radius))
 		{
+			// 프레임 모션(prev 끝점 + InvDt): 표면 속도 드래그/상대 운동 CCD. 정적이면 기본값(InvDt 0) 유지.
+			Collider->GetGPUCapsuleMotion(Cap.PrevA, Cap.PrevB, Cap.InvDeltaTime);
 			Step.Capsules.Add(Cap);
 			if (bDetectThisRope)
 			{

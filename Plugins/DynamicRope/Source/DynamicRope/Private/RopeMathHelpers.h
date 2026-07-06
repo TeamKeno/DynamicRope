@@ -17,6 +17,14 @@ namespace RopeMath
 		return T * T * (3.0f - 2.0f * T);
 	}
 
+	/** 점 P의 세그먼트(SegA-SegB) 위 최근접 파라미터 t(0..1 clamp). 캡슐 접촉 재질점 식별 등에 쓴다. */
+	inline float ClosestSegmentParam(const FVector& P, const FVector& SegA, const FVector& SegB)
+	{
+		const FVector Seg = SegB - SegA;
+		const float SegSq = static_cast<float>(Seg.SizeSquared());
+		return (SegSq > KINDA_SMALL_NUMBER) ? FMath::Clamp(static_cast<float>((P - SegA) | Seg) / SegSq, 0.0f, 1.0f) : 0.0f;
+	}
+
 	/** normal에 수직인 임의의 안정적인 tangent(퇴화 케이스 fallback 내장). */
 	inline FVector AnyTangentFromNormal(const FVector& Normal)
 	{

@@ -295,6 +295,8 @@ void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConf
 		SQ.NodeRadius = Radius;
 		SQ.SweepStep  = SweepStep;
 		SQ.MaxSamples = MaxSweepSamples;
+		SQ.SubAlpha0  = SubAlpha0; // 트랜스폼-프리 collider(캡슐)가 자체 prev 상태를 보간하는 데 쓴다.
+		SQ.SubAlpha1  = SubAlpha1;
 		FTransform PrevX, CurrX;
 		if (Collider->GetFrameMotion(PrevX, CurrX) && !PrevX.Equals(CurrX))
 		{

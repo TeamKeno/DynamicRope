@@ -42,11 +42,15 @@ struct FRopeGPUParams
 	float4 PinTarget; // xyz 사용
 };
 
-// GPU 충돌(M2)용 해석적 capsule. xyz=세그먼트 끝점, B.w=반지름.
+// GPU 충돌(M2)용 해석적 capsule. xyz=세그먼트 끝점, B.w=반지름, PrevB.w=InvDeltaTime(0이면 정적).
+// 캡슐은 리지드 트랜스폼이 없어(두 관절점이 따로 움직임) SDF의 prev quat/trans 대신 prev 끝점을 직접
+// 싣는다. 정적이면 패킹(C++)이 PrevA/PrevB=A/B로 채우므로 커널은 유효성 분기 없이 항상 lerp한다.
 struct FRopeCapsule
 {
 	float4 A;
-	float4 B; // w = Radius
+	float4 B;     // w = Radius
+	float4 PrevA; // 이전 프레임 끝점(표면 속도 드래그/substep 상대 운동 CCD)
+	float4 PrevB; // w = InvDeltaTime
 };
 
 // GPU 충돌(M3)용 SDF 볼륨 헤더. distance는 SDFDistances[DistOffset..]에 행 우선 저장.
@@ -170,6 +174,13 @@ float3 RopeClosestPointOnSegment(float3 P, float3 A, float3 B)
 	const float Denom = max(dot(AB, AB), 1e-8f);
 	const float T = saturate(dot(P - A, AB) / Denom);
 	return A + T * AB;
+}
+
+// 점 P의 세그먼트 A-B 위 최근접 파라미터 t(0..1). 캡슐 접촉 재질점 식별(prev 끝점 보간)용.
+float RopeSegmentParam(float3 P, float3 A, float3 B)
+{
+	const float3 AB = B - A;
+	return saturate(dot(P - A, AB) / max(dot(AB, AB), 1e-8f));
 }
 
 groupshared float3 gPos[ROPE_MAX_NODES];
@@ -326,25 +337,38 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		// --- Collision(M2): 각 collision pass 끝(아래 friction 포함). capsule push-out + friction.
 		// CPU SolveCollisions 미러: A=substep 시작(gPrev), 각 capsule마다 A->현재 위치를 swept 샘플,
 		// 첫 접촉에서 표면 밖으로 밀고 접선 속도를 friction만큼 깎는다. 노드별 독립이라 그룹 동기는 불필요.
+		// 움직이는 캡슐(prev 끝점 ≠ 현재): 끝점을 substep sub-포즈로 보간해 노드+캡슐 상대 운동을 함께
+		// 스윕하고(SDF의 로컬 프레임 트릭 대응), 재질점(tSeg) 표면 속도로 상대 법선/접선 응답을 만든다.
 		if (bActiveNode && gInvMass[i] > 0.0f && P.NumCapsules > 0)
 		{
 			const float3 SegA = gPrev[i];
 			const float  Friction = clamp(P.Friction, 0.0f, 1.0f);
 			const float  SweepStep = max(P.SweepStep, 0.1f);
 			const int    MaxSamples = max(P.MaxSweepSamples, 1);
+			const float  CA0 = (float)s / (float)P.NumSub;       // 이 substep의 collider 모션 시작 비율
+			const float  CA1 = (float)(s + 1) / (float)P.NumSub; // 끝 비율
 
 			for (int c = 0; c < P.NumCapsules; ++c)
 			{
 				const FRopeCapsule Cap = Capsules[P.CapsuleOffset + c];
+				// substep sub-포즈 끝점(prev->curr 선형 보간). 정지 캡슐은 prev==curr(패킹 보장) → 기존과 동일.
+				const float3 CapAS = lerp(Cap.PrevA.xyz, Cap.A.xyz, CA0);
+				const float3 CapBS = lerp(Cap.PrevB.xyz, Cap.B.xyz, CA0);
+				const float3 CapAE = lerp(Cap.PrevA.xyz, Cap.A.xyz, CA1);
+				const float3 CapBE = lerp(Cap.PrevB.xyz, Cap.B.xyz, CA1);
 				const float3 SegB = gPos[i]; // 앞선 capsule이 밀었을 수 있음
-				const float  L = distance(SegA, SegB);
+				// 상대 운동 반영 샘플 수: 노드 이동 + 캡슐 끝점 이동 최대치(과대추정은 안전 — MaxSamples 상한).
+				const float  L = distance(SegA, SegB) + max(distance(CapAS, CapAE), distance(CapBS, CapBE));
 				const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
 
 				for (int k = 0; k < NumSamples; ++k)
 				{
 					const float  T = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
 					const float3 Pt = lerp(SegA, SegB, T);
-					const float3 Closest = RopeClosestPointOnSegment(Pt, Cap.A.xyz, Cap.B.xyz);
+					const float3 CapAT = lerp(CapAS, CapAE, T);
+					const float3 CapBT = lerp(CapBS, CapBE, T);
+					const float  TSeg = RopeSegmentParam(Pt, CapAT, CapBT);
+					const float3 Closest = lerp(CapAT, CapBT, TSeg);
 					const float3 ToNode = Pt - Closest;
 					const float  Dist = length(ToNode);
 					const float  MinDist = Cap.B.w + P.CollisionRadius; // capsule 반지름 + 노드 두께
@@ -352,19 +376,30 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 					{
 						const float3 Normal = (Dist > 1e-4f) ? (ToNode / Dist) : float3(0.0f, 0.0f, 1.0f);
 						const float  Pen = MinDist - Dist;
-						gPos[i] = Pt + Normal * Pen;
+						// 접촉 재질점(TSeg)을 substep 끝 포즈로 이월 — 노드를 표면과 함께 남은 모션만큼 옮겨
+						// 배치한다(SDF가 로컬 접촉점을 끝 포즈로 재환산하는 것의 대응). 정지 캡슐이면 이월량 0.
+						const float3 ClosestE = lerp(CapAE, CapBE, TSeg);
+						gPos[i] = Pt + (ClosestE - Closest) + Normal * Pen;
+
+						// 재질점의 이번 substep 표면 변위(프레임 전체 prev->curr 변위 * InvDt * FixedDt).
+						// 정지 캡슐은 0. 아래 법선(비탄성)/접선(마찰) 응답이 공용으로 쓴다.
+						const float  InvDt = Cap.PrevB.w;
+						const float3 SurfDisp = (lerp(Cap.A.xyz, Cap.B.xyz, TSeg)
+							- lerp(Cap.PrevA.xyz, Cap.PrevB.xyz, TSeg)) * (InvDt * P.FixedDt);
+
 						// 비탄성 접촉: push-out이 gPrev 대비 +N 변위를 만들면 그대로 다음 substep 속도가 된다
 						// (깊은 접촉은 첫 샘플 Pt==gPrev라 매 substep +N*Pen 주입) → 정지 캡슐 위에서도 노드가
-						// 튄다. 바깥 법선 속도만 제거(v1 캡슐은 정적 — 표면 법선 운동 없음). 접선은 아래 마찰 담당.
-						const float VnOut = dot(gPos[i] - gPrev[i], Normal);
+						// 튄다. *상대* 바깥 법선 속도만 제거 — 표면 자신의 법선 운동(본이 미는 것)은 보존.
+						const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, Normal);
 						if (VnOut > 0.0f)
 						{
 							gPrev[i] += Normal * VnOut;
 						}
 						if (Friction > 0.0f)
 						{
-							const float3 Delta = gPos[i] - gPrev[i];
-							const float3 Tangent = Delta - dot(Delta, Normal) * Normal;
+							// 상대 접선 감쇠(움직이는 표면이 로프를 끌어 좌우로 쓸어냄). 정지 캡슐이면 기존과 동일.
+							const float3 RelDelta = (gPos[i] - gPrev[i]) - SurfDisp;
+							const float3 Tangent = RelDelta - dot(RelDelta, Normal) * Normal;
 							gPrev[i] += Tangent * Friction;
 						}
 						break; // 이 capsule의 첫 접촉에서 종료
@@ -649,11 +684,12 @@ FRopeGPUContact RopeDetectSweep(float3 A, float3 B, int SourceFlag)
 		const float Alpha = (float)s / (float)SampleCount;
 		const float3 P = lerp(A, B, Alpha);
 
-		// --- capsule (CPU FCapsuleCollider::Query 미러; 정적 → SurfaceVel=0)
+		// --- capsule (CPU FCapsuleCollider::Query 미러; SurfVel = 재질점(tSeg)의 (현재-이전 끝점 보간)*InvDt)
 		for (int c = 0; c < DetectNumCapsules; ++c)
 		{
 			const FRopeCapsule Cap = Capsules[c];
-			const float3 Closest = RopeClosestPointOnSegment(P, Cap.A.xyz, Cap.B.xyz);
+			const float  TSeg = RopeSegmentParam(P, Cap.A.xyz, Cap.B.xyz);
+			const float3 Closest = lerp(Cap.A.xyz, Cap.B.xyz, TSeg);
 			const float3 ToNode = P - Closest;
 			const float  Dist = length(ToNode);
 			const float  MinDist = Cap.B.w + DetectContactRadius;
@@ -669,7 +705,9 @@ FRopeGPUContact RopeDetectSweep(float3 A, float3 B, int SourceFlag)
 					Best.ColliderIndex = c;
 					Best.Normal = float4(Nrm, 0.0f);
 					Best.WorldPoint = float4(Closest + Nrm * Cap.B.w, Pen); // 표면점 + w=Pen
-					Best.SurfaceVel = float4(0, 0, 0, 0);
+					const float  InvDt = Cap.PrevB.w; // 0이면 정적 → SurfVel 0
+					const float3 Wprev = lerp(Cap.PrevA.xyz, Cap.PrevB.xyz, TSeg);
+					Best.SurfaceVel = float4((Closest - Wprev) * InvDt, 0.0f);
 				}
 			}
 		}

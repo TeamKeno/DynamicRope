@@ -19,6 +19,12 @@ struct FRopeGPUCapsule
 	FVector A = FVector::ZeroVector;
 	FVector B = FVector::ZeroVector;
 	float   Radius = 0.0f;
+
+	// 이전 프레임 끝점 + 1/프레임dt(표면 속도 드래그/substep 상대 운동 CCD용 — SDF의 PrevBoneToWorld 대응).
+	// InvDeltaTime=0(기본)이면 정적 — 패킹이 prev=현재로 폴백하므로 안 채워도 기존 동작과 동일.
+	FVector PrevA = FVector::ZeroVector;
+	FVector PrevB = FVector::ZeroVector;
+	float   InvDeltaTime = 0.0f;
 };
 
 /**

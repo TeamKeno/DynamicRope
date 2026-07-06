@@ -53,11 +53,13 @@ struct FRopeGPUParamsGPU
 };
 static_assert(sizeof(FRopeGPUParamsGPU) % 16 == 0, "FRopeGPUParamsGPU must be 16-byte aligned to match HLSL structured buffer.");
 
-// HLSL FRopeCapsule와 1:1 미러. xyz=세그먼트 끝점, B.w=반지름.
+// HLSL FRopeCapsule와 1:1 미러. xyz=세그먼트 끝점, B.w=반지름, PrevB.w=InvDeltaTime(0이면 정적).
 struct FRopeCapsuleGPU
 {
 	FVector4f A;
-	FVector4f B; // w = Radius
+	FVector4f B;     // w = Radius
+	FVector4f PrevA; // 이전 프레임 끝점(표면 속도 드래그/substep 상대 운동). 정적이면 패킹이 A/B로 채운다.
+	FVector4f PrevB; // w = InvDeltaTime
 };
 static_assert(sizeof(FRopeCapsuleGPU) % 16 == 0, "FRopeCapsuleGPU must be 16-byte aligned to match HLSL structured buffer.");
 
@@ -664,6 +666,12 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 					FRopeCapsuleGPU G;
 					G.A = FVector4f((float)Cap.A.X, (float)Cap.A.Y, (float)Cap.A.Z, 0.0f);
 					G.B = FVector4f((float)Cap.B.X, (float)Cap.B.Y, (float)Cap.B.Z, Cap.Radius);
+					// 정적(InvDt 0)이면 prev=현재 — 커널이 prev 유효성 분기 없이 항상 lerp/변위 계산 가능.
+					const bool bMoving = Cap.InvDeltaTime > 0.0f;
+					const FVector& PA = bMoving ? Cap.PrevA : Cap.A;
+					const FVector& PB = bMoving ? Cap.PrevB : Cap.B;
+					G.PrevA = FVector4f((float)PA.X, (float)PA.Y, (float)PA.Z, 0.0f);
+					G.PrevB = FVector4f((float)PB.X, (float)PB.Y, (float)PB.Z, Cap.InvDeltaTime);
 					CapsFlat.Add(G);
 				}
 
