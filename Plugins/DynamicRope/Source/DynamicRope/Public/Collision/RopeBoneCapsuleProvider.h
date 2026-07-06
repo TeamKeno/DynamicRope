@@ -32,10 +32,10 @@ public:
 
 	/**
 	 * capsule로 노출할 본들. 각 capsule은 해당 본에서 그 parent까지를 잇는다(반지름 = CapsuleRadius).
-	 * 비워두면 자동 모드: 메시의 Physics Asset 바디(capsule/sphere 셰이프, 본별 실제 반지름/길이)로
-	 * 캡슐을 만든다. Physics Asset이 없으면 레퍼런스 스켈레톤의 모든 본-부모 세그먼트로 폴백한다
-	 * (AutoMinBoneLength 미만 제외 — 단 IK/트위스트 본의 가짜 세그먼트가 섞일 수 있으니 캐릭터는
-	 * Physics Asset을 두는 쪽을 권장).
+	 * 비워두면 자동 모드: 메시의 Physics Asset 바디(capsule/sphere/box 셰이프, 본별 실제 치수 —
+	 * box는 장축 캡슐 근사)로 캡슐을 만든다. Physics Asset이 없거나 쓸 수 있는 셰이프가 하나도
+	 * 없으면(convex 전용 등) 레퍼런스 스켈레톤의 모든 본-부모 세그먼트로 폴백한다(AutoMinBoneLength
+	 * 미만 제외 — 단 IK/트위스트 본의 가짜 세그먼트가 섞일 수 있으니 캐릭터는 Physics Asset 권장).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	TArray<FName> Bones;

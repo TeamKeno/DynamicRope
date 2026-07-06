@@ -117,9 +117,11 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 		return;
 	}
 
-	// 2) 자동 — Physics Asset: 바디 셰이프(capsule/sphere)를 그대로 캡슐로 쓴다(구 = A==B 축퇴 캡슐).
-	// 본별 실제 반지름/길이를 얻고, 스킨이 없는 IK/트위스트 본의 가짜 세그먼트도 자연히 배제된다.
-	// (box/convex 셰이프는 건너뛴다 — 캐릭터 바디는 대부분 sphyl이라 실용상 충분.)
+	// 2) 자동 — Physics Asset: 바디 셰이프를 캡슐로 쓴다. sphyl은 그대로, sphere는 A==B 축퇴 캡슐,
+	// box는 장축 정렬 캡슐 근사(축 = 최장변, 반지름 = 나머지 두 반폭의 최대 — 단면 모서리만 살짝
+	// 초과 커버). 본별 실제 치수를 얻고, 스킨 없는 IK/트위스트 본의 가짜 세그먼트도 자연히 배제된다.
+	// convex 등 나머지 셰이프는 건너뛴다 — 그래서 셰이프를 하나도 못 만들면 아래 스켈레톤 폴백으로
+	// 진행한다(convex 전용 PA에서 충돌이 통째로 사라지는 것 방지).
 	if (const UPhysicsAsset* PhysAsset = Mesh->GetPhysicsAsset())
 	{
 		for (const TObjectPtr<USkeletalBodySetup>& Setup : PhysAsset->SkeletalBodySetups)
@@ -152,10 +154,34 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 				const float ScaledRadius = Sphere.Radius * static_cast<float>(Scale3D.GetAbsMin());
 				Capsules.Add(FCapsuleCollider(Center, Center, ScaledRadius, BoneName, Mesh));
 			}
+			for (const FKBoxElem& Box : Setup->AggGeom.BoxElems)
+			{
+				// X/Y/Z는 전체 길이. 최장변을 캡슐 축으로, 나머지 두 반폭의 최대(= 세 반폭의 중간값)를
+				// 반지름으로 — 단면 직사각형의 긴 변까지 덮는다(모서리만 살짝 초과). 세그먼트 반길이 =
+				// 최장 반폭 - 반지름(반구가 상자 끝을 안 넘게, 음수면 0 = 구).
+				const double UniformScale = Scale3D.GetAbsMin();
+				const double Hx = Box.X * 0.5 * UniformScale;
+				const double Hy = Box.Y * 0.5 * UniformScale;
+				const double Hz = Box.Z * 0.5 * UniformScale;
+				const double LongHalf = FMath::Max3(Hx, Hy, Hz);
+				const double MidHalf = Hx + Hy + Hz - LongHalf - FMath::Min3(Hx, Hy, Hz);
+				const EAxis::Type LongAxis = (Hx >= Hy && Hx >= Hz) ? EAxis::X : (Hy >= Hz) ? EAxis::Y : EAxis::Z;
+				const float SegHalf = static_cast<float>(FMath::Max(LongHalf - MidHalf, 0.0));
+				const FTransform ElemTM = Box.GetTransform() * BoneTM;
+				const FVector Axis = ElemTM.GetUnitAxis(LongAxis);
+				const FVector Center = ElemTM.GetLocation();
+				Capsules.Add(FCapsuleCollider(Center + Axis * SegHalf, Center - Axis * SegHalf,
+					static_cast<float>(MidHalf), BoneName, Mesh));
+			}
 		}
-		UE_LOG(LogRopeCollision, VeryVerbose, TEXT("CapsuleProvider on %s: built %d capsule(s) from physics asset %s."),
-			*GetNameSafe(GetOwner()), Capsules.Num(), *GetNameSafe(PhysAsset));
-		return;
+		if (Capsules.Num() > 0)
+		{
+			UE_LOG(LogRopeCollision, VeryVerbose, TEXT("CapsuleProvider on %s: built %d capsule(s) from physics asset %s."),
+				*GetNameSafe(GetOwner()), Capsules.Num(), *GetNameSafe(PhysAsset));
+			return;
+		}
+		UE_LOG(LogRopeCollision, Verbose, TEXT("CapsuleProvider on %s: physics asset %s has no usable shapes — falling back to skeleton."),
+			*GetNameSafe(GetOwner()), *GetNameSafe(PhysAsset));
 	}
 
 	// 3) 자동 — 스켈레톤 폴백(Physics Asset 없음): 모든 본-부모 세그먼트(반지름 = CapsuleRadius).
