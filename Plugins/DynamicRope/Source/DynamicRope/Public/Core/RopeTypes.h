@@ -119,6 +119,13 @@ struct FRopeWrapPathPoint
 	FVector SurfaceWorld = FVector::ZeroVector;
 	FVector NormalWorld = FVector::UpVector;
 	FVector TangentWorld = FVector::ForwardVector;
+
+	// 이 path point가 투영된 실제 표면 본.
+	// AnalyticHelix는 기존처럼 latch bone을 넣고, SurfaceVectorField는 projection scoring 결과를 넣는다.
+	// 이후 AppendWrappingAnchorFromPathPoint가 이 값을 기준으로 bone-local anchor를 저장한다.
+	FName Bone = NAME_None;
+	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
+
 	float DistanceFromLatch = 0.0f;
 };
 
@@ -147,6 +154,12 @@ struct FRopeWrappingState
 	FVector PathAxisOrigin = FVector::ZeroVector;
 	FVector PathAxisDirection = FVector::ForwardVector;
 	FVector PathLatchRadial = FVector::ForwardVector;
+
+	// SurfaceVectorField 적분 중 현재 surface point가 어느 본 위에 있는지 추적한다.
+	// 다음 step의 후보 본은 이 값을 중심으로 skeleton graph 근방에서 고른다.
+	FName PathCurrentBone = NAME_None;
+	TWeakObjectPtr<const USkeletalMeshComponent> PathCurrentMesh = nullptr;
+
 	float PathWindingSign = 1.0f;
 
 	float Elapsed = 0.0f;

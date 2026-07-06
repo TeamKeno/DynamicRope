@@ -275,6 +275,8 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.bPathBuildFailed = false;
 	State.PathCurrentDistance = 0.0f;
 	State.FrontDistance = 0.0f;
+	State.PathCurrentBone = StoredLatchAnchor.Bone;
+	State.PathCurrentMesh = Mesh;
 	State.FirstNode = TNumericLimits<int32>::Max();
 	State.LastNode = INDEX_NONE;
 
@@ -310,6 +312,8 @@ bool FRopeWrappingPhase::AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex,
 
 	FRopeWrapPathPoint Point;
 	Point.DistanceFromLatch = DistanceFromLatch;
+	Point.Bone = State.LatchAnchor.Bone;
+	Point.Mesh = State.LatchAnchor.Mesh;
 	if (!ComputeAnalyticHelixWrapTarget(State.LatchAnchor, DistanceFromLatch, Sim, Ctx,
 		Point.SurfaceWorld, Point.NormalWorld, Point.TangentWorld) &&
 		!ComputeSurfaceVectorFieldWrapTarget(State.LatchAnchor, DistanceFromLatch, Sim, Ctx,
@@ -383,11 +387,15 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 		State.PathNormalWorld,
 		Ctx,
 		State.PathCircumferenceDir);
+	State.PathCurrentBone = LatchAnchor.Bone;
+	State.PathCurrentMesh = Mesh;
 
 	FRopeWrapPathPoint LatchPoint;
 	LatchPoint.SurfaceWorld = State.PathSurfaceWorld;
 	LatchPoint.NormalWorld = State.PathNormalWorld;
 	LatchPoint.TangentWorld = State.PathTangentWorld;
+	LatchPoint.Bone = State.PathCurrentBone;
+	LatchPoint.Mesh = State.PathCurrentMesh;
 	LatchPoint.DistanceFromLatch = 0.0f;
 	State.Path.Add(LatchPoint);
 	State.PathCurrentDistance = 0.0f;
@@ -445,8 +453,18 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				State.PathCircumferenceDir);
 
 			State.PathSurfaceWorld += State.PathTangentWorld * StepDistance;
-			if (!ProjectWrapPointToSurface(State.LatchAnchor.Bone, Mesh, Sim, Ctx,
-				State.PathSurfaceWorld, State.PathNormalWorld))
+			const FName CurrentBone = State.PathCurrentBone.IsNone()
+				? State.LatchAnchor.Bone
+				: State.PathCurrentBone;
+			const USkeletalMeshComponent* ProjectedMesh = State.PathCurrentMesh.Get();
+			if (!ProjectedMesh)
+			{
+				ProjectedMesh = Mesh;
+			}
+			if (!ProjectWrapPointToSurfaceMultiBone(CurrentBone, Mesh, Sim, Ctx,
+				State.PathNormalWorld, State.PathTangentWorld,
+				State.PathSurfaceWorld, State.PathNormalWorld, State.PathTangentWorld,
+				State.PathCircumferenceDir, State.PathCurrentBone, ProjectedMesh))
 			{
 				State.bPathBuildFailed = true;
 				State.bPathBuildComplete = true;
@@ -460,6 +478,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 					State.Anchors.Num());
 				return false;
 			}
+			State.PathCurrentMesh = ProjectedMesh;
 
 			State.PathCurrentDistance += StepDistance;
 			--StepsRemaining;
@@ -485,6 +504,8 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 		Point.SurfaceWorld = State.PathSurfaceWorld;
 		Point.NormalWorld = State.PathNormalWorld;
 		Point.TangentWorld = State.PathTangentWorld;
+		Point.Bone = State.PathCurrentBone.IsNone() ? State.LatchAnchor.Bone : State.PathCurrentBone;
+		Point.Mesh = State.PathCurrentMesh.IsValid() ? State.PathCurrentMesh.Get() : Mesh;
 		Point.DistanceFromLatch = TargetDistance;
 		State.Path.Add(Point);
 		AppendWrappingAnchorFromPathPoint(PathIndex, Sim, Ctx);
@@ -534,12 +555,28 @@ bool FRopeWrappingPhase::AppendWrappingAnchorFromPathPoint(int32 PathIndex, cons
 	}
 
 	const FRopeWrapPathPoint& Point = State.Path[PathIndex];
-	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+
+	// MVP의 핵심: 경로점이 선택한 본을 그대로 anchor 소유 본으로 사용한다.
+	// 이전 구현은 모든 anchor를 LatchAnchor.Bone 로컬로 저장했기 때문에,
+	// path가 이웃 본 표면으로 넘어가더라도 Wrapped/Hold 단계에서는 한 본에 고정되어 보였다.
+	// Point.Bone이 비어 있는 경우는 AnalyticHelix/legacy fallback으로 보고 latch bone을 사용한다.
+	FName AnchorBone = Point.Bone.IsNone() ? LatchAnchor.Bone : Point.Bone;
+	const USkeletalMeshComponent* AnchorMesh = Point.Mesh.Get();
+	if (!AnchorMesh)
+	{
+		AnchorMesh = Mesh;
+	}
+	if (!AnchorMesh || AnchorBone.IsNone())
+	{
+		return false;
+	}
+
+	const FTransform BoneXform = AnchorMesh->GetSocketTransform(AnchorBone);
 
 	FRopeSurfaceAnchor Anchor;
 	Anchor.NodeIndex = NodeIndex;
-	Anchor.Bone = LatchAnchor.Bone;
-	Anchor.Mesh = Mesh;
+	Anchor.Bone = AnchorBone;
+	Anchor.Mesh = AnchorMesh;
 	Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Point.SurfaceWorld);
 	Anchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(Point.NormalWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 	Anchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(Point.TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
@@ -935,6 +972,190 @@ void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& Latc
 	}
 }
 
+void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USkeletalMeshComponent* Mesh,
+	TArray<FName>& OutCandidates) const
+{
+	OutCandidates.Reset();
+	if (!Mesh || CurrentBone.IsNone())
+	{
+		return;
+	}
+
+	struct FBoneQueueEntry
+	{
+		FName Bone = NAME_None;
+		int32 Depth = 0;
+	};
+
+	const int32 NumBones = Mesh->GetNumBones();
+	constexpr int32 MaxCandidateDepth = 3;
+
+	// SurfaceVectorField MVP는 "지금 붙어 있는 본 주변"으로만 전이를 허용한다.
+	// 기본 parent/child만 쓰면 thigh_twist_02_l 같은 twist bone에서 calf_l이 후보에
+	// 안 들어올 수 있으므로, skeleton graph를 짧게 BFS하여 조상/자식/근처 sibling을 함께 본다.
+	// 너무 멀리 보면 팔->몸통->반대팔 같은 bridge까지 우연히 열릴 수 있어 MVP에서는 3-depth로 제한한다.
+	TArray<FBoneQueueEntry, TInlineAllocator<16>> Queue;
+	Queue.Add({ CurrentBone, 0 });
+	OutCandidates.AddUnique(CurrentBone);
+
+	for (int32 QueueIndex = 0; QueueIndex < Queue.Num(); ++QueueIndex)
+	{
+		const FBoneQueueEntry Entry = Queue[QueueIndex];
+		if (Entry.Depth >= MaxCandidateDepth)
+		{
+			continue;
+		}
+
+		const auto AddNeighbor = [&](FName Bone)
+		{
+			if (Bone.IsNone() || OutCandidates.Contains(Bone))
+			{
+				return;
+			}
+
+			OutCandidates.Add(Bone);
+			Queue.Add({ Bone, Entry.Depth + 1 });
+		};
+
+		AddNeighbor(Mesh->GetParentBone(Entry.Bone));
+
+		for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+		{
+			const FName BoneName = Mesh->GetBoneName(BoneIndex);
+			if (!BoneName.IsNone() && Mesh->GetParentBone(BoneName) == Entry.Bone)
+			{
+				AddNeighbor(BoneName);
+			}
+		}
+	}
+}
+
+bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USkeletalMeshComponent* Mesh,
+	const FRopeSimState& Sim, const FContext& Ctx,
+	const FVector& PreviousNormalWorld, const FVector& PreviousTangentWorld,
+	FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
+	FVector& InOutCircumferenceDir, FName& InOutBone, const USkeletalMeshComponent*& OutMesh) const
+{
+	TArray<FName> CandidateBones;
+	GatherSurfaceVectorFieldBoneCandidates(CurrentBone, Mesh, CandidateBones);
+	if (CandidateBones.Num() == 0)
+	{
+		return false;
+	}
+
+	struct FScoredProjection
+	{
+		FVector SurfaceWorld = FVector::ZeroVector;
+		FVector NormalWorld = FVector::UpVector;
+		FVector TangentWorld = FVector::ForwardVector;
+		FVector CircumferenceDir = FVector::ForwardVector;
+		FName Bone = NAME_None;
+		const USkeletalMeshComponent* Mesh = nullptr;
+		float Distance = 0.0f;
+		float Score = TNumericLimits<float>::Max();
+	};
+
+	FScoredProjection BestProjection;
+	bool bFound = false;
+
+	constexpr float ProjectionDistanceWeight = 0.35f;
+	constexpr float TangentContinuityWeight = 8.0f;
+	constexpr float NormalContinuityWeight = 5.0f;
+	constexpr float CurrentBoneBonus = 0.1f;
+	constexpr float AdjacentBoneTransitionBonus = 0.75f;
+
+	// 이 함수는 SurfaceVectorField 전용 projection 선택기다.
+	// 기존 단일 본 방식은 LatchAnchor.Bone만 통과시켰지만, 여기서는 후보 본마다
+	// "예측 위치에서 가장 그럴듯한 표면점"을 평가한 뒤 path point의 Bone/Mesh로 보존한다.
+	//
+	// 점수 항목:
+	// - Projection.Distance: 예측 위치에서 표면까지 얼마나 멀리 튀었는지. 낮을수록 좋다.
+	// - TangentPenalty: 이전 tangent와 새 tangent가 얼마나 꺾였는지. 낮을수록 경로가 부드럽다.
+	// - NormalPenalty: 표면 normal이 얼마나 갑자기 바뀌는지. 낮을수록 안정적이다.
+	// - CurrentBoneBonus: 아주 작은 유지 보너스. 같은 점수라면 흔들림을 줄이되 전이를 막지는 않는다.
+	// - AdjacentBoneTransitionBonus: 후보 graph 안의 다른 본이 충분히 좋으면 넘어가도록 약한 보너스를 준다.
+	const FVector PreviousTangent = PreviousTangentWorld.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	const FVector PreviousNormal = PreviousNormalWorld.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	const float QueryRadius = FMath::Max3(
+		FMath::Max(Ctx.Config.ContactRadius, Ctx.SurfaceOffset),
+		Sim.SegmentLength,
+		Sim.SegmentLength * 3.0f);
+
+	for (const IRopeCollider* Collider : Ctx.Colliders)
+	{
+		if (!Collider)
+		{
+			continue;
+		}
+
+		const FRopeSurfaceProjection Projection = Collider->ProjectToSurface(InOutSurfaceWorld, QueryRadius);
+		if (!Projection.bHit)
+		{
+			continue;
+		}
+
+		if (!CandidateBones.Contains(Projection.Bone))
+		{
+			continue;
+		}
+
+		if (Mesh && Projection.SourceMesh && Projection.SourceMesh != Mesh)
+		{
+			continue;
+		}
+
+		FVector CandidateCircumferenceDir = InOutCircumferenceDir;
+		const FVector CandidateNormal = Projection.Normal.GetSafeNormal(KINDA_SMALL_NUMBER, PreviousNormal);
+		const FVector CandidateTangent = ComputeSurfaceVectorFieldTangent(
+			State.PathAxisOrigin,
+			State.PathAxisDirection,
+			State.PathLatchRadial,
+			State.PathWindingSign,
+			Projection.SurfacePoint,
+			CandidateNormal,
+			Ctx,
+			CandidateCircumferenceDir);
+
+		const float TangentPenalty = 1.0f - FMath::Clamp(FVector::DotProduct(CandidateTangent, PreviousTangent), -1.0f, 1.0f);
+		const float NormalPenalty = 1.0f - FMath::Clamp(FVector::DotProduct(CandidateNormal, PreviousNormal), -1.0f, 1.0f);
+		const bool bCurrentBone = Projection.Bone == CurrentBone;
+		const float StayBonus = bCurrentBone ? CurrentBoneBonus : 0.0f;
+		const float TransitionBonus = bCurrentBone ? 0.0f : AdjacentBoneTransitionBonus;
+		const float Score =
+			Projection.Distance * ProjectionDistanceWeight +
+			TangentPenalty * TangentContinuityWeight +
+			NormalPenalty * NormalContinuityWeight -
+			StayBonus -
+			TransitionBonus;
+
+		if (!bFound || Score < BestProjection.Score)
+		{
+			BestProjection.SurfaceWorld = Projection.SurfacePoint;
+			BestProjection.NormalWorld = CandidateNormal;
+			BestProjection.TangentWorld = CandidateTangent;
+			BestProjection.CircumferenceDir = CandidateCircumferenceDir;
+			BestProjection.Bone = Projection.Bone;
+			BestProjection.Mesh = Projection.SourceMesh ? Projection.SourceMesh : Mesh;
+			BestProjection.Distance = Projection.Distance;
+			BestProjection.Score = Score;
+			bFound = true;
+		}
+	}
+
+	if (!bFound)
+	{
+		return false;
+	}
+
+	InOutSurfaceWorld = BestProjection.SurfaceWorld;
+	InOutNormalWorld = BestProjection.NormalWorld;
+	InOutTangentWorld = BestProjection.TangentWorld;
+	InOutCircumferenceDir = BestProjection.CircumferenceDir;
+	InOutBone = BestProjection.Bone;
+	OutMesh = BestProjection.Mesh;
+	return true;
+}
+
 bool FRopeWrappingPhase::ProjectWrapPointToSurface(FName Bone, const USkeletalMeshComponent* Mesh,
 	const FRopeSimState& Sim, const FContext& Ctx,
 	FVector& InOutSurfaceWorld, FVector& InOutNormalWorld) const
@@ -1048,6 +1269,8 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 		Point.TangentWorld = BoneXform.TransformVectorNoScale(Anchor.LocalTangent);
 		Point.TangentWorld = (Point.TangentWorld - FVector::DotProduct(Point.TangentWorld, Point.NormalWorld) * Point.NormalWorld)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(Point.NormalWorld));
+		Point.Bone = Anchor.Bone;
+		Point.Mesh = Mesh;
 		Point.DistanceFromLatch = Anchor.RopeDistance;
 		return true;
 	};
@@ -1112,6 +1335,8 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 	OutPoint.TangentWorld = FMath::Lerp(LowerPoint.TangentWorld, UpperPoint.TangentWorld, Alpha);
 	OutPoint.TangentWorld = (OutPoint.TangentWorld - FVector::DotProduct(OutPoint.TangentWorld, OutPoint.NormalWorld) * OutPoint.NormalWorld)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.TangentWorld);
+	OutPoint.Bone = Alpha < 0.5f ? LowerPoint.Bone : UpperPoint.Bone;
+	OutPoint.Mesh = Alpha < 0.5f ? LowerPoint.Mesh : UpperPoint.Mesh;
 	OutPoint.DistanceFromLatch = SampleDistance;
 	return true;
 }

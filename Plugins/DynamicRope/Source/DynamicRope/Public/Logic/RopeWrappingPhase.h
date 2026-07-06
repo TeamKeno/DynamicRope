@@ -116,6 +116,17 @@ private:
 	void OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
 		const USkeletalMeshComponent* Mesh, FVector& InOutAxisDirection) const;
 
+	/** SurfaceVectorField MVP용 후보 본 수집. CurrentBone 주변의 짧은 skeleton graph만 허용한다. */
+	void GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USkeletalMeshComponent* Mesh,
+		TArray<FName>& OutCandidates) const;
+
+	/** 후보 본들의 표면 projection을 점수화해 path point가 소유할 Bone/Mesh까지 함께 선택한다. */
+	bool ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USkeletalMeshComponent* Mesh,
+		const FRopeSimState& Sim, const FContext& Ctx,
+		const FVector& PreviousNormalWorld, const FVector& PreviousTangentWorld,
+		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
+		FVector& InOutCircumferenceDir, FName& InOutBone, const USkeletalMeshComponent*& OutMesh) const;
+
 	bool ProjectWrapPointToSurface(FName Bone, const USkeletalMeshComponent* Mesh,
 		const FRopeSimState& Sim, const FContext& Ctx,
 		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld) const;
