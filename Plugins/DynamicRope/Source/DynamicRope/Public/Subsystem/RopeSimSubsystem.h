@@ -8,16 +8,45 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "Engine/EngineBaseTypes.h" // FTickFunction (TG_PostPhysics 틱)
 #include "RopeGPUSolver.h" // FRopeGPUSolver (DynamicRopeShaders): 비동기 GPU 솔브 인스턴스
 #include "RopeSimSubsystem.generated.h"
 
 class URopeComponent;
 class UActorComponent;
+class USkeletalMeshComponent;
 class IRopeCollider;
 class AActor;
 
+/**
+ * 서브시스템 Tick을 TG_PostPhysics에서 구동하는 틱 함수(기존 tickable 대체).
+ * tickable(TickObjects)은 엔진의 호출 위치(현재 TG_PostPhysics 뒤)에 묵시적으로 얹혀 있었다 — 명시
+ * 그룹 + 스켈레탈 메시 틱 선행조건으로 "본 트랜스폼(애니 평가) 이후 로프 시뮬" 순서를 계약으로 만든다.
+ * 같은 그룹 내 순서는 선행조건이 담당: 메시 틱 완료는 병렬 애니 완료 태스크를 DontCompleteUntil로
+ * 물고 있어(SkeletalMeshComponent), 선행조건만으로 포즈 버퍼 플립(최신 포즈)까지 보장된다.
+ */
+USTRUCT()
+struct FRopeSimTickFunction : public FTickFunction
+{
+	GENERATED_BODY()
+
+	// 대상 서브시스템(월드 수명). 틱 함수는 OnWorldBeginPlay~Deinitialize 동안만 등록된다.
+	class URopeSimSubsystem* Target = nullptr;
+
+	virtual void ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type CurrentThread,
+		const FGraphEventRef& MyCompletionGraphEvent) override;
+	virtual FString DiagnosticMessage() override;
+	virtual FName DiagnosticContext(bool bDetailed) override;
+};
+
+template <>
+struct TStructOpsTypeTraits<FRopeSimTickFunction> : public TStructOpsTypeTraitsBase2<FRopeSimTickFunction>
+{
+	enum { WithCopy = false };
+};
+
 UCLASS()
-class DYNAMICROPE_API URopeSimSubsystem : public UTickableWorldSubsystem
+class DYNAMICROPE_API URopeSimSubsystem : public UWorldSubsystem
 {
 	GENERATED_BODY()
 
@@ -47,15 +76,23 @@ public:
 	 */
 	bool SyncGpuPositionsForHandoff(URopeComponent& Rope);
 
-	//~ UTickableWorldSubsystem
-	virtual void Tick(float DeltaTime) override;
-	virtual TStatId GetStatId() const override;
+	/** 프레임 시뮬 구동 — FRopeSimTickFunction이 TG_PostPhysics에서 호출한다(테스트는 직접 호출 가능). */
+	void Tick(float DeltaTime);
+
+	//~ UWorldSubsystem
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
-	//~ 씬→솔버 등록(GDF 통합 경로에서 뷰 확장이 솔버를 찾는 용도). 씬 생성 이후/해제 시점에 등록·해제.
+	//~ 틱 함수 등록 + 씬→솔버 등록(GDF 통합 경로에서 뷰 확장이 솔버를 찾는 용도). 해제는 Deinitialize.
 	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 	virtual void Deinitialize() override;
 
 private:
+	// TG_PostPhysics 틱 함수(월드 BeginPlay~Deinitialize 동안 등록). 선행조건은 아래 SetAnimPrerequisites가 관리.
+	FRopeSimTickFunction SimTickFunction;
+
+	// 소스 컴포넌트(로프/provider) 소유 액터의 스켈레탈 메시 틱을 SimTickFunction 선행조건으로 등록/해제한다.
+	// 등록·해제 사이에 액터의 메시 구성이 바뀌어 잔여 항목이 남아도 FTickPrerequisite는 weak라 무해(스킵됨).
+	void SetAnimPrerequisites(const UActorComponent* Source, bool bAdd);
+
 	// 등록된 활성 로프(컴포넌트는 UObject → GC 추적).
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<URopeComponent>> Ropes;

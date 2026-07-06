@@ -12,6 +12,7 @@
 #include "SceneInterface.h"         // FSceneInterface (씬→솔버 등록 키)
 #include "GameFramework/Actor.h"    // AActor::GetOwner (provider 소스 필터링)
 #include "Components/ActorComponent.h"
+#include "Components/SkeletalMeshComponent.h" // 틱 선행조건(애니 평가 이후 보장)
 #include "Async/ParallelFor.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "RHI.h"        // GDynamicRHI
@@ -92,6 +93,7 @@ void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
 	if (Rope)
 	{
 		Ropes.AddUnique(Rope);
+		SetAnimPrerequisites(Rope, /*bAdd*/ true); // 손 핀(소켓 부착)이 소유 캐릭터 포즈를 따르므로.
 		UE_LOG(LogDynamicRope, Verbose, TEXT("RegisterRope: %s (%d total)"), *Rope->GetName(), Ropes.Num());
 	}
 }
@@ -101,6 +103,7 @@ void URopeSimSubsystem::UnregisterRope(URopeComponent* Rope)
 	Ropes.RemoveSingleSwap(Rope);
 	if (Rope)
 	{
+		SetAnimPrerequisites(Rope, /*bAdd*/ false);
 		// GPU 상주 버퍼/리드백 해제(렌더 스레드에서). 캐시에서도 제거.
 		const uint32 RopeId = Rope->GetUniqueID();
 		GpuSolver.ReleaseRope(RopeId);
@@ -120,6 +123,7 @@ void URopeSimSubsystem::RegisterColliderProvider(UActorComponent* Provider)
 	if (Provider)
 	{
 		ColliderProviders.AddUnique(Provider);
+		SetAnimPrerequisites(Provider, /*bAdd*/ true); // 본 콜라이더(capsule/SDF)가 소유 캐릭터 포즈를 읽으므로.
 		UE_LOG(LogRopeCollision, Verbose, TEXT("RegisterColliderProvider: %s (%d total)"),
 			*Provider->GetName(), ColliderProviders.Num());
 	}
@@ -128,6 +132,36 @@ void URopeSimSubsystem::RegisterColliderProvider(UActorComponent* Provider)
 void URopeSimSubsystem::UnregisterColliderProvider(UActorComponent* Provider)
 {
 	ColliderProviders.RemoveSingleSwap(Provider);
+	SetAnimPrerequisites(Provider, /*bAdd*/ false);
+}
+
+void URopeSimSubsystem::SetAnimPrerequisites(const UActorComponent* Source, bool bAdd)
+{
+	// "애니 평가 이후 로프 시뮬" 보장: 소스 컴포넌트 소유 액터의 스켈레탈 메시 틱을 SimTickFunction의
+	// 선행조건으로 건다. 메시 틱 완료는 병렬 애니 완료 태스크를 DontCompleteUntil로 물고 있으므로
+	// (SkeletalMeshComponent::DispatchParallelEvaluationTasks) 선행조건만으로 이번 프레임 포즈(버퍼
+	// 플립)까지 보장된다. 같은 메시가 로프/provider 양쪽에서 중복 등록돼도 AddPrerequisite는 유니크.
+	const AActor* Owner = Source ? Source->GetOwner() : nullptr;
+	if (!Owner)
+	{
+		return;
+	}
+	TInlineComponentArray<USkeletalMeshComponent*> Meshes(Owner);
+	for (USkeletalMeshComponent* Mesh : Meshes)
+	{
+		if (!Mesh)
+		{
+			continue;
+		}
+		if (bAdd)
+		{
+			SimTickFunction.AddPrerequisite(Mesh, Mesh->PrimaryComponentTick);
+		}
+		else
+		{
+			SimTickFunction.RemovePrerequisite(Mesh, Mesh->PrimaryComponentTick);
+		}
+	}
 }
 
 void URopeSimSubsystem::BuildFrameColliders()
@@ -319,9 +353,23 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	// TODO: tick 순서 — 충돌은 애니메이션(본 트랜스폼) 이후가 필요. 정밀 정렬은 TG_PostPhysics tick function.
 }
 
-TStatId URopeSimSubsystem::GetStatId() const
+void FRopeSimTickFunction::ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type /*CurrentThread*/,
+	const FGraphEventRef& /*MyCompletionGraphEvent*/)
 {
-	RETURN_QUICK_DECLARE_CYCLE_STAT(URopeSimSubsystem, STATGROUP_Tickables);
+	if (Target && TickType != LEVELTICK_ViewportsOnly)
+	{
+		Target->Tick(DeltaTime);
+	}
+}
+
+FString FRopeSimTickFunction::DiagnosticMessage()
+{
+	return TEXT("FRopeSimTickFunction(URopeSimSubsystem)");
+}
+
+FName FRopeSimTickFunction::DiagnosticContext(bool /*bDetailed*/)
+{
+	return FName(TEXT("RopeSimSubsystem"));
 }
 
 bool URopeSimSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
@@ -333,6 +381,19 @@ bool URopeSimSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) c
 void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
+
+	// TG_PostPhysics 틱 함수 등록(기존 UTickableWorldSubsystem tickable 대체). tickable은 엔진 TickObjects
+	// 호출 위치(TG_PostPhysics 뒤/TG_PostUpdateWork 앞 — 엔진 구현 세부)에 묵시적으로 얹혀 있었다. 명시
+	// 그룹 + 메시 틱 선행조건(SetAnimPrerequisites)으로 "애니 평가 이후" 순서를 계약으로 만든다.
+	// bAllowTickOnDedicatedServer: 기존 tickable도 서버에서 돌았으므로 유지(CPU 폴백 시뮬).
+	SimTickFunction.Target = this;
+	SimTickFunction.TickGroup = TG_PostPhysics;
+	SimTickFunction.EndTickGroup = TG_PostPhysics;
+	SimTickFunction.bCanEverTick = true;
+	SimTickFunction.bStartWithTickEnabled = true;
+	SimTickFunction.bAllowTickOnDedicatedServer = true;
+	SimTickFunction.RegisterTickFunction(InWorld.PersistentLevel);
+
 	// GDF 통합 경로에서 뷰 확장이 씬→솔버로 찾아 dispatch할 수 있게 이 월드의 씬에 솔버를 등록한다.
 	// (씬은 이 시점에 렌더링용으로 생성돼 있다.) 경로가 off여도 등록은 무해(pending이 비어 no-op).
 	RopeGDF::RegisterSolver(InWorld.Scene, &GpuSolver);
@@ -340,6 +401,12 @@ void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 
 void URopeSimSubsystem::Deinitialize()
 {
+	if (SimTickFunction.IsTickFunctionRegistered())
+	{
+		SimTickFunction.UnRegisterTickFunction();
+	}
+	SimTickFunction.Target = nullptr;
+
 	if (const UWorld* World = GetWorld())
 	{
 		RopeGDF::UnregisterSolver(World->Scene);
