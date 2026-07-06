@@ -247,6 +247,14 @@ void URopeWielderComponent::StopPull()
 	}
 }
 
+void URopeWielderComponent::Cut()
+{
+	if (Rope)
+	{
+		Rope->CutRope();
+	}
+}
+
 void URopeWielderComponent::OnPullInputStarted()
 {
 	StartPull();

@@ -360,8 +360,16 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			const float ArrowLen = FMath::Clamp(S.PullTension * 0.01f, 15.0f, 120.0f);
 			AddShape(FGameplayDebuggerShape::MakeArrow(S.PullPoint, S.PullPoint + S.PullDirection * ArrowLen,
 				8.0f, 2.0f, FColor::Orange));
-			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f dir=%s tether=%.0fcm(x%.2f) active=%.0f"),
-				S.PullTension, *S.PullDirection.ToCompactString(), S.TetherOvershoot, S.TetherResponse, S.ActivePullForce));
+			// 거리 release가 켜져 있으면 초과분이 한계에 근접/초과할 때 색으로 경고(노랑 80%+, 빨강 초과).
+			const TCHAR* OvershootColor = TEXT("{white}");
+			if (S.DistanceReleaseSlack > 0.0f)
+			{
+				OvershootColor = (S.TetherOvershoot > S.DistanceReleaseSlack) ? TEXT("{red}")
+					: (S.TetherOvershoot > S.DistanceReleaseSlack * 0.8f) ? TEXT("{yellow}") : TEXT("{white}");
+			}
+			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f dir=%s tether=%s%.0fcm{white}(x%.2f, release=%.0f) active=%.0f"),
+				S.PullTension, *S.PullDirection.ToCompactString(), OvershootColor, S.TetherOvershoot,
+				S.TetherResponse, S.DistanceReleaseSlack, S.ActivePullForce));
 		}
 		else if (S.bPullValid)
 		{

@@ -269,7 +269,28 @@ bool URopeComponent::FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, 
 	return false;
 }
 
+void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog)
+{
+	// 모든 release 트리거(수동/절단/장력/거리/대상 소실)의 공용 마무리: 페이즈 전환 + 노드 반환 +
+	// 일시 상태 폐기 + 쿨다운 + 이벤트. 사유별 차이는 호출자에서 끝난 상태로 들어온다.
+	SetPhase(ERopePhase::Releasing, *ReasonLog);
+	WrapController.Release(Reason);
+	ResetTransientPhaseState();
+	ReleaseCooldown = ReleaseCooldownSeconds;
+	OnRopeReleased.Broadcast(Bone, Reason);
+}
+
 void URopeComponent::ReleaseWrap()
+{
+	ReleaseWrapAs(ERopeReleaseReason::Manual);
+}
+
+void URopeComponent::CutRope()
+{
+	ReleaseWrapAs(ERopeReleaseReason::Cut);
+}
+
+void URopeComponent::ReleaseWrapAs(ERopeReleaseReason Reason)
 {
 	if (Phase != ERopePhase::Wrapped && Phase != ERopePhase::Contacting && Phase != ERopePhase::Wrapping)
 		return;
@@ -289,11 +310,8 @@ void URopeComponent::ReleaseWrap()
 		Bone = ContactTracker.CandidateBone;
 	}
 
-	SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("manual, bone=%s"), *Bone.ToString()));
-	WrapController.Release(ERopeReleaseReason::Manual);
-	ResetTransientPhaseState();
-	ReleaseCooldown = ReleaseCooldownSeconds;
-	OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Manual);
+	FinishWrapRelease(Bone, Reason, FString::Printf(TEXT("%s, bone=%s"),
+		Reason == ERopeReleaseReason::Cut ? TEXT("cut") : TEXT("manual"), *Bone.ToString()));
 }
 
 // ===== 시뮬레이션 프레임(서브시스템이 3단계로 구동) ===========================
@@ -366,11 +384,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		if (!WrapController.Hold(Sim, DeltaTime, OverrideFrame))
 		{
 			const FName Bone = WrapController.State.BoneName;
-			SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("wrap target mesh lost, bone=%s"), *Bone.ToString()));
-			WrapController.Release(ERopeReleaseReason::Broken);
-			ResetTransientPhaseState();
-			ReleaseCooldown = ReleaseCooldownSeconds;
-			OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Broken);
+			FinishWrapRelease(Bone, ERopeReleaseReason::Broken,
+				FString::Printf(TEXT("wrap target mesh lost, bone=%s"), *Bone.ToString()));
 			break;
 		}
 		ApplyWrappedMassMask();
@@ -403,14 +418,22 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 			if (TensionOverTime >= WrapConfig.TensionReleaseTime)
 			{
 				const FName Bone = WrapController.State.BoneName;
-				SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("tension release %.0f > %.0f, bone=%s"),
-					WrapController.State.Tension, WrapConfig.TensionReleaseForce, *Bone.ToString()));
-				WrapController.Release(ERopeReleaseReason::Tension);
-				ResetTransientPhaseState();
-				ReleaseCooldown = ReleaseCooldownSeconds;
-				OnRopeReleased.Broadcast(Bone, ERopeReleaseReason::Tension);
+				FinishWrapRelease(Bone, ERopeReleaseReason::Tension,
+					FString::Printf(TEXT("tension release %.0f > %.0f, bone=%s"),
+						WrapController.State.Tension, WrapConfig.TensionReleaseForce, *Bone.ToString()));
 				break;
 			}
+		}
+
+		// 거리 release: 손~앵커 직선 거리의 가용 로프 길이 초과분(테더 초과분과 동일 소스)이 한계를
+		// 넘으면 놓친다. 기하 기반이라 지속 시간 없이 즉시 판정(장력처럼 노이즈가 없다).
+		if (WrapConfig.DistanceReleaseSlack > 0.0f && LastTetherOvershoot > WrapConfig.DistanceReleaseSlack)
+		{
+			const FName Bone = WrapController.State.BoneName;
+			FinishWrapRelease(Bone, ERopeReleaseReason::Distance,
+				FString::Printf(TEXT("distance release overshoot %.0f > %.0f, bone=%s"),
+					LastTetherOvershoot, WrapConfig.DistanceReleaseSlack, *Bone.ToString()));
+			break;
 		}
 		bSolveThisFrame = true;
 		break;
@@ -943,6 +966,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.TetherResponse = WrapConfig.TetherResponse;
 		Snapshot.TetherOvershoot = LastTetherOvershoot;
 		Snapshot.ActivePullForce = ActivePullForce;
+		Snapshot.DistanceReleaseSlack = WrapConfig.DistanceReleaseSlack;
 	}
 
 	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). capsule이면 세그먼트,

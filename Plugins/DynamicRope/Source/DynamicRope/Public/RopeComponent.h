@@ -136,6 +136,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ReleaseWrap();
 
+	/**
+	 * 로프 절단(외부 게임플레이 — 칼질/데미지 등): 진행 중인 잡기/감기를 ERopeReleaseReason::Cut으로
+	 * 강제 해제한다. 흐름은 ReleaseWrap과 같고 사유만 달라 게임이 구분 반응(로프 파괴 연출 등)할 수
+	 * 있다. 로프 자체를 두 조각으로 나누는 물리적 절단은 후속(길이 변경/분할 시뮬 필요).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void CutRope();
+
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	ERopePhase GetPhase() const { return Phase; }
 
@@ -284,6 +292,12 @@ private:
 
 	// 동작 1 — 자동 견인(테더): 가용 로프 길이 초과분을 위치/속도 동기로 회수(수렴, 폭주 없음).
 	void UpdateTether(float DeltaTime);
+
+	// 모든 release 트리거의 공용 마무리(페이즈 전환+노드 반환+일시 상태 폐기+쿨다운+이벤트).
+	void FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog);
+
+	// ReleaseWrap/CutRope 공용 본체: 진행 중인 잡기/감기를 주어진 사유로 해제(본 귀속 해석 포함).
+	void ReleaseWrapAs(ERopeReleaseReason Reason);
 
 	// 동작 2 — Pull 힘 인가(GT, UObject): 물리 시뮬 본 → 캐릭터 무브먼트 → 시뮬 루트 순으로 시도한다.
 	void ApplyPullForce(const FVector& Force, const FRopePullSample& Pull);

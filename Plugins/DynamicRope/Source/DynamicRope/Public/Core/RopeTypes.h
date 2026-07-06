@@ -28,9 +28,10 @@ UENUM(BlueprintType)
 enum class ERopeReleaseReason : uint8
 {
 	Manual,
-	Distance,
-	Tension,
-	Broken
+	Distance,	// 손~앵커 거리가 가용 로프 길이 + DistanceReleaseSlack 초과(자동)
+	Tension,	// 최대 장력이 TensionReleaseForce를 지속 초과(자동)
+	Broken,		// 대상 소실/wrap 실패 등 내부 사유
+	Cut			// 외부 게임플레이가 로프를 절단(URopeComponent::CutRope)
 };
 
 /** Wrapping 중 tail node의 목표 surface path를 생성하는 방식. Project Settings에서 전역 선택한다. */
@@ -480,6 +481,15 @@ struct FRopeWrapConfig
 	/** 테더 발동 전 허용 여유(cm). 경계 지터/미세 슬랙에서 발동하는 것을 막는다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
 	float TetherSlack = 5.0f;
+
+	/**
+	 * 거리 release: Wrapped 중 손~앵커 직선 거리가 가용 로프 길이(+TetherSlack)를 이만큼(cm) 더
+	 * 초과하면 자동 release한다(ERopeReleaseReason::Distance). 0 = 비활성(기본). 테더와 함께 쓰면
+	 * "테더가 버티다가 이 한계를 넘으면 놓친다"가 된다 — 테더가 충분히 강하면 초과분이 안 쌓여
+	 * 발동하지 않고, 테더 없이 쓰면 순수 거리 제한으로 동작한다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
+	float DistanceReleaseSlack = 0.0f;
 };
 
 /** 던질 때 기준축을 어느 좌표계에서 가져올지. */

@@ -74,6 +74,7 @@ struct FRopeDebugSnapshot
 	float TetherResponse = 0.0f;                 // 테더 반응(0=비활성) — 표시용
 	float TetherOvershoot = 0.0f;                // 가용 로프 길이 초과분(cm, 0=팽팽하지 않음)
 	float ActivePullForce = 0.0f;                // 능동 Pull 힘(0=입력 없음)
+	float DistanceReleaseSlack = 0.0f;           // 거리 release 한계(cm, 0=비활성) — 표시용
 
 	//~ colliders(이 로프가 이번 프레임 질의한 collider들) ----------------
 	TArray<FRopeDebugCollider> Colliders;

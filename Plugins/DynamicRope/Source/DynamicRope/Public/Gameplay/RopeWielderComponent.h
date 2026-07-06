@@ -221,6 +221,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StopPull();
 
+	/** 로프 절단(ERopeReleaseReason::Cut으로 강제 해제 — 게임플레이 절단 이벤트용 패스스루). */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void Cut();
+
 	/** wrap/contact 중이면 Release, 아니면 Throw. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ToggleThrow();
