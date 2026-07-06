@@ -687,6 +687,33 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 								gPos[i + 1]  += D1;
 								gPrev[i + 1] += D1;
 							}
+
+							// GDF (world) — 세그먼트 chording: 얇은 벽을 두 노드 사이 직선이 가로지르는 경우 방어.
+							// SDF 세그먼트 케이스와 동일 패턴, query만 GDF로. small-step 노드 충돌이 대부분 잡지만
+							// SegmentLength보다 얇은 벽은 노드가 양옆 바깥이라 여기서만 잡힌다. 정적 월드라 표면속도 0.
+#if ROPE_USE_GDF && PLATFORM_SUPPORTS_DISTANCE_FIELDS
+							if (bWorldGDFValid != 0)
+							{
+								const float3 GdfTWP  = Mid + GDFPreViewTranslation;
+								const float  GdfDist = GetDistanceToNearestSurfaceGlobal(GdfTWP);
+								if (GdfDist < P.CollisionRadius)
+								{
+									const float3 GdfGrad = GetDistanceFieldGradientGlobal(GdfTWP);
+									const float  GdfGLen = length(GdfGrad);
+									if (GdfGLen > 1e-4f)
+									{
+										const float3 GdfN  = GdfGrad / GdfGLen;
+										const float  GdfDL = (P.CollisionRadius - GdfDist) / WEff;
+										const float3 GdfD0 = GdfN * ((1.0f - T) * SW0 * GdfDL);
+										const float3 GdfD1 = GdfN * (T * SW1 * GdfDL);
+										gPos[i]      += GdfD0;
+										gPrev[i]     += GdfD0;
+										gPos[i + 1]  += GdfD1;
+										gPrev[i + 1] += GdfD1;
+									}
+								}
+							}
+#endif
 						}
 					}
 				}
