@@ -227,11 +227,6 @@ public:
 	void DispatchPending_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView* View,
 		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 
-	/** 렌더 스레드(Phase 2c). 솔브 뒤·튜브 앞에 호출. GDF 대상 상주 로프의 PosBuf를 엔진 Global Distance Field로
-	    정적 월드에서 밀어낸다(별도 CS, View UB 필요). 뷰 확장이 DispatchPending 직후 호출한다. */
-	void DispatchGDFCollision_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
-		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
-
 	/** RT 리드백이 채운 최신 위치를 RopeId별로 복사(락). 새로 도착한 게 없으면 직전 값을 유지한 채 반환할 수 있다. */
 	void GetLatest(TMap<uint32, FRopeResidentLatest>& Out);
 

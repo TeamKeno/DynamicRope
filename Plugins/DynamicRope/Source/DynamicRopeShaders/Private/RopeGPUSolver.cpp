@@ -16,39 +16,9 @@
 #include "SceneView.h"               // FSceneView / FViewUniformShaderParameters (GDF 패스 View UB) — Phase 2c
 #include "DataDrivenShaderPlatformInfo.h"
 #include "Misc/ScopeLock.h"
-#include "HAL/IConsoleManager.h"     // TAutoConsoleVariable (GDFDebug 진단 토글)
 
 // 스레드그룹 크기 == 지원하는 최대 노드 수. groupshared 정적 사이징과 numthreads에 함께 쓰인다.
 static constexpr int32 ROPE_MAX_NODES = 256;
-
-// 진단(GDFDebug): GDF 월드 충돌 패스가 노드별로 실제 읽은 거리/그라디언트-이동 정렬을 매 프레임 로그로 덤프한다.
-// 0=off(기본). 얇은 벽 관통 원인 판별용 — minDist가 NodeR보다 크면 '과대보고', trig 노드의 dot>0이면 '부호-뒤집힘 사출'.
-static TAutoConsoleVariable<int32> CVarRopeGDFDebug(
-	TEXT("r.DynamicRope.GDFDebug"), 0,
-	TEXT("로프 GDF 월드 충돌 패스의 노드별 진단값(거리/그라디언트·이동 정렬/침투/트리거)을 로그로 덤프. 0=off, 1=on."),
-	ECVF_RenderThreadSafe);
-
-// 진입-면 되밀기: 얇은 벽에서 gradient가 이동 방향을 향하는(중앙면 넘은) 노드를 gradient 대신 '온 길'로
-// 되밀어 관통 사출을 막는다. 1=on(기본), 0=off(기존 gradient 밀어내기). GDFDebug로 A/B 비교용.
-static TAutoConsoleVariable<int32> CVarRopeGDFEntrySidePush(
-	TEXT("r.DynamicRope.GDFEntrySidePush"), 1,
-	TEXT("GDF 월드 충돌에서 진입-면 되밀기(부호-뒤집힘 사출 방지). 0=off(기존), 1=on(기본)."),
-	ECVF_RenderThreadSafe);
-
-// 프레임 시작→끝 스윕: 끝점이 밴드 밖이어도 이동 경로가 얇은 벽을 통째로 건너뛴(터널링) 경우를,
-// 진입점 쪽부터 마치해 진입 면에서 잡아 세운다. 1=on(기본), 0=off(끝점 점 쿼리만). GDFDebug로 A/B 비교용.
-static TAutoConsoleVariable<int32> CVarRopeGDFSweep(
-	TEXT("r.DynamicRope.GDFSweep"), 1,
-	TEXT("GDF 월드 충돌에서 프레임 시작→끝 스윕(터널링 방지). 0=off(끝점만), 1=on(기본)."),
-	ECVF_RenderThreadSafe);
-
-// GDF 월드 충돌을 솔버 substep 제약으로 처리(Phase 3, 기본 on). bUseWorldGDF 로프의 솔브가 GDF permutation으로
-// 돌아 매 substep 벽을 투영하고, post-solve GDF 패스는 비활성(중복 방지) — 장력과 같은 solve에서 균형(떨림 제거).
-// 0으로 끄면 기존 post-solve 패스(진입-면 되밀기/스윕). View 없는 Step 경로에선 무효(GDF는 뷰 확장 경로 전용).
-static TAutoConsoleVariable<int32> CVarRopeGDFInSolver(
-	TEXT("r.DynamicRope.GDFInSolver"), 1,
-	TEXT("GDF 월드 충돌을 솔버 substep 제약으로 처리. 0=off(post-solve 패스), 1=on(in-solver, post-solve 비활성; 기본)."),
-	ECVF_RenderThreadSafe);
 
 // HLSL FRopeGPUParams(RopeXPBD.usf)와 1:1 미러. 레이아웃 변경 시 .usf 동시 수정. 16바이트 정렬.
 struct FRopeGPUParamsGPU
@@ -146,7 +116,7 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, Positions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, PrevPositions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, OutLambdaDist) // 장력 리드백(마지막 substep 세그먼트 λ).
-		// --- GDF 통합 경로(FGDFDim on일 때만 셰이더가 참조; off면 미사용 → 언바운드 허용). FRopeGDFCollisionCS 레시피 미러.
+		// --- GDF 통합 경로(FGDFDim on일 때만 셰이더가 참조; off면 미사용 → 언바운드 허용).
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FGlobalDistanceFieldParameters2, GDF)
 		SHADER_PARAMETER(FVector3f, GDFPreViewTranslation)
@@ -227,46 +197,6 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FRopeContactDetectCS, "/Plugin/DynamicRope/Private/RopeXPBD.usf", "RopeContactDetectCS", SF_Compute);
 
-// Phase 2c: 엔진 GDF로 정적 월드에서 밀어내는 별도 post-solve 패스. View UB가 필요(GDF .ush의 ResolvedView) →
-// 메인 솔브 CS(View 없는 Step 경로 겸용)와 분리한다. 뷰 확장이 솔브 뒤·튜브 앞에 로프별 dispatch한다.
-class FRopeGDFCollisionCS : public FGlobalShader
-{
-public:
-	DECLARE_GLOBAL_SHADER(FRopeGDFCollisionCS);
-	SHADER_USE_PARAMETER_STRUCT(FRopeGDFCollisionCS, FGlobalShader);
-
-	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)     // ResolvedView(GDF .ush LWC 오버로드).
-		SHADER_PARAMETER_STRUCT_INCLUDE(FGlobalDistanceFieldParameters2, GDF)
-		SHADER_PARAMETER(FVector3f, GDFPreViewTranslation)
-		SHADER_PARAMETER(uint32, NumNodes)
-		SHADER_PARAMETER(float, CollisionRadius)
-		SHADER_PARAMETER(float, Friction)
-		SHADER_PARAMETER(float, TipFrictionScale)
-		SHADER_PARAMETER(uint32, bWorldGDFValid)
-		SHADER_PARAMETER(uint32, bEntrySidePush) // 1=진입-면 되밀기(부호-뒤집힘 사출 방지).
-		SHADER_PARAMETER(uint32, bSweep)         // 1=프레임 시작→끝 스윕(터널링 방지).
-		SHADER_PARAMETER(uint32, SweepBackSteps) // = NumSub(솔버 Prev를 프레임 시작으로 역산할 배수).
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, InvMass)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, Positions)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, PrevPositions)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, DebugOut) // 진단(GDFDebug): 노드별 [Dist,dot,Pen,flag].
-	END_SHADER_PARAMETER_STRUCT()
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
-	}
-
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("ROPE_GDF_THREADS"), ROPE_MAX_NODES);
-	}
-};
-
-IMPLEMENT_GLOBAL_SHADER(FRopeGDFCollisionCS, "/Plugin/DynamicRope/Private/RopeGDFCollision.usf", "RopeGDFCollisionCS", SF_Compute);
-
 // ---------------------------------------------------------------------------------------------------
 // 상주 상태 정의
 // ---------------------------------------------------------------------------------------------------
@@ -279,12 +209,9 @@ struct FRopeResidentRope
 	TRefCountPtr<FRDGPooledBuffer> InvMassBuf;
 	int32  NumNodes = 0;
 	uint32 Generation = 0xFFFFFFFFu;     // 마지막으로 시드한 generation(다르면 재시드)
-	// Phase 2c: 별도 post-solve GDF 밀어내기 패스가 순회 시 참조(매 step에서 갱신).
+	// GDF permutation 선택(뷰 확장 경로에서 solve-substep GDF 충돌)에 쓰는 플래그. 충돌 파라미터(반경/마찰)는
+	// Params 버퍼(FRopeGPUParams)로 솔브 CS에 직접 전달하므로 여기 상주할 필요 없음.
 	bool  bUseWorldGDF = false;
-	float GDFCollisionRadius = 0.0f;
-	float GDFFriction = 0.0f;
-	float GDFTipFrictionScale = 1.0f;
-	int32 GDFNumSub = 1; // 이번 프레임 substep 수(스윕이 프레임 시작을 역산하는 데 사용).
 	FRHIGPUBufferReadback* PosReadback = nullptr;
 	FRHIGPUBufferReadback* PrevReadback = nullptr;
 	bool bReadbackArmed = false;          // 리드백 copy가 enqueue되어 결과 대기 중인가.
@@ -307,10 +234,6 @@ struct FRopeResidentRope
 	TRefCountPtr<FRDGPooledBuffer> ContactBuf;
 	FRHIGPUBufferReadback* ContactReadback = nullptr;
 	bool bContactArmed = false;
-
-	// 진단(GDFDebug): GDF 월드 충돌 패스 뒤 노드별 [Dist,dot,Pen,flag] 리드백(cvar on일 때만 무장). 공유 결과 아님 — 로그 전용.
-	FRHIGPUBufferReadback* GDFDebugReadback = nullptr;
-	bool bGDFDebugArmed = false;
 };
 
 // GT<->RT 공유 결과. RT가 채우고 GT GetLatest가 락 하에 읽는다.
@@ -352,7 +275,6 @@ void FRopeGPUSolver::ReleaseAll_RenderThread()
 		delete Pair.Value.PrevReadback;     Pair.Value.PrevReadback = nullptr;
 		delete Pair.Value.LambdaReadback;   Pair.Value.LambdaReadback = nullptr;
 		delete Pair.Value.ContactReadback;  Pair.Value.ContactReadback = nullptr;
-		delete Pair.Value.GDFDebugReadback; Pair.Value.GDFDebugReadback = nullptr;
 	}
 	Impl->RtRopes.Empty();
 }
@@ -375,7 +297,6 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 				delete R->PrevReadback;
 				delete R->LambdaReadback;
 				delete R->ContactReadback;
-				delete R->GDFDebugReadback;
 				Impl->RtRopes.Remove(RopeId);
 			}
 		});
@@ -536,7 +457,6 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 					R.bReadbackArmed = false;
 					R.bLambdaArmed = false;
 					R.bContactArmed = false;
-					R.bGDFDebugArmed = false; // 재시드 프레임 — 직전 GDF 진단 리드백도 stale.
 					continue;
 				}
 
@@ -618,46 +538,6 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 					R.bContactArmed = false; // 소비 완료 — 아래 dispatch 블록에서 재무장.
 				}
 
-				// 진단(GDFDebug): GDF 월드 충돌 패스가 남긴 노드별 [Dist, dot(Nrm,이동), Pen, flag] 회수 → 로그 덤프.
-				// 공유 결과에 넣지 않고 로그만(cvar r.DynamicRope.GDFDebug로 무장·소비 게이트). 위 continue보다 앞에 둔다.
-				if (R.bGDFDebugArmed && R.GDFDebugReadback && R.GDFDebugReadback->IsReady())
-				{
-					const uint32 DBytes = (uint32)(2 * N) * sizeof(FVector4f);
-					if (const FVector4f* Src = (const FVector4f*)R.GDFDebugReadback->Lock(DBytes))
-					{
-						float MinDist = TNumericLimits<float>::Max(), MaxSeg = 0.0f;
-						int32 MinIdx = -1, TrigCount = 0, RevCount = 0, SwpCount = 0, AttemptCount = 0, DetailCount = 0;
-						FString TrigDetail;
-						for (int32 k = 0; k < N; ++k)
-						{
-							const FVector4f& P0 = Src[2 * k + 0]; // [Dist, dot, Pen, flag]
-							const FVector4f& P1 = Src[2 * k + 1]; // [SegLen, minSd, Move1, attempt]
-							const float D = P0.X;
-							if (D < 0.0f) { continue; } // sentinel(핀/미빌드로 조기 반환한 노드).
-							if (D < MinDist) { MinDist = D; MinIdx = k; }
-							MaxSeg = FMath::Max(MaxSeg, P1.X);
-							if (P1.W > 0.5f) { ++AttemptCount; } // 스윕이 개입한 노드 수.
-							const float F = P0.W; // 0=미접촉, 1=일반 push, 2=진입-면 되밀기, 3=스윕 캐치.
-							if (F < 0.5f) { continue; }
-							const TCHAR* Tag = TEXT("");
-							if (F > 2.5f)      { ++SwpCount;  Tag = TEXT(" SWEEP"); } // flag==3
-							else               { ++TrigCount; if (F > 1.5f) { ++RevCount; Tag = TEXT(" REV"); } } // 1/2
-							if (DetailCount < 8)
-							{
-								++DetailCount;
-								TrigDetail += FString::Printf(TEXT(" [n=%d d=%.2f dot=%+.2f pen=%.2f seg=%.1f minSd=%.1f%s]"),
-									k, P0.X, P0.Y, P0.Z, P1.X, P1.Y, Tag);
-							}
-						}
-						R.GDFDebugReadback->Unlock();
-						UE_LOG(LogDynamicRopeGPU, Display,
-							TEXT("[GDFDebug] Rope=%u N=%d NodeR=%.2f minDist=%.2f@%d trig=%d rev=%d swp=%d attempt=%d maxSeg=%.1f%s"),
-							S.RopeId, N, R.GDFCollisionRadius,
-							(MinIdx >= 0 ? MinDist : -1.0f), MinIdx, TrigCount, RevCount, SwpCount, AttemptCount, MaxSeg, *TrigDetail);
-					}
-					R.bGDFDebugArmed = false; // 소비 완료 — DispatchGDFCollision에서 cvar on이면 재무장.
-				}
-
 				if (!bHavePos && !bHaveContacts && !bHaveTension)
 				{
 					continue; // 이번 프레임 회수분 없음.
@@ -692,10 +572,10 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 
 			// 이제부터 그래프 빌드(seed/register/dispatch/재무장). consume은 위에서 끝냈다. GraphBuilder는 인자
 			// (전용 그래프=Step, 씬 렌더러 그래프=DispatchPending_RenderThread).
-			// GDF in-solver(Phase 3): View가 있고(=뷰 확장 경로) cvar on이면 GDF permutation으로 솔브해 매 substep
-			// 벽을 투영한다. 프레임 공용 GDF 셰이더 파라미터를 1회 산정(미빌드면 bWorldGDFValid=0 → 로프별 lean 폴백).
-			// off/Step 경로(View 없음)에선 기존 post-solve 패스가 처리 → 여기선 GDF 미사용.
-			const bool bGDFInSolver = (View != nullptr) && (CVarRopeGDFInSolver.GetValueOnRenderThread() != 0);
+			// GDF in-solver: View가 있으면(=뷰 확장 경로) GDF permutation으로 솔브해 매 substep 벽을 투영한다.
+			// 프레임 공용 GDF 셰이더 파라미터를 1회 산정(미빌드면 bGDFSolverValid=0 → 로프별 lean 폴백).
+			// View 없는 Step 경로에선 GDF 미사용(정적 월드 충돌은 뷰 확장 경로 전용).
+			const bool bGDFInSolver = (View != nullptr);
 			FGlobalDistanceFieldParameters2 GDFSolverParams;
 			uint32 bGDFSolverValid = 0;
 			if (bGDFInSolver)
@@ -737,12 +617,8 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 				FRopeResidentRope& R = Impl->RtRopes.FindOrAdd(S.RopeId);
 				const bool bSeed = !R.PosBuf.IsValid() || R.NumNodes != N || R.Generation != S.Generation;
 
-				// Phase 2c: 별도 GDF 패스가 순회 시 쓸 플래그/충돌 파라미터를 상주 상태에 기록.
+				// GDF permutation 선택에 쓰는 플래그를 상주 상태에 기록(충돌 반경/마찰은 Params 버퍼로 CS에 직접 전달).
 				R.bUseWorldGDF        = S.bUseWorldGDF;
-				R.GDFCollisionRadius  = S.CollisionRadius;
-				R.GDFFriction         = S.Friction;
-				R.GDFTipFrictionScale = S.TipFrictionScale;
-				R.GDFNumSub           = FMath::Max(1, S.NumSub); // 스윕 프레임-시작 역산용(최소 1).
 
 				FRDGBufferRef PosRDG = nullptr;
 				FRDGBufferRef PrevRDG = nullptr;
@@ -1163,8 +1039,8 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 				// 렌더 raw 튜브 경로(M5b/B2)가 이 그래프 *밖에서* PosBuf를 SRV로 직독한다 — 외부 접근 모드로
 				// 마지막 패스(solve/copy/detect) 뒤 SRV 전이(배리어)를 매 프레임 확정한다. 이게 없으면 그래프
 				// 종료 상태가 리드백 copy 유무에 따라 UAVCompute/CopySrc로 오락가락해, 배리어 없는 프레임에
-				// 튜브가 이전/미완성 위치를 읽어 wrap 노드가 떨린다(CL167 회귀). VE(GDF) 경로의 후속 쓰기는
-				// DispatchGDFCollision이 UseInternalAccessMode로 재획득 후 다시 외부로 되돌린다.
+				// 튜브가 이전/미완성 위치를 읽어 wrap 노드가 떨린다(CL167 회귀). GDF 충돌은 이제 솔브 CS 안(substep
+				// 제약)에서 처리하므로 별도 post-solve 쓰기가 없고, 이 solve 패스가 PosBuf의 마지막 쓰기다.
 				GraphBuilder.UseExternalAccessMode(PosRDG, ERHIAccess::SRVMask);
 			}
 
@@ -1214,79 +1090,4 @@ void FRopeGPUSolver::DispatchPending_RenderThread(FRDGBuilder& GraphBuilder, con
 	}
 	RunSteps_RenderThread(GraphBuilder, Impl->PendingSteps, View, GDF, PreViewTranslation);
 	Impl->PendingSteps.Reset();
-}
-
-void FRopeGPUSolver::DispatchGDFCollision_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
-	const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
-{
-	check(IsInRenderingThread());
-
-	// GDF in-solver(Phase 3) on이면 솔브 substep에서 이미 벽을 처리했으므로 이 post-solve 패스는 비활성(중복 방지).
-	if (CVarRopeGDFInSolver.GetValueOnRenderThread() != 0)
-	{
-		return;
-	}
-
-	// 프레임 공용 GDF 셰이더 파라미터(미빌드면 bWorldGDFValid=0 → 셰이더 no-op).
-	FGlobalDistanceFieldParameters2 GDFShaderParams;
-	uint32 bWorldGDFValid = 0;
-	FillGDFShaderParams(GDF, GDFShaderParams, bWorldGDFValid);
-
-	// 상주 로프 중 GDF 대상만 순회. PosBuf는 같은 그래프에서 솔브가 이미 등록(UAV)했으므로 dedup → solve→GDF
-	// 순서 자동. 이후 튜브가 PosBuf를 읽으므로 GDF→tube 순서도 RDG가 보장한다.
-	for (TPair<uint32, FRopeResidentRope>& Pair : Impl->RtRopes)
-	{
-		FRopeResidentRope& R = Pair.Value;
-		if (!R.bUseWorldGDF || R.NumNodes < 2
-			|| !R.PosBuf.IsValid() || !R.PrevBuf.IsValid() || !R.InvMassBuf.IsValid())
-		{
-			continue;
-		}
-
-		FRDGBufferRef PosRDG = GraphBuilder.RegisterExternalBuffer(R.PosBuf);
-		FRDGBufferRef PrevRDG = GraphBuilder.RegisterExternalBuffer(R.PrevBuf);
-		FRDGBufferRef InvRDG  = GraphBuilder.RegisterExternalBuffer(R.InvMassBuf);
-
-		// RunSteps가 PosBuf를 외부 접근(SRVMask)으로 확정했으므로 UAV 쓰기 전에 내부 추적으로 재획득한다
-		// (외부 접근 상태의 쓰기는 RDG validation 위반). 미확정 상태여도 no-op라 안전.
-		GraphBuilder.UseInternalAccessMode(PosRDG);
-
-		// 진단(GDFDebug): 노드당 2 슬롯([Dist,dot,Pen,flag] / [SegLen,minSd,Move1,attempt]) 출력 버퍼.
-		// 렌더/다음 프레임에 안 쓰이므로 매 dispatch 임시(transient). UAV는 셰이더가 항상 쓰므로 cvar와
-		// 무관하게 바인딩하고, CPU 리드백 copy만 cvar on일 때 아래에서 무장한다.
-		FRDGBufferRef DebugRDG = GraphBuilder.CreateBuffer(
-			FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), FMath::Max(1, 2 * R.NumNodes)), TEXT("Rope.GDFDebug"));
-
-		FRopeGDFCollisionCS::FParameters* P = GraphBuilder.AllocParameters<FRopeGDFCollisionCS::FParameters>();
-		P->View                = View.ViewUniformBuffer;
-		P->GDF                 = GDFShaderParams;
-		P->GDFPreViewTranslation = PreViewTranslation;
-		P->NumNodes            = (uint32)R.NumNodes;
-		P->CollisionRadius     = R.GDFCollisionRadius;
-		P->Friction            = R.GDFFriction;
-		P->TipFrictionScale    = R.GDFTipFrictionScale;
-		P->bWorldGDFValid      = bWorldGDFValid;
-		P->bEntrySidePush      = (CVarRopeGDFEntrySidePush.GetValueOnRenderThread() != 0) ? 1u : 0u;
-		P->bSweep              = (CVarRopeGDFSweep.GetValueOnRenderThread() != 0) ? 1u : 0u;
-		P->SweepBackSteps      = (uint32)FMath::Max(1, R.GDFNumSub);
-		P->InvMass             = GraphBuilder.CreateSRV(InvRDG);
-		P->Positions           = GraphBuilder.CreateUAV(PosRDG);
-		P->PrevPositions       = GraphBuilder.CreateUAV(PrevRDG);
-		P->DebugOut            = GraphBuilder.CreateUAV(DebugRDG);
-
-		TShaderMapRef<FRopeGDFCollisionCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()));
-		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeGDFCollision"),
-			Shader, P, FIntVector(1, 1, 1)); // 로프 1개 = 스레드그룹 1개
-
-		// 진단 리드백 무장(cvar on일 때만): GDF 패스가 방금 쓴 진단값을 비동기 copy. consume/로그는 RunSteps Loop1(다음 프레임).
-		if (CVarRopeGDFDebug.GetValueOnRenderThread() != 0 && !R.bGDFDebugArmed)
-		{
-			if (!R.GDFDebugReadback) { R.GDFDebugReadback = new FRHIGPUBufferReadback(TEXT("Rope.GDFDebugReadback")); }
-			AddEnqueueCopyPass(GraphBuilder, R.GDFDebugReadback, DebugRDG, (uint32)(2 * R.NumNodes) * sizeof(FVector4f));
-			R.bGDFDebugArmed = true;
-		}
-
-		// GDF 쓰기 완료 — 다시 외부 읽기(SRV)로 확정: 같은 그래프의 튜브 SRV 읽기 + 다음 프레임 렌더 raw 직독 유효.
-		GraphBuilder.UseExternalAccessMode(PosRDG, ERHIAccess::SRVMask);
-	}
 }
