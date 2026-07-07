@@ -1195,12 +1195,12 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		Step.MaxSweepSamples   = Config.MaxSweepSamples;
 		Step.NumSub            = NumSub;
 		Step.FixedDt           = FixedDt;
-		// 6평면 컨벡스: 평면 풀 + 헤더(오프셋 0, 개수 6).
+		// 6평면 컨벡스: 평면 풀 + 헤더(오프셋 0, 개수 6). 강체 identity → 월드=로컬(평면을 원점에 구성), 정적(InvDt 0).
 		FRopeGPUConvex Cv;
 		Cv.PlaneOffset = 0;
 		Cv.PlaneCount = 6;
-		Cv.BoundsCenter = FVector::ZeroVector;
-		Cv.BoundsExtent = H;
+		Cv.LocalBoundsCenter = FVector::ZeroVector;
+		Cv.LocalBoundsExtent = H;
 		for (const FPlane& Pl : MakePlanes())
 		{
 			Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W));

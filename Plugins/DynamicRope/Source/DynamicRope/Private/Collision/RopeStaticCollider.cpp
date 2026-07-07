@@ -51,7 +51,63 @@ FRopeContact FRopeBoxCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	Contact.Normal = Rot.RotateVector(LocalNormal);
 	Contact.Penetration = NodeRadius - SignedDist; // 안쪽이면 SignedDist<0이라 면까지 깊이 + 노드 반지름
 	Contact.SurfacePoint = Rot.RotateVector(LocalSurface) + Center;
-	// Bone/SourceMesh/SurfaceVelocity: 정적 월드 지오메트리 — 기본값(None/null/0) 그대로.
+	// Bone/SourceMesh: 정적 월드 지오메트리 — 기본값(None/null).
+	// 표면 속도: 접촉 재질점(로컬 LocalSurface)의 (현재 포즈 - 이전 포즈) / dt. 움직이는 바디가 로프를
+	// 접선 방향으로 끄는 데 쓴다. InvDeltaTime==0(정적/첫 프레임)이면 0.
+	if (InvDeltaTime > 0.0f)
+	{
+		const FVector PrevWorld = PrevRot.RotateVector(LocalSurface) + PrevCenter;
+		Contact.SurfaceVelocity = (Contact.SurfacePoint - PrevWorld) * InvDeltaTime;
+	}
+	return Contact;
+}
+
+FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
+{
+	// 정지 박스(첫 프레임 포함)는 기본(현재 포즈 정적 스윕)과 동일 — 조기 위임.
+	if (InvDeltaTime <= 0.0f || (PrevCenter.Equals(Center) && PrevRot.Equals(Rot)))
+	{
+		return IRopeCollider::QuerySwept(Q, OutHitWorldPos);
+	}
+
+	FRopeContact Contact;
+	OutHitWorldPos = Q.WorldEnd;
+
+	// 이 substep의 박스 sub-포즈(프레임 모션 prev->curr를 SubAlpha로 보간). 노드 경로와 박스 모션을 함께 스윕.
+	const FVector CenterS = FMath::Lerp(PrevCenter, Center, Q.SubAlpha0);
+	const FVector CenterE = FMath::Lerp(PrevCenter, Center, Q.SubAlpha1);
+	const FQuat   RotS = FQuat::Slerp(PrevRot, Rot, Q.SubAlpha0);
+	const FQuat   RotE = FQuat::Slerp(PrevRot, Rot, Q.SubAlpha1);
+
+	const double RelLen = FVector::Dist(Q.WorldStart, Q.WorldEnd) + FVector::Dist(CenterS, CenterE);
+	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
+	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
+
+	for (int32 k = 0; k < NumSamples; ++k)
+	{
+		const float T = (NumSamples <= 1) ? 1.0f : static_cast<float>(k) / static_cast<float>(NumSamples - 1);
+		const FVector Pt = FMath::Lerp(Q.WorldStart, Q.WorldEnd, T);
+		// sub-포즈 박스(center/rot 보간)로 점질의. 임시 collider를 만들어 로컬 clamp 질의를 재사용한다.
+		FRopeBoxCollider BoxT(FMath::Lerp(CenterS, CenterE, T), FQuat::Slerp(RotS, RotE, T), HalfExtents);
+		const FRopeContact C = BoxT.Query(Pt, Q.NodeRadius); // BoxT는 InvDt=0 → 표면 속도 0(여기선 미사용)
+		if (!C.bHit)
+		{
+			continue;
+		}
+		// 접촉 재질점(로컬)을 substep 끝 포즈로 이월 — 노드를 표면과 함께 남은 모션만큼 옮긴다.
+		const FVector Lp = BoxT.Rot.UnrotateVector(C.SurfacePoint - BoxT.Center);
+		const FVector ClosestEnd = RotE.RotateVector(Lp) + CenterE;
+		Contact.bHit = true;
+		Contact.Normal = C.Normal;
+		Contact.Penetration = C.Penetration;
+		OutHitWorldPos = Pt + (ClosestEnd - C.SurfacePoint);
+		Contact.SurfacePoint = ClosestEnd;
+		// 표면 속도: 재질점의 프레임 전체(prev->curr) 변위 / dt.
+		const FVector WCurr = Rot.RotateVector(Lp) + Center;
+		const FVector WPrev = PrevRot.RotateVector(Lp) + PrevCenter;
+		Contact.SurfaceVelocity = (WCurr - WPrev) * InvDeltaTime;
+		break;
+	}
 	return Contact;
 }
 
@@ -71,23 +127,24 @@ FBox FRopeBoxCollider::GetWorldBounds() const
 FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadius) const
 {
 	FRopeContact Contact;
-	if (Planes.Num() == 0)
+	if (LocalPlanes.Num() == 0)
 	{
 		return Contact;
 	}
-	// 브로드/질의 컬: 월드 AABB(+NodeRadius 여유) 밖이면 확실히 미접촉. 평면 루프 진입 전 조기 컷.
-	if (!Bounds.IsValid || !Bounds.ExpandBy(NodeRadius).IsInsideOrOn(WorldPos))
+	// 월드 -> 바디-로컬(강체 역): Lp = qInv*(p - Trans). 이후 로컬 평면/로컬 bounds로 질의.
+	const FVector Lp = Rot.UnrotateVector(WorldPos - Trans);
+	if (!LocalBounds.IsValid || !LocalBounds.ExpandBy(NodeRadius).IsInsideOrOn(Lp))
 	{
-		return Contact;
+		return Contact; // 로컬 AABB(+NodeRadius) 밖 → 확실히 미접촉.
 	}
 
-	// max-plane: 점이 가장 많이 위반한 평면(부호 거리 최대)이 표면 근사. 내부는 정확(모든 PlaneDot<0 →
-	// 최대값이 곧 가장 가까운 면), 외부 엣지 근방은 과소추정(보수적). 그 평면의 법선이 push-out 방향.
+	// max-plane(로컬): 점이 가장 많이 위반한 평면(부호 거리 최대)이 표면 근사. 내부는 정확, 외부 엣지 근방은
+	// 과소추정(보수적). 그 평면의 로컬 법선을 월드로 회전한 것이 push-out 방향.
 	double MaxD = -DBL_MAX;
 	int32 Best = INDEX_NONE;
-	for (int32 i = 0; i < Planes.Num(); ++i)
+	for (int32 i = 0; i < LocalPlanes.Num(); ++i)
 	{
-		const double D = Planes[i].PlaneDot(WorldPos); // dot(N,p) - W, N 바깥
+		const double D = LocalPlanes[i].PlaneDot(Lp); // dot(N,p) - W (로컬), N 바깥
 		if (D > MaxD)
 		{
 			MaxD = D;
@@ -99,11 +156,88 @@ FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadiu
 		return Contact; // 어떤 면 밖으로 NodeRadius 이상 → 확실히 컨벡스 밖(미접촉).
 	}
 
+	const FVector LocalNormal(LocalPlanes[Best].X, LocalPlanes[Best].Y, LocalPlanes[Best].Z);
+	const FVector LocalSurface = Lp - LocalNormal * MaxD; // 로컬 표면점(재질점).
 	Contact.bHit = true;
-	// 법선: 최대 위반 평면의 단위 바깥 법선(빌드 시 정규화). FRopeContact FROZEN 계약(부호 load-bearing).
-	Contact.Normal = FVector(Planes[Best].X, Planes[Best].Y, Planes[Best].Z);
-	Contact.Penetration = NodeRadius - static_cast<float>(MaxD); // 안쪽이면 MaxD<0이라 더 큼.
-	Contact.SurfacePoint = WorldPos - Contact.Normal * MaxD;      // 그 평면 위 최근접점(보조/디버그).
-	// Bone/SourceMesh/SurfaceVelocity: 정적 월드 지오메트리 — 기본값(None/null/0) 그대로.
+	Contact.Normal = Rot.RotateVector(LocalNormal);           // 월드 바깥 법선(FROZEN 계약, 부호 load-bearing).
+	Contact.Penetration = NodeRadius - static_cast<float>(MaxD);
+	Contact.SurfacePoint = Rot.RotateVector(LocalSurface) + Trans;
+	// 표면 속도: 재질점(로컬)의 (현재 포즈 - 이전 포즈) / dt. 움직이는 바디가 로프를 접선 방향으로 끈다.
+	if (InvDeltaTime > 0.0f)
+	{
+		const FVector PrevWorld = PrevRot.RotateVector(LocalSurface) + PrevTrans;
+		Contact.SurfaceVelocity = (Contact.SurfacePoint - PrevWorld) * InvDeltaTime;
+	}
 	return Contact;
+}
+
+FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
+{
+	// 정지 컨벡스(첫 프레임 포함)는 기본(현재 포즈 정적 스윕)과 동일 — 조기 위임.
+	if (InvDeltaTime <= 0.0f || (PrevTrans.Equals(Trans) && PrevRot.Equals(Rot)))
+	{
+		return IRopeCollider::QuerySwept(Q, OutHitWorldPos);
+	}
+
+	FRopeContact Contact;
+	OutHitWorldPos = Q.WorldEnd;
+
+	// substep sub-포즈 강체(prev->curr 보간).
+	const FVector TransS = FMath::Lerp(PrevTrans, Trans, Q.SubAlpha0);
+	const FVector TransE = FMath::Lerp(PrevTrans, Trans, Q.SubAlpha1);
+	const FQuat   RotS = FQuat::Slerp(PrevRot, Rot, Q.SubAlpha0);
+	const FQuat   RotE = FQuat::Slerp(PrevRot, Rot, Q.SubAlpha1);
+
+	const double RelLen = FVector::Dist(Q.WorldStart, Q.WorldEnd) + FVector::Dist(TransS, TransE);
+	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
+	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
+
+	for (int32 k = 0; k < NumSamples; ++k)
+	{
+		const float T = (NumSamples <= 1) ? 1.0f : static_cast<float>(k) / static_cast<float>(NumSamples - 1);
+		const FVector Pt = FMath::Lerp(Q.WorldStart, Q.WorldEnd, T);
+		const FVector TransT = FMath::Lerp(TransS, TransE, T);
+		const FQuat   RotT = FQuat::Slerp(RotS, RotE, T);
+		// sub-포즈 로컬 점질의(강체 RotT/TransT로 로컬 변환).
+		const FVector Lp = RotT.UnrotateVector(Pt - TransT);
+		if (!LocalBounds.ExpandBy(Q.NodeRadius).IsInsideOrOn(Lp))
+		{
+			continue;
+		}
+		double MaxD = -DBL_MAX; int32 Best = INDEX_NONE;
+		for (int32 pi = 0; pi < LocalPlanes.Num(); ++pi)
+		{
+			const double D = LocalPlanes[pi].PlaneDot(Lp);
+			if (D > MaxD) { MaxD = D; Best = pi; }
+		}
+		if (Best == INDEX_NONE || MaxD >= Q.NodeRadius)
+		{
+			continue;
+		}
+		const FVector LocalNormal(LocalPlanes[Best].X, LocalPlanes[Best].Y, LocalPlanes[Best].Z);
+		const FVector LocalSurface = Lp - LocalNormal * MaxD;
+		// 재질점을 끝 sub-포즈로 이월.
+		const FVector ClosestT = RotT.RotateVector(LocalSurface) + TransT;
+		const FVector ClosestEnd = RotE.RotateVector(LocalSurface) + TransE;
+		Contact.bHit = true;
+		Contact.Normal = RotT.RotateVector(LocalNormal);
+		Contact.Penetration = Q.NodeRadius - static_cast<float>(MaxD);
+		OutHitWorldPos = Pt + (ClosestEnd - ClosestT);
+		Contact.SurfacePoint = ClosestEnd;
+		const FVector WCurr = Rot.RotateVector(LocalSurface) + Trans;
+		const FVector WPrev = PrevRot.RotateVector(LocalSurface) + PrevTrans;
+		Contact.SurfaceVelocity = (WCurr - WPrev) * InvDeltaTime;
+		break;
+	}
+	return Contact;
+}
+
+FBox FRopeConvexCollider::GetWorldBounds() const
+{
+	// 로컬 AABB를 강체(Rot,Trans)로 변환 → 월드 AABB(브로드페이즈). 무효면 그대로.
+	if (!LocalBounds.IsValid)
+	{
+		return LocalBounds;
+	}
+	return LocalBounds.TransformBy(FTransform(Rot, Trans));
 }

@@ -845,23 +845,32 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		FRopeGPUBox Box;
 		if (Collider->GetGPUBox(Box.Center, Box.Rot, Box.HalfExtents))
 		{
+			// 프레임 모션(prev center/rot + InvDt): 표면 속도 드래그/상대 운동 CCD. 정적이면 기본값(InvDt 0) 유지.
+			Collider->GetGPUBoxMotion(Box.PrevCenter, Box.PrevRot, Box.InvDeltaTime);
 			Step.Boxes.Add(Box);
 			continue;
 		}
-		TConstArrayView<FPlane> Planes;
-		FBox CBounds(ForceInit);
-		if (Collider->GetGPUConvex(Planes, CBounds) && Planes.Num() > 0 && CBounds.IsValid)
+		TConstArrayView<FPlane> LocalPlanes;
+		FBox LocalBounds(ForceInit);
+		FQuat CvRot, CvPrevRot;
+		FVector CvTrans, CvPrevTrans;
+		float CvInvDt = 0.0f;
+		if (Collider->GetGPUConvex(LocalPlanes, LocalBounds, CvRot, CvTrans, CvPrevRot, CvPrevTrans, CvInvDt)
+			&& LocalPlanes.Num() > 0 && LocalBounds.IsValid)
 		{
-			// 평면을 평탄 풀에 이어붙이고 오프셋/개수로 참조(GPU 패킹이 풀을 그대로 업로드).
+			// 바디-로컬 평면을 평탄 풀에 이어붙이고 오프셋/개수로 참조 + 강체(curr/prev) + InvDt.
 			FRopeGPUConvex Cv;
 			Cv.PlaneOffset = Step.ConvexPlanes.Num();
-			Cv.PlaneCount = Planes.Num();
-			Cv.BoundsCenter = CBounds.GetCenter();
-			Cv.BoundsExtent = CBounds.GetExtent();
-			Step.ConvexPlanes.Reserve(Step.ConvexPlanes.Num() + Planes.Num());
-			for (const FPlane& Pl : Planes)
+			Cv.PlaneCount = LocalPlanes.Num();
+			Cv.LocalBoundsCenter = LocalBounds.GetCenter();
+			Cv.LocalBoundsExtent = LocalBounds.GetExtent();
+			Cv.Rot = CvRot; Cv.Trans = CvTrans;
+			Cv.PrevRot = CvPrevRot; Cv.PrevTrans = CvPrevTrans;
+			Cv.InvDeltaTime = CvInvDt;
+			Step.ConvexPlanes.Reserve(Step.ConvexPlanes.Num() + LocalPlanes.Num());
+			for (const FPlane& Pl : LocalPlanes)
 			{
-				Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W)); // 단위·바깥, PlaneDot=dot(N,p)-W
+				Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W)); // 로컬·단위·바깥, PlaneDot=dot(N,p)-W
 			}
 			Step.Convexes.Add(Cv);
 		}

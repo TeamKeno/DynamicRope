@@ -56,11 +56,18 @@ private:
 	// 단 이 provider는 RopeBounds(전 로프 union — 서브시스템이 프레임당 동일 값 전달)를 실제로 쓴다.
 	uint64 BuiltFrame = static_cast<uint64>(-1);
 
+	// 동적 바디 표면 속도용: 컴포넌트별 이전 프레임 월드 트랜스폼. 매 프레임 갱신 — 이번 프레임 (curr - prev)로
+	// 표면 속도/substep CCD를 산출한다. weak 키라 파괴된 컴포넌트 항목은 다음 갱신에서 자연히 사라진다.
+	TMap<TWeakObjectPtr<UPrimitiveComponent>, FTransform> PrevCompXforms;
+
 	// RopeBounds 오버랩 → 근접 정적 바디의 AggGeom을 Boxes/Capsules로 추출한다.
 	void BuildColliders(const FBox& RopeBounds);
 	// 한 컴포넌트의 BodySetup 심플 콜리전을 월드 공간 콜라이더로 추가한다. 예산 소진 시 false.
 	// 예산/컨벡스 평면 상한은 호출자(BuildColliders)가 Project Settings에서 읽어 전달한다(단일 소스).
-	bool AppendBodyColliders(const UBodySetup& Setup, const FTransform& CompTM, int32 MaxColliders, int32 MaxConvexPlanes);
+	// PrevCompTM/InvDeltaTime: 동적 바디 표면 속도용(이전 프레임 트랜스폼 + 1/dt). 정적이면 PrevCompTM=CompTM,
+	// InvDeltaTime=0을 넘긴다(표면 속도 0). 콜라이더 셰이프를 prev 트랜스폼으로도 만들어 prev 상태를 채운다.
+	bool AppendBodyColliders(const UBodySetup& Setup, const FTransform& CompTM, const FTransform& PrevCompTM,
+		float InvDeltaTime, int32 MaxColliders, int32 MaxConvexPlanes);
 
 	// ISM/HISM(M3): 로프 bounds와 겹치는 인스턴스만 열거해 각 인스턴스 월드 트랜스폼으로 공유 BodySetup을
 	// 추출한다(모든 인스턴스가 같은 메시 콜리전 공유). 예산 소진 시 false. 폴리지/모듈러 에셋 지원.

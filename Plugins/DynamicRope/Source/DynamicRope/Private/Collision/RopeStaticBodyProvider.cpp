@@ -23,6 +23,13 @@ namespace
 		return ElemTM.ToMatrixWithScale() * FScaleMatrix(Scale3D) * CompNoScale.ToMatrixWithScale();
 	}
 
+	// 바디-로컬 변환(elem + 스케일, 컴포넌트 강체 rot/trans 제외). 월드 = 바디로컬 ∘ 강체(컴포넌트 rot/trans).
+	// 강체만 프레임 간 움직이므로(스케일 불변 가정) 바디-로컬 평면은 불변 → 동적 바디의 sub-포즈 강체 보간용.
+	FMatrix ComposeConvexBodyLocal(const FTransform& ElemTM, const FVector& Scale3D)
+	{
+		return ElemTM.ToMatrixWithScale() * FScaleMatrix(Scale3D);
+	}
+
 	// 로컬 평면 집합을 월드로 변환 + 정규화(단위 법선·바깥). FPlane::TransformBy가 역전치로 법선을 올바르게
 	// 변환하므로 전단에서도 정확 — 단 길이가 변하므로 (N,W)를 |N|으로 나눠 정규화한다.
 	void TransformPlanesToWorld(const TArray<FPlane>& Local, const FMatrix& M, TArray<FPlane>& OutWorld)
@@ -116,19 +123,30 @@ void URopeStaticBodyProvider::BuildColliders(const FBox& RopeBounds)
 		return; // 활성 로프가 없으면(무효 bounds) 스캔할 이유가 없다.
 	}
 
-	// 브로드페이즈: 로프 활성 영역과 겹치는 정적 오브젝트를 GT에서 1회 오버랩. 오브젝트 타입 기준이라
-	// WorldStatic 타입의 movable 액터도 잡힌다 — 트랜스폼은 매 프레임 다시 읽으므로 위치는 따라가고,
-	// 표면 속도만 0(정적 응답) 근사가 된다.
+	// 콜라이더 예산/컨벡스 평면 상한/동적 포함 여부는 Project Settings에서 단일 관리.
+	const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
+	const int32 MaxColliders = Settings ? FMath::Max(1, Settings->StaticBodyMaxColliders) : 128;
+	const int32 MaxConvexPlanes = Settings ? FMath::Max(4, Settings->StaticBodyMaxConvexPlanes) : 32;
+	const bool  bIncludeDynamic = Settings ? Settings->bIncludeWorldDynamic : false;
+
+	// 브로드페이즈: 로프 활성 영역과 겹치는 오브젝트를 GT에서 1회 오버랩. 기본 WorldStatic, 옵션으로 WorldDynamic
+	// (움직이는 플랫폼/문 등)도 포함. 움직이는 바디는 아래에서 이전 프레임 트랜스폼으로 표면 속도를 산출한다.
 	TArray<FOverlapResult> Overlaps;
 	FCollisionObjectQueryParams ObjParams(ECC_WorldStatic);
+	if (bIncludeDynamic)
+	{
+		ObjParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+	}
 	FCollisionQueryParams QueryParams(FName(TEXT("RopeStaticBodyGather")), /*bInTraceComplex*/ false);
 	World->OverlapMultiByObjectType(Overlaps, RopeBounds.GetCenter(), FQuat::Identity, ObjParams,
 		FCollisionShape::MakeBox(RopeBounds.GetExtent()), QueryParams);
 
-	// 콜라이더 예산/컨벡스 평면 상한은 Project Settings에서 단일 관리(컴포넌트에 중복 필드를 두지 않는다).
-	const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
-	const int32 MaxColliders = Settings ? FMath::Max(1, Settings->StaticBodyMaxColliders) : 128;
-	const int32 MaxConvexPlanes = Settings ? FMath::Max(4, Settings->StaticBodyMaxConvexPlanes) : 32;
+	// 표면 속도(드래그/CCD)용 프레임 dt. 이번 프레임 처리한 컴포넌트의 (curr - prev)/dt 로 산출한다.
+	const float FrameDt = World->GetDeltaSeconds();
+	const float InvDt = (FrameDt > KINDA_SMALL_NUMBER) ? (1.0f / FrameDt) : 0.0f;
+	// 이번 프레임 컴포넌트 트랜스폼(다음 프레임 prev 소스). 처리한 것만 담아 파괴/이탈 항목은 자연히 만료.
+	TMap<TWeakObjectPtr<UPrimitiveComponent>, FTransform> CurrCompXforms;
+	CurrCompXforms.Reserve(Overlaps.Num());
 
 	TSet<const UPrimitiveComponent*> Seen; // 오버랩은 바디별로 나올 수 있어 컴포넌트 단위로 디둡.
 	bool bBudgetClipped = false;
@@ -146,7 +164,8 @@ void URopeStaticBodyProvider::BuildColliders(const FBox& RopeBounds)
 		}
 		// ISM/HISM(M3): 인스턴스별 처리 — 한 컴포넌트가 공유 메시 콜리전을 여러 인스턴스에 배치한다.
 		// GetBodySetup은 인스턴스 트랜스폼을 모르는 원본(로컬) 셰이프를 주므로, 근접 인스턴스마다 그
-		// 월드 트랜스폼으로 추출해야 한다(HISM도 이 베이스로 캐치).
+		// 월드 트랜스폼으로 추출해야 한다(HISM도 이 베이스로 캐치). 인스턴스별 prev 추적은 미지원 →
+		// 인스턴스는 정적 스냅샷으로 처리(내부에서 prev=curr, InvDt=0).
 		if (UInstancedStaticMeshComponent* ISM = Cast<UInstancedStaticMeshComponent>(Prim))
 		{
 			if (!AppendInstancedBodyColliders(*ISM, RopeBounds, MaxColliders, MaxConvexPlanes))
@@ -161,12 +180,21 @@ void URopeStaticBodyProvider::BuildColliders(const FBox& RopeBounds)
 		{
 			continue;
 		}
-		if (!AppendBodyColliders(*Setup, Prim->GetComponentTransform(), MaxColliders, MaxConvexPlanes))
+		// 이 컴포넌트의 이전 프레임 트랜스폼 조회(없으면 이번 프레임은 정적 취급 — InvDt 0).
+		const FTransform CompTM = Prim->GetComponentTransform();
+		const FTransform* PrevPtr = PrevCompXforms.Find(Prim);
+		const FTransform PrevTM = PrevPtr ? *PrevPtr : CompTM;
+		const float CompInvDt = PrevPtr ? InvDt : 0.0f;
+		CurrCompXforms.Add(Prim, CompTM);
+
+		if (!AppendBodyColliders(*Setup, CompTM, PrevTM, CompInvDt, MaxColliders, MaxConvexPlanes))
 		{
 			bBudgetClipped = true;
 			break;
 		}
 	}
+
+	PrevCompXforms = MoveTemp(CurrCompXforms); // 다음 프레임 prev 소스로 교체.
 
 	if (bBudgetClipped)
 	{
@@ -179,12 +207,13 @@ void URopeStaticBodyProvider::BuildColliders(const FBox& RopeBounds)
 }
 
 bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const FTransform& CompTM,
-	int32 MaxColliders, int32 MaxConvexPlanes)
+	const FTransform& PrevCompTM, float InvDeltaTime, int32 MaxColliders, int32 MaxConvexPlanes)
 {
 	const FVector Scale3D = CompTM.GetScale3D();
 	const auto BudgetLeft = [this, MaxColliders]() { return Boxes.Num() + Capsules.Num() + Convexes.Num() < MaxColliders; };
 
-	// sphyl: 스킨 캡슐 provider와 동일한 스케일 규약(GetScaledRadius/CylinderLength).
+	// sphyl: 스킨 캡슐 provider와 동일한 스케일 규약(GetScaledRadius/CylinderLength). 동적이면 prev 끝점도
+	// 채워 FCapsuleCollider의 표면 속도/substep CCD machinery를 그대로 탄다(셰이더/GPU 변경 불필요).
 	for (const FKSphylElem& Sphyl : Setup.AggGeom.SphylElems)
 	{
 		if (!BudgetLeft())
@@ -195,8 +224,17 @@ bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const
 		const FVector Axis = ElemTM.GetUnitAxis(EAxis::Z); // sphyl 축 = 로컬 Z
 		const FVector Center = ElemTM.GetLocation();
 		const float HalfLen = Sphyl.GetScaledCylinderLength(Scale3D) * 0.5f;
-		Capsules.Add(FRopeStaticCapsuleCollider(Center + Axis * HalfLen, Center - Axis * HalfLen,
-			Sphyl.GetScaledRadius(Scale3D)));
+		FRopeStaticCapsuleCollider Cap(Center + Axis * HalfLen, Center - Axis * HalfLen, Sphyl.GetScaledRadius(Scale3D));
+		if (InvDeltaTime > 0.0f)
+		{
+			const FTransform PrevElemTM = Sphyl.GetTransform() * PrevCompTM;
+			const FVector PrevAxis = PrevElemTM.GetUnitAxis(EAxis::Z);
+			const FVector PrevCenter = PrevElemTM.GetLocation();
+			Cap.PrevA = PrevCenter + PrevAxis * HalfLen;
+			Cap.PrevB = PrevCenter - PrevAxis * HalfLen;
+			Cap.InvDeltaTime = InvDeltaTime;
+		}
+		Capsules.Add(MoveTemp(Cap));
 	}
 
 	// sphere: A==B 축퇴 캡슐.
@@ -208,7 +246,15 @@ bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const
 		}
 		const FVector Center = CompTM.TransformPosition(Sphere.Center);
 		const float ScaledRadius = Sphere.Radius * static_cast<float>(Scale3D.GetAbsMin());
-		Capsules.Add(FRopeStaticCapsuleCollider(Center, Center, ScaledRadius));
+		FRopeStaticCapsuleCollider Cap(Center, Center, ScaledRadius);
+		if (InvDeltaTime > 0.0f)
+		{
+			const FVector PrevCenter = PrevCompTM.TransformPosition(Sphere.Center);
+			Cap.PrevA = PrevCenter;
+			Cap.PrevB = PrevCenter;
+			Cap.InvDeltaTime = InvDeltaTime;
+		}
+		Capsules.Add(MoveTemp(Cap));
 	}
 
 	// box: 해석적 OBB — 모서리 정확 처리의 본체. X/Y/Z는 전체 길이. 전단(비균등 스케일 × 회전 elem)만
@@ -227,18 +273,34 @@ bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const
 			// 정확 OBB: 균등 스케일(전 축 동일) 또는 elem 회전 identity(컴포넌트 축 정렬 → 축별 스케일 정확).
 			const FTransform ElemTM = Box.GetTransform() * CompTM;
 			const FVector Half = bUniform ? HalfLocal * AbsScale.X : HalfLocal * AbsScale;
-			Boxes.Add(FRopeBoxCollider(ElemTM.GetLocation(), ElemTM.GetRotation(), Half));
+			FRopeBoxCollider BoxCol(ElemTM.GetLocation(), ElemTM.GetRotation(), Half);
+			if (InvDeltaTime > 0.0f)
+			{
+				const FTransform PrevElemTM = Box.GetTransform() * PrevCompTM;
+				BoxCol.PrevCenter = PrevElemTM.GetLocation();
+				BoxCol.PrevRot = PrevElemTM.GetRotation();
+				BoxCol.InvDeltaTime = InvDeltaTime;
+			}
+			Boxes.Add(MoveTemp(BoxCol));
 		}
 		else
 		{
-			// 전단: 6평면 컨벡스로 정확히(평면은 전단 행렬로도 정확 변환). M1의 min-scale 근사를 대체.
-			TArray<FPlane> WorldPlanes;
-			const FMatrix M = ComposeConvexToWorld(Box.GetTransform(), Scale3D, CompTM);
-			TransformPlanesToWorld(MakeBoxLocalPlanes(HalfLocal), M, WorldPlanes);
-			const FBox WB = FBox(-HalfLocal, HalfLocal).TransformBy(M);
-			if (WorldPlanes.Num() == 6 && WB.IsValid)
+			// 전단: 6평면 컨벡스로 정확히(평면은 전단 행렬로도 정확 변환). 바디-로컬 평면 + 컴포넌트 강체로
+			// 저장해 동적(움직이는 전단 박스)도 지원. M1의 min-scale 근사를 대체.
+			TArray<FPlane> LocalPlanes;
+			const FMatrix BodyLocalM = ComposeConvexBodyLocal(Box.GetTransform(), Scale3D);
+			TransformPlanesToWorld(MakeBoxLocalPlanes(HalfLocal), BodyLocalM, LocalPlanes);
+			const FBox LB = FBox(-HalfLocal, HalfLocal).TransformBy(BodyLocalM);
+			if (LocalPlanes.Num() == 6 && LB.IsValid)
 			{
-				Convexes.Add(FRopeConvexCollider(MoveTemp(WorldPlanes), WB));
+				FRopeConvexCollider Cv(MoveTemp(LocalPlanes), LB, CompTM.GetRotation(), CompTM.GetTranslation());
+				if (InvDeltaTime > 0.0f)
+				{
+					Cv.PrevRot = PrevCompTM.GetRotation();
+					Cv.PrevTrans = PrevCompTM.GetTranslation();
+					Cv.InvDeltaTime = InvDeltaTime;
+				}
+				Convexes.Add(MoveTemp(Cv));
 			}
 		}
 	}
@@ -251,32 +313,40 @@ bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const
 		{
 			return false;
 		}
-		TArray<FPlane> LocalPlanes;
-		Convex.GetPlanes(LocalPlanes);
-		const FMatrix M = ComposeConvexToWorld(Convex.GetTransform(), Scale3D, CompTM);
+		TArray<FPlane> ElemPlanes;
+		Convex.GetPlanes(ElemPlanes);
+		const FMatrix BodyLocalM = ComposeConvexBodyLocal(Convex.GetTransform(), Scale3D);
 
-		if (LocalPlanes.Num() >= 4 && LocalPlanes.Num() <= MaxConvexPlanes && Convex.ElemBox.IsValid)
+		if (ElemPlanes.Num() >= 4 && ElemPlanes.Num() <= MaxConvexPlanes && Convex.ElemBox.IsValid)
 		{
-			TArray<FPlane> WorldPlanes;
-			TransformPlanesToWorld(LocalPlanes, M, WorldPlanes);
-			const FBox WB = Convex.ElemBox.TransformBy(M);
-			if (WorldPlanes.Num() >= 4 && WB.IsValid)
+			TArray<FPlane> LocalPlanes;
+			TransformPlanesToWorld(ElemPlanes, BodyLocalM, LocalPlanes); // elem->바디로컬(강체 제외)
+			const FBox LB = Convex.ElemBox.TransformBy(BodyLocalM);
+			if (LocalPlanes.Num() >= 4 && LB.IsValid)
 			{
-				Convexes.Add(FRopeConvexCollider(MoveTemp(WorldPlanes), WB));
+				FRopeConvexCollider Cv(MoveTemp(LocalPlanes), LB, CompTM.GetRotation(), CompTM.GetTranslation());
+				if (InvDeltaTime > 0.0f)
+				{
+					Cv.PrevRot = PrevCompTM.GetRotation();
+					Cv.PrevTrans = PrevCompTM.GetTranslation();
+					Cv.InvDeltaTime = InvDeltaTime;
+				}
+				Convexes.Add(MoveTemp(Cv));
 				continue;
 			}
 		}
 
-		// 폴백: ElemBox OBB 근사(미쿡/평면 과다/무효). 거칠지만 충돌 유지 > 통째 누락.
+		// 폴백: ElemBox OBB 근사(미쿡/평면 과다/무효). 거칠지만 충돌 유지 > 통째 누락. 정적으로 처리(드문 경로).
 		if (Convex.ElemBox.IsValid)
 		{
+			const FMatrix M = ComposeConvexToWorld(Convex.GetTransform(), Scale3D, CompTM);
 			const FVector CenterW = M.TransformPosition(Convex.ElemBox.GetCenter());
 			const FQuat   RotW = M.GetMatrixWithoutScale().ToQuat();
 			const FVector HalfW = Convex.ElemBox.GetExtent() * static_cast<float>(Scale3D.GetAbsMin());
 			Boxes.Add(FRopeBoxCollider(CenterW, RotW, HalfW));
 			UE_LOG(LogRopeCollision, Verbose,
 				TEXT("StaticBodyProvider on %s: convex elem unusable (%d planes) — falling back to ElemBox OBB."),
-				*GetNameSafe(GetOwner()), LocalPlanes.Num());
+				*GetNameSafe(GetOwner()), ElemPlanes.Num());
 		}
 	}
 
@@ -305,7 +375,8 @@ bool URopeStaticBodyProvider::AppendInstancedBodyColliders(UInstancedStaticMeshC
 		}
 		// 인스턴스 월드 트랜스폼(= 인스턴스 로컬 × 컴포넌트→월드)으로 공유 콜리전을 배치한다 — 일반 스태틱
 		// 메시가 ComponentTransform으로 배치하는 것과 동일하므로 AppendBodyColliders를 그대로 재사용.
-		if (!AppendBodyColliders(*Setup, InstanceTM, MaxColliders, MaxConvexPlanes))
+		// 인스턴스별 prev 추적은 미지원 → 정적(prev=curr, InvDt=0)으로 처리.
+		if (!AppendBodyColliders(*Setup, InstanceTM, InstanceTM, 0.0f, MaxColliders, MaxConvexPlanes))
 		{
 			return false; // 예산 소진(인스턴스는 다른 바디와 같은 MaxColliders 예산을 공유).
 		}

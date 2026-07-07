@@ -173,11 +173,24 @@ public:
 	virtual bool GetGPUBox(FVector& OutCenter, FQuat& OutRot, FVector& OutHalfExtents) const { return false; }
 
 	/**
-	 * GPU 솔버용: 이 collider가 해석적 컨벡스(평면 집합)면 월드 공간 평면 배열(단위 법선·바깥,
-	 * PlaneDot(p)=dot(N,p)-W)과 월드 AABB를 채우고 true. 기본은 false. 박스처럼 정적 월드 전용이라
-	 * 프레임 모션이 없다. OutPlanes는 collider 소유 스토리지를 가리키는 뷰(해당 프레임 동안 유효).
+	 * GPU 박스의 프레임 모션: 이전 프레임 center/rot + 1/프레임dt. GetGPUBox=true인 collider만 의미 있다.
+	 * 기본은 false(정적) — 호출자는 prev=현재, InvDt=0으로 폴백한다. 움직이는 정적 바디(플랫폼/문)가
+	 * 로프를 끌고(표면 속도) substep CCD로 터널링을 막는 데 쓴다(캡슐의 GetGPUCapsuleMotion 대응).
 	 */
-	virtual bool GetGPUConvex(TConstArrayView<FPlane>& OutPlanes, FBox& OutBounds) const { return false; }
+	virtual bool GetGPUBoxMotion(FVector& OutPrevCenter, FQuat& OutPrevRot, float& OutInvDeltaTime) const { return false; }
+
+	/**
+	 * GPU 솔버용: 이 collider가 해석적 컨벡스면 바디-로컬 평면 집합(단위 법선·바깥, PlaneDot(p)=dot(N,p)-W,
+	 * 스케일 반영·강체 트랜스폼 미적용)과 로컬 AABB, 그리고 바디의 강체 트랜스폼(curr rot/trans + prev)과
+	 * 1/프레임dt를 채우고 true. 기본은 false. 월드 평면 = 로컬 평면 ∘ 강체(rot,trans). 움직이는 바디는
+	 * prev 강체로 표면 속도/substep CCD를 처리한다(정적이면 prev=curr, InvDt=0). OutLocalPlanes는 collider
+	 * 소유 스토리지 뷰(해당 프레임 동안 유효).
+	 */
+	virtual bool GetGPUConvex(TConstArrayView<FPlane>& OutLocalPlanes, FBox& OutLocalBounds,
+		FQuat& OutRot, FVector& OutTrans, FQuat& OutPrevRot, FVector& OutPrevTrans, float& OutInvDeltaTime) const
+	{
+		return false;
+	}
 
 	/**
 	 * 움직이는 collider의 이번 프레임 모션(prev->curr 월드 트랜스폼)을 채우고 true. 기본은 false(정적/모션없음).

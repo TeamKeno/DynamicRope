@@ -37,19 +37,31 @@ struct FRopeGPUBox
 	FVector Center = FVector::ZeroVector;      // 월드 공간 박스 중심
 	FQuat   Rot = FQuat::Identity;             // 월드 공간 박스 회전
 	FVector HalfExtents = FVector::ZeroVector; // 로컬 반폭(스케일 반영 후)
+
+	// 이전 프레임 center/rot + 1/프레임dt(움직이는 바디 표면 속도/substep CCD). InvDeltaTime=0이면 정적 —
+	// 패킹이 prev=현재로 채우므로 안 채워도 기존 동작과 동일(캡슐의 Prev* 대응).
+	FVector PrevCenter = FVector::ZeroVector;
+	FQuat   PrevRot = FQuat::Identity;
+	float   InvDeltaTime = 0.0f;
 };
 
 /**
- * GPU 충돌용 해석적 컨벡스(평면 집합). 정적 월드 지오메트리(convex 심플 콜리전 + 전단 박스) 전용.
- * 평면은 Step의 ConvexPlanes 평탄 풀 [PlaneOffset, PlaneOffset+PlaneCount)에 저장(월드 공간, 단위
- * 법선·바깥, PlaneDot(p)=dot(N,p)-W). Bounds는 월드 AABB(질의 컬). 호출자가 GetGPUConvex로 추출.
+ * GPU 충돌용 해석적 컨벡스(평면 집합). 정적/동적 월드 지오메트리(convex 심플 콜리전 + 전단 박스).
+ * 평면은 Step의 ConvexPlanes 평탄 풀 [PlaneOffset, PlaneOffset+PlaneCount)에 저장(바디-로컬, 단위
+ * 법선·바깥, PlaneDot(p)=dot(N,p)-W, 강체 미적용). 월드 = 로컬 ∘ 강체(Rot,Trans). LocalBounds는 로컬
+ * AABB(질의 컬). 움직이는 바디는 prev 강체 + InvDeltaTime으로 표면 속도/CCD 처리. 호출자가 GetGPUConvex로 추출.
  */
 struct FRopeGPUConvex
 {
-	int32   PlaneOffset = 0;                     // ConvexPlanes 풀 내 시작 인덱스
-	int32   PlaneCount = 0;                       // 평면 수
-	FVector BoundsCenter = FVector::ZeroVector;   // 월드 AABB 중심
-	FVector BoundsExtent = FVector::ZeroVector;   // 월드 AABB 반크기
+	int32   PlaneOffset = 0;                          // ConvexPlanes 풀 내 시작 인덱스
+	int32   PlaneCount = 0;                            // 평면 수
+	FVector LocalBoundsCenter = FVector::ZeroVector;  // 바디-로컬 AABB 중심
+	FVector LocalBoundsExtent = FVector::ZeroVector;  // 바디-로컬 AABB 반크기
+	FQuat   Rot = FQuat::Identity;                    // 강체 회전(curr)
+	FVector Trans = FVector::ZeroVector;              // 강체 평행이동(curr)
+	FQuat   PrevRot = FQuat::Identity;                // 강체 회전(prev)
+	FVector PrevTrans = FVector::ZeroVector;          // 강체 평행이동(prev)
+	float   InvDeltaTime = 0.0f;                      // 1/프레임dt(0이면 정적)
 };
 
 /**

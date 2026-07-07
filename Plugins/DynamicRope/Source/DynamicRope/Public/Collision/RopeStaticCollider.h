@@ -23,11 +23,18 @@ public:
 	FQuat   Rot = FQuat::Identity;             // 월드 공간 박스 회전
 	FVector HalfExtents = FVector::ZeroVector; // 로컬 반폭(스케일 반영 후)
 
+	// 동적 바디 표면 속도용: 이전 프레임 center/rot + 1/프레임dt. provider가 움직이는 바디에 채운다.
+	// InvDeltaTime=0(기본)이면 정적 — prev는 무시되고 기존 동작과 동일. 스케일은 프레임 간 불변 가정.
+	FVector PrevCenter = FVector::ZeroVector;
+	FQuat   PrevRot = FQuat::Identity;
+	float   InvDeltaTime = 0.0f;
+
 	FRopeBoxCollider() = default;
 	FRopeBoxCollider(const FVector& InCenter, const FQuat& InRot, const FVector& InHalfExtents)
-		: Center(InCenter), Rot(InRot), HalfExtents(InHalfExtents) {}
+		: Center(InCenter), Rot(InRot), HalfExtents(InHalfExtents), PrevCenter(InCenter), PrevRot(InRot) {}
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
+	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const override;
 	virtual FBox GetWorldBounds() const override;
 	virtual bool IsWorldStatic() const override { return true; }
 	virtual bool GetGPUBox(FVector& OutCenter, FQuat& OutRot, FVector& OutHalfExtents) const override
@@ -37,7 +44,18 @@ public:
 		OutHalfExtents = HalfExtents;
 		return true;
 	}
-	// QuerySwept/ProjectToSurface: 기본 구현 그대로 — 정적이라 현재 포즈 라인 샘플 폴백이 정확하다.
+	virtual bool GetGPUBoxMotion(FVector& OutPrevCenter, FQuat& OutPrevRot, float& OutInvDeltaTime) const override
+	{
+		if (InvDeltaTime <= 0.0f)
+		{
+			return false; // 정적 — 호출자가 prev=현재, InvDt=0으로 폴백.
+		}
+		OutPrevCenter = PrevCenter;
+		OutPrevRot = PrevRot;
+		OutInvDeltaTime = InvDeltaTime;
+		return true;
+	}
+	// ProjectToSurface: 기본 구현 그대로.
 };
 
 /**
@@ -64,22 +82,38 @@ public:
 class DYNAMICROPE_API FRopeConvexCollider : public IRopeCollider
 {
 public:
-	// 월드 공간 평면(단위 법선·바깥 방향). PlaneDot(p)=dot(N,p)-W: 내부는 모든 평면에서 <0.
-	TArray<FPlane> Planes;
-	FBox Bounds = FBox(ForceInit); // 월드 AABB(브로드페이즈 + 질의 컬).
+	// 바디-로컬 평면(단위 법선·바깥, 스케일 반영·강체 미적용). PlaneDot(p)=dot(N,p)-W: 로컬 내부는 모든 평면 <0.
+	// 월드 평면 = 로컬 ∘ 강체(Rot,Trans). 강체만 프레임 간 움직이고 로컬 평면은 불변(스케일 불변 가정).
+	TArray<FPlane> LocalPlanes;
+	FBox LocalBounds = FBox(ForceInit); // 바디-로컬 AABB(질의 컬).
+
+	// 바디의 강체 트랜스폼(컴포넌트 rot+trans). curr + 이전 프레임(동적 표면 속도/CCD). InvDeltaTime=0이면 정적.
+	FQuat   Rot = FQuat::Identity;
+	FVector Trans = FVector::ZeroVector;
+	FQuat   PrevRot = FQuat::Identity;
+	FVector PrevTrans = FVector::ZeroVector;
+	float   InvDeltaTime = 0.0f;
 
 	FRopeConvexCollider() = default;
-	FRopeConvexCollider(TArray<FPlane>&& InPlanes, const FBox& InBounds)
-		: Planes(MoveTemp(InPlanes)), Bounds(InBounds) {}
+	// 정적 편의 생성자: 로컬 평면 + 로컬 bounds + 강체(기본 identity → 월드=로컬). 테스트/정적 경로용.
+	FRopeConvexCollider(TArray<FPlane>&& InLocalPlanes, const FBox& InLocalBounds,
+		const FQuat& InRot = FQuat::Identity, const FVector& InTrans = FVector::ZeroVector)
+		: LocalPlanes(MoveTemp(InLocalPlanes)), LocalBounds(InLocalBounds)
+		, Rot(InRot), Trans(InTrans), PrevRot(InRot), PrevTrans(InTrans) {}
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
-	virtual FBox GetWorldBounds() const override { return Bounds; }
+	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const override;
+	virtual FBox GetWorldBounds() const override;
 	virtual bool IsWorldStatic() const override { return true; }
-	virtual bool GetGPUConvex(TConstArrayView<FPlane>& OutPlanes, FBox& OutBounds) const override
+	virtual bool GetGPUConvex(TConstArrayView<FPlane>& OutLocalPlanes, FBox& OutLocalBounds,
+		FQuat& OutRot, FVector& OutTrans, FQuat& OutPrevRot, FVector& OutPrevTrans, float& OutInvDeltaTime) const override
 	{
-		OutPlanes = Planes;
-		OutBounds = Bounds;
+		OutLocalPlanes = LocalPlanes;
+		OutLocalBounds = LocalBounds;
+		OutRot = Rot; OutTrans = Trans;
+		OutPrevRot = PrevRot; OutPrevTrans = PrevTrans;
+		OutInvDeltaTime = InvDeltaTime;
 		return true;
 	}
-	// QuerySwept/ProjectToSurface: 기본 구현 그대로(정적 → 현재 포즈 라인 샘플 폴백).
+	// ProjectToSurface: 기본 구현 그대로.
 };

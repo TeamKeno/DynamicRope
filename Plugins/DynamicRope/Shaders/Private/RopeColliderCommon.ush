@@ -47,21 +47,28 @@ struct FRopeSDFCollider
 // GDF(복셀 필드)가 뭉개던 모서리를 로컬 클램프 질의로 정확히 처리하는 것이 존재 이유. C++ FRopeBoxGPU와 1:1.
 struct FRopeBox
 {
-	float4 Center;      // xyz
+	float4 Center;      // xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
 	float4 Rot;         // quat (x,y,z,w)
 	float4 HalfExtents; // xyz(스케일 반영 후 반폭)
+	float4 PrevCenter;  // xyz — 이전 프레임 중심(정적이면 Center와 동일)
+	float4 PrevRot;     // quat — 이전 프레임 회전
 };
 
-// 정적 컨벡스(평면 집합). 평면은 ConvexPlanes 평탄 풀 [PlaneOffset, PlaneOffset+PlaneCount)에.
-// C++ FRopeConvexGPU와 1:1. BoundsCenter/Extent는 월드 AABB(질의 컬).
+// 컨벡스(평면 집합). 평면은 ConvexPlanes 평탄 풀 [PlaneOffset, PlaneOffset+PlaneCount)에 바디-로컬로 저장.
+// C++ FRopeConvexGPU와 1:1. 월드 = 로컬 ∘ 강체(Rot,Trans). LocalBounds는 로컬 AABB(질의 컬), prev 강체 +
+// InvDeltaTime(LocalBoundsExtent.w)로 동적 표면 속도/CCD.
 struct FRopeConvex
 {
 	int    PlaneOffset;
 	int    PlaneCount;
 	int    Pad0;
 	int    Pad1;
-	float4 BoundsCenter; // xyz
-	float4 BoundsExtent; // xyz
+	float4 LocalBoundsCenter; // xyz
+	float4 LocalBoundsExtent; // xyz, w = InvDeltaTime
+	float4 Rot;               // quat (curr)
+	float4 Trans;             // xyz
+	float4 PrevRot;           // quat (prev)
+	float4 PrevTrans;         // xyz
 };
 
 StructuredBuffer<FRopeCapsule>   Capsules;       // 전 로프 capsule 평탄 배열(per-rope offset/count는 호출자 파라미터)
@@ -232,32 +239,36 @@ bool RopeQueryBoxPoint(FRopeBox Box, float3 P, float NodeR,
 	return SignedDist < NodeR;
 }
 
-// 컨벡스 점질의: 점 P vs 정적 컨벡스(평면 집합) + 질의 반경 NodeR. 침투 시 true. AABB 컬 후 max-plane —
-// 점이 가장 많이 위반한 평면까지의 부호 거리(내부 정확, 외부 엣지 근방 과소추정=보수적). CPU FRopeConvexCollider 미러.
-bool RopeQueryConvexPoint(FRopeConvex Cv, float3 P, float NodeR,
-	out float3 OutNormal, out float OutPen, out float3 OutClosest)
+// 컨벡스 로컬 점질의: 주어진 강체(Rot,Trans)로 월드 P를 바디-로컬로 변환 후 max-plane. 노드-스윕 sub-포즈와
+// 세그먼트(chord) 현재-포즈가 공유(강체만 다르게 넘김). 내부 정확, 외부 엣지 근방 과소추정=보수적. 침투 시 true.
+// OutLocalClosest는 재질점 이월(sub-포즈)/표면 속도 재구성용 로컬 표면점. CPU FRopeConvexCollider 미러.
+bool RopeQueryConvexLocal(FRopeConvex Cv, float4 Rot, float3 Trans, float3 P, float NodeR,
+	out float3 OutNormal, out float OutPen, out float3 OutClosest, out float3 OutLocalClosest)
 {
 	OutNormal = float3(0.0f, 0.0f, 1.0f);
 	OutPen = 0.0f;
 	OutClosest = P;
+	OutLocalClosest = float3(0.0f, 0.0f, 0.0f);
 	if (Cv.PlaneCount <= 0)
 	{
 		return false;
 	}
-	// 월드 AABB 컬(+NodeR 여유).
-	const float3 Mn = Cv.BoundsCenter.xyz - Cv.BoundsExtent.xyz - NodeR;
-	const float3 Mx = Cv.BoundsCenter.xyz + Cv.BoundsExtent.xyz + NodeR;
-	if (any(P < Mn) || any(P > Mx))
+	// 월드 -> 바디-로컬(강체 역): Lp = qInv*(P - Trans).
+	const float3 Lp = RopeQuatRotate(float4(-Rot.xyz, Rot.w), P - Trans);
+	// 로컬 AABB 컬(+NodeR 여유).
+	const float3 Mn = Cv.LocalBoundsCenter.xyz - Cv.LocalBoundsExtent.xyz - NodeR;
+	const float3 Mx = Cv.LocalBoundsCenter.xyz + Cv.LocalBoundsExtent.xyz + NodeR;
+	if (any(Lp < Mn) || any(Lp > Mx))
 	{
 		return false;
 	}
-	// max-plane: PlaneDot(p)=dot(N,p)-W 최대인 평면이 표면 근사. 그 법선이 push-out 방향.
+	// max-plane(로컬): PlaneDot(p)=dot(N,p)-W 최대인 평면이 표면 근사. 로컬 법선을 월드로 회전한 게 push-out.
 	float MaxD = -1e30f;
 	int   Best = -1;
 	for (int i = 0; i < Cv.PlaneCount; ++i)
 	{
 		const float4 Pl = ConvexPlanes[Cv.PlaneOffset + i];
-		const float  D = dot(Pl.xyz, P) - Pl.w;
+		const float  D = dot(Pl.xyz, Lp) - Pl.w;
 		if (D > MaxD) { MaxD = D; Best = i; }
 	}
 	if (Best < 0 || MaxD >= NodeR)
@@ -265,9 +276,10 @@ bool RopeQueryConvexPoint(FRopeConvex Cv, float3 P, float NodeR,
 		return false;
 	}
 	const float4 BP = ConvexPlanes[Cv.PlaneOffset + Best];
-	OutNormal = BP.xyz;                 // 빌드 시 정규화된 단위·바깥 법선
-	OutPen = NodeR - MaxD;              // 안쪽이면 MaxD<0이라 더 큼
-	OutClosest = P - BP.xyz * MaxD;     // 그 평면 위 최근접점
+	OutLocalClosest = Lp - BP.xyz * MaxD;               // 로컬 표면점(재질점)
+	OutNormal = RopeQuatRotate(Rot, BP.xyz);            // 월드 바깥 법선
+	OutPen = NodeR - MaxD;                              // 안쪽이면 MaxD<0이라 더 큼
+	OutClosest = RopeQuatRotate(Rot, OutLocalClosest) + Trans; // 월드 표면점
 	return true;
 }
 

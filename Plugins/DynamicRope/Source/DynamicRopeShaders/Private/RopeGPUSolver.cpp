@@ -80,24 +80,30 @@ struct FRopeCapsuleGPU
 };
 static_assert(sizeof(FRopeCapsuleGPU) % 16 == 0, "FRopeCapsuleGPU must be 16-byte aligned to match HLSL structured buffer.");
 
-// HLSL FRopeBox와 1:1 미러. 정적 박스(OBB): 월드 center + quat + 반폭(스케일 반영 후).
+// HLSL FRopeBox와 1:1 미러. 박스(OBB): 월드 center + quat + 반폭 + 이전 프레임 center/rot(동적 표면 속도).
 struct FRopeBoxGPU
 {
-	FVector4f Center;      // xyz
+	FVector4f Center;      // xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
 	FVector4f Rot;         // quat (x,y,z,w)
 	FVector4f HalfExtents; // xyz
+	FVector4f PrevCenter;  // xyz — 이전 프레임 중심(정적이면 패킹이 Center로 채움)
+	FVector4f PrevRot;     // quat — 이전 프레임 회전
 };
 static_assert(sizeof(FRopeBoxGPU) % 16 == 0, "FRopeBoxGPU must be 16-byte aligned to match HLSL structured buffer.");
 
-// HLSL FRopeConvex와 1:1 미러. 평면 풀 오프셋/개수 + 월드 AABB. 평면은 ConvexPlanes float4 버퍼에 별도 저장.
+// HLSL FRopeConvex와 1:1 미러. 평면 풀 오프셋/개수 + 로컬 AABB + 강체(curr/prev). 평면은 ConvexPlanes(로컬)에 별도.
 struct FRopeConvexGPU
 {
 	int32     PlaneOffset;
 	int32     PlaneCount;
 	int32     Pad0 = 0;
 	int32     Pad1 = 0;
-	FVector4f BoundsCenter; // xyz
-	FVector4f BoundsExtent; // xyz
+	FVector4f LocalBoundsCenter; // xyz
+	FVector4f LocalBoundsExtent; // xyz, w = InvDeltaTime
+	FVector4f Rot;               // quat (curr)
+	FVector4f Trans;             // xyz
+	FVector4f PrevRot;           // quat (prev)
+	FVector4f PrevTrans;         // xyz
 };
 static_assert(sizeof(FRopeConvexGPU) % 16 == 0, "FRopeConvexGPU must be 16-byte aligned to match HLSL structured buffer.");
 
@@ -727,9 +733,15 @@ static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep&
 	for (const FRopeGPUBox& Box : S.Boxes)
 	{
 		FRopeBoxGPU G;
-		G.Center      = FVector4f((float)Box.Center.X, (float)Box.Center.Y, (float)Box.Center.Z, 0.0f);
+		G.Center      = FVector4f((float)Box.Center.X, (float)Box.Center.Y, (float)Box.Center.Z, Box.InvDeltaTime); // w=InvDt
 		G.Rot         = FVector4f((float)Box.Rot.X, (float)Box.Rot.Y, (float)Box.Rot.Z, (float)Box.Rot.W);
 		G.HalfExtents = FVector4f((float)Box.HalfExtents.X, (float)Box.HalfExtents.Y, (float)Box.HalfExtents.Z, 0.0f);
+		// 정적(InvDt 0)이면 prev=현재 — 커널이 prev 유효성 분기 없이 항상 보간 가능(캡슐 패킹과 동일).
+		const bool bMoving = Box.InvDeltaTime > 0.0f;
+		const FVector PC = bMoving ? Box.PrevCenter : Box.Center;
+		const FQuat   PR = bMoving ? Box.PrevRot : Box.Rot;
+		G.PrevCenter  = FVector4f((float)PC.X, (float)PC.Y, (float)PC.Z, 0.0f);
+		G.PrevRot     = FVector4f((float)PR.X, (float)PR.Y, (float)PR.Z, (float)PR.W);
 		BoxesFlat.Add(G);
 	}
 
@@ -749,11 +761,19 @@ static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 	TArray<FVector4f>&      PlaneFlat = *GraphBuilder.AllocObject<TArray<FVector4f>>();
 	for (const FRopeGPUConvex& Cv : S.Convexes)
 	{
+		// 정적(InvDt 0)이면 prev=현재 — 커널이 prev 유효성 분기 없이 항상 보간 가능(박스/캡슐 패킹과 동일).
+		const bool bMoving = Cv.InvDeltaTime > 0.0f;
+		const FQuat   PR = bMoving ? Cv.PrevRot : Cv.Rot;
+		const FVector PT = bMoving ? Cv.PrevTrans : Cv.Trans;
 		FRopeConvexGPU G;
-		G.PlaneOffset  = PlaneFlat.Num();
-		G.PlaneCount   = Cv.PlaneCount;
-		G.BoundsCenter = FVector4f((float)Cv.BoundsCenter.X, (float)Cv.BoundsCenter.Y, (float)Cv.BoundsCenter.Z, 0.0f);
-		G.BoundsExtent = FVector4f((float)Cv.BoundsExtent.X, (float)Cv.BoundsExtent.Y, (float)Cv.BoundsExtent.Z, 0.0f);
+		G.PlaneOffset       = PlaneFlat.Num();
+		G.PlaneCount        = Cv.PlaneCount;
+		G.LocalBoundsCenter = FVector4f((float)Cv.LocalBoundsCenter.X, (float)Cv.LocalBoundsCenter.Y, (float)Cv.LocalBoundsCenter.Z, 0.0f);
+		G.LocalBoundsExtent = FVector4f((float)Cv.LocalBoundsExtent.X, (float)Cv.LocalBoundsExtent.Y, (float)Cv.LocalBoundsExtent.Z, Cv.InvDeltaTime); // w=InvDt
+		G.Rot               = FVector4f((float)Cv.Rot.X, (float)Cv.Rot.Y, (float)Cv.Rot.Z, (float)Cv.Rot.W);
+		G.Trans             = FVector4f((float)Cv.Trans.X, (float)Cv.Trans.Y, (float)Cv.Trans.Z, 0.0f);
+		G.PrevRot           = FVector4f((float)PR.X, (float)PR.Y, (float)PR.Z, (float)PR.W);
+		G.PrevTrans         = FVector4f((float)PT.X, (float)PT.Y, (float)PT.Z, 0.0f);
 		ConvFlat.Add(G);
 		const int32 Start = Cv.PlaneOffset;
 		for (int32 p = 0; p < Cv.PlaneCount; ++p)

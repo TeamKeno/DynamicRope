@@ -55,4 +55,12 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "4", ToolTip = "컨벡스당 평면 수 상한(초과분은 OBB 폴백). 단일 소스 — 프로바이더가 직접 읽습니다."))
 	int32 StaticBodyMaxConvexPlanes = 32;
+
+	/**
+	 * 정적 바디 프로바이더가 WorldStatic 외에 WorldDynamic 오브젝트도 수집할지. 켜면 움직이는 물리/키네마틱
+	 * 바디(엘리베이터·문·플랫폼 등)도 로프 충돌에 참여한다. 프로바이더가 이전 프레임 트랜스폼을 추적해
+	 * 표면 속도를 산출하므로 움직이는 표면이 로프를 끌고 substep CCD로 터널링을 막는다.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ToolTip = "WorldStatic 외에 WorldDynamic 바디도 수집합니다(움직이는 플랫폼/문 등). 이전 프레임 트랜스폼으로 표면 속도/CCD 처리."))
+	bool bIncludeWorldDynamic = false;
 };

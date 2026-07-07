@@ -204,6 +204,79 @@ bool FRopeConvexEdgeConservativeTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 동적 박스: 이전 프레임 트랜스폼으로 표면 속도가 (현재 - 이전 재질점)/dt 로 산출되는가(움직이는 표면 드래그).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBoxSurfaceVelocityTest,
+	"DynamicRope.Collision.BoxSurfaceVelocity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeBoxSurfaceVelocityTest::RunTest(const FString& Parameters)
+{
+	// 박스가 이번 프레임 +X로 10cm 이동(prev center = -10). dt=1/60 → InvDt=60.
+	FRopeBoxCollider Box(FVector::ZeroVector, FQuat::Identity, FVector(50.0));
+	Box.PrevCenter = FVector(-10.0, 0.0, 0.0);
+	Box.InvDeltaTime = 60.0f;
+
+	// +X 면 바깥 접촉. 재질점 로컬 (50,0,0): curr 월드 (50,0,0), prev 월드 (40,0,0). 표면 속도 +X 600cm/s.
+	const FRopeContact C = Box.Query(FVector(52.0, 0.0, 0.0), 5.0f);
+	TestTrue(TEXT("moving box hit"), C.bHit);
+	TestTrue(TEXT("normal +X"), C.Normal.Equals(FVector(1, 0, 0), 1e-4));
+	TestTrue(FString::Printf(TEXT("surface velocity %s should be (600,0,0)"), *C.SurfaceVelocity.ToString()),
+		C.SurfaceVelocity.Equals(FVector(600.0, 0.0, 0.0), 1e-2));
+	return true;
+}
+
+// 컨벡스 강체 트랜스폼: 바디-로컬 평면 + 강체(Rot,Trans)로 월드 질의가 올바른가(월드 = 로컬 ∘ 강체).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexRigidTransformTest,
+	"DynamicRope.Collision.ConvexRigidTransform",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeConvexRigidTransformTest::RunTest(const FString& Parameters)
+{
+	// 로컬 박스(반폭 50, 원점) 6평면 + 강체 Trans=(100,0,0). 월드에서 +X 면은 x=150.
+	const FVector H(50.0);
+	FRopeConvexCollider Cv(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H), FQuat::Identity, FVector(100.0, 0.0, 0.0));
+
+	// 월드 (152,0,0): 로컬 (52,0,0) → +X 면 위반 2. 법선 +X, 표면점 월드 (150,0,0), 침투 5-2=3.
+	const FRopeContact C = Cv.Query(FVector(152.0, 0.0, 0.0), 5.0f);
+	TestTrue(TEXT("translated convex hit"), C.bHit);
+	TestTrue(TEXT("normal +X"), C.Normal.Equals(FVector(1, 0, 0), 1e-3));
+	TestTrue(FString::Printf(TEXT("surface point %s should be (150,0,0)"), *C.SurfacePoint.ToString()),
+		C.SurfacePoint.Equals(FVector(150.0, 0.0, 0.0), 1e-3));
+	TestTrue(TEXT("penetration = 3"), FMath::IsNearlyEqual(C.Penetration, 3.0f, 1e-3f));
+
+	// 회전된 강체도: 90도 Z 회전 + Trans. 로컬 +X 면이 월드에서 +Y 방향이 된다.
+	{
+		const FQuat Rot(FVector::UpVector, HALF_PI);
+		FRopeConvexCollider CvR(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H), Rot, FVector::ZeroVector);
+		// 로컬 +X(50,0,0) → 월드 (0,50,0). 그 바깥 (0,52,0) 질의 → 법선 월드 +Y.
+		const FRopeContact CR = CvR.Query(FVector(0.0, 52.0, 0.0), 5.0f);
+		TestTrue(TEXT("rotated convex hit"), CR.bHit);
+		TestTrue(FString::Printf(TEXT("rotated normal %s should be +Y"), *CR.Normal.ToString()),
+			CR.Normal.Equals(FVector(0, 1, 0), 1e-3));
+	}
+	return true;
+}
+
+// 동적 컨벡스: 강체 이동 시 표면 속도 산출.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexSurfaceVelocityTest,
+	"DynamicRope.Collision.ConvexSurfaceVelocity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeConvexSurfaceVelocityTest::RunTest(const FString& Parameters)
+{
+	const FVector H(50.0);
+	FRopeConvexCollider Cv(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H), FQuat::Identity, FVector(100.0, 0.0, 0.0));
+	Cv.PrevTrans = FVector(90.0, 0.0, 0.0); // 이번 프레임 +X로 10cm 이동
+	Cv.InvDeltaTime = 60.0f;
+
+	// 재질점 로컬 (50,0,0): curr 월드 (150,0,0), prev 월드 (140,0,0). 표면 속도 +X 600cm/s.
+	const FRopeContact C = Cv.Query(FVector(152.0, 0.0, 0.0), 5.0f);
+	TestTrue(TEXT("moving convex hit"), C.bHit);
+	TestTrue(FString::Printf(TEXT("surface velocity %s should be (600,0,0)"), *C.SurfaceVelocity.ToString()),
+		C.SurfaceVelocity.Equals(FVector(600.0, 0.0, 0.0), 1e-2));
+	return true;
+}
+
 // 솔버 통합: 박스 모서리 위로 드레이프된 로프가 여러 프레임 뒤에도 박스 내부로 파고들지 않는가
 // (GDF 모서리 라운딩 관통 버그의 솔버 레벨 회귀 테스트).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBoxSolverCornerDrapeTest,
