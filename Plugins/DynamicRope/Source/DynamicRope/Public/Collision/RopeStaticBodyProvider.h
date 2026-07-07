@@ -19,6 +19,7 @@
 
 class UBodySetup;
 class UPrimitiveComponent;
+class UInstancedStaticMeshComponent;
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeStaticBodyProvider : public UActorComponent, public IRopeColliderProvider
@@ -60,4 +61,9 @@ private:
 	// 한 컴포넌트의 BodySetup 심플 콜리전을 월드 공간 콜라이더로 추가한다. 예산 소진 시 false.
 	// 예산/컨벡스 평면 상한은 호출자(BuildColliders)가 Project Settings에서 읽어 전달한다(단일 소스).
 	bool AppendBodyColliders(const UBodySetup& Setup, const FTransform& CompTM, int32 MaxColliders, int32 MaxConvexPlanes);
+
+	// ISM/HISM(M3): 로프 bounds와 겹치는 인스턴스만 열거해 각 인스턴스 월드 트랜스폼으로 공유 BodySetup을
+	// 추출한다(모든 인스턴스가 같은 메시 콜리전 공유). 예산 소진 시 false. 폴리지/모듈러 에셋 지원.
+	bool AppendInstancedBodyColliders(UInstancedStaticMeshComponent& ISM, const FBox& RopeBounds,
+		int32 MaxColliders, int32 MaxConvexPlanes);
 };

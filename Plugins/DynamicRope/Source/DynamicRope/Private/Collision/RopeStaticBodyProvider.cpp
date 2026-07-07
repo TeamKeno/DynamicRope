@@ -144,10 +144,16 @@ void URopeStaticBodyProvider::BuildColliders(const FBox& RopeBounds)
 		{
 			continue;
 		}
-		// ISM/HISM은 v1 범위 밖 — GetBodySetup이 인스턴스 트랜스폼을 모르는 원본 셰이프를 주므로
-		// (컴포넌트 원점에 콜라이더 1개 = 오답) 통째로 건너뛴다. M3에서 인스턴스별 처리 예정.
-		if (Prim->IsA<UInstancedStaticMeshComponent>())
+		// ISM/HISM(M3): 인스턴스별 처리 — 한 컴포넌트가 공유 메시 콜리전을 여러 인스턴스에 배치한다.
+		// GetBodySetup은 인스턴스 트랜스폼을 모르는 원본(로컬) 셰이프를 주므로, 근접 인스턴스마다 그
+		// 월드 트랜스폼으로 추출해야 한다(HISM도 이 베이스로 캐치).
+		if (UInstancedStaticMeshComponent* ISM = Cast<UInstancedStaticMeshComponent>(Prim))
 		{
+			if (!AppendInstancedBodyColliders(*ISM, RopeBounds, MaxColliders, MaxConvexPlanes))
+			{
+				bBudgetClipped = true;
+				break;
+			}
 			continue;
 		}
 		const UBodySetup* Setup = Prim->GetBodySetup();
@@ -274,5 +280,35 @@ bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const
 		}
 	}
 
+	return true;
+}
+
+bool URopeStaticBodyProvider::AppendInstancedBodyColliders(UInstancedStaticMeshComponent& ISM,
+	const FBox& RopeBounds, int32 MaxColliders, int32 MaxConvexPlanes)
+{
+	// 모든 인스턴스가 공유하는 메시 콜리전(로컬 셰이프). ISM은 GetBodySetup을 오버라이드하지 않아
+	// UStaticMeshComponent의 것(= 메시 BodySetup)을 상속한다.
+	const UBodySetup* Setup = ISM.GetBodySetup();
+	if (!Setup)
+	{
+		return true; // 콜리전 없음 — 스킵(예산 소진 아님).
+	}
+
+	// 로프 bounds와 겹치는 인스턴스만 열거(월드 공간 박스) — 밀집 폴리지에서도 근접분만 추린다.
+	const TArray<int32> Indices = ISM.GetInstancesOverlappingBox(RopeBounds, /*bBoxInWorldSpace=*/true);
+	for (int32 Index : Indices)
+	{
+		FTransform InstanceTM;
+		if (!ISM.GetInstanceTransform(Index, InstanceTM, /*bWorldSpace=*/true))
+		{
+			continue;
+		}
+		// 인스턴스 월드 트랜스폼(= 인스턴스 로컬 × 컴포넌트→월드)으로 공유 콜리전을 배치한다 — 일반 스태틱
+		// 메시가 ComponentTransform으로 배치하는 것과 동일하므로 AppendBodyColliders를 그대로 재사용.
+		if (!AppendBodyColliders(*Setup, InstanceTM, MaxColliders, MaxConvexPlanes))
+		{
+			return false; // 예산 소진(인스턴스는 다른 바디와 같은 MaxColliders 예산을 공유).
+		}
+	}
 	return true;
 }
