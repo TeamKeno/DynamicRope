@@ -1264,8 +1264,9 @@ namespace
 				{
 					continue; // 평행 면 — 교선 없음.
 				}
-				// 교선 위 한 점 p0: N_i·p=W_i, N_j·p=W_j, Dir·p=0 (표준 3평면 교점 공식).
-				const FVector P0 = (FVector::CrossProduct(Dir, Nj) * Wi + FVector::CrossProduct(Ni, Dir) * Wj) / DirLenSq;
+				// 교선 위 한 점 p0 = (Wi·(Nj×Dir) + Wj·(Dir×Ni)) / |Dir|² — 두 평면 교선의 표준 점 공식.
+				// (외적 인자 순서가 load-bearing: 뒤바뀌면 P0가 반사돼 비대칭 컨벡스에서 엣지가 대량 누락된다.)
+				const FVector P0 = (FVector::CrossProduct(Nj, Dir) * Wi + FVector::CrossProduct(Dir, Ni) * Wj) / DirLenSq;
 
 				// 나머지 평면으로 무한선을 클립: dot(N_k, p0 + t*Dir) <= W_k.
 				double TMin = -DBL_MAX, TMax = DBL_MAX;
