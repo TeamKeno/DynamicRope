@@ -224,6 +224,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	float GetSolverLODScale() const { return SolverLODScale; }
 
+	/** 이번 프레임 이 로프가 GPU 솔버로 step됐는가(false면 CPU 폴백/솔버 off). 디버그 확인용. */
+	bool IsGpuSteppedThisFrame() const { return bGpuSteppedThisFrame; }
+
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }

@@ -176,10 +176,11 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	VertexBuffers.InitWithDummyData(&VertexFactory, GetRequiredVertexCount());
 	IndexBuffer.NumIndices = GetRequiredIndexCount();
 
-	// GPU 튜브 상시화: 렌더 가능 RHI + NumRings<=256(단일 스레드그룹 한도)이면 GPU 튜브(pos/tangent/UV 컴퓨트),
-	// 아니면(쿡/-nullrhi/서버, 또는 링>256) CPU BuildTube 폴백. CVar 토글 없음 — G4 솔버와 동일한 자동 선택.
+	// GPU 튜브 상시화: 렌더 가능 RHI + NumRings<=MaxTubeRings(최상단 스레드그룹 버킷)이면 GPU 튜브
+	// (pos/tangent/UV 컴퓨트), 아니면(쿡/-nullrhi/서버, 또는 링>상한) CPU BuildTube 폴백. CVar 토글 없음 —
+	// G4 솔버와 동일한 자동 선택. 상한은 RopeTubeBuilder의 버킷 정의를 단일 소스로 참조(드리프트 방지).
 	// 생성 시점에 한 번 결정(링 수는 proxy 수명 동안 고정).
-	bUseGpuTube = (GDynamicRHI != nullptr && FApp::CanEverRender()) && NumRings <= 256;
+	bUseGpuTube = (GDynamicRHI != nullptr && FApp::CanEverRender()) && NumRings <= RopeGPU::MaxTubeRings();
 
 	// B2-lite: 솔버 resident PosBuf를 직접 읽기 위한 핸들(GT에서 캡처). 솔버는 월드 수명이라 proxy 동안 유효.
 	RopeId = Component->GetUniqueID();

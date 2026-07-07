@@ -9,14 +9,37 @@
 #include "RenderGraphUtils.h" // FComputeShaderUtils
 #include "DataDrivenShaderPlatformInfo.h"
 
-// groupshared frame 저장 / numthreads 크기 == 지원 최대 ring 수(= 솔버 MaxNodes). NumRings는 이 한도 내여야 한다.
-static constexpr int32 ROPE_TUBE_MAX_RINGS = 256;
+// 링 버킷(스레드그룹 크기 == groupshared frame 배열 크기). 로프 1개 = 스레드그룹 1개라, 예전엔 모든 로프가
+// 고정 256 그룹을 잡아 링 수가 적은 로프는 스레드 대부분이 idle(배리어에는 참여)이었다. 이제 NumRings 이상인
+// 가장 작은 버킷을 골라(퍼뮤테이션) 그 낭비를 없애고, 최상단 512로 GPU 튜브 링 상한을 끌어올린다
+// (Subdiv=3 기준 노드 ~170까지; 그 이상만 CPU 폴백). numthreads/groupshared는 .usf에서 ROPE_TUBE_MAX_RINGS로
+// 스케일 — 퍼뮤테이션이 그 define을 버킷 값으로 설정한다. groupshared 예산: 링당 5×float3=60B → 512링 = 30KB(<32KB).
+static constexpr int32 GRopeTubeRingBuckets[] = { 64, 128, 256, 512 };
+static constexpr int32 ROPE_TUBE_MAX_RINGS_CAP = 512; // 최상단 버킷 = GPU 튜브 링 상한(초과 시 CPU 폴백).
+
+int32 RopeGPU::TubeRingBucket(int32 NumRings)
+{
+	for (int32 Bucket : GRopeTubeRingBuckets)
+	{
+		if (NumRings <= Bucket) { return Bucket; }
+	}
+	return 0; // 상한 초과 → 호출자가 CPU 튜브로 폴백.
+}
+
+int32 RopeGPU::MaxTubeRings()
+{
+	return ROPE_TUBE_MAX_RINGS_CAP;
+}
 
 class FRopeBuildTubeCS : public FGlobalShader
 {
 public:
 	DECLARE_GLOBAL_SHADER(FRopeBuildTubeCS);
 	SHADER_USE_PARAMETER_STRUCT(FRopeBuildTubeCS, FGlobalShader);
+
+	// 링 버킷 = numthreads/groupshared 크기. 값이 곧 ROPE_TUBE_MAX_RINGS define으로 .usf에 전달된다.
+	class FRingBucket : SHADER_PERMUTATION_SPARSE_INT("ROPE_TUBE_MAX_RINGS", 64, 128, 256, 512);
+	using FPermutationDomain = TShaderPermutationDomain<FRingBucket>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, NumRings)
@@ -32,12 +55,6 @@ public:
 	{
 		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
 	}
-
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("ROPE_TUBE_MAX_RINGS"), ROPE_TUBE_MAX_RINGS);
-	}
 };
 
 IMPLEMENT_GLOBAL_SHADER(FRopeBuildTubeCS, "/Plugin/DynamicRope/Private/RopeBuildTube.usf", "RopeBuildTubeCS", SF_Compute);
@@ -48,6 +65,9 @@ class FRopeBuildTubeResidentCS : public FGlobalShader
 public:
 	DECLARE_GLOBAL_SHADER(FRopeBuildTubeResidentCS);
 	SHADER_USE_PARAMETER_STRUCT(FRopeBuildTubeResidentCS, FGlobalShader);
+
+	class FRingBucket : SHADER_PERMUTATION_SPARSE_INT("ROPE_TUBE_MAX_RINGS", 64, 128, 256, 512);
+	using FPermutationDomain = TShaderPermutationDomain<FRingBucket>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, NumRings)
@@ -66,12 +86,6 @@ public:
 	{
 		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
 	}
-
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("ROPE_TUBE_MAX_RINGS"), ROPE_TUBE_MAX_RINGS);
-	}
 };
 
 IMPLEMENT_GLOBAL_SHADER(FRopeBuildTubeResidentCS, "/Plugin/DynamicRope/Private/RopeBuildTube.usf", "RopeBuildTubeResidentCS", SF_Compute);
@@ -85,13 +99,16 @@ void RopeGPU::BuildTube_RenderThread(
 	int32 NumRings, int32 NumSides, float Radius)
 {
 	check(IsInRenderingThread());
+	const int32 Bucket = RopeGPU::TubeRingBucket(NumRings);
 	if (!InCenterlineSRV || !OutPositionsUAV || !OutTangentsUAV || !OutTexCoordsUAV
-		|| NumRings < 2 || NumRings > ROPE_TUBE_MAX_RINGS || NumSides < 3)
+		|| NumRings < 2 || Bucket == 0 || NumSides < 3)
 	{
-		return;
+		return; // Bucket==0 = NumRings가 상한 초과 → 호출자가 CPU 폴백.
 	}
 
-	TShaderMapRef<FRopeBuildTubeCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+	FRopeBuildTubeCS::FPermutationDomain Perm;
+	Perm.Set<FRopeBuildTubeCS::FRingBucket>(Bucket);
+	TShaderMapRef<FRopeBuildTubeCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), Perm);
 
 	FRopeBuildTubeCS::FParameters Params;
 	Params.NumRings     = (uint32)NumRings;
@@ -102,7 +119,7 @@ void RopeGPU::BuildTube_RenderThread(
 	Params.OutTangents  = OutTangentsUAV;
 	Params.OutTexCoords = OutTexCoordsUAV;
 
-	// 로프 1개 = 스레드그룹 1개(numthreads=ROPE_TUBE_MAX_RINGS). UAV 배리어는 호출자(proxy)가 처리.
+	// 로프 1개 = 스레드그룹 1개(numthreads=버킷). UAV 배리어는 호출자(proxy)가 처리.
 	FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, Params, FIntVector(1, 1, 1));
 }
 
@@ -117,13 +134,16 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 	const FMatrix44f& WorldToLocal)
 {
 	check(IsInRenderingThread());
+	const int32 Bucket = RopeGPU::TubeRingBucket(NumRings);
 	if (!InResidentPositionsSRV || !OutPositionsUAV || !OutTangentsUAV || !OutTexCoordsUAV
-		|| NumRings < 2 || NumRings > ROPE_TUBE_MAX_RINGS || NumSides < 3 || NumSrcNodes < 2)
+		|| NumRings < 2 || Bucket == 0 || NumSides < 3 || NumSrcNodes < 2)
 	{
-		return;
+		return; // Bucket==0 = NumRings가 상한 초과 → 호출자가 CPU 폴백.
 	}
 
-	TShaderMapRef<FRopeBuildTubeResidentCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+	FRopeBuildTubeResidentCS::FPermutationDomain Perm;
+	Perm.Set<FRopeBuildTubeResidentCS::FRingBucket>(Bucket);
+	TShaderMapRef<FRopeBuildTubeResidentCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), Perm);
 
 	FRopeBuildTubeResidentCS::FParameters Params;
 	Params.NumRings      = (uint32)NumRings;

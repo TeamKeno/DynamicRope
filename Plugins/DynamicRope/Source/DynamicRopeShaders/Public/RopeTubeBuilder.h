@@ -14,6 +14,14 @@ class FRHICommandList;
 
 namespace RopeGPU
 {
+	/** GPU 튜브가 지원하는 최대 링 수(= 최상단 스레드그룹 버킷). NumRings가 이보다 크면 CPU 튜브로 폴백해야 한다.
+	 *  호출자(씬 프록시)가 bUseGpuTube 판정에 쓴다 — 버킷 상한과 프록시 게이트가 어긋나지 않도록 단일 소스. */
+	DYNAMICROPESHADERS_API int32 MaxTubeRings();
+
+	/** NumRings 이상인 가장 작은 스레드그룹 버킷(64/128/256/512). 상한 초과면 0(→ CPU 폴백). 디스패치가
+	 *  퍼뮤테이션 선택에 쓰고, 디버그 오버레이가 실제 사용 버킷 표시에 쓴다(단일 소스). */
+	DYNAMICROPESHADERS_API int32 TubeRingBucket(int32 NumRings);
+
 	/**
 	 * 렌더 스레드. 센터라인(InCenterlineSRV: R32_FLOAT 타입, ring r 위치 = float[r*3..])에서 튜브 정점
 	 * 위치를 OutPositionsUAV(R32_FLOAT, v당 float3)에 기록한다. 로프 1개 = 1 디스패치.
