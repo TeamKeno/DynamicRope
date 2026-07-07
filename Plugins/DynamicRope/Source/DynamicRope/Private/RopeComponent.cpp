@@ -1239,6 +1239,68 @@ void URopeComponent::InitRope()
 }
 
 #if WITH_GAMEPLAY_DEBUGGER
+namespace
+{
+	// 컨벡스 헐 와이어프레임 엣지를 바디-로컬 평면 집합에서 계산(디버그 그리기 전용). 평면-쌍 클리핑:
+	// 두 면(i,j)의 교선을 나머지 halfspace로 클립해 [tmin,tmax] 구간이 남으면 그게 실제 헐 엣지다(인접
+	// 면 쌍만 비어있지 않게 남음). 로컬 엣지 끝점을 강체(Rot*p+Trans)로 월드 변환해 OutWorldEdges에 쌍으로
+	// 추가한다. 평면 규약: PlaneDot(p)=dot(N,p)-W, 내부는 모든 면에서 <0(halfspace dot(N,p)<=W). O(평면^3)이나
+	// 평면 상한 32 + 디버그 대상 1액터라 무해.
+	void BuildConvexHullEdges(const TConstArrayView<FPlane>& Planes, const FQuat& Rot, const FVector& Trans,
+		TArray<FVector>& OutWorldEdges)
+	{
+		const int32 N = Planes.Num();
+		for (int32 i = 0; i < N; ++i)
+		{
+			const FVector Ni(Planes[i].X, Planes[i].Y, Planes[i].Z);
+			const double  Wi = Planes[i].W;
+			for (int32 j = i + 1; j < N; ++j)
+			{
+				const FVector Nj(Planes[j].X, Planes[j].Y, Planes[j].Z);
+				const double  Wj = Planes[j].W;
+				const FVector Dir = FVector::CrossProduct(Ni, Nj);
+				const double  DirLenSq = Dir.SizeSquared();
+				if (DirLenSq < 1e-8)
+				{
+					continue; // 평행 면 — 교선 없음.
+				}
+				// 교선 위 한 점 p0: N_i·p=W_i, N_j·p=W_j, Dir·p=0 (표준 3평면 교점 공식).
+				const FVector P0 = (FVector::CrossProduct(Dir, Nj) * Wi + FVector::CrossProduct(Ni, Dir) * Wj) / DirLenSq;
+
+				// 나머지 평면으로 무한선을 클립: dot(N_k, p0 + t*Dir) <= W_k.
+				double TMin = -DBL_MAX, TMax = DBL_MAX;
+				bool bValid = true;
+				for (int32 k = 0; k < N; ++k)
+				{
+					if (k == i || k == j)
+					{
+						continue;
+					}
+					const FVector Nk(Planes[k].X, Planes[k].Y, Planes[k].Z);
+					const double  Denom = FVector::DotProduct(Nk, Dir);
+					const double  Num = static_cast<double>(Planes[k].W) - FVector::DotProduct(Nk, P0); // W_k - N_k·p0
+					if (FMath::Abs(Denom) < 1e-8)
+					{
+						if (Num < -1e-6) { bValid = false; break; } // 선이 이 면 바깥 → 엣지 없음.
+						continue; // 선이 면과 평행하고 안쪽 — 제약 없음.
+					}
+					const double T = Num / Denom;
+					if (Denom > 0.0) { TMax = FMath::Min(TMax, T); }
+					else             { TMin = FMath::Max(TMin, T); }
+				}
+				if (!bValid || TMin >= TMax - 1e-4)
+				{
+					continue; // 인접 면이 아니거나 구간 소멸 — 헐 엣지 아님.
+				}
+				const FVector L0 = P0 + Dir * TMin;
+				const FVector L1 = P0 + Dir * TMax;
+				OutWorldEdges.Add(Rot.RotateVector(L0) + Trans); // 로컬 → 월드(강체).
+				OutWorldEdges.Add(Rot.RotateVector(L1) + Trans);
+			}
+		}
+	}
+}
+
 void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 {
 	Snapshot.Phase = Phase;
@@ -1276,8 +1338,9 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.DistanceReleaseSlack = WrapConfig.DistanceReleaseSlack;
 	}
 
-	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). capsule이면 세그먼트,
-	// 그 외(SDF 등)는 월드 bounds 박스. FrameColliders는 provider 소유라 이 프레임 동안만 유효.
+	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). 상호 배타 accessor 순서로
+	// 실제 형상 분류: 캡슐(세그먼트) / 박스(회전 OBB) / 컨벡스(헐 와이어) / 그 외(SDF 등 월드 AABB 폴백).
+	// FrameColliders는 provider 소유라 이 프레임 동안만 유효(GT Phase-3 직렬 실행이라 스레딩 무관).
 	Snapshot.Colliders.Reset();
 	for (const IRopeCollider* Collider : FrameColliders)
 	{
@@ -1286,16 +1349,33 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 			continue;
 		}
 		FRopeDebugCollider DC;
+		DC.bWorldStatic = Collider->IsWorldStatic();
+
+		TConstArrayView<FPlane> LocalPlanes;
+		FBox LocalBounds(ForceInit);
+		FQuat CvRot, CvPrevRot;
+		FVector CvTrans, CvPrevTrans;
+		float CvInvDt = 0.0f;
 		if (Collider->GetGPUCapsule(DC.A, DC.B, DC.Radius))
 		{
-			DC.bIsCapsule = true;
+			DC.Shape = ERopeDebugColliderShape::Capsule;
+		}
+		else if (Collider->GetGPUBox(DC.Center, DC.Rot, DC.HalfExtents))
+		{
+			DC.Shape = ERopeDebugColliderShape::Box;
+		}
+		else if (Collider->GetGPUConvex(LocalPlanes, LocalBounds, CvRot, CvTrans, CvPrevRot, CvPrevTrans, CvInvDt)
+			&& LocalPlanes.Num() >= 4)
+		{
+			DC.Shape = ERopeDebugColliderShape::Convex;
+			BuildConvexHullEdges(LocalPlanes, CvRot, CvTrans, DC.ConvexEdges);
 		}
 		else
 		{
-			DC.bIsCapsule = false;
+			DC.Shape = ERopeDebugColliderShape::Bounds;
 			DC.Bounds = Collider->GetWorldBounds();
 		}
-		Snapshot.Colliders.Add(DC);
+		Snapshot.Colliders.Add(MoveTemp(DC));
 	}
 }
 #endif

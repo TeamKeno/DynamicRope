@@ -10,6 +10,7 @@
 #include "GameFramework/Actor.h"
 #include "RopeTubeBuilder.h"       // RopeGPU::TubeRingBucket / MaxTubeRings — GPU 튜브 경로/버킷 진단
 #include "HAL/IConsoleManager.h"   // r.DynamicRope.TubeSmoothing(Subdiv) 조회
+#include "DrawDebugHelpers.h"      // DrawDebug*(SDPG_Foreground) — 콜라이더 전경 오버레이(에디터 셀렉션처럼 위에 그림)
 
 namespace
 {
@@ -451,32 +452,58 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 	}
 
 	//~ colliders --------------------------------------------------------
+	// 콜라이더는 AddShape(SDPG_World 하드코딩 → 지오메트리에 가림) 대신 DrawDebug*(SDPG_Foreground)로 직접
+	// 그린다 — 에디터 셀렉션 라인처럼 항상 위에 보여, 메시와 겹쳐도 형상이 뚜렷하다. 이 카테고리는 이미
+	// CollectData에서 live 컴포넌트를 읽는 로컬 전용 설계라 DrawDebug 직접 호출과 정합(네트워크 리플리케이션 무관).
 	if (HasView(EView::Colliders))
 	{
-		for (const FRopeDebugCollider& C : S.Colliders)
+		if (UWorld* World = Rope.GetWorld())
 		{
-			if (C.bIsCapsule)
+			constexpr uint8 FG = SDPG_Foreground;
+			constexpr float LineThick = 1.5f;
+			for (const FRopeDebugCollider& C : S.Colliders)
 			{
-				// 실제 충돌 볼륨(sphyl) 그대로 그린다: 세그먼트+끝점 구만 그리면 원통 몸통이 빠져
-				// 팔다리처럼 가늘고 긴 캡슐이 본을 못 덮는 것처럼 보인다. DrawDebugCapsule의
-				// HalfHeight는 반구 포함 전체 절반이므로 세그먼트 절반 + Radius. 축퇴(A==B,
-				// physics asset 구 셰이프)는 방향이 없으므로 구(Point)로 그린다.
-				const FVector Axis = C.B - C.A;
-				const float SegLen = static_cast<float>(Axis.Size());
-				if (SegLen > KINDA_SMALL_NUMBER)
+				// 소스별 색: 정적 월드(박스/컨벡스/정적 캡슐)는 cyan, 스켈레탈 본 캡슐은 초록.
+				const FColor Color = C.bWorldStatic ? FColor::Cyan : FColor::Green;
+				switch (C.Shape)
 				{
-					const FVector Center = (C.A + C.B) * 0.5f;
-					const FRotator Rot = FRotationMatrix::MakeFromZ(Axis).Rotator();
-					AddShape(FGameplayDebuggerShape::MakeCapsule(Center, Rot, C.Radius, SegLen * 0.5f + C.Radius, FColor::Green));
-				}
-				else
+				case ERopeDebugColliderShape::Capsule:
 				{
-					AddShape(FGameplayDebuggerShape::MakePoint(C.A, C.Radius, FColor::Green));
+					// 실제 충돌 볼륨(sphyl) 그대로. HalfHeight는 반구 포함 전체 절반이라 세그먼트 절반 + Radius.
+					// 축퇴(A==B, 구 셰이프)는 방향이 없으므로 구.
+					const FVector Axis = C.B - C.A;
+					const float SegLen = static_cast<float>(Axis.Size());
+					if (SegLen > KINDA_SMALL_NUMBER)
+					{
+						const FVector Center = (C.A + C.B) * 0.5f;
+						const FQuat Rot = FRotationMatrix::MakeFromZ(Axis).ToQuat();
+						DrawDebugCapsule(World, Center, SegLen * 0.5f + C.Radius, C.Radius, Rot, Color, false, -1.0f, FG, LineThick);
+					}
+					else
+					{
+						DrawDebugSphere(World, C.A, C.Radius, 12, Color, false, -1.0f, FG, LineThick);
+					}
+					break;
 				}
-			}
-			else if (C.Bounds.IsValid)
-			{
-				AddShape(FGameplayDebuggerShape::MakeBox(C.Bounds.GetCenter(), C.Bounds.GetExtent(), FColor::Green));
+				case ERopeDebugColliderShape::Box:
+					// 회전 OBB. HalfExtents가 Box extent.
+					DrawDebugBox(World, C.Center, C.HalfExtents, C.Rot, Color, false, -1.0f, FG, LineThick);
+					break;
+				case ERopeDebugColliderShape::Convex:
+					// 헐 와이어프레임: 엣지 끝점 쌍(연속 2개)마다 라인.
+					for (int32 e = 0; e + 1 < C.ConvexEdges.Num(); e += 2)
+					{
+						DrawDebugLine(World, C.ConvexEdges[e], C.ConvexEdges[e + 1], Color, false, -1.0f, FG, LineThick);
+					}
+					break;
+				case ERopeDebugColliderShape::Bounds:
+				default:
+					if (C.Bounds.IsValid)
+					{
+						DrawDebugBox(World, C.Bounds.GetCenter(), C.Bounds.GetExtent(), Color, false, -1.0f, FG, LineThick);
+					}
+					break;
+				}
 			}
 		}
 	}

@@ -21,13 +21,35 @@ struct FRopeFlightNodeDebug
 	FRopeContact Contact;
 };
 
-// collider 시각화 한 개. analytic capsule이면 A-B 세그먼트+반지름, 그 외(SDF 등)는 월드 bounds 박스.
+// collider 시각화 형상 종류. 채우기(FillDebugSnapshot)가 상호 배타 accessor로 분류한다.
+enum class ERopeDebugColliderShape : uint8
+{
+	Capsule, // A-B 세그먼트 + 반지름(스켈레탈 본 / 정적 스피어·스필)
+	Box,     // 회전 OBB(Center/Rot/HalfExtents) — 정적 박스
+	Convex,  // 헐 와이어프레임(ConvexEdges: 연속 2개가 한 엣지) — 정적 컨벡스/전단 박스
+	Bounds,  // 월드 AABB 폴백(SDF 등 형상 미상)
+};
+
+// collider 시각화 한 개. Shape에 따라 해당 필드만 유효하다.
 struct FRopeDebugCollider
 {
-	bool bIsCapsule = false;
+	ERopeDebugColliderShape Shape = ERopeDebugColliderShape::Bounds;
+	bool bWorldStatic = false; // 정적 월드(박스/컨벡스/정적 캡슐) vs 스켈레탈 — 색 구분용.
+
+	// Capsule
 	FVector A = FVector::ZeroVector;
 	FVector B = FVector::ZeroVector;
-	float Radius = 0.0f;
+	float   Radius = 0.0f;
+
+	// Box (OBB)
+	FVector Center = FVector::ZeroVector;
+	FQuat   Rot = FQuat::Identity;
+	FVector HalfExtents = FVector::ZeroVector;
+
+	// Convex: 월드 공간 엣지 끝점(연속 2개 = 한 엣지). 디버그 그리기 전용(런타임 콜라이더엔 저장 안 함).
+	TArray<FVector> ConvexEdges;
+
+	// Bounds 폴백
 	FBox Bounds = FBox(ForceInit);
 };
 
