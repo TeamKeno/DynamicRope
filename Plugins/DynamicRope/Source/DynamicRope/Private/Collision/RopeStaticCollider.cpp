@@ -67,3 +67,43 @@ FBox FRopeBoxCollider::GetWorldBounds() const
 		FMath::Abs(AxX.Z) + FMath::Abs(AxY.Z) + FMath::Abs(AxZ.Z));
 	return FBox(Center - Ext, Center + Ext);
 }
+
+FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadius) const
+{
+	FRopeContact Contact;
+	if (Planes.Num() == 0)
+	{
+		return Contact;
+	}
+	// 브로드/질의 컬: 월드 AABB(+NodeRadius 여유) 밖이면 확실히 미접촉. 평면 루프 진입 전 조기 컷.
+	if (!Bounds.IsValid || !Bounds.ExpandBy(NodeRadius).IsInsideOrOn(WorldPos))
+	{
+		return Contact;
+	}
+
+	// max-plane: 점이 가장 많이 위반한 평면(부호 거리 최대)이 표면 근사. 내부는 정확(모든 PlaneDot<0 →
+	// 최대값이 곧 가장 가까운 면), 외부 엣지 근방은 과소추정(보수적). 그 평면의 법선이 push-out 방향.
+	double MaxD = -DBL_MAX;
+	int32 Best = INDEX_NONE;
+	for (int32 i = 0; i < Planes.Num(); ++i)
+	{
+		const double D = Planes[i].PlaneDot(WorldPos); // dot(N,p) - W, N 바깥
+		if (D > MaxD)
+		{
+			MaxD = D;
+			Best = i;
+		}
+	}
+	if (Best == INDEX_NONE || MaxD >= NodeRadius)
+	{
+		return Contact; // 어떤 면 밖으로 NodeRadius 이상 → 확실히 컨벡스 밖(미접촉).
+	}
+
+	Contact.bHit = true;
+	// 법선: 최대 위반 평면의 단위 바깥 법선(빌드 시 정규화). FRopeContact FROZEN 계약(부호 load-bearing).
+	Contact.Normal = FVector(Planes[Best].X, Planes[Best].Y, Planes[Best].Z);
+	Contact.Penetration = NodeRadius - static_cast<float>(MaxD); // 안쪽이면 MaxD<0이라 더 큼.
+	Contact.SurfacePoint = WorldPos - Contact.Normal * MaxD;      // 그 평면 위 최근접점(보조/디버그).
+	// Bone/SourceMesh/SurfaceVelocity: 정적 월드 지오메트리 — 기본값(None/null/0) 그대로.
+	return Contact;
+}

@@ -49,4 +49,12 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "1", ToolTip = "기본 ARopeController 자동 스폰 시 정적 바디 프로바이더의 프레임당 콜라이더 상한. 서브클래스를 지정한 경우엔 그 컴포넌트 값이 우선합니다."))
 	int32 StaticBodyMaxColliders = 128;
+
+	/**
+	 * 자동 스폰된 정적 바디 프로바이더의 컨벡스 1개당 평면 수 상한. 이 수를 넘는 복잡한 컨벡스는 ElemBox
+	 * OBB로 폴백한다. MaxColliders와 동일 규약 — 기본 ARopeController 스폰 시에만 주입, 커스텀 서브클래스는
+	 * 자기 컴포넌트 값을 존중. (전체 콜라이더 개수는 StaticBodyMaxColliders가 별도로 제한.)
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "4", ToolTip = "기본 ARopeController 자동 스폰 시 컨벡스당 평면 수 상한(초과분은 OBB 폴백). 서브클래스를 지정한 경우엔 그 컴포넌트 값이 우선합니다."))
+	int32 StaticBodyMaxConvexPlanes = 32;
 };

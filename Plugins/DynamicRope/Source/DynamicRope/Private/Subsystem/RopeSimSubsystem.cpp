@@ -530,6 +530,7 @@ void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 						if (Controller->StaticBodyProvider)
 						{
 							Controller->StaticBodyProvider->MaxColliders = Settings->StaticBodyMaxColliders;
+							Controller->StaticBodyProvider->MaxConvexPlanes = Settings->StaticBodyMaxConvexPlanes;
 						}
 					}
 				}
@@ -859,6 +860,24 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		if (Collider->GetGPUBox(Box.Center, Box.Rot, Box.HalfExtents))
 		{
 			Step.Boxes.Add(Box);
+			continue;
+		}
+		TConstArrayView<FPlane> Planes;
+		FBox CBounds(ForceInit);
+		if (Collider->GetGPUConvex(Planes, CBounds) && Planes.Num() > 0 && CBounds.IsValid)
+		{
+			// 평면을 평탄 풀에 이어붙이고 오프셋/개수로 참조(GPU 패킹이 풀을 그대로 업로드).
+			FRopeGPUConvex Cv;
+			Cv.PlaneOffset = Step.ConvexPlanes.Num();
+			Cv.PlaneCount = Planes.Num();
+			Cv.BoundsCenter = CBounds.GetCenter();
+			Cv.BoundsExtent = CBounds.GetExtent();
+			Step.ConvexPlanes.Reserve(Step.ConvexPlanes.Num() + Planes.Num());
+			for (const FPlane& Pl : Planes)
+			{
+				Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W)); // 단위·바깥, PlaneDot=dot(N,p)-W
+			}
+			Step.Convexes.Add(Cv);
 		}
 	}
 }

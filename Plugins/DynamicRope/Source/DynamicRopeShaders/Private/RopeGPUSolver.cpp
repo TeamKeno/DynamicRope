@@ -45,7 +45,7 @@ struct FRopeGPUParamsGPU
 	int32     CollisionPasses = 1;     // substep당 충돌 해소 패스 수(Iters로 상한). Pad1 슬롯 재사용.
 	int32     bHasOverrides = 0;       // G0: 이 로프에 노드별 override(타깃/질량 주입)가 있는가.
 	int32     NumBoxes = 0;            // 정적 박스(OBB) 수(0이면 박스 충돌 없음). Pad2 슬롯 재사용.
-	int32     Pad3 = 0;
+	int32     NumConvexes = 0;         // 정적 컨벡스(평면 집합) 수(0이면 컨벡스 충돌 없음). Pad3 슬롯 재사용.
 	int32     Pad4 = 0;
 	FVector4f Gravity;
 	FVector4f PinPrev;
@@ -71,6 +71,18 @@ struct FRopeBoxGPU
 	FVector4f HalfExtents; // xyz
 };
 static_assert(sizeof(FRopeBoxGPU) % 16 == 0, "FRopeBoxGPU must be 16-byte aligned to match HLSL structured buffer.");
+
+// HLSL FRopeConvex와 1:1 미러. 평면 풀 오프셋/개수 + 월드 AABB. 평면은 ConvexPlanes float4 버퍼에 별도 저장.
+struct FRopeConvexGPU
+{
+	int32     PlaneOffset;
+	int32     PlaneCount;
+	int32     Pad0 = 0;
+	int32     Pad1 = 0;
+	FVector4f BoundsCenter; // xyz
+	FVector4f BoundsExtent; // xyz
+};
+static_assert(sizeof(FRopeConvexGPU) % 16 == 0, "FRopeConvexGPU must be 16-byte aligned to match HLSL structured buffer.");
 
 // HLSL FRopeSDFVolume와 1:1 미러. 본 로컬 grid 헤더(distance는 SDFDistances 버퍼에 DistOffset부터).
 struct FRopeSDFVolumeGPU
@@ -118,6 +130,8 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFVolume>, SDFVolumes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeBox>, Boxes) // 정적 박스 — solve 전용(감지 CS는 미참조라 스트립).
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeConvex>, Convexes)   // 정적 컨벡스 — solve 전용.
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConvexPlanes)    // 컨벡스 평면 평탄 풀.
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, OverrideFlags)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, OverridePositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, OverridePrevPositions)
@@ -464,9 +478,12 @@ struct FRopeStepBuild
 	FRDGBufferRef SDFVolBuf = nullptr;
 	FRDGBufferRef SDFColBuf = nullptr;
 	FRDGBufferRef BoxesBuf = nullptr;
+	FRDGBufferRef ConvexBuf = nullptr;
+	FRDGBufferRef ConvexPlanesBuf = nullptr;
 	int32 NumValidCaps = 0;   // 더미 패딩 *전* 유효 개수(셰이더 카운트용).
 	int32 NumValidSDFCol = 0;
 	int32 NumValidBoxes = 0;
+	int32 NumValidConvexes = 0;
 
 	FRDGBufferRef OvFlagsBuf = nullptr;
 	FRDGBufferRef OvPosBuf = nullptr;
@@ -699,6 +716,39 @@ static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep&
 		sizeof(FRopeBoxGPU), BoxesFlat.Num(), BoxesFlat.GetData(), (uint64)BoxesFlat.Num() * sizeof(FRopeBoxGPU));
 }
 
+// 컨벡스 패킹: step의 정적 컨벡스 → 평면 평탄 풀(ConvexPlanes) + 헤더(Convexes) 업로드. 각 컨벡스의 평면을
+// 풀에 이어붙이고 PlaneOffset/PlaneCount로 참조한다. B.ConvexBuf/ConvexPlanesBuf/NumValidConvexes를 채운다.
+static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
+{
+	TArray<FRopeConvexGPU>& ConvFlat = *GraphBuilder.AllocObject<TArray<FRopeConvexGPU>>();
+	TArray<FVector4f>&      PlaneFlat = *GraphBuilder.AllocObject<TArray<FVector4f>>();
+	for (const FRopeGPUConvex& Cv : S.Convexes)
+	{
+		FRopeConvexGPU G;
+		G.PlaneOffset  = PlaneFlat.Num();
+		G.PlaneCount   = Cv.PlaneCount;
+		G.BoundsCenter = FVector4f((float)Cv.BoundsCenter.X, (float)Cv.BoundsCenter.Y, (float)Cv.BoundsCenter.Z, 0.0f);
+		G.BoundsExtent = FVector4f((float)Cv.BoundsExtent.X, (float)Cv.BoundsExtent.Y, (float)Cv.BoundsExtent.Z, 0.0f);
+		ConvFlat.Add(G);
+		const int32 Start = Cv.PlaneOffset;
+		for (int32 p = 0; p < Cv.PlaneCount; ++p)
+		{
+			const FVector4& Pl = S.ConvexPlanes[Start + p];
+			PlaneFlat.Add(FVector4f((float)Pl.X, (float)Pl.Y, (float)Pl.Z, (float)Pl.W));
+		}
+	}
+
+	// 유효 개수 — 더미 패딩 *전* 확정. 구조화 버퍼는 원소 >=1 — 비면 더미 1개(NumConvexes=0이라 미참조).
+	B.NumValidConvexes = ConvFlat.Num();
+	if (ConvFlat.Num() == 0) { ConvFlat.AddZeroed(1); }
+	if (PlaneFlat.Num() == 0) { PlaneFlat.AddZeroed(1); }
+
+	B.ConvexBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Convexes"),
+		sizeof(FRopeConvexGPU), ConvFlat.Num(), ConvFlat.GetData(), (uint64)ConvFlat.Num() * sizeof(FRopeConvexGPU));
+	B.ConvexPlanesBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.ConvexPlanes"),
+		sizeof(FVector4f), PlaneFlat.Num(), PlaneFlat.GetData(), (uint64)PlaneFlat.Num() * sizeof(FVector4f));
+}
+
 // SDF 콜라이더 패킹(M3): 볼륨 dedup + 상주 재사용(집합 시그니처 동일 시 업로드 0) 또는 dequant 재빌드
 // + 인스턴스(본 트랜스폼, 매 프레임) 업로드. 볼륨 dedup 맵(FreshKeyToIndex)을 인스턴스 루프가 참조하므로
 // 두 단계는 반드시 한 스코프에 있어야 한다(분리 금지 — dangling). B.SDF*Buf/NumValidSDFCol을 채운다.
@@ -902,6 +952,7 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	P.NumSDFColliders   = B.NumValidSDFCol;
 	P.bHasOverrides     = B.bHasOverrides ? 1 : 0;
 	P.NumBoxes          = B.NumValidBoxes;
+	P.NumConvexes       = B.NumValidConvexes;
 	P.Gravity           = FVector4f((float)S.Gravity.X, (float)S.Gravity.Y, (float)S.Gravity.Z, 0.0f);
 	P.PinPrev           = FVector4f((float)S.StartPinPrev.X,   (float)S.StartPinPrev.Y,   (float)S.StartPinPrev.Z,   0.0f);
 	P.PinTarget         = FVector4f((float)S.StartPinTarget.X, (float)S.StartPinTarget.Y, (float)S.StartPinTarget.Z, 0.0f);
@@ -918,6 +969,8 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	PassParams->SDFVolumes    = GraphBuilder.CreateSRV(B.SDFVolBuf);
 	PassParams->SDFColliders  = GraphBuilder.CreateSRV(B.SDFColBuf);
 	PassParams->Boxes         = GraphBuilder.CreateSRV(B.BoxesBuf);
+	PassParams->Convexes      = GraphBuilder.CreateSRV(B.ConvexBuf);
+	PassParams->ConvexPlanes  = GraphBuilder.CreateSRV(B.ConvexPlanesBuf);
 	PassParams->OverrideFlags         = GraphBuilder.CreateSRV(B.OvFlagsBuf);
 	PassParams->OverridePositions     = GraphBuilder.CreateSRV(B.OvPosBuf);
 	PassParams->OverridePrevPositions = GraphBuilder.CreateSRV(B.OvPrevBuf);
@@ -1128,6 +1181,7 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		RopePackCapsules(GraphBuilder, S, B);
 		RopePackSDFColliders(GraphBuilder, S, R, B);
 		RopePackBoxes(GraphBuilder, S, B);
+		RopePackConvexes(GraphBuilder, S, B);
 		RopePackOverrides(GraphBuilder, S, B);
 
 		const FRDGBufferRef LambdaRDG = RopeAddSolvePass(GraphBuilder, S, R, B,

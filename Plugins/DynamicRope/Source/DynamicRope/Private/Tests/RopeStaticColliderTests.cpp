@@ -115,6 +115,95 @@ bool FRopeBoxSweptTunnelingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace
+{
+	// 축 정렬 박스(중심 Center, 반폭 H)를 6평면 컨벡스로 — 컨벡스 질의를 박스와 비교/검증하는 fixture.
+	// 각 면: 바깥 법선 ±axis, PlaneDot(p)=dot(N,p)-W. +X 면 x=Cx+Hx → FPlane((1,0,0), Cx+Hx).
+	TArray<FPlane> MakeAABoxPlanes(const FVector& Center, const FVector& H)
+	{
+		TArray<FPlane> P;
+		P.Add(FPlane(FVector(1, 0, 0), Center.X + H.X));
+		P.Add(FPlane(FVector(-1, 0, 0), -Center.X + H.X));
+		P.Add(FPlane(FVector(0, 1, 0), Center.Y + H.Y));
+		P.Add(FPlane(FVector(0, -1, 0), -Center.Y + H.Y));
+		P.Add(FPlane(FVector(0, 0, 1), Center.Z + H.Z));
+		P.Add(FPlane(FVector(0, 0, -1), -Center.Z + H.Z));
+		return P;
+	}
+}
+
+// 컨벡스 내부 점: max-plane이 침투 가장 얕은 면을 정확히 고르고 박스 질의와 일치하는가(내부는 정확).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexInsideExactTest,
+	"DynamicRope.Collision.ConvexInsideExact",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeConvexInsideExactTest::RunTest(const FString& Parameters)
+{
+	const FVector H(50.0);
+	FRopeConvexCollider Convex(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H));
+	FRopeBoxCollider Box(FVector::ZeroVector, FQuat::Identity, H);
+
+	// 내부점: +X 면까지 5(최소). 박스와 동일 결과여야 한다(내부는 max-plane이 정확).
+	const FVector P(45.0, 10.0, -20.0);
+	const FRopeContact C = Convex.Query(P, 2.0f);
+	const FRopeContact B = Box.Query(P, 2.0f);
+	TestTrue(TEXT("convex inside hit"), C.bHit);
+	TestTrue(FString::Printf(TEXT("normal %s is +X face"), *C.Normal.ToString()), C.Normal.Equals(FVector(1, 0, 0), 1e-4));
+	TestTrue(TEXT("penetration = 7 (matches box)"), FMath::IsNearlyEqual(C.Penetration, B.Penetration, 1e-3f));
+	TestTrue(TEXT("surface point matches box"), C.SurfacePoint.Equals(B.SurfacePoint, 1e-3));
+	TestTrue(TEXT("no bone/mesh (static)"), C.Bone.IsNone() && C.SourceMesh == nullptr);
+	return true;
+}
+
+// 컨벡스 면 바깥: 바깥 법선 + 침투, 반경 넘어가면 미접촉.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexOutsideFaceTest,
+	"DynamicRope.Collision.ConvexOutsideFace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeConvexOutsideFaceTest::RunTest(const FString& Parameters)
+{
+	const FVector H(50.0);
+	FRopeConvexCollider Convex(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H));
+
+	// +X 면 바깥 2cm, 반경 5 → 접촉. 법선 +X, 침투 3.
+	{
+		const FRopeContact C = Convex.Query(FVector(52.0, 0, 0), 5.0f);
+		TestTrue(TEXT("outside face hit"), C.bHit);
+		TestTrue(TEXT("normal +X"), C.Normal.Equals(FVector(1, 0, 0), 1e-4));
+		TestTrue(TEXT("penetration = 3"), FMath::IsNearlyEqual(C.Penetration, 3.0f, 1e-3f));
+	}
+	// 반경 넘어감(6cm 바깥, 반경 5) → 미접촉.
+	{
+		const FRopeContact C = Convex.Query(FVector(56.0, 0, 0), 5.0f);
+		TestFalse(TEXT("beyond radius no hit"), C.bHit);
+	}
+	return true;
+}
+
+// 컨벡스 엣지 바깥: max-plane은 거리를 과소추정 → 접촉이 보수적으로(살짝 이르게) 걸린다(터널링 방지). 법선은
+// 바깥을 향하는 유효한 방향(면 법선). 박스의 정확한 대각 normal과 달리 근사임을 문서화하는 회귀 테스트.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexEdgeConservativeTest,
+	"DynamicRope.Collision.ConvexEdgeConservative",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeConvexEdgeConservativeTest::RunTest(const FString& Parameters)
+{
+	const FVector H(50.0);
+	FRopeConvexCollider Convex(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H));
+
+	// +X/+Y 엣지 바깥 대각: 각 면까지 3, 실제 엣지까지 거리 ~4.24. max-plane은 3으로 과소추정.
+	const FVector P(53.0, 53.0, 0.0);
+	// 반경 4: 실제 거리(4.24)면 미접촉이어야 하지만, 과소추정(3<4)이라 접촉으로 걸린다(보수적).
+	const FRopeContact C = Convex.Query(P, 4.0f);
+	TestTrue(TEXT("edge contact triggers early (conservative)"), C.bHit);
+	TestTrue(TEXT("penetration = 4 - 3 = 1"), FMath::IsNearlyEqual(C.Penetration, 1.0f, 1e-3f));
+	// 법선은 두 면 중 하나(축 정렬) — 바깥을 향하는 단위 벡터.
+	TestTrue(TEXT("normal is unit"), FMath::IsNearlyEqual(static_cast<float>(C.Normal.Size()), 1.0f, 1e-3f));
+	const bool bAxisAligned = C.Normal.Equals(FVector(1, 0, 0), 1e-3) || C.Normal.Equals(FVector(0, 1, 0), 1e-3);
+	TestTrue(TEXT("normal is an outward face normal"), bAxisAligned);
+	return true;
+}
+
 // 솔버 통합: 박스 모서리 위로 드레이프된 로프가 여러 프레임 뒤에도 박스 내부로 파고들지 않는가
 // (GDF 모서리 라운딩 관통 버그의 솔버 레벨 회귀 테스트).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBoxSolverCornerDrapeTest,

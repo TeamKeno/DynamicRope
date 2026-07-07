@@ -173,6 +173,13 @@ public:
 	virtual bool GetGPUBox(FVector& OutCenter, FQuat& OutRot, FVector& OutHalfExtents) const { return false; }
 
 	/**
+	 * GPU 솔버용: 이 collider가 해석적 컨벡스(평면 집합)면 월드 공간 평면 배열(단위 법선·바깥,
+	 * PlaneDot(p)=dot(N,p)-W)과 월드 AABB를 채우고 true. 기본은 false. 박스처럼 정적 월드 전용이라
+	 * 프레임 모션이 없다. OutPlanes는 collider 소유 스토리지를 가리키는 뷰(해당 프레임 동안 유효).
+	 */
+	virtual bool GetGPUConvex(TConstArrayView<FPlane>& OutPlanes, FBox& OutBounds) const { return false; }
+
+	/**
 	 * 움직이는 collider의 이번 프레임 모션(prev->curr 월드 트랜스폼)을 채우고 true. 기본은 false(정적/모션없음).
 	 * solver가 swept 충돌에서 substep별 sub-포즈를 노드 루프 밖에서 1회 계산하는 데 쓴다(상대 운동 CCD 호이스팅).
 	 * 반드시 const(읽기 전용) — collider는 로프 간 공유되며 병렬 솔브된다.

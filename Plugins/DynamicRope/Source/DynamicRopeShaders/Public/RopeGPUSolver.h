@@ -40,6 +40,19 @@ struct FRopeGPUBox
 };
 
 /**
+ * GPU 충돌용 해석적 컨벡스(평면 집합). 정적 월드 지오메트리(convex 심플 콜리전 + 전단 박스) 전용.
+ * 평면은 Step의 ConvexPlanes 평탄 풀 [PlaneOffset, PlaneOffset+PlaneCount)에 저장(월드 공간, 단위
+ * 법선·바깥, PlaneDot(p)=dot(N,p)-W). Bounds는 월드 AABB(질의 컬). 호출자가 GetGPUConvex로 추출.
+ */
+struct FRopeGPUConvex
+{
+	int32   PlaneOffset = 0;                     // ConvexPlanes 풀 내 시작 인덱스
+	int32   PlaneCount = 0;                       // 평면 수
+	FVector BoundsCenter = FVector::ZeroVector;   // 월드 AABB 중심
+	FVector BoundsExtent = FVector::ZeroVector;   // 월드 AABB 반크기
+};
+
+/**
  * GPU 충돌(M3)용 per-bone SDF collider. 본 로컬 distance grid + 본→월드 트랜스폼.
  * Distances는 호출자(에셋) 소유 포인터(Step 호출 동안 유효 — 렌더 커맨드로 옮기기 전 GT에서 복사된다).
  * Distances는 uint8 양자화 코드 — GT 평탄화 시 비대칭 밴드로 dequant해 float 버퍼로 업로드한다.
@@ -117,6 +130,8 @@ struct FRopeGPUResidentStep
 	TArray<FRopeGPUCapsule>     Capsules;
 	TArray<FRopeGPUSDFCollider> SDFColliders;
 	TArray<FRopeGPUBox>         Boxes; // 정적 박스(OBB — 스태틱 바디 심플 콜리전). solve 전용(감지 미참여).
+	TArray<FRopeGPUConvex>      Convexes;     // 정적 컨벡스(평면 집합). solve 전용.
+	TArray<FVector4>            ConvexPlanes; // 전 컨벡스 평면 평탄 풀((nx,ny,nz,w), 월드·바깥).
 
 	// 접촉 감지(detect) 커널이 볼 capsule 수. Capsules 앞쪽 [0, NumDetectCapsules)만 감지에 참여한다 —
 	// 호출자(PackStepColliders)가 비-정적 캡슐을 앞에, 정적(월드) 캡슐을 뒤에 2-pass로 패킹해 채운다.

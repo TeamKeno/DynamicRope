@@ -1131,4 +1131,150 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 정적 컨벡스(6평면 = 박스) 충돌 parity: 컨벡스 모서리 위로 드레이프된 로프가 GPU 컨벡스 경로에서도
+// (1) 내부로 파고들지 않고 (2) CPU 솔버(FRopeConvexCollider)와 근사 일치하는가. 박스를 6평면 컨벡스로
+// 표현해 두 경로의 max-plane 질의 + 평면 풀 패킹을 검증한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUConvexParityTest,
+	"DynamicRope.Solver.GPUConvexParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU 컨벡스 parity 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	const int32 N = 24;
+	const float Length = 300.0f;
+	const FVector H(50.0);
+	FRopeSolverConfig Config = MakeHangConfig();
+	Config.CollisionRadius = 2.0f;
+	Config.Friction = 0.5f;
+
+	// 원점 박스(반폭 50)를 6평면 컨벡스로. CPU는 FRopeConvexCollider, GPU는 Step.Convexes/ConvexPlanes.
+	auto MakePlanes = [&]() -> TArray<FPlane>
+	{
+		TArray<FPlane> P;
+		P.Add(FPlane(1, 0, 0, H.X)); P.Add(FPlane(-1, 0, 0, H.X));
+		P.Add(FPlane(0, 1, 0, H.Y)); P.Add(FPlane(0, -1, 0, H.Y));
+		P.Add(FPlane(0, 0, 1, H.Z)); P.Add(FPlane(0, 0, -1, H.Z));
+		return P;
+	};
+	FRopeConvexCollider CpuConvex(MakePlanes(), FBox(-H, H));
+	TArray<IRopeCollider*> Colliders;
+	Colliders.Add(&CpuConvex);
+
+	FRopeSimState CpuSim = RopeTest::MakeStraightRope(N, Length, FVector(-150.0, 0.0, 55.0), FVector(1, 0, 0));
+	FRopeSimState GpuSim = CpuSim;
+
+	const FRopeXPBDSolver Solver;
+	FRopeGPUSolver GpuSolver;
+	const uint32 RopeId = 29;
+	const uint32 Gen = 1;
+
+	auto MakeStep = [&](const FRopeSimState& Src, int32 NumSub, float FixedDt) -> FRopeGPUResidentStep
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId            = RopeId;
+		Step.Generation        = Gen;
+		Step.NumNodes          = Src.Num();
+		Step.SeedPositions     = Src.Positions;
+		Step.SeedPrevPositions = Src.PrevPositions;
+		Step.InvMass           = Src.InvMass;
+		Step.SegmentLength     = Src.SegmentLength;
+		Step.StretchCompliance = Config.StretchCompliance;
+		Step.BendCompliance    = Config.BendCompliance;
+		Step.Damping           = Config.Damping;
+		Step.Iterations        = Config.Iterations;
+		Step.Gravity           = Config.Gravity;
+		Step.CollisionRadius   = Config.CollisionRadius;
+		Step.Friction          = Config.Friction;
+		Step.SweepStep         = Config.SweepStep;
+		Step.MaxSweepSamples   = Config.MaxSweepSamples;
+		Step.NumSub            = NumSub;
+		Step.FixedDt           = FixedDt;
+		// 6평면 컨벡스: 평면 풀 + 헤더(오프셋 0, 개수 6).
+		FRopeGPUConvex Cv;
+		Cv.PlaneOffset = 0;
+		Cv.PlaneCount = 6;
+		Cv.BoundsCenter = FVector::ZeroVector;
+		Cv.BoundsExtent = H;
+		for (const FPlane& Pl : MakePlanes())
+		{
+			Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W));
+		}
+		Step.Convexes.Add(Cv);
+		return Step;
+	};
+
+	for (int32 Frame = 0; Frame < 120; ++Frame)
+	{
+		Solver.Step(CpuSim, Config, Colliders, 1.0f / 60.0f);
+		const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(GpuSim, Config, 1.0f / 60.0f);
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(MakeStep(GpuSim, Schedule.NumSub, Schedule.FixedDt));
+		GpuSolver.Step(MoveTemp(Steps));
+		FlushRenderingCommands();
+	}
+
+	TMap<uint32, FRopeResidentLatest> Latest;
+	bool bGot = false;
+	for (int32 Spin = 0; Spin < 64 && !bGot; ++Spin)
+	{
+		FlushRenderingCommands();
+		TArray<FRopeGPUResidentStep> Drain;
+		Drain.Add(MakeStep(GpuSim, 0, 1.0f / 60.0f));
+		GpuSolver.Step(MoveTemp(Drain));
+		FlushRenderingCommands();
+		GpuSolver.GetLatest(Latest);
+		if (const FRopeResidentLatest* L = Latest.Find(RopeId))
+		{
+			if (L->Generation == Gen && L->Positions.Num() == GpuSim.Num() && L->PrevPositions.Num() == GpuSim.Num())
+			{
+				for (int32 i = 0; i < GpuSim.Num(); ++i)
+				{
+					GpuSim.Positions[i]     = L->Positions[i];
+					GpuSim.PrevPositions[i] = L->PrevPositions[i];
+				}
+				bGot = true;
+			}
+		}
+	}
+	if (!bGot)
+	{
+		AddError(TEXT("GPU 컨벡스 parity: 상주 결과를 회수하지 못함."));
+		return false;
+	}
+
+	TestFalse(TEXT("CPU no NaN"), RopeTest::AnyNaN(CpuSim));
+	TestFalse(TEXT("GPU no NaN"), RopeTest::AnyNaN(GpuSim));
+
+	// (1) 관통 없음: 어떤 GPU 노드도 컨벡스(=박스) 내부에 있으면 안 된다.
+	float MaxInsideDepth = 0.0f;
+	for (const FVector& P : GpuSim.Positions)
+	{
+		const FVector A = P.GetAbs();
+		if (A.X < H.X && A.Y < H.Y && A.Z < H.Z)
+		{
+			MaxInsideDepth = FMath::Max(MaxInsideDepth, static_cast<float>(FMath::Min3(H.X - A.X, H.Y - A.Y, H.Z - A.Z)));
+		}
+	}
+	TestTrue(FString::Printf(TEXT("GPU convex max inside depth %.3f cm should be < 0.5"), MaxInsideDepth),
+		MaxInsideDepth < 0.5f);
+
+	// (2) CPU 근사 일치.
+	float MaxDev = 0.0f;
+	for (int32 i = 0; i < N; ++i)
+	{
+		MaxDev = FMath::Max(MaxDev, static_cast<float>(FVector::Dist(CpuSim.Positions[i], GpuSim.Positions[i])));
+	}
+	AddInfo(FString::Printf(TEXT("컨벡스 드레이프 CPU↔GPU 최대 노드 편차: %.2f cm"), MaxDev));
+	TestTrue(FString::Printf(TEXT("CPU↔GPU max node deviation %.2f cm within tolerance"), MaxDev),
+		MaxDev < Length * 0.25f);
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

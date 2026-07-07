@@ -39,6 +39,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (ClampMin = "1"))
 	int32 MaxColliders = 128;
 
+	/**
+	 * 컨벡스 1개당 평면 수 상한. GPU solve가 노드×substep마다 컨벡스 평면 전량을 루프하므로 컨벡스당
+	 * 비용 상한 역할. 이 수를 넘는 복잡한 컨벡스는 ElemBox OBB로 폴백한다(충돌 통째 누락 방지, 정확도만↓).
+	 * 정밀 컨벡스가 필요하면 상향, 비용을 아끼려면 하향. (전체 콜라이더 개수는 MaxColliders가 별도로 제한.)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (ClampMin = "4"))
+	int32 MaxConvexPlanes = 32;
+
 	/** 수집에서 제외할 컴포넌트(예: 로프가 의도적으로 통과해야 하는 지오메트리). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	TArray<TObjectPtr<UPrimitiveComponent>> IgnoredComponents;
@@ -51,6 +59,7 @@ private:
 	// 프레임당 1회 재구성되는 백킹 스토리지. 넘겨준 포인터들은 해당 프레임 동안 유효하다.
 	TArray<FRopeBoxCollider> Boxes;
 	TArray<FRopeStaticCapsuleCollider> Capsules;
+	TArray<FRopeConvexCollider> Convexes; // convex 심플 콜리전 + 전단 박스(6평면) 라우팅.
 
 	// 마지막으로 빌드한 GFrameCounter. 같은 프레임에 여러 로프가 호출해도 재빌드 안 함(디둡).
 	// 단 이 provider는 RopeBounds(전 로프 union — 서브시스템이 프레임당 동일 값 전달)를 실제로 쓴다.

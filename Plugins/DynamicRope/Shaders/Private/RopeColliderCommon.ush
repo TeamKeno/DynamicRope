@@ -52,11 +52,25 @@ struct FRopeBox
 	float4 HalfExtents; // xyz(스케일 반영 후 반폭)
 };
 
+// 정적 컨벡스(평면 집합). 평면은 ConvexPlanes 평탄 풀 [PlaneOffset, PlaneOffset+PlaneCount)에.
+// C++ FRopeConvexGPU와 1:1. BoundsCenter/Extent는 월드 AABB(질의 컬).
+struct FRopeConvex
+{
+	int    PlaneOffset;
+	int    PlaneCount;
+	int    Pad0;
+	int    Pad1;
+	float4 BoundsCenter; // xyz
+	float4 BoundsExtent; // xyz
+};
+
 StructuredBuffer<FRopeCapsule>   Capsules;       // 전 로프 capsule 평탄 배열(per-rope offset/count는 호출자 파라미터)
 StructuredBuffer<float>          SDFDistances;   // 전 볼륨 distance grid 연결(볼륨 dedup, 행 우선)
 StructuredBuffer<FRopeSDFVolume> SDFVolumes;     // 볼륨 헤더
 StructuredBuffer<FRopeSDFCollider> SDFColliders; // 로프별 SDF collider 인스턴스
 StructuredBuffer<FRopeBox>       Boxes;          // 로프별 정적 박스(OBB) — 감지 커널은 미참조(정적은 랩 대상 아님)
+StructuredBuffer<FRopeConvex>    Convexes;       // 로프별 정적 컨벡스 헤더
+StructuredBuffer<float4>         ConvexPlanes;   // 전 컨벡스 평면 평탄 풀((nx,ny,nz,w), 월드·바깥)
 
 // 단위 quat q로 벡터 v 회전(v' = v + 2w(q×v) + 2(q×(q×v))).
 float3 RopeQuatRotate(float4 q, float3 v)
@@ -216,6 +230,45 @@ bool RopeQueryBoxPoint(FRopeBox Box, float3 P, float NodeR,
 	OutPen = NodeR - SignedDist;
 	OutClosest = RopeQuatRotate(Box.Rot, SurfLocal) + Box.Center.xyz;
 	return SignedDist < NodeR;
+}
+
+// 컨벡스 점질의: 점 P vs 정적 컨벡스(평면 집합) + 질의 반경 NodeR. 침투 시 true. AABB 컬 후 max-plane —
+// 점이 가장 많이 위반한 평면까지의 부호 거리(내부 정확, 외부 엣지 근방 과소추정=보수적). CPU FRopeConvexCollider 미러.
+bool RopeQueryConvexPoint(FRopeConvex Cv, float3 P, float NodeR,
+	out float3 OutNormal, out float OutPen, out float3 OutClosest)
+{
+	OutNormal = float3(0.0f, 0.0f, 1.0f);
+	OutPen = 0.0f;
+	OutClosest = P;
+	if (Cv.PlaneCount <= 0)
+	{
+		return false;
+	}
+	// 월드 AABB 컬(+NodeR 여유).
+	const float3 Mn = Cv.BoundsCenter.xyz - Cv.BoundsExtent.xyz - NodeR;
+	const float3 Mx = Cv.BoundsCenter.xyz + Cv.BoundsExtent.xyz + NodeR;
+	if (any(P < Mn) || any(P > Mx))
+	{
+		return false;
+	}
+	// max-plane: PlaneDot(p)=dot(N,p)-W 최대인 평면이 표면 근사. 그 법선이 push-out 방향.
+	float MaxD = -1e30f;
+	int   Best = -1;
+	for (int i = 0; i < Cv.PlaneCount; ++i)
+	{
+		const float4 Pl = ConvexPlanes[Cv.PlaneOffset + i];
+		const float  D = dot(Pl.xyz, P) - Pl.w;
+		if (D > MaxD) { MaxD = D; Best = i; }
+	}
+	if (Best < 0 || MaxD >= NodeR)
+	{
+		return false;
+	}
+	const float4 BP = ConvexPlanes[Cv.PlaneOffset + Best];
+	OutNormal = BP.xyz;                 // 빌드 시 정규화된 단위·바깥 법선
+	OutPen = NodeR - MaxD;              // 안쪽이면 MaxD<0이라 더 큼
+	OutClosest = P - BP.xyz * MaxD;     // 그 평면 위 최근접점
+	return true;
 }
 
 // SDF 로컬 점질의: 좁은밴드 박스 컬(+NodeR 여유) 후 trilinear. 침투 시에만 gradient 계산(기존 블록과

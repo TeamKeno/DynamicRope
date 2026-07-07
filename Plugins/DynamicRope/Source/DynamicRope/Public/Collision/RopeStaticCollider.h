@@ -52,3 +52,34 @@ public:
 
 	virtual bool IsWorldStatic() const override { return true; }
 };
+
+/**
+ * 해석적 컨벡스(평면 집합) collider. 정적 월드 지오메트리(스태틱 바디의 convex 심플 콜리전) 전용.
+ * 질의는 max-plane: 점이 가장 많이 위반한 평면까지의 부호 거리를 침투 응답에 쓴다 — **내부에서는 정확**,
+ * **외부 엣지/꼭짓점 근방에서는 거리를 과소추정**(무한 평면이 유한 엣지보다 가까우므로)해 접촉이 살짝
+ * 이르게 걸린다(터널링 없는 보수적 동작이라 페널티 응답엔 충분). 박스처럼 정확한 최근접점(엣지/꼭짓점)
+ * 계산은 인접 정보가 필요해 비싸므로, 정적 월드 충돌엔 이 근사가 표준(Obi 등과 동일).
+ * FRopeContact FROZEN 계약: 비-스켈레탈이라 Bone=None, SourceMesh=null, SurfaceVelocity=0.
+ */
+class DYNAMICROPE_API FRopeConvexCollider : public IRopeCollider
+{
+public:
+	// 월드 공간 평면(단위 법선·바깥 방향). PlaneDot(p)=dot(N,p)-W: 내부는 모든 평면에서 <0.
+	TArray<FPlane> Planes;
+	FBox Bounds = FBox(ForceInit); // 월드 AABB(브로드페이즈 + 질의 컬).
+
+	FRopeConvexCollider() = default;
+	FRopeConvexCollider(TArray<FPlane>&& InPlanes, const FBox& InBounds)
+		: Planes(MoveTemp(InPlanes)), Bounds(InBounds) {}
+
+	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
+	virtual FBox GetWorldBounds() const override { return Bounds; }
+	virtual bool IsWorldStatic() const override { return true; }
+	virtual bool GetGPUConvex(TConstArrayView<FPlane>& OutPlanes, FBox& OutBounds) const override
+	{
+		OutPlanes = Planes;
+		OutBounds = Bounds;
+		return true;
+	}
+	// QuerySwept/ProjectToSurface: 기본 구현 그대로(정적 → 현재 포즈 라인 샘플 폴백).
+};
