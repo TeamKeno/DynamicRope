@@ -3,6 +3,7 @@
 #include "Collision/RopeStaticBodyProvider.h"
 #include "DynamicRopeLog.h"
 #include "Subsystem/RopeSimSubsystem.h"
+#include "Settings/DynamicRopeSettings.h" // 콜라이더 예산/컨벡스 평면 상한(단일 소스)
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Engine/OverlapResult.h"
@@ -124,6 +125,11 @@ void URopeStaticBodyProvider::BuildColliders(const FBox& RopeBounds)
 	World->OverlapMultiByObjectType(Overlaps, RopeBounds.GetCenter(), FQuat::Identity, ObjParams,
 		FCollisionShape::MakeBox(RopeBounds.GetExtent()), QueryParams);
 
+	// 콜라이더 예산/컨벡스 평면 상한은 Project Settings에서 단일 관리(컴포넌트에 중복 필드를 두지 않는다).
+	const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
+	const int32 MaxColliders = Settings ? FMath::Max(1, Settings->StaticBodyMaxColliders) : 128;
+	const int32 MaxConvexPlanes = Settings ? FMath::Max(4, Settings->StaticBodyMaxConvexPlanes) : 32;
+
 	TSet<const UPrimitiveComponent*> Seen; // 오버랩은 바디별로 나올 수 있어 컴포넌트 단위로 디둡.
 	bool bBudgetClipped = false;
 	for (const FOverlapResult& Overlap : Overlaps)
@@ -149,7 +155,7 @@ void URopeStaticBodyProvider::BuildColliders(const FBox& RopeBounds)
 		{
 			continue;
 		}
-		if (!AppendBodyColliders(*Setup, Prim->GetComponentTransform()))
+		if (!AppendBodyColliders(*Setup, Prim->GetComponentTransform(), MaxColliders, MaxConvexPlanes))
 		{
 			bBudgetClipped = true;
 			break;
@@ -166,10 +172,11 @@ void URopeStaticBodyProvider::BuildColliders(const FBox& RopeBounds)
 		*GetNameSafe(GetOwner()), Boxes.Num(), Capsules.Num(), Convexes.Num(), Seen.Num());
 }
 
-bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const FTransform& CompTM)
+bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const FTransform& CompTM,
+	int32 MaxColliders, int32 MaxConvexPlanes)
 {
 	const FVector Scale3D = CompTM.GetScale3D();
-	const auto BudgetLeft = [this]() { return Boxes.Num() + Capsules.Num() + Convexes.Num() < MaxColliders; };
+	const auto BudgetLeft = [this, MaxColliders]() { return Boxes.Num() + Capsules.Num() + Convexes.Num() < MaxColliders; };
 
 	// sphyl: 스킨 캡슐 provider와 동일한 스케일 규약(GetScaledRadius/CylinderLength).
 	for (const FKSphylElem& Sphyl : Setup.AggGeom.SphylElems)

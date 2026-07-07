@@ -42,19 +42,17 @@ public:
 	TSoftClassPtr<ARopeController> StaticBodyControllerClass;
 
 	/**
-	 * 자동 스폰된 정적 바디 프로바이더가 프레임당 수집할 콜라이더 상한(GPU solve 커널이 노드×substep마다
-	 * 콜라이더 전량을 루프하므로 밀집 씬 폭주 방지). 서브클래스가 아닌 기본 ARopeController를 스폰할
-	 * 때만 이 값이 프로바이더에 주입된다 — 커스텀 서브클래스는 자기 컴포넌트 값(디테일 패널)을 존중한다.
-	 * 즉 간단한 튜닝은 여기서, 세밀 제어는 ARopeController 서브클래스로.
+	 * 정적 바디 프로바이더가 프레임당 수집할 콜라이더 상한(GPU solve 커널이 노드×substep마다 콜라이더 전량을
+	 * 루프하므로 밀집 씬 폭주 방지). 프로바이더가 매 프레임 이 값을 직접 읽는 단일 소스 — 중복 방지 가드가
+	 * "월드당 프로바이더 1개"를 강제하므로 컴포넌트별 예산은 불필요하다. 런타임 변경도 즉시 반영된다.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "1", ToolTip = "기본 ARopeController 자동 스폰 시 정적 바디 프로바이더의 프레임당 콜라이더 상한. 서브클래스를 지정한 경우엔 그 컴포넌트 값이 우선합니다."))
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "1", ToolTip = "정적 바디 프로바이더의 프레임당 콜라이더 상한(단일 소스 — 월드당 프로바이더 1개라 전역 관리)."))
 	int32 StaticBodyMaxColliders = 128;
 
 	/**
-	 * 자동 스폰된 정적 바디 프로바이더의 컨벡스 1개당 평면 수 상한. 이 수를 넘는 복잡한 컨벡스는 ElemBox
-	 * OBB로 폴백한다. MaxColliders와 동일 규약 — 기본 ARopeController 스폰 시에만 주입, 커스텀 서브클래스는
-	 * 자기 컴포넌트 값을 존중. (전체 콜라이더 개수는 StaticBodyMaxColliders가 별도로 제한.)
+	 * 정적 바디 프로바이더의 컨벡스 1개당 평면 수 상한. 이 수를 넘는 복잡한 컨벡스는 ElemBox OBB로 폴백한다.
+	 * StaticBodyMaxColliders와 마찬가지로 프로바이더가 직접 읽는 단일 소스다. (전체 콜라이더 개수는 위에서 별도 제한.)
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "4", ToolTip = "기본 ARopeController 자동 스폰 시 컨벡스당 평면 수 상한(초과분은 OBB 폴백). 서브클래스를 지정한 경우엔 그 컴포넌트 값이 우선합니다."))
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "4", ToolTip = "컨벡스당 평면 수 상한(초과분은 OBB 폴백). 단일 소스 — 프로바이더가 직접 읽습니다."))
 	int32 StaticBodyMaxConvexPlanes = 32;
 };

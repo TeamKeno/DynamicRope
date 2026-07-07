@@ -518,22 +518,8 @@ void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 				SpawnParams.ObjectFlags |= RF_Transient; // 런타임 매니저 — 레벨에 저장하지 않는다.
 				SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn; // 위치 무관(원점).
 				SpawnedStaticBodyController = InWorld.SpawnActor<AActor>(ControllerClass, FTransform::Identity, SpawnParams);
-
-				// 공통 튜닝 노브 주입(옵션 B): 기본 ARopeController를 스폰할 때만 세팅의 MaxColliders를 프로바이더에
-				// 적용한다. 커스텀 서브클래스는 자기 컴포넌트 값을 존중한다("간단한 튜닝은 세팅, 세밀 제어는 서브클래스").
-				// SpawnActor가 이미 BeginPlay(프로바이더 등록)를 끝냈지만, MaxColliders는 gather(Tick) 시점에만 읽히므로
-				// 여기서 값을 덮어써도 첫 수집 전에 반영된다.
-				if (ControllerClass == ARopeController::StaticClass())
-				{
-					if (ARopeController* Controller = Cast<ARopeController>(SpawnedStaticBodyController))
-					{
-						if (Controller->StaticBodyProvider)
-						{
-							Controller->StaticBodyProvider->MaxColliders = Settings->StaticBodyMaxColliders;
-							Controller->StaticBodyProvider->MaxConvexPlanes = Settings->StaticBodyMaxConvexPlanes;
-						}
-					}
-				}
+				// 콜라이더 예산/컨벡스 평면 상한은 프로바이더가 BuildColliders에서 Project Settings를 직접 읽으므로
+				// 여기서 주입할 필요가 없다(단일 소스 — 컴포넌트에 중복 필드를 두지 않는다).
 				UE_LOG(LogRopeCollision, Verbose, TEXT("RopeSimSubsystem: spawned static-body controller %s (%s)."),
 					*GetNameSafe(SpawnedStaticBodyController), *GetNameSafe(ControllerClass));
 			}

@@ -32,22 +32,12 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	/**
-	 * 프레임당 수집할 프리미티브 콜라이더 수 상한(예산). GPU solve 커널이 노드×substep마다 콜라이더
-	 * 전량을 루프하므로 밀집 씬에서의 폭주를 막는다. 초과분은 버려지고 Verbose 로그를 남긴다.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (ClampMin = "1"))
-	int32 MaxColliders = 128;
+	// 콜라이더 예산(MaxColliders)과 컨벡스 평면 상한(MaxConvexPlanes)은 컴포넌트가 아니라 Project Settings
+	// (UDynamicRopeSettings)에서 단일 관리한다 — 중복 방지 가드가 "월드당 프로바이더 1개"를 강제하므로
+	// 컴포넌트별 숫자 예산은 전역 세팅 대비 실익이 없다. 아래 IgnoredComponents처럼 프로바이더별로만
+	// 의미 있는 값만 컴포넌트에 남긴다. 프로바이더는 BuildColliders에서 세팅을 직접 읽는다.
 
-	/**
-	 * 컨벡스 1개당 평면 수 상한. GPU solve가 노드×substep마다 컨벡스 평면 전량을 루프하므로 컨벡스당
-	 * 비용 상한 역할. 이 수를 넘는 복잡한 컨벡스는 ElemBox OBB로 폴백한다(충돌 통째 누락 방지, 정확도만↓).
-	 * 정밀 컨벡스가 필요하면 상향, 비용을 아끼려면 하향. (전체 콜라이더 개수는 MaxColliders가 별도로 제한.)
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (ClampMin = "4"))
-	int32 MaxConvexPlanes = 32;
-
-	/** 수집에서 제외할 컴포넌트(예: 로프가 의도적으로 통과해야 하는 지오메트리). */
+	/** 수집에서 제외할 컴포넌트(예: 로프가 의도적으로 통과해야 하는 지오메트리). 프로바이더별 값이라 컴포넌트에 둔다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	TArray<TObjectPtr<UPrimitiveComponent>> IgnoredComponents;
 
@@ -68,5 +58,6 @@ private:
 	// RopeBounds 오버랩 → 근접 정적 바디의 AggGeom을 Boxes/Capsules로 추출한다.
 	void BuildColliders(const FBox& RopeBounds);
 	// 한 컴포넌트의 BodySetup 심플 콜리전을 월드 공간 콜라이더로 추가한다. 예산 소진 시 false.
-	bool AppendBodyColliders(const UBodySetup& Setup, const FTransform& CompTM);
+	// 예산/컨벡스 평면 상한은 호출자(BuildColliders)가 Project Settings에서 읽어 전달한다(단일 소스).
+	bool AppendBodyColliders(const UBodySetup& Setup, const FTransform& CompTM, int32 MaxColliders, int32 MaxConvexPlanes);
 };
