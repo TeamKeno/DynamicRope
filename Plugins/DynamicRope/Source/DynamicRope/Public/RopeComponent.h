@@ -486,15 +486,6 @@ private:
 	/** WrappingPhase에 넘길 호출 컨텍스트(WrapConfig/collider 스냅샷/경로 모드/튜브 반지름/로그 이름). */
 	FRopeWrappingPhase::FContext MakeWrappingContext() const;
 
-	bool BuildWrappingPreviewFromCandidate(const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim,
-		FRopeWrapPreviewData& OutPreview, FString* OutFailureReason = nullptr) const;
-
-	bool BuildFreeWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
-		float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview,
-		FString* OutFailureReason = nullptr) const;
-
-	bool BuildFlightWrappingPreview(FRopeWrapPreviewData& OutPreview, FString* OutFailureReason = nullptr) const;
-
 	void CommitWrapping();
 
 	void AbortWrapping(ERopeReleaseReason Reason);
