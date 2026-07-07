@@ -20,6 +20,8 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "RHI.h"        // GDynamicRHI
 #include "Misc/App.h"   // FApp::CanEverRender
+#include "UObject/UObjectIterator.h" // TObjectIterator(자동 스폰 전 기존 프로바이더 스캔)
+#include "Engine/Engine.h"           // GEngine->AddOnScreenDebugMessage(중복 경고)
 
 namespace
 {
@@ -29,6 +31,24 @@ namespace
 	bool RopeGpuRuntimeAvailable()
 	{
 		return GDynamicRHI != nullptr && FApp::CanEverRender();
+	}
+
+	// 중복 월드-정적 프로바이더 경고: 로그 + (에디터/개발 빌드)화면 메시지. "월드당 최대 1개" 불변식을
+	// 조용히 어기지 않게 눈에 띄게 알린다 — 두 번째 프로바이더는 무시되므로 사용자가 이유를 알아야 한다.
+	void WarnDuplicateWorldStaticProvider(const AActor* Offender)
+	{
+		UE_LOG(LogRopeCollision, Warning,
+			TEXT("정적 월드 콜라이더 프로바이더가 이미 존재합니다 — %s의 중복 프로바이더는 무시됩니다(월드당 1개만 사용)."),
+			*GetNameSafe(Offender));
+#if !UE_BUILD_SHIPPING
+		if (GEngine)
+		{
+			// 키를 고정(GetTypeHash 대신 상수)해 매 프레임이 아닌 이벤트당 1회만 갱신되게 한다.
+			GEngine->AddOnScreenDebugMessage(uint64(0x0D0ED1CA), 8.0f, FColor::Yellow,
+				FString::Printf(TEXT("[DynamicRope] 중복 정적 바디 프로바이더 무시됨(%s) — 월드당 1개만 사용됩니다."),
+					*GetNameSafe(Offender)));
+		}
+#endif
 	}
 
 	// SDF collider view(런타임 Collision) → GPU 업로드용 SDF collider(Shaders) 평탄 복사.
@@ -123,13 +143,34 @@ URopeSimSubsystem* URopeSimSubsystem::Get(const UWorld* World)
 
 void URopeSimSubsystem::RegisterColliderProvider(UActorComponent* Provider)
 {
-	if (Provider)
+	if (!Provider)
 	{
-		ColliderProviders.AddUnique(Provider);
-		SetAnimPrerequisites(Provider, /*bAdd*/ true); // 본 콜라이더(capsule/SDF)가 소유 캐릭터 포즈를 읽으므로.
-		UE_LOG(LogRopeCollision, Verbose, TEXT("RegisterColliderProvider: %s (%d total)"),
-			*Provider->GetName(), ColliderProviders.Num());
+		return;
 	}
+
+	// 중복 방지 백스톱(조각 2): 월드-정적 프로바이더는 월드당 1개만. 이미 등록된 게 있으면 두 번째는
+	// 거부 + 경고. 소스(수동 배치/자동 스폰/런타임)와 무관하게 인터페이스 기반으로 불변식을 강제한다.
+	// 우선순위는 "먼저 등록된 것이 이긴다"(자동 스폰은 조각 1에서 기존 것에 양보하므로 수동이 이긴다).
+	if (const IRopeColliderProvider* Incoming = Cast<IRopeColliderProvider>(Provider))
+	{
+		if (Incoming->ProvidesWorldStaticColliders())
+		{
+			for (const TObjectPtr<UActorComponent>& Existing : ColliderProviders)
+			{
+				const IRopeColliderProvider* E = Cast<IRopeColliderProvider>(Existing);
+				if (E && E->ProvidesWorldStaticColliders())
+				{
+					WarnDuplicateWorldStaticProvider(Provider->GetOwner());
+					return; // 등록 거부 — 이 프로바이더의 GatherColliders는 호출되지 않는다.
+				}
+			}
+		}
+	}
+
+	ColliderProviders.AddUnique(Provider);
+	SetAnimPrerequisites(Provider, /*bAdd*/ true); // 본 콜라이더(capsule/SDF)가 소유 캐릭터 포즈를 읽으므로.
+	UE_LOG(LogRopeCollision, Verbose, TEXT("RegisterColliderProvider: %s (%d total)"),
+		*Provider->GetName(), ColliderProviders.Num());
 }
 
 void URopeSimSubsystem::UnregisterColliderProvider(UActorComponent* Provider)
@@ -448,9 +489,27 @@ void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	// ARopeController)를 스폰하되, None이면 자동 스폰을 끈다(수동 배치 opt-out). 스폰된 액터는 즉시
 	// BeginPlay를 받아 URopeStaticBodyProvider가 RegisterColliderProvider로 등록된다. DoesSupportWorldType이
 	// Game/PIE로 제한하므로 에디터 프리뷰 월드엔 생기지 않는다.
+	// 중복 방지(조각 1): 자동 스폰 전에 월드에 이미 정적 프로바이더가 있으면(수동 배치 등) 양보하고 스폰하지
+	// 않는다 → "수동 배치가 자동 스폰을 이긴다"는 결정적 우선순위. 레지스트리(등록 순서 의존) 대신 컴포넌트
+	// 인스턴스 존재로 판정 — 배치 액터는 BeginPlay 전에 이미 인스턴스화돼 있어 등록 타이밍과 무관하게 잡힌다.
+	bool bManualProviderPresent = false;
+	for (TObjectIterator<URopeStaticBodyProvider> It; It; ++It)
+	{
+		if (IsValid(*It) && !It->IsTemplate() && It->GetWorld() == &InWorld)
+		{
+			bManualProviderPresent = true;
+			break;
+		}
+	}
+
 	if (const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get())
 	{
-		if (!Settings->StaticBodyControllerClass.IsNull())
+		if (bManualProviderPresent)
+		{
+			UE_LOG(LogRopeCollision, Verbose,
+				TEXT("RopeSimSubsystem: 기존 정적 바디 프로바이더가 있어 자동 스폰을 건너뜁니다(수동 배치 우선)."));
+		}
+		else if (!Settings->StaticBodyControllerClass.IsNull())
 		{
 			UClass* ControllerClass = Settings->StaticBodyControllerClass.LoadSynchronous();
 			if (ControllerClass)
