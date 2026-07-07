@@ -83,14 +83,10 @@ void FRopeGDFViewExtension::PreRenderBasePass_RenderThread(FRDGBuilder& GraphBui
 	// GDF 함수는 TranslatedWorld를 받으므로 월드→TranslatedWorld 오프셋을 넘긴다.
 	const FVector3f PreViewTranslation = (FVector3f)View->ViewMatrices.GetPreViewTranslation();
 
-	// 1) 솔브를 씬 그래프에 얹는다. View 전달 — 솔브 CS가 bUseWorldGDF 로프에 GDF permutation을 골라 매 substep
-	//    벽을 투영한다(정적 월드 GDF 충돌은 솔브 안에서 처리; 이 뷰 확장 경로에서만 유효).
+	// 솔브를 씬 그래프에 얹는다. View 전달 — 솔브 CS가 bUseWorldGDF 로프에 GDF permutation을 골라 매 substep
+	// 벽을 투영한다(정적 월드 GDF 충돌은 솔브 안에서 처리; 이 뷰 확장 경로에서만 유효).
+	// 튜브는 여기서 다시 빌드하지 않는다: 솔브(=prepass 이후)에서 튜브를 덮어쓰면 depth prepass 지오메트리와
+	// base pass 지오메트리가 어긋나 EQUAL 깊이 테스트에서 픽셀이 탈락한다(로프가 검게 탐). 튜브는 프록시가
+	// 프레임 초 SetDynamicData에서 직전 프레임 PosBuf로 1회 빌드해 모든 패스에 일관되게 그린다(1프레임 렌더 지연).
 	Solver->DispatchPending_RenderThread(GraphBuilder, View, GDF, PreViewTranslation);
-
-	// 2) 솔브 뒤: 이 씬의 튜브 프록시들이 (GDF 충돌 반영된) PosBuf로 튜브를 (재)빌드한다(RDG가 solve→tube 순서 보장).
-	//    resident 프레임만 덮어쓰므로 지연이 없다(비-resident는 프록시가 스스로 스킵).
-	RopeGDF::ForEachTubeProxy(Scene, [&GraphBuilder, Solver](IRopeGDFTubeProxy* Proxy)
-	{
-		Proxy->BuildTubeInSceneGraph_RenderThread(GraphBuilder, *Solver);
-	});
 }

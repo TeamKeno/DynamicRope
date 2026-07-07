@@ -7,7 +7,6 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "RenderGraphFwd.h" // FRDGBuilder / FRDGBufferRef (RDG 튜브 경로)
 
 class FRHIShaderResourceView;
 class FRHIUnorderedAccessView;
@@ -33,7 +32,7 @@ namespace RopeGPU
 	/**
 	 * 렌더 스레드(B2-full). 솔버 resident PosBuf(StructuredBuffer<float4>, 월드, 시뮬 노드 NumSrcNodes개)를
 	 * GPU에서 Catmull-Rom 스무딩(Subdiv)해 렌더 센터라인(NumRings)을 만든 뒤 튜브 pos/tangent/UV를 생성한다.
-	 * CPU 미러 업로드/스무딩 불필요 → 위치 무지연. WorldToLocal로 component-local 변환. 호출자가 UAV 배리어 책임.
+	 * CPU 미러 업로드/스무딩 불필요. WorldToLocal로 component-local 변환. 호출자가 UAV 배리어 책임.
 	 */
 	DYNAMICROPESHADERS_API void BuildTubeFromResident_RenderThread(
 		FRHICommandList& RHICmdList,
@@ -41,22 +40,6 @@ namespace RopeGPU
 		FRHIUnorderedAccessView* OutPositionsUAV,
 		FRHIUnorderedAccessView* OutTangentsUAV,
 		FRHIUnorderedAccessView* OutTexCoordsUAV,
-		int32 NumRings, int32 NumSides, float Radius,
-		int32 NumSrcNodes, int32 Subdiv,
-		const FMatrix44f& WorldToLocal);
-
-	/**
-	 * 렌더 스레드(Phase 2b). BuildTubeFromResident_RenderThread의 RDG 버전 — 씬 렌더러 그래프에 튜브 생성
-	 * 패스를 얹는다(솔브 뒤 자동 정렬, 배리어 RDG 관리). 입력/출력은 전부 RDG 버퍼 핸들이어야 한다:
-	 * InResidentPositions=StructuredBuffer<float4>(솔버 resident PosBuf), Out*=typed 정점 스트림 버퍼(UAV).
-	 * 호출자가 이후 UseExternalAccessMode로 base pass에 넘긴다.
-	 */
-	DYNAMICROPESHADERS_API void BuildTubeFromResidentRDG_RenderThread(
-		FRDGBuilder& GraphBuilder,
-		FRDGBufferRef InResidentPositions,
-		FRDGBufferRef OutPositions,
-		FRDGBufferRef OutTangents,
-		FRDGBufferRef OutTexCoords,
 		int32 NumRings, int32 NumSides, float Radius,
 		int32 NumSrcNodes, int32 Subdiv,
 		const FMatrix44f& WorldToLocal);

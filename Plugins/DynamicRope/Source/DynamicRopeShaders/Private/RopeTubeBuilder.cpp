@@ -6,7 +6,6 @@
 #include "GlobalShader.h"
 #include "ShaderParameterStruct.h"
 #include "RHICommandList.h"
-#include "RenderGraphBuilder.h" // FRDGBuilder / AllocParameters / CreateUAV (RDG 튜브 경로)
 #include "RenderGraphUtils.h" // FComputeShaderUtils
 #include "DataDrivenShaderPlatformInfo.h"
 
@@ -77,41 +76,6 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FRopeBuildTubeResidentCS, "/Plugin/DynamicRope/Private/RopeBuildTube.usf", "RopeBuildTubeResidentCS", SF_Compute);
 
-// Phase 2b: 위 resident 셰이더와 동일 엔트리(.usf)를 RDG 파라미터로 바인딩한 변형. 씬 렌더러 그래프 안에서
-// 솔브 뒤 dispatch해 지연 없이 튜브를 생성한다(뷰 확장 PreRenderBasePass). 자원은 RDG가 추적/배리어한다.
-class FRopeBuildTubeResidentRDGCS : public FGlobalShader
-{
-public:
-	DECLARE_GLOBAL_SHADER(FRopeBuildTubeResidentRDGCS);
-	SHADER_USE_PARAMETER_STRUCT(FRopeBuildTubeResidentRDGCS, FGlobalShader);
-
-	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER(uint32, NumRings)
-		SHADER_PARAMETER(uint32, NumSides)
-		SHADER_PARAMETER(float, Radius)
-		SHADER_PARAMETER(uint32, NumSrcNodes)
-		SHADER_PARAMETER(uint32, Subdiv)
-		SHADER_PARAMETER(FMatrix44f, WorldToLocal)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, InCenterline4)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float>, OutPositions)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, OutTangents)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float>, OutTexCoords)
-	END_SHADER_PARAMETER_STRUCT()
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
-	}
-
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("ROPE_TUBE_MAX_RINGS"), ROPE_TUBE_MAX_RINGS);
-	}
-};
-
-IMPLEMENT_GLOBAL_SHADER(FRopeBuildTubeResidentRDGCS, "/Plugin/DynamicRope/Private/RopeBuildTube.usf", "RopeBuildTubeResidentCS", SF_Compute);
-
 void RopeGPU::BuildTube_RenderThread(
 	FRHICommandList& RHICmdList,
 	FRHIShaderResourceView* InCenterlineSRV,
@@ -174,39 +138,4 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 	Params.OutTexCoords  = OutTexCoordsUAV;
 
 	FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, Params, FIntVector(1, 1, 1));
-}
-
-void RopeGPU::BuildTubeFromResidentRDG_RenderThread(
-	FRDGBuilder& GraphBuilder,
-	FRDGBufferRef InResidentPositions,
-	FRDGBufferRef OutPositions,
-	FRDGBufferRef OutTangents,
-	FRDGBufferRef OutTexCoords,
-	int32 NumRings, int32 NumSides, float Radius,
-	int32 NumSrcNodes, int32 Subdiv,
-	const FMatrix44f& WorldToLocal)
-{
-	check(IsInRenderingThread());
-	if (!InResidentPositions || !OutPositions || !OutTangents || !OutTexCoords
-		|| NumRings < 2 || NumRings > ROPE_TUBE_MAX_RINGS || NumSides < 3 || NumSrcNodes < 2)
-	{
-		return;
-	}
-
-	TShaderMapRef<FRopeBuildTubeResidentRDGCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-
-	FRopeBuildTubeResidentRDGCS::FParameters* Params = GraphBuilder.AllocParameters<FRopeBuildTubeResidentRDGCS::FParameters>();
-	Params->NumRings      = (uint32)NumRings;
-	Params->NumSides      = (uint32)NumSides;
-	Params->Radius        = Radius;
-	Params->NumSrcNodes   = (uint32)NumSrcNodes;
-	Params->Subdiv        = (uint32)FMath::Max(1, Subdiv);
-	Params->WorldToLocal  = WorldToLocal;
-	Params->InCenterline4 = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(InResidentPositions)); // StructuredBuffer<float4>
-	Params->OutPositions  = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(OutPositions, PF_R32_FLOAT));
-	Params->OutTangents   = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(OutTangents, PF_R32_UINT));
-	Params->OutTexCoords  = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(OutTexCoords, PF_R32_FLOAT));
-
-	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeBuildTubeResidentRDG"),
-		ComputeShader, Params, FIntVector(1, 1, 1)); // 로프 1개 = 스레드그룹 1개
 }
