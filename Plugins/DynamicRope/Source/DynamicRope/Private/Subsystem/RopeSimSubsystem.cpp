@@ -8,6 +8,9 @@
 #include "Collision/RopeColliderProvider.h" // IRopeColliderProvider (중앙 collider gather)
 #include "RopeGPUSolver.h"          // FRopeGPUSolver / FRopeGPUResidentStep / FRopeGPUCapsule (DynamicRopeShaders 모듈)
 #include "RopeGPUSolverRegistry.h"  // RopeGDF::RegisterSolver / IsDispatchInVE (GDF 통합 경로)
+#include "Settings/DynamicRopeSettings.h"      // StaticBodyControllerClass / StaticBodyMaxColliders(자동 스폰)
+#include "Collision/RopeController.h"          // ARopeController(정적 바디 프로바이더 호스트)
+#include "Collision/RopeStaticBodyProvider.h"  // 기본 클래스 스폰 시 MaxColliders 주입
 #include "Engine/World.h"
 #include "SceneInterface.h"         // FSceneInterface (씬→솔버 등록 키)
 #include "GameFramework/Actor.h"    // AActor::GetOwner (provider 소스 필터링)
@@ -440,6 +443,46 @@ void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	// GDF 통합 경로에서 뷰 확장이 씬→솔버로 찾아 dispatch할 수 있게 이 월드의 씬에 솔버를 등록한다.
 	// (씬은 이 시점에 렌더링용으로 생성돼 있다.) 경로가 off여도 등록은 무해(pending이 비어 no-op).
 	RopeGDF::RegisterSolver(InWorld.Scene, &GpuSolver);
+
+	// 정적 월드 충돌 프로바이더 호스트 액터를 월드당 1개 자동 스폰한다. 세팅이 지정한 클래스(기본
+	// ARopeController)를 스폰하되, None이면 자동 스폰을 끈다(수동 배치 opt-out). 스폰된 액터는 즉시
+	// BeginPlay를 받아 URopeStaticBodyProvider가 RegisterColliderProvider로 등록된다. DoesSupportWorldType이
+	// Game/PIE로 제한하므로 에디터 프리뷰 월드엔 생기지 않는다.
+	if (const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get())
+	{
+		if (!Settings->StaticBodyControllerClass.IsNull())
+		{
+			UClass* ControllerClass = Settings->StaticBodyControllerClass.LoadSynchronous();
+			if (ControllerClass)
+			{
+				FActorSpawnParameters SpawnParams;
+				SpawnParams.ObjectFlags |= RF_Transient; // 런타임 매니저 — 레벨에 저장하지 않는다.
+				SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn; // 위치 무관(원점).
+				SpawnedStaticBodyController = InWorld.SpawnActor<AActor>(ControllerClass, FTransform::Identity, SpawnParams);
+
+				// 공통 튜닝 노브 주입(옵션 B): 기본 ARopeController를 스폰할 때만 세팅의 MaxColliders를 프로바이더에
+				// 적용한다. 커스텀 서브클래스는 자기 컴포넌트 값을 존중한다("간단한 튜닝은 세팅, 세밀 제어는 서브클래스").
+				// SpawnActor가 이미 BeginPlay(프로바이더 등록)를 끝냈지만, MaxColliders는 gather(Tick) 시점에만 읽히므로
+				// 여기서 값을 덮어써도 첫 수집 전에 반영된다.
+				if (ControllerClass == ARopeController::StaticClass())
+				{
+					if (ARopeController* Controller = Cast<ARopeController>(SpawnedStaticBodyController))
+					{
+						if (Controller->StaticBodyProvider)
+						{
+							Controller->StaticBodyProvider->MaxColliders = Settings->StaticBodyMaxColliders;
+						}
+					}
+				}
+				UE_LOG(LogRopeCollision, Verbose, TEXT("RopeSimSubsystem: spawned static-body controller %s (%s)."),
+					*GetNameSafe(SpawnedStaticBodyController), *GetNameSafe(ControllerClass));
+			}
+			else
+			{
+				UE_LOG(LogRopeCollision, Warning, TEXT("RopeSimSubsystem: StaticBodyControllerClass failed to load — no static world collision provider spawned."));
+			}
+		}
+	}
 }
 
 void URopeSimSubsystem::Deinitialize()
@@ -449,6 +492,14 @@ void URopeSimSubsystem::Deinitialize()
 		SimTickFunction.UnRegisterTickFunction();
 	}
 	SimTickFunction.Target = nullptr;
+
+	// 자동 스폰한 매니저 액터 파괴. 월드 teardown이 어차피 액터를 정리하지만, 명시적으로 지워
+	// 재-Initialize(예: PIE seamless travel) 시 잔여물이 남지 않게 한다. IsValid로 이미 파괴된 경우 방어.
+	if (IsValid(SpawnedStaticBodyController))
+	{
+		SpawnedStaticBodyController->Destroy();
+	}
+	SpawnedStaticBodyController = nullptr;
 
 	if (const UWorld* World = GetWorld())
 	{

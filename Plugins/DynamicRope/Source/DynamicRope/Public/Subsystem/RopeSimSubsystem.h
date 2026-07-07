@@ -101,6 +101,11 @@ private:
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UActorComponent>> ColliderProviders;
 
+	// OnWorldBeginPlay에서 자동 스폰한 로프 매니저 액터(정적 월드 충돌 프로바이더 호스트). 세팅
+	// StaticBodyControllerClass가 None이면 null(자동 스폰 opt-out). Deinitialize에서 파괴한다.
+	UPROPERTY(Transient)
+	TObjectPtr<AActor> SpawnedStaticBodyController = nullptr;
+
 	// 프레임당 1회 중앙 빌드한 collider(provider별 소유 액터 + collider 포인터). 포인터는 provider 소유라 해당 프레임만 유효.
 	struct FFrameProviderColliders
 	{

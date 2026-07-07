@@ -7,6 +7,8 @@
 #include "Engine/DeveloperSettings.h"
 #include "DynamicRopeSettings.generated.h"
 
+class ARopeController;
+
 /**
  * Dynamic Rope 플러그인의 프로젝트 전역 설정.
  * Project Settings > Plugins > Dynamic Rope에서 편집 가능하며 DefaultGame.ini에 저장된다.
@@ -29,4 +31,22 @@ public:
 	/** Wrapping 상태로 진입한 뒤 tail 방향 node들의 목표 surface path를 만드는 전역 방식. */
 	UPROPERTY(config, EditAnywhere, Category = "Wrapping", meta = (ToolTip = "Wrapping 상태에서 tail node들을 어떤 surface path로 감기게 만들지 선택합니다. 기본값은 의도적으로 원주를 돌면서 SDF 굴곡을 따라가는 Surface Vector Field입니다."))
 	ERopeWrappingPathMode WrappingPathMode = ERopeWrappingPathMode::SurfaceVectorField;
+
+	/**
+	 * 게임/PIE 월드 시작 시 URopeSimSubsystem이 자동 스폰하는 로프 매니저 액터 클래스. 이 액터가
+	 * 정적 월드 충돌용 URopeStaticBodyProvider를 품는다 — 레벨마다 프로바이더를 수동 배치하지 않아도
+	 * "월드당 정확히 1개"를 보장한다. ARopeController를 서브클래스해 MaxColliders 등을 조정할 수 있다.
+	 * 비우면(None) 자동 스폰을 끈다(수동 배치를 원하는 프로젝트용).
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ToolTip = "게임 시작 시 자동 스폰되는 로프 매니저 액터 클래스(정적 월드 충돌 프로바이더 호스트). 비우면 자동 스폰을 끕니다."))
+	TSoftClassPtr<ARopeController> StaticBodyControllerClass;
+
+	/**
+	 * 자동 스폰된 정적 바디 프로바이더가 프레임당 수집할 콜라이더 상한(GPU solve 커널이 노드×substep마다
+	 * 콜라이더 전량을 루프하므로 밀집 씬 폭주 방지). 서브클래스가 아닌 기본 ARopeController를 스폰할
+	 * 때만 이 값이 프로바이더에 주입된다 — 커스텀 서브클래스는 자기 컴포넌트 값(디테일 패널)을 존중한다.
+	 * 즉 간단한 튜닝은 여기서, 세밀 제어는 ARopeController 서브클래스로.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "1", ToolTip = "기본 ARopeController 자동 스폰 시 정적 바디 프로바이더의 프레임당 콜라이더 상한. 서브클래스를 지정한 경우엔 그 컴포넌트 값이 우선합니다."))
+	int32 StaticBodyMaxColliders = 128;
 };
