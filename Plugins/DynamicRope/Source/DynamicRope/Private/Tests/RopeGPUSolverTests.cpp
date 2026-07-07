@@ -13,6 +13,7 @@
 #include "RopeGPUSolver.h" // DynamicRopeShaders 모듈
 #include "RopeTubeBuilder.h" // B2-full 튜브 컴퓨트
 #include "Collision/RopeCollider.h"
+#include "Collision/RopeStaticCollider.h" // FRopeBoxCollider (정적 박스 parity)
 #include "Collision/SDF/RopeSDFCollider.h"
 #include "Collision/SDF/RopeSDFSynthetic.h" // MakeSphere(합성 SDF 볼륨)
 #include "Collision/SDF/RopeSDFData.h"
@@ -993,6 +994,140 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 	}
 	AddInfo(FString::Printf(TEXT("GPU-스무딩 vs CPU-스무딩 최대 정점 편차 %.5f cm"), MaxDev));
 	TestTrue(FString::Printf(TEXT("GPU Catmull-Rom 스무딩이 CPU와 일치(편차 %.5f)"), MaxDev), MaxDev < 0.05f);
+	return true;
+}
+
+// 정적 박스(OBB) 충돌 parity: 박스 모서리 위로 드레이프된 로프가 GPU 경로에서도 (1) 박스 내부로
+// 파고들지 않고 (2) CPU 솔버(FRopeBoxCollider)와 근사 일치하는가. GDF 복셀 라운딩으로 모서리를
+// 관통하던 버그를 해석적 박스가 GPU에서 막는지 보는 회귀 게이트.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUBoxCornerParityTest,
+	"DynamicRope.Solver.GPUBoxCornerParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU 박스 parity 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	const int32 N = 24;
+	const float Length = 300.0f;
+	const FVector HalfExtents(50.0);
+	FRopeSolverConfig Config = MakeHangConfig();
+	Config.CollisionRadius = 2.0f;
+	Config.Friction = 0.5f;
+
+	// 박스(반폭 50, 원점) 위 z=55에서 +X/-X 엣지를 가로질러 걸친 자유 로프(핀 없음). 중력 드레이프.
+	FRopeBoxCollider Box(FVector::ZeroVector, FQuat::Identity, HalfExtents);
+	TArray<IRopeCollider*> Colliders;
+	Colliders.Add(&Box);
+
+	FRopeSimState CpuSim = RopeTest::MakeStraightRope(N, Length, FVector(-150.0, 0.0, 55.0), FVector(1, 0, 0));
+	FRopeSimState GpuSim = CpuSim;
+
+	const FRopeXPBDSolver Solver;
+	FRopeGPUSolver GpuSolver;
+	const uint32 RopeId = 23;
+	const uint32 Gen = 1;
+
+	auto MakeStep = [&](const FRopeSimState& Src, int32 NumSub, float FixedDt) -> FRopeGPUResidentStep
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId            = RopeId;
+		Step.Generation        = Gen;
+		Step.NumNodes          = Src.Num();
+		Step.SeedPositions     = Src.Positions;
+		Step.SeedPrevPositions = Src.PrevPositions;
+		Step.InvMass           = Src.InvMass;
+		Step.SegmentLength     = Src.SegmentLength;
+		Step.StretchCompliance = Config.StretchCompliance;
+		Step.BendCompliance    = Config.BendCompliance;
+		Step.Damping           = Config.Damping;
+		Step.Iterations        = Config.Iterations;
+		Step.Gravity           = Config.Gravity;
+		Step.CollisionRadius   = Config.CollisionRadius;
+		Step.Friction          = Config.Friction;
+		Step.SweepStep         = Config.SweepStep;
+		Step.MaxSweepSamples   = Config.MaxSweepSamples;
+		Step.NumSub            = NumSub;
+		Step.FixedDt           = FixedDt;
+		// 정적 박스: CPU FRopeBoxCollider와 동일 데이터(GetGPUBox 추출과 같은 값).
+		FRopeGPUBox GpuBox;
+		Box.GetGPUBox(GpuBox.Center, GpuBox.Rot, GpuBox.HalfExtents);
+		Step.Boxes.Add(GpuBox);
+		return Step;
+	};
+
+	for (int32 Frame = 0; Frame < 120; ++Frame)
+	{
+		Solver.Step(CpuSim, Config, Colliders, 1.0f / 60.0f);
+
+		const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(GpuSim, Config, 1.0f / 60.0f);
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(MakeStep(GpuSim, Schedule.NumSub, Schedule.FixedDt));
+		GpuSolver.Step(MoveTemp(Steps));
+		FlushRenderingCommands();
+	}
+
+	// 마지막 결과 drain(NumSub=0 펌프 — 위 parity 테스트와 동일 패턴).
+	TMap<uint32, FRopeResidentLatest> Latest;
+	bool bGot = false;
+	for (int32 Spin = 0; Spin < 64 && !bGot; ++Spin)
+	{
+		FlushRenderingCommands();
+		TArray<FRopeGPUResidentStep> Drain;
+		Drain.Add(MakeStep(GpuSim, 0, 1.0f / 60.0f));
+		GpuSolver.Step(MoveTemp(Drain));
+		FlushRenderingCommands();
+		GpuSolver.GetLatest(Latest);
+		if (const FRopeResidentLatest* L = Latest.Find(RopeId))
+		{
+			if (L->Generation == Gen && L->Positions.Num() == GpuSim.Num() && L->PrevPositions.Num() == GpuSim.Num())
+			{
+				for (int32 i = 0; i < GpuSim.Num(); ++i)
+				{
+					GpuSim.Positions[i]     = L->Positions[i];
+					GpuSim.PrevPositions[i] = L->PrevPositions[i];
+				}
+				bGot = true;
+			}
+		}
+	}
+	if (!bGot)
+	{
+		AddError(TEXT("GPU 박스 parity: 상주 결과를 회수하지 못함."));
+		return false;
+	}
+
+	TestFalse(TEXT("CPU no NaN"), RopeTest::AnyNaN(CpuSim));
+	TestFalse(TEXT("GPU no NaN"), RopeTest::AnyNaN(GpuSim));
+
+	// (1) 관통 없음: 어떤 GPU 노드도 박스 내부에 있으면 안 된다(원래 버그의 회귀 조건).
+	float MaxInsideDepth = 0.0f;
+	for (const FVector& P : GpuSim.Positions)
+	{
+		const FVector A = P.GetAbs();
+		if (A.X < HalfExtents.X && A.Y < HalfExtents.Y && A.Z < HalfExtents.Z)
+		{
+			MaxInsideDepth = FMath::Max(MaxInsideDepth, static_cast<float>(FMath::Min3(
+				HalfExtents.X - A.X, HalfExtents.Y - A.Y, HalfExtents.Z - A.Z)));
+		}
+	}
+	TestTrue(FString::Printf(TEXT("GPU max inside depth %.3f cm should be < 0.5"), MaxInsideDepth),
+		MaxInsideDepth < 0.5f);
+
+	// (2) CPU 근사 일치: 정착 드레이프 형상이 가까운지(비트일치 아님 — 컬러링/샘플 순서 차).
+	float MaxDev = 0.0f;
+	for (int32 i = 0; i < N; ++i)
+	{
+		MaxDev = FMath::Max(MaxDev, static_cast<float>(FVector::Dist(CpuSim.Positions[i], GpuSim.Positions[i])));
+	}
+	AddInfo(FString::Printf(TEXT("박스 드레이프 CPU↔GPU 최대 노드 편차: %.2f cm"), MaxDev));
+	TestTrue(FString::Printf(TEXT("CPU↔GPU max node deviation %.2f cm within tolerance"), MaxDev),
+		MaxDev < Length * 0.25f);
+
 	return true;
 }
 

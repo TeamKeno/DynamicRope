@@ -28,6 +28,18 @@ struct FRopeGPUCapsule
 };
 
 /**
+ * GPU 충돌용 해석적 박스(OBB). 정적 월드 지오메트리(스태틱 바디 심플 콜리전) 전용 — 프레임 모션
+ * 없음(표면속도 0). 모서리/엣지에서 정확한 대각 normal을 주는 해석적 질의가 존재 이유(GDF 복셀
+ * 라운딩 관통 대체). 호출자가 IRopeCollider::GetGPUBox로 추출해 채운다.
+ */
+struct FRopeGPUBox
+{
+	FVector Center = FVector::ZeroVector;      // 월드 공간 박스 중심
+	FQuat   Rot = FQuat::Identity;             // 월드 공간 박스 회전
+	FVector HalfExtents = FVector::ZeroVector; // 로컬 반폭(스케일 반영 후)
+};
+
+/**
  * GPU 충돌(M3)용 per-bone SDF collider. 본 로컬 distance grid + 본→월드 트랜스폼.
  * Distances는 호출자(에셋) 소유 포인터(Step 호출 동안 유효 — 렌더 커맨드로 옮기기 전 GT에서 복사된다).
  * Distances는 uint8 양자화 코드 — GT 평탄화 시 비대칭 밴드로 dequant해 float 버퍼로 업로드한다.
@@ -104,6 +116,13 @@ struct FRopeGPUResidentStep
 	bool  bUseWorldGDF = false;   // Phase 2c: 엔진 GDF로 정적 월드 밀어내기(씬 그래프 dispatch에서만 유효).
 	TArray<FRopeGPUCapsule>     Capsules;
 	TArray<FRopeGPUSDFCollider> SDFColliders;
+	TArray<FRopeGPUBox>         Boxes; // 정적 박스(OBB — 스태틱 바디 심플 콜리전). solve 전용(감지 미참여).
+
+	// 접촉 감지(detect) 커널이 볼 capsule 수. Capsules 앞쪽 [0, NumDetectCapsules)만 감지에 참여한다 —
+	// 호출자(PackStepColliders)가 비-정적 캡슐을 앞에, 정적(월드) 캡슐을 뒤에 2-pass로 패킹해 채운다.
+	// 감지는 노드당 최심 접촉 1개만 남기므로, 벽(정적) 접촉이 본(스켈레탈) 접촉을 가려 랩 캡처가
+	// 조용히 실패하는 것을 막는다. -1(기본) = 전부 참여(기존 동작/테스트 호환).
+	int32 NumDetectCapsules = -1;
 
 	// 이번 프레임 substep 스케줄(호출자가 RopeSolverSubsteps로 계산해 전달). NumSub<=0이면 적분 없이 유지.
 	int32 NumSub = 0;

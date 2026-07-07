@@ -136,6 +136,15 @@ public:
 	virtual FBox GetWorldBounds() const = 0;
 
 	/**
+	 * 이 collider가 정적 월드 지오메트리(스태틱 바디)인지. 기본 false(스켈레탈/동적).
+	 * 정적 collider는 랩 대상이 아니므로 접촉 감지(detect) 파이프라인에서 제외해야 한다 —
+	 * detect는 노드당 가장 깊은 접촉 1개만 남기므로, 벽 접촉이 본 접촉을 가리면 그 노드의
+	 * 랩 캡처가 조용히 실패한다(GPU는 PackStepColliders의 2-pass 패킹, CPU는 flight detector
+	 * 입력 필터가 이 플래그를 본다). solve(push-out)에는 정상 참여한다.
+	 */
+	virtual bool IsWorldStatic() const { return false; }
+
+	/**
 	 * GPU 솔버(M2)용: 이 collider가 해석적 capsule이면 월드 공간 세그먼트(A-B)와 반지름을 채우고 true.
 	 * 기본은 false(미지원) — RTTI가 꺼져 있어 dynamic_cast 대신 이 가상 accessor로 capsule을 식별한다.
 	 * SDF/기타 collider는 GPU capsule 경로에서 제외된다(M3에서 Texture3D SDF로 별도 처리).
@@ -155,6 +164,13 @@ public:
 	 * 캡슐과 마찬가지로 RTTI 없이 SDF collider를 식별하는 경로다(GetGPUCapsule과 상호 배타적).
 	 */
 	virtual bool GetGPUSDF(FRopeSDFColliderView& OutView) const { return false; }
+
+	/**
+	 * GPU 솔버용: 이 collider가 해석적 박스(OBB)면 월드 공간 center/rot/half-extents를 채우고 true.
+	 * 기본은 false. GetGPUCapsule/GetGPUSDF와 상호 배타적(같은 RTTI-프리 식별 패턴). 정적 월드
+	 * 지오메트리용이라 프레임 모션이 없다 — GPU는 표면 속도 0(정적)으로 응답한다.
+	 */
+	virtual bool GetGPUBox(FVector& OutCenter, FQuat& OutRot, FVector& OutHalfExtents) const { return false; }
 
 	/**
 	 * 움직이는 collider의 이번 프레임 모션(prev->curr 월드 트랜스폼)을 채우고 true. 기본은 false(정적/모션없음).

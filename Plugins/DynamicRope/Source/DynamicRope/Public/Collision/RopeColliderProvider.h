@@ -27,4 +27,11 @@ public:
 	 * 해당 프레임 solve가 끝날 때까지 유효 상태를 유지해야 한다.
 	 */
 	virtual void GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders) = 0;
+
+	/**
+	 * 이 provider가 정적 월드 지오메트리 collider를 공급하는지(예: URopeStaticBodyProvider). true면
+	 * 서브시스템의 로프별 "자기 owner provider 제외"에서 면제된다 — 정적 월드는 "던진 본인의 몸"이
+	 * 될 수 없는데, 로프 소유 액터에 붙였다는 이유만으로 월드 충돌이 조용히 사라지는 것을 막는다.
+	 */
+	virtual bool ProvidesWorldStaticColliders() const { return false; }
 };

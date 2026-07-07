@@ -105,6 +105,7 @@ private:
 	struct FFrameProviderColliders
 	{
 		AActor* Owner = nullptr;          // 소스 필터링용(provider 컴포넌트의 owner 액터).
+		bool bWorldStatic = false;        // 정적 월드 provider — 로프별 소유자 제외 면제(ProvidesWorldStaticColliders).
 		TArray<IRopeCollider*> Colliders; // provider->GatherColliders가 채운 포인터(provider 백킹 스토리지를 가리킴).
 		TArray<FBox> Bounds;              // collider별 월드 bounds 캐시(로프별 거리 컬링용 — 프레임당 1회 계산).
 	};

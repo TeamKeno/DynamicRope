@@ -204,6 +204,7 @@ void URopeSimSubsystem::BuildFrameColliders()
 		}
 		FFrameProviderColliders FP;
 		FP.Owner = Comp->GetOwner();
+		FP.bWorldStatic = Provider->ProvidesWorldStaticColliders(); // 정적 월드 provider는 소유자 제외 면제.
 		Provider->GatherColliders(AllBounds, FP.Colliders);
 		if (FP.Colliders.Num() > 0)
 		{
@@ -251,9 +252,11 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArra
 
 	for (const FFrameProviderColliders& FP : FrameProviders)
 	{
-		if (FP.Owner == OwnerToExclude && OwnerToExclude != nullptr)
+		// 자기 owner provider 제외 — 단 정적 월드 provider는 면제(정적 월드는 "던진 본인의 몸"이 아니므로,
+		// 로프 소유 액터에 붙였다는 이유로 월드 충돌이 사라지면 안 된다).
+		if (!FP.bWorldStatic && FP.Owner == OwnerToExclude && OwnerToExclude != nullptr)
 		{
-			continue; // 자기 owner provider 제외.
+			continue;
 		}
 		if (!bCull || FP.Bounds.Num() != FP.Colliders.Num())
 		{
@@ -689,10 +692,13 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			return Attr;
 		};
 
-	// FrameColliders는 Prepare에서 GT gather된 스냅샷.
+	// FrameColliders는 Prepare에서 GT gather된 스냅샷. 2-pass: 비-정적(스켈레탈) collider를 먼저,
+	// 정적(월드) collider를 뒤에 패킹한다. 감지(detect) 커널은 capsule을 [0, NumDetectCapsules)만
+	// 보므로 정적 캡슐이 감지에서 자동 제외된다 — 감지는 노드당 최심 접촉 1개만 남겨, 벽 접촉이
+	// 본 접촉을 가리면 랩 캡처가 조용히 실패하기 때문(박스는 감지 커널에 아예 없다). solve는 전부 본다.
 	for (IRopeCollider* Collider : Rope.FrameColliders)
 	{
-		if (!Collider)
+		if (!Collider || Collider->IsWorldStatic())
 		{
 			continue;
 		}
@@ -716,6 +722,33 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			{
 				Rope.GpuSdfAttribution.Add(MakeAttribution(Collider));
 			}
+		}
+	}
+	Step.NumDetectCapsules = Step.Capsules.Num(); // 감지 경계: 여기까지가 비-정적 캡슐.
+
+	// pass 2: 정적(월드) collider — solve 전용. 캡슐(스피어/스필)은 감지 경계 뒤에 append,
+	// 박스는 전용 배열. 귀속 테이블은 인덱스 정렬 유지를 위해 정적 캡슐 분도 채운다(None/null —
+	// 감지 커널이 경계 밖 인덱스를 emit하지 않으므로 방어적).
+	for (IRopeCollider* Collider : Rope.FrameColliders)
+	{
+		if (!Collider || !Collider->IsWorldStatic())
+		{
+			continue;
+		}
+		FRopeGPUCapsule Cap;
+		if (Collider->GetGPUCapsule(Cap.A, Cap.B, Cap.Radius))
+		{
+			Step.Capsules.Add(Cap); // 정적 — 프레임 모션 없음(InvDt 0 기본값).
+			if (bDetectThisRope)
+			{
+				Rope.GpuCapsuleAttribution.Add(MakeAttribution(Collider));
+			}
+			continue;
+		}
+		FRopeGPUBox Box;
+		if (Collider->GetGPUBox(Box.Center, Box.Rot, Box.HalfExtents))
+		{
+			Step.Boxes.Add(Box);
 		}
 	}
 }

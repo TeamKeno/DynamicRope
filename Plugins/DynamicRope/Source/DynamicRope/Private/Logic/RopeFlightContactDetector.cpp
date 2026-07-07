@@ -436,7 +436,13 @@ void FRopeFlightContactDetector::GatherNearbyColliders(const FVector& PrevPositi
 
 	for (IRopeCollider* Collider : Colliders)
 	{
-		if (Collider && SegmentBounds.Intersect(Collider->GetWorldBounds().ExpandBy(Params.ContactRadius + Params.RopeRadius)))
+		// 정적 월드 collider는 감지에서 제외 — 랩 대상(본 귀속)이 아니고, 최심-1건 후보 선정에서
+		// 벽 접촉이 본 접촉을 가려 캡처를 조용히 막는다(GPU 감지 커널의 정적 제외와 동일 규약).
+		if (!Collider || Collider->IsWorldStatic())
+		{
+			continue;
+		}
+		if (SegmentBounds.Intersect(Collider->GetWorldBounds().ExpandBy(Params.ContactRadius + Params.RopeRadius)))
 		{
 			OutNearbyColliders.Add(Collider);
 		}
@@ -456,7 +462,9 @@ FRopeContact FRopeFlightContactDetector::SweepOrSampleContact(const FRopeSimStat
 		const FVector SamplePos = FMath::Lerp(PrevPosition, Position, Alpha);
 		for (const IRopeCollider* Collider : Colliders)
 		{
-			if (!Collider)
+			// 정적 제외: 내부 호출은 GatherNearbyColliders가 이미 걸렀지만, 디버그 경로가 이 함수를
+			// FrameColliders로 직접 부르므로 여기서도 방어한다(규약은 위 gather 주석 참조).
+			if (!Collider || Collider->IsWorldStatic())
 			{
 				continue;
 			}

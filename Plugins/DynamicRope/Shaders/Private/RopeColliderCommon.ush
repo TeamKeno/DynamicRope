@@ -43,10 +43,20 @@ struct FRopeSDFCollider
 	float4 PrevTranslation; // xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
 };
 
+// 정적 월드 지오메트리용 해석적 박스(OBB). 스태틱 바디 심플 콜리전 추출분 — 프레임 모션 없음(표면속도 0).
+// GDF(복셀 필드)가 뭉개던 모서리를 로컬 클램프 질의로 정확히 처리하는 것이 존재 이유. C++ FRopeBoxGPU와 1:1.
+struct FRopeBox
+{
+	float4 Center;      // xyz
+	float4 Rot;         // quat (x,y,z,w)
+	float4 HalfExtents; // xyz(스케일 반영 후 반폭)
+};
+
 StructuredBuffer<FRopeCapsule>   Capsules;       // 전 로프 capsule 평탄 배열(per-rope offset/count는 호출자 파라미터)
 StructuredBuffer<float>          SDFDistances;   // 전 볼륨 distance grid 연결(볼륨 dedup, 행 우선)
 StructuredBuffer<FRopeSDFVolume> SDFVolumes;     // 볼륨 헤더
 StructuredBuffer<FRopeSDFCollider> SDFColliders; // 로프별 SDF collider 인스턴스
+StructuredBuffer<FRopeBox>       Boxes;          // 로프별 정적 박스(OBB) — 감지 커널은 미참조(정적은 랩 대상 아님)
 
 // 단위 quat q로 벡터 v 회전(v' = v + 2w(q×v) + 2(q×(q×v))).
 float3 RopeQuatRotate(float4 q, float3 v)
@@ -155,6 +165,57 @@ bool RopeQueryCapsulePoint(float3 CapA, float3 CapB, float CapRadius, float3 P, 
 	OutNormal = (Dist > 1e-4f) ? (ToNode / Dist) : float3(0.0f, 0.0f, 1.0f);
 	OutPen = MinDist - Dist;
 	return Dist < MinDist;
+}
+
+// 박스(OBB) 점질의: 점 P vs 정적 박스 + 질의 반경 NodeR. 침투 시 true. 로컬 클램프 — 바깥에서는
+// clamp 결과가 모서리/엣지 자체가 되어 normal이 정확한 대각 방향(CPU FRopeBoxCollider::Query 미러).
+// 안쪽에서는 침투가 가장 얕은 면의 바깥 방향. OutClosest = 표면 최근접점(월드, 노드 배치용).
+bool RopeQueryBoxPoint(FRopeBox Box, float3 P, float NodeR,
+	out float3 OutNormal, out float OutPen, out float3 OutClosest)
+{
+	const float3 H = Box.HalfExtents.xyz;
+	const float3 Lp = RopeQuatRotate(float4(-Box.Rot.xyz, Box.Rot.w), P - Box.Center.xyz);
+	const float3 Clamped = clamp(Lp, -H, H);
+	const float3 Delta = Lp - Clamped;
+	const float  DistOutside = length(Delta);
+
+	float3 NLocal;
+	float3 SurfLocal;
+	float  SignedDist; // 표면까지 부호 거리(바깥 +, 안쪽 -)
+	if (DistOutside > 1e-4f)
+	{
+		SignedDist = DistOutside;
+		NLocal = Delta / DistOutside;
+		SurfLocal = Clamped;
+	}
+	else
+	{
+		const float3 FaceDist = H - abs(Lp); // 각 축 면까지 거리(전부 >= 0)
+		SurfLocal = Lp;
+		if (FaceDist.x <= FaceDist.y && FaceDist.x <= FaceDist.z)
+		{
+			SignedDist = -FaceDist.x;
+			NLocal = float3(Lp.x >= 0.0f ? 1.0f : -1.0f, 0.0f, 0.0f);
+			SurfLocal.x = (Lp.x >= 0.0f) ? H.x : -H.x;
+		}
+		else if (FaceDist.y <= FaceDist.z)
+		{
+			SignedDist = -FaceDist.y;
+			NLocal = float3(0.0f, Lp.y >= 0.0f ? 1.0f : -1.0f, 0.0f);
+			SurfLocal.y = (Lp.y >= 0.0f) ? H.y : -H.y;
+		}
+		else
+		{
+			SignedDist = -FaceDist.z;
+			NLocal = float3(0.0f, 0.0f, Lp.z >= 0.0f ? 1.0f : -1.0f);
+			SurfLocal.z = (Lp.z >= 0.0f) ? H.z : -H.z;
+		}
+	}
+
+	OutNormal = RopeQuatRotate(Box.Rot, NLocal);
+	OutPen = NodeR - SignedDist;
+	OutClosest = RopeQuatRotate(Box.Rot, SurfLocal) + Box.Center.xyz;
+	return SignedDist < NodeR;
 }
 
 // SDF 로컬 점질의: 좁은밴드 박스 컬(+NodeR 여유) 후 trilinear. 침투 시에만 gradient 계산(기존 블록과
