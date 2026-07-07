@@ -16,6 +16,7 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "Subsystem/RopeSimSubsystem.h"
 #include "Subsystem/RopeDebugSubsystem.h" // 디버그 캡처 게이트 + 스냅샷 보관소
+#include "RopeGPUSolver.h" // FRopeGPUSolver::MaxNodes — NumParticles 상한(GPU 솔버 스레드그룹 한도)
 #include "Settings/DynamicRopeSettings.h"
 #include "RopeMathHelpers.h" // RopeMath::SmoothStep / AnyTangentFromNormal (unity 빌드 중복 정의 방지)
 #include "Materials/MaterialInterface.h"
@@ -1302,6 +1303,16 @@ void URopeComponent::ResetTransientPhaseState()
 
 void URopeComponent::InitRope()
 {
+	// GPU 솔버 상한(스레드그룹 = MaxNodes)을 넘으면 조용히 CPU 솔브+튜브 폴백이 되어 성능 절벽이 된다.
+	// 에디터 ClampMax와 별개로 BP/코드 경로도 하드 클램프한다 — 값을 써 넣어 프록시 NumNodes(= NumParticles)와
+	// Sim 크기가 일치하도록(불일치 시 BuildTube가 스킵된다). 초과 시 1회 경고.
+	if (NumParticles > FRopeGPUSolver::MaxNodes)
+	{
+		UE_LOG(LogDynamicRope, Warning,
+			TEXT("[%s] NumParticles %d exceeds the GPU solver cap %d; clamping (values above the cap fall back to CPU solve+tube)."),
+			*GetName(), NumParticles, FRopeGPUSolver::MaxNodes);
+		NumParticles = FRopeGPUSolver::MaxNodes;
+	}
 	const int32 N = FMath::Max(2, NumParticles);
 	Sim.Positions.SetNum(N);
 	Sim.PrevPositions.SetNum(N);

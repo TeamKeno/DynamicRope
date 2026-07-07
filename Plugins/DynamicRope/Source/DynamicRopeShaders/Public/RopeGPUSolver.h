@@ -225,8 +225,9 @@ class FSceneView;
 class DYNAMICROPESHADERS_API FRopeGPUSolver
 {
 public:
-	/** 로프당 최대 노드 수(= compute 스레드그룹 크기). 호출자는 이 한도 내 step만 넘겨야 한다. */
-	static constexpr int32 MaxNodes = 256;
+	/** 로프당 최대 노드 수(= 최상단 compute 스레드그룹 버킷). 호출자는 이 한도 내 step만 넘겨야 한다.
+	 *  RopeGPUSolver.cpp의 노드 버킷 배열 최상단과 일치해야 한다(그쪽 static_assert가 강제). */
+	static constexpr int32 MaxNodes = 512;
 
 	FRopeGPUSolver();
 	~FRopeGPUSolver();

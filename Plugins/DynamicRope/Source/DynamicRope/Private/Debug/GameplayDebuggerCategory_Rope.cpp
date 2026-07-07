@@ -24,6 +24,9 @@ namespace
 			Subdiv = FMath::Clamp(CVar->GetInt(), 1, 8);
 		}
 		const int32 Nodes = FMath::Max(2, NumNodes);
+		// 프록시(RopeComputeTubeSubdiv)와 동일하게 Subdiv를 링 상한에 맞춰 자동 하향 → 실제 사용 버킷/링을 표시.
+		const int32 MaxForGpu = (Nodes > 2) ? FMath::Max(1, (RopeGPU::MaxTubeRings() - 1) / (Nodes - 1)) : Subdiv;
+		Subdiv = FMath::Min(Subdiv, MaxForGpu);
 		const int32 NumRings = (Nodes - 1) * Subdiv + 1;
 		const int32 Bucket = RopeGPU::TubeRingBucket(NumRings);
 		if (Bucket > 0)

@@ -17,8 +17,25 @@
 #include "DataDrivenShaderPlatformInfo.h"
 #include "Misc/ScopeLock.h"
 
-// 스레드그룹 크기 == 지원하는 최대 노드 수. groupshared 정적 사이징과 numthreads에 함께 쓰인다.
-static constexpr int32 ROPE_MAX_NODES = 256;
+// 노드 버킷(스레드그룹 크기 == groupshared/numthreads 크기). 로프 1개 = 스레드그룹 1개, 노드 = 스레드라,
+// 예전엔 모든 로프가 고정 256 그룹을 잡아 노드 수가 적은 로프는 스레드 대부분이 idle(배리어에는 참여)이었다.
+// 이제 NumNodes 이상인 가장 작은 버킷을 골라(퍼뮤테이션) 그 낭비를 없애고, 최상단 512로 지원 노드 상한을
+// 올린다. numthreads(ROPE_THREADS)/groupshared(ROPE_MAX_NODES)는 버킷 값으로 스케일 — 퍼뮤테이션이
+// ROPE_MAX_NODES를 버킷 값으로 설정하고 ModifyCompilationEnvironment가 ROPE_THREADS=버킷을 맞춘다.
+// groupshared 예산: solve 9float/node → 512노드=18KB(<32KB). detect는 groupshared 없음(numthreads만).
+static constexpr int32 GRopeNodeBuckets[] = { 64, 128, 256, 512 };
+static_assert(GRopeNodeBuckets[UE_ARRAY_COUNT(GRopeNodeBuckets) - 1] == FRopeGPUSolver::MaxNodes,
+	"최상단 노드 버킷이 FRopeGPUSolver::MaxNodes와 일치해야 한다(서브시스템 GPU 후보 게이트가 MaxNodes를 쓴다).");
+
+// NumNodes 이상인 가장 작은 버킷. 없으면(> 상한) 0. 호출부는 MaxNodes 게이트 뒤라 항상 ≥64를 받는다.
+static int32 RopeNodeBucket(int32 NumNodes)
+{
+	for (int32 Bucket : GRopeNodeBuckets)
+	{
+		if (NumNodes <= Bucket) { return Bucket; }
+	}
+	return 0;
+}
 
 // HLSL FRopeGPUParams(RopeXPBD.usf)와 1:1 미러. 레이아웃 변경 시 .usf 동시 수정. 16바이트 정렬.
 struct FRopeGPUParamsGPU
@@ -117,10 +134,12 @@ public:
 	DECLARE_GLOBAL_SHADER(FRopeXPBDSolveCS);
 	SHADER_USE_PARAMETER_STRUCT(FRopeXPBDSolveCS, FGlobalShader);
 
+	// 노드 버킷 = numthreads/groupshared 크기. 값이 곧 ROPE_MAX_NODES define으로 .usf에 전달된다.
+	class FNodeBucket : SHADER_PERMUTATION_SPARSE_INT("ROPE_MAX_NODES", 64, 128, 256, 512);
 	// GDF 월드 충돌을 substep 제약으로 통합하는 permutation. on일 때만 GDF 헤더 include + View/GDF 바인딩.
 	// off(기본, View 없는 Step 경로 겸용)는 GDF 미참조 → View 없이 기존대로 컴파일된다.
 	class FGDFDim : SHADER_PERMUTATION_BOOL("ROPE_USE_GDF");
-	using FPermutationDomain = TShaderPermutationDomain<FGDFDim>;
+	using FPermutationDomain = TShaderPermutationDomain<FNodeBucket, FGDFDim>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, NumRopes)
@@ -155,8 +174,9 @@ public:
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
 		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("ROPE_MAX_NODES"), ROPE_MAX_NODES);
-		OutEnvironment.SetDefine(TEXT("ROPE_THREADS"), ROPE_MAX_NODES);
+		// ROPE_MAX_NODES(groupshared)는 FNodeBucket 차원이 자동 설정. ROPE_THREADS(numthreads)를 같은 버킷으로 맞춘다.
+		const FPermutationDomain PermutationVector(Parameters.PermutationId);
+		OutEnvironment.SetDefine(TEXT("ROPE_THREADS"), PermutationVector.Get<FNodeBucket>());
 	}
 };
 
@@ -184,6 +204,10 @@ class FRopeContactDetectCS : public FGlobalShader
 public:
 	DECLARE_GLOBAL_SHADER(FRopeContactDetectCS);
 	SHADER_USE_PARAMETER_STRUCT(FRopeContactDetectCS, FGlobalShader);
+
+	// 노드 버킷 = numthreads 크기(감지 커널은 groupshared 없음 — numthreads만 스케일). 솔브와 동일 버킷 집합.
+	class FNodeBucket : SHADER_PERMUTATION_SPARSE_INT("ROPE_MAX_NODES", 64, 128, 256, 512);
+	using FPermutationDomain = TShaderPermutationDomain<FNodeBucket>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(int32, DetectNumNodes)
@@ -214,8 +238,9 @@ public:
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
 		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("ROPE_MAX_NODES"), ROPE_MAX_NODES);
-		OutEnvironment.SetDefine(TEXT("ROPE_THREADS"), ROPE_MAX_NODES);
+		// ROPE_MAX_NODES는 FNodeBucket 차원이 자동 설정. ROPE_THREADS(numthreads)를 같은 버킷으로 맞춘다.
+		const FPermutationDomain PermutationVector(Parameters.PermutationId);
+		OutEnvironment.SetDefine(TEXT("ROPE_THREADS"), PermutationVector.Get<FNodeBucket>());
 	}
 };
 
@@ -994,6 +1019,7 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 		PassParams->bWorldGDFValid        = bGDFSolverValid;
 	}
 	FRopeXPBDSolveCS::FPermutationDomain PermVec;
+	PermVec.Set<FRopeXPBDSolveCS::FNodeBucket>(RopeNodeBucket(N)); // N ≤ MaxNodes(호출부 게이트) → 항상 ≥64.
 	PermVec.Set<FRopeXPBDSolveCS::FGDFDim>(bUseGDFPerm);
 	TShaderMapRef<FRopeXPBDSolveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), PermVec);
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeXPBDResident"),
@@ -1112,7 +1138,9 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	DetectParams->DetectWhipNext       = GraphBuilder.CreateSRV(WNextBuf);
 	DetectParams->OutContacts          = GraphBuilder.CreateUAV(ContactRDG);
 
-	TShaderMapRef<FRopeContactDetectCS> DetectShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+	FRopeContactDetectCS::FPermutationDomain DetectPerm;
+	DetectPerm.Set<FRopeContactDetectCS::FNodeBucket>(RopeNodeBucket(N)); // N ≤ MaxNodes → 항상 ≥64.
+	TShaderMapRef<FRopeContactDetectCS> DetectShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), DetectPerm);
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeContactDetect"),
 		DetectShader, DetectParams, FIntVector(1, 1, 1));
 
@@ -1149,9 +1177,9 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	for (const FRopeGPUResidentStep& S : Steps)
 	{
 		const int32 N = S.NumNodes;
-		if (N < 2 || N > ROPE_MAX_NODES)
+		if (N < 2 || N > FRopeGPUSolver::MaxNodes)
 		{
-			UE_LOG(LogDynamicRopeGPU, Warning, TEXT("GPU resident step skipped: %d nodes out of [2, %d]."), N, ROPE_MAX_NODES);
+			UE_LOG(LogDynamicRopeGPU, Warning, TEXT("GPU resident step skipped: %d nodes out of [2, %d]."), N, FRopeGPUSolver::MaxNodes);
 			continue;
 		}
 
