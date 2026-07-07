@@ -28,7 +28,7 @@ void URopeWielderComponent::BeginPlay()
 	Super::BeginPlay();
 
 	ResolveRefs();
-	ResolvePreviewComponent();
+	ResolvePreviewComponent(/*bAllowAutoCreate*/ false);
 
 	if (!Rope)
 	{
@@ -47,9 +47,9 @@ void URopeWielderComponent::BeginPlay()
 		BindInput();
 	}
 
-	bShowThrowPreviewArc = PreviewComponent != nullptr;
-	SetComponentTickEnabled(bShowThrowPreviewArc);
-	if (bShowThrowPreviewArc)
+	bShowThrowPreview = PreviewComponent != nullptr;
+	SetComponentTickEnabled(bShowThrowPreview);
+	if (bShowThrowPreview)
 	{
 		UpdateThrowPreview();
 	}
@@ -108,7 +108,7 @@ void URopeWielderComponent::ResolveRefs()
 	}
 }
 
-void URopeWielderComponent::ResolvePreviewComponent()
+void URopeWielderComponent::ResolvePreviewComponent(bool bAllowAutoCreate)
 {
 	AActor* Owner = GetOwner();
 	if (!Owner || PreviewComponent)
@@ -124,16 +124,6 @@ void URopeWielderComponent::ResolvePreviewComponent()
 	if (!PreviewComponent)
 	{
 		PreviewComponent = Owner->FindComponentByClass<URopePreviewComponent>();
-	}
-	if (!PreviewComponent && bAutoCreatePreviewComponent)
-	{
-		PreviewComponent = NewObject<URopePreviewComponent>(Owner, TEXT("RopePreviewComponent"));
-		Owner->AddInstanceComponent(PreviewComponent);
-		if (USceneComponent* RootComponent = Owner->GetRootComponent())
-		{
-			PreviewComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepWorldTransform);
-		}
-		PreviewComponent->RegisterComponent();
 	}
 }
 
@@ -489,11 +479,11 @@ void URopeWielderComponent::ToggleThrow()
 
 void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 {
-	bShowThrowPreviewArc = bEnabled;
-	if (bShowThrowPreviewArc)
+	bShowThrowPreview = bEnabled;
+	if (bShowThrowPreview)
 	{
 		ResolveRefs();
-		ResolvePreviewComponent();
+		ResolvePreviewComponent(/*bAllowAutoCreate*/ true);
 		PreviewUpdateCooldown = 0.0f;
 		SetComponentTickEnabled(true);
 		UpdateThrowPreview();
@@ -507,7 +497,7 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 
 void URopeWielderComponent::UpdateThrowPreview()
 {
-	if (!bShowThrowPreviewArc)
+	if (!bShowThrowPreview)
 	{
 		ClearThrowPreview();
 		return;
@@ -519,7 +509,7 @@ void URopeWielderComponent::UpdateThrowPreview()
 	}
 	if (!PreviewComponent)
 	{
-		ResolvePreviewComponent();
+		ResolvePreviewComponent(/*bAllowAutoCreate*/ false);
 	}
 	if (!Rope || !PreviewComponent)
 	{

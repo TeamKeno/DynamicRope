@@ -96,25 +96,22 @@ public:
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
 
 	//~ Preview ------------------------------------------------------------
-	/** 던지기 전 로프 길이 기반 부채꼴 preview를 표시한다. Rope 본체 렌더링과 별도 컴포넌트로 그린다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
-	bool bShowThrowPreviewArc = false;
+	
+	/** */
+	bool bShowThrowPreview = false;
 
-	/** 비어 있으면 owner에서 찾고, bAutoCreatePreviewComponent가 켜져 있으면 런타임에 자동 생성한다. */
+	/** 비어 있으면 owner에서 찾다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopePreviewComponent,/Script/DynamicRope.RopeArcPreviewComponent", DisplayName = "Preview Component"))
 	FComponentReference PreviewComponentReference;
 
 	UPROPERTY(Transient)
 	TObjectPtr<URopePreviewComponent> PreviewComponent = nullptr;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
-	bool bAutoCreatePreviewComponent = true;
-
 	/** Free/Releasing 상태에서만 preview를 표시한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
 	bool bPreviewOnlyWhenIdle = true;
 
-	/** preview 반지름 = RopeLength * 이 값. */
+	/** preview*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0"))
 	float PreviewReachScale = 1.0f;
 
@@ -128,7 +125,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "1.0", Units = "cm"))
 	float PreviewSampleStep = 80.0f;
 
-	/** 0 이하이면 RopeComponent의 ContactRadius/Radius 기반 fallback을 사용한다. */
+	/** */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "cm"))
 	float PreviewQueryRadius = 0.0f;
 
@@ -274,7 +271,7 @@ private:
 	void AttachRopeToSocket(); // Rope를 AttachMesh의 HandSocketName에 부착.
 	void AddMappingContext();  // MappingContext를 로컬 플레이어 Enhanced Input 서브시스템에 추가.
 
-	void ResolvePreviewComponent();
+	void ResolvePreviewComponent(bool bAllowAutoCreate);
 	void UpdateThrowPreview();
 	void ClearThrowPreview();
 
