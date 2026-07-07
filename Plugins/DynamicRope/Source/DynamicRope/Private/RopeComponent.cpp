@@ -82,6 +82,7 @@ namespace
 		case ERopePhase::Contacting: return TEXT("Contacting");
 		case ERopePhase::Wrapping:   return TEXT("Wrapping");
 		case ERopePhase::Wrapped:    return TEXT("Wrapped");
+		case ERopePhase::GuidedThrow:return TEXT("GuidedThrow");
 		case ERopePhase::Releasing:  return TEXT("Releasing");
 		default:                     return TEXT("?");
 		}
@@ -143,6 +144,49 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 
 	EnsureRopeInitialized();
 	StartFreshThrow(ThrowContext);
+}
+
+bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& Prepared)
+{
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Prepared preview throw requested (phase=%s, valid=%d, points=%d)"),
+		*GetName(), PhaseName(Phase), Prepared.IsValid() ? 1 : 0, Prepared.RenderPreview.Points.Num());
+
+	// PreviewPathLocked의 핵심 진입점: 여기서는 StartFreshThrow처럼 Flight로 보내지 않는다.
+	// preview build가 고른 path/contact/anchor를 authoritative하게 사용해야 실제 결과가 preview와 갈라지지 않는다.
+	EnsureRopeInitialized();
+	if (!Prepared.IsValid() || Prepared.RenderPreview.Points.Num() < 2 || Sim.Num() < 2)
+	{
+		return false;
+	}
+
+	if (WrapController.IsActive())
+	{
+		WrapController.Release(ERopeReleaseReason::Manual);
+	}
+	ResetTransientPhaseState();
+	ReleaseCooldown = 0.0f;
+
+	// 다음 PrepareSimFrame부터 GuidedThrow가 StartPositions -> RenderPreview.Points로 노드를 구동한다.
+	// 완료 시 Prepared.Anchors를 그대로 Wrapped seed로 사용한다.
+	GuidedThrowState.Reset();
+	GuidedThrowState.bActive = true;
+	GuidedThrowState.Prepared = Prepared;
+	GuidedThrowState.StartPositions = Sim.Positions;
+	GuidedThrowState.Elapsed = 0.0f;
+	GuidedThrowState.Duration = FMath::Max(0.01f, WrapConfig.WrappingMotionDuration);
+
+	Sim.bStartPinned = true;
+	Sim.StartPinPrev = Prepared.ThrowContext.Origin;
+	Sim.StartPinTarget = Prepared.ThrowContext.Origin;
+	if (Sim.Positions.IsValidIndex(0))
+	{
+		Sim.Positions[0] = Prepared.ThrowContext.Origin;
+		Sim.PrevPositions[0] = Prepared.ThrowContext.Origin;
+	}
+
+	SetPhase(ERopePhase::GuidedThrow, *FString::Printf(TEXT("prepared points=%d, bone=%s"),
+		Prepared.RenderPreview.Points.Num(), *Prepared.Bone.ToString()));
+	return true;
 }
 
 float URopeComponent::GetSegmentTension(int32 SegmentIndex) const
@@ -428,6 +472,39 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 	return bBuilt;
 }
 
+bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale,
+	int32 SegmentCount, float SampleStep, float QueryRadius, FRopePreparedThrowPreview& OutPrepared,
+	FString* OutFailureReason) const
+{
+	OutPrepared.Reset();
+	// Prepared preview는 아직 던지기 전인 Free/Releasing에서만 의미가 있다.
+	// Flight 이후 phase는 이미 실제 접촉/감김 상태가 있으므로 기존 표시용 BuildWrappingPreview 경로를 쓴다.
+	if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing)
+	{
+		SetPreviewFailureReason(OutFailureReason,
+			FString::Printf(TEXT("prepared preview rejected: phase=%s"), PhaseName(Phase)));
+		return false;
+	}
+
+	FRopeThrowPreviewBuilder::FInput Input;
+	Input.Sim = &Sim;
+	Input.Colliders = &FrameColliders;
+	Input.ThrowContext = ResolveThrowContext(ThrowContext);
+	Input.WrapConfig = WrapConfig;
+	Input.PathMode = GetWrappingPathMode();
+	Input.RopeRadius = Radius;
+	Input.RopeNumSides = NumSides;
+	Input.RopeLength = FMath::Max(Sim.RopeLength, RopeLength);
+	Input.SweepAngleDegrees = MakeWhipGuideConfig().SweepAngleDegrees;
+	Input.FallbackForward = GetForwardVector();
+	Input.OwnerName = GetName();
+	Input.ReachScale = ReachScale;
+	Input.SegmentCount = SegmentCount;
+	Input.SampleStep = SampleStep;
+	Input.QueryRadius = QueryRadius;
+	return FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, OutPrepared, OutFailureReason);
+}
+
 void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog)
 {
 	// 모든 release 트리거(수동/절단/장력/거리/대상 소실)의 공용 마무리: 페이즈 전환 + 노드 반환 +
@@ -451,7 +528,8 @@ void URopeComponent::CutRope()
 
 void URopeComponent::ReleaseWrapAs(ERopeReleaseReason Reason)
 {
-	if (Phase != ERopePhase::Wrapped && Phase != ERopePhase::Contacting && Phase != ERopePhase::Wrapping)
+	if (Phase != ERopePhase::Wrapped && Phase != ERopePhase::Contacting && Phase != ERopePhase::Wrapping &&
+		Phase != ERopePhase::GuidedThrow)
 		return;
 
 	FName Bone = NAME_None;
@@ -463,6 +541,10 @@ void URopeComponent::ReleaseWrapAs(ERopeReleaseReason Reason)
 	else if (Phase == ERopePhase::Wrapping)
 	{
 		Bone = WrappingPhase.State.BoneName;
+	}
+	else if (Phase == ERopePhase::GuidedThrow)
+	{
+		Bone = GuidedThrowState.Prepared.Bone;
 	}
 	else
 	{
@@ -635,6 +717,12 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		bSolveThisFrame = true;
 		break;
 	}
+
+	case ERopePhase::GuidedThrow:
+		// PreviewPathLocked 전용 phase. 물리 solver/contact detector를 건너뛰고 cached preview path만 따른다.
+		UpdateGuidedThrow(DeltaTime);
+		bSolveThisFrame = false;
+		break;
 
 	case ERopePhase::Releasing:
 		// 모든 node를 solver에 다시 넘긴다(hand pin만 유지) — InvMass 복원 + Prev=Pos(튐 방지)를
@@ -1095,6 +1183,7 @@ void URopeComponent::ResetTransientPhaseState()
 	ContactTracker.Reset();
 	PendingWrapSeed.Reset();
 	WrappingPhase.State.Reset();
+	GuidedThrowState.Reset();
 	ContactingElapsed = 0.0f;
 	FlightNoContactElapsed = 0.0f;
 	TensionOverTime = 0.0f;
@@ -1343,6 +1432,87 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 
 	SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("fresh throw impulse, aim=%s, speed=%.1f"),
 		*WhipGuide.GetAimDir().ToCompactString(), ResolvedThrow.ThrowSpeed));
+}
+
+void URopeComponent::UpdateGuidedThrow(float DeltaTime)
+{
+	if (!GuidedThrowState.bActive || !GuidedThrowState.Prepared.IsValid() || Sim.Num() < 2)
+	{
+		SetPhase(ERopePhase::Releasing, TEXT("guided throw invalid"));
+		ResetTransientPhaseState();
+		ReleaseCooldown = ReleaseCooldownSeconds;
+		return;
+	}
+
+	GuidedThrowState.Elapsed += DeltaTime;
+	const float Alpha = FMath::Clamp(GuidedThrowState.Elapsed / FMath::Max(GuidedThrowState.Duration, 0.01f), 0.0f, 1.0f);
+	const float EasedAlpha = Alpha * Alpha * (3.0f - 2.0f * Alpha);
+	const TArray<FVector>& TargetPoints = GuidedThrowState.Prepared.RenderPreview.Points;
+
+	OverrideFrame.EnsureSize(Sim.Num());
+	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
+	{
+		// 1차 구현은 전체 노드를 시작 위치에서 preview 결과 위치로 부드럽게 보간한다.
+		// 나중에 모션 품질을 높이면 여기만 front-follow/arc-length sampling 방식으로 교체하면 된다.
+		FVector Target = TargetPoints.IsValidIndex(NodeIndex) ? TargetPoints[NodeIndex] : TargetPoints.Last();
+		if (NodeIndex == 0 && Sim.bStartPinned)
+		{
+			Target = Sim.StartPinTarget;
+		}
+
+		const FVector Start = GuidedThrowState.StartPositions.IsValidIndex(NodeIndex)
+			? GuidedThrowState.StartPositions[NodeIndex]
+			: Sim.Positions[NodeIndex];
+		const FVector Position = FMath::Lerp(Start, Target, EasedAlpha);
+		OverrideFrame.SetPosition(NodeIndex, Position, /*bZeroVelocity*/ true);
+		OverrideFrame.SetInvMass(NodeIndex, 0.0f);
+	}
+
+	if (Alpha >= 1.0f)
+	{
+		FinishGuidedThrow();
+	}
+}
+
+void URopeComponent::FinishGuidedThrow()
+{
+	const FRopePreparedThrowPreview Prepared = GuidedThrowState.Prepared;
+	if (!Prepared.IsValid() || Prepared.Anchors.Num() == 0 || !Prepared.Mesh.IsValid())
+	{
+		SetPhase(ERopePhase::Releasing, TEXT("guided throw commit failed"));
+		ResetTransientPhaseState();
+		ReleaseCooldown = ReleaseCooldownSeconds;
+		return;
+	}
+
+	// preview builder가 만든 anchor들을 그대로 wrapped seed로 승격한다.
+	// 그래서 완료 시점에 contact를 다시 찾지 않고, preview와 동일한 bone/local anchor에 고정된다.
+	FRopeWrapState Seed;
+	Seed.BoneName = Prepared.Bone;
+	Seed.Mesh = Prepared.Mesh;
+	Seed.Anchors = Prepared.Anchors;
+	for (const FRopeSurfaceAnchor& Anchor : Seed.Anchors)
+	{
+		FRopeLatchNode Latch;
+		Latch.NodeIndex = Anchor.NodeIndex;
+		Latch.Bone = Anchor.Bone;
+		Seed.Latched.Add(Latch);
+	}
+
+	WrapController.BeginWrap(Sim, Seed, OverrideFrame);
+	if (!WrapController.State.IsWrapped())
+	{
+		SetPhase(ERopePhase::Releasing, TEXT("guided throw begin wrap failed"));
+		ResetTransientPhaseState();
+		ReleaseCooldown = ReleaseCooldownSeconds;
+		return;
+	}
+
+	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
+	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("guided throw bone=%s, %d anchor(s)"),
+		*Seed.BoneName.ToString(), Seed.Anchors.Num()));
+	ResetTransientPhaseState();
+	OnRopeWrapped.Broadcast(Seed.BoneName);
 }
 
 FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const

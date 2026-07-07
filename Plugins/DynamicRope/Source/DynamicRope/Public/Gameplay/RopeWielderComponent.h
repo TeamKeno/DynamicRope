@@ -36,6 +36,16 @@ enum class ERopeAimSource : uint8
 	ActorForward
 };
 
+UENUM(BlueprintType)
+enum class ERopeWielderThrowMode : uint8
+{
+	/** 기존 던지기 방식. 입력이 들어오면 RopeComponent가 Flight로 진입하고 실제 물리/접촉 감지가 결과를 결정한다. */
+	PhysicsSimulation UMETA(DisplayName = "Physics Simulation"),
+
+	/** Preview가 성공한 경로를 권위 있는 결과로 사용한다. Preview 실패 상태에서는 던지기 입력 자체를 무시한다. */
+	PreviewPathLocked UMETA(DisplayName = "Preview Path Locked")
+};
+
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeWielderComponent : public UActorComponent
 {
@@ -82,6 +92,10 @@ public:
 	/** Wielder가 책임지는 던지기 속도. ThrowContext를 통해 RopeComponent로 전달된다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
 	float ThrowSpeed = 1500.0f;
+
+	/** 던지기 확정 방식을 고른다. PreviewPathLocked는 매 프레임 만든 prepared preview가 있어야만 던질 수 있다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	ERopeWielderThrowMode ThrowMode = ERopeWielderThrowMode::PhysicsSimulation;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "ThrowFrameMode == ERopeThrowFrameMode::Custom"))
 	FVector CustomFrameForward = FVector::ForwardVector;
@@ -278,4 +292,10 @@ private:
 	bool bLastPreviewBuildSucceeded = false;
 	bool bHasLastPreviewBuildResult = false;
 	FString LastPreviewBuildReason;
+
+	// 마지막 preview tick에서 성공한 prepared 결과. PreviewPathLocked 모드에서 "지금 던질 수 있는가"를 판정한다.
+	FRopePreparedThrowPreview LastPreparedPreview;
+
+	// 몽타주를 쓰는 경우 입력 시점의 preview를 고정해 두고, AnimNotify_RopeThrow가 ThrowNow를 부를 때 소비한다.
+	FRopePreparedThrowPreview PendingPreparedThrow;
 };

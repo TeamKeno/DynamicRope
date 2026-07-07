@@ -20,6 +20,7 @@ enum class ERopePhase : uint8
 	Contacting,		//접촉 후보 감지
 	Wrapping,		//감기는 중
 	Wrapped,
+	GuidedThrow,	//PreviewPathLocked 전용. 물리 Flight를 타지 않고 cached preview path를 authoritative하게 따라간다.
 	Releasing
 };
 
@@ -894,6 +895,57 @@ struct FRopeContactCandidate
 	float Penetration = 0.0f;
 	float RelativeTangentialSpeed = 0.0f;
 	float WrapDirectionScore = 0.0f; // 감김 방향이면 +, 반대면 -
+};
+
+struct FRopePreparedThrowPreview
+{
+	bool bValid = false;
+
+	// preview를 만들 때 쓴 throw 기준. montage가 있어도 입력 순간의 frame/origin을 보존하기 위해 저장한다.
+	FRopeThrowContext ThrowContext;
+
+	// 화면에 보이는 preview centerline. GuidedThrow에서는 이 점들을 실제 노드 목표 위치로도 사용한다.
+	FRopeWrapPreviewData RenderPreview;
+
+	// preview build 시 만든 가상 로프 상태와 접촉 후보. 디버그/후속 고도화용으로 보존한다.
+	FRopeSimState PreviewSim;
+	FRopeContactCandidate Contact;
+
+	// 최종 Wrapped 진입에 필요한 bone-local 고정 정보. Points만으로는 캐릭터 움직임을 따라갈 수 없다.
+	FRopeSurfaceAnchor LatchAnchor;
+	TArray<FRopeSurfaceAnchor> Anchors;
+
+	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
+	FName Bone = NAME_None;
+	double BuildTimeSeconds = 0.0;
+
+	void Reset()
+	{
+		*this = FRopePreparedThrowPreview();
+	}
+
+	bool IsValid() const
+	{
+		return bValid && RenderPreview.IsValid() && Mesh.IsValid() && !Bone.IsNone() && LatchAnchor.NodeIndex != INDEX_NONE;
+	}
+};
+
+struct FRopeGuidedThrowState
+{
+	bool bActive = false;
+
+	// Wielder가 확정한 prepared preview. 이 phase에서는 접촉 탐색을 다시 하지 않고 이 데이터만 따른다.
+	FRopePreparedThrowPreview Prepared;
+
+	// GuidedThrow 시작 순간의 실제 rope 위치. RenderPreview.Points로 전체 노드를 lerp하는 시작점이다.
+	TArray<FVector> StartPositions;
+	float Elapsed = 0.0f;
+	float Duration = 0.18f;
+
+	void Reset()
+	{
+		*this = FRopeGuidedThrowState();
+	}
 };
 
 //TODO 주석 추가

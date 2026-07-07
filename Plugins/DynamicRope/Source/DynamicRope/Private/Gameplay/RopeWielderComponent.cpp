@@ -28,7 +28,10 @@ void URopeWielderComponent::BeginPlay()
 	Super::BeginPlay();
 
 	ResolveRefs();
-	ResolvePreviewComponent(/*bAllowAutoCreate*/ false);
+
+	// PreviewPathLocked는 preview 성공 여부가 던지기 가능 여부 자체를 결정한다.
+	// 수동으로 배치한 PreviewComponent가 없으면 BeginPlay에서 런타임 컴포넌트를 만들어 preview tick을 보장한다.
+	ResolvePreviewComponent(/*bAllowAutoCreate*/ ThrowMode == ERopeWielderThrowMode::PreviewPathLocked);
 
 	if (!Rope)
 	{
@@ -124,6 +127,25 @@ void URopeWielderComponent::ResolvePreviewComponent(bool bAllowAutoCreate)
 	if (!PreviewComponent)
 	{
 		PreviewComponent = Owner->FindComponentByClass<URopePreviewComponent>();
+	}
+
+	if (!PreviewComponent && bAllowAutoCreate)
+	{
+		// 자동 생성은 PreviewPathLocked처럼 preview가 필수인 모드에서만 허용한다.
+		// 이미 레벨/BP에 배치된 PreviewComponent가 있으면 그 설정을 우선 사용하고 여기로 오지 않는다.
+		const FName PreviewName = MakeUniqueObjectName(Owner, URopePreviewComponent::StaticClass(), TEXT("RopePreviewComponent"));
+		PreviewComponent = NewObject<URopePreviewComponent>(Owner, URopePreviewComponent::StaticClass(), PreviewName);
+		if (PreviewComponent)
+		{
+			Owner->AddInstanceComponent(PreviewComponent);
+			if (USceneComponent* Root = Owner->GetRootComponent())
+			{
+				PreviewComponent->SetupAttachment(Root);
+			}
+			PreviewComponent->RegisterComponent();
+			UE_LOG(LogDynamicRope, Log, TEXT("RopeWielder on %s: auto-created RopePreviewComponent for PreviewPathLocked mode."),
+				*GetNameSafe(Owner));
+		}
 	}
 }
 
@@ -406,6 +428,31 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& /*AimD
 
 void URopeWielderComponent::Throw()
 {
+	if (ThrowMode == ERopeWielderThrowMode::PreviewPathLocked)
+	{
+		// Locked 모드는 "보이는 preview대로만 던진다"가 계약이다.
+		// 따라서 마지막 prepared preview가 없으면 물리 throw로 fallback하지 않고 입력을 버린다.
+		if (!LastPreparedPreview.IsValid())
+		{
+			UE_LOG(LogDynamicRope, Log, TEXT("RopeWielder on %s: preview path locked throw rejected (no valid prepared preview)."),
+				*GetNameSafe(GetOwner()));
+			return;
+		}
+
+		// 몽타주가 있으면 손을 놓는 AnimNotify까지 시간이 지나므로, 입력 순간 플레이어가 본 preview를 보존한다.
+		// notify 시점에 새로 build하면 손/카메라/타겟 포즈 변화로 결과가 달라질 수 있다.
+		PendingPreparedThrow = LastPreparedPreview;
+		if (ThrowMontage)
+		{
+			PlayThrowMontage();
+		}
+		else
+		{
+			ThrowNow();
+		}
+		return;
+	}
+
 	if (ThrowMontage)
 	{
 		PlayThrowMontage(); // 실제 던지기는 몽타주의 UAnimNotify_RopeThrow → ThrowNow().
@@ -425,6 +472,31 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 {
 	if (Rope)
 	{
+		if (ThrowMode == ERopeWielderThrowMode::PreviewPathLocked)
+		{
+			// ThrowNow는 즉시 throw와 AnimNotify throw가 모두 들어오는 실제 실행 지점이다.
+			// 몽타주 경로에서는 PendingPreparedThrow를 우선 소비하고, 즉시 throw에서는 LastPreparedPreview를 쓴다.
+			const FRopePreparedThrowPreview Prepared = PendingPreparedThrow.IsValid()
+				? PendingPreparedThrow
+				: LastPreparedPreview;
+			if (!Prepared.IsValid())
+			{
+				UE_LOG(LogDynamicRope, Log, TEXT("RopeWielder on %s: prepared throw ignored (preview is not valid)."),
+					*GetNameSafe(GetOwner()));
+				return;
+			}
+
+			ClearThrowPreview();
+			PendingPreparedThrow.Reset();
+			LastPreparedPreview.Reset();
+			if (!Rope->ThrowWithPreparedPreview(Prepared))
+			{
+				UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: Rope rejected prepared preview throw."),
+					*GetNameSafe(GetOwner()));
+			}
+			return;
+		}
+
 		ClearThrowPreview();
 		Rope->ThrowWithContext(BuildThrowContext(AimDir));
 	}
@@ -467,7 +539,8 @@ void URopeWielderComponent::ToggleThrow()
 		return;
 	}
 	const ERopePhase Phase = Rope->GetPhase();
-	if (Phase == ERopePhase::Wrapped || Phase == ERopePhase::Contacting)
+	if (Phase == ERopePhase::Wrapped || Phase == ERopePhase::Contacting || Phase == ERopePhase::Wrapping ||
+		Phase == ERopePhase::GuidedThrow)
 	{
 		Release();
 	}
@@ -519,14 +592,36 @@ void URopeWielderComponent::UpdateThrowPreview()
 
 	FRopeWrapPreviewData Preview;
 	FString PreviewBuildReason;
-	if (!Rope->BuildWrappingPreview(BuildThrowContext(FVector::ZeroVector),
-		PreviewComponent->PreviewReachScale, PreviewComponent->PreviewSegmentCount,
-		PreviewComponent->PreviewSampleStep, PreviewComponent->PreviewQueryRadius, Preview, &PreviewBuildReason))
+	const FRopeThrowContext ThrowContext = BuildThrowContext(FVector::ZeroVector);
+	const ERopePhase RopePhase = Rope->GetPhase();
+	FRopePreparedThrowPreview Prepared;
+	const bool bShouldBuildPrepared = ThrowMode == ERopeWielderThrowMode::PreviewPathLocked &&
+		(RopePhase == ERopePhase::Free || RopePhase == ERopePhase::Releasing);
+
+	// PreviewPathLocked의 Free/Releasing preview는 렌더용 centerline뿐 아니라 실제 throw에 쓸 contact/anchor까지 만든다.
+	// 그 외 모드/phase에서는 기존처럼 표시용 preview만 만든다.
+	const bool bBuiltPreview = bShouldBuildPrepared
+		? Rope->BuildPreparedWrappingPreview(ThrowContext,
+			PreviewComponent->PreviewReachScale, PreviewComponent->PreviewSegmentCount,
+			PreviewComponent->PreviewSampleStep, PreviewComponent->PreviewQueryRadius, Prepared, &PreviewBuildReason)
+		: Rope->BuildWrappingPreview(ThrowContext,
+			PreviewComponent->PreviewReachScale, PreviewComponent->PreviewSegmentCount,
+			PreviewComponent->PreviewSampleStep, PreviewComponent->PreviewQueryRadius, Preview, &PreviewBuildReason);
+	if (!bBuiltPreview)
 	{
 		LogPreviewBuildResult(false, PreviewBuildReason.IsEmpty()
 			? TEXT("preview build failed without a specific reason") : PreviewBuildReason);
 		ClearThrowPreview();
 		return;
+	}
+	if (bShouldBuildPrepared)
+	{
+		LastPreparedPreview = Prepared;
+		Preview = Prepared.RenderPreview;
+	}
+	else
+	{
+		LastPreparedPreview.Reset();
 	}
 
 	LogPreviewBuildResult(true, FString::Printf(TEXT("preview built (points=%d, radius=%.2f, sides=%d)"),
@@ -540,6 +635,7 @@ void URopeWielderComponent::ClearThrowPreview()
 {
 	bLastPreviewBlocked = false;
 	LastPreviewHitPoint = FVector::ZeroVector;
+	LastPreparedPreview.Reset();
 	PreviewUpdateCooldown = 0.0f;
 	if (PreviewComponent)
 	{

@@ -331,12 +331,146 @@ namespace
 		Params.FallbackForward = Input.FallbackForward;
 		return Params;
 	}
+
+	void BuildPreparedAnchorsFromCenterline(const TArray<FVector>& Centerline, const FRopeContactCandidate& Candidate,
+		const USkeletalMeshComponent* Mesh, TArray<FRopeSurfaceAnchor>& OutAnchors)
+	{
+		OutAnchors.Reset();
+		if (!Mesh || Candidate.Bone.IsNone())
+		{
+			return;
+		}
+
+		const FTransform BoneXform = Mesh->GetSocketTransform(Candidate.Bone);
+		const int32 FirstNode = FMath::Clamp(Candidate.NodeIndex, 1, Centerline.Num() - 1);
+		for (int32 NodeIndex = FirstNode; NodeIndex < Centerline.Num(); ++NodeIndex)
+		{
+			FRopeSurfaceAnchor Anchor;
+			Anchor.NodeIndex = NodeIndex;
+			Anchor.Bone = Candidate.Bone;
+			Anchor.Mesh = Mesh;
+			Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Centerline[NodeIndex]);
+			Anchor.LocalNormal = FVector::UpVector;
+			Anchor.LocalTangent = FVector::ForwardVector;
+			if (Centerline.IsValidIndex(NodeIndex + 1))
+			{
+				Anchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(
+					Centerline[NodeIndex + 1] - Centerline[NodeIndex]).GetSafeNormal(
+						KINDA_SMALL_NUMBER, FVector::ForwardVector);
+			}
+			Anchor.StartWorldPosition = Centerline[NodeIndex];
+			Anchor.SurfaceOffset = 0.0f;
+			Anchor.RopeDistance = 0.0f;
+			OutAnchors.Add(Anchor);
+		}
+	}
+
+	bool BuildPreparedFromCandidate(const FRopeThrowPreviewBuilder::FInput& Input,
+		const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim,
+		FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason)
+	{
+		OutPrepared.Reset();
+		const USkeletalMeshComponent* Mesh = Candidate.Mesh;
+		if (!Candidate.bValid || !Mesh || Candidate.Bone.IsNone() ||
+			!SourceSim.Positions.IsValidIndex(Candidate.NodeIndex))
+		{
+			SetPreviewFailureReason(OutFailureReason,
+				FString::Printf(TEXT("wrap preview candidate invalid (valid=%d, mesh=%s, bone=%s, node=%d, sourceNodes=%d)"),
+					Candidate.bValid ? 1 : 0, *GetNameSafe(Mesh), *Candidate.Bone.ToString(), Candidate.NodeIndex,
+					SourceSim.Num()));
+			return false;
+		}
+
+		const FVector NormalWorld = Candidate.Normal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		FVector TangentWorld = FVector::ForwardVector;
+		if (SourceSim.Positions.IsValidIndex(Candidate.NodeIndex + 1))
+		{
+			TangentWorld = SourceSim.Positions[Candidate.NodeIndex + 1] - SourceSim.Positions[Candidate.NodeIndex];
+		}
+		else if (SourceSim.Positions.IsValidIndex(Candidate.NodeIndex - 1))
+		{
+			TangentWorld = SourceSim.Positions[Candidate.NodeIndex] - SourceSim.Positions[Candidate.NodeIndex - 1];
+		}
+		else
+		{
+			TangentWorld = FRopeFlightContactDetector::ExpectedWrapTangent(SourceSim, Candidate, Input.FallbackForward);
+		}
+		TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
+
+		const FTransform BoneXform = Mesh->GetSocketTransform(Candidate.Bone);
+
+		FRopeSurfaceAnchor LatchAnchor;
+		LatchAnchor.NodeIndex = Candidate.NodeIndex;
+		LatchAnchor.Bone = Candidate.Bone;
+		LatchAnchor.Mesh = Mesh;
+		LatchAnchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Candidate.WorldPoint);
+		LatchAnchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		LatchAnchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		LatchAnchor.StartWorldPosition = SourceSim.Positions[Candidate.NodeIndex];
+		LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Input.RopeRadius);
+		LatchAnchor.RopeDistance = 0.0f;
+
+		TArray<FVector> PreviewPoints;
+		FRopeWrappingPhase PreviewWrappingPhase;
+		if (!PreviewWrappingPhase.BuildPreviewCenterline(LatchAnchor, Mesh, Candidate.Bone,
+			SourceSim, MakeWrappingContext(Input), PreviewPoints))
+		{
+			SetPreviewFailureReason(OutFailureReason,
+				FString::Printf(TEXT("wrap preview centerline build failed (mesh=%s, bone=%s, node=%d, sourceNodes=%d)"),
+					*GetNameSafe(Mesh), *Candidate.Bone.ToString(), Candidate.NodeIndex, SourceSim.Num()));
+			return false;
+		}
+
+		OutPrepared.RenderPreview.Points = MoveTemp(PreviewPoints);
+		OutPrepared.RenderPreview.Radius = FMath::Max(0.1f, Input.RopeRadius * 1.05f);
+		OutPrepared.RenderPreview.NumSides = FMath::Clamp(Input.RopeNumSides, 3, 32);
+		if (!OutPrepared.RenderPreview.IsValid())
+		{
+			SetPreviewFailureReason(OutFailureReason,
+				FString::Printf(TEXT("wrap preview output invalid (points=%d, radius=%.2f, sides=%d)"),
+					OutPrepared.RenderPreview.Points.Num(), OutPrepared.RenderPreview.Radius,
+					OutPrepared.RenderPreview.NumSides));
+			return false;
+		}
+
+		OutPrepared.bValid = true;
+		OutPrepared.ThrowContext = Input.ThrowContext;
+		OutPrepared.PreviewSim = SourceSim;
+		OutPrepared.Contact = Candidate;
+		OutPrepared.LatchAnchor = LatchAnchor;
+		OutPrepared.Mesh = Mesh;
+		OutPrepared.Bone = Candidate.Bone;
+		OutPrepared.BuildTimeSeconds = FPlatformTime::Seconds();
+		BuildPreparedAnchorsFromCenterline(OutPrepared.RenderPreview.Points, Candidate, Mesh, OutPrepared.Anchors);
+		if (OutPrepared.Anchors.Num() == 0)
+		{
+			OutPrepared.Anchors.Add(LatchAnchor);
+		}
+
+		return OutPrepared.IsValid();
+	}
 }
 
 bool FRopeThrowPreviewBuilder::BuildFreeWrappingPreview(const FInput& Input, FRopeWrapPreviewData& OutPreview,
 	FString* OutFailureReason)
 {
 	OutPreview = FRopeWrapPreviewData();
+	FRopePreparedThrowPreview Prepared;
+	if (!BuildFreePreparedPreview(Input, Prepared, OutFailureReason))
+	{
+		return false;
+	}
+	OutPreview = MoveTemp(Prepared.RenderPreview);
+	return OutPreview.IsValid();
+}
+
+bool FRopeThrowPreviewBuilder::BuildFreePreparedPreview(const FInput& Input, FRopePreparedThrowPreview& OutPrepared,
+	FString* OutFailureReason)
+{
+	OutPrepared.Reset();
 	const FRopeSimState* Sim = Input.Sim;
 	if (!Sim)
 	{
@@ -359,7 +493,7 @@ bool FRopeThrowPreviewBuilder::BuildFreeWrappingPreview(const FInput& Input, FRo
 
 	FRopeSimState PreviewSim = BuildThrowPreviewSim(*Sim, ArcPreview, ContactCandidate);
 	ContactCandidate.Candidate.NodeIndex = FMath::Clamp(ContactCandidate.Candidate.NodeIndex, 1, PreviewSim.Num() - 1);
-	return BuildWrappingPreviewFromCandidate(Input, ContactCandidate.Candidate, PreviewSim, OutPreview, OutFailureReason);
+	return BuildPreparedFromCandidate(Input, ContactCandidate.Candidate, PreviewSim, OutPrepared, OutFailureReason);
 }
 
 bool FRopeThrowPreviewBuilder::BuildFlightWrappingPreview(const FInput& Input, FRopeWrapPreviewData& OutPreview,
@@ -430,68 +564,11 @@ bool FRopeThrowPreviewBuilder::BuildWrappingPreviewFromCandidate(const FInput& I
 	FRopeWrapPreviewData& OutPreview, FString* OutFailureReason)
 {
 	OutPreview = FRopeWrapPreviewData();
-	const USkeletalMeshComponent* Mesh = Candidate.Mesh;
-	if (!Candidate.bValid || !Mesh || Candidate.Bone.IsNone() ||
-		!SourceSim.Positions.IsValidIndex(Candidate.NodeIndex))
+	FRopePreparedThrowPreview Prepared;
+	if (!BuildPreparedFromCandidate(Input, Candidate, SourceSim, Prepared, OutFailureReason))
 	{
-		SetPreviewFailureReason(OutFailureReason,
-			FString::Printf(TEXT("wrap preview candidate invalid (valid=%d, mesh=%s, bone=%s, node=%d, sourceNodes=%d)"),
-				Candidate.bValid ? 1 : 0, *GetNameSafe(Mesh), *Candidate.Bone.ToString(), Candidate.NodeIndex,
-				SourceSim.Num()));
 		return false;
 	}
-
-	const FVector NormalWorld = Candidate.Normal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-	FVector TangentWorld = FVector::ForwardVector;
-	if (SourceSim.Positions.IsValidIndex(Candidate.NodeIndex + 1))
-	{
-		TangentWorld = SourceSim.Positions[Candidate.NodeIndex + 1] - SourceSim.Positions[Candidate.NodeIndex];
-	}
-	else if (SourceSim.Positions.IsValidIndex(Candidate.NodeIndex - 1))
-	{
-		TangentWorld = SourceSim.Positions[Candidate.NodeIndex] - SourceSim.Positions[Candidate.NodeIndex - 1];
-	}
-	else
-	{
-		TangentWorld = FRopeFlightContactDetector::ExpectedWrapTangent(SourceSim, Candidate, Input.FallbackForward);
-	}
-	TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
-
-	const FTransform BoneXform = Mesh->GetSocketTransform(Candidate.Bone);
-
-	FRopeSurfaceAnchor LatchAnchor;
-	LatchAnchor.NodeIndex = Candidate.NodeIndex;
-	LatchAnchor.Bone = Candidate.Bone;
-	LatchAnchor.Mesh = Mesh;
-	LatchAnchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Candidate.WorldPoint);
-	LatchAnchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-	LatchAnchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-	LatchAnchor.StartWorldPosition = SourceSim.Positions[Candidate.NodeIndex];
-	LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Input.RopeRadius);
-	LatchAnchor.RopeDistance = 0.0f;
-
-	TArray<FVector> PreviewPoints;
-	FRopeWrappingPhase PreviewWrappingPhase;
-	if (!PreviewWrappingPhase.BuildPreviewCenterline(LatchAnchor, Mesh, Candidate.Bone,
-		SourceSim, MakeWrappingContext(Input), PreviewPoints))
-	{
-		SetPreviewFailureReason(OutFailureReason,
-			FString::Printf(TEXT("wrap preview centerline build failed (mesh=%s, bone=%s, node=%d, sourceNodes=%d)"),
-				*GetNameSafe(Mesh), *Candidate.Bone.ToString(), Candidate.NodeIndex, SourceSim.Num()));
-		return false;
-	}
-
-	OutPreview.Points = MoveTemp(PreviewPoints);
-	OutPreview.Radius = FMath::Max(0.1f, Input.RopeRadius * 1.05f);
-	OutPreview.NumSides = FMath::Clamp(Input.RopeNumSides, 3, 32);
-	if (!OutPreview.IsValid())
-	{
-		SetPreviewFailureReason(OutFailureReason,
-			FString::Printf(TEXT("wrap preview output invalid (points=%d, radius=%.2f, sides=%d)"),
-				OutPreview.Points.Num(), OutPreview.Radius, OutPreview.NumSides));
-	}
+	OutPreview = MoveTemp(Prepared.RenderPreview);
 	return OutPreview.IsValid();
 }

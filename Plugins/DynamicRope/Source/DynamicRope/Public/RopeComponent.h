@@ -147,6 +147,14 @@ public:
 		float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview,
 		FString* OutFailureReason = nullptr) const;
 
+	/** PreviewPathLocked용 preview build. 렌더 centerline뿐 아니라 실제 GuidedThrow/Wrapped 진입에 필요한 contact/anchor도 반환한다. */
+	bool BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
+		float SampleStep, float QueryRadius, FRopePreparedThrowPreview& OutPrepared,
+		FString* OutFailureReason = nullptr) const;
+
+	/** Prepared preview를 권위 있는 경로로 사용해 던진다. Flight/Contacting 재탐색을 타지 않고 GuidedThrow로 진입한다. */
+	bool ThrowWithPreparedPreview(const FRopePreparedThrowPreview& Prepared);
+
 	/** 현재 진행 중인 잡기/감기(Contacting/Wrapping/Wrapped)를 수동으로 해제한다(Releasing phase). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ReleaseWrap();
@@ -318,6 +326,7 @@ private:
 	FRopeWrapState      PendingWrapSeed;	// Contacting: 캡처 시 만들어 둔 wrap 시드(Wrapping 진입 재료)
 	FRopeWrappingPhase  WrappingPhase;		// Wrapping: 경로 점진 생성+front 모션+마스크(작업 상태는 .State)
 	FRopeWrapController WrapController;		// Wrapped: bone-local latch 유지/해제
+	FRopeGuidedThrowState GuidedThrowState;	// PreviewPathLocked: cached preview path를 authoritative하게 구동
 
 	//~ 페이즈 타이머 --------------------------------------------------------
 	float ContactingElapsed = 0.0f;	// Contacting 체류 시간(WrapDecisionTime 판정)
@@ -440,6 +449,12 @@ private:
 	FRopeThrowContext MakeDefaultThrowContext(const FVector& AimDir) const;
 
 	void StartFreshThrow(const FRopeThrowContext& ThrowContext);
+
+	/** GuidedThrow phase 한 프레임 진행. preview centerline으로 노드를 이동시키며 solver는 끈다. */
+	void UpdateGuidedThrow(float DeltaTime);
+
+	/** GuidedThrow 완료 시 prepared anchor를 FRopeWrapState로 변환해 바로 Wrapped로 커밋한다. */
+	void FinishGuidedThrow();
 
 	FRopeThrowContext ResolveThrowContext(const FRopeThrowContext& ThrowContext) const;
 

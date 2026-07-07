@@ -39,6 +39,9 @@ public:
 	static bool BuildFreeWrappingPreview(const FInput& Input, FRopeWrapPreviewData& OutPreview,
 		FString* OutFailureReason = nullptr);
 
+	static bool BuildFreePreparedPreview(const FInput& Input, FRopePreparedThrowPreview& OutPrepared,
+		FString* OutFailureReason = nullptr);
+
 	static bool BuildFlightWrappingPreview(const FInput& Input, FRopeWrapPreviewData& OutPreview,
 		FString* OutFailureReason = nullptr);
 
