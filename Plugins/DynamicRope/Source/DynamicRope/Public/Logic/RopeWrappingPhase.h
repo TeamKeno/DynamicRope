@@ -33,6 +33,7 @@ public:
 		ERopeWrappingPathMode PathMode;            // UDynamicRopeSettings에서 컴포넌트가 해석해 전달
 		float SurfaceOffset;                       // 튜브 반지름(표면에서 로프 중심까지 띄우는 거리)
 		FString OwnerName;                         // 로그 컨텍스트(컴포넌트 이름)
+		bool bSuppressPathFailureLog = false;      // preview처럼 partial path를 정상 결과로 쓰는 호출에서 true
 	};
 
 	/**

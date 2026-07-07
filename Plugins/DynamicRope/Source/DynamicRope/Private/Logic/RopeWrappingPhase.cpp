@@ -257,7 +257,7 @@ bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchA
 
 	FRopeWrapConfig PreviewConfig = Ctx.Config;
 	PreviewConfig.WrappingPathBuildStepsPerFrame = 4096;
-	const FContext PreviewCtx{ PreviewConfig, Ctx.Colliders, Ctx.PathMode, Ctx.SurfaceOffset, Ctx.OwnerName };
+	const FContext PreviewCtx{ PreviewConfig, Ctx.Colliders, Ctx.PathMode, Ctx.SurfaceOffset, Ctx.OwnerName, true };
 
 	FRopeWrappingPhase PreviewPhase;
 	if (!PreviewPhase.Begin(LatchAnchor, Mesh, Bone,
@@ -284,6 +284,7 @@ bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchA
 
 	OutCenterline = Sim.Positions;
 	const float SurfaceOffset = FMath::Max(0.0f, PreviewCtx.SurfaceOffset);
+	int32 LastDrivenNode = INDEX_NONE;
 	for (int32 PathIndex = 0; PathIndex < PreviewPhase.State.Path.Num(); ++PathIndex)
 	{
 		const int32 NodeIndex = LatchAnchor.NodeIndex + PathIndex;
@@ -294,6 +295,16 @@ bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchA
 
 		const FRopeWrapPathPoint& Point = PreviewPhase.State.Path[PathIndex];
 		OutCenterline[NodeIndex] = Point.SurfaceWorld + Point.NormalWorld * SurfaceOffset;
+		LastDrivenNode = NodeIndex;
+	}
+
+	if (OutCenterline.IsValidIndex(LastDrivenNode))
+	{
+		const float SegmentLength = FMath::Max(Sim.SegmentLength, 1.0f);
+		for (int32 NodeIndex = LastDrivenNode + 1; NodeIndex < OutCenterline.Num(); ++NodeIndex)
+		{
+			OutCenterline[NodeIndex] = OutCenterline[NodeIndex - 1] - FVector::UpVector * SegmentLength;
+		}
 	}
 
 	return OutCenterline.Num() >= 2;
@@ -537,13 +548,16 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				State.bPathBuildFailed = true;
 				State.bPathBuildComplete = true;
 				State.bPathBuildActive = false;
-				UE_LOG(LogDynamicRope, Log,
-					TEXT("[%s] Progressive wrap path stopped by projection failure (bone=%s, path=%d/%d, anchors=%d)"),
-					*Ctx.OwnerName,
-					*State.LatchAnchor.Bone.ToString(),
-					State.Path.Num(),
-					State.NumTailNodes,
-					State.Anchors.Num());
+				if (!Ctx.bSuppressPathFailureLog)
+				{
+					UE_LOG(LogDynamicRope, Log,
+						TEXT("[%s] Progressive wrap path stopped by projection failure (bone=%s, path=%d/%d, anchors=%d)"),
+						*Ctx.OwnerName,
+						*State.LatchAnchor.Bone.ToString(),
+						State.Path.Num(),
+						State.NumTailNodes,
+						State.Anchors.Num());
+				}
 				return false;
 			}
 

@@ -12,7 +12,7 @@
 
 namespace
 {
-constexpr int32 RopePreviewMaterialCount = 6;
+constexpr int32 RopePreviewMaterialCount = 1;
 
 int32 ToMaterialIndex(ERopePreviewMaterialSlot Slot)
 {
@@ -126,14 +126,8 @@ public:
 	explicit FRopePreviewSceneProxy(const URopePreviewComponent* Component)
 		: FPrimitiveSceneProxy(Component)
 		, MaterialRelevance(Component->GetMaterialRelevance(GetScene().GetShaderPlatform()))
-		, ArcFillMaterial(Component->GetMaterial(ToMaterialIndex(ERopePreviewMaterialSlot::ArcFill)))
-		, ArcRimMaterial(Component->GetMaterial(ToMaterialIndex(ERopePreviewMaterialSlot::ArcRim)))
 		, WrapPreviewMaterial(Component->GetMaterial(ToMaterialIndex(ERopePreviewMaterialSlot::WrapPreview)))
 	{
-		if (!WrapPreviewMaterial)
-		{
-			WrapPreviewMaterial = ArcRimMaterial ? ArcRimMaterial : ArcFillMaterial;
-		}
 		if (!WrapPreviewMaterial)
 		{
 			WrapPreviewMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
@@ -205,8 +199,6 @@ public:
 
 private:
 	FMaterialRelevance MaterialRelevance;
-	UMaterialInterface* ArcFillMaterial = nullptr;
-	UMaterialInterface* ArcRimMaterial = nullptr;
 	UMaterialInterface* WrapPreviewMaterial = nullptr;
 
 	FRopeWrapPreviewData WrapPreview;
@@ -302,16 +294,6 @@ UMaterialInterface* URopePreviewComponent::GetMaterial(int32 ElementIndex) const
 	switch (ElementIndex)
 	{
 	case 0:
-		return ArcFillMaterial;
-	case 1:
-		return ArcRimMaterial;
-	case 2:
-		return BlockedArcFillMaterial;
-	case 3:
-		return BlockedArcRimMaterial;
-	case 4:
-		return HitPointMaterial;
-	case 5:
 		return WrapPreviewMaterial;
 	default:
 		return nullptr;
@@ -323,21 +305,6 @@ void URopePreviewComponent::SetMaterial(int32 ElementIndex, UMaterialInterface* 
 	switch (ElementIndex)
 	{
 	case 0:
-		ArcFillMaterial = Material;
-		break;
-	case 1:
-		ArcRimMaterial = Material;
-		break;
-	case 2:
-		BlockedArcFillMaterial = Material;
-		break;
-	case 3:
-		BlockedArcRimMaterial = Material;
-		break;
-	case 4:
-		HitPointMaterial = Material;
-		break;
-	case 5:
 		WrapPreviewMaterial = Material;
 		break;
 	default:

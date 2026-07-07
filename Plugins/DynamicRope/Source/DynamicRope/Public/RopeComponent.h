@@ -144,7 +144,8 @@ public:
 
 	/** Builds a pre-wrapped preview for idle/flight aiming using the same throw context as ThrowWithContext. */
 	bool BuildWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
-		float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview) const;
+		float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview,
+		FString* OutFailureReason = nullptr) const;
 
 	/** 현재 진행 중인 잡기/감기(Contacting/Wrapping/Wrapped)를 수동으로 해제한다(Releasing phase). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
@@ -476,12 +477,13 @@ private:
 	FRopeWrappingPhase::FContext MakeWrappingContext() const;
 
 	bool BuildWrappingPreviewFromCandidate(const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim,
-		FRopeWrapPreviewData& OutPreview) const;
+		FRopeWrapPreviewData& OutPreview, FString* OutFailureReason = nullptr) const;
 
 	bool BuildFreeWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
-		float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview) const;
+		float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview,
+		FString* OutFailureReason = nullptr) const;
 
-	bool BuildFlightWrappingPreview(FRopeWrapPreviewData& OutPreview) const;
+	bool BuildFlightWrappingPreview(FRopeWrapPreviewData& OutPreview, FString* OutFailureReason = nullptr) const;
 
 	void CommitWrapping();
 

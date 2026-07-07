@@ -111,23 +111,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
 	bool bPreviewOnlyWhenIdle = true;
 
-	/** preview*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0"))
-	float PreviewReachScale = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "1", ClampMax = "128"))
-	int32 PreviewSegmentCount = 32;
-
 	/** Preview 충돌 검사 갱신 주기. 0이면 매 프레임 검사하므로 SDF 대상이 많을 때는 매우 비싸다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Preview Update Interval"))
 	float PreviewUpdateInterval = 0.1f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "1.0", Units = "cm"))
-	float PreviewSampleStep = 80.0f;
-
-	/** */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "cm"))
-	float PreviewQueryRadius = 0.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Debug")
+	bool bLogPreviewBuildAttempts = false;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
 	bool bLastPreviewBlocked = false;
@@ -274,6 +263,7 @@ private:
 	void ResolvePreviewComponent(bool bAllowAutoCreate);
 	void UpdateThrowPreview();
 	void ClearThrowPreview();
+	void LogPreviewBuildResult(bool bSucceeded, const FString& Reason);
 
 	void OnThrowInput();
 	void OnReleaseInput();
@@ -285,4 +275,7 @@ private:
 
 	bool bInputBound = false;
 	float PreviewUpdateCooldown = 0.0f;
+	bool bLastPreviewBuildSucceeded = false;
+	bool bHasLastPreviewBuildResult = false;
+	FString LastPreviewBuildReason;
 };

@@ -13,11 +13,6 @@ class UMaterialInterface;
 UENUM(BlueprintType)
 enum class ERopePreviewMaterialSlot : uint8
 {
-	ArcFill UMETA(DisplayName = "Arc Fill"),
-	ArcRim UMETA(DisplayName = "Arc Rim"),
-	BlockedArcFill UMETA(DisplayName = "Blocked Arc Fill"),
-	BlockedArcRim UMETA(DisplayName = "Blocked Arc Rim"),
-	HitPoint UMETA(DisplayName = "Hit Point"),
 	WrapPreview UMETA(DisplayName = "Wrap Preview")
 };
 
@@ -34,31 +29,19 @@ public:
 	URopePreviewComponent();
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Material")
-	TObjectPtr<UMaterialInterface> ArcFillMaterial = nullptr;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Material")
-	TObjectPtr<UMaterialInterface> ArcRimMaterial = nullptr;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Material")
-	TObjectPtr<UMaterialInterface> BlockedArcFillMaterial = nullptr;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Material")
-	TObjectPtr<UMaterialInterface> BlockedArcRimMaterial = nullptr;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Material")
-	TObjectPtr<UMaterialInterface> HitPointMaterial = nullptr;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Material")
 	TObjectPtr<UMaterialInterface> WrapPreviewMaterial = nullptr;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Shape", meta = (ClampMin = "0.1", Units = "cm"))
-	float RimThickness = 3.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "0.0", DisplayName = "Arc Reach Scale"))
+	float PreviewReachScale = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Shape", meta = (ClampMin = "0.1", Units = "cm"))
-	float HitPointRadius = 6.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "1", ClampMax = "128", DisplayName = "Arc Segment Count"))
+	int32 PreviewSegmentCount = 32;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Shape", meta = (ClampMin = "0.0", Units = "cm"))
-	float RimPlaneOffset = 0.25f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "1.0", Units = "cm", DisplayName = "Arc Sample Step"))
+	float PreviewSampleStep = 80.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Arc Query Radius"))
+	float PreviewQueryRadius = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Shape", meta = (ClampMin = "0.1", Units = "cm"))
 	float WrapPreviewRadius = 2.0f;

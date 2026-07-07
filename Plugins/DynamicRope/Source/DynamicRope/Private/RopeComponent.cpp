@@ -98,21 +98,58 @@ namespace
 		return (Aim * FMath::Cos(Angle) + Up * FMath::Sin(Angle)).GetSafeNormal();
 	}
 
+	void SetPreviewFailureReason(FString* OutFailureReason, const FString& Reason)
+	{
+		if (OutFailureReason)
+		{
+			*OutFailureReason = Reason;
+		}
+	}
+
 	struct FThrowPreviewContactCandidate
 	{
 		FRopeContactCandidate Candidate;
 		float AngleAlpha = 1.0f;
 		float DistanceAlpha = 1.0f;
+		float ArcStartAngleDegrees = 180.0f;
 		FVector Direction = FVector::ForwardVector;
 	};
 
+	bool IsBetterThrowPreviewContactCandidate(const FThrowPreviewContactCandidate& Candidate,
+		const FThrowPreviewContactCandidate& Best)
+	{
+		if (!FMath::IsNearlyEqual(Candidate.ArcStartAngleDegrees, Best.ArcStartAngleDegrees, 0.1f))
+		{
+			return Candidate.ArcStartAngleDegrees < Best.ArcStartAngleDegrees;
+		}
+		if (!FMath::IsNearlyEqual(Candidate.DistanceAlpha, Best.DistanceAlpha, 0.01f))
+		{
+			return Candidate.DistanceAlpha < Best.DistanceAlpha;
+		}
+		return Candidate.AngleAlpha < Best.AngleAlpha;
+	}
+
 	bool FindThrowPreviewContactCandidate(const FRopeArcPreviewData& Preview, const TArray<IRopeCollider*>& Colliders,
 		float RopeRadius, const FRopeWrapConfig& WrapConfig, const FRopeSimState& Sim,
-		float SampleStep, float QueryRadius, FThrowPreviewContactCandidate& OutCandidate)
+		float SampleStep, float QueryRadius, FThrowPreviewContactCandidate& OutCandidate,
+		FString* OutFailureReason = nullptr)
 	{
 		OutCandidate = FThrowPreviewContactCandidate();
-		if (Preview.Radius <= KINDA_SMALL_NUMBER || Colliders.Num() == 0 || Sim.Num() < 2)
+		if (Preview.Radius <= KINDA_SMALL_NUMBER)
 		{
+			SetPreviewFailureReason(OutFailureReason,
+				FString::Printf(TEXT("free search rejected: arc radius too small (radius=%.2f)"), Preview.Radius));
+			return false;
+		}
+		if (Colliders.Num() == 0)
+		{
+			SetPreviewFailureReason(OutFailureReason, TEXT("free search rejected: no frame colliders"));
+			return false;
+		}
+		if (Sim.Num() < 2)
+		{
+			SetPreviewFailureReason(OutFailureReason,
+				FString::Printf(TEXT("free search rejected: rope sim has too few nodes (nodes=%d)"), Sim.Num()));
 			return false;
 		}
 
@@ -153,10 +190,18 @@ namespace
 		}
 		if (CandidateColliders.Num() == 0)
 		{
+			SetPreviewFailureReason(OutFailureReason,
+				FString::Printf(TEXT("free search found no colliders inside arc bounds (frameColliders=%d, radius=%.1f, queryRadius=%.1f)"),
+					Colliders.Num(), Preview.Radius, EffectiveQueryRadius));
 			return false;
 		}
 
 		const float SegmentLength = FMath::Max(Sim.SegmentLength, 1.0f);
+		const FVector ArcStartDirection = ArcPreviewDirectionAtAlpha(Preview, 0.0f);
+		bool bFoundCandidate = false;
+		FThrowPreviewContactCandidate BestCandidate;
+		int32 HitCount = 0;
+		int32 InvalidHitCount = 0;
 		for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
 		{
 			const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
@@ -177,23 +222,49 @@ namespace
 					const FRopeContact Contact = Collider->Query(SamplePoint, EffectiveQueryRadius);
 					if (!Contact.bHit || Contact.Bone.IsNone() || !Contact.SourceMesh)
 					{
+						if (Contact.bHit)
+						{
+							++InvalidHitCount;
+						}
 						continue;
 					}
+					++HitCount;
 
-					OutCandidate.Candidate = FRopeFlightContactDetector::MakeCandidate(
+					const FVector OriginToContact = Contact.SurfacePoint - Preview.Origin;
+					const FVector ContactDirection = OriginToContact.GetSafeNormal(KINDA_SMALL_NUMBER, Direction);
+					const float ArcStartDot = FMath::Clamp(FVector::DotProduct(ArcStartDirection, ContactDirection),
+						-1.0f, 1.0f);
+
+					FThrowPreviewContactCandidate Candidate;
+					Candidate.Candidate = FRopeFlightContactDetector::MakeCandidate(
 						FMath::Clamp(FMath::RoundToInt(Distance / SegmentLength), 1, Sim.Num() - 1),
 						Contact);
-					OutCandidate.Candidate.Source = ERopeContactCandidateSource::PredictiveFree;
-					OutCandidate.Candidate.SourceMask = static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree);
-					OutCandidate.AngleAlpha = AngleAlpha;
-					OutCandidate.DistanceAlpha = DistanceAlpha;
-					OutCandidate.Direction = Direction;
-					return OutCandidate.Candidate.bValid;
+					Candidate.Candidate.Source = ERopeContactCandidateSource::PredictiveFree;
+					Candidate.Candidate.SourceMask = static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree);
+					Candidate.AngleAlpha = AngleAlpha;
+					Candidate.DistanceAlpha = DistanceAlpha;
+					Candidate.ArcStartAngleDegrees = FMath::RadiansToDegrees(FMath::Acos(ArcStartDot));
+					Candidate.Direction = Direction;
+					if (Candidate.Candidate.bValid &&
+						(!bFoundCandidate || IsBetterThrowPreviewContactCandidate(Candidate, BestCandidate)))
+					{
+						BestCandidate = Candidate;
+						bFoundCandidate = true;
+					}
 				}
 			}
 		}
 
-		return false;
+		if (!bFoundCandidate)
+		{
+			SetPreviewFailureReason(OutFailureReason,
+				FString::Printf(TEXT("free search found no valid contact (candidateColliders=%d, angleSamples=%d, radialSamples=%d, hits=%d, invalidHits=%d, queryRadius=%.1f)"),
+					CandidateColliders.Num(), AngleSamples, RadialSamples, HitCount, InvalidHitCount, EffectiveQueryRadius));
+			return false;
+		}
+
+		OutCandidate = BestCandidate;
+		return true;
 	}
 
 	FRopeSimState BuildThrowPreviewSim(const FRopeSimState& SourceSim, const FRopeArcPreviewData& Preview,
@@ -214,6 +285,7 @@ namespace
 		const float SegmentLength = FMath::Max(SourceSim.SegmentLength, 1.0f);
 		const FVector SurfacePoint = ContactCandidate.Candidate.WorldPoint;
 		const FVector ToSurface = SurfacePoint - Preview.Origin;
+		const float SurfaceDistance = FMath::Max(ToSurface.Size(), SegmentLength);
 		const FVector ApproachDir = ToSurface.GetSafeNormal(KINDA_SMALL_NUMBER, ContactCandidate.Direction);
 		const FVector TailDir = ContactCandidate.Direction.GetSafeNormal(KINDA_SMALL_NUMBER, ApproachDir);
 
@@ -225,7 +297,18 @@ namespace
 				const float Alpha = LatchNode > 0
 					? static_cast<float>(NodeIndex) / static_cast<float>(LatchNode)
 					: 0.0f;
-				Position = FMath::Lerp(Preview.Origin, SurfacePoint, Alpha);
+				if (NodeIndex == LatchNode)
+				{
+					Position = SurfacePoint;
+				}
+				else
+				{
+					const float ArcAlpha = FMath::Lerp(0.0f, ContactCandidate.AngleAlpha, Alpha);
+					const FVector ArcDirection = ArcPreviewDirectionAtAlpha(Preview, ArcAlpha);
+					const FVector ArcPosition = Preview.Origin + ArcDirection * (SurfaceDistance * Alpha);
+					const FVector ContactLinePosition = FMath::Lerp(Preview.Origin, SurfacePoint, Alpha);
+					Position = FMath::Lerp(ArcPosition, ContactLinePosition, Alpha * Alpha);
+				}
 			}
 			else
 			{
@@ -506,31 +589,42 @@ bool URopeComponent::BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) cons
 }
 
 bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
-	float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview) const
+	float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview, FString* OutFailureReason) const
 {
 	OutPreview = FRopeWrapPreviewData();
 
 	if (Phase == ERopePhase::Free || Phase == ERopePhase::Releasing)
 	{
-		return BuildFreeWrappingPreview(ThrowContext, ReachScale, SegmentCount, SampleStep, QueryRadius, OutPreview);
+		return BuildFreeWrappingPreview(ThrowContext, ReachScale, SegmentCount, SampleStep, QueryRadius, OutPreview,
+			OutFailureReason);
 	}
 
 	if (Phase == ERopePhase::Flight)
 	{
-		return BuildFlightWrappingPreview(OutPreview);
+		return BuildFlightWrappingPreview(OutPreview, OutFailureReason);
 	}
 
-	return BuildWrappingPreview(OutPreview);
+	const bool bBuilt = BuildWrappingPreview(OutPreview);
+	if (!bBuilt)
+	{
+		SetPreviewFailureReason(OutFailureReason,
+			FString::Printf(TEXT("active phase preview failed (phase=%s)"), PhaseName(Phase)));
+	}
+	return bBuilt;
 }
 
 bool URopeComponent::BuildWrappingPreviewFromCandidate(const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim,
-	FRopeWrapPreviewData& OutPreview) const
+	FRopeWrapPreviewData& OutPreview, FString* OutFailureReason) const
 {
 	OutPreview = FRopeWrapPreviewData();
 	const USkeletalMeshComponent* Mesh = Candidate.Mesh;
 	if (!Candidate.bValid || !Mesh || Candidate.Bone.IsNone() ||
 		!SourceSim.Positions.IsValidIndex(Candidate.NodeIndex))
 	{
+		SetPreviewFailureReason(OutFailureReason,
+			FString::Printf(TEXT("wrap preview candidate invalid (valid=%d, mesh=%s, bone=%s, node=%d, sourceNodes=%d)"),
+				Candidate.bValid ? 1 : 0, *GetNameSafe(Mesh), *Candidate.Bone.ToString(), Candidate.NodeIndex,
+				SourceSim.Num()));
 		return false;
 	}
 
@@ -570,42 +664,61 @@ bool URopeComponent::BuildWrappingPreviewFromCandidate(const FRopeContactCandida
 	if (!WrappingPhase.BuildPreviewCenterline(LatchAnchor, Mesh, Candidate.Bone,
 		SourceSim, MakeWrappingContext(), PreviewPoints))
 	{
+		SetPreviewFailureReason(OutFailureReason,
+			FString::Printf(TEXT("wrap preview centerline build failed (mesh=%s, bone=%s, node=%d, sourceNodes=%d)"),
+				*GetNameSafe(Mesh), *Candidate.Bone.ToString(), Candidate.NodeIndex, SourceSim.Num()));
 		return false;
 	}
 
 	OutPreview.Points = MoveTemp(PreviewPoints);
 	OutPreview.Radius = FMath::Max(0.1f, Radius * 1.05f);
 	OutPreview.NumSides = FMath::Clamp(NumSides, 3, 32);
+	if (!OutPreview.IsValid())
+	{
+		SetPreviewFailureReason(OutFailureReason,
+			FString::Printf(TEXT("wrap preview output invalid (points=%d, radius=%.2f, sides=%d)"),
+				OutPreview.Points.Num(), OutPreview.Radius, OutPreview.NumSides));
+	}
 	return OutPreview.IsValid();
 }
 
 bool URopeComponent::BuildFreeWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
-	float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview) const
+	float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview, FString* OutFailureReason) const
 {
 	OutPreview = FRopeWrapPreviewData();
 	FRopeArcPreviewData ArcPreview;
 	if (!BuildThrowArcPreview(ThrowContext, ReachScale, SegmentCount, ArcPreview))
 	{
+		SetPreviewFailureReason(OutFailureReason,
+			FString::Printf(TEXT("throw arc preview build failed (reachScale=%.2f, segmentCount=%d, ropeLength=%.2f)"),
+				ReachScale, SegmentCount, FMath::Max(Sim.RopeLength, RopeLength)));
 		return false;
 	}
 
 	FThrowPreviewContactCandidate ContactCandidate;
 	if (!FindThrowPreviewContactCandidate(ArcPreview, FrameColliders, Radius, WrapConfig, Sim,
-		SampleStep, QueryRadius, ContactCandidate))
+		SampleStep, QueryRadius, ContactCandidate, OutFailureReason))
 	{
 		return false;
 	}
 
 	FRopeSimState PreviewSim = BuildThrowPreviewSim(Sim, ArcPreview, ContactCandidate);
 	ContactCandidate.Candidate.NodeIndex = FMath::Clamp(ContactCandidate.Candidate.NodeIndex, 1, PreviewSim.Num() - 1);
-	return BuildWrappingPreviewFromCandidate(ContactCandidate.Candidate, PreviewSim, OutPreview);
+	return BuildWrappingPreviewFromCandidate(ContactCandidate.Candidate, PreviewSim, OutPreview, OutFailureReason);
 }
 
-bool URopeComponent::BuildFlightWrappingPreview(FRopeWrapPreviewData& OutPreview) const
+bool URopeComponent::BuildFlightWrappingPreview(FRopeWrapPreviewData& OutPreview, FString* OutFailureReason) const
 {
 	OutPreview = FRopeWrapPreviewData();
-	if (FrameColliders.Num() == 0 || Sim.Num() < 2)
+	if (FrameColliders.Num() == 0)
 	{
+		SetPreviewFailureReason(OutFailureReason, TEXT("flight preview rejected: no frame colliders"));
+		return false;
+	}
+	if (Sim.Num() < 2)
+	{
+		SetPreviewFailureReason(OutFailureReason,
+			FString::Printf(TEXT("flight preview rejected: rope sim has too few nodes (nodes=%d)"), Sim.Num()));
 		return false;
 	}
 
@@ -620,6 +733,8 @@ bool URopeComponent::BuildFlightWrappingPreview(FRopeWrapPreviewData& OutPreview
 	PreviewTracker.Update(Candidates, 0.0f);
 	if (PreviewTracker.CandidateBone.IsNone() || PreviewTracker.CandidateNodes.Num() == 0)
 	{
+		SetPreviewFailureReason(OutFailureReason,
+			FString::Printf(TEXT("flight preview found no tracked candidate (candidates=%d)"), Candidates.Num()));
 		return false;
 	}
 
@@ -641,7 +756,15 @@ bool URopeComponent::BuildFlightWrappingPreview(FRopeWrapPreviewData& OutPreview
 		}
 	}
 
-	return BestCandidate ? BuildWrappingPreviewFromCandidate(*BestCandidate, Sim, OutPreview) : false;
+	if (!BestCandidate)
+	{
+		SetPreviewFailureReason(OutFailureReason,
+			FString::Printf(TEXT("flight preview had tracker bone but no matching best candidate (candidates=%d, bone=%s, nodes=%d)"),
+				Candidates.Num(), *PreviewTracker.CandidateBone.ToString(), PreviewTracker.CandidateNodes.Num()));
+		return false;
+	}
+
+	return BuildWrappingPreviewFromCandidate(*BestCandidate, Sim, OutPreview, OutFailureReason);
 }
 
 void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog)

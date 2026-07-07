@@ -518,13 +518,19 @@ void URopeWielderComponent::UpdateThrowPreview()
 	}
 
 	FRopeWrapPreviewData Preview;
+	FString PreviewBuildReason;
 	if (!Rope->BuildWrappingPreview(BuildThrowContext(FVector::ZeroVector),
-		PreviewReachScale, PreviewSegmentCount, PreviewSampleStep, PreviewQueryRadius, Preview))
+		PreviewComponent->PreviewReachScale, PreviewComponent->PreviewSegmentCount,
+		PreviewComponent->PreviewSampleStep, PreviewComponent->PreviewQueryRadius, Preview, &PreviewBuildReason))
 	{
+		LogPreviewBuildResult(false, PreviewBuildReason.IsEmpty()
+			? TEXT("preview build failed without a specific reason") : PreviewBuildReason);
 		ClearThrowPreview();
 		return;
 	}
 
+	LogPreviewBuildResult(true, FString::Printf(TEXT("preview built (points=%d, radius=%.2f, sides=%d)"),
+		Preview.Points.Num(), Preview.Radius, Preview.NumSides));
 	bLastPreviewBlocked = false;
 	LastPreviewHitPoint = FVector::ZeroVector;
 	PreviewComponent->SetWrapPreviewWorld(Preview);
@@ -539,4 +545,24 @@ void URopeWielderComponent::ClearThrowPreview()
 	{
 		PreviewComponent->ClearPreview();
 	}
+}
+
+void URopeWielderComponent::LogPreviewBuildResult(bool bSucceeded, const FString& Reason)
+{
+	const bool bChanged = !bHasLastPreviewBuildResult ||
+		bLastPreviewBuildSucceeded != bSucceeded ||
+		LastPreviewBuildReason != Reason;
+	if (!bLogPreviewBuildAttempts && !bChanged)
+	{
+		return;
+	}
+
+	UE_LOG(LogDynamicRope, Log, TEXT("Rope preview %s on %s: %s"),
+		bSucceeded ? TEXT("succeeded") : TEXT("failed"),
+		*GetNameSafe(GetOwner()),
+		*Reason);
+
+	bHasLastPreviewBuildResult = true;
+	bLastPreviewBuildSucceeded = bSucceeded;
+	LastPreviewBuildReason = Reason;
 }
