@@ -225,9 +225,10 @@ struct FRopePullSample
 {
 	bool    bValid = false;
 	int32   AnchorNode = INDEX_NONE;          // 손 쪽 첫 앵커 노드(힘 인가 지점의 노드)
+	int32   AimNode = INDEX_NONE;             // 첫 직선 다리 끝(walk가 멈춘 노드) — 방향의 조준 노드(디버그/진단)
 	FName   Bone = NAME_None;                 // 앵커가 붙은 본(물리 본 힘 인가 대상)
 	FVector WorldPoint = FVector::ZeroVector; // 앵커 노드 월드 위치(힘 인가점)
-	FVector Direction = FVector::ZeroVector;  // 당김 단위 방향(앵커 → 손 직선 chord — 세그먼트 방향은 지터로 부적합)
+	FVector Direction = FVector::ZeroVector;  // 당김 단위 방향(앵커에서 손 쪽 look-ahead 노드 방향 = 로프 경로 추종; 소비 시 컴포넌트가 EMA 스무딩)
 	float   Tension = 0.0f;                   // 앵커-손 쪽 인접 세그먼트 장력(FRopeSimState::SegmentTension 단위)
 };
 
@@ -604,6 +605,14 @@ struct FRopeWrapConfig
 	float TetherSlack = 5.0f;
 
 	/**
+	 * 테더 회수 최대 속도(cm/s). 물리 대상은 속도를 누적하지 않고 이 값으로 상한된 목표 속도까지만 톱업하고,
+	 * 비물리 대상은 프레임당 위치 보정을 이 값×dt로 클램프한다 → 초과분 스파이크나 임펄스 누적으로 대상이
+	 * 튕겨나가는 것을 원천 차단한다(수렴 보장). 0 = 클램프 없음(비권장).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float TetherMaxSpeed = 1500.0f;
+
+	/**
 	 * 거리 release: Wrapped 중 손~앵커 직선 거리가 가용 로프 길이(+TetherSlack)를 이만큼(cm) 더
 	 * 초과하면 자동 release한다(ERopeReleaseReason::Distance). 0 = 비활성(기본). 테더와 함께 쓰면
 	 * "테더가 버티다가 이 한계를 넘으면 놓친다"가 된다 — 테더가 충분히 강하면 초과분이 안 쌓여
@@ -611,6 +620,25 @@ struct FRopeWrapConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
 	float DistanceReleaseSlack = 0.0f;
+
+	/**
+	 * Pull 방향 코너 판정 임계(도). 당김 방향을 앵커→손 직선(chord)이 아니라, 앵커에서 손 쪽으로 로프를
+	 * 따라 걸으며 찾은 "첫 직선 다리"의 끝 노드를 향하도록 잡는다 → 로프가 벽/모서리에 걸려 꺾이면 그
+	 * 직전에서 멈춰 첫 다리를 따라 당긴다(직선 chord는 장애물을 관통). 걷는 중 다음 세그먼트가 지금까지의
+	 * 누적 다리 방향에서 이 각도 이상 꺾이면 코너로 보고 멈춘다 — 곧으면 손(노드 0)까지 걸어가 정확히
+	 * chord가 된다. 크게 잡으면(완만한 굴곡 무시) 더 chord에 가깝고, 작게 잡으면 미세한 꺾임에도 민감.
+	 * 팽팽할 때의 처짐/노드 지터는 이 임계 아래이고, 벽 모서리는 위라 구분된다(잔여 지터는 SmoothTime이 흡수).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "1.0", ClampMax = "179.0", Units = "deg"))
+	float PullBendThresholdDeg = 30.0f;
+
+	/**
+	 * Pull 방향 시간 스무딩 상수(초, EMA time constant). look-ahead 방향의 프레임 간 지터 + GPU 미러 지연
+	 * 노이즈를 지수이동평균으로 흡수한다(alpha = 1-exp(-dt/이 값), 프레임레이트 독립). 클수록 매끄럽지만
+	 * 반응이 느리고, 0이면 스무딩 없음(원 look-ahead). wrap 시작 시 측정값으로 초기화된다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	float PullDirSmoothTime = 0.08f;
 };
 
 /** 던질 때 기준축을 어느 좌표계에서 가져올지. */

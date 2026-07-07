@@ -326,7 +326,17 @@ private:
 	float TensionOverTime = 0.0f;	// Wrapped 중 최대 장력이 TensionReleaseForce를 연속 초과한 시간
 
 	// 이번 프레임 Pull 산출물(Wrapped 동안 매 프레임 산출). BP 조회/디버거 화살표 소스.
+	// Direction은 아래 SmoothedPullDir(시간 스무딩된 방향)으로 매 프레임 덮어써서 소비자(테더/능동 Pull)가
+	// 스무딩된 값을 쓰게 한다.
 	FRopePullSample LastPullSample;
+
+	// Pull 방향의 시간 스무딩 상태(EMA). ComputePull의 look-ahead 방향(공간 평균)을 프레임 간 지수이동평균해
+	// 잔여 지터 + GPU 미러 지연 노이즈를 흡수한다. 영벡터 = 미초기화(wrap 시작 후 첫 유효 프레임에 측정값으로
+	// 시드). ResetTransientPhaseState에서 리셋. 테더/능동 Pull이 이 방향을 공용으로 쓴다.
+	FVector SmoothedPullDir = FVector::ZeroVector;
+
+	// 스무딩 전 look-ahead 방향(EMA 입력 원본). 디버거가 raw vs smoothed를 나란히 그려 지터 진단에 쓴다.
+	FVector LastPullDirRaw = FVector::ZeroVector;
 
 	// 능동 Pull의 현재 힘(SetActivePull이 설정, 0=꺼짐). Wrapped + 팽팽할 때만 인가된다.
 	float ActivePullForce = 0.0f;

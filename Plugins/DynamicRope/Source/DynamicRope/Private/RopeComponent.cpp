@@ -911,9 +911,28 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		// wrap 상태에 반영한다. 게임플레이(당김/절단 판정)와 디버거가 이 값을 읽는다.
 		WrapController.State.Tension = GetMaxTension();
 
-		// Pull 샘플 산출(항상 — 디버거/BP 관찰 + 아래 두 동작의 공용 입력).
+		// Pull 샘플 산출(항상 — 디버거/BP 관찰 + 아래 두 동작의 공용 입력). 방향은 첫 직선 다리 추종(공간).
 		LastPullSample = FRopePullSample();
-		WrapController.ComputePull(Sim, LastPullSample);
+		WrapController.ComputePull(Sim, WrapConfig.PullBendThresholdDeg, LastPullSample);
+
+		// 방향 시간 스무딩(EMA): look-ahead 방향의 프레임 간 지터 + GPU 미러 지연 노이즈를 흡수한다.
+		// wrap 시작 후 첫 유효 프레임은 측정값으로 시드(래그 없음), 이후 프레임레이트 독립 EMA로 블렌드.
+		// 소비자(테더/능동 Pull)가 모두 이 스무딩된 방향을 쓰도록 LastPullSample.Direction도 덮어쓴다.
+		if (LastPullSample.bValid)
+		{
+			LastPullDirRaw = LastPullSample.Direction; // 스무딩 전 원본 보관(디버거 raw vs smoothed 비교용).
+			if (SmoothedPullDir.IsNearlyZero())
+			{
+				SmoothedPullDir = LastPullSample.Direction;
+			}
+			else
+			{
+				const float Tau = WrapConfig.PullDirSmoothTime;
+				const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
+				SmoothedPullDir = FMath::Lerp(SmoothedPullDir, LastPullSample.Direction, Alpha).GetSafeNormal();
+			}
+			LastPullSample.Direction = SmoothedPullDir;
+		}
 
 		// 동작 1 — 자동 견인(테더, 위치/속도 동기): 가용 로프 길이 초과분만큼 대상을 되돌린다.
 		// 장력 비례 힘(폭주: 힘→스트레치→장력↑→힘↑)을 대체 — 초과분 기반이라 수렴한다.
@@ -1419,6 +1438,7 @@ void URopeComponent::ResetTransientPhaseState()
 	FlightNoContactElapsed = 0.0f;
 	TensionOverTime = 0.0f;
 	LastPullSample = FRopePullSample();
+	SmoothedPullDir = FVector::ZeroVector; // 다음 wrap 시작 시 측정값으로 다시 시드.
 	bLoggedPullNoReceiver = false;
 }
 
@@ -1494,7 +1514,11 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.TensionReleaseForce = WrapConfig.TensionReleaseForce;
 		Snapshot.bPullValid = LastPullSample.bValid;
 		Snapshot.PullPoint = LastPullSample.WorldPoint;
-		Snapshot.PullDirection = LastPullSample.Direction;
+		Snapshot.PullDirection = LastPullSample.Direction; // 스무딩된(실제 인가) 방향
+		Snapshot.PullDirRaw = LastPullDirRaw;              // 스무딩 전 look-ahead(지터 진단)
+		Snapshot.PullAimNode = LastPullSample.AimNode;
+		Snapshot.PullAimPoint = Sim.Positions.IsValidIndex(LastPullSample.AimNode)
+			? Sim.Positions[LastPullSample.AimNode] : LastPullSample.WorldPoint;
 		Snapshot.PullTension = LastPullSample.Tension;
 		Snapshot.TetherResponse = WrapConfig.TetherResponse;
 		Snapshot.TetherOvershoot = LastTetherOvershoot;
@@ -2158,17 +2182,21 @@ void URopeComponent::UpdateReel(float DeltaTime)
 
 void URopeComponent::UpdateTether(float DeltaTime)
 {
-	// 가용 로프 길이(손→앵커 세그먼트 수 × 길이 + 여유) 대비 실제 직선 거리의 초과분(overshoot).
-	// 스냅샷/BP 관찰을 위해 테더가 꺼져 있어도 초과분은 항상 계산한다.
+	// 초과분(overshoot) = 앵커에서 "조준 노드"(walk가 찾은 첫 직선 다리 끝 = 손 또는 벽 모서리)까지의 실제
+	// 직선 거리가 그 구간의 가용 로프 길이를 넘는 양. 손이 아니라 조준 노드를 기준으로 삼는 이유: 로프가 벽에
+	// 걸려 우회하면 손 직선은 장애물 뒤라 영영 안 터지지만(무반응), 모서리(조준) 기준이면 그 다리로 제대로
+	// 발화한다. 곧은 로프는 조준=손(노드 0)이라 기존과 등가. 스냅샷/BP 관찰을 위해 꺼져 있어도 항상 계산.
 	LastTetherOvershoot = 0.0f;
-	if (!LastPullSample.bValid)
+	if (!LastPullSample.bValid || !Sim.Positions.IsValidIndex(LastPullSample.AimNode))
 	{
 		return;
 	}
-	const FVector Hand = Sim.bStartPinned ? Sim.StartPinTarget : (Sim.Positions.Num() > 0 ? Sim.Positions[0] : FVector::ZeroVector);
-	const FVector Span = LastPullSample.WorldPoint - Hand;
+	const FVector Anchor = LastPullSample.WorldPoint;              // 끌 지점(대상 쪽 앵커)
+	const FVector Aim    = Sim.Positions[LastPullSample.AimNode];  // 조준(손 또는 벽 모서리)
+	const int32   LegSegs = LastPullSample.AnchorNode - LastPullSample.AimNode; // 앵커→조준 세그먼트 수
+	const FVector Span = Aim - Anchor;
 	const float Dist = static_cast<float>(Span.Size());
-	const float AvailLen = static_cast<float>(LastPullSample.AnchorNode) * Sim.SegmentLength + WrapConfig.TetherSlack;
+	const float AvailLen = static_cast<float>(LegSegs) * Sim.SegmentLength + WrapConfig.TetherSlack;
 	const float Overshoot = Dist - AvailLen;
 	LastTetherOvershoot = FMath::Max(0.0f, Overshoot);
 	if (WrapConfig.TetherResponse <= 0.0f || Overshoot <= 0.0f || Dist <= KINDA_SMALL_NUMBER)
@@ -2176,9 +2204,14 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		return;
 	}
 
-	// 초과분의 일부를 이번 프레임에 회수(위치/속도 동기). 남은 초과분이 다음 프레임 입력이므로 수렴한다.
-	const FVector DirToHand = -Span / Dist;
-	const FVector Correction = DirToHand * (Overshoot * FMath::Clamp(WrapConfig.TetherResponse, 0.0f, 1.0f));
+	// 방향 = 앵커에서 조준(모서리/손) 쪽 = 스무딩된 look-ahead 방향(둘 다 로프 경로 추종). 폴백은 이 구간 직선.
+	const FVector DirToAim = SmoothedPullDir.IsNearlyZero() ? (Span / Dist) : SmoothedPullDir;
+	// 이번 프레임 회수량 = 초과분 × 반응(위치 동기 — 남은 초과분이 다음 입력이라 수렴). 최대 속도로 클램프해
+	// 초과분 스파이크(코너 전이 등)에도 대상이 튕겨나가지 않게 한다.
+	const float Response = FMath::Clamp(WrapConfig.TetherResponse, 0.0f, 1.0f);
+	const float MaxStep = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f) * DeltaTime; // 이번 프레임 최대 이동(cm)
+	const float StepLen = (MaxStep > 0.0f) ? FMath::Min(Overshoot * Response, MaxStep) : (Overshoot * Response);
+	const FVector Correction = DirToAim * StepLen;
 
 	USkeletalMeshComponent* Mesh = const_cast<USkeletalMeshComponent*>(WrapController.State.Mesh.Get());
 	if (!Mesh)
@@ -2186,11 +2219,25 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		return;
 	}
 
-	// 물리 시뮬 대상(본/루트): 텔레포트 대신 질량 무관 속도 변경으로 같은 프레임 변위를 만든다.
+	// 물리 시뮬 대상(본/루트): 속도를 *누적하지 않고* 목표 속도(StepLen/dt)까지만 톱업한다 — 이미 그 방향으로
+	// 충분히 빠르면 아무것도 더하지 않는다. bVelChange로 매 프레임 임펄스를 더하던 기존 방식은 물리 운동량이
+	// 이월돼 속도가 누적 → 발산(맵 밖)했다. 여기서는 목표를 넘지 않게 차분만 주므로 수렴하고, 수직 성분(중력
+	// 등)은 보존된다. StepLen이 이미 최대 속도로 클램프돼 있어 상한도 보장.
+	const float InvDt = 1.0f / FMath::Max(DeltaTime, 1e-4f);
+	const float DesiredSpeed = StepLen * InvDt;
+	auto TopUpVelocity = [&](UPrimitiveComponent* Prim, FName BoneName)
+	{
+		const FVector CurVel = Prim->GetPhysicsLinearVelocity(BoneName);
+		const float CurAlong = static_cast<float>(FVector::DotProduct(CurVel, DirToAim));
+		if (DesiredSpeed > CurAlong)
+		{
+			Prim->AddImpulse(DirToAim * (DesiredSpeed - CurAlong), BoneName, /*bVelChange*/ true);
+		}
+	};
+
 	if (Mesh->IsSimulatingPhysics(LastPullSample.Bone))
 	{
-		const FVector VelChange = Correction / FMath::Max(DeltaTime, 1e-4f);
-		Mesh->AddImpulse(VelChange, LastPullSample.Bone, /*bVelChange*/ true);
+		TopUpVelocity(Mesh, LastPullSample.Bone);
 		return;
 	}
 	AActor* Owner = Mesh->GetOwner();
@@ -2198,12 +2245,12 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	{
 		if (Root->IsSimulatingPhysics())
 		{
-			Root->AddImpulse(Correction / FMath::Max(DeltaTime, 1e-4f), NAME_None, /*bVelChange*/ true);
+			TopUpVelocity(Root, NAME_None);
 			return;
 		}
 	}
 
-	// 캐릭터/비시뮬 대상: 위치 보정(스윕 — 벽 통과 방지). 캐릭터 캡슐도 이 경로로 끌려온다.
+	// 캐릭터/비시뮬 대상: 위치 보정(스윕 — 벽 통과 방지). StepLen이 클램프돼 큰 텔레포트가 없다.
 	if (Owner)
 	{
 		Owner->AddActorWorldOffset(Correction, /*bSweep*/ true);

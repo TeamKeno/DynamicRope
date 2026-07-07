@@ -139,12 +139,14 @@ bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 		Wrap.State.Anchors.Add(Anchor);
 	}
 
+	// 코너 임계 30도. 곧은 로프는 손(노드 0)까지 걸어가 방향이 정확히 chord(-X)가 된다.
+	const float BendDeg = 30.0f;
 	FRopePullSample Pull;
-	TestTrue(TEXT("ComputePull succeeds"), Wrap.ComputePull(Sim, Pull));
+	TestTrue(TEXT("ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
 	TestTrue(TEXT("pull sample valid"), Pull.bValid);
 	TestEqual(TEXT("hand-side head anchor wins"), Pull.AnchorNode, 3);
 	TestTrue(TEXT("bone attributed"), Pull.Bone == FName("arm"));
-	// 손(노드 0, x=0)은 앵커(노드 3, x=60)에서 -X 방향(chord).
+	// 곧은 로프: 앵커(노드 3, x=60)에서 손 쪽 노드(x<60)는 -X → look-ahead가 chord와 일치한다.
 	TestTrue(FString::Printf(TEXT("direction %s points toward hand (-X)"), *Pull.Direction.ToCompactString()),
 		Pull.Direction.Equals(FVector(-1, 0, 0), 0.01f));
 	TestEqual(TEXT("tension from anchor-hand segment"), Pull.Tension, 1234.0f);
@@ -156,7 +158,34 @@ bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 	HandAnchor.NodeIndex = 0;
 	WrapAtHand.State.Anchors.Add(HandAnchor);
 	FRopePullSample InvalidPull;
-	TestFalse(TEXT("anchor at hand node yields no pull"), WrapAtHand.ComputePull(Sim, InvalidPull));
+	TestFalse(TEXT("anchor at hand node yields no pull"), WrapAtHand.ComputePull(Sim, BendDeg, InvalidPull));
+
+	// 꺾인 자유 구간(벽 모서리): 앵커(노드 4)에서 첫 다리는 +Z(위)로 오르고, 모서리(노드 2)에서 손 쪽으로
+	// 수평으로 꺾인다. look-ahead 방향은 로프 경로(첫 다리 = +Z)를 따라야 하며, 앵커→손 직선 chord
+	// (대각선, 모서리를 가로지름)와 명확히 달라야 한다 — 이게 벽에 걸린 로프에서 chord가 벽을 관통하던 버그의 수정.
+	FRopeSimState Bent;
+	Bent.Positions = {
+		FVector(-40, 0, 40), // 0 손
+		FVector(-20, 0, 40), // 1
+		FVector(  0, 0, 40), // 2 모서리
+		FVector(  0, 0, 20), // 3 첫 다리
+		FVector(  0, 0,  0), // 4 앵커
+	};
+	Bent.PrevPositions = Bent.Positions;
+	Bent.SegmentLength = 20.0f;
+	FRopeWrapController WrapBent;
+	WrapBent.State.BoneName = FName("arm");
+	{
+		FRopeSurfaceAnchor A; A.NodeIndex = 4; A.Bone = FName("arm");
+		WrapBent.State.Anchors.Add(A);
+	}
+	FRopePullSample BentPull;
+	TestTrue(TEXT("bent ComputePull succeeds"), WrapBent.ComputePull(Bent, BendDeg, BentPull));
+	// 첫 다리(노드 4→3→2, +Z)를 걷다 노드 2에서 90도 꺾임 감지 → 멈춤 → 방향 +Z(로프 경로), chord가 아님.
+	TestTrue(FString::Printf(TEXT("bent direction %s follows first leg (+Z)"), *BentPull.Direction.ToCompactString()),
+		BentPull.Direction.Equals(FVector(0, 0, 1), 0.01f));
+	const FVector Chord = (Bent.Positions[0] - Bent.Positions[4]).GetSafeNormal(); // 대각선(모서리 관통)
+	TestFalse(TEXT("bent direction is NOT the straight chord"), BentPull.Direction.Equals(Chord, 0.05f));
 	return true;
 }
 

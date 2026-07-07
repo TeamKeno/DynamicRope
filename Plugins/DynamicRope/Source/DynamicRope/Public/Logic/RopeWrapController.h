@@ -44,13 +44,16 @@ public:
 
 	/**
 	 * Pull(당김) 산출: 손 쪽 첫 앵커가 로프로부터 받는 당김(방향 + 장력)을 데이터로 채운다.
-	 * 방향 = 앵커 → 손(노드 0) 직선(chord — 인접 세그먼트 방향은 로프 처짐/wrap 지터로 랜덤해져
-	 * 게임플레이에 부적합), 장력 = 손 쪽 인접 세그먼트의 SegmentTension(솔버 산출 — 슬랙이면 0이라
-	 * 힘도 자연히 0). 힘 인가(캐릭터/물리 본)는 UObject 작업이라 호출자(컴포넌트) 몫이다 — 여기는
-	 * 순수 데이터(unit-test 가능).
+	 * 방향 = 앵커에서 손 쪽으로 로프를 따라 걸으며 찾은 "첫 직선 다리"의 끝 노드를 향하는 단위벡터.
+	 * 걷는 중 다음 세그먼트가 지금까지의 누적 다리 방향에서 BendThresholdDeg 이상 꺾이면 멈춘다(코너). 곧은
+	 * 로프는 손(노드 0)까지 걸어가 정확히 chord(앵커→손 직선)가 되고, 벽/모서리에 걸리면 그 직전에서 멈춰
+	 * 로프의 실제 경로(첫 다리)를 따라 당긴다(직선 chord는 장애물을 관통). 누적 다리 방향 기준이라 한 노드의
+	 * 처짐/지터로 조기 종료되지 않는다(공간 평균; 프레임 간 잔여 지터는 호출자의 EMA가 시간 평균). 장력 =
+	 * 손 쪽 인접 세그먼트의 SegmentTension(슬랙이면 0이라 힘도 0). 힘 인가(캐릭터/물리 본)와 시간 스무딩은
+	 * UObject/상태 작업이라 호출자(컴포넌트) 몫 — 여기는 순수 데이터(unit-test 가능).
 	 * @return 유효한 앵커/세그먼트가 있어 Out이 채워졌으면 true(장력 0이어도 true).
 	 */
-	bool ComputePull(const FRopeSimState& Sim, FRopePullSample& Out) const;
+	bool ComputePull(const FRopeSimState& Sim, float BendThresholdDeg, FRopePullSample& Out) const;
 
 	/** unlatch 하고 제어권을 솔버에게 돌려준다. */
 	void Release(ERopeReleaseReason Reason);

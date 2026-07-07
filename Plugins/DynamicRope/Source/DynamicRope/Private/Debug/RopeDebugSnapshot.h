@@ -69,7 +69,10 @@ struct FRopeDebugSnapshot
 	float TensionReleaseForce = 0.0f; // 임계 장력(0=비활성) — 표시용
 	bool bPullValid = false;          // ComputePull 성공(앵커/방향 유효 — 장력 0이어도 true)
 	FVector PullPoint = FVector::ZeroVector;     // 힘 인가점(앵커 월드)
-	FVector PullDirection = FVector::ZeroVector; // 당김 단위 방향
+	FVector PullDirection = FVector::ZeroVector; // 당김 단위 방향(EMA 스무딩 후 — 실제 인가 방향)
+	FVector PullDirRaw = FVector::ZeroVector;    // 스무딩 전 look-ahead 방향(원본) — 지터 진단용(스무딩 대비)
+	FVector PullAimPoint = FVector::ZeroVector;  // 첫 직선 다리 끝(walk가 멈춘 노드 월드) — 방향 조준점
+	int32 PullAimNode = INDEX_NONE;              // 위 조준 노드 인덱스(프레임마다 튀면 방향 불안정 신호)
 	float PullTension = 0.0f;                    // 앵커 세그먼트 장력
 	float TetherResponse = 0.0f;                 // 테더 반응(0=비활성) — 표시용
 	float TetherOvershoot = 0.0f;                // 가용 로프 길이 초과분(cm, 0=팽팽하지 않음)

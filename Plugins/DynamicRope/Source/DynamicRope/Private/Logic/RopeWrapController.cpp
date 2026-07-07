@@ -314,7 +314,7 @@ bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOver
 	return true;
 }
 
-bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, FRopePullSample& Out) const
+bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresholdDeg, FRopePullSample& Out) const
 {
 	Out = FRopePullSample();
 	if (!State.IsWrapped())
@@ -354,22 +354,35 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, FRopePullSample&
 		return false;
 	}
 
-	// 당김 방향 = 앵커 → 손(노드 0) 직선(chord). 인접 세그먼트 방향이 물리적으로는 맞지만, 앵커 옆
-	// 자유 노드는 wrap 주변에서 흔들리고 로프 처짐(catenary)에 따라 옆/아래를 향해 프레임마다 사실상
-	// 랜덤해진다(+GPU 미러 지연 지터). 게임플레이 견인은 안정적인 chord를 쓴다 — 손~앵커 자유 구간에
-	// 장애물이 없는 한(앵커가 첫 접촉점이므로 일반적으로 없음) 의도("플레이어 쪽으로")와 일치한다.
-	const FVector ToHand = Sim.Positions[0] - Sim.Positions[AnchorNode];
-	const FVector Direction = ToHand.GetSafeNormal();
-	if (Direction.IsNearlyZero())
+	// 당김 방향 = 앵커에서 손 쪽으로 로프를 따라 걸으며 찾은 "첫 직선 다리"의 끝 노드를 향하는 방향.
+	// 각 스텝에서 다음 세그먼트가 지금까지의 누적 다리 방향(앵커→현재 조준노드)에서 임계 이상 꺾이면 멈춘다.
+	// 곧으면 손(노드 0)까지 걸어가 정확히 chord가 되고, 벽/모서리에선 그 직전에 멈춰 첫 다리를 따른다.
+	// 누적 방향 기준이라 한 노드의 처짐/지터로 조기 종료되지 않는다(공간 평균; 시간 지터는 호출자 EMA가 흡수).
+	const float CosThresh = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(BendThresholdDeg, 1.0f, 179.0f)));
+	int32 AimNode = AnchorNode - 1; // 최소 인접 노드 1개는 포함(손 쪽 첫 세그먼트).
+	for (int32 j = AnchorNode - 2; j >= 0; --j)
 	{
-		return false; // 축퇴(손과 앵커 겹침) — 방향 정의 불가.
+		const FVector LegSoFar = (Sim.Positions[AimNode] - Sim.Positions[AnchorNode]).GetSafeNormal(); // 누적 다리(안정)
+		const FVector NextSeg  = (Sim.Positions[j] - Sim.Positions[AimNode]).GetSafeNormal();           // 다음 세그먼트
+		if (LegSoFar.IsNearlyZero() || NextSeg.IsNearlyZero()
+			|| FVector::DotProduct(NextSeg, LegSoFar) < CosThresh)
+		{
+			break; // 코너(또는 축퇴) — 직전 노드(AimNode)가 첫 다리의 끝.
+		}
+		AimNode = j;
+	}
+	const FVector Along = (Sim.Positions[AimNode] - Sim.Positions[AnchorNode]).GetSafeNormal();
+	if (Along.IsNearlyZero())
+	{
+		return false; // 축퇴(조준 노드와 앵커 겹침) — 방향 정의 불가.
 	}
 
 	Out.bValid = true;
 	Out.AnchorNode = AnchorNode;
+	Out.AimNode = AimNode;
 	Out.Bone = AnchorBone;
 	Out.WorldPoint = Sim.Positions[AnchorNode];
-	Out.Direction = Direction;
+	Out.Direction = Along;
 	// 앵커-손 쪽 인접 세그먼트(인덱스 AnchorNode-1)의 장력. 아직 솔브 전이면(배열 비어 있음) 0.
 	Out.Tension = Sim.SegmentTension.IsValidIndex(AnchorNode - 1) ? Sim.SegmentTension[AnchorNode - 1] : 0.0f;
 	return true;

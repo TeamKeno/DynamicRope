@@ -388,13 +388,31 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			AddTextLine(FString::Printf(TEXT("    tension=%.0f (release off)"), S.WrapTension));
 		}
 
-		// Pull 상태(샘플은 항상 산출) — 유효+장력>0(화살표), 유효+슬랙, 무효(앵커가 손 노드거나 없음).
+		// Pull 방향 진단 시각화(장력 유무와 무관하게 bPullValid면 항상). 방향 문제를 눈으로 확정하기 위한 것:
+		//  - 청록 선/점 = 앵커 → walk가 멈춘 조준 노드(첫 직선 다리). 이 끝이 벽 모서리에 놓여야 정상이고,
+		//    프레임마다 조준 노드(aim=node#)가 튀면 방향이 통째로 점프하는 신호.
+		//  - 노랑 화살표 = 스무딩 전 raw look-ahead 방향(프레임 지터가 여기서 보인다).
+		//  - 초록 화살표 = EMA 스무딩 후(실제 인가) 방향. raw 대비 안정적이어야 한다.
+		//  - 텍스트 raw↔smooth = 두 방향의 각도차(도) = 이번 프레임 지터 크기.
+		if (S.bPullValid)
+		{
+			const float DiagLen = 40.0f;
+			AddShape(FGameplayDebuggerShape::MakeSegment(S.PullPoint, S.PullAimPoint, 3.0f, FColor::Cyan));
+			AddShape(FGameplayDebuggerShape::MakePoint(S.PullAimPoint, 6.0f, FColor::Cyan));
+			AddShape(FGameplayDebuggerShape::MakeArrow(S.PullPoint, S.PullPoint + S.PullDirRaw * DiagLen,
+				6.0f, 1.5f, FColor::Yellow));
+			AddShape(FGameplayDebuggerShape::MakeArrow(S.PullPoint, S.PullPoint + S.PullDirection * DiagLen,
+				8.0f, 2.0f, FColor::Green));
+			const float JitterDeg = FMath::RadiansToDegrees(FMath::Acos(
+				FMath::Clamp(static_cast<float>(FVector::DotProduct(S.PullDirRaw, S.PullDirection)), -1.0f, 1.0f)));
+			AddTextLine(FString::Printf(TEXT("    {grey}pull-dir aim=node%d raw<->smooth=%.1f deg"),
+				S.PullAimNode, JitterDeg));
+		}
+
+		// Pull 상태(샘플은 항상 산출) — 유효+장력>0(수치), 유효+슬랙, 무효(앵커가 손 노드거나 없음).
 		// tether = 가용 로프 길이 초과분(자동 견인 입력), active = 능동 Pull 힘(입력 홀드).
 		if (S.bPullValid && S.PullTension > KINDA_SMALL_NUMBER)
 		{
-			const float ArrowLen = FMath::Clamp(S.PullTension * 0.01f, 15.0f, 120.0f);
-			AddShape(FGameplayDebuggerShape::MakeArrow(S.PullPoint, S.PullPoint + S.PullDirection * ArrowLen,
-				8.0f, 2.0f, FColor::Orange));
 			// 거리 release가 켜져 있으면 초과분이 한계에 근접/초과할 때 색으로 경고(노랑 80%+, 빨강 초과).
 			const TCHAR* OvershootColor = TEXT("{white}");
 			if (S.DistanceReleaseSlack > 0.0f)
