@@ -355,15 +355,21 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 	}
 
 	// 당김 방향 = 앵커에서 손 쪽으로 로프를 따라 걸으며 찾은 "첫 직선 다리"의 끝 노드를 향하는 방향.
-	// 각 스텝에서 다음 세그먼트가 지금까지의 누적 다리 방향(앵커→현재 조준노드)에서 임계 이상 꺾이면 멈춘다.
-	// 곧으면 손(노드 0)까지 걸어가 정확히 chord가 되고, 벽/모서리에선 그 직전에 멈춰 첫 다리를 따른다.
-	// 누적 방향 기준이라 한 노드의 처짐/지터로 조기 종료되지 않는다(공간 평균; 시간 지터는 호출자 EMA가 흡수).
+	// 각 스텝에서 다음 세그먼트가 지금까지의 누적 다리 방향(앵커→현재 조준노드 chord)에서 임계 이상 꺾이면
+	// 멈춘다. 곧으면 손(노드 0)까지 걸어가 정확히 chord가 되고, 벽/모서리에선 그 직전에 멈춰 첫 다리를 따른다.
+	// 누적 chord 기준이라 90도 코너는 뚜렷이 감지하면서 한 노드의 처짐엔 둔감하다.
+	//
+	// 단, 조준을 anchor-1(세그먼트 1개)에서 시작하면 첫 스텝의 chord도 세그먼트 1개라 노드 노이즈에 취약해,
+	// 팽팽한 로프에서도 인접 두 세그먼트가 임계를 넘겨 anchor-1에 조기 종료 → baseline이 1세그먼트로 짧아져
+	// 방향 각도 지터가 폭증했다(어제 pull 지터의 주범). 인접 2세그먼트를 무조건 포함해 baseline을 확보한 뒤
+	// 코너 판정을 시작한다(손이 더 가까우면 손까지). 잔여 시간 지터/이산 홉은 호출자의 fractional 스무딩이 흡수.
 	const float CosThresh = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(BendThresholdDeg, 1.0f, 179.0f)));
-	int32 AimNode = AnchorNode - 1; // 최소 인접 노드 1개는 포함(손 쪽 첫 세그먼트).
-	for (int32 j = AnchorNode - 2; j >= 0; --j)
+	const FVector AnchorPos = Sim.Positions[AnchorNode];
+	int32 AimNode = FMath::Max(AnchorNode - 2, 0); // 2세그먼트 시드(가능하면) — 첫 스텝 단일 세그먼트 노이즈 회피.
+	for (int32 j = AimNode - 1; j >= 0; --j)
 	{
-		const FVector LegSoFar = (Sim.Positions[AimNode] - Sim.Positions[AnchorNode]).GetSafeNormal(); // 누적 다리(안정)
-		const FVector NextSeg  = (Sim.Positions[j] - Sim.Positions[AimNode]).GetSafeNormal();           // 다음 세그먼트
+		const FVector LegSoFar = (Sim.Positions[AimNode] - AnchorPos).GetSafeNormal();        // 누적 다리 chord(긴 baseline)
+		const FVector NextSeg  = (Sim.Positions[j] - Sim.Positions[AimNode]).GetSafeNormal(); // 다음 세그먼트
 		if (LegSoFar.IsNearlyZero() || NextSeg.IsNearlyZero()
 			|| FVector::DotProduct(NextSeg, LegSoFar) < CosThresh)
 		{
@@ -371,7 +377,7 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 		}
 		AimNode = j;
 	}
-	const FVector Along = (Sim.Positions[AimNode] - Sim.Positions[AnchorNode]).GetSafeNormal();
+	const FVector Along = (Sim.Positions[AimNode] - AnchorPos).GetSafeNormal();
 	if (Along.IsNearlyZero())
 	{
 		return false; // 축퇴(조준 노드와 앵커 겹침) — 방향 정의 불가.

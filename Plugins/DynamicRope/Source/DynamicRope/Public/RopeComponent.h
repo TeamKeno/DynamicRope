@@ -347,6 +347,11 @@ private:
 	// 스무딩 전 look-ahead 방향(EMA 입력 원본). 디버거가 raw vs smoothed를 나란히 그려 지터 진단에 쓴다.
 	FVector LastPullDirRaw = FVector::ZeroVector;
 
+	// Pull 조준 노드의 시간 스무딩 상태(fractional). ComputePull이 고른 정수 AimNode를 float로 EMA해 노드
+	// 사이를 보간 → 방향/tether를 연속화(이산 홉 제거). <0 = 미초기화(wrap 시작 후 첫 유효 프레임에 시드).
+	// ResetTransientPhaseState에서 -1로 리셋. PullAimSmoothTime이 상수.
+	float SmoothedAimNodeF = -1.0f;
+
 	// 능동 Pull의 현재 힘(SetActivePull이 설정, 0=꺼짐). Wrapped + 팽팽할 때만 인가된다.
 	float ActivePullForce = 0.0f;
 

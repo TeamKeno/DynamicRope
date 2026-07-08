@@ -226,11 +226,15 @@ struct FRopePullSample
 {
 	bool    bValid = false;
 	int32   AnchorNode = INDEX_NONE;          // 손 쪽 첫 앵커 노드(힘 인가 지점의 노드)
-	int32   AimNode = INDEX_NONE;             // 첫 직선 다리 끝(walk가 멈춘 노드) — 방향의 조준 노드(디버그/진단)
+	int32   AimNode = INDEX_NONE;             // 첫 직선 다리 끝(walk가 멈춘 정수 노드) — 방향의 raw 조준(ComputePull 산출; 디버그/진단)
 	FName   Bone = NAME_None;                 // 앵커가 붙은 본(물리 본 힘 인가 대상)
 	FVector WorldPoint = FVector::ZeroVector; // 앵커 노드 월드 위치(힘 인가점)
-	FVector Direction = FVector::ZeroVector;  // 당김 단위 방향(앵커에서 손 쪽 look-ahead 노드 방향 = 로프 경로 추종; 소비 시 컴포넌트가 EMA 스무딩)
+	FVector Direction = FVector::ZeroVector;  // 당김 단위 방향(앵커에서 조준 쪽 = 로프 경로 추종; 소비 시 컴포넌트가 fractional+EMA 스무딩)
 	float   Tension = 0.0f;                   // 앵커-손 쪽 인접 세그먼트 장력(FRopeSimState::SegmentTension 단위)
+	// 아래 둘은 소비자(컴포넌트)가 AimNode를 float로 시간 스무딩해 채운다(ComputePull은 정수 AimNode만 산출).
+	// tether/방향이 이 연속 값을 써 정수 조준 노드의 프레임 간 이산 홉(방향 점프 + 견인 끊김)을 없앤다.
+	float   AimNodeF = -1.0f;                 // 스무딩된 fractional 조준 인덱스([0, AnchorNode); <0 = 미설정)
+	FVector AimPos = FVector::ZeroVector;     // 노드 사이 보간된 조준 월드 위치(AimNodeF 위치)
 };
 
 /** rope 중심선: 파티클의 체인. solver / 로직 / 렌더의 단일 진실 공급원(single source of truth). */
@@ -652,6 +656,15 @@ struct FRopeWrapConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float PullDirSmoothTime = 0.08f;
+
+	/**
+	 * Pull 조준 노드 시간 스무딩 상수(초, EMA time constant). walk가 고른 정수 조준 노드(AimNode)는 로프가
+	 * 흔들리면 프레임마다 이산적으로 튀어(방향 통째 점프 + tether 초과분 불연속 = 견인 끊김) 방향 EMA로는
+	 * 못 잡는다. 조준 인덱스를 float로 EMA해 노드 사이를 보간하면 방향·tether가 연속이 된다(alpha=1-exp(-dt/이
+	 * 값), 프레임레이트 독립). 클수록 매끄럽지만 반응이 느리고, 0이면 스무딩 없음. wrap 시작 시 측정값으로 초기화.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	float PullAimSmoothTime = 0.08f;
 };
 
 /** 던질 때 기준축을 어느 좌표계에서 가져올지. */

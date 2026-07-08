@@ -658,21 +658,44 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		LastPullSample = FRopePullSample();
 		WrapController.ComputePull(Sim, WrapConfig.PullBendThresholdDeg, LastPullSample);
 
-		// 방향 시간 스무딩(EMA): look-ahead 방향의 프레임 간 지터 + GPU 미러 지연 노이즈를 흡수한다.
-		// wrap 시작 후 첫 유효 프레임은 측정값으로 시드(래그 없음), 이후 프레임레이트 독립 EMA로 블렌드.
-		// 소비자(테더/능동 Pull)가 모두 이 스무딩된 방향을 쓰도록 LastPullSample.Direction도 덮어쓴다.
+		// Pull 스무딩(2단): (1) 조준 노드 fractional 스무딩 — 정수 AimNode의 프레임 간 이산 홉(방향 통째 점프
+		// + tether 초과분 불연속)을 float EMA + 노드 사이 보간으로 없앤다. (2) 방향 EMA — 그 위에 남는 노드 위치
+		// 노이즈(GPU 미러 지연 등)를 다듬는다. wrap 시작 후 첫 유효 프레임은 측정값으로 시드(래그 없음).
 		if (LastPullSample.bValid)
 		{
-			LastPullDirRaw = LastPullSample.Direction; // 스무딩 전 원본 보관(디버거 raw vs smoothed 비교용).
+			LastPullDirRaw = LastPullSample.Direction; // 스무딩 전 raw look-ahead(정수 조준) — 디버거 raw vs smoothed 비교.
+
+			// (1) 조준 인덱스 시간 스무딩 → fractional 조준 위치 보간.
+			const float RawAimF = static_cast<float>(LastPullSample.AimNode);
+			if (SmoothedAimNodeF < 0.0f)
+			{
+				SmoothedAimNodeF = RawAimF;
+			}
+			else
+			{
+				const float TauA = WrapConfig.PullAimSmoothTime;
+				const float AlphaA = (TauA > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / TauA)) : 1.0f;
+				SmoothedAimNodeF = FMath::Lerp(SmoothedAimNodeF, RawAimF, AlphaA);
+			}
+			const float AimF = FMath::Clamp(SmoothedAimNodeF, 0.0f, static_cast<float>(LastPullSample.AnchorNode));
+			const int32 A0 = FMath::FloorToInt(AimF);
+			const int32 A1 = FMath::Min(A0 + 1, LastPullSample.AnchorNode);
+			const FVector AimPos = FMath::Lerp(Sim.Positions[A0], Sim.Positions[A1], AimF - static_cast<float>(A0));
+			LastPullSample.AimNodeF = AimF;
+			LastPullSample.AimPos = AimPos;
+
+			// (2) 연속 조준으로 방향 재계산 후 방향 EMA. 축퇴(조준=앵커)면 raw 방향 유지.
+			const FVector DirF = (AimPos - Sim.Positions[LastPullSample.AnchorNode]).GetSafeNormal();
+			const FVector DirIn = DirF.IsNearlyZero() ? LastPullSample.Direction : DirF;
 			if (SmoothedPullDir.IsNearlyZero())
 			{
-				SmoothedPullDir = LastPullSample.Direction;
+				SmoothedPullDir = DirIn;
 			}
 			else
 			{
 				const float Tau = WrapConfig.PullDirSmoothTime;
 				const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
-				SmoothedPullDir = FMath::Lerp(SmoothedPullDir, LastPullSample.Direction, Alpha).GetSafeNormal();
+				SmoothedPullDir = FMath::Lerp(SmoothedPullDir, DirIn, Alpha).GetSafeNormal();
 			}
 			LastPullSample.Direction = SmoothedPullDir;
 		}
@@ -1189,6 +1212,7 @@ void URopeComponent::ResetTransientPhaseState()
 	TensionOverTime = 0.0f;
 	LastPullSample = FRopePullSample();
 	SmoothedPullDir = FVector::ZeroVector; // 다음 wrap 시작 시 측정값으로 다시 시드.
+	SmoothedAimNodeF = -1.0f;              // fractional 조준 스무딩도 미초기화로.
 	bLoggedPullNoReceiver = false;
 }
 
@@ -1329,9 +1353,9 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.PullPoint = LastPullSample.WorldPoint;
 		Snapshot.PullDirection = LastPullSample.Direction; // 스무딩된(실제 인가) 방향
 		Snapshot.PullDirRaw = LastPullDirRaw;              // 스무딩 전 look-ahead(지터 진단)
-		Snapshot.PullAimNode = LastPullSample.AimNode;
-		Snapshot.PullAimPoint = Sim.Positions.IsValidIndex(LastPullSample.AimNode)
-			? Sim.Positions[LastPullSample.AimNode] : LastPullSample.WorldPoint;
+		Snapshot.PullAimNode = LastPullSample.AimNode; // raw 정수 조준(홉 진단용 텍스트)
+		Snapshot.PullAimPoint = LastPullSample.bValid ? LastPullSample.AimPos // 청록 = 스무딩된 fractional 조준(실제 인가)
+			: LastPullSample.WorldPoint;
 		Snapshot.PullTension = LastPullSample.Tension;
 		Snapshot.TetherResponse = WrapConfig.TetherResponse;
 		Snapshot.TetherOvershoot = LastTetherOvershoot;
@@ -2099,16 +2123,18 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 걸려 우회하면 손 직선은 장애물 뒤라 영영 안 터지지만(무반응), 모서리(조준) 기준이면 그 다리로 제대로
 	// 발화한다. 곧은 로프는 조준=손(노드 0)이라 기존과 등가. 스냅샷/BP 관찰을 위해 꺼져 있어도 항상 계산.
 	LastTetherOvershoot = 0.0f;
-	if (!LastPullSample.bValid || !Sim.Positions.IsValidIndex(LastPullSample.AimNode))
+	if (!LastPullSample.bValid || LastPullSample.AimNodeF < 0.0f)
 	{
 		return;
 	}
-	const FVector Anchor = LastPullSample.WorldPoint;              // 끌 지점(대상 쪽 앵커)
-	const FVector Aim    = Sim.Positions[LastPullSample.AimNode];  // 조준(손 또는 벽 모서리)
-	const int32   LegSegs = LastPullSample.AnchorNode - LastPullSample.AimNode; // 앵커→조준 세그먼트 수
+	// fractional 조준(연속): 정수 AimNode 대신 스무딩된 조준 위치/세그먼트 수를 써 초과분이 노드 단위로 뚝뚝
+	// 튀지 않고 연속으로 변한다 → 견인이 매끈해진다(어제 "뚝뚝 끊김"의 원인이 이 이산 참조였다).
+	const FVector Anchor = LastPullSample.WorldPoint;          // 끌 지점(대상 쪽 앵커)
+	const FVector Aim    = LastPullSample.AimPos;              // 보간된 조준(손 또는 벽 모서리)
+	const float   LegSegs = static_cast<float>(LastPullSample.AnchorNode) - LastPullSample.AimNodeF; // 연속 세그먼트 수
 	const FVector Span = Aim - Anchor;
 	const float Dist = static_cast<float>(Span.Size());
-	const float AvailLen = static_cast<float>(LegSegs) * Sim.SegmentLength + WrapConfig.TetherSlack;
+	const float AvailLen = LegSegs * Sim.SegmentLength + WrapConfig.TetherSlack;
 	const float Overshoot = Dist - AvailLen;
 	LastTetherOvershoot = FMath::Max(0.0f, Overshoot);
 	if (WrapConfig.TetherResponse <= 0.0f || Overshoot <= 0.0f || Dist <= KINDA_SMALL_NUMBER)
