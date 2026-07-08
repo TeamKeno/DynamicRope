@@ -127,6 +127,8 @@ struct FRopeGPUResidentStep
 	FVector StartPinTarget = FVector::ZeroVector;
 	float   StretchCompliance = 0.0f;
 	float   BendCompliance = 0.0f;
+	float   BendReleaseRatio = 0.70f; // 각도-허용 벤딩: straightness ≤ 이 값이면 펴는 힘 0(코너/랩 경계 각짐 완화).
+	float   BendFullRatio = 0.92f;    // straightness ≥ 이 값이면 펴는 힘 100%(완만한 굽힘은 기존처럼 편다).
 	float   Damping = 0.0f;
 	int32   Iterations = 1;
 	int32   CollisionPasses = 1; // substep당 충돌 해소 패스 수(Iterations로 상한). 1=substep 끝 1회(기존).

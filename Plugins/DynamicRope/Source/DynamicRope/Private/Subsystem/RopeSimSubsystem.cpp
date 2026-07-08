@@ -88,6 +88,8 @@ namespace
 		Step.StartPinTarget    = S.StartPinTarget;
 		Step.StretchCompliance = Cfg.StretchCompliance;
 		Step.BendCompliance    = Cfg.BendCompliance;
+		Step.BendReleaseRatio  = Cfg.BendReleaseRatio;
+		Step.BendFullRatio     = Cfg.BendFullRatio;
 		Step.Damping           = Cfg.Damping;
 		Step.Iterations        = Cfg.Iterations;
 		Step.CollisionPasses   = Cfg.CollisionPassesPerSubstep;

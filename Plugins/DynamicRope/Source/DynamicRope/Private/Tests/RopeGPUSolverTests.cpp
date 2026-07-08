@@ -94,6 +94,8 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 		Step.StartPinTarget    = Src.StartPinTarget;
 		Step.StretchCompliance = Config.StretchCompliance;
 		Step.BendCompliance    = Config.BendCompliance;
+		Step.BendReleaseRatio  = Config.BendReleaseRatio;
+		Step.BendFullRatio     = Config.BendFullRatio;
 		Step.Damping           = Config.Damping;
 		Step.Iterations        = Config.Iterations;
 		Step.Gravity           = Config.Gravity;
@@ -207,6 +209,8 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 		Step.StartPinTarget    = Sim.StartPinTarget;
 		Step.StretchCompliance = Config.StretchCompliance;
 		Step.BendCompliance    = Config.BendCompliance;
+		Step.BendReleaseRatio  = Config.BendReleaseRatio;
+		Step.BendFullRatio     = Config.BendFullRatio;
 		Step.Damping           = Config.Damping;
 		Step.Iterations        = Config.Iterations;
 		Step.Gravity           = Config.Gravity;
@@ -1044,6 +1048,8 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 		Step.SegmentLength     = Src.SegmentLength;
 		Step.StretchCompliance = Config.StretchCompliance;
 		Step.BendCompliance    = Config.BendCompliance;
+		Step.BendReleaseRatio  = Config.BendReleaseRatio;
+		Step.BendFullRatio     = Config.BendFullRatio;
 		Step.Damping           = Config.Damping;
 		Step.Iterations        = Config.Iterations;
 		Step.Gravity           = Config.Gravity;
@@ -1186,6 +1192,8 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		Step.SegmentLength     = Src.SegmentLength;
 		Step.StretchCompliance = Config.StretchCompliance;
 		Step.BendCompliance    = Config.BendCompliance;
+		Step.BendReleaseRatio  = Config.BendReleaseRatio;
+		Step.BendFullRatio     = Config.BendFullRatio;
 		Step.Damping           = Config.Damping;
 		Step.Iterations        = Config.Iterations;
 		Step.Gravity           = Config.Gravity;

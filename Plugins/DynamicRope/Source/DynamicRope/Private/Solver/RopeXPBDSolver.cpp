@@ -217,6 +217,11 @@ void FRopeXPBDSolver::SolveBending(FRopeSimState& State, const FRopeSolverConfig
 	}
 	const float AlphaTilde = (SubDt > KINDA_SMALL_NUMBER) ? (Config.BendCompliance / (SubDt * SubDt)) : 0.0f;
 	const float Rest = 2.0f * State.SegmentLength;
+	// 각도-허용 벤딩(GPU RopeXPBD.usf와 동일): 급한 굽힘(코너/랩 경계)은 펴는 힘을 놔줘 노드가 각지게
+	// 튀는 것을 막고, 완만한 굽힘만 곧게 편다. r=Dist/Rest=cos(턴각/2)로 판정. Full은 Release보다 커야
+	// smoothstep이 성립하므로 하한을 강제한다(두 값이 같거나 뒤집혀도 안전).
+	const float BendRelease = Config.BendReleaseRatio;
+	const float BendFull = FMath::Max(Config.BendFullRatio, BendRelease + 1e-4f);
 	for (int32 k = 0; k < Count; ++k)
 	{
 		const int32 i = bReverse ? (Count - 1 - k) : k;
@@ -237,7 +242,8 @@ void FRopeXPBDSolver::SolveBending(FRopeSimState& State, const FRopeSolverConfig
 
 		const FVector N = Delta / Dist;
 		const float C = Dist - Rest;
-		const float DLambda = (-C - AlphaTilde * Lambda[i]) / (WSum + AlphaTilde);
+		const float BendScale = FMath::SmoothStep(BendRelease, BendFull, Dist / Rest);
+		const float DLambda = BendScale * (-C - AlphaTilde * Lambda[i]) / (WSum + AlphaTilde);
 		Lambda[i] += DLambda;
 
 		State.Positions[i]     -= N * (WA * DLambda);

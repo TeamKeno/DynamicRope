@@ -63,7 +63,11 @@ struct FRopeGPUParamsGPU
 	int32     bHasOverrides = 0;       // G0: 이 로프에 노드별 override(타깃/질량 주입)가 있는가.
 	int32     NumBoxes = 0;            // 정적 박스(OBB) 수(0이면 박스 충돌 없음). Pad2 슬롯 재사용.
 	int32     NumConvexes = 0;         // 정적 컨벡스(평면 집합) 수(0이면 컨벡스 충돌 없음). Pad3 슬롯 재사용.
-	int32     Pad4 = 0;
+	float     BendReleaseRatio = 0.70f; // 각도-허용 벤딩: straightness ≤ 이 값이면 펴는 힘 0. Pad4 슬롯 재사용.
+	float     BendFullRatio    = 0.92f; // straightness ≥ 이 값이면 펴는 힘 100%.
+	int32     Pad5 = 0;
+	int32     Pad6 = 0;
+	int32     Pad7 = 0;
 	FVector4f Gravity;
 	FVector4f PinPrev;
 	FVector4f PinTarget;
@@ -983,6 +987,8 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	P.SegmentLength     = S.SegmentLength;
 	P.StretchCompliance = S.StretchCompliance;
 	P.BendCompliance    = S.BendCompliance;
+	P.BendReleaseRatio  = S.BendReleaseRatio;
+	P.BendFullRatio     = S.BendFullRatio;
 	P.Damping           = S.Damping;
 	P.bStartPinned      = S.bStartPinned ? 1 : 0;
 	P.CapsuleOffset     = 0;
