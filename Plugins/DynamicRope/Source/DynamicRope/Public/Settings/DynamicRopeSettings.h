@@ -42,12 +42,22 @@ public:
 	TSoftClassPtr<ARopeController> StaticBodyControllerClass;
 
 	/**
-	 * 정적 바디 프로바이더가 프레임당 수집할 콜라이더 상한(GPU solve 커널이 노드×substep마다 콜라이더 전량을
-	 * 루프하므로 밀집 씬 폭주 방지). 프로바이더가 매 프레임 이 값을 직접 읽는 단일 소스 — 중복 방지 가드가
-	 * "월드당 프로바이더 1개"를 강제하므로 컴포넌트별 예산은 불필요하다. 런타임 변경도 즉시 반영된다.
+	 * 정적 바디 프로바이더가 프레임당 추출할 콜라이더 전역 상한 — 밀집 콜리전 지대에서 추출/컬 비용이
+	 * 폭주하는 것을 막는 "안전밸브"다(정상 씬은 여기 닿지 않아야 정상). 실제 로프별 솔브 예산은 아래
+	 * StaticBodyMaxCollidersPerRope가 담당하므로, 이 값은 (예상 최대 로프 수 × per-rope 예산)보다
+	 * 넉넉히 잡아 전역 추출 단계에서 로프가 굶지 않게 한다. 프로바이더가 매 프레임 직접 읽는 단일 소스.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "1", ToolTip = "정적 바디 프로바이더의 프레임당 콜라이더 상한(단일 소스 — 월드당 프로바이더 1개라 전역 관리)."))
-	int32 StaticBodyMaxColliders = 128;
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "1", ToolTip = "정적 바디 프로바이더의 프레임당 전역 추출 상한(밀집 씬 폭주 방지 안전밸브). 로프별 예산은 StaticBodyMaxCollidersPerRope."))
+	int32 StaticBodyMaxColliders = 256;
+
+	/**
+	 * 한 로프가 솔브에 실을 수 있는 정적 월드 콜라이더 상한(로프별). 로프별 컬링 후 이 수를 넘으면 그 로프에서
+	 * 가장 먼 콜라이더부터 버린다 — GPU 커널이 노드×substep마다 콜라이더를 루프하므로 로프별 솔브 비용을
+	 * 직접 바운드한다. 전역 상한(StaticBodyMaxColliders)과 달리 로프마다 독립이라, 멀리 있는 로프의 콜라이더가
+	 * 가까운 로프의 예산을 잡아먹지 않는다(order-independent). 스켈레톤 콜라이더는 이 예산과 무관하게 항상 포함.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "1", ToolTip = "로프 1개가 솔브에 실을 정적 월드 콜라이더 상한(로프별). 초과 시 가장 먼 것부터 드롭. 스켈레톤은 항상 포함."))
+	int32 StaticBodyMaxCollidersPerRope = 32;
 
 	/**
 	 * 정적 바디 프로바이더의 컨벡스 1개당 평면 수 상한. 이 수를 넘는 복잡한 컨벡스는 ElemBox OBB로 폴백한다.

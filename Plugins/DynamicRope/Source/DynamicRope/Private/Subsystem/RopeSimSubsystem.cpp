@@ -304,6 +304,15 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArra
 	const FBox RopeBounds = ComputeRopeQueryBounds(Rope);
 	const bool bCull = RopeBounds.IsValid != 0;
 
+	// 로프별 정적 월드 콜라이더 예산. 전역 추출 상한(StaticBodyMaxColliders)과 별개로, 이 로프가 솔브에
+	// 실을 정적 월드 콜라이더 수를 로프마다 독립으로 제한한다(멀리 있는 로프가 이 로프 예산을 못 먹음).
+	// 스켈레톤 콜라이더(캡슐/SDF)는 본 수로 자연 제한되고 wrap의 핵심이라 예산 대상에서 제외 — 바로 OutColliders로.
+	const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
+	const int32 PerRopeBudget = Settings ? FMath::Max(1, Settings->StaticBodyMaxCollidersPerRope) : 32;
+
+	// 정적 월드 후보는 따로 모아 예산 초과 시 "가장 먼 것"부터 버린다(스켈레톤은 위에서 이미 무조건 포함).
+	TArray<IRopeCollider*> WorldStaticCandidates;
+
 	for (const FFrameProviderColliders& FP : FrameProviders)
 	{
 		// 자기 owner provider 제외 — 단 정적 월드 provider는 면제(정적 월드는 "던진 본인의 몸"이 아니므로,
@@ -314,17 +323,55 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArra
 		}
 		if (!bCull || FP.Bounds.Num() != FP.Colliders.Num())
 		{
-			OutColliders.Append(FP.Colliders); // 컬 불가(빈 로프/bounds 캐시 불일치) → 전체 폴백.
+			OutColliders.Append(FP.Colliders); // 컬 불가(빈 로프/bounds 캐시 불일치) → 전체 폴백(예산 우회, 드묾).
 			continue;
 		}
 		for (int32 c = 0; c < FP.Colliders.Num(); ++c)
 		{
 			if (FP.Colliders[c] && FP.Bounds[c].IsValid && FP.Bounds[c].Intersect(RopeBounds))
 			{
-				OutColliders.Add(FP.Colliders[c]);
+				if (FP.bWorldStatic)
+				{
+					WorldStaticCandidates.Add(FP.Colliders[c]); // 예산 적용 대상
+				}
+				else
+				{
+					OutColliders.Add(FP.Colliders[c]); // 스켈레톤 등 — 항상 포함
+				}
 			}
 		}
 	}
+
+	if (WorldStaticCandidates.Num() <= PerRopeBudget)
+	{
+		OutColliders.Append(WorldStaticCandidates);
+		return;
+	}
+
+	// 예산 초과: 이 로프의 실제 노드에 가까운 순으로 상위 PerRopeBudget개만 싣는다(먼 것부터 드롭).
+	// 근접도는 콜라이더 월드 bounds 중심과 로프 노드들의 최소 제곱거리 — 후보당 1회만 계산(정렬 중 재계산 방지).
+	// 이 경로는 예산 초과 프레임에서만 도는 드문 경로.
+	struct FRankedCollider { IRopeCollider* Collider; float DistSq; };
+	TArray<FRankedCollider> Ranked;
+	Ranked.Reserve(WorldStaticCandidates.Num());
+	for (IRopeCollider* Collider : WorldStaticCandidates)
+	{
+		const FVector Center = Collider->GetWorldBounds().GetCenter();
+		float Best = TNumericLimits<float>::Max();
+		for (int32 i = 0; i < Rope.Sim.Num(); ++i)
+		{
+			Best = FMath::Min(Best, static_cast<float>(FVector::DistSquared(Center, Rope.Sim.Positions[i])));
+		}
+		Ranked.Add({ Collider, Best });
+	}
+	Ranked.Sort([](const FRankedCollider& A, const FRankedCollider& B) { return A.DistSq < B.DistSq; });
+	for (int32 i = 0; i < PerRopeBudget; ++i)
+	{
+		OutColliders.Add(Ranked[i].Collider);
+	}
+	UE_LOG(LogRopeCollision, Verbose,
+		TEXT("Rope on %s: %d world-static colliders exceed per-rope budget (%d) — kept nearest, dropped %d."),
+		*GetNameSafe(Rope.GetOwner()), WorldStaticCandidates.Num(), PerRopeBudget, WorldStaticCandidates.Num() - PerRopeBudget);
 }
 
 void URopeSimSubsystem::Tick(float DeltaTime)
