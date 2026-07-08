@@ -278,6 +278,7 @@ private:
 	void UpdateThrowPreview();
 	void ClearThrowPreview();
 	void LogPreviewBuildResult(bool bSucceeded, const FString& Reason);
+	bool ShouldHoldPreparedPreview();
 
 	void OnThrowInput();
 	void OnReleaseInput();
@@ -298,4 +299,7 @@ private:
 
 	// 몽타주를 쓰는 경우 입력 시점의 preview를 고정해 두고, AnimNotify_RopeThrow가 ThrowNow를 부를 때 소비한다.
 	FRopePreparedThrowPreview PendingPreparedThrow;
+
+	// PreviewPathLocked 실행 중(GuidedThrow 포함) 화면에 유지할 확정 path.
+	FRopeWrapPreviewData HeldPreparedPreview;
 };

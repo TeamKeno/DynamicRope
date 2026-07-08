@@ -442,6 +442,7 @@ void URopeWielderComponent::Throw()
 		// 몽타주가 있으면 손을 놓는 AnimNotify까지 시간이 지나므로, 입력 순간 플레이어가 본 preview를 보존한다.
 		// notify 시점에 새로 build하면 손/카메라/타겟 포즈 변화로 결과가 달라질 수 있다.
 		PendingPreparedThrow = LastPreparedPreview;
+		HeldPreparedPreview = LastPreparedPreview.RenderPreview;
 		if (ThrowMontage)
 		{
 			PlayThrowMontage();
@@ -486,11 +487,16 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 				return;
 			}
 
-			ClearThrowPreview();
+			HeldPreparedPreview = Prepared.RenderPreview;
+			if (PreviewComponent && HeldPreparedPreview.IsValid())
+			{
+				PreviewComponent->SetWrapPreviewWorld(HeldPreparedPreview);
+			}
 			PendingPreparedThrow.Reset();
 			LastPreparedPreview.Reset();
 			if (!Rope->ThrowWithPreparedPreview(Prepared))
 			{
+				ClearThrowPreview();
 				UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: Rope rejected prepared preview throw."),
 					*GetNameSafe(GetOwner()));
 			}
@@ -568,6 +574,34 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 	}
 }
 
+bool URopeWielderComponent::ShouldHoldPreparedPreview()
+{
+	if (ThrowMode != ERopeWielderThrowMode::PreviewPathLocked ||
+		!PendingPreparedThrow.IsValid() ||
+		!ThrowMontage)
+	{
+		return false;
+	}
+
+	if (!AttachMesh)
+	{
+		ResolveRefs();
+	}
+
+	const UAnimInstance* Anim = AttachMesh ? AttachMesh->GetAnimInstance() : nullptr;
+	if (Anim && Anim->Montage_IsPlaying(ThrowMontage))
+	{
+		if (PreviewComponent && HeldPreparedPreview.IsValid())
+		{
+			PreviewComponent->SetWrapPreviewWorld(HeldPreparedPreview);
+		}
+		return true;
+	}
+
+	PendingPreparedThrow.Reset();
+	return false;
+}
+
 void URopeWielderComponent::UpdateThrowPreview()
 {
 	if (!bShowThrowPreview)
@@ -589,11 +623,22 @@ void URopeWielderComponent::UpdateThrowPreview()
 		ClearThrowPreview();
 		return;
 	}
+	if (ShouldHoldPreparedPreview())
+	{
+		return;
+	}
 
 	FRopeWrapPreviewData Preview;
 	FString PreviewBuildReason;
 	const FRopeThrowContext ThrowContext = BuildThrowContext(FVector::ZeroVector);
 	const ERopePhase RopePhase = Rope->GetPhase();
+	if (ThrowMode == ERopeWielderThrowMode::PreviewPathLocked &&
+		RopePhase == ERopePhase::GuidedThrow &&
+		HeldPreparedPreview.IsValid())
+	{
+		PreviewComponent->SetWrapPreviewWorld(HeldPreparedPreview);
+		return;
+	}
 	FRopePreparedThrowPreview Prepared;
 	const bool bShouldBuildPrepared = ThrowMode == ERopeWielderThrowMode::PreviewPathLocked &&
 		(RopePhase == ERopePhase::Free || RopePhase == ERopePhase::Releasing);
@@ -629,6 +674,10 @@ void URopeWielderComponent::UpdateThrowPreview()
 	bLastPreviewBlocked = false;
 	LastPreviewHitPoint = FVector::ZeroVector;
 	PreviewComponent->SetWrapPreviewWorld(Preview);
+	if (bShouldBuildPrepared)
+	{
+		HeldPreparedPreview = Preview;
+	}
 }
 
 void URopeWielderComponent::ClearThrowPreview()
@@ -636,6 +685,7 @@ void URopeWielderComponent::ClearThrowPreview()
 	bLastPreviewBlocked = false;
 	LastPreviewHitPoint = FVector::ZeroVector;
 	LastPreparedPreview.Reset();
+	HeldPreparedPreview = FRopeWrapPreviewData();
 	PreviewUpdateCooldown = 0.0f;
 	if (PreviewComponent)
 	{
