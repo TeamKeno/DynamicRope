@@ -897,7 +897,8 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 	Nodes.Add(FVector3f(30, 5, -3));
 	Nodes.Add(FVector3f(40, 0, 6));
 
-	// CPU 스무딩(FRopeSceneProxy::BuildSmoothedCenterline 미러).
+	// CPU 스무딩(FRopeSceneProxy::BuildSmoothedCenterline / GPU RopeCatmullSmooth 미러). α=centripetal.
+	const float SmoothParam = 0.5f;
 	TArray<FVector3f> Smoothed;
 	Smoothed.SetNum(NumRings);
 	{
@@ -911,9 +912,15 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 			const FVector3f P1 = Nodes[Seg];
 			const FVector3f P2 = Nodes[Seg + 1];
 			const FVector3f P3 = Nodes[FMath::Min(Seg + 2, LastNode)];
-			const float T2 = T * T, T3 = T2 * T;
-			Smoothed[r] = (P1 * 2.0f + (P2 - P0) * T + (P0 * 2.0f - P1 * 5.0f + P2 * 4.0f - P3) * T2
-				+ (P1 * 3.0f - P0 - P2 * 3.0f + P3) * T3) * 0.5f;
+			const float EPS = 1e-4f;
+			const float t01 = FMath::Pow(FMath::Max((P1 - P0).Size(), EPS), SmoothParam);
+			const float t12 = FMath::Pow(FMath::Max((P2 - P1).Size(), EPS), SmoothParam);
+			const float t23 = FMath::Pow(FMath::Max((P3 - P2).Size(), EPS), SmoothParam);
+			const FVector3f M1 = (P2 - P1) + t12 * ((P1 - P0) / t01 - (P2 - P0) / (t01 + t12));
+			const FVector3f M2 = (P2 - P1) + t12 * ((P3 - P2) / t23 - (P3 - P1) / (t12 + t23));
+			const FVector3f A =  2.0f * (P1 - P2) + M1 + M2;
+			const FVector3f B = -3.0f * (P1 - P2) - 2.0f * M1 - M2;
+			Smoothed[r] = ((A * T + B) * T + M1) * T + P1;
 		}
 	}
 
@@ -974,7 +981,7 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 
 			RopeGPU::BuildTube_RenderThread(RHICmdList, InSRV, PUAVa, TUAVa, UUAVa, NumRings, NumSides, Radius);
 			RopeGPU::BuildTubeFromResident_RenderThread(RHICmdList, ResSRV, PUAVb, TUAVb, UUAVb,
-				NumRings, NumSides, Radius, NumNodes, Subdiv, FMatrix44f::Identity);
+				NumRings, NumSides, Radius, NumNodes, Subdiv, SmoothParam, FMatrix44f::Identity);
 			RHICmdList.BlockUntilGPUIdle();
 
 			auto Read = [&](FBufferRHIRef Buf, uint32 Bytes, void* Dst)

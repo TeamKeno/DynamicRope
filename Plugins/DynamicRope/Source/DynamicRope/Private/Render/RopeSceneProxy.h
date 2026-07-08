@@ -162,5 +162,6 @@ private:
 	int32 NumRings;  // 렌더 링(스무딩된 센터라인) 수 = (NumNodes-1)*Subdiv+1. vertex/index 토폴로지 기준.
 	int32 NumSides;
 	float Radius;
+	float SmoothParam; // Catmull-Rom knot α(0=uniform, 0.5=centripetal). r.DynamicRope.TubeSmoothParam. 생성 시 1회.
 	bool  bHasData = false;
 };

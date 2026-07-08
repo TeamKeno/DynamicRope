@@ -75,6 +75,7 @@ public:
 		SHADER_PARAMETER(float, Radius)
 		SHADER_PARAMETER(uint32, NumSrcNodes)
 		SHADER_PARAMETER(uint32, Subdiv)
+		SHADER_PARAMETER(float, SmoothParam)
 		SHADER_PARAMETER(FMatrix44f, WorldToLocal)
 		SHADER_PARAMETER_SRV(StructuredBuffer<float4>, InCenterline4)
 		SHADER_PARAMETER_UAV(RWBuffer<float>, OutPositions)
@@ -130,7 +131,7 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 	FRHIUnorderedAccessView* OutTangentsUAV,
 	FRHIUnorderedAccessView* OutTexCoordsUAV,
 	int32 NumRings, int32 NumSides, float Radius,
-	int32 NumSrcNodes, int32 Subdiv,
+	int32 NumSrcNodes, int32 Subdiv, float SmoothParam,
 	const FMatrix44f& WorldToLocal)
 {
 	check(IsInRenderingThread());
@@ -151,6 +152,7 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 	Params.Radius        = Radius;
 	Params.NumSrcNodes   = (uint32)NumSrcNodes;
 	Params.Subdiv        = (uint32)FMath::Max(1, Subdiv);
+	Params.SmoothParam   = SmoothParam;
 	Params.WorldToLocal  = WorldToLocal;
 	Params.InCenterline4 = InResidentPositionsSRV;
 	Params.OutPositions  = OutPositionsUAV;

@@ -49,6 +49,6 @@ namespace RopeGPU
 		FRHIUnorderedAccessView* OutTangentsUAV,
 		FRHIUnorderedAccessView* OutTexCoordsUAV,
 		int32 NumRings, int32 NumSides, float Radius,
-		int32 NumSrcNodes, int32 Subdiv,
+		int32 NumSrcNodes, int32 Subdiv, float SmoothParam,
 		const FMatrix44f& WorldToLocal);
 }

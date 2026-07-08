@@ -32,14 +32,26 @@ static TAutoConsoleVariable<int32> CVarRopeWriteVelocity(
 	TEXT("DynamicRope: 0=velocity 미출력(모션블러 잔상 제거, 기본), 1=velocity 출력(레거시, 빠른 이동 시 모션블러)."),
 	ECVF_RenderThreadSafe);
 
-// 렌더 튜브 스무딩: 세그먼트당 Catmull-Rom 서브분할 수(1=off=노드당 링 1개, 기본 3). 시뮬 노드는 그대로 두고
-// 렌더 센터라인만 이웃 노드로 곡률을 추정해 매끄럽게 편다(물리와 분리 → 리스크 0). 링 수/토폴로지가 바뀌므로
-// proxy 생성 시 1회 읽는다 → 런타임 토글은 렌더 상태 재생성(재PIE/가시성 토글) 후 반영. Subdiv>1이면 GPU
-// resident 튜브(노드 직독)는 링수 불일치로 자동 비활성 → 스무딩된 CPU 센터라인 업로드 경로로 폴백한다.
+// 렌더 튜브 스무딩: 세그먼트당 Catmull-Rom 서브분할 수(1=off=노드당 링 1개, 기본 1=끔). 시뮬 노드는 그대로
+// 두고 렌더 센터라인만 이웃 노드로 곡률을 추정해 매끄럽게 편다(물리와 분리 → 리스크 0). 기본 1인 이유: 보간
+// 링은 노드 폴리라인 바깥으로 부풀 수 있어(특히 벽을 짚는 구간) 노드가 촘촘하면 직선 연결이 더 정확하다.
+// 성긴 로프를 둥글게 보이려면 올리고, 이때 오버슈트는 r.DynamicRope.TubeSmoothParam(centripetal)로 줄인다.
+// 링 수/토폴로지가 바뀌므로 proxy 생성 시 1회 읽는다 → 런타임 토글은 렌더 상태 재생성(재PIE/가시성 토글) 후
+// 반영. resident 튜브(노드 직독)는 GPU에서 직접 스무딩하므로 Subdiv>1이어도 유지되고, 비-resident 프레임만
+// CPU 스무딩 후 업로드한다.
 static TAutoConsoleVariable<int32> CVarRopeTubeSmoothing(
 	TEXT("r.DynamicRope.TubeSmoothing"),
-	3,
-	TEXT("DynamicRope: 렌더 튜브 Catmull-Rom 서브분할(세그먼트당). 1=off. 물리 무관(렌더 전용)."),
+	1,
+	TEXT("DynamicRope: 렌더 튜브 Catmull-Rom 서브분할(세그먼트당). 1=off(기본). 물리 무관(렌더 전용)."),
+	ECVF_Default);
+
+// 렌더 튜브 스무딩의 Catmull-Rom knot 매개변수 α. 0=uniform(구 동작), 0.5=centripetal(급한 코너에서 접선
+// 오버슈트↓ → 벽을 짚는 구간의 중간 링이 벽 밖으로 부풀지 않고 더 붙는다), 1=chordal. Subdiv처럼 렌더 전용
+// (물리 무관)이며 proxy 생성 시 1회 읽는다. CPU 스무딩과 GPU resident 스무딩이 같은 값을 써 렌더가 일관.
+static TAutoConsoleVariable<float> CVarRopeTubeSmoothParam(
+	TEXT("r.DynamicRope.TubeSmoothParam"),
+	0.5f,
+	TEXT("DynamicRope: 렌더 튜브 Catmull-Rom knot α(0=uniform, 0.5=centripetal, 1=chordal). 렌더 전용."),
 	ECVF_Default);
 
 void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
@@ -187,6 +199,7 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	, NumRings((NumNodes - 1) * Subdiv + 1) // 스무딩된 렌더 링 수(Subdiv=1이면 NumNodes와 동일).
 	, NumSides(FMath::Max(3, Component->NumSides))
 	, Radius(Component->Radius)
+	, SmoothParam(FMath::Clamp(CVarRopeTubeSmoothParam.GetValueOnGameThread(), 0.0f, 1.0f))
 {
 	VertexBuffers.InitWithDummyData(&VertexFactory, GetRequiredVertexCount());
 	IndexBuffer.NumIndices = GetRequiredIndexCount();
@@ -311,13 +324,17 @@ void FRopeSceneProxy::BuildSmoothedCenterline(const TArray<FVector>& Nodes, TArr
 		const FVector P2 = Nodes[Seg + 1];
 		const FVector P3 = Nodes[FMath::Min(Seg + 2, LastNode)];
 
-		const float T2 = T * T;
-		const float T3 = T2 * T;
-		// 표준 Catmull-Rom(장력 0.5): 0.5*(2P1 + (P2-P0)t + (2P0-5P1+4P2-P3)t^2 + (-P0+3P1-3P2+P3)t^3).
-		Out[r] = (P1 * 2.0
-			+ (P2 - P0) * T
-			+ (P0 * 2.0 - P1 * 5.0 + P2 * 4.0 - P3) * T2
-			+ (P1 * 3.0 - P0 - P2 * 3.0 + P3) * T3) * 0.5;
+		// 매개변수화 Catmull-Rom(GPU RopeCatmullSmooth 미러). α=SmoothParam: 0=uniform(구 표준, 장력 0.5),
+		// 0.5=centripetal(급한 코너 접선 오버슈트↓ → 벽 짚는 중간 링이 벽에 더 붙음). knot=|ΔP|^α(하한 EPS).
+		const double EPS = 1e-4;
+		const double t01 = FMath::Pow(FMath::Max((P1 - P0).Size(), EPS), (double)SmoothParam);
+		const double t12 = FMath::Pow(FMath::Max((P2 - P1).Size(), EPS), (double)SmoothParam);
+		const double t23 = FMath::Pow(FMath::Max((P3 - P2).Size(), EPS), (double)SmoothParam);
+		const FVector M1 = (P2 - P1) + t12 * ((P1 - P0) / t01 - (P2 - P0) / (t01 + t12));
+		const FVector M2 = (P2 - P1) + t12 * ((P3 - P2) / t23 - (P3 - P1) / (t12 + t23));
+		const FVector A =  2.0 * (P1 - P2) + M1 + M2;
+		const FVector B = -3.0 * (P1 - P2) - 2.0 * M1 - M2;
+		Out[r] = ((A * T + B) * T + M1) * T + P1;
 	}
 }
 
@@ -538,7 +555,7 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 		// GPU가 시뮬 노드(NumNodes)를 Subdiv로 Catmull-Rom 스무딩해 NumRings 센터라인 → 튜브 생성.
 		RopeGPU::BuildTubeFromResident_RenderThread(RHICmdList, ResidentSRV,
 			GpuPositionBuffer.UAV, GpuTangentBuffer.UAV, GpuTexCoordBuffer.UAV,
-			NumRings, NumSides, Radius, NumNodes, Subdiv, Data.WorldToLocal);
+			NumRings, NumSides, Radius, NumNodes, Subdiv, SmoothParam, Data.WorldToLocal);
 	}
 	else
 	{
