@@ -443,6 +443,7 @@ void URopeWielderComponent::Throw()
 		// notify 시점에 새로 build하면 손/카메라/타겟 포즈 변화로 결과가 달라질 수 있다.
 		PendingPreparedThrow = LastPreparedPreview;
 		HeldPreparedPreview = LastPreparedPreview.RenderPreview;
+		HeldPreviewExpireTimeSeconds = 0.0f;
 		if (ThrowMontage)
 		{
 			PlayThrowMontage();
@@ -488,6 +489,7 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 			}
 
 			HeldPreparedPreview = Prepared.RenderPreview;
+			HeldPreviewExpireTimeSeconds = 0.0f;
 			if (PreviewComponent && HeldPreparedPreview.IsValid())
 			{
 				PreviewComponent->SetWrapPreviewWorld(HeldPreparedPreview);
@@ -602,6 +604,76 @@ bool URopeWielderComponent::ShouldHoldPreparedPreview()
 	return false;
 }
 
+bool URopeWielderComponent::ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) const
+{
+	// PreviewPathLocked는 "던지기 전 성공한 preview path"만 새로 만든다.
+	// GuidedThrow/Wrapped에서는 이미 확정된 HeldPreparedPreview를 사용하므로 build를 다시 시도하지 않는다.
+	if (ThrowMode == ERopeWielderThrowMode::PreviewPathLocked)
+	{
+		return Phase == ERopePhase::Free || Phase == ERopePhase::Releasing;
+	}
+
+	// 일반 preview도 idle 전용 설정이면 조준 전 상태에서만 계산한다.
+	if (bPreviewOnlyWhenIdle)
+	{
+		return Phase == ERopePhase::Free || Phase == ERopePhase::Releasing;
+	}
+
+	// idle 전용이 아니면 실제 접촉/감김 진행 중 표시용 preview까지 허용한다.
+	return Phase == ERopePhase::Free ||
+		Phase == ERopePhase::Releasing ||
+		Phase == ERopePhase::Flight ||
+		Phase == ERopePhase::Contacting ||
+		Phase == ERopePhase::Wrapping;
+}
+
+bool URopeWielderComponent::UpdateHeldPreparedPreviewForPhase(ERopePhase Phase)
+{
+	if (ThrowMode != ERopeWielderThrowMode::PreviewPathLocked || !HeldPreparedPreview.IsValid())
+	{
+		return false;
+	}
+
+	if (Phase == ERopePhase::GuidedThrow)
+	{
+		// GuidedThrow는 cached preview path를 authoritative하게 따라가는 상태다.
+		// 새 path를 build하지 않고, 플레이어가 보고 확정한 path를 그대로 렌더 유지한다.
+		if (PreviewComponent)
+		{
+			PreviewComponent->SetWrapPreviewWorld(HeldPreparedPreview);
+		}
+		LastPreviewPhase = Phase;
+		return true;
+	}
+
+	if (Phase == ERopePhase::Wrapped)
+	{
+		// Wrapped 진입 후에도 옵션 시간만큼 path를 남길 수 있다.
+		// 기본값 0초에서는 여기서 바로 ClearThrowPreview()로 떨어진다.
+		const float NowSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+		if (LastPreviewPhase != ERopePhase::Wrapped)
+		{
+			HeldPreviewExpireTimeSeconds = NowSeconds + FMath::Max(0.0f, LockedWrappedPreviewHoldTime);
+		}
+
+		if (LockedWrappedPreviewHoldTime > KINDA_SMALL_NUMBER && NowSeconds < HeldPreviewExpireTimeSeconds)
+		{
+			if (PreviewComponent)
+			{
+				PreviewComponent->SetWrapPreviewWorld(HeldPreparedPreview);
+			}
+			LastPreviewPhase = Phase;
+			return true;
+		}
+
+		ClearThrowPreview();
+		LastPreviewPhase = Phase;
+		return true;
+	}
+
+	return false;
+}
+
 void URopeWielderComponent::UpdateThrowPreview()
 {
 	if (!bShowThrowPreview)
@@ -630,15 +702,20 @@ void URopeWielderComponent::UpdateThrowPreview()
 
 	FRopeWrapPreviewData Preview;
 	FString PreviewBuildReason;
-	const FRopeThrowContext ThrowContext = BuildThrowContext(FVector::ZeroVector);
 	const ERopePhase RopePhase = Rope->GetPhase();
-	if (ThrowMode == ERopeWielderThrowMode::PreviewPathLocked &&
-		RopePhase == ERopePhase::GuidedThrow &&
-		HeldPreparedPreview.IsValid())
+	if (UpdateHeldPreparedPreviewForPhase(RopePhase))
 	{
-		PreviewComponent->SetWrapPreviewWorld(HeldPreparedPreview);
 		return;
 	}
+	if (!ShouldUpdateThrowPreviewForPhase(RopePhase))
+	{
+		// 이 phase에서는 preview build 자체가 의미 없으므로 실패 로그를 만들지 않고 조용히 정리한다.
+		ClearThrowPreview();
+		LastPreviewPhase = RopePhase;
+		return;
+	}
+
+	const FRopeThrowContext ThrowContext = BuildThrowContext(FVector::ZeroVector);
 	FRopePreparedThrowPreview Prepared;
 	const bool bShouldBuildPrepared = ThrowMode == ERopeWielderThrowMode::PreviewPathLocked &&
 		(RopePhase == ERopePhase::Free || RopePhase == ERopePhase::Releasing);
@@ -657,6 +734,7 @@ void URopeWielderComponent::UpdateThrowPreview()
 		LogPreviewBuildResult(false, PreviewBuildReason.IsEmpty()
 			? TEXT("preview build failed without a specific reason") : PreviewBuildReason);
 		ClearThrowPreview();
+		LastPreviewPhase = RopePhase;
 		return;
 	}
 	if (bShouldBuildPrepared)
@@ -677,7 +755,9 @@ void URopeWielderComponent::UpdateThrowPreview()
 	if (bShouldBuildPrepared)
 	{
 		HeldPreparedPreview = Preview;
+		HeldPreviewExpireTimeSeconds = 0.0f;
 	}
+	LastPreviewPhase = RopePhase;
 }
 
 void URopeWielderComponent::ClearThrowPreview()
@@ -686,6 +766,7 @@ void URopeWielderComponent::ClearThrowPreview()
 	LastPreviewHitPoint = FVector::ZeroVector;
 	LastPreparedPreview.Reset();
 	HeldPreparedPreview = FRopeWrapPreviewData();
+	HeldPreviewExpireTimeSeconds = 0.0f;
 	PreviewUpdateCooldown = 0.0f;
 	if (PreviewComponent)
 	{

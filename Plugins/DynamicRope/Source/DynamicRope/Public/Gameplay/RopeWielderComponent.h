@@ -129,6 +129,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Preview Update Interval"))
 	float PreviewUpdateInterval = 0.1f;
 
+	/** PreviewPathLocked가 Wrapped로 확정된 뒤에도 preview path를 잠깐 남길 시간. 0이면 Wrapped 진입 시 즉시 지운다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Locked Wrapped Preview Hold Time"))
+	float LockedWrappedPreviewHoldTime = 0.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Debug")
 	bool bLogPreviewBuildAttempts = false;
 
@@ -279,6 +283,10 @@ private:
 	void ClearThrowPreview();
 	void LogPreviewBuildResult(bool bSucceeded, const FString& Reason);
 	bool ShouldHoldPreparedPreview();
+	// 현재 Rope phase에서 새 preview path를 계산해도 되는지 판단한다. false면 비싼 build 경로에 들어가지 않는다.
+	bool ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) const;
+	// PreviewPathLocked가 이미 확정한 path를 GuidedThrow/Wrapped 동안 렌더 유지한다. 처리했으면 true를 반환한다.
+	bool UpdateHeldPreparedPreviewForPhase(ERopePhase Phase);
 
 	void OnThrowInput();
 	void OnReleaseInput();
@@ -302,4 +310,8 @@ private:
 
 	// PreviewPathLocked 실행 중(GuidedThrow 포함) 화면에 유지할 확정 path.
 	FRopeWrapPreviewData HeldPreparedPreview;
+	// Wrapped 후 preview path를 잠깐 남길 때 사용하는 만료 시각. LockedWrappedPreviewHoldTime이 0이면 즉시 만료된다.
+	float HeldPreviewExpireTimeSeconds = 0.0f;
+	// Wrapped 진입 순간을 감지하기 위한 마지막 preview 처리 phase.
+	ERopePhase LastPreviewPhase = ERopePhase::Free;
 };
