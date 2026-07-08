@@ -505,6 +505,23 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 					break;
 				}
 			}
+
+			// 노드별 접촉 진단: 각 접촉 노드에서 바깥 법선 화살표(= 어느 면인지) + 면 라벨(n<idx> ±축/edge).
+			// 정적 월드=마젠타, 스켈레탈 본=주황. "붙는 노드가 어느 면에 어느 법선으로 닿았나"를 스크린샷으로 확정.
+			for (const FRopeNodeContactDebug& NC : S.NodeContacts)
+			{
+				const FColor NColor = NC.bWorldStatic ? FColor(255, 0, 255) : FColor(255, 128, 0);
+				const FVector Tip = NC.Position + NC.Normal * 15.0f;
+				DrawDebugDirectionalArrow(World, NC.Position, Tip, 6.0f, NColor, false, -1.0f, FG, 2.0f);
+				const FVector AN = NC.Normal.GetAbs();
+				FString Face;
+				if (AN.X > 0.9) { Face = NC.Normal.X > 0.0 ? TEXT("+X") : TEXT("-X"); }
+				else if (AN.Y > 0.9) { Face = NC.Normal.Y > 0.0 ? TEXT("+Y") : TEXT("-Y"); }
+				else if (AN.Z > 0.9) { Face = NC.Normal.Z > 0.0 ? TEXT("+Z") : TEXT("-Z"); }
+				else { Face = TEXT("edge"); } // 대각 법선 = 볼록 모서리 접촉.
+				// 라벨은 n<idx> <면>만(간결). 본 이름은 색(주황=스켈레탈)으로 갈음 — 정보량 과다 방지.
+				DrawDebugString(World, Tip, FString::Printf(TEXT("n%d %s"), NC.NodeIndex, *Face), nullptr, NColor, 0.0f, true, 1.0f);
+			}
 		}
 	}
 }

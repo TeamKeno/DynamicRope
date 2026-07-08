@@ -1402,6 +1402,42 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		}
 		Snapshot.Colliders.Add(MoveTemp(DC));
 	}
+
+	// 노드별 접촉 재질의(디버그 전용): post-solve 노드 위치를 FrameColliders에 다시 질의해 각 노드가 어느 면에
+	// 닿았는지(법선)를 기록한다. GPU 런타임은 접촉을 리드백하지 않으므로 여기서 CPU로 다시 질의한다. 질의 반경
+	// = CollisionRadius + 여유라 정착(표면에서 ~반경 떨어져 쉬는) 노드도 잡힌다. 노드당 가장 깊은 접촉 1개만.
+	Snapshot.NodeContacts.Reset();
+	const float DebugQueryRadius = SolverConfig.CollisionRadius + 4.0f;
+	for (int32 i = 0; i < Sim.Positions.Num(); ++i)
+	{
+		const FVector NodePos = Sim.Positions[i];
+		FRopeContact Best;
+		bool bAny = false;
+		for (const IRopeCollider* Collider : FrameColliders)
+		{
+			if (!Collider)
+			{
+				continue;
+			}
+			const FRopeContact C = Collider->Query(NodePos, DebugQueryRadius);
+			if (C.bHit && (!bAny || C.Penetration > Best.Penetration))
+			{
+				Best = C;
+				bAny = true;
+			}
+		}
+		if (bAny)
+		{
+			FRopeNodeContactDebug NC;
+			NC.NodeIndex = i;
+			NC.Position = NodePos;
+			NC.Normal = Best.Normal;
+			NC.Penetration = Best.Penetration;
+			NC.Bone = Best.Bone;
+			NC.bWorldStatic = Best.Bone.IsNone(); // 정적 월드(박스/컨벡스)는 Bone=None, 스켈레탈은 본 이름 있음.
+			Snapshot.NodeContacts.Add(MoveTemp(NC));
+		}
+	}
 }
 #endif
 

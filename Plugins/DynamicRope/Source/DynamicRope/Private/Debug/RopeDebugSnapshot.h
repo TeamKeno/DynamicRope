@@ -30,6 +30,19 @@ enum class ERopeDebugColliderShape : uint8
 	Bounds,  // 월드 AABB 폴백(SDF 등 형상 미상)
 };
 
+// 노드별 접촉 진단: post-solve 노드 위치를 collider에 다시 질의해 "지금 이 노드가 어느 면에, 어느 법선으로
+// 닿았나"를 데이터로 남긴다(GPU 런타임은 접촉을 리드백하지 않으므로 디버그 전용 CPU 질의). 노드가 벽/면에
+// 붙는 증상을 눈으로 확정하기 위한 것 — 화살표(법선) + 텍스트(면 축/collider 종류)로 그린다.
+struct FRopeNodeContactDebug
+{
+	int32   NodeIndex = INDEX_NONE;
+	FVector Position = FVector::ZeroVector;   // 노드 월드 위치(화살표 시작)
+	FVector Normal = FVector::ZeroVector;      // 접촉 바깥 법선(단위) — 어느 면인지 = 이 방향
+	float   Penetration = 0.0f;                // 질의 반경 대비 침투(>0=밴드 안). 붙음 정도.
+	bool    bWorldStatic = false;              // 정적 월드(박스/컨벡스 등) vs 스켈레탈 — 색 구분.
+	FName   Bone = NAME_None;                  // 스켈레탈이면 본 이름(없으면 None=정적).
+};
+
 // collider 시각화 한 개. Shape에 따라 해당 필드만 유효하다.
 struct FRopeDebugCollider
 {
@@ -103,4 +116,7 @@ struct FRopeDebugSnapshot
 
 	//~ colliders(이 로프가 이번 프레임 질의한 collider들) ----------------
 	TArray<FRopeDebugCollider> Colliders;
+
+	//~ 노드별 접촉(디버그 CPU 재질의) — 붙는 노드 진단 -------------------
+	TArray<FRopeNodeContactDebug> NodeContacts;
 };
