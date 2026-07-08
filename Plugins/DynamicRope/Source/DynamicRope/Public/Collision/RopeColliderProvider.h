@@ -23,10 +23,14 @@ class IRopeColliderProvider
 
 public:
 	/**
-	 * RopeBounds와 겹치는 collider를 추가한다(broad phase는 여기서 수행). 가리키는 collider들은
-	 * 해당 프레임 solve가 끝날 때까지 유효 상태를 유지해야 한다.
+	 * 각 로프의 활성 영역(RopeRegions — 로프별 tight AABB + 마진)과 겹치는 collider를 추가한다(broad phase는
+	 * 여기서 수행). 서브시스템이 프레임당 로프별 region 리스트를 넘기므로, bounds-aware provider는 멀리
+	 * 동떨어진 로프 사이의 빈 공간을 스캔에서 배제할 수 있다(전 로프 union AABB의 낭비/예산 경합 회피).
+	 * region을 쓰지 않는 provider(스켈레톤 등)는 인자를 무시하고 전 collider를 빌드해도 된다 — per-rope
+	 * 컬링은 서브시스템의 collider-AABB 브로드페이즈가 담당한다. 가리키는 collider들은 해당 프레임 solve가
+	 * 끝날 때까지 유효 상태를 유지해야 한다.
 	 */
-	virtual void GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders) = 0;
+	virtual void GatherColliders(TArrayView<const FBox> RopeRegions, TArray<IRopeCollider*>& OutColliders) = 0;
 
 	/**
 	 * 이 provider가 정적 월드 지오메트리 collider를 공급하는지(예: URopeStaticBodyProvider). true면

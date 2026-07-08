@@ -45,7 +45,7 @@ USkeletalMeshComponent* URopeBoneCapsuleProvider::ResolveMesh()
 	return SkeletalMesh;
 }
 
-void URopeBoneCapsuleProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeCollider*>& OutColliders)
+void URopeBoneCapsuleProvider::GatherColliders(TArrayView<const FBox> /*RopeRegions*/, TArray<IRopeCollider*>& OutColliders)
 {
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh)

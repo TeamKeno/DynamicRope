@@ -59,7 +59,7 @@ TArray<FName> URopeSDFProvider::GetBakedBoneNames() const
 	return Names;
 }
 
-void URopeSDFProvider::GatherColliders(const FBox& /*RopeBounds*/, TArray<IRopeCollider*>& OutColliders)
+void URopeSDFProvider::GatherColliders(TArrayView<const FBox> /*RopeRegions*/, TArray<IRopeCollider*>& OutColliders)
 {
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh || !SDFData)

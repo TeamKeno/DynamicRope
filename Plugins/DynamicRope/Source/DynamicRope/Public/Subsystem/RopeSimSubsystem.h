@@ -116,10 +116,13 @@ private:
 	};
 	TArray<FFrameProviderColliders> FrameProviders;
 
-	// 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). RopeBounds는 전 로프 bounds 합집합을 넘긴다.
+	// 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). provider에는 로프별 region 리스트를 넘긴다.
 	void BuildFrameColliders();
 	// 한 로프의 collider를 중앙 빌드에서 모은다: 기본은 전체, 자기 owner provider만 제외(bIncludeOwnerColliders로 옵트인).
 	void GatherCollidersForRope(const URopeComponent& Rope, TArray<IRopeCollider*>& OutColliders) const;
+	// 한 로프의 broad-phase 질의 bounds(Pos∪Prev tight AABB + 접촉/예측 마진). provider에 넘기는 region과
+	// per-rope collider 컬링이 동일 박스를 쓰도록 한 곳에서 계산한다(무효면 !IsValid 박스 반환).
+	static FBox ComputeRopeQueryBounds(const URopeComponent& Rope);
 
 	// GPU 상주 솔버(M5). 영속 버퍼(로프별)를 매 프레임 in-place 전진. 인스턴스 상태라 월드별 1개.
 	// G4: 렌더 가능 RHI면 이게 유일 런타임 경로. RHI 없으면(쿡/-nullrhi/서버) CPU 솔버로 자동 폴백.

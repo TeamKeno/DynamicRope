@@ -210,28 +210,52 @@ void URopeSimSubsystem::SetAnimPrerequisites(const UActorComponent* Source, bool
 	}
 }
 
+FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope)
+{
+	// 로프 tight AABB(Pos∪Prev — 프레임 모션 포함) + 마진. provider region과 per-rope collider 컬링이
+	// 이 동일 박스를 공유한다(GatherCollidersForRope / BuildFrameColliders 양쪽에서 호출).
+	FBox RopeBounds(ForceInit);
+	float MaxFrameDispSq = 0.0f; // 예측 접촉(전방 외삽) 여유 계산용 — 이번 프레임 최대 노드 변위.
+	for (int32 i = 0; i < Rope.Sim.Num(); ++i)
+	{
+		RopeBounds += Rope.Sim.Positions[i];
+		RopeBounds += Rope.Sim.PrevPositions[i];
+		MaxFrameDispSq = FMath::Max(MaxFrameDispSq,
+			static_cast<float>(FVector::DistSquared(Rope.Sim.Positions[i], Rope.Sim.PrevPositions[i])));
+	}
+	if (RopeBounds.IsValid)
+	{
+		// 여유: 접촉 질의 반경 + 스윕 여유 + 예측 접촉의 전방 외삽 거리(프레임 변위 × 예측 프레임).
+		// 넉넉히 잡는다 — 과대 컬링 여유는 안전(콜라이더가 몇 개 더 실릴 뿐).
+		const float Margin = Rope.SolverConfig.CollisionRadius + Rope.WrapConfig.ContactRadius
+			+ FMath::Max(2.0f * Rope.Sim.SegmentLength, 50.0f)
+			+ FMath::Sqrt(MaxFrameDispSq) * FMath::Max(Rope.WrapConfig.PredictiveContactFrames, 1.0f);
+		RopeBounds = RopeBounds.ExpandBy(Margin);
+	}
+	return RopeBounds;
+}
+
 void URopeSimSubsystem::BuildFrameColliders()
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_BuildColliders);
 	FrameProviders.Reset();
 
-	// 전 로프 bounds 합집합(provider broad-phase용). 현 provider들은 무시하지만 인터페이스 계약 유지 — 향후
-	// bounds-aware provider는 활성 영역으로 컬할 수 있다. 솔버가 다시 per-rope로 좁힌다.
-	FBox AllBounds(ForceInit);
+	// 로프별 활성 영역(region) 리스트. provider의 broad-phase에 넘긴다 — bounds-aware provider(정적 바디)는
+	// 멀리 동떨어진 로프 사이 빈 공간을 스캔에서 배제해 예산/오버랩 낭비를 피한다. 전 로프 union AABB 폐기.
+	// 여기서 쓰는 region은 아래 per-rope 컬링(GatherCollidersForRope)과 동일한 박스라 gather↔cull이 정합.
+	TArray<FBox> RopeRegions;
+	RopeRegions.Reserve(Ropes.Num());
 	for (URopeComponent* Rope : Ropes)
 	{
 		if (!IsValid(Rope))
 		{
 			continue;
 		}
-		for (const FVector& P : Rope->Sim.Positions)
+		const FBox Region = ComputeRopeQueryBounds(*Rope);
+		if (Region.IsValid)
 		{
-			AllBounds += P;
+			RopeRegions.Add(Region);
 		}
-	}
-	if (AllBounds.IsValid)
-	{
-		AllBounds = AllBounds.ExpandBy(50.0f); // contact reach 여유.
 	}
 
 	// 등록된 provider마다 1회 gather(프레임당 1회 — 로프 수와 무관). 죽은 provider는 정리.
@@ -251,7 +275,7 @@ void URopeSimSubsystem::BuildFrameColliders()
 		FFrameProviderColliders FP;
 		FP.Owner = Comp->GetOwner();
 		FP.bWorldStatic = Provider->ProvidesWorldStaticColliders(); // 정적 월드 provider는 소유자 제외 면제.
-		Provider->GatherColliders(AllBounds, FP.Colliders);
+		Provider->GatherColliders(RopeRegions, FP.Colliders);
 		if (FP.Colliders.Num() > 0)
 		{
 			// collider별 월드 bounds를 프레임당 1회 캐시 — 아래 로프별 컬링이 로프 수만큼 재계산하지 않게.
@@ -276,25 +300,9 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArra
 	// 거리 컬링: 로프 AABB(Pos∪Prev — 프레임 모션 포함)와 안 겹치는 collider는 아예 안 싣는다.
 	// CPU 솔버는 자체 broad-phase가 또 있지만, GPU 커널은 콜라이더 전량을 노드마다 루프하므로
 	// 여기서 거르는 것이 스케일링의 핵심이다(멀리 있는 캐릭터들의 캡슐/SDF가 스텝에 안 실림).
-	FBox RopeBounds(ForceInit);
-	float MaxFrameDispSq = 0.0f; // 예측 접촉(전방 외삽) 여유 계산용 — 이번 프레임 최대 노드 변위.
-	for (int32 i = 0; i < Rope.Sim.Num(); ++i)
-	{
-		RopeBounds += Rope.Sim.Positions[i];
-		RopeBounds += Rope.Sim.PrevPositions[i];
-		MaxFrameDispSq = FMath::Max(MaxFrameDispSq,
-			static_cast<float>(FVector::DistSquared(Rope.Sim.Positions[i], Rope.Sim.PrevPositions[i])));
-	}
+	// BuildFrameColliders가 provider region으로 넘긴 것과 동일 박스(단일 소스).
+	const FBox RopeBounds = ComputeRopeQueryBounds(Rope);
 	const bool bCull = RopeBounds.IsValid != 0;
-	if (bCull)
-	{
-		// 여유: 접촉 질의 반경 + 스윕 여유 + 예측 접촉의 전방 외삽 거리(프레임 변위 × 예측 프레임).
-		// 넉넉히 잡는다 — 과대 컬링 여유는 안전(콜라이더가 몇 개 더 실릴 뿐).
-		const float Margin = Rope.SolverConfig.CollisionRadius + Rope.WrapConfig.ContactRadius
-			+ FMath::Max(2.0f * Rope.Sim.SegmentLength, 50.0f)
-			+ FMath::Sqrt(MaxFrameDispSq) * FMath::Max(Rope.WrapConfig.PredictiveContactFrames, 1.0f);
-		RopeBounds = RopeBounds.ExpandBy(Margin);
-	}
 
 	for (const FFrameProviderColliders& FP : FrameProviders)
 	{

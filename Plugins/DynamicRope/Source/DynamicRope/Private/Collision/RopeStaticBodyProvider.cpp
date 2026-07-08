@@ -85,11 +85,11 @@ void URopeStaticBodyProvider::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-void URopeStaticBodyProvider::GatherColliders(const FBox& RopeBounds, TArray<IRopeCollider*>& OutColliders)
+void URopeStaticBodyProvider::GatherColliders(TArrayView<const FBox> RopeRegions, TArray<IRopeCollider*>& OutColliders)
 {
-	// 프레임당 1회만 빌드(디둡). RopeBounds는 서브시스템이 전 로프 union AABB(+여유)로 프레임 내내
-	// 동일하게 넘기므로, 첫 호출의 오버랩 결과를 그 프레임의 모든 로프가 공유한다(per-rope 컬링은
-	// 서브시스템의 collider AABB 컬링이 담당).
+	// 프레임당 1회만 빌드(디둡). RopeRegions는 서브시스템이 로프별 region 리스트로 프레임 내내 동일하게
+	// 넘기므로, 첫 호출의 오버랩 결과를 그 프레임의 모든 로프가 공유한다(per-rope 컬링은 서브시스템의
+	// collider AABB 컬링이 담당).
 	const uint64 Frame = GFrameCounter;
 	if (BuiltFrame != Frame)
 	{
@@ -97,7 +97,7 @@ void URopeStaticBodyProvider::GatherColliders(const FBox& RopeBounds, TArray<IRo
 		Boxes.Reset();
 		Capsules.Reset();
 		Convexes.Reset();
-		BuildColliders(RopeBounds);
+		BuildColliders(RopeRegions);
 	}
 
 	OutColliders.Reserve(OutColliders.Num() + Boxes.Num() + Capsules.Num() + Convexes.Num());
@@ -115,12 +115,12 @@ void URopeStaticBodyProvider::GatherColliders(const FBox& RopeBounds, TArray<IRo
 	}
 }
 
-void URopeStaticBodyProvider::BuildColliders(const FBox& RopeBounds)
+void URopeStaticBodyProvider::BuildColliders(TArrayView<const FBox> RopeRegions)
 {
 	UWorld* World = GetWorld();
-	if (!World || !RopeBounds.IsValid)
+	if (!World || RopeRegions.Num() == 0)
 	{
-		return; // 활성 로프가 없으면(무효 bounds) 스캔할 이유가 없다.
+		return; // 활성 로프가 없으면(빈 region 리스트) 스캔할 이유가 없다.
 	}
 
 	// 콜라이더 예산/컨벡스 평면 상한/동적 포함 여부는 Project Settings에서 단일 관리.
@@ -129,72 +129,99 @@ void URopeStaticBodyProvider::BuildColliders(const FBox& RopeBounds)
 	const int32 MaxConvexPlanes = Settings ? FMath::Max(4, Settings->StaticBodyMaxConvexPlanes) : 32;
 	const bool  bIncludeDynamic = Settings ? Settings->bIncludeWorldDynamic : false;
 
-	// 브로드페이즈: 로프 활성 영역과 겹치는 오브젝트를 GT에서 1회 오버랩. 기본 WorldStatic, 옵션으로 WorldDynamic
-	// (움직이는 플랫폼/문 등)도 포함. 움직이는 바디는 아래에서 이전 프레임 트랜스폼으로 표면 속도를 산출한다.
-	TArray<FOverlapResult> Overlaps;
 	FCollisionObjectQueryParams ObjParams(ECC_WorldStatic);
 	if (bIncludeDynamic)
 	{
 		ObjParams.AddObjectTypesToQuery(ECC_WorldDynamic);
 	}
-	FCollisionQueryParams QueryParams(FName(TEXT("RopeStaticBodyGather")), /*bInTraceComplex*/ false);
-	World->OverlapMultiByObjectType(Overlaps, RopeBounds.GetCenter(), FQuat::Identity, ObjParams,
-		FCollisionShape::MakeBox(RopeBounds.GetExtent()), QueryParams);
+	const FCollisionQueryParams QueryParams(FName(TEXT("RopeStaticBodyGather")), /*bInTraceComplex*/ false);
 
 	// 표면 속도(드래그/CCD)용 프레임 dt. 이번 프레임 처리한 컴포넌트의 (curr - prev)/dt 로 산출한다.
 	const float FrameDt = World->GetDeltaSeconds();
 	const float InvDt = (FrameDt > KINDA_SMALL_NUMBER) ? (1.0f / FrameDt) : 0.0f;
 	// 이번 프레임 컴포넌트 트랜스폼(다음 프레임 prev 소스). 처리한 것만 담아 파괴/이탈 항목은 자연히 만료.
+	// 프레임 전역 — 여러 region에 걸쳐 축적하고 루프 종료 후 딱 1회 스왑(표면 속도 continuity 불변식).
 	TMap<TWeakObjectPtr<UPrimitiveComponent>, FTransform> CurrCompXforms;
-	CurrCompXforms.Reserve(Overlaps.Num());
 
-	TSet<const UPrimitiveComponent*> Seen; // 오버랩은 바디별로 나올 수 있어 컴포넌트 단위로 디둡.
+	// 프레임 전역 디둡 상태(region 루프 바깥). 일반 컴포넌트는 컴포넌트 단위로 1회만 추출.
+	TSet<const UPrimitiveComponent*> Seen;
+	// ISM은 region마다 다른 인스턴스가 걸릴 수 있어 컴포넌트가 아니라 인스턴스 인덱스 단위로 디둡한다.
+	TMap<UInstancedStaticMeshComponent*, TSet<int32>> SeenInstances;
+
+	// 브로드페이즈: 로프별 활성 region마다 오버랩(멀리 떨어진 로프 사이 빈 공간은 스캔에서 배제 —
+	// 전 로프 union AABB의 낭비/예산 경합 제거). region 간 중복 결과는 위 디둡 상태로 걸러 프레임당 1회만 추출.
+	TArray<FOverlapResult> Overlaps;
 	bool bBudgetClipped = false;
-	for (const FOverlapResult& Overlap : Overlaps)
+	for (const FBox& Region : RopeRegions)
 	{
-		UPrimitiveComponent* Prim = Overlap.Component.Get();
-		if (!Prim || Seen.Contains(Prim))
+		if (bBudgetClipped)
+		{
+			break;
+		}
+		if (!Region.IsValid)
 		{
 			continue;
 		}
-		Seen.Add(Prim);
-		if (IgnoredComponents.Contains(Prim))
+		Overlaps.Reset();
+		World->OverlapMultiByObjectType(Overlaps, Region.GetCenter(), FQuat::Identity, ObjParams,
+			FCollisionShape::MakeBox(Region.GetExtent()), QueryParams);
+
+		for (const FOverlapResult& Overlap : Overlaps)
 		{
-			continue;
-		}
-		// ISM/HISM(M3): 인스턴스별 처리 — 한 컴포넌트가 공유 메시 콜리전을 여러 인스턴스에 배치한다.
-		// GetBodySetup은 인스턴스 트랜스폼을 모르는 원본(로컬) 셰이프를 주므로, 근접 인스턴스마다 그
-		// 월드 트랜스폼으로 추출해야 한다(HISM도 이 베이스로 캐치). 인스턴스별 prev 추적은 미지원 →
-		// 인스턴스는 정적 스냅샷으로 처리(내부에서 prev=curr, InvDt=0).
-		if (UInstancedStaticMeshComponent* ISM = Cast<UInstancedStaticMeshComponent>(Prim))
-		{
-			if (!AppendInstancedBodyColliders(*ISM, RopeBounds, MaxColliders, MaxConvexPlanes))
+			UPrimitiveComponent* Prim = Overlap.Component.Get();
+			if (!Prim)
+			{
+				continue;
+			}
+			// ISM/HISM(M3): 인스턴스별 처리 — 한 컴포넌트가 공유 메시 콜리전을 여러 인스턴스에 배치한다.
+			// GetBodySetup은 인스턴스 트랜스폼을 모르는 원본(로컬) 셰이프를 주므로, 근접 인스턴스마다 그
+			// 월드 트랜스폼으로 추출해야 한다(HISM도 이 베이스로 캐치). 컴포넌트 단위 Seen에 넣지 않고
+			// 인스턴스 인덱스 단위(SeenInstances)로 디둡 — 다른 region의 다른 인스턴스를 놓치지 않도록.
+			// 인스턴스별 prev 추적은 미지원 → 인스턴스는 정적 스냅샷으로 처리(내부에서 prev=curr, InvDt=0).
+			if (UInstancedStaticMeshComponent* ISM = Cast<UInstancedStaticMeshComponent>(Prim))
+			{
+				if (IgnoredComponents.Contains(Prim))
+				{
+					continue;
+				}
+				if (!AppendInstancedBodyColliders(*ISM, Region, SeenInstances.FindOrAdd(ISM), MaxColliders, MaxConvexPlanes))
+				{
+					bBudgetClipped = true;
+					break;
+				}
+				continue;
+			}
+			// 일반 컴포넌트: 프레임 전역 Seen으로 여러 region에 걸쳐도 1회만 추출(오버랩이 바디별로 중복 보고돼도 디둡).
+			if (Seen.Contains(Prim))
+			{
+				continue;
+			}
+			Seen.Add(Prim);
+			if (IgnoredComponents.Contains(Prim))
+			{
+				continue;
+			}
+			const UBodySetup* Setup = Prim->GetBodySetup();
+			if (!Setup)
+			{
+				continue;
+			}
+			// 이 컴포넌트의 이전 프레임 트랜스폼 조회(없으면 이번 프레임은 정적 취급 — InvDt 0).
+			const FTransform CompTM = Prim->GetComponentTransform();
+			const FTransform* PrevPtr = PrevCompXforms.Find(Prim);
+			const FTransform PrevTM = PrevPtr ? *PrevPtr : CompTM;
+			const float CompInvDt = PrevPtr ? InvDt : 0.0f;
+			CurrCompXforms.Add(Prim, CompTM);
+
+			if (!AppendBodyColliders(*Setup, CompTM, PrevTM, CompInvDt, MaxColliders, MaxConvexPlanes))
 			{
 				bBudgetClipped = true;
 				break;
 			}
-			continue;
-		}
-		const UBodySetup* Setup = Prim->GetBodySetup();
-		if (!Setup)
-		{
-			continue;
-		}
-		// 이 컴포넌트의 이전 프레임 트랜스폼 조회(없으면 이번 프레임은 정적 취급 — InvDt 0).
-		const FTransform CompTM = Prim->GetComponentTransform();
-		const FTransform* PrevPtr = PrevCompXforms.Find(Prim);
-		const FTransform PrevTM = PrevPtr ? *PrevPtr : CompTM;
-		const float CompInvDt = PrevPtr ? InvDt : 0.0f;
-		CurrCompXforms.Add(Prim, CompTM);
-
-		if (!AppendBodyColliders(*Setup, CompTM, PrevTM, CompInvDt, MaxColliders, MaxConvexPlanes))
-		{
-			bBudgetClipped = true;
-			break;
 		}
 	}
 
-	PrevCompXforms = MoveTemp(CurrCompXforms); // 다음 프레임 prev 소스로 교체.
+	PrevCompXforms = MoveTemp(CurrCompXforms); // 다음 프레임 prev 소스로 교체(프레임당 1회 스왑).
 
 	if (bBudgetClipped)
 	{
@@ -354,7 +381,7 @@ bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const
 }
 
 bool URopeStaticBodyProvider::AppendInstancedBodyColliders(UInstancedStaticMeshComponent& ISM,
-	const FBox& RopeBounds, int32 MaxColliders, int32 MaxConvexPlanes)
+	const FBox& Region, TSet<int32>& SeenIndices, int32 MaxColliders, int32 MaxConvexPlanes)
 {
 	// 모든 인스턴스가 공유하는 메시 콜리전(로컬 셰이프). ISM은 GetBodySetup을 오버라이드하지 않아
 	// UStaticMeshComponent의 것(= 메시 BodySetup)을 상속한다.
@@ -364,10 +391,17 @@ bool URopeStaticBodyProvider::AppendInstancedBodyColliders(UInstancedStaticMeshC
 		return true; // 콜리전 없음 — 스킵(예산 소진 아님).
 	}
 
-	// 로프 bounds와 겹치는 인스턴스만 열거(월드 공간 박스) — 밀집 폴리지에서도 근접분만 추린다.
-	const TArray<int32> Indices = ISM.GetInstancesOverlappingBox(RopeBounds, /*bBoxInWorldSpace=*/true);
+	// region과 겹치는 인스턴스만 열거(월드 공간 박스) — 밀집 폴리지에서도 근접분만 추린다.
+	// 여러 region에 걸치는 ISM은 이미 추출한 인덱스(SeenIndices)를 건너뛰어 콜라이더 중복을 막는다.
+	const TArray<int32> Indices = ISM.GetInstancesOverlappingBox(Region, /*bBoxInWorldSpace=*/true);
 	for (int32 Index : Indices)
 	{
+		bool bAlreadySeen = false;
+		SeenIndices.Add(Index, &bAlreadySeen);
+		if (bAlreadySeen)
+		{
+			continue;
+		}
 		FTransform InstanceTM;
 		if (!ISM.GetInstanceTransform(Index, InstanceTM, /*bWorldSpace=*/true))
 		{
