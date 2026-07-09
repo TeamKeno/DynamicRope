@@ -120,6 +120,14 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 		return false;
 	}
 
+	// 서브클래스 wrap 대상 게이트: preview 빌드는 이 게이트를 모르므로(정적 빌더) 진입점에서 거른다.
+	if (!CanWrapTarget(Prepared.Mesh.Get(), Prepared.Bone))
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Prepared preview throw rejected by CanWrapTarget (bone=%s)"),
+			*GetName(), *Prepared.Bone.ToString());
+		return false;
+	}
+
 	if (WrapController.IsActive())
 	{
 		WrapController.Release(ERopeReleaseReason::Manual);
@@ -474,6 +482,7 @@ void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, co
 	WrapController.Release(Reason);
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
+	NotifyReleased(Bone, Reason);
 	OnRopeReleased.Broadcast(Bone, Reason);
 }
 
@@ -873,6 +882,14 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			}
 		}
 
+		// 서브클래스 wrap 대상 게이트(CanWrapTarget): 거른 대상은 트래커/캡처 판정에서 아예 안 보이게
+		// 여기서 제거한다 — 금지 대상에 트래커가 고착돼 Flight가 정체되는 것을 막는다. 기본 구현은
+		// 전부 true라 필터가 no-op이고, 후보 수가 적어(Flight 프레임당 수십 개 상한) 비용은 무시 가능.
+		Candidates.RemoveAll([this](const FRopeContactCandidate& Candidate)
+		{
+			return !CanWrapTarget(Candidate.Mesh, Candidate.Bone);
+		});
+
 		FRopeContactTracker FlightDebugTracker;
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightTrackerUpdate);
@@ -890,6 +907,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			BuildContactingState(Candidates);
 			SetPhase(ERopePhase::Contacting, *FString::Printf(TEXT("bone=%s, %d node(s)"),
 				*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num()));
+			NotifyCaptured(ContactTracker.CandidateBone);
 			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
 		}
 		else
@@ -1158,7 +1176,15 @@ void URopeComponent::SetPhase(ERopePhase NewPhase, const TCHAR* Reason)
 		UE_LOG(LogDynamicRope, Log, TEXT("[%s] %s -> %s"),
 			*GetName(), PhaseName(Phase), PhaseName(NewPhase));
 	}
+	const ERopePhase OldPhase = Phase;
 	Phase = NewPhase;
+
+	// 확장 훅 + BP 이벤트(실제 전이만 — 같은 페이즈 재설정은 알리지 않는다).
+	if (OldPhase != NewPhase)
+	{
+		OnPhaseChanged(OldPhase, NewPhase);
+		OnRopePhaseChanged.Broadcast(OldPhase, NewPhase);
+	}
 }
 
 void URopeComponent::ResetTransientPhaseState()
@@ -1610,6 +1636,7 @@ void URopeComponent::FinishGuidedThrow()
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("guided throw bone=%s, %d anchor(s)"),
 		*Seed.BoneName.ToString(), Seed.Anchors.Num()));
 	ResetTransientPhaseState();
+	NotifyWrapped(Seed.BoneName);
 	OnRopeWrapped.Broadcast(Seed.BoneName);
 }
 
@@ -1918,6 +1945,7 @@ void URopeComponent::CommitWrapping()
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s)"),
 		*Seed.BoneName.ToString(), Seed.Latched.Num()));
 	ResetTransientPhaseState();
+	NotifyWrapped(Seed.BoneName);
 	OnRopeWrapped.Broadcast(Seed.BoneName);
 }
 

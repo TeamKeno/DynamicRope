@@ -30,6 +30,7 @@ struct FRopeDebugSnapshot;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeOnReleased, FName, Bone, ERopeReleaseReason, Reason);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeOnPhaseChanged, ERopePhase, OldPhase, ERopePhase, NewPhase);
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeComponent : public UMeshComponent
@@ -156,6 +157,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
 	bool BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) const;
 
+	//~ Wielder 계약(C++ 전용) ----------------------------------------------
+	// URopeWielderComponent의 조준/PreviewPathLocked 흐름이 쓰는 진입점들. 일반 사용자 API가 아니라
+	// BP 미노출 — 게임 코드에서 직접 부를 일은 보통 없다(Wielder를 붙이거나 같은 계약을 재구현할 때만).
+
 	/** Builds a pre-wrapped preview for idle/flight aiming using the same throw context as ThrowWithContext. */
 	bool BuildWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
 		float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview,
@@ -256,6 +261,26 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
+	/** 현재 감고 있는 스켈레탈 메시(Wrapped 동안 유효, 아니면 null). 대상 액터 반응은 GetOwner()로 이어간다.
+	 *  내부 보관은 const weak이지만 BP는 const 포인터를 못 다뤄 const_cast로 노출한다(읽기 용도). */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	USkeletalMeshComponent* GetWrappedMesh() const
+	{
+		return const_cast<USkeletalMeshComponent*>(WrapController.State.Mesh.Get());
+	}
+
+	/** 센터라인 노드 수(= NumParticles, 시뮬 초기화 후). */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	int32 GetNodeCount() const { return Sim.Num(); }
+
+	/** 센터라인 노드의 월드 위치(0=손/앵커, GetNodeCount()-1=끝). 범위 밖 인덱스는 ZeroVector.
+	 *  로프 끝에 이펙트/사운드를 붙이는 등 BP 소비용 — C++은 GetCenterlinePositions()가 무복사. */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	FVector GetNodePosition(int32 NodeIndex) const
+	{
+		return Sim.Positions.IsValidIndex(NodeIndex) ? Sim.Positions[NodeIndex] : FVector::ZeroVector;
+	}
+
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
 
 	//~ Events(이벤트) ----------------------------------------------------
@@ -267,6 +292,12 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnReleased OnRopeReleased;
+
+	/** 모든 페이즈 전이 알림(같은 페이즈 재설정은 제외). Wrapped/Captured/Released보다 세밀한 상태 연동(UI/SFX)용.
+	 *  전이 처리 도중(SetPhase 내부)에 브로드캐스트되므로 핸들러에서 로프 상태를 바꾸는 호출(ReleaseWrap 등)은
+	 *  지원하지 않는다 — 그런 반응은 OnRopeWrapped/OnRopeReleased(전이 마무리 후 발화)에 바인딩할 것. */
+	UPROPERTY(BlueprintAssignable, Category = "Rope")
+	FRopeOnPhaseChanged OnRopePhaseChanged;
 
 private:
 	/**
@@ -302,6 +333,44 @@ public:
 	virtual UMaterialInterface* GetMaterial(int32 ElementIndex) const override;
 	virtual void SetMaterial(int32 ElementIndex, UMaterialInterface* Material) override;
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
+
+protected:
+	//~ 확장 훅(서브클래스용) -------------------------------------------------
+	// 전부 게임 스레드에서 프레임 단위(콜드 패스)로만 불린다 — 병렬로 도는 Solve 단계에는 훅이 없다.
+	// 노드 단위 핫 루프(솔버/로직 F-클래스)는 POD·GPU 파리티 기준점이라 virtual 확장 지점이 아니다.
+	// 훅을 추가할 때는 호출 스레드/페이즈/빈도를 주석에 명시하는 것을 계약의 일부로 삼는다.
+
+	/** 페이즈 전이 직후, OnRopePhaseChanged 브로드캐스트 직전에 호출(전이당 1회, 같은 페이즈 재설정 제외). */
+	virtual void OnPhaseChanged(ERopePhase OldPhase, ERopePhase NewPhase) {}
+
+	/**
+	 * wrap 대상 게이트. Flight의 접촉 후보 산출 프레임마다(후보별) + prepared preview throw 진입 시 1회
+	 * 호출된다. false면 그 (Mesh, Bone) 후보는 없는 것으로 취급된다 — 팀/태그 등 게임 규칙으로 감을 수
+	 * 있는 대상을 제한할 때 오버라이드. 기본 true(모두 허용). 주의: Wielder의 조준 preview 빌드는 이
+	 * 게이트를 통과하지 않으므로(정적 빌더), 금지 대상이 preview에 보일 수는 있다 — throw가 거부한다.
+	 */
+	virtual bool CanWrapTarget(const USkeletalMeshComponent* Mesh, FName Bone) const { return true; }
+
+	//~ 이벤트 네이티브 훅: 각 델리게이트 브로드캐스트 직전에 호출(엔진 Notify 관례). C++ 서브클래스가
+	//  자기 델리게이트에 바인딩하는 우회 없이 반응할 수 있다.
+	virtual void NotifyCaptured(FName Bone) {}
+	virtual void NotifyWrapped(FName Bone) {}
+	virtual void NotifyReleased(FName Bone, ERopeReleaseReason Reason) {}
+
+	/** Throw(AimDir) 편의 진입점이 만드는 기본 컨텍스트(throw당 1회). 조준 규약을 바꾸려면 오버라이드. */
+	virtual FRopeThrowContext MakeDefaultThrowContext(const FVector& AimDir) const;
+
+	/** throw 컨텍스트 최종 해석(throw당 1회): 프레임 축 정규화/fallback/속도·원점 보정. 에임 어시스트 등 커스텀 지점. */
+	virtual FRopeThrowContext ResolveThrowContext(const FRopeThrowContext& ThrowContext) const;
+
+	/**
+	 * Pull 힘 인가(Wrapped + 팽팽 + 능동 Pull 활성인 프레임마다). 기본 수신자 체인:
+	 * 물리 시뮬 본 → CharacterMovement → 물리 시뮬 루트. 커스텀 무브먼트(Mover 등)/탈것/특수 대상은 오버라이드.
+	 */
+	virtual void ApplyPullForce(const FVector& Force, const FRopePullSample& Pull);
+
+	// 시뮬 상태 읽기 전용 접근(서브클래스용). 변경은 공개 API(Throw·Set 계열)를 통해서만.
+	const FRopeSimState& GetSimState() const { return Sim; }
 
 private:
 	// 길이 의존 머티리얼 파라미터(꼬임 밀도)를 dynamic material instance로 갱신한다:
@@ -411,8 +480,7 @@ private:
 	// ReleaseWrap/CutRope 공용 본체: 진행 중인 잡기/감기를 주어진 사유로 해제(본 귀속 해석 포함).
 	void ReleaseWrapAs(ERopeReleaseReason Reason);
 
-	// 동작 2 — Pull 힘 인가(GT, UObject): 물리 시뮬 본 → 캐릭터 무브먼트 → 시뮬 루트 순으로 시도한다.
-	void ApplyPullForce(const FVector& Force, const FRopePullSample& Pull);
+	// (ApplyPullForce — 동작 2, Pull 힘 인가 — 는 protected 확장 훅으로 이동.)
 
 	//~ 서브시스템 프레임 계약(RopeSimSubsystem이 쓰거나 읽는다) --------------
 	// 한 프레임 collider 스냅샷. RopeSimSubsystem이 Tick에서 중앙 수집해 채운다(provider 레지스트리 → 로프 필터).
@@ -467,8 +535,7 @@ private:
 #endif
 
 	//~ Throw ----------------------------------------------------------------
-	FRopeThrowContext MakeDefaultThrowContext(const FVector& AimDir) const;
-
+	// (MakeDefaultThrowContext/ResolveThrowContext는 protected 확장 훅으로 이동.)
 	void StartFreshThrow(const FRopeThrowContext& ThrowContext);
 
 	/** GuidedThrow phase 한 프레임 진행. preview centerline으로 노드를 이동시키며 solver는 끈다. */
@@ -476,8 +543,6 @@ private:
 
 	/** GuidedThrow 완료 시 prepared anchor를 FRopeWrapState로 변환해 바로 Wrapped로 커밋한다. */
 	void FinishGuidedThrow();
-
-	FRopeThrowContext ResolveThrowContext(const FRopeThrowContext& ThrowContext) const;
 
 	FVector ComputeThrowInheritedVelocity(const FRopeThrowContext& ThrowContext) const;
 
