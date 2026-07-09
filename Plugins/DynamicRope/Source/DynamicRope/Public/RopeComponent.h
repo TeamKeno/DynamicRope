@@ -71,16 +71,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
 	FRopeWrapConfig WrapConfig;
 
-#if WITH_EDITORONLY_DATA
-	/**
-	 * 에디터 배치 가이드 전용(FRopeComponentVisualizer가 이 메시로 wrap 타깃 링크를 그린다). 런타임에
-	 * 실제로 감기는 메시는 이 값이 아니라 접촉에서 확정된다(FRopeContact.SourceMesh → PendingWrapSeed →
-	 * FRopeWrapState.Mesh) — cross-actor 포함. 런타임/쿠킹 제외, BP 미노출.
-	 */
-	UPROPERTY(EditAnywhere, Category = "Rope|Wrap")
-	TObjectPtr<USkeletalMeshComponent> WrapTargetMesh = nullptr;
-#endif
-
 	/**
 	 * 기본적으로 rope는 월드의 모든 collider provider와 충돌하되 **자기 owner(던진 본인)의 provider는 제외**한다
 	 * — throw 시 늘어진 로프가 던진 사람 팔다리에 엉키는 것을 막기 위함. cross-actor wrap(다른 액터 body 잡기)은
@@ -137,7 +127,7 @@ public:
 	bool bScaleTwistByLength = true;
 
 #if WITH_EDITORONLY_DATA
-	/** 에디터에서 이 로프 액터를 선택했을 때 배치-보조 가이드(앵커·조준·도달범위·wrap 타깃·던지기 아크)를
+	/** 에디터에서 이 로프 액터를 선택했을 때 배치-보조 가이드(앵커·조준·도달범위·던지기 아크)를
 	 *  FRopeComponentVisualizer가 그릴지 여부. 레벨 에디터 전용(런타임/쿠킹 제외). */
 	UPROPERTY(EditAnywhere, Category = "Rope|Debug")
 	bool bShowPlacementGuides = true;
