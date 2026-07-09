@@ -44,35 +44,42 @@ public:
 	URopeComponent();
 
 	//~ Setup(설정) -------------------------------------------------------
+	// 아래 초기화 전용 값들(NumParticles/RopeLength/MinRopeLength)은 InitRope 시점에만 소비된다 —
+	// 런타임 쓰기는 재초기화 전까지 무효라 BlueprintReadOnly(함정 방지). 런타임 길이 변경은
+	// SetRopeLength/SetReelRate를 쓴다.
+
 	// ClampMax 512 = FRopeGPUSolver::MaxNodes(GPU 솔버 스레드그룹 상한). 초과하면 조용히 CPU 솔브+튜브
 	// 폴백이 되어 성능 절벽 + 저작 무신호라 에디터에서 막는다(BP/코드 경로는 InitRope가 하드 클램프).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "2", ClampMax = "512"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "2", ClampMax = "512"))
 	int32 NumParticles = 24;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "1.0", Units = "cm"))
+	/** 초기(최대) 로프 길이(cm). 런타임 현재 길이는 GetCurrentRopeLength/SetRopeLength. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "1.0", Units = "cm"))
 	float RopeLength = 200.0f;
 
 	/** 되감기(reel-in)로 줄일 수 있는 최소 길이(cm). RopeLength(초기)가 상한이다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "10.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "10.0", Units = "cm"))
 	float MinRopeLength = 100.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	FRopeSolverConfig SolverConfig;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	FRopeThrowParams ThrowParams;
 
 	/** physics → logic (wrap) 핸드오프를 위한 contact-decision 튜닝 값. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
 	FRopeWrapConfig WrapConfig;
 
+#if WITH_EDITORONLY_DATA
 	/**
-	 * 에디터 배치 가이드용(비주얼라이저가 이 메시로 wrap 타깃 링크를 그린다) + bIncludeOwnerColliders로
-	 * 자기 몸을 감는 드문 케이스의 명시 지정용. 런타임에 실제로 감기는 메시는 이 값이 아니라 접촉에서
-	 * 확정된다(FRopeContact.SourceMesh → PendingWrapSeed → FRopeWrapState.Mesh) — cross-actor 포함.
+	 * 에디터 배치 가이드 전용(FRopeComponentVisualizer가 이 메시로 wrap 타깃 링크를 그린다). 런타임에
+	 * 실제로 감기는 메시는 이 값이 아니라 접촉에서 확정된다(FRopeContact.SourceMesh → PendingWrapSeed →
+	 * FRopeWrapState.Mesh) — cross-actor 포함. 런타임/쿠킹 제외, BP 미노출.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
+	UPROPERTY(EditAnywhere, Category = "Rope|Wrap")
 	TObjectPtr<USkeletalMeshComponent> WrapTargetMesh = nullptr;
+#endif
 
 	/**
 	 * 기본적으로 rope는 월드의 모든 collider provider와 충돌하되 **자기 owner(던진 본인)의 provider는 제외**한다
@@ -89,17 +96,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip")
 	FRopeWhipConfig WhipConfig;
 
-	/** WhipGuide.GetElapsed()의 BP 노출용 미러(매 프레임 갱신). */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Whip")
-	float WhipElapsed = 0.0f;
+	/** 현재 whip 스윙 경과 시간(s). 스윙 비활성 시 0. */
+	UFUNCTION(BlueprintPure, Category = "Rope|Whip")
+	float GetWhipElapsed() const { return WhipGuide.GetElapsed(); }
 
 	//~ Render(렌더) ------------------------------------------------------
+	// Radius/NumSides는 씬 프록시 생성 시 토폴로지로 굳는다 — 런타임 쓰기는 프록시 재생성 전까지
+	// 반영되지 않아 BlueprintReadOnly(에디터 변경은 렌더 상태 재생성으로 반영됨).
+
 	/** 시각적 tube 반지름(cm). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render", meta = (ClampMin = "0.1", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (ClampMin = "0.1", Units = "cm"))
 	float Radius = 2.0f;
 
 	/** tube 단면의 변 개수. 높을수록 더 둥글어진다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render", meta = (ClampMin = "3", ClampMax = "32"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (ClampMin = "3", ClampMax = "32"))
 	int32 NumSides = 8;
 
 	/** rope tube에 적용되는 material. 설정하지 않으면 엔진 기본 material을 사용한다. */
@@ -167,10 +177,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void CutRope();
 
-	UFUNCTION(BlueprintCallable, Category = "Rope")
+	UFUNCTION(BlueprintPure, Category = "Rope")
 	ERopePhase GetPhase() const { return Phase; }
 
-	UFUNCTION(BlueprintCallable, Category = "Rope")
+	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool IsTensioned(float SlackTolerance = 5.0f) const;
 
 	/**
@@ -178,18 +188,18 @@ public:
 	 * 질량 1 노드 기준 상대 단위 — 매달린 노드 1개의 중력 하중 ≈ 980). 스트레치만 양수, 슬랙/압축 = 0.
 	 * GPU 상주 로프는 1~2프레임 지연 미러. 솔브가 없는 페이즈(Contacting/Releasing)는 직전 값 유지.
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Rope")
+	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetSegmentTension(int32 SegmentIndex) const;
 
 	/** 전체 세그먼트 중 최대 장력. Wrapped 중에는 매 프레임 FRopeWrapState::Tension에도 반영된다. */
-	UFUNCTION(BlueprintCallable, Category = "Rope")
+	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetMaxTension() const;
 
 	/**
 	 * 이번 프레임 Pull(당김) 데이터: 손 쪽 첫 앵커가 받는 당김 방향(단위)과 그 세그먼트 장력.
 	 * Wrapped 동안 매 프레임 산출된다. 게임 효과(포획 진행도, 이동 방해 등) 판정용.
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Rope")
+	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool GetPullSample(FVector& OutDirection, float& OutTension) const
 	{
 		OutDirection = LastPullSample.Direction;
@@ -207,7 +217,7 @@ public:
 	void SetActivePull(float Force);
 
 	/** 현재(런타임) 로프 길이(cm). 되감기/풀기로 변한다 — 초기값/상한은 RopeLength. */
-	UFUNCTION(BlueprintCallable, Category = "Rope")
+	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetCurrentRopeLength() const { return Sim.RopeLength; }
 
 	/**
@@ -228,16 +238,18 @@ public:
 	void SetReelRate(float CmPerSecond);
 
 	/** 슬립 중인가(Free 페이즈에서 정지 판정 — 솔브 스킵 상태). */
-	UFUNCTION(BlueprintCallable, Category = "Rope")
+	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool IsSleeping() const { return bAsleep; }
 
 	/** 현재 거리 LOD의 iteration 배율(1=풀 품질). 디버그/프로파일 확인용. */
-	UFUNCTION(BlueprintCallable, Category = "Rope")
+	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetSolverLODScale() const { return SolverLODScale; }
 
 	/** 이번 프레임 이 로프가 GPU 솔버로 step됐는가(false면 CPU 폴백/솔버 off). 디버그 확인용. */
 	bool IsGpuSteppedThisFrame() const { return bGpuSteppedThisFrame; }
 
+	/** 현재 감고 있는 본 이름(Wrapped 동안 유효, 아니면 None). 이벤트 파라미터 없이도 조회 가능하게 노출. */
+	UFUNCTION(BlueprintPure, Category = "Rope")
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }

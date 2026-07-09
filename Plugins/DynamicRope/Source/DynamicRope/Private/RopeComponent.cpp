@@ -616,7 +616,6 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 			// 타깃/마스크 계산만(Sim 불변) — 적용은 CPU 경로 SolveSimFrame(ApplyToSim) 또는
 			// GPU 상주 경로의 override 패스(서브시스템이 step에 실음)가 담당한다(G1).
 			WhipGuide.Advance(DeltaTime, Sim, MakeWhipGuideConfig(), bCaptureGuideTargets);
-			WhipElapsed = WhipGuide.GetElapsed(); // BP 노출용 미러.
 		}
 		else
 		{
@@ -1482,7 +1481,6 @@ FRopeThrowContext URopeComponent::MakeDefaultThrowContext(const FVector& /*AimDi
 	}
 	Context.SwingPlane = ThrowParams.SwingPlane;
 	Context.CustomSwingPlaneNormal = ThrowParams.CustomSwingPlaneNormal;
-	Context.AimDirection = Context.FrameForward;
 	return Context;
 }
 
@@ -1493,7 +1491,6 @@ FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& T
 	Resolved.FrameForward = FRopeWhipGuide::SafeNormalOr(Resolved.FrameForward, GetForwardVector());
 	Resolved.FrameUp = FRopeWhipGuide::SafeNormalOr(Resolved.FrameUp, FVector::UpVector);
 	Resolved.FrameRight = FRopeWhipGuide::SafeNormalOr(Resolved.FrameRight, FVector::CrossProduct(Resolved.FrameUp, Resolved.FrameForward));
-	Resolved.AimDirection = Resolved.FrameForward;
 	if (Resolved.ThrowSpeed <= 0.0f)
 	{
 		Resolved.ThrowSpeed = ThrowParams.ThrowSpeed;
@@ -1523,7 +1520,6 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 	WhipGuide.Begin(SwingBasis.AimDir, ResolvedThrow.Origin,
 		ResolvedThrow.FrameForward, SwingBasis.GuideUp, SwingBasis.GuideRight,
 		ResolvedThrow.ThrowSpeed, InheritedVelocity);
-	WhipElapsed = WhipGuide.GetElapsed();
 
 	++SimGeneration; // throw로 tail 위치를 재설정 → GPU 상주 버퍼 재시드(M5).
 

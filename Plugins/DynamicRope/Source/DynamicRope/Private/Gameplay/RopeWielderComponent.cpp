@@ -420,9 +420,6 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& /*AimD
 		break;
 	}
 
-	// AimDir는 legacy 입력값으로만 남긴다. 실제 던지는 방향은 선택한 frame의 forward다.
-	Context.AimDirection = Context.FrameForward;
-
 	return Context;
 }
 

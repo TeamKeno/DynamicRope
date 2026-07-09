@@ -380,7 +380,7 @@ struct FRopeSolverConfig
 	/** substep당 충돌 해소 패스 수. 1=substep 끝에 1회(기존 동작, perf 무회귀). sharp한 굴곡에서
 	 *  distance/bending이 안쪽으로 당기는 힘을 단일 충돌이 못 이겨 관통할 때, 제약 iteration을 이 수만큼
 	 *  나눠 사이사이 충돌을 끼운다 → 더 sharp한 끼인각까지 방어(>1일수록 강하지만 비용↑). Iterations로 상한. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "16"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "16"))
 	int32 CollisionPassesPerSubstep = 1;
 
 	/** XPBD stretch compliance(stiffness의 역수). 0 = 신장 불가(inextensible). */
@@ -395,12 +395,12 @@ struct FRopeSolverConfig
 	 *  판정값 r = (i↔i+2 거리)/(2*SegmentLength) = cos(턴각/2): 1=직선, 작을수록 급한 굽힘.
 	 *  r ≤ BendReleaseRatio면 펴는 힘 0(완전히 놔줌), r ≥ BendFullRatio면 100%(기존 동작), 사이는 smoothstep.
 	 *  기본 0.70(≈턴각 91°). 코너가 아직 각지면 올리고(급한 굴곡까지 놔줌), 두 값을 0으로 두면 항상 편다(각도 허용 끔). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float BendReleaseRatio = 0.70f;
 
 	/** 각도-허용 벤딩: r ≥ 이 값이면 펴는 힘 100%(완만한 굽힘은 기존처럼 곧게 편다). 기본 0.92(≈턴각 46°).
 	 *  자유 로프가 너무 흐물거리면 낮추고, 항상 BendReleaseRatio 이상이어야 한다(솔버가 내부적으로 보장). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float BendFullRatio = 0.92f;
 
 	/** collider에 대한 접선 방향 friction [0..1](Coulomb 계수 μ). */
@@ -426,11 +426,11 @@ struct FRopeSolverConfig
 	bool bUseWorldGDF = false;
 
 	/** Swept collision sample spacing in cm. Lower values reduce tunneling at higher query cost. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.1", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "0.1", Units = "cm"))
 	float SweepStep = 2.0f;
 
 	/** Maximum swept samples per segment, used as a cost cap for very fast nodes. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "64"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxSweepSamples = 16;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver")
@@ -526,7 +526,7 @@ struct FRopeWrapConfig
 	 * 지금은 skeleton parent/child edge만 사용한다. 이후 디자이너 지정 transition을 추가해도
 	 * 같은 depth 제한을 통과하므로, 너무 먼 bridge가 한 번에 열리는 것을 막는 1차 안전장치다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0", ClampMax = "16"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0", ClampMax = "16"))
 	int32 MaxBoneTransitionDepth = 3;
 
 	/**
@@ -534,50 +534,50 @@ struct FRopeWrapConfig
 	 * depth가 같아도 edge별 penalty가 다르면 비용이 달라질 수 있다. 지금은 parent/child edge 비용만
 	 * 누적하지만, 나중에 designer edge / 금지에 가까운 edge를 섞을 때 projection 전에 후보를 잘라내는 역할을 한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float MaxBoneTransitionCost = 5.0f;
 
 	/**
 	 * 자동 parent/child edge 하나를 지날 때의 비용.
 	 * 값이 클수록 graph cost가 커져 같은 본 유지가 쉬워지고, 낮추면 parent/child chain을 더 적극적으로 탄다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float AutoParentChildTransitionPenalty = 1.0f;
 
 	/** projection 거리 점수 가중치. 예측 위치에서 표면까지 멀수록 불리하다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float ProjectionDistanceWeight = 0.35f;
 
 	/** 실제 rope node 위치와 projection 표면점 사이 거리 가중치. 로프가 실제로 있는 쪽의 본을 선호한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float RopeNodeDistanceWeight = 0.25f;
 
 	/** 이전 tangent와 새 tangent가 꺾이는 정도의 가중치. 값이 클수록 부드러운 진행을 선호한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float TangentContinuityWeight = 8.0f;
 
 	/** 이전 normal과 새 normal이 꺾이는 정도의 가중치. 값이 클수록 표면 normal 연속성을 선호한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float NormalContinuityWeight = 5.0f;
 
 	/** graph 비용 가중치. parent/child를 많이 건너는 후보일수록 불리하게 만든다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float BoneTransitionPenaltyWeight = 1.0f;
 
 	/** 현재 본 유지 보너스. 동점 근처에서 본이 흔들리는 것을 줄인다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float CurrentBoneBonus = 0.35f;
 
 	/** 새 본이 현재 본보다 이 점수만큼 더 좋아야 전환한다. 전환 hysteresis. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float BoneTransitionHysteresis = 0.75f;
 
 	/** 직전 본으로 바로 돌아가는 후보에 더하는 penalty. A->B->A 왕복을 줄인다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float ImmediateBoneReturnPenalty = 1.5f;
 
 	/** 마지막 본 전환 이후 이 거리(cm) 이상 진행해야 다음 전환을 허용한다. 0이면 비활성. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0", Units = "cm"))
 	float MinBoneTransitionPathDistance = 8.0f;
 
 	/** Upper bound for physics-based wrapping settle before committing the best accumulated anchors. */
@@ -654,7 +654,7 @@ struct FRopeWrapConfig
 	 * 노이즈를 지수이동평균으로 흡수한다(alpha = 1-exp(-dt/이 값), 프레임레이트 독립). 클수록 매끄럽지만
 	 * 반응이 느리고, 0이면 스무딩 없음(원 look-ahead). wrap 시작 시 측정값으로 초기화된다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float PullDirSmoothTime = 0.08f;
 
 	/**
@@ -663,7 +663,7 @@ struct FRopeWrapConfig
 	 * 못 잡는다. 조준 인덱스를 float로 EMA해 노드 사이를 보간하면 방향·tether가 연속이 된다(alpha=1-exp(-dt/이
 	 * 값), 프레임레이트 독립). 클수록 매끄럽지만 반응이 느리고, 0이면 스무딩 없음. wrap 시작 시 측정값으로 초기화.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float PullAimSmoothTime = 0.08f;
 };
 
@@ -722,10 +722,6 @@ struct FRopeThrowContext
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	FVector Origin = FVector::ZeroVector;
-
-	/** Legacy 입력값. 현재 throw 방향은 FrameForward를 사용한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
-	FVector AimDirection = FVector::ForwardVector;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	FVector FrameForward = FVector::ForwardVector;
