@@ -11,48 +11,10 @@
 
 namespace
 {
-	void SetPreviewFailureReason(FString* OutFailureReason, const FString& Reason)
-	{
-		if (OutFailureReason)
-		{
-			*OutFailureReason = Reason;
-		}
-	}
-
 	const TArray<IRopeCollider*>& GetColliders(const FRopeThrowPreviewBuilder::FInput& Input)
 	{
 		static const TArray<IRopeCollider*> EmptyColliders;
 		return Input.Colliders ? *Input.Colliders : EmptyColliders;
-	}
-
-	FVector ArcPreviewDirectionAtAlpha(const FRopeArcPreviewData& Preview, float Alpha)
-	{
-		const FVector Aim = FRopeWhipGuide::SafeNormalOr(Preview.AimDir, FVector::ForwardVector);
-		FVector Up = Preview.GuideUp - FVector::DotProduct(Preview.GuideUp, Aim) * Aim;
-		Up = FRopeWhipGuide::SafeNormalOr(Up, FVector::UpVector);
-
-		const float ClampedAlpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
-		const float SweepRadians = FMath::DegreesToRadians(FMath::Clamp(Preview.SweepAngleDegrees, 1.0f, 180.0f));
-		const float Angle = SweepRadians * (1.0f - ClampedAlpha);
-		return (Aim * FMath::Cos(Angle) + Up * FMath::Sin(Angle)).GetSafeNormal();
-	}
-
-	int32 FindHeadValidNodeIndex(const TArray<int32>& NodeIndices, const FRopeSimState& Sim)
-	{
-		int32 HeadNodeIndex = INDEX_NONE;
-		for (const int32 NodeIndex : NodeIndices)
-		{
-			if (!Sim.Positions.IsValidIndex(NodeIndex))
-			{
-				continue;
-			}
-
-			if (HeadNodeIndex == INDEX_NONE || NodeIndex < HeadNodeIndex)
-			{
-				HeadNodeIndex = NodeIndex;
-			}
-		}
-		return HeadNodeIndex;
 	}
 
 	bool BuildThrowArcPreview(const FRopeThrowPreviewBuilder::FInput& Input, FRopeArcPreviewData& OutPreview,
@@ -64,7 +26,7 @@ namespace
 		const float ClampedReachScale = FMath::Max(Input.ReachScale, 0.0f);
 		if (ClampedReachScale <= KINDA_SMALL_NUMBER)
 		{
-			SetPreviewFailureReason(OutFailureReason,
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("throw arc preview build failed: reach scale too small (reachScale=%.2f)"),
 					Input.ReachScale));
 			return false;
@@ -83,7 +45,7 @@ namespace
 		OutPreview.SegmentCount = FMath::Clamp(Input.SegmentCount, 1, 128);
 		if (OutPreview.Radius <= KINDA_SMALL_NUMBER)
 		{
-			SetPreviewFailureReason(OutFailureReason,
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("throw arc preview build failed (reachScale=%.2f, segmentCount=%d, ropeLength=%.2f)"),
 					Input.ReachScale, Input.SegmentCount, SourceRopeLength));
 			return false;
@@ -122,18 +84,18 @@ namespace
 		OutCandidate = FThrowPreviewContactCandidate();
 		if (Preview.Radius <= KINDA_SMALL_NUMBER)
 		{
-			SetPreviewFailureReason(OutFailureReason,
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("free search rejected: arc radius too small (radius=%.2f)"), Preview.Radius));
 			return false;
 		}
 		if (Colliders.Num() == 0)
 		{
-			SetPreviewFailureReason(OutFailureReason, TEXT("free search rejected: no frame colliders"));
+			RopeMath::SetPreviewFailureReason(OutFailureReason, TEXT("free search rejected: no frame colliders"));
 			return false;
 		}
 		if (Sim.Num() < 2)
 		{
-			SetPreviewFailureReason(OutFailureReason,
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("free search rejected: rope sim has too few nodes (nodes=%d)"), Sim.Num()));
 			return false;
 		}
@@ -157,7 +119,7 @@ namespace
 		for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
 		{
 			const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
-			const FVector Direction = ArcPreviewDirectionAtAlpha(Preview, AngleAlpha);
+			const FVector Direction = RopeMath::ArcDirectionAtAlpha(Preview.AimDir, Preview.GuideUp, Preview.SweepAngleDegrees, AngleAlpha);
 			if (!Direction.IsNearlyZero())
 			{
 				PreviewBounds += Preview.Origin + Direction * Preview.Radius;
@@ -175,14 +137,14 @@ namespace
 		}
 		if (CandidateColliders.Num() == 0)
 		{
-			SetPreviewFailureReason(OutFailureReason,
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("free search found no colliders inside arc bounds (frameColliders=%d, radius=%.1f, queryRadius=%.1f)"),
 					Colliders.Num(), Preview.Radius, EffectiveQueryRadius));
 			return false;
 		}
 
 		const float SegmentLength = FMath::Max(Sim.SegmentLength, 1.0f);
-		const FVector ArcStartDirection = ArcPreviewDirectionAtAlpha(Preview, 0.0f);
+		const FVector ArcStartDirection = RopeMath::ArcDirectionAtAlpha(Preview.AimDir, Preview.GuideUp, Preview.SweepAngleDegrees, 0.0f);
 		bool bFoundCandidate = false;
 		FThrowPreviewContactCandidate BestCandidate;
 		int32 HitCount = 0;
@@ -190,7 +152,7 @@ namespace
 		for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
 		{
 			const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
-			const FVector Direction = ArcPreviewDirectionAtAlpha(Preview, AngleAlpha);
+			const FVector Direction = RopeMath::ArcDirectionAtAlpha(Preview.AimDir, Preview.GuideUp, Preview.SweepAngleDegrees, AngleAlpha);
 			if (Direction.IsNearlyZero())
 			{
 				continue;
@@ -242,7 +204,7 @@ namespace
 
 		if (!bFoundCandidate)
 		{
-			SetPreviewFailureReason(OutFailureReason,
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("free search found no valid contact (candidateColliders=%d, angleSamples=%d, radialSamples=%d, hits=%d, invalidHits=%d, queryRadius=%.1f)"),
 					CandidateColliders.Num(), AngleSamples, RadialSamples, HitCount, InvalidHitCount, EffectiveQueryRadius));
 			return false;
@@ -289,7 +251,7 @@ namespace
 				else
 				{
 					const float ArcAlpha = FMath::Lerp(0.0f, ContactCandidate.AngleAlpha, Alpha);
-					const FVector ArcDirection = ArcPreviewDirectionAtAlpha(Preview, ArcAlpha);
+					const FVector ArcDirection = RopeMath::ArcDirectionAtAlpha(Preview.AimDir, Preview.GuideUp, Preview.SweepAngleDegrees, ArcAlpha);
 					const FVector ArcPosition = Preview.Origin + ArcDirection * (SurfaceDistance * Alpha);
 					const FVector ContactLinePosition = FMath::Lerp(Preview.Origin, SurfacePoint, Alpha);
 					Position = FMath::Lerp(ArcPosition, ContactLinePosition, Alpha * Alpha);
@@ -374,7 +336,7 @@ namespace
 		if (!Candidate.bValid || !Mesh || Candidate.Bone.IsNone() ||
 			!SourceSim.Positions.IsValidIndex(Candidate.NodeIndex))
 		{
-			SetPreviewFailureReason(OutFailureReason,
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("wrap preview candidate invalid (valid=%d, mesh=%s, bone=%s, node=%d, sourceNodes=%d)"),
 					Candidate.bValid ? 1 : 0, *GetNameSafe(Mesh), *Candidate.Bone.ToString(), Candidate.NodeIndex,
 					SourceSim.Num()));
@@ -418,7 +380,7 @@ namespace
 		if (!PreviewWrappingPhase.BuildPreviewCenterline(LatchAnchor, Mesh, Candidate.Bone,
 			SourceSim, MakeWrappingContext(Input), PreviewPoints))
 		{
-			SetPreviewFailureReason(OutFailureReason,
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("wrap preview centerline build failed (mesh=%s, bone=%s, node=%d, sourceNodes=%d)"),
 					*GetNameSafe(Mesh), *Candidate.Bone.ToString(), Candidate.NodeIndex, SourceSim.Num()));
 			return false;
@@ -429,7 +391,7 @@ namespace
 		OutPrepared.RenderPreview.NumSides = FMath::Clamp(Input.RopeNumSides, 3, 32);
 		if (!OutPrepared.RenderPreview.IsValid())
 		{
-			SetPreviewFailureReason(OutFailureReason,
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("wrap preview output invalid (points=%d, radius=%.2f, sides=%d)"),
 					OutPrepared.RenderPreview.Points.Num(), OutPrepared.RenderPreview.Radius,
 					OutPrepared.RenderPreview.NumSides));
@@ -474,7 +436,7 @@ bool FRopeThrowPreviewBuilder::BuildFreePreparedPreview(const FInput& Input, FRo
 	const FRopeSimState* Sim = Input.Sim;
 	if (!Sim)
 	{
-		SetPreviewFailureReason(OutFailureReason, TEXT("free search rejected: no rope sim"));
+		RopeMath::SetPreviewFailureReason(OutFailureReason, TEXT("free search rejected: no rope sim"));
 		return false;
 	}
 
@@ -504,12 +466,12 @@ bool FRopeThrowPreviewBuilder::BuildFlightWrappingPreview(const FInput& Input, F
 	const TArray<IRopeCollider*>& Colliders = GetColliders(Input);
 	if (Colliders.Num() == 0)
 	{
-		SetPreviewFailureReason(OutFailureReason, TEXT("flight preview rejected: no frame colliders"));
+		RopeMath::SetPreviewFailureReason(OutFailureReason, TEXT("flight preview rejected: no frame colliders"));
 		return false;
 	}
 	if (!Sim || Sim->Num() < 2)
 	{
-		SetPreviewFailureReason(OutFailureReason,
+		RopeMath::SetPreviewFailureReason(OutFailureReason,
 			FString::Printf(TEXT("flight preview rejected: rope sim has too few nodes (nodes=%d)"), Sim ? Sim->Num() : 0));
 		return false;
 	}
@@ -525,12 +487,12 @@ bool FRopeThrowPreviewBuilder::BuildFlightWrappingPreview(const FInput& Input, F
 	PreviewTracker.Update(Candidates, 0.0f);
 	if (PreviewTracker.CandidateBone.IsNone() || PreviewTracker.CandidateNodes.Num() == 0)
 	{
-		SetPreviewFailureReason(OutFailureReason,
+		RopeMath::SetPreviewFailureReason(OutFailureReason,
 			FString::Printf(TEXT("flight preview found no tracked candidate (candidates=%d)"), Candidates.Num()));
 		return false;
 	}
 
-	const int32 NodeIndex = FindHeadValidNodeIndex(PreviewTracker.CandidateNodes, *Sim);
+	const int32 NodeIndex = RopeMath::HeadValidNodeIndex(PreviewTracker.CandidateNodes, Sim->Positions);
 	const FRopeContactCandidate* BestCandidate = nullptr;
 	for (const FRopeContactCandidate& Candidate : Candidates)
 	{
@@ -550,7 +512,7 @@ bool FRopeThrowPreviewBuilder::BuildFlightWrappingPreview(const FInput& Input, F
 
 	if (!BestCandidate)
 	{
-		SetPreviewFailureReason(OutFailureReason,
+		RopeMath::SetPreviewFailureReason(OutFailureReason,
 			FString::Printf(TEXT("flight preview had tracker bone but no matching best candidate (candidates=%d, bone=%s, nodes=%d)"),
 				Candidates.Num(), *PreviewTracker.CandidateBone.ToString(), PreviewTracker.CandidateNodes.Num()));
 		return false;

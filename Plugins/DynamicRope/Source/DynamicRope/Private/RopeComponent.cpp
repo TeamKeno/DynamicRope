@@ -19,32 +19,13 @@
 #include "Logic/RopeThrowPreviewBuilder.h"
 #include "RopeGPUSolver.h" // FRopeGPUSolver::MaxNodes — NumParticles 상한(GPU 솔버 스레드그룹 한도)
 #include "Settings/DynamicRopeSettings.h"
-#include "RopeMathHelpers.h" // RopeMath::SmoothStep / AnyTangentFromNormal (unity 빌드 중복 정의 방지)
+#include "RopeMathHelpers.h" // RopeMath:: 공용 헬퍼 (unity 빌드 익명 네임스페이스 중복 정의 방지)
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h" // 길이 비례 파라미터용 런타임 인스턴스
 #include "UObject/ConstructorHelpers.h" // 기본 머티리얼 로드(FObjectFinder)
 
 namespace
 {
-	// 접촉 후보 노드들 중 가장 손(node 0)에 가까운 유효 인덱스.
-	int32 FindHeadValidNodeIndex(const TArray<int32>& NodeIndices, const FRopeSimState& Sim)
-	{
-		int32 HeadNodeIndex = INDEX_NONE;
-		for (const int32 NodeIndex : NodeIndices)
-		{
-			if (!Sim.Positions.IsValidIndex(NodeIndex))
-			{
-				continue;
-			}
-
-			if (HeadNodeIndex == INDEX_NONE || NodeIndex < HeadNodeIndex)
-			{
-				HeadNodeIndex = NodeIndex;
-			}
-		}
-		return HeadNodeIndex;
-	}
-
 	// Releasing 진입 시 Free 복귀까지의 쿨다운(초). Abort/Hold 실패/수동 해제 공통.
 	constexpr float ReleaseCooldownSeconds = 0.08f;
 
@@ -85,26 +66,6 @@ namespace
 		case ERopePhase::GuidedThrow:return TEXT("GuidedThrow");
 		case ERopePhase::Releasing:  return TEXT("Releasing");
 		default:                     return TEXT("?");
-		}
-	}
-
-	FVector ArcPreviewDirectionAtAlpha(const FRopeArcPreviewData& Preview, float Alpha)
-	{
-		const FVector Aim = FRopeWhipGuide::SafeNormalOr(Preview.AimDir, FVector::ForwardVector);
-		FVector Up = Preview.GuideUp - FVector::DotProduct(Preview.GuideUp, Aim) * Aim;
-		Up = FRopeWhipGuide::SafeNormalOr(Up, FVector::UpVector);
-
-		const float ClampedAlpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
-		const float SweepRadians = FMath::DegreesToRadians(FMath::Clamp(Preview.SweepAngleDegrees, 1.0f, 180.0f));
-		const float Angle = SweepRadians * (1.0f - ClampedAlpha);
-		return (Aim * FMath::Cos(Angle) + Up * FMath::Sin(Angle)).GetSafeNormal();
-	}
-
-	void SetPreviewFailureReason(FString* OutFailureReason, const FString& Reason)
-	{
-		if (OutFailureReason)
-		{
-			*OutFailureReason = Reason;
 		}
 	}
 
@@ -272,7 +233,7 @@ bool URopeComponent::FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, 
 	for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
 	{
 		const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
-		const FVector Direction = ArcPreviewDirectionAtAlpha(Preview, AngleAlpha);
+		const FVector Direction = RopeMath::ArcDirectionAtAlpha(Preview.AimDir, Preview.GuideUp, Preview.SweepAngleDegrees, AngleAlpha);
 		if (!Direction.IsNearlyZero())
 		{
 			PreviewBounds += Preview.Origin + Direction * Preview.Radius;
@@ -296,7 +257,7 @@ bool URopeComponent::FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, 
 	for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
 	{
 		const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
-		const FVector Direction = ArcPreviewDirectionAtAlpha(Preview, AngleAlpha);
+		const FVector Direction = RopeMath::ArcDirectionAtAlpha(Preview.AimDir, Preview.GuideUp, Preview.SweepAngleDegrees, AngleAlpha);
 		if (Direction.IsNearlyZero())
 		{
 			continue;
@@ -466,7 +427,7 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 	const bool bBuilt = BuildWrappingPreview(OutPreview);
 	if (!bBuilt)
 	{
-		SetPreviewFailureReason(OutFailureReason,
+		RopeMath::SetPreviewFailureReason(OutFailureReason,
 			FString::Printf(TEXT("active phase preview failed (phase=%s)"), PhaseName(Phase)));
 	}
 	return bBuilt;
@@ -481,7 +442,7 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	// Flight 이후 phase는 이미 실제 접촉/감김 상태가 있으므로 기존 표시용 BuildWrappingPreview 경로를 쓴다.
 	if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing)
 	{
-		SetPreviewFailureReason(OutFailureReason,
+		RopeMath::SetPreviewFailureReason(OutFailureReason,
 			FString::Printf(TEXT("prepared preview rejected: phase=%s"), PhaseName(Phase)));
 		return false;
 	}
@@ -1739,7 +1700,7 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 	FRopeWrapState Seed;
 	Seed.BoneName = ContactTracker.CandidateBone;
 	Seed.Mesh = ContactTracker.CandidateMesh;
-	const int32 NodeIndex = FindHeadValidNodeIndex(ContactTracker.CandidateNodes, Sim);
+	const int32 NodeIndex = RopeMath::HeadValidNodeIndex(ContactTracker.CandidateNodes, Sim.Positions);
 	if (NodeIndex != INDEX_NONE)
 	{
 		FRopeLatchNode Latch;
