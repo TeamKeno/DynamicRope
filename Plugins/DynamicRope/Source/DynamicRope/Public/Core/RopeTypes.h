@@ -689,31 +689,6 @@ enum class ERopeSwingPlane : uint8
 	CustomNormal UMETA(DisplayName = "Custom Plane Normal")
 };
 
-/** 현재 런타임 미사용. 나중에 swing arc의 시작 방향을 어떻게 정의할지 고를 때 쓸 자리만 미리 열어둔다. */
-UENUM(BlueprintType)
-enum class ERopeSwingStartMode : uint8
-{
-	FrameAngle UMETA(DisplayName = "Frame Angle"),
-	RopePose UMETA(DisplayName = "Rope Pose"),
-	AnimationVector UMETA(DisplayName = "Animation Vector")
-};
-
-/** 현재 런타임 미사용. angle 폴리싱 때 시작 방향/각도/애니메이션 벡터를 한 덩어리로 넘기기 위한 초안이다. */
-USTRUCT(BlueprintType)
-struct FRopeSwingArcDraft
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Draft")
-	ERopeSwingStartMode StartMode = ERopeSwingStartMode::FrameAngle;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Draft", meta = (ClampMin = "0.0", ClampMax = "180.0", Units = "deg"))
-	float ArcAngleDegrees = 180.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Draft")
-	FVector AnimationStartDirection = FVector::ZeroVector;
-};
-
 /** throw 순간 Wielder/Component가 계산해 넘기는 런타임 값. 설정값(FRopeThrowParams)과 분리한다. */
 USTRUCT(BlueprintType)
 struct FRopeThrowContext
