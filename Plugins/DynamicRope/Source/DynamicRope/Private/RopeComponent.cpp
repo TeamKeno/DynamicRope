@@ -316,7 +316,7 @@ bool URopeComponent::BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) cons
 		return FRopeThrowPreviewBuilder::BuildFlightWrappingPreview(Input, OutPreview);
 	}
 
-	const USkeletalMeshComponent* Mesh = nullptr;
+	const USceneComponent* Mesh = nullptr;
 	FName Bone = NAME_None;
 	FRopeSurfaceAnchor LatchAnchor;
 
@@ -1330,7 +1330,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 	{
 		Snapshot.bHasWrapped = true;
 		Snapshot.WrapBone = Wrap.BoneName;
-		const USkeletalMeshComponent* Mesh = Wrap.Mesh.Get();
+		const USceneComponent* Mesh = Wrap.Mesh.Get();
 		Snapshot.MeshName = Mesh ? Mesh->GetName() : TEXT("None");
 		Snapshot.Latched = Wrap.Latched;
 		Snapshot.WrapTension = Wrap.Tension;
@@ -1751,7 +1751,7 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 			}
 		}
 
-		const USkeletalMeshComponent* Mesh = Seed.Mesh.Get();
+		const USceneComponent* Mesh = Seed.Mesh.Get();
 		if (!Mesh && LatchCandidate)
 		{
 			Mesh = LatchCandidate->Mesh;
@@ -1796,7 +1796,7 @@ void URopeComponent::StartWrappingFromContacting()
 
 	// 감길 메시는 접촉에서 확정된다(FRopeContact.SourceMesh → seed). 여기 비어 있으면 시드가
 	// 비정상인 것 — owner 메시로 때우면 cross-actor에서 엉뚱한 본에 붙으므로 폴백 없이 복귀한다.
-	const USkeletalMeshComponent* Mesh = PendingWrapSeed.Mesh.Get();
+	const USceneComponent* Mesh = PendingWrapSeed.Mesh.Get();
 	if (!Mesh || PendingWrapSeed.BoneName.IsNone() || PendingWrapSeed.Latched.Num() == 0)
 	{
 		SetPhase(ERopePhase::Flight, TEXT("invalid wrapping seed"));
@@ -1921,7 +1921,7 @@ FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 
 void URopeComponent::CommitWrapping()
 {
-	const USkeletalMeshComponent* Mesh = WrappingPhase.State.Mesh.Get();
+	const USceneComponent* Mesh = WrappingPhase.State.Mesh.Get();
 
 	//Wrapping 정보가 적절하지 않으면 바로 releasing
 	if (!Mesh || WrappingPhase.State.BoneName.IsNone() || WrappingPhase.State.Anchors.Num() == 0)
@@ -2172,7 +2172,9 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	const float StepLen = (MaxStep > 0.0f) ? FMath::Min(Overshoot * Response, MaxStep) : (Overshoot * Response);
 	const FVector Correction = DirToAim * StepLen;
 
-	USkeletalMeshComponent* Mesh = const_cast<USkeletalMeshComponent*>(WrapController.State.Mesh.Get());
+	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화). Pull/Tether는 스켈레탈 물리 본 대상이므로
+	// 스켈레탈로 Cast — 정적 대상이면 null이라 아래에서 조기 반환한다(정적 기둥엔 힘을 인가하지 않음).
+	USkeletalMeshComponent* Mesh = const_cast<USkeletalMeshComponent*>(Cast<USkeletalMeshComponent>(WrapController.State.Mesh.Get()));
 	if (!Mesh)
 	{
 		return;
@@ -2216,11 +2218,20 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	}
 }
 
+USkeletalMeshComponent* URopeComponent::GetWrappedMesh() const
+{
+	// State.Mesh는 USceneComponent(정적 랩 대비 일반화). "스켈레탈 메시" 반환 계약 유지 —
+	// 정적 대상이면 Cast 실패로 null(대상 액터 반응은 호출자가 GetOwner로 이어감).
+	return const_cast<USkeletalMeshComponent*>(Cast<USkeletalMeshComponent>(WrapController.State.Mesh.Get()));
+}
+
 void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample& Pull)
 {
 	// wrap 대상 mesh(cross-actor 가능). 계약상 로프는 대상을 읽기만 하므로 weak가 const지만,
 	// Pull은 의도된 게임플레이 개입(힘 인가)이라 여기서만 명시적으로 non-const로 푼다.
-	USkeletalMeshComponent* Mesh = const_cast<USkeletalMeshComponent*>(WrapController.State.Mesh.Get());
+	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화). Pull/Tether는 스켈레탈 물리 본 대상이므로
+	// 스켈레탈로 Cast — 정적 대상이면 null이라 아래에서 조기 반환한다(정적 기둥엔 힘을 인가하지 않음).
+	USkeletalMeshComponent* Mesh = const_cast<USkeletalMeshComponent*>(Cast<USkeletalMeshComponent>(WrapController.State.Mesh.Get()));
 	if (!Mesh)
 	{
 		return;
@@ -2294,7 +2305,7 @@ bool URopeComponent::ComputeTensionSlack(float& OutSlack, float& OutStraightDist
 		}
 
 		OutWorld = Sim.Positions[OutNodeIndex];
-		const USkeletalMeshComponent* Mesh = Anchor.Mesh.Get();
+		const USceneComponent* Mesh = Anchor.Mesh.Get();
 		if (Mesh && !Anchor.Bone.IsNone())
 		{
 			const FTransform BoneXform = Mesh->GetSocketTransform(Anchor.Bone);
@@ -2320,7 +2331,7 @@ bool URopeComponent::ComputeTensionSlack(float& OutSlack, float& OutStraightDist
 			if (Sim.Positions.IsValidIndex(AnchorNodeIndex))
 			{
 				AnchorWorld = Sim.Positions[AnchorNodeIndex];
-				if (const USkeletalMeshComponent* Mesh = WrapController.State.Mesh.Get())
+				if (const USceneComponent* Mesh = WrapController.State.Mesh.Get())
 				{
 					const FName Bone = Latch.Bone.IsNone() ? WrapController.State.BoneName : Latch.Bone;
 					if (!Bone.IsNone())

@@ -15,7 +15,9 @@
 #include "CoreMinimal.h"
 #include "Core/RopeTypes.h"
 
-class USkeletalMeshComponent;
+// 랩 대상 추상화(Decision 0): mesh 파라미터를 USceneComponent로 일반화. 스켈레탈 그래프 API가 필요한
+// 함수(축/후보 본)는 .cpp 내부에서 Cast<USkeletalMeshComponent>로 되찾고, 정적이면 단일 본으로 폴백한다.
+class USceneComponent;
 class IRopeCollider;
 
 class DYNAMICROPE_API FRopeWrappingPhase
@@ -41,7 +43,7 @@ public:
 	 * 경로 빌드를 개시한다(첫 경로점+앵커 확보까지). 성공 시 안정 추적도 초기화한다.
 	 * @return 경로 빌드를 시작할 수 없으면 false — 호출자는 상태를 버리고 Flight로 돌아가야 한다.
 	 */
-	bool Begin(const FRopeSurfaceAnchor& LatchAnchor, const USkeletalMeshComponent* Mesh, FName Bone,
+	bool Begin(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
 		float Duration, const FRopeSimState& Sim, const FContext& Ctx);
 
 	/** wrapping을 계속할 수 있는 상태인가(활성 + mesh 생존 + bone 유효). */
@@ -76,13 +78,13 @@ public:
 	 * 현재 앵커들로 Wrapped 핸드오프용 시드를 조립한다(FRopeWrapController::BeginWrap 입력).
 	 * 유효 노드가 없으면 Anchors가 빈 시드가 반환된다 — 호출자가 검사해 abort한다.
 	 */
-	FRopeWrapState BuildCommitSeed(const FRopeSimState& Sim, const USkeletalMeshComponent* Mesh) const;
+	FRopeWrapState BuildCommitSeed(const FRopeSimState& Sim, const USceneComponent* Mesh) const;
 
 	/** abort 시 앵커 노드들의 솔버 복귀(InvMass=1 + Prev=Pos 튐 방지)를 OutFrame에 담는다. */
 	void ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
 	/** Builds a complete target centerline using the same helix/vector-field path code as runtime wrapping. */
-	bool BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor, const USkeletalMeshComponent* Mesh, FName Bone,
+	bool BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
 		const FRopeSimState& Sim, const FContext& Ctx, TArray<FVector>& OutCenterline) const;
 
 private:
@@ -127,21 +129,21 @@ private:
 		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;
 
 	void OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
-		const USkeletalMeshComponent* Mesh, FVector& InOutAxisDirection) const;
+		const USceneComponent* Mesh, FVector& InOutAxisDirection) const;
 
 	/** SurfaceVectorField 후보 본 수집. parent/child graph를 제한 비용 탐색해 전환 비용을 함께 넘긴다. */
-	void GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USkeletalMeshComponent* Mesh,
+	void GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USceneComponent* Mesh,
 		TArray<FSurfaceVectorFieldBoneCandidate>& OutCandidates, const FContext& Ctx) const;
 
 	/** 후보 본들의 표면 projection을 graph 비용/hysteresis와 함께 점수화해 path point의 Bone/Mesh를 선택한다. */
-	bool ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USkeletalMeshComponent* Mesh,
+	bool ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USceneComponent* Mesh,
 		const FRopeSimState& Sim, const FContext& Ctx,
 		FName PreviousBone, float DistanceSinceLastTransition, const FVector& RopeNodeWorld,
 		const FVector& PreviousNormalWorld, const FVector& PreviousTangentWorld,
 		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
-		FVector& InOutCircumferenceDir, FName& InOutBone, const USkeletalMeshComponent*& OutMesh) const;
+		FVector& InOutCircumferenceDir, FName& InOutBone, const USceneComponent*& OutMesh) const;
 
-	bool ProjectWrapPointToSurface(FName Bone, const USkeletalMeshComponent* Mesh,
+	bool ProjectWrapPointToSurface(FName Bone, const USceneComponent* Mesh,
 		const FRopeSimState& Sim, const FContext& Ctx,
 		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld) const;
 

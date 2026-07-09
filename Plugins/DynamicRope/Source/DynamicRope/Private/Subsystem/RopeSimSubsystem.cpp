@@ -633,7 +633,7 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 		{
 			continue; // 귀속 불가(비-스켈레탈 collider) — 캡처 대상 아님.
 		}
-		const USkeletalMeshComponent* Mesh = A.Mesh.Get(); // weak — 지연 중 파괴됐으면 null(판정은 bone으로 진행).
+		const USceneComponent* Mesh = A.Mesh.Get(); // weak — 지연 중 파괴됐으면 null(판정은 bone으로 진행).
 
 		// 병합: 같은 (node, bone, mesh) 후보가 있으면 SourceMask OR + Source 우선순위 갱신, 새 후보는 추가 안 함.
 		FRopeContactCandidate* Existing = nullptr;
@@ -833,7 +833,7 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 	auto MakeAttribution = [](IRopeCollider* Collider)
 		{
 			URopeComponent::FGpuColliderAttribution Attr;
-			const USkeletalMeshComponent* Mesh = nullptr;
+			const USceneComponent* Mesh = nullptr;
 			Collider->GetGPUAttribution(Attr.Bone, Mesh);
 			Attr.Mesh = Mesh;
 			return Attr;
@@ -851,7 +851,7 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			}
 			bWarnedGpuUnrepresentedCollider = true;
 			FName Bone = NAME_None;
-			const USkeletalMeshComponent* Mesh = nullptr;
+			const USceneComponent* Mesh = nullptr;
 			Collider->GetGPUAttribution(Bone, Mesh);
 			UE_LOG(LogRopeCollision, Warning,
 				TEXT("[%s] A gathered rope collider has no GPU representation (GetGPUCapsule/SDF/Box/Convex all false) ")

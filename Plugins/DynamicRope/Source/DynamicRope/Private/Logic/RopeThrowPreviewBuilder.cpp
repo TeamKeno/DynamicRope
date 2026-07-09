@@ -295,7 +295,7 @@ namespace
 	}
 
 	void BuildPreparedAnchorsFromCenterline(const TArray<FVector>& Centerline, const FRopeContactCandidate& Candidate,
-		const USkeletalMeshComponent* Mesh, TArray<FRopeSurfaceAnchor>& OutAnchors)
+		const USceneComponent* Mesh, TArray<FRopeSurfaceAnchor>& OutAnchors)
 	{
 		OutAnchors.Reset();
 		if (!Mesh || Candidate.Bone.IsNone())
@@ -332,7 +332,7 @@ namespace
 		FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason)
 	{
 		OutPrepared.Reset();
-		const USkeletalMeshComponent* Mesh = Candidate.Mesh;
+		const USceneComponent* Mesh = Candidate.Mesh;
 		if (!Candidate.bValid || !Mesh || Candidate.Bone.IsNone() ||
 			!SourceSim.Positions.IsValidIndex(Candidate.NodeIndex))
 		{

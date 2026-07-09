@@ -7,7 +7,7 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "RopeMathHelpers.h" // RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
 
-bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USkeletalMeshComponent* Mesh, FName Bone,
+bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
 	float Duration, const FRopeSimState& Sim, const FContext& Ctx)
 {
 	State.BoneName = Bone;
@@ -205,7 +205,7 @@ bool FRopeWrappingPhase::ShouldAbortFailedShortWrap(const FRopeSimState& Sim, co
 	return OutTurns < MinRequiredTurns;
 }
 
-FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim, const USkeletalMeshComponent* Mesh) const
+FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim, const USceneComponent* Mesh) const
 {
 	FRopeWrapState Seed;
 	Seed.BoneName = State.BoneName;
@@ -246,7 +246,7 @@ void FRopeWrappingPhase::ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNode
 	}
 }
 
-bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor, const USkeletalMeshComponent* Mesh, FName Bone,
+bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
 	const FRopeSimState& Sim, const FContext& Ctx, TArray<FVector>& OutCenterline) const
 {
 	OutCenterline.Reset();
@@ -315,7 +315,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_BeginProgressiveWrapPathBuild);
 
-	const USkeletalMeshComponent* Mesh = State.Mesh.Get();
+	const USceneComponent* Mesh = State.Mesh.Get();
 	if (!Mesh)
 	{
 		Mesh = LatchAnchor.Mesh.Get();
@@ -405,7 +405,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_InitSurfaceVectorFieldProgressivePath);
 
-	const USkeletalMeshComponent* Mesh = LatchAnchor.Mesh.Get();
+	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
 	{
 		Mesh = State.Mesh.Get();
@@ -481,7 +481,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AdvanceSurfaceVectorFieldProgressivePath);
 
-	const USkeletalMeshComponent* Mesh = State.LatchAnchor.Mesh.Get();
+	const USceneComponent* Mesh = State.LatchAnchor.Mesh.Get();
 	if (!Mesh)
 	{
 		Mesh = State.Mesh.Get();
@@ -524,7 +524,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 			const FName CurrentBone = State.PathCurrentBone.IsNone()
 				? State.LatchAnchor.Bone
 				: State.PathCurrentBone;
-			const USkeletalMeshComponent* ProjectedMesh = State.PathCurrentMesh.Get();
+			const USceneComponent* ProjectedMesh = State.PathCurrentMesh.Get();
 			if (!ProjectedMesh)
 			{
 				ProjectedMesh = Mesh;
@@ -635,7 +635,7 @@ bool FRopeWrappingPhase::AppendWrappingAnchorFromPathPoint(int32 PathIndex, cons
 	}
 
 	const FRopeSurfaceAnchor& LatchAnchor = State.LatchAnchor;
-	const USkeletalMeshComponent* Mesh = State.Mesh.Get();
+	const USceneComponent* Mesh = State.Mesh.Get();
 	if (!Mesh)
 	{
 		Mesh = LatchAnchor.Mesh.Get();
@@ -658,7 +658,7 @@ bool FRopeWrappingPhase::AppendWrappingAnchorFromPathPoint(int32 PathIndex, cons
 	// path가 이웃 본 표면으로 넘어가더라도 Wrapped/Hold 단계에서는 한 본에 고정되어 보였다.
 	// Point.Bone이 비어 있는 경우는 AnalyticHelix/legacy fallback으로 보고 latch bone을 사용한다.
 	FName AnchorBone = Point.Bone.IsNone() ? LatchAnchor.Bone : Point.Bone;
-	const USkeletalMeshComponent* AnchorMesh = Point.Mesh.Get();
+	const USceneComponent* AnchorMesh = Point.Mesh.Get();
 	if (!AnchorMesh)
 	{
 		AnchorMesh = Mesh;
@@ -711,7 +711,7 @@ bool FRopeWrappingPhase::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceA
 	FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const
 {
 	//1. Mesh / Bone 확인
-	const USkeletalMeshComponent* Mesh = LatchAnchor.Mesh.Get();
+	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
 	{
 		Mesh = State.Mesh.Get();
@@ -828,7 +828,7 @@ bool FRopeWrappingPhase::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor
 	FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const
 {
 	///1. Mesh와 Bone 확인
-	const USkeletalMeshComponent* Mesh = LatchAnchor.Mesh.Get();
+	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
 	{
 		Mesh = State.Mesh.Get();
@@ -938,7 +938,7 @@ bool FRopeWrappingPhase::ComputeHelixTurnsAtLastBuiltPoint(const FRopeSimState& 
 	}
 
 	const FRopeSurfaceAnchor& LatchAnchor = State.LatchAnchor;
-	const USkeletalMeshComponent* Mesh = LatchAnchor.Mesh.Get();
+	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
 	{
 		Mesh = State.Mesh.Get();
@@ -989,7 +989,7 @@ bool FRopeWrappingPhase::ComputeHelixTurnsAtLastBuiltPoint(const FRopeSimState& 
 bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor,
 	FVector& OutAxisOrigin, FVector& OutAxisDirection) const
 {
-	const USkeletalMeshComponent* Mesh = LatchAnchor.Mesh.Get();
+	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
 	{
 		Mesh = State.Mesh.Get();
@@ -999,7 +999,10 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 		return false;
 	}
 
-	const FName ParentBone = Mesh->GetParentBone(LatchAnchor.Bone);
+	// 감김 축은 bone→parent 방향이므로 스켈레탈에서만 유도한다. 정적 대상(SkelMesh=null)이면 부모가 없어
+	// 아래 fallback(본 로컬 X축)으로 축을 잡는다.
+	const USkeletalMeshComponent* SkelMesh = Cast<USkeletalMeshComponent>(Mesh);
+	const FName ParentBone = SkelMesh ? SkelMesh->GetParentBone(LatchAnchor.Bone) : NAME_None;
 	const FVector BoneLocation = Mesh->GetSocketTransform(LatchAnchor.Bone).GetLocation();
 	if (!ParentBone.IsNone())
 	{
@@ -1020,14 +1023,15 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 }
 
 void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
-	const USkeletalMeshComponent* Mesh, FVector& InOutAxisDirection) const
+	const USceneComponent* Mesh, FVector& InOutAxisDirection) const
 {
 	if (!Mesh || LatchAnchor.Bone.IsNone())
 	{
 		return;
 	}
 
-	const FName ParentBone = Mesh->GetParentBone(LatchAnchor.Bone);
+	const USkeletalMeshComponent* SkelMesh = Cast<USkeletalMeshComponent>(Mesh);
+	const FName ParentBone = SkelMesh ? SkelMesh->GetParentBone(LatchAnchor.Bone) : NAME_None;
 	if (ParentBone.IsNone())
 	{
 		return;
@@ -1069,7 +1073,7 @@ void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& Latc
 	}
 }
 
-void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USkeletalMeshComponent* Mesh,
+void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USceneComponent* Mesh,
 	TArray<FSurfaceVectorFieldBoneCandidate>& OutCandidates, const FContext& Ctx) const
 {
 	OutCandidates.Reset();
@@ -1078,6 +1082,10 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 		return;
 	}
 
+	// 후보 본 그래프(parent/child) 탐색은 스켈레톤에서만 가능하다. 정적 대상(SkelMesh=null)이면
+	// NumBones=0 + 부모 없음이라 후보는 CurrentBone 하나로 남는다(단일 본 랩 폴백 — 정적은 본 그래프가 없다).
+	const USkeletalMeshComponent* SkelMesh = Cast<USkeletalMeshComponent>(Mesh);
+
 	struct FBoneQueueEntry
 	{
 		FName Bone = NAME_None;
@@ -1085,7 +1093,7 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 		float Cost = 0.0f;
 	};
 
-	const int32 NumBones = Mesh->GetNumBones();
+	const int32 NumBones = SkelMesh ? SkelMesh->GetNumBones() : 0;
 	const int32 MaxCandidateDepth = Ctx.Config.bEnableMultiBoneWrapping
 		? FMath::Max(0, Ctx.Config.MaxBoneTransitionDepth)
 		: 0;
@@ -1177,12 +1185,12 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 			Queue.Add({ Bone, NextDepth, NextCost });
 		};
 
-		AddNeighbor(Mesh->GetParentBone(Entry.Bone));
+		AddNeighbor(SkelMesh ? SkelMesh->GetParentBone(Entry.Bone) : NAME_None);
 
-		for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+		for (int32 BoneIndex = 0; SkelMesh && BoneIndex < NumBones; ++BoneIndex)
 		{
-			const FName BoneName = Mesh->GetBoneName(BoneIndex);
-			if (!BoneName.IsNone() && Mesh->GetParentBone(BoneName) == Entry.Bone)
+			const FName BoneName = SkelMesh->GetBoneName(BoneIndex);
+			if (!BoneName.IsNone() && SkelMesh->GetParentBone(BoneName) == Entry.Bone)
 			{
 				AddNeighbor(BoneName);
 			}
@@ -1190,12 +1198,12 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 	}
 }
 
-bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USkeletalMeshComponent* Mesh,
+bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USceneComponent* Mesh,
 	const FRopeSimState& Sim, const FContext& Ctx,
 	FName PreviousBone, float DistanceSinceLastTransition, const FVector& RopeNodeWorld,
 	const FVector& PreviousNormalWorld, const FVector& PreviousTangentWorld,
 	FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
-	FVector& InOutCircumferenceDir, FName& InOutBone, const USkeletalMeshComponent*& OutMesh) const
+	FVector& InOutCircumferenceDir, FName& InOutBone, const USceneComponent*& OutMesh) const
 {
 	TArray<FSurfaceVectorFieldBoneCandidate> Candidates;
 	GatherSurfaceVectorFieldBoneCandidates(CurrentBone, Mesh, Candidates, Ctx);
@@ -1211,7 +1219,7 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 		FVector TangentWorld = FVector::ForwardVector;
 		FVector CircumferenceDir = FVector::ForwardVector;
 		FName Bone = NAME_None;
-		const USkeletalMeshComponent* Mesh = nullptr;
+		const USceneComponent* Mesh = nullptr;
 		float Distance = 0.0f;
 		float RopeNodeDistance = 0.0f;
 		float GraphCost = 0.0f;
@@ -1366,7 +1374,7 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 	return true;
 }
 
-bool FRopeWrappingPhase::ProjectWrapPointToSurface(FName Bone, const USkeletalMeshComponent* Mesh,
+bool FRopeWrappingPhase::ProjectWrapPointToSurface(FName Bone, const USceneComponent* Mesh,
 	const FRopeSimState& Sim, const FContext& Ctx,
 	FVector& InOutSurfaceWorld, FVector& InOutNormalWorld) const
 {
@@ -1462,7 +1470,7 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 
 	const auto AnchorToPoint = [this](const FRopeSurfaceAnchor& Anchor, FRopeWrapPathPoint& Point) -> bool
 	{
-		const USkeletalMeshComponent* Mesh = Anchor.Mesh.Get();
+		const USceneComponent* Mesh = Anchor.Mesh.Get();
 		if (!Mesh)
 		{
 			Mesh = State.Mesh.Get();

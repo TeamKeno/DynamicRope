@@ -60,7 +60,9 @@ FVector ComputeBoneParentAxis(const FRopeContactCandidate& Candidate)
 		return FVector::ZeroVector;
 	}
 
-	const FName ParentBone = Candidate.Mesh->GetParentBone(Candidate.Bone);
+	// bone→parent 축은 스켈레탈에서만 정의된다. 정적 대상(Cast 실패)이면 축 없음(ZeroVector).
+	const USkeletalMeshComponent* SkelMesh = Cast<USkeletalMeshComponent>(Candidate.Mesh);
+	const FName ParentBone = SkelMesh ? SkelMesh->GetParentBone(Candidate.Bone) : NAME_None;
 	if (ParentBone.IsNone())
 	{
 		return FVector::ZeroVector;

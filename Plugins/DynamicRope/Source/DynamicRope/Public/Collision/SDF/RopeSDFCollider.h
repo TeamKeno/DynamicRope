@@ -10,7 +10,8 @@
 #include "Collision/RopeCollider.h"
 
 struct FRopeBoneSDFVolume;
-class USkeletalMeshComponent;
+// 랩 대상 추상화(Decision 0): 귀속 mesh를 USceneComponent로 일반화. SDF는 스켈레탈만 넘긴다.
+class USceneComponent;
 
 /** 본 로컬 SDF 볼륨 1개에 대한 해석적 collider. v1 / 캡슐과 동일 인터페이스. */
 class DYNAMICROPE_API FRopeSDFCollider : public IRopeCollider
@@ -31,13 +32,13 @@ public:
 	// 이 볼륨이 귀속된 본. FRopeContact.Bone으로 전파된다.
 	FName Bone = NAME_None;
 
-	// 본을 소유한 메시. cross-actor follow를 위해 contact로 전달된다.
-	const USkeletalMeshComponent* SourceMesh = nullptr;
+	// 본을 소유한 메시. cross-actor follow를 위해 contact로 전달된다. 타입은 USceneComponent로 일반화.
+	const USceneComponent* SourceMesh = nullptr;
 
 	FRopeSDFCollider() = default;
 	FRopeSDFCollider(const FRopeBoneSDFVolume* InVolume, const FTransform& InBoneToWorld,
 		const FTransform& InPrevBoneToWorld, float InInvDeltaTime,
-		FName InBone, const USkeletalMeshComponent* InSourceMesh)
+		FName InBone, const USceneComponent* InSourceMesh)
 		: Volume(InVolume), BoneToWorld(InBoneToWorld), PrevBoneToWorld(InPrevBoneToWorld)
 		, InvDeltaTime(InInvDeltaTime), Bone(InBone), SourceMesh(InSourceMesh) {}
 
@@ -53,7 +54,7 @@ public:
 	{
 		OutPrev = PrevBoneToWorld; OutCurr = BoneToWorld; return true;
 	}
-	virtual void GetGPUAttribution(FName& OutBone, const USkeletalMeshComponent*& OutMesh) const override
+	virtual void GetGPUAttribution(FName& OutBone, const USceneComponent*& OutMesh) const override
 	{
 		OutBone = Bone;
 		OutMesh = SourceMesh;

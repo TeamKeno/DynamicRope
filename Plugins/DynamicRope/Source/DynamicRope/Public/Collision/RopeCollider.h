@@ -14,7 +14,8 @@
 #include "CoreMinimal.h"
 #include "Core/RopeTypes.h"
 
-class USkeletalMeshComponent;
+// 랩 대상 추상화(Decision 0): SourceMesh/귀속 mesh를 USceneComponent로 일반화(정적 opt-in 대비).
+class USceneComponent;
 
 /**
  * GPU 솔버(M3)용 SDF collider 뷰. 본 로컬 distance grid + 본→월드 트랜스폼을 런타임 타입 없이 노출한다.
@@ -75,7 +76,7 @@ struct FRopeSurfaceProjection
 	FVector Normal = FVector::UpVector;
 	float Distance = 0.0f;
 	FName Bone = NAME_None;
-	const USkeletalMeshComponent* SourceMesh = nullptr;
+	const USceneComponent* SourceMesh = nullptr;
 };
 
 /** rope solver가 query하는 추상 collider. */
@@ -210,7 +211,7 @@ public:
 	 * 인덱스만 emit하므로, 호출자가 인덱스 → (bone, mesh)를 이걸로 복원한다. FRopeContact.Bone/SourceMesh와
 	 * 동일 값이어야 한다(같은 판정 파이프라인에 먹인다). 기본은 None/null.
 	 */
-	virtual void GetGPUAttribution(FName& OutBone, const USkeletalMeshComponent*& OutMesh) const
+	virtual void GetGPUAttribution(FName& OutBone, const USceneComponent*& OutMesh) const
 	{
 		OutBone = NAME_None;
 		OutMesh = nullptr;
@@ -234,13 +235,14 @@ public:
 	FVector PrevB = FVector::ZeroVector;
 	float   InvDeltaTime = 0.0f;
 
-	// 이 capsule의 bone이 속한 skeletal mesh. 컨택트로 전달되어 wrap이 액터를 넘어서도
-	// *올바른* mesh(잡힌 bone을 소유한 mesh)를 따라갈 수 있게 한다.
-	const USkeletalMeshComponent* SourceMesh = nullptr;
+	// 이 capsule의 bone이 속한 mesh(스켈레탈). 컨택트로 전달되어 wrap이 액터를 넘어서도
+	// *올바른* mesh(잡힌 bone을 소유한 mesh)를 따라갈 수 있게 한다. 타입은 USceneComponent로
+	// 일반화(정적 opt-in 대비) — 캡슐은 스켈레탈만 넘긴다.
+	const USceneComponent* SourceMesh = nullptr;
 
 	FCapsuleCollider() = default;
 	FCapsuleCollider(const FVector& InA, const FVector& InB, float InRadius, FName InBone = NAME_None,
-		const USkeletalMeshComponent* InSourceMesh = nullptr)
+		const USceneComponent* InSourceMesh = nullptr)
 		: A(InA), B(InB), Radius(InRadius), Bone(InBone), PrevA(InA), PrevB(InB), SourceMesh(InSourceMesh) {}
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
@@ -249,7 +251,7 @@ public:
 	virtual FBox GetWorldBounds() const override;
 	virtual bool GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRadius) const override;
 	virtual bool GetGPUCapsuleMotion(FVector& OutPrevA, FVector& OutPrevB, float& OutInvDeltaTime) const override;
-	virtual void GetGPUAttribution(FName& OutBone, const USkeletalMeshComponent*& OutMesh) const override
+	virtual void GetGPUAttribution(FName& OutBone, const USceneComponent*& OutMesh) const override
 	{
 		OutBone = Bone;
 		OutMesh = SourceMesh;

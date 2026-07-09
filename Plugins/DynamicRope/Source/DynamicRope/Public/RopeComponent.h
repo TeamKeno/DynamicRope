@@ -24,6 +24,7 @@ class IRopeColliderProvider;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class USkeletalMeshComponent;
+class USceneComponent; // 랩 대상 추상화(Decision 0): 랩 대상 mesh를 USceneComponent로 일반화
 class FRegisterComponentContext;
 struct FRopeDebugSnapshot;
 
@@ -262,12 +263,10 @@ public:
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
 	/** 현재 감고 있는 스켈레탈 메시(Wrapped 동안 유효, 아니면 null). 대상 액터 반응은 GetOwner()로 이어간다.
-	 *  내부 보관은 const weak이지만 BP는 const 포인터를 못 다뤄 const_cast로 노출한다(읽기 용도). */
+	 *  내부 보관은 이제 const USceneComponent weak(정적 랩 대비 일반화) — 여기서는 스켈레탈만 반환하고,
+	 *  정적 대상이면 null이다. 본문은 Cast가 필요해 .cpp에 정의(헤더 무거운 include 회피). */
 	UFUNCTION(BlueprintPure, Category = "Rope")
-	USkeletalMeshComponent* GetWrappedMesh() const
-	{
-		return const_cast<USkeletalMeshComponent*>(WrapController.State.Mesh.Get());
-	}
+	USkeletalMeshComponent* GetWrappedMesh() const;
 
 	/** 센터라인 노드 수(= NumParticles, 시뮬 초기화 후). */
 	UFUNCTION(BlueprintPure, Category = "Rope")
@@ -349,7 +348,7 @@ protected:
 	 * 있는 대상을 제한할 때 오버라이드. 기본 true(모두 허용). 주의: Wielder의 조준 preview 빌드는 이
 	 * 게이트를 통과하지 않으므로(정적 빌더), 금지 대상이 preview에 보일 수는 있다 — throw가 거부한다.
 	 */
-	virtual bool CanWrapTarget(const USkeletalMeshComponent* Mesh, FName Bone) const { return true; }
+	virtual bool CanWrapTarget(const USceneComponent* Mesh, FName Bone) const { return true; }
 
 	//~ 이벤트 네이티브 훅: 각 델리게이트 브로드캐스트 직전에 호출(엔진 Notify 관례). C++ 서브클래스가
 	//  자기 델리게이트에 바인딩하는 우회 없이 반응할 수 있다.
@@ -513,7 +512,7 @@ private:
 	struct FGpuColliderAttribution
 	{
 		FName Bone = NAME_None;
-		TWeakObjectPtr<const USkeletalMeshComponent> Mesh;
+		TWeakObjectPtr<const USceneComponent> Mesh;
 	};
 	TArray<FGpuColliderAttribution> GpuCapsuleAttribution; // GPU Capsules와 평행
 	TArray<FGpuColliderAttribution> GpuSdfAttribution;     // GPU SDFColliders와 평행

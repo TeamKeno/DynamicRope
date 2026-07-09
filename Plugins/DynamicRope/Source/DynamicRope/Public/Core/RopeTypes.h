@@ -9,7 +9,9 @@
 #include "UObject/WeakObjectPtrTemplates.h"
 #include "RopeTypes.generated.h"
 
-class USkeletalMeshComponent;
+// 랩 대상 추상화(Decision 0): 랩 대상을 실을 수 있는 포인터는 스켈레탈에 국한하지 않고 USceneComponent로
+// 일반화한다(정적/무버블 프롭 opt-in — 피드백 5번). 스켈레탈 경로는 필요 지점에서만 Cast로 되찾는다.
+class USceneComponent;
 
 /** 라이프사이클 단계. Free/Flight/Contacting = 물리(solver). Wrapped/Releasing = 로직(wrap 컨트롤러). */
 UENUM(BlueprintType)
@@ -80,7 +82,7 @@ struct FRopeContact
 	float   Penetration = 0.0f;
 	FVector SurfacePoint = FVector::ZeroVector;
 	FName   Bone = NAME_None;
-	const USkeletalMeshComponent* SourceMesh = nullptr;
+	const USceneComponent* SourceMesh = nullptr;
 	FVector SurfaceVelocity = FVector::ZeroVector;
 };
 
@@ -97,7 +99,7 @@ struct FRopeSurfaceAnchor
 	int32 NodeIndex = INDEX_NONE;
 
 	FName Bone = NAME_None;
-	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
+	TWeakObjectPtr<const USceneComponent> Mesh = nullptr;
 
 	//SDF 표면 기준 bone-local anchor;
 	FVector LocalSurfacePosition = FVector::ZeroVector;
@@ -124,7 +126,7 @@ struct FRopeWrapPathPoint
 	// AnalyticHelix는 기존처럼 latch bone을 넣고, SurfaceVectorField는 projection scoring 결과를 넣는다.
 	// 이후 AppendWrappingAnchorFromPathPoint가 이 값을 기준으로 bone-local anchor를 저장한다.
 	FName Bone = NAME_None;
-	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
+	TWeakObjectPtr<const USceneComponent> Mesh = nullptr;
 
 	float DistanceFromLatch = 0.0f;
 };
@@ -132,7 +134,7 @@ struct FRopeWrapPathPoint
 struct FRopeWrappingState
 {
 	FName BoneName = NAME_None;
-	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
+	TWeakObjectPtr<const USceneComponent> Mesh = nullptr;
 
 	TArray<FRopeSurfaceAnchor> Anchors;
 	FRopeSurfaceAnchor LatchAnchor;
@@ -162,7 +164,7 @@ struct FRopeWrappingState
 	// 마지막으로 떠난 본. 새 후보가 바로 이 본이면 A->B->A 왕복 가능성이 높으므로
 	// scoring 단계에서 ImmediateBoneReturnPenalty를 더해 전환 떨림을 줄인다.
 	FName PathPreviousBone = NAME_None;
-	TWeakObjectPtr<const USkeletalMeshComponent> PathCurrentMesh = nullptr;
+	TWeakObjectPtr<const USceneComponent> PathCurrentMesh = nullptr;
 
 	// 마지막 본 전환 이후 path가 표면을 따라 진행한 거리(cm).
 	// 새 본 후보가 좋아 보여도 MinBoneTransitionPathDistance 전에는 현재 본을 유지해
@@ -212,7 +214,7 @@ struct FRopeWrapState
 	// cross-actor wrap에서는 대상 액터가 Wrapped 도중 파괴될 수 있다. raw 포인터로 보관하면
 	// Hold가 매 프레임 dangling 포인터를 역참조(use-after-free)하므로, 파괴 시 안전하게 null이
 	// 되는 weak 포인터로 보관한다(POD 유지: hard 레퍼런스가 아니라 GC를 막지 않는다).
-	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
+	TWeakObjectPtr<const USceneComponent> Mesh = nullptr;
 
 	bool IsWrapped() const { return Anchors.Num() > 0 || Latched.Num() > 0; }
 	void Reset() { *this = FRopeWrapState(); }
@@ -880,7 +882,7 @@ struct FRopeContactCandidate
 	bool bValid = false;
 	int32 NodeIndex = INDEX_NONE;
 	FName Bone = NAME_None;
-	const USkeletalMeshComponent* Mesh = nullptr;
+	const USceneComponent* Mesh = nullptr;
 	ERopeContactCandidateSource Source = ERopeContactCandidateSource::Actual;
 	uint8 SourceMask = static_cast<uint8>(ERopeContactCandidateSource::Actual);
 
@@ -911,7 +913,7 @@ struct FRopePreparedThrowPreview
 	FRopeSurfaceAnchor LatchAnchor;
 	TArray<FRopeSurfaceAnchor> Anchors;
 
-	TWeakObjectPtr<const USkeletalMeshComponent> Mesh = nullptr;
+	TWeakObjectPtr<const USceneComponent> Mesh = nullptr;
 	FName Bone = NAME_None;
 	double BuildTimeSeconds = 0.0;
 
@@ -948,7 +950,7 @@ struct FRopeGuidedThrowState
 struct FRopeContactTracker
 {
 	FName CandidateBone = NAME_None;
-	const USkeletalMeshComponent* CandidateMesh = nullptr;
+	const USceneComponent* CandidateMesh = nullptr;
 
 	TArray<int32> CandidateNodes;
 	float DwellTime = 0.0f;
@@ -984,7 +986,7 @@ struct FRopeContactTracker
 		}
 
 		TMap<FName, TArray<int32>> NodesByBone;
-		TMap<FName, const USkeletalMeshComponent*> MeshByBone;
+		TMap<FName, const USceneComponent*> MeshByBone;
 		TMap<FName, float> ScoreByBone;
 		TMap<FName, int32> HeadNodeByBone;
 		for (const FRopeContactCandidate& Candidate : Candidates)

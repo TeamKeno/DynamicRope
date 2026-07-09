@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeWrapController.h"
+#include "Core/RopeWrapTarget.h" // FRopeBindingFrame + ResolveBindingWorld (바인딩 배선 seam A)
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -39,12 +40,12 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 
 	// 노드별 최근접 접촉: 이 노드는 어떤 bone 에 닿고 있는가(가장 깊은 침투가 우선)?
 	// 나중에 wrap 이 올바른 mesh 를 따라갈 수 있도록 각 접촉 bone 을 소유한 mesh 를 추적한다.
-	TMap<FName, TArray<int32>>                      NodesByBone;
-	TMap<FName, const USkeletalMeshComponent*>      MeshByBone;
+	TMap<FName, TArray<int32>>               NodesByBone;
+	TMap<FName, const USceneComponent*>      MeshByBone;
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
-		FName                         BestBone = NAME_None;
-		const USkeletalMeshComponent* BestMesh = nullptr;
+		FName                  BestBone = NAME_None;
+		const USceneComponent* BestMesh = nullptr;
 		float                         BestPen = 0.0f;
 		for (const IRopeCollider* Collider : Colliders)
 		{
@@ -140,7 +141,7 @@ void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapSta
 
 	// 붙잡힌 bone 을 소유한 mesh 는 시드에 실려 온다(접촉의 SourceMesh 에서 전파 — cross-actor 포함).
 	// 없으면 잘못된 시드다: 아무것도 latch 하지 않고 상태를 비워 "감긴 척"하는 상태를 남기지 않는다.
-	const USkeletalMeshComponent* Mesh = State.Mesh.Get();
+	const USceneComponent* Mesh = State.Mesh.Get();
 	if (!Mesh)
 	{
 		UE_LOG(LogRopeWrap, Warning, TEXT("BeginWrap aborted: no mesh for bone %s (seed has no mesh) — nodes stay dynamic."),
@@ -205,13 +206,17 @@ void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapSta
 			Anchor.Mesh = Mesh;
 		}
 
-		const USkeletalMeshComponent* AnchorMesh = Anchor.Mesh.Get();
-		if (!AnchorMesh)
+		const USceneComponent* AnchorComp = Anchor.Mesh.Get();
+		if (!AnchorComp)
 		{
-			AnchorMesh = Mesh;
+			AnchorComp = Mesh;
 		}
 
-		const FTransform BoneXform = AnchorMesh->GetSocketTransform(Anchor.Bone);
+		// 바인딩 배선(seam A): 대상 트랜스폼을 단일 지점에서 해석 — 스켈레탈=스키닝 소켓, 정적=컴포넌트 트랜스폼.
+		FRopeBindingFrame Binding;
+		Binding.Component = AnchorComp;
+		Binding.SocketOrBone = Anchor.Bone;
+		const FTransform BoneXform = ResolveBindingWorld(Binding);
 
 		const FVector SurfaceWorld =
 			BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
@@ -248,7 +253,7 @@ bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOver
 	// 영속화된다(cross-actor 대상일 수 있다). 대상 액터가 파괴되면 weak 가 null 이 되어
 	// raw 포인터 역참조(use-after-free) 없이 안전하게 감지된다 — 엉뚱한 bone 으로 노드를
 	// 끌어당기지 않도록 폴백 없이 false 를 반환해 호출자가 release 하게 한다.
-	const USkeletalMeshComponent* Mesh = State.Mesh.Get();
+	const USceneComponent* Mesh = State.Mesh.Get();
 	if (!Mesh)
 	{
 		return false;
@@ -266,14 +271,18 @@ bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOver
 				continue;
 			}
 
-			const USkeletalMeshComponent* AnchorMesh = Anchor.Mesh.Get();
-			if (!AnchorMesh)
+			const USceneComponent* AnchorComp = Anchor.Mesh.Get();
+			if (!AnchorComp)
 			{
-				AnchorMesh = Mesh;
+				AnchorComp = Mesh;
 			}
 
 			const FName Bone = Anchor.Bone.IsNone() ? State.BoneName : Anchor.Bone;
-			const FTransform BoneXform = AnchorMesh->GetSocketTransform(Bone);
+			// 바인딩 배선(seam A): 매 프레임 대상 추종을 단일 지점에서 — 스켈레탈=스키닝 소켓, 정적=컴포넌트 트랜스폼.
+			FRopeBindingFrame Binding;
+			Binding.Component = AnchorComp;
+			Binding.SocketOrBone = Bone;
+			const FTransform BoneXform = ResolveBindingWorld(Binding);
 
 			const FVector SurfaceWorld =
 				BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
