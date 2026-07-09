@@ -425,6 +425,14 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& /*AimD
 
 void URopeWielderComponent::Throw()
 {
+	// 서브클래스 게임 규칙 게이트(스태미나/상태 등). 몽타주 경로의 ThrowNow는 재검사하지 않는다(헤더 계약).
+	if (!CanThrow())
+	{
+		NotifyThrowRejected(ERopeThrowRejectReason::Gated);
+		OnThrowRejected.Broadcast(ERopeThrowRejectReason::Gated);
+		return;
+	}
+
 	if (ThrowMode == ERopeWielderThrowMode::PreviewPathLocked)
 	{
 		// Locked 모드는 "보이는 preview대로만 던진다"가 계약이다.
@@ -433,6 +441,8 @@ void URopeWielderComponent::Throw()
 		{
 			UE_LOG(LogDynamicRope, Log, TEXT("RopeWielder on %s: preview path locked throw rejected (no valid prepared preview)."),
 				*GetNameSafe(GetOwner()));
+			NotifyThrowRejected(ERopeThrowRejectReason::NoPreparedPreview);
+			OnThrowRejected.Broadcast(ERopeThrowRejectReason::NoPreparedPreview);
 			return;
 		}
 
@@ -482,6 +492,8 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 			{
 				UE_LOG(LogDynamicRope, Log, TEXT("RopeWielder on %s: prepared throw ignored (preview is not valid)."),
 					*GetNameSafe(GetOwner()));
+				NotifyThrowRejected(ERopeThrowRejectReason::PreparedInvalid);
+				OnThrowRejected.Broadcast(ERopeThrowRejectReason::PreparedInvalid);
 				return;
 			}
 
@@ -498,12 +510,19 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 				ClearThrowPreview();
 				UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: Rope rejected prepared preview throw."),
 					*GetNameSafe(GetOwner()));
+				NotifyThrowRejected(ERopeThrowRejectReason::RopeRejected);
+				OnThrowRejected.Broadcast(ERopeThrowRejectReason::RopeRejected);
+				return;
 			}
+			NotifyThrown();
+			OnThrown.Broadcast();
 			return;
 		}
 
 		ClearThrowPreview();
 		Rope->ThrowWithContext(BuildThrowContext(AimDir));
+		NotifyThrown();
+		OnThrown.Broadcast();
 	}
 }
 

@@ -46,6 +46,23 @@ enum class ERopeWielderThrowMode : uint8
 	PreviewPathLocked UMETA(DisplayName = "Preview Path Locked")
 };
 
+/** 던지기 입력이 실행되지 못한 사유. OnThrowRejected로 전달된다(UI 피드백/게임 반응용). */
+UENUM(BlueprintType)
+enum class ERopeThrowRejectReason : uint8
+{
+	/** CanThrow() 게이트(서브클래스 게임 규칙 — 스태미나/상태 등)가 거부. */
+	Gated,
+	/** PreviewPathLocked인데 유효한 prepared preview가 없어 입력을 버림. */
+	NoPreparedPreview,
+	/** 실행 시점(몽타주 notify 등)에 보존해 둔 prepared preview가 무효화됨. */
+	PreparedInvalid,
+	/** RopeComponent가 prepared preview throw를 거부함(CanWrapTarget 게이트 포함). */
+	RopeRejected
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FRopeWielderOnThrown);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeWielderOnThrowRejected, ERopeThrowRejectReason, Reason);
+
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeWielderComponent : public UActorComponent
 {
@@ -110,11 +127,7 @@ public:
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
 
 	//~ Preview ------------------------------------------------------------
-	
-	/** */
-	bool bShowThrowPreview = false;
-
-	/** 비어 있으면 owner에서 찾다. */
+	/** 비어 있으면 owner에서 찾는다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopePreviewComponent,/Script/DynamicRope.RopeArcPreviewComponent", DisplayName = "Preview Component"))
 	FComponentReference PreviewComponentReference;
 
@@ -213,9 +226,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowNow();
 
-	/** 현재 Wielder/Rope 설정으로 throw 순간의 origin/frame/속도 context를 만든다. AimDir은 legacy 호환용이며 내부에서는 무시한다. */
+	/** 현재 Wielder/Rope 설정으로 throw 순간의 origin/frame/속도 context를 만든다(던지기당 1회, GT).
+	 *  AimDir은 legacy 호환용이며 내부에서는 무시한다. 조립 규칙을 바꾸려면 오버라이드(확장 훅). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
-	FRopeThrowContext BuildThrowContext(const FVector& AimDir) const;
+	virtual FRopeThrowContext BuildThrowContext(const FVector& AimDir) const;
 
 	/** Legacy API. AimDir은 더 이상 주 방향이 아니며, 실제 방향은 ThrowFrameMode의 Forward를 사용한다. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
@@ -258,12 +272,13 @@ public:
 	void ToggleThrow();
 
 	/** 들고 있는 로프(없으면 null). */
-	UFUNCTION(BlueprintCallable, Category = "Rope")
+	UFUNCTION(BlueprintPure, Category = "Rope")
 	URopeComponent* GetRope() const { return Rope; }
 
-	/** 현재 AimSource 기준 조준 방향(정규화). */
-	UFUNCTION(BlueprintCallable, Category = "Rope")
-	FVector GetAimDirection() const;
+	/** 현재 AimSource 기준 조준 방향(정규화). 던지기/preview 틱에서 호출된다(GT, 콜드).
+	 *  락온·에임 어시스트·AI 조준 등 커스텀 조준은 이걸 오버라이드(확장 훅). */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	virtual FVector GetAimDirection() const;
 
 	/** 입력을 수동으로 바인딩한다. 자동 바인딩이 타이밍상 실패하면(InputComponent 미준비) Pawn의
 	 *  SetupPlayerInputComponent에서 호출하라. 이미 바인딩됐으면 무시. */
@@ -272,6 +287,36 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
 	void SetThrowPreviewEnabled(bool bEnabled);
+
+	/** 던지기 preview가 현재 켜져 있는가(런타임 상태 — BeginPlay 자동 결정 + SetThrowPreviewEnabled 토글). */
+	UFUNCTION(BlueprintPure, Category = "Rope|Preview")
+	bool IsThrowPreviewEnabled() const { return bShowThrowPreview; }
+
+	//~ Events(이벤트) ------------------------------------------------------
+	/** 던지기가 실제로 실행된 직후(즉시/몽타주 notify 경로 모두). */
+	UPROPERTY(BlueprintAssignable, Category = "Rope")
+	FRopeWielderOnThrown OnThrown;
+
+	/** 던지기 입력이 실행되지 못했을 때(사유 포함). PreviewPathLocked의 조용한 입력 버림도 여기로 알린다. */
+	UPROPERTY(BlueprintAssignable, Category = "Rope")
+	FRopeWielderOnThrowRejected OnThrowRejected;
+
+protected:
+	//~ 확장 훅(서브클래스용) ------------------------------------------------
+	// URopeComponent와 같은 원칙: 전부 게임 스레드·프레임 단위(콜드 패스)에서만 불린다.
+	// 훅을 추가할 때는 호출 시점/빈도를 주석에 명시하는 것을 계약의 일부로 삼는다.
+	// (public의 GetAimDirection/BuildThrowContext도 virtual 확장 훅이다.)
+
+	/**
+	 * 던지기 입력 게이트: Throw() 진입 시 1회 호출. false면 입력을 버리고 Gated 사유로 알린다.
+	 * 스태미나/상태 등 게임 규칙으로 던지기를 제한할 때 오버라이드. 기본 true.
+	 * 몽타주 경로의 ThrowNow()(AnimNotify 호출)는 이미 게이트를 통과한 확정 던지기라 재검사하지 않는다.
+	 */
+	virtual bool CanThrow() const { return true; }
+
+	//~ 이벤트 네이티브 훅: 각 델리게이트 브로드캐스트 직전에 호출(엔진 Notify 관례).
+	virtual void NotifyThrown() {}
+	virtual void NotifyThrowRejected(ERopeThrowRejectReason Reason) {}
 
 private:
 	void ResolveRefs();        // Rope/AttachMesh 해석(미설정 시 owner에서 탐색).
@@ -297,6 +342,9 @@ private:
 	void OnReelCompleted();
 
 	bool bInputBound = false;
+	// preview 켜짐 상태(디자이너 설정 아님 — BeginPlay가 PreviewComponent 유무로 자동 결정하고
+	// SetThrowPreviewEnabled가 토글). 조회는 IsThrowPreviewEnabled().
+	bool bShowThrowPreview = false;
 	float PreviewUpdateCooldown = 0.0f;
 	bool bLastPreviewBuildSucceeded = false;
 	bool bHasLastPreviewBuildResult = false;
