@@ -9,21 +9,16 @@
 #include "Subsystem/RopeDebugSubsystem.h"
 #include "GameFramework/Actor.h"
 #include "RopeTubeBuilder.h"       // RopeGPU::TubeRingBucket / MaxTubeRings — GPU 튜브 경로/버킷 진단
-#include "HAL/IConsoleManager.h"   // r.DynamicRope.TubeSmoothing(Subdiv) 조회
 #include "DrawDebugHelpers.h"      // DrawDebug*(SDPG_Foreground) — 콜라이더 전경 오버레이(에디터 셀렉션처럼 위에 그림)
 
 namespace
 {
-	// GPU 튜브 경로/버킷을 로프 노드 수 + Subdiv(CVar)로 도출한다 — 프록시의 bUseGpuTube 판정과 동일 수식
-	// (NumRings=(NumNodes-1)*Subdiv+1, NumRings<=MaxTubeRings면 GPU). 렌더 스레드 프록시 상태를 크로스스레드로
-	// 읽지 않고 게임 스레드에서 재현(결정적). 버킷 표시 = 실제 디스패치가 고르는 스레드그룹 크기.
-	FString TubeDiagString(int32 NumNodes)
+	// GPU 튜브 경로/버킷을 로프 노드 수 + Subdiv(로프의 TubeSmoothingSubdiv)로 도출한다 — 프록시의 bUseGpuTube
+	// 판정과 동일 수식(NumRings=(NumNodes-1)*Subdiv+1, NumRings<=MaxTubeRings면 GPU). 렌더 스레드 프록시 상태를
+	// 크로스스레드로 읽지 않고 게임 스레드에서 재현(결정적). 버킷 표시 = 실제 디스패치가 고르는 스레드그룹 크기.
+	FString TubeDiagString(int32 NumNodes, int32 WantedSubdiv)
 	{
-		int32 Subdiv = 3;
-		if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.DynamicRope.TubeSmoothing")))
-		{
-			Subdiv = FMath::Clamp(CVar->GetInt(), 1, 8);
-		}
+		int32 Subdiv = FMath::Clamp(WantedSubdiv, 1, 8);
 		const int32 Nodes = FMath::Max(2, NumNodes);
 		// 프록시(RopeComputeTubeSubdiv)와 동일하게 Subdiv를 링 상한에 맞춰 자동 하향 → 실제 사용 버킷/링을 표시.
 		const int32 MaxForGpu = (Nodes > 2) ? FMath::Max(1, (RopeGPU::MaxTubeRings() - 1) / (Nodes - 1)) : Subdiv;
@@ -219,7 +214,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 	AddTextLine(FString::Printf(
 		TEXT("  {grey}gpu: solver=%s{grey} tube=%s"),
 		Rope.IsGpuSteppedThisFrame() ? TEXT("{green}on") : TEXT("{red}cpu-fallback"),
-		*TubeDiagString(Points.Num())));
+		*TubeDiagString(Points.Num(), Rope.TubeSmoothingSubdiv)));
 
 	//~ centerline(라이브 위치/페이즈) -----------------------------------
 	if (HasView(EView::Centerline))

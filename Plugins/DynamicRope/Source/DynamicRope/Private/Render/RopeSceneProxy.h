@@ -158,10 +158,11 @@ private:
 	uint32 RopeId = 0;
 
 	int32 NumNodes;  // 시뮬 센터라인 노드 수(= Component->NumParticles). Data.Points가 이 개수여야 한다.
-	int32 Subdiv;    // 렌더 튜브 세그먼트당 Catmull-Rom 서브분할(1=off). r.DynamicRope.TubeSmoothing.
+	int32 Subdiv;    // 렌더 튜브 세그먼트당 Catmull-Rom 서브분할(1=off). Component->TubeSmoothingSubdiv(링 상한 자동 하향).
 	int32 NumRings;  // 렌더 링(스무딩된 센터라인) 수 = (NumNodes-1)*Subdiv+1. vertex/index 토폴로지 기준.
 	int32 NumSides;
 	float Radius;
-	float SmoothParam; // Catmull-Rom knot α(0=uniform, 0.5=centripetal). r.DynamicRope.TubeSmoothParam. 생성 시 1회.
+	float SmoothParam; // Catmull-Rom knot α(0=uniform, 0.5=centripetal). Component->TubeSmoothingAlpha. 생성 시 1회.
+	bool  bWriteVelocity; // velocity 버퍼 기록 여부(UDynamicRopeSettings::bWriteVelocity 스냅샷). GetViewRelevance가 읽음.
 	bool  bHasData = false;
 };

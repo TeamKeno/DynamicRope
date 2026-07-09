@@ -73,4 +73,14 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ToolTip = "WorldStatic 외에 WorldDynamic 바디도 수집합니다(움직이는 플랫폼/문 등). 이전 프레임 트랜스폼으로 표면 속도/CCD 처리."))
 	bool bIncludeWorldDynamic = false;
+
+	/**
+	 * 로프 튜브가 velocity 버퍼에 기록할지. 로프는 매 프레임 정점을 in-place 갱신하지만 per-vertex 변형
+	 * velocity가 없어(Movable transform 기반 velocity만 찍힘) 빠른 이동 프레임에 per-object 모션블러가
+	 * 로프를 번지게 한다(잔상). 기본 false = velocity 미출력 → 모션블러 대상에서 제외. 트레이드오프:
+	 * false면 TSR이 이 픽셀을 카메라 재투영으로 처리해 정지 카메라 + 빠른 로프에서 약한 TSR 고스팅이
+	 * 생길 수 있다 → true로 A/B 비교. 씬 프록시 생성 시 1회 읽힌다(변경은 재PIE/렌더 상태 재생성 후 반영).
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Rendering", meta = (ToolTip = "로프 튜브의 velocity 버퍼 기록 여부. 끄면(기본) 빠른 이동 시 모션블러 잔상이 사라지고, 켜면 레거시(velocity 출력) 동작. 정지 카메라+빠른 로프의 TSR 고스팅과의 트레이드오프 A/B용."))
+	bool bWriteVelocity = false;
 };

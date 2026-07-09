@@ -101,8 +101,8 @@ public:
 	float GetWhipElapsed() const { return WhipGuide.GetElapsed(); }
 
 	//~ Render(렌더) ------------------------------------------------------
-	// Radius/NumSides는 씬 프록시 생성 시 토폴로지로 굳는다 — 런타임 쓰기는 프록시 재생성 전까지
-	// 반영되지 않아 BlueprintReadOnly(에디터 변경은 렌더 상태 재생성으로 반영됨).
+	// 아래 렌더 값들(Radius/NumSides/TubeSmoothing*)은 씬 프록시 생성 시 1회 읽혀 굳는다 — 런타임 쓰기는
+	// 프록시 재생성 전까지 반영되지 않아 BlueprintReadOnly(에디터 변경은 렌더 상태 재생성으로 반영됨).
 
 	/** 시각적 tube 반지름(cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (ClampMin = "0.1", Units = "cm"))
@@ -111,6 +111,20 @@ public:
 	/** tube 단면의 변 개수. 높을수록 더 둥글어진다. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (ClampMin = "3", ClampMax = "32"))
 	int32 NumSides = 8;
+
+	/** 렌더 튜브 스무딩: 세그먼트당 Catmull-Rom 서브분할 수(1=끔). 시뮬 노드는 그대로 두고 렌더 센터라인만
+	 *  이웃 노드로 곡률을 추정해 매끄럽게 편다(물리와 분리 — 렌더 전용). 기본 1인 이유: 보간 링은 노드
+	 *  폴리라인 바깥으로 부풀 수 있어(특히 벽을 짚는 구간) 노드가 촘촘하면 직선 연결이 더 정확하다.
+	 *  성긴 로프만 올려 둥글게 보이게 하고, 오버슈트는 TubeSmoothingAlpha(centripetal)로 줄인다.
+	 *  NumRings=(NumParticles-1)*Subdiv+1이 GPU 튜브 링 상한을 넘으면 프록시가 자동 하향한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 TubeSmoothingSubdiv = 1;
+
+	/** 렌더 튜브 스무딩의 Catmull-Rom knot α: 0=uniform, 0.5=centripetal(급한 코너에서 접선 오버슈트↓ —
+	 *  벽을 짚는 구간의 중간 링이 벽 밖으로 덜 부푼다), 1=chordal. CPU 스무딩과 GPU resident 스무딩이
+	 *  같은 값을 써 렌더가 일관된다. TubeSmoothingSubdiv=1이면 효과 없음. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TubeSmoothingAlpha = 0.5f;
 
 	/** rope tube에 적용되는 material. 설정하지 않으면 엔진 기본 material을 사용한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render")

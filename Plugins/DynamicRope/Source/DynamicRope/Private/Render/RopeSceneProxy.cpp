@@ -17,42 +17,14 @@
 #include "Subsystem/RopeSimSubsystem.h"
 #include "RHICommandList.h"         // FRHITransitionInfo
 #include "RHI.h"                    // GDynamicRHI
-#include "HAL/IConsoleManager.h"
 #include "Misc/App.h"               // FApp::CanEverRender
+#include "Settings/DynamicRopeSettings.h" // bWriteVelocity — 프록시 생성 시 1회 스냅샷
 
-// 모션블러 잔상 대응. 로프는 매 프레임 정점을 in-place로 갱신하지만 per-vertex 변형 velocity를 만들지
-// 못한다(prev-position 스트림 없음). Movable이라 DrawsVelocity()==true가 되면 transform 기반 velocity만
-// 찍혀 velocity 패스에 들어가고, 빠르게 이동하는 프레임에 per-object 모션블러가 로프를 번지게 한다(잔상).
-// 0(기본)=velocity 미출력 → 모션블러 대상에서 제외. 1=레거시(velocity 출력, 빠른 이동 시 모션블러).
-// 트레이드오프: 0이면 TSR이 이 픽셀을 카메라 재투영으로 처리하므로 정지 카메라 + 빠른 로프에서 약한
-// TSR 고스팅이 생길 수 있다 → 1로 토글해 A/B 비교 가능. GetViewRelevance(렌더 스레드)에서 읽는다.
-static TAutoConsoleVariable<int32> CVarRopeWriteVelocity(
-	TEXT("r.DynamicRope.WriteVelocity"),
-	0,
-	TEXT("DynamicRope: 0=velocity 미출력(모션블러 잔상 제거, 기본), 1=velocity 출력(레거시, 빠른 이동 시 모션블러)."),
-	ECVF_RenderThreadSafe);
-
-// 렌더 튜브 스무딩: 세그먼트당 Catmull-Rom 서브분할 수(1=off=노드당 링 1개, 기본 1=끔). 시뮬 노드는 그대로
-// 두고 렌더 센터라인만 이웃 노드로 곡률을 추정해 매끄럽게 편다(물리와 분리 → 리스크 0). 기본 1인 이유: 보간
-// 링은 노드 폴리라인 바깥으로 부풀 수 있어(특히 벽을 짚는 구간) 노드가 촘촘하면 직선 연결이 더 정확하다.
-// 성긴 로프를 둥글게 보이려면 올리고, 이때 오버슈트는 r.DynamicRope.TubeSmoothParam(centripetal)로 줄인다.
-// 링 수/토폴로지가 바뀌므로 proxy 생성 시 1회 읽는다 → 런타임 토글은 렌더 상태 재생성(재PIE/가시성 토글) 후
-// 반영. resident 튜브(노드 직독)는 GPU에서 직접 스무딩하므로 Subdiv>1이어도 유지되고, 비-resident 프레임만
+// 렌더 튜닝 값의 출처: 튜브 스무딩(Subdiv/α)은 로프별 UPROPERTY(URopeComponent::TubeSmoothingSubdiv/
+// TubeSmoothingAlpha), velocity 출력 여부는 프로젝트 설정(UDynamicRopeSettings::bWriteVelocity).
+// 셋 다 proxy 생성 시 1회 스냅샷 — 변경은 렌더 상태 재생성(에디터 프로퍼티 편집/재PIE) 후 반영.
+// resident 튜브(노드 직독)는 GPU에서 직접 스무딩하므로 Subdiv>1이어도 유지되고, 비-resident 프레임만
 // CPU 스무딩 후 업로드한다.
-static TAutoConsoleVariable<int32> CVarRopeTubeSmoothing(
-	TEXT("r.DynamicRope.TubeSmoothing"),
-	1,
-	TEXT("DynamicRope: 렌더 튜브 Catmull-Rom 서브분할(세그먼트당). 1=off(기본). 물리 무관(렌더 전용)."),
-	ECVF_Default);
-
-// 렌더 튜브 스무딩의 Catmull-Rom knot 매개변수 α. 0=uniform(구 동작), 0.5=centripetal(급한 코너에서 접선
-// 오버슈트↓ → 벽을 짚는 구간의 중간 링이 벽 밖으로 부풀지 않고 더 붙는다), 1=chordal. Subdiv처럼 렌더 전용
-// (물리 무관)이며 proxy 생성 시 1회 읽는다. CPU 스무딩과 GPU resident 스무딩이 같은 값을 써 렌더가 일관.
-static TAutoConsoleVariable<float> CVarRopeTubeSmoothParam(
-	TEXT("r.DynamicRope.TubeSmoothParam"),
-	0.5f,
-	TEXT("DynamicRope: 렌더 튜브 Catmull-Rom knot α(0=uniform, 0.5=centripetal, 1=chordal). 렌더 전용."),
-	ECVF_Default);
 
 void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
@@ -174,13 +146,13 @@ SIZE_T FRopeSceneProxy::GetTypeHash() const
 	return reinterpret_cast<size_t>(&UniquePointer);
 }
 
-// 렌더 튜브 Subdiv 결정: CVar 값(1..8)을 쓰되, NumRings=(NumNodes-1)*Subdiv+1이 GPU 튜브 링 상한
-// (MaxTubeRings)을 넘지 않도록 자동으로 낮춘다. GPU-솔브 가능한(NumNodes ≤ MaxNodes) 로프는 노드 수와
+// 렌더 튜브 Subdiv 결정: 로프의 TubeSmoothingSubdiv(1..8)를 쓰되, NumRings=(NumNodes-1)*Subdiv+1이 GPU 튜브
+// 링 상한(MaxTubeRings)을 넘지 않도록 자동으로 낮춘다. GPU-솔브 가능한(NumNodes ≤ MaxNodes) 로프는 노드 수와
 // 무관하게 GPU 튜브를 유지하고, "크기 때문에 CPU 튜브로 떨어지는" 구간(GPU-솔브 + CPU-튜브 = 리드백 지연
 // 부활 + 렌더 스레드 비용)이 사라진다. 커질수록 렌더 스무딩만 완만히 감소한다(512노드에서 Subdiv=1).
-static int32 RopeComputeTubeSubdiv(int32 NumNodes)
+static int32 RopeComputeTubeSubdiv(int32 NumNodes, int32 WantedSubdiv)
 {
-	const int32 Wanted = FMath::Clamp(CVarRopeTubeSmoothing.GetValueOnGameThread(), 1, 8);
+	const int32 Wanted = FMath::Clamp(WantedSubdiv, 1, 8);
 	if (NumNodes <= 2)
 	{
 		return Wanted;
@@ -195,11 +167,12 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	, VertexFactory(GetScene().GetFeatureLevel(), "FRopeSceneProxy")
 	, MaterialRelevance(Component->GetMaterialRelevance(GetScene().GetShaderPlatform()))
 	, NumNodes(FMath::Max(2, Component->NumParticles))
-	, Subdiv(RopeComputeTubeSubdiv(NumNodes)) // 링 상한에 맞춰 자동 하향(위 헬퍼 주석 참고).
+	, Subdiv(RopeComputeTubeSubdiv(NumNodes, Component->TubeSmoothingSubdiv)) // 링 상한에 맞춰 자동 하향(위 헬퍼 주석 참고).
 	, NumRings((NumNodes - 1) * Subdiv + 1) // 스무딩된 렌더 링 수(Subdiv=1이면 NumNodes와 동일).
 	, NumSides(FMath::Max(3, Component->NumSides))
 	, Radius(Component->Radius)
-	, SmoothParam(FMath::Clamp(CVarRopeTubeSmoothParam.GetValueOnGameThread(), 0.0f, 1.0f))
+	, SmoothParam(FMath::Clamp(Component->TubeSmoothingAlpha, 0.0f, 1.0f))
+	, bWriteVelocity(UDynamicRopeSettings::Get()->bWriteVelocity)
 {
 	VertexBuffers.InitWithDummyData(&VertexFactory, GetRequiredVertexCount());
 	IndexBuffer.NumIndices = GetRequiredIndexCount();
@@ -677,8 +650,9 @@ FPrimitiveViewRelevance FRopeSceneProxy::GetViewRelevance(const FSceneView* View
 
 	MaterialRelevance.SetPrimitiveViewRelevance(Result);
 	// (A) 모션블러 잔상 제거: 기본적으로 velocity를 출력하지 않아 per-object 모션블러 대상에서 제외한다.
-	// r.DynamicRope.WriteVelocity 1로 레거시(velocity 출력) 동작과 A/B 비교 가능.
-	Result.bVelocityRelevance = (CVarRopeWriteVelocity.GetValueOnRenderThread() != 0)
+	// 프로젝트 설정(UDynamicRopeSettings::bWriteVelocity)으로 레거시(velocity 출력) 동작과 A/B 비교 가능
+	// (프록시 생성 시 스냅샷 — 렌더 스레드에서 설정 CDO를 직접 읽지 않는다).
+	Result.bVelocityRelevance = bWriteVelocity
 		&& DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
 	return Result;
 }
