@@ -4,14 +4,6 @@
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
-#include "HAL/IConsoleManager.h"
-
-// 세그먼트(에지) 충돌 on/off. 1=활성(기본). chording(두 노드 사이 직선이 얇은 표면 관통) 방어. A/B 검증용.
-static TAutoConsoleVariable<int32> CVarRopeSegmentCollision(
-	TEXT("r.DynamicRope.SegmentCollision"), 1,
-	TEXT("1이면 세그먼트(에지) 충돌로 노드 사이 직선 chording을 막는다. 0이면 노드 점 충돌만(기존)."),
-	ECVF_Default);
-
 FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverConfig& Config, float DeltaSeconds)
 {
 	// 고정 timestep: substep 크기를 frame rate와 무관하게 고정한다(Substeps = "60fps frame당 substep 수"로
@@ -436,10 +428,6 @@ void FRopeXPBDSolver::SolveSegmentContacts(FRopeSimState& State, const FRopeSolv
 	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds, bool bReverse) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_SegContacts);
-	if (CVarRopeSegmentCollision.GetValueOnAnyThread() == 0)
-	{
-		return; // 토글 off → 노드 점 충돌만(기존).
-	}
 	const float Radius = FMath::Max(0.0f, Config.CollisionRadius);
 	const bool bHasBounds = ColliderBounds.Num() == Colliders.Num();
 	const float SweepStep = FMath::Max(Config.SweepStep, 0.1f);       // 샘플 간격(cm) — 노드 점 충돌과 동일 config 재사용.

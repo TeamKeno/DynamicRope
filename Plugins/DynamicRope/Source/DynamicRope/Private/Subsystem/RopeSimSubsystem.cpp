@@ -7,7 +7,7 @@
 #include "Collision/RopeCollider.h" // IRopeCollider::GetGPUCapsule
 #include "Collision/RopeColliderProvider.h" // IRopeColliderProvider (중앙 collider gather)
 #include "RopeGPUSolver.h"          // FRopeGPUSolver / FRopeGPUResidentStep / FRopeGPUCapsule (DynamicRopeShaders 모듈)
-#include "RopeGPUSolverRegistry.h"  // RopeGDF::RegisterSolver / IsDispatchInVE (GDF 통합 경로)
+#include "RopeGPUSolverRegistry.h"  // RopeGDF::RegisterSolver / SetGDFActiveCount (GDF 통합 경로)
 #include "Settings/DynamicRopeSettings.h"      // StaticBodyControllerClass / StaticBodyMaxColliders(자동 스폰)
 #include "Collision/RopeController.h"          // ARopeController(정적 바디 프로바이더 호스트)
 #include "Collision/RopeStaticBodyProvider.h"  // 기본 클래스 스폰 시 MaxColliders 주입
@@ -453,15 +453,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		}
 		if (Steps.Num() > 0)
 		{
-			// GDF 통합 경로(r.DynamicRope.GDFDispatchInVE, 기본 1)면 dispatch를 뷰 확장(씬 그래프)으로 미룬다(0이면 전용 그래프).
-			if (RopeGDF::IsDispatchInVE())
-			{
-				GpuSolver.EnqueueSteps(MoveTemp(Steps));
-			}
-			else
-			{
-				GpuSolver.Step(MoveTemp(Steps));
-			}
+			// dispatch는 뷰 확장(씬 그래프, PreRenderBasePass)으로 미룬다 — GDF 파라미터가 유효한 타이밍.
+			GpuSolver.EnqueueSteps(MoveTemp(Steps));
 		}
 	}
 	else

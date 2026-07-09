@@ -45,7 +45,7 @@ void FRopeGDFViewExtension::PreRenderBasePass_RenderThread(FRDGBuilder& GraphBui
 	FSceneViewFamily* Family = CurrentFamily;
 	CurrentFamily = nullptr;
 
-	if (!RopeGDF::IsDispatchInVE() || !Family)
+	if (!Family)
 	{
 		return;
 	}

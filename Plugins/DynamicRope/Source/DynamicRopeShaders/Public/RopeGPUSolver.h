@@ -261,13 +261,12 @@ public:
 	FRDGBufferRef RegisterResidentPos_RenderThread(FRDGBuilder& GraphBuilder, uint32 RopeId, int32& OutNumNodes);
 
 	/** 이번 프레임 상주 step들을 렌더 스레드로 넘겨 GPU에서 in-place 전진(블록 없음). step은 소비된다(MoveTemp).
-	    전용(자체) RDG 그래프에서 즉시 실행 — 서브시스템 Tick이 트리거하는 G4 기본 경로. */
+	    전용(자체) RDG 그래프에서 즉시 실행 — 씬 렌더러 없이 도는 유닛 테스트 하네스 경로(런타임은 EnqueueSteps). */
 	void Step(TArray<FRopeGPUResidentStep>&& Steps);
 
 	/**
-	 * GDF 월드 충돌 경로: step을 렌더 스레드 pending 큐에 쌓아만 둔다(dispatch 안 함). 뷰 확장이 이번 프레임
+	 * 런타임 dispatch 경로: step을 렌더 스레드 pending 큐에 쌓아만 둔다(dispatch 안 함). 뷰 확장이 이번 프레임
 	 * PreRenderBasePass에서 씬 렌더러 그래프에 DispatchPending_RenderThread로 flush한다(GDF 파라미터 유효 타이밍).
-	 * r.DynamicRope.GDFDispatchInVE로 이 경로 vs Step() 전용 그래프 경로를 고른다.
 	 */
 	void EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps);
 

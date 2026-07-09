@@ -143,16 +143,17 @@ async가 맞는 경우는 "처리량(많은 로프) + 지연 허용"이지, 손�
   캡처하고, **`PreRenderBasePass_RenderThread`**(GDF 빌드 후·base pass 전)에서 씬 렌더러 `GraphBuilder`에
   세 패스를 순서대로: `DispatchPending`(=**메인 솔브 전체 이관**) → `DispatchGDFCollision`(push-out) →
   `BuildTubeInSceneGraph`(튜브). 같은 RDG·같은 PosBuf라 **솔브→GDF→튜브** 자동 정렬 → 스파이크의 1프레임 지연 제거.
-  솔버는 dispatch 모드 2개: `GpuSolver.Step`(전용 그래프, 즉시, GDF off) vs `GpuSolver.EnqueueSteps`(→`PendingSteps`,
-  뷰 확장이 소비). 선택은 `RopeGDF::IsDispatchInVE()`.
+  런타임 dispatch는 `GpuSolver.EnqueueSteps`(→`PendingSteps`, 뷰 확장이 소비) 단일 경로. `GpuSolver.Step`(전용
+  그래프, 즉시, GDF off)은 씬 렌더러 없이 도는 유닛 테스트 하네스로만 남는다.
+  (경로 선택 CVar `r.DynamicRope.GDFDispatchInVE`는 VE 경로가 정규화된 뒤 제거됨.)
 - **blocker 2 해결 — GDF 빌드 보장**: 전역 강제 대신 커스텀 `FRopeGDFFXSystem : FFXSystemInterface`가
   `UsesGlobalDistanceField()`를 `RopeGDF::IsGDFActive(Scene)`로 반환(엔진 `ShouldPrepareGlobalDistanceField`가 OR로 읽음).
   모듈 startup `RegisterCustomFXSystem`, tick이 매 프레임 `bUseWorldGDF` 로프 수로 `SetGDFActiveCount`를 먹임 →
-  엔진이 **온디맨드**로 GDF 빌드(성능 강제 없음). `r.DynamicRope.ForceGDFConsumer`(기본 0)로 강제 검증.
+  엔진이 **온디맨드**로 GDF 빌드(성능 강제 없음). (브링업 검증용 `r.DynamicRope.ForceGDFConsumer`는 제거됨.)
 - **씬→솔버 레지스트리**: 솔버는 월드별, 뷰 확장은 전역 → `RopeGPUSolverRegistry`(`TMap<FSceneInterface*,FRopeGPUSolver*>`),
   `URopeSimSubsystem::OnWorldBeginPlay`→`RegisterSolver`, `Deinitialize`→`UnregisterSolver`.
-- **게이트/기본값**: `r.DynamicRope.GDFDispatchInVE`(기본 **0**) → 기본은 `Step()` 전용 그래프(GDF off). `=1`이고
-  로프별 `Cfg.bUseWorldGDF`일 때만 push-out 실행. 모듈: `DynamicRopeShaders.Build.cs`에 `Renderer`+`Engine`.
+- **게이트/기본값**: 뷰 확장(씬 그래프) dispatch가 항상 켜진 정규 경로이고, push-out은 로프별
+  `Cfg.bUseWorldGDF`(기본 off)일 때만 실행. 모듈: `DynamicRopeShaders.Build.cs`에 `Renderer`+`Engine`.
 - **본질적 한계(불변)**: 클립맵 해상도(voxel > CollisionRadius → 얇은 벽 터널링), SurfaceVelocity 없음,
   본 귀속 없음(wrap 불가) → **per-bone SDF 대체 아님, 정적 월드 광역 보완재 한정**.
 - **파일 맵**: `RopeGDFViewExtension.{h,cpp}`, `RopeGPUSolverRegistry.{h,cpp}`, `RopeGDFFXSystem.{h,cpp}`,

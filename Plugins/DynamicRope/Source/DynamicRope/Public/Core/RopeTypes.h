@@ -417,8 +417,8 @@ struct FRopeSolverConfig
 	float CollisionRadius = 2.0f;
 
 	/**
-	 * 엔진 Global Distance Field로 정적 월드 지오메트리(벽/바닥)에서 로프를 밀어낸다. GPU 경로 + 씬 그래프
-	 * dispatch(r.DynamicRope.GDFDispatchInVE=1)에서만 동작. 프로젝트에 Generate Mesh Distance Fields 필요.
+	 * 엔진 Global Distance Field로 정적 월드 지오메트리(벽/바닥)에서 로프를 밀어낸다. GPU 경로(씬 그래프
+	 * dispatch)에서만 동작. 프로젝트에 Generate Mesh Distance Fields 필요.
 	 * 본 귀속·표면속도 없음(정적 월드 광역 밀어내기 보완재) — per-bone SDF의 대체가 아니다. 켜져 있는 동안
 	 * 엔진이 GDF를 온디맨드로 빌드한다. 밀어내기 반경/마찰은 CollisionRadius/Friction/TipFrictionScale 공유.
 	 */

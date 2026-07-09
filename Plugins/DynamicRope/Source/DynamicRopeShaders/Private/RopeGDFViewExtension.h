@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
 // GDF 월드 충돌용 씬 뷰 확장. GPU 솔브 dispatch를 씬 렌더러 그래프 안(PreRenderBasePass — GDF 빌드 이후·
-// base pass 이전)으로 옮겨, GDF 파라미터가 유효한 타이밍에 돌린다. r.DynamicRope.GDFDispatchInVE로 게이트
-// (기본 1=이 경로; 0이면 솔버 전용 그래프 경로). 튜브는 여기서 빌드하지 않는다 — 솔브(=depth prepass 이후)에서
+// base pass 이전)으로 옮겨, GDF 파라미터가 유효한 타이밍에 돌린다. 런타임 GPU 솔브의 단일 dispatch 경로
+// (솔버 전용 그래프 Step()은 유닛 테스트 하네스로만 남음). 튜브는 여기서 빌드하지 않는다 — 솔브(=depth prepass 이후)에서
 // 튜브를 다시 쓰면 prepass/base pass 지오메트리가 어긋나 EQUAL 깊이 테스트에서 픽셀이 탈락한다(로프가 검게 탐).
 // 튜브는 프록시가 프레임 초 SetDynamicData에서 직전 프레임 PosBuf로 1회 빌드한다(의도된 1프레임 렌더 지연).
 //

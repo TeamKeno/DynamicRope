@@ -2,22 +2,6 @@
 
 #include "RopeGPUSolverRegistry.h"
 #include "HAL/CriticalSection.h"
-#include "HAL/IConsoleManager.h"
-
-// Phase 1 검증/디버그용: 강제로 GDF 소비자를 켠다(로프 없이도 GDF 빌드 유발). 기본 off.
-static TAutoConsoleVariable<int32> CVarForceGDFConsumer(
-	TEXT("r.DynamicRope.ForceGDFConsumer"),
-	0,
-	TEXT("DynamicRope: 1이면 GDF 로프 유무와 무관하게 커스텀 FX 시스템이 GDF를 요구한다(온디맨드 빌드 경로 검증용)."),
-	ECVF_RenderThreadSafe);
-
-// GPU 솔브 dispatch 경로: 0=Step() 전용 그래프, 1=뷰 확장에서 씬 렌더러 그래프로 dispatch(GDF 통합, 기본).
-// GT(서브시스템)와 RT(뷰 확장) 양쪽에서 읽으므로 RenderThreadSafe. 기본 1 — GDF 월드 충돌/통합 튜브가 이 프로젝트 정규 경로.
-static TAutoConsoleVariable<int32> CVarGDFDispatchInVE(
-	TEXT("r.DynamicRope.GDFDispatchInVE"),
-	1,
-	TEXT("DynamicRope: 0=GPU 솔브를 자체 RDG 그래프에서 실행, 1=씬 뷰 확장(PreRenderBasePass)에서 씬 그래프로 실행(기본, GDF 통합)."),
-	ECVF_RenderThreadSafe);
 
 namespace RopeGDF
 {
@@ -76,20 +60,11 @@ namespace RopeGDF
 
 	bool IsGDFActive(FSceneInterface* Scene)
 	{
-		if (CVarForceGDFConsumer.GetValueOnAnyThread() != 0)
-		{
-			return true; // 검증용 강제.
-		}
 		if (!Scene)
 		{
 			return false;
 		}
 		FScopeLock Lock(&GRegistryCS);
 		return GGDFActiveCounts.FindRef(Scene) > 0;
-	}
-
-	bool IsDispatchInVE()
-	{
-		return CVarGDFDispatchInVE.GetValueOnAnyThread() != 0;
 	}
 }
