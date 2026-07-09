@@ -2,6 +2,12 @@
 //
 // Collider 추상화. solver는 IRopeCollider를 query할 뿐, 그것이 capsule인지 per-bone SDF인지
 // 아니면 world distance field인지 전혀 알지 못한다.
+//
+// [GPU 계약 — 커스텀 collider 주의] 런타임 솔브는 GPU 단일 경로다. CPU 계약(Query/QuerySwept)만
+// 구현한 커스텀 collider는 유닛 테스트/CPU 폴백(쿡·-nullrhi·노드 수 초과)에서는 동작하지만, GPU
+// 스텝에는 GetGPUCapsule / GetGPUSDF / GetGPUBox / GetGPUConvex 중 하나를 구현해야 실린다 — 넷 다
+// false면 GPU 솔브에서 제외되고 서브시스템(PackStepColliders)이 세션당 1회 경고를 남긴다.
+// 패킹 규칙: 비-정적(스켈레탈)은 capsule/SDF만, 정적(IsWorldStatic)은 capsule/box/convex만.
 
 #pragma once
 

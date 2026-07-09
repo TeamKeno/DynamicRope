@@ -147,4 +147,9 @@ private:
 	void PackStepColliders(URopeComponent& Rope, bool bDetectThisRope, FRopeGPUResidentStep& Step) const;
 	// G1: Flight whip 가이드 타깃을 override로 Step에 패킹한다(적분 전 적용, 비-Flight면 no-op).
 	void PackWhipOverride(const URopeComponent& Rope, FRopeGPUResidentStep& Step) const;
+
+	// GPU 표현(GetGPUCapsule/SDF/Box/Convex) 없는 collider의 "조용한 GPU 제외" 1회성 경고 래치.
+	// 커스텀 IRopeCollider가 CPU 계약만 구현하면 테스트(CPU)에선 되고 런타임(GPU)에선 무시되는
+	// 함정을 로그로 드러낸다. PackStepColliders(const)에서 세팅되므로 mutable(진단 상태일 뿐 로직 무관).
+	mutable bool bWarnedGpuUnrepresentedCollider = false;
 };

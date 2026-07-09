@@ -839,6 +839,28 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			return Attr;
 		};
 
+	// GPU 표현이 없는 collider의 조용한 제외를 1회 경고로 드러낸다(세션당 1회 — 스팸 방지 래치).
+	// CPU 계약(Query/QuerySwept)만 구현한 커스텀 collider는 유닛 테스트/CPU 폴백에선 동작하지만
+	// 런타임 정규 경로(GPU 솔브)에서는 여기서 제외된다 — 경고 없이는 "테스트에선 되는데 게임에선
+	// 로프가 뚫림"으로 나타나는 최악 유형의 함정이라 로그가 계약의 일부다(RopeCollider.h 참조).
+	auto WarnGpuUnrepresented = [this, &Rope](IRopeCollider* Collider)
+		{
+			if (bWarnedGpuUnrepresentedCollider)
+			{
+				return;
+			}
+			bWarnedGpuUnrepresentedCollider = true;
+			FName Bone = NAME_None;
+			const USkeletalMeshComponent* Mesh = nullptr;
+			Collider->GetGPUAttribution(Bone, Mesh);
+			UE_LOG(LogRopeCollision, Warning,
+				TEXT("[%s] A gathered rope collider has no GPU representation (GetGPUCapsule/SDF/Box/Convex all false) ")
+				TEXT("and is IGNORED by the GPU solve - it only participates in the CPU fallback (cook/-nullrhi/oversized ropes). ")
+				TEXT("Implement one of the GPU accessors on custom IRopeCollider types (see RopeCollider.h). ")
+				TEXT("(worldStatic=%d, bone=%s, mesh=%s; further occurrences suppressed)"),
+				*Rope.GetName(), Collider->IsWorldStatic() ? 1 : 0, *Bone.ToString(), *GetNameSafe(Mesh));
+		};
+
 	// FrameColliders는 Prepare에서 GT gather된 스냅샷. 2-pass: 비-정적(스켈레탈) collider를 먼저,
 	// 정적(월드) collider를 뒤에 패킹한다. 감지(detect) 커널은 capsule을 [0, NumDetectCapsules)만
 	// 보므로 정적 캡슐이 감지에서 자동 제외된다 — 감지는 노드당 최심 접촉 1개만 남겨, 벽 접촉이
@@ -869,7 +891,9 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			{
 				Rope.GpuSdfAttribution.Add(MakeAttribution(Collider));
 			}
+			continue;
 		}
+		WarnGpuUnrepresented(Collider); // 비-정적은 capsule/SDF만 GPU에 실린다 — 둘 다 아니면 제외.
 	}
 	Step.NumDetectCapsules = Step.Capsules.Num(); // 감지 경계: 여기까지가 비-정적 캡슐.
 
@@ -905,8 +929,12 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		FQuat CvRot, CvPrevRot;
 		FVector CvTrans, CvPrevTrans;
 		float CvInvDt = 0.0f;
-		if (Collider->GetGPUConvex(LocalPlanes, LocalBounds, CvRot, CvTrans, CvPrevRot, CvPrevTrans, CvInvDt)
-			&& LocalPlanes.Num() > 0 && LocalBounds.IsValid)
+		if (!Collider->GetGPUConvex(LocalPlanes, LocalBounds, CvRot, CvTrans, CvPrevRot, CvPrevTrans, CvInvDt)
+			|| LocalPlanes.Num() == 0 || !LocalBounds.IsValid)
+		{
+			WarnGpuUnrepresented(Collider); // 정적은 capsule/box/convex만 GPU에 실린다 — 전부 아니면 제외.
+			continue;
+		}
 		{
 			// 바디-로컬 평면을 평탄 풀에 이어붙이고 오프셋/개수로 참조 + 강체(curr/prev) + InvDt.
 			FRopeGPUConvex Cv;
