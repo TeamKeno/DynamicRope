@@ -222,6 +222,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bAutoGroundExitOnUpwardPull"))
 	float GroundExitMinOvershoot = 10.0f;
 
+	/**
+	 * 스윙 중(Wrapped + 공중 + wielder 몫 테더 활성) 에어컨트롤을 SwingAirControl로 올려 조향을
+	 * 살린다. CharacterMovement 기본 AirControl(0.05)로는 스윙 방향을 거의 못 바꾼다. 스윙이 끝나면
+	 * (착지/release) 저장해 둔 원래 값으로 복원한다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension")
+	bool bBoostAirControlWhileSwinging = true;
+
+	/** 스윙 중 적용할 AirControl(0~1). 0.35~1 권장 — 1이면 공중에서 지상급 조향. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bBoostAirControlWhileSwinging"))
+	float SwingAirControl = 1.0f;
+
 	//~ Animation(선택) ----------------------------------------------------
 	/**
 	 * 설정하면 Throw()가 즉시 던지지 않고 이 몽타주를 재생한다. 실제 로프 던지기는 몽타주 안에 배치한
@@ -344,8 +356,12 @@ private:
 	void AddMappingContext();  // MappingContext를 로컬 플레이어 Enhanced Input 서브시스템에 추가.
 
 	void ResolvePreviewComponent(bool bAllowAutoCreate);
+	// wielder가 테더 몫을 실제로 받는 상태인가(Wrapped + TetherResponse>0 + TargetShare<1 + 셀프랩 아님).
+	bool IsWielderTetherActive() const;
 	// wielder 몫 테더가 위로 당길 때 walking이면 Falling으로 전환한다(매 틱, GT — 위 Tension 섹션 참고).
 	void UpdateGroundExit();
+	// 스윙 판정에 따라 AirControl을 부스트/복원한다(매 틱, GT).
+	void UpdateSwingAirControl();
 	void UpdateThrowPreview();
 	void ClearThrowPreview();
 	void LogPreviewBuildResult(bool bSucceeded, const FString& Reason);
@@ -364,6 +380,9 @@ private:
 	void OnReelCompleted();
 
 	bool bInputBound = false;
+	// AirControl 부스트 원복용 저장 상태(스윙 진입 시 저장, 종료/EndPlay 시 복원).
+	bool bAirControlBoosted = false;
+	float SavedAirControl = 0.0f;
 	// preview 켜짐 상태(디자이너 설정 아님 — BeginPlay가 PreviewComponent 유무로 자동 결정하고
 	// SetThrowPreviewEnabled가 토글). 조회는 IsThrowPreviewEnabled().
 	bool bShowThrowPreview = false;

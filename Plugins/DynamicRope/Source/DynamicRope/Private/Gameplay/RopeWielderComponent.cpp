@@ -53,8 +53,8 @@ void URopeWielderComponent::BeginPlay()
 	}
 
 	bShowThrowPreview = PreviewComponent != nullptr;
-	// preview 외에 지상 이탈 감시(bAutoGroundExitOnUpwardPull)도 틱이 필요하다 — 둘 다 꺼져야 틱 정지.
-	SetComponentTickEnabled(bShowThrowPreview || bAutoGroundExitOnUpwardPull);
+	// preview 외에 지상 이탈/스윙 에어컨트롤 감시도 틱이 필요하다 — 전부 꺼져야 틱 정지.
+	SetComponentTickEnabled(bShowThrowPreview || bAutoGroundExitOnUpwardPull || bBoostAirControlWhileSwinging);
 	if (bShowThrowPreview)
 	{
 		UpdateThrowPreview();
@@ -87,6 +87,19 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	bInputBound = false;
 	ClearThrowPreview();
 
+	// 스윙 중 파괴/레벨 전환 시 AirControl 원복 누락 방지.
+	if (bAirControlBoosted)
+	{
+		if (const ACharacter* Character = Cast<ACharacter>(GetOwner()))
+		{
+			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+			{
+				Movement->AirControl = SavedAirControl;
+			}
+		}
+		bAirControlBoosted = false;
+	}
+
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -95,27 +108,37 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	UpdateGroundExit();
+	UpdateSwingAirControl();
 	UpdateThrowPreview();
 }
 
-void URopeWielderComponent::UpdateGroundExit()
+bool URopeWielderComponent::IsWielderTetherActive() const
 {
-	if (!bAutoGroundExitOnUpwardPull || !Rope || Rope->GetPhase() != ERopePhase::Wrapped)
+	if (!Rope || Rope->GetPhase() != ERopePhase::Wrapped)
 	{
-		return;
+		return false;
 	}
 	// wielder가 실제로 테더 몫을 받는 설정일 때만(분배가 전량 대상이거나 테더 자체가 꺼져 있으면 무의미).
 	if (Rope->WrapConfig.TetherResponse <= 0.0f || Rope->WrapConfig.TetherTargetShare >= 1.0f)
 	{
-		return;
+		return false;
 	}
-	// 셀프랩(자기 자신에 감김)은 UpdateTether가 wielder 몫을 주지 않는다 — 이탈도 하지 않는다.
+	// 셀프랩(자기 자신에 감김)은 UpdateTether가 wielder 몫을 주지 않는다.
 	if (const USkeletalMeshComponent* WrappedMesh = Rope->GetWrappedMesh())
 	{
 		if (WrappedMesh->GetOwner() == GetOwner())
 		{
-			return;
+			return false;
 		}
+	}
+	return true;
+}
+
+void URopeWielderComponent::UpdateGroundExit()
+{
+	if (!bAutoGroundExitOnUpwardPull || !IsWielderTetherActive())
+	{
+		return;
 	}
 	if (Rope->GetTetherOvershoot() < GroundExitMinOvershoot)
 	{
@@ -141,6 +164,31 @@ void URopeWielderComponent::UpdateGroundExit()
 	if (WielderDir.Z >= GroundExitUpDot)
 	{
 		Movement->SetMovementMode(MOVE_Falling);
+	}
+}
+
+void URopeWielderComponent::UpdateSwingAirControl()
+{
+	ACharacter* Character = Cast<ACharacter>(GetOwner());
+	UCharacterMovementComponent* Movement = Character ? Character->GetCharacterMovement() : nullptr;
+	if (!Movement)
+	{
+		return;
+	}
+
+	// 스윙 = 공중 + wielder 몫 테더 활성. 끝나면(착지/release/설정 변경) 저장해 둔 원래 값으로 복원.
+	// 부스트 중 외부에서 AirControl을 바꾸면 복원 시 덮어쓴다(데모 수준 한계 — 주석으로 계약).
+	const bool bSwinging = bBoostAirControlWhileSwinging && Movement->IsFalling() && IsWielderTetherActive();
+	if (bSwinging && !bAirControlBoosted)
+	{
+		SavedAirControl = Movement->AirControl;
+		Movement->AirControl = SwingAirControl;
+		bAirControlBoosted = true;
+	}
+	else if (!bSwinging && bAirControlBoosted)
+	{
+		Movement->AirControl = SavedAirControl;
+		bAirControlBoosted = false;
 	}
 }
 
@@ -638,7 +686,7 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 	else
 	{
 		ClearThrowPreview();
-		SetComponentTickEnabled(bAutoGroundExitOnUpwardPull);
+		SetComponentTickEnabled(bAutoGroundExitOnUpwardPull || bBoostAirControlWhileSwinging);
 	}
 }
 
