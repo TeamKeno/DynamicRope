@@ -2199,7 +2199,6 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	const float Response = FMath::Clamp(WrapConfig.TetherResponse, 0.0f, 1.0f);
 	const float MaxStep = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f) * DeltaTime; // 이번 프레임 최대 이동(cm)
 	const float StepLen = (MaxStep > 0.0f) ? FMath::Min(Overshoot * Response, MaxStep) : (Overshoot * Response);
-	const FVector Correction = DirToAim * StepLen;
 
 	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화). Pull/Tether는 스켈레탈 물리 본 대상이므로
 	// 스켈레탈로 Cast — 정적 대상이면 null이라 아래에서 조기 반환한다(정적 기둥엔 힘을 인가하지 않음).
@@ -2209,50 +2208,93 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		return;
 	}
 
-	// 물리 시뮬 대상(본/루트): 속도를 *누적하지 않고* 목표 속도(StepLen/dt)까지만 톱업한다 — 이미 그 방향으로
+	// 초과분 회수를 대상/wielder(로프 owner) 양끝에 분배한다. TetherTargetShare=1(기본)이면 전량 대상
+	// 회수(기존 동작), 0이면 전량 wielder(고정 앵커에 매달리기/등반 — 되감기와 조합하면 입체기동식
+	// "감으면 끌려 올라감"), 중간은 비율 분할. 양끝이 서로를 향해 각자 몫만큼 움직이므로 합이 초과분을
+	// 넘지 않는다(과수렴 없음). 자기 자신에 감긴 로프(owner==대상)는 분배가 무의미 — 전량 대상 경로로.
+	const float TargetShare = FMath::Clamp(WrapConfig.TetherTargetShare, 0.0f, 1.0f);
+	const bool bSelfWrap = (GetOwner() != nullptr && Mesh->GetOwner() == GetOwner());
+	const float TargetStep = bSelfWrap ? StepLen : StepLen * TargetShare;
+	const float WielderStep = bSelfWrap ? 0.0f : StepLen * (1.0f - TargetShare);
+
+	// 물리 시뮬 대상(본/루트): 속도를 *누적하지 않고* 목표 속도(step/dt)까지만 톱업한다 — 이미 그 방향으로
 	// 충분히 빠르면 아무것도 더하지 않는다. bVelChange로 매 프레임 임펄스를 더하던 기존 방식은 물리 운동량이
 	// 이월돼 속도가 누적 → 발산(맵 밖)했다. 여기서는 목표를 넘지 않게 차분만 주므로 수렴하고, 수직 성분(중력
-	// 등)은 보존된다. StepLen이 이미 최대 속도로 클램프돼 있어 상한도 보장.
+	// 등)은 보존된다. step이 이미 최대 속도로 클램프돼 있어 상한도 보장.
 	const float InvDt = 1.0f / FMath::Max(DeltaTime, 1e-4f);
-	const float DesiredSpeed = StepLen * InvDt;
-	auto TopUpVelocity = [&](UPrimitiveComponent* Prim, FName BoneName)
+	auto TopUpVelocity = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float TargetSpeed)
 	{
 		const FVector CurVel = Prim->GetPhysicsLinearVelocity(BoneName);
-		const float CurAlong = static_cast<float>(FVector::DotProduct(CurVel, DirToAim));
-		if (DesiredSpeed > CurAlong)
+		const float CurAlong = static_cast<float>(FVector::DotProduct(CurVel, Dir));
+		if (TargetSpeed > CurAlong)
 		{
-			Prim->AddImpulse(DirToAim * (DesiredSpeed - CurAlong), BoneName, /*bVelChange*/ true);
+			Prim->AddImpulse(Dir * (TargetSpeed - CurAlong), BoneName, /*bVelChange*/ true);
 		}
 	};
 
-	// 감긴 본이 시뮬 중이어도 메시 전체가 시뮬(풀 랙돌)일 때만 본 속도 톱업으로 처리한다. 부분 랙돌
-	// (메시 루트 바디는 키네마틱, 서브트리만 시뮬)은 시뮬 본이 키네마틱 부모에 구속돼 있어 —
-	// 키네마틱은 사실상 무한질량 — 본에 준 속도가 구속에 다시 잡아먹혀 액터가 끌려오지 않는다.
-	// 그 경우 아래 액터 오프셋 경로로 떨어뜨려 이동체를 직접 회수한다(시뮬 팔다리는 구속으로 따라온다).
-	// 인가 본은 감긴 본에서 부모 체인 승격(FindNearestSimulatingBone) — 바디 없는 본(트위스트 등) 대응.
-	if (Mesh->IsSimulatingPhysics())
+	// ---- 대상 몫 ----
+	if (TargetStep > KINDA_SMALL_NUMBER)
 	{
-		const FName SimBone = FindNearestSimulatingBone(Mesh, LastPullSample.Bone);
-		if (!SimBone.IsNone())
+		bool bHandled = false;
+		// 감긴 본이 시뮬 중이어도 메시 전체가 시뮬(풀 랙돌)일 때만 본 속도 톱업으로 처리한다. 부분 랙돌
+		// (메시 루트 바디는 키네마틱, 서브트리만 시뮬)은 시뮬 본이 키네마틱 부모에 구속돼 있어 —
+		// 키네마틱은 사실상 무한질량 — 본에 준 속도가 구속에 다시 잡아먹혀 액터가 끌려오지 않는다.
+		// 그 경우 아래 액터 오프셋 경로로 떨어뜨려 이동체를 직접 회수한다(시뮬 팔다리는 구속으로 따라온다).
+		// 인가 본은 감긴 본에서 부모 체인 승격(FindNearestSimulatingBone) — 바디 없는 본(트위스트 등) 대응.
+		if (Mesh->IsSimulatingPhysics())
 		{
-			TopUpVelocity(Mesh, SimBone);
-			return;
+			const FName SimBone = FindNearestSimulatingBone(Mesh, LastPullSample.Bone);
+			if (!SimBone.IsNone())
+			{
+				TopUpVelocity(Mesh, SimBone, DirToAim, TargetStep * InvDt);
+				bHandled = true;
+			}
 		}
-	}
-	AActor* Owner = Mesh->GetOwner();
-	if (UPrimitiveComponent* Root = Owner ? Cast<UPrimitiveComponent>(Owner->GetRootComponent()) : nullptr)
-	{
-		if (Root->IsSimulatingPhysics())
+		AActor* TargetOwner = Mesh->GetOwner();
+		if (!bHandled && TargetOwner)
 		{
-			TopUpVelocity(Root, NAME_None);
-			return;
+			if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(TargetOwner->GetRootComponent()))
+			{
+				if (Root->IsSimulatingPhysics())
+				{
+					TopUpVelocity(Root, NAME_None, DirToAim, TargetStep * InvDt);
+					bHandled = true;
+				}
+			}
+		}
+		if (!bHandled && TargetOwner)
+		{
+			// 캐릭터/비시뮬 대상: 위치 보정(스윕 — 벽 통과 방지). step이 클램프돼 큰 텔레포트가 없다.
+			TargetOwner->AddActorWorldOffset(DirToAim * TargetStep, /*bSweep*/ true);
 		}
 	}
 
-	// 캐릭터/비시뮬 대상: 위치 보정(스윕 — 벽 통과 방지). StepLen이 클램프돼 큰 텔레포트가 없다.
-	if (Owner)
+	// ---- wielder 몫: 같은 초과분을 로프 owner를 로프 쪽으로 당겨 회수한다 ----
+	if (WielderStep > KINDA_SMALL_NUMBER)
 	{
-		Owner->AddActorWorldOffset(Correction, /*bSweep*/ true);
+		// 방향 = 손(노드 0)에서 로프의 첫 직선 다리를 따라. 조준(AimPos)이 벽 모서리면 모서리를 향하고,
+		// 로프가 곧아 조준=손이면(chord ~0) 앵커→조준의 역방향(=손→앵커)으로 폴백한다.
+		const FVector HandPos = Sim.Positions.IsValidIndex(0) ? Sim.Positions[0] : Aim;
+		FVector WielderDir = Aim - HandPos;
+		if (!WielderDir.Normalize(KINDA_SMALL_NUMBER))
+		{
+			WielderDir = -DirToAim;
+		}
+
+		AActor* RopeOwner = GetOwner();
+		bool bHandled = false;
+		if (UPrimitiveComponent* Root = RopeOwner ? Cast<UPrimitiveComponent>(RopeOwner->GetRootComponent()) : nullptr)
+		{
+			if (Root->IsSimulatingPhysics())
+			{
+				TopUpVelocity(Root, NAME_None, WielderDir, WielderStep * InvDt);
+				bHandled = true;
+			}
+		}
+		if (!bHandled && RopeOwner)
+		{
+			RopeOwner->AddActorWorldOffset(WielderDir * WielderStep, /*bSweep*/ true);
+		}
 	}
 }
 

@@ -632,6 +632,15 @@ struct FRopeWrapConfig
 	float TetherMaxSpeed = 1500.0f;
 
 	/**
+	 * 테더 회수 분배: 초과분 중 감긴 *대상*이 회수하는 비율. 1(기본) = 전량 대상(기존 동작),
+	 * 0 = 전량 wielder(로프 owner가 앵커 쪽으로 끌려간다 — 고정 앵커 매달리기/등반, 되감기와 조합하면
+	 * 입체기동식 "감으면 끌려 올라감"), 중간 = 비율 분할(양끝이 서로에게 끌린다). 양끝 이동의 합이
+	 * 초과분을 넘지 않아 과수렴이 없다. 자기 자신에 감긴 로프(owner==대상)는 무시하고 전량 대상 경로.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TetherTargetShare = 1.0f;
+
+	/**
 	 * 거리 release: Wrapped 중 손~앵커 직선 거리가 가용 로프 길이(+TetherSlack)를 이만큼(cm) 더
 	 * 초과하면 자동 release한다(ERopeReleaseReason::Distance). 0 = 비활성(기본). 테더와 함께 쓰면
 	 * "테더가 버티다가 이 한계를 넘으면 놓친다"가 된다 — 테더가 충분히 강하면 초과분이 안 쌓여
