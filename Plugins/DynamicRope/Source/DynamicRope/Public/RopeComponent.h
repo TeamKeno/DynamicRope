@@ -217,6 +217,11 @@ public:
 		return LastPullSample.bValid;
 	}
 
+	/** 이번 프레임 테더 초과분(cm): 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). Wrapped 동안
+	 *  매 프레임 산출된다(테더 off여도 계산). wielder 견인/지상 이탈 판정 등 게임 반응용. */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	float GetTetherOvershoot() const { return LastTetherOvershoot; }
+
 	/**
 	 * 능동 Pull(당김) 힘 설정 — Wrapped + 로프가 팽팽할 때 매 프레임 이 크기의 *상수* 힘을 감긴
 	 * 대상에 인가한다(장력과 무관 → 피드백 폭주 없음). 0 = 정지. 입력 홀드 동안 켜고 떼면 끄는

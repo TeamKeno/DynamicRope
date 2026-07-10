@@ -202,6 +202,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input", meta = (ClampMin = "0.0"))
 	float ReelSpeed = 150.0f;
 
+	//~ Tension(장력 — wielder 몫 테더와 조합) ------------------------------
+	// WrapConfig.TetherTargetShare < 1이면 로프가 wielder를 앵커 쪽으로 끌어당긴다(수렴형 테더 분배).
+	// 이 섹션은 그 견인의 캐릭터 이동 정책: 물리(플러그인 코어)가 아니라 게임 반응이라 wielder에 둔다.
+
+	/**
+	 * 로프가 위로 당기는데 지상(walking 계열)이면 발이 땅에 붙어 상승을 막는다 — 견인의 상향 성분이
+	 * 충분하고 초과분이 쌓여 있으면 자동으로 Falling 전환해 몸이 뜨게 한다(착지 복귀는 엔진이 처리).
+	 * 되감기(ReelIn)와 조합하면 입체기동식 "감으면 끌려 올라감"이 된다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension")
+	bool bAutoGroundExitOnUpwardPull = true;
+
+	/** 상향 판정 임계: 견인 방향(손→앵커, 단위 벡터)의 Z 성분이 이 값 이상일 때만 지상 이탈. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bAutoGroundExitOnUpwardPull"))
+	float GroundExitUpDot = 0.35f;
+
+	/** 지상 이탈에 필요한 최소 테더 초과분(cm). 경계 지터로 모드가 퍼덕이는 것을 막는다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bAutoGroundExitOnUpwardPull"))
+	float GroundExitMinOvershoot = 10.0f;
+
 	//~ Animation(선택) ----------------------------------------------------
 	/**
 	 * 설정하면 Throw()가 즉시 던지지 않고 이 몽타주를 재생한다. 실제 로프 던지기는 몽타주 안에 배치한
@@ -324,6 +344,8 @@ private:
 	void AddMappingContext();  // MappingContext를 로컬 플레이어 Enhanced Input 서브시스템에 추가.
 
 	void ResolvePreviewComponent(bool bAllowAutoCreate);
+	// wielder 몫 테더가 위로 당길 때 walking이면 Falling으로 전환한다(매 틱, GT — 위 Tension 섹션 참고).
+	void UpdateGroundExit();
 	void UpdateThrowPreview();
 	void ClearThrowPreview();
 	void LogPreviewBuildResult(bool bSucceeded, const FString& Reason);

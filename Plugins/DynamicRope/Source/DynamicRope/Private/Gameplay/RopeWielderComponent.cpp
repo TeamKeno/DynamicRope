@@ -9,6 +9,8 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Animation/AnimInstance.h"
@@ -51,7 +53,8 @@ void URopeWielderComponent::BeginPlay()
 	}
 
 	bShowThrowPreview = PreviewComponent != nullptr;
-	SetComponentTickEnabled(bShowThrowPreview);
+	// preview 외에 지상 이탈 감시(bAutoGroundExitOnUpwardPull)도 틱이 필요하다 — 둘 다 꺼져야 틱 정지.
+	SetComponentTickEnabled(bShowThrowPreview || bAutoGroundExitOnUpwardPull);
 	if (bShowThrowPreview)
 	{
 		UpdateThrowPreview();
@@ -91,7 +94,54 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	UpdateGroundExit();
 	UpdateThrowPreview();
+}
+
+void URopeWielderComponent::UpdateGroundExit()
+{
+	if (!bAutoGroundExitOnUpwardPull || !Rope || Rope->GetPhase() != ERopePhase::Wrapped)
+	{
+		return;
+	}
+	// wielder가 실제로 테더 몫을 받는 설정일 때만(분배가 전량 대상이거나 테더 자체가 꺼져 있으면 무의미).
+	if (Rope->WrapConfig.TetherResponse <= 0.0f || Rope->WrapConfig.TetherTargetShare >= 1.0f)
+	{
+		return;
+	}
+	// 셀프랩(자기 자신에 감김)은 UpdateTether가 wielder 몫을 주지 않는다 — 이탈도 하지 않는다.
+	if (const USkeletalMeshComponent* WrappedMesh = Rope->GetWrappedMesh())
+	{
+		if (WrappedMesh->GetOwner() == GetOwner())
+		{
+			return;
+		}
+	}
+	if (Rope->GetTetherOvershoot() < GroundExitMinOvershoot)
+	{
+		return;
+	}
+
+	const ACharacter* Character = Cast<ACharacter>(GetOwner());
+	UCharacterMovementComponent* Movement = Character ? Character->GetCharacterMovement() : nullptr;
+	if (!Movement || !Movement->IsMovingOnGround())
+	{
+		return;
+	}
+
+	// 견인 방향(손→앵커) = Pull 샘플 방향(앵커→손 다리 추종)의 역. 상향 성분이 충분할 때만 이탈 —
+	// 수평 견인은 walking 그대로 끌리는 게 자연스럽다. 착지 시 walking 복귀는 엔진이 처리한다.
+	FVector DirToHand = FVector::ZeroVector;
+	float Tension = 0.0f;
+	if (!Rope->GetPullSample(DirToHand, Tension))
+	{
+		return;
+	}
+	const FVector WielderDir = -DirToHand;
+	if (WielderDir.Z >= GroundExitUpDot)
+	{
+		Movement->SetMovementMode(MOVE_Falling);
+	}
 }
 
 void URopeWielderComponent::ResolveRefs()
@@ -588,7 +638,7 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 	else
 	{
 		ClearThrowPreview();
-		SetComponentTickEnabled(false);
+		SetComponentTickEnabled(bAutoGroundExitOnUpwardPull);
 	}
 }
 
