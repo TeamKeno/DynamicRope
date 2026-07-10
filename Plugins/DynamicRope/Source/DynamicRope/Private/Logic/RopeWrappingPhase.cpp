@@ -23,11 +23,17 @@ bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USce
 	}
 
 	State.StableTime = 0.0f;
-	State.LostContactTime = 0.0f;
 	State.LastStableFirstNode = State.FirstNode;
 	State.LastStableLastNode = State.LastNode;
 	State.LastStableAnchorCount = State.Anchors.Num();
 	return true;
+}
+
+void FRopeWrappingPhase::FinishPathBuild(bool bFailed)
+{
+	State.bPathBuildActive = false;
+	State.bPathBuildComplete = !bFailed;
+	State.bPathBuildFailed = bFailed;
 }
 
 void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FContext& Ctx)
@@ -60,8 +66,7 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 
 		if (State.Path.Num() >= State.NumTailNodes)
 		{
-			State.bPathBuildComplete = true;
-			State.bPathBuildActive = false;
+			FinishPathBuild(/*bFailed=*/false);
 		}
 		return;
 	}
@@ -385,17 +390,14 @@ bool FRopeWrappingPhase::AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex,
 		!ComputeSurfaceVectorFieldWrapTarget(State.LatchAnchor, DistanceFromLatch, Sim, Ctx,
 			Point.SurfaceWorld, Point.NormalWorld, Point.TangentWorld))
 	{
-		State.bPathBuildFailed = true;
-		State.bPathBuildComplete = true;
-		State.bPathBuildActive = false;
+		FinishPathBuild(/*bFailed=*/true);
 		return false;
 	}
 
 	State.Path.Add(Point);
 	if (State.Path.Num() >= State.NumTailNodes)
 	{
-		State.bPathBuildComplete = true;
-		State.bPathBuildActive = false;
+		FinishPathBuild(/*bFailed=*/false);
 	}
 	return true;
 }
@@ -470,8 +472,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 
 	if (State.Path.Num() >= State.NumTailNodes)
 	{
-		State.bPathBuildComplete = true;
-		State.bPathBuildActive = false;
+		FinishPathBuild(/*bFailed=*/false);
 	}
 
 	return true;
@@ -488,9 +489,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 	}
 	if (!Mesh || State.LatchAnchor.Bone.IsNone())
 	{
-		State.bPathBuildFailed = true;
-		State.bPathBuildComplete = true;
-		State.bPathBuildActive = false;
+		FinishPathBuild(/*bFailed=*/true);
 		return false;
 	}
 
@@ -545,9 +544,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				State.PathSurfaceWorld, State.PathNormalWorld, State.PathTangentWorld,
 				State.PathCircumferenceDir, ProjectedBone, ProjectedMesh))
 			{
-				State.bPathBuildFailed = true;
-				State.bPathBuildComplete = true;
-				State.bPathBuildActive = false;
+				FinishPathBuild(/*bFailed=*/true);
 				if (!Ctx.bSuppressPathFailureLog)
 				{
 					UE_LOG(LogDynamicRope, Log,
@@ -615,8 +612,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 
 	if (State.Path.Num() >= State.NumTailNodes)
 	{
-		State.bPathBuildComplete = true;
-		State.bPathBuildActive = false;
+		FinishPathBuild(/*bFailed=*/false);
 	}
 
 	return !State.bPathBuildFailed;

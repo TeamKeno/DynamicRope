@@ -1899,7 +1899,6 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 		return;
 	}
 
-	WrappingPhase.State.LostContactTime = 0.0f;
 	const FRopeWrappingPhase::FContext WrappingCtx = MakeWrappingContext();
 	WrappingPhase.AdvancePathBuild(Sim, WrappingCtx);
 

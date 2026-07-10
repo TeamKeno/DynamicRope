@@ -115,6 +115,10 @@ private:
 
 	bool AppendWrappingAnchorFromPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
 
+	/** 경로 빌드 종료 기록(성공=Complete / 실패=Failed, 둘 다 Active 해제). 커밋 판정 등 독자들은
+	 *  세 플래그를 "빌드가 끝났나"(OR)로만 소비한다 — 개별 조합을 구분해 읽는 곳은 없다. */
+	void FinishPathBuild(bool bFailed);
+
 	//~ 감김 지오메트리
 	FVector ComputeSurfaceVectorFieldTangent(const FVector& AxisOrigin, const FVector& AxisDirection,
 		const FVector& LatchRadial, float WindingSign, const FVector& SurfaceWorld,

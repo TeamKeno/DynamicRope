@@ -176,7 +176,6 @@ struct FRopeWrappingState
 	float Elapsed = 0.0f;
 	float Duration = 0.16f;
 	float StableTime = 0.0f;
-	float LostContactTime = 0.0f;
 
 	int32 WindingSign = 1;
 
@@ -608,7 +607,9 @@ struct FRopeWrapConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
 	float CommitMinWrapAngleDeg = 0.0f;
 
-	/** Temporary contact loss tolerated while the rope is settling into a wrap. */
+	/** [미배선] Wrapping 중 일시적 접촉 상실을 이만큼 유예한다는 의도였으나, 소비하는 코드가 아직 없다.
+	 *  현재 Wrapping 중단 판정은 IsStillValid(mesh 생존/bone 유효)와 경로 빌드 실패 경로뿐 — 값을 바꿔도
+	 *  아무 효과가 없다. grace 로직을 실제로 배선하기 전까지 튜닝 대상이 아니다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrappingContactGraceTime = 0.20f;
 
