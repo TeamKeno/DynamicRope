@@ -48,6 +48,9 @@ struct FRopeDebugCollider
 {
 	ERopeDebugColliderShape Shape = ERopeDebugColliderShape::Bounds;
 	bool bWorldStatic = false; // 정적 월드(박스/컨벡스/정적 캡슐) vs 스켈레탈 — 색 구분용.
+	// 정적 메시 랩 대상(URopeWrapTargetComponent가 서빙): 가상 본은 있지만(감지 참여) SourceMesh가 스켈레탈이
+	// 아니다. 스켈레탈 본(초록)/정적 월드(cyan)와 별색으로 그려 "로프가 실제로 감길 추출 셰이프"를 눈에 띄게 한다.
+	bool bWrapTarget = false;
 
 	// Capsule
 	FVector A = FVector::ZeroVector;
@@ -119,4 +122,10 @@ struct FRopeDebugSnapshot
 
 	//~ 노드별 접촉(디버그 CPU 재질의) — 붙는 노드 진단 -------------------
 	TArray<FRopeNodeContactDebug> NodeContacts;
+
+	//~ 감김 축(Wrapping에서 ResolveWrappingAxis가 정한 경로 축) — [O] 뷰 선 시각화용 ---
+	// Wrapping 페이즈에서만 유효(bHasWrapAxis). 어느 축으로 감기는지 눈으로 확인하기 위한 것.
+	bool    bHasWrapAxis = false;
+	FVector WrapAxisOrigin = FVector::ZeroVector;
+	FVector WrapAxisDirection = FVector::ForwardVector;
 };

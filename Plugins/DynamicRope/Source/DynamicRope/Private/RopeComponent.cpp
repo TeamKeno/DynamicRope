@@ -1358,6 +1358,15 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.DistanceReleaseSlack = WrapConfig.DistanceReleaseSlack;
 	}
 
+	// 감김 축 시각화: Wrapping 페이즈에서 ResolveWrappingAxis가 정한 경로 축(원점+방향)을 담는다 —
+	// [O] 뷰가 선으로 그려 "이번 wrap이 어느 축으로 감기는지"를 눈으로 확인하게 한다.
+	if (Phase == ERopePhase::Wrapping && WrappingPhase.State.IsActive())
+	{
+		Snapshot.bHasWrapAxis = true;
+		Snapshot.WrapAxisOrigin = WrappingPhase.State.PathAxisOrigin;
+		Snapshot.WrapAxisDirection = WrappingPhase.State.PathAxisDirection;
+	}
+
 	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). 상호 배타 accessor 순서로
 	// 실제 형상 분류: 캡슐(세그먼트) / 박스(회전 OBB) / 컨벡스(헐 와이어) / 그 외(SDF 등 월드 AABB 폴백).
 	// FrameColliders는 provider 소유라 이 프레임 동안만 유효(GT Phase-3 직렬 실행이라 스레딩 무관).
@@ -1370,6 +1379,16 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		}
 		FRopeDebugCollider DC;
 		DC.bWorldStatic = Collider->IsWorldStatic();
+
+		// 정적 메시 랩 대상 식별: 가상 본은 있지만(감지 참여) SourceMesh가 스켈레탈이 아니면 랩 대상 셰이프
+		// (URopeWrapTargetComponent가 서빙한 박스/캡슐). [O] 뷰에서 스켈레탈 본과 다른 색으로 표시한다.
+		{
+			FName AttribBone = NAME_None;
+			const USceneComponent* AttribMesh = nullptr;
+			Collider->GetGPUAttribution(AttribBone, AttribMesh);
+			DC.bWrapTarget = !AttribBone.IsNone() && AttribMesh != nullptr
+				&& Cast<USkeletalMeshComponent>(AttribMesh) == nullptr;
+		}
 
 		TConstArrayView<FPlane> LocalPlanes;
 		FBox LocalBounds(ForceInit);

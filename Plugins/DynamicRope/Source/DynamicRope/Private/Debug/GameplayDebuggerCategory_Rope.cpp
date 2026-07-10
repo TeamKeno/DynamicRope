@@ -456,10 +456,23 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		{
 			constexpr uint8 FG = SDPG_Foreground;
 			constexpr float LineThick = 1.5f;
+
+			// 색 범례 + 랩 대상 개수(로프가 실제로 감길 추출 셰이프가 몇 개 질의됐는지).
+			int32 WrapTargetCount = 0;
 			for (const FRopeDebugCollider& C : S.Colliders)
 			{
-				// 소스별 색: 정적 월드(박스/컨벡스/정적 캡슐)는 cyan, 스켈레탈 본 캡슐은 초록.
-				const FColor Color = C.bWorldStatic ? FColor::Cyan : FColor::Green;
+				if (C.bWrapTarget) { ++WrapTargetCount; }
+			}
+			AddTextLine(FString::Printf(
+				TEXT("  {grey}colliders=%d  {blue}wrapTarget=%d{grey} [{blue}wrap{grey}/{cyan}worldStatic{grey}/{green}bone{grey}]"),
+				S.Colliders.Num(), WrapTargetCount));
+
+			for (const FRopeDebugCollider& C : S.Colliders)
+			{
+				// 소스별 색: 정적 메시 랩 대상(URopeWrapTargetComponent가 서빙한 추출 박스/캡슐 = 로프가 실제로
+				// 감길 셰이프)은 파랑, 정적 월드(박스/컨벡스/정적 캡슐)는 cyan, 스켈레탈 본 캡슐은 초록.
+				const FColor Color = C.bWrapTarget ? FColor(40, 120, 255)
+					: (C.bWorldStatic ? FColor::Cyan : FColor::Green);
 				switch (C.Shape)
 				{
 				case ERopeDebugColliderShape::Capsule:
@@ -516,6 +529,18 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				else { Face = TEXT("edge"); } // 대각 법선 = 볼록 모서리 접촉.
 				// 라벨은 n<idx> <면>만(간결). 본 이름은 색(주황=스켈레탈)으로 갈음 — 정보량 과다 방지.
 				DrawDebugString(World, Tip, FString::Printf(TEXT("n%d %s"), NC.NodeIndex, *Face), nullptr, NColor, 0.0f, true, 1.0f);
+			}
+
+			// 감김 축(Wrapping에서 결정된 경로 축): 대상을 관통하는 노란 선 + 방향 화살표. 같은 기둥을 여러
+			// 각도로 던져 이 선이 늘 장축(기둥 세로)을 따르는지(일관성) 눈으로 확인한다. Wrapping 페이즈에서만 뜬다.
+			if (S.bHasWrapAxis)
+			{
+				const FVector AxisDir = S.WrapAxisDirection.GetSafeNormal();
+				const FVector AxisO = S.WrapAxisOrigin;
+				constexpr float AxisLen = 150.0f;
+				DrawDebugLine(World, AxisO - AxisDir * AxisLen, AxisO + AxisDir * AxisLen, FColor::Yellow, false, -1.0f, FG, 3.0f);
+				DrawDebugDirectionalArrow(World, AxisO, AxisO + AxisDir * AxisLen, 14.0f, FColor::Yellow, false, -1.0f, FG, 3.0f);
+				AddTextLine(FString::Printf(TEXT("  {yellow}wrapAxis{grey} dir=%s"), *AxisDir.ToCompactString()));
 			}
 		}
 	}
