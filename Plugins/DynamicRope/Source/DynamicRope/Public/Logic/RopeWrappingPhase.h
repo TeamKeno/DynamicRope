@@ -75,6 +75,11 @@ public:
 	bool ShouldAbortFailedShortWrap(const FRopeSimState& Sim, const FContext& Ctx,
 		float MinRequiredAngleDeg, float& OutAngleDeg) const;
 
+	/** 마지막 성공 path/anchor 거리를 helix 공식에 넣어 누적 감싼 각도(도)를 계산한다.
+	 *  실패 조기 abort(위)와 커밋 품질 관문(CommitMinWrapAngleDeg — URopeComponent::CommitWrapping)이
+	 *  같은 척도를 쓰도록 공개한다. 커밋 로그의 angle 표기도 이 값. */
+	bool ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const;
+
 	/**
 	 * 현재 앵커들로 Wrapped 핸드오프용 시드를 조립한다(FRopeWrapController::BeginWrap 입력).
 	 * 유효 노드가 없으면 Anchors가 빈 시드가 반환된다 — 호출자가 검사해 abort한다.
@@ -122,9 +127,6 @@ private:
 	bool ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
 		const FRopeSimState& Sim, const FContext& Ctx,
 		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
-
-	/** 마지막 성공 path/anchor 거리를 helix 공식에 넣어 누적 감싼 각도(도)를 계산한다. */
-	bool ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const;
 
 	/**
 	 * 감김 축 유도. 우선순위:

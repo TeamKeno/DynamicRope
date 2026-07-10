@@ -597,6 +597,17 @@ struct FRopeWrapConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
 	float FailedWrapMinAngleDeg = 120.0f;
 
+	/**
+	 * 커밋 품질 하한(도): Wrapped로 커밋되는 *모든* wrap(경로 완료/실패/settle 타임아웃 불문)의 감싼
+	 * 각도가 이 값 미만이면 커밋 대신 release한다. 0(기본) = 끔 — 기존 동작 그대로.
+	 * FailedWrapMinAngleDeg와의 차이: 그쪽은 "경로 생성이 실패한" wrap 전용 조기 abort, 여기는 커밋
+	 * 직전 최종 관문. 경로가 정상 완료돼도 latch가 팁 근처면 경로가 짧아(감은 각도 미미) 철썩 붙는
+	 * 커밋이 나올 수 있고, settle 타임아웃 커밋은 앵커 1개로도 통과한다 — 그런 부실 랩을 게임
+	 * 규칙으로 거르고 싶을 때 opt-in으로 켠다(팁 살짝 걸침도 유효한 디자인이면 0 유지).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
+	float CommitMinWrapAngleDeg = 0.0f;
+
 	/** Temporary contact loss tolerated while the rope is settling into a wrap. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrappingContactGraceTime = 0.20f;

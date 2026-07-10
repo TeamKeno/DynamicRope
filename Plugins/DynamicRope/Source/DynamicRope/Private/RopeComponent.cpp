@@ -2038,6 +2038,22 @@ void URopeComponent::CommitWrapping()
 		return;
 	}
 
+	// 커밋 시점 감싼 각도(도): 커밋 품질 관문(아래)과 전이 로그가 공용으로 쓴다. 실패 조기 abort와
+	// 같은 척도라 로그의 angle 수치를 그대로 비교/튜닝에 쓸 수 있다. 계산 불가(축 축퇴 등)면 -1 표기.
+	float CommitAngleDeg = -1.0f;
+	WrappingPhase.ComputeWrappedAngleAtLastBuiltPoint(Sim, MakeWrappingContext(), CommitAngleDeg);
+
+	// 커밋 품질 관문(opt-in — CommitMinWrapAngleDeg 0이면 기존 동작 그대로): 경로가 정상 완료됐거나
+	// settle 타임아웃으로 왔어도, 감은 각도가 하한 미만인 부실 랩은 Wrapped로 확정하지 않는다.
+	if (WrapConfig.CommitMinWrapAngleDeg > 0.0f && CommitAngleDeg >= 0.0f
+		&& CommitAngleDeg < WrapConfig.CommitMinWrapAngleDeg)
+	{
+		SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("commit quality below threshold, angle=%.0fdeg < %.0fdeg"),
+			CommitAngleDeg, WrapConfig.CommitMinWrapAngleDeg));
+		AbortWrapping(ERopeReleaseReason::Broken);
+		return;
+	}
+
 	const FRopeWrapState Seed = WrappingPhase.BuildCommitSeed(Sim, Mesh);
 	if (Seed.Anchors.Num() == 0)
 	{
@@ -2049,8 +2065,8 @@ void URopeComponent::CommitWrapping()
 	WrapController.BeginWrap(Sim, Seed, OverrideFrame); // 감길 mesh는 Seed.Mesh로 전파(접촉 유래, cross-actor 포함).
 	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
 
-	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s)"),
-		*Seed.BoneName.ToString(), Seed.Latched.Num()));
+	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s), angle=%.0fdeg"),
+		*Seed.BoneName.ToString(), Seed.Latched.Num(), CommitAngleDeg));
 	ResetTransientPhaseState();
 	NotifyWrapped(Seed.BoneName);
 	OnRopeWrapped.Broadcast(Seed.BoneName);
