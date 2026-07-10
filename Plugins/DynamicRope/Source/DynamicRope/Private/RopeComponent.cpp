@@ -1449,9 +1449,34 @@ FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& T
 {
 	FRopeThrowContext Resolved = ThrowContext;
 
+	// 최종 프레임은 정규직교(오른손계)를 보증한다 — 생산자(MakeDefault/Wielder/BP 직접 호출)가 무엇을
+	// 넣었든 하류(WhipGuide 스윙 기저, 프리뷰 빌더)는 이 결과만 믿는다. 이전 구현은 세 축을 각각
+	// 정규화만 해서 비직교 Custom 축이나 폴백으로 교체된 축이 서로 안 맞는 프레임으로 통과했다.
+	// 규약: Forward가 기준축(방향 보존, 정규화만). Up은 Forward에 직교화(Gram-Schmidt) — 입력 Up이
+	// Forward와 평행하면 월드 Up → 컴포넌트 Up 순으로 폴백, 전부 평행하면 임의 수직축.
+	// Right는 항상 Up×Forward로 재유도하고 입력 Right는 무시한다 — 반대편 스윙 의도는 뒤집힌 Right가
+	// 아니라 SwingPlane의 AimAndFrameLeft/Right로 표현하는 것이 지원 계약이다.
 	Resolved.FrameForward = FRopeWhipGuide::SafeNormalOr(Resolved.FrameForward, GetForwardVector());
-	Resolved.FrameUp = FRopeWhipGuide::SafeNormalOr(Resolved.FrameUp, FVector::UpVector);
-	Resolved.FrameRight = FRopeWhipGuide::SafeNormalOr(Resolved.FrameRight, FVector::CrossProduct(Resolved.FrameUp, Resolved.FrameForward));
+	const FVector Forward = Resolved.FrameForward;
+
+	FVector Up = FVector::ZeroVector;
+	const FVector UpCandidates[] = { ThrowContext.FrameUp, FVector::UpVector, GetUpVector() };
+	for (const FVector& Candidate : UpCandidates)
+	{
+		FVector Projected = Candidate - FVector::DotProduct(Candidate, Forward) * Forward;
+		if (Projected.Normalize(KINDA_SMALL_NUMBER))
+		{
+			Up = Projected;
+			break;
+		}
+	}
+	if (Up.IsNearlyZero())
+	{
+		Up = RopeMath::AnyTangentFromNormal(Forward); // 수직 던지기 + 수직 컴포넌트 축 — 임의 수직축 폴백.
+	}
+	Resolved.FrameUp = Up;
+	Resolved.FrameRight = FVector::CrossProduct(Up, Forward);
+
 	if (Resolved.ThrowSpeed <= 0.0f)
 	{
 		Resolved.ThrowSpeed = ThrowParams.ThrowSpeed;

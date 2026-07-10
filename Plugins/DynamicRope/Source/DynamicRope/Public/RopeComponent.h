@@ -365,7 +365,10 @@ protected:
 	 *  기본 구현은 FRopeThrowContext::MakeDefault(공용 조립 — 프레임 기저 규약은 그쪽 주석 참고) 위임. */
 	virtual FRopeThrowContext MakeDefaultThrowContext(const FVector& AimDir) const;
 
-	/** throw 컨텍스트 최종 해석(throw당 1회): 프레임 축 정규화/fallback/속도·원점 보정. 에임 어시스트 등 커스텀 지점. */
+	/** throw 컨텍스트 최종 해석(throw당 1회 — 실제 던지기+프리뷰 빌드가 전부 이 관문을 지난다):
+	 *  프레임을 정규직교(오른손계)로 재구성(Forward 기준, Up 직교화, Right = Up×Forward 재유도 —
+	 *  입력 Right 무시), 속도·원점 폴백. 에임 어시스트 등 커스텀 지점(오버라이드 시 프리뷰와 실제
+	 *  던지기가 자동으로 일치). */
 	virtual FRopeThrowContext ResolveThrowContext(const FRopeThrowContext& ThrowContext) const;
 
 	/**
