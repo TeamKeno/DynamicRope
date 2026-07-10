@@ -811,7 +811,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	if (Phase == ERopePhase::Flight)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FinalizeFlight);
-		const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams();
+		const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
 		TArray<FRopeContactCandidate> Candidates;
 		TArray<FRopeFlightNodeDebug> FlightNodeDebug;
 		if (bDebugCapture)
@@ -1665,7 +1665,7 @@ float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, in
 
 // ===== Flight ===============================================================
 
-FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams() const
+FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float DeltaTime) const
 {
 	FRopeFlightContactDetector::FParams Params;
 	Params.ContactRadius = WrapConfig.ContactRadius;
@@ -1673,6 +1673,7 @@ FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams() con
 	Params.PredictiveContactFrames = WrapConfig.PredictiveContactFrames;
 	Params.MinLatchNodes = WrapConfig.MinLatchNodes;
 	Params.FallbackForward = GetForwardVector();
+	Params.DeltaTime = DeltaTime;
 	return Params;
 }
 

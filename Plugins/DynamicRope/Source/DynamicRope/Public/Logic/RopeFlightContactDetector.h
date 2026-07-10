@@ -28,6 +28,11 @@ public:
 		float PredictiveContactFrames = 0.0f; // WrapConfig.PredictiveContactFrames: 예측 외삽 프레임 수
 		int32 MinLatchNodes = 1;              // WrapConfig.MinLatchNodes: 캡처에 필요한 최소 접촉 노드 수
 		FVector FallbackForward = FVector::ForwardVector; // ExpectedWrapTangent 퇴화 케이스용(컴포넌트 전방)
+		// 프레임 dt(초): SurfaceVelocity(FROZEN 계약 — cm/s)를 로프 Verlet 속도(cm/프레임)와 같은
+		// 단위로 환산하는 다리. sim 호출자(FinalizeSimFrame)는 실제 프레임 dt를 넣는다 — 기본값은
+		// dt가 없는 호출자(preview: 정적 스냅샷이라 표면속도 0)용 보수치. 환산 없이 빼면 움직이는
+		// 본에서 표면속도가 ~1/dt배(60fps 기준 ~60배) 과대 반영된다(2026-07-09 발견 버그).
+		float DeltaTime = 1.0f / 60.0f;
 	};
 
 	// whip 가이드 프레임 데이터 뷰(예측 접촉의 가이드 노드 분기 입력). 포인터는 소유하지 않으며

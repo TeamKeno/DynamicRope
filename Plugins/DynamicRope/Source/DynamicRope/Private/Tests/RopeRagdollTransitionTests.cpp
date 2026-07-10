@@ -236,8 +236,9 @@ bool FRopeRagdollFrictionClampTest::RunTest(const FString& Parameters)
 }
 
 // (e) 상대운동 평가와 캡처의 현재 계약 고정:
-//  - EvaluateRelativeMotion은 로프 속도에서 표면속도를 빼므로, 정지 로프 + 움직이는 표면이면
-//    상대 접선 속도 = 표면 속도 크기다(움직이는 본 위에서도 "스침" 판정이 가능한 근거).
+//  - EvaluateRelativeMotion은 로프 프레임 변위(cm/프레임)에서 표면속도(cm/s)를 dt로 환산해 뺀다.
+//    정지 로프 + 움직이는 표면이면 상대 접선 속도 = 표면 속도 × dt(cm/프레임 단위 — 움직이는 본
+//    위에서도 "스침" 판정이 가능한 근거). dt 환산 누락으로 ~1/dt배 과대였던 버그를 여기서 고정한다.
 //  - ShouldCapture는 현재 품질 게이트가 바이패스라 스파이크가 캡처를 막지 않는다(특성 고정).
 //    전이 프레임 오탐의 실제 방어선은 Contacting 체류(WrapDecisionTime)와 후보 소실 dismiss,
 //    그리고 위 (c)의 dwell 재시작이다.
@@ -267,6 +268,7 @@ bool FRopeRagdollRelativeMotionTest::RunTest(const FString& Parameters)
 
 	FRopeFlightContactDetector::FParams Params;
 	Params.MinLatchNodes = 2;
+	Params.DeltaTime = 0.02f; // 단위 환산 검증을 위해 dt 명시(50fps).
 
 	TArray<FRopeContactCandidate> Candidates;
 	Candidates.Add(MakeSpikeCandidate(3, 500.0f));
@@ -274,9 +276,11 @@ bool FRopeRagdollRelativeMotionTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("candidate stays valid (mock mesh has no bone axis to judge miss cone)"),
 		Candidates[0].bValid);
-	TestTrue(FString::Printf(TEXT("relative tangential speed equals surface speed for a resting rope (%.1f)"),
+	// 정지 로프 + 표면 500cm/s → 상대 접선 속도 = 500 × 0.02 = 10cm/프레임(cm/s를 그대로 빼면 500이
+	// 나온다 — 그 단위 버그의 회귀 방지가 이 단언의 존재 이유).
+	TestTrue(FString::Printf(TEXT("relative tangential speed equals surface speed x dt for a resting rope (%.2f)"),
 		Candidates[0].RelativeTangentialSpeed),
-		FMath::IsNearlyEqual(Candidates[0].RelativeTangentialSpeed, 500.0f, 0.5f));
+		FMath::IsNearlyEqual(Candidates[0].RelativeTangentialSpeed, 10.0f, 0.05f));
 
 	// 캡처 특성 고정: 표면속도 스파이크(60000)가 있어도 MinLatchNodes만 차면 캡처된다.
 	// 이 단언이 깨지는 날은 품질 게이트가 켜진 날이다 — 그때 스파이크 컷 기준과 함께 갱신할 것.

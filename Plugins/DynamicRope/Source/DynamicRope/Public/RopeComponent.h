@@ -567,7 +567,8 @@ private:
 	// 여기엔 UObject 컨텍스트가 필요한 조립 코드만 남는다.
 
 	/** 검출기에 넘길 파라미터 스냅샷(WrapConfig + 튜브 반지름 + 컴포넌트 전방). */
-	FRopeFlightContactDetector::FParams MakeFlightDetectParams() const;
+	// DeltaTime: 이번 프레임 dt — 상대운동 평가의 SurfaceVelocity(cm/s→cm/프레임) 환산에 쓰인다.
+	FRopeFlightContactDetector::FParams MakeFlightDetectParams(float DeltaTime) const;
 
 	/** 캡처 확정 시 Contacting 진입 상태(ContactTracker/PendingWrapSeed/타이머)를 구성한다. */
 	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates);
