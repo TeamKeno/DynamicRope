@@ -415,7 +415,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 		return false;
 	}
 
-	if (!ResolveWrappingAxis(LatchAnchor, State.PathAxisOrigin, State.PathAxisDirection))
+	if (!ResolveWrappingAxis(LatchAnchor, Ctx, State.PathAxisOrigin, State.PathAxisDirection))
 	{
 		return false;
 	}
@@ -725,7 +725,7 @@ bool FRopeWrappingPhase::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceA
 	FVector AxisDirection = FVector::ForwardVector;
 
 	//2. 감김 축 구하기
-	if (!ResolveWrappingAxis(LatchAnchor, AxisOrigin, AxisDirection))
+	if (!ResolveWrappingAxis(LatchAnchor, Ctx, AxisOrigin, AxisDirection))
 	{
 		return false;
 	}
@@ -842,7 +842,7 @@ bool FRopeWrappingPhase::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor
 	FVector AxisDirection = FVector::ForwardVector;
 
 	//2. 감김 축 정의
-	if (!ResolveWrappingAxis(LatchAnchor, AxisOrigin, AxisDirection))
+	if (!ResolveWrappingAxis(LatchAnchor, Ctx, AxisOrigin, AxisDirection))
 	{
 		return false;
 	}
@@ -950,7 +950,7 @@ bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState
 
 	FVector AxisOrigin = FVector::ZeroVector;
 	FVector AxisDirection = FVector::ForwardVector;
-	if (!ResolveWrappingAxis(LatchAnchor, AxisOrigin, AxisDirection))
+	if (!ResolveWrappingAxis(LatchAnchor, Ctx, AxisOrigin, AxisDirection))
 	{
 		return false;
 	}
@@ -987,10 +987,99 @@ bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState
 	return true;
 }
 
-/* 감김 축 정의 */
-bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor,
+bool FRopeWrappingPhase::FindColliderShapeAxis(const FContext& Ctx, FName Bone, const USceneComponent* Mesh,
+	FVector& OutAxisOrigin, FVector& OutAxisDirection)
+{
+	if (Bone.IsNone())
+	{
+		return false;
+	}
+
+	for (const IRopeCollider* Collider : Ctx.Colliders)
+	{
+		if (!Collider)
+		{
+			continue;
+		}
+		FName ColliderBone = NAME_None;
+		const USceneComponent* ColliderMesh = nullptr;
+		Collider->GetGPUAttribution(ColliderBone, ColliderMesh);
+		// mesh까지 일치해야 한다(cross-actor: 다른 액터의 동명 본 오배정 방지). 귀속 미구현
+		// collider(None/null)는 자연히 걸러진다. 같은 본에 셰이프가 여럿(피직스 에셋 멀티 셰이프)이면
+		// 첫 매치를 쓴다 — 본당 주 셰이프가 먼저 빌드되는 provider 관례에 기댄 단순화.
+		if (ColliderBone != Bone || (Mesh != nullptr && ColliderMesh != Mesh))
+		{
+			continue;
+		}
+
+		// 캡슐: 세그먼트가 곧 형상 축. 구(A≈B) 축퇴는 방향 정보가 없어 다음 폴백으로.
+		FVector CapA, CapB;
+		float CapRadius = 0.0f;
+		if (Collider->GetGPUCapsule(CapA, CapB, CapRadius))
+		{
+			const FVector Axis = CapB - CapA;
+			if (Axis.SizeSquared() > 1.0f) // 1cm 미만 세그먼트는 방향 신뢰 불가(사실상 구).
+			{
+				OutAxisOrigin = CapA;
+				OutAxisDirection = Axis.GetSafeNormal();
+				return true;
+			}
+			continue;
+		}
+
+		// 박스(정적 랩 가상 본 등): 최장 반변의 로컬 축을 회전시켜 축으로. origin = 박스 중심(축 위).
+		FVector BoxCenter, BoxHalf;
+		FQuat BoxRot;
+		if (Collider->GetGPUBox(BoxCenter, BoxRot, BoxHalf))
+		{
+			FVector LocalAxis = FVector::XAxisVector;
+			if (BoxHalf.Y > BoxHalf.X && BoxHalf.Y >= BoxHalf.Z)
+			{
+				LocalAxis = FVector::YAxisVector;
+			}
+			else if (BoxHalf.Z > BoxHalf.X && BoxHalf.Z > BoxHalf.Y)
+			{
+				LocalAxis = FVector::ZAxisVector;
+			}
+			OutAxisOrigin = BoxCenter;
+			OutAxisDirection = BoxRot.RotateVector(LocalAxis);
+			return true;
+		}
+
+		// SDF: 본 로컬 bounds의 최장축을 본 트랜스폼으로 월드에. origin = bounds 중심(월드).
+		FRopeSDFColliderView SDFView;
+		if (Collider->GetGPUSDF(SDFView))
+		{
+			const FVector Size = SDFView.LocalSize;
+			FVector LocalAxis = FVector::XAxisVector;
+			if (Size.Y > Size.X && Size.Y >= Size.Z)
+			{
+				LocalAxis = FVector::YAxisVector;
+			}
+			else if (Size.Z > Size.X && Size.Z > Size.Y)
+			{
+				LocalAxis = FVector::ZAxisVector;
+			}
+			OutAxisOrigin = SDFView.BoneToWorld.TransformPosition(SDFView.LocalMin + Size * 0.5);
+			OutAxisDirection = SDFView.BoneToWorld.TransformVectorNoScale(LocalAxis)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+			return true;
+		}
+	}
+	return false;
+}
+
+/* 감김 축 정의 — 우선순위/근거는 헤더 주석 참고(형상 축 → 본→부모 → 컴포넌트 기저 → 로컬 X). */
+bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 	FVector& OutAxisOrigin, FVector& OutAxisDirection) const
 {
+	// 1) collider 형상 축: 실제 충돌 지오메트리의 장축 — 본 그래프 특성(짧은 몸통 본, 체인 본,
+	//    임포트 축)과 무관하게 맞고, origin이 지오메트리 중심축 위라 helix 반지름도 정확하다.
+	if (FindColliderShapeAxis(Ctx, LatchAnchor.Bone, LatchAnchor.Mesh.Get(), OutAxisOrigin, OutAxisDirection))
+	{
+		return true;
+	}
+
 	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
 	{

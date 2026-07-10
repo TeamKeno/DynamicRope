@@ -126,8 +126,23 @@ private:
 	/** 마지막 성공 path/anchor 거리를 helix 공식에 넣어 누적 감싼 각도(도)를 계산한다. */
 	bool ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const;
 
-	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor,
+	/**
+	 * 감김 축 유도. 우선순위:
+	 *  1) latch 본에 귀속된 collider의 *형상 축*(캡슐 세그먼트/박스 최장축/SDF bounds 최장축) —
+	 *     본→부모 벡터는 짧고 두꺼운 본(몸통)·체인 본(목/꼬리)·특이 임포트 축에서 지오메트리 장축과
+	 *     어긋나 나선 반지름이 실제 단면과 틀어졌다(드래곤 wrap 실패의 핵심). 형상 축은 실제 충돌
+	 *     지오메트리에서 나오므로 본 그래프 형태와 무관하게 맞고, 축 origin도 지오메트리 중심축 위라
+	 *     helix 반지름(latch↔축 거리)이 정확해진다.
+	 *  2) 본→부모 벡터(스켈레탈 — 형상 축을 못 찾은 본: 구형 단일 셰이프 등).
+	 *  3) 비-스켈레탈: 컴포넌트 기저축 중 latch normal에 가장 수직인 축.
+	 *  4) 본 로컬 X.
+	 */
+	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;
+
+	/** 1)의 구현: Ctx.Colliders에서 (Bone, Mesh)에 귀속된 collider를 찾아 형상 축을 돌려준다. */
+	static bool FindColliderShapeAxis(const FContext& Ctx, FName Bone, const USceneComponent* Mesh,
+		FVector& OutAxisOrigin, FVector& OutAxisDirection);
 
 	void OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
 		const USceneComponent* Mesh, FVector& InOutAxisDirection) const;
