@@ -700,11 +700,23 @@ enum class ERopeSwingPlane : uint8
 	CustomNormal UMETA(DisplayName = "Custom Plane Normal")
 };
 
+struct FRopeThrowParams; // 아래 정의 — MakeDefault가 설정 스냅샷으로 받는다.
+
 /** throw 순간 Wielder/Component가 계산해 넘기는 런타임 값. 설정값(FRopeThrowParams)과 분리한다. */
 USTRUCT(BlueprintType)
 struct FRopeThrowContext
 {
 	GENERATED_BODY()
+
+	/**
+	 * 컴포넌트 트랜스폼 + 던지기 설정에서 기본 컨텍스트를 조립한다(throw당 1회, GT).
+	 * URopeComponent::Throw(AimDir) 편의 진입점의 기본 구현이 사용한다 — Wielder처럼 컨텍스트를
+	 * 직접 만드는 호출자는 무관. 프레임 기저 규약(FrameMode별):
+	 *   World = 월드 축 · Owner/Socket = 컴포넌트 기저 · OwnerCamera = owner의 첫 카메라
+	 *   (없으면 컴포넌트 기저 폴백) · Custom = Params의 커스텀 축(원값 — 정규화/직교
+	 *   폴백은 ResolveThrowContext 책임). 구현은 RopeTypes.cpp.
+	 */
+	static FRopeThrowContext MakeDefault(const USceneComponent& RopeComponent, const FRopeThrowParams& Params);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	FVector Origin = FVector::ZeroVector;
@@ -955,7 +967,12 @@ struct FRopeGuidedThrowState
 	}
 };
 
-//TODO 주석 추가
+/**
+ * 접촉 후보들에서 dominant 본(가장 많은 노드가 닿은 본)을 추적하는 POD 트래커.
+ * Flight의 캡처 판정(ShouldCapture)과 Contacting의 체류 추적이 공용으로 쓴다.
+ * 동률은 head(손 쪽) 노드가 앞선 본 → 점수(관통+감김 방향) 순으로 깨져 프레임 간 안정적이다.
+ * 본이 바뀌면 DwellTime이 0부터 다시 쌓인다(전이 프레임 오탐 방어 — 랙돌 테스트 (c)가 고정하는 계약).
+ */
 struct FRopeContactTracker
 {
 	FName CandidateBone = NAME_None;
@@ -986,75 +1003,6 @@ struct FRopeContactTracker
 		}
 	}
 
-	void Update(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime)
-	{
-		if (Candidates.Num() == 0)
-		{
-			Decay(DeltaTime);
-			return;
-		}
-
-		TMap<FName, TArray<int32>> NodesByBone;
-		TMap<FName, const USceneComponent*> MeshByBone;
-		TMap<FName, float> ScoreByBone;
-		TMap<FName, int32> HeadNodeByBone;
-		for (const FRopeContactCandidate& Candidate : Candidates)
-		{
-			if (!Candidate.bValid || Candidate.Bone.IsNone())
-			{
-				continue;
-			}
-
-			NodesByBone.FindOrAdd(Candidate.Bone).Add(Candidate.NodeIndex);
-			MeshByBone.FindOrAdd(Candidate.Bone) = Candidate.Mesh;
-			ScoreByBone.FindOrAdd(Candidate.Bone) += Candidate.Penetration + FMath::Max(0.0f, Candidate.WrapDirectionScore);
-			if (int32* ExistingHeadNode = HeadNodeByBone.Find(Candidate.Bone))
-			{
-				*ExistingHeadNode = FMath::Min(*ExistingHeadNode, Candidate.NodeIndex);
-			}
-			else
-			{
-				HeadNodeByBone.Add(Candidate.Bone, Candidate.NodeIndex);
-			}
-		}
-
-		FName BestBone = NAME_None;
-		int32 BestCount = 0;
-		int32 BestHeadNode = INDEX_NONE;
-		float BestScore = 0.0f;
-		for (const TPair<FName, TArray<int32>>& Pair : NodesByBone)
-		{
-			const float Score = ScoreByBone.FindRef(Pair.Key);
-			const int32 HeadNode = HeadNodeByBone.FindRef(Pair.Key);
-			if (Pair.Value.Num() > BestCount ||
-				(Pair.Value.Num() == BestCount &&
-					(BestHeadNode == INDEX_NONE || HeadNode < BestHeadNode ||
-						(HeadNode == BestHeadNode && Score > BestScore))))
-			{
-				BestBone = Pair.Key;
-				BestCount = Pair.Value.Num();
-				BestHeadNode = HeadNode;
-				BestScore = Score;
-			}
-		}
-
-		if (BestBone.IsNone())
-		{
-			Decay(DeltaTime);
-			return;
-		}
-
-		if (BestBone == CandidateBone)
-		{
-			DwellTime += DeltaTime;
-		}
-		else
-		{
-			CandidateBone = BestBone;
-			DwellTime = 0.0f;
-		}
-
-		CandidateMesh = MeshByBone.FindRef(BestBone);
-		CandidateNodes = NodesByBone.FindRef(BestBone);
-	}
+	/** 후보를 본별 집계해 dominant 본/노드/체류 시간을 갱신한다. 구현은 RopeTypes.cpp. */
+	void Update(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime);
 };

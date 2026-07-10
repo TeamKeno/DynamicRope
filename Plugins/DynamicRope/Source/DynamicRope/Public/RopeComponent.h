@@ -361,7 +361,8 @@ protected:
 	virtual void NotifyWrapped(FName Bone) {}
 	virtual void NotifyReleased(FName Bone, ERopeReleaseReason Reason) {}
 
-	/** Throw(AimDir) 편의 진입점이 만드는 기본 컨텍스트(throw당 1회). 조준 규약을 바꾸려면 오버라이드. */
+	/** Throw(AimDir) 편의 진입점이 만드는 기본 컨텍스트(throw당 1회). 조준 규약을 바꾸려면 오버라이드.
+	 *  기본 구현은 FRopeThrowContext::MakeDefault(공용 조립 — 프레임 기저 규약은 그쪽 주석 참고) 위임. */
 	virtual FRopeThrowContext MakeDefaultThrowContext(const FVector& AimDir) const;
 
 	/** throw 컨텍스트 최종 해석(throw당 1회): 프레임 축 정규화/fallback/속도·원점 보정. 에임 어시스트 등 커스텀 지점. */
@@ -538,7 +539,7 @@ private:
 	void InitRope();
 
 	/** Sim이 비어 있으면 1회 초기화한다(OnRegister/Throw/Prepare 초입의 안전 가드). */
-	void EnsureRopeInitialized() { if (Sim.Num() == 0) { InitRope(); } }
+	void EnsureRopeInitialized();
 
 #if WITH_GAMEPLAY_DEBUGGER
 	// 디버그 캡처 대상일 때 centerline/wrapped/collider 공통 필드를 스냅샷에 채운다(FinalizeSimFrame에서 호출).

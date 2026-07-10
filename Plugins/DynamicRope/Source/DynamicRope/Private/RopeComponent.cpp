@@ -1249,6 +1249,14 @@ void URopeComponent::InitRope()
 		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);
 }
 
+void URopeComponent::EnsureRopeInitialized()
+{
+	if (Sim.Num() == 0) 
+	{ 
+		InitRope(); 
+	}
+}
+
 #if WITH_GAMEPLAY_DEBUGGER
 namespace
 {
@@ -1432,44 +1440,9 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 
 FRopeThrowContext URopeComponent::MakeDefaultThrowContext(const FVector& /*AimDir*/) const
 {
-	FRopeThrowContext Context;
-	Context.Origin = GetComponentLocation();
-	if (const AActor* Owner = GetOwner())
-	{
-		Context.OwnerVelocity = Owner->GetVelocity();
-		Context.SocketVelocity = Context.OwnerVelocity;
-	}
-	Context.FrameMode = ThrowParams.FrameMode;
-	Context.ThrowSpeed = ThrowParams.ThrowSpeed;
-	Context.FrameForward = GetForwardVector();
-	Context.FrameUp = ThrowParams.FrameMode == ERopeThrowFrameMode::World ? FVector::UpVector : GetUpVector();
-	Context.FrameRight = ThrowParams.FrameMode == ERopeThrowFrameMode::World ? FVector::RightVector : GetRightVector();
-	if (ThrowParams.FrameMode == ERopeThrowFrameMode::World)
-	{
-		Context.FrameForward = FVector::ForwardVector;
-		Context.FrameRight = FVector::RightVector;
-	}
-	if (ThrowParams.FrameMode == ERopeThrowFrameMode::OwnerCamera)
-	{
-		if (const AActor* Owner = GetOwner())
-		{
-			if (const UCameraComponent* Camera = Owner->FindComponentByClass<UCameraComponent>())
-			{
-				Context.FrameForward = Camera->GetForwardVector();
-				Context.FrameUp = Camera->GetUpVector();
-				Context.FrameRight = Camera->GetRightVector();
-			}
-		}
-	}
-	if (ThrowParams.FrameMode == ERopeThrowFrameMode::Custom)
-	{
-		Context.FrameForward = ThrowParams.CustomFrameForward;
-		Context.FrameUp = ThrowParams.CustomFrameUp;
-		Context.FrameRight = ThrowParams.CustomFrameRight;
-	}
-	Context.SwingPlane = ThrowParams.SwingPlane;
-	Context.CustomSwingPlaneNormal = ThrowParams.CustomSwingPlaneNormal;
-	return Context;
+	// 조립 로직은 FRopeThrowContext::MakeDefault(RopeTypes.cpp — 프레임 기저 규약 포함)로 이동.
+	// 이 함수는 서브클래스가 조준 규약을 바꾸는 확장 훅으로 남는다(기본 구현 = 공용 조립 위임).
+	return FRopeThrowContext::MakeDefault(*this, ThrowParams);
 }
 
 FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& ThrowContext) const
