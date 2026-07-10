@@ -2137,6 +2137,35 @@ void URopeComponent::UpdateReel(float DeltaTime)
 	SetRopeLength(Sim.RopeLength - ReelRate * DeltaTime);
 }
 
+namespace
+{
+	// 본에서 부모 체인을 올라가 가장 가까운 "시뮬 중인 피직스 바디"의 본을 찾는다(없으면 None).
+	// 감긴 본이 트위스트 본 등 피직스 에셋에 바디가 없는 본일 수 있다 — 그 경우 본 이름만 보고
+	// 비시뮬 판정해 캐릭터 무브먼트 분기로 빠지면, 랙돌 셋업이 무브먼트를 꺼둔 상태(MOVE_None)라
+	// AddForce가 조용히 버려진다. 힘/속도 인가 본은 이 함수로 승격해 찾는다.
+	FName FindNearestSimulatingBone(const USkeletalMeshComponent* Mesh, FName Bone)
+	{
+		while (!Bone.IsNone())
+		{
+			if (Mesh->IsSimulatingPhysics(Bone))
+			{
+				return Bone;
+			}
+			Bone = Mesh->GetParentBone(Bone);
+		}
+		return NAME_None;
+	}
+
+	// 캐릭터 무브먼트가 지금 힘을 소비할 수 있는가. MOVE_None(DisableMovement — 랙돌 셋업 관례)이면
+	// AddForce가 누적만 되고 소비되지 않아 "성공한 척" 힘이 사라진다 — 그 경우 다른 수신자로 넘긴다.
+	UCharacterMovementComponent* GetForceConsumingMovement(const USkeletalMeshComponent* Mesh)
+	{
+		const ACharacter* Character = Cast<ACharacter>(Mesh->GetOwner());
+		UCharacterMovementComponent* Movement = Character ? Character->GetCharacterMovement() : nullptr;
+		return (Movement && Movement->MovementMode != MOVE_None) ? Movement : nullptr;
+	}
+}
+
 void URopeComponent::UpdateTether(float DeltaTime)
 {
 	// 초과분(overshoot) = 앵커에서 "조준 노드"(walk가 찾은 첫 직선 다리 끝 = 손 또는 벽 모서리)까지의 실제
@@ -2196,10 +2225,19 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		}
 	};
 
-	if (Mesh->IsSimulatingPhysics(LastPullSample.Bone))
+	// 감긴 본이 시뮬 중이어도 메시 전체가 시뮬(풀 랙돌)일 때만 본 속도 톱업으로 처리한다. 부분 랙돌
+	// (메시 루트 바디는 키네마틱, 서브트리만 시뮬)은 시뮬 본이 키네마틱 부모에 구속돼 있어 —
+	// 키네마틱은 사실상 무한질량 — 본에 준 속도가 구속에 다시 잡아먹혀 액터가 끌려오지 않는다.
+	// 그 경우 아래 액터 오프셋 경로로 떨어뜨려 이동체를 직접 회수한다(시뮬 팔다리는 구속으로 따라온다).
+	// 인가 본은 감긴 본에서 부모 체인 승격(FindNearestSimulatingBone) — 바디 없는 본(트위스트 등) 대응.
+	if (Mesh->IsSimulatingPhysics())
 	{
-		TopUpVelocity(Mesh, LastPullSample.Bone);
-		return;
+		const FName SimBone = FindNearestSimulatingBone(Mesh, LastPullSample.Bone);
+		if (!SimBone.IsNone())
+		{
+			TopUpVelocity(Mesh, SimBone);
+			return;
+		}
 	}
 	AActor* Owner = Mesh->GetOwner();
 	if (UPrimitiveComponent* Root = Owner ? Cast<UPrimitiveComponent>(Owner->GetRootComponent()) : nullptr)
@@ -2237,22 +2275,33 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		return;
 	}
 
-	// 1) 감긴 본이 물리 시뮬 중(래그돌/물리 프랍)이면 그 본에 직접 — 가장 정확한 인가점.
-	if (Mesh->IsSimulatingPhysics(Pull.Bone))
+	// 1) 감긴 본(부모 체인 승격 포함)이 물리 시뮬 중(래그돌/물리 프랍)이면 그 바디에 직접 —
+	//    가장 정확한 인가점. 감긴 본 자체에 바디가 없으면(트위스트 본 등) 가장 가까운 시뮬 부모 바디로.
+	const FName SimBone = FindNearestSimulatingBone(Mesh, Pull.Bone);
+	if (!SimBone.IsNone())
 	{
-		Mesh->AddForceAtLocation(Force, Pull.WorldPoint, Pull.Bone);
+		Mesh->AddForceAtLocation(Force, Pull.WorldPoint, SimBone);
+		// 부분 랙돌(메시 루트 바디는 키네마틱): 시뮬 본에 준 힘은 키네마틱 부모 구속(무한질량)이 흡수해
+		// 액터로 전달되지 않는다. 캐릭터가 여전히 무브먼트로 구동 중이면 이동체에도 같은 힘을 줘 실제로
+		// 끌리게 한다(본 인가는 팔다리가 당겨지는 시각 반응, 무브먼트 인가는 몸통 견인 — 역할이 다르다).
+		// 풀 랙돌은 루트 바디가 시뮬이라 여기로 들어오지 않는다(이중 인가 없음).
+		if (!Mesh->IsSimulatingPhysics())
+		{
+			if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Mesh))
+			{
+				Movement->AddForce(Force);
+			}
+		}
 		return;
 	}
 
 	// 2) 캐릭터면 무브먼트에 힘 — 애니메이션 구동 본에는 힘을 줄 수 없으므로 이동체 전체를 견인한다
 	//    (PoC 4.2: 본/루트에 단순 힘 전달까지. 팔다리 IK/래그돌 반응은 후속).
-	if (ACharacter* Character = Cast<ACharacter>(Mesh->GetOwner()))
+	//    무브먼트가 힘을 실제로 소비할 때만(MOVE_None 제외) — 아니면 3)/무수신 경고로 떨어져 원인이 보인다.
+	if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Mesh))
 	{
-		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-		{
-			Movement->AddForce(Force);
-			return;
-		}
+		Movement->AddForce(Force);
+		return;
 	}
 
 	// 3) 그 외: 시뮬 중인 루트 프리미티브(물리 액터에 붙은 skeletal mesh 구성).
@@ -2266,12 +2315,13 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		}
 	}
 
-	// 수신자 없음(애니메이션 구동 본 + 비캐릭터 + 비시뮬 루트): 힘이 조용히 사라지는 걸 wrap당 1회 알린다.
+	// 수신자 없음(시뮬 바디 없는 본 체인 + 무브먼트 비활성/비캐릭터 + 비시뮬 루트): 힘이 조용히
+	// 사라지는 걸 wrap당 1회 알린다.
 	if (!bLoggedPullNoReceiver)
 	{
 		bLoggedPullNoReceiver = true;
 		UE_LOG(LogDynamicRope, Warning,
-			TEXT("[%s] Pull has no force receiver: mesh=%s bone=%s is not simulating, owner=%s is not a Character and its root is not simulating — pull force is dropped."),
+			TEXT("[%s] Pull has no force receiver: mesh=%s bone=%s has no simulating body up its parent chain, owner=%s has no force-consuming CharacterMovement (not a Character, or movement disabled) and its root is not simulating — pull force is dropped."),
 			*GetName(), *Mesh->GetName(), *Pull.Bone.ToString(), *GetNameSafe(Owner));
 	}
 }
