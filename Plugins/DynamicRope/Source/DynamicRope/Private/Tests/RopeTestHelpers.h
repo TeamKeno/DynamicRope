@@ -71,6 +71,9 @@ namespace RopeTest
 		float   Radius = 0.0f;
 		FName   Bone = NAME_None;
 		const USkeletalMeshComponent* SourceMesh = nullptr;
+		// 접촉점의 표면 속도(cm/s). 계약상 additive 필드(기본 0 = 정지 표면)라 기존 테스트와 호환.
+		// 랙돌 전환 프레임의 포즈 팝 스파이크(마찰 클램프/상대운동 평가) 테스트에 쓴다.
+		FVector SurfaceVelocity = FVector::ZeroVector;
 
 		FSphereMockCollider() = default;
 		FSphereMockCollider(const FVector& InCenter, float InRadius, FName InBone,
@@ -91,6 +94,7 @@ namespace RopeTest
 				C.SurfacePoint = Center + C.Normal * Radius;
 				C.Bone = Bone;
 				C.SourceMesh = SourceMesh;
+				C.SurfaceVelocity = SurfaceVelocity;
 			}
 			return C;
 		}
