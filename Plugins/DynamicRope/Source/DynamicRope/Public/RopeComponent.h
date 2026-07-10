@@ -527,6 +527,7 @@ private:
 	};
 	TArray<FGpuColliderAttribution> GpuCapsuleAttribution; // GPU Capsules와 평행
 	TArray<FGpuColliderAttribution> GpuSdfAttribution;     // GPU SDFColliders와 평행
+	TArray<FGpuColliderAttribution> GpuBoxAttribution;     // GPU Boxes와 평행(랩 가능 박스 감지 귀속)
 
 	// GPU 감지(G3) 프레임 산출: 서브시스템이 GetLatestContacts를 귀속해 Finalize 전에 채운다.
 	// bValid면 FinalizeSimFrame의 Flight 접촉 소스가 CPU 스윕 대신 이 후보들을 쓴다(GPU 경로).

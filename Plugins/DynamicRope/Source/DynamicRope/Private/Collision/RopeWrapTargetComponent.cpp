@@ -113,7 +113,7 @@ void URopeWrapTargetComponent::BuildCapsule(USceneComponent* Comp)
 	bHasPrevEndpoints = true;
 }
 
-void URopeWrapTargetComponent::GatherColliders(TArrayView<const FBox> /*RopeRegions*/, TArray<IRopeCollider*>& OutColliders)
+void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gather)
 {
 	USceneComponent* Comp = ResolveTarget();
 	if (!Comp)
@@ -129,5 +129,9 @@ void URopeWrapTargetComponent::GatherColliders(TArrayView<const FBox> /*RopeRegi
 		BuildCapsule(Comp);
 	}
 
-	OutColliders.Add(&Capsule); // 캐시된 캡슐 포인터(해당 프레임 solve 동안 유효).
+	// 캐시된 캡슐 포인터를 풀에 담고(해당 프레임 solve 동안 유효), region 매핑은 bounds 헬퍼가 만든다
+	// (스켈레탈 provider와 동일 계약 — 캡슐 1개라 유니언=자기 자신, 원거리 로프는 O(1) 거절).
+	const int32 StartIndex = Gather.Colliders.Num();
+	Gather.Colliders.Add(&Capsule);
+	RopeColliderGather::MapCollidersToRegionsByBounds(Gather, StartIndex);
 }

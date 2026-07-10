@@ -68,7 +68,7 @@ public:
 	FName WrapBoneName = NAME_None;
 
 	//~ IRopeColliderProvider
-	virtual void GatherColliders(TArrayView<const FBox> RopeRegions, TArray<IRopeCollider*>& OutColliders) override;
+	virtual void GatherColliders(FRopeColliderGatherContext& Gather) override;
 	// 정적 "월드" push-out 프로바이더가 아니다 — 랩 대상이라 detect에 포함되어야 하고, owner 제외 규칙도
 	// 스켈레탈 provider와 동일하게 적용받는다. 따라서 기본값(false)을 그대로 둔다.
 

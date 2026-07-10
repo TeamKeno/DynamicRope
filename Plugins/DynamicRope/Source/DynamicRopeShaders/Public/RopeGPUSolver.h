@@ -153,6 +153,10 @@ struct FRopeGPUResidentStep
 	// 조용히 실패하는 것을 막는다. -1(기본) = 전부 참여(기존 동작/테스트 호환).
 	int32 NumDetectCapsules = -1;
 
+	// 감지 커널이 볼 랩 가능 박스(OBB) 수. Boxes 앞쪽 [0, NumDetectBoxes)만 감지에 참여한다(캡슐과 동일
+	// 2-pass 패킹: 랩 가능 박스 앞, 정적 박스 뒤). 0(기본) = 감지 미참여(정적 박스 전용 — 기존 동작).
+	int32 NumDetectBoxes = 0;
+
 	// 이번 프레임 substep 스케줄(호출자가 RopeSolverSubsteps로 계산해 전달). NumSub<=0이면 적분 없이 유지.
 	int32 NumSub = 0;
 	float FixedDt = 0.0f;
@@ -205,7 +209,7 @@ struct FRopeResidentLatest
 struct FRopeGPUContactResult
 {
 	int32   NodeIndex = INDEX_NONE;
-	int32   ColliderType = 0;   // 0=capsule, 1=SDF (step의 Capsules/SDFColliders 배열 구분)
+	int32   ColliderType = 0;   // 0=capsule, 1=SDF, 2=box (step의 Capsules/SDFColliders/Boxes 배열 구분)
 	int32   ColliderIndex = 0;  // 해당 배열 내 인덱스(귀속 복원 키)
 	uint8   Source = 1;         // ERopeContactCandidateSource: 1=Actual, 2=PredictiveFree, 4=PredictiveGuided
 	float   Penetration = 0.0f;

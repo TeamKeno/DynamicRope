@@ -12,9 +12,10 @@
 #include "Collision/RopeCollider.h"
 
 /**
- * 해석적 박스(OBB) collider. 정적 월드 지오메트리 전용 — 프레임 모션 없음(SurfaceVelocity 0).
- * FRopeContact FROZEN 계약: 비-스켈레탈이므로 Bone=NAME_None, SourceMesh=null.
- * IsWorldStatic()=true — 랩 대상이 아니므로 접촉 감지(detect) 파이프라인에서 제외된다.
+ * 해석적 박스(OBB) collider. 기본은 정적 월드 지오메트리 — 프레임 모션 없음(SurfaceVelocity 0),
+ * Bone=None/SourceMesh=null → IsWorldStatic()=true → 감지(detect) 제외(push-out 전용).
+ * 랩 가능 박스(피드백 5번 박스 랩): Bone(가상 본)+SourceMesh(대상 컴포넌트)를 채우면 IsWorldStatic()=false가
+ * 되어 감지에 참여하고, FRopeContact에 그 귀속을 실어 기존 DecideWrap 경로로 랩된다(FROZEN 계약 준용).
  */
 class DYNAMICROPE_API FRopeBoxCollider : public IRopeCollider
 {
@@ -29,6 +30,11 @@ public:
 	FQuat   PrevRot = FQuat::Identity;
 	float   InvDeltaTime = 0.0f;
 
+	// 랩 가능 박스: 비-None Bone(가상 본) + SourceMesh(대상 컴포넌트)면 랩 대상(감지 참여). 기본(None/null)이면
+	// 정적 월드 push-out 전용(기존 URopeStaticBodyProvider 동작 — 감지 제외).
+	FName Bone = NAME_None;
+	const USceneComponent* SourceMesh = nullptr;
+
 	FRopeBoxCollider() = default;
 	FRopeBoxCollider(const FVector& InCenter, const FQuat& InRot, const FVector& InHalfExtents)
 		: Center(InCenter), Rot(InRot), HalfExtents(InHalfExtents), PrevCenter(InCenter), PrevRot(InRot) {}
@@ -36,7 +42,13 @@ public:
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
 	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const override;
 	virtual FBox GetWorldBounds() const override;
-	virtual bool IsWorldStatic() const override { return true; }
+	// 가상 본이 있으면 랩 대상(감지 포함) → 비-정적. 없으면 정적 월드(push-out 전용, 감지 제외).
+	virtual bool IsWorldStatic() const override { return Bone.IsNone(); }
+	virtual void GetGPUAttribution(FName& OutBone, const USceneComponent*& OutMesh) const override
+	{
+		OutBone = Bone;
+		OutMesh = SourceMesh;
+	}
 	virtual bool GetGPUBox(FVector& OutCenter, FQuat& OutRot, FVector& OutHalfExtents) const override
 	{
 		OutCenter = Center;

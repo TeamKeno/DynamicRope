@@ -696,7 +696,9 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 	{
 		// 콜라이더 인덱스 → (bone, mesh) 귀속. 범위 밖(콜라이더 집합 변화)은 건너뛴다(자기수정).
 		const TArray<URopeComponent::FGpuColliderAttribution>& Attr =
-			(C.ColliderType == 0) ? Rope.GpuCapsuleAttribution : Rope.GpuSdfAttribution;
+			(C.ColliderType == 0) ? Rope.GpuCapsuleAttribution :
+			(C.ColliderType == 1) ? Rope.GpuSdfAttribution :
+			                        Rope.GpuBoxAttribution;
 		if (!Attr.IsValidIndex(C.ColliderIndex))
 		{
 			continue;
@@ -885,6 +887,7 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 	Step.PredictionFrames = Rope.WrapConfig.PredictiveContactFrames;
 	Rope.GpuCapsuleAttribution.Reset();
 	Rope.GpuSdfAttribution.Reset();
+	Rope.GpuBoxAttribution.Reset();
 
 	// 예측 접촉(G3b): whip 활성 프레임엔 가이드 마스크/현재·직전·다음 타깃을 실어 GPU가
 	// 가이드 노드를 외삽하게 한다(CPU AddPredictedContactCandidates와 동일 입력).
@@ -966,9 +969,22 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			}
 			continue;
 		}
-		WarnGpuUnrepresented(Collider); // 비-정적은 capsule/SDF만 GPU에 실린다 — 둘 다 아니면 제외.
+		FRopeGPUBox Box;
+		if (Collider->GetGPUBox(Box.Center, Box.Rot, Box.HalfExtents))
+		{
+			// 랩 가능 박스(가상 본): 프레임 모션(prev + InvDt)까지 채우고 감지 범위 앞쪽에 패킹.
+			Collider->GetGPUBoxMotion(Box.PrevCenter, Box.PrevRot, Box.InvDeltaTime);
+			Step.Boxes.Add(Box);
+			if (bDetectThisRope)
+			{
+				Rope.GpuBoxAttribution.Add(MakeAttribution(Collider));
+			}
+			continue;
+		}
+			WarnGpuUnrepresented(Collider); // 비-정적은 capsule/SDF/box만 GPU에 실린다 — 둘 다 아니면 제외.
 	}
 	Step.NumDetectCapsules = Step.Capsules.Num(); // 감지 경계: 여기까지가 비-정적 캡슐.
+	Step.NumDetectBoxes = Step.Boxes.Num();       // 박스 감지 경계: 여기까지가 랩 가능 박스.
 
 	// pass 2: 정적(월드) collider — solve 전용. 캡슐(스피어/스필)은 감지 경계 뒤에 append,
 	// 박스는 전용 배열. 귀속 테이블은 인덱스 정렬 유지를 위해 정적 캡슐 분도 채운다(None/null —
@@ -995,6 +1011,10 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			// 프레임 모션(prev center/rot + InvDt): 표면 속도 드래그/상대 운동 CCD. 정적이면 기본값(InvDt 0) 유지.
 			Collider->GetGPUBoxMotion(Box.PrevCenter, Box.PrevRot, Box.InvDeltaTime);
 			Step.Boxes.Add(Box);
+			if (bDetectThisRope)
+			{
+				Rope.GpuBoxAttribution.Add(MakeAttribution(Collider)); // 정적 - None(감지 미참여, 인덱스 정렬용)
+			}
 			continue;
 		}
 		TConstArrayView<FPlane> LocalPlanes;

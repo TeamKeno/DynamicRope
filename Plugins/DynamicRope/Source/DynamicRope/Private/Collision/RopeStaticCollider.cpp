@@ -51,7 +51,8 @@ FRopeContact FRopeBoxCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	Contact.Normal = Rot.RotateVector(LocalNormal);
 	Contact.Penetration = NodeRadius - SignedDist; // 안쪽이면 SignedDist<0이라 면까지 깊이 + 노드 반지름
 	Contact.SurfacePoint = Rot.RotateVector(LocalSurface) + Center;
-	// Bone/SourceMesh: 정적 월드 지오메트리 — 기본값(None/null).
+	Contact.Bone = Bone;             // 랩 가능 박스면 가상 본(감지 귀속). 정적이면 None.
+	Contact.SourceMesh = SourceMesh; // 랩 가능 박스면 대상 컴포넌트. 정적이면 null.
 	// 표면 속도: 접촉 재질점(로컬 LocalSurface)의 (현재 포즈 - 이전 포즈) / dt. 움직이는 바디가 로프를
 	// 접선 방향으로 끄는 데 쓴다. InvDeltaTime==0(정적/첫 프레임)이면 0.
 	if (InvDeltaTime > 0.0f)
@@ -102,6 +103,8 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		Contact.Penetration = C.Penetration;
 		OutHitWorldPos = Pt + (ClosestEnd - C.SurfacePoint);
 		Contact.SurfacePoint = ClosestEnd;
+		Contact.Bone = Bone;             // 랩 가능 박스면 가상 본(감지 귀속). 정적이면 None.
+		Contact.SourceMesh = SourceMesh; // 랩 가능 박스면 대상 컴포넌트. 정적이면 null.
 		// 표면 속도: 재질점의 프레임 전체(prev->curr) 변위 / dt.
 		const FVector WCurr = Rot.RotateVector(Lp) + Center;
 		const FVector WPrev = PrevRot.RotateVector(Lp) + PrevCenter;

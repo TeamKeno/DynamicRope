@@ -223,6 +223,7 @@ public:
 		SHADER_PARAMETER(int32, DetectNumNodes)
 		SHADER_PARAMETER(int32, DetectNumCapsules)
 		SHADER_PARAMETER(int32, DetectNumSDF)
+		SHADER_PARAMETER(int32, DetectNumBoxes)
 		SHADER_PARAMETER(float, DetectContactRadius)
 		SHADER_PARAMETER(float, DetectSegmentLength)
 		SHADER_PARAMETER(float, DetectPredictionFrames)
@@ -231,6 +232,7 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SDFDistances)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFVolume>, SDFVolumes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeBox>, Boxes) // 랩 가능 박스 감지(정적 박스는 NumDetectBoxes로 자름).
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPrevPositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, DetectGuidedMask)
@@ -1148,6 +1150,8 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	DetectParams->DetectNumCapsules    = (S.NumDetectCapsules >= 0)
 		? FMath::Min(S.NumDetectCapsules, B.NumValidCaps) : B.NumValidCaps;
 	DetectParams->DetectNumSDF         = B.NumValidSDFCol;
+	// 랩 가능 박스만 감지(정적 박스는 뒤라 제외). 박스도 노드당 최심 접촉 슬롯을 캡슐/SDF와 공유한다.
+	DetectParams->DetectNumBoxes       = FMath::Clamp(S.NumDetectBoxes, 0, B.NumValidBoxes);
 	DetectParams->DetectContactRadius  = S.ContactRadius;
 	DetectParams->DetectSegmentLength  = S.SegmentLength;
 	DetectParams->DetectPredictionFrames = FMath::Max(0.0f, S.PredictionFrames);
@@ -1156,6 +1160,7 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	DetectParams->SDFDistances         = GraphBuilder.CreateSRV(B.SDFDistBuf);
 	DetectParams->SDFVolumes           = GraphBuilder.CreateSRV(B.SDFVolBuf);
 	DetectParams->SDFColliders         = GraphBuilder.CreateSRV(B.SDFColBuf);
+	DetectParams->Boxes                = GraphBuilder.CreateSRV(B.BoxesBuf);
 	DetectParams->DetectPositions      = GraphBuilder.CreateSRV(B.PosRDG);
 	DetectParams->DetectPrevPositions  = GraphBuilder.CreateSRV(B.PrevRDG);
 	DetectParams->DetectGuidedMask     = GraphBuilder.CreateSRV(GMaskBuf);

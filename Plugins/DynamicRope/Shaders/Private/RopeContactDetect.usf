@@ -30,6 +30,7 @@ struct FRopeGPUContact
 int   DetectNumNodes;
 int   DetectNumCapsules;
 int   DetectNumSDF;
+int   DetectNumBoxes;          // 랩 가능 박스(OBB) 수. Boxes 앞쪽 [0, DetectNumBoxes)만 감지(정적 박스 제외).
 float DetectContactRadius;
 float DetectSegmentLength;
 float DetectPredictionFrames;  // <=0이면 예측 슬롯 없음
@@ -89,6 +90,28 @@ FRopeGPUContact RopeDetectSweep(float3 A, float3 B, int SourceFlag)
 				Best.SurfaceVel = float4((Closest - Wprev) * InvDt, 0.0f);
 			}
 		}
+
+		// --- box (랩 가능 OBB만; 정적 박스는 [DetectNumBoxes, ..) 뒤라 제외. CPU FRopeBoxCollider::Query 미러)
+		for (int b = 0; b < DetectNumBoxes; ++b)
+			{
+				const FRopeBox Box = Boxes[b];
+				float3 BNrm; float BPen; float3 BClosest;
+				if (RopeQueryBoxPoint(Box, P, DetectContactRadius, BNrm, BPen, BClosest)
+					&& BPen > BestPen)
+				{
+					BestPen = BPen;
+					Best.bHit = 1;
+					Best.ColliderType = 2; // box
+					Best.ColliderIndex = b;
+					Best.Normal = float4(BNrm, 0.0f);
+					Best.WorldPoint = float4(BClosest, BPen); // 표면점 + w=Pen
+					// surfVel: 접촉 재질점(BClosest의 로컬)의 (현재-이전 포즈)*InvDt. 정적(InvDt 0)이면 0.
+					const float  InvDt = Box.Center.w;
+					const float3 Lp = RopeQuatRotate(float4(-Box.Rot.xyz, Box.Rot.w), BClosest - Box.Center.xyz);
+					const float3 Wprev = RopeQuatRotate(Box.PrevRot, Lp) + Box.PrevCenter.xyz;
+					Best.SurfaceVel = float4((BClosest - Wprev) * InvDt, 0.0f);
+				}
+			}
 
 		// --- SDF (CPU FRopeSDFCollider::Query 미러: SurfacePoint = P - N*Dist, SurfVel = (P - Wprev)*InvDt)
 		for (int sc = 0; sc < DetectNumSDF; ++sc)
