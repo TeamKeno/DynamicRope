@@ -29,6 +29,15 @@ struct FRopeColliderGatherContext
 	TArrayView<const FBox> RopeRegions;
 
 	/**
+	 * 입력(선택): region 처리 우선순위 — 앞에 오는 region 인덱스부터 스캔한다. 전역 추출 상한이 있는
+	 * provider(정적 바디)용: 선착순 소진이면 앞 순서의 한가한 로프 주변 잡동사니가 상한을 먼저 먹어
+	 * 활성 로프가 충돌을 굶을 수 있다 — 서브시스템이 활성(사용 중 페이즈, 비슬립) 로프를 앞에 둔다.
+	 * 순서만 바꿀 뿐 region 인덱스 자체는 불변이라 RegionColliderIndices 매핑에는 영향이 없다.
+	 * 비어 있으면 인덱스 순서(0..N-1)로 처리한다. 상한 없는 provider는 무시해도 된다.
+	 */
+	TArrayView<const int32> RegionGatherOrder;
+
+	/**
 	 * 출력: flat 디둡 풀(이전 계약과 동일). collider↔로프는 다대다(겹치는 region)라 풀은 provider가
 	 * 컴포넌트/본 단위로 디둡해 1회만 담고, 다중 소속은 아래 매핑으로 표현한다. 가리키는 collider들은
 	 * provider 소유 스토리지이며 이번 프레임 solve가 끝날 때까지 유효해야 한다.

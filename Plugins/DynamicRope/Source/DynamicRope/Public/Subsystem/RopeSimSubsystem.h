@@ -125,6 +125,11 @@ private:
 	// gather와 로프별 배정이 같은 박스를 쓰는 단일 소스. BuildFrameColliders가 채운다.
 	TArray<FBox> FrameRopeRegions;
 
+	// 이번 프레임 region 처리 우선순위(활성 로프 먼저 — 사용 중 페이즈 > Free 깨어있음 > 슬립 > 무효).
+	// 전역 추출 상한이 있는 provider(정적 바디)가 이 순서로 스캔해, 한가한 로프 주변 잡동사니가 상한을
+	// 선점해 활성 로프가 충돌을 굶는 것을 막는다. 순서일 뿐 region 인덱스는 불변(매핑 무영향).
+	TArray<int32> FrameRegionGatherOrder;
+
 	// 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). provider에는 로프별 region 리스트를 넘긴다.
 	void BuildFrameColliders();
 	// 한 로프의 collider를 중앙 빌드에서 모은다: 기본은 전체, 자기 owner provider만 제외(bIncludeOwnerColliders로 옵트인).

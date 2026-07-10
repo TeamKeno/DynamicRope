@@ -79,7 +79,9 @@ private:
 
 	// 로프별 region마다 오버랩 → 근접 정적 바디의 AggGeom을 Boxes/Capsules로 추출한다. region 간 중복은
 	// 컴포넌트/인스턴스 단위 디둡으로 프레임당 1회만 추출(빈 공간 union AABB의 낭비·예산 경합 제거).
-	void BuildColliders(TArrayView<const FBox> RopeRegions);
+	// region 처리 순서는 Gather.RegionGatherOrder(활성 로프 먼저) — 전역 상한이 걸리는 프레임에
+	// 스캔을 못 받는 쪽이 한가한/잠든 로프가 되게 한다.
+	void BuildColliders(const FRopeColliderGatherContext& Gather);
 	// 한 컴포넌트의 BodySetup 심플 콜리전을 월드 공간 콜라이더로 추가한다. 예산 소진 시 false.
 	// 예산/컨벡스 평면 상한은 호출자(BuildColliders)가 Project Settings에서 읽어 전달한다(단일 소스).
 	// PrevCompTM/InvDeltaTime: 동적 바디 표면 속도용(이전 프레임 트랜스폼 + 1/dt). 정적이면 PrevCompTM=CompTM,

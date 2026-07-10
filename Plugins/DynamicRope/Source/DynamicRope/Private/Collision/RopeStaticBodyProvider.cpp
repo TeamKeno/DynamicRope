@@ -97,7 +97,7 @@ void URopeStaticBodyProvider::GatherColliders(FRopeColliderGatherContext& Gather
 		Capsules.Reset();
 		Convexes.Reset();
 		Groups.Reset();
-		BuildColliders(Gather.RopeRegions);
+		BuildColliders(Gather);
 	}
 
 	const int32 PoolBase = Gather.Colliders.Num();
@@ -189,8 +189,9 @@ void URopeStaticBodyProvider::RecordExtractedGroup(int32 BoxStart, int32 CapStar
 	Groups.Add(Group);
 }
 
-void URopeStaticBodyProvider::BuildColliders(TArrayView<const FBox> RopeRegions)
+void URopeStaticBodyProvider::BuildColliders(const FRopeColliderGatherContext& Gather)
 {
+	TArrayView<const FBox> RopeRegions = Gather.RopeRegions;
 	UWorld* World = GetWorld();
 	if (!World || RopeRegions.Num() == 0)
 	{
@@ -224,10 +225,20 @@ void URopeStaticBodyProvider::BuildColliders(TArrayView<const FBox> RopeRegions)
 
 	// 브로드페이즈: 로프별 활성 region마다 오버랩(멀리 떨어진 로프 사이 빈 공간은 스캔에서 배제 —
 	// 전 로프 union AABB의 낭비/예산 경합 제거). region 간 중복 결과는 위 디둡 상태로 걸러 프레임당 1회만 추출.
+	// 처리 순서는 RegionGatherOrder(활성 로프 먼저 — 서브시스템이 정렬): 전역 상한(MaxColliders)이 걸리는
+	// 프레임에 뒤로 밀려 스캔을 못 받는 쪽이 한가한/잠든 로프가 되게 한다. 순서일 뿐 region 인덱스는
+	// 불변이라 추출 그룹/매핑에는 영향이 없다. 순서 리스트가 비었거나 길이가 다르면 인덱스 순서 폴백.
+	const bool bUseGatherOrder = Gather.RegionGatherOrder.Num() == RopeRegions.Num();
 	TArray<FOverlapResult> Overlaps;
 	bool bBudgetClipped = false;
-	for (const FBox& Region : RopeRegions)
+	for (int32 OrderSlot = 0; OrderSlot < RopeRegions.Num(); ++OrderSlot)
 	{
+		const int32 RegionIndex = bUseGatherOrder ? Gather.RegionGatherOrder[OrderSlot] : OrderSlot;
+		if (!RopeRegions.IsValidIndex(RegionIndex))
+		{
+			continue;
+		}
+		const FBox& Region = RopeRegions[RegionIndex];
 		if (bBudgetClipped)
 		{
 			break;

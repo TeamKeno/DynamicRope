@@ -251,6 +251,34 @@ void URopeSimSubsystem::BuildFrameColliders()
 		FrameRopeRegions.Add(IsValid(Rope) ? ComputeRopeQueryBounds(*Rope) : FBox(ForceInit));
 	}
 
+	// region 처리 우선순위: 활성 로프 먼저. 전역 추출 상한이 있는 provider(정적 바디)가 선착순으로
+	// 예산을 소진하므로, 상한이 걸리는 프레임에는 뒤 순서 region이 스캔을 못 받는다 — 그때 굶는 쪽이
+	// "사용 중인 로프"가 되지 않게 순서만 재배열한다(인덱스 불변 → 매핑 무영향).
+	// 키: 0 = 사용 중 페이즈(Flight~Releasing), 1 = Free 깨어있음, 2 = Free 슬립, 3 = 무효 region.
+	FrameRegionGatherOrder.Reset();
+	FrameRegionGatherOrder.Reserve(Ropes.Num());
+	for (int32 r = 0; r < Ropes.Num(); ++r)
+	{
+		FrameRegionGatherOrder.Add(r);
+	}
+	auto RegionPriority = [this](int32 RegionIndex) -> int32
+	{
+		if (!FrameRopeRegions[RegionIndex].IsValid)
+		{
+			return 3;
+		}
+		const URopeComponent* Rope = Ropes[RegionIndex];
+		if (!IsValid(Rope) || Rope->GetPhase() != ERopePhase::Free)
+		{
+			return IsValid(Rope) ? 0 : 3;
+		}
+		return Rope->IsSleeping() ? 2 : 1;
+	};
+	FrameRegionGatherOrder.StableSort([&RegionPriority](int32 A, int32 B)
+	{
+		return RegionPriority(A) < RegionPriority(B);
+	});
+
 	// 등록된 provider마다 1회 gather(프레임당 1회 — 로프 수와 무관). 죽은 provider는 정리.
 	for (int32 i = ColliderProviders.Num() - 1; i >= 0; --i)
 	{
@@ -267,6 +295,7 @@ void URopeSimSubsystem::BuildFrameColliders()
 		}
 		FRopeColliderGatherContext Gather;
 		Gather.RopeRegions = FrameRopeRegions;
+		Gather.RegionGatherOrder = FrameRegionGatherOrder;
 		Provider->GatherColliders(Gather);
 		if (Gather.Colliders.Num() == 0)
 		{
