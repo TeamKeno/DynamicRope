@@ -1017,6 +1017,32 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 	}
 
 	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+
+	// 정적/비-스켈레탈 대상(피드백 5): 본 그래프가 없어 축을 컴포넌트 기저에서 유도한다. 컴포넌트
+	// 기저축(X/Y/Z) 중 latch 표면 normal에 가장 수직인 축을 감김 축으로 고른다 — 원기둥/캡슐의 장축은
+	// 반경 방향(표면 normal)에 수직이므로, 축정렬 랩 캡슐(기둥=Z, 가로보=X/Y)에서 올바른 감김 축이
+	// 자동 선택된다(스켈레탈은 위에서 이미 반환되므로 이 분기는 정적 전용 — 무회귀).
+	if (!SkelMesh)
+	{
+		const FVector NormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		FVector BestAxis = BoneXform.GetUnitAxis(EAxis::Z);
+		float BestParallel = TNumericLimits<float>::Max();
+		for (const EAxis::Type CandidateAxis : { EAxis::X, EAxis::Y, EAxis::Z })
+		{
+			const FVector AxisWorld = BoneXform.GetUnitAxis(CandidateAxis);
+			const float ParallelToNormal = FMath::Abs(FVector::DotProduct(AxisWorld, NormalWorld));
+			if (ParallelToNormal < BestParallel)
+			{
+				BestParallel = ParallelToNormal;
+				BestAxis = AxisWorld;
+			}
+		}
+		OutAxisOrigin = BoneLocation;
+		OutAxisDirection = BestAxis.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		return true;
+	}
+
 	OutAxisOrigin = BoneLocation;
 	OutAxisDirection = BoneXform.GetUnitAxis(EAxis::X).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 	return true;
