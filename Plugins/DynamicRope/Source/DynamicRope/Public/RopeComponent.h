@@ -308,11 +308,19 @@ private:
 	/**
 	 * 시뮬레이션 한 프레임을 3단계로 나눠 URopeSimSubsystem이 구동한다(friend 접근;
 	 * 컴포넌트는 직접 tick하지 않고, 외부 게임 코드가 부를 일도 없어 private).
-	 *  Prepare(GT)  : init/pin 전진 + 로직 phase 처리. collider 스냅샷(FrameColliders)은
-	 *                 서브시스템이 이 호출 전에 중앙 수집해 채워 둔다.
-	 *  Solve(병렬)  : bSolveThisFrame(Free/Flight/Wrapped)일 때 Solver.Step — POD + const collider라
-	 *                 스레드 안전. Wrapped는 latch 노드가 InvMass=0이라 자유 구간만 물리로 움직인다.
-	 *  Finalize(GT) : Flight 접촉 감지/캡처(UObject·이벤트) + 렌더 dirty.
+	 *
+	 * 분리 계약 — 가운데 Solve가 로프 간 병렬(CPU) 또는 GPU 디스패치라 갈라진 것이며 임의 분류가 아니다.
+	 * "무엇이 어느 쪽인가"의 판정 기준은 딱 하나: 솔브 결과가 필요한가.
+	 *  Prepare(GT)  : 솔브 *입력* 생산 — pin 타깃 전진, whip 타깃 계산, 로직 페이즈(Contacting/Wrapping/
+	 *                 Wrapped/Releasing) 처리 + OverrideFrame 산출, bSolveThisFrame 결정. 솔브 결과가
+	 *                 필요 없는 로직은 전부 여기다(솔브 전 UObject/이벤트를 만질 수 있는 마지막 지점).
+	 *                 collider 스냅샷(FrameColliders)은 서브시스템이 이 호출 전에 중앙 수집해 둔다.
+	 *  Solve(병렬)  : POD(Sim) + const collider만 — bSolveThisFrame(Free/Flight/Wrapping/Wrapped)일 때
+	 *                 Solver.Step. UObject/이벤트/전이 금지(스레드 안전 경계). Wrapped는 latch 노드가
+	 *                 InvMass=0이라 자유 구간만 물리로 움직인다.
+	 *  Finalize(GT) : 솔브 *출력* 소비 — Flight 접촉 감지는 노드 이동 경로(Prev→Pos), 즉 솔브 산출물이
+	 *                 입력이라 여기 있을 수밖에 없다("로직은 Prepare, 감지만 Finalize"인 비대칭의 근거).
+	 *                 전이/이벤트 브로드캐스트 + 렌더 push + 관측(스탯/디버거 스냅샷)도 여기.
 	 */
 	void PrepareSimFrame(float DeltaTime);
 	void SolveSimFrame(float DeltaTime);
@@ -603,6 +611,12 @@ private:
 	 *  타이머를 굴려 FlightNoContactReturnTime 초과 시 Free 복귀. 캡처 여부를 반환한다(③ 관측 소비용). */
 	bool TryCaptureFlightContacts(float DeltaTime, const TArray<FRopeContactCandidate>& Candidates,
 		const FRopeFlightContactDetector::FParams& DetectParams);
+
+	/** ③ 관측: stat 카운터(수집 중일 때만) + 디버거 스냅샷(OutSnapshot != null일 때 — 디버거 대상
+	 *  로프만 넘어온다). 판정(①②)에 관여하지 않는 읽기 전용 소비를 전부 여기 가둔다 —
+	 *  FinalizeSimFrame 본문에 디버그/스탯 코드가 남지 않게 하는 것이 목적. */
+	void RecordFlightObservation(const FRopeFlightContactDetector::FParams& DetectParams,
+		const TArray<FRopeContactCandidate>& Candidates, bool bShouldCapture, FRopeDebugSnapshot* OutSnapshot);
 
 #if WITH_GAMEPLAY_DEBUGGER
 	/** ③ 관측 보조(디버거 대상 로프 전용): 노드별 감지 입력/판정 시각화 데이터 수집. 본 파이프라인과

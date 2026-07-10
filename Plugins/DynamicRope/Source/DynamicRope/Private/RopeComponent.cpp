@@ -530,6 +530,8 @@ void URopeComponent::ReleaseWrapAs(ERopeReleaseReason Reason)
 void URopeComponent::PrepareSimFrame(float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Prepare);
+	// (분리 계약 — 이 함수는 "솔브 입력 생산" 단계다: 솔브 결과가 필요 없는 로직은 전부 여기.
+	//  근거와 3단계 역할 분담은 헤더의 Prepare/Solve/Finalize 선언부 주석 참고.)
 
 	EnsureRopeInitialized();
 	OverrideFrame.Reset(); // 프레임 스코프 — 이번 프레임 로직 산출물을 새로 모은다(G2).
@@ -689,63 +691,33 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Finalize);
 
+	// (분리 계약 — 이 함수는 "솔브 출력 소비" 단계다. 근거는 헤더의 3단계 선언부 주석 참고.)
 	// 디버그 캡처 게이트: 이 로프가 게이트플레이 디버거의 대상 액터일 때만 비주얼 데이터를 모은다.
-	// 대상이 아닌 로프는 아래 flight sweep 등 캡처 비용을 전혀 내지 않는다(타깃 1개 로프만 부담).
+	// 대상이 아닌 로프는 flight sweep 등 캡처 비용을 전혀 내지 않는다(타깃 1개 로프만 부담).
 #if WITH_GAMEPLAY_DEBUGGER
 	URopeDebugSubsystem* DebugSub = URopeDebugSubsystem::Get(GetWorld());
 	const bool bDebugCapture = DebugSub && DebugSub->ShouldCapture(this);
 	FRopeDebugSnapshot DebugSnapshot;
+	FRopeDebugSnapshot* const FlightSnapshot = bDebugCapture ? &DebugSnapshot : nullptr;
 #else
 	constexpr bool bDebugCapture = false;
+	FRopeDebugSnapshot* const FlightSnapshot = nullptr;
 #endif
 
 	// Flight: 솔브 후 이동 경로 기반 접촉 후보 감지 → 캡처. 파이프라인 자체는
-	// FRopeFlightContactDetector(UObject 비의존)이고, 여기서는 3단계 오케스트레이션만 한다:
-	// ① 후보 산출 → ② 캡처 판정/전이 → ③ 관측(스탯/디버거 — 판정과 분리된 읽기 전용 소비).
+	// FRopeFlightContactDetector(UObject 비의존)이고, 여기서는 3단계 오케스트레이션만 한다.
+	// 스탯/디버거 소비는 전부 ③ 안에 있다 — 본문에는 판정 흐름만 남긴다.
 	if (Phase == ERopePhase::Flight)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FinalizeFlight);
 		const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
 
 		TArray<FRopeContactCandidate> Candidates;
-		BuildFlightContactCandidates(DeltaTime, DetectParams, Candidates);
+		BuildFlightContactCandidates(DeltaTime, DetectParams, Candidates);           // ① 후보 산출
 
-		const bool bShouldCapture = TryCaptureFlightContacts(DeltaTime, Candidates, DetectParams);
+		const bool bShouldCapture = TryCaptureFlightContacts(DeltaTime, Candidates, DetectParams); // ② 판정/전이
 
-		// ③ 관측: stat 카운터(수집 중일 때만; 디버그 캡처와 독립) + 디버거 스냅샷(대상 로프만).
-		// 캡처 프레임엔 방금 채워진 ContactTracker를, 아니면 이번 후보로 만든 관측 전용 트래커를
-		// 보여준다 — 어느 쪽도 판정에는 관여하지 않는다.
-		FRopeContactTracker FlightObserveTracker;
-		{
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightTrackerUpdate);
-			FlightObserveTracker.Update(Candidates, 0.0f);
-		}
-		const FRopeContactTracker& DebugTracker = bShouldCapture ? ContactTracker : FlightObserveTracker;
-		const float WhipGuidedEnd = FMath::Clamp(WhipConfig.GuidedLength, 0.05f, 0.95f);
-		const bool bWhipActive = WhipGuide.GetDebugGuideTargets().Num() > 0;
-		RopeDebug::RecordFlightStats(Sim, bSolveThisFrame, FrameColliders.Num(), Candidates,
-			DebugTracker, WrapConfig, bShouldCapture);
-		RopeDebug::RecordWhipStats(Sim, WhipGuide.GetDebugGuideNodeIndices(), WhipGuide.GetDebugGuideTargets(),
-			WhipGuidedEnd, bWhipActive);
-
-#if WITH_GAMEPLAY_DEBUGGER
-		if (bDebugCapture)
-		{
-			GatherFlightNodeDebug(DetectParams, DebugSnapshot.NodeDebug);
-			DebugSnapshot.bHasFlight = true;
-			DebugSnapshot.bSolveThisFrame = bSolveThisFrame;
-			DebugSnapshot.bShouldCapture = bShouldCapture;
-			DebugSnapshot.FrameColliderCount = FrameColliders.Num();
-			DebugSnapshot.MinLatchNodes = WrapConfig.MinLatchNodes;
-			DebugSnapshot.TrackerBone = DebugTracker.CandidateBone;
-			DebugSnapshot.TrackerNodes = DebugTracker.CandidateNodes;
-			DebugSnapshot.Candidates = Candidates;
-			DebugSnapshot.bWhipActive = bWhipActive;
-			DebugSnapshot.WhipGuidedEnd = WhipGuidedEnd;
-			DebugSnapshot.WhipGuideNodeIndices = WhipGuide.GetDebugGuideNodeIndices();
-			DebugSnapshot.WhipGuideTargets = WhipGuide.GetDebugGuideTargets();
-		}
-#endif
+		RecordFlightObservation(DetectParams, Candidates, bShouldCapture, FlightSnapshot);         // ③ 관측
 	}
 
 	// 새 centerline을 render proxy로 push하고 bounds를 갱신한다.
@@ -1608,6 +1580,45 @@ bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
 		FlightNoContactElapsed = 0.0f;
 	}
 	return false;
+}
+
+void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::FParams& DetectParams,
+	const TArray<FRopeContactCandidate>& Candidates, bool bShouldCapture, FRopeDebugSnapshot* OutSnapshot)
+{
+	// ③ 관측 전용 — 판정(①②)에 관여하지 않는 읽기 소비만 모아둔다. 스탯은 stat 시스템이 수집 중일
+	// 때만 실제 비용이 들고, 스냅샷은 디버거 대상 로프만 OutSnapshot으로 넘어온다(그 외 null).
+	// 캡처 프레임엔 방금 채워진 ContactTracker를, 아니면 이번 후보로 만든 관측 전용 트래커를 보여준다.
+	FRopeContactTracker FlightObserveTracker;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightTrackerUpdate);
+		FlightObserveTracker.Update(Candidates, 0.0f);
+	}
+	const FRopeContactTracker& DebugTracker = bShouldCapture ? ContactTracker : FlightObserveTracker;
+	const float WhipGuidedEnd = FMath::Clamp(WhipConfig.GuidedLength, 0.05f, 0.95f);
+	const bool bWhipActive = WhipGuide.GetDebugGuideTargets().Num() > 0;
+	RopeDebug::RecordFlightStats(Sim, bSolveThisFrame, FrameColliders.Num(), Candidates,
+		DebugTracker, WrapConfig, bShouldCapture);
+	RopeDebug::RecordWhipStats(Sim, WhipGuide.GetDebugGuideNodeIndices(), WhipGuide.GetDebugGuideTargets(),
+		WhipGuidedEnd, bWhipActive);
+
+#if WITH_GAMEPLAY_DEBUGGER
+	if (OutSnapshot)
+	{
+		GatherFlightNodeDebug(DetectParams, OutSnapshot->NodeDebug);
+		OutSnapshot->bHasFlight = true;
+		OutSnapshot->bSolveThisFrame = bSolveThisFrame;
+		OutSnapshot->bShouldCapture = bShouldCapture;
+		OutSnapshot->FrameColliderCount = FrameColliders.Num();
+		OutSnapshot->MinLatchNodes = WrapConfig.MinLatchNodes;
+		OutSnapshot->TrackerBone = DebugTracker.CandidateBone;
+		OutSnapshot->TrackerNodes = DebugTracker.CandidateNodes;
+		OutSnapshot->Candidates = Candidates;
+		OutSnapshot->bWhipActive = bWhipActive;
+		OutSnapshot->WhipGuidedEnd = WhipGuidedEnd;
+		OutSnapshot->WhipGuideNodeIndices = WhipGuide.GetDebugGuideNodeIndices();
+		OutSnapshot->WhipGuideTargets = WhipGuide.GetDebugGuideTargets();
+	}
+#endif
 }
 
 #if WITH_GAMEPLAY_DEBUGGER
