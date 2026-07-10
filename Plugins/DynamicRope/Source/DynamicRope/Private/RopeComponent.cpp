@@ -1198,6 +1198,7 @@ void URopeComponent::ResetTransientPhaseState()
 	TensionOverTime = 0.0f;
 	LastPullSample = FRopePullSample();
 	SmoothedPullDir = FVector::ZeroVector; // 다음 wrap 시작 시 측정값으로 다시 시드.
+	SmoothedWielderPullDir = FVector::ZeroVector;
 	SmoothedAimNodeF = -1.0f;              // fractional 조준 스무딩도 미초기화로.
 	bLoggedPullNoReceiver = false;
 }
@@ -2232,6 +2233,42 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		}
 	};
 
+	// 비시뮬 수신자: 캐릭터 무브먼트가 살아 있으면 위치 오프셋 대신 *무브먼트 속도* 톱업으로 끈다.
+	// 프레임당 AddActorWorldOffset은 위치 계단이라 견인이 틱틱 끊기고(초과분 쌓임→보정→슬랙 반복)
+	// wielder 수신에서는 카메라 흔들림으로 도드라졌다. 속도로 주면 무브먼트가 자체 스윕/보간으로
+	// 통합해 부드럽다. 물리 경로와 같은 "목표 속도까지 차분만" 원칙이라 누적/발산이 없고, walking은
+	// 수직 성분을 무브먼트가 버리므로 상향 견인은 지상 이탈(Wielder의 bAutoGroundExitOnUpwardPull)이
+	// 선행된다. 무브먼트가 없거나 꺼진(MOVE_None) 액터는 기존 스윕 오프셋 폴백(벽 통과 방지).
+	auto ApplyNonSimCorrection = [&](AActor* Actor, const FVector& Dir, float Step)
+	{
+		if (const ACharacter* Character = Cast<ACharacter>(Actor))
+		{
+			UCharacterMovementComponent* Movement = Character->GetCharacterMovement();
+			if (Movement && Movement->MovementMode != MOVE_None)
+			{
+				const float TargetSpeed = Step * InvDt;
+				const float CurAlong = static_cast<float>(FVector::DotProduct(Movement->Velocity, Dir));
+				if (TargetSpeed > CurAlong)
+				{
+					FVector NewVel = Movement->Velocity + Dir * (TargetSpeed - CurAlong);
+					// 주입 결과 속력의 절대 상한 = max(TetherMaxSpeed, 기존 속력): 방향이 흔들리면 톱업이
+					// 프레임마다 다른 축으로 들어가 감쇠 없는 Falling에서 벡터가 계속 커질 수 있다(폭주의
+					// 2차 방어 — 1차는 방향 EMA). 주입은 절대 속력을 이 상한 너머로 못 키우고, 기존에 더
+					// 빠른 외부 운동(자유낙하 등)은 보존한다. TetherMaxSpeed=0(클램프 없음 설정)이면 생략.
+					const float SpeedCap = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f);
+					if (SpeedCap > 0.0f)
+					{
+						const float MaxAllowed = FMath::Max(SpeedCap, static_cast<float>(Movement->Velocity.Size()));
+						NewVel = NewVel.GetClampedToMaxSize(MaxAllowed);
+					}
+					Movement->Velocity = NewVel;
+				}
+				return;
+			}
+		}
+		Actor->AddActorWorldOffset(Dir * Step, /*bSweep*/ true);
+	};
+
 	// ---- 대상 몫 ----
 	if (TargetStep > KINDA_SMALL_NUMBER)
 	{
@@ -2264,8 +2301,8 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		}
 		if (!bHandled && TargetOwner)
 		{
-			// 캐릭터/비시뮬 대상: 위치 보정(스윕 — 벽 통과 방지). step이 클램프돼 큰 텔레포트가 없다.
-			TargetOwner->AddActorWorldOffset(DirToAim * TargetStep, /*bSweep*/ true);
+			// 캐릭터/비시뮬 대상: 속도 톱업(캐릭터) 또는 스윕 위치 보정 폴백. step이 클램프돼 텔레포트 없음.
+			ApplyNonSimCorrection(TargetOwner, DirToAim, TargetStep);
 		}
 	}
 
@@ -2275,11 +2312,29 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		// 방향 = 손(노드 0)에서 로프의 첫 직선 다리를 따라. 조준(AimPos)이 벽 모서리면 모서리를 향하고,
 		// 로프가 곧아 조준=손이면(chord ~0) 앵커→조준의 역방향(=손→앵커)으로 폴백한다.
 		const FVector HandPos = Sim.Positions.IsValidIndex(0) ? Sim.Positions[0] : Aim;
-		FVector WielderDir = Aim - HandPos;
-		if (!WielderDir.Normalize(KINDA_SMALL_NUMBER))
+		FVector WielderDirRaw = Aim - HandPos;
+		if (!WielderDirRaw.Normalize(KINDA_SMALL_NUMBER))
 		{
-			WielderDir = -DirToAim;
+			WielderDirRaw = -DirToAim;
 		}
+		// 방향 EMA(대상 쪽 SmoothedPullDir과 동일 상수): AimPos 노드 노이즈/모서리 전환/근접 축퇴로
+		// raw 방향이 프레임마다 튀면 속도 톱업이 매번 다른 축으로 들어가 벡터가 랜덤워크로 불어난다(폭주).
+		if (SmoothedWielderPullDir.IsNearlyZero())
+		{
+			SmoothedWielderPullDir = WielderDirRaw;
+		}
+		else
+		{
+			const float Tau = WrapConfig.PullDirSmoothTime;
+			const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
+			SmoothedWielderPullDir = FMath::Lerp(SmoothedWielderPullDir, WielderDirRaw, Alpha).GetSafeNormal();
+			if (SmoothedWielderPullDir.IsNearlyZero())
+			{
+				// 정반대 방향 상쇄 축퇴(180° 반전 순간) — raw로 재시드.
+				SmoothedWielderPullDir = WielderDirRaw;
+			}
+		}
+		const FVector WielderDir = SmoothedWielderPullDir;
 
 		AActor* RopeOwner = GetOwner();
 		bool bHandled = false;
@@ -2293,7 +2348,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		}
 		if (!bHandled && RopeOwner)
 		{
-			RopeOwner->AddActorWorldOffset(WielderDir * WielderStep, /*bSweep*/ true);
+			ApplyNonSimCorrection(RopeOwner, WielderDir, WielderStep);
 		}
 	}
 }
