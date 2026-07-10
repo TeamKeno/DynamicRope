@@ -43,7 +43,7 @@ public:
 	TArray<TObjectPtr<UPrimitiveComponent>> IgnoredComponents;
 
 	//~ IRopeColliderProvider
-	virtual void GatherColliders(TArrayView<const FBox> RopeRegions, TArray<IRopeCollider*>& OutColliders) override;
+	virtual void GatherColliders(FRopeColliderGatherContext& Gather) override;
 	virtual bool ProvidesWorldStaticColliders() const override { return true; }
 
 private:
@@ -51,6 +51,23 @@ private:
 	TArray<FRopeBoxCollider> Boxes;
 	TArray<FRopeStaticCapsuleCollider> Capsules;
 	TArray<FRopeConvexCollider> Convexes; // convex 심플 콜리전 + 전단 박스(6평면) 라우팅.
+
+	// 추출 그룹: 컴포넌트(또는 ISM 호출) 1회가 추가한 콜라이더의 타입별 로컬 인덱스 range + 유니언 bounds.
+	// gather의 region 오버랩이 이미 아는 "이 바디가 어느 로프 근처인가"를 그룹 단위로 보존해,
+	// 서브시스템의 로프별 풀 전체 재-컬(O(로프×풀))을 "그룹 유니언 선-거절 → 히트 그룹만 콜라이더별
+	// 배정"으로 대체한다(GatherColliders 끝의 매핑 단계). 겹치는 region은 그룹이 양쪽 모두에 배정된다.
+	struct FExtractedGroup
+	{
+		int32 BoxStart = 0, BoxCount = 0;
+		int32 CapStart = 0, CapCount = 0;
+		int32 CvxStart = 0, CvxCount = 0;
+		FBox Bounds = FBox(ForceInit);
+	};
+	TArray<FExtractedGroup> Groups;
+
+	// 스냅샷(각 Start) 이후 Boxes/Capsules/Convexes에 추가된 분량을 유니언 bounds와 함께 그룹으로 기록.
+	// 아무것도 추가되지 않았으면 무시.
+	void RecordExtractedGroup(int32 BoxStart, int32 CapStart, int32 CvxStart);
 
 	// 마지막으로 빌드한 GFrameCounter. 같은 프레임에 여러 로프가 호출해도 재빌드 안 함(디둡).
 	// 단 이 provider는 RopeBounds(전 로프 union — 서브시스템이 프레임당 동일 값 전달)를 실제로 쓴다.

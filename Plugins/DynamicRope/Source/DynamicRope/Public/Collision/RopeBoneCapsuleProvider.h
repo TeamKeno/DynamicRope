@@ -49,7 +49,7 @@ public:
 	float AutoMinBoneLength = 5.0f;
 
 	//~ IRopeColliderProvider
-	virtual void GatherColliders(TArrayView<const FBox> RopeRegions, TArray<IRopeCollider*>& OutColliders) override;
+	virtual void GatherColliders(FRopeColliderGatherContext& Gather) override;
 
 private:
 	// 프레임당 1회 재구성되는 백킹 스토리지. 넘겨준 포인터들은 해당 프레임 동안 유효하다.

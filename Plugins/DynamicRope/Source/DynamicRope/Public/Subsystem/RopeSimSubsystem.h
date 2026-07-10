@@ -112,14 +112,24 @@ private:
 		AActor* Owner = nullptr;          // 소스 필터링용(provider 컴포넌트의 owner 액터).
 		bool bWorldStatic = false;        // 정적 월드 provider — 로프별 소유자 제외 면제(ProvidesWorldStaticColliders).
 		TArray<IRopeCollider*> Colliders; // provider->GatherColliders가 채운 포인터(provider 백킹 스토리지를 가리킴).
-		TArray<FBox> Bounds;              // collider별 월드 bounds 캐시(로프별 거리 컬링용 — 프레임당 1회 계산).
+		// provider가 gather 때 함께 돌려준 region(=로프 인덱스)별 풀 인덱스 매핑. bHasRegionMapping이면
+		// 로프별 배정이 이 리스트 소비로 끝난다 — O(로프×풀) bounds 재-컬 제거(2026-07 수집 방식 변경).
+		TArray<TArray<int32>> RegionIndices;
+		bool bHasRegionMapping = false;
+		// (매핑 없는 provider 폴백 전용) collider별 월드 bounds 캐시 — 이전 방식의 로프별 거리 컬링에 쓴다.
+		TArray<FBox> Bounds;
 	};
 	TArray<FFrameProviderColliders> FrameProviders;
+
+	// 이번 프레임 로프별 region(Ropes 인덱스와 1:1 — region 없는 로프는 !IsValid 자리 유지). provider
+	// gather와 로프별 배정이 같은 박스를 쓰는 단일 소스. BuildFrameColliders가 채운다.
+	TArray<FBox> FrameRopeRegions;
 
 	// 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). provider에는 로프별 region 리스트를 넘긴다.
 	void BuildFrameColliders();
 	// 한 로프의 collider를 중앙 빌드에서 모은다: 기본은 전체, 자기 owner provider만 제외(bIncludeOwnerColliders로 옵트인).
-	void GatherCollidersForRope(const URopeComponent& Rope, TArray<IRopeCollider*>& OutColliders) const;
+	// RopeIndex = Ropes/FrameRopeRegions 인덱스(provider 매핑의 region 인덱스와 동일해야 한다).
+	void GatherCollidersForRope(const URopeComponent& Rope, int32 RopeIndex, TArray<IRopeCollider*>& OutColliders) const;
 	// 한 로프의 broad-phase 질의 bounds(Pos∪Prev tight AABB + 접촉/예측 마진). provider에 넘기는 region과
 	// per-rope collider 컬링이 동일 박스를 쓰도록 한 곳에서 계산한다(무효면 !IsValid 박스 반환).
 	static FBox ComputeRopeQueryBounds(const URopeComponent& Rope);

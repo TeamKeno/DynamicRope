@@ -85,11 +85,10 @@ void URopeStaticBodyProvider::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-void URopeStaticBodyProvider::GatherColliders(TArrayView<const FBox> RopeRegions, TArray<IRopeCollider*>& OutColliders)
+void URopeStaticBodyProvider::GatherColliders(FRopeColliderGatherContext& Gather)
 {
 	// 프레임당 1회만 빌드(디둡). RopeRegions는 서브시스템이 로프별 region 리스트로 프레임 내내 동일하게
-	// 넘기므로, 첫 호출의 오버랩 결과를 그 프레임의 모든 로프가 공유한다(per-rope 컬링은 서브시스템의
-	// collider AABB 컬링이 담당).
+	// 넘기므로, 첫 호출의 오버랩 결과(+추출 그룹)를 그 프레임의 모든 로프가 공유한다.
 	const uint64 Frame = GFrameCounter;
 	if (BuiltFrame != Frame)
 	{
@@ -97,22 +96,97 @@ void URopeStaticBodyProvider::GatherColliders(TArrayView<const FBox> RopeRegions
 		Boxes.Reset();
 		Capsules.Reset();
 		Convexes.Reset();
-		BuildColliders(RopeRegions);
+		Groups.Reset();
+		BuildColliders(Gather.RopeRegions);
 	}
 
-	OutColliders.Reserve(OutColliders.Num() + Boxes.Num() + Capsules.Num() + Convexes.Num());
+	const int32 PoolBase = Gather.Colliders.Num();
+	Gather.Colliders.Reserve(PoolBase + Boxes.Num() + Capsules.Num() + Convexes.Num());
 	for (FRopeBoxCollider& Box : Boxes)
 	{
-		OutColliders.Add(&Box);
+		Gather.Colliders.Add(&Box);
 	}
 	for (FRopeStaticCapsuleCollider& Cap : Capsules)
 	{
-		OutColliders.Add(&Cap);
+		Gather.Colliders.Add(&Cap);
 	}
 	for (FRopeConvexCollider& Convex : Convexes)
 	{
-		OutColliders.Add(&Convex);
+		Gather.Colliders.Add(&Convex);
 	}
+
+	// region 매핑: 추출 그룹(=오버랩이 이미 판정한 컴포넌트 단위) 유니언 선-거절 → 히트한 그룹만
+	// 콜라이더별 bounds로 정밀 배정. 풀 순서는 위 append와 동일(boxes → capsules → convexes)이라
+	// 타입별 로컬 인덱스 + 오프셋으로 flat 인덱스를 만든다.
+	Gather.bHasRegionMapping = true;
+	Gather.RegionColliderIndices.SetNum(Gather.RopeRegions.Num());
+	const int32 CapFlatBase = PoolBase + Boxes.Num();
+	const int32 CvxFlatBase = CapFlatBase + Capsules.Num();
+	for (int32 r = 0; r < Gather.RopeRegions.Num(); ++r)
+	{
+		const FBox& Region = Gather.RopeRegions[r];
+		if (!Region.IsValid)
+		{
+			continue;
+		}
+		TArray<int32>& Out = Gather.RegionColliderIndices[r];
+		for (const FExtractedGroup& Group : Groups)
+		{
+			if (!Group.Bounds.IsValid || !Group.Bounds.Intersect(Region))
+			{
+				continue;
+			}
+			for (int32 i = Group.BoxStart; i < Group.BoxStart + Group.BoxCount; ++i)
+			{
+				if (Boxes[i].GetWorldBounds().Intersect(Region))
+				{
+					Out.Add(PoolBase + i);
+				}
+			}
+			for (int32 i = Group.CapStart; i < Group.CapStart + Group.CapCount; ++i)
+			{
+				if (Capsules[i].GetWorldBounds().Intersect(Region))
+				{
+					Out.Add(CapFlatBase + i);
+				}
+			}
+			for (int32 i = Group.CvxStart; i < Group.CvxStart + Group.CvxCount; ++i)
+			{
+				if (Convexes[i].GetWorldBounds().Intersect(Region))
+				{
+					Out.Add(CvxFlatBase + i);
+				}
+			}
+		}
+	}
+}
+
+void URopeStaticBodyProvider::RecordExtractedGroup(int32 BoxStart, int32 CapStart, int32 CvxStart)
+{
+	FExtractedGroup Group;
+	Group.BoxStart = BoxStart;
+	Group.BoxCount = Boxes.Num() - BoxStart;
+	Group.CapStart = CapStart;
+	Group.CapCount = Capsules.Num() - CapStart;
+	Group.CvxStart = CvxStart;
+	Group.CvxCount = Convexes.Num() - CvxStart;
+	if (Group.BoxCount + Group.CapCount + Group.CvxCount <= 0)
+	{
+		return;
+	}
+	for (int32 i = Group.BoxStart; i < Group.BoxStart + Group.BoxCount; ++i)
+	{
+		Group.Bounds += Boxes[i].GetWorldBounds();
+	}
+	for (int32 i = Group.CapStart; i < Group.CapStart + Group.CapCount; ++i)
+	{
+		Group.Bounds += Capsules[i].GetWorldBounds();
+	}
+	for (int32 i = Group.CvxStart; i < Group.CvxStart + Group.CvxCount; ++i)
+	{
+		Group.Bounds += Convexes[i].GetWorldBounds();
+	}
+	Groups.Add(Group);
 }
 
 void URopeStaticBodyProvider::BuildColliders(TArrayView<const FBox> RopeRegions)
@@ -184,7 +258,12 @@ void URopeStaticBodyProvider::BuildColliders(TArrayView<const FBox> RopeRegions)
 				{
 					continue;
 				}
-				if (!AppendInstancedBodyColliders(*ISM, Region, SeenInstances.FindOrAdd(ISM), MaxColliders, MaxConvexPlanes))
+				// 그룹 기록: 이 호출이 추가한 인스턴스 콜라이더 묶음(예산 클립으로 부분 추출이어도
+				// 추가된 만큼은 기록해 매핑에서 빠지지 않게 한다).
+				const int32 BoxStart = Boxes.Num(), CapStart = Capsules.Num(), CvxStart = Convexes.Num();
+				const bool bWithinBudget = AppendInstancedBodyColliders(*ISM, Region, SeenInstances.FindOrAdd(ISM), MaxColliders, MaxConvexPlanes);
+				RecordExtractedGroup(BoxStart, CapStart, CvxStart);
+				if (!bWithinBudget)
 				{
 					bBudgetClipped = true;
 					break;
@@ -213,10 +292,17 @@ void URopeStaticBodyProvider::BuildColliders(TArrayView<const FBox> RopeRegions)
 			const float CompInvDt = PrevPtr ? InvDt : 0.0f;
 			CurrCompXforms.Add(Prim, CompTM);
 
-			if (!AppendBodyColliders(*Setup, CompTM, PrevTM, CompInvDt, MaxColliders, MaxConvexPlanes))
 			{
-				bBudgetClipped = true;
-				break;
+				// 그룹 기록: 이 컴포넌트가 추가한 콜라이더 묶음. region 오버랩이 준 근접 정보를 보존해
+				// 서브시스템 재-컬 없이 로프별 배정에 쓴다(겹치는 region은 매핑 단계에서 양쪽에 배정).
+				const int32 BoxStart = Boxes.Num(), CapStart = Capsules.Num(), CvxStart = Convexes.Num();
+				const bool bWithinBudget = AppendBodyColliders(*Setup, CompTM, PrevTM, CompInvDt, MaxColliders, MaxConvexPlanes);
+				RecordExtractedGroup(BoxStart, CapStart, CvxStart);
+				if (!bWithinBudget)
+				{
+					bBudgetClipped = true;
+					break;
+				}
 			}
 		}
 	}

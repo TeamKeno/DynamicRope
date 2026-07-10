@@ -73,7 +73,7 @@ public:
 	TArray<FName> BoneFilter;
 
 	//~ IRopeColliderProvider
-	virtual void GatherColliders(TArrayView<const FBox> RopeRegions, TArray<IRopeCollider*>& OutColliders) override;
+	virtual void GatherColliders(FRopeColliderGatherContext& Gather) override;
 
 private:
 	/** BoneFilter 드롭다운(GetOptions)에 노출할 후보: SDFData에 베이크된 본 이름들. */

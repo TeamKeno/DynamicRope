@@ -59,7 +59,7 @@ TArray<FName> URopeSDFProvider::GetBakedBoneNames() const
 	return Names;
 }
 
-void URopeSDFProvider::GatherColliders(TArrayView<const FBox> /*RopeRegions*/, TArray<IRopeCollider*>& OutColliders)
+void URopeSDFProvider::GatherColliders(FRopeColliderGatherContext& Gather)
 {
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh || !SDFData)
@@ -112,9 +112,13 @@ void URopeSDFProvider::GatherColliders(TArrayView<const FBox> /*RopeRegions*/, T
 	}
 
 	// 캐시된 collider 포인터를 넘긴다(해당 프레임 동안 유효).
-	OutColliders.Reserve(OutColliders.Num() + Colliders.Num());
+	const int32 StartIndex = Gather.Colliders.Num();
+	Gather.Colliders.Reserve(StartIndex + Colliders.Num());
 	for (FRopeSDFCollider& Collider : Colliders)
 	{
-		OutColliders.Add(&Collider);
+		Gather.Colliders.Add(&Collider);
 	}
+
+	// region 매핑: 메시(볼륨 유니언) 선-거절 → 걸린 로프만 볼륨별 bounds 배정(캡슐 provider와 동일 원리).
+	RopeColliderGather::MapCollidersToRegionsByBounds(Gather, StartIndex);
 }

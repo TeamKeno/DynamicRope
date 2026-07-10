@@ -45,7 +45,7 @@ USkeletalMeshComponent* URopeBoneCapsuleProvider::ResolveMesh()
 	return SkeletalMesh;
 }
 
-void URopeBoneCapsuleProvider::GatherColliders(TArrayView<const FBox> /*RopeRegions*/, TArray<IRopeCollider*>& OutColliders)
+void URopeBoneCapsuleProvider::GatherColliders(FRopeColliderGatherContext& Gather)
 {
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh)
@@ -56,7 +56,7 @@ void URopeBoneCapsuleProvider::GatherColliders(TArrayView<const FBox> /*RopeRegi
 	}
 
 	// 프레임당 1회만 빌드(디둡): 같은 메시를 잡는 여러 로프가 호출해도 capsule을 재구성하지 않는다.
-	// per-rope 컬링은 solver의 collider AABB broad-phase가 담당하므로 RopeBounds는 여기서 쓰지 않는다.
+	// region별 배정은 아래 MapCollidersToRegionsByBounds가 만든다(빌드는 region 무관 — 전 본 빌드).
 	const uint64 Frame = GFrameCounter;
 	if (BuiltFrame != Frame)
 	{
@@ -89,11 +89,16 @@ void URopeBoneCapsuleProvider::GatherColliders(TArrayView<const FBox> /*RopeRegi
 	}
 
 	// 캐시된 capsule 포인터를 넘긴다(해당 프레임 동안 유효).
-	OutColliders.Reserve(OutColliders.Num() + Capsules.Num());
+	const int32 StartIndex = Gather.Colliders.Num();
+	Gather.Colliders.Reserve(StartIndex + Capsules.Num());
 	for (FCapsuleCollider& Cap : Capsules)
 	{
-		OutColliders.Add(&Cap);
+		Gather.Colliders.Add(&Cap);
 	}
+
+	// region 매핑: 메시(캡슐 유니언) 선-거절 → 걸린 로프만 캡슐별 bounds 배정. 원거리 로프는 메시당
+	// 비교 1회로 끝난다 — 서브시스템의 로프별 풀 전체 재-컬(O(로프×풀))을 대체하는 부분.
+	RopeColliderGather::MapCollidersToRegionsByBounds(Gather, StartIndex);
 }
 
 void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)

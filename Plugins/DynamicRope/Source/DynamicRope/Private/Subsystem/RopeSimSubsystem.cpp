@@ -240,22 +240,15 @@ void URopeSimSubsystem::BuildFrameColliders()
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_BuildColliders);
 	FrameProviders.Reset();
 
-	// 로프별 활성 영역(region) 리스트. provider의 broad-phase에 넘긴다 — bounds-aware provider(정적 바디)는
-	// 멀리 동떨어진 로프 사이 빈 공간을 스캔에서 배제해 예산/오버랩 낭비를 피한다. 전 로프 union AABB 폐기.
-	// 여기서 쓰는 region은 아래 per-rope 컬링(GatherCollidersForRope)과 동일한 박스라 gather↔cull이 정합.
-	TArray<FBox> RopeRegions;
-	RopeRegions.Reserve(Ropes.Num());
+	// 로프별 활성 영역(region) 리스트 — Ropes 인덱스와 1:1(무효/빈 로프는 !IsValid 박스로 자리 유지 —
+	// provider가 돌려주는 region 매핑 인덱스가 로프 인덱스와 그대로 대응하게 한다. provider는 !IsValid를
+	// 건너뛴다). bounds-aware provider(정적 바디)는 이 리스트로 멀리 동떨어진 로프 사이 빈 공간을
+	// 스캔에서 배제한다. 아래 로프별 배정(GatherCollidersForRope)과 동일 박스(단일 소스).
+	FrameRopeRegions.Reset();
+	FrameRopeRegions.Reserve(Ropes.Num());
 	for (URopeComponent* Rope : Ropes)
 	{
-		if (!IsValid(Rope))
-		{
-			continue;
-		}
-		const FBox Region = ComputeRopeQueryBounds(*Rope);
-		if (Region.IsValid)
-		{
-			RopeRegions.Add(Region);
-		}
+		FrameRopeRegions.Add(IsValid(Rope) ? ComputeRopeQueryBounds(*Rope) : FBox(ForceInit));
 	}
 
 	// 등록된 provider마다 1회 gather(프레임당 1회 — 로프 수와 무관). 죽은 provider는 정리.
@@ -272,24 +265,40 @@ void URopeSimSubsystem::BuildFrameColliders()
 		{
 			continue;
 		}
+		FRopeColliderGatherContext Gather;
+		Gather.RopeRegions = FrameRopeRegions;
+		Provider->GatherColliders(Gather);
+		if (Gather.Colliders.Num() == 0)
+		{
+			continue;
+		}
+
 		FFrameProviderColliders FP;
 		FP.Owner = Comp->GetOwner();
 		FP.bWorldStatic = Provider->ProvidesWorldStaticColliders(); // 정적 월드 provider는 소유자 제외 면제.
-		Provider->GatherColliders(RopeRegions, FP.Colliders);
-		if (FP.Colliders.Num() > 0)
+		FP.Colliders = MoveTemp(Gather.Colliders);
+		// region 매핑은 길이가 로프 수와 일치할 때만 신뢰(불일치 = provider 버그 → bounds 재-컬 폴백으로 강등).
+		FP.bHasRegionMapping = Gather.bHasRegionMapping
+			&& Gather.RegionColliderIndices.Num() == FrameRopeRegions.Num();
+		if (FP.bHasRegionMapping)
 		{
-			// collider별 월드 bounds를 프레임당 1회 캐시 — 아래 로프별 컬링이 로프 수만큼 재계산하지 않게.
+			FP.RegionIndices = MoveTemp(Gather.RegionColliderIndices);
+		}
+		else
+		{
+			// 폴백 경로 전용: collider별 월드 bounds를 프레임당 1회 캐시 — 로프별 재-컬이 로프 수만큼
+			// 가상 호출로 재계산하지 않게.
 			FP.Bounds.Reserve(FP.Colliders.Num());
 			for (const IRopeCollider* Collider : FP.Colliders)
 			{
 				FP.Bounds.Add(Collider ? Collider->GetWorldBounds() : FBox(ForceInit));
 			}
-			FrameProviders.Add(MoveTemp(FP));
 		}
+		FrameProviders.Add(MoveTemp(FP));
 	}
 }
 
-void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArray<IRopeCollider*>& OutColliders) const
+void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32 RopeIndex, TArray<IRopeCollider*>& OutColliders) const
 {
 	OutColliders.Reset();
 
@@ -300,8 +309,9 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArra
 	// 거리 컬링: 로프 AABB(Pos∪Prev — 프레임 모션 포함)와 안 겹치는 collider는 아예 안 싣는다.
 	// CPU 솔버는 자체 broad-phase가 또 있지만, GPU 커널은 콜라이더 전량을 노드마다 루프하므로
 	// 여기서 거르는 것이 스케일링의 핵심이다(멀리 있는 캐릭터들의 캡슐/SDF가 스텝에 안 실림).
-	// BuildFrameColliders가 provider region으로 넘긴 것과 동일 박스(단일 소스).
-	const FBox RopeBounds = ComputeRopeQueryBounds(Rope);
+	// 기본 경로는 provider가 gather 때 함께 돌려준 region 매핑을 그대로 소비한다(재-컬 없음 —
+	// 2026-07 수집 방식 변경). BuildFrameColliders가 provider에 넘긴 region과 동일 박스(단일 소스).
+	const FBox RopeBounds = FrameRopeRegions.IsValidIndex(RopeIndex) ? FrameRopeRegions[RopeIndex] : FBox(ForceInit);
 	const bool bCull = RopeBounds.IsValid != 0;
 
 	// 로프별 정적 월드 콜라이더 예산. 전역 추출 상한(StaticBodyMaxColliders)과 별개로, 이 로프가 솔브에
@@ -321,9 +331,42 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, TArra
 		{
 			continue;
 		}
-		if (!bCull || FP.Bounds.Num() != FP.Colliders.Num())
+		if (!bCull)
 		{
-			OutColliders.Append(FP.Colliders); // 컬 불가(빈 로프/bounds 캐시 불일치) → 전체 폴백(예산 우회, 드묾).
+			OutColliders.Append(FP.Colliders); // region 없는 로프(빈 sim 등) → 전체 폴백(예산 우회, 드묾 — 기존 동작 유지).
+			continue;
+		}
+
+		// 기본 경로: provider가 만든 region(=이 로프) 매핑 소비 — bounds 재테스트 없음.
+		if (FP.bHasRegionMapping)
+		{
+			if (!FP.RegionIndices.IsValidIndex(RopeIndex))
+			{
+				continue; // 빌드에서 길이 검증하므로 도달하지 않는 방어선.
+			}
+			for (const int32 Idx : FP.RegionIndices[RopeIndex])
+			{
+				IRopeCollider* Collider = FP.Colliders.IsValidIndex(Idx) ? FP.Colliders[Idx] : nullptr;
+				if (!Collider)
+				{
+					continue;
+				}
+				if (FP.bWorldStatic)
+				{
+					WorldStaticCandidates.Add(Collider); // 예산 적용 대상
+				}
+				else
+				{
+					OutColliders.Add(Collider); // 스켈레톤 등 — 항상 포함
+				}
+			}
+			continue;
+		}
+
+		// 폴백 경로(매핑 없는 provider): 이전 방식의 collider bounds 재-컬.
+		if (FP.Bounds.Num() != FP.Colliders.Num())
+		{
+			OutColliders.Append(FP.Colliders); // bounds 캐시 불일치 → 전체 폴백(드묾).
 			continue;
 		}
 		for (int32 c = 0; c < FP.Colliders.Num(); ++c)
@@ -406,9 +449,10 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_GatherColliders);
 		BuildFrameColliders();
-		for (URopeComponent* Rope : Ropes)
+		// 로프 인덱스 = FrameRopeRegions/provider 매핑의 region 인덱스(위 무효 정리 후 순서 고정).
+		for (int32 RopeIndex = 0; RopeIndex < Ropes.Num(); ++RopeIndex)
 		{
-			GatherCollidersForRope(*Rope, Rope->FrameColliders);
+			GatherCollidersForRope(*Ropes[RopeIndex], RopeIndex, Ropes[RopeIndex]->FrameColliders);
 		}
 	}
 
