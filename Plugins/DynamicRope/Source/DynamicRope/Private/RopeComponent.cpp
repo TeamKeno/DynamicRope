@@ -1489,6 +1489,19 @@ FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float
 	return Params;
 }
 
+void URopeComponent::RemoveNonWrappableCandidates(TArray<FRopeContactCandidate>& Candidates) const
+{
+	// 서브클래스 wrap 대상 게이트(CanWrapTarget): 거른 대상은 트래커/캡처 판정에서 아예 안 보이게
+	// 제거한다 — 금지 대상에 트래커가 고착돼 페이즈가 정체되는 것을 막는다. 기본 구현은 전부 true라
+	// 필터가 no-op이고, 후보 수가 적어(프레임당 수십 개 상한) 비용은 무시 가능.
+	// Flight(후보 산출)와 Contacting(재수집)이 공용 — 조건이 한쪽만 바뀌면 두 페이즈가 서로 다른
+	// 후보 집합으로 판정하는 미묘한 버그가 되므로 반드시 이 헬퍼를 거친다.
+	Candidates.RemoveAll([this](const FRopeContactCandidate& Candidate)
+	{
+		return !CanWrapTarget(Candidate.Mesh, Candidate.Bone);
+	});
+}
+
 void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
 	const FRopeFlightContactDetector::FParams& DetectParams, TArray<FRopeContactCandidate>& OutCandidates)
 {
@@ -1530,13 +1543,7 @@ void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
 		}
 	}
 
-	// 서브클래스 wrap 대상 게이트(CanWrapTarget): 거른 대상은 트래커/캡처 판정에서 아예 안 보이게
-	// 여기서 제거한다 — 금지 대상에 트래커가 고착돼 Flight가 정체되는 것을 막는다. 기본 구현은
-	// 전부 true라 필터가 no-op이고, 후보 수가 적어(Flight 프레임당 수십 개 상한) 비용은 무시 가능.
-	OutCandidates.RemoveAll([this](const FRopeContactCandidate& Candidate)
-	{
-		return !CanWrapTarget(Candidate.Mesh, Candidate.Bone);
-	});
+	RemoveNonWrappableCandidates(OutCandidates); // CanWrapTarget 게이트(Contacting 재수집과 공용 헬퍼).
 }
 
 bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
@@ -1681,10 +1688,7 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 	TArray<FRopeContactCandidate> Candidates;
 	FRopeFlightContactDetector::DetectContactCandidates(Sim, FrameColliders, DetectParams, Candidates);
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
-	Candidates.RemoveAll([this](const FRopeContactCandidate& Candidate)
-	{
-		return !CanWrapTarget(Candidate.Mesh, Candidate.Bone);
-	});
+	RemoveNonWrappableCandidates(Candidates); // CanWrapTarget 게이트(Flight 후보 산출과 공용 헬퍼).
 
 	// 트래커 갱신: 같은 본이면 dwell 누적, 지배 본이 바뀌면 dwell 리셋(전이 프레임 오탐 방어 —
 	// dwell 재시작 계약을 캡처 후 구간에도 실제로 적용), 접촉이 끊기면 dwell이 소진되며 트래커가
@@ -1838,8 +1842,14 @@ void URopeComponent::StartWrappingFromContacting()
 	// 비상비상: 아래 fallback은 contact candidate 기반의 정확한 SDF surface anchor가 없을 때만 쓰는 임시 anchor 경로다.
 	// 현재 rope particle 위치와 임시 normal/tangent로 시작점을 때우므로, wrapping 품질/방향이 흔들릴 수 있다.
 	// 정상 경로는 PendingWrapSeed.Anchors[0]에 실제 contact surface point/normal/tangent가 들어오는 것이다.
+	// Contacting이 매 프레임 시드를 최신 후보로 재조립하게 된 뒤로는(개선 2호) 후보가 있는 한 Anchors[0]가
+	// 항상 채워져 이 경로는 사실상 도달 불가로 추정된다 — 아래 경고로 실전 도달 여부를 관측한 뒤 제거 후보.
 	else if (Sim.Positions.IsValidIndex(Latch.NodeIndex))
 	{
+		UE_LOG(LogDynamicRope, Warning,
+			TEXT("[%s] StartWrapping fell back to the synthetic latch anchor (no contact-based anchor in seed, bone=%s) — wrap quality may wobble. Thought unreachable; report if seen."),
+			*GetName(), *Latch.Bone.ToString());
+
 		const FVector NormalWorld = FVector::UpVector;
 		FVector TangentWorld = FVector::ForwardVector;
 

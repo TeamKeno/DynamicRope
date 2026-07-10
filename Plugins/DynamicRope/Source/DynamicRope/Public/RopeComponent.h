@@ -602,6 +602,10 @@ private:
 	// FinalizeSimFrame의 Flight 블록은 아래 단계 헬퍼의 고정 순서로 읽는다:
 	// ① 후보 산출 → ② 캡처 판정/전이 → ③ 관측(스탯/디버거 — 판정과 분리된 읽기 전용 소비).
 
+	/** CanWrapTarget 게이트를 후보 리스트에 적용한다(금지 대상 제거). Flight 산출과 Contacting 재수집이
+	 *  같은 판정 집합을 쓰도록 필터를 한 곳에 둔다 — 조건을 고치면 두 페이즈가 함께 움직인다. */
+	void RemoveNonWrappableCandidates(TArray<FRopeContactCandidate>& Candidates) const;
+
 	/** ① 이번 프레임 접촉 후보 산출: whip 예측 뷰 조립 + GPU 감지 산출물 회수(상대운동 평가만 GT)
 	 *  또는 CPU 감지 파이프라인(actual→predicted→상대운동), 마지막에 CanWrapTarget 게이트. */
 	void BuildFlightContactCandidates(float DeltaTime, const FRopeFlightContactDetector::FParams& DetectParams,
