@@ -1662,9 +1662,26 @@ void URopeComponent::BuildContactingState(const TArray<FRopeContactCandidate>& C
 
 void URopeComponent::UpdateContacting(float DeltaTime)
 {
-	// 현재는 체류 타이머만 전진시켜 판정한다.
-	// TODO: 매 프레임 접촉 후보를 재수집하고 tangential speed / winding angle까지 갱신.
-	AdvanceWrappingMotion(DeltaTime);
+	ContactingElapsed += DeltaTime; // 총 체류(아래 정체 안전망 판단용 — 감김 판정 자체는 트래커 dwell).
+
+	// 매 프레임 실제 접촉을 재수집한다 — 캡처 순간의 1회 스냅샷만 믿고 타이머를 돌리던 이전 구조는
+	// (1) dismiss가 사실상 불발이었고(트래커 미갱신) (2) 움직이는 대상(랙돌/드래곤)에서 시드와 실제
+	// 지오메트리의 어긋남이 WrapDecisionTime 동안 누적됐다. Contacting은 솔브가 없어 노드가 정지
+	// 상태라 스윕은 점 질의로 축퇴하고, 대상 이탈은 collider 쪽 이동으로 감지된다.
+	// 예측/whip 분기는 Flight 전용이므로 여기서는 actual 접촉만 수집한다(비용: 근접 노드 점 질의뿐).
+	const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
+	TArray<FRopeContactCandidate> Candidates;
+	FRopeFlightContactDetector::DetectContactCandidates(Sim, FrameColliders, DetectParams, Candidates);
+	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
+	Candidates.RemoveAll([this](const FRopeContactCandidate& Candidate)
+	{
+		return !CanWrapTarget(Candidate.Mesh, Candidate.Bone);
+	});
+
+	// 트래커 갱신: 같은 본이면 dwell 누적, 지배 본이 바뀌면 dwell 리셋(전이 프레임 오탐 방어 —
+	// dwell 재시작 계약을 캡처 후 구간에도 실제로 적용), 접촉이 끊기면 dwell이 소진되며 트래커가
+	// 비워져 아래 dismiss로 떨어진다(짧은 플리커는 그동안 쌓인 dwell만큼 관용).
+	ContactTracker.Update(Candidates, DeltaTime);
 
 	if (ShouldDismissContacting())
 	{
@@ -1673,16 +1690,27 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 		return;
 	}
 
+	// 시드 갱신: Wrapping이 시작되는 프레임의 최신 접촉 지오메트리에서 경로 생성이 출발하게 한다.
+	if (Candidates.Num() > 0 && !ContactTracker.CandidateBone.IsNone())
+	{
+		PendingWrapSeed = BuildWrapSeedFromContactingState(Candidates);
+	}
+
 	if (ShouldStartWrapping())
 	{
 		StartWrappingFromContacting();
 		return;
 	}
-}
 
-void URopeComponent::AdvanceWrappingMotion(float DeltaTime)
-{
-	ContactingElapsed += DeltaTime;
+	// 정체 안전망: 접촉이 깜빡여 dwell이 임계에 못 미친 채 오래 머물면(커밋도 dismiss도 안 됨)
+	// Flight로 돌려보낸다. Flight에서 재캡처는 자유이므로 잃는 것 없이 무한 체류만 막는다.
+	const float StallTimeout = FMath::Max(WrapConfig.WrapDecisionTime * 10.0f, 1.0f);
+	if (ContactingElapsed >= StallTimeout)
+	{
+		SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("contacting stalled %.2fs (dwell %.2fs < %.2fs)"),
+			ContactingElapsed, ContactTracker.DwellTime, WrapConfig.WrapDecisionTime));
+		ResetTransientPhaseState();
+	}
 }
 
 bool URopeComponent::ShouldDismissContacting() const
@@ -1692,7 +1720,10 @@ bool URopeComponent::ShouldDismissContacting() const
 
 bool URopeComponent::ShouldStartWrapping() const
 {
-	return ContactingElapsed >= WrapConfig.WrapDecisionTime
+	// 판정은 "한 본과의 지속 접촉"(트래커 dwell — 지배 본이 바뀌면 0부터) 기준. 총 경과가 아니라
+	// dwell을 쓰는 것이 원 설계 의도(노드들이 WrapDecisionTime 동안 한 본에 유지)와 일치한다.
+	// 안정 접촉에서는 dwell == 총 경과라 기존과 동일하고, 본이 튀는 전이 프레임에서만 엄격해진다.
+	return ContactTracker.DwellTime >= WrapConfig.WrapDecisionTime
 		&& PendingWrapSeed.Latched.Num() > 0
 		&& !PendingWrapSeed.BoneName.IsNone();
 }

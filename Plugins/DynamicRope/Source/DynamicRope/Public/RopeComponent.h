@@ -576,9 +576,10 @@ private:
 	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates);
 
 	//~ Contacting -----------------------------------------------------------
+	// 매 프레임 실제 접촉을 재수집해 트래커 dwell을 갱신한다: 지속 접촉 → Wrapping, 접촉 소실 →
+	// dismiss(Flight), dwell이 임계에 못 미친 정체 → 안전망 타임아웃(Flight). 판정 기준은 총 경과가
+	// 아니라 트래커 dwell(지배 본이 바뀌면 리셋)이다.
 	void UpdateContacting(float DeltaTime);
-
-	void AdvanceWrappingMotion(float DeltaTime);
 
 	bool ShouldDismissContacting() const;
 
