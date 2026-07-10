@@ -27,6 +27,7 @@ class USkeletalMeshComponent;
 class USceneComponent; // 랩 대상 추상화(Decision 0): 랩 대상 mesh를 USceneComponent로 일반화
 class FRegisterComponentContext;
 struct FRopeDebugSnapshot;
+struct FRopeFlightNodeDebug; // 디버거 노드별 flight 시각화 항목(Debug/RopeDebugSnapshot.h)
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
@@ -589,6 +590,26 @@ private:
 	/** 검출기에 넘길 파라미터 스냅샷(WrapConfig + 튜브 반지름 + 컴포넌트 전방). */
 	// DeltaTime: 이번 프레임 dt — 상대운동 평가의 SurfaceVelocity(cm/s→cm/프레임) 환산에 쓰인다.
 	FRopeFlightContactDetector::FParams MakeFlightDetectParams(float DeltaTime) const;
+
+	// FinalizeSimFrame의 Flight 블록은 아래 단계 헬퍼의 고정 순서로 읽는다:
+	// ① 후보 산출 → ② 캡처 판정/전이 → ③ 관측(스탯/디버거 — 판정과 분리된 읽기 전용 소비).
+
+	/** ① 이번 프레임 접촉 후보 산출: whip 예측 뷰 조립 + GPU 감지 산출물 회수(상대운동 평가만 GT)
+	 *  또는 CPU 감지 파이프라인(actual→predicted→상대운동), 마지막에 CanWrapTarget 게이트. */
+	void BuildFlightContactCandidates(float DeltaTime, const FRopeFlightContactDetector::FParams& DetectParams,
+		TArray<FRopeContactCandidate>& OutCandidates);
+
+	/** ② 캡처 판정/전이: 캡처면 Contacting 진입(이벤트 브로드캐스트 포함), 아니면 whip 종료 후 실패
+	 *  타이머를 굴려 FlightNoContactReturnTime 초과 시 Free 복귀. 캡처 여부를 반환한다(③ 관측 소비용). */
+	bool TryCaptureFlightContacts(float DeltaTime, const TArray<FRopeContactCandidate>& Candidates,
+		const FRopeFlightContactDetector::FParams& DetectParams);
+
+#if WITH_GAMEPLAY_DEBUGGER
+	/** ③ 관측 보조(디버거 대상 로프 전용): 노드별 감지 입력/판정 시각화 데이터 수집. 본 파이프라인과
+	 *  별개로 감지기를 재질의한다(전 노드 스윕) — 대상 1개 로프만 비용을 내는 의도된 중복. */
+	void GatherFlightNodeDebug(const FRopeFlightContactDetector::FParams& DetectParams,
+		TArray<FRopeFlightNodeDebug>& OutNodeDebug) const;
+#endif
 
 	/** 캡처 확정 시 Contacting 진입 상태(ContactTracker/PendingWrapSeed/타이머)를 구성한다. */
 	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates);

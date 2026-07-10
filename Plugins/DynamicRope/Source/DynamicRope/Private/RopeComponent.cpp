@@ -807,134 +807,27 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	// }
 
 	// Flight: 솔브 후 이동 경로 기반 접촉 후보 감지 → 캡처. 파이프라인 자체는
-	// FRopeFlightContactDetector(UObject 비의존)이고, 여기서는 입력 조립 + 전이/이벤트만 한다.
+	// FRopeFlightContactDetector(UObject 비의존)이고, 여기서는 3단계 오케스트레이션만 한다:
+	// ① 후보 산출 → ② 캡처 판정/전이 → ③ 관측(스탯/디버거 — 판정과 분리된 읽기 전용 소비).
 	if (Phase == ERopePhase::Flight)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FinalizeFlight);
 		const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
+
 		TArray<FRopeContactCandidate> Candidates;
-		TArray<FRopeFlightNodeDebug> FlightNodeDebug;
-		if (bDebugCapture)
-		{
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightDebugGather);
-			for (int32 i = 0; i < Sim.Num(); ++i)
-			{
-				if (!Sim.PrevPositions.IsValidIndex(i) || !Sim.Positions.IsValidIndex(i))
-				{
-					continue;
-				}
+		BuildFlightContactCandidates(DeltaTime, DetectParams, Candidates);
 
-				FRopeFlightNodeDebug NodeDebug;
-				NodeDebug.NodeIndex = i;
-				NodeDebug.PrevPosition = Sim.PrevPositions[i];
-				NodeDebug.Position = Sim.Positions[i];
-				NodeDebug.NodeSpeed = FRopeFlightContactDetector::NodeSpeed(Sim, i);
-				NodeDebug.bFast = FRopeFlightContactDetector::IsTailNode(Sim, i) || NodeDebug.NodeSpeed > Sim.SegmentLength;
-				NodeDebug.bNearBody = FRopeFlightContactDetector::IsNearAnyColliderSegment(
-					NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders, DetectParams);
-				if (NodeDebug.bFast || NodeDebug.bNearBody)
-				{
-					NodeDebug.Contact = FRopeFlightContactDetector::SweepOrSampleContact(
-						Sim, NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders, DetectParams);
-				}
+		const bool bShouldCapture = TryCaptureFlightContacts(DeltaTime, Candidates, DetectParams);
 
-				if (NodeDebug.bFast || NodeDebug.bNearBody || NodeDebug.Contact.bHit)
-				{
-					FlightNodeDebug.Add(NodeDebug);
-				}
-			}
-		}
-
-		// whip 가이드 활성 프레임엔 예측 접촉용 데이터 뷰를 구성한다(다음 프레임 타깃 미리보기 포함).
-		// 예측이 꺼져 있으면(PredictiveContactFrames<=0) 검출기가 어차피 early-out이라 미리보기를 만들지 않는다.
-		FRopeFlightContactDetector::FWhipGuideView WhipView;
-		TArray<FVector> NextGuideTargets;
-		if (WrapConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
-		{
-			WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargets);
-			WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
-			WhipView.CurrentTargets = &WhipGuide.GetCurrentTargets();
-			WhipView.PrevTargets = &WhipGuide.GetPrevTargets();
-			WhipView.NextTargets = &NextGuideTargets;
-		}
-
-		if (bGpuContactsThisFrame)
-		{
-			// GPU 감지 경로(G3): actual+predictive 후보 모두 GPU 커널이 산출한 것을 쓴다(귀속·중복제거는
-			// 서브시스템이 복원). 상대운동 평가(ExpectedWrapTangent는 hand=node0 위치 필요)만 GT에서 돌린다.
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightGpuContacts);
-			Candidates = GpuFlightCandidates;
-			FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
-		}
-		else
-		{
-			{
-				TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightActualContacts);
-				FRopeFlightContactDetector::DetectContactCandidates(Sim, FrameColliders, DetectParams, Candidates);
-			}
-			{
-				TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightPredictiveContacts);
-				FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, FrameColliders, DetectParams, WhipView, Candidates);
-			}
-			{
-				TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCandidates);
-				FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
-			}
-		}
-
-		// 서브클래스 wrap 대상 게이트(CanWrapTarget): 거른 대상은 트래커/캡처 판정에서 아예 안 보이게
-		// 여기서 제거한다 — 금지 대상에 트래커가 고착돼 Flight가 정체되는 것을 막는다. 기본 구현은
-		// 전부 true라 필터가 no-op이고, 후보 수가 적어(Flight 프레임당 수십 개 상한) 비용은 무시 가능.
-		Candidates.RemoveAll([this](const FRopeContactCandidate& Candidate)
-		{
-			return !CanWrapTarget(Candidate.Mesh, Candidate.Bone);
-		});
-
-		FRopeContactTracker FlightDebugTracker;
+		// ③ 관측: stat 카운터(수집 중일 때만; 디버그 캡처와 독립) + 디버거 스냅샷(대상 로프만).
+		// 캡처 프레임엔 방금 채워진 ContactTracker를, 아니면 이번 후보로 만든 관측 전용 트래커를
+		// 보여준다 — 어느 쪽도 판정에는 관여하지 않는다.
+		FRopeContactTracker FlightObserveTracker;
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightTrackerUpdate);
-			FlightDebugTracker.Update(Candidates, 0.0f);
+			FlightObserveTracker.Update(Candidates, 0.0f);
 		}
-		bool bShouldCapture = false;
-		{
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCapture);
-			bShouldCapture = FRopeFlightContactDetector::ShouldCapture(Candidates, DetectParams);
-		}
-		if (bShouldCapture)
-		{
-			FlightNoContactElapsed = 0.0f;
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightBuildContactingState);
-			BuildContactingState(Candidates);
-			SetPhase(ERopePhase::Contacting, *FString::Printf(TEXT("bone=%s, %d node(s)"),
-				*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num()));
-			NotifyCaptured(ContactTracker.CandidateBone);
-			OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
-		}
-		else
-		{
-			// Whip이 끝난 뒤 캡처하지 못하고 남아 있으면 실패로 보고 Free로 복귀한다.
-			// 후보가 계속 있어도 MinLatchNodes/품질 조건을 넘지 못하면 Flight에 갇힐 수 있으므로 리셋하지 않는다.
-			if (!WhipGuide.IsActive())
-			{
-				const float FlightReturnTime = WrapConfig.FlightNoContactReturnTime > 0.0f
-					? WrapConfig.FlightNoContactReturnTime
-					: ReleaseCooldownSeconds;
-				FlightNoContactElapsed += DeltaTime;
-				if (FlightNoContactElapsed >= FlightReturnTime)
-				{
-					InjectPinnedFrameVelocityForFreeReturn(Sim);
-					SetPhase(ERopePhase::Free, *FString::Printf(TEXT("flight failed %.3fs"), FlightNoContactElapsed));
-					ResetTransientPhaseState();
-				}
-			}
-			else
-			{
-				FlightNoContactElapsed = 0.0f;
-			}
-		}
-
-		// stat 카운터(stat 시스템이 수집 중일 때만; 디버그 캡처와 독립).
-		const FRopeContactTracker& DebugTracker = bShouldCapture ? ContactTracker : FlightDebugTracker;
+		const FRopeContactTracker& DebugTracker = bShouldCapture ? ContactTracker : FlightObserveTracker;
 		const float WhipGuidedEnd = FMath::Clamp(WhipConfig.GuidedLength, 0.05f, 0.95f);
 		const bool bWhipActive = WhipGuide.GetDebugGuideTargets().Num() > 0;
 		RopeDebug::RecordFlightStats(Sim, bSolveThisFrame, FrameColliders.Num(), Candidates,
@@ -945,6 +838,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 #if WITH_GAMEPLAY_DEBUGGER
 		if (bDebugCapture)
 		{
+			GatherFlightNodeDebug(DetectParams, DebugSnapshot.NodeDebug);
 			DebugSnapshot.bHasFlight = true;
 			DebugSnapshot.bSolveThisFrame = bSolveThisFrame;
 			DebugSnapshot.bShouldCapture = bShouldCapture;
@@ -952,7 +846,6 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			DebugSnapshot.MinLatchNodes = WrapConfig.MinLatchNodes;
 			DebugSnapshot.TrackerBone = DebugTracker.CandidateBone;
 			DebugSnapshot.TrackerNodes = DebugTracker.CandidateNodes;
-			DebugSnapshot.NodeDebug = MoveTemp(FlightNodeDebug);
 			DebugSnapshot.Candidates = Candidates;
 			DebugSnapshot.bWhipActive = bWhipActive;
 			DebugSnapshot.WhipGuidedEnd = WhipGuidedEnd;
@@ -1730,6 +1623,136 @@ FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float
 	Params.DeltaTime = DeltaTime;
 	return Params;
 }
+
+void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
+	const FRopeFlightContactDetector::FParams& DetectParams, TArray<FRopeContactCandidate>& OutCandidates)
+{
+	// whip 가이드 활성 프레임엔 예측 접촉용 데이터 뷰를 구성한다(다음 프레임 타깃 미리보기 포함).
+	// 예측이 꺼져 있으면(PredictiveContactFrames<=0) 검출기가 어차피 early-out이라 미리보기를 만들지 않는다.
+	// NextGuideTargets는 뷰가 가리키는 로컬 버퍼 — 감지가 이 함수 안에서 끝나므로 수명이 충분하다.
+	FRopeFlightContactDetector::FWhipGuideView WhipView;
+	TArray<FVector> NextGuideTargets;
+	if (WrapConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
+	{
+		WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargets);
+		WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
+		WhipView.CurrentTargets = &WhipGuide.GetCurrentTargets();
+		WhipView.PrevTargets = &WhipGuide.GetPrevTargets();
+		WhipView.NextTargets = &NextGuideTargets;
+	}
+
+	if (bGpuContactsThisFrame)
+	{
+		// GPU 감지 경로(G3): actual+predictive 후보 모두 GPU 커널이 산출한 것을 쓴다(귀속·중복제거는
+		// 서브시스템이 복원). 상대운동 평가(ExpectedWrapTangent는 hand=node0 위치 필요)만 GT에서 돌린다.
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightGpuContacts);
+		OutCandidates = GpuFlightCandidates;
+		FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, OutCandidates);
+	}
+	else
+	{
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightActualContacts);
+			FRopeFlightContactDetector::DetectContactCandidates(Sim, FrameColliders, DetectParams, OutCandidates);
+		}
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightPredictiveContacts);
+			FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, FrameColliders, DetectParams, WhipView, OutCandidates);
+		}
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCandidates);
+			FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, OutCandidates);
+		}
+	}
+
+	// 서브클래스 wrap 대상 게이트(CanWrapTarget): 거른 대상은 트래커/캡처 판정에서 아예 안 보이게
+	// 여기서 제거한다 — 금지 대상에 트래커가 고착돼 Flight가 정체되는 것을 막는다. 기본 구현은
+	// 전부 true라 필터가 no-op이고, 후보 수가 적어(Flight 프레임당 수십 개 상한) 비용은 무시 가능.
+	OutCandidates.RemoveAll([this](const FRopeContactCandidate& Candidate)
+	{
+		return !CanWrapTarget(Candidate.Mesh, Candidate.Bone);
+	});
+}
+
+bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
+	const TArray<FRopeContactCandidate>& Candidates, const FRopeFlightContactDetector::FParams& DetectParams)
+{
+	bool bShouldCapture = false;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCapture);
+		bShouldCapture = FRopeFlightContactDetector::ShouldCapture(Candidates, DetectParams);
+	}
+
+	if (bShouldCapture)
+	{
+		FlightNoContactElapsed = 0.0f;
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightBuildContactingState);
+		BuildContactingState(Candidates);
+		SetPhase(ERopePhase::Contacting, *FString::Printf(TEXT("bone=%s, %d node(s)"),
+			*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num()));
+		NotifyCaptured(ContactTracker.CandidateBone);
+		OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
+		return true;
+	}
+
+	// Whip이 끝난 뒤 캡처하지 못하고 남아 있으면 실패로 보고 Free로 복귀한다.
+	// 후보가 계속 있어도 MinLatchNodes/품질 조건을 넘지 못하면 Flight에 갇힐 수 있으므로 리셋하지 않는다.
+	if (!WhipGuide.IsActive())
+	{
+		const float FlightReturnTime = WrapConfig.FlightNoContactReturnTime > 0.0f
+			? WrapConfig.FlightNoContactReturnTime
+			: ReleaseCooldownSeconds;
+		FlightNoContactElapsed += DeltaTime;
+		if (FlightNoContactElapsed >= FlightReturnTime)
+		{
+			InjectPinnedFrameVelocityForFreeReturn(Sim);
+			SetPhase(ERopePhase::Free, *FString::Printf(TEXT("flight failed %.3fs"), FlightNoContactElapsed));
+			ResetTransientPhaseState();
+		}
+	}
+	else
+	{
+		FlightNoContactElapsed = 0.0f;
+	}
+	return false;
+}
+
+#if WITH_GAMEPLAY_DEBUGGER
+void URopeComponent::GatherFlightNodeDebug(const FRopeFlightContactDetector::FParams& DetectParams,
+	TArray<FRopeFlightNodeDebug>& OutNodeDebug) const
+{
+	// 디버거 대상 로프 전용 시각화 수집. 본 감지 파이프라인과 별개로 노드마다 감지기를 재질의하는
+	// 의도된 중복 — 판정에 안 걸린 노드(느림/원거리)의 "왜 안 걸렸나"까지 보여주는 것이 목적이라
+	// 판정 산출물 재사용으로는 대체가 안 된다. 비용은 디버거 대상 1개 로프만 부담.
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightDebugGather);
+	for (int32 i = 0; i < Sim.Num(); ++i)
+	{
+		if (!Sim.PrevPositions.IsValidIndex(i) || !Sim.Positions.IsValidIndex(i))
+		{
+			continue;
+		}
+
+		FRopeFlightNodeDebug NodeDebug;
+		NodeDebug.NodeIndex = i;
+		NodeDebug.PrevPosition = Sim.PrevPositions[i];
+		NodeDebug.Position = Sim.Positions[i];
+		NodeDebug.NodeSpeed = FRopeFlightContactDetector::NodeSpeed(Sim, i);
+		NodeDebug.bFast = FRopeFlightContactDetector::IsTailNode(Sim, i) || NodeDebug.NodeSpeed > Sim.SegmentLength;
+		NodeDebug.bNearBody = FRopeFlightContactDetector::IsNearAnyColliderSegment(
+			NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders, DetectParams);
+		if (NodeDebug.bFast || NodeDebug.bNearBody)
+		{
+			NodeDebug.Contact = FRopeFlightContactDetector::SweepOrSampleContact(
+				Sim, NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders, DetectParams);
+		}
+
+		if (NodeDebug.bFast || NodeDebug.bNearBody || NodeDebug.Contact.bHit)
+		{
+			OutNodeDebug.Add(NodeDebug);
+		}
+	}
+}
+#endif // WITH_GAMEPLAY_DEBUGGER
 
 void URopeComponent::BuildContactingState(const TArray<FRopeContactCandidate>& Candidates)
 {
