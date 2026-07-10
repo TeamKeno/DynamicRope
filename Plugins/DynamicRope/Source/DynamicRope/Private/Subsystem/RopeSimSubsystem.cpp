@@ -232,6 +232,13 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope)
 			+ FMath::Sqrt(MaxFrameDispSq) * FMath::Max(Rope.WrapConfig.PredictiveContactFrames, 1.0f);
 		RopeBounds = RopeBounds.ExpandBy(Margin);
 	}
+	if (Rope.AimRayColliderQueryBounds.IsValid)
+	{
+		// Preview ray는 현재 rope centerline과 떨어진 곳을 지나갈 수 있다. 이 구간을 provider region에
+		// 합치지 않으면 ray가 SDF를 관통해도 해당 collider가 FrameColliders에 없어 cyan miss가 된다.
+		RopeBounds += Rope.AimRayColliderQueryBounds.Min;
+		RopeBounds += Rope.AimRayColliderQueryBounds.Max;
+	}
 	return RopeBounds;
 }
 
@@ -482,6 +489,13 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		for (int32 RopeIndex = 0; RopeIndex < Ropes.Num(); ++RopeIndex)
 		{
 			GatherCollidersForRope(*Ropes[RopeIndex], RopeIndex, Ropes[RopeIndex]->FrameColliders);
+			// 입력 순간 고정한 ray bounds로 collider를 모은 직후 Aim throw를 확정한다.
+			// 이 순서 덕분에 같은 요청의 최신 FrameColliders로 hit 또는 FrameForward fallback을 결정한다.
+			Ropes[RopeIndex]->ResolvePendingAimThrow();
+			// Aim ray가 mesh+bone을 잠근 throw는 여기서 다른 본 collider를 제거한다.
+			// 실제/예측 contact와 wrapping path는 항상 이 결과를 쓴다. 일반 solve도 이 목록을 쓰지만,
+			// collision-free Aim Flight solve는 거리/굽힘만 풀기 위해 목록을 의도적으로 무시한다.
+			Ropes[RopeIndex]->FilterFrameCollidersForAimWrapTarget();
 		}
 	}
 
@@ -847,6 +861,10 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 
 	// 상주 step 구성(self-contained). 시드 데이터는 매 프레임 제공(RT는 재시드 시에만 GPU 업로드).
 	SeedResidentStep(OutStep, RopeId, Rope.SimGeneration, S, Rope.SolverConfig, Schedule);
+	// solve 충돌과 contact detection은 별도 계약이다. false여도 아래 PackStepColliders는 detect용으로
+	// 계속 패킹하며, solve 커널에 전달되는 collider/GDF 개수만 0이 된다.
+	OutStep.bSolveCollisions = Rope.bSolveCollisionsThisFrame;
+	OutStep.bUseWorldGDF = OutStep.bUseWorldGDF && OutStep.bSolveCollisions;
 	// 거리 LOD: 원거리 로프는 iteration 감쇠(Prepare에서 계산). CollisionPasses는 패킹에서 Iterations로 클램프됨.
 	OutStep.Iterations = Rope.GetLODScaledIterations();
 

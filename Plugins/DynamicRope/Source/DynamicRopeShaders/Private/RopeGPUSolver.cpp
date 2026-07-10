@@ -994,7 +994,8 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	P.Damping           = S.Damping;
 	P.bStartPinned      = S.bStartPinned ? 1 : 0;
 	P.CapsuleOffset     = 0;
-	P.NumCapsules       = B.NumValidCaps;
+	// collision-free Aim Flight는 solve 커널의 형상 개수만 0으로 만든다. 업로드된 버퍼는 detect 커널이 계속 사용한다.
+	P.NumCapsules       = S.bSolveCollisions ? B.NumValidCaps : 0;
 	P.CollisionRadius   = S.CollisionRadius;
 	P.Friction          = S.Friction;
 	P.TipFrictionScale  = S.TipFrictionScale;
@@ -1002,10 +1003,10 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	P.SweepStep         = S.SweepStep;
 	P.MaxSweepSamples   = FMath::Max(1, S.MaxSweepSamples);
 	P.SDFColliderOffset = 0;
-	P.NumSDFColliders   = B.NumValidSDFCol;
+	P.NumSDFColliders   = S.bSolveCollisions ? B.NumValidSDFCol : 0;
 	P.bHasOverrides     = B.bHasOverrides ? 1 : 0;
-	P.NumBoxes          = B.NumValidBoxes;
-	P.NumConvexes       = B.NumValidConvexes;
+	P.NumBoxes          = S.bSolveCollisions ? B.NumValidBoxes : 0;
+	P.NumConvexes       = S.bSolveCollisions ? B.NumValidConvexes : 0;
 	P.Gravity           = FVector4f((float)S.Gravity.X, (float)S.Gravity.Y, (float)S.Gravity.Z, 0.0f);
 	P.PinPrev           = FVector4f((float)S.StartPinPrev.X,   (float)S.StartPinPrev.Y,   (float)S.StartPinPrev.Z,   0.0f);
 	P.PinTarget         = FVector4f((float)S.StartPinTarget.X, (float)S.StartPinTarget.Y, (float)S.StartPinTarget.Z, 0.0f);
@@ -1216,7 +1217,8 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 
 		FRopeResidentRope& R = Impl->RtRopes.FindOrAdd(S.RopeId);
 		// GDF permutation 선택에 쓰는 플래그를 상주 상태에 기록(충돌 반경/마찰은 Params 버퍼로 CS에 직접 전달).
-		R.bUseWorldGDF = S.bUseWorldGDF;
+		// Aim Flight에서 충돌 solve를 끌 때 GDF push-out도 함께 끄며, 별도 detect 커널에는 영향을 주지 않는다.
+		R.bUseWorldGDF = S.bSolveCollisions && S.bUseWorldGDF;
 
 		FRopeStepBuild B;
 		RopeEnsureResidentBuffers(GraphBuilder, S, R, B);

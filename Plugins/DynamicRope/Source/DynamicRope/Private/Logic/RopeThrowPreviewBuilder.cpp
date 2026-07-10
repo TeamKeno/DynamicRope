@@ -60,6 +60,8 @@ namespace
 		float DistanceAlpha = 1.0f;
 		float ArcStartAngleDegrees = 180.0f;
 		FVector Direction = FVector::ForwardVector;
+		// 준비된 preview에서만 origin->hit 직선을 사용한다. 실제 Flight 노드를 hit에 고정하는 옵션이 아니다.
+		bool bForceDirectPathToContact = false;
 	};
 
 	bool IsBetterThrowPreviewContactCandidate(const FThrowPreviewContactCandidate& Candidate,
@@ -74,6 +76,55 @@ namespace
 			return Candidate.DistanceAlpha < Best.DistanceAlpha;
 		}
 		return Candidate.AngleAlpha < Best.AngleAlpha;
+	}
+
+	bool BuildAimGuideHitCandidate(const FRopeArcPreviewData& Preview, const FRopeThrowContext& ThrowContext,
+		const FRopeSimState& Sim, FThrowPreviewContactCandidate& OutCandidate)
+	{
+		OutCandidate = FThrowPreviewContactCandidate();
+		const USceneComponent* GuideMesh = ThrowContext.AimGuideMesh.Get();
+		if (!ThrowContext.bHasAimGuideHit || !GuideMesh || ThrowContext.AimGuideBone.IsNone() || Sim.Num() < 2)
+		{
+			return false;
+		}
+
+		const FVector ToHit = ThrowContext.AimGuideHitWorldPos - Preview.Origin;
+		const float HitDistance = ToHit.Size();
+		const FVector HitDir = ToHit.GetSafeNormal(KINDA_SMALL_NUMBER, Preview.AimDir);
+		if (HitDistance <= KINDA_SMALL_NUMBER || HitDir.IsNearlyZero())
+		{
+			return false;
+		}
+
+		const float SegmentLength = FMath::Max(Sim.SegmentLength, 1.0f);
+		const int32 DistanceNodeIndex = FMath::Clamp(FMath::RoundToInt(HitDistance / SegmentLength), 1, Sim.Num() - 1);
+		// LockAlpha는 spline의 공간 보간 구간일 뿐 latch 위치가 아니다. 실제 hit 거리의 노드를 사용한다.
+		const int32 AimGuideNodeIndex = DistanceNodeIndex;
+
+		// AimRayHitDirection은 이미 SDF/collider swept query로 본을 고른 상태다.
+		// 여기서 arc 전체를 다시 뒤지면 다른 본/다른 방향 후보가 선택될 수 있으므로 ray hit를 직접 prepared 후보로 쓴다.
+		// SurfacePoint는 SDF 투영점이라 ray 위의 노란 hit와 다를 수 있다. spline 방향 기준은 반드시 HitWorldPos다.
+		// 이 후보의 node는 실제 hit 거리로만 정한다. AimGuideLockAlpha/DirectionBias는 물리 Flight의
+		// 곡선 보간 설정이며 prepared latch 위치를 바꾸지 않는다.
+		FRopeContactCandidate Candidate;
+		Candidate.bValid = true;
+		Candidate.NodeIndex = AimGuideNodeIndex;
+		Candidate.Bone = ThrowContext.AimGuideBone;
+		Candidate.Mesh = GuideMesh;
+		Candidate.Source = ERopeContactCandidateSource::PredictiveFree;
+		Candidate.SourceMask = static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree);
+		Candidate.WorldPoint = ThrowContext.AimGuideHitWorldPos;
+		Candidate.Normal = ThrowContext.AimGuideNormal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		Candidate.Penetration = 0.0f;
+		Candidate.WrapDirectionScore = 0.0f;
+
+		OutCandidate.Candidate = Candidate;
+		OutCandidate.AngleAlpha = 1.0f;
+		OutCandidate.DistanceAlpha = FMath::Clamp(HitDistance / FMath::Max(Preview.Radius, KINDA_SMALL_NUMBER), 0.0f, 1.0f);
+		OutCandidate.ArcStartAngleDegrees = 0.0f;
+		OutCandidate.Direction = HitDir;
+		OutCandidate.bForceDirectPathToContact = true;
+		return true;
 	}
 
 	bool FindThrowPreviewContactCandidate(const FRopeArcPreviewData& Preview, const TArray<IRopeCollider*>& Colliders,
@@ -248,6 +299,12 @@ namespace
 				{
 					Position = SurfacePoint;
 				}
+				else if (ContactCandidate.bForceDirectPathToContact)
+				{
+					// AimRayHitDirection에서는 preview arc를 섞지 않는다.
+					// hit 방향이 이미 확정된 상태이므로 origin->hit 직선이 spline prefix의 권위 있는 모양이다.
+					Position = FMath::Lerp(Preview.Origin, SurfacePoint, Alpha);
+				}
 				else
 				{
 					const float ArcAlpha = FMath::Lerp(0.0f, ContactCandidate.AngleAlpha, Alpha);
@@ -327,6 +384,36 @@ namespace
 		}
 	}
 
+	void ForceAimGuidePrefixToHit(const FRopeThrowPreviewBuilder::FInput& Input,
+		const FRopeContactCandidate& Candidate, TArray<FVector>& InOutPreviewPoints)
+	{
+		if (!Input.ThrowContext.bHasAimGuideHit ||
+			!InOutPreviewPoints.IsValidIndex(0) ||
+			!InOutPreviewPoints.IsValidIndex(Candidate.NodeIndex))
+		{
+			return;
+		}
+
+		const FVector Origin = Input.ThrowContext.Origin;
+		const FVector Hit = Input.ThrowContext.AimGuideHitWorldPos;
+		if ((Hit - Origin).IsNearlyZero())
+		{
+			return;
+		}
+
+		// 주의: 이 함수는 PreviewPathLocked의 확정 RenderPreview 전용이다. 물리 Flight의 WhipGuide에는
+		// 호출되지 않으므로, 여기서 HitPoint를 고정해도 Flight 노드가 미리 고정되는 현상과는 무관하다.
+		// BuildPreviewCenterline은 latch 이후 wrapping path를 만들면서 latch node를 표면 path로 다시 덮을 수 있다.
+		// AimRayHitDirection에서는 화면에 보이는 spline prefix가 반드시 ray hit point를 향해야 하므로
+		// 최종 렌더 포인트 생성 후에도 시작점부터 latch node까지를 Origin->Hit 직선으로 고정한다.
+		const int32 LastPrefixNode = FMath::Clamp(Candidate.NodeIndex, 1, InOutPreviewPoints.Num() - 1);
+		for (int32 NodeIndex = 0; NodeIndex <= LastPrefixNode; ++NodeIndex)
+		{
+			const float Alpha = static_cast<float>(NodeIndex) / static_cast<float>(LastPrefixNode);
+			InOutPreviewPoints[NodeIndex] = FMath::Lerp(Origin, Hit, Alpha);
+		}
+	}
+
 	bool BuildPreparedFromCandidate(const FRopeThrowPreviewBuilder::FInput& Input,
 		const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim,
 		FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason)
@@ -382,9 +469,10 @@ namespace
 		{
 			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("wrap preview centerline build failed (mesh=%s, bone=%s, node=%d, sourceNodes=%d)"),
-					*GetNameSafe(Mesh), *Candidate.Bone.ToString(), Candidate.NodeIndex, SourceSim.Num()));
+				*GetNameSafe(Mesh), *Candidate.Bone.ToString(), Candidate.NodeIndex, SourceSim.Num()));
 			return false;
 		}
+		ForceAimGuidePrefixToHit(Input, Candidate, PreviewPoints);
 
 		OutPrepared.RenderPreview.Points = MoveTemp(PreviewPoints);
 		OutPrepared.RenderPreview.Radius = FMath::Max(0.1f, Input.RopeRadius * 1.05f);
@@ -447,15 +535,18 @@ bool FRopeThrowPreviewBuilder::BuildFreePreparedPreview(const FInput& Input, FRo
 	}
 
 	FThrowPreviewContactCandidate ContactCandidate;
-	if (!FindThrowPreviewContactCandidate(ArcPreview, GetColliders(Input), Input.RopeRadius, Input.WrapConfig, *Sim,
-		Input.SampleStep, Input.QueryRadius, ContactCandidate, OutFailureReason))
+	const bool bUsedAimGuideHit = BuildAimGuideHitCandidate(ArcPreview, Input.ThrowContext, *Sim, ContactCandidate);
+	if (!bUsedAimGuideHit &&
+		!FindThrowPreviewContactCandidate(ArcPreview, GetColliders(Input), Input.RopeRadius, Input.WrapConfig, *Sim,
+			Input.SampleStep, Input.QueryRadius, ContactCandidate, OutFailureReason))
 	{
 		return false;
 	}
 
 	FRopeSimState PreviewSim = BuildThrowPreviewSim(*Sim, ArcPreview, ContactCandidate);
 	ContactCandidate.Candidate.NodeIndex = FMath::Clamp(ContactCandidate.Candidate.NodeIndex, 1, PreviewSim.Num() - 1);
-	return BuildPreparedFromCandidate(Input, ContactCandidate.Candidate, PreviewSim, OutPrepared, OutFailureReason);
+	return BuildPreparedFromCandidate(
+		Input, ContactCandidate.Candidate, PreviewSim, OutPrepared, OutFailureReason);
 }
 
 bool FRopeThrowPreviewBuilder::BuildFlightWrappingPreview(const FInput& Input, FRopeWrapPreviewData& OutPreview,

@@ -1,13 +1,12 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
 // 던지기 초반의 "채찍 스윙" 연출 로직. 조준 반대편에서 시작해 조준 방향까지 스윕하는 가이드
-// 곡선을 시간에 따라 회전시키고, 로프 앞부분(가이드 구간) 노드들을 그 곡선 위에 강제 배치한다.
-// Flight 동안만 활성. 솔버/랩 컨트롤러와 같은 패턴의 UObject 비의존 클래스다.
+// 곡선을 시간에 따라 회전시킨다. 일반 throw는 앞쪽 가이드 구간을 잡고, Aim-hit throw는 중앙을
+// 강하게 잡되 손/자유단으로 갈수록 solver 상태와 부드럽게 섞는다. Flight 동안만 활성이다.
 //
-// GPU 전환(M5 이후) 대비 설계: 타깃 *계산*(스윕 각도 → 가이드 곡선 → 노드 간격 리샘플)은
-// 게임 스레드에 남고, *적용*(Positions/PrevPositions 덮어쓰기)은 추후 GPU 커널로 옮긴다.
-// 그래서 프레임 산출물(CurrentTargets/PrevTargets/GuidedNodeMask)을 데이터 계약으로 노출한다
-// — GPU 포팅 시 이 데이터를 업로드하고 Advance의 적용 루프만 커널로 대체하면 된다.
+// 타깃 계산(스윕 각도 → 가이드 곡선 → 노드 간격 리샘플)은 게임 스레드에 남고, 적용은 CPU의
+// ApplyToSim 또는 GPU resident override가 같은 프레임 산출물을 소비한다. CurrentTargets/
+// PrevTargets/GuidedNodeMask가 두 경로의 공통 데이터 계약이다.
 
 #pragma once
 
@@ -26,6 +25,9 @@ public:
 		float SweepAngleDegrees = 180.0f; // 시작 각도(조준 반대편)에서 조준 방향까지의 스윕 각
 		float ReferenceThrowSpeed = 1500.0f; // 이 속도일 때 Duration 그대로 사용한다
 		float ComponentRopeLength = 0.0f; // 가이드 길이 산정용: max(Sim.RopeLength, 이 값) 사용
+		float AimHitRootSolverFraction = 0.20f; // 손 쪽 guide 완화 구간
+		float AimHitTipSolverFraction = 0.25f;  // 자유단 쪽 guide 완화 구간
+		float AimHitDirectionBias = 2.0f;       // hit direction 보간을 앞당기는 지수
 	};
 
 	struct FSwingBasis
@@ -48,11 +50,13 @@ public:
 	 */
 	void Begin(const FVector& InAimDir, const FVector& InOrigin,
 		const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide,
-		float InThrowSpeed = 0.0f, const FVector& InInheritedVelocity = FVector::ZeroVector);
+		float InThrowSpeed = 0.0f, const FVector& InInheritedVelocity = FVector::ZeroVector,
+		bool bInHasAimTarget = false, const FVector& InAimTarget = FVector::ZeroVector,
+		float InAimSteerStartAlpha = 0.25f, float InAimLockAlpha = 0.50f);
 
 	/**
-	 * throw 직후 초기 포즈(T=0) 스냅: 가이드 타깃을 계산해 프레임 산출물을 채우고, 가이드 구간
-	 * 노드의 Positions/PrevPositions를 타깃에 스냅한다(속도 0). StartFreshThrow에서 1회 호출.
+	 * throw 직후 초기 포즈(T=0) 스냅: 일반 가이드 구간은 타깃에 놓고, Aim-hit은 중앙만 강하게
+	 * 배치하며 양끝 envelope는 기존 solver 위치와 섞는다. StartFreshThrow에서 1회 호출.
 	 */
 	void SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config);
 
@@ -114,6 +118,11 @@ private:
 	FVector GuideUp = FVector::UpVector;
 	FVector GuideInheritedVelocity = FVector::ZeroVector;
 	float GuideThrowSpeed = 0.0f;
+	// Aim target은 노드 고정점이 아니라 최종 방향과 공간 보간 파라미터로만 보관한다.
+	bool bHasAimTarget = false;
+	FVector AimTarget = FVector::ZeroVector;
+	float AimSteerStartAlpha = 0.25f;
+	float AimLockAlpha = 0.50f;
 
 	// 직전 프레임의 가이드 타깃(가이드 노드의 Verlet 속도 주입: PrevPositions ← 이 값).
 	TArray<FVector> PreviousTargets;

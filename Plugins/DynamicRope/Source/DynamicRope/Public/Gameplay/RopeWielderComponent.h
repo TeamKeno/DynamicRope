@@ -19,6 +19,7 @@
 
 class URopeComponent;
 class URopePreviewComponent;
+struct FRopeAimRayThrowRequest;
 class USkeletalMeshComponent;
 class UInputAction;
 class UInputMappingContext;
@@ -44,6 +45,32 @@ enum class ERopeWielderThrowMode : uint8
 
 	/** Preview가 성공한 경로를 권위 있는 결과로 사용한다. Preview 실패 상태에서는 던지기 입력 자체를 무시한다. */
 	PreviewPathLocked UMETA(DisplayName = "Preview Path Locked")
+};
+
+UENUM(BlueprintType)
+enum class ERopeWielderAimMode : uint8
+{
+	/** ThrowFrameMode가 만든 Forward를 그대로 사용한다. */
+	FrameForward UMETA(DisplayName = "Frame Forward"),
+
+	/** Forward 방향으로 rope 길이만큼 SDF/collider ray를 쏘고, 본에 맞으면 Origin->Hit 방향을 Forward로 사용한다. */
+	AimRayHitDirection UMETA(DisplayName = "Aim Ray Hit Direction")
+};
+
+UENUM(BlueprintType)
+enum class ERopeAimRayOriginMode : uint8
+{
+	/** 들고 있는 SkeletalMesh bounds 중심. 특정 bone 이름을 하드코딩하지 않고 몸통/골반 근처에서 시작한다. */
+	AttachMeshBoundsCenter UMETA(DisplayName = "Attach Mesh Bounds Center"),
+
+	/** 지정한 socket/bone 위치. 정확히 pelvis 같은 기준이 필요하면 이름을 지정한다. */
+	AttachSocketOrBone UMETA(DisplayName = "Attach Socket Or Bone"),
+
+	/** Owner actor 위치. Character에서는 보통 capsule 중심에 가깝다. */
+	OwnerActorLocation UMETA(DisplayName = "Owner Actor Location"),
+
+	/** Pawn view/camera 위치. 머리/눈높이 기준이 필요할 때만 사용한다. */
+	ViewLocation UMETA(DisplayName = "View Location")
 };
 
 /** 던지기 입력이 실행되지 못한 사유. OnThrowRejected로 전달된다(UI 피드백/게임 반응용). */
@@ -96,6 +123,38 @@ public:
 	//~ Aim ----------------------------------------------------------------
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
 	ERopeAimSource AimSource = ERopeAimSource::ControlRotation;
+
+	/** FrameForward 또는 throw 시점의 SDF ray hit 방향 중 실제 spline 기준을 선택한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
+	ERopeWielderAimMode AimMode = ERopeWielderAimMode::FrameForward;
+
+	/** Aim ray 시작점을 mesh bounds 중심, attach component, socket/bone 중에서 선택한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	ERopeAimRayOriginMode AimRayOriginMode = ERopeAimRayOriginMode::AttachMeshBoundsCenter;
+
+	/** AttachSocketOrBone 모드에서 ray origin으로 사용할 socket 또는 bone 이름이다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection && AimRayOriginMode == ERopeAimRayOriginMode::AttachSocketOrBone"))
+	FName AimRayOriginSocketName = NAME_None;
+
+	/** SDF ray march의 샘플 간격이다. 작을수록 얇은 팔/다리 충돌 정확도가 높아진다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (ClampMin = "0.5", Units = "cm", EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	float AimRaySweepStep = 2.0f;
+
+	/** 중심선 주변을 함께 검사할 반경이다. 0이면 Rope Radius와 Contact Radius 중 큰 값을 기본 반경으로 사용한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	float AimRayQueryRadius = 0.0f;
+
+	/** 로프 길이상 현재 스윙 방향을 hit 방향으로 보간하기 시작하는 비율. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (ClampMin = "0.0", ClampMax = "0.9", EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	float AimRayGuideSteerStartAlpha = 0.25f;
+
+	/** 로프 길이상 hit 방향 공간 보간이 최대가 되는 비율. Flight 시간 보간 전에는 완전히 고정되지 않는다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (ClampMin = "0.05", ClampMax = "1.0", EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	float AimRayGuideLockAlpha = 0.50f;
+
+	/** SDF 검사 ray와 hit 지점/법선을 월드에 디버그 드로우한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Debug", meta = (EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	bool bDrawAimRayDebug = true;
 
 	//~ Throw --------------------------------------------------------------
 	/** 던질 때 Up/Right 기준축을 어디서 가져올지. */
@@ -259,7 +318,7 @@ public:
 	void ThrowNow();
 
 	/** 현재 Wielder/Rope 설정으로 throw 순간의 origin/frame/속도 context를 만든다(던지기당 1회, GT).
-	 *  AimDir은 legacy 호환용이며 내부에서는 무시한다. 조립 규칙을 바꾸려면 오버라이드(확장 훅). */
+	 *  유효한 AimDir이 들어오면 설정된 frame forward를 대체한다. 조립 규칙을 바꾸려면 오버라이드(확장 훅). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	virtual FRopeThrowContext BuildThrowContext(const FVector& AimDir) const;
 
@@ -363,8 +422,24 @@ private:
 	// 스윙 판정에 따라 AirControl을 부스트/복원한다(매 틱, GT).
 	void UpdateSwingAirControl();
 	void UpdateThrowPreview();
+	// 멀리 있는 target SDF도 수집되도록 ray 구간을 collider query bounds에 포함한다.
+	void UpdateAimRayColliderQueryBounds();
 	void ClearThrowPreview();
+	// collider/SDF side effect 없이 origin/frame/속도만 계산한다.
+	FRopeThrowContext BuildBaseThrowContext(const FVector& AimDir) const;
+	// 실제 ray를 새로 검사하고 throw 순간에 고정할 context를 구성한다.
+	FRopeThrowContext BuildThrowContextInternal(const FVector& AimDir) const;
+	// 입력 순간의 base frame과 ray 설정을 값 타입 요청으로 캡처한다.
+	FRopeAimRayThrowRequest BuildAimRayThrowRequest(const FVector& AimDir) const;
+	// 선택한 origin 모드를 월드 위치로 해석한다.
+	FVector GetAimRayOrigin() const;
+	// 현재 시뮬레이션 길이와 설정 길이 중 큰 값으로 ray 길이를 계산한다.
+	float GetAimRayLength() const;
 	void LogPreviewBuildResult(bool bSucceeded, const FString& Reason);
+	// Aim hit prepared spline을 wielder owner-local 좌표로 저장해 손 소켓 애니메이션에서 분리한다.
+	void StoreAimGuideFrameIfNeeded(FRopePreparedThrowPreview& Prepared) const;
+	// 저장된 owner-local prepared spline을 현재 owner transform 기준으로 렌더한다.
+	FRopeWrapPreviewData ResolvePreparedPreviewForDisplay(const FRopePreparedThrowPreview& Prepared) const;
 	bool ShouldHoldPreparedPreview();
 	// 현재 Rope phase에서 새 preview path를 계산해도 되는지 판단한다. false면 비싼 build 경로에 들어가지 않는다.
 	bool ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) const;
@@ -372,6 +447,7 @@ private:
 	bool UpdateHeldPreparedPreviewForPhase(ERopePhase Phase);
 
 	void OnThrowInput();
+	void OnAimRayThrowResolved();
 	void OnReleaseInput();
 	void OnPullInputStarted();
 	void OnPullInputCompleted();

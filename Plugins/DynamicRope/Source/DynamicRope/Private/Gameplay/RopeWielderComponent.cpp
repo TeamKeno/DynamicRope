@@ -54,7 +54,10 @@ void URopeWielderComponent::BeginPlay()
 
 	bShowThrowPreview = PreviewComponent != nullptr;
 	// preview 외에 지상 이탈/스윙 에어컨트롤 감시도 틱이 필요하다 — 전부 꺼져야 틱 정지.
-	SetComponentTickEnabled(bShowThrowPreview || bAutoGroundExitOnUpwardPull || bBoostAirControlWhileSwinging);
+	// Aim ray 모드는 preview component가 없어도 collider 수집 bounds를 매 프레임 갱신해야 한다.
+	SetComponentTickEnabled(bShowThrowPreview || bAutoGroundExitOnUpwardPull || bBoostAirControlWhileSwinging ||
+		AimMode == ERopeWielderAimMode::AimRayHitDirection);
+	UpdateAimRayColliderQueryBounds();
 	if (bShowThrowPreview)
 	{
 		UpdateThrowPreview();
@@ -86,6 +89,11 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	bInputBound = false;
 	ClearThrowPreview();
+	if (Rope)
+	{
+		// Wielder가 사라진 뒤에도 로프의 collider 수집 범위가 조준 ray 방향으로 남지 않게 정리한다.
+		Rope->ClearAimRayColliderQueryBounds();
+	}
 
 	// 스윙 중 파괴/레벨 전환 시 AirControl 원복 누락 방지.
 	if (bAirControlBoosted)
@@ -109,6 +117,7 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 	UpdateGroundExit();
 	UpdateSwingAirControl();
+	UpdateAimRayColliderQueryBounds();
 	UpdateThrowPreview();
 }
 
@@ -451,7 +460,67 @@ FVector URopeWielderComponent::GetAimDirection() const
 	}
 }
 
-FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& /*AimDir*/) const
+FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& AimDir) const
+{
+	return BuildThrowContextInternal(AimDir);
+}
+
+FVector URopeWielderComponent::GetAimRayOrigin() const
+{
+	const AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return FVector::ZeroVector;
+	}
+
+	const USkeletalMeshComponent* OriginMesh = AttachMesh ? AttachMesh.Get() : Owner->FindComponentByClass<USkeletalMeshComponent>();
+
+	// AimRay는 로프/손 소켓 위치가 아니라 Wielder가 고른 조준 기준 위치에서 쏜다.
+	// 최종 투척 방향은 아래에서 Hit - ThrowOrigin으로 다시 계산한다.
+	switch (AimRayOriginMode)
+	{
+	case ERopeAimRayOriginMode::AttachSocketOrBone:
+		if (OriginMesh && !AimRayOriginSocketName.IsNone() && OriginMesh->DoesSocketExist(AimRayOriginSocketName))
+		{
+			return OriginMesh->GetSocketLocation(AimRayOriginSocketName);
+		}
+		[[fallthrough]];
+
+	case ERopeAimRayOriginMode::AttachMeshBoundsCenter:
+		if (OriginMesh)
+		{
+			return OriginMesh->Bounds.Origin;
+		}
+		break;
+
+	case ERopeAimRayOriginMode::ViewLocation:
+		if (AimSource == ERopeAimSource::CameraForward)
+		{
+			if (const UCameraComponent* Camera = Owner->FindComponentByClass<UCameraComponent>())
+			{
+				return Camera->GetComponentLocation();
+			}
+		}
+		if (const APawn* Pawn = Cast<APawn>(Owner))
+		{
+			return Pawn->GetPawnViewLocation();
+		}
+		break;
+
+	case ERopeAimRayOriginMode::OwnerActorLocation:
+	default:
+		break;
+	}
+
+	return Owner->GetActorLocation();
+}
+
+float URopeWielderComponent::GetAimRayLength() const
+{
+	return Rope ? FMath::Max(Rope->GetCurrentRopeLength(), Rope->RopeLength) : 0.0f;
+}
+
+FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& AimDir) const
 {
 	FRopeThrowContext Context;
 
@@ -467,6 +536,9 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& /*AimD
 	Context.SwingPlane = SwingPlane;
 	Context.CustomSwingPlaneNormal = CustomSwingPlaneNormal;
 	Context.ThrowSpeed = ThrowSpeed;
+	Context.AimGuideSteerStartAlpha = FMath::Clamp(AimRayGuideSteerStartAlpha, 0.0f, 0.9f);
+	Context.AimGuideLockAlpha = FMath::Clamp(
+		FMath::Max(AimRayGuideLockAlpha, Context.AimGuideSteerStartAlpha + 0.01f), 0.05f, 1.0f);
 
 	if (AttachMesh)
 	{
@@ -518,7 +590,71 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& /*AimD
 		break;
 	}
 
+	// ThrowInDirection의 명시적 입력이 있으면 ray와 throw가 같은 방향을 사용해야 한다.
+	// 기존 Throw()/ThrowNow()는 ZeroVector를 넘기므로 설정된 frame forward 동작을 그대로 유지한다.
+	const FVector ExplicitAimDir = AimDir.GetSafeNormal();
+	if (!ExplicitAimDir.IsNearlyZero())
+	{
+		Context.FrameForward = ExplicitAimDir;
+	}
+
 	return Context;
+}
+
+FRopeThrowContext URopeWielderComponent::BuildThrowContextInternal(const FVector& AimDir) const
+{
+	if (AimMode != ERopeWielderAimMode::AimRayHitDirection)
+	{
+		return BuildBaseThrowContext(AimDir);
+	}
+
+	const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(AimDir);
+	FRopeThrowContext Context = Request.BaseContext;
+	if (Rope)
+	{
+		// Preview context는 현재 frame snapshot으로 즉시 해석한다. 실제 throw는 QueueAimRayThrow 경로를 쓴다.
+		Rope->SetAimRayColliderQueryBounds(
+			Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
+		Rope->ResolveAimRayThrowContext(Request, Context);
+	}
+	return Context;
+}
+
+FRopeAimRayThrowRequest URopeWielderComponent::BuildAimRayThrowRequest(const FVector& AimDir) const
+{
+	FRopeAimRayThrowRequest Request;
+	Request.BaseContext = BuildBaseThrowContext(AimDir);
+	Request.RayOrigin = GetAimRayOrigin();
+	Request.RayDirection = Request.BaseContext.FrameForward;
+	Request.RayLength = GetAimRayLength();
+	Request.QueryRadius = AimRayQueryRadius;
+	Request.SweepStep = AimRaySweepStep;
+	Request.bDrawDebug = bDrawAimRayDebug;
+	return Request;
+}
+
+void URopeWielderComponent::UpdateAimRayColliderQueryBounds()
+{
+	if (!Rope)
+	{
+		ResolveRefs();
+	}
+	if (!Rope)
+	{
+		return;
+	}
+
+	if (AimMode != ERopeWielderAimMode::AimRayHitDirection)
+	{
+		// 런타임 모드 변경 시 이전 ray AABB가 collider 수집 범위에 남지 않게 즉시 제거한다.
+		Rope->ClearAimRayColliderQueryBounds();
+		return;
+	}
+
+	// 실제 SDF query 없이 입력 값과 동일한 request를 만들어 다음 subsystem 수집 범위만 갱신한다.
+	const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(FVector::ZeroVector);
+	Rope->SetAimRayColliderQueryBounds(
+		Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
 }
 
 void URopeWielderComponent::Throw()
@@ -547,7 +683,7 @@ void URopeWielderComponent::Throw()
 		// 몽타주가 있으면 손을 놓는 AnimNotify까지 시간이 지나므로, 입력 순간 플레이어가 본 preview를 보존한다.
 		// notify 시점에 새로 build하면 손/카메라/타겟 포즈 변화로 결과가 달라질 수 있다.
 		PendingPreparedThrow = LastPreparedPreview;
-		HeldPreparedPreview = LastPreparedPreview.RenderPreview;
+		HeldPreparedPreview = ResolvePreparedPreviewForDisplay(LastPreparedPreview);
 		HeldPreviewExpireTimeSeconds = 0.0f;
 		if (ThrowMontage)
 		{
@@ -595,7 +731,7 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 				return;
 			}
 
-			HeldPreparedPreview = Prepared.RenderPreview;
+			HeldPreparedPreview = ResolvePreparedPreviewForDisplay(Prepared);
 			HeldPreviewExpireTimeSeconds = 0.0f;
 			if (PreviewComponent && HeldPreparedPreview.IsValid())
 			{
@@ -606,8 +742,6 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 			if (!Rope->ThrowWithPreparedPreview(Prepared))
 			{
 				ClearThrowPreview();
-				UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: Rope rejected prepared preview throw."),
-					*GetNameSafe(GetOwner()));
 				NotifyThrowRejected(ERopeThrowRejectReason::RopeRejected);
 				OnThrowRejected.Broadcast(ERopeThrowRejectReason::RopeRejected);
 				return;
@@ -618,10 +752,26 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 		}
 
 		ClearThrowPreview();
-		Rope->ThrowWithContext(BuildThrowContext(AimDir));
+		if (AimMode == ERopeWielderAimMode::AimRayHitDirection)
+		{
+			// 최신 collider 수집 직후 hit/fallback을 확정하도록 값 타입 요청만 큐에 넣는다.
+			FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(AimDir);
+			Request.OnResolved = FSimpleDelegate::CreateUObject(this, &URopeWielderComponent::OnAimRayThrowResolved);
+			Rope->QueueAimRayThrow(Request);
+			return;
+		}
+
+		Rope->ThrowWithContext(BuildBaseThrowContext(AimDir));
 		NotifyThrown();
 		OnThrown.Broadcast();
 	}
+}
+
+void URopeWielderComponent::OnAimRayThrowResolved()
+{
+	// 기존 계약대로 Rope가 Flight에 진입한 뒤 성공 알림을 보낸다.
+	NotifyThrown();
+	OnThrown.Broadcast();
 }
 
 void URopeWielderComponent::PlayThrowMontage()
@@ -707,6 +857,7 @@ bool URopeWielderComponent::ShouldHoldPreparedPreview()
 	const UAnimInstance* Anim = AttachMesh ? AttachMesh->GetAnimInstance() : nullptr;
 	if (Anim && Anim->Montage_IsPlaying(ThrowMontage))
 	{
+		HeldPreparedPreview = ResolvePreparedPreviewForDisplay(PendingPreparedThrow);
 		if (PreviewComponent && HeldPreparedPreview.IsValid())
 		{
 			PreviewComponent->SetWrapPreviewWorld(HeldPreparedPreview);
@@ -814,7 +965,6 @@ void URopeWielderComponent::UpdateThrowPreview()
 		return;
 	}
 
-	FRopeWrapPreviewData Preview;
 	FString PreviewBuildReason;
 	const ERopePhase RopePhase = Rope->GetPhase();
 	if (UpdateHeldPreparedPreviewForPhase(RopePhase))
@@ -830,19 +980,14 @@ void URopeWielderComponent::UpdateThrowPreview()
 	}
 
 	const FRopeThrowContext ThrowContext = BuildThrowContext(FVector::ZeroVector);
-	FRopePreparedThrowPreview Prepared;
 	const bool bShouldBuildPrepared = ThrowMode == ERopeWielderThrowMode::PreviewPathLocked &&
 		(RopePhase == ERopePhase::Free || RopePhase == ERopePhase::Releasing);
 
 	// PreviewPathLocked의 Free/Releasing preview는 렌더용 centerline뿐 아니라 실제 throw에 쓸 contact/anchor까지 만든다.
 	// 그 외 모드/phase에서는 기존처럼 표시용 preview만 만든다.
-	const bool bBuiltPreview = bShouldBuildPrepared
-		? Rope->BuildPreparedWrappingPreview(ThrowContext,
-			PreviewComponent->PreviewReachScale, PreviewComponent->PreviewSegmentCount,
-			PreviewComponent->PreviewSampleStep, PreviewComponent->PreviewQueryRadius, Prepared, &PreviewBuildReason)
-		: Rope->BuildWrappingPreview(ThrowContext,
-			PreviewComponent->PreviewReachScale, PreviewComponent->PreviewSegmentCount,
-			PreviewComponent->PreviewSampleStep, PreviewComponent->PreviewQueryRadius, Preview, &PreviewBuildReason);
+	// preview 모드별 build와 prepared 결과 보관은 PreviewComponent가 일관되게 소유한다.
+	const bool bBuiltPreview = PreviewComponent->UpdatePreviewFromRope(
+		*Rope, ThrowContext, bShouldBuildPrepared, &PreviewBuildReason);
 	if (!bBuiltPreview)
 	{
 		LogPreviewBuildResult(false, PreviewBuildReason.IsEmpty()
@@ -853,22 +998,20 @@ void URopeWielderComponent::UpdateThrowPreview()
 	}
 	if (bShouldBuildPrepared)
 	{
-		LastPreparedPreview = Prepared;
-		Preview = Prepared.RenderPreview;
+		LastPreparedPreview = PreviewComponent->GetPreparedPreview();
+		StoreAimGuideFrameIfNeeded(LastPreparedPreview);
 	}
 	else
 	{
 		LastPreparedPreview.Reset();
 	}
 
-	LogPreviewBuildResult(true, FString::Printf(TEXT("preview built (points=%d, radius=%.2f, sides=%d)"),
-		Preview.Points.Num(), Preview.Radius, Preview.NumSides));
+	LogPreviewBuildResult(true, TEXT("preview built"));
 	bLastPreviewBlocked = false;
 	LastPreviewHitPoint = FVector::ZeroVector;
-	PreviewComponent->SetWrapPreviewWorld(Preview);
 	if (bShouldBuildPrepared)
 	{
-		HeldPreparedPreview = Preview;
+		HeldPreparedPreview = ResolvePreparedPreviewForDisplay(LastPreparedPreview);
 		HeldPreviewExpireTimeSeconds = 0.0f;
 	}
 	LastPreviewPhase = RopePhase;
@@ -886,6 +1029,30 @@ void URopeWielderComponent::ClearThrowPreview()
 	{
 		PreviewComponent->ClearPreview();
 	}
+}
+
+void URopeWielderComponent::StoreAimGuideFrameIfNeeded(FRopePreparedThrowPreview& Prepared) const
+{
+	if (AimMode != ERopeWielderAimMode::AimRayHitDirection || !Prepared.IsValid())
+	{
+		return;
+	}
+
+	const AActor* Owner = GetOwner();
+	const USceneComponent* OwnerRoot = Owner ? Owner->GetRootComponent() : nullptr;
+	if (!OwnerRoot)
+	{
+		return;
+	}
+
+	// AimRayHitDirection은 소켓/로프 컴포넌트 로컬이 아니라 wielder owner 로컬 기준으로 path를 고정한다.
+	Prepared.StoreGuideFrameLocal(OwnerRoot);
+}
+
+FRopeWrapPreviewData URopeWielderComponent::ResolvePreparedPreviewForDisplay(const FRopePreparedThrowPreview& Prepared) const
+{
+	// owner-local로 저장되지 않은 일반 preview는 원래 월드 점을 그대로 반환한다.
+	return Prepared.ResolveRenderPreviewWorld();
 }
 
 void URopeWielderComponent::LogPreviewBuildResult(bool bSucceeded, const FString& Reason)

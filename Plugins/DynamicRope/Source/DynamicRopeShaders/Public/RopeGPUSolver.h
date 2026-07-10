@@ -135,6 +135,8 @@ struct FRopeGPUResidentStep
 	FVector Gravity = FVector::ZeroVector;
 
 	// 충돌(M2/M3). 이 로프에 적용할 collider 목록(값 복사라 step 수명 동안 유효).
+	// false면 solve 커널은 collider/GDF를 무시하지만 detect 커널은 아래 목록을 그대로 사용할 수 있다.
+	bool  bSolveCollisions = true;
 	float CollisionRadius = 0.0f; // 로프 노드 두께(= FRopeSolverConfig::CollisionRadius).
 	float Friction = 0.0f;        // 접선 감쇠 [0..1](Coulomb μ).
 	float TipFrictionScale = 1.0f; // 자유단 마찰 배율(고정점=1, 끝=이 값). 끝 노드를 잘 놔주게 함.

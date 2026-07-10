@@ -771,6 +771,25 @@ struct FRopeThrowContext
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
+
+	// AimRayHitDirection에서 유효한 본 hit을 확보했는지 나타낸다.
+	bool bHasAimGuideHit = false;
+	// Flight 이후 wrap을 허용할 대상 본이다. 다른 본 접촉은 궤적을 유지한 채 무시한다.
+	FName AimGuideBone = NAME_None;
+	// 대상 본의 transform과 SDF를 해석할 mesh/component이다.
+	TWeakObjectPtr<const USceneComponent> AimGuideMesh = nullptr;
+	// ray 중심선이 처음 target SDF 안으로 들어간 월드 위치이다.
+	FVector AimGuideHitWorldPos = FVector::ZeroVector;
+	// SDF 투영으로 구한 실제 표면점이다.
+	FVector AimGuideSurfacePoint = FVector::ZeroVector;
+	// 표면점에서 얻은 바깥쪽 법선이다.
+	FVector AimGuideNormal = FVector::UpVector;
+	// ray origin부터 hit까지 거리이며 preview 후보 노드 선택에 사용한다.
+	float AimGuideDistance = 0.0f;
+	// 로프 길이상 hit 방향 보간을 시작/완료할 구간이다.
+	// 공간 보간은 Flight 시간 보간과 곱하므로 throw가 끝나기 전에 hit 방향에 고정되는 노드는 없다.
+	float AimGuideSteerStartAlpha = 0.25f;
+	float AimGuideLockAlpha = 0.50f;
 };
 
 /** 던지기 전 미리보기 호를 정의하는 런타임 데이터. 렌더 컴포넌트는 이 값만 받아 그린다. */
@@ -904,6 +923,22 @@ struct FRopeWhipConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
 	float SweepAngleDegrees = 180.0f;
 
+	/** Aim-hit Flight에서 손 쪽 guide를 solver에 넘기는 로프 길이 비율. 0이면 중앙 spline이 손 바로 옆까지 지배한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
+	float AimHitRootSolverFraction = 0.20f;
+
+	/** Hit direction 보간 편향. 1은 선형 강도, 클수록 같은 Flight 시점에서 spline이 더 빨리 hit 방향을 향한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+	float AimHitDirectionBias = 2.0f;
+
+	/** Aim-hit Flight에서 자유단 쪽 guide를 solver에 넘기는 로프 길이 비율. 클수록 끝이 더 관성적으로 움직인다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
+	float AimHitTipSolverFraction = 0.25f;
+
+	/** Aim-hit Flight에서 거리/굽힘/감쇠 solver는 유지하고 collider push-out만 끈다. 접촉 감지는 계속 동작한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Aim Hit")
+	bool bAimHitCollisionFreeSolve = true;
+
 	/** 현재 런타임 미사용 — 에디터 배치 가이드(FRopeComponentVisualizer)의 던지기 아크 표시 전용. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.0", Units = "cm"))
 	float ArcHeight = 120.0f;
@@ -949,6 +984,12 @@ struct FRopePreparedThrowPreview
 	// 화면에 보이는 preview centerline. GuidedThrow에서는 이 점들을 실제 노드 목표 위치로도 사용한다.
 	FRopeWrapPreviewData RenderPreview;
 
+	// AimRayHitDirection처럼 소켓 애니메이션에서 독립시킬 필요가 있는 path는 owner 기준 로컬로도 보관한다.
+	bool bUseGuideFrameLocal = false;
+	TWeakObjectPtr<const USceneComponent> GuideFrameComponent = nullptr;
+	TArray<FVector> GuideFrameLocalPoints;
+	FVector GuideFrameLocalOrigin = FVector::ZeroVector;
+
 	// preview build 시 만든 가상 로프 상태와 접촉 후보. 디버그/후속 고도화용으로 보존한다.
 	FRopeSimState PreviewSim;
 	FRopeContactCandidate Contact;
@@ -970,6 +1011,17 @@ struct FRopePreparedThrowPreview
 	{
 		return bValid && RenderPreview.IsValid() && Mesh.IsValid() && !Bone.IsNone() && LatchAnchor.NodeIndex != INDEX_NONE;
 	}
+
+	// 생성 당시 월드 preview를 wielder owner 기준 로컬 좌표로 저장해 소켓 애니메이션에서 분리한다.
+	void StoreGuideFrameLocal(const USceneComponent* InGuideFrame);
+	// owner-local guide frame과 로컬 점 데이터가 모두 유효한지 확인한다.
+	bool HasGuideFrameLocal() const;
+	// 저장한 owner-local origin을 현재 owner transform 기준 월드 좌표로 복원한다.
+	FVector ResolveGuideOriginWorld() const;
+	// 지정한 owner-local spline 점을 현재 owner transform 기준 월드 좌표로 복원한다.
+	FVector ResolveGuidePointWorld(int32 PointIndex) const;
+	// 렌더용 전체 preview를 현재 owner transform에 맞춘 월드 데이터로 해석한다.
+	FRopeWrapPreviewData ResolveRenderPreviewWorld() const;
 };
 
 struct FRopeGuidedThrowState
