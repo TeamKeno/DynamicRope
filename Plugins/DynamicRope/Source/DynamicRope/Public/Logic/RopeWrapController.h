@@ -7,6 +7,7 @@
 
 #include "CoreMinimal.h"
 #include "Core/RopeTypes.h"
+#include "Core/RopeWrapTarget.h" // FRopeWrapTargetKey(DecideWrap 집계 키)
 
 class USkeletalMeshComponent;
 class IRopeCollider;
@@ -62,7 +63,8 @@ public:
 
 private:
 	// 결정을 위한 지속 접촉 누적값(일시적이며 wrap 상태의 일부가 아니다).
-	FName         CandidateBone = NAME_None;
-	float         CandidateTime = 0.0f;
-	TArray<int32> CandidateNodes;
+	// 집계 단위는 "랩 대상 키"다 — 지금은 본 이름 1:1, 3번(본 그룹)에서 그룹 이름이 된다.
+	FRopeWrapTargetKey CandidateTarget;
+	float              CandidateTime = 0.0f;
+	TArray<int32>      CandidateNodes;
 };

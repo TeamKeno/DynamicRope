@@ -32,21 +32,23 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 {
 	if (Colliders.Num() == 0 || Sim.Num() == 0)
 	{
-		CandidateBone = NAME_None;
+		CandidateTarget = FRopeWrapTargetKey();
 		CandidateTime = 0.0f;
 		CandidateNodes.Reset();
 		return false;
 	}
 
-	// 노드별 최근접 접촉: 이 노드는 어떤 bone 에 닿고 있는가(가장 깊은 침투가 우선)?
-	// 나중에 wrap 이 올바른 mesh 를 따라갈 수 있도록 각 접촉 bone 을 소유한 mesh 를 추적한다.
-	TMap<FName, TArray<int32>>               NodesByBone;
-	TMap<FName, const USceneComponent*>      MeshByBone;
+	// 노드별 최근접 접촉을 "랩 대상 키" 단위로 집계한다(가장 깊은 침투가 우선). 지금 키는 Contact.Bone
+	// 그대로(1:1)라 기존과 동일하게 동작한다 — 3번(본 그룹)에서 이 키 산출을 레지스트리로 바꿔 여러 본을
+	// 그룹 키로 접으면, 아래 dominant/dwell/커밋 로직은 이미 대상 키 단위라 그대로 재사용된다(집계 seam).
+	// 대상별로 올바른 mesh 를 따라가도록 각 대상을 소유한 mesh 도 함께 추적한다.
+	TMap<FRopeWrapTargetKey, TArray<int32>>          NodesByTarget;
+	TMap<FRopeWrapTargetKey, const USceneComponent*> MeshByTarget;
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
-		FName                  BestBone = NAME_None;
+		FRopeWrapTargetKey     BestKey;
 		const USceneComponent* BestMesh = nullptr;
-		float                         BestPen = 0.0f;
+		float                  BestPen = 0.0f;
 		for (const IRopeCollider* Collider : Colliders)
 		{
 			if (!Collider)
@@ -57,22 +59,22 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 			if (Contact.bHit && Contact.Penetration > BestPen)
 			{
 				BestPen = Contact.Penetration;
-				BestBone = Contact.Bone;
+				BestKey = FRopeWrapTargetKey{ Contact.Bone };
 				BestMesh = Contact.SourceMesh;
 			}
 		}
-		if (BestBone != NAME_None)
+		if (BestKey.IsValid())
 		{
-			NodesByBone.FindOrAdd(BestBone).Add(i);
-			MeshByBone.FindOrAdd(BestBone) = BestMesh;
+			NodesByTarget.FindOrAdd(BestKey).Add(i);
+			MeshByTarget.FindOrAdd(BestKey) = BestMesh;
 		}
 	}
 
-	// dominant bone = 가장 많은 노드가 닿고 있는 bone.
-	FName DominantBone = NAME_None;
+	// dominant 대상 = 가장 많은 노드가 닿고 있는 대상 키.
+	FRopeWrapTargetKey   DominantKey;
 	const TArray<int32>* DominantNodes = nullptr;
 	int32 DominantHeadNode = INDEX_NONE;
-	for (const TPair<FName, TArray<int32>>& Pair : NodesByBone)
+	for (const TPair<FRopeWrapTargetKey, TArray<int32>>& Pair : NodesByTarget)
 	{
 		const int32 PairHeadNode = FindHeadNodeIndex(Pair.Value);
 		if (!DominantNodes ||
@@ -80,7 +82,7 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 			(Pair.Value.Num() == DominantNodes->Num() &&
 				(DominantHeadNode == INDEX_NONE || PairHeadNode < DominantHeadNode)))
 		{
-			DominantBone = Pair.Key;
+			DominantKey = Pair.Key;
 			DominantNodes = &Pair.Value;
 			DominantHeadNode = PairHeadNode;
 		}
@@ -89,20 +91,20 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 	const bool bEnoughContact = DominantNodes && DominantNodes->Num() >= Config.MinLatchNodes;
 	if (!bEnoughContact)
 	{
-		CandidateBone = NAME_None;
+		CandidateTarget = FRopeWrapTargetKey();
 		CandidateTime = 0.0f;
 		CandidateNodes.Reset();
 		return false;
 	}
 
-	// 같은 bone 에 대한 지속 접촉을 누적한다. bone 이 바뀌면 타이머를 재시작한다.
-	if (DominantBone == CandidateBone)
+	// 같은 대상 키에 대한 지속 접촉을 누적한다. 대상이 바뀌면 타이머를 재시작한다.
+	if (DominantKey == CandidateTarget)
 	{
 		CandidateTime += Dt;
 	}
 	else
 	{
-		CandidateBone = DominantBone;
+		CandidateTarget = DominantKey;
 		CandidateTime = 0.0f;
 	}
 	CandidateNodes = *DominantNodes;
@@ -114,21 +116,21 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 
 	// 커밋: 접촉 중인 노드들로 wrap 을 시드한다(BoneLocalPos 는 BeginWrap 에서 채워진다).
 	OutSeed.Reset();
-	OutSeed.BoneName = CandidateBone;
-	OutSeed.Mesh = MeshByBone.FindRef(CandidateBone);
+	OutSeed.BoneName = CandidateTarget.Name;
+	OutSeed.Mesh = MeshByTarget.FindRef(CandidateTarget);
 	const int32 LatchNodeIndex = FindHeadNodeIndex(CandidateNodes);
 	if (LatchNodeIndex != INDEX_NONE)
 	{
 		FRopeLatchNode Latch;
 		Latch.NodeIndex = LatchNodeIndex;
-		Latch.Bone = CandidateBone;
+		Latch.Bone = CandidateTarget.Name;
 		OutSeed.Latched.Add(Latch);
 	}
 
-	UE_LOG(LogRopeWrap, Log, TEXT("DecideWrap committed: bone=%s, contact=%d node(s), latch=%d, dwell=%.3fs >= %.3fs"),
-		*CandidateBone.ToString(), CandidateNodes.Num(), LatchNodeIndex, CandidateTime, Config.WrapDecisionTime);
+	UE_LOG(LogRopeWrap, Log, TEXT("DecideWrap committed: target=%s, contact=%d node(s), latch=%d, dwell=%.3fs >= %.3fs"),
+		*CandidateTarget.Name.ToString(), CandidateNodes.Num(), LatchNodeIndex, CandidateTime, Config.WrapDecisionTime);
 
-	CandidateBone = NAME_None;
+	CandidateTarget = FRopeWrapTargetKey();
 	CandidateTime = 0.0f;
 	CandidateNodes.Reset();
 	return true;
@@ -407,7 +409,7 @@ void FRopeWrapController::Release(ERopeReleaseReason Reason)
 {
 	UE_LOG(LogRopeWrap, Log, TEXT("Release: bone=%s, reason=%d"), *State.BoneName.ToString(), static_cast<int32>(Reason));
 	State.Reset();
-	CandidateBone = NAME_None;
+	CandidateTarget = FRopeWrapTargetKey();
 	CandidateTime = 0.0f;
 	CandidateNodes.Reset();
 }
