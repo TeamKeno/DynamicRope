@@ -1517,6 +1517,57 @@ FVector URopeComponent::ComputeThrowInheritedVelocity(const FRopeThrowContext& T
 void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 {
 	const FRopeThrowContext ResolvedThrow = ResolveThrowContext(ThrowContext);
+
+	// 던지기 시작 = 4단계 고정 순서: ① 이전 상태 정리 → ② 체인 리셋(+GPU 재시드) → ③ 채찍 스윙 시작
+	// → ④ Verlet 속도 주입. ④는 ③이 확정한 조준 방향(WhipGuide.GetAimDir)을 쓰므로 순서가 계약이다.
+	AbandonActiveStateForRethrow();
+	ResetChainForThrow(ResolvedThrow.Origin);
+	BeginWhipSwingFromThrow(ResolvedThrow);
+	InjectThrowVelocityIntoVerlet(ResolvedThrow);
+
+	SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("fresh throw impulse, aim=%s, speed=%.1f"),
+		*WhipGuide.GetAimDir().ToCompactString(), ResolvedThrow.ThrowSpeed));
+}
+
+void URopeComponent::AbandonActiveStateForRethrow()
+{
+	// 재던지기: 잡고 있던 wrap은 수동 해제, 진행 중 페이즈 일시 상태는 폐기, 쿨다운 없이 즉시 던진다.
+	if (WrapController.IsActive())
+	{
+		WrapController.Release(ERopeReleaseReason::Manual);
+	}
+	ResetTransientPhaseState();
+	ReleaseCooldown = 0.0f;
+}
+
+void URopeComponent::ResetChainForThrow(const FVector& HandOrigin)
+{
+	// 체인 위치를 통째로 재설정하는 곳이므로 GPU 상주 버퍼 재시드 세대(M5)도 여기서 함께 올린다 —
+	// 리셋과 재시드는 한 몸이다(따로 두면 한쪽만 하는 버그가 생긴다).
+	++SimGeneration;
+
+	if (Sim.Num() < 2)
+	{
+		return;
+	}
+
+	// 손(노드 0)을 던지기 원점에 핀. 전 노드 Prev=Pos(속도 0) — 던지기 속도는 ④가 따로 싣는다.
+	Sim.bStartPinned = true;
+	Sim.StartPinPrev = HandOrigin;
+	Sim.StartPinTarget = HandOrigin;
+	Sim.Positions[0] = HandOrigin;
+	Sim.PrevPositions[0] = HandOrigin;
+	for (int32 i = 0; i < Sim.Num(); ++i)
+	{
+		Sim.InvMass[i] = (i == 0) ? 0.0f : 1.0f;
+		Sim.PrevPositions[i] = Sim.Positions[i];
+	}
+}
+
+void URopeComponent::BeginWhipSwingFromThrow(const FRopeThrowContext& ResolvedThrow)
+{
+	// WhipGuide.Begin의 입력(조준/가이드 축, 상속 속도)은 전부 ResolvedThrow에서 파생된다 —
+	// 파생 값 조립을 여기 가둬서 호출부(StartFreshThrow)에는 단계 이름만 남긴다.
 	const FRopeWhipGuide::FSwingBasis SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
 		ResolvedThrow, ResolvedThrow.SwingPlane, ResolvedThrow.CustomSwingPlaneNormal);
 	const FVector InheritedVelocity = ComputeThrowInheritedVelocity(ResolvedThrow);
@@ -1526,54 +1577,40 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 		ResolvedThrow.FrameForward, SwingBasis.GuideUp, SwingBasis.GuideRight,
 		ResolvedThrow.ThrowSpeed, InheritedVelocity);
 
-	++SimGeneration; // throw로 tail 위치를 재설정 → GPU 상주 버퍼 재시드(M5).
-
-	if (WrapController.IsActive())
+	if (Sim.Num() >= 2)
 	{
-		WrapController.Release(ERopeReleaseReason::Manual);
-	}
-	ResetTransientPhaseState();
-	ReleaseCooldown = 0.0f;
-
-	const int32 LastNode = Sim.Num() - 1;
-	if (LastNode >= 1)
-	{
-		const FVector Start = ResolvedThrow.Origin;
-		Sim.bStartPinned = true;
-		Sim.StartPinPrev = Start;
-		Sim.StartPinTarget = Start;
-		Sim.Positions[0] = Start;
-		Sim.PrevPositions[0] = Start;
-
-		for (int32 i = 0; i < Sim.Num(); ++i)
-		{
-			Sim.InvMass[i] = (i == 0) ? 0.0f : 1.0f;
-			Sim.PrevPositions[i] = Sim.Positions[i];
-		}
-
 		// 가이드 구간 노드를 T=0 가이드 곡선 위에 스냅(속도 0).
 		WhipGuide.SnapToInitialPose(Sim, MakeWhipGuideConfig());
+	}
+}
 
-		// 던지기 임펄스: PrevPositions를 조준 반대 방향으로 밀어 Verlet 속도를 주입한다.
-		// tail로 갈수록 가중치를 높이고 TipMass로 끝부분을 부스트한다.
-		const FVector ThrowDir = WhipGuide.GetAimDir();
-		const float ReferenceDt = 1.0f / 60.0f;
-		const float BaseImpulse = ResolvedThrow.ThrowSpeed * ReferenceDt;
-		const float TipBoost = FMath::Clamp(ThrowParams.TipMass / 5.0f, 0.25f, 3.0f);
-		const FVector InheritedVelocityImpulse = InheritedVelocity * ReferenceDt;
-		const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipConfig.GuidedLength), 1, LastNode);
-		for (int32 i = 1; i <= LastNode; ++i)
-		{
-			const float AlongRope = static_cast<float>(i) / static_cast<float>(LastNode);
-			const float TailWeight = TailWeightByIndex(i, FirstTailNode, LastNode);
-			const float Weight = FMath::Lerp(RopeMath::SmoothStep(AlongRope), 1.0f, TailWeight * 0.5f);
-			const float Impulse = BaseImpulse * Weight * FMath::Lerp(1.0f, TipBoost, TailWeight);
-			Sim.PrevPositions[i] -= ThrowDir * Impulse + InheritedVelocityImpulse;
-		}
+void URopeComponent::InjectThrowVelocityIntoVerlet(const FRopeThrowContext& ResolvedThrow)
+{
+	const int32 LastNode = Sim.Num() - 1;
+	if (LastNode < 1)
+	{
+		return;
 	}
 
-	SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("fresh throw impulse, aim=%s, speed=%.1f"),
-		*WhipGuide.GetAimDir().ToCompactString(), ResolvedThrow.ThrowSpeed));
+	// Verlet 적분에서 속도는 (Pos - Prev)/dt 로 암묵 표현된다. Prev를 원하는 속도의 반대 방향으로
+	// v·dt만큼 밀면 위치는 그대로인 채 다음 스텝부터 그 속도가 실린다(순수 속도 주입).
+	// 분배: 손→끝으로 갈수록 가중(SmoothStep + tail 가중)하고 TipMass로 끝을 부스트해 채찍처럼 끝이
+	// 앞서 나가게 한다. 상속 속도(owner/socket)는 전 노드 균일. ReferenceDt는 첫 스텝 실제 dt와
+	// 무관한 고정 환산 기준(프레임레이트에 따라 던지기 세기가 변하지 않게).
+	const FVector ThrowDir = WhipGuide.GetAimDir();
+	const float ReferenceDt = 1.0f / 60.0f;
+	const float BaseImpulse = ResolvedThrow.ThrowSpeed * ReferenceDt;
+	const float TipBoost = FMath::Clamp(ThrowParams.TipMass / 5.0f, 0.25f, 3.0f);
+	const FVector InheritedVelocityImpulse = ComputeThrowInheritedVelocity(ResolvedThrow) * ReferenceDt;
+	const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipConfig.GuidedLength), 1, LastNode);
+	for (int32 i = 1; i <= LastNode; ++i)
+	{
+		const float AlongRope = static_cast<float>(i) / static_cast<float>(LastNode);
+		const float TailWeight = TailWeightByIndex(i, FirstTailNode, LastNode);
+		const float Weight = FMath::Lerp(RopeMath::SmoothStep(AlongRope), 1.0f, TailWeight * 0.5f);
+		const float Impulse = BaseImpulse * Weight * FMath::Lerp(1.0f, TipBoost, TailWeight);
+		Sim.PrevPositions[i] -= ThrowDir * Impulse + InheritedVelocityImpulse;
+	}
 }
 
 void URopeComponent::UpdateGuidedThrow(float DeltaTime)

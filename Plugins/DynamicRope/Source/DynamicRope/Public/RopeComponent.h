@@ -551,7 +551,22 @@ private:
 
 	//~ Throw ----------------------------------------------------------------
 	// (MakeDefaultThrowContext/ResolveThrowContext는 protected 확장 훅으로 이동.)
+	// 던지기 시작은 아래 4단계 헬퍼의 고정 순서로 읽는다(StartFreshThrow가 오케스트레이션만).
 	void StartFreshThrow(const FRopeThrowContext& ThrowContext);
+
+	/** ① 이전 상태 정리: 잡고 있던 wrap 수동 해제 + 페이즈 일시 상태 폐기 + 쿨다운 0(즉시 재던지기). */
+	void AbandonActiveStateForRethrow();
+
+	/** ② 체인 리셋: 손(노드 0)을 원점에 핀, 전 노드 속도 0(Prev=Pos), GPU 상주 버퍼 재시드 세대 증가. */
+	void ResetChainForThrow(const FVector& HandOrigin);
+
+	/** ③ 채찍 스윙 시작: 스윙 기저/상속 속도를 ResolvedThrow에서 조립해 WhipGuide 활성화 + T=0 스냅. */
+	void BeginWhipSwingFromThrow(const FRopeThrowContext& ResolvedThrow);
+
+	/** ④ Verlet 속도 주입: PrevPositions를 조준 반대 방향으로 밀어 던지기 속도를 싣는다
+	 *  (Verlet에서 속도 = (Pos-Prev)/dt — Prev만 밀면 위치 변화 없이 순수 속도 주입).
+	 *  ③이 확정한 조준 방향(WhipGuide.GetAimDir)을 쓰므로 반드시 ③ 뒤에 호출. */
+	void InjectThrowVelocityIntoVerlet(const FRopeThrowContext& ResolvedThrow);
 
 	/** GuidedThrow phase 한 프레임 진행. preview centerline으로 노드를 이동시키며 solver는 끈다. */
 	void UpdateGuidedThrow(float DeltaTime);
