@@ -189,20 +189,20 @@ bool FRopeWrappingPhase::IsReadyToCommit(const FRopeSimState& Sim, const FRopeWr
 }
 
 bool FRopeWrappingPhase::ShouldAbortFailedShortWrap(const FRopeSimState& Sim, const FContext& Ctx,
-	float MinRequiredTurns, float& OutTurns) const
+	float MinRequiredAngleDeg, float& OutAngleDeg) const
 {
-	OutTurns = 0.0f;
-	if (MinRequiredTurns <= 0.0f || !State.bPathBuildFailed)
+	OutAngleDeg = 0.0f;
+	if (MinRequiredAngleDeg <= 0.0f || !State.bPathBuildFailed)
 	{
 		return false;
 	}
 
-	if (!ComputeHelixTurnsAtLastBuiltPoint(Sim, Ctx, OutTurns))
+	if (!ComputeWrappedAngleAtLastBuiltPoint(Sim, Ctx, OutAngleDeg))
 	{
 		return false;
 	}
 
-	return OutTurns < MinRequiredTurns;
+	return OutAngleDeg < MinRequiredAngleDeg;
 }
 
 FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim, const USceneComponent* Mesh) const
@@ -929,9 +929,9 @@ bool FRopeWrappingPhase::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor
 	return true;
 }
 
-bool FRopeWrappingPhase::ComputeHelixTurnsAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutTurns) const
+bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const
 {
-	OutTurns = 0.0f;
+	OutAngleDeg = 0.0f;
 	if (State.Anchors.Num() == 0 && State.Path.Num() == 0)
 	{
 		return false;
@@ -976,12 +976,14 @@ bool FRopeWrappingPhase::ComputeHelixTurnsAtLastBuiltPoint(const FRopeSimState& 
 		LastBuiltDistance = FMath::Max(LastBuiltDistance, State.Path.Last().DistanceFromLatch);
 	}
 
-	// 실제 SurfaceVectorField 경로가 얼마나 울퉁불퉁했는지와 별개로, 실패 판정은 helix 기준 누적 회전량만 본다.
+	// 실제 SurfaceVectorField 경로가 얼마나 울퉁불퉁했는지와 별개로, 실패 판정은 helix 기준 누적
+	// 감싼 각도만 본다. 각도(도) 반환 — 회전 수(=각도/360)는 2πr 로프를 요구해 대상 크기에 비례하는
+	// 기준이 되므로 쓰지 않는다(FRopeWrapConfig::FailedWrapMinAngleDeg 주석 참고).
 	const float PitchScale = Ctx.Config.WrappingHelixPitchScale;
 	const float LengthScale = FMath::Sqrt(1.0f + PitchScale * PitchScale);
 	const float CircumferenceDistance = LastBuiltDistance / FMath::Max(LengthScale, KINDA_SMALL_NUMBER);
 	const float AngleRadians = CircumferenceDistance / FMath::Max(HelixRadius, KINDA_SMALL_NUMBER);
-	OutTurns = FMath::Abs(AngleRadians) / (2.0f * PI);
+	OutAngleDeg = FMath::RadiansToDegrees(FMath::Abs(AngleRadians));
 	return true;
 }
 

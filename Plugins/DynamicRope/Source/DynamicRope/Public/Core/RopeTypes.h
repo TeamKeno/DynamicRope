@@ -586,6 +586,17 @@ struct FRopeWrapConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrappingMaxSettleTime = 0.90f;
 
+	/**
+	 * 경로 생성이 실패한 wrap의 최소 감싼 각도(도). 실패 시점까지 감은 각도가 이 값 미만이면 "조금
+	 * 닿았는데 철썩 붙는" 커밋 대신 release한다. 0 = 가드 끔.
+	 * 각도 기준인 이유(이전 constexpr "최소 1바퀴" 기준 대체): 한 바퀴는 로프 2πr을 요구해 대상이
+	 * 클수록 절대 길이가 폭증한다 — 반지름 100cm 몸통은 한 바퀴에 628cm로 기본 로프(200cm)로는
+	 * 물리적으로 불가능해 큰 대상 wrap이 구조적으로 전멸했다. 감싼 각도는 대상 크기와 무관한
+	 * "걸림 품질" 척도다(120° = 1/3바퀴 훅).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
+	float FailedWrapMinAngleDeg = 120.0f;
+
 	/** Temporary contact loss tolerated while the rope is settling into a wrap. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrappingContactGraceTime = 0.20f;

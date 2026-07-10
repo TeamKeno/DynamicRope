@@ -1885,18 +1885,15 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	const FRopeWrappingPhase::FContext WrappingCtx = MakeWrappingContext();
 	WrappingPhase.AdvancePathBuild(Sim, WrappingCtx);
 
-	// 개발용 안전장치: 표면 경로 생성이 중간에 실패했을 때, 마지막 성공 지점이 helix 기준으로
-	// 한 바퀴도 감기지 않았다면 "조금 닿았는데 바로 wrapped로 철썩 붙는" 상태를 만들지 않고 release한다.
-	// 값 조절 중에는 아래 bool만 false로 바꾸면 기능을 바로 꺼서 A/B 테스트할 수 있고,
-	// MinFailedWrapTurns는 감각이 맞으면 나중에 FRopeWrapConfig UPROPERTY로 승격하면 된다.
-	constexpr bool bEnableShortFailedWrapAbort = true;
-	constexpr float MinFailedWrapTurns = 1.0f; // 테스트 후 2.0~3.0으로 올릴 수 있음
-	float FailedWrapTurns = 0.0f;
-	if (bEnableShortFailedWrapAbort &&
-		WrappingPhase.ShouldAbortFailedShortWrap(Sim, WrappingCtx, MinFailedWrapTurns, FailedWrapTurns))
+	// 안전장치: 표면 경로 생성이 중간에 실패했을 때, 그때까지 감싼 각도가 임계 미만이면 "조금 닿았는데
+	// 바로 wrapped로 철썩 붙는" 상태를 만들지 않고 release한다. 기준은 회전 수가 아니라 감싼 각도(도,
+	// FailedWrapMinAngleDeg — 0이면 가드 끔): 회전 수는 로프 2πr을 요구해 큰 대상(드래곤 몸통)에서
+	// 물리적으로 도달 불가능한 기준이 됐다. 상세는 config 주석.
+	float FailedWrapAngleDeg = 0.0f;
+	if (WrappingPhase.ShouldAbortFailedShortWrap(Sim, WrappingCtx, WrapConfig.FailedWrapMinAngleDeg, FailedWrapAngleDeg))
 	{
-		SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("wrap path failed early, turns=%.2f < %.2f"),
-			FailedWrapTurns, MinFailedWrapTurns));
+		SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("wrap path failed early, angle=%.0fdeg < %.0fdeg"),
+			FailedWrapAngleDeg, WrapConfig.FailedWrapMinAngleDeg));
 		AbortWrapping(ERopeReleaseReason::Broken);
 		return;
 	}

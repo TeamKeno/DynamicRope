@@ -68,11 +68,12 @@ public:
 	bool IsReadyToCommit(const FRopeSimState& Sim, const FRopeWrapConfig& Config) const;
 
 	/**
-	 * 경로 생성이 실패했을 때, 마지막으로 성공한 지점이 helix 기준 최소 회전량에 못 미치면
-	 * "감긴 척 붙는" 상태로 커밋하지 않도록 abort 여부를 알려준다.
+	 * 경로 생성이 실패했을 때, 마지막으로 성공한 지점까지의 감싼 각도(도)가 최소치에 못 미치면
+	 * "감긴 척 붙는" 상태로 커밋하지 않도록 abort 여부를 알려준다. 기준이 회전 수가 아니라 각도인
+	 * 이유는 FRopeWrapConfig::FailedWrapMinAngleDeg 주석 참고(대상 크기 무관 척도).
 	 */
 	bool ShouldAbortFailedShortWrap(const FRopeSimState& Sim, const FContext& Ctx,
-		float MinRequiredTurns, float& OutTurns) const;
+		float MinRequiredAngleDeg, float& OutAngleDeg) const;
 
 	/**
 	 * 현재 앵커들로 Wrapped 핸드오프용 시드를 조립한다(FRopeWrapController::BeginWrap 입력).
@@ -122,8 +123,8 @@ private:
 		const FRopeSimState& Sim, const FContext& Ctx,
 		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
 
-	/** 마지막 성공 path/anchor 거리를 helix 공식에 넣어 누적 회전 수를 계산한다. */
-	bool ComputeHelixTurnsAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutTurns) const;
+	/** 마지막 성공 path/anchor 거리를 helix 공식에 넣어 누적 감싼 각도(도)를 계산한다. */
+	bool ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const;
 
 	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;
