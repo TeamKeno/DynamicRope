@@ -645,6 +645,23 @@ private:
 	void AbortWrapping(ERopeReleaseReason Reason);
 
 	//~ Wrapped --------------------------------------------------------------
+	// PrepareSimFrame의 Wrapped 케이스는 아래 4단계 헬퍼의 고정 순서로 읽는다.
+
+	/** ① 본 추종: Hold(스킨 본 위 재배치 — 속도 주입 없음) + 질량 마스크. 대상 mesh 소실이면
+	 *  Broken release를 마치고 false — 호출자는 이 프레임을 여기서 끝낸다. */
+	bool HoldWrappedNodesToBone(float DeltaTime);
+
+	/** ② 관측치 산출: wrap 장력(GetMaxTension) + Pull 샘플(ComputePull) + 2단 스무딩(조준 fractional
+	 *  EMA → 방향 EMA). 견인(③)/release 판정(④)/디버거/BP가 공용으로 읽는 입력을 만든다. */
+	void UpdateWrappedPullSample(float DeltaTime);
+
+	/** ③ 견인 인가: 테더(초과분 위치/속도 동기 — TetherTargetShare 분배) + 능동 Pull(팽팽할 때 상수 힘). */
+	void ApplyWrappedTraction(float DeltaTime);
+
+	/** ④ 자동 release 판정: 장력 지속 초과(TensionRelease*) / 거리 초과(DistanceReleaseSlack —
+	 *  ③의 테더가 갱신한 초과분 소비). release가 일어났으면 true — 호출자는 솔브를 건너뛴다. */
+	bool CheckWrappedAutoRelease(float DeltaTime);
+
 	/** latch/anchor 노드 InvMass=0, 나머지 1 — Wrapped 중 자유 구간만 솔버가 움직이게. */
 	void ApplyWrappedMassMask(bool bResetDynamicNodeVelocity = false);
 

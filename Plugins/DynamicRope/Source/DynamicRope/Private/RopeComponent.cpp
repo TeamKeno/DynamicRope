@@ -607,104 +607,18 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 
 	case ERopePhase::Wrapped:
 	{
-		// latch된 node는 skinned bone을 따라간다(GT). latch 노드는 InvMass=0이라 솔브는 자유 구간만.
-		// Hold가 false면 wrap 대상 mesh가 사라진 것(예: cross-actor 대상 액터 파괴) →
-		// 노드를 솔버에 되돌려 안전하게 release한다(dangling 포인터 역참조 방지는 Hold 내부에서).
-		if (!WrapController.Hold(Sim, DeltaTime, OverrideFrame))
+		// Wrapped 틱 = 4단계 고정 순서: ① 본 추종(Hold + 질량 마스크 — 대상 소실 시 release)
+		// → ② 관측치 산출(장력 + Pull 샘플/스무딩 — ③④의 공용 입력) → ③ 견인 인가(테더 + 능동 Pull)
+		// → ④ 자동 release 판정(장력 지속 초과 / 거리 초과 — ②③의 산출물을 소비).
+		if (!HoldWrappedNodesToBone(DeltaTime))
 		{
-			const FName Bone = WrapController.State.BoneName;
-			FinishWrapRelease(Bone, ERopeReleaseReason::Broken,
-				FString::Printf(TEXT("wrap target mesh lost, bone=%s"), *Bone.ToString()));
-			break;
+			break; // 대상 mesh 소실 — release 완료(솔브 없음).
 		}
-		ApplyWrappedMassMask();
-
-		// 장력 모델: 솔버가 채운 세그먼트 장력(F=λ/h², GPU 로프는 1~2프레임 지연 미러)의 최대치를
-		// wrap 상태에 반영한다. 게임플레이(당김/절단 판정)와 디버거가 이 값을 읽는다.
-		WrapController.State.Tension = GetMaxTension();
-
-		// Pull 샘플 산출(항상 — 디버거/BP 관찰 + 아래 두 동작의 공용 입력). 방향은 첫 직선 다리 추종(공간).
-		LastPullSample = FRopePullSample();
-		WrapController.ComputePull(Sim, WrapConfig.PullBendThresholdDeg, LastPullSample);
-
-		// Pull 스무딩(2단): (1) 조준 노드 fractional 스무딩 — 정수 AimNode의 프레임 간 이산 홉(방향 통째 점프
-		// + tether 초과분 불연속)을 float EMA + 노드 사이 보간으로 없앤다. (2) 방향 EMA — 그 위에 남는 노드 위치
-		// 노이즈(GPU 미러 지연 등)를 다듬는다. wrap 시작 후 첫 유효 프레임은 측정값으로 시드(래그 없음).
-		if (LastPullSample.bValid)
+		UpdateWrappedPullSample(DeltaTime);
+		ApplyWrappedTraction(DeltaTime);
+		if (CheckWrappedAutoRelease(DeltaTime))
 		{
-			LastPullDirRaw = LastPullSample.Direction; // 스무딩 전 raw look-ahead(정수 조준) — 디버거 raw vs smoothed 비교.
-
-			// (1) 조준 인덱스 시간 스무딩 → fractional 조준 위치 보간.
-			const float RawAimF = static_cast<float>(LastPullSample.AimNode);
-			if (SmoothedAimNodeF < 0.0f)
-			{
-				SmoothedAimNodeF = RawAimF;
-			}
-			else
-			{
-				const float TauA = WrapConfig.PullAimSmoothTime;
-				const float AlphaA = (TauA > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / TauA)) : 1.0f;
-				SmoothedAimNodeF = FMath::Lerp(SmoothedAimNodeF, RawAimF, AlphaA);
-			}
-			const float AimF = FMath::Clamp(SmoothedAimNodeF, 0.0f, static_cast<float>(LastPullSample.AnchorNode));
-			const int32 A0 = FMath::FloorToInt(AimF);
-			const int32 A1 = FMath::Min(A0 + 1, LastPullSample.AnchorNode);
-			const FVector AimPos = FMath::Lerp(Sim.Positions[A0], Sim.Positions[A1], AimF - static_cast<float>(A0));
-			LastPullSample.AimNodeF = AimF;
-			LastPullSample.AimPos = AimPos;
-
-			// (2) 연속 조준으로 방향 재계산 후 방향 EMA. 축퇴(조준=앵커)면 raw 방향 유지.
-			const FVector DirF = (AimPos - Sim.Positions[LastPullSample.AnchorNode]).GetSafeNormal();
-			const FVector DirIn = DirF.IsNearlyZero() ? LastPullSample.Direction : DirF;
-			if (SmoothedPullDir.IsNearlyZero())
-			{
-				SmoothedPullDir = DirIn;
-			}
-			else
-			{
-				const float Tau = WrapConfig.PullDirSmoothTime;
-				const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
-				SmoothedPullDir = FMath::Lerp(SmoothedPullDir, DirIn, Alpha).GetSafeNormal();
-			}
-			LastPullSample.Direction = SmoothedPullDir;
-		}
-
-		// 동작 1 — 자동 견인(테더, 위치/속도 동기): 가용 로프 길이 초과분만큼 대상을 되돌린다.
-		// 장력 비례 힘(폭주: 힘→스트레치→장력↑→힘↑)을 대체 — 초과분 기반이라 수렴한다.
-		UpdateTether(DeltaTime);
-
-		// 동작 2 — 능동 Pull(상수 힘): 사용자 입력(SetActivePull/Wielder)이 준 힘을 팽팽할 때만
-		// 인가한다. 장력과 무관한 상수라 피드백 폭주가 없다.
-		if (ActivePullForce > 0.0f && LastPullSample.bValid && LastPullSample.Tension > KINDA_SMALL_NUMBER)
-		{
-			ApplyPullForce(LastPullSample.Direction * ActivePullForce, LastPullSample);
-		}
-
-		// 임계 장력 release: 최대 장력이 TensionReleaseForce를 TensionReleaseTime 동안 지속해 넘으면
-		// 풀린다(순간 스파이크 무시). 0 = 비활성. 흐름은 위 mesh-lost release와 동일, 사유만 Tension.
-		if (WrapConfig.TensionReleaseForce > 0.0f)
-		{
-			TensionOverTime = (WrapController.State.Tension > WrapConfig.TensionReleaseForce)
-				? TensionOverTime + DeltaTime : 0.0f;
-			if (TensionOverTime >= WrapConfig.TensionReleaseTime)
-			{
-				const FName Bone = WrapController.State.BoneName;
-				FinishWrapRelease(Bone, ERopeReleaseReason::Tension,
-					FString::Printf(TEXT("tension release %.0f > %.0f, bone=%s"),
-						WrapController.State.Tension, WrapConfig.TensionReleaseForce, *Bone.ToString()));
-				break;
-			}
-		}
-
-		// 거리 release: 손~앵커 직선 거리의 가용 로프 길이 초과분(테더 초과분과 동일 소스)이 한계를
-		// 넘으면 놓친다. 기하 기반이라 지속 시간 없이 즉시 판정(장력처럼 노이즈가 없다).
-		if (WrapConfig.DistanceReleaseSlack > 0.0f && LastTetherOvershoot > WrapConfig.DistanceReleaseSlack)
-		{
-			const FName Bone = WrapController.State.BoneName;
-			FinishWrapRelease(Bone, ERopeReleaseReason::Distance,
-				FString::Printf(TEXT("distance release overshoot %.0f > %.0f, bone=%s"),
-					LastTetherOvershoot, WrapConfig.DistanceReleaseSlack, *Bone.ToString()));
-			break;
+			break; // 장력/거리 release 발생(솔브 없음).
 		}
 		bSolveThisFrame = true;
 		break;
@@ -784,27 +698,6 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 #else
 	constexpr bool bDebugCapture = false;
 #endif
-
-	// Test log for per-tick tension checks. Re-enable while tuning if needed.
-	// if (Phase == ERopePhase::Wrapping || Phase == ERopePhase::Wrapped)
-	// {
-	// 	constexpr float TensionLogTolerance = 5.0f;
-	// 	float Slack = 0.0f;
-	// 	float StraightDistance = 0.0f;
-	// 	float AvailableLength = 0.0f;
-	// 	const bool bHasTensionData = ComputeTensionSlack(Slack, StraightDistance, AvailableLength);
-	// 	const bool bTensioned = bHasTensionData && Slack <= TensionLogTolerance;
-	// 	UE_LOG(LogDynamicRope, Log,
-	// 		TEXT("[%s] TensionTick phase=%s valid=%s tension=%s slack=%.2fcm straight=%.2fcm available=%.2fcm tolerance=%.2fcm"),
-	// 		*GetName(),
-	// 		PhaseName(Phase),
-	// 		bHasTensionData ? TEXT("true") : TEXT("false"),
-	// 		bTensioned ? TEXT("true") : TEXT("false"),
-	// 		Slack,
-	// 		StraightDistance,
-	// 		AvailableLength,
-	// 		TensionLogTolerance);
-	// }
 
 	// Flight: 솔브 후 이동 경로 기반 접촉 후보 감지 → 캡처. 파이프라인 자체는
 	// FRopeFlightContactDetector(UObject 비의존)이고, 여기서는 3단계 오케스트레이션만 한다:
@@ -2084,6 +1977,125 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 }
 
 // ===== Wrapped ==============================================================
+// PrepareSimFrame의 Wrapped 케이스는 아래 4단계 헬퍼의 고정 순서로 돈다:
+// ① HoldWrappedNodesToBone → ② UpdateWrappedPullSample → ③ ApplyWrappedTraction → ④ CheckWrappedAutoRelease
+
+bool URopeComponent::HoldWrappedNodesToBone(float DeltaTime)
+{
+	// ① latch된 node는 skinned bone을 따라간다(GT). latch 노드는 InvMass=0이라 솔브는 자유 구간만.
+	// Hold가 false면 wrap 대상 mesh가 사라진 것(예: cross-actor 대상 액터 파괴) →
+	// 노드를 솔버에 되돌려 안전하게 release한다(dangling 포인터 역참조 방지는 Hold 내부에서).
+	if (!WrapController.Hold(Sim, DeltaTime, OverrideFrame))
+	{
+		const FName Bone = WrapController.State.BoneName;
+		FinishWrapRelease(Bone, ERopeReleaseReason::Broken,
+			FString::Printf(TEXT("wrap target mesh lost, bone=%s"), *Bone.ToString()));
+		return false;
+	}
+	ApplyWrappedMassMask();
+	return true;
+}
+
+void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
+{
+	// ② 장력 모델: 솔버가 채운 세그먼트 장력(F=λ/h², GPU 로프는 1~2프레임 지연 미러)의 최대치를
+	// wrap 상태에 반영한다. 게임플레이(당김/절단 판정)와 디버거가 이 값을 읽는다.
+	WrapController.State.Tension = GetMaxTension();
+
+	// Pull 샘플 산출(항상 — 디버거/BP 관찰 + 견인/release의 공용 입력). 방향은 첫 직선 다리 추종(공간).
+	LastPullSample = FRopePullSample();
+	WrapController.ComputePull(Sim, WrapConfig.PullBendThresholdDeg, LastPullSample);
+
+	// Pull 스무딩(2단): (1) 조준 노드 fractional 스무딩 — 정수 AimNode의 프레임 간 이산 홉(방향 통째 점프
+	// + tether 초과분 불연속)을 float EMA + 노드 사이 보간으로 없앤다. (2) 방향 EMA — 그 위에 남는 노드 위치
+	// 노이즈(GPU 미러 지연 등)를 다듬는다. wrap 시작 후 첫 유효 프레임은 측정값으로 시드(래그 없음).
+	if (!LastPullSample.bValid)
+	{
+		return;
+	}
+
+	LastPullDirRaw = LastPullSample.Direction; // 스무딩 전 raw look-ahead(정수 조준) — 디버거 raw vs smoothed 비교.
+
+	// (1) 조준 인덱스 시간 스무딩 → fractional 조준 위치 보간.
+	const float RawAimF = static_cast<float>(LastPullSample.AimNode);
+	if (SmoothedAimNodeF < 0.0f)
+	{
+		SmoothedAimNodeF = RawAimF;
+	}
+	else
+	{
+		const float TauA = WrapConfig.PullAimSmoothTime;
+		const float AlphaA = (TauA > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / TauA)) : 1.0f;
+		SmoothedAimNodeF = FMath::Lerp(SmoothedAimNodeF, RawAimF, AlphaA);
+	}
+	const float AimF = FMath::Clamp(SmoothedAimNodeF, 0.0f, static_cast<float>(LastPullSample.AnchorNode));
+	const int32 A0 = FMath::FloorToInt(AimF);
+	const int32 A1 = FMath::Min(A0 + 1, LastPullSample.AnchorNode);
+	const FVector AimPos = FMath::Lerp(Sim.Positions[A0], Sim.Positions[A1], AimF - static_cast<float>(A0));
+	LastPullSample.AimNodeF = AimF;
+	LastPullSample.AimPos = AimPos;
+
+	// (2) 연속 조준으로 방향 재계산 후 방향 EMA. 축퇴(조준=앵커)면 raw 방향 유지.
+	const FVector DirF = (AimPos - Sim.Positions[LastPullSample.AnchorNode]).GetSafeNormal();
+	const FVector DirIn = DirF.IsNearlyZero() ? LastPullSample.Direction : DirF;
+	if (SmoothedPullDir.IsNearlyZero())
+	{
+		SmoothedPullDir = DirIn;
+	}
+	else
+	{
+		const float Tau = WrapConfig.PullDirSmoothTime;
+		const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
+		SmoothedPullDir = FMath::Lerp(SmoothedPullDir, DirIn, Alpha).GetSafeNormal();
+	}
+	LastPullSample.Direction = SmoothedPullDir;
+}
+
+void URopeComponent::ApplyWrappedTraction(float DeltaTime)
+{
+	// ③-1 자동 견인(테더, 위치/속도 동기): 가용 로프 길이 초과분만큼 양끝(TetherTargetShare 분배)을
+	// 되돌린다. 장력 비례 힘(폭주: 힘→스트레치→장력↑→힘↑)을 대체 — 초과분 기반이라 수렴한다.
+	UpdateTether(DeltaTime);
+
+	// ③-2 능동 Pull(상수 힘): 사용자 입력(SetActivePull/Wielder)이 준 힘을 팽팽할 때만 인가한다.
+	// 장력과 무관한 상수라 피드백 폭주가 없다.
+	if (ActivePullForce > 0.0f && LastPullSample.bValid && LastPullSample.Tension > KINDA_SMALL_NUMBER)
+	{
+		ApplyPullForce(LastPullSample.Direction * ActivePullForce, LastPullSample);
+	}
+}
+
+bool URopeComponent::CheckWrappedAutoRelease(float DeltaTime)
+{
+	// ④-1 임계 장력 release: 최대 장력이 TensionReleaseForce를 TensionReleaseTime 동안 지속해 넘으면
+	// 풀린다(순간 스파이크 무시). 0 = 비활성. 흐름은 mesh-lost release와 동일, 사유만 Tension.
+	if (WrapConfig.TensionReleaseForce > 0.0f)
+	{
+		TensionOverTime = (WrapController.State.Tension > WrapConfig.TensionReleaseForce)
+			? TensionOverTime + DeltaTime : 0.0f;
+		if (TensionOverTime >= WrapConfig.TensionReleaseTime)
+		{
+			const FName Bone = WrapController.State.BoneName;
+			FinishWrapRelease(Bone, ERopeReleaseReason::Tension,
+				FString::Printf(TEXT("tension release %.0f > %.0f, bone=%s"),
+					WrapController.State.Tension, WrapConfig.TensionReleaseForce, *Bone.ToString()));
+			return true;
+		}
+	}
+
+	// ④-2 거리 release: 손~앵커 직선 거리의 가용 로프 길이 초과분(테더 초과분과 동일 소스 —
+	// UpdateTether가 이번 프레임 갱신한 LastTetherOvershoot)이 한계를 넘으면 놓친다.
+	// 기하 기반이라 지속 시간 없이 즉시 판정(장력처럼 노이즈가 없다).
+	if (WrapConfig.DistanceReleaseSlack > 0.0f && LastTetherOvershoot > WrapConfig.DistanceReleaseSlack)
+	{
+		const FName Bone = WrapController.State.BoneName;
+		FinishWrapRelease(Bone, ERopeReleaseReason::Distance,
+			FString::Printf(TEXT("distance release overshoot %.0f > %.0f, bone=%s"),
+				LastTetherOvershoot, WrapConfig.DistanceReleaseSlack, *Bone.ToString()));
+		return true;
+	}
+	return false;
+}
 
 void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 {
