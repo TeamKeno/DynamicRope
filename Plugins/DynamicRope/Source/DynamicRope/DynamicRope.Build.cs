@@ -47,6 +47,10 @@ public class DynamicRope : ModuleRules
 				"EnhancedInput",
 				"Slate",
 				"SlateCore",
+				// UI/ — 플러그인 설명 HUD(ARopePluginInfoHUD + URopePluginInfoWidget)
+				"UMG",
+				// UI/ — HUD 토글 키(FKey/EKeys, FKey::GetDisplayName)
+				"InputCore",
 				// ... add private dependencies that you statically link with here ...
 			}
 			);
