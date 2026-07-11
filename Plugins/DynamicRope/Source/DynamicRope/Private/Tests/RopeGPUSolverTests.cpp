@@ -635,7 +635,7 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 	for (int32 i = 0; i < N; ++i)
 	{
 		Sim.Positions[i] = FVector(Xs[i], 0, 0);
-		Sim.PrevPositions[i] = Sim.Positions[i];
+		Sim.SetStill(i);
 	}
 
 	// --- CPU ground-truth.

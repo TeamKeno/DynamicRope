@@ -264,6 +264,20 @@ struct FRopeSimState
 
 	int32 Num() const { return Positions.Num(); }
 	void  Reset() { Positions.Reset(); PrevPositions.Reset(); InvMass.Reset(); SegmentTension.Reset(); TimeAccumulator = 0.0f; }
+
+	//~ Verlet 어휘(순수 인라인 — 컨텍스트/정책 없음). 반복 관용구에 이름을 붙여 부호·차원 실수를 막는다.
+	//  솔버 적분 루프(RopeXPBDSolver)와 던지기 속도 주입 루프는 의도적으로 raw 표현을 유지한다 —
+	//  전자는 .usf 커널과의 1:1 파리티 대조가 우선, 후자는 누적형(변위 단위 임펄스)이라 형태가 다르다.
+
+	/** 노드 i의 한 프레임 변위(Pos - Prev). Verlet에서 속도 ∝ 변위(dt 나누기 전). */
+	FVector Displacement(int32 i) const { return Positions[i] - PrevPositions[i]; }
+
+	/** 노드 i의 한 프레임 이동 거리(cm/프레임). "빠른 노드" 등 임계 판정은 소비자의 정책이다. */
+	float NodeSpeed(int32 i) const { return Displacement(i).Size(); }
+
+	/** 노드 i의 속도 0(Prev = Pos). 시드/리시드 경로 전용 — 로직 페이즈의 위치·속도 쓰기는
+	 *  FRopeNodeOverrideFrame 단일 통로를 탄다(G2, GPU 상주 동기화). */
+	void SetStill(int32 i) { PrevPositions[i] = Positions[i]; }
 };
 
 /**

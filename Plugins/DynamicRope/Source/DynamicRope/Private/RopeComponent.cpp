@@ -1106,7 +1106,7 @@ void URopeComponent::InitRope()
 	{
 		const float Alpha = static_cast<float>(i) / static_cast<float>(N - 1);
 		Sim.Positions[i] = FMath::Lerp(Start, End, Alpha);
-		Sim.PrevPositions[i] = Sim.Positions[i];
+		Sim.SetStill(i);
 		Sim.InvMass[i] = 1.0f;
 	}
 
@@ -1438,7 +1438,7 @@ void URopeComponent::ResetChainForThrow(const FVector& HandOrigin)
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		Sim.InvMass[i] = (i == 0) ? 0.0f : 1.0f;
-		Sim.PrevPositions[i] = Sim.Positions[i];
+		Sim.SetStill(i);
 	}
 }
 
@@ -1777,7 +1777,7 @@ void URopeComponent::GatherFlightNodeDebug(const FRopeFlightContactDetector::FPa
 		NodeDebug.NodeIndex = i;
 		NodeDebug.PrevPosition = Sim.PrevPositions[i];
 		NodeDebug.Position = Sim.Positions[i];
-		NodeDebug.NodeSpeed = FRopeFlightContactDetector::NodeSpeed(Sim, i);
+		NodeDebug.NodeSpeed = Sim.NodeSpeed(i);
 		NodeDebug.bFast = FRopeFlightContactDetector::IsTailNode(Sim, i) || NodeDebug.NodeSpeed > Sim.SegmentLength;
 		NodeDebug.bNearBody = FRopeFlightContactDetector::IsNearAnyColliderSegment(
 			NodeDebug.PrevPosition, NodeDebug.Position, SimFrame.FrameColliders, DetectParams);

@@ -34,8 +34,8 @@ bool FRopeSolverDistanceTest::RunTest(const FString& Parameters)
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
-		Sim.Positions[i] *= 2.0f; // 2배 stretch, 속도 0 유지
-		Sim.PrevPositions[i] = Sim.Positions[i];
+		Sim.Positions[i] *= 2.0f; // 2배 stretch
+		Sim.SetStill(i);          // 속도 0 유지
 	}
 
 	const FRopeSolverConfig Config = MakeStiffConfig();

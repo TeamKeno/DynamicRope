@@ -80,11 +80,10 @@ public:
 		const TArray<FRopeContactCandidate>& Candidates, const FParams& Params);
 
 	//~ 개별 헬퍼 — 디버그 수집(FinalizeSimFrame)과 Contacting 시드 빌드에서도 쓰인다.
+	// (노드 프레임 이동 거리는 FRopeSimState::NodeSpeed로 이동 — 체인 자체의 측정이라 여기 소속이
+	//  아니었다. "빠른 노드" 임계 판정(> SegmentLength)은 이 detector의 정책으로 남는다.)
 	/** 로프 끝(tail) 근처 노드인가(마지막 4개). tail은 속도와 무관하게 항상 검사 대상. */
 	static bool IsTailNode(const FRopeSimState& Sim, int32 NodeIndex);
-
-	/** 노드의 프레임 이동 거리(Verlet 속도 크기). */
-	static float NodeSpeed(const FRopeSimState& Sim, int32 NodeIndex);
 
 	/** 세그먼트(Prev→Pos) 바운즈가 어떤 collider 바운즈와도 겹치는가(broad phase). */
 	static bool IsNearAnyColliderSegment(const FVector& PrevPosition, const FVector& Position,

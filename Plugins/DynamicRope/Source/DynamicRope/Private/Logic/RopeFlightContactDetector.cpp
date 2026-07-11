@@ -100,7 +100,7 @@ void FRopeFlightContactDetector::DetectContactCandidates(const FRopeSimState& Si
 			continue;
 		}
 
-		bool bFast = IsTailNode(Sim, i) || NodeSpeed(Sim, i) > Sim.SegmentLength;
+		bool bFast = IsTailNode(Sim, i) || Sim.NodeSpeed(i) > Sim.SegmentLength;
 		GatherNearbyColliders(Sim.PrevPositions[i], Sim.Positions[i], Colliders, Params, NearbyColliders);
 		bool bNearBody = NearbyColliders.Num() > 0;
 
@@ -165,7 +165,7 @@ void FRopeFlightContactDetector::AddPredictedContactCandidates(const FRopeSimSta
 
 		FVector CurrentPosition = Sim.Positions[i];
 		FVector PredictedPosition = CurrentPosition;
-		const FVector FrameDisplacement = Sim.Positions[i] - Sim.PrevPositions[i];
+		const FVector FrameDisplacement = Sim.Displacement(i);
 		if (bHasGuidedNodes && !ShouldRunPredictiveContactForNode(Sim, Whip, i, FrameDisplacement))
 		{
 			continue;
@@ -409,15 +409,6 @@ bool FRopeFlightContactDetector::PassesCaptureQualityGate(const FRopeContactTrac
 bool FRopeFlightContactDetector::IsTailNode(const FRopeSimState& Sim, int32 NodeIndex)
 {
 	return NodeIndex >= FMath::Max(1, Sim.Num() - 4);
-}
-
-float FRopeFlightContactDetector::NodeSpeed(const FRopeSimState& Sim, int32 NodeIndex)
-{
-	if (!Sim.Positions.IsValidIndex(NodeIndex) || !Sim.PrevPositions.IsValidIndex(NodeIndex))
-	{
-		return 0.0f;
-	}
-	return (Sim.Positions[NodeIndex] - Sim.PrevPositions[NodeIndex]).Size();
 }
 
 bool FRopeFlightContactDetector::IsNearAnyColliderSegment(const FVector& PrevPosition, const FVector& Position,
