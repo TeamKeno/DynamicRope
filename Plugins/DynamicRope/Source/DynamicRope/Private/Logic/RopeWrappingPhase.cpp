@@ -1100,13 +1100,13 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 
 	// 1) collider 형상 축: 실제 충돌 지오메트리의 장축 — 본 그래프 특성(짧은 몸통 본, 체인 본,
 	//    임포트 축)과 무관하게 맞고, origin이 지오메트리 중심축 위라 helix 반지름도 정확하다.
-	/* 테스트 중에는 collider 축이 guide-plane fallback을 가리지 않도록 비활성화한다.
+	 //테스트 중에는 collider 축이 guide-plane fallback을 가리지 않도록 비활성화한다.
 	if (FindColliderShapeAxis(Ctx, LatchAnchor.Bone, LatchAnchor.Mesh.Get(), OutAxisOrigin, OutAxisDirection))
 	{
 		LogAxisSource(TEXT("ColliderShapeAxis"), LatchAnchor.Mesh.Get());
 		return true;
 	}
-	*/
+	
 
 	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
