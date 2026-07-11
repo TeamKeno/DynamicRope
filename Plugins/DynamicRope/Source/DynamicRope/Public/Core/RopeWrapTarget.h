@@ -11,8 +11,11 @@
 //                            FRopeWrapTargetKey + IRopeWrapTargetRegistry.
 //                            (소비자: 현행 런타임은 Contacting 트래커, DecideWrap은 유닛테스트 기준점)
 //
-// [배선 상태] 이 파일은 아직 hot 경로에 배선되지 않은 additive 도입분이다(무회귀). 후속 단계에서
-// FRopeSurfaceAnchor / DecideWrap / Hold 가 이 타입들 위로 옮겨간다(설계 초안의 Increment 2~4).
+// [배선 상태] seam A(ResolveBindingWorld)는 랩 경로 전체(Hold/BeginWrap/경로 빌드/앵커 복원/프리뷰)에
+// 배선 완료. 스켈레톤 구조 질의(RopeWrapTargets:: — 부모/자식 키, 스켈레탈 판별)도 랩 경로의 인라인
+// Cast를 대체해 배선됐다 — 랩 흐름의 스켈레탈 가정은 이 파일 쌍(.h/.cpp)에만 존재한다.
+// seam B(FRopeWrapTargetKey + IRopeWrapTargetRegistry)는 미배선 — 본 그룹(피드백 3번)/디자이너 축
+// 요구가 구체화되면 RopeWrapTargets:: 구현 내부를 registry 조회로 교체한다(설계 초안 Increment 2~4).
 
 #pragma once
 
@@ -55,6 +58,27 @@ DYNAMICROPE_API FTransform ResolveBindingWorld(const FRopeBindingFrame& Frame);
  * 프레임 내 다회 호출)가 weak 프레임을 만들지 않고 직접 쓴다. null Component 는 Identity.
  */
 DYNAMICROPE_API FTransform ResolveBindingWorld(const USceneComponent* Component, FName SocketOrBone);
+
+/**
+ * 랩 대상의 스켈레톤 *구조* 질의 모음. 랩 흐름(감김 축/본 그래프/분류)이 대상 종류를 직접 Cast로
+ * 판별하는 대신 이 질의를 쓴다 — 스켈레탈 가정이 이 구현 파일 하나에 격리된다.
+ * [확장 지점] 본 그룹(피드백 3번)/디자이너 전환 edge가 들어오면 이 함수들 내부를
+ * IRopeWrapTargetRegistry 조회로 교체한다 — 호출부는 그대로.
+ */
+namespace RopeWrapTargets
+{
+	/** 대상이 스켈레탈(본 그래프 보유)인가. 정적/가상 본 대상은 false. */
+	DYNAMICROPE_API bool IsSkeletalTarget(const USceneComponent* Mesh);
+
+	/** 대상 키(본)의 부모 키. 스켈레탈 = 부모 본 이름, 그 외(정적/가상 본/루트) = None(그래프 없음). */
+	DYNAMICROPE_API FName GetParentTargetKey(const USceneComponent* Mesh, FName Bone);
+
+	/**
+	 * 대상 키(본)의 자식 키들을 OutChildren에 append. 스켈레탈 = 스켈레톤에서 부모가 Bone인 본 전부,
+	 * 그 외 = 없음. SurfaceVectorField 본 그래프 확장(bounded Dijkstra)의 이웃 열거에 쓴다.
+	 */
+	DYNAMICROPE_API void AppendChildTargetKeys(const USceneComponent* Mesh, FName Bone, TArray<FName>& OutChildren);
+}
 
 /**
  * 접촉 집계가 노드를 묶는 단위(POD). 기존엔 FName Bone 하나였다.

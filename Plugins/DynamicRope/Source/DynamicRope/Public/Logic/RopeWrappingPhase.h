@@ -16,7 +16,8 @@
 #include "Core/RopeTypes.h"
 
 // 랩 대상 추상화(Decision 0): mesh 파라미터를 USceneComponent로 일반화. 스켈레탈 그래프 API가 필요한
-// 함수(축/후보 본)는 .cpp 내부에서 Cast<USkeletalMeshComponent>로 되찾고, 정적이면 단일 본으로 폴백한다.
+// 함수(축/후보 본)는 RopeWrapTargets:: 구조 질의(부모/자식 키)로 해석한다 — 정적 대상은 그래프가
+// 비어 단일 본으로 자연 폴백(스켈레탈 가정은 Core/RopeWrapTarget.cpp에 격리).
 class USceneComponent;
 class IRopeCollider;
 

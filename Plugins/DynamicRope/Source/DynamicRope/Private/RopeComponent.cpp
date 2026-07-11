@@ -1300,7 +1300,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 			const USceneComponent* AttribMesh = nullptr;
 			Collider->GetGPUAttribution(AttribBone, AttribMesh);
 			DC.bWrapTarget = !AttribBone.IsNone() && AttribMesh != nullptr
-				&& Cast<USkeletalMeshComponent>(AttribMesh) == nullptr;
+				&& !RopeWrapTargets::IsSkeletalTarget(AttribMesh);
 		}
 
 		TConstArrayView<FPlane> LocalPlanes;

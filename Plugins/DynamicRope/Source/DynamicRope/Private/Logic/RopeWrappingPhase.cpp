@@ -5,7 +5,6 @@
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
-#include "Components/SkeletalMeshComponent.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 // RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
@@ -1085,14 +1084,13 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 		return false;
 	}
 
-	// 감김 축은 bone→parent 방향이므로 스켈레탈에서만 유도한다. 정적 대상(SkelMesh=null)이면 부모가 없어
-	// 아래 fallback(본 로컬 X축)으로 축을 잡는다.
-	const USkeletalMeshComponent* SkelMesh = Cast<USkeletalMeshComponent>(Mesh);
-	const FName ParentBone = SkelMesh ? SkelMesh->GetParentBone(LatchAnchor.Bone) : NAME_None;
-	const FVector BoneLocation = Mesh->GetSocketTransform(LatchAnchor.Bone).GetLocation();
+	// 감김 축은 bone→parent 방향이므로 본 그래프가 있는 대상(스켈레탈)에서만 유도한다. 정적 대상
+	// (부모 키 None)이면 아래 fallback(본 로컬 X축/기저축)으로 축을 잡는다.
+	const FName ParentBone = RopeWrapTargets::GetParentTargetKey(Mesh, LatchAnchor.Bone);
+	const FVector BoneLocation = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
 	if (!ParentBone.IsNone())
 	{
-		const FVector ParentLocation = Mesh->GetSocketTransform(ParentBone).GetLocation();
+		const FVector ParentLocation = ResolveBindingWorld(Mesh, ParentBone).GetLocation();
 		const FVector Axis = BoneLocation - ParentLocation;
 		if (!Axis.IsNearlyZero())
 		{
@@ -1107,8 +1105,8 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 	// 정적/비-스켈레탈 대상(피드백 5): 본 그래프가 없어 축을 컴포넌트 기저에서 유도한다. 컴포넌트
 	// 기저축(X/Y/Z) 중 latch 표면 normal에 가장 수직인 축을 감김 축으로 고른다 — 원기둥/캡슐의 장축은
 	// 반경 방향(표면 normal)에 수직이므로, 축정렬 랩 캡슐(기둥=Z, 가로보=X/Y)에서 올바른 감김 축이
-	// 자동 선택된다(스켈레탈은 위에서 이미 반환되므로 이 분기는 정적 전용 — 무회귀).
-	if (!SkelMesh)
+	// 자동 선택된다(부모가 있는 스켈레탈은 위에서 이미 반환됨 — 스켈레탈 루트 본은 아래 로컬 X 폴백).
+	if (!RopeWrapTargets::IsSkeletalTarget(Mesh))
 	{
 		const FVector NormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
@@ -1142,8 +1140,7 @@ void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& Latc
 		return;
 	}
 
-	const USkeletalMeshComponent* SkelMesh = Cast<USkeletalMeshComponent>(Mesh);
-	const FName ParentBone = SkelMesh ? SkelMesh->GetParentBone(LatchAnchor.Bone) : NAME_None;
+	const FName ParentBone = RopeWrapTargets::GetParentTargetKey(Mesh, LatchAnchor.Bone);
 	if (ParentBone.IsNone())
 	{
 		return;
@@ -1152,8 +1149,8 @@ void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& Latc
 	float ParentScore = 0.0f;
 	float BoneScore = 0.0f;
 	float TotalWeight = 0.0f;
-	const FVector ParentWorld = Mesh->GetSocketTransform(ParentBone).GetLocation();
-	const FVector BoneWorld = Mesh->GetSocketTransform(LatchAnchor.Bone).GetLocation();
+	const FVector ParentWorld = ResolveBindingWorld(Mesh, ParentBone).GetLocation();
+	const FVector BoneWorld = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
 
 	const auto AddProbe = [&](int32 NodeIndex, float Weight)
 	{
@@ -1194,10 +1191,8 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 		return;
 	}
 
-	// 후보 본 그래프(parent/child) 탐색은 스켈레톤에서만 가능하다. 정적 대상(SkelMesh=null)이면
-	// NumBones=0 + 부모 없음이라 후보는 CurrentBone 하나로 남는다(단일 본 랩 폴백 — 정적은 본 그래프가 없다).
-	const USkeletalMeshComponent* SkelMesh = Cast<USkeletalMeshComponent>(Mesh);
-
+	// 후보 본 그래프(parent/child) 탐색은 본 그래프가 있는 대상(스켈레탈)에서만 유효하다. 정적 대상은
+	// 부모/자식 키가 비어 후보가 CurrentBone 하나로 남는다(단일 본 랩 폴백 — 정적은 본 그래프가 없다).
 	struct FBoneQueueEntry
 	{
 		FName Bone = NAME_None;
@@ -1205,7 +1200,6 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 		float Cost = 0.0f;
 	};
 
-	const int32 NumBones = SkelMesh ? SkelMesh->GetNumBones() : 0;
 	const int32 MaxCandidateDepth = Ctx.Config.bEnableMultiBoneWrapping
 		? FMath::Max(0, Ctx.Config.MaxBoneTransitionDepth)
 		: 0;
@@ -1297,15 +1291,13 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 			Queue.Add({ Bone, NextDepth, NextCost });
 		};
 
-		AddNeighbor(SkelMesh ? SkelMesh->GetParentBone(Entry.Bone) : NAME_None);
+		AddNeighbor(RopeWrapTargets::GetParentTargetKey(Mesh, Entry.Bone));
 
-		for (int32 BoneIndex = 0; SkelMesh && BoneIndex < NumBones; ++BoneIndex)
+		TArray<FName> Children;
+		RopeWrapTargets::AppendChildTargetKeys(Mesh, Entry.Bone, Children);
+		for (const FName& Child : Children)
 		{
-			const FName BoneName = SkelMesh->GetBoneName(BoneIndex);
-			if (!BoneName.IsNone() && SkelMesh->GetParentBone(BoneName) == Entry.Bone)
-			{
-				AddNeighbor(BoneName);
-			}
+			AddNeighbor(Child);
 		}
 	}
 }

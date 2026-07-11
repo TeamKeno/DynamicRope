@@ -36,3 +36,39 @@ FTransform ResolveBindingWorld(const USceneComponent* Component, FName SocketOrB
 	}
 	return Component->GetComponentTransform();
 }
+
+namespace RopeWrapTargets
+{
+	bool IsSkeletalTarget(const USceneComponent* Mesh)
+	{
+		return Cast<USkeletalMeshComponent>(Mesh) != nullptr;
+	}
+
+	FName GetParentTargetKey(const USceneComponent* Mesh, FName Bone)
+	{
+		// 스켈레탈만 본 그래프가 있다. 정적/가상 본 대상(Cast 실패) 또는 루트 본이면 None.
+		const USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Mesh);
+		return (Skel && !Bone.IsNone()) ? Skel->GetParentBone(Bone) : NAME_None;
+	}
+
+	void AppendChildTargetKeys(const USceneComponent* Mesh, FName Bone, TArray<FName>& OutChildren)
+	{
+		const USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Mesh);
+		if (!Skel || Bone.IsNone())
+		{
+			return;
+		}
+
+		// 자식 열거는 전 본 스캔(스켈레톤에 자식 인덱스 테이블이 없다). 호출자(SVF 그래프 확장)는
+		// depth/cost 상한이 있는 소규모 탐색이라 이 O(본 수) 스캔이 기존 구현과 동일 비용이다.
+		const int32 NumBones = Skel->GetNumBones();
+		for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+		{
+			const FName BoneName = Skel->GetBoneName(BoneIndex);
+			if (!BoneName.IsNone() && Skel->GetParentBone(BoneName) == Bone)
+			{
+				OutChildren.Add(BoneName);
+			}
+		}
+	}
+}

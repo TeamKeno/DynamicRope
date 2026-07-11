@@ -2,6 +2,8 @@
 
 #include "Logic/RopeFlightContactDetector.h"
 #include "Collision/RopeCollider.h"
+// ResolveBindingWorld + RopeWrapTargets:: 구조 질의(스켈레탈 가정 격리 지점).
+#include "Core/RopeWrapTarget.h"
 #include "Components/SkeletalMeshComponent.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -62,16 +64,16 @@ FVector ComputeBoneParentAxis(const FRopeContactCandidate& Candidate)
 		return FVector::ZeroVector;
 	}
 
-	// bone→parent 축은 스켈레탈에서만 정의된다. 정적 대상(Cast 실패)이면 축 없음(ZeroVector).
-	const USkeletalMeshComponent* SkelMesh = Cast<USkeletalMeshComponent>(Candidate.Mesh);
-	const FName ParentBone = SkelMesh ? SkelMesh->GetParentBone(Candidate.Bone) : NAME_None;
+	// bone→parent 축은 본 그래프가 있는 대상(스켈레탈)에서만 정의된다. 정적 대상(부모 키 None)이면
+	// 축 없음(ZeroVector).
+	const FName ParentBone = RopeWrapTargets::GetParentTargetKey(Candidate.Mesh, Candidate.Bone);
 	if (ParentBone.IsNone())
 	{
 		return FVector::ZeroVector;
 	}
 
-	const FVector BoneLocation = Candidate.Mesh->GetSocketLocation(Candidate.Bone);
-	const FVector ParentLocation = Candidate.Mesh->GetSocketLocation(ParentBone);
+	const FVector BoneLocation = ResolveBindingWorld(Candidate.Mesh, Candidate.Bone).GetLocation();
+	const FVector ParentLocation = ResolveBindingWorld(Candidate.Mesh, ParentBone).GetLocation();
 	return (BoneLocation - ParentLocation).GetSafeNormal();
 }
 
