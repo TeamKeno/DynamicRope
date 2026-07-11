@@ -450,6 +450,9 @@ private:
 
 	//~ 페이즈 상태 머신 ----------------------------------------------------
 	ERopePhase Phase = ERopePhase::Free;
+	// Prepare 도중 Contacting 등에서 Flight로 돌아온 프레임은 Flight의 Advance/Solve를 거치지 않았다.
+	// Finalize 접촉 감지를 한 프레임 미뤄 stale guide 후보로 즉시 재캡처되는 것을 막는다.
+	bool bEnteredFlightDuringPrepareThisFrame = false;
 
 	/**
 	 * Phase 대입의 단일 지점. 전이 로그("[이름] Old -> New (Reason)")를 일원화한다.
@@ -504,6 +507,11 @@ private:
 
 	/** PreviewPathLocked: cached preview path를 authoritative하게 구동. */
 	FRopeGuidedThrowState GuidedThrowState;
+
+	// Flight 시작 때 확정된 whip guide spline 평면 normal. Contacting을 거쳐 Wrapping에 들어갈 때
+	// bone 위치에 세운 가상 wrapping axis의 방향으로 재사용한다.
+	bool bHasFlightGuidePlaneNormal = false;
+	FVector FlightGuidePlaneNormal = FVector::RightVector;
 
 	// Aim-ray 조준 상태(throw당 wrap 대상 잠금 + pending aim throw 큐). 질의/잠금 판정 로직 포함 —
 	// FRopeAimTargeting(Logic/RopeAimTargeting.h) 주석 참조.

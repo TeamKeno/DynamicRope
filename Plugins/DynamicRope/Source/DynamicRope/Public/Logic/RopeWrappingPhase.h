@@ -50,6 +50,10 @@ public:
 
 		/** preview처럼 partial path를 정상 결과로 쓰는 호출에서 true. */
 		bool bSuppressPathFailureLog = false;
+
+		/** Flight whip guide spline 평면 normal을 runtime wrapping에 전달한다. */
+		bool bHasGuidePlaneNormal = false;
+		FVector GuidePlaneNormal = FVector::RightVector;
 	};
 
 	/**
@@ -153,7 +157,7 @@ private:
 	 *     어긋나 나선 반지름이 실제 단면과 틀어졌다(드래곤 wrap 실패의 핵심). 형상 축은 실제 충돌
 	 *     지오메트리에서 나오므로 본 그래프 형태와 무관하게 맞고, 축 origin도 지오메트리 중심축 위라
 	 *     helix 반지름(latch↔축 거리)이 정확해진다.
-	 *  2) 본→부모 벡터(스켈레탈 — 형상 축을 못 찾은 본: 구형 단일 셰이프 등).
+	 *  2) rope spline guide 평면 normal + bone 위치로 만든 가상 축.
 	 *  3) 비-스켈레탈: 컴포넌트 기저축 중 latch normal에 가장 수직인 축.
 	 *  4) 본 로컬 X.
 	 */
@@ -162,6 +166,10 @@ private:
 
 	/** 1)의 구현: Ctx.Colliders에서 (Bone, Mesh)에 귀속된 collider를 찾아 형상 축을 돌려준다. */
 	static bool FindColliderShapeAxis(const FContext& Ctx, FName Bone, const USceneComponent* Mesh,
+		FVector& OutAxisOrigin, FVector& OutAxisDirection);
+
+	/** 2)의 구현: Flight guided spline 평면 normal을 bone 위치에 세운 가상 축으로 돌려준다. */
+	static bool FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx, const USceneComponent* Mesh,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection);
 
 	void OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,

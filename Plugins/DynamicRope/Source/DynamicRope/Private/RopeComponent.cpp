@@ -33,6 +33,7 @@
 // RopeMath:: 공용 헬퍼 (unity 빌드 익명 네임스페이스 중복 정의 방지)
 #include "RopeMathHelpers.h"
 #include "DrawDebugHelpers.h"
+#include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInterface.h"
 // 길이 비례 파라미터용 런타임 인스턴스
 #include "Materials/MaterialInstanceDynamic.h"
@@ -43,6 +44,13 @@ namespace
 {
 	// Releasing 진입 시 Free 복귀까지의 쿨다운(초). Abort/Hold 실패/수동 해제 공통.
 	constexpr float ReleaseCooldownSeconds = 0.08f;
+
+#if !UE_BUILD_SHIPPING
+	TAutoConsoleVariable<int32> CVarRopeDrawWrappingAxis(
+		TEXT("r.DynamicRope.Debug.DrawWrappingAxis"),
+		1,
+		TEXT("Draws the resolved wrapping axis arrow while a rope is in Wrapping phase."));
+#endif
 
 	void InjectPinnedFrameVelocityForFreeReturn(FRopeSimState& Sim)
 	{
@@ -83,6 +91,31 @@ namespace
 		default:                     return TEXT("?");
 		}
 	}
+
+#if !UE_BUILD_SHIPPING
+	void DrawWrappingAxisDebug(const UWorld* World, const FVector& AxisOrigin, const FVector& AxisDirection, float SegmentLength)
+	{
+		if (!World || CVarRopeDrawWrappingAxis.GetValueOnGameThread() == 0)
+		{
+			return;
+		}
+
+		const FVector AxisDir = AxisDirection.GetSafeNormal();
+		if (AxisDir.IsNearlyZero())
+		{
+			return;
+		}
+
+		const float AxisLen = FMath::Max(80.0f, SegmentLength * 6.0f);
+		const uint8 DepthPriority = SDPG_Foreground;
+		DrawDebugLine(World, AxisOrigin - AxisDir * AxisLen, AxisOrigin + AxisDir * AxisLen,
+			FColor::Yellow, false, 0.0f, DepthPriority, 3.0f);
+		DrawDebugDirectionalArrow(World, AxisOrigin, AxisOrigin + AxisDir * AxisLen,
+			16.0f, FColor::Yellow, false, 0.0f, DepthPriority, 3.0f);
+		DrawDebugString(World, AxisOrigin + AxisDir * (AxisLen + 12.0f),
+			TEXT("wrap axis"), nullptr, FColor::Yellow, 0.0f, true, 1.0f);
+	}
+#endif
 
 }
 
@@ -635,6 +668,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	EnsureRopeInitialized();
 	// 프레임 스코프 — 이번 프레임 로직 산출물을 새로 모은다(G2).
 	SimFrame.OverrideFrame.Reset();
+	const ERopePhase PhaseAtPrepareStart = Phase;
+	bEnteredFlightDuringPrepareThisFrame = false;
 
 	// pinned-start target을 전진시킨다; solver가 substep에 걸쳐 Prev->Target을 sweep하므로 빠른
 	// 캐릭터 이동이 chain을 홱 잡아당겨(폭주시켜) 버리지 않는다.
@@ -767,6 +802,11 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		break;
 	}
 
+	// Prepare 시작부터 Flight였던 프레임만 정상적인 Flight Advance/Solve 입력을 가졌다.
+	// 로직 처리 중 Flight로 돌아온 경우 Finalize 재캡처를 미뤄 다음 프레임에 guide를 먼저 재개한다.
+	bEnteredFlightDuringPrepareThisFrame =
+		PhaseAtPrepareStart != ERopePhase::Flight && Phase == ERopePhase::Flight;
+
 	// 로직 페이즈의 프레임 산출물을 CPU Sim에 1회 적용한다 — 기존 "핸들러 안에서 직접 쓰기"와
 	// 같은 결과(같은 노드 중복 시 나중 fill이 이김 = 순차 쓰기와 동일). GPU 상주 로프에는
 	// 서브시스템이 같은 프레임을 override 패스로 실어 커널에서 적용한다(G2).
@@ -827,7 +867,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	// Flight: 솔브 후 이동 경로 기반 접촉 후보 감지 → 캡처. 파이프라인 자체는
 	// FRopeFlightContactDetector(UObject 비의존)이고, 여기서는 3단계 오케스트레이션만 한다.
 	// 스탯/디버거 소비는 전부 ③ 안에 있다 — 본문에는 판정 흐름만 남긴다.
-	if (Phase == ERopePhase::Flight)
+	if (Phase == ERopePhase::Flight && !bEnteredFlightDuringPrepareThisFrame)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FinalizeFlight);
 		const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
@@ -1490,6 +1530,8 @@ void URopeComponent::BeginWhipSwingFromThrow(const FRopeThrowContext& ResolvedTh
 	const FRopeWhipGuide::FSwingBasis SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
 		ResolvedThrow, ResolvedThrow.SwingPlane, ResolvedThrow.CustomSwingPlaneNormal);
 	const FVector InheritedVelocity = ComputeThrowInheritedVelocity(ResolvedThrow);
+	FlightGuidePlaneNormal = SwingBasis.GuideRight.GetSafeNormal();
+	bHasFlightGuidePlaneNormal = !FlightGuidePlaneNormal.IsNearlyZero();
 
 	// 채찍 스윙 가이드 좌표계 구성 + 활성화(퇴화 케이스 fallback은 컴포넌트 축).
 	WhipGuide.Begin(SwingBasis.AimDir, ResolvedThrow.Origin,
@@ -2077,6 +2119,10 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	const FRopeWrappingPhase::FContext WrappingCtx = MakeWrappingContext();
 	WrappingPhase.AdvancePathBuild(Sim, WrappingCtx);
 
+#if !UE_BUILD_SHIPPING
+	DrawWrappingAxisDebug(GetWorld(), WrappingPhase.State.PathAxisOrigin, WrappingPhase.State.PathAxisDirection, Sim.SegmentLength);
+#endif
+
 	// 안전장치: 표면 경로 생성이 중간에 실패했을 때, 그때까지 감싼 각도가 임계 미만이면 "조금 닿았는데
 	// 바로 wrapped로 철썩 붙는" 상태를 만들지 않고 release한다. 기준은 회전 수가 아니라 감싼 각도(도,
 	// FailedWrapMinAngleDeg — 0이면 가드 끔): 회전 수는 로프 2πr을 요구해 큰 대상(드래곤 몸통)에서
@@ -2111,7 +2157,16 @@ ERopeWrappingPathMode URopeComponent::GetWrappingPathMode() const
 
 FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 {
-	return FRopeWrappingPhase::FContext{ WrapConfig, SimFrame.FrameColliders, GetWrappingPathMode(), Radius, GetName() };
+	return FRopeWrappingPhase::FContext{
+		WrapConfig,
+		SimFrame.FrameColliders,
+		GetWrappingPathMode(),
+		Radius,
+		GetName(),
+		false,
+		bHasFlightGuidePlaneNormal,
+		FlightGuidePlaneNormal
+	};
 }
 
 void URopeComponent::CommitWrapping()

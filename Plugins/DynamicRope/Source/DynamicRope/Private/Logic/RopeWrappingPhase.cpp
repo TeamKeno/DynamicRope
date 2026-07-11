@@ -1063,16 +1063,50 @@ bool FRopeWrappingPhase::FindColliderShapeAxis(const FContext& Ctx, FName Bone, 
 	return false;
 }
 
-/* 감김 축 정의 — 우선순위/근거는 헤더 주석 참고(형상 축 → 본→부모 → 컴포넌트 기저 → 로컬 X). */
+bool FRopeWrappingPhase::FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
+	const USceneComponent* Mesh, FVector& OutAxisOrigin, FVector& OutAxisDirection)
+{
+	if (!Mesh || LatchAnchor.Bone.IsNone() || !Ctx.bHasGuidePlaneNormal)
+	{
+		return false;
+	}
+
+	const FVector GuidePlaneNormal = Ctx.GuidePlaneNormal.GetSafeNormal();
+	if (GuidePlaneNormal.IsNearlyZero())
+	{
+		return false;
+	}
+
+	OutAxisOrigin = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
+	OutAxisDirection = GuidePlaneNormal;
+	return true;
+}
+
+/* 감김 축 정의 — 우선순위/근거는 헤더 주석 참고(형상 축 → rope 평면 가상축 → 컴포넌트 기저 → 로컬 X). */
 bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 	FVector& OutAxisOrigin, FVector& OutAxisDirection) const
 {
+	const auto LogAxisSource = [&](const TCHAR* Source, const USceneComponent* MeshForLog)
+	{
+		UE_LOG(LogRopeWrap, Log,
+			TEXT("[%s] Wrapping axis: source=%s, bone=%s, mesh=%s, origin=%s, dir=%s"),
+			*Ctx.OwnerName,
+			Source,
+			*LatchAnchor.Bone.ToString(),
+			*GetNameSafe(MeshForLog),
+			*OutAxisOrigin.ToString(),
+			*OutAxisDirection.ToString());
+	};
+
 	// 1) collider 형상 축: 실제 충돌 지오메트리의 장축 — 본 그래프 특성(짧은 몸통 본, 체인 본,
 	//    임포트 축)과 무관하게 맞고, origin이 지오메트리 중심축 위라 helix 반지름도 정확하다.
+	/* 테스트 중에는 collider 축이 guide-plane fallback을 가리지 않도록 비활성화한다.
 	if (FindColliderShapeAxis(Ctx, LatchAnchor.Bone, LatchAnchor.Mesh.Get(), OutAxisOrigin, OutAxisDirection))
 	{
+		LogAxisSource(TEXT("ColliderShapeAxis"), LatchAnchor.Mesh.Get());
 		return true;
 	}
+	*/
 
 	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
@@ -1084,10 +1118,17 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 		return false;
 	}
 
-	// 감김 축은 bone→parent 방향이므로 본 그래프가 있는 대상(스켈레탈)에서만 유도한다. 정적 대상
-	// (부모 키 None)이면 아래 fallback(본 로컬 X축/기저축)으로 축을 잡는다.
 	const FName ParentBone = RopeWrapTargets::GetParentTargetKey(Mesh, LatchAnchor.Bone);
 	const FVector BoneLocation = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
+
+	// 로프가 날아와 만든 spline guide 평면의 normal을 bone 위치에 세운 가상 축으로 쓴다.
+	if (FindGuidePlaneAxis(LatchAnchor, Ctx, Mesh, OutAxisOrigin, OutAxisDirection))
+	{
+		LogAxisSource(TEXT("RopePlaneNormal"), Mesh);
+		return true;
+	}
+
+	// rope 평면 축을 만들 수 없으면 스켈레탈 대상은 bone-parent 축으로 폴백한다.
 	if (!ParentBone.IsNone())
 	{
 		const FVector ParentLocation = ResolveBindingWorld(Mesh, ParentBone).GetLocation();
@@ -1096,6 +1137,7 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 		{
 			OutAxisOrigin = ParentLocation;
 			OutAxisDirection = Axis.GetSafeNormal();
+			LogAxisSource(TEXT("BoneParentAxis"), Mesh);
 			return true;
 		}
 	}
@@ -1124,11 +1166,13 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 		}
 		OutAxisOrigin = BoneLocation;
 		OutAxisDirection = BestAxis.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		LogAxisSource(TEXT("StaticBasisFallback"), Mesh);
 		return true;
 	}
 
 	OutAxisOrigin = BoneLocation;
 	OutAxisDirection = BoneXform.GetUnitAxis(EAxis::X).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	LogAxisSource(TEXT("BoneLocalXFallback"), Mesh);
 	return true;
 }
 
