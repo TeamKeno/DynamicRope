@@ -735,12 +735,31 @@ struct FRopeWrapConfig
 	float TetherMaxSpeed = 1500.0f;
 
 	/**
-	 * 테더 회수 분배: 초과분 중 감긴 *대상*이 회수하는 비율. 1(기본) = 전량 대상(기존 동작),
-	 * 0 = 전량 wielder(로프 owner가 앵커 쪽으로 끌려간다 — 고정 앵커 매달리기/등반, 되감기와 조합하면
-	 * 입체기동식 "감으면 끌려 올라감"), 중간 = 비율 분할(양끝이 서로에게 끌린다). 양끝 이동의 합이
-	 * 초과분을 넘지 않아 과수렴이 없다. 자기 자신에 감긴 로프(owner==대상)는 무시하고 전량 대상 경로.
+	 * 테더 회수 분배를 자동으로 정할지(기본 켜짐). 켜면 양끝의 유효 역질량(w=1/유효질량)으로 초과분을
+	 * 나눈다 — 무거울수록/앵커일수록 덜 움직인다(PBD 역질량 가중과 동일). 접지 캐릭터는 무한이 아니라
+	 * 유한 브레이스(질량 × GroundBraceFactor)로 저항하고, 공중이면 그냥 질량, MOVE_None/정적 비시뮬은
+	 * 앵커(무한질량). 물리 질량은 UE가 자동 유지하므로 별도 세팅이 필요 없다. 끄면 아래 TetherTargetShare
+	 * 고정 비율을 쓴다(오버라이드가 자동보다 항상 우선).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
+	bool bAutoTetherShare = true;
+
+	/**
+	 * 접지(발 디딘) 캐릭터가 자기 Mass의 몇 배까지 마찰로 버티는가(유효질량 = Mass × 이 값). 클수록 단단히
+	 * 버텨 무거운 대상도 잘 끌고, 작을수록 쉽게 끌려간다. "대상이 얼마나 무거워야 접지한 나를 끌기
+	 * 시작하는가"의 교차점을 정하는 유일한 튜닝 노브 — 기본값으로 대부분 무설정. bAutoTetherShare 전용.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "1.0", EditCondition = "bAutoTetherShare"))
+	float GroundBraceFactor = 4.0f;
+
+	/**
+	 * (bAutoTetherShare=false일 때만) 테더 회수 고정 분배: 초과분 중 감긴 *대상*이 회수하는 비율.
+	 * 1(기본) = 전량 대상(질량 무관 강제 — wielder가 대상을 전부 끌고 옴, 대상만 이동), 0 = 전량 wielder
+	 * (로프 owner가 앵커 쪽으로 끌려간다 — 고정 앵커 매달리기/등반, 되감기와 조합하면 입체기동식 "감으면
+	 * 끌려 올라감"), 중간 = 비율 분할(양끝이 서로에게 끌린다). 양끝 이동의 합이 초과분을 넘지 않아 과수렴이
+	 * 없다. 자기 자신에 감긴 로프(owner==대상)는 무시하고 전량 대상 경로.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "!bAutoTetherShare"))
 	float TetherTargetShare = 1.0f;
 
 	/**

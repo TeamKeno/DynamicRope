@@ -266,6 +266,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetTetherOvershoot() const { return PullDrive.LastTetherOvershoot; }
 
+	/** 이번 프레임 실제 사용된 테더 대상 몫(shareT) [0..1]. 자동(질량 기반)/수동 공통 최종값 —
+	 *  1이면 wielder 몫 0(전량 대상), 0이면 전량 wielder. wielder 견인 활성 판정/디버그용. */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	float GetEffectiveTetherTargetShare() const { return PullDrive.LastTargetShare; }
+
 	/**
 	 * 능동 Pull(당김) 힘 설정 — Wrapped + 로프가 팽팽할 때 매 프레임 이 크기의 *상수* 힘을 감긴
 	 * 대상에 인가한다(장력과 무관 → 피드백 폭주 없음). 0 = 정지. 입력 홀드 동안 켜고 떼면 끄는

@@ -50,6 +50,18 @@ struct FRopePullDriveState
 	/** 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용. */
 	float LastTetherOvershoot = 0.0f;
 
+	/**
+	 * 테더 대상 몫(shareT)의 시간 스무딩 상태(자동 분배). 접지↔공중/질량 변화로 프레임 간 튀는 것을 EMA로
+	 * 흡수한다. <0 = 미초기화(wrap 시작 후 첫 유효 프레임에 측정값으로 시드). ResetTransient에서 -1로 리셋.
+	 */
+	float SmoothedTargetShare = -1.0f;
+
+	/**
+	 * 이번 프레임 실제 사용된 대상 몫(shareT) [0..1] — 자동/수동 공통 최종값. wielder 게이트
+	 * (URopeWielderComponent::IsWielderTetherActive)와 디버거가 읽는다. 1이면 wielder 몫 0(전량 대상).
+	 */
+	float LastTargetShare = 1.0f;
+
 	/** Pull 힘 수신자 없음 경고를 wrap당 1회만 내보내기 위한 래치(ResetTransient에서 리셋). */
 	bool bLoggedPullNoReceiver = false;
 
@@ -65,6 +77,7 @@ struct FRopePullDriveState
 		SmoothedPullDir = FVector::ZeroVector;
 		SmoothedWielderPullDir = FVector::ZeroVector;
 		SmoothedAimNodeF = -1.0f;
+		SmoothedTargetShare = -1.0f;
 		bLoggedPullNoReceiver = false;
 	}
 };

@@ -16,6 +16,8 @@
 // Pull: 캐릭터 견인(CharacterMovement AddForce)
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+// 테더 자동 분배: 물리 바디 질량 조회(본별 GetBodyMass)
+#include "PhysicsEngine/BodyInstance.h"
 // 거리 LOD(카메라 거리 기준 iteration 감쇠)
 #include "Camera/PlayerCameraManager.h"
 #include "Kismet/GameplayStatics.h"
@@ -2413,6 +2415,71 @@ namespace
 		UCharacterMovementComponent* Movement = Character ? Character->GetCharacterMovement() : nullptr;
 		return (Movement && Movement->MovementMode != MOVE_None) ? Movement : nullptr;
 	}
+
+	// 테더 자동 분배용 유효 역질량(w = 1/유효질량). 0 = 앵커(무한질량). 물리 바디 질량은 UE가 콜리전
+	// 볼륨×밀도로 자동 유지하는 값을 읽으므로 별도 세팅이 필요 없다. 판정 순서는 UpdateTether의 수신자
+	// 체인(스켈레탈 본 → 시뮬 프리미티브 → 소유 루트 → 캐릭터)과 동일 — 질량과 실제 인가점이 일치한다.
+	//  - 스켈레탈 풀 랙돌: 승격된 시뮬 본의 바디 질량.
+	//  - 시뮬 프리미티브(대상 자체/루트): GetMass().
+	//  - 캐릭터: 접지=유한 브레이스(Mass×GroundBraceFactor — 발 디딤 저항), 공중=Mass, MOVE_None=앵커.
+	//  - 그 외(정적/키네마틱/비시뮬 비캐릭터): 앵커(0). wielder는 MeshComp=null로 호출(루트/캐릭터만 해석).
+	float ResolveEndpointInvMass(const USceneComponent* MeshComp, const AActor* Owner, FName WrappedBone, float GroundBraceFactor)
+	{
+		auto InvFromMass = [](float Mass) -> float
+		{
+			return (Mass > KINDA_SMALL_NUMBER) ? (1.0f / Mass) : 0.0f;
+		};
+
+		// (1) 스켈레탈 풀 랙돌: 감긴 본(부모 체인 승격)의 물리 바디 질량.
+		if (const USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
+		{
+			if (Skel->IsSimulatingPhysics())
+			{
+				const FName SimBone = FindNearestSimulatingBone(Skel, WrappedBone);
+				if (!SimBone.IsNone())
+				{
+					if (const FBodyInstance* Body = Skel->GetBodyInstance(SimBone))
+					{
+						return InvFromMass(static_cast<float>(Body->GetBodyMass()));
+					}
+				}
+			}
+		}
+		// (2) 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등).
+		if (const UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
+		{
+			if (Prim->IsSimulatingPhysics())
+			{
+				return InvFromMass(static_cast<float>(Prim->GetMass()));
+			}
+		}
+		// (3) 소유 액터 루트 프리미티브가 시뮬 중.
+		if (Owner)
+		{
+			if (const UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
+			{
+				if (Root->IsSimulatingPhysics())
+				{
+					return InvFromMass(static_cast<float>(Root->GetMass()));
+				}
+			}
+		}
+		// (4) 캐릭터: 접지=유한 브레이스, 공중=Mass, MOVE_None=앵커.
+		if (const ACharacter* Character = Cast<ACharacter>(Owner))
+		{
+			if (const UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+			{
+				if (Movement->MovementMode == MOVE_None)
+				{
+					return 0.0f;
+				}
+				const float BraceScale = Movement->IsMovingOnGround() ? FMath::Max(GroundBraceFactor, 1.0f) : 1.0f;
+				return InvFromMass(Movement->Mass * BraceScale);
+			}
+		}
+		// (5) 정적/키네마틱/비시뮬 비캐릭터 → 앵커.
+		return 0.0f;
+	}
 }
 
 void URopeComponent::UpdateTether(float DeltaTime)
@@ -2462,14 +2529,58 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		return;
 	}
 
-	// 초과분 회수를 대상/wielder(로프 owner) 양끝에 분배한다. TetherTargetShare=1(기본)이면 전량 대상
-	// 회수(기존 동작), 0이면 전량 wielder(고정 앵커에 매달리기/등반 — 되감기와 조합하면 입체기동식
-	// "감으면 끌려 올라감"), 중간은 비율 분할. 양끝이 서로를 향해 각자 몫만큼 움직이므로 합이 초과분을
-	// 넘지 않는다(과수렴 없음). 자기 자신에 감긴 로프(owner==대상)는 분배가 무의미 — 전량 대상 경로로.
-	const float TargetShare = FMath::Clamp(WrapConfig.TetherTargetShare, 0.0f, 1.0f);
+	// 초과분 회수를 대상/wielder(로프 owner) 양끝에 분배한다(양끝이 서로 각자 몫만큼 움직여 합이 초과분을
+	// 넘지 않음 — 과수렴 없음). 몫 산출:
+	//  - 자기 자신에 감긴 로프(owner==대상): 분배 무의미 → 전량 대상.
+	//  - 자동(bAutoTetherShare): 양끝 유효 역질량으로 나눈다(무거울수록/앵커일수록 덜 움직임). 접지↔공중/
+	//    질량 변화로 프레임 간 튀는 것은 EMA로 흡수. 양끝 다 앵커면 아무도 안 움직임(로프가 한계에서 버팀 —
+	//    거리 release가 처리).
+	//  - 수동(오버라이드 우선): TetherTargetShare 고정 비율. 1=전량 대상(질량 무관 강제, wielder가 대상을
+	//    전부 끌고 옴), 0=전량 wielder(앵커 매달리기/등반).
 	const bool bSelfWrap = (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner());
-	const float TargetStep = bSelfWrap ? StepLen : StepLen * TargetShare;
-	const float WielderStep = bSelfWrap ? 0.0f : StepLen * (1.0f - TargetShare);
+	float ShareT = 1.0f; // 대상 몫 [0..1]
+	float ShareW = 0.0f; // wielder 몫
+	if (bSelfWrap)
+	{
+		ShareT = 1.0f;
+		ShareW = 0.0f;
+	}
+	else if (WrapConfig.bAutoTetherShare)
+	{
+		const float WT = ResolveEndpointInvMass(MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, WrapConfig.GroundBraceFactor);
+		const float WW = ResolveEndpointInvMass(nullptr, GetOwner(), NAME_None, WrapConfig.GroundBraceFactor);
+		const float Total = WT + WW;
+		if (Total <= KINDA_SMALL_NUMBER)
+		{
+			// 양끝 다 앵커(정적/MOVE_None) — 아무도 안 움직임.
+			ShareT = 0.0f;
+			ShareW = 0.0f;
+		}
+		else
+		{
+			const float RawShareT = WT / Total; // 무거운 쪽 = 작은 w → 작은 몫.
+			if (PullDrive.SmoothedTargetShare < 0.0f)
+			{
+				PullDrive.SmoothedTargetShare = RawShareT; // 첫 유효 프레임은 측정값으로 시드(래그 없음).
+			}
+			else
+			{
+				const float Tau = WrapConfig.PullDirSmoothTime;
+				const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
+				PullDrive.SmoothedTargetShare = FMath::Lerp(PullDrive.SmoothedTargetShare, RawShareT, Alpha);
+			}
+			ShareT = FMath::Clamp(PullDrive.SmoothedTargetShare, 0.0f, 1.0f);
+			ShareW = 1.0f - ShareT;
+		}
+	}
+	else
+	{
+		ShareT = FMath::Clamp(WrapConfig.TetherTargetShare, 0.0f, 1.0f);
+		ShareW = 1.0f - ShareT;
+	}
+	PullDrive.LastTargetShare = ShareT; // wielder 게이트/디버그가 읽는 유효 대상 몫.
+	const float TargetStep = StepLen * ShareT;
+	const float WielderStep = StepLen * ShareW;
 
 	// 물리 시뮬 대상(본/루트): 속도를 *누적하지 않고* 목표 속도(step/dt)까지만 톱업한다 — 이미 그 방향으로
 	// 충분히 빠르면 아무것도 더하지 않는다. bVelChange로 매 프레임 임펄스를 더하던 기존 방식은 물리 운동량이
