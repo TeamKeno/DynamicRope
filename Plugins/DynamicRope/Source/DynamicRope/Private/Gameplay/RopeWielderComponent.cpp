@@ -294,7 +294,8 @@ void URopeWielderComponent::BindInput()
 	APawn* Pawn = Cast<APawn>(GetOwner());
 	if (!Pawn)
 	{
-		return; // 입력은 Pawn 전용.
+		// 입력은 Pawn 전용.
+		return;
 	}
 	UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(Pawn->InputComponent);
 	if (!EIC)
@@ -456,7 +457,8 @@ FVector URopeWielderComponent::GetAimDirection() const
 				return Pawn->GetControlRotation().Vector();
 			}
 		}
-		return Owner->GetActorForwardVector(); // 컨트롤러 없으면 액터 forward.
+		// 컨트롤러 없으면 액터 forward.
+		return Owner->GetActorForwardVector();
 	}
 }
 
@@ -698,7 +700,8 @@ void URopeWielderComponent::Throw()
 
 	if (ThrowMontage)
 	{
-		PlayThrowMontage(); // 실제 던지기는 몽타주의 UAnimNotify_RopeThrow → ThrowNow().
+		// 실제 던지기는 몽타주의 UAnimNotify_RopeThrow → ThrowNow().
+		PlayThrowMontage();
 	}
 	else
 	{

@@ -1,15 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
 // 모든 활성 URopeComponent의 시뮬레이션을 한 곳에서 구동하는 world subsystem. 컴포넌트가 각자
-// tick하던 것을 대체하는 단일 오케스트레이션 지점이다. 현재는 순차 구동만 — 추후 이 위에
-// collider gather 디둡 / ParallelFor 병렬 솔브 / LOD·sleep / 프레임당 예산 상한을 얹는다.
+// tick하던 것을 대체하는 단일 오케스트레이션 지점으로, 프레임당 1회 collider 중앙 수집(provider
+// 레지스트리 + region 매핑), Prepare→Solve(로프 간 병렬/GPU 배치)→Finalize 3단계 구동, 슬립/LOD
+// 반영까지 담당한다. 남은 확장 후보: 프레임당 총 솔브 예산 상한.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
-#include "Engine/EngineBaseTypes.h" // FTickFunction (TG_PostPhysics 틱)
-#include "RopeGPUSolver.h" // FRopeGPUSolver (DynamicRopeShaders): 비동기 GPU 솔브 인스턴스
+// FTickFunction (TG_PostPhysics 틱).
+#include "Engine/EngineBaseTypes.h"
+// FRopeGPUSolver (DynamicRopeShaders): 비동기 GPU 솔브 인스턴스.
+#include "RopeGPUSolver.h"
 #include "RopeSimSubsystem.generated.h"
 
 class URopeComponent;
@@ -30,7 +33,7 @@ struct FRopeSimTickFunction : public FTickFunction
 {
 	GENERATED_BODY()
 
-	// 대상 서브시스템(월드 수명). 틱 함수는 OnWorldBeginPlay~Deinitialize 동안만 등록된다.
+	/** 대상 서브시스템(월드 수명). 틱 함수는 OnWorldBeginPlay~Deinitialize 동안만 등록된다. */
 	class URopeSimSubsystem* Target = nullptr;
 
 	virtual void ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type CurrentThread,
@@ -86,85 +89,119 @@ public:
 	virtual void Deinitialize() override;
 
 private:
-	// TG_PostPhysics 틱 함수(월드 BeginPlay~Deinitialize 동안 등록). 선행조건은 아래 SetAnimPrerequisites가 관리.
+	/** TG_PostPhysics 틱 함수(월드 BeginPlay~Deinitialize 동안 등록). 선행조건은 아래 SetAnimPrerequisites가 관리. */
 	FRopeSimTickFunction SimTickFunction;
 
-	// 소스 컴포넌트(로프/provider) 소유 액터의 스켈레탈 메시 틱을 SimTickFunction 선행조건으로 등록/해제한다.
-	// 등록·해제 사이에 액터의 메시 구성이 바뀌어 잔여 항목이 남아도 FTickPrerequisite는 weak라 무해(스킵됨).
+	/**
+	 * 소스 컴포넌트(로프/provider) 소유 액터의 스켈레탈 메시 틱을 SimTickFunction 선행조건으로 등록/해제한다.
+	 * 등록·해제 사이에 액터의 메시 구성이 바뀌어 잔여 항목이 남아도 FTickPrerequisite는 weak라 무해(스킵됨).
+	 */
 	void SetAnimPrerequisites(const UActorComponent* Source, bool bAdd);
 
-	// 등록된 활성 로프(컴포넌트는 UObject → GC 추적).
+	/** 등록된 활성 로프(컴포넌트는 UObject → GC 추적). */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<URopeComponent>> Ropes;
 
-	// 등록된 collider provider(IRopeColliderProvider 구현 컴포넌트). GC 추적.
+	/** 등록된 collider provider(IRopeColliderProvider 구현 컴포넌트). GC 추적. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UActorComponent>> ColliderProviders;
 
-	// OnWorldBeginPlay에서 자동 스폰한 로프 매니저 액터(정적 월드 충돌 프로바이더 호스트). 세팅
-	// StaticBodyControllerClass가 None이면 null(자동 스폰 opt-out). Deinitialize에서 파괴한다.
+	/**
+	 * OnWorldBeginPlay에서 자동 스폰한 로프 매니저 액터(정적 월드 충돌 프로바이더 호스트). 세팅
+	 * StaticBodyControllerClass가 None이면 null(자동 스폰 opt-out). Deinitialize에서 파괴한다.
+	 */
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> SpawnedStaticBodyController = nullptr;
 
-	// 프레임당 1회 중앙 빌드한 collider(provider별 소유 액터 + collider 포인터). 포인터는 provider 소유라 해당 프레임만 유효.
+	/** 프레임당 1회 중앙 빌드한 collider(provider별 소유 액터 + collider 포인터). 포인터는 provider 소유라 해당 프레임만 유효. */
 	struct FFrameProviderColliders
 	{
-		AActor* Owner = nullptr;          // 소스 필터링용(provider 컴포넌트의 owner 액터).
-		bool bWorldStatic = false;        // 정적 월드 provider — 로프별 소유자 제외 면제(ProvidesWorldStaticColliders).
-		TArray<IRopeCollider*> Colliders; // provider->GatherColliders가 채운 포인터(provider 백킹 스토리지를 가리킴).
-		// provider가 gather 때 함께 돌려준 region(=로프 인덱스)별 풀 인덱스 매핑. bHasRegionMapping이면
-		// 로프별 배정이 이 리스트 소비로 끝난다 — O(로프×풀) bounds 재-컬 제거(2026-07 수집 방식 변경).
+		/** 소스 필터링용(provider 컴포넌트의 owner 액터). */
+		AActor* Owner = nullptr;
+
+		/** 정적 월드 provider — 로프별 소유자 제외 면제(ProvidesWorldStaticColliders). */
+		bool bWorldStatic = false;
+
+		/** provider->GatherColliders가 채운 포인터(provider 백킹 스토리지를 가리킴). */
+		TArray<IRopeCollider*> Colliders;
+
+		/**
+		 * provider가 gather 때 함께 돌려준 region(=로프 인덱스)별 풀 인덱스 매핑. bHasRegionMapping이면
+		 * 로프별 배정이 이 리스트 소비로 끝난다 — O(로프×풀) bounds 재-컬 제거(2026-07 수집 방식 변경).
+		 */
 		TArray<TArray<int32>> RegionIndices;
 		bool bHasRegionMapping = false;
-		// (매핑 없는 provider 폴백 전용) collider별 월드 bounds 캐시 — 이전 방식의 로프별 거리 컬링에 쓴다.
+
+		/** (매핑 없는 provider 폴백 전용) collider별 월드 bounds 캐시 — 이전 방식의 로프별 거리 컬링에 쓴다. */
 		TArray<FBox> Bounds;
 	};
 	TArray<FFrameProviderColliders> FrameProviders;
 
-	// 이번 프레임 로프별 region(Ropes 인덱스와 1:1 — region 없는 로프는 !IsValid 자리 유지). provider
-	// gather와 로프별 배정이 같은 박스를 쓰는 단일 소스. BuildFrameColliders가 채운다.
+	/**
+	 * 이번 프레임 로프별 region(Ropes 인덱스와 1:1 — region 없는 로프는 !IsValid 자리 유지). provider
+	 * gather와 로프별 배정이 같은 박스를 쓰는 단일 소스. BuildFrameColliders가 채운다.
+	 */
 	TArray<FBox> FrameRopeRegions;
 
-	// 이번 프레임 region 처리 우선순위(활성 로프 먼저 — 사용 중 페이즈 > Free 깨어있음 > 슬립 > 무효).
-	// 전역 추출 상한이 있는 provider(정적 바디)가 이 순서로 스캔해, 한가한 로프 주변 잡동사니가 상한을
-	// 선점해 활성 로프가 충돌을 굶는 것을 막는다. 순서일 뿐 region 인덱스는 불변(매핑 무영향).
+	/**
+	 * 이번 프레임 region 처리 우선순위(활성 로프 먼저 — 사용 중 페이즈 > Free 깨어있음 > 슬립 > 무효).
+	 * 전역 추출 상한이 있는 provider(정적 바디)가 이 순서로 스캔해, 한가한 로프 주변 잡동사니가 상한을
+	 * 선점해 활성 로프가 충돌을 굶는 것을 막는다. 순서일 뿐 region 인덱스는 불변(매핑 무영향).
+	 */
 	TArray<int32> FrameRegionGatherOrder;
 
-	// 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). provider에는 로프별 region 리스트를 넘긴다.
+	/** 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). provider에는 로프별 region 리스트를 넘긴다. */
 	void BuildFrameColliders();
-	// 한 로프의 collider를 중앙 빌드에서 모은다: 기본은 전체, 자기 owner provider만 제외(bIncludeOwnerColliders로 옵트인).
-	// RopeIndex = Ropes/FrameRopeRegions 인덱스(provider 매핑의 region 인덱스와 동일해야 한다).
+
+	/**
+	 * 한 로프의 collider를 중앙 빌드에서 모은다: 기본은 전체, 자기 owner provider만 제외(bIncludeOwnerColliders로 옵트인).
+	 * RopeIndex = Ropes/FrameRopeRegions 인덱스(provider 매핑의 region 인덱스와 동일해야 한다).
+	 */
 	void GatherCollidersForRope(const URopeComponent& Rope, int32 RopeIndex, TArray<IRopeCollider*>& OutColliders) const;
-	// 한 로프의 broad-phase 질의 bounds(Pos∪Prev tight AABB + 접촉/예측 마진). provider에 넘기는 region과
-	// per-rope collider 컬링이 동일 박스를 쓰도록 한 곳에서 계산한다(무효면 !IsValid 박스 반환).
+
+	/**
+	 * 한 로프의 broad-phase 질의 bounds(Pos∪Prev tight AABB + 접촉/예측 마진). provider에 넘기는 region과
+	 * per-rope collider 컬링이 동일 박스를 쓰도록 한 곳에서 계산한다(무효면 !IsValid 박스 반환).
+	 */
 	static FBox ComputeRopeQueryBounds(const URopeComponent& Rope);
 
-	// GPU 상주 솔버(M5). 영속 버퍼(로프별)를 매 프레임 in-place 전진. 인스턴스 상태라 월드별 1개.
-	// G4: 렌더 가능 RHI면 이게 유일 런타임 경로. RHI 없으면(쿡/-nullrhi/서버) CPU 솔버로 자동 폴백.
+	/**
+	 * GPU 상주 솔버(M5). 영속 버퍼(로프별)를 매 프레임 in-place 전진. 인스턴스 상태라 월드별 1개.
+	 * G4: 렌더 가능 RHI면 이게 유일 런타임 경로. RHI 없으면(쿡/-nullrhi/서버) CPU 솔버로 자동 폴백.
+	 */
 	FRopeGPUSolver GpuSolver;
 
-	// GetLatest로 회수한 RopeId별 최신(약간 지연) 위치 캐시. 매 프레임 갱신분을 각 Sim에 매핑한다.
+	/** GetLatest로 회수한 RopeId별 최신(약간 지연) 위치 캐시. 매 프레임 갱신분을 각 Sim에 매핑한다. */
 	TMap<uint32, FRopeResidentLatest> GpuLatest;
 
-	// GetLatestContacts로 회수한 RopeId별 최신(약간 지연) GPU 접촉 감지 결과(G3). Finalize 전에 귀속.
+	/** GetLatestContacts로 회수한 RopeId별 최신(약간 지연) GPU 접촉 감지 결과(G3). Finalize 전에 귀속. */
 	TMap<uint32, FRopeResidentContacts> GpuLatestContacts;
 
-	// GPU 감지 결과(콜라이더 인덱스)를 로프의 귀속 테이블로 FRopeContactCandidate로 복원해 컴포넌트에
-	// 채운다(Finalize의 Flight 접촉 소스). 지연분이 현재 시드 generation과 맞을 때만 유효.
+	/**
+	 * GPU 감지 결과(콜라이더 인덱스)를 로프의 귀속 테이블로 FRopeContactCandidate로 복원해 컴포넌트에
+	 * 채운다(Finalize의 Flight 접촉 소스). 지연분이 현재 시드 generation과 맞을 때만 유효.
+	 */
 	void BuildGpuFlightCandidates(URopeComponent& Rope);
 
-	// Phase 2(GPU) 헬퍼 — 한 로프의 GPU 상주 step을 구성한다. GPU 상주 대상이면 OutStep을 채우고 true를
-	// 반환(디스패치 목록에 추가), 노드수 초과 등 폴백이면 내부에서 CPU 솔브 후 false. Rope.SimFrame.bGpuSteppedThisFrame도 세팅.
+	/**
+	 * Phase 2(GPU) 헬퍼 — 한 로프의 GPU 상주 step을 구성한다. GPU 상주 대상이면 OutStep을 채우고 true를
+	 * 반환(디스패치 목록에 추가), 노드수 초과 등 폴백이면 내부에서 CPU 솔브 후 false. Rope.SimFrame.bGpuSteppedThisFrame도 세팅.
+	 */
 	bool TryBuildResidentStep(URopeComponent& Rope, float DeltaTime, FRopeGPUResidentStep& OutStep);
-	// G3: Flight 로프의 접촉 감지 요청(+ whip 예측 입력)을 Step에 세팅하고 귀속 테이블을 리셋한다.
+
+	/** G3: Flight 로프의 접촉 감지 요청(+ whip 예측 입력)을 Step에 세팅하고 귀속 테이블을 리셋한다. */
 	void RequestContactDetection(URopeComponent& Rope, float DeltaTime, FRopeGPUResidentStep& Step) const;
-	// 이 로프의 FrameColliders를 capsule/SDF로 분류해 Step에 싣는다. bDetectThisRope면 귀속 테이블도 병행 채움.
+
+	/** 이 로프의 FrameColliders를 capsule/SDF로 분류해 Step에 싣는다. bDetectThisRope면 귀속 테이블도 병행 채움. */
 	void PackStepColliders(URopeComponent& Rope, bool bDetectThisRope, FRopeGPUResidentStep& Step) const;
-	// G1: Flight whip 가이드 타깃을 override로 Step에 패킹한다(적분 전 적용, 비-Flight면 no-op).
+
+	/** G1: Flight whip 가이드 타깃을 override로 Step에 패킹한다(적분 전 적용, 비-Flight면 no-op). */
 	void PackWhipOverride(const URopeComponent& Rope, FRopeGPUResidentStep& Step) const;
 
-	// GPU 표현(GetGPUCapsule/SDF/Box/Convex) 없는 collider의 "조용한 GPU 제외" 1회성 경고 래치.
-	// 커스텀 IRopeCollider가 CPU 계약만 구현하면 테스트(CPU)에선 되고 런타임(GPU)에선 무시되는
-	// 함정을 로그로 드러낸다. PackStepColliders(const)에서 세팅되므로 mutable(진단 상태일 뿐 로직 무관).
+	/**
+	 * GPU 표현(GetGPUCapsule/SDF/Box/Convex) 없는 collider의 "조용한 GPU 제외" 1회성 경고 래치.
+	 * 커스텀 IRopeCollider가 CPU 계약만 구현하면 테스트(CPU)에선 되고 런타임(GPU)에선 무시되는
+	 * 함정을 로그로 드러낸다. PackStepColliders(const)에서 세팅되므로 mutable(진단 상태일 뿐 로직 무관).
+	 */
 	mutable bool bWarnedGpuUnrepresentedCollider = false;
 };

@@ -4,26 +4,36 @@
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "Render/RopeSceneProxy.h"
-#include "Debug/RopeDebugDraw.h"       // stat 카운터(RopeDebug::Record*)
-#include "Debug/RopeDebugSnapshot.h"   // 게이트플레이 디버거용 한 프레임 디버그 스냅샷
+// stat 카운터(RopeDebug::Record*)
+#include "Debug/RopeDebugDraw.h"
+// 게이트플레이 디버거용 한 프레임 디버그 스냅샷
+#include "Debug/RopeDebugSnapshot.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
-#include "GameFramework/Character.h"                    // Pull: 캐릭터 견인(CharacterMovement AddForce)
+// Pull: 캐릭터 견인(CharacterMovement AddForce)
+#include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "Camera/PlayerCameraManager.h"                 // 거리 LOD(카메라 거리 기준 iteration 감쇠)
+// 거리 LOD(카메라 거리 기준 iteration 감쇠)
+#include "Camera/PlayerCameraManager.h"
 #include "Kismet/GameplayStatics.h"
-#include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
+// TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Subsystem/RopeSimSubsystem.h"
-#include "Subsystem/RopeDebugSubsystem.h" // 디버그 캡처 게이트 + 스냅샷 보관소
+// 디버그 캡처 게이트 + 스냅샷 보관소
+#include "Subsystem/RopeDebugSubsystem.h"
 #include "Logic/RopeThrowPreviewBuilder.h"
-#include "RopeGPUSolver.h" // FRopeGPUSolver::MaxNodes — NumParticles 상한(GPU 솔버 스레드그룹 한도)
+// FRopeGPUSolver::MaxNodes — NumParticles 상한(GPU 솔버 스레드그룹 한도)
+#include "RopeGPUSolver.h"
 #include "Settings/DynamicRopeSettings.h"
-#include "RopeMathHelpers.h" // RopeMath:: 공용 헬퍼 (unity 빌드 익명 네임스페이스 중복 정의 방지)
+// RopeMath:: 공용 헬퍼 (unity 빌드 익명 네임스페이스 중복 정의 방지)
+#include "RopeMathHelpers.h"
 #include "DrawDebugHelpers.h"
 #include "Materials/MaterialInterface.h"
-#include "Materials/MaterialInstanceDynamic.h" // 길이 비례 파라미터용 런타임 인스턴스
-#include "UObject/ConstructorHelpers.h" // 기본 머티리얼 로드(FObjectFinder)
+// 길이 비례 파라미터용 런타임 인스턴스
+#include "Materials/MaterialInstanceDynamic.h"
+// 기본 머티리얼 로드(FObjectFinder)
+#include "UObject/ConstructorHelpers.h"
 
 namespace
 {
@@ -619,7 +629,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	//  근거와 3단계 역할 분담은 헤더의 Prepare/Solve/Finalize 선언부 주석 참고.)
 
 	EnsureRopeInitialized();
-	SimFrame.OverrideFrame.Reset(); // 프레임 스코프 — 이번 프레임 로직 산출물을 새로 모은다(G2).
+	// 프레임 스코프 — 이번 프레임 로직 산출물을 새로 모은다(G2).
+	SimFrame.OverrideFrame.Reset();
 
 	// pinned-start target을 전진시킨다; solver가 substep에 걸쳐 Prev->Target을 sweep하므로 빠른
 	// 캐릭터 이동이 chain을 홱 잡아당겨(폭주시켜) 버리지 않는다.
@@ -650,12 +661,14 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 
 	switch (Phase)
 	{
-	case ERopePhase::Free:        // 손에서 늘어뜨려진 채 캐릭터를 따라간다
+	// 손에서 늘어뜨려진 채 캐릭터를 따라간다
+	case ERopePhase::Free:
 		if (Throttle.IsAsleep() && Throttle.ShouldWakeFromSleep(Sim, SolverConfig, ReelRate, SimFrame.FrameColliders))
 		{
 			Throttle.Wake();
 		}
-		SimFrame.bSolveThisFrame = !Throttle.IsAsleep(); // 슬립 중엔 솔브 스킵(GPU 로프는 dispatch 자체가 없음).
+		// 슬립 중엔 솔브 스킵(GPU 로프는 dispatch 자체가 없음).
+		SimFrame.bSolveThisFrame = !Throttle.IsAsleep();
 		break;
 
 	case ERopePhase::Flight:
@@ -687,7 +700,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		}
 		else
 		{
-			SimFrame.bSolveThisFrame = true; // 일반 Flight는 기존처럼 solver 후 Finalize에서 접촉을 감지한다.
+			// 일반 Flight는 기존처럼 solver 후 Finalize에서 접촉을 감지한다.
+			SimFrame.bSolveThisFrame = true;
 		}
 		break;
 	}
@@ -709,13 +723,15 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		// → ④ 자동 release 판정(장력 지속 초과 / 거리 초과 — ②③의 산출물을 소비).
 		if (!HoldWrappedNodesToBone(DeltaTime))
 		{
-			break; // 대상 mesh 소실 — release 완료(솔브 없음).
+			// 대상 mesh 소실 — release 완료(솔브 없음).
+			break;
 		}
 		UpdateWrappedPullSample(DeltaTime);
 		ApplyWrappedTraction(DeltaTime);
 		if (CheckWrappedAutoRelease(DeltaTime))
 		{
-			break; // 장력/거리 release 발생(솔브 없음).
+			// 장력/거리 release 발생(솔브 없음).
+			break;
 		}
 		SimFrame.bSolveThisFrame = true;
 		break;
@@ -813,10 +829,13 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
 
 		TArray<FRopeContactCandidate> Candidates;
-		BuildFlightContactCandidates(DeltaTime, DetectParams, Candidates);           // ① 후보 산출
+		// ① 후보 산출
+		BuildFlightContactCandidates(DeltaTime, DetectParams, Candidates);
 
-		const bool bShouldCapture = TryCaptureFlightContacts(DeltaTime, Candidates, DetectParams); // ② 판정/전이
-		RecordFlightObservation(DetectParams, Candidates, bShouldCapture, FlightSnapshot);         // ③ 관측
+		// ② 판정/전이
+		const bool bShouldCapture = TryCaptureFlightContacts(DeltaTime, Candidates, DetectParams);
+		// ③ 관측
+		RecordFlightObservation(DetectParams, Candidates, bShouldCapture, FlightSnapshot);
 	}
 
 	// 새 centerline을 render proxy로 push하고 bounds를 갱신한다.
@@ -886,7 +905,8 @@ void URopeComponent::SendRenderDynamicData_Concurrent()
 	// centerline을 component-local 공간으로 보낸다; proxy는 GetLocalToWorld()를 통해 렌더링한다.
 	const FTransform Xform = GetComponentTransform();
 	FRopeDynamicData* DynamicData = new FRopeDynamicData;
-	DynamicData->bGpuResident = SimFrame.bGpuSteppedThisFrame; // M5b: GPU step된 프레임만 resident PosBuf 직접 렌더 허용.
+	// M5b: GPU step된 프레임만 resident PosBuf 직접 렌더 허용.
+	DynamicData->bGpuResident = SimFrame.bGpuSteppedThisFrame;
 	// resident 튜브의 월드→로컬 변환도 이 GT 트랜스폼으로 — Points 로컬화와 같은 프레임의 값이라 드로우
 	// 트랜스폼과 일치한다(프록시 GetLocalToWorld()는 SetDynamicData 시점에 한 프레임 이전 값 — 헤더 주석 참고).
 	DynamicData->WorldToLocal = FMatrix44f(Xform.ToInverseMatrixWithScale());
@@ -969,7 +989,8 @@ UMaterialInterface* URopeComponent::GetMaterial(int32 /*ElementIndex*/) const
 void URopeComponent::SetMaterial(int32 /*ElementIndex*/, UMaterialInterface* Material)
 {
 	RopeMaterial = Material;
-	UpdateRopeMaterialDynamicParams(); // 새 부모로 MID 재생성 + 길이 파라미터 재적용(MarkRenderStateDirty 포함).
+	// 새 부모로 MID 재생성 + 길이 파라미터 재적용(MarkRenderStateDirty 포함).
+	UpdateRopeMaterialDynamicParams();
 }
 
 void URopeComponent::UpdateRopeMaterialDynamicParams()
@@ -1058,7 +1079,8 @@ void URopeComponent::ResetTransientPhaseState()
 	ContactingElapsed = 0.0f;
 	FlightNoContactElapsed = 0.0f;
 	TensionOverTime = 0.0f;
-	PullDrive.ResetTransient(); // Pull 샘플/EMA 3종/경고 래치만. 생존 필드는 FRopePullDriveState 주석 참조.
+	// Pull 샘플/EMA 3종/경고 래치만. 생존 필드는 FRopePullDriveState 주석 참조.
+	PullDrive.ResetTransient();
 }
 
 void URopeComponent::ResolvePendingAimThrow()
@@ -1118,7 +1140,8 @@ void URopeComponent::InitRope()
 	Sim.StartPinTarget = Start;
 	Sim.StartPinPrev = Start;
 
-	++SimFrame.SimGeneration; // Sim 전면 재구성 → GPU 상주 버퍼 재시드(M5).
+	// Sim 전면 재구성 → GPU 상주 버퍼 재시드(M5).
+	++SimFrame.SimGeneration;
 
 	// 길이가 확정되는 지점 — 꼬임 밀도(TwistTurns)를 새 RopeLength에 맞춰 갱신(런타임 길이 변경/재throw 포함).
 	UpdateRopeMaterialDynamicParams();
@@ -1159,7 +1182,8 @@ namespace
 				const double  DirLenSq = Dir.SizeSquared();
 				if (DirLenSq < 1e-8)
 				{
-					continue; // 평행 면 — 교선 없음.
+					// 평행 면 — 교선 없음.
+					continue;
 				}
 				// 교선 위 한 점 p0 = (Wi·(Nj×Dir) + Wj·(Dir×Ni)) / |Dir|² — 두 평면 교선의 표준 점 공식.
 				// (외적 인자 순서가 load-bearing: 뒤바뀌면 P0가 반사돼 비대칭 컨벡스에서 엣지가 대량 누락된다.)
@@ -1176,11 +1200,14 @@ namespace
 					}
 					const FVector Nk(Planes[k].X, Planes[k].Y, Planes[k].Z);
 					const double  Denom = FVector::DotProduct(Nk, Dir);
-					const double  Num = static_cast<double>(Planes[k].W) - FVector::DotProduct(Nk, P0); // W_k - N_k·p0
+					// W_k - N_k·p0
+					const double  Num = static_cast<double>(Planes[k].W) - FVector::DotProduct(Nk, P0);
 					if (FMath::Abs(Denom) < 1e-8)
 					{
-						if (Num < -1e-6) { bValid = false; break; } // 선이 이 면 바깥 → 엣지 없음.
-						continue; // 선이 면과 평행하고 안쪽 — 제약 없음.
+						// 선이 이 면 바깥 → 엣지 없음.
+						if (Num < -1e-6) { bValid = false; break; }
+						// 선이 면과 평행하고 안쪽 — 제약 없음.
+						continue;
 					}
 					const double T = Num / Denom;
 					if (Denom > 0.0) { TMax = FMath::Min(TMax, T); }
@@ -1188,11 +1215,13 @@ namespace
 				}
 				if (!bValid || TMin >= TMax - 1e-4)
 				{
-					continue; // 인접 면이 아니거나 구간 소멸 — 헐 엣지 아님.
+					// 인접 면이 아니거나 구간 소멸 — 헐 엣지 아님.
+					continue;
 				}
 				const FVector L0 = P0 + Dir * TMin;
 				const FVector L1 = P0 + Dir * TMax;
-				OutWorldEdges.Add(Rot.RotateVector(L0) + Trans); // 로컬 → 월드(강체).
+				// 로컬 → 월드(강체).
+				OutWorldEdges.Add(Rot.RotateVector(L0) + Trans);
 				OutWorldEdges.Add(Rot.RotateVector(L1) + Trans);
 			}
 		}
@@ -1224,10 +1253,14 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.TensionReleaseForce = WrapConfig.TensionReleaseForce;
 		Snapshot.bPullValid = PullDrive.LastPullSample.bValid;
 		Snapshot.PullPoint = PullDrive.LastPullSample.WorldPoint;
-		Snapshot.PullDirection = PullDrive.LastPullSample.Direction; // 스무딩된(실제 인가) 방향
-		Snapshot.PullDirRaw = PullDrive.LastPullDirRaw;              // 스무딩 전 look-ahead(지터 진단)
-		Snapshot.PullAimNode = PullDrive.LastPullSample.AimNode; // raw 정수 조준(홉 진단용 텍스트)
-		Snapshot.PullAimPoint = PullDrive.LastPullSample.bValid ? PullDrive.LastPullSample.AimPos // 청록 = 스무딩된 fractional 조준(실제 인가)
+		// 스무딩된(실제 인가) 방향
+		Snapshot.PullDirection = PullDrive.LastPullSample.Direction;
+		// 스무딩 전 look-ahead(지터 진단)
+		Snapshot.PullDirRaw = PullDrive.LastPullDirRaw;
+		// raw 정수 조준(홉 진단용 텍스트)
+		Snapshot.PullAimNode = PullDrive.LastPullSample.AimNode;
+		// 청록 = 스무딩된 fractional 조준(실제 인가)
+		Snapshot.PullAimPoint = PullDrive.LastPullSample.bValid ? PullDrive.LastPullSample.AimPos
 			: PullDrive.LastPullSample.WorldPoint;
 		Snapshot.PullTension = PullDrive.LastPullSample.Tension;
 		Snapshot.TetherResponse = WrapConfig.TetherResponse;
@@ -1326,7 +1359,8 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 			NC.Normal = Best.Normal;
 			NC.Penetration = Best.Penetration;
 			NC.Bone = Best.Bone;
-			NC.bWorldStatic = Best.Bone.IsNone(); // 정적 월드(박스/컨벡스)는 Bone=None, 스켈레탈은 본 이름 있음.
+			// 정적 월드(박스/컨벡스)는 Bone=None, 스켈레탈은 본 이름 있음.
+			NC.bWorldStatic = Best.Bone.IsNone();
 			Snapshot.NodeContacts.Add(MoveTemp(NC));
 		}
 	}
@@ -1369,7 +1403,8 @@ FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& T
 	}
 	if (Up.IsNearlyZero())
 	{
-		Up = RopeMath::AnyTangentFromNormal(Forward); // 수직 던지기 + 수직 컴포넌트 축 — 임의 수직축 폴백.
+		// 수직 던지기 + 수직 컴포넌트 축 — 임의 수직축 폴백.
+		Up = RopeMath::AnyTangentFromNormal(Forward);
 	}
 	Resolved.FrameUp = Up;
 	Resolved.FrameRight = FVector::CrossProduct(Up, Forward);
@@ -1675,7 +1710,8 @@ void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
 		}
 	}
 
-	RemoveNonWrappableCandidates(OutCandidates); // CanWrapTarget 게이트(Contacting 재수집과 공용 헬퍼).
+	// CanWrapTarget 게이트(Contacting 재수집과 공용 헬퍼).
+	RemoveNonWrappableCandidates(OutCandidates);
 }
 
 bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
@@ -1809,7 +1845,8 @@ void URopeComponent::BuildContactingState(const TArray<FRopeContactCandidate>& C
 
 void URopeComponent::UpdateContacting(float DeltaTime)
 {
-	ContactingElapsed += DeltaTime; // 총 체류(아래 정체 안전망 판단용 — 감김 판정 자체는 트래커 dwell).
+	// 총 체류(아래 정체 안전망 판단용 — 감김 판정 자체는 트래커 dwell).
+	ContactingElapsed += DeltaTime;
 
 	// 매 프레임 실제 접촉을 재수집한다 — 캡처 순간의 1회 스냅샷만 믿고 타이머를 돌리던 이전 구조는
 	// (1) dismiss가 사실상 불발이었고(트래커 미갱신) (2) 움직이는 대상(랙돌/드래곤)에서 시드와 실제
@@ -1820,7 +1857,8 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 	TArray<FRopeContactCandidate> Candidates;
 	FRopeFlightContactDetector::DetectContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, Candidates);
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
-	RemoveNonWrappableCandidates(Candidates); // CanWrapTarget 게이트(Flight 후보 산출과 공용 헬퍼).
+	// CanWrapTarget 게이트(Flight 후보 산출과 공용 헬퍼).
+	RemoveNonWrappableCandidates(Candidates);
 
 	// 트래커 갱신: 같은 본이면 dwell 누적, 지배 본이 바뀌면 dwell 리셋(전이 프레임 오탐 방어 —
 	// dwell 재시작 계약을 캡처 후 구간에도 실제로 적용), 접촉이 끊기면 dwell이 소진되며 트래커가
@@ -1961,7 +1999,8 @@ void URopeComponent::StartWrappingFromContacting()
 		SimSubsystem->SyncGpuPositionsForHandoff(*this);
 	}
 
-	const FRopeLatchNode& Latch = PendingWrapSeed.Latched[0];	//무조건 첫 번째 latch node 하나만 기준으로 잡는다
+	// 무조건 첫 번째 latch node 하나만 기준으로 잡는다
+	const FRopeLatchNode& Latch = PendingWrapSeed.Latched[0];
 	FRopeSurfaceAnchor LatchAnchor;
 
 	// 정상 경로: BuildWrapSeedFromContactingState()가 실제 contact candidate 기반으로
@@ -2107,7 +2146,8 @@ void URopeComponent::CommitWrapping()
 		return;
 	}
 
-	WrapController.BeginWrap(Sim, Seed, SimFrame.OverrideFrame); // 감길 mesh는 Seed.Mesh로 전파(접촉 유래, cross-actor 포함).
+	// 감길 mesh는 Seed.Mesh로 전파(접촉 유래, cross-actor 포함).
+	WrapController.BeginWrap(Sim, Seed, SimFrame.OverrideFrame);
 	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
 
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s), angle=%.0fdeg"),
@@ -2166,7 +2206,8 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 		return;
 	}
 
-	PullDrive.LastPullDirRaw = PullDrive.LastPullSample.Direction; // 스무딩 전 raw look-ahead(정수 조준) — 디버거 raw vs smoothed 비교.
+	// 스무딩 전 raw look-ahead(정수 조준) — 디버거 raw vs smoothed 비교.
+	PullDrive.LastPullDirRaw = PullDrive.LastPullSample.Direction;
 
 	// (1) 조준 인덱스 시간 스무딩 → fractional 조준 위치 보간.
 	const float RawAimF = static_cast<float>(PullDrive.LastPullSample.AimNode);
@@ -2385,9 +2426,12 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	}
 	// fractional 조준(연속): 정수 AimNode 대신 스무딩된 조준 위치/세그먼트 수를 써 초과분이 노드 단위로 뚝뚝
 	// 튀지 않고 연속으로 변한다 → 견인이 매끈해진다(어제 "뚝뚝 끊김"의 원인이 이 이산 참조였다).
-	const FVector Anchor = PullDrive.LastPullSample.WorldPoint;          // 끌 지점(대상 쪽 앵커)
-	const FVector Aim    = PullDrive.LastPullSample.AimPos;              // 보간된 조준(손 또는 벽 모서리)
-	const float   LegSegs = static_cast<float>(PullDrive.LastPullSample.AnchorNode) - PullDrive.LastPullSample.AimNodeF; // 연속 세그먼트 수
+	// 끌 지점(대상 쪽 앵커)
+	const FVector Anchor = PullDrive.LastPullSample.WorldPoint;
+	// 보간된 조준(손 또는 벽 모서리)
+	const FVector Aim    = PullDrive.LastPullSample.AimPos;
+	// 연속 세그먼트 수
+	const float   LegSegs = static_cast<float>(PullDrive.LastPullSample.AnchorNode) - PullDrive.LastPullSample.AimNodeF;
 	const FVector Span = Aim - Anchor;
 	const float Dist = static_cast<float>(Span.Size());
 	const float AvailLen = LegSegs * Sim.SegmentLength + WrapConfig.TetherSlack;
@@ -2403,7 +2447,8 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 이번 프레임 회수량 = 초과분 × 반응(위치 동기 — 남은 초과분이 다음 입력이라 수렴). 최대 속도로 클램프해
 	// 초과분 스파이크(코너 전이 등)에도 대상이 튕겨나가지 않게 한다.
 	const float Response = FMath::Clamp(WrapConfig.TetherResponse, 0.0f, 1.0f);
-	const float MaxStep = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f) * DeltaTime; // 이번 프레임 최대 이동(cm)
+	// 이번 프레임 최대 이동(cm)
+	const float MaxStep = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f) * DeltaTime;
 	const float StepLen = (MaxStep > 0.0f) ? FMath::Min(Overshoot * Response, MaxStep) : (Overshoot * Response);
 
 	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화). 대상 타입을 가리지 않고 아래 수신자 체인

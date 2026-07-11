@@ -3,25 +3,40 @@
 #include "Subsystem/RopeSimSubsystem.h"
 #include "RopeComponent.h"
 #include "DynamicRopeLog.h"
-#include "Solver/RopeXPBDSolver.h" // RopeSolverSubsteps
-#include "Collision/RopeCollider.h" // IRopeCollider::GetGPUCapsule
-#include "Collision/RopeColliderProvider.h" // IRopeColliderProvider (중앙 collider gather)
-#include "RopeGPUSolver.h"          // FRopeGPUSolver / FRopeGPUResidentStep / FRopeGPUCapsule (DynamicRopeShaders 모듈)
-#include "RopeGPUSolverRegistry.h"  // RopeGDF::RegisterSolver / SetGDFActiveCount (GDF 통합 경로)
-#include "Settings/DynamicRopeSettings.h"      // StaticBodyControllerClass / StaticBodyMaxColliders(자동 스폰)
-#include "Collision/RopeController.h"          // ARopeController(정적 바디 프로바이더 호스트)
-#include "Collision/RopeStaticBodyProvider.h"  // 기본 클래스 스폰 시 MaxColliders 주입
+// RopeSolverSubsteps
+#include "Solver/RopeXPBDSolver.h"
+// IRopeCollider::GetGPUCapsule
+#include "Collision/RopeCollider.h"
+// IRopeColliderProvider (중앙 collider gather)
+#include "Collision/RopeColliderProvider.h"
+// FRopeGPUSolver / FRopeGPUResidentStep / FRopeGPUCapsule (DynamicRopeShaders 모듈)
+#include "RopeGPUSolver.h"
+// RopeGDF::RegisterSolver / SetGDFActiveCount (GDF 통합 경로)
+#include "RopeGPUSolverRegistry.h"
+// StaticBodyControllerClass / StaticBodyMaxColliders(자동 스폰)
+#include "Settings/DynamicRopeSettings.h"
+// ARopeController(정적 바디 프로바이더 호스트)
+#include "Collision/RopeController.h"
+// 기본 클래스 스폰 시 MaxColliders 주입
+#include "Collision/RopeStaticBodyProvider.h"
 #include "Engine/World.h"
-#include "SceneInterface.h"         // FSceneInterface (씬→솔버 등록 키)
-#include "GameFramework/Actor.h"    // AActor::GetOwner (provider 소스 필터링)
+// FSceneInterface (씬→솔버 등록 키)
+#include "SceneInterface.h"
+// AActor::GetOwner (provider 소스 필터링)
+#include "GameFramework/Actor.h"
 #include "Components/ActorComponent.h"
-#include "Components/SkeletalMeshComponent.h" // 틱 선행조건(애니 평가 이후 보장)
+// 틱 선행조건(애니 평가 이후 보장)
+#include "Components/SkeletalMeshComponent.h"
 #include "Async/ParallelFor.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-#include "RHI.h"        // GDynamicRHI
-#include "Misc/App.h"   // FApp::CanEverRender
-#include "UObject/UObjectIterator.h" // TObjectIterator(자동 스폰 전 기존 프로바이더 스캔)
-#include "Engine/Engine.h"           // GEngine->AddOnScreenDebugMessage(중복 경고)
+// GDynamicRHI
+#include "RHI.h"
+// FApp::CanEverRender
+#include "Misc/App.h"
+// TObjectIterator(자동 스폰 전 기존 프로바이더 스캔)
+#include "UObject/UObjectIterator.h"
+// GEngine->AddOnScreenDebugMessage(중복 경고)
+#include "Engine/Engine.h"
 
 namespace
 {
@@ -56,7 +71,8 @@ namespace
 	FRopeGPUSDFCollider MakeGpuSdf(const FRopeSDFColliderView& View)
 	{
 		FRopeGPUSDFCollider Sdf;
-		Sdf.Distances       = View.Distances;   // 코드 바이트 블롭(업로드 평탄화 시 dequant)
+		// 코드 바이트 블롭(업로드 평탄화 시 dequant)
+		Sdf.Distances       = View.Distances;
 		Sdf.BytesPerCode    = View.BytesPerCode;
 		Sdf.NarrowBandInner = View.NarrowBandInner;
 		Sdf.NarrowBandOuter = View.NarrowBandOuter;
@@ -66,7 +82,8 @@ namespace
 		Sdf.LocalMin        = View.LocalMin;
 		Sdf.LocalSize       = View.LocalSize;
 		Sdf.BoneToWorld     = View.BoneToWorld;
-		Sdf.PrevBoneToWorld = View.PrevBoneToWorld; // GPU CCD/표면속도 드래그.
+		// GPU CCD/표면속도 드래그.
+		Sdf.PrevBoneToWorld = View.PrevBoneToWorld;
 		Sdf.InvDeltaTime    = View.InvDeltaTime;
 		Sdf.VolumeKey       = View.VolumeKey;
 		return Sdf;
@@ -99,7 +116,8 @@ namespace
 		Step.TipFrictionScale  = Cfg.TipFrictionScale;
 		Step.SweepStep         = Cfg.SweepStep;
 		Step.MaxSweepSamples   = Cfg.MaxSweepSamples;
-		Step.bUseWorldGDF      = Cfg.bUseWorldGDF; // Phase 2c: 엔진 GDF 월드 밀어내기(씬 그래프 dispatch에서만 유효).
+		// Phase 2c: 엔진 GDF 월드 밀어내기(씬 그래프 dispatch에서만 유효).
+		Step.bUseWorldGDF      = Cfg.bUseWorldGDF;
 		Step.NumSub            = Schedule.NumSub;
 		Step.FixedDt           = Schedule.FixedDt;
 	}
@@ -118,7 +136,8 @@ void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
 	if (Rope)
 	{
 		Ropes.AddUnique(Rope);
-		SetAnimPrerequisites(Rope, /*bAdd*/ true); // 손 핀(소켓 부착)이 소유 캐릭터 포즈를 따르므로.
+		// 손 핀(소켓 부착)이 소유 캐릭터 포즈를 따르므로.
+		SetAnimPrerequisites(Rope, /*bAdd*/ true);
 		UE_LOG(LogDynamicRope, Verbose, TEXT("RegisterRope: %s (%d total)"), *Rope->GetName(), Ropes.Num());
 	}
 }
@@ -163,14 +182,16 @@ void URopeSimSubsystem::RegisterColliderProvider(UActorComponent* Provider)
 				if (E && E->ProvidesWorldStaticColliders())
 				{
 					WarnDuplicateWorldStaticProvider(Provider->GetOwner());
-					return; // 등록 거부 — 이 프로바이더의 GatherColliders는 호출되지 않는다.
+					// 등록 거부 — 이 프로바이더의 GatherColliders는 호출되지 않는다.
+					return;
 				}
 			}
 		}
 	}
 
 	ColliderProviders.AddUnique(Provider);
-	SetAnimPrerequisites(Provider, /*bAdd*/ true); // 본 콜라이더(capsule/SDF)가 소유 캐릭터 포즈를 읽으므로.
+	// 본 콜라이더(capsule/SDF)가 소유 캐릭터 포즈를 읽으므로.
+	SetAnimPrerequisites(Provider, /*bAdd*/ true);
 	UE_LOG(LogRopeCollision, Verbose, TEXT("RegisterColliderProvider: %s (%d total)"),
 		*Provider->GetName(), ColliderProviders.Num());
 }
@@ -215,7 +236,8 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope)
 	// 로프 tight AABB(Pos∪Prev — 프레임 모션 포함) + 마진. provider region과 per-rope collider 컬링이
 	// 이 동일 박스를 공유한다(GatherCollidersForRope / BuildFrameColliders 양쪽에서 호출).
 	FBox RopeBounds(ForceInit);
-	float MaxFrameDispSq = 0.0f; // 예측 접촉(전방 외삽) 여유 계산용 — 이번 프레임 최대 노드 변위.
+	// 예측 접촉(전방 외삽) 여유 계산용 — 이번 프레임 최대 노드 변위.
+	float MaxFrameDispSq = 0.0f;
 	for (int32 i = 0; i < Rope.Sim.Num(); ++i)
 	{
 		RopeBounds += Rope.Sim.Positions[i];
@@ -311,7 +333,8 @@ void URopeSimSubsystem::BuildFrameColliders()
 
 		FFrameProviderColliders FP;
 		FP.Owner = Comp->GetOwner();
-		FP.bWorldStatic = Provider->ProvidesWorldStaticColliders(); // 정적 월드 provider는 소유자 제외 면제.
+		// 정적 월드 provider는 소유자 제외 면제.
+		FP.bWorldStatic = Provider->ProvidesWorldStaticColliders();
 		FP.Colliders = MoveTemp(Gather.Colliders);
 		// region 매핑은 길이가 로프 수와 일치할 때만 신뢰(불일치 = provider 버그 → bounds 재-컬 폴백으로 강등).
 		FP.bHasRegionMapping = Gather.bHasRegionMapping
@@ -369,7 +392,8 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 		}
 		if (!bCull)
 		{
-			OutColliders.Append(FP.Colliders); // region 없는 로프(빈 sim 등) → 전체 폴백(예산 우회, 드묾 — 기존 동작 유지).
+			// region 없는 로프(빈 sim 등) → 전체 폴백(예산 우회, 드묾 — 기존 동작 유지).
+			OutColliders.Append(FP.Colliders);
 			continue;
 		}
 
@@ -378,7 +402,8 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 		{
 			if (!FP.RegionIndices.IsValidIndex(RopeIndex))
 			{
-				continue; // 빌드에서 길이 검증하므로 도달하지 않는 방어선.
+				// 빌드에서 길이 검증하므로 도달하지 않는 방어선.
+				continue;
 			}
 			for (const int32 Idx : FP.RegionIndices[RopeIndex])
 			{
@@ -389,11 +414,13 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 				}
 				if (FP.bWorldStatic)
 				{
-					WorldStaticCandidates.Add(Collider); // 예산 적용 대상
+					// 예산 적용 대상
+					WorldStaticCandidates.Add(Collider);
 				}
 				else
 				{
-					OutColliders.Add(Collider); // 스켈레톤 등 — 항상 포함
+					// 스켈레톤 등 — 항상 포함
+					OutColliders.Add(Collider);
 				}
 			}
 			continue;
@@ -402,7 +429,8 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 		// 폴백 경로(매핑 없는 provider): 이전 방식의 collider bounds 재-컬.
 		if (FP.Bounds.Num() != FP.Colliders.Num())
 		{
-			OutColliders.Append(FP.Colliders); // bounds 캐시 불일치 → 전체 폴백(드묾).
+			// bounds 캐시 불일치 → 전체 폴백(드묾).
+			OutColliders.Append(FP.Colliders);
 			continue;
 		}
 		for (int32 c = 0; c < FP.Colliders.Num(); ++c)
@@ -411,11 +439,13 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 			{
 				if (FP.bWorldStatic)
 				{
-					WorldStaticCandidates.Add(FP.Colliders[c]); // 예산 적용 대상
+					// 예산 적용 대상
+					WorldStaticCandidates.Add(FP.Colliders[c]);
 				}
 				else
 				{
-					OutColliders.Add(FP.Colliders[c]); // 스켈레톤 등 — 항상 포함
+					// 스켈레톤 등 — 항상 포함
+					OutColliders.Add(FP.Colliders[c]);
 				}
 			}
 		}
@@ -466,7 +496,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 
 	// G4: GPU가 유일 런타임 경로. 렌더 가능 RHI면 GPU, 아니면 CPU 폴백(자동). 감지도 GPU와 함께 켜진다.
 	const bool bUseGPU = RopeGpuRuntimeAvailable();
-	const bool bUseGPUContacts = bUseGPU; // GPU 솔브 시 감지도 GPU(별도 토글 없음).
+	// GPU 솔브 시 감지도 GPU(별도 토글 없음).
+	const bool bUseGPUContacts = bUseGPU;
 
 	// GPU 상주(M5): RT 리드백이 채운 RopeId별 최신(약 1~2프레임 지연) 위치를 회수해 캐시. 아래 Phase 2에서
 	// Free/Flight 로프의 Sim(렌더/충돌 미러)에 반영한다. 순차 의존성은 GPU 영속 버퍼 안에서 충족된다.
@@ -476,7 +507,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		GpuSolver.GetLatest(GpuLatest);
 		if (bUseGPUContacts)
 		{
-			GpuSolver.GetLatestContacts(GpuLatestContacts); // G3: 접촉 감지 결과 회수(Finalize 전에 귀속).
+			// G3: 접촉 감지 결과 회수(Finalize 전에 귀속).
+			GpuSolver.GetLatestContacts(GpuLatestContacts);
 		}
 	}
 
@@ -520,7 +552,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 
 		TArray<FRopeGPUResidentStep> Steps;
 		Steps.Reserve(Ropes.Num());
-		int32 NumGdfRopes = 0; // Phase 2c: GDF 소비자 게이트 — 활성 GDF 로프 수(엔진 온디맨드 빌드 신호).
+		// Phase 2c: GDF 소비자 게이트 — 활성 GDF 로프 수(엔진 온디맨드 빌드 신호).
+		int32 NumGdfRopes = 0;
 		for (URopeComponent* Rope : Ropes)
 		{
 			FRopeGPUResidentStep Step;
@@ -550,7 +583,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SolveParallel);
 		ParallelFor(Ropes.Num(), [this, DeltaTime](int32 Index)
 		{
-			Ropes[Index]->SimFrame.bGpuSteppedThisFrame = false; // CPU 경로 → resident 렌더 안 함(M5b).
+			// CPU 경로 → resident 렌더 안 함(M5b).
+			Ropes[Index]->SimFrame.bGpuSteppedThisFrame = false;
 			Ropes[Index]->SolveSimFrame(DeltaTime);
 		});
 	}
@@ -652,8 +686,10 @@ void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 			if (ControllerClass)
 			{
 				FActorSpawnParameters SpawnParams;
-				SpawnParams.ObjectFlags |= RF_Transient; // 런타임 매니저 — 레벨에 저장하지 않는다.
-				SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn; // 위치 무관(원점).
+				// 런타임 매니저 — 레벨에 저장하지 않는다.
+				SpawnParams.ObjectFlags |= RF_Transient;
+				// 위치 무관(원점).
+				SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 				SpawnedStaticBodyController = InWorld.SpawnActor<AActor>(ControllerClass, FTransform::Identity, SpawnParams);
 				// 콜라이더 예산/컨벡스 평면 상한은 프로바이더가 BuildColliders에서 Project Settings를 직접 읽으므로
 				// 여기서 주입할 필요가 없다(단일 소스 — 컴포넌트에 중복 필드를 두지 않는다).
@@ -699,7 +735,8 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 	if (!Contacts || Contacts->Generation != Rope.SimFrame.SimGeneration)
 	{
 		// 아직 회수분이 없거나 재시드 catch-up 중 — 이번 프레임은 GPU 후보 없음(캡처는 다음 프레임).
-		Rope.SimFrame.bGpuContactsThisFrame = true; // 소스는 GPU(빈 후보) — CPU 스윕으로 되돌아가지 않는다.
+		// 소스는 GPU(빈 후보) — CPU 스윕으로 되돌아가지 않는다.
+		Rope.SimFrame.bGpuContactsThisFrame = true;
 		return;
 	}
 
@@ -720,9 +757,11 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 		const FRopeSimFrameIO::FGpuColliderAttribution& A = Attr[C.ColliderIndex];
 		if (A.Bone.IsNone())
 		{
-			continue; // 귀속 불가(비-스켈레탈 collider) — 캡처 대상 아님.
+			// 귀속 불가(비-스켈레탈 collider) — 캡처 대상 아님.
+			continue;
 		}
-		const USceneComponent* Mesh = A.Mesh.Get(); // weak — 지연 중 파괴됐으면 null(판정은 bone으로 진행).
+		// weak — 지연 중 파괴됐으면 null(판정은 bone으로 진행).
+		const USceneComponent* Mesh = A.Mesh.Get();
 
 		// 병합: 같은 (node, bone, mesh) 후보가 있으면 SourceMask OR + Source 우선순위 갱신, 새 후보는 추가 안 함.
 		FRopeContactCandidate* Existing = nullptr;
@@ -757,7 +796,8 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 		Cand.Normal = C.Normal.GetSafeNormal();
 		Cand.Penetration = C.Penetration;
 		Cand.SurfaceVelocity = C.SurfaceVelocity;
-		Cand.WrapDirectionScore = 0.0f; // EvaluateRelativeMotion(GT)이 채운다.
+		// EvaluateRelativeMotion(GT)이 채운다.
+		Cand.WrapDirectionScore = 0.0f;
 		Rope.SimFrame.GpuFlightCandidates.Add(Cand);
 	}
 	Rope.SimFrame.bGpuContactsThisFrame = true;
@@ -767,7 +807,8 @@ bool URopeSimSubsystem::SyncGpuPositionsForHandoff(URopeComponent& Rope)
 {
 	if (!RopeGpuRuntimeAvailable())
 	{
-		return false; // CPU 폴백 — Sim이 이미 최신.
+		// CPU 폴백 — Sim이 이미 최신.
+		return false;
 	}
 
 	FRopeSimState& S = Rope.Sim;
@@ -776,11 +817,13 @@ bool URopeSimSubsystem::SyncGpuPositionsForHandoff(URopeComponent& Rope)
 	uint32 Generation = 0;
 	if (!GpuSolver.ReadbackNow(Rope.GetUniqueID(), Pos, Prev, Generation))
 	{
-		return false; // 상주 버퍼 없음(GPU로 step된 적 없음) — 미러가 곧 진실.
+		// 상주 버퍼 없음(GPU로 step된 적 없음) — 미러가 곧 진실.
+		return false;
 	}
 	if (Generation != Rope.SimFrame.SimGeneration || Pos.Num() != S.Num() || Prev.Num() != S.Num())
 	{
-		return false; // 재시드 catch-up 중이거나 노드 수 불일치 — stale 적용 방지.
+		// 재시드 catch-up 중이거나 노드 수 불일치 — stale 적용 방지.
+		return false;
 	}
 
 	S.Positions = MoveTemp(Pos);
@@ -999,10 +1042,13 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			}
 			continue;
 		}
-			WarnGpuUnrepresented(Collider); // 비-정적은 capsule/SDF/box만 GPU에 실린다 — 둘 다 아니면 제외.
+			// 비-정적은 capsule/SDF/box만 GPU에 실린다 — 둘 다 아니면 제외.
+			WarnGpuUnrepresented(Collider);
 	}
-	Step.NumDetectCapsules = Step.Capsules.Num(); // 감지 경계: 여기까지가 비-정적 캡슐.
-	Step.NumDetectBoxes = Step.Boxes.Num();       // 박스 감지 경계: 여기까지가 랩 가능 박스.
+	// 감지 경계: 여기까지가 비-정적 캡슐.
+	Step.NumDetectCapsules = Step.Capsules.Num();
+	// 박스 감지 경계: 여기까지가 랩 가능 박스.
+	Step.NumDetectBoxes = Step.Boxes.Num();
 
 	// pass 2: 정적(월드) collider — solve 전용. 캡슐(스피어/스필)은 감지 경계 뒤에 append,
 	// 박스는 전용 배열. 귀속 테이블은 인덱스 정렬 유지를 위해 정적 캡슐 분도 채운다(None/null —
@@ -1016,7 +1062,8 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		FRopeGPUCapsule Cap;
 		if (Collider->GetGPUCapsule(Cap.A, Cap.B, Cap.Radius))
 		{
-			Step.Capsules.Add(Cap); // 정적 — 프레임 모션 없음(InvDt 0 기본값).
+			// 정적 — 프레임 모션 없음(InvDt 0 기본값).
+			Step.Capsules.Add(Cap);
 			if (bDetectThisRope)
 			{
 				Rope.SimFrame.GpuCapsuleAttribution.Add(MakeAttribution(Collider));
@@ -1031,7 +1078,8 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			Step.Boxes.Add(Box);
 			if (bDetectThisRope)
 			{
-				Rope.SimFrame.GpuBoxAttribution.Add(MakeAttribution(Collider)); // 정적 - None(감지 미참여, 인덱스 정렬용)
+				// 정적 - None(감지 미참여, 인덱스 정렬용)
+				Rope.SimFrame.GpuBoxAttribution.Add(MakeAttribution(Collider));
 			}
 			continue;
 		}
@@ -1043,7 +1091,8 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		if (!Collider->GetGPUConvex(LocalPlanes, LocalBounds, CvRot, CvTrans, CvPrevRot, CvPrevTrans, CvInvDt)
 			|| LocalPlanes.Num() == 0 || !LocalBounds.IsValid)
 		{
-			WarnGpuUnrepresented(Collider); // 정적은 capsule/box/convex만 GPU에 실린다 — 전부 아니면 제외.
+			// 정적은 capsule/box/convex만 GPU에 실린다 — 전부 아니면 제외.
+			WarnGpuUnrepresented(Collider);
 			continue;
 		}
 		{
@@ -1059,7 +1108,8 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			Step.ConvexPlanes.Reserve(Step.ConvexPlanes.Num() + LocalPlanes.Num());
 			for (const FPlane& Pl : LocalPlanes)
 			{
-				Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W)); // 로컬·단위·바깥, PlaneDot=dot(N,p)-W
+				// 로컬·단위·바깥, PlaneDot=dot(N,p)-W
+				Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W));
 			}
 			Step.Convexes.Add(Cv);
 		}

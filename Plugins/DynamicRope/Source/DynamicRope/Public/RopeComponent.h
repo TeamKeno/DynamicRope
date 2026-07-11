@@ -13,8 +13,10 @@
 #include "Core/RopeTypes.h"
 #include "Core/RopeSimFrameIO.h"
 #include "Core/RopePullDriveState.h"
-#include "Logic/RopeAimTargeting.h" // FRopeAimRayHitResult/FRopeAimRayThrowRequest + 조준 로직/상태
-#include "Logic/RopeSolverThrottle.h" // 슬립 + 거리 LOD(솔브 스로틀)
+// FRopeAimRayHitResult/FRopeAimRayThrowRequest + 조준 로직/상태.
+#include "Logic/RopeAimTargeting.h"
+// 슬립 + 거리 LOD(솔브 스로틀).
+#include "Logic/RopeSolverThrottle.h"
 #include "Solver/RopeXPBDSolver.h"
 #include "Logic/RopeWrapController.h"
 #include "Logic/RopeWhipGuide.h"
@@ -28,10 +30,12 @@ class IRopeColliderProvider;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class USkeletalMeshComponent;
-class USceneComponent; // 랩 대상 추상화(Decision 0): 랩 대상 mesh를 USceneComponent로 일반화
+// 랩 대상 추상화(Decision 0): 랩 대상 mesh를 USceneComponent로 일반화.
+class USceneComponent;
 class FRegisterComponentContext;
 struct FRopeDebugSnapshot;
-struct FRopeFlightNodeDebug; // 디버거 노드별 flight 시각화 항목(Debug/RopeDebugSnapshot.h)
+// 디버거 노드별 flight 시각화 항목(Debug/RopeDebugSnapshot.h).
+struct FRopeFlightNodeDebug;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
@@ -472,24 +476,46 @@ private:
 	//~ 시뮬레이션 상태 + 페이즈별 로직 소유물 -------------------------------
 	// Non-UObject — 값으로 소유하며 GC 추적 대상이 아니다(POD/약참조만 보유).
 	// 아래 로직 4개는 로프 수명 순서와 1:1 대응한다: Throw/Flight → Contacting → Wrapping → Wrapped.
-	FRopeSimState       Sim;				// 단일 진실: 솔버/로직/렌더가 공유하는 파티클 체인
-	FRopeXPBDSolver     Solver;				// XPBD 물리(Free/Flight/Wrapped 자유 구간)
-	FRopeWhipGuide      WhipGuide;			// Throw/Flight: 채찍 스윙(가이드 타깃 계산+적용)
-	FRopeContactTracker ContactTracker;		// Flight/Contacting: 접촉 후보의 dominant bone 추적
-	FRopeWrapState      PendingWrapSeed;	// Contacting: 캡처 시 만들어 둔 wrap 시드(Wrapping 진입 재료)
-	FRopeWrappingPhase  WrappingPhase;		// Wrapping: 경로 점진 생성+front 모션+마스크(작업 상태는 .State)
-	FRopeWrapController WrapController;		// Wrapped: bone-local latch 유지/해제
-	FRopeGuidedThrowState GuidedThrowState;	// PreviewPathLocked: cached preview path를 authoritative하게 구동
+	/** 단일 진실: 솔버/로직/렌더가 공유하는 파티클 체인. */
+	FRopeSimState       Sim;
+
+	/** XPBD 물리(Free/Flight/Wrapped 자유 구간). */
+	FRopeXPBDSolver     Solver;
+
+	/** Throw/Flight: 채찍 스윙(가이드 타깃 계산+적용). */
+	FRopeWhipGuide      WhipGuide;
+
+	/** Flight/Contacting: 접촉 후보의 dominant bone 추적. */
+	FRopeContactTracker ContactTracker;
+
+	/** Contacting: 캡처 시 만들어 둔 wrap 시드(Wrapping 진입 재료). */
+	FRopeWrapState      PendingWrapSeed;
+
+	/** Wrapping: 경로 점진 생성+front 모션+마스크(작업 상태는 .State). */
+	FRopeWrappingPhase  WrappingPhase;
+
+	/** Wrapped: bone-local latch 유지/해제. */
+	FRopeWrapController WrapController;
+
+	/** PreviewPathLocked: cached preview path를 authoritative하게 구동. */
+	FRopeGuidedThrowState GuidedThrowState;
 
 	// Aim-ray 조준 상태(throw당 wrap 대상 잠금 + pending aim throw 큐). 질의/잠금 판정 로직 포함 —
 	// FRopeAimTargeting(Logic/RopeAimTargeting.h) 주석 참조.
 	FRopeAimTargeting AimTargeting;
 
 	//~ 페이즈 타이머 --------------------------------------------------------
-	float ContactingElapsed = 0.0f;	// Contacting 체류 시간(WrapDecisionTime 판정)
-	float FlightNoContactElapsed = 0.0f;	// Whip 종료 후 캡처 없이 Flight에 머문 시간
-	float ReleaseCooldown = 0.0f;	// Releasing → Free 복귀까지 남은 시간
-	float TensionOverTime = 0.0f;	// Wrapped 중 최대 장력이 TensionReleaseForce를 연속 초과한 시간
+	/** Contacting 체류 시간(WrapDecisionTime 판정). */
+	float ContactingElapsed = 0.0f;
+
+	/** Whip 종료 후 캡처 없이 Flight에 머문 시간. */
+	float FlightNoContactElapsed = 0.0f;
+
+	/** Releasing → Free 복귀까지 남은 시간. */
+	float ReleaseCooldown = 0.0f;
+
+	/** Wrapped 중 최대 장력이 TensionReleaseForce를 연속 초과한 시간. */
+	float TensionOverTime = 0.0f;
 
 	// Wrapped 견인/스무딩 상태 묶음(Pull 샘플/EMA 3종/능동 Pull/테더 초과분/경고 래치). 멤버별 의미와
 	// 전이 시 리셋 규약(무엇이 살아남는가)은 FRopePullDriveState(Core/RopePullDriveState.h) 주석 참조.

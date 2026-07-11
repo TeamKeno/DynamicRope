@@ -410,22 +410,34 @@ protected:
 	virtual void NotifyThrowRejected(ERopeThrowRejectReason Reason) {}
 
 private:
-	void ResolveRefs();        // Rope/AttachMesh 해석(미설정 시 owner에서 탐색).
-	void AttachRopeToSocket(); // Rope를 AttachMesh의 HandSocketName에 부착.
-	void AddMappingContext();  // MappingContext를 로컬 플레이어 Enhanced Input 서브시스템에 추가.
+	/** Rope/AttachMesh 해석(미설정 시 owner에서 탐색). */
+	void ResolveRefs();
+
+	/** Rope를 AttachMesh의 HandSocketName에 부착. */
+	void AttachRopeToSocket();
+
+	/** MappingContext를 로컬 플레이어 Enhanced Input 서브시스템에 추가. */
+	void AddMappingContext();
 
 	void ResolvePreviewComponent(bool bAllowAutoCreate);
-	// wielder가 테더 몫을 실제로 받는 상태인가(Wrapped + TetherResponse>0 + TargetShare<1 + 셀프랩 아님).
+
+	/** wielder가 테더 몫을 실제로 받는 상태인가(Wrapped + TetherResponse>0 + TargetShare<1 + 셀프랩 아님). */
 	bool IsWielderTetherActive() const;
-	// wielder 몫 테더가 위로 당길 때 walking이면 Falling으로 전환한다(매 틱, GT — 위 Tension 섹션 참고).
+
+	/** wielder 몫 테더가 위로 당길 때 walking이면 Falling으로 전환한다(매 틱, GT — 위 Tension 섹션 참고). */
 	void UpdateGroundExit();
-	// 스윙 판정에 따라 AirControl을 부스트/복원한다(매 틱, GT).
+
+	/** 스윙 판정에 따라 AirControl을 부스트/복원한다(매 틱, GT). */
 	void UpdateSwingAirControl();
+
 	void UpdateThrowPreview();
-	// 멀리 있는 target SDF도 수집되도록 ray 구간을 collider query bounds에 포함한다.
+
+	/** 멀리 있는 target SDF도 수집되도록 ray 구간을 collider query bounds에 포함한다. */
 	void UpdateAimRayColliderQueryBounds();
+
 	void ClearThrowPreview();
-	// collider/SDF side effect 없이 origin/frame/속도만 계산한다.
+
+	/** collider/SDF side effect 없이 origin/frame/속도만 계산한다. */
 	FRopeThrowContext BuildBaseThrowContext(const FVector& AimDir) const;
 	// 실제 ray를 새로 검사하고 throw 순간에 고정할 context를 구성한다.
 	FRopeThrowContext BuildThrowContextInternal(const FVector& AimDir) const;
