@@ -140,7 +140,7 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	// 입력 때 저장한 owner-local path를 throw 실행 시점의 owner transform으로 다시 해석한다.
 	ResolvedPrepared.RenderPreview = Prepared.ResolveRenderPreviewWorld();
 	ResolvedPrepared.ThrowContext.Origin = Prepared.ResolveGuideOriginWorld();
-	SetAimWrapTargetLock(ResolvedPrepared.ThrowContext);
+	AimTargeting.SetWrapTargetLock(ResolvedPrepared.ThrowContext);
 
 	// 다음 PrepareSimFrame부터 GuidedThrow가 StartPositions -> RenderPreview.Points로 노드를 구동한다.
 	// 완료 시 Prepared.Anchors를 그대로 Wrapped seed로 사용한다.
@@ -301,121 +301,31 @@ bool URopeComponent::FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, 
 	return false;
 }
 
+FRopeAimTargeting::FQueryContext URopeComponent::MakeAimQueryContext() const
+{
+	// 폴백 치수 규약: ray 길이 = 현재/초기 로프 길이 중 큰 값, 질의 반경 = 튜브/접촉 반경 중 큰 값.
+	FRopeAimTargeting::FQueryContext Ctx;
+	Ctx.Colliders = &SimFrame.FrameColliders;
+	Ctx.FallbackRayLength = FMath::Max(Sim.RopeLength, RopeLength);
+	Ctx.FallbackQueryRadius = FMath::Max(Radius, WrapConfig.ContactRadius);
+	return Ctx;
+}
+
 bool URopeComponent::FindAimRayBoneHit(const FVector& Origin, const FVector& AimDir, float RayLength,
 	float QueryRadius, float SweepStep, bool bDrawDebug, FRopeAimRayHitResult& OutHit) const
 {
-	OutHit = FRopeAimRayHitResult();
-
-	const FVector RayDir = AimDir.GetSafeNormal();
-	const float EffectiveRayLength = RayLength > KINDA_SMALL_NUMBER
-		? RayLength
-		: FMath::Max(Sim.RopeLength, RopeLength);
-	if (EffectiveRayLength <= KINDA_SMALL_NUMBER || RayDir.IsNearlyZero())
-	{
-		return false;
-	}
-
-	const FVector RayStart = Origin;
-	const FVector RayEnd = RayStart + RayDir * EffectiveRayLength;
-	// 0 설정은 선 ray가 아니라 rope/contact 기본 두께를 사용한다. 명시값이 있으면 그 반경으로 sweep한다.
-	const float EffectiveQueryRadius = QueryRadius > KINDA_SMALL_NUMBER
-		? QueryRadius
-		: FMath::Max(Radius, WrapConfig.ContactRadius);
-	const float EffectiveSweepStep = FMath::Clamp(SweepStep > KINDA_SMALL_NUMBER ? SweepStep : 2.0f, 0.5f, 10.0f);
-
-	FRopeSweptQuery Query;
-	Query.WorldStart = RayStart;
-	Query.WorldEnd = RayEnd;
-	Query.NodeRadius = EffectiveQueryRadius;
-	Query.SweepStep = EffectiveSweepStep;
-	Query.MaxSamples = FMath::Clamp(1 + FMath::CeilToInt(EffectiveRayLength / EffectiveSweepStep), 2, 4096);
-
-	const FBox RayBounds(RayStart.ComponentMin(RayEnd), RayStart.ComponentMax(RayEnd));
-	const FBox ExpandedRayBounds = RayBounds.ExpandBy(EffectiveQueryRadius);
-	bool bFoundHit = false;
-	FRopeAimRayHitResult BestHit;
-
-	// broad phase bounds를 통과한 collider만 같은 swept query로 검사하고 ray 진행 거리의 최솟값을 고른다.
-	for (const IRopeCollider* Collider : SimFrame.FrameColliders)
-	{
-		if (!Collider || !Collider->GetWorldBounds().Intersect(ExpandedRayBounds))
-		{
-			continue;
-		}
-
-		FVector HitWorldPos = FVector::ZeroVector;
-		const FRopeContact Contact = Collider->QuerySwept(Query, HitWorldPos);
-		if (!Contact.bHit || Contact.Bone.IsNone() || !Contact.SourceMesh ||
-			!CanWrapTarget(Contact.SourceMesh, Contact.Bone))
-		{
-			continue;
-		}
-
-		FRopeAimRayHitResult Candidate;
-		Candidate.bHit = true;
-		Candidate.Bone = Contact.Bone;
-		Candidate.Mesh = Contact.SourceMesh;
-		Candidate.HitWorldPos = HitWorldPos;
-		Candidate.SurfacePoint = Contact.SurfacePoint;
-		Candidate.Normal = Contact.Normal;
-		Candidate.Distance = FVector::DotProduct(HitWorldPos - RayStart, RayDir);
-		if (!bFoundHit || Candidate.Distance < BestHit.Distance)
-		{
-			BestHit = Candidate;
-			bFoundHit = true;
-		}
-	}
-
-	if (bDrawDebug)
-	{
-		// cyan/red capsule은 실제 QuerySwept에 전달한 길이와 반경을 그대로 시각화한다.
-		const UWorld* World = GetWorld();
-		constexpr float LifeTime = 0.05f;
-		const bool bHit = bFoundHit && BestHit.bHit;
-		const FVector RayStop = bHit ? BestHit.HitWorldPos : RayEnd;
-		const FColor MainColor = bHit ? FColor::Red : FColor::Cyan;
-		const FQuat CapsuleRotation = FRotationMatrix::MakeFromZ(RayDir).ToQuat();
-		DrawDebugCapsule(World, (RayStart + RayEnd) * 0.5f,
-			EffectiveRayLength * 0.5f + EffectiveQueryRadius, EffectiveQueryRadius,
-			CapsuleRotation, MainColor, false, LifeTime, 0, 1.0f);
-		DrawDebugLine(World, RayStart, RayStop, MainColor, false, LifeTime, 0, 2.0f);
-		if (bHit)
-		{
-			DrawDebugLine(World, RayStop, RayEnd, FColor(96, 0, 0), false, LifeTime, 0, 1.0f);
-			DrawDebugSphere(World, BestHit.HitWorldPos, 8.0f, 12, FColor::Yellow, false, LifeTime, 0, 2.0f);
-			DrawDebugString(World, BestHit.HitWorldPos + FVector(0.0f, 0.0f, 14.0f),
-				BestHit.Bone.ToString(), nullptr, FColor::Yellow, LifeTime, false, 1.0f);
-		}
-	}
-
-	if (!bFoundHit)
-	{
-		return false;
-	}
-
-	OutHit = BestHit;
-	return true;
+	// 질의 본체는 FRopeAimTargeting(UObject-free). 여기선 컨텍스트 조립 + CanWrapTarget(virtual 게이트) 주입만.
+	return FRopeAimTargeting::FindAimRayBoneHit(MakeAimQueryContext(), Origin, AimDir, RayLength,
+		QueryRadius, SweepStep, bDrawDebug, GetWorld(),
+		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); }, OutHit);
 }
 
 void URopeComponent::SetAimRayColliderQueryBounds(const FVector& Origin, const FVector& AimDir,
 	float RayLength, float QueryRadius)
 {
-	const FVector RayDir = AimDir.GetSafeNormal();
-	const float EffectiveRayLength = RayLength > KINDA_SMALL_NUMBER
-		? RayLength
-		: FMath::Max(Sim.RopeLength, RopeLength);
-	if (RayDir.IsNearlyZero() || EffectiveRayLength <= KINDA_SMALL_NUMBER)
-	{
-		ClearAimRayColliderQueryBounds();
-		return;
-	}
-
-	const float EffectiveQueryRadius = QueryRadius > KINDA_SMALL_NUMBER
-		? QueryRadius
-		: FMath::Max(Radius, WrapConfig.ContactRadius);
-	const FVector RayEnd = Origin + RayDir * EffectiveRayLength;
-	SimFrame.AimRayColliderQueryBounds = FBox(Origin.ComponentMin(RayEnd), Origin.ComponentMax(RayEnd))
-		.ExpandBy(EffectiveQueryRadius);
+	// 무효 입력이면 FBox(ForceInit) 반환 = clear와 동일(수집 확장 없음).
+	SimFrame.AimRayColliderQueryBounds =
+		FRopeAimTargeting::MakeAimRayQueryBounds(MakeAimQueryContext(), Origin, AimDir, RayLength, QueryRadius);
 }
 
 void URopeComponent::ClearAimRayColliderQueryBounds()
@@ -426,39 +336,13 @@ void URopeComponent::ClearAimRayColliderQueryBounds()
 bool URopeComponent::ResolveAimRayThrowContext(const FRopeAimRayThrowRequest& Request,
 	FRopeThrowContext& OutContext) const
 {
-	OutContext = Request.BaseContext;
-	if (!Request.IsValid())
-	{
-		return false;
-	}
-
-	FRopeAimRayHitResult Hit;
-	if (!FindAimRayBoneHit(Request.RayOrigin, Request.RayDirection, Request.RayLength,
-		Request.QueryRadius, Request.SweepStep, Request.bDrawDebug, Hit))
-	{
-		return false;
-	}
-
-	// ray 시작점이 아니라 실제 throw origin에서 hit으로 향하는 벡터가 최종 guide forward다.
-	const FVector HitAimDir = (Hit.HitWorldPos - OutContext.Origin).GetSafeNormal();
-	if (HitAimDir.IsNearlyZero())
-	{
-		return false;
-	}
-
-	OutContext.FrameForward = HitAimDir;
-	OutContext.bHasAimGuideHit = true;
-	OutContext.AimGuideBone = Hit.Bone;
-	OutContext.AimGuideMesh = Hit.Mesh;
-	OutContext.AimGuideHitWorldPos = Hit.HitWorldPos;
-	OutContext.AimGuideSurfacePoint = Hit.SurfacePoint;
-	OutContext.AimGuideNormal = Hit.Normal;
-	OutContext.AimGuideDistance = Hit.Distance;
-	return true;
+	return FRopeAimTargeting::ResolveAimRayThrowContext(MakeAimQueryContext(), Request, GetWorld(),
+		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); }, OutContext);
 }
 
 void URopeComponent::QueueAimRayThrow(const FRopeAimRayThrowRequest& Request)
 {
+	// 무효 요청은 즉시 fallback throw — StartFreshThrow 전이라 컴포넌트가 직접 처리한다(F-클래스 밖).
 	if (!Request.IsValid())
 	{
 		StartFreshThrow(Request.BaseContext);
@@ -466,7 +350,7 @@ void URopeComponent::QueueAimRayThrow(const FRopeAimRayThrowRequest& Request)
 		return;
 	}
 
-	PendingAimThrow = Request;
+	AimTargeting.QueuePendingThrow(Request);
 	SetAimRayColliderQueryBounds(
 		Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
 }
@@ -796,7 +680,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 			WhipGuide.ResetFrameOutputs();
 		}
 
-		if (IsAimWrapTargetLockActive())
+		if (AimTargeting.IsLockActive(Phase))
 		{
 			// 중앙 guide를 적용한 뒤 양끝은 XPBD 거리/굽힘/감쇠로 자연스럽게 연결한다.
 			// collider push-out은 별도 게이트로 꺼서 이전의 충돌 순간이동을 재발시키지 않는다.
@@ -1164,7 +1048,7 @@ void URopeComponent::SetPhase(ERopePhase NewPhase, const TCHAR* Reason)
 
 void URopeComponent::ResetTransientPhaseState()
 {
-	PendingAimThrow.Reset();
+	AimTargeting.ResetPendingThrow();
 	ContactTracker.Reset();
 	PendingWrapSeed.Reset();
 	WrappingPhase.State.Reset();
@@ -1179,25 +1063,14 @@ void URopeComponent::ResetTransientPhaseState()
 	bLoggedPullNoReceiver = false;
 }
 
-void URopeComponent::SetAimWrapTargetLock(const FRopeThrowContext& ThrowContext)
-{
-	bAimWrapTargetLocked = ThrowContext.bHasAimGuideHit &&
-		!ThrowContext.AimGuideBone.IsNone() && ThrowContext.AimGuideMesh.IsValid();
-	AimWrapTargetBone = bAimWrapTargetLocked ? ThrowContext.AimGuideBone : NAME_None;
-	AimWrapTargetMesh = bAimWrapTargetLocked ? ThrowContext.AimGuideMesh : nullptr;
-
-}
-
 void URopeComponent::ResolvePendingAimThrow()
 {
-	if (!PendingAimThrow.IsSet())
+	// StartFreshThrow가 transient state를 초기화하므로 요청을 먼저 값으로 꺼내고 pending 상태를 비운다.
+	FRopeAimRayThrowRequest Request;
+	if (!AimTargeting.TakePendingThrow(Request))
 	{
 		return;
 	}
-
-	// StartFreshThrow가 transient state를 초기화하므로 요청을 먼저 값으로 꺼내고 pending 상태를 비운다.
-	const FRopeAimRayThrowRequest Request = PendingAimThrow.GetValue();
-	PendingAimThrow.Reset();
 
 	FRopeThrowContext ResolvedContext;
 	ResolveAimRayThrowContext(Request, ResolvedContext);
@@ -1205,45 +1078,9 @@ void URopeComponent::ResolvePendingAimThrow()
 	Request.OnResolved.ExecuteIfBound();
 }
 
-bool URopeComponent::IsAimWrapTargetLockActive() const
-{
-	// 잠금은 한 throw의 접근/접촉/감김 경로에만 적용한다. Free preview와 Wrapped 이후의 일반 충돌은 유지한다.
-	const bool bLockingPhase = Phase == ERopePhase::Flight ||
-		Phase == ERopePhase::Contacting || Phase == ERopePhase::Wrapping;
-	return bLockingPhase && bAimWrapTargetLocked &&
-		!AimWrapTargetBone.IsNone() && AimWrapTargetMesh.IsValid();
-}
-
-bool URopeComponent::IsAimWrapTarget(const USceneComponent* Mesh, FName Bone) const
-{
-	return !IsAimWrapTargetLockActive() ||
-		(Mesh == AimWrapTargetMesh.Get() && Bone == AimWrapTargetBone);
-}
-
 void URopeComponent::FilterFrameCollidersForAimWrapTarget()
 {
-	if (!IsAimWrapTargetLockActive())
-	{
-		return;
-	}
-
-	SimFrame.FrameColliders.RemoveAll([this](const IRopeCollider* Collider)
-	{
-		if (!Collider)
-		{
-			return true;
-		}
-		if (Collider->IsWorldStatic())
-		{
-			// 월드 정적 형상은 궤적/환경 충돌용이므로 유지하고 skeletal 본 collider만 target으로 제한한다.
-			return false;
-		}
-
-		FName ColliderBone = NAME_None;
-		const USceneComponent* ColliderMesh = nullptr;
-		Collider->GetGPUAttribution(ColliderBone, ColliderMesh);
-		return ColliderMesh != AimWrapTargetMesh.Get() || ColliderBone != AimWrapTargetBone;
-	});
+	AimTargeting.FilterCollidersToTarget(Phase, SimFrame.FrameColliders);
 }
 
 // ===== 초기화/유틸 ===========================================================
@@ -1565,7 +1402,7 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 	// → ④ Verlet 속도 주입. ④는 ③이 확정한 조준 방향(WhipGuide.GetAimDir)을 쓰므로 순서가 계약이다.
 	AbandonActiveStateForRethrow();
 	// ray가 확정한 mesh+bone을 이 throw의 Flight/Contacting/Wrapping 전체에 고정한다.
-	SetAimWrapTargetLock(ResolvedThrow);
+	AimTargeting.SetWrapTargetLock(ResolvedThrow);
 	ResetChainForThrow(ResolvedThrow.Origin);
 	BeginWhipSwingFromThrow(ResolvedThrow);
 	InjectThrowVelocityIntoVerlet(ResolvedThrow);
@@ -1794,7 +1631,7 @@ void URopeComponent::RemoveNonWrappableCandidates(TArray<FRopeContactCandidate>&
 	Candidates.RemoveAll([this](const FRopeContactCandidate& Candidate)
 	{
 		// GPU 지연 후보나 외부 주입 후보도 ray가 잠근 mesh+bone 이외에는 다음 단계로 넘기지 않는다.
-		return !IsAimWrapTarget(Candidate.Mesh, Candidate.Bone) ||
+		return !AimTargeting.IsWrapTarget(Phase, Candidate.Mesh, Candidate.Bone) ||
 			!CanWrapTarget(Candidate.Mesh, Candidate.Bone);
 	});
 }

@@ -12,6 +12,7 @@
 #include "Components/MeshComponent.h"
 #include "Core/RopeTypes.h"
 #include "Core/RopeSimFrameIO.h"
+#include "Logic/RopeAimTargeting.h" // FRopeAimRayHitResult/FRopeAimRayThrowRequest + 조준 로직/상태
 #include "Solver/RopeXPBDSolver.h"
 #include "Logic/RopeWrapController.h"
 #include "Logic/RopeWhipGuide.h"
@@ -52,43 +53,7 @@ struct FRopePreviewBuildContext
 	ERopePhase Phase = ERopePhase::Free;
 };
 
-/** Wielder aim ray가 rope collider/SDF에서 찾은 가장 가까운 wrap 가능 본 hit. */
-struct FRopeAimRayHitResult
-{
-	// 아래 mesh/bone/표면 데이터가 모두 유효한 결과인지 나타낸다.
-	bool bHit = false;
-	// 이 throw에서 wrap 대상으로 잠글 bone 이름이다.
-	FName Bone = NAME_None;
-	// 같은 이름의 bone을 가진 다른 actor와 구분하기 위한 component이다.
-	const USceneComponent* Mesh = nullptr;
-	// swept ray가 collider에 처음 진입한 월드 위치이다.
-	FVector HitWorldPos = FVector::ZeroVector;
-	// SDF/contact projection으로 얻은 실제 표면점이다.
-	FVector SurfacePoint = FVector::ZeroVector;
-	// 표면점의 바깥 방향 법선이다.
-	FVector Normal = FVector::UpVector;
-	// ray origin에서 HitWorldPos까지의 투영 거리이다.
-	float Distance = 0.0f;
-};
-
-/** Wielder가 입력 순간 고정하고 RopeSimSubsystem의 최신 collider 수집 직후 해결할 Aim throw 요청. */
-struct FRopeAimRayThrowRequest
-{
-	FRopeThrowContext BaseContext;
-	FVector RayOrigin = FVector::ZeroVector;
-	FVector RayDirection = FVector::ForwardVector;
-	float RayLength = 0.0f;
-	float QueryRadius = 0.0f;
-	float SweepStep = 2.0f;
-	bool bDrawDebug = false;
-	// StartFreshThrow 완료 뒤 실행한다. Wielder를 직접 참조하지 않는 C++ 전용 완료 알림이다.
-	FSimpleDelegate OnResolved;
-
-	bool IsValid() const
-	{
-		return RayLength > KINDA_SMALL_NUMBER && !RayDirection.IsNearlyZero();
-	}
-};
+// (FRopeAimRayHitResult / FRopeAimRayThrowRequest는 Logic/RopeAimTargeting.h로 이동 — 위 include로 계속 노출된다.)
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeComponent : public UMeshComponent
@@ -490,15 +455,17 @@ private:
 	 */
 	void ResetTransientPhaseState();
 
+	// Aim-ray 조준 로직/상태는 FRopeAimTargeting(AimTargeting 멤버)으로 분리됐다. 여기엔 서브시스템
+	// 프레임 계약 진입점 2개만 남는다 — StartFreshThrow 전이(오케스트레이션)와 SimFrame 접근이 걸려
+	// 있어 컴포넌트가 소유한다.
+	// Subsystem이 FrameColliders를 채운 직후 호출해 pending request를 hit/fallback context로 확정한다.
+	void ResolvePendingAimThrow();
 	// AimRayHitDirection throw가 지정한 mesh+bone만 contact/wrap 후보로 유지한다.
 	// collision-free Aim Flight에서는 solver가 이 목록을 의도적으로 무시하지만, 실제/예측 contact와
 	// wrapping path는 필터된 목록을 계속 사용한다. 일반 Flight solver도 같은 목록을 사용한다.
-	void SetAimWrapTargetLock(const FRopeThrowContext& ThrowContext);
-	bool IsAimWrapTargetLockActive() const;
-	bool IsAimWrapTarget(const USceneComponent* Mesh, FName Bone) const;
-	// Subsystem이 FrameColliders를 채운 직후 호출해 pending request를 hit/fallback context로 확정한다.
-	void ResolvePendingAimThrow();
 	void FilterFrameCollidersForAimWrapTarget();
+	/** FRopeAimTargeting 질의에 넘길 컨텍스트 스냅샷(collider 스냅샷 + 폴백 치수). */
+	FRopeAimTargeting::FQueryContext MakeAimQueryContext() const;
 
 	//~ 시뮬레이션 상태 + 페이즈별 로직 소유물 -------------------------------
 	// Non-UObject — 값으로 소유하며 GC 추적 대상이 아니다(POD/약참조만 보유).
@@ -512,12 +479,9 @@ private:
 	FRopeWrapController WrapController;		// Wrapped: bone-local latch 유지/해제
 	FRopeGuidedThrowState GuidedThrowState;	// PreviewPathLocked: cached preview path를 authoritative하게 구동
 
-	// throw 시작 때 ray hit로 확정한 대상. 같은 bone 이름을 가진 다른 액터를 막기 위해 mesh도 함께 저장한다.
-	bool bAimWrapTargetLocked = false;
-	FName AimWrapTargetBone = NAME_None;
-	TWeakObjectPtr<const USceneComponent> AimWrapTargetMesh = nullptr;
-	// 입력 순간의 ray/frame을 보존하며, Subsystem collider gather 직후 한 번 소비한다.
-	TOptional<FRopeAimRayThrowRequest> PendingAimThrow;
+	// Aim-ray 조준 상태(throw당 wrap 대상 잠금 + pending aim throw 큐). 질의/잠금 판정 로직 포함 —
+	// FRopeAimTargeting(Logic/RopeAimTargeting.h) 주석 참조.
+	FRopeAimTargeting AimTargeting;
 
 	//~ 페이즈 타이머 --------------------------------------------------------
 	float ContactingElapsed = 0.0f;	// Contacting 체류 시간(WrapDecisionTime 판정)
