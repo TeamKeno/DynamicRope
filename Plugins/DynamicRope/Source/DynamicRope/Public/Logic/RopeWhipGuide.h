@@ -16,18 +16,31 @@
 class DYNAMICROPE_API FRopeWhipGuide
 {
 public:
-	// 디자이너 설정 스냅샷. UPROPERTY 직렬화 경로를 지키기 위해 원본 프로퍼티는
-	// URopeComponent(Rope|Whip 카테고리)에 남고, 호출할 때마다 여기로 복사해 넘긴다.
+	/**
+	 * 디자이너 설정 스냅샷. UPROPERTY 직렬화 경로를 지키기 위해 원본 프로퍼티는
+	 * URopeComponent(Rope|Whip 카테고리)에 남고, 호출할 때마다 여기로 복사해 넘긴다.
+	 */
 	struct FConfig
 	{
-		float Duration = 0.35f;           // 스윙 전체 시간(s)
-		float GuidedLength = 0.65f;       // 가이드가 잡는 로프 길이 비율(0~1)
-		float SweepAngleDegrees = 180.0f; // 시작 각도(조준 반대편)에서 조준 방향까지의 스윕 각
-		float ReferenceThrowSpeed = 1500.0f; // 이 속도일 때 Duration 그대로 사용한다
-		float ComponentRopeLength = 0.0f; // 가이드 길이 산정용: max(Sim.RopeLength, 이 값) 사용
-		float AimHitRootSolverFraction = 0.20f; // 손 쪽 guide 완화 구간
-		float AimHitTipSolverFraction = 0.25f;  // 자유단 쪽 guide 완화 구간
-		float AimHitDirectionBias = 2.0f;       // hit direction 보간을 앞당기는 지수
+		/** 스윙 전체 시간(s). */
+		float Duration = 0.35f;
+
+		/** 가이드가 잡는 로프 길이 비율(0~1). */
+		float GuidedLength = 0.65f;
+
+		/** 시작 각도(조준 반대편)에서 조준 방향까지의 스윕 각. */
+		float SweepAngleDegrees = 180.0f;
+
+		/** 이 속도일 때 Duration 그대로 사용한다. */
+		float ReferenceThrowSpeed = 1500.0f;
+
+		/** 가이드 길이 산정용: max(Sim.RopeLength, 이 값) 사용. */
+		float ComponentRopeLength = 0.0f;
+
+		/** Aim-hit에서 손 쪽/자유단 쪽 guide 완화 구간과 hit direction 보간을 앞당기는 지수. */
+		float AimHitRootSolverFraction = 0.20f;
+		float AimHitTipSolverFraction = 0.25f;
+		float AimHitDirectionBias = 2.0f;
 	};
 
 	struct FSwingBasis
@@ -84,6 +97,7 @@ public:
 
 	bool IsActive() const { return bActive; }
 	float GetElapsed() const { return Elapsed; }
+
 	/** 정규화된 조준 방향(퇴화 시 fallback 적용 후). throw 임펄스 주입에도 쓰인다. */
 	const FVector& GetAimDir() const { return AimDir; }
 
@@ -118,13 +132,14 @@ private:
 	FVector GuideUp = FVector::UpVector;
 	FVector GuideInheritedVelocity = FVector::ZeroVector;
 	float GuideThrowSpeed = 0.0f;
-	// Aim target은 노드 고정점이 아니라 최종 방향과 공간 보간 파라미터로만 보관한다.
+
+	/** Aim target은 노드 고정점이 아니라 최종 방향과 공간 보간 파라미터로만 보관한다. */
 	bool bHasAimTarget = false;
 	FVector AimTarget = FVector::ZeroVector;
 	float AimSteerStartAlpha = 0.25f;
 	float AimLockAlpha = 0.50f;
 
-	// 직전 프레임의 가이드 타깃(가이드 노드의 Verlet 속도 주입: PrevPositions ← 이 값).
+	/** 직전 프레임의 가이드 타깃(가이드 노드의 Verlet 속도 주입: PrevPositions ← 이 값). */
 	TArray<FVector> PreviousTargets;
 
 	//~ 프레임 산출물

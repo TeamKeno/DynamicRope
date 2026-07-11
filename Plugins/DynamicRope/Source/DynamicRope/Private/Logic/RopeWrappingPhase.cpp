@@ -4,8 +4,10 @@
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
-#include "RopeMathHelpers.h" // RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
+// TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+// RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
+#include "RopeMathHelpers.h"
 
 bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
 	float Duration, const FRopeSimState& Sim, const FContext& Ctx)
@@ -855,57 +857,51 @@ bool FRopeWrappingPhase::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor
 	const FVector LatchNormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 	FVector LatchTangentWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalTangent);
-	//tangent를 normal plane에 투영해
+	// tangent를 normal plane에 투영한다.
 	LatchTangentWorld = (LatchTangentWorld - FVector::DotProduct(LatchTangentWorld, LatchNormalWorld) * LatchNormalWorld)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(LatchNormalWorld));
 
-	//5. latch 점을 축 기준으로 분해
-	const float LatchAxisDistance = FVector::DotProduct(LatchSurfaceWorld - AxisOrigin, AxisDirection);//먼저 latch point가 축 위에서 어느 높이에 있는지 구함:
-	const FVector LatchAxisPoint = AxisOrigin + AxisDirection * LatchAxisDistance;//그 축 위의 점:
-	FVector LatchRadial = LatchSurfaceWorld - LatchAxisPoint; //축에서 latch point로 향하는 radial:
-	const float HelixRadius = LatchRadial.Size();	// latch 지점에서 bone - parent 축까지의 거리(반지름:)
+	// 5. latch 점을 축 기준으로 분해: latch point의 축 위 높이 → 그 축 위의 점 → 축에서 latch point로
+	//    향하는 radial. HelixRadius = latch 지점에서 bone-parent 축까지의 거리(나선 반지름).
+	const float LatchAxisDistance = FVector::DotProduct(LatchSurfaceWorld - AxisOrigin, AxisDirection);
+	const FVector LatchAxisPoint = AxisOrigin + AxisDirection * LatchAxisDistance;
+	FVector LatchRadial = LatchSurfaceWorld - LatchAxisPoint;
+	const float HelixRadius = LatchRadial.Size();
 	if (HelixRadius <= KINDA_SMALL_NUMBER)
 	{
 		return false;
 	}
-	LatchRadial /= HelixRadius;	//정규화:
-	//latch 지점이 축에서 얼마나 떨어져 있는지를 HelixRadius로 잡는 거야
+	// 정규화(radial 단위 벡터).
+	LatchRadial /= HelixRadius;
 
-	//6. 감기는 방향 결정
+	// 6. 감기는 방향 결정: 축×radial 원주 방향이 최초 latch rope tangent와 일치하는지로 부호를 정한다.
 	FVector CircumferenceDir = FVector::CrossProduct(AxisDirection, LatchRadial)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(LatchNormalWorld));
-	//최초 latch rope tangent방향과 외적이 일치하나 안하냐.
 	const float WindingSign = FVector::DotProduct(CircumferenceDir, LatchTangentWorld) < 0.0f ? -1.0f : 1.0f;
 	CircumferenceDir *= WindingSign;
 
-	//7. rope 거리 d를 나선 파라미터로 변환
+	// 7. rope 거리 d를 나선 파라미터로 변환: 원주 이동분 + 축 방향 이동량 + 원주 회전량.
 	const float PitchScale = Ctx.Config.WrappingHelixPitchScale;
 	const float LengthScale = FMath::Sqrt(1.0f + PitchScale * PitchScale);
 	const float CircumferenceDistance = DistanceFromLatch / FMath::Max(LengthScale, KINDA_SMALL_NUMBER);
-
-	//축 방향 이동량
 	const float AxisDistance = CircumferenceDistance * PitchScale;
-
-	//원주 회전량
 	const float AngleRadians = WindingSign * CircumferenceDistance / FMath::Max(HelixRadius, KINDA_SMALL_NUMBER);
 
-	//8. 축을 중심으로 radial 벡터를 회전시켜 나선 위의 점을 만듦 = 나선점 생성
-	//축을 중심으로 LatchRadial 방향을 AngleRadians만큼 돌린다
+	// 8. 나선점 생성: 축을 중심으로 LatchRadial을 AngleRadians만큼 돌리고(원주 위 방향), 축 위에서
+	//    latch 높이보다 AxisDistance만큼 이동한 중심점에서 반지름만큼 바깥으로 나가면 나선 위 월드 위치.
 	const FQuat AxisRotation(AxisDirection, AngleRadians);
-	const FVector RotatedRadial = AxisRotation.RotateVector(LatchRadial).GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);	//원주 중의 한 점
-	//TargetAxisPoint = 축 위에서, latch 높이보다 AxisDistance만큼 이동한 점
-	const FVector TargetAxisPoint = AxisOrigin + AxisDirection * (LatchAxisDistance + AxisDistance);	//축 이동
-	//// 축 위 중심점에서 바깥 방향으로 반지름만큼 나가면 나선 위의 world 위치가 된다.
+	const FVector RotatedRadial = AxisRotation.RotateVector(LatchRadial).GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);
+	const FVector TargetAxisPoint = AxisOrigin + AxisDirection * (LatchAxisDistance + AxisDistance);
 	FVector SurfaceWorld = TargetAxisPoint + RotatedRadial * HelixRadius;
 
-	//9. SDF 표면에 붙이기
+	// 9. 마지막으로 SDF 표면에 붙인다.
 	FVector NormalWorld = RotatedRadial;
-	if (!ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, Sim, Ctx, SurfaceWorld, NormalWorld))	//마지막으로 SDF 표면에 붙임
+	if (!ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, Sim, Ctx, SurfaceWorld, NormalWorld))
 	{
 		return false;
 	}
 
-	//10. 보정된 표면에서 tangent 다시 계산
+	// 10. 보정된 표면에서 tangent 다시 계산
 	const float SurfaceAxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
 	const FVector SurfaceAxisPoint = AxisOrigin + AxisDirection * SurfaceAxisDistance;
 	FVector SurfaceRadial = SurfaceWorld - SurfaceAxisPoint;
@@ -1014,7 +1010,8 @@ bool FRopeWrappingPhase::FindColliderShapeAxis(const FContext& Ctx, FName Bone, 
 		if (Collider->GetGPUCapsule(CapA, CapB, CapRadius))
 		{
 			const FVector Axis = CapB - CapA;
-			if (Axis.SizeSquared() > 1.0f) // 1cm 미만 세그먼트는 방향 신뢰 불가(사실상 구).
+			// 1cm 미만 세그먼트는 방향 신뢰 불가(사실상 구).
+			if (Axis.SizeSquared() > 1.0f)
 			{
 				OutAxisOrigin = CapA;
 				OutAxisDirection = Axis.GetSafeNormal();

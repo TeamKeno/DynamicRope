@@ -1,7 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeWrapController.h"
-#include "Core/RopeWrapTarget.h" // FRopeBindingFrame + ResolveBindingWorld (바인딩 배선 seam A)
+// FRopeBindingFrame + ResolveBindingWorld (바인딩 배선 seam A)
+#include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -376,22 +377,26 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 	// 코너 판정을 시작한다(손이 더 가까우면 손까지). 잔여 시간 지터/이산 홉은 호출자의 fractional 스무딩이 흡수.
 	const float CosThresh = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(BendThresholdDeg, 1.0f, 179.0f)));
 	const FVector AnchorPos = Sim.Positions[AnchorNode];
-	int32 AimNode = FMath::Max(AnchorNode - 2, 0); // 2세그먼트 시드(가능하면) — 첫 스텝 단일 세그먼트 노이즈 회피.
+	// 2세그먼트 시드(가능하면) — 첫 스텝 단일 세그먼트 노이즈 회피.
+	int32 AimNode = FMath::Max(AnchorNode - 2, 0);
 	for (int32 j = AimNode - 1; j >= 0; --j)
 	{
-		const FVector LegSoFar = (Sim.Positions[AimNode] - AnchorPos).GetSafeNormal();        // 누적 다리 chord(긴 baseline)
-		const FVector NextSeg  = (Sim.Positions[j] - Sim.Positions[AimNode]).GetSafeNormal(); // 다음 세그먼트
+		// LegSoFar = 누적 다리 chord(긴 baseline), NextSeg = 다음 세그먼트.
+		const FVector LegSoFar = (Sim.Positions[AimNode] - AnchorPos).GetSafeNormal();
+		const FVector NextSeg  = (Sim.Positions[j] - Sim.Positions[AimNode]).GetSafeNormal();
 		if (LegSoFar.IsNearlyZero() || NextSeg.IsNearlyZero()
 			|| FVector::DotProduct(NextSeg, LegSoFar) < CosThresh)
 		{
-			break; // 코너(또는 축퇴) — 직전 노드(AimNode)가 첫 다리의 끝.
+			// 코너(또는 축퇴) — 직전 노드(AimNode)가 첫 다리의 끝.
+			break;
 		}
 		AimNode = j;
 	}
 	const FVector Along = (Sim.Positions[AimNode] - AnchorPos).GetSafeNormal();
 	if (Along.IsNearlyZero())
 	{
-		return false; // 축퇴(조준 노드와 앵커 겹침) — 방향 정의 불가.
+		// 축퇴(조준 노드와 앵커 겹침) — 방향 정의 불가.
+		return false;
 	}
 
 	Out.bValid = true;

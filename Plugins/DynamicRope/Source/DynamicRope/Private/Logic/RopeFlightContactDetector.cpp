@@ -3,11 +3,13 @@
 #include "Logic/RopeFlightContactDetector.h"
 #include "Collision/RopeCollider.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
+// TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 namespace
 {
-constexpr float MaxBoneAxisPlaneNormalDotForMiss = 0.5f; // sin(30deg): 축-평면 각도 30도 이내면 miss.
+// sin(30deg): 축-평면 각도 30도 이내면 miss.
+constexpr float MaxBoneAxisPlaneNormalDotForMiss = 0.5f;
 
 bool BypassCaptureQualityGateForNow()
 {

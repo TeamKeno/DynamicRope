@@ -30,7 +30,8 @@ bool FRopeSolverThrottle::UpdateSleepState(ERopePhase Phase, const FRopeSimState
 		{
 			bAsleep = true;
 			SleepPinPos = Sim.StartPinTarget;
-			bJustSlept = true; // 전이 로그는 호출자(컴포넌트) 담당.
+			// 전이 로그는 호출자(컴포넌트) 담당.
+			bJustSlept = true;
 		}
 	}
 	SleepPrevFramePositions = Sim.Positions;
@@ -88,7 +89,8 @@ void FRopeSolverThrottle::ComputeSolverLOD(const FRopeSolverConfig& Config, cons
 	SolverLODScale = 1.0f;
 	if (!Config.bEnableDistanceLOD || Config.LODStartDistance <= 0.0f || !CameraDistance.IsSet())
 	{
-		return; // 비활성 또는 카메라 없음(서버) = 풀 품질.
+		// 비활성 또는 카메라 없음(서버) = 풀 품질.
+		return;
 	}
 	const float Range = FMath::Max(Config.LODEndDistance - Config.LODStartDistance, 1.0f);
 	const float Alpha = FMath::Clamp((CameraDistance.GetValue() - Config.LODStartDistance) / Range, 0.0f, 1.0f);

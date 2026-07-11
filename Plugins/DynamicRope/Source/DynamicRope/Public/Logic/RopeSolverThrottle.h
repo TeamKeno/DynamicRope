@@ -45,9 +45,18 @@ public:
 	}
 
 private:
-	bool  bAsleep = false;                     // Free 정지 판정으로 솔브 스킵 중
-	float SleepTimer = 0.0f;                   // 저속 유지 누적(초)
-	FVector SleepPinPos = FVector::ZeroVector; // 슬립 진입 시 핀 위치(이동 시 wake)
-	TArray<FVector> SleepPrevFramePositions;   // 프레임간 변위 측정 캐시(Finalize에서 갱신)
-	float SolverLODScale = 1.0f;               // 거리 LOD iteration 배율(Prepare가 계산, 1=풀)
+	/** Free 정지 판정으로 솔브 스킵 중. */
+	bool  bAsleep = false;
+
+	/** 저속 유지 누적(초). */
+	float SleepTimer = 0.0f;
+
+	/** 슬립 진입 시 핀 위치(이동 시 wake). */
+	FVector SleepPinPos = FVector::ZeroVector;
+
+	/** 프레임간 변위 측정 캐시(Finalize에서 갱신). */
+	TArray<FVector> SleepPrevFramePositions;
+
+	/** 거리 LOD iteration 배율(Prepare가 계산, 1=풀). */
+	float SolverLODScale = 1.0f;
 };

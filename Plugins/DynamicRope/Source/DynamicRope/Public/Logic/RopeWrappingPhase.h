@@ -26,16 +26,29 @@ public:
 	/** Wrapping 작업 상태(POD). 전이 시 URopeComponent::ResetTransientPhaseState가 Reset한다. */
 	FRopeWrappingState State;
 
-	// 한 호출의 컨텍스트(비소유 참조 묶음 — 호출 동안만 유효).
-	// 디자이너 설정 원본(UPROPERTY)은 URopeComponent에 남고 여기로 참조만 넘어온다.
+	/**
+	 * 한 호출의 컨텍스트(비소유 참조 묶음 — 호출 동안만 유효).
+	 * 디자이너 설정 원본(UPROPERTY)은 URopeComponent에 남고 여기로 참조만 넘어온다.
+	 */
 	struct FContext
 	{
-		const FRopeWrapConfig& Config;             // 감김 튜닝(pitch/tail delay/step budget/contact radius)
-		const TArray<IRopeCollider*>& Colliders;   // 표면 투영용 프레임 collider 스냅샷
-		ERopeWrappingPathMode PathMode;            // UDynamicRopeSettings에서 컴포넌트가 해석해 전달
-		float SurfaceOffset;                       // 튜브 반지름(표면에서 로프 중심까지 띄우는 거리)
-		FString OwnerName;                         // 로그 컨텍스트(컴포넌트 이름)
-		bool bSuppressPathFailureLog = false;      // preview처럼 partial path를 정상 결과로 쓰는 호출에서 true
+		/** 감김 튜닝(pitch/tail delay/step budget/contact radius). */
+		const FRopeWrapConfig& Config;
+
+		/** 표면 투영용 프레임 collider 스냅샷. */
+		const TArray<IRopeCollider*>& Colliders;
+
+		/** UDynamicRopeSettings에서 컴포넌트가 해석해 전달. */
+		ERopeWrappingPathMode PathMode;
+
+		/** 튜브 반지름(표면에서 로프 중심까지 띄우는 거리). */
+		float SurfaceOffset;
+
+		/** 로그 컨텍스트(컴포넌트 이름). */
+		FString OwnerName;
+
+		/** preview처럼 partial path를 정상 결과로 쓰는 호출에서 true. */
+		bool bSuppressPathFailureLog = false;
 	};
 
 	/**

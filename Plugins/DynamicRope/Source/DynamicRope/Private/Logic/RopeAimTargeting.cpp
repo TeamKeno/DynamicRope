@@ -145,7 +145,8 @@ FBox FRopeAimTargeting::MakeAimRayQueryBounds(const FQueryContext& Ctx,
 	const float EffectiveRayLength = RayLength > KINDA_SMALL_NUMBER ? RayLength : Ctx.FallbackRayLength;
 	if (RayDir.IsNearlyZero() || EffectiveRayLength <= KINDA_SMALL_NUMBER)
 	{
-		return FBox(ForceInit); // 무효 = 수집 확장 없음(clear와 동일).
+		// 무효 = 수집 확장 없음(clear와 동일).
+		return FBox(ForceInit);
 	}
 
 	const float EffectiveQueryRadius = QueryRadius > KINDA_SMALL_NUMBER ? QueryRadius : Ctx.FallbackQueryRadius;

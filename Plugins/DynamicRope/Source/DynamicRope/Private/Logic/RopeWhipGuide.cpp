@@ -1,7 +1,8 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeWhipGuide.h"
-#include "RopeMathHelpers.h" // RopeMath::SmoothStep (unity 빌드 중복 정의 방지)
+// RopeMath::SmoothStep (unity 빌드 중복 정의 방지)
+#include "RopeMathHelpers.h"
 
 namespace
 {
