@@ -85,6 +85,12 @@ bool URopeAimWidget::GetTargetScreenPosition(FVector2D& OutPosition, float& OutR
 	return bHasScreenTarget;
 }
 
+bool URopeAimWidget::GetAimScreenPosition(FVector2D& OutPosition) const
+{
+	OutPosition = AimScreenPos;
+	return bHasScreenAim;
+}
+
 void URopeAimWidget::HandleAimTargetChanged(USceneComponent* Mesh, FName Bone)
 {
 	// 대상 진입/전환 순간 — 획득 팝을 처음부터 다시 재생한다.
@@ -104,6 +110,7 @@ void URopeAimWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	// 폰 교체/지연 빙의 대비 재해석(무효일 때만 — 평시 무비용).
 	ResolveWielder();
 
+	bHasScreenAim = false;
 	bHasScreenTarget = false;
 	bScreenTargetBlocked = false;
 	if (!IsAimHudActive())
@@ -116,8 +123,21 @@ void URopeAimWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 
 	const FRopeAimHudSample Sample = GetAimSample();
 	APlayerController* PC = GetOwningPlayer();
+	if (!PC)
+	{
+		return;
+	}
+
+	// 실제 aim ray의 hit(또는 미충돌 시 끝점)를 조준원 위치로 쓴다. 화면 중앙 고정이 아니므로
+	// AttachMesh/Socket/Owner/View 중 어떤 AimRayOriginMode를 써도 UI와 레이 경로가 일치한다.
+	if (UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(
+		PC, Sample.AimWorldPos, AimScreenPos, /*bPlayerViewportRelative*/ false))
+	{
+		bHasScreenAim = true;
+	}
+
 	// 감길 대상(초록) 또는 wrap 불가 hit(빨강) — 둘 다 화면에 투영해 링을 그린다.
-	if ((!Sample.bHasTarget && !Sample.bBlocked) || !PC)
+	if (!Sample.bHasTarget && !Sample.bBlocked)
 	{
 		return;
 	}
@@ -159,9 +179,9 @@ int32 URopeAimWidget::NativePaint(const FPaintArgs& Args, const FGeometry& Allot
 
 	const FPaintGeometry PaintGeometry = AllottedGeometry.ToPaintGeometry();
 
-	// --- 십자선: 화면 중앙, 대상이 잡혀 있으면 링과 같은 톤으로 물들인다.
+	// --- 십자선: AimRayOriginMode가 정한 실제 ray의 hit/끝점, 투영 실패 시에만 화면 중앙 폴백.
 	{
-		const FVector2D Center = AllottedGeometry.GetLocalSize() * 0.5f;
+		const FVector2D Center = bHasScreenAim ? AimScreenPos : AllottedGeometry.GetLocalSize() * 0.5f;
 		// 대상 없음=기본, 감길 대상=획득색, wrap 불가=빨강.
 		FLinearColor Color = CrosshairColor;
 		if (bHasScreenTarget)

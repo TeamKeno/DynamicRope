@@ -144,6 +144,11 @@ void URopeWielderComponent::UpdateAimHudSample()
 	if (AimMode == ERopeWielderAimMode::AimRayHitDirection && Rope)
 	{
 		const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(FVector::ZeroVector);
+		const FVector RayDirection = Request.RayDirection.GetSafeNormal();
+		AimHudSample.RayOrigin = Request.RayOrigin;
+		AimHudSample.RayDirection = RayDirection;
+		AimHudSample.RayLength = Request.RayLength;
+		AimHudSample.AimWorldPos = Request.RayOrigin + RayDirection * Request.RayLength;
 		FRopeAimRayHitResult Hit;
 		FRopeAimRayHitResult Blocked;
 		// HUD 전용 스윕 — 월드 디버그 캡슐은 그리지 않는다(HUD 자체가 시각화이고, bDrawAimRayDebug는
@@ -160,6 +165,7 @@ void URopeWielderComponent::UpdateAimHudSample()
 			AimHudSample.HitWorldPos = Hit.HitWorldPos;
 			AimHudSample.TargetRadius = Hit.TargetBoundsRadius;
 			AimHudSample.Distance = Hit.Distance;
+			AimHudSample.AimWorldPos = Hit.HitWorldPos;
 		}
 		else if (Blocked.bHit)
 		{
@@ -171,6 +177,7 @@ void URopeWielderComponent::UpdateAimHudSample()
 			AimHudSample.HitWorldPos = Blocked.HitWorldPos;
 			AimHudSample.TargetRadius = Blocked.TargetBoundsRadius;
 			AimHudSample.Distance = Blocked.Distance;
+			AimHudSample.AimWorldPos = Blocked.HitWorldPos;
 		}
 	}
 

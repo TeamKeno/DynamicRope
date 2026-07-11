@@ -112,6 +112,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim HUD")
 	bool GetTargetScreenPosition(FVector2D& OutPosition, float& OutRadius) const;
 
+	/** AimRayOriginMode를 반영한 실제 ray의 hit(또는 끝점)를 투영한 조준원 위치. */
+	UFUNCTION(BlueprintPure, Category = "Rope|Aim HUD")
+	bool GetAimScreenPosition(FVector2D& OutPosition) const;
+
 	//~ BP 연출 훅(사운드/추가 이펙트) — wielder 델리게이트를 위젯 이벤트로 중계 ----
 	UFUNCTION(BlueprintImplementableEvent, Category = "Rope|Aim HUD")
 	void OnAimTargetChanged(USceneComponent* Mesh, FName Bone);
@@ -146,6 +150,8 @@ private:
 	TWeakObjectPtr<URopeWielderComponent> Wielder;
 
 	//~ NativeTick이 캐시하고 NativePaint(const)가 읽는 프레임 상태 -------------
+	bool bHasScreenAim = false;
+	FVector2D AimScreenPos = FVector2D::ZeroVector;
 	bool bHasScreenTarget = false;
 	// 이번 프레임 화면 대상이 wrap 불가(빨강)인가. bHasScreenTarget일 때만 의미.
 	bool bScreenTargetBlocked = false;

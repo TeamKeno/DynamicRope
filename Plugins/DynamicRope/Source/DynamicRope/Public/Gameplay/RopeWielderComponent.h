@@ -139,6 +139,22 @@ struct FRopeAimHudSample
 	/** ray origin에서 hit까지 거리. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
 	float Distance = 0.0f;
+
+	/** 이번 프레임 실제 aim ray 시작점. AimRayOriginMode가 선택한 위치와 동일하다. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	FVector RayOrigin = FVector::ZeroVector;
+
+	/** 실제 aim ray 방향(정규화). */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	FVector RayDirection = FVector::ForwardVector;
+
+	/** 실제 aim ray 길이. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	float RayLength = 0.0f;
+
+	/** 조준원 투영 위치. hit가 있으면 실제 hit, 없으면 aim ray 끝점이다. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	FVector AimWorldPos = FVector::ZeroVector;
 };
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
