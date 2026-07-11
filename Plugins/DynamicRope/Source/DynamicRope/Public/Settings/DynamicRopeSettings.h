@@ -8,6 +8,7 @@
 #include "DynamicRopeSettings.generated.h"
 
 class ARopeController;
+class URopeAimWidget;
 
 /**
  * Dynamic Rope 플러그인의 프로젝트 전역 설정.
@@ -73,6 +74,15 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ToolTip = "WorldStatic 외에 WorldDynamic 바디도 수집합니다(움직이는 플랫폼/문 등). 이전 프레임 트랜스폼으로 표면 속도/CCD 처리."))
 	bool bIncludeWorldDynamic = false;
+
+	/**
+	 * Aim ray 모드(AimRayHitDirection)의 데모 조준 HUD(십자선 + 감김 가능 본 강조 링) 위젯 클래스.
+	 * URopeWielderComponent가 bShowAimHudWidget일 때 이 클래스를 생성해 로컬 플레이어 뷰포트에 올린다.
+	 * 기본값 = C++ URopeAimWidget(에셋 없이 동작). URopeAimWidget을 부모로 한 WBP로 교체해 리스타일
+	 * 가능(내장 페인트를 끄고 자체 비주얼도 가능 — RopeAimWidget.h 참조). 비우면 HUD를 띄우지 않는다.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Demo", meta = (ToolTip = "Aim-ray demo HUD widget class (crosshair + wrappable-bone highlight ring). Spawned by URopeWielderComponent for the local player when bShowAimHudWidget is on. Defaults to the C++ URopeAimWidget (works with no assets); point it at a WBP subclass to restyle. Clear it to disable the HUD."))
+	TSoftClassPtr<URopeAimWidget> AimHudWidgetClass;
 
 	/**
 	 * 로프 튜브가 velocity 버퍼에 기록할지. 로프는 매 프레임 정점을 in-place 갱신하지만 per-vertex 변형

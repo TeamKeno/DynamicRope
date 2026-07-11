@@ -89,6 +89,57 @@ enum class ERopeThrowRejectReason : uint8
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FRopeWielderOnThrown);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeWielderOnThrowRejected, ERopeThrowRejectReason, Reason);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeWielderOnAimTargetChanged, USceneComponent*, Mesh, FName, Bone);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FRopeWielderOnAimTargetLost);
+
+class URopeAimWidget;
+
+/**
+ * 조준 HUD용 프레임 샘플: aim ray가 지금 어떤 감김 가능 대상을 겨누고 있는가.
+ * Aim ray 모드일 때 wielder가 틱마다 캐시한다(스윕 레이 1회/프레임 — preview 경로와 같은 비용 등급).
+ * 소비자(URopeAimWidget/BP)는 읽기 전용 — Mesh는 표시/식별 용도로만 쓸 것.
+ */
+USTRUCT(BlueprintType)
+struct FRopeAimHudSample
+{
+	GENERATED_BODY()
+
+	/** 이번 프레임 aim ray가 감김 가능 본에 걸려 있는가. false면 (bBlocked가 아닌 한) 나머지 필드는 무의미. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	bool bHasTarget = false;
+
+	/**
+	 * 이번 프레임 aim ray가 뭔가에 걸렸지만 wrap은 불가능한가(월드 정적/본 없음/CanWrapTarget 거부).
+	 * bHasTarget과 배타 — 감길 대상이 있으면 그쪽이 우선. true면 HUD를 빨갛게 표시하고, 이때
+	 * TargetWorldPos/HitWorldPos/TargetRadius/Distance는 걸린 지점 기준으로 채워진다(Bone/Mesh는 없을 수 있음).
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	bool bBlocked = false;
+
+	/** 겨누고 있는 본(가상 본 포함). */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	FName Bone = NAME_None;
+
+	/** 본을 소유한 대상 컴포넌트(스켈레탈/정적 랩 대상). */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	TObjectPtr<USceneComponent> Mesh = nullptr;
+
+	/** 강조 링 중심 — 본 바인딩 위치(ResolveBindingWorld). */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	FVector TargetWorldPos = FVector::ZeroVector;
+
+	/** ray가 실제로 맞은 월드 지점(이펙트 스폰 등 정밀 위치가 필요할 때). */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	FVector HitWorldPos = FVector::ZeroVector;
+
+	/** 대상 콜라이더의 월드 반경 근사(bounds 반대각) — 링 크기 산정용. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	float TargetRadius = 0.0f;
+
+	/** ray origin에서 hit까지 거리. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	float Distance = 0.0f;
+};
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeWielderComponent : public UActorComponent
@@ -155,6 +206,14 @@ public:
 	/** SDF 검사 ray와 hit 지점/법선을 월드에 디버그 드로우한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Debug", meta = (EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
 	bool bDrawAimRayDebug = true;
+
+	/**
+	 * 데모 조준 HUD(십자선 + 감김 가능 본 강조 링) 위젯을 로컬 플레이어 뷰포트에 자동으로 띄울지.
+	 * 위젯 클래스는 Project Settings > Dynamic Rope > AimHudWidgetClass가 정한다(기본 = C++ URopeAimWidget,
+	 * WBP 서브클래스로 리스타일 가능). Aim ray 모드에서만 의미가 있다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|HUD", meta = (EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	bool bShowAimHudWidget = true;
 
 	//~ Throw --------------------------------------------------------------
 	/** 던질 때 Up/Right 기준축을 어디서 가져올지. */
@@ -392,6 +451,18 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeWielderOnThrowRejected OnThrowRejected;
 
+	/** aim ray가 새 대상(Mesh, Bone)에 걸린 순간(진입/전환). HUD 연출·사운드 트리거용. */
+	UPROPERTY(BlueprintAssignable, Category = "Rope|Aim HUD")
+	FRopeWielderOnAimTargetChanged OnAimTargetChanged;
+
+	/** aim ray가 대상을 잃은 순간. */
+	UPROPERTY(BlueprintAssignable, Category = "Rope|Aim HUD")
+	FRopeWielderOnAimTargetLost OnAimTargetLost;
+
+	/** 이번 프레임 조준 HUD 샘플(aim ray 모드에서 틱마다 갱신 — 그 외 모드에서는 빈 샘플). */
+	UFUNCTION(BlueprintPure, Category = "Rope|Aim HUD")
+	const FRopeAimHudSample& GetAimHudSample() const { return AimHudSample; }
+
 protected:
 	//~ 확장 훅(서브클래스용) ------------------------------------------------
 	// URopeComponent와 같은 원칙: 전부 게임 스레드·프레임 단위(콜드 패스)에서만 불린다.
@@ -410,6 +481,22 @@ protected:
 	virtual void NotifyThrowRejected(ERopeThrowRejectReason Reason) {}
 
 private:
+	/** 이번 프레임 조준 HUD 샘플(Tick에서 UpdateAimHudSample이 갱신). */
+	FRopeAimHudSample AimHudSample;
+
+	/** 자동 생성한 조준 HUD 위젯(로컬 플레이어 전용). bShowAimHudWidget/모드 변경에 따라 생성·제거. */
+	UPROPERTY(Transient)
+	TObjectPtr<URopeAimWidget> AimHudWidget = nullptr;
+
+	/**
+	 * aim ray 스윕 1회로 조준 HUD 샘플을 갱신하고, 대상 (Mesh, Bone) 변화 시
+	 * OnAimTargetChanged/OnAimTargetLost를 발화한다(Tick, aim ray 모드 전용).
+	 */
+	void UpdateAimHudSample();
+
+	/** 조준 HUD 위젯 생성/제거(lazy — 로컬 PlayerController가 준비된 뒤 Tick에서). */
+	void UpdateAimHudWidget();
+
 	/** Rope/AttachMesh 해석(미설정 시 owner에서 탐색). */
 	void ResolveRefs();
 

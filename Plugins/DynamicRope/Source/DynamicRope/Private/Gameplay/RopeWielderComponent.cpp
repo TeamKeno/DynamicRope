@@ -2,8 +2,14 @@
 
 #include "Gameplay/RopeWielderComponent.h"
 #include "RopeComponent.h"
+// ResolveBindingWorld — 조준 HUD 샘플의 본 위치(링 중심) 해석.
+#include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Render/RopePreviewComponent.h"
+// 조준 HUD 위젯(생성은 프로젝트 세팅의 클래스, 수명은 이 컴포넌트가 관리).
+#include "Settings/DynamicRopeSettings.h"
+#include "UI/RopeAimWidget.h"
+#include "Blueprint/UserWidget.h"
 
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -89,6 +95,11 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	bInputBound = false;
 	ClearThrowPreview();
+	if (AimHudWidget)
+	{
+		AimHudWidget->RemoveFromParent();
+		AimHudWidget = nullptr;
+	}
 	if (Rope)
 	{
 		// Wielder가 사라진 뒤에도 로프의 collider 수집 범위가 조준 ray 방향으로 남지 않게 정리한다.
@@ -118,7 +129,99 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	UpdateGroundExit();
 	UpdateSwingAirControl();
 	UpdateAimRayColliderQueryBounds();
+	UpdateAimHudSample();
+	UpdateAimHudWidget();
 	UpdateThrowPreview();
+}
+
+void URopeWielderComponent::UpdateAimHudSample()
+{
+	const bool bHadTarget = AimHudSample.bHasTarget;
+	USceneComponent* PrevMesh = AimHudSample.Mesh;
+	const FName PrevBone = AimHudSample.Bone;
+
+	AimHudSample = FRopeAimHudSample();
+	if (AimMode == ERopeWielderAimMode::AimRayHitDirection && Rope)
+	{
+		const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(FVector::ZeroVector);
+		FRopeAimRayHitResult Hit;
+		FRopeAimRayHitResult Blocked;
+		// HUD 전용 스윕 — 월드 디버그 캡슐은 그리지 않는다(HUD 자체가 시각화이고, bDrawAimRayDebug는
+		// preview/throw 해석 경로에서 이미 그린다 — 중복 드로우 방지).
+		const bool bHitTarget = Rope->FindAimRayBoneHit(Request.RayOrigin, Request.RayDirection, Request.RayLength,
+			Request.QueryRadius, Request.SweepStep, /*bDrawDebug*/ false, Hit, &Blocked);
+		if (bHitTarget && Hit.bHit)
+		{
+			AimHudSample.bHasTarget = true;
+			AimHudSample.Bone = Hit.Bone;
+			// 샘플은 읽기 전용 계약(헤더 주석) — BP 노출을 위해 non-const로 보관만 한다.
+			AimHudSample.Mesh = const_cast<USceneComponent*>(Hit.Mesh);
+			AimHudSample.TargetWorldPos = ResolveBindingWorld(Hit.Mesh, Hit.Bone).GetLocation();
+			AimHudSample.HitWorldPos = Hit.HitWorldPos;
+			AimHudSample.TargetRadius = Hit.TargetBoundsRadius;
+			AimHudSample.Distance = Hit.Distance;
+		}
+		else if (Blocked.bHit)
+		{
+			// ray는 맞았지만 wrap 불가 — 빨강 표시. 본 바인딩이 없을 수 있어 걸린 지점을 링 중심으로 쓴다.
+			AimHudSample.bBlocked = true;
+			AimHudSample.Bone = Blocked.Bone;
+			AimHudSample.Mesh = const_cast<USceneComponent*>(Blocked.Mesh);
+			AimHudSample.TargetWorldPos = Blocked.HitWorldPos;
+			AimHudSample.HitWorldPos = Blocked.HitWorldPos;
+			AimHudSample.TargetRadius = Blocked.TargetBoundsRadius;
+			AimHudSample.Distance = Blocked.Distance;
+		}
+	}
+
+	// 대상 (Mesh, Bone) 변화 통지 — 진입/전환은 Changed, 이탈은 Lost.
+	if (AimHudSample.bHasTarget && (!bHadTarget || AimHudSample.Mesh != PrevMesh || AimHudSample.Bone != PrevBone))
+	{
+		OnAimTargetChanged.Broadcast(AimHudSample.Mesh, AimHudSample.Bone);
+	}
+	else if (!AimHudSample.bHasTarget && bHadTarget)
+	{
+		OnAimTargetLost.Broadcast();
+	}
+}
+
+void URopeWielderComponent::UpdateAimHudWidget()
+{
+	const bool bWantWidget = bShowAimHudWidget && AimMode == ERopeWielderAimMode::AimRayHitDirection;
+	if (!bWantWidget)
+	{
+		if (AimHudWidget)
+		{
+			AimHudWidget->RemoveFromParent();
+			AimHudWidget = nullptr;
+		}
+		return;
+	}
+	if (AimHudWidget)
+	{
+		return;
+	}
+
+	// 로컬 플레이어 컨트롤러가 준비된 뒤에만 생성한다(지연 빙의 대비 — 준비 전에는 다음 틱 재시도).
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+	if (!PC || !PC->IsLocalController())
+	{
+		return;
+	}
+
+	// 위젯 클래스는 프로젝트 세팅 단일 소스(기본 = C++ URopeAimWidget, WBP로 교체 가능). 비우면 HUD 없음.
+	// 데모 HUD 규모라 동기 로드를 허용한다(최초 1회).
+	UClass* WidgetClass = UDynamicRopeSettings::Get()->AimHudWidgetClass.LoadSynchronous();
+	if (!WidgetClass)
+	{
+		return;
+	}
+	AimHudWidget = CreateWidget<URopeAimWidget>(PC, WidgetClass);
+	if (AimHudWidget)
+	{
+		AimHudWidget->AddToViewport();
+	}
 }
 
 bool URopeWielderComponent::IsWielderTetherActive() const

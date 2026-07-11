@@ -8,9 +8,14 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 	const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
 	bool bDrawDebug, const UWorld* DebugWorld,
 	TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
-	FRopeAimRayHitResult& OutHit)
+	FRopeAimRayHitResult& OutHit,
+	FRopeAimRayHitResult* OutBlockedHit)
 {
 	OutHit = FRopeAimRayHitResult();
+	if (OutBlockedHit)
+	{
+		*OutBlockedHit = FRopeAimRayHitResult();
+	}
 	if (!Ctx.Colliders)
 	{
 		return false;
@@ -40,6 +45,8 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 	const FBox ExpandedRayBounds = RayBounds.ExpandBy(EffectiveQueryRadius);
 	bool bFoundHit = false;
 	FRopeAimRayHitResult BestHit;
+	bool bFoundBlocked = false;
+	FRopeAimRayHitResult BestBlocked;
 
 	// broad phase bounds를 통과한 collider만 같은 swept query로 검사하고 ray 진행 거리의 최솟값을 고른다.
 	for (const IRopeCollider* Collider : *Ctx.Colliders)
@@ -51,9 +58,33 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 
 		FVector HitWorldPos = FVector::ZeroVector;
 		const FRopeContact Contact = Collider->QuerySwept(Query, HitWorldPos);
-		if (!Contact.bHit || Contact.Bone.IsNone() || !Contact.SourceMesh ||
-			!CanWrapTarget(Contact.SourceMesh, Contact.Bone))
+		if (!Contact.bHit)
 		{
+			continue;
+		}
+
+		const float Distance = FVector::DotProduct(HitWorldPos - RayStart, RayDir);
+		// 조준 HUD 강조 링 크기용 — 맞은 콜라이더의 월드 bounds 반경 근사(extent = 반크기라 Size()가 반대각).
+		const float BoundsRadius = static_cast<float>(Collider->GetWorldBounds().GetExtent().Size());
+
+		// ray는 맞았지만 wrap 불가(본 없음/SourceMesh 없음/게이트 거부)면 blocked 후보로만 기록한다.
+		const bool bWrappable = !Contact.Bone.IsNone() && Contact.SourceMesh &&
+			CanWrapTarget(Contact.SourceMesh, Contact.Bone);
+		if (!bWrappable)
+		{
+			if (OutBlockedHit && (!bFoundBlocked || Distance < BestBlocked.Distance))
+			{
+				BestBlocked = FRopeAimRayHitResult();
+				BestBlocked.bHit = true;
+				BestBlocked.Bone = Contact.Bone;
+				BestBlocked.Mesh = Contact.SourceMesh;
+				BestBlocked.HitWorldPos = HitWorldPos;
+				BestBlocked.SurfacePoint = Contact.SurfacePoint;
+				BestBlocked.Normal = Contact.Normal;
+				BestBlocked.Distance = Distance;
+				BestBlocked.TargetBoundsRadius = BoundsRadius;
+				bFoundBlocked = true;
+			}
 			continue;
 		}
 
@@ -64,12 +95,18 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 		Candidate.HitWorldPos = HitWorldPos;
 		Candidate.SurfacePoint = Contact.SurfacePoint;
 		Candidate.Normal = Contact.Normal;
-		Candidate.Distance = FVector::DotProduct(HitWorldPos - RayStart, RayDir);
+		Candidate.Distance = Distance;
+		Candidate.TargetBoundsRadius = BoundsRadius;
 		if (!bFoundHit || Candidate.Distance < BestHit.Distance)
 		{
 			BestHit = Candidate;
 			bFoundHit = true;
 		}
+	}
+
+	if (OutBlockedHit && bFoundBlocked)
+	{
+		*OutBlockedHit = BestBlocked;
 	}
 
 	if (bDrawDebug && DebugWorld)

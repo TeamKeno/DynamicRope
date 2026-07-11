@@ -34,6 +34,8 @@ struct FRopeAimRayHitResult
 	FVector Normal = FVector::UpVector;
 	// ray origin에서 HitWorldPos까지의 투영 거리이다.
 	float Distance = 0.0f;
+	// 맞은 콜라이더의 월드 bounds 반경 근사(반대각 길이). 조준 HUD 강조 링 크기 산정용(가산 필드).
+	float TargetBoundsRadius = 0.0f;
 };
 
 /** Wielder가 입력 순간 고정하고 RopeSimSubsystem의 최신 collider 수집 직후 해결할 Aim throw 요청. */
@@ -72,12 +74,15 @@ public:
 	//~ 질의(상태 불변 — static) --------------------------------------------
 	/** swept SDF 질의로 ray에서 가장 가까운 wrap 가능 mesh+bone을 찾는다(broad phase → QuerySwept →
 	 *  ray 진행 거리 최솟값). CanWrapTarget 게이트를 통과 못 한 후보는 없는 것으로 취급.
-	 *  bDrawDebug면 DebugWorld에 실제 질의 치수를 시각화(cyan=미스/red=히트). */
+	 *  bDrawDebug면 DebugWorld에 실제 질의 치수를 시각화(cyan=미스/red=히트).
+	 *  OutBlockedHit(옵션): ray가 콜라이더에 맞았지만 wrap은 불가능한(본 없음/SourceMesh 없음/게이트 거부)
+	 *  가장 가까운 hit. 반환값(wrap 가능 hit 유무)과 독립 — 조준 HUD의 "빨강" 표시용. */
 	static bool FindAimRayBoneHit(const FQueryContext& Ctx,
 		const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
 		bool bDrawDebug, const UWorld* DebugWorld,
 		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
-		FRopeAimRayHitResult& OutHit);
+		FRopeAimRayHitResult& OutHit,
+		FRopeAimRayHitResult* OutBlockedHit = nullptr);
 
 	/** Aim 요청을 hit 컨텍스트(FrameForward/AimGuide*)로 해석한다. hit이 없으면 OutContext는
 	 *  BaseContext fallback(반환 false). 디버그 드로우 여부는 Request.bDrawDebug를 따른다. */
