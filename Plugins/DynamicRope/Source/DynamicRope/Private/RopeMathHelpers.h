@@ -61,8 +61,8 @@ namespace RopeMath
 
 	/**
 	 * Whip guide의 시간 가변 원시 중심선을 만든다.
-	 * HitPoint 좌표를 곡선에 고정하지 않고 (HitPoint-Origin)을 최종 방향으로만 사용한다.
-	 * 공간 보간값에는 시간 보간값을 반드시 곱해서 Flight가 끝나기 전 어떤 노드도 hit ray에 고정되지 않게 한다.
+	 * Aim-hit은 현재 sweep 방향 하나로 직선을 만들며, 호출자가 throw frame/swing plane으로 그 방향을
+	 * 시간에 따라 회전시킨다. 일반 whip은 기존 공간/시간 보간 경로를 사용한다.
 	 */
 	inline void BuildWhipGuideRawPoints(const FVector& Origin, const FVector& SweepDirection,
 		const FVector& AimDirection, bool bHasAimTarget, float NormalizedTime,
@@ -76,6 +76,21 @@ namespace RopeMath
 		// 두 방향을 정규화한다. SweepDirection이 퇴화면 AimDirection을, AimDirection이 퇴화면 SweepDir을 쓴다.
 		const FVector SweepDir = SafeNormalOr(SweepDirection, AimDirection);
 		const FVector AimDir = SafeNormalOr(AimDirection, SweepDir);
+
+		// Aim-hit keeps each frame's spline straight. SweepDir is computed from the
+		// wielder throw frame and swing plane, so the whole line sweeps an arc over time
+		// and reaches the Origin->Hit direction at the end of the swing.
+		if (bHasAimTarget)
+		{
+			OutPoints.Reserve(SampleCount);
+			for (int32 SampleIndex = 0; SampleIndex < SampleCount; ++SampleIndex)
+			{
+				const float RopeAlpha = static_cast<float>(SampleIndex) /
+					static_cast<float>(SampleCount - 1);
+				OutPoints.Add(Origin + SweepDir * (RopeAlpha * PathLength));
+			}
+			return;
+		}
 
 		// 2. 공간 보간 구간: 0% ─── SteerStart ─── FullSteer ─── 100%
 		//                    Sweep 유지   Hit 방향으로 보간   Hit 방향 영향 최대

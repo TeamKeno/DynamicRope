@@ -7,6 +7,7 @@
 #include "Solver/RopeXPBDSolver.h"
 #include "Collision/RopeCollider.h"
 #include "Logic/RopeWhipGuide.h"
+#include "RopeMathHelpers.h"
 #include "RopeTestHelpers.h"
 
 namespace
@@ -123,6 +124,49 @@ bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("released tip keeps solver position before solve"),
 		Guide.GetCurrentTargets().IsValidIndex(LastNode) &&
 		Guide.GetCurrentTargets()[LastNode].Equals(FreeTipBefore, 0.01f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimHitSweepingLineGuideTest,
+	"DynamicRope.Solver.AimHitSweepingLineGuide",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeAimHitSweepingLineGuideTest::RunTest(const FString& Parameters)
+{
+	const FVector Origin(10.0f, -20.0f, 30.0f);
+	const FVector AimDirection = FVector::ForwardVector;
+	const FVector GuideUp = FVector::UpVector;
+	const float SweepAngleDegrees = 120.0f;
+	const float GuideLength = 240.0f;
+	constexpr int32 SampleCount = 25;
+
+	for (const float T : { 0.0f, 0.5f, 1.0f })
+	{
+		const FVector SweepDirection = RopeMath::ArcDirectionAtAlpha(
+			AimDirection, GuideUp, SweepAngleDegrees, T);
+		TArray<FVector> Points;
+		RopeMath::BuildWhipGuideRawPoints(Origin, SweepDirection, AimDirection,
+			/*bHasAimTarget*/ true, T, GuideLength, FVector(200.0f, -100.0f, 50.0f),
+			/*AimSteerStartAlpha*/ 0.25f, /*AimLockAlpha*/ 0.50f,
+			/*AimDirectionBias*/ 4.0f, SampleCount, Points);
+
+		TestEqual(TEXT("sweeping line sample count"), Points.Num(), SampleCount);
+		for (int32 Index = 0; Index < Points.Num(); ++Index)
+		{
+			const float RopeAlpha = static_cast<float>(Index) / static_cast<float>(Points.Num() - 1);
+			const FVector Expected = Origin + SweepDirection * (RopeAlpha * GuideLength);
+			TestTrue(*FString::Printf(TEXT("T=%.2f sample %d stays on one sweep line"), T, Index),
+				Points[Index].Equals(Expected, 0.01f));
+		}
+	}
+
+	const FVector HitPoint = Origin + AimDirection * 100.0f;
+	const FVector FinalDirection = RopeMath::ArcDirectionAtAlpha(
+		AimDirection, GuideUp, SweepAngleDegrees, 1.0f);
+	TestTrue(TEXT("final sweep line uses Origin-to-hit direction"),
+		FinalDirection.Equals((HitPoint - Origin).GetSafeNormal(), 0.01f));
+	TestTrue(TEXT("reachable hit lies on final finite guide"),
+		FVector::Dist(Origin, HitPoint) <= GuideLength);
 	return true;
 }
 
