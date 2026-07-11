@@ -223,7 +223,7 @@ bool URopeComponent::FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, 
 	FRopeArcPreviewHitResult& OutHit) const
 {
 	OutHit = FRopeArcPreviewHitResult();
-	if (Preview.Radius <= KINDA_SMALL_NUMBER || FrameColliders.Num() == 0)
+	if (Preview.Radius <= KINDA_SMALL_NUMBER || SimFrame.FrameColliders.Num() == 0)
 	{
 		return false;
 	}
@@ -257,7 +257,7 @@ bool URopeComponent::FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, 
 	PreviewBounds = PreviewBounds.ExpandBy(EffectiveQueryRadius);
 
 	TArray<const IRopeCollider*, TInlineAllocator<8>> CandidateColliders;
-	for (const IRopeCollider* Collider : FrameColliders)
+	for (const IRopeCollider* Collider : SimFrame.FrameColliders)
 	{
 		if (Collider && Collider->GetWorldBounds().ExpandBy(EffectiveQueryRadius).Intersect(PreviewBounds))
 		{
@@ -336,7 +336,7 @@ bool URopeComponent::FindAimRayBoneHit(const FVector& Origin, const FVector& Aim
 	FRopeAimRayHitResult BestHit;
 
 	// broad phase bounds를 통과한 collider만 같은 swept query로 검사하고 ray 진행 거리의 최솟값을 고른다.
-	for (const IRopeCollider* Collider : FrameColliders)
+	for (const IRopeCollider* Collider : SimFrame.FrameColliders)
 	{
 		if (!Collider || !Collider->GetWorldBounds().Intersect(ExpandedRayBounds))
 		{
@@ -414,13 +414,13 @@ void URopeComponent::SetAimRayColliderQueryBounds(const FVector& Origin, const F
 		? QueryRadius
 		: FMath::Max(Radius, WrapConfig.ContactRadius);
 	const FVector RayEnd = Origin + RayDir * EffectiveRayLength;
-	AimRayColliderQueryBounds = FBox(Origin.ComponentMin(RayEnd), Origin.ComponentMax(RayEnd))
+	SimFrame.AimRayColliderQueryBounds = FBox(Origin.ComponentMin(RayEnd), Origin.ComponentMax(RayEnd))
 		.ExpandBy(EffectiveQueryRadius);
 }
 
 void URopeComponent::ClearAimRayColliderQueryBounds()
 {
-	AimRayColliderQueryBounds = FBox(ForceInit);
+	SimFrame.AimRayColliderQueryBounds = FBox(ForceInit);
 }
 
 bool URopeComponent::ResolveAimRayThrowContext(const FRopeAimRayThrowRequest& Request,
@@ -484,7 +484,7 @@ bool URopeComponent::BuildPreviewContext(const FRopeThrowContext& ThrowContext, 
 	OutContext.SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
 		OutContext.ThrowContext, OutContext.ThrowContext.SwingPlane, OutContext.ThrowContext.CustomSwingPlaneNormal);
 	OutContext.WhipConfig = MakeWhipGuideConfig();
-	OutContext.Colliders = &FrameColliders;
+	OutContext.Colliders = &SimFrame.FrameColliders;
 	OutContext.InheritedVelocity = ComputeThrowInheritedVelocity(OutContext.ThrowContext);
 	OutContext.RopeLength = FMath::Max(Sim.RopeLength, RopeLength);
 	OutContext.SegmentLength = Sim.SegmentLength;
@@ -507,7 +507,7 @@ bool URopeComponent::BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) cons
 	{
 		FRopeThrowPreviewBuilder::FInput Input;
 		Input.Sim = &Sim;
-		Input.Colliders = &FrameColliders;
+		Input.Colliders = &SimFrame.FrameColliders;
 		Input.WrapConfig = WrapConfig;
 		Input.PathMode = GetWrappingPathMode();
 		Input.RopeRadius = Radius;
@@ -602,7 +602,7 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 	{
 		FRopeThrowPreviewBuilder::FInput Input;
 		Input.Sim = &Sim;
-		Input.Colliders = &FrameColliders;
+		Input.Colliders = &SimFrame.FrameColliders;
 		Input.ThrowContext = ResolveThrowContext(ThrowContext);
 		Input.WrapConfig = WrapConfig;
 		Input.PathMode = GetWrappingPathMode();
@@ -623,7 +623,7 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 	{
 		FRopeThrowPreviewBuilder::FInput Input;
 		Input.Sim = &Sim;
-		Input.Colliders = &FrameColliders;
+		Input.Colliders = &SimFrame.FrameColliders;
 		Input.WrapConfig = WrapConfig;
 		Input.PathMode = GetWrappingPathMode();
 		Input.RopeRadius = Radius;
@@ -658,7 +658,7 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 
 	FRopeThrowPreviewBuilder::FInput Input;
 	Input.Sim = &Sim;
-	Input.Colliders = &FrameColliders;
+	Input.Colliders = &SimFrame.FrameColliders;
 	Input.ThrowContext = ResolveThrowContext(ThrowContext);
 	Input.WrapConfig = WrapConfig;
 	Input.PathMode = GetWrappingPathMode();
@@ -735,7 +735,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	//  근거와 3단계 역할 분담은 헤더의 Prepare/Solve/Finalize 선언부 주석 참고.)
 
 	EnsureRopeInitialized();
-	OverrideFrame.Reset(); // 프레임 스코프 — 이번 프레임 로직 산출물을 새로 모은다(G2).
+	SimFrame.OverrideFrame.Reset(); // 프레임 스코프 — 이번 프레임 로직 산출물을 새로 모은다(G2).
 
 	// pinned-start target을 전진시킨다; solver가 substep에 걸쳐 Prev->Target을 sweep하므로 빠른
 	// 캐릭터 이동이 chain을 홱 잡아당겨(폭주시켜) 버리지 않는다.
@@ -762,8 +762,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		SleepTimer = 0.0f;
 	}
 
-	bSolveThisFrame = false;
-	bSolveCollisionsThisFrame = true;
+	SimFrame.bSolveThisFrame = false;
+	SimFrame.bSolveCollisionsThisFrame = true;
 
 	switch (Phase)
 	{
@@ -773,7 +773,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 			bAsleep = false;
 			SleepTimer = 0.0f;
 		}
-		bSolveThisFrame = !bAsleep; // 슬립 중엔 솔브 스킵(GPU 로프는 dispatch 자체가 없음).
+		SimFrame.bSolveThisFrame = !bAsleep; // 슬립 중엔 솔브 스킵(GPU 로프는 dispatch 자체가 없음).
 		break;
 
 	case ERopePhase::Flight:
@@ -800,12 +800,12 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		{
 			// 중앙 guide를 적용한 뒤 양끝은 XPBD 거리/굽힘/감쇠로 자연스럽게 연결한다.
 			// collider push-out은 별도 게이트로 꺼서 이전의 충돌 순간이동을 재발시키지 않는다.
-			bSolveThisFrame = true;
-			bSolveCollisionsThisFrame = !WhipConfig.bAimHitCollisionFreeSolve;
+			SimFrame.bSolveThisFrame = true;
+			SimFrame.bSolveCollisionsThisFrame = !WhipConfig.bAimHitCollisionFreeSolve;
 		}
 		else
 		{
-			bSolveThisFrame = true; // 일반 Flight는 기존처럼 solver 후 Finalize에서 접촉을 감지한다.
+			SimFrame.bSolveThisFrame = true; // 일반 Flight는 기존처럼 solver 후 Finalize에서 접촉을 감지한다.
 		}
 		break;
 	}
@@ -816,8 +816,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 
 	case ERopePhase::Wrapping:
 		UpdateWrapping(DeltaTime);
-		// latch 이전 구간은 solver가 계속 처리한다. latch~tail은 OverrideFrame mass mask로 고정된다.
-		bSolveThisFrame = (Phase == ERopePhase::Wrapping || Phase == ERopePhase::Wrapped);
+		// latch 이전 구간은 solver가 계속 처리한다. latch~tail은 SimFrame.OverrideFrame mass mask로 고정된다.
+		SimFrame.bSolveThisFrame = (Phase == ERopePhase::Wrapping || Phase == ERopePhase::Wrapped);
 		break;
 
 	case ERopePhase::Wrapped:
@@ -835,24 +835,24 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		{
 			break; // 장력/거리 release 발생(솔브 없음).
 		}
-		bSolveThisFrame = true;
+		SimFrame.bSolveThisFrame = true;
 		break;
 	}
 
 	case ERopePhase::GuidedThrow:
 		// PreviewPathLocked 전용 phase. 물리 solver/contact detector를 건너뛰고 cached preview path만 따른다.
 		UpdateGuidedThrow(DeltaTime);
-		bSolveThisFrame = false;
+		SimFrame.bSolveThisFrame = false;
 		break;
 
 	case ERopePhase::Releasing:
 		// 모든 node를 solver에 다시 넘긴다(hand pin만 유지) — InvMass 복원 + Prev=Pos(튐 방지)를
 		// 프레임 산출물로 담고, cooldown이 끝나면 free simulation을 재개한다.
-		OverrideFrame.EnsureSize(Sim.Num());
+		SimFrame.OverrideFrame.EnsureSize(Sim.Num());
 		for (int32 i = 0; i < Sim.Num(); ++i)
 		{
-			OverrideFrame.SetInvMass(i, (i == 0 && Sim.bStartPinned) ? 0.0f : 1.0f);
-			OverrideFrame.SetPrevFromPosition(i);
+			SimFrame.OverrideFrame.SetInvMass(i, (i == 0 && Sim.bStartPinned) ? 0.0f : 1.0f);
+			SimFrame.OverrideFrame.SetPrevFromPosition(i);
 		}
 		ReleaseCooldown -= DeltaTime;
 		if (ReleaseCooldown <= 0)
@@ -868,19 +868,19 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	// 로직 페이즈의 프레임 산출물을 CPU Sim에 1회 적용한다 — 기존 "핸들러 안에서 직접 쓰기"와
 	// 같은 결과(같은 노드 중복 시 나중 fill이 이김 = 순차 쓰기와 동일). GPU 상주 로프에는
 	// 서브시스템이 같은 프레임을 override 패스로 실어 커널에서 적용한다(G2).
-	// 로직 페이즈 재시드(SimGeneration 증가)는 소멸 — 재시드는 진짜 시드(Init/Throw)뿐이다.
-	if (OverrideFrame.HasAny())
+	// 로직 페이즈 재시드(SimFrame.SimGeneration 증가)는 소멸 — 재시드는 진짜 시드(Init/Throw)뿐이다.
+	if (SimFrame.OverrideFrame.HasAny())
 	{
-		OverrideFrame.ApplyToSim(Sim);
+		SimFrame.OverrideFrame.ApplyToSim(Sim);
 	}
 }
 
 void URopeComponent::SolveSimFrame(float DeltaTime)
 {
-	// 병렬 단계: POD 상태(Sim) + collider 스냅샷(FrameColliders)만 만진다. Query는 const → 스레드 안전.
-	// bSolveThisFrame(Free/Flight/Wrapping/Wrapped)일 때만 물리 솔브 — Wrapping/Wrapped는
+	// 병렬 단계: POD 상태(Sim) + collider 스냅샷(SimFrame.FrameColliders)만 만진다. Query는 const → 스레드 안전.
+	// SimFrame.bSolveThisFrame(Free/Flight/Wrapping/Wrapped)일 때만 물리 솔브 — Wrapping/Wrapped는
 	// 고정 노드가 InvMass=0이라 자유 구간만 움직이고, Contacting/Releasing은 로직 구동이라 스킵.
-	if (!bSolveThisFrame)
+	if (!SimFrame.bSolveThisFrame)
 	{
 		return;
 	}
@@ -899,8 +899,8 @@ void URopeComponent::SolveSimFrame(float DeltaTime)
 	LODConfig.Iterations = GetLODScaledIterations();
 	// Aim-hit collision-free solve도 solver 자체는 실행하되 빈 목록을 넘겨 push-out만 제외한다.
 	const TArray<IRopeCollider*> NoSolveColliders;
-	const TArray<IRopeCollider*>& SolveColliders = bSolveCollisionsThisFrame
-		? FrameColliders
+	const TArray<IRopeCollider*>& SolveColliders = SimFrame.bSolveCollisionsThisFrame
+		? SimFrame.FrameColliders
 		: NoSolveColliders;
 	Solver.Step(Sim, LODConfig, SolveColliders, DeltaTime);
 }
@@ -1000,7 +1000,7 @@ void URopeComponent::SendRenderDynamicData_Concurrent()
 	// centerline을 component-local 공간으로 보낸다; proxy는 GetLocalToWorld()를 통해 렌더링한다.
 	const FTransform Xform = GetComponentTransform();
 	FRopeDynamicData* DynamicData = new FRopeDynamicData;
-	DynamicData->bGpuResident = bGpuSteppedThisFrame; // M5b: GPU step된 프레임만 resident PosBuf 직접 렌더 허용.
+	DynamicData->bGpuResident = SimFrame.bGpuSteppedThisFrame; // M5b: GPU step된 프레임만 resident PosBuf 직접 렌더 허용.
 	// resident 튜브의 월드→로컬 변환도 이 GT 트랜스폼으로 — Points 로컬화와 같은 프레임의 값이라 드로우
 	// 트랜스폼과 일치한다(프록시 GetLocalToWorld()는 SetDynamicData 시점에 한 프레임 이전 값 — 헤더 주석 참고).
 	DynamicData->WorldToLocal = FMatrix44f(Xform.ToInverseMatrixWithScale());
@@ -1227,7 +1227,7 @@ void URopeComponent::FilterFrameCollidersForAimWrapTarget()
 		return;
 	}
 
-	FrameColliders.RemoveAll([this](const IRopeCollider* Collider)
+	SimFrame.FrameColliders.RemoveAll([this](const IRopeCollider* Collider)
 	{
 		if (!Collider)
 		{
@@ -1283,7 +1283,7 @@ void URopeComponent::InitRope()
 	Sim.StartPinTarget = Start;
 	Sim.StartPinPrev = Start;
 
-	++SimGeneration; // Sim 전면 재구성 → GPU 상주 버퍼 재시드(M5).
+	++SimFrame.SimGeneration; // Sim 전면 재구성 → GPU 상주 버퍼 재시드(M5).
 
 	// 길이가 확정되는 지점 — 꼬임 밀도(TwistTurns)를 새 RopeLength에 맞춰 갱신(런타임 길이 변경/재throw 포함).
 	UpdateRopeMaterialDynamicParams();
@@ -1414,7 +1414,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 	// 실제 형상 분류: 캡슐(세그먼트) / 박스(회전 OBB) / 컨벡스(헐 와이어) / 그 외(SDF 등 월드 AABB 폴백).
 	// FrameColliders는 provider 소유라 이 프레임 동안만 유효(GT Phase-3 직렬 실행이라 스레딩 무관).
 	Snapshot.Colliders.Reset();
-	for (const IRopeCollider* Collider : FrameColliders)
+	for (const IRopeCollider* Collider : SimFrame.FrameColliders)
 	{
 		if (!Collider)
 		{
@@ -1470,7 +1470,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		const FVector NodePos = Sim.Positions[i];
 		FRopeContact Best;
 		bool bAny = false;
-		for (const IRopeCollider* Collider : FrameColliders)
+		for (const IRopeCollider* Collider : SimFrame.FrameColliders)
 		{
 			if (!Collider)
 			{
@@ -1589,7 +1589,7 @@ void URopeComponent::ResetChainForThrow(const FVector& HandOrigin)
 {
 	// 체인 위치를 통째로 재설정하는 곳이므로 GPU 상주 버퍼 재시드 세대(M5)도 여기서 함께 올린다 —
 	// 리셋과 재시드는 한 몸이다(따로 두면 한쪽만 하는 버그가 생긴다).
-	++SimGeneration;
+	++SimFrame.SimGeneration;
 
 	if (Sim.Num() < 2)
 	{
@@ -1675,7 +1675,7 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 	const float EasedAlpha = Alpha * Alpha * (3.0f - 2.0f * Alpha);
 	const FRopePreparedThrowPreview& Prepared = GuidedThrowState.Prepared;
 
-	OverrideFrame.EnsureSize(Sim.Num());
+	SimFrame.OverrideFrame.EnsureSize(Sim.Num());
 	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
 	{
 		// 1차 구현은 전체 노드를 시작 위치에서 preview 결과 위치로 부드럽게 보간한다.
@@ -1692,8 +1692,8 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 			? GuidedThrowState.StartPositions[NodeIndex]
 			: Sim.Positions[NodeIndex];
 		const FVector Position = FMath::Lerp(Start, Target, EasedAlpha);
-		OverrideFrame.SetPosition(NodeIndex, Position, /*bZeroVelocity*/ true);
-		OverrideFrame.SetInvMass(NodeIndex, 0.0f);
+		SimFrame.OverrideFrame.SetPosition(NodeIndex, Position, /*bZeroVelocity*/ true);
+		SimFrame.OverrideFrame.SetInvMass(NodeIndex, 0.0f);
 	}
 
 	if (Alpha >= 1.0f)
@@ -1727,7 +1727,7 @@ void URopeComponent::FinishGuidedThrow()
 		Seed.Latched.Add(Latch);
 	}
 
-	WrapController.BeginWrap(Sim, Seed, OverrideFrame);
+	WrapController.BeginWrap(Sim, Seed, SimFrame.OverrideFrame);
 	if (!WrapController.State.IsWrapped())
 	{
 		SetPhase(ERopePhase::Releasing, TEXT("guided throw begin wrap failed"));
@@ -1816,23 +1816,23 @@ void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
 		WhipView.NextTargets = &NextGuideTargets;
 	}
 
-	if (bGpuContactsThisFrame)
+	if (SimFrame.bGpuContactsThisFrame)
 	{
 		// GPU 감지 경로(G3): actual+predictive 후보 모두 GPU 커널이 산출한 것을 쓴다(귀속·중복제거는
 		// 서브시스템이 복원). 상대운동 평가(ExpectedWrapTangent는 hand=node0 위치 필요)만 GT에서 돌린다.
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightGpuContacts);
-		OutCandidates = GpuFlightCandidates;
+		OutCandidates = SimFrame.GpuFlightCandidates;
 		FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, OutCandidates);
 	}
 	else
 	{
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightActualContacts);
-			FRopeFlightContactDetector::DetectContactCandidates(Sim, FrameColliders, DetectParams, OutCandidates);
+			FRopeFlightContactDetector::DetectContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, OutCandidates);
 		}
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightPredictiveContacts);
-			FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, FrameColliders, DetectParams, WhipView, OutCandidates);
+			FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, WhipView, OutCandidates);
 		}
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCandidates);
@@ -1900,7 +1900,7 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 	const FRopeContactTracker& DebugTracker = bShouldCapture ? ContactTracker : FlightObserveTracker;
 	const float WhipGuidedEnd = FMath::Clamp(WhipConfig.GuidedLength, 0.05f, 0.95f);
 	const bool bWhipActive = WhipGuide.GetDebugGuideTargets().Num() > 0;
-	RopeDebug::RecordFlightStats(Sim, bSolveThisFrame, FrameColliders.Num(), Candidates,
+	RopeDebug::RecordFlightStats(Sim, SimFrame.bSolveThisFrame, SimFrame.FrameColliders.Num(), Candidates,
 		DebugTracker, WrapConfig, bShouldCapture);
 	RopeDebug::RecordWhipStats(Sim, WhipGuide.GetDebugGuideNodeIndices(), WhipGuide.GetDebugGuideTargets(),
 		WhipGuidedEnd, bWhipActive);
@@ -1910,9 +1910,9 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 	{
 		GatherFlightNodeDebug(DetectParams, OutSnapshot->NodeDebug);
 		OutSnapshot->bHasFlight = true;
-		OutSnapshot->bSolveThisFrame = bSolveThisFrame;
+		OutSnapshot->bSolveThisFrame = SimFrame.bSolveThisFrame;
 		OutSnapshot->bShouldCapture = bShouldCapture;
-		OutSnapshot->FrameColliderCount = FrameColliders.Num();
+		OutSnapshot->FrameColliderCount = SimFrame.FrameColliders.Num();
 		OutSnapshot->MinLatchNodes = WrapConfig.MinLatchNodes;
 		OutSnapshot->TrackerBone = DebugTracker.CandidateBone;
 		OutSnapshot->TrackerNodes = DebugTracker.CandidateNodes;
@@ -1947,11 +1947,11 @@ void URopeComponent::GatherFlightNodeDebug(const FRopeFlightContactDetector::FPa
 		NodeDebug.NodeSpeed = FRopeFlightContactDetector::NodeSpeed(Sim, i);
 		NodeDebug.bFast = FRopeFlightContactDetector::IsTailNode(Sim, i) || NodeDebug.NodeSpeed > Sim.SegmentLength;
 		NodeDebug.bNearBody = FRopeFlightContactDetector::IsNearAnyColliderSegment(
-			NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders, DetectParams);
+			NodeDebug.PrevPosition, NodeDebug.Position, SimFrame.FrameColliders, DetectParams);
 		if (NodeDebug.bFast || NodeDebug.bNearBody)
 		{
 			NodeDebug.Contact = FRopeFlightContactDetector::SweepOrSampleContact(
-				Sim, NodeDebug.PrevPosition, NodeDebug.Position, FrameColliders, DetectParams);
+				Sim, NodeDebug.PrevPosition, NodeDebug.Position, SimFrame.FrameColliders, DetectParams);
 		}
 
 		if (NodeDebug.bFast || NodeDebug.bNearBody || NodeDebug.Contact.bHit)
@@ -1983,7 +1983,7 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 	// 예측/whip 분기는 Flight 전용이므로 여기서는 actual 접촉만 수집한다(비용: 근접 노드 점 질의뿐).
 	const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
 	TArray<FRopeContactCandidate> Candidates;
-	FRopeFlightContactDetector::DetectContactCandidates(Sim, FrameColliders, DetectParams, Candidates);
+	FRopeFlightContactDetector::DetectContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, Candidates);
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
 	RemoveNonWrappableCandidates(Candidates); // CanWrapTarget 게이트(Flight 후보 산출과 공용 헬퍼).
 
@@ -2212,9 +2212,9 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 		return;
 	}
 
-	WrappingPhase.ApplyFrontMotion(Sim, DeltaTime, WrappingCtx, OverrideFrame);
+	WrappingPhase.ApplyFrontMotion(Sim, DeltaTime, WrappingCtx, SimFrame.OverrideFrame);
 
-	WrappingPhase.ApplyMassMask(Sim, OverrideFrame);
+	WrappingPhase.ApplyMassMask(Sim, SimFrame.OverrideFrame);
 
 	WrappingPhase.UpdateStability(DeltaTime);
 
@@ -2233,7 +2233,7 @@ ERopeWrappingPathMode URopeComponent::GetWrappingPathMode() const
 
 FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 {
-	return FRopeWrappingPhase::FContext{ WrapConfig, FrameColliders, GetWrappingPathMode(), Radius, GetName() };
+	return FRopeWrappingPhase::FContext{ WrapConfig, SimFrame.FrameColliders, GetWrappingPathMode(), Radius, GetName() };
 }
 
 void URopeComponent::CommitWrapping()
@@ -2272,7 +2272,7 @@ void URopeComponent::CommitWrapping()
 		return;
 	}
 
-	WrapController.BeginWrap(Sim, Seed, OverrideFrame); // 감길 mesh는 Seed.Mesh로 전파(접촉 유래, cross-actor 포함).
+	WrapController.BeginWrap(Sim, Seed, SimFrame.OverrideFrame); // 감길 mesh는 Seed.Mesh로 전파(접촉 유래, cross-actor 포함).
 	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
 
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s), angle=%.0fdeg"),
@@ -2287,7 +2287,7 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 	UE_LOG(LogDynamicRope, Log, TEXT("[%s] AbortWrapping reason=%d"),
 		*GetName(), static_cast<int32>(Reason));
 
-	WrappingPhase.ReturnNodesToSolver(Sim, OverrideFrame);
+	WrappingPhase.ReturnNodesToSolver(Sim, SimFrame.OverrideFrame);
 
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
@@ -2302,7 +2302,7 @@ bool URopeComponent::HoldWrappedNodesToBone(float DeltaTime)
 	// ① latch된 node는 skinned bone을 따라간다(GT). latch 노드는 InvMass=0이라 솔브는 자유 구간만.
 	// Hold가 false면 wrap 대상 mesh가 사라진 것(예: cross-actor 대상 액터 파괴) →
 	// 노드를 솔버에 되돌려 안전하게 release한다(dangling 포인터 역참조 방지는 Hold 내부에서).
-	if (!WrapController.Hold(Sim, DeltaTime, OverrideFrame))
+	if (!WrapController.Hold(Sim, DeltaTime, SimFrame.OverrideFrame))
 	{
 		const FName Bone = WrapController.State.BoneName;
 		FinishWrapRelease(Bone, ERopeReleaseReason::Broken,
@@ -2434,16 +2434,16 @@ void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 		}
 	}
 
-	OverrideFrame.EnsureSize(Sim.Num());
+	SimFrame.OverrideFrame.EnsureSize(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		const bool bStartPin = (i == 0 && Sim.bStartPinned);
 		const bool bAnchor = AnchorNodes.Contains(i);
 		const bool bFixed = bStartPin || bAnchor;
-		OverrideFrame.SetInvMass(i, bFixed ? 0.0f : 1.0f);
+		SimFrame.OverrideFrame.SetInvMass(i, bFixed ? 0.0f : 1.0f);
 		if (bResetDynamicNodeVelocity && !bFixed)
 		{
-			OverrideFrame.SetPrevFromPosition(i);
+			SimFrame.OverrideFrame.SetPrevFromPosition(i);
 		}
 	}
 }
@@ -2547,7 +2547,7 @@ bool URopeComponent::ShouldWakeFromSleep() const
 	}
 	// 움직이는 collider 근접: FrameColliders는 이미 로프 bounds로 컬링돼 있어(서브시스템) 근접분만 남는다.
 	// 정지 본(prev==curr)은 무시 — 애니 idle 미세 흔들림은 0.5cm 임계로 걸러진다.
-	for (const IRopeCollider* Collider : FrameColliders)
+	for (const IRopeCollider* Collider : SimFrame.FrameColliders)
 	{
 		if (!Collider)
 		{

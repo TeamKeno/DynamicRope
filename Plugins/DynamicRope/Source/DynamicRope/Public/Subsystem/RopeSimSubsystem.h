@@ -154,7 +154,7 @@ private:
 	void BuildGpuFlightCandidates(URopeComponent& Rope);
 
 	// Phase 2(GPU) 헬퍼 — 한 로프의 GPU 상주 step을 구성한다. GPU 상주 대상이면 OutStep을 채우고 true를
-	// 반환(디스패치 목록에 추가), 노드수 초과 등 폴백이면 내부에서 CPU 솔브 후 false. Rope.bGpuSteppedThisFrame도 세팅.
+	// 반환(디스패치 목록에 추가), 노드수 초과 등 폴백이면 내부에서 CPU 솔브 후 false. Rope.SimFrame.bGpuSteppedThisFrame도 세팅.
 	bool TryBuildResidentStep(URopeComponent& Rope, float DeltaTime, FRopeGPUResidentStep& OutStep);
 	// G3: Flight 로프의 접촉 감지 요청(+ whip 예측 입력)을 Step에 세팅하고 귀속 테이블을 리셋한다.
 	void RequestContactDetection(URopeComponent& Rope, float DeltaTime, FRopeGPUResidentStep& Step) const;
