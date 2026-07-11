@@ -14,6 +14,7 @@
 #include "Core/RopeSimFrameIO.h"
 #include "Core/RopePullDriveState.h"
 #include "Logic/RopeAimTargeting.h" // FRopeAimRayHitResult/FRopeAimRayThrowRequest + 조준 로직/상태
+#include "Logic/RopeSolverThrottle.h" // 슬립 + 거리 LOD(솔브 스로틀)
 #include "Solver/RopeXPBDSolver.h"
 #include "Logic/RopeWrapController.h"
 #include "Logic/RopeWhipGuide.h"
@@ -293,11 +294,11 @@ public:
 
 	/** 슬립 중인가(Free 페이즈에서 정지 판정 — 솔브 스킵 상태). */
 	UFUNCTION(BlueprintPure, Category = "Rope")
-	bool IsSleeping() const { return bAsleep; }
+	bool IsSleeping() const { return Throttle.IsAsleep(); }
 
 	/** 현재 거리 LOD의 iteration 배율(1=풀 품질). 디버그/프로파일 확인용. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
-	float GetSolverLODScale() const { return SolverLODScale; }
+	float GetSolverLODScale() const { return Throttle.GetSolverLODScale(); }
 
 	/** 이번 프레임 이 로프가 GPU 솔버로 step됐는가(false면 CPU 폴백/솔버 off). 디버그 확인용. */
 	bool IsGpuSteppedThisFrame() const { return SimFrame.bGpuSteppedThisFrame; }
@@ -501,23 +502,14 @@ private:
 	void UpdateReel(float DeltaTime);
 
 	//~ 슬립/LOD(스케일링) ---------------------------------------------------
-	bool  bAsleep = false;                    // Free 정지 판정으로 솔브 스킵 중
-	float SleepTimer = 0.0f;                  // 저속 유지 누적(초)
-	FVector SleepPinPos = FVector::ZeroVector; // 슬립 진입 시 핀 위치(이동 시 wake)
-	TArray<FVector> SleepPrevFramePositions;  // 프레임간 변위 측정 캐시(Finalize에서 갱신)
-	float SolverLODScale = 1.0f;              // 거리 LOD iteration 배율(Prepare가 계산, 1=풀)
+	// 상태·판정은 FRopeSolverThrottle(Logic/RopeSolverThrottle.h)로 분리 — 컴포넌트에는 카메라 접근(GT)과
+	// 슬립 전이 로그만 남는다.
+	FRopeSolverThrottle Throttle;
 
-	// 거리 LOD 배율 계산(Prepare, GT — 카메라 접근). 카메라 없으면(서버) 1 유지.
+	// 거리 LOD 배율 계산(Prepare, GT): 카메라 거리만 여기서 산출해 Throttle에 위임. 카메라 없으면(서버) 1 유지.
 	void ComputeSolverLOD();
-	// 슬립 전이 측정(Finalize, Free 전용): 프레임간 최대 노드 속도가 임계 미만이 SleepDelay 지속 → 슬립.
-	void UpdateSleepState(float DeltaTime);
-	// 슬립 해제 판정(Prepare): 핀 이동/되감기/움직이는 근접 collider.
-	bool ShouldWakeFromSleep() const;
-	// LOD 반영된 유효 iteration(CPU 솔브/GPU 스텝 공용).
-	int32 GetLODScaledIterations() const
-	{
-		return FMath::Max(1, FMath::RoundToInt(static_cast<float>(SolverConfig.Iterations) * SolverLODScale));
-	}
+	// LOD 반영된 유효 iteration(CPU 솔브/GPU 스텝 공용 — 서브시스템이 호출).
+	int32 GetLODScaledIterations() const { return Throttle.LODScaledIterations(SolverConfig.Iterations); }
 
 	// 동작 1 — 자동 견인(테더): 가용 로프 길이 초과분을 위치/속도 동기로 회수(수렴, 폭주 없음).
 	void UpdateTether(float DeltaTime);
