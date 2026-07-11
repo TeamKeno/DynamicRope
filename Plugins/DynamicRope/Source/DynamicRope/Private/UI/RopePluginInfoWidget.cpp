@@ -257,7 +257,7 @@ FText URopePluginInfoWidget::FormatEntries(const TArray<FRopePluginInfoEntry>& E
 TArray<FRopePluginKeyBinding> URopePluginInfoWidget::GetDefaultKeyBindings()
 {
 	// 실제 키는 프로젝트의 Input Mapping Context / URopeWielderComponent 액션이 정한다.
-	// 아래 라벨은 흔한 3인칭 세팅 기준의 표시용 기본값 — WBP 디폴트에서 실제 바인딩에 맞게 수정한다.
+	// 아래 라벨은 이 프로젝트의 현재 바인딩에 맞춘 값 — 바꾸면 여기(또는 WBP 디폴트)에서 수정한다.
 	auto Make = [](const TCHAR* Key, const TCHAR* Action)
 	{
 		FRopePluginKeyBinding B;
@@ -267,11 +267,11 @@ TArray<FRopePluginKeyBinding> URopePluginInfoWidget::GetDefaultKeyBindings()
 	};
 
 	return {
-		Make(TEXT("LMB"),              TEXT("Throw / release rope (toggle)")),
-		Make(TEXT("RMB (hold)"),       TEXT("Pull the wrapped target toward you")),
-		Make(TEXT("Wheel Up (hold)"),  TEXT("Reel in — shorten the rope")),
-		Make(TEXT("Wheel Down (hold)"),TEXT("Reel out — lengthen the rope")),
-		Make(TEXT("X"),                TEXT("Cut the rope")),
+		Make(TEXT("LMB"),        TEXT("Throw the rope")),
+		Make(TEXT("RMB"),        TEXT("Release the rope")),
+		Make(TEXT("Wheel Up"),   TEXT("Reel in (shorten the rope)")),
+		Make(TEXT("Wheel Down"), TEXT("Reel out (lengthen the rope)")),
+		Make(TEXT("R"),          TEXT("Pull the wrapped target")),
 	};
 }
 
