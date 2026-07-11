@@ -69,54 +69,48 @@ namespace RopeMath
 		float GuideLength, const FVector& InheritedDrift, float AimSteerStartAlpha,
 		float AimLockAlpha, float AimDirectionBias, int32 RequestedSampleCount, TArray<FVector>& OutPoints)
 	{
-		//1. 기본값 정리
+		// 1. 기본값 정리
 		OutPoints.Reset();
 		const int32 SampleCount = FMath::Max(RequestedSampleCount, 4);
 		const float PathLength = FMath::Max(GuideLength, KINDA_SMALL_NUMBER);
-		/**두 방향을 정규화합니다.
-SweepDirection이 잘못되면 AimDirection 사용
-AimDirection이 잘못되면 SweepDirection*/
+		// 두 방향을 정규화한다. SweepDirection이 퇴화면 AimDirection을, AimDirection이 퇴화면 SweepDir을 쓴다.
 		const FVector SweepDir = SafeNormalOr(SweepDirection, AimDirection);
 		const FVector AimDir = SafeNormalOr(AimDirection, SweepDir);
-		
-		//2. 공간 보간 구간
+
+		// 2. 공간 보간 구간: 0% ─── SteerStart ─── FullSteer ─── 100%
+		//                    Sweep 유지   Hit 방향으로 보간   Hit 방향 영향 최대
 		const float SteerStart = FMath::Clamp(AimSteerStartAlpha, 0.0f, 0.95f);
 		const float FullSteer = FMath::Clamp(FMath::Max(AimLockAlpha, SteerStart + 0.01f), 0.01f, 1.0f);
 		const float DirectionBias = FMath::Clamp(AimDirectionBias, 1.0f, 4.0f);
-		//    AimSteerStartAlpha       AimLockAlpha       
-		/**0%---------25%----------------50%----------------100%
-		Sweep 유지         Hit 방향으로 보간       Hit 방향 영향 최대*/
 
-
-		//3. 시간 보간
-		const float TemporalBase = SmoothStep(NormalizedTime);
+		// 3. 시간 보간. DirectionBias가 클수록 hit 방향 영향이 빠르게 강해진다.
 		// bias는 hit 방향 전환을 앞당기지만 T=0에서는 반드시 0이라 throw 시작 순간 점프가 없다.
+		const float TemporalBase = SmoothStep(NormalizedTime);
 		const float TemporalAimBlend = bHasAimTarget
 			? 1.0f - FMath::Pow(1.0f - TemporalBase, DirectionBias)
 			: 0.0f;
-		//DirectionBias가 클수록 hit 방향 영향이 빠르게 강해집니다.
-
 
 		OutPoints.Reserve(SampleCount);
 		for (int32 SampleIndex = 0; SampleIndex < SampleCount; ++SampleIndex)
 		{
-			//4. 로프 위치별 공간 보간 :각 점이 로프의 몇 퍼센트 지점인지 계산합니다.
+			// 4. 로프 위치별 공간 보간: 각 점이 로프의 몇 퍼센트 지점인지 계산한다.
 			const float RopeAlpha = static_cast<float>(SampleIndex) / static_cast<float>(SampleCount - 1);
 			const float SpatialBase = SmoothStep(
 				(RopeAlpha - SteerStart) / FMath::Max(FullSteer - SteerStart, KINDA_SMALL_NUMBER));
 			const float SpatialAimBlend = bHasAimTarget
 				? 1.0f - FMath::Pow(1.0f - SpatialBase, DirectionBias)
 				: 0.0f;
-			// 공간 보간만으로 자유단을 미리 고정하지 않도록 Flight 시간 보간을 반드시 곱한다. (예를 들어 자유단의 공간 보간이 1이어도 Flight 시작 시점에는 자유단이 처음부터 hit 방향에 붙지 않습니다.)
+			// 5. 공간 보간만으로 자유단을 미리 고정하지 않도록 Flight 시간 보간을 반드시 곱한다.
+			//    (자유단의 공간 보간이 1이어도 Flight 시작 시점에는 hit 방향에 붙지 않는다.)
 			const float AimBlend = SpatialAimBlend * TemporalAimBlend;
-			
-			//6. 최종 방향
+
+			// 6. 최종 방향
 			const FVector CurveDirection = SafeNormalOr(FMath::Lerp(SweepDir, AimDir, AimBlend), SweepDir);
-			
-			//7. 상속 이동량 손 근처: RopeAlpha≈0, drift 거의 없음 / 자유단: RopeAlpha≈1, drift 영향 증가
+
+			// 7. 상속 이동량. 손 근처(RopeAlpha≈0)는 drift 거의 없음, 자유단(RopeAlpha≈1)은 drift 영향 증가.
 			const float DriftWeight = SmoothStep(RopeAlpha) * (1.0f - AimBlend);
 
-			//8. 점 생성
+			// 8. 점 생성
 			OutPoints.Add(Origin + CurveDirection * (RopeAlpha * PathLength) +
 				InheritedDrift * DriftWeight);
 		}

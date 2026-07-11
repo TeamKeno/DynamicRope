@@ -55,7 +55,8 @@ FRopeThrowContext FRopeThrowContext::MakeDefault(const USceneComponent& RopeComp
 		}
 		else
 		{
-			SetComponentBasis(); // 카메라 없는 owner — 컴포넌트 기저 폴백(기존 동작 유지).
+			// 카메라 없는 owner — 컴포넌트 기저 폴백(기존 동작 유지).
+			SetComponentBasis();
 		}
 		break;
 	}

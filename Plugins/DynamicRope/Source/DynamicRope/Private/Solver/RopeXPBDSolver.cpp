@@ -3,7 +3,9 @@
 #include "Solver/RopeXPBDSolver.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
-#include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
+// TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+
 FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverConfig& Config, float DeltaSeconds)
 {
 	// 고정 timestep: substep 크기를 frame rate와 무관하게 고정한다(Substeps = "60fps frame당 substep 수"로
@@ -11,19 +13,22 @@ FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverC
 	// substep을 돌린다 → substep당 변위가 항상 일정 → 충돌/터널링이 frame rate에 의존하지 않는다.
 	const int32 SubPerRef = FMath::Clamp(Config.Substeps, 1, 16);
 	const float FixedDt = (1.0f / 60.0f) / static_cast<float>(SubPerRef);
-	const int32 MaxSubsteps = FMath::Clamp(SubPerRef * 2, 1, 32); // spiral-of-death 상한(과부하 시 slow-mo)
+	// spiral-of-death 상한(과부하 시 slow-mo).
+	const int32 MaxSubsteps = FMath::Clamp(SubPerRef * 2, 1, 32);
 
 	State.TimeAccumulator += DeltaSeconds;
 	const float MaxAccum = FixedDt * static_cast<float>(MaxSubsteps);
 	if (State.TimeAccumulator > MaxAccum)
 	{
-		State.TimeAccumulator = MaxAccum; // 초과분 버림: 폭주 대신 가벼운 slow-mo
+		// 초과분 버림: 폭주 대신 가벼운 slow-mo.
+		State.TimeAccumulator = MaxAccum;
 	}
 
 	const int32 NumSub = FMath::FloorToInt(State.TimeAccumulator / FixedDt);
 	if (NumSub <= 0)
 	{
-		return FRopeSubstepSchedule{ 0, FixedDt }; // 아직 한 substep 분량이 안 모임(고fps) → 다음 frame으로 이월
+		// 아직 한 substep 분량이 안 모임(고fps) → 다음 frame으로 이월.
+		return FRopeSubstepSchedule{ 0, FixedDt };
 	}
 	State.TimeAccumulator -= static_cast<float>(NumSub) * FixedDt;
 	return FRopeSubstepSchedule{ NumSub, FixedDt };
@@ -48,7 +53,7 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 
 	const int32 Iters = FMath::Max(1, Config.Iterations);
 
-	// hot-path: 기본 비활성(VeryVerbose). r.LogRopeSolver를 켜야 보인다.
+	// hot-path: 기본 비활성(VeryVerbose). 콘솔 "log LogRopeSolver VeryVerbose"로 올려야 보인다.
 	UE_LOG(LogRopeSolver, VeryVerbose, TEXT("Step: %d node(s), %d substep(s) x %d iter(s), %d collider(s)"),
 		State.Num(), NumSub, Iters, Colliders.Num());
 
@@ -107,7 +112,8 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 		for (int32 p = 0; p < CollPasses; ++p)
 		{
 			DetectContacts(State, Config, Colliders, ColliderBounds, SubAlpha0, SubAlpha1, Contacts);
-			const int32 ItTarget = ((p + 1) * Iters) / CollPasses; // 누적 목표(마지막 패스가 Iters를 보장)
+			// 누적 목표(마지막 패스가 Iters를 보장).
+			const int32 ItTarget = ((p + 1) * Iters) / CollPasses;
 			for (; ItDone < ItTarget; ++ItDone)
 			{
 				// Gauss-Seidel bias를 제거하기 위해 sweep 방향을 번갈아 바꾼다.
@@ -115,7 +121,7 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 				SolveDistance(State, Config, FixedDt, bReverse, LambdaDist);
 				SolveBending(State, Config, FixedDt, bReverse, LambdaBend);
 				SolveContacts(State, Config, Colliders, ColliderBounds, Contacts);
-					SolveSegmentContacts(State, Config, Colliders, ColliderBounds, bReverse);
+				SolveSegmentContacts(State, Config, Colliders, ColliderBounds, bReverse);
 			}
 		}
 
@@ -263,8 +269,9 @@ void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConf
 	// Swept(연속) 충돌: 노드를 점이 아니라 PrevPos->Pos 구간으로 본다. 빠른 노드가 한 substep에 얇은
 	// 표면을 가로질러도(이산 점검사로는 터널링) 구간을 따라 샘플해 첫 접촉에서 멈춘다. 느린 접촉(L 작음)은
 	// 샘플 1개 = 끝점만 검사하므로 추가 비용이 없다.
-	const float SweepStep = FMath::Max(Config.SweepStep, 0.1f);     // 샘플 간격(cm), 디자이너 튜닝
-	const int32 MaxSweepSamples = FMath::Max(1, Config.MaxSweepSamples); // 구간당 샘플 상한
+	// 샘플 간격(cm, 디자이너 튜닝)과 구간당 샘플 상한.
+	const float SweepStep = FMath::Max(Config.SweepStep, 0.1f);
+	const int32 MaxSweepSamples = FMath::Max(1, Config.MaxSweepSamples);
 
 	// 이 substep 로프 AABB(콜라이더 1회 컬용). 실제 노드 위치(Prev/Pos) 기반이라 관통 위험 없이,
 	// 로프와 안 겹치는 본은 노드 루프/Blend 진입 전에 통째로 스킵한다(매달려도 떨어져 있으면 거의 무비용).
@@ -302,7 +309,8 @@ void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConf
 		SQ.NodeRadius = Radius;
 		SQ.SweepStep  = SweepStep;
 		SQ.MaxSamples = MaxSweepSamples;
-		SQ.SubAlpha0  = SubAlpha0; // 트랜스폼-프리 collider(캡슐)가 자체 prev 상태를 보간하는 데 쓴다.
+		// 알파 구간은 트랜스폼-프리 collider(캡슐)가 자체 prev 상태를 보간하는 데 쓴다.
+		SQ.SubAlpha0  = SubAlpha0;
 		SQ.SubAlpha1  = SubAlpha1;
 		FTransform PrevX, CurrX;
 		if (Collider->GetFrameMotion(PrevX, CurrX) && !PrevX.Equals(CurrX))
@@ -319,8 +327,9 @@ void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConf
 				continue;
 			}
 
-			const FVector A = State.PrevPositions[i];  // substep 시작 위치
-			const FVector B = State.Positions[i];      // 끝점(앞선 collider가 밀었을 수 있어 매번 현재값).
+			// A = substep 시작 위치, B = 끝점(앞선 collider가 밀었을 수 있어 매번 현재값).
+			const FVector A = State.PrevPositions[i];
+			const FVector B = State.Positions[i];
 
 			// Broad-phase: 노드 구간 AABB가 collider AABB(+Radius)와 안 겹치면 스킵. 끝점만 보면 가로질러
 			// 통과한 노드를 놓치므로 반드시 구간 AABB로 판단한다.
@@ -378,7 +387,8 @@ void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfi
 	for (int32 i = 0; i < Count; ++i)
 	{
 		FRopeContactState& CC = Contacts[i];
-		if (!CC.bActive) // DetectContacts가 "이 노드는 어떤 collider엔가 근접" 표시한 노드만.
+		// DetectContacts가 "이 노드는 어떤 collider엔가 근접" 표시한 노드만.
+		if (!CC.bActive)
 		{
 			continue;
 		}
@@ -407,7 +417,8 @@ void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfi
 			const FRopeContact Contact = Collider->Query(P, Radius);
 			if (!Contact.bHit)
 			{
-				continue; // 이 collider 표면 밖 → 접촉력 없음(한쪽 접촉).
+				// 이 collider 표면 밖 → 접촉력 없음(한쪽 접촉).
+				continue;
 			}
 
 			// XPBD rigid 접촉(compliance 0): C = -Penetration(<0). ΔLambda = Penetration/W. Lambda는 >=0 클램프.
@@ -415,10 +426,11 @@ void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfi
 			const float DLambda = Contact.Penetration / W;
 			const float NewLambda = FMath::Max(0.0f, CC.Lambda + DLambda);
 			const float Applied = NewLambda - CC.Lambda;
+			// 마찰용으로 최신(마지막 접촉) 법선/표면 속도/collider 인덱스를 캐시한다.
 			CC.Lambda  = NewLambda;
-			CC.Normal  = Contact.Normal;             // 마찰용으로 최신(마지막 접촉) 법선 캐시.
-			CC.SurfaceVel = Contact.SurfaceVelocity; // 최신 표면 속도.
-			CC.ColliderIndex = c;                    // 마지막 접촉 collider(디버그/마찰 힌트).
+			CC.Normal  = Contact.Normal;
+			CC.SurfaceVel = Contact.SurfaceVelocity;
+			CC.ColliderIndex = c;
 			State.Positions[i] += Contact.Normal * (W * Applied);
 		}
 	}
@@ -430,8 +442,9 @@ void FRopeXPBDSolver::SolveSegmentContacts(FRopeSimState& State, const FRopeSolv
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_SegContacts);
 	const float Radius = FMath::Max(0.0f, Config.CollisionRadius);
 	const bool bHasBounds = ColliderBounds.Num() == Colliders.Num();
-	const float SweepStep = FMath::Max(Config.SweepStep, 0.1f);       // 샘플 간격(cm) — 노드 점 충돌과 동일 config 재사용.
-	const int32 MaxSamples = FMath::Max(1, Config.MaxSweepSamples);   // 세그먼트당 내부 샘플 상한.
+	// 샘플 간격(cm — 노드 점 충돌과 동일 config 재사용)과 세그먼트당 내부 샘플 상한.
+	const float SweepStep = FMath::Max(Config.SweepStep, 0.1f);
+	const int32 MaxSamples = FMath::Max(1, Config.MaxSweepSamples);
 	const int32 Count = State.Num() - 1;
 	for (int32 k = 0; k < Count; ++k)
 	{
@@ -440,7 +453,8 @@ void FRopeXPBDSolver::SolveSegmentContacts(FRopeSimState& State, const FRopeSolv
 		const float W1 = State.InvMass[i + 1];
 		if (W0 + W1 <= 0.0f)
 		{
-			continue; // 양 끝 모두 pin(wrap 구간) → 세그먼트를 못 움직임. 스킵.
+			// 양 끝 모두 pin(wrap 구간) → 세그먼트를 못 움직임. 스킵.
+			continue;
 		}
 
 		const FVector P0 = State.Positions[i];
@@ -450,7 +464,8 @@ void FRopeXPBDSolver::SolveSegmentContacts(FRopeSimState& State, const FRopeSolv
 		const int32 NumInner = FMath::Clamp(FMath::FloorToInt(SegLen / SweepStep), 1, MaxSamples);
 		for (int32 s = 1; s <= NumInner; ++s)
 		{
-			const float T = static_cast<float>(s) / static_cast<float>(NumInner + 1); // (0,1) 내부.
+			// T는 (0,1) 내부 파라미터.
+			const float T = static_cast<float>(s) / static_cast<float>(NumInner + 1);
 			// barycentric 유효 역질량: 내부점을 delta만큼 밀려면 두 끝을 (1-T),(T) 비율로 움직인다.
 			const float WEff = (1.0f - T) * (1.0f - T) * W0 + T * T * W1;
 			if (WEff <= 0.0f)

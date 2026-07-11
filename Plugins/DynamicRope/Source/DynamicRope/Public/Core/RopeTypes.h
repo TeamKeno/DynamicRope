@@ -13,16 +13,27 @@
 // 일반화한다(정적/무버블 프롭 opt-in — 피드백 5번). 스켈레탈 경로는 필요 지점에서만 Cast로 되찾는다.
 class USceneComponent;
 
-/** 라이프사이클 단계. Free/Flight/Contacting = 물리(solver). Wrapped/Releasing = 로직(wrap 컨트롤러). */
+/**
+ * 라이프사이클 단계. 물리(solver)는 Free/Flight에서 전체를, Wrapping/Wrapped에서는 마스크되지 않은
+ * 자유 구간만 굴린다. Contacting/Wrapping/Wrapped/Releasing의 판정·구동은 로직(Logic/ F-클래스) 담당.
+ */
 UENUM(BlueprintType)
 enum class ERopePhase : uint8
 {
 	Free,
 	Flight,
-	Contacting,		//접촉 후보 감지
-	Wrapping,		//감기는 중
+
+	/** 접촉 후보를 매 프레임 재수집하며 트래커 dwell로 wrap 진입을 판정하는 중. */
+	Contacting,
+
+	/** 감기는 중(표면 경로 점진 생성 + front 모션 + 질량 마스크). */
+	Wrapping,
+
 	Wrapped,
-	GuidedThrow,	//PreviewPathLocked 전용. 물리 Flight를 타지 않고 cached preview path를 authoritative하게 따라간다.
+
+	/** PreviewPathLocked 전용. 물리 Flight를 타지 않고 cached preview path를 authoritative하게 따라간다. */
+	GuidedThrow,
+
 	Releasing
 };
 
@@ -31,10 +42,18 @@ UENUM(BlueprintType)
 enum class ERopeReleaseReason : uint8
 {
 	Manual,
-	Distance,	// 손~앵커 거리가 가용 로프 길이 + DistanceReleaseSlack 초과(자동)
-	Tension,	// 최대 장력이 TensionReleaseForce를 지속 초과(자동)
-	Broken,		// 대상 소실/wrap 실패 등 내부 사유
-	Cut			// 외부 게임플레이가 로프를 절단(URopeComponent::CutRope)
+
+	/** 손~앵커 거리가 가용 로프 길이 + DistanceReleaseSlack 초과(자동). */
+	Distance,
+
+	/** 최대 장력이 TensionReleaseForce를 지속 초과(자동). */
+	Tension,
+
+	/** 대상 소실/wrap 실패 등 내부 사유. */
+	Broken,
+
+	/** 외부 게임플레이가 로프를 절단(URopeComponent::CutRope). */
+	Cut
 };
 
 /** Wrapping 중 tail node의 목표 surface path를 생성하는 방식. Project Settings에서 전역 선택한다. */
@@ -94,6 +113,7 @@ struct FRopeLatchNode
 	FVector BoneLocalPos = FVector::ZeroVector;
 };
 
+/** Wrapping/Wrapped가 노드를 표면에 고정할 때 쓰는 표면 앵커(bone-local 프레임 + 진행 눈금). */
 struct FRopeSurfaceAnchor
 {
 	int32 NodeIndex = INDEX_NONE;
@@ -101,36 +121,40 @@ struct FRopeSurfaceAnchor
 	FName Bone = NAME_None;
 	TWeakObjectPtr<const USceneComponent> Mesh = nullptr;
 
-	//SDF 표면 기준 bone-local anchor;
+	/** SDF 표면 기준 bone-local 앵커 프레임(위치/법선/접선). */
 	FVector LocalSurfacePosition = FVector::ZeroVector;
 	FVector LocalNormal = FVector::UpVector;
 	FVector LocalTangent = FVector::ForwardVector;
 
-	//Wrapping 시작 순간의 월드 위치 Lerp 시작점으로 사용
+	/** Wrapping 시작 순간의 월드 위치. front 모션의 Lerp 시작점으로 사용한다. */
 	FVector StartWorldPosition = FVector::ZeroVector;
 
-	//나중에 여러 번 감김/ 길이 계산이 사용할 값. 커밋 시점 눈금으로 저장되므로 reel(길이 변경) 후엔 stale.
+	/** 여러 번 감김/길이 계산이 쓰는 로프 진행 눈금. 커밋 시점 눈금으로 저장되므로 reel(길이 변경) 후엔 stale. */
 	float RopeDistance = 0.f;
 
-	//표면에서 로프 중심선을 얼마나 띄울지. 보통 rope radius
+	/** 표면에서 로프 중심선을 얼마나 띄울지(보통 rope radius). */
 	float SurfaceOffset = 0.0f;
 };
 
+/** Wrapping 표면 경로의 점 하나(월드 표면 프레임 + 귀속 본/메시 + latch로부터의 진행 거리). */
 struct FRopeWrapPathPoint
 {
 	FVector SurfaceWorld = FVector::ZeroVector;
 	FVector NormalWorld = FVector::UpVector;
 	FVector TangentWorld = FVector::ForwardVector;
 
-	// 이 path point가 투영된 실제 표면 본.
-	// AnalyticHelix는 기존처럼 latch bone을 넣고, SurfaceVectorField는 projection scoring 결과를 넣는다.
-	// 이후 AppendWrappingAnchorFromPathPoint가 이 값을 기준으로 bone-local anchor를 저장한다.
+	/**
+	 * 이 path point가 투영된 실제 표면 본.
+	 * AnalyticHelix는 기존처럼 latch bone을 넣고, SurfaceVectorField는 projection scoring 결과를 넣는다.
+	 * 이후 AppendWrappingAnchorFromPathPoint가 이 값을 기준으로 bone-local anchor를 저장한다.
+	 */
 	FName Bone = NAME_None;
 	TWeakObjectPtr<const USceneComponent> Mesh = nullptr;
 
 	float DistanceFromLatch = 0.0f;
 };
 
+/** Wrapping 페이즈의 작업 상태(FRopeWrappingPhase::State). 경로 빌드 진행/앵커 축적/커밋 판정 재료. */
 struct FRopeWrappingState
 {
 	FName BoneName = NAME_None;
@@ -157,18 +181,24 @@ struct FRopeWrappingState
 	FVector PathAxisDirection = FVector::ForwardVector;
 	FVector PathLatchRadial = FVector::ForwardVector;
 
-	// SurfaceVectorField 적분 중 현재 surface point가 어느 본 위에 있는지 추적한다.
-	// 다음 step의 후보 본은 이 값을 중심으로 skeleton graph 근방에서 고른다.
+	/**
+	 * SurfaceVectorField 적분 중 현재 surface point가 어느 본 위에 있는지 추적한다.
+	 * 다음 step의 후보 본은 이 값을 중심으로 skeleton graph 근방에서 고른다.
+	 */
 	FName PathCurrentBone = NAME_None;
 
-	// 마지막으로 떠난 본. 새 후보가 바로 이 본이면 A->B->A 왕복 가능성이 높으므로
-	// scoring 단계에서 ImmediateBoneReturnPenalty를 더해 전환 떨림을 줄인다.
+	/**
+	 * 마지막으로 떠난 본. 새 후보가 바로 이 본이면 A->B->A 왕복 가능성이 높으므로
+	 * scoring 단계에서 ImmediateBoneReturnPenalty를 더해 전환 떨림을 줄인다.
+	 */
 	FName PathPreviousBone = NAME_None;
 	TWeakObjectPtr<const USceneComponent> PathCurrentMesh = nullptr;
 
-	// 마지막 본 전환 이후 path가 표면을 따라 진행한 거리(cm).
-	// 새 본 후보가 좋아 보여도 MinBoneTransitionPathDistance 전에는 현재 본을 유지해
-	// 한두 step마다 본이 바뀌는 flicker를 막는다.
+	/**
+	 * 마지막 본 전환 이후 path가 표면을 따라 진행한 거리(cm).
+	 * 새 본 후보가 좋아 보여도 MinBoneTransitionPathDistance 전에는 현재 본을 유지해
+	 * 한두 step마다 본이 바뀌는 flicker를 막는다.
+	 */
 	float PathDistanceSinceBoneTransition = 0.0f;
 
 	float PathWindingSign = 1.0f;
@@ -196,17 +226,25 @@ struct FRopeWrappingState
 	}
 };
 
-/** wrap 이후 데이터 모델(바인딩 시맨틱). 물리→로직 핸드오프 시점에 생성된다. */
-//TODO 추후 수정사항 : 나중에 Wrapped까지 surface anchor 기반으로 갈아엎을 때 FRopeWrapState의 Latched를 Anchors로 바꾸면 돼.
+/**
+ * wrap 이후 데이터 모델(바인딩 시맨틱). 물리→로직 핸드오프 시점에 생성된다.
+ * TODO: Wrapped까지 surface anchor 기반 정리가 끝나면 legacy Latched 경로를 제거하고 Anchors로 일원화한다.
+ */
 struct FRopeWrapState
 {
 	FName                   BoneName = NAME_None;
 
-	TArray<FRopeLatchNode>  Latched;// 기존 fallback용
-	TArray<FRopeSurfaceAnchor> Anchors; // 새 방식
+	/** legacy fallback(bone-local 점 고정, 구 방식). 현행 커밋 경로는 Anchors를 채운다. */
+	TArray<FRopeLatchNode>  Latched;
 
-	float                   Tension = 0.0f;     // 최대 세그먼트 장력(Wrapped 중 매 프레임 갱신)
-	float                   TimeWrapped = 0.0f; // 감긴 누적 시간(Hold가 증가 — 포획 성공 판정 등 게임 소비 예정)
+	/** 표면 앵커(현행 방식). */
+	TArray<FRopeSurfaceAnchor> Anchors;
+
+	/** 최대 세그먼트 장력(Wrapped 중 매 프레임 갱신). */
+	float                   Tension = 0.0f;
+
+	/** 감긴 누적 시간(Hold가 증가 — 포획 성공 판정 등 게임 소비 예정). */
+	float                   TimeWrapped = 0.0f;
 
 	// BoneName을 소유한 Mesh. wrap은 이 mesh에 대해 유지/추적된다(rope 소유자와 다른
 	// 액터일 수 있음). 결정 시점에 컨택트로부터 해석된다.
@@ -226,16 +264,34 @@ struct FRopeWrapState
 struct FRopePullSample
 {
 	bool    bValid = false;
-	int32   AnchorNode = INDEX_NONE;          // 손 쪽 첫 앵커 노드(힘 인가 지점의 노드)
-	int32   AimNode = INDEX_NONE;             // 첫 직선 다리 끝(walk가 멈춘 정수 노드) — 방향의 raw 조준(ComputePull 산출; 디버그/진단)
-	FName   Bone = NAME_None;                 // 앵커가 붙은 본(물리 본 힘 인가 대상)
-	FVector WorldPoint = FVector::ZeroVector; // 앵커 노드 월드 위치(힘 인가점)
-	FVector Direction = FVector::ZeroVector;  // 당김 단위 방향(앵커에서 조준 쪽 = 로프 경로 추종; 소비 시 컴포넌트가 fractional+EMA 스무딩)
-	float   Tension = 0.0f;                   // 앵커-손 쪽 인접 세그먼트 장력(FRopeSimState::SegmentTension 단위)
-	// 아래 둘은 소비자(컴포넌트)가 AimNode를 float로 시간 스무딩해 채운다(ComputePull은 정수 AimNode만 산출).
-	// tether/방향이 이 연속 값을 써 정수 조준 노드의 프레임 간 이산 홉(방향 점프 + 견인 끊김)을 없앤다.
-	float   AimNodeF = -1.0f;                 // 스무딩된 fractional 조준 인덱스([0, AnchorNode); <0 = 미설정)
-	FVector AimPos = FVector::ZeroVector;     // 노드 사이 보간된 조준 월드 위치(AimNodeF 위치)
+
+	/** 손 쪽 첫 앵커 노드(힘 인가 지점의 노드). */
+	int32   AnchorNode = INDEX_NONE;
+
+	/** 첫 직선 다리 끝(walk가 멈춘 정수 노드) — 방향의 raw 조준(ComputePull 산출; 디버그/진단). */
+	int32   AimNode = INDEX_NONE;
+
+	/** 앵커가 붙은 본(물리 본 힘 인가 대상). */
+	FName   Bone = NAME_None;
+
+	/** 앵커 노드 월드 위치(힘 인가점). */
+	FVector WorldPoint = FVector::ZeroVector;
+
+	/** 당김 단위 방향(앵커에서 조준 쪽 = 로프 경로 추종; 소비 시 컴포넌트가 fractional+EMA 스무딩). */
+	FVector Direction = FVector::ZeroVector;
+
+	/** 앵커-손 쪽 인접 세그먼트 장력(FRopeSimState::SegmentTension 단위). */
+	float   Tension = 0.0f;
+
+	/**
+	 * 스무딩된 fractional 조준 인덱스([0, AnchorNode); <0 = 미설정). AimPos와 함께 소비자(컴포넌트)가
+	 * AimNode를 float로 시간 스무딩해 채운다(ComputePull은 정수 AimNode만 산출) — tether/방향이 이 연속
+	 * 값을 써 정수 조준 노드의 프레임 간 이산 홉(방향 점프 + 견인 끊김)을 없앤다.
+	 */
+	float   AimNodeF = -1.0f;
+
+	/** 노드 사이 보간된 조준 월드 위치(AimNodeF 위치). */
+	FVector AimPos = FVector::ZeroVector;
 };
 
 /** rope 중심선: 파티클의 체인. solver / 로직 / 렌더의 단일 진실 공급원(single source of truth). */
@@ -247,19 +303,23 @@ struct FRopeSimState
 	float           SegmentLength = 0.0f;
 	float           RopeLength = 0.0f;
 
-	// 고정된 시작점(hand/socket). solver는 substep에 걸쳐 Prev->Target으로 쓸어 이동시키므로
-	// 빠른 앵커 점프가 에너지를 주입하는(체인을 폭발시킬) 대신 흡수된다.
+	/**
+	 * 고정된 시작점(hand/socket). solver는 substep에 걸쳐 Prev->Target으로 쓸어 이동시키므로
+	 * 빠른 앵커 점프가 에너지를 주입하는(체인을 폭발시킬) 대신 흡수된다.
+	 */
 	bool            bStartPinned = false;
 	FVector         StartPinPrev = FVector::ZeroVector;
 	FVector         StartPinTarget = FVector::ZeroVector;
 
-	// Fixed timestep accumulator. The solver consumes real frame time in fixed-size substeps.
+	/** Fixed timestep accumulator. The solver consumes real frame time in fixed-size substeps. */
 	float           TimeAccumulator = 0.0f;
 
-	// 세그먼트별 장력(힘, 스트레치=양수만). XPBD distance 제약의 수렴 λ에서 유도: F = max(0, -λ)/h².
-	// 단위는 질량 1 노드 기준 mass·cm/s²(상대값) — 임계치는 실측으로 튜닝한다. CPU 솔버가 Step 끝에
-	// 채우고, GPU 상주 로프는 λ 리드백(1~2프레임 지연)이 채운다. 솔브 없는 프레임은 직전 값 유지.
-	// 크기 = Num()-1(비어 있을 수 있음 — 아직 한 번도 솔브 안 됨).
+	/**
+	 * 세그먼트별 장력(힘, 스트레치=양수만). XPBD distance 제약의 수렴 λ에서 유도: F = max(0, -λ)/h².
+	 * 단위는 질량 1 노드 기준 mass·cm/s²(상대값) — 임계치는 실측으로 튜닝한다. CPU 솔버가 Step 끝에
+	 * 채우고, GPU 상주 로프는 λ 리드백(1~2프레임 지연)이 채운다. 솔브 없는 프레임은 직전 값 유지.
+	 * 크기 = Num()-1(비어 있을 수 있음 — 아직 한 번도 솔브 안 됨).
+	 */
 	TArray<float>   SegmentTension;
 
 	int32 Num() const { return Positions.Num(); }
@@ -286,10 +346,17 @@ struct FRopeSimState
  */
 namespace RopeNodeOverride
 {
-	constexpr uint8 Position         = 1 << 0; // Pos[i]  = Positions[i]
-	constexpr uint8 Prev             = 1 << 1; // Prev[i] = PrevPositions[i] (Verlet 속도 주입)
-	constexpr uint8 PrevFromPosition = 1 << 2; // Prev[i] = Pos[i] (속도 0; Position 적용 *후* 값)
-	constexpr uint8 InvMass          = 1 << 3; // InvMass[i] = InvMass[i]
+	/** Pos[i] = Positions[i] */
+	constexpr uint8 Position         = 1 << 0;
+
+	/** Prev[i] = PrevPositions[i] (Verlet 속도 주입) */
+	constexpr uint8 Prev             = 1 << 1;
+
+	/** Prev[i] = Pos[i] (속도 0; Position 적용 *후* 값) */
+	constexpr uint8 PrevFromPosition = 1 << 2;
+
+	/** InvMass[i] = InvMass[i] */
+	constexpr uint8 InvMass          = 1 << 3;
 }
 
 /**
@@ -303,7 +370,8 @@ namespace RopeNodeOverride
  */
 struct FRopeNodeOverrideFrame
 {
-	TArray<uint8>   Flags;         // 노드별 RopeNodeOverride 비트 OR(비어 있으면 이번 프레임 산출물 없음)
+	/** 노드별 RopeNodeOverride 비트 OR(비어 있으면 이번 프레임 산출물 없음). */
+	TArray<uint8>   Flags;
 	TArray<FVector> Positions;
 	TArray<FVector> PrevPositions;
 	TArray<float>   InvMass;
@@ -737,7 +805,8 @@ enum class ERopeSwingPlane : uint8
 	CustomNormal UMETA(DisplayName = "Custom Plane Normal")
 };
 
-struct FRopeThrowParams; // 아래 정의 — MakeDefault가 설정 스냅샷으로 받는다.
+// 아래 정의 — MakeDefault가 설정 스냅샷으로 받는다.
+struct FRopeThrowParams;
 
 /** throw 순간 Wielder/Component가 계산해 넘기는 런타임 값. 설정값(FRopeThrowParams)과 분리한다. */
 USTRUCT(BlueprintType)
@@ -786,22 +855,31 @@ struct FRopeThrowContext
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
 
-	// AimRayHitDirection에서 유효한 본 hit을 확보했는지 나타낸다.
+	/** AimRayHitDirection에서 유효한 본 hit을 확보했는지 나타낸다. */
 	bool bHasAimGuideHit = false;
-	// Flight 이후 wrap을 허용할 대상 본이다. 다른 본 접촉은 궤적을 유지한 채 무시한다.
+
+	/** Flight 이후 wrap을 허용할 대상 본이다. 다른 본 접촉은 궤적을 유지한 채 무시한다. */
 	FName AimGuideBone = NAME_None;
-	// 대상 본의 transform과 SDF를 해석할 mesh/component이다.
+
+	/** 대상 본의 transform과 SDF를 해석할 mesh/component이다. */
 	TWeakObjectPtr<const USceneComponent> AimGuideMesh = nullptr;
-	// ray 중심선이 처음 target SDF 안으로 들어간 월드 위치이다.
+
+	/** ray 중심선이 처음 target SDF 안으로 들어간 월드 위치이다. */
 	FVector AimGuideHitWorldPos = FVector::ZeroVector;
-	// SDF 투영으로 구한 실제 표면점이다.
+
+	/** SDF 투영으로 구한 실제 표면점이다. */
 	FVector AimGuideSurfacePoint = FVector::ZeroVector;
-	// 표면점에서 얻은 바깥쪽 법선이다.
+
+	/** 표면점에서 얻은 바깥쪽 법선이다. */
 	FVector AimGuideNormal = FVector::UpVector;
-	// ray origin부터 hit까지 거리이며 preview 후보 노드 선택에 사용한다.
+
+	/** ray origin부터 hit까지 거리이며 preview 후보 노드 선택에 사용한다. */
 	float AimGuideDistance = 0.0f;
-	// 로프 길이상 hit 방향 보간을 시작/완료할 구간이다.
-	// 공간 보간은 Flight 시간 보간과 곱하므로 throw가 끝나기 전에 hit 방향에 고정되는 노드는 없다.
+
+	/**
+	 * 로프 길이상 hit 방향 보간을 시작/완료할 구간이다.
+	 * 공간 보간은 Flight 시간 보간과 곱하므로 throw가 끝나기 전에 hit 방향에 고정되는 노드는 없다.
+	 */
 	float AimGuideSteerStartAlpha = 0.25f;
 	float AimGuideLockAlpha = 0.50f;
 };
@@ -962,7 +1040,11 @@ struct FRopeWhipConfig
 	float SideOffset = 35.0f;
 };
 
-//TODO 주석 추가
+/**
+ * Flight 접촉 후보의 출처(비트 조합 가능 — 같은 노드×본이 여러 경로로 잡히면 SourceMask에 OR).
+ * Actual = 이번 프레임 이동 경로(Prev→Pos)의 실제 스윕 접촉,
+ * PredictiveFree = 자유 노드의 관성 외삽 예측 접촉, PredictiveGuided = whip 가이드 타깃 외삽 예측 접촉.
+ */
 enum class ERopeContactCandidateSource : uint8
 {
 	Actual = 1,
@@ -970,6 +1052,7 @@ enum class ERopeContactCandidateSource : uint8
 	PredictiveGuided = 4
 };
 
+/** Flight/Contacting이 소비하는 접촉 후보 1건(노드×본). FRopeContact + 상대운동 평가 산출물. */
 struct FRopeContactCandidate
 {
 	bool bValid = false;
@@ -985,30 +1068,33 @@ struct FRopeContactCandidate
 
 	float Penetration = 0.0f;
 	float RelativeTangentialSpeed = 0.0f;
-	float WrapDirectionScore = 0.0f; // 감김 방향이면 +, 반대면 -
+
+	/** 감김 방향이면 +, 반대면 -. */
+	float WrapDirectionScore = 0.0f;
 };
 
+/** Wielder의 PreviewPathLocked 흐름이 입력 순간 확정하는 prepared preview(렌더 + GuidedThrow/Wrapped 진입 재료). */
 struct FRopePreparedThrowPreview
 {
 	bool bValid = false;
 
-	// preview를 만들 때 쓴 throw 기준. montage가 있어도 입력 순간의 frame/origin을 보존하기 위해 저장한다.
+	/** preview를 만들 때 쓴 throw 기준. montage가 있어도 입력 순간의 frame/origin을 보존하기 위해 저장한다. */
 	FRopeThrowContext ThrowContext;
 
-	// 화면에 보이는 preview centerline. GuidedThrow에서는 이 점들을 실제 노드 목표 위치로도 사용한다.
+	/** 화면에 보이는 preview centerline. GuidedThrow에서는 이 점들을 실제 노드 목표 위치로도 사용한다. */
 	FRopeWrapPreviewData RenderPreview;
 
-	// AimRayHitDirection처럼 소켓 애니메이션에서 독립시킬 필요가 있는 path는 owner 기준 로컬로도 보관한다.
+	/** AimRayHitDirection처럼 소켓 애니메이션에서 독립시킬 필요가 있는 path는 owner 기준 로컬로도 보관한다. */
 	bool bUseGuideFrameLocal = false;
 	TWeakObjectPtr<const USceneComponent> GuideFrameComponent = nullptr;
 	TArray<FVector> GuideFrameLocalPoints;
 	FVector GuideFrameLocalOrigin = FVector::ZeroVector;
 
-	// preview build 시 만든 가상 로프 상태와 접촉 후보. 디버그/후속 고도화용으로 보존한다.
+	/** preview build 시 만든 가상 로프 상태와 접촉 후보. 디버그/후속 고도화용으로 보존한다. */
 	FRopeSimState PreviewSim;
 	FRopeContactCandidate Contact;
 
-	// 최종 Wrapped 진입에 필요한 bone-local 고정 정보. Points만으로는 캐릭터 움직임을 따라갈 수 없다.
+	/** 최종 Wrapped 진입에 필요한 bone-local 고정 정보. Points만으로는 캐릭터 움직임을 따라갈 수 없다. */
 	FRopeSurfaceAnchor LatchAnchor;
 	TArray<FRopeSurfaceAnchor> Anchors;
 
@@ -1026,26 +1112,31 @@ struct FRopePreparedThrowPreview
 		return bValid && RenderPreview.IsValid() && Mesh.IsValid() && !Bone.IsNone() && LatchAnchor.NodeIndex != INDEX_NONE;
 	}
 
-	// 생성 당시 월드 preview를 wielder owner 기준 로컬 좌표로 저장해 소켓 애니메이션에서 분리한다.
+	/** 생성 당시 월드 preview를 wielder owner 기준 로컬 좌표로 저장해 소켓 애니메이션에서 분리한다. */
 	void StoreGuideFrameLocal(const USceneComponent* InGuideFrame);
-	// owner-local guide frame과 로컬 점 데이터가 모두 유효한지 확인한다.
+
+	/** owner-local guide frame과 로컬 점 데이터가 모두 유효한지 확인한다. */
 	bool HasGuideFrameLocal() const;
-	// 저장한 owner-local origin을 현재 owner transform 기준 월드 좌표로 복원한다.
+
+	/** 저장한 owner-local origin을 현재 owner transform 기준 월드 좌표로 복원한다. */
 	FVector ResolveGuideOriginWorld() const;
-	// 지정한 owner-local spline 점을 현재 owner transform 기준 월드 좌표로 복원한다.
+
+	/** 지정한 owner-local spline 점을 현재 owner transform 기준 월드 좌표로 복원한다. */
 	FVector ResolveGuidePointWorld(int32 PointIndex) const;
-	// 렌더용 전체 preview를 현재 owner transform에 맞춘 월드 데이터로 해석한다.
+
+	/** 렌더용 전체 preview를 현재 owner transform에 맞춘 월드 데이터로 해석한다. */
 	FRopeWrapPreviewData ResolveRenderPreviewWorld() const;
 };
 
+/** GuidedThrow 페이즈의 작업 상태: cached preview path를 authoritative하게 따라가는 진행분. */
 struct FRopeGuidedThrowState
 {
 	bool bActive = false;
 
-	// Wielder가 확정한 prepared preview. 이 phase에서는 접촉 탐색을 다시 하지 않고 이 데이터만 따른다.
+	/** Wielder가 확정한 prepared preview. 이 phase에서는 접촉 탐색을 다시 하지 않고 이 데이터만 따른다. */
 	FRopePreparedThrowPreview Prepared;
 
-	// GuidedThrow 시작 순간의 실제 rope 위치. RenderPreview.Points로 전체 노드를 lerp하는 시작점이다.
+	/** GuidedThrow 시작 순간의 실제 rope 위치. RenderPreview.Points로 전체 노드를 lerp하는 시작점이다. */
 	TArray<FVector> StartPositions;
 	float Elapsed = 0.0f;
 	float Duration = 0.18f;

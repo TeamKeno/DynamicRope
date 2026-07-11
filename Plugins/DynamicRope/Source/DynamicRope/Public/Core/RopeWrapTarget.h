@@ -7,8 +7,9 @@
 // 두 개의 seam으로 분해된다:
 //   A. 바인딩(binding)     — 앵커 하나가 매 프레임 "무엇"을 따라가는가.
 //                            FRopeBindingFrame + ResolveBindingWorld.  (Hold/BeginWrap이 소비)
-//   B. 집계(aggregation)   — DecideWrap이 노드를 "무슨 단위"로 묶는가.
-//                            FRopeWrapTargetKey + IRopeWrapTargetRegistry.  (DecideWrap이 소비)
+//   B. 집계(aggregation)   — 접촉 집계가 노드를 "무슨 단위"로 묶는가.
+//                            FRopeWrapTargetKey + IRopeWrapTargetRegistry.
+//                            (소비자: 현행 런타임은 Contacting 트래커, DecideWrap은 유닛테스트 기준점)
 //
 // [배선 상태] 이 파일은 아직 hot 경로에 배선되지 않은 additive 도입분이다(무회귀). 후속 단계에서
 // FRopeSurfaceAnchor / DecideWrap / Hold 가 이 타입들 위로 옮겨간다(설계 초안의 Increment 2~4).
@@ -28,14 +29,16 @@ class USceneComponent;
  */
 struct FRopeBindingFrame
 {
-	// 붙는 대상 컴포넌트. 스켈레탈이면 USkeletalMeshComponent 로 다운캐스트해 소켓(스키닝) 트랜스폼을,
-	// 그 외(정적/무버블 프롭)면 컴포넌트/소켓 트랜스폼을 쓴다. ResolveBindingWorld 가 종류를 판별한다.
+	/**
+	 * 붙는 대상 컴포넌트. 스켈레탈이면 USkeletalMeshComponent 로 다운캐스트해 소켓(스키닝) 트랜스폼을,
+	 * 그 외(정적/무버블 프롭)면 컴포넌트/소켓 트랜스폼을 쓴다. ResolveBindingWorld 가 종류를 판별한다.
+	 */
 	TWeakObjectPtr<const USceneComponent> Component = nullptr;
 
-	// 스켈레탈: 본/소켓 이름. 정적: 소켓이 있으면 그 이름, 없으면 None(= 컴포넌트 트랜스폼).
+	/** 스켈레탈: 본/소켓 이름. 정적: 소켓이 있으면 그 이름, 없으면 None(= 컴포넌트 트랜스폼). */
 	FName SocketOrBone = NAME_None;
 
-	// 유효한 트랜스폼을 낼 수 있는가(대상 파괴 감지). 호출자는 false면 release 한다.
+	/** 유효한 트랜스폼을 낼 수 있는가(대상 파괴 감지). 호출자는 false면 release 한다. */
 	bool IsValid() const { return Component.IsValid(); }
 };
 
@@ -48,7 +51,7 @@ struct FRopeBindingFrame
 DYNAMICROPE_API FTransform ResolveBindingWorld(const FRopeBindingFrame& Frame);
 
 /**
- * DecideWrap 이 노드를 집계하는 단위(POD). 기존엔 FName Bone 하나였다.
+ * 접촉 집계가 노드를 묶는 단위(POD). 기존엔 FName Bone 하나였다.
  *   단일 본   : Name = 그 본 이름       (기존과 동일)
  *   정적 opt-in: Name = 합성(가상) 본 이름 (5번)
  *   본 그룹   : Name = 그룹 이름         — 그룹에 속한 여러 본이 같은 Key 로 접힌다(3번)
