@@ -84,10 +84,13 @@ void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates
 		return;
 	}
 
-	TMap<FName, TArray<int32>> NodesByBone;
-	TMap<FName, const USceneComponent*> MeshByBone;
-	TMap<FName, float> ScoreByBone;
-	TMap<FName, int32> HeadNodeByBone;
+	// 집계 키는 (Mesh, Bone) 쌍이다. 본 이름만 키로 쓰면 같은 스켈레톤(같은 본 이름)을 쓰는 두 액터가
+	// 한 프레임에 함께 닿을 때 서로 다른 대상의 후보가 한 버킷으로 합산되고 mesh가 마지막 후보로
+	// 오귀속된다(cross-actor 밀집 상황의 캡처 오귀속 — 2026-07 주석 전수조사에서 발견).
+	using FTargetKey = TPair<const USceneComponent*, FName>;
+	TMap<FTargetKey, TArray<int32>> NodesByTarget;
+	TMap<FTargetKey, float> ScoreByTarget;
+	TMap<FTargetKey, int32> HeadNodeByTarget;
 	for (const FRopeContactCandidate& Candidate : Candidates)
 	{
 		if (!Candidate.bValid || Candidate.Bone.IsNone())
@@ -95,55 +98,56 @@ void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates
 			continue;
 		}
 
-		NodesByBone.FindOrAdd(Candidate.Bone).Add(Candidate.NodeIndex);
-		MeshByBone.FindOrAdd(Candidate.Bone) = Candidate.Mesh;
-		ScoreByBone.FindOrAdd(Candidate.Bone) += Candidate.Penetration + FMath::Max(0.0f, Candidate.WrapDirectionScore);
-		if (int32* ExistingHeadNode = HeadNodeByBone.Find(Candidate.Bone))
+		const FTargetKey Key(Candidate.Mesh, Candidate.Bone);
+		NodesByTarget.FindOrAdd(Key).Add(Candidate.NodeIndex);
+		ScoreByTarget.FindOrAdd(Key) += Candidate.Penetration + FMath::Max(0.0f, Candidate.WrapDirectionScore);
+		if (int32* ExistingHeadNode = HeadNodeByTarget.Find(Key))
 		{
 			*ExistingHeadNode = FMath::Min(*ExistingHeadNode, Candidate.NodeIndex);
 		}
 		else
 		{
-			HeadNodeByBone.Add(Candidate.Bone, Candidate.NodeIndex);
+			HeadNodeByTarget.Add(Key, Candidate.NodeIndex);
 		}
 	}
 
-	FName BestBone = NAME_None;
+	FTargetKey BestTarget(nullptr, NAME_None);
 	int32 BestCount = 0;
 	int32 BestHeadNode = INDEX_NONE;
 	float BestScore = 0.0f;
-	for (const TPair<FName, TArray<int32>>& Pair : NodesByBone)
+	for (const TPair<FTargetKey, TArray<int32>>& Pair : NodesByTarget)
 	{
-		const float Score = ScoreByBone.FindRef(Pair.Key);
-		const int32 HeadNode = HeadNodeByBone.FindRef(Pair.Key);
+		const float Score = ScoreByTarget.FindRef(Pair.Key);
+		const int32 HeadNode = HeadNodeByTarget.FindRef(Pair.Key);
 		if (Pair.Value.Num() > BestCount ||
 			(Pair.Value.Num() == BestCount &&
 				(BestHeadNode == INDEX_NONE || HeadNode < BestHeadNode ||
 					(HeadNode == BestHeadNode && Score > BestScore))))
 		{
-			BestBone = Pair.Key;
+			BestTarget = Pair.Key;
 			BestCount = Pair.Value.Num();
 			BestHeadNode = HeadNode;
 			BestScore = Score;
 		}
 	}
 
-	if (BestBone.IsNone())
+	if (BestTarget.Value.IsNone())
 	{
 		Decay(DeltaTime);
 		return;
 	}
 
-	if (BestBone == CandidateBone)
+	// dwell 연속성도 (Mesh, Bone) 쌍 기준: 본 이름이 같아도 mesh가 바뀌면 다른 대상이므로 리셋한다.
+	if (BestTarget.Value == CandidateBone && BestTarget.Key == CandidateMesh)
 	{
 		DwellTime += DeltaTime;
 	}
 	else
 	{
-		CandidateBone = BestBone;
+		CandidateBone = BestTarget.Value;
 		DwellTime = 0.0f;
 	}
 
-	CandidateMesh = MeshByBone.FindRef(BestBone);
-	CandidateNodes = NodesByBone.FindRef(BestBone);
+	CandidateMesh = BestTarget.Key;
+	CandidateNodes = NodesByTarget.FindRef(BestTarget);
 }

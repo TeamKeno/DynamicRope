@@ -9,6 +9,8 @@
 
 #include "Logic/RopeFlightContactDetector.h"
 #include "Collision/RopeCollider.h"
+// 트래커 cross-mesh 테스트의 식별용 mock 컴포넌트(NewObject<USceneComponent>).
+#include "Components/SceneComponent.h"
 #include "RopeTestHelpers.h"
 
 namespace
@@ -192,6 +194,59 @@ bool FRopeFlightWrapDirectionScoreTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("co-moving surface yields no tangential slide"),
 		Candidates[0].RelativeTangentialSpeed < 0.01f);
 
+	return true;
+}
+
+// 트래커가 (Mesh, Bone) 쌍으로 집계하는가: 같은 본 이름을 쓰는 두 액터(mesh)가 한 프레임에 함께 닿아도
+// 후보가 한 버킷으로 합산되거나 mesh가 마지막 후보로 오귀속되지 않고, 본 이름이 같아도 mesh가 바뀌면
+// dwell이 리셋된다(cross-actor 캡처 오귀속 수정 계약 — 2026-07 주석 전수조사 발견 건).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightTrackerCrossMeshTest,
+	"DynamicRope.FlightContact.TrackerSeparatesSameBoneAcrossMeshes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightTrackerCrossMeshTest::RunTest(const FString& Parameters)
+{
+	// 식별용 컴포넌트 2개(월드 불필요 — 트래커는 포인터를 역참조하지 않는다).
+	const USceneComponent* MeshA = NewObject<USceneComponent>();
+	const USceneComponent* MeshB = NewObject<USceneComponent>();
+
+	auto MakeCandidate = [](int32 Node, const USceneComponent* Mesh)
+	{
+		FRopeContactCandidate C;
+		C.bValid = true;
+		C.NodeIndex = Node;
+		C.Bone = FName("hand_r");
+		C.Mesh = Mesh;
+		C.Penetration = 1.0f;
+		return C;
+	};
+
+	// A에 2노드, B에 1노드(전부 같은 본 이름) — dominant는 (MeshA, hand_r)이어야 하고
+	// B의 후보와 합산되면 안 된다(합산됐다면 노드 3개 + mesh가 B로 덮였을 것).
+	TArray<FRopeContactCandidate> Candidates;
+	Candidates.Add(MakeCandidate(5, MeshA));
+	Candidates.Add(MakeCandidate(6, MeshA));
+	Candidates.Add(MakeCandidate(2, MeshB));
+
+	FRopeContactTracker Tracker;
+	Tracker.Update(Candidates, 0.10f);
+	TestTrue(TEXT("dominant bone is hand_r"), Tracker.CandidateBone == FName("hand_r"));
+	TestTrue(TEXT("dominant mesh is A (no cross-mesh merge)"), Tracker.CandidateMesh == MeshA);
+	TestEqual(TEXT("only A's nodes tracked"), Tracker.CandidateNodes.Num(), 2);
+
+	// 같은 대상 유지 → dwell 누적.
+	Tracker.Update(Candidates, 0.10f);
+	TestTrue(TEXT("dwell accumulates on same (mesh, bone) target"), Tracker.DwellTime > 0.05f);
+
+	// dominant가 (MeshB, hand_r)로 넘어가면 — 본 이름은 그대로여도 — dwell이 리셋되어야 한다.
+	TArray<FRopeContactCandidate> Flipped;
+	Flipped.Add(MakeCandidate(1, MeshB));
+	Flipped.Add(MakeCandidate(2, MeshB));
+	Flipped.Add(MakeCandidate(3, MeshB));
+	Flipped.Add(MakeCandidate(5, MeshA));
+	Tracker.Update(Flipped, 0.10f);
+	TestTrue(TEXT("dominant switched to mesh B"), Tracker.CandidateMesh == MeshB);
+	TestTrue(TEXT("same bone name on a different mesh resets dwell"), Tracker.DwellTime < KINDA_SMALL_NUMBER);
 	return true;
 }
 

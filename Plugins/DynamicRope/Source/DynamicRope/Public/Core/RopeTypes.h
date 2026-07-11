@@ -207,8 +207,6 @@ struct FRopeWrappingState
 	float Duration = 0.16f;
 	float StableTime = 0.0f;
 
-	int32 WindingSign = 1;
-
 	int32 FirstNode = INDEX_NONE;
 	int32 LastNode = INDEX_NONE;
 	int32 LastStableFirstNode = INDEX_NONE;
@@ -1148,10 +1146,12 @@ struct FRopeGuidedThrowState
 };
 
 /**
- * 접촉 후보들에서 dominant 본(가장 많은 노드가 닿은 본)을 추적하는 POD 트래커.
+ * 접촉 후보들에서 dominant 대상 — (Mesh, Bone) 쌍 — 을 추적하는 POD 트래커. 본 이름만 키로 쓰면
+ * 같은 스켈레톤을 쓰는 두 액터가 동시에 닿을 때 후보가 합산/오귀속되므로 mesh까지 키에 포함한다.
  * Flight의 캡처 판정(ShouldCapture)과 Contacting의 체류 추적이 공용으로 쓴다.
- * 동률은 head(손 쪽) 노드가 앞선 본 → 점수(관통+감김 방향) 순으로 깨져 프레임 간 안정적이다.
- * 본이 바뀌면 DwellTime이 0부터 다시 쌓인다(전이 프레임 오탐 방어 — 랙돌 테스트 (c)가 고정하는 계약).
+ * 동률은 head(손 쪽) 노드가 앞선 대상 → 점수(관통+감김 방향) 순으로 깨져 프레임 간 안정적이다.
+ * 대상이 바뀌면(본 또는 mesh) DwellTime이 0부터 다시 쌓인다(전이 프레임 오탐 방어 — 랙돌 테스트 (c)가
+ * 고정하는 계약).
  */
 struct FRopeContactTracker
 {
@@ -1183,6 +1183,6 @@ struct FRopeContactTracker
 		}
 	}
 
-	/** 후보를 본별 집계해 dominant 본/노드/체류 시간을 갱신한다. 구현은 RopeTypes.cpp. */
+	/** 후보를 (Mesh, Bone) 쌍별 집계해 dominant 대상/노드/체류 시간을 갱신한다. 구현은 RopeTypes.cpp. */
 	void Update(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime);
 };
