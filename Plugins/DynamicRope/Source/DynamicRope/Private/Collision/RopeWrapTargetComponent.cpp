@@ -2,10 +2,12 @@
 
 #include "Collision/RopeWrapTargetComponent.h"
 #include "Subsystem/RopeSimSubsystem.h"
-#include "DynamicRopeLog.h"                 // LogRopeCollision(진단 로그)
+// LogRopeCollision(진단 로그)
+#include "DynamicRopeLog.h"
 #include "Components/StaticMeshComponent.h"
-#include "Components/PrimitiveComponent.h" // GetBodySetup(심플 콜리전 추출)
-#include "PhysicsEngine/BodySetup.h"       // UBodySetup / FKAggregateGeom(sphyl/box/sphere)
+// GetBodySetup(심플 콜리전 추출) / UBodySetup / FKAggregateGeom(sphyl/box/sphere)
+#include "Components/PrimitiveComponent.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "GameFramework/Actor.h"
 #include "Engine/World.h"
 
@@ -140,7 +142,8 @@ bool URopeWrapTargetComponent::BuildCapsuleFromSimpleCollision(USceneComponent* 
 		if (Best)
 		{
 			const FTransform ElemTM = Best->GetTransform() * CompTM;
-			const FVector AxisDir = ElemTM.GetUnitAxis(EAxis::Z); // sphyl 축 = 로컬 Z
+			// sphyl 축 = 로컬 Z.
+			const FVector AxisDir = ElemTM.GetUnitAxis(EAxis::Z);
 			const FVector Center = ElemTM.GetLocation();
 			const float HalfLen = Best->GetScaledCylinderLength(Scale) * 0.5f;
 			OutA = Center + AxisDir * HalfLen;
@@ -206,7 +209,8 @@ bool URopeWrapTargetComponent::BuildCapsuleFromSimpleCollision(USceneComponent* 
 		}
 	}
 
-	return false; // sphyl/box/sphere 없음(예: convex 전용) → 호출자가 bounds 폴백.
+	// sphyl/box/sphere 없음(예: convex 전용) → 호출자가 bounds 폴백.
+	return false;
 }
 
 void URopeWrapTargetComponent::BuildCapsuleFromBounds(USceneComponent* Comp,
@@ -216,8 +220,9 @@ void URopeWrapTargetComponent::BuildCapsuleFromBounds(USceneComponent* Comp,
 
 	// 로컬 공간 축정렬 bounds(LocalToWorld=Identity → 로컬 반폭/중심).
 	const FBoxSphereBounds LocalBounds = Comp->CalcBounds(FTransform::Identity);
-	const FVector Ext = LocalBounds.BoxExtent;      // 로컬 반폭
-	const FVector LocalCenter = LocalBounds.Origin; // 로컬 중심
+	// 로컬 반폭과 로컬 중심.
+	const FVector Ext = LocalBounds.BoxExtent;
+	const FVector LocalCenter = LocalBounds.Origin;
 
 	// 장축 인덱스 결정: 자동(최장 반폭) 또는 지정.
 	int32 AxisIdx;
@@ -282,7 +287,8 @@ void URopeWrapTargetComponent::BuildBox(USceneComponent* Comp)
 		const FTransform ElemTM = Best->GetTransform() * CompTM;
 		WorldCenter = ElemTM.GetLocation();
 		Rot = ElemTM.GetRotation();
-		HalfExtents = FVector(Best->X, Best->Y, Best->Z) * 0.5 * Scale; // X/Y/Z=전체 길이 → 반폭×스케일
+		// X/Y/Z=전체 길이 → 반폭×스케일.
+		HalfExtents = FVector(Best->X, Best->Y, Best->Z) * 0.5 * Scale;
 	}
 	else
 	{
@@ -309,7 +315,8 @@ bool URopeWrapTargetComponent::EffectiveServeBox(USceneComponent* Comp) const
 	UBodySetup* Setup = Prim ? Prim->GetBodySetup() : nullptr;
 	if (!Setup)
 	{
-		return false; // 심플 콜리전 없음 → 캡슐(bounds 폴백).
+		// 심플 콜리전 없음 → 캡슐(bounds 폴백).
+		return false;
 	}
 	const FKAggregateGeom& Agg = Setup->AggGeom;
 
@@ -352,7 +359,8 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 	if (BuiltFrame != Frame)
 	{
 		BuiltFrame = Frame;
-		bServeBox = EffectiveServeBox(Comp); // Auto면 심플 콜리전으로 셰이프 결정.
+		// Auto면 심플 콜리전으로 셰이프 결정.
+		bServeBox = EffectiveServeBox(Comp);
 		if (bServeBox)
 		{
 			BuildBox(Comp);

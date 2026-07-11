@@ -1,7 +1,8 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Collision/RopeCollider.h"
-#include "RopeMathHelpers.h" // RopeMath::ClosestSegmentParam (접촉 재질점 식별)
+// RopeMath::ClosestSegmentParam (접촉 재질점 식별)
+#include "RopeMathHelpers.h"
 
 FRopeContact FCapsuleCollider::Query(const FVector& WorldPos, float NodeRadius) const
 {
@@ -10,12 +11,14 @@ FRopeContact FCapsuleCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	// 노드 중심에서 캡슐 세그먼트(A-B)까지의 최근접점과 거리.
 	const float   TSeg = RopeMath::ClosestSegmentParam(WorldPos, A, B);
 	const FVector Closest = FMath::Lerp(A, B, TSeg);
-	const FVector ToNode = WorldPos - Closest;   // 세그먼트 표면 -> 노드 (바깥 방향)
+	// ToNode = 세그먼트 표면 -> 노드(바깥 방향). MinDist 미만이면 겹침으로 판정.
+	const FVector ToNode = WorldPos - Closest;
 	const float   Dist = ToNode.Size();
-	const float   MinDist = Radius + NodeRadius; // 이 거리 미만이면 겹침으로 판정
+	const float   MinDist = Radius + NodeRadius;
 	if (Dist >= MinDist)
 	{
-		return Contact; // bHit = false: 겹침 없음 -> 나머지 필드는 무의미(호출자가 무시)
+		// bHit = false: 겹침 없음 -> 나머지 필드는 무의미(호출자가 무시).
+		return Contact;
 	}
 
 	Contact.bHit = true;
@@ -26,10 +29,12 @@ FRopeContact FCapsuleCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	// 축퇴(노드가 세그먼트 축 위 = Dist≈0)에서는 방향이 정의되지 않으므로 임의의
 	// 안정 벡터(+Z)로 폴백한다. SDF도 ∇φ≈0 구간에서 동일한 폴백이 필요하다.
 	Contact.Normal = (Dist > KINDA_SMALL_NUMBER) ? (ToNode / Dist) : FVector::UpVector;
-	Contact.Penetration = MinDist - Dist;                    // 양수: Normal 방향 겹침 깊이
-	Contact.SurfacePoint = Closest + Contact.Normal * Radius; // 표면 위 최근접점(보조/디버그용)
-	Contact.Bone = Bone;                                     // 본 귀속: DecideWrap의 dominant bone 선택 입력
-	Contact.SourceMesh = SourceMesh;                         // 본을 소유한 메시(액터 간 wrap follow)
+	// Penetration = Normal 방향 겹침 깊이(양수). SurfacePoint는 표면 위 최근접점(보조/디버그용).
+	Contact.Penetration = MinDist - Dist;
+	Contact.SurfacePoint = Closest + Contact.Normal * Radius;
+	// 본 귀속(접촉 집계의 dominant bone 선택 입력)과 본을 소유한 메시(액터 간 wrap follow).
+	Contact.Bone = Bone;
+	Contact.SourceMesh = SourceMesh;
 
 	// 표면 속도(cm/s): 접촉 재질점(세그먼트 파라미터 TSeg)의 (현재 - 이전) / dt. solver가 상대 접선
 	// 마찰로 로프를 끌어 쓸어내는 데 쓴다(SDF collider와 동일 계약). InvDeltaTime==0(정적/첫 프레임)이면 0.
@@ -50,7 +55,8 @@ FRopeContact FCapsuleCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	}
 
 	FRopeContact Contact;
-	OutHitWorldPos = Q.WorldEnd; // 기본값(미접촉 시 미정의 사용 방지).
+	// 기본값(미접촉 시 미정의 사용 방지).
+	OutHitWorldPos = Q.WorldEnd;
 
 	// 이 substep의 캡슐 끝점(프레임 모션 prev->curr를 SubAlpha로 보간). 캡슐은 리지드 트랜스폼이 없어
 	// (두 관절점이 따로 움직임) SubPose 대신 끝점 자체를 보간한다 — SDF QuerySwept의 로컬 프레임 트릭 대응.

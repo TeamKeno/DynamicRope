@@ -25,19 +25,36 @@ class USceneComponent;
  */
 struct FRopeSDFColliderView
 {
-	const uint8* Distances = nullptr;    // 코드 바이트 블롭(복셀당 BytesPerCode, 행 우선). 리틀엔디안.
-	int32        BytesPerCode = 1;       // 복셀당 바이트(1=uint8 max255, 2=uint16 max65535).
-	float        NarrowBandInner = 0.0f; // 안쪽 dequant 밴드(cm). 코드 0 → -NarrowBandInner.
-	float        NarrowBandOuter = 0.0f; // 바깥 dequant 밴드(cm). 코드 max → +NarrowBandOuter.
+	/** 코드 바이트 블롭(복셀당 BytesPerCode, 행 우선). 리틀엔디안. */
+	const uint8* Distances = nullptr;
+
+	/** 복셀당 바이트(1=uint8 max255, 2=uint16 max65535). */
+	int32        BytesPerCode = 1;
+
+	/** 안쪽 dequant 밴드(cm). 코드 0 → -NarrowBandInner. */
+	float        NarrowBandInner = 0.0f;
+
+	/** 바깥 dequant 밴드(cm). 코드 max → +NarrowBandOuter. */
+	float        NarrowBandOuter = 0.0f;
+
 	int32        ResX = 0;
 	int32        ResY = 0;
 	int32        ResZ = 0;
-	FVector      LocalMin = FVector::ZeroVector;  // LocalBounds.Min
-	FVector      LocalSize = FVector::ZeroVector; // LocalBounds 크기
+
+	/** 본 로컬 그리드 원점(LocalBounds.Min)과 크기. */
+	FVector      LocalMin = FVector::ZeroVector;
+	FVector      LocalSize = FVector::ZeroVector;
+
 	FTransform   BoneToWorld = FTransform::Identity;
-	FTransform   PrevBoneToWorld = FTransform::Identity; // 이전 프레임 본 트랜스폼(GPU CCD/표면속도 드래그용)
-	float        InvDeltaTime = 0.0f;                    // 1/프레임dt(표면 속도 = (curr-prev)*InvDeltaTime). 0이면 정적.
-	const void*  VolumeKey = nullptr; // 같은 볼륨 dedup 식별자(보통 FRopeBoneSDFVolume*)
+
+	/** 이전 프레임 본 트랜스폼(GPU CCD/표면속도 드래그용). */
+	FTransform   PrevBoneToWorld = FTransform::Identity;
+
+	/** 1/프레임dt(표면 속도 = (curr-prev)*InvDeltaTime). 0이면 정적. */
+	float        InvDeltaTime = 0.0f;
+
+	/** 같은 볼륨 dedup 식별자(보통 FRopeBoneSDFVolume*). */
+	const void*  VolumeKey = nullptr;
 };
 
 /**
@@ -48,22 +65,33 @@ struct FRopeSDFColliderView
  */
 struct FRopeSweptQuery
 {
-	FVector WorldStart = FVector::ZeroVector; // substep 시작 노드 위치(PrevPos)
-	FVector WorldEnd   = FVector::ZeroVector; // substep 끝 노드 위치(Pos)
-	float   NodeRadius = 0.0f;                // 로프 두께(query 반지름)
-	float   SweepStep  = 2.0f;                // 샘플 간격(cm)
-	int32   MaxSamples = 16;                  // 구간당 샘플 상한
+	/** substep 시작/끝 노드 위치(PrevPos → Pos). */
+	FVector WorldStart = FVector::ZeroVector;
+	FVector WorldEnd   = FVector::ZeroVector;
 
-	// 움직이는 collider의 이 substep용 sub-포즈. solver가 GetFrameMotion으로 받은 prev/curr를 알파로 Blend해
-	// 콜라이더당 1회 미리 계산한다(노드 루프 밖 호이스팅 → 노드마다 Blend 재계산 방지). bUseSubPose=false면
-	// collider는 단일(현재) 포즈로 본다(정지 본/비-SDF). 공유 collider를 mutate하지 않으므로 병렬 솔브에 안전.
+	/** 로프 두께(query 반지름). */
+	float   NodeRadius = 0.0f;
+
+	/** 샘플 간격(cm). */
+	float   SweepStep  = 2.0f;
+
+	/** 구간당 샘플 상한. */
+	int32   MaxSamples = 16;
+
+	/**
+	 * 움직이는 collider의 이 substep용 sub-포즈. solver가 GetFrameMotion으로 받은 prev/curr를 알파로 Blend해
+	 * 콜라이더당 1회 미리 계산한다(노드 루프 밖 호이스팅 → 노드마다 Blend 재계산 방지). bUseSubPose=false면
+	 * collider는 단일(현재) 포즈로 본다(정지 본/비-SDF). 공유 collider를 mutate하지 않으므로 병렬 솔브에 안전.
+	 */
 	bool       bUseSubPose  = false;
 	FTransform SubPoseStart = FTransform::Identity;
 	FTransform SubPoseEnd   = FTransform::Identity;
 
-	// 이 substep의 프레임 모션 구간 비율(0=이전 프레임, 1=현재 프레임). solver가 항상 채운다.
-	// 리지드 트랜스폼이 없는 collider(캡슐 — 두 관절점이 따로 움직임)가 sub-포즈 대신 자체 prev 상태를
-	// 직접 보간하는 데 쓴다(SubPoseStart/End의 트랜스폼-프리 대응물).
+	/**
+	 * 이 substep의 프레임 모션 구간 비율(0=이전 프레임, 1=현재 프레임). solver가 항상 채운다.
+	 * 리지드 트랜스폼이 없는 collider(캡슐 — 두 관절점이 따로 움직임)가 sub-포즈 대신 자체 prev 상태를
+	 * 직접 보간하는 데 쓴다(SubPoseStart/End의 트랜스폼-프리 대응물).
+	 */
 	float SubAlpha0 = 0.0f;
 	float SubAlpha1 = 1.0f;
 };
@@ -218,7 +246,10 @@ public:
 	}
 };
 
-/** 해석적 capsule(swept-sphere 세그먼트). v1 / fallback. 추후 per-bone SDF로 대체된다. */
+/**
+ * 해석적 capsule(swept-sphere 세그먼트). v1 본 collider — per-bone SDF(FRopeSDFCollider)와 같은
+ * IRopeCollider 인터페이스 뒤에서 provider 단위로 선택된다(solver는 어느 쪽인지 모른다).
+ */
 class DYNAMICROPE_API FCapsuleCollider : public IRopeCollider
 {
 public:
@@ -227,17 +258,21 @@ public:
 	float   Radius = 0.0f;
 	FName   Bone = NAME_None;
 
-	// 이전 프레임 끝점 + 1/프레임dt. provider가 본별 prev 끝점을 캐시해 채운다(SDF provider의
-	// PrevBoneToWorld 대응). InvDeltaTime=0(기본)이면 정적 캡슐 — prev는 무시되고 기존 동작과 동일.
-	// 접촉 재질점은 세그먼트 파라미터(t)로 식별: prev 위치 = Lerp(PrevA, PrevB, t). 캡슐 축 자체의
-	// 스핀(자전)은 표현 못 하지만 본 캡슐에서는 무시 가능한 성분이다.
+	/**
+	 * 이전 프레임 끝점 + 1/프레임dt. provider가 본별 prev 끝점을 캐시해 채운다(SDF provider의
+	 * PrevBoneToWorld 대응). InvDeltaTime=0(기본)이면 정적 캡슐 — prev는 무시되고 기존 동작과 동일.
+	 * 접촉 재질점은 세그먼트 파라미터(t)로 식별: prev 위치 = Lerp(PrevA, PrevB, t). 캡슐 축 자체의
+	 * 스핀(자전)은 표현 못 하지만 본 캡슐에서는 무시 가능한 성분이다.
+	 */
 	FVector PrevA = FVector::ZeroVector;
 	FVector PrevB = FVector::ZeroVector;
 	float   InvDeltaTime = 0.0f;
 
-	// 이 capsule의 bone이 속한 mesh(스켈레탈). 컨택트로 전달되어 wrap이 액터를 넘어서도
-	// *올바른* mesh(잡힌 bone을 소유한 mesh)를 따라갈 수 있게 한다. 타입은 USceneComponent로
-	// 일반화(정적 opt-in 대비) — 캡슐은 스켈레탈만 넘긴다.
+	/**
+	 * 이 capsule의 bone이 속한 mesh(스켈레탈). 컨택트로 전달되어 wrap이 액터를 넘어서도
+	 * *올바른* mesh(잡힌 bone을 소유한 mesh)를 따라갈 수 있게 한다. 타입은 USceneComponent로
+	 * 일반화(정적 opt-in 대비) — 캡슐은 스켈레탈만 넘긴다.
+	 */
 	const USceneComponent* SourceMesh = nullptr;
 
 	FCapsuleCollider() = default;

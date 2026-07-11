@@ -12,7 +12,8 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Interface.h"
-#include "Collision/RopeCollider.h" // RopeColliderGather::MapCollidersToRegionsByBounds가 GetWorldBounds를 쓴다.
+// RopeColliderGather::MapCollidersToRegionsByBounds가 GetWorldBounds를 쓴다.
+#include "Collision/RopeCollider.h"
 #include "RopeColliderProvider.generated.h"
 
 /**

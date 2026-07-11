@@ -13,7 +13,8 @@ namespace
 		Y = FMath::Clamp(Y, 0, V.Resolution.Y - 1);
 		Z = FMath::Clamp(Z, 0, V.Resolution.Z - 1);
 		const int32 Idx = X + Y * V.Resolution.X + Z * V.Resolution.X * V.Resolution.Y;
-		return V.DecodeDistance(Idx); // uint8 코드 → cm(범위 밖/무효 인덱스는 0)
+		// 양자화 코드 → cm(범위 밖/무효 인덱스는 0).
+		return V.DecodeDistance(Idx);
 	}
 
 	FORCEINLINE double GridCoord(double P, double Mn, double Size, int32 Res)

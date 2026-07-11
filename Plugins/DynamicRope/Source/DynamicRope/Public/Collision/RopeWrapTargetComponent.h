@@ -3,8 +3,8 @@
 // 정적 메시 랩 opt-in(피드백 5번). 랩 가능한 정적/무버블 액터(기둥·가로등·갈고리 등)에 붙이는
 // 마커 겸 collider provider. 매 프레임 대상 지오메트리 주위에 "랩 가능한" 해석적 캡슐 하나를 만들어
 // 서빙한다 — 이 캡슐은 IsWorldStatic()=false라(정적 월드 push-out 콜라이더와 달리) 접촉 감지(detect)
-// 파이프라인에 포함되고, 합성(가상) 본 이름 + SourceMesh(=대상 컴포넌트)를 보고해 기존 DecideWrap
-// 경로를 그대로 탄다(FRopeContact FROZEN 계약 준용 — 필드 추가 없음).
+// 파이프라인에 포함되고, 합성(가상) 본 이름 + SourceMesh(=대상 컴포넌트)를 보고해 기존 접촉→랩
+// 판정 경로를 그대로 탄다(FRopeContact FROZEN 계약 준용 — 필드 추가 없음).
 //
 // 감긴 뒤에는 앵커가 대상 컴포넌트 트랜스폼을 따라간다(ResolveBindingWorld의 정적 분기) — 정적은
 // 불변이라 hold가 단순하고, 무버블 프롭(엘리베이터 기둥 등)도 컴포넌트 추종으로 공짜 지원된다.
@@ -17,8 +17,9 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Collision/RopeColliderProvider.h"
-#include "Collision/RopeCollider.h" // FCapsuleCollider(값 멤버)
-#include "Collision/RopeStaticCollider.h" // FRopeBoxCollider(박스 모드 값 멤버)
+// FCapsuleCollider / FRopeBoxCollider (값 멤버).
+#include "Collision/RopeCollider.h"
+#include "Collision/RopeStaticCollider.h"
 #include "RopeWrapTargetComponent.generated.h"
 
 class USceneComponent;
@@ -36,9 +37,14 @@ enum class ERopeWrapAxis : uint8
 UENUM(BlueprintType)
 enum class ERopeWrapShape : uint8
 {
-	Auto,     // 심플 콜리전의 지배 프리미티브로 자동(box→Box, sphyl/sphere→Capsule, 없으면 Capsule)
-	Capsule,  // 강제 캡슐(원기둥/기둥)
-	Box       // 강제 박스(OBB)
+	/** 심플 콜리전의 지배 프리미티브로 자동(box→Box, sphyl/sphere→Capsule, 없으면 Capsule). */
+	Auto,
+
+	/** 강제 캡슐(원기둥/기둥). */
+	Capsule,
+
+	/** 강제 박스(OBB). */
+	Box
 };
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
@@ -75,7 +81,7 @@ public:
 	ERopeWrapShape Shape = ERopeWrapShape::Auto;
 
 	/**
-	 * 이 랩 대상의 합성(가상) 본 이름 — FRopeContact::Bone 귀속에 쓰인다(DecideWrap이 이 이름으로 랩을
+	 * 이 랩 대상의 합성(가상) 본 이름 — FRopeContact::Bone 귀속에 쓰인다(접촉 집계가 이 이름으로 랩을
 	 * 건다). 비우면 대상 컴포넌트 이름 기반으로 자동 발급한다. 스태틱 메시의 실재 소켓 이름을 넣으면
 	 * hold가 그 소켓을 따르고, 그 외(가상 이름)면 컴포넌트 트랜스폼을 따른다.
 	 */
@@ -83,42 +89,56 @@ public:
 	FName WrapBoneName = NAME_None;
 
 	//~ IRopeColliderProvider
+	// ProvidesWorldStaticColliders는 기본값(false) 유지 — 정적 "월드" push-out 프로바이더가 아니라 랩
+	// 대상이므로 detect에 포함되어야 하고, owner 제외 규칙도 스켈레탈 provider와 동일하게 적용받는다.
 	virtual void GatherColliders(FRopeColliderGatherContext& Gather) override;
-	// 정적 "월드" push-out 프로바이더가 아니다 — 랩 대상이라 detect에 포함되어야 하고, owner 제외 규칙도
-	// 스켈레탈 provider와 동일하게 적용받는다. 따라서 기본값(false)을 그대로 둔다.
 
 private:
-	// 프레임당 1회 재구성되는 백킹 스토리지. 넘겨준 포인터는 해당 프레임 solve가 끝날 때까지 유효.
-	FCapsuleCollider Capsule; // Shape=Capsule일 때 서빙
-	FRopeBoxCollider Box;     // Shape=Box일 때 서빙(랩 가능 OBB: 가상 본 + SourceMesh)
+	/** 프레임당 1회 재구성되는 백킹 스토리지(넘겨준 포인터는 해당 프레임 solve 끝까지 유효).
+	 *  Capsule은 Shape=Capsule, Box는 Shape=Box(랩 가능 OBB: 가상 본 + SourceMesh)일 때 서빙. */
+	FCapsuleCollider Capsule;
+	FRopeBoxCollider Box;
 	FName            ResolvedBone = NAME_None;
 	uint64           BuiltFrame = static_cast<uint64>(-1);
 
-	// 무버블 프롭 표면 속도용: 이전 프레임 끝점 + 1/dt. 정적이면 InvDeltaTime 0(속도 0)로 남는다.
+	/** 무버블 프롭 표면 속도용: 이전 프레임 끝점 + 1/dt. 정적이면 InvDeltaTime 0(속도 0)로 남는다. */
 	FVector PrevA = FVector::ZeroVector;
 	FVector PrevB = FVector::ZeroVector;
 	bool    bHasPrevEndpoints = false;
 
-	// 진단 로그 1회 가드(등록/대상/캡슐 상태를 스팸 없이 한 번만 남긴다).
+	/** 진단 로그 1회 가드(등록/대상/캡슐 상태를 스팸 없이 한 번만 남긴다). */
 	bool    bDiagnosticsLogged = false;
-	// 마지막 캡슐이 심플 콜리전(true)에서 왔는지 bounds 폴백(false)인지 — 진단 로그용.
+
+	/** 마지막 캡슐이 심플 콜리전(true)에서 왔는지 bounds 폴백(false)인지 — 진단 로그용. */
 	bool    bUsedSimpleCollision = false;
-	// 이번 프레임 서빙 셰이프(Box=true / Capsule=false). Auto면 EffectiveServeBox가 심플 콜리전으로 결정.
+
+	/** 이번 프레임 서빙 셰이프(Box=true / Capsule=false). Auto면 EffectiveServeBox가 심플 콜리전으로 결정. */
 	bool    bServeBox = false;
 
-	// 대상 컴포넌트 해석(+가상 본 이름 확정). 실패 시 null.
+	/** 대상 컴포넌트 해석(+가상 본 이름 확정). 실패 시 null. */
 	USceneComponent* ResolveTarget();
-	// 랩 캡슐을 만들어 Capsule에 채운다(가상 본 + SourceMesh=대상). 심플 콜리전 우선, 없으면 bounds 폴백.
+
+	/** 랩 캡슐을 만들어 Capsule에 채운다(가상 본 + SourceMesh=대상). 심플 콜리전 우선, 없으면 bounds 폴백. */
 	void BuildCapsule(USceneComponent* Comp);
-	// 랩 가능 박스(가상 본 + SourceMesh)를 만들어 Box에 채운다. 심플 콜리전의 가장 큰 박스 elem을 타이트한
-	// OBB로 쓰고, 없으면 컴포넌트 로컬 bounds OBB로 폴백한다.
+
+	/**
+	 * 랩 가능 박스(가상 본 + SourceMesh)를 만들어 Box에 채운다. 심플 콜리전의 가장 큰 박스 elem을 타이트한
+	 * OBB로 쓰고, 없으면 컴포넌트 로컬 bounds OBB로 폴백한다.
+	 */
 	void BuildBox(USceneComponent* Comp);
-	// Shape=Auto일 때 이 대상에 박스를 서빙할지 결정: 심플 콜리전의 지배(최대) 프리미티브가 박스면 true,
-	// sphyl/sphere면 false. 심플 콜리전이 없으면 false(캡슐 bounds 폴백). Capsule/Box 강제면 그대로.
+
+	/**
+	 * Shape=Auto일 때 이 대상에 박스를 서빙할지 결정: 심플 콜리전의 지배(최대) 프리미티브가 박스면 true,
+	 * sphyl/sphere면 false. 심플 콜리전이 없으면 false(캡슐 bounds 폴백). Capsule/Box 강제면 그대로.
+	 */
 	bool EffectiveServeBox(USceneComponent* Comp) const;
-	// 대상 UBodySetup 심플 콜리전(sphyl/box/sphere)에서 월드 캡슐 끝점+반지름을 뽑는다. 시각 메시에 타이트
-	// 해 뜸을 없앤다. 저작 콜리전이 없거나 convex뿐이면 false(호출자가 bounds 폴백).
+
+	/**
+	 * 대상 UBodySetup 심플 콜리전(sphyl/box/sphere)에서 월드 캡슐 끝점+반지름을 뽑는다. 시각 메시에 타이트
+	 * 해 뜸을 없앤다. 저작 콜리전이 없거나 convex뿐이면 false(호출자가 bounds 폴백).
+	 */
 	bool BuildCapsuleFromSimpleCollision(USceneComponent* Comp, FVector& OutA, FVector& OutB, float& OutRadius) const;
-	// 대상 로컬 bounds에서 축정렬 랩 캡슐(끝점+반지름)을 근사한다 — 심플 콜리전이 없을 때의 폴백.
+
+	/** 대상 로컬 bounds에서 축정렬 랩 캡슐(끝점+반지름)을 근사한다 — 심플 콜리전이 없을 때의 폴백. */
 	void BuildCapsuleFromBounds(USceneComponent* Comp, FVector& OutA, FVector& OutB, float& OutRadius) const;
 };

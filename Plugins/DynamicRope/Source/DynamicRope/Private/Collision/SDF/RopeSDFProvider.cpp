@@ -85,7 +85,8 @@ void URopeSDFProvider::GatherColliders(FRopeColliderGatherContext& Gather)
 		{
 			if (Volume.Bone.IsNone() || !Volume.IsBaked())
 			{
-				continue; // 미베이크/무효 볼륨은 건너뛴다.
+				// 미베이크/무효 볼륨은 건너뛴다.
+				continue;
 			}
 
 			// 런타임 본 필터(베이크는 그대로, collider 노출만 가린다 — 디버깅 격리용).

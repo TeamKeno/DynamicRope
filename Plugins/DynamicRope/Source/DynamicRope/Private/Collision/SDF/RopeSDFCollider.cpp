@@ -3,16 +3,19 @@
 #include "Collision/SDF/RopeSDFCollider.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "Collision/SDF/RopeSDFSampler.h"
-#include "ProfilingDebugging/CpuProfilerTrace.h" // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
+// TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) const
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSDF_Query); // 점 query(접촉 감지/wrap 경로). solver 충돌은 QuerySwept 사용.
+	// 점 query(접촉 감지/wrap 경로). solver 충돌은 QuerySwept 사용.
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSDF_Query);
 	FRopeContact Contact;
 
 	if (!Volume || !Volume->IsBaked())
 	{
-		return Contact; // 미베이크/무효 볼륨 → 컨택트 없음.
+		// 미베이크/무효 볼륨 → 컨택트 없음.
+		return Contact;
 	}
 
 	// 월드 → 본 로컬 공간. grid는 본 로컬에 구워져 있다.
@@ -37,10 +40,12 @@ FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 	Contact.bHit = true;
 	Contact.Normal = BoneToWorld.TransformVectorNoScale(NLocal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-	Contact.Penetration = NodeRadius - Dist;                  // 양수: query 반지름 기준 겹침 깊이
-	Contact.SurfacePoint = WorldPos - Contact.Normal * Dist;  // 표면 위 최근접점(보조/디버그)
-	Contact.Bone = Bone;                                      // 본 귀속(DecideWrap dominant bone 입력, 비-None 필수)
-	Contact.SourceMesh = SourceMesh;                          // 본을 소유한 메시(액터 간 wrap follow)
+	// Penetration = query 반지름 기준 겹침 깊이(양수). SurfacePoint는 표면 위 최근접점(보조/디버그).
+	Contact.Penetration = NodeRadius - Dist;
+	Contact.SurfacePoint = WorldPos - Contact.Normal * Dist;
+	// 본 귀속(접촉 집계의 dominant bone 입력 — 비-None 필수)과 본을 소유한 메시(액터 간 wrap follow).
+	Contact.Bone = Bone;
+	Contact.SourceMesh = SourceMesh;
 
 	// 표면 속도(cm/s): 지금 WorldPos에 있는 본 위의 물질점은 이전 프레임엔 PrevBoneToWorld 기준 같은
 	// 로컬 좌표(LocalPos)에 있었다. (현재 - 이전) / dt 가 그 점의 월드 속도. solver가 상대 접선 속도
@@ -95,7 +100,8 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	// 역변환 + 샘플 루프. 아래 RopeSDF_SweptSampleLoop와의 차이가 transform 셋업 비용이다.
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSDF_QuerySwept);
 	FRopeContact Contact;
-	OutHitWorldPos = Q.WorldEnd; // 기본값(미접촉 시 미정의 사용 방지).
+	// 기본값(미접촉 시 미정의 사용 방지).
+	OutHitWorldPos = Q.WorldEnd;
 	if (!Volume || !Volume->IsBaked())
 	{
 		return Contact;
@@ -138,7 +144,8 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 			const FVector OutwardLocal = RopeSDFSampler::SampleGradient(*Volume, L0);
 			if (FVector::DotProduct(L1 - L0, OutwardLocal) > 0.0f)
 			{
-				return Contact; // bHit=false — 바깥으로 이동하는 진짜 분리만 재-핀 생략.
+				// bHit=false — 바깥으로 이동하는 진짜 분리만 재-핀 생략.
+				return Contact;
 			}
 		}
 	}
@@ -149,13 +156,15 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		const FVector Lp = FMath::Lerp(L0, L1, T);
 		if (!Band.IsInsideOrOn(Lp))
 		{
-			continue; // 좁은밴드(볼륨 + 노드반경) 밖 → 접촉 없음.
+			// 좁은밴드(볼륨 + 노드반경) 밖 → 접촉 없음.
+			continue;
 		}
 
 		const float Dist = RopeSDFSampler::SampleTrilinear(*Volume, Lp);
 		if (Dist >= Q.NodeRadius)
 		{
-			continue; // 아직 표면에 못 미침.
+			// 아직 표면에 못 미침.
+			continue;
 		}
 
 		// 첫 접촉. 법선/위치는 substep 끝 포즈(노드가 도달하는 현재 프레임) 기준으로 환산한다.
@@ -163,7 +172,8 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		Contact.bHit = true;
 		Contact.Normal = PoseEnd.TransformVectorNoScale(NLocal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 		Contact.Penetration = Q.NodeRadius - Dist;
-		OutHitWorldPos = PoseEnd.TransformPosition(Lp);              // 노드 배치 기준점(현재 포즈 월드)
+		// 노드 배치 기준점(현재 포즈 월드).
+		OutHitWorldPos = PoseEnd.TransformPosition(Lp);
 		Contact.SurfacePoint = OutHitWorldPos - Contact.Normal * Dist;
 		Contact.Bone = Bone;
 		Contact.SourceMesh = SourceMesh;
@@ -193,9 +203,11 @@ bool FRopeSDFCollider::GetGPUSDF(FRopeSDFColliderView& OutView) const
 {
 	if (!Volume || !Volume->IsBaked())
 	{
-		return false; // 미베이크/무효 볼륨은 GPU 충돌에서 제외(CPU Query와 동일 가드).
+		// 미베이크/무효 볼륨은 GPU 충돌에서 제외(CPU Query와 동일 가드).
+		return false;
 	}
-	OutView.Distances    = Volume->Distances.GetData(); // 코드 바이트 블롭(소비자가 비대칭 밴드로 dequant)
+	// 코드 바이트 블롭(소비자가 비대칭 밴드로 dequant).
+	OutView.Distances    = Volume->Distances.GetData();
 	OutView.BytesPerCode = Volume->BytesPerCode();
 	OutView.NarrowBandInner = Volume->NarrowBandInner;
 	OutView.NarrowBandOuter = Volume->NarrowBandOuter;
@@ -205,8 +217,10 @@ bool FRopeSDFCollider::GetGPUSDF(FRopeSDFColliderView& OutView) const
 	OutView.LocalMin     = Volume->LocalBounds.Min;
 	OutView.LocalSize    = Volume->LocalBounds.GetSize();
 	OutView.BoneToWorld  = BoneToWorld;
-	OutView.PrevBoneToWorld = PrevBoneToWorld; // GPU CCD/표면속도 드래그용(CPU QuerySwept와 동일 소스).
+	// GPU CCD/표면속도 드래그용(CPU QuerySwept와 동일 소스).
+	OutView.PrevBoneToWorld = PrevBoneToWorld;
 	OutView.InvDeltaTime = InvDeltaTime;
-	OutView.VolumeKey    = Volume; // 프레임 내 동일 볼륨 업로드 dedup용 키.
+	// 프레임 내 동일 볼륨 업로드 dedup용 키.
+	OutView.VolumeKey    = Volume;
 	return true;
 }

@@ -139,7 +139,8 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 			const int32 BoneIndex = Mesh->GetBoneIndex(BoneName);
 			if (BoneIndex == INDEX_NONE)
 			{
-				continue; // 에셋에만 있고 현재 메시에 없는 본.
+				// 에셋에만 있고 현재 메시에 없는 본.
+				continue;
 			}
 			const FTransform BoneTM = Mesh->GetBoneTransform(BoneIndex);
 			const FVector Scale3D = BoneTM.GetScale3D();
@@ -147,7 +148,8 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 			for (const FKSphylElem& Sphyl : Setup->AggGeom.SphylElems)
 			{
 				const FTransform ElemTM = Sphyl.GetTransform() * BoneTM;
-				const FVector Axis = ElemTM.GetUnitAxis(EAxis::Z); // sphyl 축 = 로컬 Z
+				// sphyl 축 = 로컬 Z.
+				const FVector Axis = ElemTM.GetUnitAxis(EAxis::Z);
 				const FVector Center = ElemTM.GetLocation();
 				const float HalfLen = Sphyl.GetScaledCylinderLength(Scale3D) * 0.5f;
 				Capsules.Add(FCapsuleCollider(Center + Axis * HalfLen, Center - Axis * HalfLen,
@@ -205,7 +207,8 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 		const int32 ParentIndex = RefSkel.GetParentIndex(i);
 		if (ParentIndex == INDEX_NONE)
 		{
-			continue; // 루트: 부모 세그먼트 없음.
+			// 루트: 부모 세그먼트 없음.
+			continue;
 		}
 		const FVector P0 = Mesh->GetBoneTransform(i).GetLocation();
 		const FVector P1 = Mesh->GetBoneTransform(ParentIndex).GetLocation();

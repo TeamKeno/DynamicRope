@@ -3,13 +3,15 @@
 #include "Collision/RopeStaticBodyProvider.h"
 #include "DynamicRopeLog.h"
 #include "Subsystem/RopeSimSubsystem.h"
-#include "Settings/DynamicRopeSettings.h" // 콜라이더 예산/컨벡스 평면 상한(단일 소스)
+// 콜라이더 예산/컨벡스 평면 상한(단일 소스)
+#include "Settings/DynamicRopeSettings.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 #include "PhysicsEngine/BodySetup.h"
-#include "PhysicsEngine/ConvexElem.h" // FKConvexElem::GetPlanes(월드 평면 추출)
+// FKConvexElem::GetPlanes(월드 평면 추출)
+#include "PhysicsEngine/ConvexElem.h"
 
 namespace
 {
@@ -195,7 +197,8 @@ void URopeStaticBodyProvider::BuildColliders(const FRopeColliderGatherContext& G
 	UWorld* World = GetWorld();
 	if (!World || RopeRegions.Num() == 0)
 	{
-		return; // 활성 로프가 없으면(빈 region 리스트) 스캔할 이유가 없다.
+		// 활성 로프가 없으면(빈 region 리스트) 스캔할 이유가 없다.
+		return;
 	}
 
 	// 콜라이더 예산/컨벡스 평면 상한/동적 포함 여부는 Project Settings에서 단일 관리.
@@ -318,7 +321,8 @@ void URopeStaticBodyProvider::BuildColliders(const FRopeColliderGatherContext& G
 		}
 	}
 
-	PrevCompXforms = MoveTemp(CurrCompXforms); // 다음 프레임 prev 소스로 교체(프레임당 1회 스왑).
+	// 다음 프레임 prev 소스로 교체(프레임당 1회 스왑).
+	PrevCompXforms = MoveTemp(CurrCompXforms);
 
 	if (bBudgetClipped)
 	{
@@ -345,7 +349,8 @@ bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const
 			return false;
 		}
 		const FTransform ElemTM = Sphyl.GetTransform() * CompTM;
-		const FVector Axis = ElemTM.GetUnitAxis(EAxis::Z); // sphyl 축 = 로컬 Z
+		// sphyl 축 = 로컬 Z.
+		const FVector Axis = ElemTM.GetUnitAxis(EAxis::Z);
 		const FVector Center = ElemTM.GetLocation();
 		const float HalfLen = Sphyl.GetScaledCylinderLength(Scale3D) * 0.5f;
 		FRopeStaticCapsuleCollider Cap(Center + Axis * HalfLen, Center - Axis * HalfLen, Sphyl.GetScaledRadius(Scale3D));
@@ -389,7 +394,8 @@ bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const
 		{
 			return false;
 		}
-		const FVector HalfLocal(Box.X * 0.5, Box.Y * 0.5, Box.Z * 0.5); // elem 공간 반폭(스케일 전).
+		// elem 공간 반폭(스케일 전).
+		const FVector HalfLocal(Box.X * 0.5, Box.Y * 0.5, Box.Z * 0.5);
 		const FVector AbsScale = Scale3D.GetAbs();
 		const bool bUniform = FMath::IsNearlyEqual(AbsScale.GetMax(), AbsScale.GetMin(), UE_KINDA_SMALL_NUMBER);
 		if (bUniform || Box.Rotation.IsNearlyZero())
@@ -444,7 +450,8 @@ bool URopeStaticBodyProvider::AppendBodyColliders(const UBodySetup& Setup, const
 		if (ElemPlanes.Num() >= 4 && ElemPlanes.Num() <= MaxConvexPlanes && Convex.ElemBox.IsValid)
 		{
 			TArray<FPlane> LocalPlanes;
-			TransformPlanesToWorld(ElemPlanes, BodyLocalM, LocalPlanes); // elem->바디로컬(강체 제외)
+			// elem -> 바디로컬(강체 제외).
+			TransformPlanesToWorld(ElemPlanes, BodyLocalM, LocalPlanes);
 			const FBox LB = Convex.ElemBox.TransformBy(BodyLocalM);
 			if (LocalPlanes.Num() >= 4 && LB.IsValid)
 			{
@@ -485,7 +492,8 @@ bool URopeStaticBodyProvider::AppendInstancedBodyColliders(UInstancedStaticMeshC
 	const UBodySetup* Setup = ISM.GetBodySetup();
 	if (!Setup)
 	{
-		return true; // 콜리전 없음 — 스킵(예산 소진 아님).
+		// 콜리전 없음 — 스킵(예산 소진 아님).
+		return true;
 	}
 
 	// region과 겹치는 인스턴스만 열거(월드 공간 박스) — 밀집 폴리지에서도 근접분만 추린다.
@@ -509,7 +517,8 @@ bool URopeStaticBodyProvider::AppendInstancedBodyColliders(UInstancedStaticMeshC
 		// 인스턴스별 prev 추적은 미지원 → 정적(prev=curr, InvDt=0)으로 처리.
 		if (!AppendBodyColliders(*Setup, InstanceTM, InstanceTM, 0.0f, MaxColliders, MaxConvexPlanes))
 		{
-			return false; // 예산 소진(인스턴스는 다른 바디와 같은 MaxColliders 예산을 공유).
+			// 예산 소진(인스턴스는 다른 바디와 같은 MaxColliders 예산을 공유).
+			return false;
 		}
 	}
 	return true;

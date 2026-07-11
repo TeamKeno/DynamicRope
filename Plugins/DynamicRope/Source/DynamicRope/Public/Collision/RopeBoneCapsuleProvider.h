@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 최소 구현 IRopeColliderProvider: 매 프레임 skeletal mesh로부터 나열된 본마다 capsule(bone -> parent 세그먼트)을
-// 생성한다. contact/wrap 테스트용 v1 collider 소스이며, 이후 동일 인터페이스 뒤에서 per-bone
-// SDF provider로 교체된다(M2-SDF).
+// 최소 구현 IRopeColliderProvider: 매 프레임 skeletal mesh로부터 본별 capsule(bone -> parent 세그먼트
+// 또는 Physics Asset 셰이프)을 생성하는 v1 collider 소스. per-bone SDF provider(URopeSDFProvider)와
+// 같은 인터페이스 뒤에 있어 대상별로 선택해 쓴다 — 해석적 캡슐이라 베이크가 필요 없어 가볍다.
 
 #pragma once
 
@@ -52,19 +52,23 @@ public:
 	virtual void GatherColliders(FRopeColliderGatherContext& Gather) override;
 
 private:
-	// 프레임당 1회 재구성되는 백킹 스토리지. 넘겨준 포인터들은 해당 프레임 동안 유효하다.
+	/** 프레임당 1회 재구성되는 백킹 스토리지. 넘겨준 포인터들은 해당 프레임 동안 유효하다. */
 	TArray<FCapsuleCollider> Capsules;
 
-	// 캡슐별(빌드 순서 인덱스 정렬) 이전 프레임 끝점(A, B). 표면 속도(드래그)/상대 운동 CCD의 prev 소스 —
-	// SDF provider의 PrevBoneToWorld 대응. 빌드 순서는 소스(Bones 목록/Physics Asset/스켈레톤)가 프레임 간
-	// 동일해 인덱스로 안정 — 개수가 바뀌면(구성 변경) 리셋하고 그 프레임은 정적(속도 0) 취급.
+	/**
+	 * 캡슐별(빌드 순서 인덱스 정렬) 이전 프레임 끝점(A, B). 표면 속도(드래그)/상대 운동 CCD의 prev 소스 —
+	 * SDF provider의 PrevBoneToWorld 대응. 빌드 순서는 소스(Bones 목록/Physics Asset/스켈레톤)가 프레임 간
+	 * 동일해 인덱스로 안정 — 개수가 바뀌면(구성 변경) 리셋하고 그 프레임은 정적(속도 0) 취급.
+	 */
 	TArray<TPair<FVector, FVector>> PrevEndpoints;
 
-	// 이번 프레임 캡슐 목록(A/B/반지름/본)을 Capsules에 빌드한다. Bones 명시 목록 → Physics Asset 자동 →
-	// 스켈레톤 폴백 순. prev 끝점/InvDt는 호출자(GatherColliders)가 인덱스 정렬로 이어 붙인다.
+	/**
+	 * 이번 프레임 캡슐 목록(A/B/반지름/본)을 Capsules에 빌드한다. Bones 명시 목록 → Physics Asset 자동 →
+	 * 스켈레톤 폴백 순. prev 끝점/InvDt는 호출자(GatherColliders)가 인덱스 정렬로 이어 붙인다.
+	 */
 	void BuildCapsules(USkeletalMeshComponent* Mesh);
 
-	// 마지막으로 capsule을 빌드한 GFrameCounter. 같은 프레임에 여러 로프가 호출해도 재빌드 안 함(디둡).
+	/** 마지막으로 capsule을 빌드한 GFrameCounter. 같은 프레임에 여러 로프가 호출해도 재빌드 안 함(디둡). */
 	uint64 BuiltFrame = static_cast<uint64>(-1);
 
 	USkeletalMeshComponent* ResolveMesh();

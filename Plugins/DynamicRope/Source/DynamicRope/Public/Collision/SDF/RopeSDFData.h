@@ -26,8 +26,8 @@ enum class ERopeSDFQuantBits : uint8
  * 베이크 1회에 대한 디자이너용 설정 값. 베이크 입력이자, 에셋에 함께 저장되어 재오써링 시
  * "이 에셋이 어떤 설정으로 구워졌는가"를 알려주는 비교 기준이 된다(URopeSDFData::LastBakeSettings).
  * 기본값은 신규 베이크의 출발점이다. 에디터 베이커(FRopeSDFBaker)가 이 타입을 그대로 입력으로 받는다.
+ * 에디터 UI(에셋 에디터 details 등) tooltip은 영어로 노출한다 — 한국어 주석 대신 명시적 ToolTip 메타를 사용.
  */
-// 에디터 UI(에셋 에디터 details 등) tooltip은 영어로 노출한다 — 한국어 주석 대신 명시적 ToolTip 메타를 사용.
 USTRUCT(BlueprintType, meta = (ToolTip = "Designer-facing settings for a single bake. Used as bake input and stored on the asset (URopeSDFData.LastBakeSettings) as the comparison baseline when re-authoring."))
 struct FRopeSDFBakeSettings
 {
@@ -71,15 +71,14 @@ struct FRopeSDFBakeSettings
  * (idx = x + y*Res.X + z*Res.X*Res.Y)으로 저장된다. distance 단위는 cm, 바깥쪽이 양수.
  * Distances가 비어 있으면(미베이크) provider는 이 본의 collider를 만들지 않는다.
  *
- * NOTE: 이 단계에서는 float 평면 배열로 둔다. FFloat16/uint16 좁은밴드 압축은 베이크 본작업(B3)에서.
+ * 에디터 UI(에셋 에디터 details 등) tooltip은 영어로 노출한다 — 한국어 주석 대신 명시적 ToolTip 메타를 사용.
  */
-// 에디터 UI(에셋 에디터 details 등) tooltip은 영어로 노출한다 — 한국어 주석 대신 명시적 ToolTip 메타를 사용.
 USTRUCT(meta = (ToolTip = "Narrow-band signed distance grid attributed to a single bone, baked in bone-local space. Distance is in cm, positive outside."))
 struct FRopeBoneSDFVolume
 {
 	GENERATED_BODY()
 
-	/** 이 볼륨이 귀속되는 본. FRopeContact.Bone으로 전파되어 DecideWrap이 wrap을 attribute한다. */
+	/** 이 볼륨이 귀속되는 본. FRopeContact.Bone으로 전파되어 접촉 집계가 wrap을 attribute한다. */
 	UPROPERTY(VisibleAnywhere, Category = "Rope|SDF", meta = (ToolTip = "Bone this volume is attributed to. Propagates to FRopeContact.Bone so DecideWrap can attribute the wrap."))
 	FName Bone = NAME_None;
 
@@ -143,7 +142,8 @@ struct FRopeBoneSDFVolume
 		uint32 Code = Distances[Base];
 		if (Bpc >= 2)
 		{
-			Code |= static_cast<uint32>(Distances[Base + 1]) << 8; // 리틀엔디안
+			// 리틀엔디안.
+			Code |= static_cast<uint32>(Distances[Base + 1]) << 8;
 		}
 		const float MaxCodeF = (Bpc >= 2) ? 65535.0f : 255.0f;
 		return static_cast<float>(Code) * (Range / MaxCodeF) - NarrowBandInner;
@@ -155,9 +155,11 @@ struct FRopeBoneSDFVolume
 		const float Range = NBInnerCm + NBOuterCm;
 		if (Range <= 0.0f)
 		{
-			return MaxCode / 2; // 무효 범위 폴백(중앙 ≈ 0).
+			// 무효 범위 폴백(중앙 ≈ 0).
+			return MaxCode / 2;
 		}
-		const float T = (Distance + NBInnerCm) / Range; // [-NBInner,+NBOuter] -> [0,1]
+		// [-NBInner,+NBOuter] -> [0,1].
+		const float T = (Distance + NBInnerCm) / Range;
 		return static_cast<uint32>(FMath::Clamp(FMath::RoundToInt(T * static_cast<float>(MaxCode)), 0, static_cast<int32>(MaxCode)));
 	}
 
