@@ -12,6 +12,7 @@
 #include "Components/MeshComponent.h"
 #include "Core/RopeTypes.h"
 #include "Core/RopeSimFrameIO.h"
+#include "Core/RopePullDriveState.h"
 #include "Logic/RopeAimTargeting.h" // FRopeAimRayHitResult/FRopeAimRayThrowRequest + 조준 로직/상태
 #include "Solver/RopeXPBDSolver.h"
 #include "Logic/RopeWrapController.h"
@@ -250,15 +251,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool GetPullSample(FVector& OutDirection, float& OutTension) const
 	{
-		OutDirection = LastPullSample.Direction;
-		OutTension = LastPullSample.Tension;
-		return LastPullSample.bValid;
+		OutDirection = PullDrive.LastPullSample.Direction;
+		OutTension = PullDrive.LastPullSample.Tension;
+		return PullDrive.LastPullSample.bValid;
 	}
 
 	/** 이번 프레임 테더 초과분(cm): 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). Wrapped 동안
 	 *  매 프레임 산출된다(테더 off여도 계산). wielder 견인/지상 이탈 판정 등 게임 반응용. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
-	float GetTetherOvershoot() const { return LastTetherOvershoot; }
+	float GetTetherOvershoot() const { return PullDrive.LastTetherOvershoot; }
 
 	/**
 	 * 능동 Pull(당김) 힘 설정 — Wrapped + 로프가 팽팽할 때 매 프레임 이 크기의 *상수* 힘을 감긴
@@ -489,32 +490,9 @@ private:
 	float ReleaseCooldown = 0.0f;	// Releasing → Free 복귀까지 남은 시간
 	float TensionOverTime = 0.0f;	// Wrapped 중 최대 장력이 TensionReleaseForce를 연속 초과한 시간
 
-	// 이번 프레임 Pull 산출물(Wrapped 동안 매 프레임 산출). BP 조회/디버거 화살표 소스.
-	// Direction은 아래 SmoothedPullDir(시간 스무딩된 방향)으로 매 프레임 덮어써서 소비자(테더/능동 Pull)가
-	// 스무딩된 값을 쓰게 한다.
-	FRopePullSample LastPullSample;
-
-	// Pull 방향의 시간 스무딩 상태(EMA). ComputePull의 look-ahead 방향(공간 평균)을 프레임 간 지수이동평균해
-	// 잔여 지터 + GPU 미러 지연 노이즈를 흡수한다. 영벡터 = 미초기화(wrap 시작 후 첫 유효 프레임에 측정값으로
-	// 시드). ResetTransientPhaseState에서 리셋. 테더/능동 Pull이 이 방향을 공용으로 쓴다.
-	FVector SmoothedPullDir = FVector::ZeroVector;
-
-	// wielder 견인 방향(손(노드0)→로프 첫 다리)의 시간 스무딩 상태(EMA — SmoothedPullDir과 동일 상수
-	// PullDirSmoothTime). 영벡터 = 미초기화(첫 유효 프레임에 시드), ResetTransientPhaseState에서 리셋.
-	// 방향이 프레임마다 튀면 속도 톱업이 매번 다른 축으로 들어가 벡터가 랜덤워크로 불어난다(폭주) —
-	// 방향 안정화가 1차 방어(속력 상한은 ApplyNonSimCorrection의 2차 방어).
-	FVector SmoothedWielderPullDir = FVector::ZeroVector;
-
-	// 스무딩 전 look-ahead 방향(EMA 입력 원본). 디버거가 raw vs smoothed를 나란히 그려 지터 진단에 쓴다.
-	FVector LastPullDirRaw = FVector::ZeroVector;
-
-	// Pull 조준 노드의 시간 스무딩 상태(fractional). ComputePull이 고른 정수 AimNode를 float로 EMA해 노드
-	// 사이를 보간 → 방향/tether를 연속화(이산 홉 제거). <0 = 미초기화(wrap 시작 후 첫 유효 프레임에 시드).
-	// ResetTransientPhaseState에서 -1로 리셋. PullAimSmoothTime이 상수.
-	float SmoothedAimNodeF = -1.0f;
-
-	// 능동 Pull의 현재 힘(SetActivePull이 설정, 0=꺼짐). Wrapped + 팽팽할 때만 인가된다.
-	float ActivePullForce = 0.0f;
+	// Wrapped 견인/스무딩 상태 묶음(Pull 샘플/EMA 3종/능동 Pull/테더 초과분/경고 래치). 멤버별 의미와
+	// 전이 시 리셋 규약(무엇이 살아남는가)은 FRopePullDriveState(Core/RopePullDriveState.h) 주석 참조.
+	FRopePullDriveState PullDrive;
 
 	// 되감기 속도(cm/s, +감기/-풀기, 0=정지). SetReelRate가 설정, UpdateReel이 프레임마다 적용.
 	float ReelRate = 0.0f;
@@ -540,12 +518,6 @@ private:
 	{
 		return FMath::Max(1, FMath::RoundToInt(static_cast<float>(SolverConfig.Iterations) * SolverLODScale));
 	}
-
-	// 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용.
-	float LastTetherOvershoot = 0.0f;
-
-	// Pull 힘 수신자 없음 경고를 wrap당 1회만 내보내기 위한 래치(ResetTransientPhaseState에서 리셋).
-	bool bLoggedPullNoReceiver = false;
 
 	// 동작 1 — 자동 견인(테더): 가용 로프 길이 초과분을 위치/속도 동기로 회수(수렴, 폭주 없음).
 	void UpdateTether(float DeltaTime);

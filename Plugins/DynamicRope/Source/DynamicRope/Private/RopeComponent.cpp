@@ -1056,11 +1056,7 @@ void URopeComponent::ResetTransientPhaseState()
 	ContactingElapsed = 0.0f;
 	FlightNoContactElapsed = 0.0f;
 	TensionOverTime = 0.0f;
-	LastPullSample = FRopePullSample();
-	SmoothedPullDir = FVector::ZeroVector; // 다음 wrap 시작 시 측정값으로 다시 시드.
-	SmoothedWielderPullDir = FVector::ZeroVector;
-	SmoothedAimNodeF = -1.0f;              // fractional 조준 스무딩도 미초기화로.
-	bLoggedPullNoReceiver = false;
+	PullDrive.ResetTransient(); // Pull 샘플/EMA 3종/경고 래치만. 생존 필드는 FRopePullDriveState 주석 참조.
 }
 
 void URopeComponent::ResolvePendingAimThrow()
@@ -1224,17 +1220,17 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.Latched = Wrap.Latched;
 		Snapshot.WrapTension = Wrap.Tension;
 		Snapshot.TensionReleaseForce = WrapConfig.TensionReleaseForce;
-		Snapshot.bPullValid = LastPullSample.bValid;
-		Snapshot.PullPoint = LastPullSample.WorldPoint;
-		Snapshot.PullDirection = LastPullSample.Direction; // 스무딩된(실제 인가) 방향
-		Snapshot.PullDirRaw = LastPullDirRaw;              // 스무딩 전 look-ahead(지터 진단)
-		Snapshot.PullAimNode = LastPullSample.AimNode; // raw 정수 조준(홉 진단용 텍스트)
-		Snapshot.PullAimPoint = LastPullSample.bValid ? LastPullSample.AimPos // 청록 = 스무딩된 fractional 조준(실제 인가)
-			: LastPullSample.WorldPoint;
-		Snapshot.PullTension = LastPullSample.Tension;
+		Snapshot.bPullValid = PullDrive.LastPullSample.bValid;
+		Snapshot.PullPoint = PullDrive.LastPullSample.WorldPoint;
+		Snapshot.PullDirection = PullDrive.LastPullSample.Direction; // 스무딩된(실제 인가) 방향
+		Snapshot.PullDirRaw = PullDrive.LastPullDirRaw;              // 스무딩 전 look-ahead(지터 진단)
+		Snapshot.PullAimNode = PullDrive.LastPullSample.AimNode; // raw 정수 조준(홉 진단용 텍스트)
+		Snapshot.PullAimPoint = PullDrive.LastPullSample.bValid ? PullDrive.LastPullSample.AimPos // 청록 = 스무딩된 fractional 조준(실제 인가)
+			: PullDrive.LastPullSample.WorldPoint;
+		Snapshot.PullTension = PullDrive.LastPullSample.Tension;
 		Snapshot.TetherResponse = WrapConfig.TetherResponse;
-		Snapshot.TetherOvershoot = LastTetherOvershoot;
-		Snapshot.ActivePullForce = ActivePullForce;
+		Snapshot.TetherOvershoot = PullDrive.LastTetherOvershoot;
+		Snapshot.ActivePullForce = PullDrive.ActivePullForce;
 		Snapshot.DistanceReleaseSlack = WrapConfig.DistanceReleaseSlack;
 	}
 
@@ -2157,52 +2153,52 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 	WrapController.State.Tension = GetMaxTension();
 
 	// Pull 샘플 산출(항상 — 디버거/BP 관찰 + 견인/release의 공용 입력). 방향은 첫 직선 다리 추종(공간).
-	LastPullSample = FRopePullSample();
-	WrapController.ComputePull(Sim, WrapConfig.PullBendThresholdDeg, LastPullSample);
+	PullDrive.LastPullSample = FRopePullSample();
+	WrapController.ComputePull(Sim, WrapConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
 
 	// Pull 스무딩(2단): (1) 조준 노드 fractional 스무딩 — 정수 AimNode의 프레임 간 이산 홉(방향 통째 점프
 	// + tether 초과분 불연속)을 float EMA + 노드 사이 보간으로 없앤다. (2) 방향 EMA — 그 위에 남는 노드 위치
 	// 노이즈(GPU 미러 지연 등)를 다듬는다. wrap 시작 후 첫 유효 프레임은 측정값으로 시드(래그 없음).
-	if (!LastPullSample.bValid)
+	if (!PullDrive.LastPullSample.bValid)
 	{
 		return;
 	}
 
-	LastPullDirRaw = LastPullSample.Direction; // 스무딩 전 raw look-ahead(정수 조준) — 디버거 raw vs smoothed 비교.
+	PullDrive.LastPullDirRaw = PullDrive.LastPullSample.Direction; // 스무딩 전 raw look-ahead(정수 조준) — 디버거 raw vs smoothed 비교.
 
 	// (1) 조준 인덱스 시간 스무딩 → fractional 조준 위치 보간.
-	const float RawAimF = static_cast<float>(LastPullSample.AimNode);
-	if (SmoothedAimNodeF < 0.0f)
+	const float RawAimF = static_cast<float>(PullDrive.LastPullSample.AimNode);
+	if (PullDrive.SmoothedAimNodeF < 0.0f)
 	{
-		SmoothedAimNodeF = RawAimF;
+		PullDrive.SmoothedAimNodeF = RawAimF;
 	}
 	else
 	{
 		const float TauA = WrapConfig.PullAimSmoothTime;
 		const float AlphaA = (TauA > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / TauA)) : 1.0f;
-		SmoothedAimNodeF = FMath::Lerp(SmoothedAimNodeF, RawAimF, AlphaA);
+		PullDrive.SmoothedAimNodeF = FMath::Lerp(PullDrive.SmoothedAimNodeF, RawAimF, AlphaA);
 	}
-	const float AimF = FMath::Clamp(SmoothedAimNodeF, 0.0f, static_cast<float>(LastPullSample.AnchorNode));
+	const float AimF = FMath::Clamp(PullDrive.SmoothedAimNodeF, 0.0f, static_cast<float>(PullDrive.LastPullSample.AnchorNode));
 	const int32 A0 = FMath::FloorToInt(AimF);
-	const int32 A1 = FMath::Min(A0 + 1, LastPullSample.AnchorNode);
+	const int32 A1 = FMath::Min(A0 + 1, PullDrive.LastPullSample.AnchorNode);
 	const FVector AimPos = FMath::Lerp(Sim.Positions[A0], Sim.Positions[A1], AimF - static_cast<float>(A0));
-	LastPullSample.AimNodeF = AimF;
-	LastPullSample.AimPos = AimPos;
+	PullDrive.LastPullSample.AimNodeF = AimF;
+	PullDrive.LastPullSample.AimPos = AimPos;
 
 	// (2) 연속 조준으로 방향 재계산 후 방향 EMA. 축퇴(조준=앵커)면 raw 방향 유지.
-	const FVector DirF = (AimPos - Sim.Positions[LastPullSample.AnchorNode]).GetSafeNormal();
-	const FVector DirIn = DirF.IsNearlyZero() ? LastPullSample.Direction : DirF;
-	if (SmoothedPullDir.IsNearlyZero())
+	const FVector DirF = (AimPos - Sim.Positions[PullDrive.LastPullSample.AnchorNode]).GetSafeNormal();
+	const FVector DirIn = DirF.IsNearlyZero() ? PullDrive.LastPullSample.Direction : DirF;
+	if (PullDrive.SmoothedPullDir.IsNearlyZero())
 	{
-		SmoothedPullDir = DirIn;
+		PullDrive.SmoothedPullDir = DirIn;
 	}
 	else
 	{
 		const float Tau = WrapConfig.PullDirSmoothTime;
 		const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
-		SmoothedPullDir = FMath::Lerp(SmoothedPullDir, DirIn, Alpha).GetSafeNormal();
+		PullDrive.SmoothedPullDir = FMath::Lerp(PullDrive.SmoothedPullDir, DirIn, Alpha).GetSafeNormal();
 	}
-	LastPullSample.Direction = SmoothedPullDir;
+	PullDrive.LastPullSample.Direction = PullDrive.SmoothedPullDir;
 }
 
 void URopeComponent::ApplyWrappedTraction(float DeltaTime)
@@ -2213,9 +2209,9 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 
 	// ③-2 능동 Pull(상수 힘): 사용자 입력(SetActivePull/Wielder)이 준 힘을 팽팽할 때만 인가한다.
 	// 장력과 무관한 상수라 피드백 폭주가 없다.
-	if (ActivePullForce > 0.0f && LastPullSample.bValid && LastPullSample.Tension > KINDA_SMALL_NUMBER)
+	if (PullDrive.ActivePullForce > 0.0f && PullDrive.LastPullSample.bValid && PullDrive.LastPullSample.Tension > KINDA_SMALL_NUMBER)
 	{
-		ApplyPullForce(LastPullSample.Direction * ActivePullForce, LastPullSample);
+		ApplyPullForce(PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, PullDrive.LastPullSample);
 	}
 }
 
@@ -2238,14 +2234,14 @@ bool URopeComponent::CheckWrappedAutoRelease(float DeltaTime)
 	}
 
 	// ④-2 거리 release: 손~앵커 직선 거리의 가용 로프 길이 초과분(테더 초과분과 동일 소스 —
-	// UpdateTether가 이번 프레임 갱신한 LastTetherOvershoot)이 한계를 넘으면 놓친다.
+	// UpdateTether가 이번 프레임 갱신한 PullDrive.LastTetherOvershoot)이 한계를 넘으면 놓친다.
 	// 기하 기반이라 지속 시간 없이 즉시 판정(장력처럼 노이즈가 없다).
-	if (WrapConfig.DistanceReleaseSlack > 0.0f && LastTetherOvershoot > WrapConfig.DistanceReleaseSlack)
+	if (WrapConfig.DistanceReleaseSlack > 0.0f && PullDrive.LastTetherOvershoot > WrapConfig.DistanceReleaseSlack)
 	{
 		const FName Bone = WrapController.State.BoneName;
 		FinishWrapRelease(Bone, ERopeReleaseReason::Distance,
 			FString::Printf(TEXT("distance release overshoot %.0f > %.0f, bone=%s"),
-				LastTetherOvershoot, WrapConfig.DistanceReleaseSlack, *Bone.ToString()));
+				PullDrive.LastTetherOvershoot, WrapConfig.DistanceReleaseSlack, *Bone.ToString()));
 		return true;
 	}
 	return false;
@@ -2287,7 +2283,7 @@ void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 
 void URopeComponent::SetActivePull(float Force)
 {
-	ActivePullForce = FMath::Max(0.0f, Force);
+	PullDrive.ActivePullForce = FMath::Max(0.0f, Force);
 }
 
 void URopeComponent::SetRopeLength(float NewLength)
@@ -2461,28 +2457,28 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 직선 거리가 그 구간의 가용 로프 길이를 넘는 양. 손이 아니라 조준 노드를 기준으로 삼는 이유: 로프가 벽에
 	// 걸려 우회하면 손 직선은 장애물 뒤라 영영 안 터지지만(무반응), 모서리(조준) 기준이면 그 다리로 제대로
 	// 발화한다. 곧은 로프는 조준=손(노드 0)이라 기존과 등가. 스냅샷/BP 관찰을 위해 꺼져 있어도 항상 계산.
-	LastTetherOvershoot = 0.0f;
-	if (!LastPullSample.bValid || LastPullSample.AimNodeF < 0.0f)
+	PullDrive.LastTetherOvershoot = 0.0f;
+	if (!PullDrive.LastPullSample.bValid || PullDrive.LastPullSample.AimNodeF < 0.0f)
 	{
 		return;
 	}
 	// fractional 조준(연속): 정수 AimNode 대신 스무딩된 조준 위치/세그먼트 수를 써 초과분이 노드 단위로 뚝뚝
 	// 튀지 않고 연속으로 변한다 → 견인이 매끈해진다(어제 "뚝뚝 끊김"의 원인이 이 이산 참조였다).
-	const FVector Anchor = LastPullSample.WorldPoint;          // 끌 지점(대상 쪽 앵커)
-	const FVector Aim    = LastPullSample.AimPos;              // 보간된 조준(손 또는 벽 모서리)
-	const float   LegSegs = static_cast<float>(LastPullSample.AnchorNode) - LastPullSample.AimNodeF; // 연속 세그먼트 수
+	const FVector Anchor = PullDrive.LastPullSample.WorldPoint;          // 끌 지점(대상 쪽 앵커)
+	const FVector Aim    = PullDrive.LastPullSample.AimPos;              // 보간된 조준(손 또는 벽 모서리)
+	const float   LegSegs = static_cast<float>(PullDrive.LastPullSample.AnchorNode) - PullDrive.LastPullSample.AimNodeF; // 연속 세그먼트 수
 	const FVector Span = Aim - Anchor;
 	const float Dist = static_cast<float>(Span.Size());
 	const float AvailLen = LegSegs * Sim.SegmentLength + WrapConfig.TetherSlack;
 	const float Overshoot = Dist - AvailLen;
-	LastTetherOvershoot = FMath::Max(0.0f, Overshoot);
+	PullDrive.LastTetherOvershoot = FMath::Max(0.0f, Overshoot);
 	if (WrapConfig.TetherResponse <= 0.0f || Overshoot <= 0.0f || Dist <= KINDA_SMALL_NUMBER)
 	{
 		return;
 	}
 
 	// 방향 = 앵커에서 조준(모서리/손) 쪽 = 스무딩된 look-ahead 방향(둘 다 로프 경로 추종). 폴백은 이 구간 직선.
-	const FVector DirToAim = SmoothedPullDir.IsNearlyZero() ? (Span / Dist) : SmoothedPullDir;
+	const FVector DirToAim = PullDrive.SmoothedPullDir.IsNearlyZero() ? (Span / Dist) : PullDrive.SmoothedPullDir;
 	// 이번 프레임 회수량 = 초과분 × 반응(위치 동기 — 남은 초과분이 다음 입력이라 수렴). 최대 속도로 클램프해
 	// 초과분 스파이크(코너 전이 등)에도 대상이 튕겨나가지 않게 한다.
 	const float Response = FMath::Clamp(WrapConfig.TetherResponse, 0.0f, 1.0f);
@@ -2568,7 +2564,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		// 인가 본은 감긴 본에서 부모 체인 승격(FindNearestSimulatingBone) — 바디 없는 본(트위스트 등) 대응.
 		if (Mesh->IsSimulatingPhysics())
 		{
-			const FName SimBone = FindNearestSimulatingBone(Mesh, LastPullSample.Bone);
+			const FName SimBone = FindNearestSimulatingBone(Mesh, PullDrive.LastPullSample.Bone);
 			if (!SimBone.IsNone())
 			{
 				TopUpVelocity(Mesh, SimBone, DirToAim, TargetStep * InvDt);
@@ -2607,22 +2603,22 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		}
 		// 방향 EMA(대상 쪽 SmoothedPullDir과 동일 상수): AimPos 노드 노이즈/모서리 전환/근접 축퇴로
 		// raw 방향이 프레임마다 튀면 속도 톱업이 매번 다른 축으로 들어가 벡터가 랜덤워크로 불어난다(폭주).
-		if (SmoothedWielderPullDir.IsNearlyZero())
+		if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
 		{
-			SmoothedWielderPullDir = WielderDirRaw;
+			PullDrive.SmoothedWielderPullDir = WielderDirRaw;
 		}
 		else
 		{
 			const float Tau = WrapConfig.PullDirSmoothTime;
 			const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
-			SmoothedWielderPullDir = FMath::Lerp(SmoothedWielderPullDir, WielderDirRaw, Alpha).GetSafeNormal();
-			if (SmoothedWielderPullDir.IsNearlyZero())
+			PullDrive.SmoothedWielderPullDir = FMath::Lerp(PullDrive.SmoothedWielderPullDir, WielderDirRaw, Alpha).GetSafeNormal();
+			if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
 			{
 				// 정반대 방향 상쇄 축퇴(180° 반전 순간) — raw로 재시드.
-				SmoothedWielderPullDir = WielderDirRaw;
+				PullDrive.SmoothedWielderPullDir = WielderDirRaw;
 			}
 		}
-		const FVector WielderDir = SmoothedWielderPullDir;
+		const FVector WielderDir = PullDrive.SmoothedWielderPullDir;
 
 		AActor* RopeOwner = GetOwner();
 		bool bHandled = false;
@@ -2702,9 +2698,9 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 
 	// 수신자 없음(시뮬 바디 없는 본 체인 + 무브먼트 비활성/비캐릭터 + 비시뮬 루트): 힘이 조용히
 	// 사라지는 걸 wrap당 1회 알린다.
-	if (!bLoggedPullNoReceiver)
+	if (!PullDrive.bLoggedPullNoReceiver)
 	{
-		bLoggedPullNoReceiver = true;
+		PullDrive.bLoggedPullNoReceiver = true;
 		UE_LOG(LogDynamicRope, Warning,
 			TEXT("[%s] Pull has no force receiver: mesh=%s bone=%s has no simulating body up its parent chain, owner=%s has no force-consuming CharacterMovement (not a Character, or movement disabled) and its root is not simulating — pull force is dropped."),
 			*GetName(), *Mesh->GetName(), *Pull.Bone.ToString(), *GetNameSafe(Owner));
