@@ -2568,12 +2568,21 @@ void URopeComponent::UpdateTether(float DeltaTime)
 
 	// 방향 = 앵커에서 조준(모서리/손) 쪽 = 스무딩된 look-ahead 방향(둘 다 로프 경로 추종). 폴백은 이 구간 직선.
 	const FVector DirToAim = PullDrive.SmoothedPullDir.IsNearlyZero() ? (Span / Dist) : PullDrive.SmoothedPullDir;
-	// 이번 프레임 회수량 = 초과분 × 반응(위치 동기 — 남은 초과분이 다음 입력이라 수렴). 최대 속도로 클램프해
-	// 초과분 스파이크(코너 전이 등)에도 대상이 튕겨나가지 않게 한다.
-	const float Response = FMath::Clamp(WrapConfig.TetherResponse, 0.0f, 1.0f);
-	// 이번 프레임 최대 이동(cm)
-	const float MaxStep = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f) * DeltaTime;
-	const float StepLen = (MaxStep > 0.0f) ? FMath::Min(Overshoot * Response, MaxStep) : (Overshoot * Response);
+
+	// 리엘 컨트롤러: 팽팽한 동안엔 *고정 속도*(TetherReelSpeed)로 당기고, 로프 한계 근처(overshoot가 작음)에서만
+	// 부드럽게 감속해 경계에 안착시킨다(임계 감쇠). 예전 "속도 ∝ overshoot"는 overshoot가 흔들리면 속도도 같이
+	// 스윙했지만(질주→걸림→되감김 사이클), 여기서는 overshoot가 감속 구간(TaperDist=TetherSettleDist)보다 크면
+	// 항상 같은 속도라 견인이 일정하다. TetherMaxSpeed는 안전 상한으로만 남는다.
+	//   VTotal = min(ReelSpeed, MaxSpeed) × clamp(Overshoot / TaperDist, 0, 1)
+	// overshoot ≥ TaperDist → 고정 ReelSpeed(플랫), < TaperDist → 선형 감속(속도 서보에선 지수 수렴=오버슛 없음).
+	const float ReelSpeed = FMath::Max(WrapConfig.TetherReelSpeed, 0.0f);
+	const float MaxSpeed = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f);
+	const float EffReelSpeed = (MaxSpeed > 0.0f) ? FMath::Min(ReelSpeed, MaxSpeed) : ReelSpeed; // 상한 클램프
+	const float TaperDist = FMath::Max(WrapConfig.TetherSettleDist, 0.01f);                      // 경계 근처 감속 구간(작을수록 빨리 고정 속도 도달)
+	const float VTotal = EffReelSpeed * FMath::Clamp(Overshoot / TaperDist, 0.0f, 1.0f);         // 이번 프레임 목표 속도(cm/s)
+	// 이번 프레임 회수 거리 — 남은 overshoot를 넘게 회수하면(빠른 속도 × dt > overshoot) 관성으로 경계를 지나쳐
+	// slack이 되고 다음 프레임 견인 off로 코스팅→재팽팽 속도 변동이 생긴다. overshoot로 캡해 항상 경계에 안착.
+	const float StepLen = FMath::Min(VTotal * DeltaTime, Overshoot);                             // 이번 프레임 회수 거리(cm)
 
 	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화). 대상 타입을 가리지 않고 아래 수신자 체인
 	// (스켈레탈 본 → 시뮬 프리미티브 → 캐릭터 무브먼트/스윕)으로 견인한다 — 가벼운 물리 프랍/정적 대상도
@@ -2637,10 +2646,18 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	const float TargetStep = StepLen * ShareT;
 	const float WielderStep = StepLen * ShareW;
 
-	// 물리 시뮬 대상(본/루트): 속도를 *누적하지 않고* 목표 속도(step/dt)까지만 톱업한다 — 이미 그 방향으로
-	// 충분히 빠르면 아무것도 더하지 않는다. bVelChange로 매 프레임 임펄스를 더하던 기존 방식은 물리 운동량이
-	// 이월돼 속도가 누적 → 발산(맵 밖)했다. 여기서는 목표를 넘지 않게 차분만 주므로 수렴하고, 수직 성분(중력
-	// 등)은 보존된다. step이 이미 최대 속도로 클램프돼 있어 상한도 보장.
+	// 보정 강성(임계 감쇠): 로프 축 속도를 목표로 *한 프레임에 확 세팅하지 않고* 매 프레임 CorrectAlpha만큼만
+	// 접근시킨다. Alpha=1이면 즉시(하드 — 진행 속도를 뚝 끊어 "턱턱 걸림"), 작을수록 몇 프레임에 걸쳐 부드럽게
+	// 감속(수렴). TetherResponse[0..1]를 이 강성으로 재사용한다(원래 "프레임당 회수 비율" 의미와 일치, 0=off 게이트).
+	const float CorrectAlpha = FMath::Clamp(WrapConfig.TetherResponse, 0.0f, 1.0f);
+
+	// 물리 시뮬 수신자용 두 인가 방식(둘 다 로프 축 성분만 건드려 수직 성분(중력 등)은 보존):
+	//  - TopUpVelocity(단방향, CorrectAlpha 감쇠): 목표 속도까지 "부족할 때만" 가속, 감속은 안 함. wielder(로프
+	//    owner) 회수용 — 진행 속도를 한 프레임에 뚝 끊지 않아 "턱턱"을 막는다(빠른 외부 운동도 보존).
+	//  - ServoVelocity(양방향, *감쇠 없이 정확 추종*): 로프 축 성분을 목표 속도에 그 프레임에 정확히 맞춘다.
+	//    대상(끌려오는 쪽)용 — bVelChange라 관성이 이월되지 않아, 목표가 경계 근처에서 0으로 감속하면 대상도
+	//    정확히 따라 경계에 지수 수렴한다(감쇠를 넣으면 목표를 지연 추종해 관성으로 slack을 지나쳐 코스팅→재팽팽
+	//    속도 변동이 생긴다 — 그래서 대상은 감쇠 없이 정확 추종).
 	const float InvDt = 1.0f / FMath::Max(DeltaTime, 1e-4f);
 	auto TopUpVelocity = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float TargetSpeed)
 	{
@@ -2648,8 +2665,14 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		const float CurAlong = static_cast<float>(FVector::DotProduct(CurVel, Dir));
 		if (TargetSpeed > CurAlong)
 		{
-			Prim->AddImpulse(Dir * (TargetSpeed - CurAlong), BoneName, /*bVelChange*/ true);
+			Prim->AddImpulse(Dir * (TargetSpeed - CurAlong) * CorrectAlpha, BoneName, /*bVelChange*/ true);
 		}
+	};
+	auto ServoVelocity = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float TargetSpeed)
+	{
+		const FVector CurVel = Prim->GetPhysicsLinearVelocity(BoneName);
+		const float CurAlong = static_cast<float>(FVector::DotProduct(CurVel, Dir));
+		Prim->AddImpulse(Dir * (TargetSpeed - CurAlong), BoneName, /*bVelChange*/ true);
 	};
 
 	// 비시뮬 수신자: 캐릭터 무브먼트가 살아 있으면 위치 오프셋 대신 *무브먼트 속도* 톱업으로 끈다.
@@ -2666,10 +2689,12 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			if (Movement && Movement->MovementMode != MOVE_None)
 			{
 				const float TargetSpeed = Step * InvDt;
-				const float CurAlong = static_cast<float>(FVector::DotProduct(Movement->Velocity, Dir));
+				const FVector OldVel = Movement->Velocity;
+				const float CurAlong = static_cast<float>(FVector::DotProduct(OldVel, Dir));
 				if (TargetSpeed > CurAlong)
 				{
-					FVector NewVel = Movement->Velocity + Dir * (TargetSpeed - CurAlong);
+					// 목표까지 CorrectAlpha만큼만 접근(하드 세팅 X) — 진행 속도를 한 프레임에 뚝 끊지 않아 "턱턱" 방지.
+					FVector NewVel = OldVel + Dir * (TargetSpeed - CurAlong) * CorrectAlpha;
 					// 주입 결과 속력의 절대 상한 = max(TetherMaxSpeed, 기존 속력): 방향이 흔들리면 톱업이
 					// 프레임마다 다른 축으로 들어가 감쇠 없는 Falling에서 벡터가 계속 커질 수 있다(폭주의
 					// 2차 방어 — 1차는 방향 EMA). 주입은 절대 속력을 이 상한 너머로 못 키우고, 기존에 더
@@ -2677,7 +2702,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 					const float SpeedCap = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f);
 					if (SpeedCap > 0.0f)
 					{
-						const float MaxAllowed = FMath::Max(SpeedCap, static_cast<float>(Movement->Velocity.Size()));
+						const float MaxAllowed = FMath::Max(SpeedCap, static_cast<float>(OldVel.Size()));
 						NewVel = NewVel.GetClampedToMaxSize(MaxAllowed);
 					}
 					Movement->Velocity = NewVel;
@@ -2685,6 +2710,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 				return;
 			}
 		}
+		// 무브먼트가 없거나 꺼진(MOVE_None) 비캐릭터: 스윕 위치 오프셋 폴백(벽 통과 방지).
 		Actor->AddActorWorldOffset(Dir * Step, /*bSweep*/ true);
 	};
 
@@ -2705,7 +2731,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 				const FName SimBone = FindNearestSimulatingBone(Skel, PullDrive.LastPullSample.Bone);
 				if (!SimBone.IsNone())
 				{
-					TopUpVelocity(Skel, SimBone, DirToAim, TargetStep * InvDt);
+					ServoVelocity(Skel, SimBone, DirToAim, TargetStep * InvDt);
 					bHandled = true;
 				}
 			}
@@ -2717,7 +2743,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			{
 				if (Prim->IsSimulatingPhysics())
 				{
-					TopUpVelocity(Prim, NAME_None, DirToAim, TargetStep * InvDt);
+					ServoVelocity(Prim, NAME_None, DirToAim, TargetStep * InvDt);
 					bHandled = true;
 				}
 			}
@@ -2730,7 +2756,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			{
 				if (Root->IsSimulatingPhysics())
 				{
-					TopUpVelocity(Root, NAME_None, DirToAim, TargetStep * InvDt);
+					ServoVelocity(Root, NAME_None, DirToAim, TargetStep * InvDt);
 					bHandled = true;
 				}
 			}

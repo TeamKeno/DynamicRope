@@ -715,21 +715,37 @@ struct FRopeWrapConfig
 
 	/**
 	 * 자동 견인(테더) 반응 [0..1]. Wrapped 중 손~앵커 직선 거리가 가용 로프 길이(앵커까지 세그먼트 수 ×
-	 * SegmentLength + TetherSlack)를 넘으면 초과분 × 이 값만큼 대상을 손 쪽으로 되돌린다(프레임당).
-	 * 힘이 아니라 위치/속도 동기라 장력→힘→스트레치→장력 피드백 폭주가 없다(초과분이 줄면 보정도
-	 * 준다 — 수렴). 1 = 즉시 스냅, 0 = 비활성(기본). 물리 시뮬 대상은 같은 수렴을 속도 주입으로 만든다.
+	 * SegmentLength + TetherSlack)를 넘으면 견인이 켜진다. 0 = 비활성(기본).
+	 * 견인 *속도* 는 TetherReelSpeed가 정하고, 이 값은 **보정 강성(임계 감쇠)** — 로프 축 속도를 목표로 매
+	 * 프레임 이 비율만큼만 접근시킨다. 1 = 즉시(하드 — 진행 속도를 뚝 끊어 "턱턱"), 작을수록(예 0.1~0.3)
+	 * 몇 프레임에 걸쳐 부드럽게 감속. 크기는 TetherReelSpeed, 부드러움은 이 값으로 역할이 나뉜다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TetherResponse = 0.0f;
 
-	/** 테더 발동 전 허용 여유(cm). 경계 지터/미세 슬랙에서 발동하는 것을 막는다. */
+	/** 테더 발동 전 허용 여유(cm). 경계 지터/미세 슬랙에서 발동하는 것을 막는다(가용 길이에 더해짐). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
 	float TetherSlack = 5.0f;
 
 	/**
-	 * 테더 회수 최대 속도(cm/s). 물리 대상은 속도를 누적하지 않고 이 값으로 상한된 목표 속도까지만 톱업하고,
-	 * 비물리 대상은 프레임당 위치 보정을 이 값×dt로 클램프한다 → 초과분 스파이크나 임펄스 누적으로 대상이
-	 * 튕겨나가는 것을 원천 차단한다(수렴 보장). 0 = 클램프 없음(비권장).
+	 * 팽팽한 동안 테더가 대상/wielder를 로프 쪽으로 되돌리는 *고정* 견인 속도(cm/s). overshoot가 TetherSettleDist보다
+	 * 크면 항상 이 속도로 당기고(마스 분배로 양끝에 ShareT:ShareW 비율로 나뉨), 한계 근처에선 부드럽게 감속해
+	 * 안착한다. 속도 ∝ overshoot가 아니라 고정이라 견인이 일정하다. 0 = 견인 없음.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float TetherReelSpeed = 400.0f;
+
+	/**
+	 * 경계 근처 감속(taper) 구간(cm). overshoot가 이 값보다 작아지면 견인 속도가 0으로 선형 감속해 로프 한계에
+	 * 부드럽게 안착한다(임계 감쇠). 작을수록 작은 overshoot에서도 곧바로 고정 ReelSpeed(빠른 견인)에 도달하고
+	 * 마지막 이 구간만 감속 — 너무 크면 평소 드래그(overshoot가 작음)가 내내 감속 구간에 들어가 견인이 느려진다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.01", Units = "cm"))
+	float TetherSettleDist = 1.5f;
+
+	/**
+	 * 테더 회수 최대 속도(cm/s) — 안전 상한. TetherReelSpeed가 이보다 크면 이 값으로 클램프해 초과분 스파이크에도
+	 * 대상이 튕겨나가지 않게 한다(수렴 보장). 0 = 클램프 없음(비권장).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float TetherMaxSpeed = 1500.0f;
