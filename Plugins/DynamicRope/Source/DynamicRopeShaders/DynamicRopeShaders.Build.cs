@@ -22,11 +22,16 @@ public class DynamicRopeShaders : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"RenderCore", // FGlobalShader / RDG (RenderGraph)
-				"RHI",        // GPU 버퍼 / 리드백
-				"Projects",   // IPluginManager — .usf 가상경로 매핑
-				"Engine",     // FSceneViewExtension / FFXSystemInterface (GDF 월드 충돌)
-				"Renderer",   // UE::FXRenderingUtils::GetGlobalDistanceFieldParameterData + FGlobalDistanceFieldParameters2
+				// FGlobalShader / RDG (RenderGraph)
+				"RenderCore",
+				// GPU 버퍼 / 리드백
+				"RHI",
+				// IPluginManager — .usf 가상경로 매핑
+				"Projects",
+				// FSceneViewExtension / FFXSystemInterface (GDF 월드 충돌)
+				"Engine",
+				// UE::FXRenderingUtils::GetGlobalDistanceFieldParameterData + FGlobalDistanceFieldParameters2
+				"Renderer",
 			}
 			);
 	}

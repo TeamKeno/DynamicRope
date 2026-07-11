@@ -2,13 +2,18 @@
 
 #include "Modules/ModuleManager.h"
 #include "DynamicRopeShadersLog.h"
-#include "RopeGDFFXSystem.h"       // 커스텀 FX 시스템(GDF 온디맨드 소비자)
-#include "RopeGDFViewExtension.h"  // GDF 씬 뷰 확장
+// 커스텀 FX 시스템(GDF 온디맨드 소비자)
+#include "RopeGDFFXSystem.h"
+// GDF 씬 뷰 확장
+#include "RopeGDFViewExtension.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
-#include "Misc/CoreDelegates.h"    // OnPostEngineInit (뷰 확장 생성 타이밍)
-#include "FXSystem.h"              // FFXSystemInterface::RegisterCustomFXSystem
-#include "ShaderCore.h" // AddShaderSourceDirectoryMapping
+// OnPostEngineInit (뷰 확장 생성 타이밍)
+#include "Misc/CoreDelegates.h"
+// FFXSystemInterface::RegisterCustomFXSystem
+#include "FXSystem.h"
+// AddShaderSourceDirectoryMapping
+#include "ShaderCore.h"
 
 DEFINE_LOG_CATEGORY(LogDynamicRopeGPU);
 

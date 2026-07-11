@@ -37,10 +37,14 @@ public class DynamicRope : ModuleRules
 			{
 				"CoreUObject",
 				"Engine",
-				"RenderCore",         // RopeSceneProxy
-				"RHI",                // RopeSceneProxy
-				"DynamicRopeShaders", // GPU 솔버(FRopeGPUSolver) — 별도 PostConfigInit 모듈
-				"EnhancedInput",      // URopeWielderComponent 선택적 입력 자동 바인딩
+				// RopeSceneProxy
+				"RenderCore",
+				// RopeSceneProxy
+				"RHI",
+				// GPU 솔버(FRopeGPUSolver) — 별도 PostConfigInit 모듈
+				"DynamicRopeShaders",
+				// URopeWielderComponent 선택적 입력 자동 바인딩
+				"EnhancedInput",
 				"Slate",
 				"SlateCore",
 				// ... add private dependencies that you statically link with here ...

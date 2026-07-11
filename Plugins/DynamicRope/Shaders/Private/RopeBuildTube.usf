@@ -17,14 +17,21 @@
 uint  NumRings;
 uint  NumSides;
 float Radius;
-uint  NumSrcNodes;  // B2-full 스무딩: resident PosBuf의 시뮬 노드 수(NumRings의 스무딩 소스).
-uint  Subdiv;       // 세그먼트당 Catmull-Rom 서브분할(1=off). NumRings=(NumSrcNodes-1)*Subdiv+1.
-float SmoothParam;  // Catmull-Rom knot 매개변수 α: 0=uniform(구), 0.5=centripetal(오버슈트↓), 1=chordal.
+// B2-full 스무딩: resident PosBuf의 시뮬 노드 수(NumRings의 스무딩 소스).
+uint  NumSrcNodes;
+// 세그먼트당 Catmull-Rom 서브분할(1=off). NumRings=(NumSrcNodes-1)*Subdiv+1.
+uint  Subdiv;
+// Catmull-Rom knot 매개변수 α: 0=uniform(구), 0.5=centripetal(오버슈트↓), 1=chordal.
+float SmoothParam;
 
-Buffer<float>          InCenterline;   // B1: ring r 위치 = (InCenterline[r*3+0..2]). component-local(CPU 스무딩 완료).
-StructuredBuffer<float4> InCenterline4; // B2: 시뮬 노드 r 위치 = InCenterline4[r].xyz. 월드(GPU에서 스무딩).
-float4x4               WorldToLocal;   // B2: 월드 → component-local.
-RWBuffer<float>        OutPositions;   // 정점 v 위치 = OutPositions[v*3+0..2]. VET_Float3 vertex stream(UAV).
+// B1: ring r 위치 = (InCenterline[r*3+0..2]). component-local(CPU 스무딩 완료).
+Buffer<float>          InCenterline;
+// B2: 시뮬 노드 r 위치 = InCenterline4[r].xyz. 월드(GPU에서 스무딩).
+StructuredBuffer<float4> InCenterline4;
+// B2: 월드 → component-local.
+float4x4               WorldToLocal;
+// 정점 v 위치 = OutPositions[v*3+0..2]. VET_Float3 vertex stream(UAV).
+RWBuffer<float>        OutPositions;
 // B2-full: tangent basis + UV도 GPU 생성 → CPU BuildTube 불필요. tangent는 high-precision SNORM16
 // (Short4N) — 정점 스트림(VET_Short4N)과 manual-vertex-fetch(SNORM16 SRV)가 모두 signed-normalized로
 // 일관(low-precision UBYTE4N은 두 경로 해석이 달라 불가). v당 uint 4개: [0]=TangentX.xy, [1]=TangentX.zw,
@@ -32,11 +39,14 @@ RWBuffer<float>        OutPositions;   // 정점 v 위치 = OutPositions[v*3+0..
 RWBuffer<uint>         OutTangents;
 RWBuffer<float>        OutTexCoords;
 
-groupshared float3 gCenter[ROPE_TUBE_MAX_RINGS]; // component-local
+// component-local
+groupshared float3 gCenter[ROPE_TUBE_MAX_RINGS];
 groupshared float3 gU[ROPE_TUBE_MAX_RINGS];
 groupshared float3 gV[ROPE_TUBE_MAX_RINGS];
-groupshared float3 gTangent[ROPE_TUBE_MAX_RINGS]; // ring 전방 접선(정점 TangentX)
-groupshared float3 gSrc[ROPE_TUBE_MAX_RINGS];     // B2 스무딩: 시뮬 노드(component-local) 소스
+// ring 전방 접선(정점 TangentX)
+groupshared float3 gTangent[ROPE_TUBE_MAX_RINGS];
+// B2 스무딩: 시뮬 노드(component-local) 소스
+groupshared float3 gSrc[ROPE_TUBE_MAX_RINGS];
 
 // 성분 c(-1..1) → SNORM16 int16: round(clamp(c,-1,1)*32767). 두 개를 하나의 uint에 팩(하위=a, 상위=b).
 uint RopePackSnorm16x2(float a, float b)
@@ -52,7 +62,8 @@ float3 RotateBetween(float3 From, float3 To, float3 v)
 	const float d = dot(From, To);
 	if (d > 0.99999f)
 	{
-		return v; // 거의 동일 → 회전 없음
+		// 거의 동일 → 회전 없음
+		return v;
 	}
 	if (d < -0.99999f)
 	{
@@ -126,9 +137,11 @@ void BuildTubeFrameAndWrite(uint tid, uint N)
 		const float3 TX = gTangent[ring];
 		const float3 TZ = Radial;
 		OutTangents[v * 4 + 0] = RopePackSnorm16x2(TX.x, TX.y);
-		OutTangents[v * 4 + 1] = RopePackSnorm16x2(TX.z, 0.0f); // TangentX.w 미사용
+		// TangentX.w 미사용
+		OutTangents[v * 4 + 1] = RopePackSnorm16x2(TX.z, 0.0f);
 		OutTangents[v * 4 + 2] = RopePackSnorm16x2(TZ.x, TZ.y);
-		OutTangents[v * 4 + 3] = RopePackSnorm16x2(TZ.z, 1.0f); // TangentZ.w = +1(basis 부호)
+		// TangentZ.w = +1(basis 부호)
+		OutTangents[v * 4 + 3] = RopePackSnorm16x2(TZ.z, 1.0f);
 
 		// UV: (AlongFrac, AroundFrac). CPU와 동일.
 		OutTexCoords[v * 2 + 0] = (float)ring * InvRingSpan;
@@ -196,7 +209,8 @@ void RopeBuildTubeResidentCS(uint3 GroupThreadId : SV_GroupThreadID)
 		const int Seg = (int)(r / Sub);
 		if (Seg >= LastNode)
 		{
-			gCenter[r] = gSrc[LastNode]; // 마지막 노드에 정확히 놓이는 끝 링
+			// 마지막 노드에 정확히 놓이는 끝 링
+			gCenter[r] = gSrc[LastNode];
 			continue;
 		}
 		const float T = (float)(r % Sub) / (float)Sub;

@@ -13,9 +13,12 @@
 struct FRopeCapsule
 {
 	float4 A;
-	float4 B;     // w = Radius
-	float4 PrevA; // 이전 프레임 끝점(표면 속도 드래그/substep 상대 운동 CCD)
-	float4 PrevB; // w = InvDeltaTime
+	// w = Radius
+	float4 B;
+	// 이전 프레임 끝점(표면 속도 드래그/substep 상대 운동 CCD)
+	float4 PrevA;
+	// w = InvDeltaTime
+	float4 PrevB;
 };
 
 // GPU 충돌(M3)용 SDF 볼륨 헤더. distance는 SDFDistances[DistOffset..]에 행 우선 저장.
@@ -25,8 +28,10 @@ struct FRopeSDFVolume
 	int    ResX;
 	int    ResY;
 	int    ResZ;
-	float4 LocalMin;  // xyz
-	float4 LocalSize; // xyz
+	// xyz
+	float4 LocalMin;
+	// xyz
+	float4 LocalSize;
 };
 
 // GPU 충돌(M3)용 SDF collider 인스턴스. 볼륨 인덱스 + 본→월드 트랜스폼(quat/trans/scale).
@@ -36,22 +41,32 @@ struct FRopeSDFCollider
 	int    Pad0;
 	int    Pad1;
 	int    Pad2;
-	float4 Rotation;        // quat (x,y,z,w) — 현재 프레임
-	float4 Translation;     // xyz
-	float4 Scale;           // xyz
-	float4 PrevRotation;    // quat (x,y,z,w) — 이전 프레임(CCD 상대 운동/표면속도)
-	float4 PrevTranslation; // xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
+	// quat (x,y,z,w) — 현재 프레임
+	float4 Rotation;
+	// xyz
+	float4 Translation;
+	// xyz
+	float4 Scale;
+	// quat (x,y,z,w) — 이전 프레임(CCD 상대 운동/표면속도)
+	float4 PrevRotation;
+	// xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
+	float4 PrevTranslation;
 };
 
 // 정적 월드 지오메트리용 해석적 박스(OBB). 스태틱 바디 심플 콜리전 추출분 — 프레임 모션 없음(표면속도 0).
 // GDF(복셀 필드)가 뭉개던 모서리를 로컬 클램프 질의로 정확히 처리하는 것이 존재 이유. C++ FRopeBoxGPU와 1:1.
 struct FRopeBox
 {
-	float4 Center;      // xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
-	float4 Rot;         // quat (x,y,z,w)
-	float4 HalfExtents; // xyz(스케일 반영 후 반폭)
-	float4 PrevCenter;  // xyz — 이전 프레임 중심(정적이면 Center와 동일)
-	float4 PrevRot;     // quat — 이전 프레임 회전
+	// xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
+	float4 Center;
+	// quat (x,y,z,w)
+	float4 Rot;
+	// xyz(스케일 반영 후 반폭)
+	float4 HalfExtents;
+	// xyz — 이전 프레임 중심(정적이면 Center와 동일)
+	float4 PrevCenter;
+	// quat — 이전 프레임 회전
+	float4 PrevRot;
 };
 
 // 컨벡스(평면 집합). 평면은 ConvexPlanes 평탄 풀 [PlaneOffset, PlaneOffset+PlaneCount)에 바디-로컬로 저장.
@@ -63,21 +78,34 @@ struct FRopeConvex
 	int    PlaneCount;
 	int    Pad0;
 	int    Pad1;
-	float4 LocalBoundsCenter; // xyz
-	float4 LocalBoundsExtent; // xyz, w = InvDeltaTime
-	float4 Rot;               // quat (curr)
-	float4 Trans;             // xyz
-	float4 PrevRot;           // quat (prev)
-	float4 PrevTrans;         // xyz
+	// xyz
+	float4 LocalBoundsCenter;
+	// xyz, w = InvDeltaTime
+	float4 LocalBoundsExtent;
+	// quat (curr)
+	float4 Rot;
+	// xyz
+	float4 Trans;
+	// quat (prev)
+	float4 PrevRot;
+	// xyz
+	float4 PrevTrans;
 };
 
-StructuredBuffer<FRopeCapsule>   Capsules;       // 전 로프 capsule 평탄 배열(per-rope offset/count는 호출자 파라미터)
-StructuredBuffer<float>          SDFDistances;   // 전 볼륨 distance grid 연결(볼륨 dedup, 행 우선)
-StructuredBuffer<FRopeSDFVolume> SDFVolumes;     // 볼륨 헤더
-StructuredBuffer<FRopeSDFCollider> SDFColliders; // 로프별 SDF collider 인스턴스
-StructuredBuffer<FRopeBox>       Boxes;          // 로프별 정적 박스(OBB) — 감지 커널은 미참조(정적은 랩 대상 아님)
-StructuredBuffer<FRopeConvex>    Convexes;       // 로프별 정적 컨벡스 헤더
-StructuredBuffer<float4>         ConvexPlanes;   // 전 컨벡스 평면 평탄 풀((nx,ny,nz,w), 월드·바깥)
+// 전 로프 capsule 평탄 배열(per-rope offset/count는 호출자 파라미터)
+StructuredBuffer<FRopeCapsule>   Capsules;
+// 전 볼륨 distance grid 연결(볼륨 dedup, 행 우선)
+StructuredBuffer<float>          SDFDistances;
+// 볼륨 헤더
+StructuredBuffer<FRopeSDFVolume> SDFVolumes;
+// 로프별 SDF collider 인스턴스
+StructuredBuffer<FRopeSDFCollider> SDFColliders;
+// 로프별 정적 박스(OBB) — 감지 커널은 미참조(정적은 랩 대상 아님)
+StructuredBuffer<FRopeBox>       Boxes;
+// 로프별 정적 컨벡스 헤더
+StructuredBuffer<FRopeConvex>    Convexes;
+// 전 컨벡스 평면 평탄 풀((nx,ny,nz,w), 월드·바깥)
+StructuredBuffer<float4>         ConvexPlanes;
 
 // 단위 quat q로 벡터 v 회전(v' = v + 2w(q×v) + 2(q×(q×v))).
 float3 RopeQuatRotate(float4 q, float3 v)
@@ -202,7 +230,8 @@ bool RopeQueryBoxPoint(FRopeBox Box, float3 P, float NodeR,
 
 	float3 NLocal;
 	float3 SurfLocal;
-	float  SignedDist; // 표면까지 부호 거리(바깥 +, 안쪽 -)
+	// 표면까지 부호 거리(바깥 +, 안쪽 -)
+	float  SignedDist;
 	if (DistOutside > 1e-4f)
 	{
 		SignedDist = DistOutside;
@@ -211,7 +240,8 @@ bool RopeQueryBoxPoint(FRopeBox Box, float3 P, float NodeR,
 	}
 	else
 	{
-		const float3 FaceDist = H - abs(Lp); // 각 축 면까지 거리(전부 >= 0)
+		// 각 축 면까지 거리(전부 >= 0)
+		const float3 FaceDist = H - abs(Lp);
 		SurfLocal = Lp;
 		if (FaceDist.x <= FaceDist.y && FaceDist.x <= FaceDist.z)
 		{
@@ -276,10 +306,14 @@ bool RopeQueryConvexLocal(FRopeConvex Cv, float4 Rot, float3 Trans, float3 P, fl
 		return false;
 	}
 	const float4 BP = ConvexPlanes[Cv.PlaneOffset + Best];
-	OutLocalClosest = Lp - BP.xyz * MaxD;               // 로컬 표면점(재질점)
-	OutNormal = RopeQuatRotate(Rot, BP.xyz);            // 월드 바깥 법선
-	OutPen = NodeR - MaxD;                              // 안쪽이면 MaxD<0이라 더 큼
-	OutClosest = RopeQuatRotate(Rot, OutLocalClosest) + Trans; // 월드 표면점
+	// 로컬 표면점(재질점)
+	OutLocalClosest = Lp - BP.xyz * MaxD;
+	// 월드 바깥 법선
+	OutNormal = RopeQuatRotate(Rot, BP.xyz);
+	// 안쪽이면 MaxD<0이라 더 큼
+	OutPen = NodeR - MaxD;
+	// 월드 표면점
+	OutClosest = RopeQuatRotate(Rot, OutLocalClosest) + Trans;
 	return true;
 }
 

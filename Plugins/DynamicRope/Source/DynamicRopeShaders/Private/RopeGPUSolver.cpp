@@ -9,11 +9,16 @@
 #include "RenderGraphUtils.h"
 #include "RHIGPUReadback.h"
 #include "RenderingThread.h"
-#include "RHICommandList.h"          // FRHICommandListExecutor, CreateShaderResourceView
-#include "RHIStaticStates.h"         // TStaticSamplerState (GDF 샘플러) — Phase 2c
-#include "GlobalDistanceFieldParameters.h" // FGlobalDistanceFieldParameters2 / _Minimal — Phase 2c
-#include "GlobalRenderResources.h"   // GBlackVolumeTexture / GBlackUintVolumeTexture — Phase 2c
-#include "SceneView.h"               // FSceneView / FViewUniformShaderParameters (GDF 패스 View UB) — Phase 2c
+// FRHICommandListExecutor, CreateShaderResourceView
+#include "RHICommandList.h"
+// TStaticSamplerState (GDF 샘플러) — Phase 2c
+#include "RHIStaticStates.h"
+// FGlobalDistanceFieldParameters2 / _Minimal — Phase 2c
+#include "GlobalDistanceFieldParameters.h"
+// GBlackVolumeTexture / GBlackUintVolumeTexture — Phase 2c
+#include "GlobalRenderResources.h"
+// FSceneView / FViewUniformShaderParameters (GDF 패스 View UB) — Phase 2c
+#include "SceneView.h"
 #include "DataDrivenShaderPlatformInfo.h"
 #include "Misc/ScopeLock.h"
 
@@ -50,21 +55,36 @@ struct FRopeGPUParamsGPU
 	float     BendCompliance;
 	float     Damping;
 	int32     bStartPinned;
-	int32     CapsuleOffset;   // M2: 이 로프의 capsule 글로벌 시작 인덱스
-	int32     NumCapsules;     // M2: capsule 수(0이면 충돌 없음)
-	float     CollisionRadius; // M2: 노드 두께
-	float     Friction;        // M2: 접선 감쇠
-	float     SweepStep;       // M2: swept 샘플 간격
-	int32     MaxSweepSamples; // M2: 세그먼트당 샘플 상한
-	int32     SDFColliderOffset; // M3: 이 로프의 SDF collider 글로벌 시작 인덱스
-	int32     NumSDFColliders;   // M3: SDF collider 수(0이면 SDF 충돌 없음)
-	float     TipFrictionScale = 1.0f; // 자유단 마찰 배율(고정점=1, 끝=이 값). Pad0 슬롯 재사용.
-	int32     CollisionPasses = 1;     // substep당 충돌 해소 패스 수(Iters로 상한). Pad1 슬롯 재사용.
-	int32     bHasOverrides = 0;       // G0: 이 로프에 노드별 override(타깃/질량 주입)가 있는가.
-	int32     NumBoxes = 0;            // 정적 박스(OBB) 수(0이면 박스 충돌 없음). Pad2 슬롯 재사용.
-	int32     NumConvexes = 0;         // 정적 컨벡스(평면 집합) 수(0이면 컨벡스 충돌 없음). Pad3 슬롯 재사용.
-	float     BendReleaseRatio = 0.70f; // 각도-허용 벤딩: straightness ≤ 이 값이면 펴는 힘 0. Pad4 슬롯 재사용.
-	float     BendFullRatio    = 0.92f; // straightness ≥ 이 값이면 펴는 힘 100%.
+	// M2: 이 로프의 capsule 글로벌 시작 인덱스
+	int32     CapsuleOffset;
+	// M2: capsule 수(0이면 충돌 없음)
+	int32     NumCapsules;
+	// M2: 노드 두께
+	float     CollisionRadius;
+	// M2: 접선 감쇠
+	float     Friction;
+	// M2: swept 샘플 간격
+	float     SweepStep;
+	// M2: 세그먼트당 샘플 상한
+	int32     MaxSweepSamples;
+	// M3: 이 로프의 SDF collider 글로벌 시작 인덱스
+	int32     SDFColliderOffset;
+	// M3: SDF collider 수(0이면 SDF 충돌 없음)
+	int32     NumSDFColliders;
+	// 자유단 마찰 배율(고정점=1, 끝=이 값). Pad0 슬롯 재사용.
+	float     TipFrictionScale = 1.0f;
+	// substep당 충돌 해소 패스 수(Iters로 상한). Pad1 슬롯 재사용.
+	int32     CollisionPasses = 1;
+	// G0: 이 로프에 노드별 override(타깃/질량 주입)가 있는가.
+	int32     bHasOverrides = 0;
+	// 정적 박스(OBB) 수(0이면 박스 충돌 없음). Pad2 슬롯 재사용.
+	int32     NumBoxes = 0;
+	// 정적 컨벡스(평면 집합) 수(0이면 컨벡스 충돌 없음). Pad3 슬롯 재사용.
+	int32     NumConvexes = 0;
+	// 각도-허용 벤딩: straightness ≤ 이 값이면 펴는 힘 0. Pad4 슬롯 재사용.
+	float     BendReleaseRatio = 0.70f;
+	// straightness ≥ 이 값이면 펴는 힘 100%.
+	float     BendFullRatio    = 0.92f;
 	int32     Pad5 = 0;
 	int32     Pad6 = 0;
 	int32     Pad7 = 0;
@@ -78,20 +98,28 @@ static_assert(sizeof(FRopeGPUParamsGPU) % 16 == 0, "FRopeGPUParamsGPU must be 16
 struct FRopeCapsuleGPU
 {
 	FVector4f A;
-	FVector4f B;     // w = Radius
-	FVector4f PrevA; // 이전 프레임 끝점(표면 속도 드래그/substep 상대 운동). 정적이면 패킹이 A/B로 채운다.
-	FVector4f PrevB; // w = InvDeltaTime
+	// w = Radius
+	FVector4f B;
+	// 이전 프레임 끝점(표면 속도 드래그/substep 상대 운동). 정적이면 패킹이 A/B로 채운다.
+	FVector4f PrevA;
+	// w = InvDeltaTime
+	FVector4f PrevB;
 };
 static_assert(sizeof(FRopeCapsuleGPU) % 16 == 0, "FRopeCapsuleGPU must be 16-byte aligned to match HLSL structured buffer.");
 
 // HLSL FRopeBox와 1:1 미러. 박스(OBB): 월드 center + quat + 반폭 + 이전 프레임 center/rot(동적 표면 속도).
 struct FRopeBoxGPU
 {
-	FVector4f Center;      // xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
-	FVector4f Rot;         // quat (x,y,z,w)
-	FVector4f HalfExtents; // xyz
-	FVector4f PrevCenter;  // xyz — 이전 프레임 중심(정적이면 패킹이 Center로 채움)
-	FVector4f PrevRot;     // quat — 이전 프레임 회전
+	// xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
+	FVector4f Center;
+	// quat (x,y,z,w)
+	FVector4f Rot;
+	// xyz
+	FVector4f HalfExtents;
+	// xyz — 이전 프레임 중심(정적이면 패킹이 Center로 채움)
+	FVector4f PrevCenter;
+	// quat — 이전 프레임 회전
+	FVector4f PrevRot;
 };
 static_assert(sizeof(FRopeBoxGPU) % 16 == 0, "FRopeBoxGPU must be 16-byte aligned to match HLSL structured buffer.");
 
@@ -102,12 +130,18 @@ struct FRopeConvexGPU
 	int32     PlaneCount;
 	int32     Pad0 = 0;
 	int32     Pad1 = 0;
-	FVector4f LocalBoundsCenter; // xyz
-	FVector4f LocalBoundsExtent; // xyz, w = InvDeltaTime
-	FVector4f Rot;               // quat (curr)
-	FVector4f Trans;             // xyz
-	FVector4f PrevRot;           // quat (prev)
-	FVector4f PrevTrans;         // xyz
+	// xyz
+	FVector4f LocalBoundsCenter;
+	// xyz, w = InvDeltaTime
+	FVector4f LocalBoundsExtent;
+	// quat (curr)
+	FVector4f Rot;
+	// xyz
+	FVector4f Trans;
+	// quat (prev)
+	FVector4f PrevRot;
+	// xyz
+	FVector4f PrevTrans;
 };
 static_assert(sizeof(FRopeConvexGPU) % 16 == 0, "FRopeConvexGPU must be 16-byte aligned to match HLSL structured buffer.");
 
@@ -118,8 +152,10 @@ struct FRopeSDFVolumeGPU
 	int32     ResX;
 	int32     ResY;
 	int32     ResZ;
-	FVector4f LocalMin;  // xyz
-	FVector4f LocalSize; // xyz
+	// xyz
+	FVector4f LocalMin;
+	// xyz
+	FVector4f LocalSize;
 };
 static_assert(sizeof(FRopeSDFVolumeGPU) % 16 == 0, "FRopeSDFVolumeGPU must be 16-byte aligned to match HLSL structured buffer.");
 
@@ -130,11 +166,16 @@ struct FRopeSDFColliderGPU
 	int32     Pad0 = 0;
 	int32     Pad1 = 0;
 	int32     Pad2 = 0;
-	FVector4f Rotation;        // quat (x,y,z,w) — 현재 프레임
-	FVector4f Translation;     // xyz
-	FVector4f Scale;           // xyz
-	FVector4f PrevRotation;    // quat (x,y,z,w) — 이전 프레임(CCD 상대 운동/표면속도용)
-	FVector4f PrevTranslation; // xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
+	// quat (x,y,z,w) — 현재 프레임
+	FVector4f Rotation;
+	// xyz
+	FVector4f Translation;
+	// xyz
+	FVector4f Scale;
+	// quat (x,y,z,w) — 이전 프레임(CCD 상대 운동/표면속도용)
+	FVector4f PrevRotation;
+	// xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
+	FVector4f PrevTranslation;
 };
 static_assert(sizeof(FRopeSDFColliderGPU) % 16 == 0, "FRopeSDFColliderGPU must be 16-byte aligned to match HLSL structured buffer.");
 
@@ -158,17 +199,22 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SDFDistances)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFVolume>, SDFVolumes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeBox>, Boxes) // 정적 박스 — solve 전용(감지 CS는 미참조라 스트립).
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeConvex>, Convexes)   // 정적 컨벡스 — solve 전용.
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConvexPlanes)    // 컨벡스 평면 평탄 풀.
+		// 정적 박스 — solve 전용(감지 CS는 미참조라 스트립).
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeBox>, Boxes)
+		// 정적 컨벡스 — solve 전용.
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeConvex>, Convexes)
+		// 컨벡스 평면 평탄 풀.
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConvexPlanes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, OverrideFlags)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, OverridePositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, OverridePrevPositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, OverrideInvMass)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, InvMass) // G0: override가 질량 마스크를 영속시키므로 RW.
+		// G0: override가 질량 마스크를 영속시키므로 RW.
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, InvMass)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, Positions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, PrevPositions)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, OutLambdaDist) // 장력 리드백(마지막 substep 세그먼트 λ).
+		// 장력 리드백(마지막 substep 세그먼트 λ).
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, OutLambdaDist)
 		// --- GDF 통합 경로(FGDFDim on일 때만 셰이더가 참조; off면 미사용 → 언바운드 허용).
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FGlobalDistanceFieldParameters2, GDF)
@@ -201,7 +247,8 @@ struct FRopeGPUContactGPU
 	int32     ColliderType;
 	int32     ColliderIndex;
 	int32     Source;
-	FVector4f WorldPoint; // xyz 접촉점, w Penetration
+	// xyz 접촉점, w Penetration
+	FVector4f WorldPoint;
 	FVector4f Normal;
 	FVector4f SurfaceVel;
 };
@@ -232,7 +279,8 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SDFDistances)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFVolume>, SDFVolumes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeBox>, Boxes) // 랩 가능 박스 감지(정적 박스는 NumDetectBoxes로 자름).
+		// 랩 가능 박스 감지(정적 박스는 NumDetectBoxes로 자름).
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeBox>, Boxes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPrevPositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, DetectGuidedMask)
@@ -269,27 +317,32 @@ struct FRopeResidentRope
 	TRefCountPtr<FRDGPooledBuffer> PrevBuf;
 	TRefCountPtr<FRDGPooledBuffer> InvMassBuf;
 	int32  NumNodes = 0;
-	uint32 Generation = 0xFFFFFFFFu;     // 마지막으로 시드한 generation(다르면 재시드)
+	// 마지막으로 시드한 generation(다르면 재시드)
+	uint32 Generation = 0xFFFFFFFFu;
 	// GDF permutation 선택(뷰 확장 경로에서 solve-substep GDF 충돌)에 쓰는 플래그. 충돌 파라미터(반경/마찰)는
 	// Params 버퍼(FRopeGPUParams)로 솔브 CS에 직접 전달하므로 여기 상주할 필요 없음.
 	bool  bUseWorldGDF = false;
 	FRHIGPUBufferReadback* PosReadback = nullptr;
 	FRHIGPUBufferReadback* PrevReadback = nullptr;
-	bool bReadbackArmed = false;          // 리드백 copy가 enqueue되어 결과 대기 중인가.
+	// 리드백 copy가 enqueue되어 결과 대기 중인가.
+	bool bReadbackArmed = false;
 
 	// 장력(λ) 리드백: 솔브(NumSub>0) 프레임에만 무장(override-only 프레임의 0을 안 내보내 직전 값 유지).
 	// LambdaFixedDt = 무장 당시 substep dt — consume 시 F = max(0,-λ)/h² 변환에 쓴다.
 	FRHIGPUBufferReadback* LambdaReadback = nullptr;
 	bool  bLambdaArmed = false;
 	float LambdaFixedDt = 0.0f;
-	FShaderResourceViewRHIRef PosSRV;     // M5b: PosBuf StructuredBuffer<float4> SRV(렌더용). 재시드 시 무효화.
+	// M5b: PosBuf StructuredBuffer<float4> SRV(렌더용). 재시드 시 무효화.
+	FShaderResourceViewRHIRef PosSRV;
 
 	// SDF 볼륨 그리드/헤더 resident(정적 베이크 데이터 — 볼륨 집합이 바뀔 때만 재업로드). 인스턴스(본
 	// 트랜스폼)는 매 프레임 작은 버퍼로 따로 올린다. 이로써 매 프레임 multi-MB 그리드 재업로드를 없앤다.
 	TRefCountPtr<FRDGPooledBuffer> SDFDistBuf;
 	TRefCountPtr<FRDGPooledBuffer> SDFVolBuf;
-	uint32 SDFSetSig = 0;                       // 볼륨 집합 시그니처(키+복셀수). 다르면 재빌드.
-	TMap<const void*, int32> SDFVolKeyToIndex;  // VolumeKey -> SDFVol 인덱스(매 프레임 인스턴스 VolumeIndex 산정).
+	// 볼륨 집합 시그니처(키+복셀수). 다르면 재빌드.
+	uint32 SDFSetSig = 0;
+	// VolumeKey -> SDFVol 인덱스(매 프레임 인스턴스 VolumeIndex 산정).
+	TMap<const void*, int32> SDFVolKeyToIndex;
 
 	// 접촉 감지(G3): 노드당 1슬롯 출력 버퍼(resident, N 변할 때만 재생성) + 리드백(위치와 같은 ring).
 	TRefCountPtr<FRDGPooledBuffer> ContactBuf;
@@ -302,13 +355,15 @@ struct FRopeResidentSharedResults
 {
 	FCriticalSection Lock;
 	TMap<uint32, FRopeResidentLatest> Map;
-	TMap<uint32, FRopeResidentContacts> Contacts; // G3: 접촉 감지 결과(GetLatestContacts).
+	// G3: 접촉 감지 결과(GetLatestContacts).
+	TMap<uint32, FRopeResidentContacts> Contacts;
 };
 
 // pimpl: 영속 버퍼 맵(RT 전용) + 공유 결과(GT<->RT). RDG/RHI 타입을 헤더에서 숨긴다.
 struct FRopeGPUSolver::FImpl
 {
-	TMap<uint32, FRopeResidentRope>                          RtRopes;  // 렌더 스레드에서만 접근.
+	// 렌더 스레드에서만 접근.
+	TMap<uint32, FRopeResidentRope>                          RtRopes;
 	TSharedRef<FRopeResidentSharedResults, ESPMode::ThreadSafe> Results
 		= MakeShared<FRopeResidentSharedResults, ESPMode::ThreadSafe>();
 
@@ -366,13 +421,15 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 void FRopeGPUSolver::GetLatest(TMap<uint32, FRopeResidentLatest>& Out)
 {
 	FScopeLock SL(&Impl->Results->Lock);
-	Out = Impl->Results->Map; // 작은 데이터 — 매 프레임 복사. (스왑 대신 복사로 호출자가 누적분 유지)
+	// 작은 데이터 — 매 프레임 복사. (스왑 대신 복사로 호출자가 누적분 유지)
+	Out = Impl->Results->Map;
 }
 
 void FRopeGPUSolver::GetLatestContacts(TMap<uint32, FRopeResidentContacts>& Out)
 {
 	FScopeLock SL(&Impl->Results->Lock);
-	Out = Impl->Results->Contacts; // 노드당 최대 1건이라 작다 — 매 프레임 복사.
+	// 노드당 최대 1건이라 작다 — 매 프레임 복사.
+	Out = Impl->Results->Contacts;
 }
 
 bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, TArray<FVector>& OutPrevPositions, uint32& OutGeneration)
@@ -426,7 +483,8 @@ bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, T
 			Generation = Rp->Generation;
 			bOk = bLocked;
 		});
-	FlushRenderingCommands(); // RT 커맨드 완료까지 GT 대기(참조 캡처 안전 + 결과 확정).
+	// RT 커맨드 완료까지 GT 대기(참조 캡처 안전 + 결과 확정).
+	FlushRenderingCommands();
 	OutGeneration = Generation;
 	return bOk;
 }
@@ -507,8 +565,10 @@ struct FRopeStepBuild
 	FRDGBufferRef PosRDG = nullptr;
 	FRDGBufferRef PrevRDG = nullptr;
 	FRDGBufferRef InvMassRDG = nullptr;
-	bool bSeed = false;          // 이번 프레임 재시드(최초/노드수·generation 변화) 여부.
-	bool bHasOverrides = false;  // G0 override 유효(플래그 길이 == 노드 수) 여부.
+	// 이번 프레임 재시드(최초/노드수·generation 변화) 여부.
+	bool bSeed = false;
+	// G0 override 유효(플래그 길이 == 노드 수) 여부.
+	bool bHasOverrides = false;
 
 	FRDGBufferRef CapsulesBuf = nullptr;
 	FRDGBufferRef SDFDistBuf = nullptr;
@@ -517,7 +577,8 @@ struct FRopeStepBuild
 	FRDGBufferRef BoxesBuf = nullptr;
 	FRDGBufferRef ConvexBuf = nullptr;
 	FRDGBufferRef ConvexPlanesBuf = nullptr;
-	int32 NumValidCaps = 0;   // 더미 패딩 *전* 유효 개수(셰이더 카운트용).
+	// 더미 패딩 *전* 유효 개수(셰이더 카운트용).
+	int32 NumValidCaps = 0;
 	int32 NumValidSDFCol = 0;
 	int32 NumValidBoxes = 0;
 	int32 NumValidConvexes = 0;
@@ -572,7 +633,8 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 				for (int32 k = 0; k < N; ++k) { TmpPrev[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
 				R.PrevReadback->Unlock();
 			}
-			R.bReadbackArmed = false; // 소비 완료 — dispatch 블록에서 재무장.
+			// 소비 완료 — dispatch 블록에서 재무장.
+			R.bReadbackArmed = false;
 			bHavePos = true;
 		}
 
@@ -594,7 +656,8 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 				R.LambdaReadback->Unlock();
 				bHaveTension = true;
 			}
-			R.bLambdaArmed = false; // 소비 완료 — dispatch 블록에서 재무장.
+			// 소비 완료 — dispatch 블록에서 재무장.
+			R.bLambdaArmed = false;
 		}
 
 		// 접촉 감지 리드백(G3): 위치와 독립 consume(감지는 Flight만 무장하므로 없을 수 있다).
@@ -617,7 +680,8 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 					C.ColliderType    = Src[slot].ColliderType;
 					C.ColliderIndex   = Src[slot].ColliderIndex;
 					C.Source          = (uint8)Src[slot].Source;
-					C.Penetration     = Src[slot].WorldPoint.W; // w에 팩된 침투.
+					// w에 팩된 침투.
+					C.Penetration     = Src[slot].WorldPoint.W;
 					C.WorldPoint      = FVector(Src[slot].WorldPoint.X, Src[slot].WorldPoint.Y, Src[slot].WorldPoint.Z);
 					C.Normal          = FVector(Src[slot].Normal.X, Src[slot].Normal.Y, Src[slot].Normal.Z);
 					C.SurfaceVelocity = FVector(Src[slot].SurfaceVel.X, Src[slot].SurfaceVel.Y, Src[slot].SurfaceVel.Z);
@@ -626,12 +690,14 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 				R.ContactReadback->Unlock();
 				bHaveContacts = true;
 			}
-			R.bContactArmed = false; // 소비 완료 — dispatch 블록에서 재무장.
+			// 소비 완료 — dispatch 블록에서 재무장.
+			R.bContactArmed = false;
 		}
 
 		if (!bHavePos && !bHaveContacts && !bHaveTension)
 		{
-			continue; // 이번 프레임 회수분 없음.
+			// 이번 프레임 회수분 없음.
+			continue;
 		}
 
 		// 락 구간은 맵 대입만(리드백 Lock은 위에서 끝냄) → GT GetLatest 블로킹 최소화.
@@ -644,7 +710,8 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 				L.Positions     = MoveTemp(TmpPos);
 				L.PrevPositions = MoveTemp(TmpPrev);
 				L.NumNodes      = N;
-				L.Generation    = R.Generation; // generation 승격은 위치와 함께만(재시드 직후 stale 위치 승격 방지).
+				// generation 승격은 위치와 함께만(재시드 직후 stale 위치 승격 방지).
+				L.Generation    = R.Generation;
 			}
 			if (bHaveTension)
 			{
@@ -695,8 +762,10 @@ static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUR
 		R.InvMassBuf = GraphBuilder.ConvertToExternalBuffer(B.InvMassRDG);
 		R.NumNodes   = N;
 		R.Generation = S.Generation;
-		R.bReadbackArmed = false; // 재시드 후 직전 리드백은 stale.
-		R.PosSRV.SafeRelease();   // PosBuf 새로 생성 → 캐시된 SRV 무효(렌더가 다음에 재생성).
+		// 재시드 후 직전 리드백은 stale.
+		R.bReadbackArmed = false;
+		// PosBuf 새로 생성 → 캐시된 SRV 무효(렌더가 다음에 재생성).
+		R.PosSRV.SafeRelease();
 	}
 	else
 	{
@@ -739,7 +808,8 @@ static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep&
 	for (const FRopeGPUBox& Box : S.Boxes)
 	{
 		FRopeBoxGPU G;
-		G.Center      = FVector4f((float)Box.Center.X, (float)Box.Center.Y, (float)Box.Center.Z, Box.InvDeltaTime); // w=InvDt
+		// w=InvDt
+		G.Center      = FVector4f((float)Box.Center.X, (float)Box.Center.Y, (float)Box.Center.Z, Box.InvDeltaTime);
 		G.Rot         = FVector4f((float)Box.Rot.X, (float)Box.Rot.Y, (float)Box.Rot.Z, (float)Box.Rot.W);
 		G.HalfExtents = FVector4f((float)Box.HalfExtents.X, (float)Box.HalfExtents.Y, (float)Box.HalfExtents.Z, 0.0f);
 		// 정적(InvDt 0)이면 prev=현재 — 커널이 prev 유효성 분기 없이 항상 보간 가능(캡슐 패킹과 동일).
@@ -775,7 +845,8 @@ static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 		G.PlaneOffset       = PlaneFlat.Num();
 		G.PlaneCount        = Cv.PlaneCount;
 		G.LocalBoundsCenter = FVector4f((float)Cv.LocalBoundsCenter.X, (float)Cv.LocalBoundsCenter.Y, (float)Cv.LocalBoundsCenter.Z, 0.0f);
-		G.LocalBoundsExtent = FVector4f((float)Cv.LocalBoundsExtent.X, (float)Cv.LocalBoundsExtent.Y, (float)Cv.LocalBoundsExtent.Z, Cv.InvDeltaTime); // w=InvDt
+		// w=InvDt
+		G.LocalBoundsExtent = FVector4f((float)Cv.LocalBoundsExtent.X, (float)Cv.LocalBoundsExtent.Y, (float)Cv.LocalBoundsExtent.Z, Cv.InvDeltaTime);
 		G.Rot               = FVector4f((float)Cv.Rot.X, (float)Cv.Rot.Y, (float)Cv.Rot.Z, (float)Cv.Rot.W);
 		G.Trans             = FVector4f((float)Cv.Trans.X, (float)Cv.Trans.Y, (float)Cv.Trans.Z, 0.0f);
 		G.PrevRot           = FVector4f((float)PR.X, (float)PR.Y, (float)PR.Z, (float)PR.W);
@@ -809,7 +880,8 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 	TArray<FRopeSDFColliderGPU>& SDFCol = *GraphBuilder.AllocObject<TArray<FRopeSDFColliderGPU>>();
 
 	// 1) 고유 볼륨 dedup + 집합 시그니처(키/복셀수만 — distance 데이터는 만지지 않는다).
-	TArray<const FRopeGPUSDFCollider*> UniqueVols; // 인덱스 = (재빌드 시) VolumeIndex
+	// 인덱스 = (재빌드 시) VolumeIndex
+	TArray<const FRopeGPUSDFCollider*> UniqueVols;
 	TMap<const void*, int32>           FreshKeyToIndex;
 	uint32 VolSig = 0;
 	for (const FRopeGPUSDFCollider& Src : S.SDFColliders)
@@ -868,7 +940,8 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 				{
 					Code |= static_cast<uint32>(Vp->Distances[Vi * Bpc + 1]) << 8;
 				}
-				SDFDist.Add(static_cast<float>(Code) * DeqScale - NBIn); // 바깥 +
+				// 바깥 +
+				SDFDist.Add(static_cast<float>(Code) * DeqScale - NBIn);
 			}
 		}
 		B.SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances"),
@@ -878,7 +951,8 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 		R.SDFDistBuf = GraphBuilder.ConvertToExternalBuffer(B.SDFDistBuf);
 		R.SDFVolBuf  = GraphBuilder.ConvertToExternalBuffer(B.SDFVolBuf);
 		R.SDFSetSig  = VolSig;
-		R.SDFVolKeyToIndex = FreshKeyToIndex; // 복사(아래 인스턴스 루프가 KeyToIndex=FreshKeyToIndex를 계속 참조).
+		// 복사(아래 인스턴스 루프가 KeyToIndex=FreshKeyToIndex를 계속 참조).
+		R.SDFVolKeyToIndex = FreshKeyToIndex;
 	}
 
 	// 3) 인스턴스(매 프레임): VolumeIndex(캐시/신규 맵) + 현재 본 트랜스폼.
@@ -887,7 +961,8 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 		const int32* VolIdx = KeyToIndex.Find(Src.VolumeKey);
 		if (!VolIdx)
 		{
-			continue; // 무효 볼륨(위 dedup 조건과 일치).
+			// 무효 볼륨(위 dedup 조건과 일치).
+			continue;
 		}
 		const FQuat   Q  = Src.BoneToWorld.GetRotation();
 		const FVector T  = Src.BoneToWorld.GetTranslation();
@@ -900,7 +975,8 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 		C.Translation     = FVector4f((float)T.X, (float)T.Y, (float)T.Z, 0.0f);
 		C.Scale           = FVector4f((float)Sc.X, (float)Sc.Y, (float)Sc.Z, 0.0f);
 		C.PrevRotation    = FVector4f((float)PQ.X, (float)PQ.Y, (float)PQ.Z, (float)PQ.W);
-		C.PrevTranslation = FVector4f((float)PT.X, (float)PT.Y, (float)PT.Z, Src.InvDeltaTime); // w=InvDt
+		// w=InvDt
+		C.PrevTranslation = FVector4f((float)PT.X, (float)PT.Y, (float)PT.Z, Src.InvDeltaTime);
 		SDFCol.Add(C);
 	}
 
@@ -1048,11 +1124,13 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 		PassParams->bWorldGDFValid        = bGDFSolverValid;
 	}
 	FRopeXPBDSolveCS::FPermutationDomain PermVec;
-	PermVec.Set<FRopeXPBDSolveCS::FNodeBucket>(RopeNodeBucket(N)); // N ≤ MaxNodes(호출부 게이트) → 항상 ≥64.
+	// N ≤ MaxNodes(호출부 게이트) → 항상 ≥64.
+	PermVec.Set<FRopeXPBDSolveCS::FNodeBucket>(RopeNodeBucket(N));
 	PermVec.Set<FRopeXPBDSolveCS::FGDFDim>(bUseGDFPerm);
 	TShaderMapRef<FRopeXPBDSolveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), PermVec);
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeXPBDResident"),
-		ComputeShader, PassParams, FIntVector(1, 1, 1)); // 로프 1개 = 스레드그룹 1개
+		// 로프 1개 = 스레드그룹 1개
+		ComputeShader, PassParams, FIntVector(1, 1, 1));
 
 	return LambdaRDG;
 }
@@ -1097,7 +1175,8 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 		ContactRDG = GraphBuilder.CreateBuffer(
 			FRDGBufferDesc::CreateStructuredDesc(sizeof(FRopeGPUContactGPU), 2 * N), TEXT("Rope.Contacts"));
 		R.ContactBuf = GraphBuilder.ConvertToExternalBuffer(ContactRDG);
-		R.bContactArmed = false; // 재생성 → 직전 접촉 리드백은 stale.
+		// 재생성 → 직전 접촉 리드백은 stale.
+		R.bContactArmed = false;
 	}
 	else
 	{
@@ -1171,7 +1250,8 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	DetectParams->OutContacts          = GraphBuilder.CreateUAV(ContactRDG);
 
 	FRopeContactDetectCS::FPermutationDomain DetectPerm;
-	DetectPerm.Set<FRopeContactDetectCS::FNodeBucket>(RopeNodeBucket(N)); // N ≤ MaxNodes → 항상 ≥64.
+	// N ≤ MaxNodes → 항상 ≥64.
+	DetectPerm.Set<FRopeContactDetectCS::FNodeBucket>(RopeNodeBucket(N));
 	TShaderMapRef<FRopeContactDetectCS> DetectShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), DetectPerm);
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeContactDetect"),
 		DetectShader, DetectParams, FIntVector(1, 1, 1));

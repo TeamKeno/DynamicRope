@@ -11,7 +11,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "RenderGraphFwd.h" // FRDGBuilder / FRDGBufferRef (Phase 2b: resident 버퍼를 씬 그래프에 등록)
+// FRDGBuilder / FRDGBufferRef (Phase 2b: resident 버퍼를 씬 그래프에 등록)
+#include "RenderGraphFwd.h"
 
 /** GPU 충돌(M2)용 해석적 capsule. 월드 공간 세그먼트(A-B) + 반지름. 호출자가 collider에서 추출해 채운다. */
 struct FRopeGPUCapsule
@@ -20,26 +21,34 @@ struct FRopeGPUCapsule
 	FVector B = FVector::ZeroVector;
 	float   Radius = 0.0f;
 
-	// 이전 프레임 끝점 + 1/프레임dt(표면 속도 드래그/substep 상대 운동 CCD용 — SDF의 PrevBoneToWorld 대응).
-	// InvDeltaTime=0(기본)이면 정적 — 패킹이 prev=현재로 폴백하므로 안 채워도 기존 동작과 동일.
+	/**
+	 * 이전 프레임 끝점 + 1/프레임dt(표면 속도 드래그/substep 상대 운동 CCD용 — SDF의 PrevBoneToWorld 대응).
+	 * InvDeltaTime=0(기본)이면 정적 — 패킹이 prev=현재로 폴백하므로 안 채워도 기존 동작과 동일.
+	 */
 	FVector PrevA = FVector::ZeroVector;
 	FVector PrevB = FVector::ZeroVector;
 	float   InvDeltaTime = 0.0f;
 };
 
 /**
- * GPU 충돌용 해석적 박스(OBB). 정적 월드 지오메트리(스태틱 바디 심플 콜리전) 전용 — 프레임 모션
- * 없음(표면속도 0). 모서리/엣지에서 정확한 대각 normal을 주는 해석적 질의가 존재 이유(GDF 복셀
- * 라운딩 관통 대체). 호출자가 IRopeCollider::GetGPUBox로 추출해 채운다.
+ * GPU 충돌용 해석적 박스(OBB). 정적 월드 지오메트리(스태틱 바디 심플 콜리전)가 기본이고, 움직이는
+ * 바디/랩 가능 박스는 아래 프레임 모션(PrevCenter/PrevRot + InvDeltaTime)으로 표면 속도·CCD에 참여한다.
+ * 모서리/엣지에서 정확한 대각 normal을 주는 해석적 질의가 존재 이유(GDF 복셀 라운딩 관통 대체).
+ * 호출자가 IRopeCollider::GetGPUBox(+GetGPUBoxMotion)로 추출해 채운다.
  */
 struct FRopeGPUBox
 {
-	FVector Center = FVector::ZeroVector;      // 월드 공간 박스 중심
-	FQuat   Rot = FQuat::Identity;             // 월드 공간 박스 회전
-	FVector HalfExtents = FVector::ZeroVector; // 로컬 반폭(스케일 반영 후)
+	/** 월드 공간 박스 중심. */
+	FVector Center = FVector::ZeroVector;
+	/** 월드 공간 박스 회전. */
+	FQuat   Rot = FQuat::Identity;
+	/** 로컬 반폭(스케일 반영 후). */
+	FVector HalfExtents = FVector::ZeroVector;
 
-	// 이전 프레임 center/rot + 1/프레임dt(움직이는 바디 표면 속도/substep CCD). InvDeltaTime=0이면 정적 —
-	// 패킹이 prev=현재로 채우므로 안 채워도 기존 동작과 동일(캡슐의 Prev* 대응).
+	/**
+	 * 이전 프레임 center/rot + 1/프레임dt(움직이는 바디 표면 속도/substep CCD). InvDeltaTime=0이면 정적 —
+	 * 패킹이 prev=현재로 채우므로 안 채워도 기존 동작과 동일(캡슐의 Prev* 대응).
+	 */
 	FVector PrevCenter = FVector::ZeroVector;
 	FQuat   PrevRot = FQuat::Identity;
 	float   InvDeltaTime = 0.0f;
@@ -53,15 +62,24 @@ struct FRopeGPUBox
  */
 struct FRopeGPUConvex
 {
-	int32   PlaneOffset = 0;                          // ConvexPlanes 풀 내 시작 인덱스
-	int32   PlaneCount = 0;                            // 평면 수
-	FVector LocalBoundsCenter = FVector::ZeroVector;  // 바디-로컬 AABB 중심
-	FVector LocalBoundsExtent = FVector::ZeroVector;  // 바디-로컬 AABB 반크기
-	FQuat   Rot = FQuat::Identity;                    // 강체 회전(curr)
-	FVector Trans = FVector::ZeroVector;              // 강체 평행이동(curr)
-	FQuat   PrevRot = FQuat::Identity;                // 강체 회전(prev)
-	FVector PrevTrans = FVector::ZeroVector;          // 강체 평행이동(prev)
-	float   InvDeltaTime = 0.0f;                      // 1/프레임dt(0이면 정적)
+	/** ConvexPlanes 풀 내 시작 인덱스. */
+	int32   PlaneOffset = 0;
+	/** 평면 수. */
+	int32   PlaneCount = 0;
+	/** 바디-로컬 AABB 중심. */
+	FVector LocalBoundsCenter = FVector::ZeroVector;
+	/** 바디-로컬 AABB 반크기. */
+	FVector LocalBoundsExtent = FVector::ZeroVector;
+	/** 강체 회전(curr). */
+	FQuat   Rot = FQuat::Identity;
+	/** 강체 평행이동(curr). */
+	FVector Trans = FVector::ZeroVector;
+	/** 강체 회전(prev). */
+	FQuat   PrevRot = FQuat::Identity;
+	/** 강체 평행이동(prev). */
+	FVector PrevTrans = FVector::ZeroVector;
+	/** 1/프레임dt(0이면 정적). */
+	float   InvDeltaTime = 0.0f;
 };
 
 /**
@@ -72,18 +90,24 @@ struct FRopeGPUConvex
  */
 struct FRopeGPUSDFCollider
 {
-	const uint8* Distances = nullptr;    // 코드 바이트 블롭(복셀당 BytesPerCode, 행 우선, 리틀엔디안). 바깥 +.
-	int32        BytesPerCode = 1;       // 복셀당 바이트(1=uint8 max255, 2=uint16 max65535).
-	float        NarrowBandInner = 0.0f; // 안쪽 dequant 밴드(cm). 코드 0 → -NarrowBandInner.
-	float        NarrowBandOuter = 0.0f; // 바깥 dequant 밴드(cm). 코드 max → +NarrowBandOuter.
+	/** 코드 바이트 블롭(복셀당 BytesPerCode, 행 우선, 리틀엔디안). 바깥 +. */
+	const uint8* Distances = nullptr;
+	/** 복셀당 바이트(1=uint8 max255, 2=uint16 max65535). */
+	int32        BytesPerCode = 1;
+	/** 안쪽 dequant 밴드(cm). 코드 0 → -NarrowBandInner. */
+	float        NarrowBandInner = 0.0f;
+	/** 바깥 dequant 밴드(cm). 코드 max → +NarrowBandOuter. */
+	float        NarrowBandOuter = 0.0f;
 	int32        ResX = 0;
 	int32        ResY = 0;
 	int32        ResZ = 0;
 	FVector      LocalMin = FVector::ZeroVector;
 	FVector      LocalSize = FVector::ZeroVector;
 	FTransform   BoneToWorld = FTransform::Identity;
-	FTransform   PrevBoneToWorld = FTransform::Identity; // 이전 프레임 본 트랜스폼(CCD/표면속도 드래그).
-	float        InvDeltaTime = 0.0f;                    // 1/프레임dt(표면 속도용). 0이면 정적.
+	/** 이전 프레임 본 트랜스폼(CCD/표면속도 드래그). */
+	FTransform   PrevBoneToWorld = FTransform::Identity;
+	/** 1/프레임dt(표면 속도용). 0이면 정적. */
+	float        InvDeltaTime = 0.0f;
 	const void*  VolumeKey = nullptr;
 };
 
@@ -96,10 +120,14 @@ struct FRopeGPUSDFCollider
 enum class ERopeGPUOverride : uint8
 {
 	None             = 0,
-	Position         = 1 << 0, // Pos[i]  = OverridePositions[i]
-	Prev             = 1 << 1, // Prev[i] = OverridePrevPositions[i] (Pos와의 차이가 Verlet 속도가 된다 — whip)
-	PrevFromPosition = 1 << 2, // Prev[i] = Pos[i] — 속도 0 고정(wrapping/hold). GPU측 현재 Pos 기준(CPU 미러 아님).
-	InvMass          = 1 << 3, // InvMass[i] = OverrideInvMass[i] — 상주 InvMass 버퍼에 영속(질량 마스크/복원)
+	// Pos[i]  = OverridePositions[i]
+	Position         = 1 << 0,
+	// Prev[i] = OverridePrevPositions[i] (Pos와의 차이가 Verlet 속도가 된다 — whip)
+	Prev             = 1 << 1,
+	// Prev[i] = Pos[i] — 속도 0 고정(wrapping/hold). GPU측 현재 Pos 기준(CPU 미러 아님).
+	PrevFromPosition = 1 << 2,
+	// InvMass[i] = OverrideInvMass[i] — 상주 InvMass 버퍼에 영속(질량 마스크/복원)
+	InvMass          = 1 << 3,
 };
 ENUM_CLASS_FLAGS(ERopeGPUOverride)
 
@@ -115,78 +143,107 @@ struct FRopeGPUResidentStep
 	uint32 Generation = 0;
 	int32  NumNodes = 0;
 
-	// 시드 데이터(매 프레임 제공; RT는 재시드 시에만 GPU 업로드).
+	/** 시드 데이터(매 프레임 제공; RT는 재시드 시에만 GPU 업로드). */
 	TArray<FVector> SeedPositions;
 	TArray<FVector> SeedPrevPositions;
 	TArray<float>   InvMass;
 
-	// sim / config 스칼라.
+	/** sim / config 스칼라. */
 	float   SegmentLength = 0.0f;
 	bool    bStartPinned = false;
 	FVector StartPinPrev = FVector::ZeroVector;
 	FVector StartPinTarget = FVector::ZeroVector;
 	float   StretchCompliance = 0.0f;
 	float   BendCompliance = 0.0f;
-	float   BendReleaseRatio = 0.70f; // 각도-허용 벤딩: straightness ≤ 이 값이면 펴는 힘 0(코너/랩 경계 각짐 완화).
-	float   BendFullRatio = 0.92f;    // straightness ≥ 이 값이면 펴는 힘 100%(완만한 굽힘은 기존처럼 편다).
+	/** 각도-허용 벤딩: straightness ≤ 이 값이면 펴는 힘 0(코너/랩 경계 각짐 완화). */
+	float   BendReleaseRatio = 0.70f;
+	/** straightness ≥ 이 값이면 펴는 힘 100%(완만한 굽힘은 기존처럼 편다). */
+	float   BendFullRatio = 0.92f;
 	float   Damping = 0.0f;
 	int32   Iterations = 1;
-	int32   CollisionPasses = 1; // substep당 충돌 해소 패스 수(Iterations로 상한). 1=substep 끝 1회(기존).
+	/** substep당 충돌 해소 패스 수(Iterations로 상한). 1=substep 끝 1회(기존). */
+	int32   CollisionPasses = 1;
 	FVector Gravity = FVector::ZeroVector;
 
-	// 충돌(M2/M3). 이 로프에 적용할 collider 목록(값 복사라 step 수명 동안 유효).
-	// false면 solve 커널은 collider/GDF를 무시하지만 detect 커널은 아래 목록을 그대로 사용할 수 있다.
+	/**
+	 * 충돌(M2/M3). 이 로프에 적용할 collider 목록(값 복사라 step 수명 동안 유효).
+	 * false면 solve 커널은 collider/GDF를 무시하지만 detect 커널은 아래 목록을 그대로 사용할 수 있다.
+	 */
 	bool  bSolveCollisions = true;
-	float CollisionRadius = 0.0f; // 로프 노드 두께(= FRopeSolverConfig::CollisionRadius).
-	float Friction = 0.0f;        // 접선 감쇠 [0..1](Coulomb μ).
-	float TipFrictionScale = 1.0f; // 자유단 마찰 배율(고정점=1, 끝=이 값). 끝 노드를 잘 놔주게 함.
-	float SweepStep = 2.0f;       // swept 샘플 간격(cm).
-	int32 MaxSweepSamples = 16;   // 세그먼트당 샘플 상한.
-	bool  bUseWorldGDF = false;   // Phase 2c: 엔진 GDF로 정적 월드 밀어내기(씬 그래프 dispatch에서만 유효).
+	/** 로프 노드 두께(= FRopeSolverConfig::CollisionRadius). */
+	float CollisionRadius = 0.0f;
+	/** 접선 감쇠 [0..1](Coulomb μ). */
+	float Friction = 0.0f;
+	/** 자유단 마찰 배율(고정점=1, 끝=이 값). 끝 노드를 잘 놔주게 함. */
+	float TipFrictionScale = 1.0f;
+	/** swept 샘플 간격(cm). */
+	float SweepStep = 2.0f;
+	/** 세그먼트당 샘플 상한. */
+	int32 MaxSweepSamples = 16;
+	/** Phase 2c: 엔진 GDF로 정적 월드 밀어내기(씬 그래프 dispatch에서만 유효). */
+	bool  bUseWorldGDF = false;
 	TArray<FRopeGPUCapsule>     Capsules;
 	TArray<FRopeGPUSDFCollider> SDFColliders;
-	TArray<FRopeGPUBox>         Boxes; // 정적 박스(OBB — 스태틱 바디 심플 콜리전). solve 전용(감지 미참여).
-	TArray<FRopeGPUConvex>      Convexes;     // 정적 컨벡스(평면 집합). solve 전용.
-	TArray<FVector4>            ConvexPlanes; // 전 컨벡스 평면 평탄 풀((nx,ny,nz,w), 월드·바깥).
+	/** 정적 박스(OBB — 스태틱 바디 심플 콜리전). solve 전용(감지 미참여). */
+	TArray<FRopeGPUBox>         Boxes;
+	/** 정적 컨벡스(평면 집합). solve 전용. */
+	TArray<FRopeGPUConvex>      Convexes;
+	/** 전 컨벡스 평면 평탄 풀((nx,ny,nz,w), 월드·바깥). */
+	TArray<FVector4>            ConvexPlanes;
 
-	// 접촉 감지(detect) 커널이 볼 capsule 수. Capsules 앞쪽 [0, NumDetectCapsules)만 감지에 참여한다 —
-	// 호출자(PackStepColliders)가 비-정적 캡슐을 앞에, 정적(월드) 캡슐을 뒤에 2-pass로 패킹해 채운다.
-	// 감지는 노드당 최심 접촉 1개만 남기므로, 벽(정적) 접촉이 본(스켈레탈) 접촉을 가려 랩 캡처가
-	// 조용히 실패하는 것을 막는다. -1(기본) = 전부 참여(기존 동작/테스트 호환).
+	/**
+	 * 접촉 감지(detect) 커널이 볼 capsule 수. Capsules 앞쪽 [0, NumDetectCapsules)만 감지에 참여한다 —
+	 * 호출자(PackStepColliders)가 비-정적 캡슐을 앞에, 정적(월드) 캡슐을 뒤에 2-pass로 패킹해 채운다.
+	 * 감지는 노드당 최심 접촉 1개만 남기므로, 벽(정적) 접촉이 본(스켈레탈) 접촉을 가려 랩 캡처가
+	 * 조용히 실패하는 것을 막는다. -1(기본) = 전부 참여(기존 동작/테스트 호환).
+	 */
 	int32 NumDetectCapsules = -1;
 
-	// 감지 커널이 볼 랩 가능 박스(OBB) 수. Boxes 앞쪽 [0, NumDetectBoxes)만 감지에 참여한다(캡슐과 동일
-	// 2-pass 패킹: 랩 가능 박스 앞, 정적 박스 뒤). 0(기본) = 감지 미참여(정적 박스 전용 — 기존 동작).
+	/**
+	 * 감지 커널이 볼 랩 가능 박스(OBB) 수. Boxes 앞쪽 [0, NumDetectBoxes)만 감지에 참여한다(캡슐과 동일
+	 * 2-pass 패킹: 랩 가능 박스 앞, 정적 박스 뒤). 0(기본) = 감지 미참여(정적 박스 전용 — 기존 동작).
+	 */
 	int32 NumDetectBoxes = 0;
 
-	// 이번 프레임 substep 스케줄(호출자가 RopeSolverSubsteps로 계산해 전달). NumSub<=0이면 적분 없이 유지.
+	/** 이번 프레임 substep 스케줄(호출자가 RopeSolverSubsteps로 계산해 전달). NumSub<=0이면 적분 없이 유지. */
 	int32 NumSub = 0;
 	float FixedDt = 0.0f;
 
-	// --- 접촉 감지(G3): Flight에서 솔브 후 PosBuf/PrevBuf를 스윕해 노드당 최심 접촉을 감지한다.
-	// bDetectContacts면 솔브 dispatch 뒤에 감지 커널을 돌리고 결과를 리드백한다(GetLatestContacts).
-	// ContactRadius는 감지 질의 반경(= FRopeWrapConfig::ContactRadius; 솔버의 CollisionRadius와 별개).
+	/**
+	 * --- 접촉 감지(G3): Flight에서 솔브 후 PosBuf/PrevBuf를 스윕해 노드당 최심 접촉을 감지한다.
+	 * bDetectContacts면 솔브 dispatch 뒤에 감지 커널을 돌리고 결과를 리드백한다(GetLatestContacts).
+	 * ContactRadius는 감지 질의 반경(= FRopeWrapConfig::ContactRadius; 솔버의 CollisionRadius와 별개).
+	 */
 	bool  bDetectContacts = false;
 	float ContactRadius = 0.0f;
 
-	// --- 예측 접촉(G3b): 노드의 다음 위치를 외삽한 경로도 스윕해 곧 닿을 접촉을 감지한다. 노드당 2슬롯
-	// (actual + predictive) 출력. PredictionFrames<=0이면 예측 없음. whip 활성 프레임엔 가이드 노드의
-	// 현재/직전/다음 타깃으로 외삽하고(PredictiveGuided), 그 외엔 프레임 변위로 외삽한다(PredictiveFree).
-	// WhipGuided*는 whip 활성 시에만 NumNodes 길이로 채운다(아니면 비움 → free 예측만).
+	/**
+	 * --- 예측 접촉(G3b): 노드의 다음 위치를 외삽한 경로도 스윕해 곧 닿을 접촉을 감지한다. 노드당 2슬롯
+	 * (actual + predictive) 출력. PredictionFrames<=0이면 예측 없음. whip 활성 프레임엔 가이드 노드의
+	 * 현재/직전/다음 타깃으로 외삽하고(PredictiveGuided), 그 외엔 프레임 변위로 외삽한다(PredictiveFree).
+	 * WhipGuided*는 whip 활성 시에만 NumNodes 길이로 채운다(아니면 비움 → free 예측만).
+	 */
 	float           PredictionFrames = 0.0f;
-	TArray<uint8>   WhipGuidedMask;    // 노드별 가이드 여부(1=guided)
+	/** 노드별 가이드 여부(1=guided). */
+	TArray<uint8>   WhipGuidedMask;
 	TArray<FVector> WhipCurrentTargets;
 	TArray<FVector> WhipPrevTargets;
 	TArray<FVector> WhipNextTargets;
 
-	// --- Override(G0): 로직 페이즈(GT)가 계산한 노드별 타깃을 상주 버퍼에 직접 기록(재시드 대체).
-	// 비어 있으면 오버라이드 없음. 채울 때 OverrideFlags는 정확히 NumNodes 길이(불일치 시 전체 무시+경고),
-	// 값 배열은 해당 비트를 쓰는 노드가 있을 때만 NumNodes 길이로 제공하면 된다.
-	// NumSub=0이어도 오버라이드가 있으면 dispatch되어 적분 없이 기록만 한다(예: Wrapping/Releasing 프레임).
-	TArray<uint8>   OverrideFlags;         // 노드별 ERopeGPUOverride 비트 OR
-	TArray<FVector> OverridePositions;     // Position 비트 노드만 유효
-	TArray<FVector> OverridePrevPositions; // Prev 비트 노드만 유효
-	TArray<float>   OverrideInvMass;       // InvMass 비트 노드만 유효
+	/**
+	 * --- Override(G0): 로직 페이즈(GT)가 계산한 노드별 타깃을 상주 버퍼에 직접 기록(재시드 대체).
+	 * 비어 있으면 오버라이드 없음. 채울 때 OverrideFlags는 정확히 NumNodes 길이(불일치 시 전체 무시+경고),
+	 * 값 배열은 해당 비트를 쓰는 노드가 있을 때만 NumNodes 길이로 제공하면 된다.
+	 * NumSub=0이어도 오버라이드가 있으면 dispatch되어 적분 없이 기록만 한다(예: Wrapping/Releasing 프레임).
+	 * 노드별 ERopeGPUOverride 비트 OR
+	 */
+	TArray<uint8>   OverrideFlags;
+	/** Position 비트 노드만 유효. */
+	TArray<FVector> OverridePositions;
+	/** Prev 비트 노드만 유효. */
+	TArray<FVector> OverridePrevPositions;
+	/** InvMass 비트 노드만 유효. */
+	TArray<float>   OverrideInvMass;
 
 	bool HasOverrides() const { return OverrideFlags.Num() > 0; }
 };
@@ -196,10 +253,13 @@ struct FRopeResidentLatest
 {
 	TArray<FVector> Positions;
 	TArray<FVector> PrevPositions;
-	// 세그먼트별 장력(NumNodes-1개, F = max(0,-λ)/h² — FRopeSimState::SegmentTension과 동일 단위/의미).
-	// 솔브(NumSub>0) 프레임에만 무장·회수되므로 위치보다 드물게 갱신될 수 있다(비어 있으면 미회수).
+	/**
+	 * 세그먼트별 장력(NumNodes-1개, F = max(0,-λ)/h² — FRopeSimState::SegmentTension과 동일 단위/의미).
+	 * 솔브(NumSub>0) 프레임에만 무장·회수되므로 위치보다 드물게 갱신될 수 있다(비어 있으면 미회수).
+	 */
 	TArray<float>   SegmentTension;
-	uint32 Generation = 0; // 이 위치가 대응하는 시드 generation(재시드 경계의 stale 적용 방지).
+	/** 이 위치가 대응하는 시드 generation(재시드 경계의 stale 적용 방지). */
+	uint32 Generation = 0;
 	int32  NumNodes = 0;
 };
 
@@ -211,20 +271,28 @@ struct FRopeResidentLatest
 struct FRopeGPUContactResult
 {
 	int32   NodeIndex = INDEX_NONE;
-	int32   ColliderType = 0;   // 0=capsule, 1=SDF, 2=box (step의 Capsules/SDFColliders/Boxes 배열 구분)
-	int32   ColliderIndex = 0;  // 해당 배열 내 인덱스(귀속 복원 키)
-	uint8   Source = 1;         // ERopeContactCandidateSource: 1=Actual, 2=PredictiveFree, 4=PredictiveGuided
+	/** 0=capsule, 1=SDF, 2=box (step의 Capsules/SDFColliders/Boxes 배열 구분). */
+	int32   ColliderType = 0;
+	/** 해당 배열 내 인덱스(귀속 복원 키). */
+	int32   ColliderIndex = 0;
+	/** ERopeContactCandidateSource: 1=Actual, 2=PredictiveFree, 4=PredictiveGuided. */
+	uint8   Source = 1;
 	float   Penetration = 0.0f;
-	FVector WorldPoint = FVector::ZeroVector;      // 표면 접촉점(FRopeContact.SurfacePoint 대응)
-	FVector Normal = FVector::UpVector;            // 바깥(collider→node) 단위 법선
-	FVector SurfaceVelocity = FVector::ZeroVector; // 접촉점 표면 속도(cm/s; 정적이면 0)
+	/** 표면 접촉점(FRopeContact.SurfacePoint 대응). */
+	FVector WorldPoint = FVector::ZeroVector;
+	/** 바깥(collider→node) 단위 법선. */
+	FVector Normal = FVector::UpVector;
+	/** 접촉점 표면 속도(cm/s; 정적이면 0). */
+	FVector SurfaceVelocity = FVector::ZeroVector;
 };
 
 /** GT가 회수하는 상주 로프의 최신(약간 지연) 접촉 감지 결과. GetLatestContacts로 복사. */
 struct FRopeResidentContacts
 {
-	TArray<FRopeGPUContactResult> Contacts; // bHit 슬롯만(GPU가 채운 유효 접촉).
-	uint32 Generation = 0;                  // 대응 시드 generation(stale 적용 방지).
+	/** bHit 슬롯만(GPU가 채운 유효 접촉). */
+	TArray<FRopeGPUContactResult> Contacts;
+	/** 대응 시드 generation(stale 적용 방지). */
+	uint32 Generation = 0;
 };
 
 /**
@@ -299,8 +367,10 @@ public:
 	void ReleaseRope(uint32 RopeId);
 
 private:
-	// 상주 상태(렌더 스레드 전용 영속 버퍼 맵 + GT<->RT 공유 결과)를 pimpl로 숨긴다 — 헤더에 RDG/RHI 타입을
-	// 노출하지 않고, 불완전 타입을 멤버로 by-value 보관할 때의 sizeof 요구도 피한다(포인터 멤버).
+	/**
+	 * 상주 상태(렌더 스레드 전용 영속 버퍼 맵 + GT<->RT 공유 결과)를 pimpl로 숨긴다 — 헤더에 RDG/RHI 타입을
+	 * 노출하지 않고, 불완전 타입을 멤버로 by-value 보관할 때의 sizeof 요구도 피한다(포인터 멤버).
+	 */
 	struct FImpl;
 	TUniquePtr<FImpl> Impl;
 

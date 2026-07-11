@@ -6,7 +6,8 @@
 #include "GlobalShader.h"
 #include "ShaderParameterStruct.h"
 #include "RHICommandList.h"
-#include "RenderGraphUtils.h" // FComputeShaderUtils
+// FComputeShaderUtils
+#include "RenderGraphUtils.h"
 #include "DataDrivenShaderPlatformInfo.h"
 
 // 링 버킷(스레드그룹 크기 == groupshared frame 배열 크기). 로프 1개 = 스레드그룹 1개라, 예전엔 모든 로프가
@@ -15,7 +16,8 @@
 // (Subdiv=3 기준 노드 ~170까지; 그 이상만 CPU 폴백). numthreads/groupshared는 .usf에서 ROPE_TUBE_MAX_RINGS로
 // 스케일 — 퍼뮤테이션이 그 define을 버킷 값으로 설정한다. groupshared 예산: 링당 5×float3=60B → 512링 = 30KB(<32KB).
 static constexpr int32 GRopeTubeRingBuckets[] = { 64, 128, 256, 512 };
-static constexpr int32 ROPE_TUBE_MAX_RINGS_CAP = 512; // 최상단 버킷 = GPU 튜브 링 상한(초과 시 CPU 폴백).
+// 최상단 버킷 = GPU 튜브 링 상한(초과 시 CPU 폴백).
+static constexpr int32 ROPE_TUBE_MAX_RINGS_CAP = 512;
 
 int32 RopeGPU::TubeRingBucket(int32 NumRings)
 {
@@ -23,7 +25,8 @@ int32 RopeGPU::TubeRingBucket(int32 NumRings)
 	{
 		if (NumRings <= Bucket) { return Bucket; }
 	}
-	return 0; // 상한 초과 → 호출자가 CPU 튜브로 폴백.
+	// 상한 초과 → 호출자가 CPU 튜브로 폴백.
+	return 0;
 }
 
 int32 RopeGPU::MaxTubeRings()
@@ -104,7 +107,8 @@ void RopeGPU::BuildTube_RenderThread(
 	if (!InCenterlineSRV || !OutPositionsUAV || !OutTangentsUAV || !OutTexCoordsUAV
 		|| NumRings < 2 || Bucket == 0 || NumSides < 3)
 	{
-		return; // Bucket==0 = NumRings가 상한 초과 → 호출자가 CPU 폴백.
+		// Bucket==0 = NumRings가 상한 초과 → 호출자가 CPU 폴백.
+		return;
 	}
 
 	FRopeBuildTubeCS::FPermutationDomain Perm;
@@ -139,7 +143,8 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 	if (!InResidentPositionsSRV || !OutPositionsUAV || !OutTangentsUAV || !OutTexCoordsUAV
 		|| NumRings < 2 || Bucket == 0 || NumSides < 3 || NumSrcNodes < 2)
 	{
-		return; // Bucket==0 = NumRings가 상한 초과 → 호출자가 CPU 폴백.
+		// Bucket==0 = NumRings가 상한 초과 → 호출자가 CPU 폴백.
+		return;
 	}
 
 	FRopeBuildTubeResidentCS::FPermutationDomain Perm;

@@ -21,16 +21,25 @@ public class DynamicRopeEditor : ModuleRules
 			"SlateCore",
 			"UnrealEd",
 			"DynamicRope",
-			"ToolMenus",            // Tools 메뉴 엔트리
-			"WorkspaceMenuStructure", // 도크탭 Window 메뉴 카테고리
-			"Projects",             // 플러그인 리소스/스타일 경로
+			// Tools 메뉴 엔트리
+			"ToolMenus",
+			// 도크탭 Window 메뉴 카테고리
+			"WorkspaceMenuStructure",
+			// 플러그인 리소스/스타일 경로
+			"Projects",
 			"InputCore",
-			"PropertyEditor",       // 오써링 패널 디테일 뷰(향후)
-			"AssetTools",           // 에셋 등록(팩토리)
-			"AssetDefinition",      // UAssetDefinition (Content Browser 카테고리/색)
-			"AdvancedPreviewScene", // 오써링 패널 3D 프리뷰 뷰포트(조명/바닥 프리뷰 씬)
-			"GeometryCore",         // 베이크 부호 판정용 fast winding number(FDynamicMesh3 + AABB/winding 트리)
-			"MessageLog",           // 베이크 결과 보고(coarsening된 본 목록)용 메시지 로그 리스닝
+			// 오써링 패널 디테일 뷰(향후)
+			"PropertyEditor",
+			// 에셋 등록(팩토리)
+			"AssetTools",
+			// UAssetDefinition (Content Browser 카테고리/색)
+			"AssetDefinition",
+			// 오써링 패널 3D 프리뷰 뷰포트(조명/바닥 프리뷰 씬)
+			"AdvancedPreviewScene",
+			// 베이크 부호 판정용 fast winding number(FDynamicMesh3 + AABB/winding 트리)
+			"GeometryCore",
+			// 베이크 결과 보고(coarsening된 본 목록)용 메시지 로그 리스닝
+			"MessageLog",
 		});
 	}
 }
