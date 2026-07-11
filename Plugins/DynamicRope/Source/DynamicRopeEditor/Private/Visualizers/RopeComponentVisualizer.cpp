@@ -44,7 +44,8 @@ void FRopeComponentVisualizer::DrawVisualization(const UActorComponent* Componen
 	{
 		const float ArrowLen = FMath::Clamp(RopeLen * 0.5f, 30.0f, 250.0f);
 		const FVector Tip = Anchor + Aim * ArrowLen;
-		const FLinearColor AimColor(1.0f, 0.85f, 0.1f); // 노랑
+		// 노랑
+		const FLinearColor AimColor(1.0f, 0.85f, 0.1f);
 		PDI->DrawLine(Anchor, Tip, AimColor, SDPG_Foreground, 2.0f);
 		// 화살촉: tip에서 뒤로 벌어진 두 선.
 		const float Head = ArrowLen * 0.18f;
@@ -54,7 +55,8 @@ void FRopeComponentVisualizer::DrawVisualization(const UActorComponent* Componen
 
 	// --- 도달 범위: 앵커 기준 RopeLength 반경 와이어 구(3개 great circle). 로프가 닿는 최대 거리.
 	{
-		const FLinearColor ReachColor(0.1f, 0.8f, 1.0f, 1.0f); // 시안
+		// 시안
+		const FLinearColor ReachColor(0.1f, 0.8f, 1.0f, 1.0f);
 		const int32 Sides = 48;
 		DrawCircle(PDI, Anchor, FVector::XAxisVector, FVector::YAxisVector, ReachColor, RopeLen, Sides, SDPG_World, 0.5f);
 		DrawCircle(PDI, Anchor, FVector::YAxisVector, FVector::ZAxisVector, ReachColor, RopeLen, Sides, SDPG_World, 0.5f);
@@ -65,13 +67,15 @@ void FRopeComponentVisualizer::DrawVisualization(const UActorComponent* Componen
 	{
 		const float ArcHeight = Rope->WhipConfig.ArcHeight;
 		const float SideOff   = Rope->WhipConfig.SideOffset;
-		const FLinearColor ArcColor(1.0f, 0.5f, 0.0f); // 주황
+		// 주황
+		const FLinearColor ArcColor(1.0f, 0.5f, 0.0f);
 		const int32 Seg = 24;
 		FVector Prev = Anchor;
 		for (int32 i = 1; i <= Seg; ++i)
 		{
 			const float S = static_cast<float>(i) / static_cast<float>(Seg);
-			const float ArcF = FMath::Sin(S * PI); // 중간에서 최대로 솟음
+			// 중간에서 최대로 솟음
+			const float ArcF = FMath::Sin(S * PI);
 			const FVector P = Anchor + Aim * (S * RopeLen) + Up * (ArcF * ArcHeight) + Side * (ArcF * SideOff);
 			PDI->DrawLine(Prev, P, ArcColor, SDPG_World, 1.0f);
 			Prev = P;

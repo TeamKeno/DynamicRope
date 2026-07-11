@@ -3,8 +3,10 @@
 #include "SDF/RopeSDFDraw.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "Collision/SDF/RopeSDFSampler.h"
-#include "Collision/SDF/RopeSDFProvider.h" // ERopeSDFSliceAxis
-#include "SceneManagement.h"               // FPrimitiveDrawInterface, SDPG_*
+// ERopeSDFSliceAxis
+#include "Collision/SDF/RopeSDFProvider.h"
+// FPrimitiveDrawInterface, SDPG_*
+#include "SceneManagement.h"
 
 namespace
 {
@@ -136,7 +138,8 @@ void RopeSDFDraw::DrawSlice(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolu
 			{
 			case ERopeSDFSliceAxis::X: Tx = Pos01; Ty = U; Tz = W; break;
 			case ERopeSDFSliceAxis::Y: Tx = U; Ty = Pos01; Tz = W; break;
-			default:                   Tx = U; Ty = W; Tz = Pos01; break; // Z
+			// Z
+			default:                   Tx = U; Ty = W; Tz = Pos01; break;
 			}
 			const FVector L = LocalFromNorm(V.LocalBounds, Tx, Ty, Tz);
 			const float D = RopeSDFSampler::SampleTrilinear(V, L);

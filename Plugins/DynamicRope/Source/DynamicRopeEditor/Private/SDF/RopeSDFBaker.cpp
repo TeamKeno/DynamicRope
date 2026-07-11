@@ -102,7 +102,8 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 	if (!Model || Model->LODModels.Num() == 0)
 	{
 		UE_LOG(LogRopeSDFBake, Warning, TEXT("BakeMesh aborted: %s has no CPU geometry (cooked/stripped)."), *Mesh->GetName());
-		return ERopeSDFBakeResult::NoGeometry; // CPU 지오메트리 없음(쿡/스트립)
+		// CPU 지오메트리 없음(쿡/스트립)
+		return ERopeSDFBakeResult::NoGeometry;
 	}
 
 	UE_LOG(LogRopeSDFBake, Log, TEXT("BakeMesh start: %s (voxel=%.2fcm, maxRes=%d, narrowBand=%.1fcm)"),
@@ -248,7 +249,8 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		}
 		if (TriA.Num() == 0)
 		{
-			continue; // 이 본에 귀속된 스킨 없음
+			// 이 본에 귀속된 스킨 없음
+			continue;
 		}
 
 		// --- (3b) 가는 본 drop. AABB(확장 전 raw 살 크기) 세 변 중 가장 긴 변(=본 축)을 빼고 남은
@@ -257,10 +259,13 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		// 떨구지 않게 보수적으로 판정. (drop은 absorb와 달리 삼각형을 부모로 넘기지 않고 그냥 제외.)
 		if (S.MinBoneGirth > 0.0f)
 		{
-			const FVector E = Local.GetSize(); // raw 삼각형 AABB(BoundsPadding/NarrowBand 확장 전)
+			// raw 삼각형 AABB(BoundsPadding/NarrowBand 확장 전)
+			const FVector E = Local.GetSize();
 			const double Girth = (E.X + E.Y + E.Z)
-				- FMath::Max3(E.X, E.Y, E.Z)   // 최장변(본 축) 제거
-				- FMath::Min3(E.X, E.Y, E.Z);  // 최단변 제거 → 중간값만 남음
+				// 최장변(본 축) 제거
+				- FMath::Max3(E.X, E.Y, E.Z)
+				// 최단변 제거 → 중간값만 남음
+				- FMath::Min3(E.X, E.Y, E.Z);
 			if (Girth < S.MinBoneGirth)
 			{
 				if (OutStats)
@@ -287,7 +292,8 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		};
 		FIntVector Res = ResFor(Vox);
 		const int32 MaxAxis = FMath::Max3(Res.X, Res.Y, Res.Z);
-		bool bCoarsened = false; // 상한 때문에 요청 VoxelSize를 키웠는가(보고용)
+		// 상한 때문에 요청 VoxelSize를 키웠는가(보고용)
+		bool bCoarsened = false;
 		if (MaxAxis > S.MaxResolution)
 		{
 			Vox *= static_cast<float>(MaxAxis) / static_cast<float>(S.MaxResolution);
@@ -313,8 +319,10 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		TArray<float> RawDist;
 		RawDist.SetNumUninitialized(Count);
 
-		const int32 NumTris = TriA.Num();                  // 거리(unsigned)는 이 본 삼각형으로
-		const FTransform& BoneToComp = CompSpace[BoneIdx]; // 본 로컬 샘플점 → 컴포넌트 공간(분류기와 동일 프레임)
+		// 거리(unsigned)는 이 본 삼각형으로
+		const int32 NumTris = TriA.Num();
+		// 본 로컬 샘플점 → 컴포넌트 공간(분류기와 동일 프레임)
+		const FTransform& BoneToComp = CompSpace[BoneIdx];
 
 		// 평탄 인덱스(Flat = x + y*X + z*X*Y) 하나의 부호 있는 거리를 계산해 기록한다.
 		auto ComputeSample = [&](int32 Flat)
@@ -322,7 +330,8 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 			const int32 x = Flat % Res.X;
 			const int32 y = (Flat / Res.X) % Res.Y;
 			const int32 z = Flat / (Res.X * Res.Y);
-			const FVector P = Min + FVector(x, y, z) * Vox; // 본 로컬
+			// 본 로컬
+			const FVector P = Min + FVector(x, y, z) * Vox;
 
 			// 거리(unsigned): 이 본 삼각형까지의 최소 점-삼각형 거리 → 본 귀속 유지.
 			float Best = BIG_NUMBER;
@@ -335,7 +344,8 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 			// 부호(안/밖): 전체 메시 fast-winding으로 가른다(본별 열린 패치는 짧고 넓은 토막의 내부를
 			// 바깥 오판하므로 전역 메시로 봐야 강건). 샘플점을 컴포넌트 공간으로 올려 질의한다.
 			const FVector Pc = BoneToComp.TransformPosition(P);
-			RawDist[Flat] = WindingClassifier.IsInside(Pc) ? -Best : Best; // 안쪽 음수 / 바깥 양수
+			// 안쪽 음수 / 바깥 양수
+			RawDist[Flat] = WindingClassifier.IsInside(Pc) ? -Best : Best;
 		};
 
 		// 게임 스레드가 취소 버튼을 처리할 수 있도록 무거운 본을 여러 배치로 쪼개고, 배치 사이에서 취소를
@@ -363,16 +373,21 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		// 안쪽 밴드(NB_in)=이 본 내부 최대 깊이(가장 음수인 거리의 크기)로 자동 → 몸통 내부 전체가 밴드
 		// 안에 들어와 깊이 박힌 노드도 최근접 표면 방향으로 회복한다. 안쪽 복셀은 이미 그리드에 존재하므로
 		// 밴드를 넓혀도 복셀 수 불변(0 비용); 대가는 양자화 스텝 = (NB_in+NB_out)/255 가 커지는 것뿐이다.
-		float MinD = 0.0f; // 가장 음수인 거리(내부 최대 깊이). 내부가 없으면 0 유지 → NB_in 0(바깥에 전체 코드 배분).
+		// 가장 음수인 거리(내부 최대 깊이). 내부가 없으면 0 유지 → NB_in 0(바깥에 전체 코드 배분).
+		float MinD = 0.0f;
 		for (int32 i = 0; i < Count; ++i)
 		{
 			MinD = FMath::Min(MinD, RawDist[i]);
 		}
-		const float NBIn = -FMath::Min(MinD, 0.0f);                       // >= 0 (내부 최대 깊이)
-		const float NBOut = FMath::Max(S.NarrowBand, KINDA_SMALL_NUMBER); // 설정 바깥 감지 밴드(0 나눗셈 방지)
-		const int32 BytesPerCode = (S.Quantization == ERopeSDFQuantBits::UInt16) ? 2 : 1; // 설정 비트수
+		// >= 0 (내부 최대 깊이)
+		const float NBIn = -FMath::Min(MinD, 0.0f);
+		// 설정 바깥 감지 밴드(0 나눗셈 방지)
+		const float NBOut = FMath::Max(S.NarrowBand, KINDA_SMALL_NUMBER);
+		// 설정 비트수
+		const int32 BytesPerCode = (S.Quantization == ERopeSDFQuantBits::UInt16) ? 2 : 1;
 
-		TArray<uint8> Distances; // 양자화 코드 바이트 블롭(복셀당 BytesPerCode, [-NBIn,+NBOut]→[0,MaxCode]).
+		// 양자화 코드 바이트 블롭(복셀당 BytesPerCode, [-NBIn,+NBOut]→[0,MaxCode]).
+		TArray<uint8> Distances;
 		Distances.SetNumUninitialized(Count * BytesPerCode);
 		ParallelFor(Count, [&](int32 i)
 		{
@@ -385,9 +400,12 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		Volume.LocalBounds = FBox(Min, Max);
 		Volume.Resolution = Res;
 		Volume.VoxelSize = Vox;
-		Volume.NarrowBandInner = NBIn;         // dequant: 코드 0 → -NBIn (본별 자동, 내부 커버)
-		Volume.NarrowBandOuter = NBOut;        // dequant: 코드 max → +NBOut (설정 감지 밴드)
-		Volume.QuantBits = S.Quantization;     // 바이트 레이아웃(1 or 2바이트/복셀)
+		// dequant: 코드 0 → -NBIn (본별 자동, 내부 커버)
+		Volume.NarrowBandInner = NBIn;
+		// dequant: 코드 max → +NBOut (설정 감지 밴드)
+		Volume.NarrowBandOuter = NBOut;
+		// 바이트 레이아웃(1 or 2바이트/복셀)
+		Volume.QuantBits = S.Quantization;
 		Volume.Distances = MoveTemp(Distances);
 		const float StepCm = (NBIn + NBOut) / static_cast<float>((BytesPerCode >= 2) ? 65535 : 255);
 		UE_LOG(LogRopeSDFBake, Verbose, TEXT("  bone %s: res=%dx%dx%d, voxel=%.2fcm, %d tri(s), band[-%.2f,+%.2f]cm (%d-bit, step %.4fcm)"),

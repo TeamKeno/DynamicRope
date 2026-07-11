@@ -14,8 +14,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Templates/Function.h" // FRopeSDFBakeProgress(TFunction) 진행 콜백
-#include "Collision/SDF/RopeSDFData.h" // FRopeSDFBakeSettings(런타임 USTRUCT, 에셋에 저장)
+// FRopeSDFBakeProgress(TFunction) 진행 콜백
+#include "Templates/Function.h"
+// FRopeSDFBakeSettings(런타임 USTRUCT, 에셋에 저장)
+#include "Collision/SDF/RopeSDFData.h"
 
 class USkeletalMesh;
 struct FRopeBoneSDFVolume;
@@ -43,9 +45,12 @@ using FRopeSDFBakeCancelPoll = TFunction<bool()>;
 /** BakeMesh 결과. */
 enum class ERopeSDFBakeResult : uint8
 {
-	Success,    // 정상 완료(결과가 0개 본일 수도 있음).
-	NoGeometry, // CPU 지오메트리 없음(쿡/스트립) 또는 null 메시 — 베이크 불가.
-	Cancelled,  // 진행 콜백이 중단 요청 — OutVolumes는 미완성이므로 자산에 반영하지 말 것.
+	// 정상 완료(결과가 0개 본일 수도 있음).
+	Success,
+	// CPU 지오메트리 없음(쿡/스트립) 또는 null 메시 — 베이크 불가.
+	NoGeometry,
+	// 진행 콜백이 중단 요청 — OutVolumes는 미완성이므로 자산에 반영하지 말 것.
+	Cancelled,
 };
 
 /**
@@ -54,18 +59,25 @@ enum class ERopeSDFBakeResult : uint8
  */
 struct FRopeSDFCoarsenedBone
 {
-	FName      Bone;               // 해당 본 이름
-	float      RequestedVoxelSize; // 사용자가 입력한 S.VoxelSize(cm)
-	float      ActualVoxelSize;    // 상한에 맞추느라 키워진 실제 voxel 크기(cm)
-	FIntVector Resolution;         // 최종 grid 해상도(축별 샘플 수)
+	// 해당 본 이름
+	FName      Bone;
+	// 사용자가 입력한 S.VoxelSize(cm)
+	float      RequestedVoxelSize;
+	// 상한에 맞추느라 키워진 실제 voxel 크기(cm)
+	float      ActualVoxelSize;
+	// 최종 grid 해상도(축별 샘플 수)
+	FIntVector Resolution;
 };
 
 /** BakeMesh 한 번의 집계 통계(에디터 보고용, 에셋에 저장하지 않는 plain 타입). */
 struct FRopeSDFBakeStats
 {
-	int32 BonesBaked = 0;                         // 실제로 볼륨이 구워진 본 수
-	TArray<FRopeSDFCoarsenedBone> CoarsenedBones; // coarsening이 발생한 본만 기록
-	TArray<FName> DroppedThinBones;               // girth < MinBoneGirth 로 제외(drop)된 본
+	// 실제로 볼륨이 구워진 본 수
+	int32 BonesBaked = 0;
+	// coarsening이 발생한 본만 기록
+	TArray<FRopeSDFCoarsenedBone> CoarsenedBones;
+	// girth < MinBoneGirth 로 제외(drop)된 본
+	TArray<FName> DroppedThinBones;
 };
 
 /** 무상태 본별 SDF 베이커. 에디터 전용(임포트 소스 모델 사용). */

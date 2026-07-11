@@ -6,21 +6,27 @@
 #include "DynamicRopeEditorLog.h"
 #include "Collision/SDF/RopeSDFData.h"
 
-#include "Logging/MessageLog.h"             // 베이크 결과(coarsening) 보고
+// 베이크 결과(coarsening) 보고
+#include "Logging/MessageLog.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Layout/SBorder.h"
-#include "Widgets/Layout/SExpandableArea.h" // 고급 베이크 설정 접이식 섹션
+// 고급 베이크 설정 접이식 섹션
+#include "Widgets/Layout/SExpandableArea.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SNumericEntryBox.h"
-#include "Widgets/Colors/SColorBlock.h"     // 범례 색 스와치
-#include "Widgets/Layout/SBox.h"            // 색 스와치 크기 고정
+// 범례 색 스와치
+#include "Widgets/Colors/SColorBlock.h"
+// 색 스와치 크기 고정
+#include "Widgets/Layout/SBox.h"
 #include "Styling/AppStyle.h"
-#include "PropertyCustomizationHelpers.h"   // SObjectPropertyEntryBox
-#include "PropertyEditorModule.h"           // 내장 디테일 뷰 생성
+// SObjectPropertyEntryBox
+#include "PropertyCustomizationHelpers.h"
+// 내장 디테일 뷰 생성
+#include "PropertyEditorModule.h"
 #include "IDetailsView.h"
 #include "Modules/ModuleManager.h"
 #include "Engine/SkeletalMesh.h"
@@ -44,7 +50,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 			FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
 		FDetailsViewArgs DetailsArgs;
 		DetailsArgs.bHideSelectionTip = true;
-		DetailsArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea; // 타깃 이름은 위 픽커가 이미 보여준다.
+		// 타깃 이름은 위 픽커가 이미 보여준다.
+		DetailsArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 		DetailsView = PropertyModule.CreateDetailView(DetailsArgs);
 		// 디테일 뷰 경유로 SourceMesh가 바뀌는 경로 대응(픽커 경유가 아니므로 별도 훅이 필요).
 		DetailsView->OnFinishedChangingProperties().AddSP(this, &SRopeSDFAuthoringPanel::OnAssetPropertyChanged);
@@ -616,7 +623,8 @@ float SRopeSDFAuthoringPanel::GetBandThresholdMax() const
 	{
 		return FMath::Max(Data->LastBakeSettings.NarrowBand, KINDA_SMALL_NUMBER);
 	}
-	return 50.0f; // 타깃 없음(편집 불가 상태) 폴백.
+	// 타깃 없음(편집 불가 상태) 폴백.
+	return 50.0f;
 }
 
 TOptional<float> SRopeSDFAuthoringPanel::GetBandThresholdMaxOpt() const
@@ -832,7 +840,8 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 					FText::AsNumber(C.RequestedVoxelSize), FText::AsNumber(C.ActualVoxelSize),
 					FText::AsNumber(C.Resolution.X), FText::AsNumber(C.Resolution.Y), FText::AsNumber(C.Resolution.Z)));
 			}
-			Log.Open(EMessageSeverity::Warning); // coarsening이 있으면 로그 창을 앞으로 꺼내 알린다.
+			// coarsening이 있으면 로그 창을 앞으로 꺼내 알린다.
+			Log.Open(EMessageSeverity::Warning);
 		}
 		else
 		{

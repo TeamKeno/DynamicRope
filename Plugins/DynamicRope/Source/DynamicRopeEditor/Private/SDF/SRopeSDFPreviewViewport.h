@@ -11,8 +11,10 @@
 #include "CoreMinimal.h"
 #include "SEditorViewport.h"
 #include "UObject/GCObject.h"
-#include "Collision/SDF/RopeSDFProvider.h" // ERopeSDFSliceAxis (오버레이 옵션 기본값)
-#include "Collision/SDF/RopeSDFData.h"     // FRopeBoneSDFVolume (오버레이 스냅샷 보관)
+// ERopeSDFSliceAxis (오버레이 옵션 기본값)
+#include "Collision/SDF/RopeSDFProvider.h"
+// FRopeBoneSDFVolume (오버레이 스냅샷 보관)
+#include "Collision/SDF/RopeSDFData.h"
 
 class FAdvancedPreviewScene;
 class FRopeSDFPreviewViewportClient;

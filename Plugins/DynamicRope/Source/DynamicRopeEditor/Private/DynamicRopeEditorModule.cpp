@@ -68,7 +68,8 @@ void FDynamicRopeEditorModule::StartupModule()
 	{
 		FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
 		FMessageLogInitializationOptions Options;
-		Options.bShowPages = true;   // 베이크마다 페이지를 분리해 이력을 남긴다.
+		// 베이크마다 페이지를 분리해 이력을 남긴다.
+		Options.bShowPages = true;
 		Options.bAllowClear = true;
 		Options.bShowFilters = true;
 		MessageLogModule.RegisterLogListing(RopeSDFMessageLogName, LOCTEXT("RopeSDFLogLabel", "Dynamic Rope SDF"), Options);
