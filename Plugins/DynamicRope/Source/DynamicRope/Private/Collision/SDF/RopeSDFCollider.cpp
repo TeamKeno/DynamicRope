@@ -1,10 +1,30 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
-
+#include "DynamicRopeLog.h"
 #include "Collision/SDF/RopeSDFCollider.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "Collision/SDF/RopeSDFSampler.h"
+#include "HAL/IConsoleManager.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+
+namespace
+{
+#if !UE_BUILD_SHIPPING
+	TAutoConsoleVariable<int32> CVarRopeLogSDFProjection(
+		TEXT("r.DynamicRope.Debug.LogSDFProjection"),
+		0,
+		TEXT("Logs SDF surface projection diagnostics. 0=off, 1=failures, 2=failures and successful outside-bounds projections."));
+#endif
+
+	bool ShouldLogSDFProjection(int32 Level)
+	{
+#if !UE_BUILD_SHIPPING
+		return CVarRopeLogSDFProjection.GetValueOnAnyThread() >= Level;
+#else
+		return false;
+#endif
+	}
+}
 
 FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) const
 {
@@ -69,28 +89,91 @@ FRopeSurfaceProjection FRopeSDFCollider::ProjectToSurface(const FVector& WorldPo
 	}
 
 	const FVector LocalPos = BoneToWorld.InverseTransformPosition(WorldPos);
-	if (!Volume->LocalBounds.IsInsideOrOn(LocalPos))
+	const bool bOutsideBounds = !Volume->LocalBounds.IsInsideOrOn(LocalPos);
+	FVector SurfaceLocal = Volume->LocalBounds.GetClosestPointTo(LocalPos);
+	const float DistToBounds = static_cast<float>(FVector::Distance(LocalPos, SurfaceLocal));
+	if (MaxDistance > 0.0f && DistToBounds > MaxDistance)
 	{
+		if (ShouldLogSDFProjection(1))
+		{
+			UE_LOG(LogDynamicRope, Warning,
+				TEXT("[RopeSDFProjection] fail=BoundsTooFar bone=%s mesh=%s world=%s local=%s distToBounds=%.2f maxDistance=%.2f"),
+				*Bone.ToString(), *GetNameSafe(SourceMesh), *WorldPos.ToString(), *LocalPos.ToString(),
+				DistToBounds, MaxDistance);
+		}
 		return Projection;
 	}
 
-	const float Dist = RopeSDFSampler::SampleTrilinear(*Volume, LocalPos);
-	const float AbsDist = FMath::Abs(Dist);
-	if (MaxDistance > 0.0f && AbsDist > MaxDistance)
+	// Bounds 밖 query는 가장 가까운 grid 경계에서 시작한다. SDF를 따라 몇 차례 이동하면
+	// narrow-band 안쪽의 실제 표면점으로 수렴하고, 이후 원래 query와의 실제 거리를 검사할 수 있다.
+	constexpr int32 MaxProjectionIterations = 3;
+	constexpr float ProjectionTolerance = 0.05f;
+	for (int32 Iteration = 0; Iteration < MaxProjectionIterations; ++Iteration)
 	{
+		const float SignedDistance = RopeSDFSampler::SampleTrilinear(*Volume, SurfaceLocal);
+		const FVector Gradient = RopeSDFSampler::SampleProjectionGradient(*Volume, SurfaceLocal);
+		if (Gradient.IsNearlyZero())
+		{
+			if (ShouldLogSDFProjection(1))
+			{
+				UE_LOG(LogDynamicRope, Warning,
+					TEXT("[RopeSDFProjection] fail=GradientZero bone=%s mesh=%s world=%s local=%s sampleLocal=%s iter=%d signedDistance=%.2f distToBounds=%.2f maxDistance=%.2f"),
+					*Bone.ToString(), *GetNameSafe(SourceMesh), *WorldPos.ToString(), *LocalPos.ToString(),
+					*SurfaceLocal.ToString(), Iteration, SignedDistance, DistToBounds, MaxDistance);
+			}
+			return Projection;
+		}
+
+		SurfaceLocal = Volume->LocalBounds.GetClosestPointTo(
+			SurfaceLocal - Gradient * SignedDistance);
+		if (FMath::Abs(SignedDistance) <= ProjectionTolerance)
+		{
+			break;
+		}
+	}
+
+	const FVector SurfaceWorld = BoneToWorld.TransformPosition(SurfaceLocal);
+	const float SurfaceDistance = static_cast<float>(FVector::Distance(WorldPos, SurfaceWorld));
+	if (MaxDistance > 0.0f && SurfaceDistance > MaxDistance)
+	{
+		if (ShouldLogSDFProjection(1))
+		{
+			UE_LOG(LogDynamicRope, Warning,
+				TEXT("[RopeSDFProjection] fail=SurfaceTooFar bone=%s mesh=%s world=%s local=%s surfaceWorld=%s surfaceLocal=%s surfaceDistance=%.2f distToBounds=%.2f maxDistance=%.2f"),
+				*Bone.ToString(), *GetNameSafe(SourceMesh), *WorldPos.ToString(), *LocalPos.ToString(),
+				*SurfaceWorld.ToString(), *SurfaceLocal.ToString(), SurfaceDistance, DistToBounds, MaxDistance);
+		}
 		return Projection;
 	}
 
-	const FVector NLocal = RopeSDFSampler::SampleGradient(*Volume, LocalPos);
+	const FVector NLocal = RopeSDFSampler::SampleProjectionGradient(*Volume, SurfaceLocal);
+	if (NLocal.IsNearlyZero())
+	{
+		if (ShouldLogSDFProjection(1))
+		{
+			UE_LOG(LogDynamicRope, Warning,
+				TEXT("[RopeSDFProjection] fail=SurfaceGradientZero bone=%s mesh=%s world=%s local=%s surfaceLocal=%s surfaceDistance=%.2f maxDistance=%.2f"),
+				*Bone.ToString(), *GetNameSafe(SourceMesh), *WorldPos.ToString(), *LocalPos.ToString(),
+				*SurfaceLocal.ToString(), SurfaceDistance, MaxDistance);
+		}
+		return Projection;
+	}
 	const FVector NormalWorld = BoneToWorld.TransformVectorNoScale(NLocal)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 
 	Projection.bHit = true;
-	Projection.SurfacePoint = WorldPos - NormalWorld * Dist;
+	Projection.SurfacePoint = SurfaceWorld;
 	Projection.Normal = NormalWorld;
-	Projection.Distance = AbsDist;
+	Projection.Distance = SurfaceDistance;
 	Projection.Bone = Bone;
 	Projection.SourceMesh = SourceMesh;
+	if (bOutsideBounds && ShouldLogSDFProjection(2))
+	{
+		UE_LOG(LogDynamicRope, Log,
+			TEXT("[RopeSDFProjection] success=OutsideBounds bone=%s mesh=%s world=%s surfaceWorld=%s surfaceDistance=%.2f distToBounds=%.2f maxDistance=%.2f"),
+			*Bone.ToString(), *GetNameSafe(SourceMesh), *WorldPos.ToString(), *SurfaceWorld.ToString(),
+			SurfaceDistance, DistToBounds, MaxDistance);
+	}
 	return Projection;
 }
 

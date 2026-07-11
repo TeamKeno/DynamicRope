@@ -16,4 +16,7 @@ namespace RopeSDFSampler
 
 	/** central-difference gradient를 정규화한 바깥쪽 방향(= Query가 반환할 법선). 축퇴 시 +Z. */
 	DYNAMICROPE_API FVector SampleGradient(const FRopeBoneSDFVolume& Volume, const FVector& LocalPos);
+
+	/** projection용 경계 대응 gradient. LocalBounds 가장자리에서는 가능한 쪽의 차분을 사용한다. */
+	DYNAMICROPE_API FVector SampleProjectionGradient(const FRopeBoneSDFVolume& Volume, const FVector& LocalPos);
 }

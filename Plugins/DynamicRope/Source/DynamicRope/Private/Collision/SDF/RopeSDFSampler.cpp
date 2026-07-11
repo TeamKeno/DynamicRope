@@ -90,3 +90,38 @@ FVector RopeSDFSampler::SampleGradient(const FRopeBoneSDFVolume& V, const FVecto
 	const FVector N = Grad.GetSafeNormal();
 	return N.IsNearlyZero() ? FVector::UpVector : N;
 }
+
+FVector RopeSDFSampler::SampleProjectionGradient(const FRopeBoneSDFVolume& V, const FVector& LocalPos)
+{
+	if (!V.IsBaked())
+	{
+		return FVector::ZeroVector;
+	}
+
+	const FVector Size = V.LocalBounds.GetSize();
+	const FVector H(
+		(V.Resolution.X > 1) ? (Size.X / (V.Resolution.X - 1)) : 1.0,
+		(V.Resolution.Y > 1) ? (Size.Y / (V.Resolution.Y - 1)) : 1.0,
+		(V.Resolution.Z > 1) ? (Size.Z / (V.Resolution.Z - 1)) : 1.0);
+
+	auto AxisDerivative = [&](int32 Axis, float Step)
+	{
+		FVector Minus = LocalPos;
+		FVector Plus = LocalPos;
+		Minus[Axis] = FMath::Max(LocalPos[Axis] - Step, V.LocalBounds.Min[Axis]);
+		Plus[Axis] = FMath::Min(LocalPos[Axis] + Step, V.LocalBounds.Max[Axis]);
+
+		const float Span = static_cast<float>(Plus[Axis] - Minus[Axis]);
+		if (Span <= KINDA_SMALL_NUMBER)
+		{
+			return 0.0f;
+		}
+
+		return (SampleTrilinear(V, Plus) - SampleTrilinear(V, Minus)) / Span;
+	};
+
+	return FVector(
+		AxisDerivative(0, H.X),
+		AxisDerivative(1, H.Y),
+		AxisDerivative(2, H.Z)).GetSafeNormal();
+}

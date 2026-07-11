@@ -7,6 +7,7 @@
 #include "Collision/SDF/RopeSDFSampler.h"
 #include "Collision/SDF/RopeSDFSynthetic.h"
 #include "Collision/SDF/RopeSDFData.h"
+#include "Collision/SDF/RopeSDFCollider.h"
 
 // trilinear 샘플이 해석적 구 SDF와 일치하는가(표면 0, 안쪽 음수, 바깥 양수).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFSamplerSphereTest,
@@ -45,6 +46,49 @@ bool FRopeSDFGradientTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("gradient is unit-length"), FMath::Abs(static_cast<float>(G.Size()) - 1.0f) < 0.05f);
 	TestTrue(TEXT("gradient points +X (outward)"),
 		static_cast<float>(FVector::DotProduct(G, FVector(1, 0, 0))) > 0.9f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFProjectionOutsideBoundsTest,
+	"DynamicRope.SDF.ProjectionOutsideBounds",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSDFProjectionOutsideBoundsTest::RunTest(const FString& Parameters)
+{
+	const FRopeBoneSDFVolume V =
+		RopeSDFSynthetic::MakeSphere(FName("test"), FVector::ZeroVector, 20.0f, FIntVector(31), 10.0f);
+	const FRopeSDFCollider Collider(
+		&V, FTransform::Identity, FTransform::Identity, 0.0f, FName("test"), nullptr);
+
+	const FVector QueryPoint(34.0, 0.0, 0.0);
+	const FRopeSurfaceProjection Hit = Collider.ProjectToSurface(QueryPoint, 15.0f);
+	TestTrue(TEXT("query outside bounds projects within MaxDistance"), Hit.bHit);
+	TestTrue(TEXT("projected point lies near sphere surface"),
+		FVector::Distance(Hit.SurfacePoint, FVector(20.0, 0.0, 0.0)) < 1.0f);
+	TestTrue(TEXT("projection reports distance from original query"),
+		FMath::Abs(Hit.Distance - 14.0f) < 1.0f);
+	TestTrue(TEXT("projection normal points outward"),
+		FVector::DotProduct(Hit.Normal, FVector::XAxisVector) > 0.9f);
+
+	const FRopeSurfaceProjection Miss = Collider.ProjectToSurface(QueryPoint, 12.0f);
+	TestFalse(TEXT("surface beyond MaxDistance is rejected"), Miss.bHit);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFProjectionBoundaryGradientTest,
+	"DynamicRope.SDF.ProjectionGradientAtBounds",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSDFProjectionBoundaryGradientTest::RunTest(const FString& Parameters)
+{
+	const FRopeBoneSDFVolume V =
+		RopeSDFSynthetic::MakeSphere(FName("test"), FVector::ZeroVector, 20.0f, FIntVector(31), 10.0f);
+	const FVector Gradient = RopeSDFSampler::SampleProjectionGradient(V, FVector(30.0, 0.0, 0.0));
+
+	TestTrue(TEXT("boundary gradient is unit-length"),
+		FMath::Abs(static_cast<float>(Gradient.Size()) - 1.0f) < 0.05f);
+	TestTrue(TEXT("boundary gradient points outward"),
+		FVector::DotProduct(Gradient, FVector::XAxisVector) > 0.9f);
 	return true;
 }
 
