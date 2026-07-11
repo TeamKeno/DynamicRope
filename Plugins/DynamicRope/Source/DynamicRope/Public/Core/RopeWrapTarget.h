@@ -43,12 +43,18 @@ struct FRopeBindingFrame
 };
 
 /**
- * 바인딩 프레임 → 이번 프레임 월드 트랜스폼. 지금의 Mesh->GetSocketTransform(Bone) 을 통째로 대체하는
+ * 바인딩 프레임 → 이번 프레임 월드 트랜스폼. 랩 경로의 Mesh->GetSocketTransform(Bone) 을 통째로 대체하는
  * 단일 해석 지점이다. 스켈레탈이면서 본 이름이 있으면 스키닝된 소켓 트랜스폼(기존 경로와 100% 동일),
  * 그 외면 컴포넌트/소켓 트랜스폼(정적은 트랜스폼 불변이라 자동으로 "안 움직이는 hold", 무버블 프롭은 추종).
  * Component 가 유효하지 않으면 Identity 를 반환한다(호출자는 IsValid()로 먼저 걸러 release 하는 것을 권장).
  */
 DYNAMICROPE_API FTransform ResolveBindingWorld(const FRopeBindingFrame& Frame);
+
+/**
+ * 위와 동일한 해석의 raw 포인터 오버로드 — (Mesh, Bone)을 이미 들고 있는 호출자(경로 빌드/앵커 배치 등
+ * 프레임 내 다회 호출)가 weak 프레임을 만들지 않고 직접 쓴다. null Component 는 Identity.
+ */
+DYNAMICROPE_API FTransform ResolveBindingWorld(const USceneComponent* Component, FName SocketOrBone);
 
 /**
  * 접촉 집계가 노드를 묶는 단위(POD). 기존엔 FName Bone 하나였다.

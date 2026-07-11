@@ -1,6 +1,8 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RopeComponent.h"
+// ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+#include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "Render/RopeSceneProxy.h"
@@ -434,7 +436,7 @@ bool URopeComponent::BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) cons
 			const FRopeLatchNode& Latch = PendingWrapSeed.Latched[0];
 			if (Mesh && Sim.Positions.IsValidIndex(Latch.NodeIndex))
 			{
-				const FTransform BoneXform = Mesh->GetSocketTransform(Latch.Bone);
+				const FTransform BoneXform = ResolveBindingWorld(Mesh, Latch.Bone);
 				const FVector NormalWorld = FVector::UpVector;
 				FVector TangentWorld = FVector::ForwardVector;
 				if (Sim.Positions.IsValidIndex(Latch.NodeIndex + 1))
@@ -1957,7 +1959,7 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 			TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
 				.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
 
-			const FTransform BoneXform = Mesh->GetSocketTransform(ContactTracker.CandidateBone);
+			const FTransform BoneXform = ResolveBindingWorld(Mesh, ContactTracker.CandidateBone);
 
 			FRopeSurfaceAnchor Anchor;
 			Anchor.NodeIndex = NodeIndex;
@@ -2033,7 +2035,7 @@ void URopeComponent::StartWrappingFromContacting()
 				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 		}
 
-		const FTransform BoneXform = Mesh->GetSocketTransform(Latch.Bone);
+		const FTransform BoneXform = ResolveBindingWorld(Mesh, Latch.Bone);
 		LatchAnchor.NodeIndex = Latch.NodeIndex;
 		LatchAnchor.Bone = Latch.Bone;
 		LatchAnchor.Mesh = Mesh;
@@ -2736,7 +2738,7 @@ bool URopeComponent::ComputeTensionSlack(float& OutSlack, float& OutStraightDist
 		const USceneComponent* Mesh = Anchor.Mesh.Get();
 		if (Mesh && !Anchor.Bone.IsNone())
 		{
-			const FTransform BoneXform = Mesh->GetSocketTransform(Anchor.Bone);
+			const FTransform BoneXform = ResolveBindingWorld(Mesh, Anchor.Bone);
 			const FVector SurfaceWorld = BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
 			const FVector NormalWorld = BoneXform.TransformVectorNoScale(Anchor.LocalNormal)
 				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
@@ -2764,7 +2766,7 @@ bool URopeComponent::ComputeTensionSlack(float& OutSlack, float& OutStraightDist
 					const FName Bone = Latch.Bone.IsNone() ? WrapController.State.BoneName : Latch.Bone;
 					if (!Bone.IsNone())
 					{
-						AnchorWorld = Mesh->GetSocketTransform(Bone).TransformPosition(Latch.BoneLocalPos);
+						AnchorWorld = ResolveBindingWorld(Mesh, Bone).TransformPosition(Latch.BoneLocalPos);
 					}
 				}
 				bHasAnchor = true;

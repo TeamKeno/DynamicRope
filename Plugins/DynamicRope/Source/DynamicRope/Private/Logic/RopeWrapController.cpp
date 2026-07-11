@@ -169,7 +169,7 @@ void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapSta
 			}
 
 			const FName Bone = Latch.Bone.IsNone() ? State.BoneName : Latch.Bone;
-			const FTransform BoneXform = Mesh->GetSocketTransform(Bone);
+			const FTransform BoneXform = ResolveBindingWorld(Mesh, Bone);
 			const FVector World = Sim.Positions[Latch.NodeIndex];
 
 			FRopeSurfaceAnchor Anchor;
@@ -315,7 +315,7 @@ bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOver
 		{
 			continue;
 		}
-		const FTransform BoneXform = Mesh->GetSocketTransform(Latch.Bone);
+		const FTransform BoneXform = ResolveBindingWorld(Mesh, Latch.Bone);
 		const FVector World = BoneXform.TransformPosition(Latch.BoneLocalPos);
 		OutFrame.EnsureSize(Sim.Num());
 		OutFrame.SetPosition(Latch.NodeIndex, World, /*bZeroVelocity*/ true);

@@ -1,6 +1,8 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeWrappingPhase.h"
+// ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+#include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -425,7 +427,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 	}
 	OrientWrappingAxisByTail(LatchAnchor, Sim, Mesh, State.PathAxisDirection);
 
-	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+	const FTransform BoneXform = ResolveBindingWorld(Mesh, LatchAnchor.Bone);
 	State.PathSurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
 	State.PathNormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
@@ -666,7 +668,7 @@ bool FRopeWrappingPhase::AppendWrappingAnchorFromPathPoint(int32 PathIndex, cons
 		return false;
 	}
 
-	const FTransform BoneXform = AnchorMesh->GetSocketTransform(AnchorBone);
+	const FTransform BoneXform = ResolveBindingWorld(AnchorMesh, AnchorBone);
 
 	FRopeSurfaceAnchor Anchor;
 	Anchor.NodeIndex = NodeIndex;
@@ -730,7 +732,7 @@ bool FRopeWrappingPhase::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceA
 	OrientWrappingAxisByTail(LatchAnchor, Sim, Mesh, AxisDirection);
 
 	//3. latch anchor를 world 좌표로 복원
-	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+	const FTransform BoneXform = ResolveBindingWorld(Mesh, LatchAnchor.Bone);
 	FVector SurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
 	FVector NormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
@@ -847,7 +849,7 @@ bool FRopeWrappingPhase::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor
 	OrientWrappingAxisByTail(LatchAnchor, Sim, Mesh, AxisDirection);
 
 	//3. latch anchor를 world 좌표로 복원
-	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+	const FTransform BoneXform = ResolveBindingWorld(Mesh, LatchAnchor.Bone);
 	//LatchSurfaceWorld가 나선의 시작점
 	const FVector LatchSurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
 
@@ -948,7 +950,7 @@ bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState
 	}
 	OrientWrappingAxisByTail(LatchAnchor, Sim, Mesh, AxisDirection);
 
-	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+	const FTransform BoneXform = ResolveBindingWorld(Mesh, LatchAnchor.Bone);
 	const FVector LatchSurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
 	const float LatchAxisDistance = FVector::DotProduct(LatchSurfaceWorld - AxisOrigin, AxisDirection);
 	const FVector LatchAxisPoint = AxisOrigin + AxisDirection * LatchAxisDistance;
@@ -1100,7 +1102,7 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 		}
 	}
 
-	const FTransform BoneXform = Mesh->GetSocketTransform(LatchAnchor.Bone);
+	const FTransform BoneXform = ResolveBindingWorld(Mesh, LatchAnchor.Bone);
 
 	// 정적/비-스켈레탈 대상(피드백 5): 본 그래프가 없어 축을 컴포넌트 기저에서 유도한다. 컴포넌트
 	// 기저축(X/Y/Z) 중 latch 표면 normal에 가장 수직인 축을 감김 축으로 고른다 — 원기둥/캡슐의 장축은
@@ -1590,7 +1592,7 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 			return false;
 		}
 
-		const FTransform BoneXform = Mesh->GetSocketTransform(Anchor.Bone);
+		const FTransform BoneXform = ResolveBindingWorld(Mesh, Anchor.Bone);
 		Point.SurfaceWorld = BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
 		Point.NormalWorld = BoneXform.TransformVectorNoScale(Anchor.LocalNormal)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);

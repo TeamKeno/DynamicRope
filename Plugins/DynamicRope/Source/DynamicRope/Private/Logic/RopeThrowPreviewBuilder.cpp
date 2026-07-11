@@ -3,6 +3,8 @@
 #include "Logic/RopeThrowPreviewBuilder.h"
 
 #include "Collision/RopeCollider.h"
+// ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+#include "Core/RopeWrapTarget.h"
 #include "Logic/RopeFlightContactDetector.h"
 #include "Logic/RopeWhipGuide.h"
 #include "Logic/RopeWrappingPhase.h"
@@ -360,7 +362,7 @@ namespace
 			return;
 		}
 
-		const FTransform BoneXform = Mesh->GetSocketTransform(Candidate.Bone);
+		const FTransform BoneXform = ResolveBindingWorld(Mesh, Candidate.Bone);
 		const int32 FirstNode = FMath::Clamp(Candidate.NodeIndex, 1, Centerline.Num() - 1);
 		for (int32 NodeIndex = FirstNode; NodeIndex < Centerline.Num(); ++NodeIndex)
 		{
@@ -447,7 +449,7 @@ namespace
 		TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
 
-		const FTransform BoneXform = Mesh->GetSocketTransform(Candidate.Bone);
+		const FTransform BoneXform = ResolveBindingWorld(Mesh, Candidate.Bone);
 
 		FRopeSurfaceAnchor LatchAnchor;
 		LatchAnchor.NodeIndex = Candidate.NodeIndex;
