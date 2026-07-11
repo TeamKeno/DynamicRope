@@ -102,7 +102,8 @@ bool FRopeWrapTieBreakTest::RunTest(const FString& Parameters)
 	TArray<IRopeCollider*> Colliders = { &ArmA, &ArmB };
 
 	FRopeWrapController Wrap;
-	const FRopeWrapConfig Config = MakeWrapConfig(3, 0.0f); // 즉시 결정
+	// 즉시 결정
+	const FRopeWrapConfig Config = MakeWrapConfig(3, 0.0f);
 	FRopeWrapState Seed;
 	const bool bCommitted = Wrap.DecideWrap(Sim, Colliders, Config, 0.0f, Seed);
 
@@ -126,8 +127,10 @@ bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 	// 노드 x = 0,20,...,140(+X 직선). 앵커 2개(노드 5, 노드 3) → 손 쪽 첫 앵커 = 노드 3.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	Sim.SegmentTension.SetNumZeroed(Sim.Num() - 1);
-	Sim.SegmentTension[2] = 1234.0f; // 앵커(3)-손 쪽 인접 노드(2) 세그먼트
-	Sim.SegmentTension[4] = 9999.0f; // 다른 세그먼트(선택되면 안 됨)
+	// 앵커(3)-손 쪽 인접 노드(2) 세그먼트
+	Sim.SegmentTension[2] = 1234.0f;
+	// 다른 세그먼트(선택되면 안 됨)
+	Sim.SegmentTension[4] = 9999.0f;
 
 	FRopeWrapController Wrap;
 	Wrap.State.BoneName = FName("arm");
@@ -165,11 +168,16 @@ bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 	// (대각선, 모서리를 가로지름)와 명확히 달라야 한다 — 이게 벽에 걸린 로프에서 chord가 벽을 관통하던 버그의 수정.
 	FRopeSimState Bent;
 	Bent.Positions = {
-		FVector(-40, 0, 40), // 0 손
-		FVector(-20, 0, 40), // 1
-		FVector(  0, 0, 40), // 2 모서리
-		FVector(  0, 0, 20), // 3 첫 다리
-		FVector(  0, 0,  0), // 4 앵커
+		// 0 손
+		FVector(-40, 0, 40),
+		// 1
+		FVector(-20, 0, 40),
+		// 2 모서리
+		FVector(  0, 0, 40),
+		// 3 첫 다리
+		FVector(  0, 0, 20),
+		// 4 앵커
+		FVector(  0, 0,  0),
 	};
 	Bent.PrevPositions = Bent.Positions;
 	Bent.SegmentLength = 20.0f;
@@ -184,7 +192,8 @@ bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 	// 첫 다리(노드 4→3→2, +Z)를 걷다 노드 2에서 90도 꺾임 감지 → 멈춤 → 방향 +Z(로프 경로), chord가 아님.
 	TestTrue(FString::Printf(TEXT("bent direction %s follows first leg (+Z)"), *BentPull.Direction.ToCompactString()),
 		BentPull.Direction.Equals(FVector(0, 0, 1), 0.01f));
-	const FVector Chord = (Bent.Positions[0] - Bent.Positions[4]).GetSafeNormal(); // 대각선(모서리 관통)
+	// 대각선(모서리 관통)
+	const FVector Chord = (Bent.Positions[0] - Bent.Positions[4]).GetSafeNormal();
 	TestFalse(TEXT("bent direction is NOT the straight chord"), BentPull.Direction.Equals(Chord, 0.05f));
 	return true;
 }

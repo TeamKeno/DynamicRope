@@ -16,7 +16,8 @@ namespace
 		FRopeSolverConfig C;
 		C.Substeps = 4;
 		C.Iterations = 8;
-		C.StretchCompliance = 0.0f; // 비신축(rigid)
+		// 비신축(rigid)
+		C.StretchCompliance = 0.0f;
 		C.BendCompliance = 0.02f;
 		C.Gravity = FVector::ZeroVector;
 		C.Damping = 0.0f;
@@ -34,8 +35,10 @@ bool FRopeSolverDistanceTest::RunTest(const FString& Parameters)
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
-		Sim.Positions[i] *= 2.0f; // 2배 stretch
-		Sim.SetStill(i);          // 속도 0 유지
+		// 2배 stretch
+		Sim.Positions[i] *= 2.0f;
+		// 속도 0 유지
+		Sim.SetStill(i);
 	}
 
 	const FRopeSolverConfig Config = MakeStiffConfig();
@@ -169,7 +172,8 @@ bool FRopeSolverTensionTest::RunTest(const FString& Parameters)
 
 	FRopeSolverConfig Config = MakeStiffConfig();
 	Config.Gravity = FVector(0.0f, 0.0f, -Gravity);
-	Config.Iterations = 32; // 장력(λ) 수렴 판정이므로 넉넉히.
+	// 장력(λ) 수렴 판정이므로 넉넉히.
+	Config.Iterations = 32;
 	const FRopeXPBDSolver Solver;
 	const TArray<IRopeCollider*> NoColliders;
 	for (int32 Frame = 0; Frame < 240; ++Frame)
@@ -195,7 +199,8 @@ bool FRopeSolverTensionTest::RunTest(const FString& Parameters)
 
 	// 무중력 rest 길이 로프(슬랙) → 장력 ~0.
 	FRopeSimState Slack = RopeTest::MakeStraightRope(8, 140.0f);
-	FRopeSolverConfig SlackConfig = MakeStiffConfig(); // Gravity = 0
+	// Gravity = 0
+	FRopeSolverConfig SlackConfig = MakeStiffConfig();
 	for (int32 Frame = 0; Frame < 30; ++Frame)
 	{
 		Solver.Step(Slack, SlackConfig, NoColliders, 1.0f / 60.0f);
@@ -250,12 +255,14 @@ bool FRopeCapsuleSweptRelativeMotionTest::RunTest(const FString& Parameters)
 	Cap.InvDeltaTime = 60.0f;
 
 	FRopeSweptQuery Q;
-	Q.WorldStart = FVector(0, 0, 50); // 정지 노드(이동 없음)
+	// 정지 노드(이동 없음)
+	Q.WorldStart = FVector(0, 0, 50);
 	Q.WorldEnd = FVector(0, 0, 50);
 	Q.NodeRadius = 2.0f;
 	Q.SweepStep = 2.0f;
 	Q.MaxSamples = 64;
-	Q.SubAlpha0 = 0.0f; // 프레임 전체를 한 substep으로
+	// 프레임 전체를 한 substep으로
+	Q.SubAlpha0 = 0.0f;
 	Q.SubAlpha1 = 1.0f;
 
 	FVector HitPos;

@@ -12,13 +12,19 @@
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveUniformShaderParametersBuilder.h"
 #include "Engine/Engine.h"
-#include "RopeTubeBuilder.h"        // RopeGPU::BuildTube_RenderThread / BuildTubeFromResident_RenderThread — M5b
-#include "RopeGPUSolver.h"          // FRopeGPUSolver::GetResidentPositionSRV_RenderThread — M5b B2-lite
+// RopeGPU::BuildTube_RenderThread / BuildTubeFromResident_RenderThread — M5b
+#include "RopeTubeBuilder.h"
+// FRopeGPUSolver::GetResidentPositionSRV_RenderThread — M5b B2-lite
+#include "RopeGPUSolver.h"
 #include "Subsystem/RopeSimSubsystem.h"
-#include "RHICommandList.h"         // FRHITransitionInfo
-#include "RHI.h"                    // GDynamicRHI
-#include "Misc/App.h"               // FApp::CanEverRender
-#include "Settings/DynamicRopeSettings.h" // bWriteVelocity — 프록시 생성 시 1회 스냅샷
+// FRHITransitionInfo
+#include "RHICommandList.h"
+// GDynamicRHI
+#include "RHI.h"
+// FApp::CanEverRender
+#include "Misc/App.h"
+// bWriteVelocity — 프록시 생성 시 1회 스냅샷
+#include "Settings/DynamicRopeSettings.h"
 
 // 렌더 튜닝 값의 출처: 튜브 스무딩(Subdiv/α)은 로프별 UPROPERTY(URopeComponent::TubeSmoothingSubdiv/
 // TubeSmoothingAlpha), velocity 출력 여부는 프로젝트 설정(UDynamicRopeSettings::bWriteVelocity).
@@ -97,7 +103,8 @@ void FRopeCenterlineBuffer::ReleaseRHI()
 // 스트림(TangentX@0, TangentZ@8, stride 16) + R16G16B16A16_SNORM SRV(매뉴얼 페치)로 읽는다.
 void FRopeGpuTangentBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
-	const uint32 Bytes = static_cast<uint32>(NumVertices) * 16; // TangentX(8) + TangentZ(8)
+	// TangentX(8) + TangentZ(8)
+	const uint32 Bytes = static_cast<uint32>(NumVertices) * 16;
 	const FRHIBufferCreateDesc CreateDesc =
 		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuTangentBuffer"), Bytes)
 		.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
@@ -167,8 +174,10 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	, VertexFactory(GetScene().GetFeatureLevel(), "FRopeSceneProxy")
 	, MaterialRelevance(Component->GetMaterialRelevance(GetScene().GetShaderPlatform()))
 	, NumNodes(FMath::Max(2, Component->NumParticles))
-	, Subdiv(RopeComputeTubeSubdiv(NumNodes, Component->TubeSmoothingSubdiv)) // 링 상한에 맞춰 자동 하향(위 헬퍼 주석 참고).
-	, NumRings((NumNodes - 1) * Subdiv + 1) // 스무딩된 렌더 링 수(Subdiv=1이면 NumNodes와 동일).
+	// 링 상한에 맞춰 자동 하향(위 헬퍼 주석 참고).
+	, Subdiv(RopeComputeTubeSubdiv(NumNodes, Component->TubeSmoothingSubdiv))
+	// 스무딩된 렌더 링 수(Subdiv=1이면 NumNodes와 동일).
+	, NumRings((NumNodes - 1) * Subdiv + 1)
 	, NumSides(FMath::Max(3, Component->NumSides))
 	, Radius(Component->Radius)
 	, SmoothParam(FMath::Clamp(Component->TubeSmoothingAlpha, 0.0f, 1.0f))
@@ -282,11 +291,14 @@ void FRopeSceneProxy::BuildSmoothedCenterline(const TArray<FVector>& Nodes, TArr
 	const int32 LastNode = NumNodes - 1;
 	for (int32 r = 0; r < NumRings; ++r)
 	{
-		const int32 Seg = r / Subdiv;      // 이 링이 속한 세그먼트(노드 Seg..Seg+1).
-		const int32 Sub = r % Subdiv;      // 세그먼트 내 서브 인덱스.
+		// 이 링이 속한 세그먼트(노드 Seg..Seg+1).
+		const int32 Seg = r / Subdiv;
+		// 세그먼트 내 서브 인덱스.
+		const int32 Sub = r % Subdiv;
 		if (Seg >= LastNode)
 		{
-			Out[r] = Nodes[LastNode];      // 마지막 노드에 정확히 놓이는 끝 링.
+			// 마지막 노드에 정확히 놓이는 끝 링.
+			Out[r] = Nodes[LastNode];
 			continue;
 		}
 		const float T = static_cast<float>(Sub) / static_cast<float>(Subdiv);

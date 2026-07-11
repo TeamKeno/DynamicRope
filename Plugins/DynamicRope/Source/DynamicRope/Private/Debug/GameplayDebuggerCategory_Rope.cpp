@@ -8,8 +8,10 @@
 #include "Debug/RopeDebugSnapshot.h"
 #include "Subsystem/RopeDebugSubsystem.h"
 #include "GameFramework/Actor.h"
-#include "RopeTubeBuilder.h"       // RopeGPU::TubeRingBucket / MaxTubeRings — GPU 튜브 경로/버킷 진단
-#include "DrawDebugHelpers.h"      // DrawDebug*(SDPG_Foreground) — 콜라이더 전경 오버레이(에디터 셀렉션처럼 위에 그림)
+// RopeGPU::TubeRingBucket / MaxTubeRings — GPU 튜브 경로/버킷 진단
+#include "RopeTubeBuilder.h"
+// DrawDebug*(SDPG_Foreground) — 콜라이더 전경 오버레이(에디터 셀렉션처럼 위에 그림)
+#include "DrawDebugHelpers.h"
 
 namespace
 {
@@ -526,7 +528,8 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				if (AN.X > 0.9) { Face = NC.Normal.X > 0.0 ? TEXT("+X") : TEXT("-X"); }
 				else if (AN.Y > 0.9) { Face = NC.Normal.Y > 0.0 ? TEXT("+Y") : TEXT("-Y"); }
 				else if (AN.Z > 0.9) { Face = NC.Normal.Z > 0.0 ? TEXT("+Z") : TEXT("-Z"); }
-				else { Face = TEXT("edge"); } // 대각 법선 = 볼록 모서리 접촉.
+				// 대각 법선 = 볼록 모서리 접촉.
+				else { Face = TEXT("edge"); }
 				// 라벨은 n<idx> <면>만(간결). 본 이름은 색(주황=스켈레탈)으로 갈음 — 정보량 과다 방지.
 				DrawDebugString(World, Tip, FString::Printf(TEXT("n%d %s"), NC.NodeIndex, *Face), nullptr, NColor, 0.0f, true, 1.0f);
 			}

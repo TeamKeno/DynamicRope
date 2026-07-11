@@ -10,18 +10,25 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Solver/RopeXPBDSolver.h"
-#include "RopeGPUSolver.h" // DynamicRopeShaders 모듈
-#include "RopeTubeBuilder.h" // B2-full 튜브 컴퓨트
+// DynamicRopeShaders 모듈
+#include "RopeGPUSolver.h"
+// B2-full 튜브 컴퓨트
+#include "RopeTubeBuilder.h"
 #include "Collision/RopeCollider.h"
-#include "Collision/RopeStaticCollider.h" // FRopeBoxCollider (정적 박스 parity)
+// FRopeBoxCollider (정적 박스 parity)
+#include "Collision/RopeStaticCollider.h"
 #include "Collision/SDF/RopeSDFCollider.h"
-#include "Collision/SDF/RopeSDFSynthetic.h" // MakeSphere(합성 SDF 볼륨)
+// MakeSphere(합성 SDF 볼륨)
+#include "Collision/SDF/RopeSDFSynthetic.h"
 #include "Collision/SDF/RopeSDFData.h"
-#include "Logic/RopeFlightContactDetector.h" // CPU 감지(패리티 ground-truth)
+// CPU 감지(패리티 ground-truth)
+#include "Logic/RopeFlightContactDetector.h"
 #include "RopeTestHelpers.h"
 #include "RHI.h"
-#include "RHICommandList.h" // BlockUntilGPUIdle
-#include "RenderingThread.h" // FlushRenderingCommands
+// BlockUntilGPUIdle
+#include "RHICommandList.h"
+// FlushRenderingCommands
+#include "RenderingThread.h"
 #include "Misc/App.h"
 
 namespace
@@ -31,7 +38,8 @@ namespace
 		FRopeSolverConfig C;
 		C.Substeps = 8;
 		C.Iterations = 8;
-		C.StretchCompliance = 0.0f; // 비신축
+		// 비신축
+		C.StretchCompliance = 0.0f;
 		C.BendCompliance = 0.02f;
 		C.Gravity = FVector(0.0f, 0.0f, -980.0f);
 		C.Damping = 0.02f;
@@ -114,7 +122,8 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 		TArray<FRopeGPUResidentStep> Steps;
 		Steps.Add(MakeStep(GpuSim, Schedule.NumSub, Schedule.FixedDt));
 		GpuSolver.Step(MoveTemp(Steps));
-		FlushRenderingCommands(); // RT가 dispatch + 리드백 copy를 처리하도록 진행.
+		// RT가 dispatch + 리드백 copy를 처리하도록 진행.
+		FlushRenderingCommands();
 	}
 
 	// 마지막 step의 리드백을 drain: consume은 다음 Step의 loop1에서 일어나므로 NumSub=0 step으로 펌프한다.
@@ -124,7 +133,8 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	{
 		FlushRenderingCommands();
 		TArray<FRopeGPUResidentStep> Drain;
-		Drain.Add(MakeStep(GpuSim, 0, 1.0f / 60.0f)); // NumSub=0 → 적분 없이 직전 리드백만 consume.
+		// NumSub=0 → 적분 없이 직전 리드백만 consume.
+		Drain.Add(MakeStep(GpuSim, 0, 1.0f / 60.0f));
 		GpuSolver.Step(MoveTemp(Drain));
 		FlushRenderingCommands();
 		GpuSolver.GetLatest(Latest);
@@ -164,7 +174,8 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	}
 	AddInfo(FString::Printf(TEXT("CPU↔GPU 최대 노드 편차: %.2f cm (RopeLength %.0f)"), MaxDev, Length));
 	TestTrue(FString::Printf(TEXT("CPU↔GPU max node deviation %.2f cm within tolerance"), MaxDev),
-		MaxDev < Length * 0.25f); // 정착 hanging 형상은 가까워야 함(관대한 상한).
+		// 정착 hanging 형상은 가까워야 함(관대한 상한).
+		MaxDev < Length * 0.25f);
 
 	return true;
 }
@@ -250,7 +261,8 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 			Pump(MoveTemp(Noop));
 		}
 		SyncGPU();
-		Pump(MakeStep(0, 1.0f / 60.0f)); // 마지막 consume(오버라이드 없음 — dispatch 없이 회수만).
+		// 마지막 consume(오버라이드 없음 — dispatch 없이 회수만).
+		Pump(MakeStep(0, 1.0f / 60.0f));
 
 		TMap<uint32, FRopeResidentLatest> Latest;
 		GpuSolver.GetLatest(Latest);
@@ -394,7 +406,8 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 		Step.SeedPrevPositions = Sim.PrevPositions;
 		Step.InvMass           = Sim.InvMass;
 		Step.SegmentLength     = Sim.SegmentLength;
-		Step.NumSub            = 0; // 적분 없음 — 시드 위치 그대로 감지.
+		// 적분 없음 — 시드 위치 그대로 감지.
+		Step.NumSub            = 0;
 		Step.FixedDt           = 1.0f / 60.0f;
 		Step.bDetectContacts   = true;
 		Step.ContactRadius     = ContactRadius;
@@ -838,7 +851,8 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 		{
 			const int32 v = ring * VertsPerRing + side;
 			const float Angle = 2.0f * PI * static_cast<float>(side) / static_cast<float>(NumSides);
-			const FVector3f Radial(0.0f, FMath::Cos(Angle), FMath::Sin(Angle)); // U=+Y, V=+Z
+			// U=+Y, V=+Z
+			const FVector3f Radial(0.0f, FMath::Cos(Angle), FMath::Sin(Angle));
 			const FVector3f ExpPos = Centerline[ring] + Radial * Radius;
 			const FVector3f GpuPos(OutPos[v * 3 + 0], OutPos[v * 3 + 1], OutPos[v * 3 + 2]);
 			MaxPosDev = FMath::Max(MaxPosDev, (GpuPos - ExpPos).Size());
@@ -847,8 +861,10 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 			const FVector3f TX(Snorm(OutTan[v * 4 + 0], 0), Snorm(OutTan[v * 4 + 0], 1), Snorm(OutTan[v * 4 + 1], 0));
 			const FVector3f TZ(Snorm(OutTan[v * 4 + 2], 0), Snorm(OutTan[v * 4 + 2], 1), Snorm(OutTan[v * 4 + 3], 0));
 			MaxTanLenDev = FMath::Max(MaxTanLenDev, FMath::Abs(TZ.Size() - 1.0f));
-			MaxTxDev = FMath::Max(MaxTxDev, (TX - FVector3f(1, 0, 0)).Size());       // 전방접선 +X
-			MaxTanLenDev = FMath::Max(MaxTanLenDev, (TZ - Radial).Size());            // 법선 = radial
+			// 전방접선 +X
+			MaxTxDev = FMath::Max(MaxTxDev, (TX - FVector3f(1, 0, 0)).Size());
+			// 법선 = radial
+			MaxTanLenDev = FMath::Max(MaxTanLenDev, (TZ - Radial).Size());
 
 			const float ExpU = static_cast<float>(ring) / static_cast<float>(NumRings - 1);
 			const float ExpV = static_cast<float>(side) / static_cast<float>(NumSides);
@@ -883,7 +899,8 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 
 	const int32 NumNodes = 5;
 	const int32 Subdiv = 3;
-	const int32 NumRings = (NumNodes - 1) * Subdiv + 1; // 13
+	// 13
+	const int32 NumRings = (NumNodes - 1) * Subdiv + 1;
 	const int32 NumSides = 6;
 	const float Radius = 4.0f;
 	const int32 VertsPerRing = NumSides + 1;
@@ -924,7 +941,8 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 		}
 	}
 
-	TArray<float> PosA, PosB; // A=B1(CPU 스무딩), B=resident(GPU 스무딩)
+	// A=B1(CPU 스무딩), B=resident(GPU 스무딩)
+	TArray<float> PosA, PosB;
 	PosA.SetNumZeroed(NumVerts * 3);
 	PosB.SetNumZeroed(NumVerts * 3);
 

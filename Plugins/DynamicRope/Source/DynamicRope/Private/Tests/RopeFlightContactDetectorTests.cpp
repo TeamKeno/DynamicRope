@@ -185,7 +185,8 @@ bool FRopeFlightWrapDirectionScoreTest::RunTest(const FString& Parameters)
 	FRopeFlightContactDetector::FParams DtParams = Params;
 	DtParams.DeltaTime = 0.02f;
 	Sim.PrevPositions[1] = FVector(105.0f, 0.0f, 0.0f);
-	Candidate.SurfaceVelocity = FVector(-250.0f, 0.0f, 0.0f); // -250cm/s × 0.02s = -5cm/프레임
+	// -250cm/s × 0.02s = -5cm/프레임
+	Candidate.SurfaceVelocity = FVector(-250.0f, 0.0f, 0.0f);
 	Candidates = { Candidate };
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DtParams, Candidates);
 	TestTrue(TEXT("co-moving surface yields no tangential slide"),

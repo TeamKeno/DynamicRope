@@ -141,7 +141,8 @@ bool FRopeRagdollDwellResetTest::RunTest(const FString& Parameters)
 {
 	// 노드 x = 0,20,...,140. 반경 25 + ContactRadius 3 = reach 28 → (60,0,0) 구는 노드 40/60/80 접촉(3개).
 	const FVector NearCenter(60.0f, 0.0f, 0.0f);
-	const FVector FarAway(0.0f, 0.0f, 100000.0f); // 접촉 불가 위치(비활성화용)
+	// 접촉 불가 위치(비활성화용)
+	const FVector FarAway(0.0f, 0.0f, 100000.0f);
 
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	USkeletalMeshComponent* Mesh = NewObject<USkeletalMeshComponent>();
@@ -203,10 +204,12 @@ bool FRopeRagdollFrictionClampTest::RunTest(const FString& Parameters)
 
 		USkeletalMeshComponent* Mesh = NewObject<USkeletalMeshComponent>();
 		RopeTest::FSphereMockCollider Body(FVector(60.0f, 0.0f, -200.0f), 200.0f, FName("body"), Mesh);
-		Body.SurfaceVelocity = FVector(SpikeSpeed, 0.0f, 0.0f); // 포즈 팝: 접선(+X) 스파이크
+		// 포즈 팝: 접선(+X) 스파이크
+		Body.SurfaceVelocity = FVector(SpikeSpeed, 0.0f, 0.0f);
 		TArray<IRopeCollider*> Colliders = { &Body };
 
-		FRopeSolverConfig Config; // 기본값: Friction 0.5, CollisionRadius 2, 중력 -Z
+		// 기본값: Friction 0.5, CollisionRadius 2, 중력 -Z
+		FRopeSolverConfig Config;
 		FRopeXPBDSolver Solver;
 		Solver.Step(Sim, Config, Colliders, 1.0f / 60.0f);
 
@@ -268,7 +271,8 @@ bool FRopeRagdollRelativeMotionTest::RunTest(const FString& Parameters)
 
 	FRopeFlightContactDetector::FParams Params;
 	Params.MinLatchNodes = 2;
-	Params.DeltaTime = 0.02f; // 단위 환산 검증을 위해 dt 명시(50fps).
+	// 단위 환산 검증을 위해 dt 명시(50fps).
+	Params.DeltaTime = 0.02f;
 
 	TArray<FRopeContactCandidate> Candidates;
 	Candidates.Add(MakeSpikeCandidate(3, 500.0f));

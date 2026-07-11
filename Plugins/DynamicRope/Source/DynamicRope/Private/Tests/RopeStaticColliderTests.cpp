@@ -266,7 +266,8 @@ bool FRopeConvexSurfaceVelocityTest::RunTest(const FString& Parameters)
 {
 	const FVector H(50.0);
 	FRopeConvexCollider Cv(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H), FQuat::Identity, FVector(100.0, 0.0, 0.0));
-	Cv.PrevTrans = FVector(90.0, 0.0, 0.0); // 이번 프레임 +X로 10cm 이동
+	// 이번 프레임 +X로 10cm 이동
+	Cv.PrevTrans = FVector(90.0, 0.0, 0.0);
 	Cv.InvDeltaTime = 60.0f;
 
 	// 재질점 로컬 (50,0,0): curr 월드 (150,0,0), prev 월드 (140,0,0). 표면 속도 +X 600cm/s.

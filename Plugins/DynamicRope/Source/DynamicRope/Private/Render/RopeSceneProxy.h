@@ -76,8 +76,10 @@ class FRopeGpuTangentBuffer final : public FVertexBuffer
 {
 public:
 	int32 NumVertices = 0;
-	FShaderResourceViewRHIRef SRV; // PF_R16G16B16A16_SNORM(매뉴얼 페치)
-	FUnorderedAccessViewRHIRef UAV; // PF_R32_UINT(컴퓨트 write)
+	// PF_R16G16B16A16_SNORM(매뉴얼 페치)
+	FShaderResourceViewRHIRef SRV;
+	// PF_R32_UINT(컴퓨트 write)
+	FUnorderedAccessViewRHIRef UAV;
 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	virtual void ReleaseRHI() override;
 };
@@ -87,8 +89,10 @@ class FRopeGpuTexCoordBuffer final : public FVertexBuffer
 {
 public:
 	int32 NumVertices = 0;
-	FShaderResourceViewRHIRef SRV; // PF_G32R32F(매뉴얼 페치)
-	FUnorderedAccessViewRHIRef UAV; // PF_R32_FLOAT(컴퓨트 write)
+	// PF_G32R32F(매뉴얼 페치)
+	FShaderResourceViewRHIRef SRV;
+	// PF_R32_FLOAT(컴퓨트 write)
+	FUnorderedAccessViewRHIRef UAV;
 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	virtual void ReleaseRHI() override;
 };
@@ -142,10 +146,13 @@ private:
 	// proxy 생성 시점에 한 번 결정(링 수는 proxy 수명 동안 고정).
 	bool bUseGpuTube = false;
 	FRopeGpuPositionBuffer GpuPositionBuffer;
-	FRopeGpuTangentBuffer  GpuTangentBuffer;  // B2-full
-	FRopeGpuTexCoordBuffer GpuTexCoordBuffer; // B2-full
+	// B2-full
+	FRopeGpuTangentBuffer  GpuTangentBuffer;
+	// B2-full
+	FRopeGpuTexCoordBuffer GpuTexCoordBuffer;
 	FRopeCenterlineBuffer  CenterlineBuffer;
-	bool bGpuStaticsBuilt = false; // B2-full: index topology + white color를 GPU 경로에서 1회만 채운다.
+	// B2-full: index topology + white color를 GPU 경로에서 1회만 채운다.
+	bool bGpuStaticsBuilt = false;
 
 	/** B2-full: GPU 튜브 경로의 index topology + 상수 color(white)를 1회 채운다(매 프레임 CPU BuildTube 대체). */
 	void BuildGpuStaticBuffers(FRHICommandListBase& RHICmdList);
@@ -157,12 +164,17 @@ private:
 	FRopeGPUSolver* SolverPtr = nullptr;
 	uint32 RopeId = 0;
 
-	int32 NumNodes;  // 시뮬 센터라인 노드 수(= Component->NumParticles). Data.Points가 이 개수여야 한다.
-	int32 Subdiv;    // 렌더 튜브 세그먼트당 Catmull-Rom 서브분할(1=off). Component->TubeSmoothingSubdiv(링 상한 자동 하향).
-	int32 NumRings;  // 렌더 링(스무딩된 센터라인) 수 = (NumNodes-1)*Subdiv+1. vertex/index 토폴로지 기준.
+	// 시뮬 센터라인 노드 수(= Component->NumParticles). Data.Points가 이 개수여야 한다.
+	int32 NumNodes;
+	// 렌더 튜브 세그먼트당 Catmull-Rom 서브분할(1=off). Component->TubeSmoothingSubdiv(링 상한 자동 하향).
+	int32 Subdiv;
+	// 렌더 링(스무딩된 센터라인) 수 = (NumNodes-1)*Subdiv+1. vertex/index 토폴로지 기준.
+	int32 NumRings;
 	int32 NumSides;
 	float Radius;
-	float SmoothParam; // Catmull-Rom knot α(0=uniform, 0.5=centripetal). Component->TubeSmoothingAlpha. 생성 시 1회.
-	bool  bWriteVelocity; // velocity 버퍼 기록 여부(UDynamicRopeSettings::bWriteVelocity 스냅샷). GetViewRelevance가 읽음.
+	// Catmull-Rom knot α(0=uniform, 0.5=centripetal). Component->TubeSmoothingAlpha. 생성 시 1회.
+	float SmoothParam;
+	// velocity 버퍼 기록 여부(UDynamicRopeSettings::bWriteVelocity 스냅샷). GetViewRelevance가 읽음.
+	bool  bWriteVelocity;
 	bool  bHasData = false;
 };
