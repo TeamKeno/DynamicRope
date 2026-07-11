@@ -2363,9 +2363,10 @@ namespace
 
 	// 캐릭터 무브먼트가 지금 힘을 소비할 수 있는가. MOVE_None(DisableMovement — 랙돌 셋업 관례)이면
 	// AddForce가 누적만 되고 소비되지 않아 "성공한 척" 힘이 사라진다 — 그 경우 다른 수신자로 넘긴다.
-	UCharacterMovementComponent* GetForceConsumingMovement(const USkeletalMeshComponent* Mesh)
+	// wrap 대상 액터를 직접 받는다(대상이 스켈레탈/정적/물리프랍 무엇이든 무관 — 소유 액터 기준 판정).
+	UCharacterMovementComponent* GetForceConsumingMovement(const AActor* Owner)
 	{
-		const ACharacter* Character = Cast<ACharacter>(Mesh->GetOwner());
+		const ACharacter* Character = Cast<ACharacter>(Owner);
 		UCharacterMovementComponent* Movement = Character ? Character->GetCharacterMovement() : nullptr;
 		return (Movement && Movement->MovementMode != MOVE_None) ? Movement : nullptr;
 	}
@@ -2405,10 +2406,11 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	const float MaxStep = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f) * DeltaTime; // 이번 프레임 최대 이동(cm)
 	const float StepLen = (MaxStep > 0.0f) ? FMath::Min(Overshoot * Response, MaxStep) : (Overshoot * Response);
 
-	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화). Pull/Tether는 스켈레탈 물리 본 대상이므로
-	// 스켈레탈로 Cast — 정적 대상이면 null이라 아래에서 조기 반환한다(정적 기둥엔 힘을 인가하지 않음).
-	USkeletalMeshComponent* Mesh = const_cast<USkeletalMeshComponent*>(Cast<USkeletalMeshComponent>(WrapController.State.Mesh.Get()));
-	if (!Mesh)
+	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화). 대상 타입을 가리지 않고 아래 수신자 체인
+	// (스켈레탈 본 → 시뮬 프리미티브 → 캐릭터 무브먼트/스윕)으로 견인한다 — 가벼운 물리 프랍/정적 대상도
+	// 스켈레탈과 동일 로직으로 끌린다. null은 대상 컴포넌트가 파괴로 소실된 경우뿐(그땐 Hold가 이미 release).
+	USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
+	if (!MeshComp)
 	{
 		return;
 	}
@@ -2418,7 +2420,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// "감으면 끌려 올라감"), 중간은 비율 분할. 양끝이 서로를 향해 각자 몫만큼 움직이므로 합이 초과분을
 	// 넘지 않는다(과수렴 없음). 자기 자신에 감긴 로프(owner==대상)는 분배가 무의미 — 전량 대상 경로로.
 	const float TargetShare = FMath::Clamp(WrapConfig.TetherTargetShare, 0.0f, 1.0f);
-	const bool bSelfWrap = (GetOwner() != nullptr && Mesh->GetOwner() == GetOwner());
+	const bool bSelfWrap = (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner());
 	const float TargetStep = bSelfWrap ? StepLen : StepLen * TargetShare;
 	const float WielderStep = bSelfWrap ? 0.0f : StepLen * (1.0f - TargetShare);
 
@@ -2477,21 +2479,38 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	if (TargetStep > KINDA_SMALL_NUMBER)
 	{
 		bool bHandled = false;
-		// 감긴 본이 시뮬 중이어도 메시 전체가 시뮬(풀 랙돌)일 때만 본 속도 톱업으로 처리한다. 부분 랙돌
-		// (메시 루트 바디는 키네마틱, 서브트리만 시뮬)은 시뮬 본이 키네마틱 부모에 구속돼 있어 —
-		// 키네마틱은 사실상 무한질량 — 본에 준 속도가 구속에 다시 잡아먹혀 액터가 끌려오지 않는다.
-		// 그 경우 아래 액터 오프셋 경로로 떨어뜨려 이동체를 직접 회수한다(시뮬 팔다리는 구속으로 따라온다).
-		// 인가 본은 감긴 본에서 부모 체인 승격(FindNearestSimulatingBone) — 바디 없는 본(트위스트 등) 대응.
-		if (Mesh->IsSimulatingPhysics())
+		// (1) 스켈레탈 + 풀 랙돌: 감긴 본이 시뮬 중이어도 메시 전체가 시뮬(풀 랙돌)일 때만 본 속도 톱업으로
+		// 처리한다. 부분 랙돌(메시 루트 바디는 키네마틱, 서브트리만 시뮬)은 시뮬 본이 키네마틱 부모에
+		// 구속돼 있어 — 키네마틱은 사실상 무한질량 — 본에 준 속도가 구속에 다시 잡아먹혀 액터가 끌려오지
+		// 않는다. 그 경우 아래 프리미티브/액터 오프셋 경로로 떨어뜨려 이동체를 직접 회수한다(시뮬 팔다리는
+		// 구속으로 따라온다). 인가 본은 감긴 본에서 부모 체인 승격(FindNearestSimulatingBone) — 바디 없는
+		// 본(트위스트 등) 대응.
+		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
 		{
-			const FName SimBone = FindNearestSimulatingBone(Mesh, PullDrive.LastPullSample.Bone);
-			if (!SimBone.IsNone())
+			if (Skel->IsSimulatingPhysics())
 			{
-				TopUpVelocity(Mesh, SimBone, DirToAim, TargetStep * InvDt);
-				bHandled = true;
+				const FName SimBone = FindNearestSimulatingBone(Skel, PullDrive.LastPullSample.Bone);
+				if (!SimBone.IsNone())
+				{
+					TopUpVelocity(Skel, SimBone, DirToAim, TargetStep * InvDt);
+					bHandled = true;
+				}
 			}
 		}
-		AActor* TargetOwner = Mesh->GetOwner();
+		// (2) wrap 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등): 컴포넌트 속도 톱업으로 견인.
+		if (!bHandled)
+		{
+			if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
+			{
+				if (Prim->IsSimulatingPhysics())
+				{
+					TopUpVelocity(Prim, NAME_None, DirToAim, TargetStep * InvDt);
+					bHandled = true;
+				}
+			}
+		}
+		AActor* TargetOwner = MeshComp->GetOwner();
+		// (3) 소유 액터 루트 프리미티브가 시뮬 중(물리 액터에 붙은 컴포넌트 구성).
 		if (!bHandled && TargetOwner)
 		{
 			if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(TargetOwner->GetRootComponent()))
@@ -2503,9 +2522,9 @@ void URopeComponent::UpdateTether(float DeltaTime)
 				}
 			}
 		}
+		// (4) 캐릭터/비시뮬 대상: 속도 톱업(캐릭터) 또는 스윕 위치 보정 폴백. step이 클램프돼 텔레포트 없음.
 		if (!bHandled && TargetOwner)
 		{
-			// 캐릭터/비시뮬 대상: 속도 톱업(캐릭터) 또는 스윕 위치 보정 폴백. step이 클램프돼 텔레포트 없음.
 			ApplyNonSimCorrection(TargetOwner, DirToAim, TargetStep);
 		}
 	}
@@ -2566,47 +2585,60 @@ USkeletalMeshComponent* URopeComponent::GetWrappedMesh() const
 
 void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample& Pull)
 {
-	// wrap 대상 mesh(cross-actor 가능). 계약상 로프는 대상을 읽기만 하므로 weak가 const지만,
+	// wrap 대상 컴포넌트(cross-actor 가능). 계약상 로프는 대상을 읽기만 하므로 weak가 const지만,
 	// Pull은 의도된 게임플레이 개입(힘 인가)이라 여기서만 명시적으로 non-const로 푼다.
-	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화). Pull/Tether는 스켈레탈 물리 본 대상이므로
-	// 스켈레탈로 Cast — 정적 대상이면 null이라 아래에서 조기 반환한다(정적 기둥엔 힘을 인가하지 않음).
-	USkeletalMeshComponent* Mesh = const_cast<USkeletalMeshComponent*>(Cast<USkeletalMeshComponent>(WrapController.State.Mesh.Get()));
-	if (!Mesh)
+	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화) — 대상 타입을 가리지 않고 수신자 체인으로
+	// 힘을 인가한다(가벼운 물리 프랍/정적 대상도 스켈레탈과 동일 로직). null은 대상 소실(파괴)일 때뿐.
+	USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
+	if (!MeshComp)
 	{
 		return;
 	}
+	AActor* Owner = MeshComp->GetOwner();
 
-	// 1) 감긴 본(부모 체인 승격 포함)이 물리 시뮬 중(래그돌/물리 프랍)이면 그 바디에 직접 —
+	// 1) 스켈레탈: 감긴 본(부모 체인 승격 포함)이 물리 시뮬 중(래그돌/물리 프랍)이면 그 바디에 직접 —
 	//    가장 정확한 인가점. 감긴 본 자체에 바디가 없으면(트위스트 본 등) 가장 가까운 시뮬 부모 바디로.
-	const FName SimBone = FindNearestSimulatingBone(Mesh, Pull.Bone);
-	if (!SimBone.IsNone())
+	if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
 	{
-		Mesh->AddForceAtLocation(Force, Pull.WorldPoint, SimBone);
-		// 부분 랙돌(메시 루트 바디는 키네마틱): 시뮬 본에 준 힘은 키네마틱 부모 구속(무한질량)이 흡수해
-		// 액터로 전달되지 않는다. 캐릭터가 여전히 무브먼트로 구동 중이면 이동체에도 같은 힘을 줘 실제로
-		// 끌리게 한다(본 인가는 팔다리가 당겨지는 시각 반응, 무브먼트 인가는 몸통 견인 — 역할이 다르다).
-		// 풀 랙돌은 루트 바디가 시뮬이라 여기로 들어오지 않는다(이중 인가 없음).
-		if (!Mesh->IsSimulatingPhysics())
+		const FName SimBone = FindNearestSimulatingBone(Skel, Pull.Bone);
+		if (!SimBone.IsNone())
 		{
-			if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Mesh))
+			Skel->AddForceAtLocation(Force, Pull.WorldPoint, SimBone);
+			// 부분 랙돌(메시 루트 바디는 키네마틱): 시뮬 본에 준 힘은 키네마틱 부모 구속(무한질량)이 흡수해
+			// 액터로 전달되지 않는다. 캐릭터가 여전히 무브먼트로 구동 중이면 이동체에도 같은 힘을 줘 실제로
+			// 끌리게 한다(본 인가는 팔다리가 당겨지는 시각 반응, 무브먼트 인가는 몸통 견인 — 역할이 다르다).
+			// 풀 랙돌은 루트 바디가 시뮬이라 여기로 들어오지 않는다(이중 인가 없음).
+			if (!Skel->IsSimulatingPhysics())
 			{
-				Movement->AddForce(Force);
+				if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Owner))
+				{
+					Movement->AddForce(Force);
+				}
 			}
+			return;
 		}
-		return;
 	}
 
 	// 2) 캐릭터면 무브먼트에 힘 — 애니메이션 구동 본에는 힘을 줄 수 없으므로 이동체 전체를 견인한다
 	//    (PoC 4.2: 본/루트에 단순 힘 전달까지. 팔다리 IK/래그돌 반응은 후속).
 	//    무브먼트가 힘을 실제로 소비할 때만(MOVE_None 제외) — 아니면 3)/무수신 경고로 떨어져 원인이 보인다.
-	if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Mesh))
+	if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Owner))
 	{
 		Movement->AddForce(Force);
 		return;
 	}
 
-	// 3) 그 외: 시뮬 중인 루트 프리미티브(물리 액터에 붙은 skeletal mesh 구성).
-	AActor* Owner = Mesh->GetOwner();
+	// 3) wrap 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등)면 그 바디에 직접.
+	if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
+	{
+		if (Prim->IsSimulatingPhysics())
+		{
+			Prim->AddForceAtLocation(Force, Pull.WorldPoint);
+			return;
+		}
+	}
+
+	// 4) 그 외: 시뮬 중인 루트 프리미티브(물리 액터에 붙은 컴포넌트 구성).
 	if (UPrimitiveComponent* Root = Owner ? Cast<UPrimitiveComponent>(Owner->GetRootComponent()) : nullptr)
 	{
 		if (Root->IsSimulatingPhysics())
@@ -2616,14 +2648,14 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		}
 	}
 
-	// 수신자 없음(시뮬 바디 없는 본 체인 + 무브먼트 비활성/비캐릭터 + 비시뮬 루트): 힘이 조용히
-	// 사라지는 걸 wrap당 1회 알린다.
+	// 수신자 없음(시뮬 바디 없는 본 체인/비시뮬 컴포넌트 + 무브먼트 비활성/비캐릭터 + 비시뮬 루트): 힘이
+	// 조용히 사라지는 걸 wrap당 1회 알린다.
 	if (!PullDrive.bLoggedPullNoReceiver)
 	{
 		PullDrive.bLoggedPullNoReceiver = true;
 		UE_LOG(LogDynamicRope, Warning,
-			TEXT("[%s] Pull has no force receiver: mesh=%s bone=%s has no simulating body up its parent chain, owner=%s has no force-consuming CharacterMovement (not a Character, or movement disabled) and its root is not simulating — pull force is dropped."),
-			*GetName(), *Mesh->GetName(), *Pull.Bone.ToString(), *GetNameSafe(Owner));
+			TEXT("[%s] Pull has no force receiver: target=%s bone=%s has no simulating body up its parent chain, owner=%s has no force-consuming CharacterMovement (not a Character, or movement disabled) and its root is not simulating — pull force is dropped."),
+			*GetName(), *MeshComp->GetName(), *Pull.Bone.ToString(), *GetNameSafe(Owner));
 	}
 }
 
