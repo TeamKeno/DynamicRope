@@ -22,7 +22,11 @@ class UBodySetup;
 class UPrimitiveComponent;
 class UInstancedStaticMeshComponent;
 
-UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
+// 에디터에 노출하지 않는다(Add Component 목록/BP 서브클래싱 제외) — 이 provider는 ARopeController가
+// CreateDefaultSubobject로 품는 컨트롤러 전용 서브오브젝트이고, 서브시스템이 월드당 1개만 자동
+// 스폰하므로 수동 배치 대상이 아니다. 튜닝은 컨트롤러(또는 그 서브클래스) 디테일 패널에서
+// IgnoredComponents로 한다. NotBlueprintable = BP 서브클래스 금지(확장은 ARopeController 서브클래싱).
+UCLASS(NotBlueprintable)
 class DYNAMICROPE_API URopeStaticBodyProvider : public UActorComponent, public IRopeColliderProvider
 {
 	GENERATED_BODY()
