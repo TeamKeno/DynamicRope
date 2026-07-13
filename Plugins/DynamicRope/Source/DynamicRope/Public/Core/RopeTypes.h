@@ -665,18 +665,15 @@ struct FRopeSolverConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TipFrictionScale = 1.0f;
 
-	/** Collision query radius in cm. The solver keeps nodes this far off contact surfaces. */
+	/** 충돌 질의 반지름(cm) — 솔버가 노드를 접촉 표면에서 이만큼 띄운다. **0 = auto: 렌더 튜브 Radius를
+	 *  그대로 사용**(반지름 3종 자동 정합 — 2026-07-13 표면 감사 B-2). 해석은 컴포넌트 경계
+	 *  (GetEffectiveCollisionRadius)에서 1회 — 솔버/GPU step은 해석된 값만 받는다. 기본값이 0이 아닌 이유:
+	 *  컴포넌트 없이 이 구조체를 직접 쓰는 소비자(유닛 테스트/커스텀 솔버 호출)의 계약 보존. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", Units = "cm"))
 	float CollisionRadius = 2.0f;
 
-	/**
-	 * 엔진 Global Distance Field로 정적 월드 지오메트리(벽/바닥)에서 로프를 밀어낸다. GPU 경로(씬 그래프
-	 * dispatch)에서만 동작. 프로젝트에 Generate Mesh Distance Fields 필요.
-	 * 본 귀속·표면속도 없음(정적 월드 광역 밀어내기 보완재) — per-bone SDF의 대체가 아니다. 켜져 있는 동안
-	 * 엔진이 GDF를 온디맨드로 빌드한다. 밀어내기 반경/마찰은 CollisionRadius/Friction/TipFrictionScale 공유.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver")
-	bool bUseWorldGDF = false;
+	// NOTE: bUseWorldGDF는 URopeComponent 직속("Rope|Collision" 카테고리)으로 이사했다
+	// (2026-07-13 표면 감사 CL-4 — 충돌 도메인 응집: bIncludeOwnerColliders와 한자리).
 
 	/** Swept collision sample spacing in cm. Lower values reduce tunneling at higher query cost. */
 	float SweepStep = 2.0f;
@@ -738,7 +735,10 @@ struct FRopeWrapConfig
 {
 	GENERATED_BODY()
 
-	/** 컨택트 결정 query에 사용하는 노드 반지름(cm). 시각용 튜브 반지름과는 별개. */
+	/** 컨택트 결정 query에 사용하는 노드 반지름(cm). **0 = auto: 렌더 튜브 Radius × 1.5**
+	 *  (반지름 3종 자동 정합 — 표면 감사 B-2; 명시값을 넣으면 그 값). 해석은 컴포넌트 경계
+	 *  (GetEffectiveContactRadius)에서 — 감지 파라미터/GPU step/preview/경로 빌드가 해석된 값을 받는다.
+	 *  기본값이 0이 아닌 이유: 컴포넌트 없이 직접 쓰는 소비자(유닛 테스트 등)의 계약 보존. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
 	float ContactRadius = 3.0f;
 

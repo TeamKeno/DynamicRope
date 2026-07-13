@@ -308,7 +308,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputAction> ReelOutAction = nullptr;
 
-	//~ Tension(장력 — wielder 몫 테더와 조합) ------------------------------
+	//~ Movement(테더 견인에 대한 캐릭터 이동 반응) --------------------------
+	// 종전 카테고리명 "Rope|Tension"은 로프 장력 설정과 혼동돼 개명(2026-07-13 표면 감사 C).
 	// HoldConfig.TetherTargetShare < 1이면 로프가 wielder를 앵커 쪽으로 끌어당긴다(수렴형 테더 분배).
 	// 이 섹션은 그 견인의 캐릭터 이동 정책: 물리(플러그인 코어)가 아니라 게임 반응이라 wielder에 둔다.
 
@@ -317,15 +318,15 @@ public:
 	 * 충분하고 초과분이 쌓여 있으면 자동으로 Falling 전환해 몸이 뜨게 한다(착지 복귀는 엔진이 처리).
 	 * 되감기(ReelIn)와 조합하면 입체기동식 "감으면 끌려 올라감"이 된다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement")
 	bool bAutoGroundExitOnUpwardPull = true;
 
 	/** 상향 판정 임계: 견인 방향(손→앵커, 단위 벡터)의 Z 성분이 이 값 이상일 때만 지상 이탈. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bAutoGroundExitOnUpwardPull"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bAutoGroundExitOnUpwardPull"))
 	float GroundExitUpDot = 0.35f;
 
 	/** 지상 이탈에 필요한 최소 테더 초과분(cm). 경계 지터로 모드가 퍼덕이는 것을 막는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bAutoGroundExitOnUpwardPull"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bAutoGroundExitOnUpwardPull"))
 	float GroundExitMinOvershoot = 10.0f;
 
 	/**
@@ -333,11 +334,11 @@ public:
 	 * 살린다. CharacterMovement 기본 AirControl(0.05)로는 스윙 방향을 거의 못 바꾼다. 스윙이 끝나면
 	 * (착지/release) 저장해 둔 원래 값으로 복원한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement")
 	bool bBoostAirControlWhileSwinging = true;
 
 	/** 스윙 중 적용할 AirControl(0~1). 0.35~1 권장 — 1이면 공중에서 지상급 조향. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tension", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bBoostAirControlWhileSwinging"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bBoostAirControlWhileSwinging"))
 	float SwingAirControl = 1.0f;
 
 	//~ Animation(선택) ----------------------------------------------------

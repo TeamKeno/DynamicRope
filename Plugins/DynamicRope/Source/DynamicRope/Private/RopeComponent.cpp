@@ -322,7 +322,7 @@ bool URopeComponent::FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, 
 		FMath::Min(MaxPreviewRadialSamples, TotalLimitedRadialSamples));
 	const float EffectiveQueryRadius = QueryRadius > KINDA_SMALL_NUMBER
 		? QueryRadius
-		: FMath::Max(Radius, WrapConfig.ContactRadius);
+		: FMath::Max(Radius, GetEffectiveContactRadius());
 
 	FBox PreviewBounds(EForceInit::ForceInit);
 	PreviewBounds += Preview.Origin;
@@ -388,7 +388,7 @@ FRopeAimTargeting::FQueryContext URopeComponent::MakeAimQueryContext() const
 	FRopeAimTargeting::FQueryContext Ctx;
 	Ctx.Colliders = &SimFrame.FrameColliders;
 	Ctx.FallbackRayLength = FMath::Max(Sim.RopeLength, RopeLength);
-	Ctx.FallbackQueryRadius = FMath::Max(Radius, WrapConfig.ContactRadius);
+	Ctx.FallbackQueryRadius = FMath::Max(Radius, GetEffectiveContactRadius());
 	return Ctx;
 }
 
@@ -475,6 +475,7 @@ bool URopeComponent::BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) cons
 		Input.Sim = &Sim;
 		Input.Colliders = &SimFrame.FrameColliders;
 		Input.WrapConfig = WrapConfig;
+		Input.WrapConfig.ContactRadius = GetEffectiveContactRadius(); // 0=auto 해석 승계
 		Input.PathMode = GetWrappingPathMode();
 		Input.RopeRadius = Radius;
 		Input.RopeNumSides = NumSides;
@@ -571,6 +572,7 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 		Input.Colliders = &SimFrame.FrameColliders;
 		Input.ThrowContext = ResolveThrowContext(ThrowContext);
 		Input.WrapConfig = WrapConfig;
+		Input.WrapConfig.ContactRadius = GetEffectiveContactRadius(); // 0=auto 해석 승계
 		Input.PathMode = GetWrappingPathMode();
 		Input.RopeRadius = Radius;
 		Input.RopeNumSides = NumSides;
@@ -591,6 +593,7 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 		Input.Sim = &Sim;
 		Input.Colliders = &SimFrame.FrameColliders;
 		Input.WrapConfig = WrapConfig;
+		Input.WrapConfig.ContactRadius = GetEffectiveContactRadius(); // 0=auto 해석 승계
 		Input.PathMode = GetWrappingPathMode();
 		Input.RopeRadius = Radius;
 		Input.RopeNumSides = NumSides;
@@ -627,6 +630,7 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	Input.Colliders = &SimFrame.FrameColliders;
 	Input.ThrowContext = ResolveThrowContext(ThrowContext);
 	Input.WrapConfig = WrapConfig;
+	Input.WrapConfig.ContactRadius = GetEffectiveContactRadius(); // 0=auto 해석 승계
 	Input.PathMode = GetWrappingPathMode();
 	Input.RopeRadius = Radius;
 	Input.RopeNumSides = NumSides;
@@ -874,6 +878,8 @@ void URopeComponent::SolveSimFrame(float DeltaTime)
 	// 거리 LOD: 원거리에서 constraint iteration만 감쇠(substep은 유지 — 안정성은 substep이 지배).
 	FRopeSolverConfig LODConfig = SolverConfig;
 	LODConfig.Iterations = GetLODScaledIterations();
+	// 반지름 auto(0=렌더 Radius) 해석 — 솔버는 항상 해석된 값만 받는다(GPU step은 서브시스템이 동일 처리).
+	LODConfig.CollisionRadius = GetEffectiveCollisionRadius();
 	// Aim-hit collision-free solve도 solver 자체는 실행하되 빈 목록을 넘겨 push-out만 제외한다.
 	const TArray<IRopeCollider*> NoSolveColliders;
 	const TArray<IRopeCollider*>& SolveColliders = SimFrame.bSolveCollisionsThisFrame
@@ -1421,7 +1427,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 	// 닿았는지(법선)를 기록한다. GPU 런타임은 접촉을 리드백하지 않으므로 여기서 CPU로 다시 질의한다. 질의 반경
 	// = CollisionRadius + 여유라 정착(표면에서 ~반경 떨어져 쉬는) 노드도 잡힌다. 노드당 가장 깊은 접촉 1개만.
 	Snapshot.NodeContacts.Reset();
-	const float DebugQueryRadius = SolverConfig.CollisionRadius + 4.0f;
+	const float DebugQueryRadius = GetEffectiveCollisionRadius() + 4.0f;
 	for (int32 i = 0; i < Sim.Positions.Num(); ++i)
 	{
 		const FVector NodePos = Sim.Positions[i];
@@ -1748,7 +1754,7 @@ float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, in
 FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float DeltaTime) const
 {
 	FRopeFlightContactDetector::FParams Params;
-	Params.ContactRadius = WrapConfig.ContactRadius;
+	Params.ContactRadius = GetEffectiveContactRadius();
 	Params.RopeRadius = Radius;
 	Params.PredictiveContactFrames = WrapConfig.PredictiveContactFrames;
 	Params.MinLatchNodes = WrapConfig.MinLatchNodes;

@@ -111,13 +111,13 @@ namespace
 		Step.Iterations        = Cfg.Iterations;
 		Step.CollisionPasses   = Cfg.CollisionPassesPerSubstep;
 		Step.Gravity           = Cfg.Gravity;
+		// CollisionRadius는 auto(0=렌더 Radius) 해석이 필요해 호출부가 Rope.GetEffectiveCollisionRadius로
+		// 덮는다(bUseWorldGDF도 컴포넌트 직속으로 이사해 호출부 소관 — 표면 감사 CL-4).
 		Step.CollisionRadius   = Cfg.CollisionRadius;
 		Step.Friction          = Cfg.Friction;
 		Step.TipFrictionScale  = Cfg.TipFrictionScale;
 		Step.SweepStep         = Cfg.SweepStep;
 		Step.MaxSweepSamples   = Cfg.MaxSweepSamples;
-		// Phase 2c: 엔진 GDF 월드 밀어내기(씬 그래프 dispatch에서만 유효).
-		Step.bUseWorldGDF      = Cfg.bUseWorldGDF;
 		Step.NumSub            = Schedule.NumSub;
 		Step.FixedDt           = Schedule.FixedDt;
 	}
@@ -249,7 +249,7 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope)
 	{
 		// 여유: 접촉 질의 반경 + 스윕 여유 + 예측 접촉의 전방 외삽 거리(프레임 변위 × 예측 프레임).
 		// 넉넉히 잡는다 — 과대 컬링 여유는 안전(콜라이더가 몇 개 더 실릴 뿐).
-		const float Margin = Rope.SolverConfig.CollisionRadius + Rope.WrapConfig.ContactRadius
+		const float Margin = Rope.GetEffectiveCollisionRadius() + Rope.GetEffectiveContactRadius()
 			+ FMath::Max(2.0f * Rope.Sim.SegmentLength, 50.0f)
 			+ FMath::Sqrt(MaxFrameDispSq) * FMath::Max(Rope.WrapConfig.PredictiveContactFrames, 1.0f);
 		RopeBounds = RopeBounds.ExpandBy(Margin);
@@ -904,10 +904,12 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 
 	// 상주 step 구성(self-contained). 시드 데이터는 매 프레임 제공(RT는 재시드 시에만 GPU 업로드).
 	SeedResidentStep(OutStep, RopeId, Rope.SimFrame.SimGeneration, S, Rope.SolverConfig, Schedule);
+	// 컴포넌트 경계 해석값 덮기: 반지름 auto(0=렌더 Radius) + 컴포넌트 직속으로 이사한 GDF 플래그.
+	OutStep.CollisionRadius = Rope.GetEffectiveCollisionRadius();
 	// solve 충돌과 contact detection은 별도 계약이다. false여도 아래 PackStepColliders는 detect용으로
 	// 계속 패킹하며, solve 커널에 전달되는 collider/GDF 개수만 0이 된다.
 	OutStep.bSolveCollisions = Rope.SimFrame.bSolveCollisionsThisFrame;
-	OutStep.bUseWorldGDF = OutStep.bUseWorldGDF && OutStep.bSolveCollisions;
+	OutStep.bUseWorldGDF = Rope.bUseWorldGDF && OutStep.bSolveCollisions;
 	// 거리 LOD: 원거리 로프는 iteration 감쇠(Prepare에서 계산). CollisionPasses는 패킹에서 Iterations로 클램프됨.
 	OutStep.Iterations = Rope.GetLODScaledIterations();
 
@@ -944,7 +946,7 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 	// 귀속 테이블(콜라이더 인덱스 → bone/mesh)은 PackStepColliders가 Step.Capsules/SDFColliders와
 	// 같은 순서로 채우므로 여기서 먼저 리셋한다.
 	Step.bDetectContacts = true;
-	Step.ContactRadius = Rope.WrapConfig.ContactRadius;
+	Step.ContactRadius = Rope.GetEffectiveContactRadius();
 	Step.PredictionFrames = Rope.WrapConfig.PredictiveContactFrames;
 	Rope.SimFrame.GpuCapsuleAttribution.Reset();
 	Rope.SimFrame.GpuSdfAttribution.Reset();

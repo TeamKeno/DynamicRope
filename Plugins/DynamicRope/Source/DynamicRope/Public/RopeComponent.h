@@ -132,14 +132,41 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold")
 	FRopeHoldConfig HoldConfig;
 
+	//~ Collision(충돌 도메인) ----------------------------------------------
+	// 흩어져 있던 충돌 관련 스위치를 한자리에 응집(2026-07-13 표면 감사 CL-4). 반지름 자체는
+	// SolverConfig.CollisionRadius / WrapConfig.ContactRadius에 있고, 0(기본)=auto — 아래
+	// GetEffective* 헬퍼가 렌더 Radius에서 유도한다(반지름 3종 자동 정합).
+
 	/**
 	 * 기본적으로 rope는 월드의 모든 collider provider와 충돌하되 **자기 owner(던진 본인)의 provider는 제외**한다
 	 * — throw 시 늘어진 로프가 던진 사람 팔다리에 엉키는 것을 막기 위함. cross-actor wrap(다른 액터 body 잡기)은
 	 * 그 액터가 "전체"에 포함되므로 자동으로 동작한다.
 	 * 켜면 owner provider도 포함한다(로프가 자기 owner 몸을 일부러 감아야 하는 드문 경우).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	bool bIncludeOwnerColliders = false;
+
+	/**
+	 * 엔진 Global Distance Field로 정적 월드 지오메트리(벽/바닥)에서 로프를 밀어낸다. GPU 경로(씬 그래프
+	 * dispatch)에서만 동작. 프로젝트에 Generate Mesh Distance Fields 필요.
+	 * 본 귀속·표면속도 없음(정적 월드 광역 밀어내기 보완재) — per-bone SDF의 대체가 아니다. 켜져 있는 동안
+	 * 엔진이 GDF를 온디맨드로 빌드한다. 밀어내기 반경/마찰은 CollisionRadius/Friction/TipFrictionScale 공유.
+	 * (SolverConfig에서 컴포넌트 직속으로 이사 — 충돌 도메인 응집.)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
+	bool bUseWorldGDF = false;
+
+	/** 해석된 솔버 충돌 반지름: SolverConfig.CollisionRadius(0=auto → 렌더 Radius). 솔브/GPU step 경계에서 소비. */
+	float GetEffectiveCollisionRadius() const
+	{
+		return SolverConfig.CollisionRadius > 0.0f ? SolverConfig.CollisionRadius : Radius;
+	}
+
+	/** 해석된 접촉 질의 반지름: WrapConfig.ContactRadius(0=auto → 렌더 Radius × 1.5). 감지/랩 경로 경계에서 소비. */
+	float GetEffectiveContactRadius() const
+	{
+		return WrapConfig.ContactRadius > 0.0f ? WrapConfig.ContactRadius : Radius * 1.5f;
+	}
 
 	//~ Whip(던지기 스윙 설정) ----------------------------------------------
 	/** 던지기 초반 채찍 스윙 튜닝. 런타임 상태는 WhipGuide가 소유하고, 호출 시

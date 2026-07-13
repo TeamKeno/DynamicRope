@@ -354,7 +354,10 @@ bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchA
 
 	FRopeWrapConfig PreviewConfig = Ctx.Config;
 	PreviewConfig.WrappingPathBuildStepsPerFrame = 4096;
-	const FContext PreviewCtx{ PreviewConfig, Ctx.Colliders, Ctx.PathMode, Ctx.SurfaceOffset, Ctx.OwnerName, true };
+	FContext PreviewCtx{ PreviewConfig, Ctx.Colliders, Ctx.PathMode, Ctx.SurfaceOffset, Ctx.OwnerName, true };
+
+	// preview에도 컴포넌트 경계에서 해석된 접촉 반지름을 승계한다(0=auto 정합 유지).
+	PreviewCtx.ResolvedContactRadius = Ctx.ResolvedContactRadius;
 
 	FRopeWrappingPhase PreviewPhase;
 	if (!PreviewPhase.Begin(LatchAnchor, Mesh, Bone,
@@ -695,7 +698,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 			{
 				const float SnapDistance = FVector::Dist(ProjectedSurface, State.PathSurfaceWorld);
 				const float MaxSnapDistance = FMath::Max3(
-					Sim.SegmentLength, Ctx.Config.ContactRadius * 2.0f, Ctx.SurfaceOffset * 2.0f);
+					Sim.SegmentLength, Ctx.GetContactRadius() * 2.0f, Ctx.SurfaceOffset * 2.0f);
 				if (SnapDistance > MaxSnapDistance)
 				{
 					bOnSurface = false;
@@ -1879,7 +1882,7 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 	const FVector PreviousTangent = PreviousTangentWorld.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 	const FVector PreviousNormal = PreviousNormalWorld.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 	const float QueryRadius = FMath::Max3(
-		FMath::Max(Ctx.Config.ContactRadius, Ctx.SurfaceOffset),
+		FMath::Max(Ctx.GetContactRadius(), Ctx.SurfaceOffset),
 		Sim.SegmentLength,
 		Sim.SegmentLength * 3.0f);
 
@@ -2015,7 +2018,7 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurface(FName Bone, const USceneCompo
 	FRopeSurfaceProjection BestProjection;
 	bool bFound = false;
 
-	const float QueryRadius = FMath::Max(FMath::Max(Ctx.Config.ContactRadius, Ctx.SurfaceOffset), Sim.SegmentLength);
+	const float QueryRadius = FMath::Max(FMath::Max(Ctx.GetContactRadius(), Ctx.SurfaceOffset), Sim.SegmentLength);
 	for (const IRopeCollider* Collider : Ctx.Colliders)
 	{
 		if (!Collider)
