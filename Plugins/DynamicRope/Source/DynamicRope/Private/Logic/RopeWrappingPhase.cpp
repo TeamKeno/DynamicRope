@@ -435,6 +435,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.bPathBuildFailed = false;
 	State.PathCurrentDistance = 0.0f;
 	State.PathAccumulatedAngleRad = 0.0f;
+	State.PathBridgeDistance = 0.0f;
 	State.FrontDistance = 0.0f;
 	State.PathCurrentBone = StoredLatchAnchor.Bone;
 	State.PathPreviousBone = NAME_None;
@@ -651,53 +652,128 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 			const FVector RopeNodeWorld = Sim.Positions.IsValidIndex(RopeNodeIndex)
 				? Sim.Positions[RopeNodeIndex]
 				: State.PathSurfaceWorld;
+			// 투영 결과는 로컬로 받는다: 브리징(아래)에서 스냅을 거부할 수 있으므로, 수용이 확정되기
+			// 전에는 State를 건드리지 않는다.
+			FVector ProjectedSurface = State.PathSurfaceWorld;
+			FVector ProjectedNormal = State.PathNormalWorld;
+			FVector ProjectedTangent = State.PathTangentWorld;
+			FVector ProjectedCircumference = State.PathCircumferenceDir;
 			FName ProjectedBone = CurrentBone;
-			if (!ProjectWrapPointToSurfaceMultiBone(CurrentBone, Mesh, Sim, Ctx,
+			bool bOnSurface = ProjectWrapPointToSurfaceMultiBone(CurrentBone, Mesh, Sim, Ctx,
 				State.PathPreviousBone, State.PathDistanceSinceBoneTransition, RopeNodeWorld,
 				State.PathNormalWorld, State.PathTangentWorld,
-				State.PathSurfaceWorld, State.PathNormalWorld, State.PathTangentWorld,
-				State.PathCircumferenceDir, ProjectedBone, ProjectedMesh))
+				ProjectedSurface, ProjectedNormal, ProjectedTangent,
+				ProjectedCircumference, ProjectedBone, ProjectedMesh);
+
+			// 갭 브리징(WrappingMaxGapBridgeDistance > 0)에서는 스냅 수용에 두 가지 관문을 둔다.
+			// 브리징 비활성 시에는 아무 관문도 없다 — 관대한 스냅으로 abort를 줄이는 종전 동작(기본값) 그대로.
+			//  ① 스냅 거리 상한: 표면이 예측점에서 한 세그먼트 이상 떨어져 있으면 "여기엔 감을 표면이
+			//     없다"로 보고 chord로 간다. 없으면 관대한 QueryRadius(세그먼트×3) 때문에 대상 사이
+			//     허공에서도 먼 표면으로 끌려가 경로가 골짜기로 말려든다.
+			//  ② winding 역행(taut-string 이탈점): 스냅을 수용한 결과가 축 기준 중심각을 되돌리면
+			//     경로가 첫 대상의 뒤편을 맴돌고 있는 것이다 — 쌍(양다리)을 도는 감김은 중심각이
+			//     winding 방향으로 단조 전진한다. 팽팽한 줄은 여기서 표면을 떠나 chord로 간다.
+			//     이 관문이 없으면 예측점이 항상 직전 표면점 근처라 ①에 안 걸리고(원 단면 위에서는
+			//     스냅 변위가 어디서나 균일하게 작다 — 국소 신호로는 이탈점을 구분할 수 없다),
+			//     경로가 첫 대상만 영원히 궤도 돌아 쌍으로 건너가지 못한다. 단일 대상 감김은 중심각이
+			//     본래 단조라 오탐하지 않는다(이탈은 하울 접점보다 약간 늦게 오고, 남는 느슨함은
+			//     커밋 후 자유 노드를 solver가 당겨 정리한다).
+			const float MaxBridgeDistance = Ctx.Config.WrappingMaxGapBridgeDistance;
+			if (bOnSurface && MaxBridgeDistance > 0.0f)
+			{
+				const float SnapDistance = FVector::Dist(ProjectedSurface, State.PathSurfaceWorld);
+				const float MaxSnapDistance = FMath::Max3(
+					Sim.SegmentLength, Ctx.Config.ContactRadius * 2.0f, Ctx.SurfaceOffset * 2.0f);
+				if (SnapDistance > MaxSnapDistance)
+				{
+					bOnSurface = false;
+				}
+
+				FVector RadialAfterSnap = FVector::ZeroVector;
+				if (bOnSurface && bHasRadialBefore && ComputeAxisRadial(ProjectedSurface, RadialAfterSnap))
+				{
+					const float SignedWindingStep = static_cast<float>(FVector::DotProduct(
+						State.PathAxisDirection,
+						FVector::CrossProduct(StepRadialBefore, RadialAfterSnap))) * State.PathWindingSign;
+					if (SignedWindingStep < 0.0f)
+					{
+						bOnSurface = false;
+					}
+				}
+			}
+
+			// 표면도 없고 브리지도 소진/비활성 — 종전과 같은 실패 처리(각도 적분 전에 끊어,
+			// 걷지 못한 스텝이 실패 시점 각도(ShouldAbortFailedShortWrap)에 섞이지 않게 한다).
+			if (!bOnSurface &&
+				(MaxBridgeDistance <= 0.0f || State.PathBridgeDistance + StepDistance > MaxBridgeDistance))
 			{
 				FinishPathBuild(/*bFailed=*/true);
 				if (!Ctx.bSuppressPathFailureLog)
 				{
 					UE_LOG(LogDynamicRope, Log,
-						TEXT("[%s] Progressive wrap path stopped by projection failure (bone=%s, path=%d/%d, anchors=%d)"),
+						TEXT("[%s] Progressive wrap path stopped by projection failure (bone=%s, path=%d/%d, anchors=%d, bridge=%.0f/%.0fcm)"),
 						*Ctx.OwnerName,
 						*State.LatchAnchor.Bone.ToString(),
 						State.Path.Num(),
 						State.NumTailNodes,
-						State.Anchors.Num());
+						State.Anchors.Num(),
+						State.PathBridgeDistance,
+						MaxBridgeDistance);
 				}
 				return false;
 			}
 
-			// 감싼 각도 적분: 이번 스텝이 만든 radial 회전량을 누적한다. 축 재해석(아래) *전에*,
-			// 이 스텝을 실제로 걸었던 축 기준으로 전/후 radial을 재야 한다.
+			// 감싼 각도 적분: 이번 스텝이 만든 radial 회전량을 누적한다. 축 재해석(아래 accept 분기의
+			// reseed) *전에*, 이 스텝을 실제로 걸었던 축 기준으로 전/후 radial을 재야 한다. 브리지
+			// 스텝도 적분한다 — chord가 가로지른 각도 구간도 "감쌌다"에 포함되는 것이 둘레 커버리지
+			// 척도(5단계 형상 기준 판정)와 일치한다.
+			const FVector PostStepPosition = bOnSurface ? ProjectedSurface : State.PathSurfaceWorld;
 			FVector StepRadialAfter = FVector::ZeroVector;
-			if (bHasRadialBefore && ComputeAxisRadial(State.PathSurfaceWorld, StepRadialAfter))
+			if (bHasRadialBefore && ComputeAxisRadial(PostStepPosition, StepRadialAfter))
 			{
 				State.PathAccumulatedAngleRad += FMath::Acos(FMath::Clamp(
 					static_cast<float>(FVector::DotProduct(StepRadialBefore, StepRadialAfter)), -1.0f, 1.0f));
 			}
 
-			// ProjectWrapPointToSurfaceMultiBone이 hysteresis까지 적용해 최종 본을 돌려준다.
-			// 여기서는 상태만 갱신한다. 전환했다면 직전 본을 기록해 다음 step에서 바로 되돌아가는 후보에
-			// penalty를 줄 수 있게 하고, 전환 거리 누적은 0으로 다시 시작한다.
-			if (ProjectedBone != CurrentBone)
+			if (bOnSurface)
 			{
-				State.PathPreviousBone = CurrentBone;
-				State.PathCurrentBone = ProjectedBone;
-				State.PathDistanceSinceBoneTransition = 0.0f;
-				// rolling axis: 이후 스텝의 tangent field가 새 본 형상 축 주위를 돌게 한다.
-				ReseedWrappingAxisOnBoneTransition(ProjectedBone, ProjectedMesh, Ctx);
+				State.PathSurfaceWorld = ProjectedSurface;
+				State.PathNormalWorld = ProjectedNormal;
+				State.PathTangentWorld = ProjectedTangent;
+				State.PathCircumferenceDir = ProjectedCircumference;
+				State.PathBridgeDistance = 0.0f;
+
+				// ProjectWrapPointToSurfaceMultiBone이 hysteresis까지 적용해 최종 본을 돌려준다.
+				// 여기서는 상태만 갱신한다. 전환했다면 직전 본을 기록해 다음 step에서 바로 되돌아가는 후보에
+				// penalty를 줄 수 있게 하고, 전환 거리 누적은 0으로 다시 시작한다.
+				if (ProjectedBone != CurrentBone)
+				{
+					State.PathPreviousBone = CurrentBone;
+					State.PathCurrentBone = ProjectedBone;
+					State.PathDistanceSinceBoneTransition = 0.0f;
+					// rolling axis: 이후 스텝의 tangent field가 새 본 형상 축 주위를 돌게 한다.
+					ReseedWrappingAxisOnBoneTransition(ProjectedBone, ProjectedMesh, Ctx);
+				}
+				else
+				{
+					State.PathCurrentBone = ProjectedBone;
+					State.PathDistanceSinceBoneTransition += StepDistance;
+				}
+				State.PathCurrentMesh = ProjectedMesh;
 			}
 			else
 			{
-				State.PathCurrentBone = ProjectedBone;
+				// 브리지 스텝: 예측 위치(tangent 직진)를 그대로 쓰고 앵커 프레임 없이 지나간다.
+				// normal은 축 radial로 유지해 다음 스텝의 원주 tangent가 깨끗하게 나오게 한다.
+				// bone/mesh는 유지 — 재진입 후보를 현재 본 중심 그래프에서 계속 찾는다.
+				State.PathBridgeDistance += StepDistance;
 				State.PathDistanceSinceBoneTransition += StepDistance;
+				FVector BridgeRadial = FVector::ZeroVector;
+				if (ComputeAxisRadial(State.PathSurfaceWorld, BridgeRadial))
+				{
+					State.PathNormalWorld = BridgeRadial;
+				}
 			}
-			State.PathCurrentMesh = ProjectedMesh;
 
 			State.PathCurrentDistance += StepDistance;
 			--StepsRemaining;
@@ -726,6 +802,8 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 		Point.Bone = State.PathCurrentBone.IsNone() ? State.LatchAnchor.Bone : State.PathCurrentBone;
 		Point.Mesh = State.PathCurrentMesh.IsValid() ? State.PathCurrentMesh.Get() : Mesh;
 		Point.DistanceFromLatch = TargetDistance;
+		// 마지막 서브스텝이 브리지였으면 이 점은 허공 chord 위다 — 앵커 생성이 스킵된다.
+		Point.bBridge = State.PathBridgeDistance > 0.0f;
 		State.Path.Add(Point);
 		AppendWrappingAnchorFromPathPoint(PathIndex, Sim, Ctx);
 
@@ -773,6 +851,16 @@ bool FRopeWrappingPhase::AppendWrappingAnchorFromPathPoint(int32 PathIndex, cons
 	}
 
 	const FRopeWrapPathPoint& Point = State.Path[PathIndex];
+
+	// 허공 브리지(chord) 경로점: 표면 프레임이 없으므로 앵커를 만들지 않는다 — 커밋 후 이 노드는
+	// 자유 로프로 남아 solver가 chord/현수 형태를 잡는다. 앵커 카운터는 전진시켜야 한다: 이 함수는
+	// PathIndex == LastAnchoredPathPointCount일 때만 신규 처리하므로, 여기서 멈추면 브리지 뒤
+	// 재진입한 표면 경로점들의 앵커 생성이 전부 막힌다.
+	if (Point.bBridge)
+	{
+		State.LastAnchoredPathPointCount = PathIndex + 1;
+		return true;
+	}
 
 	// MVP의 핵심: 경로점이 선택한 본을 그대로 anchor 소유 본으로 사용한다.
 	// 이전 구현은 모든 anchor를 LatchAnchor.Bone 로컬로 저장했기 때문에,

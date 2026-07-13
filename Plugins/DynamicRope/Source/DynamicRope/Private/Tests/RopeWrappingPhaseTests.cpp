@@ -297,4 +297,102 @@ bool FRopeWrappingTravelFrameAxisTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 갭 브리징(진행 방향 기반 wrap 4단계) — 양다리 축약 기하: 나란히 선 두 캡슐(x=±30, r=12) 쌍을
+// 진행 평면 축(쌍의 중심을 지나는 Z)으로 감는다. 브리징이 없으면 이 경로는 두 지점에서 반드시
+// 죽는다: 다리 사이 허공에서 투영이 (i) 먼 표면으로 스냅해 경로가 골짜기로 말려들거나
+// (ii) 실패해 빌드가 끊긴다. 계약:
+// ① 경로가 실패 없이 완주하고, ② chord(bBridge) 경로점이 존재하며 그 노드들은 앵커가 없고,
+// ③ 앵커가 양쪽 캡슐 표면 모두에 생기며, ④ 누적 감싼 각도가 쌍 순회를 증명한다(>270°).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingGapBridgeTest,
+	"DynamicRope.Wrapping.GapBridgeWrapsCapsulePair",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingGapBridgeTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* Mesh = MakeMockTarget();
+	// 두 "다리": 같은 mesh, 같은 본 이름(비스켈레탈 mock은 본 그래프가 없어 후보가 현재 본뿐이므로
+	// 본 이름을 공유시킨다 — 이 테스트의 대상은 갭 횡단이지 본 전환이 아니다).
+	FCapsuleCollider LegA(FVector(30, 0, -50), FVector(30, 0, 50), 12.0f, FName("legs"), Mesh);
+	FCapsuleCollider LegB(FVector(-30, 0, -50), FVector(-30, 0, 50), 12.0f, FName("legs"), Mesh);
+	TArray<IRopeCollider*> Colliders = { &LegA, &LegB };
+
+	// 로프 280cm(15노드) — 쌍의 헐 둘레(~195cm)를 한 바퀴 이상 감을 길이.
+	FRopeSimState Sim = RopeTest::MakeStraightRope(15, 280.0f, FVector(42, 0, 0), FVector(0, 1, 0));
+
+	FRopeSurfaceAnchor Latch;
+	Latch.NodeIndex = 0;
+	Latch.Bone = FName("legs");
+	Latch.Mesh = Mesh;
+	Latch.LocalSurfacePosition = FVector(42, 0, 0);
+	Latch.LocalNormal = FVector(1, 0, 0);
+	Latch.LocalTangent = FVector(0, 1, 0);
+	Latch.StartWorldPosition = FVector(42, 0, 0);
+	Latch.SurfaceOffset = 1.0f;
+
+	// 캡처 스냅샷: 축 origin = 쌍의 중심, winding = 캡처 속도(+Y).
+	FRopeCaptureTravelFrame Frame;
+	Frame.bValid = true;
+	Frame.RegionCenter = FVector::ZeroVector;
+	Frame.AverageVelocity = FVector(0, 100, 0);
+
+	FRopeWrapConfig Config;
+	Config.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
+	// chord는 60cm지만 브리지 경로는 축 반경(~32) 원호를 따라 우회한다(~77cm) — 여유를 둔다.
+	Config.WrappingMaxGapBridgeDistance = 120.0f;
+	// 이 테스트는 진행 평면 안의 순회만 검증한다 — 축 방향 나선 상승이 캡슐 꼭대기 밖으로 새지 않게.
+	Config.WrappingHelixPitchScale = 0.0f;
+	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
+		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*bHasGuidePlaneNormal*/ true, /*GuidePlaneNormal*/ FVector(0, 0, 1), &Frame };
+
+	FRopeWrappingPhase Wrapping;
+	TestTrue(TEXT("wrapping begins on the pair"), Wrapping.Begin(Latch, Mesh, FName("legs"), 0.16f, Sim, Ctx));
+
+	for (int32 Iteration = 0; Iteration < 512 && Wrapping.State.bPathBuildActive; ++Iteration)
+	{
+		Wrapping.AdvancePathBuild(Sim, Ctx);
+	}
+
+	// ① 브리징 덕에 실패 없이 완주.
+	TestTrue(TEXT("path build completes around the pair"), Wrapping.State.bPathBuildComplete);
+	TestTrue(TEXT("path build did not fail"), !Wrapping.State.bPathBuildFailed);
+
+	// ② chord 경로점 존재 + 그 노드에는 앵커가 없다.
+	int32 BridgePointCount = 0;
+	for (const FRopeWrapPathPoint& Point : Wrapping.State.Path)
+	{
+		if (Point.bBridge)
+		{
+			++BridgePointCount;
+		}
+	}
+	TestTrue(TEXT("bridge (chord) path points exist"), BridgePointCount > 0);
+	TestEqual(TEXT("bridge nodes carry no anchors"),
+		Wrapping.State.Anchors.Num() + BridgePointCount, Wrapping.State.Path.Num());
+	for (const FRopeSurfaceAnchor& Anchor : Wrapping.State.Anchors)
+	{
+		const int32 PathIndex = Anchor.NodeIndex - Latch.NodeIndex;
+		TestTrue(FString::Printf(TEXT("anchored path point %d is on-surface"), PathIndex),
+			Wrapping.State.Path.IsValidIndex(PathIndex) && !Wrapping.State.Path[PathIndex].bBridge);
+	}
+
+	// ③ 양쪽 캡슐 표면 모두에 앵커가 생겼다(identity 트랜스폼 — 로컬 X로 바로 판별).
+	bool bAnchorOnLegA = false;
+	bool bAnchorOnLegB = false;
+	for (const FRopeSurfaceAnchor& Anchor : Wrapping.State.Anchors)
+	{
+		bAnchorOnLegA |= Anchor.LocalSurfacePosition.X > 15.0f;
+		bAnchorOnLegB |= Anchor.LocalSurfacePosition.X < -15.0f;
+	}
+	TestTrue(TEXT("anchors reached the near leg"), bAnchorOnLegA);
+	TestTrue(TEXT("anchors reached the far leg"), bAnchorOnLegB);
+
+	// ④ 누적 감싼 각도가 쌍 순회를 증명한다.
+	float AngleDeg = 0.0f;
+	TestTrue(TEXT("wrapped angle computable"), Wrapping.ComputeWrappedAngleAtLastBuiltPoint(Sim, Ctx, AngleDeg));
+	TestTrue(FString::Printf(TEXT("accumulated angle circles the pair (%.0f deg)"), AngleDeg),
+		AngleDeg > 270.0f);
+	return true;
+}
+
 #endif

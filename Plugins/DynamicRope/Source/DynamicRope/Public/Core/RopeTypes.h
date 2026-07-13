@@ -175,6 +175,13 @@ struct FRopeWrapPathPoint
 	TWeakObjectPtr<const USceneComponent> Mesh = nullptr;
 
 	float DistanceFromLatch = 0.0f;
+
+	/**
+	 * 허공 브리지(chord) 경로점(WrappingMaxGapBridgeDistance > 0에서만 발생): 표면 투영 없이
+	 * tangent 직진으로 만들어졌다. front 모션의 위치 목표로는 참여하지만 앵커는 만들지 않는다 —
+	 * 커밋 후 이 구간 노드는 자유 로프로 남는다.
+	 */
+	bool bBridge = false;
 };
 
 /** Wrapping 페이즈의 작업 상태(FRopeWrappingPhase::State). 경로 빌드 진행/앵커 축적/커밋 판정 재료. */
@@ -234,6 +241,12 @@ struct FRopeWrappingState
 	float PathDistanceSinceBoneTransition = 0.0f;
 
 	float PathWindingSign = 1.0f;
+
+	/**
+	 * 현재 이어지고 있는 허공 브리지(chord)의 누적 길이(cm). 표면 재진입(스냅 수용) 시 0으로 리셋.
+	 * WrappingMaxGapBridgeDistance를 넘기면 경로 빌드가 실패 처리된다(브리징 비활성이면 항상 0).
+	 */
+	float PathBridgeDistance = 0.0f;
 
 	/**
 	 * SurfaceVectorField 경로 빌드 중 적분한 누적 감싼 각도(라디안). 감김 축이 본 전환마다
@@ -632,6 +645,19 @@ struct FRopeWrapConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap")
 	ERopeWrappingAxisSource WrappingAxisSource = ERopeWrappingAxisSource::ShapeAxisFirst;
+
+	/**
+	 * SurfaceVectorField 경로가 표면 없는 허공을 tangent 직진(chord)으로 건널 수 있는 최대 거리(cm).
+	 * 0(기본) = 끔 — 투영이 끊기면 종전대로 경로 빌드를 실패 처리한다.
+	 * 켜면 두 가지가 달라진다(진행 방향 기반 wrap 4단계, 양다리처럼 대상이 둘로 갈라진 랩의 전제):
+	 *  ① 투영이 예측점에서 한 세그먼트 이상 떨어진 표면으로 끌어당기려 하면 스냅을 거부하고 chord로
+	 *     간다(끄면 QueryRadius 내 관대한 스냅 그대로 — 기본 동작 불변).
+	 *  ② chord 구간의 경로점은 앵커를 만들지 않는다 — 커밋 후 그 노드들은 자유 로프로 남아 solver가
+	 *     현수/직선 형태를 잡고, 대상이 벌어지면 장력이 걸린다(묶임의 실제 물리).
+	 * 이 거리를 넘겨도 표면에 재진입하지 못하면 종전과 같은 실패 처리로 떨어진다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
+	float WrappingMaxGapBridgeDistance = 0.0f;
 
 	/** Wrapping phase must keep the same accumulated latch span stable this long before committing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
