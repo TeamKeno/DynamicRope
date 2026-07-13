@@ -153,13 +153,14 @@ public:
 
 	/**
 	 * 엔진 Global Distance Field로 정적 월드 지오메트리(벽/바닥)에서 로프를 밀어낸다. GPU 경로(씬 그래프
-	 * dispatch)에서만 동작. 프로젝트에 Generate Mesh Distance Fields 필요.
+	 * dispatch)에서만 동작. 프로젝트에 Generate Mesh Distance Fields 필요 — GDF가 무효면 조용히 no-op이라
+	 * **기본 켜짐**(벽/바닥 뚫림이 기본 방어되는 쪽이 안전; GDF 온디맨드 빌드 비용을 아끼려면 끔).
 	 * 본 귀속·표면속도 없음(정적 월드 광역 밀어내기 보완재) — per-bone SDF의 대체가 아니다. 켜져 있는 동안
 	 * 엔진이 GDF를 온디맨드로 빌드한다. 밀어내기 반경/마찰은 CollisionRadius/Friction/TipFrictionScale 공유.
 	 * (SolverConfig에서 컴포넌트 직속으로 이사 — 충돌 도메인 응집.)
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
-	bool bUseWorldGDF = false;
+	bool bUseWorldGDF = true;
 
 	/** 해석된 솔버 충돌 반지름: SolverConfig.CollisionRadius(0=auto → 렌더 Radius). 솔브/GPU step 경계에서 소비. */
 	float GetEffectiveCollisionRadius() const

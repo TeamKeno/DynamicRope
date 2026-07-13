@@ -665,12 +665,13 @@ struct FRopeSolverConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TipFrictionScale = 1.0f;
 
-	/** 충돌 질의 반지름(cm) — 솔버가 노드를 접촉 표면에서 이만큼 띄운다. **0 = auto: 렌더 튜브 Radius를
-	 *  그대로 사용**(반지름 3종 자동 정합 — 2026-07-13 표면 감사 B-2). 해석은 컴포넌트 경계
-	 *  (GetEffectiveCollisionRadius)에서 1회 — 솔버/GPU step은 해석된 값만 받는다. 기본값이 0이 아닌 이유:
-	 *  컴포넌트 없이 이 구조체를 직접 쓰는 소비자(유닛 테스트/커스텀 솔버 호출)의 계약 보존. */
+	/** 충돌 질의 반지름(cm) — 솔버가 노드를 접촉 표면에서 이만큼 띄운다. **기본 0 = auto: 렌더 튜브
+	 *  Radius를 그대로 사용**(반지름 3종 자동 정합 — 2026-07-13 표면 감사 B-2; 명시값을 넣으면 그 값).
+	 *  해석은 컴포넌트 경계(GetEffectiveCollisionRadius)에서 1회 — 솔버/GPU step은 해석된 값만 받는다.
+	 *  주의: 컴포넌트 없이 이 구조체를 직접 쓰는 소비자(유닛 테스트/커스텀 솔버 호출)에는 auto 해석이
+	 *  없다 — 0이면 반지름 0으로 동작하므로 반드시 명시값을 넣을 것. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", Units = "cm"))
-	float CollisionRadius = 2.0f;
+	float CollisionRadius = 0.0f;
 
 	// NOTE: bUseWorldGDF는 URopeComponent 직속("Rope|Collision" 카테고리)으로 이사했다
 	// (2026-07-13 표면 감사 CL-4 — 충돌 도메인 응집: bIncludeOwnerColliders와 한자리).
@@ -739,11 +740,11 @@ struct FRopeWrapConfig
 	 * 접촉 *질의* 반지름(cm) — 이름이 말하듯 특정 단계 소유가 아니라 **감지(Flight/Contacting)와
 	 * 성립(경로 빌드 투영/스냅 상한/DecideWrap)이 공유하는 표면 질의 프로브 반경**이다(그래서 감지
 	 * 4종이 DetectConfig로 분리될 때 여기 남았다 — 표면 감사 B-1 축소안, 구 이름 ContactRadius).
-	 * **0 = auto: 렌더 튜브 Radius × 1.5**(반지름 3종 자동 정합). 해석은 컴포넌트 경계
-	 * (GetEffectiveContactQueryRadius)에서 — 소비처는 해석된 값을 받는다. 기본값이 0이 아닌 이유:
-	 * 컴포넌트 없이 직접 쓰는 소비자(유닛 테스트 등)의 계약 보존. */
+	 * **기본 0 = auto: 렌더 튜브 Radius × 1.5**(반지름 3종 자동 정합; 명시값을 넣으면 그 값). 해석은
+	 * 컴포넌트 경계(GetEffectiveContactQueryRadius)에서 — 소비처는 해석된 값을 받는다. 주의: 컴포넌트
+	 * 없이 직접 쓰는 소비자(유닛 테스트 등)에는 auto 해석이 없다 — 반드시 명시값을 넣을 것. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
-	float ContactQueryRadius = 3.0f;
+	float ContactQueryRadius = 0.0f;
 
 	// NOTE: 순수 감지 튜닝 4종(MinLatchNodes/WrapDecisionTime/PredictiveContactFrames/
 	// FlightNoContactReturnTime)은 FRopeDetectConfig("Rope|Detect")로 분리됐다(표면 감사 B-1).

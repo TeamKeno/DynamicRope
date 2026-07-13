@@ -20,6 +20,15 @@ namespace
 	{
 		return NewObject<USceneComponent>();
 	}
+
+	// 구조체 기본값이 0=auto(컴포넌트 경계에서만 해석)가 되면서, 월드 없는 직접 호출은
+	// 구 기본값(3cm)을 명시로 고정한다 — 테스트 기하(reach 계산)가 이 값 기준.
+	FRopeWrapConfig MakeTestWrapConfig()
+	{
+		FRopeWrapConfig C;
+		C.ContactQueryRadius = 3.0f;
+		return C;
+	}
 }
 
 // SurfaceVectorField 경로 빌드가 캡슐(원기둥) 주위를 완주하고, 앵커가 표면 위에 놓이며, 빌드 중
@@ -49,7 +58,7 @@ bool FRopeWrappingCapsuleAngleTest::RunTest(const FString& Parameters)
 	Latch.StartWorldPosition = FVector(25, 0, 0);
 	Latch.SurfaceOffset = 1.0f;
 
-	const FRopeWrapConfig Config;
+	const FRopeWrapConfig Config = MakeTestWrapConfig();
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
 		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
 
@@ -127,7 +136,7 @@ bool FRopeWrappingSecondarySeedTest::RunTest(const FString& Parameters)
 	Secondary.SurfaceOffset = 1.0f;
 	Secondary.RopeDistance = 6 * 20.0f;
 
-	const FRopeWrapConfig Config;
+	const FRopeWrapConfig Config = MakeTestWrapConfig();
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
 		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
 
@@ -205,7 +214,7 @@ bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 
 	const FVector GuidePlaneNormal(0, 1, 0);
 
-	FRopeWrapConfig TravelConfig;
+	FRopeWrapConfig TravelConfig = MakeTestWrapConfig();
 	TravelConfig.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
 	const FRopeWrappingPhase::FContext TravelCtx{ TravelConfig, Colliders,
 		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
@@ -218,7 +227,7 @@ bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 			*TravelWrapping.State.PathAxisDirection.ToString()),
 		FMath::Abs(FVector::DotProduct(TravelWrapping.State.PathAxisDirection, GuidePlaneNormal)) > 0.99f);
 
-	FRopeWrapConfig DefaultConfig;
+	FRopeWrapConfig DefaultConfig = MakeTestWrapConfig();
 	const FRopeWrappingPhase::FContext DefaultCtx{ DefaultConfig, Colliders,
 		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
 		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal };
@@ -264,7 +273,7 @@ bool FRopeWrappingTravelFrameAxisTest::RunTest(const FString& Parameters)
 	Frame.RegionCenter = FVector(0, 0, 30);
 	Frame.AverageVelocity = FVector(100, 0, 0);
 
-	FRopeWrapConfig TravelConfig;
+	FRopeWrapConfig TravelConfig = MakeTestWrapConfig();
 	TravelConfig.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
 	const FVector GuidePlaneNormal(0, 1, 0);
 	const FRopeWrappingPhase::FContext FrameCtx{ TravelConfig, Colliders,
@@ -335,7 +344,7 @@ bool FRopeWrappingGapBridgeTest::RunTest(const FString& Parameters)
 	Frame.RegionCenter = FVector::ZeroVector;
 	Frame.AverageVelocity = FVector(0, 100, 0);
 
-	FRopeWrapConfig Config;
+	FRopeWrapConfig Config = MakeTestWrapConfig();
 	Config.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
 	// chord는 60cm지만 브리지 경로는 축 반경(~32) 원호를 따라 우회한다(~77cm) — 여유를 둔다.
 	Config.WrappingMaxGapBridgeDistance = 120.0f;
@@ -435,7 +444,7 @@ bool FRopeWrappingClusterAxisOriginTest::RunTest(const FString& Parameters)
 	Frame.RegionCenter = FVector(42, 0, 0);
 	Frame.AverageVelocity = FVector(0, 100, 0);
 
-	FRopeWrapConfig Config;
+	FRopeWrapConfig Config = MakeTestWrapConfig();
 	Config.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
 	Config.WrappingMaxGapBridgeDistance = 120.0f;
 	Config.WrappingHelixPitchScale = 0.0f;
@@ -498,7 +507,7 @@ bool FRopeWrappingWrapAngleCapTest::RunTest(const FString& Parameters)
 	Latch.StartWorldPosition = FVector(25, 0, 0);
 	Latch.SurfaceOffset = 1.0f;
 
-	FRopeWrapConfig Config;
+	FRopeWrapConfig Config = MakeTestWrapConfig();
 	Config.WrappingMaxWrapAngleDeg = 360.0f;
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
 		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
@@ -570,7 +579,7 @@ bool FRopeWrappingEnclosureCoverageTest::RunTest(const FString& Parameters)
 	Latch.StartWorldPosition = FVector(25, 0, 0);
 	Latch.SurfaceOffset = 1.0f;
 
-	const FRopeWrapConfig Config;
+	const FRopeWrapConfig Config = MakeTestWrapConfig();
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
 		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
 

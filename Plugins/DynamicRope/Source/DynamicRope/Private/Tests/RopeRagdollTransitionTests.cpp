@@ -209,8 +209,10 @@ bool FRopeRagdollFrictionClampTest::RunTest(const FString& Parameters)
 		Body.SurfaceVelocity = FVector(SpikeSpeed, 0.0f, 0.0f);
 		TArray<IRopeCollider*> Colliders = { &Body };
 
-		// 기본값: Friction 0.5, CollisionRadius 2, 중력 -Z
+		// Friction 0.5(기본)/중력 -Z. CollisionRadius는 명시 2 — 구조체 기본은 0=auto로 바뀌었고
+		// auto 해석은 컴포넌트 경계에만 있다(직접 솔버 호출은 명시 필수).
 		FRopeSolverConfig Config;
+		Config.CollisionRadius = 2.0f;
 		FRopeXPBDSolver Solver;
 		Solver.Step(Sim, Config, Colliders, 1.0f / 60.0f);
 
