@@ -922,6 +922,16 @@ struct FRopeWrapConfig
 	float GroundBraceFactor = 4.0f;
 
 	/**
+	 * 자동 분배가 질량차에 얼마나 민감한지(역질량에 거는 지수). 분배는 ShareT = WT^k / (WT^k + WW^k)로,
+	 * WT/WW는 대상/wielder의 유효 역질량(w=1/유효질량), k가 이 값이다. 1(기본) = 선형 역질량(기존 거동:
+	 * 2배 무거우면 몫 1/3). 1보다 크면 질량차가 **더 극단적**으로 반영돼 무거운 쪽이 훨씬 덜 끌린다(k=2면
+	 * 2배 무거움 → 몫 1/5, 3배 → 1/10). 1보다 작으면 완만(질량차 영향 축소), 0이면 질량 무시 50:50.
+	 * 앵커(w=0)는 지수와 무관하게 항상 몫 0(안 움직임). bAutoTetherShare 전용.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", EditCondition = "bAutoTetherShare"))
+	float TetherMassBias = 1.0f;
+
+	/**
 	 * (bAutoTetherShare=false일 때만) 테더 회수 고정 분배: 초과분 중 감긴 *대상*이 회수하는 비율.
 	 * 1(기본) = 전량 대상(질량 무관 강제 — wielder가 대상을 전부 끌고 옴, 대상만 이동), 0 = 전량 wielder
 	 * (로프 owner가 앵커 쪽으로 끌려간다 — 고정 앵커 매달리기/등반, 되감기와 조합하면 입체기동식 "감으면

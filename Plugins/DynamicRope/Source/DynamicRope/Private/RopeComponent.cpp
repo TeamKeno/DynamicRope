@@ -2773,7 +2773,23 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		}
 		else
 		{
-			const float RawShareT = WT / Total; // 무거운 쪽 = 작은 w → 작은 몫.
+			// 질량 바이어스: 역질량에 지수 k(TetherMassBias)를 걸어 질량차 민감도를 조절한다.
+			// k=1이면 선형 역질량(WT/Total)이고, k>1이면 무거운 쪽(작은 w)의 몫이 더 급격히 줄어 극단적으로,
+			// k<1이면 완만하게, k=0이면 50:50이 된다. 앵커(w=0)는 0^k=0이라 지수와 무관하게 항상 몫 0.
+			const float Bias = FMath::Max(WrapConfig.TetherMassBias, 0.0f);
+			float RawShareT;
+			if (FMath::IsNearlyEqual(Bias, 1.0f))
+			{
+				RawShareT = WT / Total; // 무거운 쪽 = 작은 w → 작은 몫.
+			}
+			else
+			{
+				// w=0(앵커)은 지수와 무관하게 0 — Pow(0,0)=1이라 Bias=0에서 앵커가 몫을 받는 것을 막는다.
+				const float PT = (WT > 0.0f) ? FMath::Pow(WT, Bias) : 0.0f;
+				const float PW = (WW > 0.0f) ? FMath::Pow(WW, Bias) : 0.0f;
+				const float PTotal = PT + PW;
+				RawShareT = (PTotal > KINDA_SMALL_NUMBER) ? (PT / PTotal) : 0.0f;
+			}
 			if (PullDrive.SmoothedTargetShare < 0.0f)
 			{
 				PullDrive.SmoothedTargetShare = RawShareT; // 첫 유효 프레임은 측정값으로 시드(래그 없음).
