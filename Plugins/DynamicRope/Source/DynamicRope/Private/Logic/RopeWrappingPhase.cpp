@@ -100,7 +100,17 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 	const float SurfaceOffset = FMath::Max(0.0f, Ctx.SurfaceOffset);
 	const FVector FrontWorld = FrontPoint.SurfaceWorld + FrontPoint.NormalWorld * SurfaceOffset;
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
-	const int32 TailEndNode = Sim.Num() - 1;
+	// 시드 다중화: 경로 구동은 첫 보조 시드 노드 *앞*에서 끝난다(NumTailNodes 클램프와 같은 경계).
+	// 보조 노드는 아래에서 자기 본에 hold하고, 그 너머 남는 로프는 마스크 동결로 제자리에 둔다 —
+	// front 직선 연장이 보조 대상 반대편으로 로프를 끌어가는 것을 막는다.
+	int32 TailEndNode = Sim.Num() - 1;
+	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
+	{
+		if (Secondary.NodeIndex > LatchNode)
+		{
+			TailEndNode = FMath::Min(TailEndNode, Secondary.NodeIndex - 1);
+		}
+	}
 
 	OutFrame.EnsureSize(Sim.Num());
 	for (int32 NodeIndex = LatchNode; NodeIndex <= TailEndNode; ++NodeIndex)
@@ -128,6 +138,36 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 		}
 
 		OutFrame.SetPosition(NodeIndex, World, /*bZeroVelocity*/ true);
+	}
+
+	// 보조 시드 노드 hold: 경로/front와 무관하게 자기 본의 표면 앵커 프레임을 따라간다(움직이는
+	// 대상 추종 — Wrapped의 Hold와 같은 수식). mesh가 사라진 프레임은 건너뛴다 — 노드는 마스크
+	// 동결로 제자리에 남고, 커밋 후 Hold가 mesh 소실을 정식으로 감지해 release한다.
+	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
+	{
+		if (!Sim.Positions.IsValidIndex(Secondary.NodeIndex) ||
+			!Sim.PrevPositions.IsValidIndex(Secondary.NodeIndex))
+		{
+			continue;
+		}
+
+		const USceneComponent* AnchorComp = Secondary.Mesh.Get();
+		if (!AnchorComp)
+		{
+			continue;
+		}
+
+		FRopeBindingFrame Binding;
+		Binding.Component = AnchorComp;
+		Binding.SocketOrBone = Secondary.Bone;
+		const FTransform BoneXform = ResolveBindingWorld(Binding);
+
+		const FVector SurfaceWorld = BoneXform.TransformPosition(Secondary.LocalSurfacePosition);
+		const FVector NormalWorld = BoneXform.TransformVectorNoScale(Secondary.LocalNormal)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+
+		OutFrame.SetPosition(Secondary.NodeIndex,
+			SurfaceWorld + NormalWorld * Secondary.SurfaceOffset, /*bZeroVelocity*/ true);
 	}
 }
 
@@ -234,23 +274,60 @@ FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim, con
 		Seed.Anchors.Add(Anchor);
 	}
 
+	// 시드 다중화: 보조 시드 앵커도 커밋에 합류한다 — BeginWrap/Hold는 앵커별 (Bone, Mesh)를
+	// 이미 지원하므로 이 뒤로는 경로 앵커와 동일하게 취급된다. 노드 중복은 경로 길이 클램프가
+	// 막지만(빌드 시점 보장), 시드가 어긋난 경우를 대비해 한 번 더 거른다.
+	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
+	{
+		if (!Sim.Positions.IsValidIndex(Secondary.NodeIndex))
+		{
+			continue;
+		}
+
+		const bool bNodeTaken = Seed.Anchors.ContainsByPredicate(
+			[&Secondary](const FRopeSurfaceAnchor& Existing)
+			{
+				return Existing.NodeIndex == Secondary.NodeIndex;
+			});
+		if (bNodeTaken)
+		{
+			continue;
+		}
+
+		FRopeLatchNode Latch;
+		Latch.NodeIndex = Secondary.NodeIndex;
+		Latch.Bone = Secondary.Bone;
+		Seed.Latched.Add(Latch);
+		Seed.Anchors.Add(Secondary);
+	}
+
 	return Seed;
 }
 
 void FRopeWrappingPhase::ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const
 {
 	OutFrame.EnsureSize(Sim.Num());
-	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
+	auto ReturnNode = [&Sim, &OutFrame](int32 NodeIndex)
 	{
-		if (!Sim.InvMass.IsValidIndex(Anchor.NodeIndex) ||
-			!Sim.PrevPositions.IsValidIndex(Anchor.NodeIndex) ||
-			!Sim.Positions.IsValidIndex(Anchor.NodeIndex))
+		if (!Sim.InvMass.IsValidIndex(NodeIndex) ||
+			!Sim.PrevPositions.IsValidIndex(NodeIndex) ||
+			!Sim.Positions.IsValidIndex(NodeIndex))
 		{
-			continue;
+			return;
 		}
 
-		OutFrame.SetInvMass(Anchor.NodeIndex, 1.0f);
-		OutFrame.SetPrevFromPosition(Anchor.NodeIndex);
+		OutFrame.SetInvMass(NodeIndex, 1.0f);
+		OutFrame.SetPrevFromPosition(NodeIndex);
+	};
+
+	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
+	{
+		ReturnNode(Anchor.NodeIndex);
+	}
+	// 보조 시드 노드도 abort 시 함께 복귀한다(front hold로 위치가 덮여 왔으므로 Prev=Pos 튐 방지 동일).
+	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
+	{
+		ReturnNode(Secondary.NodeIndex);
 	}
 }
 
@@ -341,6 +418,17 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.LatchAnchor = StoredLatchAnchor;
 	State.PathMode = Ctx.PathMode;
 	State.NumTailNodes = Sim.Num() - StoredLatchAnchor.NodeIndex;
+	// 시드 다중화: 첫 보조 시드 노드부터는 경로가 아니라 보조 앵커가 노드를 소유한다 — 경로 길이를
+	// 그 앞까지로 줄여 같은 노드를 경로 앵커와 보조 앵커가 이중으로 잡지 않게 한다(커밋 시드/Hold의
+	// 마지막 쓰기 승자 경합 방지). 남는 로프(보조 노드 이후)는 Wrapping 동안 마스크로 동결됐다가
+	// 커밋 후 자유 구간이 된다.
+	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
+	{
+		if (Secondary.NodeIndex > StoredLatchAnchor.NodeIndex)
+		{
+			State.NumTailNodes = FMath::Min(State.NumTailNodes, Secondary.NodeIndex - StoredLatchAnchor.NodeIndex);
+		}
+	}
 	State.LastAnchoredPathPointCount = 0;
 	State.bPathBuildActive = true;
 	State.bPathBuildComplete = false;
@@ -1135,13 +1223,15 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 
 	// 1) collider 형상 축: 실제 충돌 지오메트리의 장축 — 본 그래프 특성(짧은 몸통 본, 체인 본,
 	//    임포트 축)과 무관하게 맞고, origin이 지오메트리 중심축 위라 helix 반지름도 정확하다.
-	 //테스트 중에는 collider 축이 guide-plane fallback을 가리지 않도록 비활성화한다.
-	//if (FindColliderShapeAxis(Ctx, LatchAnchor.Bone, LatchAnchor.Mesh.Get(), OutAxisOrigin, OutAxisDirection))
-	//{
-	//	LogAxisSource(TEXT("ColliderShapeAxis"), LatchAnchor.Mesh.Get());
-	//	return true;
-	//}
-	
+	// (CL 341에 "테스트 중 비활성화" 주석 처리로 실려 왔던 것을 복원 — 이 경로가 빠지면 드래곤
+	//  wrap 수정(형상 축 1순위, CL 291)이 회귀하고 Wrapping 각도 테스트가 깨진다. guide-plane
+	//  축을 형상 축보다 앞세우고 싶으면 주석 토글이 아니라 우선순위/설정 논의로.)
+	if (FindColliderShapeAxis(Ctx, LatchAnchor.Bone, LatchAnchor.Mesh.Get(), OutAxisOrigin, OutAxisDirection))
+	{
+		LogAxisSource(TEXT("ColliderShapeAxis"), LatchAnchor.Mesh.Get());
+		return true;
+	}
+
 
 	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)

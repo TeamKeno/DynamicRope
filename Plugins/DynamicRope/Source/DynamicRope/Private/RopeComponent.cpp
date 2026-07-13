@@ -1963,63 +1963,164 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 	Seed.BoneName = ContactTracker.CandidateBone;
 	Seed.Mesh = ContactTracker.CandidateMesh;
 	const int32 NodeIndex = RopeMath::HeadValidNodeIndex(ContactTracker.CandidateNodes, Sim.Positions);
-	if (NodeIndex != INDEX_NONE)
+	if (NodeIndex == INDEX_NONE)
+	{
+		return Seed;
+	}
+
+	// dominant 시드: 시드의 [0]번 latch/anchor 자리다(StartWrappingFromContacting이 [0]을 경로
+	// 빌드 출발점으로 소비하는 계약). anchor 구성이 실패해도 latch는 남긴다(종전 동작).
 	{
 		FRopeLatchNode Latch;
-		Latch.NodeIndex = NodeIndex;
-		Latch.Bone = ContactTracker.CandidateBone;
+		FRopeSurfaceAnchor Anchor;
+		const USceneComponent* ResolvedMesh = nullptr;
+		const bool bAnchorBuilt = BuildSeedLatchForTarget(Candidates,
+			ContactTracker.CandidateBone, ContactTracker.CandidateMesh, NodeIndex,
+			/*RopeDistance*/ 0.0f, Latch, Anchor, ResolvedMesh);
 		Seed.Latched.Add(Latch);
-
-		const FRopeContactCandidate* LatchCandidate = nullptr;
-		for (const FRopeContactCandidate& Candidate : Candidates)
+		if (!Seed.Mesh.IsValid() && ResolvedMesh)
 		{
-			if (!Candidate.bValid ||
-				Candidate.NodeIndex != NodeIndex ||
-				Candidate.Bone != ContactTracker.CandidateBone)
+			Seed.Mesh = ResolvedMesh;
+		}
+		if (bAnchorBuilt)
+		{
+			Seed.Anchors.Add(Anchor);
+		}
+	}
+
+	// 보조 시드(시드 다중화, MaxWrapSeeds > 1): dominant보다 tail 쪽에서 *다른* (mesh, bone)에
+	// dwell을 채운 대상을 추가 시드로 채택한다(예: 양다리 — 반대쪽 다리). head 쪽 대상은 받지
+	// 않는다: Wrapping의 경로/마스크가 latch 이후(tail) 구간만 소유하므로 head 쪽 노드는 고정할
+	// 통로가 없다. 보조 시드는 anchor까지 만들어졌을 때만 유효하다(경로 없이 본에 hold만 하므로
+	// 표면 프레임이 필수). dominant anchor가 없으면 보조도 받지 않는다 — Anchors[0]은 dominant
+	// 자리라는 계약(StartWrappingFromContacting의 경로 출발점)이 보조 anchor로 오염되면 안 된다.
+	if (WrapConfig.MaxWrapSeeds > 1 && Seed.Anchors.Num() > 0)
+	{
+		// 노드 간 최소 이격(세그먼트 수): dominant 나선이 쓸 최소 구간을 보장하고, 이웃 노드가
+		// 서로 다른 시드로 갈라지는 것을 막는다.
+		constexpr int32 MinSeedNodeSeparation = 2;
+
+		TArray<const FRopeTrackedContactTarget*> Sorted;
+		for (const FRopeTrackedContactTarget& Target : ContactTracker.Targets)
+		{
+			const bool bDominant = Target.Bone == ContactTracker.CandidateBone &&
+				Target.Mesh == ContactTracker.CandidateMesh;
+			if (!bDominant && Target.DwellTime >= WrapConfig.WrapDecisionTime)
+			{
+				Sorted.Add(&Target);
+			}
+		}
+		// dominant에 가까운(head 쪽) 대상부터 — 프레임 간 안정적 채택 순서.
+		Sorted.Sort([this](const FRopeTrackedContactTarget& A, const FRopeTrackedContactTarget& B)
+		{
+			return RopeMath::HeadValidNodeIndex(A.Nodes, Sim.Positions)
+				< RopeMath::HeadValidNodeIndex(B.Nodes, Sim.Positions);
+		});
+
+		for (const FRopeTrackedContactTarget* Target : Sorted)
+		{
+			if (Seed.Latched.Num() >= WrapConfig.MaxWrapSeeds)
+			{
+				break;
+			}
+
+			const int32 SecondaryNode = RopeMath::HeadValidNodeIndex(Target->Nodes, Sim.Positions);
+			if (SecondaryNode == INDEX_NONE)
 			{
 				continue;
 			}
 
-			if (!LatchCandidate || Candidate.Penetration > LatchCandidate->Penetration)
+			bool bTooClose = false;
+			for (const FRopeLatchNode& Existing : Seed.Latched)
 			{
-				LatchCandidate = &Candidate;
+				if (SecondaryNode < Existing.NodeIndex + MinSeedNodeSeparation)
+				{
+					bTooClose = true;
+					break;
+				}
 			}
-		}
-
-		const USceneComponent* Mesh = Seed.Mesh.Get();
-		if (!Mesh && LatchCandidate)
-		{
-			Mesh = LatchCandidate->Mesh;
-			Seed.Mesh = Mesh;
-		}
-
-		if (LatchCandidate && Mesh)
-		{
-			const FVector NormalWorld = LatchCandidate->Normal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-			FVector TangentWorld = FRopeFlightContactDetector::ExpectedWrapTangent(Sim, *LatchCandidate, GetForwardVector());
-			if (Sim.Positions.IsValidIndex(NodeIndex + 1))
+			if (bTooClose)
 			{
-				TangentWorld = Sim.Positions[NodeIndex + 1] - Sim.Positions[NodeIndex];
+				continue;
 			}
-			TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
-				.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
 
-			const FTransform BoneXform = ResolveBindingWorld(Mesh, ContactTracker.CandidateBone);
-
+			FRopeLatchNode Latch;
 			FRopeSurfaceAnchor Anchor;
-			Anchor.NodeIndex = NodeIndex;
-			Anchor.Bone = ContactTracker.CandidateBone;
-			Anchor.Mesh = Mesh;
-			Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(LatchCandidate->WorldPoint);
-			Anchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-			Anchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-			Anchor.StartWorldPosition = Sim.Positions[NodeIndex];
-			Anchor.SurfaceOffset = FMath::Max(0.0f, Radius);
-			Anchor.RopeDistance = 0.0f;
-			Seed.Anchors.Add(Anchor);
+			const USceneComponent* ResolvedMesh = nullptr;
+			if (BuildSeedLatchForTarget(Candidates, Target->Bone, Target->Mesh, SecondaryNode,
+				static_cast<float>(SecondaryNode - NodeIndex) * Sim.SegmentLength, Latch, Anchor, ResolvedMesh))
+			{
+				Seed.Latched.Add(Latch);
+				Seed.Anchors.Add(Anchor);
+			}
 		}
 	}
+
 	return Seed;
+}
+
+bool URopeComponent::BuildSeedLatchForTarget(const TArray<FRopeContactCandidate>& Candidates,
+	FName Bone, const USceneComponent* TrackedMesh, int32 NodeIndex, float RopeDistance,
+	FRopeLatchNode& OutLatch, FRopeSurfaceAnchor& OutAnchor, const USceneComponent*& OutMesh) const
+{
+	OutLatch.NodeIndex = NodeIndex;
+	OutLatch.Bone = Bone;
+	OutMesh = TrackedMesh;
+
+	const FRopeContactCandidate* LatchCandidate = nullptr;
+	for (const FRopeContactCandidate& Candidate : Candidates)
+	{
+		if (!Candidate.bValid ||
+			Candidate.NodeIndex != NodeIndex ||
+			Candidate.Bone != Bone)
+		{
+			continue;
+		}
+
+		// 같은 본 이름을 쓰는 두 액터가 함께 닿는 프레임의 오귀속 방어(트래커의 (Mesh, Bone) 키와
+		// 같은 이유). 트래커 mesh가 없을 때만 후보 mesh를 그대로 받는다(종전 폴백 유지).
+		if (TrackedMesh && Candidate.Mesh && Candidate.Mesh != TrackedMesh)
+		{
+			continue;
+		}
+
+		if (!LatchCandidate || Candidate.Penetration > LatchCandidate->Penetration)
+		{
+			LatchCandidate = &Candidate;
+		}
+	}
+
+	if (!OutMesh && LatchCandidate)
+	{
+		OutMesh = LatchCandidate->Mesh;
+	}
+
+	if (!LatchCandidate || !OutMesh)
+	{
+		return false;
+	}
+
+	const FVector NormalWorld = LatchCandidate->Normal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	FVector TangentWorld = FRopeFlightContactDetector::ExpectedWrapTangent(Sim, *LatchCandidate, GetForwardVector());
+	if (Sim.Positions.IsValidIndex(NodeIndex + 1))
+	{
+		TangentWorld = Sim.Positions[NodeIndex + 1] - Sim.Positions[NodeIndex];
+	}
+	TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
+
+	const FTransform BoneXform = ResolveBindingWorld(OutMesh, Bone);
+
+	OutAnchor.NodeIndex = NodeIndex;
+	OutAnchor.Bone = Bone;
+	OutAnchor.Mesh = OutMesh;
+	OutAnchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(LatchCandidate->WorldPoint);
+	OutAnchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	OutAnchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	OutAnchor.StartWorldPosition = Sim.Positions[NodeIndex];
+	OutAnchor.SurfaceOffset = FMath::Max(0.0f, Radius);
+	OutAnchor.RopeDistance = RopeDistance;
+	return true;
 }
 
 // ===== Wrapping =============================================================
@@ -2094,6 +2195,19 @@ void URopeComponent::StartWrappingFromContacting()
 		LatchAnchor.RopeDistance = 0.0f;
 	}
 
+	// 시드 다중화: Anchors[0]은 dominant(경로 출발점), [1..]는 보조 시드 앵커다. Begin *전에*
+	// 상태에 실어야 경로 빌드가 NumTailNodes를 첫 보조 노드 앞까지로 클램프한다(필드 주석 참고).
+	// dominant latch보다 tail 쪽 노드만 유효하다(시드 조립이 보장하지만, 시드가 오래된 프레임일
+	// 가능성에 대비해 한 번 더 거른다).
+	for (int32 AnchorIndex = 1; AnchorIndex < PendingWrapSeed.Anchors.Num(); ++AnchorIndex)
+	{
+		const FRopeSurfaceAnchor& Secondary = PendingWrapSeed.Anchors[AnchorIndex];
+		if (Secondary.NodeIndex > LatchAnchor.NodeIndex && Sim.Positions.IsValidIndex(Secondary.NodeIndex))
+		{
+			WrappingPhase.State.SecondarySeedAnchors.Add(Secondary);
+		}
+	}
+
 	if (!WrappingPhase.Begin(LatchAnchor, Mesh, PendingWrapSeed.BoneName,
 		FMath::Max(0.01f, WrapConfig.WrappingMotionDuration), Sim, MakeWrappingContext()))
 	{
@@ -2102,8 +2216,9 @@ void URopeComponent::StartWrappingFromContacting()
 		return;
 	}
 
-	SetPhase(ERopePhase::Wrapping, *FString::Printf(TEXT("bone=%s, %d anchor(s)"),
-		*WrappingPhase.State.BoneName.ToString(), WrappingPhase.State.Anchors.Num()));
+	SetPhase(ERopePhase::Wrapping, *FString::Printf(TEXT("bone=%s, %d anchor(s), %d secondary seed(s)"),
+		*WrappingPhase.State.BoneName.ToString(), WrappingPhase.State.Anchors.Num(),
+		WrappingPhase.State.SecondarySeedAnchors.Num()));
 }
 
 void URopeComponent::UpdateWrapping(float DeltaTime)

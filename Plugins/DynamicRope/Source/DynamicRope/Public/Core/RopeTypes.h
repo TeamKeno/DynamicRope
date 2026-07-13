@@ -164,6 +164,15 @@ struct FRopeWrappingState
 	FRopeSurfaceAnchor LatchAnchor;
 	TArray<FRopeWrapPathPoint> Path;
 
+	/**
+	 * 보조 시드 앵커(시드 다중화, MaxWrapSeeds > 1): dominant latch보다 tail 쪽에서 *다른* 본에
+	 * 접촉해 채택된 앵커들. 경로 빌드/front 모션의 대상이 아니라 Wrapping 내내 자기 본에 hold되고,
+	 * BuildCommitSeed에서 경로 앵커들과 합류한다(BeginWrap/Hold는 앵커별 Bone/Mesh를 이미 지원).
+	 * Begin *이전에* 채워야 한다 — BeginProgressiveWrapPathBuild가 경로 길이(NumTailNodes)를
+	 * 첫 보조 시드 노드 앞까지로 클램프하는 데 읽는다(경로 앵커와 보조 앵커의 노드 중복 방지).
+	 */
+	TArray<FRopeSurfaceAnchor> SecondarySeedAnchors;
+
 	int32 NumTailNodes = 0;
 	int32 LastAnchoredPathPointCount = 0;
 	bool bPathBuildActive = false;
@@ -582,6 +591,16 @@ struct FRopeWrapConfig
 	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrapDecisionTime = 0.016f;
+
+	/**
+	 * 한 번의 캡처에서 채택할 수 있는 wrap 시드(접촉 대상) 최대 개수. 1(기본) = 기존 단일 시드 동작.
+	 * 2 이상이면 dominant 대상 외에, dominant latch보다 tail 쪽에서 *다른* (mesh, bone)에 dwell을
+	 * 채운 접촉이 보조 시드로 함께 감긴다(예: 양다리 — 한쪽 다리를 감고 반대쪽 다리 접촉 노드도
+	 * 그 본에 고정). 감김 경로(나선)는 dominant 시드에만 생성되고, 보조 시드는 접촉 노드를 자기
+	 * 본에 hold하는 방식이다 — 보조 대상 둘레를 도는 경로까지 만들지는 않는다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 MaxWrapSeeds = 1;
 
 	/** Wrapping phase must keep the same accumulated latch span stable this long before committing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
@@ -1188,6 +1207,19 @@ struct FRopeGuidedThrowState
 	}
 };
 
+/** 트래커가 dominant 외에도 유지하는 (Mesh, Bone) 대상별 접촉 집계(시드 다중화 재료). */
+struct FRopeTrackedContactTarget
+{
+	FName Bone = NAME_None;
+	const USceneComponent* Mesh = nullptr;
+
+	/** 이번 프레임 이 대상에 닿은 노드들(매 갱신 최신 후보로 교체). */
+	TArray<int32> Nodes;
+
+	/** 이 대상의 지속 접촉 시간. 접촉이 끊긴 프레임에는 같은 양만큼 감쇠하고 0이 되면 목록에서 빠진다. */
+	float DwellTime = 0.0f;
+};
+
 /**
  * 접촉 후보들에서 dominant 대상 — (Mesh, Bone) 쌍 — 을 추적하는 POD 트래커. 본 이름만 키로 쓰면
  * 같은 스켈레톤을 쓰는 두 액터가 동시에 닿을 때 후보가 합산/오귀속되므로 mesh까지 키에 포함한다.
@@ -1195,6 +1227,9 @@ struct FRopeGuidedThrowState
  * 동률은 head(손 쪽) 노드가 앞선 대상 → 점수(관통+감김 방향) 순으로 깨져 프레임 간 안정적이다.
  * 대상이 바뀌면(본 또는 mesh) DwellTime이 0부터 다시 쌓인다(전이 프레임 오탐 방어 — 랙돌 테스트 (c)가
  * 고정하는 계약).
+ * dominant와 별개로 접촉 중인 모든 (Mesh, Bone) 대상을 Targets에 dwell과 함께 유지한다 —
+ * 시드 다중화(MaxWrapSeeds > 1)가 보조 시드 후보를 고르는 재료다. dominant 선정/리셋 계약은
+ * Targets 도입과 무관하게 종전과 동일하다.
  */
 struct FRopeContactTracker
 {
@@ -1204,12 +1239,16 @@ struct FRopeContactTracker
 	TArray<int32> CandidateNodes;
 	float DwellTime = 0.0f;
 
+	/** 접촉 중인 모든 대상의 (Mesh, Bone)별 집계. dominant도 포함된다(같은 키로 조회 가능). */
+	TArray<FRopeTrackedContactTarget> Targets;
+
 	void Reset()
 	{
 		CandidateBone = NAME_None;
 		CandidateMesh = nullptr;
 		CandidateNodes.Reset();
 		DwellTime = 0.0f;
+		Targets.Reset();
 	}
 
 	void BeginOrUpdate(const TArray<FRopeContactCandidate>& Candidates)
@@ -1220,6 +1259,19 @@ struct FRopeContactTracker
 	void Decay(float DeltaTime)
 	{
 		DwellTime = FMath::Max(0.0f, DwellTime - DeltaTime);
+
+		// 접촉이 전무한 프레임: 모든 대상의 dwell을 같은 비율로 소진시킨다(짧은 플리커 관용은 동일).
+		// 노드 목록은 이번 프레임 접촉이 아니므로 비워 stale 소비를 막는다.
+		for (int32 Index = Targets.Num() - 1; Index >= 0; --Index)
+		{
+			Targets[Index].DwellTime -= DeltaTime;
+			Targets[Index].Nodes.Reset();
+			if (Targets[Index].DwellTime <= 0.0f)
+			{
+				Targets.RemoveAt(Index);
+			}
+		}
+
 		if (DwellTime <= 0.0f)
 		{
 			Reset();

@@ -111,6 +111,45 @@ void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates
 		}
 	}
 
+	// 대상별 dwell 대장 갱신(시드 다중화 재료): 이번 프레임 존재하는 키는 dwell 누적 + 노드 교체,
+	// 빠진 키는 같은 양만큼 감쇠 후 소진되면 제거(플리커 관용은 dominant dwell과 같은 규칙).
+	// dominant 선정(아래)은 이 대장과 독립적으로 종전 로직을 그대로 쓴다 — 단일 시드 동작 불변.
+	for (int32 Index = Targets.Num() - 1; Index >= 0; --Index)
+	{
+		FRopeTrackedContactTarget& Target = Targets[Index];
+		const FTargetKey Key(Target.Mesh, Target.Bone);
+		if (const TArray<int32>* Nodes = NodesByTarget.Find(Key))
+		{
+			Target.DwellTime += DeltaTime;
+			Target.Nodes = *Nodes;
+		}
+		else
+		{
+			Target.DwellTime -= DeltaTime;
+			Target.Nodes.Reset();
+			if (Target.DwellTime <= 0.0f)
+			{
+				Targets.RemoveAt(Index);
+			}
+		}
+	}
+	for (const TPair<FTargetKey, TArray<int32>>& Pair : NodesByTarget)
+	{
+		const bool bAlreadyTracked = Targets.ContainsByPredicate(
+			[&Pair](const FRopeTrackedContactTarget& Target)
+			{
+				return Target.Mesh == Pair.Key.Key && Target.Bone == Pair.Key.Value;
+			});
+		if (!bAlreadyTracked)
+		{
+			FRopeTrackedContactTarget& Target = Targets.AddDefaulted_GetRef();
+			Target.Bone = Pair.Key.Value;
+			Target.Mesh = Pair.Key.Key;
+			Target.Nodes = Pair.Value;
+			Target.DwellTime = 0.0f;
+		}
+	}
+
 	FTargetKey BestTarget(nullptr, NAME_None);
 	int32 BestCount = 0;
 	int32 BestHeadNode = INDEX_NONE;

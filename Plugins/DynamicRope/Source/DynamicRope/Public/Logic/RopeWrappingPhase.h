@@ -59,6 +59,8 @@ public:
 	/**
 	 * Wrapping 시작: 상태를 시드(bone/mesh/duration)로 채우고 latch anchor에서 progressive
 	 * 경로 빌드를 개시한다(첫 경로점+앵커 확보까지). 성공 시 안정 추적도 초기화한다.
+	 * 시드 다중화(MaxWrapSeeds > 1): 보조 시드 앵커는 State.SecondarySeedAnchors에 *이 호출 전에*
+	 * 실어야 한다 — 경로 길이(NumTailNodes)를 첫 보조 노드 앞까지로 클램프하는 데 여기서 읽는다.
 	 * @return 경로 빌드를 시작할 수 없으면 false — 호출자는 상태를 버리고 Flight로 돌아가야 한다.
 	 */
 	bool Begin(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,

@@ -665,6 +665,15 @@ private:
 
 	FRopeWrapState BuildWrapSeedFromContactingState(const TArray<FRopeContactCandidate>& Candidates) const;
 
+	/**
+	 * 한 (Bone, Mesh) 대상의 시드 latch/anchor를 구성한다(시드 다중화로 dominant/보조가 공용).
+	 * OutLatch는 항상 채워지고, 접촉 후보에서 표면 프레임을 얻어 anchor까지 만들었으면 true.
+	 * OutMesh는 트래커 mesh가 없을 때 후보의 mesh로 폴백된 결과(양쪽 다 없으면 null).
+	 */
+	bool BuildSeedLatchForTarget(const TArray<FRopeContactCandidate>& Candidates,
+		FName Bone, const USceneComponent* TrackedMesh, int32 NodeIndex, float RopeDistance,
+		FRopeLatchNode& OutLatch, FRopeSurfaceAnchor& OutAnchor, const USceneComponent*& OutMesh) const;
+
 	//~ Wrapping -------------------------------------------------------------
 	// 경로 생성/front 모션/마스크 등 Wrapping 페이즈의 실제 로직은 FRopeWrappingPhase(WrappingPhase)로
 	// 분리됐다. 여기엔 페이즈 전이·이벤트를 결정하는 오케스트레이션만 남는다.

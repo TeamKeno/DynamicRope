@@ -250,4 +250,69 @@ bool FRopeFlightTrackerCrossMeshTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 시드 다중화 재료: 트래커가 dominant 외의 접촉 대상도 (Mesh, Bone)별 dwell과 함께 유지하고
+// (Targets), 접촉이 빠진 대상은 같은 비율로 감쇠하다 소진되면 목록에서 빠지는가. dominant
+// 선정/리셋 계약은 Targets 도입과 무관하게 유지된다(위 테스트가 고정).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightTrackerMultiTargetTest,
+	"DynamicRope.FlightContact.TrackerKeepsSecondaryTargetDwell",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightTrackerMultiTargetTest::RunTest(const FString& Parameters)
+{
+	const USceneComponent* Mesh = NewObject<USceneComponent>();
+
+	auto MakeCandidate = [Mesh](int32 Node, const FName& Bone)
+	{
+		FRopeContactCandidate C;
+		C.bValid = true;
+		C.NodeIndex = Node;
+		C.Bone = Bone;
+		C.Mesh = Mesh;
+		C.Penetration = 1.0f;
+		return C;
+	};
+
+	// 양다리 시나리오 축약: 한 mesh의 두 본에 동시 접촉(thigh_l 노드 1,2 / calf_r 노드 6,7).
+	TArray<FRopeContactCandidate> BothLegs;
+	BothLegs.Add(MakeCandidate(1, FName("thigh_l")));
+	BothLegs.Add(MakeCandidate(2, FName("thigh_l")));
+	BothLegs.Add(MakeCandidate(6, FName("calf_r")));
+	BothLegs.Add(MakeCandidate(7, FName("calf_r")));
+
+	FRopeContactTracker Tracker;
+	Tracker.Update(BothLegs, 0.10f);
+	Tracker.Update(BothLegs, 0.10f);
+
+	TestTrue(TEXT("dominant is head-side thigh_l"), Tracker.CandidateBone == FName("thigh_l"));
+	TestEqual(TEXT("both targets tracked"), Tracker.Targets.Num(), 2);
+
+	const FRopeTrackedContactTarget* Secondary = Tracker.Targets.FindByPredicate(
+		[](const FRopeTrackedContactTarget& Target) { return Target.Bone == FName("calf_r"); });
+	if (!TestNotNull(TEXT("secondary target present"), Secondary))
+	{
+		return false;
+	}
+	TestTrue(TEXT("secondary dwell accumulates independently"), Secondary->DwellTime > 0.05f);
+	TestEqual(TEXT("secondary nodes current"), Secondary->Nodes.Num(), 2);
+
+	// calf_r 접촉이 끊기면: dwell이 같은 비율로 감쇠(우선 잔존 — 짧은 플리커 관용), 소진되면 제거.
+	TArray<FRopeContactCandidate> OneLeg;
+	OneLeg.Add(MakeCandidate(1, FName("thigh_l")));
+	OneLeg.Add(MakeCandidate(2, FName("thigh_l")));
+
+	Tracker.Update(OneLeg, 0.04f);
+	Secondary = Tracker.Targets.FindByPredicate(
+		[](const FRopeTrackedContactTarget& Target) { return Target.Bone == FName("calf_r"); });
+	if (!TestNotNull(TEXT("secondary survives a short flicker"), Secondary))
+	{
+		return false;
+	}
+	TestTrue(TEXT("flickering secondary has no current nodes"), Secondary->Nodes.Num() == 0);
+
+	Tracker.Update(OneLeg, 0.10f);
+	TestEqual(TEXT("exhausted secondary is dropped"), Tracker.Targets.Num(), 1);
+	TestTrue(TEXT("dominant unaffected by secondary decay"), Tracker.CandidateBone == FName("thigh_l"));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
