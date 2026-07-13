@@ -87,9 +87,58 @@ enum class ERopeWrapResolveMode : uint8
 };
 
 /**
+ * 결착 모델(두 번째 축) — 팁이 "닿았다"로 판정되는 순간 무엇이 성립하는가.
+ * 설계는 Docs/PoC/02_WrapResolveModes.md §2. 도달 모드와의 조합 제약(2026-07-13 합의를
+ * 데이터 수준으로 승격): ①FullSimulation·②AssistedJudged = **BareWrap 전용**(팁 결착은 창발/
+ * 판정 파이프라인과 결합하지 않는다), ③GuaranteedWrap = **Pierce/Cinch 전용**(맨 로프의
+ * "무조건 감김"은 시각적으로 정당화되지 않아 조합 자체를 금지 — 회의 결정 B의 강화).
+ * 제약 검사/보정의 단일 소스는 RopeWrapModes:: 헬퍼이고, 에디터 편집(PostEditChangeProperty,
+ * 모드가 정본)과 던지기 진입(ThrowWithContext)이 함께 강제한다.
+ *
+ * [배선 상태] Pierce/Cinch의 실행(팁 mesh 렌더/히트 판정/앵커 생성)은 후속 CL에서 붙는다 —
+ * 지금은 선언+제약+이벤트 표기만 존재하며, ③의 실제 성립은 종전 prepared preview 경로를 따른다.
+ */
+UENUM(BlueprintType)
+enum class ERopeTipEngagement : uint8
+{
+	/** 맨 로프(또는 추 팁): 접촉 dwell + 감김 판정으로 성립 — 현행 파이프라인. ①② 전용. */
+	BareWrap UMETA(DisplayName = "Bare Wrap"),
+
+	/** 창/작살 꽂힘: 팁 mesh 히트 순간 접점 앵커 1개(bone-local)로 성립. ③ 전용. */
+	Pierce UMETA(DisplayName = "Pierce"),
+
+	/** 올가미/폐로프 조임: 루프가 대상을 포획하면 둘레 앵커 링으로 성립. ③ 전용. */
+	Cinch UMETA(DisplayName = "Cinch")
+};
+
+/** 도달 모드 × 결착 모델 조합 제약의 단일 소스(에디터 보정·던지기 진입·테스트가 공용 소비). */
+namespace RopeWrapModes
+{
+	/** 이 조합이 계약상 유효한가. ①② = BareWrap만, ③ = Pierce/Cinch만. */
+	inline bool IsEngagementAllowed(ERopeWrapResolveMode Mode, ERopeTipEngagement Engagement)
+	{
+		return Mode == ERopeWrapResolveMode::GuaranteedWrap
+			? Engagement != ERopeTipEngagement::BareWrap
+			: Engagement == ERopeTipEngagement::BareWrap;
+	}
+
+	/** 무효 조합을 모드에 맞는 기본 결착으로 보정한다(①②→BareWrap, ③→Pierce). */
+	inline ERopeTipEngagement ClampEngagement(ERopeWrapResolveMode Mode, ERopeTipEngagement Engagement)
+	{
+		if (IsEngagementAllowed(Mode, Engagement))
+		{
+			return Engagement;
+		}
+		return Mode == ERopeWrapResolveMode::GuaranteedWrap
+			? ERopeTipEngagement::Pierce
+			: ERopeTipEngagement::BareWrap;
+	}
+}
+
+/**
  * Wrapped 성립 이벤트 페이로드(OnRopeWrapped / NotifyWrapped). 종전의 본 이름 하나에서 확장
  * (2026-07-13 회의 결정 G — Pierce 데미지 훅, 포획 강도 게임 규칙의 입구; 시그니처 변경은
- * 모드 도입과 함께 1회로 끝내는 클린 브레이크). 결착 모델(TipEngagement) 필드는 Pierce 도입 시 추가.
+ * 모드 도입과 함께 1회로 끝내는 클린 브레이크).
  */
 USTRUCT(BlueprintType)
 struct FRopeWrappedEventInfo
@@ -111,6 +160,10 @@ struct FRopeWrappedEventInfo
 	/** 성립 당시 이 로프의 도달 모드(③ Guaranteed 성립은 판정값이 -1이다 — preview 기반). */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+
+	/** 성립 당시 결착 모델(①② = 항상 BareWrap, ③ = Pierce/Cinch — 조합 제약은 RopeWrapModes 참고). */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope")
+	ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
 
 	/** 커밋 시점 누적 감싼 각도(도). 계산 불가/preview 기반(③) = -1. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")

@@ -605,4 +605,43 @@ bool FRopeWrappingEnclosureCoverageTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 도달 모드 × 결착 모델 조합 제약(RopeWrapModes — 에디터 보정·던지기 진입이 공용 소비하는 단일
+// 소스): ①FullSimulation·②AssistedJudged = BareWrap 전용, ③GuaranteedWrap = Pierce/Cinch 전용.
+// 보정 방향도 계약이다: ①②의 팁 결착은 BareWrap으로, ③의 BareWrap은 Pierce로 승격.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeResolveModeEngagementTest,
+	"DynamicRope.Wrapping.ResolveModeEngagementConstraint",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeResolveModeEngagementTest::RunTest(const FString& Parameters)
+{
+	const ERopeWrapResolveMode Sim = ERopeWrapResolveMode::FullSimulation;
+	const ERopeWrapResolveMode Judged = ERopeWrapResolveMode::AssistedJudged;
+	const ERopeWrapResolveMode Guaranteed = ERopeWrapResolveMode::GuaranteedWrap;
+	const ERopeTipEngagement Bare = ERopeTipEngagement::BareWrap;
+	const ERopeTipEngagement Pierce = ERopeTipEngagement::Pierce;
+	const ERopeTipEngagement Cinch = ERopeTipEngagement::Cinch;
+
+	// 허용 매트릭스.
+	TestTrue(TEXT("FullSim x BareWrap allowed"), RopeWrapModes::IsEngagementAllowed(Sim, Bare));
+	TestTrue(TEXT("Assisted x BareWrap allowed"), RopeWrapModes::IsEngagementAllowed(Judged, Bare));
+	TestTrue(TEXT("Guaranteed x Pierce allowed"), RopeWrapModes::IsEngagementAllowed(Guaranteed, Pierce));
+	TestTrue(TEXT("Guaranteed x Cinch allowed"), RopeWrapModes::IsEngagementAllowed(Guaranteed, Cinch));
+	TestTrue(TEXT("FullSim x Pierce forbidden"), !RopeWrapModes::IsEngagementAllowed(Sim, Pierce));
+	TestTrue(TEXT("FullSim x Cinch forbidden"), !RopeWrapModes::IsEngagementAllowed(Sim, Cinch));
+	TestTrue(TEXT("Assisted x Pierce forbidden"), !RopeWrapModes::IsEngagementAllowed(Judged, Pierce));
+	TestTrue(TEXT("Assisted x Cinch forbidden"), !RopeWrapModes::IsEngagementAllowed(Judged, Cinch));
+	TestTrue(TEXT("Guaranteed x BareWrap forbidden"), !RopeWrapModes::IsEngagementAllowed(Guaranteed, Bare));
+
+	// 보정 방향: 유효 조합은 그대로, 무효 조합은 모드에 맞는 기본값으로.
+	TestTrue(TEXT("valid combo passes through"),
+		RopeWrapModes::ClampEngagement(Guaranteed, Cinch) == Cinch);
+	TestTrue(TEXT("tip engagement under Assisted clamps to BareWrap"),
+		RopeWrapModes::ClampEngagement(Judged, Pierce) == Bare);
+	TestTrue(TEXT("tip engagement under FullSim clamps to BareWrap"),
+		RopeWrapModes::ClampEngagement(Sim, Cinch) == Bare);
+	TestTrue(TEXT("BareWrap under Guaranteed promotes to Pierce"),
+		RopeWrapModes::ClampEngagement(Guaranteed, Bare) == Pierce);
+	return true;
+}
+
 #endif

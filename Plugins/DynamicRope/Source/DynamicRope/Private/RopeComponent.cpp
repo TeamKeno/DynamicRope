@@ -153,6 +153,18 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 
 	EnsureRopeInitialized();
 
+	// 조합 제약 강제(런타임 쓰기 방어 — 에디터 편집은 PostEditChangeProperty가 이미 보정):
+	// ①②=BareWrap만, ③=Pierce/Cinch만. 무효 조합은 던지기 시점에 보정하고 경고를 남긴다.
+	const ERopeTipEngagement ClampedEngagement = RopeWrapModes::ClampEngagement(ResolveMode, TipEngagement);
+	if (ClampedEngagement != TipEngagement)
+	{
+		UE_LOG(LogDynamicRope, Warning,
+			TEXT("[%s] TipEngagement %d not allowed with ResolveMode %d — clamped to %d (FullSim/Assisted=BareWrap only, Guaranteed=Pierce/Cinch only)."),
+			*GetName(), static_cast<int32>(TipEngagement), static_cast<int32>(ResolveMode),
+			static_cast<int32>(ClampedEngagement));
+		TipEngagement = ClampedEngagement;
+	}
+
 	// ③ GuaranteedWrap의 BP 직행/AI 경로: Wielder의 PreviewPathLocked 흐름 없이 Throw가 불려도
 	// 보장 계약을 지킨다 — 컴포넌트가 스스로 prepared preview를 빌드해 구속 경로로 던지고,
 	// 빌드 실패 = Aim 무효 = 던지기 거부(연출 후 실패를 만들지 않는다. 2026-07-13 회의 결정 B/F).
@@ -186,6 +198,9 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	{
 		return false;
 	}
+
+	// 조합 제약 강제(Wielder 직행 진입점도 동일 방어 — ThrowWithContext의 보정과 같은 규칙).
+	TipEngagement = RopeWrapModes::ClampEngagement(ResolveMode, TipEngagement);
 
 	// 서브클래스 wrap 대상 게이트: preview 빌드는 이 게이트를 모르므로(정적 빌더) 진입점에서 거른다.
 	if (!CanWrapTarget(Prepared.Mesh.Get(), Prepared.Bone))
@@ -1019,6 +1034,15 @@ void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 		PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, RopeLength))
 	{
 		InitRope();
+	}
+
+	// 도달 모드 × 결착 모델 조합 제약(①②=BareWrap만, ③=Pierce/Cinch만 — RopeWrapModes 참고).
+	// 모드가 정본이다: 어느 쪽을 편집했든 무효 조합이면 TipEngagement 쪽을 모드에 맞게 보정한다
+	// (Pierce/Cinch를 고르려면 먼저 모드를 ③으로 — ③ 전환 시 BareWrap은 Pierce로 자동 승격).
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, ResolveMode) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, TipEngagement))
+	{
+		TipEngagement = RopeWrapModes::ClampEngagement(ResolveMode, TipEngagement);
 	}
 
 	// RopeMaterial/RopeLength/bScaleTwistByLength 변경 시 dynamic material 파라미터 갱신(에디터 미리보기 즉시 반영).
@@ -2408,6 +2432,7 @@ FRopeWrappedEventInfo URopeComponent::MakeWrappedEventInfo(const FRopeWrapState&
 	// 이벤트 페이로드는 읽기 전용 의미라 대상 mesh의 const를 벗겨 BP에 노출한다(수정 계약 아님).
 	Info.Mesh = const_cast<USceneComponent*>(Seed.Mesh.Get());
 	Info.ResolveMode = ResolveMode;
+	Info.TipEngagement = TipEngagement;
 	Info.AngleDeg = AngleDeg;
 	Info.CoverageDeg = CoverageDeg;
 	Info.AnchorCount = Seed.Anchors.Num();

@@ -86,6 +86,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
+	/**
+	 * 결착 모델(T1) — 팁이 닿는 순간 무엇이 성립하는가(ERopeTipEngagement 주석 참고).
+	 * 도달 모드와 조합이 제약된다: ①②=BareWrap 전용, ③=Pierce/Cinch 전용. 무효 조합은
+	 * 에디터 편집 시(모드가 정본 — TipEngagement가 보정됨)와 던지기 진입 시 자동 보정된다.
+	 * Pierce/Cinch의 실행 배선은 후속 CL — 현재는 계약 선언과 이벤트 표기만.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
+	ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
+
 	// 아래 초기화 전용 값들(NumParticles/RopeLength/MinRopeLength)은 InitRope 시점에만 소비된다 —
 	// 런타임 쓰기는 재초기화 전까지 무효라 BlueprintReadOnly(함정 방지). 런타임 길이 변경은
 	// SetRopeLength/SetReelRate를 쓴다.
