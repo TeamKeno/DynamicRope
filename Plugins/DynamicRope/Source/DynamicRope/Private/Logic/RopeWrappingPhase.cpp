@@ -346,6 +346,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.bPathBuildComplete = false;
 	State.bPathBuildFailed = false;
 	State.PathCurrentDistance = 0.0f;
+	State.PathAccumulatedAngleRad = 0.0f;
 	State.FrontDistance = 0.0f;
 	State.PathCurrentBone = StoredLatchAnchor.Bone;
 	State.PathPreviousBone = NAME_None;
@@ -499,6 +500,15 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 	const float StepSize = FMath::Max(1.0f, Sim.SegmentLength * 0.5f);
 	int32 StepsRemaining = FMath::Max(1, StepBudget);
 
+	// 현재 축 기준 radial(축에서 점으로 향하는 단위벡터). 스텝 전/후 radial 사이 각도가 그 스텝의
+	// 감싼 각도 증분이다 — 점이 축 위(축퇴)면 false.
+	const auto ComputeAxisRadial = [this](const FVector& Point, FVector& OutRadial) -> bool
+	{
+		const float AxisDistance = FVector::DotProduct(Point - State.PathAxisOrigin, State.PathAxisDirection);
+		OutRadial = Point - (State.PathAxisOrigin + State.PathAxisDirection * AxisDistance);
+		return OutRadial.Normalize(KINDA_SMALL_NUMBER);
+	};
+
 	while (StepsRemaining > 0 && State.Path.Num() < State.NumTailNodes)
 	{
 		const int32 PathIndex = State.Path.Num();
@@ -521,6 +531,9 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				State.PathNormalWorld,
 				Ctx,
 				State.PathCircumferenceDir);
+
+			FVector StepRadialBefore = FVector::ZeroVector;
+			const bool bHasRadialBefore = ComputeAxisRadial(State.PathSurfaceWorld, StepRadialBefore);
 
 			State.PathSurfaceWorld += State.PathTangentWorld * StepDistance;
 			const FName CurrentBone = State.PathCurrentBone.IsNone()
@@ -561,6 +574,15 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				return false;
 			}
 
+			// 감싼 각도 적분: 이번 스텝이 만든 radial 회전량을 누적한다. 축 재해석(아래) *전에*,
+			// 이 스텝을 실제로 걸었던 축 기준으로 전/후 radial을 재야 한다.
+			FVector StepRadialAfter = FVector::ZeroVector;
+			if (bHasRadialBefore && ComputeAxisRadial(State.PathSurfaceWorld, StepRadialAfter))
+			{
+				State.PathAccumulatedAngleRad += FMath::Acos(FMath::Clamp(
+					static_cast<float>(FVector::DotProduct(StepRadialBefore, StepRadialAfter)), -1.0f, 1.0f));
+			}
+
 			// ProjectWrapPointToSurfaceMultiBone이 hysteresis까지 적용해 최종 본을 돌려준다.
 			// 여기서는 상태만 갱신한다. 전환했다면 직전 본을 기록해 다음 step에서 바로 되돌아가는 후보에
 			// penalty를 줄 수 있게 하고, 전환 거리 누적은 0으로 다시 시작한다.
@@ -569,6 +591,8 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				State.PathPreviousBone = CurrentBone;
 				State.PathCurrentBone = ProjectedBone;
 				State.PathDistanceSinceBoneTransition = 0.0f;
+				// rolling axis: 이후 스텝의 tangent field가 새 본 형상 축 주위를 돌게 한다.
+				ReseedWrappingAxisOnBoneTransition(ProjectedBone, ProjectedMesh, Ctx);
 			}
 			else
 			{
@@ -930,6 +954,17 @@ bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState
 		return false;
 	}
 
+	// SurfaceVectorField는 경로 빌드가 스텝마다 적분해 둔 누적 각도를 그대로 쓴다 — 축이 본 전환마다
+	// 재해석되므로(rolling axis) latch 축 하나로 전체 거리를 나누는 아래 helix 공식이 성립하지 않는다.
+	// 단일 본(전환 없음)에서는 두 척도가 일치한다(RopeWrappingPhaseTests가 고정하는 계약).
+	// AnalyticHelix(축 고정), 그리고 아직 한 스텝도 걷지 못한 SVF는 기존 helix 공식으로 폴백.
+	if (State.PathMode == ERopeWrappingPathMode::SurfaceVectorField &&
+		State.PathAccumulatedAngleRad > KINDA_SMALL_NUMBER)
+	{
+		OutAngleDeg = FMath::RadiansToDegrees(State.PathAccumulatedAngleRad);
+		return true;
+	}
+
 	const FRopeSurfaceAnchor& LatchAnchor = State.LatchAnchor;
 	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
@@ -1224,6 +1259,66 @@ void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& Latc
 	{
 		InOutAxisDirection *= -1.0f;
 	}
+}
+
+void FRopeWrappingPhase::ReseedWrappingAxisOnBoneTransition(FName Bone, const USceneComponent* Mesh, const FContext& Ctx)
+{
+	if (Bone.IsNone())
+	{
+		return;
+	}
+
+	// ResolveWrappingAxis의 입력 계약(본/메시 + 본 로컬 표면 프레임)만 채운 합성 anchor. 현재 경로
+	// 지점의 표면 프레임을 새 본 로컬로 옮겨 담아, collider 형상 축 실패 시의 폴백(guide 평면/기저축)도
+	// 새 본 위치·현재 normal 기준으로 동작하게 한다.
+	FRopeSurfaceAnchor AxisAnchor;
+	AxisAnchor.Bone = Bone;
+	AxisAnchor.Mesh = Mesh;
+	const FTransform BoneXform = ResolveBindingWorld(Mesh, Bone);
+	AxisAnchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(State.PathSurfaceWorld);
+	AxisAnchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(State.PathNormalWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	AxisAnchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(State.PathTangentWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+
+	FVector NewAxisOrigin = State.PathAxisOrigin;
+	FVector NewAxisDirection = State.PathAxisDirection;
+	if (!ResolveWrappingAxis(AxisAnchor, Ctx, NewAxisOrigin, NewAxisDirection))
+	{
+		// 새 본 축 유도 실패 — 직전 본 축으로 계속 진행한다(종전 단일 축 동작과 동일한 폴백).
+		return;
+	}
+
+	// 부호 정렬: 체인 본의 이웃 축은 대체로 이어지므로 이전 축과 반대면 뒤집는다 — 피치 드리프트
+	// 방향(감기며 축을 따라 미끄러지는 쪽)이 전환점에서 반전되지 않게 한다. OrientWrappingAxisByTail은
+	// latch 시점 tail 위치 휴리스틱이라 경로 중간 재해석에는 부적합하다.
+	if (FVector::DotProduct(NewAxisDirection, State.PathAxisDirection) < 0.0f)
+	{
+		NewAxisDirection *= -1.0f;
+	}
+
+	// 현재 표면점 기준 radial/원주 재계산 + winding 재선출: 새 필드가 지금 진행 방향(tangent) 그대로
+	// 새 축 주위를 돌게 한다. 여기서 winding을 다시 뽑지 않으면 전환 지점의 기하에 따라 감김 방향이
+	// 뒤집힐 수 있다.
+	const float AxisDistance = FVector::DotProduct(State.PathSurfaceWorld - NewAxisOrigin, NewAxisDirection);
+	const FVector AxisPoint = NewAxisOrigin + NewAxisDirection * AxisDistance;
+	const FVector Radial = (State.PathSurfaceWorld - AxisPoint)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathNormalWorld);
+	FVector CircumferenceDir = FVector::CrossProduct(NewAxisDirection, Radial)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
+	const float NewWindingSign =
+		FVector::DotProduct(CircumferenceDir, State.PathTangentWorld) < 0.0f ? -1.0f : 1.0f;
+
+	State.PathAxisOrigin = NewAxisOrigin;
+	State.PathAxisDirection = NewAxisDirection;
+	State.PathLatchRadial = Radial;
+	State.PathWindingSign = NewWindingSign;
+	State.PathCircumferenceDir = CircumferenceDir * NewWindingSign;
+
+	UE_LOG(LogRopeWrap, Log,
+		TEXT("[%s] Wrapping axis re-seeded on bone transition: bone=%s, origin=%s, dir=%s, winding=%+.0f"),
+		*Ctx.OwnerName, *Bone.ToString(),
+		*State.PathAxisOrigin.ToString(), *State.PathAxisDirection.ToString(), NewWindingSign);
 }
 
 void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USceneComponent* Mesh,

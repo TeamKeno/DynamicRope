@@ -203,6 +203,14 @@ struct FRopeWrappingState
 
 	float PathWindingSign = 1.0f;
 
+	/**
+	 * SurfaceVectorField 경로 빌드 중 적분한 누적 감싼 각도(라디안). 감김 축이 본 전환마다
+	 * 재해석되므로(rolling axis) latch 축 하나를 가정하는 helix 공식으로는 전체 각도를 계산할 수
+	 * 없다 — 걷기 스텝마다 현재 축 기준 radial 회전량을 더해 둔다. AnalyticHelix 모드는 축이
+	 * 고정이라 이 값을 쓰지 않고 기존 helix 공식을 유지한다.
+	 */
+	float PathAccumulatedAngleRad = 0.0f;
+
 	float Elapsed = 0.0f;
 	float Duration = 0.16f;
 	float StableTime = 0.0f;

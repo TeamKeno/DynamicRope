@@ -160,9 +160,20 @@ private:
 	 *  2) rope spline guide 평면 normal + bone 위치로 만든 가상 축.
 	 *  3) 비-스켈레탈: 컴포넌트 기저축 중 latch normal에 가장 수직인 축.
 	 *  4) 본 로컬 X.
+	 * SurfaceVectorField에서는 latch 시 1회로 끝나지 않는다 — 본 전환마다
+	 * ReseedWrappingAxisOnBoneTransition이 새 본 기준으로 재호출한다(rolling axis).
 	 */
 	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;
+
+	/**
+	 * 본 전환 직후 감김 축을 새 본 기준으로 재해석한다(rolling axis). 필드가 옛 본 축을 계속 돌면
+	 * 전환 뒤 표면과 어긋나 projection 실패로 조기 종료되기 쉽다 — 현재 경로 지점의 표면 프레임을
+	 * 새 본 로컬로 옮긴 합성 anchor로 ResolveWrappingAxis를 다시 돌리고, 새 축의 부호는 이전 축과
+	 * 정렬(피치 드리프트 연속), winding은 현재 진행 tangent 기준으로 재선출해 전환점에서 감김
+	 * 방향이 뒤집히지 않게 한다. 축 유도 실패 시 기존 축을 유지한다(종전 단일 축 동작 폴백).
+	 */
+	void ReseedWrappingAxisOnBoneTransition(FName Bone, const USceneComponent* Mesh, const FContext& Ctx);
 
 	/** 1)의 구현: Ctx.Colliders에서 (Bone, Mesh)에 귀속된 collider를 찾아 형상 축을 돌려준다. */
 	static bool FindColliderShapeAxis(const FContext& Ctx, FName Bone, const USceneComponent* Mesh,
