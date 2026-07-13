@@ -65,6 +65,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll")
 	bool bRecoverRagdollOnRopeRelease = true;
 
+	/**
+	 * 풀 랙돌 복귀 시 캡슐(액터)을 랙돌이 멈춘 위치로 수평 이동한다(기본 켜짐). 랙돌 동안 무브먼트가
+	 * 꺼져 캡슐은 제자리인데 메시만 물리로(예: pull) 끌려가므로, 그냥 복귀하면 메시가 원래 캡슐로
+	 * 되돌아가며 크게 순간이동한다 — 대신 캡슐을 메시(RecoverAnchorBoneName 본) 쪽으로 옮겨 그
+	 * 되돌아감이 시각적 no-op이 되게 한다. 위치만(수평), 회전/높이는 유지하고 지면 스냅은 이어지는
+	 * MOVE_Walking이 처리한다. 부분 랙돌에는 적용 안 함(메시를 리셋하지 않아 순간이동이 없다).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll")
+	bool bMoveCapsuleToMeshOnRecover = true;
+
+	/**
+	 * 위 캡슐 재정렬의 기준 본 — "랙돌이 어디서 멈췄나"를 대표하는 본(보통 몸통 중심). 마네킹 기본은
+	 * pelvis. 드래곤/동물 등 스켈레톤이 다르면 주 물리 바디 본으로 바꾼다. 스켈레톤에 없으면 재정렬을
+	 * 건너뛴다(경고 후 종전 동작).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll", meta = (EditCondition = "bMoveCapsuleToMeshOnRecover"))
+	FName RecoverAnchorBoneName = TEXT("pelvis");
+
 	/** 랙돌 동안 메시에 줄 콜리전 프로파일. 마네킹 기본(CharacterMesh)은 물리 충돌이 없어 전환이 필수. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll")
 	FName RagdollCollisionProfileName = TEXT("Ragdoll");

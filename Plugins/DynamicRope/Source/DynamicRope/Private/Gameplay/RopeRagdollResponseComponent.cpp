@@ -219,6 +219,25 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 		return;
 	}
 
+	// 캡슐 재정렬(풀 랙돌 한정): 시뮬을 끄기 전(= 아직 랙돌 포즈일 때) 앵커 본의 월드 위치를 캡처한다.
+	// 아래에서 시뮬을 끄고 메시를 ref 포즈로 리셋하면 이 위치 정보가 사라지므로 여기서 미리 잡아둔다.
+	FName RealignAnchor = NAME_None;
+	FVector RagdollAnchorWorld = FVector::ZeroVector;
+	if (bMoveCapsuleToMeshOnRecover && !bPartial)
+	{
+		if (!RecoverAnchorBoneName.IsNone() && Mesh->GetBoneIndex(RecoverAnchorBoneName) != INDEX_NONE)
+		{
+			RealignAnchor = RecoverAnchorBoneName;
+			RagdollAnchorWorld = Mesh->GetSocketLocation(RealignAnchor);
+		}
+		else
+		{
+			UE_LOG(LogDynamicRope, Warning,
+				TEXT("[%s] RopeRagdollResponse: 재정렬 앵커 본 '%s'을(를) 스켈레톤에서 찾지 못해 캡슐 재정렬을 건너뛴다."),
+				*GetNameSafe(GetOwner()), *RecoverAnchorBoneName.ToString());
+		}
+	}
+
 	Mesh->SetAllBodiesSimulatePhysics(false);
 	Mesh->SetAllBodiesPhysicsBlendWeight(0.0f);
 	Mesh->SetSimulatePhysics(false);
@@ -232,6 +251,19 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 			Mesh->AttachToComponent(Parent, FAttachmentTransformRules::KeepRelativeTransform, SavedAttachSocket);
 		}
 		Mesh->SetRelativeTransform(SavedMeshRelative);
+
+		// 리셋으로 메시가 캡슐 위치의 ref 포즈로 돌아왔다. 캡슐(액터)을 랙돌이 멈춘 곳으로 수평 이동해,
+		// 그 되돌아감이 시각적 순간이동이 아니게 만든다. 이동량 = (랙돌 앵커 - 현재 앵커 월드), Z는 0으로
+		// 눌러 지면 높이를 유지(캡슐이 pelvis 높이만큼 가라앉는 것 방지 — 지면 스냅은 MOVE_Walking이 처리).
+		if (!RealignAnchor.IsNone())
+		{
+			if (AActor* Owner = GetOwner())
+			{
+				FVector Delta = RagdollAnchorWorld - Mesh->GetSocketLocation(RealignAnchor);
+				Delta.Z = 0.0f;
+				Owner->AddActorWorldOffset(Delta, /*bSweep*/ false);
+			}
+		}
 
 		if (ACharacter* Character = Cast<ACharacter>(GetOwner()))
 		{
