@@ -1261,12 +1261,24 @@ struct FRopeThrowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
 	float ThrowSpeed = 1500.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.1"))
-	float TipMass = 5.0f;
+	/**
+	 * 던지기 속도 주입의 팁 부스트 배율(1 = 균등, >1 = 끝으로 갈수록 세게 — 채찍처럼 끝이 앞서 나감).
+	 * 질량이 아니다: 솔버에는 어떤 질량도 반영되지 않고(2026-07-13 회의 — 팁 질량 솔버 무반영),
+	 * Throw 순간 Verlet 속도 분배에만 쓰는 연출 배율이다. 종전 이름 TipMass(기본 5 = 1배라는 숨은
+	 * 정규화)에서 개명·정규화(표면 감사 B-2) — 이제 값이 곧 배율이고 소비처에서 [0.25, 3]으로 클램프.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.25", ClampMax = "3.0"))
+	float TipVelocityBoost = 1.0f;
 
+	/**
+	 * 던질 때 owner(캐릭터) 속도를 로프에 상속시키는 배율. 물리적 사실값은 1이지만 기본 5인 이유:
+	 * 달리며 던질 때 로프가 눈에 띄게 앞서 나가는 "관성 과장" 연출 — 게임필 튜닝값이다.
+	 * 0 = 상속 없음(제자리 던지기와 동일).
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
 	float OwnerVelocityScale = 5.0f;
 
+	/** 던질 때 손 소켓(애니메이션 스윙) 속도를 로프에 상속시키는 배율. 1 = 물리 그대로. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
 	float SocketVelocityScale = 1.0f;
 

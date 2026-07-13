@@ -1608,13 +1608,13 @@ void URopeComponent::InjectThrowVelocityIntoVerlet(const FRopeThrowContext& Reso
 
 	// Verlet 적분에서 속도는 (Pos - Prev)/dt 로 암묵 표현된다. Prev를 원하는 속도의 반대 방향으로
 	// v·dt만큼 밀면 위치는 그대로인 채 다음 스텝부터 그 속도가 실린다(순수 속도 주입).
-	// 분배: 손→끝으로 갈수록 가중(SmoothStep + tail 가중)하고 TipMass로 끝을 부스트해 채찍처럼 끝이
-	// 앞서 나가게 한다. 상속 속도(owner/socket)는 전 노드 균일. ReferenceDt는 첫 스텝 실제 dt와
+	// 분배: 손→끝으로 갈수록 가중(SmoothStep + tail 가중)하고 TipVelocityBoost로 끝을 부스트해 채찍처럼
+	// 끝이 앞서 나가게 한다. 상속 속도(owner/socket)는 전 노드 균일. ReferenceDt는 첫 스텝 실제 dt와
 	// 무관한 고정 환산 기준(프레임레이트에 따라 던지기 세기가 변하지 않게).
 	const FVector ThrowDir = WhipGuide.GetAimDir();
 	const float ReferenceDt = 1.0f / 60.0f;
 	const float BaseImpulse = ResolvedThrow.ThrowSpeed * ReferenceDt;
-	const float TipBoost = FMath::Clamp(ThrowParams.TipMass / 5.0f, 0.25f, 3.0f);
+	const float TipBoost = FMath::Clamp(ThrowParams.TipVelocityBoost, 0.25f, 3.0f);
 	const FVector InheritedVelocityImpulse = ComputeThrowInheritedVelocity(ResolvedThrow) * ReferenceDt;
 	const int32 FirstTailNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * WhipConfig.GuidedLength), 1, LastNode);
 	for (int32 i = 1; i <= LastNode; ++i)
