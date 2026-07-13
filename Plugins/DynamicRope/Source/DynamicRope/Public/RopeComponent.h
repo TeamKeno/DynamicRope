@@ -465,7 +465,8 @@ private:
 
 	/**
 	 * 페이즈 전이 시 함께 폐기해야 하는 "진행 중 작업" 일시 상태 세트를 리셋한다:
-	 * ContactTracker / PendingWrapSeed / WrappingPhase.State / ContactingElapsed / FlightNoContactElapsed / TensionOverTime.
+	 * ContactTracker / PendingWrapSeed / CaptureTravelFrame / WrappingPhase.State / ContactingElapsed /
+	 * FlightNoContactElapsed / TensionOverTime.
 	 * 유휴 상태의 멤버에 대해서는 no-op이라 어떤 전이에서 불러도 안전하다.
 	 * (ReleaseCooldown은 전이마다 값이 달라 호출자가 직접 설정한다.)
 	 */
@@ -500,6 +501,10 @@ private:
 
 	/** Contacting: 캡처 시 만들어 둔 wrap 시드(Wrapping 진입 재료). */
 	FRopeWrapState      PendingWrapSeed;
+
+	/** Contacting~Wrapping: 캡처 순간의 로프 진행 좌표계 스냅샷(속도/누운 방향/진행 평면 normal —
+	 *  Contacting부터는 노드가 정지해 이 순간에만 잴 수 있다). TravelPlaneFirst 축의 가이드 평면 폴백. */
+	FRopeCaptureTravelFrame CaptureTravelFrame;
 
 	/** Wrapping: 경로 점진 생성+front 모션+마스크(작업 상태는 .State). */
 	FRopeWrappingPhase  WrappingPhase;
@@ -650,8 +655,9 @@ private:
 		TArray<FRopeFlightNodeDebug>& OutNodeDebug) const;
 #endif
 
-	/** 캡처 확정 시 Contacting 진입 상태(ContactTracker/PendingWrapSeed/타이머)를 구성한다. */
-	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates);
+	/** 캡처 확정 시 Contacting 진입 상태(ContactTracker/PendingWrapSeed/CaptureTravelFrame/타이머)를
+	 *  구성한다. DeltaTime은 travel frame의 Verlet 속도 환산용(캡처 프레임의 dt). */
+	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime);
 
 	//~ Contacting -----------------------------------------------------------
 	// 매 프레임 실제 접촉을 재수집해 트래커 dwell을 갱신한다: 지속 접촉 → Wrapping, 접촉 소실 →

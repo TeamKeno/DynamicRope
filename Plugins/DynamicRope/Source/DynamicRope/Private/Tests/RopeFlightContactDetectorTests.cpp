@@ -315,4 +315,61 @@ bool FRopeFlightTrackerMultiTargetTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 캡처 순간 진행 좌표계 스냅샷(FRopeCaptureTravelFrame::Compute, 진행 방향 기반 wrap 2단계):
+// 접촉 영역 중심/평균 속도/누운 방향에서 진행 평면 normal(속도×span)을 유도하고,
+// 속도와 span이 평행(창던지기)이거나 dt=0이면 normal 없이(bHasPlaneNormal=false) 폴백 신호를 남긴다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeCaptureTravelFrameTest,
+	"DynamicRope.FlightContact.CaptureTravelFrameSnapshot",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeCaptureTravelFrameTest::RunTest(const FString& Parameters)
+{
+	// 로프는 Y로 누워 있고(노드 간격 20) 전체가 +X로 비행 중(프레임당 10cm, dt 0.1 → 100cm/s).
+	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f, FVector::ZeroVector, FVector(0, 1, 0));
+	for (int32 Index = 0; Index < Sim.Num(); ++Index)
+	{
+		Sim.PrevPositions[Index] = Sim.Positions[Index] - FVector(10.0f, 0.0f, 0.0f);
+	}
+
+	auto MakeCandidate = [&Sim](int32 Node)
+	{
+		FRopeContactCandidate C;
+		C.bValid = true;
+		C.NodeIndex = Node;
+		C.Bone = FName("thigh_l");
+		C.WorldPoint = Sim.Positions[Node] + FVector(2.0f, 0.0f, 0.0f);
+		return C;
+	};
+
+	TArray<FRopeContactCandidate> Candidates = { MakeCandidate(3), MakeCandidate(4), MakeCandidate(5) };
+
+	const FRopeCaptureTravelFrame Frame = FRopeCaptureTravelFrame::Compute(Sim, Candidates, 0.1f);
+	TestTrue(TEXT("frame captured"), Frame.bValid);
+	TestTrue(TEXT("region center is the contact average"),
+		Frame.RegionCenter.Equals(FVector(2.0f, 80.0f, 0.0f), 0.1f));
+	TestTrue(TEXT("average velocity follows the flight direction"),
+		Frame.AverageVelocity.Equals(FVector(100.0f, 0.0f, 0.0f), 0.1f));
+	TestTrue(TEXT("span direction follows the rope lay (Y)"),
+		FMath::Abs(FVector::DotProduct(Frame.SpanDirection, FVector(0, 1, 0))) > 0.99f);
+	TestTrue(TEXT("plane normal derived (velocity x span = Z)"), Frame.bHasPlaneNormal);
+	TestTrue(TEXT("plane normal is Z"),
+		FMath::Abs(FVector::DotProduct(Frame.PlaneNormal, FVector(0, 0, 1))) > 0.99f);
+
+	// 축퇴 ①: 창던지기 — 로프가 누운 방향(+Y)으로 그대로 비행하면 normal을 만들 수 없다.
+	for (int32 Index = 0; Index < Sim.Num(); ++Index)
+	{
+		Sim.PrevPositions[Index] = Sim.Positions[Index] - FVector(0.0f, 10.0f, 0.0f);
+	}
+	const FRopeCaptureTravelFrame Javelin = FRopeCaptureTravelFrame::Compute(Sim, Candidates, 0.1f);
+	TestTrue(TEXT("javelin frame still captured"), Javelin.bValid);
+	TestTrue(TEXT("javelin flight yields no plane normal"), !Javelin.bHasPlaneNormal);
+
+	// 축퇴 ②: dt=0 — 속도 환산 불가. 스냅샷은 유효하되 normal 없음.
+	const FRopeCaptureTravelFrame NoDt = FRopeCaptureTravelFrame::Compute(Sim, Candidates, 0.0f);
+	TestTrue(TEXT("zero-dt frame still captured"), NoDt.bValid);
+	TestTrue(TEXT("zero-dt velocity is zero"), NoDt.AverageVelocity.IsNearlyZero());
+	TestTrue(TEXT("zero-dt yields no plane normal"), !NoDt.bHasPlaneNormal);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

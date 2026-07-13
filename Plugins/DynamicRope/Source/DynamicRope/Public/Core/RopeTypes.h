@@ -1238,6 +1238,42 @@ struct FRopeGuidedThrowState
 	}
 };
 
+/**
+ * 캡처(Flight→Contacting) 순간의 로프 진행 좌표계 스냅샷(진행 방향 기반 wrap 2단계).
+ * Contacting부터는 솔브가 없어 노드가 정지하므로, "로프가 어느 방향으로 날아와 어떻게 누웠는가"는
+ * 이 순간에만 잴 수 있다 — BuildContactingState가 채우고 ResetTransientPhaseState가 폐기한다.
+ * 소비자: TravelPlaneFirst 축(가이드 평면이 없는 던지기의 폴백 normal, 3단계에서 축 origin으로
+ * RegionCenter 사용 예정). GPU 상주 로프는 CPU 미러가 1~2프레임 낡을 수 있으나 방향 성분은 충분하다.
+ */
+struct FRopeCaptureTravelFrame
+{
+	bool bValid = false;
+
+	/** 접촉 후보 표면점(WorldPoint)들의 평균 — 접촉 영역 중심(월드). */
+	FVector RegionCenter = FVector::ZeroVector;
+
+	/** 접촉 노드들의 평균 Verlet 속도(cm/s). dt<=0이면 Zero. */
+	FVector AverageVelocity = FVector::ZeroVector;
+
+	/** 접촉 span의 head→tail 단위 방향(로프가 누운 방향). 접촉이 한 노드뿐이면 이웃 노드로 넓혀 잰다. */
+	FVector SpanDirection = FVector::ZeroVector;
+
+	/** AverageVelocity × SpanDirection 유도 성공 여부(속도 0/평행이면 false — 자연 폴백 신호). */
+	bool bHasPlaneNormal = false;
+
+	/** 유도된 진행 평면 normal(단위). 부호는 소비자(winding/OrientAxisByTail)가 해석한다. */
+	FVector PlaneNormal = FVector::ZeroVector;
+
+	void Reset()
+	{
+		*this = FRopeCaptureTravelFrame();
+	}
+
+	/** 캡처 순간의 Sim/후보에서 스냅샷을 계산한다(UObject-free). 구현은 RopeTypes.cpp. */
+	static FRopeCaptureTravelFrame Compute(const FRopeSimState& Sim,
+		const TArray<FRopeContactCandidate>& Candidates, float DeltaTime);
+};
+
 /** 트래커가 dominant 외에도 유지하는 (Mesh, Bone) 대상별 접촉 집계(시드 다중화 재료). */
 struct FRopeTrackedContactTarget
 {

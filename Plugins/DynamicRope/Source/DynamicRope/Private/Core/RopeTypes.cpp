@@ -76,6 +76,77 @@ FRopeThrowContext FRopeThrowContext::MakeDefault(const USceneComponent& RopeComp
 	return Context;
 }
 
+FRopeCaptureTravelFrame FRopeCaptureTravelFrame::Compute(const FRopeSimState& Sim,
+	const TArray<FRopeContactCandidate>& Candidates, float DeltaTime)
+{
+	FRopeCaptureTravelFrame Frame;
+
+	// 유효 후보 수집: 표면점 평균(RegionCenter), 접촉 노드 범위(span), 노드별 속도 평균.
+	// 같은 노드가 여러 콜라이더에 잡혀 후보가 중복될 수 있으므로 속도 평균은 노드 단위로 센다.
+	FVector CenterSum = FVector::ZeroVector;
+	int32 CenterCount = 0;
+	FVector VelocitySum = FVector::ZeroVector;
+	int32 VelocityCount = 0;
+	int32 MinNode = TNumericLimits<int32>::Max();
+	int32 MaxNode = INDEX_NONE;
+	TArray<int32, TInlineAllocator<32>> CountedNodes;
+
+	for (const FRopeContactCandidate& Candidate : Candidates)
+	{
+		if (!Candidate.bValid || !Sim.Positions.IsValidIndex(Candidate.NodeIndex))
+		{
+			continue;
+		}
+
+		CenterSum += Candidate.WorldPoint;
+		++CenterCount;
+		MinNode = FMath::Min(MinNode, Candidate.NodeIndex);
+		MaxNode = FMath::Max(MaxNode, Candidate.NodeIndex);
+
+		if (DeltaTime > KINDA_SMALL_NUMBER &&
+			Sim.PrevPositions.IsValidIndex(Candidate.NodeIndex) &&
+			!CountedNodes.Contains(Candidate.NodeIndex))
+		{
+			CountedNodes.Add(Candidate.NodeIndex);
+			VelocitySum += (Sim.Positions[Candidate.NodeIndex] - Sim.PrevPositions[Candidate.NodeIndex]) / DeltaTime;
+			++VelocityCount;
+		}
+	}
+
+	if (CenterCount == 0)
+	{
+		return Frame;
+	}
+
+	Frame.bValid = true;
+	Frame.RegionCenter = CenterSum / static_cast<float>(CenterCount);
+	if (VelocityCount > 0)
+	{
+		Frame.AverageVelocity = VelocitySum / static_cast<float>(VelocityCount);
+	}
+
+	// span: 접촉이 한 노드뿐이면(팁 우선 착지에서 흔함) 이웃 노드로 넓혀 로프가 누운 방향을 확보한다.
+	const int32 SpanStart = FMath::Max(0, MinNode - 1);
+	const int32 SpanEnd = FMath::Min(Sim.Num() - 1, MaxNode + 1);
+	if (SpanEnd > SpanStart)
+	{
+		Frame.SpanDirection = (Sim.Positions[SpanEnd] - Sim.Positions[SpanStart]).GetSafeNormal();
+	}
+
+	// 진행 평면 normal = 속도 방향 × 누운 방향(둘 다 단위벡터 — 외적 크기가 곧 sin(사잇각)).
+	// 속도가 0이거나 로프가 진행 방향으로 일자 비행(창던지기)이면 축퇴한다 — bHasPlaneNormal=false로
+	// 남겨 소비자가 다음 폴백(형상 축 등)으로 넘어가게 한다. 사잇각 ~6° 미만은 수치 노이즈로 보고 버린다.
+	const FVector VelocityDir = Frame.AverageVelocity.GetSafeNormal();
+	const FVector Cross = FVector::CrossProduct(VelocityDir, Frame.SpanDirection);
+	constexpr float MinPlaneSinAngle = 0.1f;
+	if (Cross.SizeSquared() > FMath::Square(MinPlaneSinAngle))
+	{
+		Frame.PlaneNormal = Cross.GetSafeNormal();
+		Frame.bHasPlaneNormal = true;
+	}
+	return Frame;
+}
+
 void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime)
 {
 	if (Candidates.Num() == 0)
