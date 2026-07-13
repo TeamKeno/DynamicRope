@@ -212,7 +212,7 @@ struct FRopeGPUResidentStep
 	/**
 	 * --- 접촉 감지(G3): Flight에서 솔브 후 PosBuf/PrevBuf를 스윕해 노드당 최심 접촉을 감지한다.
 	 * bDetectContacts면 솔브 dispatch 뒤에 감지 커널을 돌리고 결과를 리드백한다(GetLatestContacts).
-	 * ContactRadius는 감지 질의 반경(= FRopeWrapConfig::ContactRadius; 솔버의 CollisionRadius와 별개).
+	 * ContactRadius는 감지 질의 반경(= FRopeWrapConfig::ContactQueryRadius; 솔버의 CollisionRadius와 별개).
 	 */
 	bool  bDetectContacts = false;
 	float ContactRadius = 0.0f;

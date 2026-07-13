@@ -29,7 +29,7 @@ public:
 	 * 레퍼런스 구현이기도 하므로 삭제하지 않고 유지한다.
 	 */
 	bool DecideWrap(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
-		const FRopeWrapConfig& Config, float Dt, FRopeWrapState& OutSeed);
+		const FRopeWrapConfig& Config, const FRopeDetectConfig& Detect, float Dt, FRopeWrapState& OutSeed);
 
 	/**
 	 * 시드된 접촉 노드들을 bone-local 공간으로 동결(freeze)한다(physics → logic handoff).

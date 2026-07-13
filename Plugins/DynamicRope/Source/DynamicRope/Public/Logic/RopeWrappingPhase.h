@@ -63,14 +63,14 @@ public:
 		 */
 		const FRopeCaptureTravelFrame* TravelFrame = nullptr;
 
-		/** 컴포넌트 경계에서 해석된 접촉 질의 반지름(ContactRadius 0=auto — 렌더 Radius 유도).
+		/** 컴포넌트 경계에서 해석된 접촉 질의 반지름(ContactQueryRadius 0=auto — 렌더 Radius 유도).
 		 *  0이면 미해석 호출(단위 테스트 등) — Config 원값 폴백(GetContactRadius). */
 		float ResolvedContactRadius = 0.0f;
 
 		/** 경로 빌드/투영이 쓰는 접촉 반지름의 단일 접근자. */
 		float GetContactRadius() const
 		{
-			return ResolvedContactRadius > 0.0f ? ResolvedContactRadius : Config.ContactRadius;
+			return ResolvedContactRadius > 0.0f ? ResolvedContactRadius : Config.ContactQueryRadius;
 		}
 	};
 

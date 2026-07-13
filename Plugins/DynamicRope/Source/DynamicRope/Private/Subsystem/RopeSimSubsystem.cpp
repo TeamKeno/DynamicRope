@@ -249,9 +249,9 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope)
 	{
 		// 여유: 접촉 질의 반경 + 스윕 여유 + 예측 접촉의 전방 외삽 거리(프레임 변위 × 예측 프레임).
 		// 넉넉히 잡는다 — 과대 컬링 여유는 안전(콜라이더가 몇 개 더 실릴 뿐).
-		const float Margin = Rope.GetEffectiveCollisionRadius() + Rope.GetEffectiveContactRadius()
+		const float Margin = Rope.GetEffectiveCollisionRadius() + Rope.GetEffectiveContactQueryRadius()
 			+ FMath::Max(2.0f * Rope.Sim.SegmentLength, 50.0f)
-			+ FMath::Sqrt(MaxFrameDispSq) * FMath::Max(Rope.WrapConfig.PredictiveContactFrames, 1.0f);
+			+ FMath::Sqrt(MaxFrameDispSq) * FMath::Max(Rope.DetectConfig.PredictiveContactFrames, 1.0f);
 		RopeBounds = RopeBounds.ExpandBy(Margin);
 	}
 	if (Rope.SimFrame.AimRayColliderQueryBounds.IsValid)
@@ -946,8 +946,8 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 	// 귀속 테이블(콜라이더 인덱스 → bone/mesh)은 PackStepColliders가 Step.Capsules/SDFColliders와
 	// 같은 순서로 채우므로 여기서 먼저 리셋한다.
 	Step.bDetectContacts = true;
-	Step.ContactRadius = Rope.GetEffectiveContactRadius();
-	Step.PredictionFrames = Rope.WrapConfig.PredictiveContactFrames;
+	Step.ContactRadius = Rope.GetEffectiveContactQueryRadius();
+	Step.PredictionFrames = Rope.DetectConfig.PredictiveContactFrames;
 	Rope.SimFrame.GpuCapsuleAttribution.Reset();
 	Rope.SimFrame.GpuSdfAttribution.Reset();
 	Rope.SimFrame.GpuBoxAttribution.Reset();

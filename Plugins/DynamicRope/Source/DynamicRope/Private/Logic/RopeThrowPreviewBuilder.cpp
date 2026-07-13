@@ -165,7 +165,7 @@ namespace
 			FMath::Min(MaxPreviewRadialSamples, TotalLimitedRadialSamples));
 		const float EffectiveQueryRadius = QueryRadius > KINDA_SMALL_NUMBER
 			? QueryRadius
-			: FMath::Max(RopeRadius, WrapConfig.ContactRadius);
+			: FMath::Max(RopeRadius, WrapConfig.ContactQueryRadius);
 
 		FBox PreviewBounds(EForceInit::ForceInit);
 		PreviewBounds += Preview.Origin;
@@ -345,10 +345,10 @@ namespace
 	FRopeFlightContactDetector::FParams MakeFlightDetectParams(const FRopeThrowPreviewBuilder::FInput& Input)
 	{
 		FRopeFlightContactDetector::FParams Params;
-		Params.ContactRadius = Input.WrapConfig.ContactRadius;
+		Params.ContactRadius = Input.WrapConfig.ContactQueryRadius;
 		Params.RopeRadius = Input.RopeRadius;
-		Params.PredictiveContactFrames = Input.WrapConfig.PredictiveContactFrames;
-		Params.MinLatchNodes = Input.WrapConfig.MinLatchNodes;
+		Params.PredictiveContactFrames = Input.DetectConfig.PredictiveContactFrames;
+		Params.MinLatchNodes = Input.DetectConfig.MinLatchNodes;
 		Params.FallbackForward = Input.FallbackForward;
 		return Params;
 	}

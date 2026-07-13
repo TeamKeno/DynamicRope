@@ -11,13 +11,19 @@
 
 namespace
 {
-	FRopeWrapConfig MakeWrapConfig(int32 MinNodes = 3, float DecisionTime = 0.15f, float ContactRadius = 3.0f)
+	FRopeWrapConfig MakeWrapConfig(float ContactQueryRadius = 3.0f)
 	{
 		FRopeWrapConfig C;
-		C.ContactRadius = ContactRadius;
-		C.MinLatchNodes = MinNodes;
-		C.WrapDecisionTime = DecisionTime;
+		C.ContactQueryRadius = ContactQueryRadius;
 		return C;
+	}
+
+	FRopeDetectConfig MakeDetectConfig(int32 MinNodes = 3, float DecisionTime = 0.15f)
+	{
+		FRopeDetectConfig D;
+		D.MinLatchNodes = MinNodes;
+		D.WrapDecisionTime = DecisionTime;
+		return D;
 	}
 
 	/** 계약상 SourceMesh 자리에 넣을 빈 스켈레탈 메시 컴포넌트(월드 불필요 — 식별/전파 검증용). */
@@ -42,11 +48,12 @@ bool FRopeWrapCommitTest::RunTest(const FString& Parameters)
 
 	FRopeWrapController Wrap;
 	const FRopeWrapConfig Config = MakeWrapConfig();
+	const FRopeDetectConfig Detect = MakeDetectConfig();
 	FRopeWrapState Seed;
 	bool bCommitted = false;
 	for (int32 i = 0; i < 10 && !bCommitted; ++i)
 	{
-		bCommitted = Wrap.DecideWrap(Sim, Colliders, Config, 0.05f, Seed);
+		bCommitted = Wrap.DecideWrap(Sim, Colliders, Config, Detect, 0.05f, Seed);
 	}
 
 	TestTrue(TEXT("wrap commits after sustained contact"), bCommitted);
@@ -73,12 +80,13 @@ bool FRopeWrapNoCommitTest::RunTest(const FString& Parameters)
 	TArray<IRopeCollider*> Colliders = { &Arm };
 
 	FRopeWrapController Wrap;
-	const FRopeWrapConfig Config = MakeWrapConfig(3, 0.15f, 3.0f);
+	const FRopeWrapConfig Config = MakeWrapConfig(3.0f);
+	const FRopeDetectConfig Detect = MakeDetectConfig(3, 0.15f);
 	FRopeWrapState Seed;
 	bool bCommitted = false;
 	for (int32 i = 0; i < 20 && !bCommitted; ++i)
 	{
-		bCommitted = Wrap.DecideWrap(Sim, Colliders, Config, 0.05f, Seed);
+		bCommitted = Wrap.DecideWrap(Sim, Colliders, Config, Detect, 0.05f, Seed);
 	}
 
 	TestFalse(TEXT("no commit below MinLatchNodes"), bCommitted);
@@ -103,9 +111,10 @@ bool FRopeWrapTieBreakTest::RunTest(const FString& Parameters)
 
 	FRopeWrapController Wrap;
 	// 즉시 결정
-	const FRopeWrapConfig Config = MakeWrapConfig(3, 0.0f);
+	const FRopeWrapConfig Config = MakeWrapConfig();
+	const FRopeDetectConfig Detect = MakeDetectConfig(3, 0.0f);
 	FRopeWrapState Seed;
-	const bool bCommitted = Wrap.DecideWrap(Sim, Colliders, Config, 0.0f, Seed);
+	const bool bCommitted = Wrap.DecideWrap(Sim, Colliders, Config, Detect, 0.0f, Seed);
 
 	TestTrue(TEXT("commits on tie"), bCommitted);
 	TestTrue(TEXT("stable tie-break picks armA (C3 contract)"), Seed.BoneName == FName("armA"));

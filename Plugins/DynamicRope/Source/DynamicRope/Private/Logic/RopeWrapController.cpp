@@ -29,7 +29,7 @@ namespace
 }
 
 bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
-	const FRopeWrapConfig& Config, float Dt, FRopeWrapState& OutSeed)
+	const FRopeWrapConfig& Config, const FRopeDetectConfig& Detect, float Dt, FRopeWrapState& OutSeed)
 {
 	if (Colliders.Num() == 0 || Sim.Num() == 0)
 	{
@@ -56,7 +56,7 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 			{
 				continue;
 			}
-			const FRopeContact Contact = Collider->Query(Sim.Positions[i], Config.ContactRadius);
+			const FRopeContact Contact = Collider->Query(Sim.Positions[i], Config.ContactQueryRadius);
 			if (Contact.bHit && Contact.Penetration > BestPen)
 			{
 				BestPen = Contact.Penetration;
@@ -89,7 +89,7 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 		}
 	}
 
-	const bool bEnoughContact = DominantNodes && DominantNodes->Num() >= Config.MinLatchNodes;
+	const bool bEnoughContact = DominantNodes && DominantNodes->Num() >= Detect.MinLatchNodes;
 	if (!bEnoughContact)
 	{
 		CandidateTarget = FRopeWrapTargetKey();
@@ -110,7 +110,7 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 	}
 	CandidateNodes = *DominantNodes;
 
-	if (CandidateTime < Config.WrapDecisionTime)
+	if (CandidateTime < Detect.WrapDecisionTime)
 	{
 		return false;
 	}
@@ -129,7 +129,7 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 	}
 
 	UE_LOG(LogRopeWrap, Log, TEXT("DecideWrap committed: target=%s, contact=%d node(s), latch=%d, dwell=%.3fs >= %.3fs"),
-		*CandidateTarget.Name.ToString(), CandidateNodes.Num(), LatchNodeIndex, CandidateTime, Config.WrapDecisionTime);
+		*CandidateTarget.Name.ToString(), CandidateNodes.Num(), LatchNodeIndex, CandidateTime, Detect.WrapDecisionTime);
 
 	CandidateTarget = FRopeWrapTargetKey();
 	CandidateTime = 0.0f;

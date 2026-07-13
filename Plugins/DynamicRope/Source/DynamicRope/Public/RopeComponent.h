@@ -123,9 +123,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	FRopeThrowParams ThrowParams;
 
-	/** physics → logic (wrap) 핸드오프를 위한 contact-decision 튜닝 값. */
+	/** physics → logic (wrap) 핸드오프 — *성립*(경로 빌드/판정/커밋) 튜닝. 감지는 DetectConfig. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
 	FRopeWrapConfig WrapConfig;
+
+	/** Flight/Contacting *감지*(언제 잡혔다고 볼 것인가) 튜닝 — 성립(WrapConfig)과 분리된 도메인
+	 *  (2026-07-13 표면 감사 B-1). 공유 프로브 반경(ContactQueryRadius)은 WrapConfig 소유. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect")
+	FRopeDetectConfig DetectConfig;
 
 	/** Wrapped *이후*(유지/당김/풀림) 튜닝 — 성립 판정(WrapConfig)과 분리된 Post-Wrap 도메인
 	 *  (2026-07-13 표면 감사 B-1; 설계 노트 01 도메인, 도달 모드·결착 모델 무관 공통). */
@@ -134,7 +139,7 @@ public:
 
 	//~ Collision(충돌 도메인) ----------------------------------------------
 	// 흩어져 있던 충돌 관련 스위치를 한자리에 응집(2026-07-13 표면 감사 CL-4). 반지름 자체는
-	// SolverConfig.CollisionRadius / WrapConfig.ContactRadius에 있고, 0(기본)=auto — 아래
+	// SolverConfig.CollisionRadius / WrapConfig.ContactQueryRadius에 있고, 0(기본)=auto — 아래
 	// GetEffective* 헬퍼가 렌더 Radius에서 유도한다(반지름 3종 자동 정합).
 
 	/**
@@ -162,10 +167,10 @@ public:
 		return SolverConfig.CollisionRadius > 0.0f ? SolverConfig.CollisionRadius : Radius;
 	}
 
-	/** 해석된 접촉 질의 반지름: WrapConfig.ContactRadius(0=auto → 렌더 Radius × 1.5). 감지/랩 경로 경계에서 소비. */
-	float GetEffectiveContactRadius() const
+	/** 해석된 접촉 질의 반지름: WrapConfig.ContactQueryRadius(0=auto → 렌더 Radius × 1.5). 감지/랩 경로 경계에서 소비. */
+	float GetEffectiveContactQueryRadius() const
 	{
-		return WrapConfig.ContactRadius > 0.0f ? WrapConfig.ContactRadius : Radius * 1.5f;
+		return WrapConfig.ContactQueryRadius > 0.0f ? WrapConfig.ContactQueryRadius : Radius * 1.5f;
 	}
 
 	//~ Whip(던지기 스윙 설정) ----------------------------------------------

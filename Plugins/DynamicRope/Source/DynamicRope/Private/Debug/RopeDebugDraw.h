@@ -19,7 +19,7 @@ namespace RopeDebug
 	/** flight 프레임 카운터 기록(stat 수집 중일 때만). 디버그 비주얼 캡처와 독립. */
 	void RecordFlightStats(const FRopeSimState& Sim, bool bSolveThisFrame, int32 FrameColliderCount,
 		const TArray<FRopeContactCandidate>& Candidates, const FRopeContactTracker& ContactTracker,
-		const FRopeWrapConfig& WrapConfig, bool bShouldCapture);
+		const FRopeDetectConfig& DetectConfig, bool bShouldCapture);
 
 	/** whip 가이드 카운터 기록(whip 활성 + stat 수집 중일 때만). */
 	void RecordWhipStats(const FRopeSimState& Sim, const TArray<int32>& GuideNodeIndices,

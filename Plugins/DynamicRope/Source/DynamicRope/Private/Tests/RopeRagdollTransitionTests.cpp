@@ -151,9 +151,10 @@ bool FRopeRagdollDwellResetTest::RunTest(const FString& Parameters)
 	TArray<IRopeCollider*> Colliders = { &BoneA, &BoneB };
 
 	FRopeWrapConfig Config;
-	Config.ContactRadius = 3.0f;
-	Config.MinLatchNodes = 3;
-	Config.WrapDecisionTime = 0.15f;
+	Config.ContactQueryRadius = 3.0f;
+	FRopeDetectConfig Detect;
+	Detect.MinLatchNodes = 3;
+	Detect.WrapDecisionTime = 0.15f;
 	const float Dt = 0.05f;
 
 	FRopeWrapController Wrap;
@@ -163,7 +164,7 @@ bool FRopeRagdollDwellResetTest::RunTest(const FString& Parameters)
 	for (int32 i = 0; i < 3; ++i)
 	{
 		TestFalse(FString::Printf(TEXT("no commit while boneA dwell below threshold (frame %d)"), i),
-			Wrap.DecideWrap(Sim, Colliders, Config, Dt, Seed));
+			Wrap.DecideWrap(Sim, Colliders, Config, Detect, Dt, Seed));
 	}
 
 	// 포즈 팝: 접촉이 boneA → boneB로 스왑(같은 위치에 B가 들어옴).
@@ -175,12 +176,12 @@ bool FRopeRagdollDwellResetTest::RunTest(const FString& Parameters)
 	for (int32 i = 0; i < 3; ++i)
 	{
 		TestFalse(FString::Printf(TEXT("dwell restarts on bone switch — no early commit (frame %d)"), i),
-			Wrap.DecideWrap(Sim, Colliders, Config, Dt, Seed));
+			Wrap.DecideWrap(Sim, Colliders, Config, Detect, Dt, Seed));
 	}
 
 	// B가 자체적으로 WrapDecisionTime을 채우는 프레임(0.15)에 커밋 — 본은 반드시 B.
 	TestTrue(TEXT("commits after boneB accumulates full dwell"),
-		Wrap.DecideWrap(Sim, Colliders, Config, Dt, Seed));
+		Wrap.DecideWrap(Sim, Colliders, Config, Detect, Dt, Seed));
 	TestTrue(TEXT("committed bone is the post-pop bone (boneB)"), Seed.BoneName == FName("boneB"));
 	return true;
 }

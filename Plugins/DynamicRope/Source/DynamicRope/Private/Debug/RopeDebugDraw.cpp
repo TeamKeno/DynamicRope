@@ -46,7 +46,7 @@ bool RopeDebug::IsWrappedStatEnabled()
 
 void RopeDebug::RecordFlightStats(const FRopeSimState& Sim, bool bSolveThisFrame, int32 FrameColliderCount,
 	const TArray<FRopeContactCandidate>& Candidates, const FRopeContactTracker& ContactTracker,
-	const FRopeWrapConfig& WrapConfig, bool bShouldCapture)
+	const FRopeDetectConfig& DetectConfig, bool bShouldCapture)
 {
 	if (!IsFlightStatEnabled())
 	{
@@ -81,7 +81,7 @@ void RopeDebug::RecordFlightStats(const FRopeSimState& Sim, bool bSolveThisFrame
 	INC_DWORD_STAT_BY(STAT_RopeFlightPredictiveFreeCandidates, PredictiveFreeCandidateCount);
 	INC_DWORD_STAT_BY(STAT_RopeFlightPredictiveGuidedCandidates, PredictiveGuidedCandidateCount);
 	INC_DWORD_STAT_BY(STAT_RopeFlightCandidateNodes, ContactTracker.CandidateNodes.Num());
-	INC_DWORD_STAT_BY(STAT_RopeFlightMinLatchNodes, WrapConfig.MinLatchNodes);
+	INC_DWORD_STAT_BY(STAT_RopeFlightMinLatchNodes, DetectConfig.MinLatchNodes);
 	INC_DWORD_STAT_BY(STAT_RopeFlightShouldCapture, bShouldCapture ? 1 : 0);
 }
 
@@ -125,7 +125,7 @@ void RopeDebug::RecordWrappedStats(const FRopeSimState& Sim, const FRopeWrapStat
 bool RopeDebug::IsFlightStatEnabled() { return false; }
 bool RopeDebug::IsWrappedStatEnabled() { return false; }
 void RopeDebug::RecordFlightStats(const FRopeSimState&, bool, int32, const TArray<FRopeContactCandidate>&,
-	const FRopeContactTracker&, const FRopeWrapConfig&, bool) {}
+	const FRopeContactTracker&, const FRopeDetectConfig&, bool) {}
 void RopeDebug::RecordWhipStats(const FRopeSimState&, const TArray<int32>&, const TArray<FVector>&, float, bool) {}
 void RopeDebug::RecordWrappedStats(const FRopeSimState&, const FRopeWrapState&) {}
 

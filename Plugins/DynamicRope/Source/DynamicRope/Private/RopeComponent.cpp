@@ -322,7 +322,7 @@ bool URopeComponent::FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, 
 		FMath::Min(MaxPreviewRadialSamples, TotalLimitedRadialSamples));
 	const float EffectiveQueryRadius = QueryRadius > KINDA_SMALL_NUMBER
 		? QueryRadius
-		: FMath::Max(Radius, GetEffectiveContactRadius());
+		: FMath::Max(Radius, GetEffectiveContactQueryRadius());
 
 	FBox PreviewBounds(EForceInit::ForceInit);
 	PreviewBounds += Preview.Origin;
@@ -388,7 +388,7 @@ FRopeAimTargeting::FQueryContext URopeComponent::MakeAimQueryContext() const
 	FRopeAimTargeting::FQueryContext Ctx;
 	Ctx.Colliders = &SimFrame.FrameColliders;
 	Ctx.FallbackRayLength = FMath::Max(Sim.RopeLength, RopeLength);
-	Ctx.FallbackQueryRadius = FMath::Max(Radius, GetEffectiveContactRadius());
+	Ctx.FallbackQueryRadius = FMath::Max(Radius, GetEffectiveContactQueryRadius());
 	return Ctx;
 }
 
@@ -475,7 +475,8 @@ bool URopeComponent::BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) cons
 		Input.Sim = &Sim;
 		Input.Colliders = &SimFrame.FrameColliders;
 		Input.WrapConfig = WrapConfig;
-		Input.WrapConfig.ContactRadius = GetEffectiveContactRadius(); // 0=auto 해석 승계
+		Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
+		Input.DetectConfig = DetectConfig;
 		Input.PathMode = GetWrappingPathMode();
 		Input.RopeRadius = Radius;
 		Input.RopeNumSides = NumSides;
@@ -572,7 +573,8 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 		Input.Colliders = &SimFrame.FrameColliders;
 		Input.ThrowContext = ResolveThrowContext(ThrowContext);
 		Input.WrapConfig = WrapConfig;
-		Input.WrapConfig.ContactRadius = GetEffectiveContactRadius(); // 0=auto 해석 승계
+		Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
+		Input.DetectConfig = DetectConfig;
 		Input.PathMode = GetWrappingPathMode();
 		Input.RopeRadius = Radius;
 		Input.RopeNumSides = NumSides;
@@ -593,7 +595,8 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 		Input.Sim = &Sim;
 		Input.Colliders = &SimFrame.FrameColliders;
 		Input.WrapConfig = WrapConfig;
-		Input.WrapConfig.ContactRadius = GetEffectiveContactRadius(); // 0=auto 해석 승계
+		Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
+		Input.DetectConfig = DetectConfig;
 		Input.PathMode = GetWrappingPathMode();
 		Input.RopeRadius = Radius;
 		Input.RopeNumSides = NumSides;
@@ -630,7 +633,8 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	Input.Colliders = &SimFrame.FrameColliders;
 	Input.ThrowContext = ResolveThrowContext(ThrowContext);
 	Input.WrapConfig = WrapConfig;
-	Input.WrapConfig.ContactRadius = GetEffectiveContactRadius(); // 0=auto 해석 승계
+	Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
+	Input.DetectConfig = DetectConfig;
 	Input.PathMode = GetWrappingPathMode();
 	Input.RopeRadius = Radius;
 	Input.RopeNumSides = NumSides;
@@ -1754,10 +1758,10 @@ float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, in
 FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float DeltaTime) const
 {
 	FRopeFlightContactDetector::FParams Params;
-	Params.ContactRadius = GetEffectiveContactRadius();
+	Params.ContactRadius = GetEffectiveContactQueryRadius();
 	Params.RopeRadius = Radius;
-	Params.PredictiveContactFrames = WrapConfig.PredictiveContactFrames;
-	Params.MinLatchNodes = WrapConfig.MinLatchNodes;
+	Params.PredictiveContactFrames = DetectConfig.PredictiveContactFrames;
+	Params.MinLatchNodes = DetectConfig.MinLatchNodes;
 	Params.FallbackForward = GetForwardVector();
 	Params.DeltaTime = DeltaTime;
 	return Params;
@@ -1786,7 +1790,7 @@ void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
 	// NextGuideTargets는 뷰가 가리키는 로컬 버퍼 — 감지가 이 함수 안에서 끝나므로 수명이 충분하다.
 	FRopeFlightContactDetector::FWhipGuideView WhipView;
 	TArray<FVector> NextGuideTargets;
-	if (WrapConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
+	if (DetectConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
 	{
 		WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargets);
 		WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
@@ -1848,8 +1852,8 @@ bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
 	// 후보가 계속 있어도 MinLatchNodes/품질 조건을 넘지 못하면 Flight에 갇힐 수 있으므로 리셋하지 않는다.
 	if (!WhipGuide.IsActive())
 	{
-		const float FlightReturnTime = WrapConfig.FlightNoContactReturnTime > 0.0f
-			? WrapConfig.FlightNoContactReturnTime
+		const float FlightReturnTime = DetectConfig.FlightNoContactReturnTime > 0.0f
+			? DetectConfig.FlightNoContactReturnTime
 			: ReleaseCooldownSeconds;
 		FlightNoContactElapsed += DeltaTime;
 		if (FlightNoContactElapsed >= FlightReturnTime)
@@ -1881,7 +1885,7 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 	const float WhipGuidedEnd = FMath::Clamp(WhipConfig.GuidedLength, 0.05f, 0.95f);
 	const bool bWhipActive = WhipGuide.GetDebugGuideTargets().Num() > 0;
 	RopeDebug::RecordFlightStats(Sim, SimFrame.bSolveThisFrame, SimFrame.FrameColliders.Num(), Candidates,
-		DebugTracker, WrapConfig, bShouldCapture);
+		DebugTracker, DetectConfig, bShouldCapture);
 	RopeDebug::RecordWhipStats(Sim, WhipGuide.GetDebugGuideNodeIndices(), WhipGuide.GetDebugGuideTargets(),
 		WhipGuidedEnd, bWhipActive);
 
@@ -1893,7 +1897,7 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 		OutSnapshot->bSolveThisFrame = SimFrame.bSolveThisFrame;
 		OutSnapshot->bShouldCapture = bShouldCapture;
 		OutSnapshot->FrameColliderCount = SimFrame.FrameColliders.Num();
-		OutSnapshot->MinLatchNodes = WrapConfig.MinLatchNodes;
+		OutSnapshot->MinLatchNodes = DetectConfig.MinLatchNodes;
 		OutSnapshot->TrackerBone = DebugTracker.CandidateBone;
 		OutSnapshot->TrackerNodes = DebugTracker.CandidateNodes;
 		OutSnapshot->Candidates = Candidates;
@@ -1999,11 +2003,11 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 
 	// 정체 안전망: 접촉이 깜빡여 dwell이 임계에 못 미친 채 오래 머물면(커밋도 dismiss도 안 됨)
 	// Flight로 돌려보낸다. Flight에서 재캡처는 자유이므로 잃는 것 없이 무한 체류만 막는다.
-	const float StallTimeout = FMath::Max(WrapConfig.WrapDecisionTime * 10.0f, 1.0f);
+	const float StallTimeout = FMath::Max(DetectConfig.WrapDecisionTime * 10.0f, 1.0f);
 	if (ContactingElapsed >= StallTimeout)
 	{
 		SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("contacting stalled %.2fs (dwell %.2fs < %.2fs)"),
-			ContactingElapsed, ContactTracker.DwellTime, WrapConfig.WrapDecisionTime));
+			ContactingElapsed, ContactTracker.DwellTime, DetectConfig.WrapDecisionTime));
 		ResetTransientPhaseState();
 	}
 }
@@ -2018,7 +2022,7 @@ bool URopeComponent::ShouldStartWrapping() const
 	// 판정은 "한 본과의 지속 접촉"(트래커 dwell — 지배 본이 바뀌면 0부터) 기준. 총 경과가 아니라
 	// dwell을 쓰는 것이 원 설계 의도(노드들이 WrapDecisionTime 동안 한 본에 유지)와 일치한다.
 	// 안정 접촉에서는 dwell == 총 경과라 기존과 동일하고, 본이 튀는 전이 프레임에서만 엄격해진다.
-	return ContactTracker.DwellTime >= WrapConfig.WrapDecisionTime
+	return ContactTracker.DwellTime >= DetectConfig.WrapDecisionTime
 		&& PendingWrapSeed.Latched.Num() > 0
 		&& !PendingWrapSeed.BoneName.IsNone();
 }
@@ -2071,7 +2075,7 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 		{
 			const bool bDominant = Target.Bone == ContactTracker.CandidateBone &&
 				Target.Mesh == ContactTracker.CandidateMesh;
-			if (!bDominant && Target.DwellTime >= WrapConfig.WrapDecisionTime)
+			if (!bDominant && Target.DwellTime >= DetectConfig.WrapDecisionTime)
 			{
 				Sorted.Add(&Target);
 			}
@@ -2351,7 +2355,7 @@ FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 		GuidePlane = CaptureTravelFrame.PlaneNormal;
 	}
 
-	return FRopeWrappingPhase::FContext{
+	FRopeWrappingPhase::FContext Ctx{
 		WrapConfig,
 		SimFrame.FrameColliders,
 		GetWrappingPathMode(),
@@ -2362,6 +2366,11 @@ FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 		GuidePlane,
 		CaptureTravelFrame.bValid ? &CaptureTravelFrame : nullptr
 	};
+	// 0=auto 해석은 컴포넌트 경계 책임 — preview 경로(FInput 값 사본에 덮어씀)와 달리 여기는
+	// Config가 참조 전달이라 해석값을 별도 필드로 싣는다. 미주입 시 ContactQueryRadius=0(auto)
+	// 로프만 wrapping 경로에서 질의 반경 0으로 떨어지는 갭이 있었다.
+	Ctx.ResolvedContactRadius = GetEffectiveContactQueryRadius();
+	return Ctx;
 }
 
 void URopeComponent::CommitWrapping()

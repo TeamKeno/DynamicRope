@@ -67,7 +67,7 @@ public:
 		const TArray<IRopeCollider*>* Colliders = nullptr;
 		// RayLength 미지정(<=0) 시 폴백 길이: max(현재 Sim.RopeLength, 초기 RopeLength).
 		float FallbackRayLength = 0.0f;
-		// QueryRadius 미지정(<=0) 시 폴백 반경: max(튜브 Radius, WrapConfig.ContactRadius).
+		// QueryRadius 미지정(<=0) 시 폴백 반경: max(튜브 Radius, WrapConfig.ContactQueryRadius).
 		float FallbackQueryRadius = 0.0f;
 	};
 

@@ -23,16 +23,16 @@ public:
 	/** 검출 파라미터 스냅샷. 디자이너 원본(UPROPERTY)은 URopeComponent에 남고 호출 시 복사한다. */
 	struct FParams
 	{
-		/** WrapConfig.ContactRadius: 접촉 질의 반경. */
+		/** WrapConfig.ContactQueryRadius: 접촉 질의 반경. */
 		float ContactRadius = 3.0f;
 
 		/** 튜브 반지름(broad-phase 바운즈 여유에 합산). */
 		float RopeRadius = 2.0f;
 
-		/** WrapConfig.PredictiveContactFrames: 예측 외삽 프레임 수. */
+		/** DetectConfig.PredictiveContactFrames: 예측 외삽 프레임 수. */
 		float PredictiveContactFrames = 0.0f;
 
-		/** WrapConfig.MinLatchNodes: 캡처에 필요한 최소 접촉 노드 수. */
+		/** DetectConfig.MinLatchNodes: 캡처에 필요한 최소 접촉 노드 수. */
 		int32 MinLatchNodes = 1;
 
 		/** ExpectedWrapTangent 퇴화 케이스용(컴포넌트 전방). */

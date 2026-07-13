@@ -228,7 +228,7 @@ enum class ERopeWrappingAxisSource : uint8
  *                축퇴(노드가 medial axis 위에 있음) => 임의의 안정적인 단위 벡터(capsule: +Z).
  *   Penetration  Normal을 따른 overlap 깊이, bHit일 때 > 0. QUERY 반지름 기준으로 측정된다:
  *                (ColliderRadius + QueryRadius) - Distance. 호출자는 solver push-out에는 QueryRadius 0을,
- *                wrap-decision skin에는 WrapConfig.ContactRadius를 전달한다.
+ *                wrap-decision skin에는 WrapConfig.ContactQueryRadius를 전달한다.
  *   SurfacePoint 노드에서 가장 가까운 collider 표면 위의 점(보조/디버그). solver에는 필수가 아니며,
  *                저렴하게 구할 수 있을 때 채운다.
  *   Bone         skeletal collider에서는 반드시 non-None — bone 귀속(attribution)으로 DecideWrap이
@@ -735,20 +735,18 @@ struct FRopeWrapConfig
 {
 	GENERATED_BODY()
 
-	/** 컨택트 결정 query에 사용하는 노드 반지름(cm). **0 = auto: 렌더 튜브 Radius × 1.5**
-	 *  (반지름 3종 자동 정합 — 표면 감사 B-2; 명시값을 넣으면 그 값). 해석은 컴포넌트 경계
-	 *  (GetEffectiveContactRadius)에서 — 감지 파라미터/GPU step/preview/경로 빌드가 해석된 값을 받는다.
-	 *  기본값이 0이 아닌 이유: 컴포넌트 없이 직접 쓰는 소비자(유닛 테스트 등)의 계약 보존. */
+	/**
+	 * 접촉 *질의* 반지름(cm) — 이름이 말하듯 특정 단계 소유가 아니라 **감지(Flight/Contacting)와
+	 * 성립(경로 빌드 투영/스냅 상한/DecideWrap)이 공유하는 표면 질의 프로브 반경**이다(그래서 감지
+	 * 4종이 DetectConfig로 분리될 때 여기 남았다 — 표면 감사 B-1 축소안, 구 이름 ContactRadius).
+	 * **0 = auto: 렌더 튜브 Radius × 1.5**(반지름 3종 자동 정합). 해석은 컴포넌트 경계
+	 * (GetEffectiveContactQueryRadius)에서 — 소비처는 해석된 값을 받는다. 기본값이 0이 아닌 이유:
+	 * 컴포넌트 없이 직접 쓰는 소비자(유닛 테스트 등)의 계약 보존. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
-	float ContactRadius = 3.0f;
+	float ContactQueryRadius = 3.0f;
 
-	/** 스치는 접촉이 아니라 catch로 간주하기 위해 한 bone에 닿아야 하는 최소 rope 노드 수. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "1"))
-	int32 MinLatchNodes = 1;
-
-	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
-	float WrapDecisionTime = 0.016f;
+	// NOTE: 순수 감지 튜닝 4종(MinLatchNodes/WrapDecisionTime/PredictiveContactFrames/
+	// FlightNoContactReturnTime)은 FRopeDetectConfig("Rope|Detect")로 분리됐다(표면 감사 B-1).
 
 	/**
 	 * 한 번의 캡처에서 채택할 수 있는 wrap 시드(접촉 대상) 최대 개수. 1(기본) = 기존 단일 시드 동작.
@@ -918,12 +916,32 @@ struct FRopeWrapConfig
 	// NOTE: 종전의 [미배선] WrappingContactGraceTime은 삭제됐다(2026-07-13 표면 감사 B-2 — 소비 코드가
 	// 없는 죽은 설정). grace 로직을 실제로 배선할 때 그 CL에서 설정도 함께 되살릴 것.
 
+};
+
+/**
+ * Flight/Contacting 감지 튜닝 — "언제 잡혔다고 볼 것인가"의 단계로, 성립(FRopeWrapConfig)과
+ * 다른 도메인이라 분리했다(2026-07-13 표면 감사 B-1). 공유 프로브 반경(ContactQueryRadius)은
+ * 성립 쪽도 쓰므로 WrapConfig에 남아 있다(그쪽 주석 참고).
+ */
+USTRUCT(BlueprintType)
+struct FRopeDetectConfig
+{
+	GENERATED_BODY()
+
+	/** 스치는 접촉이 아니라 catch로 간주하기 위해 한 bone에 닿아야 하는 최소 rope 노드 수. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "1"))
+	int32 MinLatchNodes = 1;
+
+	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "0.0", Units = "s"))
+	float WrapDecisionTime = 0.016f;
+
 	/** Extra Flight lookahead in frame-displacements for thin limb/SDF candidate detection. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "0.0", ClampMax = "4.0"))
 	float PredictiveContactFrames = 1.0f;
 
 	/** Whip 종료 후 이 시간 동안 캡처하지 못하면 Free로 복귀한다. 0이면 기본 실패 복귀 쿨다운을 쓴다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "0.0", Units = "s"))
 	float FlightNoContactReturnTime = 0.0f;
 };
 

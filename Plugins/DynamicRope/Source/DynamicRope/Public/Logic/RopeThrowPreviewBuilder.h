@@ -21,6 +21,8 @@ public:
 
 		FRopeThrowContext ThrowContext;
 		FRopeWrapConfig WrapConfig;
+		/** 감지 튜닝(예측 프레임/최소 latch) — 컴포넌트 DetectConfig 스냅샷. */
+		FRopeDetectConfig DetectConfig;
 		ERopeWrappingPathMode PathMode = ERopeWrappingPathMode::SurfaceVectorField;
 
 		float RopeRadius = 0.0f;
