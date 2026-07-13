@@ -978,7 +978,7 @@ struct FRopeHoldConfig
 	 * 몇 프레임에 걸쳐 부드럽게 감속. 크기는 TetherReelSpeed, 부드러움은 이 값으로 역할이 나뉜다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float TetherResponse = 0.0f;
+	float TetherResponse = 0.2f;
 
 	/** 테더 발동 전 허용 여유(cm). 경계 지터/미세 슬랙에서 발동하는 것을 막는다(가용 길이에 더해짐). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm"))
