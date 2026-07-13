@@ -147,10 +147,30 @@ void URopeComponent::Throw(const FVector& AimDir)
 
 void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 {
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Throw requested (phase=%s, forward=%s)"),
-		*GetName(), PhaseName(Phase), *ThrowContext.FrameForward.GetSafeNormal().ToCompactString());
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Throw requested (phase=%s, mode=%d, forward=%s)"),
+		*GetName(), PhaseName(Phase), static_cast<int32>(ResolveMode),
+		*ThrowContext.FrameForward.GetSafeNormal().ToCompactString());
 
 	EnsureRopeInitialized();
+
+	// ③ GuaranteedWrap의 BP 직행/AI 경로: Wielder의 PreviewPathLocked 흐름 없이 Throw가 불려도
+	// 보장 계약을 지킨다 — 컴포넌트가 스스로 prepared preview를 빌드해 구속 경로로 던지고,
+	// 빌드 실패 = Aim 무효 = 던지기 거부(연출 후 실패를 만들지 않는다. 2026-07-13 회의 결정 B/F).
+	// 빌드 파라미터는 URopePreviewComponent의 Arc Search 기본값과 동일(1.0/32/80/0).
+	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
+	{
+		FRopePreparedThrowPreview Prepared;
+		FString FailureReason;
+		if (!BuildPreparedWrappingPreview(ThrowContext, /*ReachScale*/ 1.0f, /*SegmentCount*/ 32,
+			/*SampleStep*/ 80.0f, /*QueryRadius*/ 0.0f, Prepared, &FailureReason) ||
+			!ThrowWithPreparedPreview(Prepared))
+		{
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw rejected: %s"),
+				*GetName(), FailureReason.IsEmpty() ? TEXT("prepared throw failed") : *FailureReason);
+		}
+		return;
+	}
+
 	StartFreshThrow(ThrowContext);
 }
 
@@ -1587,6 +1607,16 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 		return;
 	}
 
+	// ③ 연출 중 인터럽트 훅(기본 false = "그래도 보장"): 대상 사망/텔레포트 등 게임 규칙이 보장을
+	// 깨야 할 때만 서브클래스가 true를 반환한다(2026-07-13 회의 결정 G — 깡통 오버라이드).
+	if (ShouldAbortGuaranteedThrow(GuidedThrowState.Prepared))
+	{
+		SetPhase(ERopePhase::Releasing, TEXT("guided throw aborted by game rule"));
+		ResetTransientPhaseState();
+		ReleaseCooldown = ReleaseCooldownSeconds;
+		return;
+	}
+
 	GuidedThrowState.Elapsed += DeltaTime;
 	const float Alpha = FMath::Clamp(GuidedThrowState.Elapsed / FMath::Max(GuidedThrowState.Duration, 0.01f), 0.0f, 1.0f);
 	const float EasedAlpha = Alpha * Alpha * (3.0f - 2.0f * Alpha);
@@ -1657,8 +1687,10 @@ void URopeComponent::FinishGuidedThrow()
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("guided throw bone=%s, %d anchor(s)"),
 		*Seed.BoneName.ToString(), Seed.Anchors.Num()));
 	ResetTransientPhaseState();
-	NotifyWrapped(Seed.BoneName);
-	OnRopeWrapped.Broadcast(Seed.BoneName);
+	// ③ preview 기반 성립은 판정을 거치지 않으므로 판정값은 -1(미측정) 계약이다.
+	const FRopeWrappedEventInfo WrappedInfo = MakeWrappedEventInfo(Seed, /*AngleDeg*/ -1.0f, /*CoverageDeg*/ -1.0f);
+	NotifyWrapped(WrappedInfo);
+	OnRopeWrapped.Broadcast(WrappedInfo);
 }
 
 FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
@@ -2363,8 +2395,36 @@ void URopeComponent::CommitWrapping()
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s), angle=%.0fdeg, coverage=%.0fdeg"),
 		*Seed.BoneName.ToString(), Seed.Latched.Num(), CommitAngleDeg, CommitCoverageDeg));
 	ResetTransientPhaseState();
-	NotifyWrapped(Seed.BoneName);
-	OnRopeWrapped.Broadcast(Seed.BoneName);
+	const FRopeWrappedEventInfo WrappedInfo = MakeWrappedEventInfo(Seed, CommitAngleDeg, CommitCoverageDeg);
+	NotifyWrapped(WrappedInfo);
+	OnRopeWrapped.Broadcast(WrappedInfo);
+}
+
+FRopeWrappedEventInfo URopeComponent::MakeWrappedEventInfo(const FRopeWrapState& Seed,
+	float AngleDeg, float CoverageDeg) const
+{
+	FRopeWrappedEventInfo Info;
+	Info.Bone = Seed.BoneName;
+	// 이벤트 페이로드는 읽기 전용 의미라 대상 mesh의 const를 벗겨 BP에 노출한다(수정 계약 아님).
+	Info.Mesh = const_cast<USceneComponent*>(Seed.Mesh.Get());
+	Info.ResolveMode = ResolveMode;
+	Info.AngleDeg = AngleDeg;
+	Info.CoverageDeg = CoverageDeg;
+	Info.AnchorCount = Seed.Anchors.Num();
+
+	// 앵커가 걸친 본 전체(대표 본 우선, 중복 제거) — 양다리처럼 복수 본 성립의 전체 정보.
+	if (!Seed.BoneName.IsNone())
+	{
+		Info.Bones.Add(Seed.BoneName);
+	}
+	for (const FRopeSurfaceAnchor& Anchor : Seed.Anchors)
+	{
+		if (!Anchor.Bone.IsNone())
+		{
+			Info.Bones.AddUnique(Anchor.Bone);
+		}
+	}
+	return Info;
 }
 
 void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
@@ -2470,6 +2530,14 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 
 bool URopeComponent::CheckWrappedAutoRelease(float DeltaTime)
 {
+	// ③ GuaranteedWrap: 자동 release(장력/거리)는 무효 — "무조건 성립"의 보장은 해제에도 대칭이라
+	// 명시 해제(ReleaseWrap/CutRope/게임 이벤트)만 유효하다(2026-07-13 회의 결정 G). ①②는 종전대로.
+	// (대상 mesh 소실 release는 자동 release가 아니라 안전 계약이라 모드 무관 — HoldWrappedNodesToBone.)
+	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
+	{
+		return false;
+	}
+
 	// ④-1 임계 장력 release: 최대 장력이 TensionReleaseForce를 TensionReleaseTime 동안 지속해 넘으면
 	// 풀린다(순간 스파이크 무시). 0 = 비활성. 흐름은 mesh-lost release와 동일, 사유만 Tension.
 	if (WrapConfig.TensionReleaseForce > 0.0f)

@@ -86,6 +86,45 @@ enum class ERopeWrapResolveMode : uint8
 	GuaranteedWrap UMETA(DisplayName = "Guaranteed")
 };
 
+/**
+ * Wrapped 성립 이벤트 페이로드(OnRopeWrapped / NotifyWrapped). 종전의 본 이름 하나에서 확장
+ * (2026-07-13 회의 결정 G — Pierce 데미지 훅, 포획 강도 게임 규칙의 입구; 시그니처 변경은
+ * 모드 도입과 함께 1회로 끝내는 클린 브레이크). 결착 모델(TipEngagement) 필드는 Pierce 도입 시 추가.
+ */
+USTRUCT(BlueprintType)
+struct FRopeWrappedEventInfo
+{
+	GENERATED_BODY()
+
+	/** 대표(지배) 본 — 종전 OnRopeWrapped(FName)와 같은 값. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope")
+	FName Bone;
+
+	/** 앵커가 걸친 모든 본(대표 본 우선, 중복 제거) — 양다리처럼 복수 본 성립의 전체 정보. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope")
+	TArray<FName> Bones;
+
+	/** 감긴 대상 mesh(cross-actor 포함). 이벤트 시점 이후 파괴될 수 있으니 weak. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope")
+	TWeakObjectPtr<USceneComponent> Mesh;
+
+	/** 성립 당시 이 로프의 도달 모드(③ Guaranteed 성립은 판정값이 -1이다 — preview 기반). */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope")
+	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+
+	/** 커밋 시점 누적 감싼 각도(도). 계산 불가/preview 기반(③) = -1. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope")
+	float AngleDeg = -1.0f;
+
+	/** 커밋 시점 축 둘레 커버리지(도, 0~360 — "빠져나갈 공백이 없는가"). 계산 불가/③ = -1. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope")
+	float CoverageDeg = -1.0f;
+
+	/** 성립 앵커(래치 노드) 수 — 포획 강도의 보조 지표. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope")
+	int32 AnchorCount = 0;
+};
+
 /** Wrapping 중 tail node의 목표 surface path를 생성하는 방식. 로프별 선택(FRopeWrapConfig). */
 UENUM(BlueprintType)
 enum class ERopeWrappingPathMode : uint8

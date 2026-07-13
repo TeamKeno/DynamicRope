@@ -37,7 +37,9 @@ struct FRopeDebugSnapshot;
 // 디버거 노드별 flight 시각화 항목(Debug/RopeDebugSnapshot.h).
 struct FRopeFlightNodeDebug;
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, FName, Bone);
+// Wrapped 성립 이벤트는 본 이름 하나에서 구조체 페이로드로 확장됐다(2026-07-13 회의 결정 G —
+// 결착/판정값/복수 본. 기존 BP 바인딩은 재연결 필요, 클린 브레이크 승인 사항).
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, const FRopeWrappedEventInfo&, Info);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeOnReleased, FName, Bone, ERopeReleaseReason, Reason);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeOnPhaseChanged, ERopePhase, OldPhase, ERopePhase, NewPhase);
@@ -427,8 +429,16 @@ protected:
 	//~ 이벤트 네이티브 훅: 각 델리게이트 브로드캐스트 직전에 호출(엔진 Notify 관례). C++ 서브클래스가
 	//  자기 델리게이트에 바인딩하는 우회 없이 반응할 수 있다.
 	virtual void NotifyCaptured(FName Bone) {}
-	virtual void NotifyWrapped(FName Bone) {}
+	virtual void NotifyWrapped(const FRopeWrappedEventInfo& Info) {}
 	virtual void NotifyReleased(FName Bone, ERopeReleaseReason Reason) {}
+
+	/**
+	 * ③ GuaranteedWrap 연출(GuidedThrow 재생) 중 매 프레임 호출되는 인터럽트 판단 훅(GT, 콜드 패스 —
+	 * 연출은 ~0.2초). 기본은 항상 false = "그래도 보장"(2026-07-13 회의 결정 G). 대상 사망/텔레포트
+	 * 같은 게임 규칙으로 보장을 깨야 하면 오버라이드해 true 반환 — 로프가 연출을 중단하고 Releasing으로
+	 * 빠진다. 대상 mesh 소실은 훅과 무관하게 항상 중단된다(Prepared.IsValid()).
+	 */
+	virtual bool ShouldAbortGuaranteedThrow(const FRopePreparedThrowPreview& Prepared) const { return false; }
 
 	/** Throw(AimDir) 편의 진입점이 만드는 기본 컨텍스트(throw당 1회). 조준 규약을 바꾸려면 오버라이드.
 	 *  기본 구현은 FRopeThrowContext::MakeDefault(공용 조립 — 프레임 기저 규약은 그쪽 주석 참고) 위임. */
@@ -705,6 +715,9 @@ private:
 	FRopeWrappingPhase::FContext MakeWrappingContext() const;
 
 	void CommitWrapping();
+
+	/** Wrapped 성립 이벤트 페이로드 조립(커밋 시드 + 판정값 → NotifyWrapped/OnRopeWrapped 공용). */
+	FRopeWrappedEventInfo MakeWrappedEventInfo(const FRopeWrapState& Seed, float AngleDeg, float CoverageDeg) const;
 
 	void AbortWrapping(ERopeReleaseReason Reason);
 
