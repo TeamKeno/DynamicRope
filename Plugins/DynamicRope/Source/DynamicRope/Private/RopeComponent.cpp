@@ -29,7 +29,6 @@
 #include "Logic/RopeThrowPreviewBuilder.h"
 // FRopeGPUSolver::MaxNodes — NumParticles 상한(GPU 솔버 스레드그룹 한도)
 #include "RopeGPUSolver.h"
-#include "Settings/DynamicRopeSettings.h"
 // RopeMath:: 공용 헬퍼 (unity 빌드 익명 네임스페이스 중복 정의 방지)
 #include "RopeMathHelpers.h"
 #include "DrawDebugHelpers.h"
@@ -2272,8 +2271,7 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 
 ERopeWrappingPathMode URopeComponent::GetWrappingPathMode() const
 {
-	const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
-	return Settings ? Settings->WrappingPathMode : ERopeWrappingPathMode::SurfaceVectorField;
+	return WrapConfig.WrappingPathMode;
 }
 
 FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const

@@ -37,25 +37,13 @@ enum class ERopeAimSource : uint8
 	ActorForward
 };
 
-UENUM(BlueprintType)
-enum class ERopeWielderThrowMode : uint8
-{
-	/** 기존 던지기 방식. 입력이 들어오면 RopeComponent가 Flight로 진입하고 실제 물리/접촉 감지가 결과를 결정한다. */
-	PhysicsSimulation UMETA(DisplayName = "Physics Simulation"),
-
-	/** Preview가 성공한 경로를 권위 있는 결과로 사용한다. Preview 실패 상태에서는 던지기 입력 자체를 무시한다. */
-	PreviewPathLocked UMETA(DisplayName = "Preview Path Locked")
-};
-
-UENUM(BlueprintType)
-enum class ERopeWielderAimMode : uint8
-{
-	/** ThrowFrameMode가 만든 Forward를 그대로 사용한다. */
-	FrameForward UMETA(DisplayName = "Frame Forward"),
-
-	/** Forward 방향으로 rope 길이만큼 SDF/collider ray를 쏘고, 본에 맞으면 Origin->Hit 방향을 Forward로 사용한다. */
-	AimRayHitDirection UMETA(DisplayName = "Aim Ray Hit Direction")
-};
+// NOTE: 종전의 ERopeWielderThrowMode(PhysicsSimulation/PreviewPathLocked)와
+// ERopeWielderAimMode(FrameForward/AimRayHitDirection)는 제거됐다(2026-07-13 회의 결정 F).
+// 조준의 '의미'(aim ray 사용)와 던지기 확정 방식(preview 구속)은 이제 로프의
+// URopeComponent::ResolveMode에서 유도된다 — UsesAimRay()/UsesLockedPreview() 참조.
+// ① FullSimulation = 자유 조준 + 물리 결과, ② AssistedJudged = aim ray + 물리/판정,
+// ③ GuaranteedWrap = aim ray + preview 구속. (종전의 금지 조합 PreviewPathLocked+FrameForward는
+// 표현 자체가 불가능해졌다.)
 
 UENUM(BlueprintType)
 enum class ERopeAimRayOriginMode : uint8
@@ -188,48 +176,62 @@ public:
 	bool bAttachOnBeginPlay = true;
 
 	//~ Aim ----------------------------------------------------------------
+	// Wielder는 조준의 '출처'(카메라/소켓/원점)만 소유한다. aim ray를 쓸지(조준의 '의미')는
+	// 로프의 ResolveMode가 결정한다 — UsesAimRay() 참조. 아래 AimRay* 세부는 T3(고급) 튜닝.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
 	ERopeAimSource AimSource = ERopeAimSource::ControlRotation;
 
-	/** FrameForward 또는 throw 시점의 SDF ray hit 방향 중 실제 spline 기준을 선택한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
-	ERopeWielderAimMode AimMode = ERopeWielderAimMode::FrameForward;
-
 	/** Aim ray 시작점을 mesh bounds 중심, attach component, socket/bone 중에서 선택한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
 	ERopeAimRayOriginMode AimRayOriginMode = ERopeAimRayOriginMode::AttachMeshBoundsCenter;
 
 	/** AttachSocketOrBone 모드에서 ray origin으로 사용할 socket 또는 bone 이름이다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection && AimRayOriginMode == ERopeAimRayOriginMode::AttachSocketOrBone"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (EditCondition = "AimRayOriginMode == ERopeAimRayOriginMode::AttachSocketOrBone"))
 	FName AimRayOriginSocketName = NAME_None;
 
 	/** SDF ray march의 샘플 간격이다. 작을수록 얇은 팔/다리 충돌 정확도가 높아진다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (ClampMin = "0.5", Units = "cm", EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Aim", meta = (ClampMin = "0.5", Units = "cm"))
 	float AimRaySweepStep = 2.0f;
 
 	/** 중심선 주변을 함께 검사할 반경이다. 0이면 Rope Radius와 Contact Radius 중 큰 값을 기본 반경으로 사용한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Aim", meta = (ClampMin = "0.0", Units = "cm"))
 	float AimRayQueryRadius = 0.0f;
 
 	/** 로프 길이상 현재 스윙 방향을 hit 방향으로 보간하기 시작하는 비율. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (ClampMin = "0.0", ClampMax = "0.9", EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Aim", meta = (ClampMin = "0.0", ClampMax = "0.9"))
 	float AimRayGuideSteerStartAlpha = 0.25f;
 
 	/** 로프 길이상 hit 방향 공간 보간이 최대가 되는 비율. Flight 시간 보간 전에는 완전히 고정되지 않는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (ClampMin = "0.05", ClampMax = "1.0", EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Aim", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float AimRayGuideLockAlpha = 0.50f;
 
 	/** SDF 검사 ray와 hit 지점/법선을 월드에 디버그 드로우한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Debug", meta = (EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Debug")
 	bool bDrawAimRayDebug = true;
 
 	/**
 	 * 데모 조준 HUD(십자선 + 감김 가능 본 강조 링) 위젯을 로컬 플레이어 뷰포트에 자동으로 띄울지.
 	 * 위젯 클래스는 Project Settings > Dynamic Rope > AimHudWidgetClass가 정한다(기본 = C++ URopeAimWidget,
-	 * WBP 서브클래스로 리스타일 가능). Aim ray 모드에서만 의미가 있다.
+	 * WBP 서브클래스로 리스타일 가능). Aim ray 모드(= 로프 ResolveMode가 ①이 아닐 때)에서만 의미가 있다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|HUD", meta = (EditCondition = "AimMode == ERopeWielderAimMode::AimRayHitDirection"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|HUD")
 	bool bShowAimHudWidget = true;
+
+	/**
+	 * 이 wielder의 조준이 aim ray(대상 잠금)를 쓰는가 — 로프 ResolveMode에서 유도된다
+	 * (②AssistedJudged/③GuaranteedWrap = true, ①FullSimulation·로프 없음 = false).
+	 * 종전 AimMode 스위치의 대체(2026-07-13 회의 결정 F: 조준의 '의미'는 로프 모드가 소유).
+	 */
+	UFUNCTION(BlueprintPure, Category = "Rope|Aim")
+	bool UsesAimRay() const;
+
+	/**
+	 * 이 wielder의 던지기가 preview 구속(PreviewPathLocked 흐름)인가 — 로프 ResolveMode에서
+	 * 유도된다(③GuaranteedWrap = true). preview 생성 실패 시 던지기 입력은 거부된다
+	 * (OnThrowRejected·NoPreparedPreview). 종전 ThrowMode 스위치의 대체.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Rope|Throw")
+	bool UsesLockedPreview() const;
 
 	//~ Throw --------------------------------------------------------------
 	/** 던질 때 Up/Right 기준축을 어디서 가져올지. */
@@ -243,10 +245,6 @@ public:
 	/** Wielder가 책임지는 던지기 속도. ThrowContext를 통해 RopeComponent로 전달된다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
 	float ThrowSpeed = 1500.0f;
-
-	/** 던지기 확정 방식을 고른다. PreviewPathLocked는 매 프레임 만든 prepared preview가 있어야만 던질 수 있다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
-	ERopeWielderThrowMode ThrowMode = ERopeWielderThrowMode::PhysicsSimulation;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "ThrowFrameMode == ERopeThrowFrameMode::Custom"))
 	FVector CustomFrameForward = FVector::ForwardVector;

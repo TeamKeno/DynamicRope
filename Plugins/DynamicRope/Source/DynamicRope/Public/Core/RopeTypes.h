@@ -56,7 +56,37 @@ enum class ERopeReleaseReason : uint8
 	Cut
 };
 
-/** Wrapping 중 tail node의 목표 surface path를 생성하는 방식. Project Settings에서 전역 선택한다. */
+/**
+ * 감김 해결(도달) 모드 — 이 로프가 던지기~결착 성립까지 무엇을 보장하는지의 계약.
+ * 설계 근거/상황별 기대 매트릭스는 Docs/PoC/02_WrapResolveModes.md(2026-07-13 팀 합의).
+ * 모드는 새 파이프라인이 아니라 기존 세 경로의 이름표다: 조준·preview의 지위와 판정 관문의
+ * 사용 여부를 이 값이 결정하고, Wielder의 조준/던지기 방식도 여기서 유도된다(별도 스위치 없음).
+ * Wrapped 성립 이후(Hold/Pull/테더/release)는 모드 무관 공통이다.
+ */
+UENUM(BlueprintType)
+enum class ERopeWrapResolveMode : uint8
+{
+	/**
+	 * ① 전체 시뮬: 날리기부터 결착까지 전부 창발. 조준 보정/preview 없음 — 빗나감·스침·판정
+	 * 미달 전부 정상 결과다(현실 대응). 샌드박스/리서치용.
+	 */
+	FullSimulation UMETA(DisplayName = "Full Simulation"),
+
+	/**
+	 * ② 보조+판정(기본): aim ray가 대상을 잠가 명중은 보장하되, 결착 성립은 판정(감싼 각도/
+	 * 커버리지 관문)이 결정한다. preview는 표시용(비구속). 실패(release)도 정상 결과. 전투/스킬용.
+	 */
+	AssistedJudged UMETA(DisplayName = "Assisted (Judged)"),
+
+	/**
+	 * ③ 무조건 성립: 입력 순간 확정한 preview가 곧 실행 경로(구속). preview 생성 실패 = 던지기
+	 * 거부(Aim 무효)라 던진 뒤의 실패는 없다. 자동 release(장력/거리)도 무효 — 명시 해제만.
+	 * 데모/연출/이동기용. BareWrap 결착의 무조건 성립은 Aim 단계에서 걸러진다(회의 결정 B).
+	 */
+	GuaranteedWrap UMETA(DisplayName = "Guaranteed")
+};
+
+/** Wrapping 중 tail node의 목표 surface path를 생성하는 방식. 로프별 선택(FRopeWrapConfig). */
 UENUM(BlueprintType)
 enum class ERopeWrappingPathMode : uint8
 {
@@ -610,7 +640,12 @@ struct FRopeSolverConfig
 	float LODMinIterationScale = 0.25f;
 };
 
-/** 컨택트 결정 튜닝: 걸쳐진 rope가 언제 사지(limb)에 "wrapped"된 것으로 간주되는가? */
+/**
+ * 컨택트 결정 튜닝: 걸쳐진 rope가 언제 사지(limb)에 "wrapped"된 것으로 간주되는가?
+ * 파라미터 계층(2026-07-13 회의 결정 F): 기본 노출 필드 = T2(밸런스), AdvancedDisplay 필드 = T3
+ * (고급 — ②AssistedJudged × BareWrap 판정 인프라 전용이 대부분. ③Guaranteed는 판정/경로 빌드를
+ * 쓰지 않으므로 T3가 전부 무의미하다). 상세는 Docs/PoC/02_WrapResolveModes.md §5~6.
+ */
 USTRUCT(BlueprintType)
 struct FRopeWrapConfig
 {
@@ -637,6 +672,14 @@ struct FRopeWrapConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 MaxWrapSeeds = 1;
+
+	/**
+	 * Wrapping 경로 생성 방식(AnalyticHelix / SurfaceVectorField). 종전에는 프로젝트 전역
+	 * (UDynamicRopeSettings) 설정이었으나 로프별 값으로 이동했다(2026-07-13 회의 결정 G-마이그레이션,
+	 * 묵은 "per-rope화" P2 정리) — 전역 필드는 제거됨, 기존 전역 튜닝은 승계하지 않는 클린 브레이크.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap")
+	ERopeWrappingPathMode WrappingPathMode = ERopeWrappingPathMode::SurfaceVectorField;
 
 	/**
 	 * 감김 축 유도 소스. ShapeAxisFirst(기본) = 기존 동작(latch 본 collider 장축 우선).

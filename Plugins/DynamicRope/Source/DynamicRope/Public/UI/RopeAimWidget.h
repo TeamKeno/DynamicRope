@@ -1,6 +1,7 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Aim-ray 모드(ERopeWielderAimMode::AimRayHitDirection)의 데모 조준 HUD 위젯.
+// Aim-ray 조준(로프 ResolveMode가 ①FullSimulation이 아닐 때 — URopeWielderComponent::UsesAimRay)의
+// 데모 조준 HUD 위젯.
 // 평상시에는 화면 중앙 십자선을, aim ray가 감을 수 있는 본에 걸리는 동안에는 그 본 주위에
 // 스크린 투영된 강조 링(획득 팝 + 펄스)을 그린다.
 //

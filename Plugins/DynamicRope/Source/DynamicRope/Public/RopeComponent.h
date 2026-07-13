@@ -74,6 +74,16 @@ public:
 	URopeComponent();
 
 	//~ Setup(설정) -------------------------------------------------------
+
+	/**
+	 * 감김 해결(도달) 모드 — 이 로프의 최상위 계약(T1). 던지기~결착 성립까지 무엇을 보장하는지,
+	 * 조준·preview의 지위, 판정 관문 사용 여부를 이 값 하나가 결정한다(ERopeWrapResolveMode 주석,
+	 * Docs/PoC/02_WrapResolveModes.md). 정본은 로프다: Wielder의 조준/던지기 방식(aim ray 사용,
+	 * preview 구속)은 여기서 유도되고, BP 직행/AI는 Wielder 없이 이 값만으로 완결된다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
+	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+
 	// 아래 초기화 전용 값들(NumParticles/RopeLength/MinRopeLength)은 InitRope 시점에만 소비된다 —
 	// 런타임 쓰기는 재초기화 전까지 무효라 BlueprintReadOnly(함정 방지). 런타임 길이 변경은
 	// SetRopeLength/SetReelRate를 쓴다.
@@ -688,7 +698,7 @@ private:
 
 	void UpdateWrapping(float DeltaTime);
 
-	/** 프로젝트 설정(UDynamicRopeSettings)에서 감김 경로 모드를 해석한다. */
+	/** 로프별 감김 경로 모드(WrapConfig.WrappingPathMode — 전역 설정에서 per-rope로 이동, 2026-07-13). */
 	ERopeWrappingPathMode GetWrappingPathMode() const;
 
 	/** WrappingPhase에 넘길 호출 컨텍스트(WrapConfig/collider 스냅샷/경로 모드/튜브 반지름/로그 이름). */

@@ -69,7 +69,7 @@ void URopeAimWidget::ResolveWielder()
 bool URopeAimWidget::IsAimHudActive() const
 {
 	const URopeWielderComponent* W = Wielder.Get();
-	return W && W->AimMode == ERopeWielderAimMode::AimRayHitDirection;
+	return W && W->UsesAimRay();
 }
 
 FRopeAimHudSample URopeAimWidget::GetAimSample() const

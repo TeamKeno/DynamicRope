@@ -39,7 +39,7 @@ void URopeWielderComponent::BeginPlay()
 
 	// PreviewPathLocked는 preview 성공 여부가 던지기 가능 여부 자체를 결정한다.
 	// 수동으로 배치한 PreviewComponent가 없으면 BeginPlay에서 런타임 컴포넌트를 만들어 preview tick을 보장한다.
-	ResolvePreviewComponent(/*bAllowAutoCreate*/ ThrowMode == ERopeWielderThrowMode::PreviewPathLocked);
+	ResolvePreviewComponent(/*bAllowAutoCreate*/ UsesLockedPreview());
 
 	if (!Rope)
 	{
@@ -62,7 +62,7 @@ void URopeWielderComponent::BeginPlay()
 	// preview 외에 지상 이탈/스윙 에어컨트롤 감시도 틱이 필요하다 — 전부 꺼져야 틱 정지.
 	// Aim ray 모드는 preview component가 없어도 collider 수집 bounds를 매 프레임 갱신해야 한다.
 	SetComponentTickEnabled(bShowThrowPreview || bAutoGroundExitOnUpwardPull || bBoostAirControlWhileSwinging ||
-		AimMode == ERopeWielderAimMode::AimRayHitDirection);
+		UsesAimRay());
 	UpdateAimRayColliderQueryBounds();
 	if (bShowThrowPreview)
 	{
@@ -141,7 +141,7 @@ void URopeWielderComponent::UpdateAimHudSample()
 	const FName PrevBone = AimHudSample.Bone;
 
 	AimHudSample = FRopeAimHudSample();
-	if (AimMode == ERopeWielderAimMode::AimRayHitDirection && Rope)
+	if (UsesAimRay() && Rope)
 	{
 		const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(FVector::ZeroVector);
 		const FVector RayDirection = Request.RayDirection.GetSafeNormal();
@@ -194,7 +194,7 @@ void URopeWielderComponent::UpdateAimHudSample()
 
 void URopeWielderComponent::UpdateAimHudWidget()
 {
-	const bool bWantWidget = bShowAimHudWidget && AimMode == ERopeWielderAimMode::AimRayHitDirection;
+	const bool bWantWidget = bShowAimHudWidget && UsesAimRay();
 	if (!bWantWidget)
 	{
 		if (AimHudWidget)
@@ -327,6 +327,18 @@ void URopeWielderComponent::ResolveRefs()
 	{
 		AttachMesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
 	}
+}
+
+// 조준/던지기 방식은 로프 ResolveMode에서 유도된다(2026-07-13 회의 결정 F — 종전 AimMode/
+// ThrowMode 스위치 대체). 로프가 없으면 조준 보정도 preview 구속도 없다(①과 동일하게 동작).
+bool URopeWielderComponent::UsesAimRay() const
+{
+	return Rope && Rope->ResolveMode != ERopeWrapResolveMode::FullSimulation;
+}
+
+bool URopeWielderComponent::UsesLockedPreview() const
+{
+	return Rope && Rope->ResolveMode == ERopeWrapResolveMode::GuaranteedWrap;
 }
 
 void URopeWielderComponent::ResolvePreviewComponent(bool bAllowAutoCreate)
@@ -716,7 +728,7 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 
 FRopeThrowContext URopeWielderComponent::BuildThrowContextInternal(const FVector& AimDir) const
 {
-	if (AimMode != ERopeWielderAimMode::AimRayHitDirection)
+	if (!UsesAimRay())
 	{
 		return BuildBaseThrowContext(AimDir);
 	}
@@ -757,7 +769,7 @@ void URopeWielderComponent::UpdateAimRayColliderQueryBounds()
 		return;
 	}
 
-	if (AimMode != ERopeWielderAimMode::AimRayHitDirection)
+	if (!UsesAimRay())
 	{
 		// 런타임 모드 변경 시 이전 ray AABB가 collider 수집 범위에 남지 않게 즉시 제거한다.
 		Rope->ClearAimRayColliderQueryBounds();
@@ -780,7 +792,7 @@ void URopeWielderComponent::Throw()
 		return;
 	}
 
-	if (ThrowMode == ERopeWielderThrowMode::PreviewPathLocked)
+	if (UsesLockedPreview())
 	{
 		// Locked 모드는 "보이는 preview대로만 던진다"가 계약이다.
 		// 따라서 마지막 prepared preview가 없으면 물리 throw로 fallback하지 않고 입력을 버린다.
@@ -829,7 +841,7 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 {
 	if (Rope)
 	{
-		if (ThrowMode == ERopeWielderThrowMode::PreviewPathLocked)
+		if (UsesLockedPreview())
 		{
 			// ThrowNow는 즉시 throw와 AnimNotify throw가 모두 들어오는 실제 실행 지점이다.
 			// 몽타주 경로에서는 PendingPreparedThrow를 우선 소비하고, 즉시 throw에서는 LastPreparedPreview를 쓴다.
@@ -866,7 +878,7 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 		}
 
 		ClearThrowPreview();
-		if (AimMode == ERopeWielderAimMode::AimRayHitDirection)
+		if (UsesAimRay())
 		{
 			// 최신 collider 수집 직후 hit/fallback을 확정하도록 값 타입 요청만 큐에 넣는다.
 			FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(AimDir);
@@ -956,7 +968,7 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 
 bool URopeWielderComponent::ShouldHoldPreparedPreview()
 {
-	if (ThrowMode != ERopeWielderThrowMode::PreviewPathLocked ||
+	if (!UsesLockedPreview() ||
 		!PendingPreparedThrow.IsValid() ||
 		!ThrowMontage)
 	{
@@ -987,7 +999,7 @@ bool URopeWielderComponent::ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) c
 {
 	// PreviewPathLocked는 "던지기 전 성공한 preview path"만 새로 만든다.
 	// GuidedThrow/Wrapped에서는 이미 확정된 HeldPreparedPreview를 사용하므로 build를 다시 시도하지 않는다.
-	if (ThrowMode == ERopeWielderThrowMode::PreviewPathLocked)
+	if (UsesLockedPreview())
 	{
 		return Phase == ERopePhase::Free || Phase == ERopePhase::Releasing;
 	}
@@ -1008,7 +1020,7 @@ bool URopeWielderComponent::ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) c
 
 bool URopeWielderComponent::UpdateHeldPreparedPreviewForPhase(ERopePhase Phase)
 {
-	if (ThrowMode != ERopeWielderThrowMode::PreviewPathLocked || !HeldPreparedPreview.IsValid())
+	if (!UsesLockedPreview() || !HeldPreparedPreview.IsValid())
 	{
 		return false;
 	}
@@ -1094,7 +1106,7 @@ void URopeWielderComponent::UpdateThrowPreview()
 	}
 
 	const FRopeThrowContext ThrowContext = BuildThrowContext(FVector::ZeroVector);
-	const bool bShouldBuildPrepared = ThrowMode == ERopeWielderThrowMode::PreviewPathLocked &&
+	const bool bShouldBuildPrepared = UsesLockedPreview() &&
 		(RopePhase == ERopePhase::Free || RopePhase == ERopePhase::Releasing);
 
 	// PreviewPathLocked의 Free/Releasing preview는 렌더용 centerline뿐 아니라 실제 throw에 쓸 contact/anchor까지 만든다.
@@ -1147,7 +1159,7 @@ void URopeWielderComponent::ClearThrowPreview()
 
 void URopeWielderComponent::StoreAimGuideFrameIfNeeded(FRopePreparedThrowPreview& Prepared) const
 {
-	if (AimMode != ERopeWielderAimMode::AimRayHitDirection || !Prepared.IsValid())
+	if (!UsesAimRay() || !Prepared.IsValid())
 	{
 		return;
 	}
