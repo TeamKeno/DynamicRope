@@ -112,6 +112,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "10.0", Units = "cm"))
 	float MinRopeLength = 100.0f;
 
+	/** 되감기/풀기 입력이 쓰는 기본 릴 속도(cm/s). 길이 변경은 로프 도메인이라 여기 산다
+	 *  (2026-07-13 표면 감사 A-2 — Wielder에서 이사; Wielder Reel 액션이 이 값으로 SetReelRate 호출). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float ReelSpeed = 150.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	FRopeSolverConfig SolverConfig;
 

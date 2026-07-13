@@ -2819,9 +2819,9 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 항상 같은 속도라 견인이 일정하다. TetherMaxSpeed는 안전 상한으로만 남는다.
 	//   VTotal = min(ReelSpeed, MaxSpeed) × clamp(Overshoot / TaperDist, 0, 1)
 	// overshoot ≥ TaperDist → 고정 ReelSpeed(플랫), < TaperDist → 선형 감속(속도 서보에선 지수 수렴=오버슛 없음).
-	const float ReelSpeed = FMath::Max(WrapConfig.TetherReelSpeed, 0.0f);
+	const float BaseReelSpeed = FMath::Max(WrapConfig.TetherReelSpeed, 0.0f);
 	const float MaxSpeed = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f);
-	const float EffReelSpeed = (MaxSpeed > 0.0f) ? FMath::Min(ReelSpeed, MaxSpeed) : ReelSpeed; // 상한 클램프
+	const float EffReelSpeed = (MaxSpeed > 0.0f) ? FMath::Min(BaseReelSpeed, MaxSpeed) : BaseReelSpeed; // 상한 클램프
 	const float TaperDist = FMath::Max(WrapConfig.TetherSettleDist, 0.01f);                      // 경계 근처 감속 구간(작을수록 빨리 고정 속도 도달)
 	const float VTotal = EffReelSpeed * FMath::Clamp(Overshoot / TaperDist, 0.0f, 1.0f);         // 이번 프레임 목표 속도(cm/s)
 	// 이번 프레임 회수 거리 — 남은 overshoot를 넘게 회수하면(빠른 속도 × dt > overshoot) 관성으로 경계를 지나쳐

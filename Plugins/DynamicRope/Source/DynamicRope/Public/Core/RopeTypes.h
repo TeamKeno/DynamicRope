@@ -1069,6 +1069,14 @@ struct FRopeWrapConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float PullAimSmoothTime = 0.08f;
+
+	/**
+	 * 능동 Pull(입력 홀드)의 견인력 — SetActivePull에 실리는 기본값. 힘 크기는 로프 물리 도메인이라
+	 * 여기 산다(2026-07-13 표면 감사 A-2 — Wielder|Input에서 이사; Wielder PullAction은 이 값을 쓴다).
+	 * Wrapped + 팽팽할 때만 실제 인가된다(URopeComponent::SetActivePull 계약).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0"))
+	float PullForce = 100000.0f;
 };
 
 /** 던질 때 기준축을 어느 좌표계에서 가져올지. */

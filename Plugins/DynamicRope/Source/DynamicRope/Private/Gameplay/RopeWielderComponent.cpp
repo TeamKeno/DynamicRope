@@ -481,7 +481,7 @@ void URopeWielderComponent::StartPull()
 {
 	if (Rope)
 	{
-		Rope->SetActivePull(PullForce);
+		Rope->SetActivePull(Rope->WrapConfig.PullForce);
 	}
 }
 
@@ -505,7 +505,7 @@ void URopeWielderComponent::StartReelIn()
 {
 	if (Rope)
 	{
-		Rope->SetReelRate(ReelSpeed);
+		Rope->SetReelRate(Rope->ReelSpeed);
 	}
 }
 
@@ -513,7 +513,7 @@ void URopeWielderComponent::StartReelOut()
 {
 	if (Rope)
 	{
-		Rope->SetReelRate(-ReelSpeed);
+		Rope->SetReelRate(-Rope->ReelSpeed);
 	}
 }
 
@@ -651,16 +651,21 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 
 	const AActor* Owner = GetOwner();
 
+	// 던지기 파라미터의 단일 소스는 로프의 ThrowParams다(2026-07-13 표면 감사 A-1 — Wielder 사본
+	// 7종 제거). Wielder는 손 소켓 원점/소켓 속도/조준 유도 등 "출처"만 컨텍스트에 얹는다.
+	const FRopeThrowParams DefaultParams;
+	const FRopeThrowParams& Params = Rope ? Rope->ThrowParams : DefaultParams;
+
 	Context.Origin = Rope ? Rope->GetComponentLocation() : (Owner ? Owner->GetActorLocation() : FVector::ZeroVector);
 	Context.FrameForward = Owner ? Owner->GetActorForwardVector() : FVector::ForwardVector;
 	Context.FrameUp = Owner ? Owner->GetActorUpVector() : FVector::UpVector;
 	Context.FrameRight = Owner ? Owner->GetActorRightVector() : FVector::RightVector;
 	Context.OwnerVelocity = Owner ? Owner->GetVelocity() : FVector::ZeroVector;
 	Context.SocketVelocity = Context.OwnerVelocity;
-	Context.FrameMode = ThrowFrameMode;
-	Context.SwingPlane = SwingPlane;
-	Context.CustomSwingPlaneNormal = CustomSwingPlaneNormal;
-	Context.ThrowSpeed = ThrowSpeed;
+	Context.FrameMode = Params.FrameMode;
+	Context.SwingPlane = Params.SwingPlane;
+	Context.CustomSwingPlaneNormal = Params.CustomSwingPlaneNormal;
+	Context.ThrowSpeed = Params.ThrowSpeed;
 	Context.AimGuideSteerStartAlpha = FMath::Clamp(AimRayGuideSteerStartAlpha, 0.0f, 0.9f);
 	Context.AimGuideLockAlpha = FMath::Clamp(
 		FMath::Max(AimRayGuideLockAlpha, Context.AimGuideSteerStartAlpha + 0.01f), 0.05f, 1.0f);
@@ -671,7 +676,7 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 		Context.SocketVelocity = AttachMesh->GetPhysicsLinearVelocity(HandSocketName);
 	}
 
-	switch (ThrowFrameMode)
+	switch (Params.FrameMode)
 	{
 	case ERopeThrowFrameMode::Owner:
 		if (Owner)
@@ -702,9 +707,9 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 		break;
 
 	case ERopeThrowFrameMode::Custom:
-		Context.FrameForward = CustomFrameForward;
-		Context.FrameUp = CustomFrameUp;
-		Context.FrameRight = CustomFrameRight;
+		Context.FrameForward = Params.CustomFrameForward;
+		Context.FrameUp = Params.CustomFrameUp;
+		Context.FrameRight = Params.CustomFrameRight;
 		break;
 
 	case ERopeThrowFrameMode::World:

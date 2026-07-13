@@ -234,29 +234,10 @@ public:
 	bool UsesLockedPreview() const;
 
 	//~ Throw --------------------------------------------------------------
-	/** 던질 때 Up/Right 기준축을 어디서 가져올지. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
-	ERopeThrowFrameMode ThrowFrameMode = ERopeThrowFrameMode::Owner;
-
-	/** AimDir과 기준축을 조합해 스윙 호가 놓일 평면을 고른다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
-	ERopeSwingPlane SwingPlane = ERopeSwingPlane::AimAndFrameUp;
-
-	/** Wielder가 책임지는 던지기 속도. ThrowContext를 통해 RopeComponent로 전달된다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
-	float ThrowSpeed = 1500.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "ThrowFrameMode == ERopeThrowFrameMode::Custom"))
-	FVector CustomFrameForward = FVector::ForwardVector;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "ThrowFrameMode == ERopeThrowFrameMode::Custom"))
-	FVector CustomFrameUp = FVector::UpVector;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "ThrowFrameMode == ERopeThrowFrameMode::Custom"))
-	FVector CustomFrameRight = FVector::RightVector;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "SwingPlane == ERopeSwingPlane::CustomNormal"))
-	FVector CustomSwingPlaneNormal = FVector::RightVector;
+	// NOTE: 종전의 던지기 파라미터 사본 7종(ThrowFrameMode/SwingPlane/ThrowSpeed/CustomFrame*/
+	// CustomSwingPlaneNormal)은 제거됐다(2026-07-13 표면 감사 A-1). 단일 소스는 로프의
+	// URopeComponent::ThrowParams(FRopeThrowParams)다 — Wielder 경유 던지기에서 로프 설정이
+	// 무시되던 이중을 해소. Wielder는 조준 방향과 손 소켓 원점 등 "출처"만 컨텍스트에 얹는다.
 
 	//~ Preview ------------------------------------------------------------
 	/** 비어 있으면 owner에서 찾는다. */
@@ -311,28 +292,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	bool bThrowActionToggles = true;
 
-	/** 능동 Pull 액션(홀드). 누르는 동안 PullForce로 감긴 대상을 끌어당기고 떼면 멈춘다. */
+	// NOTE: 힘/속도 수치(PullForce/ReelSpeed)는 로프로 이사했다(2026-07-13 표면 감사 A-2 —
+	// 물리 수치는 로프 도메인): Pull 힘 = WrapConfig.PullForce, 릴 속도 = URopeComponent::ReelSpeed.
+	// 이 섹션에는 입력 바인딩만 남는다.
+
+	/** 능동 Pull 액션(홀드). 누르는 동안 로프의 WrapConfig.PullForce로 끌어당기고 떼면 멈춘다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputAction> PullAction = nullptr;
 
-	/**
-	 * 능동 Pull의 힘(상수 — 장력과 무관해 피드백 폭주 없음). Wrapped + 로프가 팽팽할 때만 인가된다.
-	 * 캐릭터 대상은 CharacterMovement가 질량으로 나누고 지면 마찰과 경쟁하므로 수만~수십만이 체감 구간.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input", meta = (ClampMin = "0.0"))
-	float PullForce = 100000.0f;
-
-	/** 되감기 액션(홀드). 누르는 동안 ReelSpeed로 로프를 감고(짧아짐) 떼면 멈춘다. */
+	/** 되감기 액션(홀드). 누르는 동안 로프의 ReelSpeed로 로프를 감고(짧아짐) 떼면 멈춘다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputAction> ReelInAction = nullptr;
 
-	/** 풀기 액션(홀드). 누르는 동안 ReelSpeed로 로프를 풀고(초기 길이까지) 떼면 멈춘다. */
+	/** 풀기 액션(홀드). 누르는 동안 로프의 ReelSpeed로 로프를 풀고(초기 길이까지) 떼면 멈춘다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputAction> ReelOutAction = nullptr;
-
-	/** 되감기/풀기 속도(cm/s). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input", meta = (ClampMin = "0.0"))
-	float ReelSpeed = 150.0f;
 
 	//~ Tension(장력 — wielder 몫 테더와 조합) ------------------------------
 	// WrapConfig.TetherTargetShare < 1이면 로프가 wielder를 앵커 쪽으로 끌어당긴다(수렴형 테더 분배).
@@ -386,7 +360,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Throw();
 
-	/** 실제 로프 던지기를 *지금* 실행한다. 방향은 ThrowFrameMode의 Forward를 사용한다. */
+	/** 실제 로프 던지기를 *지금* 실행한다. 방향은 로프 ThrowParams.FrameMode의 Forward를 사용한다. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowNow();
 
@@ -395,7 +369,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	virtual FRopeThrowContext BuildThrowContext(const FVector& AimDir) const;
 
-	/** Legacy API. AimDir은 더 이상 주 방향이 아니며, 실제 방향은 ThrowFrameMode의 Forward를 사용한다. */
+	/** Legacy API. AimDir은 더 이상 주 방향이 아니며, 실제 방향은 로프 ThrowParams.FrameMode의 Forward를 사용한다. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowInDirection(const FVector& AimDir);
 
@@ -407,7 +381,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Release();
 
-	/** 능동 Pull 시작(PullForce로 견인 — Wrapped + 팽팽할 때만 실제 인가). 입력 홀드/게임플레이용. */
+	/** 능동 Pull 시작(로프 WrapConfig.PullForce로 견인 — Wrapped + 팽팽할 때만 실제 인가). 입력 홀드/게임플레이용. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StartPull();
 
@@ -419,11 +393,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Cut();
 
-	/** 되감기 시작(로프가 ReelSpeed로 짧아짐). 입력 홀드/게임플레이용. */
+	/** 되감기 시작(로프의 ReelSpeed로 짧아짐). 입력 홀드/게임플레이용. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StartReelIn();
 
-	/** 풀기 시작(로프가 ReelSpeed로 초기 길이까지 길어짐). */
+	/** 풀기 시작(로프의 ReelSpeed로 초기 길이까지 길어짐). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StartReelOut();
 
