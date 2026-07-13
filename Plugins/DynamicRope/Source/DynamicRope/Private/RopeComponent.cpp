@@ -1339,7 +1339,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.MeshName = Mesh ? Mesh->GetName() : TEXT("None");
 		Snapshot.Latched = Wrap.Latched;
 		Snapshot.WrapTension = Wrap.Tension;
-		Snapshot.TensionReleaseForce = WrapConfig.TensionReleaseForce;
+		Snapshot.TensionReleaseForce = HoldConfig.TensionReleaseForce;
 		Snapshot.bPullValid = PullDrive.LastPullSample.bValid;
 		Snapshot.PullPoint = PullDrive.LastPullSample.WorldPoint;
 		// 스무딩된(실제 인가) 방향
@@ -1352,10 +1352,10 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.PullAimPoint = PullDrive.LastPullSample.bValid ? PullDrive.LastPullSample.AimPos
 			: PullDrive.LastPullSample.WorldPoint;
 		Snapshot.PullTension = PullDrive.LastPullSample.Tension;
-		Snapshot.TetherResponse = WrapConfig.TetherResponse;
+		Snapshot.TetherResponse = HoldConfig.TetherResponse;
 		Snapshot.TetherOvershoot = PullDrive.LastTetherOvershoot;
 		Snapshot.ActivePullForce = PullDrive.ActivePullForce;
-		Snapshot.DistanceReleaseSlack = WrapConfig.DistanceReleaseSlack;
+		Snapshot.DistanceReleaseSlack = HoldConfig.DistanceReleaseSlack;
 	}
 
 	// 감김 축 시각화: Wrapping 페이즈에서 ResolveWrappingAxis가 정한 경로 축(원점+방향)을 담는다 —
@@ -2491,7 +2491,7 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 
 	// Pull 샘플 산출(항상 — 디버거/BP 관찰 + 견인/release의 공용 입력). 방향은 첫 직선 다리 추종(공간).
 	PullDrive.LastPullSample = FRopePullSample();
-	WrapController.ComputePull(Sim, WrapConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
+	WrapController.ComputePull(Sim, HoldConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
 
 	// Pull 스무딩(2단): (1) 조준 노드 fractional 스무딩 — 정수 AimNode의 프레임 간 이산 홉(방향 통째 점프
 	// + tether 초과분 불연속)을 float EMA + 노드 사이 보간으로 없앤다. (2) 방향 EMA — 그 위에 남는 노드 위치
@@ -2512,7 +2512,7 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 	}
 	else
 	{
-		const float TauA = WrapConfig.PullAimSmoothTime;
+		const float TauA = HoldConfig.PullAimSmoothTime;
 		const float AlphaA = (TauA > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / TauA)) : 1.0f;
 		PullDrive.SmoothedAimNodeF = FMath::Lerp(PullDrive.SmoothedAimNodeF, RawAimF, AlphaA);
 	}
@@ -2532,7 +2532,7 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 	}
 	else
 	{
-		const float Tau = WrapConfig.PullDirSmoothTime;
+		const float Tau = HoldConfig.PullDirSmoothTime;
 		const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
 		PullDrive.SmoothedPullDir = FMath::Lerp(PullDrive.SmoothedPullDir, DirIn, Alpha).GetSafeNormal();
 	}
@@ -2565,16 +2565,16 @@ bool URopeComponent::CheckWrappedAutoRelease(float DeltaTime)
 
 	// ④-1 임계 장력 release: 최대 장력이 TensionReleaseForce를 TensionReleaseTime 동안 지속해 넘으면
 	// 풀린다(순간 스파이크 무시). 0 = 비활성. 흐름은 mesh-lost release와 동일, 사유만 Tension.
-	if (WrapConfig.TensionReleaseForce > 0.0f)
+	if (HoldConfig.TensionReleaseForce > 0.0f)
 	{
-		TensionOverTime = (WrapController.State.Tension > WrapConfig.TensionReleaseForce)
+		TensionOverTime = (WrapController.State.Tension > HoldConfig.TensionReleaseForce)
 			? TensionOverTime + DeltaTime : 0.0f;
-		if (TensionOverTime >= WrapConfig.TensionReleaseTime)
+		if (TensionOverTime >= HoldConfig.TensionReleaseTime)
 		{
 			const FName Bone = WrapController.State.BoneName;
 			FinishWrapRelease(Bone, ERopeReleaseReason::Tension,
 				FString::Printf(TEXT("tension release %.0f > %.0f, bone=%s"),
-					WrapController.State.Tension, WrapConfig.TensionReleaseForce, *Bone.ToString()));
+					WrapController.State.Tension, HoldConfig.TensionReleaseForce, *Bone.ToString()));
 			return true;
 		}
 	}
@@ -2582,12 +2582,12 @@ bool URopeComponent::CheckWrappedAutoRelease(float DeltaTime)
 	// ④-2 거리 release: 손~앵커 직선 거리의 가용 로프 길이 초과분(테더 초과분과 동일 소스 —
 	// UpdateTether가 이번 프레임 갱신한 PullDrive.LastTetherOvershoot)이 한계를 넘으면 놓친다.
 	// 기하 기반이라 지속 시간 없이 즉시 판정(장력처럼 노이즈가 없다).
-	if (WrapConfig.DistanceReleaseSlack > 0.0f && PullDrive.LastTetherOvershoot > WrapConfig.DistanceReleaseSlack)
+	if (HoldConfig.DistanceReleaseSlack > 0.0f && PullDrive.LastTetherOvershoot > HoldConfig.DistanceReleaseSlack)
 	{
 		const FName Bone = WrapController.State.BoneName;
 		FinishWrapRelease(Bone, ERopeReleaseReason::Distance,
 			FString::Printf(TEXT("distance release overshoot %.0f > %.0f, bone=%s"),
-				PullDrive.LastTetherOvershoot, WrapConfig.DistanceReleaseSlack, *Bone.ToString()));
+				PullDrive.LastTetherOvershoot, HoldConfig.DistanceReleaseSlack, *Bone.ToString()));
 		return true;
 	}
 	return false;
@@ -2802,10 +2802,10 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	const float   LegSegs = static_cast<float>(PullDrive.LastPullSample.AnchorNode) - PullDrive.LastPullSample.AimNodeF;
 	const FVector Span = Aim - Anchor;
 	const float Dist = static_cast<float>(Span.Size());
-	const float AvailLen = LegSegs * Sim.SegmentLength + WrapConfig.TetherSlack;
+	const float AvailLen = LegSegs * Sim.SegmentLength + HoldConfig.TetherSlack;
 	const float Overshoot = Dist - AvailLen;
 	PullDrive.LastTetherOvershoot = FMath::Max(0.0f, Overshoot);
-	if (WrapConfig.TetherResponse <= 0.0f || Overshoot <= 0.0f || Dist <= KINDA_SMALL_NUMBER)
+	if (HoldConfig.TetherResponse <= 0.0f || Overshoot <= 0.0f || Dist <= KINDA_SMALL_NUMBER)
 	{
 		return;
 	}
@@ -2819,10 +2819,10 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 항상 같은 속도라 견인이 일정하다. TetherMaxSpeed는 안전 상한으로만 남는다.
 	//   VTotal = min(ReelSpeed, MaxSpeed) × clamp(Overshoot / TaperDist, 0, 1)
 	// overshoot ≥ TaperDist → 고정 ReelSpeed(플랫), < TaperDist → 선형 감속(속도 서보에선 지수 수렴=오버슛 없음).
-	const float BaseReelSpeed = FMath::Max(WrapConfig.TetherReelSpeed, 0.0f);
-	const float MaxSpeed = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f);
+	const float BaseReelSpeed = FMath::Max(HoldConfig.TetherReelSpeed, 0.0f);
+	const float MaxSpeed = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
 	const float EffReelSpeed = (MaxSpeed > 0.0f) ? FMath::Min(BaseReelSpeed, MaxSpeed) : BaseReelSpeed; // 상한 클램프
-	const float TaperDist = FMath::Max(WrapConfig.TetherSettleDist, 0.01f);                      // 경계 근처 감속 구간(작을수록 빨리 고정 속도 도달)
+	const float TaperDist = FMath::Max(HoldConfig.TetherSettleDist, 0.01f);                      // 경계 근처 감속 구간(작을수록 빨리 고정 속도 도달)
 	const float VTotal = EffReelSpeed * FMath::Clamp(Overshoot / TaperDist, 0.0f, 1.0f);         // 이번 프레임 목표 속도(cm/s)
 	// 이번 프레임 회수 거리 — 남은 overshoot를 넘게 회수하면(빠른 속도 × dt > overshoot) 관성으로 경계를 지나쳐
 	// slack이 되고 다음 프레임 견인 off로 코스팅→재팽팽 속도 변동이 생긴다. overshoot로 캡해 항상 경계에 안착.
@@ -2853,10 +2853,10 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		ShareT = 1.0f;
 		ShareW = 0.0f;
 	}
-	else if (WrapConfig.bAutoTetherShare)
+	else if (HoldConfig.bAutoTetherShare)
 	{
-		const float WT = ResolveEndpointInvMass(MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, WrapConfig.GroundBraceFactor);
-		const float WW = ResolveEndpointInvMass(nullptr, GetOwner(), NAME_None, WrapConfig.GroundBraceFactor);
+		const float WT = ResolveEndpointInvMass(MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, HoldConfig.GroundBraceFactor);
+		const float WW = ResolveEndpointInvMass(nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor);
 		const float Total = WT + WW;
 		if (Total <= KINDA_SMALL_NUMBER)
 		{
@@ -2869,7 +2869,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			// 질량 바이어스: 역질량에 지수 k(TetherMassBias)를 걸어 질량차 민감도를 조절한다.
 			// k=1이면 선형 역질량(WT/Total)이고, k>1이면 무거운 쪽(작은 w)의 몫이 더 급격히 줄어 극단적으로,
 			// k<1이면 완만하게, k=0이면 50:50이 된다. 앵커(w=0)는 0^k=0이라 지수와 무관하게 항상 몫 0.
-			const float Bias = FMath::Max(WrapConfig.TetherMassBias, 0.0f);
+			const float Bias = FMath::Max(HoldConfig.TetherMassBias, 0.0f);
 			float RawShareT;
 			if (FMath::IsNearlyEqual(Bias, 1.0f))
 			{
@@ -2889,7 +2889,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			}
 			else
 			{
-				const float Tau = WrapConfig.PullDirSmoothTime;
+				const float Tau = HoldConfig.PullDirSmoothTime;
 				const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
 				PullDrive.SmoothedTargetShare = FMath::Lerp(PullDrive.SmoothedTargetShare, RawShareT, Alpha);
 			}
@@ -2899,7 +2899,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	}
 	else
 	{
-		ShareT = FMath::Clamp(WrapConfig.TetherTargetShare, 0.0f, 1.0f);
+		ShareT = FMath::Clamp(HoldConfig.TetherTargetShare, 0.0f, 1.0f);
 		ShareW = 1.0f - ShareT;
 	}
 	PullDrive.LastTargetShare = ShareT; // wielder 게이트/디버그가 읽는 유효 대상 몫.
@@ -2909,7 +2909,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 보정 강성(임계 감쇠): 로프 축 속도를 목표로 *한 프레임에 확 세팅하지 않고* 매 프레임 CorrectAlpha만큼만
 	// 접근시킨다. Alpha=1이면 즉시(하드 — 진행 속도를 뚝 끊어 "턱턱 걸림"), 작을수록 몇 프레임에 걸쳐 부드럽게
 	// 감속(수렴). TetherResponse[0..1]를 이 강성으로 재사용한다(원래 "프레임당 회수 비율" 의미와 일치, 0=off 게이트).
-	const float CorrectAlpha = FMath::Clamp(WrapConfig.TetherResponse, 0.0f, 1.0f);
+	const float CorrectAlpha = FMath::Clamp(HoldConfig.TetherResponse, 0.0f, 1.0f);
 
 	// 물리 시뮬 수신자용 두 인가 방식(둘 다 로프 축 성분만 건드려 수직 성분(중력 등)은 보존):
 	//  - TopUpVelocity(단방향, CorrectAlpha 감쇠): 목표 속도까지 "부족할 때만" 가속, 감속은 안 함. wielder(로프
@@ -2959,7 +2959,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 					// 프레임마다 다른 축으로 들어가 감쇠 없는 Falling에서 벡터가 계속 커질 수 있다(폭주의
 					// 2차 방어 — 1차는 방향 EMA). 주입은 절대 속력을 이 상한 너머로 못 키우고, 기존에 더
 					// 빠른 외부 운동(자유낙하 등)은 보존한다. TetherMaxSpeed=0(클램프 없음 설정)이면 생략.
-					const float SpeedCap = FMath::Max(WrapConfig.TetherMaxSpeed, 0.0f);
+					const float SpeedCap = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
 					if (SpeedCap > 0.0f)
 					{
 						const float MaxAllowed = FMath::Max(SpeedCap, static_cast<float>(OldVel.Size()));
@@ -3047,7 +3047,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		}
 		else
 		{
-			const float Tau = WrapConfig.PullDirSmoothTime;
+			const float Tau = HoldConfig.PullDirSmoothTime;
 			const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
 			PullDrive.SmoothedWielderPullDir = FMath::Lerp(PullDrive.SmoothedWielderPullDir, WielderDirRaw, Alpha).GetSafeNormal();
 			if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())

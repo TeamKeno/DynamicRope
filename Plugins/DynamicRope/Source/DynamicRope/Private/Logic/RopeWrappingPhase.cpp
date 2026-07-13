@@ -51,7 +51,11 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 		return;
 	}
 
-	const int32 StepBudget = FMath::Max(1, Ctx.Config.WrappingPathBuildStepsPerFrame);
+	// 프레임 예산 자동화(표면 감사 B-2): 설정값은 하한(내부 기본 8)이고, 실제 예산은 로프 길이에
+	// 비례해 자동 상향된다 — 노드가 많아도 빌드가 ~4프레임 안에 끝나도록(SVF는 경로점당 스텝 2개 소모).
+	// preview 경로는 설정값을 4096으로 덮어 한 번에 완주한다(BuildPreviewCenterline).
+	const int32 AutoBudget = FMath::DivideAndRoundUp(State.NumTailNodes * 2, 4);
+	const int32 StepBudget = FMath::Max3(1, Ctx.Config.WrappingPathBuildStepsPerFrame, AutoBudget);
 	if (State.PathMode == ERopeWrappingPathMode::AnalyticHelix)
 	{
 		for (int32 StepIndex = 0;

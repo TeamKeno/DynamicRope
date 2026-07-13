@@ -293,10 +293,10 @@ public:
 	bool bThrowActionToggles = true;
 
 	// NOTE: 힘/속도 수치(PullForce/ReelSpeed)는 로프로 이사했다(2026-07-13 표면 감사 A-2 —
-	// 물리 수치는 로프 도메인): Pull 힘 = WrapConfig.PullForce, 릴 속도 = URopeComponent::ReelSpeed.
+	// 물리 수치는 로프 도메인): Pull 힘 = HoldConfig.PullForce, 릴 속도 = URopeComponent::ReelSpeed.
 	// 이 섹션에는 입력 바인딩만 남는다.
 
-	/** 능동 Pull 액션(홀드). 누르는 동안 로프의 WrapConfig.PullForce로 끌어당기고 떼면 멈춘다. */
+	/** 능동 Pull 액션(홀드). 누르는 동안 로프의 HoldConfig.PullForce로 끌어당기고 떼면 멈춘다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputAction> PullAction = nullptr;
 
@@ -309,7 +309,7 @@ public:
 	TObjectPtr<UInputAction> ReelOutAction = nullptr;
 
 	//~ Tension(장력 — wielder 몫 테더와 조합) ------------------------------
-	// WrapConfig.TetherTargetShare < 1이면 로프가 wielder를 앵커 쪽으로 끌어당긴다(수렴형 테더 분배).
+	// HoldConfig.TetherTargetShare < 1이면 로프가 wielder를 앵커 쪽으로 끌어당긴다(수렴형 테더 분배).
 	// 이 섹션은 그 견인의 캐릭터 이동 정책: 물리(플러그인 코어)가 아니라 게임 반응이라 wielder에 둔다.
 
 	/**
@@ -381,7 +381,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Release();
 
-	/** 능동 Pull 시작(로프 WrapConfig.PullForce로 견인 — Wrapped + 팽팽할 때만 실제 인가). 입력 홀드/게임플레이용. */
+	/** 능동 Pull 시작(로프 HoldConfig.PullForce로 견인 — Wrapped + 팽팽할 때만 실제 인가). 입력 홀드/게임플레이용. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StartPull();
 

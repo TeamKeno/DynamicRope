@@ -239,7 +239,7 @@ bool URopeWielderComponent::IsWielderTetherActive() const
 	}
 	// wielder가 실제로 테더 몫을 받을 때만(테더 자체가 꺼졌거나 이번 프레임 유효 몫이 전량 대상이면 무의미).
 	// 유효 대상 몫은 자동(질량 기반)/수동 공통 최종값이라 auto·override 모두에서 일관되게 판정된다.
-	if (Rope->WrapConfig.TetherResponse <= 0.0f || Rope->GetEffectiveTetherTargetShare() >= 1.0f - KINDA_SMALL_NUMBER)
+	if (Rope->HoldConfig.TetherResponse <= 0.0f || Rope->GetEffectiveTetherTargetShare() >= 1.0f - KINDA_SMALL_NUMBER)
 	{
 		return false;
 	}
@@ -481,7 +481,7 @@ void URopeWielderComponent::StartPull()
 {
 	if (Rope)
 	{
-		Rope->SetActivePull(Rope->WrapConfig.PullForce);
+		Rope->SetActivePull(Rope->HoldConfig.PullForce);
 	}
 }
 

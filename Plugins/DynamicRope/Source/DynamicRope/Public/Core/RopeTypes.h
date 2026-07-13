@@ -636,7 +636,6 @@ struct FRopeSolverConfig
 	/** substep당 충돌 해소 패스 수. 1=substep 끝에 1회(기존 동작, perf 무회귀). sharp한 굴곡에서
 	 *  distance/bending이 안쪽으로 당기는 힘을 단일 충돌이 못 이겨 관통할 때, 제약 iteration을 이 수만큼
 	 *  나눠 사이사이 충돌을 끼운다 → 더 sharp한 끼인각까지 방어(>1일수록 강하지만 비용↑). Iterations로 상한. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "16"))
 	int32 CollisionPassesPerSubstep = 1;
 
 	/** XPBD stretch compliance(stiffness의 역수). 0 = 신장 불가(inextensible). */
@@ -651,12 +650,10 @@ struct FRopeSolverConfig
 	 *  판정값 r = (i↔i+2 거리)/(2*SegmentLength) = cos(턴각/2): 1=직선, 작을수록 급한 굽힘.
 	 *  r ≤ BendReleaseRatio면 펴는 힘 0(완전히 놔줌), r ≥ BendFullRatio면 100%(기존 동작), 사이는 smoothstep.
 	 *  기본 0.70(≈턴각 91°). 코너가 아직 각지면 올리고(급한 굴곡까지 놔줌), 두 값을 0으로 두면 항상 편다(각도 허용 끔). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float BendReleaseRatio = 0.70f;
 
 	/** 각도-허용 벤딩: r ≥ 이 값이면 펴는 힘 100%(완만한 굽힘은 기존처럼 곧게 편다). 기본 0.92(≈턴각 46°).
 	 *  자유 로프가 너무 흐물거리면 낮추고, 항상 BendReleaseRatio 이상이어야 한다(솔버가 내부적으로 보장). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float BendFullRatio = 0.92f;
 
 	/** collider에 대한 접선 방향 friction [0..1](Coulomb 계수 μ). */
@@ -665,7 +662,7 @@ struct FRopeSolverConfig
 
 	/** 자유단(끝)으로 갈수록 friction을 약화시키는 배율(고정점=1, 끝=이 값). 끝 노드는 장력이 가장 낮아
 	 *  마찰에 잘 붙잡히므로, 끝쪽 그립만 낮춰 잘 놔주게 한다. 1.0이면 테이퍼 없음(균일 friction). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TipFrictionScale = 1.0f;
 
 	/** Collision query radius in cm. The solver keeps nodes this far off contact surfaces. */
@@ -682,11 +679,9 @@ struct FRopeSolverConfig
 	bool bUseWorldGDF = false;
 
 	/** Swept collision sample spacing in cm. Lower values reduce tunneling at higher query cost. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "0.1", Units = "cm"))
 	float SweepStep = 2.0f;
 
 	/** Maximum swept samples per segment, used as a cost cap for very fast nodes. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Solver", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxSweepSamples = 16;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver")
@@ -808,7 +803,6 @@ struct FRopeWrapConfig
 	float WrappingMaxWrapAngleDeg = 0.0f;
 
 	/** Wrapping phase must keep the same accumulated latch span stable this long before committing. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrappingStableTime = 0.10f;
 
 	/** Time used to pull tail nodes onto their generated surface wrap targets. */
@@ -816,11 +810,9 @@ struct FRopeWrapConfig
 	float WrappingMotionDuration = 0.50f;
 
 	/** Per-segment delay while tail nodes settle onto the surface path. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrappingTailDelayPerSegment = 0.024f;
 
 	/** Wrapping 중 한 프레임에 진행할 surface path 적분 step 수. 높이면 빨라지지만 순간 비용이 커진다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "1", ClampMax = "256"))
 	int32 WrappingPathBuildStepsPerFrame = 8;
 
 	/** Axis distance advanced per circumference distance for analytic helix wrapping. */
@@ -834,12 +826,15 @@ struct FRopeWrapConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone")
 	bool bEnableMultiBoneWrapping = true;
 
+	// NOTE: 아래 멀티본 투영 스코어링 세부(깊이/비용/가중치/보너스/히스테리시스 12종)는 실측 튜닝이
+	// 끝난 개발자 상수로 내부화됐다(2026-07-13 표면 감사 B-2 — UPROPERTY 제거, 코드에서만 조정).
+	// 켜고 끄는 스위치는 위 bEnableMultiBoneWrapping 하나다. 각 값의 의미는 필드별 주석 유지.
+
 	/**
 	 * 현재 본에서 몇 edge까지 후보로 볼지.
 	 * 지금은 skeleton parent/child edge만 사용한다. 이후 디자이너 지정 transition을 추가해도
 	 * 같은 depth 제한을 통과하므로, 너무 먼 bridge가 한 번에 열리는 것을 막는 1차 안전장치다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0", ClampMax = "16"))
 	int32 MaxBoneTransitionDepth = 3;
 
 	/**
@@ -847,54 +842,42 @@ struct FRopeWrapConfig
 	 * depth가 같아도 edge별 penalty가 다르면 비용이 달라질 수 있다. 지금은 parent/child edge 비용만
 	 * 누적하지만, 나중에 designer edge / 금지에 가까운 edge를 섞을 때 projection 전에 후보를 잘라내는 역할을 한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float MaxBoneTransitionCost = 5.0f;
 
 	/**
 	 * 자동 parent/child edge 하나를 지날 때의 비용.
 	 * 값이 클수록 graph cost가 커져 같은 본 유지가 쉬워지고, 낮추면 parent/child chain을 더 적극적으로 탄다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float AutoParentChildTransitionPenalty = 1.0f;
 
 	/** projection 거리 점수 가중치. 예측 위치에서 표면까지 멀수록 불리하다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float ProjectionDistanceWeight = 0.35f;
 
 	/** 실제 rope node 위치와 projection 표면점 사이 거리 가중치. 로프가 실제로 있는 쪽의 본을 선호한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float RopeNodeDistanceWeight = 0.25f;
 
 	/** 이전 tangent와 새 tangent가 꺾이는 정도의 가중치. 값이 클수록 부드러운 진행을 선호한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float TangentContinuityWeight = 8.0f;
 
 	/** 이전 normal과 새 normal이 꺾이는 정도의 가중치. 값이 클수록 표면 normal 연속성을 선호한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float NormalContinuityWeight = 5.0f;
 
 	/** graph 비용 가중치. parent/child를 많이 건너는 후보일수록 불리하게 만든다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float BoneTransitionPenaltyWeight = 1.0f;
 
 	/** 현재 본 유지 보너스. 동점 근처에서 본이 흔들리는 것을 줄인다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float CurrentBoneBonus = 0.35f;
 
 	/** 새 본이 현재 본보다 이 점수만큼 더 좋아야 전환한다. 전환 hysteresis. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float BoneTransitionHysteresis = 0.75f;
 
 	/** 직전 본으로 바로 돌아가는 후보에 더하는 penalty. A->B->A 왕복을 줄인다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0"))
 	float ImmediateBoneReturnPenalty = 1.5f;
 
 	/** 마지막 본 전환 이후 이 거리(cm) 이상 진행해야 다음 전환을 허용한다. 0이면 비활성. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap|MultiBone", meta = (ClampMin = "0.0", Units = "cm"))
 	float MinBoneTransitionPathDistance = 8.0f;
 
 	/** Upper bound for physics-based wrapping settle before committing the best accumulated anchors. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrappingMaxSettleTime = 0.90f;
 
 	/**
@@ -905,7 +888,7 @@ struct FRopeWrapConfig
 	 * 물리적으로 불가능해 큰 대상 wrap이 구조적으로 전멸했다. 감싼 각도는 대상 크기와 무관한
 	 * "걸림 품질" 척도다(120° = 1/3바퀴 훅).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
 	float FailedWrapMinAngleDeg = 120.0f;
 
 	/**
@@ -916,7 +899,7 @@ struct FRopeWrapConfig
 	 * 커밋이 나올 수 있고, settle 타임아웃 커밋은 앵커 1개로도 통과한다 — 그런 부실 랩을 게임
 	 * 규칙으로 거르고 싶을 때 opt-in으로 켠다(팁 살짝 걸침도 유효한 디자인이면 0 유지).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
 	float CommitMinWrapAngleDeg = 0.0f;
 
 	/**
@@ -929,14 +912,11 @@ struct FRopeWrapConfig
 	 * 의미가 정확하다(ShapeAxisFirst의 rolling axis에서는 마지막 축 기준 근사).
 	 * 양다리 잠금 용도면 300° 안팎, 느슨한 훅도 허용하려면 0 유지.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
 	float CommitMinWrapCoverageDeg = 0.0f;
 
-	/** [미배선] Wrapping 중 일시적 접촉 상실을 이만큼 유예한다는 의도였으나, 소비하는 코드가 아직 없다.
-	 *  현재 Wrapping 중단 판정은 IsStillValid(mesh 생존/bone 유효)와 경로 빌드 실패 경로뿐 — 값을 바꿔도
-	 *  아무 효과가 없다. grace 로직을 실제로 배선하기 전까지 튜닝 대상이 아니다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
-	float WrappingContactGraceTime = 0.20f;
+	// NOTE: 종전의 [미배선] WrappingContactGraceTime은 삭제됐다(2026-07-13 표면 감사 B-2 — 소비 코드가
+	// 없는 죽은 설정). grace 로직을 실제로 배선할 때 그 CL에서 설정도 함께 되살릴 것.
 
 	/** Extra Flight lookahead in frame-displacements for thin limb/SDF candidate detection. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "4.0"))
@@ -945,17 +925,30 @@ struct FRopeWrapConfig
 	/** Whip 종료 후 이 시간 동안 캡처하지 못하면 Free로 복귀한다. 0이면 기본 실패 복귀 쿨다운을 쓴다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float FlightNoContactReturnTime = 0.0f;
+};
+
+/**
+ * Wrapped *이후*(유지/당김/풀림)의 튜닝 — 설계 노트 01(Post-Wrap 모델)의 도메인이자, "성립 이후는
+ * 도달 모드·결착 모델 무관 공통"(02 문서 §3) 경계와 일치한다. 종전에는 FRopeWrapConfig(성립 판정)에
+ * 섞여 있던 것을 분리했다(2026-07-13 표면 감사 B-1 — 기존 BP 튜닝 미승계 클린 브레이크).
+ * 소비자: URopeComponent의 Wrapped 4단계(Hold→Pull 샘플→테더/Pull 인가→자동 release).
+ */
+USTRUCT(BlueprintType)
+struct FRopeHoldConfig
+{
+	GENERATED_BODY()
 
 	/**
 	 * Wrapped 중 로프 최대 장력(FRopeSimState::SegmentTension 단위 — 질량 1 노드 기준 상대 힘)이 이 값을
 	 * TensionReleaseTime 동안 지속해서 넘으면 자동 release한다(ERopeReleaseReason::Tension). 0 = 비활성.
 	 * 값 감: 매달린 노드 1개의 중력 하중이 약 980이므로, 로프 전체 무게의 몇 배를 버틸지로 잡는다.
+	 * (자동 release는 도달 모드 ①②에서만 유효 — ③ Guaranteed는 명시 해제만.)
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float TensionReleaseForce = 0.0f;
 
 	/** 장력 release 판정의 지속 시간(초). 순간 스파이크(충격 프레임)로 풀리는 것을 막는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
 	float TensionReleaseTime = 0.05f;
 
 	/**
@@ -965,11 +958,11 @@ struct FRopeWrapConfig
 	 * 프레임 이 비율만큼만 접근시킨다. 1 = 즉시(하드 — 진행 속도를 뚝 끊어 "턱턱"), 작을수록(예 0.1~0.3)
 	 * 몇 프레임에 걸쳐 부드럽게 감속. 크기는 TetherReelSpeed, 부드러움은 이 값으로 역할이 나뉜다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TetherResponse = 0.0f;
 
 	/** 테더 발동 전 허용 여유(cm). 경계 지터/미세 슬랙에서 발동하는 것을 막는다(가용 길이에 더해짐). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm"))
 	float TetherSlack = 5.0f;
 
 	/**
@@ -977,7 +970,7 @@ struct FRopeWrapConfig
 	 * 크면 항상 이 속도로 당기고(마스 분배로 양끝에 ShareT:ShareW 비율로 나뉨), 한계 근처에선 부드럽게 감속해
 	 * 안착한다. 속도 ∝ overshoot가 아니라 고정이라 견인이 일정하다. 0 = 견인 없음.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm/s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float TetherReelSpeed = 400.0f;
 
 	/**
@@ -985,14 +978,13 @@ struct FRopeWrapConfig
 	 * 부드럽게 안착한다(임계 감쇠). 작을수록 작은 overshoot에서도 곧바로 고정 ReelSpeed(빠른 견인)에 도달하고
 	 * 마지막 이 구간만 감속 — 너무 크면 평소 드래그(overshoot가 작음)가 내내 감속 구간에 들어가 견인이 느려진다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.01", Units = "cm"))
 	float TetherSettleDist = 1.5f;
 
 	/**
 	 * 테더 회수 최대 속도(cm/s) — 안전 상한. TetherReelSpeed가 이보다 크면 이 값으로 클램프해 초과분 스파이크에도
 	 * 대상이 튕겨나가지 않게 한다(수렴 보장). 0 = 클램프 없음(비권장).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm/s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float TetherMaxSpeed = 1500.0f;
 
 	/**
@@ -1002,7 +994,7 @@ struct FRopeWrapConfig
 	 * 앵커(무한질량). 물리 질량은 UE가 자동 유지하므로 별도 세팅이 필요 없다. 끄면 아래 TetherTargetShare
 	 * 고정 비율을 쓴다(오버라이드가 자동보다 항상 우선).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold")
 	bool bAutoTetherShare = true;
 
 	/**
@@ -1010,7 +1002,7 @@ struct FRopeWrapConfig
 	 * 버텨 무거운 대상도 잘 끌고, 작을수록 쉽게 끌려간다. "대상이 얼마나 무거워야 접지한 나를 끌기
 	 * 시작하는가"의 교차점을 정하는 유일한 튜닝 노브 — 기본값으로 대부분 무설정. bAutoTetherShare 전용.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "1.0", EditCondition = "bAutoTetherShare"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "1.0", EditCondition = "bAutoTetherShare"))
 	float GroundBraceFactor = 4.0f;
 
 	/**
@@ -1020,7 +1012,7 @@ struct FRopeWrapConfig
 	 * 2배 무거움 → 몫 1/5, 3배 → 1/10). 1보다 작으면 완만(질량차 영향 축소), 0이면 질량 무시 50:50.
 	 * 앵커(w=0)는 지수와 무관하게 항상 몫 0(안 움직임). bAutoTetherShare 전용.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", EditCondition = "bAutoTetherShare"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", EditCondition = "bAutoTetherShare"))
 	float TetherMassBias = 1.0f;
 
 	/**
@@ -1030,7 +1022,7 @@ struct FRopeWrapConfig
 	 * 끌려 올라감"), 중간 = 비율 분할(양끝이 서로에게 끌린다). 양끝 이동의 합이 초과분을 넘지 않아 과수렴이
 	 * 없다. 자기 자신에 감긴 로프(owner==대상)는 무시하고 전량 대상 경로.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "!bAutoTetherShare"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "!bAutoTetherShare"))
 	float TetherTargetShare = 1.0f;
 
 	/**
@@ -1039,7 +1031,7 @@ struct FRopeWrapConfig
 	 * "테더가 버티다가 이 한계를 넘으면 놓친다"가 된다 — 테더가 충분히 강하면 초과분이 안 쌓여
 	 * 발동하지 않고, 테더 없이 쓰면 순수 거리 제한으로 동작한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm"))
 	float DistanceReleaseSlack = 0.0f;
 
 	/**
@@ -1050,7 +1042,7 @@ struct FRopeWrapConfig
 	 * chord가 된다. 크게 잡으면(완만한 굴곡 무시) 더 chord에 가깝고, 작게 잡으면 미세한 꺾임에도 민감.
 	 * 팽팽할 때의 처짐/노드 지터는 이 임계 아래이고, 벽 모서리는 위라 구분된다(잔여 지터는 SmoothTime이 흡수).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "1.0", ClampMax = "179.0", Units = "deg"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "1.0", ClampMax = "179.0", Units = "deg"))
 	float PullBendThresholdDeg = 30.0f;
 
 	/**
@@ -1058,7 +1050,6 @@ struct FRopeWrapConfig
 	 * 노이즈를 지수이동평균으로 흡수한다(alpha = 1-exp(-dt/이 값), 프레임레이트 독립). 클수록 매끄럽지만
 	 * 반응이 느리고, 0이면 스무딩 없음(원 look-ahead). wrap 시작 시 측정값으로 초기화된다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float PullDirSmoothTime = 0.08f;
 
 	/**
@@ -1067,7 +1058,6 @@ struct FRopeWrapConfig
 	 * 못 잡는다. 조준 인덱스를 float로 EMA해 노드 사이를 보간하면 방향·tether가 연속이 된다(alpha=1-exp(-dt/이
 	 * 값), 프레임레이트 독립). 클수록 매끄럽지만 반응이 느리고, 0이면 스무딩 없음. wrap 시작 시 측정값으로 초기화.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float PullAimSmoothTime = 0.08f;
 
 	/**
@@ -1075,7 +1065,7 @@ struct FRopeWrapConfig
 	 * 여기 산다(2026-07-13 표면 감사 A-2 — Wielder|Input에서 이사; Wielder PullAction은 이 값을 쓴다).
 	 * Wrapped + 팽팽할 때만 실제 인가된다(URopeComponent::SetActivePull 계약).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float PullForce = 100000.0f;
 };
 
@@ -1274,7 +1264,7 @@ struct FRopeThrowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.1"))
 	float TipMass = 5.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
 	float OwnerVelocityScale = 5.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
@@ -1312,19 +1302,19 @@ struct FRopeWhipConfig
 	float SweepAngleDegrees = 180.0f;
 
 	/** Aim-hit Flight에서 손 쪽 guide를 solver에 넘기는 로프 길이 비율. 0이면 중앙 spline이 손 바로 옆까지 지배한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
 	float AimHitRootSolverFraction = 0.20f;
 
 	/** Hit direction 보간 편향. 1은 선형 강도, 클수록 같은 Flight 시점에서 spline이 더 빨리 hit 방향을 향한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "1.0", ClampMax = "4.0"))
 	float AimHitDirectionBias = 2.0f;
 
 	/** Aim-hit Flight에서 자유단 쪽 guide를 solver에 넘기는 로프 길이 비율. 클수록 끝이 더 관성적으로 움직인다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
 	float AimHitTipSolverFraction = 0.25f;
 
 	/** Aim-hit Flight에서 거리/굽힘/감쇠 solver는 유지하고 collider push-out만 끈다. 접촉 감지는 계속 동작한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Aim Hit")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Whip|Aim Hit")
 	bool bAimHitCollisionFreeSolve = true;
 
 	/** 현재 런타임 미사용 — 에디터 배치 가이드(FRopeComponentVisualizer)의 던지기 아크 표시 전용. */
