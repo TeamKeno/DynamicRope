@@ -659,6 +659,19 @@ struct FRopeWrapConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "cm"))
 	float WrappingMaxGapBridgeDistance = 0.0f;
 
+	/**
+	 * 감는 양 상한(도): SurfaceVectorField 경로 빌드의 누적 감싼 각도(rolling axis 적분 —
+	 * FRopeWrappingState::PathAccumulatedAngleRad)가 이 값에 닿으면 경로를 *성공*으로 조기 마감한다.
+	 * 0(기본) = 무제한 — 남은 로프 전량이 감길 때까지 진행(기존 동작).
+	 * 긴 로프가 대상을 여러 바퀴 나선으로 감아 들어가며(실측 3000~4400°) 본 전환 재시드가 목/머리
+	 * 등으로 번지는 "문어발 랩"의 방지책. 상한에서 마감된 경로 밖의 남는 로프는 Wrapping 동안
+	 * 동결됐다가 커밋 후 자유 구간으로 늘어진다(front 모션도 경로 밖 노드는 끌지 않는다).
+	 * 양다리 bola면 400~540°(한 바퀴 + 여유)가 자연스럽다.
+	 * AnalyticHelix 모드에는 적용되지 않는다(각도 적분이 SurfaceVectorField 전용).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "deg"))
+	float WrappingMaxWrapAngleDeg = 0.0f;
+
 	/** Wrapping phase must keep the same accumulated latch span stable this long before committing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))
 	float WrappingStableTime = 0.10f;

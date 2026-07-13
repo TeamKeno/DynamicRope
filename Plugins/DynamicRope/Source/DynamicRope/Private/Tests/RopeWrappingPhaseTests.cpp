@@ -471,6 +471,81 @@ bool FRopeWrappingClusterAxisOriginTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 감는 양 상한(WrappingMaxWrapAngleDeg): 긴 로프가 대상을 여러 바퀴 감아 들어가는 대신, 누적
+// 감싼 각도가 목표에 닿으면 경로가 *성공*으로 조기 마감되고(NumTailNodes = 빌드된 경로 길이),
+// 경로 밖 남는 로프는 front 모션이 끌지 않는다(동결 유지 → 커밋 후 자유). PIE 실측의
+// 3000~4400° 문어발 나선 방지책.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingWrapAngleCapTest,
+	"DynamicRope.Wrapping.WrapAngleCapStopsSpiral",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingWrapAngleCapTest::RunTest(const FString& Parameters)
+{
+	// 캡슐 r=25 + 로프 320cm(17노드): 상한이 없으면 두 바퀴 이상 나선을 만들 길이다.
+	USceneComponent* Mesh = MakeMockTarget();
+	FCapsuleCollider Capsule(FVector(0, 0, -50), FVector(0, 0, 50), 25.0f, FName("arm"), Mesh);
+	TArray<IRopeCollider*> Colliders = { &Capsule };
+
+	FRopeSimState Sim = RopeTest::MakeStraightRope(17, 320.0f, FVector(25, 0, 0), FVector(0, 1, 0));
+
+	FRopeSurfaceAnchor Latch;
+	Latch.NodeIndex = 0;
+	Latch.Bone = FName("arm");
+	Latch.Mesh = Mesh;
+	Latch.LocalSurfacePosition = FVector(25, 0, 0);
+	Latch.LocalNormal = FVector(1, 0, 0);
+	Latch.LocalTangent = FVector(0, 1, 0);
+	Latch.StartWorldPosition = FVector(25, 0, 0);
+	Latch.SurfaceOffset = 1.0f;
+
+	FRopeWrapConfig Config;
+	Config.WrappingMaxWrapAngleDeg = 360.0f;
+	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
+		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
+
+	FRopeWrappingPhase Wrapping;
+	TestTrue(TEXT("wrapping begins"), Wrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, Ctx));
+
+	for (int32 Iteration = 0; Iteration < 512 && Wrapping.State.bPathBuildActive; ++Iteration)
+	{
+		Wrapping.AdvancePathBuild(Sim, Ctx);
+	}
+
+	// 상한 도달 = 실패가 아니라 성공 마감. 경로는 로프보다 짧고, front/커밋 목표 거리의 기준인
+	// NumTailNodes가 경로 길이로 줄어 있어야 한다.
+	TestTrue(TEXT("capped path finishes as success"), Wrapping.State.bPathBuildComplete);
+	TestTrue(TEXT("capped path did not fail"), !Wrapping.State.bPathBuildFailed);
+	TestTrue(FString::Printf(TEXT("path stops short of the rope (%d/17 points)"), Wrapping.State.Path.Num()),
+		Wrapping.State.Path.Num() < 17);
+	TestEqual(TEXT("NumTailNodes shrinks to the built path"),
+		Wrapping.State.NumTailNodes, Wrapping.State.Path.Num());
+	TestEqual(TEXT("every capped path point is anchored"),
+		Wrapping.State.Anchors.Num(), Wrapping.State.Path.Num());
+
+	// 마감 시점 각도는 목표를 갓 넘긴 값(목표 ~ 목표+스텝각)이어야 한다 — 여러 바퀴 나선 금지.
+	float AngleDeg = 0.0f;
+	TestTrue(TEXT("wrapped angle computable"), Wrapping.ComputeWrappedAngleAtLastBuiltPoint(Sim, Ctx, AngleDeg));
+	TestTrue(FString::Printf(TEXT("angle stops just past the cap (%.0f deg)"), AngleDeg),
+		AngleDeg >= 360.0f && AngleDeg < 460.0f);
+
+	// 경로 밖 남는 로프는 front 모션이 끌지 않는다(동결 유지 — 커밋 후 자유 구간).
+	FRopeNodeOverrideFrame Frame;
+	for (int32 Step = 0; Step < 64; ++Step)
+	{
+		Frame.Reset();
+		Wrapping.ApplyFrontMotion(Sim, 0.05f, Ctx, Frame);
+	}
+	const int32 LastDrivenNode = Latch.NodeIndex + Wrapping.State.NumTailNodes - 1;
+	TestTrue(TEXT("last path node is front-driven"),
+		Frame.Flags.IsValidIndex(LastDrivenNode) &&
+		(Frame.Flags[LastDrivenNode] & RopeNodeOverride::Position) != 0);
+	TestTrue(TEXT("leftover rope beyond the cap stays untouched"),
+		Frame.Flags.IsValidIndex(16) &&
+		(Frame.Flags[LastDrivenNode + 1] & RopeNodeOverride::Position) == 0 &&
+		(Frame.Flags[16] & RopeNodeOverride::Position) == 0);
+	return true;
+}
+
 // 형상 기준 묶임 척도(진행 방향 기반 wrap 5단계, ComputeWrapEnclosureCoverage):
 // 같은 캡슐에서 로프 길이만 달리해 — 만감김(~356°)은 커버리지가 360°에 수렴하고,
 // 반쪽 훅(경로 ~132°)은 축 둘레 반대편이 통째로 비어 커버리지가 그만큼 낮게 나온다.

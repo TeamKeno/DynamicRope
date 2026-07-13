@@ -100,10 +100,18 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 	const float SurfaceOffset = FMath::Max(0.0f, Ctx.SurfaceOffset);
 	const FVector FrontWorld = FrontPoint.SurfaceWorld + FrontPoint.NormalWorld * SurfaceOffset;
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
-	// 시드 다중화: 경로 구동은 첫 보조 시드 노드 *앞*에서 끝난다(NumTailNodes 클램프와 같은 경계).
-	// 보조 노드는 아래에서 자기 본에 hold하고, 그 너머 남는 로프는 마스크 동결로 제자리에 둔다 —
-	// front 직선 연장이 보조 대상 반대편으로 로프를 끌어가는 것을 막는다.
+	// front 구동 범위는 경로가 소유한 노드까지다. 상한 없는 기본 상태에서는 NumTailNodes가 로프
+	// 끝까지라 종전과 동일하고, 감는 양 상한(WrappingMaxWrapAngleDeg)으로 경로가 로프보다 짧게
+	// 마감되면 경로 밖 노드는 front 직선 연장으로 끌지 않는다 — 남는 로프는 마스크 동결로 제자리에
+	// 있다가 커밋 후 자유 구간이 된다.
 	int32 TailEndNode = Sim.Num() - 1;
+	if (State.NumTailNodes > 0)
+	{
+		TailEndNode = FMath::Min(TailEndNode, LatchNode + State.NumTailNodes - 1);
+	}
+	// 시드 다중화: 경로 구동은 첫 보조 시드 노드 *앞*에서도 끝난다(NumTailNodes 클램프와 같은 경계).
+	// 보조 노드는 아래에서 자기 본에 hold하고, 그 너머 남는 로프도 마찬가지로 동결 유지된다 —
+	// front 직선 연장이 보조 대상 반대편으로 로프를 끌어가는 것을 막는다.
 	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
 	{
 		if (Secondary.NodeIndex > LatchNode)
@@ -806,6 +814,19 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 		Point.bBridge = State.PathBridgeDistance > 0.0f;
 		State.Path.Add(Point);
 		AppendWrappingAnchorFromPathPoint(PathIndex, Sim, Ctx);
+
+		// 감는 양 상한(WrappingMaxWrapAngleDeg > 0): 누적 감싼 각도가 목표에 닿으면 경로를 여기서
+		// *성공*으로 마감한다 — 나선이 목표 바퀴수를 넘어 남은 로프 전량을 감아 들어가는 것을 막고,
+		// 경로 밖 로프는 커밋 후 자유 구간으로 늘어뜨린다. NumTailNodes를 빌드된 경로 길이로 줄여
+		// front/커밋 목표 거리(RequestedFrontDistance = (NumTailNodes-1)·세그먼트)가 실제 경로와
+		// 일치하게 한다 — 전체 로프 기준 그대로면 front가 경로 밖 거리를 겨냥해 도달 판정이 영원히
+		// 안 되고 settle 타임아웃 커밋으로만 떨어진다.
+		if (Ctx.Config.WrappingMaxWrapAngleDeg > 0.0f &&
+			FMath::RadiansToDegrees(State.PathAccumulatedAngleRad) >= Ctx.Config.WrappingMaxWrapAngleDeg)
+		{
+			State.NumTailNodes = State.Path.Num();
+			FinishPathBuild(/*bFailed=*/false);
+		}
 
 		if (!bConsumedStep)
 		{
