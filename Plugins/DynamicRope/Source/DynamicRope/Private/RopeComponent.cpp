@@ -2299,7 +2299,8 @@ FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 		GetName(),
 		false,
 		bGuidePlane,
-		GuidePlane
+		GuidePlane,
+		CaptureTravelFrame.bValid ? &CaptureTravelFrame : nullptr
 	};
 }
 

@@ -232,4 +232,69 @@ bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 캡처 스냅샷 소비(진행 방향 기반 wrap 3단계, TravelPlaneFirst 한정):
+// - 축 origin = latch 본 위치가 아니라 접촉 영역 중심(RegionCenter) — 양다리에서 쌍의 중심 기준 반경.
+// - winding 기준 = latch tangent가 아니라 캡처 속도 — 감기 시작 방향이 실제 운동 방향과 일치.
+// - 스냅샷이 없으면 종전(본 위치 origin, tangent winding)으로 폴백.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingTravelFrameAxisTest,
+	"DynamicRope.Wrapping.TravelPlaneAxisUsesCaptureFrame",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingTravelFrameAxisTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* Mesh = MakeMockTarget();
+	FCapsuleCollider Capsule(FVector(0, 0, -50), FVector(0, 0, 50), 25.0f, FName("arm"), Mesh);
+	TArray<IRopeCollider*> Colliders = { &Capsule };
+
+	FRopeSimState Sim = RopeTest::MakeStraightRope(9, 160.0f, FVector(25, 0, 0), FVector(0, 1, 0));
+
+	FRopeSurfaceAnchor Latch;
+	Latch.NodeIndex = 0;
+	Latch.Bone = FName("arm");
+	Latch.Mesh = Mesh;
+	Latch.LocalSurfacePosition = FVector(25, 0, 0);
+	Latch.LocalNormal = FVector(1, 0, 0);
+	Latch.LocalTangent = FVector(0, 1, 0);
+	Latch.StartWorldPosition = FVector(25, 0, 0);
+	Latch.SurfaceOffset = 1.0f;
+
+	// 캡처 스냅샷: 접촉 중심은 본 위치(원점)와 다른 (0,0,30), 캡처 속도는 +X.
+	FRopeCaptureTravelFrame Frame;
+	Frame.bValid = true;
+	Frame.RegionCenter = FVector(0, 0, 30);
+	Frame.AverageVelocity = FVector(100, 0, 0);
+
+	FRopeWrapConfig TravelConfig;
+	TravelConfig.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
+	const FVector GuidePlaneNormal(0, 1, 0);
+	const FRopeWrappingPhase::FContext FrameCtx{ TravelConfig, Colliders,
+		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal, &Frame };
+
+	FRopeWrappingPhase FrameWrapping;
+	TestTrue(TEXT("wrapping begins with a capture frame"),
+		FrameWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, FrameCtx));
+	TestTrue(FString::Printf(TEXT("axis origin sits at the contact region center (origin=%s)"),
+			*FrameWrapping.State.PathAxisOrigin.ToString()),
+		FrameWrapping.State.PathAxisOrigin.Equals(FVector(0, 0, 30), 0.1f));
+	// latch tangent(+Y)는 원주와 수직이라 종전 규칙으로는 부호가 못 정해지는 배치 — 속도(+X)가
+	// 기준이 됐을 때만 감기 시작 방향이 +X 쪽을 향한다.
+	TestTrue(FString::Printf(TEXT("winding starts along the capture velocity (circ=%s)"),
+			*FrameWrapping.State.PathCircumferenceDir.ToString()),
+		FVector::DotProduct(FrameWrapping.State.PathCircumferenceDir, FVector(1, 0, 0)) > 0.1f);
+
+	// 스냅샷이 없으면 origin은 종전대로 latch 본 위치(mock identity = 원점).
+	const FRopeWrappingPhase::FContext NoFrameCtx{ TravelConfig, Colliders,
+		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal };
+
+	FRopeWrappingPhase NoFrameWrapping;
+	TestTrue(TEXT("wrapping begins without a capture frame"),
+		NoFrameWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, NoFrameCtx));
+	TestTrue(FString::Printf(TEXT("axis origin falls back to the bone location (origin=%s)"),
+			*NoFrameWrapping.State.PathAxisOrigin.ToString()),
+		NoFrameWrapping.State.PathAxisOrigin.Equals(FVector::ZeroVector, 0.1f));
+	return true;
+}
+
 #endif

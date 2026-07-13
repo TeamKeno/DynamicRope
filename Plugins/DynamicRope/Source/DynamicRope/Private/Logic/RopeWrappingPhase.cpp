@@ -534,8 +534,18 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 		State.PathAxisDirection,
 		State.PathLatchRadial)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(State.PathNormalWorld));
+	// winding 기준 방향: 기본은 latch tangent(로프가 누운 방향). TravelPlaneFirst에서 캡처 속도가
+	// 있으면 속도를 쓴다 — 감기 시작 방향이 "로프가 실제로 움직이던 쪽"과 일치해, 충돌 프레임의
+	// tangent 노이즈에 흔들리지 않는다(진행 방향 기반 wrap 3단계).
+	FVector WindingReference = LatchTangentWorld;
+	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::TravelPlaneFirst &&
+		Ctx.TravelFrame && Ctx.TravelFrame->bValid &&
+		!Ctx.TravelFrame->AverageVelocity.IsNearlyZero())
+	{
+		WindingReference = Ctx.TravelFrame->AverageVelocity.GetSafeNormal();
+	}
 	State.PathWindingSign =
-		FVector::DotProduct(State.PathCircumferenceDir, LatchTangentWorld) < 0.0f ? -1.0f : 1.0f;
+		FVector::DotProduct(State.PathCircumferenceDir, WindingReference) < 0.0f ? -1.0f : 1.0f;
 	State.PathCircumferenceDir *= State.PathWindingSign;
 
 	State.PathTangentWorld = ComputeSurfaceVectorFieldTangent(
@@ -1200,7 +1210,19 @@ bool FRopeWrappingPhase::FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAncho
 		return false;
 	}
 
-	OutAxisOrigin = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
+	// TravelPlaneFirst: 축 origin을 latch 본 위치가 아니라 캡처 순간의 접촉 영역 중심에 둔다 —
+	// 여러 본/대상에 걸친 접촉(양다리)에서 감김 반경이 한쪽 대상이 아닌 쌍의 중심을 기준으로 잡힌다.
+	// origin은 캡처 시점 고정값이라 본 전환 재시드(rolling axis)에서도 움직이지 않는다.
+	// ShapeAxisFirst의 폴백 경로(RopePlaneNormal)는 종전대로 본 위치를 쓴다 — 기본 동작 불변.
+	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::TravelPlaneFirst &&
+		Ctx.TravelFrame && Ctx.TravelFrame->bValid)
+	{
+		OutAxisOrigin = Ctx.TravelFrame->RegionCenter;
+	}
+	else
+	{
+		OutAxisOrigin = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
+	}
 	OutAxisDirection = GuidePlaneNormal;
 	return true;
 }

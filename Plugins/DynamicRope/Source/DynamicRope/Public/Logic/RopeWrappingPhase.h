@@ -54,6 +54,14 @@ public:
 		/** Flight whip guide spline 평면 normal을 runtime wrapping에 전달한다. */
 		bool bHasGuidePlaneNormal = false;
 		FVector GuidePlaneNormal = FVector::RightVector;
+
+		/**
+		 * 캡처 순간의 진행 좌표계 스냅샷(비소유 — 컴포넌트의 CaptureTravelFrame, 유효할 때만 non-null).
+		 * TravelPlaneFirst에서만 소비된다: 축 origin을 latch 본 위치 대신 접촉 영역 중심(RegionCenter)에
+		 * 두고(양다리에서 축이 쌍의 중심을 지나게), winding 부호를 latch tangent 대신 캡처 속도로 정한다.
+		 * ShapeAxisFirst(기본)에서는 읽지 않는다 — 기존 동작 불변.
+		 */
+		const FRopeCaptureTravelFrame* TravelFrame = nullptr;
 	};
 
 	/**
