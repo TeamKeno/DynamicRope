@@ -402,9 +402,6 @@ void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfi
 		// 캐시된 collider 하나만 보던 버그(다른 뼈 관통을 못 막음, colIdx≠cached로 확인됨) 수정 —
 		// 캐시 평면이 아니라 매번 실제 표면을 보므로 곡면/오목에서도 정확. GPU .usf의 노드당 전 collider 루프와 일치.
 		const FVector& P = State.Positions[i];
-		// pinch 감지: 이 노드가 닿은 collider들의 단위 법선 합·개수(GPU RopeXPBD.usf NodeContact 미러).
-		FVector ContactNormalSum = FVector::ZeroVector;
-		int32 ContactCount = 0;
 		for (int32 c = 0; c < Colliders.Num(); ++c)
 		{
 			const IRopeCollider* Collider = Colliders[c];
@@ -435,17 +432,6 @@ void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfi
 			CC.SurfaceVel = Contact.SurfaceVelocity;
 			CC.ColliderIndex = c;
 			State.Positions[i] += Contact.Normal * (W * Applied);
-			ContactNormalSum += Contact.Normal;
-			++ContactCount;
-		}
-
-		// Pinch 감쇠(GPU RopeXPBD.usf 미러): 서로 마주 보는 collider에 동시에 눌린 노드(단위 법선 합이
-		// 상쇄 = |sum| << 개수)는 빠져나갈 위치가 없어 접선축으로 튕겨나가거나 프레임 간 진동한다(대상과
-		// 바닥 사이 끼임 등). 속도를 죽여(끼임=정지) 튕김/지터를 없앤다. 임계 0.5*개수 = 두 법선이 120°
-		// 초과로 벌어진 경우만(진짜 마주 봄) — 단일면·완만한 코너(≤120°)엔 무영향.
-		if (ContactCount > 1 && ContactNormalSum.Size() < 0.5f * static_cast<float>(ContactCount))
-		{
-			State.PrevPositions[i] = State.Positions[i];
 		}
 	}
 }

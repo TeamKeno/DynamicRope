@@ -158,7 +158,7 @@ void RopeApplyContactFriction(FRopeGPUParams P, uint i, int N, float3 Normal, fl
 // 캡슐 노드 충돌(M2): substep 시작(gPrev)→현재(gPos) 경로를 캡슐 sub-포즈 끝점과 함께 상대 스윕,
 // 첫 접촉에서 push-out + *상대* 법선 속도 제거 + *상대* 접선 마찰. CPU SolveCollisions 미러.
 // s = substep 인덱스(콜라이더 프레임 모션을 substep 구간으로 나누는 비율 계산용).
-void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
+void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
@@ -211,8 +211,6 @@ void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 
 					gPrev[i] += Normal * VnOut;
 				}
 				RopeApplyContactFriction(P, i, N, Normal, Pen, SurfDisp);
-				// pinch 감지용 접촉 법선 누적(단위 법선 합·개수 → 커널이 반대 방향 동시 접촉을 판별).
-				Contact.xyz += Normal; Contact.w += 1.0f;
 				// 이 capsule의 첫 접촉에서 종료
 				break;
 			}
@@ -223,7 +221,7 @@ void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 
 // SDF 노드 충돌(M3): 캡슐과 동일한 swept 구조 — 노드 경로를 collider 로컬 상대 프레임으로 옮겨
 // sub-포즈까지 한 세그먼트에 담고, 분리 휴리스틱 후 첫 접촉에서 push-out + 상대 응답 + 장력 그립
 // 마찰(Coulomb, gLambdaDist 소비). CPU FRopeSDFCollider::QuerySwept/SolveCollisions 미러.
-void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
+void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
@@ -307,8 +305,6 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 				}
 
 				RopeApplyContactFriction(P, i, N, NWorld, Pen, SurfDisp);
-				// pinch 감지용 접촉 법선 누적.
-				Contact.xyz += NWorld; Contact.w += 1.0f;
 				// 이 SDF collider의 첫 접촉에서 종료
 				break;
 			}
@@ -320,7 +316,7 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 // 첫 접촉에서 재질점을 끝 포즈로 이월 + push-out + *상대* 법선 속도 제거 + *상대* 접선 마찰. 정적 박스는
 // prev=curr(패킹 보장)라 보간이 현재 포즈로 축약되고 SurfDisp=0 → 기존 정적 동작과 동일(상위집합).
 // 모서리/엣지 정확 normal(RopeQueryBoxPoint)이 핵심. CPU FRopeBoxCollider::Query/QuerySwept 미러.
-void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
+void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
@@ -373,8 +369,6 @@ void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N, inout float4 Con
 					gPrev[i] += Normal * VnOut;
 				}
 				RopeApplyContactFriction(P, i, N, Normal, Pen, SurfDisp);
-				// pinch 감지용 접촉 법선 누적.
-				Contact.xyz += Normal; Contact.w += 1.0f;
 				// 이 박스의 첫 접촉에서 종료
 				break;
 			}
@@ -386,7 +380,7 @@ void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N, inout float4 Con
 // 첫 접촉에서 재질점을 끝 포즈로 이월 + push-out + *상대* 법선 속도 제거 + *상대* 접선 마찰). 정적 컨벡스는
 // prev=curr(패킹 보장)라 현재 포즈로 축약되고 SurfDisp=0 → 기존 정적 동작과 동일(상위집합).
 // CPU FRopeConvexCollider::Query/QuerySwept 미러.
-void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
+void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
@@ -435,8 +429,6 @@ void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N, inout float4 
 					gPrev[i] += Normal * VnOut;
 				}
 				RopeApplyContactFriction(P, i, N, Normal, Pen, SurfDisp);
-				// pinch 감지용 접촉 법선 누적.
-				Contact.xyz += Normal; Contact.w += 1.0f;
 				// 이 컨벡스의 첫 접촉에서 종료
 				break;
 			}
@@ -728,27 +720,24 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 
 		// --- Collision(M2/M3): 노드 충돌 스테이지(본체는 파일 상단 RopeSolveNode* 함수).
 		// 노드별 독립(자기 슬롯 i만 쓰기)이라 그룹 동기 불필요 — 게이트만 여기서 건다.
-			// NodeContact: 이 pass에서 노드가 닿은 콜라이더들의 단위 법선 합(.xyz)+개수(.w) — 아래 pinch
-			// 판정에 쓴다(groupshared 없이 스레드 로컬 레지스터, 각 스테이지에 inout 전달).
-			float4 NodeContact = float4(0.0f, 0.0f, 0.0f, 0.0f);
 		if (bActiveNode && gInvMass[i] > 0.0f && P.NumCapsules > 0)
 		{
-			RopeSolveNodeCapsules(P, i, s, N, NodeContact);
+			RopeSolveNodeCapsules(P, i, s, N);
 		}
 
 		if (bActiveNode && gInvMass[i] > 0.0f && P.NumSDFColliders > 0)
 		{
-			RopeSolveNodeSDFs(P, i, s, N, NodeContact);
+			RopeSolveNodeSDFs(P, i, s, N);
 		}
 
 		if (bActiveNode && gInvMass[i] > 0.0f && P.NumBoxes > 0)
 		{
-			RopeSolveNodeBoxes(P, i, s, N, NodeContact);
+			RopeSolveNodeBoxes(P, i, s, N);
 		}
 
 		if (bActiveNode && gInvMass[i] > 0.0f && P.NumConvexes > 0)
 		{
-			RopeSolveNodeConvexes(P, i, s, N, NodeContact);
+			RopeSolveNodeConvexes(P, i, s, N);
 		}
 #if ROPE_USE_GDF && PLATFORM_SUPPORTS_DISTANCE_FIELDS
 		// GDF 월드 충돌(정적 벽/바닥) — per-substep 제약. 캡슐/SDF와 같은 충돌 pass 위치·같은 응답 패턴, query만 GDF로
@@ -774,21 +763,10 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 					if (GdfVnOut > 0.0f) { gPrev[i] += GdfN * GdfVnOut; }
 					// 마찰: 장력-한계 Coulomb(정적 월드라 SurfDisp=0). 다른 콜라이더와 동일 헬퍼 → 벽에 눌어붙지 않음.
 					RopeApplyContactFriction(P, i, N, GdfN, GdfNodeR - GdfDist, float3(0.0f, 0.0f, 0.0f));
-					// pinch 감지용 접촉 법선 누적(정적 월드도 하나의 접촉으로 계수).
-					NodeContact.xyz += GdfN; NodeContact.w += 1.0f;
 				}
 			}
 		}
 #endif
-			// Pinch 감쇠: 이번 pass에 노드가 서로 마주 보는 콜라이더에 동시에 눌렸으면(단위 법선 합이
-			// 상쇄 = |sum| << 개수) 빠져나갈 위치가 없어 접선축으로 튕겨나가거나 프레임 간 진동한다(대상과
-			// 바닥 사이 끼임 등). 이 경우 속도를 죽여(끼임=정지) 튕김/지터를 없앤다. 임계 0.5*개수는 두
-			// 법선이 120°보다 더 벌어졌을 때만(진짜 마주 봄) 발화 — 단일면·완만한 코너(≤120°)엔 무영향.
-			if (bActiveNode && gInvMass[i] > 0.0f && NodeContact.w > 1.5f
-				&& length(NodeContact.xyz) < 0.5f * NodeContact.w)
-			{
-				gPrev[i] = gPos[i];
-			}
 			// 충돌 결과 가시화 → 다음 collision pass / 다음 substep
 			GroupMemoryBarrierWithGroupSync();
 
