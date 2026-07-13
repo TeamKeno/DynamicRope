@@ -13,13 +13,26 @@
 #include "Engine/EngineBaseTypes.h"
 // FRopeGPUSolver (DynamicRopeShaders): 비동기 GPU 솔브 인스턴스.
 #include "RopeGPUSolver.h"
+// FRopeWrappedEventInfo / ERopeReleaseReason — 아래 wrap/release 중앙 신호의 페이로드.
+#include "Core/RopeTypes.h"
 #include "RopeSimSubsystem.generated.h"
 
 class URopeComponent;
 class UActorComponent;
 class USkeletalMeshComponent;
+class USceneComponent;
 class IRopeCollider;
 class AActor;
+
+/**
+ * 월드 내 *어느* 로프든 wrap이 성립/해제되면 쏘는 중앙 native 신호(비-BP). 로프의 per-instance
+ * BP 델리게이트(URopeComponent::OnRopeWrapped/OnRopeReleased)와 달리, 대상 측(감기는 쪽)이 자기를
+ * 감을 로프를 미리 알 수 없어도 구독만 해두면 반응할 수 있게 하는 용도다 — 대상이 매 프레임 로프를
+ * 전수 순회(구 데모 폴링)하던 것을 대체한다. wrap은 페이로드에 Mesh(weak)를 이미 실어오고, release는
+ * 해제 순간의 감겼던 mesh를 함께 싣는다(release 델리게이트 자체는 mesh를 안 실어서). 리스너가
+ * Mesh로 "이게 내 메시인가"를 판별한다. 서브시스템 수명 동안 유효, 등록은 리스너의 BeginPlay/EndPlay. */
+DECLARE_MULTICAST_DELEGATE_OneParam(FRopeWrappedNotify, const FRopeWrappedEventInfo& /*Info*/);
+DECLARE_MULTICAST_DELEGATE_ThreeParams(FRopeReleasedNotify, const USceneComponent* /*WrappedMesh*/, FName /*Bone*/, ERopeReleaseReason /*Reason*/);
 
 /**
  * 서브시스템 Tick을 TG_PostPhysics에서 구동하는 틱 함수(기존 tickable 대체).
@@ -57,6 +70,13 @@ public:
 	/** 활성 로프를 시뮬레이션 목록에 등록/해제한다(컴포넌트 BeginPlay/EndPlay에서 호출). */
 	void RegisterRope(URopeComponent* Rope);
 	void UnregisterRope(URopeComponent* Rope);
+
+	/**
+	 * wrap 성립/해제 중앙 신호(위 델리게이트 주석 참고). 로프가 자기 이벤트를 broadcast할 때 함께 쏜다.
+	 * 대상 반응 컴포넌트(URopeRagdollResponseComponent 등)가 구독한다 — 구독자가 없으면 사실상 무비용.
+	 */
+	FRopeWrappedNotify OnAnyRopeWrapped;
+	FRopeReleasedNotify OnAnyRopeReleased;
 
 	/**
 	 * collider provider(IRopeColliderProvider를 구현한 UActorComponent)를 중앙 레지스트리에 등록/해제한다

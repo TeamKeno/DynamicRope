@@ -771,6 +771,9 @@ private:
 	/** Wrapped 성립 이벤트 페이로드 조립(커밋 시드 + 판정값 → NotifyWrapped/OnRopeWrapped 공용). */
 	FRopeWrappedEventInfo MakeWrappedEventInfo(const FRopeWrapState& Seed, float AngleDeg, float CoverageDeg) const;
 
+	/** wrap 성립 단일 브로드캐스트: 네이티브 훅 + per-instance BP 델리게이트 + 서브시스템 중앙 신호(③/판정 공용). */
+	void DispatchWrapped(const FRopeWrappedEventInfo& Info);
+
 	void AbortWrapping(ERopeReleaseReason Reason);
 
 	//~ Wrapped --------------------------------------------------------------

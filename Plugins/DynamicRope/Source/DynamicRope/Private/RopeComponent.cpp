@@ -653,12 +653,19 @@ void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, co
 {
 	// 모든 release 트리거(수동/절단/장력/거리/대상 소실)의 공용 마무리: 페이즈 전환 + 노드 반환 +
 	// 일시 상태 폐기 + 쿨다운 + 이벤트. 사유별 차이는 호출자에서 끝난 상태로 들어온다.
+	// 감겼던 mesh는 Release/Reset이 wrap 상태를 비우기 전에 캡처한다 — 중앙 release 신호가 실어 보내
+	// 대상 반응 컴포넌트가 "내 메시가 풀렸나"를 판별하게 한다(release BP 델리게이트는 mesh 미포함).
+	const USceneComponent* WrappedMesh = WrapController.State.Mesh.Get();
 	SetPhase(ERopePhase::Releasing, *ReasonLog);
 	WrapController.Release(Reason);
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
 	NotifyReleased(Bone, Reason);
 	OnRopeReleased.Broadcast(Bone, Reason);
+	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+	{
+		SimSubsystem->OnAnyRopeReleased.Broadcast(WrappedMesh, Bone, Reason);
+	}
 }
 
 void URopeComponent::ReleaseWrap()
@@ -1723,8 +1730,7 @@ void URopeComponent::FinishGuidedThrow()
 	ResetTransientPhaseState();
 	// ③ preview 기반 성립은 판정을 거치지 않으므로 판정값은 -1(미측정) 계약이다.
 	const FRopeWrappedEventInfo WrappedInfo = MakeWrappedEventInfo(Seed, /*AngleDeg*/ -1.0f, /*CoverageDeg*/ -1.0f);
-	NotifyWrapped(WrappedInfo);
-	OnRopeWrapped.Broadcast(WrappedInfo);
+	DispatchWrapped(WrappedInfo);
 }
 
 FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
@@ -2435,8 +2441,20 @@ void URopeComponent::CommitWrapping()
 		*Seed.BoneName.ToString(), Seed.Latched.Num(), CommitAngleDeg, CommitCoverageDeg));
 	ResetTransientPhaseState();
 	const FRopeWrappedEventInfo WrappedInfo = MakeWrappedEventInfo(Seed, CommitAngleDeg, CommitCoverageDeg);
-	NotifyWrapped(WrappedInfo);
-	OnRopeWrapped.Broadcast(WrappedInfo);
+	DispatchWrapped(WrappedInfo);
+}
+
+void URopeComponent::DispatchWrapped(const FRopeWrappedEventInfo& Info)
+{
+	// wrap 성립의 단일 브로드캐스트 지점: 네이티브 훅(서브클래스) → per-instance BP 델리게이트 →
+	// 월드 중앙 신호(대상 반응 컴포넌트가 자기 로프를 몰라도 구독으로 반응). 두 성립 경로(③ preview /
+	// 판정) 공용.
+	NotifyWrapped(Info);
+	OnRopeWrapped.Broadcast(Info);
+	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+	{
+		SimSubsystem->OnAnyRopeWrapped.Broadcast(Info);
+	}
 }
 
 FRopeWrappedEventInfo URopeComponent::MakeWrappedEventInfo(const FRopeWrapState& Seed,
