@@ -1,35 +1,26 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 최소 구현 IRopeColliderProvider: 매 프레임 skeletal mesh로부터 본별 capsule(bone -> parent 세그먼트
+// 최소 구현 skeletal collider provider: 매 프레임 skeletal mesh로부터 본별 capsule(bone -> parent 세그먼트
 // 또는 Physics Asset 셰이프)을 생성하는 v1 collider 소스. per-bone SDF provider(URopeSDFProvider)와
-// 같은 인터페이스 뒤에 있어 대상별로 선택해 쓴다 — 해석적 캡슐이라 베이크가 필요 없어 가볍다.
+// 같은 베이스(URopeSkeletalColliderProvider) 뒤에 있어 대상별로 선택해 쓴다 — 해석적 캡슐이라 베이크가
+// 필요 없어 가볍다. 등록/메시 해석/프레임 디둡/gather 파이프라인은 베이스가 소유하고, 여기서는 캡슐
+// 빌드(RebuildColliders)와 포인터 append(AppendColliderPointers)만 채운다.
 
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
-#include "Collision/RopeColliderProvider.h"
+#include "Collision/RopeSkeletalColliderProvider.h"
 #include "Collision/RopeCollider.h"
 #include "RopeBoneCapsuleProvider.generated.h"
 
 class USkeletalMeshComponent;
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
-class DYNAMICROPE_API URopeBoneCapsuleProvider : public UActorComponent, public IRopeColliderProvider
+class DYNAMICROPE_API URopeBoneCapsuleProvider : public URopeSkeletalColliderProvider
 {
 	GENERATED_BODY()
 
 public:
-	URopeBoneCapsuleProvider();
-
-	//~ UActorComponent — RopeSimSubsystem 중앙 레지스트리에 등록/해제(프레임당 1회 중앙 gather).
-	virtual void BeginPlay() override;
-	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-
-	/** 본들이 collider가 되는 mesh. null로 두면 owner로부터 자동으로 해석된다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
-	TObjectPtr<USkeletalMeshComponent> SkeletalMesh = nullptr;
-
 	/**
 	 * capsule로 노출할 본들. 각 capsule은 해당 본에서 그 parent까지를 잇는다(반지름 = CapsuleRadius).
 	 * 비워두면 자동 모드: 메시의 Physics Asset 바디(capsule/sphere/box 셰이프, 본별 실제 치수 —
@@ -48,8 +39,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (ClampMin = "0.0", Units = "cm"))
 	float AutoMinBoneLength = 5.0f;
 
-	//~ IRopeColliderProvider
-	virtual void GatherColliders(FRopeColliderGatherContext& Gather) override;
+protected:
+	//~ URopeSkeletalColliderProvider
+	virtual void RebuildColliders(USkeletalMeshComponent* Mesh, float InvDt) override;
+	virtual void AppendColliderPointers(FRopeColliderGatherContext& Gather) override;
 
 private:
 	/** 프레임당 1회 재구성되는 백킹 스토리지. 넘겨준 포인터들은 해당 프레임 동안 유효하다. */
@@ -64,12 +57,7 @@ private:
 
 	/**
 	 * 이번 프레임 캡슐 목록(A/B/반지름/본)을 Capsules에 빌드한다. Bones 명시 목록 → Physics Asset 자동 →
-	 * 스켈레톤 폴백 순. prev 끝점/InvDt는 호출자(GatherColliders)가 인덱스 정렬로 이어 붙인다.
+	 * 스켈레톤 폴백 순. prev 끝점/InvDt는 RebuildColliders가 인덱스 정렬로 이어 붙인다.
 	 */
 	void BuildCapsules(USkeletalMeshComponent* Mesh);
-
-	/** 마지막으로 capsule을 빌드한 GFrameCounter. 같은 프레임에 여러 로프가 호출해도 재빌드 안 함(디둡). */
-	uint64 BuiltFrame = static_cast<uint64>(-1);
-
-	USkeletalMeshComponent* ResolveMesh();
 };

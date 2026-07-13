@@ -1,14 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// URopeSDFData를 IRopeCollider로 공급하는 provider. 본별 볼륨을 현재 본 월드 트랜스폼으로 변환해
-// 매 프레임 FRopeSDFCollider를 빌드한다. URopeBoneCapsuleProvider와 동일 인터페이스라 캡슐과
-// 공존/대체 가능(비블로킹). 미베이크 볼륨은 건너뛰므로 데이터가 비어도 안전한 no-op.
+// URopeSDFData를 IRopeCollider로 공급하는 skeletal collider provider. 본별 볼륨을 현재 본 월드
+// 트랜스폼으로 변환해 매 프레임 FRopeSDFCollider를 빌드한다. URopeBoneCapsuleProvider와 같은
+// 베이스(URopeSkeletalColliderProvider)라 캡슐과 공존/대체 가능(비블로킹). 미베이크 볼륨은 건너뛰므로
+// 데이터가 비어도 안전한 no-op. 등록/메시 해석/프레임 디둡/gather 파이프라인은 베이스가 소유한다.
 
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
-#include "Collision/RopeColliderProvider.h"
+#include "Collision/RopeSkeletalColliderProvider.h"
 #include "Collision/SDF/RopeSDFCollider.h"
 #include "RopeSDFProvider.generated.h"
 
@@ -37,24 +37,14 @@ enum class ERopeSDFBoneFilterMode : uint8
 };
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
-class DYNAMICROPE_API URopeSDFProvider : public UActorComponent, public IRopeColliderProvider
+class DYNAMICROPE_API URopeSDFProvider : public URopeSkeletalColliderProvider
 {
 	GENERATED_BODY()
 
 public:
-	URopeSDFProvider();
-
-	//~ UActorComponent — RopeSimSubsystem 중앙 레지스트리에 등록/해제(프레임당 1회 중앙 gather).
-	virtual void BeginPlay() override;
-	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-
 	/** 본별 SDF 볼륨 에셋. 비어 있으면 collider를 공급하지 않는다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	TObjectPtr<URopeSDFData> SDFData = nullptr;
-
-	/** 본 트랜스폼을 제공하는 메시. null로 두면 owner에서 자동 해석된다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
-	TObjectPtr<USkeletalMeshComponent> SkeletalMesh = nullptr;
 
 	/**
 	 * Runtime filter selecting which baked bones are exposed as colliders (for debugging / isolation).
@@ -72,8 +62,11 @@ public:
 		meta = (EditCondition = "BoneFilterMode != ERopeSDFBoneFilterMode::All", GetOptions = "GetBakedBoneNames"))
 	TArray<FName> BoneFilter;
 
-	//~ IRopeColliderProvider
-	virtual void GatherColliders(FRopeColliderGatherContext& Gather) override;
+protected:
+	//~ URopeSkeletalColliderProvider
+	virtual void RebuildColliders(USkeletalMeshComponent* Mesh, float InvDt) override;
+	virtual void AppendColliderPointers(FRopeColliderGatherContext& Gather) override;
+	virtual bool HasColliderData() const override;
 
 private:
 	/** BoneFilter 드롭다운(GetOptions)에 노출할 후보: SDFData에 베이크된 본 이름들. */
@@ -85,9 +78,4 @@ private:
 
 	// 본별 이전 프레임 BoneToWorld. 표면 속도(드래그) 산출용 — collider 빌드 시 (현재, 이전)으로 속도를 만든다.
 	TMap<FName, FTransform> PrevBoneToWorld;
-
-	// 마지막으로 collider를 빌드한 GFrameCounter. 같은 프레임에 여러 로프가 호출해도 재빌드 안 함(디둡).
-	uint64 BuiltFrame = static_cast<uint64>(-1);
-
-	USkeletalMeshComponent* ResolveMesh();
 };

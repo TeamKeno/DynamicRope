@@ -2,7 +2,6 @@
 
 #include "Collision/RopeBoneCapsuleProvider.h"
 #include "DynamicRopeLog.h"
-#include "Subsystem/RopeSimSubsystem.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkinnedAsset.h"
 #include "GameFramework/Actor.h"
@@ -10,95 +9,39 @@
 #include "PhysicsEngine/SkeletalBodySetup.h"
 #include "ReferenceSkeleton.h"
 
-URopeBoneCapsuleProvider::URopeBoneCapsuleProvider()
+void URopeBoneCapsuleProvider::RebuildColliders(USkeletalMeshComponent* Mesh, float InvDt)
 {
-	PrimaryComponentTick.bCanEverTick = false;
-}
+	Capsules.Reset();
+	BuildCapsules(Mesh);
 
-void URopeBoneCapsuleProvider::BeginPlay()
-{
-	Super::BeginPlay();
-	if (URopeSimSubsystem* Sim = URopeSimSubsystem::Get(GetWorld()))
+	// 이전 프레임 끝점을 인덱스 정렬로 이어 붙인다(캡슐별 (현재-이전)/dt = 표면 속도). 개수 불일치
+	// (첫 프레임/구성 변경)면 이 프레임은 정적(InvDt 0 = 속도 0) 취급 — FCapsuleCollider가 이미
+	// prev=현재로 초기화된 상태 그대로 둔다.
+	if (PrevEndpoints.Num() == Capsules.Num())
 	{
-		Sim->RegisterColliderProvider(this);
-	}
-}
-
-void URopeBoneCapsuleProvider::EndPlay(const EEndPlayReason::Type EndPlayReason)
-{
-	if (URopeSimSubsystem* Sim = URopeSimSubsystem::Get(GetWorld()))
-	{
-		Sim->UnregisterColliderProvider(this);
-	}
-	Super::EndPlay(EndPlayReason);
-}
-
-USkeletalMeshComponent* URopeBoneCapsuleProvider::ResolveMesh()
-{
-	if (!SkeletalMesh)
-	{
-		if (AActor* Owner = GetOwner())
+		for (int32 i = 0; i < Capsules.Num(); ++i)
 		{
-			SkeletalMesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
-		}
-	}
-	return SkeletalMesh;
-}
-
-void URopeBoneCapsuleProvider::GatherColliders(FRopeColliderGatherContext& Gather)
-{
-	USkeletalMeshComponent* Mesh = ResolveMesh();
-	if (!Mesh)
-	{
-		UE_LOG(LogRopeCollision, Verbose, TEXT("CapsuleProvider on %s: no skeletal mesh resolved — no colliders."),
-			*GetNameSafe(GetOwner()));
-		return;
-	}
-
-	// 프레임당 1회만 빌드(디둡): 같은 메시를 잡는 여러 로프가 호출해도 capsule을 재구성하지 않는다.
-	// region별 배정은 아래 MapCollidersToRegionsByBounds가 만든다(빌드는 region 무관 — 전 본 빌드).
-	const uint64 Frame = GFrameCounter;
-	if (BuiltFrame != Frame)
-	{
-		BuiltFrame = Frame;
-		Capsules.Reset();
-		BuildCapsules(Mesh);
-
-		// 표면 속도(드래그) 산출용 프레임 dt. 캡슐별 (현재-이전 끝점)/dt 로 콜라이더가 표면 속도를 만든다.
-		const float FrameDt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
-		const float InvDt = (FrameDt > KINDA_SMALL_NUMBER) ? (1.0f / FrameDt) : 0.0f;
-
-		// 이전 프레임 끝점을 인덱스 정렬로 이어 붙인다. 개수 불일치(첫 프레임/구성 변경)면 이 프레임은
-		// 정적(InvDt 0 = 속도 0) 취급 — 생성자가 이미 prev=현재로 초기화해 둔 상태 그대로.
-		if (PrevEndpoints.Num() == Capsules.Num())
-		{
-			for (int32 i = 0; i < Capsules.Num(); ++i)
-			{
-				Capsules[i].PrevA = PrevEndpoints[i].Key;
-				Capsules[i].PrevB = PrevEndpoints[i].Value;
-				Capsules[i].InvDeltaTime = InvDt;
-			}
-		}
-
-		// 다음 프레임용으로 현재 끝점 저장.
-		PrevEndpoints.Reset(Capsules.Num());
-		for (const FCapsuleCollider& Cap : Capsules)
-		{
-			PrevEndpoints.Emplace(Cap.A, Cap.B);
+			Capsules[i].PrevA = PrevEndpoints[i].Key;
+			Capsules[i].PrevB = PrevEndpoints[i].Value;
+			Capsules[i].InvDeltaTime = InvDt;
 		}
 	}
 
-	// 캐시된 capsule 포인터를 넘긴다(해당 프레임 동안 유효).
-	const int32 StartIndex = Gather.Colliders.Num();
-	Gather.Colliders.Reserve(StartIndex + Capsules.Num());
+	// 다음 프레임용으로 현재 끝점 저장.
+	PrevEndpoints.Reset(Capsules.Num());
+	for (const FCapsuleCollider& Cap : Capsules)
+	{
+		PrevEndpoints.Emplace(Cap.A, Cap.B);
+	}
+}
+
+void URopeBoneCapsuleProvider::AppendColliderPointers(FRopeColliderGatherContext& Gather)
+{
+	Gather.Colliders.Reserve(Gather.Colliders.Num() + Capsules.Num());
 	for (FCapsuleCollider& Cap : Capsules)
 	{
 		Gather.Colliders.Add(&Cap);
 	}
-
-	// region 매핑: 메시(캡슐 유니언) 선-거절 → 걸린 로프만 캡슐별 bounds 배정. 원거리 로프는 메시당
-	// 비교 1회로 끝난다 — 서브시스템의 로프별 풀 전체 재-컬(O(로프×풀))을 대체하는 부분.
-	RopeColliderGather::MapCollidersToRegionsByBounds(Gather, StartIndex);
 }
 
 void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
