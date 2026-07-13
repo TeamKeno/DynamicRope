@@ -2332,6 +2332,24 @@ void URopeComponent::CommitWrapping()
 		return;
 	}
 
+	// 형상 기준 묶임 관문(opt-in — CommitMinWrapCoverageDeg 0이면 기존 동작 그대로): 축 둘레 각도
+	// 커버리지(진동으로 부풀지 않는 기하 척도 — FRopeWrapConfig 주석 참고)가 하한 미만이면 대상을
+	// 둘러싸지 못한 랩이다 — 커밋하지 않는다. 계산 불가(경로점 부족/축 축퇴, -1 표기)면 관문을
+	// 건너뛴다(계산 가능성으로 벌하지 않는다). 전이 로그에 항상 실려 실측 튜닝의 관측값이 된다.
+	float CommitCoverageDeg = -1.0f;
+	if (!WrappingPhase.ComputeWrapEnclosureCoverage(CommitCoverageDeg))
+	{
+		CommitCoverageDeg = -1.0f;
+	}
+	if (WrapConfig.CommitMinWrapCoverageDeg > 0.0f && CommitCoverageDeg >= 0.0f
+		&& CommitCoverageDeg < WrapConfig.CommitMinWrapCoverageDeg)
+	{
+		SetPhase(ERopePhase::Releasing, *FString::Printf(TEXT("commit enclosure below threshold, coverage=%.0fdeg < %.0fdeg"),
+			CommitCoverageDeg, WrapConfig.CommitMinWrapCoverageDeg));
+		AbortWrapping(ERopeReleaseReason::Broken);
+		return;
+	}
+
 	const FRopeWrapState Seed = WrappingPhase.BuildCommitSeed(Sim, Mesh);
 	if (Seed.Anchors.Num() == 0)
 	{
@@ -2344,8 +2362,8 @@ void URopeComponent::CommitWrapping()
 	WrapController.BeginWrap(Sim, Seed, SimFrame.OverrideFrame);
 	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
 
-	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s), angle=%.0fdeg"),
-		*Seed.BoneName.ToString(), Seed.Latched.Num(), CommitAngleDeg));
+	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s), angle=%.0fdeg, coverage=%.0fdeg"),
+		*Seed.BoneName.ToString(), Seed.Latched.Num(), CommitAngleDeg, CommitCoverageDeg));
 	ResetTransientPhaseState();
 	NotifyWrapped(Seed.BoneName);
 	OnRopeWrapped.Broadcast(Seed.BoneName);

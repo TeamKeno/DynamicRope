@@ -392,6 +392,71 @@ bool FRopeWrappingGapBridgeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("wrapped angle computable"), Wrapping.ComputeWrappedAngleAtLastBuiltPoint(Sim, Ctx, AngleDeg));
 	TestTrue(FString::Printf(TEXT("accumulated angle circles the pair (%.0f deg)"), AngleDeg),
 		AngleDeg > 270.0f);
+
+	// ⑤ 형상 기준 커버리지(5단계): 쌍을 완주했으니 축 둘레에 큰 공백이 없어야 한다.
+	float CoverageDeg = 0.0f;
+	TestTrue(TEXT("enclosure coverage computable"), Wrapping.ComputeWrapEnclosureCoverage(CoverageDeg));
+	TestTrue(FString::Printf(TEXT("pair wrap leaves no escape gap (coverage=%.0f deg)"), CoverageDeg),
+		CoverageDeg > 300.0f);
+	return true;
+}
+
+// 형상 기준 묶임 척도(진행 방향 기반 wrap 5단계, ComputeWrapEnclosureCoverage):
+// 같은 캡슐에서 로프 길이만 달리해 — 만감김(~356°)은 커버리지가 360°에 수렴하고,
+// 반쪽 훅(경로 ~132°)은 축 둘레 반대편이 통째로 비어 커버리지가 그만큼 낮게 나온다.
+// CommitMinWrapCoverageDeg 관문이 이 값으로 "둘러싸임 vs 걸침"을 가른다는 계약.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingEnclosureCoverageTest,
+	"DynamicRope.Wrapping.EnclosureCoverageSeparatesHookFromWrap",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingEnclosureCoverageTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* Mesh = MakeMockTarget();
+	FCapsuleCollider Capsule(FVector(0, 0, -50), FVector(0, 0, 50), 25.0f, FName("arm"), Mesh);
+	TArray<IRopeCollider*> Colliders = { &Capsule };
+
+	FRopeSurfaceAnchor Latch;
+	Latch.NodeIndex = 0;
+	Latch.Bone = FName("arm");
+	Latch.Mesh = Mesh;
+	Latch.LocalSurfacePosition = FVector(25, 0, 0);
+	Latch.LocalNormal = FVector(1, 0, 0);
+	Latch.LocalTangent = FVector(0, 1, 0);
+	Latch.StartWorldPosition = FVector(25, 0, 0);
+	Latch.SurfaceOffset = 1.0f;
+
+	const FRopeWrapConfig Config;
+	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
+		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
+
+	auto BuildAndMeasure = [&](int32 NumNodes, float RopeLength, float& OutCoverageDeg) -> bool
+	{
+		FRopeSimState Sim = RopeTest::MakeStraightRope(NumNodes, RopeLength, FVector(25, 0, 0), FVector(0, 1, 0));
+		FRopeWrappingPhase Wrapping;
+		if (!Wrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, Ctx))
+		{
+			return false;
+		}
+		for (int32 Iteration = 0; Iteration < 256 && Wrapping.State.bPathBuildActive; ++Iteration)
+		{
+			Wrapping.AdvancePathBuild(Sim, Ctx);
+		}
+		return Wrapping.State.bPathBuildComplete &&
+			Wrapping.ComputeWrapEnclosureCoverage(OutCoverageDeg);
+	};
+
+	// 만감김: 160cm(9노드) ≈ 356° — 공백이 스텝 각 수준이라 커버리지가 360°에 수렴.
+	float FullCoverageDeg = 0.0f;
+	TestTrue(TEXT("full wrap builds and measures"), BuildAndMeasure(9, 160.0f, FullCoverageDeg));
+	TestTrue(FString::Printf(TEXT("full wrap coverage nears 360 (%.0f deg)"), FullCoverageDeg),
+		FullCoverageDeg > 300.0f);
+
+	// 반쪽 훅: 80cm(5노드) — 경로가 ~1/3바퀴에서 끝나 반대편이 통째로 빈다.
+	float HookCoverageDeg = 0.0f;
+	TestTrue(TEXT("hook wrap builds and measures"), BuildAndMeasure(5, 80.0f, HookCoverageDeg));
+	TestTrue(FString::Printf(TEXT("hook coverage stays low (%.0f deg)"), HookCoverageDeg),
+		HookCoverageDeg < 220.0f);
+	TestTrue(TEXT("coverage separates hook from wrap"), FullCoverageDeg > HookCoverageDeg + 90.0f);
 	return true;
 }
 

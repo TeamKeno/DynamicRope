@@ -771,6 +771,19 @@ struct FRopeWrapConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
 	float CommitMinWrapAngleDeg = 0.0f;
 
+	/**
+	 * 형상 기준 묶임 관문(도): 커밋되는 wrap 경로의 감김 축 둘레 각도 커버리지(경로점 각도들을 정렬해
+	 * 360° − 최대 공백)가 이 값 미만이면 커밋 대신 release한다. 0(기본) = 끔 — 기존 동작 그대로.
+	 * CommitMinWrapAngleDeg(누적 각도)와의 차이: 누적 각도는 걸은 회전량의 합이라 표면 위 진동/왕복이
+	 * 값을 부풀릴 수 있고 여러 바퀴면 360°를 넘는다. 커버리지는 "축 둘레 어느 방향까지 로프가 실제로
+	 * 둘러쌌는가"의 순수 기하 척도(0~360°)라 진동에 면역이다 — 대상이 정말 갇혔는지(양다리 bola처럼
+	 * 빠져나갈 공백이 없는지)를 묻는 판정. 축이 캡처 시점에 고정되는 TravelPlaneFirst 감김에서 가장
+	 * 의미가 정확하다(ShapeAxisFirst의 rolling axis에서는 마지막 축 기준 근사).
+	 * 양다리 잠금 용도면 300° 안팎, 느슨한 훅도 허용하려면 0 유지.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
+	float CommitMinWrapCoverageDeg = 0.0f;
+
 	/** [미배선] Wrapping 중 일시적 접촉 상실을 이만큼 유예한다는 의도였으나, 소비하는 코드가 아직 없다.
 	 *  현재 Wrapping 중단 판정은 IsStillValid(mesh 생존/bone 유효)와 경로 빌드 실패 경로뿐 — 값을 바꿔도
 	 *  아무 효과가 없다. grace 로직을 실제로 배선하기 전까지 튜닝 대상이 아니다. */

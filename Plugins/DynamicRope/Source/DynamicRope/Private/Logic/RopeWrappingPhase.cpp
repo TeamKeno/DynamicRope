@@ -1201,6 +1201,69 @@ bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState
 	return true;
 }
 
+bool FRopeWrappingPhase::ComputeWrapEnclosureCoverage(float& OutCoverageDeg) const
+{
+	OutCoverageDeg = 0.0f;
+	if (State.Path.Num() < 2)
+	{
+		return false;
+	}
+
+	const FVector Axis = State.PathAxisDirection.GetSafeNormal();
+	if (Axis.IsNearlyZero())
+	{
+		return false;
+	}
+
+	const auto ComputeRadial = [this, &Axis](const FVector& Point, FVector& OutRadial) -> bool
+	{
+		const FVector Offset = Point - State.PathAxisOrigin;
+		OutRadial = Offset - Axis * FVector::DotProduct(Offset, Axis);
+		return OutRadial.Normalize(KINDA_SMALL_NUMBER);
+	};
+
+	// 각 경로점의 축 둘레 각도(첫 비축퇴 점 기준, (-180,180]). 브리지 점도 포함한다 —
+	// chord가 가로지른 방향도 로프가 막고 있는 방향이다.
+	FVector RefRadial = FVector::ZeroVector;
+	TArray<float, TInlineAllocator<128>> AngleDegrees;
+	for (const FRopeWrapPathPoint& Point : State.Path)
+	{
+		FVector Radial = FVector::ZeroVector;
+		if (!ComputeRadial(Point.SurfaceWorld, Radial))
+		{
+			continue;
+		}
+
+		if (RefRadial.IsNearlyZero())
+		{
+			RefRadial = Radial;
+		}
+
+		const float AngleRad = FMath::Atan2(
+			static_cast<float>(FVector::DotProduct(Axis, FVector::CrossProduct(RefRadial, Radial))),
+			static_cast<float>(FVector::DotProduct(RefRadial, Radial)));
+		AngleDegrees.Add(FMath::RadiansToDegrees(AngleRad));
+	}
+
+	if (AngleDegrees.Num() < 2)
+	{
+		return false;
+	}
+
+	// 정렬 후 최대 각도 공백(이웃 간 + 양끝 wrap-around)을 찾는다. 커버리지 = 360 − 최대 공백:
+	// 점들이 축 둘레를 빈틈없이 두르면 공백이 스텝 각 수준으로 작아 360에 수렴하고,
+	// 반쪽 훅이면 반대편이 통째로 비어 커버리지가 그만큼 낮다.
+	AngleDegrees.Sort();
+	float MaxGapDeg = 360.0f - (AngleDegrees.Last() - AngleDegrees[0]);
+	for (int32 Index = 1; Index < AngleDegrees.Num(); ++Index)
+	{
+		MaxGapDeg = FMath::Max(MaxGapDeg, AngleDegrees[Index] - AngleDegrees[Index - 1]);
+	}
+
+	OutCoverageDeg = FMath::Clamp(360.0f - MaxGapDeg, 0.0f, 360.0f);
+	return true;
+}
+
 bool FRopeWrappingPhase::FindColliderShapeAxis(const FContext& Ctx, FName Bone, const USceneComponent* Mesh,
 	FVector& OutAxisOrigin, FVector& OutAxisDirection)
 {

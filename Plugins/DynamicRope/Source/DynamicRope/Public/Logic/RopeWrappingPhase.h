@@ -109,6 +109,16 @@ public:
 	bool ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const;
 
 	/**
+	 * 형상 기준 묶임 척도(5단계): 감김 축 둘레에서 경로점들이 실제로 둘러싼 각도 커버리지(도, 0~360).
+	 * 경로점 각도를 정렬해 최대 공백을 찾고 360°에서 뺀다 — 누적 각도와 달리 표면 위 진동/왕복으로
+	 * 부풀지 않아 "대상이 빠져나갈 공백이 남았는가"를 직접 답한다. 브리지(chord) 점도 포함한다:
+	 * chord가 가로지른 구간도 로프가 막고 있는 방향이다. 커밋 관문(CommitMinWrapCoverageDeg)과
+	 * 전이 로그가 소비한다.
+	 * @return 경로점이 2개 미만이거나 축이 축퇴(모든 점이 축 위)면 false — 호출자는 관문을 건너뛴다.
+	 */
+	bool ComputeWrapEnclosureCoverage(float& OutCoverageDeg) const;
+
+	/**
 	 * 현재 앵커들로 Wrapped 핸드오프용 시드를 조립한다(FRopeWrapController::BeginWrap 입력).
 	 * 유효 노드가 없으면 Anchors가 빈 시드가 반환된다 — 호출자가 검사해 abort한다.
 	 */
