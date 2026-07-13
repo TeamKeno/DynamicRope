@@ -255,11 +255,11 @@ void FRopeFlightContactDetector::EvaluateRelativeMotion(const FRopeSimState& Sim
 
 		// 로프/스플라인 평면과 bone-parent 축이 거의 평행하면, 축을 따라 스치거나 찍는 접촉이라 감김 후보에서 제외한다.
 		// 축-평면 각도 30도 이내를 miss cone으로 본다. 축이 평면에 수직에 가까울수록 실제 감김 후보로 남긴다.
-		if (IsBoneAxisNearlyParallelToRopePlane(Sim, Candidate, RelativeVelocity))
-		{
-			Candidate.bValid = false;
-			continue;
-		}
+		//if (IsBoneAxisNearlyParallelToRopePlane(Sim, Candidate, RelativeVelocity))
+		//{
+		//	Candidate.bValid = false;
+		//	continue;
+		//}
 	}
 }
 
