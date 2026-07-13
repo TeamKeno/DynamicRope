@@ -1368,7 +1368,62 @@ bool FRopeWrappingPhase::FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAncho
 	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::TravelPlaneFirst &&
 		Ctx.TravelFrame && Ctx.TravelFrame->bValid)
 	{
-		OutAxisOrigin = Ctx.TravelFrame->RegionCenter;
+		FVector Origin = Ctx.TravelFrame->RegionCenter;
+
+		// 접촉 군집 보정(브리징 = 분리 대상 랩 모드에서만): RegionCenter는 "첫 접촉" 순간의 접촉점
+		// 평균이라, 캡처가 첫 다리에 닿는 즉시 일어나면(MinLatchNodes 기본 1) 한쪽 다리 위에 있다 —
+		// 축이 대상 안을 지나면 그 대상만 도는 궤도가 winding 순방향이 되어 이탈 관문이 침묵하고,
+		// 반대쪽 다리로 못 건너간다(PIE 실측 2026-07-13: 한 다리 1725° 나선, coverage는 축이 대상
+		// 안이라 무의미하게 높음). 접촉 못 한 이웃 대상도 collider 스냅샷에는 있으므로, 같은 mesh의
+		// 근방(브리지 거리) collider 중심들을 평균해 축이 군집(양다리 쌍)의 중심을 지나게 한다.
+		// 축 방향 성분은 버린다 — 축은 선이라 수직 성분만 의미가 있다.
+		const float ClusterRadius = Ctx.Config.WrappingMaxGapBridgeDistance;
+		if (ClusterRadius > 0.0f)
+		{
+			FVector CenterSum = FVector::ZeroVector;
+			int32 CenterCount = 0;
+			for (const IRopeCollider* Collider : Ctx.Colliders)
+			{
+				if (!Collider)
+				{
+					continue;
+				}
+
+				FName ColliderBone = NAME_None;
+				const USceneComponent* ColliderMesh = nullptr;
+				Collider->GetGPUAttribution(ColliderBone, ColliderMesh);
+				if (Mesh != nullptr && ColliderMesh != nullptr && ColliderMesh != Mesh)
+				{
+					continue;
+				}
+
+				FVector Center = FVector::ZeroVector;
+				if (!GetColliderCenter(*Collider, Center))
+				{
+					continue;
+				}
+
+				const FVector Delta = Center - Origin;
+				const float AlongAxis = static_cast<float>(FVector::DotProduct(Delta, GuidePlaneNormal));
+				if (FMath::Abs(AlongAxis) > ClusterRadius ||
+					(Delta - GuidePlaneNormal * AlongAxis).Size() > ClusterRadius)
+				{
+					continue;
+				}
+
+				CenterSum += Center;
+				++CenterCount;
+			}
+
+			if (CenterCount > 0)
+			{
+				const FVector ClusterDelta = CenterSum / static_cast<float>(CenterCount) - Origin;
+				Origin += ClusterDelta - GuidePlaneNormal *
+					static_cast<float>(FVector::DotProduct(ClusterDelta, GuidePlaneNormal));
+			}
+		}
+
+		OutAxisOrigin = Origin;
 	}
 	else
 	{
@@ -1376,6 +1431,36 @@ bool FRopeWrappingPhase::FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAncho
 	}
 	OutAxisDirection = GuidePlaneNormal;
 	return true;
+}
+
+bool FRopeWrappingPhase::GetColliderCenter(const IRopeCollider& Collider, FVector& OutCenter)
+{
+	FVector CapA = FVector::ZeroVector;
+	FVector CapB = FVector::ZeroVector;
+	float CapRadius = 0.0f;
+	if (Collider.GetGPUCapsule(CapA, CapB, CapRadius))
+	{
+		OutCenter = (CapA + CapB) * 0.5f;
+		return true;
+	}
+
+	FVector BoxCenter = FVector::ZeroVector;
+	FVector BoxHalf = FVector::ZeroVector;
+	FQuat BoxRot = FQuat::Identity;
+	if (Collider.GetGPUBox(BoxCenter, BoxRot, BoxHalf))
+	{
+		OutCenter = BoxCenter;
+		return true;
+	}
+
+	FRopeSDFColliderView SDFView;
+	if (Collider.GetGPUSDF(SDFView))
+	{
+		OutCenter = SDFView.BoneToWorld.TransformPosition(SDFView.LocalMin + SDFView.LocalSize * 0.5);
+		return true;
+	}
+
+	return false;
 }
 
 /* 감김 축 정의 — 우선순위/근거는 헤더 주석 참고(형상 축 → rope 평면 가상축 → 컴포넌트 기저 → 로컬 X). */

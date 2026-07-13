@@ -401,6 +401,76 @@ bool FRopeWrappingGapBridgeTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 군집 중심 축 보정(양다리 PIE 실측 수정): 캡처는 첫 다리에 닿는 즉시 일어나 RegionCenter가
+// 한쪽 다리 위에 있다 — 그대로 축을 세우면 필드가 그 다리만 나선으로 돌고(축이 대상 안이면
+// winding 이탈 관문도 침묵) 반대쪽으로 못 건너간다(실측: 한 다리 1725°). 브리징 모드에서는
+// 같은 mesh의 근방 collider 중심 군집이 origin을 쌍의 중심으로 옮겨, 접촉이 한쪽에서 시작해도
+// 경로가 쌍을 순회해야 한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingClusterAxisOriginTest,
+	"DynamicRope.Wrapping.ClusterAxisRecentersFirstContactCapture",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingClusterAxisOriginTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* Mesh = MakeMockTarget();
+	FCapsuleCollider LegA(FVector(30, 0, -50), FVector(30, 0, 50), 12.0f, FName("legs"), Mesh);
+	FCapsuleCollider LegB(FVector(-30, 0, -50), FVector(-30, 0, 50), 12.0f, FName("legs"), Mesh);
+	TArray<IRopeCollider*> Colliders = { &LegA, &LegB };
+
+	FRopeSimState Sim = RopeTest::MakeStraightRope(15, 280.0f, FVector(42, 0, 0), FVector(0, 1, 0));
+
+	FRopeSurfaceAnchor Latch;
+	Latch.NodeIndex = 0;
+	Latch.Bone = FName("legs");
+	Latch.Mesh = Mesh;
+	Latch.LocalSurfacePosition = FVector(42, 0, 0);
+	Latch.LocalNormal = FVector(1, 0, 0);
+	Latch.LocalTangent = FVector(0, 1, 0);
+	Latch.StartWorldPosition = FVector(42, 0, 0);
+	Latch.SurfaceOffset = 1.0f;
+
+	// 실전 캡처 재현: 접촉은 첫 다리(LegA)뿐 — RegionCenter가 그 표면 위에 있다.
+	FRopeCaptureTravelFrame Frame;
+	Frame.bValid = true;
+	Frame.RegionCenter = FVector(42, 0, 0);
+	Frame.AverageVelocity = FVector(0, 100, 0);
+
+	FRopeWrapConfig Config;
+	Config.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
+	Config.WrappingMaxGapBridgeDistance = 120.0f;
+	Config.WrappingHelixPitchScale = 0.0f;
+	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
+		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*bHasGuidePlaneNormal*/ true, /*GuidePlaneNormal*/ FVector(0, 0, 1), &Frame };
+
+	FRopeWrappingPhase Wrapping;
+	TestTrue(TEXT("wrapping begins from a one-leg capture"),
+		Wrapping.Begin(Latch, Mesh, FName("legs"), 0.16f, Sim, Ctx));
+
+	// 축 origin이 첫 접촉점(42,0,0)이 아니라 collider 군집 중심(두 캡슐 중점 = x 0)으로 옮겨진다.
+	TestTrue(FString::Printf(TEXT("axis origin recentered between the legs (origin=%s)"),
+			*Wrapping.State.PathAxisOrigin.ToString()),
+		FMath::Abs(Wrapping.State.PathAxisOrigin.X) < 5.0f &&
+		FMath::Abs(Wrapping.State.PathAxisOrigin.Y) < 5.0f);
+
+	for (int32 Iteration = 0; Iteration < 512 && Wrapping.State.bPathBuildActive; ++Iteration)
+	{
+		Wrapping.AdvancePathBuild(Sim, Ctx);
+	}
+	TestTrue(TEXT("path build completes around the pair"), Wrapping.State.bPathBuildComplete);
+
+	bool bAnchorOnLegA = false;
+	bool bAnchorOnLegB = false;
+	for (const FRopeSurfaceAnchor& Anchor : Wrapping.State.Anchors)
+	{
+		bAnchorOnLegA |= Anchor.LocalSurfacePosition.X > 15.0f;
+		bAnchorOnLegB |= Anchor.LocalSurfacePosition.X < -15.0f;
+	}
+	TestTrue(TEXT("anchors reached the contacted leg"), bAnchorOnLegA);
+	TestTrue(TEXT("anchors reached the uncontacted far leg"), bAnchorOnLegB);
+	return true;
+}
+
 // 형상 기준 묶임 척도(진행 방향 기반 wrap 5단계, ComputeWrapEnclosureCoverage):
 // 같은 캡슐에서 로프 길이만 달리해 — 만감김(~356°)은 커버리지가 360°에 수렴하고,
 // 반쪽 훅(경로 ~132°)은 축 둘레 반대편이 통째로 비어 커버리지가 그만큼 낮게 나온다.

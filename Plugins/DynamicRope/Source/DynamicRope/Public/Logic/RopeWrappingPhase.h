@@ -202,9 +202,14 @@ private:
 	static bool FindColliderShapeAxis(const FContext& Ctx, FName Bone, const USceneComponent* Mesh,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection);
 
-	/** 2)의 구현: Flight guided spline 평면 normal을 bone 위치에 세운 가상 축으로 돌려준다. */
+	/** 2)의 구현: Flight guided spline 평면 normal을 bone 위치에 세운 가상 축으로 돌려준다.
+	 *  TravelPlaneFirst + 캡처 스냅샷이 있으면 origin을 접촉 영역/collider 군집 중심으로 대체한다
+	 *  (구현부 주석 참고 — 양다리처럼 접촉이 한쪽에서만 시작해도 축이 쌍의 중심을 지나게). */
 	static bool FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx, const USceneComponent* Mesh,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection);
+
+	/** collider의 대표 중심(캡슐 중점/박스 중심/SDF bounds 중심). 군집 origin 보정용. */
+	static bool GetColliderCenter(const IRopeCollider& Collider, FVector& OutCenter);
 
 	void OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
 		const USceneComponent* Mesh, FVector& InOutAxisDirection) const;
