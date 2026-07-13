@@ -1221,11 +1221,28 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 			*OutAxisDirection.ToString());
 	};
 
+	// 0) TravelPlaneFirst(설정): 로프 진행(스윙) 평면 normal 축을 형상 축보다 앞세운다. 여러 본에
+	//    걸친 랩(양다리)이 특정 본 하나의 형상 축에 끌려가지 않게 하는 진행 방향 기반 wrap의 1단계.
+	//    (CL 341이 형상 축을 주석 토글로 껐다 켰다 하던 실험의 정식화 — 기본값 ShapeAxisFirst는
+	//    기존 우선순위 그대로다.) 가이드 평면이 없으면 아래 체인으로 자연 폴백.
+	bool bTriedTravelPlane = false;
+	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::TravelPlaneFirst)
+	{
+		bTriedTravelPlane = true;
+		const USceneComponent* TravelMesh = LatchAnchor.Mesh.Get();
+		if (!TravelMesh)
+		{
+			TravelMesh = State.Mesh.Get();
+		}
+		if (TravelMesh && FindGuidePlaneAxis(LatchAnchor, Ctx, TravelMesh, OutAxisOrigin, OutAxisDirection))
+		{
+			LogAxisSource(TEXT("TravelPlaneAxis"), TravelMesh);
+			return true;
+		}
+	}
+
 	// 1) collider 형상 축: 실제 충돌 지오메트리의 장축 — 본 그래프 특성(짧은 몸통 본, 체인 본,
 	//    임포트 축)과 무관하게 맞고, origin이 지오메트리 중심축 위라 helix 반지름도 정확하다.
-	// (CL 341에 "테스트 중 비활성화" 주석 처리로 실려 왔던 것을 복원 — 이 경로가 빠지면 드래곤
-	//  wrap 수정(형상 축 1순위, CL 291)이 회귀하고 Wrapping 각도 테스트가 깨진다. guide-plane
-	//  축을 형상 축보다 앞세우고 싶으면 주석 토글이 아니라 우선순위/설정 논의로.)
 	if (FindColliderShapeAxis(Ctx, LatchAnchor.Bone, LatchAnchor.Mesh.Get(), OutAxisOrigin, OutAxisDirection))
 	{
 		LogAxisSource(TEXT("ColliderShapeAxis"), LatchAnchor.Mesh.Get());
@@ -1247,7 +1264,8 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 	const FVector BoneLocation = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
 
 	// 로프가 날아와 만든 spline guide 평면의 normal을 bone 위치에 세운 가상 축으로 쓴다.
-	if (FindGuidePlaneAxis(LatchAnchor, Ctx, Mesh, OutAxisOrigin, OutAxisDirection))
+	// (TravelPlaneFirst였다면 이미 위에서 시도·실패한 것이므로 재시도하지 않는다.)
+	if (!bTriedTravelPlane && FindGuidePlaneAxis(LatchAnchor, Ctx, Mesh, OutAxisOrigin, OutAxisDirection))
 	{
 		LogAxisSource(TEXT("RopePlaneNormal"), Mesh);
 		return true;

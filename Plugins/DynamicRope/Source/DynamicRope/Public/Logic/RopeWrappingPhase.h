@@ -153,17 +153,20 @@ private:
 		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
 
 	/**
-	 * 감김 축 유도. 우선순위:
+	 * 감김 축 유도. 우선순위(앞머리는 Config.WrappingAxisSource가 결정 — ERopeWrappingAxisSource):
+	 *  0) [TravelPlaneFirst일 때만] 로프 진행(스윙) 평면 normal 축 — 감김 원주를 로프의 운동 평면에
+	 *     고정한다(여러 본에 걸친 랩 대비). 없으면 아래로 폴백.
 	 *  1) latch 본에 귀속된 collider의 *형상 축*(캡슐 세그먼트/박스 최장축/SDF bounds 최장축) —
 	 *     본→부모 벡터는 짧고 두꺼운 본(몸통)·체인 본(목/꼬리)·특이 임포트 축에서 지오메트리 장축과
 	 *     어긋나 나선 반지름이 실제 단면과 틀어졌다(드래곤 wrap 실패의 핵심). 형상 축은 실제 충돌
 	 *     지오메트리에서 나오므로 본 그래프 형태와 무관하게 맞고, 축 origin도 지오메트리 중심축 위라
 	 *     helix 반지름(latch↔축 거리)이 정확해진다.
-	 *  2) rope spline guide 평면 normal + bone 위치로 만든 가상 축.
-	 *  3) 비-스켈레탈: 컴포넌트 기저축 중 latch normal에 가장 수직인 축.
+	 *  2) [ShapeAxisFirst일 때] rope spline guide 평면 normal + bone 위치로 만든 가상 축.
+	 *  3) 본→부모 축(스켈레탈), 비-스켈레탈은 컴포넌트 기저축 중 latch normal에 가장 수직인 축.
 	 *  4) 본 로컬 X.
 	 * SurfaceVectorField에서는 latch 시 1회로 끝나지 않는다 — 본 전환마다
 	 * ReseedWrappingAxisOnBoneTransition이 새 본 기준으로 재호출한다(rolling axis).
+	 * TravelPlaneFirst에서는 재시드에서도 진행 평면 축이 이겨 축 방향이 운동 평면에 고정된다.
 	 */
 	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;

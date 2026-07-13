@@ -68,6 +68,29 @@ enum class ERopeWrappingPathMode : uint8
 };
 
 /**
+ * 감김 축을 어디서 유도할지(FRopeWrapConfig::WrappingAxisSource). 우선순위 체인의 앞부분만 다르고,
+ * 뒤쪽 폴백(본→부모 → 컴포넌트 기저 → 본 로컬 X)은 공통이다 — FRopeWrappingPhase::ResolveWrappingAxis.
+ * (CL 341이 형상 축을 주석으로 껐다 켰다 하던 실험을 정식 설정으로 승격 — 진행 방향 기반 wrap 1단계.)
+ */
+UENUM(BlueprintType)
+enum class ERopeWrappingAxisSource : uint8
+{
+	/**
+	 * 형상 축 우선(기존 동작): latch 본에 귀속된 collider의 장축 → 진행 방향 축 → 공통 폴백.
+	 * 단일 대상(드래곤 몸통/목, 인간형 팔다리 하나)을 그 대상의 실루엣대로 감는 데 정확하다.
+	 */
+	ShapeAxisFirst UMETA(DisplayName = "Shape Axis First"),
+
+	/**
+	 * 진행 방향 축 우선: 로프가 날아온 스윙 평면의 normal(Flight whip guide)을 축으로 앞세운다 →
+	 * 형상 축 → 공통 폴백. 감김 원주가 로프의 운동 평면에 놓이므로 여러 본/대상에 걸친 랩(양다리)이
+	 * 특정 본 하나의 축에 끌려가지 않는다. 본 전환 시 재시드(rolling axis)에서도 같은 소스가 이겨
+	 * 축 방향이 진행 평면에 고정된다. 가이드 평면이 없는 던지기(BP 직행 등)는 형상 축으로 폴백.
+	 */
+	TravelPlaneFirst UMETA(DisplayName = "Travel Plane First")
+};
+
+/**
  * narrow-phase 컨택트: rope 노드 하나 vs collider 하나, IRopeCollider::Query가 반환한다.
  *
  * CONTRACT — FROZEN 2026-06-24 (2026-06-27 SurfaceVelocity 추가: 기본 0인 가산 필드라 하위호환).
@@ -601,6 +624,14 @@ struct FRopeWrapConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 MaxWrapSeeds = 1;
+
+	/**
+	 * 감김 축 유도 소스. ShapeAxisFirst(기본) = 기존 동작(latch 본 collider 장축 우선).
+	 * TravelPlaneFirst = 로프 진행(스윙) 평면 normal을 축으로 앞세운다 — 여러 본에 걸친 랩(양다리)
+	 * 대비 진행 방향 기반 wrap의 1단계. 상세는 ERopeWrappingAxisSource 주석.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap")
+	ERopeWrappingAxisSource WrappingAxisSource = ERopeWrappingAxisSource::ShapeAxisFirst;
 
 	/** Wrapping phase must keep the same accumulated latch span stable this long before committing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.0", Units = "s"))

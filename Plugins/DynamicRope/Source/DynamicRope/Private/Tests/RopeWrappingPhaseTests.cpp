@@ -176,4 +176,60 @@ bool FRopeWrappingSecondarySeedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 감김 축 소스 설정(ERopeWrappingAxisSource, 진행 방향 기반 wrap 1단계):
+// - TravelPlaneFirst: 가이드 평면 normal이 있으면 형상 축(캡슐 Z)보다 앞선다 — 축이 운동 평면에 고정.
+// - ShapeAxisFirst(기본): 가이드 평면이 있어도 형상 축이 이긴다 — 기존 동작 그대로(CL 341 주석 토글의
+//   정식화이므로, 기본값에서 아무것도 달라지지 않음을 함께 고정한다).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingAxisSourceTest,
+	"DynamicRope.Wrapping.AxisSourceConfig",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
+{
+	// 캡슐(형상 축 = Z) + 가이드 평면 normal = Y — 두 소스가 뚜렷이 구분되는 배치.
+	USceneComponent* Mesh = MakeMockTarget();
+	FCapsuleCollider Capsule(FVector(0, 0, -50), FVector(0, 0, 50), 25.0f, FName("arm"), Mesh);
+	TArray<IRopeCollider*> Colliders = { &Capsule };
+
+	FRopeSimState Sim = RopeTest::MakeStraightRope(9, 160.0f, FVector(25, 0, 0), FVector(0, 1, 0));
+
+	FRopeSurfaceAnchor Latch;
+	Latch.NodeIndex = 0;
+	Latch.Bone = FName("arm");
+	Latch.Mesh = Mesh;
+	Latch.LocalSurfacePosition = FVector(25, 0, 0);
+	Latch.LocalNormal = FVector(1, 0, 0);
+	Latch.LocalTangent = FVector(0, 1, 0);
+	Latch.StartWorldPosition = FVector(25, 0, 0);
+	Latch.SurfaceOffset = 1.0f;
+
+	const FVector GuidePlaneNormal(0, 1, 0);
+
+	FRopeWrapConfig TravelConfig;
+	TravelConfig.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
+	const FRopeWrappingPhase::FContext TravelCtx{ TravelConfig, Colliders,
+		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal };
+
+	FRopeWrappingPhase TravelWrapping;
+	TestTrue(TEXT("wrapping begins with travel-plane axis"),
+		TravelWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, TravelCtx));
+	TestTrue(FString::Printf(TEXT("TravelPlaneFirst axis follows the guide plane normal (dir=%s)"),
+			*TravelWrapping.State.PathAxisDirection.ToString()),
+		FMath::Abs(FVector::DotProduct(TravelWrapping.State.PathAxisDirection, GuidePlaneNormal)) > 0.99f);
+
+	FRopeWrapConfig DefaultConfig;
+	const FRopeWrappingPhase::FContext DefaultCtx{ DefaultConfig, Colliders,
+		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal };
+
+	FRopeWrappingPhase DefaultWrapping;
+	TestTrue(TEXT("wrapping begins with default axis source"),
+		DefaultWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, DefaultCtx));
+	TestTrue(FString::Printf(TEXT("ShapeAxisFirst keeps the capsule shape axis (dir=%s)"),
+			*DefaultWrapping.State.PathAxisDirection.ToString()),
+		FMath::Abs(FVector::DotProduct(DefaultWrapping.State.PathAxisDirection, FVector(0, 0, 1))) > 0.99f);
+	return true;
+}
+
 #endif
