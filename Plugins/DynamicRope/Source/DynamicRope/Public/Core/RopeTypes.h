@@ -1163,7 +1163,8 @@ struct FRopeThrowContext
 	/** AimRayHitDirection에서 유효한 본 hit을 확보했는지 나타낸다. */
 	bool bHasAimGuideHit = false;
 
-	/** Flight 이후 wrap을 허용할 대상 본이다. 다른 본 접촉은 궤적을 유지한 채 무시한다. */
+	/** Aim ray가 고른 primary 대상 본. Assisted에서는 첫 캡처/dominant만 이 본으로 고정하고,
+	 *  같은 mesh의 다른 본은 multi-bone 후보로 허용한다. Guaranteed에서는 exact target으로 유지된다. */
 	FName AimGuideBone = NAME_None;
 
 	/** 대상 본의 transform과 SDF를 해석할 mesh/component이다. */
@@ -1571,6 +1572,12 @@ struct FRopeContactTracker
 		}
 	}
 
-	/** 후보를 (Mesh, Bone) 쌍별 집계해 dominant 대상/노드/체류 시간을 갱신한다. 구현은 RopeTypes.cpp. */
-	void Update(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime);
+	// [Assisted 멀티 본 계약] Targets에는 모든 허용 본을 보존하면서 CandidateBone만 조준 본으로
+	// 고정할 수 있어야 한다. 그래서 일반 rank를 덮어쓰는 preferred target 입력을 이 공용 tracker에 둔다.
+	/** 후보를 (Mesh, Bone) 쌍별 집계해 dominant 대상/노드/체류 시간을 갱신한다.
+	 *  Preferred target이 현재 후보에 있으면 일반 rank보다 우선한다. bRequirePreferred인데 없으면
+	 *  dominant를 비우되 Targets의 secondary 집계는 유지한다. 구현은 RopeTypes.cpp. */
+	void Update(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime,
+		const USceneComponent* PreferredMesh = nullptr, FName PreferredBone = NAME_None,
+		bool bRequirePreferred = false);
 };

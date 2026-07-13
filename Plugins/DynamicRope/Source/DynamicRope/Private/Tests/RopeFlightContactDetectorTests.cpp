@@ -8,6 +8,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Logic/RopeFlightContactDetector.h"
+#include "Logic/RopeAimTargeting.h"
 #include "Collision/RopeCollider.h"
 // 트래커 cross-mesh 테스트의 식별용 mock 컴포넌트(NewObject<USceneComponent>).
 #include "Components/SceneComponent.h"
@@ -312,6 +313,88 @@ bool FRopeFlightTrackerMultiTargetTest::RunTest(const FString& Parameters)
 	Tracker.Update(OneLeg, 0.10f);
 	TestEqual(TEXT("exhausted secondary is dropped"), Tracker.Targets.Num(), 1);
 	TestTrue(TEXT("dominant unaffected by secondary decay"), Tracker.CandidateBone == FName("thigh_l"));
+	return true;
+}
+
+// 이 파일의 변경 이유: 이후 exact-bone 필터가 되살아나거나 pelvis rank가 primary를 빼앗는 회귀를
+// 자동으로 검출한다. 정책 테스트와 tracker 테스트를 함께 두어 허용 범위/선택 규칙을 각각 고정한다.
+// Assisted의 aim target은 일반 rank(NodeCount > HeadNode > Score)보다 우선하지만, 같은 mesh의
+// 다른 본은 Targets에서 secondary dwell 재료로 계속 추적해야 한다. preferred가 사라지면 몸통으로
+// dominant가 자동 승계되지 않아야 팔 조준이 pelvis 랩으로 바뀌지 않는다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightTrackerPreferredTargetTest,
+	"DynamicRope.FlightContact.TrackerPrefersRequiredAimTarget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightTrackerPreferredTargetTest::RunTest(const FString& Parameters)
+{
+	const USceneComponent* Mesh = NewObject<USceneComponent>();
+	const FName ArmBone("upperarm_l");
+	const FName PelvisBone("pelvis");
+
+	auto MakeCandidate = [Mesh](int32 Node, FName Bone)
+	{
+		FRopeContactCandidate Candidate;
+		Candidate.bValid = true;
+		Candidate.NodeIndex = Node;
+		Candidate.Bone = Bone;
+		Candidate.Mesh = Mesh;
+		Candidate.Penetration = 1.0f;
+		return Candidate;
+	};
+
+	TArray<FRopeContactCandidate> Candidates;
+	Candidates.Add(MakeCandidate(14, ArmBone));
+	Candidates.Add(MakeCandidate(18, PelvisBone));
+	Candidates.Add(MakeCandidate(19, PelvisBone));
+	Candidates.Add(MakeCandidate(20, PelvisBone));
+
+	FRopeContactTracker Tracker;
+	Tracker.Update(Candidates, 0.10f, Mesh, ArmBone, true);
+	TestTrue(TEXT("required aim bone wins over higher node-count pelvis"), Tracker.CandidateBone == ArmBone);
+	TestEqual(TEXT("all same-mesh targets remain tracked"), Tracker.Targets.Num(), 2);
+
+	TArray<FRopeContactCandidate> PelvisOnly;
+	PelvisOnly.Add(MakeCandidate(18, PelvisBone));
+	PelvisOnly.Add(MakeCandidate(19, PelvisBone));
+	Tracker.Update(PelvisOnly, 0.10f, Mesh, ArmBone, true);
+	TestTrue(TEXT("missing required aim target clears dominant"), Tracker.CandidateBone.IsNone());
+	TestTrue(TEXT("pelvis does not inherit dominant"), Tracker.CandidateMesh == nullptr);
+	return true;
+}
+
+// resolve mode별 aim lock 범위: Assisted는 같은 캐릭터의 다른 본까지 multi-bone 후보로 허용하고,
+// Guaranteed는 prepared target의 exact bone만 허용한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimTargetResolvePolicyTest,
+	"DynamicRope.FlightContact.AimTargetResolvePolicy",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeAimTargetResolvePolicyTest::RunTest(const FString& Parameters)
+{
+	const USceneComponent* TargetMesh = NewObject<USceneComponent>();
+	const USceneComponent* OtherMesh = NewObject<USceneComponent>();
+	const FName PrimaryBone("upperarm_l");
+	const FName NeighborBone("clavicle_l");
+
+	FRopeThrowContext ThrowContext;
+	ThrowContext.bHasAimGuideHit = true;
+	ThrowContext.AimGuideMesh = TargetMesh;
+	ThrowContext.AimGuideBone = PrimaryBone;
+
+	FRopeAimTargeting Targeting;
+	Targeting.SetWrapTargetLock(ThrowContext);
+	TestTrue(TEXT("exact aim bone is primary"), Targeting.IsPrimaryTarget(TargetMesh, PrimaryBone));
+	TestTrue(TEXT("neighbor bone on target mesh is allowed in Assisted"),
+		Targeting.IsWrapTarget(ERopePhase::Flight, ERopeWrapResolveMode::AssistedJudged,
+			TargetMesh, NeighborBone));
+	TestFalse(TEXT("same bone on another mesh is rejected in Assisted"),
+		Targeting.IsWrapTarget(ERopePhase::Flight, ERopeWrapResolveMode::AssistedJudged,
+			OtherMesh, PrimaryBone));
+	TestFalse(TEXT("neighbor bone is rejected in Guaranteed"),
+		Targeting.IsWrapTarget(ERopePhase::Flight, ERopeWrapResolveMode::GuaranteedWrap,
+			TargetMesh, NeighborBone));
+	TestTrue(TEXT("exact bone remains allowed in Guaranteed"),
+		Targeting.IsWrapTarget(ERopePhase::Flight, ERopeWrapResolveMode::GuaranteedWrap,
+			TargetMesh, PrimaryBone));
 	return true;
 }
 

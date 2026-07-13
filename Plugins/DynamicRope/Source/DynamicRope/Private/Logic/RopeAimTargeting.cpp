@@ -208,19 +208,37 @@ bool FRopeAimTargeting::IsLockActive(ERopePhase Phase) const
 	return bLockingPhase && bLocked && !TargetBone.IsNone() && TargetMesh.IsValid();
 }
 
-bool FRopeAimTargeting::IsWrapTarget(ERopePhase Phase, const USceneComponent* Mesh, FName Bone) const
+bool FRopeAimTargeting::IsPrimaryTarget(const USceneComponent* Mesh, FName Bone) const
 {
-	return !IsLockActive(Phase) || (Mesh == TargetMesh.Get() && Bone == TargetBone);
+	return bLocked && Mesh == TargetMesh.Get() && Bone == TargetBone;
 }
 
-void FRopeAimTargeting::FilterCollidersToTarget(ERopePhase Phase, TArray<IRopeCollider*>& Colliders) const
+// 이 파일의 변경 이유: 종전에는 aim lock을 collider 허용 범위와 동일하게 취급해 Assisted도 한 본만
+// 남았다. primary 판정은 exact bone으로 유지하되, 허용 범위는 resolve mode별로 분리한다.
+bool FRopeAimTargeting::IsWrapTarget(ERopePhase Phase, ERopeWrapResolveMode ResolveMode,
+	const USceneComponent* Mesh, FName Bone) const
+{
+	if (!IsLockActive(Phase) || ResolveMode == ERopeWrapResolveMode::FullSimulation)
+	{
+		return true;
+	}
+
+	// Assisted의 ray hit은 "첫 캡처/주 시드"만 고정한다. 같은 mesh의 이웃 본은 contact tracker의
+	// secondary target과 SurfaceVectorField의 multi-bone 투영 재료로 남겨야 한다.
+	return ResolveMode == ERopeWrapResolveMode::AssistedJudged
+		? Mesh == TargetMesh.Get()
+		: IsPrimaryTarget(Mesh, Bone);
+}
+
+void FRopeAimTargeting::FilterCollidersToTarget(ERopePhase Phase, ERopeWrapResolveMode ResolveMode,
+	TArray<IRopeCollider*>& Colliders) const
 {
 	if (!IsLockActive(Phase))
 	{
 		return;
 	}
 
-	Colliders.RemoveAll([this](const IRopeCollider* Collider)
+	Colliders.RemoveAll([this, Phase, ResolveMode](const IRopeCollider* Collider)
 	{
 		if (!Collider)
 		{
@@ -235,7 +253,7 @@ void FRopeAimTargeting::FilterCollidersToTarget(ERopePhase Phase, TArray<IRopeCo
 		FName ColliderBone = NAME_None;
 		const USceneComponent* ColliderMesh = nullptr;
 		Collider->GetGPUAttribution(ColliderBone, ColliderMesh);
-		return ColliderMesh != TargetMesh.Get() || ColliderBone != TargetBone;
+		return !IsWrapTarget(Phase, ResolveMode, ColliderMesh, ColliderBone);
 	});
 }
 

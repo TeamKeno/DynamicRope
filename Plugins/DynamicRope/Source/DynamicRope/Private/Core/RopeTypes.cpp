@@ -147,7 +147,8 @@ FRopeCaptureTravelFrame FRopeCaptureTravelFrame::Compute(const FRopeSimState& Si
 	return Frame;
 }
 
-void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime)
+void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime,
+	const USceneComponent* PreferredMesh, FName PreferredBone, bool bRequirePreferred)
 {
 	if (Candidates.Num() == 0)
 	{
@@ -225,25 +226,47 @@ void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates
 	int32 BestCount = 0;
 	int32 BestHeadNode = INDEX_NONE;
 	float BestScore = 0.0f;
-	for (const TPair<FTargetKey, TArray<int32>>& Pair : NodesByTarget)
+	// 이 파일의 변경 이유: pelvis처럼 노드 수가 많은 본이 조준한 팔을 rank로 역전하지 않도록 한다.
+	// preferred는 dominant 선택에만 관여하며, 위 Targets 갱신은 모든 본에 대해 그대로 수행한다.
+	const FTargetKey PreferredTarget(PreferredMesh, PreferredBone);
+	const bool bHasPreferredTarget = PreferredMesh && !PreferredBone.IsNone()
+		&& NodesByTarget.Contains(PreferredTarget);
+	if (bHasPreferredTarget)
 	{
-		const float Score = ScoreByTarget.FindRef(Pair.Key);
-		const int32 HeadNode = HeadNodeByTarget.FindRef(Pair.Key);
-		if (Pair.Value.Num() > BestCount ||
-			(Pair.Value.Num() == BestCount &&
-				(BestHeadNode == INDEX_NONE || HeadNode < BestHeadNode ||
-					(HeadNode == BestHeadNode && Score > BestScore))))
+		BestTarget = PreferredTarget;
+	}
+	else if (!bRequirePreferred)
+	{
+		for (const TPair<FTargetKey, TArray<int32>>& Pair : NodesByTarget)
 		{
-			BestTarget = Pair.Key;
-			BestCount = Pair.Value.Num();
-			BestHeadNode = HeadNode;
-			BestScore = Score;
+			const float Score = ScoreByTarget.FindRef(Pair.Key);
+			const int32 HeadNode = HeadNodeByTarget.FindRef(Pair.Key);
+			if (Pair.Value.Num() > BestCount ||
+				(Pair.Value.Num() == BestCount &&
+					(BestHeadNode == INDEX_NONE || HeadNode < BestHeadNode ||
+						(HeadNode == BestHeadNode && Score > BestScore))))
+			{
+				BestTarget = Pair.Key;
+				BestCount = Pair.Value.Num();
+				BestHeadNode = HeadNode;
+				BestScore = Score;
+			}
 		}
 	}
 
 	if (BestTarget.Value.IsNone())
 	{
-		Decay(DeltaTime);
+		if (bRequirePreferred)
+		{
+			CandidateBone = NAME_None;
+			CandidateMesh = nullptr;
+			CandidateNodes.Reset();
+			DwellTime = 0.0f;
+		}
+		else
+		{
+			Decay(DeltaTime);
+		}
 		return;
 	}
 

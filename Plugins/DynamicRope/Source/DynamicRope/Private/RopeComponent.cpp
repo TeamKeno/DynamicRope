@@ -1206,7 +1206,7 @@ void URopeComponent::ResolvePendingAimThrow()
 
 void URopeComponent::FilterFrameCollidersForAimWrapTarget()
 {
-	AimTargeting.FilterCollidersToTarget(Phase, SimFrame.FrameColliders);
+	AimTargeting.FilterCollidersToTarget(Phase, ResolveMode, SimFrame.FrameColliders);
 }
 
 // ===== 초기화/유틸 ===========================================================
@@ -1540,7 +1540,8 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 	// 던지기 시작 = 4단계 고정 순서: ① 이전 상태 정리 → ② 체인 리셋(+GPU 재시드) → ③ 채찍 스윙 시작
 	// → ④ Verlet 속도 주입. ④는 ③이 확정한 조준 방향(WhipGuide.GetAimDir)을 쓰므로 순서가 계약이다.
 	AbandonActiveStateForRethrow();
-	// ray가 확정한 mesh+bone을 이 throw의 Flight/Contacting/Wrapping 전체에 고정한다.
+	// ray가 확정한 mesh+bone을 primary로 저장한다. Assisted는 같은 mesh의 다른 본도 후보/경로에
+	// 허용하고, Guaranteed만 Flight/Contacting/Wrapping 전체를 exact bone으로 제한한다.
 	AimTargeting.SetWrapTargetLock(ResolvedThrow);
 	ResetChainForThrow(ResolvedThrow.Origin);
 	BeginWhipSwingFromThrow(ResolvedThrow);
@@ -1782,8 +1783,9 @@ void URopeComponent::RemoveNonWrappableCandidates(TArray<FRopeContactCandidate>&
 	// 후보 집합으로 판정하는 미묘한 버그가 되므로 반드시 이 헬퍼를 거친다.
 	Candidates.RemoveAll([this](const FRopeContactCandidate& Candidate)
 	{
-		// GPU 지연 후보나 외부 주입 후보도 ray가 잠근 mesh+bone 이외에는 다음 단계로 넘기지 않는다.
-		return !AimTargeting.IsWrapTarget(Phase, Candidate.Mesh, Candidate.Bone) ||
+		// GPU 지연/외부 주입 후보도 모드 정책을 통과시킨다. Assisted는 같은 mesh의 다른 본을
+		// secondary/multi-bone 재료로 유지하고, Guaranteed만 exact mesh+bone으로 제한한다.
+		return !AimTargeting.IsWrapTarget(Phase, ResolveMode, Candidate.Mesh, Candidate.Bone) ||
 			!CanWrapTarget(Candidate.Mesh, Candidate.Bone);
 	});
 }
@@ -1836,10 +1838,30 @@ void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
 bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
 	const TArray<FRopeContactCandidate>& Candidates, const FRopeFlightContactDetector::FParams& DetectParams)
 {
+	// 이 파일의 변경 이유: 감지된 전체 후보를 버리지 않으면서도 Flight 진입 판정은 조준 본으로만
+	// 수행해야 한다. 아래에서 판정용 PrimaryCandidates와 추적용 Candidates를 의도적으로 분리한다.
+	// Assisted aim lock은 "어느 캐릭터의 어느 본으로 첫 캡처할지"만 보장한다. 같은 mesh의 다른 본
+	// 후보는 BuildContactingState에 그대로 넘겨 secondary dwell과 multi-bone 경로 재료로 보존한다.
+	const bool bRequireAimPrimary = ResolveMode == ERopeWrapResolveMode::AssistedJudged
+		&& AimTargeting.IsLockActive(Phase);
+	TArray<FRopeContactCandidate> PrimaryCandidates;
+	const TArray<FRopeContactCandidate>* CaptureCandidates = &Candidates;
+	if (bRequireAimPrimary)
+	{
+		for (const FRopeContactCandidate& Candidate : Candidates)
+		{
+			if (AimTargeting.IsPrimaryTarget(Candidate.Mesh, Candidate.Bone))
+			{
+				PrimaryCandidates.Add(Candidate);
+			}
+		}
+		CaptureCandidates = &PrimaryCandidates;
+	}
+
 	bool bShouldCapture = false;
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCapture);
-		bShouldCapture = FRopeFlightContactDetector::ShouldCapture(Candidates, DetectParams);
+		bShouldCapture = FRopeFlightContactDetector::ShouldCapture(*CaptureCandidates, DetectParams);
 	}
 
 	if (bShouldCapture)
@@ -1885,7 +1907,12 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 	FRopeContactTracker FlightObserveTracker;
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightTrackerUpdate);
-		FlightObserveTracker.Update(Candidates, 0.0f);
+		const bool bRequireAimPrimary = ResolveMode == ERopeWrapResolveMode::AssistedJudged
+			&& AimTargeting.IsLockActive(Phase);
+		FlightObserveTracker.Update(Candidates, 0.0f,
+			bRequireAimPrimary ? AimTargeting.GetLockedTargetMesh() : nullptr,
+			bRequireAimPrimary ? AimTargeting.GetLockedTargetBone() : NAME_None,
+			bRequireAimPrimary);
 	}
 	const FRopeContactTracker& DebugTracker = bShouldCapture ? ContactTracker : FlightObserveTracker;
 	const float WhipGuidedEnd = FMath::Clamp(WhipConfig.GuidedLength, 0.05f, 0.95f);
@@ -1955,7 +1982,12 @@ void URopeComponent::GatherFlightNodeDebug(const FRopeFlightContactDetector::FPa
 void URopeComponent::BuildContactingState(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime)
 {
 	ContactTracker.Reset();
-	ContactTracker.Update(Candidates, 0.0f);
+	const bool bRequireAimPrimary = ResolveMode == ERopeWrapResolveMode::AssistedJudged
+		&& AimTargeting.IsLockActive(Phase);
+	ContactTracker.Update(Candidates, 0.0f,
+		bRequireAimPrimary ? AimTargeting.GetLockedTargetMesh() : nullptr,
+		bRequireAimPrimary ? AimTargeting.GetLockedTargetBone() : NAME_None,
+		bRequireAimPrimary);
 	ContactingElapsed = 0.0f;
 	PendingWrapSeed = BuildWrapSeedFromContactingState(Candidates);
 
@@ -1986,7 +2018,12 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 	// 트래커 갱신: 같은 본이면 dwell 누적, 지배 본이 바뀌면 dwell 리셋(전이 프레임 오탐 방어 —
 	// dwell 재시작 계약을 캡처 후 구간에도 실제로 적용), 접촉이 끊기면 dwell이 소진되며 트래커가
 	// 비워져 아래 dismiss로 떨어진다(짧은 플리커는 그동안 쌓인 dwell만큼 관용).
-	ContactTracker.Update(Candidates, DeltaTime);
+	const bool bRequireAimPrimary = ResolveMode == ERopeWrapResolveMode::AssistedJudged
+		&& AimTargeting.IsLockActive(Phase);
+	ContactTracker.Update(Candidates, DeltaTime,
+		bRequireAimPrimary ? AimTargeting.GetLockedTargetMesh() : nullptr,
+		bRequireAimPrimary ? AimTargeting.GetLockedTargetBone() : NAME_None,
+		bRequireAimPrimary);
 
 	if (ShouldDismissContacting())
 	{

@@ -2,7 +2,7 @@
 //
 // Aim-ray 조준 로직/상태(UObject-free F-클래스). Wielder의 조준 흐름이 쓰는 swept ray 본 질의
 // (FindAimRayBoneHit), aim throw 컨텍스트 해석, collider 수집 확장 AABB 계산, 그리고 throw당
-// wrap 대상 잠금(mesh+bone) + pending aim throw 큐를 담당한다.
+// wrap primary 잠금(mesh+bone), resolve mode별 허용 범위 + pending aim throw 큐를 담당한다.
 // UObject 컨텍스트(collider 스냅샷/폴백 치수/CanWrapTarget 게이트/디버그 월드)는 호출마다
 // 파라미터로 주입된다 — 월드 없이 단위 테스트 가능. StartFreshThrow *전이*가 걸린 진입점
 // (QueueAimRayThrow/ResolvePendingAimThrow)은 URopeComponent에 남는다(오케스트레이션).
@@ -104,12 +104,24 @@ public:
 	 *  적용한다 — Free preview와 Wrapped 이후의 일반 충돌은 유지한다. */
 	bool IsLockActive(ERopePhase Phase) const;
 
-	/** (Mesh, Bone)이 잠금 대상인가(잠금 비활성이면 모두 통과). contact/wrap 후보 필터가 소비. */
-	bool IsWrapTarget(ERopePhase Phase, const USceneComponent* Mesh, FName Bone) const;
+	/** 정확히 aim ray가 잠근 primary (Mesh, Bone)인가. Assisted의 캡처/dominant 고정이 소비한다. */
+	bool IsPrimaryTarget(const USceneComponent* Mesh, FName Bone) const;
 
-	/** 잠금 활성 시 skeletal 본 collider를 대상 (mesh, bone)만 남기고 제거한다.
-	 *  월드 정적 형상은 궤적/환경 충돌용이므로 유지한다. 잠금 비활성이면 no-op. */
-	void FilterCollidersToTarget(ERopePhase Phase, TArray<IRopeCollider*>& Colliders) const;
+	// [Assisted 멀티 본 계약] 조준 본은 primary 판정용이고, 같은 mesh의 다른 본은 감김 경로 후보용이다.
+	// 이 둘을 하나의 exact-bone 조건으로 합치면 Assisted에서 다른 본 collider가 다시 사라진다.
+	/** (Mesh, Bone)이 현재 resolve mode에서 허용되는 wrap 대상인가(잠금 비활성이면 모두 통과).
+	 *  Assisted는 primary와 같은 mesh의 다른 본도 후보/경로 투영에 허용하고, Guaranteed는 exact bone만 허용한다. */
+	bool IsWrapTarget(ERopePhase Phase, ERopeWrapResolveMode ResolveMode,
+		const USceneComponent* Mesh, FName Bone) const;
+
+	/** 잠금 활성 시 resolve mode 정책에 맞지 않는 skeletal collider를 제거한다.
+	 *  Assisted는 같은 mesh의 모든 본을 유지하고 Guaranteed는 exact bone만 유지한다.
+	 *  월드 정적 형상은 궤적/환경 충돌용이므로 항상 유지한다. 잠금 비활성이면 no-op. */
+	void FilterCollidersToTarget(ERopePhase Phase, ERopeWrapResolveMode ResolveMode,
+		TArray<IRopeCollider*>& Colliders) const;
+
+	const USceneComponent* GetLockedTargetMesh() const { return TargetMesh.Get(); }
+	FName GetLockedTargetBone() const { return TargetBone; }
 
 	//~ pending aim throw(입력 순간 고정 → collider gather 직후 소비) ---------
 	void QueuePendingThrow(const FRopeAimRayThrowRequest& Request) { PendingThrow = Request; }
