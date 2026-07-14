@@ -7,7 +7,7 @@
 // 사용 기준:
 //   LogDynamicRope     — 컴포넌트/서브시스템/모듈 수명주기, phase 전이 등 상위 흐름.
 //   LogRopeSolver      — XPBD 솔버(물리). substep/constraint/수렴 관련 hot-path 진단.
-//   LogRopeWrap        — wrap 컨트롤러(로직). DecideWrap/BeginWrap/Hold/Pull/Release.
+//   LogRopeWrap        — wrap 컨트롤러(로직). BeginWrap/Hold/Pull/Release.
 //   LogRopeCollision   — collider/provider/SDF 런타임 질의(브로드·내로우 페이즈).
 
 #pragma once
@@ -20,7 +20,7 @@ DECLARE_LOG_CATEGORY_EXTERN(LogDynamicRope, Log, All);
 /** 물리: XPBD 솔버. substep/distance·bending·collision constraint 진단. */
 DECLARE_LOG_CATEGORY_EXTERN(LogRopeSolver, Log, All);
 
-/** 로직: wrap 컨트롤러(DecideWrap/BeginWrap/Hold/Pull/Release). */
+/** 로직: wrap 컨트롤러(BeginWrap/Hold/Pull/Release). */
 DECLARE_LOG_CATEGORY_EXTERN(LogRopeWrap, Log, All);
 
 /** 충돌: collider/provider/SDF 런타임 질의(broad/narrow phase). */

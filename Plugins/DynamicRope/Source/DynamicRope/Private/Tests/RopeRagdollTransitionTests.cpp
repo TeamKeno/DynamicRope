@@ -5,10 +5,10 @@
 // 로직 레벨에서 월드 없이 검증할 수 있다:
 //   (a) Hold: 본 트랜스폼이 한 프레임에 크게 점프해도 속도 주입 없이(Prev=Pos) 그대로 추종한다.
 //   (b) Hold: 감긴 대상이 파괴되면(weak null) 폴백 없이 false — 호출자가 release.
-//   (c) DecideWrap: 포즈 팝으로 지배 본이 바뀌면 dwell 타이머가 재시작한다(전이 프레임 오탐 방어).
-//   (d) 솔버 마찰: 표면속도 스파이크의 드래그가 Coulomb 한계 μ·λ·w로 클램프된다(스파이크 크기 비비례).
-//   (e) 감지기: 상대운동 평가가 표면속도를 빼고 계산한다 + 스파이크가 캡처 게이트에서 안 걸리는
+//   (c) 솔버 마찰: 표면속도 스파이크의 드래그가 Coulomb 한계 μ·λ·w로 클램프된다(스파이크 크기 비비례).
+//   (d) 감지기: 상대운동 평가가 표면속도를 빼고 계산한다 + 스파이크가 캡처 게이트에서 안 걸리는
 //       현재 동작의 특성 고정(방어선은 Contacting 체류 + 후보 소실 dismiss라는 문서화).
+// (지배 본 스왑 시 dwell 재시작은 런타임 FRopeContactTracker 담당 — DecideWrap 제거로 이 파일에서 빠짐.)
 // 실제 물리 본(IsSimulatingPhysics 분기), 부분 랙돌, 캡슐 재빌드는 PIE 체크리스트로 커버한다.
 
 #include "Misc/AutomationTest.h"
@@ -130,63 +130,7 @@ bool FRopeRagdollHoldMeshLossTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// (c) 전이 프레임 오탐 방어: 랙돌 포즈 팝으로 지배 본이 A→B로 바뀌면 DecideWrap의 dwell
-// 타이머가 재시작해야 한다 — A에서 쌓은 체류 시간이 B로 이월되면 팝 순간 잘못된 본에 즉시
-// 커밋될 수 있다. 커밋은 B가 WrapDecisionTime을 온전히 다시 채운 뒤에만 일어나야 한다.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeRagdollDwellResetTest,
-	"DynamicRope.Ragdoll.DecideWrapDwellResetsOnBoneSwitch",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeRagdollDwellResetTest::RunTest(const FString& Parameters)
-{
-	// 노드 x = 0,20,...,140. 반경 25 + ContactRadius 3 = reach 28 → (60,0,0) 구는 노드 40/60/80 접촉(3개).
-	const FVector NearCenter(60.0f, 0.0f, 0.0f);
-	// 접촉 불가 위치(비활성화용)
-	const FVector FarAway(0.0f, 0.0f, 100000.0f);
-
-	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
-	USkeletalMeshComponent* Mesh = NewObject<USkeletalMeshComponent>();
-	RopeTest::FSphereMockCollider BoneA(NearCenter, 25.0f, FName("boneA"), Mesh);
-	RopeTest::FSphereMockCollider BoneB(FarAway, 25.0f, FName("boneB"), Mesh);
-	TArray<IRopeCollider*> Colliders = { &BoneA, &BoneB };
-
-	FRopeWrapConfig Config;
-	Config.ContactQueryRadius = 3.0f;
-	FRopeDetectConfig Detect;
-	Detect.MinLatchNodes = 3;
-	Detect.WrapDecisionTime = 0.15f;
-	const float Dt = 0.05f;
-
-	FRopeWrapController Wrap;
-	FRopeWrapState Seed;
-
-	// boneA 접촉 3프레임: dwell 0 → 0.05 → 0.10 (< 0.15) — 아직 커밋 없음.
-	for (int32 i = 0; i < 3; ++i)
-	{
-		TestFalse(FString::Printf(TEXT("no commit while boneA dwell below threshold (frame %d)"), i),
-			Wrap.DecideWrap(Sim, Colliders, Config, Detect, Dt, Seed));
-	}
-
-	// 포즈 팝: 접촉이 boneA → boneB로 스왑(같은 위치에 B가 들어옴).
-	BoneA.Center = FarAway;
-	BoneB.Center = NearCenter;
-
-	// 스왑 직후 3프레임: A의 dwell(0.10)이 이월됐다면 두 번째 프레임(0.15)에 조기 커밋된다.
-	// 재시작이 맞으면 B 기준 dwell 0 → 0.05 → 0.10 — 여전히 커밋 없음.
-	for (int32 i = 0; i < 3; ++i)
-	{
-		TestFalse(FString::Printf(TEXT("dwell restarts on bone switch — no early commit (frame %d)"), i),
-			Wrap.DecideWrap(Sim, Colliders, Config, Detect, Dt, Seed));
-	}
-
-	// B가 자체적으로 WrapDecisionTime을 채우는 프레임(0.15)에 커밋 — 본은 반드시 B.
-	TestTrue(TEXT("commits after boneB accumulates full dwell"),
-		Wrap.DecideWrap(Sim, Colliders, Config, Detect, Dt, Seed));
-	TestTrue(TEXT("committed bone is the post-pop bone (boneB)"), Seed.BoneName == FName("boneB"));
-	return true;
-}
-
-// (d) 전이 프레임 표면속도 스파이크: 랙돌 켜지는 프레임에 본이 튀면 캡슐 prev 끝점 대비
+// (c) 전이 프레임 표면속도 스파이크: 랙돌 켜지는 프레임에 본이 튀면 캡슐 prev 끝점 대비
 // 이동이 커져 SurfaceVelocity가 스파이크한다. 마찰 드래그는 Coulomb 한계 μ·λ·w로 클램프되므로
 // 로프가 스파이크 속도에 비례해 쓸려가면 안 된다 — 스파이크를 10배로 키워도 프레임 변위가
 // 거의 그대로여야 한다(클램프 활성 증명).
@@ -241,7 +185,7 @@ bool FRopeRagdollFrictionClampTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// (e) 상대운동 평가와 캡처의 현재 계약 고정:
+// (d) 상대운동 평가와 캡처의 현재 계약 고정:
 //  - EvaluateRelativeMotion은 로프 프레임 변위(cm/프레임)에서 표면속도(cm/s)를 dt로 환산해 뺀다.
 //    정지 로프 + 움직이는 표면이면 상대 접선 속도 = 표면 속도 × dt(cm/프레임 단위 — 움직이는 본
 //    위에서도 "스침" 판정이 가능한 근거). dt 환산 누락으로 ~1/dt배 과대였던 버그를 여기서 고정한다.

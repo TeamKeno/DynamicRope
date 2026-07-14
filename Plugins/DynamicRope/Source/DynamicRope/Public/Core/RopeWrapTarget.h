@@ -9,7 +9,7 @@
 //                            FRopeBindingFrame + ResolveBindingWorld.  (Hold/BeginWrap이 소비)
 //   B. 집계(aggregation)   — 접촉 집계가 노드를 "무슨 단위"로 묶는가.
 //                            FRopeWrapTargetKey + IRopeWrapTargetRegistry.
-//                            (소비자: 현행 런타임은 Contacting 트래커, DecideWrap은 유닛테스트 기준점)
+//                            (소비자: 현행 런타임은 Contacting 페이즈의 FRopeContactTracker)
 //
 // [배선 상태] seam A(ResolveBindingWorld)는 랩 경로 전체(Hold/BeginWrap/경로 빌드/앵커 복원/프리뷰)에
 // 배선 완료. 스켈레톤 구조 질의(RopeWrapTargets:: — 부모/자식 키, 스켈레탈 판별)도 랩 경로의 인라인

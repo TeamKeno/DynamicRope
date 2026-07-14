@@ -7,7 +7,7 @@
 
 #include "CoreMinimal.h"
 #include "Core/RopeTypes.h"
-// FRopeWrapTargetKey(DecideWrap 집계 키)
+// 랩 대상 추상화: FRopeBindingFrame/ResolveBindingWorld(Hold 바인딩, seam A) + FRopeWrapTargetKey(seam B)
 #include "Core/RopeWrapTarget.h"
 
 class USkeletalMeshComponent;
@@ -17,19 +17,6 @@ class DYNAMICROPE_API FRopeWrapController
 {
 public:
 	FRopeWrapState State;
-
-	/**
-	 * 접촉 결정(physics → logic 게이트). 각 노드를 콜라이더들에 대해 질의하여 dominant 하게 접촉된 bone 을
-	 * 찾고, 커밋하기 전에 MinLatchNodes 개의 노드가 WrapDecisionTime 동안 지속적으로 접촉할 것을
-	 * 요구한다. 한 번 true 를 반환하며 BeginWrap 을 위해 OutSeed(노드 인덱스 + bone)를 채운다.
-	 * 후보를 프레임에 걸쳐 내부적으로 추적한다.
-	 *
-	 * [런타임 미사용] 현행 런타임은 Contacting 페이즈(FRopeContactTracker + 시드 갱신)가 이 판정을
-	 * 대체했다 — 지금은 유닛테스트(Ragdoll dwell 계약 등)의 기준점으로만 쓰인다. 랩 대상 키 집계의
-	 * 레퍼런스 구현이기도 하므로 삭제하지 않고 유지한다.
-	 */
-	bool DecideWrap(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
-		const FRopeWrapConfig& Config, const FRopeDetectConfig& Detect, float Dt, FRopeWrapState& OutSeed);
 
 	/**
 	 * 시드된 접촉 노드들을 bone-local 공간으로 동결(freeze)한다(physics → logic handoff).
@@ -65,13 +52,4 @@ public:
 	void Release(ERopeReleaseReason Reason);
 
 	bool IsActive() const { return State.IsWrapped(); }
-
-private:
-	/**
-	 * 결정을 위한 지속 접촉 누적값(일시적이며 wrap 상태의 일부가 아니다).
-	 * 집계 단위는 "랩 대상 키"다 — 지금은 본 이름 1:1, 3번(본 그룹)에서 그룹 이름이 된다.
-	 */
-	FRopeWrapTargetKey CandidateTarget;
-	float              CandidateTime = 0.0f;
-	TArray<int32>      CandidateNodes;
 };
