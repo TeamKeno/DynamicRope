@@ -25,6 +25,9 @@ public:
 		FRopeDetectConfig DetectConfig;
 		ERopeWrappingPathMode PathMode = ERopeWrappingPathMode::SurfaceVectorField;
 
+		/** 결착 모델. Pierce면 감김 나선 경로 대신 aim-hit 접점에 단일 앵커로 꽂는다(③ 전용). */
+		ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
+
 		float RopeRadius = 0.0f;
 		int32 RopeNumSides = 8;
 		float RopeLength = 0.0f;

@@ -13,6 +13,9 @@
 #include "Debug/RopeDebugSnapshot.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+// 팁 부착물(Pierce/Cinch 창날·작살) 렌더 컴포넌트
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "GameFramework/Actor.h"
 // Pull: 캐릭터 견인(CharacterMovement AddForce)
 #include "GameFramework/Character.h"
@@ -217,6 +220,8 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	}
 	ResetTransientPhaseState();
 	ReleaseCooldown = 0.0f;
+	// 던지기~해제 단위 팁 부착물 확보(③ Pierce/Cinch의 실제 진입점; 이미 있으면 no-op).
+	EnsureTipMesh();
 
 	FRopePreparedThrowPreview ResolvedPrepared = Prepared;
 	// 입력 때 저장한 owner-local path를 throw 실행 시점의 owner transform으로 다시 해석한다.
@@ -637,6 +642,8 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
 	Input.DetectConfig = DetectConfig;
 	Input.PathMode = GetWrappingPathMode();
+	// 결착 모델을 preview 빌더로 전파 — Pierce면 감김 나선 대신 단일 앵커 꽂힘 경로를 탄다.
+	Input.TipEngagement = TipEngagement;
 	Input.RopeRadius = Radius;
 	Input.RopeNumSides = NumSides;
 	Input.RopeLength = FMath::Max(Sim.RopeLength, RopeLength);
@@ -663,6 +670,8 @@ void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, co
 	ReleaseCooldown = ReleaseCooldownSeconds;
 	// Wrapped에서 오는 release라 커밋된 wrap이 있었다 → per-instance + 중앙 신호 둘 다.
 	DispatchReleased(WrappedMesh, Bone, Reason, /*bWasWrapped*/ true);
+	// 던지기~해제 단위: 우리가 스폰한 팁 부착물은 여기서 파괴한다(외부 컴포넌트는 보존).
+	TeardownSpawnedTipMesh();
 }
 
 void URopeComponent::DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped)
@@ -954,6 +963,9 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		MarkRenderTransformDirty();
 	}
 
+	// 팁 부착물(창날/작살)을 확정된 자유단 위치로 추종시킨다(솔브 출력 소비 단계라 여기).
+	UpdateTipMeshTransform();
+
 	// wrapped stat 카운터(독립).
 	if (Phase == ERopePhase::Wrapped)
 	{
@@ -975,6 +987,93 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		DebugSub->SubmitSnapshot(this, MoveTemp(DebugSnapshot));
 	}
 #endif
+}
+
+// ===== 팁 부착물(표시 전용) =================================================
+
+void URopeComponent::EnsureTipMesh()
+{
+	// 던지기 진입에서 호출. ① Owner에 붙은 태그 컴포넌트를 우선 재사용(파괴 안 함) → ② 없고 TipMesh
+	// 에셋이 있으면 스폰(파괴는 우리 몫). 이미 확보돼 있으면 no-op. 질량·충돌 없는 표시 전용이다.
+	if (TipMeshComponent)
+	{
+		return;
+	}
+
+	AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return;
+	}
+
+	// ① 외부 컴포넌트 탐색(태그) — 있으면 재사용하고 소유는 취하지 않는다.
+	if (!TipMeshComponentTag.IsNone())
+	{
+		TArray<UActorComponent*> Tagged =
+			Owner->GetComponentsByTag(UStaticMeshComponent::StaticClass(), TipMeshComponentTag);
+		if (Tagged.Num() > 0)
+		{
+			TipMeshComponent = Cast<UStaticMeshComponent>(Tagged[0]);
+			bTipMeshSpawnedByUs = false;
+			return;
+		}
+	}
+
+	// ② 스폰(에셋 있을 때만). Wielder의 PreviewComponent 생성 idiom과 동형.
+	if (!TipMesh)
+	{
+		return;
+	}
+
+	const FName TipName = MakeUniqueObjectName(Owner, UStaticMeshComponent::StaticClass(), TEXT("RopeTipMesh"));
+	UStaticMeshComponent* Spawned =
+		NewObject<UStaticMeshComponent>(Owner, UStaticMeshComponent::StaticClass(), TipName);
+	if (!Spawned)
+	{
+		return;
+	}
+	Owner->AddInstanceComponent(Spawned);
+	Spawned->SetupAttachment(this);
+	Spawned->SetStaticMesh(TipMesh);
+	Spawned->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Spawned->RegisterComponent();
+
+	TipMeshComponent = Spawned;
+	bTipMeshSpawnedByUs = true;
+}
+
+void URopeComponent::TeardownSpawnedTipMesh()
+{
+	// 스폰분만 파괴한다 — 외부(태그로 찾은) 컴포넌트는 소유가 아니므로 놔둔다.
+	if (TipMeshComponent && bTipMeshSpawnedByUs)
+	{
+		TipMeshComponent->DestroyComponent();
+	}
+	TipMeshComponent = nullptr;
+	bTipMeshSpawnedByUs = false;
+}
+
+void URopeComponent::UpdateTipMeshTransform()
+{
+	// 위치 = 끝 노드(자유단), 회전 = 마지막 세그먼트 방향을 X축으로. 노드 위치와 정확히 일치하도록
+	// 상대가 아닌 월드 트랜스폼으로 배치한다(this에 부착돼 있어도 컴포넌트 트랜스폼 영향을 받지 않게).
+	if (!TipMeshComponent)
+	{
+		return;
+	}
+
+	const int32 N = Sim.Num();
+	if (N < 2)
+	{
+		return;
+	}
+
+	const FVector TipPos = Sim.Positions[N - 1];
+	const FVector SegDir = (Sim.Positions[N - 1] - Sim.Positions[N - 2])
+		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	const FQuat TipRot = FRotationMatrix::MakeFromX(SegDir).ToQuat();
+
+	TipMeshComponent->SetWorldTransform(TipMeshRelativeTransform * FTransform(TipRot, TipPos));
 }
 
 // ===== UActorComponent ======================================================
@@ -1013,6 +1112,9 @@ void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 			DispatchReleased(nullptr, Bone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
 		}
 	}
+
+	// 우리가 스폰한 팁 부착물 정리(외부 컴포넌트는 보존). release 없이 파괴되는 경로도 커버.
+	TeardownSpawnedTipMesh();
 
 	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
 	{
@@ -1578,6 +1680,8 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 	ResetChainForThrow(ResolvedThrow.Origin);
 	BeginWhipSwingFromThrow(ResolvedThrow);
 	InjectThrowVelocityIntoVerlet(ResolvedThrow);
+	// 던지기~해제 단위 팁 부착물 확보(TipMesh/태그 설정된 경우만; 이미 있으면 no-op).
+	EnsureTipMesh();
 
 	SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("fresh throw impulse, aim=%s, speed=%.1f"),
 		*WhipGuide.GetAimDir().ToCompactString(), ResolvedThrow.ThrowSpeed));

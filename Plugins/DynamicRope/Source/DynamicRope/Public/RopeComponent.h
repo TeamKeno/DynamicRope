@@ -30,6 +30,8 @@ class IRopeColliderProvider;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class USkeletalMeshComponent;
+class UStaticMesh;
+class UStaticMeshComponent;
 // 랩 대상 추상화(Decision 0): 랩 대상 mesh를 USceneComponent로 일반화.
 class USceneComponent;
 class FRegisterComponentContext;
@@ -94,6 +96,23 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
+
+	//~ Tip(팁 부착물 — 결착 모델 Pierce/Cinch용 창날/작살/추) --------------
+	// 밧줄 자유단(GetNodeCount()-1)에 붙는 표시 전용 StaticMesh. 질량·충돌 없음(팁 질량 솔버 반영
+	// 안 함 — 2026-07-14 확정). 던지기~해제 단위 수명: 던지기 진입에 확보, release/cut·EndPlay에
+	// (우리가 스폰한 경우만) 파괴. 외부(태그로 찾은) 컴포넌트는 파괴하지 않는다.
+
+	/** 팁에 스폰할 StaticMesh 에셋. 비어 있고 TipMeshComponentTag로도 못 찾으면 팁 없음. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	TObjectPtr<UStaticMesh> TipMesh = nullptr;
+
+	/** 설정 시, Owner에 이미 붙은 이 태그의 StaticMeshComponent를 팁으로 재사용한다(스폰보다 우선, 파괴 안 함). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	FName TipMeshComponentTag = NAME_None;
+
+	/** 팁 노드(자유단) 프레임 기준 배치 오프셋(로컬 → 월드는 UpdateTipMeshTransform이 적용). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	FTransform TipMeshRelativeTransform = FTransform::Identity;
 
 	// 아래 초기화 전용 값들(NumParticles/RopeLength/MinRopeLength)은 InitRope 시점에만 소비된다 —
 	// 런타임 쓰기는 재초기화 전까지 무효라 BlueprintReadOnly(함정 방지). 런타임 길이 변경은
@@ -529,6 +548,20 @@ private:
 	// bScaleTwistByLength=false거나 RopeMaterial에 TwistTurns가 없으면 nullptr(원본 머티리얼을 그대로 사용).
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> RopeMID = nullptr;
+
+	//~ 팁 부착물 런타임 상태 -----------------------------------------------
+	// UObject라 값 타입 sim 멤버와 달리 GC 추적이 필요하다(Transient UPROPERTY).
+	// 던지기 진입에 EnsureTipMesh가 확보하고, FinalizeSimFrame이 매 프레임 자유단으로 추종시킨다.
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMeshComponent> TipMeshComponent = nullptr;
+
+	// 우리가 스폰했는가 — release/cut·EndPlay에서 스폰분만 파괴하기 위한 소유권 플래그(외부 컴포넌트 보호).
+	bool bTipMeshSpawnedByUs = false;
+
+	// 팁 부착물을 던지기~해제 단위로 확보/파괴/추종한다(TipMesh/TipMeshComponentTag가 설정된 경우만 동작).
+	void EnsureTipMesh();
+	void TeardownSpawnedTipMesh();
+	void UpdateTipMeshTransform();
 
 	//~ 페이즈 상태 머신 ----------------------------------------------------
 	ERopePhase Phase = ERopePhase::Free;

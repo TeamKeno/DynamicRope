@@ -416,6 +416,30 @@ namespace
 		}
 	}
 
+	// Pierce(꽂힘): 밧줄 끝(팁=창)이 꽂힘 지점에 오도록 손 원점 → 꽂힘 지점 직선으로 전체 노드를 편다.
+	// 팁 뒤로 남는 로프는 없다 — 여분 길이는 손~팁 사이 slack이며 물리(솔버)가 drape로 처리한다.
+	void BuildPierceStraightCenterline(const FRopeThrowPreviewBuilder::FInput& Input,
+		const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim, TArray<FVector>& OutCenterline)
+	{
+		OutCenterline = SourceSim.Positions;
+		const int32 N = OutCenterline.Num();
+		if (N < 2)
+		{
+			return;
+		}
+
+		const FVector Origin = Input.ThrowContext.Origin;
+		const FVector Hit = Candidate.WorldPoint;
+		const int32 Last = N - 1;
+
+		// 손(0)~팁(Last) 전체를 직선으로. 팁(마지막 노드)이 꽂힘 지점 = 창이 박히는 곳. 팁 뒤 여분 없음.
+		for (int32 NodeIndex = 0; NodeIndex <= Last; ++NodeIndex)
+		{
+			const float Alpha = static_cast<float>(NodeIndex) / static_cast<float>(Last);
+			OutCenterline[NodeIndex] = FMath::Lerp(Origin, Hit, Alpha);
+		}
+	}
+
 	bool BuildPreparedFromCandidate(const FRopeThrowPreviewBuilder::FInput& Input,
 		const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim,
 		FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason)
@@ -463,6 +487,45 @@ namespace
 		LatchAnchor.StartWorldPosition = SourceSim.Positions[Candidate.NodeIndex];
 		LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Input.RopeRadius);
 		LatchAnchor.RopeDistance = 0.0f;
+
+		// Pierce(③ 전용): 감김 경로 빌드(BuildPreviewCenterline)와 경로 앵커 확장을 건너뛰고,
+		// aim-hit 접점에 단일 앵커로 성립한다. RenderPreview는 손→꽂힘 지점 직선(연출용).
+		// 이후 FinishGuidedThrow가 Anchors(=1개)를 그대로 Wrapped seed로 승격한다(커밋 경로 무변경).
+		if (Input.TipEngagement == ERopeTipEngagement::Pierce)
+		{
+			// 창(팁)이 꽂히는 것이므로 앵커는 거리 기반 접점 노드(Candidate.NodeIndex)가 아니라
+			// 밧줄 끝(마지막 노드 = 팁 mesh 위치)이어야 한다. 그러지 않으면 안쪽 노드가 고정되고
+			// 팁 + 여분 로프가 접점 아래로 늘어진다. 앵커 로컬 위치는 이미 꽂힘 지점(Candidate.WorldPoint)이다.
+			LatchAnchor.NodeIndex = SourceSim.Num() - 1;
+			LatchAnchor.StartWorldPosition = Candidate.WorldPoint;
+
+			TArray<FVector> StraightPoints;
+			BuildPierceStraightCenterline(Input, Candidate, SourceSim, StraightPoints);
+
+			OutPrepared.RenderPreview.Points = MoveTemp(StraightPoints);
+			OutPrepared.RenderPreview.Radius = FMath::Max(0.1f, Input.RopeRadius * 1.05f);
+			OutPrepared.RenderPreview.NumSides = FMath::Clamp(Input.RopeNumSides, 3, 32);
+			if (!OutPrepared.RenderPreview.IsValid())
+			{
+				RopeMath::SetPreviewFailureReason(OutFailureReason,
+					FString::Printf(TEXT("pierce preview output invalid (points=%d, node=%d, sourceNodes=%d)"),
+						OutPrepared.RenderPreview.Points.Num(), Candidate.NodeIndex, SourceSim.Num()));
+				return false;
+			}
+
+			OutPrepared.bValid = true;
+			OutPrepared.ThrowContext = Input.ThrowContext;
+			OutPrepared.PreviewSim = SourceSim;
+			OutPrepared.Contact = Candidate;
+			OutPrepared.LatchAnchor = LatchAnchor;
+			OutPrepared.Mesh = Mesh;
+			OutPrepared.Bone = Candidate.Bone;
+			OutPrepared.BuildTimeSeconds = FPlatformTime::Seconds();
+			OutPrepared.Anchors.Reset();
+			OutPrepared.Anchors.Add(LatchAnchor); // 단일 앵커 = Pierce의 정상 형태(AnchorCount=1)
+
+			return OutPrepared.IsValid();
+		}
 
 		TArray<FVector> PreviewPoints;
 		FRopeWrappingPhase PreviewWrappingPhase;
