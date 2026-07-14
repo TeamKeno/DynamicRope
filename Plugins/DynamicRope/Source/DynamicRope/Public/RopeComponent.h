@@ -654,6 +654,10 @@ private:
 	// wielder가 앵커 쪽으로 끌려가는 climb-in. ApplyPullForce의 owner 쪽 미러(시뮬 루트 → CharacterMovement).
 	void ApplyPullForceToWielder(const FVector& Force);
 
+	// 능동 Pull 견인 대상 물리 바디의 선/각속도를 HoldConfig 상한으로 클램프(상수 힘 폭주=떠오름/스핀 억제).
+	// ApplyPullForce가 힘 인가 뒤 같은 바디에 호출. BoneName None이면 컴포넌트 단위(프리미티브/루트).
+	void ClampPulledBodyVelocity(UPrimitiveComponent* Prim, FName BoneName) const;
+
 	// 모든 release 트리거의 공용 마무리(페이즈 전환+노드 반환+일시 상태 폐기+쿨다운+이벤트).
 	void FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog);
 

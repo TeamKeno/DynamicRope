@@ -1133,6 +1133,21 @@ struct FRopeHoldConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float PullForce = 100000.0f;
+
+	/**
+	 * 능동 Pull 대상 물리 바디의 선속도 상한(cm/s, 0 = 무제한). 능동 Pull은 상수 힘이라 당김 방향에 위 성분이
+	 * 있으면 대상이 종단속도 없이 무한 가속(하늘로 떠오름)한다 — 이 상한이 그 폭주를 가둔다(질량 의존 a=F/m은
+	 * 상한 이하에서 그대로 유지). 견인 중(ApplyPullForce)에만 적용.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float ActivePullMaxLinearSpeed = 300.0f;
+
+	/**
+	 * 능동 Pull 대상 물리 바디의 각속도 상한(deg/s, 0 = 무제한). 힘을 무게중심(AddForce)에 주면 토크가 없어
+	 * 스핀 원인이 대부분 사라지지만, 랙돌 관절 다이내믹이 만드는 잔여 스핀을 이 상한이 마저 억제한다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "deg/s"))
+	float ActivePullMaxAngularSpeed = 720.0f;
 };
 
 /** 던질 때 기준축을 어느 좌표계에서 가져올지. */

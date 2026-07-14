@@ -3356,14 +3356,17 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	}
 	AActor* Owner = MeshComp->GetOwner();
 
-	// 1) 스켈레탈: 감긴 본(부모 체인 승격 포함)이 물리 시뮬 중(래그돌/물리 프랍)이면 그 바디에 직접 —
-	//    가장 정확한 인가점. 감긴 본 자체에 바디가 없으면(트위스트 본 등) 가장 가까운 시뮬 부모 바디로.
+	// 1) 스켈레탈: 감긴 본(부모 체인 승격 포함)이 물리 시뮬 중(래그돌/물리 프랍)이면 그 바디에 직접.
+	//    감긴 본 자체에 바디가 없으면(트위스트 본 등) 가장 가까운 시뮬 부모 바디로.
 	if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
 	{
 		const FName SimBone = FindNearestSimulatingBone(Skel, Pull.Bone);
 		if (!SimBone.IsNone())
 		{
-			Skel->AddForceAtLocation(Force, Pull.WorldPoint, SimBone);
+			// 힘은 *무게중심*(AddForce)에 준다 — 감긴 표면점(AddForceAtLocation)에 주면 오프셋 토크로 스핀 폭주가
+			// 난다. 당김(선형 견인)은 동일하고 회전만 제거된다. 이어서 속도 상한으로 상수 힘 폭주(떠오름)를 가둔다.
+			Skel->AddForce(Force, SimBone);
+			ClampPulledBodyVelocity(Skel, SimBone);
 			// 부분 랙돌(메시 루트 바디는 키네마틱): 시뮬 본에 준 힘은 키네마틱 부모 구속(무한질량)이 흡수해
 			// 액터로 전달되지 않는다. 캐릭터가 여전히 무브먼트로 구동 중이면 이동체에도 같은 힘을 줘 실제로
 			// 끌리게 한다(본 인가는 팔다리가 당겨지는 시각 반응, 무브먼트 인가는 몸통 견인 — 역할이 다르다).
@@ -3388,12 +3391,13 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		return;
 	}
 
-	// 3) wrap 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등)면 그 바디에 직접.
+	// 3) wrap 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등)면 그 바디에 직접(무게중심+속도 상한).
 	if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
 	{
 		if (Prim->IsSimulatingPhysics())
 		{
-			Prim->AddForceAtLocation(Force, Pull.WorldPoint);
+			Prim->AddForce(Force);
+			ClampPulledBodyVelocity(Prim, NAME_None);
 			return;
 		}
 	}
@@ -3403,7 +3407,8 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	{
 		if (Root->IsSimulatingPhysics())
 		{
-			Root->AddForceAtLocation(Force, Pull.WorldPoint);
+			Root->AddForce(Force);
+			ClampPulledBodyVelocity(Root, NAME_None);
 			return;
 		}
 	}
@@ -3416,6 +3421,36 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		UE_LOG(LogDynamicRope, Warning,
 			TEXT("[%s] Pull has no force receiver: target=%s bone=%s has no simulating body up its parent chain, owner=%s has no force-consuming CharacterMovement (not a Character, or movement disabled) and its root is not simulating — pull force is dropped."),
 			*GetName(), *MeshComp->GetName(), *Pull.Bone.ToString(), *GetNameSafe(Owner));
+	}
+}
+
+void URopeComponent::ClampPulledBodyVelocity(UPrimitiveComponent* Prim, FName BoneName) const
+{
+	if (!Prim)
+	{
+		return;
+	}
+	// 선속도 상한: 능동 Pull은 상수 힘이라 종단속도가 없다 → 위 성분이 있으면 무한 가속(떠오름). 상한으로 가둔다.
+	// 총 선속도를 클램프하므로 견인 중 다른 성분(중력 등)도 상한 이내로 눌리지만, 상한 이하에선 a=F/m(질량 의존) 유지.
+	const float MaxLin = FMath::Max(0.0f, HoldConfig.ActivePullMaxLinearSpeed);
+	if (MaxLin > 0.0f)
+	{
+		const FVector LinVel = Prim->GetPhysicsLinearVelocity(BoneName);
+		if (LinVel.SizeSquared() > MaxLin * MaxLin)
+		{
+			Prim->SetPhysicsLinearVelocity(LinVel.GetClampedToMaxSize(MaxLin), /*bAddToCurrent*/ false, BoneName);
+		}
+	}
+	// 각속도 상한: 힘을 무게중심에 줘 토크 원인은 제거했지만, 랙돌 관절 다이내믹의 잔여 스핀을 마저 가둔다.
+	const float MaxAngDeg = FMath::Max(0.0f, HoldConfig.ActivePullMaxAngularSpeed);
+	if (MaxAngDeg > 0.0f)
+	{
+		const float MaxAngRad = FMath::DegreesToRadians(MaxAngDeg);
+		const FVector AngVel = Prim->GetPhysicsAngularVelocityInRadians(BoneName);
+		if (AngVel.SizeSquared() > MaxAngRad * MaxAngRad)
+		{
+			Prim->SetPhysicsAngularVelocityInRadians(AngVel.GetClampedToMaxSize(MaxAngRad), /*bAddToCurrent*/ false, BoneName);
+		}
 	}
 }
 
