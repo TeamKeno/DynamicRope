@@ -661,11 +661,23 @@ void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, co
 	WrapController.Release(Reason);
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
+	// Wrapped에서 오는 release라 커밋된 wrap이 있었다 → per-instance + 중앙 신호 둘 다.
+	DispatchReleased(WrappedMesh, Bone, Reason, /*bWasWrapped*/ true);
+}
+
+void URopeComponent::DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped)
+{
+	// per-instance: Captured/Wrapped로 시작된 engagement의 종료를 항상 알린다(짝 맞춤).
 	NotifyReleased(Bone, Reason);
 	OnRopeReleased.Broadcast(Bone, Reason);
-	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+	// 중앙 신호는 OnAnyRopeWrapped와 짝 — 실제 성립(Wrapped)이 있었을 때만. 성립 전 abort(bWasWrapped=false)에서
+	// 쏘면, 다른 로프가 감아 랙돌시킨 같은 대상을 이 로프의 abort가 잘못 복구시킨다.
+	if (bWasWrapped)
 	{
-		SimSubsystem->OnAnyRopeReleased.Broadcast(WrappedMesh, Bone, Reason);
+		if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+		{
+			SimSubsystem->OnAnyRopeReleased.Broadcast(WrappedMesh, Bone, Reason);
+		}
 	}
 }
 
@@ -983,6 +995,25 @@ void URopeComponent::BeginPlay()
 
 void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// 부착 상태로 파괴/제거되면 release 이벤트를 발화해 소비자(잡힘 카운터·랙돌 오복구)가 상태에 고착되지
+	// 않게 한다. 월드 통째 teardown(Quit/LevelTransition/에디터 종료)에선 구독자도 함께 죽으므로 생략한다.
+	if (EndPlayReason == EEndPlayReason::Destroyed || EndPlayReason == EEndPlayReason::RemovedFromWorld)
+	{
+		if (Phase == ERopePhase::Wrapped)
+		{
+			// 커밋된 wrap이 파괴됨 → per-instance + 중앙 신호(cross-actor 대상이 살아 있으면 랙돌 복구가 필요).
+			DispatchReleased(WrapController.State.Mesh.Get(), WrapController.State.BoneName,
+				ERopeReleaseReason::Broken, /*bWasWrapped*/ true);
+		}
+		else if (Phase == ERopePhase::Contacting || Phase == ERopePhase::Wrapping)
+		{
+			// Captured만 났고 성립 전 → per-instance만(짝 맞춤). GuidedThrow(커밋 전)는 start 이벤트가 없어 생략.
+			const FName Bone = (Phase == ERopePhase::Wrapping)
+				? WrappingPhase.State.BoneName : ContactTracker.CandidateBone;
+			DispatchReleased(nullptr, Bone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
+		}
+	}
+
 	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
 	{
 		SimSubsystem->UnregisterRope(this);
@@ -2030,6 +2061,8 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 
 	if (ShouldDismissContacting())
 	{
+		// Captured 짝 맞춤: 성립 전 이탈이라 per-instance만(중앙 신호는 커밋된 wrap 전용). 본 이름은 리셋 전에 읽는다.
+		DispatchReleased(nullptr, ContactTracker.CandidateBone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
 		SetPhase(ERopePhase::Flight, TEXT("contact lost before wrapping"));
 		ResetTransientPhaseState();
 		return;
@@ -2052,6 +2085,8 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 	const float StallTimeout = FMath::Max(DetectConfig.WrapDecisionTime * 10.0f, 1.0f);
 	if (ContactingElapsed >= StallTimeout)
 	{
+		// Captured 짝 맞춤(성립 전 이탈, per-instance만). 본 이름은 리셋 전에 읽는다.
+		DispatchReleased(nullptr, ContactTracker.CandidateBone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
 		SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("contacting stalled %.2fs (dwell %.2fs < %.2fs)"),
 			ContactingElapsed, ContactTracker.DwellTime, DetectConfig.WrapDecisionTime));
 		ResetTransientPhaseState();
@@ -2251,6 +2286,8 @@ void URopeComponent::StartWrappingFromContacting()
 	const USceneComponent* Mesh = PendingWrapSeed.Mesh.Get();
 	if (!Mesh || PendingWrapSeed.BoneName.IsNone() || PendingWrapSeed.Latched.Num() == 0)
 	{
+		// Captured 짝 맞춤(Contacting→Flight, 성립 전 → per-instance만). 본 이름은 리셋 전에 읽는다.
+		DispatchReleased(nullptr, ContactTracker.CandidateBone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
 		SetPhase(ERopePhase::Flight, TEXT("invalid wrapping seed"));
 		ResetTransientPhaseState();
 		return;
@@ -2327,6 +2364,8 @@ void URopeComponent::StartWrappingFromContacting()
 	if (!WrappingPhase.Begin(LatchAnchor, Mesh, PendingWrapSeed.BoneName,
 		FMath::Max(0.01f, WrapConfig.WrappingMotionDuration), Sim, MakeWrappingContext()))
 	{
+		// Captured 짝 맞춤(Contacting→Flight, 성립 전 → per-instance만). 본 이름은 리셋 전에 읽는다.
+		DispatchReleased(nullptr, ContactTracker.CandidateBone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
 		SetPhase(ERopePhase::Flight, TEXT("no valid wrapping anchors"));
 		ResetTransientPhaseState();
 		return;
@@ -2529,6 +2568,10 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 {
 	UE_LOG(LogDynamicRope, Log, TEXT("[%s] AbortWrapping reason=%d"),
 		*GetName(), static_cast<int32>(Reason));
+
+	// Captured 짝 맞춤: Wrapping은 Contacting(Captured 발화)에서만 진입하므로 이 abort는 항상 앞선 Captured와
+	// 짝이다. 성립 전이라 per-instance만(중앙 신호는 커밋된 wrap 전용). 본 이름은 리셋 전에 읽는다.
+	DispatchReleased(nullptr, WrappingPhase.State.BoneName, Reason, /*bWasWrapped*/ false);
 
 	WrappingPhase.ReturnNodesToSolver(Sim, SimFrame.OverrideFrame);
 

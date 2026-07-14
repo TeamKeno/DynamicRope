@@ -796,6 +796,12 @@ private:
 	/** wrap 성립 단일 브로드캐스트: 네이티브 훅 + per-instance BP 델리게이트 + 서브시스템 중앙 신호(③/판정 공용). */
 	void DispatchWrapped(const FRopeWrappedEventInfo& Info);
 
+	/** release 단일 브로드캐스트. per-instance(NotifyReleased + OnRopeReleased)는 항상 발화 — Captured/Wrapped로
+	 *  시작된 engagement가 끝날 때마다 짝을 맞춘다(Contacting/Wrapping abort·destroy 포함). 중앙 OnAnyRopeReleased는
+	 *  **커밋된 wrap(bWasWrapped)일 때만** 발화한다 — 성립 전 abort에서 쏘면 다른 로프가 감아 랙돌시킨 대상을
+	 *  잘못 복구시킨다. WrappedMesh는 중앙 신호 페이로드(성립 전엔 nullptr). */
+	void DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped);
+
 	void AbortWrapping(ERopeReleaseReason Reason);
 
 	//~ Wrapped --------------------------------------------------------------
