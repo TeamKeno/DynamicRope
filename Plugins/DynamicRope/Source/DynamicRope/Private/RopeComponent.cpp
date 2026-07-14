@@ -2784,7 +2784,7 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 		}
 		else
 		{
-			ApplyPullForce(PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, PullDrive.LastPullSample);
+			ApplyPullForce(PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, PullDrive.LastPullSample, DeltaTime);
 		}
 	}
 }
@@ -3470,7 +3470,7 @@ USkeletalMeshComponent* URopeComponent::GetWrappedMesh() const
 	return const_cast<USkeletalMeshComponent*>(Cast<USkeletalMeshComponent>(WrapController.State.Mesh.Get()));
 }
 
-void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample& Pull)
+void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample& Pull, float DeltaTime)
 {
 	// wrap 대상 컴포넌트(cross-actor 가능). 계약상 로프는 대상을 읽기만 하므로 weak가 const지만,
 	// Pull은 의도된 게임플레이 개입(힘 인가)이라 여기서만 명시적으로 non-const로 푼다.
@@ -3483,6 +3483,10 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	}
 	AActor* Owner = MeshComp->GetOwner();
 
+	// Force = 당김 방향 × 최대 장력. 물리 바디는 장력 상한 속도 드라이브(ApplyPullVelocityDrive)로 인가한다.
+	const float MaxTension = static_cast<float>(Force.Size());
+	const FVector Dir = (MaxTension > KINDA_SMALL_NUMBER) ? (Force / MaxTension) : FVector::ZeroVector;
+
 	// 1) 스켈레탈: 감긴 본(부모 체인 승격 포함)이 물리 시뮬 중(래그돌/물리 프랍)이면 그 바디에 직접.
 	//    감긴 본 자체에 바디가 없으면(트위스트 본 등) 가장 가까운 시뮬 부모 바디로.
 	if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
@@ -3490,10 +3494,10 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		const FName SimBone = FindNearestSimulatingBone(Skel, Pull.Bone);
 		if (!SimBone.IsNone())
 		{
-			// 힘은 *무게중심*(AddForce)에 준다 — 감긴 표면점(AddForceAtLocation)에 주면 오프셋 토크로 스핀 폭주가
-			// 난다. 당김(선형 견인)은 동일하고 회전만 제거된다. 속도 페이드로 상수 힘 폭주(떠오름)를 자연 종단속도로
-			// 가두고, 각속도 클램프로 잔여 스핀을 마저 억제한다.
-			Skel->AddForce(ApplyPullVelocityFade(Force, Skel, SimBone), SimBone);
+			// 장력 상한 속도 드라이브: 대상을 목표 속도로 몰되 임펄스를 J=min(질량×ΔV, 장력×dt)로 클램프한다
+			// (무게중심 임펄스라 토크/스핀 없음, 오버슛 없어 먼지/턱턱 없음, 무거우면 뒤처짐). 각속도 클램프로 잔여
+			// 스핀 억제. 부분 랙돌(루트 키네마틱)은 아래에서 이동체에도 같은 힘을 줘 몸통을 끈다.
+			ApplyPullVelocityDrive(Skel, SimBone, Dir, MaxTension, DeltaTime);
 			ClampPulledBodyVelocity(Skel, SimBone);
 			// 부분 랙돌(메시 루트 바디는 키네마틱): 시뮬 본에 준 힘은 키네마틱 부모 구속(무한질량)이 흡수해
 			// 액터로 전달되지 않는다. 캐릭터가 여전히 무브먼트로 구동 중이면 이동체에도 같은 힘을 줘 실제로
@@ -3519,12 +3523,12 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		return;
 	}
 
-	// 3) wrap 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등)면 그 바디에 직접(무게중심+속도 상한).
+	// 3) wrap 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등)면 그 바디에 직접(장력 상한 속도 드라이브).
 	if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
 	{
 		if (Prim->IsSimulatingPhysics())
 		{
-			Prim->AddForce(ApplyPullVelocityFade(Force, Prim, NAME_None));
+			ApplyPullVelocityDrive(Prim, NAME_None, Dir, MaxTension, DeltaTime);
 			ClampPulledBodyVelocity(Prim, NAME_None);
 			return;
 		}
@@ -3535,7 +3539,7 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	{
 		if (Root->IsSimulatingPhysics())
 		{
-			Root->AddForce(ApplyPullVelocityFade(Force, Root, NAME_None));
+			ApplyPullVelocityDrive(Root, NAME_None, Dir, MaxTension, DeltaTime);
 			ClampPulledBodyVelocity(Root, NAME_None);
 			return;
 		}
@@ -3552,24 +3556,48 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	}
 }
 
-FVector URopeComponent::ApplyPullVelocityFade(const FVector& Force, UPrimitiveComponent* Prim, FName BoneName) const
+void URopeComponent::ApplyPullVelocityDrive(UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float MaxTension, float DeltaTime) const
 {
-	// 속도 비례 드래그(하드 클램프 대체): 상수 힘은 종단속도가 없어 당김 방향에 위 성분이 있으면 대상이 무한
-	// 가속(떠오름)한다. 로프축(당김 방향) 속도가 종단속도(vTerm)에 가까울수록 힘을 선형으로 0까지 페이드해
-	// vTerm에서 가속이 자연히 멎게 한다 — 클램프의 뚝뚝 끊김 없는 부드러운 종단. 당김 방향 성분만 페이드하므로
-	// 중력/측면 운동은 보존되고, 뒤로 밀지 않으며(스케일 [0,1]), 질량 의존(a=F·scale/m)은 종단 이하에서 유지.
-	const float VTerm = FMath::Max(0.0f, HoldConfig.ActivePullMaxLinearSpeed);
-	const float FMag = static_cast<float>(Force.Size());
-	if (VTerm <= 0.0f || FMag <= KINDA_SMALL_NUMBER || !Prim)
+	// 장력 상한 속도 드라이브(상수 힘 대체): 대상을 당김 방향 목표 속도(VTarget)로 몰되, 이번 프레임 적용할
+	// 임펄스를 J = min(질량×ΔV, MaxTension×dt)로 클램프한다.
+	//  - 가벼운 대상: J = 질량×ΔV(장력 여유) → 목표 속도에 *정확히* 도달(오버슛 없음). 상수 힘이 a=F/m로 한 프레임에
+	//    목표를 훌쩍 넘겨 튕기던(먼지/턱턱) 문제가 사라진다.
+	//  - 무거운 대상: J = MaxTension×dt(장력 한계) → 프레임당 ΔV=J/질량으로 천천히 가속 → 뒤처진다(현실적).
+	// 임펄스는 무게중심(위치 없는 AddImpulse)이라 토크/스핀 없음. bVelChange=false = 실제 임펄스(질량 나눔).
+	const float VTarget = FMath::Max(0.0f, HoldConfig.ActivePullMaxLinearSpeed);
+	if (!Prim || VTarget <= 0.0f || MaxTension <= KINDA_SMALL_NUMBER || Dir.IsNearlyZero() || DeltaTime <= 0.0f)
 	{
-		// 0=off(드래그 없음, 상수 힘 그대로) 또는 무력.
-		return Force;
+		return;
 	}
-	const FVector Dir = Force / FMag;
+	// 질량: 스켈레탈 본이면 그 바디 질량, 아니면 컴포넌트 질량.
+	float Mass = 0.0f;
+	if (!BoneName.IsNone())
+	{
+		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Prim))
+		{
+			if (FBodyInstance* Body = Skel->GetBodyInstance(BoneName))
+			{
+				Mass = static_cast<float>(Body->GetBodyMass());
+			}
+		}
+	}
+	if (Mass <= KINDA_SMALL_NUMBER)
+	{
+		Mass = static_cast<float>(Prim->GetMass());
+	}
+	if (Mass <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
 	const float VAlong = static_cast<float>(FVector::DotProduct(Prim->GetPhysicsLinearVelocity(BoneName), Dir));
-	// 종단에서 0, 정지에서 1, 종단 초과/역방향은 [0,1]로 클램프(과부스트·역추진 방지).
-	const float Scale = FMath::Clamp(1.0f - VAlong / VTerm, 0.0f, 1.0f);
-	return Force * Scale;
+	const float dV = VTarget - VAlong;
+	if (dV <= 0.0f)
+	{
+		return; // 이미 목표 이상 → 무동작(역추진 없음).
+	}
+	const float JTarget = Mass * dV;              // 목표 도달에 필요한 임펄스.
+	const float JMax = MaxTension * DeltaTime;     // 최대 장력이 이번 프레임 낼 수 있는 임펄스.
+	Prim->AddImpulse(Dir * FMath::Min(JTarget, JMax), BoneName, /*bVelChange*/ false);
 }
 
 void URopeComponent::ClampPulledBodyVelocity(UPrimitiveComponent* Prim, FName BoneName) const
@@ -3579,7 +3607,7 @@ void URopeComponent::ClampPulledBodyVelocity(UPrimitiveComponent* Prim, FName Bo
 		return;
 	}
 	// 각속도 상한(잔여 스핀 안전망): 힘을 무게중심에 줘 pull 토크 원인은 제거했지만, 랙돌 관절 다이내믹의 잔여
-	// 스핀을 마저 가둔다. (선형 폭주는 ApplyPullVelocityFade의 속도 드래그가 담당 — 여기선 각속도만.)
+	// 스핀을 마저 가둔다. (선형 견인은 ApplyPullVelocityDrive의 장력 상한 임펄스가 담당 — 여기선 각속도만.)
 	const float MaxAngDeg = FMath::Max(0.0f, HoldConfig.ActivePullMaxAngularSpeed);
 	if (MaxAngDeg > 0.0f)
 	{

@@ -1136,18 +1136,20 @@ struct FRopeHoldConfig
 	float PullAimSmoothTime = 0.08f;
 
 	/**
-	 * 능동 Pull(입력 홀드)의 견인력 — SetActivePull에 실리는 기본값. 힘 크기는 로프 물리 도메인이라
-	 * 여기 산다(2026-07-13 표면 감사 A-2 — Wielder|Input에서 이사; Wielder PullAction은 이 값을 쓴다).
+	 * 능동 Pull(입력 홀드)의 **최대 장력**(견인력의 상한) — SetActivePull에 실리는 기본값. 대상을 목표 속도
+	 * (ActivePullMaxLinearSpeed)까지 끌 수 있는 최대 힘이다: 가벼운 대상은 이 장력 안에서 목표 속도에 즉시(오버슛
+	 * 없이) 도달하고, 이 장력으로 목표까지 못 끄는 무거운 대상은 뒤처진다(현실적 질량 의존 — 이 값이 "몇 kg부터
+	 * 버거운가"를 정한다). 힘 크기는 로프 물리 도메인이라 여기 산다(Wielder PullAction이 이 값을 쓴다).
 	 * Wrapped + 팽팽할 때만 실제 인가된다(URopeComponent::SetActivePull 계약).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float PullForce = 100000.0f;
 
 	/**
-	 * 능동 Pull의 **종단속도**(cm/s, 0 = 무제한). 능동 Pull은 상수 힘이라 원래 종단속도가 없어 위로 무한 가속
-	 * (하늘로 떠오름)했다 — 이제 로프축(당김 방향) 속도가 이 값에 가까울수록 힘을 선형으로 0까지 페이드해
-	 * (속도 비례 드래그) 이 속도에서 가속이 자연히 멎는다(하드 클램프 없는 부드러운 종단속도). 당김 방향 성분만
-	 * 페이드하므로 중력/측면 운동은 보존. 질량 의존(a=F/m)은 종단 이하에서 그대로. 견인 중에만 적용.
+	 * 능동 Pull의 **견인 목표 속도**(cm/s). 능동 Pull은 대상을 이 속도로 당김 방향을 따라 몰되(장력 상한 PullForce
+	 * 내에서), 임펄스를 목표 도달분(질량×ΔV)으로 클램프해 **이 속도를 오버슛하지 않는다** — 가벼운 대상이 상수 힘의
+	 * a=F/m로 한 프레임에 목표를 훌쩍 넘겨 튕기던(먼지/턱턱) 문제를 없앤다. 무거운 대상은 장력 한계로 이 속도까지
+	 * 못 끌어 뒤처진다(현실적 질량 의존). 0 = 견인 없음. 견인 중에만 적용.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float ActivePullMaxLinearSpeed = 300.0f;

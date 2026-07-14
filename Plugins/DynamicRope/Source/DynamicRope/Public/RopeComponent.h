@@ -532,8 +532,10 @@ protected:
 	/**
 	 * Pull 힘 인가(Wrapped + 팽팽 + 능동 Pull 활성인 프레임마다). 기본 수신자 체인:
 	 * 물리 시뮬 본 → CharacterMovement → 물리 시뮬 루트. 커스텀 무브먼트(Mover 등)/탈것/특수 대상은 오버라이드.
+	 * Force = 당김 방향 × 최대 장력(|Force| = 장력 상한). 물리 바디는 장력 상한 속도 드라이브로 인가한다
+	 * (ApplyPullVelocityDrive). DeltaTime은 임펄스 상한(장력×dt) 산정에 쓴다.
 	 */
-	virtual void ApplyPullForce(const FVector& Force, const FRopePullSample& Pull);
+	virtual void ApplyPullForce(const FVector& Force, const FRopePullSample& Pull, float DeltaTime);
 
 	// 시뮬 상태 읽기 전용 접근(서브클래스용). 변경은 공개 API(Throw·Set 계열)를 통해서만.
 	const FRopeSimState& GetSimState() const { return Sim; }
@@ -687,10 +689,10 @@ private:
 	// wielder가 앵커 쪽으로 끌려가는 climb-in. ApplyPullForce의 owner 쪽 미러(시뮬 루트 → CharacterMovement).
 	void ApplyPullForceToWielder(const FVector& Force);
 
-	// 능동 Pull: 로프축(당김 방향) 속도가 종단속도(ActivePullMaxLinearSpeed)에 가까울수록 힘을 선형으로 0까지
-	// 페이드(속도 비례 드래그) — 상수 힘의 무한 가속(떠오름)을 하드 클램프 없이 자연 종단속도로 가둔다. 당김 방향
-	// 성분만 페이드(수직/중력 보존), 질량 의존(a=F/m) 종단 이하 유지. 페이드된 힘을 반환(호출자가 AddForce).
-	FVector ApplyPullVelocityFade(const FVector& Force, UPrimitiveComponent* Prim, FName BoneName) const;
+	// 능동 Pull 장력 상한 속도 드라이브: 대상 물리 바디를 당김 방향(Dir)을 따라 목표 속도(ActivePullMaxLinearSpeed)로
+	// 몰되, 임펄스를 J = min(질량×ΔV, MaxTension×dt)로 클램프한다. 가벼운 대상은 목표 속도에 즉시(오버슛 없음),
+	// 무거운 대상은 장력 한계로 뒤처진다(현실적 질량 의존). 상수 힘(a=F/m)의 오버슛·먼지·턱턱을 없앤다.
+	void ApplyPullVelocityDrive(UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float MaxTension, float DeltaTime) const;
 
 	// 능동 Pull 대상 물리 바디의 각속도를 HoldConfig 상한으로 클램프(잔여 랙돌 스핀 안전망 — 힘을 무게중심에
 	// 주므로 pull 토크는 이미 없음). ApplyPullForce가 힘 인가 뒤 호출. BoneName None이면 컴포넌트 단위.
