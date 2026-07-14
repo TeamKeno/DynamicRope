@@ -1290,9 +1290,9 @@ void URopeComponent::InitRope()
 
 void URopeComponent::EnsureRopeInitialized()
 {
-	if (Sim.Num() == 0) 
-	{ 
-		InitRope(); 
+	if (Sim.Num() == 0)
+	{
+		InitRope();
 	}
 }
 
