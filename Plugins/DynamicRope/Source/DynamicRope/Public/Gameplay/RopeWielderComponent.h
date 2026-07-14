@@ -308,6 +308,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputAction> ReelOutAction = nullptr;
 
+	/** 장전 액션. Started에 Rope->EnterReel() — ③(Guaranteed) 로프를 던지기 준비(Reel) 상태로 전환한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
+	TObjectPtr<UInputAction> ReloadAction = nullptr;
+
 	//~ Movement(테더 견인에 대한 캐릭터 이동 반응) --------------------------
 	// 종전 카테고리명 "Rope|Tension"은 로프 장력 설정과 혼동돼 개명(2026-07-13 표면 감사 C).
 	// HoldConfig.TetherTargetShare < 1이면 로프가 wielder를 앵커 쪽으로 끌어당긴다(수렴형 테더 분배).
@@ -542,6 +546,7 @@ private:
 	void OnReelInStarted();
 	void OnReelOutStarted();
 	void OnReelCompleted();
+	void OnReloadInput();
 
 	bool bInputBound = false;
 	// AirControl 부스트 원복용 저장 상태(스윙 진입 시 저장, 종료/EndPlay 시 복원).

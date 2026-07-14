@@ -34,7 +34,11 @@ enum class ERopePhase : uint8
 	/** PreviewPathLocked 전용. 물리 Flight를 타지 않고 cached preview path를 authoritative하게 따라간다. */
 	GuidedThrow,
 
-	Releasing
+	Releasing,
+
+	/** ③(GuaranteedWrap) 전용: 창(팁)을 손에 든 던지기 준비 상태. 로프는 숨기고, 이 상태에서만 throw가 성립한다.
+	 *  꽂힌 뒤 release로 Free가 된 상태에서 EnterReel()로 진입한다. */
+	Reel
 };
 
 /** wrap이 해제된 이유. */

@@ -456,6 +456,11 @@ void URopeWielderComponent::BindInput()
 		EIC->BindAction(ReelOutAction, ETriggerEvent::Completed, this, &URopeWielderComponent::OnReelCompleted);
 		EIC->BindAction(ReelOutAction, ETriggerEvent::Canceled,  this, &URopeWielderComponent::OnReelCompleted);
 	}
+	if (ReloadAction)
+	{
+		// 장전은 단발(누름) — ③ 로프를 던지기 준비(Reel) 상태로 전환.
+		EIC->BindAction(ReloadAction, ETriggerEvent::Started, this, &URopeWielderComponent::OnReloadInput);
+	}
 	bInputBound = true;
 }
 
@@ -538,6 +543,14 @@ void URopeWielderComponent::OnReelOutStarted()
 void URopeWielderComponent::OnReelCompleted()
 {
 	StopReel();
+}
+
+void URopeWielderComponent::OnReloadInput()
+{
+	if (Rope)
+	{
+		Rope->EnterReel();
+	}
 }
 
 void URopeWielderComponent::OnPullInputStarted()
@@ -1006,7 +1019,9 @@ bool URopeWielderComponent::ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) c
 	// GuidedThrow/Wrapped에서는 이미 확정된 HeldPreparedPreview를 사용하므로 build를 다시 시도하지 않는다.
 	if (UsesLockedPreview())
 	{
-		return Phase == ERopePhase::Free || Phase == ERopePhase::Releasing;
+		// ③(Guaranteed)는 Reel(장전 준비) 상태에서만 조준 preview를 만든다 — Reel에서만 던질 수 있으므로.
+		// Free(release 후 늘어진 상태)에서는 장전 전이라 preview를 보이지 않는다.
+		return Phase == ERopePhase::Reel;
 	}
 
 	// 일반 preview도 idle 전용 설정이면 조준 전 상태에서만 계산한다.
@@ -1111,8 +1126,8 @@ void URopeWielderComponent::UpdateThrowPreview()
 	}
 
 	const FRopeThrowContext ThrowContext = BuildThrowContext(FVector::ZeroVector);
-	const bool bShouldBuildPrepared = UsesLockedPreview() &&
-		(RopePhase == ERopePhase::Free || RopePhase == ERopePhase::Releasing);
+	// ③ prepared preview(contact/anchor 포함 — 실제 throw에 쓰임)는 Reel(장전 준비)에서만 만들어 LastPreparedPreview에 보관한다.
+	const bool bShouldBuildPrepared = UsesLockedPreview() && RopePhase == ERopePhase::Reel;
 
 	// PreviewPathLocked의 Free/Releasing preview는 렌더용 centerline뿐 아니라 실제 throw에 쓸 contact/anchor까지 만든다.
 	// 그 외 모드/phase에서는 기존처럼 표시용 preview만 만든다.

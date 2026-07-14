@@ -91,6 +91,7 @@ namespace
 		case ERopePhase::Wrapped:    return TEXT("Wrapped");
 		case ERopePhase::GuidedThrow:return TEXT("GuidedThrow");
 		case ERopePhase::Releasing:  return TEXT("Releasing");
+		case ERopePhase::Reel:       return TEXT("Reel");
 		default:                     return TEXT("?");
 		}
 	}
@@ -175,6 +176,14 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 	// 빌드 파라미터는 URopePreviewComponent의 Arc Search 기본값과 동일(1.0/32/80/0).
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
+		// ③는 Reel(장전) 상태에서만 throw가 성립한다. 꽂힌 뒤 release로 Free가 된 상태에서는 EnterReel() 후에야 던진다.
+		if (Phase != ERopePhase::Reel)
+		{
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw rejected: not in Reel (phase=%s). Call EnterReel() first."),
+				*GetName(), PhaseName(Phase));
+			return;
+		}
+
 		FRopePreparedThrowPreview Prepared;
 		FString FailureReason;
 		if (!BuildPreparedWrappingPreview(ThrowContext, /*ReachScale*/ 1.0f, /*SegmentCount*/ 32,
@@ -200,6 +209,14 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	EnsureRopeInitialized();
 	if (!Prepared.IsValid() || Prepared.RenderPreview.Points.Num() < 2 || Sim.Num() < 2)
 	{
+		return false;
+	}
+
+	// ③ Guaranteed는 Reel(장전) 상태에서만 throw가 성립한다(Wielder 직행 방어 — ThrowWithContext와 동일 규칙).
+	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap && Phase != ERopePhase::Reel)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Prepared preview throw rejected: not in Reel (phase=%s). Call EnterReel() first."),
+			*GetName(), PhaseName(Phase));
 		return false;
 	}
 
@@ -247,9 +264,65 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 		Sim.PrevPositions[0] = ResolvedPrepared.ThrowContext.Origin;
 	}
 
+	// Reel에서 나가는 순간 전개 — 로프 표시 복원 + 전체 길이 복원(기본 구현, override 가능).
+	OnDeployFromReel();
+
 	SetPhase(ERopePhase::GuidedThrow, *FString::Printf(TEXT("prepared points=%d, bone=%s"),
 		ResolvedPrepared.RenderPreview.Points.Num(), *ResolvedPrepared.Bone.ToString()));
 	return true;
+}
+
+void URopeComponent::EnterReel()
+{
+	// ③(GuaranteedWrap) 전용 던지기 준비 상태. 창(팁)을 손 소켓에 들고, 로프는 숨긴다.
+	// 꽂힌 뒤 release로 Free가 된 상태에서만 진입한다(초기 BeginPlay 진입은 예외).
+	if (ResolveMode != ERopeWrapResolveMode::GuaranteedWrap)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] EnterReel ignored: Reel은 GuaranteedWrap(③) 전용이다."), *GetName());
+		return;
+	}
+	if (Phase != ERopePhase::Free && Phase != ERopePhase::Reel)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] EnterReel ignored: phase=%s (Free에서만 장전 가능)."),
+			*GetName(), PhaseName(Phase));
+		return;
+	}
+
+	EnsureRopeInitialized();
+	ResetTransientPhaseState();
+	ReleaseCooldown = 0.0f;
+	EnsureTipMesh();      // Reel부터 창이 손에 보여야 하므로 여기서 확보(이미 있으면 no-op).
+	OnEnterReel();        // 기본: 로프 튜브 숨김(override 가능).
+	SetPhase(ERopePhase::Reel, TEXT("reload"));
+}
+
+void URopeComponent::OnEnterReel()
+{
+	// 기본 구현: 로프 튜브 렌더를 숨긴다(창만 손 소켓에 보인다). 창 위치는 UpdateTipMeshTransform이 Reel 분기로 처리.
+	SetVisibility(false, /*bPropagateToChildren*/ false);
+}
+
+void URopeComponent::OnDeployFromReel()
+{
+	// 기본 구현: 로프 튜브를 다시 표시하고, 전개용으로 전체 길이를 복원한다.
+	SetVisibility(true, /*bPropagateToChildren*/ false);
+	SetRopeLength(RopeLength);
+}
+
+FTransform URopeComponent::GetReelTipTransform() const
+{
+	// 기본 구현: Owner의 스켈레탈 메시에서 ReelHandSocket 소켓 트랜스폼. 없으면 컴포넌트(손) 트랜스폼.
+	if (const AActor* Owner = GetOwner())
+	{
+		if (const USkeletalMeshComponent* Mesh = Owner->FindComponentByClass<USkeletalMeshComponent>())
+		{
+			if (!ReelHandSocket.IsNone() && Mesh->DoesSocketExist(ReelHandSocket))
+			{
+				return Mesh->GetSocketTransform(ReelHandSocket);
+			}
+		}
+	}
+	return GetComponentTransform();
 }
 
 float URopeComponent::GetSegmentTension(int32 SegmentIndex) const
@@ -572,7 +645,8 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 {
 	OutPreview = FRopeWrapPreviewData();
 
-	if (Phase == ERopePhase::Free || Phase == ERopePhase::Releasing)
+	// Free/Releasing/Reel(③ 장전 준비)는 던지기 전 상태 — 자유 탐색(arc) preview 경로를 쓴다.
+	if (Phase == ERopePhase::Free || Phase == ERopePhase::Releasing || Phase == ERopePhase::Reel)
 	{
 		FRopeThrowPreviewBuilder::FInput Input;
 		Input.Sim = &Sim;
@@ -625,9 +699,10 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	FString* OutFailureReason) const
 {
 	OutPrepared.Reset();
-	// Prepared preview는 아직 던지기 전인 Free/Releasing에서만 의미가 있다.
+	// Prepared preview는 아직 던지기 전인 Free/Releasing/Reel에서만 의미가 있다(Reel=③ 장전 준비 상태 —
+	// 조준 preview 표시 + Reel에서의 던지기 진입이 이 빌드를 쓴다).
 	// Flight 이후 phase는 이미 실제 접촉/감김 상태가 있으므로 기존 표시용 BuildWrappingPreview 경로를 쓴다.
-	if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing)
+	if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing && Phase != ERopePhase::Reel)
 	{
 		RopeMath::SetPreviewFailureReason(OutFailureReason,
 			FString::Printf(TEXT("prepared preview rejected: phase=%s"), PhaseName(Phase)));
@@ -670,8 +745,12 @@ void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, co
 	ReleaseCooldown = ReleaseCooldownSeconds;
 	// Wrapped에서 오는 release라 커밋된 wrap이 있었다 → per-instance + 중앙 신호 둘 다.
 	DispatchReleased(WrappedMesh, Bone, Reason, /*bWasWrapped*/ true);
-	// 던지기~해제 단위: 우리가 스폰한 팁 부착물은 여기서 파괴한다(외부 컴포넌트는 보존).
-	TeardownSpawnedTipMesh();
+	// 팁 부착물 파괴는 스폰분만. ③(Guaranteed)는 release 후 Free에서도 창이 남아 장전으로 회수하므로
+	// 여기서 파괴하지 않는다(수명 = Reel~EndPlay). ①②(추 팁)는 종전대로 던지기~해제 단위로 파괴.
+	if (ResolveMode != ERopeWrapResolveMode::GuaranteedWrap)
+	{
+		TeardownSpawnedTipMesh();
+	}
 }
 
 void URopeComponent::DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped)
@@ -851,6 +930,11 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	case ERopePhase::GuidedThrow:
 		// PreviewPathLocked 전용 phase. 물리 solver/contact detector를 건너뛰고 cached preview path만 따른다.
 		UpdateGuidedThrow(DeltaTime);
+		SimFrame.bSolveThisFrame = false;
+		break;
+
+	case ERopePhase::Reel:
+		// 던지기 준비 상태(③ 전용): 로프는 숨겨져 있고 창만 손 소켓에 있다. 솔브/접촉 없음.
 		SimFrame.bSolveThisFrame = false;
 		break;
 
@@ -1062,6 +1146,13 @@ void URopeComponent::UpdateTipMeshTransform()
 		return;
 	}
 
+	// Reel(장전) 상태에서는 창을 손 소켓에 든다(마지막 노드가 아니라 GetReelTipTransform — override 가능).
+	if (Phase == ERopePhase::Reel)
+	{
+		TipMeshComponent->SetWorldTransform(TipMeshRelativeTransform * GetReelTipTransform());
+		return;
+	}
+
 	const int32 N = Sim.Num();
 	if (N < 2)
 	{
@@ -1089,6 +1180,12 @@ void URopeComponent::BeginPlay()
 	{
 		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] BeginPlay: RopeSimSubsystem unavailable — rope will not be simulated."),
 			*GetName());
+	}
+
+	// ③ Guaranteed 로프는 던지기 준비(Reel) 상태로 시작한다 — 창을 손에 든 채 대기(로프 숨김).
+	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
+	{
+		EnterReel();
 	}
 }
 

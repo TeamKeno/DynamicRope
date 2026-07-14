@@ -114,6 +114,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
 	FTransform TipMeshRelativeTransform = FTransform::Identity;
 
+	/** Reel(장전) 상태에서 창(팁)을 붙일 Owner 스켈레탈 메시의 소켓 이름. 비어 있거나 소켓이 없으면 컴포넌트(손) 트랜스폼.
+	 *  기본 GetReelTipTransform() 구현이 사용한다 — 배치 규약을 바꾸려면 그 virtual을 override. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	FName ReelHandSocket = NAME_None;
+
 	// 아래 초기화 전용 값들(NumParticles/RopeLength/MinRopeLength)은 InitRope 시점에만 소비된다 —
 	// 런타임 쓰기는 재초기화 전까지 무효라 BlueprintReadOnly(함정 방지). 런타임 길이 변경은
 	// SetRopeLength/SetReelRate를 쓴다.
@@ -303,6 +308,14 @@ public:
 
 	/** Prepared preview를 권위 있는 경로로 사용해 던진다. Flight/Contacting 재탐색을 타지 않고 GuidedThrow로 진입한다. */
 	bool ThrowWithPreparedPreview(const FRopePreparedThrowPreview& Prepared);
+
+	/**
+	 * 던지기 준비(Reel/장전) 상태로 진입한다. ③(GuaranteedWrap) 전용 — 창(팁)을 손 소켓에 들고 로프를 숨긴다.
+	 * 꽂힌 뒤 release로 Free가 된 상태에서만 유효(그 외엔 no-op). ③ 로프는 BeginPlay에서 자동으로 Reel로 시작한다.
+	 * throw는 이 Reel 상태에서만 성립한다. 장전 입력 바인딩은 사용자 몫(이 API를 호출).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void EnterReel();
 
 	/** 현재 진행 중인 잡기/감기(Contacting/Wrapping/Wrapped)를 수동으로 해제한다(Releasing phase). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
@@ -496,6 +509,14 @@ protected:
 
 	/** 페이즈 전이 직후, OnRopePhaseChanged 브로드캐스트 직전에 호출(전이당 1회, 같은 페이즈 재설정 제외). */
 	virtual void OnPhaseChanged(ERopePhase OldPhase, ERopePhase NewPhase) {}
+
+	//~ Reel(장전) 연출 훅 — 전부 게임 스레드, 전이당 1회(콜드 패스). 기본 구현을 override해 연출을 커스텀한다.
+	/** Reel 중 창(팁)을 놓을 월드 트랜스폼. 기본: Owner 스켈레탈 메시의 ReelHandSocket 소켓(없으면 컴포넌트 트랜스폼). */
+	virtual FTransform GetReelTipTransform() const;
+	/** EnterReel() 진입 시 1회. 기본: 로프 튜브 렌더를 숨긴다(SetVisibility(false)). */
+	virtual void OnEnterReel();
+	/** Reel에서 나가는 throw 성립 직전 1회. 기본: 로프 튜브를 다시 표시하고 전체 길이(RopeLength)를 복원한다. */
+	virtual void OnDeployFromReel();
 
 	/**
 	 * wrap 대상 게이트. Flight의 접촉 후보 산출 프레임마다(후보별) + prepared preview throw 진입 시 1회

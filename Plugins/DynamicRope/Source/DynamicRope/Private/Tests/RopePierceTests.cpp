@@ -11,6 +11,7 @@
 #include "Logic/RopeWrapController.h"
 #include "Logic/RopeThrowPreviewBuilder.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "RopeComponent.h"
 #include "RopeTestHelpers.h"
 
 namespace
@@ -137,6 +138,32 @@ bool FRopePierceSingleAnchorBeginWrapTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("꽂힌 노드 InvMass=0 핀"), Frame.InvMass[PierceNode], 0.0f);
 	}
+	return true;
+}
+
+// Reel(장전) 전이: ③ 로프는 Free에서 EnterReel() → Reel. 비-③는 no-op. 던지기는 Reel에서만(허용 조건).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceEnterReelTest,
+	"DynamicRope.Pierce.EnterReelTransition",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePierceEnterReelTest::RunTest(const FString& Parameters)
+{
+	// ③ 로프: 기본 Free → EnterReel → Reel.
+	URopeComponent* Guaranteed = NewObject<URopeComponent>();
+	Guaranteed->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
+	TestEqual(TEXT("기본 phase는 Free"), Guaranteed->GetPhase(), ERopePhase::Free);
+	Guaranteed->EnterReel();
+	TestEqual(TEXT("③ EnterReel → Reel"), Guaranteed->GetPhase(), ERopePhase::Reel);
+
+	// 비-③(② Assisted): EnterReel은 no-op → Free 유지(Reel은 ③ 전용).
+	URopeComponent* Assisted = NewObject<URopeComponent>();
+	Assisted->ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+	Assisted->EnterReel();
+	TestEqual(TEXT("② EnterReel은 no-op"), Assisted->GetPhase(), ERopePhase::Free);
+
+	// Reel 허용 조건: Reel에서 다시 EnterReel은 Reel 유지(재진입 허용), 그 외 phase에선 무효.
+	Guaranteed->EnterReel();
+	TestEqual(TEXT("Reel에서 재진입해도 Reel"), Guaranteed->GetPhase(), ERopePhase::Reel);
 	return true;
 }
 
