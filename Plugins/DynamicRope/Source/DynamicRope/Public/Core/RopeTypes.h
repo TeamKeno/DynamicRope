@@ -1008,6 +1008,15 @@ struct FRopeHoldConfig
 	float TetherSlack = 5.0f;
 
 	/**
+	 * (MassShare 전용) 대상 견인 servo가 당김 방향과 *직교*인 잔여 속도를 프레임당 감쇠하는 비율(0 = 보존=기존
+	 * 동작, 1 = 완전 제거). MassShare servo는 로프 축 속도만 목표로 맞추고 직교 성분은 그대로 둔다 — 그래서 끌던
+	 * 방향을 급전환하면 옛 방향 관성이 직교로 남아 대상이 옆으로 날아간다("관성 과다"). 이 값으로 그 잔여 관성을
+	 * 몇 프레임에 걸쳐 빼되(중력/스윙은 매 프레임 재축적돼 대부분 보존), 급전환 fling을 억제한다. 기본 0.3.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TetherPerpDamping = 0.3f;
+
+	/**
 	 * 팽팽한 동안 테더가 대상/wielder를 로프 쪽으로 되돌리는 *고정* 견인 속도(cm/s). overshoot가 TetherSettleDist보다
 	 * 크면 항상 이 속도로 당기고(마스 분배로 양끝에 ShareT:ShareW 비율로 나뉨), 한계 근처에선 부드럽게 감속해
 	 * 안착한다. 속도 ∝ overshoot가 아니라 고정이라 견인이 일정하다. 0 = 견인 없음.

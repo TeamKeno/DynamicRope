@@ -2965,18 +2965,18 @@ namespace
 			return (Mass > KINDA_SMALL_NUMBER) ? (1.0f / Mass) : 0.0f;
 		};
 
-		// (1) 스켈레탈 풀 랙돌: 감긴 본(부모 체인 승격)의 물리 바디 질량.
+		// (1) 스켈레탈 랙돌(풀/부분): 감긴 본에서 부모 체인으로 승격한 가장 가까운 *시뮬 본*의 바디 질량.
+		// 루트 IsSimulatingPhysics()로 게이트하면 부분 랙돌(루트 키네마틱·서브트리만 시뮬)이 빠져 아래 캐릭터
+		// MOVE_None 분기로 떨어져 무한질량(=끌림 불가)으로 오판된다 — 힘/테더 경로(FindNearestSimulatingBone,
+		// 루트 게이트 없음)와 어긋나 BinaryPullable에서 랙돌 대상이 안 끌리는 버그. 시뮬 본 존재로만 판정한다.
 		if (const USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
 		{
-			if (Skel->IsSimulatingPhysics())
+			const FName SimBone = FindNearestSimulatingBone(Skel, WrappedBone);
+			if (!SimBone.IsNone())
 			{
-				const FName SimBone = FindNearestSimulatingBone(Skel, WrappedBone);
-				if (!SimBone.IsNone())
+				if (const FBodyInstance* Body = Skel->GetBodyInstance(SimBone))
 				{
-					if (const FBodyInstance* Body = Skel->GetBodyInstance(SimBone))
-					{
-						return InvFromMass(static_cast<float>(Body->GetBodyMass()));
-					}
+					return InvFromMass(static_cast<float>(Body->GetBodyMass()));
 				}
 			}
 		}
@@ -3168,21 +3168,34 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		auto ClampSimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Inward, float Step) -> float
 		{
 			const FVector Vel = Prim->GetPhysicsLinearVelocity(BoneName);
-			const float OutAlong = static_cast<float>(FVector::DotProduct(Vel, -Inward)); // 바깥 방향 속도 성분.
-			if (OutAlong > 0.0f)
+			const float CurInward = static_cast<float>(FVector::DotProduct(Vel, Inward)); // 안쪽 성분(바깥이면 음수).
+
+			if (BoneName.IsNone())
 			{
-				Prim->SetPhysicsLinearVelocity(Vel + Inward * OutAlong, /*bAddToCurrent*/ false, BoneName);
+				// 컴포넌트 전체 시뮬 바디(물리 프랍/정적): 바깥 속도 제거 + 위치를 안쪽으로 Step 이동(속도 주입 없음
+				// → 관성/발사 없음). 로프 축 성분만 건드려 수직(중력/스윙) 성분은 보존. TeleportPhysics는 물리 속도를
+				// 만들지 않고(sweep은 벽 통과 방지), 반환 = 실제 안쪽 이동(막히면 부족분을 wielder가 대신 멈춤).
+				if (CurInward < 0.0f)
+				{
+					Prim->SetPhysicsLinearVelocity(Vel - Inward * CurInward, /*bAddToCurrent*/ false, BoneName); // 바깥 성분 제거.
+				}
+				if (Step > KINDA_SMALL_NUMBER)
+				{
+					const FVector Before = Prim->GetComponentLocation();
+					Prim->SetWorldLocation(Before + Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
+					const FVector After = Prim->GetComponentLocation();
+					return FMath::Max(0.0f, static_cast<float>(FVector::DotProduct(After - Before, Inward)));
+				}
+				return Step;
 			}
-			// 위치 이동은 컴포넌트 전체가 시뮬 바디일 때만(BoneName=None). 스켈레탈 풀 랙돌의 개별 본은 컴포넌트
-			// 단위 SetWorldLocation으로 옮길 수 없어 속도 제거만 한다(소량 신축 감수 — 드문 케이스).
-			if (BoneName.IsNone() && Step > KINDA_SMALL_NUMBER)
-			{
-				const FVector Before = Prim->GetComponentLocation();
-				Prim->SetWorldLocation(Before + Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
-				const FVector After = Prim->GetComponentLocation();
-				return FMath::Max(0.0f, static_cast<float>(FVector::DotProduct(After - Before, Inward))); // 실제 안쪽 이동.
-			}
-			return Step; // 위치 미이동(본 등): 부족분 0 취급.
+
+			// 스켈레탈 랙돌 개별 본: 컴포넌트 단위 위치 이동이 불가하다 → 안쪽 속도를 회수 속도로 *정확 servo*해
+			// 실제로 끌어온다. exact set(bVelChange)이라 관성 누적/코스팅이 없어(Step→0이면 안쪽속도→0 = 발사 없음)
+			// 위치 클램프를 대체한다(회수 속도 ≤ TetherMaxSpeed로 이미 상한). 이전엔 바깥 속도만 제거하고 안쪽 견인이
+			// 없어 랙돌 대상이 안 끌렸다(버그). 감긴 본이 안쪽으로 끌리면 관절로 나머지 랙돌이 따라온다.
+			const float TargetInward = (DeltaTime > 1e-4f) ? (Step / DeltaTime) : 0.0f;
+			Prim->AddImpulse(Inward * (TargetInward - CurInward), BoneName, /*bVelChange*/ true);
+			return Step; // 속도로 회수(부족분 0 — wielder 안 건드림).
 		};
 		auto ClampActor = [&](AActor* Actor, const FVector& Inward, float Step)
 		{
@@ -3372,11 +3385,21 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			Prim->AddImpulse(Dir * (TargetSpeed - CurAlong) * CorrectAlpha, BoneName, /*bVelChange*/ true);
 		}
 	};
+	const float PerpDamp = FMath::Clamp(HoldConfig.TetherPerpDamping, 0.0f, 1.0f);
 	auto ServoVelocity = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float TargetSpeed)
 	{
 		const FVector CurVel = Prim->GetPhysicsLinearVelocity(BoneName);
 		const float CurAlong = static_cast<float>(FVector::DotProduct(CurVel, Dir));
-		Prim->AddImpulse(Dir * (TargetSpeed - CurAlong), BoneName, /*bVelChange*/ true);
+		// 로프 축 성분: 목표 속도로 정확 세팅(bVelChange).
+		FVector Impulse = Dir * (TargetSpeed - CurAlong);
+		// 직교(당김 방향과 수직) 잔여 관성 부분 감쇠: 방향을 급전환하면 옛 방향 관성이 직교로 남아 대상이 옆으로
+		// 날아간다(관성 과다). PerpDamp만큼 빼서 억제 — 중력/스윙은 매 프레임 재축적되므로 부분 감쇠로도 보존된다.
+		if (PerpDamp > 0.0f)
+		{
+			const FVector PerpVel = CurVel - Dir * CurAlong;
+			Impulse -= PerpVel * PerpDamp;
+		}
+		Prim->AddImpulse(Impulse, BoneName, /*bVelChange*/ true);
 	};
 
 	// 비시뮬 수신자: 캐릭터 무브먼트가 살아 있으면 위치 오프셋 대신 *무브먼트 속도* 톱업으로 끈다.
