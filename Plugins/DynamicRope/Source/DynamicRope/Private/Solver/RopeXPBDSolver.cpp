@@ -402,6 +402,11 @@ void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfi
 		// 캐시된 collider 하나만 보던 버그(다른 뼈 관통을 못 막음, colIdx≠cached로 확인됨) 수정 —
 		// 캐시 평면이 아니라 매번 실제 표면을 보므로 곡면/오목에서도 정확. GPU .usf의 노드당 전 collider 루프와 일치.
 		const FVector& P = State.Positions[i];
+		// 충돌 push-out 직전(거리 제약까지 반영된) 위치. pinch 시 여기로 되돌려 노드를 얼린다(아래 참조).
+		const FVector PrePos = State.Positions[i];
+		// pinch 감지: 이 노드가 닿은 collider들의 단위 법선 합·개수(GPU RopeXPBD.usf NodeContact 미러).
+		FVector ContactNormalSum = FVector::ZeroVector;
+		int32 ContactCount = 0;
 		for (int32 c = 0; c < Colliders.Num(); ++c)
 		{
 			const IRopeCollider* Collider = Colliders[c];
@@ -432,6 +437,20 @@ void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfi
 			CC.SurfaceVel = Contact.SurfaceVelocity;
 			CC.ColliderIndex = c;
 			State.Positions[i] += Contact.Normal * (W * Applied);
+			ContactNormalSum += Contact.Normal;
+			++ContactCount;
+		}
+
+		// Pinch 감쇠(GPU RopeXPBD.usf 미러): 서로 마주 보는 collider에 동시에 눌린 노드(단위 법선 합이
+		// 상쇄 = |sum| << 개수)는 빠져나갈 위치가 없다. last-wins push-out으로 한쪽 표면에 밀어붙인 채 두면
+		// 다음 substep 거리 제약이 다시 당겨 재관통 → 프레임 간 위치 왕복(지터)/접선 튕김. 그래서 표면으로
+		// 민 결과를 버리고 *충돌 직전 위치(PrePos)에 그대로 얼린다* — 빠져나갈 자리가 없으니 제자리가 최선,
+		// 순서 무관해 안정적. 속도도 0(gPrev=gPos=PrePos). 임계 0.6*개수 = 두 법선이 ~106° 초과로 벌어진
+		// 경우만 발화(진짜 마주 봄) — 단일면·완만한 코너엔 무영향.
+		if (ContactCount > 1 && ContactNormalSum.Size() < 0.6f * static_cast<float>(ContactCount))
+		{
+			State.Positions[i] = PrePos;
+			State.PrevPositions[i] = PrePos;
 		}
 	}
 }
