@@ -85,7 +85,8 @@ struct FRopeGPUParamsGPU
 	float     BendReleaseRatio = 0.70f;
 	// straightness ≥ 이 값이면 펴는 힘 100%.
 	float     BendFullRatio    = 0.92f;
-	int32     Pad5 = 0;
+	// Strain limiting 최대 신장 배율(<1=비활성). Pad5 슬롯 재사용.
+	float     MaxStretchRatio  = 1.5f;
 	int32     Pad6 = 0;
 	int32     Pad7 = 0;
 	FVector4f Gravity;
@@ -1064,6 +1065,7 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	P.FixedDt           = S.FixedDt;
 	P.SegmentLength     = S.SegmentLength;
 	P.StretchCompliance = S.StretchCompliance;
+	P.MaxStretchRatio   = S.MaxStretchRatio;
 	P.BendCompliance    = S.BendCompliance;
 	P.BendReleaseRatio  = S.BendReleaseRatio;
 	P.BendFullRatio     = S.BendFullRatio;

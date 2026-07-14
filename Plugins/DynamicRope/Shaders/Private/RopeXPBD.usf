@@ -70,7 +70,8 @@ struct FRopeGPUParams
 	float BendReleaseRatio;
 	// straightness ≥ 이 값이면 펴는 힘 100%.
 	float BendFullRatio;
-	int   Pad5;
+	// Strain limiting 최대 신장 배율(<1=비활성). C++ Pad5 슬롯 재사용.
+	float MaxStretchRatio;
 	int   Pad6;
 	int   Pad7;
 	// xyz 사용
@@ -568,6 +569,22 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 	}
 }
 
+// Strain limit(FTL 지향): 세그먼트가 MaxLen 초과면 *follower만* leader 쪽으로 당겨 길이를 MaxLen으로 맞춘다
+// (leader 불변 → 직전에 맞춘 세그먼트가 안 흐트러져 순차 전파 보존). follower 고정(InvMass 0)이면 스킵. 위치
+// 이동은 gPrev도 같이 옮겨 속도 중립(fling 방지). 커널 strain-limit 스테이지에서 thread 0만 순차 호출 →
+// groupshared 단일 writer라 race 없음. CPU FRopeXPBDSolver::SolveStrainLimit의 ClampToward 미러.
+void RopeClampStretchToward(int Leader, int Follower, float MaxLen)
+{
+	if (gInvMass[Follower] <= 0.0f) { return; }
+	const float3 Delta = gPos[Follower] - gPos[Leader];
+	const float  Dist = length(Delta);
+	if (Dist <= MaxLen || Dist <= 1e-5f) { return; }
+	const float3 Target = gPos[Leader] + (Delta / Dist) * MaxLen;
+	const float3 Corr = Target - gPos[Follower];
+	gPos[Follower]  += Corr;
+	gPrev[Follower] += Corr;
+}
+
 [numthreads(ROPE_THREADS, 1, 1)]
 void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
 {
@@ -813,6 +830,23 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			}
 		// for pass (CollisionPasses)
 		}
+
+		// --- Strain limiting: iteration으로 못 잡은 잔여 과신장(긴 체인이 앵커 핀에 매달릴 때 앵커 인접
+		// 세그먼트가 폭주 → 거대 장력·접선 휩 지터)을 substep 끝에 상한 안으로 가둔다. 순차 sweep(전방+후방)이라
+		// thread 0이 groupshared 전체를 직렬 처리(단일 writer=race 없음), 나머지 스레드는 배리어 대기. 앞뒤
+		// 배리어로 세그먼트 chord 결과 가시화 후 처리 + 결과를 write-back/다음 substep 전에 전파. CPU 미러.
+		GroupMemoryBarrierWithGroupSync();
+		if (i == 0 && P.MaxStretchRatio >= 1.0f && P.SegmentLength > 1e-4f)
+		{
+			const float MaxLen = P.MaxStretchRatio * P.SegmentLength;
+			[loop] for (int sp = 0; sp < 2; ++sp)
+			{
+				// 전방: leader=kf, follower=kf+1 / 후방: leader=kb+1, follower=kb (CPU와 동일 순서).
+				[loop] for (int kf = 0; kf < N - 1; ++kf)    { RopeClampStretchToward(kf, kf + 1, MaxLen); }
+				[loop] for (int kb = N - 2; kb >= 0; --kb)   { RopeClampStretchToward(kb + 1, kb, MaxLen); }
+			}
+		}
+		GroupMemoryBarrierWithGroupSync();
 	}
 
 	// --- write-back (InvMass는 override가 바꾼 질량 마스크를 상주 버퍼에 영속시키기 위해 함께 기록)

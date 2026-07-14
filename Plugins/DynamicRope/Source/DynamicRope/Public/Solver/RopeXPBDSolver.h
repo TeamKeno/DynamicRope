@@ -104,4 +104,13 @@ private:
 	 */
 	void ApplyContactFriction(FRopeSimState& State, const FRopeSolverConfig& Config,
 		const TArray<FRopeContactState>& Contacts, float SubDt) const;
+
+	/**
+	 * Strain limiting(최대 신장 클램프): XPBD iteration이 적으면 긴 체인이 고정 노드(핀/앵커, InvMass 0)에
+	 * 매달릴 때 Gauss-Seidel 보정이 끝까지 전파되지 못해 고정 노드 인접 세그먼트에 신장이 폭주한다. 순차
+	 * sweep(전방+후방)으로 각 세그먼트를 ≤ MaxStretchRatio × SegmentLength로 하드 투영해 한 번에 체인 전체로
+	 * 보정을 전파한다. 위치 이동은 속도 중립(prev도 함께 이동) — 클램프가 Verlet 속도를 주입/제거하지 않는다.
+	 * MaxStretchRatio < 1이면 no-op. GPU RopeXPBD.usf의 strain-limit 스테이지와 미러.
+	 */
+	void SolveStrainLimit(FRopeSimState& State, const FRopeSolverConfig& Config) const;
 };

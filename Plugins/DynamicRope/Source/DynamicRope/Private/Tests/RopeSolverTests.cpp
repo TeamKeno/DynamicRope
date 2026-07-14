@@ -56,6 +56,76 @@ bool FRopeSolverDistanceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Strain limiting: 긴 체인이 핀에 매달려 앵커 인접 세그먼트가 과신장될 때, iteration이 부족해도(it=1)
+// substep 끝 순차 클램프가 모든 세그먼트를 ≤ MaxStretchRatio×SegmentLength로 가두는가. 그리고 비활성(0)이면
+// 같은 조건에서 상한을 넘는가(클램프가 원인임을 대조로 증명).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverStrainLimitTest,
+	"DynamicRope.Solver.StrainLimitBoundsStretch",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSolverStrainLimitTest::RunTest(const FString& Parameters)
+{
+	auto MakeStretchedPinnedRope = []() -> FRopeSimState
+	{
+		// 40노드, SegmentLength=10. 노드를 3배 간격(30cm)으로 벌려 모든 세그먼트를 과신장시키고 node0을 핀 고정.
+		FRopeSimState S = RopeTest::MakeStraightRope(40, 390.0f); // seg = 390/39 = 10
+		for (int32 i = 0; i < S.Num(); ++i)
+		{
+			const FVector P = FVector(static_cast<float>(i) * 3.0f * S.SegmentLength, 0.0f, 0.0f);
+			S.Positions[i] = P;
+			S.PrevPositions[i] = P; // 속도 0
+		}
+		S.bStartPinned = true;
+		S.StartPinPrev = S.Positions[0];
+		S.StartPinTarget = S.Positions[0];
+		S.InvMass[0] = 0.0f;
+		return S;
+	};
+
+	auto MaxSegmentLen = [](const FRopeSimState& S) -> float
+	{
+		float M = 0.0f;
+		for (int32 i = 0; i + 1 < S.Num(); ++i)
+		{
+			M = FMath::Max(M, static_cast<float>(FVector::Dist(S.Positions[i], S.Positions[i + 1])));
+		}
+		return M;
+	};
+
+	const FRopeXPBDSolver Solver;
+	const TArray<IRopeCollider*> NoColliders;
+
+	// 약한 솔버(it=1)로 strain limit의 단독 기여를 본다.
+	FRopeSolverConfig Config = MakeStiffConfig();
+	Config.Iterations = 1;
+	Config.MaxStretchRatio = 1.5f;
+
+	// (1) strain limit ON: 한 스텝 뒤 모든 세그먼트가 ≤ 1.5×seg.
+	{
+		FRopeSimState Sim = MakeStretchedPinnedRope();
+		Solver.Step(Sim, Config, NoColliders, 1.0f / 60.0f);
+		const float MaxLen = MaxSegmentLen(Sim);
+		const float Limit = 1.5f * Sim.SegmentLength;
+		TestTrue(FString::Printf(TEXT("strain-limited max segment %.2f should be <= %.2f"), MaxLen, Limit * 1.02f),
+			MaxLen <= Limit * 1.02f);
+		TestFalse(TEXT("no NaN (strain limit on)"), RopeTest::AnyNaN(Sim));
+	}
+
+	// (2) 대조 — strain limit OFF(0): 같은 약한 솔버로는 한 스텝에 상한을 크게 초과한다(클램프가 원인임을 증명).
+	{
+		FRopeSolverConfig Off = Config;
+		Off.MaxStretchRatio = 0.0f;
+		FRopeSimState Sim = MakeStretchedPinnedRope();
+		Solver.Step(Sim, Off, NoColliders, 1.0f / 60.0f);
+		const float MaxLen = MaxSegmentLen(Sim);
+		const float Limit = 1.5f * Sim.SegmentLength;
+		TestTrue(FString::Printf(TEXT("without strain limit max segment %.2f should exceed %.2f"), MaxLen, Limit),
+			MaxLen > Limit);
+	}
+
+	return true;
+}
+
 // InvMass 0 + bStartPinned 노드는 중력 아래에서도 핀 위치를 유지하는가.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverPinTest,
 	"DynamicRope.Solver.PinnedStartHeld",

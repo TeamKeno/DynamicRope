@@ -127,6 +127,10 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 
 		// 마찰은 substep 끝 1회: 누적된 접촉 법선력(Lambda)으로 Coulomb 한계를 잡는다.
 		ApplyContactFriction(State, Config, Contacts, FixedDt);
+
+		// Strain limiting: iteration으로 못 잡은 잔여 과신장(긴 체인이 앵커 핀에 매달릴 때)을 substep 끝에
+		// 순차 sweep으로 상한 안에 가둔다(고정 노드에서 자유단으로 보정 전파).
+		SolveStrainLimit(State, Config);
 	}
 
 	// 장력(마지막 substep의 수렴 λ → 힘): XPBD에서 F = λ/h². 스트레치는 C>0 → λ<0이므로 -λ의 양수부만
@@ -136,6 +140,56 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 	for (int32 k = 0; k < NumDist; ++k)
 	{
 		State.SegmentTension[k] = FMath::Max(0.0f, -LambdaDist[k]) * InvDt2;
+	}
+}
+
+void FRopeXPBDSolver::SolveStrainLimit(FRopeSimState& State, const FRopeSolverConfig& Config) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_StrainLimit);
+	const float MaxRatio = Config.MaxStretchRatio;
+	// 0 또는 <1 = 비활성. 1.0 = 완전 비신축.
+	if (MaxRatio < 1.0f)
+	{
+		return;
+	}
+	const int32 Count = State.Num();
+	const float MaxLen = MaxRatio * State.SegmentLength;
+	if (Count < 2 || MaxLen <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	// FTL(Follow-The-Leader) 지향 클램프: 세그먼트가 MaxLen 초과면 *follower만* leader 쪽으로 당겨 길이를
+	// 정확히 MaxLen으로 맞춘다(leader는 안 움직임). 양쪽을 다 움직이면 직전에 맞춘 세그먼트가 다시 흐트러져
+	// 한 sweep으로 수렴하지 못한다 — follower만 옮기면 leader(=이미 배치된 노드)가 불변이라 순차 전파가
+	// 보존된다. follower가 고정(InvMass 0)이면 못 옮겨 스킵. 위치 이동은 prev도 함께 옮겨 속도 중립(fling 방지).
+	auto ClampToward = [&State, MaxLen](int32 Leader, int32 Follower)
+	{
+		if (State.InvMass[Follower] <= 0.0f)
+		{
+			return;
+		}
+		const FVector Delta = State.Positions[Follower] - State.Positions[Leader];
+		const float Dist = Delta.Size();
+		if (Dist <= MaxLen || Dist <= KINDA_SMALL_NUMBER)
+		{
+			return;
+		}
+		const FVector Target = State.Positions[Leader] + (Delta / Dist) * MaxLen;
+		const FVector Corr = Target - State.Positions[Follower];
+		State.Positions[Follower]     += Corr;
+		State.PrevPositions[Follower] += Corr;
+	};
+
+	// 전방(node0→N-1, leader=낮은 인덱스: 핀/앵커가 앞에 있는 손쪽 체인 전파) + 후방(N-1→0, leader=높은 인덱스:
+	// wrap 앵커가 뒤에 있는 구간 전파)을 2회. 각 방향은 follower만 옮기므로 그 방향 세그먼트를 1패스로 상한
+	// 안에 넣고, 두 방향으로 양끝 고정(손 핀·wrap 앵커)을 모두 처리한다(슬랙이 있으면 수렴, 없으면 최소 잔차).
+	// GPU RopeXPBD.usf strain-limit 스테이지와 동일 순서.
+	const int32 Passes = 2;
+	for (int32 p = 0; p < Passes; ++p)
+	{
+		for (int32 k = 0; k < Count - 1; ++k) { ClampToward(k, k + 1); }      // 전방: leader=k, follower=k+1
+		for (int32 k = Count - 2; k >= 0; --k) { ClampToward(k + 1, k); }     // 후방: leader=k+1, follower=k
 	}
 }
 

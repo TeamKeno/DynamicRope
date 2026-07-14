@@ -104,6 +104,7 @@ namespace
 		Step.StartPinPrev      = S.StartPinPrev;
 		Step.StartPinTarget    = S.StartPinTarget;
 		Step.StretchCompliance = Cfg.StretchCompliance;
+		Step.MaxStretchRatio   = Cfg.MaxStretchRatio;
 		Step.BendCompliance    = Cfg.BendCompliance;
 		Step.BendReleaseRatio  = Cfg.BendReleaseRatio;
 		Step.BendFullRatio     = Cfg.BendFullRatio;

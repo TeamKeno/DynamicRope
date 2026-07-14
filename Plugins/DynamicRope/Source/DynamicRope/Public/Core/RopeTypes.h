@@ -642,6 +642,15 @@ struct FRopeSolverConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0"))
 	float StretchCompliance = 0.0f;
 
+	/** Strain limiting(최대 신장 클램프): substep solve 뒤, 핀/앵커 고정 노드에서 체인을 따라 walk하며 각
+	 *  세그먼트 길이를 ≤ 이 배율 × SegmentLength로 하드 투영한다(속도 중립 — prev도 함께 이동). XPBD 거리
+	 *  제약은 Gauss-Seidel이라 iteration이 적으면 긴 체인(수십 노드)이 앵커 핀에 매달릴 때 보정이 끝까지
+	 *  전파되지 못해 앵커 인접 세그먼트에 신장이 폭주(6배+)·거대 장력·접선 휩 지터가 생긴다. 순차 sweep은
+	 *  한 번에 체인 전체로 전파돼 이 폭주를 상한 안으로 가둔다(PBD long-range constraint 표준 해법).
+	 *  1.5 = 최대 50% 신장 허용(기본). 1.0 = 완전 비신축(가장 빡빡). **0 또는 <1 = 비활성**(strain limit 끔). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0"))
+	float MaxStretchRatio = 1.5f;
+
 	/** XPBD bending compliance. 클수록 더 흐물거린다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0"))
 	float BendCompliance = 0.02f;

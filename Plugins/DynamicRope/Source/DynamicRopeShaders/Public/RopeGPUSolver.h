@@ -154,6 +154,9 @@ struct FRopeGPUResidentStep
 	FVector StartPinPrev = FVector::ZeroVector;
 	FVector StartPinTarget = FVector::ZeroVector;
 	float   StretchCompliance = 0.0f;
+	/** Strain limiting: substep solve 뒤 각 세그먼트를 ≤ 이 배율 × SegmentLength로 하드 투영(1.5=기본,
+	 *  <1=비활성). 긴 체인이 앵커 핀에 매달릴 때 iteration 부족으로 생기는 앵커 인접 과신장/지터를 막는다. */
+	float   MaxStretchRatio = 1.5f;
 	float   BendCompliance = 0.0f;
 	/** 각도-허용 벤딩: straightness ≤ 이 값이면 펴는 힘 0(코너/랩 경계 각짐 완화). */
 	float   BendReleaseRatio = 0.70f;
