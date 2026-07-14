@@ -126,6 +126,59 @@ bool FRopeSolverStrainLimitTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// CPU 접촉이 정지 콜라이더 위에서 반발(바깥 법선 속도 주입) 없이 정착하는가 — GPU가 push-out 뒤 VnOut을
+// 제거하는 것과 parity. restitution 메모리(CL 189)는 "CPU SolveContacts는 제약식 구조라 미러 불필요"로 판단했다;
+// 이 테스트가 그 계약을 못박아 회귀(반발/트램폴린)를 잡는다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverStaticContactNoReboundTest,
+	"DynamicRope.Solver.StaticContactNoRebound",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSolverStaticContactNoReboundTest::RunTest(const FString& Parameters)
+{
+	// 노드0을 구(sphere) 표면 바로 위 rest 거리에 핀 고정하고, 노드1을 그 아래에서 중력으로 구 위에 떨군다.
+	// 표면 z=7(구 반경5 + 노드두께2)에서 rest 거리(200)가 딱 맞아 안착 시 거리 제약력 0 → 순수 중력 vs 접촉.
+	FRopeSimState Sim = RopeTest::MakeStraightRope(2, 200.0f); // SegmentLength=200
+	Sim.Positions[0]     = FVector(0, 0, 207);
+	Sim.PrevPositions[0] = FVector(0, 0, 207);
+	Sim.bStartPinned = true;
+	Sim.StartPinPrev = Sim.Positions[0];
+	Sim.StartPinTarget = Sim.Positions[0];
+	Sim.InvMass[0] = 0.0f;
+	Sim.Positions[1]     = FVector(0, 0, 100); // 구 위에서 정지 시작 → 중력 낙하
+	Sim.PrevPositions[1] = FVector(0, 0, 100);
+
+	RopeTest::FSphereMockCollider Sphere(FVector::ZeroVector, 5.0f, FName("static"));
+	const TArray<IRopeCollider*> Colliders = { &Sphere };
+
+	FRopeSolverConfig Config = MakeStiffConfig();
+	Config.Gravity = FVector(0.0f, 0.0f, -980.0f); // 중력으로 표면에 눌러 접촉 유지
+	Config.Damping = 0.0f;                          // 감쇠로 반발을 가리지 않는다
+	Config.CollisionRadius = 2.0f;                  // 노드 두께 → 표면 z ≈ 5+2 = 7
+
+	const FRopeXPBDSolver Solver;
+	// 낙하 + 안착까지 충분히 돌린다.
+	for (int32 Frame = 0; Frame < 120; ++Frame)
+	{
+		Solver.Step(Sim, Config, Colliders, 1.0f / 60.0f);
+	}
+	// 안착 후 반발/트램폴린 관측: 표면 위로 튀는 상방 속도가 생기면 안 된다.
+	float MaxZ = -1.0e30f;
+	float MaxUpVel = -1.0e30f;
+	for (int32 Frame = 0; Frame < 60; ++Frame)
+	{
+		Solver.Step(Sim, Config, Colliders, 1.0f / 60.0f);
+		MaxZ = FMath::Max(MaxZ, static_cast<float>(Sim.Positions[1].Z));
+		MaxUpVel = FMath::Max(MaxUpVel, static_cast<float>(Sim.Positions[1].Z - Sim.PrevPositions[1].Z));
+	}
+
+	const float SettledZ = static_cast<float>(Sim.Positions[1].Z);
+	TestTrue(FString::Printf(TEXT("settles near surface (z=%.2f ~ 7)"), SettledZ), SettledZ > 6.0f && SettledZ < 8.0f);
+	TestTrue(FString::Printf(TEXT("never bounces above surface (maxZ=%.2f)"), MaxZ), MaxZ < 8.5f);
+	TestTrue(FString::Printf(TEXT("no outward velocity injection (maxUpVel=%.3f cm/substep)"), MaxUpVel), MaxUpVel < 1.0f);
+	TestFalse(TEXT("no NaN"), RopeTest::AnyNaN(Sim));
+	return true;
+}
+
 // InvMass 0 + bStartPinned 노드는 중력 아래에서도 핀 위치를 유지하는가.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverPinTest,
 	"DynamicRope.Solver.PinnedStartHeld",
