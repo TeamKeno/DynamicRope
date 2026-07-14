@@ -946,6 +946,17 @@ struct FRopeDetectConfig
 	float FlightNoContactReturnTime = 0.0f;
 };
 
+/** Wrapped 테더(로프 길이 초과분) 회수 모델. UpdateTether/능동 Pull이 이 값으로 분기한다. */
+UENUM(BlueprintType)
+enum class ERopeTetherMode : uint8
+{
+	/** (기본) 양끝 유효 역질량으로 초과분 연속 분배 + 고정속도 리엘 — 기존 동작. */
+	MassShare = 0 UMETA(DisplayName = "Mass Share"),
+
+	/** 질량 비교로 한쪽만 회수(가벼우면 대상, 무거우면 wielder) + 소프트 스프링. 무거운 대상엔 능동 Pull이 climb-in. */
+	BinaryPullable = 1 UMETA(DisplayName = "Binary Pullable"),
+};
+
 /**
  * Wrapped *이후*(유지/당김/풀림)의 튜닝 — 설계 노트 01(Post-Wrap 모델)의 도메인이자, "성립 이후는
  * 도달 모드·결착 모델 무관 공통"(02 문서 §3) 경계와 일치한다. 종전에는 FRopeWrapConfig(성립 판정)에
@@ -970,12 +981,18 @@ struct FRopeHoldConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
 	float TensionReleaseTime = 0.05f;
 
+	/** 테더 회수 모델. MassShare=역질량 연속 분배(기본), BinaryPullable=이진 끌림 판정 + 소프트 스프링. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold")
+	ERopeTetherMode TetherMode = ERopeTetherMode::MassShare;
+
 	/**
 	 * 자동 견인(테더) 반응 [0..1]. Wrapped 중 손~앵커 직선 거리가 가용 로프 길이(앵커까지 세그먼트 수 ×
-	 * SegmentLength + TetherSlack)를 넘으면 견인이 켜진다. 0 = 비활성(기본).
-	 * 견인 *속도* 는 TetherReelSpeed가 정하고, 이 값은 **보정 강성(임계 감쇠)** — 로프 축 속도를 목표로 매
-	 * 프레임 이 비율만큼만 접근시킨다. 1 = 즉시(하드 — 진행 속도를 뚝 끊어 "턱턱"), 작을수록(예 0.1~0.3)
-	 * 몇 프레임에 걸쳐 부드럽게 감속. 크기는 TetherReelSpeed, 부드러움은 이 값으로 역할이 나뉜다.
+	 * SegmentLength + TetherSlack)를 넘으면 견인이 켜진다. 0 = 비활성(기본). **의미는 TetherMode에 따라 다름:**
+	 *  - MassShare: **보정 강성(임계 감쇠)** — 견인 *속도* 는 TetherReelSpeed가 정하고, 이 값은 로프 축
+	 *    속도를 목표로 매 프레임 이 비율만큼만 접근시킨다. 1 = 즉시(하드 — "턱턱"), 작을수록(0.1~0.3) 부드러움.
+	 *  - BinaryPullable: **프레임당 회수 비율** — 양보하는 끝을 안쪽으로 min(Overshoot × 이 값, TetherMaxSpeed
+	 *    × dt)만큼 회수해 로프 길이 경계로 되돌린다(물리 시뮬 바디는 위치 이동, CMC 구동 캐릭터는 안쪽 속도
+	 *    top-up — 둘 다 관성/발사 없음). 1 = 즉시 안착, 작을수록(0.1~0.3) 여러 프레임에 걸쳐 부드럽게 추종.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TetherResponse = 0.2f;
@@ -1019,10 +1036,24 @@ struct FRopeHoldConfig
 	/**
 	 * 접지(발 디딘) 캐릭터가 자기 Mass의 몇 배까지 마찰로 버티는가(유효질량 = Mass × 이 값). 클수록 단단히
 	 * 버텨 무거운 대상도 잘 끌고, 작을수록 쉽게 끌려간다. "대상이 얼마나 무거워야 접지한 나를 끌기
-	 * 시작하는가"의 교차점을 정하는 유일한 튜닝 노브 — 기본값으로 대부분 무설정. bAutoTetherShare 전용.
+	 * 시작하는가"의 교차점을 정하는 유일한 튜닝 노브 — 기본값으로 대부분 무설정.
+	 * MassShare 자동 분배(bAutoTetherShare)와 BinaryPullable 판정이 공용으로 쓴다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "1.0", EditCondition = "bAutoTetherShare"))
-	float GroundBraceFactor = 4.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "1.0"))
+	float GroundBraceFactor = 1.5f;
+
+	// (BinaryPullable 끌림 가능 판정의 히스테리시스는 이제 비노출 내부 상수다 — 질량 노브는 GroundBraceFactor
+	//  하나로 통일. RopeComponent.cpp UpdateTargetPullable의 PullMassHysteresis 참조.)
+
+	/**
+	 * (BinaryPullable) CMC 구동 캐릭터 수신자(wielder / 캐릭터 대상)의 overshoot 회수 강도 [0..1].
+	 * 바깥 walk 상쇄(로프 길이 경계 유지)는 이 값과 무관하게 항상 100%이고, 이 값은 "이미 늘어난 overshoot를
+	 * 얼마나 빨리 안쪽으로 되돌릴지"만 정한다(캐릭터 안쪽 목표속도 = min(Overshoot × 이 값 / dt, TetherMaxSpeed)).
+	 * 물리 바디 위치 회수(TetherResponse)와 독립. 작을수록 부드럽게(과한 안쪽 당김 없이) 정상화, 0이면 회수
+	 * 없이 바깥 상쇄만(경계에 걸린 채 유지).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TetherCharacterReclaim = 0.05f;
 
 	/**
 	 * 자동 분배가 질량차에 얼마나 민감한지(역질량에 거는 지수). 분배는 ShareT = WT^k / (WT^k + WW^k)로,

@@ -59,8 +59,17 @@ struct FRopePullDriveState
 	/**
 	 * 이번 프레임 실제 사용된 대상 몫(shareT) [0..1] — 자동/수동 공통 최종값. wielder 게이트
 	 * (URopeWielderComponent::IsWielderTetherActive)와 디버거가 읽는다. 1이면 wielder 몫 0(전량 대상).
+	 * BinaryPullable 모드에선 이진값(끌림 가능=1, 불가=0)만 들어간다.
 	 */
 	float LastTargetShare = 1.0f;
+
+	/**
+	 * (BinaryPullable 전용) 대상을 끌 수 있는가의 sticky 판정 상태 — 대상 유효질량 ≤ wielder 유효질량이면
+	 * true. bTargetPullableInit이 false면 미시드(다음 유효 프레임에 히스테리시스 없이 순수 비교로 시드),
+	 * true면 TetherPullMassMargin 히스테리시스로만 뒤집힌다. ResetTransient에서 미시드로 되돌린다.
+	 */
+	bool bTargetPullable = true;
+	bool bTargetPullableInit = false;
 
 	/** Pull 힘 수신자 없음 경고를 wrap당 1회만 내보내기 위한 래치(ResetTransient에서 리셋). */
 	bool bLoggedPullNoReceiver = false;
@@ -78,6 +87,7 @@ struct FRopePullDriveState
 		SmoothedWielderPullDir = FVector::ZeroVector;
 		SmoothedAimNodeF = -1.0f;
 		SmoothedTargetShare = -1.0f;
+		bTargetPullableInit = false; // 다음 wrap 시작 시 순수 비교로 다시 시드.
 		bLoggedPullNoReceiver = false;
 	}
 };

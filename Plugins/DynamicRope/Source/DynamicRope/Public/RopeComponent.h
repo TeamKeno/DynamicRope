@@ -338,6 +338,14 @@ public:
 	float GetEffectiveTetherTargetShare() const { return PullDrive.LastTargetShare; }
 
 	/**
+	 * (BinaryPullable 테더 모드) 끌림 가능 판정 — 순수 함수(UObject 무의존, 유닛 테스트 가능).
+	 * 대상 유효질량 EffMassTarget ≤ wielder 유효질량 EffMassWielder이면 "끌림 가능". bPrev(직전 sticky
+	 * 판정)에서 뒤집으려면 반대편 질량이 MarginRatio(≥1)배만큼 더 커야 한다(경계 flapping 방지).
+	 * 무한질량(앵커)은 +BIG_NUMBER로 넘긴다(무한 대상 = 끌림 불가, 무한 wielder = 대상 끌림 가능).
+	 */
+	static bool DecideTargetPullable(float EffMassTarget, float EffMassWielder, bool bPrev, float MarginRatio);
+
+	/**
 	 * 능동 Pull(당김) 힘 설정 — Wrapped + 로프가 팽팽할 때 매 프레임 이 크기의 *상수* 힘을 감긴
 	 * 대상에 인가한다(장력과 무관 → 피드백 폭주 없음). 0 = 정지. 입력 홀드 동안 켜고 떼면 끄는
 	 * 용도(URopeWielderComponent의 PullAction이 이걸 호출). 캐릭터 대상은 CharacterMovement가
@@ -631,6 +639,15 @@ private:
 
 	// 동작 1 — 자동 견인(테더): 가용 로프 길이 초과분을 위치/속도 동기로 회수(수렴, 폭주 없음).
 	void UpdateTether(float DeltaTime);
+
+	// (BinaryPullable 전용) 이번 Wrapped 프레임의 끌림 가능 판정을 overshoot와 무관하게 갱신한다 —
+	// 테더 회수(UpdateTether)와 능동 Pull 방향(ApplyWrappedTraction)이 PullDrive.bTargetPullable을 공유.
+	// 양끝 유효질량 비교 + TetherPullMassMargin 히스테리시스. LastTargetShare(이진 0/1)도 여기서 채운다.
+	void UpdateTargetPullable();
+
+	// (BinaryPullable + not pullable) 능동 Pull 힘을 wielder(로프 owner)에 인가 — 대상이 무거워
+	// wielder가 앵커 쪽으로 끌려가는 climb-in. ApplyPullForce의 owner 쪽 미러(시뮬 루트 → CharacterMovement).
+	void ApplyPullForceToWielder(const FVector& Force);
 
 	// 모든 release 트리거의 공용 마무리(페이즈 전환+노드 반환+일시 상태 폐기+쿨다운+이벤트).
 	void FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog);

@@ -2571,6 +2571,12 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 		return;
 	}
 
+	// BinaryPullable: 끌림 가능 판정을 프레임당 산출(overshoot 무관) — 테더/능동 Pull이 공유.
+	if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable)
+	{
+		UpdateTargetPullable();
+	}
+
 	// 스무딩 전 raw look-ahead(정수 조준) — 디버거 raw vs smoothed 비교.
 	PullDrive.LastPullDirRaw = PullDrive.LastPullSample.Direction;
 
@@ -2619,7 +2625,17 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 	// 장력과 무관한 상수라 피드백 폭주가 없다.
 	if (PullDrive.ActivePullForce > 0.0f && PullDrive.LastPullSample.bValid && PullDrive.LastPullSample.Tension > KINDA_SMALL_NUMBER)
 	{
-		ApplyPullForce(PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, PullDrive.LastPullSample);
+		// BinaryPullable에서 대상이 무거워 끌 수 없으면(not pullable) 힘을 wielder에 실어 앵커 쪽으로 끌어당긴다
+		// (climb-in): LastPullSample.Direction은 앵커→손 방향이라 부호 반전 = 손→앵커. 그 외(MassShare 또는
+		// 끌림 가능)는 대상에 인가해 대상을 wielder 쪽으로 끈다(기존 동작).
+		if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable && !PullDrive.bTargetPullable)
+		{
+			ApplyPullForceToWielder(-PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce);
+		}
+		else
+		{
+			ApplyPullForce(PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, PullDrive.LastPullSample);
+		}
 	}
 }
 
@@ -2880,6 +2896,192 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		return;
 	}
 
+	// ===== BinaryPullable 모드: 이진 양보끝 + 비신축 클램프 (아래 MassShare 경로와 완전 분리) =====
+	// 대상 유효질량 ≤ wielder 유효질량이면 "대상이 양보"(대상만 회수, wielder 불변), 아니면 "wielder가 양보"
+	// (wielder만 로프 길이 쪽으로 회수). 회수 방식은 **수신자 타입에 따라 다르다**:
+	//  - 물리 시뮬 바디(ClampSimBody): 위치 기반. 안쪽 속도를 주입하면 관성이 유지돼 경계를 지나쳐 코스팅→재팽팽
+	//    진동으로 튕겨 날아간다("자유분방하게 날아다니는" 버그) → 위치만 경계로 되돌리고 바깥 속도 성분만 제거.
+	//  - CMC 구동 캐릭터(ClampActor): 안쪽 속도 top-up. 로프 sim은 TG_PostPhysics라 CMC(TG_PrePhysics)의 이동
+	//    뒤에 도는 후행 보정인데, 위치 텔레포트는 다음 틱에 CMC가 입력으로 재적분해 덮어써 무효다(walk가
+    //    TetherMaxSpeed×dt 위치 상한을 앞지르면 로프가 무한정 늘어난다). 캐릭터는 관성이 없어(매 틱 입력으로 속도
+	//    재유도) 안쪽 속도를 줘도 fling이 없고, CMC가 그 속도를 자기 적분에서 소비해 실제 안쪽 이동으로 통합한다.
+	// 능동 Pull의 방향 분기(climb-in)는 ApplyWrappedTraction이 같은 판정으로 한다.
+	if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable)
+	{
+		USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
+		if (!MeshComp)
+		{
+			return;
+		}
+
+		// 방향 = 앵커에서 조준(모서리/손) 쪽(스무딩된 look-ahead, 폴백은 이 구간 직선).
+		const FVector DirToAim = PullDrive.SmoothedPullDir.IsNearlyZero() ? (Span / Dist) : PullDrive.SmoothedPullDir;
+
+		// 이번 프레임 위치 보정 거리: 양보하는 끝을 안쪽으로 이만큼 "이동"한다(속도 주입 X → 관성 없음 → 발사 없음).
+		// Response = 위치 보정 비율(1=매 프레임 전량 회수=경계 즉시 안착, <1=여러 프레임에 걸친 부드러운 추종 —
+		// 둘 다 관성 폭주 없음). TetherMaxSpeed × dt = 프레임당 이동 상한(첫 팽팽 순간의 큰 텔레포트 방지).
+		const float Response = FMath::Clamp(HoldConfig.TetherResponse, 0.0f, 1.0f);
+		const float MaxStep = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f) * DeltaTime;
+		const float StepLen = (MaxStep > 0.0f) ? FMath::Min(Overshoot * Response, MaxStep) : (Overshoot * Response);
+
+		// 끌림 가능 판정은 ② UpdateWrappedPullSample에서 overshoot와 무관하게 프레임당 산출(테더 회수 +
+		// 능동 Pull 방향이 같은 판정 공유). 여기선 그 결과만 읽어 양보하는 끝을 고른다.
+		const bool bPullable = PullDrive.bTargetPullable;
+		const float TargetStep = bPullable ? StepLen : 0.0f;
+		const float WielderStep = bPullable ? 0.0f : StepLen;
+
+		// 비신축 클램프 — (1) 양보하는 끝의 *바깥 방향*(Inward의 반대 = 거리 증가) 속도 성분만 제거하고(안쪽 속도는
+		// 절대 주입하지 않음 → 관성 없음 → 발사 없음), (2) 위치를 안쪽으로 Step만큼 이동해 로프 길이 경계로 되돌린다
+		// (드래그 추종 — 로프가 늘어나 보이지 않게). 로프 축 성분만 건드려 수직(중력/스윙) 성분은 보존. 위치 이동은
+		// TeleportPhysics로 물리 속도를 만들지 않는다(sweep은 벽 통과 방지).
+		auto ClampSimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Inward, float Step)
+		{
+			const FVector Vel = Prim->GetPhysicsLinearVelocity(BoneName);
+			const float OutAlong = static_cast<float>(FVector::DotProduct(Vel, -Inward)); // 바깥 방향 속도 성분.
+			if (OutAlong > 0.0f)
+			{
+				Prim->SetPhysicsLinearVelocity(Vel + Inward * OutAlong, /*bAddToCurrent*/ false, BoneName);
+			}
+			// 위치 이동은 컴포넌트 전체가 시뮬 바디일 때만(BoneName=None). 스켈레탈 풀 랙돌의 개별 본은 컴포넌트
+			// 단위 SetWorldLocation으로 옮길 수 없어 속도 제거만 한다(소량 신축 감수 — 드문 케이스).
+			if (BoneName.IsNone() && Step > KINDA_SMALL_NUMBER)
+			{
+				Prim->SetWorldLocation(Prim->GetComponentLocation() + Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
+			}
+		};
+		auto ClampActor = [&](AActor* Actor, const FVector& Inward, float Step)
+		{
+			// CMC 구동 캐릭터: 위치 텔레포트 대신 **안쪽 속도**를 목표까지 top-up한다. 캐릭터는 관성이 없어(다음
+			// TG_PrePhysics에서 CMC가 입력으로 속도 재유도) 이 안쪽 속도가 관성으로 남지 않아 fling이 없고, CMC가
+			// 자기 적분에서 소비해 실제 안쪽 이동으로 통합한다 — 위치 텔레포트처럼 다음 틱에 덮어써지지 않는다.
+			// 목표속도는 물리 바디용 Step(=Overshoot×TetherResponse)이 아니라 **캐릭터 전용 회수 계수**로 계산해
+			// overshoot 회수를 독립적으로 약하게 둔다. 단 바깥 walk 상쇄는 그대로다: CurAlong<0(바깥)이면
+			// TargetSpeed(≥0)>CurAlong이 항상 참이라 바깥 성분이 0으로 제거된다(회수 계수=0이어도 경계는 지킨다).
+			if (const ACharacter* Character = Cast<ACharacter>(Actor))
+			{
+				if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+				{
+					if (Movement->MovementMode != MOVE_None)
+					{
+						const float ReclaimResp = FMath::Clamp(HoldConfig.TetherCharacterReclaim, 0.0f, 1.0f);
+						const float SpeedCap = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
+						float TargetSpeed = Overshoot * ReclaimResp / FMath::Max(DeltaTime, 1e-4f); // 안쪽 회수 목표속도(약함).
+						if (SpeedCap > 0.0f)
+						{
+							TargetSpeed = FMath::Min(TargetSpeed, SpeedCap);
+						}
+						const FVector OldVel = Movement->Velocity;
+						const float CurAlong = static_cast<float>(FVector::DotProduct(OldVel, Inward)); // 현재 안쪽 성분(바깥이면 음수).
+						if (TargetSpeed > CurAlong)
+						{
+							FVector NewVel = OldVel + Inward * (TargetSpeed - CurAlong);
+							if (SpeedCap > 0.0f)
+							{
+								NewVel = NewVel.GetClampedToMaxSize(FMath::Max(SpeedCap, static_cast<float>(OldVel.Size())));
+							}
+							Movement->Velocity = NewVel;
+						}
+						return;
+					}
+				}
+			}
+			// 무브먼트가 없거나 꺼진(MOVE_None) 비캐릭터: 스윕 위치 오프셋 폴백(관성 없어 텔레포트 무해, 벽 통과 방지).
+			if (Step > KINDA_SMALL_NUMBER)
+			{
+				Actor->AddActorWorldOffset(Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
+			}
+		};
+
+		// ---- 대상 양보 몫 ---- (수신자 체인: 스켈레탈 시뮬 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터/스윕)
+		if (TargetStep > KINDA_SMALL_NUMBER)
+		{
+			bool bHandled = false;
+			if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
+			{
+				if (Skel->IsSimulatingPhysics())
+				{
+					const FName SimBone = FindNearestSimulatingBone(Skel, PullDrive.LastPullSample.Bone);
+					if (!SimBone.IsNone())
+					{
+						ClampSimBody(Skel, SimBone, DirToAim, TargetStep);
+						bHandled = true;
+					}
+				}
+			}
+			if (!bHandled)
+			{
+				if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
+				{
+					if (Prim->IsSimulatingPhysics())
+					{
+						ClampSimBody(Prim, NAME_None, DirToAim, TargetStep);
+						bHandled = true;
+					}
+				}
+			}
+			AActor* TargetOwner = MeshComp->GetOwner();
+			if (!bHandled && TargetOwner)
+			{
+				if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(TargetOwner->GetRootComponent()))
+				{
+					if (Root->IsSimulatingPhysics())
+					{
+						ClampSimBody(Root, NAME_None, DirToAim, TargetStep);
+						bHandled = true;
+					}
+				}
+			}
+			if (!bHandled && TargetOwner)
+			{
+				ClampActor(TargetOwner, DirToAim, TargetStep);
+			}
+		}
+
+		// ---- wielder 양보 몫 ---- (방향 = 손(노드0)→로프 첫 다리 = 앵커 쪽; 시뮬 루트 → 캐릭터/스윕)
+		if (WielderStep > KINDA_SMALL_NUMBER)
+		{
+			const FVector HandPos = Sim.Positions.IsValidIndex(0) ? Sim.Positions[0] : Aim;
+			FVector WielderDirRaw = Aim - HandPos;
+			if (!WielderDirRaw.Normalize(KINDA_SMALL_NUMBER))
+			{
+				WielderDirRaw = -DirToAim;
+			}
+			// 방향 EMA(SmoothedPullDir과 동일 상수): raw 방향 프레임 지터로 클램프 축이 튀는 것을 막는다.
+			if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
+			{
+				PullDrive.SmoothedWielderPullDir = WielderDirRaw;
+			}
+			else
+			{
+				const float Tau = HoldConfig.PullDirSmoothTime;
+				const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
+				PullDrive.SmoothedWielderPullDir = FMath::Lerp(PullDrive.SmoothedWielderPullDir, WielderDirRaw, Alpha).GetSafeNormal();
+				if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
+				{
+					PullDrive.SmoothedWielderPullDir = WielderDirRaw; // 180° 반전 상쇄 축퇴 재시드.
+				}
+			}
+			const FVector WielderDir = PullDrive.SmoothedWielderPullDir;
+
+			AActor* RopeOwner = GetOwner();
+			bool bHandled = false;
+			if (UPrimitiveComponent* Root = RopeOwner ? Cast<UPrimitiveComponent>(RopeOwner->GetRootComponent()) : nullptr)
+			{
+				if (Root->IsSimulatingPhysics())
+				{
+					ClampSimBody(Root, NAME_None, WielderDir, WielderStep);
+					bHandled = true;
+				}
+			}
+			if (!bHandled && RopeOwner)
+			{
+				ClampActor(RopeOwner, WielderDir, WielderStep);
+			}
+		}
+		return;
+	}
+
+	// ===== MassShare 모드(기본, 기존 동작) =====
 	// 방향 = 앵커에서 조준(모서리/손) 쪽 = 스무딩된 look-ahead 방향(둘 다 로프 경로 추종). 폴백은 이 구간 직선.
 	const FVector DirToAim = PullDrive.SmoothedPullDir.IsNearlyZero() ? (Span / Dist) : PullDrive.SmoothedPullDir;
 
@@ -3226,6 +3428,87 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 			TEXT("[%s] Pull has no force receiver: target=%s bone=%s has no simulating body up its parent chain, owner=%s has no force-consuming CharacterMovement (not a Character, or movement disabled) and its root is not simulating — pull force is dropped."),
 			*GetName(), *MeshComp->GetName(), *Pull.Bone.ToString(), *GetNameSafe(Owner));
 	}
+}
+
+void URopeComponent::UpdateTargetPullable()
+{
+	// (BinaryPullable 전용) 이번 Wrapped 프레임의 끌림 가능 판정. overshoot와 무관하게 매 프레임 산출해
+	// 테더 회수(UpdateTether)와 능동 Pull 방향(ApplyWrappedTraction)이 같은 판정을 읽게 한다.
+	USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
+	if (!MeshComp)
+	{
+		return; // 대상 소실(파괴) — Hold가 곧 release. 직전 판정 유지.
+	}
+
+	// 자기 자신에 감긴 로프(owner==대상)는 분배 무의미 → 항상 대상 회수(pullable).
+	const bool bSelfWrap = (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner());
+	bool bPullable;
+	if (bSelfWrap)
+	{
+		bPullable = true;
+	}
+	else
+	{
+		// 양끝 유효질량(접지 캐릭터는 GroundBraceFactor로 접지마찰 반영, MOVE_None/정적은 앵커=무한).
+		const float WT = ResolveEndpointInvMass(MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, HoldConfig.GroundBraceFactor);
+		const float WW = ResolveEndpointInvMass(nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor);
+		const float InfMass = TNumericLimits<float>::Max();
+		const float EffMassTarget = (WT > KINDA_SMALL_NUMBER) ? (1.0f / WT) : InfMass; // invMass 0 = 앵커(무한).
+		const float EffMassWielder = (WW > KINDA_SMALL_NUMBER) ? (1.0f / WW) : InfMass;
+		if (!PullDrive.bTargetPullableInit)
+		{
+			bPullable = (EffMassTarget <= EffMassWielder); // 첫 유효 프레임: 히스테리시스 없이 순수 비교로 시드.
+		}
+		else
+		{
+			// 히스테리시스는 비노출 내부 상수(안정화 장치) — 경계에서 판정이 프레임마다 뒤집히는 것을 막는다.
+			// "교차점 위치"를 정하는 노출 노브는 GroundBraceFactor 하나뿐이고, 이 값은 그 선 주변의 데드밴드일 뿐.
+			constexpr float PullMassHysteresis = 1.1f;
+			bPullable = DecideTargetPullable(EffMassTarget, EffMassWielder, PullDrive.bTargetPullable, PullMassHysteresis);
+		}
+	}
+	PullDrive.bTargetPullable = bPullable;
+	PullDrive.bTargetPullableInit = true;
+	PullDrive.LastTargetShare = bPullable ? 1.0f : 0.0f; // wielder 게이트/디버거가 읽는 유효 몫(이진).
+}
+
+bool URopeComponent::DecideTargetPullable(float EffMassTarget, float EffMassWielder, bool bPrev, float MarginRatio)
+{
+	const float Margin = FMath::Max(MarginRatio, 1.0f);
+	if (bPrev)
+	{
+		// 현재 "끌림 가능": 대상이 wielder보다 Margin배 넘게 무거워질 때만 불가로 뒤집는다(sticky).
+		return !(EffMassTarget > EffMassWielder * Margin);
+	}
+	// 현재 "끌림 불가": 대상이 wielder × (1/Margin) 이하로 가벼워질 때만 가능으로 뒤집는다.
+	return (EffMassTarget * Margin <= EffMassWielder);
+}
+
+void URopeComponent::ApplyPullForceToWielder(const FVector& Force)
+{
+	// (BinaryPullable + not pullable) 능동 Pull 힘을 wielder(로프 owner)에 인가 — 대상이 무거워 대신
+	// wielder가 앵커 쪽으로 끌려가는 climb-in. ApplyPullForce의 owner 쪽 미러: CharacterMovement → 시뮬 루트.
+	AActor* RopeOwner = GetOwner();
+	if (!RopeOwner)
+	{
+		return;
+	}
+	// 1) 캐릭터 무브먼트가 힘을 소비하면(MOVE_None 제외) 이동체에 인가.
+	if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(RopeOwner))
+	{
+		Movement->AddForce(Force);
+		return;
+	}
+	// 2) 시뮬 중인 루트 프리미티브면 그 바디에 직접.
+	if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(RopeOwner->GetRootComponent()))
+	{
+		if (Root->IsSimulatingPhysics())
+		{
+			Root->AddForce(Force);
+			return;
+		}
+	}
+	// 수신자 없음(비캐릭터 + 비시뮬 루트): 조용히 드롭 — climb-in 불가한 구성.
 }
 
 bool URopeComponent::ComputeTensionSlack(float& OutSlack, float& OutStraightDistance, float& OutAvailableLength) const
