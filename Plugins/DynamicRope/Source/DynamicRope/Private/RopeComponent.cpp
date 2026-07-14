@@ -2928,13 +2928,17 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		// 능동 Pull 방향이 같은 판정 공유). 여기선 그 결과만 읽어 양보하는 끝을 고른다.
 		const bool bPullable = PullDrive.bTargetPullable;
 		const float TargetStep = bPullable ? StepLen : 0.0f;
-		const float WielderStep = bPullable ? 0.0f : StepLen;
+		// WielderStep은 대상 회수 뒤에 정한다: not-pullable이면 전량, pullable이면 대상이 걸려 못 간 잔여분
+		// (대상이 잘 따라오면 0 → wielder 자유). 아래 대상 몫 블록이 actualMoved를 채운다.
 
 		// 비신축 클램프 — (1) 양보하는 끝의 *바깥 방향*(Inward의 반대 = 거리 증가) 속도 성분만 제거하고(안쪽 속도는
 		// 절대 주입하지 않음 → 관성 없음 → 발사 없음), (2) 위치를 안쪽으로 Step만큼 이동해 로프 길이 경계로 되돌린다
 		// (드래그 추종 — 로프가 늘어나 보이지 않게). 로프 축 성분만 건드려 수직(중력/스윙) 성분은 보존. 위치 이동은
 		// TeleportPhysics로 물리 속도를 만들지 않는다(sweep은 벽 통과 방지).
-		auto ClampSimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Inward, float Step)
+		// 반환값 = 실제 안쪽 이동 거리. sweep이 막히면(대상이 벽에 걸림) 부분 이동해 Step보다 작다 → 그 부족분을
+		// 호출부가 wielder 제약으로 넘긴다("대상이 못 끌려오면 wielder가 대신 로프 길이에서 멈춘다"). 위치를 안
+		// 옮기는 경우(스켈레탈 본)는 Step을 반환해 부족분 0(= wielder 안 건드림, 기존 동작 유지).
+		auto ClampSimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Inward, float Step) -> float
 		{
 			const FVector Vel = Prim->GetPhysicsLinearVelocity(BoneName);
 			const float OutAlong = static_cast<float>(FVector::DotProduct(Vel, -Inward)); // 바깥 방향 속도 성분.
@@ -2946,8 +2950,12 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			// 단위 SetWorldLocation으로 옮길 수 없어 속도 제거만 한다(소량 신축 감수 — 드문 케이스).
 			if (BoneName.IsNone() && Step > KINDA_SMALL_NUMBER)
 			{
-				Prim->SetWorldLocation(Prim->GetComponentLocation() + Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
+				const FVector Before = Prim->GetComponentLocation();
+				Prim->SetWorldLocation(Before + Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
+				const FVector After = Prim->GetComponentLocation();
+				return FMath::Max(0.0f, static_cast<float>(FVector::DotProduct(After - Before, Inward))); // 실제 안쪽 이동.
 			}
+			return Step; // 위치 미이동(본 등): 부족분 0 취급.
 		};
 		auto ClampActor = [&](AActor* Actor, const FVector& Inward, float Step)
 		{
@@ -2955,8 +2963,8 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			// TG_PrePhysics에서 CMC가 입력으로 속도 재유도) 이 안쪽 속도가 관성으로 남지 않아 fling이 없고, CMC가
 			// 자기 적분에서 소비해 실제 안쪽 이동으로 통합한다 — 위치 텔레포트처럼 다음 틱에 덮어써지지 않는다.
 			// 목표속도는 물리 바디용 Step(=Overshoot×TetherResponse)이 아니라 **캐릭터 전용 회수 계수**로 계산해
-			// overshoot 회수를 독립적으로 약하게 둔다. 단 바깥 walk 상쇄는 그대로다: CurAlong<0(바깥)이면
-			// TargetSpeed(≥0)>CurAlong이 항상 참이라 바깥 성분이 0으로 제거된다(회수 계수=0이어도 경계는 지킨다).
+			// overshoot 회수를 독립적으로 약하게 둔다. 바깥 walk 상쇄(경계 유지)는 즉시·완전(감쇠 X — 아래 참조),
+			// 안쪽 회수만 TetherCharacterSmoothTime으로 감쇠해 걸림 순간 급당김("훅")을 없앤다.
 			if (const ACharacter* Character = Cast<ACharacter>(Actor))
 			{
 				if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
@@ -2970,11 +2978,20 @@ void URopeComponent::UpdateTether(float DeltaTime)
 						{
 							TargetSpeed = FMath::Min(TargetSpeed, SpeedCap);
 						}
+						// 감쇠: 안쪽 회수만 목표속도로 여러 프레임에 걸쳐 부드럽게 접근(걸림 순간 "훅" 제거). 바깥 walk
+						// 상쇄는 감쇠하지 않는다 — 감쇠하면 지속 바깥 입력에서 CMC가 매 프레임 속도를 100% 재유도하는데
+						// 우리는 일부만 상쇄해 경계를 못 지키고 로프가 발산한다. 그래서 바깥은 즉시 완전 제거, 안쪽만 감쇠.
+						const float SmoothTau = FMath::Max(HoldConfig.TetherCharacterSmoothTime, 0.0f);
+						const float Alpha = (SmoothTau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / SmoothTau)) : 1.0f;
 						const FVector OldVel = Movement->Velocity;
 						const float CurAlong = static_cast<float>(FVector::DotProduct(OldVel, Inward)); // 현재 안쪽 성분(바깥이면 음수).
-						if (TargetSpeed > CurAlong)
+						const float AfterWalkCancel = FMath::Max(CurAlong, 0.0f); // 바깥 walk 즉시 완전 제거(경계 보존).
+						const float FinalAlong = (TargetSpeed > AfterWalkCancel)
+							? AfterWalkCancel + (TargetSpeed - AfterWalkCancel) * Alpha // 안쪽 회수만 감쇠 접근.
+							: AfterWalkCancel;                                          // 이미 안쪽 충분/회수 0 → 바깥만 제거.
+						if (FinalAlong > CurAlong)
 						{
-							FVector NewVel = OldVel + Inward * (TargetSpeed - CurAlong);
+							FVector NewVel = OldVel + Inward * (FinalAlong - CurAlong);
 							if (SpeedCap > 0.0f)
 							{
 								NewVel = NewVel.GetClampedToMaxSize(FMath::Max(SpeedCap, static_cast<float>(OldVel.Size())));
@@ -2993,6 +3010,9 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		};
 
 		// ---- 대상 양보 몫 ---- (수신자 체인: 스켈레탈 시뮬 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터/스윕)
+		// actualMoved = 대상이 실제로 안쪽으로 움직인 거리. 프리미티브/루트 위치 클램프만 실측(sweep이 벽에
+		// 걸리면 < TargetStep), 캐릭터/본 경로는 TargetStep(부족분 0 — 기존 동작).
+		float actualMoved = TargetStep;
 		if (TargetStep > KINDA_SMALL_NUMBER)
 		{
 			bool bHandled = false;
@@ -3003,7 +3023,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 					const FName SimBone = FindNearestSimulatingBone(Skel, PullDrive.LastPullSample.Bone);
 					if (!SimBone.IsNone())
 					{
-						ClampSimBody(Skel, SimBone, DirToAim, TargetStep);
+						actualMoved = ClampSimBody(Skel, SimBone, DirToAim, TargetStep);
 						bHandled = true;
 					}
 				}
@@ -3014,7 +3034,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 				{
 					if (Prim->IsSimulatingPhysics())
 					{
-						ClampSimBody(Prim, NAME_None, DirToAim, TargetStep);
+						actualMoved = ClampSimBody(Prim, NAME_None, DirToAim, TargetStep);
 						bHandled = true;
 					}
 				}
@@ -3026,18 +3046,21 @@ void URopeComponent::UpdateTether(float DeltaTime)
 				{
 					if (Root->IsSimulatingPhysics())
 					{
-						ClampSimBody(Root, NAME_None, DirToAim, TargetStep);
+						actualMoved = ClampSimBody(Root, NAME_None, DirToAim, TargetStep);
 						bHandled = true;
 					}
 				}
 			}
 			if (!bHandled && TargetOwner)
 			{
-				ClampActor(TargetOwner, DirToAim, TargetStep);
+				ClampActor(TargetOwner, DirToAim, TargetStep); // 캐릭터 대상: 위치 실측 불가 → 부족분 0(자유).
 			}
 		}
 
 		// ---- wielder 양보 몫 ---- (방향 = 손(노드0)→로프 첫 다리 = 앵커 쪽; 시뮬 루트 → 캐릭터/스윕)
+		// not-pullable이면 전량 wielder, pullable이면 대상이 걸려 못 간 잔여분(TargetStep - 실제 이동)만 wielder에.
+		// → 대상이 잘 따라오면 0(자유), 대상이 벽에 걸리면 wielder가 대신 로프 길이에서 멈춘다.
+		const float WielderStep = bPullable ? FMath::Max(0.0f, TargetStep - actualMoved) : StepLen;
 		if (WielderStep > KINDA_SMALL_NUMBER)
 		{
 			const FVector HandPos = Sim.Positions.IsValidIndex(0) ? Sim.Positions[0] : Aim;

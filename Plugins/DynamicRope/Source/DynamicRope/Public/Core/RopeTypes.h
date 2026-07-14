@@ -1056,6 +1056,16 @@ struct FRopeHoldConfig
 	float TetherCharacterReclaim = 0.05f;
 
 	/**
+	 * (BinaryPullable) CMC 캐릭터 제약(ClampActor)의 *안쪽 회수*(축적 Overshoot 되돌림)가 목표 속도로 접근하는
+	 * 감쇠 시간 상수(초, EMA). 바깥 walk 상쇄(로프 길이 경계 유지)는 이 값과 무관하게 항상 즉시·완전이고, 이 값은
+	 * "걸림 순간 안쪽으로 당겨오는 속도를 얼마나 부드럽게 올릴지"만 정한다. 0 = 즉시(걸림 순간 "훅"), >0 = 여러
+	 * 프레임에 걸쳐 부드럽게(alpha = 1-exp(-dt/이 값), 프레임레이트 독립). 당김 *크기*는 TetherCharacterReclaim,
+	 * *부드러움*은 이 값으로 역할이 나뉜다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
+	float TetherCharacterSmoothTime = 0.12f;
+
+	/**
 	 * 자동 분배가 질량차에 얼마나 민감한지(역질량에 거는 지수). 분배는 ShareT = WT^k / (WT^k + WW^k)로,
 	 * WT/WW는 대상/wielder의 유효 역질량(w=1/유효질량), k가 이 값이다. 1(기본) = 선형 역질량(기존 거동:
 	 * 2배 무거우면 몫 1/3). 1보다 크면 질량차가 **더 극단적**으로 반영돼 무거운 쪽이 훨씬 덜 끌린다(k=2면
