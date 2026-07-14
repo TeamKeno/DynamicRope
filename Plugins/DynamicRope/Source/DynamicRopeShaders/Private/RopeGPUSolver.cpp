@@ -21,6 +21,8 @@
 #include "SceneView.h"
 #include "DataDrivenShaderPlatformInfo.h"
 #include "Misc/ScopeLock.h"
+// TRACE_CPUPROFILER_EVENT_SCOPE — 렌더 스레드 dispatch 경로 실측(Unreal Insights CPU 타임라인).
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 // 노드 버킷(스레드그룹 크기 == groupshared/numthreads 크기). 로프 1개 = 스레드그룹 1개, 노드 = 스레드라,
 // 예전엔 모든 로프가 고정 256 그룹을 잡아 노드 수가 적은 로프는 스레드 대부분이 idle(배리어에는 참여)이었다.
@@ -336,14 +338,8 @@ struct FRopeResidentRope
 	// M5b: PosBuf StructuredBuffer<float4> SRV(렌더용). 재시드 시 무효화.
 	FShaderResourceViewRHIRef PosSRV;
 
-	// SDF 볼륨 그리드/헤더 resident(정적 베이크 데이터 — 볼륨 집합이 바뀔 때만 재업로드). 인스턴스(본
-	// 트랜스폼)는 매 프레임 작은 버퍼로 따로 올린다. 이로써 매 프레임 multi-MB 그리드 재업로드를 없앤다.
-	TRefCountPtr<FRDGPooledBuffer> SDFDistBuf;
-	TRefCountPtr<FRDGPooledBuffer> SDFVolBuf;
-	// 볼륨 집합 시그니처(키+복셀수). 다르면 재빌드.
-	uint32 SDFSetSig = 0;
-	// VolumeKey -> SDFVol 인덱스(매 프레임 인스턴스 VolumeIndex 산정).
-	TMap<const void*, int32> SDFVolKeyToIndex;
+	// (SDF 볼륨 그리드/헤더 resident는 per-rope에서 전역 FRopeGlobalSDFCache로 이동 — VolumeKey당 1회 상주.
+	//  로프는 인스턴스(본 트랜스폼) 배열만 매 프레임 올린다. 전역화로 로프별 중복 업로드/집합 churn 재업로드 제거.)
 
 	// 접촉 감지(G3): 노드당 1슬롯 출력 버퍼(resident, N 변할 때만 재생성) + 리드백(위치와 같은 ring).
 	TRefCountPtr<FRDGPooledBuffer> ContactBuf;
@@ -360,6 +356,23 @@ struct FRopeResidentSharedResults
 	TMap<uint32, FRopeResidentContacts> Contacts;
 };
 
+// 전역 SDF 볼륨 캐시(RT 전용). 베이크된 복셀 데이터는 VolumeKey당 정적이라, 로프/프레임 무관하게 딱 한 번만
+// dequant+업로드해 상주시킨다. 로프의 근접 볼륨 집합이 프레임마다 흔들려도(드래곤: 콜라이더 무상한+mesh 단위
+// 브로드페이즈) distance 재업로드가 0이 된다 — 로프는 매 프레임 인스턴스(본 트랜스폼) 배열만 올린다. 인덱스/
+// 오프셋은 append-only라 기존 볼륨 참조가 절대 안 깨진다(신규 볼륨 추가 시에만 grow).
+struct FRopeGlobalSDFCache
+{
+	// VolumeKey(베이크 데이터 포인터) -> 전역 볼륨 인덱스(= SDFVolumes 인덱스; 헤더가 CpuDist 오프셋을 가짐).
+	TMap<const void*, int32> KeyToIndex;
+	// CPU 원본(연결된 dequant float + 헤더). 세션 내 grow-only — 새 볼륨을 처음 볼 때만 append.
+	TArray<float>             CpuDist;
+	TArray<FRopeSDFVolumeGPU> CpuVol;
+	// 상주 GPU 버퍼(external, 프레임 간 유지). 신규 볼륨 append로 dirty일 때만 재생성+업로드.
+	TRefCountPtr<FRDGPooledBuffer> DistBuf;
+	TRefCountPtr<FRDGPooledBuffer> VolBuf;
+	bool bDirty = false;
+};
+
 // pimpl: 영속 버퍼 맵(RT 전용) + 공유 결과(GT<->RT). RDG/RHI 타입을 헤더에서 숨긴다.
 struct FRopeGPUSolver::FImpl
 {
@@ -367,6 +380,9 @@ struct FRopeGPUSolver::FImpl
 	TMap<uint32, FRopeResidentRope>                          RtRopes;
 	TSharedRef<FRopeResidentSharedResults, ESPMode::ThreadSafe> Results
 		= MakeShared<FRopeResidentSharedResults, ESPMode::ThreadSafe>();
+
+	// 전역 SDF 볼륨 상주(모든 로프 공유 — RopeEnsureGlobalSDFVolumes가 프레임당 1회 갱신).
+	FRopeGlobalSDFCache GlobalSDF;
 
 	// GDF 경로(EnqueueSteps)로 쌓인 이번 프레임 step들. 뷰 확장이 DispatchPending_RenderThread에서 소비. RT 전용.
 	TArray<FRopeGPUResidentStep> PendingSteps;
@@ -394,6 +410,8 @@ void FRopeGPUSolver::ReleaseAll_RenderThread()
 		delete Pair.Value.ContactReadback;  Pair.Value.ContactReadback = nullptr;
 	}
 	Impl->RtRopes.Empty();
+	// 전역 SDF 상주 버퍼/캐시 해제(TRefCountPtr auto-release).
+	Impl->GlobalSDF = FRopeGlobalSDFCache{};
 }
 
 void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
@@ -595,6 +613,7 @@ struct FRopeStepBuild
 static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 	FRopeResidentSharedResults& Results, const TArray<FRopeGPUResidentStep>& Steps)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_ConsumeReadbacks);
 	for (const FRopeGPUResidentStep& S : Steps)
 	{
 		FRopeResidentRope* Rp = RtRopes.Find(S.RopeId);
@@ -735,6 +754,7 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S,
 	FRopeResidentRope& R, FRopeStepBuild& B)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_EnsureBuffers);
 	const int32 N = S.NumNodes;
 	B.bSeed = !R.PosBuf.IsValid() || R.NumNodes != N || R.Generation != S.Generation;
 
@@ -779,6 +799,7 @@ static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUR
 // 캡슐 패킹(M2): step의 월드 캡슐 → GPU 레이아웃 평탄화 + 업로드. B.CapsulesBuf/NumValidCaps를 채운다.
 static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackCapsules);
 	TArray<FRopeCapsuleGPU>& CapsFlat = *GraphBuilder.AllocObject<TArray<FRopeCapsuleGPU>>();
 	for (const FRopeGPUCapsule& Cap : S.Capsules)
 	{
@@ -805,6 +826,7 @@ static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 // 박스 패킹: step의 정적 박스(OBB) → GPU 레이아웃 평탄화 + 업로드. B.BoxesBuf/NumValidBoxes를 채운다.
 static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackBoxes);
 	TArray<FRopeBoxGPU>& BoxesFlat = *GraphBuilder.AllocObject<TArray<FRopeBoxGPU>>();
 	for (const FRopeGPUBox& Box : S.Boxes)
 	{
@@ -834,6 +856,7 @@ static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep&
 // 풀에 이어붙이고 PlaneOffset/PlaneCount로 참조한다. B.ConvexBuf/ConvexPlanesBuf/NumValidConvexes를 채운다.
 static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackConvexes);
 	TArray<FRopeConvexGPU>& ConvFlat = *GraphBuilder.AllocObject<TArray<FRopeConvexGPU>>();
 	TArray<FVector4f>&      PlaneFlat = *GraphBuilder.AllocObject<TArray<FVector4f>>();
 	for (const FRopeGPUConvex& Cv : S.Convexes)
@@ -872,97 +895,111 @@ static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 		sizeof(FVector4f), PlaneFlat.Num(), PlaneFlat.GetData(), (uint64)PlaneFlat.Num() * sizeof(FVector4f));
 }
 
-// SDF 콜라이더 패킹(M3): 볼륨 dedup + 상주 재사용(집합 시그니처 동일 시 업로드 0) 또는 dequant 재빌드
-// + 인스턴스(본 트랜스폼, 매 프레임) 업로드. 볼륨 dedup 맵(FreshKeyToIndex)을 인스턴스 루프가 참조하므로
-// 두 단계는 반드시 한 스코프에 있어야 한다(분리 금지 — dangling). B.SDF*Buf/NumValidSDFCol을 채운다.
-static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S,
-	FRopeResidentRope& R, FRopeStepBuild& B)
+// 전역 SDF 볼륨 상주 보장(프레임당 1회, 로프 루프 *전*). 이번 프레임 모든 Step의 SDF 콜라이더에서 아직
+// 캐시에 없는 VolumeKey만 dequant해 전역 배열에 append하고, 신규 볼륨이 생긴 프레임에만(dirty) 상주 버퍼를
+// 재업로드한다(세션당 볼륨 수만큼, 이후 0). 반환: 이번 프레임 바인딩할 전역 distance/header RDG 버퍼(어느
+// 로프도 SDF가 없으면 더미 1개). 이걸로 로프별·집합-churn 재업로드(구 per-rope VolSig 게이트의 50ms)를 없앤다.
+static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<FRopeGPUResidentStep>& Steps,
+	FRopeGlobalSDFCache& Cache, FRDGBufferRef& OutDistRDG, FRDGBufferRef& OutVolRDG)
 {
-	TArray<FRopeSDFColliderGPU>& SDFCol = *GraphBuilder.AllocObject<TArray<FRopeSDFColliderGPU>>();
-
-	// 1) 고유 볼륨 dedup + 집합 시그니처(키/복셀수만 — distance 데이터는 만지지 않는다).
-	// 인덱스 = (재빌드 시) VolumeIndex
-	TArray<const FRopeGPUSDFCollider*> UniqueVols;
-	TMap<const void*, int32>           FreshKeyToIndex;
-	uint32 VolSig = 0;
-	for (const FRopeGPUSDFCollider& Src : S.SDFColliders)
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_EnsureGlobalSDF);
+	for (const FRopeGPUResidentStep& S : Steps)
 	{
-		const int64 Voxels = (int64)Src.ResX * Src.ResY * Src.ResZ;
-		if (!Src.Distances || Src.ResX < 2 || Src.ResY < 2 || Src.ResZ < 2 || Voxels <= 0)
+		for (const FRopeGPUSDFCollider& Src : S.SDFColliders)
 		{
-			continue;
-		}
-		if (!FreshKeyToIndex.Contains(Src.VolumeKey))
-		{
-			FreshKeyToIndex.Add(Src.VolumeKey, UniqueVols.Num());
-			UniqueVols.Add(&Src);
-			VolSig = HashCombine(VolSig, PointerHash(Src.VolumeKey));
-			VolSig = HashCombine(VolSig, ::GetTypeHash((uint64)Voxels));
-		}
-	}
+			const int64 Voxels = (int64)Src.ResX * Src.ResY * Src.ResZ;
+			if (!Src.Distances || Src.ResX < 2 || Src.ResY < 2 || Src.ResZ < 2 || Voxels <= 0)
+			{
+				continue;
+			}
+			if (Cache.KeyToIndex.Contains(Src.VolumeKey))
+			{
+				// 이미 상주 — dequant/업로드 없음(정적 베이크 데이터라 재-dequant 불필요).
+				continue;
+			}
+			// 신규 볼륨: 전역 배열에 append(인덱스/오프셋 stable — 기존 참조 불변).
+			Cache.KeyToIndex.Add(Src.VolumeKey, Cache.CpuVol.Num());
 
-	// 2) 볼륨 distance/header 버퍼: 시그니처가 같으면 resident 재사용(업로드 0), 아니면 1회 재빌드.
-	const bool bVolReuse = R.SDFDistBuf.IsValid() && R.SDFVolBuf.IsValid()
-		&& R.SDFSetSig == VolSig && UniqueVols.Num() > 0;
-	const TMap<const void*, int32>& KeyToIndex = bVolReuse ? R.SDFVolKeyToIndex : FreshKeyToIndex;
-
-	if (bVolReuse)
-	{
-		B.SDFDistBuf = GraphBuilder.RegisterExternalBuffer(R.SDFDistBuf);
-		B.SDFVolBuf  = GraphBuilder.RegisterExternalBuffer(R.SDFVolBuf);
-	}
-	else if (UniqueVols.Num() > 0)
-	{
-		TArray<float>&             SDFDist = *GraphBuilder.AllocObject<TArray<float>>();
-		TArray<FRopeSDFVolumeGPU>& SDFVol  = *GraphBuilder.AllocObject<TArray<FRopeSDFVolumeGPU>>();
-		SDFVol.Reserve(UniqueVols.Num());
-		for (const FRopeGPUSDFCollider* Vp : UniqueVols)
-		{
 			FRopeSDFVolumeGPU V;
-			V.DistOffset = SDFDist.Num();
-			V.ResX = Vp->ResX; V.ResY = Vp->ResY; V.ResZ = Vp->ResZ;
-			V.LocalMin  = FVector4f((float)Vp->LocalMin.X,  (float)Vp->LocalMin.Y,  (float)Vp->LocalMin.Z,  0.0f);
-			V.LocalSize = FVector4f((float)Vp->LocalSize.X, (float)Vp->LocalSize.Y, (float)Vp->LocalSize.Z, 0.0f);
-			SDFVol.Add(V);
-			// 코드 → float(cm) dequant 후 업로드(셰이더 SDFDistances는 float 유지 → .usf 무변경).
-			// 비대칭 밴드: d = code*(range/MaxCode) - NBIn, range = NBIn+NBOut. 코드는 복셀당
-			// BytesPerCode 바이트(리틀엔디안): 1=uint8(max255), 2=uint16(max65535).
-			const int32 VoxN = (int32)((int64)Vp->ResX * Vp->ResY * Vp->ResZ);
-			const int32 Bpc = Vp->BytesPerCode;
+			V.DistOffset = Cache.CpuDist.Num();
+			V.ResX = Src.ResX; V.ResY = Src.ResY; V.ResZ = Src.ResZ;
+			V.LocalMin  = FVector4f((float)Src.LocalMin.X,  (float)Src.LocalMin.Y,  (float)Src.LocalMin.Z,  0.0f);
+			V.LocalSize = FVector4f((float)Src.LocalSize.X, (float)Src.LocalSize.Y, (float)Src.LocalSize.Z, 0.0f);
+			Cache.CpuVol.Add(V);
+
+			// 코드 → float(cm) dequant. 비대칭 밴드: d = code*(range/MaxCode) - NBIn. 코드는 복셀당 BytesPerCode
+			// 바이트(리틀엔디안): 1=uint8(max255), 2=uint16(max65535). 셰이더 SDFDistances는 float 유지(.usf 무변경).
+			const int32 VoxN = (int32)Voxels;
+			const int32 Bpc = Src.BytesPerCode;
 			const float MaxCodeF = (Bpc >= 2) ? 65535.0f : 255.0f;
-			const float NBIn = Vp->NarrowBandInner;
-			const float Range = NBIn + Vp->NarrowBandOuter;
+			const float NBIn = Src.NarrowBandInner;
+			const float Range = NBIn + Src.NarrowBandOuter;
 			const float DeqScale = (Range > 0.0f) ? (Range / MaxCodeF) : 0.0f;
-			SDFDist.Reserve(SDFDist.Num() + VoxN);
+			Cache.CpuDist.Reserve(Cache.CpuDist.Num() + VoxN);
 			for (int32 Vi = 0; Vi < VoxN; ++Vi)
 			{
-				uint32 Code = Vp->Distances[Vi * Bpc];
+				uint32 Code = Src.Distances[Vi * Bpc];
 				if (Bpc >= 2)
 				{
-					Code |= static_cast<uint32>(Vp->Distances[Vi * Bpc + 1]) << 8;
+					Code |= static_cast<uint32>(Src.Distances[Vi * Bpc + 1]) << 8;
 				}
 				// 바깥 +
-				SDFDist.Add(static_cast<float>(Code) * DeqScale - NBIn);
+				Cache.CpuDist.Add(static_cast<float>(Code) * DeqScale - NBIn);
 			}
+			Cache.bDirty = true;
 		}
-		B.SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances"),
-			sizeof(float), SDFDist.Num(), SDFDist.GetData(), (uint64)SDFDist.Num() * sizeof(float));
-		B.SDFVolBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFVolumes"),
-			sizeof(FRopeSDFVolumeGPU), SDFVol.Num(), SDFVol.GetData(), (uint64)SDFVol.Num() * sizeof(FRopeSDFVolumeGPU));
-		R.SDFDistBuf = GraphBuilder.ConvertToExternalBuffer(B.SDFDistBuf);
-		R.SDFVolBuf  = GraphBuilder.ConvertToExternalBuffer(B.SDFVolBuf);
-		R.SDFSetSig  = VolSig;
-		// 복사(아래 인스턴스 루프가 KeyToIndex=FreshKeyToIndex를 계속 참조).
-		R.SDFVolKeyToIndex = FreshKeyToIndex;
 	}
 
-	// 3) 인스턴스(매 프레임): VolumeIndex(캐시/신규 맵) + 현재 본 트랜스폼.
+	if (Cache.CpuVol.Num() == 0)
+	{
+		// 이번 세션에 SDF 볼륨이 하나도 없음 — 더미 1개(바인딩 유효성; 셰이더는 NumSDFColliders=0이라 미참조).
+		TArray<float>&             DummyDist = *GraphBuilder.AllocObject<TArray<float>>();
+		TArray<FRopeSDFVolumeGPU>& DummyVol  = *GraphBuilder.AllocObject<TArray<FRopeSDFVolumeGPU>>();
+		DummyDist.AddZeroed(1);
+		DummyVol.AddZeroed(1);
+		OutDistRDG = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.GlobalSDFDist.Dummy"),
+			sizeof(float), 1, DummyDist.GetData(), sizeof(float));
+		OutVolRDG = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.GlobalSDFVol.Dummy"),
+			sizeof(FRopeSDFVolumeGPU), 1, DummyVol.GetData(), sizeof(FRopeSDFVolumeGPU));
+		return;
+	}
+
+	if (Cache.DistBuf.IsValid() && Cache.VolBuf.IsValid() && !Cache.bDirty)
+	{
+		// 신규 볼륨 없음 → 재사용(업로드 0). 정상 상태 — 로프의 근접 볼륨 집합/순서가 흔들려도 여기로 온다.
+		OutDistRDG = GraphBuilder.RegisterExternalBuffer(Cache.DistBuf);
+		OutVolRDG  = GraphBuilder.RegisterExternalBuffer(Cache.VolBuf);
+		return;
+	}
+
+	// 최초 또는 신규 볼륨(dirty) — 전역 버퍼 재생성+업로드(append-only라 grow, 세션당 볼륨 수만큼만 발생).
+	OutDistRDG = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.GlobalSDFDist"),
+		sizeof(float), Cache.CpuDist.Num(), Cache.CpuDist.GetData(), (uint64)Cache.CpuDist.Num() * sizeof(float));
+	OutVolRDG = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.GlobalSDFVol"),
+		sizeof(FRopeSDFVolumeGPU), Cache.CpuVol.Num(), Cache.CpuVol.GetData(), (uint64)Cache.CpuVol.Num() * sizeof(FRopeSDFVolumeGPU));
+	Cache.DistBuf = GraphBuilder.ConvertToExternalBuffer(OutDistRDG);
+	Cache.VolBuf  = GraphBuilder.ConvertToExternalBuffer(OutVolRDG);
+	Cache.bDirty = false;
+}
+
+// SDF 콜라이더 패킹(M3): 전역 볼륨 캐시(RopeEnsureGlobalSDFVolumes가 상주 보장)를 공유 바인딩하고, 이 로프의
+// 인스턴스(전역 VolumeIndex + 현재/직전 본 트랜스폼) 배열만 매 프레임 올린다. distance dequant/업로드는 여기서
+// 하지 않는다 — 전역 캐시가 VolumeKey당 1회만 수행. B.SDF*Buf/NumValidSDFCol을 채운다.
+static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B,
+	const TMap<const void*, int32>& GlobalKeyToIndex, FRDGBufferRef GlobalDistRDG, FRDGBufferRef GlobalVolRDG)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackSDF);
+	// 전역 distance/header 버퍼를 공유 바인딩(로프별 복사 없음).
+	B.SDFDistBuf = GlobalDistRDG;
+	B.SDFVolBuf  = GlobalVolRDG;
+
+	TArray<FRopeSDFColliderGPU>& SDFCol = *GraphBuilder.AllocObject<TArray<FRopeSDFColliderGPU>>();
 	for (const FRopeGPUSDFCollider& Src : S.SDFColliders)
 	{
-		const int32* VolIdx = KeyToIndex.Find(Src.VolumeKey);
+		const int32* VolIdx = GlobalKeyToIndex.Find(Src.VolumeKey);
 		if (!VolIdx)
 		{
-			// 무효 볼륨(위 dedup 조건과 일치).
+			// 무효 볼륨(전역 캐시가 dequant 조건으로 걸러 미등록) — 스킵.
 			continue;
 		}
 		const FQuat   Q  = Src.BoneToWorld.GetRotation();
@@ -971,7 +1008,7 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 		const FQuat   PQ = Src.PrevBoneToWorld.GetRotation();
 		const FVector PT = Src.PrevBoneToWorld.GetTranslation();
 		FRopeSDFColliderGPU C;
-		C.VolumeIndex = *VolIdx;
+		C.VolumeIndex     = *VolIdx;
 		C.Rotation        = FVector4f((float)Q.X, (float)Q.Y, (float)Q.Z, (float)Q.W);
 		C.Translation     = FVector4f((float)T.X, (float)T.Y, (float)T.Z, 0.0f);
 		C.Scale           = FVector4f((float)Sc.X, (float)Sc.Y, (float)Sc.Z, 0.0f);
@@ -984,20 +1021,6 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 	// 유효 개수 — 더미 패딩 *전* 확정. 비면 더미 1개(셰이더는 NumSDFColliders=0이라 미참조).
 	B.NumValidSDFCol = SDFCol.Num();
 	if (SDFCol.Num() == 0) { SDFCol.AddZeroed(1); }
-
-	// 이 로프에 SDF 볼륨이 없으면 distance/header도 더미 1개 transient 생성.
-	if (!B.SDFDistBuf)
-	{
-		TArray<float>&             DummyDist = *GraphBuilder.AllocObject<TArray<float>>();
-		TArray<FRopeSDFVolumeGPU>& DummyVol  = *GraphBuilder.AllocObject<TArray<FRopeSDFVolumeGPU>>();
-		DummyDist.AddZeroed(1);
-		DummyVol.AddZeroed(1);
-		B.SDFDistBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFDistances.Dummy"),
-			sizeof(float), 1, DummyDist.GetData(), sizeof(float));
-		B.SDFVolBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFVolumes.Dummy"),
-			sizeof(FRopeSDFVolumeGPU), 1, DummyVol.GetData(), sizeof(FRopeSDFVolumeGPU));
-	}
-
 	B.SDFColBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFColliders"),
 		sizeof(FRopeSDFColliderGPU), SDFCol.Num(), SDFCol.GetData(), (uint64)SDFCol.Num() * sizeof(FRopeSDFColliderGPU));
 }
@@ -1006,6 +1029,7 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 // 없으면 더미 1개 + bHasOverrides=0 → 셰이더가 참조하지 않는다.
 static void RopePackOverrides(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackOverrides);
 	const int32 N = S.NumNodes;
 	TArray<uint32>&    OvFlags = *GraphBuilder.AllocObject<TArray<uint32>>();
 	TArray<FVector4f>& OvPos   = *GraphBuilder.AllocObject<TArray<FVector4f>>();
@@ -1054,6 +1078,7 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	const FGlobalDistanceFieldParameters2& GDFSolverParams, uint32 bGDFSolverValid,
 	const FVector3f& PreViewTranslation)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_AddSolvePass);
 	const int32 N = S.NumNodes;
 
 	TArray<FRopeGPUParamsGPU>& ParamsArr = *GraphBuilder.AllocObject<TArray<FRopeGPUParamsGPU>>();
@@ -1141,6 +1166,7 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 static void RopeArmReadbacks(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S,
 	FRopeResidentRope& R, const FRopeStepBuild& B, FRDGBufferRef LambdaRDG)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_ArmReadbacks);
 	const int32 N = S.NumNodes;
 	if (!R.bReadbackArmed)
 	{
@@ -1168,6 +1194,7 @@ static void RopeArmReadbacks(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S,
 	FRopeResidentRope& R, const FRopeStepBuild& B)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_AddDetectPass);
 	const int32 N = S.NumNodes;
 
 	const bool bContactSeed = !R.ContactBuf.IsValid() || B.bSeed;
@@ -1273,6 +1300,7 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRopeGPUResidentStep>& Steps,
 	const FSceneView* View, const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_RunSteps);
 	// --- Loop 1: 직전 프레임 리드백 consume — 그래프 구성 *전*에 immediate Lock으로 처리.
 	RopeConsumeReadbacks(Impl->RtRopes, *Impl->Results, Steps);
 
@@ -1286,6 +1314,12 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	{
 		FillGDFShaderParams(GDF, GDFSolverParams, bGDFSolverValid);
 	}
+
+	// 전역 SDF 볼륨 상주 보장(프레임당 1회, 로프 루프 *전*). 신규 볼륨만 dequant/업로드 → 정상 상태 재업로드 0.
+	// 아래 로프별 RopePackSDFColliders는 이 전역 버퍼를 공유 바인딩하고 인스턴스(본 트랜스폼) 배열만 올린다.
+	FRDGBufferRef GlobalSDFDistRDG = nullptr;
+	FRDGBufferRef GlobalSDFVolRDG = nullptr;
+	RopeEnsureGlobalSDFVolumes(GraphBuilder, Steps, Impl->GlobalSDF, GlobalSDFDistRDG, GlobalSDFVolRDG);
 
 	// --- Loop 2: 로프별 seed/register → 패킹 → 솔브 → 리드백 재무장 → 감지 → 외부(SRV) 배리어.
 	for (const FRopeGPUResidentStep& S : Steps)
@@ -1322,7 +1356,7 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		}
 
 		RopePackCapsules(GraphBuilder, S, B);
-		RopePackSDFColliders(GraphBuilder, S, R, B);
+		RopePackSDFColliders(GraphBuilder, S, B, Impl->GlobalSDF.KeyToIndex, GlobalSDFDistRDG, GlobalSDFVolRDG);
 		RopePackBoxes(GraphBuilder, S, B);
 		RopePackConvexes(GraphBuilder, S, B);
 		RopePackOverrides(GraphBuilder, S, B);
@@ -1358,7 +1392,11 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 			FRDGBuilder GraphBuilder(RHICmdList);
 			// 전용 그래프 경로 — View/GDF 없음(GDF in-solver는 뷰 확장 경로 전용). View=nullptr → 항상 lean.
 			RunSteps_RenderThread(GraphBuilder, Steps, nullptr, nullptr, FVector3f::ZeroVector);
-			GraphBuilder.Execute();
+			{
+				// RDG 컴파일 + RHI 커맨드 기록(렌더 스레드 CPU 비용의 큰 부분일 수 있음).
+				TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_GraphExecute);
+				GraphBuilder.Execute();
+			}
 		});
 }
 
@@ -1382,6 +1420,7 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 void FRopeGPUSolver::DispatchPending_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView* View,
 	const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_DispatchPending);
 	check(IsInRenderingThread());
 	if (Impl->PendingSteps.Num() == 0)
 	{
