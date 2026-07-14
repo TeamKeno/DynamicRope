@@ -416,9 +416,6 @@ struct FRopeWrapState
 	/** 최대 세그먼트 장력(Wrapped 중 매 프레임 갱신). */
 	float                   Tension = 0.0f;
 
-	/** 감긴 누적 시간(Hold가 증가 — 포획 성공 판정 등 게임 소비 예정). */
-	float                   TimeWrapped = 0.0f;
-
 	// BoneName을 소유한 Mesh. wrap은 이 mesh에 대해 유지/추적된다(rope 소유자와 다른
 	// 액터일 수 있음). 결정 시점에 컨택트로부터 해석된다.
 	// cross-actor wrap에서는 대상 액터가 Wrapped 도중 파괴될 수 있다. raw 포인터로 보관하면

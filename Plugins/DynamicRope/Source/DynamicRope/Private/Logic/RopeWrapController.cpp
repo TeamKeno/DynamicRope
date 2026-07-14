@@ -140,7 +140,6 @@ bool FRopeWrapController::DecideWrap(const FRopeSimState& Sim, const TArray<IRop
 void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapState& Seed, FRopeNodeOverrideFrame& OutFrame)
 {
 	State = Seed;
-	State.TimeWrapped = 0.0f;
 
 	// 붙잡힌 bone 을 소유한 mesh 는 시드에 실려 온다(접촉의 SourceMesh 에서 전파 — cross-actor 포함).
 	// 없으면 잘못된 시드다: 아무것도 latch 하지 않고 상태를 비워 "감긴 척"하는 상태를 남기지 않는다.
@@ -302,7 +301,6 @@ bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOver
 			OutFrame.SetInvMass(Anchor.NodeIndex, 0.0f);
 		}
 
-		State.TimeWrapped += Dt;
 		return true;
 	}
 
@@ -322,7 +320,6 @@ bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOver
 		OutFrame.SetInvMass(Latch.NodeIndex, 0.0f);
 	}
 
-	State.TimeWrapped += Dt;
 	return true;
 }
 
