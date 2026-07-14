@@ -2,6 +2,7 @@
 
 #include "RopeComponent.h"
 // ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+#include "Templates/Function.h"
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
@@ -2865,6 +2866,83 @@ namespace
 		// (5) 정적/키네마틱/비시뮬 비캐릭터 → 앵커.
 		return 0.0f;
 	}
+
+	// 테더 회수 수신자 체인(MassShare/BinaryPullable · 대상/wielder 공용 골격). 네 곳이 같은 타입 래더
+	// (스켈레탈 시뮬 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터/액터 폴백)를 쓰고, 적용 알고리즘만 콜백으로 다르다.
+	//  - MeshComp: 대상이면 State.Mesh, wielder면 nullptr(스켈레탈·프리미티브 rung 자동 skip → 루트부터 시작).
+	//  - SimApply(Prim, Bone, Dir, Step) → 실제 진행 거리 반환(위치 클램프의 부족분 산출용; 속도 방식은 Step 반환).
+	//  - ActorApply(Actor, Dir, Step): 캐릭터/비시뮬 폴백.
+	// 반환 = sim-body에 적용됐으면 SimApply 반환, 아니면 Step(= 부족분 0).
+	float ApplyTetherReceiverChain(
+		USceneComponent* MeshComp, AActor* Owner, FName WrapBone,
+		const FVector& Dir, float Step,
+		TFunctionRef<float(UPrimitiveComponent*, FName, const FVector&, float)> SimApply,
+		TFunctionRef<void(AActor*, const FVector&, float)> ActorApply)
+	{
+		// (1) 스켈레탈 + 풀 랙돌: 감긴 본(부모 체인 승격 — 바디 없는 트위스트 본 대응) 시뮬 바디.
+		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
+		{
+			if (Skel->IsSimulatingPhysics())
+			{
+				const FName SimBone = FindNearestSimulatingBone(Skel, WrapBone);
+				if (!SimBone.IsNone())
+				{
+					return SimApply(Skel, SimBone, Dir, Step);
+				}
+			}
+		}
+		// (2) wrap 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등).
+		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
+		{
+			if (Prim->IsSimulatingPhysics())
+			{
+				return SimApply(Prim, NAME_None, Dir, Step);
+			}
+		}
+		if (Owner)
+		{
+			// (3) 소유 액터 루트 프리미티브가 시뮬 중(물리 액터 구성). wielder는 MeshComp=nullptr라 여기서 시작.
+			if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
+			{
+				if (Root->IsSimulatingPhysics())
+				{
+					return SimApply(Root, NAME_None, Dir, Step);
+				}
+			}
+			// (4) 캐릭터/비시뮬: 콜백 폴백(속도 톱업/스윕 오프셋 등 — 모드별 적용 로직).
+			ActorApply(Owner, Dir, Step);
+		}
+		return Step; // sim-body 미적용 → 부족분 0.
+	}
+}
+
+FVector URopeComponent::ComputeSmoothedWielderDir(const FVector& Aim, const FVector& DirToAim, float DeltaTime)
+{
+	// 방향 = 손(노드 0)에서 로프의 첫 직선 다리를 따라. 조준(AimPos)이 벽 모서리면 모서리를 향하고, 로프가 곧아
+	// 조준=손이면(chord ~0) 앵커→조준의 역방향(=손→앵커)으로 폴백한다.
+	const FVector HandPos = Sim.Positions.IsValidIndex(0) ? Sim.Positions[0] : Aim;
+	FVector WielderDirRaw = Aim - HandPos;
+	if (!WielderDirRaw.Normalize(KINDA_SMALL_NUMBER))
+	{
+		WielderDirRaw = -DirToAim;
+	}
+	// 방향 EMA(대상 쪽 SmoothedPullDir과 동일 상수): AimPos 노드 노이즈/모서리 전환/근접 축퇴로 raw 방향이
+	// 프레임마다 튀면 클램프/톱업이 매번 다른 축으로 들어가 벡터가 랜덤워크로 불어난다(폭주).
+	if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
+	{
+		PullDrive.SmoothedWielderPullDir = WielderDirRaw;
+	}
+	else
+	{
+		const float Tau = HoldConfig.PullDirSmoothTime;
+		const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
+		PullDrive.SmoothedWielderPullDir = FMath::Lerp(PullDrive.SmoothedWielderPullDir, WielderDirRaw, Alpha).GetSafeNormal();
+		if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
+		{
+			PullDrive.SmoothedWielderPullDir = WielderDirRaw; // 정반대 방향 상쇄 축퇴(180° 반전 순간) — raw로 재시드.
+		}
+	}
+	return PullDrive.SmoothedWielderPullDir;
 }
 
 void URopeComponent::UpdateTether(float DeltaTime)
@@ -2896,6 +2974,15 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		return;
 	}
 
+	// 방향 = 앵커에서 조준(모서리/손) 쪽 = 스무딩된 look-ahead(폴백은 이 구간 직선). 대상 컴포넌트(파괴 소실이면
+	// null → Hold가 이미 release). 두 모드(BinaryPullable/MassShare) 공통 입력이라 분기 전에 1회만 산출한다.
+	const FVector DirToAim = PullDrive.SmoothedPullDir.IsNearlyZero() ? (Span / Dist) : PullDrive.SmoothedPullDir;
+	USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
+	if (!MeshComp)
+	{
+		return;
+	}
+
 	// ===== BinaryPullable 모드: 이진 양보끝 + 비신축 클램프 (아래 MassShare 경로와 완전 분리) =====
 	// 대상 유효질량 ≤ wielder 유효질량이면 "대상이 양보"(대상만 회수, wielder 불변), 아니면 "wielder가 양보"
 	// (wielder만 로프 길이 쪽으로 회수). 회수 방식은 **수신자 타입에 따라 다르다**:
@@ -2908,15 +2995,6 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 능동 Pull의 방향 분기(climb-in)는 ApplyWrappedTraction이 같은 판정으로 한다.
 	if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable)
 	{
-		USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
-		if (!MeshComp)
-		{
-			return;
-		}
-
-		// 방향 = 앵커에서 조준(모서리/손) 쪽(스무딩된 look-ahead, 폴백은 이 구간 직선).
-		const FVector DirToAim = PullDrive.SmoothedPullDir.IsNearlyZero() ? (Span / Dist) : PullDrive.SmoothedPullDir;
-
 		// 이번 프레임 위치 보정 거리: 양보하는 끝을 안쪽으로 이만큼 "이동"한다(속도 주입 X → 관성 없음 → 발사 없음).
 		// Response = 위치 보정 비율(1=매 프레임 전량 회수=경계 즉시 안착, <1=여러 프레임에 걸친 부드러운 추종 —
 		// 둘 다 관성 폭주 없음). TetherMaxSpeed × dt = 프레임당 이동 상한(첫 팽팽 순간의 큰 텔레포트 방지).
@@ -3009,52 +3087,16 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			}
 		};
 
-		// ---- 대상 양보 몫 ---- (수신자 체인: 스켈레탈 시뮬 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터/스윕)
-		// actualMoved = 대상이 실제로 안쪽으로 움직인 거리. 프리미티브/루트 위치 클램프만 실측(sweep이 벽에
-		// 걸리면 < TargetStep), 캐릭터/본 경로는 TargetStep(부족분 0 — 기존 동작).
+		// ---- 대상 양보 몫 ---- (공용 수신자 체인; sim-body는 ClampSimBody(위치 클램프), 캐릭터는 ClampActor).
+		// actualMoved = 대상이 실제로 안쪽으로 움직인 거리(sweep이 벽에 막히면 < TargetStep) → 부족분은 아래에서
+		// wielder로 넘어간다. 캐릭터/본 경로는 Step(부족분 0 — 위치 실측 불가/기존 동작).
 		float actualMoved = TargetStep;
 		if (TargetStep > KINDA_SMALL_NUMBER)
 		{
-			bool bHandled = false;
-			if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
-			{
-				if (Skel->IsSimulatingPhysics())
-				{
-					const FName SimBone = FindNearestSimulatingBone(Skel, PullDrive.LastPullSample.Bone);
-					if (!SimBone.IsNone())
-					{
-						actualMoved = ClampSimBody(Skel, SimBone, DirToAim, TargetStep);
-						bHandled = true;
-					}
-				}
-			}
-			if (!bHandled)
-			{
-				if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
-				{
-					if (Prim->IsSimulatingPhysics())
-					{
-						actualMoved = ClampSimBody(Prim, NAME_None, DirToAim, TargetStep);
-						bHandled = true;
-					}
-				}
-			}
-			AActor* TargetOwner = MeshComp->GetOwner();
-			if (!bHandled && TargetOwner)
-			{
-				if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(TargetOwner->GetRootComponent()))
-				{
-					if (Root->IsSimulatingPhysics())
-					{
-						actualMoved = ClampSimBody(Root, NAME_None, DirToAim, TargetStep);
-						bHandled = true;
-					}
-				}
-			}
-			if (!bHandled && TargetOwner)
-			{
-				ClampActor(TargetOwner, DirToAim, TargetStep); // 캐릭터 대상: 위치 실측 불가 → 부족분 0(자유).
-			}
+			actualMoved = ApplyTetherReceiverChain(
+				MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, DirToAim, TargetStep,
+				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
+				[&](AActor* A, const FVector& D, float S) { ClampActor(A, D, S); });
 		}
 
 		// ---- wielder 양보 몫 ---- (방향 = 손(노드0)→로프 첫 다리 = 앵커 쪽; 시뮬 루트 → 캐릭터/스윕)
@@ -3063,51 +3105,16 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		const float WielderStep = bPullable ? FMath::Max(0.0f, TargetStep - actualMoved) : StepLen;
 		if (WielderStep > KINDA_SMALL_NUMBER)
 		{
-			const FVector HandPos = Sim.Positions.IsValidIndex(0) ? Sim.Positions[0] : Aim;
-			FVector WielderDirRaw = Aim - HandPos;
-			if (!WielderDirRaw.Normalize(KINDA_SMALL_NUMBER))
-			{
-				WielderDirRaw = -DirToAim;
-			}
-			// 방향 EMA(SmoothedPullDir과 동일 상수): raw 방향 프레임 지터로 클램프 축이 튀는 것을 막는다.
-			if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
-			{
-				PullDrive.SmoothedWielderPullDir = WielderDirRaw;
-			}
-			else
-			{
-				const float Tau = HoldConfig.PullDirSmoothTime;
-				const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
-				PullDrive.SmoothedWielderPullDir = FMath::Lerp(PullDrive.SmoothedWielderPullDir, WielderDirRaw, Alpha).GetSafeNormal();
-				if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
-				{
-					PullDrive.SmoothedWielderPullDir = WielderDirRaw; // 180° 반전 상쇄 축퇴 재시드.
-				}
-			}
-			const FVector WielderDir = PullDrive.SmoothedWielderPullDir;
-
-			AActor* RopeOwner = GetOwner();
-			bool bHandled = false;
-			if (UPrimitiveComponent* Root = RopeOwner ? Cast<UPrimitiveComponent>(RopeOwner->GetRootComponent()) : nullptr)
-			{
-				if (Root->IsSimulatingPhysics())
-				{
-					ClampSimBody(Root, NAME_None, WielderDir, WielderStep);
-					bHandled = true;
-				}
-			}
-			if (!bHandled && RopeOwner)
-			{
-				ClampActor(RopeOwner, WielderDir, WielderStep);
-			}
+			const FVector WielderDir = ComputeSmoothedWielderDir(Aim, DirToAim, DeltaTime);
+			ApplyTetherReceiverChain(
+				nullptr, GetOwner(), NAME_None, WielderDir, WielderStep,
+				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
+				[&](AActor* A, const FVector& D, float S) { ClampActor(A, D, S); });
 		}
 		return;
 	}
 
 	// ===== MassShare 모드(기본, 기존 동작) =====
-	// 방향 = 앵커에서 조준(모서리/손) 쪽 = 스무딩된 look-ahead 방향(둘 다 로프 경로 추종). 폴백은 이 구간 직선.
-	const FVector DirToAim = PullDrive.SmoothedPullDir.IsNearlyZero() ? (Span / Dist) : PullDrive.SmoothedPullDir;
-
 	// 리엘 컨트롤러: 팽팽한 동안엔 *고정 속도*(TetherReelSpeed)로 당기고, 로프 한계 근처(overshoot가 작음)에서만
 	// 부드럽게 감속해 경계에 안착시킨다(임계 감쇠). 예전 "속도 ∝ overshoot"는 overshoot가 흔들리면 속도도 같이
 	// 스윙했지만(질주→걸림→되감김 사이클), 여기서는 overshoot가 감속 구간(TaperDist=TetherSettleDist)보다 크면
@@ -3123,14 +3130,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// slack이 되고 다음 프레임 견인 off로 코스팅→재팽팽 속도 변동이 생긴다. overshoot로 캡해 항상 경계에 안착.
 	const float StepLen = FMath::Min(VTotal * DeltaTime, Overshoot);                             // 이번 프레임 회수 거리(cm)
 
-	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화). 대상 타입을 가리지 않고 아래 수신자 체인
-	// (스켈레탈 본 → 시뮬 프리미티브 → 캐릭터 무브먼트/스윕)으로 견인한다 — 가벼운 물리 프랍/정적 대상도
-	// 스켈레탈과 동일 로직으로 끌린다. null은 대상 컴포넌트가 파괴로 소실된 경우뿐(그땐 Hold가 이미 release).
-	USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
-	if (!MeshComp)
-	{
-		return;
-	}
+	// (DirToAim/MeshComp는 위 공통 프롤로그에서 산출 — 두 모드 공용.)
 
 	// 초과분 회수를 대상/wielder(로프 owner) 양끝에 분배한다(양끝이 서로 각자 몫만큼 움직여 합이 초과분을
 	// 넘지 않음 — 과수렴 없음). 몫 산출:
@@ -3269,104 +3269,25 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		Actor->AddActorWorldOffset(Dir * Step, /*bSweep*/ true);
 	};
 
-	// ---- 대상 몫 ----
+	// ---- 대상 몫 ---- (공용 수신자 체인; sim-body는 ServoVelocity(정확 추종), 캐릭터/비시뮬은 ApplyNonSimCorrection).
+	// 인가 본은 감긴 본에서 부모 체인 승격(FindNearestSimulatingBone, 헬퍼 내부) — 바디 없는 트위스트 본 대응.
 	if (TargetStep > KINDA_SMALL_NUMBER)
 	{
-		bool bHandled = false;
-		// (1) 스켈레탈 + 풀 랙돌: 감긴 본이 시뮬 중이어도 메시 전체가 시뮬(풀 랙돌)일 때만 본 속도 톱업으로
-		// 처리한다. 부분 랙돌(메시 루트 바디는 키네마틱, 서브트리만 시뮬)은 시뮬 본이 키네마틱 부모에
-		// 구속돼 있어 — 키네마틱은 사실상 무한질량 — 본에 준 속도가 구속에 다시 잡아먹혀 액터가 끌려오지
-		// 않는다. 그 경우 아래 프리미티브/액터 오프셋 경로로 떨어뜨려 이동체를 직접 회수한다(시뮬 팔다리는
-		// 구속으로 따라온다). 인가 본은 감긴 본에서 부모 체인 승격(FindNearestSimulatingBone) — 바디 없는
-		// 본(트위스트 등) 대응.
-		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
-		{
-			if (Skel->IsSimulatingPhysics())
-			{
-				const FName SimBone = FindNearestSimulatingBone(Skel, PullDrive.LastPullSample.Bone);
-				if (!SimBone.IsNone())
-				{
-					ServoVelocity(Skel, SimBone, DirToAim, TargetStep * InvDt);
-					bHandled = true;
-				}
-			}
-		}
-		// (2) wrap 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등): 컴포넌트 속도 톱업으로 견인.
-		if (!bHandled)
-		{
-			if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
-			{
-				if (Prim->IsSimulatingPhysics())
-				{
-					ServoVelocity(Prim, NAME_None, DirToAim, TargetStep * InvDt);
-					bHandled = true;
-				}
-			}
-		}
-		AActor* TargetOwner = MeshComp->GetOwner();
-		// (3) 소유 액터 루트 프리미티브가 시뮬 중(물리 액터에 붙은 컴포넌트 구성).
-		if (!bHandled && TargetOwner)
-		{
-			if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(TargetOwner->GetRootComponent()))
-			{
-				if (Root->IsSimulatingPhysics())
-				{
-					ServoVelocity(Root, NAME_None, DirToAim, TargetStep * InvDt);
-					bHandled = true;
-				}
-			}
-		}
-		// (4) 캐릭터/비시뮬 대상: 속도 톱업(캐릭터) 또는 스윕 위치 보정 폴백. step이 클램프돼 텔레포트 없음.
-		if (!bHandled && TargetOwner)
-		{
-			ApplyNonSimCorrection(TargetOwner, DirToAim, TargetStep);
-		}
+		ApplyTetherReceiverChain(
+			MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, DirToAim, TargetStep,
+			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { ServoVelocity(P, B, D, S * InvDt); return S; },
+			[&](AActor* A, const FVector& D, float S) { ApplyNonSimCorrection(A, D, S); });
 	}
 
 	// ---- wielder 몫: 같은 초과분을 로프 owner를 로프 쪽으로 당겨 회수한다 ----
+	// (공용 수신자 체인; sim 루트는 TopUpVelocity(단방향 감쇠), 캐릭터/비시뮬은 ApplyNonSimCorrection.)
 	if (WielderStep > KINDA_SMALL_NUMBER)
 	{
-		// 방향 = 손(노드 0)에서 로프의 첫 직선 다리를 따라. 조준(AimPos)이 벽 모서리면 모서리를 향하고,
-		// 로프가 곧아 조준=손이면(chord ~0) 앵커→조준의 역방향(=손→앵커)으로 폴백한다.
-		const FVector HandPos = Sim.Positions.IsValidIndex(0) ? Sim.Positions[0] : Aim;
-		FVector WielderDirRaw = Aim - HandPos;
-		if (!WielderDirRaw.Normalize(KINDA_SMALL_NUMBER))
-		{
-			WielderDirRaw = -DirToAim;
-		}
-		// 방향 EMA(대상 쪽 SmoothedPullDir과 동일 상수): AimPos 노드 노이즈/모서리 전환/근접 축퇴로
-		// raw 방향이 프레임마다 튀면 속도 톱업이 매번 다른 축으로 들어가 벡터가 랜덤워크로 불어난다(폭주).
-		if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
-		{
-			PullDrive.SmoothedWielderPullDir = WielderDirRaw;
-		}
-		else
-		{
-			const float Tau = HoldConfig.PullDirSmoothTime;
-			const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
-			PullDrive.SmoothedWielderPullDir = FMath::Lerp(PullDrive.SmoothedWielderPullDir, WielderDirRaw, Alpha).GetSafeNormal();
-			if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
-			{
-				// 정반대 방향 상쇄 축퇴(180° 반전 순간) — raw로 재시드.
-				PullDrive.SmoothedWielderPullDir = WielderDirRaw;
-			}
-		}
-		const FVector WielderDir = PullDrive.SmoothedWielderPullDir;
-
-		AActor* RopeOwner = GetOwner();
-		bool bHandled = false;
-		if (UPrimitiveComponent* Root = RopeOwner ? Cast<UPrimitiveComponent>(RopeOwner->GetRootComponent()) : nullptr)
-		{
-			if (Root->IsSimulatingPhysics())
-			{
-				TopUpVelocity(Root, NAME_None, WielderDir, WielderStep * InvDt);
-				bHandled = true;
-			}
-		}
-		if (!bHandled && RopeOwner)
-		{
-			ApplyNonSimCorrection(RopeOwner, WielderDir, WielderStep);
-		}
+		const FVector WielderDir = ComputeSmoothedWielderDir(Aim, DirToAim, DeltaTime);
+		ApplyTetherReceiverChain(
+			nullptr, GetOwner(), NAME_None, WielderDir, WielderStep,
+			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { TopUpVelocity(P, B, D, S * InvDt); return S; },
+			[&](AActor* A, const FVector& D, float S) { ApplyNonSimCorrection(A, D, S); });
 	}
 }
 

@@ -640,6 +640,11 @@ private:
 	// 동작 1 — 자동 견인(테더): 가용 로프 길이 초과분을 위치/속도 동기로 회수(수렴, 폭주 없음).
 	void UpdateTether(float DeltaTime);
 
+	// (테더 공용) wielder 견인 방향(손(노드0)→로프 첫 다리 = 앵커 쪽)을 산출해 PullDrive.SmoothedWielderPullDir로
+	// EMA 스무딩(PullDirSmoothTime)해 반환. MassShare/BinaryPullable의 wielder 몫이 공유 — 방향 지터로 클램프
+	// 축이 튀는 것을 막는다(180° 반전 축퇴는 raw로 재시드).
+	FVector ComputeSmoothedWielderDir(const FVector& Aim, const FVector& DirToAim, float DeltaTime);
+
 	// (BinaryPullable 전용) 이번 Wrapped 프레임의 끌림 가능 판정을 overshoot와 무관하게 갱신한다 —
 	// 테더 회수(UpdateTether)와 능동 Pull 방향(ApplyWrappedTraction)이 PullDrive.bTargetPullable을 공유.
 	// 양끝 유효질량 비교 + TetherPullMassMargin 히스테리시스. LastTargetShare(이진 0/1)도 여기서 채운다.
