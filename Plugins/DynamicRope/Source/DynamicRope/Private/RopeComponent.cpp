@@ -923,7 +923,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	if (Phase == ERopePhase::Flight && !bEnteredFlightDuringPrepareThisFrame)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FinalizeFlight);
-		const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
+		const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams();
 
 		TArray<FRopeContactCandidate> Candidates;
 		// ① 후보 산출
@@ -1763,7 +1763,7 @@ float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, in
 
 // ===== Flight ===============================================================
 
-FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float DeltaTime) const
+FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams() const
 {
 	FRopeFlightContactDetector::FParams Params;
 	Params.ContactRadius = GetEffectiveContactQueryRadius();
@@ -1771,7 +1771,9 @@ FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float
 	Params.PredictiveContactFrames = DetectConfig.PredictiveContactFrames;
 	Params.MinLatchNodes = DetectConfig.MinLatchNodes;
 	Params.FallbackForward = GetForwardVector();
-	Params.DeltaTime = DeltaTime;
+	// substep dt = FixedDt(=(1/60)/Substeps) — 로프 Verlet 변위(마지막 substep 델타)와 표면속도(cm/s)를 같은
+	// 단위로 맞추는 다리(RopeSolverSubsteps의 FixedDt와 동일 식). 프레임 dt가 아님 — 자세한 이유는 FParams 주석.
+	Params.SubstepDeltaTime = (1.0f / 60.0f) / static_cast<float>(FMath::Clamp(SolverConfig.Substeps, 1, 16));
 	return Params;
 }
 
@@ -2009,7 +2011,7 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 	// 지오메트리의 어긋남이 WrapDecisionTime 동안 누적됐다. Contacting은 솔브가 없어 노드가 정지
 	// 상태라 스윕은 점 질의로 축퇴하고, 대상 이탈은 collider 쪽 이동으로 감지된다.
 	// 예측/whip 분기는 Flight 전용이므로 여기서는 actual 접촉만 수집한다(비용: 근접 노드 점 질의뿐).
-	const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
+	const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams();
 	TArray<FRopeContactCandidate> Candidates;
 	FRopeFlightContactDetector::DetectContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, Candidates);
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);

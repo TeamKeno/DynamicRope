@@ -274,8 +274,8 @@ bool FRopeRagdollRelativeMotionTest::RunTest(const FString& Parameters)
 
 	FRopeFlightContactDetector::FParams Params;
 	Params.MinLatchNodes = 2;
-	// 단위 환산 검증을 위해 dt 명시(50fps).
-	Params.DeltaTime = 0.02f;
+	// 단위 환산 검증을 위해 substep dt 명시(0.02s).
+	Params.SubstepDeltaTime = 0.02f;
 
 	TArray<FRopeContactCandidate> Candidates;
 	Candidates.Add(MakeSpikeCandidate(3, 500.0f));
@@ -283,7 +283,7 @@ bool FRopeRagdollRelativeMotionTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("candidate stays valid (mock mesh has no bone axis to judge miss cone)"),
 		Candidates[0].bValid);
-	// 정지 로프 + 표면 500cm/s → 상대 접선 속도 = 500 × 0.02 = 10cm/프레임(cm/s를 그대로 빼면 500이
+	// 정지 로프 + 표면 500cm/s → 상대 접선 속도 = 500 × substep dt(0.02) = 10(cm/s를 그대로 빼면 500이
 	// 나온다 — 그 단위 버그의 회귀 방지가 이 단언의 존재 이유).
 	TestTrue(FString::Printf(TEXT("relative tangential speed equals surface speed x dt for a resting rope (%.2f)"),
 		Candidates[0].RelativeTangentialSpeed),

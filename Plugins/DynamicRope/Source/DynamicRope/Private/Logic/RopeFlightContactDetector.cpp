@@ -243,10 +243,12 @@ void FRopeFlightContactDetector::EvaluateRelativeMotion(const FRopeSimState& Sim
 			continue;
 		}
 
-		// RopeVelocity는 Verlet 차분(cm/프레임), SurfaceVelocity는 FROZEN 계약상 cm/초 — dt로 환산해
-		// 같은 단위(cm/프레임)에서 뺀다. 솔버 마찰(ApplyContactFriction)의 SubDt 환산과 동일한 원칙.
+		// RopeVelocity는 Verlet 차분 = *마지막 substep*의 변위(cm/substep, ≈ v·FixedDt), SurfaceVelocity는 FROZEN
+		// 계약상 cm/초. 같은 단위로 빼려면 표면속도를 *substep dt*(SubstepDeltaTime=FixedDt)로 환산해야 한다 —
+		// 프레임 dt로 환산하면 Substeps>1일 때 표면속도가 Substeps배 과대 반영돼 상대운동 방향/속도가 틀린다.
+		// 솔버 마찰(ApplyContactFriction)이 SubDt로 환산하는 것과 동일한 원칙.
 		const FVector RopeVelocity = Sim.Positions[Candidate.NodeIndex] - Sim.PrevPositions[Candidate.NodeIndex];
-		const FVector RelativeVelocity = RopeVelocity - Candidate.SurfaceVelocity * Params.DeltaTime;
+		const FVector RelativeVelocity = RopeVelocity - Candidate.SurfaceVelocity * Params.SubstepDeltaTime;
 		const FVector TangentVelocity = RelativeVelocity - FVector::DotProduct(RelativeVelocity, Candidate.Normal) * Candidate.Normal;
 
 		Candidate.RelativeTangentialSpeed = TangentVelocity.Size();

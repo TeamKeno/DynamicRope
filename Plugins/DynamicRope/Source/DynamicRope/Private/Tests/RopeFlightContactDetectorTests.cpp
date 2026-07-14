@@ -184,11 +184,11 @@ bool FRopeFlightWrapDirectionScoreTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("away-from-hand slide scores negative"), Candidates[0].WrapDirectionScore < -0.9f);
 
 	// 표면이 로프와 같은 속도로 움직이면(상대속도 0) 미끄러짐 없음.
-	// SurfaceVelocity는 cm/s 계약이므로 dt를 명시하고, 프레임 변위 -5cm와 등속이 되는 cm/s 값을 넣는다.
+	// SurfaceVelocity는 cm/s 계약이므로 substep dt를 명시하고, 변위 -5cm와 등속이 되는 cm/s 값을 넣는다.
 	FRopeFlightContactDetector::FParams DtParams = Params;
-	DtParams.DeltaTime = 0.02f;
+	DtParams.SubstepDeltaTime = 0.02f;
 	Sim.PrevPositions[1] = FVector(105.0f, 0.0f, 0.0f);
-	// -250cm/s × 0.02s = -5cm/프레임
+	// -250cm/s × 0.02s = -5cm(이 변위의 substep 폭)
 	Candidate.SurfaceVelocity = FVector(-250.0f, 0.0f, 0.0f);
 	Candidates = { Candidate };
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DtParams, Candidates);
