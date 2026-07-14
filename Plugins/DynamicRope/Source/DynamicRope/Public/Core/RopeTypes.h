@@ -1135,9 +1135,10 @@ struct FRopeHoldConfig
 	float PullForce = 100000.0f;
 
 	/**
-	 * 능동 Pull 대상 물리 바디의 선속도 상한(cm/s, 0 = 무제한). 능동 Pull은 상수 힘이라 당김 방향에 위 성분이
-	 * 있으면 대상이 종단속도 없이 무한 가속(하늘로 떠오름)한다 — 이 상한이 그 폭주를 가둔다(질량 의존 a=F/m은
-	 * 상한 이하에서 그대로 유지). 견인 중(ApplyPullForce)에만 적용.
+	 * 능동 Pull의 **종단속도**(cm/s, 0 = 무제한). 능동 Pull은 상수 힘이라 원래 종단속도가 없어 위로 무한 가속
+	 * (하늘로 떠오름)했다 — 이제 로프축(당김 방향) 속도가 이 값에 가까울수록 힘을 선형으로 0까지 페이드해
+	 * (속도 비례 드래그) 이 속도에서 가속이 자연히 멎는다(하드 클램프 없는 부드러운 종단속도). 당김 방향 성분만
+	 * 페이드하므로 중력/측면 운동은 보존. 질량 의존(a=F/m)은 종단 이하에서 그대로. 견인 중에만 적용.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float ActivePullMaxLinearSpeed = 300.0f;
