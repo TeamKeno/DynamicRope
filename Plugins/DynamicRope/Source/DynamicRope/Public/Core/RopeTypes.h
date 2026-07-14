@@ -382,7 +382,13 @@ struct FRopeWrappingState
 	/** 마지막 path build 실패의 기계 판독 가능한 원인. 최종 abort 로그가 소비한다. */
 	FString PathBuildFailureReason;
 
+	/** projection 결과로 확정된 rope centerline polyline의 실제 누적 길이(cm).
+	 *  Path의 다음 node는 이 거리에서 SegmentLength 경계를 통과할 때 재샘플링해 생성한다. */
 	float PathCurrentDistance = 0.0f;
+
+	/** predictor/composite sweep가 시도한 명목 진행 거리(cm).
+	 *  projection이 제자리여도 증가해 표면 탐색 위상이 멈추지 않게 한다. */
+	float PathSweepDistance = 0.0f;
 	float FrontDistance = 0.0f;
 	ERopeWrappingPathMode PathMode = ERopeWrappingPathMode::SurfaceVectorField;
 	FVector PathSurfaceWorld = FVector::ZeroVector;

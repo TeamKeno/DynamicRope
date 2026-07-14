@@ -407,6 +407,38 @@ bool FRopeWrappingGapBridgeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("enclosure coverage computable"), Wrapping.ComputeWrapEnclosureCoverage(CoverageDeg));
 	TestTrue(FString::Printf(TEXT("pair wrap leaves no escape gap (coverage=%.0f deg)"), CoverageDeg),
 		CoverageDeg > 300.0f);
+
+	// ⑥ 실제 centerline arc-length 재샘플링 계약: 경로 좌표는 SegmentLength 배수이고,
+	// 인접 node의 chord는 그 사이 polyline arc보다 길 수 없으므로 SegmentLength를 초과하지 않는다.
+	const float SegmentLength = Sim.SegmentLength;
+	const float CenterlineOffset = Ctx.SurfaceOffset;
+	for (int32 PathIndex = 0; PathIndex < Wrapping.State.Path.Num(); ++PathIndex)
+	{
+		const FRopeWrapPathPoint& Point = Wrapping.State.Path[PathIndex];
+		const float ExpectedDistance = static_cast<float>(PathIndex) * SegmentLength;
+		TestTrue(FString::Printf(TEXT("path point %d uses arc-length coordinate (%.2f vs %.2f)"),
+				PathIndex, Point.DistanceFromLatch, ExpectedDistance),
+			FMath::IsNearlyEqual(Point.DistanceFromLatch, ExpectedDistance, 0.01f));
+		if (PathIndex > 0)
+		{
+			const FRopeWrapPathPoint& PreviousPoint = Wrapping.State.Path[PathIndex - 1];
+			const FVector PreviousCenter = PreviousPoint.SurfaceWorld +
+				PreviousPoint.NormalWorld * CenterlineOffset;
+			const FVector CurrentCenter = Point.SurfaceWorld +
+				Point.NormalWorld * CenterlineOffset;
+			const float ChordDistance = FVector::Dist(PreviousCenter, CurrentCenter);
+			TestTrue(FString::Printf(TEXT("path chord %d->%d does not exceed one segment (%.2f <= %.2f)"),
+					PathIndex - 1, PathIndex, ChordDistance, SegmentLength),
+				ChordDistance <= SegmentLength + 0.05f);
+		}
+	}
+	const float LastSampleDistance =
+		static_cast<float>(Wrapping.State.Path.Num() - 1) * SegmentLength;
+	TestTrue(TEXT("actual centerline distance reaches the last emitted sample"),
+		Wrapping.State.PathCurrentDistance + KINDA_SMALL_NUMBER >= LastSampleDistance);
+	TestTrue(TEXT("nominal sweep distance advances independently"),
+		Wrapping.State.PathSweepDistance > 0.0f);
+
 	return true;
 }
 

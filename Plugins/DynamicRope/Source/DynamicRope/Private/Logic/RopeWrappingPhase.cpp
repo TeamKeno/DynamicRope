@@ -482,6 +482,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.bPathBuildComplete = false;
 	State.bPathBuildFailed = false;
 	State.PathCurrentDistance = 0.0f;
+	State.PathSweepDistance = 0.0f;
 	State.PathAccumulatedAngleRad = 0.0f;
 	State.PathBridgeDistance = 0.0f;
 	State.FrontDistance = 0.0f;
@@ -890,6 +891,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 	LatchPoint.DistanceFromLatch = 0.0f;
 	State.Path.Add(LatchPoint);
 	State.PathCurrentDistance = 0.0f;
+	State.PathSweepDistance = 0.0f;
 
 	if (State.Path.Num() >= State.NumTailNodes)
 	{
@@ -929,18 +931,19 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 	while (StepsRemaining > 0 && State.Path.Num() < State.NumTailNodes)
 	{
 		const int32 PathIndex = State.Path.Num();
-		const float TargetDistance = static_cast<float>(PathIndex) * Sim.SegmentLength;
 		bool bConsumedStep = false;
 
-		while (StepsRemaining > 0 &&
-			State.PathCurrentDistance + KINDA_SMALL_NUMBER < TargetDistance)
+		// 한 번의 predictor/projection을 실제 centerline integration segment 하나로 취급한다.
+		// 노드 생성 여부와 관계없이 매 outer iteration에서 정확히 한 step을 소비한다.
+		while (StepsRemaining > 0 && !bConsumedStep)
 		{
-			const float StepDistance = FMath::Min(
-				StepSize,
-				TargetDistance - State.PathCurrentDistance);
+			const float StepDistance = StepSize;
 
 			const bool bCompositeSweep = State.bPathUsesPoseSpaceIsland;
 			const FVector PreviousSurfaceWorld = State.PathSurfaceWorld;
+			const FVector PreviousNormalWorld = State.PathNormalWorld;
+			const FVector PreviousTangentWorld = State.PathTangentWorld;
+			const bool bPreviousPointWasBridge = State.PathBridgeDistance > 0.0f;
 			FVector StepRadialBefore = FVector::ZeroVector;
 			const bool bHasRadialBefore = ComputeAxisRadial(PreviousSurfaceWorld, StepRadialBefore);
 			FVector DesiredSweepRadial = State.PathCompositeSweepRadial;
@@ -1262,6 +1265,71 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				}
 			}
 
+			// predictor/sweep가 시도한 명목 거리와 projection 결과가 실제로 만든 centerline 길이를
+			// 분리한다. 이전 구현은 아래 ActualStepDistance와 무관하게 StepDistance를 경로 길이로
+			// 기록해, 표면 스냅이 짧거나 긴 구간에서 rope node 간격이 뭉치거나 늘어났다.
+			const float CenterlineOffset = FMath::Max(0.0f, Ctx.SurfaceOffset);
+			const FVector PreviousCenterlineWorld =
+				PreviousSurfaceWorld + PreviousNormalWorld * CenterlineOffset;
+			const FVector CurrentCenterlineWorld =
+				State.PathSurfaceWorld + State.PathNormalWorld * CenterlineOffset;
+			const float ActualStepDistance = FVector::Dist(
+				PreviousCenterlineWorld, CurrentCenterlineWorld);
+			const float ArcStartDistance = State.PathCurrentDistance;
+			const float ArcEndDistance = ArcStartDistance + ActualStepDistance;
+
+			// 이번 실제 integration segment가 하나 이상의 SegmentLength 경계를 통과하면 각 경계에서
+			// centerline frame을 재샘플링한다. 한 projection 점프가 여러 node 경계를 넘을 수 있으므로
+			// if가 아니라 while이다. DistanceFromLatch/RopeDistance는 이제 실제 polyline arc 좌표다.
+			if (ActualStepDistance > KINDA_SMALL_NUMBER)
+			{
+				while (State.Path.Num() < State.NumTailNodes)
+				{
+					const int32 SamplePathIndex = State.Path.Num();
+					const float TargetArcDistance =
+						static_cast<float>(SamplePathIndex) * Sim.SegmentLength;
+					if (TargetArcDistance > ArcEndDistance + KINDA_SMALL_NUMBER)
+					{
+						break;
+					}
+
+					const float Alpha = FMath::Clamp(
+						(TargetArcDistance - ArcStartDistance) / ActualStepDistance,
+						0.0f, 1.0f);
+					const FVector SampleCenterlineWorld = FMath::Lerp(
+						PreviousCenterlineWorld, CurrentCenterlineWorld, Alpha);
+					const FVector SampleNormalWorld = FMath::Lerp(
+						PreviousNormalWorld, State.PathNormalWorld, Alpha)
+						.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathNormalWorld);
+					FVector SampleTangentWorld = FMath::Lerp(
+						PreviousTangentWorld, State.PathTangentWorld, Alpha)
+						.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathTangentWorld);
+					SampleTangentWorld = (SampleTangentWorld -
+						FVector::DotProduct(SampleTangentWorld, SampleNormalWorld) * SampleNormalWorld)
+						.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathTangentWorld);
+
+					FRopeWrapPathPoint Point;
+					Point.SurfaceWorld =
+						SampleCenterlineWorld - SampleNormalWorld * CenterlineOffset;
+					Point.NormalWorld = SampleNormalWorld;
+					Point.TangentWorld = SampleTangentWorld;
+					Point.Bone = State.PathCurrentBone.IsNone()
+						? State.LatchAnchor.Bone
+						: State.PathCurrentBone;
+					Point.Mesh = State.PathCurrentMesh.IsValid()
+						? State.PathCurrentMesh.Get()
+						: Mesh;
+					Point.DistanceFromLatch = TargetArcDistance;
+					// 브리지에서 출발하거나 이번 step이 브리지면 보간점도 허공 chord로 취급한다.
+					Point.bBridge = bPreviousPointWasBridge || !bOnSurface;
+					State.Path.Add(Point);
+					AppendWrappingAnchorFromPathPoint(SamplePathIndex, Sim, Ctx);
+				}
+			}
+
+			State.PathCurrentDistance = ArcEndDistance;
+			State.PathSweepDistance += StepDistance;
+
 			if (bCompositeSweep)
 			{
 				const float PreviousSweepAngleDeg = FMath::RadiansToDegrees(
@@ -1287,19 +1355,13 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 						*State.PathCurrentBone.ToString(), bOnSurface ? TEXT("Surface") : TEXT("Bridge"),
 						CompositeSelectedSupport, CompositeSelectedRadius,
 						CompositeSelectedAlignment, CompositeProjectionDistance,
-						State.PathCurrentDistance + StepDistance,
+						State.PathCurrentDistance,
 						*State.PathCompositeSweepRadial.ToString());
 				}
 			}
 
-			State.PathCurrentDistance += StepDistance;
 			--StepsRemaining;
 			bConsumedStep = true;
-		}
-
-		if (State.PathCurrentDistance + KINDA_SMALL_NUMBER < TargetDistance)
-		{
-			break;
 		}
 
 		if (!State.bPathUsesPoseSpaceIsland)
@@ -1314,18 +1376,6 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				Ctx,
 				State.PathCircumferenceDir);
 		}
-
-		FRopeWrapPathPoint Point;
-		Point.SurfaceWorld = State.PathSurfaceWorld;
-		Point.NormalWorld = State.PathNormalWorld;
-		Point.TangentWorld = State.PathTangentWorld;
-		Point.Bone = State.PathCurrentBone.IsNone() ? State.LatchAnchor.Bone : State.PathCurrentBone;
-		Point.Mesh = State.PathCurrentMesh.IsValid() ? State.PathCurrentMesh.Get() : Mesh;
-		Point.DistanceFromLatch = TargetDistance;
-		// 마지막 서브스텝이 브리지였으면 이 점은 허공 chord 위다 — 앵커 생성이 스킵된다.
-		Point.bBridge = State.PathBridgeDistance > 0.0f;
-		State.Path.Add(Point);
-		AppendWrappingAnchorFromPathPoint(PathIndex, Sim, Ctx);
 
 		// 감는 양 상한(WrappingMaxWrapAngleDeg > 0): 누적 감싼 각도가 목표에 닿으면 경로를 여기서
 		// *성공*으로 마감한다 — 나선이 목표 바퀴수를 넘어 남은 로프 전량을 감아 들어가는 것을 막고,
