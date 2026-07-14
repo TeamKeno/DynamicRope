@@ -67,6 +67,10 @@ public:
 		 *  0이면 미해석 호출(단위 테스트 등) — Config 원값 폴백(GetContactRadius). */
 		float ResolvedContactRadius = 0.0f;
 
+		/** Composite Multi-Bone(여러 본을 하나의 pose-space island로 취급) 사용 자격.
+		 *  FullSimulation에서만 활성화하며, 다른 모드는 기존 Sequential Multi-Bone 경로를 쓴다. */
+		ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::FullSimulation;
+
 		/** 경로 빌드/투영이 쓰는 접촉 반지름의 단일 접근자. */
 		float GetContactRadius() const
 		{
@@ -142,6 +146,15 @@ public:
 		const FRopeSimState& Sim, const FContext& Ctx, TArray<FVector>& OutCenterline) const;
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+	// 현재 포즈의 surface gap으로 전환 깊이 없는 복합 island가 구성되는지 직접 검증한다.
+	friend class FRopeWrappingPoseSpaceIslandTest;
+	// 독립 sweep radial의 양방향 support query가 팔 외곽과 몸통 외곽을 대칭적으로 선택하는지 검증한다.
+	friend class FRopeWrappingCompositeSweepSupportTest;
+	// 복합 경로 폐기 뒤 최초 latch 본 하나로만 재초기화되는지 검증한다.
+	friend class FRopeWrappingSingleBoneFallbackTest;
+#endif
+
 	struct FSurfaceVectorFieldBoneCandidate
 	{
 		FName Bone = NAME_None;
@@ -161,11 +174,15 @@ private:
 
 	bool AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 StepBudget, const FRopeSimState& Sim, const FContext& Ctx);
 
+	/** 복합 SDF 경로 실패 시 기존 경로/앵커를 버리고 최초 latch 본 하나로 같은 throw를 재시도한다. */
+	bool RestartPathBuildAsSingleBoneFallback(const FRopeSimState& Sim, const FContext& Ctx,
+		const TCHAR* CompositeFailureReason);
+
 	bool AppendWrappingAnchorFromPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
 
 	/** 경로 빌드 종료 기록(성공=Complete / 실패=Failed, 둘 다 Active 해제). 커밋 판정 등 독자들은
 	 *  세 플래그를 "빌드가 끝났나"(OR)로만 소비한다 — 개별 조합을 구분해 읽는 곳은 없다. */
-	void FinishPathBuild(bool bFailed);
+	void FinishPathBuild(bool bFailed, const TCHAR* FailureReason = nullptr);
 
 	//~ 감김 지오메트리
 	FVector ComputeSurfaceVectorFieldTangent(const FVector& AxisOrigin, const FVector& AxisDirection,
@@ -224,9 +241,41 @@ private:
 	void OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
 		const USceneComponent* Mesh, FVector& InOutAxisDirection) const;
 
-	/** SurfaceVectorField 후보 본 수집. parent/child graph를 제한 비용 탐색해 전환 비용을 함께 넘긴다. */
+	/** 비복합 경로용 skeleton parent/child 후보 본 수집. 단일 본 fallback은 이 경로를 사용하지 않는다. */
 	void GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USceneComponent* Mesh,
 		TArray<FSurfaceVectorFieldBoneCandidate>& OutCandidates, const FContext& Ctx) const;
+
+	/**
+	 * 접촉 순간의 pose-space collider island를 구성한다. 현재 감김 축의 얇은 slab 안에서 실제 표면 gap이
+	 * 로프 지름보다 작거나, 열린 gap을 통과할 추가 경로보다 가용 slack이 부족한 collider만 연결한다.
+	 * 결과는 bone transition 횟수와 무관하며 wrapping 시도 동안 고정된다.
+	 */
+	void GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
+		const USceneComponent* Mesh, TArray<FName>& OutBones,
+		TArray<FRopeWrapIslandDebugMember>& OutDebugMembers,
+		TArray<FRopeWrapIslandDebugPortal>& OutDebugPortals, float& OutAvailableSlack,
+		const FContext& Ctx) const;
+
+	/**
+	 * 저장된 pose-space island의 모든 실제 표면을 외부 support probe에서 lazy 평가한다.
+	 * DesiredSweepRadial 방향의 최외곽 표면만 남기고, 선택된 개별 SDF tangent 대신
+	 * PreviousSurfaceWorld에서 선택점으로 향하는 복합 경로 tangent를 반환한다.
+	 */
+	bool ProjectWrapPointToCompositeIsland(const FRopeSimState& Sim, const FContext& Ctx,
+		const FVector& RopeNodeWorld, const FVector& SupportProbeWorld,
+		const FVector& DesiredSweepRadial, const FVector& PreviousSurfaceWorld,
+		const FVector& PreviousNormalWorld,
+		const FVector& PreviousTangentWorld, FVector& InOutSurfaceWorld,
+		FVector& InOutNormalWorld, FVector& InOutTangentWorld,
+		FVector& InOutCircumferenceDir, FName& InOutBone,
+		const USceneComponent*& OutMesh,
+		ERopeCompositeSupportTier* OutSupportTier = nullptr) const;
+
+	/** 복합 실패 폴백 전용. 후보 graph 없이 최초 latch 본 collider만 투영한다. */
+	bool ProjectWrapPointToSingleBone(const USceneComponent* Mesh,
+		const FRopeSimState& Sim, const FContext& Ctx,
+		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
+		FVector& InOutCircumferenceDir, FName& InOutBone, const USceneComponent*& OutMesh) const;
 
 	/** 후보 본들의 표면 projection을 graph 비용/hysteresis와 함께 점수화해 path point의 Bone/Mesh를 선택한다. */
 	bool ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USceneComponent* Mesh,

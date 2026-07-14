@@ -310,6 +310,50 @@ struct FRopeWrapPathPoint
 	bool bBridge = false;
 };
 
+/** 접촉 시 실제로 평가한 pose-space gap의 판정 결과. 디버그 표시는 이 저장값만 읽는다. */
+enum class ERopeWrapIslandPortalState : uint8
+{
+	Open,
+	ClosedGeometry,
+	ClosedReachability
+};
+
+/** Composite surface projection이 어느 복구 단계에서 성공했는지 나타낸다. */
+enum class ERopeCompositeSupportTier : uint8
+{
+	Strict,
+	Relaxed,
+	Continuity,
+	Failed
+};
+
+/** island 구성에 채택된 SDF collider의 접촉 시점 volume 스냅샷. 추가 샘플링 없이 debug draw에 쓴다. */
+struct FRopeWrapIslandDebugMember
+{
+	FName Bone = NAME_None;
+	FBox WorldBounds = FBox(EForceInit::ForceInit);
+
+	/** SDF grid의 실제 oriented bounds. SDF accessor가 없는 collider면 WorldBounds로 폴백한다. */
+	bool bHasOrientedSDFBounds = false;
+	FVector SDFCenter = FVector::ZeroVector;
+	FVector SDFHalfExtent = FVector::ZeroVector;
+	FQuat SDFRotation = FQuat::Identity;
+};
+
+/** island 생성 중 이미 계산한 두 표면 projection과 길이 판정값의 스냅샷. */
+struct FRopeWrapIslandDebugPortal
+{
+	FName BoneA = NAME_None;
+	FName BoneB = NAME_None;
+	FVector SurfacePointA = FVector::ZeroVector;
+	FVector SurfacePointB = FVector::ZeroVector;
+	ERopeWrapIslandPortalState State = ERopeWrapIslandPortalState::Open;
+	float SurfaceGap = 0.0f;
+	float EffectiveDiameter = 0.0f;
+	float RequiredExtraLength = 0.0f;
+	float AvailableSlack = 0.0f;
+};
+
 /** Wrapping 페이즈의 작업 상태(FRopeWrappingPhase::State). 경로 빌드 진행/앵커 축적/커밋 판정 재료. */
 struct FRopeWrappingState
 {
@@ -335,6 +379,9 @@ struct FRopeWrappingState
 	bool bPathBuildComplete = false;
 	bool bPathBuildFailed = false;
 
+	/** 마지막 path build 실패의 기계 판독 가능한 원인. 최종 abort 로그가 소비한다. */
+	FString PathBuildFailureReason;
+
 	float PathCurrentDistance = 0.0f;
 	float FrontDistance = 0.0f;
 	ERopeWrappingPathMode PathMode = ERopeWrappingPathMode::SurfaceVectorField;
@@ -358,6 +405,48 @@ struct FRopeWrappingState
 	 */
 	FName PathPreviousBone = NAME_None;
 	TWeakObjectPtr<const USceneComponent> PathCurrentMesh = nullptr;
+
+	/**
+	 * 접촉 순간 현재 포즈에서 구성한 복합 감김 대상의 본 목록.
+	 * 이 목록은 skeleton 계보/전환 깊이가 아니라, 투척 slab 안에서 로프 두께로 확장한 표면끼리
+	 * 실제로 이어지거나 현재 가용 slack으로 사이를 통과할 수 없는 collider island다.
+	 * SurfaceVectorField 경로는 매 step마다 이 목록 전체를 lazy projection해 하나의 기둥 표면처럼 다룬다.
+	 */
+	TArray<FName> PathWrapIslandBones;
+
+	/** 접촉 시 실제 island 판정에서 나온 데이터만 보관하는 디버그 스냅샷. 별도 경로/SDF를 만들지 않는다. */
+	TArray<FRopeWrapIslandDebugMember> PathWrapIslandDebugMembers;
+	TArray<FRopeWrapIslandDebugPortal> PathWrapIslandDebugPortals;
+
+	/** 복합 island 구성 시 계산한 미고정 로프의 가용 여유 길이(cm). 디버그/portal 판정 재현용. */
+	float PathAvailableSlack = 0.0f;
+
+	/** true면 순차 bone-transition graph 대신 pose-space composite island projection을 사용한다. */
+	bool bPathUsesPoseSpaceIsland = false;
+
+	/** 복합 island 경로가 실패해 최초 latch 본 하나로 경로를 처음부터 다시 만드는 중인가. */
+	bool bPathUsesSingleBoneFallback = false;
+
+	/**
+	 * 선택된 개별 bone SDF의 local tangent와 무관하게 복합 island 외곽을 훑는 축 수직 방향.
+	 * 팔 표면 normal이 원주 tangent를 지워도 이 방향은 매 step 독립적으로 회전한다.
+	 */
+	FVector PathCompositeSweepRadial = FVector::ForwardVector;
+
+	/** 복합 단면 전체 바깥에서 SDF support projection을 시작할 축 반지름(cm). */
+	float PathCompositeProbeRadius = 0.0f;
+
+	/** 독립 sweep radial이 시작점에서 누적 회전한 양(라디안, 진행 상태 로그용). */
+	float PathCompositeSweepAngleRad = 0.0f;
+
+	/** strict support가 비어 relaxed outer-support로 복구한 step 수. */
+	int32 PathCompositeRelaxedRecoveryCount = 0;
+
+	/** 모든 composite 후보가 비어 직전 본 표면 continuity projection으로 복구한 step 수. */
+	int32 PathCompositeContinuityRecoveryCount = 0;
+
+	/** 모든 composite 복구 계층이 실패한 횟수. 정상적으로는 fallback 직전 한 번만 증가한다. */
+	int32 PathCompositeProjectionFailureCount = 0;
 
 	/**
 	 * 마지막 본 전환 이후 path가 표면을 따라 진행한 거리(cm).

@@ -10,9 +10,23 @@
 // RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
 #include "RopeMathHelpers.h"
 
+namespace
+{
+	// 실전 동작은 composite 복구 계층을 모두 소진한 뒤 SingleBone fallback을 허용한다.
+	// 실패 자체를 관찰해야 하는 한정 테스트에서만 일시적으로 true로 바꾼다.
+	constexpr bool bCancelWrapOnCompositeFailureForTesting = false;
+}
+
 bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
 	float Duration, const FRopeSimState& Sim, const FContext& Ctx)
 {
+	// 새 throw는 항상 복합 SDF부터 시작한다. 이 플래그는 같은 throw 안에서 복합 경로가 실패했을 때만
+	// 켜지며, 다음 Begin까지 유지되어 두 번째 복합 시도와 무한 fallback을 막는다.
+	State.bPathUsesSingleBoneFallback = false;
+	State.PathBuildFailureReason.Reset();
+	State.PathCompositeRelaxedRecoveryCount = 0;
+	State.PathCompositeContinuityRecoveryCount = 0;
+	State.PathCompositeProjectionFailureCount = 0;
 	State.BoneName = Bone;
 	State.Mesh = Mesh;
 	State.Elapsed = 0.0f;
@@ -22,6 +36,13 @@ bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USce
 
 	if (!BeginProgressiveWrapPathBuild(LatchAnchor, Sim, Ctx))
 	{
+		UE_LOG(LogRopeWrap, Error,
+			TEXT("[%s] Wrap begin failed: reason=%s bone=%s node=%d mesh=%s simNodes=%d segment=%.2fcm pathMode=%d colliders=%d"),
+			*Ctx.OwnerName,
+			State.PathBuildFailureReason.IsEmpty() ? TEXT("UnknownInitializationFailure") : *State.PathBuildFailureReason,
+			*LatchAnchor.Bone.ToString(), LatchAnchor.NodeIndex,
+			Mesh ? *Mesh->GetName() : TEXT("None"), Sim.Num(), Sim.SegmentLength,
+			static_cast<int32>(Ctx.PathMode), Ctx.Colliders.Num());
 		return false;
 	}
 
@@ -32,11 +53,17 @@ bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USce
 	return true;
 }
 
-void FRopeWrappingPhase::FinishPathBuild(bool bFailed)
+void FRopeWrappingPhase::FinishPathBuild(bool bFailed, const TCHAR* FailureReason)
 {
 	State.bPathBuildActive = false;
 	State.bPathBuildComplete = !bFailed;
 	State.bPathBuildFailed = bFailed;
+	if (bFailed)
+	{
+		State.PathBuildFailureReason = FailureReason && FailureReason[0] != 0
+			? FailureReason
+			: TEXT("UnknownPathBuildFailure");
+	}
 }
 
 void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FContext& Ctx)
@@ -422,6 +449,12 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	}
 	if (!Mesh || !Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex) || LatchAnchor.Bone.IsNone())
 	{
+		State.PathBuildFailureReason = TEXT("InvalidLatchInput");
+		UE_LOG(LogRopeWrap, Error,
+			TEXT("[%s] Path initialization rejected: reason=InvalidLatchInput mesh=%s bone=%s node=%d validNode=%d simNodes=%d"),
+			*Ctx.OwnerName, Mesh ? *Mesh->GetName() : TEXT("None"),
+			*LatchAnchor.Bone.ToString(), LatchAnchor.NodeIndex,
+			Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex) ? 1 : 0, Sim.Num());
 		return false;
 	}
 
@@ -461,6 +494,10 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 
 	if (State.NumTailNodes <= 0)
 	{
+		State.PathBuildFailureReason = TEXT("NoTailNodesAfterLatch");
+		UE_LOG(LogRopeWrap, Error,
+			TEXT("[%s] Path initialization rejected: reason=NoTailNodesAfterLatch latchNode=%d simNodes=%d secondarySeeds=%d"),
+			*Ctx.OwnerName, StoredLatchAnchor.NodeIndex, Sim.Num(), State.SecondarySeedAnchors.Num());
 		return false;
 	}
 
@@ -470,8 +507,22 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 		State.PathMode == ERopeWrappingPathMode::AnalyticHelix
 			? AppendAnalyticProgressiveWrapPathPoint(0, Sim, Ctx)
 			: InitializeSurfaceVectorFieldProgressiveWrapPath(StoredLatchAnchor, Sim, Ctx);
-	if (!bInitialized || !AppendWrappingAnchorFromPathPoint(0, Sim, Ctx))
+	if (!bInitialized)
 	{
+		State.PathBuildFailureReason = TEXT("InitialSurfacePathPointFailed");
+		UE_LOG(LogRopeWrap, Error,
+			TEXT("[%s] Path initialization failed: reason=InitialSurfacePathPointFailed bone=%s node=%d mode=%d surface=%s normal=%s"),
+			*Ctx.OwnerName, *StoredLatchAnchor.Bone.ToString(), StoredLatchAnchor.NodeIndex,
+			static_cast<int32>(State.PathMode), *State.PathSurfaceWorld.ToString(), *State.PathNormalWorld.ToString());
+		return false;
+	}
+	if (!AppendWrappingAnchorFromPathPoint(0, Sim, Ctx))
+	{
+		State.PathBuildFailureReason = TEXT("InitialAnchorBuildFailed");
+		UE_LOG(LogRopeWrap, Error,
+			TEXT("[%s] Path initialization failed: reason=InitialAnchorBuildFailed bone=%s node=%d pathPoints=%d surface=%s"),
+			*Ctx.OwnerName, *StoredLatchAnchor.Bone.ToString(), StoredLatchAnchor.NodeIndex,
+			State.Path.Num(), *State.PathSurfaceWorld.ToString());
 		return false;
 	}
 
@@ -498,7 +549,7 @@ bool FRopeWrappingPhase::AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex,
 		!ComputeSurfaceVectorFieldWrapTarget(State.LatchAnchor, DistanceFromLatch, Sim, Ctx,
 			Point.SurfaceWorld, Point.NormalWorld, Point.TangentWorld))
 	{
-		FinishPathBuild(/*bFailed=*/true);
+		FinishPathBuild(/*bFailed=*/true, TEXT("AnalyticAndSurfaceTargetFailed"));
 		return false;
 	}
 
@@ -507,6 +558,42 @@ bool FRopeWrappingPhase::AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex,
 	{
 		FinishPathBuild(/*bFailed=*/false);
 	}
+	return true;
+}
+
+bool FRopeWrappingPhase::RestartPathBuildAsSingleBoneFallback(
+	const FRopeSimState& Sim, const FContext& Ctx, const TCHAR* CompositeFailureReason)
+{
+	const int32 FailedPathPointCount = State.Path.Num();
+	const int32 FailedAnchorCount = State.Anchors.Num();
+	const float FailedSweepAngleDeg = FMath::RadiansToDegrees(State.PathCompositeSweepAngleRad);
+	const FRopeSurfaceAnchor OriginalLatch = State.LatchAnchor;
+
+	State.bPathUsesSingleBoneFallback = true;
+	State.PathBuildFailureReason.Reset();
+	// 복합 경로가 활성화되면서 제거한 seed를 부분적으로 복구할 수는 없다. 단일 본 경로가 전체 tail의
+	// 소유권을 명확하게 갖도록 남은 seed도 비운 뒤 최초 latch부터 다시 만든다.
+	State.SecondarySeedAnchors.Reset();
+	UE_LOG(LogRopeWrap, Log,
+		TEXT("[%s] Wrap algorithm fallback: from=CompositeSDF to=SingleBone reason=%s "
+			"latchBone=%s failedPath=%d failedAnchors=%d failedSweep=%.1fdeg"),
+		*Ctx.OwnerName, CompositeFailureReason ? CompositeFailureReason : TEXT("Unknown"),
+		*OriginalLatch.Bone.ToString(), FailedPathPointCount, FailedAnchorCount, FailedSweepAngleDeg);
+
+	if (!BeginProgressiveWrapPathBuild(OriginalLatch, Sim, Ctx))
+	{
+		FinishPathBuild(/*bFailed=*/true, TEXT("SingleBoneFallbackInitializationFailure"));
+		UE_LOG(LogRopeWrap, Warning,
+			TEXT("[%s] Single-bone fallback failed: reason=InitializationFailure bone=%s node=%d"),
+			*Ctx.OwnerName, *OriginalLatch.Bone.ToString(), OriginalLatch.NodeIndex);
+		return false;
+	}
+
+	UE_LOG(LogRopeWrap, Log,
+		TEXT("[%s] Single-bone fallback initialized: bone=%s node=%d tailNodes=%d "
+			"axisOrigin=%s axisDirection=%s"),
+		*Ctx.OwnerName, *OriginalLatch.Bone.ToString(), OriginalLatch.NodeIndex,
+		State.NumTailNodes, *State.PathAxisOrigin.ToString(), *State.PathAxisDirection.ToString());
 	return true;
 }
 
@@ -577,6 +664,222 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 	State.PathPreviousBone = NAME_None;
 	State.PathCurrentMesh = Mesh;
 	State.PathDistanceSinceBoneTransition = 0.0f;
+	State.PathWrapIslandBones.Reset();
+	State.PathWrapIslandDebugMembers.Reset();
+	State.PathWrapIslandDebugPortals.Reset();
+	State.PathAvailableSlack = 0.0f;
+	State.bPathUsesPoseSpaceIsland = false;
+	State.PathCompositeSweepRadial = State.PathLatchRadial;
+	State.PathCompositeProbeRadius = 0.0f;
+	State.PathCompositeSweepAngleRad = 0.0f;
+	// Composite Multi-Bone은 순수 물리 결과를 쓰는 FullSimulation 전용이다. Assisted/Guaranteed는
+	// island를 만들지 않고 아래 기존 SurfaceVectorField parent/child 순차 전환 경로를 그대로 탄다.
+	if (Ctx.ResolveMode == ERopeWrapResolveMode::FullSimulation &&
+		Ctx.Config.bEnableMultiBoneWrapping && !State.bPathUsesSingleBoneFallback)
+	{
+		GatherPoseSpaceWrapIsland(LatchAnchor, Sim, Mesh,
+			State.PathWrapIslandBones, State.PathWrapIslandDebugMembers,
+			State.PathWrapIslandDebugPortals, State.PathAvailableSlack, Ctx);
+		// 단일 표면은 기존 projection/축 수학을 그대로 사용해 단일 본 감김의 각도와 튜닝을 보존한다.
+		// 실제로 둘 이상의 본이 같은 pose-space 기둥으로 묶였을 때만 composite selector를 켠다.
+		State.bPathUsesPoseSpaceIsland = State.PathWrapIslandBones.Num() > 1;
+		if (State.bPathUsesPoseSpaceIsland)
+		{
+			// ResolveWrappingAxis는 island를 만들기 전에 호출되므로, 팔에서 먼저 닿으면 축 원점도 팔
+			// collider 중심에 남는다. 그 축으로 outer support를 재면 반대편 팔이 과도하게 바깥으로
+			// 보이고, 한 번 팔로 넘어간 경로가 몸통으로 돌아오지 못한다. 방향/감김 부호는 투척 프레임의
+			// 정보를 그대로 보존하고, 원점의 축 수직 성분만 접촉 순간 복합 단면의 외곽 중심으로 옮긴다.
+			const FVector AxisDirection = State.PathAxisDirection.GetSafeNormal(
+				KINDA_SMALL_NUMBER, FVector::UpVector);
+			const FVector PlaneU = RopeMath::AnyTangentFromNormal(AxisDirection)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+			const FVector PlaneV = FVector::CrossProduct(AxisDirection, PlaneU)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::RightVector);
+			const FVector SliceOrigin = State.PathSurfaceWorld;
+			const float SliceTolerance = FMath::Max(0.5f, Ctx.GetContactRadius() * 0.25f);
+
+			float MinU = TNumericLimits<float>::Max();
+			float MaxU = -TNumericLimits<float>::Max();
+			float MinV = TNumericLimits<float>::Max();
+			float MaxV = -TNumericLimits<float>::Max();
+			int32 CrossSectionContributorCount = 0;
+
+			// OBB의 12개 edge와 latch 평면의 교점을 투영하면, 본 개수나 SDF bounds의 축 방향
+			// 길이에 편향되지 않는 실제 단면 외곽 범위를 얻을 수 있다. SDF OBB가 없을 때만 world AABB를
+			// identity OBB로 사용한다.
+			static constexpr int32 BoxEdges[12][2] =
+			{
+				{ 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 },
+				{ 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 },
+				{ 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }
+			};
+
+			for (const FRopeWrapIslandDebugMember& Member : State.PathWrapIslandDebugMembers)
+			{
+				if (!State.PathWrapIslandBones.Contains(Member.Bone))
+				{
+					continue;
+				}
+
+				FVector BoxCenter = FVector::ZeroVector;
+				FVector BoxHalfExtent = FVector::ZeroVector;
+				FQuat BoxRotation = FQuat::Identity;
+				if (Member.bHasOrientedSDFBounds)
+				{
+					BoxCenter = Member.SDFCenter;
+					BoxHalfExtent = Member.SDFHalfExtent;
+					BoxRotation = Member.SDFRotation;
+				}
+				else if (Member.WorldBounds.IsValid)
+				{
+					BoxCenter = Member.WorldBounds.GetCenter();
+					BoxHalfExtent = Member.WorldBounds.GetExtent();
+				}
+				else
+				{
+					continue;
+				}
+
+				FVector Corners[8];
+				float SignedDistances[8];
+				for (int32 CornerIndex = 0; CornerIndex < 8; ++CornerIndex)
+				{
+					const FVector LocalCorner(
+						(CornerIndex & 1) ? BoxHalfExtent.X : -BoxHalfExtent.X,
+						(CornerIndex & 2) ? BoxHalfExtent.Y : -BoxHalfExtent.Y,
+						(CornerIndex & 4) ? BoxHalfExtent.Z : -BoxHalfExtent.Z);
+					Corners[CornerIndex] = BoxCenter + BoxRotation.RotateVector(LocalCorner);
+					SignedDistances[CornerIndex] = FVector::DotProduct(
+						Corners[CornerIndex] - SliceOrigin, AxisDirection);
+				}
+
+				bool bMemberContributed = false;
+				const auto AccumulateCrossSectionPoint =
+					[&](const FVector& Point)
+					{
+						const float U = FVector::DotProduct(Point, PlaneU);
+						const float V = FVector::DotProduct(Point, PlaneV);
+						MinU = FMath::Min(MinU, U);
+						MaxU = FMath::Max(MaxU, U);
+						MinV = FMath::Min(MinV, V);
+						MaxV = FMath::Max(MaxV, V);
+						bMemberContributed = true;
+					};
+
+				for (const int32* Edge : BoxEdges)
+				{
+					const int32 AIndex = Edge[0];
+					const int32 BIndex = Edge[1];
+					const float DistanceA = SignedDistances[AIndex];
+					const float DistanceB = SignedDistances[BIndex];
+
+					if (FMath::Abs(DistanceA) <= SliceTolerance)
+					{
+						AccumulateCrossSectionPoint(Corners[AIndex]);
+					}
+					if (FMath::Abs(DistanceB) <= SliceTolerance)
+					{
+						AccumulateCrossSectionPoint(Corners[BIndex]);
+					}
+					if ((DistanceA < -SliceTolerance && DistanceB > SliceTolerance) ||
+						(DistanceA > SliceTolerance && DistanceB < -SliceTolerance))
+					{
+						const float Alpha = DistanceA / (DistanceA - DistanceB);
+						AccumulateCrossSectionPoint(FMath::Lerp(
+							Corners[AIndex], Corners[BIndex], Alpha));
+					}
+				}
+
+				CrossSectionContributorCount += bMemberContributed ? 1 : 0;
+			}
+
+			// 복합 단면에 실제로 둘 이상의 표면이 있을 때만 재중앙화한다. island graph만 이어졌지만
+			// latch 높이에는 한 표면밖에 없는 경우는 기존 latch 축이 더 안전하다.
+			if (CrossSectionContributorCount >= 2)
+			{
+				const FVector PreviousAxisOrigin = State.PathAxisOrigin;
+				const float PreservedAxialCoordinate = FVector::DotProduct(
+					PreviousAxisOrigin, AxisDirection);
+				State.PathAxisOrigin =
+					PlaneU * ((MinU + MaxU) * 0.5f) +
+					PlaneV * ((MinV + MaxV) * 0.5f) +
+					AxisDirection * PreservedAxialCoordinate;
+
+				const float RecenteredAxisDistance = FVector::DotProduct(
+					State.PathSurfaceWorld - State.PathAxisOrigin, AxisDirection);
+				const FVector RecenteredAxisPoint =
+					State.PathAxisOrigin + AxisDirection * RecenteredAxisDistance;
+				State.PathLatchRadial = (State.PathSurfaceWorld - RecenteredAxisPoint)
+					.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathNormalWorld);
+				State.PathCircumferenceDir = FVector::CrossProduct(
+					AxisDirection, State.PathLatchRadial)
+					.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir) *
+					State.PathWindingSign;
+				State.PathTangentWorld = ComputeSurfaceVectorFieldTangent(
+					State.PathAxisOrigin, State.PathAxisDirection, State.PathLatchRadial,
+					State.PathWindingSign, State.PathSurfaceWorld, State.PathNormalWorld,
+					Ctx, State.PathCircumferenceDir);
+
+				UE_LOG(LogRopeWrap, Log,
+					TEXT("[%s] Composite wrap axis recentered: contributors=%d oldOrigin=%s "
+						"newOrigin=%s transverseShift=%.2fcm direction=%s"),
+					*Ctx.OwnerName, CrossSectionContributorCount,
+					*PreviousAxisOrigin.ToString(), *State.PathAxisOrigin.ToString(),
+					FVector::Dist(PreviousAxisOrigin, State.PathAxisOrigin),
+					*State.PathAxisDirection.ToString());
+			}
+			else
+			{
+				UE_LOG(LogRopeWrap, VeryVerbose,
+					TEXT("[%s] Composite wrap axis kept latch origin: crossSectionContributors=%d"),
+					*Ctx.OwnerName, CrossSectionContributorCount);
+			}
+
+			// support query는 현재 선택된 팔 표면 근처가 아니라 복합 단면 전체의 바깥에서 시작한다.
+			// 단면 반대편 collider도 같은 probe로 평가할 수 있도록 외곽 반대각 길이에 여유를 더한다.
+			const float CurrentAxisDistance = FVector::DotProduct(
+				State.PathSurfaceWorld - State.PathAxisOrigin, AxisDirection);
+			const FVector CurrentAxisPoint =
+				State.PathAxisOrigin + AxisDirection * CurrentAxisDistance;
+			const float CurrentSurfaceRadius = FVector::Dist(
+				State.PathSurfaceWorld, CurrentAxisPoint);
+			const float CrossSectionHalfU = CrossSectionContributorCount > 0
+				? FMath::Max(0.0f, (MaxU - MinU) * 0.5f)
+				: 0.0f;
+			const float CrossSectionHalfV = CrossSectionContributorCount > 0
+				? FMath::Max(0.0f, (MaxV - MinV) * 0.5f)
+				: 0.0f;
+			const float CrossSectionOuterRadius = FMath::Sqrt(
+				FMath::Square(CrossSectionHalfU) + FMath::Square(CrossSectionHalfV));
+			const float ProbeMargin = FMath::Max(
+				Sim.SegmentLength, Ctx.GetContactRadius() * 2.0f);
+			State.PathCompositeProbeRadius = FMath::Max(
+				CurrentSurfaceRadius, CrossSectionOuterRadius) + ProbeMargin;
+			State.PathCompositeSweepRadial = State.PathLatchRadial.GetSafeNormal(
+				KINDA_SMALL_NUMBER, State.PathNormalWorld);
+			State.PathCompositeSweepAngleRad = 0.0f;
+
+			UE_LOG(LogRopeWrap, Log,
+				TEXT("[%s] Composite sweep initialized: contributors=%d origin=%s direction=%s "
+					"radial=%s probeRadius=%.2fcm surfaceRadius=%.2fcm winding=%+.0f"),
+				*Ctx.OwnerName, CrossSectionContributorCount,
+				*State.PathAxisOrigin.ToString(), *State.PathAxisDirection.ToString(),
+				*State.PathCompositeSweepRadial.ToString(), State.PathCompositeProbeRadius,
+				CurrentSurfaceRadius, State.PathWindingSign);
+
+			// 복합 island 자체가 여러 접촉 표면을 소유한다. 구형 secondary seed가 경로를 첫 보조 노드
+			// 앞에서 잘라버리면 팔-몸통-팔 외곽을 만들 길이가 사라지므로, 이 경우에만 전체 tail을
+			// progressive path에 돌려주고 보조 hold/commit 경합을 제거한다.
+			State.NumTailNodes = Sim.Num() - LatchAnchor.NodeIndex;
+			if (State.SecondarySeedAnchors.Num() > 0)
+			{
+				UE_LOG(LogRopeWrap, Log,
+					TEXT("[%s] Composite wrap island replaced %d secondary seed(s); restoredTailNodes=%d"),
+					*Ctx.OwnerName, State.SecondarySeedAnchors.Num(), State.NumTailNodes);
+				State.SecondarySeedAnchors.Reset();
+			}
+		}
+	}
 
 	FRopeWrapPathPoint LatchPoint;
 	LatchPoint.SurfaceWorld = State.PathSurfaceWorld;
@@ -607,7 +910,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 	}
 	if (!Mesh || State.LatchAnchor.Bone.IsNone())
 	{
-		FinishPathBuild(/*bFailed=*/true);
+		FinishPathBuild(/*bFailed=*/true, TEXT("AdvanceMissingMeshOrLatchBone"));
 		return false;
 	}
 
@@ -636,20 +939,73 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				StepSize,
 				TargetDistance - State.PathCurrentDistance);
 
-			State.PathTangentWorld = ComputeSurfaceVectorFieldTangent(
-				State.PathAxisOrigin,
-				State.PathAxisDirection,
-				State.PathLatchRadial,
-				State.PathWindingSign,
-				State.PathSurfaceWorld,
-				State.PathNormalWorld,
-				Ctx,
-				State.PathCircumferenceDir);
-
+			const bool bCompositeSweep = State.bPathUsesPoseSpaceIsland;
+			const FVector PreviousSurfaceWorld = State.PathSurfaceWorld;
 			FVector StepRadialBefore = FVector::ZeroVector;
-			const bool bHasRadialBefore = ComputeAxisRadial(State.PathSurfaceWorld, StepRadialBefore);
+			const bool bHasRadialBefore = ComputeAxisRadial(PreviousSurfaceWorld, StepRadialBefore);
+			FVector DesiredSweepRadial = State.PathCompositeSweepRadial;
+			float SweepStepAngleRad = 0.0f;
+			FVector SupportProbeWorld = PreviousSurfaceWorld;
+			FVector PathPredictorWorld = PreviousSurfaceWorld;
 
-			State.PathSurfaceWorld += State.PathTangentWorld * StepDistance;
+			if (bCompositeSweep)
+			{
+				// 복합 외곽의 진행 좌표는 개별 SDF tangent와 분리한다. 현재 축 반지름으로 이번 거리의
+				// 각도 증분을 계산하고 2~12도로 제한해, 큰 대상에서는 충분히 전진하면서 작은 팔에서
+				// 한 step에 반대편으로 건너뛰지 않게 한다.
+				const FVector AxisDirection = State.PathAxisDirection.GetSafeNormal(
+					KINDA_SMALL_NUMBER, FVector::UpVector);
+				const float CurrentAxisDistance = FVector::DotProduct(
+					PreviousSurfaceWorld - State.PathAxisOrigin, AxisDirection);
+				const FVector CurrentAxisPoint =
+					State.PathAxisOrigin + AxisDirection * CurrentAxisDistance;
+				const float CurrentSurfaceRadius = FMath::Max(
+					FVector::Dist(PreviousSurfaceWorld, CurrentAxisPoint), Sim.SegmentLength);
+				SweepStepAngleRad = FMath::Clamp(
+					StepDistance / CurrentSurfaceRadius,
+					FMath::DegreesToRadians(2.0f),
+					FMath::DegreesToRadians(12.0f));
+				DesiredSweepRadial = FQuat(
+					AxisDirection, SweepStepAngleRad * State.PathWindingSign)
+					.RotateVector(State.PathCompositeSweepRadial)
+					.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCompositeSweepRadial);
+
+				const float PitchScale = Ctx.Config.WrappingHelixPitchScale;
+				const float PitchRatio = PitchScale / FMath::Sqrt(1.0f + FMath::Square(PitchScale));
+				const float NextAxisDistance = CurrentAxisDistance + StepDistance * PitchRatio;
+				const FVector NextAxisPoint =
+					State.PathAxisOrigin + AxisDirection * NextAxisDistance;
+				const float ProbeRadius = FMath::Max(
+					State.PathCompositeProbeRadius,
+					CurrentSurfaceRadius + Sim.SegmentLength);
+				PathPredictorWorld = NextAxisPoint + DesiredSweepRadial * CurrentSurfaceRadius;
+				SupportProbeWorld = NextAxisPoint + DesiredSweepRadial * ProbeRadius;
+				State.PathCircumferenceDir = FVector::CrossProduct(
+					AxisDirection, DesiredSweepRadial)
+					.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir) *
+					State.PathWindingSign;
+				State.PathTangentWorld =
+					(PathPredictorWorld - PreviousSurfaceWorld).GetSafeNormal(
+						KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
+			}
+			else
+			{
+				State.PathTangentWorld = ComputeSurfaceVectorFieldTangent(
+					State.PathAxisOrigin,
+					State.PathAxisDirection,
+					State.PathLatchRadial,
+					State.PathWindingSign,
+					PreviousSurfaceWorld,
+					State.PathNormalWorld,
+					Ctx,
+					State.PathCircumferenceDir);
+				PathPredictorWorld = PreviousSurfaceWorld + State.PathTangentWorld * StepDistance;
+				SupportProbeWorld = PathPredictorWorld;
+			}
+
+			// 아래의 스냅 거리/브리지 코드는 State.PathSurfaceWorld를 이번 step의 경로 predictor로 읽는다.
+			// composite의 외부 support probe는 별도 변수라 허공 브리지 지점으로 절대 사용하지 않는다.
+			State.PathSurfaceWorld = PathPredictorWorld;
 			const FName CurrentBone = State.PathCurrentBone.IsNone()
 				? State.LatchAnchor.Bone
 				: State.PathCurrentBone;
@@ -659,10 +1015,9 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				ProjectedMesh = Mesh;
 			}
 
-			// projection query 자체는 tangent field가 예측한 다음 표면 위치(State.PathSurfaceWorld)에서 시작한다.
-			// 다만 같은 query 지점에서 여러 후보 본이 모두 맞을 수 있으므로, 실제 rope node가 현재 프레임에
-			// 어디에 있는지도 scoring에 넣는다. 이 항목이 없으면 예측 path만 믿고 로프 몸체와 먼 본으로
-			// 넘어가는 일이 생길 수 있다.
+			// 단일/구형 경로는 tangent predictor에서 projection하고, 복합 island는 별도의 외부 support
+			// probe에서 projection한다. 두 경우 모두 실제 rope node 위치를 tie-break에 넣어, 외곽 support가
+			// 거의 같은 후보 사이에서 현재 로프 몸체와 가까운 표면을 고른다.
 			const int32 RopeNodeIndex = State.LatchAnchor.NodeIndex + PathIndex;
 			const FVector RopeNodeWorld = Sim.Positions.IsValidIndex(RopeNodeIndex)
 				? Sim.Positions[RopeNodeIndex]
@@ -674,11 +1029,67 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 			FVector ProjectedTangent = State.PathTangentWorld;
 			FVector ProjectedCircumference = State.PathCircumferenceDir;
 			FName ProjectedBone = CurrentBone;
-			bool bOnSurface = ProjectWrapPointToSurfaceMultiBone(CurrentBone, Mesh, Sim, Ctx,
-				State.PathPreviousBone, State.PathDistanceSinceBoneTransition, RopeNodeWorld,
-				State.PathNormalWorld, State.PathTangentWorld,
-				ProjectedSurface, ProjectedNormal, ProjectedTangent,
-				ProjectedCircumference, ProjectedBone, ProjectedMesh);
+			bool bOnSurface = false;
+			ERopeCompositeSupportTier CompositeSupportTier = ERopeCompositeSupportTier::Failed;
+			if (bCompositeSweep)
+			{
+				bOnSurface = ProjectWrapPointToCompositeIsland(Sim, Ctx, RopeNodeWorld,
+					SupportProbeWorld, DesiredSweepRadial, PreviousSurfaceWorld,
+					State.PathNormalWorld, State.PathTangentWorld,
+					ProjectedSurface, ProjectedNormal, ProjectedTangent,
+					ProjectedCircumference, ProjectedBone, ProjectedMesh, &CompositeSupportTier);
+				if (CompositeSupportTier == ERopeCompositeSupportTier::Relaxed)
+				{
+					++State.PathCompositeRelaxedRecoveryCount;
+				}
+				else if (CompositeSupportTier == ERopeCompositeSupportTier::Continuity)
+				{
+					++State.PathCompositeContinuityRecoveryCount;
+				}
+				else if (CompositeSupportTier == ERopeCompositeSupportTier::Failed)
+				{
+					++State.PathCompositeProjectionFailureCount;
+				}
+			}
+			else if (State.bPathUsesSingleBoneFallback)
+			{
+				bOnSurface = ProjectWrapPointToSingleBone(Mesh, Sim, Ctx,
+					ProjectedSurface, ProjectedNormal, ProjectedTangent,
+					ProjectedCircumference, ProjectedBone, ProjectedMesh);
+			}
+			else
+			{
+				bOnSurface = ProjectWrapPointToSurfaceMultiBone(CurrentBone, Mesh, Sim, Ctx,
+					State.PathPreviousBone, State.PathDistanceSinceBoneTransition, RopeNodeWorld,
+					State.PathNormalWorld, State.PathTangentWorld,
+					ProjectedSurface, ProjectedNormal, ProjectedTangent,
+					ProjectedCircumference, ProjectedBone, ProjectedMesh);
+			}
+			const TCHAR* StepFailureReason = bOnSurface ? TEXT("None") : TEXT("ProjectionMiss");
+
+			float CompositeSelectedSupport = 0.0f;
+			float CompositeSelectedAlignment = 0.0f;
+			float CompositeSelectedRadius = 0.0f;
+			float CompositeProjectionDistance = 0.0f;
+			if (bCompositeSweep && bOnSurface)
+			{
+				const FVector AxisDirection = State.PathAxisDirection.GetSafeNormal(
+					KINDA_SMALL_NUMBER, FVector::UpVector);
+				const FVector SelectedOffset = ProjectedSurface - State.PathAxisOrigin;
+				const FVector SelectedRadialOffset = SelectedOffset -
+					AxisDirection * FVector::DotProduct(SelectedOffset, AxisDirection);
+				CompositeSelectedRadius = SelectedRadialOffset.Size();
+				const FVector SelectedRadial = SelectedRadialOffset.GetSafeNormal(
+					KINDA_SMALL_NUMBER, DesiredSweepRadial);
+				CompositeSelectedAlignment = FVector::DotProduct(
+					SelectedRadial, DesiredSweepRadial);
+				CompositeSelectedSupport = FVector::DotProduct(
+					SelectedRadialOffset, DesiredSweepRadial);
+				// SupportProbeWorld는 이제 방향만 나타내는 원거리 기준점이다. 실제 query와 경로 품질은
+				// predictor에서 표면까지 이동한 거리로 기록해야 수치가 40~100cm로 과장되지 않는다.
+				CompositeProjectionDistance = FVector::Dist(
+					PathPredictorWorld, ProjectedSurface);
+			}
 
 			// 갭 브리징(WrappingMaxGapBridgeDistance > 0)에서는 스냅 수용에 두 가지 관문을 둔다.
 			// 브리징 비활성 시에는 아무 관문도 없다 — 관대한 스냅으로 abort를 줄이는 종전 동작(기본값) 그대로.
@@ -702,6 +1113,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				if (SnapDistance > MaxSnapDistance)
 				{
 					bOnSurface = false;
+					StepFailureReason = TEXT("SnapDistanceExceeded");
 				}
 
 				FVector RadialAfterSnap = FVector::ZeroVector;
@@ -713,6 +1125,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 					if (SignedWindingStep < 0.0f)
 					{
 						bOnSurface = false;
+						StepFailureReason = TEXT("WindingRegression");
 					}
 				}
 			}
@@ -722,7 +1135,50 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 			if (!bOnSurface &&
 				(MaxBridgeDistance <= 0.0f || State.PathBridgeDistance + StepDistance > MaxBridgeDistance))
 			{
-				FinishPathBuild(/*bFailed=*/true);
+				if (bCompositeSweep)
+				{
+					UE_LOG(LogRopeWrap, Log,
+						TEXT("[%s] Composite sweep projection stopped: sweep=%.1fdeg desiredRadial=%s "
+							"probe=%s predictor=%s currentBone=%s probeRadius=%.2fcm recoveries(relaxed=%d continuity=%d failed=%d)"),
+						*Ctx.OwnerName,
+						FMath::RadiansToDegrees(State.PathCompositeSweepAngleRad + SweepStepAngleRad),
+						*DesiredSweepRadial.ToString(), *SupportProbeWorld.ToString(),
+						*PathPredictorWorld.ToString(), *CurrentBone.ToString(),
+						State.PathCompositeProbeRadius, State.PathCompositeRelaxedRecoveryCount,
+						State.PathCompositeContinuityRecoveryCount,
+						State.PathCompositeProjectionFailureCount);
+					if (bCancelWrapOnCompositeFailureForTesting)
+					{
+						// 테스트 중에는 부분 composite 경로를 커밋하거나 단일 본으로 재시도하지 않는다.
+						// UpdateWrapping이 이 실패 상태를 보고 즉시 wrapping을 취소한다.
+						FinishPathBuild(/*bFailed=*/true, TEXT("CompositeSupportRejectedByTestGate"));
+						UE_LOG(LogRopeWrap, Warning,
+							TEXT("[%s] CompositeSDF wrap cancelled by temporary test gate: "
+								"reason=NoStrictCompositeSupport bone=%s path=%d/%d anchors=%d sweep=%.1fdeg"),
+							*Ctx.OwnerName, *State.LatchAnchor.Bone.ToString(), State.Path.Num(),
+							State.NumTailNodes, State.Anchors.Num(),
+							FMath::RadiansToDegrees(State.PathCompositeSweepAngleRad));
+						return false;
+					}
+					if (RestartPathBuildAsSingleBoneFallback(
+						Sim, Ctx, TEXT("NoStrictCompositeSupport")))
+					{
+						// 기존 composite path/anchor는 helper가 모두 폐기했다. 새 단일 본 경로는
+						// 다음 프레임 예산부터 latch에서 전진한다.
+						return true;
+					}
+					return false;
+				}
+				FinishPathBuild(/*bFailed=*/true, StepFailureReason);
+				if (State.bPathUsesSingleBoneFallback)
+				{
+					UE_LOG(LogRopeWrap, Warning,
+						TEXT("[%s] Single-bone fallback failed: reason=%s bone=%s path=%d/%d "
+							"anchors=%d predictor=%s bridge=%.1f/%.1fcm"),
+						*Ctx.OwnerName, StepFailureReason, *State.LatchAnchor.Bone.ToString(),
+						State.Path.Num(), State.NumTailNodes, State.Anchors.Num(),
+						*PathPredictorWorld.ToString(), State.PathBridgeDistance, MaxBridgeDistance);
+				}
 				if (!Ctx.bSuppressPathFailureLog)
 				{
 					UE_LOG(LogDynamicRope, Log,
@@ -766,8 +1222,24 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 					State.PathPreviousBone = CurrentBone;
 					State.PathCurrentBone = ProjectedBone;
 					State.PathDistanceSinceBoneTransition = 0.0f;
-					// rolling axis: 이후 스텝의 tangent field가 새 본 형상 축 주위를 돌게 한다.
-					ReseedWrappingAxisOnBoneTransition(ProjectedBone, ProjectedMesh, Ctx);
+					if (State.bPathUsesPoseSpaceIsland)
+					{
+						// 복합 island는 모든 표면을 하나의 기둥으로 보므로 본이 바뀌어도 축을 재해석하지 않는다.
+						// 여기의 bone은 경로 상태가 아니라 최종 anchor 귀속 정보다.
+						UE_LOG(LogRopeWrap, Log,
+							TEXT("[%s] Composite wrap surface switched: from=%s to=%s islandBones=%d axis=fixed "
+								"sweep=%.1fdeg support=%.2f radius=%.2f alignment=%.3f projection=%.2fcm"),
+							*Ctx.OwnerName, *CurrentBone.ToString(), *ProjectedBone.ToString(),
+							State.PathWrapIslandBones.Num(),
+							FMath::RadiansToDegrees(State.PathCompositeSweepAngleRad + SweepStepAngleRad),
+							CompositeSelectedSupport, CompositeSelectedRadius,
+							CompositeSelectedAlignment, CompositeProjectionDistance);
+					}
+					else
+					{
+						// 구형 순차 전환 폴백만 새 본 형상 축으로 rolling axis를 재시드한다.
+						ReseedWrappingAxisOnBoneTransition(ProjectedBone, ProjectedMesh, Ctx);
+					}
 				}
 				else
 				{
@@ -790,6 +1262,36 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				}
 			}
 
+			if (bCompositeSweep)
+			{
+				const float PreviousSweepAngleDeg = FMath::RadiansToDegrees(
+					State.PathCompositeSweepAngleRad);
+				State.PathCompositeSweepRadial = DesiredSweepRadial;
+				State.PathCompositeSweepAngleRad += SweepStepAngleRad;
+				const float NewSweepAngleDeg = FMath::RadiansToDegrees(
+					State.PathCompositeSweepAngleRad);
+				// 매 step 로그는 과도하므로 45도 경계를 지날 때만 실제 경로 각도와 선택 표면 상태를 남긴다.
+				constexpr float SweepProgressLogIntervalDeg = 45.0f;
+				const int32 PreviousLogBucket = FMath::FloorToInt(
+					PreviousSweepAngleDeg / SweepProgressLogIntervalDeg);
+				const int32 NewLogBucket = FMath::FloorToInt(
+					NewSweepAngleDeg / SweepProgressLogIntervalDeg);
+				if (NewLogBucket > PreviousLogBucket)
+				{
+					UE_LOG(LogRopeWrap, Log,
+						TEXT("[%s] Composite sweep progress: sweep=%.1fdeg actualAngle=%.1fdeg "
+							"bone=%s mode=%s support=%.2f radius=%.2f alignment=%.3f "
+							"projection=%.2fcm pathDistance=%.2fcm radial=%s"),
+						*Ctx.OwnerName, NewSweepAngleDeg,
+						FMath::RadiansToDegrees(State.PathAccumulatedAngleRad),
+						*State.PathCurrentBone.ToString(), bOnSurface ? TEXT("Surface") : TEXT("Bridge"),
+						CompositeSelectedSupport, CompositeSelectedRadius,
+						CompositeSelectedAlignment, CompositeProjectionDistance,
+						State.PathCurrentDistance + StepDistance,
+						*State.PathCompositeSweepRadial.ToString());
+				}
+			}
+
 			State.PathCurrentDistance += StepDistance;
 			--StepsRemaining;
 			bConsumedStep = true;
@@ -800,15 +1302,18 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 			break;
 		}
 
-		State.PathTangentWorld = ComputeSurfaceVectorFieldTangent(
-			State.PathAxisOrigin,
-			State.PathAxisDirection,
-			State.PathLatchRadial,
-			State.PathWindingSign,
-			State.PathSurfaceWorld,
-			State.PathNormalWorld,
-			Ctx,
-			State.PathCircumferenceDir);
+		if (!State.bPathUsesPoseSpaceIsland)
+		{
+			State.PathTangentWorld = ComputeSurfaceVectorFieldTangent(
+				State.PathAxisOrigin,
+				State.PathAxisDirection,
+				State.PathLatchRadial,
+				State.PathWindingSign,
+				State.PathSurfaceWorld,
+				State.PathNormalWorld,
+				Ctx,
+				State.PathCircumferenceDir);
+		}
 
 		FRopeWrapPathPoint Point;
 		Point.SurfaceWorld = State.PathSurfaceWorld;
@@ -844,6 +1349,15 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 	if (State.Path.Num() >= State.NumTailNodes)
 	{
 		FinishPathBuild(/*bFailed=*/false);
+	}
+	if (State.bPathUsesSingleBoneFallback && State.bPathBuildComplete)
+	{
+		UE_LOG(LogRopeWrap, Log,
+			TEXT("[%s] Single-bone fallback completed: bone=%s points=%d anchors=%d "
+				"distance=%.2fcm angle=%.1fdeg"),
+			*Ctx.OwnerName, *State.LatchAnchor.Bone.ToString(), State.Path.Num(),
+			State.Anchors.Num(), State.PathCurrentDistance,
+			FMath::RadiansToDegrees(State.PathAccumulatedAngleRad));
 	}
 
 	return !State.bPathBuildFailed;
@@ -1715,6 +2229,695 @@ void FRopeWrappingPhase::ReseedWrappingAxisOnBoneTransition(FName Bone, const US
 		*State.PathAxisOrigin.ToString(), *State.PathAxisDirection.ToString(), NewWindingSign);
 }
 
+void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& LatchAnchor,
+	const FRopeSimState& Sim, const USceneComponent* Mesh, TArray<FName>& OutBones,
+	TArray<FRopeWrapIslandDebugMember>& OutDebugMembers,
+	TArray<FRopeWrapIslandDebugPortal>& OutDebugPortals,
+	float& OutAvailableSlack, const FContext& Ctx) const
+{
+	OutBones.Reset();
+	OutDebugMembers.Reset();
+	OutDebugPortals.Reset();
+	OutAvailableSlack = 0.0f;
+	if (!Mesh || LatchAnchor.Bone.IsNone())
+	{
+		return;
+	}
+
+	// 로프 중심선의 configuration-space 반지름. 두 실제 표면의 gap이 이 지름보다 작으면
+	// 로프 중심선은 사이를 통과할 수 없으므로 같은 복합 기둥의 일부로 본다.
+	const float EffectiveRadius = FMath::Max3(
+		Ctx.GetContactRadius(), Ctx.SurfaceOffset, Sim.SegmentLength * 0.25f);
+	const float EffectiveDiameter = EffectiveRadius * 2.0f;
+	// island 판정은 구형 secondary seed가 잘라 놓은 경로 길이가 아니라 실제 미고정 tail 전체를 본다.
+	// island가 둘 이상으로 확정되면 호출자가 해당 seed를 제거하고 이 길이를 경로에 사용한다.
+	const int32 FullTailNodeCount = FMath::Max(0, Sim.Num() - LatchAnchor.NodeIndex);
+	const float FreeRestLength = FMath::Max(
+		0.0f, static_cast<float>(FMath::Max(0, FullTailNodeCount - 1)) * Sim.SegmentLength);
+	const int32 TailNodeIndex = FMath::Clamp(
+		LatchAnchor.NodeIndex + FMath::Max(0, FullTailNodeCount - 1), 0, FMath::Max(0, Sim.Num() - 1));
+	const FVector TailWorld = Sim.Positions.IsValidIndex(TailNodeIndex)
+		? Sim.Positions[TailNodeIndex]
+		: State.PathSurfaceWorld;
+	const float MinimumConnectionLength = FVector::Dist(State.PathSurfaceWorld, TailWorld);
+	const float TensionReserve = FMath::Max(Sim.SegmentLength, EffectiveDiameter);
+	OutAvailableSlack = FMath::Max(0.0f,
+		FreeRestLength - MinimumConnectionLength - TensionReserve);
+
+	struct FIslandCollider
+	{
+		const IRopeCollider* Collider = nullptr;
+		FName Bone = NAME_None;
+		FBox Bounds = FBox(EForceInit::ForceInit);
+		FVector Center = FVector::ZeroVector;
+		FVector Extent = FVector::ZeroVector;
+		FRopeWrapIslandDebugMember DebugMember;
+	};
+
+	TArray<FIslandCollider, TInlineAllocator<16>> Candidates;
+	const FVector AxisDirection = State.PathAxisDirection.GetSafeNormal(
+		KINDA_SMALL_NUMBER, FVector::UpVector);
+	const FVector AbsAxis(
+		FMath::Abs(AxisDirection.X),
+		FMath::Abs(AxisDirection.Y),
+		FMath::Abs(AxisDirection.Z));
+	const float CaptureSlabHalfWidth = FMath::Max(
+		Sim.SegmentLength * 2.0f, EffectiveRadius * 4.0f);
+	const float ReachDistance = FreeRestLength + EffectiveDiameter;
+
+	for (const IRopeCollider* Collider : Ctx.Colliders)
+	{
+		if (!Collider || Collider->IsWorldStatic())
+		{
+			continue;
+		}
+
+		FName Bone = NAME_None;
+		const USceneComponent* ColliderMesh = nullptr;
+		Collider->GetGPUAttribution(Bone, ColliderMesh);
+		if (Bone.IsNone() || ColliderMesh != Mesh)
+		{
+			continue;
+		}
+
+		const FBox Bounds = Collider->GetWorldBounds();
+		if (!Bounds.IsValid)
+		{
+			continue;
+		}
+
+		const FVector Center = Bounds.GetCenter();
+		const FVector Extent = Bounds.GetExtent();
+		const bool bLatchCollider = Bone == LatchAnchor.Bone;
+		if (!bLatchCollider)
+		{
+			// 최초 투척 단면과 무관한 골반/다리까지 skeleton 연결을 타고 내려가는 것을 막는다.
+			// bounds의 축 방향 extent까지 고려하므로 긴 몸통처럼 slab을 가로지르는 형상은 유지된다.
+			const float AxialOffset = FMath::Abs(FVector::DotProduct(
+				Center - State.PathSurfaceWorld, AxisDirection));
+			const float AxialExtent = FVector::DotProduct(Extent, AbsAxis);
+			if (AxialOffset > AxialExtent + CaptureSlabHalfWidth)
+			{
+				continue;
+			}
+
+			if (ReachDistance > 0.0f &&
+				FMath::Sqrt(Bounds.ComputeSquaredDistanceToPoint(State.PathSurfaceWorld)) > ReachDistance)
+			{
+				continue;
+			}
+		}
+
+		FIslandCollider& Candidate = Candidates.AddDefaulted_GetRef();
+		Candidate.Collider = Collider;
+		Candidate.Bone = Bone;
+		Candidate.Bounds = Bounds;
+		Candidate.Center = Center;
+		Candidate.Extent = Extent;
+		Candidate.DebugMember.Bone = Bone;
+		Candidate.DebugMember.WorldBounds = Bounds;
+
+		// SDF grid의 로컬 bounds와 당시 bone transform을 그대로 스냅샷한다. debug draw에서 이 값을
+		// 다시 샘플링하거나 메시로 변환하지 않고 oriented box로만 표시한다.
+		FRopeSDFColliderView SDFView;
+		if (Collider->GetGPUSDF(SDFView))
+		{
+			const FVector LocalCenter = SDFView.LocalMin + SDFView.LocalSize * 0.5f;
+			const FVector Scale = SDFView.BoneToWorld.GetScale3D();
+			const FVector AbsScale(FMath::Abs(Scale.X), FMath::Abs(Scale.Y), FMath::Abs(Scale.Z));
+			Candidate.DebugMember.bHasOrientedSDFBounds = true;
+			Candidate.DebugMember.SDFCenter = SDFView.BoneToWorld.TransformPosition(LocalCenter);
+			Candidate.DebugMember.SDFHalfExtent = SDFView.LocalSize * 0.5f * AbsScale;
+			Candidate.DebugMember.SDFRotation = SDFView.BoneToWorld.GetRotation().GetNormalized();
+		}
+	}
+
+	TArray<TArray<int32>, TInlineAllocator<16>> Links;
+	Links.SetNum(Candidates.Num());
+	const float ReachabilitySearchGap = FMath::Max3(
+		EffectiveDiameter + Sim.SegmentLength * 2.0f,
+		EffectiveRadius * 6.0f,
+		Sim.SegmentLength * 3.0f);
+
+	const auto ComputeBoxGap = [](const FBox& A, const FBox& B)
+	{
+		const double DX = FMath::Max3(A.Min.X - B.Max.X, B.Min.X - A.Max.X, 0.0);
+		const double DY = FMath::Max3(A.Min.Y - B.Max.Y, B.Min.Y - A.Max.Y, 0.0);
+		const double DZ = FMath::Max3(A.Min.Z - B.Max.Z, B.Min.Z - A.Max.Z, 0.0);
+		return static_cast<float>(FVector(DX, DY, DZ).Size());
+	};
+	TArray<FRopeWrapIslandDebugPortal, TInlineAllocator<32>> EvaluatedPortals;
+
+	for (int32 AIndex = 0; AIndex < Candidates.Num(); ++AIndex)
+	{
+		for (int32 BIndex = AIndex + 1; BIndex < Candidates.Num(); ++BIndex)
+		{
+			const FIslandCollider& A = Candidates[AIndex];
+			const FIslandCollider& B = Candidates[BIndex];
+			if (A.Bone == B.Bone)
+			{
+				Links[AIndex].Add(BIndex);
+				Links[BIndex].Add(AIndex);
+				continue;
+			}
+
+			const float BoundsGap = ComputeBoxGap(A.Bounds, B.Bounds);
+			if (BoundsGap > ReachabilitySearchGap)
+			{
+				continue;
+			}
+
+			const FVector BoundsPointA = A.Bounds.GetClosestPointTo(B.Center);
+			const FVector BoundsPointB = B.Bounds.GetClosestPointTo(A.Center);
+			const FVector PortalProbe = (BoundsPointA + BoundsPointB) * 0.5f;
+			const float PairQueryRadius = static_cast<float>(FMath::Max3(
+				static_cast<double>(ReachabilitySearchGap * 2.0f),
+				A.Extent.Size(), B.Extent.Size()));
+			const FRopeSurfaceProjection ProjectionA =
+				A.Collider->ProjectToSurface(PortalProbe, PairQueryRadius);
+			const FRopeSurfaceProjection ProjectionB =
+				B.Collider->ProjectToSurface(PortalProbe, PairQueryRadius);
+			if (!ProjectionA.bHit || !ProjectionB.bHit)
+			{
+				continue;
+			}
+
+			const float SurfaceGap = FVector::Dist(
+				ProjectionA.SurfacePoint, ProjectionB.SurfacePoint);
+			const FVector PortalMidpoint =
+				(ProjectionA.SurfacePoint + ProjectionB.SurfacePoint) * 0.5f;
+			const float DirectLength = FVector::Dist(State.PathSurfaceWorld, TailWorld);
+			const float ViaPortalLength =
+				FVector::Dist(State.PathSurfaceWorld, PortalMidpoint) +
+				FVector::Dist(PortalMidpoint, TailWorld);
+			const float BendAllowance = FMath::Max(0.0f, SurfaceGap - EffectiveDiameter) * 2.0f;
+			const float RequiredExtraLength =
+				FMath::Max(0.0f, ViaPortalLength - DirectLength) + BendAllowance;
+
+			const bool bClosedByGeometry = SurfaceGap <= EffectiveDiameter;
+			const bool bClosedByReachability =
+				!bClosedByGeometry &&
+				SurfaceGap <= ReachabilitySearchGap &&
+				RequiredExtraLength > OutAvailableSlack;
+			const bool bConnected = bClosedByGeometry || bClosedByReachability;
+
+			FRopeWrapIslandDebugPortal& DebugPortal = EvaluatedPortals.AddDefaulted_GetRef();
+			DebugPortal.BoneA = A.Bone;
+			DebugPortal.BoneB = B.Bone;
+			DebugPortal.SurfacePointA = ProjectionA.SurfacePoint;
+			DebugPortal.SurfacePointB = ProjectionB.SurfacePoint;
+			DebugPortal.State = bClosedByGeometry
+				? ERopeWrapIslandPortalState::ClosedGeometry
+				: (bClosedByReachability
+					? ERopeWrapIslandPortalState::ClosedReachability
+					: ERopeWrapIslandPortalState::Open);
+			DebugPortal.SurfaceGap = SurfaceGap;
+			DebugPortal.EffectiveDiameter = EffectiveDiameter;
+			DebugPortal.RequiredExtraLength = RequiredExtraLength;
+			DebugPortal.AvailableSlack = OutAvailableSlack;
+
+			// 모든 후보 쌍을 Log로 출력하면 한 번의 접촉에 O(n^2) 줄이 쌓여 실제 경로 실패가
+			// 묻힌다. 상세 pair 진단은 VeryVerbose에 남기고, 일반 로그에는 아래 집계만 출력한다.
+			UE_LOG(LogRopeWrap, VeryVerbose,
+				TEXT("[%s] Wrap island portal: a=%s b=%s state=%s gap=%.2f diameter=%.2f "
+					"requiredExtra=%.2f slack=%.2f boundsGap=%.2f"),
+				*Ctx.OwnerName, *A.Bone.ToString(), *B.Bone.ToString(),
+				bClosedByGeometry ? TEXT("ClosedGeometry") :
+					(bClosedByReachability ? TEXT("ClosedReachability") : TEXT("Open")),
+				SurfaceGap, EffectiveDiameter, RequiredExtraLength, OutAvailableSlack, BoundsGap);
+
+			if (bConnected)
+			{
+				Links[AIndex].Add(BIndex);
+				Links[BIndex].Add(AIndex);
+			}
+		}
+	}
+
+	TArray<int32, TInlineAllocator<16>> Queue;
+	TArray<bool, TInlineAllocator<16>> bInIsland;
+	bInIsland.Init(false, Candidates.Num());
+	for (int32 CandidateIndex = 0; CandidateIndex < Candidates.Num(); ++CandidateIndex)
+	{
+		if (Candidates[CandidateIndex].Bone == LatchAnchor.Bone)
+		{
+			bInIsland[CandidateIndex] = true;
+			Queue.Add(CandidateIndex);
+		}
+	}
+
+	for (int32 QueueIndex = 0; QueueIndex < Queue.Num(); ++QueueIndex)
+	{
+		const int32 CandidateIndex = Queue[QueueIndex];
+		if (!OutBones.Contains(Candidates[CandidateIndex].Bone))
+		{
+			OutBones.Add(Candidates[CandidateIndex].Bone);
+			OutDebugMembers.Add(Candidates[CandidateIndex].DebugMember);
+		}
+		for (const int32 NeighborIndex : Links[CandidateIndex])
+		{
+			if (!bInIsland[NeighborIndex])
+			{
+				bInIsland[NeighborIndex] = true;
+				Queue.Add(NeighborIndex);
+			}
+		}
+	}
+
+	if (OutBones.Num() == 0)
+	{
+		OutBones.Add(LatchAnchor.Bone);
+	}
+
+	// 채택된 island에 닿아 있던 portal만 남긴다. Open portal도 왜 합쳐지지 않았는지 볼 수 있어야 하므로
+	// 폐쇄 edge만 필터링하지 않는다. 모두 위 판정 루프에서 이미 계산된 값의 복사본이다.
+	for (const FRopeWrapIslandDebugPortal& Portal : EvaluatedPortals)
+	{
+		if (OutBones.Contains(Portal.BoneA) || OutBones.Contains(Portal.BoneB))
+		{
+			OutDebugPortals.Add(Portal);
+		}
+	}
+
+	FString BoneList;
+	for (const FName Bone : OutBones)
+	{
+		if (!BoneList.IsEmpty())
+		{
+			BoneList += TEXT(",");
+		}
+		BoneList += Bone.ToString();
+	}
+	int32 ClosedGeometryPortalCount = 0;
+	int32 ClosedReachabilityPortalCount = 0;
+	int32 OpenPortalCount = 0;
+	for (const FRopeWrapIslandDebugPortal& Portal : OutDebugPortals)
+	{
+		switch (Portal.State)
+		{
+		case ERopeWrapIslandPortalState::ClosedGeometry:
+			++ClosedGeometryPortalCount;
+			break;
+		case ERopeWrapIslandPortalState::ClosedReachability:
+			++ClosedReachabilityPortalCount;
+			break;
+		default:
+			++OpenPortalCount;
+			break;
+		}
+	}
+	UE_LOG(LogRopeWrap, Log,
+		TEXT("[%s] Pose-space wrap island built: latch=%s bones=%d candidates=%d slack=%.2fcm "
+			"freeRest=%.2fcm slabHalf=%.2fcm portals=%d(closedGeometry=%d closedReachability=%d open=%d) "
+			"members=[%s]"),
+		*Ctx.OwnerName, *LatchAnchor.Bone.ToString(), OutBones.Num(), Candidates.Num(),
+		OutAvailableSlack, FreeRestLength, CaptureSlabHalfWidth, OutDebugPortals.Num(),
+		ClosedGeometryPortalCount, ClosedReachabilityPortalCount, OpenPortalCount, *BoneList);
+}
+
+bool FRopeWrappingPhase::ProjectWrapPointToCompositeIsland(const FRopeSimState& Sim,
+	const FContext& Ctx, const FVector& RopeNodeWorld, const FVector& SupportProbeWorld,
+	const FVector& DesiredSweepRadial, const FVector& PreviousSurfaceWorld,
+	const FVector& PreviousNormalWorld,
+	const FVector& PreviousTangentWorld, FVector& InOutSurfaceWorld,
+	FVector& InOutNormalWorld, FVector& InOutTangentWorld,
+	FVector& InOutCircumferenceDir, FName& InOutBone,
+	const USceneComponent*& OutMesh, ERopeCompositeSupportTier* OutSupportTier) const
+{
+	if (OutSupportTier)
+	{
+		*OutSupportTier = ERopeCompositeSupportTier::Failed;
+	}
+	if (State.PathWrapIslandBones.Num() == 0)
+	{
+		UE_LOG(LogRopeWrap, Warning,
+			TEXT("[%s] Composite support rejected: reason=EmptyIsland currentBone=%s probe=%s predictor=%s"),
+			*Ctx.OwnerName, *InOutBone.ToString(), *SupportProbeWorld.ToString(), *InOutSurfaceWorld.ToString());
+		return false;
+	}
+
+	const USceneComponent* IslandMesh = State.LatchAnchor.Mesh.Get();
+	if (!IslandMesh)
+	{
+		IslandMesh = State.Mesh.Get();
+	}
+
+	const FVector PreviousTangent = PreviousTangentWorld.GetSafeNormal(
+		KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	const FVector PreviousNormal = PreviousNormalWorld.GetSafeNormal(
+		KINDA_SMALL_NUMBER, FVector::UpVector);
+	const FVector AxisDirection = State.PathAxisDirection.GetSafeNormal(
+		KINDA_SMALL_NUMBER, FVector::UpVector);
+	const FVector SupportProbeOffset = SupportProbeWorld - State.PathAxisOrigin;
+	const FVector SupportProbeRadialOffset = SupportProbeOffset -
+		AxisDirection * FVector::DotProduct(SupportProbeOffset, AxisDirection);
+	const float SupportProbeRadius = SupportProbeRadialOffset.Size();
+	const float QueryRadius = FMath::Max3(
+		FMath::Max(Ctx.GetContactRadius(), Ctx.SurfaceOffset),
+		Sim.SegmentLength * 3.0f,
+		SupportProbeRadius * 2.0f + Sim.SegmentLength);
+
+	// 복합 island는 선택된 개별 SDF 근처에서 다음 방향을 다시 유도하지 않는다. 호출자가 독립적으로
+	// 회전시킨 DesiredSweepRadial을 support 방향으로 고정한다. SupportProbeWorld는 어느 면을 볼지 정하는
+	// 공통 방향 기준일 뿐이다. 이 먼 점에서 SDF를 바로 투영하면 narrow band 바깥의 grid 경계에서
+	// gradient가 0이 되어 첫 step부터 후보가 전멸할 수 있으므로, 실제 query는 collider별 bake bounds
+	// 안쪽에서 시작한다.
+	const FVector ExpectedRadial = DesiredSweepRadial.GetSafeNormal(
+		KINDA_SMALL_NUMBER, State.PathLatchRadial);
+	const FVector DesiredCircumference = FVector::CrossProduct(
+		AxisDirection, ExpectedRadial)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, InOutCircumferenceDir) * State.PathWindingSign;
+	const FVector DesiredTangent =
+		(DesiredCircumference + AxisDirection * Ctx.Config.WrappingHelixPitchScale)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, DesiredCircumference);
+	const float ProbeAxisDistance = FVector::DotProduct(
+		SupportProbeWorld - State.PathAxisOrigin, AxisDirection);
+	const float MaxAxialProjectionDrift = FMath::Max3(
+		Sim.SegmentLength * 1.5f, Ctx.GetContactRadius() * 2.0f, Ctx.SurfaceOffset * 2.0f);
+	constexpr float MinSupportAlignment = 0.5f; // 목표 radial에서 60도 이내의 외곽만 사용.
+	// 로프 표면 두께보다 작은 support 차이는 같은 외곽 band로 보고 기존 거리/연속성 점수로
+	// tie-break한다. 이 허용폭보다 명확하게 바깥인 표면은 거리 점수가 다소 나빠도 우선한다.
+	const float OuterSupportTieTolerance = FMath::Max(0.5f, Ctx.GetContactRadius() * 0.25f);
+
+	struct FCompositeProjectionCandidate
+	{
+		FVector Surface = FVector::ZeroVector;
+		FVector Normal = FVector::UpVector;
+		FVector Tangent = FVector::ForwardVector;
+		FVector Circumference = FVector::ForwardVector;
+		FName Bone = NAME_None;
+		const USceneComponent* Mesh = nullptr;
+		float OuterSupport = -TNumericLimits<float>::Max();
+		float Alignment = -1.0f;
+		float AxialDrift = TNumericLimits<float>::Max();
+		float PredictorDistance = TNumericLimits<float>::Max();
+		float TieBreakScore = TNumericLimits<float>::Max();
+		bool bPassesStrictFilters = false;
+	};
+	TArray<FCompositeProjectionCandidate, TInlineAllocator<16>> Candidates;
+	float MaxStrictOuterSupport = -TNumericLimits<float>::Max();
+	int32 MatchingColliderCount = 0;
+	int32 BoundsQueryMissCount = 0;
+	int32 PredictorFallbackHitCount = 0;
+	int32 AxialRejectCount = 0;
+	int32 AlignmentRejectCount = 0;
+
+	float BestTieBreakScore = TNumericLimits<float>::Max();
+	bool bFound = false;
+	FVector BestSurface = FVector::ZeroVector;
+	FVector BestNormal = FVector::UpVector;
+	FVector BestTangent = FVector::ForwardVector;
+	FVector BestCircumference = DesiredCircumference;
+	FName BestBone = NAME_None;
+	const USceneComponent* BestMesh = IslandMesh;
+
+	for (const IRopeCollider* Collider : Ctx.Colliders)
+	{
+		if (!Collider || Collider->IsWorldStatic())
+		{
+			continue;
+		}
+
+		FName Bone = NAME_None;
+		const USceneComponent* ColliderMesh = nullptr;
+		Collider->GetGPUAttribution(Bone, ColliderMesh);
+		if (!State.PathWrapIslandBones.Contains(Bone) || ColliderMesh != IslandMesh)
+		{
+			continue;
+		}
+		++MatchingColliderCount;
+
+		// 동일한 먼 probe를 모든 SDF에 직접 넣지 않는다. SDF의 원하는 쪽 bake-boundary에서
+		// 1.5 voxel 안쪽으로 들어온 점을 사용하면 quantized narrow band 안에서 유효한 gradient로
+		// 외곽 표면에 수렴한다. capsule 등 SDF view가 없는 collider는 기존 query를 유지한다.
+		FVector ProjectionQueryWorld = SupportProbeWorld;
+		FRopeSDFColliderView SDFView;
+		if (Collider->GetGPUSDF(SDFView))
+		{
+			const FBox LocalBounds(SDFView.LocalMin, SDFView.LocalMin + SDFView.LocalSize);
+			const FVector ProbeLocal = SDFView.BoneToWorld.InverseTransformPosition(SupportProbeWorld);
+			const FVector BoundaryLocal = LocalBounds.GetClosestPointTo(ProbeLocal);
+			const FVector BoundsCenter = LocalBounds.GetCenter();
+			const FVector InwardDirection = (BoundsCenter - BoundaryLocal).GetSafeNormal();
+			const FVector VoxelSize(
+				SDFView.LocalSize.X / FMath::Max(1, SDFView.ResX - 1),
+				SDFView.LocalSize.Y / FMath::Max(1, SDFView.ResY - 1),
+				SDFView.LocalSize.Z / FMath::Max(1, SDFView.ResZ - 1));
+			const float BoundsInset = FMath::Max(0.25f, VoxelSize.GetMax() * 1.5f);
+			const FVector QueryLocal = LocalBounds.GetClosestPointTo(
+				BoundaryLocal + InwardDirection * BoundsInset);
+			ProjectionQueryWorld = SDFView.BoneToWorld.TransformPosition(QueryLocal);
+		}
+
+		FRopeSurfaceProjection Projection =
+			Collider->ProjectToSurface(ProjectionQueryWorld, QueryRadius);
+		if (!Projection.bHit)
+		{
+			++BoundsQueryMissCount;
+			// 경계 voxel이 포화된 저해상도 bake도 경로 전체를 즉시 죽이지 않게 한다. 현재 경로
+			// predictor는 직전 표면 근처이므로, 해당 collider에 유효한 local gradient가 있으면
+			// 연속성을 유지할 수 있다. 외곽 선택 자체는 아래 support 비교가 계속 담당한다.
+			Projection = Collider->ProjectToSurface(InOutSurfaceWorld, QueryRadius);
+			if (!Projection.bHit)
+			{
+				continue;
+			}
+			++PredictorFallbackHitCount;
+		}
+
+		const float ProjectionAxisDistance = FVector::DotProduct(
+			Projection.SurfacePoint - State.PathAxisOrigin, AxisDirection);
+		const float CandidateAxialDrift = FMath::Abs(ProjectionAxisDistance - ProbeAxisDistance);
+		const bool bPassesAxialFilter = CandidateAxialDrift <= MaxAxialProjectionDrift;
+		AxialRejectCount += bPassesAxialFilter ? 0 : 1;
+
+		const FVector CandidateOffset = Projection.SurfacePoint - State.PathAxisOrigin;
+		const FVector CandidateRadialOffset = CandidateOffset -
+			AxisDirection * FVector::DotProduct(CandidateOffset, AxisDirection);
+		const FVector CandidateRadial = CandidateRadialOffset.GetSafeNormal(
+			KINDA_SMALL_NUMBER, ExpectedRadial);
+		const float CandidateAlignment = FVector::DotProduct(
+			CandidateRadial, ExpectedRadial);
+		const bool bPassesAlignmentFilter = CandidateAlignment >= MinSupportAlignment;
+		AlignmentRejectCount += bPassesAlignmentFilter ? 0 : 1;
+
+		const FVector CandidateNormal = Projection.Normal.GetSafeNormal(
+			KINDA_SMALL_NUMBER, PreviousNormal);
+		const FVector CandidateTangent =
+			(Projection.SurfacePoint - PreviousSurfaceWorld).GetSafeNormal(
+				KINDA_SMALL_NUMBER, DesiredTangent);
+		const float DesiredTangentPenalty = 1.0f - FMath::Clamp(
+			FVector::DotProduct(CandidateTangent, DesiredTangent), -1.0f, 1.0f);
+		const float PreviousTangentPenalty = 1.0f - FMath::Clamp(
+			FVector::DotProduct(CandidateTangent, PreviousTangent), -1.0f, 1.0f);
+		const float TangentPenalty = DesiredTangentPenalty * 0.75f +
+			PreviousTangentPenalty * 0.25f;
+		const float NormalPenalty = 1.0f - FMath::Clamp(
+			FVector::DotProduct(CandidateNormal, PreviousNormal), -1.0f, 1.0f);
+		// collider별 bounds query 거리는 bounds 크기에 따라 달라지므로 tie-break에는 모든 collider에
+		// 공통인 방향 probe에서 표면까지의 거리를 사용한다.
+		const float TieBreakScore =
+			FVector::Dist(SupportProbeWorld, Projection.SurfacePoint) *
+				Ctx.Config.ProjectionDistanceWeight +
+			FVector::Dist(Projection.SurfacePoint, RopeNodeWorld) * Ctx.Config.RopeNodeDistanceWeight +
+			TangentPenalty * Ctx.Config.TangentContinuityWeight +
+			NormalPenalty * Ctx.Config.NormalContinuityWeight;
+		const float CandidateOuterSupport = FVector::DotProduct(
+			CandidateRadialOffset, ExpectedRadial);
+
+
+		FCompositeProjectionCandidate& Candidate = Candidates.AddDefaulted_GetRef();
+		Candidate.Surface = Projection.SurfacePoint;
+		Candidate.Normal = CandidateNormal;
+		Candidate.Tangent = CandidateTangent;
+		Candidate.Circumference = DesiredCircumference;
+		Candidate.Bone = Bone;
+		Candidate.Mesh = ColliderMesh;
+		Candidate.OuterSupport = CandidateOuterSupport;
+		Candidate.Alignment = CandidateAlignment;
+		Candidate.AxialDrift = CandidateAxialDrift;
+		Candidate.PredictorDistance = FVector::Dist(Projection.SurfacePoint, InOutSurfaceWorld);
+		Candidate.TieBreakScore = TieBreakScore;
+		Candidate.bPassesStrictFilters = bPassesAxialFilter && bPassesAlignmentFilter;
+		if (Candidate.bPassesStrictFilters)
+		{
+			MaxStrictOuterSupport = FMath::Max(MaxStrictOuterSupport, CandidateOuterSupport);
+		}
+
+		UE_LOG(LogRopeWrap, VeryVerbose,
+			TEXT("[%s] Composite support candidate: bone=%s strict=%d support=%.2f alignment=%.3f axialDrift=%.2f/%.2fcm predictorDistance=%.2fcm score=%.3f surface=%s"),
+			*Ctx.OwnerName, *Bone.ToString(), Candidate.bPassesStrictFilters ? 1 : 0,
+			Candidate.OuterSupport, Candidate.Alignment, Candidate.AxialDrift,
+			MaxAxialProjectionDrift, Candidate.PredictorDistance, Candidate.TieBreakScore,
+			*Candidate.Surface.ToString());
+	}
+
+	// 1차: 전체 후보에서 실제 최외곽 support를 확정한다. 2차: 그 외곽 band 안에서만 기존 점수를
+	// 적용한다. 한 번의 순회에서 best를 갱신하면 collider 배열 순서에 따라 허용폭만큼 안쪽으로
+	// 연쇄 이동할 수 있으므로 반드시 분리한다.
+	for (const FCompositeProjectionCandidate& Candidate : Candidates)
+	{
+		if (!Candidate.bPassesStrictFilters ||
+			Candidate.OuterSupport + OuterSupportTieTolerance < MaxStrictOuterSupport)
+		{
+			continue;
+		}
+
+		if (!bFound || Candidate.TieBreakScore < BestTieBreakScore)
+		{
+			bFound = true;
+			BestTieBreakScore = Candidate.TieBreakScore;
+			BestSurface = Candidate.Surface;
+			BestNormal = Candidate.Normal;
+			BestTangent = Candidate.Tangent;
+			BestCircumference = Candidate.Circumference;
+			BestBone = Candidate.Bone;
+			BestMesh = Candidate.Mesh;
+		}
+	}
+
+	if (!bFound)
+	{
+		// Strict 후보가 한 프레임의 pose/SDF 양자화 오차로 모두 탈락해도 즉시 접촉을 놓지 않는다.
+		// 완화 단계는 축 drift/방향/예측점 거리에 넓은 하드 상한을 유지하고, 그 안에서만 최외곽을 고른다.
+		const float RelaxedMaxAxialDrift = FMath::Max(
+			MaxAxialProjectionDrift * 2.5f, Sim.SegmentLength * 4.0f);
+		constexpr float MinRelaxedAlignment = -0.25f;
+		const float MaxRelaxedPredictorDistance = FMath::Max3(
+			Sim.SegmentLength * 4.0f, Ctx.GetContactRadius() * 6.0f, Ctx.SurfaceOffset * 6.0f);
+		const float RelaxedSupportTolerance = FMath::Max3(
+			OuterSupportTieTolerance, Ctx.GetContactRadius(), Sim.SegmentLength * 0.5f);
+		float MaxRelaxedOuterSupport = -TNumericLimits<float>::Max();
+		for (const FCompositeProjectionCandidate& Candidate : Candidates)
+		{
+			if (Candidate.AxialDrift <= RelaxedMaxAxialDrift &&
+				Candidate.Alignment >= MinRelaxedAlignment &&
+				Candidate.PredictorDistance <= MaxRelaxedPredictorDistance)
+			{
+				MaxRelaxedOuterSupport = FMath::Max(MaxRelaxedOuterSupport, Candidate.OuterSupport);
+			}
+		}
+
+		for (const FCompositeProjectionCandidate& Candidate : Candidates)
+		{
+			if (Candidate.AxialDrift > RelaxedMaxAxialDrift ||
+				Candidate.Alignment < MinRelaxedAlignment ||
+				Candidate.PredictorDistance > MaxRelaxedPredictorDistance ||
+				Candidate.OuterSupport + RelaxedSupportTolerance < MaxRelaxedOuterSupport)
+			{
+				continue;
+			}
+
+			const float RelaxedScore = Candidate.TieBreakScore +
+				Candidate.AxialDrift * 0.35f +
+				(1.0f - Candidate.Alignment) * 5.0f +
+				Candidate.PredictorDistance * 0.25f;
+			if (!bFound || RelaxedScore < BestTieBreakScore)
+			{
+				bFound = true;
+				BestTieBreakScore = RelaxedScore;
+				BestSurface = Candidate.Surface;
+				BestNormal = Candidate.Normal;
+				BestTangent = Candidate.Tangent;
+				BestCircumference = Candidate.Circumference;
+				BestBone = Candidate.Bone;
+				BestMesh = Candidate.Mesh;
+			}
+		}
+
+		if (bFound)
+		{
+			if (OutSupportTier)
+			{
+				*OutSupportTier = ERopeCompositeSupportTier::Relaxed;
+			}
+			UE_LOG(LogRopeWrap, Log,
+				TEXT("[%s] Composite support recovered: tier=Relaxed selected=%s candidates=%d axialReject=%d alignmentReject=%d projectionMiss=%d predictorFallback=%d support=%.2f score=%.3f"),
+				*Ctx.OwnerName, *BestBone.ToString(), Candidates.Num(), AxialRejectCount,
+				AlignmentRejectCount, BoundsQueryMissCount, PredictorFallbackHitCount,
+				MaxRelaxedOuterSupport, BestTieBreakScore);
+		}
+	}
+
+	if (!bFound)
+	{
+		// 마지막 composite 내부 복구: 현재 선택 본의 직전 표면에서 다시 projection한다. 한 step의
+		// 외곽 support가 비었다는 이유만으로 latch 자체를 놓지 않고 다음 sweep step에서 재진입시킨다.
+		const FName ContinuityBone = State.PathWrapIslandBones.Contains(InOutBone)
+			? InOutBone
+			: (State.PathWrapIslandBones.Contains(State.LatchAnchor.Bone)
+				? State.LatchAnchor.Bone
+				: NAME_None);
+		FVector ContinuitySurface = InOutSurfaceWorld;
+		FVector ContinuityNormal = InOutNormalWorld;
+		bool bContinuityHit = !ContinuityBone.IsNone() && ProjectWrapPointToSurface(
+			ContinuityBone, IslandMesh, Sim, Ctx, ContinuitySurface, ContinuityNormal);
+		if (!bContinuityHit)
+		{
+			ContinuitySurface = PreviousSurfaceWorld;
+			ContinuityNormal = PreviousNormal;
+			bContinuityHit = ProjectWrapPointToSurface(
+				ContinuityBone, IslandMesh, Sim, Ctx, ContinuitySurface, ContinuityNormal);
+		}
+
+		if (bContinuityHit)
+		{
+			BestSurface = ContinuitySurface;
+			BestNormal = ContinuityNormal.GetSafeNormal(KINDA_SMALL_NUMBER, PreviousNormal);
+			BestTangent = (BestSurface - PreviousSurfaceWorld).GetSafeNormal(
+				KINDA_SMALL_NUMBER, DesiredTangent);
+			BestCircumference = DesiredCircumference;
+			BestBone = ContinuityBone;
+			BestMesh = IslandMesh;
+			bFound = true;
+			if (OutSupportTier)
+			{
+				*OutSupportTier = ERopeCompositeSupportTier::Continuity;
+			}
+			UE_LOG(LogRopeWrap, Warning,
+				TEXT("[%s] Composite support recovered: tier=Continuity bone=%s colliders=%d candidates=%d projectionMiss=%d axialReject=%d alignmentReject=%d previous=%s recovered=%s"),
+				*Ctx.OwnerName, *BestBone.ToString(), MatchingColliderCount, Candidates.Num(),
+				BoundsQueryMissCount, AxialRejectCount, AlignmentRejectCount,
+				*PreviousSurfaceWorld.ToString(), *BestSurface.ToString());
+		}
+	}
+
+	if (!bFound)
+	{
+		FString IslandBoneList;
+		for (const FName Bone : State.PathWrapIslandBones)
+		{
+			if (!IslandBoneList.IsEmpty())
+			{
+				IslandBoneList += TEXT(",");
+			}
+			IslandBoneList += Bone.ToString();
+		}
+		// 이 시점에는 아래 SingleBone fallback이 아직 남아 있으므로 최종 오류가 아니라 복구 경고다.
+		UE_LOG(LogRopeWrap, Warning,
+			TEXT("[%s] Composite support exhausted: currentBone=%s island=[%s] colliders=%d candidates=%d projectionMiss=%d predictorFallback=%d axialReject=%d alignmentReject=%d queryRadius=%.2f maxAxialDrift=%.2f probeRadius=%.2f desiredRadial=%s probe=%s predictor=%s previous=%s ropeNode=%s axisOrigin=%s axisDir=%s"),
+			*Ctx.OwnerName, *InOutBone.ToString(), *IslandBoneList, MatchingColliderCount,
+			Candidates.Num(), BoundsQueryMissCount, PredictorFallbackHitCount, AxialRejectCount,
+			AlignmentRejectCount, QueryRadius, MaxAxialProjectionDrift, SupportProbeRadius,
+			*ExpectedRadial.ToString(), *SupportProbeWorld.ToString(), *InOutSurfaceWorld.ToString(),
+			*PreviousSurfaceWorld.ToString(), *RopeNodeWorld.ToString(),
+			*State.PathAxisOrigin.ToString(), *AxisDirection.ToString());
+		return false;
+	}
+	if (OutSupportTier && *OutSupportTier == ERopeCompositeSupportTier::Failed)
+	{
+		*OutSupportTier = ERopeCompositeSupportTier::Strict;
+	}
+
+	InOutSurfaceWorld = BestSurface;
+	InOutNormalWorld = BestNormal;
+	InOutTangentWorld = BestTangent;
+	InOutCircumferenceDir = BestCircumference;
+	InOutBone = BestBone;
+	OutMesh = BestMesh;
+	return true;
+}
+
 void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USceneComponent* Mesh,
 	TArray<FSurfaceVectorFieldBoneCandidate>& OutCandidates, const FContext& Ctx) const
 {
@@ -1724,8 +2927,8 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 		return;
 	}
 
-	// 후보 본 그래프(parent/child) 탐색은 본 그래프가 있는 대상(스켈레탈)에서만 유효하다. 정적 대상은
-	// 부모/자식 키가 비어 후보가 CurrentBone 하나로 남는다(단일 본 랩 폴백 — 정적은 본 그래프가 없다).
+	// 기존 Sequential Multi-Bone/비복합 동작을 보존하기 위한 skeleton parent/child 후보만 수집한다.
+	// 복합 SDF 실패 폴백은 이 함수 자체를 호출하지 않는다.
 	struct FBoneQueueEntry
 	{
 		FName Bone = NAME_None;
@@ -1741,10 +2944,6 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 		: 0.0f;
 	const float EdgePenalty = FMath::Max(0.0f, Ctx.Config.AutoParentChildTransitionPenalty);
 
-	// SurfaceVectorField의 본 후보를 "가까운 본 이름 목록"이 아니라 작은 graph 탐색 결과로 다룬다.
-	// 지금은 자동 parent/child edge만 쓰지만, 후보가 Depth/GraphCost를 들고 다니므로 이후 디자이너
-	// transition edge를 같은 경로에 섞어 넣을 수 있다. 탐색은 bounded Dijkstra에 가깝게 비용이 낮은
-	// 항목부터 확장하고, depth/cost 상한으로 팔->몸통->반대팔 같은 먼 bridge가 우연히 열리는 것을 막는다.
 	TArray<FBoneQueueEntry, TInlineAllocator<16>> Queue;
 	TMap<FName, float> BestCostByBone;
 	TMap<FName, int32> BestDepthByBone;
@@ -1752,10 +2951,6 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 	BestCostByBone.Add(CurrentBone, 0.0f);
 	BestDepthByBone.Add(CurrentBone, 0);
 
-	// 후보 수가 매우 작다는 전제의 Dijkstra-lite 구현이다.
-	// Unreal 쪽 priority queue 의존을 늘리지 않고 TInlineAllocator 배열에서 가장 싼 항목을 직접 고른다.
-	// 현재 parent/child edge 비용은 모두 같지만, 이 형태로 두면 designer transition edge에 다른
-	// penalty를 붙였을 때도 함수 구조를 바꾸지 않고 그대로 확장할 수 있다.
 	while (Queue.Num() > 0)
 	{
 		int32 BestQueueIndex = 0;
@@ -1769,40 +2964,29 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 
 		const FBoneQueueEntry Entry = Queue[BestQueueIndex];
 		Queue.RemoveAtSwap(BestQueueIndex, 1, EAllowShrinking::No);
-
 		const float* KnownBestCost = BestCostByBone.Find(Entry.Bone);
 		if (KnownBestCost && Entry.Cost > *KnownBestCost + KINDA_SMALL_NUMBER)
 		{
 			continue;
 		}
 
-		FSurfaceVectorFieldBoneCandidate Candidate;
+		FSurfaceVectorFieldBoneCandidate& Candidate = OutCandidates.AddDefaulted_GetRef();
 		Candidate.Bone = Entry.Bone;
 		Candidate.Depth = Entry.Depth;
 		Candidate.GraphCost = Entry.Cost;
 		Candidate.bCurrentBone = Entry.Bone == CurrentBone;
-		OutCandidates.Add(Candidate);
 
-		if (Entry.Depth >= MaxCandidateDepth)
-		{
-			continue;
-		}
-		if (Entry.Cost >= MaxCandidateCost)
+		if (Entry.Depth >= MaxCandidateDepth || Entry.Cost >= MaxCandidateCost)
 		{
 			continue;
 		}
 
-		// 지금 구현의 graph edge는 skeleton parent/child뿐이다.
-		// 나중에 AllowedBoneTransitions/TransitionChains를 추가하면 여기에서 AddNeighbor(ToBone, Penalty)처럼
-		// designer edge도 같이 넣으면 된다. 후보 구조가 이미 GraphCost를 들고 있어서 projection/scoring
-		// 쪽은 edge 출처를 몰라도 된다.
 		const auto AddNeighbor = [&](FName Bone)
 		{
 			if (Bone.IsNone())
 			{
 				return;
 			}
-
 			const int32 NextDepth = Entry.Depth + 1;
 			const float NextCost = Entry.Cost + EdgePenalty;
 			if (NextDepth > MaxCandidateDepth || NextCost > MaxCandidateCost)
@@ -1814,18 +2998,17 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 			const int32* ExistingDepth = BestDepthByBone.Find(Bone);
 			if (ExistingCost &&
 				(*ExistingCost < NextCost - KINDA_SMALL_NUMBER ||
-					(FMath::IsNearlyEqual(*ExistingCost, NextCost) && ExistingDepth && *ExistingDepth <= NextDepth)))
+					(FMath::IsNearlyEqual(*ExistingCost, NextCost) &&
+						ExistingDepth && *ExistingDepth <= NextDepth)))
 			{
 				return;
 			}
-
 			BestCostByBone.Add(Bone, NextCost);
 			BestDepthByBone.Add(Bone, NextDepth);
 			Queue.Add({ Bone, NextDepth, NextCost });
 		};
 
 		AddNeighbor(RopeWrapTargets::GetParentTargetKey(Mesh, Entry.Bone));
-
 		TArray<FName> Children;
 		RopeWrapTargets::AppendChildTargetKeys(Mesh, Entry.Bone, Children);
 		for (const FName& Child : Children)
@@ -1833,6 +3016,10 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 			AddNeighbor(Child);
 		}
 	}
+
+	UE_LOG(LogRopeWrap, VeryVerbose,
+		TEXT("[%s] Multi-bone candidate graph: source=Skeleton current=%s candidates=%d"),
+		*Ctx.OwnerName, *CurrentBone.ToString(), OutCandidates.Num());
 }
 
 bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USceneComponent* Mesh,
@@ -1982,6 +3169,20 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 
 	if (!bFound)
 	{
+		FString CandidateBones;
+		for (const FSurfaceVectorFieldBoneCandidate& Candidate : Candidates)
+		{
+			if (!CandidateBones.IsEmpty())
+			{
+				CandidateBones += TEXT(",");
+			}
+			CandidateBones += Candidate.Bone.ToString();
+		}
+		UE_LOG(LogRopeWrap, Warning,
+			TEXT("[%s] Multi-bone surface projection empty: current=%s previous=%s candidates=%d [%s] predictor=%s ropeNode=%s normal=%s tangent=%s distanceSinceTransition=%.2fcm"),
+			*Ctx.OwnerName, *CurrentBone.ToString(), *PreviousBone.ToString(), Candidates.Num(),
+			*CandidateBones, *InOutSurfaceWorld.ToString(), *RopeNodeWorld.ToString(),
+			*PreviousNormalWorld.ToString(), *PreviousTangentWorld.ToString(), DistanceSinceLastTransition);
 		return false;
 	}
 
@@ -1998,8 +3199,23 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 
 		if (!bEnoughScoreMargin || !bEnoughDistanceSinceTransition)
 		{
+			UE_LOG(LogRopeWrap, VeryVerbose,
+				TEXT("[%s] Bone transition held: from=%s candidate=%s source=Skeleton "
+					"score=%.3f currentScore=%.3f scoreMargin=%d pathDistance=%d"),
+				*Ctx.OwnerName, *CurrentBone.ToString(), *BestProjection.Bone.ToString(),
+				BestProjection.Score, CurrentBoneProjection.Score,
+				bEnoughScoreMargin ? 1 : 0, bEnoughDistanceSinceTransition ? 1 : 0);
 			BestProjection = CurrentBoneProjection;
 		}
+	}
+
+	if (BestProjection.Bone != CurrentBone)
+	{
+		UE_LOG(LogRopeWrap, Log,
+			TEXT("[%s] Bone transition selected: from=%s to=%s source=Skeleton "
+				"score=%.3f graphCost=%.3f"),
+			*Ctx.OwnerName, *CurrentBone.ToString(), *BestProjection.Bone.ToString(),
+			BestProjection.Score, BestProjection.GraphCost);
 	}
 
 	InOutSurfaceWorld = BestProjection.SurfaceWorld;
@@ -2008,6 +3224,41 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 	InOutCircumferenceDir = BestProjection.CircumferenceDir;
 	InOutBone = BestProjection.Bone;
 	OutMesh = BestProjection.Mesh;
+	return true;
+}
+
+bool FRopeWrappingPhase::ProjectWrapPointToSingleBone(const USceneComponent* Mesh,
+	const FRopeSimState& Sim, const FContext& Ctx,
+	FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
+	FVector& InOutCircumferenceDir, FName& InOutBone, const USceneComponent*& OutMesh) const
+{
+	// 복합 경로의 후보/graph 상태를 재사용하지 않는다. 최초 latch 본과 동일 mesh에 귀속된 collider만
+	// 기존 단일 본 projection으로 찾고, 그 표면 프레임에서 tangent를 다시 계산한다.
+	const FName LatchBone = State.LatchAnchor.Bone;
+	if (LatchBone.IsNone() ||
+		!ProjectWrapPointToSurface(LatchBone, Mesh, Sim, Ctx, InOutSurfaceWorld, InOutNormalWorld))
+	{
+		UE_LOG(LogRopeWrap, Error,
+			TEXT("[%s] Single-bone fallback projection empty: latchBone=%s mesh=%s predictor=%s normal=%s colliders=%d contactRadius=%.2fcm segment=%.2fcm"),
+			*Ctx.OwnerName, *LatchBone.ToString(), Mesh ? *Mesh->GetName() : TEXT("None"),
+			*InOutSurfaceWorld.ToString(), *InOutNormalWorld.ToString(), Ctx.Colliders.Num(),
+			Ctx.GetContactRadius(), Sim.SegmentLength);
+		return false;
+	}
+
+	InOutCircumferenceDir = InOutCircumferenceDir.GetSafeNormal(
+		KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
+	InOutTangentWorld = ComputeSurfaceVectorFieldTangent(
+		State.PathAxisOrigin,
+		State.PathAxisDirection,
+		State.PathLatchRadial,
+		State.PathWindingSign,
+		InOutSurfaceWorld,
+		InOutNormalWorld,
+		Ctx,
+		InOutCircumferenceDir);
+	InOutBone = LatchBone;
+	OutMesh = Mesh ? Mesh : State.LatchAnchor.Mesh.Get();
 	return true;
 }
 
