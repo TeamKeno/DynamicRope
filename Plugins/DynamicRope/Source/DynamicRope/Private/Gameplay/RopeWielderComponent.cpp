@@ -979,7 +979,6 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 	{
 		ResolveRefs();
 		ResolvePreviewComponent(/*bAllowAutoCreate*/ true);
-		PreviewUpdateCooldown = 0.0f;
 		SetComponentTickEnabled(true);
 		UpdateThrowPreview();
 	}
@@ -1220,7 +1219,6 @@ void URopeWielderComponent::ClearPreparedThrow()
 	LastPreparedPreview.Reset();
 	HeldPreparedPreview = FRopeWrapPreviewData();
 	HeldPreviewExpireTimeSeconds = 0.0f;
-	PreviewUpdateCooldown = 0.0f;
 }
 
 void URopeWielderComponent::ClearThrowPreview()

@@ -255,9 +255,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
 	bool bPreviewOnlyWhenIdle = true;
 
-	/** Preview 충돌 검사 갱신 주기. 0이면 매 프레임 검사하므로 SDF 대상이 많을 때는 매우 비싸다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Preview Update Interval"))
-	float PreviewUpdateInterval = 0.1f;
+	// NOTE: preview 갱신 스로틀(PreviewUpdateInterval)은 삭제됐다. CL 225에서 게이트 코드가 사라진 뒤로
+	// 필드만 남아 "0.1초마다 검사"를 약속했지만 실제로는 매 프레임 돌았다 — 값을 바꿔도 아무 일도 없었다.
+	// preview build는 지금도 매 프레임 돈다(aim ray 스윕도 원래 매 틱이다). 비용이 문제로 측정되면
+	// 그때 스로틀을 되살린다 — 계산/표시가 분리돼 있으므로 build만 조이고 렌더는 매 프레임 유지하면 된다.
 
 	/** PreviewPathLocked가 Wrapped로 확정된 뒤에도 preview path를 잠깐 남길 시간. 0이면 Wrapped 진입 시 즉시 지운다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Locked Wrapped Preview Hold Time"))
@@ -577,7 +578,6 @@ private:
 	// AirControl 부스트 원복용 저장 상태(스윙 진입 시 저장, 종료/EndPlay 시 복원).
 	bool bAirControlBoosted = false;
 	float SavedAirControl = 0.0f;
-	float PreviewUpdateCooldown = 0.0f;
 	bool bLastPreviewBuildSucceeded = false;
 	bool bHasLastPreviewBuildResult = false;
 	FString LastPreviewBuildReason;
