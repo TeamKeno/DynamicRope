@@ -2,11 +2,15 @@
 
 #include "Logic/RopeAimTargeting.h"
 #include "Collision/RopeCollider.h"
-#include "DrawDebugHelpers.h"
+
+float FRopeAimTargeting::ResolveEffectiveQueryRadius(const FQueryContext& Ctx, float QueryRadius)
+{
+	// 0 설정은 선 ray가 아니라 rope/contact 기본 두께를 사용한다. 명시값이 있으면 그 반경으로 sweep한다.
+	return QueryRadius > KINDA_SMALL_NUMBER ? QueryRadius : Ctx.FallbackQueryRadius;
+}
 
 bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 	const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
-	bool bDrawDebug, const UWorld* DebugWorld,
 	TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
 	FRopeAimRayHitResult& OutHit,
 	FRopeAimRayHitResult* OutBlockedHit)
@@ -30,8 +34,7 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 
 	const FVector RayStart = Origin;
 	const FVector RayEnd = RayStart + RayDir * EffectiveRayLength;
-	// 0 설정은 선 ray가 아니라 rope/contact 기본 두께를 사용한다. 명시값이 있으면 그 반경으로 sweep한다.
-	const float EffectiveQueryRadius = QueryRadius > KINDA_SMALL_NUMBER ? QueryRadius : Ctx.FallbackQueryRadius;
+	const float EffectiveQueryRadius = ResolveEffectiveQueryRadius(Ctx, QueryRadius);
 	const float EffectiveSweepStep = FMath::Clamp(SweepStep > KINDA_SMALL_NUMBER ? SweepStep : 2.0f, 0.5f, 10.0f);
 
 	FRopeSweptQuery Query;
@@ -109,27 +112,6 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 		*OutBlockedHit = BestBlocked;
 	}
 
-	if (bDrawDebug && DebugWorld)
-	{
-		// cyan/red capsule은 실제 QuerySwept에 전달한 길이와 반경을 그대로 시각화한다.
-		constexpr float LifeTime = 0.05f;
-		const bool bHit = bFoundHit && BestHit.bHit;
-		const FVector RayStop = bHit ? BestHit.HitWorldPos : RayEnd;
-		const FColor MainColor = bHit ? FColor::Red : FColor::Cyan;
-		const FQuat CapsuleRotation = FRotationMatrix::MakeFromZ(RayDir).ToQuat();
-		DrawDebugCapsule(DebugWorld, (RayStart + RayEnd) * 0.5f,
-			EffectiveRayLength * 0.5f + EffectiveQueryRadius, EffectiveQueryRadius,
-			CapsuleRotation, MainColor, false, LifeTime, 0, 1.0f);
-		DrawDebugLine(DebugWorld, RayStart, RayStop, MainColor, false, LifeTime, 0, 2.0f);
-		if (bHit)
-		{
-			DrawDebugLine(DebugWorld, RayStop, RayEnd, FColor(96, 0, 0), false, LifeTime, 0, 1.0f);
-			DrawDebugSphere(DebugWorld, BestHit.HitWorldPos, 8.0f, 12, FColor::Yellow, false, LifeTime, 0, 2.0f);
-			DrawDebugString(DebugWorld, BestHit.HitWorldPos + FVector(0.0f, 0.0f, 14.0f),
-				BestHit.Bone.ToString(), nullptr, FColor::Yellow, LifeTime, false, 1.0f);
-		}
-	}
-
 	if (!bFoundHit)
 	{
 		return false;
@@ -140,7 +122,6 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 }
 
 bool FRopeAimTargeting::ResolveAimRayThrowContext(const FQueryContext& Ctx, const FRopeAimRayThrowRequest& Request,
-	const UWorld* DebugWorld,
 	TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
 	FRopeThrowContext& OutContext)
 {
@@ -152,7 +133,7 @@ bool FRopeAimTargeting::ResolveAimRayThrowContext(const FQueryContext& Ctx, cons
 
 	FRopeAimRayHitResult Hit;
 	if (!FindAimRayBoneHit(Ctx, Request.RayOrigin, Request.RayDirection, Request.RayLength,
-		Request.QueryRadius, Request.SweepStep, Request.bDrawDebug, DebugWorld, CanWrapTarget, Hit))
+		Request.QueryRadius, Request.SweepStep, CanWrapTarget, Hit))
 	{
 		return false;
 	}

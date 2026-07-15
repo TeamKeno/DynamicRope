@@ -5,6 +5,7 @@
 #if WITH_GAMEPLAY_DEBUGGER
 
 #include "RopeComponent.h"
+#include "Gameplay/RopeWielderComponent.h"
 #include "Debug/RopeDebugSnapshot.h"
 #include "Subsystem/RopeDebugSubsystem.h"
 #include "GameFramework/Actor.h"
@@ -44,6 +45,8 @@ namespace
 		case ERopePhase::Wrapping:   return TEXT("Wrapping");
 		case ERopePhase::Wrapped:    return TEXT("Wrapped");
 		case ERopePhase::Releasing:  return TEXT("Releasing");
+		case ERopePhase::GuidedThrow: return TEXT("GuidedThrow");
+		case ERopePhase::Reel:       return TEXT("Reel");
 		default:                     return TEXT("?");
 		}
 	}
@@ -57,6 +60,10 @@ namespace
 		case ERopePhase::Wrapped:    return FColor::Green;
 		case ERopePhase::Wrapping:   return FColor(255, 160, 0);
 		case ERopePhase::Releasing:  return FColor::Orange;
+		// GuidedThrow는 확정 경로를 따라가는 비행 — Flight와 구분되게 파랑.
+		case ERopePhase::GuidedThrow: return FColor(80, 140, 255);
+		// Reel은 장전 대기 — 던지기 전 상태라 Free보다 밝은 회색.
+		case ERopePhase::Reel:       return FColor(210, 210, 210);
 		case ERopePhase::Free:
 		default:                     return FColor(160, 160, 160);
 		}
@@ -137,10 +144,12 @@ FGameplayDebuggerCategory_Rope::FGameplayDebuggerCategory_Rope()
 	const FGameplayDebuggerInputHandlerConfig WrappedCfg(TEXT("ToggleWrapped"), TEXT("I"));
 	const FGameplayDebuggerInputHandlerConfig CollidersCfg(TEXT("ToggleColliders"), TEXT("O"));
 	const FGameplayDebuggerInputHandlerConfig LabelsCfg(TEXT("ToggleLabels"), TEXT("P"));
+	const FGameplayDebuggerInputHandlerConfig AimCfg(TEXT("ToggleAim"), TEXT("J"));
 	BindKeyPress(FlightCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleFlight);
 	BindKeyPress(WrappedCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleWrapped);
 	BindKeyPress(CollidersCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleColliders);
 	BindKeyPress(LabelsCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleLabels);
+	BindKeyPress(AimCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleAim);
 }
 
 TSharedRef<FGameplayDebuggerCategory> FGameplayDebuggerCategory_Rope::MakeInstance()
@@ -152,6 +161,7 @@ void FGameplayDebuggerCategory_Rope::OnToggleFlight()    { ViewMask ^= static_ca
 void FGameplayDebuggerCategory_Rope::OnToggleWrapped()   { ViewMask ^= static_cast<uint8>(EView::Wrapped); }
 void FGameplayDebuggerCategory_Rope::OnToggleColliders() { ViewMask ^= static_cast<uint8>(EView::Colliders); }
 void FGameplayDebuggerCategory_Rope::OnToggleLabels()    { ViewMask ^= static_cast<uint8>(EView::Labels); }
+void FGameplayDebuggerCategory_Rope::OnToggleAim()       { ViewMask ^= static_cast<uint8>(EView::Aim); }
 
 void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AActor* DebugActor)
 {
@@ -170,9 +180,16 @@ void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AAc
 
 	auto OnOff = [](bool b) { return b ? TEXT("{green}on") : TEXT("{grey}off"); };
 	AddTextLine(FString::Printf(
-		TEXT("{white}views  [U]flight=%s{white} [I]wrapped=%s{white} [O]colliders=%s{white} [P]labels=%s"),
+		TEXT("{white}views  [U]flight=%s{white} [I]wrapped=%s{white} [O]colliders=%s{white} [P]labels=%s{white} [J]aim=%s"),
 		OnOff(HasView(EView::Flight)), OnOff(HasView(EView::Wrapped)),
-		OnOff(HasView(EView::Colliders)), OnOff(HasView(EView::Labels))));
+		OnOff(HasView(EView::Colliders)), OnOff(HasView(EView::Labels)),
+		OnOff(HasView(EView::Aim))));
+
+	// 조준은 로프가 아니라 Wielder 소유 — 로프 순회와 별개로 액터에서 한 번 찾아 그린다.
+	if (const URopeWielderComponent* Wielder = DebugActor->FindComponentByClass<URopeWielderComponent>())
+	{
+		DrawAim(*Wielder);
+	}
 
 	int32 Count = 0;
 	for (UActorComponent* Comp : DebugActor->GetComponents())
@@ -192,6 +209,76 @@ void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AAc
 	if (Count == 0)
 	{
 		AddTextLine(TEXT("{grey}no URopeComponent on debug actor"));
+	}
+}
+
+void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielder)
+{
+	if (!HasView(EView::Aim))
+	{
+		return;
+	}
+
+	// 질의는 하지 않는다 — Wielder가 aim ray 모드에서 매 틱 스윕해 남긴 샘플을 읽기만 한다.
+	// 그 외 모드에서는 빈 샘플(RayLength=0)이라 그릴 ray 자체가 없다.
+	const FRopeAimHudSample& Aim = Wielder.GetAimHudSample();
+	const UWorld* World = Wielder.GetWorld();
+	if (!World || Aim.RayLength <= KINDA_SMALL_NUMBER || Aim.RayDirection.IsNearlyZero())
+	{
+		AddTextLine(TEXT("  {white}aim: {grey}no ray (not an aim ray mode)"));
+		return;
+	}
+
+	// 색 규약은 조준 HUD와 동일하다: 감김 가능=green / 걸렸지만 감김 불가=red / 미스=cyan.
+	const bool bAnyHit = Aim.bHasTarget || Aim.bBlocked;
+	const FColor MainColor = Aim.bHasTarget ? FColor::Green : (Aim.bBlocked ? FColor::Red : FColor::Cyan);
+	const FVector RayDir = Aim.RayDirection.GetSafeNormal();
+	const FVector RayStart = Aim.RayOrigin;
+	const FVector RayEnd = RayStart + RayDir * Aim.RayLength;
+	const FVector RayStop = bAnyHit ? Aim.HitWorldPos : RayEnd;
+
+	// collider와 같은 이유로 AddShape 대신 DrawDebug*(전경): FGameplayDebuggerShape::MakeCapsule에는
+	// 회전 인자가 없어 임의 방향 ray를 표현할 수 없다. 수명은 다음 수집까지만 남게 짧게 준다.
+	constexpr float LifeTime = 0.05f;
+	constexpr uint8 FG = SDPG_Foreground;
+	// 캡슐 치수는 실제 QuerySwept에 넘어간 길이·반경 그대로 — 조준이 검사하는 부피를 눈으로 확인한다.
+	if (Aim.QueryRadius > KINDA_SMALL_NUMBER)
+	{
+		const FQuat CapsuleRotation = FRotationMatrix::MakeFromZ(RayDir).ToQuat();
+		DrawDebugCapsule(World, (RayStart + RayEnd) * 0.5f,
+			Aim.RayLength * 0.5f + Aim.QueryRadius, Aim.QueryRadius,
+			CapsuleRotation, MainColor, false, LifeTime, FG, 1.0f);
+	}
+	DrawDebugLine(World, RayStart, RayStop, MainColor, false, LifeTime, FG, 2.0f);
+	if (bAnyHit)
+	{
+		// hit 너머 남은 구간 — 조준이 어디까지 뻗을 수 있었는지.
+		DrawDebugLine(World, RayStop, RayEnd, FColor(96, 0, 0), false, LifeTime, FG, 1.0f);
+		DrawDebugSphere(World, Aim.HitWorldPos, 8.0f, 12, FColor::Yellow, false, LifeTime, FG, 2.0f);
+		if (HasView(EView::Labels))
+		{
+			DrawDebugString(World, Aim.HitWorldPos + FVector(0.0f, 0.0f, 14.0f),
+				Aim.Bone.IsNone() ? TEXT("(no bone)") : *Aim.Bone.ToString(),
+				nullptr, FColor::Yellow, LifeTime, false, 1.0f);
+		}
+	}
+
+	// ToString()의 임시를 로컬에 잡아둔다 — const TCHAR*로 받으면 다음 줄에서 이미 dangling이다.
+	const FString BoneText = Aim.Bone.IsNone() ? FString(TEXT("-")) : Aim.Bone.ToString();
+	if (Aim.bHasTarget)
+	{
+		AddTextLine(FString::Printf(TEXT("  {white}aim: {green}%s{white} dist=%.0f radius=%.1f"),
+			*BoneText, Aim.Distance, Aim.QueryRadius));
+	}
+	else if (Aim.bBlocked)
+	{
+		// ray는 맞았지만 감을 수 없다 — 본 없음/SourceMesh 없음/CanWrapTarget 거부.
+		AddTextLine(FString::Printf(TEXT("  {white}aim: {red}blocked{white} %s dist=%.0f {grey}(not wrappable)"),
+			*BoneText, Aim.Distance));
+	}
+	else
+	{
+		AddTextLine(FString::Printf(TEXT("  {white}aim: {grey}no target{white} radius=%.1f"), Aim.QueryRadius));
 	}
 }
 

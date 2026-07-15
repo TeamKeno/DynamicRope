@@ -149,13 +149,15 @@ void URopeWielderComponent::UpdateAimHudSample()
 		AimHudSample.RayOrigin = Request.RayOrigin;
 		AimHudSample.RayDirection = RayDirection;
 		AimHudSample.RayLength = Request.RayLength;
+		// 설정 반경이 0(기본)이면 로프/접촉 폴백이 걸린다 — 질의가 실제로 쓴 값을 그대로 담아야
+		// HUD/디버거가 검사 두께를 정확히 그린다.
+		AimHudSample.QueryRadius = Rope->GetAimRayEffectiveQueryRadius(Request.QueryRadius);
 		AimHudSample.AimWorldPos = Request.RayOrigin + RayDirection * Request.RayLength;
 		FRopeAimRayHitResult Hit;
 		FRopeAimRayHitResult Blocked;
-		// HUD 전용 스윕 — 월드 디버그 캡슐은 그리지 않는다(HUD 자체가 시각화이고, bDrawAimRayDebug는
-		// preview/throw 해석 경로에서 이미 그린다 — 중복 드로우 방지).
+		// 이 샘플이 조준 시각화의 단일 소스다 — HUD 위젯과 Gameplay Debugger([J]aim)가 함께 읽는다.
 		const bool bHitTarget = Rope->FindAimRayBoneHit(Request.RayOrigin, Request.RayDirection, Request.RayLength,
-			Request.QueryRadius, Request.SweepStep, /*bDrawDebug*/ false, Hit, &Blocked);
+			Request.QueryRadius, Request.SweepStep, Hit, &Blocked);
 		if (bHitTarget && Hit.bHit)
 		{
 			AimHudSample.bHasTarget = true;
@@ -773,7 +775,6 @@ FRopeAimRayThrowRequest URopeWielderComponent::BuildAimRayThrowRequest(const FVe
 	Request.RayLength = GetAimRayLength();
 	Request.QueryRadius = AimRayQueryRadius;
 	Request.SweepStep = AimRaySweepStep;
-	Request.bDrawDebug = bDrawAimRayDebug;
 	return Request;
 }
 

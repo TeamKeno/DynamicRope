@@ -277,8 +277,12 @@ public:
 	/** 현재 FrameColliders를 swept SDF 질의해 ray에서 가장 가까운 wrap 가능 mesh+bone을 찾는다.
 	 *  OutBlockedHit(옵션): ray는 맞았지만 wrap 불가한 가장 가까운 hit(조준 HUD "빨강" 표시용). */
 	bool FindAimRayBoneHit(const FVector& Origin, const FVector& AimDir, float RayLength,
-		float QueryRadius, float SweepStep, bool bDrawDebug, FRopeAimRayHitResult& OutHit,
+		float QueryRadius, float SweepStep, FRopeAimRayHitResult& OutHit,
 		FRopeAimRayHitResult* OutBlockedHit = nullptr) const;
+
+	/** 요청 반경(0=미지정)을 이 로프의 폴백 규약으로 해석한 **실제 스윕 반경**. 조준 시각화가 질의와
+	 *  같은 치수를 그리도록 쓴다 — 0이 기본값이라 실무에선 거의 항상 폴백이 걸린다. */
+	float GetAimRayEffectiveQueryRadius(float RequestedRadius) const;
 
 	/** Aim ray가 검사할 월드 구간을 collider subsystem의 로프별 수집 bounds에 등록한다. */
 	void SetAimRayColliderQueryBounds(const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius);

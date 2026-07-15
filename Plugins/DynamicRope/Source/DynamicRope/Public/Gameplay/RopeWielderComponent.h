@@ -140,6 +140,11 @@ struct FRopeAimHudSample
 	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
 	float RayLength = 0.0f;
 
+	/** 이번 프레임 스윕에 **실제로 쓰인** 질의 반경. AimRayQueryRadius가 0(기본)이면 로프/접촉 폴백 반경이
+	 *  들어가므로 설정값과 다를 수 있다 — 조준이 검사하는 실제 두께다. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	float QueryRadius = 0.0f;
+
 	/** 조준원 투영 위치. hit가 있으면 실제 hit, 없으면 aim ray 끝점이다. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
 	FVector AimWorldPos = FVector::ZeroVector;
@@ -205,10 +210,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Aim", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float AimRayGuideLockAlpha = 0.50f;
 
-	/** SDF 검사 ray와 hit 지점/법선을 월드에 디버그 드로우한다(cyan=미스/red=히트, 캡슐 반경 = 실제 질의 반경).
-	 *  기본 OFF — 디버그 드로우는 필요할 때만 켠다. 상시 관찰이 필요하면 Gameplay Debugger의 Rope 카테고리(' 키)를 쓴다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Debug")
-	bool bDrawAimRayDebug = false;
+	// NOTE: aim ray 시각화 플래그(bDrawAimRayDebug)는 사라졌다 — 시각화는 Gameplay Debugger의 Rope
+	// 카테고리([J]aim)가 아래 GetAimHudSample()을 읽어 그린다. 디버그 진입점은 그 카테고리 하나다.
 
 	/**
 	 * 데모 조준 HUD(십자선 + 감김 가능 본 강조 링) 위젯을 로컬 플레이어 뷰포트에 자동으로 띄울지.

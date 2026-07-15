@@ -626,13 +626,18 @@ FRopeAimTargeting::FQueryContext URopeComponent::MakeAimQueryContext() const
 }
 
 bool URopeComponent::FindAimRayBoneHit(const FVector& Origin, const FVector& AimDir, float RayLength,
-	float QueryRadius, float SweepStep, bool bDrawDebug, FRopeAimRayHitResult& OutHit,
+	float QueryRadius, float SweepStep, FRopeAimRayHitResult& OutHit,
 	FRopeAimRayHitResult* OutBlockedHit) const
 {
 	// 질의 본체는 FRopeAimTargeting(UObject-free). 여기선 컨텍스트 조립 + CanWrapTarget(virtual 게이트) 주입만.
 	return FRopeAimTargeting::FindAimRayBoneHit(MakeAimQueryContext(), Origin, AimDir, RayLength,
-		QueryRadius, SweepStep, bDrawDebug, GetWorld(),
+		QueryRadius, SweepStep,
 		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); }, OutHit, OutBlockedHit);
+}
+
+float URopeComponent::GetAimRayEffectiveQueryRadius(float RequestedRadius) const
+{
+	return FRopeAimTargeting::ResolveEffectiveQueryRadius(MakeAimQueryContext(), RequestedRadius);
 }
 
 void URopeComponent::SetAimRayColliderQueryBounds(const FVector& Origin, const FVector& AimDir,
@@ -651,7 +656,7 @@ void URopeComponent::ClearAimRayColliderQueryBounds()
 bool URopeComponent::ResolveAimRayThrowContext(const FRopeAimRayThrowRequest& Request,
 	FRopeThrowContext& OutContext) const
 {
-	return FRopeAimTargeting::ResolveAimRayThrowContext(MakeAimQueryContext(), Request, GetWorld(),
+	return FRopeAimTargeting::ResolveAimRayThrowContext(MakeAimQueryContext(), Request,
 		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); }, OutContext);
 }
 

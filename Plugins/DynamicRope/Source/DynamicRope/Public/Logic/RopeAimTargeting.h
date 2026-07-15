@@ -3,7 +3,7 @@
 // Aim-ray 조준 로직/상태(UObject-free F-클래스). Wielder의 조준 흐름이 쓰는 swept ray 본 질의
 // (FindAimRayBoneHit), aim throw 컨텍스트 해석, collider 수집 확장 AABB 계산, 그리고 throw당
 // wrap primary 잠금(mesh+bone), resolve mode별 허용 범위 + pending aim throw 큐를 담당한다.
-// UObject 컨텍스트(collider 스냅샷/폴백 치수/CanWrapTarget 게이트/디버그 월드)는 호출마다
+// UObject 컨텍스트(collider 스냅샷/폴백 치수/CanWrapTarget 게이트)는 호출마다
 // 파라미터로 주입된다 — 월드 없이 단위 테스트 가능. StartFreshThrow *전이*가 걸린 진입점
 // (QueueAimRayThrow/ResolvePendingAimThrow)은 URopeComponent에 남는다(오케스트레이션).
 
@@ -15,7 +15,6 @@
 
 class IRopeCollider;
 class USceneComponent;
-class UWorld;
 
 /** Wielder aim ray가 rope collider/SDF에서 찾은 가장 가까운 wrap 가능 본 hit. */
 struct FRopeAimRayHitResult
@@ -47,7 +46,6 @@ struct FRopeAimRayThrowRequest
 	float RayLength = 0.0f;
 	float QueryRadius = 0.0f;
 	float SweepStep = 2.0f;
-	bool bDrawDebug = false;
 	// StartFreshThrow 완료 뒤 실행한다. Wielder를 직접 참조하지 않는 C++ 전용 완료 알림이다.
 	FSimpleDelegate OnResolved;
 
@@ -71,23 +69,27 @@ public:
 		float FallbackQueryRadius = 0.0f;
 	};
 
-	//~ 질의(상태 불변 — static) --------------------------------------------
+	//~ 질의(상태 불변 — static, 부작용 없음) --------------------------------
+	// 시각화는 여기 없다 — Gameplay Debugger의 Rope 카테고리([J]aim)가 Wielder의 FRopeAimHudSample을
+	// 읽어 그린다(디버그 진입점 단일화: RopeDebugSubsystem.h 참조). 이 클래스는 순수 질의만 한다.
+
+	/** QueryRadius 미지정(<=0) 시 폴백 반경으로 해석한다. 질의와 시각화가 **같은 반경**을 보도록
+	 *  이 규칙의 단일 소스 — 호출처가 삼항식을 복사하면 조용히 발산한다. */
+	static float ResolveEffectiveQueryRadius(const FQueryContext& Ctx, float QueryRadius);
+
 	/** swept SDF 질의로 ray에서 가장 가까운 wrap 가능 mesh+bone을 찾는다(broad phase → QuerySwept →
 	 *  ray 진행 거리 최솟값). CanWrapTarget 게이트를 통과 못 한 후보는 없는 것으로 취급.
-	 *  bDrawDebug면 DebugWorld에 실제 질의 치수를 시각화(cyan=미스/red=히트).
 	 *  OutBlockedHit(옵션): ray가 콜라이더에 맞았지만 wrap은 불가능한(본 없음/SourceMesh 없음/게이트 거부)
 	 *  가장 가까운 hit. 반환값(wrap 가능 hit 유무)과 독립 — 조준 HUD의 "빨강" 표시용. */
 	static bool FindAimRayBoneHit(const FQueryContext& Ctx,
 		const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
-		bool bDrawDebug, const UWorld* DebugWorld,
 		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
 		FRopeAimRayHitResult& OutHit,
 		FRopeAimRayHitResult* OutBlockedHit = nullptr);
 
 	/** Aim 요청을 hit 컨텍스트(FrameForward/AimGuide*)로 해석한다. hit이 없으면 OutContext는
-	 *  BaseContext fallback(반환 false). 디버그 드로우 여부는 Request.bDrawDebug를 따른다. */
+	 *  BaseContext fallback(반환 false). */
 	static bool ResolveAimRayThrowContext(const FQueryContext& Ctx, const FRopeAimRayThrowRequest& Request,
-		const UWorld* DebugWorld,
 		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
 		FRopeThrowContext& OutContext);
 
