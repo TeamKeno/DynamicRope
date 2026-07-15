@@ -224,4 +224,89 @@ bool FRopeTractionClampInjectedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 지수 스무딩 계수: 프레임률이 달라도 같은 시상수로 수렴하고, 큰 dt에서도 오버슛하지 않는다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionExpSmoothAlphaTest,
+	"DynamicRope.Traction.ExpSmoothAlphaIsFrameRateIndependent",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTractionExpSmoothAlphaTest::RunTest(const FString& Parameters)
+{
+	// Tau=0(또는 음수) = 스무딩 없음 → 한 프레임에 목표 도달.
+	TestEqual(TEXT("zero tau means no smoothing"), RopeTraction::ExpSmoothAlpha(0.0f, 1.0f / 60.0f), 1.0f);
+	TestEqual(TEXT("negative tau means no smoothing"), RopeTraction::ExpSmoothAlpha(-1.0f, 1.0f / 60.0f), 1.0f);
+
+	// dt = Tau면 α = 1 - 1/e ≈ 0.632(시상수의 정의).
+	TestEqual(TEXT("one time constant leaves 1/e remaining"),
+		RopeTraction::ExpSmoothAlpha(0.12f, 0.12f), 1.0f - FMath::Exp(-1.0f), 1e-4f);
+
+	// dt가 아무리 커도 α ≤ 1 — 오버슛(목표를 지나쳐 반대로 튐)이 원천적으로 없다.
+	TestTrue(TEXT("a huge dt never overshoots"), RopeTraction::ExpSmoothAlpha(0.12f, 10.0f) <= 1.0f);
+
+	// 프레임률 독립: 60fps로 2프레임 간 잔량 == 30fps로 1프레임 간 잔량(둘 다 exp(-dt/Tau) 곱).
+	const float Tau = 0.12f;
+	const float Remain60 = (1.0f - RopeTraction::ExpSmoothAlpha(Tau, 1.0f / 60.0f));
+	const float Remain30 = (1.0f - RopeTraction::ExpSmoothAlpha(Tau, 1.0f / 30.0f));
+	TestEqual(TEXT("two 60fps steps equal one 30fps step"), Remain60 * Remain60, Remain30, 1e-4f);
+	return true;
+}
+
+// 방향 EMA: 미시드 시드 / 정상 보간 / **180° 반전 축퇴 재시드**. 재시드가 없으면 방향이 0으로 남아 축이 사라진다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionSmoothDirectionTest,
+	"DynamicRope.Traction.SmoothDirectionReseedsOnDegenerateFlip",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTractionSmoothDirectionTest::RunTest(const FString& Parameters)
+{
+	const FVector X = FVector::ForwardVector;
+
+	// 미시드(0) → 측정값으로 시드(래그 없음).
+	TestEqual(TEXT("unseeded direction seeds from the target"),
+		RopeTraction::SmoothDirection(FVector::ZeroVector, X, 0.5f), X);
+
+	// α=1 → 목표에 즉시 도달.
+	TestEqual(TEXT("alpha one snaps to the target"),
+		RopeTraction::SmoothDirection(FVector::UpVector, X, 1.0f), X);
+
+	// α=0 → 현재 유지.
+	TestEqual(TEXT("alpha zero holds the current direction"),
+		RopeTraction::SmoothDirection(X, FVector::UpVector, 0.0f), X);
+
+	// 중간 보간은 단위 벡터로 정규화돼 나온다(길이가 줄어들면 이후 dot 산출이 축소된다).
+	const FVector Half = RopeTraction::SmoothDirection(X, FVector::UpVector, 0.5f);
+	TestEqual(TEXT("smoothed direction stays unit length"), static_cast<float>(Half.Size()), 1.0f, 1e-4f);
+
+	// 180° 반전 + α=0.5 → Lerp가 정확히 0으로 상쇄된다. 재시드가 없으면 여기서 0이 나온다.
+	const FVector Flipped = RopeTraction::SmoothDirection(X, -X, 0.5f);
+	TestFalse(TEXT("a 180 degree flip does not collapse to zero"), Flipped.IsNearlyZero());
+	TestEqual(TEXT("a degenerate flip reseeds from the target"), Flipped, -X);
+	return true;
+}
+
+// fractional 조준: 노드 사이 선형 보간. 정수 조준의 이산 홉("뚝뚝 끊김")을 없앤 연속화가 이 함수다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionSampleFractionalAimTest,
+	"DynamicRope.Traction.SampleFractionalAimInterpolatesBetweenNodes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTractionSampleFractionalAimTest::RunTest(const FString& Parameters)
+{
+	// 노드 x = 0, 100, 200, 300. AnchorNode = 3.
+	const TArray<FVector> Positions = {
+		FVector(0.0f, 0.0f, 0.0f), FVector(100.0f, 0.0f, 0.0f),
+		FVector(200.0f, 0.0f, 0.0f), FVector(300.0f, 0.0f, 0.0f) };
+
+	TestEqual(TEXT("integral aim lands on the node"),
+		RopeTraction::SampleFractionalAim(Positions, 1.0f, 3), FVector(100.0f, 0.0f, 0.0f));
+	TestEqual(TEXT("fractional aim interpolates between nodes"),
+		RopeTraction::SampleFractionalAim(Positions, 1.25f, 3), FVector(125.0f, 0.0f, 0.0f));
+
+	// 앵커 노드에서는 A1이 앵커로 클램프돼 앵커 위치를 준다(범위 밖 인덱스 접근 없음).
+	TestEqual(TEXT("aim at the anchor clamps to the anchor node"),
+		RopeTraction::SampleFractionalAim(Positions, 3.0f, 3), FVector(300.0f, 0.0f, 0.0f));
+
+	// 빈 배열/범위 밖 → ZeroVector(크래시 없음).
+	TestEqual(TEXT("an empty array yields zero"),
+		RopeTraction::SampleFractionalAim(TArray<FVector>(), 0.0f, 0), FVector::ZeroVector);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

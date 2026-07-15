@@ -42,6 +42,33 @@ namespace RopeTraction
 		return (Mass > KINDA_SMALL_NUMBER) ? (1.0f / Mass) : 0.0f;
 	}
 
+	float ExpSmoothAlpha(float Tau, float DeltaTime)
+	{
+		return (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
+	}
+
+	FVector SmoothDirection(const FVector& Current, const FVector& Target, float Alpha)
+	{
+		if (Current.IsNearlyZero())
+		{
+			return Target; // 미시드 — 측정값으로 시드(래그 없음).
+		}
+		const FVector Smoothed = FMath::Lerp(Current, Target, Alpha).GetSafeNormal();
+		// 정반대 방향 상쇄 축퇴(180° 반전 순간): Lerp가 0이 되면 raw로 재시드한다.
+		return Smoothed.IsNearlyZero() ? Target : Smoothed;
+	}
+
+	FVector SampleFractionalAim(const TArray<FVector>& Positions, float AimF, int32 AnchorNode)
+	{
+		const int32 A0 = FMath::FloorToInt(AimF);
+		const int32 A1 = FMath::Min(A0 + 1, AnchorNode);
+		if (!Positions.IsValidIndex(A0) || !Positions.IsValidIndex(A1))
+		{
+			return FVector::ZeroVector;
+		}
+		return FMath::Lerp(Positions[A0], Positions[A1], AimF - static_cast<float>(A0));
+	}
+
 	float ComputeRawTargetShare(float InvMassTarget, float InvMassWielder, float MassBias)
 	{
 		const float Total = InvMassTarget + InvMassWielder;

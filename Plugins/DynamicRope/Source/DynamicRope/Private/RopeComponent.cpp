@@ -3202,36 +3202,19 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 
 	// (1) 조준 인덱스 시간 스무딩 → fractional 조준 위치 보간.
 	const float RawAimF = static_cast<float>(PullDrive.LastPullSample.AimNode);
-	if (PullDrive.SmoothedAimNodeF < 0.0f)
-	{
-		PullDrive.SmoothedAimNodeF = RawAimF;
-	}
-	else
-	{
-		const float TauA = HoldConfig.PullAimSmoothTime;
-		const float AlphaA = (TauA > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / TauA)) : 1.0f;
-		PullDrive.SmoothedAimNodeF = FMath::Lerp(PullDrive.SmoothedAimNodeF, RawAimF, AlphaA);
-	}
+	PullDrive.SmoothedAimNodeF = (PullDrive.SmoothedAimNodeF < 0.0f)
+		? RawAimF // 첫 유효 프레임은 측정값으로 시드(래그 없음).
+		: FMath::Lerp(PullDrive.SmoothedAimNodeF, RawAimF, RopeTraction::ExpSmoothAlpha(HoldConfig.PullAimSmoothTime, DeltaTime));
 	const float AimF = FMath::Clamp(PullDrive.SmoothedAimNodeF, 0.0f, static_cast<float>(PullDrive.LastPullSample.AnchorNode));
-	const int32 A0 = FMath::FloorToInt(AimF);
-	const int32 A1 = FMath::Min(A0 + 1, PullDrive.LastPullSample.AnchorNode);
-	const FVector AimPos = FMath::Lerp(Sim.Positions[A0], Sim.Positions[A1], AimF - static_cast<float>(A0));
+	const FVector AimPos = RopeTraction::SampleFractionalAim(Sim.Positions, AimF, PullDrive.LastPullSample.AnchorNode);
 	PullDrive.LastPullSample.AimNodeF = AimF;
 	PullDrive.LastPullSample.AimPos = AimPos;
 
 	// (2) 연속 조준으로 방향 재계산 후 방향 EMA. 축퇴(조준=앵커)면 raw 방향 유지.
 	const FVector DirF = (AimPos - Sim.Positions[PullDrive.LastPullSample.AnchorNode]).GetSafeNormal();
 	const FVector DirIn = DirF.IsNearlyZero() ? PullDrive.LastPullSample.Direction : DirF;
-	if (PullDrive.SmoothedPullDir.IsNearlyZero())
-	{
-		PullDrive.SmoothedPullDir = DirIn;
-	}
-	else
-	{
-		const float Tau = HoldConfig.PullDirSmoothTime;
-		const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
-		PullDrive.SmoothedPullDir = FMath::Lerp(PullDrive.SmoothedPullDir, DirIn, Alpha).GetSafeNormal();
-	}
+	PullDrive.SmoothedPullDir = RopeTraction::SmoothDirection(
+		PullDrive.SmoothedPullDir, DirIn, RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
 	PullDrive.LastPullSample.Direction = PullDrive.SmoothedPullDir;
 }
 
@@ -3707,10 +3690,9 @@ namespace
 			const float SpeedCapC = FMath::Max(Cfg.TetherMaxSpeed, 0.0f);
 			const float BaseReelC = FMath::Max(Cfg.TetherReelSpeed, 0.0f);
 			const float EffReelC = (SpeedCapC > 0.0f) ? FMath::Min(BaseReelC, SpeedCapC) : BaseReelC;
-			const float SmoothTau = FMath::Max(Cfg.TetherCharacterSmoothTime, 0.0f);
 			const RopeTraction::FRopeAxisServo Servo{
 				RopeTraction::ComputeReelTargetSpeed(Overshoot, EffReelC, Cfg.TetherSettleDist, DeltaTime),
-				/*Alpha*/ (SmoothTau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / SmoothTau)) : 1.0f,
+				/*Alpha*/ RopeTraction::ExpSmoothAlpha(Cfg.TetherCharacterSmoothTime, DeltaTime),
 				/*bBidirectional*/ false, /*bCancelOutward*/ true };
 			const FVector OldVel = Movement->Velocity;
 			const float DeltaV = RopeTraction::ComputeAxisDeltaV(static_cast<float>(FVector::DotProduct(OldVel, Inward)), Servo);
@@ -3789,9 +3771,8 @@ namespace
 				}
 				else
 				{
-					const float Tau = Cfg.PullDirSmoothTime;
-					const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
-					InOutSmoothedShare = FMath::Lerp(InOutSmoothedShare, RawShareT, Alpha);
+					InOutSmoothedShare = FMath::Lerp(InOutSmoothedShare, RawShareT,
+						RopeTraction::ExpSmoothAlpha(Cfg.PullDirSmoothTime, DeltaTime));
 				}
 				ShareT = FMath::Clamp(InOutSmoothedShare, 0.0f, 1.0f);
 				ShareW = 1.0f - ShareT;
@@ -3901,22 +3882,10 @@ FVector URopeComponent::ComputeSmoothedWielderDir(const FVector& Aim, const FVec
 	{
 		WielderDirRaw = -DirToAim;
 	}
-	// 방향 EMA(대상 쪽 SmoothedPullDir과 동일 상수): AimPos 노드 노이즈/모서리 전환/근접 축퇴로 raw 방향이
-	// 프레임마다 튀면 클램프/톱업이 매번 다른 축으로 들어가 벡터가 랜덤워크로 불어난다(폭주).
-	if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
-	{
-		PullDrive.SmoothedWielderPullDir = WielderDirRaw;
-	}
-	else
-	{
-		const float Tau = HoldConfig.PullDirSmoothTime;
-		const float Alpha = (Tau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / Tau)) : 1.0f;
-		PullDrive.SmoothedWielderPullDir = FMath::Lerp(PullDrive.SmoothedWielderPullDir, WielderDirRaw, Alpha).GetSafeNormal();
-		if (PullDrive.SmoothedWielderPullDir.IsNearlyZero())
-		{
-			PullDrive.SmoothedWielderPullDir = WielderDirRaw; // 정반대 방향 상쇄 축퇴(180° 반전 순간) — raw로 재시드.
-		}
-	}
+	// 방향 EMA(대상 쪽 SmoothedPullDir과 동일 상수·동일 함수): AimPos 노드 노이즈/모서리 전환/근접 축퇴로 raw
+	// 방향이 프레임마다 튀면 클램프/톱업이 매번 다른 축으로 들어가 벡터가 랜덤워크로 불어난다(폭주).
+	PullDrive.SmoothedWielderPullDir = RopeTraction::SmoothDirection(
+		PullDrive.SmoothedWielderPullDir, WielderDirRaw, RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
 	return PullDrive.SmoothedWielderPullDir;
 }
 

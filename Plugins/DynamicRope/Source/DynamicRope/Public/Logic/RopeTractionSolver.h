@@ -63,6 +63,30 @@ namespace RopeTraction
 	DYNAMICROPE_API float InvMassFromMass(float Mass);
 
 	/**
+	 * 프레임률 독립 지수 스무딩 계수 α = 1 − exp(−dt/Tau). dt가 아무리 커도 α ≤ 1이라 오버슛하지 않고,
+	 * 프레임률이 달라져도 같은 시상수(Tau 초)로 수렴한다(α를 상수로 두면 프레임률에 따라 반응이 달라진다).
+	 * Tau ≤ 0 = 스무딩 없음(α = 1, 한 프레임에 목표 도달).
+	 */
+	DYNAMICROPE_API float ExpSmoothAlpha(float Tau, float DeltaTime);
+
+	/**
+	 * 방향 EMA(단위 벡터 전용). 견인 방향이 프레임마다 튀면 클램프/톱업이 매번 다른 축으로 들어가 벡터가
+	 * 랜덤워크로 불어난다(폭주) — 그 1차 방어다(2차는 ClampInjectedVelocity의 속력 상한).
+	 *  - Current가 ~0(미시드)이면 Target으로 시드한다(첫 유효 프레임 래그 없음).
+	 *  - 그 외엔 Lerp 후 재정규화. **180° 반전 순간 Lerp가 정확히 상쇄돼 0이 되면 Target으로 재시드한다** —
+	 *    재시드가 없으면 방향이 0이 된 채로 남아 축이 사라진다(호출자 폴백에 의존하게 된다).
+	 * Target은 단위 벡터라고 가정한다(호출자가 정규화해 넘긴다).
+	 */
+	DYNAMICROPE_API FVector SmoothDirection(const FVector& Current, const FVector& Target, float Alpha);
+
+	/**
+	 * fractional 조준 위치: 조준 노드 사이를 선형 보간한다. 정수 조준 노드를 그대로 쓰면 프레임 간 이산 홉으로
+	 * 방향이 통째로 점프하고 초과분이 노드 단위로 뚝뚝 튄다(견인 "뚝뚝 끊김") — 그 연속화다.
+	 * AimF는 [0, AnchorNode] 범위로 클램프해 넘긴다. 인덱스가 범위 밖이면 ZeroVector.
+	 */
+	DYNAMICROPE_API FVector SampleFractionalAim(const TArray<FVector>& Positions, float AimF, int32 AnchorNode);
+
+	/**
 	 * MassShare 자동 분배의 raw 대상 몫 [0..1](EMA 전). 역질량에 지수 MassBias를 걸어 질량차 민감도를
 	 * 조절한다: 1 = 선형 역질량(무거운 쪽 = 작은 w → 작은 몫), >1 = 무거운 쪽 몫이 더 급격히 감소(극단),
 	 * <1 = 완만, 0 = 50:50. 앵커(w=0)는 지수와 무관하게 항상 몫 0(Pow(0,0)=1 함정 회피).
