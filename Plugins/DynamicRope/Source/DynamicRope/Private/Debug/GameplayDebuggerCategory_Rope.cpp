@@ -219,13 +219,25 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 		return;
 	}
 
-	// 질의는 하지 않는다 — Wielder가 aim ray 모드에서 매 틱 스윕해 남긴 샘플을 읽기만 한다.
-	// 그 외 모드에서는 빈 샘플(RayLength=0)이라 그릴 ray 자체가 없다.
+	// 질의는 하지 않는다 — Wielder가 조준이 성립하는 동안 매 틱 스윕해 남긴 샘플을 읽기만 한다.
+	// 조준이 꺼져 있으면 샘플이 비어 있고(RayLength=0), 그릴 ray 자체가 없다.
+	if (!Wielder.UsesAimRay())
+	{
+		AddTextLine(TEXT("  {white}aim: {grey}not an aim ray mode (①FullSimulation)"));
+		return;
+	}
+	if (!Wielder.IsAimActive())
+	{
+		// 조준 모드는 맞지만 지금 던질 수 없는 phase — ③는 Reel(장전)에서만 조준이 성립한다.
+		AddTextLine(TEXT("  {white}aim: {grey}inactive — ③ aims from Reel only"));
+		return;
+	}
+
 	const FRopeAimHudSample& Aim = Wielder.GetAimHudSample();
 	const UWorld* World = Wielder.GetWorld();
 	if (!World || Aim.RayLength <= KINDA_SMALL_NUMBER || Aim.RayDirection.IsNearlyZero())
 	{
-		AddTextLine(TEXT("  {white}aim: {grey}no ray (not an aim ray mode)"));
+		AddTextLine(TEXT("  {white}aim: {grey}no ray"));
 		return;
 	}
 

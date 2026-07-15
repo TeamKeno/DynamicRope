@@ -74,7 +74,7 @@ public:
 	bool bIncludeWorldDynamic = false;
 
 	/**
-	 * Aim ray 모드(AimRayHitDirection)의 데모 조준 HUD(십자선 + 감김 가능 본 강조 링) 위젯 클래스.
+	 * Aim ray 조준(②③)의 데모 조준 HUD(십자선 + 감김 가능 본 강조 링) 위젯 클래스.
 	 * URopeWielderComponent가 bShowAimHudWidget일 때 이 클래스를 생성해 로컬 플레이어 뷰포트에 올린다.
 	 * 기본값 = C++ URopeAimWidget(에셋 없이 동작). URopeAimWidget을 부모로 한 WBP로 교체해 리스타일
 	 * 가능(내장 페인트를 끄고 자체 비주얼도 가능 — RopeAimWidget.h 참조). 비우면 HUD를 띄우지 않는다.

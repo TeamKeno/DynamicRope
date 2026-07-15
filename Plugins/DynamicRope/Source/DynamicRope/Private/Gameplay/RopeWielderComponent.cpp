@@ -142,7 +142,9 @@ void URopeWielderComponent::UpdateAimHudSample()
 	const FName PrevBone = AimHudSample.Bone;
 
 	AimHudSample = FRopeAimHudSample();
-	if (UsesAimRay() && Rope)
+	// 던질 수 없는 phase에서는 조준 스윕 자체를 돌리지 않는다 — 샘플이 비면 위젯/디버거가 알아서 숨는다.
+	// (③ 비-Reel에서 이 스윕이 유일한 SDF 비용이었다: UpdateThrowPreview는 이미 prepared를 안 만든다.)
+	if (IsAimActive())
 	{
 		const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(FVector::ZeroVector);
 		const FVector RayDirection = Request.RayDirection.GetSafeNormal();
@@ -339,6 +341,13 @@ bool URopeWielderComponent::UsesAimRay() const
 	return Rope && Rope->ResolveMode != ERopeWrapResolveMode::FullSimulation;
 }
 
+bool URopeWielderComponent::IsAimActive() const
+{
+	// 던질 수 없는 phase에서는 조준할 이유가 없다 — ③는 Reel 전용이라 Free/Wrapped 등에서 HUD가 꺼진다.
+	// 게이트는 로프가 소유(CanThrowNow) — 던지기 진입과 같은 술어를 봐야 HUD와 실제 가능 여부가 갈리지 않는다.
+	return UsesAimRay() && Rope->CanThrowNow();
+}
+
 bool URopeWielderComponent::UsesLockedPreview() const
 {
 	return Rope && Rope->ResolveMode == ERopeWrapResolveMode::GuaranteedWrap;
@@ -364,7 +373,8 @@ void URopeWielderComponent::ResolvePreviewComponent(bool bAllowAutoCreate)
 
 	if (!PreviewComponent && bAllowAutoCreate)
 	{
-		// 자동 생성은 PreviewPathLocked처럼 preview가 필수인 모드에서만 허용한다.
+		// 편의 자동 생성 — 표시를 원하는 ③에서만(BeginPlay가 그렇게 호출한다). 게임플레이 필수는 아니다:
+		// prepared 계산은 Rope/Wielder가 하므로 이 컴포넌트가 없어도 ③은 정상적으로 던져진다.
 		// 이미 레벨/BP에 배치된 PreviewComponent가 있으면 그 설정을 우선 사용하고 여기로 오지 않는다.
 		const FName PreviewName = MakeUniqueObjectName(Owner, URopePreviewComponent::StaticClass(), TEXT("RopePreviewComponent"));
 		PreviewComponent = NewObject<URopePreviewComponent>(Owner, URopePreviewComponent::StaticClass(), PreviewName);
@@ -376,7 +386,7 @@ void URopeWielderComponent::ResolvePreviewComponent(bool bAllowAutoCreate)
 				PreviewComponent->SetupAttachment(Root);
 			}
 			PreviewComponent->RegisterComponent();
-			UE_LOG(LogDynamicRope, Log, TEXT("RopeWielder on %s: auto-created RopePreviewComponent for PreviewPathLocked mode."),
+			UE_LOG(LogDynamicRope, Log, TEXT("RopeWielder on %s: auto-created RopePreviewComponent to show the GuaranteedWrap throw preview."),
 				*GetNameSafe(Owner));
 		}
 	}
@@ -815,8 +825,8 @@ void URopeWielderComponent::Throw()
 	if (UsesLockedPreview())
 	{
 		// ③: 유효한 prepared preview가 있으면(대상 조준 성공) 그 경로대로 무조건 꽂고(GuidedThrow),
-		// 없으면(허공/사거리 밖) ThrowInDirection이 물리 탄도 투척으로 폴백한다 — 던지기 입력을 버리지 않는다
-		// (2026-07-14 보장 재정의: 보장은 '조준한 대상'에 대한 것).
+		// 없으면(허공/사거리 밖) ThrowInDirection이 레이 끝점을 향한 아치 던지기로 폴백한다 — 던지기 입력을
+		// 버리지 않는다(2026-07-14 보장 재정의: 보장은 '조준한 대상'에 대한 것).
 		if (LastPreparedPreview.IsValid())
 		{
 			// 몽타주가 있으면 손을 놓는 AnimNotify까지 시간이 지나므로, 입력 순간 플레이어가 본 preview를 보존한다.
@@ -869,12 +879,24 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 				: LastPreparedPreview;
 			if (!Prepared.IsValid())
 			{
-				// 허공(대상 없음/사거리 밖): 거부 대신 물리 탄도 투척으로 폴백한다(2026-07-14 보장 재정의).
-				// 로프의 ThrowWithContext ③ 경로가 Reel 게이트 + preview 재빌드 실패 → 탄도 Flight로 마무리한다
-				// (③ Flight는 캡처 안 함 → 안 꽂히고 Free). 던지기 방향은 조준 컨텍스트(BuildThrowContext)로 해석.
 				ClearThrowPreview();
 				PendingPreparedThrow.Reset();
 				LastPreparedPreview.Reset();
+
+				// 던질 수 없는 phase(③ 비-Reel)면 여기서 끝낸다. 로프의 게이트(ThrowWithContext)는 void라
+				// 거절을 알릴 수 없어서, 이 검사가 없으면 아무 일도 안 한 던지기에 OnThrown이 발화한다
+				// (몽타주 경로면 와인드업이 다 돌아간 뒤에).
+				if (!Rope->CanThrowNow())
+				{
+					NotifyThrowRejected(ERopeThrowRejectReason::NotInReel);
+					OnThrowRejected.Broadcast(ERopeThrowRejectReason::NotInReel);
+					return;
+				}
+
+				// 허공(대상 없음/사거리 밖): 거부 대신 레이 끝점을 향한 아치 던지기로 폴백한다(2026-07-14 보장
+				// 재정의). 로프의 ThrowWithContext ③ 경로가 preview 재빌드에 실패하면 손 원점 → 레이 끝점 직선을
+				// 아치로 재생하고(StartFreeGuidedThrow — 조준 던지기와 같은 GuidedThrow, 대상/앵커만 없다),
+				// 꽂을 대상이 없으므로 아치 완료 시 Free로 낙하한다. 방향은 조준 컨텍스트(BuildThrowContext)로 해석.
 				Rope->ThrowWithContext(BuildThrowContext(AimDir));
 				NotifyThrown();
 				OnThrown.Broadcast();
@@ -1019,13 +1041,15 @@ bool URopeWielderComponent::ShouldHoldPreparedPreview()
 
 bool URopeWielderComponent::ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) const
 {
-	// PreviewPathLocked는 "던지기 전 성공한 preview path"만 새로 만든다.
+	// ③은 "던지기 전 성공한 preview path"만 새로 만든다.
 	// GuidedThrow/Wrapped에서는 이미 확정된 HeldPreparedPreview를 사용하므로 build를 다시 시도하지 않는다.
 	if (UsesLockedPreview())
 	{
 		// ③(Guaranteed)는 Reel(장전 준비) 상태에서만 조준 preview를 만든다 — Reel에서만 던질 수 있으므로.
-		// Free(release 후 늘어진 상태)에서는 장전 전이라 preview를 보이지 않는다.
-		return Phase == ERopePhase::Reel;
+		// Free(release 후 늘어진 상태)에서는 장전 전이라 preview를 보이지 않는다. 던지기 게이트와 같은 술어를
+		// 봐야 "보이는 것 = 던질 수 있는 것"이 유지된다. (아래 ①② 분기는 던지기가 아니라 표시 정책이라 별개.)
+		// 라이브 phase(CanThrowNow)가 아니라 인자 Phase로 물어야 이 함수의 시그니처 계약과 어긋나지 않는다.
+		return RopeWrapModes::CanThrowInPhase(Rope->ResolveMode, Phase);
 	}
 
 	// 일반 preview도 idle 전용 설정이면 조준 전 상태에서만 계산한다.
@@ -1155,7 +1179,8 @@ void URopeWielderComponent::UpdateThrowPreview()
 	FString PreviewBuildReason;
 	const FRopeThrowContext ThrowContext = BuildThrowContext(FVector::ZeroVector);
 	// ③ prepared preview(contact/anchor 포함 — 실제 throw에 쓰임)는 Reel(장전 준비)에서만 만들어 여기서 소유한다.
-	const bool bNeedsPrepared = UsesLockedPreview() && RopePhase == ERopePhase::Reel;
+	// phase 검사는 불필요하다 — 위 ShouldUpdateThrowPreviewForPhase가 ③의 비-Reel을 이미 걸러냈다.
+	const bool bNeedsPrepared = UsesLockedPreview();
 
 	if (bNeedsPrepared)
 	{
@@ -1241,7 +1266,7 @@ void URopeWielderComponent::StoreAimGuideFrameIfNeeded(FRopePreparedThrowPreview
 		return;
 	}
 
-	// AimRayHitDirection은 소켓/로프 컴포넌트 로컬이 아니라 wielder owner 로컬 기준으로 path를 고정한다.
+	// aim ray 조준 path는 소켓/로프 컴포넌트 로컬이 아니라 wielder owner 로컬 기준으로 고정한다.
 	Prepared.StoreGuideFrameLocal(OwnerRoot);
 }
 

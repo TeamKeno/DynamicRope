@@ -1,7 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
 // Pierce(꽂힘) 결착 모드 단위 테스트 — ③ GuaranteedWrap 전용, aim-hit 접점에 단일 앵커로 성립.
-// 세 계약을 잠근다: ①②③↔결착 조합 제약, preview 빌더의 단일 앵커 산출, 단일 앵커 커밋(BeginWrap).
+// 네 계약을 잠근다: ①②③↔결착 조합 제약, throw phase 게이트(③=Reel 전용), preview 빌더의 단일 앵커 산출,
+// 단일 앵커 커밋(BeginWrap).
 
 #include "Misc/AutomationTest.h"
 
@@ -46,6 +47,46 @@ bool FRopePierceClampEngagementTest::RunTest(const FString& Parameters)
 		ClampEngagement(ERopeWrapResolveMode::AssistedJudged, ERopeTipEngagement::Pierce), ERopeTipEngagement::BareWrap);
 	TestEqual(TEXT("①+Cinch → BareWrap으로 보정"),
 		ClampEngagement(ERopeWrapResolveMode::FullSimulation, ERopeTipEngagement::Cinch), ERopeTipEngagement::BareWrap);
+	return true;
+}
+
+// throw phase 게이트: ③는 Reel에서만 던질 수 있고, ①②는 phase 게이트가 없다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceThrowPhaseGateTest,
+	"DynamicRope.Pierce.ThrowPhaseGateContract",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePierceThrowPhaseGateTest::RunTest(const FString& Parameters)
+{
+	using namespace RopeWrapModes;
+
+	// ERopePhase에는 Count/MAX 센티넬이 없다(Reel로 끝남) — 새 phase가 추가되면 여기에 손으로 더해야 한다.
+	static const ERopePhase AllPhases[] = {
+		ERopePhase::Free, ERopePhase::Flight, ERopePhase::Contacting, ERopePhase::Wrapping,
+		ERopePhase::Wrapped, ERopePhase::Releasing, ERopePhase::GuidedThrow, ERopePhase::Reel
+	};
+
+	// ③ GuaranteedWrap = Reel 전용.
+	TestTrue(TEXT("③+Reel 던지기 성립"),
+		CanThrowInPhase(ERopeWrapResolveMode::GuaranteedWrap, ERopePhase::Reel));
+	for (const ERopePhase Phase : AllPhases)
+	{
+		if (Phase == ERopePhase::Reel)
+		{
+			continue;
+		}
+		TestFalse(*FString::Printf(TEXT("③+%d 던지기 불가(Reel 아님)"), static_cast<int32>(Phase)),
+			CanThrowInPhase(ERopeWrapResolveMode::GuaranteedWrap, Phase));
+	}
+
+	// ①② = phase 게이트 없음 → 모든 phase에서 true.
+	// 이 술어를 `Phase == Reel`로 "단순화"하면 여기서 터진다 — ①②가 조용히 막히는 회귀 방지선이다.
+	for (const ERopePhase Phase : AllPhases)
+	{
+		TestTrue(*FString::Printf(TEXT("①+%d 게이트 없음"), static_cast<int32>(Phase)),
+			CanThrowInPhase(ERopeWrapResolveMode::FullSimulation, Phase));
+		TestTrue(*FString::Printf(TEXT("②+%d 게이트 없음"), static_cast<int32>(Phase)),
+			CanThrowInPhase(ERopeWrapResolveMode::AssistedJudged, Phase));
+	}
 	return true;
 }
 

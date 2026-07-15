@@ -67,12 +67,14 @@ enum class ERopeThrowRejectReason : uint8
 {
 	/** CanThrow() 게이트(서브클래스 게임 규칙 — 스태미나/상태 등)가 거부. */
 	Gated,
-	/** PreviewPathLocked인데 유효한 prepared preview가 없어 입력을 버림. */
+	/** @deprecated 발화하지 않는다. 2026-07-14 재정의로 prepared preview 없는 던지기는 거부 대신 아치 폴백. */
 	NoPreparedPreview,
-	/** 실행 시점(몽타주 notify 등)에 보존해 둔 prepared preview가 무효화됨. */
+	/** @deprecated 발화하지 않는다. 위와 같은 이유로 몽타주 notify 시점의 무효 prepared도 아치 폴백. */
 	PreparedInvalid,
 	/** RopeComponent가 prepared preview throw를 거부함(CanWrapTarget 게이트 포함). */
-	RopeRejected
+	RopeRejected,
+	/** ③을 Reel(장전) 밖에서 던지려 함 — EnterReel()이 먼저다. */
+	NotInReel
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FRopeWielderOnThrown);
@@ -221,19 +223,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|HUD")
 	bool bShowAimHudWidget = true;
 
-	/**
-	 * 이 wielder의 조준이 aim ray(대상 잠금)를 쓰는가 — 로프 ResolveMode에서 유도된다
-	 * (②AssistedJudged/③GuaranteedWrap = true, ①FullSimulation·로프 없음 = false).
-	 * 종전 AimMode 스위치의 대체(2026-07-13 회의 결정 F: 조준의 '의미'는 로프 모드가 소유).
-	 */
+	/** 조준에 aim ray(대상 잠금)를 쓰는가 — 로프 ResolveMode에서 유도된다(②③ = true, ① = false).
+	 *  **모드 단위** 판정이라 phase와 무관하다. 지금 조준이 살아 있는지는 IsAimActive(). */
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim")
 	bool UsesAimRay() const;
 
-	/**
-	 * 이 wielder의 던지기가 preview 구속(PreviewPathLocked 흐름)인가 — 로프 ResolveMode에서
-	 * 유도된다(③GuaranteedWrap = true). preview 생성 실패 시 던지기 입력은 거부된다
-	 * (OnThrowRejected·NoPreparedPreview). 종전 ThrowMode 스위치의 대체.
-	 */
+	/** 지금 조준이 의미가 있는가 = UsesAimRay() && 로프가 던질 수 있는 phase(CanThrowNow).
+	 *  UsesAimRay()의 **프레임 단위 쌍둥이** — ③은 Reel에서만 true, ①②는 UsesAimRay()와 동치.
+	 *  조준 HUD·위젯·디버거 시각화가 전부 이 하나를 게이트로 쓴다. */
+	UFUNCTION(BlueprintPure, Category = "Rope|Aim")
+	bool IsAimActive() const;
+
+	/** 던지기가 preview 구속인가 — 로프 ResolveMode에서 유도된다(③ = true).
+	 *  ③은 조준이 잡히면 그 경로로 무조건 꽂고, 안 잡히면 레이 끝점 아치로 폴백한다(거부 아님). */
 	UFUNCTION(BlueprintPure, Category = "Rope|Throw")
 	bool UsesLockedPreview() const;
 
@@ -260,7 +262,7 @@ public:
 	// preview build는 지금도 매 프레임 돈다(aim ray 스윕도 원래 매 틱이다). 비용이 문제로 측정되면
 	// 그때 스로틀을 되살린다 — 계산/표시가 분리돼 있으므로 build만 조이고 렌더는 매 프레임 유지하면 된다.
 
-	/** PreviewPathLocked가 Wrapped로 확정된 뒤에도 preview path를 잠깐 남길 시간. 0이면 Wrapped 진입 시 즉시 지운다. */
+	/** ③이 Wrapped로 확정된 뒤에도 preview path를 잠깐 남길 시간. 0이면 Wrapped 진입 시 즉시 지운다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Locked Wrapped Preview Hold Time"))
 	float LockedWrappedPreviewHoldTime = 0.0f;
 
@@ -453,7 +455,7 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeWielderOnThrown OnThrown;
 
-	/** 던지기 입력이 실행되지 못했을 때(사유 포함). PreviewPathLocked의 조용한 입력 버림도 여기로 알린다. */
+	/** 던지기 입력이 실행되지 못했을 때(사유 포함) — UI 피드백용. ③을 Reel 밖에서 던지려 한 경우도 여기로 온다. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeWielderOnThrowRejected OnThrowRejected;
 
@@ -561,7 +563,7 @@ private:
 	bool ShouldHoldPreparedPreview();
 	// 현재 Rope phase에서 새 preview path를 계산해도 되는지 판단한다. false면 비싼 build 경로에 들어가지 않는다.
 	bool ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) const;
-	// PreviewPathLocked가 이미 확정한 path를 GuidedThrow/Wrapped 동안 렌더 유지한다. 처리했으면 true를 반환한다.
+	// ③이 이미 확정한 path를 GuidedThrow/Wrapped 동안 렌더 유지한다. 처리했으면 true를 반환한다.
 	bool UpdateHeldPreparedPreviewForPhase(ERopePhase Phase);
 
 	void OnThrowInput();
@@ -582,13 +584,13 @@ private:
 	bool bHasLastPreviewBuildResult = false;
 	FString LastPreviewBuildReason;
 
-	// 마지막 preview tick에서 성공한 prepared 결과. PreviewPathLocked 모드에서 "지금 던질 수 있는가"를 판정한다.
+	// 마지막 preview tick에서 성공한 prepared 결과. ③에서 "지금 조준이 잡혔는가"를 판정한다.
 	FRopePreparedThrowPreview LastPreparedPreview;
 
 	// 몽타주를 쓰는 경우 입력 시점의 preview를 고정해 두고, AnimNotify_RopeThrow가 ThrowNow를 부를 때 소비한다.
 	FRopePreparedThrowPreview PendingPreparedThrow;
 
-	// PreviewPathLocked 실행 중(GuidedThrow 포함) 화면에 유지할 확정 path.
+	// ③ 실행 중(GuidedThrow 포함) 화면에 유지할 확정 path.
 	FRopeWrapPreviewData HeldPreparedPreview;
 	// Wrapped 후 preview path를 잠깐 남길 때 사용하는 만료 시각. LockedWrappedPreviewHoldTime이 0이면 즉시 만료된다.
 	float HeldPreviewExpireTimeSeconds = 0.0f;

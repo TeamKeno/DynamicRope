@@ -103,7 +103,7 @@ namespace
 		// LockAlpha는 spline의 공간 보간 구간일 뿐 latch 위치가 아니다. 실제 hit 거리의 노드를 사용한다.
 		const int32 AimGuideNodeIndex = DistanceNodeIndex;
 
-		// AimRayHitDirection은 이미 SDF/collider swept query로 본을 고른 상태다.
+		// aim ray 조준은 이미 SDF/collider swept query로 본을 고른 상태다.
 		// 여기서 arc 전체를 다시 뒤지면 다른 본/다른 방향 후보가 선택될 수 있으므로 ray hit를 직접 prepared 후보로 쓴다.
 		// SurfacePoint는 SDF 투영점이라 ray 위의 노란 hit와 다를 수 있다. spline 방향 기준은 반드시 HitWorldPos다.
 		// 이 후보의 node는 실제 hit 거리로만 정한다. AimGuideLockAlpha/DirectionBias는 물리 Flight의
@@ -303,7 +303,7 @@ namespace
 				}
 				else if (ContactCandidate.bForceDirectPathToContact)
 				{
-					// AimRayHitDirection에서는 preview arc를 섞지 않는다.
+					// aim ray 조준에서는 preview arc를 섞지 않는다.
 					// hit 방향이 이미 확정된 상태이므로 origin->hit 직선이 spline prefix의 권위 있는 모양이다.
 					Position = FMath::Lerp(Preview.Origin, SurfacePoint, Alpha);
 				}
@@ -405,10 +405,10 @@ namespace
 			return;
 		}
 
-		// 주의: 이 함수는 PreviewPathLocked의 확정 RenderPreview 전용이다. 물리 Flight의 WhipGuide에는
+		// 주의: 이 함수는 ③의 확정 RenderPreview 전용이다. 물리 Flight의 WhipGuide에는
 		// 호출되지 않으므로, 여기서 HitPoint를 고정해도 Flight 노드가 미리 고정되는 현상과는 무관하다.
 		// BuildPreviewCenterline은 latch 이후 wrapping path를 만들면서 latch node를 표면 path로 다시 덮을 수 있다.
-		// AimRayHitDirection에서는 화면에 보이는 spline prefix가 반드시 ray hit point를 향해야 하므로
+		// aim ray 조준에서는 화면에 보이는 spline prefix가 반드시 ray hit point를 향해야 하므로
 		// 최종 렌더 포인트 생성 후에도 시작점부터 latch node까지를 Origin->Hit 직선으로 고정한다.
 		const int32 LastPrefixNode = FMath::Clamp(Candidate.NodeIndex, 1, InOutPreviewPoints.Num() - 1);
 		for (int32 NodeIndex = 0; NodeIndex <= LastPrefixNode; ++NodeIndex)

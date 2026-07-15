@@ -84,19 +84,16 @@ public:
 	//~ Setup(설정) -------------------------------------------------------
 
 	/**
-	 * 감김 해결(도달) 모드 — 이 로프의 최상위 계약(T1). 던지기~결착 성립까지 무엇을 보장하는지,
-	 * 조준·preview의 지위, 판정 관문 사용 여부를 이 값 하나가 결정한다(ERopeWrapResolveMode 주석,
-	 * Docs/PoC/02_WrapResolveModes.md). 정본은 로프다: Wielder의 조준/던지기 방식(aim ray 사용,
-	 * preview 구속)은 여기서 유도되고, BP 직행/AI는 Wielder 없이 이 값만으로 완결된다.
+	 * 감김 해결(도달) 모드 — 이 로프의 최상위 계약. 무엇을 보장하는지, 조준·preview의 지위,
+	 * 판정 관문 사용 여부를 이 값 하나가 결정한다. **정본은 로프다** — Wielder의 조준/던지기 방식은
+	 * 여기서 유도되고, BP 직행/AI는 Wielder 없이 이 값만으로 완결된다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
 	/**
-	 * 결착 모델(T1) — 팁이 닿는 순간 무엇이 성립하는가(ERopeTipEngagement 주석 참고).
-	 * 도달 모드와 조합이 제약된다: ①②=BareWrap 전용, ③=Pierce/Cinch 전용. 무효 조합은
-	 * 에디터 편집 시(모드가 정본 — TipEngagement가 보정됨)와 던지기 진입 시 자동 보정된다.
-	 * Pierce/Cinch의 실행 배선은 후속 CL — 현재는 계약 선언과 이벤트 표기만.
+	 * 결착 모델 — 팁이 닿는 순간 무엇이 성립하는가. 도달 모드와 조합이 제약된다(①②=BareWrap 전용,
+	 * ③=Pierce/Cinch 전용). 무효 조합은 에디터 편집 시와 던지기 진입 시 자동 보정된다 — 모드가 정본.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
@@ -256,7 +253,8 @@ public:
 #endif
 
 	//~ API ---------------------------------------------------------------
-	/** rope를 발사한다: AimDir 방향의 초기 tip 속도를 가지고 Flight phase로 진입한다. */
+	/** rope를 AimDir 방향으로 발사한다. ①②는 초기 tip 속도를 받아 물리 Flight로,
+	 *  ③은 Reel에서만 성립하며 확정 경로를 따라가는 GuidedThrow로 진입한다(모드가 경로를 정한다). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Throw(const FVector& AimDir);
 
@@ -319,7 +317,7 @@ public:
 	bool BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) const;
 
 	//~ Wielder 계약(C++ 전용) ----------------------------------------------
-	// URopeWielderComponent의 조준/PreviewPathLocked 흐름이 쓰는 진입점들. 일반 사용자 API가 아니라
+	// URopeWielderComponent의 조준/③ preview 구속 흐름이 쓰는 진입점들. 일반 사용자 API가 아니라
 	// BP 미노출 — 게임 코드에서 직접 부를 일은 보통 없다(Wielder를 붙이거나 같은 계약을 재구현할 때만).
 	// 아크 탐색 튜닝은 인자가 아니라 위 Preview 파라미터(멤버)를 읽는다 — 호출처마다 값이 갈리지 않게.
 
@@ -327,7 +325,7 @@ public:
 	bool BuildWrappingPreview(const FRopeThrowContext& ThrowContext, FRopeWrapPreviewData& OutPreview,
 		FString* OutFailureReason = nullptr) const;
 
-	/** PreviewPathLocked용 preview build. 렌더 centerline뿐 아니라 실제 GuidedThrow/Wrapped 진입에 필요한 contact/anchor도 반환한다. */
+	/** ③용 preview build. 렌더 centerline뿐 아니라 실제 GuidedThrow/Wrapped 진입에 필요한 contact/anchor도 반환한다. */
 	bool BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext, FRopePreparedThrowPreview& OutPrepared,
 		FString* OutFailureReason = nullptr) const;
 
@@ -335,12 +333,18 @@ public:
 	bool ThrowWithPreparedPreview(const FRopePreparedThrowPreview& Prepared);
 
 	/**
-	 * 던지기 준비(Reel/장전) 상태로 진입한다. ③(GuaranteedWrap) 전용 — 창(팁)을 손 소켓에 들고 로프를 숨긴다.
-	 * 꽂힌 뒤 release로 Free가 된 상태에서만 유효(그 외엔 no-op). ③ 로프는 BeginPlay에서 자동으로 Reel로 시작한다.
-	 * throw는 이 Reel 상태에서만 성립한다. 장전 입력 바인딩은 사용자 몫(이 API를 호출).
+	 * 던지기 준비(Reel/장전) 상태로 진입한다 — 창(팁)을 손 소켓에 들고 로프를 숨긴다. **③ 전용**이고
+	 * **Free/Reel에서만** 유효하다(그 외엔 no-op — 날아가거나 꽂혀 있는 중엔 장전할 수 없다).
+	 * ③ 로프는 BeginPlay에서 Reel로 시작한다. 던지기는 이 상태에서만 성립(CanThrowNow).
+	 * 장전 입력 바인딩은 사용자 몫이다(이 API를 호출).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void EnterReel();
+
+	/** 지금 이 로프에 throw가 성립하는가(모드 × 현재 phase). ③은 Reel에서만, ①②는 항상 true.
+	 *  던지기 진입과 조준 HUD가 공유하는 게이트다. 게임 규칙(스태미나 등)은 별개 — Wielder의 CanThrow(). */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	bool CanThrowNow() const { return RopeWrapModes::CanThrowInPhase(ResolveMode, Phase); }
 
 	/** 현재 진행 중인 잡기/감기(Contacting/Wrapping/Wrapped)를 수동으로 해제한다(Releasing phase). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
@@ -635,7 +639,7 @@ private:
 	// 있어 컴포넌트가 소유한다.
 	// Subsystem이 FrameColliders를 채운 직후 호출해 pending request를 hit/fallback context로 확정한다.
 	void ResolvePendingAimThrow();
-	// AimRayHitDirection throw가 지정한 mesh+bone만 contact/wrap 후보로 유지한다.
+	// aim ray throw가 지정한 mesh+bone만 contact/wrap 후보로 유지한다.
 	// collision-free Aim Flight에서는 solver가 이 목록을 의도적으로 무시하지만, 실제/예측 contact와
 	// wrapping path는 필터된 목록을 계속 사용한다. 일반 Flight solver도 같은 목록을 사용한다.
 	void FilterFrameCollidersForAimWrapTarget();
@@ -670,7 +674,7 @@ private:
 	/** Wrapped: bone-local latch 유지/해제. */
 	FRopeWrapController WrapController;
 
-	/** PreviewPathLocked: cached preview path를 authoritative하게 구동. */
+	/** ③ GuidedThrow 구동 상태: 확정 preview path(조준) 또는 레이 끝점 아치(허공, bFreeThrow). */
 	FRopeGuidedThrowState GuidedThrowState;
 
 	// Flight 시작 때 확정된 whip guide spline 평면 normal. Contacting을 거쳐 Wrapping에 들어갈 때

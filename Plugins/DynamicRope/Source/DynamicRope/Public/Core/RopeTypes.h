@@ -31,7 +31,8 @@ enum class ERopePhase : uint8
 
 	Wrapped,
 
-	/** PreviewPathLocked 전용. 물리 Flight를 타지 않고 cached preview path를 authoritative하게 따라간다. */
+	/** ③ 전용. 물리 Flight를 타지 않는다 — 조준 던지기는 확정 preview path를, 허공 던지기는 레이 끝점
+	 *  아치를 따라간다(bFreeThrow). 전자는 Wrapped로, 후자는 Free로 빠진다. */
 	GuidedThrow,
 
 	Releasing,
@@ -61,11 +62,9 @@ enum class ERopeReleaseReason : uint8
 };
 
 /**
- * 감김 해결(도달) 모드 — 이 로프가 던지기~결착 성립까지 무엇을 보장하는지의 계약.
- * 설계 근거/상황별 기대 매트릭스는 Docs/PoC/02_WrapResolveModes.md(2026-07-13 팀 합의).
- * 모드는 새 파이프라인이 아니라 기존 세 경로의 이름표다: 조준·preview의 지위와 판정 관문의
- * 사용 여부를 이 값이 결정하고, Wielder의 조준/던지기 방식도 여기서 유도된다(별도 스위치 없음).
- * Wrapped 성립 이후(Hold/Pull/테더/release)는 모드 무관 공통이다.
+ * 감김 해결(도달) 모드 — 이 로프가 던지기~결착까지 무엇을 보장하는지의 계약.
+ * 조준·preview의 지위와 판정 관문 사용 여부를 결정하고, Wielder의 조준/던지기 방식도 여기서 유도된다.
+ * Wrapped 성립 이후(Hold/Pull/테더/release)는 모드 무관 공통. 근거: Docs/PoC/02_WrapResolveModes.md.
  */
 UENUM(BlueprintType)
 enum class ERopeWrapResolveMode : uint8
@@ -83,27 +82,18 @@ enum class ERopeWrapResolveMode : uint8
 	AssistedJudged UMETA(DisplayName = "Assisted (Judged)"),
 
 	/**
-	 * ③ 조준한 대상에 무조건 성립: preview 생성 성공(대상 잠금) = 입력 순간 확정한 preview가 곧 실행
-	 * 경로(구속) → 무조건 꽂힘. 조준 던지기는 연출 후 실패가 없다.
-	 * preview 생성 실패(대상 없음/사거리 밖) = 던지기 거부가 아니라 **물리 탄도 투척으로 폴백** → 안 꽂히고
-	 * Free(바닥에 늘어짐). "안 꽂힘"은 실패가 아니라 "조준 안 한 던지기 = 물리 투척"이라는 별개의 정상 결과다
-	 * (보장은 '조준한 대상'에 대한 것 — 2026-07-14 재정의). 자동 release(장력/거리)는 성립 후에도 무효 — 명시 해제만.
-	 * 데모/연출/이동기용. BareWrap 결착의 무조건 성립은 Aim 단계에서 걸러진다(회의 결정 B).
+	 * ③ 조준한 대상에 무조건 성립: 던지는 순간 확정한 preview가 곧 실행 경로라 연출 후 실패가 없다.
+	 * **Reel(장전)에서만 던질 수 있다**(EnterReel). 조준이 안 잡히면(대상 없음/사거리 밖) 거부가 아니라
+	 * 레이 끝점을 향해 아치로 날아가 안 꽂히고 Free로 떨어진다 — 보장은 '조준한 대상'에 대한 것이라 정상 결과다.
+	 * 자동 release(장력/거리)는 무효 — 명시 해제만. 데모/연출/이동기용.
 	 */
 	GuaranteedWrap UMETA(DisplayName = "Guaranteed")
 };
 
 /**
- * 결착 모델(두 번째 축) — 팁이 "닿았다"로 판정되는 순간 무엇이 성립하는가.
- * 설계는 Docs/PoC/02_WrapResolveModes.md §2. 도달 모드와의 조합 제약(2026-07-13 합의를
- * 데이터 수준으로 승격): ①FullSimulation·②AssistedJudged = **BareWrap 전용**(팁 결착은 창발/
- * 판정 파이프라인과 결합하지 않는다), ③GuaranteedWrap = **Pierce/Cinch 전용**(맨 로프의
- * "무조건 감김"은 시각적으로 정당화되지 않아 조합 자체를 금지 — 회의 결정 B의 강화).
- * 제약 검사/보정의 단일 소스는 RopeWrapModes:: 헬퍼이고, 에디터 편집(PostEditChangeProperty,
- * 모드가 정본)과 던지기 진입(ThrowWithContext)이 함께 강제한다.
- *
- * [배선 상태] Pierce/Cinch의 실행(팁 mesh 렌더/히트 판정/앵커 생성)은 후속 CL에서 붙는다 —
- * 지금은 선언+제약+이벤트 표기만 존재하며, ③의 실제 성립은 종전 prepared preview 경로를 따른다.
+ * 결착 모델 — 팁이 대상에 "닿았다"고 판정된 순간 무엇이 성립하는가.
+ * ①②는 BareWrap만, ③은 Pierce/Cinch만 쓸 수 있다(무효 조합은 모드 기본값으로 자동 보정).
+ * **Cinch는 아직 미구현** — 고르면 BareWrap 감김 경로로 떨어진다. 근거: Docs/PoC/02_WrapResolveModes.md §2.
  */
 UENUM(BlueprintType)
 enum class ERopeTipEngagement : uint8
@@ -118,7 +108,9 @@ enum class ERopeTipEngagement : uint8
 	Cinch UMETA(DisplayName = "Cinch")
 };
 
-/** 도달 모드 × 결착 모델 조합 제약의 단일 소스(에디터 보정·던지기 진입·테스트가 공용 소비). */
+/** 도달 모드가 강제하는 제약의 단일 소스 — 결착 모델 조합(IsEngagementAllowed/ClampEngagement)과
+ *  phase 게이트(CanThrowInPhase). 에디터 보정·던지기 진입·조준 HUD·테스트가 공용 소비한다.
+ *  UObject/월드 의존이 없어 헤더 인라인 + 단위 테스트가 가능하다. */
 namespace RopeWrapModes
 {
 	/** 이 조합이 계약상 유효한가. ①② = BareWrap만, ③ = Pierce/Cinch만. */
@@ -139,6 +131,19 @@ namespace RopeWrapModes
 		return Mode == ERopeWrapResolveMode::GuaranteedWrap
 			? ERopeTipEngagement::Pierce
 			: ERopeTipEngagement::BareWrap;
+	}
+
+	/**
+	 * 이 모드에서 이 phase에 throw가 성립하는가. ③(GuaranteedWrap)는 Reel(장전) 전용이고,
+	 * ①②는 phase 게이트가 없어 **항상 true**다.
+	 *
+	 * [함정] 이건 "던지기 게이트에 걸리지 않는다"는 뜻이지 **"③이고 Reel이다"가 아니다**.
+	 * `X && Phase == Reel` 꼴을 이 함수 단독으로 바꾸면 ①②가 true로 새어 들어간다 —
+	 * 그런 자리는 반드시 `X && CanThrowInPhase(...)` 꼴을 유지할 것.
+	 */
+	inline bool CanThrowInPhase(ERopeWrapResolveMode Mode, ERopePhase Phase)
+	{
+		return Mode != ERopeWrapResolveMode::GuaranteedWrap || Phase == ERopePhase::Reel;
 	}
 }
 
@@ -1341,7 +1346,7 @@ struct FRopeThrowContext
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
 
-	/** AimRayHitDirection에서 유효한 본 hit을 확보했는지 나타낸다. */
+	/** aim ray가 유효한 본 hit을 확보했는지 나타낸다. */
 	bool bHasAimGuideHit = false;
 
 	/** Aim ray가 고른 primary 대상 본. Assisted에서는 첫 캡처/dominant만 이 본으로 고정하고,
@@ -1472,9 +1477,9 @@ struct FRopeThrowParams
 	float TipVelocityBoost = 1.0f;
 
 	/**
-	 * ③ GuidedThrow(Pierce) 비행 아치의 정점 높이 = 손→목표 거리 × 이 비율. 팁(창)이 위쪽 포물선을 그리며
-	 * 목표(꽂힘 지점 또는 허공 던지기의 레이 끝점)에 도달한다. 0 = 직선(아치 없음). 로프는 매 순간 일직선을
-	 * 유지하고 팁 궤적만 포물선이 된다. Alpha=1에서 오프셋 0이라 착지 지점은 정확히 유지된다.
+	 * ③ GuidedThrow 비행 아치의 정점 높이 = 손→목표 거리 × 이 비율. 팁이 위쪽 포물선을 그리며 목표
+	 * (꽂힘 지점 또는 허공 던지기의 레이 끝점)에 도달한다. 0 = 아치 없음(장전 포즈 → 목표로 곧장 보간).
+	 * 아치 오프셋은 팁으로 갈수록 선형으로 커진다. Alpha=1에서 오프셋 0이라 착지 지점은 정확히 유지된다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
 	float GuidedThrowArcHeightRatio = 0.25f;
@@ -1580,7 +1585,7 @@ struct FRopeContactCandidate
 	float WrapDirectionScore = 0.0f;
 };
 
-/** Wielder의 PreviewPathLocked 흐름이 입력 순간 확정하는 prepared preview(렌더 + GuidedThrow/Wrapped 진입 재료). */
+/** ③이 입력 순간 확정하는 prepared preview(렌더 + GuidedThrow/Wrapped 진입 재료). */
 struct FRopePreparedThrowPreview
 {
 	bool bValid = false;
@@ -1591,7 +1596,7 @@ struct FRopePreparedThrowPreview
 	/** 화면에 보이는 preview centerline. GuidedThrow에서는 이 점들을 실제 노드 목표 위치로도 사용한다. */
 	FRopeWrapPreviewData RenderPreview;
 
-	/** AimRayHitDirection처럼 소켓 애니메이션에서 독립시킬 필요가 있는 path는 owner 기준 로컬로도 보관한다. */
+	/** aim ray 조준처럼 소켓 애니메이션에서 독립시킬 필요가 있는 path는 owner 기준 로컬로도 보관한다. */
 	bool bUseGuideFrameLocal = false;
 	TWeakObjectPtr<const USceneComponent> GuideFrameComponent = nullptr;
 	TArray<FVector> GuideFrameLocalPoints;

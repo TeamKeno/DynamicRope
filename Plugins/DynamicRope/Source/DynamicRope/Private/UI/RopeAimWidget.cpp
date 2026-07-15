@@ -68,8 +68,11 @@ void URopeAimWidget::ResolveWielder()
 
 bool URopeAimWidget::IsAimHudActive() const
 {
+	// 모드(UsesAimRay)가 아니라 프레임 단위 IsAimActive를 본다 — ③는 Reel에서만 조준이 성립하므로.
+	// 십자선은 샘플을 보지 않고 이 게이트로만 그려지므로(NativePaint), 여기서 막지 않으면 빈 샘플의
+	// AimWorldPos(=ZeroVector)가 월드 원점으로 투영돼 십자선이 원점/화면중앙에 남는다.
 	const URopeWielderComponent* W = Wielder.Get();
-	return W && W->UsesAimRay();
+	return W && W->IsAimActive();
 }
 
 FRopeAimHudSample URopeAimWidget::GetAimSample() const

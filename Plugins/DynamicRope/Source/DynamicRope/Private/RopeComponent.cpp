@@ -331,7 +331,7 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
 		// ③는 Reel(장전) 상태에서만 throw가 성립한다. 꽂힌 뒤 release로 Free가 된 상태에서는 EnterReel() 후에야 던진다.
-		if (Phase != ERopePhase::Reel)
+		if (!CanThrowNow())
 		{
 			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw rejected: not in Reel (phase=%s). Call EnterReel() first."),
 				*GetName(), PhaseName(Phase));
@@ -371,7 +371,7 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Prepared preview throw requested (phase=%s, valid=%d, points=%d)"),
 		*GetName(), PhaseName(Phase), Prepared.IsValid() ? 1 : 0, Prepared.RenderPreview.Points.Num());
 
-	// PreviewPathLocked의 핵심 진입점: 여기서는 StartFreshThrow처럼 Flight로 보내지 않는다.
+	// ③의 핵심 진입점: 여기서는 StartFreshThrow처럼 Flight로 보내지 않는다.
 	// preview build가 고른 path/contact/anchor를 authoritative하게 사용해야 실제 결과가 preview와 갈라지지 않는다.
 	EnsureRopeInitialized();
 	if (!Prepared.IsValid() || Prepared.RenderPreview.Points.Num() < 2 || Sim.Num() < 2)
@@ -379,8 +379,8 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 		return false;
 	}
 
-	// ③ Guaranteed는 Reel(장전) 상태에서만 throw가 성립한다(Wielder 직행 방어 — ThrowWithContext와 동일 규칙).
-	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap && Phase != ERopePhase::Reel)
+	// ③ Guaranteed는 Reel(장전) 상태에서만 throw가 성립한다(Wielder 직행 방어 — ThrowWithContext와 동일 게이트).
+	if (!CanThrowNow())
 	{
 		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Prepared preview throw rejected: not in Reel (phase=%s). Call EnterReel() first."),
 			*GetName(), PhaseName(Phase));
@@ -450,7 +450,7 @@ void URopeComponent::EnterReel()
 	}
 	if (Phase != ERopePhase::Free && Phase != ERopePhase::Reel)
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] EnterReel ignored: phase=%s (Free에서만 장전 가능)."),
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] EnterReel ignored: phase=%s (Free/Reel에서만 장전 가능)."),
 			*GetName(), PhaseName(Phase));
 		return;
 	}
@@ -1095,7 +1095,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	}
 
 	case ERopePhase::GuidedThrow:
-		// PreviewPathLocked 전용 phase. 물리 solver/contact detector를 건너뛰고 cached preview path만 따른다.
+		// ③ 전용 phase. 물리 solver/contact detector를 건너뛰고 확정 path(조준) 또는 아치(허공)만 따른다.
 		UpdateGuidedThrow(DeltaTime);
 		SimFrame.bSolveThisFrame = false;
 		break;
@@ -2362,8 +2362,9 @@ bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
 		bShouldCapture = FRopeFlightContactDetector::ShouldCapture(*CaptureCandidates, DetectParams);
 	}
 
-	// ③ GuaranteedWrap의 물리 Flight(허공 투척)는 절대 캡처/감김하지 않는다 — Pierce는 GuidedThrow로만 성립한다.
-	// 캡처를 끄면 whip 종료 후 타임아웃으로 Free(바닥에 늘어짐)로 복귀한다(2026-07-14 재정의).
+	// ③ GuaranteedWrap은 정상 경로로는 Flight를 타지 않는다 — ThrowWithContext가 조준 던지기(prepared)와
+	// 허공 던지기(레이 끝점 아치) 양쪽 모두 GuidedThrow로 보낸다. 그래도 어떤 경로로든 Flight에 들어왔다면
+	// 캡처는 금지한다: ③의 성립은 GuidedThrow가 확정한 앵커로만 이뤄진다(방어적 백스톱).
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
 		bShouldCapture = false;
