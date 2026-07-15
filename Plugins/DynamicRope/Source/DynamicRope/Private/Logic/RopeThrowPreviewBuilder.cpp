@@ -333,13 +333,15 @@ namespace
 
 	FRopeWrappingPhase::FContext MakeWrappingContext(const FRopeThrowPreviewBuilder::FInput& Input)
 	{
-		return FRopeWrappingPhase::FContext{
+		FRopeWrappingPhase::FContext Ctx{
 			Input.WrapConfig,
 			GetColliders(Input),
 			Input.PathMode,
 			Input.RopeRadius,
 			Input.OwnerName
 		};
+		Ctx.ResolveMode = Input.ResolveMode;
+		return Ctx;
 	}
 
 	FRopeFlightContactDetector::FParams MakeFlightDetectParams(const FRopeThrowPreviewBuilder::FInput& Input)
