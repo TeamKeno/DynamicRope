@@ -205,9 +205,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Aim", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float AimRayGuideLockAlpha = 0.50f;
 
-	/** SDF 검사 ray와 hit 지점/법선을 월드에 디버그 드로우한다. */
+	/** SDF 검사 ray와 hit 지점/법선을 월드에 디버그 드로우한다(cyan=미스/red=히트, 캡슐 반경 = 실제 질의 반경).
+	 *  기본 OFF — 디버그 드로우는 필요할 때만 켠다. 상시 관찰이 필요하면 Gameplay Debugger의 Rope 카테고리(' 키)를 쓴다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Debug")
-	bool bDrawAimRayDebug = true;
+	bool bDrawAimRayDebug = false;
 
 	/**
 	 * 데모 조준 HUD(십자선 + 감김 가능 본 강조 링) 위젯을 로컬 플레이어 뷰포트에 자동으로 띄울지.
@@ -428,10 +429,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope|Input")
 	void BindInput();
 
+	/**
+	 * 던지기 preview를 **표시**할지 여부(디자이너 설정). 표시 전용 플래그다 — 끄더라도 ③ GuaranteedWrap의
+	 * 던지기 계산(prepared preview)은 그대로 돌아가므로 던지기 동작에는 영향이 없다.
+	 * 켜져 있고 ③이면 PreviewComponent가 BeginPlay에서 자동 생성된다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
+	bool bShowThrowPreview = true;
+
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
 	void SetThrowPreviewEnabled(bool bEnabled);
 
-	/** 던지기 preview가 현재 켜져 있는가(런타임 상태 — BeginPlay 자동 결정 + SetThrowPreviewEnabled 토글). */
+	/** 던지기 preview 표시가 현재 켜져 있는가. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Preview")
 	bool IsThrowPreviewEnabled() const { return bShowThrowPreview; }
 
@@ -515,6 +524,19 @@ private:
 	/** 멀리 있는 target SDF도 수집되도록 ray 구간을 collider query bounds에 포함한다. */
 	void UpdateAimRayColliderQueryBounds();
 
+	/** 주어진 centerline을 preview 컴포넌트에 넘겨 그린다(표시 OFF/컴포넌트 없음이면 no-op). */
+	void DisplayPreviewCenterline(const FRopeWrapPreviewData& Centerline, const FRopeThrowContext& ThrowContext);
+
+	/** 확정된 HeldPreparedPreview를 새 build 없이 그대로 유지 표시한다(표시 OFF면 no-op). */
+	void DisplayHeldPreparedPreview();
+
+	/** 표시만 정리한다 — prepared(던지기용 데이터)는 유지된다. */
+	void ClearPreviewDisplay();
+
+	/** 던지기용 prepared 상태만 정리한다 — 표시는 건드리지 않는다. */
+	void ClearPreparedThrow();
+
+	/** prepared + 표시를 모두 정리한다. */
 	void ClearThrowPreview();
 
 	/** collider/SDF side effect 없이 origin/frame/속도만 계산한다. */
@@ -552,9 +574,6 @@ private:
 	// AirControl 부스트 원복용 저장 상태(스윙 진입 시 저장, 종료/EndPlay 시 복원).
 	bool bAirControlBoosted = false;
 	float SavedAirControl = 0.0f;
-	// preview 켜짐 상태(디자이너 설정 아님 — BeginPlay가 PreviewComponent 유무로 자동 결정하고
-	// SetThrowPreviewEnabled가 토글). 조회는 IsThrowPreviewEnabled().
-	bool bShowThrowPreview = false;
 	float PreviewUpdateCooldown = 0.0f;
 	bool bLastPreviewBuildSucceeded = false;
 	bool bHasLastPreviewBuildResult = false;

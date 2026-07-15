@@ -287,73 +287,11 @@ URopePreviewComponent::URopePreviewComponent()
 	LocalPreviewBounds = FBoxSphereBounds(FVector::ZeroVector, FVector(1.0f), 1.0f);
 }
 
-bool URopePreviewComponent::UpdatePreviewFromRope(const URopeComponent& Rope, const FRopeThrowContext& ThrowContext,
-	bool bBuildPreparedPreview, FString* OutFailureReason)
+bool URopePreviewComponent::ShowWhipGuideAnimation(const URopeComponent& Rope, const FRopeThrowContext& ThrowContext,
+	FString* OutFailureReason)
 {
-	// 렌더 컴포넌트가 모드 분기를 소유해 wielder가 두 build 경로의 상태를 따로 관리하지 않게 한다.
-	switch (PreviewMode)
-	{
-	case ERopePreviewMode::WhipGuideAnimation:
-		return UpdateWhipGuidePreviewFromRope(Rope, ThrowContext, bBuildPreparedPreview, OutFailureReason);
-	case ERopePreviewMode::WrappedPath:
-	default:
-		return UpdateWrappedPathPreviewFromRope(Rope, ThrowContext, bBuildPreparedPreview, OutFailureReason);
-	}
-}
-
-bool URopePreviewComponent::UpdateWrappedPathPreviewFromRope(const URopeComponent& Rope,
-	const FRopeThrowContext& ThrowContext, bool bBuildPreparedPreview, FString* OutFailureReason)
-{
-	// 정적 경로 모드로 전환하면 이전 whip 애니메이션의 tick과 프레임 캐시를 모두 끊는다.
-	SetComponentTickEnabled(false);
-	WhipPreviewFramesLocal.Reset();
-	WhipPreviewFrameIndex = 0;
-	WhipPreviewPlaybackTimer = 0.0f;
-
-	FRopeWrapPreviewData Preview;
-	if (bBuildPreparedPreview)
-	{
-		FRopePreparedThrowPreview Prepared;
-		if (!Rope.BuildPreparedWrappingPreview(ThrowContext, PreviewReachScale, PreviewSegmentCount,
-			PreviewSampleStep, PreviewQueryRadius, Prepared, OutFailureReason))
-		{
-			LastPreparedPreview.Reset();
-			return false;
-		}
-
-		LastPreparedPreview = Prepared;
-		Preview = Prepared.RenderPreview;
-	}
-	else
-	{
-		LastPreparedPreview.Reset();
-		if (!Rope.BuildWrappingPreview(ThrowContext, PreviewReachScale, PreviewSegmentCount,
-			PreviewSampleStep, PreviewQueryRadius, Preview, OutFailureReason))
-		{
-			return false;
-		}
-	}
-
-	SetWrapPreviewLocal(ConvertWrapPreviewToLocal(Preview));
-	return true;
-}
-
-bool URopePreviewComponent::UpdateWhipGuidePreviewFromRope(const URopeComponent& Rope,
-	const FRopeThrowContext& ThrowContext, bool bBuildPreparedPreview, FString* OutFailureReason)
-{
-	// prepared 결과는 실제 throw용이고, 아래 Source는 화면용 whip 프레임 생성에만 사용한다.
-	LastPreparedPreview.Reset();
-	if (bBuildPreparedPreview)
-	{
-		FRopePreparedThrowPreview Prepared;
-		if (!Rope.BuildPreparedWrappingPreview(ThrowContext, PreviewReachScale, PreviewSegmentCount,
-			PreviewSampleStep, PreviewQueryRadius, Prepared, OutFailureReason))
-		{
-			return false;
-		}
-		LastPreparedPreview = Prepared;
-	}
-
+	// 표시 전용: 화면용 whip 프레임만 만든다. 게임플레이 데이터(prepared contact/anchor)는 호출자(Wielder)가
+	// 로프에서 직접 빌드해 소유하므로, 여기서 실패해도 던지기에는 영향이 없다.
 	FRopePreviewBuildContext Source;
 	if (!Rope.BuildPreviewContext(ThrowContext, Source))
 	{
@@ -390,7 +328,7 @@ void URopePreviewComponent::RebuildWhipPreviewFrames(const FRopePreviewBuildCont
 		FMath::CeilToInt(static_cast<float>(Source.NodeCount - 1) * GuidedEnd), 1, Source.NodeCount - 1);
 	const int32 DesiredPointCount = FMath::Clamp(LastGuidedNode + 1, 2, Source.NodeCount);
 	const int32 RawSampleCount = FMath::Max(DesiredPointCount * 4, 16);
-	const float GuideLength = Source.RopeLength * GuidedEnd * FMath::Max(PreviewReachScale, 0.0f);
+	const float GuideLength = Source.RopeLength * GuidedEnd * FMath::Max(Source.PreviewReachScale, 0.0f);
 	const float SweepRadians = FMath::DegreesToRadians(SweepDegrees);
 	const float GuideDuration = ResolvePreviewGuideDuration(Source.WhipConfig, Source.ThrowContext.ThrowSpeed);
 
@@ -462,8 +400,8 @@ bool URopePreviewComponent::DoesWhipFrameHit(const FRopeWrapPreviewData& Frame,
 
 	// 프레임은 component-local이므로 collider 질의 직전에 현재 transform으로 월드 좌표를 복원한다.
 	const FTransform Xform = GetComponentTransform();
-	const float QueryRadius = PreviewQueryRadius > KINDA_SMALL_NUMBER
-		? PreviewQueryRadius
+	const float QueryRadius = Source.PreviewQueryRadius > KINDA_SMALL_NUMBER
+		? Source.PreviewQueryRadius
 		: FMath::Max(Source.RopeRadius, WrapPreviewRadius);
 
 	for (int32 PointIndex = 1; PointIndex < Frame.Points.Num(); ++PointIndex)
@@ -522,7 +460,7 @@ void URopePreviewComponent::SetArcPreviewWorld(const FRopeArcPreviewData& InPrev
 
 void URopePreviewComponent::SetWrapPreviewWorld(const FRopeWrapPreviewData& InPreview)
 {
-	LastPreparedPreview.Reset();
+	// 표시 전용 진입점: 주어진 월드 centerline을 그대로 그린다. whip 애니 재생 중이었다면 정적 표시로 전환한다.
 	WhipPreviewFramesLocal.Reset();
 	SetComponentTickEnabled(false);
 	SetWrapPreviewLocal(ConvertWrapPreviewToLocal(InPreview));
@@ -562,10 +500,8 @@ void URopePreviewComponent::ClearPreview()
 	}
 
 	bPreviewVisible = false;
-	PreviewLocal = FRopeArcPreviewData();
 	WrapPreviewLocal = FRopeWrapPreviewData();
 	WhipPreviewFramesLocal.Reset();
-	LastPreparedPreview.Reset();
 	WhipPreviewFrameIndex = 0;
 	WhipPreviewPlaybackTimer = 0.0f;
 	SetComponentTickEnabled(false);

@@ -324,10 +324,10 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 		TipEngagement = ClampedEngagement;
 	}
 
-	// ③ GuaranteedWrap의 BP 직행/AI 경로: Wielder의 PreviewPathLocked 흐름 없이 Throw가 불려도
-	// 보장 계약을 지킨다 — 컴포넌트가 스스로 prepared preview를 빌드해 구속 경로로 던지고,
-	// 빌드 실패 = Aim 무효 = 던지기 거부(연출 후 실패를 만들지 않는다. 2026-07-13 회의 결정 B/F).
-	// 빌드 파라미터는 URopePreviewComponent의 Arc Search 기본값과 동일(1.0/32/80/0).
+	// ③ GuaranteedWrap의 BP 직행/AI 경로: Wielder의 조준 흐름 없이 Throw가 불려도 보장 계약을 지킨다 —
+	// 컴포넌트가 스스로 prepared preview를 빌드해 구속 경로로 던진다. 빌드 성공 = 조준한 대상에 무조건 꽂힘,
+	// 빌드 실패(대상 없음/사거리 밖) = 거부가 아니라 레이 끝점 아치 투척으로 폴백(2026-07-14 보장 재정의).
+	// 빌드 파라미터(Arc Search)는 로프 멤버가 단일 소스라 Wielder 경로와 항상 일치한다.
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
 		// ③는 Reel(장전) 상태에서만 throw가 성립한다. 꽂힌 뒤 release로 Free가 된 상태에서는 EnterReel() 후에야 던진다.
@@ -340,8 +340,7 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 
 		FRopePreparedThrowPreview Prepared;
 		FString FailureReason;
-		if (BuildPreparedWrappingPreview(ThrowContext, /*ReachScale*/ 1.0f, /*SegmentCount*/ 32,
-			/*SampleStep*/ 80.0f, /*QueryRadius*/ 0.0f, Prepared, &FailureReason))
+		if (BuildPreparedWrappingPreview(ThrowContext, Prepared, &FailureReason))
 		{
 			// 대상 조준 성공 → 무조건 꽂힘(GuidedThrow, 내부에서 OnDeployFromReel).
 			if (!ThrowWithPreparedPreview(Prepared))
@@ -692,6 +691,9 @@ bool URopeComponent::BuildPreviewContext(const FRopeThrowContext& ThrowContext, 
 	OutContext.RopeNumSides = NumSides;
 	OutContext.NodeCount = Sim.Num();
 	OutContext.Phase = Phase;
+	// 아크 탐색 튜닝도 같이 실어 보낸다 — 렌더 컴포넌트가 자체 사본을 갖지 않고 로프 단일 소스를 쓴다.
+	OutContext.PreviewReachScale = PreviewReachScale;
+	OutContext.PreviewQueryRadius = PreviewQueryRadius;
 	return OutContext.RopeLength > KINDA_SMALL_NUMBER && OutContext.SegmentLength > KINDA_SMALL_NUMBER;
 }
 
@@ -796,8 +798,8 @@ bool URopeComponent::BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) cons
 	return OutPreview.IsValid();
 }
 
-bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
-	float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview, FString* OutFailureReason) const
+bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext, FRopeWrapPreviewData& OutPreview,
+	FString* OutFailureReason) const
 {
 	OutPreview = FRopeWrapPreviewData();
 
@@ -819,10 +821,11 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 		Input.SweepAngleDegrees = MakeWhipGuideConfig().SweepAngleDegrees;
 		Input.FallbackForward = GetForwardVector();
 		Input.OwnerName = GetName();
-		Input.ReachScale = ReachScale;
-		Input.SegmentCount = SegmentCount;
-		Input.SampleStep = SampleStep;
-		Input.QueryRadius = QueryRadius;
+		// 아크 탐색 튜닝은 로프 멤버가 단일 소스 — 호출처(Wielder/BP 직행)마다 값이 갈리지 않는다.
+		Input.ReachScale = PreviewReachScale;
+		Input.SegmentCount = PreviewSegmentCount;
+		Input.SampleStep = PreviewSampleStep;
+		Input.QueryRadius = PreviewQueryRadius;
 		return FRopeThrowPreviewBuilder::BuildFreeWrappingPreview(Input, OutPreview, OutFailureReason);
 	}
 
@@ -852,9 +855,8 @@ bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext,
 	return bBuilt;
 }
 
-bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale,
-	int32 SegmentCount, float SampleStep, float QueryRadius, FRopePreparedThrowPreview& OutPrepared,
-	FString* OutFailureReason) const
+bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext,
+	FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason) const
 {
 	OutPrepared.Reset();
 	// Prepared preview는 아직 던지기 전인 Free/Releasing/Reel에서만 의미가 있다(Reel=③ 장전 준비 상태 —
@@ -884,10 +886,11 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	Input.SweepAngleDegrees = MakeWhipGuideConfig().SweepAngleDegrees;
 	Input.FallbackForward = GetForwardVector();
 	Input.OwnerName = GetName();
-	Input.ReachScale = ReachScale;
-	Input.SegmentCount = SegmentCount;
-	Input.SampleStep = SampleStep;
-	Input.QueryRadius = QueryRadius;
+	// 아크 탐색 튜닝은 로프 멤버가 단일 소스 — Wielder 경로와 BP 직행 Throw() 경로가 항상 같은 값을 본다.
+	Input.ReachScale = PreviewReachScale;
+	Input.SegmentCount = PreviewSegmentCount;
+	Input.SampleStep = PreviewSampleStep;
+	Input.QueryRadius = PreviewQueryRadius;
 	return FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, OutPrepared, OutFailureReason);
 }
 

@@ -61,6 +61,10 @@ struct FRopePreviewBuildContext
 	int32 RopeNumSides = 8;
 	int32 NodeCount = 0;
 	ERopePhase Phase = ERopePhase::Free;
+	// 아크 탐색 튜닝 스냅샷(로프 소유 — URopeComponent::PreviewReachScale/PreviewQueryRadius).
+	// whip 프레임 생성이 가이드 길이·충돌 질의 반경에 쓴다.
+	float PreviewReachScale = 1.0f;
+	float PreviewQueryRadius = 0.0f;
 };
 
 // (FRopeAimRayHitResult / FRopeAimRayThrowRequest는 Logic/RopeAimTargeting.h로 이동 — 위 include로 계속 노출된다.)
@@ -285,7 +289,25 @@ public:
 	/** 실제 throw를 최신 collider 수집 직후 확정하도록 요청을 큐에 넣는다. */
 	void QueueAimRayThrow(const FRopeAimRayThrowRequest& Request);
 
-	/** PreviewComponent 전용: 현재 throw/whip/sim/collider 읽기 스냅샷을 만든다. */
+	//~ Preview 탐색(Arc Search) 파라미터 ------------------------------------
+	// preview/prepared 빌드가 쓰는 아크 탐색 튜닝의 **단일 소스**. Wielder 경로와 BP 직행 Throw() 경로가
+	// 같은 값을 봐야 하므로 로프가 소유한다(종전엔 URopePreviewComponent에 있고 ThrowWithContext가
+	// 같은 값을 하드코딩 복사해 조용히 발산할 수 있었다). 표시 전용 값(반지름/변 수/머티리얼)은
+	// 렌더 쪽(URopePreviewComponent)에 남는다.
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "0.0", DisplayName = "Arc Reach Scale"))
+	float PreviewReachScale = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "1", ClampMax = "128", DisplayName = "Arc Segment Count"))
+	int32 PreviewSegmentCount = 32;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "1.0", Units = "cm", DisplayName = "Arc Sample Step"))
+	float PreviewSampleStep = 80.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Arc Query Radius"))
+	float PreviewQueryRadius = 0.0f;
+
+	/** 표시용 whip preview 프레임 생성이 쓰는 읽기 스냅샷(현재 throw/whip/sim/collider). 렌더 컴포넌트가 소비한다. */
 	bool BuildPreviewContext(const FRopeThrowContext& ThrowContext, FRopePreviewBuildContext& OutContext) const;
 
 	/** Builds the current pre-wrapped rope centerline preview from the active/contacting wrap seed. */
@@ -295,15 +317,14 @@ public:
 	//~ Wielder 계약(C++ 전용) ----------------------------------------------
 	// URopeWielderComponent의 조준/PreviewPathLocked 흐름이 쓰는 진입점들. 일반 사용자 API가 아니라
 	// BP 미노출 — 게임 코드에서 직접 부를 일은 보통 없다(Wielder를 붙이거나 같은 계약을 재구현할 때만).
+	// 아크 탐색 튜닝은 인자가 아니라 위 Preview 파라미터(멤버)를 읽는다 — 호출처마다 값이 갈리지 않게.
 
 	/** Builds a pre-wrapped preview for idle/flight aiming using the same throw context as ThrowWithContext. */
-	bool BuildWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
-		float SampleStep, float QueryRadius, FRopeWrapPreviewData& OutPreview,
+	bool BuildWrappingPreview(const FRopeThrowContext& ThrowContext, FRopeWrapPreviewData& OutPreview,
 		FString* OutFailureReason = nullptr) const;
 
 	/** PreviewPathLocked용 preview build. 렌더 centerline뿐 아니라 실제 GuidedThrow/Wrapped 진입에 필요한 contact/anchor도 반환한다. */
-	bool BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
-		float SampleStep, float QueryRadius, FRopePreparedThrowPreview& OutPrepared,
+	bool BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext, FRopePreparedThrowPreview& OutPrepared,
 		FString* OutFailureReason = nullptr) const;
 
 	/** Prepared preview를 권위 있는 경로로 사용해 던진다. Flight/Contacting 재탐색을 타지 않고 GuidedThrow로 진입한다. */
