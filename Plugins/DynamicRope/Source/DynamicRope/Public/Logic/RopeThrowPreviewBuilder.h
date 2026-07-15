@@ -25,6 +25,10 @@ public:
 		FRopeDetectConfig DetectConfig;
 		ERopeWrappingPathMode PathMode = ERopeWrappingPathMode::SurfaceVectorField;
 
+		/** 도달 모드 스냅샷(컴포넌트 ResolveMode). 경로 정책 분기용 — 소비 로직은 아직 미배선이라
+		 *  현재는 대입만 되고 읽히지 않는다(죽은 필드로 보고 지우지 말 것). */
+		ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+
 		/** 결착 모델. Pierce면 감김 나선 경로 대신 aim-hit 접점에 단일 앵커로 꽂는다(③ 전용). */
 		ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
 
