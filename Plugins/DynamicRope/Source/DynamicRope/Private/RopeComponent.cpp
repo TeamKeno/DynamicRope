@@ -3511,97 +3511,161 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 능동 Pull의 방향 분기(climb-in)는 ApplyWrappedTraction이 같은 판정으로 한다.
 	if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable)
 	{
-		// 이번 프레임 위치 보정 거리: 양보하는 끝을 안쪽으로 이만큼 "이동"한다(속도 주입 X → 관성 없음 → 발사 없음).
-		// Response = 위치 보정 비율(1=매 프레임 전량 회수=경계 즉시 안착, <1=여러 프레임에 걸친 부드러운 추종 —
-		// 둘 다 관성 폭주 없음). TetherMaxSpeed × dt = 프레임당 이동 상한(첫 팽팽 순간의 큰 텔레포트 방지).
-		const float Response = FMath::Clamp(HoldConfig.TetherResponse, 0.0f, 1.0f);
-		const float MaxStep = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f) * DeltaTime;
-		const float StepLen = (MaxStep > 0.0f) ? FMath::Min(Overshoot * Response, MaxStep) : (Overshoot * Response);
-
-		// 끌림 가능 판정은 ② UpdateWrappedPullSample에서 overshoot와 무관하게 프레임당 산출(테더 회수 +
-		// 능동 Pull 방향이 같은 판정 공유). 여기선 그 결과만 읽어 양보하는 끝을 고른다.
+		// 양보끝 선택: pullable이면 대상만 회수(wielder 자유끝), 아니면 wielder만 로프 길이로 회수(대상=앵커).
 		const bool bPullable = PullDrive.bTargetPullable;
-		const float TargetStep = bPullable ? StepLen : 0.0f;
-		// WielderStep은 대상 회수 뒤에 정한다: not-pullable이면 전량, pullable이면 대상이 걸려 못 간 잔여분
-		// (대상이 잘 따라오면 0 → wielder 자유). 아래 대상 몫 블록이 actualMoved를 채운다.
 
-		// 비신축 클램프 — (1) 양보하는 끝의 *바깥 방향*(Inward의 반대 = 거리 증가) 속도 성분만 제거하고(안쪽 속도는
-		// 절대 주입하지 않음 → 관성 없음 → 발사 없음), (2) 위치를 안쪽으로 Step만큼 이동해 로프 길이 경계로 되돌린다
-		// (드래그 추종 — 로프가 늘어나 보이지 않게). 로프 축 성분만 건드려 수직(중력/스윙) 성분은 보존. 위치 이동은
-		// TeleportPhysics로 물리 속도를 만들지 않는다(sweep은 벽 통과 방지).
-		// 반환값 = 실제 안쪽 이동 거리. sweep이 막히면(대상이 벽에 걸림) 부분 이동해 Step보다 작다 → 그 부족분을
-		// 호출부가 wielder 제약으로 넘긴다("대상이 못 끌려오면 wielder가 대신 로프 길이에서 멈춘다"). 위치를 안
-		// 옮기는 경우(스켈레탈 본)는 Step을 반환해 부족분 0(= wielder 안 건드림, 기존 동작 유지).
-		auto ClampSimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Inward, float Step) -> float
+		if (bPullable)
 		{
-			const FVector Vel = Prim->GetPhysicsLinearVelocity(BoneName);
-			const float CurInward = static_cast<float>(FVector::DotProduct(Vel, Inward)); // 안쪽 성분(바깥이면 음수).
+			// ===== 대상 몫: 질량/마찰 제한 리엘 =====
+			// wielder가 자유끝이라 대상은 자기 물리(질량·마찰)에 종속돼 따라온다 — 가벼우면 리엘 목표 속도에 도달하고,
+			// 무겁거나 접지 마찰이 크면 장력 한계로 뒤처지며 그만큼 로프가 자연스럽게 늘어난다(BinaryPullable의 의도된
+			// 물리: 정직한 무게감 + wielder 우선). 축 속도 서보 임펄스 J = clamp(mass·dV, ±MaxTension·dt)(Model A 원리):
+			//  - 물리 바디/랙돌 본: AddImpulse(bVelChange=false) → 바디 질량으로 나뉨 + 물리 마찰이 저항.
+			//  - CMC 캐릭터: Movement->AddImpulse(bVelChange=false) → Movement.Mass로 나뉨 + CMC 접지 마찰이 저항.
+			// TetherMaxTension=0이면 무제한(질량 무시, 목표 속도에 즉시 도달).
+			// 리엘 목표 속도: 이번 프레임에 overshoot를 전부 닫을 속도(Overshoot/dt)를 목표로 삼되, 안전 상한
+			// TetherMaxSpeed로만 캡한다 — TetherReelSpeed(400)에 묶으면 자유끝 wielder가 그보다 빨리 달아날 때
+			// 대상이 400 이상 못 내 영구 뒤처진다. 경계 근처(Overshoot<Taper)에선 0으로 감속(코스팅 정지). 실제
+			// 추종 속도는 아래 장력 클램프가 질량/마찰로 제한한다(가벼우면 목표 도달, 무거우면 뒤처져 로프 신장).
+			const float SpeedCeil = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
+			const float Taper = FMath::Max(HoldConfig.TetherSettleDist, 0.01f);
+			const float InvDtC = 1.0f / FMath::Max(DeltaTime, 1e-4f);
+			const float CeilTerm = (SpeedCeil > 0.0f) ? (SpeedCeil * FMath::Clamp(Overshoot / Taper, 0.0f, 1.0f)) : (Overshoot * InvDtC);
+			const float ReelTargetSpeed = FMath::Min(CeilTerm, Overshoot * InvDtC);
+			const float MaxTension = FMath::Max(HoldConfig.TetherMaxTension, 0.0f);
 
-			if (BoneName.IsNone())
+			// 로프 축 속도를 목표(ReelTargetSpeed)로 서보하는 **양방향** 임펄스: J = clamp(mass·dV, ±MaxTension·dt).
+			// dV>0이면 안쪽 가속, dV<0(목표보다 빨리 안쪽으로 감)이면 안쪽 감속(제동) — 경계서 목표가 taper로 0이 되며
+			// 초과 관성을 빼주므로 코스팅·오버슛이 없다. 단방향(가속만)이면 초과분을 안 빼 고장력에서 대상이 경계를
+			// 지나쳐 슬랙→되튕김→물리 폭발. 장력 상한이 크면 정확 서보(옛 속도 세팅과 동일, 안정), 작으면 질량/마찰로
+			// 추종이 뒤처진다. 0=무제한(정확 서보). 로프 축 성분만 건드려 수직(중력/스윙)은 보존.
+			auto DriveInward = [&](float Mass, float CurAlong) -> float
 			{
-				// 컴포넌트 전체 시뮬 바디(물리 프랍/정적): 바깥 속도 제거 + 위치를 안쪽으로 Step 이동(속도 주입 없음
-				// → 관성/발사 없음). 로프 축 성분만 건드려 수직(중력/스윙) 성분은 보존. TeleportPhysics는 물리 속도를
-				// 만들지 않고(sweep은 벽 통과 방지), 반환 = 실제 안쪽 이동(막히면 부족분을 wielder가 대신 멈춤).
-				if (CurInward < 0.0f)
+				if (Mass <= KINDA_SMALL_NUMBER)
 				{
-					Prim->SetPhysicsLinearVelocity(Vel - Inward * CurInward, /*bAddToCurrent*/ false, BoneName); // 바깥 성분 제거.
+					return 0.0f;
 				}
+				float J = Mass * (ReelTargetSpeed - CurAlong); // 부호 있음(+가속 / -제동).
+				if (MaxTension > 0.0f)
+				{
+					const float JCap = MaxTension * DeltaTime;
+					J = FMath::Clamp(J, -JCap, JCap);
+				}
+				return J;
+			};
+			auto DriveSimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Inward, float Step) -> float
+			{
+				float BodyMass = static_cast<float>(Prim->GetMass());
+				if (!BoneName.IsNone())
+				{
+					if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Prim))
+					{
+						if (FBodyInstance* Body = Skel->GetBodyInstance(BoneName))
+						{
+							BodyMass = static_cast<float>(Body->GetBodyMass());
+						}
+					}
+				}
+				const float CurAlong = static_cast<float>(FVector::DotProduct(Prim->GetPhysicsLinearVelocity(BoneName), Inward));
+				const float J = DriveInward(BodyMass, CurAlong);
+				if (!FMath::IsNearlyZero(J))
+				{
+					Prim->AddImpulse(Inward * J, BoneName, /*bVelChange*/ false);
+				}
+				return Step; // pullable 대상은 자기 물리로 따라옴 — 부족분을 wielder로 넘기지 않는다(자유 유지).
+			};
+			auto DriveActor = [&](AActor* Actor, const FVector& Inward, float Step)
+			{
+				if (const ACharacter* Character = Cast<ACharacter>(Actor))
+				{
+					if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+					{
+						if (Movement->MovementMode != MOVE_None)
+						{
+							const float CurAlong = static_cast<float>(FVector::DotProduct(Movement->Velocity, Inward));
+							const float J = DriveInward(FMath::Max(Movement->Mass, KINDA_SMALL_NUMBER), CurAlong);
+							if (!FMath::IsNearlyZero(J))
+							{
+								Movement->AddImpulse(Inward * J, /*bVelocityChange*/ false); // Mass로 나뉨 + 접지 마찰 저항.
+							}
+							return;
+						}
+					}
+				}
+				// 비캐릭터/MOVE_None(질량 개념 없음): 스윕 위치 오프셋 폴백(관성 없어 텔레포트 무해, 벽 통과 방지).
 				if (Step > KINDA_SMALL_NUMBER)
 				{
-					const FVector Before = Prim->GetComponentLocation();
-					Prim->SetWorldLocation(Before + Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
-					const FVector After = Prim->GetComponentLocation();
-					return FMath::Max(0.0f, static_cast<float>(FVector::DotProduct(After - Before, Inward)));
+					Actor->AddActorWorldOffset(Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
 				}
-				return Step;
+			};
+			// 위치 폴백용 스텝 상한(질량 경로는 ReelTargetSpeed 구동이라 Step 무시). Overshoot 전량을 프레임 상한으로.
+			const float TargetStep = (SpeedCeil > 0.0f) ? FMath::Min(Overshoot, SpeedCeil * DeltaTime) : Overshoot;
+			if (TargetStep > KINDA_SMALL_NUMBER)
+			{
+				ApplyTetherReceiverChain(
+					MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, DirToAim, TargetStep,
+					[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return DriveSimBody(P, B, D, S); },
+					[&](AActor* A, const FVector& D, float S) { DriveActor(A, D, S); });
 			}
+			return; // pullable: wielder는 회수하지 않는다(자유끝 우선).
+		}
 
-			// 스켈레탈 랙돌 개별 본: 컴포넌트 단위 위치 이동이 불가하다 → 안쪽 속도를 회수 속도로 *정확 servo*해
-			// 실제로 끌어온다. exact set(bVelChange)이라 관성 누적/코스팅이 없어(Step→0이면 안쪽속도→0 = 발사 없음)
-			// 위치 클램프를 대체한다(회수 속도 ≤ TetherMaxSpeed로 이미 상한). 이전엔 바깥 속도만 제거하고 안쪽 견인이
-			// 없어 랙돌 대상이 안 끌렸다(버그). 감긴 본이 안쪽으로 끌리면 관절로 나머지 랙돌이 따라온다.
-			const float TargetInward = (DeltaTime > 1e-4f) ? (Step / DeltaTime) : 0.0f;
-			Prim->AddImpulse(Inward * (TargetInward - CurInward), BoneName, /*bVelChange*/ true);
-			return Step; // 속도로 회수(부족분 0 — wielder 안 건드림).
+		// ===== wielder 몫(not-pullable): 로프 길이 firm 홀드 =====
+		// 대상이 앵커(무거움/정적)라 wielder가 양보한다 — 움직이지 않는 대상 너머로 걸어갈 수 없으니 로프 길이
+		// 경계에 firm하게 붙든다(질량 제한 소프트 아님 — 앵커 통과·발산 방지). 위치 클램프 / 안쪽 속도 회수.
+		const float Response = FMath::Clamp(HoldConfig.TetherResponse, 0.0f, 1.0f);
+		const float MaxStep = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f) * DeltaTime;
+		const float WielderStep = (MaxStep > 0.0f) ? FMath::Min(Overshoot * Response, MaxStep) : (Overshoot * Response);
+		if (WielderStep <= KINDA_SMALL_NUMBER)
+		{
+			return;
+		}
+		auto ClampSimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Inward, float Step) -> float
+		{
+			// 시뮬 루트(물리 액터 구성): 바깥 속도 제거 + 안쪽 위치 클램프(속도 주입 X → 관성/발사 없음). 로프 축
+			// 성분만 건드려 수직(중력) 성분 보존. TeleportPhysics는 물리 속도를 안 만든다(sweep은 벽 통과 방지).
+			const FVector Vel = Prim->GetPhysicsLinearVelocity(BoneName);
+			const float CurInward = static_cast<float>(FVector::DotProduct(Vel, Inward));
+			if (CurInward < 0.0f)
+			{
+				Prim->SetPhysicsLinearVelocity(Vel - Inward * CurInward, /*bAddToCurrent*/ false, BoneName);
+			}
+			if (Step > KINDA_SMALL_NUMBER)
+			{
+				Prim->SetWorldLocation(Prim->GetComponentLocation() + Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
+			}
+			return Step;
 		};
 		auto ClampActor = [&](AActor* Actor, const FVector& Inward, float Step)
 		{
-			// CMC 구동 캐릭터: 위치 텔레포트 대신 **안쪽 속도**를 목표까지 top-up한다. 캐릭터는 관성이 없어(다음
-			// TG_PrePhysics에서 CMC가 입력으로 속도 재유도) 이 안쪽 속도가 관성으로 남지 않아 fling이 없고, CMC가
-			// 자기 적분에서 소비해 실제 안쪽 이동으로 통합한다 — 위치 텔레포트처럼 다음 틱에 덮어써지지 않는다.
-			// 목표속도는 물리 바디용 Step(=Overshoot×TetherResponse)이 아니라 **캐릭터 전용 회수 계수**로 계산해
-			// overshoot 회수를 독립적으로 약하게 둔다. 바깥 walk 상쇄(경계 유지)는 즉시·완전(감쇠 X — 아래 참조),
-			// 안쪽 회수만 TetherCharacterSmoothTime으로 감쇠해 걸림 순간 급당김("훅")을 없앤다.
+			// CMC 캐릭터: 바깥 walk 상쇄(경계 유지, 즉시·완전) + 안쪽 회수(EffReel 세기, TetherCharacterSmoothTime
+			// 감쇠로 걸림 순간 "훅" 제거). 캐릭터는 관성이 없어(CMC가 매 틱 입력으로 속도 재유도) fling이 없고, CMC가
+			// 이 속도를 자기 적분에서 소비해 실제 이동으로 통합한다(위치 텔레포트처럼 다음 틱에 덮어써지지 않음).
 			if (const ACharacter* Character = Cast<ACharacter>(Actor))
 			{
 				if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 				{
 					if (Movement->MovementMode != MOVE_None)
 					{
-						const float ReclaimResp = FMath::Clamp(HoldConfig.TetherCharacterReclaim, 0.0f, 1.0f);
-						const float SpeedCap = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
-						float TargetSpeed = Overshoot * ReclaimResp / FMath::Max(DeltaTime, 1e-4f); // 안쪽 회수 목표속도(약함).
-						if (SpeedCap > 0.0f)
-						{
-							TargetSpeed = FMath::Min(TargetSpeed, SpeedCap);
-						}
-						// 감쇠: 안쪽 회수만 목표속도로 여러 프레임에 걸쳐 부드럽게 접근(걸림 순간 "훅" 제거). 바깥 walk
-						// 상쇄는 감쇠하지 않는다 — 감쇠하면 지속 바깥 입력에서 CMC가 매 프레임 속도를 100% 재유도하는데
-						// 우리는 일부만 상쇄해 경계를 못 지키고 로프가 발산한다. 그래서 바깥은 즉시 완전 제거, 안쪽만 감쇠.
+						const float SpeedCapC = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
+						const float BaseReelC = FMath::Max(HoldConfig.TetherReelSpeed, 0.0f);
+						const float EffReelC = (SpeedCapC > 0.0f) ? FMath::Min(BaseReelC, SpeedCapC) : BaseReelC;
+						const float TaperC = FMath::Max(HoldConfig.TetherSettleDist, 0.01f);
+						const float TargetSpeed = FMath::Min(EffReelC * FMath::Clamp(Overshoot / TaperC, 0.0f, 1.0f), Overshoot / FMath::Max(DeltaTime, 1e-4f));
 						const float SmoothTau = FMath::Max(HoldConfig.TetherCharacterSmoothTime, 0.0f);
 						const float Alpha = (SmoothTau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / SmoothTau)) : 1.0f;
 						const FVector OldVel = Movement->Velocity;
-						const float CurAlong = static_cast<float>(FVector::DotProduct(OldVel, Inward)); // 현재 안쪽 성분(바깥이면 음수).
-						const float AfterWalkCancel = FMath::Max(CurAlong, 0.0f); // 바깥 walk 즉시 완전 제거(경계 보존).
+						const float CurAlong = static_cast<float>(FVector::DotProduct(OldVel, Inward));
+						const float AfterWalkCancel = FMath::Max(CurAlong, 0.0f); // 바깥 walk 즉시 완전 제거.
 						const float FinalAlong = (TargetSpeed > AfterWalkCancel)
-							? AfterWalkCancel + (TargetSpeed - AfterWalkCancel) * Alpha // 안쪽 회수만 감쇠 접근.
-							: AfterWalkCancel;                                          // 이미 안쪽 충분/회수 0 → 바깥만 제거.
+							? AfterWalkCancel + (TargetSpeed - AfterWalkCancel) * Alpha
+							: AfterWalkCancel;
 						if (FinalAlong > CurAlong)
 						{
 							FVector NewVel = OldVel + Inward * (FinalAlong - CurAlong);
-							if (SpeedCap > 0.0f)
+							if (SpeedCapC > 0.0f)
 							{
-								NewVel = NewVel.GetClampedToMaxSize(FMath::Max(SpeedCap, static_cast<float>(OldVel.Size())));
+								NewVel = NewVel.GetClampedToMaxSize(FMath::Max(SpeedCapC, static_cast<float>(OldVel.Size())));
 							}
 							Movement->Velocity = NewVel;
 						}
@@ -3609,37 +3673,17 @@ void URopeComponent::UpdateTether(float DeltaTime)
 					}
 				}
 			}
-			// 무브먼트가 없거나 꺼진(MOVE_None) 비캐릭터: 스윕 위치 오프셋 폴백(관성 없어 텔레포트 무해, 벽 통과 방지).
+			// MOVE_None/비캐릭터: 스윕 위치 오프셋 폴백.
 			if (Step > KINDA_SMALL_NUMBER)
 			{
 				Actor->AddActorWorldOffset(Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
 			}
 		};
-
-		// ---- 대상 양보 몫 ---- (공용 수신자 체인; sim-body는 ClampSimBody(위치 클램프), 캐릭터는 ClampActor).
-		// actualMoved = 대상이 실제로 안쪽으로 움직인 거리(sweep이 벽에 막히면 < TargetStep) → 부족분은 아래에서
-		// wielder로 넘어간다. 캐릭터/본 경로는 Step(부족분 0 — 위치 실측 불가/기존 동작).
-		float actualMoved = TargetStep;
-		if (TargetStep > KINDA_SMALL_NUMBER)
-		{
-			actualMoved = ApplyTetherReceiverChain(
-				MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, DirToAim, TargetStep,
-				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
-				[&](AActor* A, const FVector& D, float S) { ClampActor(A, D, S); });
-		}
-
-		// ---- wielder 양보 몫 ---- (방향 = 손(노드0)→로프 첫 다리 = 앵커 쪽; 시뮬 루트 → 캐릭터/스윕)
-		// not-pullable이면 전량 wielder, pullable이면 대상이 걸려 못 간 잔여분(TargetStep - 실제 이동)만 wielder에.
-		// → 대상이 잘 따라오면 0(자유), 대상이 벽에 걸리면 wielder가 대신 로프 길이에서 멈춘다.
-		const float WielderStep = bPullable ? FMath::Max(0.0f, TargetStep - actualMoved) : StepLen;
-		if (WielderStep > KINDA_SMALL_NUMBER)
-		{
-			const FVector WielderDir = ComputeSmoothedWielderDir(Aim, DirToAim, DeltaTime);
-			ApplyTetherReceiverChain(
-				nullptr, GetOwner(), NAME_None, WielderDir, WielderStep,
-				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
-				[&](AActor* A, const FVector& D, float S) { ClampActor(A, D, S); });
-		}
+		const FVector WielderDir = ComputeSmoothedWielderDir(Aim, DirToAim, DeltaTime);
+		ApplyTetherReceiverChain(
+			nullptr, GetOwner(), NAME_None, WielderDir, WielderStep,
+			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
+			[&](AActor* A, const FVector& D, float S) { ClampActor(A, D, S); });
 		return;
 	}
 

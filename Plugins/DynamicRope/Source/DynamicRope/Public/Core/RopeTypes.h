@@ -1138,6 +1138,18 @@ struct FRopeHoldConfig
 	float TetherMaxSpeed = 1500.0f;
 
 	/**
+	 * (BinaryPullable 전용) pullable 대상을 로프 길이로 되돌리는 리엘의 **최대 장력**. wielder가 자유끝이라 대상은
+	 * 이 장력 안에서만 끌려온다 — 프레임당 축 속도 서보 임펄스 J = clamp(mass·dV, ±이 값·dt)(양방향: 부족하면
+	 * 가속, 넘치면 제동). 가벼운 대상은 목표 리엘 속도(TetherMaxSpeed까지)에 도달해 잘 따라오고, 무겁거나 접지
+	 * 마찰이 큰 대상은 장력 한계로 뒤처지며 그만큼 로프가 자연스럽게 늘어난다("무게감"). 클수록 무거운 대상도 안
+	 * 늘어나게 따라오고, 작을수록 무게/마찰이 도드라진다. 참고: 어떤 질량 M이 목표 속도 V에 한 프레임 만에 도달하는
+	 * 문턱 장력 ≈ M·V·fps라, 사람 질량(50~100kg)을 스냅하게 끌려면 큰 값이 필요하다. 0 = 무제한(질량 무시 → 목표
+	 * 속도에 즉시 도달 = 정확 서보, 안정). MassShare 모드는 쓰지 않는다(양끝 분배로 처리).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	float TetherMaxTension = 150000.0f;
+
+	/**
 	 * 테더 회수 분배를 자동으로 정할지(기본 켜짐). 켜면 양끝의 유효 역질량(w=1/유효질량)으로 초과분을
 	 * 나눈다 — 무거울수록/앵커일수록 덜 움직인다(PBD 역질량 가중과 동일). 접지 캐릭터는 무한이 아니라
 	 * 유한 브레이스(질량 × GroundBraceFactor)로 저항하고, 공중이면 그냥 질량, MOVE_None/정적 비시뮬은
@@ -1160,21 +1172,11 @@ struct FRopeHoldConfig
 	//  하나로 통일. RopeComponent.cpp UpdateTargetPullable의 PullMassHysteresis 참조.)
 
 	/**
-	 * (BinaryPullable) CMC 구동 캐릭터 수신자(wielder / 캐릭터 대상)의 overshoot 회수 강도 [0..1].
-	 * 바깥 walk 상쇄(로프 길이 경계 유지)는 이 값과 무관하게 항상 100%이고, 이 값은 "이미 늘어난 overshoot를
-	 * 얼마나 빨리 안쪽으로 되돌릴지"만 정한다(캐릭터 안쪽 목표속도 = min(Overshoot × 이 값 / dt, TetherMaxSpeed)).
-	 * 물리 바디 위치 회수(TetherResponse)와 독립. 작을수록 부드럽게(과한 안쪽 당김 없이) 정상화, 0이면 회수
-	 * 없이 바깥 상쇄만(경계에 걸린 채 유지).
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float TetherCharacterReclaim = 0.05f;
-
-	/**
 	 * (BinaryPullable) CMC 캐릭터 제약(ClampActor)의 *안쪽 회수*(축적 Overshoot 되돌림)가 목표 속도로 접근하는
 	 * 감쇠 시간 상수(초, EMA). 바깥 walk 상쇄(로프 길이 경계 유지)는 이 값과 무관하게 항상 즉시·완전이고, 이 값은
 	 * "걸림 순간 안쪽으로 당겨오는 속도를 얼마나 부드럽게 올릴지"만 정한다. 0 = 즉시(걸림 순간 "훅"), >0 = 여러
-	 * 프레임에 걸쳐 부드럽게(alpha = 1-exp(-dt/이 값), 프레임레이트 독립). 당김 *크기*는 TetherCharacterReclaim,
-	 * *부드러움*은 이 값으로 역할이 나뉜다.
+	 * 프레임에 걸쳐 부드럽게(alpha = 1-exp(-dt/이 값), 프레임레이트 독립). 당김 *크기*는 MassShare와 통일한
+	 * 리엘 세기(TetherReelSpeed), *부드러움*은 이 값으로 역할이 나뉜다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
 	float TetherCharacterSmoothTime = 0.12f;
