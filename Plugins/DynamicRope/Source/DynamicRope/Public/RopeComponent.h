@@ -768,6 +768,9 @@ private:
 	/** GuidedThrow 완료 시 prepared anchor를 FRopeWrapState로 변환해 바로 Wrapped로 커밋한다. */
 	void FinishGuidedThrow();
 
+	/** 허공(대상 없음) 던지기: 레이 끝점(EndpointWorld)을 향한 아치 GuidedThrow를 시작한다(꽂힘 없이 완료 시 Free). */
+	void StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld);
+
 	FVector ComputeThrowInheritedVelocity(const FRopeThrowContext& ThrowContext) const;
 
 	/** WhipGuide에 넘길 설정 스냅샷을 Rope|Whip UPROPERTY들로부터 만든다. */

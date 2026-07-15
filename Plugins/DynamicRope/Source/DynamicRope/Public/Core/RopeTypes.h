@@ -83,8 +83,11 @@ enum class ERopeWrapResolveMode : uint8
 	AssistedJudged UMETA(DisplayName = "Assisted (Judged)"),
 
 	/**
-	 * ③ 무조건 성립: 입력 순간 확정한 preview가 곧 실행 경로(구속). preview 생성 실패 = 던지기
-	 * 거부(Aim 무효)라 던진 뒤의 실패는 없다. 자동 release(장력/거리)도 무효 — 명시 해제만.
+	 * ③ 조준한 대상에 무조건 성립: preview 생성 성공(대상 잠금) = 입력 순간 확정한 preview가 곧 실행
+	 * 경로(구속) → 무조건 꽂힘. 조준 던지기는 연출 후 실패가 없다.
+	 * preview 생성 실패(대상 없음/사거리 밖) = 던지기 거부가 아니라 **물리 탄도 투척으로 폴백** → 안 꽂히고
+	 * Free(바닥에 늘어짐). "안 꽂힘"은 실패가 아니라 "조준 안 한 던지기 = 물리 투척"이라는 별개의 정상 결과다
+	 * (보장은 '조준한 대상'에 대한 것 — 2026-07-14 재정의). 자동 release(장력/거리)는 성립 후에도 무효 — 명시 해제만.
 	 * 데모/연출/이동기용. BareWrap 결착의 무조건 성립은 Aim 단계에서 걸러진다(회의 결정 B).
 	 */
 	GuaranteedWrap UMETA(DisplayName = "Guaranteed")
@@ -1466,6 +1469,14 @@ struct FRopeThrowParams
 	float TipVelocityBoost = 1.0f;
 
 	/**
+	 * ③ GuidedThrow(Pierce) 비행 아치의 정점 높이 = 손→목표 거리 × 이 비율. 팁(창)이 위쪽 포물선을 그리며
+	 * 목표(꽂힘 지점 또는 허공 던지기의 레이 끝점)에 도달한다. 0 = 직선(아치 없음). 로프는 매 순간 일직선을
+	 * 유지하고 팁 궤적만 포물선이 된다. Alpha=1에서 오프셋 0이라 착지 지점은 정확히 유지된다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
+	float GuidedThrowArcHeightRatio = 0.25f;
+
+	/**
 	 * 던질 때 owner(캐릭터) 속도를 로프에 상속시키는 배율. 물리적 사실값은 1이지만 기본 5인 이유:
 	 * 달리며 던질 때 로프가 눈에 띄게 앞서 나가는 "관성 과장" 연출 — 게임필 튜닝값이다.
 	 * 0 = 상속 없음(제자리 던지기와 동일).
@@ -1628,6 +1639,12 @@ struct FRopeGuidedThrowState
 
 	/** Wielder가 확정한 prepared preview. 이 phase에서는 접촉 탐색을 다시 하지 않고 이 데이터만 따른다. */
 	FRopePreparedThrowPreview Prepared;
+
+	/**
+	 * 허공(대상 없음) 던지기: 레이 끝점을 향한 아치 비행. 대상 mesh/bone/anchor 없이 RenderPreview 직선만
+	 * 따라가고, 완료 시 꽂힘(Wrapped)이 아니라 Free로 낙하한다. false면 종전 조준 던지기(꽂힘).
+	 */
+	bool bFreeThrow = false;
 
 	/** GuidedThrow 시작 순간의 실제 rope 위치. RenderPreview.Points로 전체 노드를 lerp하는 시작점이다. */
 	TArray<FVector> StartPositions;

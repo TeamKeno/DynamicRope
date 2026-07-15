@@ -812,22 +812,21 @@ void URopeWielderComponent::Throw()
 
 	if (UsesLockedPreview())
 	{
-		// Locked 모드는 "보이는 preview대로만 던진다"가 계약이다.
-		// 따라서 마지막 prepared preview가 없으면 물리 throw로 fallback하지 않고 입력을 버린다.
-		if (!LastPreparedPreview.IsValid())
+		// ③: 유효한 prepared preview가 있으면(대상 조준 성공) 그 경로대로 무조건 꽂고(GuidedThrow),
+		// 없으면(허공/사거리 밖) ThrowInDirection이 물리 탄도 투척으로 폴백한다 — 던지기 입력을 버리지 않는다
+		// (2026-07-14 보장 재정의: 보장은 '조준한 대상'에 대한 것).
+		if (LastPreparedPreview.IsValid())
 		{
-			UE_LOG(LogDynamicRope, Log, TEXT("RopeWielder on %s: preview path locked throw rejected (no valid prepared preview)."),
-				*GetNameSafe(GetOwner()));
-			NotifyThrowRejected(ERopeThrowRejectReason::NoPreparedPreview);
-			OnThrowRejected.Broadcast(ERopeThrowRejectReason::NoPreparedPreview);
-			return;
+			// 몽타주가 있으면 손을 놓는 AnimNotify까지 시간이 지나므로, 입력 순간 플레이어가 본 preview를 보존한다.
+			// notify 시점에 새로 build하면 손/카메라/타겟 포즈 변화로 결과가 달라질 수 있다.
+			PendingPreparedThrow = LastPreparedPreview;
+			HeldPreparedPreview = ResolvePreparedPreviewForDisplay(LastPreparedPreview);
+			HeldPreviewExpireTimeSeconds = 0.0f;
 		}
-
-		// 몽타주가 있으면 손을 놓는 AnimNotify까지 시간이 지나므로, 입력 순간 플레이어가 본 preview를 보존한다.
-		// notify 시점에 새로 build하면 손/카메라/타겟 포즈 변화로 결과가 달라질 수 있다.
-		PendingPreparedThrow = LastPreparedPreview;
-		HeldPreparedPreview = ResolvePreparedPreviewForDisplay(LastPreparedPreview);
-		HeldPreviewExpireTimeSeconds = 0.0f;
+		else
+		{
+			PendingPreparedThrow.Reset();
+		}
 		if (ThrowMontage)
 		{
 			PlayThrowMontage();
@@ -868,10 +867,15 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 				: LastPreparedPreview;
 			if (!Prepared.IsValid())
 			{
-				UE_LOG(LogDynamicRope, Log, TEXT("RopeWielder on %s: prepared throw ignored (preview is not valid)."),
-					*GetNameSafe(GetOwner()));
-				NotifyThrowRejected(ERopeThrowRejectReason::PreparedInvalid);
-				OnThrowRejected.Broadcast(ERopeThrowRejectReason::PreparedInvalid);
+				// 허공(대상 없음/사거리 밖): 거부 대신 물리 탄도 투척으로 폴백한다(2026-07-14 보장 재정의).
+				// 로프의 ThrowWithContext ③ 경로가 Reel 게이트 + preview 재빌드 실패 → 탄도 Flight로 마무리한다
+				// (③ Flight는 캡처 안 함 → 안 꽂히고 Free). 던지기 방향은 조준 컨텍스트(BuildThrowContext)로 해석.
+				ClearThrowPreview();
+				PendingPreparedThrow.Reset();
+				LastPreparedPreview.Reset();
+				Rope->ThrowWithContext(BuildThrowContext(AimDir));
+				NotifyThrown();
+				OnThrown.Broadcast();
 				return;
 			}
 

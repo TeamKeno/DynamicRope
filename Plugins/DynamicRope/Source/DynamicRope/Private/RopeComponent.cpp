@@ -340,13 +340,27 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 
 		FRopePreparedThrowPreview Prepared;
 		FString FailureReason;
-		if (!BuildPreparedWrappingPreview(ThrowContext, /*ReachScale*/ 1.0f, /*SegmentCount*/ 32,
-			/*SampleStep*/ 80.0f, /*QueryRadius*/ 0.0f, Prepared, &FailureReason) ||
-			!ThrowWithPreparedPreview(Prepared))
+		if (BuildPreparedWrappingPreview(ThrowContext, /*ReachScale*/ 1.0f, /*SegmentCount*/ 32,
+			/*SampleStep*/ 80.0f, /*QueryRadius*/ 0.0f, Prepared, &FailureReason))
 		{
-			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw rejected: %s"),
-				*GetName(), FailureReason.IsEmpty() ? TEXT("prepared throw failed") : *FailureReason);
+			// 대상 조준 성공 → 무조건 꽂힘(GuidedThrow, 내부에서 OnDeployFromReel).
+			if (!ThrowWithPreparedPreview(Prepared))
+			{
+				UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed prepared throw failed after build: %s"),
+					*GetName(), FailureReason.IsEmpty() ? TEXT("prepared throw failed") : *FailureReason);
+			}
+			return;
 		}
+
+		// preview 실패(대상 없음/사거리 밖) → 거부가 아니라 레이 끝점을 향한 아치 던지기로 폴백(꽂힘 없이 Free 낙하).
+		// 조준 던지기와 아치를 통일한다(2026-07-14 보장 재정의: 보장은 '조준한 대상'에 대한 것).
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw: no aim target (%s) — arc toss toward ray-end."),
+			*GetName(), FailureReason.IsEmpty() ? TEXT("no preview") : *FailureReason);
+		const FRopeThrowContext ResolvedFree = ResolveThrowContext(ThrowContext);
+		const float FreeLen = FMath::Max(Sim.RopeLength, RopeLength);
+		const FVector FreeEndpoint = ResolvedFree.Origin + ResolvedFree.FrameForward.GetSafeNormal() * FreeLen;
+		OnDeployFromReel();
+		StartFreeGuidedThrow(ResolvedFree, FreeEndpoint);
 		return;
 	}
 
@@ -2032,7 +2046,11 @@ void URopeComponent::InjectThrowVelocityIntoVerlet(const FRopeThrowContext& Reso
 
 void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 {
-	if (!GuidedThrowState.bActive || !GuidedThrowState.Prepared.IsValid() || Sim.Num() < 2)
+	// 허공(free) 던지기는 대상 mesh/bone 없이 RenderPreview 직선만 따라가므로 IsValid(대상 요구) 대신 경로만 확인한다.
+	const bool bFree = GuidedThrowState.bFreeThrow;
+	const bool bValidPath = bFree ? GuidedThrowState.Prepared.RenderPreview.IsValid()
+		: GuidedThrowState.Prepared.IsValid();
+	if (!GuidedThrowState.bActive || !bValidPath || Sim.Num() < 2)
 	{
 		SetPhase(ERopePhase::Releasing, TEXT("guided throw invalid"));
 		ResetTransientPhaseState();
@@ -2055,11 +2073,18 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 	const float EasedAlpha = Alpha * Alpha * (3.0f - 2.0f * Alpha);
 	const FRopePreparedThrowPreview& Prepared = GuidedThrowState.Prepared;
 
+	// 상향 포물선 아치(조준·허공 공통): 팁이 손→목표 직선 위로 부풀었다 착지한다. Alpha=0.5 정점, 0·1에서 0.
+	// NodeFrac 선형이라 매 순간 로프는 일직선이고 팁 궤적만 포물선. Alpha=1에서 오프셋 0이라 착지 지점은 정확히 유지.
+	const FVector ArcOriginW = Prepared.ResolveGuideOriginWorld();
+	const FVector ArcTipW = Prepared.ResolveGuidePointWorld(Sim.Num() - 1);
+	const float ArcHeight = ThrowParams.GuidedThrowArcHeightRatio * static_cast<float>((ArcTipW - ArcOriginW).Size());
+	const float ArcT = 4.0f * Alpha * (1.0f - Alpha);
+	const int32 LastNode = Sim.Num() - 1;
+
 	SimFrame.OverrideFrame.EnsureSize(Sim.Num());
 	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
 	{
-		// 1차 구현은 전체 노드를 시작 위치에서 preview 결과 위치로 부드럽게 보간한다.
-		// 나중에 모션 품질을 높이면 여기만 front-follow/arc-length sampling 방식으로 교체하면 된다.
+		// 전체 노드를 시작 위치 → preview 결과 위치로 보간하고, 시간 기반 상향 아치 오프셋을 더한다.
 		// 매 프레임 현재 owner transform으로 복원하므로 손 소켓 애니메이션에는 종속되지 않고 owner 이동은 따른다.
 		FVector Target = Prepared.ResolveGuidePointWorld(NodeIndex);
 		if (NodeIndex == 0 && Sim.bStartPinned)
@@ -2071,14 +2096,32 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 		const FVector Start = GuidedThrowState.StartPositions.IsValidIndex(NodeIndex)
 			? GuidedThrowState.StartPositions[NodeIndex]
 			: Sim.Positions[NodeIndex];
-		const FVector Position = FMath::Lerp(Start, Target, EasedAlpha);
+		FVector Position = FMath::Lerp(Start, Target, EasedAlpha);
+
+		const float NodeFrac = (LastNode > 0) ? static_cast<float>(NodeIndex) / static_cast<float>(LastNode) : 0.0f;
+		Position += FVector::UpVector * (ArcHeight * ArcT * NodeFrac);
+
 		SimFrame.OverrideFrame.SetPosition(NodeIndex, Position, /*bZeroVelocity*/ true);
 		SimFrame.OverrideFrame.SetInvMass(NodeIndex, 0.0f);
 	}
 
 	if (Alpha >= 1.0f)
 	{
-		FinishGuidedThrow();
+		if (bFree)
+		{
+			// 허공 던지기: 꽂힘 없이 완료 → 비-핀 노드를 물리로 되돌리고 Free로 낙하시킨다.
+			for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
+			{
+				SimFrame.OverrideFrame.SetInvMass(NodeIndex, (NodeIndex == 0 && Sim.bStartPinned) ? 0.0f : 1.0f);
+				SimFrame.OverrideFrame.SetPrevFromPosition(NodeIndex);
+			}
+			SetPhase(ERopePhase::Free, TEXT("free guided throw landed"));
+			ResetTransientPhaseState();
+		}
+		else
+		{
+			FinishGuidedThrow();
+		}
 	}
 }
 
@@ -2123,6 +2166,58 @@ void URopeComponent::FinishGuidedThrow()
 	// ③ preview 기반 성립은 판정을 거치지 않으므로 판정값은 -1(미측정) 계약이다.
 	const FRopeWrappedEventInfo WrappedInfo = MakeWrappedEventInfo(Seed, /*AngleDeg*/ -1.0f, /*CoverageDeg*/ -1.0f);
 	DispatchWrapped(WrappedInfo);
+}
+
+void URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld)
+{
+	// 허공(대상 없음) 던지기: 손 원점 → 레이 끝점 직선을 아치로 재생하고, 완료 시 꽂힘 없이 Free로 낙하한다.
+	// preview는 straight 월드 라인만 채운다 — ResolveGuidePointWorld는 owner-local이 없으면 월드 Points로 폴백한다.
+	EnsureRopeInitialized();
+	if (Sim.Num() < 2)
+	{
+		return;
+	}
+
+	const FVector Origin = ThrowContext.Origin;
+
+	FRopePreparedThrowPreview Free;
+	Free.bValid = false; // 대상 없음 — free 경로는 GuidedThrowState.bFreeThrow로 진행한다(IsValid 불요).
+	Free.ThrowContext = ThrowContext;
+	Free.RenderPreview.Points.SetNum(Sim.Num());
+	for (int32 i = 0; i < Sim.Num(); ++i)
+	{
+		const float Alpha = static_cast<float>(i) / static_cast<float>(Sim.Num() - 1);
+		Free.RenderPreview.Points[i] = FMath::Lerp(Origin, EndpointWorld, Alpha);
+	}
+	Free.RenderPreview.Radius = FMath::Max(0.1f, Radius * 1.05f);
+	Free.RenderPreview.NumSides = FMath::Clamp(NumSides, 3, 32);
+
+	if (WrapController.IsActive())
+	{
+		WrapController.Release(ERopeReleaseReason::Manual);
+	}
+	ResetTransientPhaseState();
+	ReleaseCooldown = 0.0f;
+
+	GuidedThrowState.Reset();
+	GuidedThrowState.bActive = true;
+	GuidedThrowState.bFreeThrow = true;
+	GuidedThrowState.Prepared = Free;
+	GuidedThrowState.StartPositions = Sim.Positions;
+	GuidedThrowState.Elapsed = 0.0f;
+	GuidedThrowState.Duration = FMath::Max(0.01f, WrapConfig.WrappingMotionDuration);
+
+	Sim.bStartPinned = true;
+	Sim.StartPinPrev = Origin;
+	Sim.StartPinTarget = Origin;
+	if (Sim.Positions.IsValidIndex(0))
+	{
+		Sim.Positions[0] = Origin;
+		Sim.PrevPositions[0] = Origin;
+	}
+
+	SetPhase(ERopePhase::GuidedThrow, *FString::Printf(TEXT("free throw to ray-end, len=%.0f"),
+		static_cast<float>((EndpointWorld - Origin).Size())));
 }
 
 FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
@@ -2255,6 +2350,13 @@ bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCapture);
 		bShouldCapture = FRopeFlightContactDetector::ShouldCapture(*CaptureCandidates, DetectParams);
+	}
+
+	// ③ GuaranteedWrap의 물리 Flight(허공 투척)는 절대 캡처/감김하지 않는다 — Pierce는 GuidedThrow로만 성립한다.
+	// 캡처를 끄면 whip 종료 후 타임아웃으로 Free(바닥에 늘어짐)로 복귀한다(2026-07-14 재정의).
+	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
+	{
+		bShouldCapture = false;
 	}
 
 	if (bShouldCapture)
