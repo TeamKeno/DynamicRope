@@ -1058,10 +1058,20 @@ struct FRopeDetectConfig
 UENUM(BlueprintType)
 enum class ERopeTetherMode : uint8
 {
-	/** (기본) 양끝 유효 역질량으로 초과분 연속 분배 + 고정속도 리엘 — 기존 동작. */
+	/**
+	 * (기본) 초과분을 **양끝에 유효 역질량 비율로 나눠** 회수한다 + 고정속도 리엘. 무거운 쪽이 덜 움직이는
+	 * "무게감"이 여기서 나온다(질량 = 분배 비율). 단 인가 자체는 질량 무관한 속도 세팅이라 물리 시뮬레이션은
+	 * 아니다 — 물리적인 건 *분배*(실제 구속이 나누는 방식)지 인가가 아니다.
+	 */
 	MassShare = 0 UMETA(DisplayName = "Mass Share"),
 
-	/** 질량 비교로 한쪽만 회수(가벼우면 대상, 무거우면 wielder) + 소프트 스프링. 무거운 대상엔 능동 Pull이 climb-in. */
+	/**
+	 * 초과분을 **한쪽 끝이 전부** 흡수한다 — 질량은 "어느 끝이 양보하나"의 **이진 판정에만** 쓰인다(대상이
+	 * 가벼우면 대상이, 무거우면 wielder가 양보). 진 쪽은 **비신축 클램프**로 로프 길이를 지킨다: 바깥 속도만
+	 * 제거하고 위치를 경계로 되돌릴 뿐, **안쪽 속도를 주입하지 않는다**(관성 없음 → 발사 없음). 그래서 무게에
+	 * 비례한 뒤처짐이 없다 — 그건 MassShare의 몫이다. 이긴 쪽은 자유(대상이 벽에 걸려 못 오면 그 부족분만 wielder가
+	 * 대신 멈춘다). 무거운 대상엔 능동 Pull이 climb-in으로 wielder를 끌어당긴다.
+	 */
 	BinaryPullable = 1 UMETA(DisplayName = "Binary Pullable"),
 };
 
@@ -1142,26 +1152,6 @@ struct FRopeHoldConfig
 	float TetherMaxSpeed = 1500.0f;
 
 	/**
-	 * (BinaryPullable 전용, **기본 0 = 끔**) pullable 대상 리엘에 **최대 장력**을 걸어 "무게감"을 만드는 opt-in 노브.
-	 *
-	 * **기본(0) = 무제한 = 정확 서보 = 비신축 클램프** — 이게 BinaryPullable의 정체다. 이 모드는 질량을 "어느 끝이
-	 * 양보하나"를 정하는 **이진 판정에만** 쓰고, 진 쪽은 물리와 무관하게 로프 길이를 지킨다(초과분을 그 끝이 전부
-	 * 흡수). 무게에 따라 뒤처지는 연출은 MassShare의 역질량 분배가 맡는다.
-	 *
-	 * 0이 아니면 프레임당 ΔV를 J/mass = min(dV, 이 값·dt/mass)로 제한한다 → 무거운/접지 마찰이 큰 대상은 뒤처지고
-	 * 그만큼 로프가 늘어난다. **켜기 전에 알 것 — 이 클램프는 대칭이라 가속뿐 아니라 *제동*도 느려진다**:
-	 *  - 뒤처짐: 질량 M이 목표 속도 V에 한 프레임에 도달하는 문턱 장력 ≈ M·V·fps(50kg·400cm/s·60fps ≈ 1.2M).
-	 *    그보다 작으면 그 비율만큼 뒤처진다. **리엘 속도 상한을 올려도 안 잡힌다** — 장력이 지배하는 구간이라
-	 *    도달 속도가 그대로다(CL 401에서 실제로 그 실수를 했다).
-	 *  - 코스팅/폭주: 경계에서 목표가 0이 돼도 제동이 같은 상한에 묶여 지나쳐 간다 → 슬랙 → 재팽팽 → 진동.
-	 *  - CMC 캐릭터에는 **절벽**이 있다: 이 값이 Mass × BrakingDecelerationWalking(기본 ≈2048)보다 작으면 접지
-	 *    제동이 우리 가속을 전부 먹어 **아예 안 움직인다**(부드럽게 느려지지 않는다). 100kg이면 ≈205k가 손익분기.
-	 * MassShare 모드는 이 값을 쓰지 않는다(양끝 분배로 처리).
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
-	float TetherMaxTension = 0.0f;
-
-	/**
 	 * 테더 회수 분배를 자동으로 정할지(기본 켜짐). 켜면 양끝의 유효 역질량(w=1/유효질량)으로 초과분을
 	 * 나눈다 — 무거울수록/앵커일수록 덜 움직인다(PBD 역질량 가중과 동일). 접지 캐릭터는 무한이 아니라
 	 * 유한 브레이스(질량 × GroundBraceFactor)로 저항하고, 공중이면 그냥 질량, MOVE_None/정적 비시뮬은
@@ -1184,14 +1174,18 @@ struct FRopeHoldConfig
 	//  하나로 통일. RopeComponent.cpp UpdateTargetPullable의 PullMassHysteresis 참조.)
 
 	/**
-	 * (BinaryPullable) CMC 캐릭터 제약(ClampMovement)의 *안쪽 회수*(축적 Overshoot 되돌림)가 목표 속도로 접근하는
-	 * 감쇠 시간 상수(초, EMA). 바깥 walk 상쇄(로프 길이 경계 유지)는 이 값과 무관하게 항상 즉시·완전이고, 이 값은
-	 * "걸림 순간 안쪽으로 당겨오는 속도를 얼마나 부드럽게 올릴지"만 정한다. 0 = 즉시(걸림 순간 "훅"), >0 = 여러
-	 * 프레임에 걸쳐 부드럽게(alpha = 1-exp(-dt/이 값), 프레임레이트 독립). 당김 *크기*는 MassShare와 통일한
-	 * 리엘 세기(TetherReelSpeed), *부드러움*은 이 값으로 역할이 나뉜다.
+	 * (BinaryPullable) CMC 캐릭터 제약(ClampMovement)의 *안쪽 회수*가 목표 속도로 접근하는 감쇠 시간 상수(초, EMA).
+	 * 바깥 walk 상쇄(로프 길이 경계 유지)는 이 값과 무관하게 항상 즉시·완전이고, 이 값은 "걸림 순간 안쪽으로
+	 * 당겨오는 속도를 얼마나 부드럽게 올릴지"만 정한다(alpha = 1-exp(-dt/이 값), 프레임레이트 독립).
+	 *
+	 * **기본 0(즉시) — 켜면 CMC 마찰에 진다.** 우리는 매 프레임 목표까지의 *차분*만 alpha 비율로 주는데, CMC는
+	 * 그 사이 접지 마찰/제동으로 속도를 계속 빼간다. alpha가 작으면 주입 < 마찰이라 정상 상태 속도가 목표보다
+	 * 한참 아래에서 멈춘다("느리게 끌려옴"). 0이면 매 프레임 목표로 정확히 세팅해 마찰이 뺏어간 만큼을 즉시
+	 * 되돌린다. "훅" 걱정은 리엘 목표 속도 자체가 이미 막는다 — 걸리는 순간엔 Overshoot이 작아 목표 속도도
+	 * 작고(Overshoot/dt 캡), 초과분이 쌓이면서 자연히 올라간다. 즉 램프는 목표가 하지 감쇠가 할 일이 아니다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
-	float TetherCharacterSmoothTime = 0.12f;
+	float TetherCharacterSmoothTime = 0.0f;
 
 	/**
 	 * 자동 분배가 질량차에 얼마나 민감한지(역질량에 거는 지수). 분배는 ShareT = WT^k / (WT^k + WW^k)로,
