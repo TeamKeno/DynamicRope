@@ -3464,6 +3464,16 @@ namespace
 		// (1) 스켈레탈 랙돌(풀/부분): 감긴 본에서 부모 체인으로 승격한 가장 가까운 *시뮬 본*(바디 없는 트위스트 본 대응).
 		// 루트 IsSimulatingPhysics()로 게이트하지 않는다 — 부분 랙돌(루트 키네마틱·서브트리만 시뮬)이 빠져 아래
 		// 캐릭터 MOVE_None 분기로 떨어지면 무한질량(=끌림 불가)으로 오판된다. 시뮬 본 존재로만 판정한다.
+		//
+		// ⚠ 알려진 한계(2026-07-15, 미수정 — 재현 조건이 기본 off라 보류): 여기서 내는 Mass는 그 본의 *바디*
+		// 질량이라, **부분 랙돌**(URopeRagdollResponseComponent::bOnlyBelowWrappedBone=true → 감긴 본만 시뮬,
+		// 부모는 키네마틱, CMC는 활성)에서는 거짓이 된다. 팔뚝 바디는 3kg이지만 키네마틱 부모에 관절로 묶여
+		// 있어 로프가 당겼을 때의 *유효* 질량은 무한이다. 그 거짓값이 MassShare 몫 분배와 BinaryPullable 끌림
+		// 판정을 모두 오염시켜(가벼운 대상 = 전량 배정/pullable → wielder가 양보 안 함) overshoot가 닫히지 않고
+		// 로프만 늘어난다. 게다가 테더는 본에만 서보를 넣어 키네마틱 구속이 그걸 흡수한다(능동 Pull은
+		// ApplyPullForce의 이중 인가로 이동체에도 힘을 줘 이 경우에도 끌린다 — 두 견인 경로가 갈리는 지점).
+		// 고치려면 인가(테더도 CMC 동반 구동)와 질량(키네마틱에 묶인 본이면 캐릭터 질량 보고) 둘 다 필요하다.
+		// 풀 랙돌은 전 바디가 시뮬이라 키네마틱 앵커가 없고 관절로 몸 전체가 끌려오므로 정상이다.
 		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
 		{
 			const FName SimBone = FindNearestSimulatingBone(Skel, WrappedBone);
@@ -4000,7 +4010,10 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		// 힘을 줘 실제로 끌리게 한다(본 인가는 팔다리가 당겨지는 시각 반응, 무브먼트 인가는 몸통 견인 —
 		// 역할이 다르다). 풀 랙돌은 루트 바디가 시뮬이라 해당 없음(이중 인가 없음). 본이 아닌 rung(시뮬
 		// 프리미티브/루트)은 정의상 IsSimulatingPhysics()라 여기 안 걸린다.
-		// 주: 테더에는 이 이중 인가가 없어 같은 셋업에서 대상이 양보하지 않을 수 있다 — 통합 여부는 별도 결정.
+		//
+		// 이 이중 인가는 **Pull에만 있고 테더에는 없다** — 의도적으로 남긴 비대칭이다(2026-07-15 결정). 재현
+		// 조건인 부분 랙돌(bOnlyBelowWrappedBone)이 기본 off이고 쓸 계획이 없어 보류했다. 켤 거면 테더도 함께
+		// 고쳐야 한다(인가 + 질량 두 겹) — 상세는 ResolveTetherEndpoint rung 1과 bOnlyBelowWrappedBone 주석.
 		if (!Endpoint.Bone.IsNone() && !Endpoint.Prim->IsSimulatingPhysics())
 		{
 			if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Owner))

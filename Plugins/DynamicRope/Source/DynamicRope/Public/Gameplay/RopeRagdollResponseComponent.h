@@ -53,7 +53,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll", meta = (ClampMin = "0.0", Units = "s", EditCondition = "bRagdollOnWrapped"))
 	float RagdollOnWrappedDelay = 0.3f;
 
-	/** 자동 전환 시 풀 랙돌 대신 감긴 본 이하만 부분 랙돌(회의의 "감긴 본만 전환" 안). */
+	/**
+	 * 자동 전환 시 풀 랙돌 대신 감긴 본 이하만 부분 랙돌(회의의 "감긴 본만 전환" 안).
+	 *
+	 * ⚠ 켜기 전에 읽을 것 — 켜면 **테더(자동 회수)가 대상을 못 끈다**(2026-07-15 조사, 미수정: 재현 조건이
+	 * 기본 off이고 쓸 계획이 없어 보류). 부분 랙돌은 정의상 캡슐/무브먼트를 살려두므로(EnterPartialRagdoll)
+	 * 감긴 본만 시뮬이고 그 부모는 키네마틱이다. 로프 쪽에서 두 겹으로 깨진다:
+	 *  1) 인가: 테더는 감긴 본에만 서보를 넣는데 키네마틱 부모 구속(무한질량)이 그걸 흡수해 액터로 전달되지
+	 *     않는다 — 팔이 관절 한계까지 휘적일 뿐 캐릭터는 안 움직인다. 능동 Pull은 이 경우 이동체에도 같은
+	 *     힘을 함께 준다(URopeComponent::ApplyPullForce의 이중 인가) → **키 입력 Pull은 되는데 테더만 안 되는**
+	 *     비대칭으로 보인다.
+	 *  2) 질량/판정: 테더의 수신자 해석(ResolveTetherEndpoint)은 그 본의 *바디* 질량(팔뚝 ≈ 3kg)을 유효질량으로
+	 *     보고한다 — 실제로는 키네마틱에 묶여 유효질량이 무한인데도. 그 거짓값이 MassShare의 몫 분배(가벼운
+	 *     대상 = 거의 전량 배정 → wielder는 양보 안 함)와 BinaryPullable의 끌림 판정(pullable=true → wielder
+	 *     완전 자유)을 모두 오염시켜, overshoot가 닫히지 않고 로프만 늘어난다.
+	 * 고치려면 두 겹 다 필요하다(테더도 CMC 동반 구동 + 키네마틱에 묶인 본은 캐릭터 질량 보고). 인가만 고치면
+	 * 몫 분배가 여전히 틀린다. 기본값 false로 두는 한 무해하다 — 풀 랙돌은 전 바디가 시뮬이라 키네마틱 앵커가
+	 * 없고 관절로 몸 전체가 끌려오므로 정상 동작한다.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll", meta = (EditCondition = "bRagdollOnWrapped"))
 	bool bOnlyBelowWrappedBone = false;
 
