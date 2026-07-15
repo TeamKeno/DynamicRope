@@ -508,19 +508,6 @@ float URopeComponent::GetMaxTension() const
 	return MaxTension;
 }
 
-bool URopeComponent::IsTensioned(float SlackTolerance) const
-{
-	float Slack = 0.0f;
-	float StraightDistance = 0.0f;
-	float AvailableLength = 0.0f;
-	if (!ComputeTensionSlack(Slack, StraightDistance, AvailableLength))
-	{
-		return false;
-	}
-
-	return Slack <= FMath::Max(0.0f, SlackTolerance);
-}
-
 bool URopeComponent::BuildThrowArcPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
 	FRopeArcPreviewData& OutPreview) const
 {
@@ -4173,95 +4160,4 @@ void URopeComponent::ApplyPullForceToWielder(const FVector& Force)
 		}
 	}
 	// 수신자 없음(비캐릭터 + 비시뮬 루트): 조용히 드롭 — climb-in 불가한 구성.
-}
-
-bool URopeComponent::ComputeTensionSlack(float& OutSlack, float& OutStraightDistance, float& OutAvailableLength) const
-{
-	OutSlack = 0.0f;
-	OutStraightDistance = 0.0f;
-	OutAvailableLength = 0.0f;
-
-	if (Phase != ERopePhase::Wrapping && Phase != ERopePhase::Wrapped)
-	{
-		return false;
-	}
-
-	if (!Sim.Positions.IsValidIndex(0))
-	{
-		return false;
-	}
-
-	int32 AnchorNodeIndex = INDEX_NONE;
-	FVector AnchorWorld = FVector::ZeroVector;
-	bool bHasAnchor = false;
-
-	const auto ResolveSurfaceAnchor = [this](const FRopeSurfaceAnchor& Anchor, FVector& OutWorld, int32& OutNodeIndex) -> bool
-	{
-		OutNodeIndex = Anchor.NodeIndex;
-		if (!Sim.Positions.IsValidIndex(OutNodeIndex))
-		{
-			return false;
-		}
-
-		OutWorld = Sim.Positions[OutNodeIndex];
-		const USceneComponent* Mesh = Anchor.Mesh.Get();
-		if (Mesh && !Anchor.Bone.IsNone())
-		{
-			const FTransform BoneXform = ResolveBindingWorld(Mesh, Anchor.Bone);
-			const FVector SurfaceWorld = BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
-			const FVector NormalWorld = BoneXform.TransformVectorNoScale(Anchor.LocalNormal)
-				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-			OutWorld = SurfaceWorld + NormalWorld * Anchor.SurfaceOffset;
-		}
-
-		return true;
-	};
-
-	if (Phase == ERopePhase::Wrapped)
-	{
-		if (WrapController.State.Anchors.Num() > 0)
-		{
-			bHasAnchor = ResolveSurfaceAnchor(WrapController.State.Anchors[0], AnchorWorld, AnchorNodeIndex);
-		}
-		else if (WrapController.State.Latched.Num() > 0)
-		{
-			const FRopeLatchNode& Latch = WrapController.State.Latched[0];
-			AnchorNodeIndex = Latch.NodeIndex;
-			if (Sim.Positions.IsValidIndex(AnchorNodeIndex))
-			{
-				AnchorWorld = Sim.Positions[AnchorNodeIndex];
-				if (const USceneComponent* Mesh = WrapController.State.Mesh.Get())
-				{
-					const FName Bone = Latch.Bone.IsNone() ? WrapController.State.BoneName : Latch.Bone;
-					if (!Bone.IsNone())
-					{
-						AnchorWorld = ResolveBindingWorld(Mesh, Bone).TransformPosition(Latch.BoneLocalPos);
-					}
-				}
-				bHasAnchor = true;
-			}
-		}
-	}
-	else
-	{
-		if (WrappingPhase.State.Anchors.Num() > 0)
-		{
-			bHasAnchor = ResolveSurfaceAnchor(WrappingPhase.State.Anchors[0], AnchorWorld, AnchorNodeIndex);
-		}
-		else if (WrappingPhase.State.LatchAnchor.NodeIndex != INDEX_NONE)
-		{
-			bHasAnchor = ResolveSurfaceAnchor(WrappingPhase.State.LatchAnchor, AnchorWorld, AnchorNodeIndex);
-		}
-	}
-
-	if (!bHasAnchor || AnchorNodeIndex <= 0)
-	{
-		return false;
-	}
-
-	const FVector PinWorld = Sim.bStartPinned ? Sim.StartPinTarget : Sim.Positions[0];
-	OutStraightDistance = FVector::Dist(PinWorld, AnchorWorld);
-	OutAvailableLength = static_cast<float>(AnchorNodeIndex) * FMath::Max(Sim.SegmentLength, 0.0f);
-	OutSlack = OutAvailableLength - OutStraightDistance;
-	return OutAvailableLength > KINDA_SMALL_NUMBER;
 }

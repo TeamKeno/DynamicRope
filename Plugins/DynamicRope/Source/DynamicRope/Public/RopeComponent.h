@@ -332,9 +332,6 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	ERopePhase GetPhase() const { return Phase; }
 
-	UFUNCTION(BlueprintPure, Category = "Rope")
-	bool IsTensioned(float SlackTolerance = 5.0f) const;
-
 	/**
 	 * 세그먼트(SegmentIndex = 노드 i~i+1) 장력. 솔버의 XPBD distance λ에서 유도한 힘(F=max(0,-λ)/h²,
 	 * 질량 1 노드 기준 상대 단위 — 매달린 노드 1개의 중력 하중 ≈ 980). 스트레치만 양수, 슬랙/압축 = 0.
@@ -892,6 +889,4 @@ private:
 
 	/** latch/anchor 노드 InvMass=0, 나머지 1 — Wrapped 중 자유 구간만 솔버가 움직이게. */
 	void ApplyWrappedMassMask(bool bResetDynamicNodeVelocity = false);
-
-	bool ComputeTensionSlack(float& OutSlack, float& OutStraightDistance, float& OutAvailableLength) const;
 };
