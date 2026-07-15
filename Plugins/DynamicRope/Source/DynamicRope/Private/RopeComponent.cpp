@@ -3605,19 +3605,20 @@ namespace
 
 		if (Ctx.bTargetPullable)
 		{
-			// ===== 대상 몫: 질량/마찰 제한 리엘 =====
-			// wielder가 자유끝이라 대상은 자기 물리(질량·마찰)에 종속돼 따라온다 — 가벼우면 리엘 목표 속도에
-			// 도달하고, 무겁거나 접지 마찰이 크면 장력 한계로 뒤처지며 그만큼 로프가 자연스럽게 늘어난다
-			// (BinaryPullable의 의도된 물리: 정직한 무게감 + wielder 우선).
-			// 리엘 목표 속도 = MassShare와 같은 고정 속도(min(TetherReelSpeed, TetherMaxSpeed)) + 경계 taper.
-			// CL 401에서 이 상한을 TetherMaxSpeed(1500)로 올렸다가 되돌렸다: "50kg이 뒤처진다"의 원인은 상한이
-			// 아니라 장력이었고(50kg·150k에서 프레임당 ΔV = MaxImpulse/m = 50cm/s라 400이든 1500이든 도달 속도가
-			// 같다 — 문턱 장력 ≈ M·V·fps), 반면 가벼운 대상은 1500까지 순식간에 붙어 방향 급전환 때 그 속도가
-			// 직교로 남아 하늘로 날아갔다. 이득 0, 위험 3.75배였다.
+			// ===== 대상 몫: 비신축 리엘 =====
+			// 이 모드는 질량을 **"어느 끝이 양보하나"의 이진 판정에만** 쓴다(UpdateTargetPullable). 진 쪽 = 대상은
+			// 그 뒤로 물리와 무관하게 로프 길이를 지킨다 — 초과분을 대상이 전부 흡수하고 wielder는 자유다.
+			// 무게에 비례해 뒤처지는 연출은 MassShare(역질량 분배)의 몫이지 여기가 아니다.
+			// TetherMaxTension(기본 0=끔)을 켜면 그때만 질량/마찰 제한이 붙어 늘어나기 시작한다 — opt-in.
+			// 리엘 상한은 **TetherMaxSpeed**다(TetherReelSpeed 아님 — MassShare와 다른 지점). BinaryPullable은
+			// wielder가 자유끝이라 **대상 혼자 초과분을 다 닫아야** 하기 때문이다: MassShare처럼 400에 묶으면
+			// wielder가 그보다 빨리 달아날 때 대상이 못 따라가 로프가 영구히 늘어난다(MassShare는 wielder도 자기
+			// 몫만큼 끌려오므로 400으로 족하다). 경계 근처에선 taper로 0까지 감속. 0 = 상한 없음.
 			const float SpeedCap = FMath::Max(Cfg.TetherMaxSpeed, 0.0f);
-			const float BaseReel = FMath::Max(Cfg.TetherReelSpeed, 0.0f);
-			const float EffReel = (SpeedCap > 0.0f) ? FMath::Min(BaseReel, SpeedCap) : BaseReel;
-			const float ReelTargetSpeed = RopeTraction::ComputeReelTargetSpeed(Overshoot, EffReel, Cfg.TetherSettleDist, DeltaTime);
+			const float InvDtC = 1.0f / FMath::Max(DeltaTime, 1e-4f);
+			const float ReelTargetSpeed = (SpeedCap > 0.0f)
+				? RopeTraction::ComputeReelTargetSpeed(Overshoot, SpeedCap, Cfg.TetherSettleDist, DeltaTime)
+				: (Overshoot * InvDtC);
 			const float MaxImpulse = FMath::Max(Cfg.TetherMaxTension, 0.0f) * DeltaTime;
 			const float PerpDamp = FMath::Clamp(Cfg.TetherPerpDamping, 0.0f, 1.0f);
 			// 로프 축 속도를 목표로 서보하는 **양방향** 임펄스: J = clamp(mass·dV, ±MaxTension·dt). 부족하면 가속,
