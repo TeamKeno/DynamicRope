@@ -3965,66 +3965,48 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	const float MaxTension = static_cast<float>(Force.Size());
 	const FVector Dir = (MaxTension > KINDA_SMALL_NUMBER) ? (Force / MaxTension) : FVector::ZeroVector;
 
-	// 1) 스켈레탈: 감긴 본(부모 체인 승격 포함)이 물리 시뮬 중(래그돌/물리 프랍)이면 그 바디에 직접.
-	//    감긴 본 자체에 바디가 없으면(트위스트 본 등) 가장 가까운 시뮬 부모 바디로.
-	if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
+	// 수신자 해석은 테더와 같은 래더를 쓴다(ResolveTetherEndpoint) — 능동 Pull이 자기 래더를 따로 걷던 것을
+	// 없앴다. 예전엔 순서가 달라(Pull은 캐릭터 무브먼트를 시뮬 프리미티브보다 먼저 봤다) "활성 CMC 캐릭터가
+	// 소유한 시뮬 프리미티브"에 감기면 Pull은 무브먼트를, 테더는 그 프리미티브를 끌었다. 무브먼트 분기는
+	// 원래 "애니메이션 본이라 밀 수 없으니 이동체를 민다"는 *폴백*인데 시뮬 검사보다 앞서 있어 밀 수 있는
+	// 대상까지 가로챈 것 — 구체적(물리 바디) → 일반적(이동체) 순서로 통일한다.
+	// (해석이 함께 내는 유효질량은 Pull이 쓰지 않는다 — 장력 상한 드라이브가 바디 질량을 직접 읽는다.)
+	const FRopeTetherEndpoint Endpoint = ResolveTetherEndpoint(MeshComp, Owner, Pull.Bone, HoldConfig.GroundBraceFactor);
+
+	switch (Endpoint.Kind)
 	{
-		const FName SimBone = FindNearestSimulatingBone(Skel, Pull.Bone);
-		if (!SimBone.IsNone())
+	case ERopeEndpointKind::SimBody:
+		// 시뮬 바디(스켈레탈 승격 본 / 시뮬 프리미티브 / 시뮬 루트): 장력 상한 속도 드라이브로 직접 인가한다
+		// (무게중심 임펄스라 토크/스핀 없음, 오버슛 없어 먼지/턱턱 없음, 무거우면 뒤처짐). 각속도 클램프로 잔여 스핀 억제.
+		ApplyPullVelocityDrive(Endpoint.Prim, Endpoint.Bone, Dir, MaxTension, DeltaTime);
+		ClampPulledBodyVelocity(Endpoint.Prim, Endpoint.Bone);
+		// 부분 랙돌(감긴 본은 시뮬인데 메시 루트 바디는 키네마틱): 시뮬 본에 준 힘은 키네마틱 부모 구속
+		// (무한질량)이 흡수해 액터로 전달되지 않는다. 캐릭터가 여전히 무브먼트로 구동 중이면 이동체에도 같은
+		// 힘을 줘 실제로 끌리게 한다(본 인가는 팔다리가 당겨지는 시각 반응, 무브먼트 인가는 몸통 견인 —
+		// 역할이 다르다). 풀 랙돌은 루트 바디가 시뮬이라 해당 없음(이중 인가 없음). 본이 아닌 rung(시뮬
+		// 프리미티브/루트)은 정의상 IsSimulatingPhysics()라 여기 안 걸린다.
+		// 주: 테더에는 이 이중 인가가 없어 같은 셋업에서 대상이 양보하지 않을 수 있다 — 통합 여부는 별도 결정.
+		if (!Endpoint.Bone.IsNone() && !Endpoint.Prim->IsSimulatingPhysics())
 		{
-			// 장력 상한 속도 드라이브: 대상을 목표 속도로 몰되 임펄스를 J=min(질량×ΔV, 장력×dt)로 클램프한다
-			// (무게중심 임펄스라 토크/스핀 없음, 오버슛 없어 먼지/턱턱 없음, 무거우면 뒤처짐). 각속도 클램프로 잔여
-			// 스핀 억제. 부분 랙돌(루트 키네마틱)은 아래에서 이동체에도 같은 힘을 줘 몸통을 끈다.
-			ApplyPullVelocityDrive(Skel, SimBone, Dir, MaxTension, DeltaTime);
-			ClampPulledBodyVelocity(Skel, SimBone);
-			// 부분 랙돌(메시 루트 바디는 키네마틱): 시뮬 본에 준 힘은 키네마틱 부모 구속(무한질량)이 흡수해
-			// 액터로 전달되지 않는다. 캐릭터가 여전히 무브먼트로 구동 중이면 이동체에도 같은 힘을 줘 실제로
-			// 끌리게 한다(본 인가는 팔다리가 당겨지는 시각 반응, 무브먼트 인가는 몸통 견인 — 역할이 다르다).
-			// 풀 랙돌은 루트 바디가 시뮬이라 여기로 들어오지 않는다(이중 인가 없음).
-			if (!Skel->IsSimulatingPhysics())
+			if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Owner))
 			{
-				if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Owner))
-				{
-					Movement->AddForce(Force);
-				}
+				Movement->AddForce(Force);
 			}
-			return;
 		}
-	}
-
-	// 2) 캐릭터면 무브먼트에 힘 — 애니메이션 구동 본에는 힘을 줄 수 없으므로 이동체 전체를 견인한다
-	//    (PoC 4.2: 본/루트에 단순 힘 전달까지. 팔다리 IK/래그돌 반응은 후속).
-	//    무브먼트가 힘을 실제로 소비할 때만(MOVE_None 제외) — 아니면 3)/무수신 경고로 떨어져 원인이 보인다.
-	if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Owner))
-	{
-		Movement->AddForce(Force);
 		return;
+
+	case ERopeEndpointKind::Character:
+		// 애니메이션 구동 본에는 힘을 줄 수 없으므로 이동체 전체를 견인한다(PoC 4.2: 본/루트에 단순 힘 전달까지.
+		// 팔다리 IK/랙돌 반응은 후속). MOVE_None이면 여기로 오지 않는다(해석이 앵커로 분류 → 아래 경고).
+		Endpoint.Movement->AddForce(Force);
+		return;
+
+	default:
+		break;
 	}
 
-	// 3) wrap 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등)면 그 바디에 직접(장력 상한 속도 드라이브).
-	if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
-	{
-		if (Prim->IsSimulatingPhysics())
-		{
-			ApplyPullVelocityDrive(Prim, NAME_None, Dir, MaxTension, DeltaTime);
-			ClampPulledBodyVelocity(Prim, NAME_None);
-			return;
-		}
-	}
-
-	// 4) 그 외: 시뮬 중인 루트 프리미티브(물리 액터에 붙은 컴포넌트 구성).
-	if (UPrimitiveComponent* Root = Owner ? Cast<UPrimitiveComponent>(Owner->GetRootComponent()) : nullptr)
-	{
-		if (Root->IsSimulatingPhysics())
-		{
-			ApplyPullVelocityDrive(Root, NAME_None, Dir, MaxTension, DeltaTime);
-			ClampPulledBodyVelocity(Root, NAME_None);
-			return;
-		}
-	}
-
-	// 수신자 없음(시뮬 바디 없는 본 체인/비시뮬 컴포넌트 + 무브먼트 비활성/비캐릭터 + 비시뮬 루트): 힘이
-	// 조용히 사라지는 걸 wrap당 1회 알린다.
+	// 수신자 없음(앵커/None = 시뮬 바디 없는 본 체인·비시뮬 컴포넌트 + 무브먼트 비활성·비캐릭터 + 비시뮬 루트):
+	// 힘이 조용히 사라지는 걸 wrap당 1회 알린다.
 	if (!PullDrive.bLoggedPullNoReceiver)
 	{
 		PullDrive.bLoggedPullNoReceiver = true;
