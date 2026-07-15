@@ -46,27 +46,6 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeOnReleased, FName, Bone, ERopeReleaseReason, Reason);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeOnPhaseChanged, ERopePhase, OldPhase, ERopePhase, NewPhase);
 
-/** RopePreviewComponent가 자기 preview를 만들 때 필요한 읽기 전용 스냅샷. */
-struct FRopePreviewBuildContext
-{
-	FRopeThrowContext ThrowContext;
-	FRopeWhipGuide::FSwingBasis SwingBasis;
-	FRopeWhipGuide::FConfig WhipConfig;
-	// BuildPreviewContext 호출 직후의 동기 preview 생성 중에만 유효하다. 호출 범위 밖에 저장하면 안 된다.
-	const TArray<IRopeCollider*>* Colliders = nullptr;
-	FVector InheritedVelocity = FVector::ZeroVector;
-	float RopeLength = 0.0f;
-	float SegmentLength = 0.0f;
-	float RopeRadius = 0.0f;
-	int32 RopeNumSides = 8;
-	int32 NodeCount = 0;
-	ERopePhase Phase = ERopePhase::Free;
-	// 아크 탐색 튜닝 스냅샷(로프 소유 — URopeComponent::PreviewReachScale/PreviewQueryRadius).
-	// whip 프레임 생성이 가이드 길이·충돌 질의 반경에 쓴다.
-	float PreviewReachScale = 1.0f;
-	float PreviewQueryRadius = 0.0f;
-};
-
 // (FRopeAimRayHitResult / FRopeAimRayThrowRequest는 Logic/RopeAimTargeting.h로 이동 — 위 include로 계속 노출된다.)
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
@@ -299,8 +278,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Arc Query Radius"))
 	float PreviewQueryRadius = 0.0f;
 
-	/** 표시용 whip preview 프레임 생성이 쓰는 읽기 스냅샷(현재 throw/whip/sim/collider). 렌더 컴포넌트가 소비한다. */
-	bool BuildPreviewContext(const FRopeThrowContext& ThrowContext, FRopePreviewBuildContext& OutContext) const;
 
 	/** Builds the current pre-wrapped rope centerline preview from the active/contacting wrap seed. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")

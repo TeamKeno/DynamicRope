@@ -1116,25 +1116,11 @@ void URopeWielderComponent::DisplayHeldPreparedPreview()
 	}
 }
 
-void URopeWielderComponent::DisplayPreviewCenterline(const FRopeWrapPreviewData& Centerline,
-	const FRopeThrowContext& ThrowContext)
+void URopeWielderComponent::DisplayPreviewCenterline(const FRopeWrapPreviewData& Centerline)
 {
 	// 표시는 전적으로 선택 사항 — 계산과 분리돼 있어 여기서 실패해도 prepared(던지기용)는 건드리지 않는다.
 	if (!bShowThrowPreview || !PreviewComponent || !Rope)
 	{
-		return;
-	}
-
-	if (PreviewComponent->PreviewMode == ERopePreviewMode::WhipGuideAnimation)
-	{
-		FString WhipReason;
-		if (!PreviewComponent->ShowWhipGuideAnimation(*Rope, ThrowContext, &WhipReason))
-		{
-			// 연출 실패는 로그만 — 던지기(prepared)와 무관하다.
-			UE_LOG(LogDynamicRope, Verbose, TEXT("RopeWielder on %s: whip guide preview not shown (%s)"),
-				*GetNameSafe(GetOwner()), *WhipReason);
-			PreviewComponent->ClearPreview();
-		}
 		return;
 	}
 
@@ -1198,7 +1184,7 @@ void URopeWielderComponent::UpdateThrowPreview()
 		StoreAimGuideFrameIfNeeded(LastPreparedPreview);
 		HeldPreparedPreview = ResolvePreparedPreviewForDisplay(LastPreparedPreview);
 		HeldPreviewExpireTimeSeconds = 0.0f;
-		DisplayPreviewCenterline(HeldPreparedPreview, ThrowContext);
+		DisplayPreviewCenterline(HeldPreparedPreview);
 	}
 	else
 	{
@@ -1219,7 +1205,7 @@ void URopeWielderComponent::UpdateThrowPreview()
 			LastPreviewPhase = RopePhase;
 			return;
 		}
-		DisplayPreviewCenterline(Centerline, ThrowContext);
+		DisplayPreviewCenterline(Centerline);
 	}
 
 	LogPreviewBuildResult(true, TEXT("preview built"));

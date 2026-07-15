@@ -531,7 +531,7 @@ private:
 	void UpdateAimRayColliderQueryBounds();
 
 	/** 주어진 centerline을 preview 컴포넌트에 넘겨 그린다(표시 OFF/컴포넌트 없음이면 no-op). */
-	void DisplayPreviewCenterline(const FRopeWrapPreviewData& Centerline, const FRopeThrowContext& ThrowContext);
+	void DisplayPreviewCenterline(const FRopeWrapPreviewData& Centerline);
 
 	/** 확정된 HeldPreparedPreview를 새 build 없이 그대로 유지 표시한다(표시 OFF면 no-op). */
 	void DisplayHeldPreparedPreview();

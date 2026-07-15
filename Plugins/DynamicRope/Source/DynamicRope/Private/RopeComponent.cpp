@@ -567,33 +567,6 @@ void URopeComponent::QueueAimRayThrow(const FRopeAimRayThrowRequest& Request)
 		Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
 }
 
-bool URopeComponent::BuildPreviewContext(const FRopeThrowContext& ThrowContext, FRopePreviewBuildContext& OutContext) const
-{
-	OutContext = FRopePreviewBuildContext();
-	if (Sim.Num() < 2)
-	{
-		return false;
-	}
-
-	// preview가 실제 Flight와 같은 basis/config/속도/collider를 소비하도록 한 번에 스냅샷한다.
-	OutContext.ThrowContext = ResolveThrowContext(ThrowContext);
-	OutContext.SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
-		OutContext.ThrowContext, OutContext.ThrowContext.SwingPlane, OutContext.ThrowContext.CustomSwingPlaneNormal);
-	OutContext.WhipConfig = MakeWhipGuideConfig();
-	OutContext.Colliders = &SimFrame.FrameColliders;
-	OutContext.InheritedVelocity = ComputeThrowInheritedVelocity(OutContext.ThrowContext);
-	OutContext.RopeLength = FMath::Max(Sim.RopeLength, RopeLength);
-	OutContext.SegmentLength = Sim.SegmentLength;
-	OutContext.RopeRadius = Radius;
-	OutContext.RopeNumSides = NumSides;
-	OutContext.NodeCount = Sim.Num();
-	OutContext.Phase = Phase;
-	// 아크 탐색 튜닝도 같이 실어 보낸다 — 렌더 컴포넌트가 자체 사본을 갖지 않고 로프 단일 소스를 쓴다.
-	OutContext.PreviewReachScale = PreviewReachScale;
-	OutContext.PreviewQueryRadius = PreviewQueryRadius;
-	return OutContext.RopeLength > KINDA_SMALL_NUMBER && OutContext.SegmentLength > KINDA_SMALL_NUMBER;
-}
-
 bool URopeComponent::BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) const
 {
 	OutPreview = FRopeWrapPreviewData();
