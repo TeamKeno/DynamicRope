@@ -1093,9 +1093,19 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		break;
 
 	case ERopePhase::Reel:
-		// 던지기 준비 상태(③ 전용): 로프는 숨겨져 있고 창만 손 소켓에 있다. 솔브/접촉 없음.
-		SimFrame.bSolveThisFrame = false;
+	{
+		// 던지기 준비 상태(③ 전용): 창(팁)은 손 소켓에 고정하고, 그 뒤 로프는 물리로 자연스럽게 늘어뜨린다.
+		// node 0은 위의 pin 로직(StartPinTarget)이 손을 따라가므로, 팁만 소켓에 고정하면 사이 로프가 처진다.
+		// 팁 고정이 필요한 이유: 던지는 순간 팁 렌더가 소켓 → 마지막 노드로 바뀌므로(UpdateTipMeshTransform),
+		// 마지막 노드가 소켓에 있어야 창이 튀지 않는다. 솔브를 켜야 프리즈 없이 캐릭터를 따라간다.
+		// (Wrapped의 Hold와 동일 패턴: 위치 + InvMass=0 override → 나머지 노드는 솔버가 굴린다.)
+		const int32 ReelTipNode = Sim.Num() - 1;
+		SimFrame.OverrideFrame.EnsureSize(Sim.Num());
+		SimFrame.OverrideFrame.SetPosition(ReelTipNode, GetReelTipTransform().GetLocation(), /*bZeroVelocity*/ true);
+		SimFrame.OverrideFrame.SetInvMass(ReelTipNode, 0.0f);
+		SimFrame.bSolveThisFrame = true;
 		break;
+	}
 
 	case ERopePhase::Releasing:
 		// 모든 node를 solver에 다시 넘긴다(hand pin만 유지) — InvMass 복원 + Prev=Pos(튐 방지)를
@@ -2071,15 +2081,20 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 	SimFrame.OverrideFrame.EnsureSize(Sim.Num());
 	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
 	{
-		// 전체 노드를 시작 위치 → preview 결과 위치로 보간하고, 시간 기반 상향 아치 오프셋을 더한다.
-		// 매 프레임 현재 owner transform으로 복원하므로 손 소켓 애니메이션에는 종속되지 않고 owner 이동은 따른다.
-		FVector Target = Prepared.ResolveGuidePointWorld(NodeIndex);
+		// 손 앵커(node 0)는 보간하지 않고 항상 "현재" 손 위치에 붙어 있어야 한다. 가이드 원점(ResolveGuideOriginWorld)은
+		// 던진 순간의 좌표라(허공 던지기는 guide-frame-local이 없어 ThrowContext.Origin에 완전 고정) 그걸 목표로
+		// 삼으면 던지는 동안 캐릭터가 움직일 때 0번 노드가 손에서 떨어진다. GuidedThrow는 솔브를 끄므로 솔버의
+		// 손 핀도 걸리지 않는다 → 여기서 직접 현재 손에 고정한다.
+		// StartPinTarget은 PrepareSimFrame이 이번 프레임 GetComponentLocation()으로 이미 갱신했다.
 		if (NodeIndex == 0 && Sim.bStartPinned)
 		{
-			Target = Prepared.ResolveGuideOriginWorld();
-			Sim.StartPinTarget = Target;
+			SimFrame.OverrideFrame.SetPosition(0, Sim.StartPinTarget, /*bZeroVelocity*/ true);
+			SimFrame.OverrideFrame.SetInvMass(0, 0.0f);
+			continue;
 		}
 
+		// 나머지 노드는 시작 위치 → preview 결과 위치로 보간하고, 시간 기반 상향 아치 오프셋을 더한다.
+		const FVector Target = Prepared.ResolveGuidePointWorld(NodeIndex);
 		const FVector Start = GuidedThrowState.StartPositions.IsValidIndex(NodeIndex)
 			? GuidedThrowState.StartPositions[NodeIndex]
 			: Sim.Positions[NodeIndex];
