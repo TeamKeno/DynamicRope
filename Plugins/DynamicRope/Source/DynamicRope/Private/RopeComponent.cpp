@@ -3396,115 +3396,133 @@ namespace
 		return (Movement && Movement->MovementMode != MOVE_None) ? Movement : nullptr;
 	}
 
-	// 테더 자동 분배용 유효 역질량(w = 1/유효질량). 0 = 앵커(무한질량). 물리 바디 질량은 UE가 콜리전
-	// 볼륨×밀도로 자동 유지하는 값을 읽으므로 별도 세팅이 필요 없다. 판정 순서는 UpdateTether의 수신자
-	// 체인(스켈레탈 본 → 시뮬 프리미티브 → 소유 루트 → 캐릭터)과 동일 — 질량과 실제 인가점이 일치한다.
-	//  - 스켈레탈 풀 랙돌: 승격된 시뮬 본의 바디 질량.
-	//  - 시뮬 프리미티브(대상 자체/루트): GetMass().
-	//  - 캐릭터: 접지=유한 브레이스(Mass×GroundBraceFactor — 발 디딤 저항), 공중=Mass, MOVE_None=앵커.
-	//  - 그 외(정적/키네마틱/비시뮬 비캐릭터): 앵커(0). wielder는 MeshComp=null로 호출(루트/캐릭터만 해석).
-	float ResolveEndpointInvMass(const USceneComponent* MeshComp, const AActor* Owner, FName WrappedBone, float GroundBraceFactor)
+	// ===== 테더 엔드포인트(수신자) 해석 — 래더를 한 번만 건넌다 =====
+	// "무엇이 받는가"는 여기서 한 번만 판정해 종류·인가점·유효질량을 함께 확정한다. 예전엔 분배용 질량과 실제
+	// 인가 지점이 같은 래더를 각자 복제했고, 그 위에서 인가 람다가 자기가 어느 rung인지 다시 캐스팅으로
+	// 역추론했다 — 순서가 어긋나면 "질량은 앵커로 봤는데 힘은 다른 데 꽂히는" 버그가 된다(CL 392의 부분 랙돌
+	// 루트 게이트가 실제로 그랬다). 한 해석을 공유하면 그 어긋남이 구조적으로 불가능하다.
+	enum class ERopeEndpointKind : uint8
 	{
-		auto InvFromMass = [](float Mass) -> float
-		{
-			return (Mass > KINDA_SMALL_NUMBER) ? (1.0f / Mass) : 0.0f;
-		};
+		None,      // 수신자 없음(Owner도 없음).
+		SimBody,   // 물리 시뮬 바디: 스켈레탈 승격 본 / 대상 프리미티브 / 소유 루트.
+		Character, // CMC가 실제로 구동 중인 캐릭터(MOVE_None 제외).
+		Anchor,    // 정적/키네마틱/MOVE_None/비시뮬 비캐릭터 — 무한질량(움직이려면 위치 폴백뿐).
+	};
 
-		// (1) 스켈레탈 랙돌(풀/부분): 감긴 본에서 부모 체인으로 승격한 가장 가까운 *시뮬 본*의 바디 질량.
-		// 루트 IsSimulatingPhysics()로 게이트하면 부분 랙돌(루트 키네마틱·서브트리만 시뮬)이 빠져 아래 캐릭터
-		// MOVE_None 분기로 떨어져 무한질량(=끌림 불가)으로 오판된다 — 힘/테더 경로(FindNearestSimulatingBone,
-		// 루트 게이트 없음)와 어긋나 BinaryPullable에서 랙돌 대상이 안 끌리는 버그. 시뮬 본 존재로만 판정한다.
-		if (const USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
+	struct FRopeTetherEndpoint
+	{
+		ERopeEndpointKind Kind = ERopeEndpointKind::None;
+		// SimBody: 인가할 프리미티브와 본(본 없으면 컴포넌트 단위).
+		UPrimitiveComponent* Prim = nullptr;
+		FName Bone = NAME_None;
+		// Character: 인가할 무브먼트.
+		UCharacterMovementComponent* Movement = nullptr;
+		// 위치 폴백/로그용 소유 액터(Kind 무관, 있으면 채움).
+		AActor* Actor = nullptr;
+		// 유효 질량(kg). 캐릭터는 접지 브레이스 포함. 0 = 앵커(무한질량).
+		float Mass = 0.0f;
+	};
+
+	// 수신자 해석(대상/wielder 공용). 순서: 스켈레탈 시뮬 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터 → 앵커.
+	//  - MeshComp: 대상이면 State.Mesh, wielder면 nullptr(스켈레탈·프리미티브 rung 자동 skip → 루트부터).
+	//  - 물리 바디 질량은 UE가 콜리전 볼륨×밀도로 자동 유지하는 값이라 별도 세팅이 필요 없다.
+	//  - 캐릭터 접지는 유한 브레이스(Mass×GroundBraceFactor — 발 디딤 저항), 공중은 Mass, MOVE_None은 앵커.
+	FRopeTetherEndpoint ResolveTetherEndpoint(USceneComponent* MeshComp, AActor* Owner, FName WrappedBone, float GroundBraceFactor)
+	{
+		FRopeTetherEndpoint Out;
+		Out.Actor = Owner;
+
+		// (1) 스켈레탈 랙돌(풀/부분): 감긴 본에서 부모 체인으로 승격한 가장 가까운 *시뮬 본*(바디 없는 트위스트 본 대응).
+		// 루트 IsSimulatingPhysics()로 게이트하지 않는다 — 부분 랙돌(루트 키네마틱·서브트리만 시뮬)이 빠져 아래
+		// 캐릭터 MOVE_None 분기로 떨어지면 무한질량(=끌림 불가)으로 오판된다. 시뮬 본 존재로만 판정한다.
+		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
 		{
 			const FName SimBone = FindNearestSimulatingBone(Skel, WrappedBone);
 			if (!SimBone.IsNone())
 			{
-				if (const FBodyInstance* Body = Skel->GetBodyInstance(SimBone))
-				{
-					return InvFromMass(static_cast<float>(Body->GetBodyMass()));
-				}
+				Out.Kind = ERopeEndpointKind::SimBody;
+				Out.Prim = Skel;
+				Out.Bone = SimBone;
+				Out.Mass = ResolveBodyMass(Skel, SimBone);
+				return Out;
 			}
 		}
 		// (2) 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등).
-		if (const UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
-		{
-			if (Prim->IsSimulatingPhysics())
-			{
-				return InvFromMass(static_cast<float>(Prim->GetMass()));
-			}
-		}
-		// (3) 소유 액터 루트 프리미티브가 시뮬 중.
-		if (Owner)
-		{
-			if (const UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
-			{
-				if (Root->IsSimulatingPhysics())
-				{
-					return InvFromMass(static_cast<float>(Root->GetMass()));
-				}
-			}
-		}
-		// (4) 캐릭터: 접지=유한 브레이스, 공중=Mass, MOVE_None=앵커.
-		if (const ACharacter* Character = Cast<ACharacter>(Owner))
-		{
-			if (const UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-			{
-				if (Movement->MovementMode == MOVE_None)
-				{
-					return 0.0f;
-				}
-				const float BraceScale = Movement->IsMovingOnGround() ? FMath::Max(GroundBraceFactor, 1.0f) : 1.0f;
-				return InvFromMass(Movement->Mass * BraceScale);
-			}
-		}
-		// (5) 정적/키네마틱/비시뮬 비캐릭터 → 앵커.
-		return 0.0f;
-	}
-
-	// 테더 회수 수신자 체인(MassShare/BinaryPullable · 대상/wielder 공용 골격). 네 곳이 같은 타입 래더
-	// (스켈레탈 시뮬 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터/액터 폴백)를 쓰고, 적용 알고리즘만 콜백으로 다르다.
-	//  - MeshComp: 대상이면 State.Mesh, wielder면 nullptr(스켈레탈·프리미티브 rung 자동 skip → 루트부터 시작).
-	//  - SimApply(Prim, Bone, Dir, Step) → 실제 진행 거리 반환(위치 클램프의 부족분 산출용; 속도 방식은 Step 반환).
-	//  - ActorApply(Actor, Dir, Step): 캐릭터/비시뮬 폴백.
-	// 반환 = sim-body에 적용됐으면 SimApply 반환, 아니면 Step(= 부족분 0).
-	float ApplyTetherReceiverChain(
-		USceneComponent* MeshComp, AActor* Owner, FName WrapBone,
-		const FVector& Dir, float Step,
-		TFunctionRef<float(UPrimitiveComponent*, FName, const FVector&, float)> SimApply,
-		TFunctionRef<void(AActor*, const FVector&, float)> ActorApply)
-	{
-		// (1) 스켈레탈 + 풀 랙돌: 감긴 본(부모 체인 승격 — 바디 없는 트위스트 본 대응) 시뮬 바디.
-		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
-		{
-			if (Skel->IsSimulatingPhysics())
-			{
-				const FName SimBone = FindNearestSimulatingBone(Skel, WrapBone);
-				if (!SimBone.IsNone())
-				{
-					return SimApply(Skel, SimBone, Dir, Step);
-				}
-			}
-		}
-		// (2) wrap 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등).
 		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
 		{
 			if (Prim->IsSimulatingPhysics())
 			{
-				return SimApply(Prim, NAME_None, Dir, Step);
+				Out.Kind = ERopeEndpointKind::SimBody;
+				Out.Prim = Prim;
+				Out.Mass = ResolveBodyMass(Prim, NAME_None);
+				return Out;
 			}
 		}
-		if (Owner)
+		if (!Owner)
 		{
-			// (3) 소유 액터 루트 프리미티브가 시뮬 중(물리 액터 구성). wielder는 MeshComp=nullptr라 여기서 시작.
-			if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
+			return Out; // None.
+		}
+		// (3) 소유 액터 루트 프리미티브가 시뮬 중(물리 액터 구성). wielder는 MeshComp=nullptr라 여기서 시작.
+		if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
+		{
+			if (Root->IsSimulatingPhysics())
 			{
-				if (Root->IsSimulatingPhysics())
+				Out.Kind = ERopeEndpointKind::SimBody;
+				Out.Prim = Root;
+				Out.Mass = ResolveBodyMass(Root, NAME_None);
+				return Out;
+			}
+		}
+		// (4) 캐릭터: MOVE_None(랙돌 셋업 관례)이면 무브먼트가 힘을 소비하지 않으니 앵커로 본다.
+		if (const ACharacter* Character = Cast<ACharacter>(Owner))
+		{
+			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+			{
+				if (Movement->MovementMode != MOVE_None)
 				{
-					return SimApply(Root, NAME_None, Dir, Step);
+					Out.Kind = ERopeEndpointKind::Character;
+					Out.Movement = Movement;
+					const float BraceScale = Movement->IsMovingOnGround() ? FMath::Max(GroundBraceFactor, 1.0f) : 1.0f;
+					Out.Mass = Movement->Mass * BraceScale;
+					return Out;
 				}
 			}
-			// (4) 캐릭터/비시뮬: 콜백 폴백(속도 톱업/스윕 오프셋 등 — 모드별 적용 로직).
-			ActorApply(Owner, Dir, Step);
+		}
+		// (5) 정적/키네마틱/MOVE_None/비시뮬 비캐릭터 → 앵커(질량 0). 위치 폴백만 가능하다.
+		Out.Kind = ERopeEndpointKind::Anchor;
+		return Out;
+	}
+
+	// 테더 자동 분배용 유효 역질량(w = 1/유효질량). 0 = 앵커(무한질량).
+	float EndpointInvMass(const FRopeTetherEndpoint& Endpoint)
+	{
+		return (Endpoint.Mass > KINDA_SMALL_NUMBER) ? (1.0f / Endpoint.Mass) : 0.0f;
+	}
+
+	// 해석된 수신자에 인가를 디스패치(MassShare/BinaryPullable · 대상/wielder 공용 골격). 네 곳이 이 골격을
+	// 쓰고 적용 알고리즘만 콜백으로 다르다. 콜백은 자기가 무엇을 받았는지 이미 알고 있다(재캐스팅 불필요).
+	//  - SimApply(Prim, Bone, Dir, Step) → 실제 진행 거리 반환(위치 클램프의 부족분 산출용; 속도 방식은 Step 반환).
+	//  - CharacterApply(Movement, Dir, Step): CMC 구동 캐릭터.
+	//  - AnchorApply(Actor, Dir, Step): 앵커(정적/MOVE_None) 위치 폴백.
+	// 반환 = sim-body에 적용됐으면 SimApply 반환, 아니면 Step(= 부족분 0).
+	float ApplyToTetherEndpoint(
+		const FRopeTetherEndpoint& Endpoint, const FVector& Dir, float Step,
+		TFunctionRef<float(UPrimitiveComponent*, FName, const FVector&, float)> SimApply,
+		TFunctionRef<void(UCharacterMovementComponent*, const FVector&, float)> CharacterApply,
+		TFunctionRef<void(AActor*, const FVector&, float)> AnchorApply)
+	{
+		switch (Endpoint.Kind)
+		{
+		case ERopeEndpointKind::SimBody:
+			return SimApply(Endpoint.Prim, Endpoint.Bone, Dir, Step);
+		case ERopeEndpointKind::Character:
+			CharacterApply(Endpoint.Movement, Dir, Step);
+			break;
+		case ERopeEndpointKind::Anchor:
+			AnchorApply(Endpoint.Actor, Dir, Step);
+			break;
+		default:
+			break;
 		}
 		return Step; // sim-body 미적용 → 부족분 0.
 	}
@@ -3577,12 +3595,19 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		return;
 	}
 
+	// 양끝 수신자 해석 — 프레임당 한 번, 두 모드 공용. 질량 분배(MassShare)와 실제 인가가 같은 해석을 공유하므로
+	// "질량은 앵커로 봤는데 힘은 다른 데 꽂히는" 어긋남이 구조적으로 불가능하다.
+	const FRopeTetherEndpoint TargetEndpoint = ResolveTetherEndpoint(
+		MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, HoldConfig.GroundBraceFactor);
+	const FRopeTetherEndpoint WielderEndpoint = ResolveTetherEndpoint(
+		nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor);
+
 	// ===== BinaryPullable 모드: 이진 양보끝 + 비신축 클램프 (아래 MassShare 경로와 완전 분리) =====
 	// 대상 유효질량 ≤ wielder 유효질량이면 "대상이 양보"(대상만 회수, wielder 불변), 아니면 "wielder가 양보"
 	// (wielder만 로프 길이 쪽으로 회수). 회수 방식은 **수신자 타입에 따라 다르다**:
 	//  - 물리 시뮬 바디(ClampSimBody): 위치 기반. 안쪽 속도를 주입하면 관성이 유지돼 경계를 지나쳐 코스팅→재팽팽
 	//    진동으로 튕겨 날아간다("자유분방하게 날아다니는" 버그) → 위치만 경계로 되돌리고 바깥 속도 성분만 제거.
-	//  - CMC 구동 캐릭터(ClampActor): 안쪽 속도 top-up. 로프 sim은 TG_PostPhysics라 CMC(TG_PrePhysics)의 이동
+	//  - CMC 구동 캐릭터(ClampMovement): 안쪽 속도 top-up. 로프 sim은 TG_PostPhysics라 CMC(TG_PrePhysics)의 이동
 	//    뒤에 도는 후행 보정인데, 위치 텔레포트는 다음 틱에 CMC가 입력으로 재적분해 덮어써 무효다(walk가
     //    TetherMaxSpeed×dt 위치 상한을 앞지르면 로프가 무한정 늘어난다). 캐릭터는 관성이 없어(매 틱 입력으로 속도
 	//    재유도) 안쪽 속도를 줘도 fling이 없고, CMC가 그 속도를 자기 적분에서 소비해 실제 안쪽 이동으로 통합한다.
@@ -3630,26 +3655,19 @@ void URopeComponent::UpdateTether(float DeltaTime)
 				}
 				return Step; // pullable 대상은 자기 물리로 따라옴 — 부족분을 wielder로 넘기지 않는다(자유 유지).
 			};
-			auto DriveActor = [&](AActor* Actor, const FVector& Inward, float Step)
+			auto DriveMovement = [&](UCharacterMovementComponent* Movement, const FVector& Inward, float Step)
 			{
-				if (const ACharacter* Character = Cast<ACharacter>(Actor))
+				const float CurAlong = static_cast<float>(FVector::DotProduct(Movement->Velocity, Inward));
+				const float J = ClampAxisImpulse(ComputeAxisDeltaV(CurAlong, ReelServo),
+					FMath::Max(Movement->Mass, KINDA_SMALL_NUMBER), MaxImpulse);
+				if (!FMath::IsNearlyZero(J))
 				{
-					if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-					{
-						if (Movement->MovementMode != MOVE_None)
-						{
-							const float CurAlong = static_cast<float>(FVector::DotProduct(Movement->Velocity, Inward));
-							const float J = ClampAxisImpulse(ComputeAxisDeltaV(CurAlong, ReelServo),
-								FMath::Max(Movement->Mass, KINDA_SMALL_NUMBER), MaxImpulse);
-							if (!FMath::IsNearlyZero(J))
-							{
-								Movement->AddImpulse(Inward * J, /*bVelocityChange*/ false); // Mass로 나뉨 + 접지 마찰 저항.
-							}
-							return;
-						}
-					}
+					Movement->AddImpulse(Inward * J, /*bVelocityChange*/ false); // Mass로 나뉨 + 접지 마찰 저항.
 				}
-				// 비캐릭터/MOVE_None(질량 개념 없음): 스윕 위치 오프셋 폴백(관성 없어 텔레포트 무해, 벽 통과 방지).
+			};
+			auto DriveAnchor = [&](AActor* Actor, const FVector& Inward, float Step)
+			{
+				// 앵커(질량 개념 없음): 스윕 위치 오프셋 폴백(관성 없어 텔레포트 무해, 벽 통과 방지).
 				if (Step > KINDA_SMALL_NUMBER)
 				{
 					Actor->AddActorWorldOffset(Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
@@ -3659,10 +3677,10 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			const float TargetStep = (SpeedCeil > 0.0f) ? FMath::Min(Overshoot, SpeedCeil * DeltaTime) : Overshoot;
 			if (TargetStep > KINDA_SMALL_NUMBER)
 			{
-				ApplyTetherReceiverChain(
-					MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, DirToAim, TargetStep,
+				ApplyToTetherEndpoint(TargetEndpoint, DirToAim, TargetStep,
 					[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return DriveSimBody(P, B, D, S); },
-					[&](AActor* A, const FVector& D, float S) { DriveActor(A, D, S); });
+					[&](UCharacterMovementComponent* M, const FVector& D, float S) { DriveMovement(M, D, S); },
+					[&](AActor* A, const FVector& D, float S) { DriveAnchor(A, D, S); });
 			}
 			return; // pullable: wielder는 회수하지 않는다(자유끝 우선).
 		}
@@ -3695,47 +3713,40 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			}
 			return Step;
 		};
-		auto ClampActor = [&](AActor* Actor, const FVector& Inward, float Step)
+		auto ClampMovement = [&](UCharacterMovementComponent* Movement, const FVector& Inward, float Step)
 		{
 			// CMC 캐릭터: 바깥 walk 상쇄(경계 유지, 즉시·완전) + 안쪽 회수(EffReel 세기, TetherCharacterSmoothTime
 			// 감쇠로 걸림 순간 "훅" 제거). 캐릭터는 관성이 없어(CMC가 매 틱 입력으로 속도 재유도) fling이 없고, CMC가
 			// 이 속도를 자기 적분에서 소비해 실제 이동으로 통합한다(위치 텔레포트처럼 다음 틱에 덮어써지지 않음).
-			if (const ACharacter* Character = Cast<ACharacter>(Actor))
+			const float SpeedCapC = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
+			const float BaseReelC = FMath::Max(HoldConfig.TetherReelSpeed, 0.0f);
+			const float EffReelC = (SpeedCapC > 0.0f) ? FMath::Min(BaseReelC, SpeedCapC) : BaseReelC;
+			const float SmoothTau = FMath::Max(HoldConfig.TetherCharacterSmoothTime, 0.0f);
+			// 바깥 walk는 즉시·완전 상쇄(bCancelOutward), 안쪽 회수는 SmoothTime 감쇠로 접근("훅" 제거).
+			const FRopeAxisServo Servo{
+				ComputeReelTargetSpeed(Overshoot, EffReelC, HoldConfig.TetherSettleDist, DeltaTime),
+				/*Alpha*/ (SmoothTau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / SmoothTau)) : 1.0f,
+				/*bBidirectional*/ false, /*bCancelOutward*/ true };
+			const FVector OldVel = Movement->Velocity;
+			const float DeltaV = ComputeAxisDeltaV(static_cast<float>(FVector::DotProduct(OldVel, Inward)), Servo);
+			if (DeltaV > 0.0f)
 			{
-				if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-				{
-					if (Movement->MovementMode != MOVE_None)
-					{
-						const float SpeedCapC = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
-						const float BaseReelC = FMath::Max(HoldConfig.TetherReelSpeed, 0.0f);
-						const float EffReelC = (SpeedCapC > 0.0f) ? FMath::Min(BaseReelC, SpeedCapC) : BaseReelC;
-						const float SmoothTau = FMath::Max(HoldConfig.TetherCharacterSmoothTime, 0.0f);
-						// 바깥 walk는 즉시·완전 상쇄(bCancelOutward), 안쪽 회수는 SmoothTime 감쇠로 접근("훅" 제거).
-						const FRopeAxisServo Servo{
-							ComputeReelTargetSpeed(Overshoot, EffReelC, HoldConfig.TetherSettleDist, DeltaTime),
-							/*Alpha*/ (SmoothTau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / SmoothTau)) : 1.0f,
-							/*bBidirectional*/ false, /*bCancelOutward*/ true };
-						const FVector OldVel = Movement->Velocity;
-						const float DeltaV = ComputeAxisDeltaV(static_cast<float>(FVector::DotProduct(OldVel, Inward)), Servo);
-						if (DeltaV > 0.0f)
-						{
-							Movement->Velocity = ClampInjectedVelocity(OldVel + Inward * DeltaV, OldVel, SpeedCapC);
-						}
-						return;
-					}
-				}
+				Movement->Velocity = ClampInjectedVelocity(OldVel + Inward * DeltaV, OldVel, SpeedCapC);
 			}
-			// MOVE_None/비캐릭터: 스윕 위치 오프셋 폴백.
+		};
+		auto ClampAnchor = [&](AActor* Actor, const FVector& Inward, float Step)
+		{
+			// 앵커(MOVE_None/비캐릭터): 스윕 위치 오프셋 폴백.
 			if (Step > KINDA_SMALL_NUMBER)
 			{
 				Actor->AddActorWorldOffset(Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
 			}
 		};
 		const FVector WielderDir = ComputeSmoothedWielderDir(Aim, DirToAim, DeltaTime);
-		ApplyTetherReceiverChain(
-			nullptr, GetOwner(), NAME_None, WielderDir, WielderStep,
+		ApplyToTetherEndpoint(WielderEndpoint, WielderDir, WielderStep,
 			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
-			[&](AActor* A, const FVector& D, float S) { ClampActor(A, D, S); });
+			[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S); },
+			[&](AActor* A, const FVector& D, float S) { ClampAnchor(A, D, S); });
 		return;
 	}
 
@@ -3774,8 +3785,8 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	}
 	else if (HoldConfig.bAutoTetherShare)
 	{
-		const float WT = ResolveEndpointInvMass(MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, HoldConfig.GroundBraceFactor);
-		const float WW = ResolveEndpointInvMass(nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor);
+		const float WT = EndpointInvMass(TargetEndpoint);
+		const float WW = EndpointInvMass(WielderEndpoint);
 		const float Total = WT + WW;
 		if (Total <= KINDA_SMALL_NUMBER)
 		{
@@ -3872,47 +3883,42 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 통합해 부드럽다. 물리 경로와 같은 "목표 속도까지 차분만" 원칙이라 누적/발산이 없고, walking은
 	// 수직 성분을 무브먼트가 버리므로 상향 견인은 지상 이탈(Wielder의 bAutoGroundExitOnUpwardPull)이
 	// 선행된다. 무브먼트가 없거나 꺼진(MOVE_None) 액터는 기존 스윕 오프셋 폴백(벽 통과 방지).
-	auto ApplyNonSimCorrection = [&](AActor* Actor, const FVector& Dir, float Step)
+	auto CorrectMovement = [&](UCharacterMovementComponent* Movement, const FVector& Dir, float Step)
 	{
-		if (const ACharacter* Character = Cast<ACharacter>(Actor))
+		// 목표까지 CorrectAlpha만큼만 접근(하드 세팅 X) — 진행 속도를 한 프레임에 뚝 끊지 않아 "턱턱" 방지.
+		const FRopeAxisServo Servo{ Step * InvDt, CorrectAlpha, /*bBidirectional*/ false, /*bCancelOutward*/ false };
+		const FVector OldVel = Movement->Velocity;
+		const float DeltaV = ComputeAxisDeltaV(static_cast<float>(FVector::DotProduct(OldVel, Dir)), Servo);
+		if (DeltaV > 0.0f)
 		{
-			UCharacterMovementComponent* Movement = Character->GetCharacterMovement();
-			if (Movement && Movement->MovementMode != MOVE_None)
-			{
-				// 목표까지 CorrectAlpha만큼만 접근(하드 세팅 X) — 진행 속도를 한 프레임에 뚝 끊지 않아 "턱턱" 방지.
-				const FRopeAxisServo Servo{ Step * InvDt, CorrectAlpha, /*bBidirectional*/ false, /*bCancelOutward*/ false };
-				const FVector OldVel = Movement->Velocity;
-				const float DeltaV = ComputeAxisDeltaV(static_cast<float>(FVector::DotProduct(OldVel, Dir)), Servo);
-				if (DeltaV > 0.0f)
-				{
-					Movement->Velocity = ClampInjectedVelocity(OldVel + Dir * DeltaV, OldVel, FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f));
-				}
-				return;
-			}
+			Movement->Velocity = ClampInjectedVelocity(OldVel + Dir * DeltaV, OldVel, FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f));
 		}
-		// 무브먼트가 없거나 꺼진(MOVE_None) 비캐릭터: 스윕 위치 오프셋 폴백(벽 통과 방지).
+	};
+	// 앵커(무브먼트가 없거나 꺼진 MOVE_None/비캐릭터): 스윕 위치 오프셋 폴백(벽 통과 방지).
+	auto CorrectAnchor = [&](AActor* Actor, const FVector& Dir, float Step)
+	{
 		Actor->AddActorWorldOffset(Dir * Step, /*bSweep*/ true);
 	};
 
-	// ---- 대상 몫 ---- (공용 수신자 체인; sim-body는 ServoVelocity(정확 추종), 캐릭터/비시뮬은 ApplyNonSimCorrection).
+	// ---- 대상 몫 ---- (공용 수신자 디스패치; sim-body는 ServoVelocity(정확 추종), 캐릭터는 CorrectMovement, 앵커는 CorrectAnchor).
 	// 인가 본은 감긴 본에서 부모 체인 승격(FindNearestSimulatingBone, 헬퍼 내부) — 바디 없는 트위스트 본 대응.
 	if (TargetStep > KINDA_SMALL_NUMBER)
 	{
-		ApplyTetherReceiverChain(
-			MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, DirToAim, TargetStep,
+		ApplyToTetherEndpoint(TargetEndpoint, DirToAim, TargetStep,
 			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { ServoVelocity(P, B, D, S * InvDt); return S; },
-			[&](AActor* A, const FVector& D, float S) { ApplyNonSimCorrection(A, D, S); });
+			[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S); },
+			[&](AActor* A, const FVector& D, float S) { CorrectAnchor(A, D, S); });
 	}
 
 	// ---- wielder 몫: 같은 초과분을 로프 owner를 로프 쪽으로 당겨 회수한다 ----
-	// (공용 수신자 체인; sim 루트는 TopUpVelocity(단방향 감쇠), 캐릭터/비시뮬은 ApplyNonSimCorrection.)
+	// (공용 수신자 디스패치; sim 루트는 TopUpVelocity(단방향 감쇠), 캐릭터는 CorrectMovement, 앵커는 CorrectAnchor.)
 	if (WielderStep > KINDA_SMALL_NUMBER)
 	{
 		const FVector WielderDir = ComputeSmoothedWielderDir(Aim, DirToAim, DeltaTime);
-		ApplyTetherReceiverChain(
-			nullptr, GetOwner(), NAME_None, WielderDir, WielderStep,
+		ApplyToTetherEndpoint(WielderEndpoint, WielderDir, WielderStep,
 			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { TopUpVelocity(P, B, D, S * InvDt); return S; },
-			[&](AActor* A, const FVector& D, float S) { ApplyNonSimCorrection(A, D, S); });
+			[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S); },
+			[&](AActor* A, const FVector& D, float S) { CorrectAnchor(A, D, S); });
 	}
 }
 
@@ -4073,8 +4079,11 @@ void URopeComponent::UpdateTargetPullable()
 	else
 	{
 		// 양끝 유효질량(접지 캐릭터는 GroundBraceFactor로 접지마찰 반영, MOVE_None/정적은 앵커=무한).
-		const float WT = ResolveEndpointInvMass(MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, HoldConfig.GroundBraceFactor);
-		const float WW = ResolveEndpointInvMass(nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor);
+		// 테더 인가와 같은 해석(ResolveTetherEndpoint)을 쓴다 — 끌림 판정과 실제 인가점이 어긋나지 않는다.
+		const float WT = EndpointInvMass(ResolveTetherEndpoint(
+			MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, HoldConfig.GroundBraceFactor));
+		const float WW = EndpointInvMass(ResolveTetherEndpoint(
+			nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor));
 		const float InfMass = TNumericLimits<float>::Max();
 		const float EffMassTarget = (WT > KINDA_SMALL_NUMBER) ? (1.0f / WT) : InfMass; // invMass 0 = 앵커(무한).
 		const float EffMassWielder = (WW > KINDA_SMALL_NUMBER) ? (1.0f / WW) : InfMass;

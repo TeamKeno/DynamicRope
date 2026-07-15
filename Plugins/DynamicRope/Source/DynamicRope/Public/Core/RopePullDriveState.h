@@ -30,7 +30,7 @@ struct FRopePullDriveState
 	 * wielder 견인 방향(손(노드0)→로프 첫 다리)의 시간 스무딩 상태(EMA — SmoothedPullDir과 동일 상수
 	 * PullDirSmoothTime). 영벡터 = 미초기화(첫 유효 프레임에 시드), ResetTransient에서 리셋.
 	 * 방향이 프레임마다 튀면 속도 톱업이 매번 다른 축으로 들어가 벡터가 랜덤워크로 불어난다(폭주) —
-	 * 방향 안정화가 1차 방어(속력 상한은 ApplyNonSimCorrection의 2차 방어).
+	 * 방향 안정화가 1차 방어(속력 상한은 ClampInjectedVelocity의 2차 방어).
 	 */
 	FVector SmoothedWielderPullDir = FVector::ZeroVector;
 

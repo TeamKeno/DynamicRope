@@ -1172,7 +1172,7 @@ struct FRopeHoldConfig
 	//  하나로 통일. RopeComponent.cpp UpdateTargetPullable의 PullMassHysteresis 참조.)
 
 	/**
-	 * (BinaryPullable) CMC 캐릭터 제약(ClampActor)의 *안쪽 회수*(축적 Overshoot 되돌림)가 목표 속도로 접근하는
+	 * (BinaryPullable) CMC 캐릭터 제약(ClampMovement)의 *안쪽 회수*(축적 Overshoot 되돌림)가 목표 속도로 접근하는
 	 * 감쇠 시간 상수(초, EMA). 바깥 walk 상쇄(로프 길이 경계 유지)는 이 값과 무관하게 항상 즉시·완전이고, 이 값은
 	 * "걸림 순간 안쪽으로 당겨오는 속도를 얼마나 부드럽게 올릴지"만 정한다. 0 = 즉시(걸림 순간 "훅"), >0 = 여러
 	 * 프레임에 걸쳐 부드럽게(alpha = 1-exp(-dt/이 값), 프레임레이트 독립). 당김 *크기*는 MassShare와 통일한
