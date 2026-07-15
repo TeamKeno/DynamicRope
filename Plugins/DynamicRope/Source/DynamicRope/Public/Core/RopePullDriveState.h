@@ -38,6 +38,18 @@ struct FRopePullDriveState
 	FVector LastPullDirRaw = FVector::ZeroVector;
 
 	/**
+	 * 앵커(LastPullSample.WorldPoint)의 월드 속도 추정(cm/s, EMA). 매 Wrapped 유효 프레임에 WorldPoint의
+	 * 프레임 간 차분으로 갱신한다. 움직이는 앵커(비행 몬스터 등)에 매달린 wielder 견인의 **피드포워드** 소스 —
+	 * 리엘(overshoot P 제어)은 오차만 닫을 수 있어 순항 중인 앵커를 영영 못 따라잡는다(리엘 상한 < 앵커 속도면
+	 * 초과분만 무한히 쌓임). 이 값의 로프 축 성분을 견인 목표 속도에 더해 앵커와 같은 속도로 순항하게 한다.
+	 * 정지 앵커는 0이라 동작 불변. bPrevAnchorPointValid=false면 미시드(첫 유효 프레임엔 prev만 채운다 —
+	 * 0에서 EMA로 램프업해 wrap 직후 홱 당겨지지 않는다). ResetTransient에서 리셋.
+	 */
+	FVector SmoothedAnchorVelocity = FVector::ZeroVector;
+	FVector PrevAnchorPoint = FVector::ZeroVector;
+	bool bPrevAnchorPointValid = false;
+
+	/**
 	 * Pull 조준 노드의 시간 스무딩 상태(fractional). ComputePull이 고른 정수 AimNode를 float로 EMA해 노드
 	 * 사이를 보간 → 방향/tether를 연속화(이산 홉 제거). <0 = 미초기화(wrap 시작 후 첫 유효 프레임에 시드).
 	 * ResetTransient에서 -1로 리셋. PullAimSmoothTime이 상수.
@@ -87,6 +99,9 @@ struct FRopePullDriveState
 		SmoothedWielderPullDir = FVector::ZeroVector;
 		SmoothedAimNodeF = -1.0f;
 		SmoothedTargetShare = -1.0f;
+		SmoothedAnchorVelocity = FVector::ZeroVector;
+		PrevAnchorPoint = FVector::ZeroVector;
+		bPrevAnchorPointValid = false;
 		bTargetPullableInit = false; // 다음 wrap 시작 시 순수 비교로 다시 시드.
 		bLoggedPullNoReceiver = false;
 	}

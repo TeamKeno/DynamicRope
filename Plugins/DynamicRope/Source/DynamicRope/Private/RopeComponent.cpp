@@ -3092,6 +3092,21 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 	PullDrive.SmoothedPullDir = RopeTraction::SmoothDirection(
 		PullDrive.SmoothedPullDir, DirIn, RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
 	PullDrive.LastPullSample.Direction = PullDrive.SmoothedPullDir;
+
+	// (3) 앵커 월드 속도 추정(WorldPoint 프레임 차분 → EMA) — wielder 견인 피드포워드의 관측치.
+	// 리엘(overshoot P 제어)은 오차만 닫으므로 순항 중인 앵커(비행 몬스터 등)는 영영 못 따라잡는다 —
+	// 이 속도의 로프 축 성분을 견인 목표에 더해 따라잡음은 피드포워드가, 오차 수렴은 리엘이 맡는다.
+	// 정지 앵커는 0이라 동작 불변. 첫 유효 프레임은 prev만 채워 0에서 램프업(wrap 직후 홱 당김 방지).
+	// 노드 위치 지터는 방향 EMA와 같은 상수(PullDirSmoothTime)로 다듬는다.
+	const FVector AnchorPoint = PullDrive.LastPullSample.WorldPoint;
+	if (PullDrive.bPrevAnchorPointValid && DeltaTime > 1e-4f)
+	{
+		const FVector RawAnchorVel = (AnchorPoint - PullDrive.PrevAnchorPoint) / DeltaTime;
+		PullDrive.SmoothedAnchorVelocity = FMath::Lerp(PullDrive.SmoothedAnchorVelocity, RawAnchorVel,
+			RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
+	}
+	PullDrive.PrevAnchorPoint = AnchorPoint;
+	PullDrive.bPrevAnchorPointValid = true;
 }
 
 void URopeComponent::ApplyWrappedTraction(float DeltaTime)
@@ -3460,6 +3475,10 @@ namespace
 		const FRopeTetherEndpoint& Wielder;
 		// 앵커 → 조준(벽 모서리 또는 손) 방향 = 대상 견인 방향(스무딩된 look-ahead).
 		FVector DirToAim;
+		// 앵커의 월드 속도 추정(EMA, cm/s) — wielder 견인 피드포워드. wielder 인가 시 견인 방향 성분을
+		// 목표 속도에 더해 움직이는 앵커(비행 몬스터 등)를 같은 속도로 따라잡게 한다(정지 앵커 = 0 = 동작 불변).
+		// 대상 쪽 인가에는 쓰지 않는다 — 앵커는 대상 자신 위의 점이라 자기 속도를 목표에 더하면 자가 가속이다.
+		FVector AnchorVelocity;
 		// 가용 로프 길이를 넘은 양(cm). 항상 > 0(호출 전에 걸러진다).
 		float Overshoot;
 		float DeltaTime;
@@ -3559,18 +3578,21 @@ namespace
 			Prim->AddImpulse(Inward * NeedDeltaV, BoneName, /*bVelChange*/ true);
 			return Step; // 속도로 회수(부족분 0 — wielder 안 건드림).
 		};
-		auto ClampMovement = [&](UCharacterMovementComponent* Movement, const FVector& Inward, float Step)
+		auto ClampMovement = [&](UCharacterMovementComponent* Movement, const FVector& Inward, float Step, float FeedFwdSpeed)
 		{
 			// CMC 구동 캐릭터: 위치 텔레포트 대신 **안쪽 속도**를 목표까지 top-up한다. 로프 sim은 TG_PostPhysics라
 			// CMC(TG_PrePhysics)의 이동 뒤에 도는 후행 보정인데, 위치 텔레포트는 다음 틱에 CMC가 입력으로 재적분해
 			// 덮어써 무효다(walk가 위치 상한을 앞지르면 로프가 무한정 늘어난다). 캐릭터는 관성이 없어(매 틱 입력으로
 			// 속도 재유도) 안쪽 속도를 줘도 fling이 없고, CMC가 그 속도를 자기 적분에서 소비해 실제 이동으로 통합한다.
 			// 바깥 walk 상쇄(경계 유지)는 즉시·완전, 안쪽 회수만 TetherCharacterSmoothTime으로 감쇠해 "훅"을 없앤다.
+			// 목표 = 피드포워드(앵커 축 속도 — 움직이는 앵커 따라잡기) + 리엘(overshoot 오차 수렴). 앵커가
+			// 다가오는 중이면(피드포워드 음수) 합이 음수일 수 있는데, 단방향 servo라 인가 없이 넘어가고
+			// 바깥 상쇄(bCancelOutward)만 유지된다 — 스스로 닫히는 초과분을 억지로 더 당기지 않는다.
 			const float SpeedCapC = FMath::Max(Cfg.TetherMaxSpeed, 0.0f);
 			const float BaseReelC = FMath::Max(Cfg.TetherReelSpeed, 0.0f);
 			const float EffReelC = (SpeedCapC > 0.0f) ? FMath::Min(BaseReelC, SpeedCapC) : BaseReelC;
 			const RopeTraction::FRopeAxisServo Servo{
-				RopeTraction::ComputeReelTargetSpeed(Overshoot, EffReelC, Cfg.TetherSettleDist, DeltaTime),
+				FeedFwdSpeed + RopeTraction::ComputeReelTargetSpeed(Overshoot, EffReelC, Cfg.TetherSettleDist, DeltaTime),
 				/*Alpha*/ RopeTraction::ExpSmoothAlpha(Cfg.TetherCharacterSmoothTime, DeltaTime),
 				/*bBidirectional*/ false, /*bCancelOutward*/ true };
 			const FVector OldVel = Movement->Velocity;
@@ -3597,19 +3619,20 @@ namespace
 		{
 			ActualMoved = ApplyToTetherEndpoint(Ctx.Target, Ctx.DirToAim, TargetStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
-				[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S); },
+				[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S, /*FeedFwdSpeed*/ 0.0f); },
 				[&](AActor* A, const FVector& D, float S) { ClampAnchor(A, D, S); });
 		}
 
 		// ---- wielder 양보 몫 ----
 		// not-pullable이면 전량 wielder, pullable이면 대상이 걸려 못 간 잔여분(TargetStep - 실제 이동)만 wielder에.
 		// 대상이 잘 따라오면 잔여분 0 → wielder는 손대지 않는다(자유끝).
+		// 캐릭터 wielder는 앵커 속도의 견인 축 성분을 피드포워드로 받는다(움직이는 앵커에 매달려 끌려가기).
 		const float WielderStep = bPullable ? FMath::Max(0.0f, TargetStep - ActualMoved) : StepLen;
 		if (WielderStep > KINDA_SMALL_NUMBER)
 		{
 			ApplyToTetherEndpoint(Ctx.Wielder, Ctx.GetWielderDir(), WielderStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
-				[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S); },
+				[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S, static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D))); },
 				[&](AActor* A, const FVector& D, float S) { ClampAnchor(A, D, S); });
 		}
 	}
@@ -3731,10 +3754,12 @@ namespace
 		// wielder 수신에서는 카메라 흔들림으로 도드라졌다. 속도로 주면 무브먼트가 자체 스윕/보간으로
 		// 통합해 부드럽다. 물리 경로와 같은 "목표 속도까지 차분만" 원칙이라 누적/발산이 없고, walking은
 		// 수직 성분을 무브먼트가 버리므로 상향 견인은 지상 이탈(Wielder의 bAutoGroundExitOnUpwardPull)이 선행된다.
-		auto CorrectMovement = [&](UCharacterMovementComponent* Movement, const FVector& Dir, float Step)
+		auto CorrectMovement = [&](UCharacterMovementComponent* Movement, const FVector& Dir, float Step, float FeedFwdSpeed)
 		{
 			// 목표까지 CorrectAlpha만큼만 접근(하드 세팅 X) — 진행 속도를 한 프레임에 뚝 끊지 않아 "턱턱" 방지.
-			const RopeTraction::FRopeAxisServo Servo{ Step * InvDt, CorrectAlpha, /*bBidirectional*/ false, /*bCancelOutward*/ false };
+			// 목표 = 피드포워드(앵커 축 속도, wielder 한정) + 회수 몫. 합이 음수(앵커가 다가옴)면 단방향 servo가
+			// 인가 없이 넘어간다(스스로 닫히는 초과분을 억지로 더 당기지 않는다).
+			const RopeTraction::FRopeAxisServo Servo{ FeedFwdSpeed + Step * InvDt, CorrectAlpha, /*bBidirectional*/ false, /*bCancelOutward*/ false };
 			const FVector OldVel = Movement->Velocity;
 			const float DeltaV = RopeTraction::ComputeAxisDeltaV(static_cast<float>(FVector::DotProduct(OldVel, Dir)), Servo);
 			if (DeltaV > 0.0f)
@@ -3754,17 +3779,19 @@ namespace
 		{
 			ApplyToTetherEndpoint(Ctx.Target, Ctx.DirToAim, TargetStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { ServoVelocity(P, B, D, S * InvDt); return S; },
-				[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S); },
+				[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S, /*FeedFwdSpeed*/ 0.0f); },
 				[&](AActor* A, const FVector& D, float S) { CorrectAnchor(A, D, S); });
 		}
 
 		// ---- wielder 몫: 같은 초과분을 로프 owner를 로프 쪽으로 당겨 회수한다 ----
 		// (수신자 디스패치; sim 루트는 TopUpVelocity(단방향 감쇠), 캐릭터는 CorrectMovement, 앵커는 CorrectAnchor.)
+		// 속도 수신자(sim 루트/캐릭터)는 앵커 속도의 견인 축 성분을 피드포워드로 받는다 — 움직이는 앵커
+		// (비행 몬스터 등)에 매달린 wielder가 리엘 상한과 무관하게 앵커 순항 속도를 따라잡는다.
 		if (WielderStep > KINDA_SMALL_NUMBER)
 		{
 			ApplyToTetherEndpoint(Ctx.Wielder, Ctx.GetWielderDir(), WielderStep,
-				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { TopUpVelocity(P, B, D, S * InvDt); return S; },
-				[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S); },
+				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { TopUpVelocity(P, B, D, S * InvDt + static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D))); return S; },
+				[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S, static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D))); },
 				[&](AActor* A, const FVector& D, float S) { CorrectAnchor(A, D, S); });
 		}
 		return ShareT;
@@ -3839,7 +3866,8 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 프레임에만 호출해야 EMA 진행이 보존된다(TFunctionRef가 가리키므로 람다는 여기서 이름을 갖고 살아 있어야 한다).
 	auto GetWielderDir = [&]() { return ComputeSmoothedWielderDir(Aim, DirToAim, DeltaTime); };
 	const FRopeTetherContext Ctx{
-		HoldConfig, TargetEndpoint, WielderEndpoint, DirToAim, Overshoot, DeltaTime,
+		HoldConfig, TargetEndpoint, WielderEndpoint, DirToAim,
+		/*AnchorVelocity*/ PullDrive.SmoothedAnchorVelocity, Overshoot, DeltaTime,
 		/*bSelfWrap*/ (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner()),
 		/*bTargetPullable*/ PullDrive.bTargetPullable,
 		GetWielderDir };
