@@ -29,7 +29,16 @@ class DYNAMICROPE_API URopePreviewComponent : public UMeshComponent
 public:
 	URopePreviewComponent();
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Material")
+	/**
+	 * 프리뷰 튜브의 색을 결정하는 유일한 값이다(비우면 엔진 기본 머티리얼 — 불투명 회색). 튜브는 vertex
+	 * color를 기본값(흰색)으로만 두므로 하드코딩된 색은 없다. 반투명/색을 원하면 머티리얼이 그걸 해야 한다.
+	 *
+	 * 런타임 교체는 반드시 SetMaterial(0, M)으로 할 것. 씬 프록시가 **생성 시점에** 머티리얼을 캡처하고
+	 * 이후 dynamic data는 centerline만 갱신하므로, 이 프로퍼티를 직접 쓰면 프록시는 옛 머티리얼을 계속 쓴다.
+	 * BlueprintReadWrite가 아닌 이유가 이것 — BP의 직접 Set은 후킹할 수 없다. 에디터 디테일 패널 편집은
+	 * 컴포넌트 재등록(FComponentReregisterContext)을 거치므로 안전하다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Preview|Material")
 	TObjectPtr<UMaterialInterface> WrapPreviewMaterial = nullptr;
 
 	// NOTE: 아크 탐색 튜닝(Reach Scale/Segment Count/Sample Step/Query Radius)은 URopeComponent로 이사했다 —

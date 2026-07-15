@@ -214,14 +214,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Rope|Render", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TubeSmoothingAlpha = 0.5f;
 
-	/** rope tube에 적용되는 material. 설정하지 않으면 엔진 기본 material을 사용한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render")
+	/** rope tube에 적용되는 material. 설정하지 않으면 엔진 기본 material을 사용한다.
+	 *  런타임 교체는 SetMaterial(0, M)으로 할 것 — 이 프로퍼티를 직접 쓰면 UpdateRopeMaterialDynamicParams가
+	 *  돌지 않아 GetMaterial()이 **옛 부모를 물고 있는 RopeMID를 계속 반환**한다(교체가 조용히 무시된다).
+	 *  BP의 직접 Set은 후킹할 수 없어 BlueprintReadWrite가 아니다 — RopeLength가 BlueprintReadOnly +
+	 *  SetRopeLength인 것과 같은 이유. 에디터 디테일 패널 편집은 PostEditChangeProperty가 처리한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render")
 	TObjectPtr<UMaterialInterface> RopeMaterial = nullptr;
 
 	/** 꼬임(strand) 패턴 밀도를 rope length에 비례시켜 자동 조정할지. 켜면 런타임에 dynamic material instance로
 	 *  머티리얼이 저작한 TwistTurns에 (RopeLength / 기준 200cm)를 곱해 세팅한다 → 로프가 길어져도 꼬임 간격이
-	 *  일정하고, 프리셋별 상대 밀도(예: 파라코드가 더 촘촘)는 보존된다. 끄면 머티리얼 원본을 그대로 사용. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render")
+	 *  일정하고, 프리셋별 상대 밀도(예: 파라코드가 더 촘촘)는 보존된다. 끄면 머티리얼 원본을 그대로 사용.
+	 *  런타임 변경은 SetScaleTwistByLength()로 — RopeMaterial과 같은 이유로 BlueprintReadWrite가 아니다. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render")
 	bool bScaleTwistByLength = true;
 
 #if WITH_EDITORONLY_DATA
@@ -391,6 +396,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void SetRopeLength(float NewLength);
+
+	/**
+	 * 꼬임 밀도의 길이 비례 스케일을 런타임에 켜고 끈다(bScaleTwistByLength의 세터).
+	 * 프로퍼티를 직접 쓰면 MID가 재생성/폐기되지 않아 옛 MID로 계속 렌더되므로, 런타임 변경은 이 함수로 한다.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope|Render")
+	void SetScaleTwistByLength(bool bEnable);
 
 	/**
 	 * 되감기 속도 설정(cm/s). 양수 = 감기(짧아짐), 음수 = 풀기(길어짐, 초기 길이까지), 0 = 정지.

@@ -50,7 +50,6 @@ void DrawPreviewTube(const FSceneView* View, const FRopeWrapPreviewData& Preview
 	const int32 NumPoints = Preview.Points.Num();
 	const int32 NumSides = FMath::Clamp(Preview.NumSides, 3, 32);
 	const float Radius = FMath::Max(0.1f, Preview.Radius);
-	const FColor PreviewColor(80, 220, 255, 96);
 
 	TArray<FDynamicMeshVertex> Vertices;
 	Vertices.Reserve(NumPoints * NumSides);
@@ -87,9 +86,9 @@ void DrawPreviewTube(const FSceneView* View, const FRopeWrapPreviewData& Preview
 		{
 			const float Angle = (2.0f * UE_PI) * static_cast<float>(SideIndex) / static_cast<float>(NumSides);
 			const FVector RingOffset = (Normal * FMath::Cos(Angle) + Binormal * FMath::Sin(Angle)) * Radius;
-			FDynamicMeshVertex Vertex(FVector3f(Preview.Points[PointIndex] + RingOffset));
-			Vertex.Color = PreviewColor;
-			Vertices.Add(Vertex);
+			// 색은 전적으로 WrapPreviewMaterial 몫이다. vertex color는 FDynamicMeshVertex 기본값(불투명 흰색)
+			// 으로 두는데, 이는 vertex color를 곱하는 머티리얼에는 항등원이고 안 읽는 머티리얼에는 무시된다.
+			Vertices.Add(FDynamicMeshVertex(FVector3f(Preview.Points[PointIndex] + RingOffset)));
 		}
 	}
 

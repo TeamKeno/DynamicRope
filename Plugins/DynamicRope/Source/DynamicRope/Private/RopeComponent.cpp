@@ -3216,6 +3216,17 @@ void URopeComponent::SetRopeLength(float NewLength)
 	UpdateRopeMaterialDynamicParams();
 }
 
+void URopeComponent::SetScaleTwistByLength(bool bEnable)
+{
+	if (bScaleTwistByLength == bEnable)
+	{
+		return;
+	}
+	bScaleTwistByLength = bEnable;
+	// 켜면 MID 생성 + 길이 파라미터 적용, 끄면 MID 폐기(둘 다 MarkRenderStateDirty 포함).
+	UpdateRopeMaterialDynamicParams();
+}
+
 void URopeComponent::SetReelRate(float CmPerSecond)
 {
 	ReelRate = CmPerSecond;
