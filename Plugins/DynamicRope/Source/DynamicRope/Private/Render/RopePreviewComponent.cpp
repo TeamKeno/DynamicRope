@@ -452,12 +452,6 @@ void URopePreviewComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	}
 }
 
-void URopePreviewComponent::SetArcPreviewWorld(const FRopeArcPreviewData& InPreview)
-{
-	// Legacy throw arc preview is intentionally disabled; this component now renders wrap previews only.
-	ClearPreview();
-}
-
 void URopePreviewComponent::SetWrapPreviewWorld(const FRopeWrapPreviewData& InPreview)
 {
 	// 표시 전용 진입점: 주어진 월드 centerline을 그대로 그린다. whip 애니 재생 중이었다면 정적 표시로 전환한다.
@@ -586,9 +580,4 @@ void URopePreviewComponent::RebuildLocalBounds()
 		LocalBoundsBox += Point - FVector(BoundsRadius);
 	}
 	LocalPreviewBounds = FBoxSphereBounds(LocalBoundsBox);
-}
-
-URopeArcPreviewComponent::URopeArcPreviewComponent()
-	: Super()
-{
 }

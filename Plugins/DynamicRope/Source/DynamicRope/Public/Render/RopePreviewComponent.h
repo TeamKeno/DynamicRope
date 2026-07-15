@@ -71,22 +71,13 @@ public:
 		FString* OutFailureReason = nullptr);
 
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
-	void SetArcPreviewWorld(const FRopeArcPreviewData& InPreview);
-
-	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
 	void SetWrapPreviewWorld(const FRopeWrapPreviewData& InPreview);
 
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
 	void ClearPreview();
 
-	UFUNCTION(BlueprintCallable, Category = "Rope|Preview", meta = (DeprecatedFunction, DeprecationMessage = "Use ClearPreview."))
-	void ClearArcPreview() { ClearPreview(); }
-
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
 	bool IsPreviewVisible() const { return bPreviewVisible; }
-
-	UFUNCTION(BlueprintCallable, Category = "Rope|Preview", meta = (DeprecatedFunction, DeprecationMessage = "Use IsPreviewVisible."))
-	bool IsArcPreviewVisible() const { return IsPreviewVisible(); }
 
 	//~ UPrimitiveComponent
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
@@ -119,13 +110,4 @@ private:
 	float WhipPreviewPlaybackTimer = 0.0f;
 	bool bPreviewVisible = false;
 	FBoxSphereBounds LocalPreviewBounds;
-};
-
-UCLASS(ClassGroup = (DynamicRope), meta = (DeprecatedNode, DeprecationMessage = "Use RopePreviewComponent."))
-class DYNAMICROPE_API URopeArcPreviewComponent : public URopePreviewComponent
-{
-	GENERATED_BODY()
-
-public:
-	URopeArcPreviewComponent();
 };

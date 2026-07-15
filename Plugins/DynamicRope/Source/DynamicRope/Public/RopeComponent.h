@@ -262,16 +262,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowWithContext(const FRopeThrowContext& ThrowContext);
 
-	/** 로프 길이와 현재 whip/swing 설정을 반영한 던지기 전 미리보기 호 데이터를 만든다. */
-	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
-	bool BuildThrowArcPreview(const FRopeThrowContext& ThrowContext, float ReachScale, int32 SegmentCount,
-		FRopeArcPreviewData& OutPreview) const;
-
-	/** 현재 프레임 collider 스냅샷 기준으로 미리보기 호가 막히는 첫 각도를 찾는다. */
-	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
-	bool FindThrowArcPreviewHit(const FRopeArcPreviewData& Preview, float SampleStep, float QueryRadius,
-		FRopeArcPreviewHitResult& OutHit) const;
-
 	/** 현재 FrameColliders를 swept SDF 질의해 ray에서 가장 가까운 wrap 가능 mesh+bone을 찾는다.
 	 *  OutBlockedHit(옵션): ray는 맞았지만 wrap 불가한 가장 가까운 hit(조준 HUD "빨강" 표시용). */
 	bool FindAimRayBoneHit(const FVector& Origin, const FVector& AimDir, float RayLength,

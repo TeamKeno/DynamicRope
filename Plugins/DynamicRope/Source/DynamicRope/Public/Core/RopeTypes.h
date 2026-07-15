@@ -1376,7 +1376,9 @@ struct FRopeThrowContext
 	float AimGuideLockAlpha = 0.50f;
 };
 
-/** 던지기 전 미리보기 호를 정의하는 런타임 데이터. 렌더 컴포넌트는 이 값만 받아 그린다. */
+/** 던지기 전 탐색 호를 정의하는 런타임 데이터. FRopeThrowPreviewBuilder가 접촉 후보와 preview Sim을
+ *  만들 때 쓰는 중간 데이터다 — 호 자체를 그리는 렌더 경로는 없다(표시는 확정된 centerline을
+ *  SetWrapPreviewWorld로 넘기는 쪽이다). */
 USTRUCT(BlueprintType)
 struct FRopeArcPreviewData
 {
@@ -1399,16 +1401,6 @@ struct FRopeArcPreviewData
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "1", ClampMax = "128"))
 	int32 SegmentCount = 32;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
-	bool bBlocked = false;
-
-	/** 0~1. 이 각도 비율부터 blocked material로 그린다. 1이면 막힌 구간 없음. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float BlockedStartAlpha = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
-	FVector HitPoint = FVector::ZeroVector;
 };
 
 /** Runtime centerline data for the pre-wrapped rope preview. */
@@ -1430,25 +1422,6 @@ struct FRopeWrapPreviewData
 	{
 		return Points.Num() >= 2 && Radius > KINDA_SMALL_NUMBER;
 	}
-};
-
-/** 미리보기 호가 현재 collider 스냅샷에 닿았는지와, 닿은 각도 비율. */
-USTRUCT(BlueprintType)
-struct FRopeArcPreviewHitResult
-{
-	GENERATED_BODY()
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
-	bool bHit = false;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
-	FVector HitPoint = FVector::ZeroVector;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
-	float AngleAlpha = 1.0f;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
-	float DistanceAlpha = 1.0f;
 };
 
 /** flight 단계의 Throw / launch 파라미터. */

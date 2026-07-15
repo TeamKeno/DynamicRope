@@ -247,7 +247,7 @@ public:
 
 	//~ Preview ------------------------------------------------------------
 	/** 비어 있으면 owner에서 찾는다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopePreviewComponent,/Script/DynamicRope.RopeArcPreviewComponent", DisplayName = "Preview Component"))
+	UPROPERTY(EditAnywhere, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopePreviewComponent", DisplayName = "Preview Component"))
 	FComponentReference PreviewComponentReference;
 
 	UPROPERTY(Transient)
