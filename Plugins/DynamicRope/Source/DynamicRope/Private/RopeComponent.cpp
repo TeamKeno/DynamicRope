@@ -3291,6 +3291,84 @@ void URopeComponent::UpdateReel(float DeltaTime)
 
 namespace
 {
+	// ===== 견인 축(로프 축) 드라이브의 공용 수학 — 순수(UObject 무의존) =====
+	// 테더(양 모드 × 양끝)와 능동 Pull은 전부 "로프 축 속도를 목표로 서보한다"는 같은 골격이고, 목표/접근
+	// 방식/상한만 다르다. 그 차이를 아래 FRopeAxisServo로 기술하고 산수는 여기서 한 번만 한다. 인가(어떤
+	// UObject API로 꽂는가)는 수신자마다 의미가 달라(특히 CMC는 속도 직접 세팅=즉시 vs AddImpulse=다음 틱)
+	// 통일하지 않는다 — 호출부는 여기서 ΔV/임펄스만 받아 자기 방식으로 인가한다.
+
+	// 축 속도 서보 스펙. 로프 축 성분만 다루므로 직교 성분(중력/스윙)은 호출부가 보존한다.
+	struct FRopeAxisServo
+	{
+		// 목표 축 속도(cm/s, +가 인가 방향).
+		float TargetSpeed = 0.0f;
+		// 목표까지 이번 프레임에 접근할 비율 [0..1]. 1=정확 도달(감쇠 없음), 작을수록 여러 프레임에 걸쳐 부드럽게.
+		float Alpha = 1.0f;
+		// false=가속만(목표에 부족할 때만 인가, 감속 안 함) / true=제동도(목표 초과분 관성 제거 — 코스팅·오버슛 방지).
+		bool bBidirectional = false;
+		// true=바깥(음수) 축 속도를 먼저 0으로 상쇄한 뒤 목표로 접근(CMC walk 상쇄: 즉시·완전, Alpha 무관).
+		bool bCancelOutward = false;
+	};
+
+	// 이번 프레임 인가할 축 ΔV(cm/s). 0이면 무동작 — 호출부는 그걸로 스킵을 판단한다.
+	float ComputeAxisDeltaV(float CurAlong, const FRopeAxisServo& Servo)
+	{
+		// 상쇄 기준: 바깥으로 가고 있으면 0에서 출발한 것으로 본다(그 상쇄분은 아래 ΔV에 포함돼 함께 인가된다).
+		const float Base = Servo.bCancelOutward ? FMath::Max(CurAlong, 0.0f) : CurAlong;
+		// 가속만 모드에서 이미 목표 이상이면 Base 유지(=제동 없음).
+		const bool bApproach = Servo.bBidirectional || (Servo.TargetSpeed > Base);
+		const float Final = bApproach ? (Base + (Servo.TargetSpeed - Base) * Servo.Alpha) : Base;
+		return Final - CurAlong;
+	}
+
+	// ΔV를 실제 임펄스로: J = 질량 × ΔV, 상한이 있으면 ±MaxImpulse로 클램프(양방향 — 가속/제동 대칭).
+	// MaxImpulse = 최대 장력 × dt. 0 = 무제한(질량 무관하게 ΔV를 그대로 내는 정확 서보).
+	float ClampAxisImpulse(float DeltaV, float Mass, float MaxImpulse)
+	{
+		const float J = Mass * DeltaV;
+		return (MaxImpulse > 0.0f) ? FMath::Clamp(J, -MaxImpulse, MaxImpulse) : J;
+	}
+
+	// 인가 대상 바디의 질량: 스켈레탈 본이면 그 바디 질량, 아니면(또는 바디가 없거나 질량이 0이면) 컴포넌트 질량.
+	float ResolveBodyMass(const UPrimitiveComponent* Prim, FName BoneName)
+	{
+		float Mass = 0.0f;
+		if (!BoneName.IsNone())
+		{
+			if (const USkeletalMeshComponent* Skel = Cast<const USkeletalMeshComponent>(Prim))
+			{
+				if (const FBodyInstance* Body = Skel->GetBodyInstance(BoneName))
+				{
+					Mass = static_cast<float>(Body->GetBodyMass());
+				}
+			}
+		}
+		return (Mass > KINDA_SMALL_NUMBER) ? Mass : static_cast<float>(Prim->GetMass());
+	}
+
+	// 리엘 목표 속도(cm/s): 고정 ReelSpeed로 감되 경계 근처(Overshoot < TaperDist)에서 선형 감속하고, 이번
+	// 프레임에 남은 overshoot를 넘게 회수하지 않도록 Overshoot/dt로 캡한다(경계 안착 — 지나쳐 코스팅→재팽팽
+	// 진동이 없다). ReelSpeed=0 → 0(리엘 없음). "상한 없음"이 필요한 호출부는 스스로 Overshoot/dt를 쓴다.
+	float ComputeReelTargetSpeed(float Overshoot, float ReelSpeed, float TaperDist, float DeltaTime)
+	{
+		const float CloseSpeed = Overshoot / FMath::Max(DeltaTime, 1e-4f); // 이번 프레임에 전량 회수할 속도.
+		const float Taper = FMath::Max(TaperDist, 0.01f);
+		const float Tapered = FMath::Max(ReelSpeed, 0.0f) * FMath::Clamp(Overshoot / Taper, 0.0f, 1.0f);
+		return FMath::Min(Tapered, CloseSpeed);
+	}
+
+	// 속도 주입 결과의 절대 속력 상한 = max(SpeedCap, 기존 속력). 방향이 흔들리면 주입이 프레임마다 다른 축으로
+	// 들어가 감쇠 없는 Falling에서 벡터가 계속 커질 수 있다(폭주 2차 방어 — 1차는 방향 EMA). 기존에 더 빠른
+	// 외부 운동(자유낙하 등)은 보존한다. SpeedCap=0(클램프 없음 설정)이면 생략.
+	FVector ClampInjectedVelocity(const FVector& NewVel, const FVector& OldVel, float SpeedCap)
+	{
+		if (SpeedCap <= 0.0f)
+		{
+			return NewVel;
+		}
+		return NewVel.GetClampedToMaxSize(FMath::Max(SpeedCap, static_cast<float>(OldVel.Size())));
+	}
+
 	// 본에서 부모 체인을 올라가 가장 가까운 "시뮬 중인 피직스 바디"의 본을 찾는다(없으면 None).
 	// 감긴 본이 트위스트 본 등 피직스 에셋에 바디가 없는 본일 수 있다 — 그 경우 본 이름만 보고
 	// 비시뮬 판정해 캐릭터 무브먼트 분기로 빠지면, 랙돌 셋업이 무브먼트를 꺼둔 상태(MOVE_None)라
@@ -3528,49 +3606,27 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			// 대상이 400 이상 못 내 영구 뒤처진다. 경계 근처(Overshoot<Taper)에선 0으로 감속(코스팅 정지). 실제
 			// 추종 속도는 아래 장력 클램프가 질량/마찰로 제한한다(가벼우면 목표 도달, 무거우면 뒤처져 로프 신장).
 			const float SpeedCeil = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
-			const float Taper = FMath::Max(HoldConfig.TetherSettleDist, 0.01f);
 			const float InvDtC = 1.0f / FMath::Max(DeltaTime, 1e-4f);
-			const float CeilTerm = (SpeedCeil > 0.0f) ? (SpeedCeil * FMath::Clamp(Overshoot / Taper, 0.0f, 1.0f)) : (Overshoot * InvDtC);
-			const float ReelTargetSpeed = FMath::Min(CeilTerm, Overshoot * InvDtC);
-			const float MaxTension = FMath::Max(HoldConfig.TetherMaxTension, 0.0f);
+			// TetherMaxSpeed=0 = 상한 없음 → 이번 프레임에 overshoot 전량을 닫는 속도.
+			const float ReelTargetSpeed = (SpeedCeil > 0.0f)
+				? ComputeReelTargetSpeed(Overshoot, SpeedCeil, HoldConfig.TetherSettleDist, DeltaTime)
+				: (Overshoot * InvDtC);
+			const float MaxImpulse = FMath::Max(HoldConfig.TetherMaxTension, 0.0f) * DeltaTime;
+			// 양방향 정확 서보(감쇠 없음): 부족하면 가속, 넘치면 제동. 상한은 임펄스(장력×dt)가 건다.
+			const FRopeAxisServo ReelServo{ ReelTargetSpeed, /*Alpha*/ 1.0f, /*bBidirectional*/ true, /*bCancelOutward*/ false };
 
 			// 로프 축 속도를 목표(ReelTargetSpeed)로 서보하는 **양방향** 임펄스: J = clamp(mass·dV, ±MaxTension·dt).
 			// dV>0이면 안쪽 가속, dV<0(목표보다 빨리 안쪽으로 감)이면 안쪽 감속(제동) — 경계서 목표가 taper로 0이 되며
 			// 초과 관성을 빼주므로 코스팅·오버슛이 없다. 단방향(가속만)이면 초과분을 안 빼 고장력에서 대상이 경계를
 			// 지나쳐 슬랙→되튕김→물리 폭발. 장력 상한이 크면 정확 서보(옛 속도 세팅과 동일, 안정), 작으면 질량/마찰로
 			// 추종이 뒤처진다. 0=무제한(정확 서보). 로프 축 성분만 건드려 수직(중력/스윙)은 보존.
-			auto DriveInward = [&](float Mass, float CurAlong) -> float
-			{
-				if (Mass <= KINDA_SMALL_NUMBER)
-				{
-					return 0.0f;
-				}
-				float J = Mass * (ReelTargetSpeed - CurAlong); // 부호 있음(+가속 / -제동).
-				if (MaxTension > 0.0f)
-				{
-					const float JCap = MaxTension * DeltaTime;
-					J = FMath::Clamp(J, -JCap, JCap);
-				}
-				return J;
-			};
 			auto DriveSimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Inward, float Step) -> float
 			{
-				float BodyMass = static_cast<float>(Prim->GetMass());
-				if (!BoneName.IsNone())
-				{
-					if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Prim))
-					{
-						if (FBodyInstance* Body = Skel->GetBodyInstance(BoneName))
-						{
-							BodyMass = static_cast<float>(Body->GetBodyMass());
-						}
-					}
-				}
 				const float CurAlong = static_cast<float>(FVector::DotProduct(Prim->GetPhysicsLinearVelocity(BoneName), Inward));
-				const float J = DriveInward(BodyMass, CurAlong);
+				const float J = ClampAxisImpulse(ComputeAxisDeltaV(CurAlong, ReelServo), ResolveBodyMass(Prim, BoneName), MaxImpulse);
 				if (!FMath::IsNearlyZero(J))
 				{
-					Prim->AddImpulse(Inward * J, BoneName, /*bVelChange*/ false);
+					Prim->AddImpulse(Inward * J, BoneName, /*bVelChange*/ false); // 바디 질량으로 나뉨 + 물리 마찰이 저항.
 				}
 				return Step; // pullable 대상은 자기 물리로 따라옴 — 부족분을 wielder로 넘기지 않는다(자유 유지).
 			};
@@ -3583,7 +3639,8 @@ void URopeComponent::UpdateTether(float DeltaTime)
 						if (Movement->MovementMode != MOVE_None)
 						{
 							const float CurAlong = static_cast<float>(FVector::DotProduct(Movement->Velocity, Inward));
-							const float J = DriveInward(FMath::Max(Movement->Mass, KINDA_SMALL_NUMBER), CurAlong);
+							const float J = ClampAxisImpulse(ComputeAxisDeltaV(CurAlong, ReelServo),
+								FMath::Max(Movement->Mass, KINDA_SMALL_NUMBER), MaxImpulse);
 							if (!FMath::IsNearlyZero(J))
 							{
 								Movement->AddImpulse(Inward * J, /*bVelocityChange*/ false); // Mass로 나뉨 + 접지 마찰 저항.
@@ -3620,15 +3677,17 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		{
 			return;
 		}
+		// 바깥 속도 제거 = 축 속도를 0으로 서보하되 "가속만"(안쪽으로 가는 중이면 손대지 않음).
+		const FRopeAxisServo StopOutwardServo{ /*TargetSpeed*/ 0.0f, /*Alpha*/ 1.0f, /*bBidirectional*/ false, /*bCancelOutward*/ false };
 		auto ClampSimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Inward, float Step) -> float
 		{
 			// 시뮬 루트(물리 액터 구성): 바깥 속도 제거 + 안쪽 위치 클램프(속도 주입 X → 관성/발사 없음). 로프 축
 			// 성분만 건드려 수직(중력) 성분 보존. TeleportPhysics는 물리 속도를 안 만든다(sweep은 벽 통과 방지).
 			const FVector Vel = Prim->GetPhysicsLinearVelocity(BoneName);
-			const float CurInward = static_cast<float>(FVector::DotProduct(Vel, Inward));
-			if (CurInward < 0.0f)
+			const float DeltaV = ComputeAxisDeltaV(static_cast<float>(FVector::DotProduct(Vel, Inward)), StopOutwardServo);
+			if (!FMath::IsNearlyZero(DeltaV))
 			{
-				Prim->SetPhysicsLinearVelocity(Vel - Inward * CurInward, /*bAddToCurrent*/ false, BoneName);
+				Prim->SetPhysicsLinearVelocity(Vel + Inward * DeltaV, /*bAddToCurrent*/ false, BoneName);
 			}
 			if (Step > KINDA_SMALL_NUMBER)
 			{
@@ -3650,24 +3709,17 @@ void URopeComponent::UpdateTether(float DeltaTime)
 						const float SpeedCapC = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
 						const float BaseReelC = FMath::Max(HoldConfig.TetherReelSpeed, 0.0f);
 						const float EffReelC = (SpeedCapC > 0.0f) ? FMath::Min(BaseReelC, SpeedCapC) : BaseReelC;
-						const float TaperC = FMath::Max(HoldConfig.TetherSettleDist, 0.01f);
-						const float TargetSpeed = FMath::Min(EffReelC * FMath::Clamp(Overshoot / TaperC, 0.0f, 1.0f), Overshoot / FMath::Max(DeltaTime, 1e-4f));
 						const float SmoothTau = FMath::Max(HoldConfig.TetherCharacterSmoothTime, 0.0f);
-						const float Alpha = (SmoothTau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / SmoothTau)) : 1.0f;
+						// 바깥 walk는 즉시·완전 상쇄(bCancelOutward), 안쪽 회수는 SmoothTime 감쇠로 접근("훅" 제거).
+						const FRopeAxisServo Servo{
+							ComputeReelTargetSpeed(Overshoot, EffReelC, HoldConfig.TetherSettleDist, DeltaTime),
+							/*Alpha*/ (SmoothTau > KINDA_SMALL_NUMBER) ? (1.0f - FMath::Exp(-DeltaTime / SmoothTau)) : 1.0f,
+							/*bBidirectional*/ false, /*bCancelOutward*/ true };
 						const FVector OldVel = Movement->Velocity;
-						const float CurAlong = static_cast<float>(FVector::DotProduct(OldVel, Inward));
-						const float AfterWalkCancel = FMath::Max(CurAlong, 0.0f); // 바깥 walk 즉시 완전 제거.
-						const float FinalAlong = (TargetSpeed > AfterWalkCancel)
-							? AfterWalkCancel + (TargetSpeed - AfterWalkCancel) * Alpha
-							: AfterWalkCancel;
-						if (FinalAlong > CurAlong)
+						const float DeltaV = ComputeAxisDeltaV(static_cast<float>(FVector::DotProduct(OldVel, Inward)), Servo);
+						if (DeltaV > 0.0f)
 						{
-							FVector NewVel = OldVel + Inward * (FinalAlong - CurAlong);
-							if (SpeedCapC > 0.0f)
-							{
-								NewVel = NewVel.GetClampedToMaxSize(FMath::Max(SpeedCapC, static_cast<float>(OldVel.Size())));
-							}
-							Movement->Velocity = NewVel;
+							Movement->Velocity = ClampInjectedVelocity(OldVel + Inward * DeltaV, OldVel, SpeedCapC);
 						}
 						return;
 					}
@@ -3697,11 +3749,10 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	const float BaseReelSpeed = FMath::Max(HoldConfig.TetherReelSpeed, 0.0f);
 	const float MaxSpeed = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
 	const float EffReelSpeed = (MaxSpeed > 0.0f) ? FMath::Min(BaseReelSpeed, MaxSpeed) : BaseReelSpeed; // 상한 클램프
-	const float TaperDist = FMath::Max(HoldConfig.TetherSettleDist, 0.01f);                      // 경계 근처 감속 구간(작을수록 빨리 고정 속도 도달)
-	const float VTotal = EffReelSpeed * FMath::Clamp(Overshoot / TaperDist, 0.0f, 1.0f);         // 이번 프레임 목표 속도(cm/s)
-	// 이번 프레임 회수 거리 — 남은 overshoot를 넘게 회수하면(빠른 속도 × dt > overshoot) 관성으로 경계를 지나쳐
-	// slack이 되고 다음 프레임 견인 off로 코스팅→재팽팽 속도 변동이 생긴다. overshoot로 캡해 항상 경계에 안착.
-	const float StepLen = FMath::Min(VTotal * DeltaTime, Overshoot);                             // 이번 프레임 회수 거리(cm)
+	// 이번 프레임 목표 속도(cm/s). 헬퍼가 taper 감속 + Overshoot/dt 캡을 함께 건다 — 남은 overshoot를 넘게
+	// 회수하면 관성으로 경계를 지나쳐 slack이 되고 코스팅→재팽팽 속도 변동이 생긴다(캡으로 항상 경계 안착).
+	const float VTotal = ComputeReelTargetSpeed(Overshoot, EffReelSpeed, HoldConfig.TetherSettleDist, DeltaTime);
+	const float StepLen = VTotal * DeltaTime;                                                    // 이번 프레임 회수 거리(cm)
 
 	// (DirToAim/MeshComp는 위 공통 프롤로그에서 산출 — 두 모드 공용.)
 
@@ -3789,20 +3840,22 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	const float InvDt = 1.0f / FMath::Max(DeltaTime, 1e-4f);
 	auto TopUpVelocity = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float TargetSpeed)
 	{
+		const FRopeAxisServo Servo{ TargetSpeed, CorrectAlpha, /*bBidirectional*/ false, /*bCancelOutward*/ false };
 		const FVector CurVel = Prim->GetPhysicsLinearVelocity(BoneName);
-		const float CurAlong = static_cast<float>(FVector::DotProduct(CurVel, Dir));
-		if (TargetSpeed > CurAlong)
+		const float DeltaV = ComputeAxisDeltaV(static_cast<float>(FVector::DotProduct(CurVel, Dir)), Servo);
+		if (DeltaV > 0.0f)
 		{
-			Prim->AddImpulse(Dir * (TargetSpeed - CurAlong) * CorrectAlpha, BoneName, /*bVelChange*/ true);
+			Prim->AddImpulse(Dir * DeltaV, BoneName, /*bVelChange*/ true);
 		}
 	};
 	const float PerpDamp = FMath::Clamp(HoldConfig.TetherPerpDamping, 0.0f, 1.0f);
 	auto ServoVelocity = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float TargetSpeed)
 	{
+		const FRopeAxisServo Servo{ TargetSpeed, /*Alpha*/ 1.0f, /*bBidirectional*/ true, /*bCancelOutward*/ false };
 		const FVector CurVel = Prim->GetPhysicsLinearVelocity(BoneName);
 		const float CurAlong = static_cast<float>(FVector::DotProduct(CurVel, Dir));
 		// 로프 축 성분: 목표 속도로 정확 세팅(bVelChange).
-		FVector Impulse = Dir * (TargetSpeed - CurAlong);
+		FVector Impulse = Dir * ComputeAxisDeltaV(CurAlong, Servo);
 		// 직교(당김 방향과 수직) 잔여 관성 부분 감쇠: 방향을 급전환하면 옛 방향 관성이 직교로 남아 대상이 옆으로
 		// 날아간다(관성 과다). PerpDamp만큼 빼서 억제 — 중력/스윙은 매 프레임 재축적되므로 부분 감쇠로도 보존된다.
 		if (PerpDamp > 0.0f)
@@ -3826,24 +3879,13 @@ void URopeComponent::UpdateTether(float DeltaTime)
 			UCharacterMovementComponent* Movement = Character->GetCharacterMovement();
 			if (Movement && Movement->MovementMode != MOVE_None)
 			{
-				const float TargetSpeed = Step * InvDt;
+				// 목표까지 CorrectAlpha만큼만 접근(하드 세팅 X) — 진행 속도를 한 프레임에 뚝 끊지 않아 "턱턱" 방지.
+				const FRopeAxisServo Servo{ Step * InvDt, CorrectAlpha, /*bBidirectional*/ false, /*bCancelOutward*/ false };
 				const FVector OldVel = Movement->Velocity;
-				const float CurAlong = static_cast<float>(FVector::DotProduct(OldVel, Dir));
-				if (TargetSpeed > CurAlong)
+				const float DeltaV = ComputeAxisDeltaV(static_cast<float>(FVector::DotProduct(OldVel, Dir)), Servo);
+				if (DeltaV > 0.0f)
 				{
-					// 목표까지 CorrectAlpha만큼만 접근(하드 세팅 X) — 진행 속도를 한 프레임에 뚝 끊지 않아 "턱턱" 방지.
-					FVector NewVel = OldVel + Dir * (TargetSpeed - CurAlong) * CorrectAlpha;
-					// 주입 결과 속력의 절대 상한 = max(TetherMaxSpeed, 기존 속력): 방향이 흔들리면 톱업이
-					// 프레임마다 다른 축으로 들어가 감쇠 없는 Falling에서 벡터가 계속 커질 수 있다(폭주의
-					// 2차 방어 — 1차는 방향 EMA). 주입은 절대 속력을 이 상한 너머로 못 키우고, 기존에 더
-					// 빠른 외부 운동(자유낙하 등)은 보존한다. TetherMaxSpeed=0(클램프 없음 설정)이면 생략.
-					const float SpeedCap = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
-					if (SpeedCap > 0.0f)
-					{
-						const float MaxAllowed = FMath::Max(SpeedCap, static_cast<float>(OldVel.Size()));
-						NewVel = NewVel.GetClampedToMaxSize(MaxAllowed);
-					}
-					Movement->Velocity = NewVel;
+					Movement->Velocity = ClampInjectedVelocity(OldVel + Dir * DeltaV, OldVel, FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f));
 				}
 				return;
 			}
@@ -3980,35 +4022,15 @@ void URopeComponent::ApplyPullVelocityDrive(UPrimitiveComponent* Prim, FName Bon
 	{
 		return;
 	}
-	// 질량: 스켈레탈 본이면 그 바디 질량, 아니면 컴포넌트 질량.
-	float Mass = 0.0f;
-	if (!BoneName.IsNone())
-	{
-		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Prim))
-		{
-			if (FBodyInstance* Body = Skel->GetBodyInstance(BoneName))
-			{
-				Mass = static_cast<float>(Body->GetBodyMass());
-			}
-		}
-	}
-	if (Mass <= KINDA_SMALL_NUMBER)
-	{
-		Mass = static_cast<float>(Prim->GetMass());
-	}
-	if (Mass <= KINDA_SMALL_NUMBER)
-	{
-		return;
-	}
+	// 가속만(역추진 없음) + 정확 도달(Alpha=1). 상한은 임펄스(장력×dt)가 건다 — 테더 리엘과 같은 골격이고
+	// 양방향 여부만 다르다(테더는 경계 안착을 위해 제동까지 하지만, 능동 Pull은 사용자가 놓으면 그만이라 가속만).
+	const FRopeAxisServo Servo{ VTarget, /*Alpha*/ 1.0f, /*bBidirectional*/ false, /*bCancelOutward*/ false };
 	const float VAlong = static_cast<float>(FVector::DotProduct(Prim->GetPhysicsLinearVelocity(BoneName), Dir));
-	const float dV = VTarget - VAlong;
-	if (dV <= 0.0f)
+	const float J = ClampAxisImpulse(ComputeAxisDeltaV(VAlong, Servo), ResolveBodyMass(Prim, BoneName), MaxTension * DeltaTime);
+	if (!FMath::IsNearlyZero(J))
 	{
-		return; // 이미 목표 이상 → 무동작(역추진 없음).
+		Prim->AddImpulse(Dir * J, BoneName, /*bVelChange*/ false);
 	}
-	const float JTarget = Mass * dV;              // 목표 도달에 필요한 임펄스.
-	const float JMax = MaxTension * DeltaTime;     // 최대 장력이 이번 프레임 낼 수 있는 임펄스.
-	Prim->AddImpulse(Dir * FMath::Min(JTarget, JMax), BoneName, /*bVelChange*/ false);
 }
 
 void URopeComponent::ClampPulledBodyVelocity(UPrimitiveComponent* Prim, FName BoneName) const
