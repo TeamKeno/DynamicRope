@@ -309,4 +309,45 @@ bool FRopeTractionSampleFractionalAimTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 뒤처짐은 리엘 속도 상한이 아니라 **장력**이 지배한다 — CL 401에서 상한을 400→1500으로 올려 "50kg 뒤처짐"을
+// 고치려다 실패한 회귀. 장력이 지배하는 구간에서는 상한을 올려도 프레임당 ΔV가 그대로다(반면 가벼운 대상은
+// 그 상한까지 순식간에 붙어 위험만 3.75배가 됐다).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionCeilingDoesNotFixLagTest,
+	"DynamicRope.Traction.ReelCeilingDoesNotCureTensionLimitedLag",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTractionCeilingDoesNotFixLagTest::RunTest(const FString& Parameters)
+{
+	const float Dt = 1.0f / 60.0f;
+	const float Mass = 50.0f;
+	const float MaxImpulse = 150000.0f * Dt; // 기본 장력.
+	const float Overshoot = 50.0f;           // taper(1.5cm)보다 훨씬 큼 → 목표 = 고정 리엘 속도.
+
+	// 상한 400 vs 1500: 목표 속도는 3.75배 차이가 난다.
+	const float Target400 = RopeTraction::ComputeReelTargetSpeed(Overshoot, 400.0f, 1.5f, Dt);
+	const float Target1500 = RopeTraction::ComputeReelTargetSpeed(Overshoot, 1500.0f, 1.5f, Dt);
+	TestEqual(TEXT("the 400 ceiling targets 400"), Target400, 400.0f);
+	TestEqual(TEXT("the 1500 ceiling targets 1500"), Target1500, 1500.0f);
+
+	// 그런데 50kg에서는 둘 다 장력 클램프에 걸려 **프레임당 ΔV가 동일**하다 → 상한은 뒤처짐을 못 고친다.
+	const float Dv400 = RopeTraction::ClampAxisImpulse(
+		RopeTraction::ComputeAxisDeltaV(0.0f, MakeReelServo(Target400)), Mass, MaxImpulse) / Mass;
+	const float Dv1500 = RopeTraction::ClampAxisImpulse(
+		RopeTraction::ComputeAxisDeltaV(0.0f, MakeReelServo(Target1500)), Mass, MaxImpulse) / Mass;
+	TestEqual(TEXT("a heavy target accelerates identically under both ceilings"), Dv400, Dv1500);
+	TestEqual(TEXT("and that acceleration is set by tension alone"), Dv400, MaxImpulse / Mass);
+
+	// 뒤처짐을 실제로 고치는 건 장력뿐 — 문턱 M·V·fps를 넘기면 한 프레임에 목표 도달.
+	const float Threshold = Mass * Target400 / Dt;
+	const float DvAmple = RopeTraction::ClampAxisImpulse(
+		RopeTraction::ComputeAxisDeltaV(0.0f, MakeReelServo(Target400)), Mass, Threshold * Dt) / Mass;
+	TestEqual(TEXT("only raising tension past M*V*fps removes the lag"), DvAmple, Target400);
+
+	// 반면 **가벼운** 대상(1kg)은 같은 장력으로 상한까지 그대로 붙는다 = 상한을 올린 대가는 여기서 치른다.
+	const float DvLight = RopeTraction::ClampAxisImpulse(
+		RopeTraction::ComputeAxisDeltaV(0.0f, MakeReelServo(Target1500)), 1.0f, MaxImpulse) / 1.0f;
+	TestEqual(TEXT("a light target reaches the raised ceiling in one frame"), DvLight, 1500.0f);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

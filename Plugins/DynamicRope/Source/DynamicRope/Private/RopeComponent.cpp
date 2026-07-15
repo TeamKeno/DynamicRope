@@ -3609,42 +3609,65 @@ namespace
 			// wielder가 자유끝이라 대상은 자기 물리(질량·마찰)에 종속돼 따라온다 — 가벼우면 리엘 목표 속도에
 			// 도달하고, 무겁거나 접지 마찰이 크면 장력 한계로 뒤처지며 그만큼 로프가 자연스럽게 늘어난다
 			// (BinaryPullable의 의도된 물리: 정직한 무게감 + wielder 우선).
-			// 리엘 목표 속도: 이번 프레임에 overshoot를 전부 닫을 속도를 목표로 삼되 안전 상한 TetherMaxSpeed로만
-			// 캡한다 — TetherReelSpeed(400)에 묶으면 자유끝 wielder가 그보다 빨리 달아날 때 대상이 영구 뒤처진다.
-			// 경계 근처에선 taper로 0까지 감속(코스팅 정지). 실제 추종 속도는 아래 장력 클램프가 질량/마찰로 제한한다.
-			const float SpeedCeil = FMath::Max(Cfg.TetherMaxSpeed, 0.0f);
-			const float InvDtC = 1.0f / FMath::Max(DeltaTime, 1e-4f);
-			// TetherMaxSpeed=0 = 상한 없음 → 이번 프레임에 overshoot 전량을 닫는 속도.
-			const float ReelTargetSpeed = (SpeedCeil > 0.0f)
-				? RopeTraction::ComputeReelTargetSpeed(Overshoot, SpeedCeil, Cfg.TetherSettleDist, DeltaTime)
-				: (Overshoot * InvDtC);
+			// 리엘 목표 속도 = MassShare와 같은 고정 속도(min(TetherReelSpeed, TetherMaxSpeed)) + 경계 taper.
+			// CL 401에서 이 상한을 TetherMaxSpeed(1500)로 올렸다가 되돌렸다: "50kg이 뒤처진다"의 원인은 상한이
+			// 아니라 장력이었고(50kg·150k에서 프레임당 ΔV = MaxImpulse/m = 50cm/s라 400이든 1500이든 도달 속도가
+			// 같다 — 문턱 장력 ≈ M·V·fps), 반면 가벼운 대상은 1500까지 순식간에 붙어 방향 급전환 때 그 속도가
+			// 직교로 남아 하늘로 날아갔다. 이득 0, 위험 3.75배였다.
+			const float SpeedCap = FMath::Max(Cfg.TetherMaxSpeed, 0.0f);
+			const float BaseReel = FMath::Max(Cfg.TetherReelSpeed, 0.0f);
+			const float EffReel = (SpeedCap > 0.0f) ? FMath::Min(BaseReel, SpeedCap) : BaseReel;
+			const float ReelTargetSpeed = RopeTraction::ComputeReelTargetSpeed(Overshoot, EffReel, Cfg.TetherSettleDist, DeltaTime);
 			const float MaxImpulse = FMath::Max(Cfg.TetherMaxTension, 0.0f) * DeltaTime;
+			const float PerpDamp = FMath::Clamp(Cfg.TetherPerpDamping, 0.0f, 1.0f);
 			// 로프 축 속도를 목표로 서보하는 **양방향** 임펄스: J = clamp(mass·dV, ±MaxTension·dt). 부족하면 가속,
 			// 넘치면 제동 — 경계서 목표가 taper로 0이 되며 초과 관성을 빼주므로 코스팅·오버슛이 없다. 단방향
 			// (가속만)이면 초과분을 안 빼 고장력에서 대상이 경계를 지나쳐 슬랙→되튕김→물리 폭발(CL 401 회귀:
 			// Traction.BidirectionalServoBrakesOvershoot). 장력 상한이 크면 정확 서보(안정), 작으면 추종이 뒤처진다.
-			// 0=무제한(정확 서보). 로프 축 성분만 건드려 수직(중력/스윙)은 보존.
+			// 0=무제한(정확 서보).
 			const RopeTraction::FRopeAxisServo ReelServo{ ReelTargetSpeed, /*Alpha*/ 1.0f, /*bBidirectional*/ true, /*bCancelOutward*/ false };
 
 			auto DriveSimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Inward, float Step) -> float
 			{
-				const float CurAlong = static_cast<float>(FVector::DotProduct(Prim->GetPhysicsLinearVelocity(BoneName), Inward));
-				const float J = RopeTraction::ClampAxisImpulse(
-					RopeTraction::ComputeAxisDeltaV(CurAlong, ReelServo), ResolveBodyMass(Prim, BoneName), MaxImpulse);
-				if (!FMath::IsNearlyZero(J))
+				const FVector Vel = Prim->GetPhysicsLinearVelocity(BoneName);
+				const float CurAlong = static_cast<float>(FVector::DotProduct(Vel, Inward));
+				const float Mass = ResolveBodyMass(Prim, BoneName);
+				// 축 성분: 장력 상한 임펄스(질량 단위 N·s).
+				FVector Impulse = Inward * RopeTraction::ClampAxisImpulse(
+					RopeTraction::ComputeAxisDeltaV(CurAlong, ReelServo), Mass, MaxImpulse);
+				// 직교 잔여 관성 감쇠(MassShare의 ServoVelocity와 같은 원리·같은 노브): 축 성분만 서보하면 끌던
+				// 방향을 급전환할 때 옛 방향 관성이 직교로 남아 대상이 옆으로/위로 날아간다. 질량을 곱해 같은
+				// 임펄스에 합친다(ΔV_perp = -PerpVel·PerpDamp). 장력 클램프에 포함하지 않는다 — 장력은 "끄는 힘"의
+				// 예산이고 이건 안정화 장치라 예산을 뺏으면 안 된다.
+				if (PerpDamp > 0.0f)
 				{
-					Prim->AddImpulse(Inward * J, BoneName, /*bVelChange*/ false); // 바디 질량으로 나뉨 + 물리 마찰이 저항.
+					const FVector PerpVel = Vel - Inward * CurAlong;
+					Impulse -= PerpVel * PerpDamp * Mass;
+				}
+				if (!Impulse.IsNearlyZero())
+				{
+					Prim->AddImpulse(Impulse, BoneName, /*bVelChange*/ false); // 바디 질량으로 나뉨 + 물리 마찰이 저항.
 				}
 				return Step; // pullable 대상은 자기 물리로 따라옴 — 부족분을 wielder로 넘기지 않는다(자유 유지).
 			};
+			// CMC 캐릭터는 관성이 없다(매 틱 입력으로 속도 재유도) — 제동/직교 감쇠가 필요 없고, 넘어서 달리는 건
+			// 대상의 자유다. 그래서 단방향(부족할 때만 가속).
+			const RopeTraction::FRopeAxisServo ReelServoCMC{ ReelTargetSpeed, /*Alpha*/ 1.0f, /*bBidirectional*/ false, /*bCancelOutward*/ false };
 			auto DriveMovement = [&](UCharacterMovementComponent* Movement, const FVector& Inward, float Step)
 			{
-				const float CurAlong = static_cast<float>(FVector::DotProduct(Movement->Velocity, Inward));
-				const float J = RopeTraction::ClampAxisImpulse(RopeTraction::ComputeAxisDeltaV(CurAlong, ReelServo),
-					FMath::Max(Movement->Mass, KINDA_SMALL_NUMBER), MaxImpulse);
-				if (!FMath::IsNearlyZero(J))
+				// 질량/장력이 *크기*를 제한하되, 인가는 **속도 직접 세팅**으로 한다. Movement->AddImpulse는 다음 틱
+				// (ApplyAccumulatedForces)에나 먹고 그마저 접지 마찰이 갉아먹어 대상이 사실상 안 끌렸다(CL 396의
+				// 회귀 — 제한 방식과 인가 방식을 한 API에 묶어서 둘 다 잃었다). 직접 세팅은 CMC가 이번 프레임
+				// 적분에서 소비해 실제 이동으로 통합한다(MassShare의 CorrectMovement와 같은 이유).
+				const float Mass = FMath::Max(Movement->Mass, KINDA_SMALL_NUMBER);
+				const FVector OldVel = Movement->Velocity;
+				const float CurAlong = static_cast<float>(FVector::DotProduct(OldVel, Inward));
+				const float J = RopeTraction::ClampAxisImpulse(
+					RopeTraction::ComputeAxisDeltaV(CurAlong, ReelServoCMC), Mass, MaxImpulse);
+				const float DeltaV = J / Mass; // 장력이 제한한 결과 ΔV(무제한이면 목표까지 정확히).
+				if (DeltaV > 0.0f)
 				{
-					Movement->AddImpulse(Inward * J, /*bVelocityChange*/ false); // Mass로 나뉨 + 접지 마찰 저항.
+					Movement->Velocity = RopeTraction::ClampInjectedVelocity(OldVel + Inward * DeltaV, OldVel, SpeedCap);
 				}
 			};
 			auto DriveAnchor = [&](AActor* Actor, const FVector& Inward, float Step)
@@ -3655,8 +3678,8 @@ namespace
 					Actor->AddActorWorldOffset(Inward * Step, /*bSweep*/ true, nullptr, ETeleportType::TeleportPhysics);
 				}
 			};
-			// 위치 폴백용 스텝 상한(질량 경로는 ReelTargetSpeed 구동이라 Step 무시). Overshoot 전량을 프레임 상한으로.
-			const float TargetStep = (SpeedCeil > 0.0f) ? FMath::Min(Overshoot, SpeedCeil * DeltaTime) : Overshoot;
+			// 위치 폴백(앵커)용 스텝(질량 경로는 ReelTargetSpeed 구동이라 Step 무시). MassShare의 StepLen과 같은 산식.
+			const float TargetStep = ReelTargetSpeed * DeltaTime;
 			if (TargetStep > KINDA_SMALL_NUMBER)
 			{
 				ApplyToTetherEndpoint(Ctx.Target, Ctx.DirToAim, TargetStep,
