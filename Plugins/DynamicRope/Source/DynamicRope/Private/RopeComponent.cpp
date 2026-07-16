@@ -771,12 +771,15 @@ void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, co
 	// 감겼던 mesh는 Release/Reset이 wrap 상태를 비우기 전에 캡처한다 — 중앙 release 신호가 실어 보내
 	// 대상 반응 컴포넌트가 "내 메시가 풀렸나"를 판별하게 한다(release BP 델리게이트는 mesh 미포함).
 	const USceneComponent* WrappedMesh = WrapController.State.Mesh.Get();
+	// ReleaseWrapAs는 Wrapped뿐 아니라 Contacting/Wrapping/GuidedThrow(전부 커밋 전)에서도 들어온다 —
+	// 커밋 전이면 중앙 신호를 쏘면 안 된다(아래 DispatchReleased 주석: 다른 로프가 감아 랙돌시킨 대상을
+	// 이 로프의 abort가 잘못 복구시킨다). WrapController.Release가 상태를 비우기 전에 잡는다.
+	const bool bWasWrapped = WrapController.IsActive();
 	SetPhase(ERopePhase::Releasing, *ReasonLog);
 	WrapController.Release(Reason);
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
-	// Wrapped에서 오는 release라 커밋된 wrap이 있었다 → per-instance + 중앙 신호 둘 다.
-	DispatchReleased(WrappedMesh, Bone, Reason, /*bWasWrapped*/ true);
+	DispatchReleased(WrappedMesh, Bone, Reason, bWasWrapped);
 	// 팁 부착물 파괴는 스폰분만. ③(Guaranteed)는 release 후 Free에서도 창이 남아 장전으로 회수하므로
 	// 여기서 파괴하지 않는다(수명 = Reel~EndPlay). ①②(추 팁)는 종전대로 던지기~해제 단위로 파괴.
 	if (ResolveMode != ERopeWrapResolveMode::GuaranteedWrap)
