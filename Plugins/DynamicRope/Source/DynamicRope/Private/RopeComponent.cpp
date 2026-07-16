@@ -1645,6 +1645,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.TetherResponse = HoldConfig.TetherResponse;
 		Snapshot.TetherOvershoot = PullDrive.LastTetherOvershoot;
 		Snapshot.ActivePullForce = PullDrive.ActivePullForce;
+		Snapshot.bPullTaut = PullDrive.bPullTaut;
 		Snapshot.DistanceReleaseSlack = HoldConfig.DistanceReleaseSlack;
 	}
 
@@ -3059,6 +3060,12 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 	PullDrive.LastPullSample = FRopePullSample();
 	WrapController.ComputePull(Sim, HoldConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
 
+	// 팽팽(taut) 게이트 갱신(히스테리시스 래치) — 능동 Pull 인가(③)와 IsPullTaut()가 공용으로 읽는다.
+	// 샘플이 무효면 무조건 false(아래 early return과 무관하게 이번 프레임 값이 확정돼야 한다).
+	PullDrive.bPullTaut = PullDrive.LastPullSample.bValid && RopeTraction::EvaluateTautGate(
+		PullDrive.LastPullSample.Tension, HoldConfig.ActivePullTautTension,
+		HoldConfig.ActivePullTautReleaseRatio, PullDrive.bPullTaut);
+
 	// Pull 스무딩(2단): (1) 조준 노드 fractional 스무딩 — 정수 AimNode의 프레임 간 이산 홉(방향 통째 점프
 	// + tether 초과분 불연속)을 float EMA + 노드 사이 보간으로 없앤다. (2) 방향 EMA — 그 위에 남는 노드 위치
 	// 노이즈(GPU 미러 지연 등)를 다듬는다. wrap 시작 후 첫 유효 프레임은 측정값으로 시드(래그 없음).
@@ -3116,8 +3123,12 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 	UpdateTether(DeltaTime);
 
 	// ③-2 능동 Pull(상수 힘): 사용자 입력(SetActivePull/Wielder)이 준 힘을 팽팽할 때만 인가한다.
+	// 팽팽 판정은 ②가 갱신한 bPullTaut 래치(임계/히스테리시스는 HoldConfig — 기본 임계 0 = 장력 > ~0).
+	// 팽팽함 무시 2층: config(bActivePullRequiresTaut=false, 로프 전체 정책) / per-call(bActivePullIgnoresTaut,
+	// SetActivePull 인자 — 애니 pull window 구간용). 어느 쪽이든 Wrapped + 유효 샘플이면 인가.
 	// 장력과 무관한 상수라 피드백 폭주가 없다.
-	if (PullDrive.ActivePullForce > 0.0f && PullDrive.LastPullSample.bValid && PullDrive.LastPullSample.Tension > KINDA_SMALL_NUMBER)
+	if (PullDrive.ActivePullForce > 0.0f && PullDrive.LastPullSample.bValid
+		&& (!HoldConfig.bActivePullRequiresTaut || PullDrive.bActivePullIgnoresTaut || PullDrive.bPullTaut))
 	{
 		// BinaryPullable에서 대상이 무거워 끌 수 없으면(not pullable) 힘을 wielder에 실어 앵커 쪽으로 끌어당긴다
 		// (climb-in): LastPullSample.Direction은 앵커→손 방향이라 부호 반전 = 손→앵커. 그 외(MassShare 또는
@@ -3207,9 +3218,10 @@ void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 	}
 }
 
-void URopeComponent::SetActivePull(float Force)
+void URopeComponent::SetActivePull(float Force, bool bIgnoreTautGate)
 {
 	PullDrive.ActivePullForce = FMath::Max(0.0f, Force);
+	PullDrive.bActivePullIgnoresTaut = bIgnoreTautGate;
 }
 
 void URopeComponent::SetRopeLength(float NewLength)

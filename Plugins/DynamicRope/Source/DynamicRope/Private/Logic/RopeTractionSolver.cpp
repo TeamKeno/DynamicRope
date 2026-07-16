@@ -87,4 +87,12 @@ namespace RopeTraction
 		const float PTotal = PT + PW;
 		return (PTotal > KINDA_SMALL_NUMBER) ? (PT / PTotal) : 0.0f;
 	}
+
+	bool EvaluateTautGate(float Tension, float Threshold, float ReleaseRatio, bool bWasTaut)
+	{
+		// 진입/유지 임계 분리(히스테리시스). Threshold ≤ 0이면 둘 다 "장력 > ~0"으로 수렴한다(종전 게이트).
+		const float EnterAbove = FMath::Max(Threshold, KINDA_SMALL_NUMBER);
+		const float StayAbove = FMath::Max(Threshold * FMath::Clamp(ReleaseRatio, 0.0f, 1.0f), KINDA_SMALL_NUMBER);
+		return Tension > (bWasTaut ? StayAbove : EnterAbove);
+	}
 }

@@ -350,4 +350,42 @@ bool FRopeTractionCeilingDoesNotFixLagTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 팽팽(taut) 게이트: 임계 0 = 종전 하드코딩 게이트(장력 > ~0)와 동일(동작 불변), 임계 > 0이면
+// 진입/유지 분리 히스테리시스로 경계 지터 퍼덕임을 막는다. 능동 Pull 인가와 IsPullTaut()의 공용 판정.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionTautGateTest,
+	"DynamicRope.Traction.TautGateHysteresisPreventsFlapping",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTractionTautGateTest::RunTest(const FString& Parameters)
+{
+	// 임계 0(기본) = 종전 게이트: 장력이 조금이라도 있으면 팽팽, 0이면 아님 — 래치 상태와 무관(히스테리시스 무력).
+	TestTrue(TEXT("zero threshold treats any tension as taut"),
+		RopeTraction::EvaluateTautGate(1.0f, 0.0f, 0.5f, /*bWasTaut*/ false));
+	TestFalse(TEXT("zero threshold treats zero tension as slack"),
+		RopeTraction::EvaluateTautGate(0.0f, 0.0f, 0.5f, /*bWasTaut*/ false));
+	TestFalse(TEXT("zero tension is slack even while latched taut"),
+		RopeTraction::EvaluateTautGate(0.0f, 0.0f, 0.5f, /*bWasTaut*/ true));
+
+	// 임계 100, 비율 0.5: 진입은 100 초과여야 한다.
+	TestFalse(TEXT("tension below the threshold does not enter taut"),
+		RopeTraction::EvaluateTautGate(80.0f, 100.0f, 0.5f, /*bWasTaut*/ false));
+	TestTrue(TEXT("tension above the threshold enters taut"),
+		RopeTraction::EvaluateTautGate(120.0f, 100.0f, 0.5f, /*bWasTaut*/ false));
+
+	// 히스테리시스: 일단 팽팽이면 100×0.5 = 50까지는 유지, 그 아래로 떨어져야 해제.
+	TestTrue(TEXT("latched taut survives a dip below the enter threshold"),
+		RopeTraction::EvaluateTautGate(80.0f, 100.0f, 0.5f, /*bWasTaut*/ true));
+	TestFalse(TEXT("latched taut releases below the stay threshold"),
+		RopeTraction::EvaluateTautGate(40.0f, 100.0f, 0.5f, /*bWasTaut*/ true));
+
+	// 비율 1 = 히스테리시스 없음(진입 임계 = 유지 임계) — 80은 래치 여부와 무관하게 슬랙.
+	TestFalse(TEXT("ratio one collapses the hysteresis band"),
+		RopeTraction::EvaluateTautGate(80.0f, 100.0f, 1.0f, /*bWasTaut*/ true));
+
+	// 비율은 [0..1] 클램프 — 1 초과를 넘겨도 유지 임계가 진입 임계 위로 올라가지 않는다.
+	TestTrue(TEXT("an out-of-range ratio is clamped to the enter threshold"),
+		RopeTraction::EvaluateTautGate(101.0f, 100.0f, 2.0f, /*bWasTaut*/ true));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

@@ -94,4 +94,13 @@ namespace RopeTraction
 	 * 하므로 1-share로 유도하면 안 된다).
 	 */
 	DYNAMICROPE_API float ComputeRawTargetShare(float InvMassTarget, float InvMassWielder, float MassBias);
+
+	/**
+	 * 능동 Pull 팽팽(taut) 게이트 판정(히스테리시스 래치). 팽팽 판정의 정본은 **장력**(XPBD λ 유래)이다 —
+	 * 테더 overshoot는 기하라 여기 쓰지 않는다. Threshold ≤ 0(기본) = 장력이 조금이라도 있으면 팽팽
+	 * (종전 하드코딩 게이트 "Tension > ~0"과 동일 — 동작 불변). Threshold > 0이면 진입은 Threshold 초과,
+	 * 유지(bWasTaut=true)는 Threshold×ReleaseRatio 초과로 판정해 임계 경계의 장력 지터로 게이트가
+	 * 켜졌다 꺼졌다 퍼덕이는 것을 막는다(ReleaseRatio는 [0..1]로 클램프).
+	 */
+	DYNAMICROPE_API bool EvaluateTautGate(float Tension, float Threshold, float ReleaseRatio, bool bWasTaut);
 }

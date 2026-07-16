@@ -357,6 +357,15 @@ public:
 		return PullDrive.LastPullSample.bValid;
 	}
 
+	/**
+	 * 이번 프레임 로프가 팽팽(taut)한가 — 능동 Pull 게이트와 같은 판정(Pull 샘플 장력 vs
+	 * HoldConfig.ActivePullTautTension, 히스테리시스 포함). Wrapped 동안 매 프레임 갱신되며 그 외 phase는
+	 * false. bActivePullRequiresTaut=false여도 판정 자체는 계속 갱신된다 — 애니메이션 pull window/BP가
+	 * "지금 당겨도 되는 구간인가"를 물을 때 이 하나를 읽는다.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	bool IsPullTaut() const { return PullDrive.bPullTaut; }
+
 	/** 이번 프레임 테더 초과분(cm): 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). Wrapped 동안
 	 *  매 프레임 산출된다(테더 off여도 계산). wielder 견인/지상 이탈 판정 등 게임 반응용. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
@@ -380,9 +389,12 @@ public:
 	 * 대상에 인가한다(장력과 무관 → 피드백 폭주 없음). 0 = 정지. 입력 홀드 동안 켜고 떼면 끄는
 	 * 용도(URopeWielderComponent의 PullAction이 이걸 호출). 캐릭터 대상은 CharacterMovement가
 	 * 질량으로 나누고 지면 마찰과 경쟁하므로 수만~수십만 단위가 체감 구간이다.
+	 * 팽팽 판정/게이트는 HoldConfig(bActivePullRequiresTaut/ActivePullTautTension) — IsPullTaut()로 조회.
+	 * bIgnoreTautGate=true면 이번 Pull은 config와 무관하게 팽팽함을 무시하고 인가한다(per-call 우회 —
+	 * 애니 pull window의 "팽팽 무시" 구간용, UAnimNotifyState_RopePull이 넘긴다).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
-	void SetActivePull(float Force);
+	void SetActivePull(float Force, bool bIgnoreTautGate = false);
 
 	/** 현재(런타임) 로프 길이(cm). 되감기/풀기로 변한다 — 초기값/상한은 RopeLength. */
 	UFUNCTION(BlueprintPure, Category = "Rope")

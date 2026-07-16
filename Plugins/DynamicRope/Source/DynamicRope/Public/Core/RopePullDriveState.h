@@ -56,8 +56,23 @@ struct FRopePullDriveState
 	 */
 	float SmoothedAimNodeF = -1.0f;
 
-	/** 능동 Pull의 현재 힘(SetActivePull이 설정, 0=꺼짐). Wrapped + 팽팽할 때만 인가된다. */
+	/** 능동 Pull의 현재 힘(SetActivePull이 설정, 0=꺼짐). Wrapped + 팽팽할 때만 인가된다(아래 bPullTaut 게이트). */
 	float ActivePullForce = 0.0f;
+
+	/**
+	 * 이번 능동 Pull이 팽팽 게이트를 무시하는가(SetActivePull의 per-call 인자). true면 config
+	 * (bActivePullRequiresTaut)와 무관하게 유효 샘플만으로 인가한다 — 애니 pull window의 "팽팽 무시" 구간용.
+	 * ActivePullForce와 같은 입력 상태라 ResetTransient에서 남긴다(해제는 SetActivePull의 몫).
+	 */
+	bool bActivePullIgnoresTaut = false;
+
+	/**
+	 * 이번 프레임 팽팽(taut) 게이트 상태(히스테리시스 래치 — RopeTraction::EvaluateTautGate).
+	 * UpdateWrappedPullSample(②)이 매 Wrapped 프레임 갱신하고, 능동 Pull 인가(③ ApplyWrappedTraction)와
+	 * URopeComponent::IsPullTaut()가 공용으로 읽는다. 유효 Pull 샘플이 없으면(비Wrapped 포함) false.
+	 * ResetTransient에서 리셋.
+	 */
+	bool bPullTaut = false;
 
 	/** 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용. */
 	float LastTetherOvershoot = 0.0f;
@@ -88,7 +103,7 @@ struct FRopePullDriveState
 
 	/**
 	 * 페이즈 전이 시 폐기할 "진행 중 wrap" 일시 상태만 리셋(URopeComponent::ResetTransientPhaseState가 호출).
-	 * 의도적으로 남기는 것: ActivePullForce(입력 홀드 상태 — 해제는 SetActivePull(0)의 몫),
+	 * 의도적으로 남기는 것: ActivePullForce/bActivePullIgnoresTaut(입력 홀드 상태 — 해제는 SetActivePull(0)의 몫),
 	 * LastPullDirRaw/LastTetherOvershoot(디버거 표시용 잔상 — 다음 Wrapped 프레임이 덮어쓴다).
 	 */
 	void ResetTransient()
@@ -103,6 +118,7 @@ struct FRopePullDriveState
 		PrevAnchorPoint = FVector::ZeroVector;
 		bPrevAnchorPointValid = false;
 		bTargetPullableInit = false; // 다음 wrap 시작 시 순수 비교로 다시 시드.
+		bPullTaut = false;
 		bLoggedPullNoReceiver = false;
 	}
 };

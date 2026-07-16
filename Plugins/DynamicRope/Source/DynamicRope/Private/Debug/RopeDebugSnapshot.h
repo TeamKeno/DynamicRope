@@ -138,6 +138,8 @@ struct FRopeDebugSnapshot
 	float TetherOvershoot = 0.0f;
 	// 능동 Pull 힘(0=입력 없음)
 	float ActivePullForce = 0.0f;
+	// 팽팽(taut) 게이트 상태 — 능동 Pull 인가 조건(IsPullTaut와 동일 래치)
+	bool bPullTaut = false;
 	// 거리 release 한계(cm, 0=비활성) — 표시용
 	float DistanceReleaseSlack = 0.0f;
 

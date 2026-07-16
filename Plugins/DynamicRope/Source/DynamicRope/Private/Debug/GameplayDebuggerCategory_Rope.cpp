@@ -517,8 +517,8 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				OvershootColor = (S.TetherOvershoot > S.DistanceReleaseSlack) ? TEXT("{red}")
 					: (S.TetherOvershoot > S.DistanceReleaseSlack * 0.8f) ? TEXT("{yellow}") : TEXT("{white}");
 			}
-			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f dir=%s tether=%s%.0fcm{white}(x%.2f, release=%.0f) active=%.0f"),
-				S.PullTension, *S.PullDirection.ToCompactString(), OvershootColor, S.TetherOvershoot,
+			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f taut=%s{white} dir=%s tether=%s%.0fcm{white}(x%.2f, release=%.0f) active=%.0f"),
+				S.PullTension, S.bPullTaut ? TEXT("{green}Y") : TEXT("{grey}N"), *S.PullDirection.ToCompactString(), OvershootColor, S.TetherOvershoot,
 				S.TetherResponse, S.DistanceReleaseSlack, S.ActivePullForce));
 		}
 		else if (S.bPullValid)

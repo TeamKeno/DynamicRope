@@ -1252,10 +1252,36 @@ struct FRopeHoldConfig
 	 * (ActivePullMaxLinearSpeed)까지 끌 수 있는 최대 힘이다: 가벼운 대상은 이 장력 안에서 목표 속도에 즉시(오버슛
 	 * 없이) 도달하고, 이 장력으로 목표까지 못 끄는 무거운 대상은 뒤처진다(현실적 질량 의존 — 이 값이 "몇 kg부터
 	 * 버거운가"를 정한다). 힘 크기는 로프 물리 도메인이라 여기 산다(Wielder PullAction이 이 값을 쓴다).
-	 * Wrapped + 팽팽할 때만 실제 인가된다(URopeComponent::SetActivePull 계약).
+	 * Wrapped + 팽팽할 때만 실제 인가된다(URopeComponent::SetActivePull 계약 — 팽팽 판정은 아래
+	 * bActivePullRequiresTaut/ActivePullTautTension 게이트).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float PullForce = 100000.0f;
+
+	/**
+	 * 능동 Pull을 팽팽(taut)할 때만 인가할지. true(기본) = 로프가 팽팽한 프레임에만 힘이 실린다(늘어진 로프를
+	 * 당겨도 반응 없음 — 물리적으로 자연스러움). false = 팽팽함 무시: Wrapped + 유효 Pull 샘플이면 항상 인가
+	 * (연출/특수 게임플레이용). 팽팽 판정 자체는 URopeComponent::IsPullTaut()로 항상 조회 가능하다(이 스위치와
+	 * 무관하게 갱신 — 애니 pull window 등 외부 판단용).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold")
+	bool bActivePullRequiresTaut = true;
+
+	/**
+	 * 팽팽(taut) 판정의 장력 임계. 0(기본) = 장력이 조금이라도 있으면 팽팽(종전 동작). > 0이면 Pull 샘플의
+	 * 세그먼트 장력(XPBD λ 유래 — PullForce와 같은 힘 단위)이 이 값을 넘어야 팽팽으로 본다 — "제대로 당겨져
+	 * 있을 때만 pull이 걸리는" 게임플레이 임계. 경계 지터는 ActivePullTautReleaseRatio 히스테리시스가 흡수한다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	float ActivePullTautTension = 0.0f;
+
+	/**
+	 * 팽팽 판정 히스테리시스 비율 [0..1]. 일단 팽팽으로 판정되면 장력이 ActivePullTautTension×이 값 아래로
+	 * 떨어져야 팽팽 해제된다(진입/유지 임계 분리 — 임계 경계의 장력 지터로 게이트가 퍼덕이는 것을 방지).
+	 * 1 = 히스테리시스 없음(진입=유지). ActivePullTautTension이 0이면 무의미.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ActivePullTautReleaseRatio = 0.5f;
 
 	/**
 	 * 능동 Pull의 **견인 목표 속도**(cm/s). 능동 Pull은 대상을 이 속도로 당김 방향을 따라 몰되(장력 상한 PullForce
