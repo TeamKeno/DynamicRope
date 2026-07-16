@@ -85,19 +85,32 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 	const int32 StepBudget = FMath::Max3(1, Ctx.Config.WrappingPathBuildStepsPerFrame, AutoBudget);
 	if (State.bPathUsesPoseSpaceIsland)
 	{
+		// Composite의 한 raw probe는 실제 projection 이동량에 따라 출력 node를 0개 또는 여러 개
+		// 만들 수 있다. probe 호출 전 Path.Num()을 기억하고, 이번 호출에서 새로 생긴 범위 전체에
+		// 순서대로 anchor를 붙여 LastAnchoredPathPointCount의 연속성을 보장한다.
 		for (int32 StepIndex = 0;
 			StepIndex < StepBudget && State.Path.Num() < State.NumTailNodes;
 			++StepIndex)
 		{
-			const int32 PathIndex = State.Path.Num();
-			if (!AppendCompositeAnalyticHelixPathPoint(PathIndex, Sim, Ctx))
+			const int32 FirstNewPathIndex = State.Path.Num();
+			if (!AdvanceCompositeAnalyticHelixProbeStep(Sim, Ctx))
 			{
 				break;
 			}
 
-			if (!AppendWrappingAnchorFromPathPoint(PathIndex, Sim, Ctx))
+			bool bAnchorsAppended = true;
+			for (int32 PathIndex = FirstNewPathIndex;
+				PathIndex < State.Path.Num(); ++PathIndex)
 			{
-				FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixAnchorFailed"));
+				if (!AppendWrappingAnchorFromPathPoint(PathIndex, Sim, Ctx))
+				{
+					FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixAnchorFailed"));
+					bAnchorsAppended = false;
+					break;
+				}
+			}
+			if (!bAnchorsAppended)
+			{
 				break;
 			}
 		}
@@ -142,6 +155,14 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 				: Point.NormalWorld * SurfaceOffset);
 	};
 	const FVector FrontWorld = PathPointToCenterline(FrontPoint);
+	// 이미 감긴 위치는 projected surface path를 따르지만, 아직 감기지 않은 tail의 연장 방향은
+	// SDF normal에 투영하지 않은 ideal helix guide를 우선 사용한다. Sequential 경로와 guide가
+	// 없는 구형 데이터는 종전 surface tangent로 폴백한다.
+	const FVector TailGuideDirection =
+		State.bPathUsesPoseSpaceIsland && FrontPoint.bHasWrappingGuideTangent
+			? FrontPoint.WrappingGuideTangentWorld.GetSafeNormal(
+				KINDA_SMALL_NUMBER, FrontPoint.TangentWorld)
+			: FrontPoint.TangentWorld;
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
 	// front 구동 범위는 경로가 소유한 노드까지다. 상한 없는 기본 상태에서는 NumTailNodes가 로프
 	// 끝까지라 종전과 동일하고, 감는 양 상한(WrappingMaxWrapAngleDeg)으로 경로가 로프보다 짧게
@@ -194,7 +215,9 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 		}
 		else
 		{
-			World = FrontWorld + FrontPoint.TangentWorld * (NodeDistance - State.FrontDistance);
+			// Composite tail은 SDF projection tangent가 아니라 초기 ideal helix guide를 따른다.
+			// 위치는 계속 projected surface path를 사용하되, 미세 normal 변화가 tail 전체를 흔들지 않는다.
+			World = FrontWorld + TailGuideDirection * (NodeDistance - State.FrontDistance);
 		}
 
 		OutFrame.SetPosition(NodeIndex, World, /*bZeroVelocity*/ true);
@@ -517,6 +540,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.bPathBuildFailed = false;
 	State.PathCurrentDistance = 0.0f;
 	State.PathSweepDistance = 0.0f;
+	State.bPathCompositeRawPointVirtual = false;
 	State.PathAccumulatedAngleRad = 0.0f;
 	State.PathBridgeDistance = 0.0f;
 	State.FrontDistance = 0.0f;
@@ -562,14 +586,14 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	return true;
 }
 
-bool FRopeWrappingPhase::AppendCompositeAnalyticHelixPathPoint(
-	int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx)
+bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
+	const FRopeSimState& Sim, const FContext& Ctx)
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AppendCompositeAnalyticHelixPathPoint);
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AdvanceCompositeAnalyticHelixProbeStep);
 
-	if (PathIndex <= 0 || PathIndex >= State.NumTailNodes ||
-		PathIndex != State.Path.Num() || !State.bPathUsesPoseSpaceIsland ||
-		State.PathWrapIslandBones.Num() <= 1 || State.Path.Num() == 0)
+	if (State.Path.Num() <= 0 || State.Path.Num() >= State.NumTailNodes ||
+		!State.bPathUsesPoseSpaceIsland ||
+		State.PathWrapIslandBones.Num() <= 1)
 	{
 		FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixInvalidState"));
 		return false;
@@ -586,8 +610,8 @@ bool FRopeWrappingPhase::AppendCompositeAnalyticHelixPathPoint(
 		return false;
 	}
 
-	// 기존 AnalyticHelix의 5~8단계를 그대로 PathIndex 기반으로 계산한다. 축/래치 radial은
-	// composite 초기화에서 한 번 확정된 값을 사용하며, 직전 projection 결과는 어떤 입력에도 쓰지 않는다.
+	// 출력 Path.Num()과 독립적인 작은 probe step으로 ideal helix를 계산한다. projection 결과가
+	// 거의 움직이지 않아 출력 node가 생기지 않아도 PathSweepDistance는 계속 전진한다.
 	const FVector AxisDirection = State.PathAxisDirection.GetSafeNormal(
 		KINDA_SMALL_NUMBER, FVector::UpVector);
 	const FVector LatchSurfaceWorld = State.Path[0].SurfaceWorld;
@@ -608,24 +632,41 @@ bool FRopeWrappingPhase::AppendCompositeAnalyticHelixPathPoint(
 		: LatchRadius;
 
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
-	const float DistanceFromLatch = static_cast<float>(PathIndex) * SegmentLength;
+	// 출력 node 간격보다 촘촘한 반-segment probe로 원본 projection polyline을 만든다.
+	// Path.Num()과 무관한 PathSweepDistance에서 probe 번호를 복원하므로, 표면점이 제자리여서
+	// 이번 probe가 node를 만들지 못해도 다음 ideal helix 위상으로 전진할 수 있다.
+	const float ProbeStepDistance = FMath::Max(0.5f, SegmentLength * 0.5f);
+	const int32 ProbeStepIndex = FMath::RoundToInt(
+		State.PathSweepDistance / ProbeStepDistance) + 1;
+	const int32 MaxProbeStepCount = FMath::Max(32, State.NumTailNodes * 16);
+	// projection이 계속 같은 점을 반환하는 폐곡면/축퇴 상황에서 Path.Num()이 영원히 늘지 않는
+	// 무한 progressive build를 막는다. 정상 경로는 보통 node당 2~수 회 probe 안에 끝난다.
+	if (ProbeStepIndex > MaxProbeStepCount)
+	{
+		FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixProbeExhausted"));
+		UE_LOG(LogRopeWrap, Error,
+			TEXT("[%s] Composite analytic helix probe exhausted: probeStep=%d max=%d "
+				"path=%d/%d sweep=%.2fcm actualArc=%.2fcm"),
+			*Ctx.OwnerName, ProbeStepIndex, MaxProbeStepCount,
+			State.Path.Num(), State.NumTailNodes,
+			State.PathSweepDistance, State.PathCurrentDistance);
+		return false;
+	}
 	const float PitchScale = State.PathCompositeHelixPitchScale;
 	const float LengthScale = FMath::Sqrt(1.0f + FMath::Square(PitchScale));
 
-	// 래치 표면 반지름에서 island 전체 반지름으로 한 step에 순간 이동하지 않는다. 각 PathIndex의
-	// ideal point는 직전 projection 결과와 무관하게 래치/축/config만으로 다시 계산하되, 반지름 변화가
-	// segment의 60% 이하가 되도록 entry step 수를 자동 산출한다. 남은 길이만 원주/축 진행에 써서
-	// ideal point 간격 자체도 SegmentLength에 가깝게 유지한다.
+	// 래치 표면 반지름에서 island 전체 반지름으로 한 probe에 순간 이동하지 않는다. 각 raw point는
+	// 직전 projection 결과와 무관하게 래치/축/contact pitch만으로 독립 계산한다.
 	const float RadiusDelta = FMath::Abs(HelixRadius - LatchRadius);
 	const int32 RadiusEntrySegmentCount = RadiusDelta > KINDA_SMALL_NUMBER
-		? FMath::Max(2, FMath::CeilToInt(RadiusDelta / (SegmentLength * 0.6f)))
+		? FMath::Max(2, FMath::CeilToInt(RadiusDelta / (ProbeStepDistance * 0.6f)))
 		: 0;
 	float IdealRadius = LatchRadius;
 	float AxisAdvance = 0.0f;
 	float AngleRadians = 0.0f;
 	FVector IdealHelixWorld = LatchSurfaceWorld;
 	FVector PreviousIdealHelixWorld = LatchSurfaceWorld;
-	for (int32 IdealStepIndex = 1; IdealStepIndex <= PathIndex; ++IdealStepIndex)
+	for (int32 IdealStepIndex = 1; IdealStepIndex <= ProbeStepIndex; ++IdealStepIndex)
 	{
 		PreviousIdealHelixWorld = IdealHelixWorld;
 		const float PreviousRadius = IdealRadius;
@@ -636,7 +677,7 @@ bool FRopeWrappingPhase::AppendCompositeAnalyticHelixPathPoint(
 		IdealRadius = FMath::Lerp(LatchRadius, HelixRadius, RadiusAlpha);
 		const float RadialStep = IdealRadius - PreviousRadius;
 		const float CircumferenceStep = FMath::Sqrt(FMath::Max(
-			0.0f, FMath::Square(SegmentLength) - FMath::Square(RadialStep))) /
+			0.0f, FMath::Square(ProbeStepDistance) - FMath::Square(RadialStep))) /
 			FMath::Max(LengthScale, KINDA_SMALL_NUMBER);
 		AxisAdvance += CircumferenceStep * PitchScale;
 		const float MeanRadius = FMath::Max(
@@ -667,9 +708,9 @@ bool FRopeWrappingPhase::AppendCompositeAnalyticHelixPathPoint(
 		FinishPathBuild(/*bFailed=*/false);
 		UE_LOG(LogRopeWrap, Log,
 			TEXT("[%s] Composite analytic helix reached island axial limit: "
-				"nextIndex=%d idealAxis=%.2fcm range=[%.2f,%.2f]cm "
+				"nextProbe=%d idealAxis=%.2fcm range=[%.2f,%.2f]cm "
 				"builtPoints=%d releasedSolverNodes=%d"),
-			*Ctx.OwnerName, PathIndex, IdealAxisDistance,
+			*Ctx.OwnerName, ProbeStepIndex, IdealAxisDistance,
 			State.PathCompositeAxisMinDistance, State.PathCompositeAxisMaxDistance,
 			State.Path.Num(), FMath::Max(0, PreviousTailNodeCount - State.NumTailNodes));
 		return false;
@@ -677,7 +718,7 @@ bool FRopeWrappingPhase::AppendCompositeAnalyticHelixPathPoint(
 
 	// Ideal helix point에서 같은 축 높이의 axis point를 향해 radial ray를 쏜다. 각 SDF의
 	// 첫 교차점 중 ray 시작점에 가장 가까운 것만 사용한다. outer band/후보 점수/직전 path
-	// 방향은 전혀 사용하지 않으므로 각 PathIndex의 결과는 독립적인 analytic helix 위상에만
+	// 방향은 전혀 사용하지 않으므로 각 raw probe의 결과는 독립적인 analytic helix 위상에만
 	// 의존한다. 어떤 SDF도 ray와 교차하지 않으면 이 점은 no-anchor solver node로 남긴다.
 	bool bFound = false;
 	float BestRadialHitDistance = TNumericLimits<float>::Max();
@@ -770,7 +811,20 @@ bool FRopeWrappingPhase::AppendCompositeAnalyticHelixPathPoint(
 			BestProjection.SurfacePoint - State.PathAxisOrigin, AxisDirection);
 	}
 
-	FRopeWrapPathPoint Point;
+	// State.Path*는 마지막 출력 node가 아니라 직전 raw projection을 보관한다. 그래야 출력 경계
+	// 사이에 몇 번의 probe가 끼더라도 실제 raw polyline의 길이를 빠짐없이 누적할 수 있다.
+	const FVector PreviousRawSurfaceWorld = State.PathSurfaceWorld;
+	const FVector PreviousRawNormalWorld = State.PathNormalWorld;
+	const FVector PreviousRawTangentWorld = State.PathTangentWorld;
+	const FVector PreviousRawGuideTangentWorld =
+		State.PathCompositeRawGuideTangentWorld;
+	const FName PreviousRawBone = State.PathCurrentBone;
+	const USceneComponent* PreviousRawMesh = State.PathCurrentMesh.Get()
+		? State.PathCurrentMesh.Get()
+		: IslandMesh;
+	const bool bPreviousRawVirtual = State.bPathCompositeRawPointVirtual;
+
+	FRopeWrapPathPoint RawPoint;
 	FVector CircumferenceDirection = FVector::CrossProduct(AxisDirection, RotatedRadial)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir) * State.PathWindingSign;
 	if (bFound)
@@ -789,60 +843,177 @@ bool FRopeWrappingPhase::AppendCompositeAnalyticHelixPathPoint(
 		TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDirection);
 
-		Point.SurfaceWorld = BestProjection.SurfacePoint;
-		Point.NormalWorld = NormalWorld;
-		Point.TangentWorld = TangentWorld;
-		Point.Bone = BestProjection.Bone.IsNone() ? BestBone : BestProjection.Bone;
-		Point.Mesh = BestProjection.SourceMesh ? BestProjection.SourceMesh : BestMesh;
+		RawPoint.SurfaceWorld = BestProjection.SurfacePoint;
+		RawPoint.NormalWorld = NormalWorld;
+		RawPoint.TangentWorld = TangentWorld;
+		RawPoint.Bone = BestProjection.Bone.IsNone() ? BestBone : BestProjection.Bone;
+		RawPoint.Mesh = BestProjection.SourceMesh ? BestProjection.SourceMesh : BestMesh;
 	}
 	else
 	{
 		++State.PathCompositeProjectionFailureCount;
-		Point.SurfaceWorld = IdealHelixWorld;
-		Point.NormalWorld = RotatedRadial;
-		Point.TangentWorld = IdealTangentWorld;
-		Point.Bone = NAME_None;
-		Point.Mesh = IslandMesh;
-		Point.bVirtual = true;
+		RawPoint.SurfaceWorld = IdealHelixWorld;
+		RawPoint.NormalWorld = RotatedRadial;
+		RawPoint.TangentWorld = IdealTangentWorld;
+		RawPoint.Bone = NAME_None;
+		RawPoint.Mesh = IslandMesh;
+		RawPoint.bVirtual = true;
 	}
-	Point.DistanceFromLatch = DistanceFromLatch;
-	Point.bBridge = false;
-	State.Path.Add(Point);
 
-	if (!Point.bVirtual)
+	// Raw projection polyline의 실제 rope centerline 길이를 누적한다. 짧게 스냅된 probe는
+	// 출력 node를 만들지 않고 다음 probe로 넘어가며, 큰 projection 이동은 while에서 여러
+	// SegmentLength 경계로 나누어 출력한다.
+	const float CenterlineOffset = FMath::Max(0.0f, Ctx.SurfaceOffset);
+	const FVector PreviousRawCenterlineWorld = PreviousRawSurfaceWorld +
+		(bPreviousRawVirtual ? FVector::ZeroVector : PreviousRawNormalWorld * CenterlineOffset);
+	const FVector CurrentRawCenterlineWorld = RawPoint.SurfaceWorld +
+		(RawPoint.bVirtual ? FVector::ZeroVector : RawPoint.NormalWorld * CenterlineOffset);
+	const FVector RawCenterlineDelta =
+		CurrentRawCenterlineWorld - PreviousRawCenterlineWorld;
+	const float ActualStepDistance = RawCenterlineDelta.Size();
+	const float ArcStartDistance = State.PathCurrentDistance;
+	const float ArcEndDistance = ArcStartDistance + ActualStepDistance;
+	const int32 FirstNewPathIndex = State.Path.Num();
+
+	if (ActualStepDistance > KINDA_SMALL_NUMBER)
 	{
-		State.PathPreviousBone = State.PathCurrentBone;
-		State.PathCurrentBone = Point.Bone;
-		State.PathCurrentMesh = Point.Mesh;
+		while (State.Path.Num() < State.NumTailNodes)
+		{
+			const int32 SamplePathIndex = State.Path.Num();
+			const float TargetArcDistance =
+				static_cast<float>(SamplePathIndex) * SegmentLength;
+			if (TargetArcDistance > ArcEndDistance + KINDA_SMALL_NUMBER)
+			{
+				break;
+			}
+
+			const float Alpha = FMath::Clamp(
+				(TargetArcDistance - ArcStartDistance) / ActualStepDistance,
+				0.0f, 1.0f);
+			const bool bSampleVirtual = bPreviousRawVirtual || RawPoint.bVirtual;
+			const FVector SampleCenterlineWorld = FMath::Lerp(
+				PreviousRawCenterlineWorld, CurrentRawCenterlineWorld, Alpha);
+			const FVector SampleNormalWorld = FMath::Lerp(
+				PreviousRawNormalWorld, RawPoint.NormalWorld, Alpha)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, RawPoint.NormalWorld);
+			const FVector InterpolatedTangentWorld = FMath::Lerp(
+				PreviousRawTangentWorld, RawPoint.TangentWorld, Alpha)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, RawPoint.TangentWorld);
+			// Arc-length는 위치 간격만 보정한다. projection chord를 tangent로 쓰면 SDF support가
+			// 바뀌는 순간 chord 방향이 급회전하고, front 뒤 tail 전체의 직선 연장 방향까지 튄다.
+			// 독립 analytic helix가 만든 전/후 tangent를 보간해 원래 감김 흐름을 유지한다.
+			FVector SampleTangentWorld = (InterpolatedTangentWorld - FVector::DotProduct(
+				InterpolatedTangentWorld, SampleNormalWorld) * SampleNormalWorld)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, RawPoint.TangentWorld);
+			const FVector SampleWrappingGuideTangentWorld = FMath::Lerp(
+				PreviousRawGuideTangentWorld, IdealTangentWorld, Alpha)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, IdealTangentWorld);
+
+			// 같은 raw 구간이 두 본 사이를 잇는 경우 재샘플 위치에 더 가까운 쪽의 bone frame을
+			// anchor 소유자로 고른다. 어느 한쪽이 virtual이면 출력점도 virtual이라 bone은 쓰지 않는다.
+			const bool bUseCurrentBinding =
+				bPreviousRawVirtual || (!RawPoint.bVirtual && Alpha >= 0.5f);
+			FRopeWrapPathPoint SamplePoint;
+			SamplePoint.SurfaceWorld = SampleCenterlineWorld -
+				(bSampleVirtual ? FVector::ZeroVector : SampleNormalWorld * CenterlineOffset);
+			SamplePoint.NormalWorld = SampleNormalWorld;
+			SamplePoint.TangentWorld = SampleTangentWorld;
+			SamplePoint.WrappingGuideTangentWorld = SampleWrappingGuideTangentWorld;
+			SamplePoint.bHasWrappingGuideTangent = true;
+			SamplePoint.Bone = bSampleVirtual
+				? NAME_None
+				: (bUseCurrentBinding ? RawPoint.Bone : PreviousRawBone);
+			SamplePoint.Mesh = bUseCurrentBinding ? RawPoint.Mesh.Get() : PreviousRawMesh;
+			SamplePoint.DistanceFromLatch = TargetArcDistance;
+			SamplePoint.bBridge = false;
+			SamplePoint.bVirtual = bSampleVirtual;
+			State.Path.Add(SamplePoint);
+		}
 	}
-	State.PathSurfaceWorld = Point.SurfaceWorld;
-	State.PathNormalWorld = Point.NormalWorld;
-	State.PathTangentWorld = Point.TangentWorld;
+
+	if (!RawPoint.bVirtual)
+	{
+		if (RawPoint.Bone != State.PathCurrentBone)
+		{
+			State.PathPreviousBone = State.PathCurrentBone;
+		}
+		State.PathCurrentBone = RawPoint.Bone;
+		State.PathCurrentMesh = RawPoint.Mesh;
+	}
+	// 출력 node 생성 여부와 상관없이 raw 상태와 sweep 위상은 항상 갱신한다. PathCurrentDistance는
+	// 실제 centerline arc, PathSweepDistance는 ideal helix probe의 명목 진행량이다.
+	State.PathSurfaceWorld = RawPoint.SurfaceWorld;
+	State.PathNormalWorld = RawPoint.NormalWorld;
+	State.PathTangentWorld = RawPoint.TangentWorld;
+	State.PathCompositeRawGuideTangentWorld = IdealTangentWorld;
 	State.PathCircumferenceDir = CircumferenceDirection;
-	State.PathCurrentDistance = DistanceFromLatch;
-	State.PathSweepDistance = DistanceFromLatch;
+	State.PathCurrentDistance = ArcEndDistance;
+	State.PathSweepDistance = static_cast<float>(ProbeStepIndex) * ProbeStepDistance;
+	State.bPathCompositeRawPointVirtual = RawPoint.bVirtual;
 	State.PathCompositeSweepRadial = RotatedRadial;
 	State.PathCompositeSweepAngleRad = FMath::Abs(AngleRadians);
 	State.PathAccumulatedAngleRad = FMath::Abs(AngleRadians);
 
 	UE_LOG(LogRopeWrap, VeryVerbose,
-		TEXT("[%s] Composite analytic helix point: index=%d type=%s bone=%s "
+		TEXT("[%s] Composite analytic helix raw probe: probe=%d type=%s bone=%s "
 			"helixRadius=%.2fcm idealRadius=%.2fcm pitch=%.3f entrySegments=%d "
-			"radialHitDistance=%.2fcm surfaceDistance=%.2fcm "
+			"radialHitDistance=%.2fcm surfaceDistance=%.2fcm actualStep=%.2fcm "
+			"arc=[%.2f,%.2f]cm appended=%d path=%d/%d "
 			"angle=%.1fdeg idealAxis=%.2fcm surfaceAxis=%.2fcm "
 			"ideal=%s selected=%s sdfCandidates=%d radialMiss=%d"),
-		*Ctx.OwnerName, PathIndex, Point.bVirtual ? TEXT("NoAnchorSolver") : TEXT("SurfaceAnchor"),
-		*Point.Bone.ToString(), HelixRadius, IdealRadius, PitchScale,
+		*Ctx.OwnerName, ProbeStepIndex,
+		RawPoint.bVirtual ? TEXT("NoAnchorSolver") : TEXT("Surface"),
+		*RawPoint.Bone.ToString(), HelixRadius, IdealRadius, PitchScale,
 		RadiusEntrySegmentCount,
 		bFound ? BestRadialHitDistance : -1.0f,
 		bFound ? BestProjection.Distance : -1.0f,
+		ActualStepDistance, ArcStartDistance, ArcEndDistance,
+		State.Path.Num() - FirstNewPathIndex, State.Path.Num(), State.NumTailNodes,
 		FMath::RadiansToDegrees(FMath::Abs(AngleRadians)), IdealAxisDistance,
 		ProjectedAxisDistance, *IdealHelixWorld.ToString(),
-		*(bFound ? BestProjection.SurfacePoint : Point.SurfaceWorld).ToString(),
+		*(bFound ? BestProjection.SurfacePoint : RawPoint.SurfaceWorld).ToString(),
 		MatchingSDFCount, RadialMissCount);
 
 	if (State.Path.Num() >= State.NumTailNodes)
 	{
+		float MinCenterlineSpacing = TNumericLimits<float>::Max();
+		float MaxCenterlineSpacing = 0.0f;
+		float TotalCenterlineSpacing = 0.0f;
+		int32 SpacingCount = 0;
+		int32 VirtualPointCount = 0;
+		for (int32 PathIndex = 0; PathIndex < State.Path.Num(); ++PathIndex)
+		{
+			const FRopeWrapPathPoint& CurrentPoint = State.Path[PathIndex];
+			VirtualPointCount += CurrentPoint.bVirtual ? 1 : 0;
+			if (PathIndex == 0)
+			{
+				continue;
+			}
+
+			const FRopeWrapPathPoint& PreviousPoint = State.Path[PathIndex - 1];
+			const FVector PreviousCenterline = PreviousPoint.SurfaceWorld +
+				(PreviousPoint.bVirtual
+					? FVector::ZeroVector
+					: PreviousPoint.NormalWorld * CenterlineOffset);
+			const FVector CurrentCenterline = CurrentPoint.SurfaceWorld +
+				(CurrentPoint.bVirtual
+					? FVector::ZeroVector
+					: CurrentPoint.NormalWorld * CenterlineOffset);
+			const float Spacing = FVector::Dist(PreviousCenterline, CurrentCenterline);
+			MinCenterlineSpacing = FMath::Min(MinCenterlineSpacing, Spacing);
+			MaxCenterlineSpacing = FMath::Max(MaxCenterlineSpacing, Spacing);
+			TotalCenterlineSpacing += Spacing;
+			++SpacingCount;
+		}
+		UE_LOG(LogRopeWrap, Log,
+			TEXT("[%s] Composite arc-length resample completed: points=%d probes=%d "
+				"targetSpacing=%.2fcm chordSpacing(avg=%.2f min=%.2f max=%.2f)cm "
+				"rawArc=%.2fcm sweep=%.2fcm virtualPoints=%d"),
+			*Ctx.OwnerName, State.Path.Num(), ProbeStepIndex, SegmentLength,
+			SpacingCount > 0 ? TotalCenterlineSpacing / static_cast<float>(SpacingCount) : 0.0f,
+			SpacingCount > 0 ? MinCenterlineSpacing : 0.0f,
+			MaxCenterlineSpacing, State.PathCurrentDistance, State.PathSweepDistance,
+			VirtualPointCount);
 		FinishPathBuild(/*bFailed=*/false);
 	}
 	return true;
@@ -1312,10 +1483,13 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 				PitchSource = TEXT("DegenerateContactDirectionZero");
 			}
 
-			State.PathTangentWorld =
+			// 동일한 초기 helix 방향에서 두 tangent를 분리한다. PathTangentWorld는 표면 anchor용으로
+			// normal 평면에 투영하고, RawGuide는 projection 전 방향을 유지해 tail 흔들림을 차단한다.
+			State.PathCompositeRawGuideTangentWorld =
 				(State.PathCircumferenceDir + AxisDirection *
 					State.PathCompositeHelixPitchScale)
 				.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
+			State.PathTangentWorld = State.PathCompositeRawGuideTangentWorld;
 			State.PathTangentWorld = (State.PathTangentWorld - FVector::DotProduct(
 				State.PathTangentWorld, State.PathNormalWorld) * State.PathNormalWorld)
 				.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
@@ -1357,6 +1531,8 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 	LatchPoint.SurfaceWorld = State.PathSurfaceWorld;
 	LatchPoint.NormalWorld = State.PathNormalWorld;
 	LatchPoint.TangentWorld = State.PathTangentWorld;
+	LatchPoint.WrappingGuideTangentWorld = State.PathCompositeRawGuideTangentWorld;
+	LatchPoint.bHasWrappingGuideTangent = State.bPathUsesPoseSpaceIsland;
 	LatchPoint.Bone = State.PathCurrentBone;
 	LatchPoint.Mesh = State.PathCurrentMesh;
 	LatchPoint.DistanceFromLatch = 0.0f;
@@ -1953,6 +2129,15 @@ bool FRopeWrappingPhase::AppendWrappingAnchorFromPathPoint(int32 PathIndex, cons
 	Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Point.SurfaceWorld);
 	Anchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(Point.NormalWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 	Anchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(Point.TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	if (Point.bHasWrappingGuideTangent)
+	{
+		// guide도 anchor bone-local로 저장해 Wrapping 도중 캐릭터 애니메이션은 따라가되,
+		// 표면 normal의 미세 굴곡에는 다시 투영되지 않게 한다.
+		Anchor.LocalWrappingGuideTangent = BoneXform.InverseTransformVectorNoScale(
+			Point.WrappingGuideTangentWorld)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, Anchor.LocalTangent);
+		Anchor.bHasWrappingGuideTangent = true;
+	}
 	Anchor.StartWorldPosition = Sim.Positions[NodeIndex];
 	Anchor.SurfaceOffset = FMath::Max(0.0f, Ctx.SurfaceOffset);
 	Anchor.RopeDistance = Point.DistanceFromLatch;
@@ -3697,6 +3882,15 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 		Point.TangentWorld = BoneXform.TransformVectorNoScale(Anchor.LocalTangent);
 		Point.TangentWorld = (Point.TangentWorld - FVector::DotProduct(Point.TangentWorld, Point.NormalWorld) * Point.NormalWorld)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(Point.NormalWorld));
+		if (Anchor.bHasWrappingGuideTangent)
+		{
+			// surface tangent와 달리 guide에는 normal 평면 투영을 적용하지 않는다. 이 벡터는
+			// 충돌/고정 프레임이 아니라 front 뒤 tail의 시각적 연장 방향으로만 소비된다.
+			Point.WrappingGuideTangentWorld = BoneXform.TransformVectorNoScale(
+				Anchor.LocalWrappingGuideTangent)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, Point.TangentWorld);
+			Point.bHasWrappingGuideTangent = true;
+		}
 		Point.Bone = Anchor.Bone;
 		Point.Mesh = Mesh;
 		Point.DistanceFromLatch = Anchor.RopeDistance;
@@ -3728,6 +3922,22 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 		Point.TangentWorld = (Point.TangentWorld -
 			FVector::DotProduct(Point.TangentWorld, Point.NormalWorld) * Point.NormalWorld)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.TangentWorld);
+		Point.bHasWrappingGuideTangent =
+			LowerPoint.bHasWrappingGuideTangent || UpperPoint.bHasWrappingGuideTangent;
+		if (Point.bHasWrappingGuideTangent)
+		{
+			// front가 두 path point 사이를 이동할 때 guide도 같은 alpha로 보간해 방향이 node
+			// 경계에서 계단식으로 바뀌지 않게 한다. guide가 없는 쪽은 surface tangent로 폴백한다.
+			const FVector LowerGuide = LowerPoint.bHasWrappingGuideTangent
+				? LowerPoint.WrappingGuideTangentWorld
+				: LowerPoint.TangentWorld;
+			const FVector UpperGuide = UpperPoint.bHasWrappingGuideTangent
+				? UpperPoint.WrappingGuideTangentWorld
+				: UpperPoint.TangentWorld;
+			Point.WrappingGuideTangentWorld = FMath::Lerp(
+				LowerGuide, UpperGuide, Alpha)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, LowerGuide);
+		}
 		Point.Bone = Alpha < 0.5f ? LowerPoint.Bone : UpperPoint.Bone;
 		Point.Mesh = Alpha < 0.5f ? LowerPoint.Mesh : UpperPoint.Mesh;
 		Point.DistanceFromLatch = SampleDistance;

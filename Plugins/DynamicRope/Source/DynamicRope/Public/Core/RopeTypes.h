@@ -281,6 +281,11 @@ struct FRopeSurfaceAnchor
 	FVector LocalNormal = FVector::UpVector;
 	FVector LocalTangent = FVector::ForwardVector;
 
+	/** Composite Wrapping front 뒤 tail의 연장 방향. 표면 tangent와 분리된 ideal helix guide를
+	 *  bone-local로 저장하며 Wrapped 물리/표면 프레임에는 사용하지 않는다. */
+	FVector LocalWrappingGuideTangent = FVector::ForwardVector;
+	bool bHasWrappingGuideTangent = false;
+
 	/** Wrapping 시작 순간의 월드 위치. front 모션의 Lerp 시작점으로 사용한다. */
 	FVector StartWorldPosition = FVector::ZeroVector;
 
@@ -301,6 +306,10 @@ struct FRopeWrapPathPoint
 	FVector SurfaceWorld = FVector::ZeroVector;
 	FVector NormalWorld = FVector::UpVector;
 	FVector TangentWorld = FVector::ForwardVector;
+
+	/** Composite Wrapping tail 전용 ideal helix 방향. SDF normal의 미세 불규칙성을 따르지 않는다. */
+	FVector WrappingGuideTangentWorld = FVector::ForwardVector;
+	bool bHasWrappingGuideTangent = false;
 
 	/**
 	 * 이 path point가 투영된 실제 표면 본.
@@ -407,6 +416,13 @@ struct FRopeWrappingState
 	/** predictor/composite sweep가 시도한 명목 진행 거리(cm).
 	 *  projection이 제자리여도 증가해 표면 탐색 위상이 멈추지 않게 한다. */
 	float PathSweepDistance = 0.0f;
+
+	/** Composite Analytic Helix의 직전 raw probe가 SDF projection에 실패한 virtual 점인가.
+	 *  출력 Path와 독립된 raw polyline의 arc-length 재샘플링에서 구간 종류를 보존한다. */
+	bool bPathCompositeRawPointVirtual = false;
+
+	/** 직전 raw probe의 projection 전 ideal helix tangent. 다음 arc-length 출력점 guide 보간용. */
+	FVector PathCompositeRawGuideTangentWorld = FVector::ForwardVector;
 	float FrontDistance = 0.0f;
 	FVector PathSurfaceWorld = FVector::ZeroVector;
 	FVector PathNormalWorld = FVector::UpVector;

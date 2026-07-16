@@ -164,7 +164,9 @@ private:
 	bool BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor& LatchAnchor,
 		const FRopeSimState& Sim, const FContext& Ctx);
 
-	bool AppendCompositeAnalyticHelixPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
+	/** 출력 Path.Num()과 독립적으로 ideal helix raw probe를 한 step 전진한다. 실제 projected
+	 *  centerline arc가 SegmentLength 경계를 넘을 때만 출력 path point를 0개 이상 생성한다. */
+	bool AdvanceCompositeAnalyticHelixProbeStep(const FRopeSimState& Sim, const FContext& Ctx);
 
 	bool InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor,
 		const FRopeSimState& Sim, const FContext& Ctx);
