@@ -129,6 +129,7 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 	UpdateGroundExit();
 	UpdateSwingAirControl();
+	UpdatePullMontage();
 	UpdateAimRayColliderQueryBounds();
 	UpdateAimHudSample();
 	UpdateAimHudWidget();
@@ -497,12 +498,12 @@ void URopeWielderComponent::OnReleaseInput()
 
 void URopeWielderComponent::StartPull()
 {
-	// 몽타주 경로는 Wrapped에서만 — 감긴 게 없는데 당기는 모션만 도는 것을 막는다. 비Wrapped에서는
-	// 종전 홀드 시맨틱(힘 장전 — 감기는 순간 걸림)을 유지하기 위해 즉시 경로로 떨어진다.
-	if (PullMontage && Rope && Rope->GetPhase() == ERopePhase::Wrapped)
+	bPullHeld = true;
+	if (PullMontage)
 	{
-		// 실제 pull은 몽타주에 배치한 notify가 StartPullNow()로 발동한다(ThrowMontage와 같은 계약).
-		PlayPullMontage();
+		// 몽타주 모드: 힘은 window notify만 싣는다(비Wrapped 힘 장전 없음 — window 밖 pull이 새는 것을 막는다).
+		// 재생 조건은 UpdatePullMontage가 굴린다 — 여기서 즉시 1회 돌려 Wrapped면 지연 없이 시작.
+		UpdatePullMontage();
 	}
 	else
 	{
@@ -528,6 +529,7 @@ void URopeWielderComponent::StopPullNow()
 
 void URopeWielderComponent::StopPull()
 {
+	bPullHeld = false;
 	StopPullNow();
 	// 몽타주 경로로 시작했다면 연출도 함께 끝낸다(입력을 뗀 순간). 다른 경로였어도 무해 — 재생 중일 때만 중단.
 	if (PullMontage && AttachMesh)
@@ -1018,6 +1020,34 @@ void URopeWielderComponent::PlayPullMontage()
 	{
 		UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: no AnimInstance to play PullMontage."),
 			*GetNameSafe(GetOwner()));
+	}
+}
+
+void URopeWielderComponent::UpdatePullMontage()
+{
+	if (!PullMontage || !AttachMesh)
+	{
+		return; // 몽타주 모드 아님(또는 메시 미해석 — 다음 틱에 재시도할 것 없이 no-op).
+	}
+	UAnimInstance* Anim = AttachMesh->GetAnimInstance();
+	if (!Anim)
+	{
+		return;
+	}
+
+	const bool bPlaying = Anim->Montage_IsPlaying(PullMontage);
+	const bool bWrapped = Rope && Rope->GetPhase() == ERopePhase::Wrapped;
+	if (bPullHeld && bWrapped && !bPlaying)
+	{
+		// 홀드 중 재생 보장: 홀드 중 wrap 성립(그때 시작)과 비루프 몽타주의 자연 종료(반복 재생 =
+		// 연속 당기기 사이클)를 조건 하나로 잇는다. 힘은 몽타주 안의 window notify가 싣는다.
+		PlayPullMontage();
+	}
+	else if (bPlaying && !bWrapped)
+	{
+		// wrap이 풀리면(release/cut/대상 소실) 당기는 모션도 끝낸다 — 힘은 NotifyEnd 캐스케이드가 끈다.
+		// 직접 재생(BP의 PlayPullMontage)도 같은 규칙: 감긴 게 없는 pull 모션은 두지 않는다.
+		Anim->Montage_Stop(PullMontage->BlendOut.GetBlendTime(), PullMontage);
 	}
 }
 

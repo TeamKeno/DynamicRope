@@ -365,12 +365,12 @@ public:
 	float ThrowMontagePlayRate = 1.0f;
 
 	/**
-	 * 설정하면 StartPull()(PullAction 홀드 포함)이 즉시 당기지 않고, 로프가 Wrapped일 때 이 몽타주를 재생한다.
-	 * 실제 pull 시도는 몽타주 안에 배치한 UAnimNotifyState_RopePull window가 StartPullNow/StopPullNow를 호출해
-	 * 일어난다(ThrowMontage의 UAnimNotify_RopeThrow와 같은 계약: notify 미배치면 pull이 일어나지 않는다).
-	 * 홀드 유지 연출이 필요하면 몽타주 섹션 루프로 구성한다. 비우면 StartPull()이 즉시 StartPullNow()로
-	 * 당긴다(종전 동작). Wrapped가 아니면 몽타주 없이 힘만 장전된다(StartPullNow — 감기는 순간 걸리는 종전
-	 * 홀드 시맨틱 유지).
+	 * 설정하면 pull이 **몽타주 모드**가 된다: 힘은 몽타주 안에 배치한 UAnimNotifyState_RopePull window만
+	 * 싣는다(ThrowMontage의 UAnimNotify_RopeThrow와 같은 계약: notify 미배치면 pull이 일어나지 않는다).
+	 * 재생 수명은 홀드/페이즈 조건으로 틱이 굴린다(UpdatePullMontage): StartPull~StopPull 사이(홀드) +
+	 * Wrapped면 재생하고 — 홀드 중 wrap이 성립하면 그때 자동 시작, 비루프 몽타주가 자연 종료하면 홀드가
+	 * 유지되는 동안 반복 재생(연속 당기기 사이클) — wrap이 풀리면(release/cut) 중단한다. 비우면 StartPull()이
+	 * 즉시 StartPullNow()로 당긴다(종전 동작 — 비Wrapped 홀드는 힘 장전으로 남아 감기는 순간 걸린다).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation")
 	TObjectPtr<UAnimMontage> PullMontage = nullptr;
@@ -412,9 +412,9 @@ public:
 	void Release();
 
 	/**
-	 * 능동 Pull 시작 — 입력 홀드/게임플레이가 호출하는 진입점(Throw()와 같은 구조). PullMontage가 설정돼
-	 * 있고 로프가 Wrapped면 몽타주를 재생하고 실제 pull은 몽타주의 notify가 StartPullNow()로 발동한다.
-	 * 그 외(몽타주 없음/비Wrapped)는 즉시 StartPullNow().
+	 * 능동 Pull 시작(홀드 진입) — 입력/게임플레이가 호출하는 진입점(Throw()와 같은 구조). StopPull까지
+	 * "당기는 중" 상태가 유지된다. 몽타주 모드(PullMontage 설정)면 재생/힘은 UpdatePullMontage와 window
+	 * notify가 굴리고, 아니면 즉시 StartPullNow()로 힘을 장전한다.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StartPull();
@@ -431,7 +431,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StopPullNow();
 
-	/** 능동 Pull 정지(+재생 중인 PullMontage 중단). 입력을 뗀 순간의 전체 정지 경로. */
+	/** 능동 Pull 정지(홀드 종료 + 힘 정지 + 재생 중인 PullMontage 중단). 입력을 뗀 순간의 전체 정지 경로. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StopPull();
 
@@ -559,6 +559,13 @@ private:
 	/** 스윙 판정에 따라 AirControl을 부스트/복원한다(매 틱, GT). */
 	void UpdateSwingAirControl();
 
+	/**
+	 * PullMontage의 재생 수명 관리(매 틱, GT — 몽타주 모드 전용). 홀드 중(bPullHeld) + Wrapped + 미재생이면
+	 * 재생하고(홀드 중 wrap 성립/비루프 자연 종료의 반복 재생을 모두 이 조건 하나가 잇는다), 재생 중인데
+	 * Wrapped가 아니면 중단한다(release/cut — 힘은 NotifyEnd 캐스케이드가 끈다).
+	 */
+	void UpdatePullMontage();
+
 	void UpdateThrowPreview();
 
 	/** 멀리 있는 target SDF도 수집되도록 ray 구간을 collider query bounds에 포함한다. */
@@ -611,6 +618,8 @@ private:
 	void OnReloadInput();
 
 	bool bInputBound = false;
+	// pull 홀드 상태(StartPull~StopPull 사이). 몽타주 모드의 재생 조건 — UpdatePullMontage가 읽는다.
+	bool bPullHeld = false;
 	// AirControl 부스트 원복용 저장 상태(스윙 진입 시 저장, 종료/EndPlay 시 복원).
 	bool bAirControlBoosted = false;
 	float SavedAirControl = 0.0f;
