@@ -210,6 +210,21 @@ enum class ERopeWrappingPathMode : uint8
 	SurfaceVectorField UMETA(DisplayName = "Surface Vector Field")
 };
 
+/** Composite Multi-Bone island의 경로점/표면 선택 방식. */
+UENUM(BlueprintType)
+enum class ERopeCompositeProjectionMode : uint8
+{
+	/** 기존 방식: 최외곽 support band 안에서 거리·tangent·normal 점수로 선택한다. */
+	Legacy = 0 UMETA(DisplayName = "Legacy Outer Support"),
+
+	/**
+	 * PathIndex마다 이상적인 나선점을 독립 계산하고 같은 축 높이에서 axis 방향 radial ray를 쏜다.
+	 * composite island의 모든 SDF 중 ray의 첫 교차점을 실제 surface anchor로 사용한다. 교차가 없으면
+	 * anchor/position override 없이 해당 노드를 Wrapping부터 solver가 처리한다.
+	 */
+	AnalyticHelix = 1 UMETA(DisplayName = "Analytic Helix")
+};
+
 /**
  * 감김 축을 어디서 유도할지(FRopeWrapConfig::WrappingAxisSource). 우선순위 체인의 앞부분만 다르고,
  * 뒤쪽 폴백(본→부모 → 컴포넌트 기저 → 본 로컬 X)은 공통이다 — FRopeWrappingPhase::ResolveWrappingAxis.
@@ -325,6 +340,13 @@ struct FRopeWrapPathPoint
 	 * 커밋 후 이 구간 노드는 자유 로프로 남는다.
 	 */
 	bool bBridge = false;
+
+	/**
+	 * Composite Analytic Helix의 no-anchor 점. radial SDF ray가 표면과 교차하지 않을 때
+	 * IdealHelixWorld는 경로/디버그 위상으로만 보존한다. 이 점에 대응하는 노드는 Wrapping부터
+	 * 위치 override와 surface anchor를 받지 않고 즉시 solver가 처리한다.
+	 */
+	bool bVirtual = false;
 };
 
 /** 접촉 시 실제로 평가한 pose-space gap의 판정 결과. 디버그 표시는 이 저장값만 읽는다. */
@@ -458,6 +480,21 @@ struct FRopeWrappingState
 
 	/** 복합 단면 전체 바깥에서 SDF support projection을 시작할 축 반지름(cm). */
 	float PathCompositeProbeRadius = 0.0f;
+
+	/** composite 축에서 island 전체 SDF bounds 외곽까지의 최대 투영 반지름(cm, probe margin 제외). */
+	float PathCompositeHelixRadius = 0.0f;
+
+	/** Contacting 순간 tail 방향의 axis/circumference 비율로 자동 산출한 composite helix pitch. */
+	float PathCompositeHelixPitchScale = 0.0f;
+	bool bPathCompositeHelixPitchFromContact = false;
+
+	/** composite 축 원점 기준 island 전체 SDF bounds의 축 방향 범위(cm). */
+	float PathCompositeAxisMinDistance = 0.0f;
+	float PathCompositeAxisMaxDistance = 0.0f;
+	bool bPathCompositeAxisRangeValid = false;
+
+	/** 독립 composite helix가 island 축 범위를 벗어나 부분 경로로 정상 종료했는가. */
+	bool bPathEndedAtCompositeAxisLimit = false;
 
 	/** 독립 sweep radial이 시작점에서 누적 회전한 양(라디안, 진행 상태 로그용). */
 	float PathCompositeSweepAngleRad = 0.0f;
@@ -936,7 +973,10 @@ struct FRopeWrapConfig
 	/** Wrapping 중 한 프레임에 진행할 surface path 적분 step 수. 높이면 빨라지지만 순간 비용이 커진다. */
 	int32 WrappingPathBuildStepsPerFrame = 8;
 
-	/** Axis distance advanced per circumference distance for analytic helix wrapping. */
+	/**
+	 * Axis distance advanced per circumference distance for legacy AnalyticHelix/SVF wrapping.
+	 * Composite Analytic Helix는 이 값을 사용하지 않고 Contacting 순간 tail 기울기에서 자동 산출한다.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "-2.0", ClampMax = "2.0"))
 	float WrappingHelixPitchScale = 0.25f;
 
@@ -946,6 +986,14 @@ struct FRopeWrapConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone")
 	bool bEnableMultiBoneWrapping = true;
+
+	/**
+	 * Composite Multi-Bone 전용 경로점/표면 선택 방식. Legacy는 progressive outer-support candidate를
+	 * 사용한다. Analytic Helix는 PathIndex별 독립 helix와 radial SDF ray를 사용하며, 교차하지 않은
+	 * 경로점은 anchor 없이 solver node로 남긴다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone")
+	ERopeCompositeProjectionMode CompositeProjectionMode = ERopeCompositeProjectionMode::Legacy;
 
 	// NOTE: 아래 멀티본 투영 스코어링 세부(깊이/비용/가중치/보너스/히스테리시스 12종)는 실측 튜닝이
 	// 끝난 개발자 상수로 내부화됐다(2026-07-13 표면 감사 B-2 — UPROPERTY 제거, 코드에서만 조정).

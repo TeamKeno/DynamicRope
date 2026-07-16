@@ -39,6 +39,19 @@ struct FRopeDebugSnapshot;
 // 디버거 노드별 flight 시각화 항목(Debug/RopeDebugSnapshot.h).
 struct FRopeFlightNodeDebug;
 
+/**
+ * Composite Analytic Helix의 bounded no-anchor 구간을 양쪽 실제 anchor 사이 직선으로 유지하는
+ * kinematic bridge. 특정 본 하나에 귀속하지 않고 두 surface binding을 매 프레임 함께 해석한다.
+ */
+struct FRopeKinematicVirtualBridge
+{
+	TArray<int32> NodeIndices;
+	FRopeSurfaceAnchor LeftAnchor;
+	FRopeSurfaceAnchor RightAnchor;
+	float RestSpanLength = 0.0f;
+	bool bLoggedStretchWarning = false;
+};
+
 // Wrapped 성립 이벤트는 본 이름 하나에서 구조체 페이로드로 확장됐다(2026-07-13 회의 결정 G —
 // 결착/판정값/복수 본. 기존 BP 바인딩은 재연결 필요, 클린 브레이크 승인 사항).
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, const FRopeWrappedEventInfo&, Info);
@@ -658,6 +671,9 @@ private:
 	/** Wrapped: bone-local latch 유지/해제. */
 	FRopeWrapController WrapController;
 
+	/** 양쪽 실제 anchor가 있는 virtual run. 노드는 Wrapped 동안 Pos=Prev, InvMass=0으로 직선 고정된다. */
+	TArray<FRopeKinematicVirtualBridge> KinematicVirtualBridges;
+
 	/** ③ GuidedThrow 구동 상태: 확정 preview path(조준) 또는 레이 끝점 아치(허공, bFreeThrow). */
 	FRopeGuidedThrowState GuidedThrowState;
 
@@ -909,4 +925,15 @@ private:
 
 	/** latch/anchor 노드 InvMass=0, 나머지 1 — Wrapped 중 자유 구간만 솔버가 움직이게. */
 	void ApplyWrappedMassMask(bool bResetDynamicNodeVelocity = false);
+
+	/** Wrapping 커밋 직전 path의 bounded virtual run을 dual-anchor bridge로 변환한다. */
+	void BuildKinematicVirtualBridges(const TArray<FRopeWrapPathPoint>& Path, int32 LatchNodeIndex,
+		const TArray<FRopeSurfaceAnchor>& CommitAnchors);
+
+	/** 양쪽 anchor의 현재 월드 위치 사이에 bridge 노드를 균등 배치하고 hard kinematic override를 쓴다. */
+	void HoldKinematicVirtualBridges();
+
+	/** release/rethrow/non-composite 진입에서 이전 bridge binding을 폐기한다. */
+	void ResetKinematicVirtualBridges();
+
 };

@@ -83,6 +83,32 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 	// preview 경로는 설정값을 4096으로 덮어 한 번에 완주한다(BuildPreviewCenterline).
 	const int32 AutoBudget = FMath::DivideAndRoundUp(State.NumTailNodes * 2, 4);
 	const int32 StepBudget = FMath::Max3(1, Ctx.Config.WrappingPathBuildStepsPerFrame, AutoBudget);
+	if (State.bPathUsesPoseSpaceIsland &&
+		Ctx.Config.CompositeProjectionMode == ERopeCompositeProjectionMode::AnalyticHelix)
+	{
+		for (int32 StepIndex = 0;
+			StepIndex < StepBudget && State.Path.Num() < State.NumTailNodes;
+			++StepIndex)
+		{
+			const int32 PathIndex = State.Path.Num();
+			if (!AppendCompositeAnalyticHelixPathPoint(PathIndex, Sim, Ctx))
+			{
+				break;
+			}
+
+			if (!AppendWrappingAnchorFromPathPoint(PathIndex, Sim, Ctx))
+			{
+				FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixAnchorFailed"));
+				break;
+			}
+		}
+
+		if (State.Path.Num() >= State.NumTailNodes)
+		{
+			FinishPathBuild(/*bFailed=*/false);
+		}
+		return;
+	}
 	if (State.PathMode == ERopeWrappingPathMode::AnalyticHelix)
 	{
 		for (int32 StepIndex = 0;
@@ -129,7 +155,16 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 	}
 
 	const float SurfaceOffset = FMath::Max(0.0f, Ctx.SurfaceOffset);
-	const FVector FrontWorld = FrontPoint.SurfaceWorld + FrontPoint.NormalWorld * SurfaceOffset;
+	const auto PathPointToCenterline = [SurfaceOffset](const FRopeWrapPathPoint& Point)
+	{
+		// Surface point만 표면 법선 offset을 적용한다. Virtual/bridge는 이미 rope centerline의
+		// 월드 위치이므로 offset을 다시 더하면 이상적인 나선 반지름이 이중으로 커진다.
+		return Point.SurfaceWorld +
+			(Point.bVirtual || Point.bBridge
+				? FVector::ZeroVector
+				: Point.NormalWorld * SurfaceOffset);
+	};
+	const FVector FrontWorld = PathPointToCenterline(FrontPoint);
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
 	// front 구동 범위는 경로가 소유한 노드까지다. 상한 없는 기본 상태에서는 NumTailNodes가 로프
 	// 끝까지라 종전과 동일하고, 감는 양 상한(WrappingMaxWrapAngleDeg)으로 경로가 로프보다 짧게
@@ -160,6 +195,15 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 			continue;
 		}
 
+		// Radial SDF ray가 표면을 찾지 못한 composite helix point는 이 페이즈에서도
+		// 위치 override를 주지 않는다. 이 노드만 즉시 solver가 계산하게 해 Wrapped
+		// 커밋 순간 virtual guide가 한꺼번에 사라지는 위치 discontinuity를 없앤다.
+		const int32 PathIndex = NodeIndex - LatchNode;
+		if (State.Path.IsValidIndex(PathIndex) && State.Path[PathIndex].bVirtual)
+		{
+			continue;
+		}
+
 		const float NodeDistance = static_cast<float>(NodeIndex - LatchNode) * SegmentLength;
 		FVector World = FVector::ZeroVector;
 		if (NodeDistance <= State.FrontDistance + KINDA_SMALL_NUMBER)
@@ -169,7 +213,7 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 			{
 				continue;
 			}
-			World = NodePoint.SurfaceWorld + NodePoint.NormalWorld * SurfaceOffset;
+			World = PathPointToCenterline(NodePoint);
 		}
 		else
 		{
@@ -214,12 +258,22 @@ void FRopeWrappingPhase::ApplyMassMask(const FRopeSimState& Sim, FRopeNodeOverri
 {
 	const int32 LatchNode = State.LatchAnchor.NodeIndex;
 	const bool bHasValidLatch = Sim.InvMass.IsValidIndex(LatchNode);
+	const int32 DrivenEndNode = State.bPathEndedAtCompositeAxisLimit
+		? FMath::Min(Sim.Num() - 1, LatchNode + FMath::Max(0, State.NumTailNodes - 1))
+		: Sim.Num() - 1;
 
 	OutFrame.EnsureSize(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		const bool bStartPin = (i == 0 && Sim.bStartPinned);
-		const bool bWrappingDrivenNode = bHasValidLatch && i >= LatchNode;
+		// Composite analytic helix가 island의 축 범위를 벗어나 부분 완료된 경우에는 실제로
+		// 만들어진 경로까지만 Wrapping이 소유한다. 그 뒤 노드는 즉시 dynamic으로 돌려 solver가
+		// 마지막 surface anchor에서 이어지는 자유 tail을 계산하게 한다.
+		const int32 PathIndex = i - LatchNode;
+		const bool bNoAnchorSolverNode =
+			State.Path.IsValidIndex(PathIndex) && State.Path[PathIndex].bVirtual;
+		const bool bWrappingDrivenNode =
+			bHasValidLatch && i >= LatchNode && i <= DrivenEndNode && !bNoAnchorSolverNode;
 		OutFrame.SetInvMass(i, (bStartPin || bWrappingDrivenNode) ? 0.0f : 1.0f);
 	}
 }
@@ -562,6 +616,292 @@ bool FRopeWrappingPhase::AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex,
 	return true;
 }
 
+bool FRopeWrappingPhase::AppendCompositeAnalyticHelixPathPoint(
+	int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AppendCompositeAnalyticHelixPathPoint);
+
+	if (PathIndex <= 0 || PathIndex >= State.NumTailNodes ||
+		PathIndex != State.Path.Num() || !State.bPathUsesPoseSpaceIsland ||
+		State.PathWrapIslandBones.Num() <= 1 || State.Path.Num() == 0)
+	{
+		FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixInvalidState"));
+		return false;
+	}
+
+	const USceneComponent* IslandMesh = State.LatchAnchor.Mesh.Get();
+	if (!IslandMesh)
+	{
+		IslandMesh = State.Mesh.Get();
+	}
+	if (!IslandMesh)
+	{
+		FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixMissingMesh"));
+		return false;
+	}
+
+	// 기존 AnalyticHelix의 5~8단계를 그대로 PathIndex 기반으로 계산한다. 축/래치 radial은
+	// composite 초기화에서 한 번 확정된 값을 사용하며, 직전 projection 결과는 어떤 입력에도 쓰지 않는다.
+	const FVector AxisDirection = State.PathAxisDirection.GetSafeNormal(
+		KINDA_SMALL_NUMBER, FVector::UpVector);
+	const FVector LatchSurfaceWorld = State.Path[0].SurfaceWorld;
+	const float LatchAxisDistance = FVector::DotProduct(
+		LatchSurfaceWorld - State.PathAxisOrigin, AxisDirection);
+	const FVector LatchAxisPoint =
+		State.PathAxisOrigin + AxisDirection * LatchAxisDistance;
+	FVector LatchRadialOffset = LatchSurfaceWorld - LatchAxisPoint;
+	const float LatchRadius = LatchRadialOffset.Size();
+	if (LatchRadius <= KINDA_SMALL_NUMBER)
+	{
+		FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixDegenerateRadius"));
+		return false;
+	}
+	const FVector LatchRadial = LatchRadialOffset / LatchRadius;
+	const float HelixRadius = State.PathCompositeHelixRadius > KINDA_SMALL_NUMBER
+		? State.PathCompositeHelixRadius
+		: LatchRadius;
+
+	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
+	const float DistanceFromLatch = static_cast<float>(PathIndex) * SegmentLength;
+	const float PitchScale = State.PathCompositeHelixPitchScale;
+	const float LengthScale = FMath::Sqrt(1.0f + FMath::Square(PitchScale));
+
+	// 래치 표면 반지름에서 island 전체 반지름으로 한 step에 순간 이동하지 않는다. 각 PathIndex의
+	// ideal point는 직전 projection 결과와 무관하게 래치/축/config만으로 다시 계산하되, 반지름 변화가
+	// segment의 60% 이하가 되도록 entry step 수를 자동 산출한다. 남은 길이만 원주/축 진행에 써서
+	// ideal point 간격 자체도 SegmentLength에 가깝게 유지한다.
+	const float RadiusDelta = FMath::Abs(HelixRadius - LatchRadius);
+	const int32 RadiusEntrySegmentCount = RadiusDelta > KINDA_SMALL_NUMBER
+		? FMath::Max(2, FMath::CeilToInt(RadiusDelta / (SegmentLength * 0.6f)))
+		: 0;
+	float IdealRadius = LatchRadius;
+	float AxisAdvance = 0.0f;
+	float AngleRadians = 0.0f;
+	FVector IdealHelixWorld = LatchSurfaceWorld;
+	FVector PreviousIdealHelixWorld = LatchSurfaceWorld;
+	for (int32 IdealStepIndex = 1; IdealStepIndex <= PathIndex; ++IdealStepIndex)
+	{
+		PreviousIdealHelixWorld = IdealHelixWorld;
+		const float PreviousRadius = IdealRadius;
+		const float RadiusAlpha = RadiusEntrySegmentCount > 0
+			? FMath::Clamp(static_cast<float>(IdealStepIndex) /
+				static_cast<float>(RadiusEntrySegmentCount), 0.0f, 1.0f)
+			: 1.0f;
+		IdealRadius = FMath::Lerp(LatchRadius, HelixRadius, RadiusAlpha);
+		const float RadialStep = IdealRadius - PreviousRadius;
+		const float CircumferenceStep = FMath::Sqrt(FMath::Max(
+			0.0f, FMath::Square(SegmentLength) - FMath::Square(RadialStep))) /
+			FMath::Max(LengthScale, KINDA_SMALL_NUMBER);
+		AxisAdvance += CircumferenceStep * PitchScale;
+		const float MeanRadius = FMath::Max(
+			(PreviousRadius + IdealRadius) * 0.5f, KINDA_SMALL_NUMBER);
+		AngleRadians += State.PathWindingSign * CircumferenceStep / MeanRadius;
+
+		const FVector StepRadial = FQuat(AxisDirection, AngleRadians)
+			.RotateVector(LatchRadial)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);
+		const FVector StepAxisPoint = State.PathAxisOrigin + AxisDirection *
+			(LatchAxisDistance + AxisAdvance);
+		IdealHelixWorld = StepAxisPoint + StepRadial * IdealRadius;
+	}
+	const FVector RotatedRadial = FQuat(AxisDirection, AngleRadians)
+		.RotateVector(LatchRadial)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);
+	const FVector IdealTangentWorld = (IdealHelixWorld - PreviousIdealHelixWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER,
+			FVector::CrossProduct(AxisDirection, RotatedRadial) * State.PathWindingSign);
+	const float IdealAxisDistance = LatchAxisDistance + AxisAdvance;
+	if (State.bPathCompositeAxisRangeValid &&
+		(IdealAxisDistance < State.PathCompositeAxisMinDistance ||
+			IdealAxisDistance > State.PathCompositeAxisMaxDistance))
+	{
+		const int32 PreviousTailNodeCount = State.NumTailNodes;
+		State.bPathEndedAtCompositeAxisLimit = true;
+		State.NumTailNodes = State.Path.Num();
+		FinishPathBuild(/*bFailed=*/false);
+		UE_LOG(LogRopeWrap, Log,
+			TEXT("[%s] Composite analytic helix reached island axial limit: "
+				"nextIndex=%d idealAxis=%.2fcm range=[%.2f,%.2f]cm "
+				"builtPoints=%d releasedSolverNodes=%d"),
+			*Ctx.OwnerName, PathIndex, IdealAxisDistance,
+			State.PathCompositeAxisMinDistance, State.PathCompositeAxisMaxDistance,
+			State.Path.Num(), FMath::Max(0, PreviousTailNodeCount - State.NumTailNodes));
+		return false;
+	}
+
+	// Ideal helix point에서 같은 축 높이의 axis point를 향해 radial ray를 쏜다. 각 SDF의
+	// 첫 교차점 중 ray 시작점에 가장 가까운 것만 사용한다. outer band/후보 점수/직전 path
+	// 방향은 전혀 사용하지 않으므로 각 PathIndex의 결과는 독립적인 analytic helix 위상에만
+	// 의존한다. 어떤 SDF도 ray와 교차하지 않으면 이 점은 no-anchor solver node로 남긴다.
+	bool bFound = false;
+	float BestRadialHitDistance = TNumericLimits<float>::Max();
+	FRopeSurfaceProjection BestProjection;
+	FName BestBone = NAME_None;
+	const USceneComponent* BestMesh = IslandMesh;
+	int32 MatchingSDFCount = 0;
+	int32 RadialMissCount = 0;
+	const FVector RadialRayStartWorld = IdealHelixWorld;
+	const FVector RadialRayEndWorld =
+		State.PathAxisOrigin + AxisDirection * IdealAxisDistance;
+	for (const IRopeCollider* Collider : Ctx.Colliders)
+	{
+		if (!Collider || Collider->IsWorldStatic())
+		{
+			continue;
+		}
+
+		FName Bone = NAME_None;
+		const USceneComponent* ColliderMesh = nullptr;
+		Collider->GetGPUAttribution(Bone, ColliderMesh);
+		if (!State.PathWrapIslandBones.Contains(Bone) || ColliderMesh != IslandMesh)
+		{
+			continue;
+		}
+
+		FRopeSDFColliderView SDFView;
+		if (!Collider->GetGPUSDF(SDFView))
+		{
+			continue;
+		}
+		++MatchingSDFCount;
+
+		// QuerySwept의 step은 SDF 로컬 공간에서 소비된다. 가장 작은 voxel의 절반으로
+		// 샘플해 얇은 표면도 건너뛰지 않게 하고, ray 전체가 항상 샘플되도록 상한을 산출한다.
+		const FVector VoxelSize(
+			SDFView.LocalSize.X / FMath::Max(1, SDFView.ResX - 1),
+			SDFView.LocalSize.Y / FMath::Max(1, SDFView.ResY - 1),
+			SDFView.LocalSize.Z / FMath::Max(1, SDFView.ResZ - 1));
+		const float MinVoxelSize = FMath::Max(0.1f,
+			FMath::Min3(VoxelSize.X, VoxelSize.Y, VoxelSize.Z));
+		const float SweepStep = FMath::Max(0.1f, MinVoxelSize * 0.5f);
+		const FVector LocalRayStart =
+			SDFView.BoneToWorld.InverseTransformPosition(RadialRayStartWorld);
+		const FVector LocalRayEnd =
+			SDFView.BoneToWorld.InverseTransformPosition(RadialRayEndWorld);
+		const int32 MaxSamples = FMath::Clamp(
+			FMath::CeilToInt(FVector::Dist(LocalRayStart, LocalRayEnd) / SweepStep) + 1,
+			2, 512);
+
+		FRopeSweptQuery RadialQuery;
+		RadialQuery.WorldStart = RadialRayStartWorld;
+		RadialQuery.WorldEnd = RadialRayEndWorld;
+		// 0보다 아주 조금 큰 값으로 부호가 양자화된 표면 voxel도 첫 교차로 잡되,
+		// 저장 위치는 Contact.SurfacePoint이므로 rope radius만큼 부풀리지 않는다.
+		RadialQuery.NodeRadius = 0.05f;
+		RadialQuery.SweepStep = SweepStep;
+		RadialQuery.MaxSamples = MaxSamples;
+
+		FVector RadialHitWorld = RadialRayEndWorld;
+		const FRopeContact RadialHit = Collider->QuerySwept(RadialQuery, RadialHitWorld);
+		if (!RadialHit.bHit)
+		{
+			++RadialMissCount;
+			continue;
+		}
+
+		const float RadialHitDistance = FVector::Dist(
+			RadialRayStartWorld, RadialHitWorld);
+		if (!bFound || RadialHitDistance < BestRadialHitDistance)
+		{
+			bFound = true;
+			BestRadialHitDistance = RadialHitDistance;
+			BestProjection.bHit = true;
+			BestProjection.SurfacePoint = RadialHit.SurfacePoint;
+			BestProjection.Normal = RadialHit.Normal;
+			BestProjection.Distance = FVector::Dist(
+				RadialRayStartWorld, RadialHit.SurfacePoint);
+			BestProjection.Bone = RadialHit.Bone;
+			BestProjection.SourceMesh = RadialHit.SourceMesh;
+			BestBone = Bone;
+			BestMesh = ColliderMesh;
+		}
+	}
+
+	float ProjectedAxisDistance = IdealAxisDistance;
+	if (bFound)
+	{
+		ProjectedAxisDistance = FVector::DotProduct(
+			BestProjection.SurfacePoint - State.PathAxisOrigin, AxisDirection);
+	}
+
+	FRopeWrapPathPoint Point;
+	FVector CircumferenceDirection = FVector::CrossProduct(AxisDirection, RotatedRadial)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir) * State.PathWindingSign;
+	if (bFound)
+	{
+		const FVector NormalWorld = BestProjection.Normal.GetSafeNormal(
+			KINDA_SMALL_NUMBER, RotatedRadial);
+		const FVector ProjectedAxisPoint =
+			State.PathAxisOrigin + AxisDirection * ProjectedAxisDistance;
+		const FVector ProjectedRadial =
+			(BestProjection.SurfacePoint - ProjectedAxisPoint)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, RotatedRadial);
+		CircumferenceDirection = FVector::CrossProduct(AxisDirection, ProjectedRadial)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDirection) * State.PathWindingSign;
+		FVector TangentWorld = (CircumferenceDirection + AxisDirection * PitchScale)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDirection);
+		TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDirection);
+
+		Point.SurfaceWorld = BestProjection.SurfacePoint;
+		Point.NormalWorld = NormalWorld;
+		Point.TangentWorld = TangentWorld;
+		Point.Bone = BestProjection.Bone.IsNone() ? BestBone : BestProjection.Bone;
+		Point.Mesh = BestProjection.SourceMesh ? BestProjection.SourceMesh : BestMesh;
+	}
+	else
+	{
+		++State.PathCompositeProjectionFailureCount;
+		Point.SurfaceWorld = IdealHelixWorld;
+		Point.NormalWorld = RotatedRadial;
+		Point.TangentWorld = IdealTangentWorld;
+		Point.Bone = NAME_None;
+		Point.Mesh = IslandMesh;
+		Point.bVirtual = true;
+	}
+	Point.DistanceFromLatch = DistanceFromLatch;
+	Point.bBridge = false;
+	State.Path.Add(Point);
+
+	if (!Point.bVirtual)
+	{
+		State.PathPreviousBone = State.PathCurrentBone;
+		State.PathCurrentBone = Point.Bone;
+		State.PathCurrentMesh = Point.Mesh;
+	}
+	State.PathSurfaceWorld = Point.SurfaceWorld;
+	State.PathNormalWorld = Point.NormalWorld;
+	State.PathTangentWorld = Point.TangentWorld;
+	State.PathCircumferenceDir = CircumferenceDirection;
+	State.PathCurrentDistance = DistanceFromLatch;
+	State.PathSweepDistance = DistanceFromLatch;
+	State.PathCompositeSweepRadial = RotatedRadial;
+	State.PathCompositeSweepAngleRad = FMath::Abs(AngleRadians);
+	State.PathAccumulatedAngleRad = FMath::Abs(AngleRadians);
+
+	UE_LOG(LogRopeWrap, Log,
+		TEXT("[%s] Composite analytic helix point: index=%d type=%s bone=%s "
+			"helixRadius=%.2fcm idealRadius=%.2fcm pitch=%.3f entrySegments=%d "
+			"radialHitDistance=%.2fcm surfaceDistance=%.2fcm "
+			"angle=%.1fdeg idealAxis=%.2fcm surfaceAxis=%.2fcm "
+			"ideal=%s selected=%s sdfCandidates=%d radialMiss=%d"),
+		*Ctx.OwnerName, PathIndex, Point.bVirtual ? TEXT("NoAnchorSolver") : TEXT("SurfaceAnchor"),
+		*Point.Bone.ToString(), HelixRadius, IdealRadius, PitchScale,
+		RadiusEntrySegmentCount,
+		bFound ? BestRadialHitDistance : -1.0f,
+		bFound ? BestProjection.Distance : -1.0f,
+		FMath::RadiansToDegrees(FMath::Abs(AngleRadians)), IdealAxisDistance,
+		ProjectedAxisDistance, *IdealHelixWorld.ToString(),
+		*(bFound ? BestProjection.SurfacePoint : Point.SurfaceWorld).ToString(),
+		MatchingSDFCount, RadialMissCount);
+
+	if (State.Path.Num() >= State.NumTailNodes)
+	{
+		FinishPathBuild(/*bFailed=*/false);
+	}
+	return true;
+}
+
 bool FRopeWrappingPhase::RestartPathBuildAsSingleBoneFallback(
 	const FRopeSimState& Sim, const FContext& Ctx, const TCHAR* CompositeFailureReason)
 {
@@ -672,6 +1012,13 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 	State.bPathUsesPoseSpaceIsland = false;
 	State.PathCompositeSweepRadial = State.PathLatchRadial;
 	State.PathCompositeProbeRadius = 0.0f;
+	State.PathCompositeHelixRadius = 0.0f;
+	State.PathCompositeHelixPitchScale = 0.0f;
+	State.bPathCompositeHelixPitchFromContact = false;
+	State.PathCompositeAxisMinDistance = 0.0f;
+	State.PathCompositeAxisMaxDistance = 0.0f;
+	State.bPathCompositeAxisRangeValid = false;
+	State.bPathEndedAtCompositeAxisLimit = false;
 	State.PathCompositeSweepAngleRad = 0.0f;
 	// Composite Multi-Bone은 순수 물리 결과를 쓰는 FullSimulation 전용이다. Assisted/Guaranteed는
 	// island를 만들지 않고 아래 기존 SurfaceVectorField parent/child 순차 전환 경로를 그대로 탄다.
@@ -704,6 +1051,10 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 			float MinV = TNumericLimits<float>::Max();
 			float MaxV = -TNumericLimits<float>::Max();
 			int32 CrossSectionContributorCount = 0;
+			TArray<FVector2D, TInlineAllocator<128>> IslandProjectedBoundsPoints;
+			float IslandMinAxisCoordinate = TNumericLimits<float>::Max();
+			float IslandMaxAxisCoordinate = -TNumericLimits<float>::Max();
+			int32 IslandBoundsContributorCount = 0;
 
 			// OBB의 12개 edge와 latch 평면의 교점을 투영하면, 본 개수나 SDF bounds의 축 방향
 			// 길이에 편향되지 않는 실제 단면 외곽 범위를 얻을 수 있다. SDF OBB가 없을 때만 world AABB를
@@ -752,7 +1103,17 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 					Corners[CornerIndex] = BoxCenter + BoxRotation.RotateVector(LocalCorner);
 					SignedDistances[CornerIndex] = FVector::DotProduct(
 						Corners[CornerIndex] - SliceOrigin, AxisDirection);
+					IslandProjectedBoundsPoints.Emplace(
+						FVector::DotProduct(Corners[CornerIndex], PlaneU),
+						FVector::DotProduct(Corners[CornerIndex], PlaneV));
+					const float AxisCoordinate = FVector::DotProduct(
+						Corners[CornerIndex], AxisDirection);
+					IslandMinAxisCoordinate = FMath::Min(
+						IslandMinAxisCoordinate, AxisCoordinate);
+					IslandMaxAxisCoordinate = FMath::Max(
+						IslandMaxAxisCoordinate, AxisCoordinate);
 				}
+				++IslandBoundsContributorCount;
 
 				bool bMemberContributed = false;
 				const auto AccumulateCrossSectionPoint =
@@ -844,6 +1205,27 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 				State.PathAxisOrigin + AxisDirection * CurrentAxisDistance;
 			const float CurrentSurfaceRadius = FVector::Dist(
 				State.PathSurfaceWorld, CurrentAxisPoint);
+			float IslandOuterRadius = 0.0f;
+			if (IslandProjectedBoundsPoints.Num() > 0)
+			{
+				const float AxisOriginU = FVector::DotProduct(State.PathAxisOrigin, PlaneU);
+				const float AxisOriginV = FVector::DotProduct(State.PathAxisOrigin, PlaneV);
+				for (const FVector2D& Point : IslandProjectedBoundsPoints)
+				{
+					IslandOuterRadius = FMath::Max(IslandOuterRadius,
+						static_cast<float>(FVector2D::Distance(
+							Point, FVector2D(AxisOriginU, AxisOriginV))));
+				}
+
+				const float AxisOriginCoordinate = FVector::DotProduct(
+					State.PathAxisOrigin, AxisDirection);
+				State.PathCompositeAxisMinDistance =
+					IslandMinAxisCoordinate - AxisOriginCoordinate;
+				State.PathCompositeAxisMaxDistance =
+					IslandMaxAxisCoordinate - AxisOriginCoordinate;
+				State.bPathCompositeAxisRangeValid =
+					State.PathCompositeAxisMinDistance <= State.PathCompositeAxisMaxDistance;
+			}
 			const float CrossSectionHalfU = CrossSectionContributorCount > 0
 				? FMath::Max(0.0f, (MaxU - MinU) * 0.5f)
 				: 0.0f;
@@ -854,19 +1236,166 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 				FMath::Square(CrossSectionHalfU) + FMath::Square(CrossSectionHalfV));
 			const float ProbeMargin = FMath::Max(
 				Sim.SegmentLength, Ctx.GetContactRadius() * 2.0f);
-			State.PathCompositeProbeRadius = FMath::Max(
-				CurrentSurfaceRadius, CrossSectionOuterRadius) + ProbeMargin;
+			const float CrossSectionProbeRadius = FMath::Max(
+				CurrentSurfaceRadius, CrossSectionOuterRadius);
+			State.PathCompositeHelixRadius = FMath::Max(
+				CurrentSurfaceRadius, IslandOuterRadius);
+			State.PathCompositeProbeRadius =
+				CrossSectionProbeRadius + ProbeMargin;
 			State.PathCompositeSweepRadial = State.PathLatchRadial.GetSafeNormal(
 				KINDA_SMALL_NUMBER, State.PathNormalWorld);
 			State.PathCompositeSweepAngleRad = 0.0f;
 
+			// 새 독립 Analytic Helix의 pitch는 디자이너 상수가 아니라 Contacting 순간 로프가 누운
+			// tail 방향에서 읽는다. radial 접근 성분을 제거한 뒤 T ~= C + A*pitch로 분해하면
+			// pitch = dot(T,A) / dot(T,C)다. 원주 성분이 거의 없으면 비율이 폭주하므로 0으로 둔다.
+			const TCHAR* PitchSource = TEXT("NotUsed");
+			float PitchAxisComponent = 0.0f;
+			float PitchCircumferenceComponent = 0.0f;
+			float UnclampedPitchScale = 0.0f;
+			float AxisLimitedMaxAbsPitch = 0.0f;
+			float PitchAvailableAxisDistance = 0.0f;
+			float PitchUsableAxisDistance = 0.0f;
+			float PitchPlannedBaseTravel = 0.0f;
+			float PitchAxisSafetyMargin = 0.0f;
+			bool bPitchClampedByAxisRange = false;
+			if (Ctx.Config.CompositeProjectionMode ==
+				ERopeCompositeProjectionMode::AnalyticHelix)
+			{
+				const bool bHasContactSpan = Ctx.TravelFrame && Ctx.TravelFrame->bValid &&
+					!Ctx.TravelFrame->SpanDirection.IsNearlyZero();
+				const FVector ContactTailDirection = bHasContactSpan
+					? Ctx.TravelFrame->SpanDirection.GetSafeNormal()
+					: LatchTangentWorld;
+				const FVector RadialDirection = State.PathCompositeSweepRadial;
+				const FVector TangentialContactDirection =
+					(ContactTailDirection - FVector::DotProduct(
+						ContactTailDirection, RadialDirection) * RadialDirection)
+					.GetSafeNormal();
+
+				if (!TangentialContactDirection.IsNearlyZero())
+				{
+					const FVector BaseCircumference = FVector::CrossProduct(
+						AxisDirection, RadialDirection)
+						.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
+					State.PathWindingSign = FVector::DotProduct(
+						BaseCircumference, TangentialContactDirection) < 0.0f ? -1.0f : 1.0f;
+					State.PathCircumferenceDir =
+						BaseCircumference * State.PathWindingSign;
+					PitchAxisComponent = FVector::DotProduct(
+						TangentialContactDirection, AxisDirection);
+					PitchCircumferenceComponent = FVector::DotProduct(
+						TangentialContactDirection, State.PathCircumferenceDir);
+
+					constexpr float MinContactCircumferenceComponent = 0.1f;
+					if (PitchCircumferenceComponent >= MinContactCircumferenceComponent)
+					{
+						UnclampedPitchScale =
+							PitchAxisComponent / PitchCircumferenceComponent;
+						State.PathCompositeHelixPitchScale = UnclampedPitchScale;
+
+						// Contact에서 얻은 pitch의 부호/기울기는 유지하되, 그 방향의 island 축 여유 안에
+						// 계획된 전체 helix가 들어가도록 크기만 줄인다. 각 step의 실제 수식은
+						//   axial = sqrt(segment^2 - radialStep^2) * pitch / sqrt(1 + pitch^2)
+						// 이므로 radial entry까지 포함한 pitch=0 기준 진행량(BaseTravel)을 먼저 합산한다.
+						if (State.bPathCompositeAxisRangeValid &&
+							!FMath::IsNearlyZero(UnclampedPitchScale))
+						{
+							PitchAvailableAxisDistance = UnclampedPitchScale > 0.0f
+								? State.PathCompositeAxisMaxDistance - CurrentAxisDistance
+								: CurrentAxisDistance - State.PathCompositeAxisMinDistance;
+							// 마지막으로 잘 감긴 pitch(-0.062)가 불필요하게 줄지 않도록 한 node의 일부만
+							// 경계 여유로 둔다. ContactRadius보다 작은 여유는 SDF cap 양자화에 취약하다.
+							PitchAxisSafetyMargin = FMath::Max(
+								Ctx.GetContactRadius(), Sim.SegmentLength * 0.25f);
+							PitchUsableAxisDistance = FMath::Max(
+								0.0f, PitchAvailableAxisDistance - PitchAxisSafetyMargin);
+
+							const float SegmentLength = FMath::Max(
+								Sim.SegmentLength, KINDA_SMALL_NUMBER);
+							const int32 PlannedPathSegmentCount = FMath::Max(
+								0, Sim.Num() - LatchAnchor.NodeIndex - 1);
+							const float RadiusDelta = FMath::Abs(
+								State.PathCompositeHelixRadius - CurrentSurfaceRadius);
+							const int32 RadiusEntrySegmentCount = RadiusDelta > KINDA_SMALL_NUMBER
+								? FMath::Max(2, FMath::CeilToInt(
+									RadiusDelta / (SegmentLength * 0.6f)))
+								: 0;
+							float PreviousPlannedRadius = CurrentSurfaceRadius;
+							for (int32 StepIndex = 1;
+								StepIndex <= PlannedPathSegmentCount; ++StepIndex)
+							{
+								const float RadiusAlpha = RadiusEntrySegmentCount > 0
+									? FMath::Clamp(static_cast<float>(StepIndex) /
+										static_cast<float>(RadiusEntrySegmentCount), 0.0f, 1.0f)
+									: 1.0f;
+								const float PlannedRadius = FMath::Lerp(
+									CurrentSurfaceRadius, State.PathCompositeHelixRadius, RadiusAlpha);
+								const float RadialStep = PlannedRadius - PreviousPlannedRadius;
+								PitchPlannedBaseTravel += FMath::Sqrt(FMath::Max(
+									0.0f, FMath::Square(SegmentLength) - FMath::Square(RadialStep)));
+								PreviousPlannedRadius = PlannedRadius;
+							}
+
+							if (PitchPlannedBaseTravel > KINDA_SMALL_NUMBER)
+							{
+								const float MaxAxisRatio = FMath::Clamp(
+									PitchUsableAxisDistance / PitchPlannedBaseTravel,
+									0.0f, 0.999f);
+								AxisLimitedMaxAbsPitch = MaxAxisRatio /
+									FMath::Sqrt(FMath::Max(
+										KINDA_SMALL_NUMBER, 1.0f - FMath::Square(MaxAxisRatio)));
+								const float RawAbsPitch = FMath::Abs(UnclampedPitchScale);
+								const float FittedAbsPitch = FMath::Min(
+									RawAbsPitch, AxisLimitedMaxAbsPitch);
+								State.PathCompositeHelixPitchScale =
+									FMath::Sign(UnclampedPitchScale) * FittedAbsPitch;
+								bPitchClampedByAxisRange =
+									FittedAbsPitch + KINDA_SMALL_NUMBER < RawAbsPitch;
+							}
+						}
+						State.bPathCompositeHelixPitchFromContact = bHasContactSpan;
+						PitchSource = bHasContactSpan
+							? TEXT("ContactSpan")
+							: TEXT("LatchTangentFallback");
+					}
+					else
+					{
+						PitchSource = TEXT("DegenerateCircumferenceZero");
+					}
+				}
+				else
+				{
+					PitchSource = TEXT("DegenerateContactDirectionZero");
+				}
+
+				State.PathTangentWorld =
+					(State.PathCircumferenceDir + AxisDirection *
+						State.PathCompositeHelixPitchScale)
+					.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
+				State.PathTangentWorld = (State.PathTangentWorld - FVector::DotProduct(
+					State.PathTangentWorld, State.PathNormalWorld) * State.PathNormalWorld)
+					.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
+			}
+
 			UE_LOG(LogRopeWrap, Log,
-				TEXT("[%s] Composite sweep initialized: contributors=%d origin=%s direction=%s "
-					"radial=%s probeRadius=%.2fcm surfaceRadius=%.2fcm winding=%+.0f"),
-				*Ctx.OwnerName, CrossSectionContributorCount,
+				TEXT("[%s] Composite sweep initialized: crossSectionContributors=%d "
+					"islandBoundsContributors=%d origin=%s direction=%s radial=%s "
+					"probeRadius=%.2fcm helixRadius=%.2fcm latchRadius=%.2fcm "
+					"axisRange=[%.2f,%.2f]cm winding=%+.0f "
+					"pitch=%.3f rawPitch=%.3f pitchSource=%s axisClamp=%d maxPitch=%.3f "
+					"axisRoom=%.2fcm usableAxis=%.2fcm safety=%.2fcm plannedBase=%.2fcm "
+					"contactComponents(axis=%.3f circumference=%.3f)"),
+				*Ctx.OwnerName, CrossSectionContributorCount, IslandBoundsContributorCount,
 				*State.PathAxisOrigin.ToString(), *State.PathAxisDirection.ToString(),
 				*State.PathCompositeSweepRadial.ToString(), State.PathCompositeProbeRadius,
-				CurrentSurfaceRadius, State.PathWindingSign);
+				State.PathCompositeHelixRadius, CurrentSurfaceRadius,
+				State.PathCompositeAxisMinDistance, State.PathCompositeAxisMaxDistance,
+				State.PathWindingSign, State.PathCompositeHelixPitchScale,
+				UnclampedPitchScale, PitchSource, bPitchClampedByAxisRange ? 1 : 0,
+				AxisLimitedMaxAbsPitch, PitchAvailableAxisDistance,
+				PitchUsableAxisDistance, PitchAxisSafetyMargin, PitchPlannedBaseTravel,
+				PitchAxisComponent, PitchCircumferenceComponent);
 
 			// 복합 island 자체가 여러 접촉 표면을 소유한다. 구형 secondary seed가 경로를 첫 보조 노드
 			// 앞에서 잘라버리면 팔-몸통-팔 외곽을 만들 길이가 사라지므로, 이 경우에만 전체 tail을
@@ -1068,7 +1597,9 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 					ProjectedSurface, ProjectedNormal, ProjectedTangent,
 					ProjectedCircumference, ProjectedBone, ProjectedMesh);
 			}
-			const TCHAR* StepFailureReason = bOnSurface ? TEXT("None") : TEXT("ProjectionMiss");
+			const TCHAR* StepFailureReason = bOnSurface
+				? TEXT("None")
+				: TEXT("ProjectionMiss");
 
 			float CompositeSelectedSupport = 0.0f;
 			float CompositeSelectedAlignment = 0.0f;
@@ -1136,7 +1667,8 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 			// 표면도 없고 브리지도 소진/비활성 — 종전과 같은 실패 처리(각도 적분 전에 끊어,
 			// 걷지 못한 스텝이 실패 시점 각도(ShouldAbortFailedShortWrap)에 섞이지 않게 한다).
 			if (!bOnSurface &&
-				(MaxBridgeDistance <= 0.0f || State.PathBridgeDistance + StepDistance > MaxBridgeDistance))
+				(MaxBridgeDistance <= 0.0f ||
+					State.PathBridgeDistance + StepDistance > MaxBridgeDistance))
 			{
 				if (bCompositeSweep)
 				{
@@ -1444,11 +1976,12 @@ bool FRopeWrappingPhase::AppendWrappingAnchorFromPathPoint(int32 PathIndex, cons
 
 	const FRopeWrapPathPoint& Point = State.Path[PathIndex];
 
-	// 허공 브리지(chord) 경로점: 표면 프레임이 없으므로 앵커를 만들지 않는다 — 커밋 후 이 노드는
-	// 자유 로프로 남아 solver가 chord/현수 형태를 잡는다. 앵커 카운터는 전진시켜야 한다: 이 함수는
+	// 허공 브리지(chord)와 composite virtual helix point는 표면 프레임이 없으므로 앵커를 만들지
+	// 않는다 — 커밋 후 이 노드는 자유 로프로 남아 solver가 chord/현수 형태를 잡는다. 앵커 카운터는
+	// 전진시켜야 한다: 이 함수는
 	// PathIndex == LastAnchoredPathPointCount일 때만 신규 처리하므로, 여기서 멈추면 브리지 뒤
 	// 재진입한 표면 경로점들의 앵커 생성이 전부 막힌다.
-	if (Point.bBridge)
+	if (Point.bBridge || Point.bVirtual)
 	{
 		State.LastAnchoredPathPointCount = PathIndex + 1;
 		return true;
@@ -1785,6 +2318,18 @@ bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState
 	// 실제 SurfaceVectorField 경로가 얼마나 울퉁불퉁했는지와 별개로, 실패 판정은 helix 기준 누적
 	// 감싼 각도만 본다. 각도(도) 반환 — 회전 수(=각도/360)는 2πr 로프를 요구해 대상 크기에 비례하는
 	// 기준이 되므로 쓰지 않는다(FRopeWrapConfig::FailedWrapMinAngleDeg 주석 참고).
+	if (State.bPathUsesPoseSpaceIsland &&
+		Ctx.Config.CompositeProjectionMode ==
+			ERopeCompositeProjectionMode::AnalyticHelix &&
+		State.Path.Num() > 1)
+	{
+		// 자동 pitch와 진입 반지름을 사용한 독립 helix는 이미 실제 누적 위상을 저장한다.
+		// 고정 config pitch로 다시 역산하면 커밋 로그/품질 관문의 각도가 경로와 달라진다.
+		OutAngleDeg = FMath::RadiansToDegrees(
+			FMath::Abs(State.PathCompositeSweepAngleRad));
+		return true;
+	}
+
 	const float PitchScale = Ctx.Config.WrappingHelixPitchScale;
 	const float LengthScale = FMath::Sqrt(1.0f + PitchScale * PitchScale);
 	const float CircumferenceDistance = LastBuiltDistance / FMath::Max(LengthScale, KINDA_SMALL_NUMBER);
@@ -2802,9 +3347,8 @@ bool FRopeWrappingPhase::ProjectWrapPointToCompositeIsland(const FRopeSimState& 
 			*Candidate.Surface.ToString());
 	}
 
-	// 1차: 전체 후보에서 실제 최외곽 support를 확정한다. 2차: 그 외곽 band 안에서만 기존 점수를
-	// 적용한다. 한 번의 순회에서 best를 갱신하면 collider 배열 순서에 따라 허용폭만큼 안쪽으로
-	// 연쇄 이동할 수 있으므로 반드시 분리한다.
+	// Legacy outer-support 선택: strict 후보 중 최외곽 band만 남기고 기존 거리/연속성 점수로
+	// tie-break한다. Analytic Helix는 이 함수를 호출하지 않고 별도 radial SDF ray 경로를 사용한다.
 	for (const FCompositeProjectionCandidate& Candidate : Candidates)
 	{
 		if (!Candidate.bPassesStrictFilters ||
@@ -3366,9 +3910,18 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
 	const float FullDistance = static_cast<float>(FMath::Max(0, State.NumTailNodes - 1)) * SegmentLength;
 	float BuiltPathMaxDistance = 0.0f;
-	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
+	for (const FRopeWrapPathPoint& Point : State.Path)
 	{
-		BuiltPathMaxDistance = FMath::Max(BuiltPathMaxDistance, Anchor.RopeDistance);
+		BuiltPathMaxDistance = FMath::Max(BuiltPathMaxDistance, Point.DistanceFromLatch);
+	}
+	// Legacy/실패 초기화처럼 Path가 비어 있는 경우만 anchor 거리를 폴백으로 쓴다.
+	if (State.Path.Num() == 0)
+	{
+		for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
+		{
+			BuiltPathMaxDistance = FMath::Max(
+				BuiltPathMaxDistance, Anchor.RopeDistance);
+		}
 	}
 
 	const float TargetFrontDistance = FMath::Min(FullDistance, BuiltPathMaxDistance);
@@ -3401,7 +3954,7 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 
 bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPathPoint& OutPoint) const
 {
-	if (State.Anchors.Num() == 0)
+	if (State.Path.Num() == 0 && State.Anchors.Num() == 0)
 	{
 		return false;
 	}
@@ -3430,8 +3983,111 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 		Point.DistanceFromLatch = Anchor.RopeDistance;
 		return true;
 	};
+	const auto InterpolatePoints = [](const FRopeWrapPathPoint& LowerPoint,
+		const FRopeWrapPathPoint& UpperPoint, float SampleDistance,
+		FRopeWrapPathPoint& Point)
+	{
+		if (FMath::Abs(UpperPoint.DistanceFromLatch - LowerPoint.DistanceFromLatch)
+			<= KINDA_SMALL_NUMBER)
+		{
+			Point = LowerPoint;
+			Point.DistanceFromLatch = SampleDistance;
+			return;
+		}
+
+		const float Alpha = FMath::Clamp(
+			(SampleDistance - LowerPoint.DistanceFromLatch) /
+			(UpperPoint.DistanceFromLatch - LowerPoint.DistanceFromLatch),
+			0.0f, 1.0f);
+		Point.SurfaceWorld = FMath::Lerp(
+			LowerPoint.SurfaceWorld, UpperPoint.SurfaceWorld, Alpha);
+		Point.NormalWorld = FMath::Lerp(
+			LowerPoint.NormalWorld, UpperPoint.NormalWorld, Alpha)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.NormalWorld);
+		Point.TangentWorld = FMath::Lerp(
+			LowerPoint.TangentWorld, UpperPoint.TangentWorld, Alpha);
+		Point.TangentWorld = (Point.TangentWorld -
+			FVector::DotProduct(Point.TangentWorld, Point.NormalWorld) * Point.NormalWorld)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.TangentWorld);
+		Point.Bone = Alpha < 0.5f ? LowerPoint.Bone : UpperPoint.Bone;
+		Point.Mesh = Alpha < 0.5f ? LowerPoint.Mesh : UpperPoint.Mesh;
+		Point.DistanceFromLatch = SampleDistance;
+		Point.bBridge = LowerPoint.bBridge || UpperPoint.bBridge;
+		Point.bVirtual = LowerPoint.bVirtual || UpperPoint.bVirtual;
+	};
 
 	const float SampleDistance = FMath::Max(0.0f, DistanceFromLatch);
+	if (State.Path.Num() > 0)
+	{
+		int32 LowerPathIndex = INDEX_NONE;
+		int32 UpperPathIndex = INDEX_NONE;
+		for (int32 PathIndex = 0; PathIndex < State.Path.Num(); ++PathIndex)
+		{
+			const FRopeWrapPathPoint& StoredPoint = State.Path[PathIndex];
+			if (StoredPoint.DistanceFromLatch <= SampleDistance &&
+				(LowerPathIndex == INDEX_NONE ||
+					StoredPoint.DistanceFromLatch > State.Path[LowerPathIndex].DistanceFromLatch))
+			{
+				LowerPathIndex = PathIndex;
+			}
+			if (StoredPoint.DistanceFromLatch >= SampleDistance &&
+				(UpperPathIndex == INDEX_NONE ||
+					StoredPoint.DistanceFromLatch < State.Path[UpperPathIndex].DistanceFromLatch))
+			{
+				UpperPathIndex = PathIndex;
+			}
+		}
+
+		if (LowerPathIndex == INDEX_NONE)
+		{
+			LowerPathIndex = UpperPathIndex;
+		}
+		if (UpperPathIndex == INDEX_NONE)
+		{
+			UpperPathIndex = LowerPathIndex;
+		}
+		if (LowerPathIndex == INDEX_NONE || UpperPathIndex == INDEX_NONE)
+		{
+			return false;
+		}
+
+		const auto ResolveStoredPoint = [this, &AnchorToPoint](
+			int32 PathIndex, FRopeWrapPathPoint& Point) -> bool
+		{
+			const FRopeWrapPathPoint& StoredPoint = State.Path[PathIndex];
+			if (StoredPoint.bBridge || StoredPoint.bVirtual)
+			{
+				Point = StoredPoint;
+				return true;
+			}
+
+			const int32 NodeIndex = State.LatchAnchor.NodeIndex + PathIndex;
+			const FRopeSurfaceAnchor* Anchor = State.Anchors.FindByPredicate(
+				[NodeIndex](const FRopeSurfaceAnchor& Candidate)
+				{
+					return Candidate.NodeIndex == NodeIndex;
+				});
+			if (Anchor)
+			{
+				return AnchorToPoint(*Anchor, Point);
+			}
+
+			// Progressive build에서 anchor가 아직 붙기 전인 같은 프레임의 짧은 창은 스냅샷을 쓴다.
+			Point = StoredPoint;
+			return true;
+		};
+
+		FRopeWrapPathPoint LowerPoint;
+		FRopeWrapPathPoint UpperPoint;
+		if (!ResolveStoredPoint(LowerPathIndex, LowerPoint) ||
+			!ResolveStoredPoint(UpperPathIndex, UpperPoint))
+		{
+			return false;
+		}
+		InterpolatePoints(LowerPoint, UpperPoint, SampleDistance, OutPoint);
+		return true;
+	}
+
 	const FRopeSurfaceAnchor* LowerAnchor = nullptr;
 	const FRopeSurfaceAnchor* UpperAnchor = nullptr;
 	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
@@ -3481,18 +4137,6 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 		return false;
 	}
 
-	const float Alpha = FMath::Clamp(
-		(SampleDistance - LowerAnchor->RopeDistance) / (UpperAnchor->RopeDistance - LowerAnchor->RopeDistance),
-		0.0f,
-		1.0f);
-	OutPoint.SurfaceWorld = FMath::Lerp(LowerPoint.SurfaceWorld, UpperPoint.SurfaceWorld, Alpha);
-	OutPoint.NormalWorld = FMath::Lerp(LowerPoint.NormalWorld, UpperPoint.NormalWorld, Alpha)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.NormalWorld);
-	OutPoint.TangentWorld = FMath::Lerp(LowerPoint.TangentWorld, UpperPoint.TangentWorld, Alpha);
-	OutPoint.TangentWorld = (OutPoint.TangentWorld - FVector::DotProduct(OutPoint.TangentWorld, OutPoint.NormalWorld) * OutPoint.NormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.TangentWorld);
-	OutPoint.Bone = Alpha < 0.5f ? LowerPoint.Bone : UpperPoint.Bone;
-	OutPoint.Mesh = Alpha < 0.5f ? LowerPoint.Mesh : UpperPoint.Mesh;
-	OutPoint.DistanceFromLatch = SampleDistance;
+	InterpolatePoints(LowerPoint, UpperPoint, SampleDistance, OutPoint);
 	return true;
 }

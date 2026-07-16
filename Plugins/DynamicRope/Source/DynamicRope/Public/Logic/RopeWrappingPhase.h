@@ -168,6 +168,7 @@ private:
 		const FRopeSimState& Sim, const FContext& Ctx);
 
 	bool AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
+	bool AppendCompositeAnalyticHelixPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
 
 	bool InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor,
 		const FRopeSimState& Sim, const FContext& Ctx);
