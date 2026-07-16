@@ -876,10 +876,7 @@ private:
 
 	void UpdateWrapping(float DeltaTime);
 
-	/** 로프별 감김 경로 모드(WrapConfig.WrappingPathMode — 전역 설정에서 per-rope로 이동, 2026-07-13). */
-	ERopeWrappingPathMode GetWrappingPathMode() const;
-
-	/** WrappingPhase에 넘길 호출 컨텍스트(WrapConfig/collider 스냅샷/경로 모드/튜브 반지름/로그 이름). */
+	/** WrappingPhase에 넘길 호출 컨텍스트(WrapConfig/collider 스냅샷/튜브 반지름/로그 이름). */
 	FRopeWrappingPhase::FContext MakeWrappingContext() const;
 
 	void CommitWrapping();

@@ -21,8 +21,6 @@ public:
 
 		FRopeThrowContext ThrowContext;
 		FRopeWrapConfig WrapConfig;
-		ERopeWrappingPathMode PathMode = ERopeWrappingPathMode::SurfaceVectorField;
-
 		/** 도달 모드 스냅샷(컴포넌트 ResolveMode). GuaranteedWrap Cinch의 감김 경로 빌드가 감김 축/경로 선택에 쓴다. */
 		ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 

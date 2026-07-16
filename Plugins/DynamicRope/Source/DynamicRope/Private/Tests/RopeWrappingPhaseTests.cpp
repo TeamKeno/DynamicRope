@@ -60,7 +60,7 @@ bool FRopeWrappingCapsuleAngleTest::RunTest(const FString& Parameters)
 
 	const FRopeWrapConfig Config = MakeTestWrapConfig();
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
 
 	FRopeWrappingPhase Wrapping;
 	TestTrue(TEXT("wrapping begins on capsule"), Wrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, Ctx));
@@ -138,7 +138,7 @@ bool FRopeWrappingSecondarySeedTest::RunTest(const FString& Parameters)
 
 	const FRopeWrapConfig Config = MakeTestWrapConfig();
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
 
 	FRopeWrappingPhase Wrapping;
 	Wrapping.State.SecondarySeedAnchors.Add(Secondary);
@@ -217,7 +217,7 @@ bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 	FRopeWrapConfig TravelConfig = MakeTestWrapConfig();
 	TravelConfig.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
 	const FRopeWrappingPhase::FContext TravelCtx{ TravelConfig, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
 		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal };
 
 	FRopeWrappingPhase TravelWrapping;
@@ -229,7 +229,7 @@ bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 
 	FRopeWrapConfig DefaultConfig = MakeTestWrapConfig();
 	const FRopeWrappingPhase::FContext DefaultCtx{ DefaultConfig, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
 		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal };
 
 	FRopeWrappingPhase DefaultWrapping;
@@ -277,7 +277,7 @@ bool FRopeWrappingTravelFrameAxisTest::RunTest(const FString& Parameters)
 	TravelConfig.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
 	const FVector GuidePlaneNormal(0, 1, 0);
 	const FRopeWrappingPhase::FContext FrameCtx{ TravelConfig, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
 		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal, &Frame };
 
 	FRopeWrappingPhase FrameWrapping;
@@ -294,7 +294,7 @@ bool FRopeWrappingTravelFrameAxisTest::RunTest(const FString& Parameters)
 
 	// 스냅샷이 없으면 origin은 종전대로 latch 본 위치(mock identity = 원점).
 	const FRopeWrappingPhase::FContext NoFrameCtx{ TravelConfig, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
 		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal };
 
 	FRopeWrappingPhase NoFrameWrapping;
@@ -351,7 +351,7 @@ bool FRopeWrappingGapBridgeTest::RunTest(const FString& Parameters)
 	// 이 테스트는 진행 평면 안의 순회만 검증한다 — 축 방향 나선 상승이 캡슐 꼭대기 밖으로 새지 않게.
 	Config.WrappingHelixPitchScale = 0.0f;
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
 		/*bHasGuidePlaneNormal*/ true, /*GuidePlaneNormal*/ FVector(0, 0, 1), &Frame };
 
 	FRopeWrappingPhase Wrapping;
@@ -481,7 +481,7 @@ bool FRopeWrappingClusterAxisOriginTest::RunTest(const FString& Parameters)
 	Config.WrappingMaxGapBridgeDistance = 120.0f;
 	Config.WrappingHelixPitchScale = 0.0f;
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
 		/*bHasGuidePlaneNormal*/ true, /*GuidePlaneNormal*/ FVector(0, 0, 1), &Frame };
 
 	FRopeWrappingPhase Wrapping;
@@ -542,7 +542,7 @@ bool FRopeWrappingWrapAngleCapTest::RunTest(const FString& Parameters)
 	FRopeWrapConfig Config = MakeTestWrapConfig();
 	Config.WrappingMaxWrapAngleDeg = 360.0f;
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
 
 	FRopeWrappingPhase Wrapping;
 	TestTrue(TEXT("wrapping begins"), Wrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, Ctx));
@@ -613,7 +613,7 @@ bool FRopeWrappingEnclosureCoverageTest::RunTest(const FString& Parameters)
 
 	const FRopeWrapConfig Config = MakeTestWrapConfig();
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, /*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
 
 	auto BuildAndMeasure = [&](int32 NumNodes, float RopeLength, float& OutCoverageDeg) -> bool
 	{

@@ -37,12 +37,12 @@ bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USce
 	if (!BeginProgressiveWrapPathBuild(LatchAnchor, Sim, Ctx))
 	{
 		UE_LOG(LogRopeWrap, Error,
-			TEXT("[%s] Wrap begin failed: reason=%s bone=%s node=%d mesh=%s simNodes=%d segment=%.2fcm pathMode=%d colliders=%d"),
+			TEXT("[%s] Wrap begin failed: reason=%s bone=%s node=%d mesh=%s simNodes=%d segment=%.2fcm colliders=%d"),
 			*Ctx.OwnerName,
 			State.PathBuildFailureReason.IsEmpty() ? TEXT("UnknownInitializationFailure") : *State.PathBuildFailureReason,
 			*LatchAnchor.Bone.ToString(), LatchAnchor.NodeIndex,
 			Mesh ? *Mesh->GetName() : TEXT("None"), Sim.Num(), Sim.SegmentLength,
-			static_cast<int32>(Ctx.PathMode), Ctx.Colliders.Num());
+			Ctx.Colliders.Num());
 		return false;
 	}
 
@@ -83,8 +83,7 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 	// preview 경로는 설정값을 4096으로 덮어 한 번에 완주한다(BuildPreviewCenterline).
 	const int32 AutoBudget = FMath::DivideAndRoundUp(State.NumTailNodes * 2, 4);
 	const int32 StepBudget = FMath::Max3(1, Ctx.Config.WrappingPathBuildStepsPerFrame, AutoBudget);
-	if (State.bPathUsesPoseSpaceIsland &&
-		Ctx.Config.CompositeProjectionMode == ERopeCompositeProjectionMode::AnalyticHelix)
+	if (State.bPathUsesPoseSpaceIsland)
 	{
 		for (int32 StepIndex = 0;
 			StepIndex < StepBudget && State.Path.Num() < State.NumTailNodes;
@@ -109,28 +108,6 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 		}
 		return;
 	}
-	if (State.PathMode == ERopeWrappingPathMode::AnalyticHelix)
-	{
-		for (int32 StepIndex = 0;
-			StepIndex < StepBudget && State.Path.Num() < State.NumTailNodes;
-			++StepIndex)
-		{
-			const int32 PathIndex = State.Path.Num();
-			if (!AppendAnalyticProgressiveWrapPathPoint(PathIndex, Sim, Ctx))
-			{
-				break;
-			}
-
-			AppendWrappingAnchorFromPathPoint(PathIndex, Sim, Ctx);
-		}
-
-		if (State.Path.Num() >= State.NumTailNodes)
-		{
-			FinishPathBuild(/*bFailed=*/false);
-		}
-		return;
-	}
-
 	AdvanceSurfaceVectorFieldProgressiveWrapPath(StepBudget, Sim, Ctx);
 }
 
@@ -435,10 +412,14 @@ bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchA
 
 	FRopeWrapConfig PreviewConfig = Ctx.Config;
 	PreviewConfig.WrappingPathBuildStepsPerFrame = 4096;
-	FContext PreviewCtx{ PreviewConfig, Ctx.Colliders, Ctx.PathMode, Ctx.SurfaceOffset, Ctx.OwnerName, true };
+	FContext PreviewCtx{ PreviewConfig, Ctx.Colliders, Ctx.SurfaceOffset, Ctx.OwnerName, true };
 
-	// preview에도 컴포넌트 경계에서 해석된 접촉 반지름을 승계한다(0=auto 정합 유지).
+	// preview에도 runtime과 같은 축/접촉/resolve 컨텍스트를 승계한다.
+	PreviewCtx.bHasGuidePlaneNormal = Ctx.bHasGuidePlaneNormal;
+	PreviewCtx.GuidePlaneNormal = Ctx.GuidePlaneNormal;
+	PreviewCtx.TravelFrame = Ctx.TravelFrame;
 	PreviewCtx.ResolvedContactRadius = Ctx.ResolvedContactRadius;
+	PreviewCtx.ResolveMode = Ctx.ResolveMode;
 
 	FRopeWrappingPhase PreviewPhase;
 	if (!PreviewPhase.Begin(LatchAnchor, Mesh, Bone,
@@ -518,7 +499,6 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.Anchors.Reset();
 	State.Path.Reset();
 	State.LatchAnchor = StoredLatchAnchor;
-	State.PathMode = Ctx.PathMode;
 	State.NumTailNodes = Sim.Num() - StoredLatchAnchor.NodeIndex;
 	// 시드 다중화: 첫 보조 시드 노드부터는 경로가 아니라 보조 앵커가 노드를 소유한다 — 경로 길이를
 	// 그 앞까지로 줄여 같은 노드를 경로 앵커와 보조 앵커가 이중으로 잡지 않게 한다(커밋 시드/Hold의
@@ -559,16 +539,14 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.Path.Reserve(State.NumTailNodes);
 
 	const bool bInitialized =
-		State.PathMode == ERopeWrappingPathMode::AnalyticHelix
-			? AppendAnalyticProgressiveWrapPathPoint(0, Sim, Ctx)
-			: InitializeSurfaceVectorFieldProgressiveWrapPath(StoredLatchAnchor, Sim, Ctx);
+		InitializeSurfaceVectorFieldProgressiveWrapPath(StoredLatchAnchor, Sim, Ctx);
 	if (!bInitialized)
 	{
 		State.PathBuildFailureReason = TEXT("InitialSurfacePathPointFailed");
 		UE_LOG(LogRopeWrap, Error,
-			TEXT("[%s] Path initialization failed: reason=InitialSurfacePathPointFailed bone=%s node=%d mode=%d surface=%s normal=%s"),
+			TEXT("[%s] Path initialization failed: reason=InitialSurfacePathPointFailed bone=%s node=%d surface=%s normal=%s"),
 			*Ctx.OwnerName, *StoredLatchAnchor.Bone.ToString(), StoredLatchAnchor.NodeIndex,
-			static_cast<int32>(State.PathMode), *State.PathSurfaceWorld.ToString(), *State.PathNormalWorld.ToString());
+			*State.PathSurfaceWorld.ToString(), *State.PathNormalWorld.ToString());
 		return false;
 	}
 	if (!AppendWrappingAnchorFromPathPoint(0, Sim, Ctx))
@@ -581,38 +559,6 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 		return false;
 	}
 
-	return true;
-}
-
-bool FRopeWrappingPhase::AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx)
-{
-	if (PathIndex < 0 ||
-		PathIndex >= State.NumTailNodes ||
-		PathIndex != State.Path.Num())
-	{
-		return false;
-	}
-
-	const float DistanceFromLatch = static_cast<float>(PathIndex) * Sim.SegmentLength;
-
-	FRopeWrapPathPoint Point;
-	Point.DistanceFromLatch = DistanceFromLatch;
-	Point.Bone = State.LatchAnchor.Bone;
-	Point.Mesh = State.LatchAnchor.Mesh;
-	if (!ComputeAnalyticHelixWrapTarget(State.LatchAnchor, DistanceFromLatch, Sim, Ctx,
-		Point.SurfaceWorld, Point.NormalWorld, Point.TangentWorld) &&
-		!ComputeSurfaceVectorFieldWrapTarget(State.LatchAnchor, DistanceFromLatch, Sim, Ctx,
-			Point.SurfaceWorld, Point.NormalWorld, Point.TangentWorld))
-	{
-		FinishPathBuild(/*bFailed=*/true, TEXT("AnalyticAndSurfaceTargetFailed"));
-		return false;
-	}
-
-	State.Path.Add(Point);
-	if (State.Path.Num() >= State.NumTailNodes)
-	{
-		FinishPathBuild(/*bFailed=*/false);
-	}
 	return true;
 }
 
@@ -1259,124 +1205,120 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 			float PitchPlannedBaseTravel = 0.0f;
 			float PitchAxisSafetyMargin = 0.0f;
 			bool bPitchClampedByAxisRange = false;
-			if (Ctx.Config.CompositeProjectionMode ==
-				ERopeCompositeProjectionMode::AnalyticHelix)
+			const bool bHasContactSpan = Ctx.TravelFrame && Ctx.TravelFrame->bValid &&
+				!Ctx.TravelFrame->SpanDirection.IsNearlyZero();
+			const FVector ContactTailDirection = bHasContactSpan
+				? Ctx.TravelFrame->SpanDirection.GetSafeNormal()
+				: LatchTangentWorld;
+			const FVector RadialDirection = State.PathCompositeSweepRadial;
+			const FVector TangentialContactDirection =
+				(ContactTailDirection - FVector::DotProduct(
+					ContactTailDirection, RadialDirection) * RadialDirection)
+				.GetSafeNormal();
+
+			if (!TangentialContactDirection.IsNearlyZero())
 			{
-				const bool bHasContactSpan = Ctx.TravelFrame && Ctx.TravelFrame->bValid &&
-					!Ctx.TravelFrame->SpanDirection.IsNearlyZero();
-				const FVector ContactTailDirection = bHasContactSpan
-					? Ctx.TravelFrame->SpanDirection.GetSafeNormal()
-					: LatchTangentWorld;
-				const FVector RadialDirection = State.PathCompositeSweepRadial;
-				const FVector TangentialContactDirection =
-					(ContactTailDirection - FVector::DotProduct(
-						ContactTailDirection, RadialDirection) * RadialDirection)
-					.GetSafeNormal();
+				const FVector BaseCircumference = FVector::CrossProduct(
+					AxisDirection, RadialDirection)
+					.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
+				State.PathWindingSign = FVector::DotProduct(
+					BaseCircumference, TangentialContactDirection) < 0.0f ? -1.0f : 1.0f;
+				State.PathCircumferenceDir =
+					BaseCircumference * State.PathWindingSign;
+				PitchAxisComponent = FVector::DotProduct(
+					TangentialContactDirection, AxisDirection);
+				PitchCircumferenceComponent = FVector::DotProduct(
+					TangentialContactDirection, State.PathCircumferenceDir);
 
-				if (!TangentialContactDirection.IsNearlyZero())
+				constexpr float MinContactCircumferenceComponent = 0.1f;
+				if (PitchCircumferenceComponent >= MinContactCircumferenceComponent)
 				{
-					const FVector BaseCircumference = FVector::CrossProduct(
-						AxisDirection, RadialDirection)
-						.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
-					State.PathWindingSign = FVector::DotProduct(
-						BaseCircumference, TangentialContactDirection) < 0.0f ? -1.0f : 1.0f;
-					State.PathCircumferenceDir =
-						BaseCircumference * State.PathWindingSign;
-					PitchAxisComponent = FVector::DotProduct(
-						TangentialContactDirection, AxisDirection);
-					PitchCircumferenceComponent = FVector::DotProduct(
-						TangentialContactDirection, State.PathCircumferenceDir);
+					UnclampedPitchScale =
+						PitchAxisComponent / PitchCircumferenceComponent;
+					State.PathCompositeHelixPitchScale = UnclampedPitchScale;
 
-					constexpr float MinContactCircumferenceComponent = 0.1f;
-					if (PitchCircumferenceComponent >= MinContactCircumferenceComponent)
+					// Contact에서 얻은 pitch의 부호/기울기는 유지하되, 그 방향의 island 축 여유 안에
+					// 계획된 전체 helix가 들어가도록 크기만 줄인다. 각 step의 실제 수식은
+					//   axial = sqrt(segment^2 - radialStep^2) * pitch / sqrt(1 + pitch^2)
+					// 이므로 radial entry까지 포함한 pitch=0 기준 진행량(BaseTravel)을 먼저 합산한다.
+					if (State.bPathCompositeAxisRangeValid &&
+						!FMath::IsNearlyZero(UnclampedPitchScale))
 					{
-						UnclampedPitchScale =
-							PitchAxisComponent / PitchCircumferenceComponent;
-						State.PathCompositeHelixPitchScale = UnclampedPitchScale;
+						PitchAvailableAxisDistance = UnclampedPitchScale > 0.0f
+							? State.PathCompositeAxisMaxDistance - CurrentAxisDistance
+							: CurrentAxisDistance - State.PathCompositeAxisMinDistance;
+						// 마지막으로 잘 감긴 pitch(-0.062)가 불필요하게 줄지 않도록 한 node의 일부만
+						// 경계 여유로 둔다. ContactRadius보다 작은 여유는 SDF cap 양자화에 취약하다.
+						PitchAxisSafetyMargin = FMath::Max(
+							Ctx.GetContactRadius(), Sim.SegmentLength * 0.25f);
+						PitchUsableAxisDistance = FMath::Max(
+							0.0f, PitchAvailableAxisDistance - PitchAxisSafetyMargin);
 
-						// Contact에서 얻은 pitch의 부호/기울기는 유지하되, 그 방향의 island 축 여유 안에
-						// 계획된 전체 helix가 들어가도록 크기만 줄인다. 각 step의 실제 수식은
-						//   axial = sqrt(segment^2 - radialStep^2) * pitch / sqrt(1 + pitch^2)
-						// 이므로 radial entry까지 포함한 pitch=0 기준 진행량(BaseTravel)을 먼저 합산한다.
-						if (State.bPathCompositeAxisRangeValid &&
-							!FMath::IsNearlyZero(UnclampedPitchScale))
+						const float SegmentLength = FMath::Max(
+							Sim.SegmentLength, KINDA_SMALL_NUMBER);
+						const int32 PlannedPathSegmentCount = FMath::Max(
+							0, Sim.Num() - LatchAnchor.NodeIndex - 1);
+						const float RadiusDelta = FMath::Abs(
+							State.PathCompositeHelixRadius - CurrentSurfaceRadius);
+						const int32 RadiusEntrySegmentCount = RadiusDelta > KINDA_SMALL_NUMBER
+							? FMath::Max(2, FMath::CeilToInt(
+								RadiusDelta / (SegmentLength * 0.6f)))
+							: 0;
+						float PreviousPlannedRadius = CurrentSurfaceRadius;
+						for (int32 StepIndex = 1;
+							StepIndex <= PlannedPathSegmentCount; ++StepIndex)
 						{
-							PitchAvailableAxisDistance = UnclampedPitchScale > 0.0f
-								? State.PathCompositeAxisMaxDistance - CurrentAxisDistance
-								: CurrentAxisDistance - State.PathCompositeAxisMinDistance;
-							// 마지막으로 잘 감긴 pitch(-0.062)가 불필요하게 줄지 않도록 한 node의 일부만
-							// 경계 여유로 둔다. ContactRadius보다 작은 여유는 SDF cap 양자화에 취약하다.
-							PitchAxisSafetyMargin = FMath::Max(
-								Ctx.GetContactRadius(), Sim.SegmentLength * 0.25f);
-							PitchUsableAxisDistance = FMath::Max(
-								0.0f, PitchAvailableAxisDistance - PitchAxisSafetyMargin);
-
-							const float SegmentLength = FMath::Max(
-								Sim.SegmentLength, KINDA_SMALL_NUMBER);
-							const int32 PlannedPathSegmentCount = FMath::Max(
-								0, Sim.Num() - LatchAnchor.NodeIndex - 1);
-							const float RadiusDelta = FMath::Abs(
-								State.PathCompositeHelixRadius - CurrentSurfaceRadius);
-							const int32 RadiusEntrySegmentCount = RadiusDelta > KINDA_SMALL_NUMBER
-								? FMath::Max(2, FMath::CeilToInt(
-									RadiusDelta / (SegmentLength * 0.6f)))
-								: 0;
-							float PreviousPlannedRadius = CurrentSurfaceRadius;
-							for (int32 StepIndex = 1;
-								StepIndex <= PlannedPathSegmentCount; ++StepIndex)
-							{
-								const float RadiusAlpha = RadiusEntrySegmentCount > 0
-									? FMath::Clamp(static_cast<float>(StepIndex) /
-										static_cast<float>(RadiusEntrySegmentCount), 0.0f, 1.0f)
-									: 1.0f;
-								const float PlannedRadius = FMath::Lerp(
-									CurrentSurfaceRadius, State.PathCompositeHelixRadius, RadiusAlpha);
-								const float RadialStep = PlannedRadius - PreviousPlannedRadius;
-								PitchPlannedBaseTravel += FMath::Sqrt(FMath::Max(
-									0.0f, FMath::Square(SegmentLength) - FMath::Square(RadialStep)));
-								PreviousPlannedRadius = PlannedRadius;
-							}
-
-							if (PitchPlannedBaseTravel > KINDA_SMALL_NUMBER)
-							{
-								const float MaxAxisRatio = FMath::Clamp(
-									PitchUsableAxisDistance / PitchPlannedBaseTravel,
-									0.0f, 0.999f);
-								AxisLimitedMaxAbsPitch = MaxAxisRatio /
-									FMath::Sqrt(FMath::Max(
-										KINDA_SMALL_NUMBER, 1.0f - FMath::Square(MaxAxisRatio)));
-								const float RawAbsPitch = FMath::Abs(UnclampedPitchScale);
-								const float FittedAbsPitch = FMath::Min(
-									RawAbsPitch, AxisLimitedMaxAbsPitch);
-								State.PathCompositeHelixPitchScale =
-									FMath::Sign(UnclampedPitchScale) * FittedAbsPitch;
-								bPitchClampedByAxisRange =
-									FittedAbsPitch + KINDA_SMALL_NUMBER < RawAbsPitch;
-							}
+							const float RadiusAlpha = RadiusEntrySegmentCount > 0
+								? FMath::Clamp(static_cast<float>(StepIndex) /
+									static_cast<float>(RadiusEntrySegmentCount), 0.0f, 1.0f)
+								: 1.0f;
+							const float PlannedRadius = FMath::Lerp(
+								CurrentSurfaceRadius, State.PathCompositeHelixRadius, RadiusAlpha);
+							const float RadialStep = PlannedRadius - PreviousPlannedRadius;
+							PitchPlannedBaseTravel += FMath::Sqrt(FMath::Max(
+								0.0f, FMath::Square(SegmentLength) - FMath::Square(RadialStep)));
+							PreviousPlannedRadius = PlannedRadius;
 						}
-						State.bPathCompositeHelixPitchFromContact = bHasContactSpan;
-						PitchSource = bHasContactSpan
-							? TEXT("ContactSpan")
-							: TEXT("LatchTangentFallback");
+
+						if (PitchPlannedBaseTravel > KINDA_SMALL_NUMBER)
+						{
+							const float MaxAxisRatio = FMath::Clamp(
+								PitchUsableAxisDistance / PitchPlannedBaseTravel,
+								0.0f, 0.999f);
+							AxisLimitedMaxAbsPitch = MaxAxisRatio /
+								FMath::Sqrt(FMath::Max(
+									KINDA_SMALL_NUMBER, 1.0f - FMath::Square(MaxAxisRatio)));
+							const float RawAbsPitch = FMath::Abs(UnclampedPitchScale);
+							const float FittedAbsPitch = FMath::Min(
+								RawAbsPitch, AxisLimitedMaxAbsPitch);
+							State.PathCompositeHelixPitchScale =
+								FMath::Sign(UnclampedPitchScale) * FittedAbsPitch;
+							bPitchClampedByAxisRange =
+								FittedAbsPitch + KINDA_SMALL_NUMBER < RawAbsPitch;
+						}
 					}
-					else
-					{
-						PitchSource = TEXT("DegenerateCircumferenceZero");
-					}
+					State.bPathCompositeHelixPitchFromContact = bHasContactSpan;
+					PitchSource = bHasContactSpan
+						? TEXT("ContactSpan")
+						: TEXT("LatchTangentFallback");
 				}
 				else
 				{
-					PitchSource = TEXT("DegenerateContactDirectionZero");
+					PitchSource = TEXT("DegenerateCircumferenceZero");
 				}
-
-				State.PathTangentWorld =
-					(State.PathCircumferenceDir + AxisDirection *
-						State.PathCompositeHelixPitchScale)
-					.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
-				State.PathTangentWorld = (State.PathTangentWorld - FVector::DotProduct(
-					State.PathTangentWorld, State.PathNormalWorld) * State.PathNormalWorld)
-					.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
 			}
+			else
+			{
+				PitchSource = TEXT("DegenerateContactDirectionZero");
+			}
+
+			State.PathTangentWorld =
+				(State.PathCircumferenceDir + AxisDirection *
+					State.PathCompositeHelixPitchScale)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
+			State.PathTangentWorld = (State.PathTangentWorld - FVector::DotProduct(
+				State.PathTangentWorld, State.PathNormalWorld) * State.PathNormalWorld)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathCircumferenceDir);
 
 			UE_LOG(LogRopeWrap, Log,
 				TEXT("[%s] Composite sweep initialized: crossSectionContributors=%d "
@@ -2040,223 +1982,6 @@ FVector FRopeWrappingPhase::ComputeSurfaceVectorFieldTangent(const FVector& Axis
 	return TangentWorld;
 }
 
-bool FRopeWrappingPhase::ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
-	const FRopeSimState& Sim, const FContext& Ctx,
-	FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const
-{
-	//1. Mesh / Bone 확인
-	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = State.Mesh.Get();
-	}
-	if (!Mesh || LatchAnchor.Bone.IsNone())
-	{
-		return false;
-	}
-
-	FVector AxisOrigin = FVector::ZeroVector;
-	FVector AxisDirection = FVector::ForwardVector;
-
-	//2. 감김 축 구하기
-	if (!ResolveWrappingAxis(LatchAnchor, Ctx, AxisOrigin, AxisDirection))
-	{
-		return false;
-	}
-	OrientWrappingAxisByTail(LatchAnchor, Sim, Mesh, AxisDirection);
-
-	//3. latch anchor를 world 좌표로 복원
-	const FTransform BoneXform = ResolveBindingWorld(Mesh, LatchAnchor.Bone);
-	FVector SurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
-	FVector NormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-
-	//4. 최초 rope tangent를 표면 위 방향으로 정리
-	FVector LatchTangentWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalTangent);
-	LatchTangentWorld = (LatchTangentWorld - FVector::DotProduct(LatchTangentWorld, NormalWorld) * NormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
-
-	//5. latch 지점의 radial 구하기
-	const float LatchAxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
-	const FVector LatchAxisPoint = AxisOrigin + AxisDirection * LatchAxisDistance;
-	const FVector LatchRadial = (SurfaceWorld - LatchAxisPoint)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, NormalWorld);
-
-	//6. 최초 원주 방향과 감김 방향 결정
-	FVector CircumferenceDir = FVector::CrossProduct(AxisDirection, LatchRadial)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
-	const float WindingSign = FVector::DotProduct(CircumferenceDir, LatchTangentWorld) < 0.0f ? -1.0f : 1.0f;
-	CircumferenceDir *= WindingSign;
-
-	//7. 최초 tangent field 만들기
-	FVector TangentWorld = (CircumferenceDir + AxisDirection * Ctx.Config.WrappingHelixPitchScale)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
-	//SDF 표면 밖으로 튀어나가는 성분 제거
-	TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
-
-	//8. 거리 0이면 바로 latch point 반환
-	if (DistanceFromLatch <= KINDA_SMALL_NUMBER)
-	{
-		OutSurfaceWorld = SurfaceWorld;
-		OutNormalWorld = NormalWorld;
-		OutTangentWorld = TangentWorld;
-		return true;
-	}
-
-	//9. 걷기 step 계산
-	const float StepSize = FMath::Max(1.0f, Sim.SegmentLength * 0.5f);
-	const int32 StepCount = FMath::Max(1, FMath::CeilToInt(DistanceFromLatch / StepSize));
-	float RemainingDistance = DistanceFromLatch;
-
-	//10. 표면 위를 실제로 걷는 루프
-	for (int32 StepIndex = 0; StepIndex < StepCount; ++StepIndex)
-	{
-		const float StepDistance = FMath::Min(StepSize, RemainingDistance);
-		RemainingDistance -= StepDistance;
-
-		//현재 위치에서 radial을 다시 구함. 현재 표면 위치에서 매번 radial을 다시 계산
-		const float AxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
-		const FVector AxisPoint = AxisOrigin + AxisDirection * AxisDistance;
-		const FVector Radial = (SurfaceWorld - AxisPoint).GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);
-
-		//원주 방향 재계산:
-		CircumferenceDir = FVector::CrossProduct(AxisDirection, Radial)
-			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir) * WindingSign;
-		//pitch를 섞어 걸어갈 방향을 다시 만듦:
-		TangentWorld = (CircumferenceDir + AxisDirection * Ctx.Config.WrappingHelixPitchScale)
-			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
-		//표면 tangent plane에 다시 눕힘:
-		TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
-			.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
-
-		SurfaceWorld += TangentWorld * StepDistance;
-		if (!ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, Sim, Ctx, SurfaceWorld, NormalWorld))
-		{
-			return false;
-		}
-	}
-
-	//11. 최종 위치에서 tangent 다시 계산
-	const float FinalAxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
-	const FVector FinalAxisPoint = AxisOrigin + AxisDirection * FinalAxisDistance;
-	const FVector FinalRadial = (SurfaceWorld - FinalAxisPoint).GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);
-	CircumferenceDir = FVector::CrossProduct(AxisDirection, FinalRadial)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir) * WindingSign;
-	TangentWorld = (CircumferenceDir + AxisDirection * Ctx.Config.WrappingHelixPitchScale)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
-	TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir);
-
-	OutSurfaceWorld = SurfaceWorld;
-	OutNormalWorld = NormalWorld;
-	OutTangentWorld = TangentWorld;
-	return true;
-}
-
-/* 이 방식은 "수학적인 나선"을 먼저 만든 다음 SDF 표면에 붙입니다. */
-//DistnaceFromLatch : tail node가 latch에서 얼마나 떨어졌는지
-// LatchAnchor       = 감김이 시작된 최초 접촉점 정보
-bool FRopeWrappingPhase::ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
-	const FRopeSimState& Sim, const FContext& Ctx,
-	FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const
-{
-	///1. Mesh와 Bone 확인
-	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = State.Mesh.Get();
-	}
-	if (!Mesh || LatchAnchor.Bone.IsNone())
-	{
-		return false;
-	}
-
-	FVector AxisOrigin = FVector::ZeroVector;
-	FVector AxisDirection = FVector::ForwardVector;
-
-	//2. 감김 축 정의
-	if (!ResolveWrappingAxis(LatchAnchor, Ctx, AxisOrigin, AxisDirection))
-	{
-		return false;
-	}
-	OrientWrappingAxisByTail(LatchAnchor, Sim, Mesh, AxisDirection);
-
-	//3. latch anchor를 world 좌표로 복원
-	const FTransform BoneXform = ResolveBindingWorld(Mesh, LatchAnchor.Bone);
-	//LatchSurfaceWorld가 나선의 시작점
-	const FVector LatchSurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
-
-	//4. LatchNormalWorld normal / tangent 복원
-	//LatchNormalWorld는 접촉 표면 normal.
-	//LatchTangentWorld는 최초 latch 순간 로프가 tail 방향으로 뻗던 방향
-	const FVector LatchNormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-	FVector LatchTangentWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalTangent);
-	// tangent를 normal plane에 투영한다.
-	LatchTangentWorld = (LatchTangentWorld - FVector::DotProduct(LatchTangentWorld, LatchNormalWorld) * LatchNormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(LatchNormalWorld));
-
-	// 5. latch 점을 축 기준으로 분해: latch point의 축 위 높이 → 그 축 위의 점 → 축에서 latch point로
-	//    향하는 radial. HelixRadius = latch 지점에서 bone-parent 축까지의 거리(나선 반지름).
-	const float LatchAxisDistance = FVector::DotProduct(LatchSurfaceWorld - AxisOrigin, AxisDirection);
-	const FVector LatchAxisPoint = AxisOrigin + AxisDirection * LatchAxisDistance;
-	FVector LatchRadial = LatchSurfaceWorld - LatchAxisPoint;
-	const float HelixRadius = LatchRadial.Size();
-	if (HelixRadius <= KINDA_SMALL_NUMBER)
-	{
-		return false;
-	}
-	// 정규화(radial 단위 벡터).
-	LatchRadial /= HelixRadius;
-
-	// 6. 감기는 방향 결정: 축×radial 원주 방향이 최초 latch rope tangent와 일치하는지로 부호를 정한다.
-	FVector CircumferenceDir = FVector::CrossProduct(AxisDirection, LatchRadial)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(LatchNormalWorld));
-	const float WindingSign = FVector::DotProduct(CircumferenceDir, LatchTangentWorld) < 0.0f ? -1.0f : 1.0f;
-	CircumferenceDir *= WindingSign;
-
-	// 7. rope 거리 d를 나선 파라미터로 변환: 원주 이동분 + 축 방향 이동량 + 원주 회전량.
-	const float PitchScale = Ctx.Config.WrappingHelixPitchScale;
-	const float LengthScale = FMath::Sqrt(1.0f + PitchScale * PitchScale);
-	const float CircumferenceDistance = DistanceFromLatch / FMath::Max(LengthScale, KINDA_SMALL_NUMBER);
-	const float AxisDistance = CircumferenceDistance * PitchScale;
-	const float AngleRadians = WindingSign * CircumferenceDistance / FMath::Max(HelixRadius, KINDA_SMALL_NUMBER);
-
-	// 8. 나선점 생성: 축을 중심으로 LatchRadial을 AngleRadians만큼 돌리고(원주 위 방향), 축 위에서
-	//    latch 높이보다 AxisDistance만큼 이동한 중심점에서 반지름만큼 바깥으로 나가면 나선 위 월드 위치.
-	const FQuat AxisRotation(AxisDirection, AngleRadians);
-	const FVector RotatedRadial = AxisRotation.RotateVector(LatchRadial).GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);
-	const FVector TargetAxisPoint = AxisOrigin + AxisDirection * (LatchAxisDistance + AxisDistance);
-	FVector SurfaceWorld = TargetAxisPoint + RotatedRadial * HelixRadius;
-
-	// 9. 마지막으로 SDF 표면에 붙인다.
-	FVector NormalWorld = RotatedRadial;
-	if (!ProjectWrapPointToSurface(LatchAnchor.Bone, Mesh, Sim, Ctx, SurfaceWorld, NormalWorld))
-	{
-		return false;
-	}
-
-	// 10. 보정된 표면에서 tangent 다시 계산
-	const float SurfaceAxisDistance = FVector::DotProduct(SurfaceWorld - AxisOrigin, AxisDirection);
-	const FVector SurfaceAxisPoint = AxisOrigin + AxisDirection * SurfaceAxisDistance;
-	FVector SurfaceRadial = SurfaceWorld - SurfaceAxisPoint;
-	SurfaceRadial = SurfaceRadial.GetSafeNormal(KINDA_SMALL_NUMBER, RotatedRadial);
-
-	FVector SurfaceCircumferenceDir = FVector::CrossProduct(AxisDirection, SurfaceRadial)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, CircumferenceDir) * WindingSign;
-	FVector TangentWorld = (SurfaceCircumferenceDir + AxisDirection * PitchScale)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, SurfaceCircumferenceDir);
-	TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
-		.GetSafeNormal(KINDA_SMALL_NUMBER, SurfaceCircumferenceDir);
-
-	//11. 결과 반환
-	OutSurfaceWorld = SurfaceWorld;
-	OutNormalWorld = NormalWorld;
-	OutTangentWorld = TangentWorld;
-	return true;
-}
-
 bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const
 {
 	OutAngleDeg = 0.0f;
@@ -2265,12 +1990,9 @@ bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState
 		return false;
 	}
 
-	// SurfaceVectorField는 경로 빌드가 스텝마다 적분해 둔 누적 각도를 그대로 쓴다 — 축이 본 전환마다
-	// 재해석되므로(rolling axis) latch 축 하나로 전체 거리를 나누는 아래 helix 공식이 성립하지 않는다.
-	// 단일 본(전환 없음)에서는 두 척도가 일치한다(RopeWrappingPhaseTests가 고정하는 계약).
-	// AnalyticHelix(축 고정), 그리고 아직 한 스텝도 걷지 못한 SVF는 기존 helix 공식으로 폴백.
-	if (State.PathMode == ERopeWrappingPathMode::SurfaceVectorField &&
-		State.PathAccumulatedAngleRad > KINDA_SMALL_NUMBER)
+	// Sequential SurfaceVectorField와 Composite AnalyticHelix 모두 경로 빌드 중 누적한 실제 위상을
+	// 우선 사용한다. 아직 한 스텝도 진행하지 못한 경로만 아래의 단일 축 근사로 폴백한다.
+	if (State.PathAccumulatedAngleRad > KINDA_SMALL_NUMBER)
 	{
 		OutAngleDeg = FMath::RadiansToDegrees(State.PathAccumulatedAngleRad);
 		return true;
@@ -2318,10 +2040,7 @@ bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState
 	// 실제 SurfaceVectorField 경로가 얼마나 울퉁불퉁했는지와 별개로, 실패 판정은 helix 기준 누적
 	// 감싼 각도만 본다. 각도(도) 반환 — 회전 수(=각도/360)는 2πr 로프를 요구해 대상 크기에 비례하는
 	// 기준이 되므로 쓰지 않는다(FRopeWrapConfig::FailedWrapMinAngleDeg 주석 참고).
-	if (State.bPathUsesPoseSpaceIsland &&
-		Ctx.Config.CompositeProjectionMode ==
-			ERopeCompositeProjectionMode::AnalyticHelix &&
-		State.Path.Num() > 1)
+	if (State.bPathUsesPoseSpaceIsland && State.Path.Num() > 1)
 	{
 		// 자동 pitch와 진입 반지름을 사용한 독립 helix는 이미 실제 누적 위상을 저장한다.
 		// 고정 config pitch로 다시 역산하면 커밋 로그/품질 관문의 각도가 경로와 달라진다.

@@ -1,14 +1,14 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
 // Wrapping 페이즈 로직: Contacting에서 확정된 latch anchor로부터 감김 경로를 점진 생성하고
-// (AnalyticHelix / SurfaceVectorField), 로프 앞단(front)을 경로 따라 이동시키며, 감긴 노드의
+// (Composite AnalyticHelix / Sequential SurfaceVectorField), 로프 앞단(front)을 경로 따라 이동시키며, 감긴 노드의
 // 질량을 마스킹하고, 커밋 시드(FRopeWrapState)를 조립한다. 물리가 아니라 LOGIC이다 —
 // FRopeWrapController(Wrapped 이후)의 앞 단계에 해당한다.
 //
 // FRopeWrapController와 같은 패턴: 작업 상태(FRopeWrappingState)를 값으로 소유하는
 // UObject 비의존 클래스. 페이즈 전이/이벤트 브로드캐스트는 URopeComponent가 결정하고,
 // 여기는 상태와 지오메트리만 다룬다. UObject 컨텍스트(WrapConfig, collider 스냅샷,
-// 경로 모드, 로그용 이름)는 FContext로 호출마다 주입받는다.
+// 로그용 이름)는 FContext로 호출마다 주입받는다.
 
 #pragma once
 
@@ -38,9 +38,6 @@ public:
 
 		/** 표면 투영용 프레임 collider 스냅샷. */
 		const TArray<IRopeCollider*>& Colliders;
-
-		/** UDynamicRopeSettings에서 컴포넌트가 해석해 전달. */
-		ERopeWrappingPathMode PathMode;
 
 		/** 튜브 반지름(표면에서 로프 중심까지 띄우는 거리). */
 		float SurfaceOffset;
@@ -167,7 +164,6 @@ private:
 	bool BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor& LatchAnchor,
 		const FRopeSimState& Sim, const FContext& Ctx);
 
-	bool AppendAnalyticProgressiveWrapPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
 	bool AppendCompositeAnalyticHelixPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
 
 	bool InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor,
@@ -189,14 +185,6 @@ private:
 	FVector ComputeSurfaceVectorFieldTangent(const FVector& AxisOrigin, const FVector& AxisDirection,
 		const FVector& LatchRadial, float WindingSign, const FVector& SurfaceWorld,
 		const FVector& NormalWorld, const FContext& Ctx, FVector& InOutCircumferenceDir) const;
-
-	bool ComputeAnalyticHelixWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
-		const FRopeSimState& Sim, const FContext& Ctx,
-		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
-
-	bool ComputeSurfaceVectorFieldWrapTarget(const FRopeSurfaceAnchor& LatchAnchor, float DistanceFromLatch,
-		const FRopeSimState& Sim, const FContext& Ctx,
-		FVector& OutSurfaceWorld, FVector& OutNormalWorld, FVector& OutTangentWorld) const;
 
 	/**
 	 * 감김 축 유도. 우선순위(앞머리는 Config.WrappingAxisSource가 결정 — ERopeWrappingAxisSource):

@@ -238,11 +238,7 @@ namespace
 					StepDistance / CurrentSurfaceRadius,
 					FMath::DegreesToRadians(2.0f),
 					FMath::DegreesToRadians(12.0f));
-				const float PitchScale =
-					Config.CompositeProjectionMode ==
-						ERopeCompositeProjectionMode::AnalyticHelix
-					? State.PathCompositeHelixPitchScale
-					: Config.WrappingHelixPitchScale;
+				const float PitchScale = State.PathCompositeHelixPitchScale;
 				const float PitchRatio = PitchScale /
 					FMath::Sqrt(1.0f + FMath::Square(PitchScale));
 				const float AxialStep = StepDistance * PitchRatio;
@@ -708,7 +704,6 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	Input.ThrowContext = ResolveThrowContext(ThrowContext);
 	Input.WrapConfig = WrapConfig;
 	Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
-	Input.PathMode = GetWrappingPathMode();
 	// 결착 모델을 preview 빌더로 전파 — Pierce면 감김 나선 대신 단일 앵커 꽂힘 경로를 탄다.
 	Input.TipEngagement = TipEngagement;
 	Input.ResolveMode = ResolveMode;
@@ -2689,7 +2684,7 @@ void URopeComponent::StartWrappingFromContacting()
 		if (Sim.Positions.IsValidIndex(Latch.NodeIndex + 1))
 		{
 			// tangent는 가능하면 다음 rope node 방향을 쓴다 — "로프가 tail 방향으로 어느 쪽으로
-			// 뻗어 있는가"를 잡기 위한 값으로, 이후 Analytic Helix / Surface Vector Field에서
+			// 뻗어 있는가"를 잡기 위한 값으로, 이후 Composite Analytic Helix / Sequential Surface Vector Field에서
 			// 감기는 방향(WindingSign)을 정할 때 중요하다.
 			TangentWorld = (Sim.Positions[Latch.NodeIndex + 1] - Sim.Positions[Latch.NodeIndex])
 				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
@@ -2805,11 +2800,6 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	}
 }
 
-ERopeWrappingPathMode URopeComponent::GetWrappingPathMode() const
-{
-	return WrapConfig.WrappingPathMode;
-}
-
 FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 {
 	// TravelPlaneFirst 전용 폴백: whip guide 평면이 없는 던지기(BP 직행 등)에서는 캡처 순간
@@ -2828,7 +2818,6 @@ FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 	FRopeWrappingPhase::FContext Ctx{
 		WrapConfig,
 		SimFrame.FrameColliders,
-		GetWrappingPathMode(),
 		Radius,
 		GetName(),
 		false,

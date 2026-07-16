@@ -336,7 +336,6 @@ namespace
 		FRopeWrappingPhase::FContext Ctx{
 			Input.WrapConfig,
 			GetColliders(Input),
-			Input.PathMode,
 			Input.RopeRadius,
 			Input.OwnerName
 		};

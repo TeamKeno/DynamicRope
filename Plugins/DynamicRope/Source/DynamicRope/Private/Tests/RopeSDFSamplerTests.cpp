@@ -126,7 +126,7 @@ bool FRopeWrappingPoseSpaceIslandTest::RunTest(const FString& Parameters)
 	Config.ContactQueryRadius = 3.0f;
 	Config.bEnableMultiBoneWrapping = true;
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, 3.0f, TEXT("PoseSpaceIslandTest"), true };
+		3.0f, TEXT("PoseSpaceIslandTest"), true };
 
 	FRopeSimState Sim;
 	Sim.SegmentLength = 12.0f;
@@ -190,7 +190,7 @@ bool FRopeWrappingCompositeSweepSupportTest::RunTest(const FString& Parameters)
 	FRopeWrapConfig Config;
 	Config.ContactQueryRadius = 3.0f;
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, 3.0f, TEXT("CompositeSweepSupportTest"), true };
+		3.0f, TEXT("CompositeSweepSupportTest"), true };
 	FRopeSimState Sim;
 	Sim.SegmentLength = 8.0f;
 	Sim.Positions = { FVector(10.0f, 0.0f, 0.0f) };
@@ -274,7 +274,7 @@ bool FRopeWrappingSingleBoneFallbackTest::RunTest(const FString& Parameters)
 	Config.ContactQueryRadius = 3.0f;
 	Config.bEnableMultiBoneWrapping = true;
 	FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		ERopeWrappingPathMode::SurfaceVectorField, 3.0f, TEXT("SingleBoneFallbackTest"), true };
+		3.0f, TEXT("SingleBoneFallbackTest"), true };
 	Ctx.ResolveMode = ERopeWrapResolveMode::FullSimulation;
 
 	FRopeSimState Sim;
