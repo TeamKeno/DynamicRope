@@ -82,13 +82,29 @@ void DrawPreviewTube(const FSceneView* View, const FRopeWrapPreviewData& Preview
 		const FVector Binormal = FVector::CrossProduct(Tangent, Normal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::RightVector);
 		PreviousNormal = Normal;
 
+		const float AlongFrac = static_cast<float>(PointIndex) / static_cast<float>(NumPoints - 1);
 		for (int32 SideIndex = 0; SideIndex < NumSides; ++SideIndex)
 		{
-			const float Angle = (2.0f * UE_PI) * static_cast<float>(SideIndex) / static_cast<float>(NumSides);
-			const FVector RingOffset = (Normal * FMath::Cos(Angle) + Binormal * FMath::Sin(Angle)) * Radius;
-			// 색은 전적으로 WrapPreviewMaterial 몫이다. vertex color는 FDynamicMeshVertex 기본값(불투명 흰색)
-			// 으로 두는데, 이는 vertex color를 곱하는 머티리얼에는 항등원이고 안 읽는 머티리얼에는 무시된다.
-			Vertices.Add(FDynamicMeshVertex(FVector3f(Preview.Points[PointIndex] + RingOffset)));
+			const float AroundFrac = static_cast<float>(SideIndex) / static_cast<float>(NumSides);
+			const float Angle = (2.0f * UE_PI) * AroundFrac;
+			const FVector Radial = (Normal * FMath::Cos(Angle) + Binormal * FMath::Sin(Angle))
+				.GetSafeNormal(KINDA_SMALL_NUMBER, Normal);
+			const FVector RingOffset = Radial * Radius;
+			// 색은 전적으로 WrapPreviewMaterial 몫이다. vertex color는 불투명 흰색으로 채워 머티리얼이
+			// 곱해 읽어도 항등원이고, 안 읽는 머티리얼에는 무시되게 둔다.
+			const FVector TangentY = FVector::CrossProduct(Radial, Tangent)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, Binormal);
+			FDynamicMeshVertex Vertex(
+				FVector3f(Preview.Points[PointIndex] + RingOffset),
+				FVector3f(Tangent),
+				FVector3f(Radial),
+				FVector2f(AlongFrac, AroundFrac),
+				FColor::White);
+			Vertex.SetTangents(
+				FVector3f(Tangent),
+				FVector3f(TangentY),
+				FVector3f(Radial));
+			Vertices.Add(Vertex);
 		}
 	}
 

@@ -1313,7 +1313,36 @@ void URopeWielderComponent::StoreAimGuideFrameIfNeeded(FRopePreparedThrowPreview
 FRopeWrapPreviewData URopeWielderComponent::ResolvePreparedPreviewForDisplay(const FRopePreparedThrowPreview& Prepared) const
 {
 	// owner-local로 저장되지 않은 일반 preview는 원래 월드 점을 그대로 반환한다.
-	return Prepared.ResolveRenderPreviewWorld();
+	FRopeWrapPreviewData Preview = Prepared.ResolveRenderPreviewWorld();
+	if (!Rope || Rope->TipEngagement != ERopeTipEngagement::Pierce || !Preview.IsValid())
+	{
+		return Preview;
+	}
+
+	// Pierce의 throw용 prepared 경로는 마지막 노드가 Tail 소켓에 오도록 RopeComponent가 TailWorld까지 줄인다.
+	// 표시는 플레이어가 조준한 Head/Hit 지점까지 이어져야 하므로, 렌더 전용 centerline만 HitPoint까지 다시 편다.
+	const FRopeSurfaceAnchor* Anchor = Prepared.Anchors.Num() > 0 ? &Prepared.Anchors[0] : &Prepared.LatchAnchor;
+	if (!Anchor || Anchor->NodeIndex == INDEX_NONE)
+	{
+		return Preview;
+	}
+
+	FVector HitPoint = Anchor->StartWorldPosition;
+	const USceneComponent* Mesh = Anchor->Mesh.IsValid() ? Anchor->Mesh.Get() : Prepared.Mesh.Get();
+	const FName Bone = Anchor->Bone.IsNone() ? Prepared.Bone : Anchor->Bone;
+	if (Mesh && !Bone.IsNone())
+	{
+		HitPoint = ResolveBindingWorld(Mesh, Bone).TransformPosition(Anchor->LocalSurfacePosition);
+	}
+
+	const FVector Origin = Preview.Points[0];
+	const int32 LastPoint = Preview.Points.Num() - 1;
+	for (int32 PointIndex = 0; PointIndex <= LastPoint; ++PointIndex)
+	{
+		const float Alpha = static_cast<float>(PointIndex) / static_cast<float>(LastPoint);
+		Preview.Points[PointIndex] = FMath::Lerp(Origin, HitPoint, Alpha);
+	}
+	return Preview;
 }
 
 void URopeWielderComponent::LogPreviewBuildResult(bool bSucceeded, const FString& Reason)
