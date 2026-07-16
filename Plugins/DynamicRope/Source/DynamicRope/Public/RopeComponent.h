@@ -266,8 +266,8 @@ public:
 	void QueueAimRayThrow(const FRopeAimRayThrowRequest& Request);
 
 	//~ Preview 탐색(Arc Search) 파라미터 ------------------------------------
-	// preview/prepared 빌드가 쓰는 아크 탐색 튜닝의 **단일 소스**. Wielder 경로와 BP 직행 Throw() 경로가
-	// 같은 값을 봐야 하므로 로프가 소유한다(종전엔 URopePreviewComponent에 있고 ThrowWithContext가
+	// GuaranteedWrap prepared 빌드가 쓰는 아크 탐색 튜닝의 **단일 소스**. Wielder 경로와 BP 직행 Throw()
+	// 경로가 같은 값을 봐야 하므로 로프가 소유한다(종전엔 URopePreviewComponent에 있고 ThrowWithContext가
 	// 같은 값을 하드코딩 복사해 조용히 발산할 수 있었다). 표시 전용 값(반지름/변 수/머티리얼)은
 	// 렌더 쪽(URopePreviewComponent)에 남는다.
 
@@ -283,21 +283,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Arc Query Radius"))
 	float PreviewQueryRadius = 0.0f;
 
-
-	/** Builds the current pre-wrapped rope centerline preview from the active/contacting wrap seed. */
-	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
-	bool BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) const;
-
 	//~ Wielder 계약(C++ 전용) ----------------------------------------------
-	// URopeWielderComponent의 조준/③ preview 구속 흐름이 쓰는 진입점들. 일반 사용자 API가 아니라
+	// URopeWielderComponent의 조준/GuaranteedWrap preview 구속 흐름이 쓰는 진입점. 일반 사용자 API가 아니라
 	// BP 미노출 — 게임 코드에서 직접 부를 일은 보통 없다(Wielder를 붙이거나 같은 계약을 재구현할 때만).
 	// 아크 탐색 튜닝은 인자가 아니라 위 Preview 파라미터(멤버)를 읽는다 — 호출처마다 값이 갈리지 않게.
 
-	/** Builds a pre-wrapped preview for idle/flight aiming using the same throw context as ThrowWithContext. */
-	bool BuildWrappingPreview(const FRopeThrowContext& ThrowContext, FRopeWrapPreviewData& OutPreview,
-		FString* OutFailureReason = nullptr) const;
-
-	/** ③용 preview build. 렌더 centerline뿐 아니라 실제 GuidedThrow/Wrapped 진입에 필요한 contact/anchor도 반환한다. */
+	/** GuaranteedWrap용 preview build. 렌더 centerline뿐 아니라 실제 GuidedThrow/Wrapped 진입에 필요한 contact/anchor도 반환한다. */
 	bool BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext, FRopePreparedThrowPreview& OutPrepared,
 		FString* OutFailureReason = nullptr) const;
 

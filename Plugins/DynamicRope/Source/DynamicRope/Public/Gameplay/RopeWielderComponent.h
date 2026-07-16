@@ -245,7 +245,10 @@ public:
 	// URopeComponent::ThrowParams(FRopeThrowParams)다 — Wielder 경유 던지기에서 로프 설정이
 	// 무시되던 이중을 해소. Wielder는 조준 방향과 손 소켓 원점 등 "출처"만 컨텍스트에 얹는다.
 
-	//~ Preview ------------------------------------------------------------
+	//~ Preview(GuaranteedWrap 모드 전용) ----------------------------------
+	// preview는 GuaranteedWrap만 쓴다 — Reel에서 조준한 대상을 확정 throw로 던지기 위한 prepared path를
+	// 만든다. FullSimulation/AssistedJudged는 감김이 판정/창발이라 던지기 전에 확정할 경로가 없어 preview가
+	// 없다(AssistedJudged의 조준 표시는 aim ray HUD가 담당). 아래 필드는 전부 GuaranteedWrap의 표시/보류 정책이다.
 	/** 비어 있으면 owner에서 찾는다. */
 	UPROPERTY(EditAnywhere, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopePreviewComponent", DisplayName = "Preview Component"))
 	FComponentReference PreviewComponentReference;
@@ -253,27 +256,12 @@ public:
 	UPROPERTY(Transient)
 	TObjectPtr<URopePreviewComponent> PreviewComponent = nullptr;
 
-	/** Free/Releasing 상태에서만 preview를 표시한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
-	bool bPreviewOnlyWhenIdle = true;
-
-	// NOTE: preview 갱신 스로틀(PreviewUpdateInterval)은 삭제됐다. CL 225에서 게이트 코드가 사라진 뒤로
-	// 필드만 남아 "0.1초마다 검사"를 약속했지만 실제로는 매 프레임 돌았다 — 값을 바꿔도 아무 일도 없었다.
-	// preview build는 지금도 매 프레임 돈다(aim ray 스윕도 원래 매 틱이다). 비용이 문제로 측정되면
-	// 그때 스로틀을 되살린다 — 계산/표시가 분리돼 있으므로 build만 조이고 렌더는 매 프레임 유지하면 된다.
-
-	/** ③이 Wrapped로 확정된 뒤에도 preview path를 잠깐 남길 시간. 0이면 Wrapped 진입 시 즉시 지운다. */
+	/** Guaranteed가 Wrapped로 확정된 뒤에도 preview path를 잠깐 남길 시간. 0이면 Wrapped 진입 시 즉시 지운다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Locked Wrapped Preview Hold Time"))
 	float LockedWrappedPreviewHoldTime = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Debug")
 	bool bLogPreviewBuildAttempts = false;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
-	bool bLastPreviewBlocked = false;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Preview")
-	FVector LastPreviewHitPoint = FVector::ZeroVector;
 
 	//~ Input(선택) — 비우면 무시, Throw()를 직접 호출하면 된다 ------------
 	/** Action/MappingContext가 설정돼 있으면 BeginPlay에 자동 바인딩할지. */

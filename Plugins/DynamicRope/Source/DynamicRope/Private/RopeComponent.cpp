@@ -567,171 +567,14 @@ void URopeComponent::QueueAimRayThrow(const FRopeAimRayThrowRequest& Request)
 		Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
 }
 
-bool URopeComponent::BuildWrappingPreview(FRopeWrapPreviewData& OutPreview) const
-{
-	OutPreview = FRopeWrapPreviewData();
-	if (Sim.Num() < 2)
-	{
-		return false;
-	}
-
-	if (Phase == ERopePhase::Flight)
-	{
-		FRopeThrowPreviewBuilder::FInput Input;
-		Input.Sim = &Sim;
-		Input.Colliders = &SimFrame.FrameColliders;
-		Input.WrapConfig = WrapConfig;
-		Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
-		Input.DetectConfig = DetectConfig;
-		Input.PathMode = GetWrappingPathMode();
-		Input.ResolveMode = ResolveMode;
-		Input.RopeRadius = Radius;
-		Input.RopeNumSides = NumSides;
-		Input.FallbackForward = GetForwardVector();
-		Input.OwnerName = GetName();
-		return FRopeThrowPreviewBuilder::BuildFlightWrappingPreview(Input, OutPreview);
-	}
-
-	const USceneComponent* Mesh = nullptr;
-	FName Bone = NAME_None;
-	FRopeSurfaceAnchor LatchAnchor;
-
-	if (Phase == ERopePhase::Wrapping && WrappingPhase.State.IsActive())
-	{
-		Mesh = WrappingPhase.State.Mesh.Get();
-		Bone = WrappingPhase.State.BoneName;
-		LatchAnchor = WrappingPhase.State.LatchAnchor;
-	}
-	else if (Phase == ERopePhase::Contacting)
-	{
-		Mesh = PendingWrapSeed.Mesh.Get();
-		Bone = PendingWrapSeed.BoneName;
-		if (PendingWrapSeed.Anchors.Num() > 0)
-		{
-			LatchAnchor = PendingWrapSeed.Anchors[0];
-		}
-		else if (PendingWrapSeed.Latched.Num() > 0)
-		{
-			const FRopeLatchNode& Latch = PendingWrapSeed.Latched[0];
-			if (Mesh && Sim.Positions.IsValidIndex(Latch.NodeIndex))
-			{
-				const FTransform BoneXform = ResolveBindingWorld(Mesh, Latch.Bone);
-				const FVector NormalWorld = FVector::UpVector;
-				FVector TangentWorld = FVector::ForwardVector;
-				if (Sim.Positions.IsValidIndex(Latch.NodeIndex + 1))
-				{
-					TangentWorld = (Sim.Positions[Latch.NodeIndex + 1] - Sim.Positions[Latch.NodeIndex])
-						.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-				}
-
-				LatchAnchor.NodeIndex = Latch.NodeIndex;
-				LatchAnchor.Bone = Latch.Bone;
-				LatchAnchor.Mesh = Mesh;
-				LatchAnchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Sim.Positions[Latch.NodeIndex]);
-				LatchAnchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld)
-					.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-				LatchAnchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld)
-					.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-				LatchAnchor.StartWorldPosition = Sim.Positions[Latch.NodeIndex];
-				LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Radius);
-				LatchAnchor.RopeDistance = 0.0f;
-			}
-		}
-	}
-	else
-	{
-		return false;
-	}
-
-	if (!Mesh)
-	{
-		Mesh = LatchAnchor.Mesh.Get();
-	}
-	if (!Mesh || Bone.IsNone() || LatchAnchor.Bone.IsNone() ||
-		!Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex))
-	{
-		return false;
-	}
-
-	LatchAnchor.Mesh = Mesh;
-	LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Radius);
-
-	TArray<FVector> PreviewPoints;
-	if (!WrappingPhase.BuildPreviewCenterline(LatchAnchor, Mesh, Bone, Sim, MakeWrappingContext(), PreviewPoints))
-	{
-		return false;
-	}
-
-	OutPreview.Points = MoveTemp(PreviewPoints);
-	OutPreview.Radius = FMath::Max(0.1f, Radius * 1.05f);
-	OutPreview.NumSides = FMath::Clamp(NumSides, 3, 32);
-	return OutPreview.IsValid();
-}
-
-bool URopeComponent::BuildWrappingPreview(const FRopeThrowContext& ThrowContext, FRopeWrapPreviewData& OutPreview,
-	FString* OutFailureReason) const
-{
-	OutPreview = FRopeWrapPreviewData();
-
-	// Free/Releasing/Reel(③ 장전 준비)는 던지기 전 상태 — 자유 탐색(arc) preview 경로를 쓴다.
-	if (Phase == ERopePhase::Free || Phase == ERopePhase::Releasing || Phase == ERopePhase::Reel)
-	{
-		FRopeThrowPreviewBuilder::FInput Input;
-		Input.Sim = &Sim;
-		Input.Colliders = &SimFrame.FrameColliders;
-		Input.ThrowContext = ResolveThrowContext(ThrowContext);
-		Input.WrapConfig = WrapConfig;
-		Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
-		Input.DetectConfig = DetectConfig;
-		Input.PathMode = GetWrappingPathMode();
-		Input.ResolveMode = ResolveMode;
-		Input.RopeRadius = Radius;
-		Input.RopeNumSides = NumSides;
-		Input.RopeLength = FMath::Max(Sim.RopeLength, RopeLength);
-		Input.SweepAngleDegrees = MakeWhipGuideConfig().SweepAngleDegrees;
-		Input.FallbackForward = GetForwardVector();
-		Input.OwnerName = GetName();
-		// 아크 탐색 튜닝은 로프 멤버가 단일 소스 — 호출처(Wielder/BP 직행)마다 값이 갈리지 않는다.
-		Input.ReachScale = PreviewReachScale;
-		Input.SegmentCount = PreviewSegmentCount;
-		Input.SampleStep = PreviewSampleStep;
-		Input.QueryRadius = PreviewQueryRadius;
-		return FRopeThrowPreviewBuilder::BuildFreeWrappingPreview(Input, OutPreview, OutFailureReason);
-	}
-
-	if (Phase == ERopePhase::Flight)
-	{
-		FRopeThrowPreviewBuilder::FInput Input;
-		Input.Sim = &Sim;
-		Input.Colliders = &SimFrame.FrameColliders;
-		Input.WrapConfig = WrapConfig;
-		Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
-		Input.DetectConfig = DetectConfig;
-		Input.PathMode = GetWrappingPathMode();
-		Input.ResolveMode = ResolveMode;
-		Input.RopeRadius = Radius;
-		Input.RopeNumSides = NumSides;
-		Input.FallbackForward = GetForwardVector();
-		Input.OwnerName = GetName();
-		return FRopeThrowPreviewBuilder::BuildFlightWrappingPreview(Input, OutPreview, OutFailureReason);
-	}
-
-	const bool bBuilt = BuildWrappingPreview(OutPreview);
-	if (!bBuilt)
-	{
-		RopeMath::SetPreviewFailureReason(OutFailureReason,
-			FString::Printf(TEXT("active phase preview failed (phase=%s)"), PhaseName(Phase)));
-	}
-	return bBuilt;
-}
-
 bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext,
 	FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason) const
 {
 	OutPrepared.Reset();
-	// Prepared preview는 아직 던지기 전인 Free/Releasing/Reel에서만 의미가 있다(Reel=③ 장전 준비 상태 —
-	// 조준 preview 표시 + Reel에서의 던지기 진입이 이 빌드를 쓴다).
-	// Flight 이후 phase는 이미 실제 접촉/감김 상태가 있으므로 기존 표시용 BuildWrappingPreview 경로를 쓴다.
+	// Prepared preview는 아직 던지기 전인 Free/Releasing/Reel에서만 의미가 있다(Reel=GuaranteedWrap 장전
+	// 준비 상태 — 조준 preview 표시 + Reel에서의 던지기 진입이 이 빌드를 쓴다). Flight 이후 phase는 이미
+	// 실제 접촉/감김 상태라 preview가 없다(FullSimulation/AssistedJudged는 preview 자체가 없고,
+	// GuaranteedWrap은 이 prepared 경로가 유일한 preview다).
 	if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing && Phase != ERopePhase::Reel)
 	{
 		RopeMath::SetPreviewFailureReason(OutFailureReason,
@@ -745,7 +588,6 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	Input.ThrowContext = ResolveThrowContext(ThrowContext);
 	Input.WrapConfig = WrapConfig;
 	Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
-	Input.DetectConfig = DetectConfig;
 	Input.PathMode = GetWrappingPathMode();
 	// 결착 모델을 preview 빌더로 전파 — Pierce면 감김 나선 대신 단일 앵커 꽂힘 경로를 탄다.
 	Input.TipEngagement = TipEngagement;

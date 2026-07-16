@@ -37,9 +37,9 @@ void URopeWielderComponent::BeginPlay()
 
 	ResolveRefs();
 
-	// 표시를 원하는 ③에서만 런타임 컴포넌트를 만들어준다(수동 배치가 있으면 그걸 쓴다).
-	// 표시를 끄면 컴포넌트 자체가 생기지 않는다 — 던지기 계산은 Rope/Wielder가 하므로 영향 없다.
-	// ①②는 종전대로 수동 배치했을 때만 표시된다.
+	// preview는 Guaranteed 모드 전용이다 — 표시를 원하는 Guaranteed에서만 런타임 컴포넌트를 만들어준다
+	// (수동 배치가 있으면 그걸 쓴다). 표시를 끄면 컴포넌트 자체가 생기지 않는다 — 던지기 계산은
+	// Rope/Wielder가 하므로 영향 없다.
 	ResolvePreviewComponent(/*bAllowAutoCreate*/ bShowThrowPreview && UsesLockedPreview());
 
 	if (!Rope)
@@ -59,13 +59,14 @@ void URopeWielderComponent::BeginPlay()
 		BindInput();
 	}
 
-	// ③는 표시를 꺼도 던지기용 prepared 계산에 틱이 필요하다.
-	// preview 외에 지상 이탈/스윙 에어컨트롤 감시도 틱이 필요하다 — 전부 꺼져야 틱 정지.
-	// Aim ray 모드는 preview component가 없어도 collider 수집 bounds를 매 프레임 갱신해야 한다.
-	SetComponentTickEnabled(UsesLockedPreview() || bShowThrowPreview || bAutoGroundExitOnUpwardPull ||
+	// Guaranteed는 표시를 꺼도 던지기용 prepared 계산에 틱이 필요하다(UsesLockedPreview로 이미 켜진다 —
+	// bShowThrowPreview는 표시 on/off일 뿐 계산 게이트가 아니다). preview 외에 지상 이탈/스윙
+	// 에어컨트롤 감시도 틱이 필요하다 — 전부 꺼져야 틱 정지. Aim ray 모드(Assisted)는 preview
+	// component가 없어도 collider 수집 bounds를 매 프레임 갱신해야 한다.
+	SetComponentTickEnabled(UsesLockedPreview() || bAutoGroundExitOnUpwardPull ||
 		bBoostAirControlWhileSwinging || UsesAimRay());
 	UpdateAimRayColliderQueryBounds();
-	if (UsesLockedPreview() || bShowThrowPreview)
+	if (UsesLockedPreview())
 	{
 		UpdateThrowPreview();
 	}
@@ -1124,29 +1125,12 @@ bool URopeWielderComponent::ShouldHoldPreparedPreview()
 
 bool URopeWielderComponent::ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) const
 {
-	// ③은 "던지기 전 성공한 preview path"만 새로 만든다.
-	// GuidedThrow/Wrapped에서는 이미 확정된 HeldPreparedPreview를 사용하므로 build를 다시 시도하지 않는다.
-	if (UsesLockedPreview())
-	{
-		// ③(Guaranteed)는 Reel(장전 준비) 상태에서만 조준 preview를 만든다 — Reel에서만 던질 수 있으므로.
-		// Free(release 후 늘어진 상태)에서는 장전 전이라 preview를 보이지 않는다. 던지기 게이트와 같은 술어를
-		// 봐야 "보이는 것 = 던질 수 있는 것"이 유지된다. (아래 ①② 분기는 던지기가 아니라 표시 정책이라 별개.)
-		// 라이브 phase(CanThrowNow)가 아니라 인자 Phase로 물어야 이 함수의 시그니처 계약과 어긋나지 않는다.
-		return RopeWrapModes::CanThrowInPhase(Rope->ResolveMode, Phase);
-	}
-
-	// 일반 preview도 idle 전용 설정이면 조준 전 상태에서만 계산한다.
-	if (bPreviewOnlyWhenIdle)
-	{
-		return Phase == ERopePhase::Free || Phase == ERopePhase::Releasing;
-	}
-
-	// idle 전용이 아니면 실제 접촉/감김 진행 중 표시용 preview까지 허용한다.
-	return Phase == ERopePhase::Free ||
-		Phase == ERopePhase::Releasing ||
-		Phase == ERopePhase::Flight ||
-		Phase == ERopePhase::Contacting ||
-		Phase == ERopePhase::Wrapping;
+	// Guaranteed 모드는 "던지기 전 성공한 preview path"만 새로 만든다. GuidedThrow/Wrapped에서는 이미
+	// 확정된 HeldPreparedPreview를 쓰므로 build를 다시 시도하지 않는다(호출자에서 먼저 걸러진다).
+	// Reel(장전 준비) 상태에서만 조준 preview를 만든다 — Reel에서만 던질 수 있으므로. 던지기 게이트와
+	// 같은 술어(CanThrowInPhase)를 봐야 "보이는 것 = 던질 수 있는 것"이 유지된다. 라이브 phase가 아니라
+	// 인자 Phase로 물어야 이 함수의 시그니처 계약과 어긋나지 않는다.
+	return RopeWrapModes::CanThrowInPhase(Rope->ResolveMode, Phase);
 }
 
 bool URopeWielderComponent::UpdateHeldPreparedPreviewForPhase(ERopePhase Phase)
@@ -1212,20 +1196,23 @@ void URopeWielderComponent::DisplayPreviewCenterline(const FRopeWrapPreviewData&
 
 void URopeWielderComponent::UpdateThrowPreview()
 {
-	// 계산(prepared)과 표시(preview 컴포넌트)는 분리돼 있다 — ③는 표시를 꺼도, preview 컴포넌트가 아예 없어도
-	// prepared를 만들어야 던질 수 있다. 표시 여부는 DisplayPreviewCenterline이 단독으로 판단한다.
+	// preview는 GuaranteedWrap 모드 전용이다 — Reel(장전)에서 조준한 대상을 확정 throw로 던지기 위한
+	// prepared path(contact/anchor 포함)를 만든다. 계산(prepared)과 표시(preview 컴포넌트)는 분리돼
+	// 있어, 표시를 꺼도·컴포넌트가 없어도 prepared는 만들어야 던질 수 있다.
+	// FullSimulation/AssistedJudged는 preview를 쓰지 않는다 — 감김이 판정/창발이라 던지기 전에 확정할
+	// 경로가 없다. AssistedJudged의 조준 표시는 aim ray HUD(UpdateAimHudSample)가 따로 담당한다.
 	if (!Rope)
 	{
 		ResolveRefs();
 	}
-	if (!PreviewComponent)
-	{
-		ResolvePreviewComponent(/*bAllowAutoCreate*/ false);
-	}
-	if (!Rope)
+	if (!Rope || !UsesLockedPreview())
 	{
 		ClearThrowPreview();
 		return;
+	}
+	if (!PreviewComponent)
+	{
+		ResolvePreviewComponent(/*bAllowAutoCreate*/ false);
 	}
 	if (ShouldHoldPreparedPreview())
 	{
@@ -1247,53 +1234,23 @@ void URopeWielderComponent::UpdateThrowPreview()
 
 	FString PreviewBuildReason;
 	const FRopeThrowContext ThrowContext = BuildThrowContext(FVector::ZeroVector);
-	// ③ prepared preview(contact/anchor 포함 — 실제 throw에 쓰임)는 Reel(장전 준비)에서만 만들어 여기서 소유한다.
-	// phase 검사는 불필요하다 — 위 ShouldUpdateThrowPreviewForPhase가 ③의 비-Reel을 이미 걸러냈다.
-	const bool bNeedsPrepared = UsesLockedPreview();
-
-	if (bNeedsPrepared)
+	FRopePreparedThrowPreview Prepared;
+	if (!Rope->BuildPreparedWrappingPreview(ThrowContext, Prepared, &PreviewBuildReason))
 	{
-		FRopePreparedThrowPreview Prepared;
-		if (!Rope->BuildPreparedWrappingPreview(ThrowContext, Prepared, &PreviewBuildReason))
-		{
-			LogPreviewBuildResult(false, PreviewBuildReason.IsEmpty()
-				? TEXT("prepared preview build failed without a specific reason") : PreviewBuildReason);
-			ClearThrowPreview();
-			LastPreviewPhase = RopePhase;
-			return;
-		}
-
-		LastPreparedPreview = Prepared;
-		StoreAimGuideFrameIfNeeded(LastPreparedPreview);
-		HeldPreparedPreview = ResolvePreparedPreviewForDisplay(LastPreparedPreview);
-		HeldPreviewExpireTimeSeconds = 0.0f;
-		DisplayPreviewCenterline(HeldPreparedPreview);
+		LogPreviewBuildResult(false, PreviewBuildReason.IsEmpty()
+			? TEXT("prepared preview build failed without a specific reason") : PreviewBuildReason);
+		ClearThrowPreview();
+		LastPreviewPhase = RopePhase;
+		return;
 	}
-	else
-	{
-		// 표시 전용 경로(①②) — 던지기용 데이터를 만들지 않으므로 표시가 꺼져 있으면 빌드 자체를 건너뛴다.
-		LastPreparedPreview.Reset();
-		if (!bShowThrowPreview || !PreviewComponent)
-		{
-			LastPreviewPhase = RopePhase;
-			return;
-		}
 
-		FRopeWrapPreviewData Centerline;
-		if (!Rope->BuildWrappingPreview(ThrowContext, Centerline, &PreviewBuildReason))
-		{
-			LogPreviewBuildResult(false, PreviewBuildReason.IsEmpty()
-				? TEXT("preview build failed without a specific reason") : PreviewBuildReason);
-			ClearThrowPreview();
-			LastPreviewPhase = RopePhase;
-			return;
-		}
-		DisplayPreviewCenterline(Centerline);
-	}
+	LastPreparedPreview = Prepared;
+	StoreAimGuideFrameIfNeeded(LastPreparedPreview);
+	HeldPreparedPreview = ResolvePreparedPreviewForDisplay(LastPreparedPreview);
+	HeldPreviewExpireTimeSeconds = 0.0f;
+	DisplayPreviewCenterline(HeldPreparedPreview);
 
 	LogPreviewBuildResult(true, TEXT("preview built"));
-	bLastPreviewBlocked = false;
-	LastPreviewHitPoint = FVector::ZeroVector;
 	LastPreviewPhase = RopePhase;
 }
 
@@ -1308,8 +1265,6 @@ void URopeWielderComponent::ClearPreviewDisplay()
 
 void URopeWielderComponent::ClearPreparedThrow()
 {
-	bLastPreviewBlocked = false;
-	LastPreviewHitPoint = FVector::ZeroVector;
 	LastPreparedPreview.Reset();
 	HeldPreparedPreview = FRopeWrapPreviewData();
 	HeldPreviewExpireTimeSeconds = 0.0f;

@@ -344,17 +344,6 @@ namespace
 		return Ctx;
 	}
 
-	FRopeFlightContactDetector::FParams MakeFlightDetectParams(const FRopeThrowPreviewBuilder::FInput& Input)
-	{
-		FRopeFlightContactDetector::FParams Params;
-		Params.ContactRadius = Input.WrapConfig.ContactQueryRadius;
-		Params.RopeRadius = Input.RopeRadius;
-		Params.PredictiveContactFrames = Input.DetectConfig.PredictiveContactFrames;
-		Params.MinLatchNodes = Input.DetectConfig.MinLatchNodes;
-		Params.FallbackForward = Input.FallbackForward;
-		return Params;
-	}
-
 	void BuildPreparedAnchorsFromCenterline(const TArray<FVector>& Centerline, const FRopeContactCandidate& Candidate,
 		const USceneComponent* Mesh, TArray<FRopeSurfaceAnchor>& OutAnchors)
 	{
@@ -571,19 +560,6 @@ namespace
 	}
 }
 
-bool FRopeThrowPreviewBuilder::BuildFreeWrappingPreview(const FInput& Input, FRopeWrapPreviewData& OutPreview,
-	FString* OutFailureReason)
-{
-	OutPreview = FRopeWrapPreviewData();
-	FRopePreparedThrowPreview Prepared;
-	if (!BuildFreePreparedPreview(Input, Prepared, OutFailureReason))
-	{
-		return false;
-	}
-	OutPreview = MoveTemp(Prepared.RenderPreview);
-	return OutPreview.IsValid();
-}
-
 bool FRopeThrowPreviewBuilder::BuildFreePreparedPreview(const FInput& Input, FRopePreparedThrowPreview& OutPrepared,
 	FString* OutFailureReason)
 {
@@ -616,79 +592,3 @@ bool FRopeThrowPreviewBuilder::BuildFreePreparedPreview(const FInput& Input, FRo
 		Input, ContactCandidate.Candidate, PreviewSim, OutPrepared, OutFailureReason);
 }
 
-bool FRopeThrowPreviewBuilder::BuildFlightWrappingPreview(const FInput& Input, FRopeWrapPreviewData& OutPreview,
-	FString* OutFailureReason)
-{
-	OutPreview = FRopeWrapPreviewData();
-	const FRopeSimState* Sim = Input.Sim;
-	const TArray<IRopeCollider*>& Colliders = GetColliders(Input);
-	if (Colliders.Num() == 0)
-	{
-		RopeMath::SetPreviewFailureReason(OutFailureReason, TEXT("flight preview rejected: no frame colliders"));
-		return false;
-	}
-	if (!Sim || Sim->Num() < 2)
-	{
-		RopeMath::SetPreviewFailureReason(OutFailureReason,
-			FString::Printf(TEXT("flight preview rejected: rope sim has too few nodes (nodes=%d)"), Sim ? Sim->Num() : 0));
-		return false;
-	}
-
-	TArray<FRopeContactCandidate> Candidates;
-	const FRopeFlightContactDetector::FParams Params = MakeFlightDetectParams(Input);
-	FRopeFlightContactDetector::DetectContactCandidates(*Sim, Colliders, Params, Candidates);
-	FRopeFlightContactDetector::FWhipGuideView EmptyWhip;
-	FRopeFlightContactDetector::AddPredictedContactCandidates(*Sim, Colliders, Params, EmptyWhip, Candidates);
-	FRopeFlightContactDetector::EvaluateRelativeMotion(*Sim, Params, Candidates);
-
-	FRopeContactTracker PreviewTracker;
-	PreviewTracker.Update(Candidates, 0.0f);
-	if (PreviewTracker.CandidateBone.IsNone() || PreviewTracker.CandidateNodes.Num() == 0)
-	{
-		RopeMath::SetPreviewFailureReason(OutFailureReason,
-			FString::Printf(TEXT("flight preview found no tracked candidate (candidates=%d)"), Candidates.Num()));
-		return false;
-	}
-
-	const int32 NodeIndex = RopeMath::HeadValidNodeIndex(PreviewTracker.CandidateNodes, Sim->Positions);
-	const FRopeContactCandidate* BestCandidate = nullptr;
-	for (const FRopeContactCandidate& Candidate : Candidates)
-	{
-		if (!Candidate.bValid ||
-			Candidate.NodeIndex != NodeIndex ||
-			Candidate.Bone != PreviewTracker.CandidateBone ||
-			Candidate.Mesh != PreviewTracker.CandidateMesh)
-		{
-			continue;
-		}
-
-		if (!BestCandidate || Candidate.Penetration > BestCandidate->Penetration)
-		{
-			BestCandidate = &Candidate;
-		}
-	}
-
-	if (!BestCandidate)
-	{
-		RopeMath::SetPreviewFailureReason(OutFailureReason,
-			FString::Printf(TEXT("flight preview had tracker bone but no matching best candidate (candidates=%d, bone=%s, nodes=%d)"),
-				Candidates.Num(), *PreviewTracker.CandidateBone.ToString(), PreviewTracker.CandidateNodes.Num()));
-		return false;
-	}
-
-	return BuildWrappingPreviewFromCandidate(Input, *BestCandidate, *Sim, OutPreview, OutFailureReason);
-}
-
-bool FRopeThrowPreviewBuilder::BuildWrappingPreviewFromCandidate(const FInput& Input,
-	const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim,
-	FRopeWrapPreviewData& OutPreview, FString* OutFailureReason)
-{
-	OutPreview = FRopeWrapPreviewData();
-	FRopePreparedThrowPreview Prepared;
-	if (!BuildPreparedFromCandidate(Input, Candidate, SourceSim, Prepared, OutFailureReason))
-	{
-		return false;
-	}
-	OutPreview = MoveTemp(Prepared.RenderPreview);
-	return OutPreview.IsValid();
-}

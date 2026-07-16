@@ -21,15 +21,12 @@ public:
 
 		FRopeThrowContext ThrowContext;
 		FRopeWrapConfig WrapConfig;
-		/** 감지 튜닝(예측 프레임/최소 latch) — 컴포넌트 DetectConfig 스냅샷. */
-		FRopeDetectConfig DetectConfig;
 		ERopeWrappingPathMode PathMode = ERopeWrappingPathMode::SurfaceVectorField;
 
-		/** 도달 모드 스냅샷(컴포넌트 ResolveMode). BareWrap preview에서 FullSimulation은
-		 *  Composite Multi-Bone, AssistedJudged는 Sequential Multi-Bone 경로를 선택하는 데 사용한다. */
+		/** 도달 모드 스냅샷(컴포넌트 ResolveMode). GuaranteedWrap Cinch의 감김 경로 빌드가 감김 축/경로 선택에 쓴다. */
 		ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
-		/** 결착 모델. Pierce면 감김 나선 경로 대신 aim-hit 접점에 단일 앵커로 꽂는다(③ 전용). */
+		/** 결착 모델. Pierce면 감김 나선 경로 대신 aim-hit 접점에 단일 앵커로 꽂는다(GuaranteedWrap 전용). */
 		ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
 
 		float RopeRadius = 0.0f;
@@ -45,16 +42,7 @@ public:
 		float QueryRadius = 0.0f;
 	};
 
-	static bool BuildFreeWrappingPreview(const FInput& Input, FRopeWrapPreviewData& OutPreview,
-		FString* OutFailureReason = nullptr);
-
+	// GuaranteedWrap 모드 전용: Reel에서 조준한 대상의 확정 throw path(contact/anchor 포함)를 만든다.
 	static bool BuildFreePreparedPreview(const FInput& Input, FRopePreparedThrowPreview& OutPrepared,
-		FString* OutFailureReason = nullptr);
-
-	static bool BuildFlightWrappingPreview(const FInput& Input, FRopeWrapPreviewData& OutPreview,
-		FString* OutFailureReason = nullptr);
-
-	static bool BuildWrappingPreviewFromCandidate(const FInput& Input, const FRopeContactCandidate& Candidate,
-		const FRopeSimState& SourceSim, FRopeWrapPreviewData& OutPreview,
 		FString* OutFailureReason = nullptr);
 };
