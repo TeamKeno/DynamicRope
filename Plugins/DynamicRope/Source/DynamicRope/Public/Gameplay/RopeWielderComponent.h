@@ -364,6 +364,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation", meta = (ClampMin = "0.1"))
 	float ThrowMontagePlayRate = 1.0f;
 
+	/**
+	 * 설정하면 StartPull()(PullAction 홀드 포함)이 즉시 당기지 않고, 로프가 Wrapped일 때 이 몽타주를 재생한다.
+	 * 실제 pull 시도는 몽타주 안에 배치한 UAnimNotifyState_RopePull window가 StartPullNow/StopPullNow를 호출해
+	 * 일어난다(ThrowMontage의 UAnimNotify_RopeThrow와 같은 계약: notify 미배치면 pull이 일어나지 않는다).
+	 * 홀드 유지 연출이 필요하면 몽타주 섹션 루프로 구성한다. 비우면 StartPull()이 즉시 StartPullNow()로
+	 * 당긴다(종전 동작). Wrapped가 아니면 몽타주 없이 힘만 장전된다(StartPullNow — 감기는 순간 걸리는 종전
+	 * 홀드 시맨틱 유지).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation")
+	TObjectPtr<UAnimMontage> PullMontage = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation", meta = (ClampMin = "0.1"))
+	float PullMontagePlayRate = 1.0f;
+
 	//~ API ----------------------------------------------------------------
 	/**
 	 * 던지기 시작. ThrowMontage가 설정돼 있으면 몽타주를 재생(실제 던지기는 몽타주의 UAnimNotify_RopeThrow가
@@ -389,15 +403,35 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void PlayThrowMontage();
 
+	/** PullMontage를 owner 메시의 AnimInstance에서 재생한다(설정돼 있을 때). */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void PlayPullMontage();
+
 	/** 현재 wrap을 해제한다. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Release();
 
-	/** 능동 Pull 시작(로프 HoldConfig.PullForce로 견인 — Wrapped + 팽팽할 때만 실제 인가). 입력 홀드/게임플레이용. */
+	/**
+	 * 능동 Pull 시작 — 입력 홀드/게임플레이가 호출하는 진입점(Throw()와 같은 구조). PullMontage가 설정돼
+	 * 있고 로프가 Wrapped면 몽타주를 재생하고 실제 pull은 몽타주의 notify가 StartPullNow()로 발동한다.
+	 * 그 외(몽타주 없음/비Wrapped)는 즉시 StartPullNow().
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StartPull();
 
-	/** 능동 Pull 정지. */
+	/** 실제 능동 Pull을 *지금* 시작한다(로프 HoldConfig.PullForce로 견인 — Wrapped + 팽팽할 때만 실제 인가.
+	 *  팽팽 판정/게이트는 로프 HoldConfig의 bActivePullRequiresTaut/ActivePullTautTension, 조회는 IsPullTaut()).
+	 *  bIgnoreTautGate=true면 이번 Pull은 팽팽함을 무시한다(per-call 우회 — pull window의 연출 구간용).
+	 *  몽타주 notify가 호출하는 실행 지점(ThrowNow 대응). */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void StartPullNow(bool bIgnoreTautGate = false);
+
+	/** 능동 Pull 힘만 정지한다(몽타주는 건드리지 않음 — pull window의 NotifyEnd가 호출: 창이 닫혀도
+	 *  몽타주의 후속 구간(회수 모션 등)은 계속 재생돼야 한다). */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void StopPullNow();
+
+	/** 능동 Pull 정지(+재생 중인 PullMontage 중단). 입력을 뗀 순간의 전체 정지 경로. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StopPull();
 

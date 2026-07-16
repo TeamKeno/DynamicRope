@@ -497,17 +497,48 @@ void URopeWielderComponent::OnReleaseInput()
 
 void URopeWielderComponent::StartPull()
 {
+	// 몽타주 경로는 Wrapped에서만 — 감긴 게 없는데 당기는 모션만 도는 것을 막는다. 비Wrapped에서는
+	// 종전 홀드 시맨틱(힘 장전 — 감기는 순간 걸림)을 유지하기 위해 즉시 경로로 떨어진다.
+	if (PullMontage && Rope && Rope->GetPhase() == ERopePhase::Wrapped)
+	{
+		// 실제 pull은 몽타주에 배치한 notify가 StartPullNow()로 발동한다(ThrowMontage와 같은 계약).
+		PlayPullMontage();
+	}
+	else
+	{
+		StartPullNow();
+	}
+}
+
+void URopeWielderComponent::StartPullNow(bool bIgnoreTautGate)
+{
 	if (Rope)
 	{
-		Rope->SetActivePull(Rope->HoldConfig.PullForce);
+		Rope->SetActivePull(Rope->HoldConfig.PullForce, bIgnoreTautGate);
+	}
+}
+
+void URopeWielderComponent::StopPullNow()
+{
+	if (Rope)
+	{
+		Rope->SetActivePull(0.0f);
 	}
 }
 
 void URopeWielderComponent::StopPull()
 {
-	if (Rope)
+	StopPullNow();
+	// 몽타주 경로로 시작했다면 연출도 함께 끝낸다(입력을 뗀 순간). 다른 경로였어도 무해 — 재생 중일 때만 중단.
+	if (PullMontage && AttachMesh)
 	{
-		Rope->SetActivePull(0.0f);
+		if (UAnimInstance* Anim = AttachMesh->GetAnimInstance())
+		{
+			if (Anim->Montage_IsPlaying(PullMontage))
+			{
+				Anim->Montage_Stop(PullMontage->BlendOut.GetBlendTime(), PullMontage);
+			}
+		}
 	}
 }
 
@@ -964,6 +995,28 @@ void URopeWielderComponent::PlayThrowMontage()
 	else
 	{
 		UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: no AnimInstance to play ThrowMontage."),
+			*GetNameSafe(GetOwner()));
+	}
+}
+
+void URopeWielderComponent::PlayPullMontage()
+{
+	if (!PullMontage)
+	{
+		return;
+	}
+	if (!AttachMesh)
+	{
+		ResolveRefs();
+	}
+	UAnimInstance* Anim = AttachMesh ? AttachMesh->GetAnimInstance() : nullptr;
+	if (Anim)
+	{
+		Anim->Montage_Play(PullMontage, PullMontagePlayRate);
+	}
+	else
+	{
+		UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: no AnimInstance to play PullMontage."),
 			*GetNameSafe(GetOwner()));
 	}
 }
