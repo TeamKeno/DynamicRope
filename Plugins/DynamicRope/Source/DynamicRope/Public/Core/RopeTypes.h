@@ -42,10 +42,12 @@ enum class ERopePhase : uint8
 	Reel
 };
 
-/** wrap이 해제된 이유. */
+/** 이 로프의 engagement(접촉/성립/③ 조준 던지기)가 끝난 이유. **성립(wrap) 전 abort도 포함**한다 —
+ *  OnRopeReleased는 wrap 없이도 발화한다(Bone이 None일 수 있다). 중앙 OnAnyRopeReleased만 커밋된 wrap 전용. */
 UENUM(BlueprintType)
 enum class ERopeReleaseReason : uint8
 {
+	/** 게임플레이가 명시적으로 해제(URopeComponent::ReleaseWrap). */
 	Manual,
 
 	/** 손~앵커 거리가 가용 로프 길이 + DistanceReleaseSlack 초과(자동). */
@@ -54,11 +56,18 @@ enum class ERopeReleaseReason : uint8
 	/** 최대 장력이 TensionReleaseForce를 지속 초과(자동). */
 	Tension,
 
-	/** 대상 소실/wrap 실패 등 내부 사유. */
+	/** 대상 소실/wrap 실패 등 내부 사유. 성립 전 abort(접촉/감김/③ 연출 중 대상 소실)도 여기다. */
 	Broken,
 
 	/** 외부 게임플레이가 로프를 절단(URopeComponent::CutRope). */
-	Cut
+	Cut,
+
+	/**
+	 * ③ 연출(GuidedThrow) 중 게임 규칙이 보장을 깼다 — ShouldAbortGuaranteedThrow 오버라이드가 true를 반환.
+	 * 내부 실패(Broken)와 달리 **의도된 게임플레이 결과**다(대상이 회피/텔레포트했다 등). 소비자가 둘을
+	 * 구분해야 "엔진 문제"와 "설계된 회피"에 다르게 반응할 수 있다.
+	 */
+	ThrowAborted
 };
 
 /**

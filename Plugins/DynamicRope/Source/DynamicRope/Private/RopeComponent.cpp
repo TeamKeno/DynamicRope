@@ -1246,11 +1246,15 @@ void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 			DispatchReleased(WrapController.State.Mesh.Get(), WrapController.State.BoneName,
 				ERopeReleaseReason::Broken, /*bWasWrapped*/ true);
 		}
-		else if (Phase == ERopePhase::Contacting || Phase == ERopePhase::Wrapping)
+		else if (Phase == ERopePhase::Contacting || Phase == ERopePhase::Wrapping ||
+			(Phase == ERopePhase::GuidedThrow && !GuidedThrowState.bFreeThrow))
 		{
-			// Captured만 났고 성립 전 → per-instance만(짝 맞춤). GuidedThrow(커밋 전)는 start 이벤트가 없어 생략.
-			const FName Bone = (Phase == ERopePhase::Wrapping)
-				? WrappingPhase.State.BoneName : ContactTracker.CandidateBone;
+			// 성립 전 engagement가 파괴됨 → per-instance만(짝 맞춤). 조준된 ③ 던지기도 engagement를 연
+			// 것으로 본다(대상을 잡은 시점부터 — DispatchReleased 계약). 허공 던지기는 대상이 없어 제외.
+			FName Bone = NAME_None;
+			if (Phase == ERopePhase::Wrapping)          { Bone = WrappingPhase.State.BoneName; }
+			else if (Phase == ERopePhase::GuidedThrow)  { Bone = GuidedThrowState.Prepared.Bone; }
+			else                                        { Bone = ContactTracker.CandidateBone; }
 			DispatchReleased(nullptr, Bone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
 		}
 	}
@@ -1918,6 +1922,26 @@ void URopeComponent::InjectThrowVelocityIntoVerlet(const FRopeThrowContext& Reso
 	}
 }
 
+void URopeComponent::AbortGuidedThrow(ERopeReleaseReason Reason, const TCHAR* ReasonLog)
+{
+	// 허공 던지기는 대상이 없어 engagement를 연 적이 없다 → release를 쏘면 짝이 안 맞는 유령 신호가 된다
+	// (DispatchReleased 계약 참고). 조준 던지기만 알린다.
+	const bool bNotify = !GuidedThrowState.bFreeThrow;
+	// ResetTransientPhaseState가 GuidedThrowState를 비우므로 먼저 복사한다.
+	const FName Bone = GuidedThrowState.Prepared.Bone;
+
+	SetPhase(ERopePhase::Releasing, ReasonLog);
+	ResetTransientPhaseState();
+	ReleaseCooldown = ReleaseCooldownSeconds;
+
+	// 상태를 모두 정리한 뒤에 알린다 — 핸들러가 ReleaseWrap 등을 다시 부를 수 있다(OnRopeReleased 계약).
+	// 커밋 전이므로 중앙 신호는 나가지 않는다(bWasWrapped=false).
+	if (bNotify)
+	{
+		DispatchReleased(nullptr, Bone, Reason, /*bWasWrapped*/ false);
+	}
+}
+
 void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 {
 	// 허공(free) 던지기는 대상 mesh/bone 없이 RenderPreview 직선만 따라가므로 IsValid(대상 요구) 대신 경로만 확인한다.
@@ -1926,19 +1950,19 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 		: GuidedThrowState.Prepared.IsValid();
 	if (!GuidedThrowState.bActive || !bValidPath || Sim.Num() < 2)
 	{
-		SetPhase(ERopePhase::Releasing, TEXT("guided throw invalid"));
-		ResetTransientPhaseState();
-		ReleaseCooldown = ReleaseCooldownSeconds;
+		// 대상 mesh 소실/경로 무효 — 비자발적 실패라 Broken.
+		AbortGuidedThrow(ERopeReleaseReason::Broken, TEXT("guided throw invalid"));
 		return;
 	}
 
 	// ③ 연출 중 인터럽트 훅(기본 false = "그래도 보장"): 대상 사망/텔레포트 등 게임 규칙이 보장을
 	// 깨야 할 때만 서브클래스가 true를 반환한다(2026-07-13 회의 결정 G — 깡통 오버라이드).
-	if (ShouldAbortGuaranteedThrow(GuidedThrowState.Prepared))
+	// 허공 던지기는 폴링하지 않는다 — 깰 보장이 없고, Prepared가 stub(Mesh=null)이라 훅이 문서화한
+	// 용례(대상 사망/텔레포트)를 판단할 수 없다. 취소가 필요하면 ReleaseWrap()이 있다.
+	if (!bFree && ShouldAbortGuaranteedThrow(GuidedThrowState.Prepared))
 	{
-		SetPhase(ERopePhase::Releasing, TEXT("guided throw aborted by game rule"));
-		ResetTransientPhaseState();
-		ReleaseCooldown = ReleaseCooldownSeconds;
+		// 게임 규칙이 의도적으로 깬 것 — 내부 실패(Broken)와 구분해 소비자가 다르게 반응할 수 있게 한다.
+		AbortGuidedThrow(ERopeReleaseReason::ThrowAborted, TEXT("guided throw aborted by game rule"));
 		return;
 	}
 
@@ -2006,12 +2030,11 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 
 void URopeComponent::FinishGuidedThrow()
 {
+	// 여기는 조준 던지기 전용이다 — 허공 던지기는 UpdateGuidedThrow가 Free로 착지시키고 오지 않는다.
 	const FRopePreparedThrowPreview Prepared = GuidedThrowState.Prepared;
 	if (!Prepared.IsValid() || Prepared.Anchors.Num() == 0 || !Prepared.Mesh.IsValid())
 	{
-		SetPhase(ERopePhase::Releasing, TEXT("guided throw commit failed"));
-		ResetTransientPhaseState();
-		ReleaseCooldown = ReleaseCooldownSeconds;
+		AbortGuidedThrow(ERopeReleaseReason::Broken, TEXT("guided throw commit failed"));
 		return;
 	}
 
@@ -2032,9 +2055,7 @@ void URopeComponent::FinishGuidedThrow()
 	WrapController.BeginWrap(Sim, Seed, SimFrame.OverrideFrame);
 	if (!WrapController.State.IsWrapped())
 	{
-		SetPhase(ERopePhase::Releasing, TEXT("guided throw begin wrap failed"));
-		ResetTransientPhaseState();
-		ReleaseCooldown = ReleaseCooldownSeconds;
+		AbortGuidedThrow(ERopeReleaseReason::Broken, TEXT("guided throw begin wrap failed"));
 		return;
 	}
 

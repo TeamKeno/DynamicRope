@@ -550,10 +550,12 @@ protected:
 	virtual void NotifyReleased(FName Bone, ERopeReleaseReason Reason) {}
 
 	/**
-	 * ③ GuaranteedWrap 연출(GuidedThrow 재생) 중 매 프레임 호출되는 인터럽트 판단 훅(GT, 콜드 패스 —
-	 * 연출은 ~0.2초). 기본은 항상 false = "그래도 보장"(2026-07-13 회의 결정 G). 대상 사망/텔레포트
-	 * 같은 게임 규칙으로 보장을 깨야 하면 오버라이드해 true 반환 — 로프가 연출을 중단하고 Releasing으로
-	 * 빠진다. 대상 mesh 소실은 훅과 무관하게 항상 중단된다(Prepared.IsValid()).
+	 * ③ 연출(GuidedThrow) 중 매 프레임 호출되는 인터럽트 판단 훅(GT, 콜드 패스 — 연출은 ~0.2초).
+	 * 기본은 항상 false = "그래도 보장"(2026-07-13 회의 결정 G). 대상 사망/텔레포트 같은 게임 규칙으로
+	 * 보장을 깨야 하면 오버라이드해 true 반환 — 연출이 중단되고 OnRopeReleased(ThrowAborted)가 발화한다
+	 * (내부 실패는 Broken이라 소비자가 구분할 수 있다). 대상 mesh 소실은 훅과 무관하게 항상 중단된다.
+	 * **조준 던지기에서만 폴링된다** — 허공 던지기(대상 없음)는 깰 보장이 없고 Prepared가 stub이라
+	 * 부르지 않는다. 정책 훅이라 C++ 전용이다(반응은 OnRopeReleased로 BP에서).
 	 */
 	virtual bool ShouldAbortGuaranteedThrow(const FRopePreparedThrowPreview& Prepared) const { return false; }
 
@@ -881,13 +883,20 @@ private:
 	/** wrap 성립 단일 브로드캐스트: 네이티브 훅 + per-instance BP 델리게이트 + 서브시스템 중앙 신호(③/판정 공용). */
 	void DispatchWrapped(const FRopeWrappedEventInfo& Info);
 
-	/** release 단일 브로드캐스트. per-instance(NotifyReleased + OnRopeReleased)는 항상 발화 — Captured/Wrapped로
-	 *  시작된 engagement가 끝날 때마다 짝을 맞춘다(Contacting/Wrapping abort·destroy 포함). 중앙 OnAnyRopeReleased는
-	 *  **커밋된 wrap(bWasWrapped)일 때만** 발화한다 — 성립 전 abort에서 쏘면 다른 로프가 감아 랙돌시킨 대상을
-	 *  잘못 복구시킨다. WrappedMesh는 중앙 신호 페이로드(성립 전엔 nullptr). */
+	/** release 단일 브로드캐스트. per-instance(NotifyReleased + OnRopeReleased)는 항상 발화 — engagement가
+	 *  끝날 때마다 짝을 맞춘다(Contacting/Wrapping abort·destroy 포함). engagement를 여는 것은 Captured,
+	 *  Wrapped, **또는 조준된 ③ 던지기**(ThrowWithPreparedPreview 성공 — start 이벤트는 없지만 대상을 잡은
+	 *  시점부터 engagement다). **허공 ③ 던지기(bFreeThrow)는 대상이 없어 아무것도 열지 않으므로 release도
+	 *  없다** — 착지는 그냥 Free다. 중앙 OnAnyRopeReleased는 **커밋된 wrap(bWasWrapped)일 때만** 발화한다 —
+	 *  성립 전 abort에서 쏘면 다른 로프가 감아 랙돌시킨 대상을 잘못 복구시킨다. WrappedMesh는 중앙 신호
+	 *  페이로드(성립 전엔 nullptr). */
 	void DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped);
 
 	void AbortWrapping(ERopeReleaseReason Reason);
+
+	/** ③ 연출(GuidedThrow) 중단 공용 마무리: Releasing 전환 + 일시 상태 폐기 + 쿨다운 + release 이벤트.
+	 *  조준 던지기에서만 이벤트를 쏜다 — 허공 던지기(bFreeThrow)는 연 engagement가 없어 짝이 안 맞는다. */
+	void AbortGuidedThrow(ERopeReleaseReason Reason, const TCHAR* ReasonLog);
 
 	//~ Wrapped --------------------------------------------------------------
 	// PrepareSimFrame의 Wrapped 케이스는 아래 4단계 헬퍼의 고정 순서로 읽는다.

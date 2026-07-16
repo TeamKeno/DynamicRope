@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
 // Pierce(꽂힘) 결착 모드 단위 테스트 — ③ GuaranteedWrap 전용, aim-hit 접점에 단일 앵커로 성립.
-// 네 계약을 잠근다: ①②③↔결착 조합 제약, throw phase 게이트(③=Reel 전용), preview 빌더의 단일 앵커 산출,
-// 단일 앵커 커밋(BeginWrap).
+// 다섯 계약을 잠근다: ①②③↔결착 조합 제약, throw phase 게이트(③=Reel 전용), preview 빌더의 단일 앵커
+// 산출, 단일 앵커 커밋(BeginWrap), ③ 연출 진입/이탈(Reel→GuidedThrow→Releasing).
 
 #include "Misc/AutomationTest.h"
 
@@ -205,6 +205,67 @@ bool FRopePierceEnterReelTest::RunTest(const FString& Parameters)
 	// Reel 허용 조건: Reel에서 다시 EnterReel은 Reel 유지(재진입 허용), 그 외 phase에선 무효.
 	Guaranteed->EnterReel();
 	TestEqual(TEXT("Reel에서 재진입해도 Reel"), Guaranteed->GetPhase(), ERopePhase::Reel);
+	return true;
+}
+
+// ③ 연출 진입/이탈 phase 계약: Reel → (prepared throw) → GuidedThrow → (수동 해제) → Releasing.
+// 이 수동 해제가 FinishWrapRelease의 GuidedThrow 분기(커밋 전 release)로 들어가는 유일한 public 진입로다.
+//
+// [테스트 범위의 한계 — 사실대로 적는다] 연출 중 abort(AbortGuidedThrow → OnRopeReleased)는 여기서
+// 검증할 수 없다: ① UpdateGuidedThrow/PrepareSimFrame이 private이고 friend는 URopeSimSubsystem 하나뿐이라
+// 구동할 수 없고, ② OnRopeReleased는 dynamic delegate라 UFUNCTION을 가진 UObject 리스너가 필요한데
+// Private/Tests에 UCLASS가 없으며, ③ world가 없어 중앙 신호(OnAnyRopeReleased)는 애초에 도달 불가다
+// (URopeSimSubsystem::Get(nullptr) == nullptr). 이벤트 발화 검증은 PIE 체크리스트가 담당한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceGuidedThrowEntryTest,
+	"DynamicRope.Pierce.GuidedThrowEntryAndManualRelease",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePierceGuidedThrowEntryTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	Rope->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
+	Rope->TipEngagement = ERopeTipEngagement::Pierce;
+	Rope->RopeLength = 140.0f;
+	Rope->NumParticles = 8;
+
+	// 조준 성공 상황의 prepared를 world 없이 조립한다(PreviewYieldsSingleAnchor와 같은 경로).
+	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
+	USkeletalMeshComponent* Mesh = MakePierceMockMesh();
+
+	FRopeThrowPreviewBuilder::FInput Input;
+	Input.Sim = &Sim;
+	Input.RopeLength = 140.0f;
+	Input.ReachScale = 1.0f;
+	Input.RopeRadius = 2.0f;
+	Input.TipEngagement = ERopeTipEngagement::Pierce;
+	Input.ThrowContext.Origin = FVector::ZeroVector;
+	Input.ThrowContext.FrameForward = FVector(1, 0, 0);
+	Input.ThrowContext.FrameUp = FVector(0, 0, 1);
+	Input.ThrowContext.bHasAimGuideHit = true;
+	Input.ThrowContext.AimGuideMesh = Mesh;
+	Input.ThrowContext.AimGuideBone = FName("spine");
+	Input.ThrowContext.AimGuideHitWorldPos = FVector(60, 0, 0);
+	Input.ThrowContext.AimGuideNormal = FVector(0, 0, 1);
+
+	FRopePreparedThrowPreview Prepared;
+	FString Failure;
+	if (!TestTrue(FString::Printf(TEXT("prepared preview builds (%s)"), *Failure),
+		FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, Prepared, &Failure)))
+	{
+		return false;
+	}
+
+	// Reel 밖에서는 던질 수 없다(CanThrowInPhase 계약의 실제 경로 확인).
+	TestFalse(TEXT("Free에서는 prepared throw 거부"), Rope->ThrowWithPreparedPreview(Prepared));
+	TestEqual(TEXT("거부 후 phase 불변"), Rope->GetPhase(), ERopePhase::Free);
+
+	Rope->EnterReel();
+	TestTrue(TEXT("Reel에서 prepared throw 성립"), Rope->ThrowWithPreparedPreview(Prepared));
+	TestEqual(TEXT("prepared throw → GuidedThrow"), Rope->GetPhase(), ERopePhase::GuidedThrow);
+
+	// 연출 중 수동 해제 → Releasing(커밋 전이므로 중앙 신호는 안 나가야 하지만 world 없이는 관측 불가).
+	Rope->ReleaseWrap();
+	TestEqual(TEXT("GuidedThrow 중 ReleaseWrap → Releasing"), Rope->GetPhase(), ERopePhase::Releasing);
 	return true;
 }
 
