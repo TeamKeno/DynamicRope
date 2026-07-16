@@ -112,6 +112,25 @@ namespace
 		return WorldBasis * LocalBasis.Inverse();
 	}
 
+	FVector MakeAimYawLockedDirection(const FVector& SourceDirInput, const FVector& AimDirInput,
+		const FVector& UpHintInput)
+	{
+		const FVector AimDir = AimDirInput.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		const FVector SourceDir = SourceDirInput.GetSafeNormal(KINDA_SMALL_NUMBER, AimDir);
+		const FVector Up = UpHintInput.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+
+		FVector AimFlat = AimDir - FVector::DotProduct(AimDir, Up) * Up;
+		if (!AimFlat.Normalize(KINDA_SMALL_NUMBER))
+		{
+			return SourceDir;
+		}
+
+		const float Vertical = FMath::Clamp(FVector::DotProduct(SourceDir, Up), -1.0f, 1.0f);
+		const float HorizontalScale = FMath::Sqrt(FMath::Max(0.0f, 1.0f - FMath::Square(Vertical)));
+		const FVector LockedDir = AimFlat * HorizontalScale + Up * Vertical;
+		return LockedDir.GetSafeNormal(KINDA_SMALL_NUMBER, SourceDir);
+	}
+
 #if !UE_BUILD_SHIPPING
 	TAutoConsoleVariable<int32> CVarRopeDrawWrappingAxis(
 		TEXT("r.DynamicRope.Debug.DrawWrappingAxis"),
@@ -1225,8 +1244,8 @@ void URopeComponent::UpdateTipMeshTransform()
 		}
 	}
 
-	// 던지는 중(조준 GuidedThrow): 비행 중반까진 세그먼트 추종(A), Alpha 0.7~1.0에서 최종 임베드 자세(B)로
-	// slerp/lerp. Alpha=1의 B는 커밋 프레임 Wrapped 자세와 일치하므로 착지 시 팝이 없다.
+	// 던지는 중(조준 GuidedThrow): 비행 중반까진 세그먼트 pitch + 조준 yaw 자세(A), Alpha 0.7~1.0에서
+	// 최종 임베드 자세(B)로 slerp/lerp. Alpha=1의 B는 커밋 프레임 Wrapped 자세와 일치하므로 착지 시 팝이 없다.
 	if (bPierceSocket && Phase == ERopePhase::GuidedThrow &&
 		GuidedThrowState.bActive && !GuidedThrowState.bFreeThrow && Sim.Num() >= 2)
 	{
@@ -1246,8 +1265,10 @@ void URopeComponent::UpdateTipMeshTransform()
 		{
 			const FVector SegDir = (Sim.Positions[LastNode] - Sim.Positions[LastNode - 1])
 				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+			const FVector AimYawLockedSegDir = MakeAimYawLockedDirection(
+				SegDir, PierceDir, Prepared.ThrowContext.FrameUp);
 			FTransform SegFollow;
-			ComputeTipFollowTransform(Sim.Positions[LastNode], SegDir, SegFollow);
+			ComputeTipFollowTransform(Sim.Positions[LastNode], AimYawLockedSegDir, SegFollow);
 
 			const float Alpha = FMath::Clamp(
 				GuidedThrowState.Elapsed / FMath::Max(GuidedThrowState.Duration, 0.01f), 0.0f, 1.0f);
@@ -1269,8 +1290,21 @@ void URopeComponent::UpdateTipMeshTransform()
 	const FVector TipPos = Sim.Positions[N - 1];
 	const FVector SegDir = (Sim.Positions[N - 1] - Sim.Positions[N - 2])
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	FVector FollowDir = SegDir;
+	if (Phase == ERopePhase::GuidedThrow && GuidedThrowState.bActive && GuidedThrowState.bFreeThrow)
+	{
+		const FRopePreparedThrowPreview& Prepared = GuidedThrowState.Prepared;
+		const FVector EndpointWorld = Prepared.ResolveGuidePointWorld(N - 1);
+		const FVector HandWorld = Sim.Positions.IsValidIndex(0) ? Sim.Positions[0] : Prepared.ResolveGuideOriginWorld();
+		FVector FreeAimDir = (EndpointWorld - HandWorld).GetSafeNormal();
+		if (FreeAimDir.IsNearlyZero())
+		{
+			FreeAimDir = Prepared.ThrowContext.FrameForward.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		}
+		FollowDir = MakeAimYawLockedDirection(SegDir, FreeAimDir, Prepared.ThrowContext.FrameUp);
+	}
 	FTransform TipFollow;
-	ComputeTipFollowTransform(TipPos, SegDir, TipFollow);
+	ComputeTipFollowTransform(TipPos, FollowDir, TipFollow);
 
 	TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(TipFollow));
 }
