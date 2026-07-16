@@ -289,6 +289,10 @@ struct FRopeSurfaceAnchor
 
 	/** 표면에서 로프 중심선을 얼마나 띄울지(보통 rope radius). */
 	float SurfaceOffset = 0.0f;
+
+	/** Pierce 전용 — 꽂힌 순간 얼린 팁 메쉬 원점의 bone-local 트랜스폼(스케일 포함).
+	 *  Wrapped 동안 팁 렌더 자세의 단일 소스(회전 freeze + 본 추종). 비-Pierce는 Identity로 미사용. */
+	FTransform LocalMeshTransform = FTransform::Identity;
 };
 
 /** Wrapping 표면 경로의 점 하나(월드 표면 프레임 + 귀속 본/메시 + latch로부터의 진행 거리). */

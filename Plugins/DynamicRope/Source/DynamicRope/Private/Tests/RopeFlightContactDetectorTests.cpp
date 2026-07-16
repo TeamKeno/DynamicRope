@@ -398,6 +398,31 @@ bool FRopeAimTargetResolvePolicyTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimRayReachLengthTest,
+	"DynamicRope.FlightContact.AimRayReachLengthUsesThrowOrigin",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeAimRayReachLengthTest::RunTest(const FString& Parameters)
+{
+	const FVector RayDir(1.0f, 0.0f, 0.0f);
+	const float RopeReach = 200.0f;
+
+	TestEqual(TEXT("ray at hand uses rope reach"),
+		FRopeAimTargeting::ResolveRayLengthForReach(FVector::ZeroVector, RayDir, FVector::ZeroVector, RopeReach),
+		200.0f);
+	TestEqual(TEXT("ray behind hand extends to hand reach"),
+		FRopeAimTargeting::ResolveRayLengthForReach(FVector(-100.0f, 0.0f, 0.0f), RayDir, FVector::ZeroVector, RopeReach),
+		300.0f);
+	TestTrue(TEXT("lateral offset intersects reach sphere at chord end"),
+		FMath::IsNearlyEqual(
+			FRopeAimTargeting::ResolveRayLengthForReach(FVector(0.0f, 100.0f, 0.0f), RayDir, FVector::ZeroVector, RopeReach),
+			FMath::Sqrt(30000.0f), 0.01f));
+	TestEqual(TEXT("ray pointing away from reach sphere has no usable length"),
+		FRopeAimTargeting::ResolveRayLengthForReach(FVector(300.0f, 0.0f, 0.0f), RayDir, FVector::ZeroVector, RopeReach),
+		0.0f);
+	return true;
+}
+
 // 캡처 순간 진행 좌표계 스냅샷(FRopeCaptureTravelFrame::Compute, 진행 방향 기반 wrap 2단계):
 // 접촉 영역 중심/평균 속도/누운 방향에서 진행 평면 normal(속도×span)을 유도하고,
 // 속도와 span이 평행(창던지기)이거나 dt=0이면 normal 없이(bHasPlaneNormal=false) 폴백 신호를 남긴다.

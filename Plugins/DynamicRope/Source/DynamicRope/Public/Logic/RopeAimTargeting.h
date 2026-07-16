@@ -44,6 +44,9 @@ struct FRopeAimRayThrowRequest
 	FVector RayOrigin = FVector::ZeroVector;
 	FVector RayDirection = FVector::ForwardVector;
 	float RayLength = 0.0f;
+	// 실제 로프 도달 판정 기준. RayOrigin(카메라/바운즈 중심)과 throw origin(손 소켓)이 다를 수 있어 별도로 보관한다.
+	FVector ReachOrigin = FVector::ZeroVector;
+	float ReachLength = 0.0f;
 	float QueryRadius = 0.0f;
 	float SweepStep = 2.0f;
 	// StartFreshThrow 완료 뒤 실행한다. Wielder를 직접 참조하지 않는 C++ 전용 완료 알림이다.
@@ -77,12 +80,23 @@ public:
 	 *  이 규칙의 단일 소스 — 호출처가 삼항식을 복사하면 조용히 발산한다. */
 	static float ResolveEffectiveQueryRadius(const FQueryContext& Ctx, float QueryRadius);
 
+	/** Aim ray가 실제 로프 도달 구(ReachOrigin, ReachLength)를 통과하는 가장 먼 ray 거리.
+	 *  RayOrigin이 손/로프 시작점과 달라도 조준 ray가 너무 짧거나 길게 판정되지 않도록 한다. */
+	static float ResolveRayLengthForReach(const FVector& RayOrigin, const FVector& AimDir,
+		const FVector& ReachOrigin, float ReachLength);
+
 	/** swept SDF 질의로 ray에서 가장 가까운 wrap 가능 mesh+bone을 찾는다(broad phase → QuerySwept →
 	 *  ray 진행 거리 최솟값). CanWrapTarget 게이트를 통과 못 한 후보는 없는 것으로 취급.
 	 *  OutBlockedHit(옵션): ray가 콜라이더에 맞았지만 wrap은 불가능한(본 없음/SourceMesh 없음/게이트 거부)
 	 *  가장 가까운 hit. 반환값(wrap 가능 hit 유무)과 독립 — 조준 HUD의 "빨강" 표시용. */
 	static bool FindAimRayBoneHit(const FQueryContext& Ctx,
 		const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
+		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
+		FRopeAimRayHitResult& OutHit,
+		FRopeAimRayHitResult* OutBlockedHit = nullptr);
+
+	static bool FindAimRayBoneHit(const FQueryContext& Ctx,
+		const FRopeAimRayThrowRequest& Request,
 		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
 		FRopeAimRayHitResult& OutHit,
 		FRopeAimRayHitResult* OutBlockedHit = nullptr);
@@ -135,6 +149,13 @@ public:
 	void ResetPendingThrow() { PendingThrow.Reset(); }
 
 private:
+	static bool FindAimRayBoneHit(const FQueryContext& Ctx,
+		const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
+		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
+		FRopeAimRayHitResult& OutHit,
+		FRopeAimRayHitResult* OutBlockedHit,
+		const FVector* ReachOrigin, float ReachLength);
+
 	// throw 시작 때 ray hit로 확정한 대상. 같은 bone 이름을 가진 다른 액터를 막기 위해 mesh도 함께 저장한다.
 	bool bLocked = false;
 	FName TargetBone = NAME_None;

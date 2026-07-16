@@ -78,6 +78,40 @@ namespace
 		return true;
 	}
 
+	void ClearPreparedGuideFrameLocal(FRopePreparedThrowPreview& Prepared)
+	{
+		Prepared.bUseGuideFrameLocal = false;
+		Prepared.GuideFrameComponent = nullptr;
+		Prepared.GuideFrameLocalPoints.Reset();
+		Prepared.GuideFrameLocalOrigin = FVector::ZeroVector;
+	}
+
+	FVector ProjectOntoPlaneOrFallback(const FVector& Candidate, const FVector& Normal)
+	{
+		const FVector Axis = Normal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		FVector Projected = Candidate - FVector::DotProduct(Candidate, Axis) * Axis;
+		if (Projected.Normalize(KINDA_SMALL_NUMBER))
+		{
+			return Projected;
+		}
+		return RopeMath::AnyTangentFromNormal(Axis);
+	}
+
+	FQuat MakeAxisAlignmentRotation(const FVector& LocalAxisInput, const FVector& WorldAxisInput,
+		const FVector& LocalUpHintInput)
+	{
+		const FVector LocalAxis = LocalAxisInput.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		const FVector WorldAxis = WorldAxisInput.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		const FVector LocalUp = ProjectOntoPlaneOrFallback(LocalUpHintInput, LocalAxis);
+
+		const FQuat ShortestSwing = FQuat::FindBetweenNormals(LocalAxis, WorldAxis);
+		const FVector WorldUp = ProjectOntoPlaneOrFallback(ShortestSwing.RotateVector(LocalUp), WorldAxis);
+
+		const FQuat LocalBasis = FRotationMatrix::MakeFromXZ(LocalAxis, LocalUp).ToQuat();
+		const FQuat WorldBasis = FRotationMatrix::MakeFromXZ(WorldAxis, WorldUp).ToQuat();
+		return WorldBasis * LocalBasis.Inverse();
+	}
+
 #if !UE_BUILD_SHIPPING
 	TAutoConsoleVariable<int32> CVarRopeDrawWrappingAxis(
 		TEXT("r.DynamicRope.Debug.DrawWrappingAxis"),
@@ -527,6 +561,8 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	// 입력 때 저장한 owner-local path를 throw 실행 시점의 owner transform으로 다시 해석한다.
 	ResolvedPrepared.RenderPreview = Prepared.ResolveRenderPreviewWorld();
 	ResolvedPrepared.ThrowContext.Origin = Prepared.ResolveGuideOriginWorld();
+	ClearPreparedGuideFrameLocal(ResolvedPrepared);
+	ApplyPierceSocketTargetsToPrepared(ResolvedPrepared);
 	AimTargeting.SetWrapTargetLock(ResolvedPrepared.ThrowContext);
 
 	// 다음 PrepareSimFrame부터 GuidedThrow가 StartPositions -> RenderPreview.Points로 노드를 구동한다.
@@ -643,6 +679,13 @@ bool URopeComponent::FindAimRayBoneHit(const FVector& Origin, const FVector& Aim
 		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); }, OutHit, OutBlockedHit);
 }
 
+bool URopeComponent::FindAimRayBoneHit(const FRopeAimRayThrowRequest& Request, FRopeAimRayHitResult& OutHit,
+	FRopeAimRayHitResult* OutBlockedHit) const
+{
+	return FRopeAimTargeting::FindAimRayBoneHit(MakeAimQueryContext(), Request,
+		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); }, OutHit, OutBlockedHit);
+}
+
 float URopeComponent::GetAimRayEffectiveQueryRadius(float RequestedRadius) const
 {
 	return FRopeAimTargeting::ResolveEffectiveQueryRadius(MakeAimQueryContext(), RequestedRadius);
@@ -718,7 +761,12 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	Input.SegmentCount = PreviewSegmentCount;
 	Input.SampleStep = PreviewSampleStep;
 	Input.QueryRadius = PreviewQueryRadius;
-	return FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, OutPrepared, OutFailureReason);
+	const bool bBuilt = FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, OutPrepared, OutFailureReason);
+	if (bBuilt)
+	{
+		ApplyPierceSocketTargetsToPrepared(OutPrepared);
+	}
+	return bBuilt;
 }
 
 void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog)
@@ -934,8 +982,9 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 		// 마지막 노드가 소켓에 있어야 창이 튀지 않는다. 솔브를 켜야 프리즈 없이 캐릭터를 따라간다.
 		// (Wrapped의 Hold와 동일 패턴: 위치 + InvMass=0 override → 나머지 노드는 솔버가 굴린다.)
 		const int32 ReelTipNode = Sim.Num() - 1;
+		const FTransform ReelTipWorld = GetReelTipTransform();
 		SimFrame.OverrideFrame.EnsureSize(Sim.Num());
-		SimFrame.OverrideFrame.SetPosition(ReelTipNode, GetReelTipTransform().GetLocation(), /*bZeroVelocity*/ true);
+		SimFrame.OverrideFrame.SetPosition(ReelTipNode, ResolveTipRopeAttachWorld(ReelTipWorld), /*bZeroVelocity*/ true);
 		SimFrame.OverrideFrame.SetInvMass(ReelTipNode, 0.0f);
 		SimFrame.bSolveThisFrame = true;
 		break;
@@ -1102,6 +1151,7 @@ void URopeComponent::EnsureTipMesh()
 		{
 			TipMeshComponent = Cast<UStaticMeshComponent>(Tagged[0]);
 			bTipMeshSpawnedByUs = false;
+			TipMeshAuthoredScale = TipMeshComponent ? TipMeshComponent->GetComponentScale() : FVector::OneVector;
 			return;
 		}
 	}
@@ -1127,6 +1177,7 @@ void URopeComponent::EnsureTipMesh()
 
 	TipMeshComponent = Spawned;
 	bTipMeshSpawnedByUs = true;
+	TipMeshAuthoredScale = FVector::OneVector;
 }
 
 void URopeComponent::TeardownSpawnedTipMesh()
@@ -1138,6 +1189,7 @@ void URopeComponent::TeardownSpawnedTipMesh()
 	}
 	TipMeshComponent = nullptr;
 	bTipMeshSpawnedByUs = false;
+	TipMeshAuthoredScale = FVector::OneVector;
 }
 
 void URopeComponent::UpdateTipMeshTransform()
@@ -1152,8 +1204,59 @@ void URopeComponent::UpdateTipMeshTransform()
 	// Reel(장전) 상태에서는 창을 손 소켓에 든다(마지막 노드가 아니라 GetReelTipTransform — override 가능).
 	if (Phase == ERopePhase::Reel)
 	{
-		TipMeshComponent->SetWorldTransform(TipMeshRelativeTransform * GetReelTipTransform());
+		TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(GetReelTipTransform()));
 		return;
+	}
+
+	// Pierce 임베드 활성 조건: 결착 모델이 Pierce이고 팁 소켓이 실제로 존재. 아니면 아래 세그먼트-추종 폴백.
+	const bool bPierceSocket = (TipEngagement == ERopeTipEngagement::Pierce) &&
+		!TipSocketName.IsNone() && TipMeshComponent->DoesSocketExist(TipSocketName);
+
+	// 꽂힌 뒤(Wrapped): 얼린 bone-local 메쉬 자세를 본에서 복원 — 회전 완전 고정 + 대상 애니메이션 추종.
+	if (bPierceSocket && Phase == ERopePhase::Wrapped && WrapController.State.Anchors.Num() > 0)
+	{
+		const FRopeSurfaceAnchor& Anchor = WrapController.State.Anchors[0];
+		if (const USceneComponent* Mesh = WrapController.State.Mesh.Get()) // cross-actor 대상 파괴 방어.
+		{
+			const FTransform BoneXform = ResolveBindingWorld(Mesh, Anchor.Bone);
+			const FTransform MeshWorld = Anchor.LocalMeshTransform * BoneXform;
+			TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(MeshWorld));
+			return;
+		}
+	}
+
+	// 던지는 중(조준 GuidedThrow): 비행 중반까진 세그먼트 추종(A), Alpha 0.7~1.0에서 최종 임베드 자세(B)로
+	// slerp/lerp. Alpha=1의 B는 커밋 프레임 Wrapped 자세와 일치하므로 착지 시 팝이 없다.
+	if (bPierceSocket && Phase == ERopePhase::GuidedThrow &&
+		GuidedThrowState.bActive && !GuidedThrowState.bFreeThrow && Sim.Num() >= 2)
+	{
+		const int32 LastNode = Sim.Num() - 1;
+		const FRopePreparedThrowPreview& Prepared = GuidedThrowState.Prepared;
+		FVector HitPoint = Prepared.LatchAnchor.StartWorldPosition; // 빌더가 꽂힘 지점으로 세팅.
+		ResolvePreparedPierceHitPoint(Prepared, HitPoint);
+		FVector PierceDir = Prepared.ThrowContext.FrameForward.GetSafeNormal();
+		if (PierceDir.IsNearlyZero())
+		{
+			PierceDir = (HitPoint - Sim.Positions[0]).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		}
+
+		FTransform EmbedWorld;
+		FVector TailWorld;
+		if (ComputePierceEmbed(HitPoint, PierceDir, EmbedWorld, TailWorld))
+		{
+			const FVector SegDir = (Sim.Positions[LastNode] - Sim.Positions[LastNode - 1])
+				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+			FTransform SegFollow;
+			ComputeTipFollowTransform(Sim.Positions[LastNode], SegDir, SegFollow);
+
+			const float Alpha = FMath::Clamp(
+				GuidedThrowState.Elapsed / FMath::Max(GuidedThrowState.Duration, 0.01f), 0.0f, 1.0f);
+			const float T = FMath::SmoothStep(0.7f, 1.0f, Alpha);
+			const FQuat Rot = FQuat::Slerp(SegFollow.GetRotation(), EmbedWorld.GetRotation(), T);
+			const FVector Loc = FMath::Lerp(SegFollow.GetLocation(), EmbedWorld.GetLocation(), T);
+			TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(FTransform(Rot, Loc)));
+			return;
+		}
 	}
 
 	const int32 N = Sim.Num();
@@ -1162,12 +1265,209 @@ void URopeComponent::UpdateTipMeshTransform()
 		return;
 	}
 
+	// 위치 = 끝 노드(자유단), 회전 = 마지막 세그먼트 방향을 X축으로(비-Pierce · 소켓 미설정 폴백).
 	const FVector TipPos = Sim.Positions[N - 1];
 	const FVector SegDir = (Sim.Positions[N - 1] - Sim.Positions[N - 2])
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-	const FQuat TipRot = FRotationMatrix::MakeFromX(SegDir).ToQuat();
+	FTransform TipFollow;
+	ComputeTipFollowTransform(TipPos, SegDir, TipFollow);
 
-	TipMeshComponent->SetWorldTransform(TipMeshRelativeTransform * FTransform(TipRot, TipPos));
+	TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(TipFollow));
+}
+
+// ===== Pierce 임베드 헬퍼 ====================================================
+
+bool URopeComponent::ReadTipSocketLocal(FName Socket, FTransform& OutLocal) const
+{
+	if (Socket.IsNone() || !TipMeshComponent || !TipMeshComponent->DoesSocketExist(Socket))
+	{
+		return false;
+	}
+	// RTS_Component = 메쉬 원점 기준 소켓 로컬 트랜스폼. UStaticMeshComponent가 UStaticMesh 소켓을 조회한다.
+	OutLocal = TipMeshComponent->GetSocketTransform(Socket, RTS_Component);
+	return true;
+}
+
+FTransform URopeComponent::MakeTipPlacementTransform() const
+{
+	return FTransform(FQuat::Identity, FVector::ZeroVector, TipMeshAuthoredScale) * TipMeshRelativeTransform;
+}
+
+FTransform URopeComponent::MakeTipPlacementSocketLocal(const FTransform& SocketLocal) const
+{
+	return SocketLocal * MakeTipPlacementTransform();
+}
+
+FTransform URopeComponent::MakeTipWorldTransform(const FTransform& BaseWorld) const
+{
+	return MakeTipPlacementTransform() * BaseWorld;
+}
+
+void URopeComponent::SolveTipSocketFollow(const FVector& RopeAttachWorld, const FVector& ForwardDir,
+	const FTransform& RopeSocketLocal, FTransform& OutComponentWorld)
+{
+	SolveTipSocketFollow(RopeAttachWorld, ForwardDir, RopeSocketLocal,
+		/*bHasHeadSocket*/ false, FTransform::Identity, OutComponentWorld);
+}
+
+void URopeComponent::SolveTipSocketFollow(const FVector& RopeAttachWorld, const FVector& ForwardDir,
+	const FTransform& RopeSocketLocal, bool bHasHeadSocket, const FTransform& HeadSocketLocal,
+	FTransform& OutComponentWorld)
+{
+	const FVector Dir = ForwardDir.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	const FVector TailToHead = HeadSocketLocal.GetLocation() - RopeSocketLocal.GetLocation();
+	const bool bUseHeadAxis = bHasHeadSocket && !TailToHead.IsNearlyZero();
+	const FVector LocalAxis = bUseHeadAxis
+		? TailToHead
+		: RopeSocketLocal.GetUnitAxis(EAxis::X);
+	const FVector LocalUpHint = bUseHeadAxis
+		? HeadSocketLocal.GetUnitAxis(EAxis::Z)
+		: RopeSocketLocal.GetUnitAxis(EAxis::Z);
+	const FQuat ComponentRot = MakeAxisAlignmentRotation(LocalAxis, Dir, LocalUpHint);
+	const FVector ComponentLoc = RopeAttachWorld - ComponentRot.RotateVector(RopeSocketLocal.GetLocation());
+	OutComponentWorld = FTransform(ComponentRot, ComponentLoc, FVector::OneVector);
+}
+
+void URopeComponent::ComputeTipFollowTransform(const FVector& RopeAttachWorld, const FVector& ForwardDir,
+	FTransform& OutComponentWorld) const
+{
+	FTransform TailSocketLocal;
+	const bool bHasTail = ReadTipSocketLocal(TipRopeSocketName, TailSocketLocal);
+	FTransform TipSocketLocal;
+	const bool bHasTip = ReadTipSocketLocal(TipSocketName, TipSocketLocal);
+	const FTransform RopeSocketLocal = bHasTail
+		? MakeTipPlacementSocketLocal(TailSocketLocal)
+		: MakeTipPlacementTransform();
+	const FTransform HeadSocketLocal = bHasTip
+		? MakeTipPlacementSocketLocal(TipSocketLocal)
+		: FTransform::Identity;
+	SolveTipSocketFollow(RopeAttachWorld, ForwardDir, RopeSocketLocal,
+		/*bHasHeadSocket*/ bHasTail && bHasTip, HeadSocketLocal, OutComponentWorld);
+}
+
+FVector URopeComponent::ResolveTipRopeAttachWorld(const FTransform& ComponentWorld) const
+{
+	if (!TipMeshComponent)
+	{
+		return ComponentWorld.GetLocation();
+	}
+
+	FTransform TailSocketLocal;
+	if (ReadTipSocketLocal(TipRopeSocketName, TailSocketLocal))
+	{
+		return (MakeTipPlacementSocketLocal(TailSocketLocal) * ComponentWorld).GetLocation();
+	}
+	return MakeTipWorldTransform(ComponentWorld).GetLocation();
+}
+
+bool URopeComponent::ResolvePreparedPierceHitPoint(const FRopePreparedThrowPreview& Prepared, FVector& OutHitPoint) const
+{
+	const FRopeSurfaceAnchor* Anchor = Prepared.Anchors.Num() > 0 ? &Prepared.Anchors[0] : &Prepared.LatchAnchor;
+	if (!Anchor || Anchor->NodeIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	const USceneComponent* Mesh = Anchor->Mesh.IsValid() ? Anchor->Mesh.Get() : Prepared.Mesh.Get();
+	if (Mesh)
+	{
+		const FName Bone = Anchor->Bone.IsNone() ? Prepared.Bone : Anchor->Bone;
+		if (!Bone.IsNone())
+		{
+			const FTransform BoneXform = ResolveBindingWorld(Mesh, Bone);
+			OutHitPoint = BoneXform.TransformPosition(Anchor->LocalSurfacePosition);
+			return true;
+		}
+	}
+
+	OutHitPoint = Anchor->StartWorldPosition;
+	return true;
+}
+
+void URopeComponent::ApplyPierceSocketTargetsToPrepared(FRopePreparedThrowPreview& InOutPrepared) const
+{
+	if (TipEngagement != ERopeTipEngagement::Pierce || !InOutPrepared.RenderPreview.IsValid())
+	{
+		return;
+	}
+
+	const int32 LastPoint = InOutPrepared.RenderPreview.Points.Num() - 1;
+	FVector HitPoint = InOutPrepared.RenderPreview.Points[LastPoint];
+	ResolvePreparedPierceHitPoint(InOutPrepared, HitPoint);
+	InOutPrepared.LatchAnchor.StartWorldPosition = HitPoint;
+	if (InOutPrepared.Anchors.Num() > 0)
+	{
+		InOutPrepared.Anchors[0].StartWorldPosition = HitPoint;
+	}
+
+	FVector PierceDir = InOutPrepared.ThrowContext.FrameForward.GetSafeNormal();
+	if (PierceDir.IsNearlyZero())
+	{
+		PierceDir = (HitPoint - InOutPrepared.ThrowContext.Origin)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	}
+
+	FTransform ComponentWorld;
+	FVector TailWorld;
+	if (ComputePierceEmbed(HitPoint, PierceDir, ComponentWorld, TailWorld))
+	{
+		const FVector Origin = InOutPrepared.ThrowContext.Origin;
+		for (int32 PointIndex = 0; PointIndex <= LastPoint; ++PointIndex)
+		{
+			const float Alpha = static_cast<float>(PointIndex) / static_cast<float>(LastPoint);
+			InOutPrepared.RenderPreview.Points[PointIndex] = FMath::Lerp(Origin, TailWorld, Alpha);
+		}
+	}
+}
+
+void URopeComponent::SolvePierceEmbed(const FVector& HitPoint, const FVector& PierceDir,
+	const FTransform& TipSocketLocal, bool bHasTailSocket, const FTransform& TailSocketLocal,
+	FTransform& OutComponentWorld, FVector& OutTailWorld)
+{
+	// 원하는 팁 소켓 월드 자세: 위치 = HitPoint, X축 = 관통 방향(샤프트).
+	const FVector Dir = PierceDir.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+	if (bHasTailSocket)
+	{
+		const FVector LocalTailToHeadAxis = TipSocketLocal.GetLocation() - TailSocketLocal.GetLocation();
+		if (!LocalTailToHeadAxis.IsNearlyZero())
+		{
+			const FQuat ComponentRot = MakeAxisAlignmentRotation(
+				LocalTailToHeadAxis, Dir, TipSocketLocal.GetUnitAxis(EAxis::Z));
+			const FVector ComponentLoc = HitPoint - ComponentRot.RotateVector(TipSocketLocal.GetLocation());
+			OutComponentWorld = FTransform(ComponentRot, ComponentLoc, FVector::OneVector);
+			OutTailWorld = ComponentRot.RotateVector(TailSocketLocal.GetLocation()) + ComponentLoc;
+			return;
+		}
+	}
+
+	const FQuat ComponentRot = MakeAxisAlignmentRotation(
+		TipSocketLocal.GetUnitAxis(EAxis::X), Dir, TipSocketLocal.GetUnitAxis(EAxis::Z));
+	const FVector ComponentLoc = HitPoint - ComponentRot.RotateVector(TipSocketLocal.GetLocation());
+	OutComponentWorld = FTransform(ComponentRot, ComponentLoc, FVector::OneVector);
+	OutTailWorld = OutComponentWorld.GetLocation();
+}
+
+bool URopeComponent::ComputePierceEmbed(const FVector& HitPoint, const FVector& PierceDir,
+	FTransform& OutComponentWorld, FVector& OutTailWorld) const
+{
+	FTransform TipSocketLocal;
+	if (!ReadTipSocketLocal(TipSocketName, TipSocketLocal))
+	{
+		return false; // 팁 소켓 필수 — 없으면 Pierce 임베드 비활성(호출부가 폴백).
+	}
+	FTransform TailSocketLocal;
+	const bool bHasTail = ReadTipSocketLocal(TipRopeSocketName, TailSocketLocal);
+	const FTransform EffectiveTipSocketLocal = MakeTipPlacementSocketLocal(TipSocketLocal);
+	const FTransform EffectiveTailSocketLocal = bHasTail
+		? MakeTipPlacementSocketLocal(TailSocketLocal)
+		: MakeTipPlacementTransform();
+	SolvePierceEmbed(HitPoint, PierceDir, EffectiveTipSocketLocal, bHasTail, EffectiveTailSocketLocal,
+		OutComponentWorld, OutTailWorld);
+	if (!bHasTail)
+	{
+		OutTailWorld = MakeTipWorldTransform(OutComponentWorld).GetLocation();
+	}
+	return true;
 }
 
 // ===== UActorComponent ======================================================
@@ -2009,6 +2309,31 @@ void URopeComponent::FinishGuidedThrow()
 		Latch.NodeIndex = Anchor.NodeIndex;
 		Latch.Bone = Anchor.Bone;
 		Seed.Latched.Add(Latch);
+	}
+
+	// Pierce: 팁 소켓이 조준 히트점에 박히도록 메쉬 자세를 얼려 앵커에 싣는다(회전 freeze + 꼬리 연결).
+	// LocalMeshTransform = 팁 렌더 자세(bone-local), LocalSurfacePosition = 로프 연결점(꼬리, bone-local).
+	// 소켓 미설정이면 앵커를 그대로 둬 현행(원점=히트점, 세그먼트 추종) 폴백.
+	if (TipEngagement == ERopeTipEngagement::Pierce && Seed.Anchors.Num() > 0)
+	{
+		FRopeSurfaceAnchor& Anchor = Seed.Anchors[0];
+		const USceneComponent* Mesh = Seed.Mesh.Get();
+		FVector HitPoint = Anchor.StartWorldPosition; // 빌더가 꽂힘 지점으로 세팅.
+		ResolvePreparedPierceHitPoint(Prepared, HitPoint);
+		FVector PierceDir = (HitPoint - Sim.Positions[0]).GetSafeNormal();
+		if (PierceDir.IsNearlyZero())
+		{
+			PierceDir = Prepared.ThrowContext.FrameForward.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
+		}
+
+		FTransform ComponentWorld;
+		FVector TailWorld;
+		if (Mesh && !Anchor.Bone.IsNone() && ComputePierceEmbed(HitPoint, PierceDir, ComponentWorld, TailWorld))
+		{
+			const FTransform BoneXform = ResolveBindingWorld(Mesh, Anchor.Bone);
+			Anchor.LocalMeshTransform = ComponentWorld.GetRelativeTransform(BoneXform);
+			Anchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(TailWorld);
+		}
 	}
 
 	ResetKinematicVirtualBridges();

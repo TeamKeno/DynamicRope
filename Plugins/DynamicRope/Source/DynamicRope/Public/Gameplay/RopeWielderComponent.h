@@ -582,8 +582,7 @@ private:
 	FRopeAimRayThrowRequest BuildAimRayThrowRequest(const FVector& AimDir) const;
 	// 선택한 origin 모드를 월드 위치로 해석한다.
 	FVector GetAimRayOrigin() const;
-	// 현재 시뮬레이션 길이와 설정 길이 중 큰 값으로 ray 길이를 계산한다.
-	float GetAimRayLength() const;
+	float GetAimReachLength() const;
 	void LogPreviewBuildResult(bool bSucceeded, const FString& Reason);
 	// Aim hit prepared spline을 wielder owner-local 좌표로 저장해 손 소켓 애니메이션에서 분리한다.
 	void StoreAimGuideFrameIfNeeded(FRopePreparedThrowPreview& Prepared) const;

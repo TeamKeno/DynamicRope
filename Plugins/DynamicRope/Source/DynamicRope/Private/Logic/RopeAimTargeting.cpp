@@ -3,10 +3,46 @@
 #include "Logic/RopeAimTargeting.h"
 #include "Collision/RopeCollider.h"
 
+namespace
+{
+	bool IsWithinAimReach(const FVector* ReachOrigin, float ReachLength, const FVector& SurfacePoint, float QueryRadius)
+	{
+		if (!ReachOrigin || ReachLength <= KINDA_SMALL_NUMBER)
+		{
+			return true;
+		}
+
+		const float AllowedReach = ReachLength + FMath::Max(0.0f, QueryRadius);
+		return FVector::DistSquared(*ReachOrigin, SurfacePoint) <= FMath::Square(AllowedReach);
+	}
+}
+
 float FRopeAimTargeting::ResolveEffectiveQueryRadius(const FQueryContext& Ctx, float QueryRadius)
 {
 	// 0 설정은 선 ray가 아니라 rope/contact 기본 두께를 사용한다. 명시값이 있으면 그 반경으로 sweep한다.
 	return QueryRadius > KINDA_SMALL_NUMBER ? QueryRadius : Ctx.FallbackQueryRadius;
+}
+
+float FRopeAimTargeting::ResolveRayLengthForReach(const FVector& RayOrigin, const FVector& AimDir,
+	const FVector& ReachOrigin, float ReachLength)
+{
+	const FVector RayDir = AimDir.GetSafeNormal();
+	if (ReachLength <= KINDA_SMALL_NUMBER || RayDir.IsNearlyZero())
+	{
+		return 0.0f;
+	}
+
+	const FVector RayToReach = ReachOrigin - RayOrigin;
+	const float Along = FVector::DotProduct(RayToReach, RayDir);
+	const float PerpSq = FMath::Max(0.0f, RayToReach.SizeSquared() - FMath::Square(Along));
+	const float ReachSq = FMath::Square(ReachLength);
+	if (PerpSq > ReachSq)
+	{
+		return 0.0f;
+	}
+
+	const float HalfChord = FMath::Sqrt(FMath::Max(0.0f, ReachSq - PerpSq));
+	return FMath::Max(0.0f, Along + HalfChord);
 }
 
 bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
@@ -14,6 +50,38 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 	TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
 	FRopeAimRayHitResult& OutHit,
 	FRopeAimRayHitResult* OutBlockedHit)
+{
+	return FindAimRayBoneHit(Ctx, Origin, AimDir, RayLength, QueryRadius, SweepStep,
+		CanWrapTarget, OutHit, OutBlockedHit, nullptr, 0.0f);
+}
+
+bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
+	const FRopeAimRayThrowRequest& Request,
+	TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
+	FRopeAimRayHitResult& OutHit,
+	FRopeAimRayHitResult* OutBlockedHit)
+{
+	OutHit = FRopeAimRayHitResult();
+	if (OutBlockedHit)
+	{
+		*OutBlockedHit = FRopeAimRayHitResult();
+	}
+	if (!Request.IsValid())
+	{
+		return false;
+	}
+
+	return FindAimRayBoneHit(Ctx, Request.RayOrigin, Request.RayDirection, Request.RayLength,
+		Request.QueryRadius, Request.SweepStep, CanWrapTarget, OutHit, OutBlockedHit,
+		&Request.ReachOrigin, Request.ReachLength);
+}
+
+bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
+	const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
+	TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
+	FRopeAimRayHitResult& OutHit,
+	FRopeAimRayHitResult* OutBlockedHit,
+	const FVector* ReachOrigin, float ReachLength)
 {
 	OutHit = FRopeAimRayHitResult();
 	if (OutBlockedHit)
@@ -62,6 +130,10 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 		FVector HitWorldPos = FVector::ZeroVector;
 		const FRopeContact Contact = Collider->QuerySwept(Query, HitWorldPos);
 		if (!Contact.bHit)
+		{
+			continue;
+		}
+		if (!IsWithinAimReach(ReachOrigin, ReachLength, Contact.SurfacePoint, EffectiveQueryRadius))
 		{
 			continue;
 		}
@@ -132,8 +204,7 @@ bool FRopeAimTargeting::ResolveAimRayThrowContext(const FQueryContext& Ctx, cons
 	}
 
 	FRopeAimRayHitResult Hit;
-	if (!FindAimRayBoneHit(Ctx, Request.RayOrigin, Request.RayDirection, Request.RayLength,
-		Request.QueryRadius, Request.SweepStep, CanWrapTarget, Hit))
+	if (!FindAimRayBoneHit(Ctx, Request, CanWrapTarget, Hit))
 	{
 		return false;
 	}

@@ -160,8 +160,7 @@ void URopeWielderComponent::UpdateAimHudSample()
 		FRopeAimRayHitResult Hit;
 		FRopeAimRayHitResult Blocked;
 		// 이 샘플이 조준 시각화의 단일 소스다 — HUD 위젯과 Gameplay Debugger([J]aim)가 함께 읽는다.
-		const bool bHitTarget = Rope->FindAimRayBoneHit(Request.RayOrigin, Request.RayDirection, Request.RayLength,
-			Request.QueryRadius, Request.SweepStep, Hit, &Blocked);
+		const bool bHitTarget = Rope->FindAimRayBoneHit(Request, Hit, &Blocked);
 		if (bHitTarget && Hit.bHit)
 		{
 			AimHudSample.bHasTarget = true;
@@ -700,7 +699,7 @@ FVector URopeWielderComponent::GetAimRayOrigin() const
 	return Owner->GetActorLocation();
 }
 
-float URopeWielderComponent::GetAimRayLength() const
+float URopeWielderComponent::GetAimReachLength() const
 {
 	return Rope ? FMath::Max(Rope->GetCurrentRopeLength(), Rope->RopeLength) : 0.0f;
 }
@@ -803,9 +802,16 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContextInternal(const FVector
 	if (Rope)
 	{
 		// Preview context는 현재 frame snapshot으로 즉시 해석한다. 실제 throw는 QueueAimRayThrow 경로를 쓴다.
-		Rope->SetAimRayColliderQueryBounds(
-			Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
-		Rope->ResolveAimRayThrowContext(Request, Context);
+		if (Request.IsValid())
+		{
+			Rope->SetAimRayColliderQueryBounds(
+				Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
+			Rope->ResolveAimRayThrowContext(Request, Context);
+		}
+		else
+		{
+			Rope->ClearAimRayColliderQueryBounds();
+		}
 	}
 	return Context;
 }
@@ -816,7 +822,10 @@ FRopeAimRayThrowRequest URopeWielderComponent::BuildAimRayThrowRequest(const FVe
 	Request.BaseContext = BuildBaseThrowContext(AimDir);
 	Request.RayOrigin = GetAimRayOrigin();
 	Request.RayDirection = Request.BaseContext.FrameForward;
-	Request.RayLength = GetAimRayLength();
+	Request.ReachOrigin = Request.BaseContext.Origin;
+	Request.ReachLength = GetAimReachLength();
+	Request.RayLength = FRopeAimTargeting::ResolveRayLengthForReach(
+		Request.RayOrigin, Request.RayDirection, Request.ReachOrigin, Request.ReachLength);
 	Request.QueryRadius = AimRayQueryRadius;
 	Request.SweepStep = AimRaySweepStep;
 	return Request;
@@ -842,8 +851,15 @@ void URopeWielderComponent::UpdateAimRayColliderQueryBounds()
 
 	// 실제 SDF query 없이 입력 값과 동일한 request를 만들어 다음 subsystem 수집 범위만 갱신한다.
 	const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(FVector::ZeroVector);
-	Rope->SetAimRayColliderQueryBounds(
-		Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
+	if (Request.IsValid())
+	{
+		Rope->SetAimRayColliderQueryBounds(
+			Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
+	}
+	else
+	{
+		Rope->ClearAimRayColliderQueryBounds();
+	}
 }
 
 void URopeWielderComponent::Throw()

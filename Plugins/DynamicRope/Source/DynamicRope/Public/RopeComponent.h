@@ -112,6 +112,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
 	FName ReelHandSocket = NAME_None;
 
+	/** Pierce 전용 — 팁 StaticMesh의 뾰족한 끝(관통 지점) 소켓. 이 소켓이 조준 히트점에 정확히 박히도록
+	 *  메쉬 원점을 역산해 배치하고, 그 자세를 bone-local로 얼려 대상 애니메이션을 따라간다.
+	 *  비어 있거나 소켓이 없으면 Pierce 임베드 비활성 → 현행(원점=히트점, 세그먼트 추종 회전) 폴백. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	FName TipSocketName = NAME_None;
+
+	/** Pierce 전용 — 로프 자유단이 연결될 팁 메쉬의 꼬리 소켓. 비어 있거나 소켓이 없으면 메쉬 원점에 연결. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	FName TipRopeSocketName = NAME_None;
+
 	// 아래 초기화 전용 값들(NumParticles/RopeLength/MinRopeLength)은 InitRope 시점에만 소비된다 —
 	// 런타임 쓰기는 재초기화 전까지 무효라 BlueprintReadOnly(함정 방지). 런타임 길이 변경은
 	// SetRopeLength/SetReelRate를 쓴다.
@@ -263,6 +273,8 @@ public:
 	 *  OutBlockedHit(옵션): ray는 맞았지만 wrap 불가한 가장 가까운 hit(조준 HUD "빨강" 표시용). */
 	bool FindAimRayBoneHit(const FVector& Origin, const FVector& AimDir, float RayLength,
 		float QueryRadius, float SweepStep, FRopeAimRayHitResult& OutHit,
+		FRopeAimRayHitResult* OutBlockedHit = nullptr) const;
+	bool FindAimRayBoneHit(const FRopeAimRayThrowRequest& Request, FRopeAimRayHitResult& OutHit,
 		FRopeAimRayHitResult* OutBlockedHit = nullptr) const;
 
 	/** 요청 반경(0=미지정)을 이 로프의 폴백 규약으로 해석한 **실제 스윕 반경**. 조준 시각화가 질의와
@@ -604,10 +616,51 @@ private:
 	// 우리가 스폰했는가 — release/cut·EndPlay에서 스폰분만 파괴하기 위한 소유권 플래그(외부 컴포넌트 보호).
 	bool bTipMeshSpawnedByUs = false;
 
+	// 태그로 재사용한 팁 StaticMeshComponent의 기존 월드 스케일. SetWorldTransform으로 덮어도 비주얼 크기를 보존한다.
+	FVector TipMeshAuthoredScale = FVector::OneVector;
+
 	// 팁 부착물을 던지기~해제 단위로 확보/파괴/추종한다(TipMesh/TipMeshComponentTag가 설정된 경우만 동작).
 	void EnsureTipMesh();
 	void TeardownSpawnedTipMesh();
 	void UpdateTipMeshTransform();
+
+	//~ Pierce 임베드(소켓 기반) 헬퍼 -------------------------------------------
+	// 팁 StaticMesh의 소켓을 컴포넌트-로컬 트랜스폼으로 읽는다. 소켓이 없으면 false(호출부가 폴백).
+	bool ReadTipSocketLocal(FName Socket, FTransform& OutLocal) const;
+	// 태그 컴포넌트의 기존 스케일과 TipMeshRelativeTransform을 함께 담은 팁 배치 로컬.
+	FTransform MakeTipPlacementTransform() const;
+	// 최종 팁 배치까지 포함한 "배치 기준" 소켓 로컬. 실제 SetWorldTransform은 MakeTipWorldTransform(BaseWorld)를 쓴다.
+	FTransform MakeTipPlacementSocketLocal(const FTransform& SocketLocal) const;
+	FTransform MakeTipWorldTransform(const FTransform& BaseWorld) const;
+	// 로프 연결점(꼬리 소켓, 없으면 메쉬 원점)이 RopeAttachWorld에 오도록 팁 메쉬 기준 월드 트랜스폼을 역산한다.
+	void ComputeTipFollowTransform(const FVector& RopeAttachWorld, const FVector& ForwardDir,
+		FTransform& OutComponentWorld) const;
+	// 주어진 기준 월드 트랜스폼에서 로프가 붙어야 할 실제 월드 위치(꼬리 소켓, 없으면 메쉬 원점)를 얻는다.
+	FVector ResolveTipRopeAttachWorld(const FTransform& ComponentWorld) const;
+	// owner-local로 보관된 prepared path를 throw 시점 월드 스냅샷으로 확정한 뒤 Pierce 소켓 목표를 반영한다.
+	void ApplyPierceSocketTargetsToPrepared(FRopePreparedThrowPreview& InOutPrepared) const;
+	// Prepared의 단일 Pierce 앵커에서 현재 월드 히트점을 복원한다(가능하면 bone-local 앵커 기준).
+	bool ResolvePreparedPierceHitPoint(const FRopePreparedThrowPreview& Prepared, FVector& OutHitPoint) const;
+	// 팁 소켓을 HitPoint에 두고 Tail->Head 소켓 벡터가 관통 방향(PierceDir)을 보도록 메쉬 원점(컴포넌트) 월드
+	// 트랜스폼을 역산한다. 꼬리 소켓이 있으면 로프 연결점(월드)도 함께 낸다(없으면 메쉬 원점).
+	// TipSocketName 소켓이 없으면 false(Pierce 임베드 비활성). 순수 배치 수학은 static 헬퍼로 분리해 단위 테스트한다.
+	bool ComputePierceEmbed(const FVector& HitPoint, const FVector& PierceDir,
+		FTransform& OutComponentWorld, FVector& OutTailWorld) const;
+
+public:
+	// 순수 배치 수학(컴포넌트/월드 무의존) — 팁 소켓이 HitPoint에 PierceDir로 박히도록 메쉬 원점 월드
+	// 트랜스폼을 역산하고, 꼬리 소켓 월드 위치를 낸다. 소켓 로컬을 인자로 받아 단위 테스트가 world 없이 검증한다.
+	static void SolvePierceEmbed(const FVector& HitPoint, const FVector& PierceDir,
+		const FTransform& TipSocketLocal, bool bHasTailSocket, const FTransform& TailSocketLocal,
+		FTransform& OutComponentWorld, FVector& OutTailWorld);
+	// 순수 배치 수학 — 로프 연결 소켓이 RopeAttachWorld에 오고 Tail->Head 소켓 벡터가 ForwardDir을 보도록 메쉬 원점을 역산한다.
+	static void SolveTipSocketFollow(const FVector& RopeAttachWorld, const FVector& ForwardDir,
+		const FTransform& RopeSocketLocal, FTransform& OutComponentWorld);
+	static void SolveTipSocketFollow(const FVector& RopeAttachWorld, const FVector& ForwardDir,
+		const FTransform& RopeSocketLocal, bool bHasHeadSocket, const FTransform& HeadSocketLocal,
+		FTransform& OutComponentWorld);
+
+private:
 
 	//~ 페이즈 상태 머신 ----------------------------------------------------
 	ERopePhase Phase = ERopePhase::Free;
