@@ -1206,11 +1206,11 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 		State.PathAxisDirection,
 		State.PathLatchRadial)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(State.PathNormalWorld));
-	// winding 기준 방향: 기본은 latch tangent(로프가 누운 방향). TravelPlaneFirst에서 캡처 속도가
+	// winding 기준 방향: 기본은 latch tangent(로프가 누운 방향). CaptureTravelPlane에서 캡처 속도가
 	// 있으면 속도를 쓴다 — 감기 시작 방향이 "로프가 실제로 움직이던 쪽"과 일치해, 충돌 프레임의
 	// tangent 노이즈에 흔들리지 않는다(진행 방향 기반 wrap 3단계).
 	FVector WindingReference = LatchTangentWorld;
-	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::TravelPlaneFirst &&
+	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::CaptureTravelPlane &&
 		Ctx.TravelFrame && Ctx.TravelFrame->bValid &&
 		!Ctx.TravelFrame->AverageVelocity.IsNearlyZero())
 	{
@@ -2521,89 +2521,6 @@ bool FRopeWrappingPhase::ComputeWrapEnclosureCoverage(float& OutCoverageDeg) con
 	return true;
 }
 
-bool FRopeWrappingPhase::FindColliderShapeAxis(const FContext& Ctx, FName Bone, const USceneComponent* Mesh,
-	FVector& OutAxisOrigin, FVector& OutAxisDirection)
-{
-	if (Bone.IsNone())
-	{
-		return false;
-	}
-
-	for (const IRopeCollider* Collider : Ctx.Colliders)
-	{
-		if (!Collider)
-		{
-			continue;
-		}
-		FName ColliderBone = NAME_None;
-		const USceneComponent* ColliderMesh = nullptr;
-		Collider->GetGPUAttribution(ColliderBone, ColliderMesh);
-		// mesh까지 일치해야 한다(cross-actor: 다른 액터의 동명 본 오배정 방지). 귀속 미구현
-		// collider(None/null)는 자연히 걸러진다. 같은 본에 셰이프가 여럿(피직스 에셋 멀티 셰이프)이면
-		// 첫 매치를 쓴다 — 본당 주 셰이프가 먼저 빌드되는 provider 관례에 기댄 단순화.
-		if (ColliderBone != Bone || (Mesh != nullptr && ColliderMesh != Mesh))
-		{
-			continue;
-		}
-
-		// 캡슐: 세그먼트가 곧 형상 축. 구(A≈B) 축퇴는 방향 정보가 없어 다음 폴백으로.
-		FVector CapA, CapB;
-		float CapRadius = 0.0f;
-		if (Collider->GetGPUCapsule(CapA, CapB, CapRadius))
-		{
-			const FVector Axis = CapB - CapA;
-			// 1cm 미만 세그먼트는 방향 신뢰 불가(사실상 구).
-			if (Axis.SizeSquared() > 1.0f)
-			{
-				OutAxisOrigin = CapA;
-				OutAxisDirection = Axis.GetSafeNormal();
-				return true;
-			}
-			continue;
-		}
-
-		// 박스(정적 랩 가상 본 등): 최장 반변의 로컬 축을 회전시켜 축으로. origin = 박스 중심(축 위).
-		FVector BoxCenter, BoxHalf;
-		FQuat BoxRot;
-		if (Collider->GetGPUBox(BoxCenter, BoxRot, BoxHalf))
-		{
-			FVector LocalAxis = FVector::XAxisVector;
-			if (BoxHalf.Y > BoxHalf.X && BoxHalf.Y >= BoxHalf.Z)
-			{
-				LocalAxis = FVector::YAxisVector;
-			}
-			else if (BoxHalf.Z > BoxHalf.X && BoxHalf.Z > BoxHalf.Y)
-			{
-				LocalAxis = FVector::ZAxisVector;
-			}
-			OutAxisOrigin = BoxCenter;
-			OutAxisDirection = BoxRot.RotateVector(LocalAxis);
-			return true;
-		}
-
-		// SDF: 본 로컬 bounds의 최장축을 본 트랜스폼으로 월드에. origin = bounds 중심(월드).
-		FRopeSDFColliderView SDFView;
-		if (Collider->GetGPUSDF(SDFView))
-		{
-			const FVector Size = SDFView.LocalSize;
-			FVector LocalAxis = FVector::XAxisVector;
-			if (Size.Y > Size.X && Size.Y >= Size.Z)
-			{
-				LocalAxis = FVector::YAxisVector;
-			}
-			else if (Size.Z > Size.X && Size.Z > Size.Y)
-			{
-				LocalAxis = FVector::ZAxisVector;
-			}
-			OutAxisOrigin = SDFView.BoneToWorld.TransformPosition(SDFView.LocalMin + Size * 0.5);
-			OutAxisDirection = SDFView.BoneToWorld.TransformVectorNoScale(LocalAxis)
-				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-			return true;
-		}
-	}
-	return false;
-}
-
 bool FRopeWrappingPhase::FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 	const USceneComponent* Mesh, FVector& OutAxisOrigin, FVector& OutAxisDirection)
 {
@@ -2618,11 +2535,11 @@ bool FRopeWrappingPhase::FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAncho
 		return false;
 	}
 
-	// TravelPlaneFirst: 축 origin을 latch 본 위치가 아니라 캡처 순간의 접촉 영역 중심에 둔다 —
+	// CaptureTravelPlane: 축 origin을 latch 본 위치가 아니라 캡처 순간의 접촉 영역 중심에 둔다 —
 	// 여러 본/대상에 걸친 접촉(양다리)에서 감김 반경이 한쪽 대상이 아닌 쌍의 중심을 기준으로 잡힌다.
 	// origin은 캡처 시점 고정값이라 본 전환 재시드(rolling axis)에서도 움직이지 않는다.
-	// ShapeAxisFirst의 폴백 경로(RopePlaneNormal)는 종전대로 본 위치를 쓴다 — 기본 동작 불변.
-	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::TravelPlaneFirst &&
+	// BoneCenteredGuidePlane은 종전처럼 본 위치를 쓴다 — Assisted 단일 본 동작 불변.
+	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::CaptureTravelPlane &&
 		Ctx.TravelFrame && Ctx.TravelFrame->bValid)
 	{
 		FVector Origin = Ctx.TravelFrame->RegionCenter;
@@ -2720,7 +2637,7 @@ bool FRopeWrappingPhase::GetColliderCenter(const IRopeCollider& Collider, FVecto
 	return false;
 }
 
-/* 감김 축 정의 — 우선순위/근거는 헤더 주석 참고(형상 축 → rope 평면 가상축 → 컴포넌트 기저 → 로컬 X). */
+/* 감김 축 정의 — 캡처 영역 중심/본 중심 가이드 평면 → 본·컴포넌트 축 폴백 순서로 해석한다. */
 bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 	FVector& OutAxisOrigin, FVector& OutAxisDirection) const
 {
@@ -2736,34 +2653,23 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 			*OutAxisDirection.ToString());
 	};
 
-	// 0) TravelPlaneFirst(설정): 로프 진행(스윙) 평면 normal 축을 형상 축보다 앞세운다. 여러 본에
-	//    걸친 랩(양다리)이 특정 본 하나의 형상 축에 끌려가지 않게 하는 진행 방향 기반 wrap의 1단계.
-	//    (CL 341이 형상 축을 주석 토글로 껐다 켰다 하던 실험의 정식화 — 기본값 ShapeAxisFirst는
-	//    기존 우선순위 그대로다.) 가이드 평면이 없으면 아래 체인으로 자연 폴백.
-	bool bTriedTravelPlane = false;
-	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::TravelPlaneFirst)
+	// CaptureTravelPlane: 진행 평면 normal 축을 캡처 접촉 영역/collider 군집 중심에 고정한다.
+	// 여러 본에 걸친 Composite wrapping이 특정 latch 본의 위치에 끌려가지 않도록 하는 모드다.
+	bool bTriedCaptureTravelPlane = false;
+	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::CaptureTravelPlane)
 	{
-		bTriedTravelPlane = true;
-		const USceneComponent* TravelMesh = LatchAnchor.Mesh.Get();
-		if (!TravelMesh)
+		bTriedCaptureTravelPlane = true;
+		const USceneComponent* CaptureMesh = LatchAnchor.Mesh.Get();
+		if (!CaptureMesh)
 		{
-			TravelMesh = State.Mesh.Get();
+			CaptureMesh = State.Mesh.Get();
 		}
-		if (TravelMesh && FindGuidePlaneAxis(LatchAnchor, Ctx, TravelMesh, OutAxisOrigin, OutAxisDirection))
+		if (CaptureMesh && FindGuidePlaneAxis(LatchAnchor, Ctx, CaptureMesh, OutAxisOrigin, OutAxisDirection))
 		{
-			LogAxisSource(TEXT("TravelPlaneAxis"), TravelMesh);
+			LogAxisSource(TEXT("CaptureTravelPlane"), CaptureMesh);
 			return true;
 		}
 	}
-
-	// 1) collider 형상 축: 실제 충돌 지오메트리의 장축 — 본 그래프 특성(짧은 몸통 본, 체인 본,
-	//    임포트 축)과 무관하게 맞고, origin이 지오메트리 중심축 위라 helix 반지름도 정확하다.
-	//if (FindColliderShapeAxis(Ctx, LatchAnchor.Bone, LatchAnchor.Mesh.Get(), OutAxisOrigin, OutAxisDirection))
-	//{
-	//	LogAxisSource(TEXT("ColliderShapeAxis"), LatchAnchor.Mesh.Get());
-	//	return true;
-	//}
-
 
 	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
 	if (!Mesh)
@@ -2778,11 +2684,11 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 	const FName ParentBone = RopeWrapTargets::GetParentTargetKey(Mesh, LatchAnchor.Bone);
 	const FVector BoneLocation = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
 
-	// 로프가 날아와 만든 spline guide 평면의 normal을 bone 위치에 세운 가상 축으로 쓴다.
-	// (TravelPlaneFirst였다면 이미 위에서 시도·실패한 것이므로 재시도하지 않는다.)
-	if (!bTriedTravelPlane && FindGuidePlaneAxis(LatchAnchor, Ctx, Mesh, OutAxisOrigin, OutAxisDirection))
+	// BoneCenteredGuidePlane: 같은 진행 평면 normal을 latch 본 위치에 세운다.
+	// CaptureTravelPlane이었다면 이미 위에서 시도·실패한 것이므로 같은 입력을 재시도하지 않는다.
+	if (!bTriedCaptureTravelPlane && FindGuidePlaneAxis(LatchAnchor, Ctx, Mesh, OutAxisOrigin, OutAxisDirection))
 	{
-		LogAxisSource(TEXT("RopePlaneNormal"), Mesh);
+		LogAxisSource(TEXT("BoneCenteredGuidePlane"), Mesh);
 		return true;
 	}
 

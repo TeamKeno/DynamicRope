@@ -59,8 +59,10 @@ bool FRopeWrappingCapsuleAngleTest::RunTest(const FString& Parameters)
 	Latch.SurfaceOffset = 1.0f;
 
 	const FRopeWrapConfig Config = MakeTestWrapConfig();
+	// Collider 장축 자동 추론은 제거됐으므로 테스트가 의도한 캡슐 Z축을 가이드 평면으로 명시한다.
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*bHasGuidePlaneNormal*/ true, /*GuidePlaneNormal*/ FVector::ZAxisVector };
 
 	FRopeWrappingPhase Wrapping;
 	TestTrue(TEXT("wrapping begins on capsule"), Wrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, Ctx));
@@ -185,17 +187,17 @@ bool FRopeWrappingSecondarySeedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 감김 축 소스 설정(ERopeWrappingAxisSource, 진행 방향 기반 wrap 1단계):
-// - TravelPlaneFirst: 가이드 평면 normal이 있으면 형상 축(캡슐 Z)보다 앞선다 — 축이 운동 평면에 고정.
-// - ShapeAxisFirst(기본): 가이드 평면이 있어도 형상 축이 이긴다 — 기존 동작 그대로(CL 341 주석 토글의
-//   정식화이므로, 기본값에서 아무것도 달라지지 않음을 함께 고정한다).
+// 감김 축 소스 설정:
+// - CaptureTravelPlane: 진행 평면 normal을 캡처 접촉 영역 중심에 배치한다(Composite용).
+// - BoneCenteredGuidePlane(기본): 같은 normal을 latch 본 위치에 배치한다(Assisted single bone용).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingAxisSourceTest,
 	"DynamicRope.Wrapping.AxisSourceConfig",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 {
-	// 캡슐(형상 축 = Z) + 가이드 평면 normal = Y — 두 소스가 뚜렷이 구분되는 배치.
+	// 가이드 평면 normal = Y. 이 테스트에는 캡처 스냅샷이 없으므로 두 모드 모두 mock 본 원점을 쓰며,
+	// 기본 모드가 폐기된 collider 형상 축(Z)으로 돌아가지 않는 것도 함께 검증한다.
 	USceneComponent* Mesh = MakeMockTarget();
 	FCapsuleCollider Capsule(FVector(0, 0, -50), FVector(0, 0, 50), 25.0f, FName("arm"), Mesh);
 	TArray<IRopeCollider*> Colliders = { &Capsule };
@@ -214,18 +216,18 @@ bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 
 	const FVector GuidePlaneNormal(0, 1, 0);
 
-	FRopeWrapConfig TravelConfig = MakeTestWrapConfig();
-	TravelConfig.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
-	const FRopeWrappingPhase::FContext TravelCtx{ TravelConfig, Colliders,
+	FRopeWrapConfig CaptureConfig = MakeTestWrapConfig();
+	CaptureConfig.WrappingAxisSource = ERopeWrappingAxisSource::CaptureTravelPlane;
+	const FRopeWrappingPhase::FContext CaptureCtx{ CaptureConfig, Colliders,
 		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
 		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal };
 
-	FRopeWrappingPhase TravelWrapping;
-	TestTrue(TEXT("wrapping begins with travel-plane axis"),
-		TravelWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, TravelCtx));
-	TestTrue(FString::Printf(TEXT("TravelPlaneFirst axis follows the guide plane normal (dir=%s)"),
-			*TravelWrapping.State.PathAxisDirection.ToString()),
-		FMath::Abs(FVector::DotProduct(TravelWrapping.State.PathAxisDirection, GuidePlaneNormal)) > 0.99f);
+	FRopeWrappingPhase CaptureWrapping;
+	TestTrue(TEXT("wrapping begins with capture travel-plane axis"),
+		CaptureWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, CaptureCtx));
+	TestTrue(FString::Printf(TEXT("CaptureTravelPlane axis follows the guide plane normal (dir=%s)"),
+			*CaptureWrapping.State.PathAxisDirection.ToString()),
+		FMath::Abs(FVector::DotProduct(CaptureWrapping.State.PathAxisDirection, GuidePlaneNormal)) > 0.99f);
 
 	FRopeWrapConfig DefaultConfig = MakeTestWrapConfig();
 	const FRopeWrappingPhase::FContext DefaultCtx{ DefaultConfig, Colliders,
@@ -235,21 +237,24 @@ bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 	FRopeWrappingPhase DefaultWrapping;
 	TestTrue(TEXT("wrapping begins with default axis source"),
 		DefaultWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, DefaultCtx));
-	TestTrue(FString::Printf(TEXT("ShapeAxisFirst keeps the capsule shape axis (dir=%s)"),
+	TestTrue(FString::Printf(TEXT("BoneCenteredGuidePlane follows the guide plane normal (dir=%s)"),
 			*DefaultWrapping.State.PathAxisDirection.ToString()),
-		FMath::Abs(FVector::DotProduct(DefaultWrapping.State.PathAxisDirection, FVector(0, 0, 1))) > 0.99f);
+		FMath::Abs(FVector::DotProduct(DefaultWrapping.State.PathAxisDirection, GuidePlaneNormal)) > 0.99f);
+	TestTrue(FString::Printf(TEXT("BoneCenteredGuidePlane uses the latch bone origin (origin=%s)"),
+			*DefaultWrapping.State.PathAxisOrigin.ToString()),
+		DefaultWrapping.State.PathAxisOrigin.Equals(FVector::ZeroVector, 0.1f));
 	return true;
 }
 
-// 캡처 스냅샷 소비(진행 방향 기반 wrap 3단계, TravelPlaneFirst 한정):
+// 캡처 스냅샷 소비(진행 방향 기반 wrap 3단계, CaptureTravelPlane 한정):
 // - 축 origin = latch 본 위치가 아니라 접촉 영역 중심(RegionCenter) — 양다리에서 쌍의 중심 기준 반경.
 // - winding 기준 = latch tangent가 아니라 캡처 속도 — 감기 시작 방향이 실제 운동 방향과 일치.
 // - 스냅샷이 없으면 종전(본 위치 origin, tangent winding)으로 폴백.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingTravelFrameAxisTest,
-	"DynamicRope.Wrapping.TravelPlaneAxisUsesCaptureFrame",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingCaptureTravelPlaneTest,
+	"DynamicRope.Wrapping.CaptureTravelPlaneUsesCaptureFrame",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FRopeWrappingTravelFrameAxisTest::RunTest(const FString& Parameters)
+bool FRopeWrappingCaptureTravelPlaneTest::RunTest(const FString& Parameters)
 {
 	USceneComponent* Mesh = MakeMockTarget();
 	FCapsuleCollider Capsule(FVector(0, 0, -50), FVector(0, 0, 50), 25.0f, FName("arm"), Mesh);
@@ -273,10 +278,10 @@ bool FRopeWrappingTravelFrameAxisTest::RunTest(const FString& Parameters)
 	Frame.RegionCenter = FVector(0, 0, 30);
 	Frame.AverageVelocity = FVector(100, 0, 0);
 
-	FRopeWrapConfig TravelConfig = MakeTestWrapConfig();
-	TravelConfig.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
+	FRopeWrapConfig CaptureConfig = MakeTestWrapConfig();
+	CaptureConfig.WrappingAxisSource = ERopeWrappingAxisSource::CaptureTravelPlane;
 	const FVector GuidePlaneNormal(0, 1, 0);
-	const FRopeWrappingPhase::FContext FrameCtx{ TravelConfig, Colliders,
+	const FRopeWrappingPhase::FContext FrameCtx{ CaptureConfig, Colliders,
 		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
 		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal, &Frame };
 
@@ -293,7 +298,7 @@ bool FRopeWrappingTravelFrameAxisTest::RunTest(const FString& Parameters)
 		FVector::DotProduct(FrameWrapping.State.PathCircumferenceDir, FVector(1, 0, 0)) > 0.1f);
 
 	// 스냅샷이 없으면 origin은 종전대로 latch 본 위치(mock identity = 원점).
-	const FRopeWrappingPhase::FContext NoFrameCtx{ TravelConfig, Colliders,
+	const FRopeWrappingPhase::FContext NoFrameCtx{ CaptureConfig, Colliders,
 		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
 		/*bHasGuidePlaneNormal*/ true, GuidePlaneNormal };
 
@@ -345,7 +350,7 @@ bool FRopeWrappingGapBridgeTest::RunTest(const FString& Parameters)
 	Frame.AverageVelocity = FVector(0, 100, 0);
 
 	FRopeWrapConfig Config = MakeTestWrapConfig();
-	Config.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
+	Config.WrappingAxisSource = ERopeWrappingAxisSource::CaptureTravelPlane;
 	// chord는 60cm지만 브리지 경로는 축 반경(~32) 원호를 따라 우회한다(~77cm) — 여유를 둔다.
 	Config.WrappingMaxGapBridgeDistance = 120.0f;
 	// 이 테스트는 진행 평면 안의 순회만 검증한다 — 축 방향 나선 상승이 캡슐 꼭대기 밖으로 새지 않게.
@@ -477,7 +482,7 @@ bool FRopeWrappingClusterAxisOriginTest::RunTest(const FString& Parameters)
 	Frame.AverageVelocity = FVector(0, 100, 0);
 
 	FRopeWrapConfig Config = MakeTestWrapConfig();
-	Config.WrappingAxisSource = ERopeWrappingAxisSource::TravelPlaneFirst;
+	Config.WrappingAxisSource = ERopeWrappingAxisSource::CaptureTravelPlane;
 	Config.WrappingMaxGapBridgeDistance = 120.0f;
 	Config.WrappingHelixPitchScale = 0.0f;
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
@@ -612,8 +617,10 @@ bool FRopeWrappingEnclosureCoverageTest::RunTest(const FString& Parameters)
 	Latch.SurfaceOffset = 1.0f;
 
 	const FRopeWrapConfig Config = MakeTestWrapConfig();
+	// 커버리지 비교의 기준 축을 캡슐 Z축으로 고정한다(형상 축 자동 추론에 의존하지 않음).
 	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+		/*bHasGuidePlaneNormal*/ true, /*GuidePlaneNormal*/ FVector::ZAxisVector };
 
 	auto BuildAndMeasure = [&](int32 NumNodes, float RopeLength, float& OutCoverageDeg) -> bool
 	{

@@ -200,26 +200,25 @@ struct FRopeWrappedEventInfo
 };
 
 /**
- * 감김 축을 어디서 유도할지(FRopeWrapConfig::WrappingAxisSource). 우선순위 체인의 앞부분만 다르고,
+ * 감김 축을 어느 기준으로 배치할지(FRopeWrapConfig::WrappingAxisSource).
+ * 두 모드 모두 로프 진행 평면의 normal을 축 방향으로 쓰되, 축 원점과 winding 기준이 다르다.
  * 뒤쪽 폴백(본→부모 → 컴포넌트 기저 → 본 로컬 X)은 공통이다 — FRopeWrappingPhase::ResolveWrappingAxis.
- * (CL 341이 형상 축을 주석으로 껐다 켰다 하던 실험을 정식 설정으로 승격 — 진행 방향 기반 wrap 1단계.)
  */
 UENUM(BlueprintType)
 enum class ERopeWrappingAxisSource : uint8
 {
 	/**
-	 * 형상 축 우선(기존 동작): latch 본에 귀속된 collider의 장축 → 진행 방향 축 → 공통 폴백.
-	 * 단일 대상(드래곤 몸통/목, 인간형 팔다리 하나)을 그 대상의 실루엣대로 감는 데 정확하다.
+	 * 본 중심 가이드 평면: 축 원점은 latch 본 위치, winding은 latch tangent를 기준으로 잡는다.
+	 * Assisted resolve의 단일 본 wrapping처럼 본별로 축을 재해석해야 하는 경로에 적합하다.
 	 */
-	ShapeAxisFirst UMETA(DisplayName = "Shape Axis First"),
+	BoneCenteredGuidePlane = 0 UMETA(DisplayName = "Bone-Centered Guide Plane"),
 
 	/**
-	 * 진행 방향 축 우선: 로프가 날아온 스윙 평면의 normal(Flight whip guide)을 축으로 앞세운다 →
-	 * 형상 축 → 공통 폴백. 감김 원주가 로프의 운동 평면에 놓이므로 여러 본/대상에 걸친 랩(양다리)이
-	 * 특정 본 하나의 축에 끌려가지 않는다. 본 전환 시 재시드(rolling axis)에서도 같은 소스가 이겨
-	 * 축 방향이 진행 평면에 고정된다. 가이드 평면이 없는 던지기(BP 직행 등)는 형상 축으로 폴백.
+	 * 캡처 진행 평면: 로프가 날아온 스윙 평면의 normal을 축 방향으로 쓰고, 축 원점은 캡처 접촉 영역과
+	 * collider 군집 중심으로 보정한다. winding은 캡처 순간 속도를 기준으로 잡아 Composite wrapping에 적합하다.
+	 * 캡처 진행 평면을 만들 수 없으면 공통 본/컴포넌트 축 폴백으로 내려간다.
 	 */
-	TravelPlaneFirst UMETA(DisplayName = "Travel Plane First")
+	CaptureTravelPlane = 1 UMETA(DisplayName = "Capture Travel Plane")
 };
 
 /**
@@ -988,12 +987,11 @@ struct FRopeWrapConfig
 	int32 MaxWrapSeeds = 1;
 
 	/**
-	 * 감김 축 유도 소스. ShapeAxisFirst(기본) = 기존 동작(latch 본 collider 장축 우선).
-	 * TravelPlaneFirst = 로프 진행(스윙) 평면 normal을 축으로 앞세운다 — 여러 본에 걸친 랩(양다리)
-	 * 대비 진행 방향 기반 wrap의 1단계. 상세는 ERopeWrappingAxisSource 주석.
+	 * 감김 축 유도 소스. BoneCenteredGuidePlane(기본)은 Assisted 단일 본 wrapping을 위해 latch 본을
+	 * 축 원점으로 사용한다. CaptureTravelPlane은 접촉 영역/군집 중심 축으로 Composite wrapping을 지원한다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap")
-	ERopeWrappingAxisSource WrappingAxisSource = ERopeWrappingAxisSource::ShapeAxisFirst;
+	ERopeWrappingAxisSource WrappingAxisSource = ERopeWrappingAxisSource::BoneCenteredGuidePlane;
 
 	/**
 	 * SurfaceVectorField 경로가 표면 없는 허공을 tangent 직진(chord)으로 건널 수 있는 최대 거리(cm).
@@ -1146,8 +1144,8 @@ struct FRopeWrapConfig
 	 * CommitMinWrapAngleDeg(누적 각도)와의 차이: 누적 각도는 걸은 회전량의 합이라 표면 위 진동/왕복이
 	 * 값을 부풀릴 수 있고 여러 바퀴면 360°를 넘는다. 커버리지는 "축 둘레 어느 방향까지 로프가 실제로
 	 * 둘러쌌는가"의 순수 기하 척도(0~360°)라 진동에 면역이다 — 대상이 정말 갇혔는지(양다리 bola처럼
-	 * 빠져나갈 공백이 없는지)를 묻는 판정. 축이 캡처 시점에 고정되는 TravelPlaneFirst 감김에서 가장
-	 * 의미가 정확하다(ShapeAxisFirst의 rolling axis에서는 마지막 축 기준 근사).
+	 * 빠져나갈 공백이 없는지)를 묻는 판정. 축이 캡처 시점에 고정되는 CaptureTravelPlane 감김에서 가장
+	 * 의미가 정확하다(BoneCenteredGuidePlane의 rolling axis에서는 마지막 축 기준 근사).
 	 * 양다리 잠금 용도면 300° 안팎, 느슨한 훅도 허용하려면 0 유지.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
@@ -1861,7 +1859,7 @@ struct FRopeGuidedThrowState
  * 캡처(Flight→Contacting) 순간의 로프 진행 좌표계 스냅샷(진행 방향 기반 wrap 2단계).
  * Contacting부터는 솔브가 없어 노드가 정지하므로, "로프가 어느 방향으로 날아와 어떻게 누웠는가"는
  * 이 순간에만 잴 수 있다 — BuildContactingState가 채우고 ResetTransientPhaseState가 폐기한다.
- * 소비자: TravelPlaneFirst 축(가이드 평면이 없는 던지기의 폴백 normal, 3단계에서 축 origin으로
+ * 소비자: CaptureTravelPlane 축(가이드 평면이 없는 던지기의 폴백 normal, 3단계에서 축 origin으로
  * RegionCenter 사용 예정). GPU 상주 로프는 CPU 미러가 1~2프레임 낡을 수 있으나 방향 성분은 충분하다.
  */
 struct FRopeCaptureTravelFrame

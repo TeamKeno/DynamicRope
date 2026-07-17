@@ -779,7 +779,7 @@ private:
 	FRopeWrapState      PendingWrapSeed;
 
 	/** Contacting~Wrapping: 캡처 순간의 로프 진행 좌표계 스냅샷(속도/누운 방향/진행 평면 normal —
-	 *  Contacting부터는 노드가 정지해 이 순간에만 잴 수 있다). TravelPlaneFirst 축의 가이드 평면 폴백. */
+	 *  Contacting부터는 노드가 정지해 이 순간에만 잴 수 있다). CaptureTravelPlane 축의 가이드 평면 폴백. */
 	FRopeCaptureTravelFrame CaptureTravelFrame;
 
 	/** Wrapping: 경로 점진 생성+front 모션+마스크(작업 상태는 .State). */

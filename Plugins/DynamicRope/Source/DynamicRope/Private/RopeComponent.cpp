@@ -2695,7 +2695,7 @@ void URopeComponent::BuildContactingState(const TArray<FRopeContactCandidate>& C
 	PendingWrapSeed = BuildWrapSeedFromContactingState(Candidates);
 
 	// 진행 좌표계 스냅샷은 이 순간이 마지막 기회다 — Contacting부터는 솔브가 없어 노드가 정지하고
-	// (Pos==Prev로 수렴) 속도 정보가 죽는다. Wrapping의 TravelPlaneFirst 축이 소비한다.
+	// (Pos==Prev로 수렴) 속도 정보가 죽는다. Wrapping의 CaptureTravelPlane 축이 소비한다.
 	CaptureTravelFrame = FRopeCaptureTravelFrame::Compute(Sim, Candidates, DeltaTime);
 }
 
@@ -3147,13 +3147,13 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 
 FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 {
-	// TravelPlaneFirst 전용 폴백: whip guide 평면이 없는 던지기(BP 직행 등)에서는 캡처 순간
-	// 스냅샷(속도×누운 방향)으로 유도한 진행 평면 normal을 대신 싣는다. 기본값(ShapeAxisFirst)
-	// 에서는 주입하지 않는다 — 기존 폴백 체인(RopePlaneNormal은 whip guide 유래만)이 그대로다.
+	// CaptureTravelPlane 전용 폴백: whip guide 평면이 없는 던지기(BP 직행 등)에서는 캡처 순간
+	// 스냅샷(속도×누운 방향)으로 유도한 진행 평면 normal을 대신 싣는다. 기본값(BoneCenteredGuidePlane)
+	// 에서는 주입하지 않는다 — BoneCenteredGuidePlane은 whip guide에서 얻은 normal만 사용한다.
 	bool bGuidePlane = bHasFlightGuidePlaneNormal;
 	FVector GuidePlane = FlightGuidePlaneNormal;
 	if (!bGuidePlane &&
-		WrapConfig.WrappingAxisSource == ERopeWrappingAxisSource::TravelPlaneFirst &&
+		WrapConfig.WrappingAxisSource == ERopeWrappingAxisSource::CaptureTravelPlane &&
 		CaptureTravelFrame.bValid && CaptureTravelFrame.bHasPlaneNormal)
 	{
 		bGuidePlane = true;

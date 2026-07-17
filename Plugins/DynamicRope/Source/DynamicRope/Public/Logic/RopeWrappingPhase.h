@@ -54,9 +54,9 @@ public:
 
 		/**
 		 * 캡처 순간의 진행 좌표계 스냅샷(비소유 — 컴포넌트의 CaptureTravelFrame, 유효할 때만 non-null).
-		 * TravelPlaneFirst에서만 소비된다: 축 origin을 latch 본 위치 대신 접촉 영역 중심(RegionCenter)에
+		 * CaptureTravelPlane에서만 소비된다: 축 origin을 latch 본 위치 대신 접촉 영역 중심(RegionCenter)에
 		 * 두고(양다리에서 축이 쌍의 중심을 지나게), winding 부호를 latch tangent 대신 캡처 속도로 정한다.
-		 * ShapeAxisFirst(기본)에서는 읽지 않는다 — 기존 동작 불변.
+		 * BoneCenteredGuidePlane(기본)에서는 읽지 않는다 — Assisted 단일 본 동작 불변.
 		 */
 		const FRopeCaptureTravelFrame* TravelFrame = nullptr;
 
@@ -189,20 +189,14 @@ private:
 		const FVector& NormalWorld, const FContext& Ctx, FVector& InOutCircumferenceDir) const;
 
 	/**
-	 * 감김 축 유도. 우선순위(앞머리는 Config.WrappingAxisSource가 결정 — ERopeWrappingAxisSource):
-	 *  0) [TravelPlaneFirst일 때만] 로프 진행(스윙) 평면 normal 축 — 감김 원주를 로프의 운동 평면에
-	 *     고정한다(여러 본에 걸친 랩 대비). 없으면 아래로 폴백.
-	 *  1) latch 본에 귀속된 collider의 *형상 축*(캡슐 세그먼트/박스 최장축/SDF bounds 최장축) —
-	 *     본→부모 벡터는 짧고 두꺼운 본(몸통)·체인 본(목/꼬리)·특이 임포트 축에서 지오메트리 장축과
-	 *     어긋나 나선 반지름이 실제 단면과 틀어졌다(드래곤 wrap 실패의 핵심). 형상 축은 실제 충돌
-	 *     지오메트리에서 나오므로 본 그래프 형태와 무관하게 맞고, 축 origin도 지오메트리 중심축 위라
-	 *     helix 반지름(latch↔축 거리)이 정확해진다.
-	 *  2) [ShapeAxisFirst일 때] rope spline guide 평면 normal + bone 위치로 만든 가상 축.
-	 *  3) 본→부모 축(스켈레탈), 비-스켈레탈은 컴포넌트 기저축 중 latch normal에 가장 수직인 축.
-	 *  4) 본 로컬 X.
+	 * 감김 축 유도. Config.WrappingAxisSource에 따라 같은 진행 평면 normal을 서로 다른 원점에 배치한다.
+	 *  0) CaptureTravelPlane: 캡처 접촉 영역/collider 군집 중심에 축을 고정한다(Composite wrapping).
+	 *  1) BoneCenteredGuidePlane: latch 본 위치에 축을 세우고 본 전환마다 재해석한다(Assisted single bone).
+	 *  2) 본→부모 축(스켈레탈), 비-스켈레탈은 컴포넌트 기저축 중 latch normal에 가장 수직인 축.
+	 *  3) 본 로컬 X.
 	 * SurfaceVectorField에서는 latch 시 1회로 끝나지 않는다 — 본 전환마다
 	 * ReseedWrappingAxisOnBoneTransition이 새 본 기준으로 재호출한다(rolling axis).
-	 * TravelPlaneFirst에서는 재시드에서도 진행 평면 축이 이겨 축 방향이 운동 평면에 고정된다.
+	 * CaptureTravelPlane에서는 재시드에서도 캡처 진행 평면 축이 유지된다.
 	 */
 	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;
@@ -216,12 +210,8 @@ private:
 	 */
 	void ReseedWrappingAxisOnBoneTransition(FName Bone, const USceneComponent* Mesh, const FContext& Ctx);
 
-	/** 1)의 구현: Ctx.Colliders에서 (Bone, Mesh)에 귀속된 collider를 찾아 형상 축을 돌려준다. */
-	static bool FindColliderShapeAxis(const FContext& Ctx, FName Bone, const USceneComponent* Mesh,
-		FVector& OutAxisOrigin, FVector& OutAxisDirection);
-
-	/** 2)의 구현: Flight guided spline 평면 normal을 bone 위치에 세운 가상 축으로 돌려준다.
-	 *  TravelPlaneFirst + 캡처 스냅샷이 있으면 origin을 접촉 영역/collider 군집 중심으로 대체한다
+	/** Flight guided spline 평면 normal을 감김 축 방향으로 돌려준다.
+	 *  CaptureTravelPlane + 캡처 스냅샷이 있으면 origin을 접촉 영역/collider 군집 중심으로 대체한다
 	 *  (구현부 주석 참고 — 양다리처럼 접촉이 한쪽에서만 시작해도 축이 쌍의 중심을 지나게). */
 	static bool FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx, const USceneComponent* Mesh,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection);
