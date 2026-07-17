@@ -99,6 +99,9 @@ void URopeStaticBodyProvider::GatherColliders(FRopeColliderGatherContext& Gather
 		Capsules.Reset();
 		Convexes.Reset();
 		Groups.Reset();
+		BoxWorldBounds.Reset();
+		CapWorldBounds.Reset();
+		CvxWorldBounds.Reset();
 		BuildColliders(Gather);
 	}
 
@@ -140,21 +143,21 @@ void URopeStaticBodyProvider::GatherColliders(FRopeColliderGatherContext& Gather
 			}
 			for (int32 i = Group.BoxStart; i < Group.BoxStart + Group.BoxCount; ++i)
 			{
-				if (Boxes[i].GetWorldBounds().Intersect(Region))
+				if (BoxWorldBounds[i].Intersect(Region))
 				{
 					Out.Add(PoolBase + i);
 				}
 			}
 			for (int32 i = Group.CapStart; i < Group.CapStart + Group.CapCount; ++i)
 			{
-				if (Capsules[i].GetWorldBounds().Intersect(Region))
+				if (CapWorldBounds[i].Intersect(Region))
 				{
 					Out.Add(CapFlatBase + i);
 				}
 			}
 			for (int32 i = Group.CvxStart; i < Group.CvxStart + Group.CvxCount; ++i)
 			{
-				if (Convexes[i].GetWorldBounds().Intersect(Region))
+				if (CvxWorldBounds[i].Intersect(Region))
 				{
 					Out.Add(CvxFlatBase + i);
 				}
@@ -176,17 +179,28 @@ void URopeStaticBodyProvider::RecordExtractedGroup(int32 BoxStart, int32 CapStar
 	{
 		return;
 	}
+	// 월드 AABB를 collider당 1회 계산해 Group.Bounds와 캐시에 함께 넣는다 — 아래 GatherColliders의 region
+	// 매핑이 collider×region마다 GetWorldBounds를 재계산하지 않게 한다(#10). 캐시는 collider 배열과 평행.
+	BoxWorldBounds.SetNum(Boxes.Num());
 	for (int32 i = Group.BoxStart; i < Group.BoxStart + Group.BoxCount; ++i)
 	{
-		Group.Bounds += Boxes[i].GetWorldBounds();
+		const FBox WB = Boxes[i].GetWorldBounds();
+		BoxWorldBounds[i] = WB;
+		Group.Bounds += WB;
 	}
+	CapWorldBounds.SetNum(Capsules.Num());
 	for (int32 i = Group.CapStart; i < Group.CapStart + Group.CapCount; ++i)
 	{
-		Group.Bounds += Capsules[i].GetWorldBounds();
+		const FBox WB = Capsules[i].GetWorldBounds();
+		CapWorldBounds[i] = WB;
+		Group.Bounds += WB;
 	}
+	CvxWorldBounds.SetNum(Convexes.Num());
 	for (int32 i = Group.CvxStart; i < Group.CvxStart + Group.CvxCount; ++i)
 	{
-		Group.Bounds += Convexes[i].GetWorldBounds();
+		const FBox WB = Convexes[i].GetWorldBounds();
+		CvxWorldBounds[i] = WB;
+		Group.Bounds += WB;
 	}
 	Groups.Add(Group);
 }

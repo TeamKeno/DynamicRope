@@ -67,4 +67,10 @@ protected:
 private:
 	/** 마지막으로 collider를 빌드한 GFrameCounter. 같은 프레임에 여러 로프가 호출해도 재빌드 안 함(디둡). */
 	uint64 BuiltFrame = static_cast<uint64>(-1);
+
+	/**
+	 * 이번 프레임에 실제로 빌드했는지(#12 근접 게이트). 어느 로프 region도 메시 근처에 없으면 false로 두고
+	 * collider 공급을 통째로 건너뛴다(스테일 append 방지). 프레임당 첫 호출이 판정, 같은 프레임 뒤 호출은 재사용.
+	 */
+	bool bBuiltThisFrame = false;
 };

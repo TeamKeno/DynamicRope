@@ -60,6 +60,15 @@ private:
 	TArray<FRopeConvexCollider> Convexes;
 
 	/**
+	 * 프레임당 collider별 월드 AABB 캐시(Boxes/Capsules/Convexes와 평행). RecordExtractedGroup이 추출 시
+	 * 1회 계산해 채우고, GatherColliders의 region 매핑이 collider×region마다 GetWorldBounds를 재계산하는
+	 * 대신 이 캐시를 쓴다(#10 — O(region×collider) 재계산 제거).
+	 */
+	TArray<FBox> BoxWorldBounds;
+	TArray<FBox> CapWorldBounds;
+	TArray<FBox> CvxWorldBounds;
+
+	/**
 	 * 추출 그룹: 컴포넌트(또는 ISM 호출) 1회가 추가한 콜라이더의 타입별 로컬 인덱스 range + 유니언 bounds.
 	 * gather의 region 오버랩이 이미 아는 "이 바디가 어느 로프 근처인가"를 그룹 단위로 보존해,
 	 * 서브시스템의 로프별 풀 전체 재-컬(O(로프×풀))을 "그룹 유니언 선-거절 → 히트 그룹만 콜라이더별

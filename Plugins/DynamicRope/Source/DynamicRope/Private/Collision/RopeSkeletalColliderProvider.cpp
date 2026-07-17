@@ -7,6 +7,29 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 
+namespace
+{
+	// 로프 region(브로드페이즈 질의 bounds) 중 하나라도 메시의 현재 월드 bounds와 겹치는지. 어느 로프도
+	// 근처에 없으면 전 본 collider 재빌드를 건너뛴다(#12). 보수적: bounds가 불명이면 true(빌드)로 본다.
+	// region은 접촉/예측 마진을, 메시 bounds는 스킨 범위를 이미 포함하므로 겹치면 접촉 가능 = 빌드.
+	bool AnyRopeRegionNearMesh(const USkeletalMeshComponent& Mesh, TArrayView<const FBox> Regions)
+	{
+		const FBox MeshBox = Mesh.Bounds.GetBox();
+		if (!MeshBox.IsValid)
+		{
+			return true;
+		}
+		for (const FBox& Region : Regions)
+		{
+			if (Region.IsValid && Region.Intersect(MeshBox))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+}
+
 URopeSkeletalColliderProvider::URopeSkeletalColliderProvider()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -63,10 +86,21 @@ void URopeSkeletalColliderProvider::GatherColliders(FRopeColliderGatherContext& 
 	if (BuiltFrame != Frame)
 	{
 		BuiltFrame = Frame;
-		// 표면 속도(드래그) 산출용 프레임 dt. 서브클래스가 (현재-이전)/dt 로 collider의 표면 속도를 만든다.
-		const float FrameDt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
-		const float InvDt = (FrameDt > KINDA_SMALL_NUMBER) ? (1.0f / FrameDt) : 0.0f;
-		RebuildColliders(Mesh, InvDt);
+		// 근접 게이트(#12): 어느 로프 region도 이 메시 근처에 없으면 전 본 collider 재빌드를 건너뛴다. 본은 매
+		// 프레임 애니로 움직여 캐시가 무의미하므로, 근접 로프가 없으면 아예 만들지 않는다(빌드/append 스킵).
+		bBuiltThisFrame = AnyRopeRegionNearMesh(*Mesh, Gather.RopeRegions);
+		if (bBuiltThisFrame)
+		{
+			// 표면 속도(드래그) 산출용 프레임 dt. 서브클래스가 (현재-이전)/dt 로 collider의 표면 속도를 만든다.
+			const float FrameDt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
+			const float InvDt = (FrameDt > KINDA_SMALL_NUMBER) ? (1.0f / FrameDt) : 0.0f;
+			RebuildColliders(Mesh, InvDt);
+		}
+	}
+	if (!bBuiltThisFrame)
+	{
+		// 이 프레임 근접 로프 없음 → collider 공급 없음(스테일 append 방지).
+		return;
 	}
 
 	// 캐시된 collider 포인터를 넘긴다(해당 프레임 동안 유효). region 매핑: 메시(collider 유니언) 선-거절 →
