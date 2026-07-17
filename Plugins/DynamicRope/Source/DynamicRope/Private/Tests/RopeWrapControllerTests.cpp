@@ -88,4 +88,89 @@ bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 전 체인 팽팽 관측치(ComputePull): 코너-다리 chord 합(TautChordLen)과 자유 구간 rest 길이(FreeRestLen)가
+// "줄이 다 펴졌는가"를 기하로 구분하는가 — 팽팽 직선/슬랙(압축)/코너에 걸린 팽팽/앵커 다리만 스트레치된
+// 슬랙(움직이는 대상 회귀 케이스) 네 가지.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrapComputePullChainTautTest,
+	"DynamicRope.Wrap.ComputePullChainTautObservables",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
+{
+	const float BendDeg = 30.0f;
+	auto MakeWrap = [](int32 AnchorNode)
+	{
+		FRopeWrapController Wrap;
+		Wrap.State.BoneName = FName("arm");
+		FRopeSurfaceAnchor A; A.NodeIndex = AnchorNode; A.Bone = FName("arm");
+		Wrap.State.Anchors.Add(A);
+		return Wrap;
+	};
+
+	// ① 곧게 편(팽팽) 로프: 앵커 5, SegmentLength 20 → rest = 100, chord 합 = |P5-P0| = 100.
+	{
+		FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
+		FRopeWrapController Wrap = MakeWrap(5);
+		FRopePullSample Pull;
+		TestTrue(TEXT("straight ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
+		TestEqual(TEXT("straight rest length"), Pull.FreeRestLen, 100.0f, 0.1f);
+		TestEqual(TEXT("straight chord sum equals rest (taut)"), Pull.TautChordLen, 100.0f, 0.1f);
+	}
+
+	// ② 압축(슬랙) 로프: 노드 간격이 rest(20)의 절반(10)인 직선 — 굴곡 없이도 chord 합이 rest의 절반.
+	// XPBD는 압축에 저항하지 않으므로 "줄이 안 펴진" 대표 형상이다.
+	{
+		FRopeSimState Sim = RopeTest::MakeStraightRope(5, 80.0f);
+		for (int32 i = 0; i < Sim.Num(); ++i)
+		{
+			Sim.Positions[i] = FVector(10.0f * i, 0, 0);
+			Sim.PrevPositions[i] = Sim.Positions[i];
+		}
+		FRopeWrapController Wrap = MakeWrap(4);
+		FRopePullSample Pull;
+		TestTrue(TEXT("compressed ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
+		TestEqual(TEXT("compressed rest length"), Pull.FreeRestLen, 80.0f, 0.1f);
+		TestEqual(TEXT("compressed chord sum is half the rest (slack)"), Pull.TautChordLen, 40.0f, 0.1f);
+	}
+
+	// ③ 코너에 걸렸지만 두 다리 모두 팽팽: 앵커(4)→모서리(2) 40 + 모서리(2)→손(0) 40 = rest 80.
+	// 코너는 손해가 아니다 — 벽에 걸린 팽팽한 로프는 팽팽으로 인정돼 테더/Pull이 종전대로 발화한다.
+	{
+		FRopeSimState Bent;
+		Bent.Positions = {
+			FVector(-40, 0, 40), FVector(-20, 0, 40), FVector(0, 0, 40),
+			FVector(0, 0, 20), FVector(0, 0, 0),
+		};
+		Bent.PrevPositions = Bent.Positions;
+		Bent.SegmentLength = 20.0f;
+		Bent.InvMass.Init(1.0f, 5);
+		FRopeWrapController Wrap = MakeWrap(4);
+		FRopePullSample Pull;
+		TestTrue(TEXT("bent ComputePull succeeds"), Wrap.ComputePull(Bent, BendDeg, Pull));
+		TestEqual(TEXT("bent rest length"), Pull.FreeRestLen, 80.0f, 0.1f);
+		TestEqual(TEXT("bent leg chords sum to rest (taut around a corner)"), Pull.TautChordLen, 80.0f, 0.1f);
+	}
+
+	// ④ 회귀 케이스(움직이는 대상): 앵커 인접 다리(5→3)만 직선으로 스트레치(세그먼트 27 > rest 20)되고
+	// 꼬리(3→0)는 뭉쳐 처짐. sub-leg만 보면 팽팽해 보이지만 전 체인 chord 합은 rest에 한참 못 미친다 —
+	// 늘어진 줄이 끌려가던 증상의 판별이 바로 이 차이다.
+	{
+		FRopeSimState Sim = RopeTest::MakeStraightRope(6, 100.0f);
+		Sim.Positions = {
+			FVector(32, 0, -18), FVector(36, 0, -14), FVector(40, 0, -8),
+			FVector(46, 0, 0), FVector(73, 0, 0), FVector(100, 0, 0),
+		};
+		Sim.PrevPositions = Sim.Positions;
+		FRopeWrapController Wrap = MakeWrap(5);
+		FRopePullSample Pull;
+		TestTrue(TEXT("stretched-leg ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
+		TestEqual(TEXT("stretched-leg rest length"), Pull.FreeRestLen, 100.0f, 0.1f);
+		// 첫 다리는 꼬리 처짐 직전(노드 3)에서 멈춘다 — 방향/조준은 종전 산출 그대로.
+		TestEqual(TEXT("first leg still aims at the bend"), Pull.AimNode, 3);
+		TestTrue(FString::Printf(TEXT("chord sum %.1f stays well below rest 100 (slack chain)"), Pull.TautChordLen),
+			Pull.TautChordLen < 90.0f);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

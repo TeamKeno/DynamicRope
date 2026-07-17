@@ -1881,6 +1881,9 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.TetherOvershoot = PullDrive.LastTetherOvershoot;
 		Snapshot.ActivePullForce = PullDrive.ActivePullForce;
 		Snapshot.bPullTaut = PullDrive.bPullTaut;
+		Snapshot.bChainTaut = PullDrive.bChainTaut;
+		Snapshot.TautChordLen = PullDrive.LastPullSample.TautChordLen;
+		Snapshot.FreeRestLen = PullDrive.LastPullSample.FreeRestLen;
 		Snapshot.DistanceReleaseSlack = HoldConfig.DistanceReleaseSlack;
 	}
 
@@ -3509,9 +3512,19 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 	PullDrive.LastPullSample = FRopePullSample();
 	WrapController.ComputePull(Sim, HoldConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
 
-	// 팽팽(taut) 게이트 갱신(히스테리시스 래치) — 능동 Pull 인가(③)와 IsPullTaut()가 공용으로 읽는다.
+	// 전 체인 팽팽(기하) 게이트 갱신(히스테리시스 래치) — 견인 인가(③: 테더 + 능동 Pull)의 공용 선행 조건.
+	// 앵커 인접 국소 관측치(세그먼트 장력/sub-leg overshoot)는 움직이는 대상이 슬랙 로프에서도 만들어내므로
+	// (핀 노드가 이웃을 순간 스트레치 — 공중 Pierce/움직이는 정적 메시에서 늘어진 줄이 끌려가던 증상),
+	// "로프 전체가 펴졌는가"는 코너-다리 chord 합 vs 자유 구간 rest 길이의 기하로 판정한다.
 	// 샘플이 무효면 무조건 false(아래 early return과 무관하게 이번 프레임 값이 확정돼야 한다).
-	PullDrive.bPullTaut = PullDrive.LastPullSample.bValid && RopeTraction::EvaluateTautGate(
+	PullDrive.bChainTaut = PullDrive.LastPullSample.bValid
+		&& (HoldConfig.TautSlackRatio <= 0.0f || RopeTraction::EvaluateChainTautGate(
+			PullDrive.LastPullSample.TautChordLen, PullDrive.LastPullSample.FreeRestLen,
+			HoldConfig.TautSlackRatio, HoldConfig.TautSlackReleaseScale, PullDrive.bChainTaut));
+
+	// 팽팽(taut) 게이트 갱신(히스테리시스 래치) — 능동 Pull 인가(③)와 IsPullTaut()가 공용으로 읽는다.
+	// 전 체인 기하(bChainTaut) ∧ 장력 임계(보조 게이트 — ActivePullTautTension 0이면 "장력 > ~0").
+	PullDrive.bPullTaut = PullDrive.bChainTaut && RopeTraction::EvaluateTautGate(
 		PullDrive.LastPullSample.Tension, HoldConfig.ActivePullTautTension,
 		HoldConfig.ActivePullTautReleaseRatio, PullDrive.bPullTaut);
 
@@ -3572,7 +3585,8 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 	UpdateTether(DeltaTime);
 
 	// ③-2 능동 Pull(상수 힘): 사용자 입력(SetActivePull/Wielder)이 준 힘을 팽팽할 때만 인가한다.
-	// 팽팽 판정은 ②가 갱신한 bPullTaut 래치(임계/히스테리시스는 HoldConfig — 기본 임계 0 = 장력 > ~0).
+	// 팽팽 판정은 ②가 갱신한 bPullTaut 래치 = 전 체인 기하(bChainTaut) ∧ 장력 임계
+	// (임계/히스테리시스는 HoldConfig — 기본 임계 0 = 장력 > ~0).
 	// 팽팽함 무시 2층: config(bActivePullRequiresTaut=false, 로프 전체 정책) / per-call(bActivePullIgnoresTaut,
 	// SetActivePull 인자 — 애니 pull window 구간용). 어느 쪽이든 Wrapped + 유효 샘플이면 인가.
 	// 장력과 무관한 상수라 피드백 폭주가 없다.
@@ -4313,7 +4327,12 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	const float AvailLen = LegSegs * Sim.SegmentLength + HoldConfig.TetherSlack;
 	const float Overshoot = Dist - AvailLen;
 	PullDrive.LastTetherOvershoot = FMath::Max(0.0f, Overshoot);
-	if (HoldConfig.TetherResponse <= 0.0f || Overshoot <= 0.0f || Dist <= KINDA_SMALL_NUMBER)
+	// 전 체인 팽팽 게이트(bChainTaut, ②가 갱신): sub-leg overshoot는 움직이는 앵커가 슬랙 로프에서도
+	// 만들어내므로(앵커 인접 다리만 순간 스트레치, 나머지는 처짐), 로프 전체가 펴진 프레임에만 견인을
+	// 인가한다 — 앵커 속도 피드포워드까지 함께 게이트된다. 초과분 자체는 위에서 항상 계산해 둔다
+	// (거리 release/스냅샷이 소비 — 코너에 걸린 채 한계를 넘는 이탈은 여전히 잡는다).
+	if (HoldConfig.TetherResponse <= 0.0f || Overshoot <= 0.0f || Dist <= KINDA_SMALL_NUMBER
+		|| !PullDrive.bChainTaut)
 	{
 		return;
 	}

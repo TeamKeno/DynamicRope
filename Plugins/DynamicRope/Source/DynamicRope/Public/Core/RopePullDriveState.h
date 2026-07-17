@@ -74,6 +74,15 @@ struct FRopePullDriveState
 	 */
 	bool bPullTaut = false;
 
+	/**
+	 * 이번 프레임 전 체인 팽팽(기하) 게이트 상태(히스테리시스 래치 — RopeTraction::EvaluateChainTautGate).
+	 * 앵커→손 코너-다리 chord 합 vs 자유 구간 rest 길이의 비교로, 로프 **전체**가 펴져 있는가를 판정한다.
+	 * UpdateWrappedPullSample(②)이 매 Wrapped 프레임 갱신하고, 견인 인가(③: 테더 + 능동 Pull)가 선행
+	 * 조건으로 읽는다 — 국소 관측치(앵커 인접 장력/sub-leg overshoot)는 슬랙 로프에서도 발생하므로
+	 * 이 게이트가 닫혀 있으면 견인하지 않는다. bPullTaut는 이 값 ∧ 장력 임계다. ResetTransient에서 리셋.
+	 */
+	bool bChainTaut = false;
+
 	/** 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용. */
 	float LastTetherOvershoot = 0.0f;
 
@@ -119,6 +128,7 @@ struct FRopePullDriveState
 		bPrevAnchorPointValid = false;
 		bTargetPullableInit = false; // 다음 wrap 시작 시 순수 비교로 다시 시드.
 		bPullTaut = false;
+		bChainTaut = false;
 		bLoggedPullNoReceiver = false;
 	}
 };

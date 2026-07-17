@@ -607,6 +607,17 @@ struct FRopePullSample
 
 	/** 노드 사이 보간된 조준 월드 위치(AimNodeF 위치). */
 	FVector AimPos = FVector::ZeroVector;
+
+	/**
+	 * 앵커→손 코너-다리 chord 합(cm). walk를 첫 코너에서 멈추지 않고 손(노드 0)까지 이어 각 다리의 직선
+	 * 거리를 누적한 값 — FreeRestLen과의 비교가 "전 체인 팽팽" 판정의 관측치다(RopeTraction::
+	 * EvaluateChainTautGate). 처짐은 chord를 rest보다 짧게 만들고, 코너에 걸린 팽팽한 로프는 다리별 chord가
+	 * rest에 근접해 팽팽으로 인정된다.
+	 */
+	float   TautChordLen = 0.0f;
+
+	/** 자유 구간(손~앵커) rest 길이(cm) = AnchorNode × SegmentLength(되감기 축소 자동 반영). */
+	float   FreeRestLen = 0.0f;
 };
 
 /** rope 중심선: 파티클의 체인. solver / 로직 / 렌더의 단일 진실 공급원(single source of truth). */
@@ -1315,6 +1326,26 @@ struct FRopeHoldConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float ActivePullTautReleaseRatio = 0.5f;
+
+	/**
+	 * 전 체인 팽팽 판정의 슬랙 허용 비율 [0..1]. 앵커→손 코너-다리 chord 합이 자유 구간 rest 길이 ×
+	 * (1 − 이 값) 이상이어야 로프 전체가 팽팽한 것으로 보고, **팽팽할 때만 견인(테더 + 능동 Pull)이
+	 * 인가된다**. 앵커 인접 국소 관측치(세그먼트 장력/sub-leg overshoot)는 움직이는 대상이 슬랙 로프에서도
+	 * 만들어내므로(핀 노드가 이웃을 순간 스트레치 — 공중 Pierce/움직이는 정적 메시에서 늘어진 줄이 끌려가던
+	 * 증상) 그것만으론 게이트가 못 된다. 코너에 걸린 팽팽한 로프는 다리별 chord가 rest에 근접해 팽팽으로
+	 * 인정된다(벽 코너 시나리오 보존). 비율이라 로프 길이/되감기(SegmentLength 축소)에 자동 스케일.
+	 * 0 = 게이트 없음(종전 동작 — 국소 관측치만으로 판정).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TautSlackRatio = 0.03f;
+
+	/**
+	 * 전 체인 팽팽 판정 히스테리시스 배율(≥ 1). 일단 팽팽으로 판정되면 슬랙 비율이 TautSlackRatio × 이 값을
+	 * 넘어야 해제된다(진입/유지 임계 분리 — 경계의 chord 지터로 게이트가 켜졌다 꺼졌다 퍼덕이는 것을 방지).
+	 * 1 = 히스테리시스 없음(진입=유지). TautSlackRatio가 0이면 무의미.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "1.0"))
+	float TautSlackReleaseScale = 2.0f;
 
 	/**
 	 * 능동 Pull의 **견인 목표 속도**(cm/s). 능동 Pull은 대상을 이 속도로 당김 방향을 따라 몰되(장력 상한 PullForce

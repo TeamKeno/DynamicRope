@@ -388,4 +388,40 @@ bool FRopeTractionTautGateTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 전 체인 팽팽(기하) 게이트: chord 합 vs rest 길이 비교 + 진입/유지 히스테리시스 + 판정 불능 방어.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionChainTautGateTest,
+	"DynamicRope.Traction.ChainTautGate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTractionChainTautGateTest::RunTest(const FString& Parameters)
+{
+	// rest 100, 슬랙 허용 3%: 진입 임계 = 97.
+	TestTrue(TEXT("chord at rest enters taut"),
+		RopeTraction::EvaluateChainTautGate(100.0f, 100.0f, 0.03f, 2.0f, /*bWasTaut*/ false));
+	TestTrue(TEXT("chord within the slack ratio enters taut"),
+		RopeTraction::EvaluateChainTautGate(97.5f, 100.0f, 0.03f, 2.0f, /*bWasTaut*/ false));
+	TestFalse(TEXT("sagging chord stays slack"),
+		RopeTraction::EvaluateChainTautGate(80.0f, 100.0f, 0.03f, 2.0f, /*bWasTaut*/ false));
+
+	// 히스테리시스(배율 2 → 유지 임계 = 94): 일단 팽팽이면 진입 임계 아래로 살짝 처져도 유지된다.
+	TestFalse(TEXT("chord just below the enter threshold does not enter"),
+		RopeTraction::EvaluateChainTautGate(96.0f, 100.0f, 0.03f, 2.0f, /*bWasTaut*/ false));
+	TestTrue(TEXT("latched taut survives a dip into the hysteresis band"),
+		RopeTraction::EvaluateChainTautGate(96.0f, 100.0f, 0.03f, 2.0f, /*bWasTaut*/ true));
+	TestFalse(TEXT("latched taut releases below the stay threshold"),
+		RopeTraction::EvaluateChainTautGate(90.0f, 100.0f, 0.03f, 2.0f, /*bWasTaut*/ true));
+
+	// 배율 1 = 히스테리시스 없음(진입 = 유지).
+	TestFalse(TEXT("release scale one collapses the hysteresis band"),
+		RopeTraction::EvaluateChainTautGate(96.0f, 100.0f, 0.03f, 1.0f, /*bWasTaut*/ true));
+
+	// 방어: rest ≤ 0(자유 구간 없음)은 항상 슬랙. 비율×배율 ≥ 1은 "슬랙 전량 허용"으로 수렴 —
+	// 래치된 게이트가 chord와 무관하게 유지된다(캡은 음수 임계 방지일 뿐, 의미는 동일).
+	TestFalse(TEXT("zero rest length never reports taut"),
+		RopeTraction::EvaluateChainTautGate(100.0f, 0.0f, 0.03f, 2.0f, /*bWasTaut*/ true));
+	TestTrue(TEXT("ratio times scale of one or more keeps the latched gate open"),
+		RopeTraction::EvaluateChainTautGate(0.0f, 100.0f, 0.9f, 5.0f, /*bWasTaut*/ true));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

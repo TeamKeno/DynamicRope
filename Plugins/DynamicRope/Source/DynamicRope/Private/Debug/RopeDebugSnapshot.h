@@ -140,6 +140,12 @@ struct FRopeDebugSnapshot
 	float ActivePullForce = 0.0f;
 	// 팽팽(taut) 게이트 상태 — 능동 Pull 인가 조건(IsPullTaut와 동일 래치)
 	bool bPullTaut = false;
+	// 전 체인 팽팽(기하) 게이트 — 견인(테더+능동 Pull) 공용 선행 조건(코너-다리 chord 합 vs rest 길이)
+	bool bChainTaut = false;
+	// 앵커→손 코너-다리 chord 합(cm) — bChainTaut의 관측치
+	float TautChordLen = 0.0f;
+	// 자유 구간(손~앵커) rest 길이(cm) = AnchorNode × SegmentLength
+	float FreeRestLen = 0.0f;
 	// 거리 release 한계(cm, 0=비활성) — 표시용
 	float DistanceReleaseSlack = 0.0f;
 

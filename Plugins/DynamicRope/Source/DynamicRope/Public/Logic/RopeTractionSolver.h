@@ -103,4 +103,15 @@ namespace RopeTraction
 	 * 켜졌다 꺼졌다 퍼덕이는 것을 막는다(ReleaseRatio는 [0..1]로 클램프).
 	 */
 	DYNAMICROPE_API bool EvaluateTautGate(float Tension, float Threshold, float ReleaseRatio, bool bWasTaut);
+
+	/**
+	 * 전 체인 팽팽(taut) 기하 게이트 판정(히스테리시스 래치). 앵커→손 코너-다리 chord 합(ChordLen)이 자유
+	 * 구간 rest 길이(RestLen) × (1 − SlackRatio) 이상이면 로프 전체가 팽팽하다 — 처짐은 다리 chord를 rest보다
+	 * 짧게 만들고, 코너에 걸린 팽팽한 로프는 다리별 chord가 rest에 근접해 팽팽으로 인정된다(코너는 손해가
+	 * 아니다). 앵커 인접 국소 관측치(세그먼트 장력/sub-leg overshoot)는 움직이는 대상이 슬랙 로프에서도
+	 * 만들어내므로(핀 노드가 이웃을 순간 스트레치) 그것만으론 "줄이 다 펴졌나"를 판정할 수 없다 — 그 보완이다.
+	 * 유지(bWasTaut=true)는 SlackRatio × ReleaseScale(≥1)로 완화해 경계의 chord 지터로 게이트가 퍼덕이는
+	 * 것을 막는다. RestLen ≤ 0이면 false(판정 불능).
+	 */
+	DYNAMICROPE_API bool EvaluateChainTautGate(float ChordLen, float RestLen, float SlackRatio, float ReleaseScale, bool bWasTaut);
 }

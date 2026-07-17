@@ -323,7 +323,9 @@ void URopeWielderComponent::UpdateGroundExit()
 	{
 		return;
 	}
-	if (Rope->GetTetherOvershoot() < GroundExitMinOvershoot)
+	// 전 체인이 팽팽해야 테더가 실제로 인가된다 — overshoot는 슬랙 체인에서도 sub-leg 스트레치로
+	// >0일 수 있으므로(움직이는 앵커), 그것만 보고 지상을 이탈하면 견인 없는 헛 낙하가 된다.
+	if (!Rope->IsChainTaut() || Rope->GetTetherOvershoot() < GroundExitMinOvershoot)
 	{
 		return;
 	}

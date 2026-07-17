@@ -242,20 +242,42 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 	// 코너 판정을 시작한다(손이 더 가까우면 손까지). 잔여 시간 지터/이산 홉은 호출자의 fractional 스무딩이 흡수.
 	const float CosThresh = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(BendThresholdDeg, 1.0f, 179.0f)));
 	const FVector AnchorPos = Sim.Positions[AnchorNode];
-	// 2세그먼트 시드(가능하면) — 첫 스텝 단일 세그먼트 노이즈 회피.
-	int32 AimNode = FMath::Max(AnchorNode - 2, 0);
-	for (int32 j = AimNode - 1; j >= 0; --j)
+	// 다리(leg) 단위 walk: 앵커에서 손(노드 0)까지 코너마다 다리를 끊어 걷는다. 첫 다리의 끝(AimNode)은
+	// 방향/테더 overshoot의 조준(종전과 동일 산출)이고, 모든 다리의 chord 합(TautChordLen)은 "전 체인 팽팽"
+	// 판정의 관측치다 — 처짐은 chord를 rest보다 짧게 만들고, 코너에 걸린 팽팽한 로프는 다리별 chord가
+	// rest에 근접해 팽팽으로 남는다(코너는 손해가 아니다).
+	int32 LegStart = AnchorNode;
+	// 첫 다리는 2세그먼트 시드(가능하면) — 첫 스텝 단일 세그먼트 노이즈 회피(종전 동작).
+	int32 LegEnd = FMath::Max(AnchorNode - 2, 0);
+	int32 AimNode = INDEX_NONE; // 첫 다리의 끝(아래 첫 바퀴에 확정)
+	float ChordSum = 0.0f;
+	while (true)
 	{
-		// LegSoFar = 누적 다리 chord(긴 baseline), NextSeg = 다음 세그먼트.
-		const FVector LegSoFar = (Sim.Positions[AimNode] - AnchorPos).GetSafeNormal();
-		const FVector NextSeg  = (Sim.Positions[j] - Sim.Positions[AimNode]).GetSafeNormal();
-		if (LegSoFar.IsNearlyZero() || NextSeg.IsNearlyZero()
-			|| FVector::DotProduct(NextSeg, LegSoFar) < CosThresh)
+		for (int32 j = LegEnd - 1; j >= 0; --j)
 		{
-			// 코너(또는 축퇴) — 직전 노드(AimNode)가 첫 다리의 끝.
+			// LegSoFar = 누적 다리 chord(긴 baseline), NextSeg = 다음 세그먼트.
+			const FVector LegSoFar = (Sim.Positions[LegEnd] - Sim.Positions[LegStart]).GetSafeNormal();
+			const FVector NextSeg  = (Sim.Positions[j] - Sim.Positions[LegEnd]).GetSafeNormal();
+			if (LegSoFar.IsNearlyZero() || NextSeg.IsNearlyZero()
+				|| FVector::DotProduct(NextSeg, LegSoFar) < CosThresh)
+			{
+				// 코너(또는 축퇴) — 직전 노드(LegEnd)가 이 다리의 끝.
+				break;
+			}
+			LegEnd = j;
+		}
+		if (AimNode == INDEX_NONE)
+		{
+			AimNode = LegEnd;
+		}
+		ChordSum += static_cast<float>((Sim.Positions[LegEnd] - Sim.Positions[LegStart]).Size());
+		if (LegEnd <= 0)
+		{
 			break;
 		}
-		AimNode = j;
+		// 다음 다리: 코너 노드에서 재시작(1세그먼트 시드 — chord 합엔 baseline 노이즈 영향이 미미하다).
+		LegStart = LegEnd;
+		LegEnd = LegEnd - 1;
 	}
 	const FVector Along = (Sim.Positions[AimNode] - AnchorPos).GetSafeNormal();
 	if (Along.IsNearlyZero())
@@ -272,6 +294,9 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 	Out.Direction = Along;
 	// 앵커-손 쪽 인접 세그먼트(인덱스 AnchorNode-1)의 장력. 아직 솔브 전이면(배열 비어 있음) 0.
 	Out.Tension = Sim.SegmentTension.IsValidIndex(AnchorNode - 1) ? Sim.SegmentTension[AnchorNode - 1] : 0.0f;
+	// 전 체인 팽팽 관측치: 다리 chord 합 + 자유 구간 rest 길이(소비 = 컴포넌트의 EvaluateChainTautGate).
+	Out.TautChordLen = ChordSum;
+	Out.FreeRestLen = static_cast<float>(AnchorNode) * Sim.SegmentLength;
 	return true;
 }
 

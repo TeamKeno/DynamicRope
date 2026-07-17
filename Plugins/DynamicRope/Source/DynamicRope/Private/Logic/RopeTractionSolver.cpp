@@ -95,4 +95,18 @@ namespace RopeTraction
 		const float StayAbove = FMath::Max(Threshold * FMath::Clamp(ReleaseRatio, 0.0f, 1.0f), KINDA_SMALL_NUMBER);
 		return Tension > (bWasTaut ? StayAbove : EnterAbove);
 	}
+
+	bool EvaluateChainTautGate(float ChordLen, float RestLen, float SlackRatio, float ReleaseScale, bool bWasTaut)
+	{
+		if (RestLen <= KINDA_SMALL_NUMBER)
+		{
+			// 자유 구간 없음(앵커=손) 등 판정 불능 — 팽팽 아님.
+			return false;
+		}
+		// 진입/유지 임계 분리(히스테리시스): 유지는 슬랙 허용을 ReleaseScale배로 완화한다. 곱이 1 이상이면
+		// "슬랙 전량 허용"(래치된 게이트가 chord와 무관하게 유지)으로 수렴한다 — 1로 캡해 음수 임계를 막는다.
+		const float Ratio = FMath::Clamp(SlackRatio, 0.0f, 1.0f);
+		const float EffRatio = bWasTaut ? FMath::Min(Ratio * FMath::Max(ReleaseScale, 1.0f), 1.0f) : Ratio;
+		return ChordLen >= RestLen * (1.0f - EffRatio);
+	}
 }

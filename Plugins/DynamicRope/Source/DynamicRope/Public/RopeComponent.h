@@ -375,13 +375,24 @@ public:
 	}
 
 	/**
-	 * 이번 프레임 로프가 팽팽(taut)한가 — 능동 Pull 게이트와 같은 판정(Pull 샘플 장력 vs
-	 * HoldConfig.ActivePullTautTension, 히스테리시스 포함). Wrapped 동안 매 프레임 갱신되며 그 외 phase는
-	 * false. bActivePullRequiresTaut=false여도 판정 자체는 계속 갱신된다 — 애니메이션 pull window/BP가
-	 * "지금 당겨도 되는 구간인가"를 물을 때 이 하나를 읽는다.
+	 * 이번 프레임 로프가 팽팽(taut)한가 — 능동 Pull 게이트와 같은 판정: 전 체인 기하(코너-다리 chord 합 vs
+	 * 자유 구간 rest 길이, HoldConfig.TautSlackRatio) ∧ 장력 임계(Pull 샘플 장력 vs
+	 * HoldConfig.ActivePullTautTension), 둘 다 히스테리시스 포함. Wrapped 동안 매 프레임 갱신되며 그 외
+	 * phase는 false. bActivePullRequiresTaut=false여도 판정 자체는 계속 갱신된다 — 애니메이션 pull window/
+	 * BP가 "지금 당겨도 되는 구간인가"를 물을 때 이 하나를 읽는다.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool IsPullTaut() const { return PullDrive.bPullTaut; }
+
+	/**
+	 * 이번 프레임 전 체인이 기하적으로 팽팽한가 — 코너-다리 chord 합 vs 자유 구간 rest 길이
+	 * (HoldConfig.TautSlackRatio, 히스테리시스 포함)의 순수 기하 판정으로, 장력 임계와 무관하다
+	 * (IsPullTaut = 이 값 ∧ 장력 임계). 견인(테더 + 능동 Pull)의 공용 선행 조건 — 테더 overshoot는 슬랙
+	 * 체인에서도 sub-leg 스트레치로 >0일 수 있으므로, overshoot 소비자는 이 게이트를 함께 봐야 한다.
+	 * Wrapped 동안 매 프레임 갱신되며 그 외 phase는 false.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	bool IsChainTaut() const { return PullDrive.bChainTaut; }
 
 	/** 이번 프레임 테더 초과분(cm): 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). Wrapped 동안
 	 *  매 프레임 산출된다(테더 off여도 계산). wielder 견인/지상 이탈 판정 등 게임 반응용. */
