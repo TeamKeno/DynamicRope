@@ -28,6 +28,7 @@
 // 틱 선행조건(애니 평가 이후 보장)
 #include "Components/SkeletalMeshComponent.h"
 #include "Async/ParallelFor.h"
+#include "Debug/RopeStats.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 // GDynamicRHI
 #include "RHI.h"
@@ -136,6 +137,13 @@ void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
 {
 	if (Rope)
 	{
+		if (bTickingRopes)
+		{
+			// 틱 순회 중 재진입(핸들러가 로프 액터 스폰) — 변형을 미룬다(헤더 bTickingRopes 주석).
+			DeferredRopeUnregister.RemoveSingleSwap(Rope);
+			DeferredRopeRegister.AddUnique(Rope);
+			return;
+		}
 		Ropes.AddUnique(Rope);
 		// 손 핀(소켓 부착)이 소유 캐릭터 포즈를 따르므로.
 		SetAnimPrerequisites(Rope, /*bAdd*/ true);
@@ -145,6 +153,17 @@ void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
 
 void URopeSimSubsystem::UnregisterRope(URopeComponent* Rope)
 {
+	if (bTickingRopes)
+	{
+		// 틱 순회 중 재진입(핸들러가 로프 액터 파괴) — 실제 제거는 ApplyDeferredRopeChanges로 미룬다. 이번
+		// 프레임 남은 순회는 IsValid 가드가 이 로프(파괴 → pending-kill)를 건너뛴다(헤더 bTickingRopes 주석).
+		if (Rope)
+		{
+			DeferredRopeRegister.RemoveSingleSwap(Rope);
+			DeferredRopeUnregister.AddUnique(Rope);
+		}
+		return;
+	}
 	Ropes.RemoveSingleSwap(Rope);
 	if (Rope)
 	{
@@ -156,6 +175,31 @@ void URopeSimSubsystem::UnregisterRope(URopeComponent* Rope)
 	}
 	UE_LOG(LogDynamicRope, Verbose, TEXT("UnregisterRope: %s (%d remaining)"),
 		Rope ? *Rope->GetName() : TEXT("null"), Ropes.Num());
+}
+
+void URopeSimSubsystem::ApplyDeferredRopeChanges()
+{
+	// 순서: 해제 먼저, 등록 나중(같은 틱에 스폰+파괴된 로프도 최종 상태로 수렴). bTickingRopes는 이미
+	// false라 아래 호출은 실제 Ropes 변형/GPU 해제를 수행한다(Register/Unregister는 델리게이트를 쏘지
+	// 않으므로 여기서 추가 재진입은 없다).
+	if (DeferredRopeUnregister.Num() > 0)
+	{
+		TArray<URopeComponent*> ToUnregister = MoveTemp(DeferredRopeUnregister);
+		DeferredRopeUnregister.Reset();
+		for (URopeComponent* Rope : ToUnregister)
+		{
+			UnregisterRope(Rope);
+		}
+	}
+	if (DeferredRopeRegister.Num() > 0)
+	{
+		TArray<URopeComponent*> ToRegister = MoveTemp(DeferredRopeRegister);
+		DeferredRopeRegister.Reset();
+		for (URopeComponent* Rope : ToRegister)
+		{
+			RegisterRope(Rope);
+		}
+	}
 }
 
 URopeSimSubsystem* URopeSimSubsystem::Get(const UWorld* World)
@@ -487,6 +531,7 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 void URopeSimSubsystem::Tick(float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SubsystemTick);
+	SCOPE_CYCLE_COUNTER(STAT_RopeSim_Tick);
 
 	// 무효 항목 정리.
 	Ropes.RemoveAllSwap([](const TObjectPtr<URopeComponent>& Rope) { return !IsValid(Rope.Get()); });
@@ -499,6 +544,11 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	const bool bUseGPU = RopeGpuRuntimeAvailable();
 	// GPU 솔브 시 감지도 GPU(별도 토글 없음).
 	const bool bUseGPUContacts = bUseGPU;
+
+	// 'stat DynamicRope' 프레임 대시보드용 집계. NumGdfRopes/TotalFrameColliders는 아래 GPU/gather 루프에
+	// 얹어 모으고(서브시스템만 아는 값), 나머지 페이즈/솔브 경로 카운터는 RecordFrameStats가 public 게터로 집계.
+	int32 NumGdfRopes = 0;
+	int32 TotalFrameColliders = 0;
 
 	// GPU 상주(M5): RT 리드백이 채운 RopeId별 최신(약 1~2프레임 지연) 위치를 회수해 캐시. 아래 Phase 2에서
 	// Free/Flight 로프의 Sim(렌더/충돌 미러)에 반영한다. 순차 의존성은 GPU 영속 버퍼 안에서 충족된다.
@@ -513,30 +563,48 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		}
 	}
 
+	// 아래 로프 순회 동안 Register/UnregisterRope의 Ropes 변형을 지연시킨다(재진입 가드 — 헤더 주석).
+	// ResolvePendingAimThrow/Prepare/Finalize가 쏘는 델리게이트 핸들러의 로프 스폰/파괴에 대비.
+	bTickingRopes = true;
+
 	// Phase 1a (GT): collider 중앙 수집 — 등록된 provider에서 프레임당 1회 빌드 후 로프별 필터로 FrameColliders 채움.
 	// (로프마다 월드를 스캔하던 것을 대체. collider 포인터는 provider 소유라 이번 프레임 solve/finalize 동안 유효.)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_GatherColliders);
+		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Gather);
 		BuildFrameColliders();
 		// 로프 인덱스 = FrameRopeRegions/provider 매핑의 region 인덱스(위 무효 정리 후 순서 고정).
 		for (int32 RopeIndex = 0; RopeIndex < Ropes.Num(); ++RopeIndex)
 		{
-			GatherCollidersForRope(*Ropes[RopeIndex], RopeIndex, Ropes[RopeIndex]->SimFrame.FrameColliders);
+			// 이 프레임 앞선 재진입으로 파괴된(pending-kill) 로프는 건너뛴다. FrameRopeRegions는 !IsValid
+			// 자리를 유지하므로 인덱스 대응은 그대로다(변형은 지연됐고 순서는 불변).
+			URopeComponent* Rope = Ropes[RopeIndex];
+			if (!IsValid(Rope))
+			{
+				continue;
+			}
+			GatherCollidersForRope(*Rope, RopeIndex, Rope->SimFrame.FrameColliders);
 			// 입력 순간 고정한 ray bounds로 collider를 모은 직후 Aim throw를 확정한다.
 			// 이 순서 덕분에 같은 요청의 최신 FrameColliders로 hit 또는 FrameForward fallback을 결정한다.
-			Ropes[RopeIndex]->ResolvePendingAimThrow();
+			Rope->ResolvePendingAimThrow();
 			// Aim ray가 mesh+bone을 잠근 throw는 여기서 다른 본 collider를 제거한다.
 			// 실제/예측 contact와 wrapping path는 항상 이 결과를 쓴다. 일반 solve도 이 목록을 쓰지만,
 			// collision-free Aim Flight solve는 거리/굽힘만 풀기 위해 목록을 의도적으로 무시한다.
-			Ropes[RopeIndex]->FilterFrameCollidersForAimWrapTarget();
+			Rope->FilterFrameCollidersForAimWrapTarget();
+			TotalFrameColliders += Rope->SimFrame.FrameColliders.Num();
 		}
 	}
 
 	// Phase 1b (GT): 준비 — init/pin + 로직 phase 처리(collider는 위에서 이미 채워짐).
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Prepare);
+		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Prepare);
 		for (URopeComponent* Rope : Ropes)
 		{
+			if (!IsValid(Rope))
+			{
+				continue;
+			}
 			Rope->PrepareSimFrame(DeltaTime);
 		}
 	}
@@ -550,13 +618,17 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		// (OverrideFrame)을 override 패스로 실어 재시드 없이 커널에서 적용한다. 적분이 없는
 		// 로직 프레임은 NumSub=0 override-only dispatch. 접촉 감지는 Finalize가 지연 미러로 처리(G3).
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SolveGPU);
+		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Solve);
 
 		TArray<FRopeGPUResidentStep> Steps;
 		Steps.Reserve(Ropes.Num());
-		// Phase 2c: GDF 소비자 게이트 — 활성 GDF 로프 수(엔진 온디맨드 빌드 신호).
-		int32 NumGdfRopes = 0;
+		// Phase 2c: GDF 소비자 게이트 — 활성 GDF 로프 수(엔진 온디맨드 빌드 신호). NumGdfRopes는 Tick 상단에서 hoist.
 		for (URopeComponent* Rope : Ropes)
 		{
+			if (!IsValid(Rope))
+			{
+				continue;
+			}
 			FRopeGPUResidentStep Step;
 			if (TryBuildResidentStep(*Rope, DeltaTime, Step))
 			{
@@ -582,19 +654,30 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	{
 		// CPU 경로(기본): 로프는 서로 독립 + collider 스냅샷 read-only → 스레드 안전.
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SolveParallel);
+		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Solve);
 		ParallelFor(Ropes.Num(), [this, DeltaTime](int32 Index)
 		{
+			URopeComponent* Rope = Ropes[Index];
+			if (!IsValid(Rope))
+			{
+				return;
+			}
 			// CPU 경로 → resident 렌더 안 함(M5b).
-			Ropes[Index]->SimFrame.bGpuSteppedThisFrame = false;
-			Ropes[Index]->SolveSimFrame(DeltaTime);
+			Rope->SimFrame.bGpuSteppedThisFrame = false;
+			Rope->SolveSimFrame(DeltaTime);
 		});
 	}
 
 	// Phase 3 (GT): 마무리 — Flight 접촉 감지/캡처(UObject·이벤트) + 렌더 dirty.
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Finalize);
+		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Finalize);
 		for (URopeComponent* Rope : Ropes)
 		{
+			if (!IsValid(Rope))
+			{
+				continue;
+			}
 			// G3: GPU 감지 결과를 귀속해 Finalize의 Flight 접촉 소스를 GPU 후보로 채운다.
 			// 게이트는 전역이 아니라 로프별 bGpuSteppedThisFrame — 이 프레임 실제로 GPU step된 로프만
 			// GPU 감지를 쓴다. GPU step 못 한 로프(노드>256 등)는 CPU 솔브됐으므로 여기서도 GPU 후보를
@@ -610,6 +693,16 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 
 	// 슬립(Free 정지 로프 솔브 스킵)/거리 LOD(iteration 감쇠)/gather 거리 컬링은 구현됨 — 컴포넌트
 	// (UpdateSleepState/ComputeSolverLOD) + GatherCollidersForRope. TODO: 프레임당 총 솔브 비용 상한.
+
+	// 'stat DynamicRope' — 프레임 부하/페이즈 대시보드 갱신(그룹 미수집 시 helper가 순회 스킵).
+	RopeStats::FRopeFrameCounters FrameCounters;
+	FrameCounters.NumGdfDispatched = NumGdfRopes;
+	FrameCounters.FrameColliders = TotalFrameColliders;
+	RopeStats::RecordFrameStats(Ropes, FrameCounters);
+
+	// 순회 종료 — 미뤄둔 로프 등록/해제를 지금 반영한다(이후부터 즉시 변형 재개).
+	bTickingRopes = false;
+	ApplyDeferredRopeChanges();
 }
 
 void FRopeSimTickFunction::ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type /*CurrentThread*/,

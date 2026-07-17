@@ -451,6 +451,11 @@ public:
 	/** 이번 프레임 이 로프가 GPU 솔버로 step됐는가(false면 CPU 폴백/솔버 off). 디버그 확인용. */
 	bool IsGpuSteppedThisFrame() const { return SimFrame.bGpuSteppedThisFrame; }
 
+	/** 이번 프레임 이 로프가 (CPU/GPU 무관) 실제로 물리 솔브 스텝을 밟았는가. 슬립·Contacting·Releasing·
+	 *  로직 override-only 프레임은 false. IsGpuSteppedThisFrame()과 조합하면 CPU 폴백 솔브를 가려낸다
+	 *  (WasSolvedThisFrame() && !IsGpuSteppedThisFrame()). 디버그/프로파일용. */
+	bool WasSolvedThisFrame() const { return SimFrame.bSolveThisFrame; }
+
 	/** 현재 감고 있는 본 이름(Wrapped 동안 유효, 아니면 None). 이벤트 파라미터 없이도 조회 가능하게 노출. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
