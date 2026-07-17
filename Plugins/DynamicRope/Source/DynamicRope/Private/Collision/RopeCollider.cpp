@@ -72,6 +72,24 @@ FRopeContact FCapsuleCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
 	const float  MinDist = Radius + Q.NodeRadius;
 
+	// 분리 가드(RopeCollision::IsSweptSeparating): 접촉 스킨 안에서 시작해 표면 바깥으로 분리 중이면 재-핀 생략.
+	// 시작 재질점(TSeg0)을 시작/끝 포즈로 이월해 접촉점 이동을, 끝 포즈 세그먼트로 끝 접촉 여부를 판정한다.
+	{
+		const float   TSeg0 = RopeMath::ClosestSegmentParam(Q.WorldStart, CapAS, CapBS);
+		const FVector Closest0 = FMath::Lerp(CapAS, CapBS, TSeg0);
+		const FVector ToNode0 = Q.WorldStart - Closest0;
+		const float   Dist0 = static_cast<float>(ToNode0.Size());
+		const FVector Outward0 = (Dist0 > KINDA_SMALL_NUMBER) ? (ToNode0 / Dist0) : FVector::UpVector;
+		const FVector Closest0End = FMath::Lerp(CapAE, CapBE, TSeg0);
+		const float   TSeg1 = RopeMath::ClosestSegmentParam(Q.WorldEnd, CapAE, CapBE);
+		const bool    bEndInContact = static_cast<float>(FVector::Dist(Q.WorldEnd, FMath::Lerp(CapAE, CapBE, TSeg1))) < MinDist;
+		if (RopeCollision::IsSweptSeparating(Q.WorldStart, Q.WorldEnd, Closest0, Closest0End, Outward0,
+			/*bStartInContact*/ Dist0 < MinDist, bEndInContact))
+		{
+			return Contact;
+		}
+	}
+
 	for (int32 k = 0; k < NumSamples; ++k)
 	{
 		const float T = (NumSamples <= 1) ? 1.0f : static_cast<float>(k) / static_cast<float>(NumSamples - 1);

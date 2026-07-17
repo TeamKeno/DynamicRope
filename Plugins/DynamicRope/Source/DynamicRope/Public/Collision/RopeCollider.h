@@ -107,6 +107,28 @@ struct FRopeSurfaceProjection
 	const USceneComponent* SourceMesh = nullptr;
 };
 
+/**
+ * QuerySwept 분리 가드 공용 판정(SDF QuerySwept가 로컬 프레임으로 하는 것의 월드-공간 일반화). 노드가 접촉
+ * 스킨 안에서 시작해 표면 *바깥쪽*으로 빠져나가는 중이면 재-핀하지 않는다 — 안 그러면 접촉 노드가 매
+ * substep 시작점으로 되돌려져 영영 못 떨어진다(움직이는 본을 따라 질질 끌리거나 저장력 끝 노드가 붙어 있음).
+ * 시작 접촉 + 끝점 스킨 밖 + 상대 변위(노드 이동 - 접촉 재질점 이동)가 시작 바깥 법선 방향으로 양수일 때만
+ * true. 관통(안쪽 이동 → 반대편 스킨 밖)은 sweep이 첫 접촉에서 잡으므로 여기서 걸러지지 않는다.
+ */
+namespace RopeCollision
+{
+	inline bool IsSweptSeparating(const FVector& NodeStart, const FVector& NodeEnd,
+		const FVector& ContactPointStart, const FVector& ContactPointEnd,
+		const FVector& StartOutwardNormal, bool bStartInContact, bool bEndInContact)
+	{
+		if (!bStartInContact || bEndInContact)
+		{
+			return false;
+		}
+		const FVector RelativeDisplacement = (NodeEnd - NodeStart) - (ContactPointEnd - ContactPointStart);
+		return FVector::DotProduct(RelativeDisplacement, StartOutwardNormal) > 0.0f;
+	}
+}
+
 /** rope solver가 query하는 추상 collider. */
 class DYNAMICROPE_API IRopeCollider
 {
@@ -151,6 +173,17 @@ public:
 	 */
 	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 	{
+		// 분리 가드(RopeCollision::IsSweptSeparating): 접촉 스킨 안에서 시작해 표면 바깥으로 분리 중이면 재-핀
+		// 하지 않는다. 정적 폴백이라 collider 모션 0 → 접촉 재질점 이동도 0(같은 점 전달, 상대변위=노드변위).
+		// 끝점 query는 시작이 접촉일 때만(단축 평가).
+		const FRopeContact Start = Query(Q.WorldStart, Q.NodeRadius);
+		if (Start.bHit && RopeCollision::IsSweptSeparating(Q.WorldStart, Q.WorldEnd,
+			Start.SurfacePoint, Start.SurfacePoint, Start.Normal,
+			/*bStartInContact*/ true, /*bEndInContact*/ Query(Q.WorldEnd, Q.NodeRadius).bHit))
+		{
+			OutHitWorldPos = Q.WorldEnd;
+			return FRopeContact();
+		}
 		const double L = FVector::Dist(Q.WorldStart, Q.WorldEnd);
 		const int32 NumSamples = FMath::Clamp(1 + FMath::FloorToInt(L / FMath::Max(Q.SweepStep, 0.1f)), 1, FMath::Max(1, Q.MaxSamples));
 		for (int32 k = 0; k < NumSamples; ++k)

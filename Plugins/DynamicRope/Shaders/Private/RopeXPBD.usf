@@ -183,6 +183,19 @@ void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 
 		const float  L = distance(SegA, SegB) + max(distance(CapAS, CapAE), distance(CapBS, CapBE));
 		const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
 
+		// 분리 가드(CPU RopeCollision::IsSweptSeparating / SDF 미러): 접촉 스킨 안에서 시작해 표면 바깥으로
+		// 분리 중이면 재-핀 생략. 시작 재질점을 끝 포즈로 이월해 접촉점 이동을, 끝 포즈로 끝 접촉을 판정한다.
+		{
+			float3 N0; float Pen0; float TSeg0; float3 C0;
+			if (RopeQueryCapsulePoint(CapAS, CapBS, Cap.B.w, SegA, P.CollisionRadius, N0, Pen0, TSeg0, C0))
+			{
+				const float3 C0End = lerp(CapAE, CapBE, TSeg0);
+				float3 N1; float Pen1; float TSeg1; float3 C1;
+				const bool bEndIn = RopeQueryCapsulePoint(CapAE, CapBE, Cap.B.w, SegB, P.CollisionRadius, N1, Pen1, TSeg1, C1);
+				if (!bEndIn && dot((SegB - SegA) - (C0End - C0), N0) > 0.0f) { continue; }
+			}
+		}
+
 		for (int k = 0; k < NumSamples; ++k)
 		{
 			const float  T = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
@@ -350,6 +363,22 @@ void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N, inout float4 Con
 		const float  L = distance(SegA, SegB) + distance(CenterS, CenterE);
 		const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
 
+		// 분리 가드(CPU RopeCollision::IsSweptSeparating / SDF 미러): 접촉 스킨 안에서 시작해 바깥으로 분리
+		// 중이면 재-핀 생략. 시작 포즈 박스로 시작 접촉/재질점을, 끝 포즈 박스로 끝 접촉을 판정한다.
+		{
+			FRopeBox BoxS = Box; BoxS.Center = float4(CenterS, 0.0f); BoxS.Rot = RotS;
+			float3 N0; float Pen0; float3 C0;
+			if (RopeQueryBoxPoint(BoxS, SegA, P.CollisionRadius, N0, Pen0, C0))
+			{
+				const float3 Lp0 = RopeQuatRotate(float4(-RotS.xyz, RotS.w), C0 - CenterS);
+				const float3 C0End = RopeQuatRotate(RotE, Lp0) + CenterE;
+				FRopeBox BoxE = Box; BoxE.Center = float4(CenterE, 0.0f); BoxE.Rot = RotE;
+				float3 N1; float Pen1; float3 C1;
+				const bool bEndIn = RopeQueryBoxPoint(BoxE, SegB, P.CollisionRadius, N1, Pen1, C1);
+				if (!bEndIn && dot((SegB - SegA) - (C0End - C0), N0) > 0.0f) { continue; }
+			}
+		}
+
 		for (int k = 0; k < NumSamples; ++k)
 		{
 			const float  T = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
@@ -415,6 +444,19 @@ void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N, inout float4 
 		const float3 SegB = gPos[i];
 		const float  L = distance(SegA, SegB) + distance(TransS, TransE);
 		const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
+
+		// 분리 가드(CPU RopeCollision::IsSweptSeparating / SDF 미러): 접촉 스킨 안에서 시작해 바깥으로 분리
+		// 중이면 재-핀 생략. 시작/끝 sub-포즈 강체로 시작 접촉/재질점·끝 접촉을 판정한다.
+		{
+			float3 N0; float Pen0; float3 C0; float3 Lp0;
+			if (RopeQueryConvexLocal(Cv, RotS, TransS, SegA, P.CollisionRadius, N0, Pen0, C0, Lp0))
+			{
+				const float3 C0End = RopeQuatRotate(RotE, Lp0) + TransE;
+				float3 N1; float Pen1; float3 C1; float3 Lp1;
+				const bool bEndIn = RopeQueryConvexLocal(Cv, RotE, TransE, SegB, P.CollisionRadius, N1, Pen1, C1, Lp1);
+				if (!bEndIn && dot((SegB - SegA) - (C0End - C0), N0) > 0.0f) { continue; }
+			}
+		}
 
 		for (int k = 0; k < NumSamples; ++k)
 		{

@@ -89,6 +89,25 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
 
+	// 분리 가드(RopeCollision::IsSweptSeparating): 접촉 스킨 안에서 시작해 바깥으로 분리 중이면 재-핀 생략.
+	// 시작 포즈 박스로 시작 접촉/재질점을, 끝 포즈 박스로 끝 접촉 여부를 판정한다.
+	{
+		const FRopeBoxCollider BoxS(CenterS, RotS, HalfExtents);
+		const FRopeContact Start = BoxS.Query(Q.WorldStart, Q.NodeRadius);
+		if (Start.bHit)
+		{
+			// 시작 재질점(로컬)의 끝 포즈 위치.
+			const FVector Lp0 = RotS.UnrotateVector(Start.SurfacePoint - CenterS);
+			const FVector Closest0End = RotE.RotateVector(Lp0) + CenterE;
+			const FRopeBoxCollider BoxE(CenterE, RotE, HalfExtents);
+			if (RopeCollision::IsSweptSeparating(Q.WorldStart, Q.WorldEnd, Start.SurfacePoint, Closest0End,
+				Start.Normal, /*bStartInContact*/ true, /*bEndInContact*/ BoxE.Query(Q.WorldEnd, Q.NodeRadius).bHit))
+			{
+				return Contact;
+			}
+		}
+	}
+
 	for (int32 k = 0; k < NumSamples; ++k)
 	{
 		const float T = (NumSamples <= 1) ? 1.0f : static_cast<float>(k) / static_cast<float>(NumSamples - 1);
@@ -206,6 +225,45 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 	const double RelLen = FVector::Dist(Q.WorldStart, Q.WorldEnd) + FVector::Dist(TransS, TransE);
 	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
+
+	// 분리 가드(RopeCollision::IsSweptSeparating): 접촉 스킨 안에서 시작해 바깥으로 분리 중이면 재-핀 생략.
+	// 시작/끝 sub-포즈 강체로 로컬 평면 질의(위 sweep과 동일 로직)를 인라인해 시작 접촉/재질점·끝 접촉을 얻는다.
+	{
+		const FVector Lp0 = RotS.UnrotateVector(Q.WorldStart - TransS);
+		double MaxD0 = -DBL_MAX; int32 Best0 = INDEX_NONE;
+		if (LocalBounds.ExpandBy(Q.NodeRadius).IsInsideOrOn(Lp0))
+		{
+			for (int32 pi = 0; pi < LocalPlanes.Num(); ++pi)
+			{
+				const double D = LocalPlanes[pi].PlaneDot(Lp0);
+				if (D > MaxD0) { MaxD0 = D; Best0 = pi; }
+			}
+		}
+		if (Best0 != INDEX_NONE && MaxD0 < Q.NodeRadius)
+		{
+			const FVector LocalNormal0(LocalPlanes[Best0].X, LocalPlanes[Best0].Y, LocalPlanes[Best0].Z);
+			const FVector LocalSurface0 = Lp0 - LocalNormal0 * MaxD0;
+			const FVector StartSurface = RotS.RotateVector(LocalSurface0) + TransS;
+			const FVector Closest0End = RotE.RotateVector(LocalSurface0) + TransE; // 재질점 끝 포즈
+			const FVector StartNormal = RotS.RotateVector(LocalNormal0);
+			const FVector Lp1 = RotE.UnrotateVector(Q.WorldEnd - TransE);
+			bool bEndInContact = false;
+			if (LocalBounds.ExpandBy(Q.NodeRadius).IsInsideOrOn(Lp1))
+			{
+				double MaxD1 = -DBL_MAX;
+				for (int32 pi = 0; pi < LocalPlanes.Num(); ++pi)
+				{
+					MaxD1 = FMath::Max(MaxD1, LocalPlanes[pi].PlaneDot(Lp1));
+				}
+				bEndInContact = MaxD1 < Q.NodeRadius;
+			}
+			if (RopeCollision::IsSweptSeparating(Q.WorldStart, Q.WorldEnd, StartSurface, Closest0End,
+				StartNormal, /*bStartInContact*/ true, bEndInContact))
+			{
+				return Contact;
+			}
+		}
+	}
 
 	for (int32 k = 0; k < NumSamples; ++k)
 	{
