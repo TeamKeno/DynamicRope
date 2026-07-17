@@ -164,13 +164,15 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 				KINDA_SMALL_NUMBER, FrontPoint.TangentWorld)
 			: FrontPoint.TangentWorld;
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
-	// front 구동 범위는 경로가 소유한 노드까지다. 상한 없는 기본 상태에서는 NumTailNodes가 로프
-	// 끝까지라 종전과 동일하고, 감는 양 상한(WrappingMaxWrapAngleDeg)으로 경로가 로프보다 짧게
-	// 마감되면 경로 밖 노드는 front 직선 연장으로 끌지 않는다 — 남는 로프는 마스크 동결로 제자리에
-	// 있다가 커밋 후 자유 구간이 된다.
+	// 실제 surface path/anchor의 소유 범위와 Wrapping 중 시각적으로 구동할 범위를 분리한다.
+	// Composite analytic helix는 island 축 범위에서 path가 먼저 끝나더라도 남은 tail 전체를 현재
+	// ideal helix guide 방향으로 정렬한다. NumTailNodes 자체는 줄어든 path/commit 범위를 계속 뜻한다.
+	const bool bDriveFullCompositeTail = State.bPathUsesPoseSpaceIsland;
 	int32 TailEndNode = Sim.Num() - 1;
-	if (State.NumTailNodes > 0)
+	if (!bDriveFullCompositeTail && State.NumTailNodes > 0)
 	{
+		// Sequential은 기존 정책을 유지한다. 실제로 생성된 path가 소유하는 노드까지만 움직이고,
+		// 그 뒤 자유 tail은 이 단계의 강제 위치 애니메이션에 포함하지 않는다.
 		TailEndNode = FMath::Min(TailEndNode, LatchNode + State.NumTailNodes - 1);
 	}
 	// 시드 다중화: 경로 구동은 첫 보조 시드 노드 *앞*에서도 끝난다(NumTailNodes 클램프와 같은 경계).
@@ -178,7 +180,7 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 	// front 직선 연장이 보조 대상 반대편으로 로프를 끌어가는 것을 막는다.
 	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
 	{
-		if (Secondary.NodeIndex > LatchNode)
+		if (!bDriveFullCompositeTail && Secondary.NodeIndex > LatchNode)
 		{
 			TailEndNode = FMath::Min(TailEndNode, Secondary.NodeIndex - 1);
 		}
@@ -206,6 +208,8 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 		FVector World = FVector::ZeroVector;
 		if (NodeDistance <= State.FrontDistance + KINDA_SMALL_NUMBER)
 		{
+			// 감김 front가 이미 지나간 노드는 실제 SDF projection 경로의 같은 rope distance를
+			// 샘플한다. 따라서 표면에 도달한 구간의 위치/anchor 동작은 기존과 동일하다.
 			FRopeWrapPathPoint NodePoint;
 			if (!SampleWrappingPath(NodeDistance, NodePoint))
 			{
@@ -217,6 +221,9 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 		{
 			// Composite tail은 SDF projection tangent가 아니라 초기 ideal helix guide를 따른다.
 			// 위치는 계속 projected surface path를 사용하되, 미세 normal 변화가 tail 전체를 흔들지 않는다.
+			// Composite에서는 실제 path가 island 축 끝에서 먼저 종료돼도 이 식을 마지막 rope node까지
+			// 적용한다. 이 구간에는 새 surface anchor를 만들지 않고 Wrapping 동안의 시각적 정렬만 준다.
+			//   tail 위치 = 현재 front 위치 + helix guide 방향 * front에서 남은 rope 길이
 			World = FrontWorld + TailGuideDirection * (NodeDistance - State.FrontDistance);
 		}
 
@@ -258,22 +265,28 @@ void FRopeWrappingPhase::ApplyMassMask(const FRopeSimState& Sim, FRopeNodeOverri
 {
 	const int32 LatchNode = State.LatchAnchor.NodeIndex;
 	const bool bHasValidLatch = Sim.InvMass.IsValidIndex(LatchNode);
-	const int32 DrivenEndNode = State.bPathEndedAtCompositeAxisLimit
-		? FMath::Min(Sim.Num() - 1, LatchNode + FMath::Max(0, State.NumTailNodes - 1))
-		: Sim.Num() - 1;
+	// Composite는 실제 path가 island 축 끝에서 잘려도 Wrapping 애니메이션 동안에는 남은 tail
+	// 전체를 kinematic guide가 소유한다. 커밋 시에는 실제 anchor가 있는 노드만 Wrapped에 남고,
+	// guide-only tail은 마지막 위치에서 속도 0 상태로 solver에 반환된다.
+	const int32 DrivenEndNode = State.bPathUsesPoseSpaceIsland
+		? Sim.Num() - 1
+		: (State.bPathEndedAtCompositeAxisLimit
+			? FMath::Min(Sim.Num() - 1, LatchNode + FMath::Max(0, State.NumTailNodes - 1))
+			: Sim.Num() - 1);
 
 	OutFrame.EnsureSize(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		const bool bStartPin = (i == 0 && Sim.bStartPinned);
-		// Composite analytic helix가 island의 축 범위를 벗어나 부분 완료된 경우에는 실제로
-		// 만들어진 경로까지만 Wrapping이 소유한다. 그 뒤 노드는 즉시 dynamic으로 돌려 solver가
-		// 마지막 surface anchor에서 이어지는 자유 tail을 계산하게 한다.
+		// Radial projection에 실패한 virtual path node만 solver에 남긴다. Composite path 바깥의
+		// guide-only tail은 위 DrivenEndNode 범위에 포함되어 ApplyFrontMotion의 위치를 그대로 따른다.
 		const int32 PathIndex = i - LatchNode;
 		const bool bNoAnchorSolverNode =
 			State.Path.IsValidIndex(PathIndex) && State.Path[PathIndex].bVirtual;
 		const bool bWrappingDrivenNode =
 			bHasValidLatch && i >= LatchNode && i <= DrivenEndNode && !bNoAnchorSolverNode;
+		// ApplyFrontMotion으로 위치를 직접 쓰는 노드는 같은 프레임의 solver가 다시 움직이지 못하도록
+		// 질량을 0으로 만든다. Wrapped 커밋 뒤에는 실제 anchor가 없는 guide-only tail이 다시 dynamic이 된다.
 		OutFrame.SetInvMass(i, (bStartPin || bWrappingDrivenNode) ? 0.0f : 1.0f);
 	}
 }
