@@ -47,6 +47,15 @@ public:
 		 * FixedDt를 넣는다. 기본값은 dt가 무의미한 호출자(preview: 정적 스냅샷이라 표면속도 0)용 placeholder.
 		 */
 		float SubstepDeltaTime = 1.0f / 60.0f;
+
+	/**
+	 * 이번 프레임 델타(초). 예측 접촉 외삽(AddPredictedContactCandidates 자유 노드 분기)에서 로프 Verlet
+	 * 변위(= 마지막 substep 델타, ≈ v·SubstepDeltaTime)를 *프레임* 변위로 환산하는 다리다
+	 * (× FrameDeltaTime/SubstepDeltaTime). 이게 없으면 PredictiveContactFrames가 substep 단위로 해석돼
+	 * lookahead가 Substeps배 과소 적용된다(가이드 노드 분기는 프레임 단위 타깃 차분이라 환산하지 않는다).
+	 * 정적 스냅샷 호출자(preview)는 예측을 안 쓰므로 기본값으로 충분.
+	 */
+	float FrameDeltaTime = 1.0f / 60.0f;
 	};
 
 	// whip 가이드 프레임 데이터 뷰(예측 접촉의 가이드 노드 분기 입력). 포인터는 소유하지 않으며

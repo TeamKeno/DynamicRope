@@ -360,6 +360,7 @@ public:
 		SHADER_PARAMETER(float, DetectContactRadius)
 		SHADER_PARAMETER(float, DetectSegmentLength)
 		SHADER_PARAMETER(float, DetectPredictionFrames)
+		SHADER_PARAMETER(float, DetectFrameToSubstepRatio)
 		SHADER_PARAMETER(int32, DetectHasGuidedNodes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeCapsule>, Capsules)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SDFDistances)
@@ -1367,6 +1368,7 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	DetectParams->DetectContactRadius  = S.ContactRadius;
 	DetectParams->DetectSegmentLength  = S.SegmentLength;
 	DetectParams->DetectPredictionFrames = FMath::Max(0.0f, S.PredictionFrames);
+	DetectParams->DetectFrameToSubstepRatio = S.ContactFrameToSubstepRatio;
 	DetectParams->DetectHasGuidedNodes = bHasWhip ? 1 : 0;
 	DetectParams->Capsules             = GraphBuilder.CreateSRV(B.CapsulesBuf);
 	DetectParams->SDFDistances         = GraphBuilder.CreateSRV(B.SDFDistBuf);

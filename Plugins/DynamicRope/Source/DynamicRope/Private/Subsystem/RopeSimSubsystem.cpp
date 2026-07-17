@@ -857,6 +857,16 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 		return;
 	}
 
+	// 콜라이더 집합 안정성 게이트(#7): 지연된 접촉의 ColliderIndex는 디스패치(1~2프레임 전) 집합 기준인데
+	// 아래 귀속 테이블은 이번 프레임 것으로 재빌드됐다. 최근 지연 창(현재==Prev1==Prev2)에서 집합이 안정적일
+	// 때만 인덱스가 이번 프레임 테이블과 대응한다. 바뀐 프레임은 다른 본으로의 오귀속 대신 드롭(다음 프레임 캡처).
+	const FRopeSimFrameIO& F = Rope.SimFrame;
+	if (F.GpuAttribSig != F.GpuAttribSigPrev1 || F.GpuAttribSig != F.GpuAttribSigPrev2)
+	{
+		Rope.SimFrame.bGpuContactsThisFrame = true;
+		return;
+	}
+
 	// Contacts는 슬롯 순서(actual 먼저, predictive 뒤)라 actual이 우선 처리된다. CPU AddUniqueCandidate와
 	// 동일하게 (node, bone, mesh) 중복은 병합한다(SourceMask OR + Source 우선순위 Guided>Actual>Free) —
 	// 트래커의 노드 중복 카운트를 막고 판정을 CPU와 일치시킨다.
@@ -1065,6 +1075,9 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 	Step.bDetectContacts = true;
 	Step.ContactRadius = Rope.GetEffectiveContactQueryRadius();
 	Step.PredictionFrames = Rope.DetectConfig.PredictiveContactFrames;
+	// 예측 접촉 free 노드 외삽의 substep→프레임 변위 환산(#8). Step.FixedDt(=Schedule.FixedDt=(1/60)/Substeps)는
+	// SeedResidentStep이 이미 채웠다 — CPU MakeFlightDetectParams의 FrameDeltaTime/SubstepDeltaTime과 동일 값.
+	Step.ContactFrameToSubstepRatio = (Step.FixedDt > KINDA_SMALL_NUMBER) ? (DeltaTime / Step.FixedDt) : 1.0f;
 	Rope.SimFrame.GpuCapsuleAttribution.Reset();
 	Rope.SimFrame.GpuSdfAttribution.Reset();
 	Rope.SimFrame.GpuBoxAttribution.Reset();
@@ -1081,6 +1094,20 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 		Step.WhipPrevTargets = Rope.WhipGuide.GetPrevTargets();
 		Step.WhipNextTargets = MoveTemp(NextTargets);
 	}
+}
+
+// GPU 귀속 집합의 순서 있는 (bone, mesh) 서명. 지연된 접촉(1~2프레임)의 ColliderIndex가 이번 프레임
+// 귀속 테이블과 안전하게 대응하는지(= 집합/순서 불변)를 프레임 간 비교로 판정하는 데 쓴다.
+// 자세한 계약은 FRopeSimFrameIO::GpuAttribSig 주석 참조.
+static uint32 RopeComputeAttribSig(const TArray<FRopeSimFrameIO::FGpuColliderAttribution>& Attr, uint32 Seed)
+{
+	uint32 H = HashCombine(Seed, static_cast<uint32>(Attr.Num()));
+	for (const FRopeSimFrameIO::FGpuColliderAttribution& E : Attr)
+	{
+		H = HashCombine(H, GetTypeHash(E.Bone));
+		H = HashCombine(H, PointerHash(E.Mesh.Get()));
+	}
+	return H;
 }
 
 void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThisRope, FRopeGPUResidentStep& Step) const
@@ -1232,6 +1259,19 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			}
 			Step.Convexes.Add(Cv);
 		}
+	}
+
+	// 지연 GPU 접촉 오귀속 방지(#7): 이번 프레임 귀속 집합의 서명을 롤링 기록한다(detect 프레임에만 의미).
+	// BuildGpuFlightCandidates가 최근 창(현재==Prev1==Prev2)의 안정성으로 지연 접촉 소비를 게이트한다.
+	if (bDetectThisRope)
+	{
+		uint32 Sig = 0x9E3779B9u;
+		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuCapsuleAttribution, Sig);
+		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuSdfAttribution, Sig);
+		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuBoxAttribution, Sig);
+		Rope.SimFrame.GpuAttribSigPrev2 = Rope.SimFrame.GpuAttribSigPrev1;
+		Rope.SimFrame.GpuAttribSigPrev1 = Rope.SimFrame.GpuAttribSig;
+		Rope.SimFrame.GpuAttribSig = Sig;
 	}
 }
 

@@ -853,9 +853,10 @@ private:
 	// 접촉 감지 파이프라인 자체는 FRopeFlightContactDetector(정적, UObject 비의존)로 분리됐다.
 	// 여기엔 UObject 컨텍스트가 필요한 조립 코드만 남는다.
 
-	/** 검출기에 넘길 파라미터 스냅샷(WrapConfig + 튜브 반지름 + 컴포넌트 전방 + substep dt). SubstepDeltaTime은
-	 *  SolverConfig.Substeps에서 유도한 FixedDt로, 상대운동 평가의 SurfaceVelocity(cm/s→변위) 환산에 쓰인다. */
-	FRopeFlightContactDetector::FParams MakeFlightDetectParams() const;
+	/** 검출기에 넘길 파라미터 스냅샷(WrapConfig + 튜브 반지름 + 컴포넌트 전방 + substep dt + 프레임 dt).
+	 *  SubstepDeltaTime은 SolverConfig.Substeps에서 유도한 FixedDt로 상대운동 평가의 SurfaceVelocity(cm/s→변위)
+	 *  환산에, FrameDeltaTime은 예측 접촉 외삽의 substep→프레임 변위 환산에 쓰인다. */
+	FRopeFlightContactDetector::FParams MakeFlightDetectParams(float DeltaTime) const;
 
 	// FinalizeSimFrame의 Flight 블록은 아래 단계 헬퍼의 고정 순서로 읽는다:
 	// ① 후보 산출 → ② 캡처 판정/전이 → ③ 관측(스탯/디버거 — 판정과 분리된 읽기 전용 소비).

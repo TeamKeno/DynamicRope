@@ -160,6 +160,12 @@ void FRopeFlightContactDetector::AddPredictedContactCandidates(const FRopeSimSta
 	TArray<IRopeCollider*> NearbyColliders;
 	const bool bHasGuidedNodes = Whip.HasGuidedNodes();
 
+	// 로프 Verlet 변위(Positions-PrevPositions)는 *마지막 substep* 델타(≈ v·SubstepDeltaTime)라, 프레임
+	// 단위 lookahead(PredictiveContactFrames)로 쓰려면 프레임/substep 비로 환산한다 — 안 하면 Substeps배
+	// (기본 12배) 과소 적용된다. 가이드 노드 분기는 프레임 단위 타깃 차분을 쓰므로 이 환산을 적용하지 않는다.
+	const float FrameToSubstepRatio = (Params.SubstepDeltaTime > KINDA_SMALL_NUMBER)
+		? (Params.FrameDeltaTime / Params.SubstepDeltaTime) : 1.0f;
+
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		if (!Sim.Positions.IsValidIndex(i) || !Sim.PrevPositions.IsValidIndex(i))
@@ -169,7 +175,8 @@ void FRopeFlightContactDetector::AddPredictedContactCandidates(const FRopeSimSta
 
 		FVector CurrentPosition = Sim.Positions[i];
 		FVector PredictedPosition = CurrentPosition;
-		const FVector FrameDisplacement = Sim.Displacement(i);
+		// substep 변위 → 프레임 변위 환산(위 주석). bFastNode/ShouldRun 임계와 자유 노드 예측이 모두 이 값을 쓴다.
+		const FVector FrameDisplacement = Sim.Displacement(i) * FrameToSubstepRatio;
 		if (bHasGuidedNodes && !ShouldRunPredictiveContactForNode(Sim, Whip, i, FrameDisplacement))
 		{
 			continue;

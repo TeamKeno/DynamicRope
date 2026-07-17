@@ -41,6 +41,8 @@ float DetectContactRadius;
 float DetectSegmentLength;
 // <=0이면 예측 슬롯 없음
 float DetectPredictionFrames;
+// substep→프레임 변위 환산 계수(free 노드 예측). CPU FParams::FrameDeltaTime/SubstepDeltaTime 경로와 동일.
+float DetectFrameToSubstepRatio;
 // whip 활성(가이드 마스크 유효) 여부
 int   DetectHasGuidedNodes;
 // 상주 Pos(월드)
@@ -185,7 +187,7 @@ void RopeContactDetectCS(uint3 GroupThreadId : SV_GroupThreadID)
 	if (DetectPredictionFrames > 1e-4f)
 	{
 		const bool bGuided = (DetectHasGuidedNodes != 0) && (DetectGuidedMask[i] != 0);
-		const float3 Disp = CurP - PrevP;
+		const float3 Disp = (CurP - PrevP) * DetectFrameToSubstepRatio;
 		const bool bTail = RopeDetectIsTail(i);
 		const bool bFast = length(Disp) > DetectSegmentLength;
 		// CPU ShouldRunPredictiveContactForNode: whip 활성이면 가이드/tail/fast 노드만 예측.

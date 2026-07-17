@@ -227,6 +227,12 @@ struct FRopeGPUResidentStep
 	 * WhipGuided*는 whip 활성 시에만 NumNodes 길이로 채운다(아니면 비움 → free 예측만).
 	 */
 	float           PredictionFrames = 0.0f;
+	/**
+	 * substep→프레임 변위 환산 계수(= DeltaTime / FixedDt). free 노드 예측이 로프 Verlet 변위(마지막
+	 * substep 델타)를 프레임 변위로 올리는 데 쓴다 — 1이면 환산 없음(substep 단위 축소 버그). 가이드 노드
+	 * 예측은 프레임 단위 타깃 차분이라 이 계수를 안 쓴다. CPU FParams::FrameDeltaTime 경로와 동일 의미/값.
+	 */
+	float           ContactFrameToSubstepRatio = 1.0f;
 	/** 노드별 가이드 여부(1=guided). */
 	TArray<uint8>   WhipGuidedMask;
 	TArray<FVector> WhipCurrentTargets;
