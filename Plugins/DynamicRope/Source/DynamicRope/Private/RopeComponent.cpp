@@ -1885,6 +1885,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.TautChordLen = PullDrive.LastPullSample.TautChordLen;
 		Snapshot.FreeRestLen = PullDrive.LastPullSample.FreeRestLen;
 		Snapshot.MinFreeTension = PullDrive.LastPullSample.MinFreeTension;
+		Snapshot.MaxLegSag = PullDrive.LastPullSample.MaxLegSag;
 		Snapshot.DistanceReleaseSlack = HoldConfig.DistanceReleaseSlack;
 	}
 
@@ -3516,13 +3517,18 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 	// 전 체인 팽팽 게이트 갱신(히스테리시스 래치) — 견인 인가(③: 테더 + 능동 Pull)의 공용 선행 조건.
 	// 앵커 인접 국소 관측치(세그먼트 장력/sub-leg overshoot)는 움직이는 대상이 슬랙 로프에서도 만들어내므로
 	// (핀 노드가 이웃을 순간 스트레치 — 공중 Pierce/움직이는 정적 메시에서 늘어진 줄이 끌려가던 증상),
-	// "로프 전체가 펴졌는가"를 서로 보완하는 두 관측치의 AND로 판정한다:
-	//  - 기하(chord 합 vs rest, 다리별 rest 클램프): 완만한 처짐을 거른다.
+	// "로프 전체가 펴졌는가"를 서로 보완하는 세 관측치의 AND로 판정한다:
+	//  - 처짐(다리별 내부 노드의 chord 직선 이탈 cm): "시각적으로 펴졌는가"의 정본 — chord 비율은
+	//    처짐의 제곱에만 반응해 눈에 띄는 처짐(600cm 로프 chord 590 = ~45cm 처짐)도 통과시킨다.
+	//  - 기하(chord 합 vs rest, 다리별 rest 클램프): 완만한 대형 처짐/압축(노드 뭉침)의 백스톱.
 	//  - 최소 전달 장력(자유 구간 세그먼트 장력 최솟값): 기하가 못 보는 지그재그 구김/부분 스트레치를
 	//    거른다 — 팽팽함 = 장력이 앵커에서 손까지 전 구간 전달(어딘가 슬랙이면 최솟값 0).
 	// 샘플이 무효면 무조건 false(아래 early return과 무관하게 이번 프레임 값이 확정돼야 한다).
-	// 두 판정 모두 직전 래치(bChainTaut)를 히스테리시스 기준으로 공유한다.
+	// 세 판정 모두 직전 래치(bChainTaut)를 히스테리시스 기준으로 공유한다(처짐은 유지 시 ×ReleaseScale 완화).
+	const float SagLimit = HoldConfig.TautMaxSag
+		* (PullDrive.bChainTaut ? FMath::Max(HoldConfig.TautSlackReleaseScale, 1.0f) : 1.0f);
 	PullDrive.bChainTaut = PullDrive.LastPullSample.bValid
+		&& (HoldConfig.TautMaxSag <= 0.0f || PullDrive.LastPullSample.MaxLegSag <= SagLimit)
 		&& (HoldConfig.TautSlackRatio <= 0.0f || RopeTraction::EvaluateChainTautGate(
 			PullDrive.LastPullSample.TautChordLen, PullDrive.LastPullSample.FreeRestLen,
 			HoldConfig.TautSlackRatio, HoldConfig.TautSlackReleaseScale, PullDrive.bChainTaut))

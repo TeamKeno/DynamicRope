@@ -251,6 +251,7 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 	int32 LegEnd = FMath::Max(AnchorNode - 2, 0);
 	int32 AimNode = INDEX_NONE; // 첫 다리의 끝(아래 첫 바퀴에 확정)
 	float ChordSum = 0.0f;
+	float MaxSag = 0.0f;
 	while (true)
 	{
 		for (int32 j = LegEnd - 1; j >= 0; --j)
@@ -276,6 +277,13 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 		const float LegChord = static_cast<float>((Sim.Positions[LegEnd] - Sim.Positions[LegStart]).Size());
 		const float LegRest = static_cast<float>(LegStart - LegEnd) * Sim.SegmentLength;
 		ChordSum += FMath::Min(LegChord, LegRest);
+		// 다리 내부 노드의 chord 직선 대비 최대 수직 이탈(처짐, cm) — 코너 판정(각도)이 못 잡는 완만한
+		// catenary 처짐을 선형 감도로 잰다. 코너에 걸린 팽팽한 로프는 다리별로 곧아 값이 작다.
+		for (int32 k = LegEnd + 1; k < LegStart; ++k)
+		{
+			MaxSag = FMath::Max(MaxSag, static_cast<float>(
+				FMath::PointDistToSegment(Sim.Positions[k], Sim.Positions[LegStart], Sim.Positions[LegEnd])));
+		}
 		if (LegEnd <= 0)
 		{
 			break;
@@ -310,6 +318,7 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 		MinT = FMath::Min(MinT, Sim.SegmentTension.IsValidIndex(i) ? Sim.SegmentTension[i] : 0.0f);
 	}
 	Out.MinFreeTension = (AnchorNode > 0) ? MinT : 0.0f;
+	Out.MaxLegSag = MaxSag;
 	return true;
 }
 

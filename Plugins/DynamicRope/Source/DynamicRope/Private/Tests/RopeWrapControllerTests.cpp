@@ -120,6 +120,7 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("straight rest length"), Pull.FreeRestLen, 100.0f, 0.1f);
 		TestEqual(TEXT("straight chord sum equals rest (taut)"), Pull.TautChordLen, 100.0f, 0.1f);
 		TestEqual(TEXT("min transmitted tension reads the hand-side span only"), Pull.MinFreeTension, 50.0f, 0.1f);
+		TestEqual(TEXT("straight rope has no sag"), Pull.MaxLegSag, 0.0f, 0.1f);
 	}
 
 	// ② 압축(슬랙) 로프: 노드 간격이 rest(20)의 절반(10)인 직선 — 굴곡 없이도 chord 합이 rest의 절반.
@@ -182,6 +183,26 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("chord sum %.1f stays well below rest 100 (slack chain)"), Pull.TautChordLen),
 			Pull.TautChordLen < 70.0f);
 		TestEqual(TEXT("crumpled span zeroes the min transmitted tension"), Pull.MinFreeTension, 0.0f, 0.01f);
+	}
+
+	// ⑤ 완만한 catenary 처짐(코너 임계 미만의 굴곡 = 한 다리): chord 비율은 처짐의 제곱에만 반응해
+	// 9cm 처짐도 99%로 통과시키지만(그 둔감함이 PIE "590/600인데 눈에 띄게 처짐"의 원인), MaxLegSag는
+	// 처짐 cm를 직접 낸다 — TautMaxSag 게이트의 관측치.
+	{
+		FRopeSimState Sim = RopeTest::MakeStraightRope(5, 80.0f);
+		Sim.Positions = {
+			FVector(79.0f, 0, 0), FVector(59.5f, 0, -6), FVector(39.5f, 0, -9),
+			FVector(19.5f, 0, -6), FVector(0, 0, 0),
+		};
+		Sim.PrevPositions = Sim.Positions;
+		FRopeWrapController Wrap = MakeWrap(4);
+		FRopePullSample Pull;
+		TestTrue(TEXT("sagging ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
+		// 완만한 굴곡이라 walk는 손까지 한 다리 — chord ≈ 79/80 = 99%(비율 게이트는 통과해 버린다).
+		TestEqual(TEXT("gentle sag still walks to the hand"), Pull.AimNode, 0);
+		TestTrue(FString::Printf(TEXT("chord ratio %.3f stays above 0.97 (ratio gate blind)"),
+			Pull.TautChordLen / Pull.FreeRestLen), Pull.TautChordLen / Pull.FreeRestLen > 0.97f);
+		TestEqual(TEXT("max leg sag reads the visible dip"), Pull.MaxLegSag, 9.0f, 0.5f);
 	}
 	return true;
 }

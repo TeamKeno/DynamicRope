@@ -148,6 +148,8 @@ struct FRopeDebugSnapshot
 	float FreeRestLen = 0.0f;
 	// 자유 구간 세그먼트 장력 최솟값 — 0이면 어딘가 슬랙(장력이 손까지 전달 안 됨 = 구김/부분 스트레치)
 	float MinFreeTension = 0.0f;
+	// 다리별 최대 처짐(cm) — 내부 노드의 다리 chord 직선 이탈. 시각적 "펴짐"의 직접 관측치
+	float MaxLegSag = 0.0f;
 	// 거리 release 한계(cm, 0=비활성) — 표시용
 	float DistanceReleaseSlack = 0.0f;
 

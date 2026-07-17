@@ -616,6 +616,10 @@ struct FRopePullSample
 	 * 앵커가 앵커 쪽 다리를 스트레치시키면(세그먼트 > rest) chord가 rest를 초과해, 나머지 로프의 슬랙을
 	 * 상쇄·은폐하는 것을 막는다(PIE 실측 620/600cm 사례). 단 지그재그로 구겨진 슬랙은 다리가 잘게 쪼개져
 	 * 여전히 rest에 붙는 맹점이 있다 — 그건 MinFreeTension 게이트가 잡는다.
+	 *
+	 * ⚠ chord 결손은 처짐의 **제곱**으로만 줄어든다(600cm 로프의 chord 590 = 눈에 보이는 처짐 ~45cm) —
+	 * "시각적으로 펴졌는가"의 판정자는 이 비율이 아니라 MaxLegSag(cm, 선형)다. 이 값은 완만한 대형 처짐과
+	 * 압축(노드 뭉침)의 거친 백스톱으로 남는다.
 	 */
 	float   TautChordLen = 0.0f;
 
@@ -629,6 +633,14 @@ struct FRopePullSample
 	 * 이걸로 판별한다. 아직 솔브 전(배열 비어 있음)이면 0(GPU 로프는 1~2프레임 지연 미러).
 	 */
 	float   MinFreeTension = 0.0f;
+
+	/**
+	 * 다리별 최대 처짐(cm) = 각 코너-다리의 내부 노드가 그 다리 chord 직선에서 벗어난 최대 수직 거리.
+	 * "시각적으로 펴졌는가"의 직접 관측치 — chord 비율(처짐의 제곱에만 반응)과 달리 처짐 cm에 **선형**으로
+	 * 반응한다(PIE 실측: chord 590/600(98.3%)인 로프의 실제 처짐 ~45cm). 다리 단위라 코너에 걸린 팽팽한
+	 * 로프(다리별로 곧음)는 값이 작고, 완만한 catenary 처짐은 그대로 cm로 드러난다.
+	 */
+	float   MaxLegSag = 0.0f;
 };
 
 /** rope 중심선: 파티클의 체인. solver / 로직 / 렌더의 단일 진실 공급원(single source of truth). */
@@ -1375,6 +1387,17 @@ struct FRopeHoldConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TautMinTensionReleaseRatio = 0.5f;
+
+	/**
+	 * 전 체인 팽팽 판정의 최대 허용 처짐(cm). 코너-다리 내부 노드가 다리 chord 직선에서 이보다 멀리
+	 * 처지면(MaxLegSag 초과) 팽팽이 아니다 — "시각적으로 펴졌을 때만 끌린다"의 정본 손잡이. chord 비율
+	 * (TautSlackRatio)은 처짐의 제곱에만 반응해 눈에 띄는 처짐(600cm 로프에서 ~45cm)도 통과시키지만,
+	 * 이 값은 처짐 cm를 직접 잰다. 절대값(cm)인 이유: 허용 처짐은 "로프가 얼마나 늘어졌나"가 아니라
+	 * "화면에서 얼마나 휘어 보이나"의 문제라 로프 길이와 무관하다. 히스테리시스는 TautSlackReleaseScale
+	 * 공용(일단 팽팽이면 이 값×스케일까지 유지). 0 = 비활성(chord 비율/최소 장력만 판정).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm"))
+	float TautMaxSag = 20.0f;
 
 	/**
 	 * 능동 Pull의 **견인 목표 속도**(cm/s). 능동 Pull은 대상을 이 속도로 당김 방향을 따라 몰되(장력 상한 PullForce
