@@ -771,7 +771,7 @@ void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, co
 	const bool bWasWrapped = WrapController.IsActive();
 	SetPhase(ERopePhase::Releasing, *ReasonLog);
 	WrapController.Release(Reason);
-	ResetKinematicVirtualBridges();
+	ReleaseKinematicVirtualBridgesToSolver();
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
 	DispatchReleased(WrappedMesh, Bone, Reason, bWasWrapped);
@@ -787,6 +787,7 @@ void URopeComponent::FinishPreCommitReleaseToFlight(FName Bone, const TCHAR* Pha
 	// Bone은 인자로 값 캡처되어 ResetTransientPhaseState(트래커 비움) 이후에도 유효하다. 커밋 전이라
 	// bWasWrapped=false — 중앙 신호(OnAnyRopeReleased) 없이 per-instance만(다른 로프가 감은 대상 오복구 방지).
 	SetPhase(ERopePhase::Flight, PhaseLog);
+	ReleaseKinematicVirtualBridgesToSolver();
 	ResetTransientPhaseState();
 	DispatchReleased(nullptr, Bone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
 }
@@ -2954,6 +2955,8 @@ bool URopeComponent::BuildSeedLatchForTarget(const TArray<FRopeContactCandidate>
 void URopeComponent::StartWrappingFromContacting()
 {
 	// PendingWrapSeed를 바로 BeginWrap에 넣지 않고, WrappingPhase 상태로 변환한다.
+	// 새 시도는 이전 Composite virtual run의 점진 scan 상태를 절대 이어받지 않는다.
+	ResetKinematicVirtualBridges();
 	WrappingPhase.State.Reset();
 
 	// 감길 메시는 접촉에서 확정된다(FRopeContact.SourceMesh → seed). 여기 비어 있으면 시드가
@@ -3073,6 +3076,15 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	const FRopeWrappingPhase::FContext WrappingCtx = MakeWrappingContext();
 	WrappingPhase.AdvancePathBuild(Sim, WrappingCtx);
 
+	// Composite가 내부 복구 과정에서 SingleBone으로 fallback하면 이미 고정한 virtual node를 즉시
+	// solver에 돌려준다. 새 Single 경로의 front/mass override가 아래에서 같은 프레임에 다시 적용된다.
+	if (!WrappingPhase.State.bPathUsesPoseSpaceIsland &&
+		(KinematicVirtualBridges.Num() > 0 || WrappingVirtualBridgeScanPathIndex > 0 ||
+			WrappingVirtualRunStartPathIndex != INDEX_NONE))
+	{
+		ReleaseKinematicVirtualBridgesToSolver();
+	}
+
 #if !UE_BUILD_SHIPPING
 	DrawWrappingAxisDebug(GetWorld(), WrappingPhase.State.PathAxisOrigin, WrappingPhase.State.PathAxisDirection, Sim.SegmentLength);
 	DrawWrapIslandDebug(GetWorld(), WrappingPhase.State, Sim, WrapConfig);
@@ -3111,6 +3123,18 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	WrappingPhase.ApplyFrontMotion(Sim, DeltaTime, WrappingCtx, SimFrame.OverrideFrame);
 
 	WrappingPhase.ApplyMassMask(Sim, SimFrame.OverrideFrame);
+
+	if (WrappingPhase.State.bPathUsesPoseSpaceIsland)
+	{
+		// ApplyFrontMotion이 오른쪽 실제 표면 노드를 먼저 붙이고 ApplyMassMask가 virtual node를 기본
+		// 동적 상태로 만든 뒤 실행한다. 따라서 front가 닫은 구간만 이 마지막 override로 즉시 조인다.
+		UpdateWrappingKinematicVirtualBridges(
+			WrappingPhase.State.Path,
+			WrappingPhase.State.LatchAnchor.NodeIndex,
+			WrappingPhase.State.Anchors,
+			WrappingPhase.State.FrontDistance);
+		HoldKinematicVirtualBridges();
+	}
 
 	WrappingPhase.UpdateStability(DeltaTime);
 
@@ -3333,15 +3357,133 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 	DispatchReleased(nullptr, WrappingPhase.State.BoneName, Reason, /*bWasWrapped*/ false);
 
 	WrappingPhase.ReturnNodesToSolver(Sim, SimFrame.OverrideFrame);
+	ReleaseKinematicVirtualBridgesToSolver();
 
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
 }
 
+void URopeComponent::UpdateWrappingKinematicVirtualBridges(
+	const TArray<FRopeWrapPathPoint>& Path, int32 LatchNodeIndex,
+	const TArray<FRopeSurfaceAnchor>& Anchors, float FrontDistance)
+{
+	// Composite 경로는 프레임마다 뒤에 점을 추가한다. 이미 본 prefix를 매번 재검색하지 않고 cursor부터
+	// 읽으며, 오른쪽 실제 표면점이 아직 없는 virtual run은 pending 상태로 다음 프레임까지 보존한다.
+	WrappingVirtualBridgeScanPathIndex = FMath::Clamp(
+		WrappingVirtualBridgeScanPathIndex, 0, Path.Num());
+
+	while (WrappingVirtualBridgeScanPathIndex < Path.Num())
+	{
+		const int32 PathIndex = WrappingVirtualBridgeScanPathIndex;
+		const FRopeWrapPathPoint& Point = Path[PathIndex];
+
+		if (WrappingVirtualRunStartPathIndex == INDEX_NONE)
+		{
+			if (Point.bVirtual)
+			{
+				// 첫 virtual point 직전의 실제 표면점을 왼쪽 경계로 기억한다. 아직 오른쪽 경계는
+				// 만들어지지 않았을 수 있으므로 이 시점에는 node를 고정하지 않는다.
+				WrappingVirtualRunStartPathIndex = PathIndex;
+				WrappingVirtualRunLeftPathIndex = PathIndex - 1;
+			}
+			++WrappingVirtualBridgeScanPathIndex;
+			continue;
+		}
+
+		if (Point.bVirtual)
+		{
+			++WrappingVirtualBridgeScanPathIndex;
+			continue;
+		}
+
+		const int32 RunStart = WrappingVirtualRunStartPathIndex;
+		const int32 RunEnd = PathIndex - 1;
+		const int32 LeftPathIndex = WrappingVirtualRunLeftPathIndex;
+		const int32 RightPathIndex = PathIndex;
+		if (!Path.IsValidIndex(LeftPathIndex) || !Path.IsValidIndex(RightPathIndex) ||
+			Path[LeftPathIndex].bBridge || Path[LeftPathIndex].bVirtual ||
+			Path[RightPathIndex].bBridge || Path[RightPathIndex].bVirtual)
+		{
+			// 양쪽 실제 표면점으로 닫히지 않은 run은 kinematic bridge가 될 수 없다.
+			WrappingVirtualRunStartPathIndex = INDEX_NONE;
+			WrappingVirtualRunLeftPathIndex = INDEX_NONE;
+			++WrappingVirtualBridgeScanPathIndex;
+			continue;
+		}
+
+		const int32 LeftNodeIndex = LatchNodeIndex + LeftPathIndex;
+		const int32 RightNodeIndex = LatchNodeIndex + RightPathIndex;
+		const int32 NodeSpan = RightNodeIndex - LeftNodeIndex;
+		if (NodeSpan <= 1)
+		{
+			WrappingVirtualRunStartPathIndex = INDEX_NONE;
+			WrappingVirtualRunLeftPathIndex = INDEX_NONE;
+			++WrappingVirtualBridgeScanPathIndex;
+			continue;
+		}
+
+		const FRopeSurfaceAnchor* LeftAnchor = FindSurfaceAnchorByNode(Anchors, LeftNodeIndex);
+		const FRopeSurfaceAnchor* RightAnchor = FindSurfaceAnchorByNode(Anchors, RightNodeIndex);
+		if (!LeftAnchor || !RightAnchor)
+		{
+			// Path와 anchor는 같은 AdvancePathBuild에서 추가되지만, 순서가 달라지는 경우에는 현재
+			// 오른쪽 점을 소비하지 않고 다음 프레임에 재시도한다.
+			break;
+		}
+
+		const USceneComponent* LeftMesh = LeftAnchor->Mesh.Get();
+		const USceneComponent* RightMesh = RightAnchor->Mesh.Get();
+		if (LeftMesh && LeftMesh == RightMesh)
+		{
+			// 양쪽 binding이 확보됐어도 path build는 animation front보다 앞서갈 수 있다. 따라서 여기서는
+			// 목록만 만들고 bActive=false로 둔 뒤, 아래 front 거리 판정이 실제 고정 시점을 결정한다.
+			FRopeKinematicVirtualBridge& Bridge = KinematicVirtualBridges.AddDefaulted_GetRef();
+			Bridge.LeftAnchor = *LeftAnchor;
+			Bridge.RightAnchor = *RightAnchor;
+			Bridge.RestSpanLength = static_cast<float>(NodeSpan) * Sim.SegmentLength;
+			Bridge.ActivationFrontDistance = RightAnchor->RopeDistance;
+			Bridge.bActive = false;
+			Bridge.NodeIndices.Reserve(RunEnd - RunStart + 1);
+			for (int32 VirtualPathIndex = RunStart; VirtualPathIndex <= RunEnd; ++VirtualPathIndex)
+			{
+				Bridge.NodeIndices.Add(LatchNodeIndex + VirtualPathIndex);
+			}
+
+			UE_LOG(LogRopeWrap, Verbose,
+				TEXT("[%s] Wrapping virtual bridge registered: leftNode=%d rightNode=%d "
+					"virtualNodes=%d activationDistance=%.2fcm"),
+				*GetName(), LeftNodeIndex, RightNodeIndex, Bridge.NodeIndices.Num(),
+				Bridge.ActivationFrontDistance);
+		}
+
+		WrappingVirtualRunStartPathIndex = INDEX_NONE;
+		WrappingVirtualRunLeftPathIndex = INDEX_NONE;
+		++WrappingVirtualBridgeScanPathIndex;
+	}
+
+	// 오른쪽 anchor 거리까지 front가 도달했다는 것은 ApplyFrontMotion이 양쪽 경계를 실제 표면 위치로
+	// 고정했다는 뜻이다. 그 프레임부터 내부 virtual node를 직선으로 묶어 Wrapped 전 출렁임을 없앤다.
+	const float FrontTolerance = FMath::Max(0.01f, Sim.SegmentLength * 0.001f);
+	for (FRopeKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
+	{
+		if (!Bridge.bActive && FrontDistance + FrontTolerance >= Bridge.ActivationFrontDistance)
+		{
+			Bridge.bActive = true;
+			UE_LOG(LogRopeWrap, Log,
+				TEXT("[%s] Wrapping virtual bridge activated: leftNode=%d rightNode=%d "
+					"virtualNodes=%d front=%.2fcm activation=%.2fcm"),
+				*GetName(), Bridge.LeftAnchor.NodeIndex, Bridge.RightAnchor.NodeIndex,
+				Bridge.NodeIndices.Num(), FrontDistance, Bridge.ActivationFrontDistance);
+		}
+	}
+}
+
 void URopeComponent::BuildKinematicVirtualBridges(const TArray<FRopeWrapPathPoint>& Path,
 	int32 LatchNodeIndex, const TArray<FRopeSurfaceAnchor>& CommitAnchors)
 {
-	KinematicVirtualBridges.Reset();
+	// 커밋 시에는 점진 목록을 최종 seed anchor 기준으로 재구성한다. 모든 경계는 이미 front 뒤이므로
+	// 새 목록은 즉시 활성 상태다.
+	ResetKinematicVirtualBridges();
 	if (Path.Num() == 0)
 	{
 		return;
@@ -3419,6 +3561,8 @@ void URopeComponent::BuildKinematicVirtualBridges(const TArray<FRopeWrapPathPoin
 		Bridge.LeftAnchor = *LeftAnchor;
 		Bridge.RightAnchor = *RightAnchor;
 		Bridge.RestSpanLength = static_cast<float>(NodeSpan) * Sim.SegmentLength;
+		Bridge.ActivationFrontDistance = RightAnchor->RopeDistance;
+		Bridge.bActive = true;
 		Bridge.NodeIndices.Reserve(RunEnd - RunStart + 1);
 		for (int32 VirtualPathIndex = RunStart; VirtualPathIndex <= RunEnd; ++VirtualPathIndex)
 		{
@@ -3448,6 +3592,12 @@ void URopeComponent::HoldKinematicVirtualBridges()
 	SimFrame.OverrideFrame.EnsureSize(Sim.Num());
 	for (FRopeKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
 	{
+		if (!Bridge.bActive)
+		{
+			// 경로 생성만 완료되고 front가 아직 오른쪽 anchor에 도달하지 않은 구간은 solver에 맡긴다.
+			continue;
+		}
+
 		FVector LeftWorld;
 		FVector RightWorld;
 		if (!ResolveAnchorCenterlineWorld(Bridge.LeftAnchor, LeftWorld) ||
@@ -3496,7 +3646,39 @@ void URopeComponent::HoldKinematicVirtualBridges()
 
 void URopeComponent::ResetKinematicVirtualBridges()
 {
+	// bridge binding뿐 아니라 점진 scanner의 pending run까지 함께 비워야 다음 wrap이 이전 path index를
+	// 이어 읽지 않는다. 이 함수 자체는 질량을 복구하지 않으므로 활성 bridge 해제에는 Release*를 쓴다.
 	KinematicVirtualBridges.Reset();
+	WrappingVirtualBridgeScanPathIndex = 0;
+	WrappingVirtualRunStartPathIndex = INDEX_NONE;
+	WrappingVirtualRunLeftPathIndex = INDEX_NONE;
+}
+
+void URopeComponent::ReleaseKinematicVirtualBridgesToSolver()
+{
+	// Composite→Single fallback, abort, 정상 release 공용 경로. 활성 여부와 관계없이 등록된 모든
+	// virtual node를 동적 질량으로 돌려 stale hard pin이 다음 phase까지 남지 않게 한다.
+	if (KinematicVirtualBridges.Num() > 0)
+	{
+		SimFrame.OverrideFrame.EnsureSize(Sim.Num());
+		for (const FRopeKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
+		{
+			for (const int32 NodeIndex : Bridge.NodeIndices)
+			{
+				if (!Sim.InvMass.IsValidIndex(NodeIndex))
+				{
+					continue;
+				}
+
+				// bridge 해제 프레임에 Pos-Prev 차이가 속도로 튀지 않도록 현재 위치에서 정지시킨다.
+				const bool bStartPin = NodeIndex == 0 && Sim.bStartPinned;
+				SimFrame.OverrideFrame.SetInvMass(NodeIndex, bStartPin ? 0.0f : 1.0f);
+				SimFrame.OverrideFrame.SetPrevFromPosition(NodeIndex);
+			}
+		}
+	}
+
+	ResetKinematicVirtualBridges();
 }
 
 // ===== Wrapped ==============================================================
@@ -3731,6 +3913,11 @@ void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 
 	for (const FRopeKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
 	{
+		if (!Bridge.bActive)
+		{
+			continue;
+		}
+
 		for (const int32 NodeIndex : Bridge.NodeIndices)
 		{
 			if (Sim.InvMass.IsValidIndex(NodeIndex))

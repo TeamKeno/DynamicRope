@@ -45,10 +45,18 @@ struct FRopeFlightNodeDebug;
  */
 struct FRopeKinematicVirtualBridge
 {
+	/** 양쪽 실제 표면점 사이에서 SDF projection에 실패해 anchor가 없는 내부 노드들. */
 	TArray<int32> NodeIndices;
+	/** 매 프레임 bone-local binding으로 다시 해석할 왼쪽/오른쪽 실제 표면 anchor. */
 	FRopeSurfaceAnchor LeftAnchor;
 	FRopeSurfaceAnchor RightAnchor;
+	/** 양 끝 노드를 포함한 원래 세그먼트 수 × SegmentLength. 과도한 직선 신장 진단 기준이다. */
 	float RestSpanLength = 0.0f;
+	/** Wrapping front가 오른쪽 실제 anchor까지 도달했을 때 bridge를 켜기 위한 경로 거리. */
+	float ActivationFrontDistance = 0.0f;
+	/** 커밋 전 점진 등록된 bridge는 false로 대기하고, 양쪽 실제 anchor가 고정된 순간 true가 된다. */
+	bool bActive = true;
+	/** 같은 bridge의 과신장 경고가 매 프레임 반복되지 않도록 하는 1회성 로그 래치. */
 	bool bLoggedStretchWarning = false;
 };
 
@@ -780,8 +788,14 @@ private:
 	/** Wrapped: bone-local latch 유지/해제. */
 	FRopeWrapController WrapController;
 
-	/** 양쪽 실제 anchor가 있는 virtual run. 노드는 Wrapped 동안 Pos=Prev, InvMass=0으로 직선 고정된다. */
+	/** 양쪽 실제 anchor가 있는 virtual run. Wrapping 중 front 도달 뒤부터 Wrapped까지 직선 고정된다. */
 	TArray<FRopeKinematicVirtualBridge> KinematicVirtualBridges;
+
+	/** Composite path가 매 프레임 뒤에 붙으므로 새 구간만 검사하기 위한 점진 scan cursor. */
+	int32 WrappingVirtualBridgeScanPathIndex = 0;
+	/** 아직 오른쪽 실제 표면점이 생성되지 않은 virtual run의 시작/왼쪽 경계. */
+	int32 WrappingVirtualRunStartPathIndex = INDEX_NONE;
+	int32 WrappingVirtualRunLeftPathIndex = INDEX_NONE;
 
 	/** ③ GuidedThrow 구동 상태: 확정 preview path(조준) 또는 레이 끝점 아치(허공, bFreeThrow). */
 	FRopeGuidedThrowState GuidedThrowState;
@@ -1038,7 +1052,11 @@ private:
 	/** latch/anchor 노드 InvMass=0, 나머지 1 — Wrapped 중 자유 구간만 솔버가 움직이게. */
 	void ApplyWrappedMassMask(bool bResetDynamicNodeVelocity = false);
 
-	/** Wrapping 커밋 직전 path의 bounded virtual run을 dual-anchor bridge로 변환한다. */
+	/** Wrapping 중 새로 닫힌 virtual run을 등록하고 front가 오른쪽 anchor에 닿은 run을 즉시 활성화한다. */
+	void UpdateWrappingKinematicVirtualBridges(const TArray<FRopeWrapPathPoint>& Path,
+		int32 LatchNodeIndex, const TArray<FRopeSurfaceAnchor>& Anchors, float FrontDistance);
+
+	/** Wrapping 커밋 직전 path의 bounded virtual run을 최종 dual-anchor bridge 목록으로 재구성한다. */
 	void BuildKinematicVirtualBridges(const TArray<FRopeWrapPathPoint>& Path, int32 LatchNodeIndex,
 		const TArray<FRopeSurfaceAnchor>& CommitAnchors);
 
@@ -1047,5 +1065,8 @@ private:
 
 	/** release/rethrow/non-composite 진입에서 이전 bridge binding을 폐기한다. */
 	void ResetKinematicVirtualBridges();
+
+	/** 활성 bridge 노드를 solver 질량으로 되돌리고 속도를 제거한 뒤 binding과 scan 상태를 폐기한다. */
+	void ReleaseKinematicVirtualBridgesToSolver();
 
 };
