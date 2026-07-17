@@ -329,8 +329,36 @@ bool FRopeWrappingPhase::IsReadyToCommit(const FRopeSimState& Sim, const FRopeWr
 	const float CommitFrontDistance = State.bPathBuildFailed
 		? BuiltPathMaxDistance
 		: RequestedFrontDistance;
-	const bool bFrontDone = State.FrontDistance + KINDA_SMALL_NUMBER >= CommitFrontDistance;
-	const bool bMotionDone = State.Elapsed >= State.Duration + MaxTailDelay;
+
+	// 정상 AngleMapped path는 animation phase와 물리 배치가 모두 끝나야 commit한다. path build
+	// 실패/degenerate fallback은 angle target이 없을 수 있으므로 기존 distance 정책을 유지한다.
+	const bool bUseAngularCompletion = State.bFrontUsesAngleMapping &&
+		State.bPathBuildComplete && !State.bPathBuildFailed &&
+		State.FrontTargetWrapAngleRad > KINDA_SMALL_NUMBER;
+	const float EffectiveCommitDistance = bUseAngularCompletion
+		? State.FrontTargetDistance
+		: CommitFrontDistance;
+	const float DistanceCompletionTolerance = FMath::Max(0.01f, SegmentLength * 0.001f);
+	const float AngleCompletionToleranceRad = FMath::DegreesToRadians(0.1f);
+	const bool bDistanceDone = State.FrontDistance + DistanceCompletionTolerance >=
+		EffectiveCommitDistance;
+	const bool bAngleDone = !bUseAngularCompletion ||
+		State.FrontWrapAngleRad + AngleCompletionToleranceRad >=
+			State.FrontTargetWrapAngleRad;
+	const bool bFrontDone = bAngleDone && bDistanceDone;
+
+	// DistanceFallback에만 종전 per-segment deadline을 적용한다. AngleMapped는 front가 목표에
+	// 도달한 뒤의 짧은 settle과 최소 phase duration만 기다려 중복 tail delay를 제거한다.
+	const bool bLegacyMotionDone = State.Elapsed >= State.Duration + MaxTailDelay;
+	const bool bMinimumPhaseDurationDone = State.Elapsed >= State.Duration;
+	const bool bPostFrontSettleDone = State.FrontReachedTargetElapsed >= 0.0f &&
+		State.Elapsed + KINDA_SMALL_NUMBER >=
+			State.FrontReachedTargetElapsed + FMath::Max(0.0f, Config.WrappingPostFrontSettleTime);
+	const bool bCompletionTimingDone = bUseAngularCompletion
+		? (bMinimumPhaseDurationDone && bPostFrontSettleDone)
+		: bLegacyMotionDone;
+	const bool bStable = !bUseAngularCompletion ||
+		State.StableTime + KINDA_SMALL_NUMBER >= FMath::Max(0.0f, Config.WrappingStableTime);
 	const bool bTimedOutWithAnchors =
 		Config.WrappingMaxSettleTime > 0.0f &&
 		State.Elapsed >= Config.WrappingMaxSettleTime;
@@ -339,7 +367,12 @@ bool FRopeWrappingPhase::IsReadyToCommit(const FRopeSimState& Sim, const FRopeWr
 		State.bPathBuildComplete ||
 		State.bPathBuildFailed;
 
-	return bHasEnoughAnchors && bPathReadyToCommit && bFrontDone && (bMotionDone || bTimedOutWithAnchors);
+	// timeout은 front 목표 자체를 건너뛰지는 않지만, 비정상적으로 안정화/settle이 끝나지 않는
+	// 경우의 마지막 탈출구로 종전과 같이 timing gate를 우회한다.
+	const bool bNormalCompletion = bFrontDone && bStable && bCompletionTimingDone;
+	const bool bTimeoutCompletion = bFrontDone && bTimedOutWithAnchors;
+	return bHasEnoughAnchors && bPathReadyToCommit &&
+		(bNormalCompletion || bTimeoutCompletion);
 }
 
 bool FRopeWrappingPhase::ShouldAbortFailedShortWrap(const FRopeSimState& Sim, const FContext& Ctx,
@@ -555,8 +588,26 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.PathSweepDistance = 0.0f;
 	State.bPathCompositeRawPointVirtual = false;
 	State.PathAccumulatedAngleRad = 0.0f;
+	State.PathSignedNetAngleRad = 0.0f;
+	State.PathForwardAngleRad = 0.0f;
+	State.PathReverseAngleRad = 0.0f;
+	State.PathRadiusSum = 0.0f;
+	State.PathRadiusMin = 0.0f;
+	State.PathRadiusMax = 0.0f;
+	State.PathRadiusSampleCount = 0;
+	State.PathBoneTransitionCount = 0;
 	State.PathBridgeDistance = 0.0f;
 	State.FrontDistance = 0.0f;
+	State.FrontWrapAngleRad = 0.0f;
+	// 새 progressive path마다 4단계 완료 게이트도 초기화한다. 이전 throw의 최종 목표나
+	// 목표 도달 시간이 남으면 새 wrap이 즉시 commit될 수 있으므로 반드시 함께 리셋해야 한다.
+	State.FrontTargetDistance = 0.0f;
+	State.FrontTargetWrapAngleRad = 0.0f;
+	State.bFrontUsesAngleMapping = false;
+	State.FrontReachedTargetElapsed = -1.0f;
+	State.FrontMotionStartElapsed = -1.0f;
+	State.bFrontMotionStartLogged = false;
+	State.bFrontMotionCompletionLogged = false;
 	State.PathCurrentBone = StoredLatchAnchor.Bone;
 	State.PathPreviousBone = NAME_None;
 	State.PathCurrentMesh = Mesh;
@@ -667,6 +718,7 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 	}
 	const float PitchScale = State.PathCompositeHelixPitchScale;
 	const float LengthScale = FMath::Sqrt(1.0f + FMath::Square(PitchScale));
+	const float PreviousRawAngleRad = State.PathCompositeSweepAngleRad;
 
 	// 래치 표면 반지름에서 island 전체 반지름으로 한 probe에 순간 이동하지 않는다. 각 raw point는
 	// 직전 projection 결과와 무관하게 래치/축/contact pitch만으로 독립 계산한다.
@@ -704,6 +756,48 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 			(LatchAxisDistance + AxisAdvance);
 		IdealHelixWorld = StepAxisPoint + StepRadial * IdealRadius;
 	}
+	const float CurrentRawAngleRad = FMath::Abs(AngleRadians);
+	const auto LogAngularDensityMetrics = [&](const TCHAR* CompletionReason)
+	{
+		const float BuiltDistance = State.Path.Num() > 0
+			? State.Path.Last().DistanceFromLatch
+			: 0.0f;
+		const float BuiltAngleRad = State.Path.Num() > 0
+			? State.Path.Last().WrapAngleFromLatchRad
+			: 0.0f;
+		const float BuiltAngleDeg = FMath::RadiansToDegrees(BuiltAngleRad);
+		const float ActualCmPerRad = BuiltAngleRad > KINDA_SMALL_NUMBER
+			? BuiltDistance / BuiltAngleRad
+			: 0.0f;
+		// Single Bone SurfaceVectorField의 저작 pitch를 기준 밀도로 사용한다. 이 값은 Composite
+		// projection 자체의 arc 변화 진단용이며 angle-mapped front의 속도에는 사용하지 않는다.
+		const float ReferencePitch = Ctx.Config.WrappingHelixPitchScale;
+		const float ReferenceCmPerRad = HelixRadius *
+			FMath::Sqrt(1.0f + FMath::Square(ReferencePitch));
+		const float AngularDensityScale =
+			ActualCmPerRad > KINDA_SMALL_NUMBER && ReferenceCmPerRad > KINDA_SMALL_NUMBER
+				? ActualCmPerRad / ReferenceCmPerRad
+				: 0.0f;
+		const float RawArcToSweepRatio = State.PathSweepDistance > KINDA_SMALL_NUMBER
+			? State.PathCurrentDistance / State.PathSweepDistance
+			: 0.0f;
+		const float NodesPerTurn = BuiltAngleRad > KINDA_SMALL_NUMBER
+			? static_cast<float>(FMath::Max(0, State.Path.Num() - 1)) *
+				(2.0f * PI) / BuiltAngleRad
+			: 0.0f;
+
+		UE_LOG(LogRopeWrap, Log,
+			TEXT("[%s] Composite angular density metrics: reason=%s "
+				"builtDistance=%.2fcm builtAngle=%.2fdeg actualCmPerRad=%.3f "
+				"referenceCmPerRad=%.3f angularDensityScale=%.3f "
+				"rawArcToSweep=%.3f nodesPerTurn=%.2f "
+				"compositePitch=%.3f referencePitch=%.3f points=%d"),
+			*Ctx.OwnerName, CompletionReason,
+			BuiltDistance, BuiltAngleDeg, ActualCmPerRad,
+			ReferenceCmPerRad, AngularDensityScale,
+			RawArcToSweepRatio, NodesPerTurn,
+			PitchScale, ReferencePitch, State.Path.Num());
+	};
 	const FVector RotatedRadial = FQuat(AxisDirection, AngleRadians)
 		.RotateVector(LatchRadial)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, LatchRadial);
@@ -717,6 +811,7 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 	{
 		const int32 PreviousTailNodeCount = State.NumTailNodes;
 		State.bPathEndedAtCompositeAxisLimit = true;
+		LogAngularDensityMetrics(TEXT("AxisLimit"));
 		State.NumTailNodes = State.Path.Num();
 		FinishPathBuild(/*bFailed=*/false);
 		UE_LOG(LogRopeWrap, Log,
@@ -938,6 +1033,8 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 				: (bUseCurrentBinding ? RawPoint.Bone : PreviousRawBone);
 			SamplePoint.Mesh = bUseCurrentBinding ? RawPoint.Mesh.Get() : PreviousRawMesh;
 			SamplePoint.DistanceFromLatch = TargetArcDistance;
+			SamplePoint.WrapAngleFromLatchRad = FMath::Lerp(
+				PreviousRawAngleRad, CurrentRawAngleRad, Alpha);
 			SamplePoint.bBridge = false;
 			SamplePoint.bVirtual = bSampleVirtual;
 			State.Path.Add(SamplePoint);
@@ -964,8 +1061,8 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 	State.PathSweepDistance = static_cast<float>(ProbeStepIndex) * ProbeStepDistance;
 	State.bPathCompositeRawPointVirtual = RawPoint.bVirtual;
 	State.PathCompositeSweepRadial = RotatedRadial;
-	State.PathCompositeSweepAngleRad = FMath::Abs(AngleRadians);
-	State.PathAccumulatedAngleRad = FMath::Abs(AngleRadians);
+	State.PathCompositeSweepAngleRad = CurrentRawAngleRad;
+	State.PathAccumulatedAngleRad = CurrentRawAngleRad;
 
 	UE_LOG(LogRopeWrap, VeryVerbose,
 		TEXT("[%s] Composite analytic helix raw probe: probe=%d type=%s bone=%s "
@@ -1027,6 +1124,7 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 			SpacingCount > 0 ? MinCenterlineSpacing : 0.0f,
 			MaxCenterlineSpacing, State.PathCurrentDistance, State.PathSweepDistance,
 			VirtualPointCount);
+		LogAngularDensityMetrics(TEXT("FullPath"));
 		FinishPathBuild(/*bFailed=*/false);
 	}
 	return true;
@@ -1549,6 +1647,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 	LatchPoint.Bone = State.PathCurrentBone;
 	LatchPoint.Mesh = State.PathCurrentMesh;
 	LatchPoint.DistanceFromLatch = 0.0f;
+	LatchPoint.WrapAngleFromLatchRad = 0.0f;
 	State.Path.Add(LatchPoint);
 	State.PathCurrentDistance = 0.0f;
 	State.PathSweepDistance = 0.0f;
@@ -1864,12 +1963,56 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 			// reseed) *전에*, 이 스텝을 실제로 걸었던 축 기준으로 전/후 radial을 재야 한다. 브리지
 			// 스텝도 적분한다 — chord가 가로지른 각도 구간도 "감쌌다"에 포함되는 것이 둘레 커버리지
 			// 척도(5단계 형상 기준 판정)와 일치한다.
+			const float PreviousForwardAngleRad = State.PathForwardAngleRad;
 			const FVector PostStepPosition = bOnSurface ? ProjectedSurface : State.PathSurfaceWorld;
 			FVector StepRadialAfter = FVector::ZeroVector;
 			if (bHasRadialBefore && ComputeAxisRadial(PostStepPosition, StepRadialAfter))
 			{
-				State.PathAccumulatedAngleRad += FMath::Acos(FMath::Clamp(
-					static_cast<float>(FVector::DotProduct(StepRadialBefore, StepRadialAfter)), -1.0f, 1.0f));
+				const float RadialDot = FMath::Clamp(
+					static_cast<float>(FVector::DotProduct(StepRadialBefore, StepRadialAfter)),
+					-1.0f, 1.0f);
+				const float UnsignedStepAngleRad = FMath::Acos(RadialDot);
+				State.PathAccumulatedAngleRad += UnsignedStepAngleRad;
+
+				// acos 누적은 전진/후퇴를 모두 양수로 더한다. 같은 step을 atan2로도 측정해 winding
+				// 방향 전진과 역방향 흔들림을 분리한다. 기존 각도 기반 동작/품질 판정은 건드리지 않는다.
+				const FVector StepAxisDirection = State.PathAxisDirection.GetSafeNormal(
+					KINDA_SMALL_NUMBER, FVector::UpVector);
+				const float SignedStepAngleRad = FMath::Atan2(
+					FVector::DotProduct(StepAxisDirection,
+						FVector::CrossProduct(StepRadialBefore, StepRadialAfter)),
+					RadialDot);
+				const float WindingStepAngleRad = SignedStepAngleRad * State.PathWindingSign;
+				State.PathSignedNetAngleRad += WindingStepAngleRad;
+				if (WindingStepAngleRad >= 0.0f)
+				{
+					State.PathForwardAngleRad += WindingStepAngleRad;
+				}
+				else
+				{
+					State.PathReverseAngleRad += -WindingStepAngleRad;
+				}
+
+				const float BeforeAxisDistance = FVector::DotProduct(
+					PreviousSurfaceWorld - State.PathAxisOrigin, StepAxisDirection);
+				const float AfterAxisDistance = FVector::DotProduct(
+					PostStepPosition - State.PathAxisOrigin, StepAxisDirection);
+				const float BeforeRadius = FVector::Dist(
+					PreviousSurfaceWorld,
+					State.PathAxisOrigin + StepAxisDirection * BeforeAxisDistance);
+				const float AfterRadius = FVector::Dist(
+					PostStepPosition,
+					State.PathAxisOrigin + StepAxisDirection * AfterAxisDistance);
+				const float StepMeanRadius = (BeforeRadius + AfterRadius) * 0.5f;
+				if (StepMeanRadius > KINDA_SMALL_NUMBER)
+				{
+					State.PathRadiusSum += StepMeanRadius;
+					State.PathRadiusMin = State.PathRadiusSampleCount > 0
+						? FMath::Min(State.PathRadiusMin, StepMeanRadius)
+						: StepMeanRadius;
+					State.PathRadiusMax = FMath::Max(State.PathRadiusMax, StepMeanRadius);
+					++State.PathRadiusSampleCount;
+				}
 			}
 
 			if (bOnSurface)
@@ -1885,6 +2028,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 				// penalty를 줄 수 있게 하고, 전환 거리 누적은 0으로 다시 시작한다.
 				if (ProjectedBone != CurrentBone)
 				{
+					++State.PathBoneTransitionCount;
 					State.PathPreviousBone = CurrentBone;
 					State.PathCurrentBone = ProjectedBone;
 					State.PathDistanceSinceBoneTransition = 0.0f;
@@ -1983,6 +2127,11 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 						? State.PathCurrentMesh.Get()
 						: Mesh;
 					Point.DistanceFromLatch = TargetArcDistance;
+					// 물리 위치는 실제 centerline arc로 재샘플링하되 animation phase는 같은
+					// integration segment의 forward signed angle을 보간한다. reverse 성분을 빼므로
+					// point angle은 감소하지 않고 angle -> distance binary search가 안정적으로 동작한다.
+					Point.WrapAngleFromLatchRad = FMath::Lerp(
+						PreviousForwardAngleRad, State.PathForwardAngleRad, Alpha);
 					// 브리지에서 출발하거나 이번 step이 브리지면 보간점도 허공 chord로 취급한다.
 					Point.bBridge = bPreviousPointWasBridge || !bOnSurface;
 					State.Path.Add(Point);
@@ -2062,6 +2211,60 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 	if (State.Path.Num() >= State.NumTailNodes)
 	{
 		FinishPathBuild(/*bFailed=*/false);
+	}
+	if (!State.bPathUsesPoseSpaceIsland && State.bPathBuildComplete)
+	{
+		const float BuiltDistance = State.Path.Num() > 0
+			? State.Path.Last().DistanceFromLatch
+			: 0.0f;
+		const float AbsoluteAngleRad = State.PathAccumulatedAngleRad;
+		const float NetSignedAngleRad = State.PathSignedNetAngleRad;
+		const float ForwardAngleRad = State.PathForwardAngleRad;
+		const float ReverseAngleRad = State.PathReverseAngleRad;
+		const float AverageRadius = State.PathRadiusSampleCount > 0
+			? State.PathRadiusSum / static_cast<float>(State.PathRadiusSampleCount)
+			: 0.0f;
+		const float PitchScale = Ctx.Config.WrappingHelixPitchScale;
+		const float ExpectedCmPerRad = AverageRadius *
+			FMath::Sqrt(1.0f + FMath::Square(PitchScale));
+		const float RawArcToSweepRatio = State.PathSweepDistance > KINDA_SMALL_NUMBER
+			? State.PathCurrentDistance / State.PathSweepDistance
+			: 0.0f;
+		const int32 BuiltSegmentCount = FMath::Max(0, State.Path.Num() - 1);
+		const auto CmPerRad = [BuiltDistance](float AngleRad)
+		{
+			return FMath::Abs(AngleRad) > KINDA_SMALL_NUMBER
+				? BuiltDistance / FMath::Abs(AngleRad)
+				: 0.0f;
+		};
+		const auto NodesPerTurn = [BuiltSegmentCount](float AngleRad)
+		{
+			return FMath::Abs(AngleRad) > KINDA_SMALL_NUMBER
+				? static_cast<float>(BuiltSegmentCount) * (2.0f * PI) / FMath::Abs(AngleRad)
+				: 0.0f;
+		};
+		const bool bEndedByAngleCap = Ctx.Config.WrappingMaxWrapAngleDeg > 0.0f &&
+			FMath::RadiansToDegrees(AbsoluteAngleRad) >= Ctx.Config.WrappingMaxWrapAngleDeg;
+
+		UE_LOG(LogRopeWrap, Log,
+			TEXT("[%s] Single angular density metrics: reason=%s "
+				"builtDistance=%.2fcm anglesDeg(abs=%.2f net=%.2f forward=%.2f reverse=%.2f) "
+				"cmPerRad(abs=%.3f net=%.3f forward=%.3f expected=%.3f) "
+				"nodesPerTurn(abs=%.2f net=%.2f forward=%.2f) rawArcToSweep=%.3f "
+				"radius(avg=%.2f min=%.2f max=%.2f samples=%d) pitch=%.3f "
+				"boneTransitions=%d points=%d anchors=%d"),
+			*Ctx.OwnerName, bEndedByAngleCap ? TEXT("AngleCap") : TEXT("FullPath"),
+			BuiltDistance,
+			FMath::RadiansToDegrees(AbsoluteAngleRad),
+			FMath::RadiansToDegrees(NetSignedAngleRad),
+			FMath::RadiansToDegrees(ForwardAngleRad),
+			FMath::RadiansToDegrees(ReverseAngleRad),
+			CmPerRad(AbsoluteAngleRad), CmPerRad(NetSignedAngleRad),
+			CmPerRad(ForwardAngleRad), ExpectedCmPerRad,
+			NodesPerTurn(AbsoluteAngleRad), NodesPerTurn(NetSignedAngleRad),
+			NodesPerTurn(ForwardAngleRad), RawArcToSweepRatio,
+			AverageRadius, State.PathRadiusMin, State.PathRadiusMax, State.PathRadiusSampleCount,
+			PitchScale, State.PathBoneTransitionCount, State.Path.Num(), State.Anchors.Num());
 	}
 	if (State.bPathUsesSingleBoneFallback && State.bPathBuildComplete)
 	{
@@ -3821,15 +4024,19 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 	if (State.Anchors.Num() == 0 || State.NumTailNodes <= 0)
 	{
 		State.FrontDistance = 0.0f;
+		State.FrontWrapAngleRad = 0.0f;
 		return;
 	}
 
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
 	const float FullDistance = static_cast<float>(FMath::Max(0, State.NumTailNodes - 1)) * SegmentLength;
 	float BuiltPathMaxDistance = 0.0f;
+	float BuiltPathMaxAngleRad = 0.0f;
 	for (const FRopeWrapPathPoint& Point : State.Path)
 	{
 		BuiltPathMaxDistance = FMath::Max(BuiltPathMaxDistance, Point.DistanceFromLatch);
+		BuiltPathMaxAngleRad = FMath::Max(
+			BuiltPathMaxAngleRad, Point.WrapAngleFromLatchRad);
 	}
 	// Legacy/실패 초기화처럼 Path가 비어 있는 경우만 anchor 거리를 폴백으로 쓴다.
 	if (State.Path.Num() == 0)
@@ -3842,6 +4049,9 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 	}
 
 	const float TargetFrontDistance = FMath::Min(FullDistance, BuiltPathMaxDistance);
+	// Advance와 commit이 서로 다른 목표를 보지 않도록, 이번 프레임에 사용한 실제 거리 cap을
+	// 상태에 보존한다. 최종 path build가 끝나면 이 값이 최종 완료 거리로 확정된다.
+	State.FrontTargetDistance = TargetFrontDistance;
 	if (TargetFrontDistance <= KINDA_SMALL_NUMBER)
 	{
 		State.FrontDistance = 0.0f;
@@ -3851,22 +4061,287 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 	const float FullTailDelay = (FullDistance / SegmentLength) * Ctx.Config.WrappingTailDelayPerSegment;
 	const float TotalDuration = FMath::Max(State.Duration + FullTailDelay, KINDA_SMALL_NUMBER);
 	const float BaseFrontSpeed = FullDistance / TotalDuration;
+	const auto EvaluateSpeedScale = [](float ProgressAlpha)
+	{
+		// 기존 front의 초반 완속/후반 가속 곡선은 보존하고 입력 위상만 distance progress에서
+		// Single/Composite 공통 angle progress로 바꾼다.
+		const float StartSpeedScale = 0.5f;
+		const float EndSpeedScale = 3.0f;
+		return FMath::Lerp(StartSpeedScale, EndSpeedScale,
+			RopeMath::SmoothStep(FMath::Clamp(ProgressAlpha, 0.0f, 1.0f)));
+	};
 
-	// Accelerate the visual wrap front as more of the tail is already wound.
-	// Use the full requested distance, not the currently built path cap, so early path-build frames do not spike speed.
-	const float ProgressAlpha = FMath::Clamp(
-		State.FrontDistance / FMath::Max(FullDistance, KINDA_SMALL_NUMBER),
-		0.0f,
-		1.0f);
+	const float PreviousFrontDistance = State.FrontDistance;
+	float PreviousFrontAngleRad = State.FrontWrapAngleRad;
+	float ProgressAlpha = 0.0f;
+	float SpeedScale = 1.0f;
+	float TargetFrontAngleRad = 0.0f;
+	float BaseAngularSpeedDegPerSec = 0.0f;
+	const bool bUseAngleMappedFront = State.Path.Num() >= 2 &&
+		BuiltPathMaxAngleRad > KINDA_SMALL_NUMBER;
+	// IsReadyToCommit에서도 동일한 정책을 선택할 수 있도록 현재 front 구동 방식을 기록한다.
+	State.bFrontUsesAngleMapping = bUseAngleMappedFront;
+	const TCHAR* FrontPolicy = bUseAngleMappedFront
+		? TEXT("AngleMapped")
+		: TEXT("DistanceFallback");
 
-	const float StartSpeedScale = 0.5f;
-	const float EndSpeedScale = 3.0f;
-	const float SpeedScale = FMath::Lerp(StartSpeedScale, EndSpeedScale, RopeMath::SmoothStep(ProgressAlpha));
+	if (bUseAngleMappedFront)
+	{
+		// 두 모드의 path는 distance와 animation angle이 모두 단조 증가한다. 현재까지 빌드된 path만
+		// 대상으로 양방향 보간을 제공해 front가 progressive build를 앞질러 순간 점프하지 않게 한다.
+		// build cap에 막힌 동안 미소비 angle debt도 별도로 쌓지 않는다.
+		const auto FindAngleAtDistance = [this](float SampleDistance)
+		{
+			if (State.Path.Num() == 0)
+			{
+				return 0.0f;
+			}
+			if (SampleDistance <= State.Path[0].DistanceFromLatch)
+			{
+				return State.Path[0].WrapAngleFromLatchRad;
+			}
+			if (SampleDistance >= State.Path.Last().DistanceFromLatch)
+			{
+				return State.Path.Last().WrapAngleFromLatchRad;
+			}
 
-	const float FrontSpeed = BaseFrontSpeed * SpeedScale;
-	State.FrontDistance = FMath::Min(
-		State.FrontDistance + FrontSpeed * FMath::Max(0.0f, DeltaTime),
-		TargetFrontDistance);
+			int32 LowerSearchIndex = 1;
+			int32 UpperSearchIndex = State.Path.Num() - 1;
+			while (LowerSearchIndex < UpperSearchIndex)
+			{
+				const int32 MidIndex = LowerSearchIndex + (UpperSearchIndex - LowerSearchIndex) / 2;
+				if (State.Path[MidIndex].DistanceFromLatch < SampleDistance)
+				{
+					LowerSearchIndex = MidIndex + 1;
+				}
+				else
+				{
+					UpperSearchIndex = MidIndex;
+				}
+			}
+
+			const FRopeWrapPathPoint& UpperPoint = State.Path[LowerSearchIndex];
+			const FRopeWrapPathPoint& LowerPoint = State.Path[LowerSearchIndex - 1];
+			const float DistanceSpan = UpperPoint.DistanceFromLatch - LowerPoint.DistanceFromLatch;
+			if (DistanceSpan <= KINDA_SMALL_NUMBER)
+			{
+				return UpperPoint.WrapAngleFromLatchRad;
+			}
+			const float Alpha = FMath::Clamp(
+				(SampleDistance - LowerPoint.DistanceFromLatch) / DistanceSpan,
+				0.0f, 1.0f);
+			return FMath::Lerp(
+				LowerPoint.WrapAngleFromLatchRad, UpperPoint.WrapAngleFromLatchRad, Alpha);
+		};
+
+		const auto FindDistanceAtAngle = [this](float SampleAngleRad)
+		{
+			if (State.Path.Num() == 0)
+			{
+				return 0.0f;
+			}
+			if (SampleAngleRad <= State.Path[0].WrapAngleFromLatchRad)
+			{
+				return State.Path[0].DistanceFromLatch;
+			}
+			if (SampleAngleRad >= State.Path.Last().WrapAngleFromLatchRad)
+			{
+				return State.Path.Last().DistanceFromLatch;
+			}
+
+			int32 LowerSearchIndex = 1;
+			int32 UpperSearchIndex = State.Path.Num() - 1;
+			while (LowerSearchIndex < UpperSearchIndex)
+			{
+				const int32 MidIndex = LowerSearchIndex + (UpperSearchIndex - LowerSearchIndex) / 2;
+				if (State.Path[MidIndex].WrapAngleFromLatchRad < SampleAngleRad)
+				{
+					LowerSearchIndex = MidIndex + 1;
+				}
+				else
+				{
+					UpperSearchIndex = MidIndex;
+				}
+			}
+
+			const FRopeWrapPathPoint& UpperPoint = State.Path[LowerSearchIndex];
+			const FRopeWrapPathPoint& LowerPoint = State.Path[LowerSearchIndex - 1];
+			const float AngleSpan = UpperPoint.WrapAngleFromLatchRad - LowerPoint.WrapAngleFromLatchRad;
+			if (AngleSpan <= KINDA_SMALL_NUMBER)
+			{
+				return UpperPoint.DistanceFromLatch;
+			}
+			const float Alpha = FMath::Clamp(
+				(SampleAngleRad - LowerPoint.WrapAngleFromLatchRad) / AngleSpan,
+				0.0f, 1.0f);
+			return FMath::Lerp(
+				LowerPoint.DistanceFromLatch, UpperPoint.DistanceFromLatch, Alpha);
+		};
+
+		// 초기 몇 frame에 angle point가 아직 없어 distance fallback이 먼저 움직였더라도, angular
+		// path가 준비되는 순간 현재 distance의 angle로 이어 받아 위치가 latch로 되감기지 않게 한다.
+		if (State.FrontWrapAngleRad <= KINDA_SMALL_NUMBER &&
+			State.FrontDistance > KINDA_SMALL_NUMBER)
+		{
+			State.FrontWrapAngleRad = FindAngleAtDistance(State.FrontDistance);
+			PreviousFrontAngleRad = State.FrontWrapAngleRad;
+		}
+
+		TargetFrontAngleRad = FindAngleAtDistance(TargetFrontDistance);
+		// 빌드 중에는 최종 angle을 아직 모르므로 현재 평균 angular density를 FullDistance까지
+		// 외삽한다. 이렇게 해야 짧게 빌드된 path의 끝에 닿았다는 이유로 easing이 즉시 3배가 되지 않는다.
+		float EstimatedFinalAngleRad = TargetFrontAngleRad;
+		if (!State.bPathBuildComplete && BuiltPathMaxDistance > KINDA_SMALL_NUMBER)
+		{
+			EstimatedFinalAngleRad = FMath::Max(
+				EstimatedFinalAngleRad,
+				BuiltPathMaxAngleRad * FullDistance / BuiltPathMaxDistance);
+		}
+		ProgressAlpha = EstimatedFinalAngleRad > KINDA_SMALL_NUMBER
+			? State.FrontWrapAngleRad / EstimatedFinalAngleRad
+			: 0.0f;
+		SpeedScale = EvaluateSpeedScale(ProgressAlpha);
+		BaseAngularSpeedDegPerSec = FMath::Clamp(
+			Ctx.Config.WrappingAngularSpeedDegPerSec, 1.0f, 7200.0f);
+		const float AngularStepRad = FMath::DegreesToRadians(
+			BaseAngularSpeedDegPerSec * SpeedScale) * FMath::Max(0.0f, DeltaTime);
+		State.FrontWrapAngleRad = FMath::Min(
+			State.FrontWrapAngleRad + AngularStepRad,
+			TargetFrontAngleRad);
+		State.FrontDistance = FMath::Min(
+			FindDistanceAtAngle(State.FrontWrapAngleRad),
+			TargetFrontDistance);
+	}
+	else
+	{
+		// 각도 parameter가 없는 legacy/degenerate path만 기존 distance front로 안전하게 폴백한다.
+		ProgressAlpha = State.FrontDistance / FMath::Max(FullDistance, KINDA_SMALL_NUMBER);
+		SpeedScale = EvaluateSpeedScale(ProgressAlpha);
+		const float FrontSpeed = BaseFrontSpeed * SpeedScale;
+		State.FrontDistance = FMath::Min(
+			State.FrontDistance + FrontSpeed * FMath::Max(0.0f, DeltaTime),
+			TargetFrontDistance);
+	}
+
+	if (State.FrontMotionStartElapsed < 0.0f &&
+		State.FrontDistance > PreviousFrontDistance + KINDA_SMALL_NUMBER)
+	{
+		State.FrontMotionStartElapsed = FMath::Max(
+			0.0f, State.Elapsed - FMath::Max(0.0f, DeltaTime));
+	}
+
+	// AngleMapped는 두 모드 모두 point별 실제 animation angle을 쓴다. legacy/degenerate fallback만
+	// Sequential 누적 forward angle의 전체 평균으로 timing 로그를 추정한다.
+	const float ModeBuiltAngleRad = bUseAngleMappedFront
+		? BuiltPathMaxAngleRad
+		: State.PathForwardAngleRad;
+	const float BuiltCmPerRad = ModeBuiltAngleRad > KINDA_SMALL_NUMBER
+		? BuiltPathMaxDistance / ModeBuiltAngleRad
+		: 0.0f;
+	const float EstimatedFrontAngleRad = bUseAngleMappedFront
+		? State.FrontWrapAngleRad
+		: (BuiltPathMaxDistance > KINDA_SMALL_NUMBER
+			? ModeBuiltAngleRad * FMath::Clamp(
+				State.FrontDistance / BuiltPathMaxDistance, 0.0f, 1.0f)
+			: 0.0f);
+	if (!bUseAngleMappedFront)
+	{
+		TargetFrontAngleRad = BuiltPathMaxDistance > KINDA_SMALL_NUMBER
+			? ModeBuiltAngleRad * FMath::Clamp(
+				TargetFrontDistance / BuiltPathMaxDistance, 0.0f, 1.0f)
+			: 0.0f;
+		BaseAngularSpeedDegPerSec = BuiltCmPerRad > KINDA_SMALL_NUMBER
+			? FMath::RadiansToDegrees(BaseFrontSpeed / BuiltCmPerRad)
+			: 0.0f;
+	}
+	State.FrontTargetWrapAngleRad = TargetFrontAngleRad;
+
+	// 4단계 완료 게이트는 progressive build의 임시 cap이 아니라 최종 path에 대해서만 arm한다.
+	// angle과 distance가 모두 끝난 최초 시간을 기록해 기존 per-segment tail deadline 대신 짧은
+	// post-front settle 시간을 잴 수 있게 한다.
+	const float DistanceCompletionTolerance = FMath::Max(0.01f, SegmentLength * 0.001f);
+	const float AngleCompletionToleranceRad = FMath::DegreesToRadians(0.1f);
+	const bool bAngleTargetDone = !bUseAngleMappedFront ||
+		State.FrontWrapAngleRad + AngleCompletionToleranceRad >= TargetFrontAngleRad;
+	const bool bDistanceTargetDone =
+		State.FrontDistance + DistanceCompletionTolerance >= TargetFrontDistance;
+	const bool bFinalFrontTargetDone = State.bPathBuildComplete &&
+		!State.bPathBuildFailed && bAngleTargetDone && bDistanceTargetDone;
+	if (bUseAngleMappedFront && bFinalFrontTargetDone &&
+		State.FrontReachedTargetElapsed < 0.0f)
+	{
+		State.FrontReachedTargetElapsed = State.Elapsed;
+		UE_LOG(LogRopeWrap, Display,
+			TEXT("[%s] Wrapping front reached angle+distance target: mode=%s "
+				"angle=%.2f/%.2fdeg distance=%.2f/%.2fcm postSettle=%.3fs"),
+			*Ctx.OwnerName,
+			State.bPathUsesPoseSpaceIsland ? TEXT("Composite") : TEXT("Single"),
+			FMath::RadiansToDegrees(State.FrontWrapAngleRad),
+			FMath::RadiansToDegrees(TargetFrontAngleRad),
+			State.FrontDistance, TargetFrontDistance,
+			Ctx.Config.WrappingPostFrontSettleTime);
+	}
+
+	const float SafeDeltaTime = FMath::Max(0.0f, DeltaTime);
+	const float MeasuredFrontSpeed = SafeDeltaTime > KINDA_SMALL_NUMBER
+		? (State.FrontDistance - PreviousFrontDistance) / SafeDeltaTime
+		: 0.0f;
+	const float MeasuredAngularSpeedDegPerSec = SafeDeltaTime > KINDA_SMALL_NUMBER
+		? (bUseAngleMappedFront
+			? FMath::RadiansToDegrees(
+				(State.FrontWrapAngleRad - PreviousFrontAngleRad) / SafeDeltaTime)
+			: (BuiltCmPerRad > KINDA_SMALL_NUMBER
+				? FMath::RadiansToDegrees(MeasuredFrontSpeed / BuiltCmPerRad)
+				: 0.0f))
+		: 0.0f;
+
+	// Progressive build가 끝난 뒤 한 번만 출력한다. 두 모드의 measuredLinearSpeed가 path의
+	// 구간별 cm/rad에 따라 달라도 measuredAngularSpeed는 같은 공통 angular policy를 따라야 한다.
+	if (State.bPathBuildComplete && !State.bFrontMotionStartLogged)
+	{
+		UE_LOG(LogRopeWrap, Display,
+			TEXT("[%s] Wrapping front speed metrics: mode=%s policy=%s "
+				"legacyBaseLinearSpeed=%.2fcm/s measuredLinearSpeed=%.2fcm/s "
+				"baseAngularSpeed=%.2fdeg/s measuredAngularSpeed=%.2fdeg/s speedScale=%.3f "
+				"builtCmPerRad=%.3f frontAngle=%.2fdeg targetAngle=%.2fdeg "
+				"front=%.2fcm target=%.2fcm"),
+			*Ctx.OwnerName,
+			State.bPathUsesPoseSpaceIsland ? TEXT("Composite") : TEXT("Single"),
+			FrontPolicy, BaseFrontSpeed, MeasuredFrontSpeed,
+			BaseAngularSpeedDegPerSec, MeasuredAngularSpeedDegPerSec, SpeedScale,
+			BuiltCmPerRad, FMath::RadiansToDegrees(EstimatedFrontAngleRad),
+			FMath::RadiansToDegrees(TargetFrontAngleRad),
+			State.FrontDistance, TargetFrontDistance);
+		State.bFrontMotionStartLogged = true;
+	}
+
+	const bool bReachedFinalBuiltFront = State.bPathBuildComplete &&
+		bAngleTargetDone && bDistanceTargetDone;
+	if (bReachedFinalBuiltFront && !State.bFrontMotionCompletionLogged)
+	{
+		const float FrontMotionElapsed = State.FrontMotionStartElapsed >= 0.0f
+			? FMath::Max(0.0f, State.Elapsed - State.FrontMotionStartElapsed)
+			: 0.0f;
+		const float FrontAngleDeg = FMath::RadiansToDegrees(EstimatedFrontAngleRad);
+		const float FrontTurns = FrontAngleDeg / 360.0f;
+		const float AverageDegPerSec = FrontMotionElapsed > KINDA_SMALL_NUMBER
+			? FrontAngleDeg / FrontMotionElapsed
+			: 0.0f;
+		const float AverageSecondsPerTurn = FrontTurns > KINDA_SMALL_NUMBER
+			? FrontMotionElapsed / FrontTurns
+			: 0.0f;
+		UE_LOG(LogRopeWrap, Display,
+			TEXT("[%s] Wrapping front timing metrics: mode=%s policy=%s "
+				"frontElapsed=%.3fs frontAngle=%.2fdeg turns=%.3f "
+				"averageDegPerSec=%.2f averageSecondsPerTurn=%.3fs "
+				"frontDistance=%.2fcm builtDistance=%.2fcm"),
+			*Ctx.OwnerName,
+			State.bPathUsesPoseSpaceIsland ? TEXT("Composite") : TEXT("Single"),
+			FrontPolicy, FrontMotionElapsed, FrontAngleDeg, FrontTurns,
+			AverageDegPerSec, AverageSecondsPerTurn,
+			State.FrontDistance, BuiltPathMaxDistance);
+		State.bFrontMotionCompletionLogged = true;
+	}
 }
 
 bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPathPoint& OutPoint) const
@@ -3954,6 +4429,8 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 		Point.Bone = Alpha < 0.5f ? LowerPoint.Bone : UpperPoint.Bone;
 		Point.Mesh = Alpha < 0.5f ? LowerPoint.Mesh : UpperPoint.Mesh;
 		Point.DistanceFromLatch = SampleDistance;
+		Point.WrapAngleFromLatchRad = FMath::Lerp(
+			LowerPoint.WrapAngleFromLatchRad, UpperPoint.WrapAngleFromLatchRad, Alpha);
 		Point.bBridge = LowerPoint.bBridge || UpperPoint.bBridge;
 		Point.bVirtual = LowerPoint.bVirtual || UpperPoint.bVirtual;
 	};
@@ -4011,7 +4488,14 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 				});
 			if (Anchor)
 			{
-				return AnchorToPoint(*Anchor, Point);
+				if (!AnchorToPoint(*Anchor, Point))
+				{
+					return false;
+				}
+				// 움직이는 본에서 위치/법선은 anchor frame으로 갱신하되, path가 빌드될 때
+				// 확정한 animation angle parameter는 저장된 point 값으로 복원한다.
+				Point.WrapAngleFromLatchRad = StoredPoint.WrapAngleFromLatchRad;
+				return true;
 			}
 
 			// Progressive build에서 anchor가 아직 붙기 전인 같은 프레임의 짧은 창은 스냅샷을 쓴다.

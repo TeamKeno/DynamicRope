@@ -323,6 +323,14 @@ struct FRopeWrapPathPoint
 	float DistanceFromLatch = 0.0f;
 
 	/**
+	 * latch에서 이 path point까지의 wrapping animation 위상(rad). Composite는 ideal helix angle,
+	 * Sequential SurfaceVectorField는 winding 방향 forward signed angle을 실제 centerline arc
+	 * 재샘플 alpha로 보간해 저장한다. DistanceFromLatch는 물리 rope spacing을 유지하고,
+	 * 이 값은 두 모드가 공유하는 front angle -> distance 매핑에 사용한다.
+	 */
+	float WrapAngleFromLatchRad = 0.0f;
+
+	/**
 	 * 허공 브리지(chord) 경로점(WrappingMaxGapBridgeDistance > 0에서만 발생): 표면 투영 없이
 	 * tangent 직진으로 만들어졌다. front 모션의 위치 목표로는 참여하지만 앵커는 만들지 않는다 —
 	 * 커밋 후 이 구간 노드는 자유 로프로 남는다.
@@ -424,6 +432,28 @@ struct FRopeWrappingState
 	/** 직전 raw probe의 projection 전 ideal helix tangent. 다음 arc-length 출력점 guide 보간용. */
 	FVector PathCompositeRawGuideTangentWorld = FVector::ForwardVector;
 	float FrontDistance = 0.0f;
+	/** angle -> distance front가 현재까지 진행한 공통 animation 위상(rad).
+	 *  물리 rope distance와 분리되며 Single/Composite가 같은 각속도 정책을 사용한다. */
+	float FrontWrapAngleRad = 0.0f;
+	/** 현재 최종 path가 요구하는 물리적 front 이동 거리(cm).
+	 *  진행 중인 path build의 임시 끝점이 아니라 commit 시점에 검사할 최종 거리 목표다. */
+	float FrontTargetDistance = 0.0f;
+	/** 현재 최종 path가 요구하는 animation 위상(rad).
+	 *  거리와 별도로 저장해 투영 후 path 밀도가 달라도 한 바퀴의 완료 시점을 동일하게 판정한다. */
+	float FrontTargetWrapAngleRad = 0.0f;
+	/** 현재 front가 point별 angle -> distance 매핑을 사용하는지 여부.
+	 *  false인 degenerate/legacy path는 기존 거리 기반 완료 정책으로 안전하게 폴백한다. */
+	bool bFrontUsesAngleMapping = false;
+	/** angle과 distance가 모두 최종 목표에 처음 도달한 Wrapping phase 경과 시간.
+	 *  이 시각부터 post-front 안정화 시간을 재며, 음수면 아직 목표에 도달하지 않은 상태다. */
+	float FrontReachedTargetElapsed = -1.0f;
+
+	/** front가 실제로 처음 전진한 Wrapping phase 경과 시간. angle-mapped front의
+	 *  모드별 초/회전 로그를 계산하며, 음수면 아직 front가 출발하지 않은 상태다. */
+	float FrontMotionStartElapsed = -1.0f;
+	bool bFrontMotionStartLogged = false;
+	bool bFrontMotionCompletionLogged = false;
+
 	FVector PathSurfaceWorld = FVector::ZeroVector;
 	FVector PathNormalWorld = FVector::UpVector;
 	FVector PathTangentWorld = FVector::ForwardVector;
@@ -522,6 +552,19 @@ struct FRopeWrappingState
 	 * rolling axis 기준 radial 회전량을 더하고, Composite AnalyticHelix는 노드별 나선 위상을 저장한다.
 	 */
 	float PathAccumulatedAngleRad = 0.0f;
+
+	/** Sequential SurfaceVectorField 각도 진단. 기존 PathAccumulatedAngleRad는 acos 기반 절댓값
+	 *  누적을 유지하고, 아래 값은 winding 방향을 +로 둔 signed/forward/reverse 성분을 병렬 기록한다. */
+	float PathSignedNetAngleRad = 0.0f;
+	float PathForwardAngleRad = 0.0f;
+	float PathReverseAngleRad = 0.0f;
+
+	/** Sequential step이 실제 사용한 rolling axis 기준 surface radius 통계. */
+	float PathRadiusSum = 0.0f;
+	float PathRadiusMin = 0.0f;
+	float PathRadiusMax = 0.0f;
+	int32 PathRadiusSampleCount = 0;
+	int32 PathBoneTransitionCount = 0;
 
 	float Elapsed = 0.0f;
 	float Duration = 0.16f;
@@ -985,7 +1028,23 @@ struct FRopeWrapConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.01", Units = "s"))
 	float WrappingMotionDuration = 0.50f;
 
-	/** Per-segment delay while tail nodes settle onto the surface path. */
+	/**
+	 * wrapping animation의 easing 적용 전 기준 각속도(deg/s).
+	 * Single/Composite 모두 이 값으로 FrontWrapAngleRad를 진행한다. 1100deg/s는 3단계 전
+	 * Single 실측 시작 정책(baseSpeed 약 203cm/s / 10.57cm/rad)에 맞춘 공통 기본값이다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap",
+		meta = (ClampMin = "1.0", ClampMax = "7200.0", Units = "deg/s"))
+	float WrappingAngularSpeedDegPerSec = 1100.0f;
+
+	/** 각도 매핑 front가 angle+distance 목표에 도달한 뒤 Wrapped commit 전에 확보할 짧은
+	 *  안정화 시간. 마지막 kinematic node/anchor 전환에서 발생할 수 있는 한 프레임 튐을 막는다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Wrap",
+		meta = (ClampMin = "0.0", ClampMax = "1.0", Units = "s"))
+	float WrappingPostFrontSettleTime = 0.08f;
+
+	/** tail node가 surface path에 안착하도록 세그먼트마다 추가하던 지연 시간.
+	 *  4단계부터 commit 제한 시간으로는 각도 매핑을 쓸 수 없는 DistanceFallback 경로에만 적용한다. */
 	float WrappingTailDelayPerSegment = 0.024f;
 
 	/** Wrapping 중 한 프레임에 진행할 surface path 적분 step 수. 높이면 빨라지지만 순간 비용이 커진다. */
