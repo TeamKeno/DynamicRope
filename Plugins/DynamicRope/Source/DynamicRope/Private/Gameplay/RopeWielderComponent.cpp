@@ -115,19 +115,17 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		{
 			EIC->ClearBindingsForObject(this);
 		}
-		if (MappingContext)
+	}
+	// IMC는 Pawn이 아니라 LocalPlayer에 등록됐다 — 폰이 먼저 unpossess된 뒤 파괴되면 GetController()가 null이라
+	// 종전엔 제거가 건너뛰어져 IMC가 로컬 플레이어에 영구 잔류했다(#11). 추가 시점에 캐시한 서브시스템으로
+	// possession 상태와 무관하게 제거한다(LocalPlayer가 이미 파괴됐으면 weak가 null → 제거 불필요).
+	if (MappingContext)
+	{
+		if (UEnhancedInputLocalPlayerSubsystem* Sub = MappedInputSubsystem.Get())
 		{
-			if (APlayerController* PC = Cast<APlayerController>(Pawn->GetController()))
-			{
-				if (ULocalPlayer* LP = PC->GetLocalPlayer())
-				{
-					if (UEnhancedInputLocalPlayerSubsystem* Sub = LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
-					{
-						Sub->RemoveMappingContext(MappingContext);
-					}
-				}
-			}
+			Sub->RemoveMappingContext(MappingContext);
 		}
+		MappedInputSubsystem.Reset();
 	}
 	bInputBound = false;
 	ClearThrowPreview();
@@ -516,6 +514,8 @@ void URopeWielderComponent::AddMappingContext()
 	if (UEnhancedInputLocalPlayerSubsystem* Sub = LP ? LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>() : nullptr)
 	{
 		Sub->AddMappingContext(MappingContext, MappingPriority);
+		// EndPlay가 possession 무관하게 제거하도록 서브시스템을 캐시(#11).
+		MappedInputSubsystem = Sub;
 	}
 }
 

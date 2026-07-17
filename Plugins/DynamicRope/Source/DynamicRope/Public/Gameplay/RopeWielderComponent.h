@@ -23,6 +23,7 @@ struct FRopeAimRayThrowRequest;
 class USkeletalMeshComponent;
 class UInputAction;
 class UInputMappingContext;
+class UEnhancedInputLocalPlayerSubsystem;
 class UAnimMontage;
 
 /** 던질 때 조준 방향을 어디서 가져올지. */
@@ -610,6 +611,10 @@ private:
 	void OnReloadInput();
 
 	bool bInputBound = false;
+	// AddMappingContext가 IMC를 꽂은 로컬 플레이어 Enhanced Input 서브시스템(weak). IMC는 Pawn이 아니라
+	// LocalPlayer에 등록되므로, EndPlay가 폰의 현재 컨트롤러에 의존하지 않고 여기서 possession 무관하게
+	// 제거한다(#11 — 폰이 먼저 unpossess된 뒤 파괴돼도 IMC가 로컬 플레이어에 잔류하는 것 방지). LP 파괴 시 null.
+	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> MappedInputSubsystem;
 	// pull 홀드 상태(StartPull~StopPull 사이). 몽타주 모드의 재생 조건 — UpdatePullMontage가 읽는다.
 	bool bPullHeld = false;
 	// AirControl 부스트 원복용 저장 상태(스윙 진입 시 저장, 종료/EndPlay 시 복원).

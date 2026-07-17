@@ -223,36 +223,46 @@ void URopeWrapTargetComponent::BuildCapsuleFromBounds(USceneComponent* Comp,
 	// 로컬 반폭과 로컬 중심.
 	const FVector Ext = LocalBounds.BoxExtent;
 	const FVector LocalCenter = LocalBounds.Origin;
+	// 컴포넌트 스케일을 반영한 월드 반폭. 반지름/세그먼트가 월드 단위여야 스케일된 대상에서 두께가 축 길이와
+	// 어긋나지 않는다(#5 — 종전엔 반지름만 로컬이라 스케일 S 대상이 축 S배·두께 1배로 표면을 관통). 끝점은
+	// 아래에서 월드 중심+월드 축 단위로 배치한다(CompTM 스케일 이중 적용 방지). 스케일 1이면 동작 불변.
+	const FVector Scale = CompTM.GetScale3D().GetAbs();
+	const FVector ScaledExt = Ext * Scale;
 
-	// 장축 인덱스 결정: 자동(최장 반폭) 또는 지정.
+	// 장축 인덱스 결정: 자동(최장 월드 반폭) 또는 지정.
 	int32 AxisIdx;
 	if (bAutoAxis)
 	{
-		AxisIdx = (Ext.X >= Ext.Y && Ext.X >= Ext.Z) ? 0 : (Ext.Y >= Ext.Z) ? 1 : 2;
+		AxisIdx = (ScaledExt.X >= ScaledExt.Y && ScaledExt.X >= ScaledExt.Z) ? 0 : (ScaledExt.Y >= ScaledExt.Z) ? 1 : 2;
 	}
 	else
 	{
 		AxisIdx = (Axis == ERopeWrapAxis::X) ? 0 : (Axis == ERopeWrapAxis::Y) ? 1 : 2;
 	}
 
-	// 반지름: 나머지 두 반폭의 최대(축정렬 단면을 덮는 캡슐 근사 — 사각 단면 모서리만 살짝 초과).
+	// 반지름: 나머지 두 월드 반폭의 최대(축정렬 단면을 덮는 캡슐 근사 — 사각 단면 모서리만 살짝 초과).
 	double OtherMax = 0.0;
 	for (int32 k = 0; k < 3; ++k)
 	{
 		if (k != AxisIdx)
 		{
-			OtherMax = FMath::Max(OtherMax, static_cast<double>(Ext[k]));
+			OtherMax = FMath::Max(OtherMax, static_cast<double>(ScaledExt[k]));
 		}
 	}
 	OutRadius = static_cast<float>(FMath::Max(OtherMax, 1.0));
 
-	// 세그먼트 반길이 = 장축 반폭 - 반지름(반구가 끝을 넘지 않게; 음수면 0 = 구).
-	const float SegHalf = static_cast<float>(FMath::Max(static_cast<double>(Ext[AxisIdx]) - OutRadius, 0.0));
+	// 세그먼트 반길이(월드) = 장축 월드 반폭 - 반지름(반구가 끝을 넘지 않게; 음수면 0 = 구).
+	const float SegHalf = static_cast<float>(FMath::Max(static_cast<double>(ScaledExt[AxisIdx]) - OutRadius, 0.0));
 
+	// 끝점: 월드 중심에서 월드 축 단위벡터로 SegHalf(월드)만큼. 스케일은 ScaledExt에 이미 반영됐으므로
+	// 오프셋에 CompTM 스케일을 다시 곱하지 않는다(방향만 회전 — TransformVectorNoScale). 스케일 1에서
+	// 종전 CompTM.TransformPosition(LocalCenter + Axis*SegHalf)와 동일 결과.
 	FVector LocalAxis = FVector::ZeroVector;
 	LocalAxis[AxisIdx] = 1.0;
-	OutA = CompTM.TransformPosition(LocalCenter + LocalAxis * SegHalf);
-	OutB = CompTM.TransformPosition(LocalCenter - LocalAxis * SegHalf);
+	const FVector WorldAxis = CompTM.TransformVectorNoScale(LocalAxis).GetSafeNormal();
+	const FVector WorldCenter = CompTM.TransformPosition(LocalCenter);
+	OutA = WorldCenter + WorldAxis * SegHalf;
+	OutB = WorldCenter - WorldAxis * SegHalf;
 }
 
 void URopeWrapTargetComponent::BuildBox(USceneComponent* Comp)
