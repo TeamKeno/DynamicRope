@@ -443,18 +443,24 @@ struct FRopeResidentSharedResults
 // 전역 SDF 볼륨 캐시(RT 전용). 베이크된 복셀 데이터는 VolumeKey당 정적이라, 로프/프레임 무관하게 딱 한 번만
 // dequant+업로드해 상주시킨다. 로프의 근접 볼륨 집합이 프레임마다 흔들려도(드래곤: 콜라이더 무상한+mesh 단위
 // 브로드페이즈) distance 재업로드가 0이 된다 — 로프는 매 프레임 인스턴스(본 트랜스폼) 배열만 올린다. 인덱스/
-// 오프셋은 append-only라 기존 볼륨 참조가 절대 안 깨진다(신규 볼륨 추가 시에만 grow).
+// 오프셋은 프레임 내에서 안정적이라 기존 참조가 안 깨진다(신규 볼륨은 append). 무한 성장은 generational
+// 재빌드로 막는다 — 오래 미참조 볼륨이 쌓이면 캐시를 live 집합만으로 압축 재구성한다(인스턴스 배열은 매
+// 프레임 KeyToIndex 재조회라 인덱스 재배치 안전; 압축은 캐시된 CpuDist 슬라이스 복사라 소스 재-dequant 불필요).
 struct FRopeGlobalSDFCache
 {
 	// VolumeKey(베이크 데이터 포인터) -> 전역 볼륨 인덱스(= SDFVolumes 인덱스; 헤더가 CpuDist 오프셋을 가짐).
 	TMap<const void*, int32> KeyToIndex;
-	// CPU 원본(연결된 dequant float + 헤더). 세션 내 grow-only — 새 볼륨을 처음 볼 때만 append.
+	// VolumeKey -> 마지막으로 참조된 RT 프레임(재빌드 축출 판정용). KeyToIndex와 같은 키 집합.
+	TMap<const void*, uint64> KeyLastUsedFrame;
+	// CPU 원본(연결된 dequant float + 헤더). 신규 볼륨 append / 재빌드 시 live만 남기고 압축.
 	TArray<float>             CpuDist;
 	TArray<FRopeSDFVolumeGPU> CpuVol;
-	// 상주 GPU 버퍼(external, 프레임 간 유지). 신규 볼륨 append로 dirty일 때만 재생성+업로드.
+	// 상주 GPU 버퍼(external, 프레임 간 유지). dirty(신규 append 또는 재빌드)일 때만 재생성+업로드.
 	TRefCountPtr<FRDGPooledBuffer> DistBuf;
 	TRefCountPtr<FRDGPooledBuffer> VolBuf;
 	bool bDirty = false;
+	// RT 프레임 카운터(Ensure가 프레임당 1회 증가). KeyLastUsedFrame 스탬프/축출 판정의 시계.
+	uint64 FrameCounter = 0;
 };
 
 // pimpl: 영속 버퍼 맵(RT 전용) + 공유 결과(GT<->RT). RDG/RHI 타입을 헤더에서 숨긴다.
@@ -988,11 +994,56 @@ static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 // 캐시에 없는 VolumeKey만 dequant해 전역 배열에 append하고, 신규 볼륨이 생긴 프레임에만(dirty) 상주 버퍼를
 // 재업로드한다(세션당 볼륨 수만큼, 이후 0). 반환: 이번 프레임 바인딩할 전역 distance/header RDG 버퍼(어느
 // 로프도 SDF가 없으면 더미 1개). 이걸로 로프별·집합-churn 재업로드(구 per-rope VolSig 게이트의 50ms)를 없앤다.
+// generational 재빌드 파라미터.
+//  - EvictAfterFrames: 이만큼 연속 미참조면 축출 대상(히스테리시스 — 컬링 경계 깜빡임에 재빌드 안 터지게).
+//  - RebuildReclaimFrac: 죽은 dist 바이트 비율이 이 이상일 때만 재빌드(자잘한 회수로 MB 재업로드 방지).
+static constexpr uint64 GRopeSDFEvictAfterFrames = 600;   // ~10s @ 60fps
+static constexpr float  GRopeSDFRebuildReclaimFrac = 0.25f;
+
+// 캐시를 live(최근 EvictAfterFrames 내 참조) 볼륨만으로 압축 재구성. dequant된 CpuDist 슬라이스를 그대로
+// 복사(소스 불필요)하고 인덱스/오프셋을 새로 부여 → bDirty로 상주 버퍼 1회 재업로드. 인스턴스 배열이 매
+// 프레임 KeyToIndex를 재조회하므로 인덱스 재배치는 다음 팩 단계가 자동 반영(참조 무손상).
+static void RopeRebuildGlobalSDFCache(FRopeGlobalSDFCache& Cache, uint64 Frame)
+{
+	TMap<const void*, int32>   NewKeyToIndex;
+	TMap<const void*, uint64>  NewLastUsed;
+	TArray<float>              NewDist;
+	TArray<FRopeSDFVolumeGPU>  NewVol;
+	NewKeyToIndex.Reserve(Cache.KeyToIndex.Num());
+	NewVol.Reserve(Cache.CpuVol.Num());
+	NewDist.Reserve(Cache.CpuDist.Num());
+
+	for (const TPair<const void*, int32>& KV : Cache.KeyToIndex)
+	{
+		const uint64* Last = Cache.KeyLastUsedFrame.Find(KV.Key);
+		if (!Last || (Frame - *Last) >= GRopeSDFEvictAfterFrames)
+		{
+			continue;   // 오래 미참조 — 드롭.
+		}
+		const FRopeSDFVolumeGPU& Old = Cache.CpuVol[KV.Value];
+		const int32 VoxN = Old.ResX * Old.ResY * Old.ResZ;
+
+		FRopeSDFVolumeGPU NewV = Old;
+		NewV.DistOffset = NewDist.Num();
+		NewKeyToIndex.Add(KV.Key, NewVol.Num());
+		NewVol.Add(NewV);
+		NewDist.Append(Cache.CpuDist.GetData() + Old.DistOffset, VoxN);
+		NewLastUsed.Add(KV.Key, *Last);
+	}
+
+	Cache.KeyToIndex       = MoveTemp(NewKeyToIndex);
+	Cache.KeyLastUsedFrame = MoveTemp(NewLastUsed);
+	Cache.CpuVol           = MoveTemp(NewVol);
+	Cache.CpuDist          = MoveTemp(NewDist);
+	Cache.bDirty           = true;   // 아래 업로드 경로가 압축된 버퍼를 1회 재업로드.
+}
+
 static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<FRopeGPUResidentStep>& Steps,
 	FRopeGlobalSDFCache& Cache, FRDGBufferRef& OutDistRDG, FRDGBufferRef& OutVolRDG)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_EnsureGlobalSDF);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_EnsureGlobalSDF);
+	const uint64 Frame = ++Cache.FrameCounter;   // 프레임당 1회(Ensure는 RunSteps당 1회).
 	for (const FRopeGPUResidentStep& S : Steps)
 	{
 		for (const FRopeGPUSDFCollider& Src : S.SDFColliders)
@@ -1002,6 +1053,8 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 			{
 				continue;
 			}
+			// 유효 볼륨 — 마지막 사용 프레임 스탬프(신규/기존 공통; 재빌드 축출 판정의 기준).
+			Cache.KeyLastUsedFrame.FindOrAdd(Src.VolumeKey) = Frame;
 			if (Cache.KeyToIndex.Contains(Src.VolumeKey))
 			{
 				// 이미 상주 — dequant/업로드 없음(정적 베이크 데이터라 재-dequant 불필요).
@@ -1040,9 +1093,33 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 		}
 	}
 
+	// generational 축출: 오래 미참조 볼륨이 회수 문턱 이상 쌓였으면 live 집합만으로 캐시 압축 재구성.
+	if (Cache.CpuVol.Num() > 0)
+	{
+		int64 DeadFloats = 0;
+		for (const TPair<const void*, int32>& KV : Cache.KeyToIndex)
+		{
+			const uint64* Last = Cache.KeyLastUsedFrame.Find(KV.Key);
+			if (!Last || (Frame - *Last) >= GRopeSDFEvictAfterFrames)
+			{
+				const FRopeSDFVolumeGPU& H = Cache.CpuVol[KV.Value];
+				DeadFloats += (int64)H.ResX * H.ResY * H.ResZ;
+			}
+		}
+		if (DeadFloats > 0 && Cache.CpuDist.Num() > 0 &&
+			(float)DeadFloats / (float)Cache.CpuDist.Num() >= GRopeSDFRebuildReclaimFrac)
+		{
+			RopeRebuildGlobalSDFCache(Cache, Frame);
+		}
+	}
+
 	if (Cache.CpuVol.Num() == 0)
 	{
-		// 이번 세션에 SDF 볼륨이 하나도 없음 — 더미 1개(바인딩 유효성; 셰이더는 NumSDFColliders=0이라 미참조).
+		// 볼륨이 하나도 없음(최초, 또는 재빌드로 전부 축출) — 상주 버퍼 해제(VRAM 회수) 후 더미 바인딩.
+		Cache.DistBuf.SafeRelease();
+		Cache.VolBuf.SafeRelease();
+		Cache.bDirty = false;
+		// 더미 1개(바인딩 유효성; 셰이더는 NumSDFColliders=0이라 미참조).
 		TArray<float>&             DummyDist = *GraphBuilder.AllocObject<TArray<float>>();
 		TArray<FRopeSDFVolumeGPU>& DummyVol  = *GraphBuilder.AllocObject<TArray<FRopeSDFVolumeGPU>>();
 		DummyDist.AddZeroed(1);
