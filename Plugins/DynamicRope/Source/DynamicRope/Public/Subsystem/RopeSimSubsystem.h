@@ -102,6 +102,13 @@ public:
 	/** 프레임 시뮬 구동 — FRopeSimTickFunction이 TG_PostPhysics에서 호출한다(테스트는 직접 호출 가능). */
 	void Tick(float DeltaTime);
 
+	/**
+	 * 즉시 조준 질의(HUD/preview)용 collider 스냅샷 새로고침. Wielder tick은 SimTick보다 먼저 돌 수 있어,
+	 * 방금 갱신한 aim ray bounds가 다음 SimTick까지 FrameColliders에 반영되지 않는 프레임이 생긴다.
+	 * 이 함수는 현재 등록된 provider를 한 번 다시 수집하고 지정 로프의 FrameColliders만 최신 region으로 채운다.
+	 */
+	bool RefreshFrameCollidersForImmediateQuery(URopeComponent& Rope);
+
 	//~ UWorldSubsystem
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 	//~ 틱 함수 등록 + 씬→솔버 등록(GDF 통합 경로에서 뷰 확장이 솔버를 찾는 용도). 해제는 Deinitialize.

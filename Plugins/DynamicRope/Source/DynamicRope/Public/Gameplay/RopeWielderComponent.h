@@ -5,7 +5,7 @@
 //
 // 수동으로 하던 것: 로프를 Hand_r에 reparent → BP에서 F키→Throw 배선. 이 컴포넌트가 둘 다 대신한다.
 //  - 소켓 자동 부착: BeginPlay에 owner의 SkeletalMesh를 찾아 로프를 HandSocketName에 attach.
-//  - Throw()/Release()/ToggleThrow() BlueprintCallable. 조준 방향은 AimSource(컨트롤 회전/카메라/액터)에서 계산.
+//  - Throw()/Release()/ToggleThrow() BlueprintCallable. 조준 방향은 로프 ThrowParams.FrameMode에서 계산.
 //  - 선택적 Enhanced Input 자동 바인딩: ThrowAction/ReleaseAction(+ MappingContext)을 꽂으면 BeginPlay에 바인딩.
 //    안 꽂으면 Throw()를 직접 호출하면 된다.
 
@@ -183,8 +183,9 @@ public:
 	bool bAttachOnBeginPlay = true;
 
 	//~ Aim ----------------------------------------------------------------
-	// Wielder는 조준의 '출처'(카메라/소켓/원점)만 소유한다. aim ray를 쓸지(조준의 '의미')는
-	// 로프의 ResolveMode가 결정한다 — UsesAimRay() 참조. 아래 AimRay* 세부는 T3(고급) 튜닝.
+	// Wielder는 조준 원점 세부만 소유한다. aim ray 방향은 Rope ThrowParams.FrameMode(Owner/OwnerCamera/Socket 등)를
+	// 따른다. aim ray를 쓸지(조준의 '의미')는 로프의 ResolveMode가 결정한다 — UsesAimRay() 참조.
+	/** Legacy 조준 방향 선택자. 현재 aim ray 방향은 FrameMode를 따르며, ViewLocation 원점의 camera 폴백에만 관여한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
 	ERopeAimSource AimSource = ERopeAimSource::ControlRotation;
 
@@ -447,8 +448,8 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	URopeComponent* GetRope() const { return Rope; }
 
-	/** 현재 AimSource 기준 조준 방향(정규화). 던지기/preview 틱에서 호출된다(GT, 콜드).
-	 *  락온·에임 어시스트·AI 조준 등 커스텀 조준은 이걸 오버라이드(확장 훅). */
+	/** Legacy AimSource 기준 방향 조회 헬퍼. 내부 aim ray/던지기/preview 방향은 Rope ThrowParams.FrameMode를
+	 *  단일 소스로 사용하므로 이 함수가 바꾸지 않는다. 외부 게임 코드의 보조 방향 조회용으로만 유지한다. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	virtual FVector GetAimDirection() const;
 
@@ -514,6 +515,11 @@ private:
 	/** 이번 프레임 조준 HUD 샘플(Tick에서 UpdateAimHudSample이 갱신). */
 	FRopeAimHudSample AimHudSample;
 
+	/** 이번 프레임 HUD 스윕이 확정한 throw context. Preview는 같은 프레임이면 이를 재사용한다. */
+	FRopeThrowContext AimRayFrameThrowContext;
+	uint64 AimRayFrameContextStamp = 0;
+	bool bHasAimRayFrameThrowContext = false;
+
 	/** 자동 생성한 조준 HUD 위젯(로컬 플레이어 전용). bShowAimHudWidget/모드 변경에 따라 생성·제거. */
 	UPROPERTY(Transient)
 	TObjectPtr<URopeAimWidget> AimHudWidget = nullptr;
@@ -556,9 +562,6 @@ private:
 
 	void UpdateThrowPreview();
 
-	/** 멀리 있는 target SDF도 수집되도록 ray 구간을 collider query bounds에 포함한다. */
-	void UpdateAimRayColliderQueryBounds();
-
 	/** 주어진 centerline을 preview 컴포넌트에 넘겨 그린다(표시 OFF/컴포넌트 없음이면 no-op). */
 	void DisplayPreviewCenterline(const FRopeWrapPreviewData& Centerline);
 
@@ -578,6 +581,8 @@ private:
 	FRopeThrowContext BuildBaseThrowContext(const FVector& AimDir) const;
 	// 실제 ray를 새로 검사하고 throw 순간에 고정할 context를 구성한다.
 	FRopeThrowContext BuildThrowContextInternal(const FVector& AimDir) const;
+	// 같은 프레임 HUD 스윕이 이미 만든 aim context가 있으면 Preview가 재사용한다.
+	bool TryGetCachedAimRayThrowContext(const FVector& AimDir, FRopeThrowContext& OutContext) const;
 	// 입력 순간의 base frame과 ray 설정을 값 타입 요청으로 캡처한다.
 	FRopeAimRayThrowRequest BuildAimRayThrowRequest(const FVector& AimDir) const;
 	// 선택한 origin 모드를 월드 위치로 해석한다.

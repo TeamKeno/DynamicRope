@@ -12,6 +12,7 @@
 #include "Collision/RopeCollider.h"
 // 트래커 cross-mesh 테스트의 식별용 mock 컴포넌트(NewObject<USceneComponent>).
 #include "Components/SceneComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "RopeTestHelpers.h"
 
 namespace
@@ -420,6 +421,60 @@ bool FRopeAimRayReachLengthTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("ray pointing away from reach sphere has no usable length"),
 		FRopeAimTargeting::ResolveRayLengthForReach(FVector(300.0f, 0.0f, 0.0f), RayDir, FVector::ZeroVector, RopeReach),
 		0.0f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimRayResolveOutputsTest,
+	"DynamicRope.FlightContact.AimRayResolveReturnsSingleSweepOutputs",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeAimRayResolveOutputsTest::RunTest(const FString& Parameters)
+{
+	const FName Bone("upperarm_l");
+	const USkeletalMeshComponent* Mesh = NewObject<USkeletalMeshComponent>();
+	RopeTest::FSphereMockCollider Target(FVector(100.0f, 0.0f, 0.0f), 10.0f, Bone, Mesh);
+	TArray<IRopeCollider*> Colliders = { &Target };
+
+	FRopeAimTargeting::FQueryContext QueryContext;
+	QueryContext.Colliders = &Colliders;
+	QueryContext.FallbackRayLength = 200.0f;
+	QueryContext.FallbackQueryRadius = 2.0f;
+
+	FRopeAimRayThrowRequest Request;
+	Request.BaseContext.Origin = FVector::ZeroVector;
+	Request.RayOrigin = FVector::ZeroVector;
+	Request.RayDirection = FVector::ForwardVector;
+	Request.RayLength = 200.0f;
+	Request.ReachOrigin = FVector::ZeroVector;
+	Request.ReachLength = 200.0f;
+	Request.QueryRadius = 2.0f;
+	Request.SweepStep = 1.0f;
+
+	FRopeThrowContext Resolved;
+	FRopeAimRayHitResult Hit;
+	FRopeAimRayHitResult Blocked;
+	const bool bResolved = FRopeAimTargeting::ResolveAimRayThrowContext(
+		QueryContext, Request,
+		[](const USceneComponent*, FName) { return true; },
+		Resolved, &Hit, &Blocked);
+	TestTrue(TEXT("wrap 가능 target은 context까지 해석"), bResolved);
+	TestTrue(TEXT("같은 sweep의 hit 반환"), Hit.bHit);
+	TestFalse(TEXT("wrap 가능 target은 blocked 아님"), Blocked.bHit);
+	TestTrue(TEXT("context에 aim guide 설정"), Resolved.bHasAimGuideHit);
+	TestTrue(TEXT("context와 hit의 mesh 일치"), Resolved.AimGuideMesh.Get() == Hit.Mesh);
+	TestEqual(TEXT("context와 hit의 bone 일치"), Resolved.AimGuideBone, Hit.Bone);
+
+	Resolved = FRopeThrowContext();
+	Hit = FRopeAimRayHitResult();
+	Blocked = FRopeAimRayHitResult();
+	const bool bRejected = FRopeAimTargeting::ResolveAimRayThrowContext(
+		QueryContext, Request,
+		[](const USceneComponent*, FName) { return false; },
+		Resolved, &Hit, &Blocked);
+	TestFalse(TEXT("게이트 거부 target은 context fallback"), bRejected);
+	TestFalse(TEXT("게이트 거부 target은 valid hit 아님"), Hit.bHit);
+	TestTrue(TEXT("게이트 거부 target은 blocked로 반환"), Blocked.bHit);
+	TestFalse(TEXT("fallback context에는 aim guide 없음"), Resolved.bHasAimGuideHit);
 	return true;
 }
 

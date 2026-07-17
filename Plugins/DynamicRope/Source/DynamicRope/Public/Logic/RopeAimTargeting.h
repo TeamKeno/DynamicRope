@@ -102,10 +102,12 @@ public:
 		FRopeAimRayHitResult* OutBlockedHit = nullptr);
 
 	/** Aim 요청을 hit 컨텍스트(FrameForward/AimGuide*)로 해석한다. hit이 없으면 OutContext는
-	 *  BaseContext fallback(반환 false). */
+	 *  BaseContext fallback(반환 false). 선택 출력으로 같은 단일 sweep의 hit/blocked 결과를 돌려준다. */
 	static bool ResolveAimRayThrowContext(const FQueryContext& Ctx, const FRopeAimRayThrowRequest& Request,
 		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
-		FRopeThrowContext& OutContext);
+		FRopeThrowContext& OutContext,
+		FRopeAimRayHitResult* OutHit = nullptr,
+		FRopeAimRayHitResult* OutBlockedHit = nullptr);
 
 	/** Aim ray가 검사할 collider 수집 확장 AABB를 만든다. 무효 입력이면 FBox(ForceInit)
 	 *  (= 수집 확장 없음 — SimFrame.AimRayColliderQueryBounds의 clear와 동일 의미). */

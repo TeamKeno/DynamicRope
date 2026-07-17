@@ -59,6 +59,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope|Preview")
 	bool IsPreviewVisible() const { return bPreviewVisible; }
 
+	bool TryClaimPreviewOwner(UObject* InOwner);
+	void ReleasePreviewOwner(UObject* InOwner);
+	bool IsPreviewOwner(const UObject* InOwner) const;
+
 	//~ UPrimitiveComponent
 	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
 	virtual void SendRenderDynamicData_Concurrent() override;
@@ -79,4 +83,7 @@ private:
 	FRopeWrapPreviewData WrapPreviewLocal;
 	bool bPreviewVisible = false;
 	FBoxSphereBounds LocalPreviewBounds;
+
+	UPROPERTY(Transient)
+	TWeakObjectPtr<UObject> PreviewOwner;
 };

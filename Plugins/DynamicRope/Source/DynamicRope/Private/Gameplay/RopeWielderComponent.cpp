@@ -25,6 +25,40 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 
+namespace
+{
+	void SetThrowContextForward(FRopeThrowContext& Context, const FVector& Forward)
+	{
+		const FVector SafeForward = Forward.GetSafeNormal();
+		if (SafeForward.IsNearlyZero())
+		{
+			return;
+		}
+
+		FVector Up = Context.FrameUp.GetSafeNormal();
+		if (Up.IsNearlyZero() || FMath::Abs(FVector::DotProduct(Up, SafeForward)) > 0.98f)
+		{
+			Up = FMath::Abs(FVector::DotProduct(FVector::UpVector, SafeForward)) < 0.98f
+				? FVector::UpVector
+				: FVector::RightVector;
+		}
+
+		FVector Right = FVector::CrossProduct(Up, SafeForward).GetSafeNormal();
+		if (Right.IsNearlyZero())
+		{
+			Right = FVector::CrossProduct(FVector::RightVector, SafeForward).GetSafeNormal();
+		}
+		if (Right.IsNearlyZero())
+		{
+			return;
+		}
+
+		Context.FrameForward = SafeForward;
+		Context.FrameRight = Right;
+		Context.FrameUp = FVector::CrossProduct(SafeForward, Right).GetSafeNormal();
+	}
+}
+
 URopeWielderComponent::URopeWielderComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -65,7 +99,7 @@ void URopeWielderComponent::BeginPlay()
 	// component가 없어도 collider 수집 bounds를 매 프레임 갱신해야 한다.
 	SetComponentTickEnabled(UsesLockedPreview() || bAutoGroundExitOnUpwardPull ||
 		bBoostAirControlWhileSwinging || UsesAimRay());
-	UpdateAimRayColliderQueryBounds();
+	UpdateAimHudSample();
 	if (UsesLockedPreview())
 	{
 		UpdateThrowPreview();
@@ -97,6 +131,11 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	bInputBound = false;
 	ClearThrowPreview();
+	if (PreviewComponent)
+	{
+		PreviewComponent->ReleasePreviewOwner(this);
+		PreviewComponent = nullptr;
+	}
 	if (AimHudWidget)
 	{
 		AimHudWidget->RemoveFromParent();
@@ -131,7 +170,6 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	UpdateGroundExit();
 	UpdateSwingAirControl();
 	UpdatePullMontage();
-	UpdateAimRayColliderQueryBounds();
 	UpdateAimHudSample();
 	UpdateAimHudWidget();
 	UpdateThrowPreview();
@@ -139,16 +177,25 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 void URopeWielderComponent::UpdateAimHudSample()
 {
+	if (!Rope)
+	{
+		ResolveRefs();
+	}
+
 	const bool bHadTarget = AimHudSample.bHasTarget;
 	USceneComponent* PrevMesh = AimHudSample.Mesh;
 	const FName PrevBone = AimHudSample.Bone;
 
 	AimHudSample = FRopeAimHudSample();
+	bHasAimRayFrameThrowContext = false;
+	AimRayFrameContextStamp = GFrameCounter;
 	// 던질 수 없는 phase에서는 조준 스윕 자체를 돌리지 않는다 — 샘플이 비면 위젯/디버거가 알아서 숨는다.
 	// (③ 비-Reel에서 이 스윕이 유일한 SDF 비용이었다: UpdateThrowPreview는 이미 prepared를 안 만든다.)
 	if (IsAimActive())
 	{
 		const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(FVector::ZeroVector);
+		Rope->RefreshAimRayQueryColliders(Request);
+		FRopeThrowContext ResolvedContext = Request.BaseContext;
 		const FVector RayDirection = Request.RayDirection.GetSafeNormal();
 		AimHudSample.RayOrigin = Request.RayOrigin;
 		AimHudSample.RayDirection = RayDirection;
@@ -160,7 +207,8 @@ void URopeWielderComponent::UpdateAimHudSample()
 		FRopeAimRayHitResult Hit;
 		FRopeAimRayHitResult Blocked;
 		// 이 샘플이 조준 시각화의 단일 소스다 — HUD 위젯과 Gameplay Debugger([J]aim)가 함께 읽는다.
-		const bool bHitTarget = Rope->FindAimRayBoneHit(Request, Hit, &Blocked);
+		const bool bHitTarget = Rope->ResolveAimRayThrowContext(
+			Request, ResolvedContext, &Hit, &Blocked);
 		if (bHitTarget && Hit.bHit)
 		{
 			AimHudSample.bHasTarget = true;
@@ -185,6 +233,17 @@ void URopeWielderComponent::UpdateAimHudSample()
 			AimHudSample.Distance = Blocked.Distance;
 			AimHudSample.AimWorldPos = Blocked.HitWorldPos;
 		}
+
+		if (Request.IsValid())
+		{
+			AimRayFrameThrowContext = ResolvedContext;
+			bHasAimRayFrameThrowContext = true;
+		}
+	}
+	else if (Rope)
+	{
+		// 조준 불가능한 phase에서는 이전 ray bounds가 collider 수집 범위를 계속 넓히지 않게 한다.
+		Rope->ClearAimRayColliderQueryBounds();
 	}
 
 	// 대상 (Mesh, Bone) 변화 통지 — 진입/전환은 Changed, 이탈은 Lost.
@@ -357,19 +416,56 @@ bool URopeWielderComponent::UsesLockedPreview() const
 void URopeWielderComponent::ResolvePreviewComponent(bool bAllowAutoCreate)
 {
 	AActor* Owner = GetOwner();
-	if (!Owner || PreviewComponent)
+	if (!Owner)
 	{
 		return;
 	}
 
+	if (PreviewComponent && !IsValid(PreviewComponent))
+	{
+		PreviewComponent = nullptr;
+	}
+	if (PreviewComponent)
+	{
+		return;
+	}
+
+	URopePreviewComponent* ReferencedPreviewComponent = nullptr;
 	if (UActorComponent* ReferencedComponent = PreviewComponentReference.GetComponent(Owner))
 	{
-		PreviewComponent = Cast<URopePreviewComponent>(ReferencedComponent);
+		ReferencedPreviewComponent = Cast<URopePreviewComponent>(ReferencedComponent);
+		if (ReferencedPreviewComponent)
+		{
+			if (ReferencedPreviewComponent->TryClaimPreviewOwner(this))
+			{
+				PreviewComponent = ReferencedPreviewComponent;
+			}
+			else
+			{
+				UE_LOG(LogDynamicRope, Warning,
+					TEXT("RopeWielder on %s: referenced RopePreviewComponent '%s' is already used by another wielder."),
+					*GetNameSafe(Owner), *GetNameSafe(ReferencedPreviewComponent));
+			}
+		}
 	}
 
 	if (!PreviewComponent)
 	{
-		PreviewComponent = Owner->FindComponentByClass<URopePreviewComponent>();
+		TArray<URopePreviewComponent*> PreviewComponents;
+		Owner->GetComponents(PreviewComponents);
+		for (URopePreviewComponent* Candidate : PreviewComponents)
+		{
+			if (!Candidate || Candidate == ReferencedPreviewComponent)
+			{
+				continue;
+			}
+
+			if (Candidate->TryClaimPreviewOwner(this))
+			{
+				PreviewComponent = Candidate;
+				break;
+			}
+		}
 	}
 
 	if (!PreviewComponent && bAllowAutoCreate)
@@ -381,6 +477,7 @@ void URopeWielderComponent::ResolvePreviewComponent(bool bAllowAutoCreate)
 		PreviewComponent = NewObject<URopePreviewComponent>(Owner, URopePreviewComponent::StaticClass(), PreviewName);
 		if (PreviewComponent)
 		{
+			PreviewComponent->TryClaimPreviewOwner(this);
 			Owner->AddInstanceComponent(PreviewComponent);
 			if (USceneComponent* Root = Owner->GetRootComponent())
 			{
@@ -784,7 +881,7 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 	const FVector ExplicitAimDir = AimDir.GetSafeNormal();
 	if (!ExplicitAimDir.IsNearlyZero())
 	{
-		Context.FrameForward = ExplicitAimDir;
+		SetThrowContextForward(Context, ExplicitAimDir);
 	}
 
 	return Context;
@@ -797,15 +894,20 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContextInternal(const FVector
 		return BuildBaseThrowContext(AimDir);
 	}
 
+	if (FRopeThrowContext CachedContext; TryGetCachedAimRayThrowContext(AimDir, CachedContext))
+	{
+		return CachedContext;
+	}
+
 	const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(AimDir);
 	FRopeThrowContext Context = Request.BaseContext;
 	if (Rope)
 	{
-		// Preview context는 현재 frame snapshot으로 즉시 해석한다. 실제 throw는 QueueAimRayThrow 경로를 쓴다.
+		// Preview context는 current ray bounds로 snapshot을 즉시 갱신한 뒤 해석한다.
+		// 실제 throw는 QueueAimRayThrow 경로를 써서 SimTick의 중앙 수집 직후 확정한다.
 		if (Request.IsValid())
 		{
-			Rope->SetAimRayColliderQueryBounds(
-				Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
+			Rope->RefreshAimRayQueryColliders(Request);
 			Rope->ResolveAimRayThrowContext(Request, Context);
 		}
 		else
@@ -814,6 +916,21 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContextInternal(const FVector
 		}
 	}
 	return Context;
+}
+
+bool URopeWielderComponent::TryGetCachedAimRayThrowContext(const FVector& AimDir, FRopeThrowContext& OutContext) const
+{
+	if (!AimDir.GetSafeNormal().IsNearlyZero())
+	{
+		return false;
+	}
+	if (!bHasAimRayFrameThrowContext || AimRayFrameContextStamp != GFrameCounter)
+	{
+		return false;
+	}
+
+	OutContext = AimRayFrameThrowContext;
+	return true;
 }
 
 FRopeAimRayThrowRequest URopeWielderComponent::BuildAimRayThrowRequest(const FVector& AimDir) const
@@ -829,37 +946,6 @@ FRopeAimRayThrowRequest URopeWielderComponent::BuildAimRayThrowRequest(const FVe
 	Request.QueryRadius = AimRayQueryRadius;
 	Request.SweepStep = AimRaySweepStep;
 	return Request;
-}
-
-void URopeWielderComponent::UpdateAimRayColliderQueryBounds()
-{
-	if (!Rope)
-	{
-		ResolveRefs();
-	}
-	if (!Rope)
-	{
-		return;
-	}
-
-	if (!UsesAimRay())
-	{
-		// 런타임 모드 변경 시 이전 ray AABB가 collider 수집 범위에 남지 않게 즉시 제거한다.
-		Rope->ClearAimRayColliderQueryBounds();
-		return;
-	}
-
-	// 실제 SDF query 없이 입력 값과 동일한 request를 만들어 다음 subsystem 수집 범위만 갱신한다.
-	const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(FVector::ZeroVector);
-	if (Request.IsValid())
-	{
-		Rope->SetAimRayColliderQueryBounds(
-			Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
-	}
-	else
-	{
-		Rope->ClearAimRayColliderQueryBounds();
-	}
 }
 
 void URopeWielderComponent::Throw()
@@ -1273,7 +1359,7 @@ void URopeWielderComponent::UpdateThrowPreview()
 void URopeWielderComponent::ClearPreviewDisplay()
 {
 	// 표시만 정리 — prepared(던지기용)는 건드리지 않는다.
-	if (PreviewComponent)
+	if (PreviewComponent && PreviewComponent->IsPreviewOwner(this))
 	{
 		PreviewComponent->ClearPreview();
 	}
@@ -1328,11 +1414,19 @@ FRopeWrapPreviewData URopeWielderComponent::ResolvePreparedPreviewForDisplay(con
 	}
 
 	FVector HitPoint = Anchor->StartWorldPosition;
-	const USceneComponent* Mesh = Anchor->Mesh.IsValid() ? Anchor->Mesh.Get() : Prepared.Mesh.Get();
-	const FName Bone = Anchor->Bone.IsNone() ? Prepared.Bone : Anchor->Bone;
-	if (Mesh && !Bone.IsNone())
+	if (Prepared.ThrowContext.bHasAimGuideHit)
 	{
-		HitPoint = ResolveBindingWorld(Mesh, Bone).TransformPosition(Anchor->LocalSurfacePosition);
+		// Aim guide preview의 표시 끝점은 anchor local을 다시 푼 값이 아니라, 조준 레이가 실제로 선택한 hit이다.
+		HitPoint = Prepared.ThrowContext.AimGuideHitWorldPos;
+	}
+	else
+	{
+		const USceneComponent* Mesh = Anchor->Mesh.IsValid() ? Anchor->Mesh.Get() : Prepared.Mesh.Get();
+		const FName Bone = Anchor->Bone.IsNone() ? Prepared.Bone : Anchor->Bone;
+		if (Mesh && !Bone.IsNone())
+		{
+			HitPoint = ResolveBindingWorld(Mesh, Bone).TransformPosition(Anchor->LocalSurfacePosition);
+		}
 	}
 
 	const FVector Origin = Preview.Points[0];

@@ -274,8 +274,6 @@ public:
 	bool FindAimRayBoneHit(const FVector& Origin, const FVector& AimDir, float RayLength,
 		float QueryRadius, float SweepStep, FRopeAimRayHitResult& OutHit,
 		FRopeAimRayHitResult* OutBlockedHit = nullptr) const;
-	bool FindAimRayBoneHit(const FRopeAimRayThrowRequest& Request, FRopeAimRayHitResult& OutHit,
-		FRopeAimRayHitResult* OutBlockedHit = nullptr) const;
 
 	/** 요청 반경(0=미지정)을 이 로프의 폴백 규약으로 해석한 **실제 스윕 반경**. 조준 시각화가 질의와
 	 *  같은 치수를 그리도록 쓴다 — 0이 기본값이라 실무에선 거의 항상 폴백이 걸린다. */
@@ -285,8 +283,11 @@ public:
 	void SetAimRayColliderQueryBounds(const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius);
 	/** Aim ray 모드가 끝났을 때 이전 프레임의 추가 collider 수집 bounds를 제거한다. */
 	void ClearAimRayColliderQueryBounds();
+	/** 즉시 HUD/preview 질의 전에 request bounds를 등록하고 중앙 subsystem snapshot을 현재 값으로 갱신한다. */
+	bool RefreshAimRayQueryColliders(const FRopeAimRayThrowRequest& Request);
 	/** 현재 FrameColliders로 Aim 요청을 해석한다. hit이 없으면 OutContext는 BaseContext fallback이다. */
-	bool ResolveAimRayThrowContext(const FRopeAimRayThrowRequest& Request, FRopeThrowContext& OutContext) const;
+	bool ResolveAimRayThrowContext(const FRopeAimRayThrowRequest& Request, FRopeThrowContext& OutContext,
+		FRopeAimRayHitResult* OutHit = nullptr, FRopeAimRayHitResult* OutBlockedHit = nullptr) const;
 	/** 실제 throw를 최신 collider 수집 직후 확정하도록 요청을 큐에 넣는다. */
 	void QueueAimRayThrow(const FRopeAimRayThrowRequest& Request);
 
@@ -648,24 +649,9 @@ private:
 	bool ResolvePreparedPierceHitPoint(const FRopePreparedThrowPreview& Prepared, FVector& OutHitPoint) const;
 	// 팁 소켓을 HitPoint에 두고 Tail->Head 소켓 벡터가 관통 방향(PierceDir)을 보도록 메쉬 원점(컴포넌트) 월드
 	// 트랜스폼을 역산한다. 꼬리 소켓이 있으면 로프 연결점(월드)도 함께 낸다(없으면 메쉬 원점).
-	// TipSocketName 소켓이 없으면 false(Pierce 임베드 비활성). 순수 배치 수학은 static 헬퍼로 분리해 단위 테스트한다.
+	// TipSocketName 소켓이 없으면 false(Pierce 임베드 비활성). 순수 배치 수학은 FRopeTipPlacement가 소유한다.
 	bool ComputePierceEmbed(const FVector& HitPoint, const FVector& PierceDir,
 		FTransform& OutComponentWorld, FVector& OutTailWorld) const;
-
-public:
-	// 순수 배치 수학(컴포넌트/월드 무의존) — 팁 소켓이 HitPoint에 PierceDir로 박히도록 메쉬 원점 월드
-	// 트랜스폼을 역산하고, 꼬리 소켓 월드 위치를 낸다. 소켓 로컬을 인자로 받아 단위 테스트가 world 없이 검증한다.
-	static void SolvePierceEmbed(const FVector& HitPoint, const FVector& PierceDir,
-		const FTransform& TipSocketLocal, bool bHasTailSocket, const FTransform& TailSocketLocal,
-		FTransform& OutComponentWorld, FVector& OutTailWorld);
-	// 순수 배치 수학 — 로프 연결 소켓이 RopeAttachWorld에 오고 Tail->Head 소켓 벡터가 ForwardDir을 보도록 메쉬 원점을 역산한다.
-	static void SolveTipSocketFollow(const FVector& RopeAttachWorld, const FVector& ForwardDir,
-		const FTransform& RopeSocketLocal, FTransform& OutComponentWorld);
-	static void SolveTipSocketFollow(const FVector& RopeAttachWorld, const FVector& ForwardDir,
-		const FTransform& RopeSocketLocal, bool bHasHeadSocket, const FTransform& HeadSocketLocal,
-		FTransform& OutComponentWorld);
-
-private:
 
 	//~ 페이즈 상태 머신 ----------------------------------------------------
 	ERopePhase Phase = ERopePhase::Free;

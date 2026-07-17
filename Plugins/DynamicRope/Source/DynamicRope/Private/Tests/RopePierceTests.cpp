@@ -13,6 +13,7 @@
 #include "Logic/RopeThrowPreviewBuilder.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "RopeComponent.h"
+#include "Logic/RopeTipPlacement.h"
 #include "RopeTestHelpers.h"
 
 namespace
@@ -270,7 +271,7 @@ bool FRopePierceGuidedThrowEntryTest::RunTest(const FString& Parameters)
 }
 
 // Pierce 임베드 배치 수학: 팁 소켓이 히트점에 관통 방향으로 박히고, 꼬리 소켓이 로프 연결점이 되는가.
-// SolvePierceEmbed는 world 무의존 static이라 소켓 로컬만으로 계약을 잠근다.
+// FRopeTipPlacement는 world 무의존이라 소켓 로컬만으로 계약을 잠근다.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceEmbedMathTest,
 	"DynamicRope.Pierce.EmbedPlacesTipAtHit",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -286,7 +287,7 @@ bool FRopePierceEmbedMathTest::RunTest(const FString& Parameters)
 
 	FTransform ComponentWorld;
 	FVector TailWorld;
-	URopeComponent::SolvePierceEmbed(HitPoint, PierceDir, TipSocketLocal,
+	FRopeTipPlacement::SolvePierceEmbed(HitPoint, PierceDir, TipSocketLocal,
 		/*bHasTailSocket*/ true, TailSocketLocal, ComponentWorld, TailWorld);
 
 	const FTransform TipWorld = TipSocketLocal * ComponentWorld;
@@ -303,7 +304,7 @@ bool FRopePierceEmbedMathTest::RunTest(const FString& Parameters)
 	const FTransform EffectiveTailSocketLocal = TailSocketLocal * Relative;
 	FTransform ScaledBaseWorld;
 	FVector ScaledTailWorld;
-	URopeComponent::SolvePierceEmbed(HitPoint, PierceDir, EffectiveTipSocketLocal,
+	FRopeTipPlacement::SolvePierceEmbed(HitPoint, PierceDir, EffectiveTipSocketLocal,
 		/*bHasTailSocket*/ true, EffectiveTailSocketLocal, ScaledBaseWorld, ScaledTailWorld);
 	const FTransform ScaledMeshWorld = Relative * ScaledBaseWorld;
 	const FTransform ScaledTipWorld = TipSocketLocal * ScaledMeshWorld;
@@ -320,7 +321,7 @@ bool FRopePierceEmbedMathTest::RunTest(const FString& Parameters)
 	// 꼬리 소켓 없음 → 연결점은 메쉬 원점.
 	FTransform CW2;
 	FVector Tail2;
-	URopeComponent::SolvePierceEmbed(HitPoint, PierceDir, TipSocketLocal,
+	FRopeTipPlacement::SolvePierceEmbed(HitPoint, PierceDir, TipSocketLocal,
 		/*bHasTailSocket*/ false, FTransform::Identity, CW2, Tail2);
 	TestTrue(TEXT("꼬리 소켓 없으면 연결점=메쉬 원점"), Tail2.Equals(CW2.GetLocation(), 0.01f));
 	return true;
@@ -339,7 +340,7 @@ bool FRopePierceTailSocketFollowMathTest::RunTest(const FString& Parameters)
 	const FTransform HeadSocketLocal(FQuat(FVector(0, 1, 0), 0.4f), FVector(20, 35, 8));
 
 	FTransform ComponentWorld;
-	URopeComponent::SolveTipSocketFollow(RopeAttachWorld, ForwardDir, TailSocketLocal,
+	FRopeTipPlacement::SolveSocketFollow(RopeAttachWorld, ForwardDir, TailSocketLocal,
 		/*bHasHeadSocket*/ true, HeadSocketLocal, ComponentWorld);
 
 	const FTransform TailWorld = TailSocketLocal * ComponentWorld;
@@ -357,7 +358,7 @@ bool FRopePierceTailSocketFollowMathTest::RunTest(const FString& Parameters)
 	const FTransform EffectiveHeadSocketLocal = HeadSocketLocal * Relative;
 
 	FTransform BaseWorld;
-	URopeComponent::SolveTipSocketFollow(RopeAttachWorld, ForwardDir, EffectiveTailSocketLocal,
+	FRopeTipPlacement::SolveSocketFollow(RopeAttachWorld, ForwardDir, EffectiveTailSocketLocal,
 		/*bHasHeadSocket*/ true, EffectiveHeadSocketLocal, BaseWorld);
 
 	const FTransform RenderedMeshWorld = Relative * BaseWorld;
@@ -386,7 +387,7 @@ bool FRopePierceEmbedBoneLocalRoundTripTest::RunTest(const FString& Parameters)
 
 	FTransform ComponentWorld;
 	FVector TailWorld;
-	URopeComponent::SolvePierceEmbed(HitPoint, PierceDir, TipSocketLocal,
+	FRopeTipPlacement::SolvePierceEmbed(HitPoint, PierceDir, TipSocketLocal,
 		/*bHasTailSocket*/ false, FTransform::Identity, ComponentWorld, TailWorld);
 
 	// 임의의 본 트랜스폼(위치+회전+스케일).
@@ -400,6 +401,29 @@ bool FRopePierceEmbedBoneLocalRoundTripTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("복원 위치 = 커밋 위치"), Restored.GetLocation().Equals(ComponentWorld.GetLocation(), 0.01f));
 	TestTrue(TEXT("복원 회전 = 커밋 회전"),
 		Restored.GetRotation().Equals(ComponentWorld.GetRotation(), 0.001f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceAimYawLockTest,
+	"DynamicRope.Pierce.AimYawLockPreservesPitch",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePierceAimYawLockTest::RunTest(const FString& Parameters)
+{
+	const FVector Up = FVector::UpVector;
+	const FVector SourceDir = FVector(0.8f, 0.0f, 0.6f).GetSafeNormal();
+	const FVector AimDir = FVector(0.0f, 1.0f, 0.4f).GetSafeNormal();
+	const FVector Locked = FRopeTipPlacement::MakeAimYawLockedDirection(SourceDir, AimDir, Up);
+
+	TestTrue(TEXT("상하 기울기 유지"),
+		FMath::IsNearlyEqual(FVector::DotProduct(Locked, Up), FVector::DotProduct(SourceDir, Up), 0.001f));
+	const FVector LockedFlat = FVector::VectorPlaneProject(Locked, Up).GetSafeNormal();
+	const FVector AimFlat = FVector::VectorPlaneProject(AimDir, Up).GetSafeNormal();
+	TestTrue(TEXT("수평 yaw는 aim 방향"), LockedFlat.Equals(AimFlat, 0.001f));
+
+	const FVector VerticalAimResult = FRopeTipPlacement::MakeAimYawLockedDirection(
+		SourceDir, FVector::UpVector, Up);
+	TestTrue(TEXT("수평 aim이 없으면 원래 방향 유지"), VerticalAimResult.Equals(SourceDir, 0.001f));
 	return true;
 }
 

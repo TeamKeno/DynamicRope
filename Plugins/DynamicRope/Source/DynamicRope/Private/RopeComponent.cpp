@@ -30,6 +30,7 @@
 #include "Subsystem/RopeSimSubsystem.h"
 // 디버그 캡처 게이트 + 스냅샷 보관소
 #include "Subsystem/RopeDebugSubsystem.h"
+#include "Logic/RopeTipPlacement.h"
 #include "Logic/RopeThrowPreviewBuilder.h"
 #include "Logic/RopeTractionSolver.h"
 // FRopeGPUSolver::MaxNodes — NumParticles 상한(GPU 솔버 스레드그룹 한도)
@@ -84,51 +85,6 @@ namespace
 		Prepared.GuideFrameComponent = nullptr;
 		Prepared.GuideFrameLocalPoints.Reset();
 		Prepared.GuideFrameLocalOrigin = FVector::ZeroVector;
-	}
-
-	FVector ProjectOntoPlaneOrFallback(const FVector& Candidate, const FVector& Normal)
-	{
-		const FVector Axis = Normal.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-		FVector Projected = Candidate - FVector::DotProduct(Candidate, Axis) * Axis;
-		if (Projected.Normalize(KINDA_SMALL_NUMBER))
-		{
-			return Projected;
-		}
-		return RopeMath::AnyTangentFromNormal(Axis);
-	}
-
-	FQuat MakeAxisAlignmentRotation(const FVector& LocalAxisInput, const FVector& WorldAxisInput,
-		const FVector& LocalUpHintInput)
-	{
-		const FVector LocalAxis = LocalAxisInput.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-		const FVector WorldAxis = WorldAxisInput.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-		const FVector LocalUp = ProjectOntoPlaneOrFallback(LocalUpHintInput, LocalAxis);
-
-		const FQuat ShortestSwing = FQuat::FindBetweenNormals(LocalAxis, WorldAxis);
-		const FVector WorldUp = ProjectOntoPlaneOrFallback(ShortestSwing.RotateVector(LocalUp), WorldAxis);
-
-		const FQuat LocalBasis = FRotationMatrix::MakeFromXZ(LocalAxis, LocalUp).ToQuat();
-		const FQuat WorldBasis = FRotationMatrix::MakeFromXZ(WorldAxis, WorldUp).ToQuat();
-		return WorldBasis * LocalBasis.Inverse();
-	}
-
-	FVector MakeAimYawLockedDirection(const FVector& SourceDirInput, const FVector& AimDirInput,
-		const FVector& UpHintInput)
-	{
-		const FVector AimDir = AimDirInput.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-		const FVector SourceDir = SourceDirInput.GetSafeNormal(KINDA_SMALL_NUMBER, AimDir);
-		const FVector Up = UpHintInput.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-
-		FVector AimFlat = AimDir - FVector::DotProduct(AimDir, Up) * Up;
-		if (!AimFlat.Normalize(KINDA_SMALL_NUMBER))
-		{
-			return SourceDir;
-		}
-
-		const float Vertical = FMath::Clamp(FVector::DotProduct(SourceDir, Up), -1.0f, 1.0f);
-		const float HorizontalScale = FMath::Sqrt(FMath::Max(0.0f, 1.0f - FMath::Square(Vertical)));
-		const FVector LockedDir = AimFlat * HorizontalScale + Up * Vertical;
-		return LockedDir.GetSafeNormal(KINDA_SMALL_NUMBER, SourceDir);
 	}
 
 #if !UE_BUILD_SHIPPING
@@ -698,13 +654,6 @@ bool URopeComponent::FindAimRayBoneHit(const FVector& Origin, const FVector& Aim
 		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); }, OutHit, OutBlockedHit);
 }
 
-bool URopeComponent::FindAimRayBoneHit(const FRopeAimRayThrowRequest& Request, FRopeAimRayHitResult& OutHit,
-	FRopeAimRayHitResult* OutBlockedHit) const
-{
-	return FRopeAimTargeting::FindAimRayBoneHit(MakeAimQueryContext(), Request,
-		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); }, OutHit, OutBlockedHit);
-}
-
 float URopeComponent::GetAimRayEffectiveQueryRadius(float RequestedRadius) const
 {
 	return FRopeAimTargeting::ResolveEffectiveQueryRadius(MakeAimQueryContext(), RequestedRadius);
@@ -723,11 +672,29 @@ void URopeComponent::ClearAimRayColliderQueryBounds()
 	SimFrame.AimRayColliderQueryBounds = FBox(ForceInit);
 }
 
+bool URopeComponent::RefreshAimRayQueryColliders(const FRopeAimRayThrowRequest& Request)
+{
+	if (!Request.IsValid())
+	{
+		ClearAimRayColliderQueryBounds();
+		return false;
+	}
+
+	SetAimRayColliderQueryBounds(
+		Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
+	if (URopeSimSubsystem* RopeSim = URopeSimSubsystem::Get(GetWorld()))
+	{
+		return RopeSim->RefreshFrameCollidersForImmediateQuery(*this);
+	}
+	return false;
+}
+
 bool URopeComponent::ResolveAimRayThrowContext(const FRopeAimRayThrowRequest& Request,
-	FRopeThrowContext& OutContext) const
+	FRopeThrowContext& OutContext, FRopeAimRayHitResult* OutHit, FRopeAimRayHitResult* OutBlockedHit) const
 {
 	return FRopeAimTargeting::ResolveAimRayThrowContext(MakeAimQueryContext(), Request,
-		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); }, OutContext);
+		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); },
+		OutContext, OutHit, OutBlockedHit);
 }
 
 void URopeComponent::QueueAimRayThrow(const FRopeAimRayThrowRequest& Request)
@@ -1265,7 +1232,7 @@ void URopeComponent::UpdateTipMeshTransform()
 		{
 			const FVector SegDir = (Sim.Positions[LastNode] - Sim.Positions[LastNode - 1])
 				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-			const FVector AimYawLockedSegDir = MakeAimYawLockedDirection(
+			const FVector AimYawLockedSegDir = FRopeTipPlacement::MakeAimYawLockedDirection(
 				SegDir, PierceDir, Prepared.ThrowContext.FrameUp);
 			FTransform SegFollow;
 			ComputeTipFollowTransform(Sim.Positions[LastNode], AimYawLockedSegDir, SegFollow);
@@ -1301,7 +1268,8 @@ void URopeComponent::UpdateTipMeshTransform()
 		{
 			FreeAimDir = Prepared.ThrowContext.FrameForward.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 		}
-		FollowDir = MakeAimYawLockedDirection(SegDir, FreeAimDir, Prepared.ThrowContext.FrameUp);
+		FollowDir = FRopeTipPlacement::MakeAimYawLockedDirection(
+			SegDir, FreeAimDir, Prepared.ThrowContext.FrameUp);
 	}
 	FTransform TipFollow;
 	ComputeTipFollowTransform(TipPos, FollowDir, TipFollow);
@@ -1337,31 +1305,6 @@ FTransform URopeComponent::MakeTipWorldTransform(const FTransform& BaseWorld) co
 	return MakeTipPlacementTransform() * BaseWorld;
 }
 
-void URopeComponent::SolveTipSocketFollow(const FVector& RopeAttachWorld, const FVector& ForwardDir,
-	const FTransform& RopeSocketLocal, FTransform& OutComponentWorld)
-{
-	SolveTipSocketFollow(RopeAttachWorld, ForwardDir, RopeSocketLocal,
-		/*bHasHeadSocket*/ false, FTransform::Identity, OutComponentWorld);
-}
-
-void URopeComponent::SolveTipSocketFollow(const FVector& RopeAttachWorld, const FVector& ForwardDir,
-	const FTransform& RopeSocketLocal, bool bHasHeadSocket, const FTransform& HeadSocketLocal,
-	FTransform& OutComponentWorld)
-{
-	const FVector Dir = ForwardDir.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-	const FVector TailToHead = HeadSocketLocal.GetLocation() - RopeSocketLocal.GetLocation();
-	const bool bUseHeadAxis = bHasHeadSocket && !TailToHead.IsNearlyZero();
-	const FVector LocalAxis = bUseHeadAxis
-		? TailToHead
-		: RopeSocketLocal.GetUnitAxis(EAxis::X);
-	const FVector LocalUpHint = bUseHeadAxis
-		? HeadSocketLocal.GetUnitAxis(EAxis::Z)
-		: RopeSocketLocal.GetUnitAxis(EAxis::Z);
-	const FQuat ComponentRot = MakeAxisAlignmentRotation(LocalAxis, Dir, LocalUpHint);
-	const FVector ComponentLoc = RopeAttachWorld - ComponentRot.RotateVector(RopeSocketLocal.GetLocation());
-	OutComponentWorld = FTransform(ComponentRot, ComponentLoc, FVector::OneVector);
-}
-
 void URopeComponent::ComputeTipFollowTransform(const FVector& RopeAttachWorld, const FVector& ForwardDir,
 	FTransform& OutComponentWorld) const
 {
@@ -1375,7 +1318,7 @@ void URopeComponent::ComputeTipFollowTransform(const FVector& RopeAttachWorld, c
 	const FTransform HeadSocketLocal = bHasTip
 		? MakeTipPlacementSocketLocal(TipSocketLocal)
 		: FTransform::Identity;
-	SolveTipSocketFollow(RopeAttachWorld, ForwardDir, RopeSocketLocal,
+	FRopeTipPlacement::SolveSocketFollow(RopeAttachWorld, ForwardDir, RopeSocketLocal,
 		/*bHasHeadSocket*/ bHasTail && bHasTip, HeadSocketLocal, OutComponentWorld);
 }
 
@@ -1396,6 +1339,13 @@ FVector URopeComponent::ResolveTipRopeAttachWorld(const FTransform& ComponentWor
 
 bool URopeComponent::ResolvePreparedPierceHitPoint(const FRopePreparedThrowPreview& Prepared, FVector& OutHitPoint) const
 {
+	if (Prepared.ThrowContext.bHasAimGuideHit)
+	{
+		// Aim guide로 만든 Pierce prepared는 조준 레이가 선택한 hit를 Head 기준점으로 유지한다.
+		OutHitPoint = Prepared.ThrowContext.AimGuideHitWorldPos;
+		return true;
+	}
+
 	const FRopeSurfaceAnchor* Anchor = Prepared.Anchors.Num() > 0 ? &Prepared.Anchors[0] : &Prepared.LatchAnchor;
 	if (!Anchor || Anchor->NodeIndex == INDEX_NONE)
 	{
@@ -1454,33 +1404,6 @@ void URopeComponent::ApplyPierceSocketTargetsToPrepared(FRopePreparedThrowPrevie
 	}
 }
 
-void URopeComponent::SolvePierceEmbed(const FVector& HitPoint, const FVector& PierceDir,
-	const FTransform& TipSocketLocal, bool bHasTailSocket, const FTransform& TailSocketLocal,
-	FTransform& OutComponentWorld, FVector& OutTailWorld)
-{
-	// 원하는 팁 소켓 월드 자세: 위치 = HitPoint, X축 = 관통 방향(샤프트).
-	const FVector Dir = PierceDir.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-	if (bHasTailSocket)
-	{
-		const FVector LocalTailToHeadAxis = TipSocketLocal.GetLocation() - TailSocketLocal.GetLocation();
-		if (!LocalTailToHeadAxis.IsNearlyZero())
-		{
-			const FQuat ComponentRot = MakeAxisAlignmentRotation(
-				LocalTailToHeadAxis, Dir, TipSocketLocal.GetUnitAxis(EAxis::Z));
-			const FVector ComponentLoc = HitPoint - ComponentRot.RotateVector(TipSocketLocal.GetLocation());
-			OutComponentWorld = FTransform(ComponentRot, ComponentLoc, FVector::OneVector);
-			OutTailWorld = ComponentRot.RotateVector(TailSocketLocal.GetLocation()) + ComponentLoc;
-			return;
-		}
-	}
-
-	const FQuat ComponentRot = MakeAxisAlignmentRotation(
-		TipSocketLocal.GetUnitAxis(EAxis::X), Dir, TipSocketLocal.GetUnitAxis(EAxis::Z));
-	const FVector ComponentLoc = HitPoint - ComponentRot.RotateVector(TipSocketLocal.GetLocation());
-	OutComponentWorld = FTransform(ComponentRot, ComponentLoc, FVector::OneVector);
-	OutTailWorld = OutComponentWorld.GetLocation();
-}
-
 bool URopeComponent::ComputePierceEmbed(const FVector& HitPoint, const FVector& PierceDir,
 	FTransform& OutComponentWorld, FVector& OutTailWorld) const
 {
@@ -1495,7 +1418,8 @@ bool URopeComponent::ComputePierceEmbed(const FVector& HitPoint, const FVector& 
 	const FTransform EffectiveTailSocketLocal = bHasTail
 		? MakeTipPlacementSocketLocal(TailSocketLocal)
 		: MakeTipPlacementTransform();
-	SolvePierceEmbed(HitPoint, PierceDir, EffectiveTipSocketLocal, bHasTail, EffectiveTailSocketLocal,
+	FRopeTipPlacement::SolvePierceEmbed(
+		HitPoint, PierceDir, EffectiveTipSocketLocal, bHasTail, EffectiveTailSocketLocal,
 		OutComponentWorld, OutTailWorld);
 	if (!bHasTail)
 	{

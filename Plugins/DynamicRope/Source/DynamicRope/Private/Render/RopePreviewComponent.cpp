@@ -49,10 +49,11 @@ void DrawPreviewTube(const FSceneView* View, const FRopeWrapPreviewData& Preview
 
 	const int32 NumPoints = Preview.Points.Num();
 	const int32 NumSides = FMath::Clamp(Preview.NumSides, 3, 32);
+	const int32 RingVertexCount = NumSides + 1;
 	const float Radius = FMath::Max(0.1f, Preview.Radius);
 
 	TArray<FDynamicMeshVertex> Vertices;
-	Vertices.Reserve(NumPoints * NumSides);
+	Vertices.Reserve(NumPoints * RingVertexCount);
 	TArray<uint32> Indices;
 	Indices.Reserve((NumPoints - 1) * NumSides * 6);
 
@@ -83,7 +84,9 @@ void DrawPreviewTube(const FSceneView* View, const FRopeWrapPreviewData& Preview
 		PreviousNormal = Normal;
 
 		const float AlongFrac = static_cast<float>(PointIndex) / static_cast<float>(NumPoints - 1);
-		for (int32 SideIndex = 0; SideIndex < NumSides; ++SideIndex)
+		// 원주 seam의 위치는 같지만 UV 0/1 정점은 분리한다. 하나를 공유하면 마지막 strip에서
+		// 텍스처 좌표가 1 -> 0으로 보간되어 임의 머티리얼의 무늬가 길게 번진다.
+		for (int32 SideIndex = 0; SideIndex <= NumSides; ++SideIndex)
 		{
 			const float AroundFrac = static_cast<float>(SideIndex) / static_cast<float>(NumSides);
 			const float Angle = (2.0f * UE_PI) * AroundFrac;
@@ -111,14 +114,14 @@ void DrawPreviewTube(const FSceneView* View, const FRopeWrapPreviewData& Preview
 	// 매번 triangle index 생성
 	for (int32 PointIndex = 0; PointIndex < NumPoints - 1; ++PointIndex)
 	{
-		const uint32 BaseA = static_cast<uint32>(PointIndex * NumSides);
-		const uint32 BaseB = static_cast<uint32>((PointIndex + 1) * NumSides);
+		const uint32 BaseA = static_cast<uint32>(PointIndex * RingVertexCount);
+		const uint32 BaseB = static_cast<uint32>((PointIndex + 1) * RingVertexCount);
 		for (int32 SideIndex = 0; SideIndex < NumSides; ++SideIndex)
 		{
 			const uint32 A0 = BaseA + static_cast<uint32>(SideIndex);
-			const uint32 A1 = BaseA + static_cast<uint32>((SideIndex + 1) % NumSides);
+			const uint32 A1 = BaseA + static_cast<uint32>(SideIndex + 1);
 			const uint32 B0 = BaseB + static_cast<uint32>(SideIndex);
-			const uint32 B1 = BaseB + static_cast<uint32>((SideIndex + 1) % NumSides);
+			const uint32 B1 = BaseB + static_cast<uint32>(SideIndex + 1);
 			Indices.Add(A0); Indices.Add(B0); Indices.Add(A1);
 			Indices.Add(A1); Indices.Add(B0); Indices.Add(B1);
 		}
@@ -230,6 +233,40 @@ URopePreviewComponent::URopePreviewComponent()
 	Mobility = EComponentMobility::Movable;
 	SetCastShadow(false);
 	LocalPreviewBounds = FBoxSphereBounds(FVector::ZeroVector, FVector(1.0f), 1.0f);
+}
+
+bool URopePreviewComponent::TryClaimPreviewOwner(UObject* InOwner)
+{
+	if (!InOwner)
+	{
+		return false;
+	}
+
+	if (PreviewOwner.IsValid() && PreviewOwner.Get() != InOwner)
+	{
+		return false;
+	}
+
+	PreviewOwner = InOwner;
+	return true;
+}
+
+void URopePreviewComponent::ReleasePreviewOwner(UObject* InOwner)
+{
+	if (!InOwner)
+	{
+		return;
+	}
+
+	if (!PreviewOwner.IsValid() || PreviewOwner.Get() == InOwner)
+	{
+		PreviewOwner.Reset();
+	}
+}
+
+bool URopePreviewComponent::IsPreviewOwner(const UObject* InOwner) const
+{
+	return InOwner && PreviewOwner.IsValid() && PreviewOwner.Get() == InOwner;
 }
 
 void URopePreviewComponent::SetWrapPreviewWorld(const FRopeWrapPreviewData& InPreview)

@@ -528,6 +528,29 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 		*GetNameSafe(Rope.GetOwner()), WorldStaticCandidates.Num(), PerRopeBudget, WorldStaticCandidates.Num() - PerRopeBudget);
 }
 
+bool URopeSimSubsystem::RefreshFrameCollidersForImmediateQuery(URopeComponent& Rope)
+{
+	const int32 RopeIndex = Ropes.IndexOfByPredicate([&Rope](const TObjectPtr<URopeComponent>& Candidate)
+	{
+		return Candidate.Get() == &Rope;
+	});
+	if (RopeIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	// Wielder tick의 즉시 HUD/preview 질의는 SimTick의 Phase 1a보다 먼저 실행될 수 있다.
+	// 여기서 같은 중앙 수집 경로를 한 번 실행해, 방금 설정한 AimRayColliderQueryBounds와 FrameColliders를 맞춘다.
+	BuildFrameColliders();
+	if (!FrameRopeRegions.IsValidIndex(RopeIndex))
+	{
+		return false;
+	}
+
+	GatherCollidersForRope(Rope, RopeIndex, Rope.SimFrame.FrameColliders);
+	return true;
+}
+
 void URopeSimSubsystem::Tick(float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SubsystemTick);

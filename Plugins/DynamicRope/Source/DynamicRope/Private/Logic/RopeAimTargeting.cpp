@@ -195,18 +195,32 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 
 bool FRopeAimTargeting::ResolveAimRayThrowContext(const FQueryContext& Ctx, const FRopeAimRayThrowRequest& Request,
 	TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
-	FRopeThrowContext& OutContext)
+	FRopeThrowContext& OutContext,
+	FRopeAimRayHitResult* OutHit,
+	FRopeAimRayHitResult* OutBlockedHit)
 {
 	OutContext = Request.BaseContext;
+	if (OutHit)
+	{
+		*OutHit = FRopeAimRayHitResult();
+	}
+	if (OutBlockedHit)
+	{
+		*OutBlockedHit = FRopeAimRayHitResult();
+	}
 	if (!Request.IsValid())
 	{
 		return false;
 	}
 
 	FRopeAimRayHitResult Hit;
-	if (!FindAimRayBoneHit(Ctx, Request, CanWrapTarget, Hit))
+	if (!FindAimRayBoneHit(Ctx, Request, CanWrapTarget, Hit, OutBlockedHit))
 	{
 		return false;
+	}
+	if (OutHit)
+	{
+		*OutHit = Hit;
 	}
 
 	// ray 시작점이 아니라 실제 throw origin에서 hit으로 향하는 벡터가 최종 guide forward다.
