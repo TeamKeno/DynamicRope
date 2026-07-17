@@ -23,6 +23,29 @@
 #include "Misc/ScopeLock.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE — 렌더 스레드 dispatch 경로 실측(Unreal Insights CPU 타임라인).
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Stats/Stats.h"
+
+// 'stat DynamicRope' GPU RT 타이밍 seam — 이 shaders 모듈은 런타임 DynamicRope 모듈보다 하위라 그쪽 RopeStats.h를
+// include할 수 없다. 그래서 같은 "DynamicRope" 그룹명으로 RT 스코프를 여기서 자체 선언한다 — 그룹 identity는 이름
+// 문자열로 합쳐져 런타임 GT 타이밍/카운터와 한 'stat DynamicRope' HUD에 함께 뜬다(카테고리도 STATCAT_Advanced로
+// 동일해야 program-wide ODR 안전). 아래 CYCLE stat은 각 RopeRT_* 스코프(SCOPE_CYCLE_COUNTER)에서 RT 스레드 시간을
+// 잡는다. STATS 꺼진 빌드에선 매크로가 자동 no-op. RunSteps=RT 총량, 나머지는 그 하위 분해(PackSDF=SDF 재업로드
+// 병목 지목용 — memory: sdf-global-volume-cache). GT 타이밍/부하 카운터는 런타임 RopeStats.h/.cpp가 소유.
+DECLARE_STATS_GROUP(TEXT("DynamicRope"), STATGROUP_DynamicRope, STATCAT_Advanced);
+DECLARE_CYCLE_STAT(TEXT("GPU RunSteps (RT total)"), STAT_RopeGPU_RunSteps, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU EnsureBuffers"), STAT_RopeGPU_EnsureBuffers, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Pack Capsules"), STAT_RopeGPU_PackCapsules, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Pack Boxes"), STAT_RopeGPU_PackBoxes, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Pack Convexes"), STAT_RopeGPU_PackConvexes, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Ensure Global SDF"), STAT_RopeGPU_EnsureGlobalSDF, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Pack SDF"), STAT_RopeGPU_PackSDF, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Pack Overrides"), STAT_RopeGPU_PackOverrides, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Add Solve Pass"), STAT_RopeGPU_AddSolvePass, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Add Detect Pass"), STAT_RopeGPU_AddDetectPass, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Graph Execute"), STAT_RopeGPU_GraphExecute, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Arm Readbacks"), STAT_RopeGPU_ArmReadbacks, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Consume Readbacks"), STAT_RopeGPU_ConsumeReadbacks, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU Dispatch Pending"), STAT_RopeGPU_DispatchPending, STATGROUP_DynamicRope);
 
 // 노드 버킷(스레드그룹 크기 == groupshared/numthreads 크기). 로프 1개 = 스레드그룹 1개, 노드 = 스레드라,
 // 예전엔 모든 로프가 고정 256 그룹을 잡아 노드 수가 적은 로프는 스레드 대부분이 idle(배리어에는 참여)이었다.
@@ -614,6 +637,7 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 	FRopeResidentSharedResults& Results, const TArray<FRopeGPUResidentStep>& Steps)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_ConsumeReadbacks);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_ConsumeReadbacks);
 	for (const FRopeGPUResidentStep& S : Steps)
 	{
 		FRopeResidentRope* Rp = RtRopes.Find(S.RopeId);
@@ -755,6 +779,7 @@ static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	FRopeResidentRope& R, FRopeStepBuild& B)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_EnsureBuffers);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_EnsureBuffers);
 	const int32 N = S.NumNodes;
 	B.bSeed = !R.PosBuf.IsValid() || R.NumNodes != N || R.Generation != S.Generation;
 
@@ -800,6 +825,7 @@ static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUR
 static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackCapsules);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_PackCapsules);
 	TArray<FRopeCapsuleGPU>& CapsFlat = *GraphBuilder.AllocObject<TArray<FRopeCapsuleGPU>>();
 	for (const FRopeGPUCapsule& Cap : S.Capsules)
 	{
@@ -827,6 +853,7 @@ static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackBoxes);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_PackBoxes);
 	TArray<FRopeBoxGPU>& BoxesFlat = *GraphBuilder.AllocObject<TArray<FRopeBoxGPU>>();
 	for (const FRopeGPUBox& Box : S.Boxes)
 	{
@@ -857,6 +884,7 @@ static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep&
 static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackConvexes);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_PackConvexes);
 	TArray<FRopeConvexGPU>& ConvFlat = *GraphBuilder.AllocObject<TArray<FRopeConvexGPU>>();
 	TArray<FVector4f>&      PlaneFlat = *GraphBuilder.AllocObject<TArray<FVector4f>>();
 	for (const FRopeGPUConvex& Cv : S.Convexes)
@@ -903,6 +931,7 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 	FRopeGlobalSDFCache& Cache, FRDGBufferRef& OutDistRDG, FRDGBufferRef& OutVolRDG)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_EnsureGlobalSDF);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_EnsureGlobalSDF);
 	for (const FRopeGPUResidentStep& S : Steps)
 	{
 		for (const FRopeGPUSDFCollider& Src : S.SDFColliders)
@@ -989,6 +1018,7 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 	const TMap<const void*, int32>& GlobalKeyToIndex, FRDGBufferRef GlobalDistRDG, FRDGBufferRef GlobalVolRDG)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackSDF);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_PackSDF);
 	// 전역 distance/header 버퍼를 공유 바인딩(로프별 복사 없음).
 	B.SDFDistBuf = GlobalDistRDG;
 	B.SDFVolBuf  = GlobalVolRDG;
@@ -1030,6 +1060,7 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 static void RopePackOverrides(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackOverrides);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_PackOverrides);
 	const int32 N = S.NumNodes;
 	TArray<uint32>&    OvFlags = *GraphBuilder.AllocObject<TArray<uint32>>();
 	TArray<FVector4f>& OvPos   = *GraphBuilder.AllocObject<TArray<FVector4f>>();
@@ -1079,6 +1110,7 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	const FVector3f& PreViewTranslation)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_AddSolvePass);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_AddSolvePass);
 	const int32 N = S.NumNodes;
 
 	TArray<FRopeGPUParamsGPU>& ParamsArr = *GraphBuilder.AllocObject<TArray<FRopeGPUParamsGPU>>();
@@ -1167,6 +1199,7 @@ static void RopeArmReadbacks(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 	FRopeResidentRope& R, const FRopeStepBuild& B, FRDGBufferRef LambdaRDG)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_ArmReadbacks);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_ArmReadbacks);
 	const int32 N = S.NumNodes;
 	if (!R.bReadbackArmed)
 	{
@@ -1195,6 +1228,7 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	FRopeResidentRope& R, const FRopeStepBuild& B)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_AddDetectPass);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_AddDetectPass);
 	const int32 N = S.NumNodes;
 
 	const bool bContactSeed = !R.ContactBuf.IsValid() || B.bSeed;
@@ -1301,6 +1335,7 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	const FSceneView* View, const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_RunSteps);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_RunSteps);
 	// --- Loop 1: 직전 프레임 리드백 consume — 그래프 구성 *전*에 immediate Lock으로 처리.
 	RopeConsumeReadbacks(Impl->RtRopes, *Impl->Results, Steps);
 
@@ -1395,6 +1430,7 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 			{
 				// RDG 컴파일 + RHI 커맨드 기록(렌더 스레드 CPU 비용의 큰 부분일 수 있음).
 				TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_GraphExecute);
+				SCOPE_CYCLE_COUNTER(STAT_RopeGPU_GraphExecute);
 				GraphBuilder.Execute();
 			}
 		});
@@ -1421,6 +1457,7 @@ void FRopeGPUSolver::DispatchPending_RenderThread(FRDGBuilder& GraphBuilder, con
 	const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_DispatchPending);
+	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_DispatchPending);
 	check(IsInRenderingThread());
 	if (Impl->PendingSteps.Num() == 0)
 	{
