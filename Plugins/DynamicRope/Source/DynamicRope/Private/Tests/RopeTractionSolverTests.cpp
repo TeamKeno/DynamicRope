@@ -424,4 +424,55 @@ bool FRopeTractionChainTautGateTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 슬랙 브레이크 장부 회수(DecayVelocityDebt): 주입분만 회수·직교 운동량 보존·외부 감속분 자동 탕감.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionDecayVelocityDebtTest,
+	"DynamicRope.Traction.DecayVelocityDebt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTractionDecayVelocityDebtTest::RunTest(const FString& Parameters)
+{
+	// 전량 회수(Alpha 1): 속도에서 장부 성분만 빠지고 장부는 0.
+	{
+		FVector Debt(400, 0, 0);
+		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(600, 0, 0), Debt, 1.0f);
+		TestTrue(TEXT("full alpha removes the whole debt from velocity"), NewVel.Equals(FVector(200, 0, 0), 0.1f));
+		TestTrue(TEXT("full alpha clears the ledger"), Debt.IsNearlyZero());
+	}
+	// 부분 회수(Alpha 0.5): 절반만 빼고 잔여는 장부에 남는다.
+	{
+		FVector Debt(400, 0, 0);
+		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(600, 0, 0), Debt, 0.5f);
+		TestTrue(TEXT("half alpha removes half the debt"), NewVel.Equals(FVector(400, 0, 0), 0.1f));
+		TestTrue(TEXT("half alpha keeps the remainder on the ledger"), Debt.Equals(FVector(200, 0, 0), 0.1f));
+	}
+	// 직교 보존: 장부 방향 성분이 없는 속도(스윙 접선 운동량)는 건드리지 않고 장부는 탕감된다.
+	{
+		FVector Debt(400, 0, 0);
+		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(0, 500, 0), Debt, 1.0f);
+		TestTrue(TEXT("perpendicular momentum is preserved"), NewVel.Equals(FVector(0, 500, 0), 0.1f));
+		TestTrue(TEXT("unavailable debt is forgiven"), Debt.IsNearlyZero());
+	}
+	// 자동 탕감: 실제 축 성분(100)이 장부(400)보다 작으면 그만큼만 회수 — 역방향으로 밀지 않는다.
+	{
+		FVector Debt(400, 0, 0);
+		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(100, 300, 0), Debt, 1.0f);
+		TestTrue(TEXT("removal is capped at the available axis component"), NewVel.Equals(FVector(0, 300, 0), 0.1f));
+		TestTrue(TEXT("excess debt is forgiven, not carried"), Debt.IsNearlyZero());
+	}
+	// 탕감 + 부분 회수 조합: 유효 장부(100)의 절반만 회수, 잔여 50만 장부에.
+	{
+		FVector Debt(400, 0, 0);
+		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(100, 300, 0), Debt, 0.5f);
+		TestTrue(TEXT("forgiven ledger decays from the available amount"), NewVel.Equals(FVector(50, 300, 0), 0.1f));
+		TestTrue(TEXT("ledger keeps only the un-recovered available part"), Debt.Equals(FVector(50, 0, 0), 0.1f));
+	}
+	// 빈 장부: 무동작.
+	{
+		FVector Debt = FVector::ZeroVector;
+		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(123, 45, 6), Debt, 1.0f);
+		TestTrue(TEXT("empty ledger is a no-op"), NewVel.Equals(FVector(123, 45, 6), 0.01f));
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

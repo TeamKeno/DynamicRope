@@ -3592,6 +3592,12 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 	PullDrive.bPrevAnchorPointValid = true;
 }
 
+namespace
+{
+	// 전방 선언(정의는 아래 수신자 해석 블록) — 슬랙 브레이크(③-3)가 wielder CMC를 찾는 데 쓴다.
+	UCharacterMovementComponent* GetForceConsumingMovement(const AActor* Owner);
+}
+
 void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 {
 	// ③-1 자동 견인(테더, 위치/속도 동기): 가용 로프 길이 초과분만큼 양끝(TetherTargetShare 분배)을
@@ -3617,6 +3623,32 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 		else
 		{
 			ApplyPullForce(PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, PullDrive.LastPullSample, DeltaTime);
+		}
+	}
+
+	// ③-3 슬랙 브레이크: 게이트가 닫혀도(전 체인 슬랙) 팽팽 프레임에 테더가 주입해 둔 견인 속도는 관성으로
+	// 남는다 — 지상은 마찰이 소화하지만 공중(Falling)은 감쇠가 없어 "슬랙인데 계속 끌려가는" 잔상이 된다.
+	// wielder 인가 람다가 적립한 장부(TowedVelDebt)의 성분만 시상수 감쇠로 회수한다 — 스윙 접선 운동량/
+	// 에어컨트롤/점프 등 주입하지 않은 속도는 장부에 없어 보존된다(자동 탕감은 DecayVelocityDebt 주석).
+	if (HoldConfig.TetherSlackBrakeTime > 0.0f && !PullDrive.bChainTaut && !PullDrive.TowedVelDebt.IsNearlyZero())
+	{
+		if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(GetOwner()))
+		{
+			if (Movement->IsMovingOnGround())
+			{
+				// 지상: 마찰이 이미 소화 — 감속 개입 없이 장부만 청산(재이륙 시 이월 회수 방지).
+				PullDrive.TowedVelDebt = FVector::ZeroVector;
+			}
+			else
+			{
+				Movement->Velocity = RopeTraction::DecayVelocityDebt(Movement->Velocity, PullDrive.TowedVelDebt,
+					RopeTraction::ExpSmoothAlpha(HoldConfig.TetherSlackBrakeTime, DeltaTime));
+			}
+		}
+		else
+		{
+			// 수신자 없음(비캐릭터 wielder — sim 바디 관성은 정당한 물리) — 장부 무의미, 청산만.
+			PullDrive.TowedVelDebt = FVector::ZeroVector;
 		}
 	}
 }
@@ -3986,6 +4018,10 @@ namespace
 		bool bSelfWrap;
 		// (BinaryPullable 전용) 대상이 끌림 가능한가 = 어느 끝이 양보하는가.
 		bool bTargetPullable;
+		// 테더가 wielder(CMC)에 주입한 속도 변화의 장부(소유 = PullDrive.TowedVelDebt). wielder 인가 람다가
+		// 실제 반영분을 적립하고, 슬랙 브레이크(ApplyWrappedTraction ③-3)가 슬랙 프레임에 회수한다.
+		// 대상 쪽 인가는 적립하지 않는다(브레이크는 wielder 전용 — 대상 관성은 정당한 물리).
+		FVector* WielderTowDebt;
 		// wielder 견인 방향. 방향 EMA를 컴포넌트가 소유하므로 지연 산출한다 — 실제로 wielder를 움직이는
 		// 프레임에만 호출해야 EMA 진행이 보존된다(무조건 호출하면 안 움직이는 프레임에도 EMA가 돌아간다).
 		TFunctionRef<FVector()> GetWielderDir;
@@ -4078,7 +4114,7 @@ namespace
 			Prim->AddImpulse(Inward * NeedDeltaV, BoneName, /*bVelChange*/ true);
 			return Step; // 속도로 회수(부족분 0 — wielder 안 건드림).
 		};
-		auto ClampMovement = [&](UCharacterMovementComponent* Movement, const FVector& Inward, float Step, float FeedFwdSpeed)
+		auto ClampMovement = [&](UCharacterMovementComponent* Movement, const FVector& Inward, float Step, float FeedFwdSpeed, FVector* TowDebt)
 		{
 			// CMC 구동 캐릭터: 위치 텔레포트 대신 **안쪽 속도**를 목표까지 top-up한다. 로프 sim은 TG_PostPhysics라
 			// CMC(TG_PrePhysics)의 이동 뒤에 도는 후행 보정인데, 위치 텔레포트는 다음 틱에 CMC가 입력으로 재적분해
@@ -4100,6 +4136,11 @@ namespace
 			if (DeltaV > 0.0f)
 			{
 				Movement->Velocity = RopeTraction::ClampInjectedVelocity(OldVel + Inward * DeltaV, OldVel, SpeedCapC);
+				// 견인 주입 장부: 실제 반영분(속력 상한 클램프 이후)을 적립 — 슬랙 브레이크가 이 성분만 회수.
+				if (TowDebt)
+				{
+					*TowDebt += Movement->Velocity - OldVel;
+				}
 			}
 		};
 		auto ClampAnchor = [&](AActor* Actor, const FVector& Inward, float Step)
@@ -4119,7 +4160,7 @@ namespace
 		{
 			ActualMoved = ApplyToTetherEndpoint(Ctx.Target, Ctx.DirToAim, TargetStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
-				[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S, /*FeedFwdSpeed*/ 0.0f); },
+				[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S, /*FeedFwdSpeed*/ 0.0f, /*TowDebt*/ nullptr); },
 				[&](AActor* A, const FVector& D, float S) { ClampAnchor(A, D, S); });
 		}
 
@@ -4132,7 +4173,7 @@ namespace
 		{
 			ApplyToTetherEndpoint(Ctx.Wielder, Ctx.GetWielderDir(), WielderStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
-				[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S, static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D))); },
+				[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S, static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D)), Ctx.WielderTowDebt); },
 				[&](AActor* A, const FVector& D, float S) { ClampAnchor(A, D, S); });
 		}
 	}
@@ -4254,7 +4295,7 @@ namespace
 		// wielder 수신에서는 카메라 흔들림으로 도드라졌다. 속도로 주면 무브먼트가 자체 스윕/보간으로
 		// 통합해 부드럽다. 물리 경로와 같은 "목표 속도까지 차분만" 원칙이라 누적/발산이 없고, walking은
 		// 수직 성분을 무브먼트가 버리므로 상향 견인은 지상 이탈(Wielder의 bAutoGroundExitOnUpwardPull)이 선행된다.
-		auto CorrectMovement = [&](UCharacterMovementComponent* Movement, const FVector& Dir, float Step, float FeedFwdSpeed)
+		auto CorrectMovement = [&](UCharacterMovementComponent* Movement, const FVector& Dir, float Step, float FeedFwdSpeed, FVector* TowDebt)
 		{
 			// 목표까지 CorrectAlpha만큼만 접근(하드 세팅 X) — 진행 속도를 한 프레임에 뚝 끊지 않아 "턱턱" 방지.
 			// 목표 = 피드포워드(앵커 축 속도, wielder 한정) + 회수 몫. 합이 음수(앵커가 다가옴)면 단방향 servo가
@@ -4265,6 +4306,11 @@ namespace
 			if (DeltaV > 0.0f)
 			{
 				Movement->Velocity = RopeTraction::ClampInjectedVelocity(OldVel + Dir * DeltaV, OldVel, FMath::Max(Cfg.TetherMaxSpeed, 0.0f));
+				// 견인 주입 장부: 실제 반영분(속력 상한 클램프 이후)을 적립 — 슬랙 브레이크가 이 성분만 회수.
+				if (TowDebt)
+				{
+					*TowDebt += Movement->Velocity - OldVel;
+				}
 			}
 		};
 		// 앵커(무브먼트가 없거나 꺼진 MOVE_None/비캐릭터): 스윕 위치 오프셋 폴백(벽 통과 방지).
@@ -4279,7 +4325,7 @@ namespace
 		{
 			ApplyToTetherEndpoint(Ctx.Target, Ctx.DirToAim, TargetStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { ServoVelocity(P, B, D, S * InvDt); return S; },
-				[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S, /*FeedFwdSpeed*/ 0.0f); },
+				[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S, /*FeedFwdSpeed*/ 0.0f, /*TowDebt*/ nullptr); },
 				[&](AActor* A, const FVector& D, float S) { CorrectAnchor(A, D, S); });
 		}
 
@@ -4291,7 +4337,7 @@ namespace
 		{
 			ApplyToTetherEndpoint(Ctx.Wielder, Ctx.GetWielderDir(), WielderStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { TopUpVelocity(P, B, D, S * InvDt + static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D))); return S; },
-				[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S, static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D))); },
+				[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S, static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D)), Ctx.WielderTowDebt); },
 				[&](AActor* A, const FVector& D, float S) { CorrectAnchor(A, D, S); });
 		}
 		return ShareT;
@@ -4375,6 +4421,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		/*AnchorVelocity*/ PullDrive.SmoothedAnchorVelocity, Overshoot, DeltaTime,
 		/*bSelfWrap*/ (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner()),
 		/*bTargetPullable*/ PullDrive.bTargetPullable,
+		/*WielderTowDebt*/ &PullDrive.TowedVelDebt,
 		GetWielderDir };
 
 	if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable)

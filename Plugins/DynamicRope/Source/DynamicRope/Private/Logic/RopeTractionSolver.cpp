@@ -109,4 +109,25 @@ namespace RopeTraction
 		const float EffRatio = bWasTaut ? FMath::Min(Ratio * FMath::Max(ReleaseScale, 1.0f), 1.0f) : Ratio;
 		return ChordLen >= RestLen * (1.0f - EffRatio);
 	}
+
+	FVector DecayVelocityDebt(const FVector& Velocity, FVector& InOutDebt, float Alpha)
+	{
+		FVector Dir = InOutDebt;
+		float DebtMag = 0.0f;
+		if (!Dir.Normalize(KINDA_SMALL_NUMBER))
+		{
+			// 장부 ~0 — 무동작(잔여 미세값은 청산).
+			InOutDebt = FVector::ZeroVector;
+			return Velocity;
+		}
+		DebtMag = static_cast<float>(InOutDebt.Size());
+
+		// 자동 탕감: 장부 방향의 실제 속도 성분이 장부보다 작으면(외부 감속이 이미 소화) 그만큼 장부를 줄인다
+		// — 회수는 항상 "실제로 남아 있는 주입분"에서만 이루어진다(역방향 밀어내기 불가).
+		const float Avail = FMath::Max(0.0f, static_cast<float>(FVector::DotProduct(Velocity, Dir)));
+		const float EffDebt = FMath::Min(DebtMag, Avail);
+		const float Remove = EffDebt * FMath::Clamp(Alpha, 0.0f, 1.0f);
+		InOutDebt = Dir * (EffDebt - Remove);
+		return Velocity - Dir * Remove;
+	}
 }

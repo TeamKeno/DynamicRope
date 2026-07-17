@@ -114,4 +114,13 @@ namespace RopeTraction
 	 * 것을 막는다. RestLen ≤ 0이면 false(판정 불능).
 	 */
 	DYNAMICROPE_API bool EvaluateChainTautGate(float ChordLen, float RestLen, float SlackRatio, float ReleaseScale, bool bWasTaut);
+
+	/**
+	 * 견인 주입 장부(debt)의 슬랙 회수 한 스텝. 테더가 주입한 속도 변화의 누적(InOutDebt)에서 Alpha 비율만큼을
+	 * Velocity에서 빼고 장부를 그만큼 줄여 반환한다 — 주입하지 않은 운동(스윙 접선/에어컨트롤)은 장부에 없어
+	 * 건드리지 않는다. **자동 탕감**: 실제 속도의 장부 방향 성분(avail)이 장부보다 작으면(외부 감속이 이미
+	 * 소화) 장부를 avail로 먼저 줄인다 — 없는 속도를 빼서 역방향으로 밀어내는 일이 구조적으로 불가능하다.
+	 * Alpha는 [0..1] 클램프(ExpSmoothAlpha로 산출해 넘긴다). 장부가 ~0이면 무동작.
+	 */
+	DYNAMICROPE_API FVector DecayVelocityDebt(const FVector& Velocity, FVector& InOutDebt, float Alpha);
 }

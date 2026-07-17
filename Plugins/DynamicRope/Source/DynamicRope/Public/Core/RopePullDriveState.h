@@ -83,6 +83,14 @@ struct FRopePullDriveState
 	 */
 	bool bChainTaut = false;
 
+	/**
+	 * 테더가 wielder(CMC)에 주입한 속도 변화의 장부(누적 벡터, cm/s). 슬랙 브레이크(TetherSlackBrakeTime)가
+	 * Wrapped 슬랙 프레임에 이 성분만 회수한다 — 주입하지 않은 운동(스윙 접선/에어컨트롤/점프)은 여기 없어
+	 * 보존된다. 지상 복귀 시(마찰이 소화) 청산, 외부 감속으로 실제 속도가 장부보다 작아지면 회수 시 자동
+	 * 탕감(RopeTraction::DecayVelocityDebt). ResetTransient에서 리셋.
+	 */
+	FVector TowedVelDebt = FVector::ZeroVector;
+
 	/** 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용. */
 	float LastTetherOvershoot = 0.0f;
 
@@ -129,6 +137,7 @@ struct FRopePullDriveState
 		bTargetPullableInit = false; // 다음 wrap 시작 시 순수 비교로 다시 시드.
 		bPullTaut = false;
 		bChainTaut = false;
+		TowedVelDebt = FVector::ZeroVector;
 		bLoggedPullNoReceiver = false;
 	}
 };
