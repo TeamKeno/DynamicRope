@@ -577,12 +577,34 @@ bool FRopeThrowPreviewBuilder::BuildFreePreparedPreview(const FInput& Input, FRo
 	}
 
 	FThrowPreviewContactCandidate ContactCandidate;
-	const bool bUsedAimGuideHit = BuildAimGuideHitCandidate(ArcPreview, Input.ThrowContext, *Sim, ContactCandidate);
-	if (!bUsedAimGuideHit &&
-		!FindThrowPreviewContactCandidate(ArcPreview, GetColliders(Input), Input.RopeRadius, Input.WrapConfig, *Sim,
-			Input.SampleStep, Input.QueryRadius, ContactCandidate, OutFailureReason))
+	if (!BuildAimGuideHitCandidate(ArcPreview, Input.ThrowContext, *Sim, ContactCandidate))
 	{
-		return false;
+		// aim hit이 없을 때 arc 전체를 다시 뒤지면 "조준하지 않은" 옆 대상이 선택된다 —
+		// BuildAimGuideHitCandidate 주석이 hit 경로에 대해 이미 경고한 그 위험이 miss 경로로 샌 것이다.
+		// 아래 두 경우엔 재탐색하지 않고 실패로 끝낸다. 그러면 호출자(ThrowWithContext ③ 분기)가
+		// StartFreeGuidedThrow(레이 끝점 허공 아치)로 가고, 조준이 빗나가면 안 꽂히는 게 정상 결과다.
+		//   - 조준 ray가 돌았는데 대상을 못 잡음: ③ 계약상 보장 대상은 "조준한 대상"뿐이다.
+		//   - Pierce: 창은 조준한 곳에 꽂히는 것이 전부라 arc 탐색(최대 SweepAngleDegrees 폭)이
+		//     의미를 갖지 않는다. 조준 ray가 없는 BP 직행/AI라도 방향만 보고 옆 대상에 꽂으면 안 된다.
+		// 남은 하나(조준 없는 BP 직행/AI + Cinch)만 arc 탐색으로 대상을 찾는다 — "이 방향으로 던져
+		// 거기 있는 걸 감아라"는 감김 모델에서는 성립하는 요청이다.
+		if (Input.ThrowContext.bAimRayEvaluated)
+		{
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
+				TEXT("prepared preview rejected: aim ray found no target (aimed throw does not re-search the arc)"));
+			return false;
+		}
+		if (Input.TipEngagement == ERopeTipEngagement::Pierce)
+		{
+			RopeMath::SetPreviewFailureReason(OutFailureReason,
+				TEXT("prepared preview rejected: pierce requires an aim hit (arc search is wrap-only)"));
+			return false;
+		}
+		if (!FindThrowPreviewContactCandidate(ArcPreview, GetColliders(Input), Input.RopeRadius, Input.WrapConfig, *Sim,
+			Input.SampleStep, Input.QueryRadius, ContactCandidate, OutFailureReason))
+		{
+			return false;
+		}
 	}
 
 	FRopeSimState PreviewSim = BuildThrowPreviewSim(*Sim, ArcPreview, ContactCandidate);

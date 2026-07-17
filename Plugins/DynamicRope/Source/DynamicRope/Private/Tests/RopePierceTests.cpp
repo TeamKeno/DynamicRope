@@ -427,4 +427,117 @@ bool FRopePierceAimYawLockTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ─── preview 대상 선택의 출처 계약 ─────────────────────────────────────────────
+// BuildFreePreparedPreview는 aim hit이 없을 때 arc 전체를 재탐색할 수 있다. 이 재탐색은 조준과
+// 무관한 옆 대상을 고르므로, 아래 세 갈래를 반드시 구분해야 한다. 셋 다 "aim hit 없음"이지만
+// 기대 동작이 다르다 — 이 구분이 무너지면 조준이 빗나가도 엉뚱한 대상에 꽂힌다(실제 발생한 버그).
+namespace
+{
+	// aim 축(+X)에서 비켜난 arc 위 대상. arc는 (AimDir, GuideUp) 평면을 alpha=1(+X)→0(-X)로 쓸고
+	// alpha=0.5가 +Z이므로, +Z로 Radius의 절반 거리에 두면 재탐색이 반드시 줍는 위치가 된다
+	// (RopeLength 140 × ReachScale 1 = arc 반경 140 → radial 샘플에 70이 포함된다).
+	FCapsuleCollider MakeOffAimArcTarget(const USkeletalMeshComponent* Mesh)
+	{
+		return FCapsuleCollider(FVector(0, -20, 70), FVector(0, 20, 70), 25.0f, FName("spine"), Mesh);
+	}
+
+	// 조준 성공 케이스와 같은 fixture. 호출자가 bAimRayEvaluated/TipEngagement만 바꿔 갈래를 만든다.
+	FRopeThrowPreviewBuilder::FInput MakeArcSearchInput(const FRopeSimState& Sim)
+	{
+		FRopeThrowPreviewBuilder::FInput Input;
+		Input.Sim = &Sim;
+		Input.RopeLength = 140.0f;
+		Input.ReachScale = 1.0f;
+		Input.RopeRadius = 2.0f;
+		Input.ThrowContext.Origin = FVector::ZeroVector;
+		Input.ThrowContext.FrameForward = FVector(1, 0, 0);
+		Input.ThrowContext.FrameUp = FVector(0, 0, 1);
+		// bHasAimGuideHit = false(기본) — 세 갈래 공통 전제.
+		return Input;
+	}
+}
+
+// 갈래 ①(회귀 잠금): 조준 ray가 돌았는데 빗나감 → preview 없음. 대상이 arc 안에 **있는데도** 그렇다.
+// 수정 전에는 여기서 arc 재탐색이 옆 대상을 주워 preview가 성립했고, 그게 리포트된 버그였다
+// (청록=miss인데 preview가 ray 밖 대상으로 연결됨). 실패 사유까지 확인해 "arc가 아무것도 못 찾아서
+// 우연히 false"인 공허한 통과와 구분한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceAimMissYieldsNoPreviewTest,
+	"DynamicRope.Pierce.AimMissYieldsNoPreview",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePierceAimMissYieldsNoPreviewTest::RunTest(const FString& Parameters)
+{
+	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
+	USkeletalMeshComponent* Mesh = MakePierceMockMesh();
+	FCapsuleCollider Target = MakeOffAimArcTarget(Mesh);
+	TArray<IRopeCollider*> Colliders = { &Target };
+
+	FRopeThrowPreviewBuilder::FInput Input = MakeArcSearchInput(Sim);
+	Input.Colliders = &Colliders;
+	Input.TipEngagement = ERopeTipEngagement::Pierce;
+	Input.ThrowContext.bAimRayEvaluated = true; // 조준했고 — 빗나갔다.
+
+	FRopePreparedThrowPreview Prepared;
+	FString Failure;
+	TestFalse(TEXT("조준 miss면 arc 재탐색 없이 preview 실패"),
+		FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, Prepared, &Failure));
+	TestFalse(TEXT("prepared 무효"), Prepared.IsValid());
+	TestTrue(FString::Printf(TEXT("사유가 조준 게이트여야 한다(arc 미발견이 아니라): %s"), *Failure),
+		Failure.Contains(TEXT("aim ray found no target")));
+	return true;
+}
+
+// 갈래 ②: 조준 자체가 없는 BP 직행/AI라도 Pierce는 arc 재탐색을 하지 않는다. 창은 조준한 곳에
+// 꽂히는 것이 전부라, 방향만 보고 최대 SweepAngleDegrees 폭의 옆 대상에 꽂으면 같은 버그가 된다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceDirectThrowRequiresAimHitTest,
+	"DynamicRope.Pierce.DirectPierceRequiresAimHit",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePierceDirectThrowRequiresAimHitTest::RunTest(const FString& Parameters)
+{
+	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
+	USkeletalMeshComponent* Mesh = MakePierceMockMesh();
+	FCapsuleCollider Target = MakeOffAimArcTarget(Mesh);
+	TArray<IRopeCollider*> Colliders = { &Target };
+
+	FRopeThrowPreviewBuilder::FInput Input = MakeArcSearchInput(Sim);
+	Input.Colliders = &Colliders;
+	Input.TipEngagement = ERopeTipEngagement::Pierce;
+	Input.ThrowContext.bAimRayEvaluated = false; // 조준 흐름 없음(BP 직행/AI).
+
+	FRopePreparedThrowPreview Prepared;
+	FString Failure;
+	TestFalse(TEXT("Pierce는 조준 hit 없이 preview가 성립하지 않는다"),
+		FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, Prepared, &Failure));
+	TestTrue(FString::Printf(TEXT("사유가 pierce 게이트여야 한다: %s"), *Failure),
+		Failure.Contains(TEXT("pierce requires an aim hit")));
+	return true;
+}
+
+// 갈래 ③(보존 잠금): 조준 없는 BP 직행 + Cinch(감김)는 arc 재탐색이 **의도된** 대상 선택 수단이다
+// ("이 방향으로 던져 거기 있는 걸 감아라"). 위 두 게이트가 이 경로까지 막으면 안 된다.
+// collider를 비워 arc 탐색 자체의 사유("no frame colliders")로 실패시킨다 — 감김 경로 전체를
+// 세우지 않고도 "게이트에 막힌 게 아니라 탐색까지 도달했다"만 정확히 확인한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeCinchDirectThrowStillSearchesArcTest,
+	"DynamicRope.Pierce.DirectCinchStillSearchesArc",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeCinchDirectThrowStillSearchesArcTest::RunTest(const FString& Parameters)
+{
+	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
+	TArray<IRopeCollider*> NoColliders;
+
+	FRopeThrowPreviewBuilder::FInput Input = MakeArcSearchInput(Sim);
+	Input.Colliders = &NoColliders;
+	Input.TipEngagement = ERopeTipEngagement::Cinch;
+	Input.ThrowContext.bAimRayEvaluated = false; // 조준 흐름 없음(BP 직행/AI).
+
+	FRopePreparedThrowPreview Prepared;
+	FString Failure;
+	FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, Prepared, &Failure);
+	TestTrue(FString::Printf(TEXT("BP 직행 Cinch는 arc 탐색까지 도달해야 한다(게이트 아님): %s"), *Failure),
+		Failure.Contains(TEXT("free search")));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

@@ -1465,6 +1465,13 @@ struct FRopeThrowContext
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
 
+	/** 이 컨텍스트를 조준 ray 경로가 만들었는지 나타낸다 — hit/miss와 무관하게 참이다.
+	 *  아래 bHasAimGuideHit이 false인 두 상황을 가르는 유일한 표시다: "조준했는데 빗나감"(true)
+	 *  vs "조준 자체가 없음"(false — Wielder 없는 BP 직행/AI의 Throw()). preview 빌더가 이걸로
+	 *  arc 재탐색 허용 여부를 정한다 — 조준이 빗나간 경우까지 arc로 대상을 주우면 조준하지 않은
+	 *  옆 대상에 꽂혀 ③ 계약("보장 = 조준한 대상")이 깨진다. */
+	bool bAimRayEvaluated = false;
+
 	/** aim ray가 유효한 본 hit을 확보했는지 나타낸다. */
 	bool bHasAimGuideHit = false;
 

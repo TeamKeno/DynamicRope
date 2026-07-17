@@ -939,6 +939,11 @@ FRopeAimRayThrowRequest URopeWielderComponent::BuildAimRayThrowRequest(const FVe
 {
 	FRopeAimRayThrowRequest Request;
 	Request.BaseContext = BuildBaseThrowContext(AimDir);
+	// 조준 ray 경로가 만든 컨텍스트임을 표시한다 — preview 빌더가 "조준 miss"와 "조준 자체가 없음
+	// (BP 직행/AI)"을 구분하는 근거다. 조준 컨텍스트의 단일 팩토리인 여기서 한 번만 찍으면 hit/miss는
+	// 물론 ray가 무효(RayLength=0 — reach 구를 안 지남)인 경우까지 덮인다: ResolveAimRayThrowContext와
+	// BuildThrowContextInternal 둘 다 결과를 BaseContext에서 출발시키므로 플래그가 살아남는다.
+	Request.BaseContext.bAimRayEvaluated = true;
 	Request.RayOrigin = GetAimRayOrigin();
 	Request.RayDirection = Request.BaseContext.FrameForward;
 	Request.ReachOrigin = Request.BaseContext.Origin;
