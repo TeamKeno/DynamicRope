@@ -56,26 +56,53 @@ DECLARE_DWORD_COUNTER_STAT(TEXT("GPU SDF Volumes"), STAT_RopeGPU_SDFVolumes, STA
 // 프레임별 GPU 업로드 대역폭(실제 전송 바이트) — CreateStructuredBuffer 업로드를 RopeUploadBuffer로 감싸 누산.
 // 상주 풋프린트(위 GPU Mem)와 달리 매 프레임 GPU로 올리는 양이다. SDF는 CL389 캐시가 grow할 때만 튄다.
 DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (total)"), STAT_RopeGPU_UploadTotal, STATGROUP_DynamicRope);
-DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (SDF)"), STAT_RopeGPU_UploadSDF, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (SDF Volume)"), STAT_RopeGPU_UploadSDF, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Colliders)"), STAT_RopeGPU_UploadColliders, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Detect)"), STAT_RopeGPU_UploadDetect, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Override)"), STAT_RopeGPU_UploadOverride, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Seed)"), STAT_RopeGPU_UploadSeed, STATGROUP_DynamicRope);
+// GPU→CPU 다운로드 대역폭 + 프레임당 컴퓨트 dispatch/substep 수(솔버 작업량).
+DECLARE_MEMORY_STAT(TEXT("GPU Readback/Frame (download)"), STAT_RopeGPU_ReadbackBytes, STATGROUP_DynamicRope);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Dispatches/Frame"), STAT_RopeGPU_Dispatches, STATGROUP_DynamicRope);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Substeps/Frame"), STAT_RopeGPU_Substeps, STATGROUP_DynamicRope);
 
 // RT 전용 프레임 업로드 누산기(RunSteps 시작에서 리셋, 끝에서 SET). RunSteps는 프레임당 1회 실행.
 #if STATS
+// 프레임 업로드 누산기(RunSteps 시작 리셋, 끝 SET). 카테고리별로 쪼개 MB 총합을 어디가 지배하는지 본다.
 static uint64 GRopeUploadBytesTotal = 0;
-static uint64 GRopeUploadBytesSDF = 0;
+static uint64 GRopeUploadBytesSDF = 0;        // Rope.GlobalSDF* — 복셀 볼륨 재업로드(정상 상태 ~0; 매 프레임 크면 캐시 미작동)
+static uint64 GRopeUploadBytesColliders = 0;  // Capsules/Boxes/Convex/SDFColliders 인스턴스(매 프레임, 콜라이더 수 비례)
+static uint64 GRopeUploadBytesDetect = 0;     // Detect* — Flight 감지 입력
+static uint64 GRopeUploadBytesOverride = 0;   // Override* — 로직 페이즈(Wrapping/Releasing)
+static uint64 GRopeUploadBytesSeed = 0;       // Pos/Prev/InvMass 시드(재던지기/토폴로지 변화 시에만)
+static uint64 GRopeReadbackBytes = 0;         // GPU→CPU 리드백(다운로드) 바이트 — Pos/Prev/Lambda/Contact
+static uint32 GRopeDispatchCount = 0;         // 이번 프레임 컴퓨트 dispatch 수(솔브+감지)
+static uint32 GRopeSubstepSum = 0;            // 이번 프레임 substep 합(솔버 작업량 프록시)
+
+// 버퍼 이름으로 업로드를 카테고리 버킷에 분류(순서 중요 — Override*가 "Pos"/"Prev"를 포함하므로 앞에서 거른다).
+static void RopeAccumUploadBucket(const TCHAR* Name, uint64 Bytes)
+{
+	GRopeUploadBytesTotal += Bytes;
+	if      (FCString::Strifind(Name, TEXT("GlobalSDF")))    { GRopeUploadBytesSDF += Bytes; }
+	else if (FCString::Strifind(Name, TEXT("Override")))     { GRopeUploadBytesOverride += Bytes; }
+	else if (FCString::Strifind(Name, TEXT("Detect")))       { GRopeUploadBytesDetect += Bytes; }
+	else if (FCString::Strifind(Name, TEXT("Capsules")) || FCString::Strifind(Name, TEXT("Boxes"))
+		  || FCString::Strifind(Name, TEXT("Convex"))    || FCString::Strifind(Name, TEXT("SDFColliders")))
+		{ GRopeUploadBytesColliders += Bytes; }
+	else if (FCString::Strifind(Name, TEXT("Rope.Pos")) || FCString::Strifind(Name, TEXT("Rope.Prev"))
+		  || FCString::Strifind(Name, TEXT("Rope.InvMass")))
+		{ GRopeUploadBytesSeed += Bytes; }
+	// 그 외(Rope.Params 등) — total에만 집계.
+}
 #endif
 
-// CreateStructuredBuffer 업로드 래퍼 — 초기데이터 바이트(InitialDataSize = 실제 GPU 전송량)를 누산하고
-// 엔진 헬퍼로 그대로 포워드한다. 모든 로프 GPU 업로드가 이 한 곳을 지나 프레임 대역폭이 자동 집계된다.
-// (Rope.GlobalSDF* 이름은 SDF 재업로드 버킷으로 별도 합산.)
+// CreateStructuredBuffer 업로드 래퍼 — 초기데이터 바이트(InitialDataSize = 실제 GPU 전송량)를 카테고리별로
+// 누산하고 엔진 헬퍼로 그대로 포워드한다. 모든 로프 GPU 업로드가 이 한 곳을 지나 프레임 대역폭이 자동 집계된다.
 static FRDGBufferRef RopeUploadBuffer(FRDGBuilder& GraphBuilder, const TCHAR* Name, uint32 BytesPerElement,
 	uint32 NumElements, const void* InitialData, uint64 InitialDataSize)
 {
 #if STATS
-	GRopeUploadBytesTotal += InitialDataSize;
-	if (FCString::Strifind(Name, TEXT("GlobalSDF")) != nullptr)
-	{
-		GRopeUploadBytesSDF += InitialDataSize;
-	}
+	RopeAccumUploadBucket(Name, InitialDataSize);
 #endif
 	return ::CreateStructuredBuffer(GraphBuilder, Name, BytesPerElement, NumElements, InitialData, InitialDataSize);
 }
@@ -1220,6 +1247,9 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	PermVec.Set<FRopeXPBDSolveCS::FNodeBucket>(RopeNodeBucket(N));
 	PermVec.Set<FRopeXPBDSolveCS::FGDFDim>(bUseGDFPerm);
 	TShaderMapRef<FRopeXPBDSolveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), PermVec);
+#if STATS
+	++GRopeDispatchCount;
+#endif
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeXPBDResident"),
 		// 로프 1개 = 스레드그룹 1개
 		ComputeShader, PassParams, FIntVector(1, 1, 1));
@@ -1241,6 +1271,9 @@ static void RopeArmReadbacks(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 		const uint32 NodeBytes = (uint32)N * sizeof(FVector4f);
 		AddEnqueueCopyPass(GraphBuilder, R.PosReadback,  B.PosRDG,  NodeBytes);
 		AddEnqueueCopyPass(GraphBuilder, R.PrevReadback, B.PrevRDG, NodeBytes);
+#if STATS
+		GRopeReadbackBytes += 2ull * NodeBytes;
+#endif
 		R.bReadbackArmed = true;
 	}
 
@@ -1250,6 +1283,9 @@ static void RopeArmReadbacks(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 	{
 		if (!R.LambdaReadback) { R.LambdaReadback = new FRHIGPUBufferReadback(TEXT("Rope.LambdaReadback")); }
 		AddEnqueueCopyPass(GraphBuilder, R.LambdaReadback, LambdaRDG, (uint32)N * sizeof(float));
+#if STATS
+		GRopeReadbackBytes += (uint64)N * sizeof(float);
+#endif
 		R.LambdaFixedDt = S.FixedDt;
 		R.bLambdaArmed = true;
 	}
@@ -1349,6 +1385,9 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	// N ≤ MaxNodes → 항상 ≥64.
 	DetectPerm.Set<FRopeContactDetectCS::FNodeBucket>(RopeNodeBucket(N));
 	TShaderMapRef<FRopeContactDetectCS> DetectShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), DetectPerm);
+#if STATS
+	++GRopeDispatchCount;
+#endif
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeContactDetect"),
 		DetectShader, DetectParams, FIntVector(1, 1, 1));
 
@@ -1356,6 +1395,9 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	{
 		if (!R.ContactReadback) { R.ContactReadback = new FRHIGPUBufferReadback(TEXT("Rope.ContactReadback")); }
 		AddEnqueueCopyPass(GraphBuilder, R.ContactReadback, ContactRDG, (uint32)(2 * N) * sizeof(FRopeGPUContactGPU));
+#if STATS
+		GRopeReadbackBytes += (uint64)(2 * N) * sizeof(FRopeGPUContactGPU);
+#endif
 		R.bContactArmed = true;
 	}
 }
@@ -1370,8 +1412,16 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_RunSteps);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_RunSteps);
 #if STATS
-	GRopeUploadBytesTotal = 0;   // 이번 프레임 업로드 누산 리셋(아래 RopeUploadBuffer들이 더한다).
+	// 이번 프레임 업로드 누산 리셋(아래 RopeUploadBuffer들이 카테고리별로 더한다). RunSteps는 프레임당 1회.
+	GRopeUploadBytesTotal = 0;
 	GRopeUploadBytesSDF = 0;
+	GRopeUploadBytesColliders = 0;
+	GRopeUploadBytesDetect = 0;
+	GRopeUploadBytesOverride = 0;
+	GRopeUploadBytesSeed = 0;
+	GRopeReadbackBytes = 0;
+	GRopeDispatchCount = 0;
+	GRopeSubstepSum = 0;
 #endif
 	// --- Loop 1: 직전 프레임 리드백 consume — 그래프 구성 *전*에 immediate Lock으로 처리.
 	RopeConsumeReadbacks(Impl->RtRopes, *Impl->Results, Steps);
@@ -1397,6 +1447,9 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	for (const FRopeGPUResidentStep& S : Steps)
 	{
 		const int32 N = S.NumNodes;
+#if STATS
+		GRopeSubstepSum += (uint32)FMath::Max(0, S.NumSub);
+#endif
 		if (N < 2 || N > FRopeGPUSolver::MaxNodes)
 		{
 			UE_LOG(LogDynamicRopeGPU, Warning, TEXT("GPU resident step skipped: %d nodes out of [2, %d]."), N, FRopeGPUSolver::MaxNodes);
@@ -1474,6 +1527,13 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		SET_DWORD_STAT(STAT_RopeGPU_SDFVolumes, Impl->GlobalSDF.CpuVol.Num());
 		SET_MEMORY_STAT(STAT_RopeGPU_UploadTotal, GRopeUploadBytesTotal);
 		SET_MEMORY_STAT(STAT_RopeGPU_UploadSDF, GRopeUploadBytesSDF);
+		SET_MEMORY_STAT(STAT_RopeGPU_UploadColliders, GRopeUploadBytesColliders);
+		SET_MEMORY_STAT(STAT_RopeGPU_UploadDetect, GRopeUploadBytesDetect);
+		SET_MEMORY_STAT(STAT_RopeGPU_UploadOverride, GRopeUploadBytesOverride);
+		SET_MEMORY_STAT(STAT_RopeGPU_UploadSeed, GRopeUploadBytesSeed);
+		SET_MEMORY_STAT(STAT_RopeGPU_ReadbackBytes, GRopeReadbackBytes);
+		SET_DWORD_STAT(STAT_RopeGPU_Dispatches, GRopeDispatchCount);
+		SET_DWORD_STAT(STAT_RopeGPU_Substeps, GRopeSubstepSum);
 	}
 #endif
 }
