@@ -75,51 +75,81 @@ public:
 
 	//~ Setup(설정) -------------------------------------------------------
 
-	/**
-	 * 감김 해결(도달) 모드 — 이 로프의 최상위 계약. 무엇을 보장하는지, 조준·preview의 지위,
-	 * 판정 관문 사용 여부를 이 값 하나가 결정한다. **정본은 로프다** — Wielder의 조준/던지기 방식은
-	 * 여기서 유도되고, BP 직행/AI는 Wielder 없이 이 값만으로 완결된다.
-	 */
+	// 이 로프의 최상위 계약 — 무엇을 보장하는지, 조준·preview의 지위, 판정 관문 사용 여부를 이 값
+	// 하나가 결정한다. **정본은 로프다**: Wielder의 조준/던지기 방식은 여기서 유도되고, BP 직행/AI는
+	// Wielder 없이 이 값만으로 완결된다. 모드별 계약은 ERopeWrapResolveMode 열거자 주석 참조.
+
+	/** 감김 해결(도달) 모드 — 던지기~결착까지 무엇을 보장하는가. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
-	/**
-	 * 결착 모델 — 팁이 닿는 순간 무엇이 성립하는가. 도달 모드와 조합이 제약된다(①②=BareWrap 전용,
-	 * ③=Pierce/Cinch 전용). 무효 조합은 에디터 편집 시와 던지기 진입 시 자동 보정된다 — 모드가 정본.
-	 */
+	// 도달 모드와 조합이 제약된다(①②=BareWrap 전용, ③=Pierce/Cinch 전용). 무효 조합은 에디터 편집
+	// 시와 던지기 진입 시 자동 보정된다 — 모드가 정본(RopeWrapModes::ClampEngagement).
+
+	/** 결착 모델 — 팁이 닿는 순간 무엇이 성립하는가. 도달 모드와 조합이 제약된다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
 
-	//~ Tip(팁 부착물 — 결착 모델 Pierce/Cinch용 창날/작살/추) --------------
+	//~ Tip(팁 부착물 — 창날/작살/추) ----------------------------------------
 	// 밧줄 자유단(GetNodeCount()-1)에 붙는 표시 전용 StaticMesh. 질량·충돌 없음(팁 질량 솔버 반영
-	// 안 함 — 2026-07-14 확정). 던지기~해제 단위 수명: 던지기 진입에 확보, release/cut·EndPlay에
-	// (우리가 스폰한 경우만) 파괴. 외부(태그로 찾은) 컴포넌트는 파괴하지 않는다.
+	// 안 함 — 2026-07-14 확정). **결착 모델 무관 공통 기능**이다(2026-07-17): bUseTipMesh 하나로
+	// 켜고, 수명은 전 모드 BeginPlay~EndPlay로 통일한다 — (우리가 스폰한 경우만) EndPlay에 파괴하고,
+	// 외부(태그로 찾은) 컴포넌트는 파괴하지 않는다.
+	// 예외는 소켓 보정(bUseTipMeshSockets) 하나 — Head를 꽂힘 지점에 맞춘다는 개념이 Pierce에만 있다.
+	// 활성 조건의 단일 소스는 IsTipSocketPlacementActive()이고, 관문은 ReadTipSocketLocal() 한 곳이다.
+	//
+	// 폴백(소켓 보정이 꺼졌거나 비-Pierce거나 Head 소켓이 없을 때): 메쉬 원점이 로프 끝 노드에, X축이
+	// 마지막 세그먼트 방향에 놓인다 — 팁이 대상에 파묻혀도 보정하지 않는다(의도된 무보정). Wrapped에서도
+	// 끝 노드가 bone-local 앵커라 애니메이션은 계속 따라가고, 회전만 얼린 자세가 아닌 세그먼트 유도가 된다.
+	// Head만 있고 Tail이 없으면 로프는 메쉬 원점에 연결된다.
+	//
+	// 주의: 아래 /** */는 그대로 에디터 툴팁이 된다 — 한 줄로 짧게 유지하고, 상세는 이 블록에 적을 것.
 
-	/** 팁에 스폰할 StaticMesh 에셋. 비어 있고 TipMeshComponentTag로도 못 찾으면 팁 없음. */
+	/** 팁 부착물을 사용한다. 끄면 아래 Tip 설정이 전부 무시되고 팁 없는 일반 로프가 된다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	bool bUseTipMesh = false;
+
+	/** 팁에 스폰할 StaticMesh. 비어 있고 태그로도 못 찾으면 팁 없음. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
 	TObjectPtr<UStaticMesh> TipMesh = nullptr;
 
-	/** 설정 시, Owner에 이미 붙은 이 태그의 StaticMeshComponent를 팁으로 재사용한다(스폰보다 우선, 파괴 안 함). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	/** Owner에 이미 붙은 이 태그의 StaticMeshComponent를 팁으로 재사용(스폰보다 우선, 파괴 안 함). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
 	FName TipMeshComponentTag = NAME_None;
 
-	/** 팁 노드(자유단) 프레임 기준 배치 오프셋(로컬 → 월드는 UpdateTipMeshTransform이 적용). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	/** 팁 배치 오프셋(팁 노드 프레임 기준). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
 	FTransform TipMeshRelativeTransform = FTransform::Identity;
 
-	/** Reel(장전) 상태에서 창(팁)을 붙일 Owner 스켈레탈 메시의 소켓 이름. 비어 있거나 소켓이 없으면 컴포넌트(손) 트랜스폼.
-	 *  기본 GetReelTipTransform() 구현이 사용한다 — 배치 규약을 바꾸려면 그 virtual을 override. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	// 끔 = 게임 코드가 GetTipMeshComponent()로 Free 배치를 직접 구동하라는 확장점(로프는 손대지 않는다).
+	// Free 외 페이즈(Flight/GuidedThrow/Wrapping/Wrapped/Releasing/Reel)는 이 값과 무관하게 항상 추종한다.
+
+	/** Free에서 팁을 매 프레임 로프 끝에 맞춘다. 끄면 Free 동안 팁을 건드리지 않는다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
+	bool bSyncTipMeshOnFree = true;
+
+	// 기본 GetReelTipTransform() 구현이 사용한다 — 배치 규약을 바꾸려면 그 virtual을 override.
+
+	/** Reel(장전)에서 팁을 붙일 Owner 스켈레탈 메시 소켓. 없으면 컴포넌트(손) 트랜스폼. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
 	FName ReelHandSocket = NAME_None;
 
-	/** Pierce 전용 — 팁 StaticMesh의 뾰족한 끝(관통 지점) 소켓. 이 소켓이 조준 히트점에 정확히 박히도록
-	 *  메쉬 원점을 역산해 배치하고, 그 자세를 bone-local로 얼려 대상 애니메이션을 따라간다.
-	 *  비어 있거나 소켓이 없으면 Pierce 임베드 비활성 → 현행(원점=히트점, 세그먼트 추종 회전) 폴백. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	// 켬 = Tail이 로프 끝에, Head가 꽂힘 지점에 오도록 메쉬 원점을 역산하고 그 자세를 bone-local로 얼려
+	// 대상 애니메이션을 따라간다. 끔 = 소켓을 일절 읽지 않는다(위 폴백). BareWrap/Cinch에는 무의미.
+
+	/** Pierce 전용 — Head/Tail 소켓으로 팁을 정밀 배치한다. 끄면 메쉬 원점이 로프 끝에 놓인다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
+		meta = (EditCondition = "bUseTipMesh && TipEngagement == ERopeTipEngagement::Pierce"))
+	bool bUseTipMeshSockets = false;
+
+	/** Head 소켓 — 팁의 뾰족한 끝. 이 소켓이 조준 히트점에 박힌다. 없으면 위 보정 비활성. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
+		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && TipEngagement == ERopeTipEngagement::Pierce"))
 	FName TipSocketName = NAME_None;
 
-	/** Pierce 전용 — 로프 자유단이 연결될 팁 메쉬의 꼬리 소켓. 비어 있거나 소켓이 없으면 메쉬 원점에 연결. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
+	/** Tail 소켓 — 로프 자유단이 연결될 지점. 없으면 메쉬 원점에 연결. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
+		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && TipEngagement == ERopeTipEngagement::Pierce"))
 	FName TipRopeSocketName = NAME_None;
 
 	// 아래 초기화 전용 값들(NumParticles/RopeLength/MinRopeLength)은 InitRope 시점에만 소비된다 —
@@ -494,6 +524,13 @@ public:
 
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
 
+	// bSyncTipMeshOnFree=false일 때 Free 배치를 게임 코드가 직접 구동하기 위한 확장점 — 그 경우
+	// 로프는 Free 동안 이 컴포넌트의 트랜스폼을 건드리지 않는다.
+
+	/** 팁 부착물 컴포넌트(팁을 안 쓰거나 확보 실패면 null). */
+	UFUNCTION(BlueprintPure, Category = "Rope|Tip")
+	UStaticMeshComponent* GetTipMeshComponent() const { return TipMeshComponent; }
+
 	//~ Events(이벤트) ----------------------------------------------------
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnWrapped OnRopeWrapped;
@@ -571,10 +608,17 @@ protected:
 	virtual void OnDeployFromReel();
 
 	/**
-	 * wrap 대상 게이트. Flight의 접촉 후보 산출 프레임마다(후보별) + prepared preview throw 진입 시 1회
-	 * 호출된다. false면 그 (Mesh, Bone) 후보는 없는 것으로 취급된다 — 팀/태그 등 게임 규칙으로 감을 수
-	 * 있는 대상을 제한할 때 오버라이드. 기본 true(모두 허용). 주의: Wielder의 조준 preview 빌드는 이
-	 * 게이트를 통과하지 않으므로(정적 빌더), 금지 대상이 preview에 보일 수는 있다 — throw가 거부한다.
+	 * wrap 대상 게이트. false면 그 (Mesh, Bone) 후보는 없는 것으로 취급된다 — 팀/태그 등 게임 규칙으로
+	 * 감을 수 있는 대상을 제한할 때 오버라이드. 기본 true(모두 허용).
+	 *
+	 * **대상을 고르는 모든 경로가 이 게이트 하나를 공유한다** — 조준/preview/판정이 갈리면 "조준은
+	 * 거부했는데 preview는 고르는" 불일치가 된다. 호출 지점:
+	 *   - Flight 후보 산출(프레임마다·후보별) + Contacting 재수집 — RemoveNonWrappableCandidates
+	 *   - 조준 ray 질의 — FindAimRayBoneHit (금지 대상은 blocked로 잡힌다 = aim hit 없음)
+	 *   - preview arc 탐색 — FRopeThrowPreviewBuilder::FInput::CanWrapTarget 주입
+	 *     (빌더가 UObject-free라 virtual을 직접 못 부르므로 호출자가 람다로 넣어준다)
+	 *   - prepared throw 진입 — ThrowWithPreparedPreview (마지막 방어선)
+	 * 새 대상 선택 경로를 추가하면 이 게이트도 함께 태울 것.
 	 */
 	virtual bool CanWrapTarget(const USceneComponent* Mesh, FName Bone) const { return true; }
 
@@ -632,19 +676,27 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UStaticMeshComponent> TipMeshComponent = nullptr;
 
-	// 우리가 스폰했는가 — release/cut·EndPlay에서 스폰분만 파괴하기 위한 소유권 플래그(외부 컴포넌트 보호).
+	// 우리가 스폰했는가 — EndPlay에서 스폰분만 파괴하기 위한 소유권 플래그(외부 컴포넌트 보호).
 	bool bTipMeshSpawnedByUs = false;
 
 	// 태그로 재사용한 팁 StaticMeshComponent의 기존 월드 스케일. SetWorldTransform으로 덮어도 비주얼 크기를 보존한다.
 	FVector TipMeshAuthoredScale = FVector::OneVector;
 
-	// 팁 부착물을 던지기~해제 단위로 확보/파괴/추종한다(TipMesh/TipMeshComponentTag가 설정된 경우만 동작).
+	// 팁 부착물을 BeginPlay~EndPlay 단위로 확보/파괴/추종한다(bUseTipMesh가 켜진 경우만 동작).
 	void EnsureTipMesh();
 	void TeardownSpawnedTipMesh();
 	void UpdateTipMeshTransform();
 
 	//~ Pierce 임베드(소켓 기반) 헬퍼 -------------------------------------------
-	// 팁 StaticMesh의 소켓을 컴포넌트-로컬 트랜스폼으로 읽는다. 소켓이 없으면 false(호출부가 폴백).
+	// 소켓 배치 활성 조건의 **단일 소스** = 팁 사용 + 소켓 옵트인 + Pierce 결착. Head를 꽂힘 지점에
+	// 맞춘다는 개념이 Pierce에만 있으므로, BareWrap/Cinch는 소켓 이름이 채워져 있어도 읽지 않는다
+	// (세그먼트 추종으로 통일). ReadTipSocketLocal이 이 술어를 태우므로 소켓 경로 전체가 함께 꺼진다.
+	bool IsTipSocketPlacementActive() const
+	{
+		return bUseTipMesh && bUseTipMeshSockets && TipEngagement == ERopeTipEngagement::Pierce;
+	}
+	// 팁 StaticMesh의 소켓을 컴포넌트-로컬 트랜스폼으로 읽는다. 소켓 배치가 비활성이거나 소켓이 없으면
+	// false(호출부가 폴백) — 소켓 읽기의 유일한 관문이다.
 	bool ReadTipSocketLocal(FName Socket, FTransform& OutLocal) const;
 	// 태그 컴포넌트의 기존 스케일과 TipMeshRelativeTransform을 함께 담은 팁 배치 로컬.
 	FTransform MakeTipPlacementTransform() const;

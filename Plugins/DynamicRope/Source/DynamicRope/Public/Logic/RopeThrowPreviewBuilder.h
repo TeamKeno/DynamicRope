@@ -6,6 +6,7 @@
 #include "Core/RopeTypes.h"
 
 class IRopeCollider;
+class USceneComponent;
 
 /**
  * Stateless throw-preview path builder. It owns the expensive preview search/path-build
@@ -18,6 +19,12 @@ public:
 	{
 		const FRopeSimState* Sim = nullptr;
 		const TArray<IRopeCollider*>* Colliders = nullptr;
+
+		/** wrap 대상 게이트(URopeComponent::CanWrapTarget 주입 — 빌더는 UObject-free라 virtual을 직접 못 부른다).
+		 *  arc 탐색이 aim 경로(FindAimRayBoneHit)와 **같은 기준**으로 후보를 거르게 하는 유일한 통로다:
+		 *  이게 없으면 aim이 거부한 대상을 preview가 주워 둘의 판정이 갈린다. 미설정이면 전부 허용
+		 *  (CanWrapTarget의 기본 구현과 같은 의미) — 월드 없는 단위 테스트는 설정하지 않아도 된다. */
+		TFunction<bool(const USceneComponent*, FName)> CanWrapTarget;
 
 		FRopeThrowContext ThrowContext;
 		FRopeWrapConfig WrapConfig;

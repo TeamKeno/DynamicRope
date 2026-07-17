@@ -540,4 +540,46 @@ bool FRopeCinchDirectThrowStillSearchesArcTest::RunTest(const FString& Parameter
 	return true;
 }
 
+// arc 탐색이 aim과 같은 wrap 대상 기준을 쓰는가. 종전에는 arc 탐색이 Bone/SourceMesh만 보고
+// CanWrapTarget을 몰라서, aim이 금지한 대상을 preview가 주웠다("보이는데 던지면 거부됨").
+// 게이트는 주입식이라(FInput.CanWrapTarget) 월드/서브클래스 없이 람다로 계약을 잠글 수 있다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeCinchArcSearchHonorsWrapGateTest,
+	"DynamicRope.Pierce.ArcSearchHonorsWrapGate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeCinchArcSearchHonorsWrapGateTest::RunTest(const FString& Parameters)
+{
+	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
+	USkeletalMeshComponent* Mesh = MakePierceMockMesh();
+	FCapsuleCollider Target = MakeOffAimArcTarget(Mesh);
+	TArray<IRopeCollider*> Colliders = { &Target };
+
+	// 먼저 게이트 없이: arc 탐색이 이 대상을 실제로 줍는다는 것부터 확인한다(아래 대조군의 전제).
+	FRopeThrowPreviewBuilder::FInput Allowed = MakeArcSearchInput(Sim);
+	Allowed.Colliders = &Colliders;
+	Allowed.TipEngagement = ERopeTipEngagement::Cinch;
+	FRopePreparedThrowPreview AllowedPrepared;
+	FString AllowedFailure;
+	const bool bAllowedBuilt = FRopeThrowPreviewBuilder::BuildFreePreparedPreview(
+		Allowed, AllowedPrepared, &AllowedFailure);
+	TestTrue(FString::Printf(TEXT("전제: 게이트 미설정이면 arc 탐색이 이 대상을 줍는다 (%s)"), *AllowedFailure),
+		bAllowedBuilt);
+
+	// 같은 대상 + 거부 게이트 → 후보에서 빠져야 한다. 위 전제가 성립하므로 이 false는 게이트 때문이다.
+	FRopeThrowPreviewBuilder::FInput Denied = MakeArcSearchInput(Sim);
+	Denied.Colliders = &Colliders;
+	Denied.TipEngagement = ERopeTipEngagement::Cinch;
+	int32 GateCalls = 0;
+	Denied.CanWrapTarget = [&GateCalls](const USceneComponent*, FName) { ++GateCalls; return false; };
+
+	FRopePreparedThrowPreview DeniedPrepared;
+	FString DeniedFailure;
+	TestFalse(TEXT("CanWrapTarget이 거부한 대상은 arc 탐색 후보에서 빠진다"),
+		FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Denied, DeniedPrepared, &DeniedFailure));
+	TestTrue(TEXT("게이트가 실제로 호출됐다"), GateCalls > 0);
+	TestTrue(FString::Printf(TEXT("사유가 '유효 접촉 없음'이어야 한다(collider는 있었다): %s"), *DeniedFailure),
+		DeniedFailure.Contains(TEXT("no valid contact")));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

@@ -75,27 +75,27 @@ enum class ERopeReleaseReason : uint8
  * 조준·preview의 지위와 판정 관문 사용 여부를 결정하고, Wielder의 조준/던지기 방식도 여기서 유도된다.
  * Wrapped 성립 이후(Hold/Pull/테더/release)는 모드 무관 공통. 근거: Docs/PoC/02_WrapResolveModes.md.
  */
+
 UENUM(BlueprintType)
 enum class ERopeWrapResolveMode : uint8
 {
-	/**
-	 * ① 전체 시뮬: 날리기부터 결착까지 전부 창발. 조준 보정/preview 없음 — 빗나감·스침·판정
-	 * 미달 전부 정상 결과다(현실 대응). 샌드박스/리서치용.
-	 */
+	// 날리기부터 결착까지 전부 창발. 조준 보정/preview가 없어 빗나감·스침·판정 미달이 전부 정상
+	// 결과다(현실 대응).
+
+	/** ① 전체 시뮬 — 아무것도 보장하지 않는다. 빗나감도 정상(샌드박스/리서치). */
 	FullSimulation UMETA(DisplayName = "Full Simulation"),
 
-	/**
-	 * ② 보조+판정(기본): aim ray가 대상을 잠가 명중은 보장하되, 결착 성립은 판정(감싼 각도/
-	 * 커버리지 관문)이 결정한다. preview는 표시용(비구속). 실패(release)도 정상 결과. 전투/스킬용.
-	 */
+	// aim ray가 대상을 잠가 명중은 보장하되, 결착 성립은 판정(감싼 각도/커버리지 관문)이 결정한다.
+	// preview는 표시용(비구속).
+
+	/** ② 보조+판정 — 명중은 보장, 결착은 판정. 실패(release)도 정상(전투/스킬). */
 	AssistedJudged UMETA(DisplayName = "Assisted (Judged)"),
 
-	/**
-	 * ③ 조준한 대상에 무조건 성립: 던지는 순간 확정한 preview가 곧 실행 경로라 연출 후 실패가 없다.
-	 * **Reel(장전)에서만 던질 수 있다**(EnterReel). 조준이 안 잡히면(대상 없음/사거리 밖) 거부가 아니라
-	 * 레이 끝점을 향해 아치로 날아가 안 꽂히고 Free로 떨어진다 — 보장은 '조준한 대상'에 대한 것이라 정상 결과다.
-	 * 자동 release(장력/거리)는 무효 — 명시 해제만. 데모/연출/이동기용.
-	 */
+	// 던지는 순간 확정한 preview가 곧 실행 경로라 연출 후 실패가 없다. 조준이 안 잡히면(대상 없음/
+	// 사거리 밖) 거부가 아니라 레이 끝점을 향해 아치로 날아가 안 꽂히고 Free로 떨어진다 — 보장은
+	// '조준한 대상'에 대한 것이라 이것도 정상 결과다. 자동 release(장력/거리)는 무효 — 명시 해제만.
+
+	/** ③ 무조건 성립 — 조준한 대상에 실패 없이 결착. Reel(장전)에서만 던질 수 있다(데모/연출/이동기). */
 	GuaranteedWrap UMETA(DisplayName = "Guaranteed")
 };
 

@@ -529,7 +529,7 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	ResetKinematicVirtualBridges();
 	ResetTransientPhaseState();
 	ReleaseCooldown = 0.0f;
-	// 던지기~해제 단위 팁 부착물 확보(③ Pierce/Cinch의 실제 진입점; 이미 있으면 no-op).
+	// 팁 부착물 확보 보험 — 정상 경로는 BeginPlay가 이미 잡았다(런타임 bUseTipMesh 토글 대비; 이미 있으면 no-op).
 	EnsureTipMesh();
 
 	FRopePreparedThrowPreview ResolvedPrepared = Prepared;
@@ -585,7 +585,7 @@ void URopeComponent::EnterReel()
 	EnsureRopeInitialized();
 	ResetTransientPhaseState();
 	ReleaseCooldown = 0.0f;
-	EnsureTipMesh();      // Reel부터 창이 손에 보여야 하므로 여기서 확보(이미 있으면 no-op).
+	EnsureTipMesh();      // 확보 보험 — 정상 경로는 BeginPlay가 이미 잡았다(이미 있으면 no-op).
 	OnEnterReel();        // 기본: 로프 튜브 숨김(override 가능).
 	SetPhase(ERopePhase::Reel, TEXT("reload"));
 }
@@ -730,6 +730,9 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	FRopeThrowPreviewBuilder::FInput Input;
 	Input.Sim = &Sim;
 	Input.Colliders = &SimFrame.FrameColliders;
+	// wrap 대상 게이트 주입(aim 경로의 ResolveAimRayThrowContext와 같은 패턴) — arc 탐색이 aim과 같은
+	// 기준으로 후보를 거르게 한다. 주입 전에는 금지 대상이 preview에만 보이고 throw 진입점에서 거부됐다.
+	Input.CanWrapTarget = [this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); };
 	Input.ThrowContext = ResolveThrowContext(ThrowContext);
 	Input.WrapConfig = WrapConfig;
 	Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
@@ -772,12 +775,8 @@ void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, co
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
 	DispatchReleased(WrappedMesh, Bone, Reason, bWasWrapped);
-	// 팁 부착물 파괴는 스폰분만. ③(Guaranteed)는 release 후 Free에서도 창이 남아 장전으로 회수하므로
-	// 여기서 파괴하지 않는다(수명 = Reel~EndPlay). ①②(추 팁)는 종전대로 던지기~해제 단위로 파괴.
-	if (ResolveMode != ERopeWrapResolveMode::GuaranteedWrap)
-	{
-		TeardownSpawnedTipMesh();
-	}
+	// 팁 부착물은 여기서 파괴하지 않는다 — 수명은 전 모드 BeginPlay~EndPlay다(2026-07-17 모드 무관화).
+	// 종전엔 ①②만 release에 파괴했으나, 그러면 Free에 팁이 없어 bSyncTipMeshOnFree가 무의미해진다.
 }
 
 void URopeComponent::FinishPreCommitReleaseToFlight(FName Bone, const TCHAR* PhaseLog)
@@ -1127,9 +1126,11 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 
 void URopeComponent::EnsureTipMesh()
 {
-	// 던지기 진입에서 호출. ① Owner에 붙은 태그 컴포넌트를 우선 재사용(파괴 안 함) → ② 없고 TipMesh
-	// 에셋이 있으면 스폰(파괴는 우리 몫). 이미 확보돼 있으면 no-op. 질량·충돌 없는 표시 전용이다.
-	if (TipMeshComponent)
+	// BeginPlay에서 호출(런타임에 bUseTipMesh를 켜는 경로 대비로 던지기/Reel 진입에서도 호출 — idempotent).
+	// ① Owner에 붙은 태그 컴포넌트를 우선 재사용(파괴 안 함) → ② 없고 TipMesh 에셋이 있으면 스폰(파괴는
+	// 우리 몫). 이미 확보돼 있으면 no-op. 질량·충돌 없는 표시 전용이다.
+	// 팁 확보의 유일한 경로라, 여기서 막으면 팁 서브시스템 전체가 꺼진다(나머지는 TipMeshComponent 널 가드).
+	if (!bUseTipMesh || TipMeshComponent)
 	{
 		return;
 	}
@@ -1200,15 +1201,24 @@ void URopeComponent::UpdateTipMeshTransform()
 	}
 
 	// Reel(장전) 상태에서는 창을 손 소켓에 든다(마지막 노드가 아니라 GetReelTipTransform — override 가능).
+	// Free 게이트보다 앞: Reel은 ③의 손 소켓 고정이라 bSyncTipMeshOnFree와 무관하게 항상 유효해야 한다.
 	if (Phase == ERopePhase::Reel)
 	{
 		TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(GetReelTipTransform()));
 		return;
 	}
 
-	// Pierce 임베드 활성 조건: 결착 모델이 Pierce이고 팁 소켓이 실제로 존재. 아니면 아래 세그먼트-추종 폴백.
-	const bool bPierceSocket = (TipEngagement == ERopeTipEngagement::Pierce) &&
-		!TipSocketName.IsNone() && TipMeshComponent->DoesSocketExist(TipSocketName);
+	// Free 확장점: bSyncTipMeshOnFree를 끄면 팁 배치를 게임 코드에 넘긴다(GetTipMeshComponent) —
+	// 여기서 트랜스폼을 건드리지 않는다. Free 외 페이즈는 이 플래그와 무관하게 항상 추종한다.
+	if (Phase == ERopePhase::Free && !bSyncTipMeshOnFree)
+	{
+		return;
+	}
+
+	// Pierce 임베드 활성 조건(Pierce 결착 + 소켓 옵트인 + 소켓 실존)은 ReadTipSocketLocal이 전부 판정한다.
+	// 아니면 아래 세그먼트-추종 폴백.
+	FTransform PierceSocketLocalUnused;
+	const bool bPierceSocket = ReadTipSocketLocal(TipSocketName, PierceSocketLocalUnused);
 
 	// 꽂힌 뒤(Wrapped): 얼린 bone-local 메쉬 자세를 본에서 복원 — 회전 완전 고정 + 대상 애니메이션 추종.
 	if (bPierceSocket && Phase == ERopePhase::Wrapped && WrapController.State.Anchors.Num() > 0)
@@ -1293,7 +1303,9 @@ void URopeComponent::UpdateTipMeshTransform()
 
 bool URopeComponent::ReadTipSocketLocal(FName Socket, FTransform& OutLocal) const
 {
-	if (Socket.IsNone() || !TipMeshComponent || !TipMeshComponent->DoesSocketExist(Socket))
+	// 소켓 읽기의 유일한 관문 — IsTipSocketPlacementActive()가 여기 한 곳에만 걸리므로 소켓 보정을 끄면
+	// ComputeTipFollowTransform/ComputePierceEmbed/ResolveTipRopeAttachWorld가 각자의 기존 폴백으로 떨어진다.
+	if (!IsTipSocketPlacementActive() || Socket.IsNone() || !TipMeshComponent || !TipMeshComponent->DoesSocketExist(Socket))
 	{
 		return false;
 	}
@@ -1455,6 +1467,10 @@ void URopeComponent::BeginPlay()
 			*GetName());
 	}
 
+	// 팁 부착물 확보(bUseTipMesh가 켜진 경우만). 수명 = BeginPlay~EndPlay, 결착 모델·도달 모드 무관 —
+	// Free에서도 팁이 로프 끝에 보이려면 여기서 확보돼 있어야 한다. Sim을 읽지 않아 초기화 순서 의존이 없다.
+	EnsureTipMesh();
+
 	// ③ Guaranteed 로프는 던지기 준비(Reel) 상태로 시작한다 — 창을 손에 든 채 대기(로프 숨김).
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
@@ -1487,7 +1503,7 @@ void URopeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		}
 	}
 
-	// 우리가 스폰한 팁 부착물 정리(외부 컴포넌트는 보존). release 없이 파괴되는 경로도 커버.
+	// 우리가 스폰한 팁 부착물 정리(외부 컴포넌트는 보존). 수명 = BeginPlay~EndPlay라 파괴는 여기 한 곳뿐이다.
 	TeardownSpawnedTipMesh();
 
 	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
@@ -2060,7 +2076,7 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 	ResetChainForThrow(ResolvedThrow.Origin);
 	BeginWhipSwingFromThrow(ResolvedThrow);
 	InjectThrowVelocityIntoVerlet(ResolvedThrow);
-	// 던지기~해제 단위 팁 부착물 확보(TipMesh/태그 설정된 경우만; 이미 있으면 no-op).
+	// 팁 부착물 확보 보험 — 정상 경로는 BeginPlay가 이미 잡았다(이미 있으면 no-op).
 	EnsureTipMesh();
 
 	SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("fresh throw impulse, aim=%s, speed=%.1f"),

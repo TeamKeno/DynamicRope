@@ -131,7 +131,9 @@ namespace
 
 	bool FindThrowPreviewContactCandidate(const FRopeArcPreviewData& Preview, const TArray<IRopeCollider*>& Colliders,
 		float RopeRadius, const FRopeWrapConfig& WrapConfig, const FRopeSimState& Sim,
-		float SampleStep, float QueryRadius, FThrowPreviewContactCandidate& OutCandidate,
+		float SampleStep, float QueryRadius,
+		const TFunction<bool(const USceneComponent*, FName)>& CanWrapTarget,
+		FThrowPreviewContactCandidate& OutCandidate,
 		FString* OutFailureReason = nullptr)
 	{
 		OutCandidate = FThrowPreviewContactCandidate();
@@ -226,6 +228,15 @@ namespace
 						{
 							++InvalidHitCount;
 						}
+						continue;
+					}
+					// 서브클래스 wrap 대상 게이트 — aim 경로(FindAimRayBoneHit)와 같은 기준으로 거른다.
+					// 이 검사가 빠지면 aim이 금지한 대상을 arc 탐색이 주워 preview와 aim의 판정이 갈린다
+					// (throw 진입점이 결국 거부하므로 증상은 "보이는데 안 던져짐"이 된다).
+					// 미설정(단위 테스트/게이트 없는 호출자)이면 전부 허용 — CanWrapTarget 기본 구현과 같다.
+					if (CanWrapTarget && !CanWrapTarget(Contact.SourceMesh, Contact.Bone))
+					{
+						++InvalidHitCount;
 						continue;
 					}
 					++HitCount;
@@ -601,7 +612,7 @@ bool FRopeThrowPreviewBuilder::BuildFreePreparedPreview(const FInput& Input, FRo
 			return false;
 		}
 		if (!FindThrowPreviewContactCandidate(ArcPreview, GetColliders(Input), Input.RopeRadius, Input.WrapConfig, *Sim,
-			Input.SampleStep, Input.QueryRadius, ContactCandidate, OutFailureReason))
+			Input.SampleStep, Input.QueryRadius, Input.CanWrapTarget, ContactCandidate, OutFailureReason))
 		{
 			return false;
 		}
