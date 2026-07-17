@@ -46,6 +46,39 @@ DECLARE_CYCLE_STAT(TEXT("GPU Graph Execute"), STAT_RopeGPU_GraphExecute, STATGRO
 DECLARE_CYCLE_STAT(TEXT("GPU Arm Readbacks"), STAT_RopeGPU_ArmReadbacks, STATGROUP_DynamicRope);
 DECLARE_CYCLE_STAT(TEXT("GPU Consume Readbacks"), STAT_RopeGPU_ConsumeReadbacks, STATGROUP_DynamicRope);
 DECLARE_CYCLE_STAT(TEXT("GPU Dispatch Pending"), STAT_RopeGPU_DispatchPending, STATGROUP_DynamicRope);
+// GPU 상주 VRAM(프레임 간 유지되는 영속 버퍼) — 로프별 Pos/Prev/InvMass/Contact + 전역 SDF 캐시(Dist/Vol).
+// RunSteps 끝에서 GetSize()(바이트) 합산해 SET. 전송 대역폭이 아니라 상주 풋프린트다(SDF는 캐시 크기).
+DECLARE_MEMORY_STAT(TEXT("GPU Mem: Rope Buffers"), STAT_RopeGPU_MemRopes, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Mem: Global SDF"), STAT_RopeGPU_MemGlobalSDF, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Mem: Resident Total"), STAT_RopeGPU_MemTotal, STATGROUP_DynamicRope);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Resident Ropes (count)"), STAT_RopeGPU_ResidentRopeCount, STATGROUP_DynamicRope);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU SDF Volumes"), STAT_RopeGPU_SDFVolumes, STATGROUP_DynamicRope);
+// 프레임별 GPU 업로드 대역폭(실제 전송 바이트) — CreateStructuredBuffer 업로드를 RopeUploadBuffer로 감싸 누산.
+// 상주 풋프린트(위 GPU Mem)와 달리 매 프레임 GPU로 올리는 양이다. SDF는 CL389 캐시가 grow할 때만 튄다.
+DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (total)"), STAT_RopeGPU_UploadTotal, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (SDF)"), STAT_RopeGPU_UploadSDF, STATGROUP_DynamicRope);
+
+// RT 전용 프레임 업로드 누산기(RunSteps 시작에서 리셋, 끝에서 SET). RunSteps는 프레임당 1회 실행.
+#if STATS
+static uint64 GRopeUploadBytesTotal = 0;
+static uint64 GRopeUploadBytesSDF = 0;
+#endif
+
+// CreateStructuredBuffer 업로드 래퍼 — 초기데이터 바이트(InitialDataSize = 실제 GPU 전송량)를 누산하고
+// 엔진 헬퍼로 그대로 포워드한다. 모든 로프 GPU 업로드가 이 한 곳을 지나 프레임 대역폭이 자동 집계된다.
+// (Rope.GlobalSDF* 이름은 SDF 재업로드 버킷으로 별도 합산.)
+static FRDGBufferRef RopeUploadBuffer(FRDGBuilder& GraphBuilder, const TCHAR* Name, uint32 BytesPerElement,
+	uint32 NumElements, const void* InitialData, uint64 InitialDataSize)
+{
+#if STATS
+	GRopeUploadBytesTotal += InitialDataSize;
+	if (FCString::Strifind(Name, TEXT("GlobalSDF")) != nullptr)
+	{
+		GRopeUploadBytesSDF += InitialDataSize;
+	}
+#endif
+	return ::CreateStructuredBuffer(GraphBuilder, Name, BytesPerElement, NumElements, InitialData, InitialDataSize);
+}
 
 // 노드 버킷(스레드그룹 크기 == groupshared/numthreads 크기). 로프 1개 = 스레드그룹 1개, 노드 = 스레드라,
 // 예전엔 모든 로프가 고정 256 그룹을 잡아 노드 수가 적은 로프는 스레드 대부분이 idle(배리어에는 참여)이었다.
@@ -800,9 +833,9 @@ static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUR
 			SeedPrev[k] = FVector4f((float)Pp.X, (float)Pp.Y, (float)Pp.Z, 0.0f);
 			SeedInv[k]  = bHaveSeed ? S.InvMass[k] : 1.0f;
 		}
-		B.PosRDG     = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Pos"),     sizeof(FVector4f), N, SeedPos.GetData(),  (uint64)N * sizeof(FVector4f));
-		B.PrevRDG    = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Prev"),    sizeof(FVector4f), N, SeedPrev.GetData(), (uint64)N * sizeof(FVector4f));
-		B.InvMassRDG = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.InvMass"), sizeof(float),     N, SeedInv.GetData(),  (uint64)N * sizeof(float));
+		B.PosRDG     = RopeUploadBuffer(GraphBuilder, TEXT("Rope.Pos"),     sizeof(FVector4f), N, SeedPos.GetData(),  (uint64)N * sizeof(FVector4f));
+		B.PrevRDG    = RopeUploadBuffer(GraphBuilder, TEXT("Rope.Prev"),    sizeof(FVector4f), N, SeedPrev.GetData(), (uint64)N * sizeof(FVector4f));
+		B.InvMassRDG = RopeUploadBuffer(GraphBuilder, TEXT("Rope.InvMass"), sizeof(float),     N, SeedInv.GetData(),  (uint64)N * sizeof(float));
 		R.PosBuf     = GraphBuilder.ConvertToExternalBuffer(B.PosRDG);
 		R.PrevBuf    = GraphBuilder.ConvertToExternalBuffer(B.PrevRDG);
 		R.InvMassBuf = GraphBuilder.ConvertToExternalBuffer(B.InvMassRDG);
@@ -845,7 +878,7 @@ static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 	B.NumValidCaps = CapsFlat.Num();
 	if (CapsFlat.Num() == 0) { CapsFlat.AddZeroed(1); }
 
-	B.CapsulesBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Capsules"),
+	B.CapsulesBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.Capsules"),
 		sizeof(FRopeCapsuleGPU), CapsFlat.Num(), CapsFlat.GetData(), (uint64)CapsFlat.Num() * sizeof(FRopeCapsuleGPU));
 }
 
@@ -875,7 +908,7 @@ static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep&
 	B.NumValidBoxes = BoxesFlat.Num();
 	if (BoxesFlat.Num() == 0) { BoxesFlat.AddZeroed(1); }
 
-	B.BoxesBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Boxes"),
+	B.BoxesBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.Boxes"),
 		sizeof(FRopeBoxGPU), BoxesFlat.Num(), BoxesFlat.GetData(), (uint64)BoxesFlat.Num() * sizeof(FRopeBoxGPU));
 }
 
@@ -917,9 +950,9 @@ static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 	if (ConvFlat.Num() == 0) { ConvFlat.AddZeroed(1); }
 	if (PlaneFlat.Num() == 0) { PlaneFlat.AddZeroed(1); }
 
-	B.ConvexBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Convexes"),
+	B.ConvexBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.Convexes"),
 		sizeof(FRopeConvexGPU), ConvFlat.Num(), ConvFlat.GetData(), (uint64)ConvFlat.Num() * sizeof(FRopeConvexGPU));
-	B.ConvexPlanesBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.ConvexPlanes"),
+	B.ConvexPlanesBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.ConvexPlanes"),
 		sizeof(FVector4f), PlaneFlat.Num(), PlaneFlat.GetData(), (uint64)PlaneFlat.Num() * sizeof(FVector4f));
 }
 
@@ -986,9 +1019,9 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 		TArray<FRopeSDFVolumeGPU>& DummyVol  = *GraphBuilder.AllocObject<TArray<FRopeSDFVolumeGPU>>();
 		DummyDist.AddZeroed(1);
 		DummyVol.AddZeroed(1);
-		OutDistRDG = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.GlobalSDFDist.Dummy"),
+		OutDistRDG = RopeUploadBuffer(GraphBuilder, TEXT("Rope.GlobalSDFDist.Dummy"),
 			sizeof(float), 1, DummyDist.GetData(), sizeof(float));
-		OutVolRDG = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.GlobalSDFVol.Dummy"),
+		OutVolRDG = RopeUploadBuffer(GraphBuilder, TEXT("Rope.GlobalSDFVol.Dummy"),
 			sizeof(FRopeSDFVolumeGPU), 1, DummyVol.GetData(), sizeof(FRopeSDFVolumeGPU));
 		return;
 	}
@@ -1002,9 +1035,9 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 	}
 
 	// 최초 또는 신규 볼륨(dirty) — 전역 버퍼 재생성+업로드(append-only라 grow, 세션당 볼륨 수만큼만 발생).
-	OutDistRDG = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.GlobalSDFDist"),
+	OutDistRDG = RopeUploadBuffer(GraphBuilder, TEXT("Rope.GlobalSDFDist"),
 		sizeof(float), Cache.CpuDist.Num(), Cache.CpuDist.GetData(), (uint64)Cache.CpuDist.Num() * sizeof(float));
-	OutVolRDG = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.GlobalSDFVol"),
+	OutVolRDG = RopeUploadBuffer(GraphBuilder, TEXT("Rope.GlobalSDFVol"),
 		sizeof(FRopeSDFVolumeGPU), Cache.CpuVol.Num(), Cache.CpuVol.GetData(), (uint64)Cache.CpuVol.Num() * sizeof(FRopeSDFVolumeGPU));
 	Cache.DistBuf = GraphBuilder.ConvertToExternalBuffer(OutDistRDG);
 	Cache.VolBuf  = GraphBuilder.ConvertToExternalBuffer(OutVolRDG);
@@ -1051,7 +1084,7 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 	// 유효 개수 — 더미 패딩 *전* 확정. 비면 더미 1개(셰이더는 NumSDFColliders=0이라 미참조).
 	B.NumValidSDFCol = SDFCol.Num();
 	if (SDFCol.Num() == 0) { SDFCol.AddZeroed(1); }
-	B.SDFColBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.SDFColliders"),
+	B.SDFColBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.SDFColliders"),
 		sizeof(FRopeSDFColliderGPU), SDFCol.Num(), SDFCol.GetData(), (uint64)SDFCol.Num() * sizeof(FRopeSDFColliderGPU));
 }
 
@@ -1092,13 +1125,13 @@ static void RopePackOverrides(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 		OvPrev.AddZeroed(1);
 		OvInv.AddZeroed(1);
 	}
-	B.OvFlagsBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.OverrideFlags"),
+	B.OvFlagsBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.OverrideFlags"),
 		sizeof(uint32), OvFlags.Num(), OvFlags.GetData(), (uint64)OvFlags.Num() * sizeof(uint32));
-	B.OvPosBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.OverridePositions"),
+	B.OvPosBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.OverridePositions"),
 		sizeof(FVector4f), OvPos.Num(), OvPos.GetData(), (uint64)OvPos.Num() * sizeof(FVector4f));
-	B.OvPrevBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.OverridePrevPositions"),
+	B.OvPrevBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.OverridePrevPositions"),
 		sizeof(FVector4f), OvPrev.Num(), OvPrev.GetData(), (uint64)OvPrev.Num() * sizeof(FVector4f));
-	B.OvInvBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.OverrideInvMass"),
+	B.OvInvBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.OverrideInvMass"),
 		sizeof(float), OvInv.Num(), OvInv.GetData(), (uint64)OvInv.Num() * sizeof(float));
 }
 
@@ -1147,7 +1180,7 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	P.PinTarget         = FVector4f((float)S.StartPinTarget.X, (float)S.StartPinTarget.Y, (float)S.StartPinTarget.Z, 0.0f);
 	ParamsArr.Add(P);
 
-	FRDGBufferRef ParamsBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.Params"),
+	FRDGBufferRef ParamsBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.Params"),
 		sizeof(FRopeGPUParamsGPU), 1, ParamsArr.GetData(), sizeof(FRopeGPUParamsGPU));
 
 	FRopeXPBDSolveCS::FParameters* PassParams = GraphBuilder.AllocParameters<FRopeXPBDSolveCS::FParameters>();
@@ -1276,13 +1309,13 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	{
 		GMask.AddZeroed(1); WCur.AddZeroed(1); WPrev.AddZeroed(1); WNext.AddZeroed(1);
 	}
-	FRDGBufferRef GMaskBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.DetectGuidedMask"),
+	FRDGBufferRef GMaskBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.DetectGuidedMask"),
 		sizeof(uint32), GMask.Num(), GMask.GetData(), (uint64)GMask.Num() * sizeof(uint32));
-	FRDGBufferRef WCurBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.DetectWhipCur"),
+	FRDGBufferRef WCurBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.DetectWhipCur"),
 		sizeof(FVector4f), WCur.Num(), WCur.GetData(), (uint64)WCur.Num() * sizeof(FVector4f));
-	FRDGBufferRef WPrevBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.DetectWhipPrev"),
+	FRDGBufferRef WPrevBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.DetectWhipPrev"),
 		sizeof(FVector4f), WPrev.Num(), WPrev.GetData(), (uint64)WPrev.Num() * sizeof(FVector4f));
-	FRDGBufferRef WNextBuf = CreateStructuredBuffer(GraphBuilder, TEXT("Rope.DetectWhipNext"),
+	FRDGBufferRef WNextBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.DetectWhipNext"),
 		sizeof(FVector4f), WNext.Num(), WNext.GetData(), (uint64)WNext.Num() * sizeof(FVector4f));
 
 	FRopeContactDetectCS::FParameters* DetectParams = GraphBuilder.AllocParameters<FRopeContactDetectCS::FParameters>();
@@ -1336,6 +1369,10 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_RunSteps);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_RunSteps);
+#if STATS
+	GRopeUploadBytesTotal = 0;   // 이번 프레임 업로드 누산 리셋(아래 RopeUploadBuffer들이 더한다).
+	GRopeUploadBytesSDF = 0;
+#endif
 	// --- Loop 1: 직전 프레임 리드백 consume — 그래프 구성 *전*에 immediate Lock으로 처리.
 	RopeConsumeReadbacks(Impl->RtRopes, *Impl->Results, Steps);
 
@@ -1412,6 +1449,33 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		// 제약)에서 처리하므로 별도 post-solve 쓰기가 없고, 이 solve 패스가 PosBuf의 마지막 쓰기다.
 		GraphBuilder.UseExternalAccessMode(B.PosRDG, ERHIAccess::SRVMask);
 	}
+
+#if STATS
+	// GPU 상주 VRAM 계측. 영속 버퍼(ConvertToExternalBuffer로 배정, 프레임 간 유지)만 합산 — 프레임 transient
+	// (colliders/params/detect RDG)는 풀 재사용이라 상주 풋프린트가 아니다. GetSize()=Desc 바이트.
+	{
+		uint64 RopeBytes = 0;
+		for (const TPair<uint32, FRopeResidentRope>& Pair : Impl->RtRopes)
+		{
+			const FRopeResidentRope& RR = Pair.Value;
+			if (RR.PosBuf.IsValid())     { RopeBytes += RR.PosBuf->GetSize(); }
+			if (RR.PrevBuf.IsValid())    { RopeBytes += RR.PrevBuf->GetSize(); }
+			if (RR.InvMassBuf.IsValid()) { RopeBytes += RR.InvMassBuf->GetSize(); }
+			if (RR.ContactBuf.IsValid()) { RopeBytes += RR.ContactBuf->GetSize(); }
+		}
+		uint64 SdfBytes = 0;
+		if (Impl->GlobalSDF.DistBuf.IsValid()) { SdfBytes += Impl->GlobalSDF.DistBuf->GetSize(); }
+		if (Impl->GlobalSDF.VolBuf.IsValid())  { SdfBytes += Impl->GlobalSDF.VolBuf->GetSize(); }
+
+		SET_MEMORY_STAT(STAT_RopeGPU_MemRopes, RopeBytes);
+		SET_MEMORY_STAT(STAT_RopeGPU_MemGlobalSDF, SdfBytes);
+		SET_MEMORY_STAT(STAT_RopeGPU_MemTotal, RopeBytes + SdfBytes);
+		SET_DWORD_STAT(STAT_RopeGPU_ResidentRopeCount, Impl->RtRopes.Num());
+		SET_DWORD_STAT(STAT_RopeGPU_SDFVolumes, Impl->GlobalSDF.CpuVol.Num());
+		SET_MEMORY_STAT(STAT_RopeGPU_UploadTotal, GRopeUploadBytesTotal);
+		SET_MEMORY_STAT(STAT_RopeGPU_UploadSDF, GRopeUploadBytesSDF);
+	}
+#endif
 }
 
 void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
