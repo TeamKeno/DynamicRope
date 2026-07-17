@@ -122,6 +122,22 @@ private:
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<URopeComponent>> Ropes;
 
+	/**
+	 * Tick 순회 재진입 가드. Prepare/Finalize 순회 중 델리게이트 핸들러(OnRopeWrapped/OnRopeReleased/
+	 * OnRopePhaseChanged)가 로프 컴포넌트를 가진 액터를 스폰/파괴하면 Register/UnregisterRope가 Ropes를
+	 * 즉시 변형해 (1) ranged-for 이터레이터 무효화(개발 빌드 assert 크래시 / Shipping 댕글링)와
+	 * (2) FrameRopeRegions 인덱스 매핑 붕괴(로프가 남의 region collider를 받음)를 일으킨다. 그래서 틱
+	 * 순회 중에는 변형을 아래 Deferred 리스트로 미루고(bTickingRopes=true), 순회가 끝난 뒤
+	 * ApplyDeferredRopeChanges에서 실제로 반영한다. 순회 루프는 IsValid 가드로 이 프레임 파괴된
+	 * (pending-kill) 로프를 건너뛴다. Deferred 리스트는 한 틱 안에서만 살고 즉시 비워지므로 raw 포인터.
+	 */
+	bool bTickingRopes = false;
+	TArray<URopeComponent*> DeferredRopeRegister;
+	TArray<URopeComponent*> DeferredRopeUnregister;
+
+	/** 틱 순회 중 미뤄둔 로프 등록/해제를 반영한다(Tick 말미, bTickingRopes=false 이후). */
+	void ApplyDeferredRopeChanges();
+
 	/** 등록된 collider provider(IRopeColliderProvider 구현 컴포넌트). GC 추적. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UActorComponent>> ColliderProviders;

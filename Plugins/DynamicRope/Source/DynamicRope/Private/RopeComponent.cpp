@@ -2129,13 +2129,23 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 void URopeComponent::AbandonActiveStateForRethrow()
 {
 	// 재던지기: 잡고 있던 wrap은 수동 해제, 진행 중 페이즈 일시 상태는 폐기, 쿨다운 없이 즉시 던진다.
-	if (WrapController.IsActive())
+	// 커밋된 wrap이었으면 해제를 알려야 한다(FinishWrapRelease와 같은 짝 맞춤) — 안 그러면
+	// OnAnyRopeReleased가 안 나가 cross-actor 대상(랙돌 등)이 로프가 풀렸는데도 영구 고착된다.
+	// mesh/본은 Release가 상태를 비우기 전에 잡고, 통지는 상태 정리 후에 쏜다(DispatchReleased 재진입 계약).
+	const USceneComponent* WrappedMesh = WrapController.State.Mesh.Get();
+	const FName WrappedBone = WrapController.State.BoneName;
+	const bool bWasWrapped = WrapController.IsActive();
+	if (bWasWrapped)
 	{
 		WrapController.Release(ERopeReleaseReason::Manual);
 	}
 	ResetKinematicVirtualBridges();
 	ResetTransientPhaseState();
 	ReleaseCooldown = 0.0f;
+	if (bWasWrapped)
+	{
+		DispatchReleased(WrappedMesh, WrappedBone, ERopeReleaseReason::Manual, /*bWasWrapped*/ true);
+	}
 }
 
 void URopeComponent::ResetChainForThrow(const FVector& HandOrigin)
