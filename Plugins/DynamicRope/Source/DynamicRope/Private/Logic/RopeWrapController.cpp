@@ -270,7 +270,12 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 		{
 			AimNode = LegEnd;
 		}
-		ChordSum += static_cast<float>((Sim.Positions[LegEnd] - Sim.Positions[LegStart]).Size());
+		// 다리 chord는 그 다리의 rest 길이로 클램프한다 — 움직이는 앵커가 다리를 스트레치시키면(세그먼트 >
+		// rest) chord가 rest를 초과해 다른 구간의 슬랙을 상쇄·은폐한다(스트레치는 팽팽함의 증거가 아니라
+		// 그 다리 하나의 사정이다). 클램프하면 chord 합의 상한이 정확히 FreeRestLen이 된다.
+		const float LegChord = static_cast<float>((Sim.Positions[LegEnd] - Sim.Positions[LegStart]).Size());
+		const float LegRest = static_cast<float>(LegStart - LegEnd) * Sim.SegmentLength;
+		ChordSum += FMath::Min(LegChord, LegRest);
 		if (LegEnd <= 0)
 		{
 			break;
@@ -297,6 +302,14 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 	// 전 체인 팽팽 관측치: 다리 chord 합 + 자유 구간 rest 길이(소비 = 컴포넌트의 EvaluateChainTautGate).
 	Out.TautChordLen = ChordSum;
 	Out.FreeRestLen = static_cast<float>(AnchorNode) * Sim.SegmentLength;
+	// 자유 구간 세그먼트 장력의 최솟값 — 팽팽함 = 장력이 손까지 전 구간 전달(어딘가 슬랙이면 0).
+	// chord 합 기하가 못 보는 지그재그 슬랙/부분 스트레치의 판별자다. 솔브 전(배열 부족)은 0으로 취급.
+	float MinT = TNumericLimits<float>::Max();
+	for (int32 i = 0; i < AnchorNode; ++i)
+	{
+		MinT = FMath::Min(MinT, Sim.SegmentTension.IsValidIndex(i) ? Sim.SegmentTension[i] : 0.0f);
+	}
+	Out.MinFreeTension = (AnchorNode > 0) ? MinT : 0.0f;
 	return true;
 }
 

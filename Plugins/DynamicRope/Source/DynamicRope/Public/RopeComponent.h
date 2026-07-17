@@ -385,10 +385,11 @@ public:
 	bool IsPullTaut() const { return PullDrive.bPullTaut; }
 
 	/**
-	 * 이번 프레임 전 체인이 기하적으로 팽팽한가 — 코너-다리 chord 합 vs 자유 구간 rest 길이
-	 * (HoldConfig.TautSlackRatio, 히스테리시스 포함)의 순수 기하 판정으로, 장력 임계와 무관하다
-	 * (IsPullTaut = 이 값 ∧ 장력 임계). 견인(테더 + 능동 Pull)의 공용 선행 조건 — 테더 overshoot는 슬랙
-	 * 체인에서도 sub-leg 스트레치로 >0일 수 있으므로, overshoot 소비자는 이 게이트를 함께 봐야 한다.
+	 * 이번 프레임 전 체인이 팽팽한가 — 두 관측치의 AND(둘 다 히스테리시스 포함): 기하(코너-다리 chord 합
+	 * vs 자유 구간 rest 길이, HoldConfig.TautSlackRatio — 완만한 처짐 거름) ∧ 최소 전달 장력(자유 구간
+	 * 세그먼트 장력 최솟값 vs HoldConfig.TautMinTension — 지그재그 구김/부분 스트레치 거름). 견인(테더 +
+	 * 능동 Pull)의 공용 선행 조건 — 테더 overshoot는 슬랙 체인에서도 sub-leg 스트레치로 >0일 수 있으므로,
+	 * overshoot 소비자는 이 게이트를 함께 봐야 한다. IsPullTaut = 이 값 ∧ 앵커 인접 장력 임계.
 	 * Wrapped 동안 매 프레임 갱신되며 그 외 phase는 false.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")

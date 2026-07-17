@@ -612,12 +612,23 @@ struct FRopePullSample
 	 * 앵커→손 코너-다리 chord 합(cm). walk를 첫 코너에서 멈추지 않고 손(노드 0)까지 이어 각 다리의 직선
 	 * 거리를 누적한 값 — FreeRestLen과의 비교가 "전 체인 팽팽" 판정의 관측치다(RopeTraction::
 	 * EvaluateChainTautGate). 처짐은 chord를 rest보다 짧게 만들고, 코너에 걸린 팽팽한 로프는 다리별 chord가
-	 * rest에 근접해 팽팽으로 인정된다.
+	 * rest에 근접해 팽팽으로 인정된다. **다리별 chord는 그 다리의 rest 길이로 클램프**한다 — 움직이는
+	 * 앵커가 앵커 쪽 다리를 스트레치시키면(세그먼트 > rest) chord가 rest를 초과해, 나머지 로프의 슬랙을
+	 * 상쇄·은폐하는 것을 막는다(PIE 실측 620/600cm 사례). 단 지그재그로 구겨진 슬랙은 다리가 잘게 쪼개져
+	 * 여전히 rest에 붙는 맹점이 있다 — 그건 MinFreeTension 게이트가 잡는다.
 	 */
 	float   TautChordLen = 0.0f;
 
 	/** 자유 구간(손~앵커) rest 길이(cm) = AnchorNode × SegmentLength(되감기 축소 자동 반영). */
 	float   FreeRestLen = 0.0f;
+
+	/**
+	 * 자유 구간(손~앵커) 세그먼트 장력의 **최솟값**(FRopeSimState::SegmentTension 단위). 팽팽한 로프는
+	 * 장력이 앵커에서 손까지 전 구간으로 전달되므로 최솟값이 양수고, 어딘가 한 구간이라도 슬랙이면
+	 * (압축/구김 — XPBD 장력은 당김만 계상) 0이다 — chord 합 기하가 못 보는 지그재그 슬랙/부분 스트레치를
+	 * 이걸로 판별한다. 아직 솔브 전(배열 비어 있음)이면 0(GPU 로프는 1~2프레임 지연 미러).
+	 */
+	float   MinFreeTension = 0.0f;
 };
 
 /** rope 중심선: 파티클의 체인. solver / 로직 / 렌더의 단일 진실 공급원(single source of truth). */
@@ -1346,6 +1357,24 @@ struct FRopeHoldConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "1.0"))
 	float TautSlackReleaseScale = 2.0f;
+
+	/**
+	 * 전 체인 팽팽 판정의 최소 전달 장력. 자유 구간(손~앵커) 세그먼트 장력의 **최솟값**이 이 값을 넘어야
+	 * 팽팽으로 본다 — 팽팽함의 물리적 정의는 "장력이 앵커에서 손까지 전 구간 전달"이라, 어딘가 한 구간이라도
+	 * 슬랙이면(장력 0) 게이트가 닫힌다. chord 합 기하(TautSlackRatio)가 못 보는 **지그재그로 구겨진 슬랙**
+	 * (다리가 잘게 쪼개져 chord 합이 rest에 붙음)과 **부분 스트레치**(앵커 쪽 다리만 늘어나 슬랙을 은폐)를
+	 * 잡는다. 0(기본) = 전 구간 장력이 조금이라도 있으면 통과(">~0"). 기하 게이트와 AND — 완만한 처짐(자중
+	 * 장력은 전 구간 양수)은 기하가, 구김/부분 스트레치는 이게 거른다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	float TautMinTension = 0.0f;
+
+	/**
+	 * 최소 전달 장력 판정의 히스테리시스 비율 [0..1] — ActivePullTautReleaseRatio와 같은 방식(일단 팽팽이면
+	 * TautMinTension×이 값 아래로 떨어져야 해제). TautMinTension이 0이면 무의미. 1 = 히스테리시스 없음.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TautMinTensionReleaseRatio = 0.5f;
 
 	/**
 	 * 능동 Pull의 **견인 목표 속도**(cm/s). 능동 Pull은 대상을 이 속도로 당김 방향을 따라 몰되(장력 상한 PullForce

@@ -517,16 +517,16 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				OvershootColor = (S.TetherOvershoot > S.DistanceReleaseSlack) ? TEXT("{red}")
 					: (S.TetherOvershoot > S.DistanceReleaseSlack * 0.8f) ? TEXT("{yellow}") : TEXT("{white}");
 			}
-			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f taut=%s{white} chain=%s{white}(%.0f/%.0fcm) dir=%s tether=%s%.0fcm{white}(x%.2f, release=%.0f) active=%.0f"),
+			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f taut=%s{white} chain=%s{white}(%.0f/%.0fcm, minT=%.0f) dir=%s tether=%s%.0fcm{white}(x%.2f, release=%.0f) active=%.0f"),
 				S.PullTension, S.bPullTaut ? TEXT("{green}Y") : TEXT("{grey}N"),
-				S.bChainTaut ? TEXT("{green}Y") : TEXT("{grey}N"), S.TautChordLen, S.FreeRestLen,
+				S.bChainTaut ? TEXT("{green}Y") : TEXT("{grey}N"), S.TautChordLen, S.FreeRestLen, S.MinFreeTension,
 				*S.PullDirection.ToCompactString(), OvershootColor, S.TetherOvershoot,
 				S.TetherResponse, S.DistanceReleaseSlack, S.ActivePullForce));
 		}
 		else if (S.bPullValid)
 		{
-			AddTextLine(FString::Printf(TEXT("    {grey}pull slack (tension 0, chain=%s %.0f/%.0fcm, tether=%.0fcm x%.2f)"),
-				S.bChainTaut ? TEXT("Y") : TEXT("N"), S.TautChordLen, S.FreeRestLen,
+			AddTextLine(FString::Printf(TEXT("    {grey}pull slack (tension 0, chain=%s %.0f/%.0fcm minT=%.0f, tether=%.0fcm x%.2f)"),
+				S.bChainTaut ? TEXT("Y") : TEXT("N"), S.TautChordLen, S.FreeRestLen, S.MinFreeTension,
 				S.TetherOvershoot, S.TetherResponse));
 		}
 		else

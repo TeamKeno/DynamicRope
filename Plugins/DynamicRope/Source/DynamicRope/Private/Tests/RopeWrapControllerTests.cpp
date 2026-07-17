@@ -88,9 +88,9 @@ bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 전 체인 팽팽 관측치(ComputePull): 코너-다리 chord 합(TautChordLen)과 자유 구간 rest 길이(FreeRestLen)가
-// "줄이 다 펴졌는가"를 기하로 구분하는가 — 팽팽 직선/슬랙(압축)/코너에 걸린 팽팽/앵커 다리만 스트레치된
-// 슬랙(움직이는 대상 회귀 케이스) 네 가지.
+// 전 체인 팽팽 관측치(ComputePull): 코너-다리 chord 합(TautChordLen, 다리별 rest 클램프)·자유 구간 rest
+// 길이(FreeRestLen)·최소 전달 장력(MinFreeTension)이 "줄이 다 펴졌는가"를 구분하는가 — 팽팽 직선/슬랙(압축)/
+// 코너에 걸린 팽팽/앵커 다리만 스트레치된 슬랙(움직이는 대상 회귀 케이스) 네 가지.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrapComputePullChainTautTest,
 	"DynamicRope.Wrap.ComputePullChainTautObservables",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -110,11 +110,16 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 	// ① 곧게 편(팽팽) 로프: 앵커 5, SegmentLength 20 → rest = 100, chord 합 = |P5-P0| = 100.
 	{
 		FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
+		// 최소 전달 장력은 자유 구간(0..앵커-1)만 본다 — 앵커 너머 세그먼트의 낮은 장력은 무시.
+		Sim.SegmentTension.Init(500.0f, Sim.Num() - 1);
+		Sim.SegmentTension[2] = 50.0f; // 자유 구간 최솟값
+		Sim.SegmentTension[5] = 1.0f;  // 앵커 너머 — 반영되면 안 됨
 		FRopeWrapController Wrap = MakeWrap(5);
 		FRopePullSample Pull;
 		TestTrue(TEXT("straight ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
 		TestEqual(TEXT("straight rest length"), Pull.FreeRestLen, 100.0f, 0.1f);
 		TestEqual(TEXT("straight chord sum equals rest (taut)"), Pull.TautChordLen, 100.0f, 0.1f);
+		TestEqual(TEXT("min transmitted tension reads the hand-side span only"), Pull.MinFreeTension, 50.0f, 0.1f);
 	}
 
 	// ② 압축(슬랙) 로프: 노드 간격이 rest(20)의 절반(10)인 직선 — 굴곡 없이도 chord 합이 rest의 절반.
@@ -149,11 +154,15 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("bent ComputePull succeeds"), Wrap.ComputePull(Bent, BendDeg, Pull));
 		TestEqual(TEXT("bent rest length"), Pull.FreeRestLen, 80.0f, 0.1f);
 		TestEqual(TEXT("bent leg chords sum to rest (taut around a corner)"), Pull.TautChordLen, 80.0f, 0.1f);
+		// 주의: 자유 공중에서 L자로 접힌 슬랙도 기하는 동일하게 rest로 읽는다(맹점) — 벽 코너(전 구간 장력)와
+		// 공중 구김(어딘가 0)의 구분은 MinFreeTension의 몫. 여기선 솔브 전(배열 비어 있음) → 0.
+		TestEqual(TEXT("bent MinFreeTension is zero without solved tensions"), Pull.MinFreeTension, 0.0f, 0.01f);
 	}
 
 	// ④ 회귀 케이스(움직이는 대상): 앵커 인접 다리(5→3)만 직선으로 스트레치(세그먼트 27 > rest 20)되고
-	// 꼬리(3→0)는 뭉쳐 처짐. sub-leg만 보면 팽팽해 보이지만 전 체인 chord 합은 rest에 한참 못 미친다 —
-	// 늘어진 줄이 끌려가던 증상의 판별이 바로 이 차이다.
+	// 꼬리(3→0)는 뭉쳐 처짐. sub-leg만 보면 팽팽해 보이지만 ①스트레치 다리 chord(54)는 다리 rest(40)로
+	// 클램프되고(스트레치가 슬랙을 은폐 못 함) ②구김 구간 장력 0이 최소 전달 장력을 0으로 만든다 —
+	// 늘어진 줄이 끌려가던 증상의 판별이 바로 이 두 관측치다.
 	{
 		FRopeSimState Sim = RopeTest::MakeStraightRope(6, 100.0f);
 		Sim.Positions = {
@@ -161,14 +170,18 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 			FVector(46, 0, 0), FVector(73, 0, 0), FVector(100, 0, 0),
 		};
 		Sim.PrevPositions = Sim.Positions;
+		// 앵커 쪽 스트레치 구간만 장력, 구김 구간(0~2)은 0.
+		Sim.SegmentTension = { 0.0f, 0.0f, 0.0f, 800.0f, 900.0f };
 		FRopeWrapController Wrap = MakeWrap(5);
 		FRopePullSample Pull;
 		TestTrue(TEXT("stretched-leg ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
 		TestEqual(TEXT("stretched-leg rest length"), Pull.FreeRestLen, 100.0f, 0.1f);
 		// 첫 다리는 꼬리 처짐 직전(노드 3)에서 멈춘다 — 방향/조준은 종전 산출 그대로.
 		TestEqual(TEXT("first leg still aims at the bend"), Pull.AimNode, 3);
+		// 클램프 후 합 ≈ 40(클램프) + 22.8(꼬리) = 62.8 — 스트레치를 rest로 계상하던 90 미만 검사에서 강화.
 		TestTrue(FString::Printf(TEXT("chord sum %.1f stays well below rest 100 (slack chain)"), Pull.TautChordLen),
-			Pull.TautChordLen < 90.0f);
+			Pull.TautChordLen < 70.0f);
+		TestEqual(TEXT("crumpled span zeroes the min transmitted tension"), Pull.MinFreeTension, 0.0f, 0.01f);
 	}
 	return true;
 }
