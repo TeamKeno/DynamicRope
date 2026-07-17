@@ -12,6 +12,7 @@ DEFINE_LOG_CATEGORY(LogRopeCollision);
 #if WITH_GAMEPLAY_DEBUGGER
 #include "GameplayDebugger.h"
 #include "Debug/GameplayDebuggerCategory_Rope.h"
+#include "Debug/GameplayDebuggerCategory_RopePerf.h"
 #endif
 
 #define LOCTEXT_NAMESPACE "FDynamicRopeModule"
@@ -25,6 +26,10 @@ void FDynamicRopeModule::StartupModule()
 	GameplayDebugger.RegisterCategory(TEXT("Rope"),
 		IGameplayDebugger::FOnGetCategory::CreateStatic(&FGameplayDebuggerCategory_Rope::MakeInstance),
 		EGameplayDebuggerCategoryState::EnabledInGameAndSimulate);
+	// 월드 전역 로프 perf/스로틀 개관(별도 카테고리). 기본은 꺼둔다 — 필요할 때 토글.
+	GameplayDebugger.RegisterCategory(TEXT("RopePerf"),
+		IGameplayDebugger::FOnGetCategory::CreateStatic(&FGameplayDebuggerCategory_RopePerf::MakeInstance),
+		EGameplayDebuggerCategoryState::Disabled);
 	GameplayDebugger.NotifyCategoriesChanged();
 	UE_LOG(LogDynamicRope, Verbose, TEXT("Registered GameplayDebugger category 'Rope'."));
 #endif
@@ -38,6 +43,7 @@ void FDynamicRopeModule::ShutdownModule()
 	if (IGameplayDebugger::IsAvailable())
 	{
 		IGameplayDebugger::Get().UnregisterCategory(TEXT("Rope"));
+		IGameplayDebugger::Get().UnregisterCategory(TEXT("RopePerf"));
 	}
 #endif
 	UE_LOG(LogDynamicRope, Log, TEXT("DynamicRope runtime module shut down."));
