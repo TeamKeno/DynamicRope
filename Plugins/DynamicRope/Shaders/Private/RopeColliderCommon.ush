@@ -171,10 +171,17 @@ float3 RopeSDFGradient(FRopeSDFVolume Vol, float3 LocalPos)
 	const float Hx = (Vol.ResX > 1) ? (Sz.x / (Vol.ResX - 1)) : 1.0f;
 	const float Hy = (Vol.ResY > 1) ? (Sz.y / (Vol.ResY - 1)) : 1.0f;
 	const float Hz = (Vol.ResZ > 1) ? (Sz.z / (Vol.ResZ - 1)) : 1.0f;
+	const float3 Mx = Vol.LocalMin.xyz + Sz;
 	const float C  = RopeSDFTrilinear(Vol, LocalPos);
-	const float Dx = RopeSDFTrilinear(Vol, LocalPos + float3(Hx,0,0)) - C;
-	const float Dy = RopeSDFTrilinear(Vol, LocalPos + float3(0,Hy,0)) - C;
-	const float Dz = RopeSDFTrilinear(Vol, LocalPos + float3(0,0,Hz)) - C;
+	// 축당 순방향 차분. +H 프로브가 Max 경계 밖이면(클램프 → 축 차분 0 축퇴, 경계 법선 소실) 후방 차분
+	// 으로 대체(#4 — 절단면 밖 접선 법선 방지). CPU SampleGradient 미러.
+	float Dx, Dy, Dz;
+	if (LocalPos.x + Hx <= Mx.x) { Dx = RopeSDFTrilinear(Vol, LocalPos + float3(Hx,0,0)) - C; }
+	else                         { Dx = C - RopeSDFTrilinear(Vol, LocalPos - float3(Hx,0,0)); }
+	if (LocalPos.y + Hy <= Mx.y) { Dy = RopeSDFTrilinear(Vol, LocalPos + float3(0,Hy,0)) - C; }
+	else                         { Dy = C - RopeSDFTrilinear(Vol, LocalPos - float3(0,Hy,0)); }
+	if (LocalPos.z + Hz <= Mx.z) { Dz = RopeSDFTrilinear(Vol, LocalPos + float3(0,0,Hz)) - C; }
+	else                         { Dz = C - RopeSDFTrilinear(Vol, LocalPos - float3(0,0,Hz)); }
 	const float3 Grad = float3(Dx / Hx, Dy / Hy, Dz / Hz);
 	const float Len = length(Grad);
 	return (Len > 1e-6f) ? (Grad / Len) : float3(0.0f, 0.0f, 1.0f);
@@ -347,12 +354,17 @@ bool RopeQuerySDFWorld(FRopeSDFCollider Col, FRopeSDFVolume Vol, float3 P, float
 	const float3 Scl = Col.Scale.xyz;
 	const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
 	OutLp = RopeQuatRotate(float4(-Col.Rotation.xyz, Col.Rotation.w), P - Col.Translation.xyz) * InvScale;
+	// 로컬(베이크) 거리 ↔ 월드 환산(#3): 로컬 cm로 질의하고 결과를 월드로 되돌린다. 균일 스케일 가정
+	// (스케일 1이면 동작 불변). CPU FRopeSDFCollider::Query와 동일.
+	const float ScaleScalar = max(max(abs(Scl.x), abs(Scl.y)), abs(Scl.z));
+	const float LocalNodeR  = NodeR / max(ScaleScalar, 1e-6f);
 	float3 NLocal;
-	if (!RopeQuerySDFLocal(Vol, OutLp, NodeR, OutDist, NLocal))
+	if (!RopeQuerySDFLocal(Vol, OutLp, LocalNodeR, OutDist, NLocal))
 	{
 		OutNWorld = float3(0.0f, 0.0f, 1.0f);
 		return false;
 	}
+	OutDist *= ScaleScalar; // 로컬 cm → 월드 cm
 	OutNWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal));
 	return true;
 }

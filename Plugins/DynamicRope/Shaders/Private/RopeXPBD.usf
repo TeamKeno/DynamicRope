@@ -247,6 +247,10 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 		const float3 TrE  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A1);
 		const float3 Scl      = Col.Scale.xyz;
 		const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
+		// 로컬(베이크) 거리 ↔ 월드 환산(#3). L0/L1/SDF는 로컬 cm, NodeR/Pen은 월드. 균일 스케일 가정
+		// (스케일 1이면 동작 불변). CPU FRopeSDFCollider::QuerySwept와 동일.
+		const float  ScaleScalar = max(max(abs(Scl.x), abs(Scl.y)), abs(Scl.z));
+		const float  LocalNodeR  = NodeR / max(ScaleScalar, 1e-6f);
 
 		// 노드 substep 경로를 collider 로컬 상대 프레임으로(시작=시작 sub-포즈, 끝=끝 sub-포즈).
 		// 한 세그먼트에 노드+collider 상대 운동을 모두 담는다. InvTransform=(qInv*(P-T))/Scale.
@@ -260,12 +264,12 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 		// BUGFIX: 끝점만 보면 관통(L0 안쪽 → L1 반대편 바깥)도 분리로 오판해 몸을 통과한다. L0 바깥
 		// gradient에 대한 변위가 양수일 때만 분리로 인정 → 안쪽(관통)이면 아래 sweep이 첫 접촉에서 막는다.
 		{
-			const float3 BMn = Vol.LocalMin.xyz - NodeR;
-			const float3 BMx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + NodeR;
-			const bool StartIn = all(L0 >= BMn) && all(L0 <= BMx) && (RopeSDFTrilinear(Vol, L0) < NodeR);
+			const float3 BMn = Vol.LocalMin.xyz - LocalNodeR;
+			const float3 BMx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + LocalNodeR;
+			const bool StartIn = all(L0 >= BMn) && all(L0 <= BMx) && (RopeSDFTrilinear(Vol, L0) < LocalNodeR);
 			if (StartIn)
 			{
-				const bool EndOut = any(L1 < BMn) || any(L1 > BMx) || (RopeSDFTrilinear(Vol, L1) >= NodeR);
+				const bool EndOut = any(L1 < BMn) || any(L1 > BMx) || (RopeSDFTrilinear(Vol, L1) >= LocalNodeR);
 				if (EndOut)
 				{
 					// 바깥 방향 단위(로컬)
@@ -282,11 +286,11 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 			const float3 Lp = lerp(L0, L1, T);
 			// 밴드 컬 + trilinear + gradient(침투 시) — 공용 로컬 점질의.
 			float Dist; float3 NLocal;
-			if (RopeQuerySDFLocal(Vol, Lp, NodeR, Dist, NLocal))
+			if (RopeQuerySDFLocal(Vol, Lp, LocalNodeR, Dist, NLocal))
 			{
 				// 끝 sub-포즈 기준 월드 법선
 				const float3 NWorld = normalize(RopeQuatRotate(RotE, NLocal));
-				const float  Pen = NodeR - Dist;
+				const float  Pen = NodeR - Dist * ScaleScalar; // 로컬 거리 → 월드 침투(#3)
 				// 끝 sub-포즈 기준 월드 접촉점(노드 배치). World = Rot*(Scale*Local) + Trans.
 				const float3 HitWorld = RopeQuatRotate(RotE, Lp * Scl) + TrE;
 				gPos[i] = HitWorld + NWorld * Pen;

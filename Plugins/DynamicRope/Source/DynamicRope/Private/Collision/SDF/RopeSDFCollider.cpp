@@ -38,19 +38,26 @@ FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) 
 		return Contact;
 	}
 
-	// 월드 → 본 로컬 공간. grid는 본 로컬에 구워져 있다.
+	// 월드 → 본 로컬 공간. grid는 본 로컬(스케일 없는 ref 포즈)에 구워져 있다.
 	const FVector LocalPos = BoneToWorld.InverseTransformPosition(WorldPos);
 
-	// 좁은밴드 밖이면(노드 반지름 여유 포함) 빠르게 컬링.
-	if (!Volume->LocalBounds.ExpandBy(NodeRadius).IsInsideOrOn(LocalPos))
+	// 로컬(베이크) 거리 ↔ 월드 거리 환산 스케일(#3). SDF 거리는 스케일 없는 로컬 cm인데 NodeRadius/
+	// Penetration/SurfacePoint는 월드 cm다 — 스케일된 메시에서 접촉 밴드/푸시아웃이 스케일 배수만큼 어긋난다.
+	// 균일 스케일 가정(비균일은 최대 성분 근사 — 캡슐 provider의 GetScaledRadius와 정합). 스케일 1이면
+	// LocalNodeRadius==NodeRadius·WorldDist==Dist라 동작 불변.
+	const float LocalToWorldScale = FMath::Max(KINDA_SMALL_NUMBER, static_cast<float>(BoneToWorld.GetScale3D().GetAbsMax()));
+	const float LocalNodeRadius = NodeRadius / LocalToWorldScale;
+
+	// 좁은밴드 밖이면(노드 반지름 여유 포함) 빠르게 컬링(월드 반경을 로컬로 환산).
+	if (!Volume->LocalBounds.ExpandBy(LocalNodeRadius).IsInsideOrOn(LocalPos))
 	{
 		return Contact;
 	}
 
-	// signed distance(바깥 +). 샘플링은 시각화와 공유하는 단일 진실 공급원(RopeSDFSampler)에 위임한다.
+	// signed distance(바깥 +, 로컬 cm). 샘플링은 시각화와 공유하는 단일 진실 공급원(RopeSDFSampler)에 위임한다.
 	// 노드 구체가 표면에 못 미치면 gradient는 계산조차 않고 빠진다(Query는 node×substep×iteration마다 호출).
 	const float Dist = RopeSDFSampler::SampleTrilinear(*Volume, LocalPos);
-	if (Dist >= NodeRadius)
+	if (Dist >= LocalNodeRadius)
 	{
 		return Contact;
 	}
@@ -58,11 +65,12 @@ FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) 
 	// 바깥쪽 단위 법선(샘플러가 축퇴 시 +Z로 폴백). 본 로컬 → 월드(스케일 무시, 단위 유지).
 	const FVector NLocal = RopeSDFSampler::SampleGradient(*Volume, LocalPos);
 
+	const float WorldDist = Dist * LocalToWorldScale;
 	Contact.bHit = true;
 	Contact.Normal = BoneToWorld.TransformVectorNoScale(NLocal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-	// Penetration = query 반지름 기준 겹침 깊이(양수). SurfacePoint는 표면 위 최근접점(보조/디버그).
-	Contact.Penetration = NodeRadius - Dist;
-	Contact.SurfacePoint = WorldPos - Contact.Normal * Dist;
+	// Penetration = query 반지름 기준 겹침 깊이(양수, 월드). SurfacePoint는 표면 위 최근접점(보조/디버그).
+	Contact.Penetration = NodeRadius - WorldDist;
+	Contact.SurfacePoint = WorldPos - Contact.Normal * WorldDist;
 	// 본 귀속(접촉 집계의 dominant bone 입력 — 비-None 필수)과 본을 소유한 메시(액터 간 wrap follow).
 	Contact.Bone = Bone;
 	Contact.SourceMesh = SourceMesh;
@@ -195,6 +203,11 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	const FTransform& PoseStart = Q.bUseSubPose ? Q.SubPoseStart : BoneToWorld;
 	const FTransform& PoseEnd   = Q.bUseSubPose ? Q.SubPoseEnd   : BoneToWorld;
 
+	// 로컬(베이크) 거리 ↔ 월드 환산 스케일(#3). L0/L1은 스케일 없는 본 로컬이고 Q.NodeRadius/Penetration/
+	// SurfacePoint는 월드다. 접촉 프레임(PoseEnd)의 스케일을 쓴다. 균일 스케일 가정(스케일 1이면 동작 불변).
+	const float LocalToWorldScale = FMath::Max(KINDA_SMALL_NUMBER, static_cast<float>(PoseEnd.GetScale3D().GetAbsMax()));
+	const float LocalNodeRadius = Q.NodeRadius / LocalToWorldScale;
+
 	// 노드 substep 경로를 collider 로컬 상대 프레임으로: 시작은 시작 sub-포즈, 끝은 끝 sub-포즈 기준.
 	// 이 하나의 로컬 세그먼트가 노드 모션 + collider 모션(상대 운동)을 모두 담는다 → 빠른 본이 노드를
 	// 추월해도 로컬에서는 노드가 표면을 가로지르므로 첫 접촉(앞면)에서 잡힌다.
@@ -206,7 +219,7 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
 
-	const FBox Band = Volume->LocalBounds.ExpandBy(Q.NodeRadius);
+	const FBox Band = Volume->LocalBounds.ExpandBy(LocalNodeRadius);
 
 	// 분리(separation): 노드가 표면에 접촉한 채 시작했고(L0 밴드 내·침투) substep 동안 표면 *바깥쪽*으로
 	// 빠져나가는 중이면 재-핀하지 않고 놔준다. 안 그러면 접촉 노드가 매 substep 시작점으로 다시 핀돼 영영
@@ -217,10 +230,10 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	// 통과한다(고장력 시 발생). 진짜 분리는 노드가 표면 바깥 법선 방향으로 움직일 때뿐이므로, L0의 바깥
 	// gradient에 대해 상대 변위가 양수인 경우로 한정한다. 안쪽(관통)이면 early-out하지 않고 아래 sweep이
 	// 첫 접촉에서 잡아 표면 밖으로 민다(= 관통 차단).
-	const bool bStartInContact = Band.IsInsideOrOn(L0) && RopeSDFSampler::SampleTrilinear(*Volume, L0) < Q.NodeRadius;
+	const bool bStartInContact = Band.IsInsideOrOn(L0) && RopeSDFSampler::SampleTrilinear(*Volume, L0) < LocalNodeRadius;
 	if (bStartInContact)
 	{
-		const bool bEndOutside = !Band.IsInsideOrOn(L1) || RopeSDFSampler::SampleTrilinear(*Volume, L1) >= Q.NodeRadius;
+		const bool bEndOutside = !Band.IsInsideOrOn(L1) || RopeSDFSampler::SampleTrilinear(*Volume, L1) >= LocalNodeRadius;
 		if (bEndOutside)
 		{
 			// L0 바깥 법선(gradient)에 대한 상대 변위 부호로 "진짜 분리 vs 관통"을 가른다.
@@ -244,7 +257,7 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		}
 
 		const float Dist = RopeSDFSampler::SampleTrilinear(*Volume, Lp);
-		if (Dist >= Q.NodeRadius)
+		if (Dist >= LocalNodeRadius)
 		{
 			// 아직 표면에 못 미침.
 			continue;
@@ -252,12 +265,13 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 
 		// 첫 접촉. 법선/위치는 substep 끝 포즈(노드가 도달하는 현재 프레임) 기준으로 환산한다.
 		const FVector NLocal = RopeSDFSampler::SampleGradient(*Volume, Lp);
+		const float WorldDist = Dist * LocalToWorldScale;
 		Contact.bHit = true;
 		Contact.Normal = PoseEnd.TransformVectorNoScale(NLocal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-		Contact.Penetration = Q.NodeRadius - Dist;
+		Contact.Penetration = Q.NodeRadius - WorldDist;
 		// 노드 배치 기준점(현재 포즈 월드).
 		OutHitWorldPos = PoseEnd.TransformPosition(Lp);
-		Contact.SurfacePoint = OutHitWorldPos - Contact.Normal * Dist;
+		Contact.SurfacePoint = OutHitWorldPos - Contact.Normal * WorldDist;
 		Contact.Bone = Bone;
 		Contact.SourceMesh = SourceMesh;
 

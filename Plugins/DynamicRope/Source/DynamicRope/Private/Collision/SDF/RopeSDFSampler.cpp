@@ -81,12 +81,24 @@ FVector RopeSDFSampler::SampleGradient(const FRopeBoneSDFVolume& V, const FVecto
 
 	// Forward difference(center + 축당 1샘플 = 4) — 기존 central(6)보다 trilinear 2회 적다(핫패스 비용↓).
 	// SDF 내부는 단조로워 push-out 법선 방향엔 충분(완전 대칭 정확도는 약간 손해).
-	const float C  = SampleTrilinear(V, LocalPos);
-	const float Dx = SampleTrilinear(V, LocalPos + FVector(Hx, 0, 0)) - C;
-	const float Dy = SampleTrilinear(V, LocalPos + FVector(0, Hy, 0)) - C;
-	const float Dz = SampleTrilinear(V, LocalPos + FVector(0, 0, Hz)) - C;
+	// 단 +H 프로브가 그리드 Max 경계 밖이면 SampleTrilinear가 경계면으로 클램프돼 그 축 차분이 0으로
+	// 축퇴한다(경계 법선 성분 소실 → 접선 방향 법선). 절단면(본 이음매) 밖에서 노드가 옆으로 밀리는 #4를
+	// 막기 위해, 그 축만 후방 차분으로 대체한다(내부 점은 종전 순방향 그대로 — 핫패스 4샘플 유지).
+	const float C = SampleTrilinear(V, LocalPos);
+	const auto AxisDeriv = [&V, &LocalPos, C](int32 Axis, double H) -> float
+	{
+		FVector Pp = LocalPos;
+		Pp[Axis] += H;
+		if (Pp[Axis] <= V.LocalBounds.Max[Axis])
+		{
+			return static_cast<float>((SampleTrilinear(V, Pp) - C) / H);
+		}
+		FVector Pm = LocalPos;
+		Pm[Axis] -= H;
+		return static_cast<float>((C - SampleTrilinear(V, Pm)) / H);
+	};
 
-	const FVector Grad(Dx / Hx, Dy / Hy, Dz / Hz);
+	const FVector Grad(AxisDeriv(0, Hx), AxisDeriv(1, Hy), AxisDeriv(2, Hz));
 	const FVector N = Grad.GetSafeNormal();
 	return N.IsNearlyZero() ? FVector::UpVector : N;
 }
