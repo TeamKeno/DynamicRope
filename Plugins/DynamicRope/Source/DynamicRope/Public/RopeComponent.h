@@ -792,6 +792,11 @@ private:
 	// 모든 release 트리거의 공용 마무리(페이즈 전환+노드 반환+일시 상태 폐기+쿨다운+이벤트).
 	void FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog);
 
+	// 성립 전(Captured~Wrapping) 이탈의 공용 마무리: Flight 전이 + 일시 상태 폐기 후에 per-instance release를
+	// 통지한다(정리 후 통지 — DispatchReleased 재진입 계약). dismiss/stall/wrapping-abort 4곳 공용. Bone은
+	// 호출 시점(Reset 전)에 값으로 캡처된다. 커밋 전이라 bWasWrapped=false(중앙 신호 없이 per-instance만).
+	void FinishPreCommitReleaseToFlight(FName Bone, const TCHAR* PhaseLog);
+
 	// ReleaseWrap/CutRope 공용 본체: 진행 중인 잡기/감기를 주어진 사유로 해제(본 귀속 해석 포함).
 	void ReleaseWrapAs(ERopeReleaseReason Reason);
 

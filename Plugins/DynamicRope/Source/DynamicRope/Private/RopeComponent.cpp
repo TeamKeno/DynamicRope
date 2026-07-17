@@ -780,6 +780,18 @@ void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, co
 	}
 }
 
+void URopeComponent::FinishPreCommitReleaseToFlight(FName Bone, const TCHAR* PhaseLog)
+{
+	// 성립 전(Captured~Wrapping) 이탈의 공용 마무리 — 정리(Flight 전이 + 일시 상태 폐기) 후에 통지한다.
+	// 정리 전에 쏘면(구 버그) 아직 Contacting인 게이트를 핸들러의 ReleaseWrap()이 통과해 이중 release +
+	// 핸들러가 확정한 Releasing을 곧바로 이 SetPhase(Flight)가 덮어썼다(AbortGuidedThrow와 같은 계약으로 통일).
+	// Bone은 인자로 값 캡처되어 ResetTransientPhaseState(트래커 비움) 이후에도 유효하다. 커밋 전이라
+	// bWasWrapped=false — 중앙 신호(OnAnyRopeReleased) 없이 per-instance만(다른 로프가 감은 대상 오복구 방지).
+	SetPhase(ERopePhase::Flight, PhaseLog);
+	ResetTransientPhaseState();
+	DispatchReleased(nullptr, Bone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
+}
+
 void URopeComponent::DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped)
 {
 	// per-instance: Captured/Wrapped로 시작된 engagement의 종료를 항상 알린다(짝 맞춤).
@@ -2701,10 +2713,8 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 			*GetName(), Candidates.Num(), *ContactTracker.CandidateBone.ToString(),
 			ContactTracker.CandidateNodes.Num(), ContactTracker.DwellTime,
 			DetectConfig.WrapDecisionTime, ContactingElapsed, SimFrame.FrameColliders.Num());
-		// Captured 짝 맞춤: 성립 전 이탈이라 per-instance만(중앙 신호는 커밋된 wrap 전용). 본 이름은 리셋 전에 읽는다.
-		DispatchReleased(nullptr, ContactTracker.CandidateBone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
-		SetPhase(ERopePhase::Flight, TEXT("contact lost before wrapping"));
-		ResetTransientPhaseState();
+		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight: 재진입 계약).
+		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone, TEXT("contact lost before wrapping"));
 		return;
 	}
 
@@ -2730,11 +2740,10 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 			*GetName(), Candidates.Num(), *ContactTracker.CandidateBone.ToString(),
 			ContactTracker.CandidateNodes.Num(), ContactTracker.Targets.Num(),
 			ContactTracker.DwellTime, DetectConfig.WrapDecisionTime, ContactingElapsed, StallTimeout);
-		// Captured 짝 맞춤(성립 전 이탈, per-instance만). 본 이름은 리셋 전에 읽는다.
-		DispatchReleased(nullptr, ContactTracker.CandidateBone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
-		SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("contacting stalled %.2fs (dwell %.2fs < %.2fs)"),
-			ContactingElapsed, ContactTracker.DwellTime, DetectConfig.WrapDecisionTime));
-		ResetTransientPhaseState();
+		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight).
+		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone,
+			*FString::Printf(TEXT("contacting stalled %.2fs (dwell %.2fs < %.2fs)"),
+				ContactingElapsed, ContactTracker.DwellTime, DetectConfig.WrapDecisionTime));
 	}
 }
 
@@ -2937,10 +2946,8 @@ void URopeComponent::StartWrappingFromContacting()
 			PendingWrapSeed.Latched.Num(), PendingWrapSeed.Anchors.Num(),
 			*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num(),
 			ContactTracker.DwellTime, ContactingElapsed, Sim.Num());
-		// Captured 짝 맞춤(Contacting→Flight, 성립 전 → per-instance만). 본 이름은 리셋 전에 읽는다.
-		DispatchReleased(nullptr, ContactTracker.CandidateBone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
-		SetPhase(ERopePhase::Flight, TEXT("invalid wrapping seed"));
-		ResetTransientPhaseState();
+		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight).
+		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone, TEXT("invalid wrapping seed"));
 		return;
 	}
 
@@ -3016,10 +3023,8 @@ void URopeComponent::StartWrappingFromContacting()
 		FMath::Max(0.01f, WrapConfig.WrappingMotionDuration), Sim, MakeWrappingContext()))
 	{
 		LogWrappingFailureState(GetName(), TEXT("StartWrapping.Begin"), WrappingPhase.State, Sim);
-		// Captured 짝 맞춤(Contacting→Flight, 성립 전 → per-instance만). 본 이름은 리셋 전에 읽는다.
-		DispatchReleased(nullptr, ContactTracker.CandidateBone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
-		SetPhase(ERopePhase::Flight, TEXT("no valid wrapping anchors"));
-		ResetTransientPhaseState();
+		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight).
+		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone, TEXT("no valid wrapping anchors"));
 		return;
 	}
 
