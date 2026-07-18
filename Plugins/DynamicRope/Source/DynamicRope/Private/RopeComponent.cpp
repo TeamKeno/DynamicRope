@@ -1480,12 +1480,27 @@ FVector URopeComponent::ResolveTipRopeAttachWorld(const FTransform& ComponentWor
 	return MakeTipWorldTransform(ComponentWorld).GetLocation();
 }
 
+// 조준 hit을 현재 대상 본 트랜스폼 기준 월드로 복원한다. 본-로컬을 저장한 경우 대상의 이동/애니메이션을
+// 추종하고, 아니면 조준 순간의 월드 값(폴백)을 그대로 쓴다. bone-local 앵커 복원과 대칭이다.
+static FVector ResolveAimGuideHitWorld(const FRopeThrowContext& Ctx)
+{
+	if (Ctx.bHasAimGuideLocalHit && !Ctx.AimGuideBone.IsNone())
+	{
+		if (const USceneComponent* Mesh = Ctx.AimGuideMesh.Get())
+		{
+			return ResolveBindingWorld(Mesh, Ctx.AimGuideBone).TransformPosition(Ctx.AimGuideLocalHitPos);
+		}
+	}
+	return Ctx.AimGuideHitWorldPos;
+}
+
 bool URopeComponent::ResolvePreparedPierceHitPoint(const FRopePreparedThrowPreview& Prepared, FVector& OutHitPoint) const
 {
 	if (Prepared.ThrowContext.bHasAimGuideHit)
 	{
 		// Aim guide로 만든 Pierce prepared는 조준 레이가 선택한 hit를 Head 기준점으로 유지한다.
-		OutHitPoint = Prepared.ThrowContext.AimGuideHitWorldPos;
+		// 대상 본 기준으로 복원해 조준 이후 대상이 움직여도 조준한 신체 지점을 따라간다.
+		OutHitPoint = ResolveAimGuideHitWorld(Prepared.ThrowContext);
 		return true;
 	}
 
@@ -2358,6 +2373,14 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 	const float ArcT = 4.0f * Alpha * (1.0f - Alpha);
 	const int32 LastNode = Sim.Num() - 1;
 
+	// 조준 던지기(비-허공)면 팁 목표를 매 프레임 현재 대상 본 위치로 재조준한다 — 비행 중 대상이
+	// 움직여도 팁 궤적이 조준한 신체 지점으로 수렴하고 착지 순간 튐(pop)이 없다. 프리뷰 가이드 점은
+	// thrower-local이라 대상 이동을 반영하지 못하므로 끝점만 실시간 대상으로 대체한다.
+	const bool bTrackAimTarget = !bFree && Prepared.ThrowContext.bHasAimGuideLocalHit;
+	const FVector AimTargetWorld = bTrackAimTarget
+		? ResolveAimGuideHitWorld(Prepared.ThrowContext)
+		: FVector::ZeroVector;
+
 	SimFrame.OverrideFrame.EnsureSize(Sim.Num());
 	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
 	{
@@ -2374,7 +2397,10 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 		}
 
 		// 나머지 노드는 시작 위치 → preview 결과 위치로 보간하고, 시간 기반 상향 아치 오프셋을 더한다.
-		const FVector Target = Prepared.ResolveGuidePointWorld(NodeIndex);
+		// 조준 던지기의 팁 노드만 실시간 대상 위치로 재조준한다(나머지는 프리뷰 가이드 점 유지).
+		const FVector Target = (bTrackAimTarget && NodeIndex == LastNode)
+			? AimTargetWorld
+			: Prepared.ResolveGuidePointWorld(NodeIndex);
 		const FVector Start = GuidedThrowState.StartPositions.IsValidIndex(NodeIndex)
 			? GuidedThrowState.StartPositions[NodeIndex]
 			: Sim.Positions[NodeIndex];

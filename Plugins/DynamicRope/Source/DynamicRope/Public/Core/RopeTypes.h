@@ -1587,6 +1587,16 @@ struct FRopeThrowContext
 	/** ray 중심선이 처음 target SDF 안으로 들어간 월드 위치이다. */
 	FVector AimGuideHitWorldPos = FVector::ZeroVector;
 
+	/** 조준 hit을 대상 본(AimGuideBone) 기준으로 표현한 로컬 위치이다. 조준 순간의 월드 hit을 그때의
+	 *  본 트랜스폼으로 역변환해 저장한다. 대상이 움직여도 소비 시점의 본 트랜스폼으로 현재 월드를
+	 *  복원하면(대칭) 팁이 조준한 신체 지점을 그대로 따라간다 — AimGuideHitWorldPos(월드 고정)는
+	 *  대상 이동을 반영하지 못해 커밋 시 팁이 허공에 뜨는 문제가 있었다. */
+	FVector AimGuideLocalHitPos = FVector::ZeroVector;
+
+	/** 위 AimGuideLocalHitPos가 유효한 본-로컬 값을 담고 있는지 나타낸다. false면 소비부가
+	 *  AimGuideHitWorldPos(월드) 폴백을 사용한다 — 조준 본/mesh가 없거나 구 컨텍스트 하위호환용. */
+	bool bHasAimGuideLocalHit = false;
+
 	/** SDF 투영으로 구한 실제 표면점이다. */
 	FVector AimGuideSurfacePoint = FVector::ZeroVector;
 

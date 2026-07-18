@@ -2,6 +2,7 @@
 
 #include "Logic/RopeAimTargeting.h"
 #include "Collision/RopeCollider.h"
+#include "Core/RopeWrapTarget.h"
 
 namespace
 {
@@ -235,6 +236,14 @@ bool FRopeAimTargeting::ResolveAimRayThrowContext(const FQueryContext& Ctx, cons
 	OutContext.AimGuideBone = Hit.Bone;
 	OutContext.AimGuideMesh = Hit.Mesh;
 	OutContext.AimGuideHitWorldPos = Hit.HitWorldPos;
+	// 조준 hit을 대상 본 기준 로컬로도 저장한다 — 비행/커밋 시 현재 본 트랜스폼으로 복원해
+	// 움직이는 대상을 추종한다(월드 고정 AimGuideHitWorldPos만으로는 팁이 허공에 뜬다).
+	if (Hit.Mesh && !Hit.Bone.IsNone())
+	{
+		const FTransform BoneXform = ResolveBindingWorld(Hit.Mesh, Hit.Bone);
+		OutContext.AimGuideLocalHitPos = BoneXform.InverseTransformPosition(Hit.HitWorldPos);
+		OutContext.bHasAimGuideLocalHit = true;
+	}
 	OutContext.AimGuideSurfacePoint = Hit.SurfacePoint;
 	OutContext.AimGuideNormal = Hit.Normal;
 	OutContext.AimGuideDistance = Hit.Distance;
