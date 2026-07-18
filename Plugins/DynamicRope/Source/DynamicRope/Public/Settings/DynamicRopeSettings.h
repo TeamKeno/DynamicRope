@@ -72,7 +72,7 @@ public:
 	 * 표면 속도를 산출하므로 움직이는 표면이 로프를 끌고 substep CCD로 터널링을 막는다.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ToolTip = "WorldStatic 외에 WorldDynamic 바디도 수집합니다(움직이는 플랫폼/문 등). 이전 프레임 트랜스폼으로 표면 속도/CCD 처리."))
-	bool bIncludeWorldDynamic = false;
+	bool bIncludeWorldDynamic = true;
 
 	/**
 	 * Aim ray 조준(②③)의 데모 조준 HUD(십자선 + 감김 가능 본 강조 링) 위젯 클래스.
