@@ -716,6 +716,10 @@ private:
 	// 태그로 재사용한 팁 StaticMeshComponent의 기존 월드 스케일. SetWorldTransform으로 덮어도 비주얼 크기를 보존한다.
 	FVector TipMeshAuthoredScale = FVector::OneVector;
 
+	// 태그 재사용 팁의 획득 시점 상대 트랜스폼(저작 원본). 해제(Teardown) 시 이 값으로 복원해, 재획득
+	// (프리셋 전환)이 매 프레임 배치가 덮어쓴 트랜스폼을 저작 기준선으로 오캡처하는 것(스케일 누적 오염)을 막는다.
+	FTransform TipMeshAuthoredRelative = FTransform::Identity;
+
 	// 팁 부착물을 BeginPlay~EndPlay 단위로 확보/파괴/추종한다(bUseTipMesh가 켜진 경우만 동작).
 	void EnsureTipMesh();
 	void TeardownSpawnedTipMesh();

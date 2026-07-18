@@ -14,6 +14,8 @@
 
 #include "Preset/RopePreset.h"
 #include "RopeComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "GameFramework/Actor.h"
 #if WITH_EDITOR
 #include "Misc/DataValidation.h"
 #endif
@@ -228,6 +230,72 @@ bool FRopePresetRejectsOutsideFreeReelTest::RunTest(const FString& Parameters)
 
 	// null 프리셋도 거부.
 	TestFalse(TEXT("null 프리셋 거부"), Rope->ApplyPreset(nullptr));
+	return true;
+}
+
+// 태그 재사용 팁 × 프리셋 전환: 해제(Teardown) 시 저작 상대 트랜스폼이 복원돼, 직전 프리셋의
+// 배치 스케일(0.2)이 다음 획득의 저작 기준선으로 오염되지 않는다(스케일 누적 버그 회귀 방어).
+// 매 프레임 배치(FinalizeSimFrame)는 테스트에서 안 돌므로, 배치가 덮어쓴 상태를 직접 기록해 재현한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePresetTagTipTransformRestoreTest,
+	"DynamicRope.Preset.TagTipTransformRestoredAcrossPresets",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePresetTagTipTransformRestoreTest::RunTest(const FString& Parameters)
+{
+	AActor* Owner = NewObject<AActor>();
+	UStaticMeshComponent* TagTip = NewObject<UStaticMeshComponent>(Owner);
+	TagTip->ComponentTags.Add(FName(TEXT("RopeTipTagTest")));
+	TagTip->SetRelativeScale3D(FVector(2.0f));		// 저작 스케일
+
+	URopeComponent* Rope = NewObject<URopeComponent>(Owner);
+	Rope->TipMeshComponentTag = FName(TEXT("RopeTipTagTest"));
+
+	// 프리셋 1: 팁 사용 + 배치 스케일 0.2.
+	URopePreset* SmallTipPreset = NewObject<URopePreset>();
+	SmallTipPreset->bUseTipMesh = true;
+	SmallTipPreset->TipMeshRelativeTransform.SetScale3D(FVector(0.2f));
+	TestTrue(TEXT("프리셋 1 적용"), Rope->ApplyPreset(SmallTipPreset));
+	TestEqual(TEXT("태그 컴포넌트 획득"), Rope->GetTipMeshComponent(), TagTip);
+
+	// 프레임 배치가 월드 스케일을 저작(2)×프리셋(0.2)로 덮은 상태 재현.
+	TagTip->SetWorldScale3D(FVector(2.0f * 0.2f));
+
+	// 프리셋 2: 팁 사용 + 기본 Transform(스케일 1). Teardown 복원 → 재획득 기준선이 저작값이어야 한다.
+	URopePreset* DefaultTipPreset = NewObject<URopePreset>();
+	DefaultTipPreset->bUseTipMesh = true;
+	TestTrue(TEXT("프리셋 2 적용"), Rope->ApplyPreset(DefaultTipPreset));
+	TestEqual(TEXT("재획득 유지"), Rope->GetTipMeshComponent(), TagTip);
+	TestEqual(TEXT("저작 스케일 복원(0.2 오염 없음)"), TagTip->GetRelativeScale3D(), FVector(2.0f));
+	return true;
+}
+
+// 태그 재사용 팁 × 팁 끔 프리셋: 외부 컴포넌트는 파괴되지 않고(소유 아님), 참조만 해제되며
+// 저작 트랜스폼으로 복원된다. 로프의 팁 포인터는 null.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePresetTagTipSurvivesTipOffTest,
+	"DynamicRope.Preset.TagTipSurvivesTipOffPreset",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePresetTagTipSurvivesTipOffTest::RunTest(const FString& Parameters)
+{
+	AActor* Owner = NewObject<AActor>();
+	UStaticMeshComponent* TagTip = NewObject<UStaticMeshComponent>(Owner);
+	TagTip->ComponentTags.Add(FName(TEXT("RopeTipTagTest2")));
+	TagTip->SetRelativeScale3D(FVector(3.0f));
+
+	URopeComponent* Rope = NewObject<URopeComponent>(Owner);
+	Rope->TipMeshComponentTag = FName(TEXT("RopeTipTagTest2"));
+
+	URopePreset* TipOnPreset = NewObject<URopePreset>();
+	TipOnPreset->bUseTipMesh = true;
+	TipOnPreset->TipMeshRelativeTransform.SetScale3D(FVector(0.5f));
+	TestTrue(TEXT("팁 켬 프리셋 적용"), Rope->ApplyPreset(TipOnPreset));
+	TagTip->SetWorldScale3D(FVector(3.0f * 0.5f));	// 배치 덮어쓰기 재현
+
+	URopePreset* TipOffPreset = NewObject<URopePreset>();	// 기본값 = bUseTipMesh false
+	TestTrue(TEXT("팁 끔 프리셋 적용"), Rope->ApplyPreset(TipOffPreset));
+	TestNull(TEXT("로프 팁 참조 해제"), Rope->GetTipMeshComponent());
+	TestTrue(TEXT("외부 컴포넌트 생존"), IsValid(TagTip));
+	TestEqual(TEXT("저작 트랜스폼 복원"), TagTip->GetRelativeScale3D(), FVector(3.0f));
 	return true;
 }
 

@@ -1250,7 +1250,18 @@ void URopeComponent::EnsureTipMesh()
 		{
 			TipMeshComponent = Cast<UStaticMeshComponent>(Tagged[0]);
 			bTipMeshSpawnedByUs = false;
+			// 저작 기준선 캡처 — 배치(SetWorldTransform)가 덮어쓰기 *전*의 값이어야 한다. 해제 시
+			// TipMeshAuthoredRelative로 원상 복구하므로(Teardown), 재획득이 오염된 값을 다시 캡처하지 않는다.
 			TipMeshAuthoredScale = TipMeshComponent ? TipMeshComponent->GetComponentScale() : FVector::OneVector;
+			TipMeshAuthoredRelative = TipMeshComponent ? TipMeshComponent->GetRelativeTransform() : FTransform::Identity;
+			// 태그 컴포넌트가 TipMesh 에셋보다 우선하고 외부 컴포넌트의 메시는 바꾸지 않는다(인스턴스 소유).
+			// 프리셋 전환에서 "TipMesh가 적용 안 된다"로 보이는 침묵을 없애기 위해 알린다.
+			if (TipMesh)
+			{
+				UE_LOG(LogDynamicRope, Log,
+					TEXT("[%s] 팁: 태그('%s') 컴포넌트가 TipMesh 에셋('%s')보다 우선한다 — 프리셋/에셋이 팁 메시를 소유하려면 TipMeshComponentTag를 비울 것."),
+					*GetName(), *TipMeshComponentTag.ToString(), *TipMesh->GetName());
+			}
 			return;
 		}
 	}
@@ -1286,9 +1297,17 @@ void URopeComponent::TeardownSpawnedTipMesh()
 	{
 		TipMeshComponent->DestroyComponent();
 	}
+	else if (TipMeshComponent)
+	{
+		// 외부(태그) 컴포넌트 해제: 매 프레임 배치(SetWorldTransform)가 덮어쓴 트랜스폼을 저작 원본으로
+		// 되돌린다. 안 돌리면 다음 획득(프리셋 전환)이 "저작값×직전 프리셋 스케일"을 새 기준선으로 캡처해
+		// 스케일이 누적 오염된다. 월드가 아닌 *상대* 트랜스폼 복원 — 부모가 움직였어도 저작 자세가 유지된다.
+		TipMeshComponent->SetRelativeTransform(TipMeshAuthoredRelative);
+	}
 	TipMeshComponent = nullptr;
 	bTipMeshSpawnedByUs = false;
 	TipMeshAuthoredScale = FVector::OneVector;
+	TipMeshAuthoredRelative = FTransform::Identity;
 }
 
 void URopeComponent::UpdateTipMeshTransform()
