@@ -448,10 +448,10 @@ struct FRopeResidentSharedResults
 // 프레임 KeyToIndex 재조회라 인덱스 재배치 안전; 압축은 캐시된 CpuDist 슬라이스 복사라 소스 재-dequant 불필요).
 struct FRopeGlobalSDFCache
 {
-	// VolumeKey(베이크 데이터 포인터) -> 전역 볼륨 인덱스(= SDFVolumes 인덱스; 헤더가 CpuDist 오프셋을 가짐).
-	TMap<const void*, int32> KeyToIndex;
+	// VolumeKey(안정 식별자) -> 전역 볼륨 인덱스(= SDFVolumes 인덱스; 헤더가 CpuDist 오프셋을 가짐).
+	TMap<uint64, int32> KeyToIndex;
 	// VolumeKey -> 마지막으로 참조된 RT 프레임(재빌드 축출 판정용). KeyToIndex와 같은 키 집합.
-	TMap<const void*, uint64> KeyLastUsedFrame;
+	TMap<uint64, uint64> KeyLastUsedFrame;
 	// CPU 원본(연결된 dequant float + 헤더). 신규 볼륨 append / 재빌드 시 live만 남기고 압축.
 	TArray<float>             CpuDist;
 	TArray<FRopeSDFVolumeGPU> CpuVol;
@@ -1005,15 +1005,15 @@ static constexpr float  GRopeSDFRebuildReclaimFrac = 0.25f;
 // 프레임 KeyToIndex를 재조회하므로 인덱스 재배치는 다음 팩 단계가 자동 반영(참조 무손상).
 static void RopeRebuildGlobalSDFCache(FRopeGlobalSDFCache& Cache, uint64 Frame)
 {
-	TMap<const void*, int32>   NewKeyToIndex;
-	TMap<const void*, uint64>  NewLastUsed;
+	TMap<uint64, int32>   NewKeyToIndex;
+	TMap<uint64, uint64>  NewLastUsed;
 	TArray<float>              NewDist;
 	TArray<FRopeSDFVolumeGPU>  NewVol;
 	NewKeyToIndex.Reserve(Cache.KeyToIndex.Num());
 	NewVol.Reserve(Cache.CpuVol.Num());
 	NewDist.Reserve(Cache.CpuDist.Num());
 
-	for (const TPair<const void*, int32>& KV : Cache.KeyToIndex)
+	for (const TPair<uint64, int32>& KV : Cache.KeyToIndex)
 	{
 		const uint64* Last = Cache.KeyLastUsedFrame.Find(KV.Key);
 		if (!Last || (Frame - *Last) >= GRopeSDFEvictAfterFrames)
@@ -1097,7 +1097,7 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 	if (Cache.CpuVol.Num() > 0)
 	{
 		int64 DeadFloats = 0;
-		for (const TPair<const void*, int32>& KV : Cache.KeyToIndex)
+		for (const TPair<uint64, int32>& KV : Cache.KeyToIndex)
 		{
 			const uint64* Last = Cache.KeyLastUsedFrame.Find(KV.Key);
 			if (!Last || (Frame - *Last) >= GRopeSDFEvictAfterFrames)
@@ -1153,7 +1153,7 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 // 인스턴스(전역 VolumeIndex + 현재/직전 본 트랜스폼) 배열만 매 프레임 올린다. distance dequant/업로드는 여기서
 // 하지 않는다 — 전역 캐시가 VolumeKey당 1회만 수행. B.SDF*Buf/NumValidSDFCol을 채운다.
 static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B,
-	const TMap<const void*, int32>& GlobalKeyToIndex, FRDGBufferRef GlobalDistRDG, FRDGBufferRef GlobalVolRDG)
+	const TMap<uint64, int32>& GlobalKeyToIndex, FRDGBufferRef GlobalDistRDG, FRDGBufferRef GlobalVolRDG)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackSDF);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_PackSDF);

@@ -65,7 +65,10 @@ void URopeSDFProvider::RebuildColliders(USkeletalMeshComponent* Mesh, float InvD
 		const FTransform* PrevPtr = PrevBoneToWorld.Find(Volume.Bone);
 		const FTransform PrevXform = PrevPtr ? *PrevPtr : BoneToWorld;
 		PrevBoneToWorld.Add(Volume.Bone, BoneToWorld);
-		Colliders.Add(FRopeSDFCollider(&Volume, BoneToWorld, PrevXform, InvDt, Volume.Bone, Mesh));
+		// 볼륨 안정 키 = 에셋 런타임 ID(로드마다 부여) << 16 | 본 인덱스. raw 포인터 대신 써서 언로드 오샘플 방지.
+		const int32 BoneIdx = static_cast<int32>(&Volume - SDFData->BoneVolumes.GetData());
+		const uint64 VolKey = (SDFData->GetRuntimeVolumeId() << 16) | static_cast<uint64>(BoneIdx & 0xFFFF);
+		Colliders.Add(FRopeSDFCollider(&Volume, BoneToWorld, PrevXform, InvDt, Volume.Bone, Mesh, VolKey));
 	}
 
 	UE_LOG(LogRopeCollision, VeryVerbose, TEXT("SDFProvider on %s: built %d collider(s) from %d baked volume(s)."),

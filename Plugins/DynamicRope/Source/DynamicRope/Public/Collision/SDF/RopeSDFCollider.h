@@ -35,12 +35,16 @@ public:
 	// 본을 소유한 메시. cross-actor follow를 위해 contact로 전달된다. 타입은 USceneComponent로 일반화.
 	const USceneComponent* SourceMesh = nullptr;
 
+	// 볼륨 안정 식별자(provider가 URopeSDFData 런타임 ID + 본 인덱스로 계산). GetGPUSDF가 뷰로 전달 → GPU SDF
+	// 캐시 키. raw 포인터 대신 써서 에셋 언로드→주소 재사용 오샘플을 막는다.
+	uint64 VolumeKey = 0;
+
 	FRopeSDFCollider() = default;
 	FRopeSDFCollider(const FRopeBoneSDFVolume* InVolume, const FTransform& InBoneToWorld,
 		const FTransform& InPrevBoneToWorld, float InInvDeltaTime,
-		FName InBone, const USceneComponent* InSourceMesh)
+		FName InBone, const USceneComponent* InSourceMesh, uint64 InVolumeKey = 0)
 		: Volume(InVolume), BoneToWorld(InBoneToWorld), PrevBoneToWorld(InPrevBoneToWorld)
-		, InvDeltaTime(InInvDeltaTime), Bone(InBone), SourceMesh(InSourceMesh) {}
+		, InvDeltaTime(InInvDeltaTime), Bone(InBone), SourceMesh(InSourceMesh), VolumeKey(InVolumeKey) {}
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
 	virtual FRopeSurfaceProjection ProjectToSurface(const FVector& WorldPos, float MaxDistance) const override;

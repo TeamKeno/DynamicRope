@@ -210,4 +210,12 @@ public:
 
 	/** 하나라도 베이크된 볼륨이 있는가. */
 	bool HasAnyBakedVolume() const;
+
+	/** 이 에셋 인스턴스의 런타임 전용 고유 ID(로드마다 부여, 재사용 없음, 직렬화 안 함). GPU SDF 캐시가 raw
+	 *  포인터 대신 이 ID + 본 인덱스로 볼륨을 키잉해, 에셋 언로드→메모리 재사용 시 옛 복셀 오샘플을 막는다(lazy). */
+	uint64 GetRuntimeVolumeId() const;
+
+private:
+	/** GetRuntimeVolumeId lazy 캐시(0=미할당). const 게터가 최초 호출 시 채운다(mutable). */
+	mutable uint64 RuntimeVolumeId = 0;
 };

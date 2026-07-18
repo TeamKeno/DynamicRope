@@ -108,7 +108,7 @@ struct FRopeGPUSDFCollider
 	FTransform   PrevBoneToWorld = FTransform::Identity;
 	/** 1/프레임dt(표면 속도용). 0이면 정적. */
 	float        InvDeltaTime = 0.0f;
-	const void*  VolumeKey = nullptr;
+	uint64       VolumeKey = 0;
 };
 
 /**

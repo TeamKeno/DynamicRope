@@ -317,7 +317,7 @@ bool FRopeSDFCollider::GetGPUSDF(FRopeSDFColliderView& OutView) const
 	// GPU CCD/표면속도 드래그용(CPU QuerySwept와 동일 소스).
 	OutView.PrevBoneToWorld = PrevBoneToWorld;
 	OutView.InvDeltaTime = InvDeltaTime;
-	// 프레임 내 동일 볼륨 업로드 dedup용 키.
-	OutView.VolumeKey    = Volume;
+	// 볼륨 안정 식별자(provider가 심음) — GPU SDF 캐시 키. raw 포인터 미사용(언로드 오샘플 방지).
+	OutView.VolumeKey    = VolumeKey;
 	return true;
 }

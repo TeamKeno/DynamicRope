@@ -19,7 +19,7 @@ class USceneComponent;
 
 /**
  * GPU 솔버(M3)용 SDF collider 뷰. 본 로컬 distance grid + 본→월드 트랜스폼을 런타임 타입 없이 노출한다.
- * Distances는 collider/asset 소유 포인터(해당 프레임 동안 유효). VolumeKey는 GPU 업로드 dedup용 식별자.
+ * Distances는 collider/asset 소유 포인터(해당 프레임 동안 유효). VolumeKey는 볼륨 안정 식별자(로드마다 부여, 재사용 없음).
  * Distances는 uint8 양자화 코드 — 소비자가 비대칭 밴드로 dequant(d = code*(range/255) - NBInner,
  * range = NBInner+NBOuter, 바깥 +). 안쪽/바깥 밴드가 달라 offset은 -NBInner.
  */
@@ -53,8 +53,9 @@ struct FRopeSDFColliderView
 	/** 1/프레임dt(표면 속도 = (curr-prev)*InvDeltaTime). 0이면 정적. */
 	float        InvDeltaTime = 0.0f;
 
-	/** 같은 볼륨 dedup 식별자(보통 FRopeBoneSDFVolume*). */
-	const void*  VolumeKey = nullptr;
+	/** 볼륨 안정 식별자(URopeSDFData::GetRuntimeVolumeId()<<16 | 본 인덱스). 로드마다 부여·재사용 없음 →
+	 *  GPU SDF 캐시가 언로드→주소 재사용에도 오샘플하지 않는다. 0=미설정. */
+	uint64       VolumeKey = 0;
 };
 
 /**
