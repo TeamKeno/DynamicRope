@@ -1041,10 +1041,10 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 
 			HeldPreparedPreview = ResolvePreparedPreviewForDisplay(Prepared);
 			HeldPreviewExpireTimeSeconds = 0.0f;
-			if (PreviewComponent && HeldPreparedPreview.IsValid())
-			{
-				PreviewComponent->SetWrapPreviewWorld(HeldPreparedPreview);
-			}
+			// 프리뷰는 Reel(조준)에서만 보인다 — 발사 즉시 표시를 지운다(HeldPreparedPreview 데이터는
+			// 유지: phase-gate 유효성 검사와 Wrapped-hold 옵션이 참조). 이후 GuidedThrow 분기가 계속
+			// 지운 상태를 유지한다.
+			ClearPreviewDisplay();
 			PendingPreparedThrow.Reset();
 			LastPreparedPreview.Reset();
 			if (!Rope->ThrowWithPreparedPreview(Prepared))
@@ -1250,8 +1250,11 @@ bool URopeWielderComponent::ShouldHoldPreparedPreview()
 	const UAnimInstance* Anim = AttachMesh ? AttachMesh->GetAnimInstance() : nullptr;
 	if (Anim && Anim->Montage_IsPlaying(ThrowMontage))
 	{
+		// 던지기 입력 순간 PendingPreparedThrow에 경로를 고정한다(실제 던지기 정확도용) — 유지한다.
+		// 다만 프리뷰는 Reel(조준)에서만 보이면 되므로, 윈드업 몽타주 재생 중에는 표시를 끈다.
+		// 이전엔 고정 경로를 매 틱 그려, 윈드업 동안 캐릭터가 이동하면 지나간 자리에 프리뷰가 남았다.
 		HeldPreparedPreview = ResolvePreparedPreviewForDisplay(PendingPreparedThrow);
-		DisplayHeldPreparedPreview();
+		ClearPreviewDisplay();
 		return true;
 	}
 
@@ -1278,9 +1281,11 @@ bool URopeWielderComponent::UpdateHeldPreparedPreviewForPhase(ERopePhase Phase)
 
 	if (Phase == ERopePhase::GuidedThrow)
 	{
-		// GuidedThrow는 cached preview path를 authoritative하게 따라가는 상태다.
-		// 새 path를 build하지 않고, 플레이어가 보고 확정한 path를 그대로 렌더 유지한다.
-		DisplayHeldPreparedPreview();
+		// GuidedThrow는 cached preview path를 authoritative하게 따라가는 상태다. 새 path를 build하지
+		// 않는다. 프리뷰는 Reel(조준)에서만 보이면 되므로 발사 후에는 표시를 지운다(HeldPreparedPreview
+		// 데이터는 보존 — phase-gate 유효성 검사와 Wrapped-hold 옵션이 참조한다). return true로 이
+		// phase에서 preview 재빌드로 떨어지지 않게 한다.
+		ClearPreviewDisplay();
 		LastPreviewPhase = Phase;
 		return true;
 	}
