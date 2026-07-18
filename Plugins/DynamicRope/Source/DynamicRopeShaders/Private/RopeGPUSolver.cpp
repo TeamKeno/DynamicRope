@@ -31,7 +31,7 @@
 // 동일해야 program-wide ODR 안전). 아래 CYCLE stat은 각 RopeRT_* 스코프(SCOPE_CYCLE_COUNTER)에서 RT 스레드 시간을
 // 잡는다. STATS 꺼진 빌드에선 매크로가 자동 no-op. RunSteps=RT 총량, 나머지는 그 하위 분해(PackSDF=SDF 재업로드
 // 병목 지목용 — memory: sdf-global-volume-cache). GT 타이밍/부하 카운터는 런타임 RopeStats.h/.cpp가 소유.
-DECLARE_STATS_GROUP(TEXT("DynamicRope"), STATGROUP_DynamicRope, STATCAT_Advanced);
+#include "RopeGPUStatGroup.h"
 DECLARE_CYCLE_STAT(TEXT("GPU RunSteps (RT total)"), STAT_RopeGPU_RunSteps, STATGROUP_DynamicRope);
 DECLARE_CYCLE_STAT(TEXT("GPU EnsureBuffers"), STAT_RopeGPU_EnsureBuffers, STATGROUP_DynamicRope);
 DECLARE_CYCLE_STAT(TEXT("GPU Pack Capsules"), STAT_RopeGPU_PackCapsules, STATGROUP_DynamicRope);

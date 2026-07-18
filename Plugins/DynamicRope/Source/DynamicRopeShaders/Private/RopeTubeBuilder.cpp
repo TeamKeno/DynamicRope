@@ -9,6 +9,10 @@
 // FComputeShaderUtils
 #include "RenderGraphUtils.h"
 #include "DataDrivenShaderPlatformInfo.h"
+// 'stat DynamicRope' 튜브 빌드 대역폭 계측(GFrameNumberRenderThread / SET_*_STAT). 그룹 선언은 모듈 공용 헤더.
+#include "RenderingThread.h"
+#include "Stats/Stats.h"
+#include "RopeGPUStatGroup.h"
 
 // 링 버킷(스레드그룹 크기 == groupshared frame 배열 크기). 로프 1개 = 스레드그룹 1개라, 예전엔 모든 로프가
 // 고정 256 그룹을 잡아 링 수가 적은 로프는 스레드 대부분이 idle(배리어에는 참여)이었다. 이제 NumRings 이상인
@@ -94,6 +98,47 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FRopeBuildTubeResidentCS, "/Plugin/DynamicRope/Private/RopeBuildTube.usf", "RopeBuildTubeResidentCS", SF_Compute);
 
+// ── 'stat DynamicRope' — GPU 튜브 빌드 대역폭 ──────────────────────────────────────────────────────
+// RopeGPUSolver.cpp가 같은 "DynamicRope" 그룹으로 솔버/충돌 업로드(GPU Upload/Frame *)를 계측하지만, 튜브
+// 중심선 업로드는 그 RunSteps 경로 밖 — 프록시(FRopeSceneProxy::BuildTubeGPU)별 렌더 커맨드라 거기서 빠진다.
+// 그래서 여기서 따로 잡는다. 그룹 선언은 RopeGPUStatGroup.h(모듈 공용, include guard)가 소유 — 개별 stat은
+// static이라 이 TU 로컬이다.
+// 비-resident 프레임에만 발생: 프록시가 CPU 중심선 미러(NumRings×float3)를 매 프레임 CenterlineBuffer로 올려
+// 컴퓨트가 읽는다(BuildTube_RenderThread). resident 프레임은 솔버 상주 PosBuf를 직접 읽어 업로드 0 — 그
+// 절약분을 Resident 카운터로 대비해 본다(resident 비율이 높을수록 이 대역폭은 0에 수렴).
+DECLARE_MEMORY_STAT(TEXT("GPU Tube Upload/Frame (Centerline)"), STAT_RopeGPU_TubeUpload, STATGROUP_DynamicRope);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Tube Builds/Frame"), STAT_RopeGPU_TubeBuilds, STATGROUP_DynamicRope);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Tube Resident Builds/Frame"), STAT_RopeGPU_TubeResidentBuilds, STATGROUP_DynamicRope);
+
+#if STATS
+// 튜브 빌드는 로프(프록시)별 렌더 커맨드라 솔버 RunSteps 같은 단일 프레임 진입점이 없다. RT 프레임 번호가
+// 바뀌는 그 프레임 첫 빌드에서 직전 프레임 누산분을 stat에 밀어넣고 리셋하는 지연-플러시로 프레임당 값을
+// 만든다(프레임에 GPU 튜브 빌드가 아예 없으면 마지막 값이 유지되는 것도 솔버와 동일 — HUD 관례).
+static uint64 GRopeTubeUploadBytes = 0;    // 이번 프레임 중심선 업로드 바이트(비-resident 빌드 합)
+static uint32 GRopeTubeBuildCount = 0;     // 이번 프레임 GPU 튜브 빌드 수
+static uint32 GRopeTubeResidentCount = 0;  // 그중 resident(업로드 0) 빌드 수
+static uint32 GRopeTubeStatsFrame = 0;     // 마지막 플러시 시점의 RT 프레임 번호
+
+static void RopeTube_AccumBuild(bool bResident, uint64 CenterlineBytes)
+{
+	const uint32 Frame = GFrameNumberRenderThread;
+	if (Frame != GRopeTubeStatsFrame)
+	{
+		// 프레임 경계 — 직전 프레임 누산분 publish 후 리셋.
+		SET_MEMORY_STAT(STAT_RopeGPU_TubeUpload, GRopeTubeUploadBytes);
+		SET_DWORD_STAT(STAT_RopeGPU_TubeBuilds, GRopeTubeBuildCount);
+		SET_DWORD_STAT(STAT_RopeGPU_TubeResidentBuilds, GRopeTubeResidentCount);
+		GRopeTubeUploadBytes = 0;
+		GRopeTubeBuildCount = 0;
+		GRopeTubeResidentCount = 0;
+		GRopeTubeStatsFrame = Frame;
+	}
+	++GRopeTubeBuildCount;
+	if (bResident) { ++GRopeTubeResidentCount; }
+	else           { GRopeTubeUploadBytes += CenterlineBytes; }
+}
+#endif
+
 void RopeGPU::BuildTube_RenderThread(
 	FRHICommandList& RHICmdList,
 	FRHIShaderResourceView* InCenterlineSRV,
@@ -125,6 +170,11 @@ void RopeGPU::BuildTube_RenderThread(
 	Params.OutTexCoords = OutTexCoordsUAV;
 
 	// 로프 1개 = 스레드그룹 1개(numthreads=버킷). UAV 배리어는 호출자(proxy)가 처리.
+#if STATS
+	// 비-resident: 프록시가 이번 프레임 CenterlineBuffer에 올린 중심선(NumRings×float3)이 이 업로드 대역폭이다.
+	RopeTube_AccumBuild(/*bResident*/false, (uint64)NumRings * 3 * sizeof(float));
+#endif
+
 	FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, Params, FIntVector(1, 1, 1));
 }
 
@@ -163,6 +213,11 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 	Params.OutPositions  = OutPositionsUAV;
 	Params.OutTangents   = OutTangentsUAV;
 	Params.OutTexCoords  = OutTexCoordsUAV;
+
+#if STATS
+	// resident: 솔버 상주 PosBuf 직독 — CPU→GPU 중심선 업로드 없음(업로드 대역폭 0).
+	RopeTube_AccumBuild(/*bResident*/true, 0);
+#endif
 
 	FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, Params, FIntVector(1, 1, 1));
 }
