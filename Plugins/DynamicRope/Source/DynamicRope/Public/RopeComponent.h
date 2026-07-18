@@ -29,6 +29,7 @@ class IRopeCollider;
 class IRopeColliderProvider;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
+class URopePreset;
 class USkeletalMeshComponent;
 class UStaticMesh;
 class UStaticMeshComponent;
@@ -66,6 +67,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, const FRopeWrappedEv
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeOnReleased, FName, Bone, ERopeReleaseReason, Reason);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeOnPhaseChanged, ERopePhase, OldPhase, ERopePhase, NewPhase);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnPresetApplied, const URopePreset*, Preset);
 
 // (FRopeAimRayHitResult / FRopeAimRayThrowRequest는 Logic/RopeAimTargeting.h로 이동 — 위 include로 계속 노출된다.)
 
@@ -77,6 +79,11 @@ class DYNAMICROPE_API URopeComponent : public UMeshComponent
 	// 서브시스템이 프레임 구동을 위해 Sim/SolverConfig/Phase/WhipGuide + SimFrame(프레임 계약 묶음 —
 	// FRopeSimFrameIO 주석 참조)에 직접 접근한다(GPU 배치 솔브 포함; CPU 경로는 SolveSimFrame 사용).
 	friend class URopeSimSubsystem;
+
+#if WITH_DEV_AUTOMATION_TESTS
+	// 테스트 시임: ApplyPreset 페이즈 게이트 음성 테스트(RopePresetTests)가 SetPhase를 강제하기 위한 최소 접근.
+	friend struct FRopePresetTestSeam;
+#endif
 
 public:
 	URopeComponent();
@@ -298,6 +305,18 @@ public:
 #endif
 
 	//~ API ---------------------------------------------------------------
+
+	/**
+	 * 프리셋(URopePreset) 통째 적용 — 값 복사(스탬프) 후 로프를 재초기화한다. **Free/Reel에서만**
+	 * 성립하고 그 외 페이즈(날아가거나 감고 있는 중)는 false를 반환하며 아무것도 바꾸지 않는다.
+	 * 적용 시: Sim 재시드(InitRope) + 렌더/MID 재구성 + 팁 재확보 + 모드-페이즈 정합(③이면 Reel
+	 * 진입, Reel이었는데 ①②가 되면 Free 복귀). 무효 모드 조합은 ClampEngagement로 보정된다.
+	 * TipMeshComponentTag 등 인스턴스 배선 값은 프리셋 밖이라 유지된다 — 태그로 잡은 외부 팁을
+	 * bUseTipMesh=false 프리셋이 숨겨 주지는 않는다(인스턴스 책임). 리플리케이션 없음(로컬 스탬프).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	bool ApplyPreset(const URopePreset* Preset);
+
 	/** rope를 AimDir 방향으로 발사한다. ①②는 초기 tip 속도를 받아 물리 Flight로,
 	 *  ③은 Reel에서만 성립하며 확정 경로를 따라가는 GuidedThrow로 진입한다(모드가 경로를 정한다). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
@@ -555,6 +574,11 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnPhaseChanged OnRopePhaseChanged;
 
+	/** ApplyPreset 성공 직후 발화(거부 시 미발화). Wielder가 모드 유도 상태(preview/틱) 재동기화에
+	 *  구독하고, 게임 코드도 프리셋 전환 반응(UI 갱신 등)에 쓸 수 있다. */
+	UPROPERTY(BlueprintAssignable, Category = "Rope")
+	FRopeOnPresetApplied OnPresetApplied;
+
 private:
 	/**
 	 * 시뮬레이션 한 프레임을 3단계로 나눠 URopeSimSubsystem이 구동한다(friend 접근;
@@ -635,6 +659,8 @@ protected:
 	virtual void NotifyCaptured(FName Bone) {}
 	virtual void NotifyWrapped(const FRopeWrappedEventInfo& Info) {}
 	virtual void NotifyReleased(FName Bone, ERopeReleaseReason Reason) {}
+	/** ApplyPreset 성공 직후, OnPresetApplied 브로드캐스트 직전 호출(GT, 콜드 패스 — 적용당 1회). */
+	virtual void NotifyPresetApplied(const URopePreset* Preset) {}
 
 	/**
 	 * ③ 연출(GuidedThrow) 중 매 프레임 호출되는 인터럽트 판단 훅(GT, 콜드 패스 — 연출은 ~0.2초).

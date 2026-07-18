@@ -71,11 +71,6 @@ void URopeWielderComponent::BeginPlay()
 
 	ResolveRefs();
 
-	// preview는 Guaranteed 모드 전용이다 — 표시를 원하는 Guaranteed에서만 런타임 컴포넌트를 만들어준다
-	// (수동 배치가 있으면 그걸 쓴다). 표시를 끄면 컴포넌트 자체가 생기지 않는다 — 던지기 계산은
-	// Rope/Wielder가 하므로 영향 없다.
-	ResolvePreviewComponent(/*bAllowAutoCreate*/ bShowThrowPreview && UsesLockedPreview());
-
 	if (!Rope)
 	{
 		UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: no URopeComponent found (set Rope or add one to the actor)."),
@@ -93,17 +88,14 @@ void URopeWielderComponent::BeginPlay()
 		BindInput();
 	}
 
-	// Guaranteed는 표시를 꺼도 던지기용 prepared 계산에 틱이 필요하다(UsesLockedPreview로 이미 켜진다 —
-	// bShowThrowPreview는 표시 on/off일 뿐 계산 게이트가 아니다). preview 외에 지상 이탈/스윙
-	// 에어컨트롤 감시도 틱이 필요하다 — 전부 꺼져야 틱 정지. Aim ray 모드(Assisted)는 preview
-	// component가 없어도 collider 수집 bounds를 매 프레임 갱신해야 한다.
-	SetComponentTickEnabled(UsesLockedPreview() || bAutoGroundExitOnUpwardPull ||
-		bBoostAirControlWhileSwinging || UsesAimRay());
-	UpdateAimHudSample();
-	if (UsesLockedPreview())
+	// 모드 유도 상태(preview 생성/틱 활성/조준 샘플)는 RefreshModeDerivedState 한 곳으로 통일 —
+	// 런타임 프리셋 적용(ApplyPreset → OnPresetApplied)이 같은 경로를 재사용한다. Rope가 BeginPlay
+	// 이후에 해석되는 비정상 순서라면 구독이 빠진다 — 그때는 게임 코드가 Refresh를 수동 호출한다.
+	if (Rope)
 	{
-		UpdateThrowPreview();
+		Rope->OnPresetApplied.AddUniqueDynamic(this, &URopeWielderComponent::HandleRopePresetApplied);
 	}
+	RefreshModeDerivedState();
 }
 
 void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -143,6 +135,7 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		// Wielder가 사라진 뒤에도 로프의 collider 수집 범위가 조준 ray 방향으로 남지 않게 정리한다.
 		Rope->ClearAimRayColliderQueryBounds();
+		Rope->OnPresetApplied.RemoveDynamic(this, &URopeWielderComponent::HandleRopePresetApplied);
 	}
 
 	// 스윙 중 파괴/레벨 전환 시 AirControl 원복 누락 방지.
@@ -1201,9 +1194,43 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 	{
 		// 표시만 끈다 — prepared(던지기용)는 그대로 두고, ③/aim ray는 계산 틱을 계속 돌린다.
 		ClearPreviewDisplay();
-		SetComponentTickEnabled(UsesLockedPreview() || bAutoGroundExitOnUpwardPull ||
-			bBoostAirControlWhileSwinging || UsesAimRay());
+		SetComponentTickEnabled(ComputeDesiredTickEnabled());
 	}
+}
+
+bool URopeWielderComponent::ComputeDesiredTickEnabled() const
+{
+	// Guaranteed는 표시를 꺼도 던지기용 prepared 계산에 틱이 필요하다(UsesLockedPreview로 켜진다 —
+	// bShowThrowPreview는 표시 on/off일 뿐 계산 게이트가 아니다). preview 외에 지상 이탈/스윙
+	// 에어컨트롤 감시도 틱이 필요하다 — 전부 꺼져야 틱 정지. Aim ray 모드(Assisted)는 preview
+	// component가 없어도 collider 수집 bounds를 매 프레임 갱신해야 한다.
+	return UsesLockedPreview() || bAutoGroundExitOnUpwardPull ||
+		bBoostAirControlWhileSwinging || UsesAimRay();
+}
+
+void URopeWielderComponent::RefreshModeDerivedState()
+{
+	// preview는 Guaranteed 모드 전용이다 — 표시를 원하는 Guaranteed에서만 런타임 컴포넌트를 만들어준다
+	// (수동 배치가 있으면 그걸 쓴다). ③이 아니게 되면 잔류 preview 표시만 지운다(컴포넌트는 유휴로
+	// 남긴다 — 다시 ③이 되면 재사용). HUD 위젯은 UpdateAimHudWidget이 틱마다 재유도하지만, ①로
+	// 바뀌며 틱 자체가 꺼질 수 있으므로 꺼지기 전에 위젯 생성/제거를 한 번 정리하고 나간다.
+	ResolvePreviewComponent(/*bAllowAutoCreate*/ bShowThrowPreview && UsesLockedPreview());
+	if (!UsesLockedPreview())
+	{
+		ClearPreviewDisplay();
+	}
+	SetComponentTickEnabled(ComputeDesiredTickEnabled());
+	UpdateAimHudWidget();
+	UpdateAimHudSample();
+	if (UsesLockedPreview())
+	{
+		UpdateThrowPreview();
+	}
+}
+
+void URopeWielderComponent::HandleRopePresetApplied(const URopePreset* Preset)
+{
+	RefreshModeDerivedState();
 }
 
 bool URopeWielderComponent::ShouldHoldPreparedPreview()

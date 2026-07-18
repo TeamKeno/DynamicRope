@@ -18,6 +18,7 @@
 #include "RopeWielderComponent.generated.h"
 
 class URopeComponent;
+class URopePreset;
 class URopePreviewComponent;
 struct FRopeAimRayThrowRequest;
 class USkeletalMeshComponent;
@@ -474,6 +475,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope|Preview")
 	bool IsThrowPreviewEnabled() const { return bShowThrowPreview; }
 
+	/**
+	 * 로프 ResolveMode에서 유도되는 상태(preview 자동 생성/표시, 컴포넌트 틱 활성, 조준 HUD)를
+	 * 현재 모드로 재동기화한다. preview 생성과 틱 활성은 BeginPlay에서만 계산되므로 런타임에
+	 * 모드가 바뀌면(URopeComponent::ApplyPreset — OnPresetApplied 구독으로 자동 호출) 이걸로 다시
+	 * 계산한다. 게임 코드가 ResolveMode를 직접 바꿨을 때 수동 호출해도 된다(GT, 콜드 패스).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void RefreshModeDerivedState();
+
 	//~ Events(이벤트) ------------------------------------------------------
 	/** 던지기가 실제로 실행된 직후(즉시/몽타주 notify 경로 모두). */
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
@@ -544,6 +554,14 @@ private:
 	void AddMappingContext();
 
 	void ResolvePreviewComponent(bool bAllowAutoCreate);
+
+	/** 컴포넌트 틱이 필요한가 — preview(③)/지상 이탈/스윙 에어컨트롤/aim ray(②③) 중 하나라도.
+	 *  BeginPlay · SetThrowPreviewEnabled · RefreshModeDerivedState가 공유하는 단일 식. */
+	bool ComputeDesiredTickEnabled() const;
+
+	/** 로프 ApplyPreset 성공 신호(OnPresetApplied) 핸들러 — 모드 유도 상태 재동기화. */
+	UFUNCTION()
+	void HandleRopePresetApplied(const URopePreset* Preset);
 
 	/** wielder가 테더 몫을 실제로 받는 상태인가(Wrapped + TetherResponse>0 + TargetShare<1 + 셀프랩 아님). */
 	bool IsWielderTetherActive() const;

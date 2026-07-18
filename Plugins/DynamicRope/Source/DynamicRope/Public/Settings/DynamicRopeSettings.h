@@ -9,6 +9,7 @@
 
 class ARopeController;
 class URopeAimWidget;
+class URopePreset;
 
 /**
  * Dynamic Rope 플러그인의 프로젝트 전역 설정.
@@ -81,6 +82,16 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Demo", meta = (ToolTip = "Aim-ray demo HUD widget class (crosshair + wrappable-bone highlight ring). Spawned by URopeWielderComponent for the local player when bShowAimHudWidget is on. Defaults to the C++ URopeAimWidget (works with no assets); point it at a WBP subclass to restyle. Clear it to disable the HUD."))
 	TSoftClassPtr<URopeAimWidget> AimHudWidgetClass;
+
+	/**
+	 * 데모 프리셋 순환 목록 — 소비처는 콘솔 명령 Rope.Preset.Cycle / .Apply / .List
+	 * (RopePresetDemoCommands.cpp, 비Shipping 전용)뿐이다. 데모/기능 테스트에서 월드의 로프에
+	 * 순서대로 적용할 URopePreset 에셋들을 등록한다(soft — 명령 실행 시에만 로드). Shipping
+	 * 빌드에서는 명령이 빠져 미소비가 되는 **데모 전용 설정**이다(죽은 설정 아님 — 위 규약의
+	 * 의도된 예외). 게임 코드는 URopeComponent::ApplyPreset을 직접 호출하면 된다.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Demo", meta = (ToolTip = "Demo preset cycle list consumed only by the non-shipping console commands Rope.Preset.Cycle / .Apply / .List. Soft references - loaded when a command runs. Game code should call URopeComponent::ApplyPreset directly."))
+	TArray<TSoftObjectPtr<URopePreset>> DemoPresets;
 
 	/**
 	 * 로프 튜브가 velocity 버퍼에 기록할지. 로프는 매 프레임 정점을 in-place 갱신하지만 per-vertex 변형

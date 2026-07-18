@@ -33,6 +33,8 @@
 #include "Logic/RopeTipPlacement.h"
 #include "Logic/RopeThrowPreviewBuilder.h"
 #include "Logic/RopeTractionSolver.h"
+// 프리셋 스탬프 적용(ApplyPreset)
+#include "Preset/RopePreset.h"
 // FRopeGPUSolver::MaxNodes — NumParticles 상한(GPU 솔버 스레드그룹 한도)
 #include "RopeGPUSolver.h"
 // RopeMath:: 공용 헬퍼 (unity 빌드 익명 네임스페이스 중복 정의 방지)
@@ -601,6 +603,103 @@ void URopeComponent::OnDeployFromReel()
 	// 기본 구현: 로프 튜브를 다시 표시하고, 전개용으로 전체 길이를 복원한다.
 	SetVisibility(true, /*bPropagateToChildren*/ false);
 	SetRopeLength(RopeLength);
+}
+
+bool URopeComponent::ApplyPreset(const URopePreset* Preset)
+{
+	// [1] 게이트 — 유휴 페이즈(Free/Reel)에서만 통째 적용이 성립한다. 날아가거나 감고 있는 중의
+	// 재구성은 지원 범위 밖(시드/래치/경로가 옛 토폴로지를 물고 있다) — 거부하고 아무것도 안 바꾼다.
+	if (!Preset)
+	{
+		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] ApplyPreset ignored: preset이 null이다."), *GetName());
+		return false;
+	}
+	if (Phase != ERopePhase::Free && Phase != ERopePhase::Reel)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] ApplyPreset('%s') ignored: phase=%s (Free/Reel에서만 적용 가능)."),
+			*GetName(), *Preset->GetName(), PhaseName(Phase));
+		return false;
+	}
+	const bool bWasReel = (Phase == ERopePhase::Reel);
+
+	// [2] 값 스탬프 — RopeMaterial/bScaleTwistByLength만 세터 경유가 필요해 [5]로 미룬다.
+	// (인스턴스 배선 값 TipMeshComponentTag/ReelHandSocket은 프리셋에 없다 — 헤더 주석 참조.)
+	ResolveMode = Preset->ResolveMode;
+	TipEngagement = Preset->TipEngagement;
+	NumParticles = Preset->NumParticles;
+	RopeLength = Preset->RopeLength;
+	MinRopeLength = Preset->MinRopeLength;
+	ReelSpeed = Preset->ReelSpeed;
+	SolverConfig = Preset->SolverConfig;
+	ThrowParams = Preset->ThrowParams;
+	WrapConfig = Preset->WrapConfig;
+	DetectConfig = Preset->DetectConfig;
+	HoldConfig = Preset->HoldConfig;
+	WhipConfig = Preset->WhipConfig;
+	bUseTipMesh = Preset->bUseTipMesh;
+	TipMesh = Preset->TipMesh;
+	TipMeshRelativeTransform = Preset->TipMeshRelativeTransform;
+	bSyncTipMeshOnFree = Preset->bSyncTipMeshOnFree;
+	bUseTipMeshSockets = Preset->bUseTipMeshSockets;
+	TipSocketName = Preset->TipSocketName;
+	TipRopeSocketName = Preset->TipRopeSocketName;
+	Radius = Preset->Radius;
+	NumSides = Preset->NumSides;
+	TubeSmoothingSubdiv = Preset->TubeSmoothingSubdiv;
+	TubeSmoothingAlpha = Preset->TubeSmoothingAlpha;
+	bIncludeOwnerColliders = Preset->bIncludeOwnerColliders;
+	bUseWorldGDF = Preset->bUseWorldGDF;
+	PreviewReachScale = Preset->PreviewReachScale;
+	PreviewSegmentCount = Preset->PreviewSegmentCount;
+	PreviewSampleStep = Preset->PreviewSampleStep;
+	PreviewQueryRadius = Preset->PreviewQueryRadius;
+
+	// [3] 조합 보정 — 에디터(PostEditChangeProperty)/던지기(ThrowWithContext)와 같은 규칙의 심층 방어.
+	// IsDataValid를 통과한 에셋이면 안 걸린다.
+	const ERopeTipEngagement Clamped = RopeWrapModes::ClampEngagement(ResolveMode, TipEngagement);
+	if (Clamped != TipEngagement)
+	{
+		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] ApplyPreset('%s'): 무효 모드 조합이라 결착을 보정했다(%d -> %d)."),
+			*GetName(), *Preset->GetName(), (int32)TipEngagement, (int32)Clamped);
+		TipEngagement = Clamped;
+	}
+
+	// [4] Sim 재시드 — 항상 호출(분기 없는 단일 경로). NumParticles/RopeLength 소비 + GPU 상주 버퍼
+	// 재시드 세대 증가 + 길이 의존 MID 파라미터 갱신까지 포함한다. EnsureRopeInitialized는 비었을 때만이라
+	// 여기서는 부적합.
+	InitRope();
+
+	// [5] 렌더/MID — RopeMaterial은 SetMaterial 경유가 계약(직접 대입 시 옛 부모를 문 MID가 남는다).
+	// bScaleTwistByLength는 직접 대입 후 SetMaterial 내부의 UpdateRopeMaterialDynamicParams가 반영한다.
+	// 프록시 1회 소비 값(Radius/NumSides/TubeSmoothing*)은 MarkRenderStateDirty로 프록시를 재생성해 반영
+	// — 에디터 PostEditChangeProperty의 런타임 등가물.
+	bScaleTwistByLength = Preset->bScaleTwistByLength;
+	SetMaterial(0, Preset->RopeMaterial);
+	MarkRenderStateDirty();
+
+	// [6] 팁 재구성 — EnsureTipMesh는 기존 컴포넌트가 있으면 no-op이라, 에셋 교체/on↔off를 반영하려면
+	// 먼저 내려야 한다(스폰분만 파괴 — 태그 재사용 컴포넌트는 보존, 필요하면 Ensure가 재획득).
+	TeardownSpawnedTipMesh();
+	EnsureTipMesh();
+
+	// [7] 모드-페이즈 정합 — ③은 Reel(장전)에서만 던질 수 있으므로 즉시 장전한다(BeginPlay와 같은 규약).
+	// 반대로 Reel이었는데 ①②가 되면 Reel이 무의미해지므로 전개(가시성/길이 복원) 후 Free로 돌린다.
+	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
+	{
+		EnterReel();
+	}
+	else if (bWasReel)
+	{
+		OnDeployFromReel();
+		SetPhase(ERopePhase::Free, TEXT("preset applied"));
+	}
+
+	// [8] 통지 — 네이티브 훅 먼저, 그다음 BP 델리게이트(엔진 Notify 관례).
+	NotifyPresetApplied(Preset);
+	OnPresetApplied.Broadcast(Preset);
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] preset '%s' applied (mode=%d, engagement=%d, N=%d, L=%.0f)."),
+		*GetName(), *Preset->GetName(), (int32)ResolveMode, (int32)TipEngagement, NumParticles, RopeLength);
+	return true;
 }
 
 FTransform URopeComponent::GetReelTipTransform() const
