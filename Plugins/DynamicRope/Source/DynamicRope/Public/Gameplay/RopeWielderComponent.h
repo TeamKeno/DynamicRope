@@ -263,9 +263,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Locked Wrapped Preview Hold Time"))
 	float LockedWrappedPreviewHoldTime = 0.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Debug")
-	bool bLogPreviewBuildAttempts = false;
-
 	//~ Input(선택) — 비우면 무시, Throw()를 직접 호출하면 된다 ------------
 	/** Action/MappingContext가 설정돼 있으면 BeginPlay에 자동 바인딩할지. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
@@ -607,7 +604,6 @@ private:
 	// 선택한 origin 모드를 월드 위치로 해석한다.
 	FVector GetAimRayOrigin() const;
 	float GetAimReachLength() const;
-	void LogPreviewBuildResult(bool bSucceeded, const FString& Reason);
 	// Aim hit prepared spline을 wielder owner-local 좌표로 저장해 손 소켓 애니메이션에서 분리한다.
 	void StoreAimGuideFrameIfNeeded(FRopePreparedThrowPreview& Prepared) const;
 	// 저장된 owner-local prepared spline을 현재 owner transform 기준으로 렌더한다.
@@ -638,9 +634,6 @@ private:
 	// AirControl 부스트 원복용 저장 상태(스윙 진입 시 저장, 종료/EndPlay 시 복원).
 	bool bAirControlBoosted = false;
 	float SavedAirControl = 0.0f;
-	bool bLastPreviewBuildSucceeded = false;
-	bool bHasLastPreviewBuildResult = false;
-	FString LastPreviewBuildReason;
 
 	// 마지막 preview tick에서 성공한 prepared 결과. ③에서 "지금 조준이 잡혔는가"를 판정한다.
 	FRopePreparedThrowPreview LastPreparedPreview;

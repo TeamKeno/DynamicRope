@@ -477,8 +477,6 @@ void URopeWielderComponent::ResolvePreviewComponent(bool bAllowAutoCreate)
 				PreviewComponent->SetupAttachment(Root);
 			}
 			PreviewComponent->RegisterComponent();
-			UE_LOG(LogDynamicRope, Log, TEXT("RopeWielder on %s: auto-created RopePreviewComponent to show the GuaranteedWrap throw preview."),
-				*GetNameSafe(Owner));
 		}
 	}
 }
@@ -1378,8 +1376,6 @@ void URopeWielderComponent::UpdateThrowPreview()
 	FRopePreparedThrowPreview Prepared;
 	if (!Rope->BuildPreparedWrappingPreview(ThrowContext, Prepared, &PreviewBuildReason))
 	{
-		LogPreviewBuildResult(false, PreviewBuildReason.IsEmpty()
-			? TEXT("prepared preview build failed without a specific reason") : PreviewBuildReason);
 		ClearThrowPreview();
 		LastPreviewPhase = RopePhase;
 		return;
@@ -1391,7 +1387,6 @@ void URopeWielderComponent::UpdateThrowPreview()
 	HeldPreviewExpireTimeSeconds = 0.0f;
 	DisplayPreviewCenterline(HeldPreparedPreview);
 
-	LogPreviewBuildResult(true, TEXT("preview built"));
 	LastPreviewPhase = RopePhase;
 }
 
@@ -1476,24 +1471,4 @@ FRopeWrapPreviewData URopeWielderComponent::ResolvePreparedPreviewForDisplay(con
 		Preview.Points[PointIndex] = FMath::Lerp(Origin, HitPoint, Alpha);
 	}
 	return Preview;
-}
-
-void URopeWielderComponent::LogPreviewBuildResult(bool bSucceeded, const FString& Reason)
-{
-	const bool bChanged = !bHasLastPreviewBuildResult ||
-		bLastPreviewBuildSucceeded != bSucceeded ||
-		LastPreviewBuildReason != Reason;
-	if (!bLogPreviewBuildAttempts && !bChanged)
-	{
-		return;
-	}
-
-	UE_LOG(LogDynamicRope, Log, TEXT("Rope preview %s on %s: %s"),
-		bSucceeded ? TEXT("succeeded") : TEXT("failed"),
-		*GetNameSafe(GetOwner()),
-		*Reason);
-
-	bHasLastPreviewBuildResult = true;
-	bLastPreviewBuildSucceeded = bSucceeded;
-	LastPreviewBuildReason = Reason;
 }

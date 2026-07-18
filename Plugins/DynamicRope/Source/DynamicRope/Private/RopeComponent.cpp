@@ -494,9 +494,6 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 
 bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& Prepared)
 {
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] Prepared preview throw requested (phase=%s, valid=%d, points=%d)"),
-		*GetName(), PhaseName(Phase), Prepared.IsValid() ? 1 : 0, Prepared.RenderPreview.Points.Num());
-
 	// ③의 핵심 진입점: 여기서는 StartFreshThrow처럼 Flight로 보내지 않는다.
 	// preview build가 고른 path/contact/anchor를 authoritative하게 사용해야 실제 결과가 preview와 갈라지지 않는다.
 	EnsureRopeInitialized();
@@ -508,8 +505,6 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	// ③ Guaranteed는 Reel(장전) 상태에서만 throw가 성립한다(Wielder 직행 방어 — ThrowWithContext와 동일 게이트).
 	if (!CanThrowNow())
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Prepared preview throw rejected: not in Reel (phase=%s). Call EnterReel() first."),
-			*GetName(), PhaseName(Phase));
 		return false;
 	}
 
@@ -519,8 +514,6 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	// 서브클래스 wrap 대상 게이트: preview 빌드는 이 게이트를 모르므로(정적 빌더) 진입점에서 거른다.
 	if (!CanWrapTarget(Prepared.Mesh.Get(), Prepared.Bone))
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Prepared preview throw rejected by CanWrapTarget (bone=%s)"),
-			*GetName(), *Prepared.Bone.ToString());
 		return false;
 	}
 
