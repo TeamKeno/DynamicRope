@@ -475,4 +475,81 @@ bool FRopeTractionDecayVelocityDebtTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 한 프레임 축 ΔV 절대 상한(ClampAxisDeltaV): 0=무제한 통과, 상한 이하 통과, 초과는 ±대칭 클램프.
+// 목표 속도 상한과 별개의 방어다 — 목표가 유한해도 현재 속도가 크면 정확 서보의 ΔV는 무제한이다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionClampAxisDeltaVTest,
+	"DynamicRope.Traction.ClampAxisDeltaV",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTractionClampAxisDeltaVTest::RunTest(const FString& Parameters)
+{
+	// 0(무제한 설정) = 그대로 통과.
+	TestEqual(TEXT("무제한(0) 통과"), RopeTraction::ClampAxisDeltaV(3400.0f, 0.0f), 3400.0f);
+	TestEqual(TEXT("무제한(음수 설정) 통과"), RopeTraction::ClampAxisDeltaV(-3400.0f, -1.0f), -3400.0f);
+	// 상한 이하 = 무손실.
+	TestEqual(TEXT("상한 이하 통과"), RopeTraction::ClampAxisDeltaV(200.0f, 333.0f), 200.0f);
+	// 상한 초과 = ±대칭 클램프(가속/제동 대칭 — 역전 슬램을 여러 프레임에 분산).
+	TestEqual(TEXT("상한 초과 클램프(+)"), RopeTraction::ClampAxisDeltaV(3400.0f, 333.0f), 333.0f);
+	TestEqual(TEXT("상한 초과 클램프(-)"), RopeTraction::ClampAxisDeltaV(-3400.0f, 333.0f), -333.0f);
+	return true;
+}
+
+// 슬램 시나리오 조합: 고속 이탈(축속도 -3000) 대상에 목표 +400 양방향 정확 서보 → raw ΔV=3400을
+// 가속 상한(20000cm/s² × 1/60s ≈ 333)이 잘라, 역전이 한 프레임 슬램이 아니라 ~10프레임에 걸쳐 분산된다.
+// (Pierce 지면 관통 물리 폭발의 회귀 방어 — MassShare 대상 servo가 이 조합을 쓴다.)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionSlamScenarioClampTest,
+	"DynamicRope.Traction.FastDepartingTargetSlamClamped",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTractionSlamScenarioClampTest::RunTest(const FString& Parameters)
+{
+	const RopeTraction::FRopeAxisServo ExactServo{ /*TargetSpeed*/ 400.0f, /*Alpha*/ 1.0f, /*bBidirectional*/ true, /*bCancelOutward*/ false };
+	const float RawDeltaV = RopeTraction::ComputeAxisDeltaV(-3000.0f, ExactServo);
+	TestEqual(TEXT("정확 서보 raw ΔV = 목표-현재"), RawDeltaV, 3400.0f);
+
+	const float Dt = 1.0f / 60.0f;
+	const float MaxDeltaV = 20000.0f * Dt; // 기본 TetherMaxAcceleration × dt
+	const float Clamped = RopeTraction::ClampAxisDeltaV(RawDeltaV, MaxDeltaV);
+	TestEqual(TEXT("슬램이 가속 상한으로 제한"), Clamped, MaxDeltaV);
+	TestTrue(TEXT("한 프레임 역전 불가(현재 속도보다 작은 ΔV)"), Clamped < 3000.0f);
+
+	// 순항 중 보정(예: 200 → 400, ΔV=200 ≤ 상한 333)은 무손실 통과.
+	const float CruiseDeltaV = RopeTraction::ComputeAxisDeltaV(200.0f, ExactServo);
+	TestEqual(TEXT("순항 보정 ΔV는 상한 이하 통과"), RopeTraction::ClampAxisDeltaV(CruiseDeltaV, MaxDeltaV), CruiseDeltaV);
+
+	// 정지 출발(0 → 400, ΔV=400)은 첫 프레임만 상한(≈333)에 걸리고 **두 프레임 안에 목표 도달** —
+	// "기본값 켬이 정상 견인 체감을 바꾸지 않는다"의 정량 근거(1~2프레임 지연이 전부).
+	const float Frame1 = RopeTraction::ClampAxisDeltaV(RopeTraction::ComputeAxisDeltaV(0.0f, ExactServo), MaxDeltaV);
+	TestEqual(TEXT("정지 출발 첫 프레임은 상한"), Frame1, MaxDeltaV);
+	const float Frame2 = RopeTraction::ClampAxisDeltaV(RopeTraction::ComputeAxisDeltaV(Frame1, ExactServo), MaxDeltaV);
+	TestTrue(TEXT("두 프레임 내 목표 도달"), Frame1 + Frame2 >= 400.0f - 0.5f);
+	return true;
+}
+
+// 대상 주입 2차 방어 조합: 주입 결과 벡터가 TetherMaxSpeed를 넘으면 클램프하되, 기존에 더 빠른
+// 외부 운동(자유낙하 등)은 보존한다(wielder 쪽 CorrectMovement와 같은 헬퍼를 대상 servo도 쓴다).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionTargetInjectSpeedCapTest,
+	"DynamicRope.Traction.TargetInjectedSpeedCapPreservesExternalMotion",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTractionTargetInjectSpeedCapTest::RunTest(const FString& Parameters)
+{
+	const float Cap = 1500.0f;
+	// 주입으로 상한을 넘는 경우 → 상한으로 클램프.
+	{
+		const FVector OldVel(0.0f, 0.0f, 0.0f);
+		const FVector NewVel(2000.0f, 0.0f, 0.0f);
+		const FVector Clamped = RopeTraction::ClampInjectedVelocity(NewVel, OldVel, Cap);
+		TestEqual(TEXT("주입 초과분 클램프"), static_cast<float>(Clamped.Size()), Cap);
+	}
+	// 기존 속력이 이미 상한 초과(자유낙하 등) → 그 속력까지는 허용(주입이 외부 운동을 깎지 않는다).
+	{
+		const FVector OldVel(0.0f, 0.0f, -3000.0f);
+		const FVector NewVel(300.0f, 0.0f, -3000.0f);
+		const FVector Clamped = RopeTraction::ClampInjectedVelocity(NewVel, OldVel, Cap);
+		TestTrue(TEXT("기존 고속 외부 운동 보존"), Clamped.Size() >= OldVel.Size() - 1.0f);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

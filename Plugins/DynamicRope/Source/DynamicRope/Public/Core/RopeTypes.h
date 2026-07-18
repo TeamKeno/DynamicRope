@@ -1259,6 +1259,17 @@ struct FRopeHoldConfig
 	float TetherPerpDamping = 0.3f;
 
 	/**
+	 * (두 모드 공용 — 물리 바디 *대상* 한정) 테더가 대상에 넣는 프레임 속도 변화의 가속 상한(cm/s²;
+	 * 한 프레임 ΔV ≤ 이 값 × dt). 대상 servo는 정확 세팅이라 목표 속도가 유한해도 *현재* 속도가 크면
+	 * ΔV가 무제한이다 — 빠르게 이탈하는 대상(지면을 관통해 굴러가는 Pierce mesh 등)을 한 프레임에 역전
+	 * 슬램해 물리가 폭발한다. 이 상한이 역전을 여러 프레임에 분산한다(기본 20000 ≈ 20g — 정지→견인
+	 * 속도 도달이 60fps 기준 1~2프레임이라 정상 견인 체감은 불변). 0 = 무제한(구 동작).
+	 * wielder 쪽은 단방향 서보 + 속력 상한이 이미 있어 적용하지 않는다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	float TetherMaxAcceleration = 20000.0f;
+
+	/**
 	 * 팽팽한 동안 테더가 대상/wielder를 로프 쪽으로 되돌리는 *고정* 견인 속도(cm/s). overshoot가 TetherSettleDist보다
 	 * 크면 항상 이 속도로 당기고(마스 분배로 양끝에 ShareT:ShareW 비율로 나뉨), 한계 근처에선 부드럽게 감속해
 	 * 안착한다. 속도 ∝ overshoot가 아니라 고정이라 견인이 일정하다. 0 = 견인 없음.

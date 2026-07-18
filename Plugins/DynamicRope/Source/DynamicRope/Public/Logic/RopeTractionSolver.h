@@ -44,6 +44,14 @@ namespace RopeTraction
 	DYNAMICROPE_API float ClampAxisImpulse(float DeltaV, float Mass, float MaxImpulse);
 
 	/**
+	 * 한 프레임 축 ΔV 절대 상한(가속 상한 × dt). 양방향 정확 서보(bVelChange)는 ΔV = |현재 − 목표|가
+	 * 무제한이라, 빠르게 멀어지는 대상(지면 관통으로 이탈하는 Pierce mesh 등)을 한 프레임에 역전
+	 * 슬램해 물리를 폭발시킬 수 있다 — 이 클램프가 역전을 여러 프레임에 분산한다(목표 속도 상한과
+	 * 별개의 방어: 목표는 유한해도 현재 속도가 무제한이면 ΔV가 무제한이다). MaxAbsDeltaV ≤ 0 = 무제한.
+	 */
+	DYNAMICROPE_API float ClampAxisDeltaV(float DeltaV, float MaxAbsDeltaV);
+
+	/**
 	 * 리엘 목표 속도(cm/s): 고정 ReelSpeed로 감되 경계 근처(Overshoot < TaperDist)에서 선형 감속하고,
 	 * 이번 프레임에 남은 overshoot를 넘게 회수하지 않도록 Overshoot/dt로 캡한다(경계 안착 — 지나쳐
 	 * 코스팅→재팽팽 진동이 없다). ReelSpeed=0 → 0(리엘 없음). "상한 없음"이 필요한 호출자는 스스로

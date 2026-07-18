@@ -4385,6 +4385,9 @@ namespace
 
 		// 바깥 속도 제거 = 축 속도를 0으로 서보하되 "가속만"(안쪽으로 가는 중이면 손대지 않음).
 		const RopeTraction::FRopeAxisServo StopOutwardServo{ /*TargetSpeed*/ 0.0f, /*Alpha*/ 1.0f, /*bBidirectional*/ false, /*bCancelOutward*/ false };
+		// 한 프레임 ΔV 상한(가속 상한 × dt) — 고속으로 이탈 중인 시뮬 바디를 한 프레임에 역전 슬램하지 않게
+		// 여러 프레임에 분산한다(0 = 무제한). 지면 관통 이탈(Pierce) 폭주의 1차 방어 — FRopeHoldConfig 주석 참조.
+		const float MaxDeltaV = FMath::Max(Cfg.TetherMaxAcceleration, 0.0f) * DeltaTime;
 		// 비신축 클램프(양끝 공용) — (1) 양보하는 끝의 *바깥 방향*(Inward의 반대 = 거리 증가) 속도 성분만 제거하고
 		// (안쪽 속도는 절대 주입하지 않음 → 관성 없음 → 발사 없음), (2) 위치를 안쪽으로 Step만큼 이동해 로프 길이
 		// 경계로 되돌린다(드래그 추종 — 로프가 늘어나 보이지 않게). 로프 축 성분만 건드려 수직(중력/스윙) 성분은
@@ -4400,7 +4403,9 @@ namespace
 			{
 				// 컴포넌트 전체 시뮬 바디(StaticMesh 물리 프랍/시뮬 루트): 바깥 속도 제거 + 위치를 안쪽으로 Step
 				// 이동(속도 주입 없음 → 관성/발사 없음). 반환 = 실제 안쪽 이동(막히면 부족분을 wielder가 대신 멈춘다).
-				const float DeltaV = RopeTraction::ComputeAxisDeltaV(CurInward, StopOutwardServo);
+				// 바깥 속도가 아무리 커도 상쇄는 프레임당 MaxDeltaV까지 — 일괄 정지 슬램 방지.
+				const float DeltaV = RopeTraction::ClampAxisDeltaV(
+					RopeTraction::ComputeAxisDeltaV(CurInward, StopOutwardServo), MaxDeltaV);
 				if (!FMath::IsNearlyZero(DeltaV))
 				{
 					Prim->SetPhysicsLinearVelocity(Vel + Inward * DeltaV, /*bAddToCurrent*/ false, BoneName);
@@ -4417,8 +4422,9 @@ namespace
 
 			// 스켈레탈 랙돌: 컴포넌트 단위 위치 이동이 불가하다(시뮬 바디는 월드 공간) → 속도로 회수한다.
 			// exact set이라 관성 누적/코스팅이 없다 — Step ∝ Overshoot이라 경계에서 Step→0 → 안쪽 속도→0 = 발사 없음.
+			// 단 고속 이탈 중이면 ΔV = 목표 − 현재가 무제한이라 프레임당 MaxDeltaV로 클램프(역전 슬램 분산).
 			const float TargetInward = (DeltaTime > 1e-4f) ? (Step / DeltaTime) : 0.0f;
-			const float NeedDeltaV = TargetInward - CurInward;
+			const float NeedDeltaV = RopeTraction::ClampAxisDeltaV(TargetInward - CurInward, MaxDeltaV);
 			USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Prim);
 			if (Skel && Skel->IsSimulatingPhysics())
 			{
@@ -4594,19 +4600,37 @@ namespace
 		//    정확히 따라 경계에 지수 수렴한다(감쇠를 넣으면 목표를 지연 추종해 관성으로 slack을 지나쳐 코스팅→재팽팽
 		//    속도 변동이 생긴다 — 그래서 대상은 감쇠 없이 정확 추종).
 		const float PerpDamp = FMath::Clamp(Cfg.TetherPerpDamping, 0.0f, 1.0f);
+		// 한 프레임 ΔV 상한(가속 상한 × dt): 목표 속도는 유한해도(EffReelSpeed) *현재* 속도가 크면 정확 세팅의
+		// ΔV가 무제한이다 — 지면을 관통해 고속 이탈하는 대상(Pierce mesh)을 한 프레임에 역전 슬램하며 물리가
+		// 폭발하던 것의 1차 방어(0 = 무제한). 2차 방어는 아래 ClampInjectedVelocity(절대 속력 상한).
+		const float MaxDeltaV = FMath::Max(Cfg.TetherMaxAcceleration, 0.0f) * DeltaTime;
 		auto ServoVelocity = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float TargetSpeed)
 		{
 			const RopeTraction::FRopeAxisServo Servo{ TargetSpeed, /*Alpha*/ 1.0f, /*bBidirectional*/ true, /*bCancelOutward*/ false };
 			const FVector CurVel = Prim->GetPhysicsLinearVelocity(BoneName);
 			const float CurAlong = static_cast<float>(FVector::DotProduct(CurVel, Dir));
-			// 로프 축 성분: 목표 속도로 정확 세팅(bVelChange).
-			FVector Impulse = Dir * RopeTraction::ComputeAxisDeltaV(CurAlong, Servo);
+			// 로프 축 성분: 목표 속도로 정확 세팅(bVelChange) — 단 한 프레임 ΔV는 가속 상한으로 클램프.
+			const float RawDeltaV = RopeTraction::ComputeAxisDeltaV(CurAlong, Servo);
+			const float AxisDeltaV = RopeTraction::ClampAxisDeltaV(RawDeltaV, MaxDeltaV);
+			FVector Impulse = Dir * AxisDeltaV;
 			// 직교(당김 방향과 수직) 잔여 관성 부분 감쇠: 방향을 급전환하면 옛 방향 관성이 직교로 남아 대상이 옆으로
 			// 날아간다(관성 과다). PerpDamp만큼 빼서 억제 — 중력/스윙은 매 프레임 재축적되므로 부분 감쇠로도 보존된다.
 			if (PerpDamp > 0.0f)
 			{
 				const FVector PerpVel = CurVel - Dir * CurAlong;
 				Impulse -= PerpVel * PerpDamp;
+			}
+			// 2차 방어(wielder CorrectMovement와 대칭): 주입 결과의 절대 속력을 TetherMaxSpeed로 클램프 —
+			// 방향 churn/직교 성분까지 합친 최종 벡터가 상한을 넘지 않게(기존보다 빠른 외부 운동은 보존).
+			const FVector NewVel = RopeTraction::ClampInjectedVelocity(
+				CurVel + Impulse, CurVel, FMath::Max(Cfg.TetherMaxSpeed, 0.0f));
+			Impulse = NewVel - CurVel;
+			// 개입 관측(폭주 재현 씬 검증용) — 가속 상한이 실제로 잘라낸 프레임만. (익명 네임스페이스 자유
+			// 함수라 컴포넌트 이름이 없다 — 대상 컴포넌트 이름으로 식별.)
+			if (!FMath::IsNearlyEqual(RawDeltaV, AxisDeltaV))
+			{
+				UE_LOG(LogDynamicRope, Verbose, TEXT("tether target ΔV clamp on '%s': raw=%.0f -> %.0f cm/s (accel cap)"),
+					*GetNameSafe(Prim), RawDeltaV, AxisDeltaV);
 			}
 			Prim->AddImpulse(Impulse, BoneName, /*bVelChange*/ true);
 		};

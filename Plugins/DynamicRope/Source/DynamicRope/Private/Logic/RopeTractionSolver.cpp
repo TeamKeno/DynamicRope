@@ -20,6 +20,11 @@ namespace RopeTraction
 		return (MaxImpulse > 0.0f) ? FMath::Clamp(J, -MaxImpulse, MaxImpulse) : J;
 	}
 
+	float ClampAxisDeltaV(float DeltaV, float MaxAbsDeltaV)
+	{
+		return (MaxAbsDeltaV > 0.0f) ? FMath::Clamp(DeltaV, -MaxAbsDeltaV, MaxAbsDeltaV) : DeltaV;
+	}
+
 	float ComputeReelTargetSpeed(float Overshoot, float ReelSpeed, float TaperDist, float DeltaTime)
 	{
 		const float CloseSpeed = Overshoot / FMath::Max(DeltaTime, 1e-4f); // 이번 프레임에 전량 회수할 속도.
