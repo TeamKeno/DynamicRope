@@ -38,14 +38,31 @@
 #include "UObject/UObjectIterator.h"
 // GEngine->AddOnScreenDebugMessage(중복 경고)
 #include "Engine/Engine.h"
+// TAutoConsoleVariable(CPU 솔브 강제 토글)
+#include "HAL/IConsoleManager.h"
 
 namespace
 {
+	// 디버그/프로파일링용 CPU 솔브 강제 토글. 1이면 렌더 가능한 RHI가 있어도 GPU 상주 경로를 끄고 CPU
+	// 폴백 솔버+감지로 내려간다(솔브·감지·핸드오프 동기가 함께 CPU 경로로 일관 전환 — 튜브는 로프별
+	// bGpuSteppedThisFrame가 false가 되어 CPU 미러 센터라인으로 자동 폴백). GPU 대비 검증/성능 비교용. 기본 0.
+	static TAutoConsoleVariable<int32> CVarForceCPUSolve(
+		TEXT("r.DynamicRope.ForceCPUSolve"),
+		0,
+		TEXT("1이면 GPU가 가용해도 로프 솔브/감지를 CPU 경로로 강제한다(디버그·비교용). 0=자동 선택(기본)."),
+		ECVF_Default);
+
 	// G4: GPU가 런타임 유일 경로. 렌더 가능한 RHI가 있으면 GPU 상주 솔브+감지, 없으면(쿡/-nullrhi/
-	// 서버 빌드) 자동으로 CPU 솔브+감지로 폴백한다. 클라이언트 토글(CVar) 없음 — GPU가 THE 경로.
+	// 서버 빌드) 자동으로 CPU 솔브+감지로 폴백한다. 유일한 클라이언트 토글은 위 r.DynamicRope.ForceCPUSolve
+	// (디버그용 CPU 강제)뿐 — 평상시엔 GPU가 THE 경로다.
 	// FRopeXPBDSolver는 이 폴백과 패리티 테스트를 위해 유지된다(런타임 클라이언트에선 사실상 미사용).
 	bool RopeGpuRuntimeAvailable()
 	{
+		// CPU 강제 토글이 켜져 있으면 GPU 가용 여부와 무관하게 CPU 폴백으로 내려간다.
+		if (CVarForceCPUSolve.GetValueOnGameThread() != 0)
+		{
+			return false;
+		}
 		return GDynamicRHI != nullptr && FApp::CanEverRender();
 	}
 
