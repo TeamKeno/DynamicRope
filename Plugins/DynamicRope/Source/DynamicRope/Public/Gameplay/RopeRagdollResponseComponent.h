@@ -11,7 +11,7 @@
 // 자기를 감을 로프를 미리 알 수 없으므로(cross-actor throw가 흔함), 매 프레임 로프를 전수 순회하는 대신
 // 서브시스템의 중앙 wrap/release 신호(URopeSimSubsystem::OnAnyRopeWrapped/OnAnyRopeReleased)에 구독해
 // 자기 메시가 감겼는지/풀렸는지로 반응한다. 랙돌 전환 자체는 게임/컴포넌트 책임이라는 계약(플러그인
-// 코어는 랙돌을 요구하지 않는다 — RopeRagdollTransitionTests.cpp 주석)에 따라 이 컴포넌트는 어디까지나
+// 코어는 랙돌을 요구하지 않는다 — RopeMovingSurfaceRegressionTests.cpp 주석)에 따라 이 컴포넌트는 어디까지나
 // 옵트인 편의/레퍼런스 구현이며, 게임이 자체 랙돌 로직을 그대로 쓸 수도 있다.
 //
 // #if !UE_BUILD_SHIPPING 콘솔 명령(이 컴포넌트가 붙은 월드 내 모든 액터에 일괄 적용 — 개발 확인용):

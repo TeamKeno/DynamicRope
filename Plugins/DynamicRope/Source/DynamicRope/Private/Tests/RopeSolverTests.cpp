@@ -6,8 +6,6 @@
 
 #include "Solver/RopeXPBDSolver.h"
 #include "Collision/RopeCollider.h"
-#include "Logic/RopeWhipGuide.h"
-#include "RopeMathHelpers.h"
 #include "RopeTestHelpers.h"
 
 namespace
@@ -207,92 +205,6 @@ bool FRopeSolverPinTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Aim-hit guide는 중앙만 잡고 양끝은 solver 상태를 유지하는가.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimHitEndpointSolverBlendTest,
-	"DynamicRope.Solver.AimHitEndpointSolverBlend",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
-{
-	FRopeSimState Sim = RopeTest::MakeStraightRope(21, 200.0f);
-	// 움직인 손 pin을 구성해 root 쪽 소켓 추종과 중앙 가이드가 함께 적용되는 조건을 만든다.
-	Sim.bStartPinned = true;
-	Sim.StartPinPrev = Sim.Positions[0];
-	Sim.StartPinTarget = Sim.Positions[0] + FVector(0.0f, 25.0f, 0.0f);
-	Sim.InvMass[0] = 0.0f;
-
-	FRopeWhipGuide::FConfig Config;
-	Config.Duration = 0.5f;
-	Config.SweepAngleDegrees = 120.0f;
-	Config.ComponentRopeLength = Sim.RopeLength;
-	Config.AimHitRootSolverFraction = 0.20f;
-	Config.AimHitTipSolverFraction = 0.25f;
-
-	FRopeWhipGuide Guide;
-	Guide.Begin(FVector::ForwardVector, Sim.Positions[0], FVector::ForwardVector,
-		FVector::UpVector, FVector::RightVector, 1500.0f, FVector::ZeroVector,
-		/*bHasAimTarget*/ true, FVector(100.0f, 0.0f, 0.0f), 0.25f, 0.50f);
-	Guide.SnapToInitialPose(Sim, Config);
-
-	const int32 LastNode = Sim.Num() - 1;
-	const int32 MiddleNode = LastNode / 2;
-	// 자유단을 spline 밖으로 옮겨 Advance가 끝 노드를 다시 덮어쓰지 않는지 검증한다.
-	const FVector FreeTipBefore(200.0f, 40.0f, -15.0f);
-	Sim.Positions[LastNode] = FreeTipBefore;
-	Sim.PrevPositions[LastNode] = FreeTipBefore;
-	Guide.Advance(1.0f / 60.0f, Sim, Config, /*bCaptureDebugTargets*/ false);
-
-	TestTrue(TEXT("middle node remains spline-guided"), Guide.IsGuidedNodeThisFrame(MiddleNode));
-	TestFalse(TEXT("tip node is released to solver"), Guide.IsGuidedNodeThisFrame(LastNode));
-	TestTrue(TEXT("released tip keeps solver position before solve"),
-		Guide.GetCurrentTargets().IsValidIndex(LastNode) &&
-		Guide.GetCurrentTargets()[LastNode].Equals(FreeTipBefore, 0.01f));
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimHitSweepingLineGuideTest,
-	"DynamicRope.Solver.AimHitSweepingLineGuide",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeAimHitSweepingLineGuideTest::RunTest(const FString& Parameters)
-{
-	const FVector Origin(10.0f, -20.0f, 30.0f);
-	const FVector AimDirection = FVector::ForwardVector;
-	const FVector GuideUp = FVector::UpVector;
-	const float SweepAngleDegrees = 120.0f;
-	const float GuideLength = 240.0f;
-	constexpr int32 SampleCount = 25;
-
-	for (const float T : { 0.0f, 0.5f, 1.0f })
-	{
-		const FVector SweepDirection = RopeMath::ArcDirectionAtAlpha(
-			AimDirection, GuideUp, SweepAngleDegrees, T);
-		TArray<FVector> Points;
-		RopeMath::BuildWhipGuideRawPoints(Origin, SweepDirection, AimDirection,
-			/*bHasAimTarget*/ true, T, GuideLength, FVector(200.0f, -100.0f, 50.0f),
-			/*AimSteerStartAlpha*/ 0.25f, /*AimLockAlpha*/ 0.50f,
-			/*AimDirectionBias*/ 4.0f, SampleCount, Points);
-
-		TestEqual(TEXT("sweeping line sample count"), Points.Num(), SampleCount);
-		for (int32 Index = 0; Index < Points.Num(); ++Index)
-		{
-			const float RopeAlpha = static_cast<float>(Index) / static_cast<float>(Points.Num() - 1);
-			const FVector Expected = Origin + SweepDirection * (RopeAlpha * GuideLength);
-			TestTrue(*FString::Printf(TEXT("T=%.2f sample %d stays on one sweep line"), T, Index),
-				Points[Index].Equals(Expected, 0.01f));
-		}
-	}
-
-	const FVector HitPoint = Origin + AimDirection * 100.0f;
-	const FVector FinalDirection = RopeMath::ArcDirectionAtAlpha(
-		AimDirection, GuideUp, SweepAngleDegrees, 1.0f);
-	TestTrue(TEXT("final sweep line uses Origin-to-hit direction"),
-		FinalDirection.Equals((HitPoint - Origin).GetSafeNormal(), 0.01f));
-	TestTrue(TEXT("reachable hit lies on final finite guide"),
-		FVector::Dist(Origin, HitPoint) <= GuideLength);
-	return true;
-}
-
 // 중력 아래 장시간 시뮬레이션에서 발산/NaN 없이 비신축 길이를 유지하는가(explosion 가드).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverStabilityTest,
 	"DynamicRope.Solver.StableUnderGravity",
@@ -378,69 +290,5 @@ bool FRopeSolverTensionTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 움직이는 캡슐의 Query가 접촉 재질점의 표면 속도를 보고하는가(FRopeContact 계약: cm/s, 정적이면 0).
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeCapsuleSurfaceVelocityTest,
-	"DynamicRope.Collision.CapsuleSurfaceVelocity",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeCapsuleSurfaceVelocityTest::RunTest(const FString& Parameters)
-{
-	// Z축 캡슐(반지름 10)이 한 프레임(1/60s)에 +X로 6cm 이동. 노드는 축 중간 높이에서 +X쪽 표면에 겹침.
-	FCapsuleCollider Cap(FVector(6, 0, 0), FVector(6, 0, 100), 10.0f, FName(TEXT("bone")));
-	Cap.PrevA = FVector(0, 0, 0);
-	Cap.PrevB = FVector(0, 0, 100);
-	Cap.InvDeltaTime = 60.0f;
-
-	const FRopeContact Contact = Cap.Query(FVector(14, 0, 50), 2.0f);
-	TestTrue(TEXT("node overlaps capsule"), Contact.bHit);
-	// 재질점(축 위 z=50)의 프레임 변위 = +X 6cm → 표면 속도 = 6 * 60 = 360 cm/s.
-	TestTrue(FString::Printf(TEXT("surface velocity %s should be ~(360,0,0)"), *Contact.SurfaceVelocity.ToString()),
-		Contact.SurfaceVelocity.Equals(FVector(360, 0, 0), 1.0f));
-	TestTrue(TEXT("normal points outward (+X)"), Contact.Normal.Equals(FVector(1, 0, 0), 0.01f));
-
-	// 정적 캡슐(InvDeltaTime 0)은 표면 속도 0 — 기존 동작 유지.
-	FCapsuleCollider StaticCap(FVector(6, 0, 0), FVector(6, 0, 100), 10.0f);
-	const FRopeContact StaticContact = StaticCap.Query(FVector(14, 0, 50), 2.0f);
-	TestTrue(TEXT("static capsule overlaps"), StaticContact.bHit);
-	TestTrue(TEXT("static capsule surface velocity is zero"), StaticContact.SurfaceVelocity.IsNearlyZero());
-	return true;
-}
-
-// 움직이는 캡슐의 QuerySwept가 정지 노드를 추월할 때 접근(앞)면에서 잡는가(상대 운동 CCD).
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeCapsuleSweptRelativeMotionTest,
-	"DynamicRope.Collision.CapsuleSweptRelativeMotion",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeCapsuleSweptRelativeMotionTest::RunTest(const FString& Parameters)
-{
-	// Z축 캡슐(반지름 10)이 한 프레임에 X=-40 → X=+40으로 80cm 이동. 노드는 X=0에 정지 —
-	// 끝 포즈만 보면 캡슐이 이미 노드를 지나쳐(거리 40 > 12) 접촉 자체가 없다(= 관통). 상대 운동 스윕은
-	// 접근 중 첫 접촉을 잡고, 노드를 캡슐 앞면(+X, 진행 방향)으로 밀어내는 법선을 보고해야 한다.
-	FCapsuleCollider Cap(FVector(40, 0, 0), FVector(40, 0, 100), 10.0f, FName(TEXT("bone")));
-	Cap.PrevA = FVector(-40, 0, 0);
-	Cap.PrevB = FVector(-40, 0, 100);
-	Cap.InvDeltaTime = 60.0f;
-
-	FRopeSweptQuery Q;
-	// 정지 노드(이동 없음)
-	Q.WorldStart = FVector(0, 0, 50);
-	Q.WorldEnd = FVector(0, 0, 50);
-	Q.NodeRadius = 2.0f;
-	Q.SweepStep = 2.0f;
-	Q.MaxSamples = 64;
-	// 프레임 전체를 한 substep으로
-	Q.SubAlpha0 = 0.0f;
-	Q.SubAlpha1 = 1.0f;
-
-	FVector HitPos;
-	const FRopeContact Contact = Cap.QuerySwept(Q, HitPos);
-	TestTrue(TEXT("overtaking capsule is caught by relative sweep"), Contact.bHit);
-	TestTrue(FString::Printf(TEXT("normal %s should push node ahead (+X)"), *Contact.Normal.ToString()),
-		Contact.Normal.X > 0.9f);
-	// 표면 속도는 캡슐 이동 방향(+X), 80cm/frame * 60 = 4800 cm/s.
-	TestTrue(FString::Printf(TEXT("surface velocity %s should be ~(4800,0,0)"), *Contact.SurfaceVelocity.ToString()),
-		Contact.SurfaceVelocity.Equals(FVector(4800, 0, 0), 10.0f));
-	return true;
-}
-
 #endif // WITH_DEV_AUTOMATION_TESTS
+
