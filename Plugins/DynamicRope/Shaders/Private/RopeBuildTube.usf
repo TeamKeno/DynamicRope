@@ -85,6 +85,14 @@ float3 RotateBetween(float3 From, float3 To, float3 v)
 // gCenter[]가 채워진 뒤 공통: thread 0가 frame 전파 → barrier → 모든 thread가 정점 기록.
 void BuildTubeFrameAndWrite(uint tid, uint N)
 {
+	// FXC/SM5 cannot prove that thread 0's dynamic loop initializes every groupshared
+	// frame slot before the other lanes read it. Initialize one slot per lane first;
+	// thread 0 overwrites every valid [0, N) frame below, so rendered output is unchanged.
+	gU[tid] = float3(1.0f, 0.0f, 0.0f);
+	gV[tid] = float3(0.0f, 1.0f, 0.0f);
+	gTangent[tid] = float3(1.0f, 0.0f, 0.0f);
+	GroupMemoryBarrierWithGroupSync();
+
 	if (tid == 0)
 	{
 		float3 PrevTangent = normalize(gCenter[1] - gCenter[0]);
