@@ -1,6 +1,7 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeAimTargeting.h"
+#include "Components/SceneComponent.h"
 #include "Collision/RopeCollider.h"
 #include "Core/RopeWrapTarget.h"
 

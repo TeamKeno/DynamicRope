@@ -8,6 +8,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/StridedView.h"
 #include "FXSystem.h"
 
 class FRopeGDFFXSystem final : public FFXSystemInterface

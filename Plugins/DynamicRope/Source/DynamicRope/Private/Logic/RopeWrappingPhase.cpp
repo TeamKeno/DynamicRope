@@ -1,6 +1,7 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeWrappingPhase.h"
+#include "Components/SceneComponent.h"
 // ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"

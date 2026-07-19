@@ -6,6 +6,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Core/RopeTypes.h"
 #include "Collision/RopeCollider.h"
 

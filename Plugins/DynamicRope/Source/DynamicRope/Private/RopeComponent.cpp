@@ -16,6 +16,7 @@
 // 팁 부착물(Pierce/Cinch 창날·작살) 렌더 컴포넌트
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/World.h"
 #include "GameFramework/Actor.h"
 // Pull: 캐릭터 견인(CharacterMovement AddForce)
 #include "GameFramework/Character.h"

@@ -1,5 +1,6 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 #include "Collision/SDF/RopeSDFCollider.h"
+#include "Components/SceneComponent.h"
 #include "DynamicRopeLog.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "Collision/SDF/RopeSDFSampler.h"

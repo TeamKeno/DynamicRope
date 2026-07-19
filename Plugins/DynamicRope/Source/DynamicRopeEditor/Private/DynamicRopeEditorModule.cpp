@@ -13,6 +13,7 @@
 #include "Modules/ModuleManager.h"
 #include "MessageLogModule.h"
 
+#include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Textures/SlateIcon.h"

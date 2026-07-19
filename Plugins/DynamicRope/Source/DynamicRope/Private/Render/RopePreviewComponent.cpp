@@ -3,10 +3,12 @@
 #include "Render/RopePreviewComponent.h"
 
 #include "DynamicMeshBuilder.h"
+#include "MaterialDomain.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialRenderProxy.h"
 #include "PrimitiveSceneProxy.h"
 #include "PrimitiveViewRelevance.h"
+#include "SceneInterface.h"
 #include "SceneManagement.h"
 #include "SceneView.h"
 

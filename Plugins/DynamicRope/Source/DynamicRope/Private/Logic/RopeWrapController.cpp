@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeWrapController.h"
+#include "Components/SceneComponent.h"
 // FRopeBindingFrame + ResolveBindingWorld (바인딩 배선 seam A)
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
