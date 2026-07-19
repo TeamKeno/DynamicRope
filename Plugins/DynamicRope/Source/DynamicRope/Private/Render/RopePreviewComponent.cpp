@@ -11,6 +11,8 @@
 #include "SceneInterface.h"
 #include "SceneManagement.h"
 #include "SceneView.h"
+// UE_VERSION_OLDER_THAN — 엔진 버전 가드(GetMaterialRelevance 시그니처가 5.7에서 변경)
+#include "Misc/EngineVersionComparison.h"
 
 namespace
 {
@@ -147,7 +149,14 @@ class FRopePreviewSceneProxy final : public FPrimitiveSceneProxy
 public:
 	explicit FRopePreviewSceneProxy(const URopePreviewComponent* Component)
 		: FPrimitiveSceneProxy(Component)
-		, MaterialRelevance(Component->GetMaterialRelevance(GetScene().GetShaderPlatform()))
+		// 5.7에서 GetMaterialRelevance 인자가 ERHIFeatureLevel::Type→EShaderPlatform으로 바뀜 — 버전 가드.
+		, MaterialRelevance(Component->GetMaterialRelevance(
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
+			GetScene().GetFeatureLevel()
+#else
+			GetScene().GetShaderPlatform()
+#endif
+		))
 		, WrapPreviewMaterial(Component->GetMaterial(ToMaterialIndex(ERopePreviewMaterialSlot::WrapPreview)))
 	{
 		if (!WrapPreviewMaterial)

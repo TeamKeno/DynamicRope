@@ -23,6 +23,8 @@
 #include "RHI.h"
 // FApp::CanEverRender
 #include "Misc/App.h"
+// UE_VERSION_OLDER_THAN — 엔진 버전 가드(GetMaterialRelevance 시그니처가 5.7에서 변경)
+#include "Misc/EngineVersionComparison.h"
 // bWriteVelocity — 프록시 생성 시 1회 스냅샷
 #include "Settings/DynamicRopeSettings.h"
 
@@ -172,7 +174,14 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	: FPrimitiveSceneProxy(Component)
 	, Material(Component->GetMaterial(0))
 	, VertexFactory(GetScene().GetFeatureLevel(), "FRopeSceneProxy")
-	, MaterialRelevance(Component->GetMaterialRelevance(GetScene().GetShaderPlatform()))
+	// 5.7에서 GetMaterialRelevance 인자가 ERHIFeatureLevel::Type→EShaderPlatform으로 바뀜 — 버전 가드.
+	, MaterialRelevance(Component->GetMaterialRelevance(
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
+		GetScene().GetFeatureLevel()
+#else
+		GetScene().GetShaderPlatform()
+#endif
+	))
 	, NumNodes(FMath::Max(2, Component->NumParticles))
 	// 링 상한에 맞춰 자동 하향(위 헬퍼 주석 참고).
 	, Subdiv(RopeComputeTubeSubdiv(NumNodes, Component->TubeSmoothingSubdiv))

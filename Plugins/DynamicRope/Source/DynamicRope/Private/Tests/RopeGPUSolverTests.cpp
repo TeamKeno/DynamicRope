@@ -12,6 +12,8 @@
 #include "Solver/RopeXPBDSolver.h"
 // DynamicRopeShaders 모듈
 #include "RopeGPUSolver.h"
+// FRHIGPUBufferReadback 완전정의(5.7/5.8은 전이 include, ≤5.6은 명시 필요)
+#include "RHIGPUReadback.h"
 #include "Collision/RopeCollider.h"
 // FRopeBoxCollider (정적 박스 parity)
 #include "Collision/RopeStaticCollider.h"
