@@ -2139,11 +2139,14 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.Colliders.Add(MoveTemp(DC));
 	}
 
-	// 노드별 접촉 재질의(디버그 전용): post-solve 노드 위치를 FrameColliders에 다시 질의해 각 노드가 어느 면에
-	// 닿았는지(법선)를 기록한다. GPU 런타임은 접촉을 리드백하지 않으므로 여기서 CPU로 다시 질의한다. 질의 반경
-	// = CollisionRadius + 여유라 정착(표면에서 ~반경 떨어져 쉬는) 노드도 잡힌다. 노드당 가장 깊은 접촉 1개만.
-	Snapshot.NodeContacts.Reset();
-	const float DebugQueryRadius = GetEffectiveCollisionRadius() + 4.0f;
+	// 노드별 근접 재질의(디버그 전용): post-solve 노드 위치를 FrameColliders에 다시 질의해 각 노드가 어느 면을
+	// 마주하는지(법선)를 기록한다. GPU 런타임은 접촉을 리드백하지 않으므로 여기서 CPU로 다시 질의한다. 질의
+	// 반경 = CollisionRadius + 여유라 정착(표면에서 ~반경 떨어져 쉬는) 노드도 잡힌다 — solver가 실제로 처리한
+	// 접촉 집합이 아니라는 뜻이고, 화면도 그 여유를 함께 밝힌다. 노드당 가장 깊은 것 1개만.
+	constexpr float ProximityQueryMargin = 4.0f;
+	Snapshot.NodeProximity.Reset();
+	Snapshot.ProximityQueryMargin = ProximityQueryMargin;
+	const float DebugQueryRadius = GetEffectiveCollisionRadius() + ProximityQueryMargin;
 	for (int32 i = 0; i < Sim.Positions.Num(); ++i)
 	{
 		const FVector NodePos = Sim.Positions[i];
@@ -2167,14 +2170,14 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		}
 		if (bAny)
 		{
-			FRopeNodeContactDebug NC;
-			NC.NodeIndex = i;
-			NC.Position = NodePos;
-			NC.Normal = Best.Normal;
-			NC.Penetration = Best.Penetration;
-			NC.Bone = Best.Bone;
-			NC.bWorldStatic = bBestWorldStatic;
-			Snapshot.NodeContacts.Add(MoveTemp(NC));
+			FRopeNodeProximityDebug NP;
+			NP.NodeIndex = i;
+			NP.Position = NodePos;
+			NP.Normal = Best.Normal;
+			NP.Penetration = Best.Penetration;
+			NP.Bone = Best.Bone;
+			NP.bWorldStatic = bBestWorldStatic;
+			Snapshot.NodeProximity.Add(MoveTemp(NP));
 		}
 	}
 }
@@ -2814,7 +2817,7 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 	}
 	const bool bWhipActive = WhipGuidedNodeCount > 0;
 	RopeDebug::RecordFlightStats(Sim, SimFrame.bSolveThisFrame, SimFrame.FrameColliders.Num(), Candidates,
-		FrameTracker, DetectConfig, bShouldCapture);
+		FrameTracker, bShouldCapture);
 	RopeDebug::RecordWhipStats(Sim, WhipGuidedNodeCount, WhipGuidedEnd);
 
 #if WITH_GAMEPLAY_DEBUGGER

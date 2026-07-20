@@ -85,14 +85,15 @@ namespace
 		}
 	}
 
-	// 도달 모드 표시명(자동 해제 문구에 함께 낸다).
+	// 도달 모드 표시명(자동 해제 문구에 함께 낸다). 열거자 이름 그대로 낸다 — 화면에서 읽은 값으로
+	// 코드를 바로 찾을 수 있어야 한다.
 	const TCHAR* DebugResolveModeName(ERopeWrapResolveMode Mode)
 	{
 		switch (Mode)
 		{
-		case ERopeWrapResolveMode::FullSimulation: return TEXT("①FullSimulation");
-		case ERopeWrapResolveMode::AssistedJudged: return TEXT("②Assisted");
-		case ERopeWrapResolveMode::GuaranteedWrap: return TEXT("③Guaranteed");
+		case ERopeWrapResolveMode::FullSimulation: return TEXT("FullSimulation");
+		case ERopeWrapResolveMode::AssistedJudged: return TEXT("AssistedJudged");
+		case ERopeWrapResolveMode::GuaranteedWrap: return TEXT("GuaranteedWrap");
 		default:                                   return TEXT("?");
 		}
 	}
@@ -115,16 +116,18 @@ FGameplayDebuggerCategory_Rope::FGameplayDebuggerCategory_Rope()
 
 	// 하위 보기 토글 키. 카테고리가 활성일 때 입력된다. cvar(r.DynamicRope.Debug.*) 대체.
 	// 키는 FName 리터럴로 지정한다 — EKeys/FKey는 InputCore 모듈 심볼이라 링크 의존을 피한다.
-	const FGameplayDebuggerInputHandlerConfig CenterlineCfg(TEXT("ToggleCenterline"), TEXT("P"));
+	const FGameplayDebuggerInputHandlerConfig NodesCfg(TEXT("ToggleNodes"), TEXT("P"));
 	const FGameplayDebuggerInputHandlerConfig FlightCfg(TEXT("ToggleFlight"), TEXT("U"));
-	const FGameplayDebuggerInputHandlerConfig WrappedCfg(TEXT("ToggleWrapped"), TEXT("I"));
+	const FGameplayDebuggerInputHandlerConfig WrapCfg(TEXT("ToggleWrap"), TEXT("I"));
 	const FGameplayDebuggerInputHandlerConfig CollidersCfg(TEXT("ToggleColliders"), TEXT("O"));
 	const FGameplayDebuggerInputHandlerConfig AimCfg(TEXT("ToggleAim"), TEXT("J"));
-	BindKeyPress(CenterlineCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleCenterline);
+	const FGameplayDebuggerInputHandlerConfig AdvancedCfg(TEXT("ToggleAdvanced"), TEXT("K"));
+	BindKeyPress(NodesCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleNodes);
 	BindKeyPress(FlightCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleFlight);
-	BindKeyPress(WrappedCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleWrapped);
+	BindKeyPress(WrapCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleWrap);
 	BindKeyPress(CollidersCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleColliders);
 	BindKeyPress(AimCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleAim);
+	BindKeyPress(AdvancedCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleAdvanced);
 }
 
 TSharedRef<FGameplayDebuggerCategory> FGameplayDebuggerCategory_Rope::MakeInstance()
@@ -132,11 +135,12 @@ TSharedRef<FGameplayDebuggerCategory> FGameplayDebuggerCategory_Rope::MakeInstan
 	return MakeShareable(new FGameplayDebuggerCategory_Rope());
 }
 
-void FGameplayDebuggerCategory_Rope::OnToggleCenterline() { ViewMask ^= static_cast<uint8>(EView::Centerline); }
+void FGameplayDebuggerCategory_Rope::OnToggleNodes()     { ViewMask ^= static_cast<uint8>(EView::Nodes); }
 void FGameplayDebuggerCategory_Rope::OnToggleFlight()    { ViewMask ^= static_cast<uint8>(EView::Flight); }
-void FGameplayDebuggerCategory_Rope::OnToggleWrapped()   { ViewMask ^= static_cast<uint8>(EView::Wrapped); }
+void FGameplayDebuggerCategory_Rope::OnToggleWrap()      { ViewMask ^= static_cast<uint8>(EView::Wrap); }
 void FGameplayDebuggerCategory_Rope::OnToggleColliders() { ViewMask ^= static_cast<uint8>(EView::Colliders); }
 void FGameplayDebuggerCategory_Rope::OnToggleAim()       { ViewMask ^= static_cast<uint8>(EView::Aim); }
+void FGameplayDebuggerCategory_Rope::OnToggleAdvanced()  { ViewMask ^= static_cast<uint8>(EView::Advanced); }
 
 void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AActor* DebugActor)
 {
@@ -155,9 +159,9 @@ void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AAc
 
 	auto OnOff = [](bool b) { return b ? TEXT("{green}on") : TEXT("{grey}off"); };
 	AddTextLine(FString::Printf(
-		TEXT("{white}views  [P]centerline=%s{white} [U]flight=%s{white} [I]wrapped=%s{white} [O]colliders=%s{white} [J]aim=%s"),
-		OnOff(HasView(EView::Centerline)), OnOff(HasView(EView::Flight)), OnOff(HasView(EView::Wrapped)),
-		OnOff(HasView(EView::Colliders)), OnOff(HasView(EView::Aim))));
+		TEXT("{white}views  [P]nodes=%s{white} [U]flight=%s{white} [I]wrap=%s{white} [O]colliders=%s{white} [J]aim=%s{white} [K]advanced=%s"),
+		OnOff(HasView(EView::Nodes)), OnOff(HasView(EView::Flight)), OnOff(HasView(EView::Wrap)),
+		OnOff(HasView(EView::Colliders)), OnOff(HasView(EView::Aim)), OnOff(HasView(EView::Advanced))));
 
 	// 조준은 로프가 아니라 Wielder 소유 — 로프 순회와 별개로 액터에서 한 번 찾아 그린다.
 	if (const URopeWielderComponent* Wielder = DebugActor->FindComponentByClass<URopeWielderComponent>())
@@ -195,15 +199,22 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 
 	// 질의는 하지 않는다 — Wielder가 조준이 성립하는 동안 매 틱 스윕해 남긴 샘플을 읽기만 한다.
 	// 조준이 꺼져 있으면 샘플이 비어 있고(RayLength=0), 그릴 ray 자체가 없다.
+
+	// FullSimulation처럼 조준 ray를 아예 쓰지 않는 모드에서는 이 섹션 자체를 내지 않는다. 모드가 바뀌지
+	// 않는 한 영영 같은 문구라 진단 가치가 없고, 상세 보기에 둬도 화면만 차지한다.
 	if (!Wielder.UsesAimRay())
 	{
-		AddTextLine(TEXT("  {white}aim: {grey}not an aim ray mode (①FullSimulation)"));
 		return;
 	}
+	// 조준 모드는 맞지만 지금 던질 수 없는 phase — GuaranteedWrap은 Reel(장전)에서만 조준이 성립한다.
+	// 진입하면 해소되는 일시 상태라 "왜 조준이 안 잡히나"의 답이 된다. 다만 평소엔 자리만 차지하므로
+	// 상세 보기에서만 낸다.
 	if (!Wielder.IsAimActive())
 	{
-		// 조준 모드는 맞지만 지금 던질 수 없는 phase — ③는 Reel(장전)에서만 조준이 성립한다.
-		AddTextLine(TEXT("  {white}aim: {grey}inactive — ③ aims from Reel only"));
+		if (HasView(EView::Advanced))
+		{
+			AddTextLine(TEXT("  {white}aim: {grey}inactive — GuaranteedWrap aims from Reel only"));
+		}
 		return;
 	}
 
@@ -307,11 +318,11 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		*TubeDiagString(Snap ? Snap->NumParticles : Rope.NumParticles,
 			Snap ? Snap->TubeSmoothingSubdiv : Rope.TubeSmoothingSubdiv)));
 
-	//~ centerline -------------------------------------------------------
-	if (HasView(EView::Centerline))
+	//~ nodes ------------------------------------------------------------
+	if (HasView(EView::Nodes))
 	{
 		// 노드 점만 찍는다 — 연결 세그먼트는 튜브 메시가 이미 보여주므로 중복이고, phase 색은 위 헤더
-		// 줄의 phase=... 텍스트가 낸다. 노드 단위 상태 구분은 [U]flight / [I]wrapped 오버레이 담당.
+		// 줄의 phase=... 텍스트가 낸다. 노드 단위 상태 구분은 [U]flight / [I]wrap 오버레이 담당.
 		for (const FVector& Point : Points)
 		{
 			AddShape(FGameplayDebuggerShape::MakePoint(Point, 2.0f, FColor::Yellow));
@@ -335,8 +346,41 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		return;
 	}
 	const FRopeDebugSnapshot& S = *Snap;
-	// colliders 총계의 단일 소스는 S.Colliders(항상 채워짐). [O] 뷰는 여기 총계를 반복하지 않고 분류만 낸다.
-	AddTextLine(FString::Printf(TEXT("  {grey}diag: colliders=%d"), S.Colliders.Num()));
+
+	//~ nodes: 근접 재질의 ------------------------------------------------
+	// 노드가 어느 면에 어느 법선으로 붙었나. collider 형상이 아니라 **노드 상태**라 [P]nodes 소속이다.
+	// 이름이 proximity인 이유: 실제 solver 접촉이 아니라 질의 반경을 CollisionRadius+4cm로 넓혀 다시
+	// 질의한 결과라, 닿지 않은 근처 노드도 잡힌다(GPU는 접촉을 리드백하지 않아 CPU로 재질의한다).
+	if (HasView(EView::Nodes) && S.NodeProximity.Num() > 0)
+	{
+		if (UWorld* World = Rope.GetWorld())
+		{
+			constexpr uint8 FG = SDPG_Foreground;
+			AddTextLine(FString::Printf(
+				TEXT("  {grey}proximity n=%d {grey}(requery r+%.0fcm, not solver contacts)"),
+				S.NodeProximity.Num(), S.ProximityQueryMargin));
+			for (const FRopeNodeProximityDebug& NP : S.NodeProximity)
+			{
+				// 정적 월드=마젠타, 그 외(스켈레탈 본/랩 대상)=주황.
+				const FColor NColor = NP.bWorldStatic ? FColor(255, 0, 255) : FColor(255, 128, 0);
+				const FVector Tip = NP.Position + NP.Normal * 15.0f;
+				DrawDebugDirectionalArrow(World, NP.Position, Tip, 6.0f, NColor, false, -1.0f, FG, 2.0f);
+				// 면 라벨은 화살표 방향으로 이미 읽히므로 상세 보기에서만 — 접촉 노드가 많으면 화면이 덮인다.
+				if (HasView(EView::Advanced))
+				{
+					const FVector AN = NP.Normal.GetAbs();
+					FString Face;
+					if (AN.X > 0.9) { Face = NP.Normal.X > 0.0 ? TEXT("+X") : TEXT("-X"); }
+					else if (AN.Y > 0.9) { Face = NP.Normal.Y > 0.0 ? TEXT("+Y") : TEXT("-Y"); }
+					else if (AN.Z > 0.9) { Face = NP.Normal.Z > 0.0 ? TEXT("+Z") : TEXT("-Z"); }
+					// 대각 법선 = 볼록 모서리 접촉.
+					else { Face = TEXT("edge"); }
+					DrawDebugString(World, Tip, FString::Printf(TEXT("n%d %s"), NP.NodeIndex, *Face),
+						nullptr, NColor, 0.0f, true, 1.0f);
+				}
+			}
+		}
+	}
 
 	//~ flight -----------------------------------------------------------
 	if (HasView(EView::Flight) && S.bHasFlight)
@@ -427,6 +471,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 					AddShape(FGameplayDebuggerShape::MakePoint(S.Positions[i], 2.5f, FColor::Green));
 				}
 			}
+			// 가이드 커브 자체(타깃 점 + 이음선)는 기본으로 낸다 — 스윙이 어디로 향하는지가 요지다.
 			for (int32 i = 0; i < S.WhipGuideTargets.Num(); ++i)
 			{
 				AddShape(FGameplayDebuggerShape::MakePoint(S.WhipGuideTargets[i], 3.0f, FColor::Cyan));
@@ -434,17 +479,47 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				{
 					AddShape(FGameplayDebuggerShape::MakeSegment(S.WhipGuideTargets[i], S.WhipGuideTargets[i + 1], 1.0f, FColor::Cyan));
 				}
-				if (S.WhipGuideNodeIndices.IsValidIndex(i) && S.Positions.IsValidIndex(S.WhipGuideNodeIndices[i]))
+			}
+			// 노드→타깃 보정선은 노드마다 한 줄씩 늘어 Flight의 짧은 순간에 화면을 덮는다. 가이드가 실제로
+			// 어느 노드를 얼마나 끌고 있는지 봐야 할 때만 상세 보기로.
+			if (HasView(EView::Advanced))
+			{
+				for (int32 i = 0; i < S.WhipGuideTargets.Num(); ++i)
 				{
-					AddShape(FGameplayDebuggerShape::MakeSegment(S.Positions[S.WhipGuideNodeIndices[i]],
-						S.WhipGuideTargets[i], 1.0f, FColor(255, 140, 0)));
+					if (S.WhipGuideNodeIndices.IsValidIndex(i) && S.Positions.IsValidIndex(S.WhipGuideNodeIndices[i]))
+					{
+						AddShape(FGameplayDebuggerShape::MakeSegment(S.Positions[S.WhipGuideNodeIndices[i]],
+							S.WhipGuideTargets[i], 1.0f, FColor(255, 140, 0)));
+					}
 				}
 			}
 		}
 	}
 
-	//~ wrapped ----------------------------------------------------------
-	if (HasView(EView::Wrapped) && S.bHasWrapped)
+	//~ wrap: 감김 경로 축 -------------------------------------------------
+	// Wrapping에서 ResolveWrappingAxis가 정한 경로 축(대상을 관통하는 노란 선 + 방향 화살표). 충돌 형상이
+	// 아니라 **감김 경로 진단**이라 [I]wrap 소속이다. 같은 기둥을 여러 각도로 던져 이 선이 늘 장축을
+	// 따르는지 눈으로 확인한다. Wrapping 페이즈에서만 뜬다.
+	if (HasView(EView::Wrap) && S.bHasWrapAxis)
+	{
+		if (UWorld* World = Rope.GetWorld())
+		{
+			const FVector AxisDir = S.WrapAxisDirection.GetSafeNormal();
+			const FVector AxisO = S.WrapAxisOrigin;
+			// 축 길이는 로프 스케일에 비례(max(80, SegmentLength×6)). 축이 퇴화(0벡터)면 텍스트만 낸다.
+			const float AxisLen = FMath::Max(80.0f, S.WrapAxisSegmentLength * 6.0f);
+			if (!AxisDir.IsNearlyZero())
+			{
+				constexpr uint8 FG = SDPG_Foreground;
+				DrawDebugLine(World, AxisO - AxisDir * AxisLen, AxisO + AxisDir * AxisLen, FColor::Yellow, false, -1.0f, FG, 3.0f);
+				DrawDebugDirectionalArrow(World, AxisO, AxisO + AxisDir * AxisLen, 16.0f, FColor::Yellow, false, -1.0f, FG, 3.0f);
+			}
+			AddTextLine(FString::Printf(TEXT("  {yellow}wrapAxis{grey} dir=%s"), *AxisDir.ToCompactString()));
+		}
+	}
+
+	//~ wrap: 결착 결과 ----------------------------------------------------
+	if (HasView(EView::Wrap) && S.bHasWrapped)
 	{
 		TSet<int32> LatchedSet(S.LatchedNodes);
 		for (int32 i = 0; i < S.Positions.Num(); ++i)
@@ -461,7 +536,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 
 		AddTextLine(FString::Printf(TEXT("  {green}wrapped{white} bone=%s mesh=%s latched=%d"),
 			*S.WrapBone.ToString(), *S.MeshName, S.Latched.Num()));
-		// 장력(λ/h² 상대 힘). 임계치와 경고색은 자동 해제가 실제로 도는 모드에서만 낸다 — ③ Guaranteed는
+		// 장력(λ/h² 상대 힘). 임계치와 경고색은 자동 해제가 실제로 도는 모드에서만 낸다 — GuaranteedWrap은
 		// 임계치를 보지 않으므로(명시 해제만 유효) 임계 대비 경고가 의미를 갖지 않는다.
 		if (!S.bAutoReleaseEnabled)
 		{
@@ -508,7 +583,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		if (S.bPullValid && S.PullTension > KINDA_SMALL_NUMBER)
 		{
 			// 거리 release가 실제로 도는 모드에서 켜져 있으면 초과분이 한계에 근접/초과할 때 색으로
-			// 경고(노랑 80%+, 빨강 초과). ③ Guaranteed는 거리 해제도 무효라 경고 대상이 아니다.
+			// 경고(노랑 80%+, 빨강 초과). GuaranteedWrap은 거리 해제도 무효라 경고 대상이 아니다.
 			const TCHAR* OvershootColor = TEXT("{white}");
 			if (S.bAutoReleaseEnabled && S.DistanceReleaseSlack > 0.0f)
 			{
@@ -600,7 +675,8 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				if (C.bWrapTarget) { ++StaticWrapTargetCount; }
 			}
 			AddTextLine(FString::Printf(
-				TEXT("  {grey}colliders [{green}wrappable{grey}/{red}rejected{grey}/{cyan}collision-only{grey}]  staticWrapTargets=%d"),
+				TEXT("  {grey}colliders n=%d [{green}wrappable{grey}/{red}rejected{grey}/{cyan}collision-only{grey}]  staticWrapTargets=%d"),
+				S.Colliders.Num(),
 				StaticWrapTargetCount));
 
 			// 3패스로 그려 초록(감김 가능)이 항상 위에 오게 한다: 랩 대상이 자기 push-out 셰이프를 같은 위치에
@@ -656,40 +732,6 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				}
 			}
 
-			// 노드별 접촉 진단: 각 접촉 노드에서 바깥 법선 화살표(= 어느 면인지) + 면 라벨(n<idx> ±축/edge).
-			// 정적 월드=마젠타, 스켈레탈 본=주황. "붙는 노드가 어느 면에 어느 법선으로 닿았나"를 스크린샷으로 확정.
-			for (const FRopeNodeContactDebug& NC : S.NodeContacts)
-			{
-				const FColor NColor = NC.bWorldStatic ? FColor(255, 0, 255) : FColor(255, 128, 0);
-				const FVector Tip = NC.Position + NC.Normal * 15.0f;
-				DrawDebugDirectionalArrow(World, NC.Position, Tip, 6.0f, NColor, false, -1.0f, FG, 2.0f);
-				const FVector AN = NC.Normal.GetAbs();
-				FString Face;
-				if (AN.X > 0.9) { Face = NC.Normal.X > 0.0 ? TEXT("+X") : TEXT("-X"); }
-				else if (AN.Y > 0.9) { Face = NC.Normal.Y > 0.0 ? TEXT("+Y") : TEXT("-Y"); }
-				else if (AN.Z > 0.9) { Face = NC.Normal.Z > 0.0 ? TEXT("+Z") : TEXT("-Z"); }
-				// 대각 법선 = 볼록 모서리 접촉.
-				else { Face = TEXT("edge"); }
-				// 라벨은 n<idx> <면>만(간결). 본 이름은 색(주황=스켈레탈)으로 갈음 — 정보량 과다 방지.
-				DrawDebugString(World, Tip, FString::Printf(TEXT("n%d %s"), NC.NodeIndex, *Face), nullptr, NColor, 0.0f, true, 1.0f);
-			}
-
-			// 감김 축(Wrapping에서 결정된 경로 축): 대상을 관통하는 노란 선 + 방향 화살표. 같은 기둥을 여러
-			// 각도로 던져 이 선이 늘 장축(기둥 세로)을 따르는지(일관성) 눈으로 확인한다. Wrapping 페이즈에서만 뜬다.
-			if (S.bHasWrapAxis)
-			{
-				const FVector AxisDir = S.WrapAxisDirection.GetSafeNormal();
-				const FVector AxisO = S.WrapAxisOrigin;
-				// 축 길이는 로프 스케일에 비례(max(80, SegmentLength×6)) — 구 r.DynamicRope.Debug.DrawWrappingAxis
-				// 즉시모드 드로우를 여기로 일원화하며 그 수식을 이식. 축이 퇴화(0벡터)면 선/화살표는 생략하고 텍스트만.
-				const float AxisLen = FMath::Max(80.0f, S.WrapAxisSegmentLength * 6.0f);
-				if (!AxisDir.IsNearlyZero())
-				{
-					DrawDebugLine(World, AxisO - AxisDir * AxisLen, AxisO + AxisDir * AxisLen, FColor::Yellow, false, -1.0f, FG, 3.0f);
-					DrawDebugDirectionalArrow(World, AxisO, AxisO + AxisDir * AxisLen, 16.0f, FColor::Yellow, false, -1.0f, FG, 3.0f);
-				}
-				AddTextLine(FString::Printf(TEXT("  {yellow}wrapAxis{grey} dir=%s"), *AxisDir.ToCompactString()));
-			}
 		}
 	}
 }

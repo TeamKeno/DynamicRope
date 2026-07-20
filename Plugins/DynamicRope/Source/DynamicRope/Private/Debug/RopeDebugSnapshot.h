@@ -37,10 +37,11 @@ enum class ERopeDebugColliderShape : uint8
 	Bounds,
 };
 
-// 노드별 접촉 진단: post-solve 노드 위치를 collider에 다시 질의해 "지금 이 노드가 어느 면에, 어느 법선으로
-// 닿았나"를 데이터로 남긴다(GPU 런타임은 접촉을 리드백하지 않으므로 디버그 전용 CPU 질의). 노드가 벽/면에
-// 붙는 증상을 눈으로 확정하기 위한 것 — 화살표(법선) + 텍스트(면 축/collider 종류)로 그린다.
-struct FRopeNodeContactDebug
+// 노드별 **근접** 진단: post-solve 노드 위치를 collider에 다시 질의해 "이 노드가 어느 면을 어느 법선으로
+// 마주하고 있나"를 데이터로 남긴다(GPU 런타임은 접촉을 리드백하지 않으므로 디버그 전용 CPU 질의).
+// solver가 실제로 처리한 접촉이 **아니다** — 질의 반경을 CollisionRadius보다 넓혀 던지므로 닿지 않은
+// 근처 노드도 잡힌다. 노드가 벽/면에 붙는 증상을 눈으로 확정하기 위한 것이라 그 편이 유용하다.
+struct FRopeNodeProximityDebug
 {
 	int32   NodeIndex = INDEX_NONE;
 	// 노드 월드 위치(화살표 시작)
@@ -153,7 +154,7 @@ struct FRopeDebugSnapshot
 	float TensionReleaseForce = 0.0f;
 	// 이 로프의 도달 모드 — 자동 해제 문구에 함께 낸다.
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
-	// 장력/거리 자동 해제가 실제로 동작하는가. ③ GuaranteedWrap은 CheckWrappedAutoRelease가 조기 반환해
+	// 장력/거리 자동 해제가 실제로 동작하는가. GuaranteedWrap은 CheckWrappedAutoRelease가 조기 반환해
 	// 임계치를 보지 않는다(보장 계약은 해제에도 대칭이라 명시 해제만 유효).
 	bool bAutoReleaseEnabled = true;
 	// 임계 장력을 연속 초과한 시간과 발동까지 필요한 시간(0 = 임계 release 비활성). 임계를 넘어도
@@ -209,8 +210,10 @@ struct FRopeDebugSnapshot
 	//~ colliders(이 로프가 이번 프레임 질의한 collider들) ----------------
 	TArray<FRopeDebugCollider> Colliders;
 
-	//~ 노드별 접촉(디버그 CPU 재질의) — 붙는 노드 진단 -------------------
-	TArray<FRopeNodeContactDebug> NodeContacts;
+	//~ 노드별 근접(디버그 CPU 재질의) — 붙는 노드 진단 -------------------
+	TArray<FRopeNodeProximityDebug> NodeProximity;
+	// 재질의에 더한 여유 반경(cm). 화면이 "이건 solver 접촉이 아니라 r+N cm 질의 결과"라고 밝히는 데 쓴다.
+	float ProximityQueryMargin = 0.0f;
 
 	//~ 감김 축(Wrapping에서 ResolveWrappingAxis가 정한 경로 축) — [O] 뷰 선 시각화용 ---
 	// Wrapping 페이즈에서만 유효(bHasWrapAxis). 어느 축으로 감기는지 눈으로 확인하기 위한 것.
