@@ -25,46 +25,40 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Stats/Stats.h"
 
-// 'stat DynamicRope' GPU RT 타이밍 seam — 이 shaders 모듈은 런타임 DynamicRope 모듈보다 하위라 그쪽 RopeStats.h를
-// include할 수 없다. 그래서 같은 "DynamicRope" 그룹명으로 RT 스코프를 여기서 자체 선언한다 — 그룹 identity는 이름
-// 문자열로 합쳐져 런타임 GT 타이밍/카운터와 한 'stat DynamicRope' HUD에 함께 뜬다(카테고리도 STATCAT_Advanced로
-// 동일해야 program-wide ODR 안전). 아래 CYCLE stat은 각 RopeRT_* 스코프(SCOPE_CYCLE_COUNTER)에서 RT 스레드 시간을
-// 잡는다. STATS 꺼진 빌드에선 매크로가 자동 no-op. RunSteps=RT 총량, 나머지는 그 하위 분해(PackSDF=SDF 재업로드
-// 병목 지목용 — memory: sdf-global-volume-cache). GT 타이밍/부하 카운터는 런타임 RopeStats.h/.cpp가 소유.
+// 'stat DynamicRopeGPU' RT 타이밍/메모리/대역폭 — 그룹 선언과 분리 이유는 RopeGPUStatGroup.h 참조(런타임 GT
+// 대시보드 'stat DynamicRope'와 별개 그룹). 아래 CYCLE stat은 각 RopeRT_* 스코프(SCOPE_CYCLE_COUNTER)에서 RT
+// 스레드 시간을 잡는다 — GPU 타임라인 시간이 아니라 RT CPU 시간이다. STATS 꺼진 빌드에선 매크로가 자동 no-op.
+// RunSteps=RT 총량, 나머지는 그 하위 분해(PackSDF=SDF 재업로드 병목 지목용 — memory: sdf-global-volume-cache).
+// HUD에는 프레임 예산에 실제로 잡히는 단계만 둔다 — 서브밀리초 부기(EnsureBuffers/Pack Boxes·Convexes·
+// Overrides/Arm Readbacks)는 RopeRT_* Insights 스코프에 그대로 남아 있으니 필요할 때 거기서 본다.
 #include "RopeGPUStatGroup.h"
-DECLARE_CYCLE_STAT(TEXT("GPU RunSteps (RT total)"), STAT_RopeGPU_RunSteps, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU EnsureBuffers"), STAT_RopeGPU_EnsureBuffers, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Pack Capsules"), STAT_RopeGPU_PackCapsules, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Pack Boxes"), STAT_RopeGPU_PackBoxes, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Pack Convexes"), STAT_RopeGPU_PackConvexes, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Ensure Global SDF"), STAT_RopeGPU_EnsureGlobalSDF, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Pack SDF"), STAT_RopeGPU_PackSDF, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Pack Overrides"), STAT_RopeGPU_PackOverrides, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Add Solve Pass"), STAT_RopeGPU_AddSolvePass, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Add Detect Pass"), STAT_RopeGPU_AddDetectPass, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Graph Execute"), STAT_RopeGPU_GraphExecute, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Arm Readbacks"), STAT_RopeGPU_ArmReadbacks, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Consume Readbacks"), STAT_RopeGPU_ConsumeReadbacks, STATGROUP_DynamicRope);
-DECLARE_CYCLE_STAT(TEXT("GPU Dispatch Pending"), STAT_RopeGPU_DispatchPending, STATGROUP_DynamicRope);
+DECLARE_CYCLE_STAT(TEXT("GPU RunSteps (RT total)"), STAT_RopeGPU_RunSteps, STATGROUP_DynamicRopeGPU);
+DECLARE_CYCLE_STAT(TEXT("GPU Pack Capsules"), STAT_RopeGPU_PackCapsules, STATGROUP_DynamicRopeGPU);
+DECLARE_CYCLE_STAT(TEXT("GPU Ensure Global SDF"), STAT_RopeGPU_EnsureGlobalSDF, STATGROUP_DynamicRopeGPU);
+DECLARE_CYCLE_STAT(TEXT("GPU Pack SDF"), STAT_RopeGPU_PackSDF, STATGROUP_DynamicRopeGPU);
+DECLARE_CYCLE_STAT(TEXT("GPU Add Solve Pass"), STAT_RopeGPU_AddSolvePass, STATGROUP_DynamicRopeGPU);
+DECLARE_CYCLE_STAT(TEXT("GPU Add Detect Pass"), STAT_RopeGPU_AddDetectPass, STATGROUP_DynamicRopeGPU);
+DECLARE_CYCLE_STAT(TEXT("GPU Graph Execute"), STAT_RopeGPU_GraphExecute, STATGROUP_DynamicRopeGPU);
+DECLARE_CYCLE_STAT(TEXT("GPU Consume Readbacks"), STAT_RopeGPU_ConsumeReadbacks, STATGROUP_DynamicRopeGPU);
+DECLARE_CYCLE_STAT(TEXT("GPU Dispatch Pending"), STAT_RopeGPU_DispatchPending, STATGROUP_DynamicRopeGPU);
 // GPU 상주 VRAM(프레임 간 유지되는 영속 버퍼) — 로프별 Pos/Prev/InvMass/Contact + 전역 SDF 캐시(Dist/Vol).
 // RunSteps 끝에서 GetSize()(바이트) 합산해 SET. 전송 대역폭이 아니라 상주 풋프린트다(SDF는 캐시 크기).
-DECLARE_MEMORY_STAT(TEXT("GPU Mem: Rope Buffers"), STAT_RopeGPU_MemRopes, STATGROUP_DynamicRope);
-DECLARE_MEMORY_STAT(TEXT("GPU Mem: Global SDF"), STAT_RopeGPU_MemGlobalSDF, STATGROUP_DynamicRope);
-DECLARE_MEMORY_STAT(TEXT("GPU Mem: Resident Total"), STAT_RopeGPU_MemTotal, STATGROUP_DynamicRope);
-DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Resident Ropes (count)"), STAT_RopeGPU_ResidentRopeCount, STATGROUP_DynamicRope);
-DECLARE_DWORD_COUNTER_STAT(TEXT("GPU SDF Volumes"), STAT_RopeGPU_SDFVolumes, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Mem: Rope Buffers"), STAT_RopeGPU_MemRopes, STATGROUP_DynamicRopeGPU);
+DECLARE_MEMORY_STAT(TEXT("GPU Mem: Global SDF"), STAT_RopeGPU_MemGlobalSDF, STATGROUP_DynamicRopeGPU);
+DECLARE_MEMORY_STAT(TEXT("GPU Mem: Resident Total"), STAT_RopeGPU_MemTotal, STATGROUP_DynamicRopeGPU);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Resident Ropes (count)"), STAT_RopeGPU_ResidentRopeCount, STATGROUP_DynamicRopeGPU);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU SDF Volumes"), STAT_RopeGPU_SDFVolumes, STATGROUP_DynamicRopeGPU);
 // 프레임별 GPU 업로드 대역폭(실제 전송 바이트) — CreateStructuredBuffer 업로드를 RopeUploadBuffer로 감싸 누산.
-// 상주 풋프린트(위 GPU Mem)와 달리 매 프레임 GPU로 올리는 양이다. SDF는 CL389 캐시가 grow할 때만 튄다.
-DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (total)"), STAT_RopeGPU_UploadTotal, STATGROUP_DynamicRope);
-DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (SDF Volume)"), STAT_RopeGPU_UploadSDF, STATGROUP_DynamicRope);
-DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Colliders)"), STAT_RopeGPU_UploadColliders, STATGROUP_DynamicRope);
-DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Detect)"), STAT_RopeGPU_UploadDetect, STATGROUP_DynamicRope);
-DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Override)"), STAT_RopeGPU_UploadOverride, STATGROUP_DynamicRope);
-DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Seed)"), STAT_RopeGPU_UploadSeed, STATGROUP_DynamicRope);
+// 상주 풋프린트(위 GPU Mem)와 달리 매 프레임 GPU로 올리는 양이다. 분해는 두 축만 남긴다: SDF(=CL389 캐시가
+// 죽으면 매 프레임 MB 단위로 튄다 — 회귀 감시용)와 Colliders(콘텐츠 규모에 비례해 자라는 유일한 축). 나머지
+// (Detect/Override/Seed)는 작고 산발적이라 total에 묻어 둔다.
+DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (total)"), STAT_RopeGPU_UploadTotal, STATGROUP_DynamicRopeGPU);
+DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (SDF Volume)"), STAT_RopeGPU_UploadSDF, STATGROUP_DynamicRopeGPU);
+DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Colliders)"), STAT_RopeGPU_UploadColliders, STATGROUP_DynamicRopeGPU);
 // GPU→CPU 다운로드 대역폭 + 프레임당 컴퓨트 dispatch/substep 수(솔버 작업량).
-DECLARE_MEMORY_STAT(TEXT("GPU Readback/Frame (download)"), STAT_RopeGPU_ReadbackBytes, STATGROUP_DynamicRope);
-DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Dispatches/Frame"), STAT_RopeGPU_Dispatches, STATGROUP_DynamicRope);
-DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Substeps/Frame"), STAT_RopeGPU_Substeps, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Readback/Frame (download)"), STAT_RopeGPU_ReadbackBytes, STATGROUP_DynamicRopeGPU);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Dispatches/Frame"), STAT_RopeGPU_Dispatches, STATGROUP_DynamicRopeGPU);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Substeps/Frame"), STAT_RopeGPU_Substeps, STATGROUP_DynamicRopeGPU);
 
 // RT 전용 프레임 업로드 누산기(RunSteps 시작에서 리셋, 끝에서 SET). RunSteps는 프레임당 1회 실행.
 #if STATS
@@ -72,27 +66,24 @@ DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Substeps/Frame"), STAT_RopeGPU_Substeps, ST
 static uint64 GRopeUploadBytesTotal = 0;
 static uint64 GRopeUploadBytesSDF = 0;        // Rope.GlobalSDF* — 복셀 볼륨 재업로드(정상 상태 ~0; 매 프레임 크면 캐시 미작동)
 static uint64 GRopeUploadBytesColliders = 0;  // Capsules/Boxes/Convex/SDFColliders 인스턴스(매 프레임, 콜라이더 수 비례)
-static uint64 GRopeUploadBytesDetect = 0;     // Detect* — Flight 감지 입력
-static uint64 GRopeUploadBytesOverride = 0;   // Override* — 로직 페이즈(Wrapping/Releasing)
-static uint64 GRopeUploadBytesSeed = 0;       // Pos/Prev/InvMass 시드(재던지기/토폴로지 변화 시에만)
 static uint64 GRopeReadbackBytes = 0;         // GPU→CPU 리드백(다운로드) 바이트 — Pos/Prev/Lambda/Contact
 static uint32 GRopeDispatchCount = 0;         // 이번 프레임 컴퓨트 dispatch 수(솔브+감지)
 static uint32 GRopeSubstepSum = 0;            // 이번 프레임 substep 합(솔버 작업량 프록시)
 
-// 버퍼 이름으로 업로드를 카테고리 버킷에 분류(순서 중요 — Override*가 "Pos"/"Prev"를 포함하므로 앞에서 거른다).
+// 버퍼 이름으로 업로드를 카테고리 버킷에 분류. 감시 대상 두 축(SDF/Colliders)만 떼고 나머지(Detect/Override/
+// 시드/Params)는 total에만 남긴다 — 작고 산발적이라 행을 쓸 값어치가 없다.
 static void RopeAccumUploadBucket(const TCHAR* Name, uint64 Bytes)
 {
 	GRopeUploadBytesTotal += Bytes;
-	if      (FCString::Strifind(Name, TEXT("GlobalSDF")))    { GRopeUploadBytesSDF += Bytes; }
-	else if (FCString::Strifind(Name, TEXT("Override")))     { GRopeUploadBytesOverride += Bytes; }
-	else if (FCString::Strifind(Name, TEXT("Detect")))       { GRopeUploadBytesDetect += Bytes; }
+	if (FCString::Strifind(Name, TEXT("GlobalSDF")))
+	{
+		GRopeUploadBytesSDF += Bytes;
+	}
 	else if (FCString::Strifind(Name, TEXT("Capsules")) || FCString::Strifind(Name, TEXT("Boxes"))
 		  || FCString::Strifind(Name, TEXT("Convex"))    || FCString::Strifind(Name, TEXT("SDFColliders")))
-		{ GRopeUploadBytesColliders += Bytes; }
-	else if (FCString::Strifind(Name, TEXT("Rope.Pos")) || FCString::Strifind(Name, TEXT("Rope.Prev"))
-		  || FCString::Strifind(Name, TEXT("Rope.InvMass")))
-		{ GRopeUploadBytesSeed += Bytes; }
-	// 그 외(Rope.Params 등) — total에만 집계.
+	{
+		GRopeUploadBytesColliders += Bytes;
+	}
 }
 #endif
 
@@ -846,7 +837,6 @@ static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	FRopeResidentRope& R, FRopeStepBuild& B)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_EnsureBuffers);
-	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_EnsureBuffers);
 	const int32 N = S.NumNodes;
 	B.bSeed = !R.PosBuf.IsValid() || R.NumNodes != N || R.Generation != S.Generation;
 
@@ -920,7 +910,6 @@ static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackBoxes);
-	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_PackBoxes);
 	TArray<FRopeBoxGPU>& BoxesFlat = *GraphBuilder.AllocObject<TArray<FRopeBoxGPU>>();
 	for (const FRopeGPUBox& Box : S.Boxes)
 	{
@@ -951,7 +940,6 @@ static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep&
 static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackConvexes);
-	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_PackConvexes);
 	TArray<FRopeConvexGPU>& ConvFlat = *GraphBuilder.AllocObject<TArray<FRopeConvexGPU>>();
 	TArray<FVector4f>&      PlaneFlat = *GraphBuilder.AllocObject<TArray<FVector4f>>();
 	for (const FRopeGPUConvex& Cv : S.Convexes)
@@ -1198,7 +1186,6 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 static void RopePackOverrides(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& S, FRopeStepBuild& B)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackOverrides);
-	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_PackOverrides);
 	const int32 N = S.NumNodes;
 	TArray<uint32>&    OvFlags = *GraphBuilder.AllocObject<TArray<uint32>>();
 	TArray<FVector4f>& OvPos   = *GraphBuilder.AllocObject<TArray<FVector4f>>();
@@ -1340,7 +1327,6 @@ static void RopeArmReadbacks(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 	FRopeResidentRope& R, const FRopeStepBuild& B, FRDGBufferRef LambdaRDG)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_ArmReadbacks);
-	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_ArmReadbacks);
 	const int32 N = S.NumNodes;
 	if (!R.bReadbackArmed)
 	{
@@ -1495,9 +1481,6 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	GRopeUploadBytesTotal = 0;
 	GRopeUploadBytesSDF = 0;
 	GRopeUploadBytesColliders = 0;
-	GRopeUploadBytesDetect = 0;
-	GRopeUploadBytesOverride = 0;
-	GRopeUploadBytesSeed = 0;
 	GRopeReadbackBytes = 0;
 	GRopeDispatchCount = 0;
 	GRopeSubstepSum = 0;
@@ -1607,9 +1590,6 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		SET_MEMORY_STAT(STAT_RopeGPU_UploadTotal, GRopeUploadBytesTotal);
 		SET_MEMORY_STAT(STAT_RopeGPU_UploadSDF, GRopeUploadBytesSDF);
 		SET_MEMORY_STAT(STAT_RopeGPU_UploadColliders, GRopeUploadBytesColliders);
-		SET_MEMORY_STAT(STAT_RopeGPU_UploadDetect, GRopeUploadBytesDetect);
-		SET_MEMORY_STAT(STAT_RopeGPU_UploadOverride, GRopeUploadBytesOverride);
-		SET_MEMORY_STAT(STAT_RopeGPU_UploadSeed, GRopeUploadBytesSeed);
 		SET_MEMORY_STAT(STAT_RopeGPU_ReadbackBytes, GRopeReadbackBytes);
 		SET_DWORD_STAT(STAT_RopeGPU_Dispatches, GRopeDispatchCount);
 		SET_DWORD_STAT(STAT_RopeGPU_Substeps, GRopeSubstepSum);

@@ -98,17 +98,17 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FRopeBuildTubeResidentCS, "/Plugin/DynamicRope/Private/RopeBuildTube.usf", "RopeBuildTubeResidentCS", SF_Compute);
 
-// ── 'stat DynamicRope' — GPU 튜브 빌드 대역폭 ──────────────────────────────────────────────────────
-// RopeGPUSolver.cpp가 같은 "DynamicRope" 그룹으로 솔버/충돌 업로드(GPU Upload/Frame *)를 계측하지만, 튜브
+// ── 'stat DynamicRopeGPU' — GPU 튜브 빌드 대역폭 ───────────────────────────────────────────────────
+// RopeGPUSolver.cpp가 같은 "DynamicRopeGPU" 그룹으로 솔버/충돌 업로드(GPU Upload/Frame *)를 계측하지만, 튜브
 // 중심선 업로드는 그 RunSteps 경로 밖 — 프록시(FRopeSceneProxy::BuildTubeGPU)별 렌더 커맨드라 거기서 빠진다.
 // 그래서 여기서 따로 잡는다. 그룹 선언은 RopeGPUStatGroup.h(모듈 공용, include guard)가 소유 — 개별 stat은
 // static이라 이 TU 로컬이다.
 // 비-resident 프레임에만 발생: 프록시가 CPU 중심선 미러(NumRings×float3)를 매 프레임 CenterlineBuffer로 올려
 // 컴퓨트가 읽는다(BuildTube_RenderThread). resident 프레임은 솔버 상주 PosBuf를 직접 읽어 업로드 0 — 그
 // 절약분을 Resident 카운터로 대비해 본다(resident 비율이 높을수록 이 대역폭은 0에 수렴).
-DECLARE_MEMORY_STAT(TEXT("GPU Tube Upload/Frame (Centerline)"), STAT_RopeGPU_TubeUpload, STATGROUP_DynamicRope);
-DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Tube Builds/Frame"), STAT_RopeGPU_TubeBuilds, STATGROUP_DynamicRope);
-DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Tube Resident Builds/Frame"), STAT_RopeGPU_TubeResidentBuilds, STATGROUP_DynamicRope);
+DECLARE_MEMORY_STAT(TEXT("GPU Tube Upload/Frame (Centerline)"), STAT_RopeGPU_TubeUpload, STATGROUP_DynamicRopeGPU);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Tube Builds/Frame"), STAT_RopeGPU_TubeBuilds, STATGROUP_DynamicRopeGPU);
+DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Tube Resident Builds/Frame"), STAT_RopeGPU_TubeResidentBuilds, STATGROUP_DynamicRopeGPU);
 
 #if STATS
 // 튜브 빌드는 로프(프록시)별 렌더 커맨드라 솔버 RunSteps 같은 단일 프레임 진입점이 없다. RT 프레임 번호가
