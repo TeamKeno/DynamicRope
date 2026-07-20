@@ -51,24 +51,6 @@ namespace
 		}
 	}
 
-	FColor PhaseColor(ERopePhase Phase)
-	{
-		switch (Phase)
-		{
-		case ERopePhase::Flight:     return FColor::Cyan;
-		case ERopePhase::Contacting: return FColor::Yellow;
-		case ERopePhase::Wrapped:    return FColor::Green;
-		case ERopePhase::Wrapping:   return FColor(255, 160, 0);
-		case ERopePhase::Releasing:  return FColor::Orange;
-		// GuidedThrow는 확정 경로를 따라가는 비행 — Flight와 구분되게 파랑.
-		case ERopePhase::GuidedThrow: return FColor(80, 140, 255);
-		// Reel은 장전 대기 — 던지기 전 상태라 Free보다 밝은 회색.
-		case ERopePhase::Reel:       return FColor(210, 210, 210);
-		case ERopePhase::Free:
-		default:                     return FColor(160, 160, 160);
-		}
-	}
-
 	FColor CandidateSourceColor(ERopeContactCandidateSource Source)
 	{
 		switch (Source)
@@ -79,7 +61,6 @@ namespace
 		default: return FColor::White;
 		}
 	}
-
 }
 
 FGameplayDebuggerCategory_Rope::FGameplayDebuggerCategory_Rope()
@@ -256,17 +237,14 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		Rope.IsGpuSteppedThisFrame() ? TEXT("{green}on") : TEXT("{red}cpu-fallback"),
 		*TubeDiagString(Points.Num(), Rope.TubeSmoothingSubdiv)));
 
-	//~ centerline(라이브 위치/페이즈) -----------------------------------
+	//~ centerline(라이브 위치) -------------------------------------------
 	if (HasView(EView::Centerline))
 	{
-		const FColor LineColor = PhaseColor(LivePhase);
-		for (int32 i = 0; i < Points.Num(); ++i)
+		// 노드 점만 찍는다 — 연결 세그먼트는 튜브 메시가 이미 보여주므로 중복이고, phase 색은 위 헤더
+		// 줄의 phase=... 텍스트가 낸다. 노드 단위 상태 구분은 [U]flight / [I]wrapped 오버레이 담당.
+		for (const FVector& Point : Points)
 		{
-			AddShape(FGameplayDebuggerShape::MakePoint(Points[i], 2.0f, FColor::Yellow));
-			if (i + 1 < Points.Num())
-			{
-				AddShape(FGameplayDebuggerShape::MakeSegment(Points[i], Points[i + 1], 2.0f, LineColor));
-			}
+			AddShape(FGameplayDebuggerShape::MakePoint(Point, 2.0f, FColor::Yellow));
 		}
 		// latch 노드 강조(스냅샷 인덱스를 라이브 위치에 적용).
 		if (Snap)
