@@ -3,6 +3,7 @@
 #include "Core/RopeWrapTarget.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Collision/RopeCollider.h"
 
 FTransform ResolveBindingWorld(const FRopeBindingFrame& Frame)
 {
@@ -69,6 +70,34 @@ namespace RopeWrapTargets
 			{
 				OutChildren.Add(BoneName);
 			}
+		}
+	}
+
+	void FilterWrappableColliders(
+		const TArray<IRopeCollider*>& InColliders,
+		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
+		TArray<IRopeCollider*>& OutColliders)
+	{
+		OutColliders.Reset(InColliders.Num());
+		for (IRopeCollider* Collider : InColliders)
+		{
+			if (!Collider)
+			{
+				continue;
+			}
+
+			FName Bone = NAME_None;
+			const USceneComponent* Mesh = nullptr;
+			Collider->GetGPUAttribution(Bone, Mesh);
+
+			// 귀속 없음 = 감김 대상이 아니라 표면 기하일 뿐 → 게이트 대상에서 제외(항상 유지).
+			const bool bAttributed = !Bone.IsNone() || Mesh != nullptr;
+			if (bAttributed && !CanWrapTarget(Mesh, Bone))
+			{
+				continue;
+			}
+
+			OutColliders.Add(Collider);
 		}
 	}
 }

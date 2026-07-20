@@ -309,8 +309,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	bool ApplyPreset(const URopePreset* Preset);
 
-	/** rope를 AimDir 방향으로 발사한다. ①②는 초기 tip 속도를 받아 물리 Flight로,
-	 *  ③은 Reel에서만 성립하며 확정 경로를 따라가는 GuidedThrow로 진입한다(모드가 경로를 정한다). */
+	/** rope를 발사한다. ①②는 초기 tip 속도를 받아 물리 Flight로, ③은 Reel에서만 성립하며 확정 경로를
+	 *  따라가는 GuidedThrow로 진입한다(모드가 경로를 정한다).
+	 *  ⚠ AimDir은 **사용되지 않는다** — 실제 방향은 ThrowParams.FrameMode의 Forward가 단일 소스다
+	 *  (URopeWielderComponent::ThrowInDirection과 같은 legacy 인자). 방향을 직접 지정하려면
+	 *  ThrowWithContext(FRopeThrowContext)를 쓸 것. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Throw(const FVector& AimDir);
 
@@ -657,14 +660,18 @@ protected:
 	 */
 	virtual bool ShouldAbortGuaranteedThrow(const FRopePreparedThrowPreview& Prepared) const { return false; }
 
-	/** Throw(AimDir) 편의 진입점이 만드는 기본 컨텍스트(throw당 1회). 조준 규약을 바꾸려면 오버라이드.
-	 *  기본 구현은 FRopeThrowContext::MakeDefault(공용 조립 — 프레임 기저 규약은 그쪽 주석 참고) 위임. */
-	virtual FRopeThrowContext MakeDefaultThrowContext(const FVector& AimDir) const;
-
-	/** throw 컨텍스트 최종 해석(throw당 1회 — 실제 던지기+프리뷰 빌드가 전부 이 관문을 지난다):
-	 *  프레임을 정규직교(오른손계)로 재구성(Forward 기준, Up 직교화, Right = Up×Forward 재유도 —
-	 *  입력 Right 무시), 속도·원점 폴백. 에임 어시스트 등 커스텀 지점(오버라이드 시 프리뷰와 실제
-	 *  던지기가 자동으로 일치). */
+	/**
+	 * throw 컨텍스트 최종 해석 — **던지기 컨텍스트를 손댈 수 있는 유일한 확장 훅**(throw당 1회).
+	 * 프레임을 정규직교(오른손계)로 재구성(Forward 기준, Up 직교화, Right = Up×Forward 재유도 —
+	 * 입력 Right 무시), 속도·원점 폴백. 에임 어시스트 등 커스텀 지점(오버라이드하면 프리뷰와 실제
+	 * 던지기가 자동으로 일치한다).
+	 *
+	 * **모든 던지기가 이 관문을 지난다** — 컨텍스트 생산자가 무엇이든(Throw 편의 진입점의
+	 * FRopeThrowContext::MakeDefault / URopeWielderComponent::BuildThrowContext / BP 직접 호출)
+	 * 여기로 수렴한다. ③ prepared 경로는 preview 빌드 시점에 한 번 지나고 그 결과를 재사용한다.
+	 * 과거엔 "조준 규약을 바꾸는" 훅이 MakeDefaultThrowContext에도 있었으나, Wielder 경로가 자체
+	 * 컨텍스트를 만들어 그 훅을 지나지 않아 오버라이드해도 무효였다 → 훅을 이쪽 하나로 일원화했다.
+	 */
 	virtual FRopeThrowContext ResolveThrowContext(const FRopeThrowContext& ThrowContext) const;
 
 	/**
@@ -1012,6 +1019,14 @@ private:
 
 	/** WrappingPhase에 넘길 호출 컨텍스트(WrapConfig/collider 스냅샷/튜브 반지름/로그 이름). */
 	FRopeWrappingPhase::FContext MakeWrappingContext() const;
+
+	/**
+	 * MakeWrappingContext가 넘기는 collider 목록의 저장소 — CanWrapTarget 게이트를 통과한 것만 담는다
+	 * (FContext가 배열을 *참조*로 들고 있어 호출보다 오래 사는 저장소가 필요하다).
+	 * 금지 대상이 감김 경로 빌드의 표면/귀속 후보로 올라오는 것을 막는 관문이며, 게이트를
+	 * 오버라이드하지 않은 로프에서는 FrameColliders와 내용이 같다(동작 불변).
+	 */
+	mutable TArray<IRopeCollider*> WrappableColliders;
 
 	void CommitWrapping();
 

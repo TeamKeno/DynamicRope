@@ -342,11 +342,23 @@ namespace
 		return PreviewSim;
 	}
 
-	FRopeWrappingPhase::FContext MakeWrappingContext(const FRopeThrowPreviewBuilder::FInput& Input)
+	// OutColliderStorage는 호출자가 소유한다 — FContext가 배열을 참조로 들기 때문에 임시 저장소를
+	// 여기서 만들면 dangling이 된다. 런타임(URopeComponent::MakeWrappingContext)과 같은 게이트를
+	// 태워, preview가 고른 대상과 실제 감김 경로가 같은 집합을 보게 한다.
+	FRopeWrappingPhase::FContext MakeWrappingContext(const FRopeThrowPreviewBuilder::FInput& Input,
+		TArray<IRopeCollider*>& OutColliderStorage)
 	{
+		RopeWrapTargets::FilterWrappableColliders(GetColliders(Input),
+			[&Input](const USceneComponent* Mesh, FName Bone)
+			{
+				// 미설정(단위 테스트/게이트 없는 호출자)이면 전부 허용 — CanWrapTarget 기본 구현과 같다.
+				return !Input.CanWrapTarget || Input.CanWrapTarget(Mesh, Bone);
+			},
+			OutColliderStorage);
+
 		FRopeWrappingPhase::FContext Ctx{
 			Input.WrapConfig,
-			GetColliders(Input),
+			OutColliderStorage,
 			Input.RopeRadius,
 			Input.OwnerName
 		};
@@ -530,8 +542,10 @@ namespace
 
 		TArray<FVector> PreviewPoints;
 		FRopeWrappingPhase PreviewWrappingPhase;
+		// 게이트 통과 collider 저장소 — FContext보다 오래 살아야 한다(참조 보유).
+		TArray<IRopeCollider*> WrappableColliders;
 		if (!PreviewWrappingPhase.BuildPreviewCenterline(LatchAnchor, Mesh, Candidate.Bone,
-			SourceSim, MakeWrappingContext(Input), PreviewPoints))
+			SourceSim, MakeWrappingContext(Input, WrappableColliders), PreviewPoints))
 		{
 			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				FString::Printf(TEXT("wrap preview centerline build failed (mesh=%s, bone=%s, node=%d, sourceNodes=%d)"),

@@ -425,9 +425,11 @@ URopeComponent::URopeComponent()
 
 // ===== API ==================================================================
 
-void URopeComponent::Throw(const FVector& AimDir)
+void URopeComponent::Throw(const FVector& /*AimDir*/)
 {
-	ThrowWithContext(MakeDefaultThrowContext(AimDir));
+	// 프레임 기저 규약은 FRopeThrowContext::MakeDefault(RopeTypes.cpp) 주석 참고. 커스텀 지점은
+	// ResolveThrowContext 하나다 — ThrowWithContext가 그 관문을 태운다.
+	ThrowWithContext(FRopeThrowContext::MakeDefault(*this, ThrowParams));
 }
 
 void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
@@ -2077,13 +2079,6 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 
 // ===== Throw ================================================================
 
-FRopeThrowContext URopeComponent::MakeDefaultThrowContext(const FVector& /*AimDir*/) const
-{
-	// 조립 로직은 FRopeThrowContext::MakeDefault(RopeTypes.cpp — 프레임 기저 규약 포함)로 이동.
-	// 이 함수는 서브클래스가 조준 규약을 바꾸는 확장 훅으로 남는다(기본 구현 = 공용 조립 위임).
-	return FRopeThrowContext::MakeDefault(*this, ThrowParams);
-}
-
 FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& ThrowContext) const
 {
 	FRopeThrowContext Resolved = ThrowContext;
@@ -3242,9 +3237,16 @@ FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 		GuidePlane = CaptureTravelFrame.PlaneNormal;
 	}
 
+	// wrap 대상 게이트(CanWrapTarget)를 감김 경로에도 적용한다 — 조준/preview/판정이 이미 거른 대상을
+	// 경로 빌드만 모르고 주워 앵커를 까는 불일치를 막는다. 게이트 기본값(전부 허용)이면 결과는
+	// FrameColliders와 동일하다.
+	RopeWrapTargets::FilterWrappableColliders(SimFrame.FrameColliders,
+		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); },
+		WrappableColliders);
+
 	FRopeWrappingPhase::FContext Ctx{
 		WrapConfig,
-		SimFrame.FrameColliders,
+		WrappableColliders,
 		Radius,
 		GetName(),
 		false,

@@ -24,6 +24,7 @@
 #include "Core/RopeTypes.h"
 
 class USceneComponent;
+class IRopeCollider;
 
 /**
  * 앵커/랩 노드가 "무엇에 붙어 매 프레임 따라가는가"를 기술하는 바인딩 프레임(POD — 핫 루프 규칙 준수).
@@ -78,6 +79,22 @@ namespace RopeWrapTargets
 	 * 그 외 = 없음. SurfaceVectorField 본 그래프 확장(bounded Dijkstra)의 이웃 열거에 쓴다.
 	 */
 	DYNAMICROPE_API void AppendChildTargetKeys(const USceneComponent* Mesh, FName Bone, TArray<FName>& OutChildren);
+
+	/**
+	 * URopeComponent::CanWrapTarget 게이트를 collider 스냅샷에 적용해 OutColliders를 채운다
+	 * (감김 경로 빌드가 금지된 대상 위에 앵커를 깔지 않게 하는 관문).
+	 *
+	 * 판정 기준은 감김 경로가 대상을 식별하는 방법과 **같은 것**을 쓴다 — IRopeCollider::GetGPUAttribution.
+	 * 귀속이 없는 collider(월드 정적 등: Bone=None && Mesh=null)는 애초에 감김 대상이 될 수 없고
+	 * 표면 기하로만 쓰이므로 게이트와 무관하게 남긴다.
+	 *
+	 * 게이트 기본 구현이 전부 허용이면 결과는 입력과 동일하다 — 즉 **오버라이드하지 않은 로프의
+	 * 동작은 정의상 불변**이다.
+	 */
+	DYNAMICROPE_API void FilterWrappableColliders(
+		const TArray<IRopeCollider*>& InColliders,
+		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
+		TArray<IRopeCollider*>& OutColliders);
 }
 
 /**

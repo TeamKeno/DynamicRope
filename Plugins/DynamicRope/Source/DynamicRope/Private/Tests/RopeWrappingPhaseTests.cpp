@@ -9,6 +9,7 @@
 
 #include "Logic/RopeWrappingPhase.h"
 #include "Collision/RopeCollider.h"
+#include "Core/RopeWrapTarget.h"
 #include "Components/SceneComponent.h"
 #include "RopeTestHelpers.h"
 
@@ -689,6 +690,48 @@ bool FRopeResolveModeEngagementTest::RunTest(const FString& Parameters)
 		RopeWrapModes::ClampEngagement(Sim, Cinch) == Bare);
 	TestTrue(TEXT("BareWrap under Guaranteed promotes to Pierce"),
 		RopeWrapModes::ClampEngagement(Guaranteed, Bare) == Pierce);
+	return true;
+}
+
+// wrap 대상 게이트(URopeComponent::CanWrapTarget)가 감김 *경로 빌드*에도 적용되는지 잠근다.
+// 과거엔 조준/preview/판정만 게이트를 태우고 Wrapping 경로는 콜라이더 스냅샷을 그대로 받아,
+// "조준은 거부한 대상 위로 경로가 깔리는" 불일치가 있었다. 관문은 컴포넌트 경계의 필터 하나다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrapTargetGateFilterTest,
+	"DynamicRope.Wrapping.CanWrapTargetGateFiltersWrappingColliders",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrapTargetGateFilterTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* AllowedMesh = MakeMockTarget();
+	USceneComponent* DeniedMesh = MakeMockTarget();
+
+	FCapsuleCollider AllowedCol(FVector(0, 0, -50), FVector(0, 0, 50), 25.0f, FName("arm"), AllowedMesh);
+	FCapsuleCollider DeniedCol(FVector(100, 0, -50), FVector(100, 0, 50), 25.0f, FName("leg"), DeniedMesh);
+	// 귀속 없는 collider(월드 정적 기하) — 감김 대상이 될 수 없으므로 게이트 대상이 아니다.
+	FCapsuleCollider WorldGeo(FVector(0, 200, -50), FVector(0, 200, 50), 25.0f, NAME_None, nullptr);
+
+	const TArray<IRopeCollider*> In = { &AllowedCol, &DeniedCol, &WorldGeo };
+	TArray<IRopeCollider*> Out;
+
+	// ① 기본 게이트(전부 허용) = 입력 불변 — 오버라이드하지 않은 로프의 동작 보존 계약.
+	RopeWrapTargets::FilterWrappableColliders(In,
+		[](const USceneComponent*, FName) { return true; }, Out);
+	TestEqual(TEXT("게이트 기본값이면 collider 집합이 그대로다"), Out.Num(), In.Num());
+
+	// ② 특정 대상 거부 → 그 collider만 빠진다.
+	RopeWrapTargets::FilterWrappableColliders(In,
+		[DeniedMesh](const USceneComponent* Mesh, FName) { return Mesh != DeniedMesh; }, Out);
+	TestEqual(TEXT("거부된 대상 1개가 빠진다"), Out.Num(), 2);
+	TestTrue(TEXT("허용 대상은 남는다"), Out.Contains(&AllowedCol));
+	TestFalse(TEXT("거부 대상은 감김 경로에 보이지 않는다"), Out.Contains(&DeniedCol));
+	TestTrue(TEXT("귀속 없는 월드 기하는 게이트와 무관하게 남는다"), Out.Contains(&WorldGeo));
+
+	// ③ 전부 거부해도 귀속 없는 표면 기하는 유지된다(로프가 벽을 통과하면 안 된다).
+	RopeWrapTargets::FilterWrappableColliders(In,
+		[](const USceneComponent*, FName) { return false; }, Out);
+	TestEqual(TEXT("전부 거부해도 귀속 없는 기하는 남는다"), Out.Num(), 1);
+	TestTrue(TEXT("남은 것은 월드 기하"), Out.Contains(&WorldGeo));
+
 	return true;
 }
 
