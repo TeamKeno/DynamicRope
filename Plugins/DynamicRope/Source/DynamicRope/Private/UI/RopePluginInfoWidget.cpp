@@ -346,8 +346,9 @@ TArray<FRopePluginInfoEntry> URopePluginInfoWidget::GetDefaultLimitations()
 			TEXT("The GPU tube path requires NumRings <= 256; oversized ropes fall back to the CPU tube builder.")),
 		Make(TEXT("CPU fallback contexts"),
 			TEXT("Cook, dedicated server and -nullrhi have no renderable RHI, so they run the CPU solver / tube instead of the GPU path.")),
-		Make(TEXT("Single wrap target per rope"),
-			TEXT("A rope commits to one wrap at a time; multi-seed wraps (two-leg / suspension) are not implemented yet.")),
+		Make(TEXT("Spiral wraps only the dominant target"),
+			TEXT("Secondary seeds (two-leg / suspension) hold and commit on their own bones, but the wrap spiral is ")
+			TEXT("built for the dominant target only. Raise MaxWrapSeeds above its default of 1 to enable them.")),
 		Make(TEXT("Wrap tuning is sensitive"),
 			TEXT("Default WrapDecisionTime (~1 frame) and MinLatchNodes (1) latch on first sustained contact — tune them for your targets.")),
 	};

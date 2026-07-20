@@ -6,12 +6,8 @@
 	"Description": "dynamic rope interaction",
 	"Category": "Other",
 	"CreatedBy": "Team Keno",
-	"CreatedByURL": "",
-	"DocsURL": "",
-	"MarketplaceURL": "",
-	"SupportURL": "",
 	"CanContainContent": true,
-	"IsBetaVersion": false,
+	"IsBetaVersion": true,
 	"IsExperimentalVersion": false,
 	"Installed": false,
 	"Modules": [

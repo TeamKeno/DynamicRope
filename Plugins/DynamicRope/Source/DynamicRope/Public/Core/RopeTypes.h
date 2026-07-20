@@ -117,8 +117,12 @@ enum class ERopeTipEngagement : uint8
 	/** 창/작살 꽂힘: 팁 mesh 히트 순간 접점 앵커 1개(bone-local)로 성립. ③ 전용. */
 	Pierce UMETA(DisplayName = "Pierce"),
 
-	/** 올가미/폐로프 조임: 루프가 대상을 포획하면 둘레 앵커 링으로 성립. ③ 전용. */
-	Cinch UMETA(DisplayName = "Cinch")
+	/**
+	 * 올가미/폐로프 조임: 루프가 대상을 포획하면 둘레 앵커 링으로 성립. ③ 전용.
+	 * **미구현** — 고르면 BareWrap 감김 경로로 떨어진다(preview/앵커 모두). 계약상 유효한 조합이라
+	 * 저장·던지기는 되지만 동작은 Cinch가 아니므로 표시 이름에 명시한다. 던질 때 런타임 경고 1회.
+	 */
+	Cinch UMETA(DisplayName = "Cinch (Not Implemented)")
 };
 
 /** 도달 모드가 강제하는 제약의 단일 소스 — 결착 모델 조합(IsEngagementAllowed/ClampEngagement)과

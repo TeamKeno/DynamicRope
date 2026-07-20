@@ -32,7 +32,7 @@ GPU화는 *시뮬레이션*과 *렌더*가 **직교**한다.
 | 축 | 선택 방식 | 폴백/기본 | GPU |
 |---|---|---|---|
 | 시뮬레이션(솔브+감지) | **자동** — CVar 없음 | 렌더 불가 RHI(쿡/-nullrhi/서버)면 CPU `ParallelFor` | 렌더 가능 RHI면 GPU 상주(항상) |
-| 렌더(튜브) | **자동** — CVar 없음 | 렌더 불가 RHI 또는 링>256이면 CPU `BuildTube` | GPU 컴퓨트 정점(pos+tangent+UV, B2-full) |
+| 렌더(튜브) | **자동** — CVar 없음 | 렌더 불가 RHI 또는 링>512이면 CPU `BuildTube` | GPU 컴퓨트 정점(pos+tangent+UV, B2-full) |
 
 - **초기엔** `r.DynamicRope.GPUSolver` / `.GPUTube` 토글로 CPU/GPU를 골랐으나(둘 다 0이면 원본 CPU와 바이트 동일),
   G0~G3에서 whip/로직 페이즈/감지를, B2-full에서 튜브 tangent/UV까지 전부 GPU로 옮긴 뒤 토글을 없애고 자동 선택으로 전환했다.
@@ -106,7 +106,7 @@ async가 맞는 경우는 "처리량(많은 로프) + 지연 허용"이지, 손�
 - `Source/DynamicRope/`
   - `Subsystem/RopeSimSubsystem` — 중앙 구동 + GPU 솔버 소유 + **collider 레지스트리/중앙 수집(CL57)**.
   - `RopeComponent` — Facade, phase machine, `SimGeneration`/`bGpuSteppedThisFrame`.
-  - `Render/RopeSceneProxy` — 튜브 렌더. GPU 경로(자동, 렌더 가능 RHI+링<=256): pos+tangent+UV UAV 버퍼를
+  - `Render/RopeSceneProxy` — 튜브 렌더. GPU 경로(자동, 렌더 가능 RHI+링<=512): pos+tangent+UV UAV 버퍼를
     컴퓨트로 채우고 resident PosBuf를 GPU 스무딩(무지연). 폴백: CPU `BuildTube`.
   - `Collision/` — `IRopeCollider`(FROZEN contract), provider(캡슐/SDF), GPU 추출자(`GetGPUCapsule`/`GetGPUSDF`).
 
@@ -122,12 +122,13 @@ async가 맞는 경우는 "처리량(많은 로프) + 지연 허용"이지, 손�
 | G1 | whip 커널화(제외조건 제거, override로 가이드 타깃 주입) | 153 |
 | G2 | 로직 페이즈 통합(FRopeNodeOverrideFrame; Wrapped도 GPU 상주; M5c 핸드오프 동기 리드백) | 155 |
 | G3a/b | 접촉 감지 GPU화(actual+predictive, capsule+SDF; 콜라이더 인덱스→bone/mesh 귀속) | 156/157 |
-| G4 | GPU 단일 런타임(CVar 제거, RHI 유무 자동 선택, CPU 자동 폴백) + >256 감지 게이트 픽스 | 159/160 |
+| G4 | GPU 단일 런타임(CVar 제거, RHI 유무 자동 선택, CPU 자동 폴백) + >512 감지 게이트 픽스 | 159/160 |
 | G5 | B2-full 튜브(pos+tangent+UV GPU) 165 · GPUTube 상시화 166 · GPU 튜브 스무딩(무지연) 167 | 165~167 |
 
 - **미해결(트랙 밖)**: 미러(`GetLatest`) 완전 제거 — 비-resident 폴백 + 디버그/GT 로직이 아직 읽음.
 - **보류(수요 시)**: 다중 로프 단일 dispatch(per-rope resident PosBuf 구조와 충돌 → 슬랩 재설계),
-  256노드 초과(단일 스레드그룹 한도 → multi-threadgroup 재설계; 현재는 >256 자동 CPU 폴백).
+  512노드 초과(단일 스레드그룹 한도 → multi-threadgroup 재설계; 현재는 >512 자동 CPU 폴백).
+  상한의 단일 소스는 `RopeGPU::MaxTubeRings()` / `FRopeGPUSolver::MaxNodes`다 — 문서를 고칠 때 그쪽을 볼 것.
 
 ## 6a. GDF 월드 충돌 — 구현됨 (CL 170+, 기본 OFF)
 

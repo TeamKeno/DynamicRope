@@ -438,6 +438,17 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 		TipEngagement = ClampedEngagement;
 	}
 
+	// Cinch는 계약상 유효한 조합이지만(③ 전용) 아직 구현이 없어 실제로는 BareWrap 감김 경로로 떨어진다.
+	// 이벤트 페이로드에는 저작값 그대로 Cinch가 실리므로, 로그가 없으면 소비자는 Cinch가 성립한 줄 안다.
+	// 던지기당이 아니라 로프당 1회만 남긴다(연사 시 로그 홍수 방지).
+	if (TipEngagement == ERopeTipEngagement::Cinch && !bWarnedCinchUnimplemented)
+	{
+		bWarnedCinchUnimplemented = true;
+		UE_LOG(LogDynamicRope, Warning,
+			TEXT("[%s] TipEngagement=Cinch는 아직 미구현이다 — 실제 동작은 BareWrap 감김이고 이벤트에만 Cinch로 보고된다."),
+			*GetName());
+	}
+
 	// ③ GuaranteedWrap의 BP 직행/AI 경로: Wielder의 조준 흐름 없이 Throw가 불려도 보장 계약을 지킨다 —
 	// 컴포넌트가 스스로 prepared preview를 빌드해 구속 경로로 던진다. 빌드 성공 = 조준한 대상에 무조건 꽂힘,
 	// 빌드 실패(대상 없음/사거리 밖) = 거부가 아니라 레이 끝점 아치 투척으로 폴백(2026-07-14 보장 재정의).

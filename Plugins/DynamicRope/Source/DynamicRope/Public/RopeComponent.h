@@ -729,6 +729,9 @@ private:
 	// 우리가 스폰했는가 — EndPlay에서 스폰분만 파괴하기 위한 소유권 플래그(외부 컴포넌트 보호).
 	bool bTipMeshSpawnedByUs = false;
 
+	// 미구현 결착(Cinch) 경고를 로프당 1회만 남기기 위한 래치(연사 시 로그 홍수 방지).
+	bool bWarnedCinchUnimplemented = false;
+
 	// 태그로 재사용한 팁 StaticMeshComponent의 기존 월드 스케일. SetWorldTransform으로 덮어도 비주얼 크기를 보존한다.
 	FVector TipMeshAuthoredScale = FVector::OneVector;
 
