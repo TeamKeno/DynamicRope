@@ -2667,20 +2667,6 @@ void URopeComponent::RemoveNonWrappableCandidates(TArray<FRopeContactCandidate>&
 void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
 	const FRopeFlightContactDetector::FParams& DetectParams, TArray<FRopeContactCandidate>& OutCandidates)
 {
-	// whip 가이드 활성 프레임엔 예측 접촉용 데이터 뷰를 구성한다(다음 프레임 타깃 미리보기 포함).
-	// 예측이 꺼져 있으면(PredictiveContactFrames<=0) 검출기가 어차피 early-out이라 미리보기를 만들지 않는다.
-	// NextGuideTargets는 뷰가 가리키는 로컬 버퍼 — 감지가 이 함수 안에서 끝나므로 수명이 충분하다.
-	FRopeFlightContactDetector::FWhipGuideView WhipView;
-	TArray<FVector> NextGuideTargets;
-	if (DetectConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
-	{
-		WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargets);
-		WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
-		WhipView.CurrentTargets = &WhipGuide.GetCurrentTargets();
-		WhipView.PrevTargets = &WhipGuide.GetPrevTargets();
-		WhipView.NextTargets = &NextGuideTargets;
-	}
-
 	if (SimFrame.bGpuContactsThisFrame)
 	{
 		// GPU 감지 경로(G3): actual+predictive 후보 모두 GPU 커널이 산출한 것을 쓴다(귀속·중복제거는
@@ -2691,6 +2677,21 @@ void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
 	}
 	else
 	{
+		// CPU 예측 접촉에만 whip 데이터 뷰가 필요하다. GPU 경로는 subsystem이 dispatch 전에 같은
+		// 다음 프레임 타깃을 이미 계산해 GPU step에 실었으므로 Finalize에서 다시 만들지 않는다.
+		// 예측이 꺼져 있으면(PredictiveContactFrames<=0) 검출기가 어차피 early-out이라 미리보기를 만들지 않는다.
+		// NextGuideTargets는 뷰가 가리키는 로컬 버퍼 — 감지가 이 함수 안에서 끝나므로 수명이 충분하다.
+		FRopeFlightContactDetector::FWhipGuideView WhipView;
+		TArray<FVector> NextGuideTargets;
+		if (DetectConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
+		{
+			WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargets);
+			WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
+			WhipView.CurrentTargets = &WhipGuide.GetCurrentTargets();
+			WhipView.PrevTargets = &WhipGuide.GetPrevTargets();
+			WhipView.NextTargets = &NextGuideTargets;
+		}
+
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightActualContacts);
 			FRopeFlightContactDetector::DetectContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, OutCandidates);
