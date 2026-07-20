@@ -219,7 +219,7 @@ void URopeStaticBodyProvider::BuildColliders(const FRopeColliderGatherContext& G
 	const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
 	const int32 MaxColliders = Settings ? FMath::Max(1, Settings->StaticBodyMaxColliders) : 128;
 	const int32 MaxConvexPlanes = Settings ? FMath::Max(4, Settings->StaticBodyMaxConvexPlanes) : 32;
-	const bool  bIncludeDynamic = Settings ? Settings->bIncludeWorldDynamic : false;
+	const bool  bIncludeDynamic = Settings ? Settings->bIncludeWorldDynamic : true;
 
 	FCollisionObjectQueryParams ObjParams(ECC_WorldStatic);
 	if (bIncludeDynamic)
