@@ -624,7 +624,30 @@ private:
 	void OnReelCompleted();
 	void OnReloadInput();
 
+	/**
+	 * possession 변화 훅 — 늦은 빙의(스폰 직후 컨트롤러 없음)와 재빙의에서 입력을 다시 건다.
+	 * 종전에는 BeginPlay에서 딱 한 번만 시도해, 그 시점에 컨트롤러가 없으면 IMC가 영영 안 붙고
+	 * InputComponent가 없으면 바인딩도 영영 안 걸렸다(Throw/Pull/Reel 무반응). bAutoBindInput일 때만
+	 * 구독한다 — 수동 바인딩 게임은 SetupPlayerInputComponent가 재빙의마다 다시 불려 이미 안전하다.
+	 */
+	UFUNCTION()
+	void HandlePawnControllerChanged(APawn* OwnerPawn, AController* OldController, AController* NewController);
+
+	/** InputComponent는 PawnClientRestart에서 만들어진다 — 컨트롤러가 붙은 직후엔 아직 없을 수 있어
+	 *  restart 시점에도 한 번 더 시도한다(둘 중 늦은 쪽이 실제로 바인딩을 성사시킨다). */
+	UFUNCTION()
+	void HandlePawnRestarted(APawn* OwnerPawn);
+
+	/** IMC 재부착 + 액션 재바인딩(현재 소유 폰 기준). BeginPlay와 위 두 훅의 공용 경로. */
+	void RefreshInputRegistration();
+
+	/** AddMappingContext가 꽂은 IMC를 캐시된 서브시스템에서 뗀다(possession 전환/EndPlay 공용). */
+	void RemoveMappingContext();
+
 	bool bInputBound = false;
+	// 실제로 바인딩을 건 InputComponent. 재빙의로 새 InputComponent가 생기면 bInputBound만으로는
+	// "어디에 걸었는지"를 알 수 없어, 새 컴포넌트엔 안 걸린 채 true가 유지됐다(입력 영구 누락).
+	TWeakObjectPtr<UInputComponent> BoundInputComponent;
 	// AddMappingContext가 IMC를 꽂은 로컬 플레이어 Enhanced Input 서브시스템(weak). IMC는 Pawn이 아니라
 	// LocalPlayer에 등록되므로, EndPlay가 폰의 현재 컨트롤러에 의존하지 않고 여기서 possession 무관하게
 	// 제거한다(#11 — 폰이 먼저 unpossess된 뒤 파괴돼도 IMC가 로컬 플레이어에 잔류하는 것 방지). LP 파괴 시 null.

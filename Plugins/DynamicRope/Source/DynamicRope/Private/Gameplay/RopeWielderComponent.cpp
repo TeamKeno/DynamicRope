@@ -22,6 +22,7 @@
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 
+#include "Components/InputComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 
@@ -84,8 +85,14 @@ void URopeWielderComponent::BeginPlay()
 
 	if (bAutoBindInput)
 	{
-		AddMappingContext();
-		BindInput();
+		// 늦은/재 빙의 대응: 지금 되면 지금 걸고, 안 되면 possession/restart 훅이 다시 시도한다.
+		// (컨트롤러 없이 스폰된 폰, 클라이언트 지연 빙의, unpossess 후 재빙의 — 종전엔 전부 영구 누락)
+		if (APawn* OwnerPawn = Cast<APawn>(GetOwner()))
+		{
+			OwnerPawn->ReceiveControllerChangedDelegate.AddDynamic(this, &URopeWielderComponent::HandlePawnControllerChanged);
+			OwnerPawn->ReceiveRestartedDelegate.AddDynamic(this, &URopeWielderComponent::HandlePawnRestarted);
+		}
+		RefreshInputRegistration();
 	}
 
 	// 모드 유도 상태(preview 생성/틱 활성/조준 샘플)는 RefreshModeDerivedState 한 곳으로 통일 —
@@ -103,23 +110,16 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	// 입력 바인딩/매핑 정리(컴포넌트 파괴 후 댕글링 델리게이트 방지).
 	if (APawn* Pawn = Cast<APawn>(GetOwner()))
 	{
+		Pawn->ReceiveControllerChangedDelegate.RemoveDynamic(this, &URopeWielderComponent::HandlePawnControllerChanged);
+		Pawn->ReceiveRestartedDelegate.RemoveDynamic(this, &URopeWielderComponent::HandlePawnRestarted);
 		if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(Pawn->InputComponent))
 		{
 			EIC->ClearBindingsForObject(this);
 		}
 	}
-	// IMC는 Pawn이 아니라 LocalPlayer에 등록됐다 — 폰이 먼저 unpossess된 뒤 파괴되면 GetController()가 null이라
-	// 종전엔 제거가 건너뛰어져 IMC가 로컬 플레이어에 영구 잔류했다(#11). 추가 시점에 캐시한 서브시스템으로
-	// possession 상태와 무관하게 제거한다(LocalPlayer가 이미 파괴됐으면 weak가 null → 제거 불필요).
-	if (MappingContext)
-	{
-		if (UEnhancedInputLocalPlayerSubsystem* Sub = MappedInputSubsystem.Get())
-		{
-			Sub->RemoveMappingContext(MappingContext);
-		}
-		MappedInputSubsystem.Reset();
-	}
+	RemoveMappingContext();
 	bInputBound = false;
+	BoundInputComponent.Reset();
 	ClearThrowPreview();
 	if (PreviewComponent)
 	{
@@ -495,6 +495,50 @@ void URopeWielderComponent::AttachRopeToSocket()
 	Rope->AttachToComponent(AttachMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, HandSocketName);
 }
 
+void URopeWielderComponent::HandlePawnControllerChanged(APawn* OwnerPawn, AController* OldController,
+	AController* NewController)
+{
+	if (!NewController)
+	{
+		// unpossess — IMC를 그 로컬 플레이어에서 떼어 둔다(다음 빙의 때 새 플레이어에 다시 꽂는다).
+		// 바인딩은 InputComponent에 붙어 있으므로 여기서 건드리지 않는다(같은 컴포넌트로 돌아오면 그대로 유효).
+		RemoveMappingContext();
+		return;
+	}
+	// 빙의 직후엔 InputComponent가 아직 없을 수 있다 — 그 경우 아래 restart 훅이 마저 성사시킨다.
+	RefreshInputRegistration();
+}
+
+void URopeWielderComponent::HandlePawnRestarted(APawn* OwnerPawn)
+{
+	// PawnClientRestart(→ SetupPlayerInputComponent) 이후라 InputComponent가 준비돼 있다.
+	RefreshInputRegistration();
+}
+
+void URopeWielderComponent::RefreshInputRegistration()
+{
+	// 빙의가 바뀌면 IMC가 붙어야 할 로컬 플레이어도 바뀔 수 있다 — 옛 곳에서 떼고 새 곳에 꽂는다.
+	RemoveMappingContext();
+	AddMappingContext();
+	BindInput();
+}
+
+void URopeWielderComponent::RemoveMappingContext()
+{
+	// IMC는 Pawn이 아니라 LocalPlayer에 등록됐다 — 폰이 먼저 unpossess된 뒤 파괴되면 GetController()가 null이라
+	// 종전엔 제거가 건너뛰어져 IMC가 로컬 플레이어에 영구 잔류했다(#11). 추가 시점에 캐시한 서브시스템으로
+	// possession 상태와 무관하게 제거한다(LocalPlayer가 이미 파괴됐으면 weak가 null → 제거 불필요).
+	if (!MappingContext)
+	{
+		return;
+	}
+	if (UEnhancedInputLocalPlayerSubsystem* Sub = MappedInputSubsystem.Get())
+	{
+		Sub->RemoveMappingContext(MappingContext);
+	}
+	MappedInputSubsystem.Reset();
+}
+
 void URopeWielderComponent::AddMappingContext()
 {
 	if (!MappingContext)
@@ -514,10 +558,6 @@ void URopeWielderComponent::AddMappingContext()
 
 void URopeWielderComponent::BindInput()
 {
-	if (bInputBound)
-	{
-		return;
-	}
 	APawn* Pawn = Cast<APawn>(GetOwner());
 	if (!Pawn)
 	{
@@ -527,10 +567,26 @@ void URopeWielderComponent::BindInput()
 	UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(Pawn->InputComponent);
 	if (!EIC)
 	{
-		// 아직 빙의/입력 셋업 전일 수 있다 — Pawn의 SetupPlayerInputComponent에서 BindInput()을 호출하면 된다.
-		UE_LOG(LogDynamicRope, Verbose, TEXT("RopeWielder on %s: EnhancedInputComponent not ready — call BindInput() from SetupPlayerInputComponent."),
+		// 아직 빙의/입력 셋업 전일 수 있다 — bAutoBindInput이면 possession/restart 훅이 다시 부른다.
+		// 수동 모드라면 Pawn의 SetupPlayerInputComponent에서 BindInput()을 호출하면 된다.
+		UE_LOG(LogDynamicRope, Verbose, TEXT("RopeWielder on %s: EnhancedInputComponent not ready — will retry on possess/restart (or call BindInput() from SetupPlayerInputComponent)."),
 			*GetNameSafe(GetOwner()));
 		return;
+	}
+
+	// 중복 방지는 "이미 걸었나"가 아니라 "**이** 컴포넌트에 걸었나"로 판정한다 — 재빙의로 새 InputComponent가
+	// 생기면 옛 플래그만 보고 건너뛰어 입력이 영영 안 걸렸다.
+	if (bInputBound && BoundInputComponent.Get() == EIC)
+	{
+		return;
+	}
+	if (UInputComponent* Old = BoundInputComponent.Get())
+	{
+		// 옛 컴포넌트가 아직 살아 있으면 이중 발화하지 않게 우리 바인딩만 걷어낸다.
+		if (UEnhancedInputComponent* OldEIC = Cast<UEnhancedInputComponent>(Old))
+		{
+			OldEIC->ClearBindingsForObject(this);
+		}
 	}
 
 	if (ThrowAction)
@@ -566,6 +622,7 @@ void URopeWielderComponent::BindInput()
 		EIC->BindAction(ReloadAction, ETriggerEvent::Started, this, &URopeWielderComponent::OnReloadInput);
 	}
 	bInputBound = true;
+	BoundInputComponent = EIC;
 }
 
 void URopeWielderComponent::OnThrowInput()
