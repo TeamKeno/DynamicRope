@@ -492,11 +492,18 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				TEXT("  {grey}colliders [{green}wrappable{grey}/{cyan}worldStatic{grey}]  wrapTarget=%d"),
 				WrapTargetCount));
 
+			// green(wrappable)이 항상 cyan(worldStatic push-out) 위에 오도록 2패스로 그린다: 랩 대상이 자기
+			// push-out 셰이프(cyan)를 같은 위치에 서빙하면(PhysicsBody 프롭) wrap 셰이프(green)가 가려질 수 있어,
+			// Pass 0에서 non-wrappable(cyan)을 먼저 깔고 Pass 1에서 wrappable(green)을 덮어 그린다(전경은 나중이 위).
+			for (int32 DrawPass = 0; DrawPass < 2; ++DrawPass)
 			for (const FRopeDebugCollider& C : S.Colliders)
 			{
 				// 색은 wrap 가능/불가 2범주만: worldStatic(정적 월드, push-out 전용)은 cyan, 그 외(스켈레탈 본 +
 				// URopeWrapTargetComponent 랩 대상 = 모두 감김 가능)는 초록. 랩 대상과 본은 같은 초록으로 통일한다.
-				const FColor Color = C.bWorldStatic ? FColor::Cyan : FColor::Green;
+				const bool bWrappable = !C.bWorldStatic;
+				// Pass 0 = cyan(비-wrappable)만, Pass 1 = green(wrappable)만 — green을 뒤에 그려 위에 덮는다.
+				if (bWrappable != (DrawPass == 1)) { continue; }
+				const FColor Color = bWrappable ? FColor::Green : FColor::Cyan;
 				switch (C.Shape)
 				{
 				case ERopeDebugColliderShape::Capsule:
