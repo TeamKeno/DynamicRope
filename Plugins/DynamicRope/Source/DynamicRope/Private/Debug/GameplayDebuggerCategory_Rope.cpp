@@ -69,45 +69,6 @@ namespace
 		}
 	}
 
-	const TCHAR* CandidateSourceName(ERopeContactCandidateSource Source)
-	{
-		switch (Source)
-		{
-		case ERopeContactCandidateSource::Actual: return TEXT("actual");
-		case ERopeContactCandidateSource::PredictiveFree: return TEXT("predFree");
-		case ERopeContactCandidateSource::PredictiveGuided: return TEXT("predGuided");
-		default: return TEXT("?");
-		}
-	}
-
-	FString CandidateSourceMaskName(uint8 SourceMask)
-	{
-		TArray<const TCHAR*> Parts;
-		if ((SourceMask & static_cast<uint8>(ERopeContactCandidateSource::Actual)) != 0)
-		{
-			Parts.Add(TEXT("actual"));
-		}
-		if ((SourceMask & static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree)) != 0)
-		{
-			Parts.Add(TEXT("predFree"));
-		}
-		if ((SourceMask & static_cast<uint8>(ERopeContactCandidateSource::PredictiveGuided)) != 0)
-		{
-			Parts.Add(TEXT("predGuided"));
-		}
-
-		FString Result;
-		for (int32 i = 0; i < Parts.Num(); ++i)
-		{
-			if (i > 0)
-			{
-				Result += TEXT("+");
-			}
-			Result += Parts[i];
-		}
-		return Result.IsEmpty() ? FString(TEXT("?")) : Result;
-	}
-
 	FColor CandidateSourceColor(ERopeContactCandidateSource Source)
 	{
 		switch (Source)
@@ -119,19 +80,6 @@ namespace
 		}
 	}
 
-	FString NodeListString(const TArray<int32>& Nodes)
-	{
-		FString Result;
-		for (int32 i = 0; i < Nodes.Num(); ++i)
-		{
-			if (i > 0)
-			{
-				Result += TEXT(",");
-			}
-			Result += LexToString(Nodes[i]);
-		}
-		return Result;
-	}
 }
 
 FGameplayDebuggerCategory_Rope::FGameplayDebuggerCategory_Rope()
@@ -143,12 +91,10 @@ FGameplayDebuggerCategory_Rope::FGameplayDebuggerCategory_Rope()
 	const FGameplayDebuggerInputHandlerConfig FlightCfg(TEXT("ToggleFlight"), TEXT("U"));
 	const FGameplayDebuggerInputHandlerConfig WrappedCfg(TEXT("ToggleWrapped"), TEXT("I"));
 	const FGameplayDebuggerInputHandlerConfig CollidersCfg(TEXT("ToggleColliders"), TEXT("O"));
-	const FGameplayDebuggerInputHandlerConfig LabelsCfg(TEXT("ToggleLabels"), TEXT("P"));
 	const FGameplayDebuggerInputHandlerConfig AimCfg(TEXT("ToggleAim"), TEXT("J"));
 	BindKeyPress(FlightCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleFlight);
 	BindKeyPress(WrappedCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleWrapped);
 	BindKeyPress(CollidersCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleColliders);
-	BindKeyPress(LabelsCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleLabels);
 	BindKeyPress(AimCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleAim);
 }
 
@@ -160,7 +106,6 @@ TSharedRef<FGameplayDebuggerCategory> FGameplayDebuggerCategory_Rope::MakeInstan
 void FGameplayDebuggerCategory_Rope::OnToggleFlight()    { ViewMask ^= static_cast<uint8>(EView::Flight); }
 void FGameplayDebuggerCategory_Rope::OnToggleWrapped()   { ViewMask ^= static_cast<uint8>(EView::Wrapped); }
 void FGameplayDebuggerCategory_Rope::OnToggleColliders() { ViewMask ^= static_cast<uint8>(EView::Colliders); }
-void FGameplayDebuggerCategory_Rope::OnToggleLabels()    { ViewMask ^= static_cast<uint8>(EView::Labels); }
 void FGameplayDebuggerCategory_Rope::OnToggleAim()       { ViewMask ^= static_cast<uint8>(EView::Aim); }
 
 void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AActor* DebugActor)
@@ -180,10 +125,9 @@ void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AAc
 
 	auto OnOff = [](bool b) { return b ? TEXT("{green}on") : TEXT("{grey}off"); };
 	AddTextLine(FString::Printf(
-		TEXT("{white}views  [U]flight=%s{white} [I]wrapped=%s{white} [O]colliders=%s{white} [P]labels=%s{white} [J]aim=%s"),
+		TEXT("{white}views  [U]flight=%s{white} [I]wrapped=%s{white} [O]colliders=%s{white} [J]aim=%s"),
 		OnOff(HasView(EView::Flight)), OnOff(HasView(EView::Wrapped)),
-		OnOff(HasView(EView::Colliders)), OnOff(HasView(EView::Labels)),
-		OnOff(HasView(EView::Aim))));
+		OnOff(HasView(EView::Colliders)), OnOff(HasView(EView::Aim))));
 
 	// 조준은 로프가 아니라 Wielder 소유 — 로프 순회와 별개로 액터에서 한 번 찾아 그린다.
 	if (const URopeWielderComponent* Wielder = DebugActor->FindComponentByClass<URopeWielderComponent>())
@@ -266,13 +210,8 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 	{
 		// hit 너머 남은 구간 — 조준이 어디까지 뻗을 수 있었는지.
 		DrawDebugLine(World, RayStop, RayEnd, FColor(96, 0, 0), false, LifeTime, FG, 1.0f);
+		// 본 이름은 3D 라벨로 띄우지 않는다 — 아래 aim 텍스트 줄이 같은 이름을 상시 내보내므로 중복.
 		DrawDebugSphere(World, Aim.HitWorldPos, 8.0f, 12, FColor::Yellow, false, LifeTime, FG, 2.0f);
-		if (HasView(EView::Labels))
-		{
-			DrawDebugString(World, Aim.HitWorldPos + FVector(0.0f, 0.0f, 14.0f),
-				Aim.Bone.IsNone() ? TEXT("(no bone)") : *Aim.Bone.ToString(),
-				nullptr, FColor::Yellow, LifeTime, false, 1.0f);
-		}
 	}
 
 	// ToString()의 임시를 로컬에 잡아둔다 — const TCHAR*로 받으면 다음 줄에서 이미 dangling이다.
@@ -388,8 +327,10 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				return A.Penetration > B.Penetration;
 			});
 
-		const int32 MaxLabels = FMath::Min(5, Sorted.Num());
-		for (int32 i = 0; i < MaxLabels; ++i)
+		// flight 진단은 3D 도형만 남긴다 — Flight phase는 찰나라 좌측 패널 텍스트를 읽을 시간이 없다.
+		// (후보 상세 줄과 요약 줄 모두 그래서 제거했다.) 후보는 상위 N개만 박스로.
+		const int32 MaxCandidateShapes = FMath::Min(5, Sorted.Num());
+		for (int32 i = 0; i < MaxCandidateShapes; ++i)
 		{
 			const FRopeContactCandidate& Candidate = Sorted[i];
 			const FColor SourceColor = CandidateSourceColor(Candidate.Source);
@@ -397,30 +338,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				? FColor(FMath::Min(255, SourceColor.R + 40), FMath::Min(255, SourceColor.G + 20), FMath::Min(255, SourceColor.B + 40))
 				: SourceColor;
 			AddShape(FGameplayDebuggerShape::MakeBox(Candidate.WorldPoint, FVector(3.5f), CandidateColor));
-
-			if (HasView(EView::Labels))
-			{
-				AddTextLine(FString::Printf(
-					TEXT("  {grey}cand node=%d src=%s primary=%s bone=%s pen=%.2f relTan=%.1f wrap=%.2f"),
-					Candidate.NodeIndex, *CandidateSourceMaskName(Candidate.SourceMask),
-					CandidateSourceName(Candidate.Source), *Candidate.Bone.ToString(),
-					Candidate.Penetration, Candidate.RelativeTangentialSpeed, Candidate.WrapDirectionScore));
-			}
 		}
-
-		// 요약(원래 on-screen 텍스트).
-		int32 ActualCount = 0, PredFreeCount = 0, PredGuidedCount = 0;
-		for (const FRopeContactCandidate& C : S.Candidates)
-		{
-			if ((C.SourceMask & static_cast<uint8>(ERopeContactCandidateSource::Actual)) != 0) { ++ActualCount; }
-			if ((C.SourceMask & static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree)) != 0) { ++PredFreeCount; }
-			if ((C.SourceMask & static_cast<uint8>(ERopeContactCandidateSource::PredictiveGuided)) != 0) { ++PredGuidedCount; }
-		}
-		AddTextLine(FString::Printf(
-			TEXT("  {cyan}flight{white} cand=%d (actual=%d predFree=%d predGuided=%d)  trackerBone=%s  nodes=%d/%d [%s]  capture=%s"),
-			S.Candidates.Num(), ActualCount, PredFreeCount, PredGuidedCount,
-			*S.TrackerBone.ToString(), S.TrackerNodes.Num(), S.MinLatchNodes,
-			*NodeListString(S.TrackerNodes), S.bShouldCapture ? TEXT("yes") : TEXT("no")));
 
 		// whip 가이드.
 		if (S.bWhipActive && S.Positions.Num() >= 2)
@@ -562,23 +480,23 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			constexpr uint8 FG = SDPG_Foreground;
 			constexpr float LineThick = 1.5f;
 
-			// 색 범례 + 분류. 총계(colliders=N)는 위 diag 줄이 단일 소스라 여기선 반복하지 않고, 그중 랩 대상
-			// 셰이프(로프가 실제로 감길 추출 셰이프)가 몇 개인지 "Z / N" 형태로만 낸다.
+			// 색은 wrap 가능/불가 2범주(초록=wrap 가능=본+랩대상, cyan=worldStatic=push-out 전용). 총계는 위
+			// diag 줄이 단일 소스. wrapTarget 수는 색으로 구분하지 않는 대신, "랩 대상이 실제로 서빙되는지"
+			// 확인용 진단 텍스트로만 남긴다(본과 색이 같아졌으므로).
 			int32 WrapTargetCount = 0;
 			for (const FRopeDebugCollider& C : S.Colliders)
 			{
 				if (C.bWrapTarget) { ++WrapTargetCount; }
 			}
 			AddTextLine(FString::Printf(
-				TEXT("  {blue}wrapTarget=%d{grey} / %d [{blue}wrap{grey}/{cyan}worldStatic{grey}/{green}bone{grey}]"),
-				WrapTargetCount, S.Colliders.Num()));
+				TEXT("  {grey}colliders [{green}wrappable{grey}/{cyan}worldStatic{grey}]  wrapTarget=%d"),
+				WrapTargetCount));
 
 			for (const FRopeDebugCollider& C : S.Colliders)
 			{
-				// 소스별 색: 정적 메시 랩 대상(URopeWrapTargetComponent가 서빙한 추출 박스/캡슐 = 로프가 실제로
-				// 감길 셰이프)은 파랑, 정적 월드(박스/컨벡스/정적 캡슐)는 cyan, 스켈레탈 본 캡슐은 초록.
-				const FColor Color = C.bWrapTarget ? FColor(40, 120, 255)
-					: (C.bWorldStatic ? FColor::Cyan : FColor::Green);
+				// 색은 wrap 가능/불가 2범주만: worldStatic(정적 월드, push-out 전용)은 cyan, 그 외(스켈레탈 본 +
+				// URopeWrapTargetComponent 랩 대상 = 모두 감김 가능)는 초록. 랩 대상과 본은 같은 초록으로 통일한다.
+				const FColor Color = C.bWorldStatic ? FColor::Cyan : FColor::Green;
 				switch (C.Shape)
 				{
 				case ERopeDebugColliderShape::Capsule:

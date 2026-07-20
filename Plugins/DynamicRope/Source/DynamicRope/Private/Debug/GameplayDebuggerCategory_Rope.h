@@ -3,7 +3,7 @@
 // rope 디버그의 단일 진입점. 인게임에서 게이트플레이 디버거를 켜고 'Rope' 카테고리를 토글하면 디버그
 // 대상 액터의 URopeComponent들을 표시한다. 매 프레임 대상 액터를 URopeDebugSubsystem에 등록하면
 // sim tick(GT)이 그 로프만 캡처해 스냅샷을 남기고, 여기서 읽어 AddShape/AddTextLine으로 그린다.
-// 하위 보기(Flight/Wrapped/Colliders/Labels/Aim)는 카테고리 input binding 키로 토글한다(cvar 폐지).
+// 하위 보기(Flight/Wrapped/Colliders/Aim)는 카테고리 input binding 키로 토글한다(cvar 폐지).
 // Aim 보기만은 로프가 아니라 대상 액터의 URopeWielderComponent가 매 틱 캐시하는 FRopeAimHudSample을
 // 라이브로 읽어 그린다 — 조준은 Wielder 소유라 로프 스냅샷에 실을 수 없다.
 // WITH_GAMEPLAY_DEBUGGER가 꺼진 빌드(shipping 등)에서는 전체가 컴파일에서 제외된다.
@@ -39,7 +39,6 @@ private:
 		Flight     = 1 << 1,
 		Wrapped    = 1 << 2,
 		Colliders  = 1 << 3,
-		Labels     = 1 << 4,
 		Aim        = 1 << 5,
 	};
 
@@ -49,7 +48,6 @@ private:
 	void OnToggleFlight();
 	void OnToggleWrapped();
 	void OnToggleColliders();
-	void OnToggleLabels();
 	void OnToggleAim();
 
 	// 한 로프를 그린다. phase/centerline/wrapBone 같은 상시 정보는 **라이브 컴포넌트**에서 읽어 항상
