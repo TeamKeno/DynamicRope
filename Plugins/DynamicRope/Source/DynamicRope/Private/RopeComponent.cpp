@@ -3900,7 +3900,7 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 		// 끌림 가능)는 대상에 인가해 대상을 wielder 쪽으로 끈다(기존 동작).
 		if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable && !PullDrive.bTargetPullable)
 		{
-			ApplyPullForceToWielder(-PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce);
+			ApplyPullForceToWielder(-PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, DeltaTime);
 		}
 		else
 		{
@@ -3923,8 +3923,29 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 			}
 			else
 			{
-				Movement->Velocity = RopeTraction::DecayVelocityDebt(Movement->Velocity, PullDrive.TowedVelDebt,
-					RopeTraction::ExpSmoothAlpha(HoldConfig.TetherSlackBrakeTime, DeltaTime));
+				// 장부(TowedVelDebt) 갱신은 DecayVelocityDebt 안에서 일어난다 — 관문이 가로채든 아니든
+				// **먼저 한 번만** 돌려 로프 내부 상태가 서브클래스 처리 여부로 갈라지지 않게 한다.
+				const FVector BrakedVelocity = RopeTraction::DecayVelocityDebt(Movement->Velocity,
+					PullDrive.TowedVelDebt, RopeTraction::ExpSmoothAlpha(HoldConfig.TetherSlackBrakeTime, DeltaTime));
+				const FVector VelocityDelta = BrakedVelocity - Movement->Velocity;
+
+				// 확장 관문 — 요청은 "이만큼 감속할 것"을 기술한다(FRopeTetherEndpoint는 아래쪽 익명
+				// 네임스페이스라 여기선 요청을 직접 채운다).
+				FRopeTractionRequest Req;
+				Req.Source = ERopeTractionSource::SlackBrake;
+				Req.ReceiverKind = ERopeEndpointKind::Character;
+				Req.Movement = Movement;
+				Req.Actor = GetOwner();
+				const float DeltaSize = static_cast<float>(VelocityDelta.Size());
+				Req.Direction = (DeltaSize > KINDA_SMALL_NUMBER) ? (VelocityDelta / DeltaSize) : FVector::ZeroVector;
+				Req.Amount = DeltaSize;
+				Req.DeltaTime = DeltaTime;
+				Req.bWielderSide = true;
+
+				if (!ApplyTractionToReceiver(Req))
+				{
+					Movement->Velocity = BrakedVelocity;
+				}
 			}
 		}
 		else
@@ -4136,14 +4157,8 @@ namespace
 	// 인가 지점이 같은 래더를 각자 복제했고, 그 위에서 인가 람다가 자기가 어느 rung인지 다시 캐스팅으로
 	// 역추론했다 — 순서가 어긋나면 "질량은 앵커로 봤는데 힘은 다른 데 꽂히는" 버그가 된다(CL 392의 부분 랙돌
 	// 루트 게이트가 실제로 그랬다). 한 해석을 공유하면 그 어긋남이 구조적으로 불가능하다.
-	enum class ERopeEndpointKind : uint8
-	{
-		None,      // 수신자 없음(Owner도 없음).
-		SimBody,   // 물리 시뮬 바디: 스켈레탈 승격 본 / 대상 프리미티브 / 소유 루트.
-		Character, // CMC가 실제로 구동 중인 캐릭터(MOVE_None 제외).
-		Anchor,    // 정적/키네마틱/MOVE_None/비시뮬 비캐릭터 — 무한질량(움직이려면 위치 폴백뿐).
-	};
-
+	// ERopeEndpointKind는 공개 타입이다(Core/RopeTypes.h) — 확장 훅 ApplyTractionToReceiver가
+	// 수신자 종류를 그대로 기술하므로 로프 밖에서도 읽을 수 있어야 한다.
 	struct FRopeTetherEndpoint
 	{
 		ERopeEndpointKind Kind = ERopeEndpointKind::None;
@@ -4238,39 +4253,31 @@ namespace
 		return Out;
 	}
 
+	// 해석된 수신자를 공개 확장 훅(ApplyTractionToReceiver)이 읽는 요청으로 옮긴다.
+	// Source/Direction/Amount는 인가 경로가 각자 채운다(단위가 경로마다 다르다 — 요청 타입 주석 참고).
+	FRopeTractionRequest MakeTractionRequest(const FRopeTetherEndpoint& Endpoint, ERopeTractionSource Source,
+		const FVector& Dir, float Amount, float DeltaTime, bool bWielderSide)
+	{
+		FRopeTractionRequest Req;
+		Req.Source = Source;
+		Req.ReceiverKind = Endpoint.Kind;
+		Req.Prim = Endpoint.Prim;
+		Req.Bone = Endpoint.Bone;
+		Req.Movement = Endpoint.Movement;
+		Req.Actor = Endpoint.Actor;
+		Req.Direction = Dir;
+		Req.Amount = Amount;
+		Req.DeltaTime = DeltaTime;
+		Req.bWielderSide = bWielderSide;
+		return Req;
+	}
+
 	// 테더 자동 분배용 유효 역질량(w = 1/유효질량). 0 = 앵커(무한질량).
 	float EndpointInvMass(const FRopeTetherEndpoint& Endpoint)
 	{
 		return RopeTraction::InvMassFromMass(Endpoint.Mass);
 	}
 
-	// 해석된 수신자에 인가를 디스패치(MassShare/BinaryPullable · 대상/wielder 공용 골격). 네 곳이 이 골격을
-	// 쓰고 적용 알고리즘만 콜백으로 다르다. 콜백은 자기가 무엇을 받았는지 이미 알고 있다(재캐스팅 불필요).
-	//  - SimApply(Prim, Bone, Dir, Step) → 실제 진행 거리 반환(위치 클램프의 부족분 산출용; 속도 방식은 Step 반환).
-	//  - CharacterApply(Movement, Dir, Step): CMC 구동 캐릭터.
-	//  - AnchorApply(Actor, Dir, Step): 앵커(정적/MOVE_None) 위치 폴백.
-	// 반환 = sim-body에 적용됐으면 SimApply 반환, 아니면 Step(= 부족분 0).
-	float ApplyToTetherEndpoint(
-		const FRopeTetherEndpoint& Endpoint, const FVector& Dir, float Step,
-		TFunctionRef<float(UPrimitiveComponent*, FName, const FVector&, float)> SimApply,
-		TFunctionRef<void(UCharacterMovementComponent*, const FVector&, float)> CharacterApply,
-		TFunctionRef<void(AActor*, const FVector&, float)> AnchorApply)
-	{
-		switch (Endpoint.Kind)
-		{
-		case ERopeEndpointKind::SimBody:
-			return SimApply(Endpoint.Prim, Endpoint.Bone, Dir, Step);
-		case ERopeEndpointKind::Character:
-			CharacterApply(Endpoint.Movement, Dir, Step);
-			break;
-		case ERopeEndpointKind::Anchor:
-			AnchorApply(Endpoint.Actor, Dir, Step);
-			break;
-		default:
-			break;
-		}
-		return Step; // sim-body 미적용 → 부족분 0.
-	}
 
 	// 이번 프레임의 테더 입력 — 초과분 기하 + 양끝 수신자 해석 + 설정. 두 모드 함수의 공용 인자다.
 	// 모드 함수는 이 컨텍스트와 수신자 인가만 알면 되고, 관측치 산출/상태 보관은 컴포넌트가 한다.
@@ -4299,7 +4306,48 @@ namespace
 		// wielder 견인 방향. 방향 EMA를 컴포넌트가 소유하므로 지연 산출한다 — 실제로 wielder를 움직이는
 		// 프레임에만 호출해야 EMA 진행이 보존된다(무조건 호출하면 안 움직이는 프레임에도 EMA가 돌아간다).
 		TFunctionRef<FVector()> GetWielderDir;
+		// 수신자 인가 확장 관문(컴포넌트의 virtual로 위임). true면 내장 인가를 건너뛴다.
+		TFunctionRef<bool(const FRopeTractionRequest&)> TractionGate;
 	};
+
+	// 해석된 수신자에 인가를 디스패치(MassShare/BinaryPullable · 대상/wielder 공용 골격). 네 곳이 이 골격을
+	// 쓰고 적용 알고리즘만 콜백으로 다르다. 콜백은 자기가 무엇을 받았는지 이미 알고 있다(재캐스팅 불필요).
+	//  - SimApply(Prim, Bone, Dir, Step) → 실제 진행 거리 반환(위치 클램프의 부족분 산출용; 속도 방식은 Step 반환).
+	//  - CharacterApply(Movement, Dir, Step): CMC 구동 캐릭터.
+	//  - AnchorApply(Actor, Dir, Step): 앵커(정적/MOVE_None) 위치 폴백.
+	// 반환 = sim-body에 적용됐으면 SimApply 반환, 아니면 Step(= 부족분 0).
+	float ApplyToTetherEndpoint(
+		const FRopeTetherContext& Ctx, bool bWielderSide, const FVector& Dir, float Step,
+		TFunctionRef<float(UPrimitiveComponent*, FName, const FVector&, float)> SimApply,
+		TFunctionRef<void(UCharacterMovementComponent*, const FVector&, float)> CharacterApply,
+		TFunctionRef<void(AActor*, const FVector&, float)> AnchorApply)
+	{
+		const FRopeTetherEndpoint& Endpoint = bWielderSide ? Ctx.Wielder : Ctx.Target;
+
+		// 확장 관문(URopeComponent::ApplyTractionToReceiver): 서브클래스가 처리했으면 내장 인가를 건너뛴다.
+		// 테더의 네 인가 지점이 전부 이 골격을 지나므로, 여기 한 줄이 테더 경로 전체를 덮는다.
+		// 반환은 Step(= 부족분 0) — sim-body 미적용 분기와 같은 계약이다.
+		if (Ctx.TractionGate(MakeTractionRequest(Endpoint, ERopeTractionSource::Tether, Dir, Step,
+			Ctx.DeltaTime, bWielderSide)))
+		{
+			return Step;
+		}
+
+		switch (Endpoint.Kind)
+		{
+		case ERopeEndpointKind::SimBody:
+			return SimApply(Endpoint.Prim, Endpoint.Bone, Dir, Step);
+		case ERopeEndpointKind::Character:
+			CharacterApply(Endpoint.Movement, Dir, Step);
+			break;
+		case ERopeEndpointKind::Anchor:
+			AnchorApply(Endpoint.Actor, Dir, Step);
+			break;
+		default:
+			break;
+		}
+		return Step; // sim-body 미적용 → 부족분 0.
+	}
 
 	// ===== BinaryPullable 모드: 이진 양보끝 + 비신축 클램프 (MassShare 경로와 완전 분리) =====
 	// 대상 유효질량 ≤ wielder 유효질량이면 "대상이 양보"(대상만 회수, wielder 자유끝), 아니면 "wielder가 양보"
@@ -4438,7 +4486,7 @@ namespace
 		float ActualMoved = TargetStep;
 		if (TargetStep > KINDA_SMALL_NUMBER)
 		{
-			ActualMoved = ApplyToTetherEndpoint(Ctx.Target, Ctx.DirToAim, TargetStep,
+			ActualMoved = ApplyToTetherEndpoint(Ctx, /*bWielderSide*/ false, Ctx.DirToAim, TargetStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
 				[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S, /*FeedFwdSpeed*/ 0.0f, /*TowDebt*/ nullptr); },
 				[&](AActor* A, const FVector& D, float S) { ClampAnchor(A, D, S); });
@@ -4451,7 +4499,7 @@ namespace
 		const float WielderStep = bPullable ? FMath::Max(0.0f, TargetStep - ActualMoved) : StepLen;
 		if (WielderStep > KINDA_SMALL_NUMBER)
 		{
-			ApplyToTetherEndpoint(Ctx.Wielder, Ctx.GetWielderDir(), WielderStep,
+			ApplyToTetherEndpoint(Ctx, /*bWielderSide*/ true, Ctx.GetWielderDir(), WielderStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ClampSimBody(P, B, D, S); },
 				[&](UCharacterMovementComponent* M, const FVector& D, float S) { ClampMovement(M, D, S, static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D)), Ctx.WielderTowDebt); },
 				[&](AActor* A, const FVector& D, float S) { ClampAnchor(A, D, S); });
@@ -4621,7 +4669,7 @@ namespace
 		// 인가 본은 감긴 본에서 부모 체인 승격(ResolveTetherEndpoint가 이미 승격해 담아둔다) — 바디 없는 트위스트 본 대응.
 		if (TargetStep > KINDA_SMALL_NUMBER)
 		{
-			ApplyToTetherEndpoint(Ctx.Target, Ctx.DirToAim, TargetStep,
+			ApplyToTetherEndpoint(Ctx, /*bWielderSide*/ false, Ctx.DirToAim, TargetStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { ServoVelocity(P, B, D, S * InvDt); return S; },
 				[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S, /*FeedFwdSpeed*/ 0.0f, /*TowDebt*/ nullptr); },
 				[&](AActor* A, const FVector& D, float S) { CorrectAnchor(A, D, S); });
@@ -4633,7 +4681,7 @@ namespace
 		// (비행 몬스터 등)에 매달린 wielder가 리엘 상한과 무관하게 앵커 순항 속도를 따라잡는다.
 		if (WielderStep > KINDA_SMALL_NUMBER)
 		{
-			ApplyToTetherEndpoint(Ctx.Wielder, Ctx.GetWielderDir(), WielderStep,
+			ApplyToTetherEndpoint(Ctx, /*bWielderSide*/ true, Ctx.GetWielderDir(), WielderStep,
 				[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { TopUpVelocity(P, B, D, S * InvDt + static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D))); return S; },
 				[&](UCharacterMovementComponent* M, const FVector& D, float S) { CorrectMovement(M, D, S, static_cast<float>(FVector::DotProduct(Ctx.AnchorVelocity, D)), Ctx.WielderTowDebt); },
 				[&](AActor* A, const FVector& D, float S) { CorrectAnchor(A, D, S); });
@@ -4714,13 +4762,15 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// wielder 방향 EMA는 이 컴포넌트가 소유하므로 지연 호출로 넘긴다 — 모드 함수가 실제로 wielder를 움직이는
 	// 프레임에만 호출해야 EMA 진행이 보존된다(TFunctionRef가 가리키므로 람다는 여기서 이름을 갖고 살아 있어야 한다).
 	auto GetWielderDir = [&]() { return ComputeSmoothedWielderDir(Aim, DirToAim, DeltaTime); };
+	// 수신자 인가 관문 — 테더 인가가 컴포넌트의 확장 훅을 지나게 한다(TFunctionRef라 람다가 여기 살아 있어야 한다).
+	auto TractionGate = [this](const FRopeTractionRequest& Req) { return ApplyTractionToReceiver(Req); };
 	const FRopeTetherContext Ctx{
 		HoldConfig, TargetEndpoint, WielderEndpoint, DirToAim,
 		/*AnchorVelocity*/ PullDrive.SmoothedAnchorVelocity, Overshoot, DeltaTime,
 		/*bSelfWrap*/ (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner()),
 		/*bTargetPullable*/ PullDrive.bTargetPullable,
 		/*WielderTowDebt*/ &PullDrive.TowedVelDebt,
-		GetWielderDir };
+		GetWielderDir, TractionGate };
 
 	if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable)
 	{
@@ -4762,6 +4812,13 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	// 대상까지 가로챈 것 — 구체적(물리 바디) → 일반적(이동체) 순서로 통일한다.
 	// (해석이 함께 내는 유효질량은 Pull이 쓰지 않는다 — 장력 상한 드라이브가 바디 질량을 직접 읽는다.)
 	const FRopeTetherEndpoint Endpoint = ResolveTetherEndpoint(MeshComp, Owner, Pull.Bone, HoldConfig.GroundBraceFactor);
+
+	// 확장 관문: 수신자 단위로 가로채는 서브클래스(커스텀 무브먼트/탈것)가 처리했으면 내장 인가를 생략한다.
+	if (ApplyTractionToReceiver(MakeTractionRequest(Endpoint, ERopeTractionSource::ActivePull, Dir, MaxTension,
+		DeltaTime, /*bWielderSide*/ false)))
+	{
+		return;
+	}
 
 	switch (Endpoint.Kind)
 	{
@@ -4910,7 +4967,7 @@ bool URopeComponent::DecideTargetPullable(float EffMassTarget, float EffMassWiel
 	return (EffMassTarget * Margin <= EffMassWielder);
 }
 
-void URopeComponent::ApplyPullForceToWielder(const FVector& Force)
+void URopeComponent::ApplyPullForceToWielder(const FVector& Force, float DeltaTime)
 {
 	// (BinaryPullable + not pullable) 능동 Pull 힘을 wielder(로프 owner)에 인가 — 대상이 무거워 대신
 	// wielder가 앵커 쪽으로 끌려가는 climb-in. ApplyPullForce의 owner 쪽 미러: CharacterMovement → 시뮬 루트.
@@ -4919,20 +4976,44 @@ void URopeComponent::ApplyPullForceToWielder(const FVector& Force)
 	{
 		return;
 	}
-	// 1) 캐릭터 무브먼트가 힘을 소비하면(MOVE_None 제외) 이동체에 인가.
+
+	// 수신자를 **먼저 해석**한다 — 확장 관문에 "무엇에 꽂힐 뻔했는지"를 그대로 넘기기 위함이다.
+	// 해석 순서는 기존 그대로(CharacterMovement → 시뮬 루트): 여기서 ResolveTetherEndpoint 래더로
+	// 갈아타면 시뮬 루트가 무브먼트보다 앞서게 되어 climb-in 동작이 바뀐다.
+	FRopeTetherEndpoint Receiver;
+	Receiver.Actor = RopeOwner;
 	if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(RopeOwner))
 	{
-		Movement->AddForce(Force);
-		return;
+		Receiver.Kind = ERopeEndpointKind::Character;
+		Receiver.Movement = Movement;
 	}
-	// 2) 시뮬 중인 루트 프리미티브면 그 바디에 직접.
-	if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(RopeOwner->GetRootComponent()))
+	else if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(RopeOwner->GetRootComponent()))
 	{
 		if (Root->IsSimulatingPhysics())
 		{
-			Root->AddForce(Force);
-			return;
+			Receiver.Kind = ERopeEndpointKind::SimBody;
+			Receiver.Prim = Root;
 		}
 	}
-	// 수신자 없음(비캐릭터 + 비시뮬 루트): 조용히 드롭 — climb-in 불가한 구성.
+
+	const float Magnitude = static_cast<float>(Force.Size());
+	const FVector Dir = (Magnitude > KINDA_SMALL_NUMBER) ? (Force / Magnitude) : FVector::ZeroVector;
+	if (ApplyTractionToReceiver(MakeTractionRequest(Receiver, ERopeTractionSource::ActivePull, Dir, Magnitude,
+		DeltaTime, /*bWielderSide*/ true)))
+	{
+		return;
+	}
+
+	switch (Receiver.Kind)
+	{
+	case ERopeEndpointKind::Character:
+		Receiver.Movement->AddForce(Force);
+		return;
+	case ERopeEndpointKind::SimBody:
+		Receiver.Prim->AddForce(Force);
+		return;
+	default:
+		// 수신자 없음(비캐릭터 + 비시뮬 루트): 조용히 드롭 — climb-in 불가한 구성.
+		return;
+	}
 }

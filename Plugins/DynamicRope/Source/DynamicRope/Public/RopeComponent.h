@@ -679,8 +679,28 @@ protected:
 	 * 물리 시뮬 본 → CharacterMovement → 물리 시뮬 루트. 커스텀 무브먼트(Mover 등)/탈것/특수 대상은 오버라이드.
 	 * Force = 당김 방향 × 최대 장력(|Force| = 장력 상한). 물리 바디는 장력 상한 속도 드라이브로 인가한다
 	 * (ApplyPullVelocityDrive). DeltaTime은 임펄스 상한(장력×dt) 산정에 쓴다.
+	 *
+	 * 이건 능동 Pull *정책*(무엇을 얼마나 당기나) 훅이다. 수신자 단위로 가로채려면 아래
+	 * ApplyTractionToReceiver를 쓸 것 — 이 함수의 기본 구현도 실제 인가 직전 그 관문을 지난다.
 	 */
 	virtual void ApplyPullForce(const FVector& Force, const FRopePullSample& Pull, float DeltaTime);
+
+	/**
+	 * 로프가 수신자에 견인을 인가하기 직전의 **단일 관문**(GT, 프레임당 최대 수 회 — 콜드 패스).
+	 * true를 반환하면 "서브클래스가 처리했다"로 보고 기본 인가를 생략한다. 기본 false = 내장 인가.
+	 *
+	 * **로프가 만드는 모든 힘/속도 개입이 여기를 지난다** — 자동 테더(양끝), 능동 Pull(대상), climb-in
+	 * (wielder), 슬랙 브레이크. 그래서 커스텀 무브먼트(Mover 등)·탈것·특수 수신자는 이것 하나만
+	 * 오버라이드하면 로프 견인 전부를 자기 이동 시스템으로 가져갈 수 있다.
+	 *
+	 * 과거엔 능동 Pull만 훅(ApplyPullForce)이 있고 테더/climb-in/슬랙 브레이크는 수신자에 직접
+	 * 임펄스·속도를 꽂아, ApplyPullForce를 오버라이드해도 테더가 그대로 밀어붙이는 상태였다.
+	 *
+	 * Request.Amount의 단위는 Request.Source마다 다르다(FRopeTractionRequest 주석 참고).
+	 * true를 반환해도 로프 내부 장부(슬랙 브레이크의 TowedVelDebt 등)는 동일하게 갱신된다 —
+	 * 서브클래스가 처리 여부를 바꿔도 로프 상태가 갈라지지 않게 하기 위함이다.
+	 */
+	virtual bool ApplyTractionToReceiver(const FRopeTractionRequest& Request) { return false; }
 
 	// 시뮬 상태 읽기 전용 접근(서브클래스용). 변경은 공개 API(Throw·Set 계열)를 통해서만.
 	const FRopeSimState& GetSimState() const { return Sim; }
@@ -869,7 +889,7 @@ private:
 
 	// (BinaryPullable + not pullable) 능동 Pull 힘을 wielder(로프 owner)에 인가 — 대상이 무거워
 	// wielder가 앵커 쪽으로 끌려가는 climb-in. ApplyPullForce의 owner 쪽 미러(시뮬 루트 → CharacterMovement).
-	void ApplyPullForceToWielder(const FVector& Force);
+	void ApplyPullForceToWielder(const FVector& Force, float DeltaTime);
 
 	// 능동 Pull 장력 상한 속도 드라이브: 대상 물리 바디를 당김 방향(Dir)을 따라 목표 속도(ActivePullMaxLinearSpeed)로
 	// 몰되, 임펄스를 J = min(질량×ΔV, MaxTension×dt)로 클램프한다. 가벼운 대상은 목표 속도에 즉시(오버슛 없음),

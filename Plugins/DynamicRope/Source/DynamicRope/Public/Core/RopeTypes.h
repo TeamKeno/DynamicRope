@@ -12,6 +12,9 @@
 // 랩 대상 추상화(Decision 0): 랩 대상을 실을 수 있는 포인터는 스켈레탈에 국한하지 않고 USceneComponent로
 // 일반화한다(정적/무버블 프롭 opt-in — 피드백 5번). 스켈레탈 경로는 필요 지점에서만 Cast로 되찾는다.
 class USceneComponent;
+class UPrimitiveComponent;
+class UCharacterMovementComponent;
+class AActor;
 
 /**
  * 라이프사이클 단계. 물리(solver)는 Free/Flight에서 전체를, Wrapping/Wrapped에서는 마스크되지 않은
@@ -612,6 +615,67 @@ struct FRopeWrapState
 
 	bool IsWrapped() const { return Anchors.Num() > 0 || Latched.Num() > 0; }
 	void Reset() { *this = FRopeWrapState(); }
+};
+
+/**
+ * 견인 수신자의 종류 — "무엇이 로프 힘을 받는가"의 단일 판정 결과(RopeComponent.cpp ResolveTetherEndpoint).
+ * 테더와 능동 Pull이 각자 래더를 걷던 것을 한 해석으로 합친 결과물이라, 질량 분배와 실제 인가 지점이
+ * 어긋나는 일이 구조적으로 불가능하다. 확장 훅(ApplyTractionToReceiver)이 수신자를 기술할 때도 쓴다.
+ */
+enum class ERopeEndpointKind : uint8
+{
+	None,      // 수신자 없음(Owner도 없음).
+	SimBody,   // 물리 시뮬 바디: 스켈레탈 승격 본 / 대상 프리미티브 / 소유 루트.
+	Character, // CMC가 실제로 구동 중인 캐릭터(MOVE_None 제외).
+	Anchor,    // 정적/키네마틱/MOVE_None/비시뮬 비캐릭터 — 무한질량(움직이려면 위치 폴백뿐).
+};
+
+/** 이 인가가 어느 견인 경로에서 왔는가 — 서브클래스가 경로별로 다르게 반응할 수 있게 한다. */
+enum class ERopeTractionSource : uint8
+{
+	/** 자동 견인: 가용 로프 길이 초과분을 양끝에 분배해 되돌린다(UpdateTether). */
+	Tether,
+	/** 사용자 입력 능동 Pull(상수 힘). 대상 인가와 climb-in(wielder 인가) 둘 다 포함. */
+	ActivePull,
+	/** 슬랙 프레임에서 테더가 주입해 둔 견인 속도를 회수하는 감속. */
+	SlackBrake,
+};
+
+/**
+ * 로프가 수신자에 견인을 인가하기 **직전**의 요청 기술(POD, 비소유 포인터 — 호출 동안만 유효).
+ * URopeComponent::ApplyTractionToReceiver가 받는 유일한 타입이며, 로프가 만드는 모든 힘/속도 개입이
+ * 이 한 타입으로 기술된다(경로는 Source로 구분).
+ */
+struct FRopeTractionRequest
+{
+	ERopeTractionSource Source = ERopeTractionSource::Tether;
+	ERopeEndpointKind ReceiverKind = ERopeEndpointKind::None;
+
+	/** SimBody: 인가할 프리미티브와 본(본 없으면 컴포넌트 단위). */
+	UPrimitiveComponent* Prim = nullptr;
+	FName Bone = NAME_None;
+
+	/** Character: 인가할 무브먼트. */
+	UCharacterMovementComponent* Movement = nullptr;
+
+	/** 수신자 소유 액터(Kind 무관, 있으면 채움). 커스텀 무브먼트는 보통 여기서 자기 컴포넌트를 찾는다. */
+	AActor* Actor = nullptr;
+
+	/** 인가 방향(단위 벡터). SlackBrake는 감속 방향(= 속도 변화 방향). */
+	FVector Direction = FVector::ZeroVector;
+
+	/**
+	 * Source별 크기 — 단위가 다르니 반드시 Source와 함께 읽을 것.
+	 *   Tether     = 이번 프레임 회수 거리(cm)
+	 *   ActivePull = 힘의 크기 = 장력 상한(N)
+	 *   SlackBrake = 회수할 속도의 크기(cm/s)
+	 */
+	float Amount = 0.0f;
+
+	float DeltaTime = 0.0f;
+
+	/** wielder(로프 소유자) 쪽 인가인가. false면 감긴 대상 쪽. */
+	bool bWielderSide = false;
 };
 
 /**
