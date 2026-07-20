@@ -525,9 +525,6 @@ struct FRopeWrappingState
 	float PathCompositeAxisMaxDistance = 0.0f;
 	bool bPathCompositeAxisRangeValid = false;
 
-	/** 독립 composite helix가 island 축 범위를 벗어나 부분 경로로 정상 종료했는가. */
-	bool bPathEndedAtCompositeAxisLimit = false;
-
 	/** 독립 sweep radial이 시작점에서 누적 회전한 양(라디안, 진행 상태 로그용). */
 	float PathCompositeSweepAngleRad = 0.0f;
 

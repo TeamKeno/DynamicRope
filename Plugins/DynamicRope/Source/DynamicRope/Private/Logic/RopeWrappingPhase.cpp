@@ -142,8 +142,16 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 		return;
 	}
 
+	// Path와 anchor는 PathIndex/NodeIndex 순서로 함께 생성된다. 현재 프레임의 움직이는 bone frame을
+	// 한 번만 해석해 재사용하면, 아래 각 노드가 SampleWrappingPath의 path/anchor 선형 탐색을
+	// 반복하던 O(N²) 비용을 피할 수 있다.
+	if (!BuildResolvedWrappingPath(ResolvedPathScratch))
+	{
+		return;
+	}
+
 	FRopeWrapPathPoint FrontPoint;
-	if (!SampleWrappingPath(State.FrontDistance, FrontPoint))
+	if (!SampleResolvedWrappingPath(ResolvedPathScratch, State.FrontDistance, FrontPoint))
 	{
 		return;
 	}
@@ -213,13 +221,24 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 		if (NodeDistance <= State.FrontDistance + KINDA_SMALL_NUMBER)
 		{
 			// 감김 front가 이미 지나간 노드는 실제 SDF projection 경로의 같은 rope distance를
-			// 샘플한다. 따라서 표면에 도달한 구간의 위치/anchor 동작은 기존과 동일하다.
-			FRopeWrapPathPoint NodePoint;
-			if (!SampleWrappingPath(NodeDistance, NodePoint))
+			// 따른다. Path point는 정확히 PathIndex * SegmentLength 간격으로 생성되므로 이번 프레임에
+			// 한 번 해석한 배열을 직접 인덱싱할 수 있다.
+			if (State.Path.IsValidIndex(PathIndex) &&
+				ResolvedPathScratch.IsValidIndex(PathIndex))
 			{
-				continue;
+				World = PathPointToCenterline(ResolvedPathScratch[PathIndex]);
 			}
-			World = PathPointToCenterline(NodePoint);
+			else
+			{
+				// Path가 없는 구형 anchors-only 상태는 이번 프레임에 resolve/정렬한 anchor 배열을
+				// binary search한다. 이 경계 상태에서도 노드마다 anchor 전체를 다시 훑지 않는다.
+				FRopeWrapPathPoint NodePoint;
+				if (!SampleResolvedWrappingPath(ResolvedPathScratch, NodeDistance, NodePoint))
+				{
+					continue;
+				}
+				World = PathPointToCenterline(NodePoint);
+			}
 		}
 		else
 		{
@@ -269,14 +288,10 @@ void FRopeWrappingPhase::ApplyMassMask(const FRopeSimState& Sim, FRopeNodeOverri
 {
 	const int32 LatchNode = State.LatchAnchor.NodeIndex;
 	const bool bHasValidLatch = Sim.InvMass.IsValidIndex(LatchNode);
-	// Composite는 실제 path가 island 축 끝에서 잘려도 Wrapping 애니메이션 동안에는 남은 tail
-	// 전체를 kinematic guide가 소유한다. 커밋 시에는 실제 anchor가 있는 노드만 Wrapped에 남고,
-	// guide-only tail은 마지막 위치에서 속도 0 상태로 solver에 반환된다.
-	const int32 DrivenEndNode = State.bPathUsesPoseSpaceIsland
-		? Sim.Num() - 1
-		: (State.bPathEndedAtCompositeAxisLimit
-			? FMath::Min(Sim.Num() - 1, LatchNode + FMath::Max(0, State.NumTailNodes - 1))
-			: Sim.Num() - 1);
+	// 실제 path 범위와 무관하게 Wrapping 애니메이션 동안에는 latch 이후 전체 tail을 kinematic으로
+	// 유지한다. Composite axis limit 이후의 guide-only tail도 ApplyFrontMotion이 강제로 애니메이팅하고,
+	// 커밋 시 실제 anchor가 없는 노드만 마지막 위치에서 속도 0 상태로 solver에 반환된다.
+	const int32 DrivenEndNode = Sim.Num() - 1;
 
 	OutFrame.EnsureSize(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
@@ -826,7 +841,6 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 			IdealAxisDistance > State.PathCompositeAxisMaxDistance))
 	{
 		const int32 PreviousTailNodeCount = State.NumTailNodes;
-		State.bPathEndedAtCompositeAxisLimit = true;
 		LogAngularDensityMetrics(TEXT("AxisLimit"));
 		State.NumTailNodes = State.Path.Num();
 		FinishPathBuild(/*bFailed=*/false);
@@ -1262,7 +1276,6 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 	State.PathCompositeAxisMinDistance = 0.0f;
 	State.PathCompositeAxisMaxDistance = 0.0f;
 	State.bPathCompositeAxisRangeValid = false;
-	State.bPathEndedAtCompositeAxisLimit = false;
 	State.PathCompositeSweepAngleRad = 0.0f;
 	// Composite Multi-Bone은 순수 물리 결과를 쓰는 FullSimulation 전용이다. Assisted/Guaranteed는
 	// island를 만들지 않고 아래 기존 SurfaceVectorField parent/child 순차 전환 경로를 그대로 탄다.
@@ -3726,226 +3739,209 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 	}
 }
 
-bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPathPoint& OutPoint) const
+bool FRopeWrappingPhase::ResolveWrappingAnchorPoint(
+	const FRopeSurfaceAnchor& Anchor, FRopeWrapPathPoint& OutPoint) const
 {
-	if (State.Path.Num() == 0 && State.Anchors.Num() == 0)
+	const USceneComponent* Mesh = Anchor.Mesh.Get();
+	if (!Mesh)
+	{
+		Mesh = State.Mesh.Get();
+	}
+	if (!Mesh || Anchor.Bone.IsNone())
 	{
 		return false;
 	}
 
-	const auto AnchorToPoint = [this](const FRopeSurfaceAnchor& Anchor, FRopeWrapPathPoint& Point) -> bool
+	const FTransform BoneXform = ResolveBindingWorld(Mesh, Anchor.Bone);
+	OutPoint = FRopeWrapPathPoint();
+	OutPoint.SurfaceWorld = BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
+	OutPoint.NormalWorld = BoneXform.TransformVectorNoScale(Anchor.LocalNormal)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	OutPoint.TangentWorld = BoneXform.TransformVectorNoScale(Anchor.LocalTangent);
+	OutPoint.TangentWorld = (OutPoint.TangentWorld -
+		FVector::DotProduct(OutPoint.TangentWorld, OutPoint.NormalWorld) * OutPoint.NormalWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(OutPoint.NormalWorld));
+	if (Anchor.bHasWrappingGuideTangent)
 	{
-		const USceneComponent* Mesh = Anchor.Mesh.Get();
-		if (!Mesh)
-		{
-			Mesh = State.Mesh.Get();
-		}
-		if (!Mesh || Anchor.Bone.IsNone())
-		{
-			return false;
-		}
-
-		const FTransform BoneXform = ResolveBindingWorld(Mesh, Anchor.Bone);
-		Point.SurfaceWorld = BoneXform.TransformPosition(Anchor.LocalSurfacePosition);
-		Point.NormalWorld = BoneXform.TransformVectorNoScale(Anchor.LocalNormal)
-			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-		Point.TangentWorld = BoneXform.TransformVectorNoScale(Anchor.LocalTangent);
-		Point.TangentWorld = (Point.TangentWorld - FVector::DotProduct(Point.TangentWorld, Point.NormalWorld) * Point.NormalWorld)
-			.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(Point.NormalWorld));
-		if (Anchor.bHasWrappingGuideTangent)
-		{
-			// surface tangent와 달리 guide에는 normal 평면 투영을 적용하지 않는다. 이 벡터는
-			// 충돌/고정 프레임이 아니라 front 뒤 tail의 시각적 연장 방향으로만 소비된다.
-			Point.WrappingGuideTangentWorld = BoneXform.TransformVectorNoScale(
-				Anchor.LocalWrappingGuideTangent)
-				.GetSafeNormal(KINDA_SMALL_NUMBER, Point.TangentWorld);
-			Point.bHasWrappingGuideTangent = true;
-		}
-		Point.Bone = Anchor.Bone;
-		Point.Mesh = Mesh;
-		Point.DistanceFromLatch = Anchor.RopeDistance;
-		return true;
-	};
-	const auto InterpolatePoints = [](const FRopeWrapPathPoint& LowerPoint,
-		const FRopeWrapPathPoint& UpperPoint, float SampleDistance,
-		FRopeWrapPathPoint& Point)
-	{
-		if (FMath::Abs(UpperPoint.DistanceFromLatch - LowerPoint.DistanceFromLatch)
-			<= KINDA_SMALL_NUMBER)
-		{
-			Point = LowerPoint;
-			Point.DistanceFromLatch = SampleDistance;
-			return;
-		}
-
-		const float Alpha = FMath::Clamp(
-			(SampleDistance - LowerPoint.DistanceFromLatch) /
-			(UpperPoint.DistanceFromLatch - LowerPoint.DistanceFromLatch),
-			0.0f, 1.0f);
-		Point.SurfaceWorld = FMath::Lerp(
-			LowerPoint.SurfaceWorld, UpperPoint.SurfaceWorld, Alpha);
-		Point.NormalWorld = FMath::Lerp(
-			LowerPoint.NormalWorld, UpperPoint.NormalWorld, Alpha)
-			.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.NormalWorld);
-		Point.TangentWorld = FMath::Lerp(
-			LowerPoint.TangentWorld, UpperPoint.TangentWorld, Alpha);
-		Point.TangentWorld = (Point.TangentWorld -
-			FVector::DotProduct(Point.TangentWorld, Point.NormalWorld) * Point.NormalWorld)
-			.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.TangentWorld);
-		Point.bHasWrappingGuideTangent =
-			LowerPoint.bHasWrappingGuideTangent || UpperPoint.bHasWrappingGuideTangent;
-		if (Point.bHasWrappingGuideTangent)
-		{
-			// front가 두 path point 사이를 이동할 때 guide도 같은 alpha로 보간해 방향이 node
-			// 경계에서 계단식으로 바뀌지 않게 한다. guide가 없는 쪽은 surface tangent로 폴백한다.
-			const FVector LowerGuide = LowerPoint.bHasWrappingGuideTangent
-				? LowerPoint.WrappingGuideTangentWorld
-				: LowerPoint.TangentWorld;
-			const FVector UpperGuide = UpperPoint.bHasWrappingGuideTangent
-				? UpperPoint.WrappingGuideTangentWorld
-				: UpperPoint.TangentWorld;
-			Point.WrappingGuideTangentWorld = FMath::Lerp(
-				LowerGuide, UpperGuide, Alpha)
-				.GetSafeNormal(KINDA_SMALL_NUMBER, LowerGuide);
-		}
-		Point.Bone = Alpha < 0.5f ? LowerPoint.Bone : UpperPoint.Bone;
-		Point.Mesh = Alpha < 0.5f ? LowerPoint.Mesh : UpperPoint.Mesh;
-		Point.DistanceFromLatch = SampleDistance;
-		Point.WrapAngleFromLatchRad = FMath::Lerp(
-			LowerPoint.WrapAngleFromLatchRad, UpperPoint.WrapAngleFromLatchRad, Alpha);
-		Point.bBridge = LowerPoint.bBridge || UpperPoint.bBridge;
-		Point.bVirtual = LowerPoint.bVirtual || UpperPoint.bVirtual;
-	};
-
-	const float SampleDistance = FMath::Max(0.0f, DistanceFromLatch);
-	if (State.Path.Num() > 0)
-	{
-		int32 LowerPathIndex = INDEX_NONE;
-		int32 UpperPathIndex = INDEX_NONE;
-		for (int32 PathIndex = 0; PathIndex < State.Path.Num(); ++PathIndex)
-		{
-			const FRopeWrapPathPoint& StoredPoint = State.Path[PathIndex];
-			if (StoredPoint.DistanceFromLatch <= SampleDistance &&
-				(LowerPathIndex == INDEX_NONE ||
-					StoredPoint.DistanceFromLatch > State.Path[LowerPathIndex].DistanceFromLatch))
-			{
-				LowerPathIndex = PathIndex;
-			}
-			if (StoredPoint.DistanceFromLatch >= SampleDistance &&
-				(UpperPathIndex == INDEX_NONE ||
-					StoredPoint.DistanceFromLatch < State.Path[UpperPathIndex].DistanceFromLatch))
-			{
-				UpperPathIndex = PathIndex;
-			}
-		}
-
-		if (LowerPathIndex == INDEX_NONE)
-		{
-			LowerPathIndex = UpperPathIndex;
-		}
-		if (UpperPathIndex == INDEX_NONE)
-		{
-			UpperPathIndex = LowerPathIndex;
-		}
-		if (LowerPathIndex == INDEX_NONE || UpperPathIndex == INDEX_NONE)
-		{
-			return false;
-		}
-
-		const auto ResolveStoredPoint = [this, &AnchorToPoint](
-			int32 PathIndex, FRopeWrapPathPoint& Point) -> bool
-		{
-			const FRopeWrapPathPoint& StoredPoint = State.Path[PathIndex];
-			if (StoredPoint.bBridge || StoredPoint.bVirtual)
-			{
-				Point = StoredPoint;
-				return true;
-			}
-
-			const int32 NodeIndex = State.LatchAnchor.NodeIndex + PathIndex;
-			const FRopeSurfaceAnchor* Anchor = State.Anchors.FindByPredicate(
-				[NodeIndex](const FRopeSurfaceAnchor& Candidate)
-				{
-					return Candidate.NodeIndex == NodeIndex;
-				});
-			if (Anchor)
-			{
-				if (!AnchorToPoint(*Anchor, Point))
-				{
-					return false;
-				}
-				// 움직이는 본에서 위치/법선은 anchor frame으로 갱신하되, path가 빌드될 때
-				// 확정한 animation angle parameter는 저장된 point 값으로 복원한다.
-				Point.WrapAngleFromLatchRad = StoredPoint.WrapAngleFromLatchRad;
-				return true;
-			}
-
-			// Progressive build에서 anchor가 아직 붙기 전인 같은 프레임의 짧은 창은 스냅샷을 쓴다.
-			Point = StoredPoint;
-			return true;
-		};
-
-		FRopeWrapPathPoint LowerPoint;
-		FRopeWrapPathPoint UpperPoint;
-		if (!ResolveStoredPoint(LowerPathIndex, LowerPoint) ||
-			!ResolveStoredPoint(UpperPathIndex, UpperPoint))
-		{
-			return false;
-		}
-		InterpolatePoints(LowerPoint, UpperPoint, SampleDistance, OutPoint);
-		return true;
+		// surface tangent와 달리 guide에는 normal 평면 투영을 적용하지 않는다. 이 벡터는
+		// 충돌/고정 프레임이 아니라 front 뒤 tail의 시각적 연장 방향으로만 소비된다.
+		OutPoint.WrappingGuideTangentWorld = BoneXform.TransformVectorNoScale(
+			Anchor.LocalWrappingGuideTangent)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, OutPoint.TangentWorld);
+		OutPoint.bHasWrappingGuideTangent = true;
 	}
+	OutPoint.Bone = Anchor.Bone;
+	OutPoint.Mesh = Mesh;
+	OutPoint.DistanceFromLatch = Anchor.RopeDistance;
+	return true;
+}
 
-	const FRopeSurfaceAnchor* LowerAnchor = nullptr;
-	const FRopeSurfaceAnchor* UpperAnchor = nullptr;
-	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
-	{
-		if (Anchor.RopeDistance <= SampleDistance &&
-			(!LowerAnchor || Anchor.RopeDistance > LowerAnchor->RopeDistance))
-		{
-			LowerAnchor = &Anchor;
-		}
-		if (Anchor.RopeDistance >= SampleDistance &&
-			(!UpperAnchor || Anchor.RopeDistance < UpperAnchor->RopeDistance))
-		{
-			UpperAnchor = &Anchor;
-		}
-	}
-
-	if (!LowerAnchor)
-	{
-		LowerAnchor = UpperAnchor;
-	}
-	if (!UpperAnchor)
-	{
-		UpperAnchor = LowerAnchor;
-	}
-	if (!LowerAnchor || !UpperAnchor)
-	{
-		return false;
-	}
-
-	FRopeWrapPathPoint LowerPoint;
-	if (!AnchorToPoint(*LowerAnchor, LowerPoint))
-	{
-		return false;
-	}
-
-	if (LowerAnchor == UpperAnchor ||
-		FMath::Abs(UpperAnchor->RopeDistance - LowerAnchor->RopeDistance) <= KINDA_SMALL_NUMBER)
+void FRopeWrappingPhase::InterpolateWrappingPathPoints(
+	const FRopeWrapPathPoint& LowerPoint, const FRopeWrapPathPoint& UpperPoint,
+	float SampleDistance, FRopeWrapPathPoint& OutPoint)
+{
+	if (FMath::Abs(UpperPoint.DistanceFromLatch - LowerPoint.DistanceFromLatch)
+		<= KINDA_SMALL_NUMBER)
 	{
 		OutPoint = LowerPoint;
+		OutPoint.DistanceFromLatch = SampleDistance;
+		return;
+	}
+
+	OutPoint = FRopeWrapPathPoint();
+	const float Alpha = FMath::Clamp(
+		(SampleDistance - LowerPoint.DistanceFromLatch) /
+		(UpperPoint.DistanceFromLatch - LowerPoint.DistanceFromLatch),
+		0.0f, 1.0f);
+	OutPoint.SurfaceWorld = FMath::Lerp(
+		LowerPoint.SurfaceWorld, UpperPoint.SurfaceWorld, Alpha);
+	OutPoint.NormalWorld = FMath::Lerp(
+		LowerPoint.NormalWorld, UpperPoint.NormalWorld, Alpha)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.NormalWorld);
+	OutPoint.TangentWorld = FMath::Lerp(
+		LowerPoint.TangentWorld, UpperPoint.TangentWorld, Alpha);
+	OutPoint.TangentWorld = (OutPoint.TangentWorld -
+		FVector::DotProduct(OutPoint.TangentWorld, OutPoint.NormalWorld) * OutPoint.NormalWorld)
+		.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.TangentWorld);
+	OutPoint.bHasWrappingGuideTangent =
+		LowerPoint.bHasWrappingGuideTangent || UpperPoint.bHasWrappingGuideTangent;
+	if (OutPoint.bHasWrappingGuideTangent)
+	{
+		// front가 두 path point 사이를 이동할 때 guide도 같은 alpha로 보간해 방향이 node
+		// 경계에서 계단식으로 바뀌지 않게 한다. guide가 없는 쪽은 surface tangent로 폴백한다.
+		const FVector LowerGuide = LowerPoint.bHasWrappingGuideTangent
+			? LowerPoint.WrappingGuideTangentWorld
+			: LowerPoint.TangentWorld;
+		const FVector UpperGuide = UpperPoint.bHasWrappingGuideTangent
+			? UpperPoint.WrappingGuideTangentWorld
+			: UpperPoint.TangentWorld;
+		OutPoint.WrappingGuideTangentWorld = FMath::Lerp(
+			LowerGuide, UpperGuide, Alpha)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, LowerGuide);
+	}
+	OutPoint.Bone = Alpha < 0.5f ? LowerPoint.Bone : UpperPoint.Bone;
+	OutPoint.Mesh = Alpha < 0.5f ? LowerPoint.Mesh : UpperPoint.Mesh;
+	OutPoint.DistanceFromLatch = SampleDistance;
+	OutPoint.WrapAngleFromLatchRad = FMath::Lerp(
+		LowerPoint.WrapAngleFromLatchRad, UpperPoint.WrapAngleFromLatchRad, Alpha);
+	OutPoint.bBridge = LowerPoint.bBridge || UpperPoint.bBridge;
+	OutPoint.bVirtual = LowerPoint.bVirtual || UpperPoint.bVirtual;
+}
+
+bool FRopeWrappingPhase::BuildResolvedWrappingPath(
+	TArray<FRopeWrapPathPoint>& OutResolvedPath) const
+{
+	OutResolvedPath.Reset(FMath::Max(State.Path.Num(), State.Anchors.Num()));
+	if (State.Path.Num() == 0)
+	{
+		for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
+		{
+			FRopeWrapPathPoint ResolvedPoint;
+			if (!ResolveWrappingAnchorPoint(Anchor, ResolvedPoint))
+			{
+				OutResolvedPath.Reset();
+				return false;
+			}
+			OutResolvedPath.Add(MoveTemp(ResolvedPoint));
+		}
+		OutResolvedPath.Sort([](const FRopeWrapPathPoint& A, const FRopeWrapPathPoint& B)
+		{
+			return A.DistanceFromLatch < B.DistanceFromLatch;
+		});
+		return true;
+	}
+
+	OutResolvedPath.SetNum(State.Path.Num());
+	int32 AnchorIndex = 0;
+	for (int32 PathIndex = 0; PathIndex < State.Path.Num(); ++PathIndex)
+	{
+		const FRopeWrapPathPoint& StoredPoint = State.Path[PathIndex];
+		if (StoredPoint.bBridge || StoredPoint.bVirtual)
+		{
+			OutResolvedPath[PathIndex] = StoredPoint;
+			continue;
+		}
+
+		const int32 ExpectedNodeIndex = State.LatchAnchor.NodeIndex + PathIndex;
+		while (State.Anchors.IsValidIndex(AnchorIndex) &&
+			State.Anchors[AnchorIndex].NodeIndex < ExpectedNodeIndex)
+		{
+			++AnchorIndex;
+		}
+
+		if (State.Anchors.IsValidIndex(AnchorIndex) &&
+			State.Anchors[AnchorIndex].NodeIndex == ExpectedNodeIndex)
+		{
+			FRopeWrapPathPoint ResolvedPoint;
+			if (!ResolveWrappingAnchorPoint(State.Anchors[AnchorIndex], ResolvedPoint))
+			{
+				OutResolvedPath.Reset();
+				return false;
+			}
+			// 움직이는 본에서 위치/법선은 anchor frame으로 갱신하되, path가 빌드될 때
+			// 확정한 animation angle parameter는 저장된 point 값으로 복원한다.
+			ResolvedPoint.WrapAngleFromLatchRad = StoredPoint.WrapAngleFromLatchRad;
+			OutResolvedPath[PathIndex] = MoveTemp(ResolvedPoint);
+			++AnchorIndex;
+		}
+		else
+		{
+			// Progressive build에서 anchor가 아직 붙기 전인 같은 프레임의 짧은 창은 스냅샷을 쓴다.
+			OutResolvedPath[PathIndex] = StoredPoint;
+		}
+	}
+	return true;
+}
+
+bool FRopeWrappingPhase::SampleResolvedWrappingPath(
+	const TArray<FRopeWrapPathPoint>& ResolvedPath, float DistanceFromLatch,
+	FRopeWrapPathPoint& OutPoint)
+{
+	if (ResolvedPath.Num() == 0)
+	{
+		return false;
+	}
+
+	const float SampleDistance = FMath::Max(0.0f, DistanceFromLatch);
+	int32 SearchMin = 0;
+	int32 SearchMax = ResolvedPath.Num();
+	while (SearchMin < SearchMax)
+	{
+		const int32 MidIndex = SearchMin + (SearchMax - SearchMin) / 2;
+		if (ResolvedPath[MidIndex].DistanceFromLatch < SampleDistance)
+		{
+			SearchMin = MidIndex + 1;
+		}
+		else
+		{
+			SearchMax = MidIndex;
+		}
+	}
+
+	const int32 UpperPathIndex = SearchMin;
+	if (ResolvedPath.IsValidIndex(UpperPathIndex) &&
+		ResolvedPath[UpperPathIndex].DistanceFromLatch == SampleDistance)
+	{
+		OutPoint = ResolvedPath[UpperPathIndex];
+		OutPoint.DistanceFromLatch = SampleDistance;
+		return true;
+	}
+	if (UpperPathIndex <= 0)
+	{
+		OutPoint = ResolvedPath[0];
+		OutPoint.DistanceFromLatch = SampleDistance;
+		return true;
+	}
+	if (UpperPathIndex >= ResolvedPath.Num())
+	{
+		OutPoint = ResolvedPath.Last();
 		OutPoint.DistanceFromLatch = SampleDistance;
 		return true;
 	}
 
-	FRopeWrapPathPoint UpperPoint;
-	if (!AnchorToPoint(*UpperAnchor, UpperPoint))
-	{
-		return false;
-	}
-
-	InterpolatePoints(LowerPoint, UpperPoint, SampleDistance, OutPoint);
+	InterpolateWrappingPathPoints(
+		ResolvedPath[UpperPathIndex - 1], ResolvedPath[UpperPathIndex],
+		SampleDistance, OutPoint);
 	return true;
 }
 

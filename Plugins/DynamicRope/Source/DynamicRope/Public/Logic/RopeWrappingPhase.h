@@ -256,5 +256,21 @@ private:
 	//~ front 이동
 	void AdvanceWrappingFront(float DeltaTime, const FRopeSimState& Sim, const FContext& Ctx);
 
-	bool SampleWrappingPath(float DistanceFromLatch, FRopeWrapPathPoint& OutPoint) const;
+	/** 움직이는 anchor frame을 현재 world-space path point로 해석한다. */
+	bool ResolveWrappingAnchorPoint(const FRopeSurfaceAnchor& Anchor,
+		FRopeWrapPathPoint& OutPoint) const;
+
+	/** 이번 프레임에 사용할 world-space path를 path/anchor의 정렬 순서를 이용해 선형 시간에 만든다. */
+	bool BuildResolvedWrappingPath(TArray<FRopeWrapPathPoint>& OutResolvedPath) const;
+
+	/** 거리 순으로 정렬된 resolved path를 binary search해 보간한다. */
+	static bool SampleResolvedWrappingPath(const TArray<FRopeWrapPathPoint>& ResolvedPath,
+		float DistanceFromLatch, FRopeWrapPathPoint& OutPoint);
+
+	static void InterpolateWrappingPathPoints(const FRopeWrapPathPoint& LowerPoint,
+		const FRopeWrapPathPoint& UpperPoint, float SampleDistance,
+		FRopeWrapPathPoint& OutPoint);
+
+	/** ApplyFrontMotion 전용 재사용 버퍼. 매 프레임 path point/anchor를 반복 해석하지 않는다. */
+	TArray<FRopeWrapPathPoint> ResolvedPathScratch;
 };
