@@ -876,6 +876,19 @@ void URopeComponent::DispatchCaptured(FName Bone)
 
 void URopeComponent::DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped)
 {
+	// Wrapped 통지가 아직 진행 중이면(핸들러가 그 안에서 ReleaseWrap을 불렀다) 통지를 미룬다 —
+	// 지금 쏘면 구독자가 Released를 Wrapped보다 먼저 받는다(FDeferredReleaseNotice 주석 참고).
+	// 상태는 이미 정리된 뒤이므로 미루는 것은 통지뿐이고, 큐는 Wrapped 통지가 끝나는 즉시 비워진다.
+	if (WrappedDispatchDepth > 0)
+	{
+		FDeferredReleaseNotice& Notice = DeferredReleaseNotices.AddDefaulted_GetRef();
+		Notice.WrappedMesh = const_cast<USceneComponent*>(WrappedMesh);
+		Notice.Bone = Bone;
+		Notice.Reason = Reason;
+		Notice.bWasWrapped = bWasWrapped;
+		return;
+	}
+
 	// per-instance: Captured/Wrapped로 시작된 engagement의 종료를 항상 알린다(짝 맞춤).
 	NotifyReleased(Bone, Reason);
 	OnRopeReleased.Broadcast(Bone, Reason);
@@ -3400,11 +3413,35 @@ void URopeComponent::DispatchWrapped(const FRopeWrappedEventInfo& Info)
 	// wrap 성립의 단일 브로드캐스트 지점: 네이티브 훅(서브클래스) → per-instance BP 델리게이트 →
 	// 월드 중앙 신호(대상 반응 컴포넌트가 자기 로프를 몰라도 구독으로 반응). 두 성립 경로(③ preview /
 	// 판정) 공용.
+	// 이 구간 동안 release 통지는 큐로 간다 — 핸들러가 곧바로 ReleaseWrap을 불러도 구독자가 보는 순서는
+	// 항상 Wrapped → Released다(FDeferredReleaseNotice 주석). 통지 중 예외는 없는 코드지만, 깊이를
+	// 짝지어 내리는 것은 이 함수의 단일 책임이므로 마지막에 반드시 내린다.
+	++WrappedDispatchDepth;
 	NotifyWrapped(Info);
 	OnRopeWrapped.Broadcast(Info);
 	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
 	{
 		SimSubsystem->OnAnyRopeWrapped.Broadcast(Info);
+	}
+	--WrappedDispatchDepth;
+
+	FlushDeferredReleaseNotices();
+}
+
+void URopeComponent::FlushDeferredReleaseNotices()
+{
+	// 중첩된 Wrapped 통지가 아직 남아 있으면 가장 바깥에서만 흘린다(순서 보장의 유일한 지점).
+	if (WrappedDispatchDepth > 0 || DeferredReleaseNotices.Num() == 0)
+	{
+		return;
+	}
+
+	// 흘리는 도중 핸들러가 또 release를 부를 수 있으므로 큐를 먼저 비우고 사본을 돈다.
+	TArray<FDeferredReleaseNotice> Pending = MoveTemp(DeferredReleaseNotices);
+	DeferredReleaseNotices.Reset();
+	for (const FDeferredReleaseNotice& Notice : Pending)
+	{
+		DispatchReleased(Notice.WrappedMesh.Get(), Notice.Bone, Notice.Reason, Notice.bWasWrapped);
 	}
 }
 
@@ -3444,14 +3481,19 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 		*GetName(), static_cast<int32>(Reason));
 
 	// Captured 짝 맞춤: Wrapping은 Contacting(Captured 발화)에서만 진입하므로 이 abort는 항상 앞선 Captured와
-	// 짝이다. 성립 전이라 per-instance만(중앙 신호는 커밋된 wrap 전용). 본 이름은 리셋 전에 읽는다.
-	DispatchReleased(nullptr, WrappingPhase.State.BoneName, Reason, /*bWasWrapped*/ false);
+	// 짝이다. 성립 전이라 per-instance만(중앙 신호는 커밋된 wrap 전용). 본 이름은 값으로 잡아 두고
+	// **정리가 다 끝난 뒤에** 통지한다 — FinishPreCommitReleaseToFlight와 같은 계약(정리 전에 쏘면
+	// 핸들러의 ReleaseWrap/재던지기가 아직 살아 있는 wrapping 상태 위에서 돌고, 그 결과를 이 아래
+	// 정리가 덮어쓴다). 호출자는 전부 SetPhase(Releasing)을 마친 뒤 들어온다.
+	const FName AbortedBone = WrappingPhase.State.BoneName;
 
 	WrappingPhase.ReturnNodesToSolver(Sim, SimFrame.OverrideFrame);
 	ReleaseKinematicVirtualBridgesToSolver();
 
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
+
+	DispatchReleased(nullptr, AbortedBone, Reason, /*bWasWrapped*/ false);
 }
 
 void URopeComponent::UpdateWrappingKinematicVirtualBridges(

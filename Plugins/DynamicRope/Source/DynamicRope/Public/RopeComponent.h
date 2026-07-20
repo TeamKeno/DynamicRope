@@ -1083,6 +1083,28 @@ private:
 	 *  페이로드(성립 전엔 nullptr). */
 	void DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped);
 
+	/**
+	 * Wrapped 통지 도중 들어온 release 통지를 담아두는 큐 — **순서 역전 방지**가 목적이다.
+	 * 핸들러가 통지 안에서 ReleaseWrap()을 부르면 release 통지가 중첩되어 먼저 끝나 버려, 구독자는
+	 * Released → Wrapped 순으로 받는다(랙돌 대상이 복구를 먼저 무시하고 그 뒤 Wrapped만 받아 영구 고착).
+	 * 그래서 Wrapped 통지가 다 끝날 때까지 release 통지를 미뤄 **항상 Wrapped → Released** 순을 보장한다.
+	 * 상태 변경(ReleaseWrap 자체)은 미루지 않는다 — 미루는 것은 통지뿐이다.
+	 */
+	struct FDeferredReleaseNotice
+	{
+		TWeakObjectPtr<USceneComponent> WrappedMesh;
+		FName Bone = NAME_None;
+		ERopeReleaseReason Reason = ERopeReleaseReason::Manual;
+		bool bWasWrapped = false;
+	};
+
+	/** DispatchWrapped 중첩 깊이(>0이면 release 통지를 큐에 넣는다). */
+	int32 WrappedDispatchDepth = 0;
+	TArray<FDeferredReleaseNotice> DeferredReleaseNotices;
+
+	/** 큐에 밀린 release 통지를 순서대로 흘려보낸다(Wrapped 통지가 완전히 끝난 뒤에만 호출). */
+	void FlushDeferredReleaseNotices();
+
 	void AbortWrapping(ERopeReleaseReason Reason);
 
 	/** ③ 연출(GuidedThrow) 중단 공용 마무리: Releasing 전환 + 일시 상태 폐기 + 쿨다운 + release 이벤트.
