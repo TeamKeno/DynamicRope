@@ -228,3 +228,19 @@ s*     = −β · C / dt                          // 목표: 이번 프레임 C�
   확인 — 사용 중이면 "끝별 w 스케일" 노브 1개로 승계.
 - **결정 필요**: ①TensionRelease를 λ 기준으로 옮길지(단위계 변경 — 팀 튜닝값 재조정 필요),
   ②BinaryPullable enum을 언제 제거할지(외부 BP 참조), ③코너 마찰(capstan) 도입 여부.
+
+## 8. PIE 검증 씬/절차 (CL D)
+
+고정 .umap 대신 **코드 스폰 리그**(`Debug/RopeTetherTestScenes.cpp`, 개발 빌드 전용)로 재현한다 —
+텍스트라 리뷰/머지가 되고, 플레이어 기준 상대 배치라 각자의 `Lvl_*Test` 맵에서 그대로 돈다.
+
+| 커맨드 | 씬 | 재현 절차 | 기대(레거시 → Constraint) |
+|---|---|---|---|
+| `Rope.Test.TetherScene wall` | 전방 4m 기둥(지름 60cm) | 감기 → 뒤로 걷기/점프 탈출 | 벽 쪽 400cm/s 윈치 → **로프 끝 정지(끌림 없음)** |
+| `Rope.Test.TetherScene drag [kg=100]` | 전방 6m 물리 큐브 | 감기 → 걷기/되감기로 끌기 | 탄성 룩/서보 진동 → **질량비 분배·경계 유지**(500kg이면 내가 양보) |
+| `Rope.Test.TetherScene ragdoll` | 배치된 랙돌 캐릭터를 전방 2.5m 소환 | 근접 wrap(자동 랙돌) → 유지/되감기 | 요요/관절 슬램 폭주 → **λ 단방향 = 폭주 없음, 전신 질량 끌림** |
+
+모드 전환: `Rope.Test.TetherMode <mass|binary|constraint>` (월드 내 전 로프, 런타임 한정) — 같은 씬을
+번갈아 A/B. 관찰: 게임플레이 디버거 pull 라인의 `constraint T=현재/상한`(상한 근접 노랑/클램프 빨강),
+`chain`/`tether` 값, 그리고 `Rope.Ragdoll`(수동 랙돌 토글) 병용. 데모 3종(입체기동/도르래/드래곤)
+스모크는 기존 데모 맵에서 `Rope.Test.TetherMode constraint`로 전환해 확인한다.
