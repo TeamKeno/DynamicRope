@@ -69,10 +69,12 @@ FGameplayDebuggerCategory_Rope::FGameplayDebuggerCategory_Rope()
 
 	// 하위 보기 토글 키. 카테고리가 활성일 때 입력된다. cvar(r.DynamicRope.Debug.*) 대체.
 	// 키는 FName 리터럴로 지정한다 — EKeys/FKey는 InputCore 모듈 심볼이라 링크 의존을 피한다.
+	const FGameplayDebuggerInputHandlerConfig CenterlineCfg(TEXT("ToggleCenterline"), TEXT("P"));
 	const FGameplayDebuggerInputHandlerConfig FlightCfg(TEXT("ToggleFlight"), TEXT("U"));
 	const FGameplayDebuggerInputHandlerConfig WrappedCfg(TEXT("ToggleWrapped"), TEXT("I"));
 	const FGameplayDebuggerInputHandlerConfig CollidersCfg(TEXT("ToggleColliders"), TEXT("O"));
 	const FGameplayDebuggerInputHandlerConfig AimCfg(TEXT("ToggleAim"), TEXT("J"));
+	BindKeyPress(CenterlineCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleCenterline);
 	BindKeyPress(FlightCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleFlight);
 	BindKeyPress(WrappedCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleWrapped);
 	BindKeyPress(CollidersCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleColliders);
@@ -84,6 +86,7 @@ TSharedRef<FGameplayDebuggerCategory> FGameplayDebuggerCategory_Rope::MakeInstan
 	return MakeShareable(new FGameplayDebuggerCategory_Rope());
 }
 
+void FGameplayDebuggerCategory_Rope::OnToggleCenterline() { ViewMask ^= static_cast<uint8>(EView::Centerline); }
 void FGameplayDebuggerCategory_Rope::OnToggleFlight()    { ViewMask ^= static_cast<uint8>(EView::Flight); }
 void FGameplayDebuggerCategory_Rope::OnToggleWrapped()   { ViewMask ^= static_cast<uint8>(EView::Wrapped); }
 void FGameplayDebuggerCategory_Rope::OnToggleColliders() { ViewMask ^= static_cast<uint8>(EView::Colliders); }
@@ -106,8 +109,8 @@ void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AAc
 
 	auto OnOff = [](bool b) { return b ? TEXT("{green}on") : TEXT("{grey}off"); };
 	AddTextLine(FString::Printf(
-		TEXT("{white}views  [U]flight=%s{white} [I]wrapped=%s{white} [O]colliders=%s{white} [J]aim=%s"),
-		OnOff(HasView(EView::Flight)), OnOff(HasView(EView::Wrapped)),
+		TEXT("{white}views  [P]centerline=%s{white} [U]flight=%s{white} [I]wrapped=%s{white} [O]colliders=%s{white} [J]aim=%s"),
+		OnOff(HasView(EView::Centerline)), OnOff(HasView(EView::Flight)), OnOff(HasView(EView::Wrapped)),
 		OnOff(HasView(EView::Colliders)), OnOff(HasView(EView::Aim))));
 
 	// 조준은 로프가 아니라 Wielder 소유 — 로프 순회와 별개로 액터에서 한 번 찾아 그린다.
