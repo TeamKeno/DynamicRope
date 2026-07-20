@@ -555,11 +555,19 @@ void URopeComponent::EnterReel()
 		return;
 	}
 
+	// 이미 Reel이면 재장전(상태 리셋)은 하되 연출 훅은 다시 부르지 않는다 — 프리셋 적용이 ③ 로프에
+	// EnterReel()을 무조건 호출하는데(ApplyPreset [7]), 그때 SetPhase는 no-op이라 페이즈 이벤트는 안 나가면서
+	// OnEnterReel만 재발화해 enter/deploy 짝이 어긋났다. 오버라이드가 VFX를 스폰하면 중복 스폰이 된다.
+	const bool bAlreadyReel = (Phase == ERopePhase::Reel);
+
 	EnsureRopeInitialized();
 	ResetTransientPhaseState();
 	ReleaseCooldown = 0.0f;
 	EnsureTipMesh();      // 확보 보험 — 정상 경로는 BeginPlay가 이미 잡았다(이미 있으면 no-op).
-	OnEnterReel();        // 기본: 로프 튜브 숨김(override 가능).
+	if (!bAlreadyReel)
+	{
+		OnEnterReel();    // 기본: 로프 튜브 숨김(override 가능). 진입 에지에서만.
+	}
 	SetPhase(ERopePhase::Reel, TEXT("reload"));
 }
 
@@ -857,6 +865,13 @@ void URopeComponent::FinishPreCommitReleaseToFlight(FName Bone, const TCHAR* Pha
 	ReleaseKinematicVirtualBridgesToSolver();
 	ResetTransientPhaseState();
 	DispatchReleased(nullptr, Bone, ERopeReleaseReason::Broken, /*bWasWrapped*/ false);
+}
+
+void URopeComponent::DispatchCaptured(FName Bone)
+{
+	// 통지 순서는 엔진 Notify 관례 — 네이티브 훅 먼저, 그다음 BP 델리게이트.
+	NotifyCaptured(Bone);
+	OnRopeCaptured.Broadcast(Bone);
 }
 
 void URopeComponent::DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped)
@@ -2407,6 +2422,13 @@ void URopeComponent::FinishGuidedThrow()
 	}
 
 	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
+
+	// ③은 Flight/Contacting을 거치지 않아 Captured가 한 번도 발화하지 않았다 — 그런데 release는 발화하므로
+	// 소비자 입장에선 "Captured 없는 Released"라는 짝 안 맞는 이벤트 쌍이 됐다. 도달 = 잡힘이므로 여기서
+	// 발화해 ①②와 같은 (Captured → Wrapped) 순서를 만든다. BeginWrap 성공 뒤에 두어, Captured만 나가고
+	// Wrapped가 안 나오는 중간 실패 구간이 생기지 않게 한다.
+	DispatchCaptured(Seed.BoneName);
+
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("guided throw bone=%s, %d anchor(s)"),
 		*Seed.BoneName.ToString(), Seed.Anchors.Num()));
 	ResetTransientPhaseState();
@@ -2617,8 +2639,7 @@ bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
 		BuildContactingState(Candidates, DeltaTime);
 		SetPhase(ERopePhase::Contacting, *FString::Printf(TEXT("bone=%s, %d node(s)"),
 			*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num()));
-		NotifyCaptured(ContactTracker.CandidateBone);
-		OnRopeCaptured.Broadcast(ContactTracker.CandidateBone);
+		DispatchCaptured(ContactTracker.CandidateBone);
 		// 캡처 프레임 자체도 실제 접촉 1프레임이다. 기본 WrapDecisionTime(약 1프레임)을 이미 채웠다면
 		// 다음 프레임 재검출을 기다리지 않고 즉시 Wrapping으로 넘겨 움직이는 대상에서 튕김을 줄인다.
 		if (ShouldStartWrapping())

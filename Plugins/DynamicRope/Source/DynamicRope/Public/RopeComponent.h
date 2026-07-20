@@ -619,12 +619,20 @@ protected:
 	/** 페이즈 전이 직후, OnRopePhaseChanged 브로드캐스트 직전에 호출(전이당 1회, 같은 페이즈 재설정 제외). */
 	virtual void OnPhaseChanged(ERopePhase OldPhase, ERopePhase NewPhase) {}
 
-	//~ Reel(장전) 연출 훅 — 전부 게임 스레드, 전이당 1회(콜드 패스). 기본 구현을 override해 연출을 커스텀한다.
-	/** Reel 중 창(팁)을 놓을 월드 트랜스폼. 기본: Owner 스켈레탈 메시의 ReelHandSocket 소켓(없으면 컴포넌트 트랜스폼). */
+	//~ Reel(장전) 연출 훅 — 전부 게임 스레드(콜드 패스). 기본 구현을 override해 연출을 커스텀한다.
+
+	/** Reel 중 창(팁)을 놓을 월드 트랜스폼. 기본: Owner 스켈레탈 메시의 ReelHandSocket 소켓(없으면 컴포넌트 트랜스폼).
+	 *  ⚠ 전이당이 아니라 **Reel인 동안 매 프레임 2회** 불린다(노드 구동 + 팁 메쉬 배치) — 무거운 계산은 캐시할 것. */
 	virtual FTransform GetReelTipTransform() const;
-	/** EnterReel() 진입 시 1회. 기본: 로프 튜브 렌더를 숨긴다(SetVisibility(false)). */
+
+	/** Reel 진입 **에지에서만** 1회(이미 Reel일 때 EnterReel()을 다시 불러도 재발화하지 않는다 —
+	 *  프리셋 적용이 ③ 로프에 EnterReel()을 무조건 호출하기 때문). 기본: 로프 튜브 렌더를 숨긴다.
+	 *  OnDeployFromReel과 1:1로 짝지어진다. */
 	virtual void OnEnterReel();
-	/** Reel에서 나가는 throw 성립 직전 1회. 기본: 로프 튜브를 다시 표시하고 전체 길이(RopeLength)를 복원한다. */
+
+	/** Reel을 벗어나는 순간 1회(throw 성립 또는 프리셋으로 ①②가 될 때). 기본: 로프 튜브를 다시 표시하고
+	 *  전체 길이(RopeLength)를 복원한다.
+	 *  ⚠ 호출 시점의 GetPhase()는 **아직 Reel**이다(페이즈 전이는 이 훅 뒤에 일어난다). */
 	virtual void OnDeployFromReel();
 
 	/**
@@ -671,6 +679,12 @@ protected:
 	 * 여기로 수렴한다. ③ prepared 경로는 preview 빌드 시점에 한 번 지나고 그 결과를 재사용한다.
 	 * 과거엔 "조준 규약을 바꾸는" 훅이 MakeDefaultThrowContext에도 있었으나, Wielder 경로가 자체
 	 * 컨텍스트를 만들어 그 훅을 지나지 않아 오버라이드해도 무효였다 → 훅을 이쪽 하나로 일원화했다.
+	 *
+	 * **오버라이드는 순수(pure)해야 한다** — 같은 입력에 항상 같은 출력, 상태 변경 없음. 이유는 두 가지다:
+	 *  (1) ③은 preview 빌드 시점에 해석한 컨텍스트를 던지기가 그대로 재사용한다. 여기서 난수(조준 산포
+	 *      등)를 쓰면 preview가 보여준 궤적과 실제 던지기가 갈라진다 — 이 훅이 존재하는 이유 자체가 그 일치다.
+	 *  (2) ③ 조준 실패 폴백(아치 던지기)은 같은 원본 컨텍스트로 이 훅을 한 번 더 호출한다. 순수하면
+	 *      결과가 같아 무해하지만, 부수효과가 있으면 두 번 적용된다.
 	 */
 	virtual FRopeThrowContext ResolveThrowContext(const FRopeThrowContext& ThrowContext) const;
 
@@ -953,6 +967,10 @@ private:
 
 	/** GuidedThrow 완료 시 prepared anchor를 FRopeWrapState로 변환해 바로 Wrapped로 커밋한다. */
 	void FinishGuidedThrow();
+
+	/** Captured 통지의 단일 지점(네이티브 훅 → BP 델리게이트). ①② Flight 캡처와 ③ 도달이 공유한다 —
+	 *  경로마다 인라인 브로드캐스트를 두면 한쪽이 빠져도 안 보인다(실제로 ③이 그랬다). */
+	void DispatchCaptured(FName Bone);
 
 	/** 허공(대상 없음) 던지기: 레이 끝점(EndpointWorld)을 향한 아치 GuidedThrow를 시작한다(꽂힘 없이 완료 시 Free). */
 	void StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld);
