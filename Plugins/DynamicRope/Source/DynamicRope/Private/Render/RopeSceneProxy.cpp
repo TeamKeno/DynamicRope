@@ -25,6 +25,8 @@
 #include "Misc/App.h"
 // UE_VERSION_OLDER_THAN — 엔진 버전 가드(GetMaterialRelevance 시그니처가 5.7에서 변경)
 #include "Misc/EngineVersionComparison.h"
+// RHI 버퍼 생성 버전차 래퍼(5.6+ FRHIBufferCreateDesc vs 5.5 구 경로)
+#include "RopeRHICompat.h"
 // bWriteVelocity — 프록시 생성 시 1회 스냅샷
 #include "Settings/DynamicRopeSettings.h"
 
@@ -36,12 +38,8 @@
 
 void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
-	const FRHIBufferCreateDesc CreateDesc =
-		FRHIBufferCreateDesc::CreateIndex<int32>(TEXT("FRopeIndexBuffer"), NumIndices)
-		.AddUsage(EBufferUsageFlags::Dynamic | EBufferUsageFlags::ShaderResource)
-		.DetermineInitialState();
-
-	IndexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	IndexBufferRHI = RopeRHI::CreateIndexBuffer(RHICmdList, TEXT("FRopeIndexBuffer"), sizeof(int32), NumIndices,
+		EBufferUsageFlags::Dynamic | EBufferUsageFlags::ShaderResource);
 
 	// BuildTube가 채우기 전(예: PIE 밖, 서브시스템 틱이 없어 센터라인이 안 올라온 상태)에 캐시된 정적
 	// 드로우가 미초기화 인덱스(쓰레기 값)를 그리면 원점을 가로지르는 degenerate 삼각형 = 월드를 가르는
@@ -60,11 +58,8 @@ void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 void FRopeGpuPositionBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	const uint32 Bytes = static_cast<uint32>(NumVertices) * sizeof(FVector3f);
-	const FRHIBufferCreateDesc CreateDesc =
-		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuPositionBuffer"), Bytes)
-		.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
-		.DetermineInitialState();
-	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	VertexBufferRHI = RopeRHI::CreateVertexBuffer(RHICmdList, TEXT("FRopeGpuPositionBuffer"), Bytes,
+		EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess);
 
 	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
 		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R32_FLOAT));
@@ -85,11 +80,8 @@ void FRopeGpuPositionBuffer::ReleaseRHI()
 void FRopeCenterlineBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	const uint32 Bytes = static_cast<uint32>(NumFloats) * sizeof(float);
-	const FRHIBufferCreateDesc CreateDesc =
-		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeCenterlineBuffer"), Bytes)
-		.AddUsage(EBufferUsageFlags::ShaderResource)
-		.DetermineInitialState();
-	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	VertexBufferRHI = RopeRHI::CreateVertexBuffer(RHICmdList, TEXT("FRopeCenterlineBuffer"), Bytes,
+		EBufferUsageFlags::ShaderResource);
 
 	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
 		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R32_FLOAT));
@@ -107,11 +99,8 @@ void FRopeGpuTangentBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	// TangentX(8) + TangentZ(8)
 	const uint32 Bytes = static_cast<uint32>(NumVertices) * 16;
-	const FRHIBufferCreateDesc CreateDesc =
-		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuTangentBuffer"), Bytes)
-		.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
-		.DetermineInitialState();
-	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	VertexBufferRHI = RopeRHI::CreateVertexBuffer(RHICmdList, TEXT("FRopeGpuTangentBuffer"), Bytes,
+		EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess);
 
 	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
 		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R16G16B16A16_SNORM));
@@ -130,11 +119,8 @@ void FRopeGpuTangentBuffer::ReleaseRHI()
 void FRopeGpuTexCoordBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	const uint32 Bytes = static_cast<uint32>(NumVertices) * sizeof(FVector2f);
-	const FRHIBufferCreateDesc CreateDesc =
-		FRHIBufferCreateDesc::CreateVertex(TEXT("FRopeGpuTexCoordBuffer"), Bytes)
-		.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess)
-		.DetermineInitialState();
-	VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+	VertexBufferRHI = RopeRHI::CreateVertexBuffer(RHICmdList, TEXT("FRopeGpuTexCoordBuffer"), Bytes,
+		EBufferUsageFlags::ShaderResource | EBufferUsageFlags::UnorderedAccess);
 
 	SRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI,
 		FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_G32R32F));

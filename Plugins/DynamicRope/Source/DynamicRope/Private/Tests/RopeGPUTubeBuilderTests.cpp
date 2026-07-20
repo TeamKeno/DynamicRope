@@ -7,6 +7,9 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "RopeTubeBuilder.h"
+// FRHIGPUBufferReadback 완전정의 + RHI 버퍼 생성 버전차 래퍼
+#include "RHIGPUReadback.h"
+#include "RopeRHICompat.h"
 #include "RHI.h"
 #include "RHIGPUReadback.h"
 #include "RHICommandList.h"
@@ -52,10 +55,8 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 			auto MakeBuf = [&](const TCHAR* Name, uint32 Bytes, EPixelFormat Fmt, bool bUAV,
 				FShaderResourceViewRHIRef& OutSRV, FUnorderedAccessViewRHIRef& OutUAV) -> FBufferRHIRef
 			{
-				FRHIBufferCreateDesc Desc = FRHIBufferCreateDesc::CreateVertex(Name, Bytes)
-					.AddUsage(EBufferUsageFlags::ShaderResource | (bUAV ? EBufferUsageFlags::UnorderedAccess : EBufferUsageFlags::None))
-					.DetermineInitialState();
-				FBufferRHIRef Buf = RHICmdList.CreateBuffer(Desc);
+				FBufferRHIRef Buf = RopeRHI::CreateVertexBuffer(RHICmdList, Name, Bytes,
+					EBufferUsageFlags::ShaderResource | (bUAV ? EBufferUsageFlags::UnorderedAccess : EBufferUsageFlags::None));
 				OutSRV = RHICmdList.CreateShaderResourceView(Buf,
 					FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(Fmt));
 				if (bUAV)
@@ -211,10 +212,8 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 			auto MakeTyped = [&](const TCHAR* Name, uint32 Bytes, EPixelFormat Fmt, bool bUAV,
 				FShaderResourceViewRHIRef& OutSRV, FUnorderedAccessViewRHIRef& OutUAV) -> FBufferRHIRef
 			{
-				FRHIBufferCreateDesc Desc = FRHIBufferCreateDesc::CreateVertex(Name, Bytes)
-					.AddUsage(EBufferUsageFlags::ShaderResource | (bUAV ? EBufferUsageFlags::UnorderedAccess : EBufferUsageFlags::None))
-					.DetermineInitialState();
-				FBufferRHIRef Buf = RHICmdList.CreateBuffer(Desc);
+				FBufferRHIRef Buf = RopeRHI::CreateVertexBuffer(RHICmdList, Name, Bytes,
+					EBufferUsageFlags::ShaderResource | (bUAV ? EBufferUsageFlags::UnorderedAccess : EBufferUsageFlags::None));
 				OutSRV = RHICmdList.CreateShaderResourceView(Buf,
 					FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(Fmt));
 				if (bUAV) { OutUAV = RHICmdList.CreateUnorderedAccessView(Buf,
@@ -223,10 +222,8 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 			};
 			auto MakeStructured = [&](const TCHAR* Name, uint32 Stride, uint32 Count, FShaderResourceViewRHIRef& OutSRV) -> FBufferRHIRef
 			{
-				FRHIBufferCreateDesc Desc = FRHIBufferCreateDesc::CreateStructured(Name, Stride * Count, Stride)
-					.AddUsage(EBufferUsageFlags::ShaderResource)
-					.DetermineInitialState();
-				FBufferRHIRef Buf = RHICmdList.CreateBuffer(Desc);
+				FBufferRHIRef Buf = RopeRHI::CreateStructuredBuffer(RHICmdList, Name, Stride, Count,
+					EBufferUsageFlags::ShaderResource);
 				OutSRV = RHICmdList.CreateShaderResourceView(Buf,
 					FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Structured));
 				return Buf;

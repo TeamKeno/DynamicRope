@@ -11,6 +11,8 @@
 #include "ToolMenus.h"
 #include "ViewportToolbar/UnrealEdViewportToolbar.h"
 #include "ViewportToolbar/UnrealEdViewportToolbarContext.h"
+// UE_VERSION_OLDER_THAN — 아래 뷰포트 툴바 서브메뉴가 5.6+ API라 버전 가드에 필요
+#include "Misc/EngineVersionComparison.h"
 
 #define LOCTEXT_NAMESPACE "RopeSDFPreviewViewport"
 
@@ -203,6 +205,9 @@ TSharedPtr<SWidget> SRopeSDFPreviewViewport::BuildViewportToolbar()
 		FToolMenuSection& RightSection = Menu->AddSection("Right");
 		RightSection.Alignment = EToolMenuSectionAlign::Last;
 
+		// 카메라/뷰모드 서브메뉴는 5.6에서 들어온 뷰포트 툴바 API다(UE::UnrealEd::Create*Submenu). 5.5에는
+		// 없어 그대로 두면 컴파일이 깨지므로 가드한다 — 5.5에서는 이 두 서브메뉴 없이 툴바가 뜬다.
+#if !UE_VERSION_OLDER_THAN(5, 6, 0)
 		// 카메라 서브메뉴(이동 속도 옵션 포함). 서브메뉴 안의 스피드 메뉴는 SetShowInToolbarTopLevel(true)로
 		// 툴바 최상단에도 자동 승격되므로(메인 레벨 뷰포트와 동일 구성), 별도 스피드 엔트리를 추가하면 중복된다.
 		RightSection.AddEntry(UE::UnrealEd::CreateCameraSubmenu(
@@ -211,6 +216,7 @@ TSharedPtr<SWidget> SRopeSDFPreviewViewport::BuildViewportToolbar()
 		// 뷰 모드(Lit/Unlit/Wireframe...) — 오버레이가 메시 내부에 있을 때 와이어프레임으로 검수.
 		// 전환 커맨드는 SEditorViewport::BindCommands가 이미 바인딩해 둔 것을 메뉴로 노출만 한다.
 		RightSection.AddEntry(UE::UnrealEd::CreateViewModesSubmenu());
+#endif
 	}
 
 	// 메뉴 위젯 생성 컨텍스트: 이 뷰포트의 커맨드 리스트 + 뷰포트 참조(카메라 스피드 등이 사용).
