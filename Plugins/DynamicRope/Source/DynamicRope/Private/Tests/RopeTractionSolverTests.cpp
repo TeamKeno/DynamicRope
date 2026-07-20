@@ -552,4 +552,207 @@ bool FRopeTractionTargetInjectSpeedCapTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+//======================================================================================
+// 테더 λ 제약 솔브(SolveTetherLambda) — Docs/PoC/05 재편의 순수 수학 계층.
+//======================================================================================
+
+namespace
+{
+	// 공용 기본 입력: 10kg 대상 + 100kg wielder, β=1, 상한/컴플라이언스 없음. 각 테스트가 필요한 것만 덮는다.
+	RopeTraction::FRopeTetherConstraint MakeLambdaInput(float C, float SepSpeed)
+	{
+		RopeTraction::FRopeTetherConstraint In;
+		In.C = C;
+		In.SepSpeed = SepSpeed;
+		In.InvMassTarget = 1.0f / 10.0f;
+		In.InvMassWielder = 1.0f / 100.0f;
+		In.SettleAlpha = 1.0f;
+		return In;
+	}
+}
+
+// 단방향성: 로프는 밀지도(슬랙), 접근을 제동하지도 않는다. 양끝 다 앵커면 아무도 못 움직인다.
+// λ의 정의 검증: 인가 총량(λ × w합)이 "벌어짐 상쇄 + 위치 회수 명령"을 정확히 닫는다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTetherLambdaUnilateralTest,
+	"DynamicRope.Traction.TetherLambdaUnilateralAndAnchors",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTetherLambdaUnilateralTest::RunTest(const FString& Parameters)
+{
+	const float Dt = 1.0f / 60.0f;
+
+	// 슬랙(C ≤ 0): 벌어지는 중이어도 무동작 — 팽팽하지 않은 로프는 힘이 없다(별도 게이트 불필요).
+	TestEqual(TEXT("슬랙이면 0"), RopeTraction::SolveTetherLambda(MakeLambdaInput(-5.0f, 500.0f), Dt), 0.0f);
+	TestEqual(TEXT("경계(C=0)도 0"), RopeTraction::SolveTetherLambda(MakeLambdaInput(0.0f, 500.0f), Dt), 0.0f);
+
+	// dt 축퇴 가드.
+	TestEqual(TEXT("dt 0이면 0"), RopeTraction::SolveTetherLambda(MakeLambdaInput(10.0f, 500.0f), 0.0f), 0.0f);
+
+	// 이미 명령 이상으로 접근 중(β·C/dt = 0.2×10×60 = 120): 제동 없음 — 슬랙 코스팅은 정당한 물리.
+	{
+		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(10.0f, -120.0f);
+		In.SettleAlpha = 0.2f;
+		TestEqual(TEXT("명령 속도로 접근 중이면 0"), RopeTraction::SolveTetherLambda(In, Dt), 0.0f);
+		In.SepSpeed = -200.0f;
+		TestEqual(TEXT("명령 초과 접근도 제동하지 않는다"), RopeTraction::SolveTetherLambda(In, Dt), 0.0f);
+	}
+
+	// 벌어지는 중: λ × w합 = 벌어짐 상쇄(300) + 위치 회수(120) 정확 폐합.
+	{
+		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(10.0f, 300.0f);
+		In.SettleAlpha = 0.2f;
+		const float WSum = In.InvMassTarget + In.InvMassWielder;
+		const float Lambda = RopeTraction::SolveTetherLambda(In, Dt);
+		TestTrue(TEXT("벌어지면 λ > 0"), Lambda > 0.0f);
+		TestEqual(TEXT("인가 총량 = 상쇄 + 회수"), Lambda * WSum, 420.0f, 0.01f);
+	}
+
+	// 양끝 다 앵커(w합 ~0): 아무도 못 움직인다(한계 이탈은 거리 release가 처리).
+	{
+		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(50.0f, 500.0f);
+		In.InvMassTarget = 0.0f;
+		In.InvMassWielder = 0.0f;
+		TestEqual(TEXT("양끝 앵커면 0"), RopeTraction::SolveTetherLambda(In, Dt), 0.0f);
+	}
+	return true;
+}
+
+// 분배 자동성: 같은 λ가 양끝에 걸려 끝별 ΔV = λ×w — 무거운 쪽이 덜 움직이고(역질량비), 앵커(w=0)는
+// 정지한 채 반대쪽이 전량 회수한다. MassShare 분배/BinaryPullable 양보가 이 한 식에서 유도된다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTetherLambdaDistributionTest,
+	"DynamicRope.Traction.TetherLambdaDistributesByInverseMass",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTetherLambdaDistributionTest::RunTest(const FString& Parameters)
+{
+	const float Dt = 1.0f / 60.0f;
+
+	// 10kg 대상 vs 100kg wielder: ΔV 비율 10:1(가벼운 쪽이 10배 움직임), 합은 명령(β·C/dt = 1800) 폐합.
+	{
+		const RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(30.0f, 0.0f);
+		const float Lambda = RopeTraction::SolveTetherLambda(In, Dt);
+		const float DvTarget = Lambda * In.InvMassTarget;
+		const float DvWielder = Lambda * In.InvMassWielder;
+		TestEqual(TEXT("ΔV 비율 = 역질량비(10:1)"), DvTarget / DvWielder, 10.0f, 0.01f);
+		TestEqual(TEXT("끝별 ΔV 합 = 회수 명령"), DvTarget + DvWielder, 1800.0f, 0.1f);
+	}
+
+	// 대상이 앵커(벽): wielder가 전량 회수 — 그리고 λ는 명령을 넘지 않는다(윈치 없음: 회수 명령은
+	// β·C/dt로 유한하고, 상시 리엘 같은 하한이 존재하지 않는다).
+	{
+		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(30.0f, 0.0f);
+		In.InvMassTarget = 0.0f;
+		const float Lambda = RopeTraction::SolveTetherLambda(In, Dt);
+		TestEqual(TEXT("앵커 쪽 ΔV = 0"), Lambda * In.InvMassTarget, 0.0f);
+		TestEqual(TEXT("wielder가 전량 회수"), Lambda * In.InvMassWielder, 1800.0f, 0.1f);
+	}
+	return true;
+}
+
+// 세 상한의 계약: MaxTension(장력 한계 — 무거운 대상 뒤처짐), Compliance(의도적 탄성),
+// MaxBiasSpeed(위치 회수 명령 상한 — 벌어짐 상쇄에는 걸리지 않는다).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTetherLambdaCapsTest,
+	"DynamicRope.Traction.TetherLambdaHonorsTensionComplianceAndBiasCaps",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTetherLambdaCapsTest::RunTest(const FString& Parameters)
+{
+	const float Dt = 1.0f / 60.0f;
+
+	// 장력 상한: λ ≤ MaxTension × dt. 부족분은 다음 프레임 C로 이월된다(무거운 대상 뒤처짐 — 물리적).
+	{
+		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(30.0f, 0.0f);
+		In.MaxTension = 60000.0f;
+		TestEqual(TEXT("장력 상한 클램프"), RopeTraction::SolveTetherLambda(In, Dt), 60000.0f * Dt, 0.01f);
+	}
+
+	// 컴플라이언스: 분모에 α/dt²가 더해져 λ가 줄어든다 = 의도적 탄성. 0 = 비신축(정확 폐합).
+	{
+		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(30.0f, 0.0f);
+		In.InvMassTarget = 0.0f; // wielder 단독(w = 0.01)로 수치를 단순화.
+		const float Rigid = RopeTraction::SolveTetherLambda(In, Dt);
+		TestEqual(TEXT("비신축 λ"), Rigid, 1800.0f / 0.01f, 0.5f);
+		In.Compliance = 0.0005f; // α/dt² = 1.8 → 분모 0.01 + 1.8
+		const float Soft = RopeTraction::SolveTetherLambda(In, Dt);
+		TestEqual(TEXT("탄성 λ"), Soft, 1800.0f / 1.81f, 0.5f);
+		TestTrue(TEXT("탄성이 λ를 줄인다"), Soft < Rigid);
+	}
+
+	// 바이어스 상한: 위치 회수 명령(β·C/dt = 6000)만 400으로 캡되고, 벌어짐 상쇄(500)는 캡과 무관하다
+	// — 상쇄는 운동량 실체(실제 벌어짐을 멈춤), 바이어스만 코스팅 잔류가 될 수 있어 따로 제한한다.
+	{
+		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(100.0f, 0.0f);
+		In.InvMassTarget = 0.0f;
+		In.MaxBiasSpeed = 400.0f;
+		TestEqual(TEXT("회수 명령이 캡으로 제한"),
+			RopeTraction::SolveTetherLambda(In, Dt) * In.InvMassWielder, 400.0f, 0.1f);
+		In.SepSpeed = 500.0f;
+		TestEqual(TEXT("벌어짐 상쇄는 캡 위에 더해진다"),
+			RopeTraction::SolveTetherLambda(In, Dt) * In.InvMassWielder, 900.0f, 0.1f);
+	}
+	return true;
+}
+
+// 수렴성(미니 적분): 자유 양끝이 초과분 C에서 출발하면 λ는 첫 프레임에만 발화하고(재슬램 없음),
+// C는 단조 감소로 경계를 지나 슬랙이 되며, 잔류 접근 속도는 첫 프레임 회수 명령을 넘지 않는다.
+// 옛 시스템의 "코스팅→재팽팽 되튕김" 진동(끝별 서보 + 상시 리엘)이 구조적으로 없음을 고정하는 회귀 테스트.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTetherLambdaConvergenceTest,
+	"DynamicRope.Traction.TetherLambdaConvergesWithoutOscillation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTetherLambdaConvergenceTest::RunTest(const FString& Parameters)
+{
+	const float Dt = 1.0f / 60.0f;
+
+	auto Simulate = [&](float MaxBiasSpeed, float& OutFinalSep, int32& OutFramesWithLambda, bool& bOutMonotonic)
+	{
+		float C = 50.0f;
+		float Sep = 0.0f; // 정지 출발.
+		OutFramesWithLambda = 0;
+		bOutMonotonic = true;
+		for (int32 Frame = 0; Frame < 120; ++Frame)
+		{
+			RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(C, Sep);
+			In.SettleAlpha = 0.2f;
+			In.MaxBiasSpeed = MaxBiasSpeed;
+			const float Lambda = RopeTraction::SolveTetherLambda(In, Dt);
+			if (Lambda > 0.0f)
+			{
+				++OutFramesWithLambda;
+			}
+			// 자유 바디: 임펄스 쌍이 상대 접근으로 그대로 반영되고(합산 w), 속도는 다음 프레임까지 보존된다.
+			Sep -= Lambda * (In.InvMassTarget + In.InvMassWielder);
+			const float NewC = C + Sep * Dt;
+			bOutMonotonic &= (NewC <= C + KINDA_SMALL_NUMBER);
+			C = NewC;
+		}
+		OutFinalSep = Sep;
+		return C;
+	};
+
+	// 상한 없음: 첫 프레임 명령 = β·C/dt = 0.2×50×60 = 600. 이후는 코스팅이 명령을 앞서 λ가 다시 안 나온다.
+	{
+		float FinalSep = 0.0f;
+		int32 FramesWithLambda = 0;
+		bool bMonotonic = false;
+		const float FinalC = Simulate(0.0f, FinalSep, FramesWithLambda, bMonotonic);
+		TestEqual(TEXT("λ는 첫 프레임에만 발화(재슬램 없음)"), FramesWithLambda, 1);
+		TestTrue(TEXT("C 단조 감소(되튕김 없음)"), bMonotonic);
+		TestTrue(TEXT("경계 도달(슬랙 전환)"), FinalC <= 0.0f);
+		TestEqual(TEXT("잔류 접근 = 첫 프레임 회수 명령"), FinalSep, -600.0f, 0.5f);
+	}
+
+	// 바이어스 상한 200: 잔류 접근(코스팅)이 정확히 상한으로 묶인다 — "상한 = 최대 접근 속도" 계약.
+	{
+		float FinalSep = 0.0f;
+		int32 FramesWithLambda = 0;
+		bool bMonotonic = false;
+		const float FinalC = Simulate(200.0f, FinalSep, FramesWithLambda, bMonotonic);
+		TestTrue(TEXT("캡 하에서도 경계 도달"), FinalC <= 0.0f);
+		TestTrue(TEXT("C 단조 감소(캡)"), bMonotonic);
+		TestEqual(TEXT("잔류 접근 ≤ 바이어스 상한"), FinalSep, -200.0f, 0.5f);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

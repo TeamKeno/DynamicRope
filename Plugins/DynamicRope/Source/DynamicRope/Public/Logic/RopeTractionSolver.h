@@ -131,4 +131,57 @@ namespace RopeTraction
 	 * Alpha는 [0..1] 클램프(ExpSmoothAlpha로 산출해 넘긴다). 장부가 ~0이면 무동작.
 	 */
 	DYNAMICROPE_API FVector DecayVelocityDebt(const FVector& Velocity, FVector& InOutDebt, float Alpha);
+
+	/**
+	 * 테더 λ 제약 입력(단위: cm / kg / s — SolveTetherLambda 참조). 설계는 Docs/PoC/05.
+	 */
+	struct FRopeTetherConstraint
+	{
+		/** 초과분 C = 앵커→손 경로 chord 합 − 자유 구간 rest 길이(cm). ≤ 0 = 슬랙(λ = 0). */
+		float C = 0.0f;
+
+		/**
+		 * 벌어지는 속도(cm/s, + = 벌어지는 중) = −(vT·dT + vW·dW) − dRest/dt.
+		 * vT/vW = 양끝 속도, dT/dW = 각 끝의 안쪽(로프를 따라 상대 쪽) 단위 방향. 되감기(rest 축소)는
+		 * dRest/dt < 0이라 +로 유입돼 λ가 그만큼 당긴다(리엘 = rest 길이 변화, 별도 견인 경로 없음).
+		 */
+		float SepSpeed = 0.0f;
+
+		/** 양끝 유효 역질량(1/kg). 0 = 앵커(무한질량 — 그 끝은 ΔV를 받지 않는다). */
+		float InvMassTarget = 0.0f;
+		float InvMassWielder = 0.0f;
+
+		/**
+		 * 위치 회수 게인 β [0..1] — 이번 프레임에 C의 이 비율을 닫는 접근 속도를 명령한다.
+		 * ExpSmoothAlpha(TetherSettleTime, dt)로 산출해 넘긴다(프레임률 독립). 0 = 속도 제약만
+		 * (벌어짐 상쇄만 하고 이미 쌓인 C는 안 닫는다 — 드리프트 허용).
+		 */
+		float SettleAlpha = 1.0f;
+
+		/**
+		 * 위치 회수 명령 속도 상한(cm/s, 0 = 무제한). β·C/dt는 C가 큰 프레임(커밋 직후 이미 초과 등)에
+		 * 스파이크가 된다 — 이 항만이 벌어짐 상쇄와 달리 운동량에 바이어스로 남으므로(슬랙 전환 후
+		 * 접근 코스팅의 상한이 곧 이 값), 상한이 곧 "테더가 만들 수 있는 최대 접근 속도"다.
+		 */
+		float MaxBiasSpeed = 0.0f;
+
+		/** 컴플라이언스 α(s²/kg — XPBD 표준형, 분모에 α/dt²). 0 = 비신축(기본), > 0 = 의도적 탄성(연출). */
+		float Compliance = 0.0f;
+
+		/** 장력 상한(kg·cm/s², 0 = 무제한). λ ≤ 이 값 × dt — 무거운 대상 뒤처짐/한계 장력 연출의 물리 노브. */
+		float MaxTension = 0.0f;
+	};
+
+	/**
+	 * 테더 λ 제약 솔브(프레임당 1회, 해석적 — 반복 불필요). 반환 = 장력 임펄스 λ ≥ 0(kg·cm/s).
+	 * 인가는 호출자 몫: 각 끝에 Δv = d × (λ × w) — 크기가 같은 임펄스 쌍이라 분배(무거운 쪽이 덜
+	 * 움직임/앵커는 정지)가 자동이고, 상대 *접근*만 만들므로 끝별 독립 서보와 달리 에너지 주입이
+	 * 없다(바이어스 항만 예외 — MaxBiasSpeed 주석). 성질:
+	 *  - 단방향: 슬랙(C ≤ 0)이거나 이미 목표 이상으로 접근 중이면 0 — 로프는 밀지도, 접근을 제동하지도
+	 *    않는다(슬랙 코스팅은 정당한 물리).
+	 *  - 양끝 다 앵커(w 합 ~0)면 0 — 아무도 못 움직인다(한계 이탈은 거리 release가 처리).
+	 *  - MaxTension 상한에 걸리면 남은 C가 다음 프레임으로 이월된다(무거운 대상 뒤처짐).
+	 * 유닛 테스트: Tests/RopeTractionSolverTests.cpp의 TetherLambda* 계열.
+	 */
+	DYNAMICROPE_API float SolveTetherLambda(const FRopeTetherConstraint& In, float DeltaTime);
 }
