@@ -319,12 +319,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowWithContext(const FRopeThrowContext& ThrowContext);
 
-	/** 현재 FrameColliders를 swept SDF 질의해 ray에서 가장 가까운 wrap 가능 mesh+bone을 찾는다.
-	 *  OutBlockedHit(옵션): ray는 맞았지만 wrap 불가한 가장 가까운 hit(조준 HUD "빨강" 표시용). */
-	bool FindAimRayBoneHit(const FVector& Origin, const FVector& AimDir, float RayLength,
-		float QueryRadius, float SweepStep, FRopeAimRayHitResult& OutHit,
-		FRopeAimRayHitResult* OutBlockedHit = nullptr) const;
-
 	/** 요청 반경(0=미지정)을 이 로프의 폴백 규약으로 해석한 **실제 스윕 반경**. 조준 시각화가 질의와
 	 *  같은 치수를 그리도록 쓴다 — 0이 기본값이라 실무에선 거의 항상 폴백이 걸린다. */
 	float GetAimRayEffectiveQueryRadius(float RequestedRadius) const;
@@ -651,7 +645,8 @@ protected:
 	 * **대상을 고르는 모든 경로가 이 게이트 하나를 공유한다** — 조준/preview/판정이 갈리면 "조준은
 	 * 거부했는데 preview는 고르는" 불일치가 된다. 호출 지점:
 	 *   - Flight 후보 산출(프레임마다·후보별) + Contacting 재수집 — RemoveNonWrappableCandidates
-	 *   - 조준 ray 질의 — FindAimRayBoneHit (금지 대상은 blocked로 잡힌다 = aim hit 없음)
+	 *   - 조준 ray 질의 — FRopeAimTargeting::FindAimRayBoneHit
+	 *     (금지 대상은 blocked로 잡힌다 = aim hit 없음)
 	 *   - preview arc 탐색 — FRopeThrowPreviewBuilder::FInput::CanWrapTarget 주입
 	 *     (빌더가 UObject-free라 virtual을 직접 못 부르므로 호출자가 람다로 넣어준다)
 	 *   - prepared throw 진입 — ThrowWithPreparedPreview (마지막 방어선)
