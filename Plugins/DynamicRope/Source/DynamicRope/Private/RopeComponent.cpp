@@ -47,6 +47,8 @@
 // 기본 머티리얼 로드(FObjectFinder)
 #include "UObject/ConstructorHelpers.h"
 
+#pragma region File_Local_Helpers_And_Debug
+
 namespace
 {
 	// Releasing 진입 시 Free 복귀까지의 쿨다운(초). Abort/Hold 실패/수동 해제 공통.
@@ -379,6 +381,10 @@ namespace
 
 }
 
+#pragma endregion File_Local_Helpers_And_Debug
+
+#pragma region Construction
+
 URopeComponent::URopeComponent()
 {
 	// 컴포넌트는 스스로 tick하지 않는다 — URopeSimSubsystem이 모든 로프를
@@ -398,6 +404,10 @@ URopeComponent::URopeComponent()
 		RopeMaterial = DefaultRopeMaterial.Object;
 	}
 }
+
+#pragma endregion Construction
+
+#pragma region Public_API
 
 // ===== API ==================================================================
 
@@ -944,6 +954,10 @@ void URopeComponent::ReleaseWrapAs(ERopeReleaseReason Reason)
 		Reason == ERopeReleaseReason::Cut ? TEXT("cut") : TEXT("manual"), *Bone.ToString()));
 }
 
+#pragma endregion Public_API
+
+#pragma region Simulation_Frame_Pipeline
+
 // ===== 시뮬레이션 프레임(서브시스템이 3단계로 구동) ===========================
 
 void URopeComponent::PrepareSimFrame(float DeltaTime)
@@ -1220,6 +1234,10 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 #endif
 }
 
+#pragma endregion Simulation_Frame_Pipeline
+
+#pragma region Tip_Mesh
+
 // ===== 팁 부착물(표시 전용) =================================================
 
 void URopeComponent::EnsureTipMesh()
@@ -1416,6 +1434,10 @@ void URopeComponent::UpdateTipMeshTransform()
 	TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(TipFollow));
 }
 
+#pragma endregion Tip_Mesh
+
+#pragma region Pierce_Embedding
+
 // ===== Pierce 임베드 헬퍼 ====================================================
 
 bool URopeComponent::ReadTipSocketLocal(FName Socket, FTransform& OutLocal) const
@@ -1584,6 +1606,10 @@ bool URopeComponent::ComputePierceEmbed(const FVector& HitPoint, const FVector& 
 	return true;
 }
 
+#pragma endregion Pierce_Embedding
+
+#pragma region Component_Lifecycle
+
 // ===== UActorComponent ======================================================
 
 void URopeComponent::BeginPlay()
@@ -1720,6 +1746,10 @@ void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 }
 #endif
 
+#pragma endregion Component_Lifecycle
+
+#pragma region Rendering
+
 // ===== UPrimitiveComponent / UMeshComponent =================================
 
 FPrimitiveSceneProxy* URopeComponent::CreateSceneProxy()
@@ -1755,6 +1785,10 @@ FBoxSphereBounds URopeComponent::CalcBounds(const FTransform& LocalToWorld) cons
 	const float Reach = RopeLength + Radius + 1.0f;
 	return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector(Reach), Reach);
 }
+
+#pragma endregion Rendering
+
+#pragma region Phase_State_Machine
 
 // ===== 페이즈 상태 머신 ======================================================
 
@@ -1815,6 +1849,10 @@ void URopeComponent::FilterFrameCollidersForAimWrapTarget()
 {
 	AimTargeting.FilterCollidersToTarget(Phase, ResolveMode, SimFrame.FrameColliders);
 }
+
+#pragma endregion Phase_State_Machine
+
+#pragma region Initialization_And_Debug
 
 // ===== 초기화/유틸 ===========================================================
 
@@ -2089,6 +2127,10 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 	}
 }
 #endif
+
+#pragma endregion Initialization_And_Debug
+
+#pragma region Throw
 
 // ===== Throw ================================================================
 
@@ -2531,6 +2573,10 @@ float URopeComponent::TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, in
 	return RopeMath::SmoothStep(T);
 }
 
+#pragma endregion Throw
+
+#pragma region Flight
+
 // ===== Flight ===============================================================
 
 FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float DeltaTime) const
@@ -2794,6 +2840,10 @@ void URopeComponent::BuildContactingState(const TArray<FRopeContactCandidate>& C
 	CaptureTravelFrame = FRopeCaptureTravelFrame::Compute(Sim, Candidates, DeltaTime);
 }
 
+#pragma endregion Flight
+
+#pragma region Contacting
+
 // ===== Contacting ===========================================================
 
 void URopeComponent::UpdateContacting(float DeltaTime)
@@ -3044,6 +3094,10 @@ bool URopeComponent::BuildSeedLatchForTarget(const TArray<FRopeContactCandidate>
 	OutAnchor.RopeDistance = RopeDistance;
 	return true;
 }
+
+#pragma endregion Contacting
+
+#pragma region Wrapping
 
 // ===== Wrapping =============================================================
 
@@ -3814,6 +3868,10 @@ void URopeComponent::ReleaseKinematicVirtualBridgesToSolver()
 	ResetKinematicVirtualBridges();
 }
 
+#pragma endregion Wrapping
+
+#pragma region Wrapped_Hold_And_Pull_Sampling
+
 // ===== Wrapped ==============================================================
 // PrepareSimFrame의 Wrapped 케이스는 아래 4단계 헬퍼의 고정 순서로 돈다:
 // ① HoldWrappedNodesToBone → ② UpdateWrappedPullSample → ③ ApplyWrappedTraction → ④ CheckWrappedAutoRelease
@@ -4095,6 +4153,10 @@ void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 	}
 }
 
+#pragma endregion Wrapped_Hold_And_Pull_Sampling
+
+#pragma region Rope_Length_Reel_And_LOD
+
 void URopeComponent::SetActivePull(float Force, bool bIgnoreTautGate)
 {
 	PullDrive.ActivePullForce = FMath::Max(0.0f, Force);
@@ -4152,6 +4214,10 @@ void URopeComponent::UpdateReel(float DeltaTime)
 	}
 	SetRopeLength(Sim.RopeLength - ReelRate * DeltaTime);
 }
+
+#pragma endregion Rope_Length_Reel_And_LOD
+
+#pragma region Traction_Endpoint_And_Tether_Policies
 
 namespace
 {
@@ -4739,6 +4805,10 @@ namespace
 	}
 }
 
+#pragma endregion Traction_Endpoint_And_Tether_Policies
+
+#pragma region Tether_And_Pull_Application
+
 FVector URopeComponent::ComputeSmoothedWielderDir(const FVector& Aim, const FVector& DirToAim, float DeltaTime)
 {
 	// 방향 = 손(노드 0)에서 로프의 첫 직선 다리를 따라. 조준(AimPos)이 벽 모서리면 모서리를 향하고, 로프가 곧아
@@ -5066,3 +5136,5 @@ void URopeComponent::ApplyPullForceToWielder(const FVector& Force, float DeltaTi
 		return;
 	}
 }
+
+#pragma endregion Tether_And_Pull_Application
