@@ -1259,10 +1259,6 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 		State.PathNormalWorld,
 		Ctx,
 		State.PathCircumferenceDir);
-	State.PathCurrentBone = LatchAnchor.Bone;
-	State.PathPreviousBone = NAME_None;
-	State.PathCurrentMesh = Mesh;
-	State.PathDistanceSinceBoneTransition = 0.0f;
 	State.PathWrapIslandBones.Reset();
 	State.PathWrapIslandDebugMembers.Reset();
 	State.PathWrapIslandDebugPortals.Reset();
@@ -3677,23 +3673,23 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 			Ctx.Config.WrappingPostFrontSettleTime);
 	}
 
-	const float SafeDeltaTime = FMath::Max(0.0f, DeltaTime);
-	const float MeasuredFrontSpeed = SafeDeltaTime > KINDA_SMALL_NUMBER
-		? (State.FrontDistance - PreviousFrontDistance) / SafeDeltaTime
-		: 0.0f;
-	const float MeasuredAngularSpeedDegPerSec = SafeDeltaTime > KINDA_SMALL_NUMBER
-		? (bUseAngleMappedFront
-			? FMath::RadiansToDegrees(
-				(State.FrontWrapAngleRad - PreviousFrontAngleRad) / SafeDeltaTime)
-			: (BuiltCmPerRad > KINDA_SMALL_NUMBER
-				? FMath::RadiansToDegrees(MeasuredFrontSpeed / BuiltCmPerRad)
-				: 0.0f))
-		: 0.0f;
-
 	// Progressive build가 끝난 뒤 한 번만 출력한다. 두 모드의 measuredLinearSpeed가 path의
 	// 구간별 cm/rad에 따라 달라도 measuredAngularSpeed는 같은 공통 angular policy를 따라야 한다.
 	if (State.bPathBuildComplete && !State.bFrontMotionStartLogged)
 	{
+		const float SafeDeltaTime = FMath::Max(0.0f, DeltaTime);
+		const float MeasuredFrontSpeed = SafeDeltaTime > KINDA_SMALL_NUMBER
+			? (State.FrontDistance - PreviousFrontDistance) / SafeDeltaTime
+			: 0.0f;
+		const float MeasuredAngularSpeedDegPerSec = SafeDeltaTime > KINDA_SMALL_NUMBER
+			? (bUseAngleMappedFront
+				? FMath::RadiansToDegrees(
+					(State.FrontWrapAngleRad - PreviousFrontAngleRad) / SafeDeltaTime)
+				: (BuiltCmPerRad > KINDA_SMALL_NUMBER
+					? FMath::RadiansToDegrees(MeasuredFrontSpeed / BuiltCmPerRad)
+					: 0.0f))
+			: 0.0f;
+
 		UE_LOG(LogRopeWrap, Display,
 			TEXT("[%s] Wrapping front speed metrics: mode=%s policy=%s "
 				"legacyBaseLinearSpeed=%.2fcm/s measuredLinearSpeed=%.2fcm/s "
