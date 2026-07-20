@@ -964,6 +964,9 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 	SimFrame.OverrideFrame.Reset();
 	const ERopePhase PhaseAtPrepareStart = Phase;
 	bEnteredFlightDuringPrepareThisFrame = false;
+#if WITH_GAMEPLAY_DEBUGGER
+	DebugPhaseAtFrameStart = PhaseAtPrepareStart;
+#endif
 
 	// pinned-start target을 전진시킨다; solver가 substep에 걸쳐 Prev->Target을 sweep하므로 빠른
 	// 캐릭터 이동이 chain을 홱 잡아당겨(폭주시켜) 버리지 않는다.
@@ -1990,7 +1993,19 @@ namespace
 void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 {
 	Snapshot.Phase = Phase;
+	Snapshot.PhaseAtFrameStart = DebugPhaseAtFrameStart;
 	Snapshot.Positions = Sim.Positions;
+
+	// 헤더 표시용 프레임 상태 — 화면이 라이브 대신 여기서 읽어 한 시간 기준을 유지한다.
+	// wrapBone은 Wrapped 전용 블록과 달리 phase 무관하게 담는다(헤더가 항상 낸다).
+	Snapshot.WrapBoneName = WrapController.State.BoneName;
+	Snapshot.bSleeping = Throttle.IsAsleep();
+	Snapshot.LodScale = Throttle.GetSolverLODScale();
+	Snapshot.NumParticles = NumParticles;
+	Snapshot.TubeSmoothingSubdiv = TubeSmoothingSubdiv;
+	Snapshot.bSolveThisFrame = SimFrame.bSolveThisFrame;
+	Snapshot.bGpuStepped = SimFrame.bGpuSteppedThisFrame;
+	Snapshot.bLogicOverride = SimFrame.OverrideFrame.HasAny();
 
 	// centerline 상에서 강조할 latch 노드 인덱스.
 	const FRopeWrapState& Wrap = WrapController.State;

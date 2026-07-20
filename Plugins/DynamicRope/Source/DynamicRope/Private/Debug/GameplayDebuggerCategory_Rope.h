@@ -51,9 +51,10 @@ private:
 	void OnToggleColliders();
 	void OnToggleAim();
 
-	// 한 로프를 그린다. phase/centerline/wrapBone 같은 상시 정보는 **라이브 컴포넌트**에서 읽어 항상
-	// 정확하게(디버거 수집 주기에 따른 지연 없음), flight 후보·sweep·wrapped 상세 같은 transient 진단
-	// 오버레이만 스냅샷에서 읽는다(Snap==null이면 오버레이는 생략). 진단은 수집 주기만큼 지연될 수 있다.
+	// 한 로프를 그린다. **한 화면은 하나의 시간 기준만 쓴다** — 헤더(phase/nodes/wrapBone/solve)와
+	// centerline, 진단 오버레이가 모두 같은 스냅샷에서 나온다. 헤더만 라이브로 두면 같은 노드가 두 시점에
+	// 겹쳐 그려져 시뮬 떨림이나 latch 불안정으로 오독된다. 스냅샷 나이는 헤더의 age=Nf로 드러낸다.
+	// Snap==null(캡처 첫 프레임)일 때만 헤더를 라이브로 내고 (live) 라벨을 붙이며, 오버레이는 생략한다.
 	void DrawRope(int32 Index, const URopeComponent& Rope, const FRopeDebugSnapshot* Snap);
 
 	// 조준 ray를 그린다. 질의는 하지 않는다 — Wielder가 이미 매 틱 스윕해 캐시한 샘플을 읽기만 한다

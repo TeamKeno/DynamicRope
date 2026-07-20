@@ -94,10 +94,31 @@ struct FRopeDebugSnapshot
 	uint64 FrameStamp = 0;
 
 	//~ centerline(항상) ---------------------------------------------------
+	// 프레임 종료 시점 phase(제출 직전). 아래 PhaseAtFrameStart와 다르면 이번 프레임에 전이한 것이다.
 	ERopePhase Phase = ERopePhase::Free;
+	// 프레임 시작(Prepare 진입) 시점 phase. 전이는 Prepare/Finalize 안에서 일어나므로, 한 스냅샷이
+	// "Flight에서 시작해 Contacting으로 끝난 프레임"처럼 전이 전후를 함께 담는다 — 이때 flight 오버레이는
+	// 전이를 일으킨 바로 그 관측이라 유효하다(phase가 다르다는 이유로 숨기면 전이 원인을 잃는다).
+	ERopePhase PhaseAtFrameStart = ERopePhase::Free;
 	TArray<FVector> Positions;
 	// centerline 상에서 강조할 latch 노드 인덱스.
 	TArray<int32> LatchedNodes;
+
+	//~ 헤더 표시용 프레임 상태 -------------------------------------------
+	// 화면 한 장이 하나의 시간 기준만 쓰도록, 헤더도 라이브 컴포넌트 대신 이 값들을 읽는다. 라이브와
+	// 섞으면 같은 노드가 두 시점에 겹쳐 그려져 시뮬 떨림처럼 보인다.
+	// (주의: GPU 경로에서는 Sim.Positions 자체가 리드백 미러라 1~2프레임 지연된다. 여기서 맞추는 것은
+	//  디버거 내부의 일관성이지, 실제 GPU 버퍼로 그려지는 튜브와의 일치가 아니다.)
+	FName WrapBoneName = NAME_None;
+	bool  bSleeping = false;
+	float LodScale = 1.0f;
+	// tube 적격성 계산 입력(씬 프록시와 같은 소스인 설정값).
+	int32 NumParticles = 0;
+	int32 TubeSmoothingSubdiv = 1;
+	// 솔브 경로 토큰 산출 입력 — 세 값의 조합이 6종을 가른다(bSleeping 포함).
+	bool  bSolveThisFrame = false;
+	bool  bGpuStepped = false;
+	bool  bLogicOverride = false;
 
 	//~ flight(Flight phase에서만) ----------------------------------------
 	bool bHasFlight = false;

@@ -798,6 +798,12 @@ private:
 	// Finalize 접촉 감지를 한 프레임 미뤄 stale guide 후보로 즉시 재캡처되는 것을 막는다.
 	bool bEnteredFlightDuringPrepareThisFrame = false;
 
+#if WITH_GAMEPLAY_DEBUGGER
+	// 프레임 시작(Prepare 진입) 시점 phase. 전이는 Prepare/Finalize 안에서 일어나 프레임 끝의 Phase만으로는
+	// "무엇에서 무엇으로 갔는지"를 알 수 없으므로, 디버그 스냅샷이 전이 전후를 함께 담도록 보존한다.
+	ERopePhase DebugPhaseAtFrameStart = ERopePhase::Free;
+#endif
+
 	/**
 	 * Phase 대입의 단일 지점. 전이 로그("[이름] Old -> New (Reason)")를 일원화한다.
 	 * Reason은 로그용 부가 설명(nullptr이면 생략). 전이에 딸린 이벤트 브로드캐스트와

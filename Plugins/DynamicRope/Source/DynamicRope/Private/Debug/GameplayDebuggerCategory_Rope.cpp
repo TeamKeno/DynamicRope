@@ -46,18 +46,17 @@ namespace
 		return FString::Printf(TEXT("{red}cpu{grey}(rings %d > %d)"), NumRings, RopeGPU::MaxTubeRings());
 	}
 
-	// 이번 프레임 이 로프가 밟은 솔브 경로. bGpuSteppedThisFrame 하나로는 판정할 수 없다 — 서브시스템이
-	// 솔브 프레임과 override-only 프레임(Wrapping/Releasing/GuidedThrow)을 똑같이 GPU에 실으므로
+	// 이번 프레임 이 로프가 밟은 솔브 경로. bGpuStepped 하나로는 판정할 수 없다 — 서브시스템이 솔브
+	// 프레임과 override-only 프레임(Wrapping/Releasing/GuidedThrow)을 똑같이 GPU에 실으므로
 	// (TryBuildResidentStep) GPU=true가 "물리 솔브 중"을 뜻하지 않는다.
-	const TCHAR* SolvePathToken(const URopeComponent& Rope)
+	const TCHAR* SolvePathToken(bool bSleeping, bool bSolved, bool bGpuStepped, bool bLogicOverride)
 	{
-		if (Rope.IsSleeping())
+		if (bSleeping)
 		{
 			// 슬립은 솔브 자체가 없다 — 다른 어떤 상태보다 먼저 본다.
 			return TEXT("{cyan}SLEEP");
 		}
-		const bool bSolved = Rope.WasSolvedThisFrame();
-		if (Rope.IsGpuSteppedThisFrame())
+		if (bGpuStepped)
 		{
 			return bSolved ? TEXT("{green}GPU_SOLVE") : TEXT("{green}GPU_OVERRIDE");
 		}
@@ -67,7 +66,7 @@ namespace
 			return TEXT("{red}CPU_SOLVE");
 		}
 		// 솔브도 GPU 디스패치도 없지만 로직이 위치를 갱신한 프레임 vs 아무것도 안 한 프레임.
-		return Rope.HadLogicOverrideThisFrame() ? TEXT("{yellow}CPU_OVERRIDE") : TEXT("{grey}IDLE");
+		return bLogicOverride ? TEXT("{yellow}CPU_OVERRIDE") : TEXT("{grey}IDLE");
 	}
 
 	const TCHAR* DebugPhaseName(ERopePhase Phase)
@@ -267,28 +266,48 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 
 void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent& Rope, const FRopeDebugSnapshot* Snap)
 {
-	// 상시 정보는 라이브 컴포넌트에서 — 디버거 수집 주기에 따른 지연 없이 항상 현재 값.
-	const ERopePhase LivePhase = Rope.GetPhase();
-	const FName Bone = Rope.GetWrappedBoneName();
-	const TArray<FVector>& Points = Rope.GetCenterlinePositions();
+	// 화면 한 장은 하나의 시간 기준만 쓴다 — 스냅샷이 있으면 헤더·centerline·오버레이가 모두 그 스냅샷을
+	// 읽는다. 헤더만 라이브로 두면 같은 노드가 두 시점에 겹쳐 그려져 시뮬 떨림/latch 불안정처럼 보인다.
+	// 스냅샷이 아직 없는 첫 프레임에만 라이브로 헤더를 내고 (live) 라벨을 붙인다.
+	const ERopePhase PhaseEnd = Snap ? Snap->Phase : Rope.GetPhase();
+	const ERopePhase PhaseStart = Snap ? Snap->PhaseAtFrameStart : PhaseEnd;
+	const TArray<FVector>& Points = Snap ? Snap->Positions : Rope.GetCenterlinePositions();
+	const FName Bone = Snap ? Snap->WrapBoneName : Rope.GetWrappedBoneName();
+	const bool bSleeping = Snap ? Snap->bSleeping : Rope.IsSleeping();
+	const float LODScale = Snap ? Snap->LodScale : Rope.GetSolverLODScale();
+
+	// 프레임 안에서 전이했으면 시작→종료를 함께 낸다. 이 조합이 곧 "무엇 때문에 넘어갔나"의 단서다
+	// (예: Flight→Contacting 프레임의 flight 오버레이 = 전이를 일으킨 관측).
+	const FString PhaseText = (PhaseStart != PhaseEnd)
+		? FString::Printf(TEXT("%s{grey}→{white}%s"), DebugPhaseName(PhaseStart), DebugPhaseName(PhaseEnd))
+		: FString(DebugPhaseName(PhaseEnd));
+
+	// 스냅샷 나이(프레임). 0이면 이번 프레임 것, 커지면 sim이 캡처를 못 낸 것이다(대상 해제/일시정지).
+	const FString AgeText = Snap
+		? ((GFrameCounter > Snap->FrameStamp)
+			? FString::Printf(TEXT("  {grey}age=%lluf"), static_cast<unsigned long long>(GFrameCounter - Snap->FrameStamp))
+			: FString())
+		: FString(TEXT("  {grey}(live — diag pending)"));
 
 	// 스케일링 상태: 슬립(솔브 스킵) 여부 + 거리 LOD iteration 배율(1 미만이면 감쇠 중).
-	const float LODScale = Rope.GetSolverLODScale();
 	AddTextLine(FString::Printf(
 		TEXT("{yellow}Rope #%d{white} phase=%s nodes=%d wrapBone=%s%s%s%s"),
-		Index, DebugPhaseName(LivePhase), Points.Num(),
+		Index, *PhaseText, Points.Num(),
 		Bone.IsNone() ? TEXT("-") : *Bone.ToString(),
-		Rope.IsSleeping() ? TEXT("  {cyan}asleep") : TEXT(""),
+		bSleeping ? TEXT("  {cyan}asleep") : TEXT(""),
 		LODScale < 0.999f ? *FString::Printf(TEXT("  {cyan}lod=x%.2f"), LODScale) : TEXT(""),
-		Snap ? TEXT("") : TEXT("  {grey}(diag pending)")));
+		*AgeText));
 
 	// 솔브 경로(6종 토큰) + 튜브 적격성(프록시 실제 상태가 아닌 재계산 추정치 — TubeDiagString 주석 참조).
 	AddTextLine(FString::Printf(
 		TEXT("  {grey}solve=%s{grey} tube-eligible=%s"),
-		SolvePathToken(Rope),
-		*TubeDiagString(Rope.NumParticles, Rope.TubeSmoothingSubdiv)));
+		Snap ? SolvePathToken(Snap->bSleeping, Snap->bSolveThisFrame, Snap->bGpuStepped, Snap->bLogicOverride)
+			 : SolvePathToken(Rope.IsSleeping(), Rope.WasSolvedThisFrame(),
+					Rope.IsGpuSteppedThisFrame(), Rope.HadLogicOverrideThisFrame()),
+		*TubeDiagString(Snap ? Snap->NumParticles : Rope.NumParticles,
+			Snap ? Snap->TubeSmoothingSubdiv : Rope.TubeSmoothingSubdiv)));
 
-	//~ centerline(라이브 위치) -------------------------------------------
+	//~ centerline -------------------------------------------------------
 	if (HasView(EView::Centerline))
 	{
 		// 노드 점만 찍는다 — 연결 세그먼트는 튜브 메시가 이미 보여주므로 중복이고, phase 색은 위 헤더
@@ -297,7 +316,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		{
 			AddShape(FGameplayDebuggerShape::MakePoint(Point, 2.0f, FColor::Yellow));
 		}
-		// latch 노드 강조(스냅샷 인덱스를 라이브 위치에 적용).
+		// latch 노드 강조(인덱스와 위치가 같은 스냅샷에서 온다).
 		if (Snap)
 		{
 			for (int32 NodeIdx : Snap->LatchedNodes)
@@ -310,7 +329,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		}
 	}
 
-	// 이하 진단 오버레이는 transient 캡처 데이터 — 스냅샷이 있을 때만. 수집 주기만큼 지연될 수 있다.
+	// 이하 진단 오버레이는 transient 캡처 데이터 — 스냅샷이 있을 때만.
 	if (!Snap)
 	{
 		return;
