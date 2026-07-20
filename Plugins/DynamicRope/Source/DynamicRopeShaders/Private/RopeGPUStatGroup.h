@@ -7,6 +7,9 @@
 // 비용은 저쪽, GPU/RT는 이쪽으로 갈랐다 — 새 stat을 추가할 때 이 경계를 지켜라. 둘을 같이 보려면 두 그룹을
 // 각각 켜면 된다('stat DynamicRope' + 'stat DynamicRopeGPU').
 //
+// 단, 이 그룹의 'GPU *' CYCLE stat은 전부 RT CPU 시간이다 — GPU가 실제로 커널을 돌린 시간은 엔진 GPU 그룹
+// 소관이라 'stat gpu'에서 DynamicRope Solve / Detect / Tube로 본다(선언은 각 cpp의 DECLARE_GPU_STAT_NAMED).
+//
 // 그룹 struct(DECLARE_STATS_GROUP)는 TU당 정확히 한 번만 정의돼야 한다. 유니티 빌드가 여러 cpp를 한 TU로
 // 합치므로 각 cpp에 인라인 선언하면 struct 재정의(C2011)가 난다 — 그래서 헤더+include guard로 TU당 1회만
 // 나오게 하고, 이 그룹으로 stat을 선언하는 shaders cpp(RopeGPUSolver.cpp / RopeTubeBuilder.cpp)가 모두 이

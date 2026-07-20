@@ -110,6 +110,12 @@ DECLARE_MEMORY_STAT(TEXT("GPU Tube Upload/Frame (Centerline)"), STAT_RopeGPU_Tub
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Tube Builds/Frame"), STAT_RopeGPU_TubeBuilds, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Tube Resident Builds/Frame"), STAT_RopeGPU_TubeResidentBuilds, STATGROUP_DynamicRopeGPU);
 
+// GPU 타임라인 stat — 튜브 빌드 커널의 **실제 GPU 시간**('stat gpu' / ProfileGPU / Insights GPU 트랙). 위
+// 대역폭 카운터와 달리 이 그룹 HUD에는 안 나온다. 튜브 빌드는 RDG가 아니라 즉시 RHI 커맨드 리스트에 dispatch
+// 하므로(프록시별 렌더 커맨드) RDG_EVENT_SCOPE_STAT이 아니라 RHI_BREADCRUMB_EVENT_STAT을 쓴다 — 5.7에서
+// SCOPED_GPU_STAT은 no-op이다(자세한 버전 계약은 RopeGPUSolver.cpp의 같은 블록 주석 참조).
+DECLARE_GPU_STAT_NAMED(RopeGPUTube, TEXT("DynamicRope Tube"));
+
 #if STATS
 // 튜브 빌드는 로프(프록시)별 렌더 커맨드라 솔버 RunSteps 같은 단일 프레임 진입점이 없다. RT 프레임 번호가
 // 바뀌는 그 프레임 첫 빌드에서 직전 프레임 누산분을 stat에 밀어넣고 리셋하는 지연-플러시로 프레임당 값을
@@ -170,6 +176,7 @@ void RopeGPU::BuildTube_RenderThread(
 	Params.OutTexCoords = OutTexCoordsUAV;
 
 	// 로프 1개 = 스레드그룹 1개(numthreads=버킷). UAV 배리어는 호출자(proxy)가 처리.
+	RHI_BREADCRUMB_EVENT_STAT(RHICmdList, RopeGPUTube, "DynamicRope Tube");
 #if STATS
 	// 비-resident: 프록시가 이번 프레임 CenterlineBuffer에 올린 중심선(NumRings×float3)이 이 업로드 대역폭이다.
 	RopeTube_AccumBuild(/*bResident*/false, (uint64)NumRings * 3 * sizeof(float));
@@ -214,6 +221,7 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 	Params.OutTangents   = OutTangentsUAV;
 	Params.OutTexCoords  = OutTexCoordsUAV;
 
+	RHI_BREADCRUMB_EVENT_STAT(RHICmdList, RopeGPUTube, "DynamicRope Tube");
 #if STATS
 	// resident: 솔버 상주 PosBuf 직독 — CPU→GPU 중심선 업로드 없음(업로드 대역폭 0).
 	RopeTube_AccumBuild(/*bResident*/true, 0);

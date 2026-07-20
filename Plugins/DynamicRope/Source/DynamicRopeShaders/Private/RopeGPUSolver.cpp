@@ -23,6 +23,7 @@
 #include "Misc/ScopeLock.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE — 렌더 스레드 dispatch 경로 실측(Unreal Insights CPU 타임라인).
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "ProfilingDebugging/RealtimeGPUProfiler.h"
 #include "Stats/Stats.h"
 
 // 'stat DynamicRopeGPU' RT 타이밍/메모리/대역폭 — 그룹 선언과 분리 이유는 RopeGPUStatGroup.h 참조(런타임 GT
@@ -59,6 +60,18 @@ DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Colliders)"), STAT_RopeGPU_UploadCol
 DECLARE_MEMORY_STAT(TEXT("GPU Readback/Frame (download)"), STAT_RopeGPU_ReadbackBytes, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Dispatches/Frame"), STAT_RopeGPU_Dispatches, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Substeps/Frame"), STAT_RopeGPU_Substeps, STATGROUP_DynamicRopeGPU);
+
+// ── GPU 타임라인 stat — 위 CYCLE stat들과 재는 대상이 다르다 ────────────────────────────────────────
+// 위쪽 'GPU *' CYCLE stat은 전부 **RT CPU 시간**(그래프를 짜는 데 든 시간)이다. 아래 두 개는 GPU가 실제로
+// 커널을 돌린 시간으로, 엔진 GPU 그룹에 들어가 'stat gpu' / GPU Visualizer(ProfileGPU) / Insights GPU 트랙에
+// 뜬다 — 이 그룹('stat DynamicRopeGPU')에는 안 나온다. 로프가 프레임 예산에서 몇 ms를 먹는지는 이쪽 숫자다.
+//
+// [매크로 선택 — 버전 계약] UE 5.7은 RHI_NEW_GPU_PROFILER=1이라 구형 RDG_GPU_STAT_SCOPE/SCOPED_GPU_STAT이
+// **조용히 no-op**이 된다(5.8은 아예 deprecated). 반면 RDG_EVENT_SCOPE_STAT(RDG 경로)와
+// RHI_BREADCRUMB_EVENT_STAT(즉시 RHI 경로)은 이 플러그인이 지원하는 5.5~5.8 전 버전에서 stat id를 실어
+// 나른다. 그래서 RopeRHICompat 게이팅 없이 이 두 형태만 쓴다 — 새 GPU 스코프를 넣을 때도 이걸 따르라.
+DECLARE_GPU_STAT_NAMED(RopeGPUSolve, TEXT("DynamicRope Solve"));
+DECLARE_GPU_STAT_NAMED(RopeGPUDetect, TEXT("DynamicRope Detect"));
 
 // RT 전용 프레임 업로드 누산기(RunSteps 시작에서 리셋, 끝에서 SET). RunSteps는 프레임당 1회 실행.
 #if STATS
@@ -1362,6 +1375,8 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_AddDetectPass);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_AddDetectPass);
+	// 솔브 스코프 안에 중첩 — 감지 커널 시간은 Solve가 아니라 이쪽으로 귀속된다.
+	RDG_EVENT_SCOPE_STAT(GraphBuilder, RopeGPUDetect, "DynamicRope Detect");
 	const int32 N = S.NumNodes;
 
 	const bool bContactSeed = !R.ContactBuf.IsValid() || B.bSeed;
@@ -1476,6 +1491,9 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_RunSteps);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_RunSteps);
+	// GPU 타임라인 귀속: 이 스코프 안에서 GraphBuilder에 추가되는 모든 패스가 'DynamicRope Solve'로 잡힌다
+	// (감지 패스는 RopeAddDetectPass가 자체 스코프로 다시 떼어간다).
+	RDG_EVENT_SCOPE_STAT(GraphBuilder, RopeGPUSolve, "DynamicRope Solve");
 #if STATS
 	// 이번 프레임 업로드 누산 리셋(아래 RopeUploadBuffer들이 카테고리별로 더한다). RunSteps는 프레임당 1회.
 	GRopeUploadBytesTotal = 0;
