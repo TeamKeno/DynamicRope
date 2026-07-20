@@ -6,6 +6,75 @@
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
+void FRopeColliderCandidates::Reset(int32 NumNodes)
+{
+	const int32 NumSeg = FMath::Max(0, NumNodes - 1);
+	bValid = false;
+
+	// Reset(슬랙 유지) + AddZeroed로 카운트만 비운다 → substep마다 힙을 다시 잡지 않는다.
+	// 인덱스 버퍼는 카운트 밖 슬롯을 읽지 않으므로 초기화할 필요가 없다.
+	NodeBounds.SetNum(NumNodes, EAllowShrinking::No);
+	NodeIndices.SetNumUninitialized(NumNodes * MaxPerItem, EAllowShrinking::No);
+	NodeNum.Reset(NumNodes);
+	NodeNum.AddZeroed(NumNodes);
+	bNodeOverflow.Reset(NumNodes);
+	bNodeOverflow.AddZeroed(NumNodes);
+
+	SegIndices.SetNumUninitialized(NumSeg * MaxPerItem, EAllowShrinking::No);
+	SegNum.Reset(NumSeg);
+	SegNum.AddZeroed(NumSeg);
+	bSegOverflow.Reset(NumSeg);
+	bSegOverflow.AddZeroed(NumSeg);
+}
+
+void FRopeColliderCandidates::AddNode(int32 NodeIndex, int32 ColliderIndex)
+{
+	int32& Num = NodeNum[NodeIndex];
+	if (Num >= MaxPerItem)
+	{
+		// 이 노드에 겹치는 collider가 상한 초과 → 후보 목록이 불완전하므로 전량 루프로 폴백시킨다
+		// (앞의 MaxPerItem개만 보면 검출이 줄어 관통이 난다 — 여기서만은 느린 게 맞다).
+		bNodeOverflow[NodeIndex] = true;
+		return;
+	}
+	NodeIndices[NodeIndex * MaxPerItem + Num] = ColliderIndex;
+	++Num;
+}
+
+void FRopeColliderCandidates::AddSegment(int32 SegIndex, int32 ColliderIndex)
+{
+	int32& Num = SegNum[SegIndex];
+	if (Num >= MaxPerItem)
+	{
+		bSegOverflow[SegIndex] = true;
+		return;
+	}
+	SegIndices[SegIndex * MaxPerItem + Num] = ColliderIndex;
+	++Num;
+}
+
+int32 FRopeColliderCandidates::NodeCount(int32 NodeIndex, int32 NumColliders, bool& bOutAll) const
+{
+	if (!bValid || !bNodeOverflow.IsValidIndex(NodeIndex) || bNodeOverflow[NodeIndex])
+	{
+		bOutAll = true;
+		return NumColliders;
+	}
+	bOutAll = false;
+	return NodeNum[NodeIndex];
+}
+
+int32 FRopeColliderCandidates::SegCount(int32 SegIndex, int32 NumColliders, bool& bOutAll) const
+{
+	if (!bValid || !bSegOverflow.IsValidIndex(SegIndex) || bSegOverflow[SegIndex])
+	{
+		bOutAll = true;
+		return NumColliders;
+	}
+	bOutAll = false;
+	return SegNum[SegIndex];
+}
+
 FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverConfig& Config, float DeltaSeconds)
 {
 	// 고정 timestep: substep 크기를 frame rate와 무관하게 고정한다(Substeps = "60fps frame당 substep 수"로
@@ -69,6 +138,10 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 	TArray<FRopeContactState> Contacts;
 	Contacts.SetNum(State.Num());
 
+	// 노드/세그먼트별 collider 후보. detect 패스마다 다시 채워지고 그 패스의 iteration들이 재사용한다.
+	// 버퍼를 substep 루프 밖에서 한 번만 잡으려고 여기서 선언한다.
+	FRopeColliderCandidates Candidates;
+
 	// Broad-phase: collider별 월드 AABB(+CollisionRadius)를 1회만 계산한다. SolveCollisions가
 	// node/iteration/substep마다 먼 collider까지 역변환 query하던 비용을 싼 박스 테스트로 컷.
 	const float CollRadius = FMath::Max(0.0f, Config.CollisionRadius);
@@ -111,7 +184,7 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 		int32 ItDone = 0;
 		for (int32 p = 0; p < CollPasses; ++p)
 		{
-			DetectContacts(State, Config, Colliders, ColliderBounds, SubAlpha0, SubAlpha1, Contacts);
+			DetectContacts(State, Config, Colliders, ColliderBounds, SubAlpha0, SubAlpha1, Contacts, Candidates);
 			// 누적 목표(마지막 패스가 Iters를 보장).
 			const int32 ItTarget = ((p + 1) * Iters) / CollPasses;
 			for (; ItDone < ItTarget; ++ItDone)
@@ -120,8 +193,8 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 				const bool bReverse = (ItDone & 1) != 0;
 				SolveDistance(State, Config, FixedDt, bReverse, LambdaDist);
 				SolveBending(State, Config, FixedDt, bReverse, LambdaBend);
-				SolveContacts(State, Config, Colliders, ColliderBounds, Contacts);
-				SolveSegmentContacts(State, Config, Colliders, ColliderBounds, bReverse);
+				SolveContacts(State, Config, Colliders, ColliderBounds, Candidates, Contacts);
+				SolveSegmentContacts(State, Config, Colliders, ColliderBounds, Candidates, bReverse);
 			}
 		}
 
@@ -305,12 +378,15 @@ void FRopeXPBDSolver::SolveBending(FRopeSimState& State, const FRopeSolverConfig
 
 void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
 	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
-	float SubAlpha0, float SubAlpha1, TArray<FRopeContactState>& Contacts) const
+	float SubAlpha0, float SubAlpha1, TArray<FRopeContactState>& Contacts,
+	FRopeColliderCandidates& Candidates) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_Collisions);
 
 	// 재검출: 이전 패스의 활성 플래그만 지운다(Lambda는 substep 시작에만 리셋되어 substep 내 누적 유지).
 	for (FRopeContactState& C : Contacts) { C.bActive = false; }
+	// 후보도 같이 비운다(조기 반환 경로에서도 이전 패스 목록이 남지 않도록 먼저).
+	Candidates.Reset(State.Num());
 	if (Colliders.Num() == 0)
 	{
 		return;
@@ -327,18 +403,31 @@ void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConf
 	const float SweepStep = FMath::Max(Config.SweepStep, 0.1f);
 	const int32 MaxSweepSamples = FMath::Max(1, Config.MaxSweepSamples);
 
-	// 이 substep 로프 AABB(콜라이더 1회 컬용). 실제 노드 위치(Prev/Pos) 기반이라 관통 위험 없이,
-	// 로프와 안 겹치는 본은 노드 루프/Blend 진입 전에 통째로 스킵한다(매달려도 떨어져 있으면 거의 무비용).
+	Candidates.bValid = bHasBounds;
+
+	// 노드별 sweep AABB(Prev→Pos)를 1회 만들어 둔다. 로프 전체 AABB(콜라이더 1회 컬용)와 세그먼트 구간
+	// 박스가 전부 여기서 파생된다. 실제 노드 위치 기반이라 관통 위험 없이, 로프와 안 겹치는 본은 노드
+	// 루프/Blend 진입 전에 통째로 스킵한다(매달려도 떨어져 있으면 거의 무비용).
+	const int32 NumNodes = State.Num();
 	FBox RopeBounds(ForceInit);
-	for (int32 i = 0; i < State.Num(); ++i)
+	for (int32 i = 0; i < NumNodes; ++i)
 	{
-		RopeBounds += State.PrevPositions[i];
-		RopeBounds += State.Positions[i];
+		FBox& NodeBox = Candidates.NodeBounds[i];
+		NodeBox = FBox(ForceInit);
+		NodeBox += State.PrevPositions[i];
+		NodeBox += State.Positions[i];
+		RopeBounds += NodeBox;
 	}
+
+	// 후보 판정에 줄 여유(cm). 이 detect 패스에 뒤따르는 iteration들이 distance/bending/세그먼트 보정으로
+	// 노드를 끌어당길 수 있는 범위를 덮어야 후보에서 collider를 놓치지 않는다. 세그먼트 rest 길이면 충분히
+	// 보수적이다 — 한 collision 패스 안에서 노드가 그보다 더 재배치되면 이미 폭주 상태라 다음 substep의
+	// 재검출이 답이다. rest 길이가 아직 0인 초기화 직후를 위해 Radius/1cm로 하한을 둔다.
+	const float CandidateMargin = FMath::Max3(State.SegmentLength, Radius, 1.0f);
 
 	// 이번 검출에서 노드가 실제 swept hit를 받았는지. hit가 proximity-watch(아래)를 덮어쓰도록 구분한다.
 	TArray<bool> bHitThisDetect;
-	bHitThisDetect.Init(false, State.Num());
+	bHitThisDetect.Init(false, NumNodes);
 
 	// 콜라이더-아우터: substep sub-포즈(움직이는 본의 prev->curr를 알파로 Blend)를 콜라이더당 1회 계산해
 	// 노드 루프 밖으로 호이스팅한다(노드마다 Blend 재계산 방지). 한 노드가 여러 collider에 닿으면 마지막 hit가
@@ -374,7 +463,7 @@ void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConf
 			SQ.SubPoseEnd.Blend(PrevX, CurrX, SubAlpha1);
 		}
 
-		for (int32 i = 0; i < State.Num(); ++i)
+		for (int32 i = 0; i < NumNodes; ++i)
 		{
 			if (State.InvMass[i] <= 0.0f)
 			{
@@ -385,13 +474,23 @@ void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConf
 			const FVector A = State.PrevPositions[i];
 			const FVector B = State.Positions[i];
 
+			// 앞선 collider의 push-out으로 옮겨간 위치까지 노드 박스에 누적한다. 커지기만 하므로 이 박스에서
+			// 파생되는 세그먼트 후보 판정은 계속 보수적이다.
+			Candidates.NodeBounds[i] += B;
+
 			// Broad-phase: 노드 구간 AABB가 collider AABB(+Radius)와 안 겹치면 스킵. 끝점만 보면 가로질러
-			// 통과한 노드를 놓치므로 반드시 구간 AABB로 판단한다.
+			// 통과한 노드를 놓치므로 반드시 구간 AABB로 판단한다. 판정은 두 겹이다 — Margin만큼 넓힌 쪽은
+			// 뒤따르는 iteration들이 쓸 후보 등록용, 좁은 쪽은 지금 swept query를 쏠지 여부용.
 			if (bHasBounds)
 			{
 				FBox SweepBox(ForceInit);
 				SweepBox += A;
 				SweepBox += B;
+				if (!ColBounds.Intersect(SweepBox.ExpandBy(CandidateMargin)))
+				{
+					continue;
+				}
+				Candidates.AddNode(i, c);
 				if (!ColBounds.Intersect(SweepBox))
 				{
 					continue;
@@ -411,7 +510,6 @@ void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConf
 				// (hit가 proximity-watch를 덮어씀). 이후 SolveContacts가 매 iteration fresh 재질의로 강제.
 				State.Positions[i] = HitPos + Contact.Normal * Contact.Penetration;
 				CC.bActive        = true;
-				CC.ColliderIndex  = c;
 				CC.Normal         = Contact.Normal;
 				CC.SurfaceVel     = Contact.SurfaceVelocity;
 				bHitThisDetect[i] = true;
@@ -423,16 +521,34 @@ void FRopeXPBDSolver::DetectContacts(FRopeSimState& State, const FRopeSolverConf
 				// SolveContacts가 매 iteration point-query로 실제 침투를 직접 판정해 밀어낸다(밖이면 무동작 —
 				// 한쪽 접촉). 이미 hit로 확정된 collider는 덮어쓰지 않는다.
 				CC.bActive       = true;
-				CC.ColliderIndex = c;
 			}
 			// CC.Lambda는 그대로 둔다(substep 시작에만 0으로 리셋되어 누적).
+		}
+	}
+
+	// 세그먼트 후보는 검출이 다 끝난 뒤(push-out까지 반영된 최종 노드 박스로) 한 번에 만든다.
+	// 노드 후보의 합집합으로 대신할 수 없다 — 양 끝 박스 어느 쪽과도 안 겹치면서 세그먼트 중간을 가로지르는
+	// collider가 있기 때문(박스들의 합집합 ⊊ 합집합의 박스). SolveSegmentContacts의 내부 샘플은 전부 두 끝
+	// 사이에 있으므로 이 구간 박스로 거르면 보수적이다.
+	if (bHasBounds)
+	{
+		for (int32 k = 0; k + 1 < NumNodes; ++k)
+		{
+			const FBox SegBox = (Candidates.NodeBounds[k] + Candidates.NodeBounds[k + 1]).ExpandBy(CandidateMargin);
+			for (int32 c = 0; c < Colliders.Num(); ++c)
+			{
+				if (Colliders[c] && ColliderBounds[c].Intersect(SegBox))
+				{
+					Candidates.AddSegment(k, c);
+				}
+			}
 		}
 	}
 }
 
 void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
 	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
-	TArray<FRopeContactState>& Contacts) const
+	const FRopeColliderCandidates& Candidates, TArray<FRopeContactState>& Contacts) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_Contacts);
 	const float Radius = FMath::Max(0.0f, Config.CollisionRadius);
@@ -455,20 +571,25 @@ void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfi
 		// 노드에 근접한 *모든* collider를 재질의해 각각 표면 밖으로 민다(겹치는 뼈 다중 접촉을 전부 방어).
 		// 캐시된 collider 하나만 보던 버그(다른 뼈 관통을 못 막음, colIdx≠cached로 확인됨) 수정 —
 		// 캐시 평면이 아니라 매번 실제 표면을 보므로 곡면/오목에서도 정확. GPU .usf의 노드당 전 collider 루프와 일치.
+		// 다만 "근접"의 범위는 DetectContacts가 이미 가려 뒀으므로 그 후보만 돈다(상한 초과 노드만 전량 폴백).
 		const FVector& P = State.Positions[i];
 		// 충돌 push-out 직전(거리 제약까지 반영된) 위치. pinch 시 여기로 되돌려 노드를 얼린다(아래 참조).
 		const FVector PrePos = State.Positions[i];
 		// pinch 감지: 이 노드가 닿은 collider들의 단위 법선 합·개수(GPU RopeXPBD.usf NodeContact 미러).
 		FVector ContactNormalSum = FVector::ZeroVector;
 		int32 ContactCount = 0;
-		for (int32 c = 0; c < Colliders.Num(); ++c)
+		bool bAllColliders = true;
+		const int32 NumCand = Candidates.NodeCount(i, Colliders.Num(), bAllColliders);
+		for (int32 n = 0; n < NumCand; ++n)
 		{
+			const int32 c = bAllColliders ? n : Candidates.NodeAt(i, n);
 			const IRopeCollider* Collider = Colliders[c];
 			if (!Collider)
 			{
 				continue;
 			}
-			// broad-phase: collider 월드 bounds(+Radius로 확장됨)에 노드 점이 없으면 스킵(먼 collider 컷).
+			// broad-phase: collider 월드 bounds(+Radius로 확장됨)에 노드 점이 없으면 스킵. 후보는 Margin만큼
+			// 넉넉히 뽑혔으므로(iteration 중 이동 대비) 이 정밀 판정은 후보 안에서도 그대로 필요하다.
 			if (bHasBounds && !ColliderBounds[c].IsInsideOrOn(P))
 			{
 				continue;
@@ -485,11 +606,10 @@ void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfi
 			const float DLambda = Contact.Penetration / W;
 			const float NewLambda = FMath::Max(0.0f, CC.Lambda + DLambda);
 			const float Applied = NewLambda - CC.Lambda;
-			// 마찰용으로 최신(마지막 접촉) 법선/표면 속도/collider 인덱스를 캐시한다.
+			// 마찰용으로 최신(마지막 접촉) 법선/표면 속도를 캐시한다.
 			CC.Lambda  = NewLambda;
 			CC.Normal  = Contact.Normal;
 			CC.SurfaceVel = Contact.SurfaceVelocity;
-			CC.ColliderIndex = c;
 			State.Positions[i] += Contact.Normal * (W * Applied);
 			ContactNormalSum += Contact.Normal;
 			++ContactCount;
@@ -510,7 +630,8 @@ void FRopeXPBDSolver::SolveContacts(FRopeSimState& State, const FRopeSolverConfi
 }
 
 void FRopeXPBDSolver::SolveSegmentContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
-	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds, bool bReverse) const
+	const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
+	const FRopeColliderCandidates& Candidates, bool bReverse) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_SegContacts);
 	const float Radius = FMath::Max(0.0f, Config.CollisionRadius);
@@ -527,6 +648,15 @@ void FRopeXPBDSolver::SolveSegmentContacts(FRopeSimState& State, const FRopeSolv
 		if (W0 + W1 <= 0.0f)
 		{
 			// 양 끝 모두 pin(wrap 구간) → 세그먼트를 못 움직임. 스킵.
+			continue;
+		}
+
+		// 이 세그먼트의 collider 후보(DetectContacts가 세그먼트 구간 박스로 추려 둠). 후보가 없으면 샘플
+		// 루프 진입 자체를 건너뛴다 — 보통 대부분의 세그먼트가 여기서 끝난다.
+		bool bAllColliders = true;
+		const int32 NumCand = Candidates.SegCount(i, Colliders.Num(), bAllColliders);
+		if (NumCand == 0)
+		{
 			continue;
 		}
 
@@ -547,8 +677,9 @@ void FRopeXPBDSolver::SolveSegmentContacts(FRopeSimState& State, const FRopeSolv
 			}
 			// 현재 위치로 매 샘플 재계산(앞 샘플이 끝 노드를 이미 움직였을 수 있음).
 			const FVector Mid = FMath::Lerp(State.Positions[i], State.Positions[i + 1], T);
-			for (int32 c = 0; c < Colliders.Num(); ++c)
+			for (int32 n = 0; n < NumCand; ++n)
 			{
+				const int32 c = bAllColliders ? n : Candidates.SegAt(i, n);
 				const IRopeCollider* Collider = Colliders[c];
 				if (!Collider)
 				{

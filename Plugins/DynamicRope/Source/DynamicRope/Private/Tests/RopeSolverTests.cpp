@@ -290,5 +290,140 @@ bool FRopeSolverTensionTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// broad-phase 후보 목록(DetectContacts가 추려 두고 SolveContacts/SolveSegmentContacts가 그 패스의 매
+// iteration 재사용)이 결과를 바꾸지 않는가. 두 가지를 못박는다:
+//  (1) 접촉하지 않는 먼 collider를 사이사이 끼워 넣어도 결과가 같아야 한다 — 후보 슬롯→collider 인덱스
+//      매핑이 어긋나면(전량 루프 시절엔 있을 수 없던 실수) 엉뚱한 collider를 질의하게 되어 여기서 갈린다.
+//  (2) 한 노드에 겹치는 collider가 MaxPerItem을 넘으면 후보를 포기하고 전량 루프로 폴백해야 한다 —
+//      앞의 MaxPerItem개만 보면 뒤쪽 collider를 놓쳐 관통한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverColliderCandidateTest,
+	"DynamicRope.Solver.ColliderCandidateFiltering",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSolverColliderCandidateTest::RunTest(const FString& Parameters)
+{
+	FRopeSolverConfig Config = MakeStiffConfig();
+	Config.Gravity = FVector(0.0f, 0.0f, -980.0f);
+	Config.CollisionRadius = 2.0f;
+	const FRopeXPBDSolver Solver;
+
+	// (1) 먼 decoy collider는 결과에 영향이 없어야 한다.
+	{
+		// 감쇠를 조금 줘서 스윙이 멎고 구 위에 안착하게 한다(두 런에 똑같이 적용되니 비교엔 무영향).
+		FRopeSolverConfig DrapeConfig = Config;
+		DrapeConfig.Damping = 0.05f;
+		// 양 끝 고정 + 여유 길이(span 160 < rest 220) → 가운데가 구 위로 늘어져 실제 접촉이 생긴다.
+		auto MakeDrapedRope = []() -> FRopeSimState
+		{
+			FRopeSimState S = RopeTest::MakeStraightRope(12, 220.0f);
+			for (int32 i = 0; i < S.Num(); ++i)
+			{
+				const float Alpha = static_cast<float>(i) / static_cast<float>(S.Num() - 1);
+				const FVector P(-80.0f + 160.0f * Alpha, 0.0f, 60.0f);
+				S.Positions[i] = P;
+				S.PrevPositions[i] = P;
+			}
+			S.bStartPinned = true;
+			S.StartPinPrev = S.Positions[0];
+			S.StartPinTarget = S.Positions[0];
+			S.InvMass[0] = 0.0f;
+			S.InvMass[S.Num() - 1] = 0.0f;
+			return S;
+		};
+
+		// 서로 겹치도록 배치한다 — 떨어뜨려 놓으면 늘어진 로프가 가운데 틈으로 그냥 빠져나간다.
+		constexpr float SphereRadius = 25.0f;
+		RopeTest::FSphereMockCollider RealA(FVector(-20.0f, 0.0f, 0.0f), SphereRadius, FName("a"));
+		RopeTest::FSphereMockCollider RealB(FVector( 20.0f, 0.0f, 0.0f), SphereRadius, FName("b"));
+
+		// 로프 AABB에서 한참 떨어져 후보로도 안 잡히는 decoy들.
+		TArray<RopeTest::FSphereMockCollider> Decoy;
+		Decoy.Reserve(8);
+		for (int32 i = 0; i < 8; ++i)
+		{
+			Decoy.Add(RopeTest::FSphereMockCollider(FVector(0.0f, 5000.0f + i * 100.0f, 0.0f), 10.0f, FName("far")));
+		}
+
+		const TArray<IRopeCollider*> Bare = { &RealA, &RealB };
+
+		// decoy를 앞뒤로 끼워 실제 collider가 0/1이 아닌 높은 인덱스에 오게 한다(슬롯≠인덱스 상황을 만든다).
+		TArray<IRopeCollider*> Mixed;
+		for (int32 i = 0; i < 4; ++i) { Mixed.Add(&Decoy[i]); }
+		Mixed.Add(&RealA);
+		for (int32 i = 4; i < 8; ++i) { Mixed.Add(&Decoy[i]); }
+		Mixed.Add(&RealB);
+
+		FRopeSimState A = MakeDrapedRope();
+		FRopeSimState B = MakeDrapedRope();
+		for (int32 Frame = 0; Frame < 90; ++Frame)
+		{
+			Solver.Step(A, DrapeConfig, Bare, 1.0f / 60.0f);
+			Solver.Step(B, DrapeConfig, Mixed, 1.0f / 60.0f);
+		}
+
+		// 로프가 실제로 구에 걸쳐 있어야 비교가 의미 있다(둘 다 자유낙하면 자명하게 같다).
+		bool bTouched = false;
+		for (int32 i = 0; i < A.Num(); ++i)
+		{
+			const float DA = static_cast<float>(FVector::Dist(A.Positions[i], RealA.Center));
+			const float DB = static_cast<float>(FVector::Dist(A.Positions[i], RealB.Center));
+			const float Surface = SphereRadius + DrapeConfig.CollisionRadius + 1.0f;
+			bTouched |= (DA < Surface) || (DB < Surface);
+		}
+		TestTrue(TEXT("rope actually rests on the spheres (otherwise the comparison is vacuous)"), bTouched);
+
+		float MaxDelta = 0.0f;
+		for (int32 i = 0; i < A.Num(); ++i)
+		{
+			MaxDelta = FMath::Max(MaxDelta, static_cast<float>(FVector::Dist(A.Positions[i], B.Positions[i])));
+		}
+		TestTrue(FString::Printf(TEXT("distant decoy colliders must not change the result (max delta %.4f cm)"), MaxDelta),
+			MaxDelta < 0.01f);
+		TestFalse(TEXT("no NaN (decoy run)"), RopeTest::AnyNaN(B));
+	}
+
+	// (2) 후보 상한 초과 → 전량 루프 폴백.
+	{
+		// 같은 자리에 겹친 구 16개. 마지막 하나만 크게 만들어, 앞의 MaxPerItem개만 봤다면 그 큰 구를 놓쳐
+		// 노드가 작은 구 표면(z≈5)까지 가라앉는지로 폴백 동작을 판별한다.
+		constexpr int32 NumSpheres = 16;
+		static_assert(NumSpheres > FRopeColliderCandidates::MaxPerItem, "overflow 경로를 타야 의미가 있는 테스트");
+		TArray<RopeTest::FSphereMockCollider> Spheres;
+		Spheres.Reserve(NumSpheres);
+		for (int32 i = 0; i < NumSpheres; ++i)
+		{
+			Spheres.Add(RopeTest::FSphereMockCollider(FVector::ZeroVector,
+				(i == NumSpheres - 1) ? 8.0f : 3.0f, FName("stack")));
+		}
+		TArray<IRopeCollider*> Colliders;
+		Colliders.Reserve(NumSpheres);
+		for (RopeTest::FSphereMockCollider& S : Spheres) { Colliders.Add(&S); }
+
+		// StaticContactNoRebound과 같은 2노드 fixture: node0 핀, node1이 구 더미 위로 낙하.
+		FRopeSimState Sim = RopeTest::MakeStraightRope(2, 200.0f);
+		Sim.Positions[0] = FVector(0.0f, 0.0f, 207.0f);
+		Sim.PrevPositions[0] = Sim.Positions[0];
+		Sim.bStartPinned = true;
+		Sim.StartPinPrev = Sim.Positions[0];
+		Sim.StartPinTarget = Sim.Positions[0];
+		Sim.InvMass[0] = 0.0f;
+		Sim.Positions[1] = FVector(0.0f, 0.0f, 100.0f);
+		Sim.PrevPositions[1] = Sim.Positions[1];
+
+		for (int32 Frame = 0; Frame < 180; ++Frame)
+		{
+			Solver.Step(Sim, Config, Colliders, 1.0f / 60.0f);
+		}
+
+		// 가장 큰 구의 표면 = 8 + CollisionRadius 2 = 10. 폴백이 깨졌다면 5 근처에 앉는다.
+		const float Z = static_cast<float>(Sim.Positions[1].Z);
+		TestTrue(FString::Printf(TEXT("overflowed node still sees the last collider (z=%.2f, expected ~10)"), Z),
+			Z > 9.0f && Z < 11.0f);
+		TestFalse(TEXT("no NaN (overflow run)"), RopeTest::AnyNaN(Sim));
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
 
