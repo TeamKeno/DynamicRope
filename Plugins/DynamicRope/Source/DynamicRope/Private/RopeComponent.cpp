@@ -513,13 +513,7 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 		return false;
 	}
 
-	if (WrapController.IsActive())
-	{
-		WrapController.Release(ERopeReleaseReason::Manual);
-	}
-	ResetKinematicVirtualBridges();
-	ResetTransientPhaseState();
-	ReleaseCooldown = 0.0f;
+	PrepareForNewGuidedThrow();
 	// 팁 부착물 확보 보험 — 정상 경로는 BeginPlay가 이미 잡았다(런타임 bUseTipMesh 토글 대비; 이미 있으면 no-op).
 	EnsureTipMesh();
 
@@ -531,28 +525,17 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	ApplyPierceSocketTargetsToPrepared(ResolvedPrepared);
 	AimTargeting.SetWrapTargetLock(ResolvedPrepared.ThrowContext);
 
-	// 다음 PrepareSimFrame부터 GuidedThrow가 StartPositions -> RenderPreview.Points로 노드를 구동한다.
-	// 완료 시 Prepared.Anchors를 그대로 Wrapped seed로 사용한다.
-	GuidedThrowState.bActive = true;
-	GuidedThrowState.Prepared = ResolvedPrepared;
-	GuidedThrowState.StartPositions = Sim.Positions;
-	GuidedThrowState.Elapsed = 0.0f;
-	GuidedThrowState.Duration = FMath::Max(0.01f, WrapConfig.WrappingMotionDuration);
-
-	Sim.bStartPinned = true;
-	Sim.StartPinPrev = ResolvedPrepared.ThrowContext.Origin;
-	Sim.StartPinTarget = ResolvedPrepared.ThrowContext.Origin;
-	if (Sim.Positions.IsValidIndex(0))
+	const FString PhaseReason = FString::Printf(TEXT("prepared points=%d, bone=%s"),
+		ResolvedPrepared.RenderPreview.Points.Num(), *ResolvedPrepared.Bone.ToString());
+	if (!BeginGuidedThrowState(MoveTemp(ResolvedPrepared), /*bFreeThrow*/ false))
 	{
-		Sim.Positions[0] = ResolvedPrepared.ThrowContext.Origin;
-		Sim.PrevPositions[0] = ResolvedPrepared.ThrowContext.Origin;
+		return false;
 	}
 
 	// Reel에서 나가는 순간 전개 — 로프 표시 복원 + 전체 길이 복원(기본 구현, override 가능).
 	OnDeployFromReel();
 
-	SetPhase(ERopePhase::GuidedThrow, *FString::Printf(TEXT("prepared points=%d, bone=%s"),
-		ResolvedPrepared.RenderPreview.Points.Num(), *ResolvedPrepared.Bone.ToString()));
+	SetPhase(ERopePhase::GuidedThrow, *PhaseReason);
 	return true;
 }
 
@@ -2282,6 +2265,45 @@ void URopeComponent::AbandonActiveStateForRethrow()
 	}
 }
 
+void URopeComponent::PrepareForNewGuidedThrow()
+{
+	// Prepared/Free 모두 정상적으로는 Reel에서 들어와 active wrap이 없어야 한다. 기존 방어 동작은
+	// 그대로 유지하되, 커밋된 wrap의 release 통지 계약이 필요한 일반 재던지기는 Abandon*이 맡는다.
+	if (WrapController.IsActive())
+	{
+		WrapController.Release(ERopeReleaseReason::Manual);
+	}
+	ResetKinematicVirtualBridges();
+	ResetTransientPhaseState();
+	ReleaseCooldown = 0.0f;
+}
+
+bool URopeComponent::BeginGuidedThrowState(FRopePreparedThrowPreview&& Prepared, bool bFreeThrow)
+{
+	if (Sim.Num() < 2)
+	{
+		return false;
+	}
+
+	const FVector Origin = Prepared.ThrowContext.Origin;
+	GuidedThrowState.bActive = true;
+	GuidedThrowState.bFreeThrow = bFreeThrow;
+	GuidedThrowState.Prepared = MoveTemp(Prepared);
+	GuidedThrowState.StartPositions = Sim.Positions;
+	GuidedThrowState.Elapsed = 0.0f;
+	GuidedThrowState.Duration = FMath::Max(0.01f, WrapConfig.WrappingMotionDuration);
+
+	Sim.bStartPinned = true;
+	Sim.StartPinPrev = Origin;
+	Sim.StartPinTarget = Origin;
+	if (Sim.Positions.IsValidIndex(0))
+	{
+		Sim.Positions[0] = Origin;
+		Sim.PrevPositions[0] = Origin;
+	}
+	return true;
+}
+
 void URopeComponent::ResetChainForThrow(const FVector& HandOrigin)
 {
 	// 체인 위치를 통째로 재설정하는 곳이므로 GPU 상주 버퍼 재시드 세대(M5)도 여기서 함께 올린다 —
@@ -2574,32 +2596,15 @@ void URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext,
 	Free.RenderPreview.Radius = FMath::Max(0.1f, Radius * 1.05f);
 	Free.RenderPreview.NumSides = FMath::Clamp(NumSides, 3, 32);
 
-	if (WrapController.IsActive())
+	PrepareForNewGuidedThrow();
+	const FString PhaseReason = FString::Printf(TEXT("free throw to ray-end, len=%.0f"),
+		static_cast<float>((EndpointWorld - Origin).Size()));
+	if (!BeginGuidedThrowState(MoveTemp(Free), /*bFreeThrow*/ true))
 	{
-		WrapController.Release(ERopeReleaseReason::Manual);
-	}
-	ResetKinematicVirtualBridges();
-	ResetTransientPhaseState();
-	ReleaseCooldown = 0.0f;
-
-	GuidedThrowState.bActive = true;
-	GuidedThrowState.bFreeThrow = true;
-	GuidedThrowState.Prepared = Free;
-	GuidedThrowState.StartPositions = Sim.Positions;
-	GuidedThrowState.Elapsed = 0.0f;
-	GuidedThrowState.Duration = FMath::Max(0.01f, WrapConfig.WrappingMotionDuration);
-
-	Sim.bStartPinned = true;
-	Sim.StartPinPrev = Origin;
-	Sim.StartPinTarget = Origin;
-	if (Sim.Positions.IsValidIndex(0))
-	{
-		Sim.Positions[0] = Origin;
-		Sim.PrevPositions[0] = Origin;
+		return;
 	}
 
-	SetPhase(ERopePhase::GuidedThrow, *FString::Printf(TEXT("free throw to ray-end, len=%.0f"),
-		static_cast<float>((EndpointWorld - Origin).Size())));
+	SetPhase(ERopePhase::GuidedThrow, *PhaseReason);
 }
 
 FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
@@ -3296,8 +3301,7 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	// Composite Analytic Helix가 terminal failure 뒤 SingleBone으로 fallback하면 이미 고정한 virtual node를 즉시
 	// solver에 돌려준다. 새 Single 경로의 front/mass override가 아래에서 같은 프레임에 다시 적용된다.
 	if (!WrappingPhase.State.bPathUsesPoseSpaceIsland &&
-		(KinematicVirtualBridges.Num() > 0 || WrappingVirtualBridgeScanPathIndex > 0 ||
-			WrappingVirtualRunStartPathIndex != INDEX_NONE))
+		(KinematicVirtualBridges.Num() > 0 || KinematicVirtualBridgeRunCursor > 0))
 	{
 		ReleaseKinematicVirtualBridgesToSolver();
 	}
@@ -3347,8 +3351,7 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 		// ApplyFrontMotion이 오른쪽 실제 표면 노드를 먼저 붙이고 ApplyMassMask가 virtual node를 기본
 		// 동적 상태로 만든 뒤 실행한다. 따라서 front가 닫은 구간만 이 마지막 override로 즉시 조인다.
 		UpdateWrappingKinematicVirtualBridges(
-			WrappingPhase.State.Path,
-			WrappingPhase.State.LatchAnchor.NodeIndex,
+			WrappingPhase.State.VirtualBridgeRuns,
 			WrappingPhase.State.Anchors,
 			WrappingPhase.State.FrontDistance);
 		HoldKinematicVirtualBridges();
@@ -3515,9 +3518,19 @@ void URopeComponent::CommitWrapping()
 		return;
 	}
 
+	// Wrapping 중 만든 bridge를 버리고 Path를 다시 스캔하지 않는다. 최종 commit seed의 anchor를
+	// 정본으로 재해석해 같은 bridge의 binding만 갱신하고 모두 활성화한다.
+	if (!FinalizeKinematicVirtualBridges(WrappingPhase.State.VirtualBridgeRuns, Seed.Anchors))
+	{
+		WrappingPhase.State.PathBuildFailureReason = TEXT("KinematicVirtualBridgeFinalizeFailed");
+		LogWrappingFailureState(GetName(), TEXT("CommitWrapping.FinalizeVirtualBridges"),
+			WrappingPhase.State, Sim);
+		SetPhase(ERopePhase::Releasing, TEXT("virtual bridge finalization failed"));
+		AbortWrapping(ERopeReleaseReason::Broken);
+		return;
+	}
+
 	// 감길 mesh는 Seed.Mesh로 전파(접촉 유래, cross-actor 포함).
-	BuildKinematicVirtualBridges(
-		WrappingPhase.State.Path, WrappingPhase.State.LatchAnchor.NodeIndex, Seed.Anchors);
 	WrapController.BeginWrap(Sim, Seed, SimFrame.OverrideFrame);
 	HoldKinematicVirtualBridges();
 	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
@@ -3618,70 +3631,21 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 }
 
 void URopeComponent::UpdateWrappingKinematicVirtualBridges(
-	const TArray<FRopeWrapPathPoint>& Path, int32 LatchNodeIndex,
+	const TArray<FRopeVirtualBridgeRun>& Runs,
 	const TArray<FRopeSurfaceAnchor>& Anchors, float FrontDistance)
 {
-	// Composite 경로는 프레임마다 뒤에 점을 추가한다. 이미 본 prefix를 매번 재검색하지 않고 cursor부터
-	// 읽으며, 오른쪽 실제 표면점이 아직 없는 virtual run은 pending 상태로 다음 프레임까지 보존한다.
-	WrappingVirtualBridgeScanPathIndex = FMath::Clamp(
-		WrappingVirtualBridgeScanPathIndex, 0, Path.Num());
-
-	while (WrappingVirtualBridgeScanPathIndex < Path.Num())
+	// Path의 virtual run 탐색은 WrappingPhase가 한 번만 수행한다. 컴포넌트는 아직 소비하지 않은 run에
+	// 양쪽 anchor를 연결해 runtime bridge를 한 번 만들고, anchor가 늦으면 같은 run부터 다음 프레임 재시도한다.
+	KinematicVirtualBridgeRunCursor = FMath::Clamp(
+		KinematicVirtualBridgeRunCursor, 0, Runs.Num());
+	while (KinematicVirtualBridgeRunCursor < Runs.Num())
 	{
-		const int32 PathIndex = WrappingVirtualBridgeScanPathIndex;
-		const FRopeWrapPathPoint& Point = Path[PathIndex];
-
-		if (WrappingVirtualRunStartPathIndex == INDEX_NONE)
-		{
-			if (Point.bVirtual)
-			{
-				// 첫 virtual point 직전의 실제 표면점을 왼쪽 경계로 기억한다. 아직 오른쪽 경계는
-				// 만들어지지 않았을 수 있으므로 이 시점에는 node를 고정하지 않는다.
-				WrappingVirtualRunStartPathIndex = PathIndex;
-				WrappingVirtualRunLeftPathIndex = PathIndex - 1;
-			}
-			++WrappingVirtualBridgeScanPathIndex;
-			continue;
-		}
-
-		if (Point.bVirtual)
-		{
-			++WrappingVirtualBridgeScanPathIndex;
-			continue;
-		}
-
-		const int32 RunStart = WrappingVirtualRunStartPathIndex;
-		const int32 RunEnd = PathIndex - 1;
-		const int32 LeftPathIndex = WrappingVirtualRunLeftPathIndex;
-		const int32 RightPathIndex = PathIndex;
-		if (!Path.IsValidIndex(LeftPathIndex) || !Path.IsValidIndex(RightPathIndex) ||
-			Path[LeftPathIndex].bBridge || Path[LeftPathIndex].bVirtual ||
-			Path[RightPathIndex].bBridge || Path[RightPathIndex].bVirtual)
-		{
-			// 양쪽 실제 표면점으로 닫히지 않은 run은 kinematic bridge가 될 수 없다.
-			WrappingVirtualRunStartPathIndex = INDEX_NONE;
-			WrappingVirtualRunLeftPathIndex = INDEX_NONE;
-			++WrappingVirtualBridgeScanPathIndex;
-			continue;
-		}
-
-		const int32 LeftNodeIndex = LatchNodeIndex + LeftPathIndex;
-		const int32 RightNodeIndex = LatchNodeIndex + RightPathIndex;
-		const int32 NodeSpan = RightNodeIndex - LeftNodeIndex;
-		if (NodeSpan <= 1)
-		{
-			WrappingVirtualRunStartPathIndex = INDEX_NONE;
-			WrappingVirtualRunLeftPathIndex = INDEX_NONE;
-			++WrappingVirtualBridgeScanPathIndex;
-			continue;
-		}
-
-		const FRopeSurfaceAnchor* LeftAnchor = FindSurfaceAnchorByNode(Anchors, LeftNodeIndex);
-		const FRopeSurfaceAnchor* RightAnchor = FindSurfaceAnchorByNode(Anchors, RightNodeIndex);
+		const FRopeVirtualBridgeRun& Run = Runs[KinematicVirtualBridgeRunCursor];
+		const FRopeSurfaceAnchor* LeftAnchor = FindSurfaceAnchorByNode(Anchors, Run.LeftNodeIndex);
+		const FRopeSurfaceAnchor* RightAnchor = FindSurfaceAnchorByNode(Anchors, Run.RightNodeIndex);
 		if (!LeftAnchor || !RightAnchor)
 		{
-			// Path와 anchor는 같은 AdvancePathBuild에서 추가되지만, 순서가 달라지는 경우에는 현재
-			// 오른쪽 점을 소비하지 않고 다음 프레임에 재시도한다.
+			// 경로와 anchor 추가 순서가 갈린 경우 현재 run을 소비하지 않고 다음 프레임에 재시도한다.
 			break;
 		}
 
@@ -3689,30 +3653,21 @@ void URopeComponent::UpdateWrappingKinematicVirtualBridges(
 		const USceneComponent* RightMesh = RightAnchor->Mesh.Get();
 		if (LeftMesh && LeftMesh == RightMesh)
 		{
-			// 양쪽 binding이 확보됐어도 path build는 animation front보다 앞서갈 수 있다. 따라서 여기서는
-			// 목록만 만들고 bActive=false로 둔 뒤, 아래 front 거리 판정이 실제 고정 시점을 결정한다.
 			FRopeKinematicVirtualBridge& Bridge = KinematicVirtualBridges.AddDefaulted_GetRef();
+			Bridge.NodeIndices = Run.VirtualNodeIndices;
 			Bridge.LeftAnchor = *LeftAnchor;
 			Bridge.RightAnchor = *RightAnchor;
-			Bridge.RestSpanLength = static_cast<float>(NodeSpan) * Sim.SegmentLength;
+			Bridge.RestSpanLength = static_cast<float>(Run.RightNodeIndex - Run.LeftNodeIndex) * Sim.SegmentLength;
 			Bridge.ActivationFrontDistance = RightAnchor->RopeDistance;
 			Bridge.bActive = false;
-			Bridge.NodeIndices.Reserve(RunEnd - RunStart + 1);
-			for (int32 VirtualPathIndex = RunStart; VirtualPathIndex <= RunEnd; ++VirtualPathIndex)
-			{
-				Bridge.NodeIndices.Add(LatchNodeIndex + VirtualPathIndex);
-			}
 
 			UE_LOG(LogRopeWrap, Verbose,
 				TEXT("[%s] Wrapping virtual bridge registered: leftNode=%d rightNode=%d "
 					"virtualNodes=%d activationDistance=%.2fcm"),
-				*GetName(), LeftNodeIndex, RightNodeIndex, Bridge.NodeIndices.Num(),
+				*GetName(), Run.LeftNodeIndex, Run.RightNodeIndex, Bridge.NodeIndices.Num(),
 				Bridge.ActivationFrontDistance);
 		}
-
-		WrappingVirtualRunStartPathIndex = INDEX_NONE;
-		WrappingVirtualRunLeftPathIndex = INDEX_NONE;
-		++WrappingVirtualBridgeScanPathIndex;
+		++KinematicVirtualBridgeRunCursor;
 	}
 
 	// 오른쪽 anchor 거리까지 front가 도달했다는 것은 ApplyFrontMotion이 양쪽 경계를 실제 표면 위치로
@@ -3732,108 +3687,67 @@ void URopeComponent::UpdateWrappingKinematicVirtualBridges(
 	}
 }
 
-void URopeComponent::BuildKinematicVirtualBridges(const TArray<FRopeWrapPathPoint>& Path,
-	int32 LatchNodeIndex, const TArray<FRopeSurfaceAnchor>& CommitAnchors)
+bool URopeComponent::FinalizeKinematicVirtualBridges(
+	const TArray<FRopeVirtualBridgeRun>& Runs,
+	const TArray<FRopeSurfaceAnchor>& CommitAnchors)
 {
-	// 커밋 시에는 점진 목록을 최종 seed anchor 기준으로 재구성한다. 모든 경계는 이미 front 뒤이므로
-	// 새 목록은 즉시 활성 상태다.
-	ResetKinematicVirtualBridges();
-	if (Path.Num() == 0)
+	// Commit은 같은 run을 다시 찾거나 bridge를 재생성하지 않는다. Wrapping 중 산출/등록된 목록이
+	// 완전한지 먼저 확인한 뒤 최종 seed anchor 사본으로 binding만 교체한다.
+	if (KinematicVirtualBridgeRunCursor != Runs.Num() || KinematicVirtualBridges.Num() != Runs.Num())
 	{
-		return;
+		UE_LOG(LogRopeWrap, Error,
+			TEXT("[%s] Virtual bridge finalization rejected: discoveredRuns=%d consumedRuns=%d bridges=%d"),
+			*GetName(), Runs.Num(), KinematicVirtualBridgeRunCursor, KinematicVirtualBridges.Num());
+		return false;
 	}
 
-	bool bSawVirtualPoint = false;
-	int32 BridgeNodeCount = 0;
-	int32 SkippedUnboundedRunCount = 0;
-	int32 SkippedBoundaryRunCount = 0;
-	int32 SkippedMissingAnchorRunCount = 0;
-	int32 SkippedCrossComponentRunCount = 0;
-
-	int32 PathIndex = 0;
-	while (PathIndex < Path.Num())
+	for (int32 RunIndex = 0; RunIndex < Runs.Num(); ++RunIndex)
 	{
-		if (!Path[PathIndex].bVirtual)
+		const FRopeVirtualBridgeRun& Run = Runs[RunIndex];
+		FRopeKinematicVirtualBridge& Bridge = KinematicVirtualBridges[RunIndex];
+		if (Bridge.LeftAnchor.NodeIndex != Run.LeftNodeIndex ||
+			Bridge.RightAnchor.NodeIndex != Run.RightNodeIndex ||
+			Bridge.NodeIndices != Run.VirtualNodeIndices)
 		{
-			++PathIndex;
-			continue;
+			UE_LOG(LogRopeWrap, Error,
+				TEXT("[%s] Virtual bridge finalization rejected: run %d no longer matches registered bridge"),
+				*GetName(), RunIndex);
+			return false;
 		}
 
-		bSawVirtualPoint = true;
-		const int32 RunStart = PathIndex;
-		while (PathIndex + 1 < Path.Num() && Path[PathIndex + 1].bVirtual)
-		{
-			++PathIndex;
-		}
-		const int32 RunEnd = PathIndex;
-		++PathIndex;
-
-		const int32 LeftPathIndex = RunStart - 1;
-		const int32 RightPathIndex = RunEnd + 1;
-		if (!Path.IsValidIndex(LeftPathIndex) || !Path.IsValidIndex(RightPathIndex))
-		{
-			++SkippedUnboundedRunCount;
-			continue;
-		}
-
-		// bridge/virtual point는 실제 surface binding이 없으므로 kinematic bridge의 끝점이 될 수 없다.
-		if (Path[LeftPathIndex].bBridge || Path[RightPathIndex].bBridge ||
-			Path[LeftPathIndex].bVirtual || Path[RightPathIndex].bVirtual)
-		{
-			++SkippedBoundaryRunCount;
-			continue;
-		}
-
-		const int32 LeftNodeIndex = LatchNodeIndex + LeftPathIndex;
-		const int32 RightNodeIndex = LatchNodeIndex + RightPathIndex;
-		const int32 NodeSpan = RightNodeIndex - LeftNodeIndex;
-		if (NodeSpan <= 1)
-		{
-			++SkippedBoundaryRunCount;
-			continue;
-		}
-
-		const FRopeSurfaceAnchor* LeftAnchor =
-			FindSurfaceAnchorByNode(CommitAnchors, LeftNodeIndex);
-		const FRopeSurfaceAnchor* RightAnchor =
-			FindSurfaceAnchorByNode(CommitAnchors, RightNodeIndex);
+		const FRopeSurfaceAnchor* LeftAnchor = FindSurfaceAnchorByNode(CommitAnchors, Run.LeftNodeIndex);
+		const FRopeSurfaceAnchor* RightAnchor = FindSurfaceAnchorByNode(CommitAnchors, Run.RightNodeIndex);
 		if (!LeftAnchor || !RightAnchor)
 		{
-			++SkippedMissingAnchorRunCount;
-			continue;
+			UE_LOG(LogRopeWrap, Error,
+				TEXT("[%s] Virtual bridge finalization rejected: run=%d missing anchor left=%d right=%d"),
+				*GetName(), RunIndex, Run.LeftNodeIndex, Run.RightNodeIndex);
+			return false;
 		}
 
 		const USceneComponent* LeftMesh = LeftAnchor->Mesh.Get();
 		const USceneComponent* RightMesh = RightAnchor->Mesh.Get();
 		if (!LeftMesh || LeftMesh != RightMesh)
 		{
-			++SkippedCrossComponentRunCount;
-			continue;
+			UE_LOG(LogRopeWrap, Error,
+				TEXT("[%s] Virtual bridge finalization rejected: run=%d crosses components left=%s right=%s"),
+				*GetName(), RunIndex, *GetNameSafe(LeftMesh), *GetNameSafe(RightMesh));
+			return false;
 		}
 
-		FRopeKinematicVirtualBridge& Bridge = KinematicVirtualBridges.AddDefaulted_GetRef();
 		Bridge.LeftAnchor = *LeftAnchor;
 		Bridge.RightAnchor = *RightAnchor;
-		Bridge.RestSpanLength = static_cast<float>(NodeSpan) * Sim.SegmentLength;
 		Bridge.ActivationFrontDistance = RightAnchor->RopeDistance;
 		Bridge.bActive = true;
-		Bridge.NodeIndices.Reserve(RunEnd - RunStart + 1);
-		for (int32 VirtualPathIndex = RunStart; VirtualPathIndex <= RunEnd; ++VirtualPathIndex)
-		{
-			Bridge.NodeIndices.Add(LatchNodeIndex + VirtualPathIndex);
-			++BridgeNodeCount;
-		}
 	}
 
-	if (bSawVirtualPoint)
+	if (Runs.Num() > 0)
 	{
 		UE_LOG(LogRopeWrap, Log,
-			TEXT("[%s] Kinematic virtual bridge built: runs=%d nodes=%d "
-				"skipped(unbounded=%d boundary=%d missingAnchor=%d crossComponent=%d)"),
-			*GetName(), KinematicVirtualBridges.Num(), BridgeNodeCount,
-			SkippedUnboundedRunCount, SkippedBoundaryRunCount,
-			SkippedMissingAnchorRunCount, SkippedCrossComponentRunCount);
+			TEXT("[%s] Kinematic virtual bridges finalized in place: runs=%d"),
+			*GetName(), KinematicVirtualBridges.Num());
 	}
+	return true;
 }
 
 void URopeComponent::HoldKinematicVirtualBridges()
@@ -3900,12 +3814,10 @@ void URopeComponent::HoldKinematicVirtualBridges()
 
 void URopeComponent::ResetKinematicVirtualBridges()
 {
-	// bridge binding뿐 아니라 점진 scanner의 pending run까지 함께 비워야 다음 wrap이 이전 path index를
-	// 이어 읽지 않는다. 이 함수 자체는 질량을 복구하지 않으므로 활성 bridge 해제에는 Release*를 쓴다.
+	// bridge binding과 WrappingPhase 산출물 소비 cursor를 함께 비워야 다음 wrap이 이전 run을 이어 읽지
+	// 않는다. 이 함수 자체는 질량을 복구하지 않으므로 활성 bridge 해제에는 Release*를 쓴다.
 	KinematicVirtualBridges.Reset();
-	WrappingVirtualBridgeScanPathIndex = 0;
-	WrappingVirtualRunStartPathIndex = INDEX_NONE;
-	WrappingVirtualRunLeftPathIndex = INDEX_NONE;
+	KinematicVirtualBridgeRunCursor = 0;
 	bWrappedMassMaskDirty = true;
 }
 

@@ -148,6 +148,8 @@ private:
 	friend class FRopeWrappingPoseSpaceIslandTest;
 	// 복합 경로 폐기 뒤 최초 latch 본 하나로만 재초기화되는지 검증한다.
 	friend class FRopeWrappingSingleBoneFallbackTest;
+	// virtual run 단일 산출과 컴포넌트 bridge 수명 인계를 검증한다.
+	friend struct FRopeComponentRefactorTestSeam;
 #endif
 
 	struct FSurfaceVectorFieldBoneCandidate
@@ -176,6 +178,9 @@ private:
 		const TCHAR* CompositeFailureReason);
 
 	bool AppendWrappingAnchorFromPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
+
+	/** 새로 닫힌 virtual run을 Path에서 한 번만 발견해 State.VirtualBridgeRuns에 기록한다. */
+	void UpdateVirtualBridgeRuns();
 
 	/** 경로 빌드 종료 기록(성공=Complete / 실패=Failed, 둘 다 Active 해제). 커밋 판정 등 독자들은
 	 *  세 플래그를 "빌드가 끝났나"(OR)로만 소비한다 — 개별 조합을 구분해 읽는 곳은 없다. */

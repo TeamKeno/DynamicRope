@@ -362,6 +362,17 @@ struct FRopeWrapPathPoint
 	bool bVirtual = false;
 };
 
+/**
+ * Composite path에서 양쪽 실제 surface point로 닫힌 연속 virtual 구간.
+ * 경로 빌드가 한 번만 산출하고 URopeComponent가 Wrapping~Wrapped 동안 같은 bridge를 이어서 소유한다.
+ */
+struct FRopeVirtualBridgeRun
+{
+	int32 LeftNodeIndex = INDEX_NONE;
+	int32 RightNodeIndex = INDEX_NONE;
+	TArray<int32> VirtualNodeIndices;
+};
+
 /** 접촉 시 실제로 평가한 pose-space gap의 판정 결과. 디버그 표시는 이 저장값만 읽는다. */
 enum class ERopeWrapIslandPortalState : uint8
 {
@@ -406,6 +417,13 @@ struct FRopeWrappingState
 	TArray<FRopeSurfaceAnchor> Anchors;
 	FRopeSurfaceAnchor LatchAnchor;
 	TArray<FRopeWrapPathPoint> Path;
+
+	/** Path 생성 중 한 번만 발견해 누적하는 bounded virtual run 목록. */
+	TArray<FRopeVirtualBridgeRun> VirtualBridgeRuns;
+	/** Path가 프레임마다 뒤에 붙으므로 새 구간만 검사하기 위한 점진 scan 상태. */
+	int32 VirtualBridgeScanPathIndex = 0;
+	int32 VirtualRunStartPathIndex = INDEX_NONE;
+	int32 VirtualRunLeftPathIndex = INDEX_NONE;
 
 	/**
 	 * 보조 시드 앵커(시드 다중화, MaxWrapSeeds > 1): dominant latch보다 tail 쪽에서 *다른* 본에

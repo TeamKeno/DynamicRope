@@ -60,6 +60,63 @@ void FRopeWrappingPhase::FinishPathBuild(bool bFailed, const TCHAR* FailureReaso
 	}
 }
 
+void FRopeWrappingPhase::UpdateVirtualBridgeRuns()
+{
+	State.VirtualBridgeScanPathIndex = FMath::Clamp(
+		State.VirtualBridgeScanPathIndex, 0, State.Path.Num());
+
+	while (State.VirtualBridgeScanPathIndex < State.Path.Num())
+	{
+		const int32 PathIndex = State.VirtualBridgeScanPathIndex;
+		const FRopeWrapPathPoint& Point = State.Path[PathIndex];
+
+		if (State.VirtualRunStartPathIndex == INDEX_NONE)
+		{
+			if (Point.bVirtual)
+			{
+				State.VirtualRunStartPathIndex = PathIndex;
+				State.VirtualRunLeftPathIndex = PathIndex - 1;
+			}
+			++State.VirtualBridgeScanPathIndex;
+			continue;
+		}
+
+		if (Point.bVirtual)
+		{
+			++State.VirtualBridgeScanPathIndex;
+			continue;
+		}
+
+		const int32 RunStart = State.VirtualRunStartPathIndex;
+		const int32 RunEnd = PathIndex - 1;
+		const int32 LeftPathIndex = State.VirtualRunLeftPathIndex;
+		const int32 RightPathIndex = PathIndex;
+		if (State.Path.IsValidIndex(LeftPathIndex) &&
+			State.Path.IsValidIndex(RightPathIndex) &&
+			!State.Path[LeftPathIndex].bBridge && !State.Path[LeftPathIndex].bVirtual &&
+			!State.Path[RightPathIndex].bBridge && !State.Path[RightPathIndex].bVirtual)
+		{
+			const int32 LatchNodeIndex = State.LatchAnchor.NodeIndex;
+			FRopeVirtualBridgeRun Run;
+			Run.LeftNodeIndex = LatchNodeIndex + LeftPathIndex;
+			Run.RightNodeIndex = LatchNodeIndex + RightPathIndex;
+			if (Run.RightNodeIndex - Run.LeftNodeIndex > 1)
+			{
+				Run.VirtualNodeIndices.Reserve(RunEnd - RunStart + 1);
+				for (int32 VirtualPathIndex = RunStart; VirtualPathIndex <= RunEnd; ++VirtualPathIndex)
+				{
+					Run.VirtualNodeIndices.Add(LatchNodeIndex + VirtualPathIndex);
+				}
+				State.VirtualBridgeRuns.Add(MoveTemp(Run));
+			}
+		}
+
+		State.VirtualRunStartPathIndex = INDEX_NONE;
+		State.VirtualRunLeftPathIndex = INDEX_NONE;
+		++State.VirtualBridgeScanPathIndex;
+	}
+}
+
 void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FContext& Ctx)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AdvanceProgressiveWrapPathBuild);
@@ -108,6 +165,7 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 				break;
 			}
 		}
+		UpdateVirtualBridgeRuns();
 
 		if (State.Path.Num() >= State.NumTailNodes)
 		{
@@ -122,6 +180,7 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 		return;
 	}
 	AdvanceSurfaceVectorFieldProgressiveWrapPath(StepBudget, Sim, Ctx);
+	UpdateVirtualBridgeRuns();
 }
 
 #pragma endregion
@@ -598,6 +657,10 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 
 	State.Anchors.Reset();
 	State.Path.Reset();
+	State.VirtualBridgeRuns.Reset();
+	State.VirtualBridgeScanPathIndex = 0;
+	State.VirtualRunStartPathIndex = INDEX_NONE;
+	State.VirtualRunLeftPathIndex = INDEX_NONE;
 	State.LatchAnchor = StoredLatchAnchor;
 	State.NumTailNodes = Sim.Num() - StoredLatchAnchor.NodeIndex;
 	// 시드 다중화: 첫 보조 시드 노드부터는 경로가 아니라 보조 앵커가 노드를 소유한다 — 경로 길이를

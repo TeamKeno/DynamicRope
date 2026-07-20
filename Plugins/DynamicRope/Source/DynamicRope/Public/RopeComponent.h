@@ -82,6 +82,10 @@ class DYNAMICROPE_API URopeComponent : public UMeshComponent
 #if WITH_DEV_AUTOMATION_TESTS
 	// 테스트 시임: ApplyPreset 페이즈 게이트 음성 테스트(RopePresetTests)가 SetPhase를 강제하기 위한 최소 접근.
 	friend struct FRopePresetTestSeam;
+	// 테스트 시임: Contacting 시드의 anchor 불변식과 synthetic latch fallback 진입을 검증하는 최소 접근.
+	friend struct FRopeWrappingFallbackTestSeam;
+	// 테스트 시임: virtual bridge 수명과 GuidedThrow 공통 진입 상태를 검증하는 최소 접근.
+	friend struct FRopeComponentRefactorTestSeam;
 #endif
 
 public:
@@ -862,12 +866,8 @@ private:
 
 	/** 양쪽 실제 anchor가 있는 virtual run. Wrapping 중 front 도달 뒤부터 Wrapped까지 직선 고정된다. */
 	TArray<FRopeKinematicVirtualBridge> KinematicVirtualBridges;
-
-	/** Composite path가 매 프레임 뒤에 붙으므로 새 구간만 검사하기 위한 점진 scan cursor. */
-	int32 WrappingVirtualBridgeScanPathIndex = 0;
-	/** 아직 오른쪽 실제 표면점이 생성되지 않은 virtual run의 시작/왼쪽 경계. */
-	int32 WrappingVirtualRunStartPathIndex = INDEX_NONE;
-	int32 WrappingVirtualRunLeftPathIndex = INDEX_NONE;
+	/** WrappingPhase가 한 번 산출한 run 중 component bridge로 동기화한 prefix 길이. */
+	int32 KinematicVirtualBridgeRunCursor = 0;
 
 	/** ③ GuidedThrow 구동 상태: 확정 preview path(조준) 또는 레이 끝점 아치(허공, bFreeThrow). */
 	FRopeGuidedThrowState GuidedThrowState;
@@ -1009,6 +1009,12 @@ private:
 
 	/** ① 이전 상태 정리: 잡고 있던 wrap 수동 해제 + 페이즈 일시 상태 폐기 + 쿨다운 0(즉시 재던지기). */
 	void AbandonActiveStateForRethrow();
+
+	/** GuidedThrow 공통 사전 정리: wrap/bridge/일시 상태를 폐기하고 release cooldown을 없앤다. */
+	void PrepareForNewGuidedThrow();
+
+	/** Prepared/Free 공용 GuidedThrow 상태와 시작 노드 pin을 구성한다. */
+	bool BeginGuidedThrowState(FRopePreparedThrowPreview&& Prepared, bool bFreeThrow);
 
 	/** ② 체인 리셋: 손(노드 0)을 원점에 핀, 전 노드 속도 0(Prev=Pos), GPU 상주 버퍼 재시드 세대 증가. */
 	void ResetChainForThrow(const FVector& HandOrigin);
@@ -1199,12 +1205,12 @@ private:
 	// 전체 질량 마스크는 topology/binding 변경 때만 다시 만든다. 매 프레임 Hold는 고정 노드 위치/InvMass만 갱신.
 	bool bWrappedMassMaskDirty = true;
 
-	/** Wrapping 중 새로 닫힌 virtual run을 등록하고 front가 오른쪽 anchor에 닿은 run을 즉시 활성화한다. */
-	void UpdateWrappingKinematicVirtualBridges(const TArray<FRopeWrapPathPoint>& Path,
-		int32 LatchNodeIndex, const TArray<FRopeSurfaceAnchor>& Anchors, float FrontDistance);
+	/** WrappingPhase가 새로 산출한 run을 bridge로 한 번만 등록하고 front 도달 시 활성화한다. */
+	void UpdateWrappingKinematicVirtualBridges(const TArray<FRopeVirtualBridgeRun>& Runs,
+		const TArray<FRopeSurfaceAnchor>& Anchors, float FrontDistance);
 
-	/** Wrapping 커밋 직전 path의 bounded virtual run을 최종 dual-anchor bridge 목록으로 재구성한다. */
-	void BuildKinematicVirtualBridges(const TArray<FRopeWrapPathPoint>& Path, int32 LatchNodeIndex,
+	/** 기존 bridge를 최종 commit anchor로 재검증·갱신하고 활성화한다. 재생성하지 않는다. */
+	bool FinalizeKinematicVirtualBridges(const TArray<FRopeVirtualBridgeRun>& Runs,
 		const TArray<FRopeSurfaceAnchor>& CommitAnchors);
 
 	/** 양쪽 anchor의 현재 월드 위치 사이에 bridge 노드를 균등 배치하고 hard kinematic override를 쓴다. */
