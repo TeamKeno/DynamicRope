@@ -45,6 +45,8 @@ groupshared float3 gU[ROPE_TUBE_MAX_RINGS];
 groupshared float3 gV[ROPE_TUBE_MAX_RINGS];
 // ring 전방 접선(정점 TangentX)
 groupshared float3 gTangent[ROPE_TUBE_MAX_RINGS];
+// ring 0부터의 누적 호길이(cm). UV.x = gArc/원주 → 로프 길이와 무관하게 트위스트 밀도 일정.
+groupshared float  gArc[ROPE_TUBE_MAX_RINGS];
 // B2 스무딩: 시뮬 노드(component-local) 소스
 groupshared float3 gSrc[ROPE_TUBE_MAX_RINGS];
 
@@ -91,6 +93,7 @@ void BuildTubeFrameAndWrite(uint tid, uint N)
 	gU[tid] = float3(1.0f, 0.0f, 0.0f);
 	gV[tid] = float3(0.0f, 1.0f, 0.0f);
 	gTangent[tid] = float3(1.0f, 0.0f, 0.0f);
+	gArc[tid] = 0.0f;
 	GroupMemoryBarrierWithGroupSync();
 
 	if (tid == 0)
@@ -104,6 +107,7 @@ void BuildTubeFrameAndWrite(uint tid, uint N)
 		float3 U = normalize(cross(SeedUp, PrevTangent));
 		float3 V = normalize(cross(PrevTangent, U));
 
+		float Arc = 0.0f;
 		for (uint i = 0; i < N; ++i)
 		{
 			float3 Tangent = (i < N - 1) ? normalize(gCenter[i + 1] - gCenter[i])
@@ -116,18 +120,21 @@ void BuildTubeFrameAndWrite(uint tid, uint N)
 			{
 				U = RotateBetween(PrevTangent, Tangent, U);
 				V = RotateBetween(PrevTangent, Tangent, V);
+				Arc += length(gCenter[i] - gCenter[i - 1]);
 			}
 			PrevTangent = Tangent;
 			gU[i] = U;
 			gV[i] = V;
 			gTangent[i] = Tangent;
+			gArc[i] = Arc;
 		}
 	}
 	GroupMemoryBarrierWithGroupSync();
 
 	const uint VertsPerRing = NumSides + 1;
 	const uint TotalVerts = N * VertsPerRing;
-	const float InvRingSpan = 1.0f / (float)(N - 1);
+	// UV.x = 누적 호길이 / 원주(2πR) → U,V가 같은 물리 스케일(등방). 로프 길이와 무관하게 트위스트 밀도 일정.
+	const float InvCirc = 1.0f / max(2.0f * 3.14159265358979f * Radius, 1e-4f);
 	for (uint v = tid; v < TotalVerts; v += ROPE_TUBE_MAX_RINGS)
 	{
 		const uint ring = v / VertsPerRing;
@@ -140,19 +147,19 @@ void BuildTubeFrameAndWrite(uint tid, uint N)
 		OutPositions[v * 3 + 1] = Pos.y;
 		OutPositions[v * 3 + 2] = Pos.z;
 
-		// B2-full: tangent basis (CPU SetVertexTangents(Tangent, Radial^Tangent, Radial) 미러). TangentX=ring
-		// 전방 접선, TangentZ=Radial(법선), w=+1(오른손 basis: Y=cross(Z,X)로 복원되도록 부호 +).
+		// B2-full: tangent basis (CPU SetVertexTangents(Tangent, Tangent^Radial, Radial) 미러). TangentX=ring
+		// 전방 접선, TangentZ=Radial(법선), w=-1(바이탄젠트 Y=cross(Z,X)*w=Tangent^Radial=+UV.y 원주 방향).
 		const float3 TX = gTangent[ring];
 		const float3 TZ = Radial;
 		OutTangents[v * 4 + 0] = RopePackSnorm16x2(TX.x, TX.y);
 		// TangentX.w 미사용
 		OutTangents[v * 4 + 1] = RopePackSnorm16x2(TX.z, 0.0f);
 		OutTangents[v * 4 + 2] = RopePackSnorm16x2(TZ.x, TZ.y);
-		// TangentZ.w = +1(basis 부호)
-		OutTangents[v * 4 + 3] = RopePackSnorm16x2(TZ.z, 1.0f);
+		// TangentZ.w = -1(basis 부호): 바이탄젠트 cross(TZ,TX)*w = Tangent^Radial = +UV.y(원주 증가) 방향과 정합.
+		OutTangents[v * 4 + 3] = RopePackSnorm16x2(TZ.z, -1.0f);
 
-		// UV: (AlongFrac, AroundFrac). CPU와 동일.
-		OutTexCoords[v * 2 + 0] = (float)ring * InvRingSpan;
+		// UV: (누적 호길이/원주, AroundFrac). CPU와 동일.
+		OutTexCoords[v * 2 + 0] = gArc[ring] * InvCirc;
 		OutTexCoords[v * 2 + 1] = AroundFrac;
 	}
 }

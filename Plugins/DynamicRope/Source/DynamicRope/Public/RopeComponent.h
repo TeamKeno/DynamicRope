@@ -28,7 +28,6 @@ class AActor;
 class IRopeCollider;
 class IRopeColliderProvider;
 class UMaterialInterface;
-class UMaterialInstanceDynamic;
 class URopePreset;
 class USkeletalMeshComponent;
 class UStaticMesh;
@@ -283,19 +282,12 @@ public:
 	float TubeSmoothingAlpha = 0.5f;
 
 	/** rope tube에 적용되는 material. 설정하지 않으면 엔진 기본 material을 사용한다.
-	 *  런타임 교체는 SetMaterial(0, M)으로 할 것 — 이 프로퍼티를 직접 쓰면 UpdateRopeMaterialDynamicParams가
-	 *  돌지 않아 GetMaterial()이 **옛 부모를 물고 있는 RopeMID를 계속 반환**한다(교체가 조용히 무시된다).
+	 *  런타임 교체는 SetMaterial(0, M)으로 할 것 — 씬 프록시가 생성 시점에 머티리얼을 캡처하므로 직접 대입하면
+	 *  MarkRenderStateDirty가 없어 다음 프록시 재생성 전까지 교체가 반영되지 않는다.
 	 *  BP의 직접 Set은 후킹할 수 없어 BlueprintReadWrite가 아니다 — RopeLength가 BlueprintReadOnly +
 	 *  SetRopeLength인 것과 같은 이유. 에디터 디테일 패널 편집은 PostEditChangeProperty가 처리한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render")
 	TObjectPtr<UMaterialInterface> RopeMaterial = nullptr;
-
-	/** 꼬임(strand) 패턴 밀도를 rope length에 비례시켜 자동 조정할지. 켜면 런타임에 dynamic material instance로
-	 *  머티리얼이 저작한 TwistTurns에 (RopeLength / 기준 200cm)를 곱해 세팅한다 → 로프가 길어져도 꼬임 간격이
-	 *  일정하고, 프리셋별 상대 밀도(예: 파라코드가 더 촘촘)는 보존된다. 끄면 머티리얼 원본을 그대로 사용.
-	 *  런타임 변경은 SetScaleTwistByLength()로 — RopeMaterial과 같은 이유로 BlueprintReadWrite가 아니다. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render")
-	bool bScaleTwistByLength = true;
 
 #if WITH_EDITORONLY_DATA
 	/** 에디터에서 이 로프 액터를 선택했을 때 배치-보조 가이드(앵커·조준·도달범위·던지기 아크)를
@@ -497,13 +489,6 @@ public:
 	void SetRopeLength(float NewLength);
 
 	/**
-	 * 꼬임 밀도의 길이 비례 스케일을 런타임에 켜고 끈다(bScaleTwistByLength의 세터).
-	 * 프로퍼티를 직접 쓰면 MID가 재생성/폐기되지 않아 옛 MID로 계속 렌더되므로, 런타임 변경은 이 함수로 한다.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Rope|Render")
-	void SetScaleTwistByLength(bool bEnable);
-
-	/**
 	 * 되감기 속도 설정(cm/s). 양수 = 감기(짧아짐), 음수 = 풀기(길어짐, 초기 길이까지), 0 = 정지.
 	 * Free/Flight/Wrapped에서 매 프레임 적용된다(Contacting/Wrapping/Releasing은 일시 보류 —
 	 * 경로 생성이 SegmentLength에 의존). 입력 홀드 용도(URopeWielderComponent의 ReelIn/Out 액션).
@@ -694,16 +679,6 @@ protected:
 	const FRopeSimState& GetSimState() const { return Sim; }
 
 private:
-	// 길이 의존 머티리얼 파라미터(꼬임 밀도)를 dynamic material instance로 갱신한다:
-	// 저작된 TwistTurns × (RopeLength / 기준 200cm) → rope가 길어져도 꼬임 간격이 일정(프리셋 밀도 보존).
-	// RopeMaterial/RopeLength/bScaleTwistByLength 변경 시 호출. GetMaterial은 이 MID를 우선 반환한다.
-	void UpdateRopeMaterialDynamicParams();
-
-	// UpdateRopeMaterialDynamicParams가 만드는 런타임 인스턴스(부모 = RopeMaterial/프리셋). 길이 의존 파라미터용.
-	// bScaleTwistByLength=false거나 RopeMaterial에 TwistTurns가 없으면 nullptr(원본 머티리얼을 그대로 사용).
-	UPROPERTY(Transient)
-	TObjectPtr<UMaterialInstanceDynamic> RopeMID = nullptr;
-
 	//~ 팁 부착물 런타임 상태 -----------------------------------------------
 	// UObject라 값 타입 sim 멤버와 달리 GC 추적이 필요하다(Transient UPROPERTY).
 	// 던지기 진입에 EnsureTipMesh가 확보하고, FinalizeSimFrame이 매 프레임 자유단으로 추종시킨다.

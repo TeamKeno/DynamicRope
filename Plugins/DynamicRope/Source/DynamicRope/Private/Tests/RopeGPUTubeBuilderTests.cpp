@@ -17,7 +17,7 @@
 #include "Misc/App.h"
 
 // B2-full 튜브 컴퓨트: 셰이더가 컴파일되고 (1) 위치가 CPU parallel-transport 결과와 일치, (2) tangent(SNORM16
-// 언팩)가 단위이며 TangentX=전방접선/TangentZ=radial, (3) UV가 (ring/(N-1), side/NumSides)인지 검증.
+// 언팩)가 단위이며 TangentX=전방접선/TangentZ=radial, (3) UV가 (누적 호길이/원주, side/NumSides)인지 검증.
 // 직선 센터라인(전방=+X)이라 프레임이 상수(U=+Y, V=+Z)여서 기대값이 결정적이다.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUTubeTangentUVTest,
 	"DynamicRope.Solver.GPUTubeTangentUV",
@@ -126,7 +126,8 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 			// 법선 = radial
 			MaxTanLenDev = FMath::Max(MaxTanLenDev, (TZ - Radial).Size());
 
-			const float ExpU = static_cast<float>(ring) / static_cast<float>(NumRings - 1);
+			// UV.x = 누적 호길이(직선 10cm 간격이라 10*ring) / 원주(2πR).
+			const float ExpU = (10.0f * static_cast<float>(ring)) / (2.0f * PI * Radius);
 			const float ExpV = static_cast<float>(side) / static_cast<float>(NumSides);
 			MaxUVDev = FMath::Max(MaxUVDev, FMath::Abs(OutUV[v * 2 + 0] - ExpU));
 			MaxUVDev = FMath::Max(MaxUVDev, FMath::Abs(OutUV[v * 2 + 1] - ExpV));
@@ -138,7 +139,7 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("위치가 CPU parallel-transport와 일치"), MaxPosDev < 0.01f);
 	TestTrue(TEXT("TangentX = 전방접선(+X)"), MaxTxDev < 0.01f);
 	TestTrue(TEXT("TangentZ = radial 법선(단위)"), MaxTanLenDev < 0.01f);
-	TestTrue(TEXT("UV = (ring/(N-1), side/NumSides)"), MaxUVDev < 0.001f);
+	TestTrue(TEXT("UV = (누적 호길이/원주, side/NumSides)"), MaxUVDev < 0.001f);
 	return true;
 }
 

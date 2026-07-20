@@ -340,6 +340,10 @@ void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDyna
 	FVector3f U = (SeedUp ^ PrevTangent).GetSafeNormal();
 	FVector3f V = (PrevTangent ^ U).GetSafeNormal();
 
+	// UV.x = 누적 호길이 / 원주(2πR) → U,V가 같은 물리 스케일. 로프 길이와 무관하게 트위스트 밀도 일정.
+	const float InvCirc = 1.0f / FMath::Max(2.0f * PI * Radius, KINDA_SMALL_NUMBER);
+	float AlongLen = 0.0f;
+
 	uint32 VertIdx = 0;
 	for (int32 i = 0; i < NumRings; ++i)
 	{
@@ -360,7 +364,11 @@ void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDyna
 		PrevTangent = Tangent;
 
 		const FVector3f Center(Points[i]);
-		const float AlongFrac = static_cast<float>(i) / static_cast<float>(NumRings - 1);
+		if (i > 0)
+		{
+			AlongLen += static_cast<float>((Points[i] - Points[i - 1]).Size());
+		}
+		const float AlongFrac = AlongLen * InvCirc;
 
 		for (int32 s = 0; s <= NumSides; ++s)
 		{
@@ -371,7 +379,8 @@ void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDyna
 			VertexBuffers.PositionVertexBuffer.VertexPosition(VertIdx) = Center + Radial * Radius;
 			VertexBuffers.StaticMeshVertexBuffer.SetVertexUV(VertIdx, 0, FVector2f(AlongFrac, AroundFrac));
 			VertexBuffers.ColorVertexBuffer.VertexColor(VertIdx) = FColor::White;
-			VertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(VertIdx, Tangent, FVector3f(Radial ^ Tangent), Radial);
+			// 바이탄젠트 = Tangent^Radial = +UV.y(원주 증가) 방향(노말맵 Y 정합). Radial^Tangent는 부호 반대라 원주 노말이 뒤집힘.
+			VertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(VertIdx, Tangent, FVector3f(Tangent ^ Radial), Radial);
 			++VertIdx;
 		}
 	}

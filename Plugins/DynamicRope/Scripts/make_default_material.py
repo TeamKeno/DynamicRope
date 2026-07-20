@@ -4,6 +4,8 @@
 # ------------------------------------------------------------------------------
 # 헴프/황마 절차적 밧줄 룩. 텍스처 에셋 없이 UV만으로 표현한다.
 #   1) 꼬임(strand) 패턴:  phase = V*StrandCount + U*TwistTurns
+#      (U=길이축 UV=누적 호길이/원주, V=원주 UV. 튜브 빌더가 U,V를 같은 물리 스케일로 채워
+#       TwistTurns=원주-길이당 회전 수 → 로프 길이 무관 밀도 일정. StrandCount≈TwistTurns면 ~45° 레이.)
 #      - sin(phase) → strand 마스크 → BaseColor 2톤 + Roughness 홈 변화
 #      - cos(phase) → 탄젠트공간 노말 섭동(꼬임선 음영). NormalStrength로 세기.
 #   2) 불규칙 섬유 거침:  Custom HLSL 값노이즈(UV 고정, 로프 움직여도 안 헤엄침)
@@ -60,7 +62,7 @@ tint.set_editor_property("parameter_name", "Tint")
 tint.set_editor_property("default_value", unreal.LinearColor(0.62, 0.44, 0.24, 1.0))  # 따뜻한 헴프 탄
 
 strand = scalar_param("StrandCount", 3.0, -1900, 60)   # 원주 방향 가닥 수
-twist = scalar_param("TwistTurns", 9.0, -1900, 160)    # 길이 방향 꼬임 회전 수
+twist = scalar_param("TwistTurns", 3.0, -1900, 160)    # 원주-길이(2πR)당 꼬임 회전 수(UV.x=호길이/원주)
 rough_p = scalar_param("Roughness", 0.82, -520, 300)
 nstr = scalar_param("NormalStrength", 0.55, -900, 560)  # 꼬임선 노말 세기(도드라지게 ↑)
 

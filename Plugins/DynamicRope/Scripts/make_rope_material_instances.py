@@ -24,15 +24,16 @@ if parent is None:
     raise Exception("부모 머티리얼이 없습니다: {} — 먼저 make_default_material.py 실행".format(PARENT_PATH))
 
 # name -> (Tint RGB, StrandCount, TwistTurns, Roughness, NormalStrength)
+# TwistTurns는 이제 "원주-길이(2πR)당 회전 수"(UV.x=호길이/원주). StrandCount와 비슷하면 ~45° 레이.
 PRESETS = {
     # 밝은 천연 마닐라/사이잘
-    "MI_Rope_Manila":       ((0.74, 0.60, 0.36), 3.0,  8.0, 0.88, 0.42),
+    "MI_Rope_Manila":       ((0.74, 0.60, 0.36), 3.0, 3.0, 0.88, 0.42),
     # 오래된 짙은 황마
-    "MI_Rope_JuteDark":     ((0.34, 0.24, 0.13), 3.0, 10.0, 0.90, 0.50),
+    "MI_Rope_JuteDark":     ((0.34, 0.24, 0.13), 3.0, 3.5, 0.90, 0.50),
     # 검은 나일론 파라코드 — 촘촘한 꼬임 + 약간 광택
-    "MI_Rope_ParacordBlack":((0.02, 0.02, 0.025),5.0, 16.0, 0.50, 0.22),
+    "MI_Rope_ParacordBlack":((0.02, 0.02, 0.025),5.0, 6.0, 0.50, 0.22),
     # 장식용 붉은 밧줄
-    "MI_Rope_Crimson":      ((0.42, 0.05, 0.05), 3.0,  9.0, 0.65, 0.35),
+    "MI_Rope_Crimson":      ((0.42, 0.05, 0.05), 3.0, 3.0, 0.65, 0.35),
 }
 
 

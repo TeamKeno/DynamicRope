@@ -44,7 +44,6 @@
 #include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInterface.h"
 // 길이 비례 파라미터용 런타임 인스턴스
-#include "Materials/MaterialInstanceDynamic.h"
 // 기본 머티리얼 로드(FObjectFinder)
 #include "UObject/ConstructorHelpers.h"
 
@@ -616,7 +615,7 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	}
 	const bool bWasReel = (Phase == ERopePhase::Reel);
 
-	// [2] 값 스탬프 — RopeMaterial/bScaleTwistByLength만 세터 경유가 필요해 [5]로 미룬다.
+	// [2] 값 스탬프 — RopeMaterial만 세터(SetMaterial) 경유가 필요해 [5]로 미룬다.
 	// (인스턴스 배선 값 TipMeshComponentTag/ReelHandSocket은 프리셋에 없다 — 헤더 주석 참조.)
 	ResolveMode = Preset->ResolveMode;
 	TipEngagement = Preset->TipEngagement;
@@ -659,15 +658,12 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	}
 
 	// [4] Sim 재시드 — 항상 호출(분기 없는 단일 경로). NumParticles/RopeLength 소비 + GPU 상주 버퍼
-	// 재시드 세대 증가 + 길이 의존 MID 파라미터 갱신까지 포함한다. EnsureRopeInitialized는 비었을 때만이라
-	// 여기서는 부적합.
+	// 재시드 세대 증가까지 포함한다. EnsureRopeInitialized는 비었을 때만이라 여기서는 부적합.
 	InitRope();
 
-	// [5] 렌더/MID — RopeMaterial은 SetMaterial 경유가 계약(직접 대입 시 옛 부모를 문 MID가 남는다).
-	// bScaleTwistByLength는 직접 대입 후 SetMaterial 내부의 UpdateRopeMaterialDynamicParams가 반영한다.
-	// 프록시 1회 소비 값(Radius/NumSides/TubeSmoothing*)은 MarkRenderStateDirty로 프록시를 재생성해 반영
-	// — 에디터 PostEditChangeProperty의 런타임 등가물.
-	bScaleTwistByLength = Preset->bScaleTwistByLength;
+	// [5] 렌더 — RopeMaterial은 SetMaterial 경유가 계약(씬 프록시가 생성 시점에 머티리얼을 캡처하므로
+	// MarkRenderStateDirty로 프록시를 재생성해야 반영된다). 프록시 1회 소비 값(Radius/NumSides/
+	// TubeSmoothing*)도 같은 MarkRenderStateDirty로 반영 — 에디터 PostEditChangeProperty의 런타임 등가물.
 	SetMaterial(0, Preset->RopeMaterial);
 	MarkRenderStateDirty();
 
@@ -1678,8 +1674,6 @@ void URopeComponent::OnRegister()
 	// 에디터에서도 Sim에 기본 직선 포즈를 채워 둔다(서브시스템 틱은 PIE에서만 돌기 때문).
 	// 이미 채워져 있으면(InitRope 후/PIE 진행 중) 그대로 둔다.
 	EnsureRopeInitialized();
-	// 길이 의존 머티리얼 파라미터 초기 세팅(EnsureRopeInitialized가 Sim만 채우고 재init 안 하는 재등록 케이스 포함).
-	UpdateRopeMaterialDynamicParams();
 }
 
 void URopeComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
@@ -1714,9 +1708,6 @@ void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 		TipEngagement = RopeWrapModes::ClampEngagement(ResolveMode, TipEngagement);
 	}
 
-	// RopeMaterial/RopeLength/bScaleTwistByLength 변경 시 dynamic material 파라미터 갱신(에디터 미리보기 즉시 반영).
-	UpdateRopeMaterialDynamicParams();
-
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
 #endif
@@ -1735,57 +1726,13 @@ int32 URopeComponent::GetNumMaterials() const
 
 UMaterialInterface* URopeComponent::GetMaterial(int32 /*ElementIndex*/) const
 {
-	// 길이 비례 파라미터를 실은 MID가 있으면 그것을 반환(없으면 원본 머티리얼).
-	if (RopeMID)
-	{
-		return RopeMID;
-	}
 	return RopeMaterial;
 }
 
 void URopeComponent::SetMaterial(int32 /*ElementIndex*/, UMaterialInterface* Material)
 {
 	RopeMaterial = Material;
-	// 새 부모로 MID 재생성 + 길이 파라미터 재적용(MarkRenderStateDirty 포함).
-	UpdateRopeMaterialDynamicParams();
-}
-
-void URopeComponent::UpdateRopeMaterialDynamicParams()
-{
-	// 길이 스케일 비활성 또는 머티리얼 없음 → MID 불필요. 있으면 버려 원본을 그대로 쓴다.
-	auto DropMID = [this]()
-	{
-		if (RopeMID)
-		{
-			RopeMID = nullptr;
-			MarkRenderStateDirty();
-		}
-	};
-
-	if (!bScaleTwistByLength || !RopeMaterial)
-	{
-		DropMID();
-		return;
-	}
-
-	// 머티리얼(또는 프리셋)이 저작한 기준 TwistTurns를 읽는다. 파라미터가 없는 커스텀 머티리얼이면 대상 아님.
-	float AuthoredTwist = 0.0f;
-	if (!RopeMaterial->GetScalarParameterValue(FMaterialParameterInfo(TEXT("TwistTurns")), AuthoredTwist))
-	{
-		DropMID();
-		return;
-	}
-
-	// 부모(RopeMaterial/프리셋)가 바뀌었으면 MID 재생성.
-	if (!RopeMID || RopeMID->Parent != RopeMaterial)
-	{
-		RopeMID = UMaterialInstanceDynamic::Create(RopeMaterial, this);
-	}
-
-	// 저작된 TwistTurns × (RopeLength / 기준 200cm) → 길이에 비례해 꼬임 간격 일정, 프리셋 상대 밀도 보존.
-	// 기준 200cm = 기본 RopeLength라 기본 길이에선 저작값 그대로(시각적 회귀 없음).
-	constexpr float ReferenceLengthCm = 200.0f;
-	RopeMID->SetScalarParameterValue(TEXT("TwistTurns"), AuthoredTwist * (RopeLength / ReferenceLengthCm));
+	// 씬 프록시가 생성 시점에 머티리얼을 캡처하므로, 교체를 반영하려면 프록시를 재생성한다.
 	MarkRenderStateDirty();
 }
 
@@ -1900,9 +1847,6 @@ void URopeComponent::InitRope()
 
 	// Sim 전면 재구성 → GPU 상주 버퍼 재시드(M5).
 	++SimFrame.SimGeneration;
-
-	// 길이가 확정되는 지점 — 꼬임 밀도(TwistTurns)를 새 RopeLength에 맞춰 갱신(런타임 길이 변경/재throw 포함).
-	UpdateRopeMaterialDynamicParams();
 
 	UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] InitRope: %d particles, length=%.1f, segment=%.2f"),
 		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);
@@ -4100,19 +4044,6 @@ void URopeComponent::SetRopeLength(float NewLength)
 	}
 	Sim.RopeLength = Clamped;
 	Sim.SegmentLength = Clamped / static_cast<float>(Sim.Num() - 1);
-	// 길이 의존 머티리얼 파라미터(꼬임 밀도) 갱신 — 감아도 꼬임 간격이 일정하게 유지된다.
-	UpdateRopeMaterialDynamicParams();
-}
-
-void URopeComponent::SetScaleTwistByLength(bool bEnable)
-{
-	if (bScaleTwistByLength == bEnable)
-	{
-		return;
-	}
-	bScaleTwistByLength = bEnable;
-	// 켜면 MID 생성 + 길이 파라미터 적용, 끄면 MID 폐기(둘 다 MarkRenderStateDirty 포함).
-	UpdateRopeMaterialDynamicParams();
 }
 
 void URopeComponent::SetReelRate(float CmPerSecond)

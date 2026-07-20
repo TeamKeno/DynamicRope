@@ -151,10 +151,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Render")
 	TObjectPtr<UMaterialInterface> RopeMaterial = nullptr;
 
-	/** 꼬임(strand) 패턴 밀도를 rope length에 비례시켜 자동 조정할지. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Render")
-	bool bScaleTwistByLength = true;
-
 	//~ Collision(충돌) -----------------------------------------------------
 
 	/** 자기 owner의 collider provider도 충돌에 포함할지(기본 제외 — 던진 사람 몸에 엉킴 방지). */
