@@ -2,7 +2,7 @@
 //
 // Flight 중 접촉 후보 감지 파이프라인: 솔브 결과의 이동 경로에서 실제 접촉을 찾고(Detect),
 // 빠른 노드/whip 가이드 노드의 다음 위치를 외삽해 예측 접촉을 추가하고(AddPredicted),
-// 표면 대비 상대운동을 평가한 뒤(EvaluateRelativeMotion), 캡처 여부를 판정한다(ShouldCapture).
+// 표면 대비 상대운동을 평가한 뒤(EvaluateRelativeMotion), tracker와 캡처 여부를 함께 만든다(EvaluateCapture).
 // FinalizeSimFrame(GT)에서 매 프레임 호출된다 — Flight → Contacting 전이의 입력을 만드는 곳.
 //
 // 솔버/랩 컨트롤러와 같은 UObject 비의존 패턴. 상태가 없어 전부 static이다.
@@ -16,6 +16,22 @@
 #include "Core/RopeTypes.h"
 
 class IRopeCollider;
+class USceneComponent;
+
+/** Flight 캡처에서 dominant 대상을 고르는 정책. Assisted 조준은 preferred 대상을 필수로 지정한다. */
+struct FRopeFlightCapturePolicy
+{
+	const USceneComponent* PreferredMesh = nullptr;
+	FName PreferredBone = NAME_None;
+	bool bRequirePreferred = false;
+};
+
+/** 한 번의 후보 집계로 만든 Flight 캡처 판정 결과. 게임 전이와 관측이 같은 Tracker를 소비한다. */
+struct FRopeFlightCaptureEvaluation
+{
+	FRopeContactTracker Tracker;
+	bool bShouldCapture = false;
+};
 
 class DYNAMICROPE_API FRopeFlightContactDetector
 {
@@ -98,7 +114,12 @@ public:
 	static void EvaluateRelativeMotion(const FRopeSimState& Sim, const FParams& Params,
 		TArray<FRopeContactCandidate>& Candidates);
 
-	/** dominant bone에 MinLatchNodes 이상이 접촉했으면 캡처(Flight → Contacting) 판정. */
+	/** 후보를 한 번 집계해 dominant tracker와 캡처 여부를 함께 만든다. */
+	static FRopeFlightCaptureEvaluation EvaluateCapture(const TArray<FRopeContactCandidate>& Candidates,
+		const FParams& Params, const FRopeFlightCapturePolicy& Policy = {});
+
+	/** 구 C++ 편의 API. 새 코드는 tracker를 재사용할 수 있는 EvaluateCapture를 쓸 것. */
+	UE_DEPRECATED(5.7, "Use EvaluateCapture so gameplay and observation can share the tracker.")
 	static bool ShouldCapture(const TArray<FRopeContactCandidate>& Candidates, const FParams& Params);
 
 	/**

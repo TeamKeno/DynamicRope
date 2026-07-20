@@ -9,6 +9,7 @@
 
 #include "Logic/RopeFlightContactDetector.h"
 #include "Collision/RopeCollider.h"
+#include "Components/SceneComponent.h"
 #include "RopeTestHelpers.h"
 
 namespace
@@ -98,10 +99,63 @@ bool FRopeFlightShouldCaptureTest::RunTest(const FString& Parameters)
 	FRopeFlightContactDetector::DetectContactCandidates(Sim, Colliders, MakeDetectParams(), Candidates);
 	TestEqual(TEXT("fixture produces three candidates"), Candidates.Num(), 3);
 
-	TestTrue(TEXT("captures at threshold (3 >= 3)"),
-		FRopeFlightContactDetector::ShouldCapture(Candidates, MakeDetectParams(3)));
-	TestFalse(TEXT("no capture above threshold (3 < 4)"),
-		FRopeFlightContactDetector::ShouldCapture(Candidates, MakeDetectParams(4)));
+	const FRopeFlightCaptureEvaluation AtThreshold =
+		FRopeFlightContactDetector::EvaluateCapture(Candidates, MakeDetectParams(3));
+	TestTrue(TEXT("captures at threshold (3 >= 3)"), AtThreshold.bShouldCapture);
+	TestEqual(TEXT("evaluation keeps the deciding nodes"), AtThreshold.Tracker.CandidateNodes.Num(), 3);
+
+	const FRopeFlightCaptureEvaluation AboveThreshold =
+		FRopeFlightContactDetector::EvaluateCapture(Candidates, MakeDetectParams(4));
+	TestFalse(TEXT("no capture above threshold (3 < 4)"), AboveThreshold.bShouldCapture);
+	return true;
+}
+
+// Assisted 정책은 조준 본을 dominant로 고르되 같은 mesh의 다른 본도 secondary target으로 보존하는가.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightCaptureEvaluationPolicyTest,
+	"DynamicRope.FlightContact.EvaluationSharesPreferredTracker",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightCaptureEvaluationPolicyTest::RunTest(const FString& Parameters)
+{
+	const USceneComponent* Mesh = NewObject<USceneComponent>();
+	const FName ArmBone("upperarm_l");
+	const FName PelvisBone("pelvis");
+	auto MakeCandidate = [Mesh](int32 NodeIndex, FName Bone)
+	{
+		FRopeContactCandidate Candidate;
+		Candidate.bValid = true;
+		Candidate.NodeIndex = NodeIndex;
+		Candidate.Mesh = Mesh;
+		Candidate.Bone = Bone;
+		Candidate.Penetration = 1.0f;
+		return Candidate;
+	};
+
+	TArray<FRopeContactCandidate> Candidates;
+	Candidates.Add(MakeCandidate(4, ArmBone));
+	Candidates.Add(MakeCandidate(7, PelvisBone));
+	Candidates.Add(MakeCandidate(8, PelvisBone));
+	Candidates.Add(MakeCandidate(9, PelvisBone));
+
+	FRopeFlightCapturePolicy Policy;
+	Policy.PreferredMesh = Mesh;
+	Policy.PreferredBone = ArmBone;
+	Policy.bRequirePreferred = true;
+	const FRopeFlightCaptureEvaluation Evaluation =
+		FRopeFlightContactDetector::EvaluateCapture(Candidates, MakeDetectParams(1), Policy);
+
+	TestTrue(TEXT("required aim target captures"), Evaluation.bShouldCapture);
+	TestTrue(TEXT("evaluation exposes the aim target used by gameplay"),
+		Evaluation.Tracker.CandidateMesh == Mesh && Evaluation.Tracker.CandidateBone == ArmBone);
+	TestEqual(TEXT("secondary target remains available for Contacting"), Evaluation.Tracker.Targets.Num(), 2);
+
+	TArray<FRopeContactCandidate> PelvisOnly;
+	PelvisOnly.Add(MakeCandidate(7, PelvisBone));
+	const FRopeFlightCaptureEvaluation MissingPreferred =
+		FRopeFlightContactDetector::EvaluateCapture(PelvisOnly, MakeDetectParams(1), Policy);
+	TestFalse(TEXT("missing required aim target does not capture"), MissingPreferred.bShouldCapture);
+	TestTrue(TEXT("missing required aim target leaves no dominant"),
+		MissingPreferred.Tracker.CandidateBone.IsNone());
 	return true;
 }
 

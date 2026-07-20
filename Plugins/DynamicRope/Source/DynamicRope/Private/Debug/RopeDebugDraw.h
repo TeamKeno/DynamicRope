@@ -22,8 +22,7 @@ namespace RopeDebug
 		const FRopeDetectConfig& DetectConfig, bool bShouldCapture);
 
 	/** whip 가이드 카운터 기록(whip 활성 + stat 수집 중일 때만). */
-	void RecordWhipStats(const FRopeSimState& Sim, const TArray<int32>& GuideNodeIndices,
-		const TArray<FVector>& GuideTargets, float GuidedEnd, bool bWhipActive);
+	void RecordWhipStats(const FRopeSimState& Sim, int32 GuidedNodeCount, float GuidedEnd);
 
 	/** wrapped 카운터 기록(wrapped 상태 + stat 수집 중일 때만). */
 	void RecordWrappedStats(const FRopeSimState& Sim, const FRopeWrapState& Wrap);

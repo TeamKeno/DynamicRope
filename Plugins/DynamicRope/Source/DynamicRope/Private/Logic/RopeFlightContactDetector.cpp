@@ -272,14 +272,24 @@ void FRopeFlightContactDetector::EvaluateRelativeMotion(const FRopeSimState& Sim
 	}
 }
 
+FRopeFlightCaptureEvaluation FRopeFlightContactDetector::EvaluateCapture(
+	const TArray<FRopeContactCandidate>& Candidates, const FParams& Params,
+	const FRopeFlightCapturePolicy& Policy)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCapture);
+	FRopeFlightCaptureEvaluation Result;
+	Result.Tracker.Update(Candidates, 0.0f,
+		Policy.PreferredMesh, Policy.PreferredBone, Policy.bRequirePreferred);
+	Result.bShouldCapture =
+		Result.Tracker.CandidateNodes.Num() >= FMath::Max(1, Params.MinLatchNodes) &&
+		IsWrappableBone(Result.Tracker.CandidateBone) &&
+		PassesCaptureQualityGate(Result.Tracker, Candidates, Params);
+	return Result;
+}
+
 bool FRopeFlightContactDetector::ShouldCapture(const TArray<FRopeContactCandidate>& Candidates, const FParams& Params)
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCaptureImpl);
-	FRopeContactTracker TempTracker;
-	TempTracker.Update(Candidates, 0.0f);
-	return TempTracker.CandidateNodes.Num() >= FMath::Max(1, Params.MinLatchNodes)
-		&& IsWrappableBone(TempTracker.CandidateBone)
-		&& PassesCaptureQualityGate(TempTracker, Candidates, Params);
+	return EvaluateCapture(Candidates, Params).bShouldCapture;
 }
 
 bool FRopeFlightContactDetector::PassesCaptureQualityGate(const FRopeContactTracker& Tracker,
@@ -294,7 +304,7 @@ bool FRopeFlightContactDetector::PassesCaptureQualityGate(const FRopeContactTrac
 	// 지금은 감김 애니메이션/경로 폴리싱이 우선이라, 위 게이트에서 항상 통과시킨다.
 
 	// 1. 접촉 노드 수/분포:
-	//    MinLatchNodes는 이미 ShouldCapture에서 보고 있다. 여기에 더해 연속된 노드 구간인지,
+	//    MinLatchNodes는 이미 EvaluateCapture에서 보고 있다. 여기에 더해 연속된 노드 구간인지,
 	//    너무 한 점에만 몰린 접촉인지, head/tail 중 어느 쪽 접촉인지 볼 수 있다.
 	const int32 ContactNodeCount = Tracker.CandidateNodes.Num();
 	const bool bHasEnoughNodes = ContactNodeCount >= FMath::Max(1, Params.MinLatchNodes);

@@ -43,13 +43,29 @@ bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 	const FVector FreeTipBefore(200.0f, 40.0f, -15.0f);
 	Sim.Positions[LastNode] = FreeTipBefore;
 	Sim.PrevPositions[LastNode] = FreeTipBefore;
-	Guide.Advance(1.0f / 60.0f, Sim, Config, /*bCaptureDebugTargets*/ false);
+	Guide.Advance(1.0f / 60.0f, Sim, Config);
 
 	TestTrue(TEXT("middle node remains spline-guided"), Guide.IsGuidedNodeThisFrame(MiddleNode));
 	TestFalse(TEXT("tip node is released to solver"), Guide.IsGuidedNodeThisFrame(LastNode));
 	TestTrue(TEXT("released tip keeps solver position before solve"),
 		Guide.GetCurrentTargets().IsValidIndex(LastNode) &&
 		Guide.GetCurrentTargets()[LastNode].Equals(FreeTipBefore, 0.01f));
+
+	TArray<int32> DebugNodeIndices;
+	TArray<FVector> DebugTargets;
+	Guide.CopyGuidedTargetsForDebug(DebugNodeIndices, DebugTargets);
+	TestEqual(TEXT("debug extraction reads the gameplay guided-node count"),
+		DebugNodeIndices.Num(), Guide.GetGuidedNodeCountThisFrame());
+	TestEqual(TEXT("debug node and target arrays stay paired"), DebugTargets.Num(), DebugNodeIndices.Num());
+	for (int32 DebugIndex = 0; DebugIndex < DebugNodeIndices.Num(); ++DebugIndex)
+	{
+		const int32 NodeIndex = DebugNodeIndices[DebugIndex];
+		TestTrue(TEXT("debug extraction contains only gameplay-guided nodes"),
+			Guide.IsGuidedNodeThisFrame(NodeIndex));
+		TestTrue(TEXT("debug target is the gameplay target"),
+			Guide.GetCurrentTargets().IsValidIndex(NodeIndex) &&
+			Guide.GetCurrentTargets()[NodeIndex].Equals(DebugTargets[DebugIndex], 0.01f));
+	}
 	return true;
 }
 
@@ -97,4 +113,3 @@ bool FRopeAimHitSweepingLineGuideTest::RunTest(const FString& Parameters)
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS
-

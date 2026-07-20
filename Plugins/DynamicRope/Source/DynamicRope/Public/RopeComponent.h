@@ -1018,16 +1018,21 @@ private:
 	void BuildFlightContactCandidates(float DeltaTime, const FRopeFlightContactDetector::FParams& DetectParams,
 		TArray<FRopeContactCandidate>& OutCandidates);
 
-	/** ② 캡처 판정/전이: 캡처면 Contacting 진입(이벤트 브로드캐스트 포함), 아니면 whip 종료 후 실패
-	 *  타이머를 굴려 FlightNoContactReturnTime 초과 시 Free 복귀. 캡처 여부를 반환한다(③ 관측 소비용). */
-	bool TryCaptureFlightContacts(float DeltaTime, const TArray<FRopeContactCandidate>& Candidates,
-		const FRopeFlightContactDetector::FParams& DetectParams);
+	/** ②a 후보를 한 번 집계해 캡처 판정과 관측이 공유할 frame-local 결과를 만든다. */
+	FRopeFlightCaptureEvaluation EvaluateFlightCapture(const TArray<FRopeContactCandidate>& Candidates,
+		const FRopeFlightContactDetector::FParams& DetectParams) const;
+
+	/** ②b 평가 결과를 게임 상태에 적용한다. 캡처면 Tracker를 ContactTracker로 이동해 Contacting에
+	 *  진입하고, 아니면 whip 종료 후 실패 타이머를 굴린다. 실제 캡처 여부를 반환한다. */
+	bool ApplyFlightCaptureEvaluation(float DeltaTime, const TArray<FRopeContactCandidate>& Candidates,
+		FRopeFlightCaptureEvaluation& Evaluation);
 
 	/** ③ 관측: stat 카운터(수집 중일 때만) + 디버거 스냅샷(OutSnapshot != null일 때 — 디버거 대상
 	 *  로프만 넘어온다). 판정(①②)에 관여하지 않는 읽기 전용 소비를 전부 여기 가둔다 —
 	 *  FinalizeSimFrame 본문에 디버그/스탯 코드가 남지 않게 하는 것이 목적. */
 	void RecordFlightObservation(const FRopeFlightContactDetector::FParams& DetectParams,
-		const TArray<FRopeContactCandidate>& Candidates, bool bShouldCapture, FRopeDebugSnapshot* OutSnapshot);
+		const TArray<FRopeContactCandidate>& Candidates, const FRopeContactTracker& FrameTracker,
+		bool bShouldCapture, FRopeDebugSnapshot* OutSnapshot);
 
 #if WITH_GAMEPLAY_DEBUGGER
 	/** ③ 관측 보조(디버거 대상 로프 전용): 노드별 감지 입력/판정 시각화 데이터 수집. 본 파이프라인과
@@ -1036,9 +1041,10 @@ private:
 		TArray<FRopeFlightNodeDebug>& OutNodeDebug) const;
 #endif
 
-	/** 캡처 확정 시 Contacting 진입 상태(ContactTracker/PendingWrapSeed/CaptureTravelFrame/타이머)를
-	 *  구성한다. DeltaTime은 travel frame의 Verlet 속도 환산용(캡처 프레임의 dt). */
-	void BuildContactingState(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime);
+	/** 캡처 확정 시 평가 Tracker를 소유 상태로 이동하고 Contacting 진입 상태
+	 *  (PendingWrapSeed/CaptureTravelFrame/타이머)를 구성한다. */
+	void BuildContactingState(FRopeContactTracker&& EvaluatedTracker,
+		const TArray<FRopeContactCandidate>& Candidates, float DeltaTime);
 
 	//~ Contacting -----------------------------------------------------------
 	// 매 프레임 실제 접촉을 재수집해 트래커 dwell을 갱신한다: 지속 접촉 → Wrapping, 접촉 소실 →

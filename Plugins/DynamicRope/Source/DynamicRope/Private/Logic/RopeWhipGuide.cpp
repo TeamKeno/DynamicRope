@@ -153,7 +153,6 @@ void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
 	bActive = true;
 
 	// 새 스윙 시작: 직전 스윙의 프레임 산출물이 이번 throw로 새어들지 않게 비운다.
-	// (디버그 배열은 원 코드와 동일하게 다음 Advance가 리셋한다.)
 	PrevTargetsThisFrame.Reset();
 	CurrentTargetsThisFrame.Reset();
 	GuidedNodesThisFrame.Reset();
@@ -201,7 +200,7 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 	}
 }
 
-void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config, bool bCaptureDebugTargets)
+void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config)
 {
 	ResetFrameOutputs();
 
@@ -285,11 +284,6 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 			GuidedNodesThisFrame[i] = 1;
 		}
 
-		if (bCaptureDebugTargets)
-		{
-			DebugGuideNodeIndices.Add(i);
-			DebugGuideTargets.Add(CurrentTargetsThisFrame[i]);
-		}
 	}
 
 	PreviousTargets = GuideTargets;
@@ -337,11 +331,36 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 
 void FRopeWhipGuide::ResetFrameOutputs()
 {
-	DebugGuideNodeIndices.Reset();
-	DebugGuideTargets.Reset();
 	PrevTargetsThisFrame.Reset();
 	CurrentTargetsThisFrame.Reset();
 	GuidedNodesThisFrame.Reset();
+}
+
+int32 FRopeWhipGuide::GetGuidedNodeCountThisFrame() const
+{
+	int32 Count = 0;
+	for (const uint8 bGuided : GuidedNodesThisFrame)
+	{
+		Count += bGuided != 0 ? 1 : 0;
+	}
+	return Count;
+}
+
+void FRopeWhipGuide::CopyGuidedTargetsForDebug(
+	TArray<int32>& OutNodeIndices, TArray<FVector>& OutTargets) const
+{
+	OutNodeIndices.Reset();
+	OutTargets.Reset();
+	for (int32 NodeIndex = 0; NodeIndex < GuidedNodesThisFrame.Num(); ++NodeIndex)
+	{
+		if (GuidedNodesThisFrame[NodeIndex] == 0 || !CurrentTargetsThisFrame.IsValidIndex(NodeIndex))
+		{
+			continue;
+		}
+
+		OutNodeIndices.Add(NodeIndex);
+		OutTargets.Add(CurrentTargetsThisFrame[NodeIndex]);
+	}
 }
 
 void FRopeWhipGuide::BuildGuideTargets(float NormalizedTime, int32 LastGuidedNode,

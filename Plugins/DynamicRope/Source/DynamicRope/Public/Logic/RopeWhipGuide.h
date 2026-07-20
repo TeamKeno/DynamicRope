@@ -78,9 +78,8 @@ public:
 	 * 적용은 두 갈래가 같은 산출물을 소비한다: CPU 솔브 경로는 ApplyToSim, GPU 상주 경로는
 	 * override 패스(ERopeGPUOverride::Position|Prev — 서브시스템이 step에 실어 보냄).
 	 * 스윙이 끝나면(Elapsed >= Duration) 스스로 비활성화된다.
-	 * bCaptureDebugTargets가 참일 때만 디버그 배열(GetDebugGuide*)을 채운다(비용 절약).
 	 */
-	void Advance(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config, bool bCaptureDebugTargets);
+	void Advance(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config);
 
 	/**
 	 * CPU 경로의 적용 절반: Advance가 계산한 타깃/마스크를 Sim에 기록한다(가이드 노드만,
@@ -110,9 +109,11 @@ public:
 		return GuidedNodesThisFrame.IsValidIndex(NodeIndex) && GuidedNodesThisFrame[NodeIndex] != 0;
 	}
 
-	//~ 디버그 캡처 산출물(Advance에 bCaptureDebugTargets를 줬을 때만 채워짐)
-	const TArray<int32>& GetDebugGuideNodeIndices() const { return DebugGuideNodeIndices; }
-	const TArray<FVector>& GetDebugGuideTargets() const { return DebugGuideTargets; }
+	/** 실제 프레임 산출물에서 guided node 수를 센다. stat/관측이 필요할 때만 호출한다. */
+	int32 GetGuidedNodeCountThisFrame() const;
+
+	/** 실제 프레임 산출물을 디버그 스냅샷 배열로 복사한다. 시뮬레이션 상태는 변경하지 않는다. */
+	void CopyGuidedTargetsForDebug(TArray<int32>& OutNodeIndices, TArray<FVector>& OutTargets) const;
 
 private:
 	/** NormalizedTime(0~1) 시점의 가이드 곡선을 만들고 노드 간격으로 리샘플해 타깃을 채운다. */
@@ -146,6 +147,4 @@ private:
 	TArray<FVector> PrevTargetsThisFrame;
 	TArray<FVector> CurrentTargetsThisFrame;
 	TArray<uint8> GuidedNodesThisFrame;
-	TArray<int32> DebugGuideNodeIndices;
-	TArray<FVector> DebugGuideTargets;
 };

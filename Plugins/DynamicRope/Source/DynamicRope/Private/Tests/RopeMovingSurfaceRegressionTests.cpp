@@ -240,7 +240,7 @@ bool FRopeRagdollRelativeMotionTest::RunTest(const FString& Parameters)
 	SpikeCandidates.Add(MakeSpikeCandidate(4, 60000.0f));
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, Params, SpikeCandidates);
 	TestTrue(TEXT("capture proceeds despite surface-velocity spike (quality gate bypassed — documented behavior)"),
-		FRopeFlightContactDetector::ShouldCapture(SpikeCandidates, Params));
+		FRopeFlightContactDetector::EvaluateCapture(SpikeCandidates, Params).bShouldCapture);
 	return true;
 }
 

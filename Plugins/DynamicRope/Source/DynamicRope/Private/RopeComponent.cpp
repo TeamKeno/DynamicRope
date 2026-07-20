@@ -1018,16 +1018,9 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 	{
 		if (WhipGuide.IsActive())
 		{
-			// whip 가이드 타깃 캡처: 이 로프가 디버거 대상이거나(시각화) stat 수집 중일 때만(비용 절약).
-#if WITH_GAMEPLAY_DEBUGGER
-			const URopeDebugSubsystem* WhipDebugSub = URopeDebugSubsystem::Get(GetWorld());
-			const bool bCaptureGuideTargets = (WhipDebugSub && WhipDebugSub->ShouldCapture(this)) || RopeDebug::IsFlightStatEnabled();
-#else
-			const bool bCaptureGuideTargets = RopeDebug::IsFlightStatEnabled();
-#endif
 			// 타깃/마스크 계산만(Sim 불변) — 적용은 CPU 경로 SolveSimFrame(ApplyToSim) 또는
 			// GPU 상주 경로의 override 패스(서브시스템이 step에 실음)가 담당한다(G1).
-			WhipGuide.Advance(DeltaTime, Sim, MakeWhipGuideConfig(), bCaptureGuideTargets);
+			WhipGuide.Advance(DeltaTime, Sim, MakeWhipGuideConfig());
 		}
 		else
 		{
@@ -1198,10 +1191,14 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		// ① 후보 산출
 		BuildFlightContactCandidates(DeltaTime, DetectParams, Candidates);
 
-		// ② 판정/전이
-		const bool bShouldCapture = TryCaptureFlightContacts(DeltaTime, Candidates, DetectParams);
+		// ② 판정 결과를 한 번 만들고 게임 전이와 관측이 같은 tracker를 소비한다.
+		FRopeFlightCaptureEvaluation CaptureEvaluation = EvaluateFlightCapture(Candidates, DetectParams);
+		const bool bShouldCapture = ApplyFlightCaptureEvaluation(DeltaTime, Candidates, CaptureEvaluation);
+		const FRopeContactTracker& FrameTracker = bShouldCapture
+			? ContactTracker
+			: CaptureEvaluation.Tracker;
 		// ③ 관측
-		RecordFlightObservation(DetectParams, Candidates, bShouldCapture, FlightSnapshot);
+		RecordFlightObservation(DetectParams, Candidates, FrameTracker, bShouldCapture, FlightSnapshot);
 	}
 
 	// 실제 centerline/GPU 소스/component transform이 달라진 프레임만 render data를 다시 민다.
@@ -2683,33 +2680,26 @@ void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
 	RemoveNonWrappableCandidates(OutCandidates);
 }
 
-bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
-	const TArray<FRopeContactCandidate>& Candidates, const FRopeFlightContactDetector::FParams& DetectParams)
+FRopeFlightCaptureEvaluation URopeComponent::EvaluateFlightCapture(
+	const TArray<FRopeContactCandidate>& Candidates,
+	const FRopeFlightContactDetector::FParams& DetectParams) const
 {
-	// 이 파일의 변경 이유: 감지된 전체 후보를 버리지 않으면서도 Flight 진입 판정은 조준 본으로만
-	// 수행해야 한다. 아래에서 판정용 PrimaryCandidates와 추적용 Candidates를 의도적으로 분리한다.
-	// Assisted aim lock은 "어느 캐릭터의 어느 본으로 첫 캡처할지"만 보장한다. 같은 mesh의 다른 본
-	// 후보는 BuildContactingState에 그대로 넘겨 secondary dwell과 multi-bone 경로 재료로 보존한다.
+	// Assisted aim lock은 dominant만 조준 본으로 고정한다. Tracker.Update는 전체 후보를 집계하므로
+	// 같은 mesh의 다른 본은 Targets에 남아 secondary dwell과 multi-bone 경로 재료가 된다.
 	const bool bRequireAimPrimary = ResolveMode == ERopeWrapResolveMode::AssistedJudged
 		&& AimTargeting.IsLockActive(Phase);
-	TArray<FRopeContactCandidate> PrimaryCandidates;
-	const TArray<FRopeContactCandidate>* CaptureCandidates = &Candidates;
+	FRopeFlightCapturePolicy Policy;
 	if (bRequireAimPrimary)
 	{
-		for (const FRopeContactCandidate& Candidate : Candidates)
-		{
-			if (AimTargeting.IsPrimaryTarget(Candidate.Mesh, Candidate.Bone))
-			{
-				PrimaryCandidates.Add(Candidate);
-			}
-		}
-		CaptureCandidates = &PrimaryCandidates;
+		Policy.PreferredMesh = AimTargeting.GetLockedTargetMesh();
+		Policy.PreferredBone = AimTargeting.GetLockedTargetBone();
+		Policy.bRequirePreferred = true;
 	}
 
-	bool bShouldCapture = false;
+	FRopeFlightCaptureEvaluation Evaluation;
 	{
-		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightShouldCapture);
-		bShouldCapture = FRopeFlightContactDetector::ShouldCapture(*CaptureCandidates, DetectParams);
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCapture);
+		Evaluation = FRopeFlightContactDetector::EvaluateCapture(Candidates, DetectParams, Policy);
 	}
 
 	// ③ GuaranteedWrap은 정상 경로로는 Flight를 타지 않는다 — ThrowWithContext가 조준 던지기(prepared)와
@@ -2717,14 +2707,19 @@ bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
 	// 캡처는 금지한다: ③의 성립은 GuidedThrow가 확정한 앵커로만 이뤄진다(방어적 백스톱).
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
-		bShouldCapture = false;
+		Evaluation.bShouldCapture = false;
 	}
+	return Evaluation;
+}
 
-	if (bShouldCapture)
+bool URopeComponent::ApplyFlightCaptureEvaluation(float DeltaTime,
+	const TArray<FRopeContactCandidate>& Candidates, FRopeFlightCaptureEvaluation& Evaluation)
+{
+	if (Evaluation.bShouldCapture)
 	{
 		FlightNoContactElapsed = 0.0f;
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightBuildContactingState);
-		BuildContactingState(Candidates, DeltaTime);
+		BuildContactingState(MoveTemp(Evaluation.Tracker), Candidates, DeltaTime);
 		SetPhase(ERopePhase::Contacting, *FString::Printf(TEXT("bone=%s, %d node(s)"),
 			*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num()));
 		DispatchCaptured(ContactTracker.CandidateBone);
@@ -2760,28 +2755,36 @@ bool URopeComponent::TryCaptureFlightContacts(float DeltaTime,
 }
 
 void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::FParams& DetectParams,
-	const TArray<FRopeContactCandidate>& Candidates, bool bShouldCapture, FRopeDebugSnapshot* OutSnapshot)
+	const TArray<FRopeContactCandidate>& Candidates, const FRopeContactTracker& FrameTracker,
+	bool bShouldCapture, FRopeDebugSnapshot* OutSnapshot)
 {
 	// ③ 관측 전용 — 판정(①②)에 관여하지 않는 읽기 소비만 모아둔다. 스탯은 stat 시스템이 수집 중일
 	// 때만 실제 비용이 들고, 스냅샷은 디버거 대상 로프만 OutSnapshot으로 넘어온다(그 외 null).
-	// 캡처 프레임엔 방금 채워진 ContactTracker를, 아니면 이번 후보로 만든 관측 전용 트래커를 보여준다.
-	FRopeContactTracker FlightObserveTracker;
+	const bool bNeedStats = RopeDebug::IsFlightStatEnabled();
+	const bool bNeedSnapshot = OutSnapshot != nullptr;
+	if (!bNeedStats && !bNeedSnapshot)
 	{
-		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightTrackerUpdate);
-		const bool bRequireAimPrimary = ResolveMode == ERopeWrapResolveMode::AssistedJudged
-			&& AimTargeting.IsLockActive(Phase);
-		FlightObserveTracker.Update(Candidates, 0.0f,
-			bRequireAimPrimary ? AimTargeting.GetLockedTargetMesh() : nullptr,
-			bRequireAimPrimary ? AimTargeting.GetLockedTargetBone() : NAME_None,
-			bRequireAimPrimary);
+		return;
 	}
-	const FRopeContactTracker& DebugTracker = bShouldCapture ? ContactTracker : FlightObserveTracker;
+
 	const float WhipGuidedEnd = FMath::Clamp(WhipConfig.GuidedLength, 0.05f, 0.95f);
-	const bool bWhipActive = WhipGuide.GetDebugGuideTargets().Num() > 0;
+	int32 WhipGuidedNodeCount = 0;
+#if WITH_GAMEPLAY_DEBUGGER
+	if (OutSnapshot)
+	{
+		WhipGuide.CopyGuidedTargetsForDebug(
+			OutSnapshot->WhipGuideNodeIndices, OutSnapshot->WhipGuideTargets);
+		WhipGuidedNodeCount = OutSnapshot->WhipGuideNodeIndices.Num();
+	}
+#endif
+	if (WhipGuidedNodeCount == 0 && bNeedStats)
+	{
+		WhipGuidedNodeCount = WhipGuide.GetGuidedNodeCountThisFrame();
+	}
+	const bool bWhipActive = WhipGuidedNodeCount > 0;
 	RopeDebug::RecordFlightStats(Sim, SimFrame.bSolveThisFrame, SimFrame.FrameColliders.Num(), Candidates,
-		DebugTracker, DetectConfig, bShouldCapture);
-	RopeDebug::RecordWhipStats(Sim, WhipGuide.GetDebugGuideNodeIndices(), WhipGuide.GetDebugGuideTargets(),
-		WhipGuidedEnd, bWhipActive);
+		FrameTracker, DetectConfig, bShouldCapture);
+	RopeDebug::RecordWhipStats(Sim, WhipGuidedNodeCount, WhipGuidedEnd);
 
 #if WITH_GAMEPLAY_DEBUGGER
 	if (OutSnapshot)
@@ -2791,13 +2794,11 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 		// bSolveThisFrame / colliders 수는 FillDebugSnapshot(항상 실행)이 단일 소스로 채운다 — 여기선 안 쓴다.
 		OutSnapshot->bShouldCapture = bShouldCapture;
 		OutSnapshot->MinLatchNodes = DetectConfig.MinLatchNodes;
-		OutSnapshot->TrackerBone = DebugTracker.CandidateBone;
-		OutSnapshot->TrackerNodes = DebugTracker.CandidateNodes;
+		OutSnapshot->TrackerBone = FrameTracker.CandidateBone;
+		OutSnapshot->TrackerNodes = FrameTracker.CandidateNodes;
 		OutSnapshot->Candidates = Candidates;
 		OutSnapshot->bWhipActive = bWhipActive;
 		OutSnapshot->WhipGuidedEnd = WhipGuidedEnd;
-		OutSnapshot->WhipGuideNodeIndices = WhipGuide.GetDebugGuideNodeIndices();
-		OutSnapshot->WhipGuideTargets = WhipGuide.GetDebugGuideTargets();
 	}
 #endif
 }
@@ -2839,16 +2840,11 @@ void URopeComponent::GatherFlightNodeDebug(const FRopeFlightContactDetector::FPa
 }
 #endif // WITH_GAMEPLAY_DEBUGGER
 
-void URopeComponent::BuildContactingState(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime)
+void URopeComponent::BuildContactingState(FRopeContactTracker&& EvaluatedTracker,
+	const TArray<FRopeContactCandidate>& Candidates, float DeltaTime)
 {
-	ContactTracker.Reset();
-	const bool bRequireAimPrimary = ResolveMode == ERopeWrapResolveMode::AssistedJudged
-		&& AimTargeting.IsLockActive(Phase);
-	ContactTracker.Update(Candidates, 0.0f,
-		bRequireAimPrimary ? AimTargeting.GetLockedTargetMesh() : nullptr,
-		bRequireAimPrimary ? AimTargeting.GetLockedTargetBone() : NAME_None,
-		bRequireAimPrimary);
-	// Update의 0초 초기화는 대상 선택만 수행하므로 캡처 프레임의 실제 접촉 시간이 사라진다.
+	ContactTracker = MoveTemp(EvaluatedTracker);
+	// 평가 단계의 0초 집계는 대상 선택만 수행하므로 캡처 프레임의 실제 접촉 시간은 여기서 반영한다.
 	// 이 프레임을 dwell에 반영해 기본 1-frame decision이 진짜로 같은 프레임에 성립하게 한다.
 	const float CapturedFrameDwell = FMath::Max(0.0f, DeltaTime);
 	ContactTracker.DwellTime = FMath::Max(ContactTracker.DwellTime, CapturedFrameDwell);

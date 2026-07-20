@@ -85,10 +85,9 @@ void RopeDebug::RecordFlightStats(const FRopeSimState& Sim, bool bSolveThisFrame
 	INC_DWORD_STAT_BY(STAT_RopeFlightShouldCapture, bShouldCapture ? 1 : 0);
 }
 
-void RopeDebug::RecordWhipStats(const FRopeSimState& Sim, const TArray<int32>& GuideNodeIndices,
-	const TArray<FVector>& GuideTargets, float GuidedEnd, bool bWhipActive)
+void RopeDebug::RecordWhipStats(const FRopeSimState& Sim, int32 GuidedNodeCount, float GuidedEnd)
 {
-	if (!bWhipActive || !IsFlightStatEnabled())
+	if (GuidedNodeCount <= 0 || !IsFlightStatEnabled())
 	{
 		return;
 	}
@@ -99,12 +98,11 @@ void RopeDebug::RecordWhipStats(const FRopeSimState& Sim, const TArray<int32>& G
 		return;
 	}
 
-	const int32 GuidedNodeCount = GuideNodeIndices.Num();
 	const int32 LastGuidedNode = FMath::Clamp(FMath::FloorToInt(static_cast<float>(LastNode) * GuidedEnd), 0, LastNode);
 	const int32 SolverOnlyCount = FMath::Max(0, LastNode - LastGuidedNode);
 
 	INC_DWORD_STAT_BY(STAT_RopeFlightWhipGuidedNodes, GuidedNodeCount);
-	INC_DWORD_STAT_BY(STAT_RopeFlightWhipGuidePoints, GuideTargets.Num());
+	INC_DWORD_STAT_BY(STAT_RopeFlightWhipGuidePoints, GuidedNodeCount);
 	INC_DWORD_STAT_BY(STAT_RopeFlightWhipSolverOnlyNodes, SolverOnlyCount);
 }
 
@@ -126,7 +124,7 @@ bool RopeDebug::IsFlightStatEnabled() { return false; }
 bool RopeDebug::IsWrappedStatEnabled() { return false; }
 void RopeDebug::RecordFlightStats(const FRopeSimState&, bool, int32, const TArray<FRopeContactCandidate>&,
 	const FRopeContactTracker&, const FRopeDetectConfig&, bool) {}
-void RopeDebug::RecordWhipStats(const FRopeSimState&, const TArray<int32>&, const TArray<FVector>&, float, bool) {}
+void RopeDebug::RecordWhipStats(const FRopeSimState&, int32, float) {}
 void RopeDebug::RecordWrappedStats(const FRopeSimState&, const FRopeWrapState&) {}
 
 #endif
