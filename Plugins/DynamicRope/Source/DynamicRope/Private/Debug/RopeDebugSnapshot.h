@@ -136,6 +136,10 @@ struct FRopeDebugSnapshot
 	float TetherResponse = 0.0f;
 	// 가용 로프 길이 초과분(cm, 0=팽팽하지 않음)
 	float TetherOvershoot = 0.0f;
+	// Constraint(λ) 테더 모드 여부 + 이번 프레임 테더 장력(λ/dt, kg·cm/s²)과 그 상한 — 디버거 표시용.
+	bool bConstraintTetherMode = false;
+	float TetherTension = 0.0f;
+	float MaxTetherTension = 0.0f;
 	// 능동 Pull 힘(0=입력 없음)
 	float ActivePullForce = 0.0f;
 	// 팽팽(taut) 게이트 상태 — 능동 Pull 인가 조건(IsPullTaut와 동일 래치)

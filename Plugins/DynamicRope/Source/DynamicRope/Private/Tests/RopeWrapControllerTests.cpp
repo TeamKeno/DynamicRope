@@ -121,6 +121,7 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("straight chord sum equals rest (taut)"), Pull.TautChordLen, 100.0f, 0.1f);
 		TestEqual(TEXT("min transmitted tension reads the hand-side span only"), Pull.MinFreeTension, 50.0f, 0.1f);
 		TestEqual(TEXT("straight rope has no sag"), Pull.MaxLegSag, 0.0f, 0.1f);
+		TestEqual(TEXT("straight raw chord equals clamped chord"), Pull.PathChordLen, 100.0f, 0.1f);
 	}
 
 	// ② 압축(슬랙) 로프: 노드 간격이 rest(20)의 절반(10)인 직선 — 굴곡 없이도 chord 합이 rest의 절반.
@@ -137,6 +138,7 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("compressed ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
 		TestEqual(TEXT("compressed rest length"), Pull.FreeRestLen, 80.0f, 0.1f);
 		TestEqual(TEXT("compressed chord sum is half the rest (slack)"), Pull.TautChordLen, 40.0f, 0.1f);
+		TestEqual(TEXT("compressed raw chord matches (slack -> constraint C negative)"), Pull.PathChordLen, 40.0f, 0.1f);
 	}
 
 	// ③ 코너에 걸렸지만 두 다리 모두 팽팽: 앵커(4)→모서리(2) 40 + 모서리(2)→손(0) 40 = rest 80.
@@ -183,6 +185,9 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("chord sum %.1f stays well below rest 100 (slack chain)"), Pull.TautChordLen),
 			Pull.TautChordLen < 70.0f);
 		TestEqual(TEXT("crumpled span zeroes the min transmitted tension"), Pull.MinFreeTension, 0.0f, 0.01f);
+		// 비클램프 합은 스트레치 다리를 그대로 계상(54 + 22.8 = 76.8)하되 여전히 rest(100) 미만 —
+		// 부분 스트레치만으로는 Constraint C가 양수가 되지 않는다(전체가 펴져야 λ가 나온다).
+		TestEqual(TEXT("raw chord counts the stretched leg yet stays below rest"), Pull.PathChordLen, 76.8f, 0.5f);
 	}
 
 	// ⑤ 완만한 catenary 처짐(코너 임계 미만의 굴곡 = 한 다리): chord 비율은 처짐의 제곱에만 반응해
@@ -203,6 +208,24 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("chord ratio %.3f stays above 0.97 (ratio gate blind)"),
 			Pull.TautChordLen / Pull.FreeRestLen), Pull.TautChordLen / Pull.FreeRestLen > 0.97f);
 		TestEqual(TEXT("max leg sag reads the visible dip"), Pull.MaxLegSag, 9.0f, 0.5f);
+	}
+
+	// ⑥ 팽팽 + 스트레치(노드 간격 22 > rest 20): 두 관측치가 갈라지는 지점 — TautChordLen은 다리별 rest로
+	// 클램프돼 rest에 머물고(게이트 규약), PathChordLen은 실제 경로(110)를 내 Constraint C가 양수가 된다
+	// (C = 110 - 100 - slack > 0 = λ 발화 조건). Docs/PoC/05 §3.1의 관측치 계약.
+	{
+		FRopeSimState Sim = RopeTest::MakeStraightRope(6, 100.0f);
+		for (int32 i = 0; i < Sim.Num(); ++i)
+		{
+			Sim.Positions[i] = FVector(22.0f * i, 0, 0);
+			Sim.PrevPositions[i] = Sim.Positions[i];
+		}
+		FRopeWrapController Wrap = MakeWrap(5);
+		FRopePullSample Pull;
+		TestTrue(TEXT("stretched ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
+		TestEqual(TEXT("stretched rest length"), Pull.FreeRestLen, 100.0f, 0.1f);
+		TestEqual(TEXT("clamped chord stays at rest (gate contract)"), Pull.TautChordLen, 100.0f, 0.1f);
+		TestEqual(TEXT("raw chord reads the stretched path (constraint C positive)"), Pull.PathChordLen, 110.0f, 0.1f);
 	}
 	return true;
 }

@@ -692,7 +692,9 @@ struct FRopeTractionRequest
 
 	/**
 	 * Source별 크기 — 단위가 다르니 반드시 Source와 함께 읽을 것.
-	 *   Tether     = 이번 프레임 회수 거리(cm)
+	 *   Tether     = MassShare/BinaryPullable: 이번 프레임 회수 거리(cm)
+	 *                Constraint: 이번 프레임 축 속도 변화 ΔV = λ×유효 역질량(cm/s)
+	 *                (레거시 두 모드가 물러나면 cm/s로 단일화된다 — Docs/PoC/05 §4.4)
 	 *   ActivePull = 힘의 크기 = 장력 상한(N)
 	 *   SlackBrake = 회수할 속도의 크기(cm/s)
 	 */
@@ -754,6 +756,16 @@ struct FRopePullSample
 	 * 압축(노드 뭉침)의 거친 백스톱으로 남는다.
 	 */
 	float   TautChordLen = 0.0f;
+
+	/**
+	 * 앵커→손 코너-다리 chord 합의 **비클램프** 값(cm) — TautChordLen과 달리 다리별 rest 클램프를 하지
+	 * 않아, 스트레치된 다리는 그만큼 합을 키운다. Constraint 테더의 제약 위반 관측치: C = 이 값 −
+	 * (FreeRestLen + TetherSlack)이 양수 = 경로가 rest를 실제로 초과(팽팽 + 스트레치)일 때만 λ가 나온다.
+	 * 처짐/구김은 chord ≤ 호 길이라 음수 = 자동 슬랙(별도 팽팽 게이트 불필요 — Docs/PoC/05 §3.1).
+	 * (TautChordLen의 클램프는 "스트레치가 다른 구간 슬랙을 은폐하지 않게"라는 팽팽 *게이트* 전용 규약이라
+	 * 제약 위반량으로는 못 쓴다 — 클램프 합은 정의상 FreeRestLen을 넘지 못해 C가 항상 음수가 된다.)
+	 */
+	float   PathChordLen = 0.0f;
 
 	/** 자유 구간(손~앵커) rest 길이(cm) = AnchorNode × SegmentLength(되감기 축소 자동 반영). */
 	float   FreeRestLen = 0.0f;
@@ -1321,6 +1333,16 @@ enum class ERopeTetherMode : uint8
 	 * 대신 멈춘다). 무거운 대상엔 능동 Pull이 climb-in으로 wielder를 끌어당긴다.
 	 */
 	BinaryPullable = 1 UMETA(DisplayName = "Binary Pullable"),
+
+	/**
+	 * (실험 — Docs/PoC/05) 초과분을 **단일 장력 임펄스 λ**로 회수한다: 프레임당 λ 하나를 풀어 양끝에
+	 * 크기가 같은 임펄스 쌍(각자 다리 방향, ΔV = λ×유효 역질량)으로 인가한다. 분배(무거운 쪽이 덜
+	 * 움직임/앵커 정지)는 역질량에서 자동 유도되고, 상대 *접근*만 만들므로 끝별 서보의 에너지 주입
+	 * (폭주)·상시 리엘의 윈치화가 구조적으로 없다. 슬랙 게이트 = C ≤ 0 그 자체(팽팽 게이트 3종은 능동
+	 * Pull 전용으로 물러난다). 노브: TetherSettleTime/MaxTetherTension/TetherCompliance(+ 상한 재사용
+	 * TetherMaxSpeed). 검증 후 기본이 되고 두 레거시 모드를 대체할 예정.
+	 */
+	Constraint = 2 UMETA(DisplayName = "Constraint (Lambda)"),
 };
 
 /**
@@ -1596,6 +1618,32 @@ struct FRopeHoldConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
 	float TetherSlackBrakeTime = 0.3f;
+
+	/**
+	 * (Constraint 모드 전용) 초과분 C의 위치 회수 시상수(초). β = 1−exp(−dt/이 값)만큼 매 프레임 C를 닫는
+	 * 접근 속도를 명령한다 — 작을수록 단단(즉시 안착), 클수록 부드러운 추종. 0 = 한 프레임 전량(β=1).
+	 * 프레임률 독립. 회수 명령 속도의 절대 상한은 TetherMaxSpeed를 재사용한다(SolveTetherLambda의
+	 * MaxBiasSpeed — 커밋 직후 C가 큰 프레임의 스파이크 방지이자 슬랙 코스팅 잔류의 상한).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
+	float TetherSettleTime = 0.08f;
+
+	/**
+	 * (Constraint 모드 전용) 테더가 낼 수 있는 최대 장력(kg·cm/s², 0 = 무제한). λ ≤ 이 값 × dt로 클램프돼
+	 * 무거운 대상은 이 장력 한계 안에서 천천히 끌리고(뒤처짐 — 질량 의존이 물리적), 고속 이탈 대상의
+	 * 한 프레임 역전 슬램도 이 한계가 막는다(구 TetherMaxAcceleration의 질량 의존 물리화 — 100kg 기준
+	 * 기본값 500000 ≈ 5g 감속, 600cm/s 낙하를 ~0.12초에 흡수). 절단 연출 임계와 같은 단위계다
+	 * (GetTetherTension() = λ/dt 관측치와 직접 비교 가능).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	float MaxTetherTension = 500000.0f;
+
+	/**
+	 * (Constraint 모드 전용) 컴플라이언스 α(s²/kg — XPBD 표준형, 분모에 α/dt²). 0(기본) = 비신축 로프.
+	 * > 0이면 λ가 줄어 의도적 탄성(번지 등 연출)이 된다 — 값 감: 0.0005면 60fps에서 강성이 약 1/180로 준다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	float TetherCompliance = 0.0f;
 
 	/**
 	 * 능동 Pull의 **견인 목표 속도**(cm/s). 능동 Pull은 대상을 이 속도로 당김 방향을 따라 몰되(장력 상한 PullForce

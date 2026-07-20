@@ -252,6 +252,7 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 	int32 LegEnd = FMath::Max(AnchorNode - 2, 0);
 	int32 AimNode = INDEX_NONE; // 첫 다리의 끝(아래 첫 바퀴에 확정)
 	float ChordSum = 0.0f;
+	float ChordSumRaw = 0.0f; // 비클램프 chord 합 — Constraint 테더의 C 관측치(FRopePullSample::PathChordLen 주석 참조).
 	float MaxSag = 0.0f;
 	while (true)
 	{
@@ -278,6 +279,7 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 		const float LegChord = static_cast<float>((Sim.Positions[LegEnd] - Sim.Positions[LegStart]).Size());
 		const float LegRest = static_cast<float>(LegStart - LegEnd) * Sim.SegmentLength;
 		ChordSum += FMath::Min(LegChord, LegRest);
+		ChordSumRaw += LegChord;
 		// 다리 내부 노드의 chord 직선 대비 최대 수직 이탈(처짐, cm) — 코너 판정(각도)이 못 잡는 완만한
 		// catenary 처짐을 선형 감도로 잰다. 코너에 걸린 팽팽한 로프는 다리별로 곧아 값이 작다.
 		for (int32 k = LegEnd + 1; k < LegStart; ++k)
@@ -310,6 +312,7 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 	Out.Tension = Sim.SegmentTension.IsValidIndex(AnchorNode - 1) ? Sim.SegmentTension[AnchorNode - 1] : 0.0f;
 	// 전 체인 팽팽 관측치: 다리 chord 합 + 자유 구간 rest 길이(소비 = 컴포넌트의 EvaluateChainTautGate).
 	Out.TautChordLen = ChordSum;
+	Out.PathChordLen = ChordSumRaw;
 	Out.FreeRestLen = static_cast<float>(AnchorNode) * Sim.SegmentLength;
 	// 자유 구간 세그먼트 장력의 최솟값 — 팽팽함 = 장력이 손까지 전 구간 전달(어딘가 슬랙이면 0).
 	// chord 합 기하가 못 보는 지그재그 슬랙/부분 스트레치의 판별자다. 솔브 전(배열 부족)은 0으로 취급.

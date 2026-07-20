@@ -436,17 +436,31 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				OvershootColor = (S.TetherOvershoot > S.DistanceReleaseSlack) ? TEXT("{red}")
 					: (S.TetherOvershoot > S.DistanceReleaseSlack * 0.8f) ? TEXT("{yellow}") : TEXT("{white}");
 			}
-			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f taut=%s{white} chain=%s{white}(%.0f/%.0fcm, minT=%.0f, sag=%.0f) dir=%s tether=%s%.0fcm{white}(x%.2f, release=%.0f) active=%.0f"),
+			// Constraint(λ) 모드는 테더 장력(λ/dt)과 상한을 덧붙인다 — 상한 80%+ 노랑, 도달 빨강(클램프 중).
+			FString ConstraintInfo;
+			if (S.bConstraintTetherMode)
+			{
+				const TCHAR* TensionColor = TEXT("{cyan}");
+				if (S.MaxTetherTension > 0.0f)
+				{
+					TensionColor = (S.TetherTension >= S.MaxTetherTension * 0.999f) ? TEXT("{red}")
+						: (S.TetherTension > S.MaxTetherTension * 0.8f) ? TEXT("{yellow}") : TEXT("{cyan}");
+				}
+				ConstraintInfo = FString::Printf(TEXT(" constraint %sT=%.0f{white}/%.0f"),
+					TensionColor, S.TetherTension, S.MaxTetherTension);
+			}
+			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f taut=%s{white} chain=%s{white}(%.0f/%.0fcm, minT=%.0f, sag=%.0f) dir=%s tether=%s%.0fcm{white}(x%.2f, release=%.0f) active=%.0f%s"),
 				S.PullTension, S.bPullTaut ? TEXT("{green}Y") : TEXT("{grey}N"),
 				S.bChainTaut ? TEXT("{green}Y") : TEXT("{grey}N"), S.TautChordLen, S.FreeRestLen, S.MinFreeTension, S.MaxLegSag,
 				*S.PullDirection.ToCompactString(), OvershootColor, S.TetherOvershoot,
-				S.TetherResponse, S.DistanceReleaseSlack, S.ActivePullForce));
+				S.TetherResponse, S.DistanceReleaseSlack, S.ActivePullForce, *ConstraintInfo));
 		}
 		else if (S.bPullValid)
 		{
-			AddTextLine(FString::Printf(TEXT("    {grey}pull slack (tension 0, chain=%s %.0f/%.0fcm minT=%.0f sag=%.0f, tether=%.0fcm x%.2f)"),
+			AddTextLine(FString::Printf(TEXT("    {grey}pull slack (tension 0, chain=%s %.0f/%.0fcm minT=%.0f sag=%.0f, tether=%.0fcm x%.2f%s)"),
 				S.bChainTaut ? TEXT("Y") : TEXT("N"), S.TautChordLen, S.FreeRestLen, S.MinFreeTension, S.MaxLegSag,
-				S.TetherOvershoot, S.TetherResponse));
+				S.TetherOvershoot, S.TetherResponse,
+				S.bConstraintTetherMode ? *FString::Printf(TEXT(", constraint T=%.0f"), S.TetherTension) : TEXT("")));
 		}
 		else
 		{

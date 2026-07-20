@@ -457,6 +457,17 @@ public:
 	float GetEffectiveTetherTargetShare() const { return PullDrive.LastTargetShare; }
 
 	/**
+	 * (Constraint 테더 모드) 이번 프레임 테더 장력 = λ/dt(kg·cm/s² — HoldConfig.MaxTetherTension과 같은
+	 * 단위계라 직접 비교 가능). 슬랙/비Constraint 모드/비Wrapped면 0. 절단·연출 임계 판정과 디버거의
+	 * 관측치. (레거시 장력 관측 GetMaxTension은 XPBD 세그먼트 λ 유래로 단위계가 다르다 — 혼용 금지.)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	float GetTetherTension() const
+	{
+		return (PullDrive.LastTetherLambdaDt > 1e-4f) ? (PullDrive.LastTetherLambda / PullDrive.LastTetherLambdaDt) : 0.0f;
+	}
+
+	/**
 	 * (BinaryPullable 테더 모드) 끌림 가능 판정 — 순수 함수(UObject 무의존, 유닛 테스트 가능).
 	 * 대상 유효질량 EffMassTarget ≤ wielder 유효질량 EffMassWielder이면 "끌림 가능". bPrev(직전 sticky
 	 * 판정)에서 뒤집으려면 반대편 질량이 MarginRatio(≥1)배만큼 더 커야 한다(경계 flapping 방지).
@@ -895,6 +906,10 @@ private:
 
 	// 동작 1 — 자동 견인(테더): 가용 로프 길이 초과분을 위치/속도 동기로 회수(수렴, 폭주 없음).
 	void UpdateTether(float DeltaTime);
+
+	// (Constraint 테더 모드 — Docs/PoC/05) 관측(전 체인 C·벌어짐 속도)→λ 솔브→양끝 임펄스 쌍 인가.
+	// UpdateTether가 모드 분기로 위임한다. λ/장력 관측치는 PullDrive.LastTetherLambda(+Dt)에 남는다.
+	void UpdateConstraintTether(float DeltaTime);
 
 	// (테더 공용) wielder 견인 방향(손(노드0)→로프 첫 다리 = 앵커 쪽)을 산출해 PullDrive.SmoothedWielderPullDir로
 	// EMA 스무딩(PullDirSmoothTime)해 반환. MassShare/BinaryPullable의 wielder 몫이 공유 — 방향 지터로 클램프

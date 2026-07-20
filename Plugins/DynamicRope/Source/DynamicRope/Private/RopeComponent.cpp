@@ -2034,6 +2034,9 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.PullTension = PullDrive.LastPullSample.Tension;
 		Snapshot.TetherResponse = HoldConfig.TetherResponse;
 		Snapshot.TetherOvershoot = PullDrive.LastTetherOvershoot;
+		Snapshot.bConstraintTetherMode = (HoldConfig.TetherMode == ERopeTetherMode::Constraint);
+		Snapshot.TetherTension = GetTetherTension();
+		Snapshot.MaxTetherTension = HoldConfig.MaxTetherTension;
 		Snapshot.ActivePullForce = PullDrive.ActivePullForce;
 		Snapshot.bPullTaut = PullDrive.bPullTaut;
 		Snapshot.bChainTaut = PullDrive.bChainTaut;
@@ -4264,6 +4267,24 @@ namespace
 		return NAME_None;
 	}
 
+	// 시뮬 본 위(부모 체인)에 키네마틱 바디가 있는가 = 부분 랙돌 판정. 있으면 그 구속이 본 견인을 통째로
+	// 흡수해(무한질량 벽) 본에 인가한 서보/힘이 액터에 전달되지 않는다 — 이 경우 수신자 해석은 본이 아니라
+	// 이동체(캐릭터)로 내려가야 한다. 없으면(루트 바디까지 전부 시뮬) 관절로 몸 전체가 끌려오는 자유 랙돌.
+	// 바디 없는 본(트위스트/IK)은 구속이 아니므로 건너뛴다.
+	bool IsSimBoneBoundToKinematic(const USkeletalMeshComponent* Mesh, FName SimBone)
+	{
+		for (FName Bone = Mesh->GetParentBone(SimBone); !Bone.IsNone(); Bone = Mesh->GetParentBone(Bone))
+		{
+			// 바디 존재 + 비시뮬 = 키네마틱 구속. (시뮬 상태는 컴포넌트 API로 묻는다 —
+			// FBodyInstance::IsInstanceSimulatingPhysics는 비export 인라인이라 링크 불가.)
+			if (Mesh->GetBodyInstance(Bone) != nullptr && !Mesh->IsSimulatingPhysics(Bone))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	// 캐릭터 무브먼트가 지금 힘을 소비할 수 있는가. MOVE_None(DisableMovement — 랙돌 셋업 관례)이면
 	// AddForce가 누적만 되고 소비되지 않아 "성공한 척" 힘이 사라진다 — 그 경우 다른 수신자로 넘긴다.
 	// wrap 대상 액터를 직접 받는다(대상이 스켈레탈/정적/물리프랍 무엇이든 무관 — 소유 액터 기준 판정).
@@ -4301,7 +4322,8 @@ namespace
 	// ERopeEndpointKind/FRopeTetherEndpoint는 Core/RopeTypes.h의 공용 판정 타입이다. 컴포넌트는
 	// target/wielder 결과를 같은 Wrapped 프레임 안에서 캐시해 pullable/테더/기본 Pull이 공유한다.
 
-	// 수신자 해석(대상/wielder 공용). 순서: 스켈레탈 시뮬 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터 → 앵커.
+	// 수신자 해석(대상/wielder 공용). 순서: 스켈레탈 자유 랙돌 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터 → 앵커.
+	// (부분 랙돌 — 시뮬 본이 위쪽 키네마틱 바디에 묶임 — 은 rung 1이 받지 않고 캐릭터/앵커로 폴스루한다.)
 	//  - MeshComp: 대상이면 State.Mesh, wielder면 nullptr(스켈레탈·프리미티브 rung 자동 skip → 루트부터).
 	//  - 물리 바디 질량은 UE가 콜리전 볼륨×밀도로 자동 유지하는 값이라 별도 세팅이 필요 없다.
 	//  - 캐릭터 접지는 유한 브레이스(Mass×GroundBraceFactor — 발 디딤 저항), 공중은 Mass, MOVE_None은 앵커.
@@ -4310,28 +4332,27 @@ namespace
 		FRopeTetherEndpoint Out;
 		Out.Actor = Owner;
 
-		// (1) 스켈레탈 랙돌(풀/부분): 감긴 본에서 부모 체인으로 승격한 가장 가까운 *시뮬 본*(바디 없는 트위스트 본 대응).
-		// 루트 IsSimulatingPhysics()로 게이트하지 않는다 — 부분 랙돌(루트 키네마틱·서브트리만 시뮬)이 빠져 아래
-		// 캐릭터 MOVE_None 분기로 떨어지면 무한질량(=끌림 불가)으로 오판된다. 시뮬 본 존재로만 판정한다.
+		// (1) 스켈레탈 **자유 랙돌**(시뮬 본이 루트 바디까지 관절로만 이어짐): 감긴 본에서 부모 체인으로 승격한
+		// 가장 가까운 *시뮬 본*(바디 없는 트위스트 본 대응)에 인가한다. 유효 질량은 본 바디가 아니라 **전신 바디
+		// 질량 합**(GetMass) — 본 하나를 당겨도 관절로 끌려오는 것은 몸 전체라, 본 바디 질량(팔뚝 3kg)을 쓰면
+		// MassShare 분배/BinaryPullable 끌림 판정이 "가벼운 대상"으로 오판해 물리적으로 낼 수 없는 회수를 전량
+		// 배정받고 로프만 늘어난다(탄성 끌림 증상 — Docs/PoC/05 §3.4).
 		//
-		// ⚠ 알려진 한계(2026-07-15, 미수정 — 재현 조건이 기본 off라 보류): 여기서 내는 Mass는 그 본의 *바디*
-		// 질량이라, **부분 랙돌**(URopeRagdollResponseComponent::bOnlyBelowWrappedBone=true → 감긴 본만 시뮬,
-		// 부모는 키네마틱, CMC는 활성)에서는 거짓이 된다. 팔뚝 바디는 3kg이지만 키네마틱 부모에 관절로 묶여
-		// 있어 로프가 당겼을 때의 *유효* 질량은 무한이다. 그 거짓값이 MassShare 몫 분배와 BinaryPullable 끌림
-		// 판정을 모두 오염시켜(가벼운 대상 = 전량 배정/pullable → wielder가 양보 안 함) overshoot가 닫히지 않고
-		// 로프만 늘어난다. 게다가 테더는 본에만 서보를 넣어 키네마틱 구속이 그걸 흡수한다(능동 Pull은
-		// ApplyPullForce의 이중 인가로 이동체에도 힘을 줘 이 경우에도 끌린다 — 두 견인 경로가 갈리는 지점).
-		// 고치려면 인가(테더도 CMC 동반 구동)와 질량(키네마틱에 묶인 본이면 캐릭터 질량 보고) 둘 다 필요하다.
-		// 풀 랙돌은 전 바디가 시뮬이라 키네마틱 앵커가 없고 관절로 몸 전체가 끌려오므로 정상이다.
+		// **부분 랙돌**(시뮬 본 위 부모 체인에 키네마틱 바디 존재)은 여기서 받지 않고 아래로 폴스루한다: 본을
+		// 아무리 서보해도 키네마틱 구속이 흡수해 로프만 늘어난다(2026-07-15 보류했던 rung 1 한계 — 이 폴스루가
+		// 그 해소다). 실제로 끌 수 있는 것은 이동체(캐릭터 rung — CMC 활성)거나, 그마저 없으면 아무것도 없다
+		// (앵커 = 무한질량이 물리적 진실). 감긴 본의 시각 반응(팔이 딸려오는 연출)은 후속(Docs/PoC/05 §7).
 		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
 		{
 			const FName SimBone = FindNearestSimulatingBone(Skel, WrappedBone);
-			if (!SimBone.IsNone())
+			if (!SimBone.IsNone() && !IsSimBoneBoundToKinematic(Skel, SimBone))
 			{
 				Out.Kind = ERopeEndpointKind::SimBody;
 				Out.Prim = Skel;
 				Out.Bone = SimBone;
-				Out.Mass = ResolveBodyMass(Skel, SimBone);
+				// 전신 질량(전 바디 합). 축퇴(바디 미생성 등으로 0)면 종전 본 바디 → 컴포넌트 질량 폴백.
+				const float WholeMass = static_cast<float>(Skel->GetMass());
+				Out.Mass = (WholeMass > KINDA_SMALL_NUMBER) ? WholeMass : ResolveBodyMass(Skel, SimBone);
 				return Out;
 			}
 		}
@@ -4565,8 +4586,8 @@ namespace
 				Skel->SetAllPhysicsLinearVelocity(Inward * NeedDeltaV, /*bAddToCurrent*/ true);
 				return Step;
 			}
-			// 부분 랙돌(루트 키네마틱) 등: 전체 평행이동이 부적절하다 → 감긴 본만 servo(종전 동작).
-			// 이 셋업은 별도의 알려진 한계가 있다 — ResolveTetherEndpoint rung 1 주석 참조.
+			// 안전 폴백: 컴포넌트 시뮬이 꺼진 스켈레탈 본 endpoint. 수신자 해석(rung 1)이 부분 랙돌을
+			// 캐릭터/앵커로 폴스루하는 지금은 정상 경로에서 도달하지 않는다 — 도달 시 감긴 본만 servo(종전 동작).
 			Prim->AddImpulse(Inward * NeedDeltaV, BoneName, /*bVelChange*/ true);
 			return Step; // 속도로 회수(부족분 0 — wielder 안 건드림).
 		};
@@ -4868,6 +4889,14 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 실제 회수 정책은 ApplyBinaryPullableTether / ApplyMassShareTether가, 축 드라이브 산수는
 	// RopeTraction(Logic/RopeTractionSolver.h, 유닛 테스트 대상)이 가진다.
 
+	// Constraint(λ) 모드는 관측치(전 체인 C)·게이트(C ≤ 0 그 자체)·인가(임펄스 쌍)가 레거시 두 모드와
+	// 전부 달라 아래 sub-leg overshoot 경로를 공유하지 않는다 — 전용 함수로 위임(Docs/PoC/05).
+	if (HoldConfig.TetherMode == ERopeTetherMode::Constraint)
+	{
+		UpdateConstraintTether(DeltaTime);
+		return;
+	}
+
 	// 초과분(overshoot) = 앵커에서 "조준 노드"(walk가 찾은 첫 직선 다리 끝 = 손 또는 벽 모서리)까지의 실제
 	// 직선 거리가 그 구간의 가용 로프 길이를 넘는 양. 손이 아니라 조준 노드를 기준으로 삼는 이유: 로프가 벽에
 	// 걸려 우회하면 손 직선은 장애물 뒤라 영영 안 터지지만(무반응), 모서리(조준) 기준이면 그 다리로 제대로
@@ -4935,6 +4964,173 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	PullDrive.LastTargetShare = ApplyMassShareTether(Ctx, PullDrive.SmoothedTargetShare);
 }
 
+void URopeComponent::UpdateConstraintTether(float DeltaTime)
+{
+	// (Constraint 모드 — Docs/PoC/05) 관측(C·s·d·w) → λ 솔브(RopeTraction::SolveTetherLambda, 유닛 테스트
+	// 대상) → 크기가 같은 임펄스 쌍 인가. 레거시 두 모드와 달리 팽팽 게이트도 상시 리엘도 없다:
+	// C ≤ 0(슬랙)이면 λ = 0이 게이트의 전부고, 능동 견인은 되감기의 rest 변화율이 s에 실려 λ로 나온다.
+	PullDrive.LastTetherOvershoot = 0.0f;
+	PullDrive.LastTetherLambda = 0.0f;
+	PullDrive.LastTetherLambdaDt = DeltaTime;
+	if (!PullDrive.LastPullSample.bValid || DeltaTime <= 1e-4f)
+	{
+		PullDrive.bPrevFreeRestValid = false; // 관측 공백 — 다음 유효 프레임에 rest 차분 재시드.
+		return;
+	}
+
+	// 제약 위반 C = 실제 경로 길이(비클램프 chord 합) − (자유 구간 rest + 여유). 슬랙/구김/처짐은 chord가
+	// rest보다 짧아 C < 0 → 무동작. 스냅샷/거리 release가 읽는 overshoot는 C의 0 클램프다(의미 동일).
+	const float FreeRest = PullDrive.LastPullSample.FreeRestLen + FMath::Max(HoldConfig.TetherSlack, 0.0f);
+	const float C = PullDrive.LastPullSample.PathChordLen - FreeRest;
+	PullDrive.LastTetherOvershoot = FMath::Max(0.0f, C);
+
+	// rest 변화율(되감기/SetRopeLength → 감김 = rest 감소 = 벌어짐 취급): 앵커 노드가 같은 프레임 간
+	// 차분만 신뢰한다 — 앵커가 옮겨간 프레임의 rest는 불연속이라 속도가 아니다.
+	float RestRate = 0.0f;
+	if (PullDrive.bPrevFreeRestValid && PullDrive.PrevAnchorNode == PullDrive.LastPullSample.AnchorNode)
+	{
+		RestRate = (FreeRest - PullDrive.PrevFreeRestLen) / DeltaTime;
+	}
+	PullDrive.PrevFreeRestLen = FreeRest;
+	PullDrive.PrevAnchorNode = PullDrive.LastPullSample.AnchorNode;
+	PullDrive.bPrevFreeRestValid = true;
+
+	if (C <= 0.0f)
+	{
+		return; // 슬랙 — 솔브도 0을 내지만 수신자 해석/방향 EMA 비용을 아낀다.
+	}
+
+	const FRopeResolvedWrappedEndpoints* Endpoints = GetOrResolveWrappedEndpoints();
+	if (!Endpoints)
+	{
+		return;
+	}
+	USceneComponent* MeshComp = Endpoints->TargetMesh.Get();
+	if (!MeshComp)
+	{
+		return;
+	}
+
+	// 끝 방향(안쪽 = 상대 쪽): 대상 = 앵커→첫 다리(스무딩된 look-ahead), wielder = 손→첫 다리(EMA —
+	// 이 프레임은 인가 후보라 무조건 진행시킨다). 축퇴 폴백은 앵커→조준 span 직선.
+	const FVector Anchor = PullDrive.LastPullSample.WorldPoint;
+	const FVector Aim = PullDrive.LastPullSample.AimPos;
+	const FVector Span = (Aim - Anchor).GetSafeNormal();
+	const FVector DirTarget = PullDrive.SmoothedPullDir.IsNearlyZero() ? Span : PullDrive.SmoothedPullDir;
+	if (DirTarget.IsNearlyZero())
+	{
+		return; // 축퇴(조준=앵커) — 방향 정의 불가.
+	}
+	const FVector DirWielder = ComputeSmoothedWielderDir(Aim, DirTarget, DeltaTime);
+	if (DirWielder.IsNearlyZero())
+	{
+		return;
+	}
+
+	// 자기 랩(owner == 대상): 양끝이 같은 몸이라 쌍 인가가 자가 상쇄된다 — wielder 끝을 앵커(w=0)로 취급해
+	// 대상 끝만 움직인다(레거시 특례와 동일).
+	const bool bSelfWrap = (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner());
+
+	// 벌어짐 속도 s = −(vT·dT + vW·dW) − dRest/dt. 끝 속도는 수신자 해석과 같은 rung에서 실측한다 —
+	// 움직이는 앵커(드래곤)의 순항은 vT에 실려 별도 피드포워드 없이 추종된다(레거시의 앵커 속도 EMA 대체).
+	auto EndpointVelocity = [](const FRopeTetherEndpoint& Endpoint) -> FVector
+	{
+		switch (Endpoint.Kind)
+		{
+		case ERopeEndpointKind::SimBody:
+			return Endpoint.Prim ? Endpoint.Prim->GetPhysicsLinearVelocity(Endpoint.Bone) : FVector::ZeroVector;
+		case ERopeEndpointKind::Character:
+			return Endpoint.Movement ? Endpoint.Movement->Velocity : FVector::ZeroVector;
+		default:
+			return FVector::ZeroVector; // 앵커/None — 정지.
+		}
+	};
+	const float SepTarget = -static_cast<float>(FVector::DotProduct(EndpointVelocity(Endpoints->Target), DirTarget));
+	const float SepWielder = bSelfWrap ? 0.0f
+		: -static_cast<float>(FVector::DotProduct(EndpointVelocity(Endpoints->Wielder), DirWielder));
+	const float SepSpeed = SepTarget + SepWielder - RestRate;
+
+	RopeTraction::FRopeTetherConstraint In;
+	In.C = C;
+	In.SepSpeed = SepSpeed;
+	In.InvMassTarget = EndpointInvMass(Endpoints->Target);
+	In.InvMassWielder = bSelfWrap ? 0.0f : EndpointInvMass(Endpoints->Wielder);
+	In.SettleAlpha = RopeTraction::ExpSmoothAlpha(HoldConfig.TetherSettleTime, DeltaTime);
+	In.MaxBiasSpeed = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
+	In.Compliance = HoldConfig.TetherCompliance;
+	In.MaxTension = HoldConfig.MaxTetherTension;
+	const float Lambda = RopeTraction::SolveTetherLambda(In, DeltaTime);
+	PullDrive.LastTetherLambda = Lambda;
+	// 유효 분배 몫(wielder 게이트/디버거 호환) = 역질량비 — λ 발화와 무관하게 이번 프레임 값으로 확정한다.
+	const float WSum = In.InvMassTarget + In.InvMassWielder;
+	PullDrive.LastTargetShare = (WSum > KINDA_SMALL_NUMBER) ? (In.InvMassTarget / WSum) : 0.0f;
+	if (Lambda <= 0.0f)
+	{
+		return; // 이미 충분히 접근 중이거나 양끝 다 앵커.
+	}
+
+	// ---- 인가: 끝별 ΔV = λ × w(cm/s), 각자 다리 방향 ----
+	// 모든 경로가 로프 축(+직교 감쇠) 성분만 건드려 스윙/중력은 보존되고, 결과 속력은 TetherMaxSpeed로
+	// 2차 클램프된다(자유 랙돌 add 경로 제외 — ΔV 자체가 λ 상한으로 유계). 기존 디스패치 골격
+	// (ApplyToTetherEndpoint)을 그대로 지나므로 확장 관문(ApplyTractionToReceiver, Amount = ΔV cm/s)도 동일.
+	const float SpeedCap = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
+	const float PerpDamp = FMath::Clamp(HoldConfig.TetherPerpDamping, 0.0f, 1.0f);
+	auto ApplySimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float DeltaV) -> float
+	{
+		USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Prim);
+		if (Skel && !BoneName.IsNone())
+		{
+			// 자유 랙돌(수신자 해석 rung 1 계약): 전체 평행이동(add) — 감긴 본이 ΔV를 정확히 받고 바디 간
+			// 상대 속도(내부 다이내믹)는 보존된다. 단일 본 슬램(관절 에너지 펌핑)을 하지 않는 것이 핵심.
+			Skel->SetAllPhysicsLinearVelocity(Dir * DeltaV, /*bAddToCurrent*/ true);
+			return DeltaV;
+		}
+		// 컴포넌트 단위 시뮬 바디: 임펄스(bVelChange) + 직교 잔여 관성 부분 감쇠 + 결과 속력 클램프.
+		const FVector CurVel = Prim->GetPhysicsLinearVelocity(BoneName);
+		FVector Impulse = Dir * DeltaV;
+		if (PerpDamp > 0.0f)
+		{
+			const FVector PerpVel = CurVel - Dir * static_cast<float>(FVector::DotProduct(CurVel, Dir));
+			Impulse -= PerpVel * PerpDamp;
+		}
+		const FVector NewVel = RopeTraction::ClampInjectedVelocity(CurVel + Impulse, CurVel, SpeedCap);
+		Prim->AddImpulse(NewVel - CurVel, BoneName, /*bVelChange*/ true);
+		return DeltaV;
+	};
+	auto ApplyCharacter = [&](UCharacterMovementComponent* Movement, const FVector& Dir, float DeltaV)
+	{
+		// CMC: 속도 직접 가산(이번 프레임 반영 계약). 주입 장부(TowedVelDebt)는 적립하지 않는다 —
+		// λ의 위치 회수 항은 MaxBiasSpeed로 유계라 슬랙 브레이크가 회수할 과잉 주입이 없다.
+		const FVector OldVel = Movement->Velocity;
+		Movement->Velocity = RopeTraction::ClampInjectedVelocity(OldVel + Dir * DeltaV, OldVel, SpeedCap);
+	};
+
+	auto GetWielderDirFn = [&]() { return DirWielder; }; // EMA는 위에서 이미 이 프레임 진행 완료.
+	auto TractionGate = [this](const FRopeTractionRequest& Req) { return ApplyTractionToReceiver(Req); };
+	const FRopeTetherContext Ctx{
+		HoldConfig, Endpoints->Target, Endpoints->Wielder, DirTarget,
+		/*AnchorVelocity*/ PullDrive.SmoothedAnchorVelocity, PullDrive.LastTetherOvershoot, DeltaTime,
+		bSelfWrap, PullDrive.bTargetPullable,
+		/*WielderTowDebt*/ &PullDrive.TowedVelDebt, GetWielderDirFn, TractionGate };
+
+	const float DvTarget = Lambda * In.InvMassTarget;
+	if (DvTarget > KINDA_SMALL_NUMBER)
+	{
+		ApplyToTetherEndpoint(Ctx, /*bWielderSide*/ false, DirTarget, DvTarget,
+			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ApplySimBody(P, B, D, S); },
+			[&](UCharacterMovementComponent* M, const FVector& D, float S) { ApplyCharacter(M, D, S); },
+			[&](AActor*, const FVector&, float) { /* 앵커 = w 0이라 ΔV도 0 — 도달 불가 */ });
+	}
+	const float DvWielder = bSelfWrap ? 0.0f : Lambda * In.InvMassWielder;
+	if (DvWielder > KINDA_SMALL_NUMBER)
+	{
+		ApplyToTetherEndpoint(Ctx, /*bWielderSide*/ true, DirWielder, DvWielder,
+			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ApplySimBody(P, B, D, S); },
+			[&](UCharacterMovementComponent* M, const FVector& D, float S) { ApplyCharacter(M, D, S); },
+			[&](AActor*, const FVector&, float) { /* 앵커 무동작 */ });
+	}
+}
+
 USkeletalMeshComponent* URopeComponent::GetWrappedMesh() const
 {
 	// State.Mesh는 USceneComponent(정적 랩 대비 일반화). "스켈레탈 메시" 반환 계약 유지 —
@@ -4985,22 +5181,9 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		// (무게중심 임펄스라 토크/스핀 없음, 오버슛 없어 먼지/턱턱 없음, 무거우면 뒤처짐). 각속도 클램프로 잔여 스핀 억제.
 		ApplyPullVelocityDrive(Endpoint.Prim, Endpoint.Bone, Dir, MaxTension, DeltaTime);
 		ClampPulledBodyVelocity(Endpoint.Prim, Endpoint.Bone);
-		// 부분 랙돌(감긴 본은 시뮬인데 메시 루트 바디는 키네마틱): 시뮬 본에 준 힘은 키네마틱 부모 구속
-		// (무한질량)이 흡수해 액터로 전달되지 않는다. 캐릭터가 여전히 무브먼트로 구동 중이면 이동체에도 같은
-		// 힘을 줘 실제로 끌리게 한다(본 인가는 팔다리가 당겨지는 시각 반응, 무브먼트 인가는 몸통 견인 —
-		// 역할이 다르다). 풀 랙돌은 루트 바디가 시뮬이라 해당 없음(이중 인가 없음). 본이 아닌 rung(시뮬
-		// 프리미티브/루트)은 정의상 IsSimulatingPhysics()라 여기 안 걸린다.
-		//
-		// 이 이중 인가는 **Pull에만 있고 테더에는 없다** — 의도적으로 남긴 비대칭이다(2026-07-15 결정). 재현
-		// 조건인 부분 랙돌(bOnlyBelowWrappedBone)이 기본 off이고 쓸 계획이 없어 보류했다. 켤 거면 테더도 함께
-		// 고쳐야 한다(인가 + 질량 두 겹) — 상세는 ResolveTetherEndpoint rung 1과 bOnlyBelowWrappedBone 주석.
-		if (!Endpoint.Bone.IsNone() && !Endpoint.Prim->IsSimulatingPhysics())
-		{
-			if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Owner))
-			{
-				Movement->AddForce(Force);
-			}
-		}
+		// (부분 랙돌의 "본 + 이동체 이중 인가"는 제거됐다: 수신자 해석이 부분 랙돌을 더 이상 본으로 내리지
+		// 않고 캐릭터 rung으로 폴스루하므로 — ResolveTetherEndpoint rung 1 — 여기 오는 본 endpoint는 항상
+		// 자유 랙돌이고, 힘은 관절로 몸 전체에 전달된다. 테더와 Pull이 같은 수신자를 보는 대칭 복원.)
 		return;
 
 	case ERopeEndpointKind::Character:

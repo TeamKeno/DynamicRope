@@ -91,8 +91,27 @@ struct FRopePullDriveState
 	 */
 	FVector TowedVelDebt = FVector::ZeroVector;
 
-	/** 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용. */
+	/** 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용.
+	 *  (Constraint 모드에선 제약 위반 C의 0 클램프 — 산출원만 다르고 의미는 동일하다.) */
 	float LastTetherOvershoot = 0.0f;
+
+	/**
+	 * (Constraint 모드) 이번 프레임 λ(장력 임펄스, kg·cm/s). 0 = 미발화(슬랙/접근 중/비Constraint 모드).
+	 * 테더 장력 관측치 GetTetherTension() = 이 값 / dt — 그 dt를 함께 보관한다. 디버거·BP 조회 소스.
+	 * ResetTransient에서 리셋.
+	 */
+	float LastTetherLambda = 0.0f;
+	float LastTetherLambdaDt = 0.0f;
+
+	/**
+	 * (Constraint 모드) 직전 프레임의 자유 구간 rest 길이(cm, TetherSlack 포함) — 되감기/SetRopeLength에
+	 * 의한 rest 변화율(dRest/dt)을 프레임 차분으로 관측해 벌어짐 속도(s)에 싣는다(감김 = rest 감소 = 벌어짐
+	 * 취급 → λ가 당긴다 = 리엘의 유일한 견인 경로). 앵커 노드가 바뀐 프레임은 rest가 불연속이라 차분을
+	 * 쓰지 않는다(PrevAnchorNode 비교). bPrevFreeRestValid=false = 미시드. ResetTransient에서 리셋.
+	 */
+	float PrevFreeRestLen = 0.0f;
+	int32 PrevAnchorNode = -1;
+	bool bPrevFreeRestValid = false;
 
 	/**
 	 * 테더 대상 몫(shareT)의 시간 스무딩 상태(자동 분배). 접지↔공중/질량 변화로 프레임 간 튀는 것을 EMA로
@@ -138,6 +157,11 @@ struct FRopePullDriveState
 		bPullTaut = false;
 		bChainTaut = false;
 		TowedVelDebt = FVector::ZeroVector;
+		LastTetherLambda = 0.0f;
+		LastTetherLambdaDt = 0.0f;
+		PrevFreeRestLen = 0.0f;
+		PrevAnchorNode = -1;
+		bPrevFreeRestValid = false;
 		bLoggedPullNoReceiver = false;
 	}
 };
