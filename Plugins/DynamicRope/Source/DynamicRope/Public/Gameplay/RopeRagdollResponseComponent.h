@@ -8,6 +8,9 @@
 //    (감으면 자빠지고 놓으면 일어난다 — 대칭). 수동/치트로 진입한 랙돌은 로프 release와 무관하게 유지.
 //  - EnterRagdoll/EnterPartialRagdoll/RecoverFromRagdoll: BP/코드에서 직접 제어하는 정식 API.
 //
+// 한 대상을 여러 로프가 동시에 감을 수 있으므로(양팔 포박 등) 활성 engagement를 로프 단위 집합으로
+// 센다 — 자동 복귀는 **마지막 로프가 풀렸을 때만** 한다(WrappingRopes 참고).
+//
 // 자기를 감을 로프를 미리 알 수 없으므로(cross-actor throw가 흔함), 매 프레임 로프를 전수 순회하는 대신
 // 서브시스템의 중앙 wrap/release 신호(URopeSimSubsystem::OnAnyRopeWrapped/OnAnyRopeReleased)에 구독해
 // 자기 메시가 감겼는지/풀렸는지로 반응한다. 랙돌 전환 자체는 게임/컴포넌트 책임이라는 계약(플러그인
@@ -28,10 +31,13 @@
 #include "Engine/TimerHandle.h"
 // ERopeReleaseReason / FRopeWrappedEventInfo — 중앙 신호 페이로드.
 #include "Core/RopeTypes.h"
+// EMovementMode — 랙돌 진입 전 무브먼트 모드 저장 멤버.
+#include "Engine/EngineTypes.h"
 #include "RopeRagdollResponseComponent.generated.h"
 
 class USkeletalMeshComponent;
 class USceneComponent;
+class URopeComponent;
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeRagdollResponseComponent : public UActorComponent
@@ -86,8 +92,8 @@ public:
 	 * 풀 랙돌 복귀 시 캡슐(액터)을 랙돌이 멈춘 위치로 수평 이동한다(기본 켜짐). 랙돌 동안 무브먼트가
 	 * 꺼져 캡슐은 제자리인데 메시만 물리로(예: pull) 끌려가므로, 그냥 복귀하면 메시가 원래 캡슐로
 	 * 되돌아가며 크게 순간이동한다 — 대신 캡슐을 메시(RecoverAnchorBoneName 본) 쪽으로 옮겨 그
-	 * 되돌아감이 시각적 no-op이 되게 한다. 위치만(수평), 회전/높이는 유지하고 지면 스냅은 이어지는
-	 * MOVE_Walking이 처리한다. 부분 랙돌에는 적용 안 함(메시를 리셋하지 않아 순간이동이 없다).
+	 * 되돌아감이 시각적 no-op이 되게 한다. 위치만(수평), 회전/높이는 유지하고 지면 스냅은 복귀한
+	 * 무브먼트 모드가 처리한다. 부분 랙돌에는 적용 안 함(메시를 리셋하지 않아 순간이동이 없다).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll")
 	bool bMoveCapsuleToMeshOnRecover = true;
@@ -129,8 +135,12 @@ private:
 	//~ 중앙 신호 핸들러(URopeSimSubsystem).
 	/** 월드 어느 로프든 wrap 성립 시 — Info.Mesh가 내 메시면 (지연 후) 자동 랙돌 예약. */
 	void HandleAnyRopeWrapped(const FRopeWrappedEventInfo& Info);
-	/** 월드 어느 로프든 release 시 — 내 메시가 풀렸고 자동 랙돌이었으면 복귀(+예약 취소). */
-	void HandleAnyRopeReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason);
+	/** 월드 어느 로프든 release 시 — 내 메시를 감던 마지막 로프가 풀렸고 자동 랙돌이었으면 복귀(+예약 취소). */
+	void HandleAnyRopeReleased(const URopeComponent* Rope, const USceneComponent* WrappedMesh, FName Bone,
+		ERopeReleaseReason Reason);
+
+	/** 파괴된 로프(weak 만료)를 engagement 집합에서 걷어내고 남은 수를 돌려준다. */
+	int32 PruneWrappingRopes();
 
 	/** RagdollOnWrappedDelay 만료 시 실제 전환(예약된 본은 PendingWrappedBone). */
 	void FireAutoRagdoll();
@@ -143,11 +153,20 @@ private:
 	FName PendingWrappedBone = NAME_None;
 	FTimerHandle AutoRagdollTimer;
 
+	// 지금 이 액터의 메시를 감고 있는 로프들(중앙 wrap/release 신호로 유지). 자동 복귀 게이트가 "비었나"를
+	// 본다 — mesh 일치만으로 복구하면 로프 둘이 감은 상태에서 하나만 풀려도 일어서 버린다. 로프는 감긴
+	// 채 파괴될 수 있으므로 weak(만료분은 PruneWrappingRopes가 정리).
+	TSet<TWeakObjectPtr<URopeComponent>> WrappingRopes;
+
 	FName SavedCollisionProfile = NAME_None;
 	FTransform SavedMeshRelative = FTransform::Identity;
 	TWeakObjectPtr<USceneComponent> SavedAttachParent;
 	FName SavedAttachSocket = NAME_None;
 	TEnumAsByte<ECollisionEnabled::Type> SavedCapsuleCollision = ECollisionEnabled::QueryAndPhysics;
+	// 진입 전 무브먼트 모드 — 복귀 때 그대로 되돌린다(종전에는 MOVE_Walking 하드코딩이라 Flying/Swimming/
+	// Custom으로 랙돌에 들어간 대상이 걸어 나왔다). MOVE_None으로 들어갔던 경우만 Walking으로 구제한다.
+	TEnumAsByte<EMovementMode> SavedMovementMode = MOVE_Walking;
+	uint8 SavedCustomMovementMode = 0;
 
 	// 신호 구독 핸들(EndPlay 해제용).
 	FDelegateHandle WrappedHandle;

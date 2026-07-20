@@ -30,9 +30,13 @@ class AActor;
  * 감을 로프를 미리 알 수 없어도 구독만 해두면 반응할 수 있게 하는 용도다 — 대상이 매 프레임 로프를
  * 전수 순회(구 데모 폴링)하던 것을 대체한다. wrap은 페이로드에 Mesh(weak)를 이미 실어오고, release는
  * 해제 순간의 감겼던 mesh를 함께 싣는다(release 델리게이트 자체는 mesh를 안 실어서). 리스너가
- * Mesh로 "이게 내 메시인가"를 판별한다. 서브시스템 수명 동안 유효, 등록은 리스너의 BeginPlay/EndPlay. */
+ * Mesh로 "이게 내 메시인가"를 판별한다. 서브시스템 수명 동안 유효, 등록은 리스너의 BeginPlay/EndPlay.
+ *
+ * 두 신호 모두 **어느 로프인지**를 함께 싣는다(wrap은 FRopeWrappedEventInfo::Rope, release는 Rope 인자).
+ * 대상 하나를 여러 로프가 동시에 감을 수 있으므로, 구독자는 mesh만이 아니라 (mesh, rope) 쌍으로 활성
+ * engagement를 세어야 한다 — 로프 하나가 풀렸다고 반응을 되돌리면 남은 로프가 무시된다. */
 DECLARE_MULTICAST_DELEGATE_OneParam(FRopeWrappedNotify, const FRopeWrappedEventInfo& /*Info*/);
-DECLARE_MULTICAST_DELEGATE_ThreeParams(FRopeReleasedNotify, const USceneComponent* /*WrappedMesh*/, FName /*Bone*/, ERopeReleaseReason /*Reason*/);
+DECLARE_MULTICAST_DELEGATE_FourParams(FRopeReleasedNotify, const URopeComponent* /*Rope*/, const USceneComponent* /*WrappedMesh*/, FName /*Bone*/, ERopeReleaseReason /*Reason*/);
 
 /**
  * 서브시스템 Tick을 TG_PostPhysics에서 구동하는 틱 함수(기존 tickable 대체).

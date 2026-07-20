@@ -15,6 +15,7 @@ class USceneComponent;
 class UPrimitiveComponent;
 class UCharacterMovementComponent;
 class AActor;
+class URopeComponent;
 
 /**
  * 라이프사이클 단계. 물리(solver)는 Free/Flight에서 전체를, Wrapping/Wrapped에서는 마스크되지 않은
@@ -200,6 +201,16 @@ struct FRopeWrappedEventInfo
 	/** 성립 앵커(래치 노드) 수 — 포획 강도의 보조 지표. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	int32 AnchorCount = 0;
+
+	/**
+	 * 이 wrap을 성립시킨 로프 — 중앙 신호(OnAnyRopeWrapped) 구독자가 **어느 로프가 감았는지**를 알기 위한
+	 * 식별자다. 대상 하나를 여러 로프가 동시에 감을 수 있으므로(양팔 포박 등), 구독자는 이 값으로 활성
+	 * engagement 집합을 유지해야 한다 — mesh만 보면 로프 하나가 풀렸을 때 나머지가 남아 있는데도 반응을
+	 * 되돌린다(URopeRagdollResponseComponent의 조기 복구 버그, 2026-07-20). 짝이 되는 해제 신호
+	 * OnAnyRopeReleased도 같은 로프 포인터를 싣는다. 이벤트 이후 파괴될 수 있으니 weak.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope")
+	TWeakObjectPtr<URopeComponent> Rope;
 };
 
 /**

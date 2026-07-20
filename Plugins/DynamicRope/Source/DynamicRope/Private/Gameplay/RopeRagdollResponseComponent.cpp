@@ -3,6 +3,8 @@
 #include "Gameplay/RopeRagdollResponseComponent.h"
 
 #include "DynamicRopeLog.h"
+// URopeComponent 완전정의 — WrappingRopes(engagement 집합)의 weak 키 타입.
+#include "RopeComponent.h"
 #include "Subsystem/RopeSimSubsystem.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -39,28 +41,53 @@ void URopeRagdollResponseComponent::BeginPlay()
 
 void URopeRagdollResponseComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	if (URopeSimSubsystem* Sim = URopeSimSubsystem::Get(GetWorld()))
+	UWorld* World = GetWorld();
+	if (URopeSimSubsystem* Sim = URopeSimSubsystem::Get(World))
 	{
 		Sim->OnAnyRopeWrapped.Remove(WrappedHandle);
 		Sim->OnAnyRopeReleased.Remove(ReleasedHandle);
 	}
-	if (UWorld* World = GetWorld())
+	if (World)
 	{
 		World->GetTimerManager().ClearTimer(AutoRagdollTimer);
+	}
+	WrappingRopes.Reset();
+
+	// 컴포넌트만 떼는 경우(DestroyComponent/UnregisterComponent)의 원복: 랙돌 상태는 이 컴포넌트가 만든
+	// 것이고 복구에 필요한 저장값(프로파일/부착/무브먼트 모드)도 이 컴포넌트에만 있다 — 그대로 사라지면
+	// 대상은 시뮬 켜진 채 무브먼트가 꺼져 영구히 조작 불능이 된다. 액터/월드가 함께 죽는 경우는 원복해도
+	// 의미가 없고 죽어가는 객체를 건드리는 위험만 있으므로 제외한다.
+	AActor* Owner = GetOwner();
+	const bool bComponentOnlyTeardown = bRagdolled
+		&& IsValid(Owner) && !Owner->IsActorBeingDestroyed()
+		&& World && !World->bIsTearingDown;
+	if (bComponentOnlyTeardown)
+	{
+		UE_LOG(LogDynamicRope, Log,
+			TEXT("[%s] RopeRagdollResponse: 컴포넌트 제거 — 랙돌 상태를 원복하고 나간다."), *GetNameSafe(Owner));
+		RecoverFromRagdoll();
 	}
 	Super::EndPlay(EndPlayReason);
 }
 
 void URopeRagdollResponseComponent::HandleAnyRopeWrapped(const FRopeWrappedEventInfo& Info)
 {
-	if (!bRagdollOnWrapped || bRagdolled)
-	{
-		return;
-	}
 	const USkeletalMeshComponent* MyMesh = ResolveMesh();
 	if (!MyMesh || Info.Mesh.Get() != MyMesh)
 	{
 		// 다른 메시가 감긴 이벤트 — 무시.
+		return;
+	}
+
+	// engagement 등록은 랙돌 게이트보다 **먼저** 한다 — 이미 랙돌 중이어도 두 번째 로프를 세어야
+	// 하나가 풀렸을 때 조기 복구를 막을 수 있다(종전엔 bRagdolled면 곧장 return이라 아예 기록되지 않았다).
+	if (Info.Rope.IsValid())
+	{
+		WrappingRopes.Add(Info.Rope);
+	}
+
+	if (!bRagdollOnWrapped || bRagdolled)
+	{
 		return;
 	}
 
@@ -76,7 +103,8 @@ void URopeRagdollResponseComponent::HandleAnyRopeWrapped(const FRopeWrappedEvent
 	}
 }
 
-void URopeRagdollResponseComponent::HandleAnyRopeReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason)
+void URopeRagdollResponseComponent::HandleAnyRopeReleased(const URopeComponent* Rope,
+	const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason)
 {
 	const USkeletalMeshComponent* MyMesh = ResolveMesh();
 	if (!MyMesh || WrappedMesh != MyMesh)
@@ -84,10 +112,29 @@ void URopeRagdollResponseComponent::HandleAnyRopeReleased(const USceneComponent*
 		return;
 	}
 
-	// 지연 대기 중 풀렸다면(빠른 wrap→release) 예약된 자동 전환을 취소한다.
-	if (UWorld* World = GetWorld())
+	WrappingRopes.Remove(const_cast<URopeComponent*>(Rope));
+	// 감긴 채 파괴된 로프는 release 신호를 못 쏘므로 만료 weak로만 남는다 — 여기서 걷어내지 않으면
+	// 집합이 영영 비지 않아 자동 복귀가 죽는다.
+	const int32 RemainingRopes = PruneWrappingRopes();
+
+	// 지연 대기 중 풀렸다면(빠른 wrap→release) 예약된 자동 전환을 취소한다. 단 다른 로프가 아직 감고
+	// 있으면 그 로프의 예약이므로 유지한다.
+	if (RemainingRopes == 0)
 	{
-		World->GetTimerManager().ClearTimer(AutoRagdollTimer);
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(AutoRagdollTimer);
+		}
+	}
+
+	// 한 대상을 여러 로프가 감을 수 있다 — 마지막 로프가 풀렸을 때만 일으킨다(하나만 풀렸는데 복구하면
+	// 남은 로프에 감긴 채 서 있게 된다).
+	if (RemainingRopes > 0)
+	{
+		UE_LOG(LogDynamicRope, Verbose,
+			TEXT("[%s] RopeRagdollResponse: 로프 release(%s) — 아직 %d개 로프가 감고 있어 복귀 보류."),
+			*GetNameSafe(GetOwner()), *UEnum::GetValueAsString(Reason), RemainingRopes);
+		return;
 	}
 
 	// 자동 전환된 랙돌만 자동 복귀(수동/치트 진입은 유지). RecoverFromRagdoll이 메시 유효성/랙돌 여부를
@@ -98,6 +145,18 @@ void URopeRagdollResponseComponent::HandleAnyRopeReleased(const USceneComponent*
 			*GetNameSafe(GetOwner()), *UEnum::GetValueAsString(Reason));
 		RecoverFromRagdoll();
 	}
+}
+
+int32 URopeRagdollResponseComponent::PruneWrappingRopes()
+{
+	for (auto It = WrappingRopes.CreateIterator(); It; ++It)
+	{
+		if (!It->IsValid())
+		{
+			It.RemoveCurrent();
+		}
+	}
+	return WrappingRopes.Num();
 }
 
 void URopeRagdollResponseComponent::FireAutoRagdoll()
@@ -132,6 +191,19 @@ void URopeRagdollResponseComponent::EnterRagdoll()
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh || bRagdolled)
 	{
+		return;
+	}
+
+	// 피직스 에셋 검증은 **아무것도 바꾸기 전에** 한다. 바디가 없으면 SetSimulatePhysics(true)가 조용히
+	// 무효가 되는데, 그 전에 무브먼트/캡슐 콜리전을 먼저 껐다면 대상은 "랙돌도 아니고 걷지도 못하는"
+	// 상태로 bRagdolled=true인 채 고착된다(조작 불능). 부분 랙돌 경로는 원래 이 순서를 지키고 있었다 —
+	// 풀 랙돌만 비대칭이었다.
+	const UPhysicsAsset* PhysAsset = Mesh->GetPhysicsAsset();
+	if (!PhysAsset || PhysAsset->SkeletalBodySetups.Num() == 0)
+	{
+		UE_LOG(LogDynamicRope, Warning,
+			TEXT("[%s] RopeRagdollResponse: 메시에 피직스 바디가 없어(에셋 %s) 풀 랙돌을 건너뛴다."),
+			*GetNameSafe(GetOwner()), PhysAsset ? TEXT("바디 0개") : TEXT("없음"));
 		return;
 	}
 
@@ -254,7 +326,7 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 
 		// 리셋으로 메시가 캡슐 위치의 ref 포즈로 돌아왔다. 캡슐(액터)을 랙돌이 멈춘 곳으로 수평 이동해,
 		// 그 되돌아감이 시각적 순간이동이 아니게 만든다. 이동량 = (랙돌 앵커 - 현재 앵커 월드), Z는 0으로
-		// 눌러 지면 높이를 유지(캡슐이 pelvis 높이만큼 가라앉는 것 방지 — 지면 스냅은 MOVE_Walking이 처리).
+		// 눌러 지면 높이를 유지(캡슐이 pelvis 높이만큼 가라앉는 것 방지 — 지면 스냅은 이어지는 무브먼트가 처리).
 		if (!RealignAnchor.IsNone())
 		{
 			if (AActor* Owner = GetOwner())
@@ -268,7 +340,10 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 		if (ACharacter* Character = Cast<ACharacter>(GetOwner()))
 		{
 			Character->GetCapsuleComponent()->SetCollisionEnabled(SavedCapsuleCollision);
-			Character->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+			// 진입 시 모드로 복귀한다. 단 MOVE_None(이미 무브먼트가 꺼진 상태에서 진입)으로 되돌리면
+			// 조작 불능이 그대로 남으므로 그 한 경우만 Walking으로 구제한다.
+			const EMovementMode RestoreMode = (SavedMovementMode == MOVE_None) ? MOVE_Walking : SavedMovementMode.GetValue();
+			Character->GetCharacterMovement()->SetMovementMode(RestoreMode, SavedCustomMovementMode);
 		}
 	}
 
@@ -298,6 +373,18 @@ void URopeRagdollResponseComponent::SaveRestoreState(USkeletalMeshComponent* Mes
 	SavedMeshRelative = Mesh->GetRelativeTransform();
 	SavedAttachParent = Mesh->GetAttachParent();
 	SavedAttachSocket = Mesh->GetAttachSocketName();
+
+	// 무브먼트 모드도 저장한다 — 복귀 때 되돌리기 위함(비행/수영/커스텀 중 감긴 대상이 걸어 나오면 안 된다).
+	SavedMovementMode = MOVE_Walking;
+	SavedCustomMovementMode = 0;
+	if (const ACharacter* Character = Cast<ACharacter>(GetOwner()))
+	{
+		if (const UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+		{
+			SavedMovementMode = Movement->MovementMode;
+			SavedCustomMovementMode = Movement->CustomMovementMode;
+		}
+	}
 }
 
 #if !UE_BUILD_SHIPPING

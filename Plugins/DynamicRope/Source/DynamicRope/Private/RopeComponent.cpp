@@ -885,7 +885,9 @@ void URopeComponent::DispatchReleased(const USceneComponent* WrappedMesh, FName 
 	{
 		if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
 		{
-			SimSubsystem->OnAnyRopeReleased.Broadcast(WrappedMesh, Bone, Reason);
+			// 로프 자신을 함께 싣는다 — 대상을 여러 로프가 감았을 때 구독자가 "내 engagement 중 어느
+			// 것이 끝났나"를 mesh만으로는 구분할 수 없다(FRopeWrappedEventInfo::Rope와 짝).
+			SimSubsystem->OnAnyRopeReleased.Broadcast(this, WrappedMesh, Bone, Reason);
 		}
 	}
 }
@@ -3411,6 +3413,8 @@ FRopeWrappedEventInfo URopeComponent::MakeWrappedEventInfo(const FRopeWrapState&
 {
 	FRopeWrappedEventInfo Info;
 	Info.Bone = Seed.BoneName;
+	// 성립 주체(이 로프) — 중앙 신호 구독자의 engagement 집합 키. release 신호도 같은 포인터를 싣는다.
+	Info.Rope = const_cast<URopeComponent*>(this);
 	// 이벤트 페이로드는 읽기 전용 의미라 대상 mesh의 const를 벗겨 BP에 노출한다(수정 계약 아님).
 	Info.Mesh = const_cast<USceneComponent*>(Seed.Mesh.Get());
 	Info.ResolveMode = ResolveMode;
