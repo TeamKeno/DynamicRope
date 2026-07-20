@@ -208,6 +208,12 @@ struct FRopeGPUResidentStep
 	 */
 	int32 NumDetectBoxes = 0;
 
+	/**
+	 * 이 dispatch가 쓰는 콜라이더 귀속 집합의 서명(호출자가 계산). 감지 리드백에 그대로 실려 돌아와,
+	 * 소비 시점에 ColliderIndex를 해석해도 되는지 판정하는 근거가 된다(FRopeResidentContacts::AttribSig).
+	 */
+	uint32 AttribSig = 0;
+
 	/** 이번 프레임 substep 스케줄(호출자가 RopeSolverSubsteps로 계산해 전달). NumSub<=0이면 적분 없이 유지. */
 	int32 NumSub = 0;
 	float FixedDt = 0.0f;
@@ -302,6 +308,12 @@ struct FRopeResidentContacts
 	TArray<FRopeGPUContactResult> Contacts;
 	/** 대응 시드 generation(stale 적용 방지). */
 	uint32 Generation = 0;
+	/**
+	 * 이 결과를 만든 **dispatch 시점**의 콜라이더 귀속 서명(FRopeGPUResidentStep::AttribSig 그대로).
+	 * ColliderIndex는 그때의 집합 순서를 가리키므로, 소비자는 자기 현재 서명과 이 값을 직접 비교해
+	 * 인덱스가 아직 같은 뜻인지 판정한다 — "최근 N프레임이 안 변했다"는 근사가 아니라 정확한 대응이다.
+	 */
+	uint32 AttribSig = 0;
 };
 
 /**
@@ -351,8 +363,13 @@ public:
 	 * 렌더 스레드. 로프의 resident PosBuf(StructuredBuffer<float4>, 월드 위치) SRV를 반환(없으면 null).
 	 * M5b B2-lite: scene proxy가 이 SRV를 직접 읽어 튜브를 GPU 생성 → 위치 무지연(렌더 리드백 없음).
 	 * 솔버가 이 로프를 step한 적이 없으면(= GPU 솔버 off) null → 호출자는 CPU 경로로 폴백한다.
+	 *
+	 * OutGeneration은 이 버퍼가 담고 있는 시드 generation이다. 호출자는 자기 generation과 대조해야 한다 —
+	 * 노드 수만 보면 **같은 노드 수로 재시드**(재던지기 등)한 프레임에 직전 로프의 포즈를 그대로 읽어
+	 * 한 프레임 유령이 뜬다(버퍼는 그 프레임 dispatch 전까지 옛 세대를 들고 있다).
 	 */
-	FRHIShaderResourceView* GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes);
+	FRHIShaderResourceView* GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes,
+		uint32& OutGeneration);
 
 	/**
 	 * 렌더 스레드(Phase 2b). 이 로프의 resident PosBuf를 전달받은 (씬 렌더러) 그래프에 등록해 RDG 핸들을

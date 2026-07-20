@@ -432,6 +432,8 @@ struct FRopeResidentRope
 	// 접촉 감지(G3): 노드당 1슬롯 출력 버퍼(resident, N 변할 때만 재생성) + 리드백(위치와 같은 ring).
 	TRefCountPtr<FRDGPooledBuffer> ContactBuf;
 	FRHIGPUBufferReadback* ContactReadback = nullptr;
+	// 접촉 리드백을 무장한 dispatch의 귀속 서명 — 소비 시 결과에 실어 보낸다(오귀속 판정의 근거).
+	uint32 ContactAttribSig = 0;
 	bool bContactArmed = false;
 };
 
@@ -444,6 +446,10 @@ struct FRopeResidentSharedResults
 	TMap<uint32, FRopeResidentContacts> Contacts;
 	// 소비되지 못하고 교체된 pending step의 시뮬 시간(초). RT가 쌓고 GT가 DrainDroppedSimTime으로 비운다.
 	TMap<uint32, float> DroppedSimTime;
+	// wrap 핸드오프 동기 리드백의 프레임 스냅샷(ReadbackNow). 한 프레임에 여러 로프가 감겨도 GPU idle
+	// 대기는 첫 요청 1회뿐이고, 나머지는 이 캐시를 락으로 읽는다(GT stall 없음).
+	uint64 HandoffFrame = 0;
+	TMap<uint32, FRopeResidentLatest> HandoffSnapshots;
 };
 
 // 전역 SDF 볼륨 캐시(RT 전용). 베이크된 복셀 데이터는 VolumeKey당 정적이라, 로프/프레임 무관하게 딱 한 번만
@@ -545,6 +551,7 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 		Impl->Results->Map.Remove(RopeId);
 		Impl->Results->Contacts.Remove(RopeId);
 		Impl->Results->DroppedSimTime.Remove(RopeId);
+		Impl->Results->HandoffSnapshots.Remove(RopeId);
 	}
 	// 영속 버퍼/리드백은 렌더 스레드에서 해제(this 캡처 — destructor가 flush하므로 수명 안전).
 	ENQUEUE_RENDER_COMMAND(RopeGPUReleaseRope)(
@@ -593,65 +600,116 @@ void FRopeGPUSolver::GetLatestContacts(TMap<uint32, FRopeResidentContacts>& Out)
 
 bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, TArray<FVector>& OutPrevPositions, uint32& OutGeneration)
 {
-	// GT 블로킹(M5c): RT에서 즉석 copy pass + GPU idle 대기 + Lock까지 끝내고, GT는 Flush로 그 완료를
-	// 기다린다. 이벤트당 1회(wrap 핸드오프) 전용 — 상주 리드백(GetLatest)과 달리 지연이 없다.
-	bool bOk = false;
-	uint32 Generation = 0;
-	ENQUEUE_RENDER_COMMAND(RopeGPUReadbackNow)(
-		[this, RopeId, &OutPositions, &OutPrevPositions, &Generation, &bOk](FRHICommandListImmediate& RHICmdList)
-		{
-			FRopeResidentRope* Rp = Impl->RtRopes.Find(RopeId);
-			if (!Rp || !Rp->PosBuf.IsValid() || !Rp->PrevBuf.IsValid() || Rp->NumNodes < 2)
-			{
-				return;
-			}
-			const int32 N = Rp->NumNodes;
-			const uint32 Bytes = (uint32)N * sizeof(FVector4f);
+	// GT 블로킹(M5c): 상주 미러(GetLatest)는 1~2프레임 낡아 wrap 시드 정밀도에 못 쓴다 — 핸드오프 순간만
+	// 지금 값을 받는다. 비용은 GPU idle 대기 + 렌더 커맨드 flush라 프레임당 여러 번 내면 그대로 hitch다.
+	// 그래서 **프레임 단위로 한 번만** 뜬다: 첫 요청이 상주 로프 전체를 한 그래프에서 복사하고 idle을
+	// 1회 기다려 스냅샷을 만들고, 같은 프레임의 나머지 로프는 락만 잡고 그 스냅샷을 읽는다(대기 0).
+	// 한 프레임 안에서는 dispatch가 아직 없어(솔브는 Prepare 뒤) 모든 로프에 같은 스냅샷이 유효하다.
+	// 여분 복사(안 감기는 로프까지)는 로프당 수십 KB로, stall 한 번보다 훨씬 싸다.
+	const uint64 FrameId = GFrameCounter;
 
-			// 상주(in-flight) 리드백과 독립인 일회용 리드백 — RDG로 등록해 상태 전이를 맡긴다.
-			FRHIGPUBufferReadback PosRb(TEXT("Rope.PosReadbackNow"));
-			FRHIGPUBufferReadback PrevRb(TEXT("Rope.PrevReadbackNow"));
+	auto CopyOutFromCache = [&]() -> bool
+	{
+		const FRopeResidentLatest* Snap = Impl->Results->HandoffSnapshots.Find(RopeId);
+		if (!Snap || Snap->NumNodes < 2)
+		{
+			return false;
+		}
+		OutPositions = Snap->Positions;
+		OutPrevPositions = Snap->PrevPositions;
+		OutGeneration = Snap->Generation;
+		return true;
+	};
+
+	{
+		FScopeLock SL(&Impl->Results->Lock);
+		if (Impl->Results->HandoffFrame == FrameId)
+		{
+			return CopyOutFromCache();
+		}
+	}
+
+	ENQUEUE_RENDER_COMMAND(RopeGPUReadbackNow)(
+		[this, FrameId](FRHICommandListImmediate& RHICmdList)
+		{
+			// 상주 로프 전체의 Pos/Prev를 한 그래프에 모아 복사한다(패스는 많아도 idle 대기는 1회).
+			TArray<uint32> Ids;
+			TArray<TUniquePtr<FRHIGPUBufferReadback>> PosRbs;
+			TArray<TUniquePtr<FRHIGPUBufferReadback>> PrevRbs;
+			TArray<int32> Nodes;
 			{
 				FRDGBuilder GraphBuilder(RHICmdList);
-				FRDGBufferRef PosRDG  = GraphBuilder.RegisterExternalBuffer(Rp->PosBuf);
-				FRDGBufferRef PrevRDG = GraphBuilder.RegisterExternalBuffer(Rp->PrevBuf);
-				AddEnqueueCopyPass(GraphBuilder, &PosRb,  PosRDG,  Bytes);
-				AddEnqueueCopyPass(GraphBuilder, &PrevRb, PrevRDG, Bytes);
+				for (TPair<uint32, FRopeResidentRope>& Pair : Impl->RtRopes)
+				{
+					FRopeResidentRope& Rp = Pair.Value;
+					if (!Rp.PosBuf.IsValid() || !Rp.PrevBuf.IsValid() || Rp.NumNodes < 2)
+					{
+						continue;
+					}
+					const uint32 Bytes = (uint32)Rp.NumNodes * sizeof(FVector4f);
+					TUniquePtr<FRHIGPUBufferReadback> PosRb =
+						MakeUnique<FRHIGPUBufferReadback>(TEXT("Rope.PosReadbackNow"));
+					TUniquePtr<FRHIGPUBufferReadback> PrevRb =
+						MakeUnique<FRHIGPUBufferReadback>(TEXT("Rope.PrevReadbackNow"));
+					AddEnqueueCopyPass(GraphBuilder, PosRb.Get(),
+						GraphBuilder.RegisterExternalBuffer(Rp.PosBuf), Bytes);
+					AddEnqueueCopyPass(GraphBuilder, PrevRb.Get(),
+						GraphBuilder.RegisterExternalBuffer(Rp.PrevBuf), Bytes);
+					Ids.Add(Pair.Key);
+					Nodes.Add(Rp.NumNodes);
+					PosRbs.Add(MoveTemp(PosRb));
+					PrevRbs.Add(MoveTemp(PrevRb));
+				}
 				GraphBuilder.Execute();
 			}
 			RHICmdList.BlockUntilGPUIdle();
 
-			OutPositions.SetNumUninitialized(N);
-			OutPrevPositions.SetNumUninitialized(N);
-			bool bLocked = false;
-			if (const FVector4f* Src = (const FVector4f*)PosRb.Lock(Bytes))
+			TMap<uint32, FRopeResidentLatest> Snapshots;
+			Snapshots.Reserve(Ids.Num());
+			for (int32 i = 0; i < Ids.Num(); ++i)
 			{
-				for (int32 k = 0; k < N; ++k) { OutPositions[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
-				PosRb.Unlock();
-				bLocked = true;
+				const int32 N = Nodes[i];
+				const uint32 Bytes = (uint32)N * sizeof(FVector4f);
+				const FVector4f* SrcPos = (const FVector4f*)PosRbs[i]->Lock(Bytes);
+				const FVector4f* SrcPrev = SrcPos ? (const FVector4f*)PrevRbs[i]->Lock(Bytes) : nullptr;
+				if (SrcPos && SrcPrev)
+				{
+					FRopeResidentLatest Snap;
+					Snap.NumNodes = N;
+					Snap.Positions.SetNumUninitialized(N);
+					Snap.PrevPositions.SetNumUninitialized(N);
+					for (int32 k = 0; k < N; ++k)
+					{
+						Snap.Positions[k] = FVector(SrcPos[k].X, SrcPos[k].Y, SrcPos[k].Z);
+						Snap.PrevPositions[k] = FVector(SrcPrev[k].X, SrcPrev[k].Y, SrcPrev[k].Z);
+					}
+					if (const FRopeResidentRope* Rp = Impl->RtRopes.Find(Ids[i]))
+					{
+						Snap.Generation = Rp->Generation;
+					}
+					Snapshots.Add(Ids[i], MoveTemp(Snap));
+				}
+				if (SrcPos) { PosRbs[i]->Unlock(); }
+				if (SrcPrev) { PrevRbs[i]->Unlock(); }
 			}
-			if (const FVector4f* Src = (const FVector4f*)PrevRb.Lock(Bytes))
-			{
-				for (int32 k = 0; k < N; ++k) { OutPrevPositions[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
-				PrevRb.Unlock();
-			}
-			else
-			{
-				bLocked = false;
-			}
-			Generation = Rp->Generation;
-			bOk = bLocked;
+
+			FScopeLock SL(&Impl->Results->Lock);
+			Impl->Results->HandoffSnapshots = MoveTemp(Snapshots);
+			Impl->Results->HandoffFrame = FrameId;
 		});
-	// RT 커맨드 완료까지 GT 대기(참조 캡처 안전 + 결과 확정).
+	// RT 커맨드 완료까지 GT 대기(스냅샷 확정).
 	FlushRenderingCommands();
-	OutGeneration = Generation;
-	return bOk;
+
+	FScopeLock SL(&Impl->Results->Lock);
+	return CopyOutFromCache();
 }
 
-FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes)
+FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes,
+	uint32& OutGeneration)
 {
 	check(IsInRenderingThread());
 	OutNumNodes = 0;
+	OutGeneration = 0;
 
 	FRopeResidentRope* R = Impl->RtRopes.Find(RopeId);
 	if (!R || !R->PosBuf.IsValid())
@@ -659,6 +717,7 @@ FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint
 		return nullptr;
 	}
 	OutNumNodes = R->NumNodes;
+	OutGeneration = R->Generation;
 
 	if (!R->PosSRV.IsValid())
 	{
@@ -886,6 +945,7 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 			FRopeResidentContacts& CL = Results.Contacts.FindOrAdd(S.RopeId);
 			CL.Contacts   = MoveTemp(TmpContacts);
 			CL.Generation = R.Generation;
+			CL.AttribSig  = R.ContactAttribSig;
 		}
 	}
 }
@@ -1521,6 +1581,8 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	{
 		if (!R.ContactReadback) { R.ContactReadback = new FRHIGPUBufferReadback(TEXT("Rope.ContactReadback")); }
 		AddEnqueueCopyPass(GraphBuilder, R.ContactReadback, ContactRDG, (uint32)(2 * N) * sizeof(FRopeGPUContactGPU));
+		// ColliderIndex가 가리키는 집합은 *이* dispatch의 것이다 — 그 서명을 결과까지 들고 간다.
+		R.ContactAttribSig = S.AttribSig;
 #if STATS
 		GRopeReadbackBytes += (uint64)(2 * N) * sizeof(FRopeGPUContactGPU);
 #endif

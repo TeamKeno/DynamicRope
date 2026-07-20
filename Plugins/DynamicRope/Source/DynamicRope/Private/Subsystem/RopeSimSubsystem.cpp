@@ -963,11 +963,11 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 		return;
 	}
 
-	// 콜라이더 집합 안정성 게이트(#7): 지연된 접촉의 ColliderIndex는 디스패치(1~2프레임 전) 집합 기준인데
-	// 아래 귀속 테이블은 이번 프레임 것으로 재빌드됐다. 최근 지연 창(현재==Prev1==Prev2)에서 집합이 안정적일
-	// 때만 인덱스가 이번 프레임 테이블과 대응한다. 바뀐 프레임은 다른 본으로의 오귀속 대신 드롭(다음 프레임 캡처).
-	const FRopeSimFrameIO& F = Rope.SimFrame;
-	if (F.GpuAttribSig != F.GpuAttribSigPrev1 || F.GpuAttribSig != F.GpuAttribSigPrev2)
+	// 콜라이더 집합 대응 게이트(#7): 지연된 접촉의 ColliderIndex는 **디스패치 시점** 집합 기준인데 아래
+	// 귀속 테이블은 이번 프레임 것으로 재빌드됐다. 결과가 싣고 온 dispatch 서명과 지금 서명이 같을 때만
+	// 인덱스가 같은 뜻이다 — 다르면 다른 본으로의 오귀속 대신 드롭(다음 프레임 캡처).
+	// 서명 0은 미설정(워밍업)이라 역시 드롭한다.
+	if (Contacts->AttribSig == 0 || Contacts->AttribSig != Rope.SimFrame.GpuAttribSig)
 	{
 		Rope.SimFrame.bGpuContactsThisFrame = true;
 		return;
@@ -1383,9 +1383,10 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuCapsuleAttribution, Sig);
 		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuSdfAttribution, Sig);
 		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuBoxAttribution, Sig);
-		Rope.SimFrame.GpuAttribSigPrev2 = Rope.SimFrame.GpuAttribSigPrev1;
-		Rope.SimFrame.GpuAttribSigPrev1 = Rope.SimFrame.GpuAttribSig;
-		Rope.SimFrame.GpuAttribSig = Sig;
+		// 서명 0은 "미설정"이라는 뜻으로 예약돼 있다 — 해시가 우연히 0이면 1로 밀어 워밍업과 구분한다.
+		Rope.SimFrame.GpuAttribSig = (Sig == 0) ? 1u : Sig;
+		// 이 dispatch가 쓰는 집합의 서명을 step에 싣는다(감지 결과가 그대로 되싣고 돌아온다).
+		Step.AttribSig = Rope.SimFrame.GpuAttribSig;
 	}
 }
 

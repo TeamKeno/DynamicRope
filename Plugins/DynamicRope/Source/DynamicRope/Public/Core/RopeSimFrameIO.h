@@ -68,7 +68,8 @@ struct FRopeSimFrameIO
 	 * 서브시스템이 GPU step 프레임마다 Step.Capsules/SDFColliders와 같은 순서로 채운다. mesh는 지연
 	 * 동안 파괴될 수 있어 weak. 지연된 GPU 접촉(1~2프레임)의 ColliderIndex는 *디스패치 시점* 집합
 	 * 기준인데 이 테이블은 *이번 프레임* 것으로 재빌드되므로, 지연 창 동안 집합이 바뀌면 인덱스가
-	 * 다른 본으로 어긋난다. 아래 GpuAttribSig 롤링 서명으로 그런 프레임을 감지해 드롭한다(오귀속 방지).
+	 * 다른 본으로 어긋난다. 아래 GpuAttribSig를 dispatch에 실어 보내고 결과와 함께 돌려받아, 인덱스가
+	 * 아직 같은 뜻인지 정확히 비교해 드롭한다(오귀속 방지).
 	 */
 	struct FGpuColliderAttribution
 	{
@@ -86,15 +87,18 @@ struct FRopeSimFrameIO
 	TArray<FGpuColliderAttribution> GpuBoxAttribution;
 
 	/**
-	 * 위 귀속 집합의 순서 있는 (bone, mesh) 서명. 서브시스템이 GPU step(detect) 프레임마다 재계산하며
-	 * 직전 2프레임분을 함께 보관한다. BuildGpuFlightCandidates는 지연 창(현재==Prev1==Prev2)에서 집합이
-	 * 안정적일 때만 지연 접촉을 소비한다 — 바뀐 프레임은 generation 미스와 동일하게 드롭(이번 프레임
-	 * GPU 후보 없음, 캡처는 다음 프레임). 이로써 집합 변화 시 다른 본으로의 오귀속을 원천 차단한다.
+	 * 위 귀속 집합의 순서 있는 (bone, mesh) 서명. 서브시스템이 GPU step(detect) 프레임마다 재계산해
+	 * dispatch(FRopeGPUResidentStep::AttribSig)에 싣고, 감지 결과가 그 값을 그대로 되싣고 돌아온다
+	 * (FRopeResidentContacts::AttribSig). BuildGpuFlightCandidates는 **결과의 서명과 현재 서명이 같을 때만**
+	 * 지연 접촉을 소비한다 — 다르면 generation 미스와 동일하게 드롭(이번 프레임 GPU 후보 없음).
+	 *
+	 * 종전에는 직전 2프레임분을 함께 들고 "최근 3프레임이 모두 같으면 안정"으로 근사했는데, 지연이
+	 * 3프레임을 넘으면(GPU stall) 그 사이 콜라이더가 재정렬됐다 안정된 상태도 통과해 팔 접촉이 다리로
+	 * 귀속될 수 있었다. dispatch 시점 값을 직접 비교하면 지연 길이와 무관하게 정확하고, 집합이
+	 * 바뀌었다가 같은 배치로 돌아온 경우는 오히려 정상 소비된다.
 	 * 0 = 미설정(Flight 진입 직후 워밍업 — 안전하게 드롭).
 	 */
 	uint32 GpuAttribSig = 0;
-	uint32 GpuAttribSigPrev1 = 0;
-	uint32 GpuAttribSigPrev2 = 0;
 
 	/**
 	 * GPU 감지(G3) 프레임 산출: 서브시스템이 GetLatestContacts를 귀속해 Finalize 전에 채운다.

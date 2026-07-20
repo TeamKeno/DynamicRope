@@ -26,6 +26,9 @@ struct FRopeDynamicData
 	// M5b: 이 프레임에 로프가 GPU에서 step됐는가 → true면 GPU 튜브가 resident PosBuf를 직접 읽어도 됨(무지연).
 	// false(whip/CPU-폴백/솔버 off)면 resident는 stale이므로 위 Points(CPU 미러)로 그린다.
 	bool bGpuResident = false;
+	// 이 프레임 GT 시드 generation. resident PosBuf가 같은 세대일 때만 직접 읽는다 — 같은 노드 수로
+	// 재시드(재던지기)하면 버퍼는 아직 옛 세대라, 세대를 안 보면 직전 로프 포즈가 한 프레임 유령으로 뜬다.
+	uint32 SimGeneration = 0;
 	// resident 튜브(월드 PosBuf → component-local)용 변환 — Points를 로컬화한 것과 *같은* GT 프레임의
 	// GetComponentTransform() 역행렬. 프록시의 GetLocalToWorld()를 쓰면 안 된다: SetDynamicData 렌더 커맨드는
 	// 이번 프레임 트랜스폼이 프록시에 적용되는 UpdateAllPrimitiveSceneInfos보다 먼저 실행돼 한 프레임 이전

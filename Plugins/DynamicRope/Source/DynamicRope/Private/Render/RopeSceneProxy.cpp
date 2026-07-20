@@ -509,9 +509,14 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 	// pass 지오메트리가 어긋나 EQUAL 깊이 테스트에서 픽셀이 탈락한다(로프가 검게 탐) — 그래서 프레임당 이
 	// 1회 빌드만 유지하고 모든 패스가 같은 지오메트리를 보게 한다.
 	int32 ResidentNodes = 0;
+	uint32 ResidentGeneration = 0;
 	FRHIShaderResourceView* ResidentSRV = (Data.bGpuResident && SolverPtr)
-		? SolverPtr->GetResidentPositionSRV_RenderThread(RopeId, ResidentNodes) : nullptr;
-	const bool bResident = (ResidentSRV != nullptr && ResidentNodes == NumNodes);
+		? SolverPtr->GetResidentPositionSRV_RenderThread(RopeId, ResidentNodes, ResidentGeneration) : nullptr;
+	// 노드 수 + **시드 generation**이 모두 맞아야 직접 읽는다. 재시드 프레임에는 버퍼가 아직 옛 세대라
+	// (재시드는 그 프레임 dispatch에서 일어난다) 노드 수만 보면 직전 로프 포즈가 한 프레임 그려진다.
+	// 이 프레임은 CPU 미러로 폴백하는데, 미러는 새 시드를 이미 담고 있어 정확하다.
+	const bool bResident = (ResidentSRV != nullptr && ResidentNodes == NumNodes
+		&& ResidentGeneration == Data.SimGeneration);
 
 	if (!bResident)
 	{

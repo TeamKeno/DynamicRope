@@ -1696,6 +1696,8 @@ void URopeComponent::SendRenderDynamicData_Concurrent()
 	FRopeDynamicData* DynamicData = new FRopeDynamicData;
 	// M5b: GPU step된 프레임만 resident PosBuf 직접 렌더 허용.
 	DynamicData->bGpuResident = SimFrame.bGpuSteppedThisFrame;
+	// 프록시가 resident 버퍼의 세대와 대조한다(같은 노드 수 재시드의 한 프레임 유령 방지).
+	DynamicData->SimGeneration = SimFrame.SimGeneration;
 	// resident 튜브의 월드→로컬 변환도 이 GT 트랜스폼으로 — Points 로컬화와 같은 프레임의 값이라 드로우
 	// 트랜스폼과 일치한다(프록시 GetLocalToWorld()는 SetDynamicData 시점에 한 프레임 이전 값 — 헤더 주석 참고).
 	DynamicData->WorldToLocal = FMatrix44f(Xform.ToInverseMatrixWithScale());
