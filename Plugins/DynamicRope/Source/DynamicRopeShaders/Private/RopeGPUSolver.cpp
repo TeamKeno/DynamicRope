@@ -504,6 +504,8 @@ void FRopeGPUSolver::ReleaseAll_RenderThread()
 		delete Pair.Value.ContactReadback;  Pair.Value.ContactReadback = nullptr;
 	}
 	Impl->RtRopes.Empty();
+	// 소비되지 않은 step도 함께 버린다 — 남으면 다음 dispatch가 방금 비운 상주 맵을 되살린다.
+	Impl->PendingSteps.Reset();
 	// 전역 SDF 상주 버퍼/캐시 해제(TRefCountPtr auto-release).
 	Impl->GlobalSDF = FRopeGlobalSDFCache{};
 }
@@ -520,6 +522,14 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 	ENQUEUE_RENDER_COMMAND(RopeGPUReleaseRope)(
 		[this, RopeId](FRHICommandListImmediate&)
 		{
+			// 아직 소비되지 않은 pending step부터 걷어낸다. 남겨두면 뒤이은 뷰 확장 dispatch가
+			// RunSteps_RenderThread의 FindOrAdd로 방금 지운 RopeId를 **되살려** 상주 버퍼/리드백을 다시
+			// 만들고, 그 로프를 해제해 줄 주체는 이미 사라진 뒤라 월드 종료까지 VRAM에 남는다.
+			// (EnqueueSteps는 교체 시맨틱이라 "다음 프레임이면 어차피 사라진다"가 성립하지 않는다 —
+			// 씬 렌더가 없는 프레임에는 교체도 일어나지 않는다.)
+			Impl->PendingSteps.RemoveAll(
+				[RopeId](const FRopeGPUResidentStep& Step) { return Step.RopeId == RopeId; });
+
 			if (FRopeResidentRope* R = Impl->RtRopes.Find(RopeId))
 			{
 				delete R->PosReadback;

@@ -162,6 +162,8 @@ void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
 			return;
 		}
 		Ropes.AddUnique(Rope);
+		// GPU 상주 자원의 주인을 ID로도 기록한다 — 컴포넌트가 정식 해제 없이 사라졌을 때 회수할 유일한 단서.
+		RegisteredRopeIds.Add(Rope->GetUniqueID());
 		// 손 핀(소켓 부착)이 소유 캐릭터 포즈를 따르므로.
 		SetAnimPrerequisites(Rope, /*bAdd*/ true);
 		UE_LOG(LogDynamicRope, Verbose, TEXT("RegisterRope: %s (%d total)"), *Rope->GetName(), Ropes.Num());
@@ -185,13 +187,53 @@ void URopeSimSubsystem::UnregisterRope(URopeComponent* Rope)
 	if (Rope)
 	{
 		SetAnimPrerequisites(Rope, /*bAdd*/ false);
-		// GPU 상주 버퍼/리드백 해제(렌더 스레드에서). 캐시에서도 제거.
+		// GPU 상주 버퍼/리드백 해제(렌더 스레드에서). 두 캐시와 ID 대장에서도 제거한다
+		// (GpuLatestContacts는 종전에 빠져 있어 죽은 로프의 접촉 스냅샷이 월드 내내 남았다).
 		const uint32 RopeId = Rope->GetUniqueID();
 		GpuSolver.ReleaseRope(RopeId);
 		GpuLatest.Remove(RopeId);
+		GpuLatestContacts.Remove(RopeId);
+		RegisteredRopeIds.Remove(RopeId);
 	}
 	UE_LOG(LogDynamicRope, Verbose, TEXT("UnregisterRope: %s (%d remaining)"),
 		Rope ? *Rope->GetName() : TEXT("null"), Ropes.Num());
+}
+
+void URopeSimSubsystem::ReleaseGpuResourcesForDeadRopes()
+{
+	if (RegisteredRopeIds.Num() == 0)
+	{
+		return;
+	}
+
+	// 살아 있는 로프의 ID 집합을 만들고, 대장에만 남은 ID = 정식 해제를 못 거친 로프로 본다.
+	TSet<uint32> LiveIds;
+	LiveIds.Reserve(Ropes.Num());
+	for (const TObjectPtr<URopeComponent>& Rope : Ropes)
+	{
+		if (URopeComponent* Live = Rope.Get())
+		{
+			LiveIds.Add(Live->GetUniqueID());
+		}
+	}
+
+	for (auto It = RegisteredRopeIds.CreateIterator(); It; ++It)
+	{
+		const uint32 RopeId = *It;
+		if (LiveIds.Contains(RopeId))
+		{
+			continue;
+		}
+		// 애니 선행조건은 여기서 못 푼다(컴포넌트가 이미 없어 소유 메시를 되짚을 수 없다). FTickPrerequisite는
+		// weak라 죽은 메시 항목은 자동으로 스킵되므로 남아도 무해하고, 메시가 살아 있는 경우는 컴포넌트가
+		// 정식 EndPlay를 거쳤다는 뜻이라 이 경로로 오지 않는다.
+		UE_LOG(LogDynamicRope, Verbose,
+			TEXT("ReleaseGpuResourcesForDeadRopes: RopeId %u — 정식 해제 없이 사라진 로프의 GPU 자원 회수."), RopeId);
+		GpuSolver.ReleaseRope(RopeId);
+		GpuLatest.Remove(RopeId);
+		GpuLatestContacts.Remove(RopeId);
+		It.RemoveCurrent();
+	}
 }
 
 void URopeSimSubsystem::ApplyDeferredRopeChanges()
@@ -284,11 +326,35 @@ void URopeSimSubsystem::SetAnimPrerequisites(const UActorComponent* Source, bool
 		}
 		if (bAdd)
 		{
-			SimTickFunction.AddPrerequisite(Mesh, Mesh->PrimaryComponentTick);
+			// 첫 소비자일 때만 실제로 건다(AddPrerequisite 자체는 유니크라 중복 호출이 무해하지만,
+			// 세지 않으면 해제 때 남은 소비자 몫까지 지워진다 — 헤더 주석).
+			int32& RefCount = AnimPrereqRefCount.FindOrAdd(Mesh);
+			if (++RefCount == 1)
+			{
+				SimTickFunction.AddPrerequisite(Mesh, Mesh->PrimaryComponentTick);
+			}
 		}
-		else
+		else if (int32* RefCount = AnimPrereqRefCount.Find(Mesh))
 		{
-			SimTickFunction.RemovePrerequisite(Mesh, Mesh->PrimaryComponentTick);
+			// 마지막 소비자가 빠질 때만 해제.
+			if (--(*RefCount) <= 0)
+			{
+				AnimPrereqRefCount.Remove(Mesh);
+				SimTickFunction.RemovePrerequisite(Mesh, Mesh->PrimaryComponentTick);
+			}
+		}
+	}
+
+	if (bAdd)
+	{
+		// 액터가 정식 해제 없이 죽으면 키가 만료된 채 카운트만 남는다. 선행조건 자체는 weak라 무해하지만
+		// 맵이 무한정 자라지 않도록 add 때 한 번씩 청소한다(해제 경로는 비용을 늘리지 않는다).
+		for (auto It = AnimPrereqRefCount.CreateIterator(); It; ++It)
+		{
+			if (!It->Key.IsValid())
+			{
+				It.RemoveCurrent();
+			}
 		}
 	}
 }
@@ -573,10 +639,18 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SubsystemTick);
 	SCOPE_CYCLE_COUNTER(STAT_RopeSim_Tick);
 
-	// 무효 항목 정리.
+	// 무효 항목 정리. 여기로 사라지는 로프는 UnregisterRope를 거치지 않았으므로(액터가 정식 해제 없이
+	// 파괴된 경우) GPU 상주 자원이 남는다 — 배열에서 빼는 것과 자원 회수를 한 몸으로 처리한다.
 	Ropes.RemoveAllSwap([](const TObjectPtr<URopeComponent>& Rope) { return !IsValid(Rope.Get()); });
+	ReleaseGpuResourcesForDeadRopes();
 	if (Ropes.Num() == 0)
 	{
+		// 마지막 로프가 사라진 프레임에 GDF 수요를 내리지 않으면(종전에는 아래 SetGDFActiveCount에
+		// 닿기 전에 return했다) 엔진이 아무도 안 쓰는 Global Distance Field를 계속 빌드한다.
+		if (const UWorld* World = GetWorld())
+		{
+			RopeGDF::SetGDFActiveCount(World->Scene, 0);
+		}
 		return;
 	}
 
@@ -856,6 +930,8 @@ void URopeSimSubsystem::Deinitialize()
 
 	if (const UWorld* World = GetWorld())
 	{
+		// 수요를 먼저 내리고 솔버를 뗀다(월드가 살아 있는 재-Initialize 경로에서 잔여 수요가 남지 않게).
+		RopeGDF::SetGDFActiveCount(World->Scene, 0);
 		RopeGDF::UnregisterSolver(World->Scene);
 	}
 	Super::Deinitialize();

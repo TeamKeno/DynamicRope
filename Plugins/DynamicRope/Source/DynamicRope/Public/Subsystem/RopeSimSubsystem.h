@@ -126,12 +126,32 @@ private:
 	/**
 	 * 소스 컴포넌트(로프/provider) 소유 액터의 스켈레탈 메시 틱을 SimTickFunction 선행조건으로 등록/해제한다.
 	 * 등록·해제 사이에 액터의 메시 구성이 바뀌어 잔여 항목이 남아도 FTickPrerequisite는 weak라 무해(스킵됨).
+	 *
+	 * 같은 메시를 여러 소비자(같은 액터의 로프 + collider provider, 로프 여러 개)가 요구할 수 있고
+	 * AddPrerequisite는 유니크라 중복 add가 1건으로 합쳐진다 — 그래서 **해제도 소비자 수로 세야 한다**.
+	 * 종전에는 한 소비자가 빠질 때 RemovePrerequisite를 그대로 호출해 남은 소비자의 "애니 평가 이후
+	 * 시뮬" 보장까지 같이 지워졌고, 그 뒤 PostPhysics gather가 직전 프레임 본 트랜스폼을 읽었다.
+	 * AnimPrereqRefCount가 메시별 소비자 수를 세어 0→1에서만 add, 1→0에서만 remove 한다.
 	 */
 	void SetAnimPrerequisites(const UActorComponent* Source, bool bAdd);
+
+	/** 메시별 선행조건 소비자 수(위 주석). 액터가 먼저 죽으면 키가 만료되므로 weak — 만료분은 add 때 청소. */
+	TMap<TWeakObjectPtr<USkeletalMeshComponent>, int32> AnimPrereqRefCount;
 
 	/** 등록된 활성 로프(컴포넌트는 UObject → GC 추적). */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<URopeComponent>> Ropes;
+
+	/**
+	 * 등록된 로프의 GPU RopeId 대장. Ropes와 짝을 이루되 **컴포넌트가 죽어도 남는다** — 이게 요점이다.
+	 * 로프가 UnregisterRope 없이 사라지면(액터 파괴 후 GC) Tick의 무효 정리가 배열에서 빼는 것으로 끝나
+	 * 상주 VRAM/리드백이 월드 종료까지 남았는데, 포인터가 이미 없어 RopeId를 되찾을 방법도 없었다.
+	 * ID를 따로 들고 있으면 "대장에는 있는데 살아있는 로프에는 없는" 차집합이 곧 누수분이다.
+	 */
+	TSet<uint32> RegisteredRopeIds;
+
+	/** 죽은 로프의 GPU 상주 자원을 RopeId 대장과의 차집합으로 회수한다(Tick 무효 정리 직후). */
+	void ReleaseGpuResourcesForDeadRopes();
 
 	/**
 	 * Tick 순회 재진입 가드. Prepare/Finalize 순회 중 델리게이트 핸들러(OnRopeWrapped/OnRopeReleased/
