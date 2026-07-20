@@ -1166,9 +1166,8 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FinalizeFlight);
 		const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
 
-		TArray<FRopeContactCandidate> Candidates;
 		// ① 후보 산출
-		BuildFlightContactCandidates(DeltaTime, DetectParams, Candidates);
+		TArray<FRopeContactCandidate>& Candidates = GetOrBuildFlightContactCandidates(DeltaTime, DetectParams);
 
 		// ② 판정 결과를 한 번 만들고 게임 전이와 관측이 같은 tracker를 소비한다.
 		FRopeFlightCaptureEvaluation CaptureEvaluation = EvaluateFlightCapture(Candidates, DetectParams);
@@ -2664,50 +2663,62 @@ void URopeComponent::RemoveNonWrappableCandidates(TArray<FRopeContactCandidate>&
 	});
 }
 
-void URopeComponent::BuildFlightContactCandidates(float DeltaTime,
-	const FRopeFlightContactDetector::FParams& DetectParams, TArray<FRopeContactCandidate>& OutCandidates)
+TArray<FRopeContactCandidate>& URopeComponent::GetOrBuildFlightContactCandidates(float DeltaTime,
+	const FRopeFlightContactDetector::FParams& DetectParams)
 {
+	TArray<FRopeContactCandidate>& Candidates = SimFrame.bGpuContactsThisFrame
+		? SimFrame.GpuFlightCandidates
+		: ContactCandidateScratch;
+
 	if (SimFrame.bGpuContactsThisFrame)
 	{
 		// GPU 감지 경로(G3): actual+predictive 후보 모두 GPU 커널이 산출한 것을 쓴다(귀속·중복제거는
-		// 서브시스템이 복원). 상대운동 평가(ExpectedWrapTangent는 hand=node0 위치 필요)만 GT에서 돌린다.
+		// 서브시스템이 복원). SimFrame 배열을 직접 후처리해 frame-local 복사/할당을 만들지 않는다.
+		// 상대운동 평가(ExpectedWrapTangent는 hand=node0 위치 필요)만 GT에서 돌린다.
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightGpuContacts);
-		OutCandidates = SimFrame.GpuFlightCandidates;
-		FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, OutCandidates);
+		FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
 	}
 	else
 	{
-		// CPU 예측 접촉에만 whip 데이터 뷰가 필요하다. GPU 경로는 subsystem이 dispatch 전에 같은
-		// 다음 프레임 타깃을 이미 계산해 GPU step에 실었으므로 Finalize에서 다시 만들지 않는다.
-		// 예측이 꺼져 있으면(PredictiveContactFrames<=0) 검출기가 어차피 early-out이라 미리보기를 만들지 않는다.
-		// NextGuideTargets는 뷰가 가리키는 로컬 버퍼 — 감지가 이 함수 안에서 끝나므로 수명이 충분하다.
-		FRopeFlightContactDetector::FWhipGuideView WhipView;
-		TArray<FVector> NextGuideTargets;
-		if (DetectConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
-		{
-			WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargets);
-			WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
-			WhipView.CurrentTargets = &WhipGuide.GetCurrentTargets();
-			WhipView.PrevTargets = &WhipGuide.GetPrevTargets();
-			WhipView.NextTargets = &NextGuideTargets;
-		}
-
-		{
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightActualContacts);
-			FRopeFlightContactDetector::DetectContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, OutCandidates);
-		}
-		{
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightPredictiveContacts);
-			FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, WhipView, OutCandidates);
-		}
-		{
-			TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCandidates);
-			FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, OutCandidates);
-		}
+		Candidates.Reset();
+		NextGuideTargetScratch.Reset();
+		BuildCpuFlightContactCandidates(DeltaTime, DetectParams, Candidates);
 	}
 
 	// CanWrapTarget 게이트(Contacting 재수집과 공용 헬퍼).
-	RemoveNonWrappableCandidates(OutCandidates);
+	RemoveNonWrappableCandidates(Candidates);
+	return Candidates;
+}
+
+void URopeComponent::BuildCpuFlightContactCandidates(float DeltaTime,
+	const FRopeFlightContactDetector::FParams& DetectParams, TArray<FRopeContactCandidate>& OutCandidates)
+{
+	// CPU 예측 접촉에만 whip 데이터 뷰가 필요하다. GPU 경로는 subsystem이 dispatch 전에 같은
+	// 다음 프레임 타깃을 이미 계산해 GPU step에 실었으므로 Finalize에서 다시 만들지 않는다.
+	// 예측이 꺼져 있으면(PredictiveContactFrames<=0) 검출기가 어차피 early-out이라 미리보기를 만들지 않는다.
+	// NextGuideTargetScratch는 뷰가 가리키는 멤버 버퍼 — 감지가 끝난 뒤 다음 CPU 사용 때 Reset한다.
+	FRopeFlightContactDetector::FWhipGuideView WhipView;
+	if (DetectConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
+	{
+		WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargetScratch);
+		WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
+		WhipView.CurrentTargets = &WhipGuide.GetCurrentTargets();
+		WhipView.PrevTargets = &WhipGuide.GetPrevTargets();
+		WhipView.NextTargets = &NextGuideTargetScratch;
+	}
+
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightActualContacts);
+		FRopeFlightContactDetector::DetectContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, OutCandidates);
+	}
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightPredictiveContacts);
+		FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, WhipView, OutCandidates);
+	}
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCandidates);
+		FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, OutCandidates);
+	}
 }
 
 FRopeFlightCaptureEvaluation URopeComponent::EvaluateFlightCapture(
@@ -2921,7 +2932,8 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 	// 상태라 스윕은 점 질의로 축퇴하고, 대상 이탈은 collider 쪽 이동으로 감지된다.
 	// 예측/whip 분기는 Flight 전용이므로 여기서는 actual 접촉만 수집한다(비용: 근접 노드 점 질의뿐).
 	const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
-	TArray<FRopeContactCandidate> Candidates;
+	TArray<FRopeContactCandidate>& Candidates = ContactCandidateScratch;
+	Candidates.Reset();
 	FRopeFlightContactDetector::DetectContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, Candidates);
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
 	// CanWrapTarget 게이트(Flight 후보 산출과 공용 헬퍼).

@@ -851,6 +851,14 @@ private:
 	/** Flight/Contacting: 접촉 후보의 dominant bone 추적. */
 	FRopeContactTracker ContactTracker;
 
+	// CPU Flight fallback과 Contacting 재검출이 번갈아 쓰는 후보 저장소. 감지기는 append하므로
+	// 각 경로가 사용하기 직전에 Reset한다. GPU Flight는 SimFrame.GpuFlightCandidates를 직접 소비한다.
+	TArray<FRopeContactCandidate> ContactCandidateScratch;
+
+	// CPU Flight predictive contact의 다음 프레임 whip 타깃. GPU 경로는 subsystem이 dispatch payload에
+	// 별도 소유 배열을 실으므로 이 scratch를 사용하지 않는다.
+	TArray<FVector> NextGuideTargetScratch;
+
 	/** Contacting: 캡처 시 만들어 둔 wrap 시드(Wrapping 진입 재료). */
 	FRopeWrapState      PendingWrapSeed;
 
@@ -1064,9 +1072,14 @@ private:
 	 *  같은 판정 집합을 쓰도록 필터를 한 곳에 둔다 — 조건을 고치면 두 페이즈가 함께 움직인다. */
 	void RemoveNonWrappableCandidates(TArray<FRopeContactCandidate>& Candidates) const;
 
-	/** ① 이번 프레임 접촉 후보 산출: whip 예측 뷰 조립 + GPU 감지 산출물 회수(상대운동 평가만 GT)
-	 *  또는 CPU 감지 파이프라인(actual→predicted→상대운동), 마지막에 CanWrapTarget 게이트. */
-	void BuildFlightContactCandidates(float DeltaTime, const FRopeFlightContactDetector::FParams& DetectParams,
+	/** ① 이번 프레임 Flight 후보 선택/산출. GPU 결과는 SimFrame 배열을 복사 없이 직접 소비하고,
+	 *  CPU fallback은 ContactCandidateScratch에 actual→predicted→상대운동 순으로 만든다. */
+	TArray<FRopeContactCandidate>& GetOrBuildFlightContactCandidates(float DeltaTime,
+		const FRopeFlightContactDetector::FParams& DetectParams);
+
+	/** CPU Flight fallback 전용 후보 산출. OutCandidates와 NextGuideTargetScratch는 호출자가 미리 Reset한다. */
+	void BuildCpuFlightContactCandidates(float DeltaTime,
+		const FRopeFlightContactDetector::FParams& DetectParams,
 		TArray<FRopeContactCandidate>& OutCandidates);
 
 	/** ②a 후보를 한 번 집계해 캡처 판정과 관측이 공유할 frame-local 결과를 만든다. */
