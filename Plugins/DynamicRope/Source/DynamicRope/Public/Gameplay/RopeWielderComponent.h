@@ -291,7 +291,7 @@ public:
 	// 물리 수치는 로프 도메인): Pull 힘 = HoldConfig.PullForce, 릴 속도 = URopeComponent::ReelSpeed.
 	// 이 섹션에는 입력 바인딩만 남는다.
 
-	/** 능동 Pull 액션(홀드). 누르는 동안 로프의 HoldConfig.PullForce로 끌어당기고 떼면 멈춘다. */
+	/** 능동 Pull 액션(토글): 누르면 장전, 다시 누르면 해제. 발동 시점은 장력 임계(PullEngageTension)가 정한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputAction> PullAction = nullptr;
 
@@ -353,15 +353,22 @@ public:
 	float ThrowMontagePlayRate = 1.0f;
 
 	/**
-	 * 설정하면 pull이 **몽타주 모드**가 된다: 힘은 몽타주 안에 배치한 UAnimNotifyState_RopePull window만
-	 * 싣는다(ThrowMontage의 UAnimNotify_RopeThrow와 같은 계약: notify 미배치면 pull이 일어나지 않는다).
-	 * 재생 수명은 홀드/페이즈 조건으로 틱이 굴린다(UpdatePullMontage): StartPull~StopPull 사이(홀드) +
-	 * Wrapped면 재생하고 — 홀드 중 wrap이 성립하면 그때 자동 시작, 비루프 몽타주가 자연 종료하면 홀드가
-	 * 유지되는 동안 반복 재생(연속 당기기 사이클) — wrap이 풀리면(release/cut) 중단한다. 비우면 StartPull()이
-	 * 즉시 StartPullNow()로 당긴다(종전 동작 — 비Wrapped 홀드는 힘 장전으로 남아 감기는 순간 걸린다).
+	 * 설정하면 pull 발동 시 이 몽타주를 **단일 재생**한다: 힘은 몽타주 안에 배치한 UAnimNotifyState_RopePull
+	 * window만 싣는다(ThrowMontage의 UAnimNotify_RopeThrow와 같은 계약: notify 미배치면 pull이 일어나지
+	 * 않는다). 반복/중단 관리는 없다 — 발동(장전 상태에서 장력 임계 최초 돌파, UpdatePullEngage)마다 1회
+	 * 재생하고 자연 종료에 맡긴다. 비우면 발동이 즉시 StartPullNow()로 힘을 장전한다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation")
 	TObjectPtr<UAnimMontage> PullMontage = nullptr;
+
+	/**
+	 * Pull 발동 임계 장력(FRopeSimState::SegmentTension 단위 — ActivePullTautTension/TensionReleaseForce와
+	 * 같은 단위계, 매달린 노드 1개의 중력 하중 ≈ 980). Pull 입력으로 **장전**해 두면(토글 on) Wrapped에서
+	 * 장력이 이 값을 처음 넘는 순간 발동한다(0 = 팽팽 판정(IsPullTaut)만으로) — "제대로 당겨졌을 때만
+	 * 끌려가기 시작"의 게임플레이 임계. 발동/수명 규칙은 UpdatePullEngage 주석 참조.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation", meta = (ClampMin = "0.0"))
+	float PullEngageTension = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation", meta = (ClampMin = "0.1"))
 	float PullMontagePlayRate = 1.0f;
@@ -400,9 +407,9 @@ public:
 	void Release();
 
 	/**
-	 * 능동 Pull 시작(홀드 진입) — 입력/게임플레이가 호출하는 진입점(Throw()와 같은 구조). StopPull까지
-	 * "당기는 중" 상태가 유지된다. 몽타주 모드(PullMontage 설정)면 재생/힘은 UpdatePullMontage와 window
-	 * notify가 굴리고, 아니면 즉시 StartPullNow()로 힘을 장전한다.
+	 * 능동 Pull **장전**(토글 on) — 입력/게임플레이가 호출하는 진입점. 힘/몽타주는 여기서 시작하지 않고,
+	 * Wrapped에서 장력이 PullEngageTension을 처음 넘는 순간 발동한다(UpdatePullEngage — 몽타주 단일 재생
+	 * 또는 즉시 힘). 감기 전에 장전해 두면 감겨서 당겨지는 순간 자동 발동한다. 해제는 StopPull.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StartPull();
@@ -419,7 +426,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StopPullNow();
 
-	/** 능동 Pull 정지(홀드 종료 + 힘 정지 + 재생 중인 PullMontage 중단). 입력을 뗀 순간의 전체 정지 경로. */
+	/** 능동 Pull 장전 해제(토글 off) + 힘 정지 + 발동 래치 리셋. 몽타주는 중단하지 않는다(단일 재생 — 자연 종료). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StopPull();
 
@@ -570,11 +577,12 @@ private:
 	void UpdateSwingAirControl();
 
 	/**
-	 * PullMontage의 재생 수명 관리(매 틱, GT — 몽타주 모드 전용). 홀드 중(bPullHeld) + Wrapped + 미재생이면
-	 * 재생하고(홀드 중 wrap 성립/비루프 자연 종료의 반복 재생을 모두 이 조건 하나가 잇는다), 재생 중인데
-	 * Wrapped가 아니면 중단한다(release/cut — 힘은 NotifyEnd 캐스케이드가 끈다).
+	 * 장전된 Pull(bPullArmed)의 발동 판정(매 틱, GT). Wrapped + 장력 조건(임계 0 = IsPullTaut, > 0 =
+	 * GetMaxTension ≥ PullEngageTension)을 처음 만족하는 순간 발동한다(래치 — wrap당 1회): 몽타주 셋업이면
+	 * PullMontage **단일 재생**(힘은 window notify가 싣는다 — 반복/중단 관리 없음), 무애니면 즉시 힘 장전.
+	 * 비Wrapped가 되면 힘을 끄고 재무장한다(장전 유지 — 다음 wrap에서 재발동).
 	 */
-	void UpdatePullMontage();
+	void UpdatePullEngage();
 
 	void UpdateThrowPreview();
 
@@ -618,7 +626,6 @@ private:
 	void OnAimRayThrowResolved();
 	void OnReleaseInput();
 	void OnPullInputStarted();
-	void OnPullInputCompleted();
 	void OnReelInStarted();
 	void OnReelOutStarted();
 	void OnReelCompleted();
@@ -652,8 +659,10 @@ private:
 	// LocalPlayer에 등록되므로, EndPlay가 폰의 현재 컨트롤러에 의존하지 않고 여기서 possession 무관하게
 	// 제거한다(#11 — 폰이 먼저 unpossess된 뒤 파괴돼도 IMC가 로컬 플레이어에 잔류하는 것 방지). LP 파괴 시 null.
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> MappedInputSubsystem;
-	// pull 홀드 상태(StartPull~StopPull 사이). 몽타주 모드의 재생 조건 — UpdatePullMontage가 읽는다.
-	bool bPullHeld = false;
+	// pull 장전 상태(StartPull~StopPull 사이 토글). 발동 판정은 UpdatePullEngage.
+	bool bPullArmed = false;
+	// pull 발동 래치(장전 중 장력 임계 최초 돌파 시 true — 몽타주 단일 재생/힘 장전 완료). wrap 해제 시 재무장.
+	bool bPullEngaged = false;
 	// AirControl 부스트 원복용 저장 상태(스윙 진입 시 저장, 종료/EndPlay 시 복원).
 	bool bAirControlBoosted = false;
 	float SavedAirControl = 0.0f;

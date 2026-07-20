@@ -3969,7 +3969,9 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 	// 이 함수의 동기 호출 구간에서만 endpoint 캐시를 유지한다. virtual ApplyPullForce가 Super를 호출해도
 	// 같은 target 해석을 재사용하고, 외부에서 별도로 호출한 ApplyPullForce에는 캐시가 새지 않는다.
 	WrappedEndpointCache.Reset();
-	if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable && PullDrive.LastPullSample.bValid)
+	// 끌림 가능 판정은 BinaryPullable(테더 회수 방향)과 Constraint(능동 Pull climb-in 방향)가 쓴다 —
+	// MassShare만 몫 분배로 대신한다.
+	if (HoldConfig.TetherMode != ERopeTetherMode::MassShare && PullDrive.LastPullSample.bValid)
 	{
 		UpdateTargetPullable();
 	}
@@ -3987,10 +3989,11 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 	if (PullDrive.ActivePullForce > 0.0f && PullDrive.LastPullSample.bValid
 		&& (!HoldConfig.bActivePullRequiresTaut || PullDrive.bActivePullIgnoresTaut || PullDrive.bPullTaut))
 	{
-		// BinaryPullable에서 대상이 무거워 끌 수 없으면(not pullable) 힘을 wielder에 실어 앵커 쪽으로 끌어당긴다
-		// (climb-in): LastPullSample.Direction은 앵커→손 방향이라 부호 반전 = 손→앵커. 그 외(MassShare 또는
-		// 끌림 가능)는 대상에 인가해 대상을 wielder 쪽으로 끈다(기존 동작).
-		if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable && !PullDrive.bTargetPullable)
+		// 대상이 무거워 끌 수 없으면(not pullable) 힘을 wielder에 실어 앵커 쪽으로 끌어당긴다(climb-in):
+		// LastPullSample.Direction은 앵커→손 방향이라 부호 반전 = 손→앵커. BinaryPullable과 Constraint가
+		// 같은 판정(bTargetPullable)을 공유한다 — "내가 끌려가야 되면 간다"(벽/무거운 랙돌/드래곤에 pull =
+		// 입체기동). 그 외(MassShare 또는 끌림 가능)는 대상에 인가해 대상을 wielder 쪽으로 끈다(기존 동작).
+		if (HoldConfig.TetherMode != ERopeTetherMode::MassShare && !PullDrive.bTargetPullable)
 		{
 			ApplyPullForceToWielder(-PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, DeltaTime);
 		}

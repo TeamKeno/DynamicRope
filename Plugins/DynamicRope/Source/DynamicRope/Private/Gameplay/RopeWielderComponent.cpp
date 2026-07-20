@@ -160,7 +160,7 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 	UpdateGroundExit();
 	UpdateSwingAirControl();
-	UpdatePullMontage();
+	UpdatePullEngage();
 	UpdateAimHudSample();
 	UpdateAimHudWidget();
 	UpdateThrowPreview();
@@ -599,10 +599,9 @@ void URopeWielderComponent::BindInput()
 	}
 	if (PullAction)
 	{
-		// 홀드 시맨틱: 누르면 시작, 떼거나(Completed) 중단되면(Canceled) 정지.
-		EIC->BindAction(PullAction, ETriggerEvent::Started,   this, &URopeWielderComponent::OnPullInputStarted);
-		EIC->BindAction(PullAction, ETriggerEvent::Completed, this, &URopeWielderComponent::OnPullInputCompleted);
-		EIC->BindAction(PullAction, ETriggerEvent::Canceled,  this, &URopeWielderComponent::OnPullInputCompleted);
+		// 토글 시맨틱: 누를 때마다 장전↔해제. 발동 시점은 장력 임계가 정한다(UpdatePullEngage) —
+		// Completed/Canceled 바인딩 불필요(홀드 아님).
+		EIC->BindAction(PullAction, ETriggerEvent::Started, this, &URopeWielderComponent::OnPullInputStarted);
 	}
 	if (ReelInAction)
 	{
@@ -645,12 +644,53 @@ void URopeWielderComponent::OnReleaseInput()
 
 void URopeWielderComponent::StartPull()
 {
-	bPullHeld = true;
+	// 장전(토글 on): 힘/몽타주는 여기서 시작하지 않는다 — 발동은 UpdatePullEngage가 "Wrapped + 장력이
+	// PullEngageTension을 처음 넘는 순간" 1회 수행한다. 감기 전에 장전해 두면 감겨서 당겨지는 순간 발동한다.
+	bPullArmed = true;
+}
+
+void URopeWielderComponent::UpdatePullEngage()
+{
+	// 장전(bPullArmed)된 Pull의 발동 판정: Wrapped + 장력 조건을 처음 만족하는 **순간** 발동하는 래치
+	// (wrap당 1회). 애니 window(UAnimNotifyState_RopePull)가 정하던 "언제 힘을 싣나"를 장력 임계가 대신하고,
+	// 몽타주 셋업이면 그 window를 품은 몽타주를 **단일 재생**한다(반복/중단 관리 없음 — 자연 종료).
+	// 무애니 셋업이면 즉시 힘을 장전한다. 발동 후 프레임별 인가 게이트(bActivePullRequiresTaut 등)는
+	// 로프가 동일하게 판정하고, wrap이 풀리면 힘을 끄고 재무장한다(장전 유지 — 다음 wrap에서 재발동).
+	if (!bPullArmed || !Rope)
+	{
+		return;
+	}
+	if (Rope->GetPhase() != ERopePhase::Wrapped)
+	{
+		if (bPullEngaged)
+		{
+			bPullEngaged = false; // 재무장 — 장전은 유지된 채 다음 wrap에서 다시 발동한다.
+			StopPullNow();
+		}
+		return;
+	}
+	if (bPullEngaged)
+	{
+		return; // wrap당 1회 — 유지/해제는 로프 게이트와 wrap 수명이 담당.
+	}
+	// 발동 판정: 임계 0 = 팽팽 래치(IsPullTaut — 로프 게이트와 동일 판정), > 0 = 최대 장력 임계.
+	const bool bEngage = (PullEngageTension <= 0.0f)
+		? Rope->IsPullTaut()
+		: (Rope->GetMaxTension() >= PullEngageTension);
+	if (!bEngage)
+	{
+		return;
+	}
+	bPullEngaged = true;
+	// 발동 순간 스냅샷(원샷) — PullEngageTension 튜닝용 관측.
+	UE_LOG(LogDynamicRope, Log,
+		TEXT("[PullEngage] mode=%s share=%.2f tautT=%.0f tetherT=%.0f overshoot=%.0f"),
+		*UEnum::GetValueAsString(Rope->HoldConfig.TetherMode), Rope->GetEffectiveTetherTargetShare(),
+		Rope->GetMaxTension(), Rope->GetTetherTension(), Rope->GetTetherOvershoot());
 	if (PullMontage)
 	{
-		// 몽타주 모드: 힘은 window notify만 싣는다(비Wrapped 힘 장전 없음 — window 밖 pull이 새는 것을 막는다).
-		// 재생 조건은 UpdatePullMontage가 굴린다 — 여기서 즉시 1회 돌려 Wrapped면 지연 없이 시작.
-		UpdatePullMontage();
+		// 몽타주 단일 재생 — 힘은 안의 window notify(StartPullNow/StopPullNow)가 싣는다.
+		PlayPullMontage();
 	}
 	else
 	{
@@ -676,19 +716,11 @@ void URopeWielderComponent::StopPullNow()
 
 void URopeWielderComponent::StopPull()
 {
-	bPullHeld = false;
+	// 장전 해제(토글 off) + 힘 정지 + 발동 래치 리셋. 몽타주는 중단하지 않는다 — 단일 재생 계약이라 재생
+	// 수명을 여기서 관리하지 않고 자연 종료에 맡긴다(해제 순간 모션이 뚝 끊기는 것 방지).
+	bPullArmed = false;
+	bPullEngaged = false;
 	StopPullNow();
-	// 몽타주 경로로 시작했다면 연출도 함께 끝낸다(입력을 뗀 순간). 다른 경로였어도 무해 — 재생 중일 때만 중단.
-	if (PullMontage && AttachMesh)
-	{
-		if (UAnimInstance* Anim = AttachMesh->GetAnimInstance())
-		{
-			if (Anim->Montage_IsPlaying(PullMontage))
-			{
-				Anim->Montage_Stop(PullMontage->BlendOut.GetBlendTime(), PullMontage);
-			}
-		}
-	}
 }
 
 void URopeWielderComponent::Cut()
@@ -748,12 +780,16 @@ void URopeWielderComponent::OnReloadInput()
 
 void URopeWielderComponent::OnPullInputStarted()
 {
-	StartPull();
-}
-
-void URopeWielderComponent::OnPullInputCompleted()
-{
-	StopPull();
+	// 토글: 누를 때마다 장전 ↔ 해제. 발동(힘/몽타주 단일 재생)은 장전 상태에서 장력 임계가 정한다
+	// (UpdatePullEngage — PullEngageTension).
+	if (bPullArmed)
+	{
+		StopPull();
+	}
+	else
+	{
+		StartPull();
+	}
 }
 
 FVector URopeWielderComponent::GetAimDirection() const
@@ -1181,33 +1217,6 @@ void URopeWielderComponent::PlayPullMontage()
 	}
 }
 
-void URopeWielderComponent::UpdatePullMontage()
-{
-	if (!PullMontage || !AttachMesh)
-	{
-		return; // 몽타주 모드 아님(또는 메시 미해석 — 다음 틱에 재시도할 것 없이 no-op).
-	}
-	UAnimInstance* Anim = AttachMesh->GetAnimInstance();
-	if (!Anim)
-	{
-		return;
-	}
-
-	const bool bPlaying = Anim->Montage_IsPlaying(PullMontage);
-	const bool bWrapped = Rope && Rope->GetPhase() == ERopePhase::Wrapped;
-	if (bPullHeld && bWrapped && !bPlaying)
-	{
-		// 홀드 중 재생 보장: 홀드 중 wrap 성립(그때 시작)과 비루프 몽타주의 자연 종료(반복 재생 =
-		// 연속 당기기 사이클)를 조건 하나로 잇는다. 힘은 몽타주 안의 window notify가 싣는다.
-		PlayPullMontage();
-	}
-	else if (bPlaying && !bWrapped)
-	{
-		// wrap이 풀리면(release/cut/대상 소실) 당기는 모션도 끝낸다 — 힘은 NotifyEnd 캐스케이드가 끈다.
-		// 직접 재생(BP의 PlayPullMontage)도 같은 규칙: 감긴 게 없는 pull 모션은 두지 않는다.
-		Anim->Montage_Stop(PullMontage->BlendOut.GetBlendTime(), PullMontage);
-	}
-}
 
 void URopeWielderComponent::Release()
 {
