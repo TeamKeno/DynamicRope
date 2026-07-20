@@ -39,6 +39,9 @@ int   DetectNumSDF;
 int   DetectNumBoxes;
 float DetectContactRadius;
 float DetectSegmentLength;
+// 감지 스윕 샘플 간격(cm)과 샘플 수 상한 — CPU FParams::ContactSweepStep/ContactMaxSweepSamples 미러.
+float DetectSweepStep;
+int   DetectMaxSweepSamples;
 // <=0이면 예측 슬롯 없음
 float DetectPredictionFrames;
 // substep→프레임 변위 환산 계수(free 노드 예측). CPU FParams::FrameDeltaTime/SubstepDeltaTime 경로와 동일.
@@ -79,7 +82,9 @@ FRopeGPUContact RopeDetectSweep(float3 A, float3 B, int SourceFlag)
 	Best.SurfaceVel = float4(0, 0, 0, 0);
 
 	const float Travel = distance(A, B);
-	const int SampleCount = clamp((int)ceil(Travel / max(DetectSegmentLength, 1.0f)), 1, 4);
+	// 샘플 간격은 cm(DetectSweepStep) — 세그먼트 길이는 대상 두께와 무관해 빠른 노드가 얇은 collider를
+	// 샘플 사이로 통과했다. CPU SweepOrSampleContact와 같은 식(둘이 갈라지면 parity가 못 잡는다).
+	const int SampleCount = clamp((int)ceil(Travel / max(DetectSweepStep, 0.1f)), 1, max(DetectMaxSweepSamples, 1));
 	float BestPen = 0.0f;
 
 	for (int s = 0; s <= SampleCount; ++s)

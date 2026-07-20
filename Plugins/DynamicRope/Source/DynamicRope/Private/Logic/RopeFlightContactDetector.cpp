@@ -462,7 +462,12 @@ FRopeContact FRopeFlightContactDetector::SweepOrSampleContact(const FRopeSimStat
 {
 	FRopeContact Best;
 	const float Travel = FVector::Dist(PrevPosition, Position);
-	const int32 SampleCount = FMath::Clamp(FMath::CeilToInt(Travel / FMath::Max(Sim.SegmentLength, 1.0f)), 1, 4);
+	// 샘플 간격은 **cm**로 끊는다(세그먼트 길이가 아니라). 세그먼트 길이는 대상 두께와 무관해서, 종전
+	// "Travel/SegmentLength, 최대 4"는 빠른 노드가 얇은 collider를 샘플 사이로 통과하게 놔뒀다.
+	// GPU RopeDetectSweep과 같은 식을 쓴다(둘이 갈라지면 parity 테스트가 못 잡는 종류의 버그가 된다).
+	const float Step = FMath::Max(Params.ContactSweepStep, 0.1f);
+	const int32 MaxSamples = FMath::Max(Params.ContactMaxSweepSamples, 1);
+	const int32 SampleCount = FMath::Clamp(FMath::CeilToInt(Travel / Step), 1, MaxSamples);
 
 	for (int32 SampleIdx = 0; SampleIdx <= SampleCount; ++SampleIdx)
 	{

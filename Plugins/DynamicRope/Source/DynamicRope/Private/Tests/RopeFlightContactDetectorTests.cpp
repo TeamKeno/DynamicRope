@@ -51,6 +51,37 @@ bool FRopeFlightDetectActualTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 빠른 노드가 얇은 대상을 샘플 사이로 통과하지 않는가(터널링).
+// 종전 샘플링은 간격을 SegmentLength(=20cm) 기준으로 잡고 4개로 잘라, 100cm 이동에서 25cm 간격이 됐다 —
+// 두께 몇 cm짜리 팔뚝/난간은 그 사이로 그냥 지나갔고 CPU/GPU가 똑같이 틀려 parity 테스트도 통과했다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightThinColliderTunnelTest,
+	"DynamicRope.FlightContact.FastNodeDoesNotTunnelThinCollider",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightThinColliderTunnelTest::RunTest(const FString& Parameters)
+{
+	const FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
+
+	// 한 프레임에 100cm 이동(x=0 → 100). 두께 3cm 대상이 x=60에 있고 질의 반경 1 → 도달 반경 4cm.
+	// 옛 간격 25cm에서는 샘플이 50과 75라 둘 다 4cm 밖(3.75cm 초과)이라 놓쳤다.
+	const FVector Prev(0.0f, 0.0f, 0.0f);
+	const FVector Curr(100.0f, 0.0f, 0.0f);
+	RopeTest::FSphereMockCollider Thin(FVector(60.0f, 0.0f, 0.0f), 3.0f, FName("forearm"));
+	TArray<IRopeCollider*> Colliders = { &Thin };
+
+	FRopeFlightContactDetector::FParams Params = MakeDetectParams(/*MinLatchNodes*/ 1,
+		/*PredictiveFrames*/ 0.0f, /*ContactRadius*/ 1.0f);
+	const FRopeContact Hit = FRopeFlightContactDetector::SweepOrSampleContact(Sim, Prev, Curr, Colliders, Params);
+	TestTrue(TEXT("thin collider is found along a fast path"), Hit.bHit);
+	TestTrue(TEXT("contact is attributed to the thin bone"), Hit.Bone == FName("forearm"));
+
+	// 상한을 4로 낮추면 간격이 25cm로 되돌아가 다시 놓친다 — 이 테스트가 간격 자체를 보고 있음을 고정한다.
+	Params.ContactMaxSweepSamples = 4;
+	const FRopeContact Missed = FRopeFlightContactDetector::SweepOrSampleContact(Sim, Prev, Curr, Colliders, Params);
+	TestFalse(TEXT("a 4-sample cap tunnels through it again"), Missed.bHit);
+	return true;
+}
+
 // dominant bone 접촉 노드 수가 MinLatchNodes 문턱을 넘을 때만 캡처 판정하는가.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightShouldCaptureTest,
 	"DynamicRope.FlightContact.ShouldCaptureRespectsMinLatchNodes",

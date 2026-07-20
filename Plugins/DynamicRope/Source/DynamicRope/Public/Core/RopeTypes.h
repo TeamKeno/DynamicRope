@@ -1273,6 +1273,22 @@ struct FRopeDetectConfig
 	/** Whip 종료 후 이 시간 동안 캡처하지 못하면 Free로 복귀한다. 0이면 기본 실패 복귀 쿨다운을 쓴다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "0.0", Units = "s"))
 	float FlightNoContactReturnTime = 0.0f;
+
+	/**
+	 * 접촉 감지 스윕의 샘플 간격(cm). 노드가 한 프레임에 이동한 경로를 이 간격으로 점질의해 최심 접촉을
+	 * 찾는다 — **터널링을 막는 값**이라 대상의 얇은 쪽 두께(팔뚝/난간)보다 작아야 한다.
+	 *
+	 * 종전에는 간격을 `SegmentLength` 기준으로 잡고 샘플을 4개로 잘랐다. 세그먼트 길이는 대상 두께와
+	 * 아무 관계가 없어서(로프 20cm 세그먼트 vs 팔뚝 8cm) 빠른 던지기는 샘플 사이로 대상을 그냥 지나쳤고,
+	 * CPU/GPU가 똑같이 틀려 parity 테스트도 통과했다. 이제 cm 단위로 끊는다 — solver 충돌의
+	 * FRopeSolverConfig::SweepStep과 같은 사고방식이되, 감지는 Flight에서만 도므로 예산을 따로 둔다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "0.1", Units = "cm"))
+	float ContactSweepStep = 2.0f;
+
+	/** 위 스윕의 샘플 수 상한(비용 한도). 매우 빠른 노드는 간격이 이 상한에 눌려 넓어진다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "1", ClampMax = "64"))
+	int32 ContactMaxSweepSamples = 16;
 };
 
 /** Wrapped 테더(로프 길이 초과분) 회수 모델. UpdateTether/능동 Pull이 이 값으로 분기한다. */

@@ -363,6 +363,8 @@ public:
 		SHADER_PARAMETER(int32, DetectNumBoxes)
 		SHADER_PARAMETER(float, DetectContactRadius)
 		SHADER_PARAMETER(float, DetectSegmentLength)
+		SHADER_PARAMETER(float, DetectSweepStep)
+		SHADER_PARAMETER(int32, DetectMaxSweepSamples)
 		SHADER_PARAMETER(float, DetectPredictionFrames)
 		SHADER_PARAMETER(float, DetectFrameToSubstepRatio)
 		SHADER_PARAMETER(int32, DetectHasGuidedNodes)
@@ -1551,6 +1553,8 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	DetectParams->DetectNumBoxes       = FMath::Clamp(S.NumDetectBoxes, 0, B.NumValidBoxes);
 	DetectParams->DetectContactRadius  = S.ContactRadius;
 	DetectParams->DetectSegmentLength  = S.SegmentLength;
+	DetectParams->DetectSweepStep      = FMath::Max(S.ContactSweepStep, 0.1f);
+	DetectParams->DetectMaxSweepSamples = FMath::Max(S.ContactMaxSweepSamples, 1);
 	DetectParams->DetectPredictionFrames = FMath::Max(0.0f, S.PredictionFrames);
 	DetectParams->DetectFrameToSubstepRatio = S.ContactFrameToSubstepRatio;
 	DetectParams->DetectHasGuidedNodes = bHasWhip ? 1 : 0;
