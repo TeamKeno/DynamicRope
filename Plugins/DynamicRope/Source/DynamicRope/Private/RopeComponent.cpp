@@ -1965,6 +1965,12 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.WrapAxisSegmentLength = Sim.SegmentLength;
 	}
 
+	// diag 라인의 solve 여부는 phase 무관하게 매 프레임 채운다. 예전엔 flight 캡처 경로
+	// (RecordFlightObservation)에서만 세팅돼 Wrapped/Releasing 등 비-Flight phase에서 solve=0으로 잘못
+	// 표시됐다(Wrapped도 실제로 솔브함). FillDebugSnapshot은 항상 실행되므로 여기서 채우는 게 정답.
+	// colliders 개수는 별도 필드 없이 아래 Snapshot.Colliders 배열 크기가 단일 소스다(diag/[O] 공용).
+	Snapshot.bSolveThisFrame = SimFrame.bSolveThisFrame;
+
 	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). 상호 배타 accessor 순서로
 	// 실제 형상 분류: 캡슐(세그먼트) / 박스(회전 OBB) / 컨벡스(헐 와이어) / 그 외(SDF 등 월드 AABB 폴백).
 	// FrameColliders는 provider 소유라 이 프레임 동안만 유효(GT Phase-3 직렬 실행이라 스레딩 무관).
@@ -2673,9 +2679,8 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 	{
 		GatherFlightNodeDebug(DetectParams, OutSnapshot->NodeDebug);
 		OutSnapshot->bHasFlight = true;
-		OutSnapshot->bSolveThisFrame = SimFrame.bSolveThisFrame;
+		// bSolveThisFrame / colliders 수는 FillDebugSnapshot(항상 실행)이 단일 소스로 채운다 — 여기선 안 쓴다.
 		OutSnapshot->bShouldCapture = bShouldCapture;
-		OutSnapshot->FrameColliderCount = SimFrame.FrameColliders.Num();
 		OutSnapshot->MinLatchNodes = DetectConfig.MinLatchNodes;
 		OutSnapshot->TrackerBone = DebugTracker.CandidateBone;
 		OutSnapshot->TrackerNodes = DebugTracker.CandidateNodes;

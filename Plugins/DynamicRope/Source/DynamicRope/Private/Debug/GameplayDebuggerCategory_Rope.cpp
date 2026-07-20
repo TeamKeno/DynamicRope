@@ -348,8 +348,9 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		return;
 	}
 	const FRopeDebugSnapshot& S = *Snap;
+	// colliders 총계의 단일 소스는 S.Colliders(항상 채워짐). [O] 뷰는 여기 총계를 반복하지 않고 분류만 낸다.
 	AddTextLine(FString::Printf(TEXT("  {grey}diag: solve=%d colliders=%d"),
-		S.bSolveThisFrame ? 1 : 0, S.FrameColliderCount));
+		S.bSolveThisFrame ? 1 : 0, S.Colliders.Num()));
 
 	//~ flight -----------------------------------------------------------
 	if (HasView(EView::Flight) && S.bHasFlight)
@@ -561,15 +562,16 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			constexpr uint8 FG = SDPG_Foreground;
 			constexpr float LineThick = 1.5f;
 
-			// 색 범례 + 랩 대상 개수(로프가 실제로 감길 추출 셰이프가 몇 개 질의됐는지).
+			// 색 범례 + 분류. 총계(colliders=N)는 위 diag 줄이 단일 소스라 여기선 반복하지 않고, 그중 랩 대상
+			// 셰이프(로프가 실제로 감길 추출 셰이프)가 몇 개인지 "Z / N" 형태로만 낸다.
 			int32 WrapTargetCount = 0;
 			for (const FRopeDebugCollider& C : S.Colliders)
 			{
 				if (C.bWrapTarget) { ++WrapTargetCount; }
 			}
 			AddTextLine(FString::Printf(
-				TEXT("  {grey}colliders=%d  {blue}wrapTarget=%d{grey} [{blue}wrap{grey}/{cyan}worldStatic{grey}/{green}bone{grey}]"),
-				S.Colliders.Num(), WrapTargetCount));
+				TEXT("  {blue}wrapTarget=%d{grey} / %d [{blue}wrap{grey}/{cyan}worldStatic{grey}/{green}bone{grey}]"),
+				WrapTargetCount, S.Colliders.Num()));
 
 			for (const FRopeDebugCollider& C : S.Colliders)
 			{

@@ -94,9 +94,9 @@ struct FRopeDebugSnapshot
 
 	//~ flight(Flight phase에서만) ----------------------------------------
 	bool bHasFlight = false;
+	// bSolveThisFrame은 phase 무관하게 FillDebugSnapshot에서 채운다(diag 줄용) — flight 전용 아님.
 	bool bSolveThisFrame = false;
 	bool bShouldCapture = false;
-	int32 FrameColliderCount = 0;
 	int32 MinLatchNodes = 0;
 	FName TrackerBone = NAME_None;
 	TArray<int32> TrackerNodes;
