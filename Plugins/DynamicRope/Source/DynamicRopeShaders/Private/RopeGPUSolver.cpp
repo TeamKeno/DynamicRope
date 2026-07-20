@@ -442,6 +442,8 @@ struct FRopeResidentSharedResults
 	TMap<uint32, FRopeResidentLatest> Map;
 	// G3: 접촉 감지 결과(GetLatestContacts).
 	TMap<uint32, FRopeResidentContacts> Contacts;
+	// 소비되지 못하고 교체된 pending step의 시뮬 시간(초). RT가 쌓고 GT가 DrainDroppedSimTime으로 비운다.
+	TMap<uint32, float> DroppedSimTime;
 };
 
 // 전역 SDF 볼륨 캐시(RT 전용). 베이크된 복셀 데이터는 VolumeKey당 정적이라, 로프/프레임 무관하게 딱 한 번만
@@ -542,6 +544,7 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 		FScopeLock SL(&Impl->Results->Lock);
 		Impl->Results->Map.Remove(RopeId);
 		Impl->Results->Contacts.Remove(RopeId);
+		Impl->Results->DroppedSimTime.Remove(RopeId);
 	}
 	// 영속 버퍼/리드백은 렌더 스레드에서 해제(this 캡처 — destructor가 flush하므로 수명 안전).
 	ENQUEUE_RENDER_COMMAND(RopeGPUReleaseRope)(
@@ -564,6 +567,14 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 				Impl->RtRopes.Remove(RopeId);
 			}
 		});
+}
+
+void FRopeGPUSolver::DrainDroppedSimTime(TMap<uint32, float>& Out)
+{
+	FScopeLock SL(&Impl->Results->Lock);
+	// 회수는 1회성이다(같은 시간을 두 번 돌려주면 오히려 앞서 나간다) — 옮기고 비운다.
+	Out = MoveTemp(Impl->Results->DroppedSimTime);
+	Impl->Results->DroppedSimTime.Reset();
 }
 
 void FRopeGPUSolver::GetLatest(TMap<uint32, FRopeResidentLatest>& Out)
@@ -1684,7 +1695,21 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate&) mutable
 		{
 			// 교체 시맨틱: 이번 프레임 step으로 대체한다(직전 프레임분이 뷰 확장에서 소비 안 됐어도 — 씬
-			// 렌더가 없던 프레임 등 — 최신만 유효하므로 누적하지 않는다).
+			// 렌더가 없던 프레임 등 — 최신만 유효하므로 누적하지 않는다). 다만 **시간은 버리지 않는다**:
+			// 덮어쓰는 step이 들고 있던 substep 분량을 장부에 적어 GT가 accumulator로 되돌리게 한다
+			// (그냥 버리면 그 시간만큼 시뮬이 영구히 뒤처진다 — DrainDroppedSimTime 주석).
+			if (Impl->PendingSteps.Num() > 0)
+			{
+				FScopeLock SL(&Impl->Results->Lock);
+				for (const FRopeGPUResidentStep& Dropped : Impl->PendingSteps)
+				{
+					if (Dropped.NumSub > 0 && Dropped.FixedDt > 0.0f)
+					{
+						Impl->Results->DroppedSimTime.FindOrAdd(Dropped.RopeId) +=
+							static_cast<float>(Dropped.NumSub) * Dropped.FixedDt;
+					}
+				}
+			}
 			Impl->PendingSteps = MoveTemp(Steps);
 		});
 }

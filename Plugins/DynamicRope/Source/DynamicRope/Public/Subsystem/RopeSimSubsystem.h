@@ -154,6 +154,14 @@ private:
 	void ReleaseGpuResourcesForDeadRopes();
 
 	/**
+	 * 뷰 확장이 소비하지 못해 교체된 step의 시뮬 시간(초, RopeId별). 매 틱 솔버에서 회수해 쌓아두고,
+	 * 그 로프가 실제로 솔브하는 프레임에 TimeAccumulator로 되돌린 뒤 항목을 지운다 — 로직 프레임처럼
+	 * 이번 틱에 안 쓰이면 다음 기회까지 보존한다(그 자리에서 버리면 되돌릴 시간을 또 잃는다).
+	 * 몰아치기 방어는 따로 두지 않는다: RopeSolverSubsteps가 이미 accumulator를 MaxAccum으로 클램프한다.
+	 */
+	TMap<uint32, float> PendingSimTimeRefund;
+
+	/**
 	 * Tick 순회 재진입 가드. Prepare/Finalize 순회 중 델리게이트 핸들러(OnRopeWrapped/OnRopeReleased/
 	 * OnRopePhaseChanged)가 로프 컴포넌트를 가진 액터를 스폰/파괴하면 Register/UnregisterRope가 Ropes를
 	 * 즉시 변형해 (1) ranged-for 이터레이터 무효화(개발 빌드 assert 크래시 / Shipping 댕글링)와

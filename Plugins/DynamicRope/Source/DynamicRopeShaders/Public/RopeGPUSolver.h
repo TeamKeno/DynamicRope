@@ -376,6 +376,17 @@ public:
 	void DispatchPending_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView* View,
 		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 
+	/**
+	 * 소비되지 못하고 교체된 pending step의 시뮬 시간을 RopeId별 초 단위로 회수한다(호출 즉시 비운다, 락).
+	 *
+	 * EnqueueSteps는 교체 시맨틱이라, 뷰 확장이 도는 base pass가 없던 프레임의 step은 다음 프레임 step에
+	 * 덮여 그대로 사라진다. 그런데 그 substep 시간은 GT에서 이미 accumulator를 깎고 만든 것이라, 놔두면
+	 * **시뮬 시간이 영구히 없어진다**(프레임을 건너뛴 게 아니라 시간을 잃은 것이라 이후에도 안 메워진다).
+	 * 호출자는 이 값을 다음 스케줄 계산 전에 accumulator로 되돌린다 — 그러면 accumulator가 다시
+	 * "시뮬된 시간"의 단일 진실이 되고, 몰아치기는 RopeSolverSubsteps의 기존 상한이 알아서 막는다.
+	 */
+	void DrainDroppedSimTime(TMap<uint32, float>& Out);
+
 	/** RT 리드백이 채운 최신 위치를 RopeId별로 복사(락). 새로 도착한 게 없으면 직전 값을 유지한 채 반환할 수 있다. */
 	void GetLatest(TMap<uint32, FRopeResidentLatest>& Out);
 

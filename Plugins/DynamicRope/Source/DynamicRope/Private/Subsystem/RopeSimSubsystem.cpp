@@ -195,6 +195,7 @@ void URopeSimSubsystem::UnregisterRope(URopeComponent* Rope)
 		GpuSolver.ReleaseRope(RopeId);
 		GpuLatest.Remove(RopeId);
 		GpuLatestContacts.Remove(RopeId);
+		PendingSimTimeRefund.Remove(RopeId);
 		RegisteredRopeIds.Remove(RopeId);
 	}
 	UE_LOG(LogDynamicRope, Verbose, TEXT("UnregisterRope: %s (%d remaining)"),
@@ -234,6 +235,7 @@ void URopeSimSubsystem::ReleaseGpuResourcesForDeadRopes()
 		GpuSolver.ReleaseRope(RopeId);
 		GpuLatest.Remove(RopeId);
 		GpuLatestContacts.Remove(RopeId);
+		PendingSimTimeRefund.Remove(RopeId);
 		It.RemoveCurrent();
 	}
 }
@@ -672,6 +674,15 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_GPUGetLatest);
 		GpuSolver.GetLatest(GpuLatest);
+		// 뷰 확장이 소비 못 한 채 교체된 step의 시뮬 시간을 회수한다(아래 TryBuildResidentStep이 되돌린다).
+		{
+			TMap<uint32, float> Dropped;
+			GpuSolver.DrainDroppedSimTime(Dropped);
+			for (const TPair<uint32, float>& Pair : Dropped)
+			{
+				PendingSimTimeRefund.FindOrAdd(Pair.Key) += Pair.Value;
+			}
+		}
 		if (bUseGPUContacts)
 		{
 			// G3: 접촉 감지 결과 회수(Finalize 전에 귀속).
@@ -1121,6 +1132,14 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 	Schedule.FixedDt = 0.0f;
 	if (Rope.SimFrame.bSolveThisFrame)
 	{
+		// dispatch되지 못하고 버려진 step의 시간을 accumulator로 되돌린 뒤 스케줄을 짠다 — 그래야
+		// accumulator가 "시뮬된 시간"의 단일 진실로 유지된다. 되돌린 뒤 바로 아래 RopeSolverSubsteps가
+		// MaxAccum으로 클램프하므로 긴 정지 뒤 몰아치기는 기존 slow-mo 정책 그대로 제한된다.
+		float Refund = 0.0f;
+		if (PendingSimTimeRefund.RemoveAndCopyValue(RopeId, Refund) && Refund > 0.0f)
+		{
+			S.TimeAccumulator += Refund;
+		}
 		Schedule = RopeSolverSubsteps(S, Rope.SolverConfig, DeltaTime);
 	}
 
