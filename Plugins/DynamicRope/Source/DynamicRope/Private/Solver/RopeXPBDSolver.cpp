@@ -181,6 +181,8 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 		// collision이 매 iteration distance/bending과 동등하게 경쟁해 장력에 안 밀린다(관통 차단). 노드가 substep
 		// 안에서 많이 움직여 평면이 낡으면 K>1로 중간 갱신.
 		const int32 CollPasses = FMath::Clamp(Config.CollisionPassesPerSubstep, 1, Iters);
+		// 접촉 해소 주기. 패스의 마지막 iteration부터 거꾸로 세므로 마지막은 항상 포함된다(아래 참조).
+		const int32 ContactInterval = FMath::Max(1, Config.ContactSolveInterval);
 		int32 ItDone = 0;
 		for (int32 p = 0; p < CollPasses; ++p)
 		{
@@ -193,8 +195,16 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 				const bool bReverse = (ItDone & 1) != 0;
 				SolveDistance(State, Config, FixedDt, bReverse, LambdaDist);
 				SolveBending(State, Config, FixedDt, bReverse, LambdaBend);
-				SolveContacts(State, Config, Colliders, ColliderBounds, Candidates, Contacts);
-				SolveSegmentContacts(State, Config, Colliders, ColliderBounds, Candidates, bReverse);
+
+				// 접촉은 ContactInterval마다. 주기를 패스의 *마지막* iteration에서 거꾸로 세는 것이 요점이다 —
+				// 나머지 연산이 0이 되는 지점에 마지막이 항상 포함되므로, 어떤 Interval에서도 "distance/bending이
+				// 마지막으로 당긴 뒤 되밀지 못한 채 substep이 끝나는" 관통을 구조적으로 막는다.
+				// Interval >= 패스당 iteration 수 → 패스당 정확히 1회 = GPU 커널과 같은 cadence.
+				if (((ItTarget - 1 - ItDone) % ContactInterval) == 0)
+				{
+					SolveContacts(State, Config, Colliders, ColliderBounds, Candidates, Contacts);
+					SolveSegmentContacts(State, Config, Colliders, ColliderBounds, Candidates, bReverse);
+				}
 			}
 		}
 

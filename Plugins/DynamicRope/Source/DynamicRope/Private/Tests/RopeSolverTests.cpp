@@ -425,5 +425,63 @@ bool FRopeSolverColliderCandidateTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 접촉 해소 주기(ContactSolveInterval) 계약: 어떤 주기를 줘도 각 collision 패스의 *마지막* iteration에는
+// 반드시 접촉을 풀어야 한다. 안 그러면 distance/bending이 마지막으로 당긴 것을 되밀 기회 없이 substep이
+// 끝나 관통 상태로 남는다. 거리 제약이 노드를 콜라이더 *중심*으로 계속 끌어당기는 fixture로 확인한다 —
+// 주기를 패스 시작부터 세는 순진한 구현이면 Interval > Iterations에서 마지막이 빠져 여기서 무너진다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverContactCadenceTest,
+	"DynamicRope.Solver.ContactSolveIntervalKeepsLastIteration",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSolverContactCadenceTest::RunTest(const FString& Parameters)
+{
+	// 구 반경 5 + 노드 두께 2 → 표면 z = 7. node0을 z=200에 핀 고정하고 rest 길이도 200이라 거리 제약이
+	// node1을 z=0(구 중심)으로 끌어당긴다 → 충돌과 정면으로 경쟁하는, cadence에 가장 민감한 조건.
+	constexpr float SurfaceZ = 7.0f;
+
+	auto DeepestZ = [](int32 Interval) -> float
+	{
+		FRopeSimState Sim = RopeTest::MakeStraightRope(2, 200.0f);
+		Sim.Positions[0] = FVector(0.0f, 0.0f, 200.0f);
+		Sim.PrevPositions[0] = Sim.Positions[0];
+		Sim.bStartPinned = true;
+		Sim.StartPinPrev = Sim.Positions[0];
+		Sim.StartPinTarget = Sim.Positions[0];
+		Sim.InvMass[0] = 0.0f;
+		Sim.Positions[1] = FVector(0.0f, 0.0f, 40.0f);
+		Sim.PrevPositions[1] = Sim.Positions[1];
+
+		RopeTest::FSphereMockCollider Sphere(FVector::ZeroVector, 5.0f, FName("static"));
+		const TArray<IRopeCollider*> Colliders = { &Sphere };
+
+		FRopeSolverConfig Config = MakeStiffConfig();
+		Config.Gravity = FVector(0.0f, 0.0f, -980.0f);
+		Config.CollisionRadius = 2.0f;
+		Config.ContactSolveInterval = Interval;
+
+		const FRopeXPBDSolver Solver;
+		float Deepest = 1.0e30f;
+		for (int32 Frame = 0; Frame < 180; ++Frame)
+		{
+			Solver.Step(Sim, Config, Colliders, 1.0f / 60.0f);
+			// 안착 뒤 구간만 본다(초기 낙하는 swept CCD가 잡는다).
+			if (Frame >= 60)
+			{
+				Deepest = FMath::Min(Deepest, static_cast<float>(Sim.Positions[1].Z));
+			}
+		}
+		return Deepest;
+	};
+
+	// MakeStiffConfig는 Iterations=8. 그보다 큰 주기(= 패스당 1회로 떨어지는 GPU cadence)까지 확인한다.
+	for (const int32 Interval : { 1, 2, 3, 8, 16 })
+	{
+		const float Deepest = DeepestZ(Interval);
+		TestTrue(FString::Printf(TEXT("interval=%d keeps the node outside the surface (deepest z=%.3f, surface %.1f)"),
+			Interval, Deepest, SurfaceZ), Deepest > SurfaceZ - 0.5f);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
 

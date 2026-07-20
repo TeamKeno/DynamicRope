@@ -856,6 +856,19 @@ struct FRopeSolverConfig
 	 *  나눠 사이사이 충돌을 끼운다 → 더 sharp한 끼인각까지 방어(>1일수록 강하지만 비용↑). Iterations로 상한. */
 	int32 CollisionPassesPerSubstep = 1;
 
+	/** 접촉 제약을 몇 iteration마다 풀지(CPU 폴백 전용 — GPU 커널은 원래 collision 패스당 1회다).
+	 *  1 = 매 iteration(기본, 기존 동작). N = N iteration마다 1회.
+	 *
+	 *  **어떤 값을 줘도 각 collision 패스의 *마지막* iteration에는 반드시 푼다.** 이게 계약의 핵심이다 —
+	 *  마지막에 안 풀면 그 뒤로 distance/bending이 노드를 표면 안으로 당긴 걸 되밀 기회가 없어 substep이
+	 *  관통 상태로 끝난다. 그래서 N을 Iterations 이상으로 주면 "패스당 정확히 1회" = GPU와 같은 cadence가 된다.
+	 *
+	 *  매 iteration 푸는 편이 sharp한 끼인각에서 더 강하다(충돌이 distance/bending과 매번 경쟁하므로 장력에
+	 *  안 밀린다). N을 키우면 그 경쟁 횟수를 줄여 비용을 선형으로 깎는 대신 관통 여유가 줄어든다.
+	 *  Query가 비싼 SDF 콜라이더에서 CPU 폴백 비용을 직접 나누는 유일한 손잡이다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", AdvancedDisplay, meta = (ClampMin = "1"))
+	int32 ContactSolveInterval = 1;
+
 	/** XPBD stretch compliance(stiffness의 역수). 0 = 신장 불가(inextensible). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0"))
 	float StretchCompliance = 0.0f;
