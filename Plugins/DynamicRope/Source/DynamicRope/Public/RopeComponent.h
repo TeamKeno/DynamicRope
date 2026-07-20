@@ -922,6 +922,25 @@ private:
 	// UpdateTether가 모드 분기로 위임한다. λ/장력 관측치는 PullDrive.LastTetherLambda(+Dt)에 남는다.
 	void UpdateConstraintTether(float DeltaTime);
 
+	// (Constraint 테더 — 랙돌 대상 절반) 엔진 물리 제약: 코너의 키네마틱 프록시 ↔ 감긴 본의 앵커 점을
+	// 다리 rest 길이의 구면 리밋으로 묶는다. GT 프레임당 임펄스는 관절체에서 "전신 크기 kick → 폭주" vs
+	// "본 크기 λ → 견인력 붕괴" 딜레마가 있어(2026-07-20 Pierce 실측 반복), 랙돌 쪽은 Chaos 제약이
+	// 서브스텝에서 관절·접촉과 함께 푼다(Docs/PoC/05 §3.4-1). 갱신은 UpdateConstraintTether가 매 Wrapped
+	// 프레임, 해체는 phase 전이(ResetTransientPhaseState)/모드 이탈/대상·본 변경/EndPlay에서.
+	void UpdatePhysicalTether(class USkeletalMeshComponent* TargetSkel, FName Bone,
+		const FVector& AnchorWorld, const FVector& CornerWorld, float LegRestLen, float DeltaTime);
+	void TeardownPhysicalTether();
+
+	/** 물리 제약 테더의 키네마틱 프록시(코너 추종)와 제약 — 런타임 전용, Constraint 모드 스켈레탈 대상에서만 산다. */
+	UPROPERTY(Transient)
+	TObjectPtr<class USphereComponent> PhysicalTetherProxy;
+	UPROPERTY(Transient)
+	TObjectPtr<class UPhysicsConstraintComponent> PhysicalTetherConstraint;
+	// 제약이 묶은 대상/본(변경 감지 → 재생성)과 현재 리밋(cm — 갱신 스킵용, <0 = 미설정).
+	TWeakObjectPtr<class USkeletalMeshComponent> PhysicalTetherTarget;
+	FName PhysicalTetherBone = NAME_None;
+	float PhysicalTetherLimit = -1.0f;
+
 	// (테더 공용) wielder 견인 방향(손(노드0)→로프 첫 다리 = 앵커 쪽)을 산출해 PullDrive.SmoothedWielderPullDir로
 	// EMA 스무딩(PullDirSmoothTime)해 반환. MassShare/BinaryPullable의 wielder 몫이 공유 — 방향 지터로 클램프
 	// 축이 튀는 것을 막는다(180° 반전 축퇴는 raw로 재시드).

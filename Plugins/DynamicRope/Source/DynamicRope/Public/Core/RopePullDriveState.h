@@ -113,6 +113,9 @@ struct FRopePullDriveState
 	int32 PrevAnchorNode = -1;
 	bool bPrevFreeRestValid = false;
 
+	// (Constraint 모드의 스켈레탈 대상 관측/인가 상태는 여기 없다 — 랙돌 절반은 엔진 물리 제약이 담당한다:
+	//  URopeComponent::UpdatePhysicalTether. GT 임펄스 관측 상태(점 속도 EMA)는 그 전환으로 폐기됐다.)
+
 	/**
 	 * 테더 대상 몫(shareT)의 시간 스무딩 상태(자동 분배). 접지↔공중/질량 변화로 프레임 간 튀는 것을 EMA로
 	 * 흡수한다. <0 = 미초기화(wrap 시작 후 첫 유효 프레임에 측정값으로 시드). ResetTransient에서 -1로 리셋.

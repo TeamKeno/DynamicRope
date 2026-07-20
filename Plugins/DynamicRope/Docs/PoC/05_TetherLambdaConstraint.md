@@ -58,9 +58,15 @@ L_rest = AnchorNode × SegmentLength + TetherSlack
 ```
 
 현행 overshoot(`UpdateTether`의 fractional aim 기반 첫 다리 초과분)와 달리 **전 체인** 기하를
-쓴다. 이러면 "sub-leg overshoot가 슬랙 로프에서 발화"하던 문제(팽팽 게이트 3종을 낳은 원인)가
-정의상 사라진다: 처짐/구김 = chord 합 < rest = C < 0 = λ = 0. **C ≤ 0이면 이번 프레임 무동작**
-— 이것이 슬랙 게이트의 전부다.
+쓴다. 처짐/구김 = chord 합 < rest = C < 0 = λ = 0.
+
+> **정정(2026-07-20 랙돌 PIE)**: 초안은 "C ≤ 0이 슬랙 게이트의 전부"라고 주장했으나 틀렸다.
+> C의 소스(비클램프 chord 합)는 **부분 스트레치에 오염**된다 — 랙돌 본이 요동치면 앵커 인접
+> 다리만 strain limit(1.5×)까지 늘어나, 나머지가 늘어져 있어도 합이 rest를 넘어 슬랙 로프에서
+> C > 0이 된다. 그 가짜 C에 λ가 상한까지 발화 → 쌍 임펄스 견인 → 요동 가속 → 더 큰 스트레치의
+> 정귀환(실측: T=상한 클램프 빨강 + 랙돌·wielder 동반 요동). 따라서 발화 조건은
+> **C > 0 ∧ 전 체인 팽팽(bChainTaut — 클램프 chord 비율·최소 전달 장력·처짐 3중 게이트)**이다.
+> 레거시가 3차 보강(CL 466→470)으로 얻은 게이트가 Constraint에서도 정본으로 남는다.
 
 ### 3.2 끝점 관측
 
@@ -119,10 +125,13 @@ s*     = −β · C / dt                          // 목표: 이번 프레임 C�
 기존 `ResolveTetherEndpoint` 래더와 `ApplyToTetherEndpoint` 디스패치, `ApplyTractionToReceiver`
 관문을 그대로 쓴다. 정정/규약:
 
-1. **풀 랙돌**: 유효질량 = **전신 바디 질량 합**(현행: 감긴 본 바디 질량 — 팔 3kg으로 오판해
-   분배/pullable을 오염시키던 것). 인가 = `SetAllPhysicsLinearVelocity(bAddToCurrent=true)`
-   전체 평행이동(BinaryPullable이 이미 쓰는 방식 — 상대 속도 보존, 관절 다이내믹 유지).
-   **MassShare의 단일 본 슬램(ServoVelocity)은 폐기**한다(관절 에너지 펌핑 = 폭주 입력).
+1. **풀 랙돌**: ~~인가 = 전체 평행이동~~ → **(정정 2026-07-20, Pierce PIE 5차) 점 Jacobian으로 교체**:
+   관측 s = 앵커 점 속도(EMA), 유효 역질량 w_point = 1/m + (r×d)ᵀI⁻¹(r×d), 인가 =
+   `AddImpulseAtLocation(λ·d, 앵커, 본)`. COM 평행이동은 레버(Pierce 창 끝) 스윙이 만드는 점 오차를
+   **영영 닫을 수 없어** λ가 상한으로 와인드업하는 구조적 폭주가 있었다 — 점 임펄스는 오차를 직접
+   닫고(당기면 창이 로프 방향으로 정렬), 관측·질량·인가가 같은 Jacobian이라 자기일관적이다.
+   임펄스는 λ 상한으로 유계라 구 velocity-set 단일 본 슬램(무한 힘)과 다르다. 잔여 스핀은 인가 후
+   각속도 클램프(ActivePullMaxAngularSpeed). 분배/pullable 판정의 유효질량은 종전대로 전신 바디 합.
 2. **부분 랙돌(시뮬 본이 키네마틱 체인에 묶임)**: rung 1에서 **Character로 폴스루**한다
    (유효질량 = CMC 질량 × 브레이스, 인가 = CMC). 감긴 본에는 시각 반응용 소량 임펄스만 옵션.
    → `ResolveTetherEndpoint` rung 1 주석의 "알려진 한계"(2026-07-15 보류)를 이 설계로 해소.
@@ -141,7 +150,7 @@ s*     = −β · C / dt                          // 목표: 이번 프레임 C�
 
 | 제거 대상 | 근거 |
 |---|---|
-| 팽팽 게이트 3종의 **테더 게이트 역할** (TautSlackRatio/TautMinTension/TautMaxSag) | C가 전 체인 chord 합 기반 — 슬랙이면 C<0=무동작. 게이트는 **능동 Pull 전용**으로 강등(IsPullTaut API 유지) |
+| ~~팽팽 게이트 3종의 테더 게이트 역할~~ | **유지로 정정**(§3.1 정정 참조) — C는 부분 스트레치에 오염돼 단독 게이트가 못 된다. Constraint 발화 = C > 0 ∧ bChainTaut |
 | 앵커 속도 피드포워드 (SmoothedAnchorVelocity의 견인 사용) | s가 실측 상대 속도 — 순항 앵커 자동 추종. EMA 자체는 디버거 표시용으로 유지 |
 | 슬랙 브레이크 + TowedVelDebt 장부 | λ는 벌어질 때만·회수량만 인가 — 과잉 주입이 없어 회수할 장부가 없다 |
 | TetherReelSpeed의 상시 리엘 | 능동 견인은 되감기(rest 축소)가 유일한 경로 — s의 dL_rest/dt 항으로 자연 유입 |

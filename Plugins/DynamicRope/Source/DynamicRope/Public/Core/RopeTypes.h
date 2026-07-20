@@ -757,10 +757,13 @@ struct FRopePullSample
 	/**
 	 * 앵커→손 코너-다리 chord 합의 **비클램프** 값(cm) — TautChordLen과 달리 다리별 rest 클램프를 하지
 	 * 않아, 스트레치된 다리는 그만큼 합을 키운다. Constraint 테더의 제약 위반 관측치: C = 이 값 −
-	 * (FreeRestLen + TetherSlack)이 양수 = 경로가 rest를 실제로 초과(팽팽 + 스트레치)일 때만 λ가 나온다.
-	 * 처짐/구김은 chord ≤ 호 길이라 음수 = 자동 슬랙(별도 팽팽 게이트 불필요 — Docs/PoC/05 §3.1).
-	 * (TautChordLen의 클램프는 "스트레치가 다른 구간 슬랙을 은폐하지 않게"라는 팽팽 *게이트* 전용 규약이라
-	 * 제약 위반량으로는 못 쓴다 — 클램프 합은 정의상 FreeRestLen을 넘지 못해 C가 항상 음수가 된다.)
+	 * (FreeRestLen + TetherSlack). (TautChordLen의 클램프는 팽팽 *게이트* 전용 규약이라 제약 위반량으로는
+	 * 못 쓴다 — 클램프 합은 정의상 FreeRestLen을 넘지 못해 C가 항상 음수가 된다.)
+	 *
+	 * ⚠ C > 0은 발화의 **필요조건일 뿐**이다(∧ bChainTaut — 랙돌 PIE 2026-07-20 교훈): 랙돌 본 요동이
+	 * 앵커 인접 다리만 strain limit까지 늘리면 나머지가 늘어져 있어도 합이 rest를 넘어 슬랙 로프에서
+	 * C > 0이 된다(부분 스트레치 오염). 그 가짜 C에 λ가 발화하면 견인→요동→스트레치의 정귀환 폭주가
+	 * 된다 — "전체가 펴졌는가"의 정본은 여전히 3중 팽팽 게이트다.
 	 */
 	float   PathChordLen = 0.0f;
 
@@ -1335,9 +1338,10 @@ enum class ERopeTetherMode : uint8
 	 * (실험 — Docs/PoC/05) 초과분을 **단일 장력 임펄스 λ**로 회수한다: 프레임당 λ 하나를 풀어 양끝에
 	 * 크기가 같은 임펄스 쌍(각자 다리 방향, ΔV = λ×유효 역질량)으로 인가한다. 분배(무거운 쪽이 덜
 	 * 움직임/앵커 정지)는 역질량에서 자동 유도되고, 상대 *접근*만 만들므로 끝별 서보의 에너지 주입
-	 * (폭주)·상시 리엘의 윈치화가 구조적으로 없다. 슬랙 게이트 = C ≤ 0 그 자체(팽팽 게이트 3종은 능동
-	 * Pull 전용으로 물러난다). 노브: TetherSettleTime/MaxTetherTension/TetherCompliance(+ 상한 재사용
-	 * TetherMaxSpeed). 검증 후 기본이 되고 두 레거시 모드를 대체할 예정.
+	 * (폭주)·상시 리엘의 윈치화가 구조적으로 없다. 발화 = C > 0 ∧ 전 체인 팽팽(bChainTaut 3중 게이트 공유
+	 * — C의 소스는 부분 스트레치에 오염될 수 있어 C 단독으로는 게이트가 못 된다, PathChordLen 주석 참조).
+	 * 노브: TetherSettleTime/MaxTetherTension/TetherCompliance(+ 상한 재사용 TetherMaxSpeed).
+	 * 검증 후 기본이 되고 두 레거시 모드를 대체할 예정.
 	 */
 	Constraint = 2 UMETA(DisplayName = "Constraint (Lambda)"),
 };
