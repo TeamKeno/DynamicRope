@@ -106,6 +106,20 @@ private:
 	FVector PrevB = FVector::ZeroVector;
 	bool    bHasPrevEndpoints = false;
 
+	/**
+	 * 디테일 push-out 백킹 스토리지: 대상이 StaticBodyProvider 스캔 밖 채널(PhysicsBody 등 — Movable+Simulate
+	 * Physics로 drag하는 프롭)일 때, 대상 심플 콜리전 전체를 여기 담아 wrap 셰이프와 함께 서빙한다. Bone=None →
+	 * IsWorldStatic()=true → detect 제외(push-out 전용, wrap엔 단일 Capsule/Box만 참여). 프레임당 1회 재구성이라
+	 * 넘겨준 포인터는 solve 끝까지 유효(StaticBodyProvider와 동일 계약).
+	 */
+	TArray<FRopeBoxCollider>            PushOutBoxes;
+	TArray<FRopeStaticCapsuleCollider> PushOutCapsules;
+	TArray<FRopeConvexCollider>        PushOutConvexes;
+
+	/** push-out 셰이프의 무버블 표면 속도용: 이전 프레임 컴포넌트 월드 트랜스폼(+1/dt). 정적이면 InvDt 0. */
+	FTransform PrevCompTM = FTransform::Identity;
+	bool       bHasPrevCompTM = false;
+
 	/** 진단 로그 1회 가드(등록/대상/캡슐 상태를 스팸 없이 한 번만 남긴다). */
 	bool    bDiagnosticsLogged = false;
 

@@ -10,6 +10,10 @@
 #include "PhysicsEngine/BodySetup.h"
 #include "GameFramework/Actor.h"
 #include "Engine/World.h"
+// 심플 콜리전 전체 → push-out 콜라이더 추출(StaticBodyProvider와 공용 헬퍼)
+#include "Collision/RopeBodyColliderExtraction.h"
+// UDynamicRopeSettings(예산/컨벡스 평면 상한 + bIncludeWorldDynamic 채널 판정)
+#include "Settings/DynamicRopeSettings.h"
 
 URopeWrapTargetComponent::URopeWrapTargetComponent()
 {
@@ -380,6 +384,36 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 			BuildCapsule(Comp);
 		}
 
+		// 디테일 push-out(auto 채널 판단): 대상이 StaticBodyProvider의 스캔 채널(WorldStatic + 설정 시 WorldDynamic)
+		// 밖(PhysicsBody 등 — drag 위해 Movable+Simulate Physics로 만든 프롭)이면 StaticBodyProvider가 그 프롭을
+		// 못 보므로, 대상 심플 콜리전 전체를 push-out 콜라이더로 직접 추출한다(Bone=None → detect 제외, wrap엔 위
+		// 단일 셰이프만 참여). 커버되는 채널이면 스킵 → StaticBodyProvider가 담당(중복 없음). 조건이 bIncludeWorldDynamic을
+		// 읽어 StaticBodyProvider의 실제 스캔 범위를 미러링한다(공백 채움: 설정 off면 WorldDynamic도 여기서 채움).
+		PushOutBoxes.Reset();
+		PushOutCapsules.Reset();
+		PushOutConvexes.Reset();
+		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Comp))
+		{
+			const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
+			const ECollisionChannel ObjType = Prim->GetCollisionObjectType();
+			const bool bCoveredByStaticProvider = ObjType == ECC_WorldStatic ||
+				(Settings && Settings->bIncludeWorldDynamic && ObjType == ECC_WorldDynamic);
+			UBodySetup* Setup = Prim->GetBodySetup();
+			if (!bCoveredByStaticProvider && Setup)
+			{
+				const FTransform CompTM = Comp->GetComponentTransform();
+				const float FrameDt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
+				const float InvDt = (bHasPrevCompTM && FrameDt > KINDA_SMALL_NUMBER) ? 1.0f / FrameDt : 0.0f;
+				const FTransform PrevTM = bHasPrevCompTM ? PrevCompTM : CompTM;
+				const int32 MaxCol = Settings ? Settings->StaticBodyMaxCollidersPerRope : 32;
+				const int32 MaxPlanes = Settings ? Settings->StaticBodyMaxConvexPlanes : 32;
+				RopeBodyColliderExtraction::AppendBodyColliders(*Setup, CompTM, PrevTM, InvDt,
+					MaxCol, MaxPlanes, PushOutBoxes, PushOutCapsules, PushOutConvexes, [](int32){});
+				PrevCompTM = CompTM;
+				bHasPrevCompTM = true;
+			}
+		}
+
 		// 진단: 첫 빌드 시 셰이프/형상·본을 1회 로그(이 로그가 안 뜨면 GatherColliders 미호출 =
 		// provider 미등록 또는 로프 소유자 제외(같은 액터) 또는 근처 로프 없음).
 		if (!bDiagnosticsLogged)
@@ -418,5 +452,10 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 	{
 		Gather.Colliders.Add(&Capsule);
 	}
+	// 디테일 push-out 셰이프도 함께 서빙(있을 때만 — auto 판단으로 채널 밖일 때만 채워짐). wrap 셰이프와 한
+	// 그룹으로 region 매핑(GetWorldBounds 기반이라 타입 혼재 무관, 매핑은 아래 한 번 호출로 충분).
+	for (FRopeBoxCollider& B : PushOutBoxes)              { Gather.Colliders.Add(&B); }
+	for (FRopeStaticCapsuleCollider& C : PushOutCapsules) { Gather.Colliders.Add(&C); }
+	for (FRopeConvexCollider& Cv : PushOutConvexes)       { Gather.Colliders.Add(&Cv); }
 	RopeColliderGather::MapCollidersToRegionsByBounds(Gather, StartIndex);
 }
