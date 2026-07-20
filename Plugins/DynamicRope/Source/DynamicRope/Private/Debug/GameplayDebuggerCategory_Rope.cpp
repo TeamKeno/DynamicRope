@@ -557,30 +557,35 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			AddTextLine(FString::Printf(TEXT("    tension=%.0f (release off)"), S.WrapTension));
 		}
 
-		// Pull 방향 진단 시각화(장력 유무와 무관하게 bPullValid면 항상). 방향 문제를 눈으로 확정하기 위한 것:
-		//  - 청록 선/점 = 앵커 → walk가 멈춘 조준 노드(첫 직선 다리). 이 끝이 벽 모서리에 놓여야 정상이고,
-		//    프레임마다 조준 노드(aim=node#)가 튀면 방향이 통째로 점프하는 신호.
-		//  - 노랑 화살표 = 스무딩 전 raw look-ahead 방향(프레임 지터가 여기서 보인다).
-		//  - 초록 화살표 = EMA 스무딩 후(실제 인가) 방향. raw 대비 안정적이어야 한다.
-		//  - 텍스트 raw↔smooth = 두 방향의 각도차(도) = 이번 프레임 지터 크기.
+		// Pull 방향(장력 유무와 무관하게 bPullValid면 항상). 기본은 **실제로 인가되는 것**만 그린다:
+		//  - 청록 선/점 = 앵커 → walk가 멈춘 조준 노드(첫 직선 다리). 이 끝이 벽 모서리에 놓여야 정상이다.
+		//  - 초록 화살표 = EMA 스무딩 후 = 이번 프레임 실제 인가 방향.
 		if (S.bPullValid)
 		{
-			const float DiagLen = 40.0f;
+			constexpr float DiagLen = 40.0f;
 			AddShape(FGameplayDebuggerShape::MakeSegment(S.PullPoint, S.PullAimPoint, 3.0f, FColor::Cyan));
 			AddShape(FGameplayDebuggerShape::MakePoint(S.PullAimPoint, 6.0f, FColor::Cyan));
-			AddShape(FGameplayDebuggerShape::MakeArrow(S.PullPoint, S.PullPoint + S.PullDirRaw * DiagLen,
-				6.0f, 1.5f, FColor::Yellow));
 			AddShape(FGameplayDebuggerShape::MakeArrow(S.PullPoint, S.PullPoint + S.PullDirection * DiagLen,
 				8.0f, 2.0f, FColor::Green));
-			const float JitterDeg = FMath::RadiansToDegrees(FMath::Acos(
-				FMath::Clamp(static_cast<float>(FVector::DotProduct(S.PullDirRaw, S.PullDirection)), -1.0f, 1.0f)));
-			AddTextLine(FString::Printf(TEXT("    {grey}pull-dir aim=node%d raw<->smooth=%.1f deg"),
-				S.PullAimNode, JitterDeg));
+
+			// 스무딩 전 raw 방향과의 대조는 EMA 계수를 맞출 때 쓰는 것이라 상세 보기로 둔다.
+			// 노랑 화살표 = raw look-ahead, 각도차 = 이번 프레임 지터. 조준 노드가 프레임마다 튀면 방향이
+			// 통째로 점프한다는 신호라 그 노드 번호도 함께 낸다.
+			if (HasView(EView::Advanced))
+			{
+				AddShape(FGameplayDebuggerShape::MakeArrow(S.PullPoint, S.PullPoint + S.PullDirRaw * DiagLen,
+					6.0f, 1.5f, FColor::Yellow));
+				const float JitterDeg = FMath::RadiansToDegrees(FMath::Acos(
+					FMath::Clamp(static_cast<float>(FVector::DotProduct(S.PullDirRaw, S.PullDirection)), -1.0f, 1.0f)));
+				AddTextLine(FString::Printf(TEXT("    {grey}pull-dir aim=node%d raw<->smooth=%.1f deg dir=%s"),
+					S.PullAimNode, JitterDeg, *S.PullDirection.ToCompactString()));
+			}
 		}
 
-		// Pull 상태(샘플은 항상 산출) — 유효+장력>0(수치), 유효+슬랙, 무효(앵커가 손 노드거나 없음).
-		// tether = 가용 로프 길이 초과분(자동 견인 입력), active = 능동 Pull 힘(입력 홀드).
-		if (S.bPullValid && S.PullTension > KINDA_SMALL_NUMBER)
+		// Pull 상태(샘플은 항상 산출). 기본 줄은 **결론**만 낸다 — 당기고 있는가(tension), 팽팽한가(taut,
+		// 능동 Pull 인가 조건), 얼마나 초과했고 놓칠 만한가(tether/release), 입력이 걸렸는가(active).
+		// 그 결론을 만든 관측치(chain 기하·방향 벡터·λ 내부값)는 아래 상세 줄로 내린다.
+		if (S.bPullValid)
 		{
 			// 거리 release가 실제로 도는 모드에서 켜져 있으면 초과분이 한계에 근접/초과할 때 색으로
 			// 경고(노랑 80%+, 빨강 초과). GuaranteedWrap은 거리 해제도 무효라 경고 대상이 아니다.
@@ -590,31 +595,44 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				OvershootColor = (S.TetherOvershoot > S.DistanceReleaseSlack) ? TEXT("{red}")
 					: (S.TetherOvershoot > S.DistanceReleaseSlack * 0.8f) ? TEXT("{yellow}") : TEXT("{white}");
 			}
-			// Constraint(λ) 모드는 테더 장력(λ/dt)과 상한을 덧붙인다 — 상한 80%+ 노랑, 도달 빨강(클램프 중).
-			FString ConstraintInfo;
-			if (S.bConstraintTetherMode)
+
+			if (S.PullTension > KINDA_SMALL_NUMBER)
 			{
-				const TCHAR* TensionColor = TEXT("{cyan}");
-				if (S.MaxTetherTension > 0.0f)
-				{
-					TensionColor = (S.TetherTension >= S.MaxTetherTension * 0.999f) ? TEXT("{red}")
-						: (S.TetherTension > S.MaxTetherTension * 0.8f) ? TEXT("{yellow}") : TEXT("{cyan}");
-				}
-				ConstraintInfo = FString::Printf(TEXT(" constraint %sT=%.0f{white}/%.0f"),
-					TensionColor, S.TetherTension, S.MaxTetherTension);
+				AddTextLine(FString::Printf(
+					TEXT("    {orange}pull{white} tension=%.0f taut=%s{white} tether=%s%.0fcm{white}(release=%.0f) active=%.0f"),
+					S.PullTension, S.bPullTaut ? TEXT("{green}Y") : TEXT("{grey}N"),
+					OvershootColor, S.TetherOvershoot, S.DistanceReleaseSlack, S.ActivePullForce));
 			}
-			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f taut=%s{white} chain=%s{white}(%.0f/%.0fcm, minT=%.0f, sag=%.0f) dir=%s tether=%s%.0fcm{white}(x%.2f, release=%.0f) active=%.0f%s"),
-				S.PullTension, S.bPullTaut ? TEXT("{green}Y") : TEXT("{grey}N"),
-				S.bChainTaut ? TEXT("{green}Y") : TEXT("{grey}N"), S.TautChordLen, S.FreeRestLen, S.MinFreeTension, S.MaxLegSag,
-				*S.PullDirection.ToCompactString(), OvershootColor, S.TetherOvershoot,
-				S.TetherResponse, S.DistanceReleaseSlack, S.ActivePullForce, *ConstraintInfo));
-		}
-		else if (S.bPullValid)
-		{
-			AddTextLine(FString::Printf(TEXT("    {grey}pull slack (tension 0, chain=%s %.0f/%.0fcm minT=%.0f sag=%.0f, tether=%.0fcm x%.2f%s)"),
-				S.bChainTaut ? TEXT("Y") : TEXT("N"), S.TautChordLen, S.FreeRestLen, S.MinFreeTension, S.MaxLegSag,
-				S.TetherOvershoot, S.TetherResponse,
-				S.bConstraintTetherMode ? *FString::Printf(TEXT(", constraint T=%.0f"), S.TetherTension) : TEXT("")));
+			else
+			{
+				// 장력 0 = 슬랙. 이 상태가 의외라면 chain 기하(상세 줄)가 이유를 말해준다.
+				AddTextLine(FString::Printf(TEXT("    {grey}pull slack (tension 0, tether=%.0fcm)"), S.TetherOvershoot));
+			}
+
+			// 상세: 결론을 만든 관측치. chain은 견인의 선행 게이트(코너-다리 chord 합 vs rest 길이),
+			// minT=0이면 장력이 손까지 전달되지 않는다는 뜻, sag는 다리별 최대 처짐이다.
+			if (HasView(EView::Advanced))
+			{
+				FString ConstraintInfo;
+				if (S.bConstraintTetherMode)
+				{
+					// 상한 대비 색(80%+ 노랑, 도달 빨강 = 클램프 중). 상한에 붙는 것 자체는 설계된 동작이라
+					// 별도 경고 문구 없이 색으로만 드러낸다.
+					const TCHAR* TensionColor = TEXT("{cyan}");
+					if (S.MaxTetherTension > 0.0f)
+					{
+						TensionColor = (S.TetherTension >= S.MaxTetherTension * 0.999f) ? TEXT("{red}")
+							: (S.TetherTension > S.MaxTetherTension * 0.8f) ? TEXT("{yellow}") : TEXT("{cyan}");
+					}
+					ConstraintInfo = FString::Printf(TEXT(" constraint %sT=%.0f{white}/%.0f"),
+						TensionColor, S.TetherTension, S.MaxTetherTension);
+				}
+				AddTextLine(FString::Printf(
+					TEXT("      {grey}chain=%s{grey}(%.0f/%.0fcm, minT=%.0f, sag=%.0f) tetherResponse=x%.2f%s"),
+					S.bChainTaut ? TEXT("{green}Y") : TEXT("{grey}N"),
+					S.TautChordLen, S.FreeRestLen, S.MinFreeTension, S.MaxLegSag,
+					S.TetherResponse, *ConstraintInfo));
+			}
 		}
 		else
 		{
