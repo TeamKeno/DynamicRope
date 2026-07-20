@@ -205,4 +205,55 @@ bool FRopeSDFSamplerBitExactTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// SampleGradient의 격자 경계 폴백(#4, CL 463)을 직접 못박는다.
+//
+// 축당 순방향 차분은 +H 프로브가 그리드 Max 면을 벗어나면 SampleTrilinear가 경계면으로 클램프해
+// 그 축 차분이 0으로 죽는다 → 법선에서 그 축 성분이 통째로 사라져 본 이음매(절단면) 밖에서 법선이
+// 접선 방향으로 눕고, 노드가 표면 밖이 아니라 옆으로 밀린다. CL 463이 그 축만 후방 차분으로
+// 대체해 고쳤지만 그 수정을 직접 검증하는 테스트가 없었다.
+//
+// 임계값은 폴백이 빠졌을 때 반드시 실패하도록 잡았다: 축이 죽으면 gradient가 축퇴해 샘플러가 +Z로
+// 폴백하는데, 모서리에서 참 법선은 (1,1,1)/sqrt(3)이라 +Z와의 내적이 0.577이다. 그래서 0.9를 쓴다
+// (0.5로 두면 폴백 벡터도 통과해 버려 테스트가 아무것도 못 잡는다).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFGradientAtGridMaxFaceTest,
+	"DynamicRope.SDF.GradientAtGridMaxFace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSDFGradientAtGridMaxFaceTest::RunTest(const FString& Parameters)
+{
+	// MakeSphere는 양자화 밴드를 데이터 최댓값에 맞추므로(클램프 없음) 경계/모서리에서도 거리가
+	// 포화되지 않는다 = 여기서 재는 gradient는 실제 정보를 담고 있다.
+	const FRopeBoneSDFVolume V =
+		RopeSDFSynthetic::MakeSphere(FName("face"), FVector::ZeroVector, 20.0f, FIntVector(31), 10.0f);
+	TestTrue(TEXT("synthetic volume is baked"), V.IsBaked());
+	const FVector Max = V.LocalBounds.Max;
+
+	// (1) +X Max 면 위(정확히 경계). 참 법선 = +X. 폴백이 없으면 X 성분이 죽어 실패한다.
+	{
+		const FVector N = RopeSDFSampler::SampleGradient(V, FVector(Max.X, 0.0, 0.0));
+		TestTrue(FString::Printf(TEXT("+X max-face normal is unit (len=%.4f)"), N.Size()),
+			FMath::Abs(static_cast<float>(N.Size()) - 1.0f) < 0.05f);
+		TestTrue(FString::Printf(TEXT("+X max-face normal keeps its X component (n=%s)"), *N.ToString()),
+			FVector::DotProduct(N, FVector::XAxisVector) > 0.9);
+	}
+
+	// (2) 세 축이 동시에 Max인 모서리 — 세 축 모두 폴백을 타야 한다.
+	{
+		const FVector N = RopeSDFSampler::SampleGradient(V, Max);
+		const FVector Truth = Max.GetSafeNormal();
+		TestTrue(FString::Printf(TEXT("max-corner normal is unit (len=%.4f)"), N.Size()),
+			FMath::Abs(static_cast<float>(N.Size()) - 1.0f) < 0.05f);
+		TestTrue(FString::Printf(TEXT("max-corner normal points along the true radial normal (n=%s)"), *N.ToString()),
+			FVector::DotProduct(N, Truth) > 0.9);
+	}
+
+	// (3) Min 면은 +H 프로브가 경계 안이라 순방향 차분 그대로 — 폴백과 무관하게 정상이어야 한다(대조).
+	{
+		const FVector N = RopeSDFSampler::SampleGradient(V, FVector(V.LocalBounds.Min.X, 0.0, 0.0));
+		TestTrue(FString::Printf(TEXT("-X min-face normal points -X (n=%s)"), *N.ToString()),
+			FVector::DotProduct(N, -FVector::XAxisVector) > 0.9);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
