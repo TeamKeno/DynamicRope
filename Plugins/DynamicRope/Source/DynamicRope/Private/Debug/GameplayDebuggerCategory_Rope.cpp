@@ -642,9 +642,14 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			{
 				const FVector AxisDir = S.WrapAxisDirection.GetSafeNormal();
 				const FVector AxisO = S.WrapAxisOrigin;
-				constexpr float AxisLen = 150.0f;
-				DrawDebugLine(World, AxisO - AxisDir * AxisLen, AxisO + AxisDir * AxisLen, FColor::Yellow, false, -1.0f, FG, 3.0f);
-				DrawDebugDirectionalArrow(World, AxisO, AxisO + AxisDir * AxisLen, 14.0f, FColor::Yellow, false, -1.0f, FG, 3.0f);
+				// 축 길이는 로프 스케일에 비례(max(80, SegmentLength×6)) — 구 r.DynamicRope.Debug.DrawWrappingAxis
+				// 즉시모드 드로우를 여기로 일원화하며 그 수식을 이식. 축이 퇴화(0벡터)면 선/화살표는 생략하고 텍스트만.
+				const float AxisLen = FMath::Max(80.0f, S.WrapAxisSegmentLength * 6.0f);
+				if (!AxisDir.IsNearlyZero())
+				{
+					DrawDebugLine(World, AxisO - AxisDir * AxisLen, AxisO + AxisDir * AxisLen, FColor::Yellow, false, -1.0f, FG, 3.0f);
+					DrawDebugDirectionalArrow(World, AxisO, AxisO + AxisDir * AxisLen, 16.0f, FColor::Yellow, false, -1.0f, FG, 3.0f);
+				}
 				AddTextLine(FString::Printf(TEXT("  {yellow}wrapAxis{grey} dir=%s"), *AxisDir.ToCompactString()));
 			}
 		}

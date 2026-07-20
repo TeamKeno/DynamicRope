@@ -90,11 +90,8 @@ namespace
 	}
 
 #if !UE_BUILD_SHIPPING
-	TAutoConsoleVariable<int32> CVarRopeDrawWrappingAxis(
-		TEXT("r.DynamicRope.Debug.DrawWrappingAxis"),
-		1,
-		TEXT("Draws the resolved wrapping axis arrow while a rope is in Wrapping phase."));
-
+	// (구 CVarRopeDrawWrappingAxis 제거 — wrap 축 노란 화살표는 Gameplay Debugger [O] 뷰의 bHasWrapAxis
+	//  경로로 일원화했다. GameplayDebuggerCategory_Rope.cpp 참조.)
 	TAutoConsoleVariable<int32> CVarRopeDrawWrapIsland(
 		TEXT("r.DynamicRope.Debug.DrawWrapIsland"),
 		0,
@@ -143,27 +140,6 @@ namespace
 	}
 
 #if !UE_BUILD_SHIPPING
-	void DrawWrappingAxisDebug(const UWorld* World, const FVector& AxisOrigin, const FVector& AxisDirection, float SegmentLength)
-	{
-		if (!World || CVarRopeDrawWrappingAxis.GetValueOnGameThread() == 0)
-		{
-			return;
-		}
-
-		const FVector AxisDir = AxisDirection.GetSafeNormal();
-		if (AxisDir.IsNearlyZero())
-		{
-			return;
-		}
-
-		const float AxisLen = FMath::Max(80.0f, SegmentLength * 6.0f);
-		const uint8 DepthPriority = SDPG_Foreground;
-		DrawDebugLine(World, AxisOrigin - AxisDir * AxisLen, AxisOrigin + AxisDir * AxisLen,
-			FColor::Yellow, false, 0.0f, DepthPriority, 3.0f);
-		DrawDebugDirectionalArrow(World, AxisOrigin, AxisOrigin + AxisDir * AxisLen,
-			16.0f, FColor::Yellow, false, 0.0f, DepthPriority, 3.0f);
-	}
-
 	FColor WrapIslandMemberColor(FName Bone)
 	{
 		const uint32 Hash = GetTypeHash(Bone);
@@ -1986,6 +1962,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.bHasWrapAxis = true;
 		Snapshot.WrapAxisOrigin = WrappingPhase.State.PathAxisOrigin;
 		Snapshot.WrapAxisDirection = WrappingPhase.State.PathAxisDirection;
+		Snapshot.WrapAxisSegmentLength = Sim.SegmentLength;
 	}
 
 	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). 상호 배타 accessor 순서로
@@ -3163,7 +3140,7 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	}
 
 #if !UE_BUILD_SHIPPING
-	DrawWrappingAxisDebug(GetWorld(), WrappingPhase.State.PathAxisOrigin, WrappingPhase.State.PathAxisDirection, Sim.SegmentLength);
+	// wrap 축 노란 화살표는 Gameplay Debugger([O] 뷰, bHasWrapAxis)로 일원화 — 여기서는 더 그리지 않는다.
 	DrawWrapIslandDebug(GetWorld(), WrappingPhase.State, Sim, WrapConfig);
 #endif
 

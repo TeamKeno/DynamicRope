@@ -164,4 +164,7 @@ struct FRopeDebugSnapshot
 	bool    bHasWrapAxis = false;
 	FVector WrapAxisOrigin = FVector::ZeroVector;
 	FVector WrapAxisDirection = FVector::ForwardVector;
+	// 축 시각화 길이 도출용 세그먼트 길이. 디버거가 max(80, ×6) 수식으로 로프 스케일에 비례한 축을 그린다
+	// (구 r.DynamicRope.Debug.DrawWrappingAxis 즉시모드 드로우와 동일 수식 — 일원화하며 이식).
+	float   WrapAxisSegmentLength = 0.0f;
 };
