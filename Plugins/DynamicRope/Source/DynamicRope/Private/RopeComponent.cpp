@@ -2010,6 +2010,12 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.Latched = Wrap.Latched;
 		Snapshot.WrapTension = Wrap.Tension;
 		Snapshot.TensionReleaseForce = HoldConfig.TensionReleaseForce;
+		// 자동 해제의 실효 여부 — 임계치 값과는 별개다. 판정식을 여기 한 곳에만 두고 화면은 이 불리언만
+		// 읽어, CheckWrappedAutoRelease의 모드 게이트와 표시가 갈라지지 않게 한다.
+		Snapshot.ResolveMode = ResolveMode;
+		Snapshot.bAutoReleaseEnabled = (ResolveMode != ERopeWrapResolveMode::GuaranteedWrap);
+		Snapshot.TensionOverTime = TensionOverTime;
+		Snapshot.TensionReleaseTime = HoldConfig.TensionReleaseTime;
 		Snapshot.bPullValid = PullDrive.LastPullSample.bValid;
 		Snapshot.PullPoint = PullDrive.LastPullSample.WorldPoint;
 		// 스무딩된(실제 인가) 방향
@@ -2047,11 +2053,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.WrapAxisSegmentLength = Sim.SegmentLength;
 	}
 
-	// diag 라인의 solve 여부는 phase 무관하게 매 프레임 채운다. 예전엔 flight 캡처 경로
-	// (RecordFlightObservation)에서만 세팅돼 Wrapped/Releasing 등 비-Flight phase에서 solve=0으로 잘못
-	// 표시됐다(Wrapped도 실제로 솔브함). FillDebugSnapshot은 항상 실행되므로 여기서 채우는 게 정답.
 	// colliders 개수는 별도 필드 없이 아래 Snapshot.Colliders 배열 크기가 단일 소스다(diag/[O] 공용).
-	Snapshot.bSolveThisFrame = SimFrame.bSolveThisFrame;
 
 	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). 상호 배타 accessor 순서로
 	// 실제 형상 분류: 캡슐(세그먼트) / 박스(회전 OBB) / 컨벡스(헐 와이어) / 그 외(SDF 등 월드 AABB 폴백).
@@ -2066,14 +2068,18 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		FRopeDebugCollider DC;
 		DC.bWorldStatic = Collider->IsWorldStatic();
 
-		// 정적 메시 랩 대상 식별: 가상 본은 있지만(감지 참여) SourceMesh가 스켈레탈이 아니면 랩 대상 셰이프
-		// (URopeWrapTargetComponent가 서빙한 박스/캡슐). [O] 뷰에서 스켈레탈 본과 다른 색으로 표시한다.
+		// 귀속(본+메시) 한 번으로 두 값을 낸다.
+		//  - bWrapTarget : 정적 메시 랩 대상(URopeWrapTargetComponent가 서빙). 가상 본은 있지만
+		//                  SourceMesh가 스켈레탈이 아니다. 개수 표시(staticWrapTargets)용.
+		//  - bWrapAllowed: 실제로 감길 수 있는가. 후보 산출(RemoveNonWrappableCandidates)과 같은
+		//                  CanWrapTarget 게이트를 태워 표시와 판정을 한 기준으로 맞춘다.
 		{
 			FName AttribBone = NAME_None;
 			const USceneComponent* AttribMesh = nullptr;
 			Collider->GetGPUAttribution(AttribBone, AttribMesh);
-			DC.bWrapTarget = !AttribBone.IsNone() && AttribMesh != nullptr
-				&& !RopeWrapTargets::IsSkeletalTarget(AttribMesh);
+			const bool bAttributed = !AttribBone.IsNone() && AttribMesh != nullptr;
+			DC.bWrapTarget = bAttributed && !RopeWrapTargets::IsSkeletalTarget(AttribMesh);
+			DC.bWrapAllowed = bAttributed && CanWrapTarget(AttribMesh, AttribBone);
 		}
 
 		TConstArrayView<FPlane> LocalPlanes;
@@ -2113,6 +2119,8 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		const FVector NodePos = Sim.Positions[i];
 		FRopeContact Best;
 		bool bAny = false;
+		// 이긴 접촉을 낸 collider의 정적 여부를 함께 들고 간다(FRopeContact에는 없는 정보라 여기서 보존).
+		bool bBestWorldStatic = false;
 		for (const IRopeCollider* Collider : SimFrame.FrameColliders)
 		{
 			if (!Collider)
@@ -2123,6 +2131,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 			if (C.bHit && (!bAny || C.Penetration > Best.Penetration))
 			{
 				Best = C;
+				bBestWorldStatic = Collider->IsWorldStatic();
 				bAny = true;
 			}
 		}
@@ -2134,8 +2143,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 			NC.Normal = Best.Normal;
 			NC.Penetration = Best.Penetration;
 			NC.Bone = Best.Bone;
-			// 정적 월드(박스/컨벡스)는 Bone=None, 스켈레탈은 본 이름 있음.
-			NC.bWorldStatic = Best.Bone.IsNone();
+			NC.bWorldStatic = bBestWorldStatic;
 			Snapshot.NodeContacts.Add(MoveTemp(NC));
 		}
 	}
@@ -2790,6 +2798,14 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 		OutSnapshot->TrackerBone = FrameTracker.CandidateBone;
 		OutSnapshot->TrackerNodes = FrameTracker.CandidateNodes;
 		OutSnapshot->Candidates = Candidates;
+		// 대상 식별은 (Mesh, Bone) 쌍이다(FRopeContactTracker 계약). 메시 포인터는 스냅샷 수명(수 프레임)
+		// 뒤 죽어 있을 수 있으므로 비교 전용 키로 지금 굳힌다.
+		OutSnapshot->TrackerMeshKey = FObjectKey(FrameTracker.CandidateMesh);
+		OutSnapshot->CandidateMeshKeys.Reset(Candidates.Num());
+		for (const FRopeContactCandidate& Candidate : Candidates)
+		{
+			OutSnapshot->CandidateMeshKeys.Add(FObjectKey(Candidate.Mesh));
+		}
 		OutSnapshot->bWhipActive = bWhipActive;
 		OutSnapshot->WhipGuidedEnd = WhipGuidedEnd;
 	}
@@ -2823,6 +2839,9 @@ void URopeComponent::GatherFlightNodeDebug(const FRopeFlightContactDetector::FPa
 		{
 			NodeDebug.Contact = FRopeFlightContactDetector::SweepOrSampleContact(
 				Sim, NodeDebug.PrevPosition, NodeDebug.Position, SimFrame.FrameColliders, DetectParams);
+			// 같은 노드라도 후보와 다른 대상에 닿은 접촉일 수 있다. 대상 일치 판정용 키를 지금 굳힌다
+			// (스냅샷 수명이 지나면 raw 포인터는 역참조할 수 없다).
+			NodeDebug.ContactMeshKey = FObjectKey(NodeDebug.Contact.SourceMesh);
 		}
 
 		if (NodeDebug.bFast || NodeDebug.bNearBody || NodeDebug.Contact.bHit)

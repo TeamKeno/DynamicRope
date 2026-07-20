@@ -11,16 +11,27 @@
 #include "GameFramework/Actor.h"
 // RopeGPU::TubeRingBucket / MaxTubeRings — GPU 튜브 경로/버킷 진단
 #include "RopeTubeBuilder.h"
+// RopeGPU::IsRuntimeSupported — 프록시의 GPU 튜브 게이트와 같은 런타임 판정(RHI + SM5)
+#include "RopeGPUSolver.h"
 // DrawDebug*(SDPG_Foreground) — 콜라이더 전경 오버레이(에디터 셀렉션처럼 위에 그림)
 #include "DrawDebugHelpers.h"
 
 namespace
 {
-	// GPU 튜브 경로/버킷을 로프 노드 수 + Subdiv(로프의 TubeSmoothingSubdiv)로 도출한다 — 프록시의 bUseGpuTube
-	// 판정과 동일 수식(NumRings=(NumNodes-1)*Subdiv+1, NumRings<=MaxTubeRings면 GPU). 렌더 스레드 프록시 상태를
-	// 크로스스레드로 읽지 않고 게임 스레드에서 재현(결정적). 버킷 표시 = 실제 디스패치가 고르는 스레드그룹 크기.
+	// GPU 튜브 적격성을 노드 수 + Subdiv(로프의 TubeSmoothingSubdiv)로 도출한다. 프록시의 bUseGpuTube를
+	// 읽은 값이 아니라 같은 수식을 게임 스레드에서 재현한 추정치다(렌더 스레드 상태를 크로스스레드로 읽지
+	// 않는다) — 프록시는 생성 시점에 판정을 굳히므로 런타임 속성 변경 후에는 갈릴 수 있고, 그래서 화면
+	// 라벨도 tube-eligible이다. 판정식은 프록시와 동일: IsRuntimeSupported() && NumRings<=MaxTubeRings,
+	// NumRings=(NumNodes-1)*Subdiv+1.
+	// NumNodes는 프록시와 같은 소스인 NumParticles(설정값)를 받는다 — 라이브 노드 수를 넘기면 시드 전이나
+	// 노드 수 변경 중에 프록시와 다른 링 수가 나온다.
 	FString TubeDiagString(int32 NumNodes, int32 WantedSubdiv)
 	{
+		if (!RopeGPU::IsRuntimeSupported())
+		{
+			// 렌더 가능 RHI가 없거나 SM5 미만 — 링 수와 무관하게 프록시가 CPU BuildTube로 간다.
+			return FString(TEXT("{red}cpu{grey}(no gpu runtime)"));
+		}
 		int32 Subdiv = FMath::Clamp(WantedSubdiv, 1, 8);
 		const int32 Nodes = FMath::Max(2, NumNodes);
 		// 프록시(RopeComputeTubeSubdiv)와 동일하게 Subdiv를 링 상한에 맞춰 자동 하향 → 실제 사용 버킷/링을 표시.
@@ -33,6 +44,30 @@ namespace
 			return FString::Printf(TEXT("{green}gpu{grey}(bucket %d, rings %d)"), Bucket, NumRings);
 		}
 		return FString::Printf(TEXT("{red}cpu{grey}(rings %d > %d)"), NumRings, RopeGPU::MaxTubeRings());
+	}
+
+	// 이번 프레임 이 로프가 밟은 솔브 경로. bGpuSteppedThisFrame 하나로는 판정할 수 없다 — 서브시스템이
+	// 솔브 프레임과 override-only 프레임(Wrapping/Releasing/GuidedThrow)을 똑같이 GPU에 실으므로
+	// (TryBuildResidentStep) GPU=true가 "물리 솔브 중"을 뜻하지 않는다.
+	const TCHAR* SolvePathToken(const URopeComponent& Rope)
+	{
+		if (Rope.IsSleeping())
+		{
+			// 슬립은 솔브 자체가 없다 — 다른 어떤 상태보다 먼저 본다.
+			return TEXT("{cyan}SLEEP");
+		}
+		const bool bSolved = Rope.WasSolvedThisFrame();
+		if (Rope.IsGpuSteppedThisFrame())
+		{
+			return bSolved ? TEXT("{green}GPU_SOLVE") : TEXT("{green}GPU_OVERRIDE");
+		}
+		if (bSolved)
+		{
+			// GPU 상주 대상이 아니어서 CPU로 푼 프레임(노드 수 초과·RHI 없음 등).
+			return TEXT("{red}CPU_SOLVE");
+		}
+		// 솔브도 GPU 디스패치도 없지만 로직이 위치를 갱신한 프레임 vs 아무것도 안 한 프레임.
+		return Rope.HadLogicOverrideThisFrame() ? TEXT("{yellow}CPU_OVERRIDE") : TEXT("{grey}IDLE");
 	}
 
 	const TCHAR* DebugPhaseName(ERopePhase Phase)
@@ -48,6 +83,18 @@ namespace
 		case ERopePhase::GuidedThrow: return TEXT("GuidedThrow");
 		case ERopePhase::Reel:       return TEXT("Reel");
 		default:                     return TEXT("?");
+		}
+	}
+
+	// 도달 모드 표시명(자동 해제 문구에 함께 낸다).
+	const TCHAR* DebugResolveModeName(ERopeWrapResolveMode Mode)
+	{
+		switch (Mode)
+		{
+		case ERopeWrapResolveMode::FullSimulation: return TEXT("①FullSimulation");
+		case ERopeWrapResolveMode::AssistedJudged: return TEXT("②Assisted");
+		case ERopeWrapResolveMode::GuaranteedWrap: return TEXT("③Guaranteed");
+		default:                                   return TEXT("?");
 		}
 	}
 
@@ -177,8 +224,9 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 	const FVector RayEnd = RayStart + RayDir * Aim.RayLength;
 	const FVector RayStop = bAnyHit ? Aim.HitWorldPos : RayEnd;
 
-	// collider와 같은 이유로 AddShape 대신 DrawDebug*(전경): FGameplayDebuggerShape::MakeCapsule에는
-	// 회전 인자가 없어 임의 방향 ray를 표현할 수 없다. 수명은 다음 수집까지만 남게 짧게 준다.
+	// collider와 같은 이유로 AddShape 대신 DrawDebug*(전경): AddShape는 depth priority가 SDPG_World로
+	// 하드코딩돼 지오메트리에 가린다(형상 표현의 문제가 아니다 — MakeCapsule은 회전 인자를 받는다).
+	// 수명은 다음 수집까지만 남게 짧게 준다.
 	constexpr float LifeTime = 0.05f;
 	constexpr uint8 FG = SDPG_Foreground;
 	// 캡슐 치수는 실제 QuerySwept에 넘어간 길이·반경 그대로 — 조준이 검사하는 부피를 눈으로 확인한다.
@@ -234,11 +282,11 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		LODScale < 0.999f ? *FString::Printf(TEXT("  {cyan}lod=x%.2f"), LODScale) : TEXT(""),
 		Snap ? TEXT("") : TEXT("  {grey}(diag pending)")));
 
-	// GPU 경로 진단: 솔버 step 여부(이번 프레임 실제 GPU step, false면 CPU 폴백/off) + 튜브 경로/버킷.
+	// 솔브 경로(6종 토큰) + 튜브 적격성(프록시 실제 상태가 아닌 재계산 추정치 — TubeDiagString 주석 참조).
 	AddTextLine(FString::Printf(
-		TEXT("  {grey}gpu: solver=%s{grey} tube=%s"),
-		Rope.IsGpuSteppedThisFrame() ? TEXT("{green}on") : TEXT("{red}cpu-fallback"),
-		*TubeDiagString(Points.Num(), Rope.TubeSmoothingSubdiv)));
+		TEXT("  {grey}solve=%s{grey} tube-eligible=%s"),
+		SolvePathToken(Rope),
+		*TubeDiagString(Rope.NumParticles, Rope.TubeSmoothingSubdiv)));
 
 	//~ centerline(라이브 위치) -------------------------------------------
 	if (HasView(EView::Centerline))
@@ -269,20 +317,31 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 	}
 	const FRopeDebugSnapshot& S = *Snap;
 	// colliders 총계의 단일 소스는 S.Colliders(항상 채워짐). [O] 뷰는 여기 총계를 반복하지 않고 분류만 낸다.
-	AddTextLine(FString::Printf(TEXT("  {grey}diag: solve=%d colliders=%d"),
-		S.bSolveThisFrame ? 1 : 0, S.Colliders.Num()));
+	AddTextLine(FString::Printf(TEXT("  {grey}diag: colliders=%d"), S.Colliders.Num()));
 
 	//~ flight -----------------------------------------------------------
 	if (HasView(EView::Flight) && S.bHasFlight)
 	{
-		TSet<int32> ValidCandidateNodes;
-		for (const FRopeContactCandidate& Candidate : S.Candidates)
+		// 이 노드의 접촉이 유효 후보로 이어졌는가. 같은 노드가 한 프레임에 여러 대상에 닿을 수 있으므로
+		// 노드 인덱스만으로는 판정할 수 없고, 대상 식별 계약대로 (NodeIndex, Bone, Mesh) 3자를 모두 본다.
+		// 후보 수가 작아 선형 탐색으로 충분하다.
+		auto HasValidCandidateFor = [&S](const FRopeFlightNodeDebug& Node)
 		{
-			if (Candidate.bValid)
+			for (int32 i = 0; i < S.Candidates.Num(); ++i)
 			{
-				ValidCandidateNodes.Add(Candidate.NodeIndex);
+				const FRopeContactCandidate& Candidate = S.Candidates[i];
+				if (!Candidate.bValid || Candidate.NodeIndex != Node.NodeIndex || Candidate.Bone != Node.Contact.Bone)
+				{
+					continue;
+				}
+				// 키 배열은 Candidates와 1:1. 없으면(구 스냅샷) 본까지만 맞은 것으로 본다.
+				if (!S.CandidateMeshKeys.IsValidIndex(i) || S.CandidateMeshKeys[i] == Node.ContactMeshKey)
+				{
+					return true;
+				}
 			}
-		}
+			return false;
+		};
 
 		for (const FRopeFlightNodeDebug& Node : S.NodeDebug)
 		{
@@ -295,27 +354,38 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 
 			if (Node.Contact.bHit)
 			{
-				const FColor HitColor = ValidCandidateNodes.Contains(Node.NodeIndex) ? FColor::Green : FColor::Red;
+				const FColor HitColor = HasValidCandidateFor(Node) ? FColor::Green : FColor::Red;
 				AddShape(FGameplayDebuggerShape::MakePoint(Node.Contact.SurfacePoint, 3.0f, HitColor));
 				AddShape(FGameplayDebuggerShape::MakeSegment(Node.Contact.SurfacePoint,
 					Node.Contact.SurfacePoint + Node.Contact.Normal.GetSafeNormal() * 22.0f, 1.0f, FColor::Blue));
 			}
 		}
 
-		TArray<FRopeContactCandidate> Sorted = S.Candidates;
-		Sorted.Sort([](const FRopeContactCandidate& A, const FRopeContactCandidate& B)
+		// 후보 자체를 정렬하면 짝을 이루는 CandidateMeshKeys와 인덱스 대응이 깨진다 — 인덱스를 정렬한다.
+		TArray<int32> SortedIdx;
+		SortedIdx.Reserve(S.Candidates.Num());
+		for (int32 i = 0; i < S.Candidates.Num(); ++i)
+		{
+			SortedIdx.Add(i);
+		}
+		SortedIdx.Sort([&S](int32 A, int32 B)
 			{
-				return A.Penetration > B.Penetration;
+				return S.Candidates[A].Penetration > S.Candidates[B].Penetration;
 			});
 
 		// flight 진단은 3D 도형만 남긴다 — Flight phase는 찰나라 좌측 패널 텍스트를 읽을 시간이 없다.
 		// (후보 상세 줄과 요약 줄 모두 그래서 제거했다.) 후보는 상위 N개만 박스로.
-		const int32 MaxCandidateShapes = FMath::Min(5, Sorted.Num());
-		for (int32 i = 0; i < MaxCandidateShapes; ++i)
+		const int32 MaxCandidateShapes = FMath::Min(5, SortedIdx.Num());
+		for (int32 n = 0; n < MaxCandidateShapes; ++n)
 		{
-			const FRopeContactCandidate& Candidate = Sorted[i];
+			const int32 i = SortedIdx[n];
+			const FRopeContactCandidate& Candidate = S.Candidates[i];
 			const FColor SourceColor = CandidateSourceColor(Candidate.Source);
-			const FColor CandidateColor = (Candidate.Bone == S.TrackerBone)
+			// dominant 판정도 (Mesh, Bone) 쌍으로 — 같은 스켈레톤을 쓰는 두 액터가 붙어 있으면 본 이름만
+			// 으로는 반대편 액터의 후보와 구별되지 않는다.
+			const bool bIsTracker = (Candidate.Bone == S.TrackerBone)
+				&& (!S.CandidateMeshKeys.IsValidIndex(i) || S.CandidateMeshKeys[i] == S.TrackerMeshKey);
+			const FColor CandidateColor = bIsTracker
 				? FColor(FMath::Min(255, SourceColor.R + 40), FMath::Min(255, SourceColor.G + 20), FMath::Min(255, SourceColor.B + 40))
 				: SourceColor;
 			AddShape(FGameplayDebuggerShape::MakeBox(Candidate.WorldPoint, FVector(3.5f), CandidateColor));
@@ -372,13 +442,21 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 
 		AddTextLine(FString::Printf(TEXT("  {green}wrapped{white} bone=%s mesh=%s latched=%d"),
 			*S.WrapBone.ToString(), *S.MeshName, S.Latched.Num()));
-		// 장력(λ/h² 상대 힘): 임계치가 켜져 있으면 초과 여부를 색으로(노랑=근접 80%+, 빨강=초과).
-		if (S.TensionReleaseForce > 0.0f)
+		// 장력(λ/h² 상대 힘). 임계치와 경고색은 자동 해제가 실제로 도는 모드에서만 낸다 — ③ Guaranteed는
+		// 임계치를 보지 않으므로(명시 해제만 유효) 임계 대비 경고가 의미를 갖지 않는다.
+		if (!S.bAutoReleaseEnabled)
+		{
+			AddTextLine(FString::Printf(
+				TEXT("    tension=%.0f  {grey}auto-release=disabled (%s — explicit release only)"),
+				S.WrapTension, DebugResolveModeName(S.ResolveMode)));
+		}
+		else if (S.TensionReleaseForce > 0.0f)
 		{
 			const TCHAR* Color = (S.WrapTension > S.TensionReleaseForce) ? TEXT("{red}")
 				: (S.WrapTension > S.TensionReleaseForce * 0.8f) ? TEXT("{yellow}") : TEXT("{white}");
-			AddTextLine(FString::Printf(TEXT("    tension=%s%.0f{white} / release=%.0f"),
-				Color, S.WrapTension, S.TensionReleaseForce));
+			// 임계 초과 지속 시간도 함께 — 임계를 넘어도 TensionReleaseTime 동안 지속돼야 풀린다(스파이크 무시).
+			AddTextLine(FString::Printf(TEXT("    tension=%s%.0f{white} / release=%.0f  {grey}(%.2f/%.2fs)"),
+				Color, S.WrapTension, S.TensionReleaseForce, S.TensionOverTime, S.TensionReleaseTime));
 		}
 		else
 		{
@@ -410,9 +488,10 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		// tether = 가용 로프 길이 초과분(자동 견인 입력), active = 능동 Pull 힘(입력 홀드).
 		if (S.bPullValid && S.PullTension > KINDA_SMALL_NUMBER)
 		{
-			// 거리 release가 켜져 있으면 초과분이 한계에 근접/초과할 때 색으로 경고(노랑 80%+, 빨강 초과).
+			// 거리 release가 실제로 도는 모드에서 켜져 있으면 초과분이 한계에 근접/초과할 때 색으로
+			// 경고(노랑 80%+, 빨강 초과). ③ Guaranteed는 거리 해제도 무효라 경고 대상이 아니다.
 			const TCHAR* OvershootColor = TEXT("{white}");
-			if (S.DistanceReleaseSlack > 0.0f)
+			if (S.bAutoReleaseEnabled && S.DistanceReleaseSlack > 0.0f)
 			{
 				OvershootColor = (S.TetherOvershoot > S.DistanceReleaseSlack) ? TEXT("{red}")
 					: (S.TetherOvershoot > S.DistanceReleaseSlack * 0.8f) ? TEXT("{yellow}") : TEXT("{white}");
@@ -465,9 +544,12 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 	}
 
 	//~ colliders --------------------------------------------------------
-	// 콜라이더는 AddShape(SDPG_World 하드코딩 → 지오메트리에 가림) 대신 DrawDebug*(SDPG_Foreground)로 직접
-	// 그린다 — 에디터 셀렉션 라인처럼 항상 위에 보여, 메시와 겹쳐도 형상이 뚜렷하다. 이 카테고리는 이미
-	// CollectData에서 live 컴포넌트를 읽는 로컬 전용 설계라 DrawDebug 직접 호출과 정합(네트워크 리플리케이션 무관).
+	// 콜라이더는 AddShape 대신 DrawDebug*(SDPG_Foreground)로 직접 그린다 — 에디터 셀렉션 라인처럼 항상 위에
+	// 보여 메시와 겹쳐도 형상이 뚜렷하다. AddShape는 depth priority가 SDPG_World로 하드코딩돼 있어
+	// (엔진 FGameplayDebuggerShape::Draw) 지오메트리에 가린다. 형상 표현력의 문제는 아니다 —
+	// MakeCapsule/MakeBox 모두 회전 인자를 받는다.
+	// 주의: DrawDebug*는 호출된 월드에만 그려져 원격 클라이언트로 복제되지 않는다. 지원 범위가
+	// Standalone/로컬 시뮬레이션이라 성립하는 선택이며, 멀티플레이를 지원하게 되면 다시 봐야 한다.
 	if (HasView(EView::Colliders))
 	{
 		if (UWorld* World = Rope.GetWorld())
@@ -475,30 +557,29 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			constexpr uint8 FG = SDPG_Foreground;
 			constexpr float LineThick = 1.5f;
 
-			// 색은 wrap 가능/불가 2범주(초록=wrap 가능=본+랩대상, cyan=worldStatic=push-out 전용). 총계는 위
-			// diag 줄이 단일 소스. wrapTarget 수는 색으로 구분하지 않는 대신, "랩 대상이 실제로 서빙되는지"
-			// 확인용 진단 텍스트로만 남긴다(본과 색이 같아졌으므로).
-			int32 WrapTargetCount = 0;
+			// 색은 "실제로 감길 수 있는가" 3범주(아래 ColorPass). staticWrapTargets는 감김 가능 대상 전체가
+			// 아니라 URopeWrapTargetComponent가 서빙하는 정적 opt-in 대상 수다.
+			int32 StaticWrapTargetCount = 0;
 			for (const FRopeDebugCollider& C : S.Colliders)
 			{
-				if (C.bWrapTarget) { ++WrapTargetCount; }
+				if (C.bWrapTarget) { ++StaticWrapTargetCount; }
 			}
 			AddTextLine(FString::Printf(
-				TEXT("  {grey}colliders [{green}wrappable{grey}/{cyan}worldStatic{grey}]  wrapTarget=%d"),
-				WrapTargetCount));
+				TEXT("  {grey}colliders [{green}wrappable{grey}/{red}rejected{grey}/{cyan}collision-only{grey}]  staticWrapTargets=%d"),
+				StaticWrapTargetCount));
 
-			// green(wrappable)이 항상 cyan(worldStatic push-out) 위에 오도록 2패스로 그린다: 랩 대상이 자기
-			// push-out 셰이프(cyan)를 같은 위치에 서빙하면(PhysicsBody 프롭) wrap 셰이프(green)가 가려질 수 있어,
-			// Pass 0에서 non-wrappable(cyan)을 먼저 깔고 Pass 1에서 wrappable(green)을 덮어 그린다(전경은 나중이 위).
-			for (int32 DrawPass = 0; DrawPass < 2; ++DrawPass)
+			// 3패스로 그려 초록(감김 가능)이 항상 위에 오게 한다: 랩 대상이 자기 push-out 셰이프를 같은 위치에
+			// 서빙하면(PhysicsBody 프롭) 겹쳐서 가려지므로, cyan → red → green 순으로 깔고 덮는다(전경은 나중이 위).
+			for (int32 DrawPass = 0; DrawPass < 3; ++DrawPass)
 			for (const FRopeDebugCollider& C : S.Colliders)
 			{
-				// 색은 wrap 가능/불가 2범주만: worldStatic(정적 월드, push-out 전용)은 cyan, 그 외(스켈레탈 본 +
-				// URopeWrapTargetComponent 랩 대상 = 모두 감김 가능)는 초록. 랩 대상과 본은 같은 초록으로 통일한다.
-				const bool bWrappable = !C.bWorldStatic;
-				// Pass 0 = cyan(비-wrappable)만, Pass 1 = green(wrappable)만 — green을 뒤에 그려 위에 덮는다.
-				if (bWrappable != (DrawPass == 1)) { continue; }
-				const FColor Color = bWrappable ? FColor::Green : FColor::Cyan;
+				// cyan = 정적 월드(push-out 전용, 감지 비참여) / red = 감지에는 들어오지만 게이트가 거부 /
+				// green = 귀속 유효 + CanWrapTarget 통과. URopeWrapTargetComponent의 정적 프롭은
+				// IsWorldStatic()=false라 cyan이 아니라 green/red로 갈린다.
+				const int32 ColorPass = C.bWorldStatic ? 0 : (C.bWrapAllowed ? 2 : 1);
+				if (ColorPass != DrawPass) { continue; }
+				const FColor Color = (ColorPass == 2) ? FColor::Green
+					: (ColorPass == 1) ? FColor::Red : FColor::Cyan;
 				switch (C.Shape)
 				{
 				case ERopeDebugColliderShape::Capsule:

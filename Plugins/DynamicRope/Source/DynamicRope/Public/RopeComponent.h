@@ -510,13 +510,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetSolverLODScale() const { return Throttle.GetSolverLODScale(); }
 
-	/** 이번 프레임 이 로프가 GPU 솔버로 step됐는가(false면 CPU 폴백/솔버 off). 디버그 확인용. */
+	/** 이번 프레임 이 로프가 GPU로 디스패치됐는가. **물리 솔브만을 뜻하지 않는다** — 서브시스템은
+	 *  솔브 프레임과 override-only 프레임(Wrapping/Releasing/GuidedThrow)을 똑같이 GPU에 싣는다
+	 *  (TryBuildResidentStep의 bSolveThisFrame || OverrideFrame.HasAny()). 따라서 이 값 하나로
+	 *  "GPU 솔브 중"이라고 읽으면 안 되고, 아래 두 게터와 조합해야 한다. 디버그 확인용. */
 	bool IsGpuSteppedThisFrame() const { return SimFrame.bGpuSteppedThisFrame; }
 
 	/** 이번 프레임 이 로프가 (CPU/GPU 무관) 실제로 물리 솔브 스텝을 밟았는가. 슬립·Contacting·Releasing·
 	 *  로직 override-only 프레임은 false. IsGpuSteppedThisFrame()과 조합하면 CPU 폴백 솔브를 가려낸다
 	 *  (WasSolvedThisFrame() && !IsGpuSteppedThisFrame()). 디버그/프로파일용. */
 	bool WasSolvedThisFrame() const { return SimFrame.bSolveThisFrame; }
+
+	/** 이번 프레임 로직 페이즈(Wrapping/Wrapped/Releasing/GuidedThrow 등)가 노드 override를 산출했는가
+	 *  = 솔브는 안 밟았지만 위치가 갱신된 프레임. 위 두 게터와 합쳐 솔브 경로를 6종으로 가른다:
+	 *  SLEEP / GPU_SOLVE / GPU_OVERRIDE / CPU_SOLVE / CPU_OVERRIDE / IDLE. GPU 경로는
+	 *  IsGpuSteppedThisFrame()만으로 override가 드러나지만, CPU 경로에서 override와 idle을 구별하려면
+	 *  이 값이 필요하다. 디버그/프로파일용. */
+	bool HadLogicOverrideThisFrame() const { return SimFrame.OverrideFrame.HasAny(); }
 
 	/** 현재 감고 있는 본 이름(Wrapped 동안 유효, 아니면 None). 이벤트 파라미터 없이도 조회 가능하게 노출. */
 	UFUNCTION(BlueprintPure, Category = "Rope")

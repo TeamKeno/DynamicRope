@@ -19,6 +19,9 @@ struct FRopeFlightNodeDebug
 	bool bFast = false;
 	bool bNearBody = false;
 	FRopeContact Contact;
+	// Contact.SourceMesh를 캡처 시점에 굳힌 비교 전용 키(후보와 같은 대상인지 판정). 스냅샷은 몇 프레임
+	// 살아남으므로 그리기 시점에 raw 포인터로 키를 만들면 이미 파괴된 컴포넌트를 역참조한다.
+	FObjectKey ContactMeshKey;
 };
 
 // collider 시각화 형상 종류. 채우기(FillDebugSnapshot)가 상호 배타 accessor로 분류한다.
@@ -46,7 +49,8 @@ struct FRopeNodeContactDebug
 	FVector Normal = FVector::ZeroVector;
 	// 질의 반경 대비 침투(>0=밴드 안). 붙음 정도.
 	float   Penetration = 0.0f;
-	// 정적 월드(박스/컨벡스 등) vs 스켈레탈 — 색 구분.
+	// 이 접촉을 낸 collider의 IsWorldStatic() — 색 구분용. 본 유무로 추론하지 않는다(본을 보고하지 않는
+	// 커스텀 non-static collider와, 가상 본을 가진 정적 프롭이 둘 다 반례다).
 	bool    bWorldStatic = false;
 	// 스켈레탈이면 본 이름(없으면 None=정적).
 	FName   Bone = NAME_None;
@@ -59,8 +63,11 @@ struct FRopeDebugCollider
 	// 정적 월드(박스/컨벡스/정적 캡슐) vs 스켈레탈 — 색 구분용.
 	bool bWorldStatic = false;
 	// 정적 메시 랩 대상(URopeWrapTargetComponent가 서빙): 가상 본은 있지만(감지 참여) SourceMesh가 스켈레탈이
-	// 아니다. 스켈레탈 본(초록)/정적 월드(cyan)와 별색으로 그려 "로프가 실제로 감길 추출 셰이프"를 눈에 띄게 한다.
+	// 아니다. 감김 가능 대상 전체가 아니라 이 정적 opt-in 대상만 세는 값이라 화면 라벨도 staticWrapTargets다.
 	bool bWrapTarget = false;
+	// 이 collider에 실제로 감길 수 있는가 = 귀속(본+메시)이 유효하고 CanWrapTarget() 게이트를 통과했는가.
+	// IsWorldStatic()과는 별개다 — 감지에는 들어오지만 게이트가 거부하는 대상이 있다.
+	bool bWrapAllowed = false;
 
 	// Capsule
 	FVector A = FVector::ZeroVector;
@@ -94,14 +101,19 @@ struct FRopeDebugSnapshot
 
 	//~ flight(Flight phase에서만) ----------------------------------------
 	bool bHasFlight = false;
-	// bSolveThisFrame은 phase 무관하게 FillDebugSnapshot에서 채운다(diag 줄용) — flight 전용 아님.
-	bool bSolveThisFrame = false;
 	bool bShouldCapture = false;
 	int32 MinLatchNodes = 0;
 	FName TrackerBone = NAME_None;
+	// dominant 대상의 mesh를 캡처 시점에 변환한 키. 접촉 대상의 식별 계약은 (Mesh, Bone) 쌍이다
+	// (FRopeContactTracker 주석 참조) — 본 이름만 비교하면 같은 스켈레톤을 쓰는 두 액터가 붙어 있을 때
+	// 엉뚱한 후보가 dominant처럼 강조된다.
+	FObjectKey TrackerMeshKey;
 	TArray<int32> TrackerNodes;
 	TArray<FRopeFlightNodeDebug> NodeDebug;
+	// 주의: Candidates[].Mesh는 raw 포인터다. 스냅샷이 몇 프레임 살아남으므로 **역참조 금지** —
+	// 대상 일치 판정은 아래 CandidateMeshKeys(캡처 시 변환)로 한다. 인덱스는 Candidates와 1:1이다.
 	TArray<FRopeContactCandidate> Candidates;
+	TArray<FObjectKey> CandidateMeshKeys;
 
 	//~ whip guide(whip 활성 시) ------------------------------------------
 	bool bWhipActive = false;
@@ -118,6 +130,15 @@ struct FRopeDebugSnapshot
 	float WrapTension = 0.0f;
 	// 임계 장력(0=비활성) — 표시용
 	float TensionReleaseForce = 0.0f;
+	// 이 로프의 도달 모드 — 자동 해제 문구에 함께 낸다.
+	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+	// 장력/거리 자동 해제가 실제로 동작하는가. ③ GuaranteedWrap은 CheckWrappedAutoRelease가 조기 반환해
+	// 임계치를 보지 않는다(보장 계약은 해제에도 대칭이라 명시 해제만 유효).
+	bool bAutoReleaseEnabled = true;
+	// 임계 장력을 연속 초과한 시간과 발동까지 필요한 시간(0 = 임계 release 비활성). 임계를 넘어도
+	// TensionReleaseTime 동안 지속돼야 풀리므로 그 진행도를 표시한다.
+	float TensionOverTime = 0.0f;
+	float TensionReleaseTime = 0.0f;
 	// ComputePull 성공(앵커/방향 유효 — 장력 0이어도 true)
 	bool bPullValid = false;
 	// 힘 인가점(앵커 월드)
