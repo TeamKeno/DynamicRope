@@ -34,6 +34,39 @@ TArray<FName> URopeSDFProvider::GetBakedBoneNames() const
 	return Names;
 }
 
+namespace
+{
+	/**
+	 * 비균등 스케일 경고(본당 1회). SDF 질의는 로컬↔월드 거리 환산을 **단일 스칼라**(스케일 최대 성분)로
+	 * 근사하므로 — CPU FRopeSDFCollider::Query / GPU RopeQuerySDFWorld 양쪽 동일 — 축마다 스케일이 다르면
+	 * 접촉 밴드와 침투 깊이가 축별로 어긋난다. 근사 자체는 의도된 계약이지만 지금까지 아무 신호가 없어
+	 * "왜 이 메시만 로프가 파고드나"를 추적할 단서가 없었다. 음수 스케일(미러링)은 이제 정상 지원한다 —
+	 * 여기서 보는 것은 성분 간 *비율*뿐이라 -1 균등 미러는 경고하지 않는다.
+	 */
+	void WarnOnNonUniformScaleOnce(const FTransform& BoneToWorld, FName Bone)
+	{
+#if !UE_BUILD_SHIPPING
+		const FVector Abs = BoneToWorld.GetScale3D().GetAbs();
+		const double MaxC = Abs.GetMax();
+		const double MinC = Abs.GetMin();
+		if (MaxC <= KINDA_SMALL_NUMBER || MaxC - MinC <= 0.01 * MaxC)
+		{
+			return;
+		}
+		static TSet<FName> WarnedBones;
+		if (WarnedBones.Contains(Bone))
+		{
+			return;
+		}
+		WarnedBones.Add(Bone);
+		UE_LOG(LogRopeCollision, Warning,
+			TEXT("SDF 콜라이더 본 '%s'의 스케일이 비균등하다(%s) — SDF 거리 환산은 최대 성분 스칼라 근사라 ")
+			TEXT("축별로 접촉 밴드/침투가 어긋난다. 균등 스케일을 권장한다."),
+			*Bone.ToString(), *BoneToWorld.GetScale3D().ToCompactString());
+#endif
+	}
+}
+
 void URopeSDFProvider::RebuildColliders(USkeletalMeshComponent* Mesh, float InvDt)
 {
 	// per-rope 컬링은 solver의 collider AABB broad-phase가 담당하므로, 여기서는 RopeBounds 컬 없이
@@ -61,6 +94,7 @@ void URopeSDFProvider::RebuildColliders(USkeletalMeshComponent* Mesh, float InvD
 		}
 
 		const FTransform BoneToWorld = Mesh->GetSocketTransform(Volume.Bone);
+		WarnOnNonUniformScaleOnce(BoneToWorld, Volume.Bone);
 		// 이전 프레임 트랜스폼(없으면 현재 = 첫 프레임 속도 0). lookup 후 다음 프레임용으로 갱신.
 		const FTransform* PrevPtr = PrevBoneToWorld.Find(Volume.Bone);
 		const FTransform PrevXform = PrevPtr ? *PrevPtr : BoneToWorld;

@@ -345,6 +345,23 @@ bool RopeQuerySDFLocal(FRopeSDFVolume Vol, float3 Lp, float NodeR, out float Out
 	return true;
 }
 
+// 축별 스케일 부호(0/양수 = +1, 음수 = -1). 레벨에서 미러링한 액터(스케일 -1)를 위한 것으로,
+// 부호를 잃으면 아래 역스케일이 max() 클램프에 걸려 좌표가 1e6배로 폭발한다.
+float3 RopeScaleSign(float3 Scl)
+{
+	return float3(Scl.x < 0.0f ? -1.0f : 1.0f,
+	              Scl.y < 0.0f ? -1.0f : 1.0f,
+	              Scl.z < 0.0f ? -1.0f : 1.0f);
+}
+
+// 부호 보존 역스케일. CPU의 FTransform::InverseTransformPosition이 원래 하던 것과 같은 결과를 준다
+// (그쪽은 부호를 그대로 나눠 미러 로컬 좌표를 만든다) — 종전 GPU 버전은 음수 축에서 CPU와 갈라졌다.
+// 양수 스케일에서는 abs()가 값을 그대로 통과시키므로 기존 동작이 불변이고, 스케일 1이면 정확히 1.0이다.
+float3 RopeInvScaleSigned(float3 Scl)
+{
+	return RopeScaleSign(Scl) / max(abs(Scl), float3(1e-6f, 1e-6f, 1e-6f));
+}
+
 // SDF 월드 점질의(현재 포즈): 월드 P를 collider 로컬로 역변환(InvTransform = qInv*(P-T)/Scale) 후 로컬
 // 점질의, 침투 시 법선을 월드로 회전. sub-포즈가 필요 없는 호출자(세그먼트 충돌/접촉 감지)용.
 // OutLp는 표면점(P - N*Dist)/표면속도(Wprev) 재구성에 쓴다.
@@ -352,7 +369,7 @@ bool RopeQuerySDFWorld(FRopeSDFCollider Col, FRopeSDFVolume Vol, float3 P, float
 	out float3 OutNWorld, out float OutDist, out float3 OutLp)
 {
 	const float3 Scl = Col.Scale.xyz;
-	const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
+	const float3 InvScale = RopeInvScaleSigned(Scl);
 	OutLp = RopeQuatRotate(float4(-Col.Rotation.xyz, Col.Rotation.w), P - Col.Translation.xyz) * InvScale;
 	// 로컬(베이크) 거리 ↔ 월드 환산(#3): 로컬 cm로 질의하고 결과를 월드로 되돌린다. 균일 스케일 가정
 	// (스케일 1이면 동작 불변). CPU FRopeSDFCollider::Query와 동일.
@@ -365,6 +382,8 @@ bool RopeQuerySDFWorld(FRopeSDFCollider Col, FRopeSDFVolume Vol, float3 P, float
 		return false;
 	}
 	OutDist *= ScaleScalar; // 로컬 cm → 월드 cm
-	OutNWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal));
+	// 미러 축은 법선도 뒤집어야 바깥을 향한다(FRopeContact 계약: Normal은 outward, 부호가 load-bearing).
+	// 양수 스케일이면 곱하는 값이 정확히 1.0이라 기존 결과와 비트 동일하다.
+	OutNWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal * RopeScaleSign(Scl)));
 	return true;
 }

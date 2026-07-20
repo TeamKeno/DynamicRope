@@ -75,6 +75,37 @@ bool FRopeSDFProjectionOutsideBoundsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 미러링(음수 스케일) 대상에서 질의 좌표와 법선이 모두 뒤집힌 축을 따라가는가.
+// 구를 원점에서 +X로 밀어 비대칭으로 만든 뒤 X축을 뒤집으면, 월드에서 표면은 -X쪽에 생기고 바깥
+// 법선도 -X여야 한다. 부호를 잃으면 법선이 +X(안쪽)로 나오고 — FRopeContact 계약 위반이라 로프가
+// 몸 안으로 빨려 들어간다 — GPU 쪽은 역스케일이 max() 클램프에 걸려 좌표가 1e6배로 폭발한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFNegativeScaleTest,
+	"DynamicRope.SDF.NegativeScaleMirrorsQueryAndNormal",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSDFNegativeScaleTest::RunTest(const FString& Parameters)
+{
+	// 로컬 중심 (10,0,0), 반지름 20 → 로컬 표면은 x=30. X 미러 후 월드 표면은 x=-30.
+	const FRopeBoneSDFVolume V =
+		RopeSDFSynthetic::MakeSphere(FName("test"), FVector(10, 0, 0), 20.0f, FIntVector(31), 10.0f);
+
+	const FTransform Mirrored(FQuat::Identity, FVector::ZeroVector, FVector(-1.0, 1.0, 1.0));
+	const FRopeSDFCollider Collider(&V, Mirrored, Mirrored, 0.0f, FName("test"), nullptr);
+
+	const FRopeContact Hit = Collider.Query(FVector(-30.0, 0.0, 0.0), 2.0f);
+	TestTrue(TEXT("mirrored surface is hit on the -X side"), Hit.bHit);
+	TestTrue(TEXT("outward normal follows the mirrored axis (-X)"),
+		FVector::DotProduct(Hit.Normal, FVector(-1, 0, 0)) > 0.9);
+	// 표면 위 질의라 침투는 노드 반지름 전체(거리 ~0).
+	TestTrue(TEXT("penetration equals the node radius at the surface"),
+		FMath::Abs(Hit.Penetration - 2.0f) < 0.5f);
+
+	// 미러되지 않은 +X쪽에는 아무것도 없다(좌표 부호를 잃으면 여기가 맞았다).
+	const FRopeContact Miss = Collider.Query(FVector(30.0, 0.0, 0.0), 2.0f);
+	TestFalse(TEXT("nothing on the unmirrored +X side"), Miss.bHit);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFProjectionBoundaryGradientTest,
 	"DynamicRope.SDF.ProjectionGradientAtBounds",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

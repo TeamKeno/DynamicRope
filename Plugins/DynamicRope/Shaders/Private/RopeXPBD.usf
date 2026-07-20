@@ -259,7 +259,9 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 		const float3 TrS  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A0);
 		const float3 TrE  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A1);
 		const float3 Scl      = Col.Scale.xyz;
-		const float3 InvScale = 1.0f / max(Scl, float3(1e-6f, 1e-6f, 1e-6f));
+		// 부호 보존(미러링 액터의 음수 스케일) — RopeColliderCommon.ush의 공용 헬퍼가 단일 소스.
+		const float3 InvScale = RopeInvScaleSigned(Scl);
+		const float3 ScaleSgn = RopeScaleSign(Scl);
 		// 로컬(베이크) 거리 ↔ 월드 환산(#3). L0/L1/SDF는 로컬 cm, NodeR/Pen은 월드. 균일 스케일 가정
 		// (스케일 1이면 동작 불변). CPU FRopeSDFCollider::QuerySwept와 동일.
 		const float  ScaleScalar = max(max(abs(Scl.x), abs(Scl.y)), abs(Scl.z));
@@ -286,6 +288,7 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 				if (EndOut)
 				{
 					// 바깥 방향 단위(로컬)
+					// 로컬 공간 비교라 부호 보정 불필요(L0/L1도 같은 미러 로컬 공간에 있다).
 					const float3 OutwardLocal = RopeSDFGradient(Vol, L0);
 					// 바깥으로 이동하는 진짜 분리만 생략.
 					if (dot(L1 - L0, OutwardLocal) > 0.0f) { continue; }
@@ -301,8 +304,8 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 			float Dist; float3 NLocal;
 			if (RopeQuerySDFLocal(Vol, Lp, LocalNodeR, Dist, NLocal))
 			{
-				// 끝 sub-포즈 기준 월드 법선
-				const float3 NWorld = normalize(RopeQuatRotate(RotE, NLocal));
+				// 끝 sub-포즈 기준 월드 법선. 미러 축은 함께 뒤집어야 바깥을 향한다(양수 스케일이면 ×1.0).
+				const float3 NWorld = normalize(RopeQuatRotate(RotE, NLocal * ScaleSgn));
 				const float  Pen = NodeR - Dist * ScaleScalar; // 로컬 거리 → 월드 침투(#3)
 				// 끝 sub-포즈 기준 월드 접촉점(노드 배치). World = Rot*(Scale*Local) + Trans.
 				const float3 HitWorld = RopeQuatRotate(RotE, Lp * Scl) + TrE;

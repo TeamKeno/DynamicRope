@@ -25,6 +25,21 @@ namespace
 		return false;
 #endif
 	}
+
+	/**
+	 * 음수 스케일(레벨에서 미러링한 액터) 대응: 로컬 gradient를 월드로 되돌리기 전에 뒤집힌 축의 부호를
+	 * 되돌린다. 위치는 FTransform::InverseTransformPosition이 부호를 그대로 나눠 미러 로컬 좌표를 주므로
+	 * 이미 맞지만, 법선은 회전만 태우면(TransformVectorNoScale) 그 축이 **안쪽**을 향한다 —
+	 * FRopeContact 계약상 Normal은 outward이고 부호가 load-bearing이다(안쪽 법선은 로프를 몸 안으로 빨아들인다).
+	 * 양수 스케일에서는 곱하는 값이 정확히 1.0이라 기존 결과가 비트 불변이다. GPU의 RopeScaleSign 미러.
+	 */
+	FVector MirrorLocalNormalForScale(const FVector& NLocal, const FTransform& Xform)
+	{
+		const FVector S = Xform.GetScale3D();
+		return FVector(S.X < 0.0 ? -NLocal.X : NLocal.X,
+			S.Y < 0.0 ? -NLocal.Y : NLocal.Y,
+			S.Z < 0.0 ? -NLocal.Z : NLocal.Z);
+	}
 }
 
 FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) const
@@ -68,7 +83,8 @@ FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 	const float WorldDist = Dist * LocalToWorldScale;
 	Contact.bHit = true;
-	Contact.Normal = BoneToWorld.TransformVectorNoScale(NLocal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	Contact.Normal = BoneToWorld.TransformVectorNoScale(MirrorLocalNormalForScale(NLocal, BoneToWorld))
+		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 	// Penetration = query 반지름 기준 겹침 깊이(양수, 월드). SurfacePoint는 표면 위 최근접점(보조/디버그).
 	Contact.Penetration = NodeRadius - WorldDist;
 	Contact.SurfacePoint = WorldPos - Contact.Normal * WorldDist;
@@ -167,7 +183,7 @@ FRopeSurfaceProjection FRopeSDFCollider::ProjectToSurface(const FVector& WorldPo
 		}
 		return Projection;
 	}
-	const FVector NormalWorld = BoneToWorld.TransformVectorNoScale(NLocal)
+	const FVector NormalWorld = BoneToWorld.TransformVectorNoScale(MirrorLocalNormalForScale(NLocal, BoneToWorld))
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 
 	Projection.bHit = true;
@@ -268,7 +284,8 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		const FVector NLocal = RopeSDFSampler::SampleGradient(*Volume, Lp);
 		const float WorldDist = Dist * LocalToWorldScale;
 		Contact.bHit = true;
-		Contact.Normal = PoseEnd.TransformVectorNoScale(NLocal).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		Contact.Normal = PoseEnd.TransformVectorNoScale(MirrorLocalNormalForScale(NLocal, PoseEnd))
+			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 		Contact.Penetration = Q.NodeRadius - WorldDist;
 		// 노드 배치 기준점(현재 포즈 월드).
 		OutHitWorldPos = PoseEnd.TransformPosition(Lp);
