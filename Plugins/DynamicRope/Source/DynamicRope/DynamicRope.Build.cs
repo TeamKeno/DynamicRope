@@ -25,9 +25,24 @@ public class DynamicRope : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
+				// [규약] public 헤더가 include하는 모듈은 반드시 여기(public)에 둔다 — private에 두면
+				// 그 헤더를 include하는 하위(게임) 모듈이 include 경로를 못 받아 컴파일에 실패한다.
 				"Core",
 				"DeveloperSettings",
-				// ... add other public dependencies that you statically link with here ...
+				// UObject/Interface.h(IRopeColliderProvider), 전 public 헤더의 UObject 계열
+				"CoreUObject",
+				// Components/MeshComponent.h(URopeComponent), GameFramework/Actor.h(ARopeController) 등
+				"Engine",
+				// Subsystem/RopeSimSubsystem.h가 RopeGPUSolver.h를 include(FRopeGPUSolver 값 멤버) —
+				// 이 헤더가 유일한 공개 확장 seam(RegisterColliderProvider)을 담고 있다.
+				"DynamicRopeShaders",
+				// UI/ — Blueprint/UserWidget.h(URopeAimWidget, URopePluginInfoWidget)
+				"UMG",
+				// UI/ — Slate 타입(위젯 페인트 시그니처: FGeometry/FSlateRect/FSlateWindowElementList)
+				"Slate",
+				"SlateCore",
+				// UI/RopePluginInfoHUD.h — InputCoreTypes.h(FKey)
+				"InputCore",
 			}
 			);
 
@@ -35,22 +50,12 @@ public class DynamicRope : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"CoreUObject",
-				"Engine",
 				// RopeSceneProxy
 				"RenderCore",
 				// RopeSceneProxy
 				"RHI",
-				// GPU 솔버(FRopeGPUSolver) — 별도 PostConfigInit 모듈
-				"DynamicRopeShaders",
-				// URopeWielderComponent 선택적 입력 자동 바인딩
+				// URopeWielderComponent 선택적 입력 자동 바인딩(public 헤더는 전방선언만 — private 유지)
 				"EnhancedInput",
-				"Slate",
-				"SlateCore",
-				// UI/ — 플러그인 설명 HUD(ARopePluginInfoHUD + URopePluginInfoWidget)
-				"UMG",
-				// UI/ — HUD 토글 키(FKey/EKeys, FKey::GetDisplayName)
-				"InputCore",
 				// ... add private dependencies that you statically link with here ...
 			}
 			);

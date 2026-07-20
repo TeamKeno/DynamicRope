@@ -42,7 +42,7 @@ DECLARE_MULTICAST_DELEGATE_ThreeParams(FRopeReleasedNotify, const USceneComponen
  * 물고 있어(SkeletalMeshComponent), 선행조건만으로 포즈 버퍼 플립(최신 포즈)까지 보장된다.
  */
 USTRUCT()
-struct FRopeSimTickFunction : public FTickFunction
+struct DYNAMICROPE_API FRopeSimTickFunction : public FTickFunction
 {
 	GENERATED_BODY()
 

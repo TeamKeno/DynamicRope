@@ -1535,7 +1535,7 @@ struct FRopeThrowParams;
 
 /** throw 순간 Wielder/Component가 계산해 넘기는 런타임 값. 설정값(FRopeThrowParams)과 분리한다. */
 USTRUCT(BlueprintType)
-struct FRopeThrowContext
+struct DYNAMICROPE_API FRopeThrowContext
 {
 	GENERATED_BODY()
 
@@ -1810,7 +1810,7 @@ struct FRopeContactCandidate
 };
 
 /** ③이 입력 순간 확정하는 prepared preview(렌더 + GuidedThrow/Wrapped 진입 재료). */
-struct FRopePreparedThrowPreview
+struct DYNAMICROPE_API FRopePreparedThrowPreview
 {
 	bool bValid = false;
 
@@ -1896,7 +1896,7 @@ struct FRopeGuidedThrowState
  * 소비자: CaptureTravelPlane 축(가이드 평면이 없는 던지기의 폴백 normal, 3단계에서 축 origin으로
  * RegionCenter 사용 예정). GPU 상주 로프는 CPU 미러가 1~2프레임 낡을 수 있으나 방향 성분은 충분하다.
  */
-struct FRopeCaptureTravelFrame
+struct DYNAMICROPE_API FRopeCaptureTravelFrame
 {
 	bool bValid = false;
 
@@ -1949,7 +1949,7 @@ struct FRopeTrackedContactTarget
  * 시드 다중화(MaxWrapSeeds > 1)가 보조 시드 후보를 고르는 재료다. dominant 선정/리셋 계약은
  * Targets 도입과 무관하게 종전과 동일하다.
  */
-struct FRopeContactTracker
+struct DYNAMICROPE_API FRopeContactTracker
 {
 	FName CandidateBone = NAME_None;
 	const USceneComponent* CandidateMesh = nullptr;

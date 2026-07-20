@@ -59,7 +59,7 @@ struct FRopeContactState
  * 한 항목에 겹치는 collider가 MaxPerItem을 넘으면 그 항목만 전량 루프로 폴백하므로, 어떤 경우에도
  * 검출 결과가 줄지 않는다(순수한 비용 절감이지 동작 변경이 아니다).
  */
-struct FRopeColliderCandidates
+struct DYNAMICROPE_API FRopeColliderCandidates
 {
 	/** 항목(노드/세그먼트) 1개당 후보 상한. 초과하면 그 항목만 전량 루프 폴백. */
 	static constexpr int32 MaxPerItem = 12;

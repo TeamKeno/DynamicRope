@@ -16,14 +16,15 @@ public class DynamicRopeShaders : ModuleRules
 			new string[]
 			{
 				"Core",
+				// public 헤더(RopeGPUSolver.h)가 RenderGraphFwd.h를 include하므로 public이어야 한다 —
+				// private로 두면 이 모듈의 헤더를 include하는 하위 모듈이 컴파일되지 않는다.
+				"RenderCore",
 			}
 			);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				// FGlobalShader / RDG (RenderGraph)
-				"RenderCore",
 				// GPU 버퍼 / 리드백
 				"RHI",
 				// IPluginManager — .usf 가상경로 매핑
