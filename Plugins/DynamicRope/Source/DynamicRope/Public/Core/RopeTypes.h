@@ -1337,29 +1337,31 @@ UENUM(BlueprintType)
 enum class ERopeTetherMode : uint8
 {
 	/**
-	 * (기본) 초과분을 **양끝에 유효 역질량 비율로 나눠** 회수한다 + 고정속도 리엘. 무거운 쪽이 덜 움직이는
+	 * (레거시 — 기본 자리를 Constraint에 넘겼다. 이행기 동안 선택 가능, 제거 계획은 Docs/PoC/05 §6 F)
+	 * 초과분을 **양끝에 유효 역질량 비율로 나눠** 회수한다 + 고정속도 리엘. 무거운 쪽이 덜 움직이는
 	 * "무게감"이 여기서 나온다(질량 = 분배 비율). 단 인가 자체는 질량 무관한 속도 세팅이라 물리 시뮬레이션은
-	 * 아니다 — 물리적인 건 *분배*(실제 구속이 나누는 방식)지 인가가 아니다.
+	 * 아니다 — 알려진 한계: 정적 앵커에서 wielder가 상시 리엘로 끌려가는 윈치화(Docs/PoC/05 §1).
 	 */
-	MassShare = 0 UMETA(DisplayName = "Mass Share"),
+	MassShare = 0 UMETA(DisplayName = "Mass Share (Legacy)"),
 
 	/**
-	 * 초과분을 **한쪽 끝이 전부** 흡수한다 — 질량은 "어느 끝이 양보하나"의 **이진 판정에만** 쓰인다(대상이
-	 * 가벼우면 대상이, 무거우면 wielder가 양보). 진 쪽은 **비신축 클램프**로 로프 길이를 지킨다: 바깥 속도만
-	 * 제거하고 위치를 경계로 되돌릴 뿐, **안쪽 속도를 주입하지 않는다**(관성 없음 → 발사 없음). 그래서 무게에
-	 * 비례한 뒤처짐이 없다 — 그건 MassShare의 몫이다. 이긴 쪽은 자유(대상이 벽에 걸려 못 오면 그 부족분만 wielder가
-	 * 대신 멈춘다). 무거운 대상엔 능동 Pull이 climb-in으로 wielder를 끌어당긴다.
+	 * (레거시 — MassShare와 동일 이행기) 초과분을 **한쪽 끝이 전부** 흡수한다 — 질량은 "어느 끝이 양보하나"의
+	 * **이진 판정에만** 쓰인다(대상이 가벼우면 대상이, 무거우면 wielder가 양보). 진 쪽은 **비신축 클램프**로
+	 * 로프 길이를 지킨다: 바깥 속도만 제거하고 위치를 경계로 되돌릴 뿐, 안쪽 속도를 주입하지 않는다(관성 없음
+	 * → 발사 없음). 이긴 쪽은 자유(대상이 벽에 걸려 못 오면 그 부족분만 wielder가 대신 멈춘다). 무거운 대상엔
+	 * 능동 Pull이 climb-in으로 wielder를 끌어당긴다 — 이 이진 판정/climb-in은 Constraint도 공유한다.
 	 */
-	BinaryPullable = 1 UMETA(DisplayName = "Binary Pullable"),
+	BinaryPullable = 1 UMETA(DisplayName = "Binary Pullable (Legacy)"),
 
 	/**
-	 * (실험 — Docs/PoC/05) 초과분을 **단일 장력 임펄스 λ**로 회수한다: 프레임당 λ 하나를 풀어 양끝에
-	 * 크기가 같은 임펄스 쌍(각자 다리 방향, ΔV = λ×유효 역질량)으로 인가한다. 분배(무거운 쪽이 덜
-	 * 움직임/앵커 정지)는 역질량에서 자동 유도되고, 상대 *접근*만 만들므로 끝별 서보의 에너지 주입
-	 * (폭주)·상시 리엘의 윈치화가 구조적으로 없다. 발화 = C > 0 ∧ 전 체인 팽팽(bChainTaut 3중 게이트 공유
-	 * — C의 소스는 부분 스트레치에 오염될 수 있어 C 단독으로는 게이트가 못 된다, PathChordLen 주석 참조).
+	 * (기본 — Docs/PoC/05, 2026-07-20 PIE 검증으로 승격) 초과분을 **단일 장력 임펄스 λ**로 회수한다:
+	 * 프레임당 λ 하나를 풀어 양끝에 크기가 같은 임펄스 쌍(각자 다리 방향, ΔV = λ×유효 역질량)으로
+	 * 인가한다. 분배(무거운 쪽이 덜 움직임/앵커 정지)는 역질량에서 자동 유도되고, 상대 *접근*만 만들므로
+	 * 끝별 서보의 에너지 주입(폭주)·상시 리엘의 윈치화가 구조적으로 없다. **랙돌 대상 절반은 엔진 물리
+	 * 제약**(URopeComponent::UpdatePhysicalTether — Chaos가 서브스텝에서 관절·접촉과 함께 솔브)이 담당한다.
+	 * 발화 = C > 0 ∧ 전 체인 팽팽(bChainTaut 3중 게이트 공유 — C의 소스는 부분 스트레치에 오염될 수 있어
+	 * C 단독으로는 게이트가 못 된다, PathChordLen 주석 참조).
 	 * 노브: TetherSettleTime/MaxTetherTension/TetherCompliance(+ 상한 재사용 TetherMaxSpeed).
-	 * 검증 후 기본이 되고 두 레거시 모드를 대체할 예정.
 	 */
 	Constraint = 2 UMETA(DisplayName = "Constraint (Lambda)"),
 };
@@ -1388,9 +1390,14 @@ struct FRopeHoldConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
 	float TensionReleaseTime = 0.05f;
 
-	/** 테더 회수 모델. MassShare=역질량 연속 분배(기본), BinaryPullable=이진 끌림 판정 + 소프트 스프링. */
+	/**
+	 * 테더 회수 모델. 기본 = Constraint(단일 λ 임펄스 제약, 랙돌 절반은 엔진 물리 제약 — Docs/PoC/05).
+	 * 레거시 두 모드(MassShare/BinaryPullable)는 이행기 선택지로만 남는다: 모드를 명시 저장한 에셋만
+	 * 종전 동작을 유지하고(델타 직렬화 — 안 만진 에셋은 새 기본을 따른다), 아래 "(레거시 전용)" 노브들은
+	 * 레거시 모드에서만 편집/작동한다.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold")
-	ERopeTetherMode TetherMode = ERopeTetherMode::MassShare;
+	ERopeTetherMode TetherMode = ERopeTetherMode::Constraint;
 
 	/**
 	 * 자동 견인(테더) 반응 [0..1]. Wrapped 중 손~앵커 직선 거리가 가용 로프 길이(앵커까지 세그먼트 수 ×
@@ -1401,7 +1408,7 @@ struct FRopeHoldConfig
 	 *    × dt)만큼 회수해 로프 길이 경계로 되돌린다(물리 시뮬 바디는 위치 이동, CMC 구동 캐릭터는 안쪽 속도
 	 *    top-up — 둘 다 관성/발사 없음). 1 = 즉시 안착, 작을수록(0.1~0.3) 여러 프레임에 걸쳐 부드럽게 추종.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "TetherMode != ERopeTetherMode::Constraint"))
 	float TetherResponse = 0.2f;
 
 	/** 테더 발동 전 허용 여유(cm). 경계 지터/미세 슬랙에서 발동하는 것을 막는다(가용 길이에 더해짐). */
@@ -1426,7 +1433,7 @@ struct FRopeHoldConfig
 	 * 속도 도달이 60fps 기준 1~2프레임이라 정상 견인 체감은 불변). 0 = 무제한(구 동작).
 	 * wielder 쪽은 단방향 서보 + 속력 상한이 이미 있어 적용하지 않는다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", EditCondition = "TetherMode != ERopeTetherMode::Constraint"))
 	float TetherMaxAcceleration = 20000.0f;
 
 	/**
@@ -1434,7 +1441,7 @@ struct FRopeHoldConfig
 	 * 크면 항상 이 속도로 당기고(마스 분배로 양끝에 ShareT:ShareW 비율로 나뉨), 한계 근처에선 부드럽게 감속해
 	 * 안착한다. 속도 ∝ overshoot가 아니라 고정이라 견인이 일정하다. 0 = 견인 없음.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm/s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm/s", EditCondition = "TetherMode != ERopeTetherMode::Constraint"))
 	float TetherReelSpeed = 400.0f;
 
 	/**
@@ -1458,7 +1465,7 @@ struct FRopeHoldConfig
 	 * 앵커(무한질량). 물리 질량은 UE가 자동 유지하므로 별도 세팅이 필요 없다. 끄면 아래 TetherTargetShare
 	 * 고정 비율을 쓴다(오버라이드가 자동보다 항상 우선).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (EditCondition = "TetherMode != ERopeTetherMode::Constraint"))
 	bool bAutoTetherShare = true;
 
 	/**
@@ -1484,7 +1491,7 @@ struct FRopeHoldConfig
 	 * 되돌린다. "훅" 걱정은 리엘 목표 속도 자체가 이미 막는다 — 걸리는 순간엔 Overshoot이 작아 목표 속도도
 	 * 작고(Overshoot/dt 캡), 초과분이 쌓이면서 자연히 올라간다. 즉 램프는 목표가 하지 감쇠가 할 일이 아니다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s", EditCondition = "TetherMode != ERopeTetherMode::Constraint"))
 	float TetherCharacterSmoothTime = 0.0f;
 
 	/**
@@ -1494,7 +1501,7 @@ struct FRopeHoldConfig
 	 * 2배 무거움 → 몫 1/5, 3배 → 1/10). 1보다 작으면 완만(질량차 영향 축소), 0이면 질량 무시 50:50.
 	 * 앵커(w=0)는 지수와 무관하게 항상 몫 0(안 움직임). bAutoTetherShare 전용.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", EditCondition = "bAutoTetherShare"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", EditCondition = "bAutoTetherShare && TetherMode != ERopeTetherMode::Constraint"))
 	float TetherMassBias = 1.0f;
 
 	/**
@@ -1504,7 +1511,7 @@ struct FRopeHoldConfig
 	 * 끌려 올라감"), 중간 = 비율 분할(양끝이 서로에게 끌린다). 양끝 이동의 합이 초과분을 넘지 않아 과수렴이
 	 * 없다. 자기 자신에 감긴 로프(owner==대상)는 무시하고 전량 대상 경로.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "!bAutoTetherShare"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "!bAutoTetherShare && TetherMode != ERopeTetherMode::Constraint"))
 	float TetherTargetShare = 1.0f;
 
 	/**
@@ -1635,7 +1642,7 @@ struct FRopeHoldConfig
 	 * 주입하지 않은 속도는 장부에 없어 보존되고, 외부 감속으로 이미 사라진 몫은 자동 탕감된다.
 	 * 0 = 브레이크 없음(종전 동작 — 관성 유지).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s", EditCondition = "TetherMode != ERopeTetherMode::Constraint"))
 	float TetherSlackBrakeTime = 0.3f;
 
 	/**
@@ -1644,7 +1651,7 @@ struct FRopeHoldConfig
 	 * 프레임률 독립. 회수 명령 속도의 절대 상한은 TetherMaxSpeed를 재사용한다(SolveTetherLambda의
 	 * MaxBiasSpeed — 커밋 직후 C가 큰 프레임의 스파이크 방지이자 슬랙 코스팅 잔류의 상한).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s", EditCondition = "TetherMode == ERopeTetherMode::Constraint"))
 	float TetherSettleTime = 0.08f;
 
 	/**
@@ -1654,14 +1661,14 @@ struct FRopeHoldConfig
 	 * 기본값 500000 ≈ 5g 감속, 600cm/s 낙하를 ~0.12초에 흡수). 절단 연출 임계와 같은 단위계다
 	 * (GetTetherTension() = λ/dt 관측치와 직접 비교 가능).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", EditCondition = "TetherMode == ERopeTetherMode::Constraint"))
 	float MaxTetherTension = 500000.0f;
 
 	/**
 	 * (Constraint 모드 전용) 컴플라이언스 α(s²/kg — XPBD 표준형, 분모에 α/dt²). 0(기본) = 비신축 로프.
 	 * > 0이면 λ가 줄어 의도적 탄성(번지 등 연출)이 된다 — 값 감: 0.0005면 60fps에서 강성이 약 1/180로 준다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", EditCondition = "TetherMode == ERopeTetherMode::Constraint"))
 	float TetherCompliance = 0.0f;
 
 	/**

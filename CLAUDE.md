@@ -103,11 +103,18 @@ unit-testable without a world:
   skinned bone each frame so the wrap follows animation (returning `false` if the wrapped mesh was
   destroyed, so the caller releases); `Release` hands the nodes back to the solver. `ComputePull`
   derives the pull on the hand-side head anchor (direction + adjacent-segment tension) as pure data;
-  the component consumes it two ways each Wrapped frame: (1) *tether* (`TetherResponse`, 0 = off) —
-  position/velocity sync that recovers the overshoot past the available rope length (convergent by
-  construction; a tension-proportional force would runaway), and (2) *active pull*
-  (`URopeComponent::SetActivePull`, held input via `URopeWielderComponent::PullAction`) — a constant
-  user-set force applied only while taut. Receivers: simulating bone → character movement →
+  the component consumes it two ways each Wrapped frame: (1) *tether* — default mode `Constraint`
+  (Docs/PoC/05): one tension impulse λ per frame, solved from the whole-chain violation (unclamped
+  chord sum − rest, gated by the taut latch) and applied as an equal/opposite impulse pair to both
+  ends, so distribution follows inverse effective mass and neither end can be winched or blown up;
+  **ragdoll targets are instead held by an engine physics constraint** (kinematic corner proxy ↔
+  wrapped-bone anchor point, spherical distance limit — `UpdatePhysicalTether`, solved by Chaos
+  together with the joints per substep). Legacy per-end-servo modes (`MassShare`/`BinaryPullable`)
+  remain selectable during the transition; their knobs are edit-gated legacy-only. (2) *active pull*
+  (`URopeComponent::SetActivePull`; `URopeWielderComponent::PullAction` is an **armed toggle** —
+  press to arm, engages the moment tension first crosses `PullEngageTension`, playing `PullMontage`
+  once if set) — a constant user-set force; if the target is too heavy/anchored the same force pulls
+  the wielder toward the anchor instead (climb-in). Receivers: simulating bone → character movement →
   simulating root.
 
 **Collision abstraction (`Collision/`)**: the solver only ever calls `IRopeCollider::Query()` — it

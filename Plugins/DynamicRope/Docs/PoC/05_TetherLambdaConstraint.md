@@ -1,6 +1,9 @@
 # 05. Wrapped 테더의 λ 제약 재편 (설계)
 
-작성: 2026-07-20. 상태: **설계 초안 — 리뷰 대기**.
+작성: 2026-07-20. 상태: **A~E 구현 완료** — A(순수 수학) CL 536, B+C(질량 정정·Constraint 배선) CL 545,
+D(재현 리그) CL 546, 랙돌 물리 제약 전환(§3.4-1 정정) CL 556, Pull 장전 토글+climb-in 공유 CL 564,
+E(Constraint 기본 승격·레거시 노브 게이팅) 이 문서와 동반 CL. 남은 것 = **F(레거시 두 모드·노브 제거)** —
+외부 BP 참조 정리 후. PIE 실측: 벽 탈출/프랍 드래그/랙돌(BareWrap·Pierce)/장전 토글 통과.
 관련: `01_PostWrapModel.md`(성립 이후 = 데이터 + 제약), 현행 구현 `RopeComponent.cpp`
 (UpdateTether / ApplyMassShareTether / ApplyBinaryPullableTether), `Logic/RopeTractionSolver.h`.
 
