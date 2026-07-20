@@ -600,24 +600,8 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 					TensionColor = (S.TetherTension >= S.MaxTetherTension * 0.999f) ? TEXT("{red}")
 						: (S.TetherTension > S.MaxTetherTension * 0.8f) ? TEXT("{yellow}") : TEXT("{cyan}");
 				}
-				// 수신자 요약: 종류(sim/chr/anc)+유효질량 — 랙돌이 anc(무한질량)로 오분류되면 여기서 바로 보인다.
-				auto KindTag = [](uint8 Kind) -> const TCHAR*
-				{
-					switch (Kind)
-					{
-					case 1: return TEXT("sim");
-					case 2: return TEXT("chr");
-					case 3: return TEXT("anc");
-					default: return TEXT("none");
-					}
-				};
-				const FString RecvInfo = S.bTetherEndpointsValid
-					? FString::Printf(TEXT(" recv=%s%.0f/%s%.0fkg"),
-						KindTag(S.TetherTargetKind), S.TetherMassTarget,
-						KindTag(S.TetherWielderKind), S.TetherMassWielder)
-					: FString();
-				ConstraintInfo = FString::Printf(TEXT(" constraint %sT=%.0f{white}/%.0f%s"),
-					TensionColor, S.TetherTension, S.MaxTetherTension, *RecvInfo);
+				ConstraintInfo = FString::Printf(TEXT(" constraint %sT=%.0f{white}/%.0f"),
+					TensionColor, S.TetherTension, S.MaxTetherTension);
 			}
 			AddTextLine(FString::Printf(TEXT("    {orange}pull{white} tension=%.0f taut=%s{white} chain=%s{white}(%.0f/%.0fcm, minT=%.0f, sag=%.0f) dir=%s tether=%s%.0fcm{white}(x%.2f, release=%.0f) active=%.0f%s"),
 				S.PullTension, S.bPullTaut ? TEXT("{green}Y") : TEXT("{grey}N"),

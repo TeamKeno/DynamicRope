@@ -2036,16 +2036,6 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.bConstraintTetherMode = (HoldConfig.TetherMode == ERopeTetherMode::Constraint);
 		Snapshot.TetherTension = GetTetherTension();
 		Snapshot.MaxTetherTension = HoldConfig.MaxTetherTension;
-		// 수신자 해석 요약(이번 프레임 캐시가 유효할 때만) — "왜 안 끌리나"의 1차 판독: 종류 오분류(랙돌이
-		// Anchor로 떨어짐 등)와 유효질량(0 = 앵커/무한)이 그대로 보인다.
-		Snapshot.bTetherEndpointsValid = WrappedEndpointCache.bValid;
-		if (WrappedEndpointCache.bValid)
-		{
-			Snapshot.TetherTargetKind = static_cast<uint8>(WrappedEndpointCache.Target.Kind);
-			Snapshot.TetherWielderKind = static_cast<uint8>(WrappedEndpointCache.Wielder.Kind);
-			Snapshot.TetherMassTarget = WrappedEndpointCache.Target.Mass;
-			Snapshot.TetherMassWielder = WrappedEndpointCache.Wielder.Mass;
-		}
 		Snapshot.ActivePullForce = PullDrive.ActivePullForce;
 		Snapshot.bPullTaut = PullDrive.bPullTaut;
 		Snapshot.bChainTaut = PullDrive.bChainTaut;

@@ -183,13 +183,6 @@ struct FRopeDebugSnapshot
 	bool bConstraintTetherMode = false;
 	float TetherTension = 0.0f;
 	float MaxTetherTension = 0.0f;
-	// 수신자 해석 요약(이번 프레임 endpoint 캐시 유효 시) — 종류(ERopeEndpointKind 값)와 유효질량(kg,
-	// 0 = 앵커/무한). 랙돌 오분류("왜 안 끌리나")를 PIE에서 바로 판독하기 위한 관측치.
-	bool bTetherEndpointsValid = false;
-	uint8 TetherTargetKind = 0;
-	uint8 TetherWielderKind = 0;
-	float TetherMassTarget = 0.0f;
-	float TetherMassWielder = 0.0f;
 	// 능동 Pull 힘(0=입력 없음)
 	float ActivePullForce = 0.0f;
 	// 팽팽(taut) 게이트 상태 — 능동 Pull 인가 조건(IsPullTaut와 동일 래치)
