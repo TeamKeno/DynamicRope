@@ -25,7 +25,9 @@ namespace
 	// NumRings=(NumNodes-1)*Subdiv+1.
 	// NumNodes는 프록시와 같은 소스인 NumParticles(설정값)를 받는다 — 라이브 노드 수를 넘기면 시드 전이나
 	// 노드 수 변경 중에 프록시와 다른 링 수가 나온다.
-	FString TubeDiagString(int32 NumNodes, int32 WantedSubdiv)
+	// bAdvanced가 꺼지면 경로(gpu/cpu)와 **CPU로 떨어진 사유**만 낸다. 사유는 조치할 수 있어서(노드 수나
+	// Subdiv를 낮춘다) 남기고, GPU일 때의 버킷·링 수는 디스패치 내부 수치라 상세에서만 낸다.
+	FString TubeDiagString(int32 NumNodes, int32 WantedSubdiv, bool bAdvanced)
 	{
 		if (!RopeGPU::IsRuntimeSupported())
 		{
@@ -41,7 +43,9 @@ namespace
 		const int32 Bucket = RopeGPU::TubeRingBucket(NumRings);
 		if (Bucket > 0)
 		{
-			return FString::Printf(TEXT("{green}gpu{grey}(bucket %d, rings %d)"), Bucket, NumRings);
+			return bAdvanced
+				? FString::Printf(TEXT("{green}gpu{grey}(bucket %d, rings %d)"), Bucket, NumRings)
+				: FString(TEXT("{green}gpu"));
 		}
 		return FString::Printf(TEXT("{red}cpu{grey}(rings %d > %d)"), NumRings, RopeGPU::MaxTubeRings());
 	}
@@ -316,7 +320,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			 : SolvePathToken(Rope.IsSleeping(), Rope.WasSolvedThisFrame(),
 					Rope.IsGpuSteppedThisFrame(), Rope.HadLogicOverrideThisFrame()),
 		*TubeDiagString(Snap ? Snap->NumParticles : Rope.NumParticles,
-			Snap ? Snap->TubeSmoothingSubdiv : Rope.TubeSmoothingSubdiv)));
+			Snap ? Snap->TubeSmoothingSubdiv : Rope.TubeSmoothingSubdiv, HasView(EView::Advanced))));
 
 	//~ nodes ------------------------------------------------------------
 	if (HasView(EView::Nodes))
@@ -406,9 +410,15 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			return false;
 		};
 
+		// 노드별 이동선(prev→pos)은 감지에 걸린 노드마다 한 줄씩 늘어 화면을 덮는다. 접촉점·법선·후보가
+		// 이미 결과를 보여주므로, "노드가 그 사이 어디를 지났나"까지 봐야 할 때만 상세 보기로 낸다.
+		const bool bShowNodeTrails = HasView(EView::Advanced);
 		for (const FRopeFlightNodeDebug& Node : S.NodeDebug)
 		{
-			AddShape(FGameplayDebuggerShape::MakeSegment(Node.PrevPosition, Node.Position, 1.0f, FColor::White));
+			if (bShowNodeTrails)
+			{
+				AddShape(FGameplayDebuggerShape::MakeSegment(Node.PrevPosition, Node.Position, 1.0f, FColor::White));
+			}
 
 			if (Node.bNearBody)
 			{
@@ -514,7 +524,12 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				DrawDebugLine(World, AxisO - AxisDir * AxisLen, AxisO + AxisDir * AxisLen, FColor::Yellow, false, -1.0f, FG, 3.0f);
 				DrawDebugDirectionalArrow(World, AxisO, AxisO + AxisDir * AxisLen, 16.0f, FColor::Yellow, false, -1.0f, FG, 3.0f);
 			}
-			AddTextLine(FString::Printf(TEXT("  {yellow}wrapAxis{grey} dir=%s"), *AxisDir.ToCompactString()));
+			// 축 방향은 위 노란 선/화살표가 이미 보여준다 — 숫자 벡터는 스크린샷으로 값을 대조할 때만
+			// 필요하므로 상세 보기에서만. 축이 퇴화(0벡터)해 선을 못 그린 경우엔 그 사실을 알려야 하므로 낸다.
+			if (HasView(EView::Advanced) || AxisDir.IsNearlyZero())
+			{
+				AddTextLine(FString::Printf(TEXT("  {yellow}wrapAxis{grey} dir=%s"), *AxisDir.ToCompactString()));
+			}
 		}
 	}
 
@@ -639,19 +654,24 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			AddTextLine(TEXT("    {grey}pull n/a (no hand-side anchor)"));
 		}
 
-		const int32 MaxRows = FMath::Min(12, S.Latched.Num());
+		// latch 테이블. 개수는 위 wrapped 줄의 latched=N이, 위치는 3D 노란 박스가 이미 보여주고, bone은
+		// 헤더·wrapped 줄과 겹친다. 남는 고유 정보는 본 로컬 좌표뿐인데 화면에서 정오를 판단할 방법이
+		// 없으므로(대조할 기준이 없다) 상세 보기에서만 낸다.
+		const int32 MaxRows = HasView(EView::Advanced) ? FMath::Min(12, S.Latched.Num()) : 0;
 		for (int32 i = 0; i < MaxRows; ++i)
 		{
 			const FRopeLatchNode& Latch = S.Latched[i];
 			const FVector WorldPos = S.Positions.IsValidIndex(Latch.NodeIndex)
 				? S.Positions[Latch.NodeIndex] : FVector::ZeroVector;
-			AddTextLine(FString::Printf(TEXT("    {grey}node=%d bone=%s local=%s world=%s"),
+			AddTextLine(FString::Printf(TEXT("      {grey}node=%d bone=%s local=%s world=%s"),
 				Latch.NodeIndex, *Latch.Bone.ToString(),
 				*Latch.BoneLocalPos.ToCompactString(), *WorldPos.ToCompactString()));
 		}
-		if (S.Latched.Num() > MaxRows)
+		// 잘린 나머지 안내는 표를 실제로 낸 경우에만 — 상세가 꺼져 MaxRows=0이면 "... N more"가 전체
+		// 개수로 떠서 표가 잘린 것처럼 읽힌다(개수는 이미 latched=N이 냈다).
+		if (MaxRows > 0 && S.Latched.Num() > MaxRows)
 		{
-			AddTextLine(FString::Printf(TEXT("    {grey}... %d more"), S.Latched.Num() - MaxRows));
+			AddTextLine(FString::Printf(TEXT("      {grey}... %d more"), S.Latched.Num() - MaxRows));
 		}
 	}
 
