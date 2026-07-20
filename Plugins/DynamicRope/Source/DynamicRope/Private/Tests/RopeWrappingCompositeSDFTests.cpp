@@ -83,91 +83,7 @@ bool FRopeWrappingPoseSpaceIslandTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 복합 외곽 query가 직전 선택 SDF의 local tangent에 갇히지 않고, 독립 sweep radial 방향에 따라
-// 같은 포즈에서 몸통->팔과 팔->몸통을 모두 선택할 수 있는지 고정한다.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingCompositeSweepSupportTest,
-	"DynamicRope.Wrapping.CompositeSweepSelectsOuterSupportInBothDirections",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeWrappingCompositeSweepSupportTest::RunTest(const FString& Parameters)
-{
-	USceneComponent* Mesh = NewObject<USceneComponent>();
-	FRopeBoneSDFVolume BodyVolume =
-		RopeSDFSynthetic::MakeSphere(FName("body"), FVector::ZeroVector, 10.0f, FIntVector(21), 5.0f);
-	FRopeBoneSDFVolume ArmVolume =
-		RopeSDFSynthetic::MakeSphere(FName("arm"), FVector::ZeroVector, 5.0f, FIntVector(21), 5.0f);
-
-	const FTransform BodyTransform = FTransform::Identity;
-	const FTransform ArmTransform(FQuat::Identity, FVector(15.0f, 0.0f, 0.0f));
-	FRopeSDFCollider BodyCollider(
-		&BodyVolume, BodyTransform, BodyTransform, 0.0f, BodyVolume.Bone, Mesh);
-	FRopeSDFCollider ArmCollider(
-		&ArmVolume, ArmTransform, ArmTransform, 0.0f, ArmVolume.Bone, Mesh);
-	TArray<IRopeCollider*> Colliders = { &BodyCollider, &ArmCollider };
-
-	FRopeWrapConfig Config;
-	Config.ContactQueryRadius = 3.0f;
-	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
-		3.0f, TEXT("CompositeSweepSupportTest"), true };
-	FRopeSimState Sim;
-	Sim.SegmentLength = 8.0f;
-	Sim.Positions = { FVector(10.0f, 0.0f, 0.0f) };
-	Sim.PrevPositions = Sim.Positions;
-	Sim.InvMass = { 1.0f };
-
-	FRopeWrappingPhase Wrapping;
-	Wrapping.State.LatchAnchor.Mesh = Mesh;
-	Wrapping.State.Mesh = Mesh;
-	Wrapping.State.PathWrapIslandBones = { BodyVolume.Bone, ArmVolume.Bone };
-	Wrapping.State.PathAxisOrigin = FVector::ZeroVector;
-	Wrapping.State.PathAxisDirection = FVector::UpVector;
-	Wrapping.State.PathLatchRadial = FVector::ForwardVector;
-	Wrapping.State.PathWindingSign = 1.0f;
-	Wrapping.State.PathCompositeProbeRadius = 25.0f;
-
-	const auto QuerySweepSupport = [&](const FVector& SweepRadial,
-		const FVector& Probe, const FVector& PreviousSurface, FName& OutBone,
-		ERopeCompositeSupportTier* OutSupportTier)
-	{
-		FVector Surface = PreviousSurface;
-		FVector Normal = FVector::ForwardVector;
-		FVector Tangent = FVector::RightVector;
-		FVector Circumference = FVector::RightVector;
-		const USceneComponent* SelectedMesh = Mesh;
-		OutBone = NAME_None;
-		return Wrapping.ProjectWrapPointToCompositeIsland(
-			Sim, Ctx, Sim.Positions[0], Probe, SweepRadial, PreviousSurface,
-			Normal, Tangent, Surface, Normal, Tangent, Circumference, OutBone, SelectedMesh,
-			OutSupportTier);
-	};
-
-	FName PositiveBone = NAME_None;
-	TestTrue(TEXT("positive sweep finds a composite support"),
-		QuerySweepSupport(FVector::ForwardVector, FVector(25.0f, 0.0f, 0.0f),
-			FVector(10.0f, 0.0f, 0.0f), PositiveBone, nullptr));
-	TestEqual(TEXT("positive sweep selects the farther arm outer surface"),
-		PositiveBone, ArmVolume.Bone);
-
-	FName NegativeBone = NAME_None;
-	TestTrue(TEXT("negative sweep finds a composite support"),
-		QuerySweepSupport(-FVector::ForwardVector, FVector(-25.0f, 0.0f, 0.0f),
-			FVector(20.0f, 0.0f, 0.0f), NegativeBone, nullptr));
-	TestEqual(TEXT("reverse-side sweep returns from arm side to body outer surface"),
-		NegativeBone, BodyVolume.Bone);
-
-	// 빠르게 움직이는 pose에서 support probe의 축 좌표가 한 프레임 앞서면 strict axial slab을 벗어날
-	// 수 있다. 실제 표면 후보가 넓은 안전 상한 안에 있으면 접촉을 버리지 않고 relaxed tier로 복구한다.
-	FName RelaxedBone = NAME_None;
-	ERopeCompositeSupportTier RelaxedTier = ERopeCompositeSupportTier::Failed;
-	TestTrue(TEXT("axially displaced probe recovers without leaving composite mode"),
-		QuerySweepSupport(FVector::ForwardVector, FVector(25.0f, 0.0f, 25.0f),
-			FVector(20.0f, 0.0f, 0.0f), RelaxedBone, &RelaxedTier));
-	TestTrue(TEXT("displaced probe uses relaxed composite support"),
-		RelaxedTier == ERopeCompositeSupportTier::Relaxed);
-	return true;
-}
-
-// 복합 SDF 실패 후에는 실패 지점에서 graph 전환을 이어가지 않고, 최초 latch 본 하나로 경로와
+// Composite Analytic Helix 실패 후에는 실패 지점에서 경로를 이어가지 않고, 최초 latch 본 하나로 경로와
 // projection 대상을 완전히 재설정해야 한다.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingSingleBoneFallbackTest,
 	"DynamicRope.Wrapping.CompositeFailureRestartsSingleBonePath",
@@ -244,22 +160,23 @@ bool FRopeWrappingSingleBoneFallbackTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("single-bone projection ignores the touching arm collider"),
 		SelectedBone, BodyVolume.Bone);
 
-	// 런타임 composite support가 모든 복구 단계를 소진하면 테스트 취소 게이트에서 release하지 않고,
-	// 같은 throw 안에서 실제 SingleBone fallback으로 자동 전환해야 한다.
+	// Analytic Helix 자체가 terminal failure로 끝나면 같은 throw 안에서 실제 SingleBone
+	// Surface Vector Field fallback으로 자동 전환해야 한다.
 	FRopeWrappingPhase AutomaticFallbackWrapping;
 	TestTrue(TEXT("automatic fallback scenario initializes as a valid wrap"),
 		AutomaticFallbackWrapping.Begin(Latch, Mesh, BodyVolume.Bone, 0.5f, Sim, Ctx));
 	TestTrue(TEXT("full simulation enables composite multi-bone"),
 		AutomaticFallbackWrapping.State.bPathUsesPoseSpaceIsland);
-	AutomaticFallbackWrapping.State.PathWrapIslandBones = {
-		FName("missing_composite_a"), FName("missing_composite_b") };
-	AutomaticFallbackWrapping.State.bPathUsesPoseSpaceIsland = true;
-	TestTrue(TEXT("exhausted composite support restarts instead of cancelling contact"),
-		AutomaticFallbackWrapping.AdvanceSurfaceVectorFieldProgressiveWrapPath(1, Sim, Ctx));
+	// island 불변식을 깨 terminal failure를 유도한다. public dispatcher가 이를 감지해
+	// 구형 Composite Surface Vector Field를 거치지 않고 fallback을 재초기화해야 한다.
+	AutomaticFallbackWrapping.State.PathWrapIslandBones.Reset();
+	AutomaticFallbackWrapping.AdvancePathBuild(Sim, Ctx);
 	TestTrue(TEXT("automatic runtime path enters single-bone fallback"),
 		AutomaticFallbackWrapping.State.bPathUsesSingleBoneFallback);
 	TestFalse(TEXT("automatic fallback clears composite selector"),
 		AutomaticFallbackWrapping.State.bPathUsesPoseSpaceIsland);
+	TestFalse(TEXT("successful fallback initialization clears terminal failure"),
+		AutomaticFallbackWrapping.State.bPathBuildFailed);
 	TestEqual(TEXT("automatic fallback restarts at the original latch"),
 		AutomaticFallbackWrapping.State.Path.Num(), 1);
 
@@ -278,4 +195,3 @@ bool FRopeWrappingSingleBoneFallbackTest::RunTest(const FString& Parameters)
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS
-

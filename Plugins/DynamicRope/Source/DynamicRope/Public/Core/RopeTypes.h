@@ -370,15 +370,6 @@ enum class ERopeWrapIslandPortalState : uint8
 	ClosedReachability
 };
 
-/** Composite surface projection이 어느 복구 단계에서 성공했는지 나타낸다. */
-enum class ERopeCompositeSupportTier : uint8
-{
-	Strict,
-	Relaxed,
-	Continuity,
-	Failed
-};
-
 /** island 구성에 채택된 SDF collider의 접촉 시점 volume 스냅샷. 추가 샘플링 없이 debug draw에 쓴다. */
 struct FRopeWrapIslandDebugMember
 {
@@ -507,7 +498,7 @@ struct FRopeWrappingState
 	/** 복합 island 구성 시 계산한 미고정 로프의 가용 여유 길이(cm). 디버그/portal 판정 재현용. */
 	float PathAvailableSlack = 0.0f;
 
-	/** true면 순차 bone-transition graph 대신 pose-space composite island projection을 사용한다. */
+	/** true면 순차 Surface Vector Field 대신 pose-space island 기반 Composite Analytic Helix를 사용한다. */
 	bool bPathUsesPoseSpaceIsland = false;
 
 	/** 복합 island 경로가 실패해 최초 latch 본 하나로 경로를 처음부터 다시 만드는 중인가. */
@@ -540,13 +531,7 @@ struct FRopeWrappingState
 	/** 독립 sweep radial이 시작점에서 누적 회전한 양(라디안, 진행 상태 로그용). */
 	float PathCompositeSweepAngleRad = 0.0f;
 
-	/** strict support가 비어 relaxed outer-support로 복구한 step 수. */
-	int32 PathCompositeRelaxedRecoveryCount = 0;
-
-	/** 모든 composite 후보가 비어 직전 본 표면 continuity projection으로 복구한 step 수. */
-	int32 PathCompositeContinuityRecoveryCount = 0;
-
-	/** 모든 composite 복구 계층이 실패한 횟수. 정상적으로는 fallback 직전 한 번만 증가한다. */
+	/** Composite Analytic Helix의 개별 radial projection이 실패해 virtual point를 만든 횟수. */
 	int32 PathCompositeProjectionFailureCount = 0;
 
 	/**

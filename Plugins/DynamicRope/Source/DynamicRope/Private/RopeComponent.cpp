@@ -345,20 +345,19 @@ namespace
 
 		const FRopeWrapPathPoint* LastPathPoint = State.Path.Num() > 0 ? &State.Path.Last() : nullptr;
 		UE_LOG(LogRopeWrap, Error,
-			TEXT("[%s] WRAP FAILURE: site=%s reason=%s active=%d complete=%d failed=%d algorithm=%s latch=%s[%d] current=%s previous=%s path=%d/%d anchors=%d secondary=%d currentDistance=%.2fcm bridge=%.2fcm sweep=%.1fdeg accumulated=%.1fdeg recoveries(relaxed=%d continuity=%d exhausted=%d) island=[%s] portals(geometry=%d reachability=%d open=%d)"),
+			TEXT("[%s] WRAP FAILURE: site=%s reason=%s active=%d complete=%d failed=%d algorithm=%s latch=%s[%d] current=%s previous=%s path=%d/%d anchors=%d secondary=%d currentDistance=%.2fcm bridge=%.2fcm sweep=%.1fdeg accumulated=%.1fdeg projectionMisses=%d island=[%s] portals(geometry=%d reachability=%d open=%d)"),
 			*OwnerName, FailureSite ? FailureSite : TEXT("Unknown"),
 			State.PathBuildFailureReason.IsEmpty() ? TEXT("Unspecified") : *State.PathBuildFailureReason,
 			State.bPathBuildActive ? 1 : 0, State.bPathBuildComplete ? 1 : 0,
 			State.bPathBuildFailed ? 1 : 0,
-			State.bPathUsesPoseSpaceIsland ? TEXT("CompositeSDF") :
-				(State.bPathUsesSingleBoneFallback ? TEXT("SingleBoneFallback") : TEXT("LegacySurface")),
+			State.bPathUsesPoseSpaceIsland ? TEXT("CompositeAnalyticHelix") :
+				(State.bPathUsesSingleBoneFallback ? TEXT("SingleBoneFallback") : TEXT("SequentialSurfaceVectorField")),
 			*State.LatchAnchor.Bone.ToString(), State.LatchAnchor.NodeIndex,
 			*State.PathCurrentBone.ToString(), *State.PathPreviousBone.ToString(),
 			State.Path.Num(), State.NumTailNodes, State.Anchors.Num(), State.SecondarySeedAnchors.Num(),
 			State.PathCurrentDistance, State.PathBridgeDistance,
 			FMath::RadiansToDegrees(State.PathCompositeSweepAngleRad),
 			FMath::RadiansToDegrees(State.PathAccumulatedAngleRad),
-			State.PathCompositeRelaxedRecoveryCount, State.PathCompositeContinuityRecoveryCount,
 			State.PathCompositeProjectionFailureCount, *IslandBones,
 			ClosedGeometryCount, ClosedReachabilityCount, OpenPortalCount);
 
@@ -3253,7 +3252,7 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	const FRopeWrappingPhase::FContext WrappingCtx = MakeWrappingContext();
 	WrappingPhase.AdvancePathBuild(Sim, WrappingCtx);
 
-	// Composite가 내부 복구 과정에서 SingleBone으로 fallback하면 이미 고정한 virtual node를 즉시
+	// Composite Analytic Helix가 terminal failure 뒤 SingleBone으로 fallback하면 이미 고정한 virtual node를 즉시
 	// solver에 돌려준다. 새 Single 경로의 front/mass override가 아래에서 같은 프레임에 다시 적용된다.
 	if (!WrappingPhase.State.bPathUsesPoseSpaceIsland &&
 		(KinematicVirtualBridges.Num() > 0 || WrappingVirtualBridgeScanPathIndex > 0 ||
@@ -3267,18 +3266,19 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	DrawWrapIslandDebug(GetWorld(), WrappingPhase.State, Sim, WrapConfig);
 #endif
 
-	// 정상 경로에서는 composite 내부 복구 뒤 SingleBone fallback으로 전환되므로 여기 도달하지 않는다.
-	// fallback 초기화까지 실패해 composite 실패 상태가 남은 경우를 위한 마지막 안전망이다.
-	if (WrappingPhase.State.bPathBuildFailed && WrappingPhase.State.bPathUsesPoseSpaceIsland)
+	// fallback 초기화 자체가 실패한 경우를 위한 마지막 안전망이다. 이후 SingleBone 진행 중 생긴
+	// projection failure는 기존 partial-path 품질 판정에 맡긴다.
+	if (WrappingPhase.State.bPathBuildFailed &&
+		WrappingPhase.State.PathBuildFailureReason == TEXT("SingleBoneFallbackInitializationFailure"))
 	{
 		LogWrappingFailureState(GetName(), TEXT("UpdateWrapping.CompositeFallbackExhausted"),
 			WrappingPhase.State, Sim);
 		UE_LOG(LogRopeWrap, Warning,
-			TEXT("[%s] Wrap cancelled: algorithm=CompositeSDF reason=PathBuildFailed "
+			TEXT("[%s] Wrap cancelled: algorithm=CompositeAnalyticHelix->SingleBone reason=FallbackInitializationFailed "
 				"path=%d/%d anchors=%d"),
 			*GetName(), WrappingPhase.State.Path.Num(), WrappingPhase.State.NumTailNodes,
 			WrappingPhase.State.Anchors.Num());
-		SetPhase(ERopePhase::Releasing, TEXT("CompositeSDF and fallback initialization both failed"));
+		SetPhase(ERopePhase::Releasing, TEXT("Composite analytic helix and fallback initialization both failed"));
 		AbortWrapping(ERopeReleaseReason::Broken);
 		return;
 	}
@@ -3455,14 +3455,12 @@ void URopeComponent::CommitWrapping()
 		UE_LOG(LogRopeWrap, Log,
 			TEXT("[%s] Composite wrap path summary: points=%d surfacePoints=%d bridgePoints=%d virtualPoints=%d "
 				"switches=%d visitedBones=%d builtDistance=%.2fcm angle=%.0fdeg coverage=%.0fdeg "
-				"recoveries(relaxed=%d continuity=%d exhausted=%d) bones=[%s]"),
+				"projectionMisses=%d bones=[%s]"),
 			*GetName(), WrappingPhase.State.Path.Num(),
 			WrappingPhase.State.Path.Num() - BridgePointCount - VirtualPointCount,
 			BridgePointCount, VirtualPointCount,
 			SurfaceSwitchCount, VisitedBones.Num(), BuiltDistance,
 			CommitAngleDeg, CommitCoverageDeg,
-			WrappingPhase.State.PathCompositeRelaxedRecoveryCount,
-			WrappingPhase.State.PathCompositeContinuityRecoveryCount,
 			WrappingPhase.State.PathCompositeProjectionFailureCount, *VisitedBoneList);
 	}
 

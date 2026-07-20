@@ -146,8 +146,6 @@ private:
 #if WITH_DEV_AUTOMATION_TESTS
 	// 현재 포즈의 surface gap으로 전환 깊이 없는 복합 island가 구성되는지 직접 검증한다.
 	friend class FRopeWrappingPoseSpaceIslandTest;
-	// 독립 sweep radial의 양방향 support query가 팔 외곽과 몸통 외곽을 대칭적으로 선택하는지 검증한다.
-	friend class FRopeWrappingCompositeSweepSupportTest;
 	// 복합 경로 폐기 뒤 최초 latch 본 하나로만 재초기화되는지 검증한다.
 	friend class FRopeWrappingSingleBoneFallbackTest;
 #endif
@@ -173,7 +171,7 @@ private:
 
 	bool AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 StepBudget, const FRopeSimState& Sim, const FContext& Ctx);
 
-	/** 복합 SDF 경로 실패 시 기존 경로/앵커를 버리고 최초 latch 본 하나로 같은 throw를 재시도한다. */
+	/** Composite Analytic Helix의 terminal failure 시 기존 경로/앵커를 버리고 최초 latch 본 하나로 재시도한다. */
 	bool RestartPathBuildAsSingleBoneFallback(const FRopeSimState& Sim, const FContext& Ctx,
 		const TCHAR* CompositeFailureReason);
 
@@ -236,21 +234,6 @@ private:
 		TArray<FRopeWrapIslandDebugMember>& OutDebugMembers,
 		TArray<FRopeWrapIslandDebugPortal>& OutDebugPortals, float& OutAvailableSlack,
 		const FContext& Ctx) const;
-
-	/**
-	 * 저장된 pose-space island의 모든 실제 표면을 외부 support probe에서 lazy 평가한다.
-	 * DesiredSweepRadial 방향의 최외곽 표면만 남기고, 선택된 개별 SDF tangent 대신
-	 * PreviousSurfaceWorld에서 선택점으로 향하는 복합 경로 tangent를 반환한다.
-	 */
-	bool ProjectWrapPointToCompositeIsland(const FRopeSimState& Sim, const FContext& Ctx,
-		const FVector& RopeNodeWorld, const FVector& SupportProbeWorld,
-		const FVector& DesiredSweepRadial, const FVector& PreviousSurfaceWorld,
-		const FVector& PreviousNormalWorld,
-		const FVector& PreviousTangentWorld, FVector& InOutSurfaceWorld,
-		FVector& InOutNormalWorld, FVector& InOutTangentWorld,
-		FVector& InOutCircumferenceDir, FName& InOutBone,
-		const USceneComponent*& OutMesh,
-		ERopeCompositeSupportTier* OutSupportTier = nullptr) const;
 
 	/** 복합 실패 폴백 전용. 후보 graph 없이 최초 latch 본 collider만 투영한다. */
 	bool ProjectWrapPointToSingleBone(const USceneComponent* Mesh,
