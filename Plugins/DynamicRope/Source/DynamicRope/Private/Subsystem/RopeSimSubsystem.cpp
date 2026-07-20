@@ -63,7 +63,9 @@ namespace
 		{
 			return false;
 		}
-		return GDynamicRHI != nullptr && FApp::CanEverRender();
+		// 렌더 가능 RHI + SM5 이상(커널이 SM5 가드로만 컴파일된다) — 판정은 RopeGPU::IsRuntimeSupported가
+		// 단일 소스다(씬 프록시의 GPU 튜브 게이트와 같은 함수를 본다).
+		return RopeGPU::IsRuntimeSupported();
 	}
 
 	// 중복 월드-정적 프로바이더 경고: 로그 + (에디터/개발 빌드)화면 메시지. "월드당 최대 1개" 불변식을

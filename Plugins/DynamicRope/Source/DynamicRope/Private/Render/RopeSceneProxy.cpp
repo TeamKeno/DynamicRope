@@ -185,7 +185,9 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	// (pos/tangent/UV 컴퓨트), 아니면(쿡/-nullrhi/서버, 또는 링>상한) CPU BuildTube 폴백. CVar 토글 없음 —
 	// G4 솔버와 동일한 자동 선택. 상한은 RopeTubeBuilder의 버킷 정의를 단일 소스로 참조(드리프트 방지).
 	// 생성 시점에 한 번 결정(링 수는 proxy 수명 동안 고정).
-	bUseGpuTube = (GDynamicRHI != nullptr && FApp::CanEverRender()) && NumRings <= RopeGPU::MaxTubeRings();
+	// 런타임 지원 판정은 솔버 게이트와 같은 함수(RopeGPU::IsRuntimeSupported — RHI 유무 + SM5 이상)를 쓴다.
+	// 두 게이트가 어긋나면 솔버는 GPU인데 튜브만 CPU인 반쪽 상태가 된다.
+	bUseGpuTube = RopeGPU::IsRuntimeSupported() && NumRings <= RopeGPU::MaxTubeRings();
 
 	// B2-lite: 솔버 resident PosBuf를 직접 읽기 위한 핸들(GT에서 캡처). 솔버는 월드 수명이라 proxy 동안 유효.
 	RopeId = Component->GetUniqueID();

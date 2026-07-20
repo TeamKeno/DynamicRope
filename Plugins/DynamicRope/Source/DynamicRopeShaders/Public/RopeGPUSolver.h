@@ -319,6 +319,24 @@ class FRDGBuilder;
 class FGlobalDistanceFieldParameterData;
 class FSceneView;
 
+namespace RopeGPU
+{
+	/**
+	 * 이 런타임에서 GPU 경로(솔버·감지·튜브)를 쓸 수 있는가. 렌더 가능한 RHI가 있는지에 더해
+	 * **feature level이 SM5 이상인지**까지 본다 — 커널은 전부 SM5 가드로 컴파일되므로(각 CS의
+	 * ShouldCompilePermutation) ES3.1/모바일에서는 퍼뮤테이션이 존재하지 않는다. RHI 유무만 보면
+	 * 렌더는 되는 모바일에서 없는 셰이더를 요청해 assert/크래시/미출력으로 간다.
+	 *
+	 * 판정 기준은 전역 GMaxRHIFeatureLevel(= 이 기기가 실제로 낼 수 있는 최대치)이다. 에디터의
+	 * 모바일 프리뷰는 씬 feature level만 낮추고 실 RHI는 SM6 그대로라 GPU 경로가 유지되는데,
+	 * 이는 의도한 동작이다(프리뷰에서 시뮬 경로까지 바뀌면 재현이 어긋난다).
+	 *
+	 * 호출자는 솔버(URopeSimSubsystem)와 튜브(FRopeSceneProxy) 둘 다 — 두 게이트가 어긋나면
+	 * 솔버는 GPU인데 튜브는 CPU 같은 반쪽 상태가 되므로 판정을 단일 소스로 둔다.
+	 */
+	DYNAMICROPESHADERS_API bool IsRuntimeSupported();
+}
+
 class DYNAMICROPESHADERS_API FRopeGPUSolver
 {
 public:

@@ -482,6 +482,31 @@ struct FRopeGPUSolver::FImpl
 	TArray<FRopeGPUResidentStep> PendingSteps;
 };
 
+bool RopeGPU::IsRuntimeSupported()
+{
+	// 커널이 SM5 가드로만 컴파일되므로(각 CS의 ShouldCompilePermutation) 그 아래 feature level에서는
+	// 퍼뮤테이션 자체가 없다 — RHI 유무만 보던 종전 판정은 모바일에서 없는 셰이더를 요청하게 했다.
+	// 판정 근거와 자세한 배경은 RopeGPUSolver.h 선언부 주석 참고.
+	if (GDynamicRHI == nullptr || !FApp::CanEverRender())
+	{
+		return false;
+	}
+	if (GMaxRHIFeatureLevel < ERHIFeatureLevel::SM5)
+	{
+		// 조용한 CPU 폴백은 성능 이상으로 오해되기 쉬우므로 런타임에 1회 알린다.
+		static bool bWarned = false;
+		if (!bWarned)
+		{
+			bWarned = true;
+			UE_LOG(LogDynamicRopeGPU, Warning,
+				TEXT("GPU 로프 경로 비활성 — feature level이 SM5 미만이다(%s). CPU 솔버/튜브로 폴백한다."),
+				*LexToString(GMaxRHIFeatureLevel));
+		}
+		return false;
+	}
+	return true;
+}
+
 FRopeGPUSolver::FRopeGPUSolver()
 {
 	Impl = MakeUnique<FImpl>();
