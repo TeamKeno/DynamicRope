@@ -110,7 +110,7 @@ public:
 	// 켜고, 수명은 전 모드 BeginPlay~EndPlay로 통일한다 — (우리가 스폰한 경우만) EndPlay에 파괴하고,
 	// 외부(태그로 찾은) 컴포넌트는 파괴하지 않는다.
 	// 예외는 소켓 보정(bUseTipMeshSockets) 하나 — Head를 꽂힘 지점에 맞춘다는 개념이 Pierce에만 있다.
-	// 활성 조건의 단일 소스는 IsTipSocketPlacementActive()이고, 관문은 ReadTipSocketLocal() 한 곳이다.
+	// 활성 조건의 단일 소스는 IsTipSocketPlacementActive()이고, 존재 확인/읽기는 HasTipSocket/ReadTipSocketLocal이 맡는다.
 	//
 	// 폴백(소켓 보정이 꺼졌거나 비-Pierce거나 Head 소켓이 없을 때): 메쉬 원점이 로프 끝 노드에, X축이
 	// 마지막 세그먼트 방향에 놓인다 — 팁이 대상에 파묻혀도 보정하지 않는다(의도된 무보정). Wrapped에서도
@@ -310,12 +310,10 @@ public:
 	bool ApplyPreset(const URopePreset* Preset);
 
 	/** rope를 발사한다. ①②는 초기 tip 속도를 받아 물리 Flight로, ③은 Reel에서만 성립하며 확정 경로를
-	 *  따라가는 GuidedThrow로 진입한다(모드가 경로를 정한다).
-	 *  ⚠ AimDir은 **사용되지 않는다** — 실제 방향은 ThrowParams.FrameMode의 Forward가 단일 소스다
-	 *  (URopeWielderComponent::ThrowInDirection과 같은 legacy 인자). 방향을 직접 지정하려면
-	 *  ThrowWithContext(FRopeThrowContext)를 쓸 것. */
+	 *  따라가는 GuidedThrow로 진입한다(모드가 경로를 정한다). 실제 방향은 ThrowParams.FrameMode의
+	 *  Forward가 단일 소스다. 방향을 직접 지정하려면 ThrowWithContext(FRopeThrowContext)를 쓸 것. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
-	void Throw(const FVector& AimDir);
+	void Throw();
 
 	/** Wielder가 origin/frame/속도까지 계산해 넘기는 확장 throw 진입점. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
@@ -585,7 +583,7 @@ private:
 	 *                 입력이라 여기 있을 수밖에 없다("로직은 Prepare, 감지만 Finalize"인 비대칭의 근거).
 	 *                 전이/이벤트 브로드캐스트 + 렌더 push + 관측(스탯/디버거 스냅샷)도 여기.
 	 */
-	void PrepareSimFrame(float DeltaTime);
+	void PrepareSimFrame(float DeltaTime, const TOptional<FVector>& LODCameraLocation);
 	void SolveSimFrame(float DeltaTime);
 	void FinalizeSimFrame(float DeltaTime);
 
@@ -739,6 +737,9 @@ private:
 	// (프리셋 전환)이 매 프레임 배치가 덮어쓴 트랜스폼을 저작 기준선으로 오캡처하는 것(스케일 누적 오염)을 막는다.
 	FTransform TipMeshAuthoredRelative = FTransform::Identity;
 
+	// 존재 여부만 필요한 분기가 socket transform까지 읽지 않도록 분리한 경량 질의.
+	bool HasTipSocket(FName Socket) const;
+
 	// 팁 부착물을 BeginPlay~EndPlay 단위로 확보/파괴/추종한다(bUseTipMesh가 켜진 경우만 동작).
 	void EnsureTipMesh();
 	void TeardownSpawnedTipMesh();
@@ -747,7 +748,7 @@ private:
 	//~ Pierce 임베드(소켓 기반) 헬퍼 -------------------------------------------
 	// 소켓 배치 활성 조건의 **단일 소스** = 팁 사용 + 소켓 옵트인 + Pierce 결착. Head를 꽂힘 지점에
 	// 맞춘다는 개념이 Pierce에만 있으므로, BareWrap/Cinch는 소켓 이름이 채워져 있어도 읽지 않는다
-	// (세그먼트 추종으로 통일). ReadTipSocketLocal이 이 술어를 태우므로 소켓 경로 전체가 함께 꺼진다.
+	// (세그먼트 추종으로 통일). HasTipSocket이 이 술어를 태우므로 소켓 경로 전체가 함께 꺼진다.
 	bool IsTipSocketPlacementActive() const
 	{
 		return bUseTipMesh && bUseTipMeshSockets && TipEngagement == ERopeTipEngagement::Pierce;
@@ -874,6 +875,7 @@ private:
 	// Wrapped 견인/스무딩 상태 묶음(Pull 샘플/EMA 3종/능동 Pull/테더 초과분/경고 래치). 멤버별 의미와
 	// 전이 시 리셋 규약(무엇이 살아남는가)은 FRopePullDriveState(Core/RopePullDriveState.h) 주석 참조.
 	FRopePullDriveState PullDrive;
+	FRopeResolvedWrappedEndpoints WrappedEndpointCache;
 
 	// 되감기 속도(cm/s, +감기/-풀기, 0=정지). SetReelRate가 설정, UpdateReel이 프레임마다 적용.
 	float ReelRate = 0.0f;
@@ -886,8 +888,8 @@ private:
 	// 슬립 전이 로그만 남는다.
 	FRopeSolverThrottle Throttle;
 
-	// 거리 LOD 배율 계산(Prepare, GT): 카메라 거리만 여기서 산출해 Throttle에 위임. 카메라 없으면(서버) 1 유지.
-	void ComputeSolverLOD();
+	// 거리 LOD 배율 계산(Prepare, GT): 서브시스템이 프레임당 한 번 구한 카메라 위치를 거리로 바꿔 Throttle에 위임.
+	void ComputeSolverLOD(const TOptional<FVector>& CameraLocation);
 	// LOD 반영된 유효 iteration(CPU 솔브/GPU 스텝 공용 — 서브시스템이 호출).
 	int32 GetLODScaledIterations() const { return Throttle.LODScaledIterations(SolverConfig.Iterations); }
 
@@ -903,6 +905,9 @@ private:
 	// 테더 회수(UpdateTether)와 능동 Pull 방향(ApplyWrappedTraction)이 PullDrive.bTargetPullable을 공유.
 	// 양끝 유효질량 비교 + TetherPullMassMargin 히스테리시스. LastTargetShare(이진 0/1)도 여기서 채운다.
 	void UpdateTargetPullable();
+
+	// Wrapped 견인 구간에서 target/wielder를 지연 해석하고 같은 프레임의 판정·테더·기본 Pull이 공유한다.
+	const FRopeResolvedWrappedEndpoints* GetOrResolveWrappedEndpoints();
 
 	// (BinaryPullable + not pullable) 능동 Pull 힘을 wielder(로프 owner)에 인가 — 대상이 무거워
 	// wielder가 앵커 쪽으로 끌려가는 climb-in. ApplyPullForce의 owner 쪽 미러(시뮬 루트 → CharacterMovement).
@@ -934,6 +939,12 @@ private:
 	// 프레임 단위 시뮬 입출력 묶음. 멤버별 의미/수명 규약은 FRopeSimFrameIO(Core/RopeSimFrameIO.h) 주석 참조.
 	// 필드 이름은 낱개 멤버 시절 그대로라 접근 경로만 SimFrame.X다(CL 303).
 	FRopeSimFrameIO SimFrame;
+
+	// 마지막 렌더 push 상태. 정지 로프는 dynamic-data/transform dirty를 건너뛰되 GPU resident 전환과
+	// component transform 변경은 반드시 새 WorldToLocal/로컬 centerline을 밀도록 비교한다.
+	FTransform LastRenderDataComponentTransform = FTransform::Identity;
+	bool bHasLastRenderDataComponentTransform = false;
+	bool bLastRenderDataGpuResident = false;
 
 	//~ 초기화/유틸 ----------------------------------------------------------
 	void InitRope();
@@ -1134,6 +1145,8 @@ private:
 
 	/** latch/anchor 노드 InvMass=0, 나머지 1 — Wrapped 중 자유 구간만 솔버가 움직이게. */
 	void ApplyWrappedMassMask(bool bResetDynamicNodeVelocity = false);
+	// 전체 질량 마스크는 topology/binding 변경 때만 다시 만든다. 매 프레임 Hold는 고정 노드 위치/InvMass만 갱신.
+	bool bWrappedMassMaskDirty = true;
 
 	/** Wrapping 중 새로 닫힌 virtual run을 등록하고 front가 오른쪽 anchor에 닿은 run을 즉시 활성화한다. */
 	void UpdateWrappingKinematicVirtualBridges(const TArray<FRopeWrapPathPoint>& Path,

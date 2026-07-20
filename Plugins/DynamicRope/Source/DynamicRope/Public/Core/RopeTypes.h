@@ -645,6 +645,32 @@ enum class ERopeEndpointKind : uint8
 	Anchor,    // 정적/키네마틱/MOVE_None/비시뮬 비캐릭터 — 무한질량(움직이려면 위치 폴백뿐).
 };
 
+/**
+ * 테더/능동 Pull이 공유하는 수신자 해석 결과. UObject 포인터는 한 GT 프레임 동안만 소비하며 소유하지 않는다.
+ * 종류·실제 인가점·유효질량을 한 번에 확정해 판정과 인가가 서로 다른 endpoint를 보지 않게 한다.
+ */
+struct FRopeTetherEndpoint
+{
+	ERopeEndpointKind Kind = ERopeEndpointKind::None;
+	UPrimitiveComponent* Prim = nullptr;
+	FName Bone = NAME_None;
+	UCharacterMovementComponent* Movement = nullptr;
+	AActor* Actor = nullptr;
+	float Mass = 0.0f;
+};
+
+/** Wrapped 한 프레임 동안 target/wielder endpoint 해석을 공유하는 비소유 캐시. */
+struct FRopeResolvedWrappedEndpoints
+{
+	FRopeTetherEndpoint Target;
+	FRopeTetherEndpoint Wielder;
+	TWeakObjectPtr<USceneComponent> TargetMesh;
+	FName TargetBone = NAME_None;
+	bool bValid = false;
+
+	void Reset() { *this = FRopeResolvedWrappedEndpoints(); }
+};
+
 /** 이 인가가 어느 견인 경로에서 왔는가 — 서브클래스가 경로별로 다르게 반응할 수 있게 한다. */
 enum class ERopeTractionSource : uint8
 {
@@ -1636,7 +1662,7 @@ struct DYNAMICROPE_API FRopeThrowContext
 
 	/**
 	 * 컴포넌트 트랜스폼 + 던지기 설정에서 기본 컨텍스트를 조립한다(throw당 1회, GT).
-	 * URopeComponent::Throw(AimDir) 편의 진입점의 기본 구현이 사용한다 — Wielder처럼 컨텍스트를
+	 * URopeComponent::Throw() 편의 진입점의 기본 구현이 사용한다 — Wielder처럼 컨텍스트를
 	 * 직접 만드는 호출자는 무관. 프레임 기저 규약(FrameMode별):
 	 *   World = 월드 축 · Owner/Socket = 컴포넌트 기저 · OwnerCamera = owner의 첫 카메라
 	 *   (없으면 컴포넌트 기저 폴백) · Custom = Params의 커스텀 축(원값 — 정규화/직교

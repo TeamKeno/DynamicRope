@@ -11,7 +11,6 @@
 #include "Debug/RopeDebugDraw.h"
 // 게이트플레이 디버거용 한 프레임 디버그 스냅샷
 #include "Debug/RopeDebugSnapshot.h"
-#include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 // 팁 부착물(Pierce/Cinch 창날·작살) 렌더 컴포넌트
 #include "Components/StaticMeshComponent.h"
@@ -23,9 +22,6 @@
 #include "GameFramework/CharacterMovementComponent.h"
 // 테더 자동 분배: 물리 바디 질량 조회(본별 GetBodyMass)
 #include "PhysicsEngine/BodyInstance.h"
-// 거리 LOD(카메라 거리 기준 iteration 감쇠)
-#include "Camera/PlayerCameraManager.h"
-#include "Kismet/GameplayStatics.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Subsystem/RopeSimSubsystem.h"
@@ -43,7 +39,6 @@
 #include "DrawDebugHelpers.h"
 #include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInterface.h"
-// 길이 비례 파라미터용 런타임 인스턴스
 // 기본 머티리얼 로드(FObjectFinder)
 #include "UObject/ConstructorHelpers.h"
 
@@ -411,7 +406,7 @@ URopeComponent::URopeComponent()
 
 // ===== API ==================================================================
 
-void URopeComponent::Throw(const FVector& /*AimDir*/)
+void URopeComponent::Throw()
 {
 	// 프레임 기저 규약은 FRopeThrowContext::MakeDefault(RopeTypes.cpp) 주석 참고. 커스텀 지점은
 	// ResolveThrowContext 하나다 — ThrowWithContext가 그 관문을 태운다.
@@ -536,7 +531,6 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 
 	// 다음 PrepareSimFrame부터 GuidedThrow가 StartPositions -> RenderPreview.Points로 노드를 구동한다.
 	// 완료 시 Prepared.Anchors를 그대로 Wrapped seed로 사용한다.
-	GuidedThrowState.Reset();
 	GuidedThrowState.bActive = true;
 	GuidedThrowState.Prepared = ResolvedPrepared;
 	GuidedThrowState.StartPositions = Sim.Positions;
@@ -672,7 +666,6 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	// MarkRenderStateDirty로 프록시를 재생성해야 반영된다). 프록시 1회 소비 값(Radius/NumSides/
 	// TubeSmoothing*)도 같은 MarkRenderStateDirty로 반영 — 에디터 PostEditChangeProperty의 런타임 등가물.
 	SetMaterial(0, Preset->RopeMaterial);
-	MarkRenderStateDirty();
 
 	// [6] 팁 재구성 — EnsureTipMesh는 기존 컴포넌트가 있으면 no-op이라, 에셋 교체/on↔off를 반영하려면
 	// 먼저 내려야 한다(스폰분만 파괴 — 태그 재사용 컴포넌트는 보존, 필요하면 Ensure가 재획득).
@@ -971,7 +964,7 @@ void URopeComponent::ReleaseWrapAs(ERopeReleaseReason Reason)
 
 // ===== 시뮬레이션 프레임(서브시스템이 3단계로 구동) ===========================
 
-void URopeComponent::PrepareSimFrame(float DeltaTime)
+void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& LODCameraLocation)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Prepare);
 	// (분리 계약 — 이 함수는 "솔브 입력 생산" 단계다: 솔브 결과가 필요 없는 로직은 전부 여기.
@@ -999,7 +992,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime)
 	UpdateReel(DeltaTime);
 
 	// 거리 LOD 배율(iteration 감쇠) — 솔브 판정 전에 이번 프레임 값 확정(GPU 스텝/CPU 솔브 공용).
-	ComputeSolverLOD();
+	ComputeSolverLOD(LODCameraLocation);
 
 	// 슬립은 Free 전용 — 다른 페이즈로 넘어가면 즉시 해제(전이 자체가 활동).
 	if (Phase != ERopePhase::Free && Throttle.IsAsleep())
@@ -1212,12 +1205,26 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		RecordFlightObservation(DetectParams, Candidates, bShouldCapture, FlightSnapshot);
 	}
 
-	// 새 centerline을 render proxy로 push하고 bounds를 갱신한다.
+	// 실제 centerline/GPU 소스/component transform이 달라진 프레임만 render data를 다시 민다.
+	// 정지 Free/Contacting처럼 solve·override가 없고 transform도 그대로인 로프는 render command를 만들지 않는다.
+	const FTransform CurrentComponentTransform = GetComponentTransform();
+	const bool bRenderTransformChanged = !bHasLastRenderDataComponentTransform ||
+		!LastRenderDataComponentTransform.Equals(CurrentComponentTransform);
+	const bool bGpuResidentChanged = bLastRenderDataGpuResident != SimFrame.bGpuSteppedThisFrame;
+	const bool bRenderDataChanged = SimFrame.bSolveThisFrame || SimFrame.OverrideFrame.HasAny() ||
+		bGpuResidentChanged || bRenderTransformChanged;
+	if (bRenderDataChanged)
 	{
-		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_MarkRenderDirty);
+		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_MarkRenderDynamicDataDirty);
 		MarkRenderDynamicDataDirty();
+	}
+	if (bRenderTransformChanged)
+	{
 		MarkRenderTransformDirty();
 	}
+	LastRenderDataComponentTransform = CurrentComponentTransform;
+	bHasLastRenderDataComponentTransform = true;
+	bLastRenderDataGpuResident = SimFrame.bGpuSteppedThisFrame;
 
 	// 팁 부착물(창날/작살)을 확정된 자유단 위치로 추종시킨다(솔브 출력 소비 단계라 여기).
 	UpdateTipMeshTransform();
@@ -1363,8 +1370,7 @@ void URopeComponent::UpdateTipMeshTransform()
 
 	// Pierce 임베드 활성 조건(Pierce 결착 + 소켓 옵트인 + 소켓 실존)은 ReadTipSocketLocal이 전부 판정한다.
 	// 아니면 아래 세그먼트-추종 폴백.
-	FTransform PierceSocketLocalUnused;
-	const bool bPierceSocket = ReadTipSocketLocal(TipSocketName, PierceSocketLocalUnused);
+	const bool bPierceSocket = HasTipSocket(TipSocketName);
 
 	// 꽂힌 뒤(Wrapped): 얼린 bone-local 메쉬 자세를 본에서 복원 — 회전 완전 고정 + 대상 애니메이션 추종.
 	if (bPierceSocket && Phase == ERopePhase::Wrapped && WrapController.State.Anchors.Num() > 0)
@@ -1451,11 +1457,16 @@ void URopeComponent::UpdateTipMeshTransform()
 
 // ===== Pierce 임베드 헬퍼 ====================================================
 
+bool URopeComponent::HasTipSocket(FName Socket) const
+{
+	return IsTipSocketPlacementActive() && !Socket.IsNone() && TipMeshComponent &&
+		TipMeshComponent->DoesSocketExist(Socket);
+}
+
 bool URopeComponent::ReadTipSocketLocal(FName Socket, FTransform& OutLocal) const
 {
-	// 소켓 읽기의 유일한 관문 — IsTipSocketPlacementActive()가 여기 한 곳에만 걸리므로 소켓 보정을 끄면
-	// ComputeTipFollowTransform/ComputePierceEmbed/ResolveTipRopeAttachWorld가 각자의 기존 폴백으로 떨어진다.
-	if (!IsTipSocketPlacementActive() || Socket.IsNone() || !TipMeshComponent || !TipMeshComponent->DoesSocketExist(Socket))
+	// 존재/활성 조건은 HasTipSocket 한 곳에서 판정한다. 소켓 보정을 끄면 호출부가 각자의 기존 폴백으로 떨어진다.
+	if (!HasTipSocket(Socket))
 	{
 		return false;
 	}
@@ -1906,6 +1917,7 @@ void URopeComponent::InitRope()
 
 	// Sim 전면 재구성 → GPU 상주 버퍼 재시드(M5).
 	++SimFrame.SimGeneration;
+	bWrappedMassMaskDirty = true;
 
 	UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] InitRope: %d particles, length=%.1f, segment=%.2f"),
 		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);
@@ -2245,6 +2257,7 @@ void URopeComponent::ResetChainForThrow(const FVector& HandOrigin)
 	// 체인 위치를 통째로 재설정하는 곳이므로 GPU 상주 버퍼 재시드 세대(M5)도 여기서 함께 올린다 —
 	// 리셋과 재시드는 한 몸이다(따로 두면 한쪽만 하는 버그가 생긴다).
 	++SimFrame.SimGeneration;
+	bWrappedMassMaskDirty = true;
 
 	if (Sim.Num() < 2)
 	{
@@ -2539,7 +2552,6 @@ void URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext,
 	ResetTransientPhaseState();
 	ReleaseCooldown = 0.0f;
 
-	GuidedThrowState.Reset();
 	GuidedThrowState.bActive = true;
 	GuidedThrowState.bFreeThrow = true;
 	GuidedThrowState.Prepared = Free;
@@ -3855,6 +3867,7 @@ void URopeComponent::ResetKinematicVirtualBridges()
 	WrappingVirtualBridgeScanPathIndex = 0;
 	WrappingVirtualRunStartPathIndex = INDEX_NONE;
 	WrappingVirtualRunLeftPathIndex = INDEX_NONE;
+	bWrappedMassMaskDirty = true;
 }
 
 void URopeComponent::ReleaseKinematicVirtualBridgesToSolver()
@@ -3905,7 +3918,10 @@ bool URopeComponent::HoldWrappedNodesToBone(float DeltaTime)
 		return false;
 	}
 	HoldKinematicVirtualBridges();
-	ApplyWrappedMassMask();
+	if (bWrappedMassMaskDirty)
+	{
+		ApplyWrappedMassMask();
+	}
 	return true;
 }
 
@@ -3955,12 +3971,6 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 		return;
 	}
 
-	// BinaryPullable: 끌림 가능 판정을 프레임당 산출(overshoot 무관) — 테더/능동 Pull이 공유.
-	if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable)
-	{
-		UpdateTargetPullable();
-	}
-
 	// 스무딩 전 raw look-ahead(정수 조준) — 디버거 raw vs smoothed 비교.
 	PullDrive.LastPullDirRaw = PullDrive.LastPullSample.Direction;
 
@@ -4005,6 +4015,14 @@ namespace
 
 void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 {
+	// 이 함수의 동기 호출 구간에서만 endpoint 캐시를 유지한다. virtual ApplyPullForce가 Super를 호출해도
+	// 같은 target 해석을 재사용하고, 외부에서 별도로 호출한 ApplyPullForce에는 캐시가 새지 않는다.
+	WrappedEndpointCache.Reset();
+	if (HoldConfig.TetherMode == ERopeTetherMode::BinaryPullable && PullDrive.LastPullSample.bValid)
+	{
+		UpdateTargetPullable();
+	}
+
 	// ③-1 자동 견인(테더, 위치/속도 동기): 가용 로프 길이 초과분만큼 양끝(TetherTargetShare 분배)을
 	// 되돌린다. 장력 비례 힘(폭주: 힘→스트레치→장력↑→힘↑)을 대체 — 초과분 기반이라 수렴한다.
 	UpdateTether(DeltaTime);
@@ -4052,8 +4070,7 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 					PullDrive.TowedVelDebt, RopeTraction::ExpSmoothAlpha(HoldConfig.TetherSlackBrakeTime, DeltaTime));
 				const FVector VelocityDelta = BrakedVelocity - Movement->Velocity;
 
-				// 확장 관문 — 요청은 "이만큼 감속할 것"을 기술한다(FRopeTetherEndpoint는 아래쪽 익명
-				// 네임스페이스라 여기선 요청을 직접 채운다).
+				// 확장 관문 — 요청은 "이만큼 감속할 것"을 기술한다.
 				FRopeTractionRequest Req;
 				Req.Source = ERopeTractionSource::SlackBrake;
 				Req.ReceiverKind = ERopeEndpointKind::Character;
@@ -4077,6 +4094,7 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 			PullDrive.TowedVelDebt = FVector::ZeroVector;
 		}
 	}
+	WrappedEndpointCache.Reset();
 }
 
 bool URopeComponent::CheckWrappedAutoRelease(float DeltaTime)
@@ -4167,6 +4185,7 @@ void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 			SimFrame.OverrideFrame.SetPrevFromPosition(i);
 		}
 	}
+	bWrappedMassMaskDirty = false;
 }
 
 #pragma endregion Wrapped_Hold_And_Pull_Sampling
@@ -4201,17 +4220,14 @@ void URopeComponent::SetReelRate(float CmPerSecond)
 	ReelRate = CmPerSecond;
 }
 
-void URopeComponent::ComputeSolverLOD()
+void URopeComponent::ComputeSolverLOD(const TOptional<FVector>& CameraLocation)
 {
-	// 카메라 거리 산출만 GT/UObject 접근 — 배율 계산은 Throttle(순수)에 위임.
-	// 로컬 플레이어 카메라 기준(멀티 로컬 플레이어는 0번만 — LOD는 근사여도 무방). 서버/카메라 없음 = 풀 품질.
+	// 카메라 UObject 조회는 RopeSimSubsystem이 프레임당 한 번 수행한다. 여기서는 로프별 거리 계산만 한다.
+	// 로컬 플레이어 0번 기준이며 서버/카메라 없음 = 풀 품질.
 	TOptional<float> CameraDist;
-	if (SolverConfig.bEnableDistanceLOD && SolverConfig.LODStartDistance > 0.0f)
+	if (SolverConfig.bEnableDistanceLOD && SolverConfig.LODStartDistance > 0.0f && CameraLocation.IsSet())
 	{
-		if (const APlayerCameraManager* Camera = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0))
-		{
-			CameraDist = static_cast<float>(FVector::Dist(Camera->GetCameraLocation(), GetComponentLocation()));
-		}
+		CameraDist = static_cast<float>(FVector::Dist(CameraLocation.GetValue(), GetComponentLocation()));
 	}
 	Throttle.ComputeSolverLOD(SolverConfig, CameraDist);
 }
@@ -4288,21 +4304,8 @@ namespace
 	// 인가 지점이 같은 래더를 각자 복제했고, 그 위에서 인가 람다가 자기가 어느 rung인지 다시 캐스팅으로
 	// 역추론했다 — 순서가 어긋나면 "질량은 앵커로 봤는데 힘은 다른 데 꽂히는" 버그가 된다(CL 392의 부분 랙돌
 	// 루트 게이트가 실제로 그랬다). 한 해석을 공유하면 그 어긋남이 구조적으로 불가능하다.
-	// ERopeEndpointKind는 공개 타입이다(Core/RopeTypes.h) — 확장 훅 ApplyTractionToReceiver가
-	// 수신자 종류를 그대로 기술하므로 로프 밖에서도 읽을 수 있어야 한다.
-	struct FRopeTetherEndpoint
-	{
-		ERopeEndpointKind Kind = ERopeEndpointKind::None;
-		// SimBody: 인가할 프리미티브와 본(본 없으면 컴포넌트 단위).
-		UPrimitiveComponent* Prim = nullptr;
-		FName Bone = NAME_None;
-		// Character: 인가할 무브먼트.
-		UCharacterMovementComponent* Movement = nullptr;
-		// 위치 폴백/로그용 소유 액터(Kind 무관, 있으면 채움).
-		AActor* Actor = nullptr;
-		// 유효 질량(kg). 캐릭터는 접지 브레이스 포함. 0 = 앵커(무한질량).
-		float Mass = 0.0f;
-	};
+	// ERopeEndpointKind/FRopeTetherEndpoint는 Core/RopeTypes.h의 공용 판정 타입이다. 컴포넌트는
+	// target/wielder 결과를 같은 Wrapped 프레임 안에서 캐시해 pullable/테더/기본 Pull이 공유한다.
 
 	// 수신자 해석(대상/wielder 공용). 순서: 스켈레탈 시뮬 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터 → 앵커.
 	//  - MeshComp: 대상이면 State.Mesh, wielder면 nullptr(스켈레탈·프리미티브 rung 자동 skip → 루트부터).
@@ -4821,6 +4824,29 @@ namespace
 	}
 }
 
+const FRopeResolvedWrappedEndpoints* URopeComponent::GetOrResolveWrappedEndpoints()
+{
+	if (WrappedEndpointCache.bValid)
+	{
+		return &WrappedEndpointCache;
+	}
+
+	USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
+	if (!MeshComp || !PullDrive.LastPullSample.bValid)
+	{
+		return nullptr;
+	}
+
+	WrappedEndpointCache.Target = ResolveTetherEndpoint(
+		MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, HoldConfig.GroundBraceFactor);
+	WrappedEndpointCache.Wielder = ResolveTetherEndpoint(
+		nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor);
+	WrappedEndpointCache.TargetMesh = MeshComp;
+	WrappedEndpointCache.TargetBone = PullDrive.LastPullSample.Bone;
+	WrappedEndpointCache.bValid = true;
+	return &WrappedEndpointCache;
+}
+
 #pragma endregion Traction_Endpoint_And_Tether_Policies
 
 #pragma region Tether_And_Pull_Application
@@ -4878,21 +4904,20 @@ void URopeComponent::UpdateTether(float DeltaTime)
 		return;
 	}
 
-	// 방향 = 앵커에서 조준(모서리/손) 쪽 = 스무딩된 look-ahead(폴백은 이 구간 직선). 대상 컴포넌트(파괴 소실이면
-	// null → Hold가 이미 release).
+	// 방향 = 앵커에서 조준(모서리/손) 쪽 = 스무딩된 look-ahead(폴백은 이 구간 직선).
 	const FVector DirToAim = PullDrive.SmoothedPullDir.IsNearlyZero() ? (Span / Dist) : PullDrive.SmoothedPullDir;
-	USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
+	const FRopeResolvedWrappedEndpoints* Endpoints = GetOrResolveWrappedEndpoints();
+	if (!Endpoints)
+	{
+		return;
+	}
+	USceneComponent* MeshComp = Endpoints->TargetMesh.Get();
 	if (!MeshComp)
 	{
 		return;
 	}
 
-	// 양끝 수신자 해석 — 프레임당 한 번, 두 모드 공용. 질량 분배(MassShare)와 실제 인가가 같은 해석을 공유하므로
-	// "질량은 앵커로 봤는데 힘은 다른 데 꽂히는" 어긋남이 구조적으로 불가능하다.
-	const FRopeTetherEndpoint TargetEndpoint = ResolveTetherEndpoint(
-		MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, HoldConfig.GroundBraceFactor);
-	const FRopeTetherEndpoint WielderEndpoint = ResolveTetherEndpoint(
-		nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor);
+	// 양끝 수신자는 이 Wrapped 견인 구간에서 한 번만 해석해 pullable 판정/테더/기본 Pull이 공유한다.
 
 	// wielder 방향 EMA는 이 컴포넌트가 소유하므로 지연 호출로 넘긴다 — 모드 함수가 실제로 wielder를 움직이는
 	// 프레임에만 호출해야 EMA 진행이 보존된다(TFunctionRef가 가리키므로 람다는 여기서 이름을 갖고 살아 있어야 한다).
@@ -4900,7 +4925,7 @@ void URopeComponent::UpdateTether(float DeltaTime)
 	// 수신자 인가 관문 — 테더 인가가 컴포넌트의 확장 훅을 지나게 한다(TFunctionRef라 람다가 여기 살아 있어야 한다).
 	auto TractionGate = [this](const FRopeTractionRequest& Req) { return ApplyTractionToReceiver(Req); };
 	const FRopeTetherContext Ctx{
-		HoldConfig, TargetEndpoint, WielderEndpoint, DirToAim,
+		HoldConfig, Endpoints->Target, Endpoints->Wielder, DirToAim,
 		/*AnchorVelocity*/ PullDrive.SmoothedAnchorVelocity, Overshoot, DeltaTime,
 		/*bSelfWrap*/ (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner()),
 		/*bTargetPullable*/ PullDrive.bTargetPullable,
@@ -4946,7 +4971,11 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	// 원래 "애니메이션 본이라 밀 수 없으니 이동체를 민다"는 *폴백*인데 시뮬 검사보다 앞서 있어 밀 수 있는
 	// 대상까지 가로챈 것 — 구체적(물리 바디) → 일반적(이동체) 순서로 통일한다.
 	// (해석이 함께 내는 유효질량은 Pull이 쓰지 않는다 — 장력 상한 드라이브가 바디 질량을 직접 읽는다.)
-	const FRopeTetherEndpoint Endpoint = ResolveTetherEndpoint(MeshComp, Owner, Pull.Bone, HoldConfig.GroundBraceFactor);
+	const bool bCanReuseWrappedEndpoint = WrappedEndpointCache.bValid &&
+		WrappedEndpointCache.TargetMesh.Get() == MeshComp && WrappedEndpointCache.TargetBone == Pull.Bone;
+	const FRopeTetherEndpoint Endpoint = bCanReuseWrappedEndpoint
+		? WrappedEndpointCache.Target
+		: ResolveTetherEndpoint(MeshComp, Owner, Pull.Bone, HoldConfig.GroundBraceFactor);
 
 	// 확장 관문: 수신자 단위로 가로채는 서브클래스(커스텀 무브먼트/탈것)가 처리했으면 내장 인가를 생략한다.
 	if (ApplyTractionToReceiver(MakeTractionRequest(Endpoint, ERopeTractionSource::ActivePull, Dir, MaxTension,
@@ -5049,10 +5078,15 @@ void URopeComponent::UpdateTargetPullable()
 {
 	// (BinaryPullable 전용) 이번 Wrapped 프레임의 끌림 가능 판정. overshoot와 무관하게 매 프레임 산출해
 	// 테더 회수(UpdateTether)와 능동 Pull 방향(ApplyWrappedTraction)이 같은 판정을 읽게 한다.
-	USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
-	if (!MeshComp)
+	const FRopeResolvedWrappedEndpoints* Endpoints = GetOrResolveWrappedEndpoints();
+	if (!Endpoints)
 	{
 		return; // 대상 소실(파괴) — Hold가 곧 release. 직전 판정 유지.
+	}
+	USceneComponent* MeshComp = Endpoints->TargetMesh.Get();
+	if (!MeshComp)
+	{
+		return;
 	}
 
 	// 자기 자신에 감긴 로프(owner==대상)는 분배 무의미 → 항상 대상 회수(pullable).
@@ -5066,10 +5100,8 @@ void URopeComponent::UpdateTargetPullable()
 	{
 		// 양끝 유효질량(접지 캐릭터는 GroundBraceFactor로 접지마찰 반영, MOVE_None/정적은 앵커=무한).
 		// 테더 인가와 같은 해석(ResolveTetherEndpoint)을 쓴다 — 끌림 판정과 실제 인가점이 어긋나지 않는다.
-		const float WT = EndpointInvMass(ResolveTetherEndpoint(
-			MeshComp, MeshComp->GetOwner(), PullDrive.LastPullSample.Bone, HoldConfig.GroundBraceFactor));
-		const float WW = EndpointInvMass(ResolveTetherEndpoint(
-			nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor));
+		const float WT = EndpointInvMass(Endpoints->Target);
+		const float WW = EndpointInvMass(Endpoints->Wielder);
 		const float InfMass = TNumericLimits<float>::Max();
 		const float EffMassTarget = (WT > KINDA_SMALL_NUMBER) ? (1.0f / WT) : InfMass; // invMass 0 = 앵커(무한).
 		const float EffMassWielder = (WW > KINDA_SMALL_NUMBER) ? (1.0f / WW) : InfMass;

@@ -18,6 +18,8 @@ namespace
 	constexpr bool bCancelWrapOnCompositeFailureForTesting = false;
 }
 
+#pragma region Wrapping Lifecycle and Path Build Dispatch
+
 bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
 	float Duration, const FRopeSimState& Sim, const FContext& Ctx)
 {
@@ -124,6 +126,10 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 	}
 	AdvanceSurfaceVectorFieldProgressiveWrapPath(StepBudget, Sim, Ctx);
 }
+
+#pragma endregion
+
+#pragma region Runtime Node Overrides
 
 void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaTime, const FContext& Ctx, FRopeNodeOverrideFrame& OutFrame)
 {
@@ -291,6 +297,10 @@ void FRopeWrappingPhase::ApplyMassMask(const FRopeSimState& Sim, FRopeNodeOverri
 		OutFrame.SetInvMass(i, (bStartPin || bWrappingDrivenNode) ? 0.0f : 1.0f);
 	}
 }
+
+#pragma endregion
+
+#pragma region Commit Readiness and Phase Handoff
 
 void FRopeWrappingPhase::UpdateStability(float DeltaTime)
 {
@@ -471,6 +481,10 @@ void FRopeWrappingPhase::ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNode
 	}
 }
 
+#pragma endregion
+
+#pragma region Preview Path Generation
+
 bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
 	const FRopeSimState& Sim, const FContext& Ctx, TArray<FVector>& OutCenterline) const
 {
@@ -541,6 +555,10 @@ bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchA
 
 	return OutCenterline.Num() >= 2;
 }
+
+#pragma endregion
+
+#pragma region Progressive Path Construction
 
 bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor& LatchAnchor,
 	const FRopeSimState& Sim, const FContext& Ctx)
@@ -2366,6 +2384,10 @@ bool FRopeWrappingPhase::AppendWrappingAnchorFromPathPoint(int32 PathIndex, cons
 	return true;
 }
 
+#pragma endregion
+
+#pragma region Wrap Geometry and Quality Metrics
+
 FVector FRopeWrappingPhase::ComputeSurfaceVectorFieldTangent(const FVector& AxisOrigin, const FVector& AxisDirection,
 	const FVector& LatchRadial, float WindingSign, const FVector& SurfaceWorld,
 	const FVector& NormalWorld, const FContext& Ctx, FVector& InOutCircumferenceDir) const
@@ -2521,6 +2543,10 @@ bool FRopeWrappingPhase::ComputeWrapEnclosureCoverage(float& OutCoverageDeg) con
 	OutCoverageDeg = FMath::Clamp(360.0f - MaxGapDeg, 0.0f, 360.0f);
 	return true;
 }
+
+#pragma endregion
+
+#pragma region Wrapping Axis Resolution
 
 bool FRopeWrappingPhase::FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 	const USceneComponent* Mesh, FVector& OutAxisOrigin, FVector& OutAxisDirection)
@@ -2851,6 +2877,10 @@ void FRopeWrappingPhase::ReseedWrappingAxisOnBoneTransition(FName Bone, const US
 		*State.PathAxisOrigin.ToString(), *State.PathAxisDirection.ToString(), NewWindingSign);
 }
 
+#pragma endregion
+
+#pragma region Composite Island Construction
+
 void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& LatchAnchor,
 	const FRopeSimState& Sim, const USceneComponent* Mesh, TArray<FName>& OutBones,
 	TArray<FRopeWrapIslandDebugMember>& OutDebugMembers,
@@ -3156,6 +3186,10 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 		OutAvailableSlack, FreeRestLength, CaptureSlabHalfWidth, OutDebugPortals.Num(),
 		ClosedGeometryPortalCount, ClosedReachabilityPortalCount, OpenPortalCount, *BoneList);
 }
+
+#pragma endregion
+
+#pragma region Surface Projection and Bone Selection
 
 bool FRopeWrappingPhase::ProjectWrapPointToCompositeIsland(const FRopeSimState& Sim,
 	const FContext& Ctx, const FVector& RopeNodeWorld, const FVector& SupportProbeWorld,
@@ -3926,6 +3960,10 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurface(FName Bone, const USceneCompo
 	return true;
 }
 
+#pragma endregion
+
+#pragma region Front Progression and Path Sampling
+
 void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimState& Sim, const FContext& Ctx)
 {
 	if (State.Anchors.Num() == 0 || State.NumTailNodes <= 0)
@@ -4473,3 +4511,5 @@ bool FRopeWrappingPhase::SampleWrappingPath(float DistanceFromLatch, FRopeWrapPa
 	InterpolatePoints(LowerPoint, UpperPoint, SampleDistance, OutPoint);
 	return true;
 }
+
+#pragma endregion

@@ -24,6 +24,8 @@
 #include "SceneInterface.h"
 // AActor::GetOwner (provider 소스 필터링)
 #include "GameFramework/Actor.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Kismet/GameplayStatics.h"
 #include "Components/ActorComponent.h"
 // 틱 선행조건(애니 평가 이후 보장)
 #include "Components/SkeletalMeshComponent.h"
@@ -726,13 +728,26 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Prepare);
 		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Prepare);
+		TOptional<FVector> LODCameraLocation;
+		bool bLODCameraResolved = false;
 		for (URopeComponent* Rope : Ropes)
 		{
 			if (!IsValid(Rope))
 			{
 				continue;
 			}
-			Rope->PrepareSimFrame(DeltaTime);
+			// 모든 로프가 같은 로컬 플레이어 카메라를 쓰므로, 필요한 첫 로프에서 프레임당 한 번만 조회한다.
+			// 조회 실패도 resolved로 기억해 서버/카메라 없는 월드에서 로프 수만큼 반복하지 않는다.
+			if (!bLODCameraResolved && Rope->SolverConfig.bEnableDistanceLOD &&
+				Rope->SolverConfig.LODStartDistance > 0.0f)
+			{
+				bLODCameraResolved = true;
+				if (const APlayerCameraManager* Camera = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0))
+				{
+					LODCameraLocation = Camera->GetCameraLocation();
+				}
+			}
+			Rope->PrepareSimFrame(DeltaTime, LODCameraLocation);
 		}
 	}
 
