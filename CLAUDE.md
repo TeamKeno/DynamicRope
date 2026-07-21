@@ -52,7 +52,7 @@ To run/iterate behavior, open the `.uproject` in the editor and Play.
     (The CPU `Sim` mirror is still uploaded per frame as the tube's centerline source under Catmull-Rom
     smoothing — removing it needs GPU-side smoothing, a later step.)
   - `DynamicRopeEditor` (Editor) — SDF authoring: a nomad tab (`SRopeSDFAuthoringPanel`), the
-    `URopeSDFData` baker/factory/asset-definition, and component visualizers. **Not** an empty stub.
+    `URopeSDFData` baker/factory/asset-definition. **Not** an empty stub.
 - `Source/DynamicRopeProject/` — thin game module (game mode + module boilerplate). Depends only on
   `DynamicRope`.
 - `Plugins/DynamicRope/Docs/PoC/` — design notes (Korean) defining the post-wrap behavior model. The

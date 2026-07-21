@@ -4,8 +4,6 @@
 #include "DynamicRopeEditorLog.h"
 #include "SDF/SRopeSDFAuthoringPanel.h"
 #include "SDF/RopeBoneSDFVolumeCustomization.h"
-#include "Visualizers/RopeComponentVisualizer.h"
-#include "RopeComponent.h"
 #include "Collision/SDF/RopeSDFProvider.h"
 #include "Collision/SDF/RopeSDFData.h"
 
@@ -21,8 +19,6 @@
 #include "ToolMenus.h"
 #include "WorkspaceMenuStructure.h"
 #include "WorkspaceMenuStructureModule.h"
-#include "Editor/UnrealEdEngine.h"
-#include "UnrealEdGlobals.h"
 
 // Editor log category definitions (declarations in DynamicRopeEditorLog.h).
 DEFINE_LOG_CATEGORY(LogDynamicRopeEditor);
@@ -48,13 +44,6 @@ void FDynamicRopeEditorModule::StartupModule()
 	UToolMenus::RegisterStartupCallback(
 		FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FDynamicRopeEditorModule::RegisterMenus));
 
-	// Editor viewport visualizers (drawn on selection).
-	if (GUnrealEd)
-	{
-		GUnrealEd->RegisterComponentVisualizer(URopeComponent::StaticClass()->GetFName(),
-			MakeShared<FRopeComponentVisualizer>());
-	}
-
 	// 디테일 패널 프로퍼티 타입 커스터마이즈: FRopeBoneSDFVolume 배열 요소 헤더에 본 이름 표시.
 	{
 		FPropertyEditorModule& PropertyModule =
@@ -76,18 +65,13 @@ void FDynamicRopeEditorModule::StartupModule()
 		MessageLogModule.RegisterLogListing(RopeSDFMessageLogName, LOCTEXT("RopeSDFLogLabel", "Dynamic Rope SDF"), Options);
 	}
 
-	UE_LOG(LogDynamicRopeEditor, Log, TEXT("DynamicRopeEditor module started (SDF authoring tab + component visualizers registered)."));
+	UE_LOG(LogDynamicRopeEditor, Log, TEXT("DynamicRopeEditor module started (SDF authoring tab registered)."));
 }
 
 void FDynamicRopeEditorModule::ShutdownModule()
 {
 	UToolMenus::UnRegisterStartupCallback(this);
 	UToolMenus::UnregisterOwner(this);
-
-	if (GUnrealEd)
-	{
-		GUnrealEd->UnregisterComponentVisualizer(URopeComponent::StaticClass()->GetFName());
-	}
 
 	if (FModuleManager::Get().IsModuleLoaded("PropertyEditor"))
 	{

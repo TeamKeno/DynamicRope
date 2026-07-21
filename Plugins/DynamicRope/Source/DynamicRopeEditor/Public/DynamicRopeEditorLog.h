@@ -4,7 +4,7 @@
 // Definitions (DEFINE) live once in DynamicRopeEditorModule.cpp.
 //
 // Usage:
-//   LogDynamicRopeEditor — editor module lifecycle, tabs/menus, visualizers, asset tooling.
+//   LogDynamicRopeEditor — editor module lifecycle, tabs/menus, asset tooling.
 //   LogRopeSDFBake       — the SDF authoring/baking pipeline (the heavy offline editor op).
 
 #pragma once
@@ -12,7 +12,7 @@
 #include "Logging/LogMacros.h"
 #include "UObject/NameTypes.h"
 
-/** General editor tooling: module startup, tab/menu registration, component visualizers, factories. */
+/** General editor tooling: module startup, tab/menu registration, factories. */
 DECLARE_LOG_CATEGORY_EXTERN(LogDynamicRopeEditor, Log, All);
 
 /** SDF authoring/baking pipeline (sampling, bake progress, asset write-out). */

@@ -9,7 +9,7 @@ class SDockTab;
 class FSpawnTabArgs;
 class URopeSDFData;
 
-/** Editor module for the Dynamic Rope plugin. Hosts editor tooling, customizations, and visualizers. */
+/** Editor module for the Dynamic Rope plugin. Hosts editor tooling and customizations. */
 class FDynamicRopeEditorModule : public IModuleInterface
 {
 public:

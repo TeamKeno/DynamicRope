@@ -306,13 +306,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render")
 	TObjectPtr<UMaterialInterface> RopeMaterial = nullptr;
 
-#if WITH_EDITORONLY_DATA
-	/** 에디터에서 이 로프 액터를 선택했을 때 배치-보조 가이드(앵커·조준·도달범위·던지기 아크)를
-	 *  FRopeComponentVisualizer가 그릴지 여부. 레벨 에디터 전용(런타임/쿠킹 제외). */
-	UPROPERTY(EditAnywhere, Category = "Rope|Debug")
-	bool bShowPlacementGuides = true;
-#endif
-
 	//~ API ---------------------------------------------------------------
 
 	/**
