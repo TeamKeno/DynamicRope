@@ -36,6 +36,8 @@ struct FRopeFlightNodeDebug
 	int32 NodeIndex = INDEX_NONE;
 	FVector PrevPosition = FVector::ZeroVector;
 	FVector Position = FVector::ZeroVector;
+	// NodeSpeed/bFast는 캡처 루프의 게이팅 중간값이다 — 표시는 읽지 않는다(bNearBody만 노란 점으로 나간다).
+	// 셋이 같은 게이팅 식에 함께 쓰이므로 출처를 가르지 않고 구조체에 나란히 둔다.
 	float NodeSpeed = 0.0f;
 	bool bFast = false;
 	bool bNearBody = false;
@@ -69,8 +71,6 @@ struct FRopeNodeProximityDebug
 	FVector Position = FVector::ZeroVector;
 	// 접촉 바깥 법선(단위) — 어느 면인지 = 이 방향
 	FVector Normal = FVector::ZeroVector;
-	// 질의 반경 대비 침투(>0=밴드 안). 붙음 정도.
-	float   Penetration = 0.0f;
 	// 이 접촉을 낸 collider의 IsWorldStatic() — 색 구분용. 본 유무로 추론하지 않는다(본을 보고하지 않는
 	// 커스텀 non-static collider와, 가상 본을 가진 정적 프롭이 둘 다 반례다).
 	bool    bWorldStatic = false;
@@ -143,15 +143,16 @@ struct FRopeDebugSnapshot
 	bool  bLogicOverride = false;
 
 	//~ flight(Flight phase에서만) ----------------------------------------
+	// (캡처 판정 3종은 담지 않는다: MinLatchNodes는 런타임에 안 바뀌는 config 상수고, bShouldCapture는
+	//  true가 되는 즉시 같은 프레임에 Contacting으로 전이해 헤더의 `Flight→Contacting`과 중복이며,
+	//  TrackerNodes의 위치는 후보 박스가 이미 그린다. 셋 다 찰나의 값이라 누적해서 읽는 stat RopeFlight의
+	//  Candidate Nodes / Capture Decisions가 유효한 형태다.)
 	bool bHasFlight = false;
-	bool bShouldCapture = false;
-	int32 MinLatchNodes = 0;
 	FName TrackerBone = NAME_None;
 	// dominant 대상의 mesh를 캡처 시점에 변환한 키. 접촉 대상의 식별 계약은 (Mesh, Bone) 쌍이다
 	// (FRopeContactTracker 주석 참조) — 본 이름만 비교하면 같은 스켈레톤을 쓰는 두 액터가 붙어 있을 때
 	// 엉뚱한 후보가 dominant처럼 강조된다.
 	FObjectKey TrackerMeshKey;
-	TArray<int32> TrackerNodes;
 	TArray<FRopeFlightNodeDebug> NodeDebug;
 	// 주의: Candidates[].Mesh는 raw 포인터다. 스냅샷이 몇 프레임 살아남으므로 **역참조 금지** —
 	// 대상 일치 판정은 아래 CandidateMeshKeys(캡처 시 변환)로 한다. 인덱스는 Candidates와 1:1이다.

@@ -516,7 +516,6 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugC
 			NP.NodeIndex = i;
 			NP.Position = NodePos;
 			NP.Normal = Best.Normal;
-			NP.Penetration = Best.Penetration;
 			NP.Bone = Best.Bone;
 			NP.bWorldStatic = bBestWorldStatic;
 			Snapshot.NodeProximity.Add(MoveTemp(NP));
@@ -567,10 +566,8 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 		GatherFlightNodeDebug(DetectParams, OutSnapshot->NodeDebug);
 		OutSnapshot->bHasFlight = true;
 		// bSolveThisFrame / colliders 수는 FillDebugSnapshot(항상 실행)이 단일 소스로 채운다 — 여기선 안 쓴다.
-		OutSnapshot->bShouldCapture = bShouldCapture;
-		OutSnapshot->MinLatchNodes = DetectConfig.MinLatchNodes;
+		// 캡처 판정값(bShouldCapture / MinLatchNodes / TrackerNodes)은 담지 않는다 — 사유는 스냅샷 구조체 주석.
 		OutSnapshot->TrackerBone = FrameTracker.CandidateBone;
-		OutSnapshot->TrackerNodes = FrameTracker.CandidateNodes;
 		OutSnapshot->Candidates = Candidates;
 		// 대상 식별은 (Mesh, Bone) 쌍이다(FRopeContactTracker 계약). 메시 포인터는 스냅샷 수명(수 프레임)
 		// 뒤 죽어 있을 수 있으므로 비교 전용 키로 지금 굳힌다.
