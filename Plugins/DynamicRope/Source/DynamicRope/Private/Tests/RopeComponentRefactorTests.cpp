@@ -37,7 +37,7 @@ struct FRopeComponentRefactorTestSeam
 		return Rope.FinalizeKinematicVirtualBridges(Runs, Anchors);
 	}
 
-	static TArray<FRopeKinematicVirtualBridge>& GetVirtualBridges(URopeComponent& Rope)
+	static TArray<URopeComponent::FKinematicVirtualBridge>& GetVirtualBridges(URopeComponent& Rope)
 	{
 		return Rope.KinematicVirtualBridges;
 	}
@@ -109,8 +109,7 @@ bool FRopeVirtualBridgeSingleLifecycleTest::RunTest(const FString& Parameters)
 	FRopeComponentRefactorTestSeam::SyncVirtualBridges(
 		*Rope, Phase.State.VirtualBridgeRuns, WrappingAnchors, /*FrontDistance*/ 100.0f);
 
-	TArray<FRopeKinematicVirtualBridge>& Bridges =
-		FRopeComponentRefactorTestSeam::GetVirtualBridges(*Rope);
+	auto& Bridges = FRopeComponentRefactorTestSeam::GetVirtualBridges(*Rope);
 	TestEqual(TEXT("Wrapping creates the bridge once"), Bridges.Num(), 1);
 	if (Bridges.Num() != 1)
 	{

@@ -893,7 +893,7 @@ void URopeComponent::UpdateWrappingKinematicVirtualBridges(
 		const USceneComponent* RightMesh = RightAnchor->Mesh.Get();
 		if (LeftMesh && LeftMesh == RightMesh)
 		{
-			FRopeKinematicVirtualBridge& Bridge = KinematicVirtualBridges.AddDefaulted_GetRef();
+			FKinematicVirtualBridge& Bridge = KinematicVirtualBridges.AddDefaulted_GetRef();
 			Bridge.NodeIndices = Run.VirtualNodeIndices;
 			Bridge.LeftAnchor = *LeftAnchor;
 			Bridge.RightAnchor = *RightAnchor;
@@ -913,7 +913,7 @@ void URopeComponent::UpdateWrappingKinematicVirtualBridges(
 	// 오른쪽 anchor 거리까지 front가 도달했다는 것은 ApplyFrontMotion이 양쪽 경계를 실제 표면 위치로
 	// 고정했다는 뜻이다. 그 프레임부터 내부 virtual node를 직선으로 묶어 Wrapped 전 출렁임을 없앤다.
 	const float FrontTolerance = FMath::Max(0.01f, Sim.SegmentLength * 0.001f);
-	for (FRopeKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
+	for (FKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
 	{
 		if (!Bridge.bActive && FrontDistance + FrontTolerance >= Bridge.ActivationFrontDistance)
 		{
@@ -944,7 +944,7 @@ bool URopeComponent::FinalizeKinematicVirtualBridges(
 	for (int32 RunIndex = 0; RunIndex < Runs.Num(); ++RunIndex)
 	{
 		const FRopeVirtualBridgeRun& Run = Runs[RunIndex];
-		FRopeKinematicVirtualBridge& Bridge = KinematicVirtualBridges[RunIndex];
+		FKinematicVirtualBridge& Bridge = KinematicVirtualBridges[RunIndex];
 		if (Bridge.LeftAnchor.NodeIndex != Run.LeftNodeIndex ||
 			Bridge.RightAnchor.NodeIndex != Run.RightNodeIndex ||
 			Bridge.NodeIndices != Run.VirtualNodeIndices)
@@ -998,7 +998,7 @@ void URopeComponent::HoldKinematicVirtualBridges()
 	}
 
 	SimFrame.OverrideFrame.EnsureSize(Sim.Num());
-	for (FRopeKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
+	for (FKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
 	{
 		if (!Bridge.bActive)
 		{
@@ -1068,7 +1068,7 @@ void URopeComponent::ReleaseKinematicVirtualBridgesToSolver()
 	if (KinematicVirtualBridges.Num() > 0)
 	{
 		SimFrame.OverrideFrame.EnsureSize(Sim.Num());
-		for (const FRopeKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
+		for (const FKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
 		{
 			for (const int32 NodeIndex : Bridge.NodeIndices)
 			{
@@ -1176,7 +1176,7 @@ void URopeComponent::ApplyWrappedMassMask(bool bResetDynamicNodeVelocity)
 		}
 	}
 
-	for (const FRopeKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
+	for (const FKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
 	{
 		if (!Bridge.bActive)
 		{

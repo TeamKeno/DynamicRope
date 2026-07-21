@@ -41,27 +41,6 @@ struct FRopeFlightNodeDebug;
 // 디버거 캡처 범위 비트(Debug/RopeDebugSnapshot.h) — 켜진 보기만 수집하도록 캡처 측에 전달된다.
 enum class ERopeDebugCapture : uint8;
 
-/**
- * Composite Analytic Helix의 bounded no-anchor 구간을 양쪽 실제 anchor 사이 직선으로 유지하는
- * kinematic bridge. 특정 본 하나에 귀속하지 않고 두 surface binding을 매 프레임 함께 해석한다.
- */
-struct FRopeKinematicVirtualBridge
-{
-	/** 양쪽 실제 표면점 사이에서 SDF projection에 실패해 anchor가 없는 내부 노드들. */
-	TArray<int32> NodeIndices;
-	/** 매 프레임 bone-local binding으로 다시 해석할 왼쪽/오른쪽 실제 표면 anchor. */
-	FRopeSurfaceAnchor LeftAnchor;
-	FRopeSurfaceAnchor RightAnchor;
-	/** 양 끝 노드를 포함한 원래 세그먼트 수 × SegmentLength. 과도한 직선 신장 진단 기준이다. */
-	float RestSpanLength = 0.0f;
-	/** Wrapping front가 오른쪽 실제 anchor까지 도달했을 때 bridge를 켜기 위한 경로 거리. */
-	float ActivationFrontDistance = 0.0f;
-	/** 커밋 전 점진 등록된 bridge는 false로 대기하고, 양쪽 실제 anchor가 고정된 순간 true가 된다. */
-	bool bActive = true;
-	/** 같은 bridge의 과신장 경고가 매 프레임 반복되지 않도록 하는 1회성 로그 래치. */
-	bool bLoggedStretchWarning = false;
-};
-
 // Wrapped 성립 이벤트는 본 이름 하나에서 구조체 페이로드로 확장됐다(2026-07-13 회의 결정 G —
 // 결착/판정값/복수 본. 기존 BP 바인딩은 재연결 필요, 클린 브레이크 승인 사항).
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, const FRopeWrappedEventInfo&, Info);
@@ -911,8 +890,29 @@ private:
 	/** Wrapped: bone-local latch 유지/해제. */
 	FRopeWrapController WrapController;
 
+	/**
+	 * Composite Analytic Helix의 bounded no-anchor 구간을 양쪽 실제 anchor 사이 직선으로 유지하는
+	 * 컴포넌트 전용 런타임 상태. 특정 본 하나에 귀속하지 않고 두 surface binding을 매 프레임 함께 해석한다.
+	 */
+	struct FKinematicVirtualBridge
+	{
+		/** 양쪽 실제 표면점 사이에서 SDF projection에 실패해 anchor가 없는 내부 노드들. */
+		TArray<int32> NodeIndices;
+		/** 매 프레임 bone-local binding으로 다시 해석할 왼쪽/오른쪽 실제 표면 anchor. */
+		FRopeSurfaceAnchor LeftAnchor;
+		FRopeSurfaceAnchor RightAnchor;
+		/** 양 끝 노드를 포함한 원래 세그먼트 수 × SegmentLength. 과도한 직선 신장 진단 기준이다. */
+		float RestSpanLength = 0.0f;
+		/** Wrapping front가 오른쪽 실제 anchor까지 도달했을 때 bridge를 켜기 위한 경로 거리. */
+		float ActivationFrontDistance = 0.0f;
+		/** 커밋 전 점진 등록된 bridge는 false로 대기하고, 양쪽 실제 anchor가 고정된 순간 true가 된다. */
+		bool bActive = true;
+		/** 같은 bridge의 과신장 경고가 매 프레임 반복되지 않도록 하는 1회성 로그 래치. */
+		bool bLoggedStretchWarning = false;
+	};
+
 	/** 양쪽 실제 anchor가 있는 virtual run. Wrapping 중 front 도달 뒤부터 Wrapped까지 직선 고정된다. */
-	TArray<FRopeKinematicVirtualBridge> KinematicVirtualBridges;
+	TArray<FKinematicVirtualBridge> KinematicVirtualBridges;
 	/** WrappingPhase가 한 번 산출한 run 중 component bridge로 동기화한 prefix 길이. */
 	int32 KinematicVirtualBridgeRunCursor = 0;
 
