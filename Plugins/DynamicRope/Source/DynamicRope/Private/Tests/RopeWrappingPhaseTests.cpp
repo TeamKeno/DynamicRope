@@ -32,6 +32,41 @@ namespace
 	}
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingInitializationFailureStateTest,
+	"DynamicRope.Wrapping.InitializationFailureState",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingInitializationFailureStateTest::RunTest(const FString& Parameters)
+{
+	FRopeWrappingPhase Wrapping;
+	// Seed contradictory stale flags to prove that even the earliest validation failure
+	// establishes the canonical failed terminal state.
+	Wrapping.State.bPathBuildActive = true;
+	Wrapping.State.bPathBuildComplete = true;
+	Wrapping.State.bPathBuildFailed = false;
+	Wrapping.State.PathBuildFailureReason = TEXT("StaleFailure");
+
+	FRopeSurfaceAnchor InvalidLatch;
+	FRopeSimState EmptySim;
+	TArray<IRopeCollider*> NoColliders;
+	const FRopeWrapConfig Config = MakeTestWrapConfig();
+	const FRopeWrappingPhase::FContext Ctx{ Config, NoColliders,
+		/*SurfaceOffset*/ 1.0f, TEXT("WrappingInitializationFailureTest"), true };
+
+	AddExpectedError(TEXT("Path initialization rejected: reason=InvalidLatchInput"),
+		EAutomationExpectedErrorFlags::Contains, 1);
+	AddExpectedError(TEXT("Wrap begin failed: reason=InvalidLatchInput"),
+		EAutomationExpectedErrorFlags::Contains, 1);
+	TestFalse(TEXT("invalid latch rejects wrapping initialization"),
+		Wrapping.Begin(InvalidLatch, 0.16f, EmptySim, Ctx));
+	TestFalse(TEXT("failed initialization is not active"), Wrapping.State.bPathBuildActive);
+	TestFalse(TEXT("failed initialization is not complete"), Wrapping.State.bPathBuildComplete);
+	TestTrue(TEXT("failed initialization records failure"), Wrapping.State.bPathBuildFailed);
+	TestEqual(TEXT("failed initialization preserves its reason"),
+		Wrapping.State.PathBuildFailureReason, FString(TEXT("InvalidLatchInput")));
+	return true;
+}
+
 // SurfaceVectorField 경로 빌드가 캡슐(원기둥) 주위를 완주하고, 앵커가 표면 위에 놓이며, 빌드 중
 // 적분한 누적 감싼 각도가 단일 축 helix 공식과 일치하는가 — rolling axis(본 전환 시 축 재해석)
 // 도입 후에도 단일 본(전환 없음) 결과가 기존 공식과 동치임을 고정하는 회귀 계약.

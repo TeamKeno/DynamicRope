@@ -694,10 +694,17 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_BeginProgressiveWrapPathBuild);
 
+	// 모든 초기화 시도는 비활성 상태에서 시작한다. 아래 어느 검증 단계에서 실패하더라도
+	// FinishPathBuild를 거쳐 Active/Complete/Failed 플래그가 하나의 일관된 종료 상태를 갖는다.
+	State.bPathBuildActive = false;
+	State.bPathBuildComplete = false;
+	State.bPathBuildFailed = false;
+	State.PathBuildFailureReason.Reset();
+
 	const USceneComponent* Mesh = ResolveWrappingMesh(State, LatchAnchor);
 	if (!Mesh || !Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex) || LatchAnchor.Bone.IsNone())
 	{
-		State.PathBuildFailureReason = TEXT("InvalidLatchInput");
+		FinishPathBuild(/*bFailed=*/true, TEXT("InvalidLatchInput"));
 		UE_LOG(LogRopeWrap, Error,
 			TEXT("[%s] Path initialization rejected: reason=InvalidLatchInput mesh=%s bone=%s node=%d validNode=%d simNodes=%d"),
 			*Ctx.OwnerName, Mesh ? *Mesh->GetName() : TEXT("None"),
@@ -765,7 +772,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 
 	if (State.NumTailNodes <= 0)
 	{
-		State.PathBuildFailureReason = TEXT("NoTailNodesAfterLatch");
+		FinishPathBuild(/*bFailed=*/true, TEXT("NoTailNodesAfterLatch"));
 		UE_LOG(LogRopeWrap, Error,
 			TEXT("[%s] Path initialization rejected: reason=NoTailNodesAfterLatch latchNode=%d simNodes=%d secondarySeeds=%d"),
 			*Ctx.OwnerName, StoredLatchAnchor.NodeIndex, Sim.Num(), State.SecondarySeedAnchors.Num());
@@ -778,7 +785,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 		InitializeSurfaceVectorFieldProgressiveWrapPath(StoredLatchAnchor, Sim, Ctx);
 	if (!bInitialized)
 	{
-		State.PathBuildFailureReason = TEXT("InitialSurfacePathPointFailed");
+		FinishPathBuild(/*bFailed=*/true, TEXT("InitialSurfacePathPointFailed"));
 		UE_LOG(LogRopeWrap, Error,
 			TEXT("[%s] Path initialization failed: reason=InitialSurfacePathPointFailed bone=%s node=%d surface=%s normal=%s"),
 			*Ctx.OwnerName, *StoredLatchAnchor.Bone.ToString(), StoredLatchAnchor.NodeIndex,
@@ -787,7 +794,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	}
 	if (!AppendWrappingAnchorFromPathPoint(0, Sim, Ctx))
 	{
-		State.PathBuildFailureReason = TEXT("InitialAnchorBuildFailed");
+		FinishPathBuild(/*bFailed=*/true, TEXT("InitialAnchorBuildFailed"));
 		UE_LOG(LogRopeWrap, Error,
 			TEXT("[%s] Path initialization failed: reason=InitialAnchorBuildFailed bone=%s node=%d pathPoints=%d surface=%s"),
 			*Ctx.OwnerName, *StoredLatchAnchor.Bone.ToString(), StoredLatchAnchor.NodeIndex,
