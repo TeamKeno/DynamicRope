@@ -8,7 +8,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeConfigTypes.h"
+#include "Core/RopeSimTypes.h"
 
 class IRopeCollider;
 
