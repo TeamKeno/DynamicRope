@@ -67,29 +67,6 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 
 	EnsureRopeInitialized();
 
-	// 조합 제약 강제(런타임 쓰기 방어 — 에디터 편집은 PostEditChangeProperty가 이미 보정):
-	// ①②=BareWrap만, ③=Pierce/Cinch만. 무효 조합은 던지기 시점에 보정하고 경고를 남긴다.
-	const ERopeTipEngagement ClampedEngagement = RopeWrapModes::ClampEngagement(ResolveMode, TipEngagement);
-	if (ClampedEngagement != TipEngagement)
-	{
-		UE_LOG(LogDynamicRope, Warning,
-			TEXT("[%s] TipEngagement %d not allowed with ResolveMode %d — clamped to %d (FullSim/Assisted=BareWrap only, Guaranteed=Pierce/Cinch only)."),
-			*GetName(), static_cast<int32>(TipEngagement), static_cast<int32>(ResolveMode),
-			static_cast<int32>(ClampedEngagement));
-		TipEngagement = ClampedEngagement;
-	}
-
-	// Cinch는 계약상 유효한 조합이지만(③ 전용) 아직 구현이 없어 실제로는 BareWrap 감김 경로로 떨어진다.
-	// 이벤트 페이로드에는 저작값 그대로 Cinch가 실리므로, 로그가 없으면 소비자는 Cinch가 성립한 줄 안다.
-	// 던지기당이 아니라 로프당 1회만 남긴다(연사 시 로그 홍수 방지).
-	if (TipEngagement == ERopeTipEngagement::Cinch && !bWarnedCinchUnimplemented)
-	{
-		bWarnedCinchUnimplemented = true;
-		UE_LOG(LogDynamicRope, Warning,
-			TEXT("[%s] TipEngagement=Cinch는 아직 미구현이다 — 실제 동작은 BareWrap 감김이고 이벤트에만 Cinch로 보고된다."),
-			*GetName());
-	}
-
 	// ③ GuaranteedWrap의 BP 직행/AI 경로: Wielder의 조준 흐름 없이 Throw가 불려도 보장 계약을 지킨다 —
 	// 컴포넌트가 스스로 prepared preview를 빌드해 구속 경로로 던진다. 빌드 성공 = 조준한 대상에 무조건 꽂힘,
 	// 빌드 실패(대상 없음/사거리 밖) = 거부가 아니라 레이 끝점 아치 투척으로 폴백(2026-07-14 보장 재정의).
@@ -147,9 +124,6 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	{
 		return false;
 	}
-
-	// 조합 제약 강제(Wielder 직행 진입점도 동일 방어 — ThrowWithContext의 보정과 같은 규칙).
-	TipEngagement = RopeWrapModes::ClampEngagement(ResolveMode, TipEngagement);
 
 	// 서브클래스 wrap 대상 게이트: preview 빌드는 이 게이트를 모르므로(정적 빌더) 진입점에서 거른다.
 	if (!CanWrapTarget(Prepared.Mesh.Get(), Prepared.Bone))
@@ -346,8 +320,7 @@ bool URopeComponent::BuildPreparedWrappingPreviewFromResolvedContext(
 	Input.ThrowContext = ResolvedThrowContext;
 	Input.WrapConfig = WrapConfig;
 	Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
-	// 결착 모델을 preview 빌더로 전파 — Pierce면 감김 나선 대신 단일 앵커 꽂힘 경로를 탄다.
-	Input.TipEngagement = TipEngagement;
+	// 도달 모드를 preview 빌더로 전파 — ③이면 감김 나선 대신 단일 앵커 꽂힘 경로를 탄다.
 	Input.ResolveMode = ResolveMode;
 	Input.RopeRadius = Radius;
 	Input.RopeNumSides = NumSides;
@@ -825,7 +798,7 @@ void URopeComponent::FinishGuidedThrow()
 	// Pierce: 팁 소켓이 조준 히트점에 박히도록 메쉬 자세를 얼려 앵커에 싣는다(회전 freeze + 꼬리 연결).
 	// LocalMeshTransform = 팁 렌더 자세(bone-local), LocalSurfacePosition = 로프 연결점(꼬리, bone-local).
 	// 소켓 미설정이면 앵커를 그대로 둬 현행(원점=히트점, 세그먼트 추종) 폴백.
-	if (TipEngagement == ERopeTipEngagement::Pierce && Seed.Anchors.Num() > 0)
+	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap && Seed.Anchors.Num() > 0)
 	{
 		FRopeSurfaceAnchor& Anchor = Seed.Anchors[0];
 		const USceneComponent* Mesh = Seed.Mesh.Get();

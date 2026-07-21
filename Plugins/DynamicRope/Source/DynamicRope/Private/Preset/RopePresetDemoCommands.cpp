@@ -156,10 +156,9 @@ namespace RopePresetConsole
 				const URopePreset* Loaded = Settings->DemoPresets[i].Get();
 				if (Loaded)
 				{
-					UE_LOG(LogDynamicRope, Log, TEXT("  [%d]%s %s (mode=%s, engagement=%s)"),
+					UE_LOG(LogDynamicRope, Log, TEXT("  [%d]%s %s (mode=%s)"),
 						i, (i == GLastAppliedIndex ? TEXT("*") : TEXT(" ")), *Loaded->GetName(),
-						*StaticEnum<ERopeWrapResolveMode>()->GetNameStringByValue((int64)Loaded->ResolveMode),
-						*StaticEnum<ERopeTipEngagement>()->GetNameStringByValue((int64)Loaded->TipEngagement));
+						*StaticEnum<ERopeWrapResolveMode>()->GetNameStringByValue((int64)Loaded->ResolveMode));
 				}
 				else
 				{

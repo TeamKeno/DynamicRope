@@ -509,13 +509,13 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 
 void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& LatchAnchor,
 	const FRopeSimState& Sim, const USceneComponent* Mesh, TArray<FName>& OutBones,
-	TArray<FRopeWrapIslandDebugMember>& OutDebugMembers,
-	TArray<FRopeWrapIslandDebugPortal>& OutDebugPortals,
+	TArray<FRopeWrapIslandMember>& OutMembers,
+	TArray<FRopeWrapIslandPortal>& OutPortals,
 	float& OutAvailableSlack, const FContext& Ctx) const
 {
 	OutBones.Reset();
-	OutDebugMembers.Reset();
-	OutDebugPortals.Reset();
+	OutMembers.Reset();
+	OutPortals.Reset();
 	OutAvailableSlack = 0.0f;
 	if (!Mesh || LatchAnchor.Bone.IsNone())
 	{
@@ -549,7 +549,7 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 		FBox Bounds = FBox(EForceInit::ForceInit);
 		FVector Center = FVector::ZeroVector;
 		FVector Extent = FVector::ZeroVector;
-		FRopeWrapIslandDebugMember DebugMember;
+		FRopeWrapIslandMember Member;
 	};
 
 	TArray<FIslandCollider, TInlineAllocator<16>> Candidates;
@@ -612,8 +612,8 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 		Candidate.Bounds = Bounds;
 		Candidate.Center = Center;
 		Candidate.Extent = Extent;
-		Candidate.DebugMember.Bone = Bone;
-		Candidate.DebugMember.WorldBounds = Bounds;
+		Candidate.Member.Bone = Bone;
+		Candidate.Member.WorldBounds = Bounds;
 
 		// SDF grid의 로컬 bounds와 당시 bone transform을 그대로 스냅샷한다. 이후 복합 단면 계산은
 		// 이 oriented box를 사용해 SDF를 다시 샘플링하거나 메시로 변환하지 않는다.
@@ -623,10 +623,10 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 			const FVector LocalCenter = SDFView.LocalMin + SDFView.LocalSize * 0.5f;
 			const FVector Scale = SDFView.BoneToWorld.GetScale3D();
 			const FVector AbsScale(FMath::Abs(Scale.X), FMath::Abs(Scale.Y), FMath::Abs(Scale.Z));
-			Candidate.DebugMember.bHasOrientedSDFBounds = true;
-			Candidate.DebugMember.SDFCenter = SDFView.BoneToWorld.TransformPosition(LocalCenter);
-			Candidate.DebugMember.SDFHalfExtent = SDFView.LocalSize * 0.5f * AbsScale;
-			Candidate.DebugMember.SDFRotation = SDFView.BoneToWorld.GetRotation().GetNormalized();
+			Candidate.Member.bHasOrientedSDFBounds = true;
+			Candidate.Member.SDFCenter = SDFView.BoneToWorld.TransformPosition(LocalCenter);
+			Candidate.Member.SDFHalfExtent = SDFView.LocalSize * 0.5f * AbsScale;
+			Candidate.Member.SDFRotation = SDFView.BoneToWorld.GetRotation().GetNormalized();
 		}
 	}
 
@@ -644,7 +644,7 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 		const double DZ = FMath::Max3(A.Min.Z - B.Max.Z, B.Min.Z - A.Max.Z, 0.0);
 		return static_cast<float>(FVector(DX, DY, DZ).Size());
 	};
-	TArray<FRopeWrapIslandDebugPortal, TInlineAllocator<32>> EvaluatedPortals;
+	TArray<FRopeWrapIslandPortal, TInlineAllocator<32>> EvaluatedPortals;
 
 	for (int32 AIndex = 0; AIndex < Candidates.Num(); ++AIndex)
 	{
@@ -699,17 +699,17 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 				RequiredExtraLength > OutAvailableSlack;
 			const bool bConnected = bClosedByGeometry || bClosedByReachability;
 
-			FRopeWrapIslandDebugPortal& DebugPortal = EvaluatedPortals.AddDefaulted_GetRef();
-			DebugPortal.BoneA = A.Bone;
-			DebugPortal.BoneB = B.Bone;
-			DebugPortal.SurfacePointA = ProjectionA.SurfacePoint;
-			DebugPortal.SurfacePointB = ProjectionB.SurfacePoint;
-			DebugPortal.State = bClosedByGeometry
+			FRopeWrapIslandPortal& Portal = EvaluatedPortals.AddDefaulted_GetRef();
+			Portal.BoneA = A.Bone;
+			Portal.BoneB = B.Bone;
+			Portal.SurfacePointA = ProjectionA.SurfacePoint;
+			Portal.SurfacePointB = ProjectionB.SurfacePoint;
+			Portal.State = bClosedByGeometry
 				? ERopeWrapIslandPortalState::ClosedGeometry
 				: (bClosedByReachability
 					? ERopeWrapIslandPortalState::ClosedReachability
 					: ERopeWrapIslandPortalState::Open);
-			DebugPortal.SurfaceGap = SurfaceGap;
+			Portal.SurfaceGap = SurfaceGap;
 
 			// 모든 후보 쌍을 Log로 출력하면 한 번의 접촉에 O(n^2) 줄이 쌓여 실제 경로 실패가
 			// 묻힌다. 상세 pair 진단은 VeryVerbose에 남기고, 일반 로그에는 아래 집계만 출력한다.
@@ -747,7 +747,7 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 		if (!OutBones.Contains(Candidates[CandidateIndex].Bone))
 		{
 			OutBones.Add(Candidates[CandidateIndex].Bone);
-			OutDebugMembers.Add(Candidates[CandidateIndex].DebugMember);
+			OutMembers.Add(Candidates[CandidateIndex].Member);
 		}
 		for (const int32 NeighborIndex : Links[CandidateIndex])
 		{
@@ -766,11 +766,11 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 
 	// 채택된 island에 닿아 있던 portal만 남긴다. Open portal도 왜 합쳐지지 않았는지 볼 수 있어야 하므로
 	// 폐쇄 edge만 필터링하지 않는다. 모두 위 판정 루프에서 이미 계산된 값의 복사본이다.
-	for (const FRopeWrapIslandDebugPortal& Portal : EvaluatedPortals)
+	for (const FRopeWrapIslandPortal& Portal : EvaluatedPortals)
 	{
 		if (OutBones.Contains(Portal.BoneA) || OutBones.Contains(Portal.BoneB))
 		{
-			OutDebugPortals.Add(Portal);
+			OutPortals.Add(Portal);
 		}
 	}
 
@@ -786,7 +786,7 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 	int32 ClosedGeometryPortalCount = 0;
 	int32 ClosedReachabilityPortalCount = 0;
 	int32 OpenPortalCount = 0;
-	for (const FRopeWrapIslandDebugPortal& Portal : OutDebugPortals)
+	for (const FRopeWrapIslandPortal& Portal : OutPortals)
 	{
 		switch (Portal.State)
 		{
@@ -806,7 +806,7 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 			"freeRest=%.2fcm slabHalf=%.2fcm portals=%d(closedGeometry=%d closedReachability=%d open=%d) "
 			"members=[%s]"),
 		*Ctx.OwnerName, *LatchAnchor.Bone.ToString(), OutBones.Num(), Candidates.Num(),
-		OutAvailableSlack, FreeRestLength, CaptureSlabHalfWidth, OutDebugPortals.Num(),
+		OutAvailableSlack, FreeRestLength, CaptureSlabHalfWidth, OutPortals.Num(),
 		ClosedGeometryPortalCount, ClosedReachabilityPortalCount, OpenPortalCount, *BoneList);
 }
 

@@ -53,7 +53,6 @@ namespace
 	{
 		URopePreset* Preset = NewObject<URopePreset>();
 		Preset->ResolveMode = ERopeWrapResolveMode::AssistedJudged;
-		Preset->TipEngagement = ERopeTipEngagement::BareWrap;
 		Preset->NumParticles = 32;
 		Preset->RopeLength = 555.0f;
 		Preset->MinRopeLength = 111.0f;
@@ -80,9 +79,7 @@ bool FRopePresetDefaultsValidTest::RunTest(const FString& Parameters)
 	const URopePreset* Preset = GetDefault<URopePreset>();
 	const URopeComponent* Rope = GetDefault<URopeComponent>();
 
-	TestTrue(TEXT("기본 모드 조합 유효"), RopeWrapModes::IsEngagementAllowed(Preset->ResolveMode, Preset->TipEngagement));
 	TestEqual(TEXT("ResolveMode 기본값 일치"), Preset->ResolveMode, Rope->ResolveMode);
-	TestEqual(TEXT("TipEngagement 기본값 일치"), Preset->TipEngagement, Rope->TipEngagement);
 	TestEqual(TEXT("NumParticles 기본값 일치"), Preset->NumParticles, Rope->NumParticles);
 	TestEqual(TEXT("RopeLength 기본값 일치"), Preset->RopeLength, Rope->RopeLength);
 	TestEqual(TEXT("MinRopeLength 기본값 일치"), Preset->MinRopeLength, Rope->MinRopeLength);
@@ -98,45 +95,31 @@ bool FRopePresetDefaultsValidTest::RunTest(const FString& Parameters)
 }
 
 #if WITH_EDITOR
-// 에셋 저장 검증(IsDataValid): 무효 모드 조합은 Invalid, 유효 조합은 통과. Cinch는 경고만(저장 허용).
+// 에셋 저장 검증(IsDataValid): 길이 역전은 경고로 알리되 저장 자체는 막지 않는다 —
+// SetRopeLength가 [MinRopeLength, RopeLength]로 클램프하므로 역전은 저작 실수지 무효 데이터가 아니다.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePresetDataValidationTest,
-	"DynamicRope.Preset.DataValidationRejectsInvalidCombo",
+	"DynamicRope.Preset.DataValidationWarnsOnLengthInversion",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopePresetDataValidationTest::RunTest(const FString& Parameters)
 {
 	URopePreset* Preset = NewObject<URopePreset>();
 
-	// ③ + BareWrap = 무효.
-	Preset->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
-	Preset->TipEngagement = ERopeTipEngagement::BareWrap;
+	Preset->RopeLength = 300.0f;
+	Preset->MinRopeLength = 500.0f;
 	{
 		FDataValidationContext Context;
-		TestEqual(TEXT("③+BareWrap → Invalid"), Preset->IsDataValid(Context), EDataValidationResult::Invalid);
+		TestNotEqual(TEXT("길이 역전은 경고지 Invalid가 아니다"),
+			Preset->IsDataValid(Context), EDataValidationResult::Invalid);
+		TestEqual(TEXT("길이 역전 경고 1건"), Context.GetNumWarnings(), 1);
 	}
 
-	// ① + Pierce = 무효.
-	Preset->ResolveMode = ERopeWrapResolveMode::FullSimulation;
-	Preset->TipEngagement = ERopeTipEngagement::Pierce;
+	Preset->MinRopeLength = 100.0f;
 	{
 		FDataValidationContext Context;
-		TestEqual(TEXT("①+Pierce → Invalid"), Preset->IsDataValid(Context), EDataValidationResult::Invalid);
-	}
-
-	// ③ + Pierce = 유효.
-	Preset->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
-	Preset->TipEngagement = ERopeTipEngagement::Pierce;
-	{
-		FDataValidationContext Context;
-		TestNotEqual(TEXT("③+Pierce → Invalid 아님"), Preset->IsDataValid(Context), EDataValidationResult::Invalid);
-	}
-
-	// ② + BareWrap = 유효.
-	Preset->ResolveMode = ERopeWrapResolveMode::AssistedJudged;
-	Preset->TipEngagement = ERopeTipEngagement::BareWrap;
-	{
-		FDataValidationContext Context;
-		TestNotEqual(TEXT("②+BareWrap → Invalid 아님"), Preset->IsDataValid(Context), EDataValidationResult::Invalid);
+		TestEqual(TEXT("정상 길이면 경고 없음"), Context.GetNumWarnings(), 0);
+		TestNotEqual(TEXT("정상 길이는 Invalid 아님"),
+			Preset->IsDataValid(Context), EDataValidationResult::Invalid);
 	}
 	return true;
 }
@@ -179,24 +162,6 @@ bool FRopePresetApplyStampsValuesTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 무효 조합 심층 방어: 코드로 조작한 ③+BareWrap 프리셋(IsDataValid를 우회한 케이스)을 적용하면
-// ClampEngagement 규칙(③→Pierce)으로 보정돼 들어간다.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePresetApplyClampsEngagementTest,
-	"DynamicRope.Preset.ApplyClampsEngagement",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopePresetApplyClampsEngagementTest::RunTest(const FString& Parameters)
-{
-	URopeComponent* Rope = NewObject<URopeComponent>();
-	URopePreset* Preset = NewObject<URopePreset>();
-	Preset->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
-	Preset->TipEngagement = ERopeTipEngagement::BareWrap;
-
-	TestTrue(TEXT("적용 성공(보정 포함)"), Rope->ApplyPreset(Preset));
-	TestEqual(TEXT("③+BareWrap → Pierce 보정"), Rope->TipEngagement, ERopeTipEngagement::Pierce);
-	return true;
-}
-
 // 모드-페이즈 정합: Free+③프리셋 → 즉시 Reel(장전) 진입 + 던지기 게이트 통과.
 // 이어서 Reel에서 ①프리셋 → 전개 후 Free 복귀(①은 게이트 없음).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePresetModePhaseReconciliationTest,
@@ -209,7 +174,6 @@ bool FRopePresetModePhaseReconciliationTest::RunTest(const FString& Parameters)
 
 	URopePreset* Guaranteed = NewObject<URopePreset>();
 	Guaranteed->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
-	Guaranteed->TipEngagement = ERopeTipEngagement::Pierce;
 
 	TestTrue(TEXT("Free에서 ③ 적용 성공"), Rope->ApplyPreset(Guaranteed));
 	TestEqual(TEXT("③ 적용 → Reel 진입"), Rope->GetPhase(), ERopePhase::Reel);
@@ -217,7 +181,6 @@ bool FRopePresetModePhaseReconciliationTest::RunTest(const FString& Parameters)
 
 	URopePreset* FreeSim = NewObject<URopePreset>();
 	FreeSim->ResolveMode = ERopeWrapResolveMode::FullSimulation;
-	FreeSim->TipEngagement = ERopeTipEngagement::BareWrap;
 
 	TestTrue(TEXT("Reel에서 ① 적용 성공(Reel은 허용 페이즈)"), Rope->ApplyPreset(FreeSim));
 	TestEqual(TEXT("①로 전환 → Free 복귀"), Rope->GetPhase(), ERopePhase::Free);

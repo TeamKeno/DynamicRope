@@ -38,16 +38,10 @@ public:
 	URopePreset();
 
 	//~ Mode(모드 계약) -----------------------------------------------------
-	// 조합 제약(①②=BareWrap만, ③=Pierce/Cinch만)의 단일 소스는 RopeWrapModes:: — 에디터 편집 시
-	// PostEditChangeProperty가 보정하고, 저장 검증(IsDataValid)과 ApplyPreset이 심층 방어한다.
 
 	/** 감김 해결(도달) 모드 — 던지기~결착까지 무엇을 보장하는가. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Mode")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
-
-	/** 결착 모델 — 팁이 닿는 순간 무엇이 성립하는가. 도달 모드와 조합이 제약된다. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Mode")
-	ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
 
 	//~ Rope(기본 물성) -----------------------------------------------------
 
@@ -113,19 +107,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip", meta = (EditCondition = "bUseTipMesh"))
 	bool bSyncTipMeshOnFree = true;
 
-	/** Pierce 전용 — Head/Tail 소켓으로 팁을 정밀 배치한다. 끄면 메쉬 원점이 로프 끝에 놓인다. */
+	/** ③(Guaranteed) 전용 — Head/Tail 소켓으로 팁을 정밀 배치한다. 끄면 메쉬 원점이 로프 끝에 놓인다. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip",
-		meta = (EditCondition = "bUseTipMesh && TipEngagement == ERopeTipEngagement::Pierce"))
+		meta = (EditCondition = "bUseTipMesh && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
 	bool bUseTipMeshSockets = false;
 
 	/** Head 소켓 — 팁의 뾰족한 끝. 이 소켓이 조준 히트점에 박힌다. 없으면 소켓 보정 비활성. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip",
-		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && TipEngagement == ERopeTipEngagement::Pierce"))
+		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
 	FName TipSocketName = NAME_None;
 
 	/** Tail 소켓 — 로프 자유단이 연결될 지점. 없으면 메쉬 원점에 연결. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip",
-		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && TipEngagement == ERopeTipEngagement::Pierce"))
+		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
 	FName TipRopeSocketName = NAME_None;
 
 	//~ Render(렌더) --------------------------------------------------------
@@ -176,9 +170,7 @@ public:
 	float PreviewQueryRadius = 0.0f;
 
 #if WITH_EDITOR
-	//~ 에디터 검증 — 무효 모드 조합의 3중 방어 중 1층(에셋 저장; 2층=아래 편집 보정, 3층=ApplyPreset).
+	//~ 에디터 검증 — 저작 실수(길이 역전 등)를 에셋 저장 시점에 알린다.
 	virtual EDataValidationResult IsDataValid(FDataValidationContext& Context) const override;
-	// 컴포넌트 PostEditChangeProperty와 같은 규칙: 모드가 정본 — 어느 쪽을 편집하든 TipEngagement를 보정.
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 };

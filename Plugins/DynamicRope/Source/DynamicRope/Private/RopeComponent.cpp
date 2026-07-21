@@ -133,7 +133,6 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	// [2] 값 스탬프 — RopeMaterial만 세터(SetMaterial) 경유가 필요해 [5]로 미룬다.
 	// (인스턴스 배선 값 TipMeshComponentTag/ReelHandSocket은 프리셋에 없다 — 헤더 주석 참조.)
 	ResolveMode = Preset->ResolveMode;
-	TipEngagement = Preset->TipEngagement;
 	NumParticles = Preset->NumParticles;
 	RopeLength = Preset->RopeLength;
 	MinRopeLength = Preset->MinRopeLength;
@@ -161,16 +160,6 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	PreviewSegmentCount = Preset->PreviewSegmentCount;
 	PreviewSampleStep = Preset->PreviewSampleStep;
 	PreviewQueryRadius = Preset->PreviewQueryRadius;
-
-	// [3] 조합 보정 — 에디터(PostEditChangeProperty)/던지기(ThrowWithContext)와 같은 규칙의 심층 방어.
-	// IsDataValid를 통과한 에셋이면 안 걸린다.
-	const ERopeTipEngagement Clamped = RopeWrapModes::ClampEngagement(ResolveMode, TipEngagement);
-	if (Clamped != TipEngagement)
-	{
-		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] ApplyPreset('%s'): 무효 모드 조합이라 결착을 보정했다(%d -> %d)."),
-			*GetName(), *Preset->GetName(), (int32)TipEngagement, (int32)Clamped);
-		TipEngagement = Clamped;
-	}
 
 	// [4] Sim 재시드 — 항상 호출(분기 없는 단일 경로). NumParticles/RopeLength 소비 + GPU 상주 버퍼
 	// 재시드 세대 증가까지 포함한다. EnsureRopeInitialized는 비었을 때만이라 여기서는 부적합.
@@ -201,8 +190,8 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	// [8] 통지 — 네이티브 훅 먼저, 그다음 BP 델리게이트(엔진 Notify 관례).
 	NotifyPresetApplied(Preset);
 	OnPresetApplied.Broadcast(Preset);
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] preset '%s' applied (mode=%d, engagement=%d, N=%d, L=%.0f)."),
-		*GetName(), *Preset->GetName(), (int32)ResolveMode, (int32)TipEngagement, NumParticles, RopeLength);
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] preset '%s' applied (mode=%d, N=%d, L=%.0f)."),
+		*GetName(), *Preset->GetName(), (int32)ResolveMode, NumParticles, RopeLength);
 	return true;
 }
 
@@ -633,15 +622,6 @@ void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 		PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, RopeLength))
 	{
 		InitRope();
-	}
-
-	// 도달 모드 × 결착 모델 조합 제약(①②=BareWrap만, ③=Pierce/Cinch만 — RopeWrapModes 참고).
-	// 모드가 정본이다: 어느 쪽을 편집했든 무효 조합이면 TipEngagement 쪽을 모드에 맞게 보정한다
-	// (Pierce/Cinch를 고르려면 먼저 모드를 ③으로 — ③ 전환 시 BareWrap은 Pierce로 자동 승격).
-	if (PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, ResolveMode) ||
-		PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, TipEngagement))
-	{
-		TipEngagement = RopeWrapModes::ClampEngagement(ResolveMode, TipEngagement);
 	}
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);

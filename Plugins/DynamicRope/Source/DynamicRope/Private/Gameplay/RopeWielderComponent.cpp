@@ -1494,7 +1494,7 @@ FRopeWrapPreviewData URopeWielderComponent::ResolvePreparedPreviewForDisplay(con
 {
 	// owner-local로 저장되지 않은 일반 preview는 원래 월드 점을 그대로 반환한다.
 	FRopeWrapPreviewData Preview = Prepared.ResolveRenderPreviewWorld();
-	if (!Rope || Rope->TipEngagement != ERopeTipEngagement::Pierce || !Preview.IsValid())
+	if (!Rope || Rope->ResolveMode != ERopeWrapResolveMode::GuaranteedWrap || !Preview.IsValid())
 	{
 		return Preview;
 	}

@@ -508,10 +508,10 @@ namespace
 		LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Input.RopeRadius);
 		LatchAnchor.RopeDistance = 0.0f;
 
-		// Pierce(③ 전용): 감김 경로 빌드(BuildPreviewCenterline)와 경로 앵커 확장을 건너뛰고,
+		// ③(Guaranteed) = Pierce: 감김 경로 빌드(BuildPreviewCenterline)와 경로 앵커 확장을 건너뛰고,
 		// aim-hit 접점에 단일 앵커로 성립한다. RenderPreview는 손→꽂힘 지점 직선(연출용).
 		// 이후 FinishGuidedThrow가 Anchors(=1개)를 그대로 Wrapped seed로 승격한다(커밋 경로 무변경).
-		if (Input.TipEngagement == ERopeTipEngagement::Pierce)
+		if (Input.ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 		{
 			// 창(팁)이 꽂히는 것이므로 앵커는 거리 기반 접점 노드(Candidate.NodeIndex)가 아니라
 			// 밧줄 끝(마지막 노드 = 팁 mesh 위치)이어야 한다. 그러지 않으면 안쪽 노드가 고정되고
@@ -610,17 +610,18 @@ bool FRopeThrowPreviewBuilder::BuildFreePreparedPreview(const FInput& Input, FRo
 		// 아래 두 경우엔 재탐색하지 않고 실패로 끝낸다. 그러면 호출자(ThrowWithContext ③ 분기)가
 		// StartFreeGuidedThrow(레이 끝점 허공 아치)로 가고, 조준이 빗나가면 안 꽂히는 게 정상 결과다.
 		//   - 조준 ray가 돌았는데 대상을 못 잡음: ③ 계약상 보장 대상은 "조준한 대상"뿐이다.
-		//   - Pierce: 창은 조준한 곳에 꽂히는 것이 전부라 arc 탐색(최대 SweepAngleDegrees 폭)이
+		//   - ③(Pierce): 창은 조준한 곳에 꽂히는 것이 전부라 arc 탐색(최대 SweepAngleDegrees 폭)이
 		//     의미를 갖지 않는다. 조준 ray가 없는 BP 직행/AI라도 방향만 보고 옆 대상에 꽂으면 안 된다.
-		// 남은 하나(조준 없는 BP 직행/AI + Cinch)만 arc 탐색으로 대상을 찾는다 — "이 방향으로 던져
-		// 거기 있는 걸 감아라"는 감김 모델에서는 성립하는 요청이다.
+		// 아래 arc 탐색은 감김 모델(①②)의 요청 — "이 방향으로 던져 거기 있는 걸 감아라" — 을 위한
+		// 경로다. 이 함수 자체가 ③ 전용이라 실사용에서는 위 두 게이트에서 끝나고, 탐색까지 내려오는
+		// 것은 ①② 입력을 직접 넣는 단위 테스트뿐이다.
 		if (Input.ThrowContext.bAimRayEvaluated)
 		{
 			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				TEXT("prepared preview rejected: aim ray found no target (aimed throw does not re-search the arc)"));
 			return false;
 		}
-		if (Input.TipEngagement == ERopeTipEngagement::Pierce)
+		if (Input.ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 		{
 			RopeMath::SetPreviewFailureReason(OutFailureReason,
 				TEXT("prepared preview rejected: pierce requires an aim hit (arc search is wrap-only)"));

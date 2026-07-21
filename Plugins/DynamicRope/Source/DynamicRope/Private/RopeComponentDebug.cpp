@@ -29,7 +29,7 @@ namespace RopeComponentPrivate
 		int32 ClosedGeometryCount = 0;
 		int32 ClosedReachabilityCount = 0;
 		int32 OpenPortalCount = 0;
-		for (const FRopeWrapIslandDebugPortal& Portal : State.PathWrapIslandDebugPortals)
+		for (const FRopeWrapIslandPortal& Portal : State.PathWrapIslandPortals)
 		{
 			switch (Portal.State)
 			{

@@ -260,8 +260,8 @@ private:
 	 */
 	void GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
 		const USceneComponent* Mesh, TArray<FName>& OutBones,
-		TArray<FRopeWrapIslandDebugMember>& OutDebugMembers,
-		TArray<FRopeWrapIslandDebugPortal>& OutDebugPortals, float& OutAvailableSlack,
+		TArray<FRopeWrapIslandMember>& OutMembers,
+		TArray<FRopeWrapIslandPortal>& OutPortals, float& OutAvailableSlack,
 		const FContext& Ctx) const;
 
 	/** 복합 실패 폴백 전용. 후보 graph 없이 최초 latch 본 collider만 투영한다. */

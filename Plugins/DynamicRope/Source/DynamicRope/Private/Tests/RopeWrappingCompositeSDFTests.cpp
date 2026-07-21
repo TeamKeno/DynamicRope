@@ -67,19 +67,19 @@ bool FRopeWrappingPoseSpaceIslandTest::RunTest(const FString& Parameters)
 	Wrapping.State.PathAxisDirection = FVector::UpVector;
 
 	TArray<FName> IslandBones;
-	TArray<FRopeWrapIslandDebugMember> DebugMembers;
-	TArray<FRopeWrapIslandDebugPortal> DebugPortals;
+	TArray<FRopeWrapIslandMember> Members;
+	TArray<FRopeWrapIslandPortal> Portals;
 	float AvailableSlack = 0.0f;
 	Wrapping.GatherPoseSpaceWrapIsland(
-		Latch, Sim, Mesh, IslandBones, DebugMembers, DebugPortals, AvailableSlack, Ctx);
+		Latch, Sim, Mesh, IslandBones, Members, Portals, AvailableSlack, Ctx);
 
 	TestTrue(TEXT("contact arm remains in island"), IslandBones.Contains(VolumeA.Bone));
 	TestTrue(TEXT("near torso joins by rope-radius surface gap"), IslandBones.Contains(VolumeB.Bone));
 	TestTrue(TEXT("opposite arm joins through the same pose-space component"), IslandBones.Contains(VolumeC.Bone));
 	TestFalse(TEXT("surface outside remaining-rope reach is excluded"), IslandBones.Contains(VolumeFar.Bone));
 	TestEqual(TEXT("island contains the three touching-column surfaces"), IslandBones.Num(), 3);
-	TestEqual(TEXT("debug snapshot reuses the three selected collider bounds"), DebugMembers.Num(), 3);
-	TestTrue(TEXT("debug snapshot keeps evaluated surface portals"), DebugPortals.Num() >= 2);
+	TestEqual(TEXT("island members reuse the three selected collider bounds"), Members.Num(), 3);
+	TestTrue(TEXT("island keeps evaluated surface portals"), Portals.Num() >= 2);
 	return true;
 }
 

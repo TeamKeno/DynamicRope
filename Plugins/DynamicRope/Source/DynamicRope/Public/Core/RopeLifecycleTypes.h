@@ -95,53 +95,10 @@ enum class ERopeWrapResolveMode : uint8
 	GuaranteedWrap = 2 UMETA(DisplayName = "Guaranteed")
 };
 
-/**
- * 결착 모델 — 팁이 대상에 "닿았다"고 판정된 순간 무엇이 성립하는가.
- * ①②는 BareWrap만, ③은 Pierce/Cinch만 쓸 수 있다(무효 조합은 모드 기본값으로 자동 보정).
- * **Cinch는 아직 미구현** — 고르면 BareWrap 감김 경로로 떨어진다. 근거: Docs/PoC/02_WrapResolveModes.md §2.
- */
-UENUM(BlueprintType)
-enum class ERopeTipEngagement : uint8
-{
-	/** 맨 로프(또는 추 팁): 접촉 dwell + 감김 판정으로 성립 — 현행 파이프라인. ①② 전용. */
-	BareWrap = 0 UMETA(DisplayName = "Bare Wrap"),
-
-	/** 창/작살 꽂힘: 팁 mesh 히트 순간 접점 앵커 1개(bone-local)로 성립. ③ 전용. */
-	Pierce = 1 UMETA(DisplayName = "Pierce"),
-
-	/**
-	 * 올가미/폐로프 조임: 루프가 대상을 포획하면 둘레 앵커 링으로 성립. ③ 전용.
-	 * **미구현** — 고르면 BareWrap 감김 경로로 떨어진다(preview/앵커 모두). 계약상 유효한 조합이라
-	 * 저장·던지기는 되지만 동작은 Cinch가 아니므로 표시 이름에 명시한다. 던질 때 런타임 경고 1회.
-	 */
-	Cinch = 2 UMETA(DisplayName = "Cinch (Not Implemented)")
-};
-
-/** 도달 모드가 강제하는 제약의 단일 소스 — 결착 모델 조합(IsEngagementAllowed/ClampEngagement)과
- *  phase 게이트(CanThrowInPhase). 에디터 보정·던지기 진입·조준 HUD·테스트가 공용 소비한다.
- *  UObject/월드 의존이 없어 헤더 인라인 + 단위 테스트가 가능하다. */
+/** 도달 모드가 강제하는 제약의 단일 소스 — phase 게이트(CanThrowInPhase). 던지기 진입·조준 HUD·
+ *  테스트가 공용 소비한다. UObject/월드 의존이 없어 헤더 인라인 + 단위 테스트가 가능하다. */
 namespace RopeWrapModes
 {
-	/** 이 조합이 계약상 유효한가. ①② = BareWrap만, ③ = Pierce/Cinch만. */
-	inline bool IsEngagementAllowed(ERopeWrapResolveMode Mode, ERopeTipEngagement Engagement)
-	{
-		return Mode == ERopeWrapResolveMode::GuaranteedWrap
-			? Engagement != ERopeTipEngagement::BareWrap
-			: Engagement == ERopeTipEngagement::BareWrap;
-	}
-
-	/** 무효 조합을 모드에 맞는 기본 결착으로 보정한다(①②→BareWrap, ③→Pierce). */
-	inline ERopeTipEngagement ClampEngagement(ERopeWrapResolveMode Mode, ERopeTipEngagement Engagement)
-	{
-		if (IsEngagementAllowed(Mode, Engagement))
-		{
-			return Engagement;
-		}
-		return Mode == ERopeWrapResolveMode::GuaranteedWrap
-			? ERopeTipEngagement::Pierce
-			: ERopeTipEngagement::BareWrap;
-	}
-
 	/**
 	 * 이 모드에서 이 phase에 throw가 성립하는가. ③(GuaranteedWrap)는 Reel(장전) 전용이고,
 	 * ①②는 phase 게이트가 없어 **항상 true**다.
@@ -181,10 +138,6 @@ struct FRopeWrappedEventInfo
 	/** 성립 당시 이 로프의 도달 모드(③ Guaranteed 성립은 판정값이 -1이다 — preview 기반). */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
-
-	/** 성립 당시 결착 모델(①② = 항상 BareWrap, ③ = Pierce/Cinch — 조합 제약은 RopeWrapModes 참고). */
-	UPROPERTY(BlueprintReadOnly, Category = "Rope")
-	ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
 
 	/** 커밋 시점 누적 감싼 각도(도). 계산 불가/preview 기반(③) = -1. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")

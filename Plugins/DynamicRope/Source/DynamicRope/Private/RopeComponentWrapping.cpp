@@ -829,7 +829,6 @@ FRopeWrappedEventInfo URopeComponent::MakeWrappedEventInfo(const FRopeWrapState&
 	// 이벤트 페이로드는 읽기 전용 의미라 대상 mesh의 const를 벗겨 BP에 노출한다(수정 계약 아님).
 	Info.Mesh = const_cast<USceneComponent*>(Seed.Mesh.Get());
 	Info.ResolveMode = ResolveMode;
-	Info.TipEngagement = TipEngagement;
 	Info.AngleDeg = AngleDeg;
 	Info.CoverageDeg = CoverageDeg;
 	Info.AnchorCount = Seed.Anchors.Num();

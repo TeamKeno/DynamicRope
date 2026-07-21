@@ -24,23 +24,6 @@ EDataValidationResult URopePreset::IsDataValid(FDataValidationContext& Context) 
 {
 	EDataValidationResult Result = Super::IsDataValid(Context);
 
-	// 모드 조합 계약(①②=BareWrap만, ③=Pierce/Cinch만) — 단일 소스 RopeWrapModes::.
-	if (!RopeWrapModes::IsEngagementAllowed(ResolveMode, TipEngagement))
-	{
-		Context.AddError(FText::Format(
-			NSLOCTEXT("RopePreset", "InvalidModeCombo",
-				"Invalid mode combination: {0} + {1}. FullSimulation/AssistedJudged allow BareWrap only; GuaranteedWrap allows Pierce/Cinch only."),
-			UEnum::GetDisplayValueAsText(ResolveMode), UEnum::GetDisplayValueAsText(TipEngagement)));
-		Result = EDataValidationResult::Invalid;
-	}
-
-	// Cinch는 미구현(BareWrap 경로 폴백) — 저장은 막지 않되 저작자에게 알린다.
-	if (TipEngagement == ERopeTipEngagement::Cinch)
-	{
-		Context.AddWarning(NSLOCTEXT("RopePreset", "CinchNotImplemented",
-			"Cinch engagement is not implemented yet - it falls back to the BareWrap wrapping path at runtime."));
-	}
-
 	// SetRopeLength가 [MinRopeLength, RopeLength]로 클램프하므로 역전 구간은 저작 실수다.
 	if (MinRopeLength > RopeLength)
 	{
@@ -51,16 +34,5 @@ EDataValidationResult URopePreset::IsDataValid(FDataValidationContext& Context) 
 	}
 
 	return Result;
-}
-
-void URopePreset::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
-{
-	const FName PropertyName = PropertyChangedEvent.GetPropertyName();
-	if (PropertyName == GET_MEMBER_NAME_CHECKED(URopePreset, ResolveMode) ||
-		PropertyName == GET_MEMBER_NAME_CHECKED(URopePreset, TipEngagement))
-	{
-		TipEngagement = RopeWrapModes::ClampEngagement(ResolveMode, TipEngagement);
-	}
-	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
 #endif // WITH_EDITOR

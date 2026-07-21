@@ -371,8 +371,8 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 		Ctx,
 		State.PathCircumferenceDir);
 	State.PathWrapIslandBones.Reset();
-	State.PathWrapIslandDebugMembers.Reset();
-	State.PathWrapIslandDebugPortals.Reset();
+	State.PathWrapIslandMembers.Reset();
+	State.PathWrapIslandPortals.Reset();
 	State.PathAvailableSlack = 0.0f;
 	State.bPathUsesPoseSpaceIsland = false;
 	State.PathCompositeSweepRadial = State.PathLatchRadial;
@@ -389,8 +389,8 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 		Ctx.Config.bEnableMultiBoneWrapping && !State.bPathUsesSingleBoneFallback)
 	{
 		GatherPoseSpaceWrapIsland(LatchAnchor, Sim, Mesh,
-			State.PathWrapIslandBones, State.PathWrapIslandDebugMembers,
-			State.PathWrapIslandDebugPortals, State.PathAvailableSlack, Ctx);
+			State.PathWrapIslandBones, State.PathWrapIslandMembers,
+			State.PathWrapIslandPortals, State.PathAvailableSlack, Ctx);
 		// 단일 표면은 기존 projection/축 수학을 그대로 사용해 단일 본 감김의 각도와 튜닝을 보존한다.
 		// 실제로 둘 이상의 본이 같은 pose-space 기둥으로 묶였을 때만 composite selector를 켠다.
 		State.bPathUsesPoseSpaceIsland = State.PathWrapIslandBones.Num() > 1;
@@ -429,7 +429,7 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 				{ 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }
 			};
 
-			for (const FRopeWrapIslandDebugMember& Member : State.PathWrapIslandDebugMembers)
+			for (const FRopeWrapIslandMember& Member : State.PathWrapIslandMembers)
 			{
 				if (!State.PathWrapIslandBones.Contains(Member.Bone))
 				{

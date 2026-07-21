@@ -118,7 +118,7 @@ enum class ERopeWrapIslandPortalState : uint8
 };
 
 /** island 후보 SDF collider의 접촉 시점 volume 스냅샷. 런타임 복합 단면 계산이 추가 샘플링 없이 쓴다. */
-struct FRopeWrapIslandDebugMember
+struct FRopeWrapIslandMember
 {
 	FName Bone = NAME_None;
 	FBox WorldBounds = FBox(EForceInit::ForceInit);
@@ -131,7 +131,7 @@ struct FRopeWrapIslandDebugMember
 };
 
 /** island 생성 중 이미 계산한 두 표면 projection과 길이 판정값의 스냅샷. */
-struct FRopeWrapIslandDebugPortal
+struct FRopeWrapIslandPortal
 {
 	FName BoneA = NAME_None;
 	FName BoneB = NAME_None;
@@ -244,8 +244,8 @@ struct FRopeWrappingState
 
 	/** 접촉 시 실제 island 판정에서 나온 스냅샷. member는 런타임 복합 단면 계산에, portal은 실패 진단에
 	 *  사용하며 별도 경로/SDF를 만들지 않는다. */
-	TArray<FRopeWrapIslandDebugMember> PathWrapIslandDebugMembers;
-	TArray<FRopeWrapIslandDebugPortal> PathWrapIslandDebugPortals;
+	TArray<FRopeWrapIslandMember> PathWrapIslandMembers;
+	TArray<FRopeWrapIslandPortal> PathWrapIslandPortals;
 
 	/** 복합 island 구성 시 계산한 미고정 로프의 가용 여유 길이(cm). 디버그/portal 판정 재현용. */
 	float PathAvailableSlack = 0.0f;

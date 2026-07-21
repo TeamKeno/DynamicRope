@@ -335,7 +335,7 @@ bool URopeComponent::ResolvePreparedPierceHitPoint(const FRopePreparedThrowPrevi
 
 void URopeComponent::ApplyPierceSocketTargetsToPrepared(FRopePreparedThrowPreview& InOutPrepared) const
 {
-	if (TipEngagement != ERopeTipEngagement::Pierce || !InOutPrepared.RenderPreview.IsValid())
+	if (ResolveMode != ERopeWrapResolveMode::GuaranteedWrap || !InOutPrepared.RenderPreview.IsValid())
 	{
 		return;
 	}

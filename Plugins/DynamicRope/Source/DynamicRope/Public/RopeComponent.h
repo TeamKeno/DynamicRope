@@ -82,22 +82,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
-	// 도달 모드와 조합이 제약된다(①②=BareWrap 전용, ③=Pierce/Cinch 전용). 무효 조합은 에디터 편집
-	// 시와 던지기 진입 시 자동 보정된다 — 모드가 정본(RopeWrapModes::ClampEngagement).
-
-	/** 결착 모델 — 팁이 닿는 순간 무엇이 성립하는가. 도달 모드와 조합이 제약된다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
-	ERopeTipEngagement TipEngagement = ERopeTipEngagement::BareWrap;
-
 	//~ Tip(팁 부착물 — 창날/작살/추) ----------------------------------------
 	// 밧줄 자유단(GetNodeCount()-1)에 붙는 표시 전용 StaticMesh. 질량·충돌 없음(팁 질량 솔버 반영
 	// 안 함 — 2026-07-14 확정). **결착 모델 무관 공통 기능**이다(2026-07-17): bUseTipMesh 하나로
 	// 켜고, 수명은 전 모드 BeginPlay~EndPlay로 통일한다 — (우리가 스폰한 경우만) EndPlay에 파괴하고,
 	// 외부(태그로 찾은) 컴포넌트는 파괴하지 않는다.
-	// 예외는 소켓 보정(bUseTipMeshSockets) 하나 — Head를 꽂힘 지점에 맞춘다는 개념이 Pierce에만 있다.
+	// 예외는 소켓 보정(bUseTipMeshSockets) 하나 — Head를 꽂힘 지점에 맞춘다는 개념이 ③에만 있다.
 	// 활성 조건의 단일 소스는 IsTipSocketPlacementActive()이고, 존재 확인/읽기는 HasTipSocket/ReadTipSocketLocal이 맡는다.
 	//
-	// 폴백(소켓 보정이 꺼졌거나 비-Pierce거나 Head 소켓이 없을 때): 메쉬 원점이 로프 끝 노드에, X축이
+	// 폴백(소켓 보정이 꺼졌거나 ③이 아니거나 Head 소켓이 없을 때): 메쉬 원점이 로프 끝 노드에, X축이
 	// 마지막 세그먼트 방향에 놓인다 — 팁이 대상에 파묻혀도 보정하지 않는다(의도된 무보정). Wrapped에서도
 	// 끝 노드가 bone-local 앵커라 애니메이션은 계속 따라가고, 회전만 얼린 자세가 아닌 세그먼트 유도가 된다.
 	// Head만 있고 Tail이 없으면 로프는 메쉬 원점에 연결된다.
@@ -134,21 +127,21 @@ public:
 	FName ReelHandSocket = NAME_None;
 
 	// 켬 = Tail이 로프 끝에, Head가 꽂힘 지점에 오도록 메쉬 원점을 역산하고 그 자세를 bone-local로 얼려
-	// 대상 애니메이션을 따라간다. 끔 = 소켓을 일절 읽지 않는다(위 폴백). BareWrap/Cinch에는 무의미.
+	// 대상 애니메이션을 따라간다. 끔 = 소켓을 일절 읽지 않는다(위 폴백). ①②에는 무의미.
 
-	/** Pierce 전용 — Head/Tail 소켓으로 팁을 정밀 배치한다. 끄면 메쉬 원점이 로프 끝에 놓인다. */
+	/** ③(Guaranteed) 전용 — Head/Tail 소켓으로 팁을 정밀 배치한다. 끄면 메쉬 원점이 로프 끝에 놓인다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
-		meta = (EditCondition = "bUseTipMesh && TipEngagement == ERopeTipEngagement::Pierce"))
+		meta = (EditCondition = "bUseTipMesh && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
 	bool bUseTipMeshSockets = false;
 
 	/** Head 소켓 — 팁의 뾰족한 끝. 이 소켓이 조준 히트점에 박힌다. 없으면 위 보정 비활성. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
-		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && TipEngagement == ERopeTipEngagement::Pierce"))
+		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
 	FName TipSocketName = NAME_None;
 
 	/** Tail 소켓 — 로프 자유단이 연결될 지점. 없으면 메쉬 원점에 연결. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
-		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && TipEngagement == ERopeTipEngagement::Pierce"))
+		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
 	FName TipRopeSocketName = NAME_None;
 
 	// 아래 초기화 전용 값들(NumParticles/RopeLength/MinRopeLength)은 InitRope 시점에만 소비된다 —
@@ -291,7 +284,7 @@ public:
 	 * 프리셋(URopePreset) 통째 적용 — 값 복사(스탬프) 후 로프를 재초기화한다. **Free/Reel에서만**
 	 * 성립하고 그 외 페이즈(날아가거나 감고 있는 중)는 false를 반환하며 아무것도 바꾸지 않는다.
 	 * 적용 시: Sim 재시드(InitRope) + 렌더/MID 재구성 + 팁 재확보 + 모드-페이즈 정합(③이면 Reel
-	 * 진입, Reel이었는데 ①②가 되면 Free 복귀). 무효 모드 조합은 ClampEngagement로 보정된다.
+	 * 진입, Reel이었는데 ①②가 되면 Free 복귀).
 	 * TipMeshComponentTag 등 인스턴스 배선 값은 프리셋 밖이라 유지된다 — 태그로 잡은 외부 팁을
 	 * bUseTipMesh=false 프리셋이 숨겨 주지는 않는다(인스턴스 책임). 리플리케이션 없음(로컬 스탬프).
 	 */
@@ -760,9 +753,6 @@ private:
 	// 우리가 스폰했는가 — EndPlay에서 스폰분만 파괴하기 위한 소유권 플래그(외부 컴포넌트 보호).
 	bool bTipMeshSpawnedByUs = false;
 
-	// 미구현 결착(Cinch) 경고를 로프당 1회만 남기기 위한 래치(연사 시 로그 홍수 방지).
-	bool bWarnedCinchUnimplemented = false;
-
 	// 태그로 재사용한 팁 StaticMeshComponent의 기존 월드 스케일. SetWorldTransform으로 덮어도 비주얼 크기를 보존한다.
 	FVector TipMeshAuthoredScale = FVector::OneVector;
 
@@ -779,12 +769,12 @@ private:
 	void UpdateTipMeshTransform();
 
 	//~ Pierce 임베드(소켓 기반) 헬퍼 -------------------------------------------
-	// 소켓 배치 활성 조건의 **단일 소스** = 팁 사용 + 소켓 옵트인 + Pierce 결착. Head를 꽂힘 지점에
-	// 맞춘다는 개념이 Pierce에만 있으므로, BareWrap/Cinch는 소켓 이름이 채워져 있어도 읽지 않는다
+	// 소켓 배치 활성 조건의 **단일 소스** = 팁 사용 + 소켓 옵트인 + ③(Guaranteed). Head를 꽂힘 지점에
+	// 맞춘다는 개념이 ③에만 있으므로, ①②는 소켓 이름이 채워져 있어도 읽지 않는다
 	// (세그먼트 추종으로 통일). HasTipSocket이 이 술어를 태우므로 소켓 경로 전체가 함께 꺼진다.
 	bool IsTipSocketPlacementActive() const
 	{
-		return bUseTipMesh && bUseTipMeshSockets && TipEngagement == ERopeTipEngagement::Pierce;
+		return bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap;
 	}
 	// 팁 StaticMesh의 소켓을 컴포넌트-로컬 트랜스폼으로 읽는다. 소켓 배치가 비활성이거나 소켓이 없으면
 	// false(호출부가 폴백) — 소켓 읽기의 유일한 관문이다.

@@ -23,33 +23,6 @@ namespace
 	}
 }
 
-// 조합 제약: ①② = BareWrap 전용, ③ = Pierce/Cinch 전용(무효 조합은 모드 기본으로 보정, ③→Pierce).
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceClampEngagementTest,
-	"DynamicRope.Pierce.ClampEngagementContract",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopePierceClampEngagementTest::RunTest(const FString& Parameters)
-{
-	using namespace RopeWrapModes;
-
-	// ③ GuaranteedWrap = Pierce/Cinch만 허용, BareWrap은 Pierce로 보정.
-	TestFalse(TEXT("③+BareWrap 불가"), IsEngagementAllowed(ERopeWrapResolveMode::GuaranteedWrap, ERopeTipEngagement::BareWrap));
-	TestTrue(TEXT("③+Pierce 허용"), IsEngagementAllowed(ERopeWrapResolveMode::GuaranteedWrap, ERopeTipEngagement::Pierce));
-	TestTrue(TEXT("③+Cinch 허용"), IsEngagementAllowed(ERopeWrapResolveMode::GuaranteedWrap, ERopeTipEngagement::Cinch));
-	TestEqual(TEXT("③+BareWrap → Pierce로 보정"),
-		ClampEngagement(ERopeWrapResolveMode::GuaranteedWrap, ERopeTipEngagement::BareWrap), ERopeTipEngagement::Pierce);
-	TestEqual(TEXT("③+Pierce 유지"),
-		ClampEngagement(ERopeWrapResolveMode::GuaranteedWrap, ERopeTipEngagement::Pierce), ERopeTipEngagement::Pierce);
-
-	// ①② AssistedJudged/FullSimulation = BareWrap만, Pierce는 BareWrap으로 보정.
-	TestFalse(TEXT("②+Pierce 불가"), IsEngagementAllowed(ERopeWrapResolveMode::AssistedJudged, ERopeTipEngagement::Pierce));
-	TestEqual(TEXT("②+Pierce → BareWrap으로 보정"),
-		ClampEngagement(ERopeWrapResolveMode::AssistedJudged, ERopeTipEngagement::Pierce), ERopeTipEngagement::BareWrap);
-	TestEqual(TEXT("①+Cinch → BareWrap으로 보정"),
-		ClampEngagement(ERopeWrapResolveMode::FullSimulation, ERopeTipEngagement::Cinch), ERopeTipEngagement::BareWrap);
-	return true;
-}
-
 // throw phase 게이트: ③는 Reel에서만 던질 수 있고, ①②는 phase 게이트가 없다.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceThrowPhaseGateTest,
 	"DynamicRope.Pierce.ThrowPhaseGateContract",
@@ -106,7 +79,7 @@ bool FRopePierceSingleAnchorPreviewTest::RunTest(const FString& Parameters)
 	Input.RopeLength = 140.0f;
 	Input.ReachScale = 1.0f;
 	Input.RopeRadius = 2.0f;
-	Input.TipEngagement = ERopeTipEngagement::Pierce;
+	Input.ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
 	Input.ThrowContext.Origin = FVector::ZeroVector;
 	Input.ThrowContext.FrameForward = FVector(1, 0, 0);
 	Input.ThrowContext.FrameUp = FVector(0, 0, 1);
@@ -224,7 +197,6 @@ bool FRopePierceGuidedThrowEntryTest::RunTest(const FString& Parameters)
 {
 	URopeComponent* Rope = NewObject<URopeComponent>();
 	Rope->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
-	Rope->TipEngagement = ERopeTipEngagement::Pierce;
 	Rope->RopeLength = 140.0f;
 	Rope->NumParticles = 8;
 
@@ -237,7 +209,7 @@ bool FRopePierceGuidedThrowEntryTest::RunTest(const FString& Parameters)
 	Input.RopeLength = 140.0f;
 	Input.ReachScale = 1.0f;
 	Input.RopeRadius = 2.0f;
-	Input.TipEngagement = ERopeTipEngagement::Pierce;
+	Input.ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
 	Input.ThrowContext.Origin = FVector::ZeroVector;
 	Input.ThrowContext.FrameForward = FVector(1, 0, 0);
 	Input.ThrowContext.FrameUp = FVector(0, 0, 1);
@@ -282,7 +254,7 @@ namespace
 		return FCapsuleCollider(FVector(0, -20, 70), FVector(0, 20, 70), 25.0f, FName("spine"), Mesh);
 	}
 
-	// 조준 성공 케이스와 같은 fixture. 호출자가 bAimRayEvaluated/TipEngagement만 바꿔 갈래를 만든다.
+	// 조준 성공 케이스와 같은 fixture. 호출자가 bAimRayEvaluated/ResolveMode만 바꿔 갈래를 만든다.
 	FRopeThrowPreviewBuilder::FInput MakeArcSearchInput(const FRopeSimState& Sim)
 	{
 		FRopeThrowPreviewBuilder::FInput Input;
@@ -315,7 +287,7 @@ bool FRopePierceAimMissYieldsNoPreviewTest::RunTest(const FString& Parameters)
 
 	FRopeThrowPreviewBuilder::FInput Input = MakeArcSearchInput(Sim);
 	Input.Colliders = &Colliders;
-	Input.TipEngagement = ERopeTipEngagement::Pierce;
+	Input.ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
 	Input.ThrowContext.bAimRayEvaluated = true; // 조준했고 — 빗나갔다.
 
 	FRopePreparedThrowPreview Prepared;
@@ -343,7 +315,7 @@ bool FRopePierceDirectThrowRequiresAimHitTest::RunTest(const FString& Parameters
 
 	FRopeThrowPreviewBuilder::FInput Input = MakeArcSearchInput(Sim);
 	Input.Colliders = &Colliders;
-	Input.TipEngagement = ERopeTipEngagement::Pierce;
+	Input.ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
 	Input.ThrowContext.bAimRayEvaluated = false; // 조준 흐름 없음(BP 직행/AI).
 
 	FRopePreparedThrowPreview Prepared;
@@ -355,40 +327,14 @@ bool FRopePierceDirectThrowRequiresAimHitTest::RunTest(const FString& Parameters
 	return true;
 }
 
-// 갈래 ③(보존 잠금): 조준 없는 BP 직행 + Cinch(감김)는 arc 재탐색이 **의도된** 대상 선택 수단이다
-// ("이 방향으로 던져 거기 있는 걸 감아라"). 위 두 게이트가 이 경로까지 막으면 안 된다.
-// collider를 비워 arc 탐색 자체의 사유("no frame colliders")로 실패시킨다 — 감김 경로 전체를
-// 세우지 않고도 "게이트에 막힌 게 아니라 탐색까지 도달했다"만 정확히 확인한다.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeCinchDirectThrowStillSearchesArcTest,
-	"DynamicRope.Pierce.DirectCinchStillSearchesArc",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeCinchDirectThrowStillSearchesArcTest::RunTest(const FString& Parameters)
-{
-	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
-	TArray<IRopeCollider*> NoColliders;
-
-	FRopeThrowPreviewBuilder::FInput Input = MakeArcSearchInput(Sim);
-	Input.Colliders = &NoColliders;
-	Input.TipEngagement = ERopeTipEngagement::Cinch;
-	Input.ThrowContext.bAimRayEvaluated = false; // 조준 흐름 없음(BP 직행/AI).
-
-	FRopePreparedThrowPreview Prepared;
-	FString Failure;
-	FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, Prepared, &Failure);
-	TestTrue(FString::Printf(TEXT("BP 직행 Cinch는 arc 탐색까지 도달해야 한다(게이트 아님): %s"), *Failure),
-		Failure.Contains(TEXT("free search")));
-	return true;
-}
-
 // arc 탐색이 aim과 같은 wrap 대상 기준을 쓰는가. 종전에는 arc 탐색이 Bone/SourceMesh만 보고
 // CanWrapTarget을 몰라서, aim이 금지한 대상을 preview가 주웠다("보이는데 던지면 거부됨").
 // 게이트는 주입식이라(FInput.CanWrapTarget) 월드/서브클래스 없이 람다로 계약을 잠글 수 있다.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeCinchArcSearchHonorsWrapGateTest,
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeArcSearchHonorsWrapGateTest,
 	"DynamicRope.Pierce.ArcSearchHonorsWrapGate",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FRopeCinchArcSearchHonorsWrapGateTest::RunTest(const FString& Parameters)
+bool FRopeArcSearchHonorsWrapGateTest::RunTest(const FString& Parameters)
 {
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	USkeletalMeshComponent* Mesh = MakePierceMockMesh();
@@ -398,7 +344,6 @@ bool FRopeCinchArcSearchHonorsWrapGateTest::RunTest(const FString& Parameters)
 	// 먼저 게이트 없이: arc 탐색이 이 대상을 실제로 줍는다는 것부터 확인한다(아래 대조군의 전제).
 	FRopeThrowPreviewBuilder::FInput Allowed = MakeArcSearchInput(Sim);
 	Allowed.Colliders = &Colliders;
-	Allowed.TipEngagement = ERopeTipEngagement::Cinch;
 	FRopePreparedThrowPreview AllowedPrepared;
 	FString AllowedFailure;
 	const bool bAllowedBuilt = FRopeThrowPreviewBuilder::BuildFreePreparedPreview(
@@ -409,7 +354,6 @@ bool FRopeCinchArcSearchHonorsWrapGateTest::RunTest(const FString& Parameters)
 	// 같은 대상 + 거부 게이트 → 후보에서 빠져야 한다. 위 전제가 성립하므로 이 false는 게이트 때문이다.
 	FRopeThrowPreviewBuilder::FInput Denied = MakeArcSearchInput(Sim);
 	Denied.Colliders = &Colliders;
-	Denied.TipEngagement = ERopeTipEngagement::Cinch;
 	int32 GateCalls = 0;
 	Denied.CanWrapTarget = [&GateCalls](const USceneComponent*, FName) { ++GateCalls; return false; };
 
