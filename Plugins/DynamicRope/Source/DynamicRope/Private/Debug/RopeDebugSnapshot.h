@@ -134,6 +134,14 @@ struct FRopeDebugSnapshot
 	// 섞으면 같은 노드가 두 시점에 겹쳐 그려져 시뮬 떨림처럼 보인다.
 	// (주의: GPU 경로에서는 Sim.Positions 자체가 리드백 미러라 1~2프레임 지연된다. 여기서 맞추는 것은
 	//  디버거 내부의 일관성이지, 실제 GPU 버퍼로 그려지는 튜브와의 일치가 아니다.)
+	// 정체성 — 로프가 여럿일 때 화면의 어느 줄이 어느 컴포넌트인지 가리는 유일한 수단(구 `Rope #N`
+	// 인덱스는 수집 순서라 프레임마다 바뀔 수 있다). 소유 액터까지 내는 이유는 cross-actor 감김에서
+	// "어느 캐릭터의 로프인가"가 인덱스로는 드러나지 않기 때문.
+	FString ComponentName;
+	FString OwnerActorName;
+	// 도달 모드. 모드마다 성립 계약과 유효한 설정이 통째로 달라, 화면의 나머지를 해석하는 전제다.
+	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+
 	FName WrapBoneName = NAME_None;
 	bool  bSleeping = false;
 	float LodScale = 1.0f;
@@ -177,8 +185,6 @@ struct FRopeDebugSnapshot
 	float WrapTension = 0.0f;
 	// 임계 장력(0=비활성) — 표시용
 	float TensionReleaseForce = 0.0f;
-	// 이 로프의 도달 모드 — 자동 해제 문구에 함께 낸다.
-	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 	// 장력/거리 자동 해제가 실제로 동작하는가. GuaranteedWrap은 CheckWrappedAutoRelease가 조기 반환해
 	// 임계치를 보지 않는다(보장 계약은 해제에도 대칭이라 명시 해제만 유효).
 	bool bAutoReleaseEnabled = true;

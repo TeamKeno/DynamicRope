@@ -261,7 +261,7 @@ void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AAc
 
 		// phase/centerline 등 상시 정보는 라이브에서, 진단 오버레이는 스냅샷(있으면)에서.
 		const FRopeDebugSnapshot* Snap = Dbg ? Dbg->GetSnapshot(Rope) : nullptr;
-		DrawRope(Count, *Rope, Snap);
+		DrawRope(*Rope, Snap);
 	}
 
 	if (Count == 0)
@@ -355,7 +355,7 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 	}
 }
 
-void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent& Rope, const FRopeDebugSnapshot* Snap)
+void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const FRopeDebugSnapshot* Snap)
 {
 	// 화면 한 장은 하나의 시간 기준만 쓴다 — 스냅샷이 있으면 헤더·centerline·오버레이가 모두 그 스냅샷을
 	// 읽는다. 헤더만 라이브로 두면 같은 노드가 두 시점에 겹쳐 그려져 시뮬 떨림/latch 불안정처럼 보인다.
@@ -380,10 +380,18 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			: FString())
 		: FString(TEXT("  {grey}(live — diag pending)"));
 
+	// 정체성: 컴포넌트 이름 + 소유 액터. 인덱스는 수집 순서라 프레임마다 바뀔 수 있어 로프를 특정하지
+	// 못한다. 스냅샷이 없는 첫 프레임에는 라이브 컴포넌트에서 같은 값을 읽는다.
+	const FString NameText = Snap ? Snap->ComponentName : Rope.GetName();
+	const AActor* LiveOwner = Rope.GetOwner();
+	const FString OwnerText = Snap ? Snap->OwnerActorName : (LiveOwner ? LiveOwner->GetName() : TEXT("None"));
+
 	// 스케일링 상태: 슬립(솔브 스킵) 여부 + 거리 LOD iteration 배율(1 미만이면 감쇠 중).
+	// 모드는 상시 표기다 — 모드마다 성립 계약과 유효한 설정이 통째로 달라 나머지 줄의 해석 전제가 된다.
 	AddTextLine(FString::Printf(
-		TEXT("{yellow}Rope #%d{white} phase=%s nodes=%d wrapBone=%s%s%s%s"),
-		Index, *PhaseText, Points.Num(),
+		TEXT("{yellow}%s{grey}@%s{white} phase=%s mode=%s nodes=%d wrapBone=%s%s%s%s"),
+		*NameText, *OwnerText, *PhaseText,
+		DebugResolveModeName(Snap ? Snap->ResolveMode : Rope.ResolveMode), Points.Num(),
 		Bone.IsNone() ? TEXT("-") : *Bone.ToString(),
 		bSleeping ? TEXT("  {cyan}asleep") : TEXT(""),
 		LODScale < 0.999f ? *FString::Printf(TEXT("  {cyan}lod=x%.2f"), LODScale) : TEXT(""),

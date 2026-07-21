@@ -150,6 +150,11 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugC
 	Snapshot.PhaseAtFrameStart = DebugPhaseAtFrameStart;
 	Snapshot.Positions = Sim.Positions;
 
+	// 정체성과 모드는 어느 보기를 켜든 헤더가 낸다 — 질의가 아니라 이름 복사라 게이트를 두지 않는다.
+	Snapshot.ComponentName = GetName();
+	Snapshot.OwnerActorName = GetOwner() ? GetOwner()->GetName() : TEXT("None");
+	Snapshot.ResolveMode = ResolveMode;
+
 	// 헤더 표시용 프레임 상태 — 화면이 라이브 대신 여기서 읽어 한 시간 기준을 유지한다.
 	// wrapBone은 Wrapped 전용 블록과 달리 phase 무관하게 담는다(헤더가 항상 낸다).
 	Snapshot.WrapBoneName = WrapController.State.BoneName;
@@ -186,7 +191,6 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugC
 		Snapshot.TensionReleaseForce = HoldConfig.TensionReleaseForce;
 		// 자동 해제의 실효 여부 — 임계치 값과는 별개다. 판정식을 여기 한 곳에만 두고 화면은 이 불리언만
 		// 읽어, CheckWrappedAutoRelease의 모드 게이트와 표시가 갈라지지 않게 한다.
-		Snapshot.ResolveMode = ResolveMode;
 		Snapshot.bAutoReleaseEnabled = (ResolveMode != ERopeWrapResolveMode::GuaranteedWrap);
 		Snapshot.TensionOverTime = TensionOverTime;
 		Snapshot.TensionReleaseTime = HoldConfig.TensionReleaseTime;
