@@ -731,22 +731,6 @@ FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint
 	return R->PosSRV.GetReference();
 }
 
-FRDGBufferRef FRopeGPUSolver::RegisterResidentPos_RenderThread(FRDGBuilder& GraphBuilder, uint32 RopeId, int32& OutNumNodes)
-{
-	check(IsInRenderingThread());
-	OutNumNodes = 0;
-
-	FRopeResidentRope* R = Impl->RtRopes.Find(RopeId);
-	if (!R || !R->PosBuf.IsValid())
-	{
-		return nullptr;
-	}
-	OutNumNodes = R->NumNodes;
-	// 같은 그래프에서 DispatchPending의 solve 패스가 이 PosBuf를 UAV로 등록했으면 RDG가 dedup해 동일 노드를
-	// 돌려주고 solve→tube 의존성을 자동으로 건다.
-	return GraphBuilder.RegisterExternalBuffer(R->PosBuf);
-}
-
 // Phase 2c: GDF 셰이더 파라미터 구성. 엔진 SetupGlobalDistanceFieldParameters(전체)는 RENDERER_API가 아니라
 // 링크 불가 → inline _Minimal을 쓰고 그것이 빠뜨리는 CoverageAtlas 텍스처 + 샘플러 3개를 직접 보강한다.
 // GDF가 null/클립맵 0이면 검은 볼륨 텍스처를 바인딩하고 OutValid=0(셰이더가 GDF 블록을 건너뛴다).
