@@ -25,7 +25,6 @@
 #include "Logic/RopeFlightContactDetector.h"
 #include "RopeTestHelpers.h"
 #include "RHI.h"
-#include "RHIGPUReadback.h"
 // BlockUntilGPUIdle
 #include "RHICommandList.h"
 // FlushRenderingCommands

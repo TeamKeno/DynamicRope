@@ -4,7 +4,6 @@
 #include "DynamicRopeLog.h"
 #include "RopeComponent.h"
 #include "Gameplay/RopeRagdollResponseComponent.h"
-#include "Gameplay/RopeWielderComponent.h"
 #include "Subsystem/RopeSimSubsystem.h"
 
 #include "Components/BoxComponent.h"
