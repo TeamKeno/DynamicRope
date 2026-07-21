@@ -30,7 +30,7 @@
 // FTimerHandle(자동 전환 지연) 멤버.
 #include "Engine/TimerHandle.h"
 // ERopeReleaseReason / FRopeWrappedEventInfo — 중앙 신호 페이로드.
-#include "Core/RopeTypes.h"
+#include "Core/RopeLifecycleTypes.h"
 // EMovementMode — 랙돌 진입 전 무브먼트 모드 저장 멤버.
 #include "Engine/EngineTypes.h"
 #include "RopeRagdollResponseComponent.generated.h"
