@@ -7,7 +7,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeSimTypes.h"
 #include "Collision/RopeCollider.h"
 
 namespace RopeTest

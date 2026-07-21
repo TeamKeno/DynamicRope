@@ -6,7 +6,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Core/RopeTypes.h"
+#include "Core/RopeContactTrackingTypes.h"
 #include "Components/SceneComponent.h"
 
 // 트래커가 (Mesh, Bone) 쌍으로 집계하는가: 같은 본 이름을 쓰는 두 액터(mesh)가 한 프레임에 함께 닿아도
