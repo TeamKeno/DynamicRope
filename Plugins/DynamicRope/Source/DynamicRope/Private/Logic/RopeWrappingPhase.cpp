@@ -1796,6 +1796,11 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 	}
 
 	const float StepSize = FMath::Max(1.0f, Sim.SegmentLength * 0.5f);
+	// Composite probe와 같은 전체 시도 상한을 둔다. PathSweepDistance는 projection이 제자리여도
+	// 매 integration step마다 StepSize만큼 증가하므로 별도 persistent counter 없이 무한 정체를 막는다.
+	const int32 MaxIntegrationStepCount = FMath::Max(32, State.NumTailNodes * 16);
+	const float MaxIntegrationSweepDistance =
+		StepSize * static_cast<float>(MaxIntegrationStepCount);
 	int32 StepsRemaining = FMath::Max(1, StepBudget);
 
 	// 현재 축 기준 radial(축에서 점으로 향하는 단위벡터). 스텝 전/후 radial 사이 각도가 그 스텝의
@@ -1807,7 +1812,9 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 		return OutRadial.Normalize(KINDA_SMALL_NUMBER);
 	};
 
-	while (StepsRemaining > 0 && State.Path.Num() < State.NumTailNodes)
+	while (StepsRemaining > 0 &&
+		State.Path.Num() < State.NumTailNodes &&
+		State.PathSweepDistance + KINDA_SMALL_NUMBER < MaxIntegrationSweepDistance)
 	{
 		const int32 PathIndex = State.Path.Num();
 		bool bConsumedStep = false;
@@ -2110,7 +2117,16 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 					// 브리지에서 출발하거나 이번 step이 브리지면 보간점도 허공 chord로 취급한다.
 					Point.bBridge = bPreviousPointWasBridge || !bOnSurface;
 					State.Path.Add(Point);
-					AppendWrappingAnchorFromPathPoint(SamplePathIndex, Sim, Ctx);
+					if (!AppendWrappingAnchorFromPathPoint(SamplePathIndex, Sim, Ctx))
+					{
+						// Path와 anchor 처리를 하나의 원자적 append로 취급한다. 현재 점 또는 같은
+						// integration segment에서 아직 처리하지 못한 뒤쪽 점을 남기면 이후 resolve가
+						// 저장 당시 월드 위치를 정상 anchor처럼 사용할 수 있으므로 모두 제거한다.
+						State.Path.SetNum(FMath::Clamp(
+							State.LastAnchoredPathPointCount, 0, State.Path.Num()));
+						FinishPathBuild(/*bFailed=*/true, TEXT("SequentialAnchorBuildFailed"));
+						return false;
+					}
 				}
 			}
 
@@ -2153,6 +2169,11 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 	if (State.Path.Num() >= State.NumTailNodes)
 	{
 		FinishPathBuild(/*bFailed=*/false);
+	}
+	else if (State.bPathBuildActive &&
+		State.PathSweepDistance + KINDA_SMALL_NUMBER >= MaxIntegrationSweepDistance)
+	{
+		FinishPathBuild(/*bFailed=*/true, TEXT("SequentialIntegrationStepLimitExceeded"));
 	}
 	if (State.bPathBuildComplete)
 	{

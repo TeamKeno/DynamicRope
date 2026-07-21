@@ -67,6 +67,88 @@ bool FRopeWrappingInitializationFailureStateTest::RunTest(const FString& Paramet
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingSequentialPathBuildGuardsTest,
+	"DynamicRope.Wrapping.SequentialPathBuildGuards",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingSequentialPathBuildGuardsTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* Mesh = MakeMockTarget();
+	FCapsuleCollider Capsule(
+		FVector(0, 0, -50), FVector(0, 0, 50), 25.0f, FName("arm"), Mesh);
+	TArray<IRopeCollider*> Colliders = { &Capsule };
+	FRopeSimState Sim = RopeTest::MakeStraightRope(
+		9, 160.0f, FVector(25, 0, 0), FVector(0, 1, 0));
+
+	FRopeSurfaceAnchor Latch;
+	Latch.NodeIndex = 0;
+	Latch.Bone = FName("arm");
+	Latch.Mesh = Mesh;
+	Latch.LocalSurfacePosition = FVector(25, 0, 0);
+	Latch.LocalNormal = FVector(1, 0, 0);
+	Latch.LocalTangent = FVector(0, 1, 0);
+	Latch.StartWorldPosition = FVector(25, 0, 0);
+	Latch.SurfaceOffset = 1.0f;
+
+	const FRopeWrapConfig Config = MakeTestWrapConfig();
+	const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
+		/*SurfaceOffset*/ 1.0f, TEXT("SequentialPathBuildGuardsTest"), true,
+		/*bHasGuidePlaneNormal*/ true, /*GuidePlaneNormal*/ FVector::ZAxisVector };
+
+	FRopeWrappingPhase AnchorFailureWrapping;
+	TestTrue(TEXT("anchor failure fixture begins"),
+		AnchorFailureWrapping.Begin(Latch, 0.16f, Sim, Ctx));
+	TestFalse(TEXT("fixture uses the sequential path"),
+		AnchorFailureWrapping.State.bPathUsesPoseSpaceIsland);
+
+	// Shrinking the simulation after Begin makes the next sampled path point lack a valid
+	// rope node. The failed append must leave only the previously processed path/anchor pair.
+	FRopeSimState TruncatedSim = Sim;
+	TruncatedSim.Positions.SetNum(1);
+	TruncatedSim.PrevPositions.SetNum(1);
+	TruncatedSim.InvMass.SetNum(1);
+	for (int32 Iteration = 0;
+		Iteration < 64 && AnchorFailureWrapping.State.bPathBuildActive;
+		++Iteration)
+	{
+		AnchorFailureWrapping.AdvancePathBuild(TruncatedSim, Ctx);
+	}
+
+	TestFalse(TEXT("anchor failure terminates the path build"),
+		AnchorFailureWrapping.State.bPathBuildActive);
+	TestTrue(TEXT("anchor failure records a failed build"),
+		AnchorFailureWrapping.State.bPathBuildFailed);
+	TestEqual(TEXT("anchor failure records its reason"),
+		AnchorFailureWrapping.State.PathBuildFailureReason,
+		FString(TEXT("SequentialAnchorBuildFailed")));
+	TestEqual(TEXT("unprocessed path points are rolled back"),
+		AnchorFailureWrapping.State.Path.Num(), 1);
+	TestEqual(TEXT("the previous anchor remains valid"),
+		AnchorFailureWrapping.State.Anchors.Num(), 1);
+	TestEqual(TEXT("processed path count matches the retained path"),
+		AnchorFailureWrapping.State.LastAnchoredPathPointCount,
+		AnchorFailureWrapping.State.Path.Num());
+
+	FRopeWrappingPhase StepLimitWrapping;
+	TestTrue(TEXT("step limit fixture begins"),
+		StepLimitWrapping.Begin(Latch, 0.16f, Sim, Ctx));
+	const float StepSize = FMath::Max(1.0f, Sim.SegmentLength * 0.5f);
+	const int32 MaxIntegrationStepCount =
+		FMath::Max(32, StepLimitWrapping.State.NumTailNodes * 16);
+	StepLimitWrapping.State.PathSweepDistance =
+		StepSize * static_cast<float>(MaxIntegrationStepCount);
+	StepLimitWrapping.AdvancePathBuild(Sim, Ctx);
+
+	TestFalse(TEXT("integration limit terminates the path build"),
+		StepLimitWrapping.State.bPathBuildActive);
+	TestTrue(TEXT("integration limit records a failed build"),
+		StepLimitWrapping.State.bPathBuildFailed);
+	TestEqual(TEXT("integration limit records its reason"),
+		StepLimitWrapping.State.PathBuildFailureReason,
+		FString(TEXT("SequentialIntegrationStepLimitExceeded")));
+	return true;
+}
+
 // SurfaceVectorField 경로 빌드가 캡슐(원기둥) 주위를 완주하고, 앵커가 표면 위에 놓이며, 빌드 중
 // 적분한 누적 감싼 각도가 단일 축 helix 공식과 일치하는가 — rolling axis(본 전환 시 축 재해석)
 // 도입 후에도 단일 본(전환 없음) 결과가 기존 공식과 동치임을 고정하는 회귀 계약.
