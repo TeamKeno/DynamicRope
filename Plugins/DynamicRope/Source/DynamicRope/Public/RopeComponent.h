@@ -466,7 +466,7 @@ public:
 	}
 
 	/**
-	 * (BinaryPullable 테더 모드) 끌림 가능 판정 — 순수 함수(UObject 무의존, 유닛 테스트 가능).
+	 * 끌림 가능 판정(능동 Pull climb-in 방향의 정본) — 순수 함수(UObject 무의존, 유닛 테스트 가능).
 	 * 대상 유효질량 EffMassTarget ≤ wielder 유효질량 EffMassWielder이면 "끌림 가능". bPrev(직전 sticky
 	 * 판정)에서 뒤집으려면 반대편 질량이 MarginRatio(≥1)배만큼 더 커야 한다(경계 flapping 방지).
 	 * 무한질량(앵커)은 +BIG_NUMBER로 넘긴다(무한 대상 = 끌림 불가, 무한 wielder = 대상 끌림 가능).
@@ -729,8 +729,8 @@ protected:
 	 * 임펄스·속도를 꽂아, ApplyPullForce를 오버라이드해도 테더가 그대로 밀어붙이는 상태였다.
 	 *
 	 * Request.Amount의 단위는 Request.Source마다 다르다(FRopeTractionRequest 주석 참고).
-	 * true를 반환해도 로프 내부 장부(슬랙 브레이크의 TowedVelDebt 등)는 동일하게 갱신된다 —
-	 * 서브클래스가 처리 여부를 바꿔도 로프 상태가 갈라지지 않게 하기 위함이다.
+	 * true를 반환해도 로프 내부 관측/상태 갱신은 동일하게 일어난다 — 서브클래스가 처리 여부를 바꿔도
+	 * 로프 상태가 갈라지지 않게 하기 위함이다.
 	 */
 	virtual bool ApplyTractionToReceiver(const FRopeTractionRequest& Request) { return false; }
 
@@ -923,11 +923,8 @@ private:
 	// LOD 반영된 유효 iteration(CPU 솔브/GPU 스텝 공용 — 서브시스템이 호출).
 	int32 GetLODScaledIterations() const { return Throttle.LODScaledIterations(SolverConfig.Iterations); }
 
-	// 동작 1 — 자동 견인(테더): 가용 로프 길이 초과분을 위치/속도 동기로 회수(수렴, 폭주 없음).
-	void UpdateTether(float DeltaTime);
-
-	// (Constraint 테더 모드 — Docs/PoC/05) 관측(전 체인 C·벌어짐 속도)→λ 솔브→양끝 임펄스 쌍 인가.
-	// UpdateTether가 모드 분기로 위임한다. λ/장력 관측치는 PullDrive.LastTetherLambda(+Dt)에 남는다.
+	// 동작 1 — 자동 견인(테더, Docs/PoC/05): 관측(전 체인 C·벌어짐 속도)→λ 솔브→양끝 임펄스 쌍 인가.
+	// ApplyWrappedTraction이 매 Wrapped 프레임 호출한다. λ/장력 관측치는 PullDrive.LastTetherLambda(+Dt).
 	void UpdateConstraintTether(float DeltaTime);
 
 	// (Constraint 테더 — 랙돌 대상 절반) 엔진 물리 제약: 코너의 키네마틱 프록시 ↔ 감긴 본의 앵커 점을
@@ -949,20 +946,18 @@ private:
 	FName PhysicalTetherBone = NAME_None;
 	float PhysicalTetherLimit = -1.0f;
 
-	// (테더 공용) wielder 견인 방향(손(노드0)→로프 첫 다리 = 앵커 쪽)을 산출해 PullDrive.SmoothedWielderPullDir로
-	// EMA 스무딩(PullDirSmoothTime)해 반환. MassShare/BinaryPullable의 wielder 몫이 공유 — 방향 지터로 클램프
-	// 축이 튀는 것을 막는다(180° 반전 축퇴는 raw로 재시드).
+	// (테더) wielder 견인 방향(손(노드0)→로프 첫 다리 = 앵커 쪽)을 산출해 PullDrive.SmoothedWielderPullDir로
+	// EMA 스무딩(PullDirSmoothTime)해 반환 — 방향 지터로 인가 축이 튀는 것을 막는다(180° 반전 축퇴는 raw 재시드).
 	FVector ComputeSmoothedWielderDir(const FVector& Aim, const FVector& DirToAim, float DeltaTime);
 
-	// (BinaryPullable 전용) 이번 Wrapped 프레임의 끌림 가능 판정을 overshoot와 무관하게 갱신한다 —
-	// 테더 회수(UpdateTether)와 능동 Pull 방향(ApplyWrappedTraction)이 PullDrive.bTargetPullable을 공유.
-	// 양끝 유효질량 비교 + TetherPullMassMargin 히스테리시스. LastTargetShare(이진 0/1)도 여기서 채운다.
+	// 이번 Wrapped 프레임의 끌림 가능 판정을 overshoot와 무관하게 갱신한다 — 능동 Pull의 climb-in 방향과
+	// 분배 관측(LastTargetShare 이진값)이 PullDrive.bTargetPullable을 공유. 양끝 유효질량 비교 + 히스테리시스.
 	void UpdateTargetPullable();
 
 	// Wrapped 견인 구간에서 target/wielder를 지연 해석하고 같은 프레임의 판정·테더·기본 Pull이 공유한다.
 	const FRopeResolvedWrappedEndpoints* GetOrResolveWrappedEndpoints();
 
-	// (BinaryPullable + not pullable) 능동 Pull 힘을 wielder(로프 owner)에 인가 — 대상이 무거워
+	// (not pullable) 능동 Pull 힘을 wielder(로프 owner)에 인가 — 대상이 무거워
 	// wielder가 앵커 쪽으로 끌려가는 climb-in. ApplyPullForce의 owner 쪽 미러(시뮬 루트 → CharacterMovement).
 	void ApplyPullForceToWielder(const FVector& Force, float DeltaTime);
 
@@ -1206,7 +1201,7 @@ private:
 	 *  EMA → 방향 EMA). 견인(③)/release 판정(④)/디버거/BP가 공용으로 읽는 입력을 만든다. */
 	void UpdateWrappedPullSample(float DeltaTime);
 
-	/** ③ 견인 인가: 테더(초과분 위치/속도 동기 — TetherTargetShare 분배) + 능동 Pull(팽팽할 때 상수 힘). */
+	/** ③ 견인 인가: 테더(λ 임펄스 제약 + 랙돌 물리 제약) + 능동 Pull(팽팽할 때 상수 힘/climb-in). */
 	void ApplyWrappedTraction(float DeltaTime);
 
 	/** ④ 자동 release 판정: 장력 지속 초과(TensionRelease*) / 거리 초과(DistanceReleaseSlack —

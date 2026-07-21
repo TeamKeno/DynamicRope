@@ -309,7 +309,7 @@ public:
 
 	//~ Movement(테더 견인에 대한 캐릭터 이동 반응) --------------------------
 	// 종전 카테고리명 "Rope|Tension"은 로프 장력 설정과 혼동돼 개명(2026-07-13 표면 감사 C).
-	// HoldConfig.TetherTargetShare < 1이면 로프가 wielder를 앵커 쪽으로 끌어당긴다(수렴형 테더 분배).
+	// 테더의 wielder 몫(λ 역질량비)이 0보다 크면 로프가 wielder를 앵커 쪽으로 끌어당긴다.
 	// 이 섹션은 그 견인의 캐릭터 이동 정책: 물리(플러그인 코어)가 아니라 게임 반응이라 wielder에 둔다.
 
 	/**
@@ -567,7 +567,7 @@ private:
 	UFUNCTION()
 	void HandleRopePresetApplied(const URopePreset* Preset);
 
-	/** wielder가 테더 몫을 실제로 받는 상태인가(Wrapped + TetherResponse>0 + TargetShare<1 + 셀프랩 아님). */
+	/** wielder가 테더 몫을 실제로 받는 상태인가(Wrapped + 유효 대상 몫 < 1 + 셀프랩 아님). */
 	bool IsWielderTetherActive() const;
 
 	/** wielder 몫 테더가 위로 당길 때 walking이면 Falling으로 전환한다(매 틱, GT — 위 Tension 섹션 참고). */

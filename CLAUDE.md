@@ -109,8 +109,8 @@ unit-testable without a world:
   ends, so distribution follows inverse effective mass and neither end can be winched or blown up;
   **ragdoll targets are instead held by an engine physics constraint** (kinematic corner proxy ↔
   wrapped-bone anchor point, spherical distance limit — `UpdatePhysicalTether`, solved by Chaos
-  together with the joints per substep). Legacy per-end-servo modes (`MassShare`/`BinaryPullable`)
-  remain selectable during the transition; their knobs are edit-gated legacy-only. (2) *active pull*
+  together with the joints per substep). The legacy per-end-servo modes and their knobs were removed
+  once Constraint was validated (Docs/PoC/05 §6 step F). (2) *active pull*
   (`URopeComponent::SetActivePull`; `URopeWielderComponent::PullAction` is an **armed toggle** —
   press to arm, engages the moment tension first crosses `PullEngageTension`, playing `PullMontage`
   once if set) — a constant user-set force; if the target is too heavy/anchored the same force pulls

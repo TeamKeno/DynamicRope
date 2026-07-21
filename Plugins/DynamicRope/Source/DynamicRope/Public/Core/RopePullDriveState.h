@@ -39,11 +39,9 @@ struct FRopePullDriveState
 
 	/**
 	 * 앵커(LastPullSample.WorldPoint)의 월드 속도 추정(cm/s, EMA). 매 Wrapped 유효 프레임에 WorldPoint의
-	 * 프레임 간 차분으로 갱신한다. 움직이는 앵커(비행 몬스터 등)에 매달린 wielder 견인의 **피드포워드** 소스 —
-	 * 리엘(overshoot P 제어)은 오차만 닫을 수 있어 순항 중인 앵커를 영영 못 따라잡는다(리엘 상한 < 앵커 속도면
-	 * 초과분만 무한히 쌓임). 이 값의 로프 축 성분을 견인 목표 속도에 더해 앵커와 같은 속도로 순항하게 한다.
-	 * 정지 앵커는 0이라 동작 불변. bPrevAnchorPointValid=false면 미시드(첫 유효 프레임엔 prev만 채운다 —
-	 * 0에서 EMA로 램프업해 wrap 직후 홱 당겨지지 않는다). ResetTransient에서 리셋.
+	 * 프레임 간 차분으로 갱신한다. 디버거/BP 관찰용 관측치 — 레거시 피드포워드 소비는 제거됐다(λ 제약은
+	 * 끝 속도를 실측해 움직이는 앵커를 자동 추종한다). bPrevAnchorPointValid=false면 미시드(첫 유효
+	 * 프레임엔 prev만 채운다). ResetTransient에서 리셋.
 	 */
 	FVector SmoothedAnchorVelocity = FVector::ZeroVector;
 	FVector PrevAnchorPoint = FVector::ZeroVector;
@@ -83,13 +81,8 @@ struct FRopePullDriveState
 	 */
 	bool bChainTaut = false;
 
-	/**
-	 * 테더가 wielder(CMC)에 주입한 속도 변화의 장부(누적 벡터, cm/s). 슬랙 브레이크(TetherSlackBrakeTime)가
-	 * Wrapped 슬랙 프레임에 이 성분만 회수한다 — 주입하지 않은 운동(스윙 접선/에어컨트롤/점프)은 여기 없어
-	 * 보존된다. 지상 복귀 시(마찰이 소화) 청산, 외부 감속으로 실제 속도가 장부보다 작아지면 회수 시 자동
-	 * 탕감(RopeTraction::DecayVelocityDebt). ResetTransient에서 리셋.
-	 */
-	FVector TowedVelDebt = FVector::ZeroVector;
+	// (레거시 서보 시절의 주입 장부(TowedVelDebt)/슬랙 브레이크는 제거됐다 — λ의 위치 회수 항은
+	//  MaxBiasSpeed로 유계라 회수할 과잉 주입 자체가 없다. Docs/PoC/05 §3.5.)
 
 	/** 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용.
 	 *  (Constraint 모드에선 제약 위반 C의 0 클램프 — 산출원만 다르고 의미는 동일하다.) */
@@ -117,22 +110,16 @@ struct FRopePullDriveState
 	//  URopeComponent::UpdatePhysicalTether. GT 임펄스 관측 상태(점 속도 EMA)는 그 전환으로 폐기됐다.)
 
 	/**
-	 * 테더 대상 몫(shareT)의 시간 스무딩 상태(자동 분배). 접지↔공중/질량 변화로 프레임 간 튀는 것을 EMA로
-	 * 흡수한다. <0 = 미초기화(wrap 시작 후 첫 유효 프레임에 측정값으로 시드). ResetTransient에서 -1로 리셋.
-	 */
-	float SmoothedTargetShare = -1.0f;
-
-	/**
-	 * 이번 프레임 실제 사용된 대상 몫(shareT) [0..1] — 자동/수동 공통 최종값. wielder 게이트
-	 * (URopeWielderComponent::IsWielderTetherActive)와 디버거가 읽는다. 1이면 wielder 몫 0(전량 대상).
-	 * BinaryPullable 모드에선 이진값(끌림 가능=1, 불가=0)만 들어간다.
+	 * 이번 프레임 유효 대상 몫(shareT) [0..1] — wielder 게이트(URopeWielderComponent::IsWielderTetherActive)와
+	 * 디버거가 읽는다. 1이면 wielder 몫 0(전량 대상). UpdateTargetPullable이 끌림 판정의 이진값(가능=1,
+	 * 불가=0)으로 채우고, λ가 실제 발화한 프레임엔 UpdateConstraintTether가 역질량비(w_t/w합)로 덮는다.
 	 */
 	float LastTargetShare = 1.0f;
 
 	/**
-	 * (BinaryPullable 전용) 대상을 끌 수 있는가의 sticky 판정 상태 — 대상 유효질량 ≤ wielder 유효질량이면
-	 * true. bTargetPullableInit이 false면 미시드(다음 유효 프레임에 히스테리시스 없이 순수 비교로 시드),
-	 * true면 TetherPullMassMargin 히스테리시스로만 뒤집힌다. ResetTransient에서 미시드로 되돌린다.
+	 * 대상을 끌 수 있는가의 sticky 판정 상태(능동 Pull climb-in 방향의 정본) — 대상 유효질량 ≤ wielder
+	 * 유효질량이면 true. bTargetPullableInit이 false면 미시드(다음 유효 프레임에 히스테리시스 없이 순수
+	 * 비교로 시드), true면 내부 히스테리시스로만 뒤집힌다. ResetTransient에서 미시드로 되돌린다.
 	 */
 	bool bTargetPullable = true;
 	bool bTargetPullableInit = false;
@@ -152,14 +139,12 @@ struct FRopePullDriveState
 		SmoothedPullDir = FVector::ZeroVector;
 		SmoothedWielderPullDir = FVector::ZeroVector;
 		SmoothedAimNodeF = -1.0f;
-		SmoothedTargetShare = -1.0f;
 		SmoothedAnchorVelocity = FVector::ZeroVector;
 		PrevAnchorPoint = FVector::ZeroVector;
 		bPrevAnchorPointValid = false;
 		bTargetPullableInit = false; // 다음 wrap 시작 시 순수 비교로 다시 시드.
 		bPullTaut = false;
 		bChainTaut = false;
-		TowedVelDebt = FVector::ZeroVector;
 		LastTetherLambda = 0.0f;
 		LastTetherLambdaDt = 0.0f;
 		PrevFreeRestLen = 0.0f;

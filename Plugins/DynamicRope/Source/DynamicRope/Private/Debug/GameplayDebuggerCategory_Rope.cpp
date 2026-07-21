@@ -628,25 +628,19 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			// minT=0이면 장력이 손까지 전달되지 않는다는 뜻, sag는 다리별 최대 처짐이다.
 			if (HasView(EView::Advanced))
 			{
-				FString ConstraintInfo;
-				if (S.bConstraintTetherMode)
+				// 테더 장력 T: 상한 대비 색(80%+ 노랑, 도달 빨강 = λ 클램프 중). 상한에 붙는 것 자체는 설계된
+				// 동작이라 별도 경고 문구 없이 색으로만 드러낸다.
+				const TCHAR* TensionColor = TEXT("{cyan}");
+				if (S.MaxTetherTension > 0.0f)
 				{
-					// 상한 대비 색(80%+ 노랑, 도달 빨강 = 클램프 중). 상한에 붙는 것 자체는 설계된 동작이라
-					// 별도 경고 문구 없이 색으로만 드러낸다.
-					const TCHAR* TensionColor = TEXT("{cyan}");
-					if (S.MaxTetherTension > 0.0f)
-					{
-						TensionColor = (S.TetherTension >= S.MaxTetherTension * 0.999f) ? TEXT("{red}")
-							: (S.TetherTension > S.MaxTetherTension * 0.8f) ? TEXT("{yellow}") : TEXT("{cyan}");
-					}
-					ConstraintInfo = FString::Printf(TEXT(" constraint %sT=%.0f{white}/%.0f"),
-						TensionColor, S.TetherTension, S.MaxTetherTension);
+					TensionColor = (S.TetherTension >= S.MaxTetherTension * 0.999f) ? TEXT("{red}")
+						: (S.TetherTension > S.MaxTetherTension * 0.8f) ? TEXT("{yellow}") : TEXT("{cyan}");
 				}
 				AddTextLine(FString::Printf(
-					TEXT("      {grey}chain=%s{grey}(%.0f/%.0fcm, minT=%.0f, sag=%.0f) tetherResponse=x%.2f%s"),
+					TEXT("      {grey}chain=%s{grey}(%.0f/%.0fcm, minT=%.0f, sag=%.0f) tether %sT=%.0f{grey}/%.0f"),
 					S.bChainTaut ? TEXT("{green}Y") : TEXT("{grey}N"),
 					S.TautChordLen, S.FreeRestLen, S.MinFreeTension, S.MaxLegSag,
-					S.TetherResponse, *ConstraintInfo));
+					TensionColor, S.TetherTension, S.MaxTetherTension));
 			}
 		}
 		else

@@ -20,19 +20,6 @@ namespace RopeTraction
 		return (MaxImpulse > 0.0f) ? FMath::Clamp(J, -MaxImpulse, MaxImpulse) : J;
 	}
 
-	float ClampAxisDeltaV(float DeltaV, float MaxAbsDeltaV)
-	{
-		return (MaxAbsDeltaV > 0.0f) ? FMath::Clamp(DeltaV, -MaxAbsDeltaV, MaxAbsDeltaV) : DeltaV;
-	}
-
-	float ComputeReelTargetSpeed(float Overshoot, float ReelSpeed, float TaperDist, float DeltaTime)
-	{
-		const float CloseSpeed = Overshoot / FMath::Max(DeltaTime, 1e-4f); // 이번 프레임에 전량 회수할 속도.
-		const float Taper = FMath::Max(TaperDist, 0.01f);
-		const float Tapered = FMath::Max(ReelSpeed, 0.0f) * FMath::Clamp(Overshoot / Taper, 0.0f, 1.0f);
-		return FMath::Min(Tapered, CloseSpeed);
-	}
-
 	FVector ClampInjectedVelocity(const FVector& NewVel, const FVector& OldVel, float SpeedCap)
 	{
 		if (SpeedCap <= 0.0f)
@@ -74,25 +61,6 @@ namespace RopeTraction
 		return FMath::Lerp(Positions[A0], Positions[A1], AimF - static_cast<float>(A0));
 	}
 
-	float ComputeRawTargetShare(float InvMassTarget, float InvMassWielder, float MassBias)
-	{
-		const float Total = InvMassTarget + InvMassWielder;
-		if (Total <= KINDA_SMALL_NUMBER)
-		{
-			return 0.0f; // 양끝 다 앵커 — 아무도 안 움직인다(호출자가 wielder 몫도 0으로 둔다).
-		}
-		const float Bias = FMath::Max(MassBias, 0.0f);
-		if (FMath::IsNearlyEqual(Bias, 1.0f))
-		{
-			return InvMassTarget / Total; // 선형 역질량: 무거운 쪽 = 작은 w → 작은 몫.
-		}
-		// w=0(앵커)은 지수와 무관하게 0 — Pow(0,0)=1이라 Bias=0에서 앵커가 몫을 받는 것을 막는다.
-		const float PT = (InvMassTarget > 0.0f) ? FMath::Pow(InvMassTarget, Bias) : 0.0f;
-		const float PW = (InvMassWielder > 0.0f) ? FMath::Pow(InvMassWielder, Bias) : 0.0f;
-		const float PTotal = PT + PW;
-		return (PTotal > KINDA_SMALL_NUMBER) ? (PT / PTotal) : 0.0f;
-	}
-
 	bool EvaluateTautGate(float Tension, float Threshold, float ReleaseRatio, bool bWasTaut)
 	{
 		// 진입/유지 임계 분리(히스테리시스). Threshold ≤ 0이면 둘 다 "장력 > ~0"으로 수렴한다(종전 게이트).
@@ -113,27 +81,6 @@ namespace RopeTraction
 		const float Ratio = FMath::Clamp(SlackRatio, 0.0f, 1.0f);
 		const float EffRatio = bWasTaut ? FMath::Min(Ratio * FMath::Max(ReleaseScale, 1.0f), 1.0f) : Ratio;
 		return ChordLen >= RestLen * (1.0f - EffRatio);
-	}
-
-	FVector DecayVelocityDebt(const FVector& Velocity, FVector& InOutDebt, float Alpha)
-	{
-		FVector Dir = InOutDebt;
-		float DebtMag = 0.0f;
-		if (!Dir.Normalize(KINDA_SMALL_NUMBER))
-		{
-			// 장부 ~0 — 무동작(잔여 미세값은 청산).
-			InOutDebt = FVector::ZeroVector;
-			return Velocity;
-		}
-		DebtMag = static_cast<float>(InOutDebt.Size());
-
-		// 자동 탕감: 장부 방향의 실제 속도 성분이 장부보다 작으면(외부 감속이 이미 소화) 그만큼 장부를 줄인다
-		// — 회수는 항상 "실제로 남아 있는 주입분"에서만 이루어진다(역방향 밀어내기 불가).
-		const float Avail = FMath::Max(0.0f, static_cast<float>(FVector::DotProduct(Velocity, Dir)));
-		const float EffDebt = FMath::Min(DebtMag, Avail);
-		const float Remove = EffDebt * FMath::Clamp(Alpha, 0.0f, 1.0f);
-		InOutDebt = Dir * (EffDebt - Remove);
-		return Velocity - Dir * Remove;
 	}
 
 	float SolveTetherLambda(const FRopeTetherConstraint& In, float DeltaTime)

@@ -176,11 +176,9 @@ struct FRopeDebugSnapshot
 	// 앵커 세그먼트 장력
 	float PullTension = 0.0f;
 	// 테더 반응(0=비활성) — 표시용
-	float TetherResponse = 0.0f;
 	// 가용 로프 길이 초과분(cm, 0=팽팽하지 않음)
 	float TetherOvershoot = 0.0f;
-	// Constraint(λ) 테더 모드 여부 + 이번 프레임 테더 장력(λ/dt, kg·cm/s²)과 그 상한 — 디버거 표시용.
-	bool bConstraintTetherMode = false;
+	// 이번 프레임 테더 장력(λ/dt 또는 랙돌 물리 제약 실측력, kg·cm/s²)과 그 상한 — 디버거 표시용.
 	float TetherTension = 0.0f;
 	float MaxTetherTension = 0.0f;
 	// 능동 Pull 힘(0=입력 없음)

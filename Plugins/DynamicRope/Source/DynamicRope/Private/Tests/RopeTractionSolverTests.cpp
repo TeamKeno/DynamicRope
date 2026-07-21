@@ -12,7 +12,7 @@
 
 namespace
 {
-	// 테더 리엘의 대상 서보(양방향 정확 서보) — BinaryPullable pullable 대상 경로.
+	// 양방향 정확 서보(제동 포함) — FRopeAxisServo 시맨틱 검증용.
 	RopeTraction::FRopeAxisServo MakeReelServo(float TargetSpeed)
 	{
 		RopeTraction::FRopeAxisServo Servo;
@@ -57,35 +57,7 @@ bool FRopeTractionBidirectionalBrakesTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 리엘 목표 속도: taper 감속 + Overshoot/dt 캡. 남은 overshoot를 넘게 회수하지 않는다(경계 안착).
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionReelTargetSpeedTest,
-	"DynamicRope.Traction.ReelTargetSpeedTapersAndCaps",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeTractionReelTargetSpeedTest::RunTest(const FString& Parameters)
-{
-	const float Dt = 1.0f / 60.0f;
-
-	// overshoot(50) >> taper(1.5) → 고정 리엘 속도(400). 단, Overshoot/dt = 3000이라 캡에 안 걸린다.
-	TestEqual(TEXT("far from boundary reels at the flat speed"),
-		RopeTraction::ComputeReelTargetSpeed(50.0f, 400.0f, 1.5f, Dt), 400.0f);
-
-	// overshoot(0.75) = taper(1.5)의 절반 → 선형 감속으로 200. Overshoot/dt = 45가 더 작아 캡이 이긴다.
-	TestEqual(TEXT("inside the taper the overshoot/dt cap wins"),
-		RopeTraction::ComputeReelTargetSpeed(0.75f, 400.0f, 1.5f, Dt), 45.0f);
-
-	// 경계 도달(overshoot 0) → 0. 코스팅 없이 멈춘다.
-	TestEqual(TEXT("at the boundary the reel target is zero"),
-		RopeTraction::ComputeReelTargetSpeed(0.0f, 400.0f, 1.5f, Dt), 0.0f);
-
-	// ReelSpeed=0 = 리엘 없음(0). "상한 없음"으로 오해하면 안 된다 — 그 의미는 호출자가 따로 가진다.
-	TestEqual(TEXT("zero reel speed means no reel"),
-		RopeTraction::ComputeReelTargetSpeed(50.0f, 0.0f, 1.5f, Dt), 0.0f);
-	return true;
-}
-
-// 장력 클램프가 질량 의존 추종을 만든다. CL 401 회귀: 리엘 목표 속도 상한이 TetherReelSpeed(400)에
-// 묶여 있어, 자유끝 wielder가 그보다 빠르면 *장력을 아무리 올려도* 대상이 영구히 뒤처졌다.
+// 장력 클램프가 질량 의존 추종을 만든다(능동 Pull의 ApplyPullVelocityDrive 골격).
 // 문턱 장력 ≈ M·V·fps — 그 이상이면 목표 도달, 미만이면 뒤처진다.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionTensionLimitTest,
 	"DynamicRope.Traction.TensionLimitMakesHeavyTargetsLag",
@@ -151,52 +123,6 @@ bool FRopeTractionCancelOutwardTest::RunTest(const FString& Parameters)
 	// 안쪽으로 가는 중이면 손대지 않는다.
 	TestEqual(TEXT("zero-target one-way servo leaves inward velocity alone"),
 		RopeTraction::ComputeAxisDeltaV(200.0f, MakeOneWayServo(0.0f)), 0.0f);
-	return true;
-}
-
-// MassShare 분배: 선형 역질량 / 바이어스 지수 / 앵커는 항상 몫 0.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionMassShareTest,
-	"DynamicRope.Traction.MassShareSplitsByInverseMass",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeTractionMassShareTest::RunTest(const FString& Parameters)
-{
-	const float WLight = RopeTraction::InvMassFromMass(50.0f);   // 0.02
-	const float WHeavy = RopeTraction::InvMassFromMass(150.0f);  // 0.00667
-	const float WAnchor = RopeTraction::InvMassFromMass(0.0f);   // 0 (앵커)
-	TestEqual(TEXT("anchor mass yields zero inverse mass"), WAnchor, 0.0f);
-
-	// 같은 질량 → 50:50.
-	TestEqual(TEXT("equal masses split evenly"),
-		RopeTraction::ComputeRawTargetShare(WLight, WLight, 1.0f), 0.5f);
-
-	// 대상이 가볍고(50) wielder가 무거우면(150) 대상이 더 많이 움직인다 = 0.02/(0.02+0.00667) = 0.75.
-	TestEqual(TEXT("the lighter end yields more"),
-		RopeTraction::ComputeRawTargetShare(WLight, WHeavy, 1.0f), 0.75f, 1e-4f);
-
-	// 앵커 wielder → 대상이 전부 움직인다.
-	TestEqual(TEXT("an anchored wielder gives the target the whole share"),
-		RopeTraction::ComputeRawTargetShare(WLight, WAnchor, 1.0f), 1.0f);
-
-	// 앵커 대상 → 대상 몫 0(wielder가 전부 양보).
-	TestEqual(TEXT("an anchored target takes no share"),
-		RopeTraction::ComputeRawTargetShare(WAnchor, WLight, 1.0f), 0.0f);
-
-	// 양끝 다 앵커 → 0(아무도 안 움직임; 호출자가 wielder 몫도 0으로 둔다).
-	TestEqual(TEXT("two anchors move nobody"),
-		RopeTraction::ComputeRawTargetShare(WAnchor, WAnchor, 1.0f), 0.0f);
-
-	// Bias=0 → 질량 무시 50:50. 단 앵커는 지수와 무관하게 0이어야 한다(Pow(0,0)=1 함정).
-	TestEqual(TEXT("zero bias ignores mass"),
-		RopeTraction::ComputeRawTargetShare(WLight, WHeavy, 0.0f), 0.5f);
-	TestEqual(TEXT("zero bias still gives an anchor no share"),
-		RopeTraction::ComputeRawTargetShare(WAnchor, WLight, 0.0f), 0.0f);
-	TestEqual(TEXT("zero bias still gives an anchored wielder the whole share"),
-		RopeTraction::ComputeRawTargetShare(WLight, WAnchor, 0.0f), 1.0f);
-
-	// Bias>1 → 질량차를 과장한다(가벼운 대상 몫이 선형 0.75보다 커진다).
-	TestTrue(TEXT("high bias exaggerates the mass difference"),
-		RopeTraction::ComputeRawTargetShare(WLight, WHeavy, 2.0f) > 0.75f);
 	return true;
 }
 
@@ -309,47 +235,6 @@ bool FRopeTractionSampleFractionalAimTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 뒤처짐은 리엘 속도 상한이 아니라 **장력**이 지배한다 — CL 401에서 상한을 400→1500으로 올려 "50kg 뒤처짐"을
-// 고치려다 실패한 회귀. 장력이 지배하는 구간에서는 상한을 올려도 프레임당 ΔV가 그대로다(반면 가벼운 대상은
-// 그 상한까지 순식간에 붙어 위험만 3.75배가 됐다).
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionCeilingDoesNotFixLagTest,
-	"DynamicRope.Traction.ReelCeilingDoesNotCureTensionLimitedLag",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeTractionCeilingDoesNotFixLagTest::RunTest(const FString& Parameters)
-{
-	const float Dt = 1.0f / 60.0f;
-	const float Mass = 50.0f;
-	const float MaxImpulse = 150000.0f * Dt; // 기본 장력.
-	const float Overshoot = 50.0f;           // taper(1.5cm)보다 훨씬 큼 → 목표 = 고정 리엘 속도.
-
-	// 상한 400 vs 1500: 목표 속도는 3.75배 차이가 난다.
-	const float Target400 = RopeTraction::ComputeReelTargetSpeed(Overshoot, 400.0f, 1.5f, Dt);
-	const float Target1500 = RopeTraction::ComputeReelTargetSpeed(Overshoot, 1500.0f, 1.5f, Dt);
-	TestEqual(TEXT("the 400 ceiling targets 400"), Target400, 400.0f);
-	TestEqual(TEXT("the 1500 ceiling targets 1500"), Target1500, 1500.0f);
-
-	// 그런데 50kg에서는 둘 다 장력 클램프에 걸려 **프레임당 ΔV가 동일**하다 → 상한은 뒤처짐을 못 고친다.
-	const float Dv400 = RopeTraction::ClampAxisImpulse(
-		RopeTraction::ComputeAxisDeltaV(0.0f, MakeReelServo(Target400)), Mass, MaxImpulse) / Mass;
-	const float Dv1500 = RopeTraction::ClampAxisImpulse(
-		RopeTraction::ComputeAxisDeltaV(0.0f, MakeReelServo(Target1500)), Mass, MaxImpulse) / Mass;
-	TestEqual(TEXT("a heavy target accelerates identically under both ceilings"), Dv400, Dv1500);
-	TestEqual(TEXT("and that acceleration is set by tension alone"), Dv400, MaxImpulse / Mass);
-
-	// 뒤처짐을 실제로 고치는 건 장력뿐 — 문턱 M·V·fps를 넘기면 한 프레임에 목표 도달.
-	const float Threshold = Mass * Target400 / Dt;
-	const float DvAmple = RopeTraction::ClampAxisImpulse(
-		RopeTraction::ComputeAxisDeltaV(0.0f, MakeReelServo(Target400)), Mass, Threshold * Dt) / Mass;
-	TestEqual(TEXT("only raising tension past M*V*fps removes the lag"), DvAmple, Target400);
-
-	// 반면 **가벼운** 대상(1kg)은 같은 장력으로 상한까지 그대로 붙는다 = 상한을 올린 대가는 여기서 치른다.
-	const float DvLight = RopeTraction::ClampAxisImpulse(
-		RopeTraction::ComputeAxisDeltaV(0.0f, MakeReelServo(Target1500)), 1.0f, MaxImpulse) / 1.0f;
-	TestEqual(TEXT("a light target reaches the raised ceiling in one frame"), DvLight, 1500.0f);
-	return true;
-}
-
 // 팽팽(taut) 게이트: 임계 0 = 종전 하드코딩 게이트(장력 > ~0)와 동일(동작 불변), 임계 > 0이면
 // 진입/유지 분리 히스테리시스로 경계 지터 퍼덕임을 막는다. 능동 Pull 인가와 IsPullTaut()의 공용 판정.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionTautGateTest,
@@ -421,108 +306,6 @@ bool FRopeTractionChainTautGateTest::RunTest(const FString& Parameters)
 		RopeTraction::EvaluateChainTautGate(100.0f, 0.0f, 0.03f, 2.0f, /*bWasTaut*/ true));
 	TestTrue(TEXT("ratio times scale of one or more keeps the latched gate open"),
 		RopeTraction::EvaluateChainTautGate(0.0f, 100.0f, 0.9f, 5.0f, /*bWasTaut*/ true));
-	return true;
-}
-
-// 슬랙 브레이크 장부 회수(DecayVelocityDebt): 주입분만 회수·직교 운동량 보존·외부 감속분 자동 탕감.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionDecayVelocityDebtTest,
-	"DynamicRope.Traction.DecayVelocityDebt",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeTractionDecayVelocityDebtTest::RunTest(const FString& Parameters)
-{
-	// 전량 회수(Alpha 1): 속도에서 장부 성분만 빠지고 장부는 0.
-	{
-		FVector Debt(400, 0, 0);
-		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(600, 0, 0), Debt, 1.0f);
-		TestTrue(TEXT("full alpha removes the whole debt from velocity"), NewVel.Equals(FVector(200, 0, 0), 0.1f));
-		TestTrue(TEXT("full alpha clears the ledger"), Debt.IsNearlyZero());
-	}
-	// 부분 회수(Alpha 0.5): 절반만 빼고 잔여는 장부에 남는다.
-	{
-		FVector Debt(400, 0, 0);
-		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(600, 0, 0), Debt, 0.5f);
-		TestTrue(TEXT("half alpha removes half the debt"), NewVel.Equals(FVector(400, 0, 0), 0.1f));
-		TestTrue(TEXT("half alpha keeps the remainder on the ledger"), Debt.Equals(FVector(200, 0, 0), 0.1f));
-	}
-	// 직교 보존: 장부 방향 성분이 없는 속도(스윙 접선 운동량)는 건드리지 않고 장부는 탕감된다.
-	{
-		FVector Debt(400, 0, 0);
-		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(0, 500, 0), Debt, 1.0f);
-		TestTrue(TEXT("perpendicular momentum is preserved"), NewVel.Equals(FVector(0, 500, 0), 0.1f));
-		TestTrue(TEXT("unavailable debt is forgiven"), Debt.IsNearlyZero());
-	}
-	// 자동 탕감: 실제 축 성분(100)이 장부(400)보다 작으면 그만큼만 회수 — 역방향으로 밀지 않는다.
-	{
-		FVector Debt(400, 0, 0);
-		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(100, 300, 0), Debt, 1.0f);
-		TestTrue(TEXT("removal is capped at the available axis component"), NewVel.Equals(FVector(0, 300, 0), 0.1f));
-		TestTrue(TEXT("excess debt is forgiven, not carried"), Debt.IsNearlyZero());
-	}
-	// 탕감 + 부분 회수 조합: 유효 장부(100)의 절반만 회수, 잔여 50만 장부에.
-	{
-		FVector Debt(400, 0, 0);
-		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(100, 300, 0), Debt, 0.5f);
-		TestTrue(TEXT("forgiven ledger decays from the available amount"), NewVel.Equals(FVector(50, 300, 0), 0.1f));
-		TestTrue(TEXT("ledger keeps only the un-recovered available part"), Debt.Equals(FVector(50, 0, 0), 0.1f));
-	}
-	// 빈 장부: 무동작.
-	{
-		FVector Debt = FVector::ZeroVector;
-		const FVector NewVel = RopeTraction::DecayVelocityDebt(FVector(123, 45, 6), Debt, 1.0f);
-		TestTrue(TEXT("empty ledger is a no-op"), NewVel.Equals(FVector(123, 45, 6), 0.01f));
-	}
-	return true;
-}
-
-// 한 프레임 축 ΔV 절대 상한(ClampAxisDeltaV): 0=무제한 통과, 상한 이하 통과, 초과는 ±대칭 클램프.
-// 목표 속도 상한과 별개의 방어다 — 목표가 유한해도 현재 속도가 크면 정확 서보의 ΔV는 무제한이다.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionClampAxisDeltaVTest,
-	"DynamicRope.Traction.ClampAxisDeltaV",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeTractionClampAxisDeltaVTest::RunTest(const FString& Parameters)
-{
-	// 0(무제한 설정) = 그대로 통과.
-	TestEqual(TEXT("무제한(0) 통과"), RopeTraction::ClampAxisDeltaV(3400.0f, 0.0f), 3400.0f);
-	TestEqual(TEXT("무제한(음수 설정) 통과"), RopeTraction::ClampAxisDeltaV(-3400.0f, -1.0f), -3400.0f);
-	// 상한 이하 = 무손실.
-	TestEqual(TEXT("상한 이하 통과"), RopeTraction::ClampAxisDeltaV(200.0f, 333.0f), 200.0f);
-	// 상한 초과 = ±대칭 클램프(가속/제동 대칭 — 역전 슬램을 여러 프레임에 분산).
-	TestEqual(TEXT("상한 초과 클램프(+)"), RopeTraction::ClampAxisDeltaV(3400.0f, 333.0f), 333.0f);
-	TestEqual(TEXT("상한 초과 클램프(-)"), RopeTraction::ClampAxisDeltaV(-3400.0f, 333.0f), -333.0f);
-	return true;
-}
-
-// 슬램 시나리오 조합: 고속 이탈(축속도 -3000) 대상에 목표 +400 양방향 정확 서보 → raw ΔV=3400을
-// 가속 상한(20000cm/s² × 1/60s ≈ 333)이 잘라, 역전이 한 프레임 슬램이 아니라 ~10프레임에 걸쳐 분산된다.
-// (Pierce 지면 관통 물리 폭발의 회귀 방어 — MassShare 대상 servo가 이 조합을 쓴다.)
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionSlamScenarioClampTest,
-	"DynamicRope.Traction.FastDepartingTargetSlamClamped",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeTractionSlamScenarioClampTest::RunTest(const FString& Parameters)
-{
-	const RopeTraction::FRopeAxisServo ExactServo{ /*TargetSpeed*/ 400.0f, /*Alpha*/ 1.0f, /*bBidirectional*/ true, /*bCancelOutward*/ false };
-	const float RawDeltaV = RopeTraction::ComputeAxisDeltaV(-3000.0f, ExactServo);
-	TestEqual(TEXT("정확 서보 raw ΔV = 목표-현재"), RawDeltaV, 3400.0f);
-
-	const float Dt = 1.0f / 60.0f;
-	const float MaxDeltaV = 20000.0f * Dt; // 기본 TetherMaxAcceleration × dt
-	const float Clamped = RopeTraction::ClampAxisDeltaV(RawDeltaV, MaxDeltaV);
-	TestEqual(TEXT("슬램이 가속 상한으로 제한"), Clamped, MaxDeltaV);
-	TestTrue(TEXT("한 프레임 역전 불가(현재 속도보다 작은 ΔV)"), Clamped < 3000.0f);
-
-	// 순항 중 보정(예: 200 → 400, ΔV=200 ≤ 상한 333)은 무손실 통과.
-	const float CruiseDeltaV = RopeTraction::ComputeAxisDeltaV(200.0f, ExactServo);
-	TestEqual(TEXT("순항 보정 ΔV는 상한 이하 통과"), RopeTraction::ClampAxisDeltaV(CruiseDeltaV, MaxDeltaV), CruiseDeltaV);
-
-	// 정지 출발(0 → 400, ΔV=400)은 첫 프레임만 상한(≈333)에 걸리고 **두 프레임 안에 목표 도달** —
-	// "기본값 켬이 정상 견인 체감을 바꾸지 않는다"의 정량 근거(1~2프레임 지연이 전부).
-	const float Frame1 = RopeTraction::ClampAxisDeltaV(RopeTraction::ComputeAxisDeltaV(0.0f, ExactServo), MaxDeltaV);
-	TestEqual(TEXT("정지 출발 첫 프레임은 상한"), Frame1, MaxDeltaV);
-	const float Frame2 = RopeTraction::ClampAxisDeltaV(RopeTraction::ComputeAxisDeltaV(Frame1, ExactServo), MaxDeltaV);
-	TestTrue(TEXT("두 프레임 내 목표 도달"), Frame1 + Frame2 >= 400.0f - 0.5f);
 	return true;
 }
 

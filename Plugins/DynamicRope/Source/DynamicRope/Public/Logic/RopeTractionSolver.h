@@ -44,23 +44,6 @@ namespace RopeTraction
 	DYNAMICROPE_API float ClampAxisImpulse(float DeltaV, float Mass, float MaxImpulse);
 
 	/**
-	 * 한 프레임 축 ΔV 절대 상한(가속 상한 × dt). 양방향 정확 서보(bVelChange)는 ΔV = |현재 − 목표|가
-	 * 무제한이라, 빠르게 멀어지는 대상(지면 관통으로 이탈하는 Pierce mesh 등)을 한 프레임에 역전
-	 * 슬램해 물리를 폭발시킬 수 있다 — 이 클램프가 역전을 여러 프레임에 분산한다(목표 속도 상한과
-	 * 별개의 방어: 목표는 유한해도 현재 속도가 무제한이면 ΔV가 무제한이다). MaxAbsDeltaV ≤ 0 = 무제한.
-	 */
-	DYNAMICROPE_API float ClampAxisDeltaV(float DeltaV, float MaxAbsDeltaV);
-
-	/**
-	 * 리엘 목표 속도(cm/s): 고정 ReelSpeed로 감되 경계 근처(Overshoot < TaperDist)에서 선형 감속하고,
-	 * 이번 프레임에 남은 overshoot를 넘게 회수하지 않도록 Overshoot/dt로 캡한다(경계 안착 — 지나쳐
-	 * 코스팅→재팽팽 진동이 없다). ReelSpeed=0 → 0(리엘 없음). "상한 없음"이 필요한 호출자는 스스로
-	 * Overshoot/dt를 쓴다(설정값 0의 의미가 호출자마다 다르다 — TetherReelSpeed=0은 리엘 없음,
-	 * TetherMaxSpeed=0은 상한 없음).
-	 */
-	DYNAMICROPE_API float ComputeReelTargetSpeed(float Overshoot, float ReelSpeed, float TaperDist, float DeltaTime);
-
-	/**
 	 * 속도 주입 결과의 절대 속력 상한 = max(SpeedCap, 기존 속력). 방향이 흔들리면 주입이 프레임마다 다른
 	 * 축으로 들어가 감쇠 없는 Falling에서 벡터가 계속 커질 수 있다(폭주 2차 방어 — 1차는 방향 EMA).
 	 * 기존에 더 빠른 외부 운동(자유낙하 등)은 보존한다. SpeedCap=0(클램프 없음 설정)이면 그대로 통과.
@@ -95,15 +78,6 @@ namespace RopeTraction
 	DYNAMICROPE_API FVector SampleFractionalAim(const TArray<FVector>& Positions, float AimF, int32 AnchorNode);
 
 	/**
-	 * MassShare 자동 분배의 raw 대상 몫 [0..1](EMA 전). 역질량에 지수 MassBias를 걸어 질량차 민감도를
-	 * 조절한다: 1 = 선형 역질량(무거운 쪽 = 작은 w → 작은 몫), >1 = 무거운 쪽 몫이 더 급격히 감소(극단),
-	 * <1 = 완만, 0 = 50:50. 앵커(w=0)는 지수와 무관하게 항상 몫 0(Pow(0,0)=1 함정 회피).
-	 * 양끝 다 앵커(합 ~0)면 0을 반환한다 — "아무도 안 움직임"의 처리는 호출자 몫이다(wielder 몫도 0이라야
-	 * 하므로 1-share로 유도하면 안 된다).
-	 */
-	DYNAMICROPE_API float ComputeRawTargetShare(float InvMassTarget, float InvMassWielder, float MassBias);
-
-	/**
 	 * 능동 Pull 팽팽(taut) 게이트 판정(히스테리시스 래치). 팽팽 판정의 정본은 **장력**(XPBD λ 유래)이다 —
 	 * 테더 overshoot는 기하라 여기 쓰지 않는다. Threshold ≤ 0(기본) = 장력이 조금이라도 있으면 팽팽
 	 * (종전 하드코딩 게이트 "Tension > ~0"과 동일 — 동작 불변). Threshold > 0이면 진입은 Threshold 초과,
@@ -122,15 +96,6 @@ namespace RopeTraction
 	 * 것을 막는다. RestLen ≤ 0이면 false(판정 불능).
 	 */
 	DYNAMICROPE_API bool EvaluateChainTautGate(float ChordLen, float RestLen, float SlackRatio, float ReleaseScale, bool bWasTaut);
-
-	/**
-	 * 견인 주입 장부(debt)의 슬랙 회수 한 스텝. 테더가 주입한 속도 변화의 누적(InOutDebt)에서 Alpha 비율만큼을
-	 * Velocity에서 빼고 장부를 그만큼 줄여 반환한다 — 주입하지 않은 운동(스윙 접선/에어컨트롤)은 장부에 없어
-	 * 건드리지 않는다. **자동 탕감**: 실제 속도의 장부 방향 성분(avail)이 장부보다 작으면(외부 감속이 이미
-	 * 소화) 장부를 avail로 먼저 줄인다 — 없는 속도를 빼서 역방향으로 밀어내는 일이 구조적으로 불가능하다.
-	 * Alpha는 [0..1] 클램프(ExpSmoothAlpha로 산출해 넘긴다). 장부가 ~0이면 무동작.
-	 */
-	DYNAMICROPE_API FVector DecayVelocityDebt(const FVector& Velocity, FVector& InOutDebt, float Alpha);
 
 	/**
 	 * 테더 λ 제약 입력(단위: cm / kg / s — SolveTetherLambda 참조). 설계는 Docs/PoC/05.

@@ -4,6 +4,7 @@
 // 벽 탈출 윈치)을 어느 맵에서든 한 커맨드로 같은 배치로 재현한다. 고정 .umap 대신 코드 스폰인 이유:
 // 리뷰/머지 가능한 텍스트고, 플레이어 기준 상대 배치라 각자의 테스트 맵(Lvl_*Test)에서 그대로 돈다.
 // 엔진 기본 셰이프만 쓴다(게임 콘텐츠 무의존) — 랙돌 씬은 맵에 이미 배치된 랙돌 캐릭터를 끌어온다.
+// (레거시 테더 모드 A/B 전환 커맨드(Rope.Test.TetherMode)는 모드 제거와 함께 삭제 — Docs/PoC/05 §6 F.)
 
 #include "CoreMinimal.h"
 
@@ -82,7 +83,7 @@ namespace RopeTetherTestScenes
 			FVector(0.6f, 0.6f, 3.5f)))
 		{
 			UE_LOG(LogDynamicRope, Log, TEXT("[TetherScene] wall: 전방 4m 기둥(지름 60cm). 절차 = 기둥에 감기 → 뒤로 걷기/점프 탈출."));
-			UE_LOG(LogDynamicRope, Log, TEXT("[TetherScene] 기대: 레거시=벽 쪽으로 끌려감(윈치) / Constraint=로프 끝에서 정지(끌림 없음). 디버거 pull 라인 constraint T 관찰."));
+			UE_LOG(LogDynamicRope, Log, TEXT("[TetherScene] 기대: 로프 끝에서 정지(윈치 끌림 없음). 디버거 상세 줄의 tether T 관찰."));
 		}
 	}
 
@@ -103,7 +104,7 @@ namespace RopeTetherTestScenes
 			Comp->SetSimulatePhysics(true);
 			Comp->SetMassOverrideInKg(NAME_None, FMath::Max(MassKg, 1.0f), true);
 			UE_LOG(LogDynamicRope, Log, TEXT("[TetherScene] drag: 전방 6m 물리 큐브 %.0fkg. 절차 = 감기 → 뒤로 걷기·되감기(Reel)로 끌기."), MassKg);
-			UE_LOG(LogDynamicRope, Log, TEXT("[TetherScene] 기대: Constraint=질량비 분배 자동(가벼우면 큐브가, 무거우면 내가 양보) — 스트레치 잔류(탄성 룩) 없이 경계 유지."));
+			UE_LOG(LogDynamicRope, Log, TEXT("[TetherScene] 기대: 질량비 분배 자동(가벼우면 큐브가, 무거우면 내가 양보) — 스트레치 잔류(탄성 룩) 없이 경계 유지."));
 		}
 	}
 
@@ -129,7 +130,7 @@ namespace RopeTetherTestScenes
 			Owner->TeleportTo(Dest, FaceMe, /*bIsATest*/ false, /*bNoCheck*/ true);
 			UE_LOG(LogDynamicRope, Log, TEXT("[TetherScene] ragdoll: '%s'를 전방 2.5m로 소환. 절차 = 근접 wrap(자동 랙돌) → 유지/되감기, 이후 Rope.Ragdoll로 수동 토글도."),
 				*GetNameSafe(Owner));
-			UE_LOG(LogDynamicRope, Log, TEXT("[TetherScene] 기대: 레거시=요요/관절 슬램 폭주 가능 / Constraint=λ 단방향이라 폭주 없음, 전신 질량 분배로 끌림."));
+			UE_LOG(LogDynamicRope, Log, TEXT("[TetherScene] 기대: 요요/폭주 없이 물리 제약으로 차분히 끌림(창 레버 정렬 포함)."));
 			return;
 		}
 		UE_LOG(LogDynamicRope, Warning, TEXT("[TetherScene] ragdoll: 랙돌 반응 캐릭터(URopeRagdollResponseComponent, 플레이어 제외)가 맵에 없다 — 데모 캐릭터를 배치할 것."));
@@ -159,50 +160,6 @@ namespace RopeTetherTestScenes
 			}
 		}));
 
-	// 월드 내 모든 로프의 테더 모드를 런타임 전환 — Constraint(λ) A/B 비교용. BP/프리셋 기본값은 안 건드린다
-	// (PIE 세션 한정). 인자: mass|binary|constraint 또는 0|1|2.
-	static FAutoConsoleCommandWithWorldAndArgs GModeCmd(
-		TEXT("Rope.Test.TetherMode"),
-		TEXT("월드 내 모든 로프의 HoldConfig.TetherMode 전환(mass|binary|constraint 또는 0|1|2) — λ A/B 비교용."),
-		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
-		{
-			if (Args.Num() < 1)
-			{
-				UE_LOG(LogDynamicRope, Warning, TEXT("Rope.Test.TetherMode <mass|binary|constraint|0|1|2>"));
-				return;
-			}
-			const FString Arg = Args[0].ToLower();
-			ERopeTetherMode Mode;
-			if (Arg == TEXT("mass") || Arg == TEXT("0"))
-			{
-				Mode = ERopeTetherMode::MassShare;
-			}
-			else if (Arg == TEXT("binary") || Arg == TEXT("1"))
-			{
-				Mode = ERopeTetherMode::BinaryPullable;
-			}
-			else if (Arg == TEXT("constraint") || Arg == TEXT("2"))
-			{
-				Mode = ERopeTetherMode::Constraint;
-			}
-			else
-			{
-				UE_LOG(LogDynamicRope, Warning, TEXT("Rope.Test.TetherMode: 알 수 없는 모드 '%s'."), *Args[0]);
-				return;
-			}
-			int32 Count = 0;
-			for (TObjectIterator<URopeComponent> It; It; ++It)
-			{
-				URopeComponent* Rope = *It;
-				if (IsValid(Rope) && Rope->GetWorld() == World)
-				{
-					Rope->HoldConfig.TetherMode = Mode;
-					++Count;
-				}
-			}
-			UE_LOG(LogDynamicRope, Log, TEXT("Rope.Test.TetherMode: 로프 %d개 → %s (런타임 한정, 저장 안 됨)."),
-				Count, *UEnum::GetValueAsString(Mode));
-		}));
 }
 
 #endif // !UE_BUILD_SHIPPING

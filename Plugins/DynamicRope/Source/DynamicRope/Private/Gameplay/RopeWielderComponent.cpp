@@ -293,13 +293,13 @@ bool URopeWielderComponent::IsWielderTetherActive() const
 	{
 		return false;
 	}
-	// wielder가 실제로 테더 몫을 받을 때만(테더 자체가 꺼졌거나 이번 프레임 유효 몫이 전량 대상이면 무의미).
-	// 유효 대상 몫은 자동(질량 기반)/수동 공통 최종값이라 auto·override 모두에서 일관되게 판정된다.
-	if (Rope->HoldConfig.TetherResponse <= 0.0f || Rope->GetEffectiveTetherTargetShare() >= 1.0f - KINDA_SMALL_NUMBER)
+	// wielder가 실제로 테더 몫을 받을 때만 — 이번 프레임 유효 몫(λ 역질량비/끌림 판정 이진값)이
+	// 전량 대상(=1)이면 wielder는 자유끝이라 스윙/지상이탈 반응이 무의미하다.
+	if (Rope->GetEffectiveTetherTargetShare() >= 1.0f - KINDA_SMALL_NUMBER)
 	{
 		return false;
 	}
-	// 셀프랩(자기 자신에 감김)은 UpdateTether가 wielder 몫을 주지 않는다.
+	// 셀프랩(자기 자신에 감김)은 테더가 wielder 몫을 주지 않는다.
 	if (const USkeletalMeshComponent* WrappedMesh = Rope->GetWrappedMesh())
 	{
 		if (WrappedMesh->GetOwner() == GetOwner())
@@ -684,8 +684,8 @@ void URopeWielderComponent::UpdatePullEngage()
 	bPullEngaged = true;
 	// 발동 순간 스냅샷(원샷) — PullEngageTension 튜닝용 관측.
 	UE_LOG(LogDynamicRope, Log,
-		TEXT("[PullEngage] mode=%s share=%.2f tautT=%.0f tetherT=%.0f overshoot=%.0f"),
-		*UEnum::GetValueAsString(Rope->HoldConfig.TetherMode), Rope->GetEffectiveTetherTargetShare(),
+		TEXT("[PullEngage] share=%.2f tautT=%.0f tetherT=%.0f overshoot=%.0f"),
+		Rope->GetEffectiveTetherTargetShare(),
 		Rope->GetMaxTension(), Rope->GetTetherTension(), Rope->GetTetherOvershoot());
 	if (PullMontage)
 	{
