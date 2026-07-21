@@ -14,7 +14,7 @@
 // FRopeGPUSolver (DynamicRopeShaders): 비동기 GPU 솔브 인스턴스.
 #include "RopeGPUSolver.h"
 // FRopeWrappedEventInfo / ERopeReleaseReason — 아래 wrap/release 중앙 신호의 페이로드.
-#include "Core/RopeTypes.h"
+#include "Core/RopeLifecycleTypes.h"
 #include "RopeSimSubsystem.generated.h"
 
 class URopeComponent;
