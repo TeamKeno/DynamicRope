@@ -149,6 +149,8 @@ private:
 	friend class FRopeWrappingPoseSpaceIslandTest;
 	// 복합 경로 폐기 뒤 최초 latch 본 하나로만 재초기화되는지 검증한다.
 	friend class FRopeWrappingSingleBoneFallbackTest;
+	// surface/bridge/virtual path point의 저장 좌표와 centerline 변환 계약을 검증한다.
+	friend class FRopeWrappingPathPointCoordinateContractTest;
 	// virtual run 단일 산출과 컴포넌트 bridge 수명 인계를 검증한다.
 	friend struct FRopeComponentRefactorTestSeam;
 #endif
@@ -269,12 +271,19 @@ private:
 	/** 이번 프레임에 사용할 world-space path를 path/anchor의 정렬 순서를 이용해 선형 시간에 만든다. */
 	bool BuildResolvedWrappingPath(TArray<FRopeWrapPathPoint>& OutResolvedPath) const;
 
+	/** bVirtual만 이미 centerline을 저장한다. 일반 surface와 bridge는 normal offset을 적용한다. */
+	static FVector GetPathPointCenterlineWorld(const FRopeWrapPathPoint& Point, float SurfaceOffset);
+
+	/** centerline을 FRopeWrapPathPoint의 저장 규약으로 되돌린다. bVirtual이면 그대로, 아니면 offset을 뺀다. */
+	static FVector EncodePathPointPositionFromCenterline(const FVector& CenterlineWorld,
+		const FVector& NormalWorld, bool bVirtual, float SurfaceOffset);
+
 	/** 거리 순으로 정렬된 resolved path를 binary search해 보간한다. */
 	static bool SampleResolvedWrappingPath(const TArray<FRopeWrapPathPoint>& ResolvedPath,
-		float DistanceFromLatch, FRopeWrapPathPoint& OutPoint);
+		float DistanceFromLatch, float SurfaceOffset, FRopeWrapPathPoint& OutPoint);
 
 	static void InterpolateWrappingPathPoints(const FRopeWrapPathPoint& LowerPoint,
-		const FRopeWrapPathPoint& UpperPoint, float SampleDistance,
+		const FRopeWrapPathPoint& UpperPoint, float SampleDistance, float SurfaceOffset,
 		FRopeWrapPathPoint& OutPoint);
 
 	/** ApplyFrontMotion 전용 재사용 버퍼. 매 프레임 path point/anchor를 반복 해석하지 않는다. */

@@ -266,23 +266,15 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 		return;
 	}
 
+	const float SurfaceOffset = FMath::Max(0.0f, Ctx.SurfaceOffset);
 	FRopeWrapPathPoint FrontPoint;
-	if (!SampleResolvedWrappingPath(ResolvedPathScratch, State.FrontDistance, FrontPoint))
+	if (!SampleResolvedWrappingPath(
+		ResolvedPathScratch, State.FrontDistance, SurfaceOffset, FrontPoint))
 	{
 		return;
 	}
 
-	const float SurfaceOffset = FMath::Max(0.0f, Ctx.SurfaceOffset);
-	const auto PathPointToCenterline = [SurfaceOffset](const FRopeWrapPathPoint& Point)
-	{
-		// Surface point만 표면 법선 offset을 적용한다. Virtual/bridge는 이미 rope centerline의
-		// 월드 위치이므로 offset을 다시 더하면 이상적인 나선 반지름이 이중으로 커진다.
-		return Point.SurfaceWorld +
-			(Point.bVirtual || Point.bBridge
-				? FVector::ZeroVector
-				: Point.NormalWorld * SurfaceOffset);
-	};
-	const FVector FrontWorld = PathPointToCenterline(FrontPoint);
+	const FVector FrontWorld = GetPathPointCenterlineWorld(FrontPoint, SurfaceOffset);
 	// 이미 감긴 위치는 projected surface path를 따르지만, 아직 감기지 않은 tail의 연장 방향은
 	// SDF normal에 투영하지 않은 ideal helix guide를 우선 사용한다. Sequential 경로와 guide가
 	// 없는 구형 데이터는 종전 surface tangent로 폴백한다.
@@ -342,18 +334,20 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 			if (State.Path.IsValidIndex(PathIndex) &&
 				ResolvedPathScratch.IsValidIndex(PathIndex))
 			{
-				World = PathPointToCenterline(ResolvedPathScratch[PathIndex]);
+				World = GetPathPointCenterlineWorld(
+					ResolvedPathScratch[PathIndex], SurfaceOffset);
 			}
 			else
 			{
 				// Path가 없는 구형 anchors-only 상태는 이번 프레임에 resolve/정렬한 anchor 배열을
 				// binary search한다. 이 경계 상태에서도 노드마다 anchor 전체를 다시 훑지 않는다.
 				FRopeWrapPathPoint NodePoint;
-				if (!SampleResolvedWrappingPath(ResolvedPathScratch, NodeDistance, NodePoint))
+				if (!SampleResolvedWrappingPath(
+					ResolvedPathScratch, NodeDistance, SurfaceOffset, NodePoint))
 				{
 					continue;
 				}
-				World = PathPointToCenterline(NodePoint);
+				World = GetPathPointCenterlineWorld(NodePoint, SurfaceOffset);
 			}
 		}
 		else
@@ -669,7 +663,7 @@ bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchA
 		}
 
 		const FRopeWrapPathPoint& Point = PreviewPhase.State.Path[PathIndex];
-		OutCenterline[NodeIndex] = Point.SurfaceWorld + Point.NormalWorld * SurfaceOffset;
+		OutCenterline[NodeIndex] = GetPathPointCenterlineWorld(Point, SurfaceOffset);
 		LastDrivenNode = NodeIndex;
 	}
 
@@ -1161,8 +1155,10 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 			const bool bUseCurrentBinding =
 				bPreviousRawVirtual || (!RawPoint.bVirtual && Alpha >= 0.5f);
 			FRopeWrapPathPoint SamplePoint;
-			SamplePoint.SurfaceWorld = SampleCenterlineWorld -
-				(bSampleVirtual ? FVector::ZeroVector : SampleNormalWorld * CenterlineOffset);
+			SamplePoint.bBridge = false;
+			SamplePoint.bVirtual = bSampleVirtual;
+			SamplePoint.SurfaceWorld = EncodePathPointPositionFromCenterline(
+				SampleCenterlineWorld, SampleNormalWorld, SamplePoint.bVirtual, CenterlineOffset);
 			SamplePoint.NormalWorld = SampleNormalWorld;
 			SamplePoint.TangentWorld = SampleTangentWorld;
 			SamplePoint.WrappingGuideTangentWorld = SampleWrappingGuideTangentWorld;
@@ -1174,8 +1170,6 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 			SamplePoint.DistanceFromLatch = TargetArcDistance;
 			SamplePoint.WrapAngleFromLatchRad = FMath::Lerp(
 				PreviousRawAngleRad, CurrentRawAngleRad, Alpha);
-			SamplePoint.bBridge = false;
-			SamplePoint.bVirtual = bSampleVirtual;
 			State.Path.Add(SamplePoint);
 		}
 	}
@@ -1240,14 +1234,10 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 			}
 
 			const FRopeWrapPathPoint& PreviousPoint = State.Path[PathIndex - 1];
-			const FVector PreviousCenterline = PreviousPoint.SurfaceWorld +
-				(PreviousPoint.bVirtual
-					? FVector::ZeroVector
-					: PreviousPoint.NormalWorld * CenterlineOffset);
-			const FVector CurrentCenterline = CurrentPoint.SurfaceWorld +
-				(CurrentPoint.bVirtual
-					? FVector::ZeroVector
-					: CurrentPoint.NormalWorld * CenterlineOffset);
+			const FVector PreviousCenterline = GetPathPointCenterlineWorld(
+				PreviousPoint, CenterlineOffset);
+			const FVector CurrentCenterline = GetPathPointCenterlineWorld(
+				CurrentPoint, CenterlineOffset);
 			const float Spacing = FVector::Dist(PreviousCenterline, CurrentCenterline);
 			MinCenterlineSpacing = FMath::Min(MinCenterlineSpacing, Spacing);
 			MaxCenterlineSpacing = FMath::Max(MaxCenterlineSpacing, Spacing);
@@ -2098,8 +2088,12 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 						.GetSafeNormal(KINDA_SMALL_NUMBER, State.PathTangentWorld);
 
 					FRopeWrapPathPoint Point;
-					Point.SurfaceWorld =
-						SampleCenterlineWorld - SampleNormalWorld * CenterlineOffset;
+					Point.bVirtual = false;
+					// 브리지에서 출발하거나 이번 step이 브리지면 보간점도 허공 chord로 취급한다.
+					Point.bBridge = bPreviousPointWasBridge || !bOnSurface;
+					Point.SurfaceWorld = EncodePathPointPositionFromCenterline(
+						SampleCenterlineWorld, SampleNormalWorld,
+						Point.bVirtual, CenterlineOffset);
 					Point.NormalWorld = SampleNormalWorld;
 					Point.TangentWorld = SampleTangentWorld;
 					Point.Bone = State.PathCurrentBone.IsNone()
@@ -2114,8 +2108,6 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 					// point angle은 감소하지 않고 angle -> distance binary search가 안정적으로 동작한다.
 					Point.WrapAngleFromLatchRad = FMath::Lerp(
 						PreviousForwardAngleRad, State.PathForwardAngleRad, Alpha);
-					// 브리지에서 출발하거나 이번 step이 브리지면 보간점도 허공 chord로 취급한다.
-					Point.bBridge = bPreviousPointWasBridge || !bOnSurface;
 					State.Path.Add(Point);
 					if (!AppendWrappingAnchorFromPathPoint(SamplePathIndex, Sim, Ctx))
 					{
@@ -3868,9 +3860,32 @@ bool FRopeWrappingPhase::ResolveWrappingAnchorPoint(
 	return true;
 }
 
+FVector FRopeWrappingPhase::GetPathPointCenterlineWorld(
+	const FRopeWrapPathPoint& Point, float SurfaceOffset)
+{
+	const float ClampedSurfaceOffset = FMath::Max(0.0f, SurfaceOffset);
+	// bVirtual만 SurfaceWorld에 이미 rope centerline을 저장한다. Sequential bridge는
+	// anchor가 없을 뿐 일반 surface point와 같은 offset 이전 기준 위치를 저장한다.
+	return Point.SurfaceWorld +
+		(Point.bVirtual
+			? FVector::ZeroVector
+			: Point.NormalWorld * ClampedSurfaceOffset);
+}
+
+FVector FRopeWrappingPhase::EncodePathPointPositionFromCenterline(
+	const FVector& CenterlineWorld, const FVector& NormalWorld,
+	bool bVirtual, float SurfaceOffset)
+{
+	const float ClampedSurfaceOffset = FMath::Max(0.0f, SurfaceOffset);
+	return CenterlineWorld -
+		(bVirtual
+			? FVector::ZeroVector
+			: NormalWorld * ClampedSurfaceOffset);
+}
+
 void FRopeWrappingPhase::InterpolateWrappingPathPoints(
 	const FRopeWrapPathPoint& LowerPoint, const FRopeWrapPathPoint& UpperPoint,
-	float SampleDistance, FRopeWrapPathPoint& OutPoint)
+	float SampleDistance, float SurfaceOffset, FRopeWrapPathPoint& OutPoint)
 {
 	if (FMath::Abs(UpperPoint.DistanceFromLatch - LowerPoint.DistanceFromLatch)
 		<= KINDA_SMALL_NUMBER)
@@ -3885,11 +3900,22 @@ void FRopeWrappingPhase::InterpolateWrappingPathPoints(
 		(SampleDistance - LowerPoint.DistanceFromLatch) /
 		(UpperPoint.DistanceFromLatch - LowerPoint.DistanceFromLatch),
 		0.0f, 1.0f);
-	OutPoint.SurfaceWorld = FMath::Lerp(
-		LowerPoint.SurfaceWorld, UpperPoint.SurfaceWorld, Alpha);
+	// 두 플래그 모두 anchor 생략 정책에는 참여하지만 좌표 저장 규약은 bVirtual만 결정한다.
+	OutPoint.bBridge = LowerPoint.bBridge || UpperPoint.bBridge;
+	OutPoint.bVirtual = LowerPoint.bVirtual || UpperPoint.bVirtual;
 	OutPoint.NormalWorld = FMath::Lerp(
 		LowerPoint.NormalWorld, UpperPoint.NormalWorld, Alpha)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.NormalWorld);
+	// 저장 표현(surface 기준/virtual centerline)을 직접 섞지 않는다. 양 끝점을 centerline으로
+	// 해석해 보간한 뒤, 출력 point가 따르는 저장 규약으로 한 번만 되돌린다.
+	const FVector LowerCenterlineWorld = GetPathPointCenterlineWorld(
+		LowerPoint, SurfaceOffset);
+	const FVector UpperCenterlineWorld = GetPathPointCenterlineWorld(
+		UpperPoint, SurfaceOffset);
+	const FVector CenterlineWorld = FMath::Lerp(
+		LowerCenterlineWorld, UpperCenterlineWorld, Alpha);
+	OutPoint.SurfaceWorld = EncodePathPointPositionFromCenterline(
+		CenterlineWorld, OutPoint.NormalWorld, OutPoint.bVirtual, SurfaceOffset);
 	OutPoint.TangentWorld = FMath::Lerp(
 		LowerPoint.TangentWorld, UpperPoint.TangentWorld, Alpha);
 	OutPoint.TangentWorld = (OutPoint.TangentWorld -
@@ -3916,8 +3942,6 @@ void FRopeWrappingPhase::InterpolateWrappingPathPoints(
 	OutPoint.DistanceFromLatch = SampleDistance;
 	OutPoint.WrapAngleFromLatchRad = FMath::Lerp(
 		LowerPoint.WrapAngleFromLatchRad, UpperPoint.WrapAngleFromLatchRad, Alpha);
-	OutPoint.bBridge = LowerPoint.bBridge || UpperPoint.bBridge;
-	OutPoint.bVirtual = LowerPoint.bVirtual || UpperPoint.bVirtual;
 }
 
 bool FRopeWrappingPhase::BuildResolvedWrappingPath(
@@ -3987,7 +4011,7 @@ bool FRopeWrappingPhase::BuildResolvedWrappingPath(
 
 bool FRopeWrappingPhase::SampleResolvedWrappingPath(
 	const TArray<FRopeWrapPathPoint>& ResolvedPath, float DistanceFromLatch,
-	FRopeWrapPathPoint& OutPoint)
+	float SurfaceOffset, FRopeWrapPathPoint& OutPoint)
 {
 	if (ResolvedPath.Num() == 0)
 	{
@@ -4033,7 +4057,7 @@ bool FRopeWrappingPhase::SampleResolvedWrappingPath(
 
 	InterpolateWrappingPathPoints(
 		ResolvedPath[UpperPathIndex - 1], ResolvedPath[UpperPathIndex],
-		SampleDistance, OutPoint);
+		SampleDistance, SurfaceOffset, OutPoint);
 	return true;
 }
 

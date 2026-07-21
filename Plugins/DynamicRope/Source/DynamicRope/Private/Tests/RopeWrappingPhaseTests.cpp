@@ -67,6 +67,75 @@ bool FRopeWrappingInitializationFailureStateTest::RunTest(const FString& Paramet
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingPathPointCoordinateContractTest,
+	"DynamicRope.Wrapping.PathPointCoordinateContract",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingPathPointCoordinateContractTest::RunTest(const FString& Parameters)
+{
+	constexpr float SurfaceOffset = 2.0f;
+	const FVector NormalWorld = FVector::XAxisVector;
+
+	FRopeWrapPathPoint SurfacePoint;
+	SurfacePoint.SurfaceWorld = FVector(10.0f, 0.0f, 0.0f);
+	SurfacePoint.NormalWorld = NormalWorld;
+	SurfacePoint.TangentWorld = FVector::YAxisVector;
+	SurfacePoint.DistanceFromLatch = 0.0f;
+	TestTrue(TEXT("surface point applies the normal offset"),
+		FRopeWrappingPhase::GetPathPointCenterlineWorld(SurfacePoint, SurfaceOffset)
+			.Equals(FVector(12.0f, 0.0f, 0.0f), KINDA_SMALL_NUMBER));
+
+	FRopeWrapPathPoint BridgePoint = SurfacePoint;
+	BridgePoint.bBridge = true;
+	TestTrue(TEXT("bridge point uses the same stored-position contract as a surface point"),
+		FRopeWrappingPhase::GetPathPointCenterlineWorld(BridgePoint, SurfaceOffset)
+			.Equals(FVector(12.0f, 0.0f, 0.0f), KINDA_SMALL_NUMBER));
+
+	FRopeWrapPathPoint VirtualPoint = SurfacePoint;
+	VirtualPoint.SurfaceWorld = FVector(20.0f, 0.0f, 0.0f);
+	VirtualPoint.DistanceFromLatch = 10.0f;
+	VirtualPoint.bVirtual = true;
+	TestTrue(TEXT("virtual point already stores its centerline"),
+		FRopeWrappingPhase::GetPathPointCenterlineWorld(VirtualPoint, SurfaceOffset)
+			.Equals(FVector(20.0f, 0.0f, 0.0f), KINDA_SMALL_NUMBER));
+
+	const FVector EncodedSurface = FRopeWrappingPhase::EncodePathPointPositionFromCenterline(
+		FVector(12.0f, 0.0f, 0.0f), NormalWorld, /*bVirtual=*/false, SurfaceOffset);
+	const FVector EncodedVirtual = FRopeWrappingPhase::EncodePathPointPositionFromCenterline(
+		FVector(20.0f, 0.0f, 0.0f), NormalWorld, /*bVirtual=*/true, SurfaceOffset);
+	TestTrue(TEXT("surface centerline encoding removes the offset"),
+		EncodedSurface.Equals(FVector(10.0f, 0.0f, 0.0f), KINDA_SMALL_NUMBER));
+	TestTrue(TEXT("virtual centerline encoding preserves the position"),
+		EncodedVirtual.Equals(FVector(20.0f, 0.0f, 0.0f), KINDA_SMALL_NUMBER));
+
+	FRopeWrapPathPoint SurfaceToVirtualMidpoint;
+	FRopeWrappingPhase::InterpolateWrappingPathPoints(
+		SurfacePoint, VirtualPoint, /*SampleDistance=*/5.0f,
+		SurfaceOffset, SurfaceToVirtualMidpoint);
+	TestTrue(TEXT("surface-to-virtual interpolation remains virtual"),
+		SurfaceToVirtualMidpoint.bVirtual);
+	TestTrue(TEXT("surface-to-virtual interpolation lerps decoded centerlines"),
+		FRopeWrappingPhase::GetPathPointCenterlineWorld(
+			SurfaceToVirtualMidpoint, SurfaceOffset)
+			.Equals(FVector(16.0f, 0.0f, 0.0f), KINDA_SMALL_NUMBER));
+
+	BridgePoint.SurfaceWorld = FVector(18.0f, 0.0f, 0.0f);
+	BridgePoint.DistanceFromLatch = 10.0f;
+	FRopeWrapPathPoint SurfaceToBridgeMidpoint;
+	FRopeWrappingPhase::InterpolateWrappingPathPoints(
+		SurfacePoint, BridgePoint, /*SampleDistance=*/5.0f,
+		SurfaceOffset, SurfaceToBridgeMidpoint);
+	TestTrue(TEXT("surface-to-bridge interpolation preserves the bridge flag"),
+		SurfaceToBridgeMidpoint.bBridge);
+	TestFalse(TEXT("bridge interpolation does not imply virtual storage"),
+		SurfaceToBridgeMidpoint.bVirtual);
+	TestTrue(TEXT("surface-to-bridge interpolation round-trips the centerline"),
+		FRopeWrappingPhase::GetPathPointCenterlineWorld(
+			SurfaceToBridgeMidpoint, SurfaceOffset)
+			.Equals(FVector(16.0f, 0.0f, 0.0f), KINDA_SMALL_NUMBER));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingSequentialPathBuildGuardsTest,
 	"DynamicRope.Wrapping.SequentialPathBuildGuards",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

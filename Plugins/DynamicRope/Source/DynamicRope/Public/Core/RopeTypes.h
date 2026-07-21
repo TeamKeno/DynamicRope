@@ -317,9 +317,15 @@ struct FRopeSurfaceAnchor
 	FTransform LocalMeshTransform = FTransform::Identity;
 };
 
-/** Wrapping 표면 경로의 점 하나(월드 표면 프레임 + 귀속 본/메시 + latch로부터의 진행 거리). */
+/** Wrapping 경로의 점 하나(월드 기준 프레임 + 귀속 본/메시 + latch로부터의 진행 거리). */
 struct FRopeWrapPathPoint
 {
+	/**
+	 * bVirtual=false이면 rope centerline의 normal offset 이전 기준 위치다. 일반 점은 실제 투영 표면,
+	 * bBridge 점은 허공 centerline에서 offset을 뺀 가상 기준 위치다. bVirtual=true이면 표면이 없으므로
+	 * 이미 완성된 rope centerline을 저장한다. centerline 소비자는 이 규약을 직접 재구현하지 말고
+	 * FRopeWrappingPhase의 공용 변환을 사용해야 한다.
+	 */
 	FVector SurfaceWorld = FVector::ZeroVector;
 	FVector NormalWorld = FVector::UpVector;
 	FVector TangentWorld = FVector::ForwardVector;
