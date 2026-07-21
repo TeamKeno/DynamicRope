@@ -720,6 +720,7 @@ void URopeComponent::SetPhase(ERopePhase NewPhase, const TCHAR* Reason)
 void URopeComponent::ResetTransientPhaseState()
 {
 	AimTargeting.ResetPendingThrow();
+	PendingGuaranteedAimThrow.Reset();
 	ContactTracker.Reset();
 	PendingWrapSeed.Reset();
 	TeardownPhysicalTether(); // Constraint 모드 랙돌 제약 — wrap 시도 단위 수명(무해 no-op 가능).

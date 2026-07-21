@@ -6,12 +6,10 @@
 #include "Core/RopeWrapTarget.h"
 #include "Debug/RopeDebugSnapshot.h"
 #include "DynamicRopeLog.h"
-#include "Engine/World.h"
 #include "Logic/RopeThrowPreviewBuilder.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "RopeComponentInternal.h"
 #include "RopeMathHelpers.h"
-#include "Subsystem/RopeSimSubsystem.h"
 
 using RopeComponentPrivate::PhaseName;
 using RopeComponentPrivate::ReleaseCooldownSeconds;
@@ -219,29 +217,38 @@ void URopeComponent::ClearAimRayColliderQueryBounds()
 	// 조준 목록은 이 bounds로만 채워진다 — bounds가 사라진 프레임에 함께 비워, 다음 조준 전까지
 	// 지난 프레임 provider 포인터가 남지 않게 한다(수명은 해당 프레임 한정).
 	SimFrame.AimFrameColliders.Reset();
+	AimTargeting.ResetQuery();
 }
 
-bool URopeComponent::RefreshAimRayQueryColliders(const FRopeAimRayThrowRequest& Request)
+void URopeComponent::QueueAimRayQuery(const FRopeAimRayThrowRequest& Request)
 {
 	if (!Request.IsValid())
 	{
 		ClearAimRayColliderQueryBounds();
-		return false;
+		return;
 	}
 
-	SetAimRayColliderQueryBounds(
-		Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
-	if (URopeSimSubsystem* RopeSim = URopeSimSubsystem::Get(GetWorld()))
+	AimTargeting.QueuePendingQuery(Request);
+	// 같은 PrePhysics 구간에 실제 throw가 먼저 큐에 들어왔다면 HUD 요청이 그 입력 bounds를 덮지 않는다.
+	// 실제 요청은 이 프레임 gather에서 정확히 포함돼야 하고, HUD 결과는 어차피 phase 전이 뒤 소비되지 않는다.
+	if (!AimTargeting.HasPendingThrow() &&
+		(!PendingGuaranteedAimThrow.bQueued || PendingGuaranteedAimThrow.bResolved))
 	{
-		if (RopeSim->RefreshAimFrameCollidersForImmediateQuery(*this))
-		{
-			return true;
-		}
+		SetAimRayColliderQueryBounds(
+			Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
 	}
+}
 
-	// bounds만 유효하고 조준 스냅샷 갱신은 실패한 상태를 남기면 GetAimQueryColliders가 빈/지난 목록을
-	// 정상 결과처럼 선택한다. 실패 시 둘을 함께 무효화해 기존 물리 스냅샷 폴백 계약을 보존한다.
-	ClearAimRayColliderQueryBounds();
+bool URopeComponent::GetLatestAimRayQueryResult(FRopeAimRayQueryResult& OutResult) const
+{
+	return AimTargeting.GetLatestQueryResult(OutResult);
+}
+
+bool URopeComponent::RefreshAimRayQueryColliders(const FRopeAimRayThrowRequest& Request)
+{
+	// 소스 호환만 유지한다. 이름과 달리 provider를 즉시 다시 돌리지 않으며, 결과는 정상 gather 뒤
+	// GetLatestAimRayQueryResult로 소비해야 한다.
+	QueueAimRayQuery(Request);
 	return false;
 }
 
@@ -266,6 +273,42 @@ void URopeComponent::QueueAimRayThrow(const FRopeAimRayThrowRequest& Request)
 	AimTargeting.QueuePendingThrow(Request);
 	SetAimRayColliderQueryBounds(
 		Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
+}
+
+bool URopeComponent::QueueGuaranteedAimThrow(const FRopeAimRayThrowRequest& Request, bool bExecuteWhenReady)
+{
+	if (ResolveMode != ERopeWrapResolveMode::GuaranteedWrap || !CanThrowNow() || PendingGuaranteedAimThrow.bQueued)
+	{
+		return false;
+	}
+
+	PendingGuaranteedAimThrow.Reset();
+	PendingGuaranteedAimThrow.Request = Request;
+	PendingGuaranteedAimThrow.bQueued = true;
+	PendingGuaranteedAimThrow.bExecuteWhenReady = bExecuteWhenReady;
+	SetAimRayColliderQueryBounds(
+		Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
+	return true;
+}
+
+bool URopeComponent::RequestExecuteQueuedGuaranteedAimThrow()
+{
+	if (!PendingGuaranteedAimThrow.bQueued)
+	{
+		return false;
+	}
+
+	PendingGuaranteedAimThrow.bExecuteWhenReady = true;
+	if (PendingGuaranteedAimThrow.bResolved)
+	{
+		ExecutePendingGuaranteedAimThrow();
+	}
+	return true;
+}
+
+void URopeComponent::CancelQueuedGuaranteedAimThrow()
+{
+	PendingGuaranteedAimThrow.Reset();
 }
 
 bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext,
@@ -334,6 +377,86 @@ void URopeComponent::DispatchCaptured(FName Bone)
 #pragma endregion Throw_Public_API
 
 #pragma region Throw_Phase_State
+
+void URopeComponent::ResolvePendingAimQuery()
+{
+	FRopeAimRayThrowRequest Request;
+	if (!AimTargeting.TakePendingQuery(Request))
+	{
+		return;
+	}
+
+	FRopeAimRayQueryResult Result;
+	Result.Request = Request;
+	Result.ResolvedContext = Request.BaseContext;
+	Result.bHitTarget = ResolveAimRayThrowContext(
+		Request, Result.ResolvedContext, &Result.Hit, &Result.BlockedHit);
+	AimTargeting.StoreLatestQueryResult(Result);
+}
+
+void URopeComponent::ResolvePendingGuaranteedAimThrow()
+{
+	if (!PendingGuaranteedAimThrow.bQueued || PendingGuaranteedAimThrow.bResolved)
+	{
+		return;
+	}
+
+	FRopeThrowContext& ResolvedContext = PendingGuaranteedAimThrow.ResolvedContext;
+	ResolvedContext = PendingGuaranteedAimThrow.Request.BaseContext;
+	ResolveAimRayThrowContext(PendingGuaranteedAimThrow.Request, ResolvedContext);
+
+	FString FailureReason;
+	BuildPreparedWrappingPreviewFromResolvedContext(
+		ResolvedContext, PendingGuaranteedAimThrow.Prepared, &FailureReason);
+	PendingGuaranteedAimThrow.bResolved = true;
+	PendingGuaranteedAimThrow.Request.OnPrepared.ExecuteIfBound(PendingGuaranteedAimThrow.Prepared);
+
+	if (PendingGuaranteedAimThrow.bExecuteWhenReady)
+	{
+		ExecutePendingGuaranteedAimThrow();
+	}
+}
+
+bool URopeComponent::ExecutePendingGuaranteedAimThrow()
+{
+	if (!PendingGuaranteedAimThrow.bQueued || !PendingGuaranteedAimThrow.bResolved)
+	{
+		return false;
+	}
+
+	FPendingGuaranteedAimThrow Pending = MoveTemp(PendingGuaranteedAimThrow);
+	PendingGuaranteedAimThrow.Reset();
+
+	bool bExecuted = false;
+	if (CanThrowNow())
+	{
+		if (Pending.Prepared.IsValid())
+		{
+			bExecuted = ThrowWithPreparedPreview(Pending.Prepared);
+		}
+		else
+		{
+			// 입력 프레임의 miss를 notify 시점에 다시 질의하지 않는다. 그때 확정한 방향 그대로 free arc로 던진다.
+			EnsureRopeInitialized();
+			const FRopeThrowContext ResolvedThrow = ResolveThrowContext(Pending.ResolvedContext);
+			const float FreeLen = FMath::Max(Sim.RopeLength, RopeLength);
+			const FVector FreeEndpoint = ResolvedThrow.Origin + ResolvedThrow.FrameForward.GetSafeNormal() * FreeLen;
+			OnDeployFromReel();
+			StartFreeGuidedThrow(ResolvedThrow, FreeEndpoint);
+			bExecuted = Phase == ERopePhase::GuidedThrow;
+		}
+	}
+
+	if (bExecuted)
+	{
+		Pending.Request.OnResolved.ExecuteIfBound();
+	}
+	else
+	{
+		Pending.Request.OnRejected.ExecuteIfBound();
+	}
+	return bExecuted;
+}
 
 void URopeComponent::ResolvePendingAimThrow()
 {

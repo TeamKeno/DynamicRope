@@ -314,9 +314,14 @@ public:
 
 	/** Aim ray가 검사할 월드 구간을 collider subsystem의 조준 수집 region으로 등록한다. */
 	void SetAimRayColliderQueryBounds(const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius);
-	/** Aim ray 모드가 끝났을 때 조준 수집 region과 그 스냅샷을 함께 비운다. */
+	/** Aim ray 모드가 끝났을 때 조준 수집 region, 스냅샷, pending/캐시 결과를 함께 비운다. */
 	void ClearAimRayColliderQueryBounds();
-	/** 즉시 HUD/preview 질의 전에 request bounds를 등록하고 중앙 subsystem의 조준 snapshot을 갱신한다. */
+	/** HUD/preview 요청을 등록한다. 정상 subsystem collider gather 직후 해석되며 즉시 재수집하지 않는다. */
+	void QueueAimRayQuery(const FRopeAimRayThrowRequest& Request);
+	/** 정상 gather에서 확정한 최근 HUD/preview 결과. 다음 Wielder tick이 소비하므로 최대 1프레임 지연된다. */
+	bool GetLatestAimRayQueryResult(FRopeAimRayQueryResult& OutResult) const;
+	/** 호환용 레거시 API. 즉시 provider 재수집은 하지 않고 QueueAimRayQuery로 전환하며 항상 false를 반환한다. */
+	UE_DEPRECATED(5.7, "Use QueueAimRayQuery/GetLatestAimRayQueryResult. Immediate collider refresh was removed.")
 	bool RefreshAimRayQueryColliders(const FRopeAimRayThrowRequest& Request);
 	/** 현재 조준 collider 목록으로 Aim 요청을 해석한다. hit이 없으면 OutContext는 BaseContext fallback이다. */
 	bool ResolveAimRayThrowContext(const FRopeAimRayThrowRequest& Request, FRopeThrowContext& OutContext,
@@ -353,6 +358,17 @@ public:
 
 	/** Prepared preview를 권위 있는 경로로 사용해 던진다. Flight/Contacting 재탐색을 타지 않고 GuidedThrow로 진입한다. */
 	bool ThrowWithPreparedPreview(const FRopePreparedThrowPreview& Prepared);
+
+	/**
+	 * Guaranteed 입력 순간의 aim 요청을 정상 collider gather 직후 prepared path로 확정한다. 몽타주가 없으면
+	 * bExecuteWhenReady=true로 즉시 실행하고, 몽타주 경로는 false로 큐에 둔 뒤 notify에서
+	 * RequestExecuteQueuedGuaranteedAimThrow를 호출한다. OnPrepared → 실제 실행 → OnResolved 순서다.
+	 */
+	bool QueueGuaranteedAimThrow(const FRopeAimRayThrowRequest& Request, bool bExecuteWhenReady);
+	/** 큐 결과가 준비됐으면 즉시 실행하고, 아직 gather 전이면 준비 직후 실행하도록 표시한다. */
+	bool RequestExecuteQueuedGuaranteedAimThrow();
+	/** 몽타주 취소/모드 변경/EndPlay에서 아직 실행하지 않은 Guaranteed 요청을 버린다. */
+	void CancelQueuedGuaranteedAimThrow();
 
 	/**
 	 * 던지기 준비(Reel/장전) 상태로 진입한다 — 창(팁)을 손 소켓에 든다(로프 튜브 표시는
@@ -843,8 +859,12 @@ private:
 	void ResetTransientPhaseState();
 
 	// Aim-ray 조준 로직/상태는 FRopeAimTargeting(AimTargeting 멤버)으로 분리됐다. 여기엔 서브시스템
-	// 프레임 계약 진입점 2개만 남는다 — StartFreshThrow 전이(오케스트레이션)와 SimFrame 접근이 걸려
+	// 프레임 계약 진입점만 남는다 — StartFreshThrow 전이(오케스트레이션)와 SimFrame 접근이 걸려
 	// 있어 컴포넌트가 소유한다.
+	// Subsystem이 AimFrameColliders를 채운 직후 HUD/preview pending query를 결과 캐시로 확정한다.
+	void ResolvePendingAimQuery();
+	// Guaranteed 입력 요청을 같은 조준 목록으로 prepared path까지 확정하고, 실행 대기 상태면 즉시 던진다.
+	void ResolvePendingGuaranteedAimThrow();
 	// Subsystem이 FrameColliders를 채운 직후 호출해 pending request를 hit/fallback context로 확정한다.
 	void ResolvePendingAimThrow();
 	// aim ray throw가 지정한 mesh+bone만 contact/wrap 후보로 유지한다.
@@ -931,9 +951,27 @@ private:
 	bool bHasFlightGuidePlaneNormal = false;
 	FVector FlightGuidePlaneNormal = FVector::RightVector;
 
-	// Aim-ray 조준 상태(throw당 wrap 대상 잠금 + pending aim throw 큐). 질의/잠금 판정 로직 포함 —
+	// Aim-ray 조준 상태(throw당 wrap 대상 잠금 + pending HUD/preview query/result + aim throw 큐).
+	// 질의/잠금 판정 로직 포함 —
 	// FRopeAimTargeting(Logic/RopeAimTargeting.h) 주석 참조.
 	FRopeAimTargeting AimTargeting;
+
+	/** 입력 ray를 정상 gather에서 한 번 확정한 뒤 즉시 실행하거나 몽타주 notify까지 보관하는 ③ 전용 상태. */
+	struct FPendingGuaranteedAimThrow
+	{
+		FRopeAimRayThrowRequest Request;
+		FRopeThrowContext ResolvedContext;
+		FRopePreparedThrowPreview Prepared;
+		bool bQueued = false;
+		bool bResolved = false;
+		bool bExecuteWhenReady = false;
+
+		void Reset() { *this = FPendingGuaranteedAimThrow(); }
+	};
+	FPendingGuaranteedAimThrow PendingGuaranteedAimThrow;
+
+	/** 확정된 ③ 요청을 재질의 없이 prepared 또는 입력 시점 free-arc로 실행하고 완료/거부 콜백을 보낸다. */
+	bool ExecutePendingGuaranteedAimThrow();
 
 	//~ 페이즈 타이머 --------------------------------------------------------
 	/** Contacting 체류 시간(WrapDecisionTime 판정). */

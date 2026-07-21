@@ -77,7 +77,8 @@ class URopeAimWidget;
 
 /**
  * 조준 HUD용 프레임 샘플: aim ray가 지금 어떤 감김 가능 대상을 겨누고 있는가.
- * Aim ray 모드일 때 wielder가 틱마다 캐시한다(스윕 레이 1회/프레임 — preview 경로와 같은 비용 등급).
+ * Aim ray 모드일 때 wielder가 요청을 등록하고, subsystem의 정상 collider gather 직후 해석한 결과를
+ * 다음 틱에 캐시한다(최대 1프레임 지연 — HUD 때문에 provider를 추가 수집하지 않는다).
  * 소비자(URopeAimWidget/BP)는 읽기 전용 — Mesh는 표시/식별 용도로만 쓸 것.
  */
 USTRUCT(BlueprintType)
@@ -491,7 +492,7 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Rope|Aim HUD")
 	FRopeWielderOnAimTargetLost OnAimTargetLost;
 
-	/** 이번 프레임 조준 HUD 샘플(aim ray 모드에서 틱마다 갱신 — 그 외 모드에서는 빈 샘플). */
+	/** 최근 정상 collider gather에서 확정한 조준 HUD 샘플(aim ray 모드에서 틱마다 소비·갱신). */
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim HUD")
 	const FRopeAimHudSample& GetAimHudSample() const { return AimHudSample; }
 
@@ -513,10 +514,10 @@ protected:
 	virtual void NotifyThrowRejected(ERopeThrowRejectReason Reason) {}
 
 private:
-	/** 이번 프레임 조준 HUD 샘플(Tick에서 UpdateAimHudSample이 갱신). */
+	/** 최근 정상 collider gather의 조준 HUD 샘플(Tick에서 UpdateAimHudSample이 결과를 소비해 갱신). */
 	FRopeAimHudSample AimHudSample;
 
-	/** 이번 프레임 HUD 스윕이 확정한 throw context. Preview는 같은 프레임이면 이를 재사용한다. */
+	/** 최근 정상 gather가 확정한 throw context. Preview는 HUD가 소비한 같은 Wielder tick에 이를 재사용한다. */
 	FRopeThrowContext AimRayFrameThrowContext;
 	uint64 AimRayFrameContextStamp = 0;
 	bool bHasAimRayFrameThrowContext = false;
@@ -526,8 +527,8 @@ private:
 	TObjectPtr<URopeAimWidget> AimHudWidget = nullptr;
 
 	/**
-	 * aim ray 스윕 1회로 조준 HUD 샘플을 갱신하고, 대상 (Mesh, Bone) 변화 시
-	 * OnAimTargetChanged/OnAimTargetLost를 발화한다(Tick, aim ray 모드 전용).
+	 * aim 요청을 등록하고 정상 gather의 최근 결과로 HUD 샘플을 갱신한 뒤, 대상 (Mesh, Bone) 변화 시
+	 * OnAimTargetChanged/OnAimTargetLost를 발화한다(Tick, aim ray 모드 전용, 최대 1프레임 지연).
 	 */
 	void UpdateAimHudSample();
 
@@ -591,10 +592,12 @@ private:
 	FRopeThrowContext BuildBaseThrowContext(const FVector& AimDir) const;
 	// 실제 ray를 새로 검사하고 throw 순간에 고정할 context를 구성한다.
 	FRopeThrowContext BuildThrowContextInternal(const FVector& AimDir) const;
-	// 같은 프레임 HUD 스윕이 이미 만든 aim context가 있으면 Preview가 재사용한다.
+	// 같은 Wielder tick에 HUD가 소비한 최근 gather의 aim context가 있으면 Preview가 재사용한다.
 	bool TryGetCachedAimRayThrowContext(const FVector& AimDir, FRopeThrowContext& OutContext) const;
 	// 입력 순간의 base frame과 ray 설정을 값 타입 요청으로 캡처한다.
 	FRopeAimRayThrowRequest BuildAimRayThrowRequest(const FVector& AimDir) const;
+	// ③ 실제 입력 ray를 정상 gather 직후 prepared로 확정하도록 큐에 넣는다.
+	bool QueueGuaranteedAimThrow(const FVector& AimDir, bool bExecuteWhenReady);
 	// 선택한 origin 모드를 월드 위치로 해석한다.
 	FVector GetAimRayOrigin() const;
 	float GetAimReachLength() const;
@@ -609,7 +612,9 @@ private:
 	bool UpdateHeldPreparedPreviewForPhase(ERopePhase Phase);
 
 	void OnThrowInput();
+	void OnGuaranteedAimPrepared(FRopePreparedThrowPreview& Prepared);
 	void OnAimRayThrowResolved();
+	void OnAimRayThrowRejected();
 	void OnReleaseInput();
 	void OnPullInputStarted();
 	void OnReelInStarted();
@@ -656,8 +661,8 @@ private:
 	// 마지막 preview tick에서 성공한 prepared 결과. ③에서 "지금 조준이 잡혔는가"를 판정한다.
 	FRopePreparedThrowPreview LastPreparedPreview;
 
-	// 몽타주를 쓰는 경우 입력 시점의 preview를 고정해 두고, AnimNotify_RopeThrow가 ThrowNow를 부를 때 소비한다.
-	FRopePreparedThrowPreview PendingPreparedThrow;
+	// ③ 입력 ray가 정상 gather에서 prepared로 확정되거나 몽타주 notify 실행을 기다리는 동안 true.
+	bool bGuaranteedAimThrowQueued = false;
 
 	// ③ 실행 중(GuidedThrow 포함) 화면에 유지할 확정 path.
 	FRopeWrapPreviewData HeldPreparedPreview;

@@ -2,7 +2,7 @@
 //
 // Aim-ray 조준 로직/상태(UObject-free F-클래스). Wielder의 조준 흐름이 쓰는 swept ray 본 질의
 // (FindAimRayBoneHit), aim throw 컨텍스트 해석, collider 수집 확장 AABB 계산, 그리고 throw당
-// wrap primary 잠금(mesh+bone), resolve mode별 허용 범위 + pending aim throw 큐를 담당한다.
+// wrap primary 잠금(mesh+bone), resolve mode별 허용 범위 + pending HUD/preview query와 aim throw 큐를 담당한다.
 // UObject 컨텍스트(collider 스냅샷/폴백 치수/CanWrapTarget 게이트)는 호출마다
 // 파라미터로 주입된다 — 월드 없이 단위 테스트 가능. StartFreshThrow *전이*가 걸린 진입점
 // (QueueAimRayThrow/ResolvePendingAimThrow)은 URopeComponent에 남는다(오케스트레이션).
@@ -37,6 +37,9 @@ struct FRopeAimRayHitResult
 	float TargetBoundsRadius = 0.0f;
 };
 
+/** Guaranteed prepared가 정상 gather에서 확정됐을 때 실행한다. 콜백은 실제 throw에 쓸 값을 수정할 수 있다. */
+DECLARE_DELEGATE_OneParam(FRopeAimPreparedDelegate, FRopePreparedThrowPreview&);
+
 /** Wielder가 입력 순간 고정하고 RopeSimSubsystem의 최신 collider 수집 직후 해결할 Aim throw 요청. */
 struct FRopeAimRayThrowRequest
 {
@@ -49,12 +52,41 @@ struct FRopeAimRayThrowRequest
 	float ReachLength = 0.0f;
 	float QueryRadius = 0.0f;
 	float SweepStep = 2.0f;
+	// Guaranteed prepared가 확정된 직후, 실제 실행 전에 호출한다(owner-local guide frame 저장 등).
+	FRopeAimPreparedDelegate OnPrepared;
 	// StartFreshThrow 완료 뒤 실행한다. Wielder를 직접 참조하지 않는 C++ 전용 완료 알림이다.
 	FSimpleDelegate OnResolved;
+	// 큐 등록 또는 실제 실행이 거부됐을 때 실행한다.
+	FSimpleDelegate OnRejected;
 
 	bool IsValid() const
 	{
 		return RayLength > KINDA_SMALL_NUMBER && !RayDirection.IsNearlyZero();
+	}
+};
+
+/** 정상 collider gather 직후 해석해 다음 Wielder tick의 HUD/preview가 소비하는 조준 결과. */
+struct FRopeAimRayQueryResult
+{
+	FRopeAimRayThrowRequest Request;
+	FRopeThrowContext ResolvedContext;
+	FRopeAimRayHitResult Hit;
+	FRopeAimRayHitResult BlockedHit;
+	bool bHitTarget = false;
+	// Hit 공개 계약은 raw pointer를 유지하되, 프레임을 넘겨 캐시하는 동안에는 이 약참조가 수명을 검증한다.
+	TWeakObjectPtr<const USceneComponent> CachedHitMesh = nullptr;
+	TWeakObjectPtr<const USceneComponent> CachedBlockedMesh = nullptr;
+
+	bool IsValid() const { return Request.IsValid(); }
+	void CaptureMeshReferences()
+	{
+		CachedHitMesh = Hit.Mesh;
+		CachedBlockedMesh = BlockedHit.Mesh;
+	}
+	void RestoreMeshPointers()
+	{
+		Hit.Mesh = CachedHitMesh.Get();
+		BlockedHit.Mesh = CachedBlockedMesh.Get();
 	}
 };
 
@@ -141,8 +173,24 @@ public:
 	const USceneComponent* GetLockedTargetMesh() const { return TargetMesh.Get(); }
 	FName GetLockedTargetBone() const { return TargetBone; }
 
+	//~ pending HUD/preview query(PrePhysics 등록 → PostPhysics collider gather 직후 해석) ---
+	void QueuePendingQuery(const FRopeAimRayThrowRequest& Request) { PendingQuery = Request; }
+	bool TakePendingQuery(FRopeAimRayThrowRequest& OutRequest);
+	void StoreLatestQueryResult(FRopeAimRayQueryResult Result)
+	{
+		Result.CaptureMeshReferences();
+		LatestQueryResult = MoveTemp(Result);
+	}
+	bool GetLatestQueryResult(FRopeAimRayQueryResult& OutResult) const;
+	void ResetQuery()
+	{
+		PendingQuery.Reset();
+		LatestQueryResult.Reset();
+	}
+
 	//~ pending aim throw(입력 순간 고정 → collider gather 직후 소비) ---------
 	void QueuePendingThrow(const FRopeAimRayThrowRequest& Request) { PendingThrow = Request; }
+	bool HasPendingThrow() const { return PendingThrow.IsSet(); }
 
 	/** pending을 값으로 꺼내며 비운다(없으면 false). 호출자(ResolvePendingAimThrow)의 StartFreshThrow가
 	 *  transient 상태를 리셋하므로, 요청은 반드시 꺼낸 값으로 이어서 처리한다. */
@@ -162,6 +210,10 @@ private:
 	bool bLocked = false;
 	FName TargetBone = NAME_None;
 	TWeakObjectPtr<const USceneComponent> TargetMesh = nullptr;
+
+	// Wielder가 현재 프레임 등록한 요청과 정상 gather에서 확정한 직전 결과. 결과는 다음 Wielder tick까지 유지한다.
+	TOptional<FRopeAimRayThrowRequest> PendingQuery;
+	TOptional<FRopeAimRayQueryResult> LatestQueryResult;
 
 	// 입력 순간의 ray/frame을 보존하며, Subsystem collider gather 직후 한 번 소비한다.
 	TOptional<FRopeAimRayThrowRequest> PendingThrow;

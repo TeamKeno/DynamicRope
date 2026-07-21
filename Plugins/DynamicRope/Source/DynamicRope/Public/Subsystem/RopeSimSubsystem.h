@@ -115,14 +115,8 @@ public:
 	/** 프레임 시뮬 구동 — FRopeSimTickFunction이 TG_PostPhysics에서 호출한다(테스트는 직접 호출 가능). */
 	void Tick(float DeltaTime);
 
-	/**
-	 * 즉시 조준 질의(HUD/preview)용 collider 스냅샷 새로고침. Wielder tick은 SimTick보다 먼저 돌 수 있어,
-	 * 방금 갱신한 aim ray bounds가 다음 SimTick까지 반영되지 않는 프레임이 생긴다. 이 함수는 현재
-	 * 등록된 provider를 한 번 다시 수집하고 지정 로프의 **AimFrameColliders만** 최신 조준 region으로
-	 * 채운다. 조준 region 결과를 물리용 FrameColliders에 쓰지 않으며, 물리 목록은 SimTick이 물리
-	 * region으로 다시 채운다(조준 대상의 본 콜라이더가 솔버/접촉/디버그 질의로 새는 것을 막는 분리
-	 * 계약: FRopeSimFrameIO::AimFrameColliders 주석 참조).
-	 */
+	/** 호환용 레거시 API. 즉시 provider 재수집은 제거됐으므로 아무 상태도 바꾸지 않고 false를 반환한다. */
+	UE_DEPRECATED(5.7, "Immediate collider refresh was removed. Queue aim work for the normal subsystem gather.")
 	bool RefreshAimFrameCollidersForImmediateQuery(URopeComponent& Rope);
 
 	//~ UWorldSubsystem

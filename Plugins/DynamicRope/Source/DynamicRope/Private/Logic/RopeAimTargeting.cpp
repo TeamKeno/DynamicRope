@@ -235,13 +235,14 @@ bool FRopeAimTargeting::ResolveAimRayThrowContext(const FQueryContext& Ctx, cons
 	OutContext.FrameForward = HitAimDir;
 	OutContext.bHasAimGuideHit = true;
 	OutContext.AimGuideBone = Hit.Bone;
-	OutContext.AimGuideMesh = Hit.Mesh;
+	const USceneComponent* HitMesh = Hit.Mesh;
+	OutContext.AimGuideMesh = HitMesh;
 	OutContext.AimGuideHitWorldPos = Hit.HitWorldPos;
 	// 조준 hit을 대상 본 기준 로컬로도 저장한다 — 비행/커밋 시 현재 본 트랜스폼으로 복원해
 	// 움직이는 대상을 추종한다(월드 고정 AimGuideHitWorldPos만으로는 팁이 허공에 뜬다).
-	if (Hit.Mesh && !Hit.Bone.IsNone())
+	if (HitMesh && !Hit.Bone.IsNone())
 	{
-		const FTransform BoneXform = ResolveBindingWorld(Hit.Mesh, Hit.Bone);
+		const FTransform BoneXform = ResolveBindingWorld(HitMesh, Hit.Bone);
 		OutContext.AimGuideLocalHitPos = BoneXform.InverseTransformPosition(Hit.HitWorldPos);
 		OutContext.bHasAimGuideLocalHit = true;
 	}
@@ -329,6 +330,28 @@ void FRopeAimTargeting::FilterCollidersToTarget(ERopePhase Phase, ERopeWrapResol
 		Collider->GetGPUAttribution(ColliderBone, ColliderMesh);
 		return !IsWrapTarget(Phase, ResolveMode, ColliderMesh, ColliderBone);
 	});
+}
+
+bool FRopeAimTargeting::TakePendingQuery(FRopeAimRayThrowRequest& OutRequest)
+{
+	if (!PendingQuery.IsSet())
+	{
+		return false;
+	}
+	OutRequest = PendingQuery.GetValue();
+	PendingQuery.Reset();
+	return true;
+}
+
+bool FRopeAimTargeting::GetLatestQueryResult(FRopeAimRayQueryResult& OutResult) const
+{
+	if (!LatestQueryResult.IsSet())
+	{
+		return false;
+	}
+	OutResult = LatestQueryResult.GetValue();
+	OutResult.RestoreMeshPointers();
+	return true;
 }
 
 bool FRopeAimTargeting::TakePendingThrow(FRopeAimRayThrowRequest& OutRequest)

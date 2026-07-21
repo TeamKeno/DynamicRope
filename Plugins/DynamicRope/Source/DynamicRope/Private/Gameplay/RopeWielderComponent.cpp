@@ -133,6 +133,8 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	if (Rope)
 	{
+		Rope->CancelQueuedGuaranteedAimThrow();
+		bGuaranteedAimThrowQueued = false;
 		// Wielder가 사라진 뒤에도 로프의 collider 수집 범위가 조준 ray 방향으로 남지 않게 정리한다.
 		Rope->ClearAimRayColliderQueryBounds();
 		Rope->OnPresetApplied.RemoveDynamic(this, &URopeWielderComponent::HandleRopePresetApplied);
@@ -184,36 +186,43 @@ void URopeWielderComponent::UpdateAimHudSample()
 	// (③ 비-Reel에서 이 스윕이 유일한 SDF 비용이었다: UpdateThrowPreview는 이미 prepared를 안 만든다.)
 	if (IsAimActive())
 	{
-		const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(FVector::ZeroVector);
-		Rope->RefreshAimRayQueryColliders(Request);
-		FRopeThrowContext ResolvedContext = Request.BaseContext;
-		const FVector RayDirection = Request.RayDirection.GetSafeNormal();
-		AimHudSample.RayOrigin = Request.RayOrigin;
+		const FRopeAimRayThrowRequest CurrentRequest = BuildAimRayThrowRequest(FVector::ZeroVector);
+		// PrePhysics에서는 요청만 등록한다. PostPhysics의 정상 collider gather 직후 Rope가 해석하고,
+		// 여기서는 직전 gather 결과를 소비한다(최대 1프레임 지연, 전역 provider 수집은 프레임당 1회).
+		Rope->QueueAimRayQuery(CurrentRequest);
+
+		FRopeAimRayQueryResult QueryResult;
+		const bool bHasResolvedQuery = Rope->GetLatestAimRayQueryResult(QueryResult) && QueryResult.IsValid();
+		const FRopeAimRayThrowRequest& DisplayRequest = bHasResolvedQuery ? QueryResult.Request : CurrentRequest;
+		const FRopeThrowContext& ResolvedContext = bHasResolvedQuery
+			? QueryResult.ResolvedContext
+			: CurrentRequest.BaseContext;
+		const FVector RayDirection = DisplayRequest.RayDirection.GetSafeNormal();
+		AimHudSample.RayOrigin = DisplayRequest.RayOrigin;
 		AimHudSample.RayDirection = RayDirection;
-		AimHudSample.RayLength = Request.RayLength;
+		AimHudSample.RayLength = DisplayRequest.RayLength;
 		// 설정 반경이 0(기본)이면 로프/접촉 폴백이 걸린다 — 질의가 실제로 쓴 값을 그대로 담아야
 		// HUD/디버거가 검사 두께를 정확히 그린다.
-		AimHudSample.QueryRadius = Rope->GetAimRayEffectiveQueryRadius(Request.QueryRadius);
-		AimHudSample.AimWorldPos = Request.RayOrigin + RayDirection * Request.RayLength;
-		FRopeAimRayHitResult Hit;
-		FRopeAimRayHitResult Blocked;
+		AimHudSample.QueryRadius = Rope->GetAimRayEffectiveQueryRadius(DisplayRequest.QueryRadius);
+		AimHudSample.AimWorldPos = DisplayRequest.RayOrigin + RayDirection * DisplayRequest.RayLength;
 		// 이 샘플이 조준 시각화의 단일 소스다 — HUD 위젯과 Gameplay Debugger([J]aim)가 함께 읽는다.
-		const bool bHitTarget = Rope->ResolveAimRayThrowContext(
-			Request, ResolvedContext, &Hit, &Blocked);
-		if (bHitTarget && Hit.bHit)
+		if (bHasResolvedQuery && QueryResult.bHitTarget && QueryResult.Hit.bHit && QueryResult.Hit.Mesh)
 		{
+			const FRopeAimRayHitResult& Hit = QueryResult.Hit;
+			const USceneComponent* HitMesh = Hit.Mesh;
 			AimHudSample.bHasTarget = true;
 			AimHudSample.Bone = Hit.Bone;
 			// 샘플은 읽기 전용 계약(헤더 주석) — BP 노출을 위해 non-const로 보관만 한다.
-			AimHudSample.Mesh = const_cast<USceneComponent*>(Hit.Mesh);
-			AimHudSample.TargetWorldPos = ResolveBindingWorld(Hit.Mesh, Hit.Bone).GetLocation();
+			AimHudSample.Mesh = const_cast<USceneComponent*>(HitMesh);
+			AimHudSample.TargetWorldPos = ResolveBindingWorld(HitMesh, Hit.Bone).GetLocation();
 			AimHudSample.HitWorldPos = Hit.HitWorldPos;
 			AimHudSample.TargetRadius = Hit.TargetBoundsRadius;
 			AimHudSample.Distance = Hit.Distance;
 			AimHudSample.AimWorldPos = Hit.HitWorldPos;
 		}
-		else if (Blocked.bHit)
+		else if (bHasResolvedQuery && QueryResult.BlockedHit.bHit)
 		{
+			const FRopeAimRayHitResult& Blocked = QueryResult.BlockedHit;
 			// ray는 맞았지만 wrap 불가 — 빨강 표시. 본 바인딩이 없을 수 있어 걸린 지점을 링 중심으로 쓴다.
 			AimHudSample.bBlocked = true;
 			AimHudSample.Bone = Blocked.Bone;
@@ -225,7 +234,7 @@ void URopeWielderComponent::UpdateAimHudSample()
 			AimHudSample.AimWorldPos = Blocked.HitWorldPos;
 		}
 
-		if (Request.IsValid())
+		if (bHasResolvedQuery && DisplayRequest.IsValid())
 		{
 			AimRayFrameThrowContext = ResolvedContext;
 			bHasAimRayFrameThrowContext = true;
@@ -233,6 +242,11 @@ void URopeWielderComponent::UpdateAimHudSample()
 	}
 	else if (Rope)
 	{
+		if (bGuaranteedAimThrowQueued)
+		{
+			Rope->CancelQueuedGuaranteedAimThrow();
+			bGuaranteedAimThrowQueued = false;
+		}
 		// 조준 불가능한 phase에서는 이전 ray bounds가 collider 수집 범위를 계속 넓히지 않게 한다.
 		Rope->ClearAimRayColliderQueryBounds();
 	}
@@ -953,22 +967,10 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContextInternal(const FVector
 	}
 
 	const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(AimDir);
-	FRopeThrowContext Context = Request.BaseContext;
-	if (Rope)
-	{
-		// Preview context는 current ray bounds로 snapshot을 즉시 갱신한 뒤 해석한다.
-		// 실제 throw는 QueueAimRayThrow 경로를 써서 SimTick의 중앙 수집 직후 확정한다.
-		if (Request.IsValid())
-		{
-			Rope->RefreshAimRayQueryColliders(Request);
-			Rope->ResolveAimRayThrowContext(Request, Context);
-		}
-		else
-		{
-			Rope->ClearAimRayColliderQueryBounds();
-		}
-	}
-	return Context;
+	// 첫 조준 프레임 또는 명시 AimDir은 아직 정상 gather에서 확정한 캐시가 없다. 여기서 provider를
+	// 즉시 재수집하지 않고 base fallback을 반환한다. 실제 throw는 QueueAimRayThrow가 같은 프레임의
+	// PostPhysics gather 직후 확정하며, HUD/preview는 다음 틱부터 위 캐시를 사용한다.
+	return Request.BaseContext;
 }
 
 bool URopeWielderComponent::TryGetCachedAimRayThrowContext(const FVector& AimDir, FRopeThrowContext& OutContext) const
@@ -1006,6 +1008,39 @@ FRopeAimRayThrowRequest URopeWielderComponent::BuildAimRayThrowRequest(const FVe
 	return Request;
 }
 
+bool URopeWielderComponent::QueueGuaranteedAimThrow(const FVector& AimDir, bool bExecuteWhenReady)
+{
+	if (bGuaranteedAimThrowQueued)
+	{
+		// 같은 입력/몽타주 요청이 이미 정상 gather 또는 notify를 기다리는 중이다. 기존 요청을 보존한다.
+		return false;
+	}
+	if (!Rope || !Rope->CanThrowNow())
+	{
+		bGuaranteedAimThrowQueued = false;
+		NotifyThrowRejected(ERopeThrowRejectReason::NotInReel);
+		OnThrowRejected.Broadcast(ERopeThrowRejectReason::NotInReel);
+		return false;
+	}
+
+	FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(AimDir);
+	Request.OnPrepared = FRopeAimPreparedDelegate::CreateUObject(
+		this, &URopeWielderComponent::OnGuaranteedAimPrepared);
+	Request.OnResolved = FSimpleDelegate::CreateUObject(this, &URopeWielderComponent::OnAimRayThrowResolved);
+	Request.OnRejected = FSimpleDelegate::CreateUObject(this, &URopeWielderComponent::OnAimRayThrowRejected);
+	if (!Rope->QueueGuaranteedAimThrow(Request, bExecuteWhenReady))
+	{
+		bGuaranteedAimThrowQueued = false;
+		NotifyThrowRejected(ERopeThrowRejectReason::RopeRejected);
+		OnThrowRejected.Broadcast(ERopeThrowRejectReason::RopeRejected);
+		return false;
+	}
+
+	bGuaranteedAimThrowQueued = true;
+	ClearPreviewDisplay();
+	return true;
+}
+
 void URopeWielderComponent::Throw()
 {
 	// 서브클래스 게임 규칙 게이트(스태미나/상태 등). 몽타주 경로의 ThrowNow는 재검사하지 않는다(헤더 계약).
@@ -1018,28 +1053,15 @@ void URopeWielderComponent::Throw()
 
 	if (UsesLockedPreview())
 	{
-		// ③: 유효한 prepared preview가 있으면(대상 조준 성공) 그 경로대로 무조건 꽂고(GuidedThrow),
-		// 없으면(허공/사거리 밖) ThrowInDirection이 레이 끝점을 향한 아치 던지기로 폴백한다 — 던지기 입력을
-		// 버리지 않는다(2026-07-14 보장 재정의: 보장은 '조준한 대상'에 대한 것).
-		if (LastPreparedPreview.IsValid())
+		// ③ 실제 발사는 화면용 1프레임 캐시를 쓰지 않는다. 입력 순간 ray를 같은 프레임 정상 gather에서
+		// prepared로 확정하고, 몽타주가 있으면 그 결과만 notify까지 보관한다.
+		if (!QueueGuaranteedAimThrow(FVector::ZeroVector, /*bExecuteWhenReady*/ !ThrowMontage))
 		{
-			// 몽타주가 있으면 손을 놓는 AnimNotify까지 시간이 지나므로, 입력 순간 플레이어가 본 preview를 보존한다.
-			// notify 시점에 새로 build하면 손/카메라/타겟 포즈 변화로 결과가 달라질 수 있다.
-			PendingPreparedThrow = LastPreparedPreview;
-			HeldPreparedPreview = ResolvePreparedPreviewForDisplay(LastPreparedPreview);
-			HeldPreviewExpireTimeSeconds = 0.0f;
-		}
-		else
-		{
-			PendingPreparedThrow.Reset();
+			return;
 		}
 		if (ThrowMontage)
 		{
 			PlayThrowMontage();
-		}
-		else
-		{
-			ThrowNow();
 		}
 		return;
 	}
@@ -1066,54 +1088,16 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 	{
 		if (UsesLockedPreview())
 		{
-			// ThrowNow는 즉시 throw와 AnimNotify throw가 모두 들어오는 실제 실행 지점이다.
-			// 몽타주 경로에서는 PendingPreparedThrow를 우선 소비하고, 즉시 throw에서는 LastPreparedPreview를 쓴다.
-			const FRopePreparedThrowPreview Prepared = PendingPreparedThrow.IsValid()
-				? PendingPreparedThrow
-				: LastPreparedPreview;
-			if (!Prepared.IsValid())
+			// 몽타주 입력이 이미 큐를 만들었다면 notify는 실행 의사만 전달한다. gather가 아직이면 준비 직후,
+			// 이미 prepared가 준비됐으면 지금 실행된다.
+			if (Rope->RequestExecuteQueuedGuaranteedAimThrow())
 			{
-				ClearThrowPreview();
-				PendingPreparedThrow.Reset();
-				LastPreparedPreview.Reset();
-
-				// 던질 수 없는 phase(③ 비-Reel)면 여기서 끝낸다. 로프의 게이트(ThrowWithContext)는 void라
-				// 거절을 알릴 수 없어서, 이 검사가 없으면 아무 일도 안 한 던지기에 OnThrown이 발화한다
-				// (몽타주 경로면 와인드업이 다 돌아간 뒤에).
-				if (!Rope->CanThrowNow())
-				{
-					NotifyThrowRejected(ERopeThrowRejectReason::NotInReel);
-					OnThrowRejected.Broadcast(ERopeThrowRejectReason::NotInReel);
-					return;
-				}
-
-				// 허공(대상 없음/사거리 밖): 거부 대신 레이 끝점을 향한 아치 던지기로 폴백한다(2026-07-14 보장
-				// 재정의). 로프의 ThrowWithContext ③ 경로가 preview 재빌드에 실패하면 손 원점 → 레이 끝점 직선을
-				// 아치로 재생하고(StartFreeGuidedThrow — 조준 던지기와 같은 GuidedThrow, 대상/앵커만 없다),
-				// 꽂을 대상이 없으므로 아치 완료 시 Free로 낙하한다. 방향은 조준 컨텍스트(BuildThrowContext)로 해석.
-				Rope->ThrowWithContext(BuildThrowContext(AimDir));
-				NotifyThrown();
-				OnThrown.Broadcast();
 				return;
 			}
 
-			HeldPreparedPreview = ResolvePreparedPreviewForDisplay(Prepared);
-			HeldPreviewExpireTimeSeconds = 0.0f;
-			// 프리뷰는 Reel(조준)에서만 보인다 — 발사 즉시 표시를 지운다(HeldPreparedPreview 데이터는
-			// 유지: phase-gate 유효성 검사와 Wrapped-hold 옵션이 참조). 이후 GuidedThrow 분기가 계속
-			// 지운 상태를 유지한다.
-			ClearPreviewDisplay();
-			PendingPreparedThrow.Reset();
-			LastPreparedPreview.Reset();
-			if (!Rope->ThrowWithPreparedPreview(Prepared))
-			{
-				ClearThrowPreview();
-				NotifyThrowRejected(ERopeThrowRejectReason::RopeRejected);
-				OnThrowRejected.Broadcast(ERopeThrowRejectReason::RopeRejected);
-				return;
-			}
-			NotifyThrown();
-			OnThrown.Broadcast();
+			// ThrowInDirection 직행(BP/코드)처럼 선행 Throw()가 없으면 여기서 현재 ray 요청을 만들고
+			// 정상 gather 직후 실행한다.
+			QueueGuaranteedAimThrow(AimDir, /*bExecuteWhenReady*/ true);
 			return;
 		}
 
@@ -1135,9 +1119,32 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 
 void URopeWielderComponent::OnAimRayThrowResolved()
 {
-	// 기존 계약대로 Rope가 Flight에 진입한 뒤 성공 알림을 보낸다.
+	bGuaranteedAimThrowQueued = false;
+	LastPreparedPreview.Reset();
+	ClearPreviewDisplay();
+	// Rope가 실제 실행 페이즈(Assisted=Flight, Guaranteed=GuidedThrow)에 진입한 뒤 성공 알림을 보낸다.
 	NotifyThrown();
 	OnThrown.Broadcast();
+}
+
+void URopeWielderComponent::OnGuaranteedAimPrepared(FRopePreparedThrowPreview& Prepared)
+{
+	// 입력 프레임에 확정한 world path를 owner-local로 바꿔, 몽타주 동안 캐릭터가 움직여도 notify 실행 시
+	// 기존 ③ 계약처럼 현재 owner transform 기준으로 복원한다. 실제 실행 전에 같은 값을 직접 수정한다.
+	StoreAimGuideFrameIfNeeded(Prepared);
+	HeldPreparedPreview = Prepared.IsValid()
+		? ResolvePreparedPreviewForDisplay(Prepared)
+		: FRopeWrapPreviewData();
+	HeldPreviewExpireTimeSeconds = 0.0f;
+	ClearPreviewDisplay();
+}
+
+void URopeWielderComponent::OnAimRayThrowRejected()
+{
+	bGuaranteedAimThrowQueued = false;
+	ClearThrowPreview();
+	NotifyThrowRejected(ERopeThrowRejectReason::RopeRejected);
+	OnThrowRejected.Broadcast(ERopeThrowRejectReason::RopeRejected);
 }
 
 void URopeWielderComponent::PlayThrowMontage()
@@ -1248,6 +1255,11 @@ void URopeWielderComponent::RefreshModeDerivedState()
 	ResolvePreviewComponent(/*bAllowAutoCreate*/ bShowThrowPreview && UsesLockedPreview());
 	if (!UsesLockedPreview())
 	{
+		if (Rope)
+		{
+			Rope->CancelQueuedGuaranteedAimThrow();
+		}
+		bGuaranteedAimThrowQueued = false;
 		ClearPreviewDisplay();
 	}
 	SetComponentTickEnabled(ComputeDesiredTickEnabled());
@@ -1266,11 +1278,15 @@ void URopeWielderComponent::HandleRopePresetApplied(const URopePreset* Preset)
 
 bool URopeWielderComponent::ShouldHoldPreparedPreview()
 {
-	if (!UsesLockedPreview() ||
-		!PendingPreparedThrow.IsValid() ||
-		!ThrowMontage)
+	if (!UsesLockedPreview() || !bGuaranteedAimThrowQueued)
 	{
 		return false;
+	}
+	if (!ThrowMontage)
+	{
+		// 즉시 실행도 PostPhysics gather까지는 큐 상태다. 그 사이 직전 HUD 캐시로 preview를 다시 만들지 않는다.
+		ClearPreviewDisplay();
+		return true;
 	}
 
 	if (!AttachMesh)
@@ -1281,15 +1297,18 @@ bool URopeWielderComponent::ShouldHoldPreparedPreview()
 	const UAnimInstance* Anim = AttachMesh ? AttachMesh->GetAnimInstance() : nullptr;
 	if (Anim && Anim->Montage_IsPlaying(ThrowMontage))
 	{
-		// 던지기 입력 순간 PendingPreparedThrow에 경로를 고정한다(실제 던지기 정확도용) — 유지한다.
-		// 다만 프리뷰는 Reel(조준)에서만 보이면 되므로, 윈드업 몽타주 재생 중에는 표시를 끈다.
-		// 이전엔 고정 경로를 매 틱 그려, 윈드업 동안 캐릭터가 이동하면 지나간 자리에 프리뷰가 남았다.
-		HeldPreparedPreview = ResolvePreparedPreviewForDisplay(PendingPreparedThrow);
+		// 입력 프레임 PostPhysics에서 확정된 결과는 Rope가 notify까지 보관한다. 프리뷰는 Reel 조준에서만
+		// 보이면 되므로 윈드업 중에는 숨기고, 직전 HUD 캐시로 새 path를 만들지 않는다.
 		ClearPreviewDisplay();
 		return true;
 	}
 
-	PendingPreparedThrow.Reset();
+	// 몽타주가 notify 없이 끝났거나 재생에 실패했다면 예약된 실제 throw도 함께 취소한다.
+	if (Rope)
+	{
+		Rope->CancelQueuedGuaranteedAimThrow();
+	}
+	bGuaranteedAimThrowQueued = false;
 	return false;
 }
 
@@ -1399,6 +1418,14 @@ void URopeWielderComponent::UpdateThrowPreview()
 	if (!ShouldUpdateThrowPreviewForPhase(RopePhase))
 	{
 		// 이 phase에서는 preview build 자체가 의미 없으므로 실패 로그를 만들지 않고 조용히 정리한다.
+		ClearThrowPreview();
+		LastPreviewPhase = RopePhase;
+		return;
+	}
+	if (!bHasAimRayFrameThrowContext)
+	{
+		// 첫 조준 프레임은 아직 정상 gather 결과가 없다. base fallback으로 허공 preview를 한 프레임
+		// 그렸다가 target path로 바뀌는 깜빡임을 만들지 않고, 다음 틱의 확정 결과를 기다린다.
 		ClearThrowPreview();
 		LastPreviewPhase = RopePhase;
 		return;

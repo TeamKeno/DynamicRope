@@ -649,32 +649,11 @@ void URopeSimSubsystem::GatherAimCollidersForRope(URopeComponent& Rope, int32 Ro
 	GatherCollidersForRope(Rope, RegionIndex, Rope.SimFrame.AimFrameColliders);
 }
 
-bool URopeSimSubsystem::RefreshAimFrameCollidersForImmediateQuery(URopeComponent& Rope)
+bool URopeSimSubsystem::RefreshAimFrameCollidersForImmediateQuery(URopeComponent& /*Rope*/)
 {
-	const int32 RopeIndex = Ropes.IndexOfByPredicate([&Rope](const TObjectPtr<URopeComponent>& Candidate)
-	{
-		return Candidate.Get() == &Rope;
-	});
-	if (RopeIndex == INDEX_NONE)
-	{
-		return false;
-	}
-
-	// Wielder tick의 즉시 HUD/preview 질의는 SimTick의 Phase 1a보다 먼저 실행될 수 있다. 여기서 같은
-	// 중앙 수집 경로를 한 번 실행해, 방금 설정한 AimRayColliderQueryBounds와 조준 목록을 맞춘다.
-	// 물리용 FrameColliders는 그대로 둔다 — 이 시점은 SimTick 밖이라 로프 위치가 이번 프레임 값으로
-	// 확정되기 전이고, 무엇보다 조준 region(원거리 대상 포함)으로 덮어쓰면 그 대상의 본 콜라이더가
-	// 솔버/접촉/디버그 질의에 그대로 실린다.
-	BuildFrameColliders();
-	const int32 AimRegionIndex = AimRegionIndexOf(RopeIndex);
-	if (!FrameRopeRegions.IsValidIndex(AimRegionIndex) || !FrameRopeRegions[AimRegionIndex].IsValid)
-	{
-		Rope.SimFrame.AimFrameColliders.Reset();
-		return false;
-	}
-
-	GatherAimCollidersForRope(Rope, RopeIndex);
-	return true;
+	// ABI/source 호환용 no-op. 정상 Tick 외부에서 BuildFrameColliders를 호출하면 provider 1회/프레임
+	// 계약과 다중 Wielder region 일관성이 다시 깨지므로 즉시 경로는 복원하지 않는다.
+	return false;
 }
 
 void URopeSimSubsystem::Tick(float DeltaTime)
@@ -758,6 +737,12 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			// 조준 목록은 별도 region(로프 AABB ∪ aim ray)에서 따로 모은다 — 원거리 조준 대상의 본
 			// 콜라이더가 위 물리 목록으로 새지 않게 하는 분리 계약(FRopeSimFrameIO::AimFrameColliders).
 			GatherAimCollidersForRope(*Rope, RopeIndex);
+			// Wielder가 PrePhysics에 등록한 HUD/preview 요청도 여기서 확정한다. 다음 Wielder tick이 이 결과를
+			// 소비하므로 최대 1프레임 지연되지만, HUD 때문에 BuildFrameColliders를 다시 호출하지 않는다.
+			Rope->ResolvePendingAimQuery();
+			// ③ 실제 입력은 HUD 캐시를 쓰지 않는다. 입력 순간 ray를 같은 프레임 조준 목록으로 prepared까지
+			// 확정하고, 즉시 실행 요청이면 여기서 던지며 몽타주 경로면 notify까지 결과를 보관한다.
+			Rope->ResolvePendingGuaranteedAimThrow();
 			// 입력 순간 고정한 ray bounds로 collider를 모은 직후 Aim throw를 확정한다.
 			// 이 순서 덕분에 같은 요청의 최신 조준 목록으로 hit 또는 FrameForward fallback을 결정한다.
 			Rope->ResolvePendingAimThrow();
