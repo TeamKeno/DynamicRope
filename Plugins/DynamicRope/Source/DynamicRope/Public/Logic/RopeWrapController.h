@@ -6,7 +6,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeLifecycleTypes.h"
+#include "Core/RopeSimTypes.h"
+#include "Core/RopeTractionTypes.h"
+#include "Core/RopeWrappingTypes.h"
 // 랩 대상 추상화: FRopeBindingFrame/ResolveBindingWorld(Hold 바인딩, seam A) + FRopeWrapTargetKey(seam B)
 #include "Core/RopeWrapTarget.h"
 

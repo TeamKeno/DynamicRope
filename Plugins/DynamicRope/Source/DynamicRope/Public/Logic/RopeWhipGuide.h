@@ -11,7 +11,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeSimTypes.h"
+#include "Core/RopeThrowTypes.h"
 
 class DYNAMICROPE_API FRopeWhipGuide
 {
