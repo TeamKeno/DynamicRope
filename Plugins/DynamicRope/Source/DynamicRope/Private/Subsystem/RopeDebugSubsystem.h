@@ -6,6 +6,11 @@
 // 다시 읽어(GetSnapshot) 그린다. 대상이 아닌 로프는 flight sweep 같은 캡처 비용을 아예 내지 않는다.
 //
 // 디버그 전용 기능이라 실질 동작은 WITH_GAMEPLAY_DEBUGGER에서만 컴파일된다(shipping에선 빈 셸).
+//
+// **모듈 내부 전용이라 Private에 둔다.** API 표면이 Private/Debug의 FRopeDebugSnapshot·ERopeDebugCapture를
+// 그대로 노출하므로 Public에 두면 그 타입들까지 공개해야 하는데, 실제 사용처는 이 모듈의 Private 소스
+// 셋(카테고리 / RopeComponent / 이 서브시스템 구현)뿐이다. 외부 모듈이 쓸 일이 생기면 그때 스냅샷 타입의
+// 공개 여부부터 결정할 것 — 지금 공개하면 디버그 자료구조가 사실상 플러그인 API가 된다.
 
 #pragma once
 
@@ -18,7 +23,7 @@ class URopeComponent;
 class AActor;
 
 UCLASS()
-class DYNAMICROPE_API URopeDebugSubsystem : public UWorldSubsystem
+class URopeDebugSubsystem : public UWorldSubsystem
 {
 	GENERATED_BODY()
 

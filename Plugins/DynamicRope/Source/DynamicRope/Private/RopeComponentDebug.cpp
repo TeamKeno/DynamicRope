@@ -353,12 +353,17 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugC
 	Snapshot.bGpuStepped = SimFrame.bGpuSteppedThisFrame;
 	Snapshot.bLogicOverride = SimFrame.OverrideFrame.HasAny();
 
-	// centerline 상에서 강조할 latch 노드 인덱스.
+	// centerline 상에서 강조할 latch 노드 인덱스. [P] nodes의 latch 강조와 [I] wrap만 읽으므로,
+	// 기본(aim만) 상태에서는 순회·복사할 이유가 없다.
 	const FRopeWrapState& Wrap = WrapController.State;
 	Snapshot.LatchedNodes.Reset();
-	for (const FRopeLatchNode& Latch : Wrap.Latched)
+	if (EnumHasAnyFlags(CaptureMask, ERopeDebugCapture::Nodes | ERopeDebugCapture::Wrap))
 	{
-		Snapshot.LatchedNodes.Add(Latch.NodeIndex);
+		Snapshot.LatchedNodes.Reserve(Wrap.Latched.Num());
+		for (const FRopeLatchNode& Latch : Wrap.Latched)
+		{
+			Snapshot.LatchedNodes.Add(Latch.NodeIndex);
+		}
 	}
 
 	// wrapped 상세(테이블용)는 Wrapped phase + [I] wrap 보기일 때만.
