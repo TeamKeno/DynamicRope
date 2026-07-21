@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "RopeTestMoverComponent.h"
+#include "Testing/RopeTestMoverComponent.h"
 #include "GameFramework/Actor.h"
 
 URopeTestMoverComponent::URopeTestMoverComponent()

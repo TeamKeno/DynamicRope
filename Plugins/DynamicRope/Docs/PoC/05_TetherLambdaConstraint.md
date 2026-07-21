@@ -245,16 +245,17 @@ s*     = −β · C / dt                          // 목표: 이번 프레임 C�
 
 ## 8. PIE 검증 씬/절차 (CL D)
 
-고정 .umap 대신 **코드 스폰 리그**(`Debug/RopeTetherTestScenes.cpp`, 개발 빌드 전용)로 재현한다 —
-텍스트라 리뷰/머지가 되고, 플레이어 기준 상대 배치라 각자의 `Lvl_*Test` 맵에서 그대로 돈다.
+검증 당시 고정 .umap 대신 **코드 스폰 리그**(`Debug/RopeTetherTestScenes.cpp`, 개발 빌드 전용)를 썼다 —
+텍스트라 리뷰/머지가 되고, 플레이어 기준 상대 배치라 각자의 `Lvl_*Test` 맵에서 그대로 돌았다.
+**리그는 검증 완료 후 삭제됨**(아래 커맨드는 더 이상 존재하지 않는다) — 표는 무엇을 어떻게 확인했는지의
+기록으로만 남긴다.
 
-| 커맨드 | 씬 | 재현 절차 | 기대(레거시 → Constraint) |
+| 커맨드(삭제됨) | 씬 | 재현 절차 | 기대(레거시 → Constraint) |
 |---|---|---|---|
 | `Rope.Test.TetherScene wall` | 전방 4m 기둥(지름 60cm) | 감기 → 뒤로 걷기/점프 탈출 | 벽 쪽 400cm/s 윈치 → **로프 끝 정지(끌림 없음)** |
 | `Rope.Test.TetherScene drag [kg=100]` | 전방 6m 물리 큐브 | 감기 → 걷기/되감기로 끌기 | 탄성 룩/서보 진동 → **질량비 분배·경계 유지**(500kg이면 내가 양보) |
 | `Rope.Test.TetherScene ragdoll` | 배치된 랙돌 캐릭터를 전방 2.5m 소환 | 근접 wrap(자동 랙돌) → 유지/되감기 | 요요/관절 슬램 폭주 → **λ 단방향 = 폭주 없음, 전신 질량 끌림** |
 
-모드 전환: `Rope.Test.TetherMode <mass|binary|constraint>` (월드 내 전 로프, 런타임 한정) — 같은 씬을
-번갈아 A/B. 관찰: 게임플레이 디버거 pull 라인의 `constraint T=현재/상한`(상한 근접 노랑/클램프 빨강),
-`chain`/`tether` 값, 그리고 `Rope.Ragdoll`(수동 랙돌 토글) 병용. 데모 3종(입체기동/도르래/드래곤)
-스모크는 기존 데모 맵에서 `Rope.Test.TetherMode constraint`로 전환해 확인한다.
+A/B에 쓰던 모드 전환 커맨드(`Rope.Test.TetherMode`)는 F단계의 모드 제거와 함께 이미 삭제됐다.
+관찰 지표는 그대로 유효하다: 게임플레이 디버거 pull 라인의 `constraint T=현재/상한`(상한 근접 노랑/
+클램프 빨강), `chain`/`tether` 값, 그리고 `Rope.Ragdoll`(수동 랙돌 토글) 병용.
