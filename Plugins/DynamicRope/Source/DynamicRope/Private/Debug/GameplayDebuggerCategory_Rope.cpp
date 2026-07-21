@@ -105,6 +105,34 @@ namespace
 		}
 	}
 
+	// 근접 노드 인덱스를 연속 구간으로 압축한 문자열("12-16,23-24"). 개수만으로는 알 수 없는 "어디부터
+	// 닿았나 / 한 덩어리인가 나뉘었나"를 한 줄로 읽게 한다. 노드 단위 3D 라벨은 간격이 SegmentLength라
+	// 화면에서 겹쳐 못 읽으므로, 이 정보는 좌측 패널 텍스트로만 낸다.
+	// 입력은 캡처 루프(RopeComponentDebug)가 노드 순회 순서대로 채워 이미 오름차순 — 정렬하지 않는다.
+	FString ProximityRangeString(const TArray<FRopeNodeProximityDebug>& Proximity)
+	{
+		FString Out;
+		for (int32 i = 0; i < Proximity.Num(); )
+		{
+			const int32 RunStart = Proximity[i].NodeIndex;
+			int32 RunEnd = RunStart;
+			while (i + 1 < Proximity.Num() && Proximity[i + 1].NodeIndex == RunEnd + 1)
+			{
+				++i;
+				RunEnd = Proximity[i].NodeIndex;
+			}
+			++i;
+			if (!Out.IsEmpty())
+			{
+				Out += TEXT(",");
+			}
+			Out += (RunStart == RunEnd)
+				? FString::Printf(TEXT("%d"), RunStart)
+				: FString::Printf(TEXT("%d-%d"), RunStart, RunEnd);
+		}
+		return Out;
+	}
+
 	FColor CandidateSourceColor(ERopeContactCandidateSource Source)
 	{
 		switch (Source)
@@ -375,26 +403,24 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		if (UWorld* World = Rope.GetWorld())
 		{
 			constexpr uint8 FG = SDPG_Foreground;
+			// 닿은 노드가 몇 번부터 어디까지인지는 구간 문자열로 낸다 — 노드마다 3D 라벨을 띄우면 간격이
+			// SegmentLength라 서로 겹쳐 읽을 수 없다.
 			AddTextLine(FString::Printf(
-				TEXT("  {grey}proximity n=%d {grey}(requery r+%.0fcm, not solver contacts)"),
-				S.NodeProximity.Num(), S.ProximityQueryMargin));
-			for (const FRopeNodeProximityDebug& NP : S.NodeProximity)
+				TEXT("  {grey}proximity n=%d nodes=%s {grey}(requery r+%.0fcm, not solver contacts)"),
+				S.NodeProximity.Num(), *ProximityRangeString(S.NodeProximity), S.ProximityQueryMargin));
+			for (int32 i = 0; i < S.NodeProximity.Num(); ++i)
 			{
+				const FRopeNodeProximityDebug& NP = S.NodeProximity[i];
 				// 정적 월드=마젠타, 그 외(스켈레탈 본/랩 대상)=주황.
 				const FColor NColor = NP.bWorldStatic ? FColor(255, 0, 255) : FColor(255, 128, 0);
 				const FVector Tip = NP.Position + NP.Normal * 15.0f;
+				// 화살표는 접촉 바깥 법선 그대로 — 축 정렬이 아니라 실제 방향이다.
 				DrawDebugDirectionalArrow(World, NP.Position, Tip, 6.0f, NColor, false, -1.0f, FG, 2.0f);
-				// 면 라벨은 화살표 방향으로 이미 읽히므로 상세 보기에서만 — 접촉 노드가 많으면 화면이 덮인다.
-				if (HasView(EView::Advanced))
+				// 3D 라벨은 첫 노드 하나만. 이 지점이 곧 감김 시작점이라 공간상 위치가 의미를 갖는 유일한
+				// 값이고, 나머지 노드의 번호는 위 nodes=... 구간이 이미 낸다.
+				if (i == 0)
 				{
-					const FVector AN = NP.Normal.GetAbs();
-					FString Face;
-					if (AN.X > 0.9) { Face = NP.Normal.X > 0.0 ? TEXT("+X") : TEXT("-X"); }
-					else if (AN.Y > 0.9) { Face = NP.Normal.Y > 0.0 ? TEXT("+Y") : TEXT("-Y"); }
-					else if (AN.Z > 0.9) { Face = NP.Normal.Z > 0.0 ? TEXT("+Z") : TEXT("-Z"); }
-					// 대각 법선 = 볼록 모서리 접촉.
-					else { Face = TEXT("edge"); }
-					DrawDebugString(World, Tip, FString::Printf(TEXT("n%d %s"), NP.NodeIndex, *Face),
+					DrawDebugString(World, Tip, FString::Printf(TEXT("n%d"), NP.NodeIndex),
 						nullptr, NColor, 0.0f, true, 1.0f);
 				}
 			}
