@@ -189,7 +189,7 @@ bool FRopeRagdollFrictionClampTest::RunTest(const FString& Parameters)
 //  - EvaluateRelativeMotion은 로프 프레임 변위(cm/프레임)에서 표면속도(cm/s)를 dt로 환산해 뺀다.
 //    정지 로프 + 움직이는 표면이면 상대 접선 속도 = 표면 속도 × dt(cm/프레임 단위 — 움직이는 본
 //    위에서도 "스침" 판정이 가능한 근거). dt 환산 누락으로 ~1/dt배 과대였던 버그를 여기서 고정한다.
-//  - ShouldCapture는 현재 품질 게이트가 바이패스라 스파이크가 캡처를 막지 않는다(특성 고정).
+//  - EvaluateCapture는 추가 품질 필터를 적용하지 않아 스파이크가 캡처를 막지 않는다(특성 고정).
 //    전이 프레임 오탐의 실제 방어선은 Contacting 체류(WrapDecisionTime)와 후보 소실 dismiss,
 //    그리고 위 (c)의 dwell 재시작이다.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeRagdollRelativeMotionTest,
@@ -234,12 +234,12 @@ bool FRopeRagdollRelativeMotionTest::RunTest(const FString& Parameters)
 		FMath::IsNearlyEqual(Candidates[0].RelativeTangentialSpeed, 10.0f, 0.05f));
 
 	// 캡처 특성 고정: 표면속도 스파이크(60000)가 있어도 MinLatchNodes만 차면 캡처된다.
-	// 이 단언이 깨지는 날은 품질 게이트가 켜진 날이다 — 그때 스파이크 컷 기준과 함께 갱신할 것.
+	// 추가 품질 필터를 도입할 때는 스파이크 컷 기준과 함께 이 단언을 갱신할 것.
 	TArray<FRopeContactCandidate> SpikeCandidates;
 	SpikeCandidates.Add(MakeSpikeCandidate(3, 60000.0f));
 	SpikeCandidates.Add(MakeSpikeCandidate(4, 60000.0f));
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, Params, SpikeCandidates);
-	TestTrue(TEXT("capture proceeds despite surface-velocity spike (quality gate bypassed — documented behavior)"),
+	TestTrue(TEXT("capture proceeds despite surface-velocity spike (no additional quality filter)"),
 		FRopeFlightContactDetector::EvaluateCapture(SpikeCandidates, Params).bShouldCapture);
 	return true;
 }

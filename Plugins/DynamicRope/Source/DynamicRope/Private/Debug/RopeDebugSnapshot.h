@@ -39,10 +39,6 @@ struct FRopeFlightNodeDebug
 	int32 NodeIndex = INDEX_NONE;
 	FVector PrevPosition = FVector::ZeroVector;
 	FVector Position = FVector::ZeroVector;
-	// NodeSpeed/bFast는 캡처 루프의 게이팅 중간값이다 — 표시는 읽지 않는다(bNearBody만 노란 점으로 나간다).
-	// 셋이 같은 게이팅 식에 함께 쓰이므로 출처를 가르지 않고 구조체에 나란히 둔다.
-	float NodeSpeed = 0.0f;
-	bool bFast = false;
 	bool bNearBody = false;
 	FRopeContact Contact;
 	// Contact.SourceMesh를 캡처 시점에 굳힌 비교 전용 키(후보와 같은 대상인지 판정). 스냅샷은 몇 프레임
@@ -183,7 +179,6 @@ struct FRopeDebugSnapshot
 
 	//~ wrapped(Wrapped phase에서만) --------------------------------------
 	bool bHasWrapped = false;
-	FName WrapBone = NAME_None;
 	FString MeshName;
 	TArray<FRopeLatchNode> Latched;
 	// 최대 세그먼트 장력(FRopeWrapState::Tension 미러)

@@ -683,11 +683,7 @@ private:
 	void OnGuaranteedAimPrepared(FRopePreparedThrowPreview& Prepared);
 	void OnAimRayThrowResolved();
 	void OnAimRayThrowRejected();
-	void OnReleaseInput();
 	void OnPullInputStarted();
-	void OnReelInStarted();
-	void OnReelOutStarted();
-	void OnReelCompleted();
 	void OnReloadInput();
 
 	/**
@@ -710,9 +706,8 @@ private:
 	/** AddMappingContext가 꽂은 IMC를 캐시된 서브시스템에서 뗀다(possession 전환/EndPlay 공용). */
 	void RemoveMappingContext();
 
-	bool bInputBound = false;
-	// 실제로 바인딩을 건 InputComponent. 재빙의로 새 InputComponent가 생기면 bInputBound만으로는
-	// "어디에 걸었는지"를 알 수 없어, 새 컴포넌트엔 안 걸린 채 true가 유지됐다(입력 영구 누락).
+	// 실제로 바인딩을 건 InputComponent. 같은 컴포넌트의 중복 바인딩을 막고,
+	// 재빙의로 InputComponent가 교체되면 기존 바인딩을 정리한 뒤 새 컴포넌트에 다시 건다.
 	TWeakObjectPtr<UInputComponent> BoundInputComponent;
 	// AddMappingContext가 IMC를 꽂은 로컬 플레이어 Enhanced Input 서브시스템(weak). IMC는 Pawn이 아니라
 	// LocalPlayer에 등록되므로, EndPlay가 폰의 현재 컨트롤러에 의존하지 않고 여기서 possession 무관하게
@@ -740,9 +735,6 @@ private:
 	// AirControl 부스트 원복용 저장 상태(스윙 진입 시 저장, 종료/EndPlay 시 복원).
 	bool bAirControlBoosted = false;
 	float SavedAirControl = 0.0f;
-
-	// 마지막 preview tick에서 성공한 prepared 결과. ③에서 "지금 조준이 잡혔는가"를 판정한다.
-	FRopePreparedThrowPreview LastPreparedPreview;
 
 	// ③ 입력 ray가 정상 gather에서 prepared로 확정되거나 몽타주 notify 실행을 기다리는 동안 true.
 	bool bGuaranteedAimThrowQueued = false;

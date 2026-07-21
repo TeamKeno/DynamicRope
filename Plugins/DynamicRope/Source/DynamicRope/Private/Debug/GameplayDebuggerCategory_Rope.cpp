@@ -639,7 +639,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 		}
 
 		AddTextLine(FString::Printf(TEXT("  {green}wrapped{white} bone=%s mesh=%s latched=%d"),
-			*S.WrapBone.ToString(), *S.MeshName, S.Latched.Num()));
+			*S.WrapBoneName.ToString(), *S.MeshName, S.Latched.Num()));
 		// 장력(λ/h² 상대 힘). 임계치와 경고색은 자동 해제가 실제로 도는 모드에서만 낸다 — GuaranteedWrap은
 		// 임계치를 보지 않으므로(명시 해제만 유효) 임계 대비 경고가 의미를 갖지 않는다.
 		if (!S.bAutoReleaseEnabled)

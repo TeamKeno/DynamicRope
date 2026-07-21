@@ -124,8 +124,7 @@ public:
 	static bool ShouldCapture(const TArray<FRopeContactCandidate>& Candidates, const FParams& Params);
 
 	/**
-	 * 접촉 후보가 "그냥 닿음"을 넘어 실제 감김으로 볼 만한지 검사하는 품질 게이트.
-	 * 현재는 감김 폴리싱 우선이라 항상 통과시키고, 나중에 점수/속도/방향 기준을 여기 안에 채운다.
+	 * 현재 추가 품질 필터는 적용하지 않는다. 외부 호출 호환성을 위해 유지하며 항상 true를 반환한다.
 	 */
 	static bool PassesCaptureQualityGate(const FRopeContactTracker& Tracker,
 		const TArray<FRopeContactCandidate>& Candidates, const FParams& Params);

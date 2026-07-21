@@ -120,7 +120,6 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		}
 	}
 	RemoveMappingContext();
-	bInputBound = false;
 	BoundInputComponent.Reset();
 	ClearThrowPreview();
 	if (PreviewComponent)
@@ -638,9 +637,9 @@ void URopeWielderComponent::BindInput()
 		return;
 	}
 
-	// 중복 방지는 "이미 걸었나"가 아니라 "**이** 컴포넌트에 걸었나"로 판정한다 — 재빙의로 새 InputComponent가
-	// 생기면 옛 플래그만 보고 건너뛰어 입력이 영영 안 걸렸다.
-	if (bInputBound && BoundInputComponent.Get() == EIC)
+	// 실제 바인딩 대상이 같은 컴포넌트일 때만 중복으로 본다. 재빙의로 InputComponent가 교체되면
+	// 아래에서 기존 바인딩을 정리하고 새 컴포넌트에 다시 건다.
+	if (BoundInputComponent.Get() == EIC)
 	{
 		return;
 	}
@@ -659,7 +658,7 @@ void URopeWielderComponent::BindInput()
 	}
 	if (ReleaseAction)
 	{
-		EIC->BindAction(ReleaseAction, ETriggerEvent::Started, this, &URopeWielderComponent::OnReleaseInput);
+		EIC->BindAction(ReleaseAction, ETriggerEvent::Started, this, &URopeWielderComponent::Release);
 	}
 	if (PullAction)
 	{
@@ -669,22 +668,21 @@ void URopeWielderComponent::BindInput()
 	}
 	if (ReelInAction)
 	{
-		EIC->BindAction(ReelInAction, ETriggerEvent::Started,   this, &URopeWielderComponent::OnReelInStarted);
-		EIC->BindAction(ReelInAction, ETriggerEvent::Completed, this, &URopeWielderComponent::OnReelCompleted);
-		EIC->BindAction(ReelInAction, ETriggerEvent::Canceled,  this, &URopeWielderComponent::OnReelCompleted);
+		EIC->BindAction(ReelInAction, ETriggerEvent::Started,   this, &URopeWielderComponent::StartReelIn);
+		EIC->BindAction(ReelInAction, ETriggerEvent::Completed, this, &URopeWielderComponent::StopReel);
+		EIC->BindAction(ReelInAction, ETriggerEvent::Canceled,  this, &URopeWielderComponent::StopReel);
 	}
 	if (ReelOutAction)
 	{
-		EIC->BindAction(ReelOutAction, ETriggerEvent::Started,   this, &URopeWielderComponent::OnReelOutStarted);
-		EIC->BindAction(ReelOutAction, ETriggerEvent::Completed, this, &URopeWielderComponent::OnReelCompleted);
-		EIC->BindAction(ReelOutAction, ETriggerEvent::Canceled,  this, &URopeWielderComponent::OnReelCompleted);
+		EIC->BindAction(ReelOutAction, ETriggerEvent::Started,   this, &URopeWielderComponent::StartReelOut);
+		EIC->BindAction(ReelOutAction, ETriggerEvent::Completed, this, &URopeWielderComponent::StopReel);
+		EIC->BindAction(ReelOutAction, ETriggerEvent::Canceled,  this, &URopeWielderComponent::StopReel);
 	}
 	if (ReloadAction)
 	{
 		// 장전은 단발(누름) — ③ 로프를 던지기 준비(Reel) 상태로 전환.
 		EIC->BindAction(ReloadAction, ETriggerEvent::Started, this, &URopeWielderComponent::OnReloadInput);
 	}
-	bInputBound = true;
 	BoundInputComponent = EIC;
 }
 
@@ -699,11 +697,6 @@ void URopeWielderComponent::OnThrowInput()
 	{
 		Throw();
 	}
-}
-
-void URopeWielderComponent::OnReleaseInput()
-{
-	Release();
 }
 
 void URopeWielderComponent::StartPull()
@@ -889,21 +882,6 @@ void URopeWielderComponent::StopReel()
 	{
 		Rope->SetReelRate(0.0f);
 	}
-}
-
-void URopeWielderComponent::OnReelInStarted()
-{
-	StartReelIn();
-}
-
-void URopeWielderComponent::OnReelOutStarted()
-{
-	StartReelOut();
-}
-
-void URopeWielderComponent::OnReelCompleted()
-{
-	StopReel();
 }
 
 void URopeWielderComponent::OnReloadInput()
@@ -1242,7 +1220,6 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 void URopeWielderComponent::OnAimRayThrowResolved()
 {
 	bGuaranteedAimThrowQueued = false;
-	LastPreparedPreview.Reset();
 	ClearPreviewDisplay();
 	// Rope가 실제 실행 페이즈(Assisted=Flight, Guaranteed=GuidedThrow)에 진입한 뒤 성공 알림을 보낸다.
 	NotifyThrown();
@@ -1563,9 +1540,8 @@ void URopeWielderComponent::UpdateThrowPreview()
 		return;
 	}
 
-	LastPreparedPreview = Prepared;
-	StoreAimGuideFrameIfNeeded(LastPreparedPreview);
-	HeldPreparedPreview = ResolvePreparedPreviewForDisplay(LastPreparedPreview);
+	StoreAimGuideFrameIfNeeded(Prepared);
+	HeldPreparedPreview = ResolvePreparedPreviewForDisplay(Prepared);
 	HeldPreviewExpireTimeSeconds = 0.0f;
 	DisplayPreviewCenterline(HeldPreparedPreview);
 
@@ -1583,7 +1559,6 @@ void URopeWielderComponent::ClearPreviewDisplay()
 
 void URopeWielderComponent::ClearPreparedThrow()
 {
-	LastPreparedPreview.Reset();
 	HeldPreparedPreview = FRopeWrapPreviewData();
 	HeldPreviewExpireTimeSeconds = 0.0f;
 }

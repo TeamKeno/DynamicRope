@@ -184,7 +184,6 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugC
 	if (EnumHasAnyFlags(CaptureMask, ERopeDebugCapture::Wrap) && Phase == ERopePhase::Wrapped && Wrap.IsWrapped())
 	{
 		Snapshot.bHasWrapped = true;
-		Snapshot.WrapBone = Wrap.BoneName;
 		const USceneComponent* Mesh = Wrap.Mesh.Get();
 		Snapshot.MeshName = Mesh ? Mesh->GetName() : TEXT("None");
 		Snapshot.Latched = Wrap.Latched;
@@ -415,11 +414,10 @@ void URopeComponent::GatherFlightNodeDebug(const FRopeFlightContactDetector::FPa
 		NodeDebug.NodeIndex = i;
 		NodeDebug.PrevPosition = Sim.PrevPositions[i];
 		NodeDebug.Position = Sim.Positions[i];
-		NodeDebug.NodeSpeed = Sim.NodeSpeed(i);
-		NodeDebug.bFast = FRopeFlightContactDetector::IsTailNode(Sim, i) || NodeDebug.NodeSpeed > Sim.SegmentLength;
+		const bool bFast = FRopeFlightContactDetector::IsTailNode(Sim, i) || Sim.NodeSpeed(i) > Sim.SegmentLength;
 		NodeDebug.bNearBody = FRopeFlightContactDetector::IsNearAnyColliderSegment(
 			NodeDebug.PrevPosition, NodeDebug.Position, SimFrame.FrameColliders, DetectParams);
-		if (NodeDebug.bFast || NodeDebug.bNearBody)
+		if (bFast || NodeDebug.bNearBody)
 		{
 			NodeDebug.Contact = FRopeFlightContactDetector::SweepOrSampleContact(
 				Sim, NodeDebug.PrevPosition, NodeDebug.Position, SimFrame.FrameColliders, DetectParams);
@@ -428,7 +426,7 @@ void URopeComponent::GatherFlightNodeDebug(const FRopeFlightContactDetector::FPa
 			NodeDebug.ContactMeshKey = FObjectKey(NodeDebug.Contact.SourceMesh);
 		}
 
-		if (NodeDebug.bFast || NodeDebug.bNearBody || NodeDebug.Contact.bHit)
+		if (bFast || NodeDebug.bNearBody || NodeDebug.Contact.bHit)
 		{
 			OutNodeDebug.Add(NodeDebug);
 		}
