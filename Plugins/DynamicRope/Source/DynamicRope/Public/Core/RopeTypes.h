@@ -338,7 +338,7 @@ struct FRopeWrapPathPoint
 	 * 이 path point가 투영된 실제 표면 본.
 	 * Composite AnalyticHelix와 Sequential SurfaceVectorField 모두 실제 projection 결과를 넣는다.
 	 * Composite radial ray가 빗나간 virtual point는 NAME_None이다.
-	 * 이후 AppendWrappingAnchorFromPathPoint가 이 값을 기준으로 bone-local anchor를 저장한다.
+	 * 이후 ProcessPathPointForAnchoring이 이 값을 기준으로 bone-local anchor를 저장한다.
 	 */
 	FName Bone = NAME_None;
 	TWeakObjectPtr<const USceneComponent> Mesh = nullptr;

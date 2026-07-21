@@ -48,7 +48,7 @@ bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, float Dura
 	return true;
 }
 
-void FRopeWrappingPhase::UpdateStability(float DeltaTime)
+void FRopeWrappingPhase::UpdateAnchorSpanStability(float DeltaTime)
 {
 	const bool bSameStableSpan =
 		State.FirstNode == State.LastStableFirstNode &&
@@ -141,7 +141,7 @@ bool FRopeWrappingPhase::ShouldAbortFailedShortWrap(const FRopeSimState& Sim, co
 		return false;
 	}
 
-	if (!ComputeWrappedAngleAtLastBuiltPoint(Sim, Ctx, OutAngleDeg))
+	if (!ComputeBuiltPathWrapAngle(Sim, Ctx, OutAngleDeg))
 	{
 		return false;
 	}
@@ -200,7 +200,7 @@ FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim) con
 	return Seed;
 }
 
-void FRopeWrappingPhase::ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const
+void FRopeWrappingPhase::ReleaseAnchoredNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const
 {
 	OutFrame.EnsureSize(Sim.Num());
 	auto ReturnNode = [&Sim, &OutFrame](int32 NodeIndex)

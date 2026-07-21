@@ -582,13 +582,13 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 		return;
 	}
 
-	WrappingPhase.ApplyFrontMotion(Sim, DeltaTime, WrappingCtx, SimFrame.OverrideFrame);
+	WrappingPhase.ApplyWrappingMotionOverrides(Sim, DeltaTime, WrappingCtx, SimFrame.OverrideFrame);
 
-	WrappingPhase.ApplyMassMask(Sim, SimFrame.OverrideFrame);
+	WrappingPhase.ApplyWrappingKinematicMask(Sim, SimFrame.OverrideFrame);
 
 	if (WrappingPhase.State.bPathUsesPoseSpaceIsland)
 	{
-		// ApplyFrontMotion이 오른쪽 실제 표면 노드를 먼저 붙이고 ApplyMassMask가 virtual node를 기본
+		// ApplyWrappingMotionOverrides가 오른쪽 실제 표면 노드를 먼저 붙이고 ApplyWrappingKinematicMask가 virtual node를 기본
 		// 동적 상태로 만든 뒤 실행한다. 따라서 front가 닫은 구간만 이 마지막 override로 즉시 조인다.
 		UpdateWrappingKinematicVirtualBridges(
 			WrappingPhase.State.VirtualBridgeRuns,
@@ -597,7 +597,7 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 		HoldKinematicVirtualBridges();
 	}
 
-	WrappingPhase.UpdateStability(DeltaTime);
+	WrappingPhase.UpdateAnchorSpanStability(DeltaTime);
 
 	if (WrappingPhase.IsReadyToCommit(Sim, WrapConfig))
 	{
@@ -663,7 +663,7 @@ void URopeComponent::CommitWrapping()
 	// 커밋 시점 감싼 각도(도): 커밋 품질 관문(아래)과 전이 로그가 공용으로 쓴다. 실패 조기 abort와
 	// 같은 척도라 로그의 angle 수치를 그대로 비교/튜닝에 쓸 수 있다. 계산 불가(축 축퇴 등)면 -1 표기.
 	float CommitAngleDeg = -1.0f;
-	WrappingPhase.ComputeWrappedAngleAtLastBuiltPoint(Sim, MakeWrappingContext(), CommitAngleDeg);
+	WrappingPhase.ComputeBuiltPathWrapAngle(Sim, MakeWrappingContext(), CommitAngleDeg);
 
 	// 커밋 품질 관문(opt-in — CommitMinWrapAngleDeg 0이면 기존 동작 그대로): 경로가 정상 완료됐거나
 	// settle 타임아웃으로 왔어도, 감은 각도가 하한 미만인 부실 랩은 Wrapped로 확정하지 않는다.
@@ -861,7 +861,7 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 	// 정리가 덮어쓴다). 호출자는 전부 SetPhase(Releasing)을 마친 뒤 들어온다.
 	const FName AbortedBone = WrappingPhase.State.BoneName;
 
-	WrappingPhase.ReturnNodesToSolver(Sim, SimFrame.OverrideFrame);
+	WrappingPhase.ReleaseAnchoredNodesToSolver(Sim, SimFrame.OverrideFrame);
 	ReleaseKinematicVirtualBridgesToSolver();
 
 	ResetTransientPhaseState();
@@ -910,7 +910,7 @@ void URopeComponent::UpdateWrappingKinematicVirtualBridges(
 		++KinematicVirtualBridgeRunCursor;
 	}
 
-	// 오른쪽 anchor 거리까지 front가 도달했다는 것은 ApplyFrontMotion이 양쪽 경계를 실제 표면 위치로
+	// 오른쪽 anchor 거리까지 front가 도달했다는 것은 ApplyWrappingMotionOverrides가 양쪽 경계를 실제 표면 위치로
 	// 고정했다는 뜻이다. 그 프레임부터 내부 virtual node를 직선으로 묶어 Wrapped 전 출렁임을 없앤다.
 	const float FrontTolerance = FMath::Max(0.01f, Sim.SegmentLength * 0.001f);
 	for (FKinematicVirtualBridge& Bridge : KinematicVirtualBridges)

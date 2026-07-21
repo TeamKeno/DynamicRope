@@ -96,13 +96,13 @@ public:
 	void AdvancePathBuild(const FRopeSimState& Sim, const FContext& Ctx);
 
 	/** front를 경로 따라 전진시키고 latch 이후 노드들의 경로 위 타깃(+표면 오프셋)을 OutFrame에 담는다(G2). */
-	void ApplyFrontMotion(const FRopeSimState& Sim, float DeltaTime, const FContext& Ctx, FRopeNodeOverrideFrame& OutFrame);
+	void ApplyWrappingMotionOverrides(const FRopeSimState& Sim, float DeltaTime, const FContext& Ctx, FRopeNodeOverrideFrame& OutFrame);
 
-	/** 감긴(anchor) 노드 InvMass=0, 나머지 1(시작 핀 유지)을 OutFrame에 담는다 — 솔버가 감긴 구간을 건드리지 않게. */
-	void ApplyMassMask(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
+	/** latch 이후 전체 tail을 kinematic으로 만들되 virtual path node는 solver에 남긴다. 시작 핀도 유지한다. */
+	void ApplyWrappingKinematicMask(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
 	/** 앵커 span이 변하지 않는 시간(StableTime)을 누적한다. 커밋 판정 보조 지표. */
-	void UpdateStability(float DeltaTime);
+	void UpdateAnchorSpanStability(float DeltaTime);
 
 	/** 커밋 조건: 앵커 확보 + 경로 빌드 종료 + front 도달 + (모션 완료 또는 settle 타임아웃). */
 	bool IsReadyToCommit(const FRopeSimState& Sim, const FRopeWrapConfig& Config) const;
@@ -115,10 +115,10 @@ public:
 	bool ShouldAbortFailedShortWrap(const FRopeSimState& Sim, const FContext& Ctx,
 		float MinRequiredAngleDeg, float& OutAngleDeg) const;
 
-	/** 마지막 성공 path/anchor 거리를 helix 공식에 넣어 누적 감싼 각도(도)를 계산한다.
+	/** built path의 누적 감싼 각도(도)를 반환한다. 누적값이 없으면 마지막 성공 path/anchor 거리로 근사한다.
 	 *  실패 조기 abort(위)와 커밋 품질 관문(CommitMinWrapAngleDeg — URopeComponent::CommitWrapping)이
 	 *  같은 척도를 쓰도록 공개한다. 커밋 로그의 angle 표기도 이 값. */
-	bool ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const;
+	bool ComputeBuiltPathWrapAngle(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const;
 
 	/**
 	 * 형상 기준 묶임 척도(5단계): 감김 축 둘레에서 경로점들이 실제로 둘러싼 각도 커버리지(도, 0~360).
@@ -137,7 +137,7 @@ public:
 	FRopeWrapState BuildCommitSeed(const FRopeSimState& Sim) const;
 
 	/** abort 시 앵커 노드들의 솔버 복귀(InvMass=1 + Prev=Pos 튐 방지)를 OutFrame에 담는다. */
-	void ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
+	void ReleaseAnchoredNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
 	/** Builds a complete target centerline using the same helix/vector-field path code as runtime wrapping. */
 	bool BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor,
@@ -188,23 +188,23 @@ private:
 		float StartRadius, float TargetRadius, float PreviousRadius,
 		float PitchScale, float WindingSign);
 
-	bool InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor,
+	bool InitializeProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor,
 		const FRopeSimState& Sim, const FContext& Ctx);
 
-	bool AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 StepBudget, const FRopeSimState& Sim, const FContext& Ctx);
+	bool AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudget, const FRopeSimState& Sim, const FContext& Ctx);
 
 	/** Composite Analytic Helix의 terminal failure 시 기존 경로/앵커를 버리고 최초 latch 본 하나로 재시도한다. */
 	bool RestartPathBuildAsSingleBoneFallback(const FRopeSimState& Sim, const FContext& Ctx,
 		const TCHAR* CompositeFailureReason);
 
-	bool AppendWrappingAnchorFromPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
+	bool ProcessPathPointForAnchoring(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
 
 	/** Anchor가 지정한 mesh를 우선하고, 없으면 wrapping state의 mesh를 사용한다. */
 	static const USceneComponent* ResolveWrappingMesh(
 		const FRopeWrappingState& State, const FRopeSurfaceAnchor& Anchor);
 
 	/** 새로 닫힌 virtual run을 Path에서 한 번만 발견해 State.VirtualBridgeRuns에 기록한다. */
-	void UpdateVirtualBridgeRuns();
+	void CollectCompletedVirtualBridgeRuns();
 
 	/** 경로 빌드 종료 기록(성공=Complete / 실패=Failed, 둘 다 Active 해제). 커밋 판정 등 독자들은
 	 *  세 플래그를 "빌드가 끝났나"(OR)로만 소비한다 — 개별 조합을 구분해 읽는 곳은 없다. */
@@ -265,7 +265,7 @@ private:
 		const FContext& Ctx) const;
 
 	/** 복합 실패 폴백 전용. 후보 graph 없이 최초 latch 본 collider만 투영한다. */
-	bool ProjectWrapPointToSingleBone(const USceneComponent* Mesh,
+	bool ProjectWrapPointToLatchBone(const USceneComponent* Mesh,
 		const FRopeSimState& Sim, const FContext& Ctx,
 		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
 		FVector& InOutCircumferenceDir, FName& InOutBone, const USceneComponent*& OutMesh) const;
@@ -307,6 +307,6 @@ private:
 		const FRopeWrapPathPoint& UpperPoint, float SampleDistance, float SurfaceOffset,
 		FRopeWrapPathPoint& OutPoint);
 
-	/** ApplyFrontMotion 전용 재사용 버퍼. 매 프레임 path point/anchor를 반복 해석하지 않는다. */
+	/** ApplyWrappingMotionOverrides 전용 재사용 버퍼. 매 프레임 path point/anchor를 반복 해석하지 않는다. */
 	TArray<FRopeWrapPathPoint> ResolvedPathScratch;
 };

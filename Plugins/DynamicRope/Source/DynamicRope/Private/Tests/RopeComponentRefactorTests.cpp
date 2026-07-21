@@ -14,7 +14,7 @@ struct FRopeComponentRefactorTestSeam
 {
 	static void ExtractVirtualBridgeRuns(FRopeWrappingPhase& Phase)
 	{
-		Phase.UpdateVirtualBridgeRuns();
+		Phase.CollectCompletedVirtualBridgeRuns();
 	}
 
 	static void ConfigureSim(URopeComponent& Rope, int32 NumNodes, float RopeLength)

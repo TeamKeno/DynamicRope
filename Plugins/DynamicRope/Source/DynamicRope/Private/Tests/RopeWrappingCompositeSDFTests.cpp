@@ -155,7 +155,7 @@ bool FRopeWrappingSingleBoneFallbackTest::RunTest(const FString& Parameters)
 	FName SelectedBone = NAME_None;
 	const USceneComponent* SelectedMesh = Mesh;
 	TestTrue(TEXT("single-bone projection succeeds at the shared surface"),
-		Wrapping.ProjectWrapPointToSingleBone(Mesh, Sim, Ctx,
+		Wrapping.ProjectWrapPointToLatchBone(Mesh, Sim, Ctx,
 			Surface, Normal, Tangent, Circumference, SelectedBone, SelectedMesh));
 	TestEqual(TEXT("single-bone projection ignores the touching arm collider"),
 		SelectedBone, BodyVolume.Bone);

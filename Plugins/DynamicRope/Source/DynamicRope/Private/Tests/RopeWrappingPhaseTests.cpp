@@ -275,7 +275,7 @@ bool FRopeWrappingCapsuleAngleTest::RunTest(const FString& Parameters)
 	// 걷기가 현(chord) 스텝(세그먼트 절반 = 10cm)이라 호 기반 공식보다 스텝당 atan만큼 낮게 적분된다
 	// (r=25에서 약 -4.7% ≈ -16°) — 허용 오차는 그 이산화 편차를 포함해 30°로 잡는다.
 	float AngleDeg = 0.0f;
-	TestTrue(TEXT("wrapped angle computable"), Wrapping.ComputeWrappedAngleAtLastBuiltPoint(Sim, Ctx, AngleDeg));
+	TestTrue(TEXT("wrapped angle computable"), Wrapping.ComputeBuiltPathWrapAngle(Sim, Ctx, AngleDeg));
 	const float PitchScale = Config.WrappingHelixPitchScale;
 	const float ExpectedDeg = FMath::RadiansToDegrees(
 		(160.0f / FMath::Sqrt(1.0f + PitchScale * PitchScale)) / 25.0f);
@@ -349,7 +349,7 @@ bool FRopeWrappingSecondarySeedTest::RunTest(const FString& Parameters)
 	for (int32 Step = 0; Step < 64; ++Step)
 	{
 		Frame.Reset();
-		Wrapping.ApplyFrontMotion(Sim, 0.05f, Ctx, Frame);
+		Wrapping.ApplyWrappingMotionOverrides(Sim, 0.05f, Ctx, Frame);
 	}
 	TestTrue(TEXT("secondary node receives a position override"),
 		Frame.Flags.IsValidIndex(6) && (Frame.Flags[6] & RopeNodeOverride::Position) != 0);
@@ -590,7 +590,7 @@ bool FRopeWrappingGapBridgeTest::RunTest(const FString& Parameters)
 
 	// ④ 누적 감싼 각도가 쌍 순회를 증명한다.
 	float AngleDeg = 0.0f;
-	TestTrue(TEXT("wrapped angle computable"), Wrapping.ComputeWrappedAngleAtLastBuiltPoint(Sim, Ctx, AngleDeg));
+	TestTrue(TEXT("wrapped angle computable"), Wrapping.ComputeBuiltPathWrapAngle(Sim, Ctx, AngleDeg));
 	TestTrue(FString::Printf(TEXT("accumulated angle circles the pair (%.0f deg)"), AngleDeg),
 		AngleDeg > 270.0f);
 
@@ -757,7 +757,7 @@ bool FRopeWrappingWrapAngleCapTest::RunTest(const FString& Parameters)
 
 	// 마감 시점 각도는 목표를 갓 넘긴 값(목표 ~ 목표+스텝각)이어야 한다 — 여러 바퀴 나선 금지.
 	float AngleDeg = 0.0f;
-	TestTrue(TEXT("wrapped angle computable"), Wrapping.ComputeWrappedAngleAtLastBuiltPoint(Sim, Ctx, AngleDeg));
+	TestTrue(TEXT("wrapped angle computable"), Wrapping.ComputeBuiltPathWrapAngle(Sim, Ctx, AngleDeg));
 	TestTrue(FString::Printf(TEXT("angle stops just past the cap (%.0f deg)"), AngleDeg),
 		AngleDeg >= 360.0f && AngleDeg < 460.0f);
 
@@ -766,7 +766,7 @@ bool FRopeWrappingWrapAngleCapTest::RunTest(const FString& Parameters)
 	for (int32 Step = 0; Step < 64; ++Step)
 	{
 		Frame.Reset();
-		Wrapping.ApplyFrontMotion(Sim, 0.05f, Ctx, Frame);
+		Wrapping.ApplyWrappingMotionOverrides(Sim, 0.05f, Ctx, Frame);
 	}
 	const int32 LastDrivenNode = Latch.NodeIndex + Wrapping.State.NumTailNodes - 1;
 	TestTrue(TEXT("last path node is front-driven"),

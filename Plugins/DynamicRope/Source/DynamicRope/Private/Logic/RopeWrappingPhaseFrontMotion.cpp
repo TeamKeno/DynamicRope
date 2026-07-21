@@ -13,9 +13,9 @@
 
 #pragma region Wrapping Front Motion and Path Sampling
 
-void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaTime, const FContext& Ctx, FRopeNodeOverrideFrame& OutFrame)
+void FRopeWrappingPhase::ApplyWrappingMotionOverrides(const FRopeSimState& Sim, float DeltaTime, const FContext& Ctx, FRopeNodeOverrideFrame& OutFrame)
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_ApplyWrappingFrontMotion);
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_ApplyWrappingMotionOverrides);
 
 	AdvanceWrappingFront(DeltaTime, Sim, Ctx);
 
@@ -163,12 +163,12 @@ void FRopeWrappingPhase::ApplyFrontMotion(const FRopeSimState& Sim, float DeltaT
 	}
 }
 
-void FRopeWrappingPhase::ApplyMassMask(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const
+void FRopeWrappingPhase::ApplyWrappingKinematicMask(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const
 {
 	const int32 LatchNode = State.LatchAnchor.NodeIndex;
 	const bool bHasValidLatch = Sim.InvMass.IsValidIndex(LatchNode);
 	// 실제 path 범위와 무관하게 Wrapping 애니메이션 동안에는 latch 이후 전체 tail을 kinematic으로
-	// 유지한다. Composite axis limit 이후의 guide-only tail도 ApplyFrontMotion이 강제로 애니메이팅하고,
+	// 유지한다. Composite axis limit 이후의 guide-only tail도 ApplyWrappingMotionOverrides가 강제로 애니메이팅하고,
 	// 커밋 시 실제 anchor가 없는 노드만 마지막 위치에서 속도 0 상태로 solver에 반환된다.
 	const int32 DrivenEndNode = Sim.Num() - 1;
 
@@ -177,13 +177,13 @@ void FRopeWrappingPhase::ApplyMassMask(const FRopeSimState& Sim, FRopeNodeOverri
 	{
 		const bool bStartPin = (i == 0 && Sim.bStartPinned);
 		// Radial projection에 실패한 virtual path node만 solver에 남긴다. Composite path 바깥의
-		// guide-only tail은 위 DrivenEndNode 범위에 포함되어 ApplyFrontMotion의 위치를 그대로 따른다.
+		// guide-only tail은 위 DrivenEndNode 범위에 포함되어 ApplyWrappingMotionOverrides의 위치를 그대로 따른다.
 		const int32 PathIndex = i - LatchNode;
 		const bool bNoAnchorSolverNode =
 			State.Path.IsValidIndex(PathIndex) && State.Path[PathIndex].bVirtual;
 		const bool bWrappingDrivenNode =
 			bHasValidLatch && i >= LatchNode && i <= DrivenEndNode && !bNoAnchorSolverNode;
-		// ApplyFrontMotion으로 위치를 직접 쓰는 노드는 같은 프레임의 solver가 다시 움직이지 못하도록
+		// ApplyWrappingMotionOverrides로 위치를 직접 쓰는 노드는 같은 프레임의 solver가 다시 움직이지 못하도록
 		// 질량을 0으로 만든다. Wrapped 커밋 뒤에는 실제 anchor가 없는 guide-only tail이 다시 dynamic이 된다.
 		OutFrame.SetInvMass(i, (bStartPin || bWrappingDrivenNode) ? 0.0f : 1.0f);
 	}

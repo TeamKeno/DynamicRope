@@ -36,7 +36,7 @@ void FRopeWrappingPhase::FinishPathBuild(bool bFailed, const TCHAR* FailureReaso
 	}
 }
 
-void FRopeWrappingPhase::UpdateVirtualBridgeRuns()
+void FRopeWrappingPhase::CollectCompletedVirtualBridgeRuns()
 {
 	State.VirtualBridgeScanPathIndex = FMath::Clamp(
 		State.VirtualBridgeScanPathIndex, 0, State.Path.Num());
@@ -129,7 +129,7 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 			for (int32 PathIndex = FirstNewPathIndex;
 				PathIndex < State.Path.Num(); ++PathIndex)
 			{
-				if (!AppendWrappingAnchorFromPathPoint(PathIndex, Sim, Ctx))
+				if (!ProcessPathPointForAnchoring(PathIndex, Sim, Ctx))
 				{
 					FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixAnchorFailed"));
 					bAnchorsAppended = false;
@@ -141,7 +141,7 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 				break;
 			}
 		}
-		UpdateVirtualBridgeRuns();
+		CollectCompletedVirtualBridgeRuns();
 
 		if (State.Path.Num() >= State.NumTailNodes)
 		{
@@ -155,8 +155,8 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 		}
 		return;
 	}
-	AdvanceSurfaceVectorFieldProgressiveWrapPath(StepBudget, Sim, Ctx);
-	UpdateVirtualBridgeRuns();
+	AdvanceSequentialSurfaceVectorFieldPath(StepBudget, Sim, Ctx);
+	CollectCompletedVirtualBridgeRuns();
 }
 
 bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor& LatchAnchor,
@@ -252,7 +252,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.Path.Reserve(State.NumTailNodes);
 
 	const bool bInitialized =
-		InitializeSurfaceVectorFieldProgressiveWrapPath(StoredLatchAnchor, Sim, Ctx);
+		InitializeProgressiveWrapPath(StoredLatchAnchor, Sim, Ctx);
 	if (!bInitialized)
 	{
 		FinishPathBuild(/*bFailed=*/true, TEXT("InitialSurfacePathPointFailed"));
@@ -262,7 +262,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 			*State.PathSurfaceWorld.ToString(), *State.PathNormalWorld.ToString());
 		return false;
 	}
-	if (!AppendWrappingAnchorFromPathPoint(0, Sim, Ctx))
+	if (!ProcessPathPointForAnchoring(0, Sim, Ctx))
 	{
 		FinishPathBuild(/*bFailed=*/true, TEXT("InitialAnchorBuildFailed"));
 		UE_LOG(LogRopeWrap, Error,
@@ -311,10 +311,10 @@ bool FRopeWrappingPhase::RestartPathBuildAsSingleBoneFallback(
 	return true;
 }
 
-bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor,
+bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor,
 	const FRopeSimState& Sim, const FContext& Ctx)
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_InitSurfaceVectorFieldProgressivePath);
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_InitializeProgressiveWrapPath);
 
 	const USceneComponent* Mesh = ResolveWrappingMesh(State, LatchAnchor);
 	if (!Mesh || LatchAnchor.Bone.IsNone())
@@ -790,7 +790,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 	return true;
 }
 
-bool FRopeWrappingPhase::AppendWrappingAnchorFromPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx)
+bool FRopeWrappingPhase::ProcessPathPointForAnchoring(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx)
 {
 	if (PathIndex < State.LastAnchoredPathPointCount)
 	{

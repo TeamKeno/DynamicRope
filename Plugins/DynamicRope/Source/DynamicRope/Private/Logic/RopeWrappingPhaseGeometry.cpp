@@ -13,7 +13,7 @@
 
 #pragma region Wrapping Geometry and Axis Resolution
 
-bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const
+bool FRopeWrappingPhase::ComputeBuiltPathWrapAngle(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const
 {
 	OutAngleDeg = 0.0f;
 	if (State.Anchors.Num() == 0 && State.Path.Num() == 0)

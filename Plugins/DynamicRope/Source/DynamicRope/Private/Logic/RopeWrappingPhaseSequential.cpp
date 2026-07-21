@@ -13,9 +13,9 @@
 
 #pragma region Sequential Surface Vector Field Path
 
-bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 StepBudget, const FRopeSimState& Sim, const FContext& Ctx)
+bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudget, const FRopeSimState& Sim, const FContext& Ctx)
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AdvanceSurfaceVectorFieldProgressivePath);
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AdvanceSequentialSurfaceVectorFieldPath);
 
 	const USceneComponent* Mesh = ResolveWrappingMesh(State, State.LatchAnchor);
 	if (!Mesh || State.LatchAnchor.Bone.IsNone())
@@ -100,7 +100,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 			bool bOnSurface = false;
 			if (State.bPathUsesSingleBoneFallback)
 			{
-				bOnSurface = ProjectWrapPointToSingleBone(Mesh, Sim, Ctx,
+				bOnSurface = ProjectWrapPointToLatchBone(Mesh, Sim, Ctx,
 					ProjectedSurface, ProjectedNormal, ProjectedTangent,
 					ProjectedCircumference, ProjectedBone, ProjectedMesh);
 			}
@@ -348,7 +348,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 					Point.WrapAngleFromLatchRad = FMath::Lerp(
 						PreviousForwardAngleRad, State.PathForwardAngleRad, Alpha);
 					State.Path.Add(Point);
-					if (!AppendWrappingAnchorFromPathPoint(SamplePathIndex, Sim, Ctx))
+					if (!ProcessPathPointForAnchoring(SamplePathIndex, Sim, Ctx))
 					{
 						// Path와 anchor 처리를 하나의 원자적 append로 취급한다. 현재 점 또는 같은
 						// integration segment에서 아직 처리하지 못한 뒤쪽 점을 남기면 이후 resolve가
@@ -800,7 +800,7 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 	return true;
 }
 
-bool FRopeWrappingPhase::ProjectWrapPointToSingleBone(const USceneComponent* Mesh,
+bool FRopeWrappingPhase::ProjectWrapPointToLatchBone(const USceneComponent* Mesh,
 	const FRopeSimState& Sim, const FContext& Ctx,
 	FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
 	FVector& InOutCircumferenceDir, FName& InOutBone, const USceneComponent*& OutMesh) const
