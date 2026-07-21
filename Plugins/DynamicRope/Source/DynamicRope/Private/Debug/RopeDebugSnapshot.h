@@ -142,6 +142,11 @@ struct FRopeDebugSnapshot
 	// 도달 모드. 모드마다 성립 계약과 유효한 설정이 통째로 달라, 화면의 나머지를 해석하는 전제다.
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
+	// 해석된 노드 충돌 반지름(cm) = GetEffectiveCollisionRadius(). 솔버가 노드를 접촉 표면에서 띄우는
+	// 거리이고, 기본(SolverConfig.CollisionRadius=0=auto)에서는 렌더 튜브 Radius와 같다.
+	// latch 마커의 크기를 이 값에서 유도해 "박스가 얼마만 한가"가 실제 의미를 갖게 한다.
+	float NodeCollisionRadius = 0.0f;
+
 	FName WrapBoneName = NAME_None;
 	bool  bSleeping = false;
 	float LodScale = 1.0f;

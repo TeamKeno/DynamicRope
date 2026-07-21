@@ -162,6 +162,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugC
 	Snapshot.LodScale = Throttle.GetSolverLODScale();
 	Snapshot.NumParticles = NumParticles;
 	Snapshot.TubeSmoothingSubdiv = TubeSmoothingSubdiv;
+	Snapshot.NodeCollisionRadius = GetEffectiveCollisionRadius();
 	Snapshot.bSolveThisFrame = SimFrame.bSolveThisFrame;
 	Snapshot.bGpuStepped = SimFrame.bGpuSteppedThisFrame;
 	Snapshot.bLogicOverride = SimFrame.OverrideFrame.HasAny();

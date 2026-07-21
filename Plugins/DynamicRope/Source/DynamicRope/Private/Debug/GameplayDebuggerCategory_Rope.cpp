@@ -623,16 +623,18 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 	//~ wrap: 결착 결과 ----------------------------------------------------
 	if (HasView(EView::Wrap) && S.bHasWrapped)
 	{
-		TSet<int32> LatchedSet(S.LatchedNodes);
-		for (int32 i = 0; i < S.Positions.Num(); ++i)
+		// latch 노드만 낸다. 감김 결과에서 고유한 정보는 "어느 노드가 본에 고정됐나"뿐이고, 나머지 노드의
+		// 위치는 튜브 메시가 이미 그 자리에 그린다(노드 단위 상태가 필요하면 [P] nodes 담당).
+		// 전부 찍던 종전 루프는 기본 24노드에서 23개가 튜브와 겹치는 중복이었다.
+		// 박스 크기는 노드 충돌 반지름에서 유도한다 — 종전 고정 4.5cm는 아무것도 뜻하지 않아 노드가
+		// 그만한 볼륨을 갖는 것처럼 읽혔다. 실제로는 노드가 질점이고 반지름은 표면에서 띄우는 거리다.
+		// 반지름의 AABB이므로 모서리는 그 구보다 밖에 있다(정확한 볼륨이 아니라 그 크기의 지표).
+		const FVector LatchExtent(FMath::Max(S.NodeCollisionRadius, KINDA_SMALL_NUMBER));
+		for (const int32 NodeIdx : S.LatchedNodes)
 		{
-			if (LatchedSet.Contains(i))
+			if (S.Positions.IsValidIndex(NodeIdx))
 			{
-				AddShape(FGameplayDebuggerShape::MakeBox(S.Positions[i], FVector(4.5f), FColor::Yellow));
-			}
-			else
-			{
-				AddPoint(S.Positions[i], 8.0f, FColor::Green);
+				AddShape(FGameplayDebuggerShape::MakeBox(S.Positions[NodeIdx], LatchExtent, FColor::Yellow));
 			}
 		}
 
