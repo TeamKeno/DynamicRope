@@ -803,9 +803,30 @@ private:
 	bool bEnteredFlightDuringPrepareThisFrame = false;
 
 #if WITH_GAMEPLAY_DEBUGGER
-	// 프레임 시작(Prepare 진입) 시점 phase. 전이는 Prepare/Finalize 안에서 일어나 프레임 끝의 Phase만으로는
-	// "무엇에서 무엇으로 갔는지"를 알 수 없으므로, 디버그 스냅샷이 전이 전후를 함께 담도록 보존한다.
+	// 프레임 시작 시점 phase. 전이는 프레임 곳곳에서 일어나 프레임 끝의 Phase만으로는 "무엇에서 무엇으로
+	// 갔는지"를 알 수 없으므로, 디버그 스냅샷이 전이 전후를 함께 담도록 보존한다.
 	ERopePhase DebugPhaseAtFrameStart = ERopePhase::Free;
+	// 위 값을 기록한 프레임(GFrameCounter). 프레임당 최초 1회만 쓰기 위한 것 — 서브시스템은 Prepare보다
+	// **앞서** ResolvePendingAimThrow를 돌리고 그 경로가 StartFreshThrow로 Flight 전이를 만들 수 있어,
+	// Prepare에서만 잡으면 그 전이가 이미 지나가 버린다.
+	uint64 DebugPhaseFrameStamp = 0;
+	// 이번 Wrapped 프레임에 능동 Pull이 팽팽 게이트를 통과해 실제로 인가됐는가. SetActivePull이 저장한
+	// 요청값만 보면 "입력은 있으나 게이트에 막힌" 프레임과 구분되지 않는다.
+	bool DebugActivePullPassedGate = false;
+
+public:
+	/** 이 프레임 첫 접점에서 프레임 시작 phase를 굳힌다(프레임당 1회, 이후 호출은 no-op).
+	 *  서브시스템이 로프를 건드리기 전에 부르고, 그 경로를 타지 않는 로프를 위해 Prepare에서도 부른다. */
+	void CaptureDebugFrameStartPhase()
+	{
+		if (DebugPhaseFrameStamp != GFrameCounter)
+		{
+			DebugPhaseFrameStamp = GFrameCounter;
+			DebugPhaseAtFrameStart = Phase;
+		}
+	}
+
+private:
 #endif
 
 	/**

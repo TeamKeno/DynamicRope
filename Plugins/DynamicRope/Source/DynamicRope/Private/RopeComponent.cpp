@@ -90,7 +90,7 @@ namespace
 	}
 
 #if !UE_BUILD_SHIPPING
-	// (구 CVarRopeDrawWrappingAxis 제거 — wrap 축 노란 화살표는 Gameplay Debugger [O] 뷰의 bHasWrapAxis
+	// (구 CVarRopeDrawWrappingAxis 제거 — wrap 축 노란 화살표는 Gameplay Debugger [I] wrap 뷰의 bHasWrapAxis
 	//  경로로 일원화했다. GameplayDebuggerCategory_Rope.cpp 참조.)
 	TAutoConsoleVariable<int32> CVarRopeDrawWrapIsland(
 		TEXT("r.DynamicRope.Debug.DrawWrapIsland"),
@@ -951,7 +951,9 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 	const ERopePhase PhaseAtPrepareStart = Phase;
 	bEnteredFlightDuringPrepareThisFrame = false;
 #if WITH_GAMEPLAY_DEBUGGER
-	DebugPhaseAtFrameStart = PhaseAtPrepareStart;
+	// 폴백 — 보통은 서브시스템이 Phase 1a에서 이미 잡았고(그쪽이 pending aim throw보다 앞선다) 이 호출은
+	// no-op이다. Phase 1a를 건너뛴 로프만 여기서 처음 기록된다.
+	CaptureDebugFrameStartPhase();
 #endif
 
 	// pinned-start target을 전진시킨다; solver가 substep에 걸쳐 Prev->Target을 sweep하므로 빠른
@@ -2034,6 +2036,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.TetherTension = GetTetherTension();
 		Snapshot.MaxTetherTension = HoldConfig.MaxTetherTension;
 		Snapshot.ActivePullForce = PullDrive.ActivePullForce;
+		Snapshot.bActivePullApplied = DebugActivePullPassedGate;
 		Snapshot.bPullTaut = PullDrive.bPullTaut;
 		Snapshot.bChainTaut = PullDrive.bChainTaut;
 		Snapshot.TautChordLen = PullDrive.LastPullSample.TautChordLen;
@@ -2044,7 +2047,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 	}
 
 	// 감김 축 시각화: Wrapping 페이즈에서 ResolveWrappingAxis가 정한 경로 축(원점+방향)을 담는다 —
-	// [O] 뷰가 선으로 그려 "이번 wrap이 어느 축으로 감기는지"를 눈으로 확인하게 한다.
+	// [I] wrap 뷰가 선으로 그려 "이번 wrap이 어느 축으로 감기는지"를 눈으로 확인하게 한다.
 	if (Phase == ERopePhase::Wrapping && WrappingPhase.State.IsActive())
 	{
 		Snapshot.bHasWrapAxis = true;
@@ -2053,7 +2056,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.WrapAxisSegmentLength = Sim.SegmentLength;
 	}
 
-	// colliders 개수는 별도 필드 없이 아래 Snapshot.Colliders 배열 크기가 단일 소스다(diag/[O] 공용).
+	// colliders 개수는 별도 필드 없이 아래 Snapshot.Colliders 배열 크기가 단일 소스다([O] 섹션 표시용).
 
 	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). 상호 배타 accessor 순서로
 	// 실제 형상 분류: 캡슐(세그먼트) / 박스(회전 OBB) / 컨벡스(헐 와이어) / 그 외(SDF 등 월드 AABB 폴백).
@@ -3308,7 +3311,7 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	}
 
 #if !UE_BUILD_SHIPPING
-	// wrap 축 노란 화살표는 Gameplay Debugger([O] 뷰, bHasWrapAxis)로 일원화 — 여기서는 더 그리지 않는다.
+	// wrap 축 노란 화살표는 Gameplay Debugger([I] wrap 뷰, bHasWrapAxis)로 일원화 — 여기서는 더 그리지 않는다.
 	DrawWrapIslandDebug(GetWorld(), WrappingPhase.State, Sim, WrapConfig);
 #endif
 
@@ -3980,8 +3983,14 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 	// 팽팽함 무시 2층: config(bActivePullRequiresTaut=false, 로프 전체 정책) / per-call(bActivePullIgnoresTaut,
 	// SetActivePull 인자 — 애니 pull window 구간용). 어느 쪽이든 Wrapped + 유효 샘플이면 인가.
 	// 장력과 무관한 상수라 피드백 폭주가 없다.
-	if (PullDrive.ActivePullForce > 0.0f && PullDrive.LastPullSample.bValid
-		&& (!HoldConfig.bActivePullRequiresTaut || PullDrive.bActivePullIgnoresTaut || PullDrive.bPullTaut))
+	const bool bActivePullPassesGate = PullDrive.ActivePullForce > 0.0f && PullDrive.LastPullSample.bValid
+		&& (!HoldConfig.bActivePullRequiresTaut || PullDrive.bActivePullIgnoresTaut || PullDrive.bPullTaut);
+#if WITH_GAMEPLAY_DEBUGGER
+	// 디버거는 요청값(ActivePullForce)만으로는 실제 인가를 알 수 없다 — 팽팽 게이트와 우회 2층이 여기서
+	// 갈리기 때문이다. 게이트 통과 여부를 그대로 남긴다(수신자 단계에서 힘이 버려지는 경우는 별개다).
+	DebugActivePullPassedGate = bActivePullPassesGate;
+#endif
+	if (bActivePullPassesGate)
 	{
 		// 대상이 무거워 끌 수 없으면(not pullable) 힘을 wielder에 실어 앵커 쪽으로 끌어당긴다(climb-in):
 		// LastPullSample.Direction은 앵커→손 방향이라 부호 반전 = 손→앵커 — "내가 끌려가야 되면 간다"

@@ -712,6 +712,11 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			{
 				continue;
 			}
+#if WITH_GAMEPLAY_DEBUGGER
+			// 이 프레임 로프를 처음 건드리는 지점 — 아래 ResolvePendingAimThrow가 Flight 전이를 만들 수
+			// 있으므로 그 전에 프레임 시작 phase를 굳힌다(디버거 헤더의 "시작→종료" 표시용).
+			Rope->CaptureDebugFrameStartPhase();
+#endif
 			GatherCollidersForRope(*Rope, RopeIndex, Rope->SimFrame.FrameColliders);
 			// 입력 순간 고정한 ray bounds로 collider를 모은 직후 Aim throw를 확정한다.
 			// 이 순서 덕분에 같은 요청의 최신 FrameColliders로 hit 또는 FrameForward fallback을 결정한다.

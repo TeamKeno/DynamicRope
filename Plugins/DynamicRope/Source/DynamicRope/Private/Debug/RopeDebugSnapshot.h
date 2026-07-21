@@ -181,8 +181,11 @@ struct FRopeDebugSnapshot
 	// 이번 프레임 테더 장력(λ/dt 또는 랙돌 물리 제약 실측력, kg·cm/s²)과 그 상한 — 디버거 표시용.
 	float TetherTension = 0.0f;
 	float MaxTetherTension = 0.0f;
-	// 능동 Pull 힘(0=입력 없음)
+	// 능동 Pull **요청** 힘(0=입력 없음). SetActivePull이 저장한 값이라 인가 여부와는 별개다.
 	float ActivePullForce = 0.0f;
+	// 그 요청이 이번 프레임 팽팽 게이트를 통과해 실제로 인가됐는가. 요청값만 내면 "taut=N인데 우회 설정으로
+	// 인가된" 경우와 "입력은 있으나 막힌" 경우가 같은 숫자로 보인다.
+	bool bActivePullApplied = false;
 	// 팽팽(taut) 게이트 상태 — 능동 Pull 인가 조건(IsPullTaut와 동일 래치)
 	bool bPullTaut = false;
 	// 전 체인 팽팽(기하) 게이트 — 견인(테더+능동 Pull) 공용 선행 조건(코너-다리 chord 합 vs rest 길이)
@@ -206,7 +209,7 @@ struct FRopeDebugSnapshot
 	// 재질의에 더한 여유 반경(cm). 화면이 "이건 solver 접촉이 아니라 r+N cm 질의 결과"라고 밝히는 데 쓴다.
 	float ProximityQueryMargin = 0.0f;
 
-	//~ 감김 축(Wrapping에서 ResolveWrappingAxis가 정한 경로 축) — [O] 뷰 선 시각화용 ---
+	//~ 감김 축(Wrapping에서 ResolveWrappingAxis가 정한 경로 축) — [I] wrap 뷰 선 시각화용 ---
 	// Wrapping 페이즈에서만 유효(bHasWrapAxis). 어느 축으로 감기는지 눈으로 확인하기 위한 것.
 	bool    bHasWrapAxis = false;
 	FVector WrapAxisOrigin = FVector::ZeroVector;

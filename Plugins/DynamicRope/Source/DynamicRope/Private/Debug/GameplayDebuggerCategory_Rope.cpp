@@ -53,13 +53,11 @@ namespace
 	// 이번 프레임 이 로프가 밟은 솔브 경로. bGpuStepped 하나로는 판정할 수 없다 — 서브시스템이 솔브
 	// 프레임과 override-only 프레임(Wrapping/Releasing/GuidedThrow)을 똑같이 GPU에 실으므로
 	// (TryBuildResidentStep) GPU=true가 "물리 솔브 중"을 뜻하지 않는다.
+	// **실제로 한 일을 먼저 본다.** bSleeping은 프레임 끝(UpdateSleepState)에 확정되는 반면 솔브/디스패치
+	// 플래그는 이미 수행한 작업이라, 슬립을 먼저 보면 깨어 있다가 이 프레임 끝에 잠든 로프가 실제로 밟은
+	// GPU_SOLVE/CPU_SOLVE를 SLEEP이 덮는다. 슬립은 "그래서 아무 일도 안 한" 프레임의 사유로만 쓴다.
 	const TCHAR* SolvePathToken(bool bSleeping, bool bSolved, bool bGpuStepped, bool bLogicOverride)
 	{
-		if (bSleeping)
-		{
-			// 슬립은 솔브 자체가 없다 — 다른 어떤 상태보다 먼저 본다.
-			return TEXT("{cyan}SLEEP");
-		}
 		if (bGpuStepped)
 		{
 			return bSolved ? TEXT("{green}GPU_SOLVE") : TEXT("{green}GPU_OVERRIDE");
@@ -69,8 +67,13 @@ namespace
 			// GPU 상주 대상이 아니어서 CPU로 푼 프레임(노드 수 초과·RHI 없음 등).
 			return TEXT("{red}CPU_SOLVE");
 		}
-		// 솔브도 GPU 디스패치도 없지만 로직이 위치를 갱신한 프레임 vs 아무것도 안 한 프레임.
-		return bLogicOverride ? TEXT("{yellow}CPU_OVERRIDE") : TEXT("{grey}IDLE");
+		if (bLogicOverride)
+		{
+			// 솔브는 없지만 로직이 위치를 갱신한 프레임.
+			return TEXT("{yellow}CPU_OVERRIDE");
+		}
+		// 아무 일도 없었다 — 잠들어서인지(SLEEP) 그냥 할 일이 없어서인지(IDLE)를 가른다.
+		return bSleeping ? TEXT("{cyan}SLEEP") : TEXT("{grey}IDLE");
 	}
 
 	const TCHAR* DebugPhaseName(ERopePhase Phase)
@@ -602,26 +605,42 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		// 그 결론을 만든 관측치(chain 기하·방향 벡터·λ 내부값)는 아래 상세 줄로 내린다.
 		if (S.bPullValid)
 		{
-			// 거리 release가 실제로 도는 모드에서 켜져 있으면 초과분이 한계에 근접/초과할 때 색으로
-			// 경고(노랑 80%+, 빨강 초과). GuaranteedWrap은 거리 해제도 무효라 경고 대상이 아니다.
+			// 거리 release는 **장력과 무관하게** 초과분(TetherOvershoot)만 보고 판정하므로, 슬랙(tension 0)
+			// 상태에서도 한계에 근접하거나 넘을 수 있다. 그래서 release 상태와 능동 Pull 입력은 두 분기가
+			// 같은 값을 낸다 — 한쪽만 내면 슬랙일 때 "곧 놓친다"를 놓친다.
+			const bool bDistanceReleaseLive = S.bAutoReleaseEnabled && S.DistanceReleaseSlack > 0.0f;
+			// 초과분이 한계에 근접/초과할 때 색으로 경고(노랑 80%+, 빨강 초과).
 			const TCHAR* OvershootColor = TEXT("{white}");
-			if (S.bAutoReleaseEnabled && S.DistanceReleaseSlack > 0.0f)
+			if (bDistanceReleaseLive)
 			{
 				OvershootColor = (S.TetherOvershoot > S.DistanceReleaseSlack) ? TEXT("{red}")
 					: (S.TetherOvershoot > S.DistanceReleaseSlack * 0.8f) ? TEXT("{yellow}") : TEXT("{white}");
 			}
+			// 임계가 0이거나 GuaranteedWrap이면 숫자가 아니라 off — release=0은 "임계가 0"으로 읽힌다.
+			const FString ReleaseText = bDistanceReleaseLive
+				? FString::Printf(TEXT("release=%.0f"), S.DistanceReleaseSlack)
+				: FString(TEXT("release=off"));
+			// active는 SetActivePull이 저장한 **요청값**이다. 팽팽 게이트(+우회 2층)를 통과해야 실제로 인가되므로
+			// 통과 여부를 함께 낸다 — 숫자만 내면 막힌 프레임과 인가된 프레임이 같아 보인다.
+			const FString ActiveText = (S.ActivePullForce > 0.0f)
+				? FString::Printf(TEXT(" active=%.0f%s"), S.ActivePullForce,
+					S.bActivePullApplied ? TEXT("") : TEXT("{yellow} blocked"))
+				: FString();
 
 			if (S.PullTension > KINDA_SMALL_NUMBER)
 			{
 				AddTextLine(FString::Printf(
-					TEXT("    {orange}pull{white} tension=%.0f taut=%s{white} tether=%s%.0fcm{white}(release=%.0f) active=%.0f"),
+					TEXT("    {orange}pull{white} tension=%.0f taut=%s{white} tether=%s%.0fcm{white}(%s)%s"),
 					S.PullTension, S.bPullTaut ? TEXT("{green}Y") : TEXT("{grey}N"),
-					OvershootColor, S.TetherOvershoot, S.DistanceReleaseSlack, S.ActivePullForce));
+					OvershootColor, S.TetherOvershoot, *ReleaseText, *ActiveText));
 			}
 			else
 			{
 				// 장력 0 = 슬랙. 이 상태가 의외라면 chain 기하(상세 줄)가 이유를 말해준다.
-				AddTextLine(FString::Printf(TEXT("    {grey}pull slack (tension 0, tether=%.0fcm)"), S.TetherOvershoot));
+				AddTextLine(FString::Printf(
+					TEXT("    {grey}pull slack (tension 0) taut=%s{grey} tether=%s%.0fcm{grey}(%s)%s"),
+					S.bPullTaut ? TEXT("{green}Y") : TEXT("{grey}N"),
+					OvershootColor, S.TetherOvershoot, *ReleaseText, *ActiveText));
 			}
 
 			// 상세: 결론을 만든 관측치. chain은 견인의 선행 게이트(코너-다리 chord 합 vs rest 길이),
