@@ -53,11 +53,11 @@ public:
 
 	/** 노드(파티클) 수. 적용 시 로프가 재초기화된다. 상한 512 = GPU 솔버 스레드그룹 한계. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Rope", meta = (ClampMin = "2", ClampMax = "512"))
-	int32 NumParticles = 24;
+	int32 NumParticles = 72;
 
 	/** 초기(최대) 로프 길이(cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Rope", meta = (ClampMin = "1.0", Units = "cm"))
-	float RopeLength = 200.0f;
+	float RopeLength = 600.0f;
 
 	/** 되감기(reel-in)로 줄일 수 있는 최소 길이(cm). RopeLength(초기)가 상한이다. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Rope", meta = (ClampMin = "10.0", Units = "cm"))
