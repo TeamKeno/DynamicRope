@@ -10,7 +10,8 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "Camera/PlayerCameraManager.h"
-#include "UObject/UObjectIterator.h"
+// 등록된 로프 목록(GetRegisteredRopes) — 이 화면의 단일 소스
+#include "Subsystem/RopeSimSubsystem.h"
 
 namespace
 {
@@ -42,6 +43,9 @@ namespace
 		float LodScale = 1.0f;
 		float Distance = -1.0f;     // 카메라→앵커(cm), 카메라 없으면 -1
 		FVector Anchor = FVector::ZeroVector;
+		// centerline이 아직 없으면(시드 전/노드 0) Anchor는 의미 없는 0벡터다. 그대로 마커를 그리면
+		// 월드 원점에 있지도 않은 로프의 #n 라벨이 찍혀(여럿이면 겹쳐 쌓여) 엉뚱한 곳을 찾게 만든다.
+		bool bHasAnchor = false;
 	};
 }
 
@@ -86,14 +90,21 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 	TArray<FPerfRow> Rows;
 	int32 NumGpu = 0, NumCpu = 0, NumSleeping = 0, NumGdf = 0;
 	int64 TotalParticles = 0;
-	for (TObjectIterator<URopeComponent> It; It; ++It)
+	// 서브시스템의 등록 목록을 읽는다 — 이 화면이 세는 것은 "월드에 있는 로프"가 아니라 **이 서브시스템이
+	// 실제로 구동하는 로프**다(등록 안 된 로프는 틱되지 않아 비용도 0이라 성능 화면의 분모로 맞지 않다).
+	// 전체 UObject 스캔을 쓰면 로프 수와 무관하게 비싸고, 성능을 재려고 켠 화면이 스스로 프레임을
+	// 무겁게 만들어 측정 대상을 왜곡한다.
+	const URopeSimSubsystem* SimSub = URopeSimSubsystem::Get(World);
+	if (!SimSub)
 	{
-		const URopeComponent* Rope = *It;
-		if (!IsValid(Rope) || Rope->GetWorld() != World || !Rope->IsRegistered())
-		{
-			continue;
-		}
-		if (Rope->HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject))
+		AddTextLine(TEXT("{grey}no rope sim subsystem"));
+		return;
+	}
+	for (const TObjectPtr<URopeComponent>& RopePtr : SimSub->GetRegisteredRopes())
+	{
+		// 파괴 후 GC 대기 중인 항목이 섞일 수 있다(무효 정리는 Tick 프레임 경계에서만 돈다).
+		const URopeComponent* Rope = RopePtr.Get();
+		if (!IsValid(Rope))
 		{
 			continue;
 		}
@@ -111,6 +122,7 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 		if (Points.Num() > 0)
 		{
 			Row.Anchor = Points[0];
+			Row.bHasAnchor = true;
 			if (bHasCam)
 			{
 				Row.Distance = static_cast<float>(FVector::Dist(CamLoc, Row.Anchor));
@@ -128,9 +140,11 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 	const int32 NumRopes = Rows.Num();
 	const int32 NumIdle = FMath::Max(0, NumRopes - NumGpu - NumCpu);
 
-	// 상단 집계(‘stat DynamicRope’와 동일 정의: Active = gpu + cpu + idle).
+	// 상단 집계. registered = 서브시스템에 등록돼 이번 프레임 구동된 로프 수이지 월드에 배치된 수가 아니다
+	// — 등록 전(스폰 직후 BeginPlay 전)이거나 등록에 실패한 로프는 틱되지 않으므로 여기 없다.
+	// 그 구성(gpu + cpu + idle)은 ‘stat DynamicRope’의 Active와 같은 정의다.
 	AddTextLine(FString::Printf(
-		TEXT("{white}Rope Perf (world){grey}  active=%d  {green}gpu=%d {red}cpu=%d {grey}idle=%d  {cyan}sleeping=%d"),
+		TEXT("{white}Rope Perf (world){grey}  registered=%d  {green}gpu=%d {red}cpu=%d {grey}idle=%d  {cyan}sleeping=%d"),
 		NumRopes, NumGpu, NumCpu, NumIdle, NumSleeping));
 	AddTextLine(FString::Printf(
 		TEXT("{grey}particles=%lld  gdf-enabled=%d%s"),
@@ -139,7 +153,7 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 
 	if (NumRopes == 0)
 	{
-		AddTextLine(TEXT("{grey}no active ropes in world"));
+		AddTextLine(TEXT("{grey}no registered ropes in world"));
 		return;
 	}
 
@@ -177,10 +191,14 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 			R.bGdf ? TEXT("{green}gdf") : TEXT("{grey}gdf-off"), *Dist));
 
 		// 앵커 마커(월드↔리스트 상관용). 슬립=cyan, 솔브 중=흰, idle=회색.
-		const FColor MarkerColor = R.bSleeping ? FColor::Cyan
-			: ((R.bGpuStepped || R.bCpuSolved) ? FColor::White : FColor(140, 140, 140));
-		AddShape(FGameplayDebuggerShape::MakePoint(R.Anchor, 6.0f, MarkerColor,
-			FString::Printf(TEXT("#%d"), i + 1)));
+		// centerline이 없는 로프는 찍을 위치가 없다 — 0벡터로 그리면 월드 원점에 유령 마커가 생긴다.
+		if (R.bHasAnchor)
+		{
+			const FColor MarkerColor = R.bSleeping ? FColor::Cyan
+				: ((R.bGpuStepped || R.bCpuSolved) ? FColor::White : FColor(140, 140, 140));
+			AddShape(FGameplayDebuggerShape::MakePoint(R.Anchor, 6.0f, MarkerColor,
+				FString::Printf(TEXT("#%d"), i + 1)));
+		}
 	}
 	if (Rows.Num() > MaxRows)
 	{

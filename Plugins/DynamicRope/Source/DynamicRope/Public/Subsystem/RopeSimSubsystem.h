@@ -76,6 +76,15 @@ public:
 	void UnregisterRope(URopeComponent* Rope);
 
 	/**
+	 * 이번 프레임 이 서브시스템이 구동하는 로프 목록(읽기 전용). 등록/해제는 위 두 함수가 단일 통로다.
+	 * 진단 화면이 월드에서 로프를 직접 찾지 않게 하려고 연다 — 전체 UObject 스캔은 로프 수와 무관하게
+	 * 비싸고, 무엇보다 성능을 재려고 켠 화면이 스스로 측정 대상을 무겁게 만든다.
+	 * 무효 항목(파괴 후 GC 대기)이 섞일 수 있으므로 소비자가 IsValid로 거른다 — Tick의 무효 정리는
+	 * 프레임 경계에서만 돈다.
+	 */
+	const TArray<TObjectPtr<URopeComponent>>& GetRegisteredRopes() const { return Ropes; }
+
+	/**
 	 * wrap 성립/해제 중앙 신호(위 델리게이트 주석 참고). 로프가 자기 이벤트를 broadcast할 때 함께 쏜다.
 	 * 대상 반응 컴포넌트(URopeRagdollResponseComponent 등)가 구독한다 — 구독자가 없으면 사실상 무비용.
 	 */
