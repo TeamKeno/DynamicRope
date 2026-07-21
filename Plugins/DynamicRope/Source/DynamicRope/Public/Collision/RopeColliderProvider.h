@@ -23,23 +23,28 @@
 struct FRopeColliderGatherContext
 {
 	/**
-	 * 입력: 로프별 활성 영역(로프 tight AABB + 마진). 서브시스템의 로프 목록 인덱스와 1:1이며,
-	 * region이 없는 로프는 !IsValid 박스로 자리를 유지한다 — provider는 !IsValid를 건너뛴다.
+	 * 입력: 물리/조준 활성 영역. 로프 수를 N이라 할 때 레이아웃은 [0, N) 물리 region,
+	 * [N, 2N) 같은 로프의 조준 region이다. 조준 중이 아닌 로프의 조준 region과 region이 없는 로프는
+	 * !IsValid 박스로 자리를 유지한다 — provider는 !IsValid를 건너뛴다.
 	 * bounds-aware provider는 이 리스트로 멀리 동떨어진 로프 사이 빈 공간을 스캔에서 배제한다.
 	 */
 	TArrayView<const FBox> RopeRegions;
 
+	/** RopeRegions 앞쪽에 있는 물리 region 수(N). 뒤쪽 N개는 같은 순서의 조준 region이다. */
+	int32 NumPhysicsRegions = 0;
+
 	/**
 	 * 입력(선택): region 처리 우선순위 — 앞에 오는 region 인덱스부터 스캔한다. 전역 추출 상한이 있는
 	 * provider(정적 바디)용: 선착순 소진이면 앞 순서의 한가한 로프 주변 잡동사니가 상한을 먼저 먹어
-	 * 활성 로프가 충돌을 굶을 수 있다 — 서브시스템이 활성(사용 중 페이즈, 비슬립) 로프를 앞에 둔다.
+	 * 활성 로프가 충돌을 굶을 수 있다 — 서브시스템이 활성(사용 중 페이즈, 비슬립) 물리 region을
+	 * 먼저 두고, 조준 region은 모든 물리 region 뒤에 둔다.
 	 * 순서만 바꿀 뿐 region 인덱스 자체는 불변이라 RegionColliderIndices 매핑에는 영향이 없다.
 	 * 비어 있으면 인덱스 순서(0..N-1)로 처리한다. 상한 없는 provider는 무시해도 된다.
 	 */
 	TArrayView<const int32> RegionGatherOrder;
 
 	/**
-	 * 출력: flat 디둡 풀(이전 계약과 동일). collider↔로프는 다대다(겹치는 region)라 풀은 provider가
+	 * 출력: flat 디둡 풀(이전 계약과 동일). collider↔region은 다대다(겹치는 영역)라 풀은 provider가
 	 * 컴포넌트/본 단위로 디둡해 1회만 담고, 다중 소속은 아래 매핑으로 표현한다. 가리키는 collider들은
 	 * provider 소유 스토리지이며 이번 프레임 solve가 끝날 때까지 유효해야 한다.
 	 */
@@ -72,7 +77,8 @@ class IRopeColliderProvider
 public:
 	/**
 	 * 이번 프레임의 collider를 수집한다(broad phase는 여기서 수행). 서브시스템이 프레임당 1회,
-	 * 로프별 region 리스트(Gather.RopeRegions)와 함께 호출한다.
+	 * 물리/조준 region 리스트(Gather.RopeRegions)와 함께 호출한다. 공개 레이아웃 계약은
+	 * Gather.NumPhysicsRegions 주석을 따른다.
 	 *  - region을 실제로 쓰는 provider(정적 바디): region별 오버랩 결과를 풀에 디둡해 담고, 어느
 	 *    region이 어느 콜라이더를 물었는지 RegionColliderIndices로 함께 돌려준다.
 	 *  - region 무시 provider(스켈레톤): 전 collider를 빌드해 풀에 담은 뒤
@@ -95,7 +101,7 @@ namespace RopeColliderGather
 	/**
 	 * 스켈레톤형(전 콜라이더 빌드 후 배정) provider 공용 매핑 헬퍼: 풀의 [StartIndex, Colliders.Num())
 	 * 구간 — 이 provider가 이번 호출에 추가한 콜라이더들 — 을 각 region에 배정한다.
-	 * 그룹 유니언 bounds로 먼저 거절하므로 멀리 있는 로프는 region당 1회 비교로 끝나고(메시당 O(로프)),
+	 * 그룹 유니언 bounds로 먼저 거절하므로 멀리 있는 영역은 region당 1회 비교로 끝나고(메시당 O(region)),
 	 * 유니언에 걸린 가까운 로프만 콜라이더별 bounds로 정밀 배정한다(이전 서브시스템 재-컬과 동일 판정).
 	 */
 	inline void MapCollidersToRegionsByBounds(FRopeColliderGatherContext& Gather, int32 StartIndex)

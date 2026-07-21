@@ -342,11 +342,13 @@ TArray<FRopePluginInfoEntry> URopePluginInfoWidget::GetDefaultLimitations()
 	return {
 		Make(TEXT("No networking / replication"),
 			TEXT("The simulation is local only. For multiplayer, replicate the high-level events and simulate the rope locally on each machine.")),
-		Make(TEXT("Gameplay debugger is local only"),
-			TEXT("The Rope category is built for Standalone and local play. Its 3D overlays are drawn in the foreground with DrawDebug, ")
-			TEXT("which the gameplay debugger does not replicate, so on a remote client you get the text lines without the shapes.")),
+		Make(TEXT("Some gameplay-debug overlays are local only"),
+			TEXT("Rope debugger text, AddShape geometry and point markers replicate through the Gameplay Debugger. ")
+			TEXT("Foreground-only overlays (colliders, aim, wrap axis, node-contact arrows and pull legs) use direct DrawDebug calls, ")
+			TEXT("so those overlays are missing on a remote client.")),
 		Make(TEXT("GPU tube ring limit"),
-			TEXT("The GPU tube path requires NumRings <= 512; oversized ropes fall back to the CPU tube builder.")),
+			TEXT("The GPU tube path supports up to 512 effective rings. Tube smoothing subdivision is reduced automatically ")
+			TEXT("to stay within the limit; ropes with more than 512 simulation nodes use the CPU tube builder.")),
 		Make(TEXT("CPU fallback contexts"),
 			TEXT("Cook, dedicated server and -nullrhi have no renderable RHI, so they run the CPU solver / tube instead of the GPU path.")),
 		Make(TEXT("Spiral wraps only the dominant target"),

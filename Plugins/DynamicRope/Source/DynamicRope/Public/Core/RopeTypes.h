@@ -379,7 +379,7 @@ struct FRopeVirtualBridgeRun
 	TArray<int32> VirtualNodeIndices;
 };
 
-/** 접촉 시 실제로 평가한 pose-space gap의 판정 결과. 디버그 표시는 이 저장값만 읽는다. */
+/** 접촉 시 실제로 평가한 pose-space gap의 판정 결과. island 연결 판정과 실패 진단이 함께 읽는다. */
 enum class ERopeWrapIslandPortalState : uint8
 {
 	Open,
@@ -387,7 +387,7 @@ enum class ERopeWrapIslandPortalState : uint8
 	ClosedReachability
 };
 
-/** island 구성에 채택된 SDF collider의 접촉 시점 volume 스냅샷. 추가 샘플링 없이 debug draw에 쓴다. */
+/** island 후보 SDF collider의 접촉 시점 volume 스냅샷. 런타임 복합 단면 계산이 추가 샘플링 없이 쓴다. */
 struct FRopeWrapIslandDebugMember
 {
 	FName Bone = NAME_None;
@@ -515,7 +515,8 @@ struct FRopeWrappingState
 	 */
 	TArray<FName> PathWrapIslandBones;
 
-	/** 접촉 시 실제 island 판정에서 나온 데이터만 보관하는 디버그 스냅샷. 별도 경로/SDF를 만들지 않는다. */
+	/** 접촉 시 실제 island 판정에서 나온 스냅샷. member는 런타임 복합 단면 계산에, portal은 실패 진단에
+	 *  사용하며 별도 경로/SDF를 만들지 않는다. */
 	TArray<FRopeWrapIslandDebugMember> PathWrapIslandDebugMembers;
 	TArray<FRopeWrapIslandDebugPortal> PathWrapIslandDebugPortals;
 

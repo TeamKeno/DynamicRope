@@ -102,7 +102,7 @@ private:
 	TMap<TWeakObjectPtr<UPrimitiveComponent>, FTransform> PrevCompXforms;
 
 	/**
-	 * 로프별 region마다 오버랩 → 근접 정적 바디의 AggGeom을 Boxes/Capsules/Convexes로 추출한다. region 간 중복은
+	 * 물리/조준 region마다 오버랩 → 근접 정적 바디의 AggGeom을 Boxes/Capsules/Convexes로 추출한다. region 간 중복은
 	 * 컴포넌트/인스턴스 단위 디둡으로 프레임당 1회만 추출(빈 공간 union AABB의 낭비·예산 경합 제거).
 	 * region 처리 순서는 Gather.RegionGatherOrder(활성 로프 먼저) — 전역 상한이 걸리는 프레임에
 	 * 스캔을 못 받는 쪽이 한가한/잠든 로프가 되게 한다.

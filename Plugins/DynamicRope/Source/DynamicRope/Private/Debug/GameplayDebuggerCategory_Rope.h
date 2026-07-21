@@ -12,7 +12,7 @@
 // pull leg)는 전경 표시(SDPG_Foreground)가 필요해 AddShape 대신 DrawDebug*를 직접 부른다 — AddShape는
 // depth priority가 SDPG_World로 하드코딩돼 캐릭터 메시 안의 앵커 같은 것이 묻힌다.
 // 그 대가로 이 도형들은 **원격 클라이언트에 복제되지 않는다**: CollectData()는 authority에서 돌고
-// DrawDebug*는 그 월드에만 그린다(AddTextLine/AddShape만 복제된다).
+// DrawDebug*는 그 월드에만 그린다(AddTextLine/AddShape/아래 FRepData 점 표시는 복제된다).
 // 이것은 "네트워크와 무관"해서가 아니라 **현재 지원 범위 밖이라 받아들인 기술 부채**다 — 플러그인
 // 시뮬레이션 자체가 로컬 전용이라 지금은 손실이 없지만, 멀티플레이를 지원하게 되면 끝점을 직렬화해
 // 클라이언트 렌더 단계에서 그리는 작업이 함께 필요하다.

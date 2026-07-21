@@ -615,8 +615,8 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 		Candidate.DebugMember.Bone = Bone;
 		Candidate.DebugMember.WorldBounds = Bounds;
 
-		// SDF grid의 로컬 bounds와 당시 bone transform을 그대로 스냅샷한다. debug draw에서 이 값을
-		// 다시 샘플링하거나 메시로 변환하지 않고 oriented box로만 표시한다.
+		// SDF grid의 로컬 bounds와 당시 bone transform을 그대로 스냅샷한다. 이후 복합 단면 계산은
+		// 이 oriented box를 사용해 SDF를 다시 샘플링하거나 메시로 변환하지 않는다.
 		FRopeSDFColliderView SDFView;
 		if (Collider->GetGPUSDF(SDFView))
 		{

@@ -64,7 +64,7 @@ public:
 	/** 질의 공통 컨텍스트. 호출자(URopeComponent)가 프레임 값으로 조립해 넘긴다. */
 	struct FQueryContext
 	{
-		// 이번 프레임 collider 스냅샷(SimFrame.FrameColliders). 호출 범위 동안만 유효.
+		// 이번 프레임 조준 collider 스냅샷(URopeComponent::GetAimQueryColliders). 호출 범위 동안만 유효.
 		const TArray<IRopeCollider*>* Colliders = nullptr;
 		// RayLength 미지정(<=0) 시 폴백 길이: max(현재 Sim.RopeLength, 초기 RopeLength).
 		float FallbackRayLength = 0.0f;

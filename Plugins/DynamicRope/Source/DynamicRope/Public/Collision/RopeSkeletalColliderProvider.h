@@ -54,7 +54,7 @@ protected:
 	virtual void RebuildColliders(USkeletalMeshComponent* Mesh, float InvDt)
 		PURE_VIRTUAL(URopeSkeletalColliderProvider::RebuildColliders, );
 
-	/** 서브클래스 스토리지의 collider 포인터를 Gather.Colliders에 append한다(reserve 포함, 프레임당 로프마다 호출). */
+	/** 서브클래스 스토리지의 collider 포인터를 Gather.Colliders에 append한다(reserve 포함, 중앙 수집 pass마다 호출). */
 	virtual void AppendColliderPointers(FRopeColliderGatherContext& Gather)
 		PURE_VIRTUAL(URopeSkeletalColliderProvider::AppendColliderPointers, );
 

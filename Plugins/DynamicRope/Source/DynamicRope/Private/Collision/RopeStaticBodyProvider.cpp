@@ -40,8 +40,9 @@ void URopeStaticBodyProvider::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void URopeStaticBodyProvider::GatherColliders(FRopeColliderGatherContext& Gather)
 {
-	// 프레임당 1회만 빌드(디둡). RopeRegions는 서브시스템이 로프별 region 리스트로 프레임 내내 동일하게
-	// 넘기므로, 첫 호출의 오버랩 결과(+추출 그룹)를 그 프레임의 모든 로프가 공유한다.
+	// 프레임당 1회만 빌드(디둡). 물리/조준 RopeRegions를 한 번에 받아 첫 중앙 수집 pass에서 추출한
+	// 오버랩 결과(+추출 그룹)를 그 프레임의 모든 region이 공유한다. 같은 프레임의 후속 pass는 현재
+	// region에 대한 매핑만 다시 만들고, backing pool은 재사용한다.
 	const uint64 Frame = GFrameCounter;
 	if (BuiltFrame != Frame)
 	{

@@ -117,10 +117,13 @@ public:
 
 	/**
 	 * 즉시 조준 질의(HUD/preview)용 collider 스냅샷 새로고침. Wielder tick은 SimTick보다 먼저 돌 수 있어,
-	 * 방금 갱신한 aim ray bounds가 다음 SimTick까지 FrameColliders에 반영되지 않는 프레임이 생긴다.
-	 * 이 함수는 현재 등록된 provider를 한 번 다시 수집하고 지정 로프의 FrameColliders만 최신 region으로 채운다.
+	 * 방금 갱신한 aim ray bounds가 다음 SimTick까지 반영되지 않는 프레임이 생긴다. 이 함수는 현재
+	 * 등록된 provider를 한 번 다시 수집하고 지정 로프의 **AimFrameColliders만** 최신 조준 region으로
+	 * 채운다. 조준 region 결과를 물리용 FrameColliders에 쓰지 않으며, 물리 목록은 SimTick이 물리
+	 * region으로 다시 채운다(조준 대상의 본 콜라이더가 솔버/접촉/디버그 질의로 새는 것을 막는 분리
+	 * 계약: FRopeSimFrameIO::AimFrameColliders 주석 참조).
 	 */
-	bool RefreshFrameCollidersForImmediateQuery(URopeComponent& Rope);
+	bool RefreshAimFrameCollidersForImmediateQuery(URopeComponent& Rope);
 
 	//~ UWorldSubsystem
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
@@ -222,10 +225,17 @@ private:
 	TArray<FFrameProviderColliders> FrameProviders;
 
 	/**
-	 * 이번 프레임 로프별 region(Ropes 인덱스와 1:1 — region 없는 로프는 !IsValid 자리 유지). provider
-	 * gather와 로프별 배정이 같은 박스를 쓰는 단일 소스. BuildFrameColliders가 채운다.
+	 * 이번 프레임 region 목록. provider gather와 로프별 배정이 같은 박스를 쓰는 단일 소스로,
+	 * BuildFrameColliders가 채운다. 레이아웃은 **로프 수(N)의 두 배**다:
+	 *  - [0, N)   물리 region — 로프 tight AABB + 마진(Ropes 인덱스와 1:1).
+	 *  - [N, 2N)  조준 region — 물리 region ∪ aim ray AABB(조준 중이 아니면 !IsValid).
+	 * 조준 region을 따로 두는 이유는 FRopeSimFrameIO::AimFrameColliders 주석 참조. region 없는 자리는
+	 * !IsValid 박스로 유지한다(provider가 돌려주는 매핑 인덱스가 그대로 대응하도록 — provider는 건너뜀).
 	 */
 	TArray<FBox> FrameRopeRegions;
+
+	/** 로프 인덱스 → 조준 region 인덱스(위 레이아웃). 물리 region 인덱스는 로프 인덱스 그대로다. */
+	int32 AimRegionIndexOf(int32 RopeIndex) const { return Ropes.Num() + RopeIndex; }
 
 	/**
 	 * 이번 프레임 region 처리 우선순위(활성 로프 먼저 — 사용 중 페이즈 > Free 깨어있음 > 슬립 > 무효).
@@ -234,20 +244,29 @@ private:
 	 */
 	TArray<int32> FrameRegionGatherOrder;
 
-	/** 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). provider에는 로프별 region 리스트를 넘긴다. */
+	/** 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). provider에는 물리/조준 region 리스트를 넘긴다. */
 	void BuildFrameColliders();
 
 	/**
-	 * 한 로프의 collider를 중앙 빌드에서 모은다: 기본은 전체, 자기 owner provider만 제외(bIncludeOwnerColliders로 옵트인).
-	 * RopeIndex = Ropes/FrameRopeRegions 인덱스(provider 매핑의 region 인덱스와 동일해야 한다).
+	 * 한 region의 collider를 중앙 빌드에서 모은다: 기본은 전체, 자기 owner provider만 제외(bIncludeOwnerColliders로 옵트인).
+	 * RegionIndex = FrameRopeRegions 인덱스(물리면 로프 인덱스, 조준이면 AimRegionIndexOf) — provider 매핑의
+	 * region 인덱스와 동일해야 한다. owner 제외·정적 예산·cross-actor 규칙은 양쪽 region에 똑같이 적용된다.
 	 */
-	void GatherCollidersForRope(const URopeComponent& Rope, int32 RopeIndex, TArray<IRopeCollider*>& OutColliders) const;
+	void GatherCollidersForRope(const URopeComponent& Rope, int32 RegionIndex, TArray<IRopeCollider*>& OutColliders) const;
+
+	/**
+	 * 한 로프의 조준 collider 스냅샷(SimFrame.AimFrameColliders)을 조준 region으로 채운다.
+	 * 조준 중이 아니면(aim bounds 무효) 즉시 비운다 — 프레임을 넘어 남은 포인터를 쓰지 않게.
+	 */
+	void GatherAimCollidersForRope(URopeComponent& Rope, int32 RopeIndex) const;
 
 	/**
 	 * 한 로프의 broad-phase 질의 bounds(Pos∪Prev tight AABB + 접촉/예측 마진). provider에 넘기는 region과
 	 * per-rope collider 컬링이 동일 박스를 쓰도록 한 곳에서 계산한다(무효면 !IsValid 박스 반환).
+	 * bIncludeAimRay면 조준 ray AABB까지 합친 조준 region을 만든다 — 조준 중이 아니면(ray bounds 무효)
+	 * 조준 region 자체가 필요 없으므로 !IsValid 박스를 반환한다(수집 없음 = 조준 목록 비움).
 	 */
-	static FBox ComputeRopeQueryBounds(const URopeComponent& Rope);
+	static FBox ComputeRopeQueryBounds(const URopeComponent& Rope, bool bIncludeAimRay = false);
 
 	/**
 	 * GPU 상주 솔버(M5). 영속 버퍼(로프별)를 매 프레임 in-place 전진. 인스턴스 상태라 월드별 1개.

@@ -185,11 +185,16 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	return true;
 }
 
+const TArray<IRopeCollider*>& URopeComponent::GetAimQueryColliders() const
+{
+	return SimFrame.AimRayColliderQueryBounds.IsValid ? SimFrame.AimFrameColliders : SimFrame.FrameColliders;
+}
+
 FRopeAimTargeting::FQueryContext URopeComponent::MakeAimQueryContext() const
 {
 	// 폴백 치수 규약: ray 길이 = 현재/초기 로프 길이 중 큰 값, 질의 반경 = 튜브/접촉 반경 중 큰 값.
 	FRopeAimTargeting::FQueryContext Ctx;
-	Ctx.Colliders = &SimFrame.FrameColliders;
+	Ctx.Colliders = &GetAimQueryColliders();
 	Ctx.FallbackRayLength = FMath::Max(Sim.RopeLength, RopeLength);
 	Ctx.FallbackQueryRadius = FMath::Max(Radius, GetEffectiveContactQueryRadius());
 	return Ctx;
@@ -211,6 +216,9 @@ void URopeComponent::SetAimRayColliderQueryBounds(const FVector& Origin, const F
 void URopeComponent::ClearAimRayColliderQueryBounds()
 {
 	SimFrame.AimRayColliderQueryBounds = FBox(ForceInit);
+	// 조준 목록은 이 bounds로만 채워진다 — bounds가 사라진 프레임에 함께 비워, 다음 조준 전까지
+	// 지난 프레임 provider 포인터가 남지 않게 한다(수명은 해당 프레임 한정).
+	SimFrame.AimFrameColliders.Reset();
 }
 
 bool URopeComponent::RefreshAimRayQueryColliders(const FRopeAimRayThrowRequest& Request)
@@ -225,8 +233,15 @@ bool URopeComponent::RefreshAimRayQueryColliders(const FRopeAimRayThrowRequest& 
 		Request.RayOrigin, Request.RayDirection, Request.RayLength, Request.QueryRadius);
 	if (URopeSimSubsystem* RopeSim = URopeSimSubsystem::Get(GetWorld()))
 	{
-		return RopeSim->RefreshFrameCollidersForImmediateQuery(*this);
+		if (RopeSim->RefreshAimFrameCollidersForImmediateQuery(*this))
+		{
+			return true;
+		}
 	}
+
+	// bounds만 유효하고 조준 스냅샷 갱신은 실패한 상태를 남기면 GetAimQueryColliders가 빈/지난 목록을
+	// 정상 결과처럼 선택한다. 실패 시 둘을 함께 무효화해 기존 물리 스냅샷 폴백 계약을 보존한다.
+	ClearAimRayColliderQueryBounds();
 	return false;
 }
 
@@ -279,7 +294,9 @@ bool URopeComponent::BuildPreparedWrappingPreviewFromResolvedContext(
 
 	FRopeThrowPreviewBuilder::FInput Input;
 	Input.Sim = &Sim;
-	Input.Colliders = &SimFrame.FrameColliders;
+	// 아크 탐색은 aim ray hit 판정과 같은 목록을 봐야 한다 — 조준 중이면 조준 스냅샷(원거리 대상 포함),
+	// 아니면 물리 스냅샷(BP 직행 Throw 경로). GetAimQueryColliders 주석 참조.
+	Input.Colliders = &GetAimQueryColliders();
 	// wrap 대상 게이트 주입(aim 경로의 ResolveAimRayThrowContext와 같은 패턴) — arc 탐색이 aim과 같은
 	// 기준으로 후보를 거르게 한다. 주입 전에는 금지 대상이 preview에만 보이고 throw 진입점에서 거부됐다.
 	Input.CanWrapTarget = [this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); };

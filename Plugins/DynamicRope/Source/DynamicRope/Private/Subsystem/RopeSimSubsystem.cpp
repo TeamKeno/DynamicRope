@@ -365,8 +365,14 @@ void URopeSimSubsystem::SetAnimPrerequisites(const UActorComponent* Source, bool
 	}
 }
 
-FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope)
+FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope, bool bIncludeAimRay)
 {
+	// 조준 region 요청인데 조준 중이 아니면 수집 자체가 필요 없다 — 무효 박스(= 조준 목록 비움).
+	if (bIncludeAimRay && !Rope.SimFrame.AimRayColliderQueryBounds.IsValid)
+	{
+		return FBox(ForceInit);
+	}
+
 	// 로프 tight AABB(Pos∪Prev — 프레임 모션 포함) + 마진. provider region과 per-rope collider 컬링이
 	// 이 동일 박스를 공유한다(GatherCollidersForRope / BuildFrameColliders 양쪽에서 호출).
 	FBox RopeBounds(ForceInit);
@@ -388,10 +394,12 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope)
 			+ FMath::Sqrt(MaxFrameDispSq) * FMath::Max(Rope.DetectConfig.PredictiveContactFrames, 1.0f);
 		RopeBounds = RopeBounds.ExpandBy(Margin);
 	}
-	if (Rope.SimFrame.AimRayColliderQueryBounds.IsValid)
+	if (bIncludeAimRay)
 	{
-		// Preview ray는 현재 rope centerline과 떨어진 곳을 지나갈 수 있다. 이 구간을 provider region에
-		// 합치지 않으면 ray가 SDF를 관통해도 해당 collider가 FrameColliders에 없어 cyan miss가 된다.
+		// 조준 region 전용: preview ray는 현재 rope centerline과 떨어진 곳을 지나갈 수 있다. 이 구간을
+		// 합치지 않으면 ray가 SDF를 관통해도 해당 collider가 조준 목록에 없어 cyan miss가 된다.
+		// 로프 주변까지 함께 덮는 합집합이라, 조준 질의(hit 판정/preview 아크 탐색)가 보는 범위는
+		// 분리 이전과 같다 — 좁아지는 것은 물리·디버그가 쓰는 FrameColliders 쪽뿐이다.
 		RopeBounds += Rope.SimFrame.AimRayColliderQueryBounds.Min;
 		RopeBounds += Rope.SimFrame.AimRayColliderQueryBounds.Max;
 	}
@@ -403,39 +411,48 @@ void URopeSimSubsystem::BuildFrameColliders()
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_BuildColliders);
 	FrameProviders.Reset();
 
-	// 로프별 활성 영역(region) 리스트 — Ropes 인덱스와 1:1(무효/빈 로프는 !IsValid 박스로 자리 유지 —
-	// provider가 돌려주는 region 매핑 인덱스가 로프 인덱스와 그대로 대응하게 한다. provider는 !IsValid를
+	// 활성 영역(region) 리스트 — 앞쪽 N개가 물리 region(Ropes 인덱스와 1:1), 뒤쪽 N개가 같은 로프의
+	// 조준 region(AimRegionIndexOf). 무효/빈 로프와 조준 중이 아닌 로프는 !IsValid 박스로 자리를 유지한다 —
+	// provider가 돌려주는 region 매핑 인덱스가 이 인덱스와 그대로 대응하게 한다(provider는 !IsValid를
 	// 건너뛴다). bounds-aware provider(정적 바디)는 이 리스트로 멀리 동떨어진 로프 사이 빈 공간을
-	// 스캔에서 배제한다. 아래 로프별 배정(GatherCollidersForRope)과 동일 박스(단일 소스).
+	// 스캔에서 배제한다. 아래 배정(GatherCollidersForRope)과 동일 박스(단일 소스).
 	FrameRopeRegions.Reset();
-	FrameRopeRegions.Reserve(Ropes.Num());
+	FrameRopeRegions.Reserve(Ropes.Num() * 2);
 	for (URopeComponent* Rope : Ropes)
 	{
 		FrameRopeRegions.Add(IsValid(Rope) ? ComputeRopeQueryBounds(*Rope) : FBox(ForceInit));
 	}
+	for (URopeComponent* Rope : Ropes)
+	{
+		FrameRopeRegions.Add(IsValid(Rope) ? ComputeRopeQueryBounds(*Rope, /*bIncludeAimRay*/ true) : FBox(ForceInit));
+	}
 
-	// region 처리 우선순위: 활성 로프 먼저. 전역 추출 상한이 있는 provider(정적 바디)가 선착순으로
-	// 예산을 소진하므로, 상한이 걸리는 프레임에는 뒤 순서 region이 스캔을 못 받는다 — 그때 굶는 쪽이
-	// "사용 중인 로프"가 되지 않게 순서만 재배열한다(인덱스 불변 → 매핑 무영향).
+	// region 처리 우선순위: 활성 로프 먼저, 그리고 물리 region이 조준 region보다 먼저. 전역 추출 상한이
+	// 있는 provider(정적 바디)가 선착순으로 예산을 소진하므로, 상한이 걸리는 프레임에는 뒤 순서 region이
+	// 스캔을 못 받는다 — 그때 굶는 쪽이 "실제로 시뮬되는 로프"가 되지 않게 순서만 재배열한다
+	// (인덱스 불변 → 매핑 무영향). 조준 region은 HUD/preview 표시용이라 물리보다 뒤로 미룬다.
 	// 키: 0 = 사용 중 페이즈(Flight~Releasing), 1 = Free 깨어있음, 2 = Free 슬립, 3 = 무효 region.
+	// 조준 region은 여기에 +4(무효는 그대로 7)로, 전체 물리 region 뒤에 놓인다.
 	FrameRegionGatherOrder.Reset();
-	FrameRegionGatherOrder.Reserve(Ropes.Num());
-	for (int32 r = 0; r < Ropes.Num(); ++r)
+	FrameRegionGatherOrder.Reserve(FrameRopeRegions.Num());
+	for (int32 r = 0; r < FrameRopeRegions.Num(); ++r)
 	{
 		FrameRegionGatherOrder.Add(r);
 	}
 	auto RegionPriority = [this](int32 RegionIndex) -> int32
 	{
+		const bool bAimRegion = RegionIndex >= Ropes.Num();
+		const int32 AimOffset = bAimRegion ? 4 : 0;
 		if (!FrameRopeRegions[RegionIndex].IsValid)
 		{
-			return 3;
+			return 3 + AimOffset;
 		}
-		const URopeComponent* Rope = Ropes[RegionIndex];
+		const URopeComponent* Rope = Ropes[bAimRegion ? RegionIndex - Ropes.Num() : RegionIndex];
 		if (!IsValid(Rope) || Rope->GetPhase() != ERopePhase::Free)
 		{
-			return IsValid(Rope) ? 0 : 3;
+			return (IsValid(Rope) ? 0 : 3) + AimOffset;
 		}
-		return Rope->IsSleeping() ? 2 : 1;
+		return (Rope->IsSleeping() ? 2 : 1) + AimOffset;
 	};
 	FrameRegionGatherOrder.StableSort([&RegionPriority](int32 A, int32 B)
 	{
@@ -458,6 +475,7 @@ void URopeSimSubsystem::BuildFrameColliders()
 		}
 		FRopeColliderGatherContext Gather;
 		Gather.RopeRegions = FrameRopeRegions;
+		Gather.NumPhysicsRegions = Ropes.Num();
 		Gather.RegionGatherOrder = FrameRegionGatherOrder;
 		Provider->GatherColliders(Gather);
 		if (Gather.Colliders.Num() == 0)
@@ -491,7 +509,7 @@ void URopeSimSubsystem::BuildFrameColliders()
 	}
 }
 
-void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32 RopeIndex, TArray<IRopeCollider*>& OutColliders) const
+void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32 RegionIndex, TArray<IRopeCollider*>& OutColliders) const
 {
 	OutColliders.Reset();
 
@@ -504,7 +522,7 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 	// 여기서 거르는 것이 스케일링의 핵심이다(멀리 있는 캐릭터들의 캡슐/SDF가 스텝에 안 실림).
 	// 기본 경로는 provider가 gather 때 함께 돌려준 region 매핑을 그대로 소비한다(재-컬 없음 —
 	// 2026-07 수집 방식 변경). BuildFrameColliders가 provider에 넘긴 region과 동일 박스(단일 소스).
-	const FBox RopeBounds = FrameRopeRegions.IsValidIndex(RopeIndex) ? FrameRopeRegions[RopeIndex] : FBox(ForceInit);
+	const FBox RopeBounds = FrameRopeRegions.IsValidIndex(RegionIndex) ? FrameRopeRegions[RegionIndex] : FBox(ForceInit);
 	const bool bCull = RopeBounds.IsValid != 0;
 
 	// 로프별 정적 월드 콜라이더 예산. 전역 추출 상한(StaticBodyMaxColliders)과 별개로, 이 로프가 솔브에
@@ -534,12 +552,12 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 		// 기본 경로: provider가 만든 region(=이 로프) 매핑 소비 — bounds 재테스트 없음.
 		if (FP.bHasRegionMapping)
 		{
-			if (!FP.RegionIndices.IsValidIndex(RopeIndex))
+			if (!FP.RegionIndices.IsValidIndex(RegionIndex))
 			{
 				// 빌드에서 길이 검증하므로 도달하지 않는 방어선.
 				continue;
 			}
-			for (const int32 Idx : FP.RegionIndices[RopeIndex])
+			for (const int32 Idx : FP.RegionIndices[RegionIndex])
 			{
 				IRopeCollider* Collider = FP.Colliders.IsValidIndex(Idx) ? FP.Colliders[Idx] : nullptr;
 				if (!Collider)
@@ -617,7 +635,21 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 		*GetNameSafe(Rope.GetOwner()), WorldStaticCandidates.Num(), PerRopeBudget, WorldStaticCandidates.Num() - PerRopeBudget);
 }
 
-bool URopeSimSubsystem::RefreshFrameCollidersForImmediateQuery(URopeComponent& Rope)
+void URopeSimSubsystem::GatherAimCollidersForRope(URopeComponent& Rope, int32 RopeIndex) const
+{
+	const int32 RegionIndex = AimRegionIndexOf(RopeIndex);
+	const bool bAiming = FrameRopeRegions.IsValidIndex(RegionIndex) && FrameRopeRegions[RegionIndex].IsValid;
+	if (!bAiming)
+	{
+		// 조준이 끝났거나 애초에 조준 중이 아니면 목록을 비운다 — 지난 프레임 provider 포인터가
+		// 남아 있으면 다음 조준 질의가 이미 파괴된 스토리지를 읽는다.
+		Rope.SimFrame.AimFrameColliders.Reset();
+		return;
+	}
+	GatherCollidersForRope(Rope, RegionIndex, Rope.SimFrame.AimFrameColliders);
+}
+
+bool URopeSimSubsystem::RefreshAimFrameCollidersForImmediateQuery(URopeComponent& Rope)
 {
 	const int32 RopeIndex = Ropes.IndexOfByPredicate([&Rope](const TObjectPtr<URopeComponent>& Candidate)
 	{
@@ -628,15 +660,20 @@ bool URopeSimSubsystem::RefreshFrameCollidersForImmediateQuery(URopeComponent& R
 		return false;
 	}
 
-	// Wielder tick의 즉시 HUD/preview 질의는 SimTick의 Phase 1a보다 먼저 실행될 수 있다.
-	// 여기서 같은 중앙 수집 경로를 한 번 실행해, 방금 설정한 AimRayColliderQueryBounds와 FrameColliders를 맞춘다.
+	// Wielder tick의 즉시 HUD/preview 질의는 SimTick의 Phase 1a보다 먼저 실행될 수 있다. 여기서 같은
+	// 중앙 수집 경로를 한 번 실행해, 방금 설정한 AimRayColliderQueryBounds와 조준 목록을 맞춘다.
+	// 물리용 FrameColliders는 그대로 둔다 — 이 시점은 SimTick 밖이라 로프 위치가 이번 프레임 값으로
+	// 확정되기 전이고, 무엇보다 조준 region(원거리 대상 포함)으로 덮어쓰면 그 대상의 본 콜라이더가
+	// 솔버/접촉/디버그 질의에 그대로 실린다.
 	BuildFrameColliders();
-	if (!FrameRopeRegions.IsValidIndex(RopeIndex))
+	const int32 AimRegionIndex = AimRegionIndexOf(RopeIndex);
+	if (!FrameRopeRegions.IsValidIndex(AimRegionIndex) || !FrameRopeRegions[AimRegionIndex].IsValid)
 	{
+		Rope.SimFrame.AimFrameColliders.Reset();
 		return false;
 	}
 
-	GatherCollidersForRope(Rope, RopeIndex, Rope.SimFrame.FrameColliders);
+	GatherAimCollidersForRope(Rope, RopeIndex);
 	return true;
 }
 
@@ -702,7 +739,7 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_GatherColliders);
 		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Gather);
 		BuildFrameColliders();
-		// 로프 인덱스 = FrameRopeRegions/provider 매핑의 region 인덱스(위 무효 정리 후 순서 고정).
+		// 로프 인덱스 = FrameRopeRegions/provider 매핑의 물리 region 인덱스(위 무효 정리 후 순서 고정).
 		for (int32 RopeIndex = 0; RopeIndex < Ropes.Num(); ++RopeIndex)
 		{
 			// 이 프레임 앞선 재진입으로 파괴된(pending-kill) 로프는 건너뛴다. FrameRopeRegions는 !IsValid
@@ -718,8 +755,11 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			Rope->CaptureDebugFrameStartPhase();
 #endif
 			GatherCollidersForRope(*Rope, RopeIndex, Rope->SimFrame.FrameColliders);
+			// 조준 목록은 별도 region(로프 AABB ∪ aim ray)에서 따로 모은다 — 원거리 조준 대상의 본
+			// 콜라이더가 위 물리 목록으로 새지 않게 하는 분리 계약(FRopeSimFrameIO::AimFrameColliders).
+			GatherAimCollidersForRope(*Rope, RopeIndex);
 			// 입력 순간 고정한 ray bounds로 collider를 모은 직후 Aim throw를 확정한다.
-			// 이 순서 덕분에 같은 요청의 최신 FrameColliders로 hit 또는 FrameForward fallback을 결정한다.
+			// 이 순서 덕분에 같은 요청의 최신 조준 목록으로 hit 또는 FrameForward fallback을 결정한다.
 			Rope->ResolvePendingAimThrow();
 			// Aim ray가 mesh+bone을 잠근 throw는 여기서 다른 본 collider를 제거한다.
 			// 실제/예측 contact와 wrapping path는 항상 이 결과를 쓴다. 일반 solve도 이 목록을 쓰지만,

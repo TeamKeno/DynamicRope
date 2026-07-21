@@ -312,13 +312,13 @@ public:
 	 *  같은 치수를 그리도록 쓴다 — 0이 기본값이라 실무에선 거의 항상 폴백이 걸린다. */
 	float GetAimRayEffectiveQueryRadius(float RequestedRadius) const;
 
-	/** Aim ray가 검사할 월드 구간을 collider subsystem의 로프별 수집 bounds에 등록한다. */
+	/** Aim ray가 검사할 월드 구간을 collider subsystem의 조준 수집 region으로 등록한다. */
 	void SetAimRayColliderQueryBounds(const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius);
-	/** Aim ray 모드가 끝났을 때 이전 프레임의 추가 collider 수집 bounds를 제거한다. */
+	/** Aim ray 모드가 끝났을 때 조준 수집 region과 그 스냅샷을 함께 비운다. */
 	void ClearAimRayColliderQueryBounds();
-	/** 즉시 HUD/preview 질의 전에 request bounds를 등록하고 중앙 subsystem snapshot을 현재 값으로 갱신한다. */
+	/** 즉시 HUD/preview 질의 전에 request bounds를 등록하고 중앙 subsystem의 조준 snapshot을 갱신한다. */
 	bool RefreshAimRayQueryColliders(const FRopeAimRayThrowRequest& Request);
-	/** 현재 FrameColliders로 Aim 요청을 해석한다. hit이 없으면 OutContext는 BaseContext fallback이다. */
+	/** 현재 조준 collider 목록으로 Aim 요청을 해석한다. hit이 없으면 OutContext는 BaseContext fallback이다. */
 	bool ResolveAimRayThrowContext(const FRopeAimRayThrowRequest& Request, FRopeThrowContext& OutContext,
 		FRopeAimRayHitResult* OutHit = nullptr, FRopeAimRayHitResult* OutBlockedHit = nullptr) const;
 	/** 실제 throw를 최신 collider 수집 직후 확정하도록 요청을 큐에 넣는다. */
@@ -853,6 +853,13 @@ private:
 	void FilterFrameCollidersForAimWrapTarget();
 	/** FRopeAimTargeting 질의에 넘길 컨텍스트 스냅샷(collider 스냅샷 + 폴백 치수). */
 	FRopeAimTargeting::FQueryContext MakeAimQueryContext() const;
+	/**
+	 * 조준 계열 질의(aim ray hit, GuaranteedWrap preview 아크 탐색)가 쓸 collider 목록.
+	 * 조준 중이면 조준 전용 스냅샷(로프 AABB ∪ ray 영역 — 물리 목록엔 원거리 대상이 안 들어온다),
+	 * 조준 중이 아니면 물리 스냅샷. 후자는 Wielder 조준 흐름 없이 Throw()가 직접 불린 BP/AI 경로다 —
+	 * ray region이 없으니 로프 주변 목록이 유일한 소스다.
+	 */
+	const TArray<IRopeCollider*>& GetAimQueryColliders() const;
 
 	//~ 시뮬레이션 상태 + 페이즈별 로직 소유물 -------------------------------
 	// Non-UObject — 값으로 소유하며 GC 추적 대상이 아니다(POD/약참조만 보유).

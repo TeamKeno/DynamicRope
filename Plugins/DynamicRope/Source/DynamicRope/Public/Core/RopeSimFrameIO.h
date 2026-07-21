@@ -17,7 +17,7 @@ class USceneComponent;
 /**
  * 로프 하나의 한 프레임 시뮬 입출력(서브시스템 프레임 계약).
  * 수명 규약 요약 — 자세한 흐름은 URopeComponent::PrepareSimFrame 3단계 계약 주석 참조:
- *  - 프레임 스코프(매 프레임 리셋/재작성): FrameColliders, OverrideFrame, bSolveThisFrame,
+ *  - 프레임 스코프(매 프레임 리셋/재작성): FrameColliders, AimFrameColliders, OverrideFrame, bSolveThisFrame,
  *    bSolveCollisionsThisFrame, bGpuSteppedThisFrame, Gpu*Attribution, GpuFlightCandidates,
  *    bGpuContactsThisFrame.
  *  - 프레임을 넘어 유지: SimGeneration(진짜 시드에만 증가), AimRayColliderQueryBounds(에임 모드 동안 유지).
@@ -30,7 +30,17 @@ struct FRopeSimFrameIO
 	 */
 	TArray<IRopeCollider*> FrameColliders;
 
-	/** 현재 로프 위치와 떨어진 조준 대상 SDF도 수집하도록 로프 AABB에 합칠 추가 영역. */
+	/**
+	 * 조준 전용 collider 스냅샷(로프 AABB ∪ aim ray 영역에서 수집). 물리/접촉/디버그가 쓰는 위
+	 * FrameColliders와 **의도적으로 분리**돼 있다 — 멀리 있는 대상을 조준했다는 이유만으로 그 대상의
+	 * 본 콜라이더 전부가 솔버 패킹·접촉 감지·노드 근접 디버그 질의에 실리면 안 되기 때문이다.
+	 * 소비처: aim ray hit 판정, GuaranteedWrap preview 빌드. 수집은 FrameColliders와 같은 규칙
+	 * (owner 제외 / 정적 예산 / cross-actor)을 따르고, 같은 collider가 양쪽 목록에 들어올 수 있다.
+	 * AimRayColliderQueryBounds가 무효면(조준 종료) 비어 있다. 포인터 수명은 FrameColliders와 동일.
+	 */
+	TArray<IRopeCollider*> AimFrameColliders;
+
+	/** 조준 ray가 검사할 영역 AABB. 위 AimFrameColliders의 수집 영역이며, 물리 수집 영역과는 무관하다. */
 	FBox AimRayColliderQueryBounds = FBox(ForceInit);
 
 	/**

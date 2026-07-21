@@ -5,10 +5,8 @@
 #include "Collision/RopeCollider.h"
 #include "Debug/RopeDebugDraw.h"
 #include "Debug/RopeDebugSnapshot.h"
-#include "DrawDebugHelpers.h"
 #include "DynamicRopeLog.h"
 #include "Engine/World.h"
-#include "HAL/IConsoleManager.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #pragma region Wrapping_Debug_And_Diagnostics
