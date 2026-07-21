@@ -171,6 +171,23 @@ private:
 	 *  centerline arc가 SegmentLength 경계를 넘을 때만 출력 path point를 0개 이상 생성한다. */
 	bool AdvanceCompositeAnalyticHelixProbeStep(const FRopeSimState& Sim, const FContext& Ctx);
 
+	struct FCompositeHelixStepKinematics
+	{
+		float Radius = 0.0f;
+		float BaseTangentialStep = 0.0f;
+		float CircumferenceStep = 0.0f;
+		float AxisStep = 0.0f;
+		float AngleStepRad = 0.0f;
+	};
+
+	static int32 ComputeCompositeRadiusEntryStepCount(
+		float StartRadius, float TargetRadius, float StepDistance);
+
+	static FCompositeHelixStepKinematics EvaluateCompositeHelixStep(
+		int32 StepIndex, float StepDistance, int32 RadiusEntryStepCount,
+		float StartRadius, float TargetRadius, float PreviousRadius,
+		float PitchScale, float WindingSign);
+
 	bool InitializeSurfaceVectorFieldProgressiveWrapPath(const FRopeSurfaceAnchor& LatchAnchor,
 		const FRopeSimState& Sim, const FContext& Ctx);
 
@@ -181,6 +198,10 @@ private:
 		const TCHAR* CompositeFailureReason);
 
 	bool AppendWrappingAnchorFromPathPoint(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
+
+	/** Anchor가 지정한 mesh를 우선하고, 없으면 wrapping state의 mesh를 사용한다. */
+	static const USceneComponent* ResolveWrappingMesh(
+		const FRopeWrappingState& State, const FRopeSurfaceAnchor& Anchor);
 
 	/** 새로 닫힌 virtual run을 Path에서 한 번만 발견해 State.VirtualBridgeRuns에 기록한다. */
 	void UpdateVirtualBridgeRuns();
