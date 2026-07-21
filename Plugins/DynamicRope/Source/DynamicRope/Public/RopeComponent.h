@@ -192,6 +192,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float ReelSpeed = 150.0f;
 
+	// Reel(장전) 동안의 로프 튜브 가시성. 기본 OnEnterReel() 구현이 소비하는 값이라, 그 훅을 override해
+	// 자체 연출을 넣으면 이 값은 무시된다. 끔 = 창만 손 소켓에 보이는 연출, 켬 = 손~창 사이 늘어진
+	// 로프가 그대로 보인다(Reel에서도 솔브는 돌아 로프가 처진다).
+	// 직접 대입은 Reel 중이면 반영되지 않으므로(가시성 적용 시점이 Reel 진입 에지) BlueprintReadOnly +
+	// SetShowRopeInReel/ToggleShowRopeInReel 세터를 쓴다(RopeMaterial과 같은 이유).
+
+	/** Reel(장전) 상태에서 로프 튜브를 보인다. ③(GuaranteedWrap) 전용 연출 스위치. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope",
+		meta = (EditCondition = "ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
+	bool bShowRopeInReel = false;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	FRopeSolverConfig SolverConfig;
 
@@ -370,13 +381,27 @@ public:
 	bool ThrowWithPreparedPreview(const FRopePreparedThrowPreview& Prepared);
 
 	/**
-	 * 던지기 준비(Reel/장전) 상태로 진입한다 — 창(팁)을 손 소켓에 들고 로프를 숨긴다. **③ 전용**이고
+	 * 던지기 준비(Reel/장전) 상태로 진입한다 — 창(팁)을 손 소켓에 든다(로프 튜브 표시는
+	 * bShowRopeInReel, 기본 숨김). **③ 전용**이고
 	 * **Free/Reel에서만** 유효하다(그 외엔 no-op — 날아가거나 꽂혀 있는 중엔 장전할 수 없다).
 	 * ③ 로프는 BeginPlay에서 Reel로 시작한다. 던지기는 이 상태에서만 성립(CanThrowNow).
 	 * 장전 입력 바인딩은 사용자 몫이다(이 API를 호출).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void EnterReel();
+
+	/** Reel(장전) 중 로프 튜브 표시를 설정한다. Reel 중이면 즉시 반영되고, 그 외 페이즈에서는
+	 *  다음 Reel 진입부터 적용된다(전개 상태의 가시성은 건드리지 않는다). */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void SetShowRopeInReel(bool bShow);
+
+	/** Reel 로프 표시를 뒤집는다(입력 한 키에 물리는 용도). 반환값 = 뒤집은 뒤의 값. */
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	bool ToggleShowRopeInReel();
+
+	/** Reel 중 로프 튜브를 보이도록 설정돼 있는가. */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	bool IsShowRopeInReel() const { return bShowRopeInReel; }
 
 	/** 지금 이 로프에 throw가 성립하는가(모드 × 현재 phase). ③은 Reel에서만, ①②는 항상 true.
 	 *  던지기 진입과 조준 HUD가 공유하는 게이트다. 게임 규칙(스태미나 등)은 별개 — Wielder의 CanThrow(). */
@@ -643,8 +668,8 @@ protected:
 	virtual FTransform GetReelTipTransform() const;
 
 	/** Reel 진입 **에지에서만** 1회(이미 Reel일 때 EnterReel()을 다시 불러도 재발화하지 않는다 —
-	 *  프리셋 적용이 ③ 로프에 EnterReel()을 무조건 호출하기 때문). 기본: 로프 튜브 렌더를 숨긴다.
-	 *  OnDeployFromReel과 1:1로 짝지어진다. */
+	 *  프리셋 적용이 ③ 로프에 EnterReel()을 무조건 호출하기 때문). 기본: bShowRopeInReel에 따라
+	 *  로프 튜브 렌더를 켜거나 끈다. OnDeployFromReel과 1:1로 짝지어진다. */
 	virtual void OnEnterReel();
 
 	/** Reel을 벗어나는 순간 1회(throw 성립 또는 프리셋으로 ①②가 될 때). 기본: 로프 튜브를 다시 표시하고

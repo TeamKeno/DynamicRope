@@ -541,7 +541,7 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 
 void URopeComponent::EnterReel()
 {
-	// ③(GuaranteedWrap) 전용 던지기 준비 상태. 창(팁)을 손 소켓에 들고, 로프는 숨긴다.
+	// ③(GuaranteedWrap) 전용 던지기 준비 상태. 창(팁)을 손 소켓에 들고, 로프 튜브 표시는 bShowRopeInReel을 따른다.
 	// 꽂힌 뒤 release로 Free가 된 상태에서만 진입한다(초기 BeginPlay 진입은 예외).
 	if (ResolveMode != ERopeWrapResolveMode::GuaranteedWrap)
 	{
@@ -571,10 +571,33 @@ void URopeComponent::EnterReel()
 	SetPhase(ERopePhase::Reel, TEXT("reload"));
 }
 
+void URopeComponent::SetShowRopeInReel(bool bShow)
+{
+	if (bShowRopeInReel == bShow)
+	{
+		return;
+	}
+	bShowRopeInReel = bShow;
+
+	// Reel 중이면 즉시 반영한다(가시성 적용 시점이 진입 에지뿐이라, 없으면 다음 장전까지 안 바뀐다).
+	// 그 외 페이즈는 전개 상태(항상 표시)라 건드리지 않는다 — 다음 OnEnterReel()이 이 값을 소비한다.
+	if (Phase == ERopePhase::Reel)
+	{
+		SetVisibility(bShowRopeInReel, /*bPropagateToChildren*/ false);
+	}
+}
+
+bool URopeComponent::ToggleShowRopeInReel()
+{
+	SetShowRopeInReel(!bShowRopeInReel);
+	return bShowRopeInReel;
+}
+
 void URopeComponent::OnEnterReel()
 {
-	// 기본 구현: 로프 튜브 렌더를 숨긴다(창만 손 소켓에 보인다). 창 위치는 UpdateTipMeshTransform이 Reel 분기로 처리.
-	SetVisibility(false, /*bPropagateToChildren*/ false);
+	// 기본 구현: bShowRopeInReel에 따라 로프 튜브 렌더를 켜고 끈다(끔 = 창만 손 소켓에 보인다).
+	// 창 위치는 UpdateTipMeshTransform이 Reel 분기로 처리.
+	SetVisibility(bShowRopeInReel, /*bPropagateToChildren*/ false);
 }
 
 void URopeComponent::OnDeployFromReel()
