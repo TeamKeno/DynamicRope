@@ -1,19 +1,21 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 //
-// 드래곤 비행 데모 컴포넌트(7.09 마일스톤 "드래곤 — 날리기/당기기" — 정식 기능 아님, 데모 폴더).
-// 스켈레탈 메시를 가진 드래곤 액터에 붙이면 시작 지점 주변을 선회 비행한다.
+// 드래곤 데모 컴포넌트(정식 기능 아님, 데모 폴더) — **10초 안쪽 데모 영상 한 컷**을 위한 하드코딩 연출.
 //
-// 핵심 설계 — 절대 경로가 아니라 *스티어링*이다:
-//  매 틱 "궤도 접선 + 반경 복원 + 고도 복원"으로 원하는 방향을 만들고, 현재 헤딩을 TurnRate로
-//  그쪽에 회전시켜 전진(AddActorWorldOffset)한다. 위치를 경로식으로 덮어쓰지 않으므로
-//  로프 테더가 밀어낸 변위(UpdateTether의 비캐릭터 오프셋 폴백)가 그대로 누적된다 —
-//  즉 로프로 나는 드래곤을 실제로 끌어당길 수 있고, 드래곤은 끌려간 자리에서 궤도로 복귀하려 한다.
+// 흐름(고정):
+//   Idle(가만히 앉아 있음)
+//     └ 로프가 이 액터를 감으면(중앙 OnAnyRopeWrapped) 또는 Rope.Demo.Dragon / StartSequence()로 수동 발동
+//   Howl(하울링 1회)
+//   Thrash(지면과 수평인 8자 궤적으로 몸부림)
+//   Ascend(위로 솟구침)
+//   Descend(다시 내려와 정지) → Idle 애니메이션으로 복귀하고 끝
 //
-// 로프 연동 시나리오(로프 쪽 설정으로 갈린다):
-//  - 당기기(끌어내리기): 로프 TetherTargetShare=1(기본) + 되감기 → 초과분만큼 드래곤이 끌려온다.
-//    WrappedSpeedScale로 감긴 동안 비행이 둔해지는 반응을 함께 준다.
-//  - 타고 끌려가기: TetherTargetShare=0 → wielder가 드래곤에 견인된다(지상 이탈/스윙/되감기 등반은
-//    Wielder 쪽 기존 기능). TensionReleaseForce/DistanceReleaseSlack은 0(기본) 유지해야 안 풀린다.
+// 설계 메모:
+//  - 이전 버전의 "스티어링 선회 비행"(로프 테더에 실제로 끌려가던 물리 친화 경로)은 통째로 버렸다.
+//    이 컴포넌트는 연출 전용이라 매 틱 액터 트랜스폼을 **경로식으로 덮어쓴다** — 로프 테더가 밀어낸
+//    변위는 남지 않는다. 영상용 결정론적 타이밍이 목적이고, 물리 상호작용 데모는 별도다.
+//  - 애니메이션은 AnimBP 없이 단일 AnimSequence 3종(Idle/Howl/Fly)을 SkeletalMeshComponent의
+//    싱글 노드 모드(PlayAnimation)로 직접 갈아 끼운다. 드래곤 BP에 AnimBP를 붙이지 말 것.
 
 #pragma once
 
@@ -21,8 +23,22 @@
 #include "Components/ActorComponent.h"
 #include "RopeDragonFlightDemoComponent.generated.h"
 
+class UAnimSequenceBase;
 class URopeComponent;
 class USkeletalMeshComponent;
+struct FRopeWrappedEventInfo;
+
+/** 데모 연출 단계. 순서는 고정이며 되돌아가지 않는다(Finished 뒤엔 Idle 애님만 유지). */
+UENUM(BlueprintType)
+enum class ERopeDragonDemoState : uint8
+{
+	Idle		UMETA(DisplayName = "Idle"),
+	Howl		UMETA(DisplayName = "Howl"),
+	Thrash		UMETA(DisplayName = "Thrash (8자)"),
+	Ascend		UMETA(DisplayName = "Ascend"),
+	Descend		UMETA(DisplayName = "Descend"),
+	Finished	UMETA(DisplayName = "Finished")
+};
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPEPROJECT_API URopeDragonFlightDemoComponent : public UActorComponent
@@ -33,42 +49,135 @@ public:
 	URopeDragonFlightDemoComponent();
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
-	/** 순항 속도(cm/s). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float FlightSpeed = 600.0f;
+	//==================================================================================
+	// 애니메이션 — AnimBP 없이 단일 시퀀스를 직접 재생한다.
+	//==================================================================================
 
-	/** 선회 반경(cm). 궤도 중심은 BeginPlay 때 시작 위치 오른쪽으로 이 거리만큼 떨어진 곳. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo", meta = (ClampMin = "100.0", Units = "cm"))
-	float OrbitRadius = 1500.0f;
+	/** 대기/종료 포즈(루프). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Anim")
+	TObjectPtr<UAnimSequenceBase> IdleAnim;
 
-	/** 헤딩 회전 속도(도/초). 낮을수록 크게 도는 둔한 비행. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo", meta = (ClampMin = "1.0"))
-	float TurnRateDeg = 45.0f;
+	/** 발동 직후 1회 재생하는 하울링. 이 시퀀스 길이가 Howl 단계의 길이가 된다(HowlDuration=0일 때). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Anim")
+	TObjectPtr<UAnimSequenceBase> HowlAnim;
 
-	/** 고도 복원 최대 상승/하강 성분(순항 속도 대비 비율 0~1). 테더에 끌어내려져도 이 비율로만 되오른다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MaxClimbRatio = 0.35f;
+	/** 몸부림/상승/하강 내내 도는 비행 루프. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Anim")
+	TObjectPtr<UAnimSequenceBase> FlyAnim;
 
-	/** 선회 뱅크(롤) 최대각(도). 시각용. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo", meta = (ClampMin = "0.0", ClampMax = "60.0"))
-	float BankAngleMax = 20.0f;
+	//==================================================================================
+	// 타이밍 — 전부 합쳐 10초 안쪽이 되도록 잡은 기본값.
+	//==================================================================================
 
-	/** 로프에 감긴(Wrapped) 동안의 속도 배율. 1 = 반응 없음, 0.5 = 절반으로 둔해짐. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float WrappedSpeedScale = 0.5f;
+	/** 하울링 길이(초). 0 = HowlAnim 시퀀스 길이를 그대로 쓴다(없으면 1.5초). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Timing", meta = (ClampMin = "0.0", Units = "s"))
+	float HowlDuration = 0.0f;
 
-	/** 지금 어떤 로프가 이 액터의 메시를 감고 있는가(반응 판정과 동일한 질의 — BP 연출용). */
+	/** 8자 몸부림 길이(초). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Timing", meta = (ClampMin = "0.1", Units = "s"))
+	float ThrashDuration = 3.5f;
+
+	/** 상승 길이(초). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Timing", meta = (ClampMin = "0.1", Units = "s"))
+	float AscendDuration = 1.8f;
+
+	/** 하강 길이(초). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Timing", meta = (ClampMin = "0.1", Units = "s"))
+	float DescendDuration = 1.6f;
+
+	//==================================================================================
+	// 8자 궤적 — 발동 시점의 액터 트랜스폼을 원점/기저로 삼는다(지면과 수평).
+	//==================================================================================
+
+	/** 8자 긴 축(발동 시점 전방) 반폭(cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Thrash", meta = (ClampMin = "0.0", Units = "cm"))
+	float ThrashLength = 700.0f;
+
+	/** 8자 짧은 축(발동 시점 오른쪽) 반폭(cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Thrash", meta = (ClampMin = "0.0", Units = "cm"))
+	float ThrashWidth = 450.0f;
+
+	/** 몸부림 동안 8자를 도는 횟수. 정수여야 시작/끝이 원점에서 매끄럽게 만난다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Thrash", meta = (ClampMin = "1"))
+	int32 ThrashLoops = 2;
+
+	/** 8자를 도는 동안의 상하 흔들림 진폭(cm). 완전 평면이면 밋밋해서 살짝만 준다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Thrash", meta = (ClampMin = "0.0", Units = "cm"))
+	float ThrashBobHeight = 120.0f;
+
+	/** 8자 교차 방향에 맞춘 뱅크(롤) 최대각(도). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Thrash", meta = (ClampMin = "0.0", ClampMax = "80.0"))
+	float ThrashBankDeg = 35.0f;
+
+	//==================================================================================
+	// 상승/하강.
+	//==================================================================================
+
+	/** 상승 높이(cm, 발동 지점 기준). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Climb", meta = (ClampMin = "0.0", Units = "cm"))
+	float AscendHeight = 1400.0f;
+
+	/** 상승 중 앞으로 밀려 나가는 거리(cm) — 수직으로만 뜨면 부자연스러우니 전방 성분을 섞는다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Climb", meta = (ClampMin = "0.0", Units = "cm"))
+	float AscendForward = 500.0f;
+
+	/** 상승/하강 시 몸을 세우는 피치 최대각(도). 상승=위로, 하강=아래로. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Climb", meta = (ClampMin = "0.0", ClampMax = "80.0"))
+	float ClimbPitchDeg = 30.0f;
+
+	/** 하강이 끝났을 때 발동 지점으로 되돌아올지(false면 상승 때 밀려난 전방 위치에 착지). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Climb")
+	bool bReturnToStartOnLand = false;
+
+	//==================================================================================
+	// 발동.
+	//==================================================================================
+
+	/** 로프가 이 액터의 메시를 감으면 자동 발동. false면 StartSequence()/콘솔로만 발동. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Trigger")
+	bool bStartOnWrapped = true;
+
+	/** 감긴 뒤 하울링까지의 지연(초) — 로프가 걸리는 순간을 한 박자 보여주고 반응한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|DragonDemo|Trigger", meta = (ClampMin = "0.0", Units = "s"))
+	float TriggerDelay = 0.2f;
+
+	/** 연출 시작(이미 진행 중이거나 끝났으면 무시). */
+	UFUNCTION(BlueprintCallable, Category = "Rope|DragonDemo")
+	void StartSequence();
+
+	/** Idle 상태로 되돌린다(발동 지점 트랜스폼 복원 — 반복 촬영용). */
+	UFUNCTION(BlueprintCallable, Category = "Rope|DragonDemo")
+	void ResetSequence();
+
+	/** 현재 단계. */
 	UFUNCTION(BlueprintPure, Category = "Rope|DragonDemo")
-	bool IsWrappedByRope() const { return FindRopeWrappingUs() != nullptr; }
+	ERopeDragonDemoState GetDemoState() const { return State; }
 
 private:
-	URopeComponent* FindRopeWrappingUs() const;
-	USkeletalMeshComponent* ResolveMesh() const;
+	void HandleAnyRopeWrapped(const FRopeWrappedEventInfo& Info);
 
-	FVector OrbitCenter = FVector::ZeroVector;
-	float PreferredAltitude = 0.0f;
-	FVector Heading = FVector::ForwardVector;
-	float CurrentBank = 0.0f;
+	USkeletalMeshComponent* ResolveMesh() const;
+	void PlayAnim(UAnimSequenceBase* Anim, bool bLoop);
+	void EnterState(ERopeDragonDemoState NewState);
+
+	/** 발동 지점 기준 로컬 오프셋/회전을 월드에 적용한다(모든 단계 공용 출구). */
+	void ApplyPose(const FVector& LocalOffset, float YawDeg, float PitchDeg, float RollDeg);
+
+	float ResolveHowlDuration() const;
+
+	ERopeDragonDemoState State = ERopeDragonDemoState::Idle;
+	float TimeInState = 0.0f;
+	float PendingTriggerTime = -1.0f;
+
+	/** 발동 시점의 액터 위치/기저(Yaw만 사용 — 8자는 지면과 수평이어야 한다). */
+	FVector AnchorLocation = FVector::ZeroVector;
+	float AnchorYawDeg = 0.0f;
+
+	/** 상승 끝에서의 로컬 오프셋 — 하강이 여기서 출발한다. */
+	FVector AscendEndOffset = FVector::ZeroVector;
+
+	FDelegateHandle WrappedHandle;
 };
