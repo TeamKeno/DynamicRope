@@ -12,7 +12,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeSimTypes.h"
 
 // 랩 대상 추상화(Decision 0): SourceMesh/귀속 mesh를 USceneComponent로 일반화(정적 opt-in 대비).
 class USceneComponent;
