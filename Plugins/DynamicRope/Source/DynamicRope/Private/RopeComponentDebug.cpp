@@ -1,6 +1,6 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "RopeComponent.h"
+#include "RopeComponentInternal.h"
 
 #include "Collision/RopeCollider.h"
 #include "Debug/RopeDebugDraw.h"
@@ -35,7 +35,7 @@ namespace RopeComponentPrivate
 	}
 
 	void DrawWrapIslandDebug(const UWorld* World, const FRopeWrappingState& State,
-		const FRopeSimState& Sim, const FRopeWrapConfig& Config)
+		const FRopeSimState& Sim)
 	{
 		if (!World || CVarRopeDrawWrapIsland.GetValueOnGameThread() == 0 ||
 			State.PathWrapIslandDebugMembers.Num() == 0)

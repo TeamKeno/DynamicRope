@@ -718,11 +718,9 @@ protected:
 	 * 과거엔 "조준 규약을 바꾸는" 훅이 MakeDefaultThrowContext에도 있었으나, Wielder 경로가 자체
 	 * 컨텍스트를 만들어 그 훅을 지나지 않아 오버라이드해도 무효였다 → 훅을 이쪽 하나로 일원화했다.
 	 *
-	 * **오버라이드는 순수(pure)해야 한다** — 같은 입력에 항상 같은 출력, 상태 변경 없음. 이유는 두 가지다:
-	 *  (1) ③은 preview 빌드 시점에 해석한 컨텍스트를 던지기가 그대로 재사용한다. 여기서 난수(조준 산포
-	 *      등)를 쓰면 preview가 보여준 궤적과 실제 던지기가 갈라진다 — 이 훅이 존재하는 이유 자체가 그 일치다.
-	 *  (2) ③ 조준 실패 폴백(아치 던지기)은 같은 원본 컨텍스트로 이 훅을 한 번 더 호출한다. 순수하면
-	 *      결과가 같아 무해하지만, 부수효과가 있으면 두 번 적용된다.
+	 * **오버라이드는 순수(pure)해야 한다** — 같은 입력에 항상 같은 출력, 상태 변경 없음. ③은 preview
+	 * 빌드 시점에 해석한 컨텍스트를 던지기가 그대로 재사용한다. 여기서 난수(조준 산포 등)를 쓰면
+	 * 반복 preview 질의 사이의 결과가 달라지거나 preview가 보여준 궤적과 실제 던지기가 갈라진다.
 	 */
 	virtual FRopeThrowContext ResolveThrowContext(const FRopeThrowContext& ThrowContext) const;
 
@@ -1049,6 +1047,11 @@ private:
 
 	//~ Throw ----------------------------------------------------------------
 	// (MakeDefaultThrowContext/ResolveThrowContext는 protected 확장 훅으로 이동.)
+	/** 이미 ResolveThrowContext를 통과한 컨텍스트로 Guaranteed preview를 만든다.
+	 *  ThrowWithContext의 성공/실패 경로가 같은 해석 결과를 공유하기 위한 내부 진입점이다. */
+	bool BuildPreparedWrappingPreviewFromResolvedContext(const FRopeThrowContext& ResolvedThrowContext,
+		FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason) const;
+
 	// 던지기 시작은 아래 4단계 헬퍼의 고정 순서로 읽는다(StartFreshThrow가 오케스트레이션만).
 	void StartFreshThrow(const FRopeThrowContext& ThrowContext);
 

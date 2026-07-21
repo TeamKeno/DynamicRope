@@ -108,7 +108,8 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 
 		FRopePreparedThrowPreview Prepared;
 		FString FailureReason;
-		if (BuildPreparedWrappingPreview(ThrowContext, Prepared, &FailureReason))
+		const FRopeThrowContext ResolvedThrow = ResolveThrowContext(ThrowContext);
+		if (BuildPreparedWrappingPreviewFromResolvedContext(ResolvedThrow, Prepared, &FailureReason))
 		{
 			// 대상 조준 성공 → 무조건 꽂힘(GuidedThrow, 내부에서 OnDeployFromReel).
 			if (!ThrowWithPreparedPreview(Prepared))
@@ -123,11 +124,10 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 		// 조준 던지기와 아치를 통일한다(2026-07-14 보장 재정의: 보장은 '조준한 대상'에 대한 것).
 		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw: no aim target (%s) — arc toss toward ray-end."),
 			*GetName(), FailureReason.IsEmpty() ? TEXT("no preview") : *FailureReason);
-		const FRopeThrowContext ResolvedFree = ResolveThrowContext(ThrowContext);
 		const float FreeLen = FMath::Max(Sim.RopeLength, RopeLength);
-		const FVector FreeEndpoint = ResolvedFree.Origin + ResolvedFree.FrameForward.GetSafeNormal() * FreeLen;
+		const FVector FreeEndpoint = ResolvedThrow.Origin + ResolvedThrow.FrameForward.GetSafeNormal() * FreeLen;
 		OnDeployFromReel();
-		StartFreeGuidedThrow(ResolvedFree, FreeEndpoint);
+		StartFreeGuidedThrow(ResolvedThrow, FreeEndpoint);
 		return;
 	}
 
@@ -256,17 +256,26 @@ void URopeComponent::QueueAimRayThrow(const FRopeAimRayThrowRequest& Request)
 bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext,
 	FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason) const
 {
-	OutPrepared.Reset();
 	// Prepared preview는 아직 던지기 전인 Free/Releasing/Reel에서만 의미가 있다(Reel=GuaranteedWrap 장전
 	// 준비 상태 — 조준 preview 표시 + Reel에서의 던지기 진입이 이 빌드를 쓴다). Flight 이후 phase는 이미
 	// 실제 접촉/감김 상태라 preview가 없다(FullSimulation/AssistedJudged는 preview 자체가 없고,
 	// GuaranteedWrap은 이 prepared 경로가 유일한 preview다).
 	if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing && Phase != ERopePhase::Reel)
 	{
+		OutPrepared.Reset();
 		RopeMath::SetPreviewFailureReason(OutFailureReason,
 			FString::Printf(TEXT("prepared preview rejected: phase=%s"), PhaseName(Phase)));
 		return false;
 	}
+	return BuildPreparedWrappingPreviewFromResolvedContext(
+		ResolveThrowContext(ThrowContext), OutPrepared, OutFailureReason);
+}
+
+bool URopeComponent::BuildPreparedWrappingPreviewFromResolvedContext(
+	const FRopeThrowContext& ResolvedThrowContext,
+	FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason) const
+{
+	OutPrepared.Reset();
 
 	FRopeThrowPreviewBuilder::FInput Input;
 	Input.Sim = &Sim;
@@ -274,7 +283,7 @@ bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& Throw
 	// wrap 대상 게이트 주입(aim 경로의 ResolveAimRayThrowContext와 같은 패턴) — arc 탐색이 aim과 같은
 	// 기준으로 후보를 거르게 한다. 주입 전에는 금지 대상이 preview에만 보이고 throw 진입점에서 거부됐다.
 	Input.CanWrapTarget = [this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); };
-	Input.ThrowContext = ResolveThrowContext(ThrowContext);
+	Input.ThrowContext = ResolvedThrowContext;
 	Input.WrapConfig = WrapConfig;
 	Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
 	// 결착 모델을 preview 빌더로 전파 — Pierce면 감김 나선 대신 단일 앵커 꽂힘 경로를 탄다.

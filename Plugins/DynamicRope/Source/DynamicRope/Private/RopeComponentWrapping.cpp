@@ -554,7 +554,7 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 
 #if !UE_BUILD_SHIPPING
 	// wrap 축 노란 화살표는 Gameplay Debugger([I] wrap 뷰, bHasWrapAxis)로 일원화 — 여기서는 더 그리지 않는다.
-	DrawWrapIslandDebug(GetWorld(), WrappingPhase.State, Sim, WrapConfig);
+	DrawWrapIslandDebug(GetWorld(), WrappingPhase.State, Sim);
 #endif
 
 	// fallback 초기화 자체가 실패한 경우를 위한 마지막 안전망이다. 이후 SingleBone 진행 중 생긴

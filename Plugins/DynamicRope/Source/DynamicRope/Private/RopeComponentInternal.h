@@ -8,7 +8,7 @@ namespace RopeComponentPrivate
 {
 #if !UE_BUILD_SHIPPING
 	void DrawWrapIslandDebug(const UWorld* World, const FRopeWrappingState& State,
-		const FRopeSimState& Sim, const FRopeWrapConfig& Config);
+		const FRopeSimState& Sim);
 #endif
 
 	void LogWrappingFailureState(const FString& OwnerName, const TCHAR* FailureSite,
