@@ -379,7 +379,6 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 	State.PathCompositeProbeRadius = 0.0f;
 	State.PathCompositeHelixRadius = 0.0f;
 	State.PathCompositeHelixPitchScale = 0.0f;
-	State.bPathCompositeHelixPitchFromContact = false;
 	State.PathCompositeAxisMinDistance = 0.0f;
 	State.PathCompositeAxisMaxDistance = 0.0f;
 	State.bPathCompositeAxisRangeValid = false;
@@ -709,7 +708,6 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 								FittedAbsPitch + KINDA_SMALL_NUMBER < RawAbsPitch;
 						}
 					}
-					State.bPathCompositeHelixPitchFromContact = bHasContactSpan;
 					PitchSource = bHasContactSpan
 						? TEXT("ContactSpan")
 						: TEXT("LatchTangentFallback");

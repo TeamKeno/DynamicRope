@@ -245,9 +245,7 @@ bool FRopeAimTargeting::ResolveAimRayThrowContext(const FQueryContext& Ctx, cons
 		OutContext.AimGuideLocalHitPos = BoneXform.InverseTransformPosition(Hit.HitWorldPos);
 		OutContext.bHasAimGuideLocalHit = true;
 	}
-	OutContext.AimGuideSurfacePoint = Hit.SurfacePoint;
 	OutContext.AimGuideNormal = Hit.Normal;
-	OutContext.AimGuideDistance = Hit.Distance;
 	return true;
 }
 

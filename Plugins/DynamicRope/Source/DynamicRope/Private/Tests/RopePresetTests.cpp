@@ -28,6 +28,22 @@ struct FRopePresetTestSeam
 	{
 		Rope.Phase = Phase;
 	}
+
+	static void SeedTransientSimState(URopeComponent& Rope)
+	{
+		Rope.Sim.SegmentTension = { 100.0f, 200.0f };
+		Rope.Sim.TimeAccumulator = 0.5f;
+	}
+
+	static int32 GetSegmentTensionNum(const URopeComponent& Rope)
+	{
+		return Rope.Sim.SegmentTension.Num();
+	}
+
+	static float GetTimeAccumulator(const URopeComponent& Rope)
+	{
+		return Rope.Sim.TimeAccumulator;
+	}
 };
 
 namespace
@@ -136,6 +152,7 @@ bool FRopePresetApplyStampsValuesTest::RunTest(const FString& Parameters)
 {
 	URopeComponent* Rope = NewObject<URopeComponent>();
 	URopePreset* Preset = MakeStampTestPreset();
+	FRopePresetTestSeam::SeedTransientSimState(*Rope);
 
 	TestTrue(TEXT("Free에서 적용 성공"), Rope->ApplyPreset(Preset));
 
@@ -154,6 +171,8 @@ bool FRopePresetApplyStampsValuesTest::RunTest(const FString& Parameters)
 	// InitRope 실행 증명 — Sim 토폴로지/길이가 새 값으로 재시드됐다.
 	TestEqual(TEXT("노드 수 재시드"), Rope->GetNodeCount(), 32);
 	TestEqual(TEXT("현재 길이 재시드"), Rope->GetCurrentRopeLength(), 555.0f);
+	TestEqual(TEXT("재초기화 시 이전 장력 제거"), FRopePresetTestSeam::GetSegmentTensionNum(*Rope), 0);
+	TestEqual(TEXT("재초기화 시 fixed-step 누적 시간 제거"), FRopePresetTestSeam::GetTimeAccumulator(*Rope), 0.0f);
 
 	// ② 프리셋은 페이즈를 옮기지 않는다.
 	TestEqual(TEXT("Free 유지"), Rope->GetPhase(), ERopePhase::Free);

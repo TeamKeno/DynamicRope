@@ -710,9 +710,6 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 					? ERopeWrapIslandPortalState::ClosedReachability
 					: ERopeWrapIslandPortalState::Open);
 			DebugPortal.SurfaceGap = SurfaceGap;
-			DebugPortal.EffectiveDiameter = EffectiveDiameter;
-			DebugPortal.RequiredExtraLength = RequiredExtraLength;
-			DebugPortal.AvailableSlack = OutAvailableSlack;
 
 			// 모든 후보 쌍을 Log로 출력하면 한 번의 접촉에 O(n^2) 줄이 쌓여 실제 경로 실패가
 			// 묻힌다. 상세 pair 진단은 VeryVerbose에 남기고, 일반 로그에는 아래 집계만 출력한다.

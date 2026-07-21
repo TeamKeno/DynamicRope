@@ -409,9 +409,6 @@ struct FRopeWrapIslandDebugPortal
 	FVector SurfacePointB = FVector::ZeroVector;
 	ERopeWrapIslandPortalState State = ERopeWrapIslandPortalState::Open;
 	float SurfaceGap = 0.0f;
-	float EffectiveDiameter = 0.0f;
-	float RequiredExtraLength = 0.0f;
-	float AvailableSlack = 0.0f;
 };
 
 /** Wrapping 페이즈의 작업 상태(FRopeWrappingPhase::State). 경로 빌드 진행/앵커 축적/커밋 판정 재료. */
@@ -543,7 +540,6 @@ struct FRopeWrappingState
 
 	/** Contacting 순간 tail 방향의 axis/circumference 비율로 자동 산출한 composite helix pitch. */
 	float PathCompositeHelixPitchScale = 0.0f;
-	bool bPathCompositeHelixPitchFromContact = false;
 
 	/** composite 축 원점 기준 island 전체 SDF bounds의 축 방향 범위(cm). */
 	float PathCompositeAxisMinDistance = 0.0f;
@@ -1656,14 +1652,8 @@ struct DYNAMICROPE_API FRopeThrowContext
 	 *  AimGuideHitWorldPos(월드) 폴백을 사용한다 — 조준 본/mesh가 없거나 구 컨텍스트 하위호환용. */
 	bool bHasAimGuideLocalHit = false;
 
-	/** SDF 투영으로 구한 실제 표면점이다. */
-	FVector AimGuideSurfacePoint = FVector::ZeroVector;
-
 	/** 표면점에서 얻은 바깥쪽 법선이다. */
 	FVector AimGuideNormal = FVector::UpVector;
-
-	/** ray origin부터 hit까지 거리이며 preview 후보 노드 선택에 사용한다. */
-	float AimGuideDistance = 0.0f;
 
 	/**
 	 * 로프 길이상 hit 방향 보간을 시작/완료할 구간이다.
@@ -1864,17 +1854,12 @@ struct DYNAMICROPE_API FRopePreparedThrowPreview
 	TArray<FVector> GuideFrameLocalPoints;
 	FVector GuideFrameLocalOrigin = FVector::ZeroVector;
 
-	/** preview build 시 만든 가상 로프 상태와 접촉 후보. 디버그/후속 고도화용으로 보존한다. */
-	FRopeSimState PreviewSim;
-	FRopeContactCandidate Contact;
-
 	/** 최종 Wrapped 진입에 필요한 bone-local 고정 정보. Points만으로는 캐릭터 움직임을 따라갈 수 없다. */
 	FRopeSurfaceAnchor LatchAnchor;
 	TArray<FRopeSurfaceAnchor> Anchors;
 
 	TWeakObjectPtr<const USceneComponent> Mesh = nullptr;
 	FName Bone = NAME_None;
-	double BuildTimeSeconds = 0.0;
 
 	void Reset()
 	{
@@ -2007,6 +1992,7 @@ struct DYNAMICROPE_API FRopeContactTracker
 		Targets.Reset();
 	}
 
+	UE_DEPRECATED(5.7, "Use Update(Candidates, DeltaTime) instead.")
 	void BeginOrUpdate(const TArray<FRopeContactCandidate>& Candidates)
 	{
 		Update(Candidates, 0.0f);

@@ -479,10 +479,6 @@ namespace
 		{
 			TangentWorld = SourceSim.Positions[Candidate.NodeIndex] - SourceSim.Positions[Candidate.NodeIndex - 1];
 		}
-		else
-		{
-			TangentWorld = FRopeFlightContactDetector::ExpectedWrapTangent(SourceSim, Candidate, Input.FallbackForward);
-		}
 		TangentWorld = (TangentWorld - FVector::DotProduct(TangentWorld, NormalWorld) * NormalWorld)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(NormalWorld));
 
@@ -528,12 +524,9 @@ namespace
 
 			OutPrepared.bValid = true;
 			OutPrepared.ThrowContext = Input.ThrowContext;
-			OutPrepared.PreviewSim = SourceSim;
-			OutPrepared.Contact = Candidate;
 			OutPrepared.LatchAnchor = LatchAnchor;
 			OutPrepared.Mesh = Mesh;
 			OutPrepared.Bone = Candidate.Bone;
-			OutPrepared.BuildTimeSeconds = FPlatformTime::Seconds();
 			OutPrepared.Anchors.Reset();
 			OutPrepared.Anchors.Add(LatchAnchor); // 단일 앵커 = Pierce의 정상 형태(AnchorCount=1)
 
@@ -568,12 +561,9 @@ namespace
 
 		OutPrepared.bValid = true;
 		OutPrepared.ThrowContext = Input.ThrowContext;
-		OutPrepared.PreviewSim = SourceSim;
-		OutPrepared.Contact = Candidate;
 		OutPrepared.LatchAnchor = LatchAnchor;
 		OutPrepared.Mesh = Mesh;
 		OutPrepared.Bone = Candidate.Bone;
-		OutPrepared.BuildTimeSeconds = FPlatformTime::Seconds();
 		BuildPreparedAnchorsFromCenterline(OutPrepared.RenderPreview.Points, Candidate, Mesh, OutPrepared.Anchors);
 		if (OutPrepared.Anchors.Num() == 0)
 		{

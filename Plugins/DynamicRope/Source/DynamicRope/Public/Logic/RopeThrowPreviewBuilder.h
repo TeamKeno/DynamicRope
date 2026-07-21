@@ -38,7 +38,6 @@ public:
 		int32 RopeNumSides = 8;
 		float RopeLength = 0.0f;
 		float SweepAngleDegrees = 180.0f;
-		FVector FallbackForward = FVector::ForwardVector;
 		FString OwnerName;
 
 		float ReachScale = 1.0f;

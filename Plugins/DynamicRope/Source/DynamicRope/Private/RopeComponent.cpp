@@ -752,6 +752,7 @@ void URopeComponent::InitRope()
 		NumParticles = FRopeGPUSolver::MaxNodes;
 	}
 	const int32 N = FMath::Max(2, NumParticles);
+	Sim.Reset();
 	Sim.Positions.SetNum(N);
 	Sim.PrevPositions.SetNum(N);
 	Sim.InvMass.SetNum(N);

@@ -131,7 +131,7 @@ bool FRopePierceSingleAnchorPreviewTest::RunTest(const FString& Parameters)
 		// Pierce는 창(팁=마지막 노드)이 꽂히는 것 — 거리 기반 안쪽 노드가 아니라 밧줄 끝에 앵커가 박혀야
 		// 팁 mesh가 꽂힘 지점에 오고 끝이 처지지 않는다.
 		TestEqual(TEXT("Pierce 앵커는 밧줄 끝(팁=창) 노드"),
-			Prepared.Anchors[0].NodeIndex, Prepared.PreviewSim.Num() - 1);
+			Prepared.Anchors[0].NodeIndex, Sim.Num() - 1);
 	}
 	TestTrue(TEXT("렌더 preview 유효(직선 centerline)"), Prepared.RenderPreview.IsValid());
 	return true;
@@ -424,4 +424,3 @@ bool FRopeCinchArcSearchHonorsWrapGateTest::RunTest(const FString& Parameters)
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS
-

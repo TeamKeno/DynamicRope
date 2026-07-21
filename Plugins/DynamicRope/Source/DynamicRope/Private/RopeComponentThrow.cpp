@@ -310,7 +310,6 @@ bool URopeComponent::BuildPreparedWrappingPreviewFromResolvedContext(
 	Input.RopeNumSides = NumSides;
 	Input.RopeLength = FMath::Max(Sim.RopeLength, RopeLength);
 	Input.SweepAngleDegrees = MakeWhipGuideConfig().SweepAngleDegrees;
-	Input.FallbackForward = GetForwardVector();
 	Input.OwnerName = GetName();
 	// 아크 탐색 튜닝은 로프 멤버가 단일 소스 — Wielder 경로와 BP 직행 Throw() 경로가 항상 같은 값을 본다.
 	Input.ReachScale = PreviewReachScale;
