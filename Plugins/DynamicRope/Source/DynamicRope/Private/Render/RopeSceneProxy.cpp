@@ -141,21 +141,6 @@ SIZE_T FRopeSceneProxy::GetTypeHash() const
 	return reinterpret_cast<size_t>(&UniquePointer);
 }
 
-// 렌더 튜브 Subdiv 결정: 로프의 TubeSmoothingSubdiv(1..8)를 쓰되, NumRings=(NumNodes-1)*Subdiv+1이 GPU 튜브
-// 링 상한(MaxTubeRings)을 넘지 않도록 자동으로 낮춘다. GPU-솔브 가능한(NumNodes ≤ MaxNodes) 로프는 노드 수와
-// 무관하게 GPU 튜브를 유지하고, "크기 때문에 CPU 튜브로 떨어지는" 구간(GPU-솔브 + CPU-튜브 = 리드백 지연
-// 부활 + 렌더 스레드 비용)이 사라진다. 커질수록 렌더 스무딩만 완만히 감소한다(512노드에서 Subdiv=1).
-static int32 RopeComputeTubeSubdiv(int32 NumNodes, int32 WantedSubdiv)
-{
-	const int32 Wanted = FMath::Clamp(WantedSubdiv, 1, 8);
-	if (NumNodes <= 2)
-	{
-		return Wanted;
-	}
-	const int32 MaxForGpu = FMath::Max(1, (RopeGPU::MaxTubeRings() - 1) / (NumNodes - 1));
-	return FMath::Min(Wanted, MaxForGpu);
-}
-
 FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	: FPrimitiveSceneProxy(Component)
 	, Material(Component->GetMaterial(0))
@@ -169,8 +154,8 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 #endif
 	))
 	, NumNodes(FMath::Max(2, Component->NumParticles))
-	// 링 상한에 맞춰 자동 하향(위 헬퍼 주석 참고).
-	, Subdiv(RopeComputeTubeSubdiv(NumNodes, Component->TubeSmoothingSubdiv))
+	// GPU 튜브 링 상한에 맞춰 자동 하향(RopeGPU::ComputeTubeSubdiv — 디버그 오버레이와 공유하는 단일 소스).
+	, Subdiv(RopeGPU::ComputeTubeSubdiv(NumNodes, Component->TubeSmoothingSubdiv))
 	// 스무딩된 렌더 링 수(Subdiv=1이면 NumNodes와 동일).
 	, NumRings((NumNodes - 1) * Subdiv + 1)
 	, NumSides(FMath::Max(3, Component->NumSides))

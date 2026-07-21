@@ -13,7 +13,7 @@
 //
 // 솔브 경로 분할(매 프레임 Active = GpuStepped + CpuSolved + 나머지(솔브 없음)):
 //   - GPU Stepped : 이 프레임 GPU 상주 스텝(솔브 또는 로직 override)로 dispatch된 로프.
-//   - CPU Solved  : 솔브는 했으나 GPU가 아닌 로프 = 진짜 CPU 폴백(노드 > MaxNodes(256), 또는 렌더 가능 RHI
+//   - CPU Solved  : 솔브는 했으나 GPU가 아닌 로프 = 진짜 CPU 폴백(노드 > MaxNodes(512), 또는 렌더 가능 RHI
 //                   없음 -nullrhi/서버). TryBuildResidentStep의 bGpuRope=false && bSolveThisFrame 분기.
 //   - (암묵) idle : 둘 다 아닌 로프 — Contacting(동결)·슬립(Free 정지)·로직 override-only 없음 등. Active에서
 //                   두 값을 빼면 나오므로 별도 행을 두지 않는다(per-rope 내역은 RopePerf 디버거).

@@ -45,7 +45,7 @@ To run/iterate behavior, open the `.uproject` in the editor and Play.
   - `DynamicRopeShaders` (Runtime, loads at `PostConfigInit`) — the GPU compute path: XPBD solver and
     tube builder on RDG (`FRopeGPUSolver`, `FRopeTubeBuilder`, `.usf` in `Shaders/`). **GPU is the
     single runtime path for both solve+detect and tube rendering** — auto-selected when a renderable
-    RHI exists (and, for the tube, `NumRings <= 256`), else CPU fallback (cook / `-nullrhi` / server,
+    RHI exists (and, for the tube, `NumRings <= 512`), else CPU fallback (cook / `-nullrhi` / server,
     or oversized ropes). No `r.DynamicRope.GPUSolver` / `.GPUTube` toggles anymore. The GPU tube
     generates position + tangent basis + UV (B2-full), so CPU `BuildTube` runs only on the fallback.
     `FRopeXPBDSolver` + CPU `BuildTube` are kept as that fallback + parity/unit-test reference.

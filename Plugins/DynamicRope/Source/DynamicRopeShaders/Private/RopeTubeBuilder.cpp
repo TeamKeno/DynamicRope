@@ -14,11 +14,10 @@
 #include "Stats/Stats.h"
 #include "RopeGPUStatGroup.h"
 
-// 링 버킷(스레드그룹 크기 == groupshared frame 배열 크기). 로프 1개 = 스레드그룹 1개라, 예전엔 모든 로프가
-// 고정 256 그룹을 잡아 링 수가 적은 로프는 스레드 대부분이 idle(배리어에는 참여)이었다. 이제 NumRings 이상인
-// 가장 작은 버킷을 골라(퍼뮤테이션) 그 낭비를 없애고, 최상단 512로 GPU 튜브 링 상한을 끌어올린다
-// (Subdiv=3 기준 노드 ~170까지; 그 이상만 CPU 폴백). numthreads/groupshared는 .usf에서 ROPE_TUBE_MAX_RINGS로
-// 스케일 — 퍼뮤테이션이 그 define을 버킷 값으로 설정한다. groupshared 예산: 링당 5×float3=60B → 512링 = 30KB(<32KB).
+// 링 버킷(스레드그룹 크기 == groupshared frame 배열 크기). 로프 1개 = 스레드그룹 1개라, NumRings 이상인 가장
+// 작은 버킷을 퍼뮤테이션으로 골라 idle 스레드를 줄인다. 최상단 512가 GPU 튜브 링 상한(Subdiv=3 기준 노드
+// ~170까지; 그 이상은 CPU 폴백). numthreads/groupshared는 .usf에서 ROPE_TUBE_MAX_RINGS로 스케일 —
+// 퍼뮤테이션이 그 define을 버킷 값으로 설정한다. groupshared 예산: 링당 5×float3=60B → 512링 = 30KB(<32KB).
 static constexpr int32 GRopeTubeRingBuckets[] = { 64, 128, 256, 512 };
 // 최상단 버킷 = GPU 튜브 링 상한(초과 시 CPU 폴백).
 static constexpr int32 ROPE_TUBE_MAX_RINGS_CAP = 512;
@@ -36,6 +35,17 @@ int32 RopeGPU::TubeRingBucket(int32 NumRings)
 int32 RopeGPU::MaxTubeRings()
 {
 	return ROPE_TUBE_MAX_RINGS_CAP;
+}
+
+int32 RopeGPU::ComputeTubeSubdiv(int32 NumNodes, int32 WantedSubdiv)
+{
+	const int32 Wanted = FMath::Clamp(WantedSubdiv, 1, 8);
+	if (NumNodes <= 2)
+	{
+		return Wanted;
+	}
+	const int32 MaxForGpu = FMath::Max(1, (ROPE_TUBE_MAX_RINGS_CAP - 1) / (NumNodes - 1));
+	return FMath::Min(Wanted, MaxForGpu);
 }
 
 class FRopeBuildTubeCS : public FGlobalShader

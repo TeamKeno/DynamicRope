@@ -18,15 +18,11 @@
 
 namespace
 {
-	// GPU 튜브 적격성을 노드 수 + Subdiv(로프의 TubeSmoothingSubdiv)로 도출한다. 프록시의 bUseGpuTube를
-	// 읽은 값이 아니라 같은 수식을 게임 스레드에서 재현한 추정치다(렌더 스레드 상태를 크로스스레드로 읽지
-	// 않는다) — 프록시는 생성 시점에 판정을 굳히므로 런타임 속성 변경 후에는 갈릴 수 있고, 그래서 화면
-	// 라벨도 tube-eligible이다. 판정식은 프록시와 동일: IsRuntimeSupported() && NumRings<=MaxTubeRings,
-	// NumRings=(NumNodes-1)*Subdiv+1.
-	// NumNodes는 프록시와 같은 소스인 NumParticles(설정값)를 받는다 — 라이브 노드 수를 넘기면 시드 전이나
-	// 노드 수 변경 중에 프록시와 다른 링 수가 나온다.
-	// bAdvanced가 꺼지면 경로(gpu/cpu)와 **CPU로 떨어진 사유**만 낸다. 사유는 조치할 수 있어서(노드 수나
-	// Subdiv를 낮춘다) 남기고, GPU일 때의 버킷·링 수는 디스패치 내부 수치라 상세에서만 낸다.
+	// GPU 튜브 적격성을 프록시와 같은 수식(IsRuntimeSupported() && NumRings<=MaxTubeRings)으로 게임 스레드에서
+	// 재현한다 — 프록시의 bUseGpuTube를 크로스스레드로 읽지 않는다. 프록시는 생성 시점에 판정을 굳히므로 런타임
+	// 속성 변경 후에는 갈릴 수 있고, 그래서 라벨이 tube-eligible이다. NumNodes는 프록시와 같은 소스인
+	// NumParticles(설정값)를 받는다. bAdvanced가 꺼지면 경로와 CPU 폴백 사유만 낸다(사유는 조치 가능하고,
+	// 버킷·링 수는 디스패치 내부 수치라 상세에서만).
 	FString TubeDiagString(int32 NumNodes, int32 WantedSubdiv, bool bAdvanced)
 	{
 		if (!RopeGPU::IsRuntimeSupported())
@@ -34,11 +30,9 @@ namespace
 			// 렌더 가능 RHI가 없거나 SM5 미만 — 링 수와 무관하게 프록시가 CPU BuildTube로 간다.
 			return FString(TEXT("{red}cpu{grey}(no gpu runtime)"));
 		}
-		int32 Subdiv = FMath::Clamp(WantedSubdiv, 1, 8);
 		const int32 Nodes = FMath::Max(2, NumNodes);
-		// 프록시(RopeComputeTubeSubdiv)와 동일하게 Subdiv를 링 상한에 맞춰 자동 하향 → 실제 사용 버킷/링을 표시.
-		const int32 MaxForGpu = (Nodes > 2) ? FMath::Max(1, (RopeGPU::MaxTubeRings() - 1) / (Nodes - 1)) : Subdiv;
-		Subdiv = FMath::Min(Subdiv, MaxForGpu);
+		// 프록시와 같은 헬퍼로 Subdiv를 링 상한에 맞춰 하향 → 실제 사용 버킷/링을 표시.
+		const int32 Subdiv = RopeGPU::ComputeTubeSubdiv(Nodes, WantedSubdiv);
 		const int32 NumRings = (Nodes - 1) * Subdiv + 1;
 		const int32 Bucket = RopeGPU::TubeRingBucket(NumRings);
 		if (Bucket > 0)
@@ -50,12 +44,9 @@ namespace
 		return FString::Printf(TEXT("{red}cpu{grey}(rings %d > %d)"), NumRings, RopeGPU::MaxTubeRings());
 	}
 
-	// 이번 프레임 이 로프가 밟은 솔브 경로. bGpuStepped 하나로는 판정할 수 없다 — 서브시스템이 솔브
-	// 프레임과 override-only 프레임(Wrapping/Releasing/GuidedThrow)을 똑같이 GPU에 실으므로
-	// (TryBuildResidentStep) GPU=true가 "물리 솔브 중"을 뜻하지 않는다.
-	// **실제로 한 일을 먼저 본다.** bSleeping은 프레임 끝(UpdateSleepState)에 확정되는 반면 솔브/디스패치
-	// 플래그는 이미 수행한 작업이라, 슬립을 먼저 보면 깨어 있다가 이 프레임 끝에 잠든 로프가 실제로 밟은
-	// GPU_SOLVE/CPU_SOLVE를 SLEEP이 덮는다. 슬립은 "그래서 아무 일도 안 한" 프레임의 사유로만 쓴다.
+	// 이번 프레임 이 로프가 밟은 솔브 경로. 서브시스템이 솔브 프레임과 override-only 프레임을 똑같이 GPU에
+	// 실으므로 bGpuStepped 하나로는 판정할 수 없다. 판정 순서는 "실제로 한 일" 먼저 — bSleeping은 프레임
+	// 끝에 확정되므로 먼저 보면 이 프레임 실제로 밟은 SOLVE를 SLEEP이 덮는다.
 	const TCHAR* SolvePathToken(bool bSleeping, bool bSolved, bool bGpuStepped, bool bLogicOverride)
 	{
 		if (bGpuStepped)
@@ -105,10 +96,8 @@ namespace
 		}
 	}
 
-	// 근접 노드 인덱스를 연속 구간으로 압축한 문자열("12-16,23-24"). 개수만으로는 알 수 없는 "어디부터
-	// 닿았나 / 한 덩어리인가 나뉘었나"를 한 줄로 읽게 한다. 노드 단위 3D 라벨은 간격이 SegmentLength라
-	// 화면에서 겹쳐 못 읽으므로, 이 정보는 좌측 패널 텍스트로만 낸다.
-	// 입력은 캡처 루프(RopeComponentDebug)가 노드 순회 순서대로 채워 이미 오름차순 — 정렬하지 않는다.
+	// 근접 노드 인덱스를 연속 구간으로 압축한 문자열("12-16,23-24"). 개수만으로는 알 수 없는 "어디부터 닿았나 /
+	// 한 덩어리인가"를 한 줄로 읽게 한다. 입력은 캡처 루프가 노드 순서대로 채워 이미 오름차순 — 정렬하지 않는다.
 	FString ProximityRangeString(const TArray<FRopeNodeProximityDebug>& Proximity)
 	{
 		FString Out;
@@ -663,13 +652,9 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		}
 
 		// Pull 방향(장력 유무와 무관하게 bPullValid면 항상).
-		// 청록 선/점 = **fractional aim leg** — 앵커 → 스무딩된 조준 위치(AimPos). 이 끝이 벽 모서리에
-		// 놓여야 정상이다. 이 다리의 방향은 방향 EMA의 **입력**이지 인가 방향이 아니다:
-		// UpdateWrappedPullSample이 (AimPos - 앵커)를 다시 PullDirSmoothTime으로 EMA한 SmoothedPullDir이
-		// 실제로 인가된다. 정상 상태에서만 두 방향이 겹치고, 방향이 빠르게 바뀌거나 스무딩 상수가 크면
-		// 벌어진다 — 그래서 실제 인가 방향은 아래 초록 화살표로 따로 그린다.
-		// 콜라이더/wrapAxis와 같은 이유로 전경 DrawDebug*: 앵커가 감긴 본(캐릭터 몸통) 안이라 AddShape의
-		// SDPG_World로는 메시에 묻힌다. 단 이 경로는 원격 클라이언트로 복제되지 않는다(아래 지원 범위 주석).
+		// 청록 선/점 = fractional aim leg — 앵커 → 스무딩된 조준 위치(AimPos). 방향 EMA의 **입력**이지 인가
+		// 방향이 아니다(인가되는 SmoothedPullDir은 아래 초록 화살표). 정상 상태에서만 둘이 겹친다.
+		// 전경 DrawDebug*를 쓰는 이유: 앵커가 감긴 본 안이라 AddShape의 SDPG_World로는 메시에 묻힌다.
 		if (S.bPullValid)
 		{
 			if (UWorld* World = Rope.GetWorld())
@@ -679,19 +664,15 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				DrawDebugPoint(World, S.PullAimPoint, 12.0f, FColor::Cyan, false, -1.0f, FG);
 			}
 
-			// 상세: 실제 인가 방향과 그 EMA 진단.
-			//  - 초록 화살표 = SmoothedPullDir = **이번 프레임 실제 인가 방향**. 위 청록 다리(EMA 입력)와
-			//    벌어지는 정도가 곧 방향 스무딩의 지연이라, 둘을 겹쳐 봐야 의미가 있다.
-			//  - 각도차는 **정수 조준 기반 raw ↔ smoothed** 비교다(PullDirRaw는 fractional 스무딩 이전 값).
-			//    청록↔초록의 차이와는 다른 쌍이므로 그 값으로 읽지 말 것 — EMA 계수를 맞출 때 쓴다.
-			//  - 조준 노드가 프레임마다 튀면 방향이 통째로 점프한다는 신호라 그 노드 번호도 함께 낸다.
+			// 상세: 초록 화살표 = SmoothedPullDir = 이번 프레임 실제 인가 방향. 청록(EMA 입력)과 벌어지는
+			// 정도가 방향 스무딩 지연이다. 표시되는 각도차는 raw(정수 조준) ↔ smoothed 비교로 청록↔초록과는
+			// 다른 쌍이니 EMA 계수 조정에만 쓴다. 조준 노드 번호는 프레임마다 튀면 방향 점프의 신호다.
 			if (HasView(EView::Advanced))
 			{
 				if (UWorld* World = Rope.GetWorld())
 				{
-					// 청록 다리와 원점을 공유하고 정상 상태에서는 거의 겹치므로, **청록보다 뒤에** 굵게
-					// 그린다(전경은 나중이 위). 굵기는 청록의 두 배 — 겹칠 때 가려지는 쪽이 "실제 인가
-					// 방향"이면 이 표시의 목적 자체가 사라진다.
+					// 청록 다리와 원점을 공유하고 정상 상태에서 거의 겹치므로 청록보다 뒤에(전경은 나중이
+					// 위) 두 배 굵기로 그린다 — 겹칠 때 가려지는 쪽이 실제 인가 방향이면 안 된다.
 					constexpr float DiagLen = 40.0f;
 					DrawDebugDirectionalArrow(World, S.PullPoint, S.PullPoint + S.PullDirection * DiagLen,
 						16.0f, FColor::Green, false, -1.0f, SDPG_Foreground, 6.0f);
@@ -792,12 +773,10 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 	}
 
 	//~ colliders --------------------------------------------------------
-	// 콜라이더는 AddShape 대신 DrawDebug*(SDPG_Foreground)로 직접 그린다 — 에디터 셀렉션 라인처럼 항상 위에
-	// 보여 메시와 겹쳐도 형상이 뚜렷하다. AddShape는 depth priority가 SDPG_World로 하드코딩돼 있어
-	// (엔진 FGameplayDebuggerShape::Draw) 지오메트리에 가린다. 형상 표현력의 문제는 아니다 —
-	// MakeCapsule/MakeBox 모두 회전 인자를 받는다.
-	// 주의: DrawDebug*는 호출된 월드에만 그려져 원격 클라이언트로 복제되지 않는다. 지원 범위가
-	// Standalone/로컬 시뮬레이션이라 성립하는 선택이며, 멀티플레이를 지원하게 되면 다시 봐야 한다.
+	// 콜라이더는 AddShape 대신 DrawDebug*(SDPG_Foreground)로 그린다 — AddShape는 depth priority가 SDPG_World로
+	// 하드코딩돼(FGameplayDebuggerShape::Draw) 메시에 가린다. 형상 표현력 문제는 아니다(MakeCapsule/MakeBox도
+	// 회전 인자를 받는다). 대신 DrawDebug*는 원격 클라이언트로 복제되지 않는다 — 지원 범위가 Standalone/로컬이라
+	// 성립하는 선택이며 멀티플레이 지원 시 재검토 대상.
 	if (HasView(EView::Colliders))
 	{
 		if (UWorld* World = Rope.GetWorld())

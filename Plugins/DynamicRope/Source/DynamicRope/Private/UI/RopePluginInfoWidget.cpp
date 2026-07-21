@@ -346,7 +346,7 @@ TArray<FRopePluginInfoEntry> URopePluginInfoWidget::GetDefaultLimitations()
 			TEXT("The Rope category is built for Standalone and local play. Its 3D overlays are drawn in the foreground with DrawDebug, ")
 			TEXT("which the gameplay debugger does not replicate, so on a remote client you get the text lines without the shapes.")),
 		Make(TEXT("GPU tube ring limit"),
-			TEXT("The GPU tube path requires NumRings <= 256; oversized ropes fall back to the CPU tube builder.")),
+			TEXT("The GPU tube path requires NumRings <= 512; oversized ropes fall back to the CPU tube builder.")),
 		Make(TEXT("CPU fallback contexts"),
 			TEXT("Cook, dedicated server and -nullrhi have no renderable RHI, so they run the CPU solver / tube instead of the GPU path.")),
 		Make(TEXT("Spiral wraps only the dominant target"),

@@ -22,6 +22,11 @@ namespace RopeGPU
 	 *  퍼뮤테이션 선택에 쓰고, 디버그 오버레이가 실제 사용 버킷 표시에 쓴다(단일 소스). */
 	DYNAMICROPESHADERS_API int32 TubeRingBucket(int32 NumRings);
 
+	/** 렌더 튜브 Subdiv 결정. WantedSubdiv(1..8)를 쓰되 NumRings=(NumNodes-1)*Subdiv+1이 MaxTubeRings를
+	 *  넘지 않도록 하향한다 → 노드가 많아도 GPU 튜브를 유지하고 렌더 스무딩만 완만히 줄어든다.
+	 *  씬 프록시가 실제 Subdiv 결정에, 디버그 오버레이가 적격성 표시에 쓴다(단일 소스). */
+	DYNAMICROPESHADERS_API int32 ComputeTubeSubdiv(int32 NumNodes, int32 WantedSubdiv);
+
 	/**
 	 * 렌더 스레드. 센터라인(InCenterlineSRV: R32_FLOAT 타입, ring r 위치 = float[r*3..])에서 튜브 정점
 	 * 위치를 OutPositionsUAV(R32_FLOAT, v당 float3)에 기록한다. 로프 1개 = 1 디스패치.
