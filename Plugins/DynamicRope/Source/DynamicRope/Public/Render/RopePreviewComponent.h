@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/MeshComponent.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeThrowTypes.h"
 #include "RopePreviewComponent.generated.h"
 
 class UMaterialInterface;
