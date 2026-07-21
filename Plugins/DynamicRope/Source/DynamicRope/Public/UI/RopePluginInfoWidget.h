@@ -7,7 +7,8 @@
 //
 // WBP에서 하는 일 — 명명된 "빈 컨테이너" 3개만 두면 끝(그래프 로직 불필요):
 //  - 네 패널의 루트를 UPanelWidget(VerticalBox 권장 — 슬롯 패딩이 적용됨)으로 만들고 이름을
-//    KeyGuidePanel / ComponentsPanel / CapabilitiesPanel / LimitationsPanel로 맞춘다(BindWidgetOptional).
+//    KeyGuidePanel / ComponentsPanel / CapabilitiesPanel / LimitationsPanel / ToolsPanel로 맞춘다
+//    (BindWidgetOptional).
 //    LimitationsPanel이 없는 기존 WBP는 그대로 동작한다 — 한계 항목이 Capabilities 패널 뒤에 이어 붙는다.
 //  - 항목 문구는 "제목 + 한 줄"로 유지한다. 이 HUD는 읽는 문서가 아니라 훑는 참조표이고, 설명이 길어지면
 //    화면 밖으로 밀린다(스크롤은 마우스 휠이 이미 리엘에 묶여 있어 쓸 수 없다).
@@ -39,7 +40,9 @@ enum class ERopeInfoPanel : uint8
 	Capabilities,
 	/** 어떤 한계가 있는지. Capabilities와 한 패널에 있었으나 화면을 넘겨 분리했다 —
 	 *  WBP에 LimitationsPanel 컨테이너가 없으면 예전처럼 Capabilities 패널 아래에 이어 붙는다. */
-	Limitations
+	Limitations,
+	/** 콘솔 명령·프로파일러·디버거·에디터 도구 등 "어디를 보면 되는지". */
+	Tools
 };
 
 /** 키 안내 한 줄: 키 라벨 + 그 키가 하는 일. 실제 키는 프로젝트의 Input Mapping Context가 정하므로 라벨은 표시용. */
@@ -91,6 +94,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Info|Capabilities")
 	TArray<FRopePluginInfoEntry> Limitations;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Info|Tools")
+	TArray<FRopePluginInfoEntry> Tools;
+
 	//~ 패널 토글 API — HUD 입력 키가 호출(BlueprintCallable로도 노출) --------------------
 	UFUNCTION(BlueprintCallable, Category = "Rope|Info")
 	void TogglePanel(ERopeInfoPanel Panel);
@@ -121,6 +127,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope|Info")
 	FText GetLimitationsText() const;
 
+	UFUNCTION(BlueprintPure, Category = "Rope|Info")
+	FText GetToolsText() const;
+
 	//~ 풍부 경로 훅: 배열을 순회해 행 위젯을 만들고 싶을 때 WBP에서 구현 ------------------
 	/** NativeConstruct 후 1회 호출. 배열을 읽어 행 위젯을 채우는 곳(구현은 선택). */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Rope|Info")
@@ -131,6 +140,7 @@ public:
 	static TArray<FRopePluginInfoEntry> GetDefaultRequiredComponents();
 	static TArray<FRopePluginInfoEntry> GetDefaultCapabilities();
 	static TArray<FRopePluginInfoEntry> GetDefaultLimitations();
+	static TArray<FRopePluginInfoEntry> GetDefaultTools();
 
 	/** 배열을 멀티라인 FText로 포매팅(위젯 게터와 HUD Canvas 폴백 공용). */
 	static FText FormatKeyBindings(const TArray<FRopePluginKeyBinding>& Bindings);
@@ -159,6 +169,10 @@ protected:
 	/** 없으면 한계 항목이 CapabilitiesPanel 뒤에 이어 붙는다(구 WBP 호환). */
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UPanelWidget> LimitationsPanel;
+
+	/** 없으면 도구 패널은 그냥 비어 있다(이어 붙일 자연스러운 상위 패널이 없다). */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UPanelWidget> ToolsPanel;
 
 	/** 상시 표시되는 힌트 줄(토글 패널과 별개 — 어느 패널을 켜/꺼도 계속 보인다). WBP에서 이름을 맞춰 둔다. */
 	UPROPERTY(meta = (BindWidgetOptional))

@@ -17,6 +17,7 @@ ARopePluginInfoHUD::ARopePluginInfoHUD()
 	ComponentsToggleKey = EKeys::Two;
 	CapabilitiesToggleKey = EKeys::Three;
 	LimitationsToggleKey = EKeys::Four;
+	ToolsToggleKey = EKeys::Five;
 	MasterToggleKey = EKeys::H;
 }
 
@@ -70,6 +71,7 @@ void ARopePluginInfoHUD::SetupInputBindings()
 	InputComponent->BindKey(ComponentsToggleKey, IE_Pressed, this, &ARopePluginInfoHUD::OnComponentsKey);
 	InputComponent->BindKey(CapabilitiesToggleKey, IE_Pressed, this, &ARopePluginInfoHUD::OnCapabilitiesKey);
 	InputComponent->BindKey(LimitationsToggleKey, IE_Pressed, this, &ARopePluginInfoHUD::OnLimitationsKey);
+	InputComponent->BindKey(ToolsToggleKey, IE_Pressed, this, &ARopePluginInfoHUD::OnToolsKey);
 	InputComponent->BindKey(MasterToggleKey, IE_Pressed, this, &ARopePluginInfoHUD::ToggleAll);
 }
 
@@ -106,7 +108,8 @@ void ARopePluginInfoHUD::ToggleAll()
 			InfoWidget->IsPanelVisible(ERopeInfoPanel::KeyGuide) ||
 			InfoWidget->IsPanelVisible(ERopeInfoPanel::Components) ||
 			InfoWidget->IsPanelVisible(ERopeInfoPanel::Capabilities) ||
-			InfoWidget->IsPanelVisible(ERopeInfoPanel::Limitations);
+			InfoWidget->IsPanelVisible(ERopeInfoPanel::Limitations) ||
+			InfoWidget->IsPanelVisible(ERopeInfoPanel::Tools);
 
 		if (bAnyVisible)
 		{
@@ -138,11 +141,12 @@ void ARopePluginInfoHUD::ToggleAll()
 FText ARopePluginInfoHUD::BuildHintText() const
 {
 	return FText::FromString(FString::Printf(
-		TEXT("Dynamic Rope   [%s] Keys    [%s] Components    [%s] Capabilities    [%s] Limits    [%s] Hide"),
+		TEXT("Dynamic Rope   [%s] Keys    [%s] Components    [%s] Capabilities    [%s] Limits    [%s] Tools    [%s] Hide"),
 		*KeyGuideToggleKey.GetDisplayName().ToString(),
 		*ComponentsToggleKey.GetDisplayName().ToString(),
 		*CapabilitiesToggleKey.GetDisplayName().ToString(),
 		*LimitationsToggleKey.GetDisplayName().ToString(),
+		*ToolsToggleKey.GetDisplayName().ToString(),
 		*MasterToggleKey.GetDisplayName().ToString()));
 }
 
@@ -206,5 +210,10 @@ void ARopePluginInfoHUD::DrawHUD()
 	{
 		Y = DrawFallbackBlock(TEXT("LIMITATIONS"),
 			URopePluginInfoWidget::FormatEntries(URopePluginInfoWidget::GetDefaultLimitations()), X, Y);
+	}
+	if (bFallbackPanelVisible[static_cast<int32>(ERopeInfoPanel::Tools)])
+	{
+		Y = DrawFallbackBlock(TEXT("TOOLS & DIAGNOSTICS"),
+			URopePluginInfoWidget::FormatEntries(URopePluginInfoWidget::GetDefaultTools()), X, Y);
 	}
 }

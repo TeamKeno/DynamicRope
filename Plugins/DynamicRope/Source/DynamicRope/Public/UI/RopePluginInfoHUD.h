@@ -54,6 +54,9 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Rope|Info|Input")
 	FKey LimitationsToggleKey;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Rope|Info|Input")
+	FKey ToolsToggleKey;
+
 	/** 전체 HUD를 한 번에 표시/숨김. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Rope|Info|Input")
 	FKey MasterToggleKey;
@@ -84,6 +87,7 @@ protected:
 	void OnComponentsKey()   { TogglePanel(ERopeInfoPanel::Components); }
 	void OnCapabilitiesKey() { TogglePanel(ERopeInfoPanel::Capabilities); }
 	void OnLimitationsKey()  { TogglePanel(ERopeInfoPanel::Limitations); }
+	void OnToolsKey()        { TogglePanel(ERopeInfoPanel::Tools); }
 
 	// Canvas 폴백: 제목 + 본문 블록을 그리고 다음 블록의 Y를 돌려준다.
 	float DrawFallbackBlock(const FString& Title, const FText& Body, float X, float Y);
@@ -93,7 +97,7 @@ protected:
 	TObjectPtr<URopePluginInfoWidget> InfoWidget = nullptr;
 
 	// Canvas 폴백에서만 쓰는 패널 표시 상태(위젯이 있으면 위젯이 진실을 소유한다). 힌트 줄은 상시.
-	bool bFallbackPanelVisible[4] = { true, false, false, false };
+	bool bFallbackPanelVisible[5] = { true, false, false, false, false };
 
 	// ToggleAll이 "숨김 → 복원"할 때 되살릴 마지막으로 연 패널.
 	ERopeInfoPanel LastShownPanel = ERopeInfoPanel::KeyGuide;

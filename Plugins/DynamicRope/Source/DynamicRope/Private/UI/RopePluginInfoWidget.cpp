@@ -83,6 +83,7 @@ URopePluginInfoWidget::URopePluginInfoWidget(const FObjectInitializer& ObjectIni
 	RequiredComponents = GetDefaultRequiredComponents();
 	Capabilities = GetDefaultCapabilities();
 	Limitations = GetDefaultLimitations();
+	Tools = GetDefaultTools();
 }
 
 void URopePluginInfoWidget::NativeConstruct()
@@ -93,13 +94,14 @@ void URopePluginInfoWidget::NativeConstruct()
 	PopulatePanels();
 
 	// 상시 힌트의 기본 문구(HUD가 BeginPlay에서 실제 키 라벨로 덮어쓴다 — 이건 그 전 폴백).
-	SetHintText(LOCTEXT("HintDefault", "[1] Keys   [2] Components   [3] Capabilities   [4] Limits   [H] Hide"));
+	SetHintText(LOCTEXT("HintDefault", "[1] Keys   [2] Components   [3] Capabilities   [4] Limits   [5] Tools   [H] Hide"));
 
 	// 시작 상태: 키 안내만 켜 두고 나머지는 숨긴다.
 	SetPanelVisible(ERopeInfoPanel::KeyGuide, true);
 	SetPanelVisible(ERopeInfoPanel::Components, false);
 	SetPanelVisible(ERopeInfoPanel::Capabilities, false);
 	SetPanelVisible(ERopeInfoPanel::Limitations, false);
+	SetPanelVisible(ERopeInfoPanel::Tools, false);
 
 	// 자동 채움 뒤 추가 커스터마이즈가 필요하면 여기서(구현은 선택).
 	OnRefreshContent();
@@ -143,6 +145,17 @@ void URopePluginInfoWidget::PopulatePanels()
 		}
 	}
 
+	// 도구/진단 패널.
+	if (ToolsPanel)
+	{
+		ToolsPanel->ClearChildren();
+		AddHeader(WidgetTree, ToolsPanel, LOCTEXT("ToolsHeader", "TOOLS & DIAGNOSTICS"));
+		for (const FRopePluginInfoEntry& Entry : Tools)
+		{
+			AddEntry(WidgetTree, ToolsPanel, Entry);
+		}
+	}
+
 	// 한계 패널. 전용 컨테이너가 없는 WBP에서는 예전처럼 지원 패널 뒤에 이어 붙인다(구 WBP 호환).
 	if (UPanelWidget* Target = LimitationsPanel ? ToRawPtr(LimitationsPanel) : ToRawPtr(CapabilitiesPanel))
 	{
@@ -167,6 +180,7 @@ UPanelWidget* URopePluginInfoWidget::GetPanelWidget(ERopeInfoPanel Panel) const
 	case ERopeInfoPanel::Capabilities: return CapabilitiesPanel;
 	// 전용 컨테이너가 없으면 지원 패널과 한 몸이라 그쪽 가시성을 따른다.
 	case ERopeInfoPanel::Limitations:  return LimitationsPanel ? LimitationsPanel : CapabilitiesPanel;
+	case ERopeInfoPanel::Tools:        return ToolsPanel;
 	default:                           return nullptr;
 	}
 }
@@ -196,6 +210,7 @@ void URopePluginInfoWidget::HideAllPanels()
 	SetPanelVisible(ERopeInfoPanel::Components, false);
 	SetPanelVisible(ERopeInfoPanel::Capabilities, false);
 	SetPanelVisible(ERopeInfoPanel::Limitations, false);
+	SetPanelVisible(ERopeInfoPanel::Tools, false);
 }
 
 void URopePluginInfoWidget::SetHintText(const FText& InText)
@@ -231,6 +246,11 @@ FText URopePluginInfoWidget::GetCapabilitiesText() const
 FText URopePluginInfoWidget::GetLimitationsText() const
 {
 	return FormatEntries(Limitations);
+}
+
+FText URopePluginInfoWidget::GetToolsText() const
+{
+	return FormatEntries(Tools);
 }
 
 FText URopePluginInfoWidget::FormatKeyBindings(const TArray<FRopePluginKeyBinding>& Bindings)
@@ -396,6 +416,37 @@ TArray<FRopePluginInfoEntry> URopePluginInfoWidget::GetDefaultLimitations()
 			TEXT("Foreground DrawDebug overlays do not reach a remote client.")),
 		Make(TEXT("Wrap tuning is sensitive"),
 			TEXT("Defaults latch on first sustained contact - tune per target.")),
+	};
+}
+
+TArray<FRopePluginInfoEntry> URopePluginInfoWidget::GetDefaultTools()
+{
+	auto Make = [](const TCHAR* Title, const TCHAR* Desc)
+	{
+		FRopePluginInfoEntry E;
+		E.Title = FText::FromString(Title);
+		E.Description = FText::FromString(Desc);
+		return E;
+	};
+
+	// 콘솔 명령과 디버그 오버레이는 비-Shipping 빌드에만 존재한다.
+	return {
+		Make(TEXT("stat DynamicRope"),
+			TEXT("Frame cost per stage, active vs sleeping ropes, GPU timings.")),
+		Make(TEXT("Gameplay Debugger"),
+			TEXT("Apostrophe key - 'Rope' inspects one rope, 'RopePerf' the whole world.")),
+		Make(TEXT("Rope.Preset.List / .Apply / .Cycle"),
+			TEXT("Swap tuning presets on the world's ropes at runtime.")),
+		Make(TEXT("Rope.Ragdoll  /  .Recover  /  .Destroy"),
+			TEXT("Toggle ragdoll on wrap targets, or destroy one mid-wrap.")),
+		Make(TEXT("Rope.Capsules / .Contacts / .SDFColliders"),
+			TEXT("Debug draws for collision - one toggle each (more in the source).")),
+		Make(TEXT("Tools > Rope SDF Authoring"),
+			TEXT("Editor tab that bakes per-bone distance fields for a skeletal mesh.")),
+		Make(TEXT("Project Settings > Plugins > Dynamic Rope"),
+			TEXT("Project-wide defaults, HUD widget classes, demo preset list.")),
+		Make(TEXT("Session Frontend > Automation"),
+			TEXT("Filter on 'DynamicRope.' to run the solver, wrap and GPU parity tests.")),
 	};
 }
 
