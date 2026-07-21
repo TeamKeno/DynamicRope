@@ -2,7 +2,7 @@
 
 #include "Debug/RopeStats.h"
 #include "RopeComponent.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeLifecycleTypes.h"
 
 DEFINE_STAT(STAT_RopeSim_Tick);
 DEFINE_STAT(STAT_RopeSim_Gather);

@@ -7,7 +7,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeContactTrackingTypes.h"
+#include "Core/RopeLifecycleTypes.h"
+#include "Core/RopeSimTypes.h"
+#include "Core/RopeWrappingTypes.h"
 
 /**
  * 캡처 범위 비트. 카테고리의 보기 토글에서 만들어져 **캡처 측까지** 전달된다 — 그리기에서만 막으면

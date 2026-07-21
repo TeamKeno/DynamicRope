@@ -8,7 +8,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeContactTrackingTypes.h"
+#include "Core/RopeSimTypes.h"
+#include "Core/RopeWrappingTypes.h"
 
 namespace RopeDebug
 {

@@ -5,7 +5,7 @@
 #if WITH_GAMEPLAY_DEBUGGER
 
 #include "RopeComponent.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeLifecycleTypes.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
