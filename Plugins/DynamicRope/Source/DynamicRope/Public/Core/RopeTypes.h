@@ -24,26 +24,26 @@ class URopeComponent;
 UENUM(BlueprintType)
 enum class ERopePhase : uint8
 {
-	Free,
-	Flight,
+	Free = 0,
+	Flight = 1,
 
 	/** 접촉 후보를 매 프레임 재수집하며 트래커 dwell로 wrap 진입을 판정하는 중. */
-	Contacting,
+	Contacting = 2,
 
 	/** 감기는 중(표면 경로 점진 생성 + front 모션 + 질량 마스크). */
-	Wrapping,
+	Wrapping = 3,
 
-	Wrapped,
+	Wrapped = 4,
 
 	/** ③ 전용. 물리 Flight를 타지 않는다 — 조준 던지기는 확정 preview path를, 허공 던지기는 레이 끝점
 	 *  아치를 따라간다(bFreeThrow). 전자는 Wrapped로, 후자는 Free로 빠진다. */
-	GuidedThrow,
+	GuidedThrow = 5,
 
-	Releasing,
+	Releasing = 6,
 
 	/** ③(GuaranteedWrap) 전용: 창(팁)을 손에 든 던지기 준비 상태. 로프는 숨기고, 이 상태에서만 throw가 성립한다.
 	 *  꽂힌 뒤 release로 Free가 된 상태에서 EnterReel()로 진입한다. */
-	Reel
+	Reel = 7
 };
 
 /** 이 로프의 engagement(접촉/성립/③ 조준 던지기)가 끝난 이유. **성립(wrap) 전 abort도 포함**한다 —
@@ -52,26 +52,26 @@ UENUM(BlueprintType)
 enum class ERopeReleaseReason : uint8
 {
 	/** 게임플레이가 명시적으로 해제(URopeComponent::ReleaseWrap). */
-	Manual,
+	Manual = 0,
 
 	/** 손~앵커 거리가 가용 로프 길이 + DistanceReleaseSlack 초과(자동). */
-	Distance,
+	Distance = 1,
 
 	/** 최대 장력이 TensionReleaseForce를 지속 초과(자동). */
-	Tension,
+	Tension = 2,
 
 	/** 대상 소실/wrap 실패 등 내부 사유. 성립 전 abort(접촉/감김/③ 연출 중 대상 소실)도 여기다. */
-	Broken,
+	Broken = 3,
 
 	/** 외부 게임플레이가 로프를 절단(URopeComponent::CutRope). */
-	Cut,
+	Cut = 4,
 
 	/**
 	 * ③ 연출(GuidedThrow) 중 게임 규칙이 보장을 깼다 — ShouldAbortGuaranteedThrow 오버라이드가 true를 반환.
 	 * 내부 실패(Broken)와 달리 **의도된 게임플레이 결과**다(대상이 회피/텔레포트했다 등). 소비자가 둘을
 	 * 구분해야 "엔진 문제"와 "설계된 회피"에 다르게 반응할 수 있다.
 	 */
-	ThrowAborted
+	ThrowAborted = 5
 };
 
 /**
@@ -87,20 +87,20 @@ enum class ERopeWrapResolveMode : uint8
 	// 결과다(현실 대응).
 
 	/** ① 전체 시뮬 — 아무것도 보장하지 않는다. 빗나감도 정상(샌드박스/리서치). */
-	FullSimulation UMETA(DisplayName = "Full Simulation"),
+	FullSimulation = 0 UMETA(DisplayName = "Full Simulation"),
 
 	// aim ray가 대상을 잠가 명중은 보장하되, 결착 성립은 판정(감싼 각도/커버리지 관문)이 결정한다.
 	// preview는 표시용(비구속).
 
 	/** ② 보조+판정 — 명중은 보장, 결착은 판정. 실패(release)도 정상(전투/스킬). */
-	AssistedJudged UMETA(DisplayName = "Assisted (Judged)"),
+	AssistedJudged = 1 UMETA(DisplayName = "Assisted (Judged)"),
 
 	// 던지는 순간 확정한 preview가 곧 실행 경로라 연출 후 실패가 없다. 조준이 안 잡히면(대상 없음/
 	// 사거리 밖) 거부가 아니라 레이 끝점을 향해 아치로 날아가 안 꽂히고 Free로 떨어진다 — 보장은
 	// '조준한 대상'에 대한 것이라 이것도 정상 결과다. 자동 release(장력/거리)는 무효 — 명시 해제만.
 
 	/** ③ 무조건 성립 — 조준한 대상에 실패 없이 결착. Reel(장전)에서만 던질 수 있다(데모/연출/이동기). */
-	GuaranteedWrap UMETA(DisplayName = "Guaranteed")
+	GuaranteedWrap = 2 UMETA(DisplayName = "Guaranteed")
 };
 
 /**
@@ -112,17 +112,17 @@ UENUM(BlueprintType)
 enum class ERopeTipEngagement : uint8
 {
 	/** 맨 로프(또는 추 팁): 접촉 dwell + 감김 판정으로 성립 — 현행 파이프라인. ①② 전용. */
-	BareWrap UMETA(DisplayName = "Bare Wrap"),
+	BareWrap = 0 UMETA(DisplayName = "Bare Wrap"),
 
 	/** 창/작살 꽂힘: 팁 mesh 히트 순간 접점 앵커 1개(bone-local)로 성립. ③ 전용. */
-	Pierce UMETA(DisplayName = "Pierce"),
+	Pierce = 1 UMETA(DisplayName = "Pierce"),
 
 	/**
 	 * 올가미/폐로프 조임: 루프가 대상을 포획하면 둘레 앵커 링으로 성립. ③ 전용.
 	 * **미구현** — 고르면 BareWrap 감김 경로로 떨어진다(preview/앵커 모두). 계약상 유효한 조합이라
 	 * 저장·던지기는 되지만 동작은 Cinch가 아니므로 표시 이름에 명시한다. 던질 때 런타임 경고 1회.
 	 */
-	Cinch UMETA(DisplayName = "Cinch (Not Implemented)")
+	Cinch = 2 UMETA(DisplayName = "Cinch (Not Implemented)")
 };
 
 /** 도달 모드가 강제하는 제약의 단일 소스 — 결착 모델 조합(IsEngagementAllowed/ClampEngagement)과
@@ -1565,11 +1565,11 @@ enum class ERopeThrowFrameMode : uint8
 UENUM(BlueprintType)
 enum class ERopeSwingPlane : uint8
 {
-	AimAndFrameUp UMETA(DisplayName = "Aim + Frame Up"),
-	AimAndFrameDown UMETA(DisplayName = "Aim + Frame Down"),
-	AimAndFrameRight UMETA(DisplayName = "Aim + Frame Right"),
-	AimAndFrameLeft UMETA(DisplayName = "Aim + Frame Left"),
-	CustomNormal UMETA(DisplayName = "Custom Plane Normal")
+	AimAndFrameUp = 0 UMETA(DisplayName = "Aim + Frame Up"),
+	AimAndFrameDown = 1 UMETA(DisplayName = "Aim + Frame Down"),
+	AimAndFrameRight = 2 UMETA(DisplayName = "Aim + Frame Right"),
+	AimAndFrameLeft = 3 UMETA(DisplayName = "Aim + Frame Left"),
+	CustomNormal = 4 UMETA(DisplayName = "Custom Plane Normal")
 };
 
 // 아래 정의 — MakeDefault가 설정 스냅샷으로 받는다.
@@ -1661,33 +1661,6 @@ struct DYNAMICROPE_API FRopeThrowContext
 	 */
 	float AimGuideSteerStartAlpha = 0.25f;
 	float AimGuideLockAlpha = 0.50f;
-};
-
-/** 던지기 전 탐색 호를 정의하는 런타임 데이터. FRopeThrowPreviewBuilder가 접촉 후보와 preview Sim을
- *  만들 때 쓰는 중간 데이터다 — 호 자체를 그리는 렌더 경로는 없다(표시는 확정된 centerline을
- *  SetWrapPreviewWorld로 넘기는 쪽이다). */
-USTRUCT(BlueprintType)
-struct FRopeArcPreviewData
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
-	FVector Origin = FVector::ZeroVector;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
-	FVector AimDir = FVector::ForwardVector;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
-	FVector GuideUp = FVector::UpVector;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "cm"))
-	float Radius = 0.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
-	float SweepAngleDegrees = 180.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "1", ClampMax = "128"))
-	int32 SegmentCount = 32;
 };
 
 /** Runtime centerline data for the pre-wrapped rope preview. */

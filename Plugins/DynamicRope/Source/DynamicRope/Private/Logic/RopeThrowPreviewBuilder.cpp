@@ -13,6 +13,17 @@
 
 namespace
 {
+	/** Builder 내부에서만 사용하는 던지기 탐색 호. 렌더·Blueprint·외부 API에는 노출하지 않는다. */
+	struct FRopeArcPreviewData
+	{
+		FVector Origin = FVector::ZeroVector;
+		FVector AimDir = FVector::ForwardVector;
+		FVector GuideUp = FVector::UpVector;
+		float Radius = 0.0f;
+		float SweepAngleDegrees = 180.0f;
+		int32 SegmentCount = 32;
+	};
+
 	const TArray<IRopeCollider*>& GetColliders(const FRopeThrowPreviewBuilder::FInput& Input)
 	{
 		static const TArray<IRopeCollider*> EmptyColliders;
