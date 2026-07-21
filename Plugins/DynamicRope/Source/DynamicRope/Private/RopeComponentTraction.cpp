@@ -246,7 +246,7 @@ namespace
 	// 인가 지점이 같은 래더를 각자 복제했고, 그 위에서 인가 람다가 자기가 어느 rung인지 다시 캐스팅으로
 	// 역추론했다 — 순서가 어긋나면 "질량은 앵커로 봤는데 힘은 다른 데 꽂히는" 버그가 된다(CL 392의 부분 랙돌
 	// 루트 게이트가 실제로 그랬다). 한 해석을 공유하면 그 어긋남이 구조적으로 불가능하다.
-	// ERopeEndpointKind/FRopeTetherEndpoint는 Core/RopeTypes.h의 공용 판정 타입이다. 컴포넌트는
+	// ERopeEndpointKind/FRopeTetherEndpoint는 Core/RopeTractionTypes.h의 공용 판정 타입이다. 컴포넌트는
 	// target/wielder 결과를 같은 Wrapped 프레임 안에서 캐시해 pullable/테더/기본 Pull이 공유한다.
 
 	// 수신자 해석(대상/wielder 공용). 순서: 스켈레탈 자유 랙돌 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터 → 앵커.
