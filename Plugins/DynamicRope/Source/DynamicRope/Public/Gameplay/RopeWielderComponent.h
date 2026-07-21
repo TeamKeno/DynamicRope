@@ -352,17 +352,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation")
 	TObjectPtr<UAnimMontage> PullMontage = nullptr;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation", meta = (ClampMin = "0.1"))
+	float PullMontagePlayRate = 1.0f;
+
+	//~ Pull(능동 견인 정책) --------------------------------------------------
+	// 힘의 크기는 로프 도메인이다(HoldConfig.PullForce) — 여기 있는 것은 "언제 발동하는가"뿐이다.
 	/**
 	 * Pull 발동 임계 장력(FRopeSimState::SegmentTension 단위 — ActivePullTautTension/TensionReleaseForce와
 	 * 같은 단위계, 매달린 노드 1개의 중력 하중 ≈ 980). Pull 입력으로 **장전**해 두면(토글 on) Wrapped에서
 	 * 장력이 이 값을 처음 넘는 순간 발동한다(0 = 팽팽 판정(IsPullTaut)만으로) — "제대로 당겨졌을 때만
-	 * 끌려가기 시작"의 게임플레이 임계. 발동/수명 규칙은 UpdatePullEngage 주석 참조.
+	 * 끌려가기 시작"의 게임플레이 임계. 몽타주 유무와 무관하게 발동을 지배하므로 Animation이 아니라
+	 * 여기 있다(무애니면 발동이 즉시 힘을 장전한다). 발동/수명 규칙은 UpdatePullEngage 주석 참조.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull", meta = (ClampMin = "0.0"))
 	float PullEngageTension = 0.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation", meta = (ClampMin = "0.1"))
-	float PullMontagePlayRate = 1.0f;
 
 	//~ API ----------------------------------------------------------------
 	/**
