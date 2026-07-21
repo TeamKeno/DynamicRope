@@ -93,12 +93,13 @@ void URopePluginInfoWidget::NativeConstruct()
 	PopulatePanels();
 
 	// 상시 힌트의 기본 문구(HUD가 BeginPlay에서 실제 키 라벨로 덮어쓴다 — 이건 그 전 폴백).
-	SetHintText(LOCTEXT("HintDefault", "[1] Keys   [2] Components   [3] Capabilities & Limits   [H] Hide"));
+	SetHintText(LOCTEXT("HintDefault", "[1] Keys   [2] Components   [3] Capabilities   [4] Limits   [H] Hide"));
 
 	// 시작 상태: 키 안내만 켜 두고 나머지는 숨긴다.
 	SetPanelVisible(ERopeInfoPanel::KeyGuide, true);
 	SetPanelVisible(ERopeInfoPanel::Components, false);
 	SetPanelVisible(ERopeInfoPanel::Capabilities, false);
+	SetPanelVisible(ERopeInfoPanel::Limitations, false);
 
 	// 자동 채움 뒤 추가 커스터마이즈가 필요하면 여기서(구현은 선택).
 	OnRefreshContent();
@@ -131,7 +132,7 @@ void URopePluginInfoWidget::PopulatePanels()
 		}
 	}
 
-	// 지원/한계 패널: 두 섹션을 헤더로 나눠 한 컨테이너에 담는다.
+	// 지원 패널.
 	if (CapabilitiesPanel)
 	{
 		CapabilitiesPanel->ClearChildren();
@@ -140,10 +141,19 @@ void URopePluginInfoWidget::PopulatePanels()
 		{
 			AddEntry(WidgetTree, CapabilitiesPanel, Entry);
 		}
-		AddHeader(WidgetTree, CapabilitiesPanel, LOCTEXT("LimitationsHeader", "LIMITATIONS"));
+	}
+
+	// 한계 패널. 전용 컨테이너가 없는 WBP에서는 예전처럼 지원 패널 뒤에 이어 붙인다(구 WBP 호환).
+	if (UPanelWidget* Target = LimitationsPanel ? ToRawPtr(LimitationsPanel) : ToRawPtr(CapabilitiesPanel))
+	{
+		if (LimitationsPanel)
+		{
+			LimitationsPanel->ClearChildren();
+		}
+		AddHeader(WidgetTree, Target, LOCTEXT("LimitationsHeader", "LIMITATIONS"));
 		for (const FRopePluginInfoEntry& Entry : Limitations)
 		{
-			AddEntry(WidgetTree, CapabilitiesPanel, Entry);
+			AddEntry(WidgetTree, Target, Entry);
 		}
 	}
 }
@@ -155,6 +165,8 @@ UPanelWidget* URopePluginInfoWidget::GetPanelWidget(ERopeInfoPanel Panel) const
 	case ERopeInfoPanel::KeyGuide:     return KeyGuidePanel;
 	case ERopeInfoPanel::Components:   return ComponentsPanel;
 	case ERopeInfoPanel::Capabilities: return CapabilitiesPanel;
+	// 전용 컨테이너가 없으면 지원 패널과 한 몸이라 그쪽 가시성을 따른다.
+	case ERopeInfoPanel::Limitations:  return LimitationsPanel ? LimitationsPanel : CapabilitiesPanel;
 	default:                           return nullptr;
 	}
 }
@@ -183,6 +195,7 @@ void URopePluginInfoWidget::HideAllPanels()
 	SetPanelVisible(ERopeInfoPanel::KeyGuide, false);
 	SetPanelVisible(ERopeInfoPanel::Components, false);
 	SetPanelVisible(ERopeInfoPanel::Capabilities, false);
+	SetPanelVisible(ERopeInfoPanel::Limitations, false);
 }
 
 void URopePluginInfoWidget::SetHintText(const FText& InText)
@@ -267,11 +280,12 @@ TArray<FRopePluginKeyBinding> URopePluginInfoWidget::GetDefaultKeyBindings()
 	};
 
 	return {
-		Make(TEXT("LMB"),        TEXT("Throw the rope")),
-		Make(TEXT("RMB"),        TEXT("Release the rope")),
-		Make(TEXT("Wheel Up"),   TEXT("Reel in (shorten the rope)")),
-		Make(TEXT("Wheel Down"), TEXT("Reel out (lengthen the rope)")),
-		Make(TEXT("R"),          TEXT("Pull the wrapped target")),
+		Make(TEXT("LMB"),        TEXT("Throw")),
+		Make(TEXT("RMB"),        TEXT("Release")),
+		Make(TEXT("Wheel Up"),   TEXT("Reel in")),
+		Make(TEXT("Wheel Down"), TEXT("Reel out")),
+		Make(TEXT("T"),          TEXT("Arm the pull (toggle) - fires itself when the rope goes taut")),
+		Make(TEXT("R"),          TEXT("Reload - back to the ready state")),
 	};
 }
 
@@ -287,15 +301,21 @@ TArray<FRopePluginInfoEntry> URopePluginInfoWidget::GetDefaultRequiredComponents
 
 	return {
 		Make(TEXT("URopeComponent"),
-			TEXT("Core facade. Attach to the actor that owns the rope, then call Throw(). Owns the sim state, solver and phase state machine.")),
+			TEXT("The rope itself. Attach, then Throw().")),
 		Make(TEXT("URopeWielderComponent  (optional)"),
-			TEXT("Gameplay wielder. Attaches the rope to a hand socket, wires Enhanced Input (throw / release / pull / reel) and handles aiming. One component to make a character throw a rope.")),
-		Make(TEXT("A collider provider  (on wrap targets)"),
-			TEXT("URopeBoneCapsuleProvider (per-bone capsules) or URopeSDFProvider (baked per-bone SDF). Put it on every actor the rope may wrap; it registers with the sim subsystem each frame.")),
+			TEXT("Makes a character use it - hand socket, input, aiming.")),
+		Make(TEXT("Collider provider  (on wrap targets)"),
+			TEXT("Bone capsules or baked SDF. Required on anything the rope may wrap.")),
 		Make(TEXT("URopeSimSubsystem  (automatic)"),
-			TEXT("World subsystem, created for you. Centrally ticks every rope and gathers colliders once per frame. No manual setup.")),
+			TEXT("Ticks every rope and gathers colliders. No setup.")),
 		Make(TEXT("URopePreviewComponent  (optional)"),
-			TEXT("Draws a throw-arc / landing preview before you throw.")),
+			TEXT("Throw-arc preview before you throw.")),
+		Make(TEXT("URopeRagdollResponseComponent  (optional)"),
+			TEXT("Target goes limp when wrapped, stands up when released.")),
+		Make(TEXT("Rope anim notifies  (optional)"),
+			TEXT("Fire the throw and the pull window from a montage.")),
+		Make(TEXT("URopePreset  (optional asset)"),
+			TEXT("A whole tuning in one call. Three ship with the plugin.")),
 	};
 }
 
@@ -311,21 +331,37 @@ TArray<FRopePluginInfoEntry> URopePluginInfoWidget::GetDefaultCapabilities()
 
 	return {
 		Make(TEXT("Throw, flight & collision"),
-			TEXT("The rope flies as a physically-simulated chain and collides with skeletal bones.")),
+			TEXT("Flies as a simulated chain, collides with bones.")),
 		Make(TEXT("Wrap around bones"),
-			TEXT("Wraps a character's bone and then follows the animation while held.")),
-		Make(TEXT("Hold / Pull / Release"),
-			TEXT("A convergent tether plus a constant active pull that transfers force to the wrapped character's movement.")),
+			TEXT("Coils on a bone and follows the animation.")),
+		Make(TEXT("Hold / pull / release"),
+			TEXT("Tension-driven tether plus an active pull.")),
 		Make(TEXT("Reel in / out"),
-			TEXT("Shorten or lengthen the rope at runtime — combine with the tether for a grapple pull-up.")),
+			TEXT("Change rope length at runtime.")),
 		Make(TEXT("Cross-actor wrap"),
-			TEXT("A rope owned by actor A can wrap and follow a bone on a different actor B (safely released if B is destroyed).")),
+			TEXT("A rope on one actor can wrap and follow another.")),
 		Make(TEXT("GPU solver & tube"),
-			TEXT("XPBD solve + contact detection + tube build run on the GPU when a renderable RHI exists; CPU is the fallback.")),
+			TEXT("Solve, contact detection and tube build on the GPU.")),
 		Make(TEXT("SDF collision"),
-			TEXT("Optional baked per-bone signed-distance-field colliders, authored in the editor, for thin limbs.")),
+			TEXT("Baked per-bone distance fields for thin limbs.")),
 		Make(TEXT("Cut"),
-			TEXT("Sever the rope on a gameplay event via CutRope().")),
+			TEXT("Sever the rope on a gameplay event.")),
+		Make(TEXT("Three throw modes"),
+			TEXT("Full sim / assisted / guaranteed. Per rope.")),
+		Make(TEXT("Pierce"),
+			TEXT("Spear tip plants a single anchor instead of coiling.")),
+		Make(TEXT("Armed pull"),
+			TEXT("Engages only once the rope is genuinely taut.")),
+		Make(TEXT("Mass decides who moves"),
+			TEXT("Heavy target pulls you in instead - same rule, not a mode.")),
+		Make(TEXT("Moving surfaces"),
+			TEXT("A moving body drags and sweeps the rope aside.")),
+		Make(TEXT("Swept contact"),
+			TEXT("Fast nodes and fast colliders do not tunnel.")),
+		Make(TEXT("World collision"),
+			TEXT("Analytic static meshes plus optional global distance field.")),
+		Make(TEXT("Runtime presets"),
+			TEXT("Swap the whole tuning while free or reeled.")),
 	};
 }
 
@@ -340,22 +376,26 @@ TArray<FRopePluginInfoEntry> URopePluginInfoWidget::GetDefaultLimitations()
 	};
 
 	return {
-		Make(TEXT("No networking / replication"),
-			TEXT("The simulation is local only. For multiplayer, replicate the high-level events and simulate the rope locally on each machine.")),
-		Make(TEXT("Some gameplay-debug overlays are local only"),
-			TEXT("Rope debugger text, AddShape geometry and point markers replicate through the Gameplay Debugger. ")
-			TEXT("Foreground-only overlays (colliders, aim, wrap axis, node-contact arrows and pull legs) use direct DrawDebug calls, ")
-			TEXT("so those overlays are missing on a remote client.")),
+		Make(TEXT("No networking"),
+			TEXT("Local simulation only. Replicate events, simulate per machine.")),
+		Make(TEXT("No save / load"),
+			TEXT("Sim state is transient - a rope in flight will not survive a save.")),
+		Make(TEXT("Cinch is not implemented"),
+			TEXT("Falls back to a bare wrap. Use pierce or bare wrap.")),
+		Make(TEXT("One wrap target per rope"),
+			TEXT("A rope commits to a single dominant target.")),
+		Make(TEXT("Ragdolls hang from a physics constraint"),
+			TEXT("Like dragging a body by a handle, not a full-body force model.")),
+		Make(TEXT("Spiral follows the dominant target"),
+			TEXT("Secondary seeds hold and commit, but do not get their own spiral.")),
 		Make(TEXT("GPU tube ring limit"),
-			TEXT("The GPU tube path supports up to 512 effective rings. Tube smoothing subdivision is reduced automatically ")
-			TEXT("to stay within the limit; ropes with more than 512 simulation nodes use the CPU tube builder.")),
+			TEXT("Over 512 rings falls back to the CPU tube builder.")),
 		Make(TEXT("CPU fallback contexts"),
-			TEXT("Cook, dedicated server and -nullrhi have no renderable RHI, so they run the CPU solver / tube instead of the GPU path.")),
-		Make(TEXT("Spiral wraps only the dominant target"),
-			TEXT("Secondary seeds (two-leg / suspension) hold and commit on their own bones, but the wrap spiral is ")
-			TEXT("built for the dominant target only. Raise MaxWrapSeeds above its default of 1 to enable them.")),
+			TEXT("Cook, dedicated server and -nullrhi have no renderable RHI.")),
+		Make(TEXT("Some debug overlays are local only"),
+			TEXT("Foreground DrawDebug overlays do not reach a remote client.")),
 		Make(TEXT("Wrap tuning is sensitive"),
-			TEXT("Default WrapDecisionTime (~1 frame) and MinLatchNodes (1) latch on first sustained contact — tune them for your targets.")),
+			TEXT("Defaults latch on first sustained contact - tune per target.")),
 	};
 }
 
