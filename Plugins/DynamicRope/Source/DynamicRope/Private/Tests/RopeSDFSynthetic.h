@@ -2,7 +2,7 @@
 //
 // 해석적 SDF로 FRopeBoneSDFVolume를 채우는 헬퍼. 정답 거리를 아는 구 SDF를 즉석에서 만들어,
 // 샘플러(RopeSDFSampler)의 trilinear·gradient 정확도를 골든 값과 대조하는 회귀 테스트
-// (Tests/RopeSDFSamplerTests)의 픽스처로 쓴다 — 실제 베이크 볼륨은 정답 거리가 없어 검증 불가.
+// (RopeSDFSamplerTests 등)의 픽스처로 쓴다 — 실제 베이크 볼륨은 정답 거리가 없어 검증 불가.
 // 런타임 경로엔 관여하지 않는 테스트 전용 코드다. 헤더 전용(inline).
 
 #pragma once

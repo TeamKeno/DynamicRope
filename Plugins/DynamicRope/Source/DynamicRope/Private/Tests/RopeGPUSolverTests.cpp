@@ -19,7 +19,7 @@
 #include "Collision/RopeStaticCollider.h"
 #include "Collision/SDF/RopeSDFCollider.h"
 // MakeSphere(합성 SDF 볼륨)
-#include "Collision/SDF/RopeSDFSynthetic.h"
+#include "RopeSDFSynthetic.h"
 #include "Collision/SDF/RopeSDFData.h"
 // CPU 감지(패리티 ground-truth)
 #include "Logic/RopeFlightContactDetector.h"

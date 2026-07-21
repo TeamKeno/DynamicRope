@@ -8,7 +8,7 @@
 
 #include "Logic/RopeWrappingPhase.h"
 #include "Collision/SDF/RopeSDFCollider.h"
-#include "Collision/SDF/RopeSDFSynthetic.h"
+#include "RopeSDFSynthetic.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "Components/SceneComponent.h"
 

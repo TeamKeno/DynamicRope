@@ -5,7 +5,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Collision/SDF/RopeSDFSampler.h"
-#include "Collision/SDF/RopeSDFSynthetic.h"
+#include "RopeSDFSynthetic.h"
 #include "Collision/SDF/RopeSDFData.h"
 #include "Collision/SDF/RopeSDFCollider.h"
 
