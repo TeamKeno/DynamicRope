@@ -707,7 +707,9 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 	// NodeFrac 선형이라 매 순간 로프는 일직선이고 팁 궤적만 포물선. Alpha=1에서 오프셋 0이라 착지 지점은 정확히 유지.
 	const FVector ArcOriginW = Prepared.ResolveGuideOriginWorld();
 	const FVector ArcTipW = Prepared.ResolveGuidePointWorld(Sim.Num() - 1);
-	const float ArcHeight = ThrowParams.GuidedThrowArcHeightRatio * static_cast<float>((ArcTipW - ArcOriginW).Size());
+	// BP 런타임 쓰기는 UPROPERTY meta의 Clamp를 우회하므로 소비 시점에 같은 범위로 접는다.
+	const float ArcHeightRatio = FMath::Clamp(ThrowParams.GuidedThrowArcHeightRatio, 0.0f, 0.5f);
+	const float ArcHeight = ArcHeightRatio * static_cast<float>((ArcTipW - ArcOriginW).Size());
 	const float ArcT = 4.0f * Alpha * (1.0f - Alpha);
 	const int32 LastNode = Sim.Num() - 1;
 

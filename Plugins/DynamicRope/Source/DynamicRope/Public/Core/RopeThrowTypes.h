@@ -172,8 +172,12 @@ struct FRopeThrowParams
 	 * ③ GuidedThrow 비행 아치의 정점 높이 = 손→목표 거리 × 이 비율. 팁이 위쪽 포물선을 그리며 목표
 	 * (꽂힘 지점 또는 허공 던지기의 레이 끝점)에 도달한다. 0 = 아치 없음(장전 포즈 → 목표로 곧장 보간).
 	 * 아치 오프셋은 팁으로 갈수록 선형으로 커진다. Alpha=1에서 오프셋 0이라 착지 지점은 정확히 유지된다.
+	 * 상한 0.5 = 정점이 손→목표 거리의 절반까지. 그 이상은 목표로 날아간다기보다 위로 쏘아 올렸다
+	 * 떨어지는 궤적이 되어, 조준선과 실제로 보이는 비행이 눈에 띄게 어긋난다.
+	 * BP 런타임 쓰기는 이 meta를 우회하므로 소비처에서도 같은 범위로 클램프한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw",
+		meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float GuidedThrowArcHeightRatio = 0.25f;
 
 	/**
