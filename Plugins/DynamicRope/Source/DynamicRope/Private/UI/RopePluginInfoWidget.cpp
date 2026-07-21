@@ -342,6 +342,9 @@ TArray<FRopePluginInfoEntry> URopePluginInfoWidget::GetDefaultLimitations()
 	return {
 		Make(TEXT("No networking / replication"),
 			TEXT("The simulation is local only. For multiplayer, replicate the high-level events and simulate the rope locally on each machine.")),
+		Make(TEXT("Gameplay debugger is local only"),
+			TEXT("The Rope category is built for Standalone and local play. Its 3D overlays are drawn in the foreground with DrawDebug, ")
+			TEXT("which the gameplay debugger does not replicate, so on a remote client you get the text lines without the shapes.")),
 		Make(TEXT("GPU tube ring limit"),
 			TEXT("The GPU tube path requires NumRings <= 256; oversized ropes fall back to the CPU tube builder.")),
 		Make(TEXT("CPU fallback contexts"),

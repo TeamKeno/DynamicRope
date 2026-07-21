@@ -416,8 +416,10 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				const FVector Tip = NP.Position + NP.Normal * 15.0f;
 				// 화살표는 접촉 바깥 법선 그대로 — 축 정렬이 아니라 실제 방향이다.
 				DrawDebugDirectionalArrow(World, NP.Position, Tip, 6.0f, NColor, false, -1.0f, FG, 2.0f);
-				// 3D 라벨은 첫 노드 하나만. 이 지점이 곧 감김 시작점이라 공간상 위치가 의미를 갖는 유일한
-				// 값이고, 나머지 노드의 번호는 위 nodes=... 구간이 이미 낸다.
+				// 3D 라벨은 **첫 구간의 시작 노드** 하나만 — 위 nodes=... 텍스트와 3D를 잇는 기준점 역할이다
+				// (나머지 번호는 그 구간 문자열이 이미 낸다). 배열이 노드 인덱스 순이라 i==0은 "가장 작은
+				// 번호"일 뿐이고, 캡처 후보나 dominant 대상, 감김 시작점이라는 뜻이 아니다 — 정적 월드
+				// 접촉(마젠타)일 수도, 감김이 없는 페이즈일 수도 있다. 구간이 여럿이면 첫 구간만 라벨된다.
 				if (i == 0)
 				{
 					DrawDebugString(World, Tip, FString::Printf(TEXT("n%d"), NP.NodeIndex),
@@ -613,12 +615,14 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			AddTextLine(FString::Printf(TEXT("    tension=%.0f (release off)"), S.WrapTension));
 		}
 
-		// Pull 방향(장력 유무와 무관하게 bPullValid면 항상). 청록 선/점 = 앵커 → walk가 멈춘 조준 노드
-		// (첫 직선 다리). 이 끝이 벽 모서리에 놓여야 정상이고, 선의 방향이 곧 이번 프레임 인가 방향이다
-		// (PullDirection은 이 다리를 정규화해 EMA로 다듬은 값이라 구조적으로 같은 방향 — 화살표를 따로
-		// 그리면 같은 선 위에 겹칠 뿐이고, 유일한 차이인 EMA 지연(수 도)은 아래 상세 줄이 숫자로 낸다).
+		// Pull 방향(장력 유무와 무관하게 bPullValid면 항상).
+		// 청록 선/점 = **fractional aim leg** — 앵커 → 스무딩된 조준 위치(AimPos). 이 끝이 벽 모서리에
+		// 놓여야 정상이다. 이 다리의 방향은 방향 EMA의 **입력**이지 인가 방향이 아니다:
+		// UpdateWrappedPullSample이 (AimPos - 앵커)를 다시 PullDirSmoothTime으로 EMA한 SmoothedPullDir이
+		// 실제로 인가된다. 정상 상태에서만 두 방향이 겹치고, 방향이 빠르게 바뀌거나 스무딩 상수가 크면
+		// 벌어진다 — 그래서 실제 인가 방향은 아래 초록 화살표로 따로 그린다.
 		// 콜라이더/wrapAxis와 같은 이유로 전경 DrawDebug*: 앵커가 감긴 본(캐릭터 몸통) 안이라 AddShape의
-		// SDPG_World로는 메시에 묻힌다.
+		// SDPG_World로는 메시에 묻힌다. 단 이 경로는 원격 클라이언트로 복제되지 않는다(아래 지원 범위 주석).
 		if (S.bPullValid)
 		{
 			if (UWorld* World = Rope.GetWorld())
@@ -628,14 +632,26 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				DrawDebugPoint(World, S.PullAimPoint, 12.0f, FColor::Cyan, false, -1.0f, FG);
 			}
 
-			// 스무딩 전 raw 방향과의 대조는 EMA 계수를 맞출 때 쓰는 것이라 상세 보기로 둔다. 각도차 =
-			// 이번 프레임 지터. 조준 노드가 프레임마다 튀면 방향이 통째로 점프한다는 신호라 그 노드 번호도
-			// 함께 낸다.
+			// 상세: 실제 인가 방향과 그 EMA 진단.
+			//  - 초록 화살표 = SmoothedPullDir = **이번 프레임 실제 인가 방향**. 위 청록 다리(EMA 입력)와
+			//    벌어지는 정도가 곧 방향 스무딩의 지연이라, 둘을 겹쳐 봐야 의미가 있다.
+			//  - 각도차는 **정수 조준 기반 raw ↔ smoothed** 비교다(PullDirRaw는 fractional 스무딩 이전 값).
+			//    청록↔초록의 차이와는 다른 쌍이므로 그 값으로 읽지 말 것 — EMA 계수를 맞출 때 쓴다.
+			//  - 조준 노드가 프레임마다 튀면 방향이 통째로 점프한다는 신호라 그 노드 번호도 함께 낸다.
 			if (HasView(EView::Advanced))
 			{
+				if (UWorld* World = Rope.GetWorld())
+				{
+					// 청록 다리와 원점을 공유하고 정상 상태에서는 거의 겹치므로, **청록보다 뒤에** 굵게
+					// 그린다(전경은 나중이 위). 굵기는 청록의 두 배 — 겹칠 때 가려지는 쪽이 "실제 인가
+					// 방향"이면 이 표시의 목적 자체가 사라진다.
+					constexpr float DiagLen = 40.0f;
+					DrawDebugDirectionalArrow(World, S.PullPoint, S.PullPoint + S.PullDirection * DiagLen,
+						16.0f, FColor::Green, false, -1.0f, SDPG_Foreground, 6.0f);
+				}
 				const float JitterDeg = FMath::RadiansToDegrees(FMath::Acos(
 					FMath::Clamp(static_cast<float>(FVector::DotProduct(S.PullDirRaw, S.PullDirection)), -1.0f, 1.0f)));
-				AddTextLine(FString::Printf(TEXT("    {grey}pull-dir aim=node%d raw<->smooth=%.1f deg dir=%s"),
+				AddTextLine(FString::Printf(TEXT("    {grey}pull-dir aim=node%d rawAim<->smooth=%.1f deg dir=%s"),
 					S.PullAimNode, JitterDeg, *S.PullDirection.ToCompactString()));
 			}
 		}
