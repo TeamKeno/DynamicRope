@@ -191,9 +191,10 @@ struct FRopeDebugSnapshot
 	FVector PullDirection = FVector::ZeroVector;
 	// 스무딩 전 look-ahead 방향(원본) — 지터 진단용(스무딩 대비)
 	FVector PullDirRaw = FVector::ZeroVector;
-	// 첫 직선 다리 끝(walk가 멈춘 노드 월드) — 방향 조준점
+	// 첫 직선 다리 끝 = 스무딩된 fractional 조준 위치(AimPos) — 방향 EMA의 입력.
+	// 정수 노드 위치가 아니다: 조준 인덱스를 EMA로 다듬은 뒤 노드 사이를 보간한 값이라 노드에 놓이지 않는다.
 	FVector PullAimPoint = FVector::ZeroVector;
-	// 위 조준 노드 인덱스(프레임마다 튀면 방향 불안정 신호)
+	// 스무딩 전 정수 조준 노드 인덱스(프레임마다 튀면 방향 불안정 신호) — 위 fractional 위치의 원본
 	int32 PullAimNode = INDEX_NONE;
 	// 앵커 세그먼트 장력
 	float PullTension = 0.0f;

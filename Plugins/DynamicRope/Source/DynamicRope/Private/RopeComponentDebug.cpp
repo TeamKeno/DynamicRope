@@ -390,7 +390,7 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugC
 		Snapshot.PullDirRaw = PullDrive.LastPullDirRaw;
 		// raw 정수 조준(홉 진단용 텍스트)
 		Snapshot.PullAimNode = PullDrive.LastPullSample.AimNode;
-		// 청록 = 스무딩된 fractional 조준(실제 인가)
+		// 청록 = 스무딩된 fractional 조준 위치(방향 EMA의 입력). 실제 인가 방향은 위 PullDirection이다.
 		Snapshot.PullAimPoint = PullDrive.LastPullSample.bValid ? PullDrive.LastPullSample.AimPos
 			: PullDrive.LastPullSample.WorldPoint;
 		Snapshot.PullTension = PullDrive.LastPullSample.Tension;

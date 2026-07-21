@@ -163,6 +163,50 @@ FGameplayDebuggerCategory_Rope::FGameplayDebuggerCategory_Rope()
 	BindKeyPress(CollidersCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleColliders);
 	BindKeyPress(AimCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleAim);
 	BindKeyPress(AdvancedCfg, this, &FGameplayDebuggerCategory_Rope::OnToggleAdvanced);
+
+	// 점 표시는 셰이프가 아니라 자체 데이터 팩으로 복제한다(사유는 헤더 FRepData 주석).
+	// ResetOnTick(기본) — 수집 틱마다 비워지므로 CollectData에서 따로 Reset하지 않는다.
+	SetDataPackReplication<FRepData>(&DataPack);
+}
+
+void FGameplayDebuggerCategory_Rope::FRepData::Serialize(FArchive& Ar)
+{
+	int32 NumPoints = Points.Num();
+	Ar << NumPoints;
+	if (Ar.IsLoading())
+	{
+		Points.SetNum(NumPoints);
+	}
+	for (FPoint& Point : Points)
+	{
+		Ar << Point.Location;
+		Ar << Point.Color;
+		Ar << Point.Size;
+	}
+}
+
+void FGameplayDebuggerCategory_Rope::AddPoint(const FVector& Location, float PixelSize, const FColor& Color)
+{
+	FRepData::FPoint Point;
+	Point.Location = Location;
+	Point.Color = Color;
+	Point.Size = PixelSize;
+	DataPack.Points.Add(Point);
+}
+
+void FGameplayDebuggerCategory_Rope::DrawData(APlayerController* OwnerPC, FGameplayDebuggerCanvasContext& CanvasContext)
+{
+	FGameplayDebuggerCategory::DrawData(OwnerPC, CanvasContext);
+
+	// 점은 전경으로 — 노드 상당수가 캐릭터/벽 메시 안이나 표면에 붙어 있어 SDPG_World면 묻힌다.
+	// DrawData는 보는 쪽에서 매 프레임 돌므로, 수집 간격이 프레임보다 길어도 점이 깜빡이지 않는다.
+	if (UWorld* World = CanvasContext.World.Get())
+	{
+		for (const FRepData::FPoint& Point : DataPack.Points)
+		{
+			DrawDebugPoint(World, Point.Location, Point.Size, Point.Color, false, -1.0f, SDPG_Foreground);
+		}
+	}
 }
 
 TSharedRef<FGameplayDebuggerCategory> FGameplayDebuggerCategory_Rope::MakeInstance()
@@ -372,16 +416,18 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 		// 줄의 phase=... 텍스트가 낸다. 노드 단위 상태 구분은 [U]flight / [I]wrap 오버레이 담당.
 		for (const FVector& Point : Points)
 		{
-			AddShape(FGameplayDebuggerShape::MakePoint(Point, 2.0f, FColor::Yellow));
+			AddPoint(Point, 6.0f, FColor::Yellow);
 		}
-		// latch 노드 강조(인덱스와 위치가 같은 스냅샷에서 온다).
+		// latch 노드 강조(인덱스와 위치가 같은 스냅샷에서 온다). 크기는 일반 노드와 같게 두고 색으로만
+		// 구분한다 — 뒤에 그려 노란 점을 정확히 덮으므로, 노드 하나가 빨갛게 바뀐 것으로 읽힌다.
+		// 키우면 노드 간격보다 커져 이웃 노드까지 가리는 덩어리가 된다.
 		if (Snap)
 		{
 			for (int32 NodeIdx : Snap->LatchedNodes)
 			{
 				if (Points.IsValidIndex(NodeIdx))
 				{
-					AddShape(FGameplayDebuggerShape::MakePoint(Points[NodeIdx], 4.0f, FColor::Red));
+					AddPoint(Points[NodeIdx], 6.0f, FColor::Red);
 				}
 			}
 		}
@@ -414,8 +460,9 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				// 정적 월드=마젠타, 그 외(스켈레탈 본/랩 대상)=주황.
 				const FColor NColor = NP.bWorldStatic ? FColor(255, 0, 255) : FColor(255, 128, 0);
 				const FVector Tip = NP.Position + NP.Normal * 15.0f;
-				// 화살표는 접촉 바깥 법선 그대로 — 축 정렬이 아니라 실제 방향이다.
-				DrawDebugDirectionalArrow(World, NP.Position, Tip, 6.0f, NColor, false, -1.0f, FG, 2.0f);
+				// 화살표는 접촉 바깥 법선 그대로 — 축 정렬이 아니라 실제 방향이다. 노드 수만큼 나오는
+				// 표시라 굵기는 가늘게 둔다 — 굵으면 인접 노드끼리 뭉쳐 방향을 읽을 수 없다.
+				DrawDebugDirectionalArrow(World, NP.Position, Tip, 5.0f, NColor, false, -1.0f, FG, 1.5f);
 				// 3D 라벨은 **첫 구간의 시작 노드** 하나만 — 위 nodes=... 텍스트와 3D를 잇는 기준점 역할이다
 				// (나머지 번호는 그 구간 문자열이 이미 낸다). 배열이 노드 인덱스 순이라 i==0은 "가장 작은
 				// 번호"일 뿐이고, 캡처 후보나 dominant 대상, 감김 시작점이라는 뜻이 아니다 — 정적 월드
@@ -465,13 +512,13 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 
 			if (Node.bNearBody)
 			{
-				AddShape(FGameplayDebuggerShape::MakePoint(Node.Position, 2.5f, FColor::Yellow));
+				AddPoint(Node.Position, 8.0f, FColor::Yellow);
 			}
 
 			if (Node.Contact.bHit)
 			{
 				const FColor HitColor = HasValidCandidateFor(Node) ? FColor::Green : FColor::Red;
-				AddShape(FGameplayDebuggerShape::MakePoint(Node.Contact.SurfacePoint, 3.0f, HitColor));
+				AddPoint(Node.Contact.SurfacePoint, 10.0f, HitColor);
 				AddShape(FGameplayDebuggerShape::MakeSegment(Node.Contact.SurfacePoint,
 					Node.Contact.SurfacePoint + Node.Contact.Normal.GetSafeNormal() * 22.0f, 1.0f, FColor::Blue));
 			}
@@ -521,13 +568,13 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 				}
 				else
 				{
-					AddShape(FGameplayDebuggerShape::MakePoint(S.Positions[i], 2.5f, FColor::Green));
+					AddPoint(S.Positions[i], 8.0f, FColor::Green);
 				}
 			}
 			// 가이드 커브 자체(타깃 점 + 이음선)는 기본으로 낸다 — 스윙이 어디로 향하는지가 요지다.
 			for (int32 i = 0; i < S.WhipGuideTargets.Num(); ++i)
 			{
-				AddShape(FGameplayDebuggerShape::MakePoint(S.WhipGuideTargets[i], 3.0f, FColor::Cyan));
+				AddPoint(S.WhipGuideTargets[i], 10.0f, FColor::Cyan);
 				if (i + 1 < S.WhipGuideTargets.Num())
 				{
 					AddShape(FGameplayDebuggerShape::MakeSegment(S.WhipGuideTargets[i], S.WhipGuideTargets[i + 1], 1.0f, FColor::Cyan));
@@ -588,7 +635,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			}
 			else
 			{
-				AddShape(FGameplayDebuggerShape::MakePoint(S.Positions[i], 2.5f, FColor::Green));
+				AddPoint(S.Positions[i], 8.0f, FColor::Green);
 			}
 		}
 
