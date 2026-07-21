@@ -185,11 +185,11 @@ struct FRopeGPUResidentStep
 	bool  bUseWorldGDF = false;
 	TArray<FRopeGPUCapsule>     Capsules;
 	TArray<FRopeGPUSDFCollider> SDFColliders;
-	/** 정적 박스(OBB — 스태틱 바디 심플 콜리전). solve 전용(감지 미참여). */
+	/** 해석적 박스(OBB). solve에 사용하며 앞쪽 NumDetectBoxes개는 접촉 감지에도 참여한다. */
 	TArray<FRopeGPUBox>         Boxes;
-	/** 정적 컨벡스(평면 집합). solve 전용. */
+	/** 해석적 컨벡스(평면 집합). solve 전용. */
 	TArray<FRopeGPUConvex>      Convexes;
-	/** 전 컨벡스 평면 평탄 풀((nx,ny,nz,w), 월드·바깥). */
+	/** 전 컨벡스의 바디-로컬 평면 평탄 풀((nx,ny,nz,w), 바깥 방향 법선). */
 	TArray<FVector4>            ConvexPlanes;
 
 	/**
@@ -281,8 +281,9 @@ struct FRopeResidentLatest
 };
 
 /**
- * GPU 접촉 감지(G3) 결과 1건 — 노드당 최대 1개(최심 접촉). GPU는 bone/mesh(FName/포인터,
- * GT 개념)를 만들 수 없으므로 콜라이더 인덱스만 emit하고, 호출자(런타임)가 인덱스 → (bone, mesh)
+ * GPU 접촉 감지(G3) 결과 1건. 실제 접촉과 예측 접촉이 각각 노드당 최대 1개씩 나올 수 있다.
+ * GPU는 bone/mesh(FName/포인터, GT 개념)를 만들 수 없으므로 콜라이더 인덱스만 emit하고,
+ * 호출자(런타임)가 인덱스 → (bone, mesh)
  * 귀속 테이블로 복원한다. HLSL FRopeGPUContact와 1:1 미러(레이아웃/의미 동일).
  */
 struct FRopeGPUContactResult
