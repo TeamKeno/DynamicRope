@@ -613,24 +613,26 @@ void FGameplayDebuggerCategory_Rope::DrawRope(int32 Index, const URopeComponent&
 			AddTextLine(FString::Printf(TEXT("    tension=%.0f (release off)"), S.WrapTension));
 		}
 
-		// Pull 방향(장력 유무와 무관하게 bPullValid면 항상). 기본은 **실제로 인가되는 것**만 그린다:
-		//  - 청록 선/점 = 앵커 → walk가 멈춘 조준 노드(첫 직선 다리). 이 끝이 벽 모서리에 놓여야 정상이다.
-		//  - 초록 화살표 = EMA 스무딩 후 = 이번 프레임 실제 인가 방향.
+		// Pull 방향(장력 유무와 무관하게 bPullValid면 항상). 청록 선/점 = 앵커 → walk가 멈춘 조준 노드
+		// (첫 직선 다리). 이 끝이 벽 모서리에 놓여야 정상이고, 선의 방향이 곧 이번 프레임 인가 방향이다
+		// (PullDirection은 이 다리를 정규화해 EMA로 다듬은 값이라 구조적으로 같은 방향 — 화살표를 따로
+		// 그리면 같은 선 위에 겹칠 뿐이고, 유일한 차이인 EMA 지연(수 도)은 아래 상세 줄이 숫자로 낸다).
+		// 콜라이더/wrapAxis와 같은 이유로 전경 DrawDebug*: 앵커가 감긴 본(캐릭터 몸통) 안이라 AddShape의
+		// SDPG_World로는 메시에 묻힌다.
 		if (S.bPullValid)
 		{
-			constexpr float DiagLen = 40.0f;
-			AddShape(FGameplayDebuggerShape::MakeSegment(S.PullPoint, S.PullAimPoint, 3.0f, FColor::Cyan));
-			AddShape(FGameplayDebuggerShape::MakePoint(S.PullAimPoint, 6.0f, FColor::Cyan));
-			AddShape(FGameplayDebuggerShape::MakeArrow(S.PullPoint, S.PullPoint + S.PullDirection * DiagLen,
-				8.0f, 2.0f, FColor::Green));
+			if (UWorld* World = Rope.GetWorld())
+			{
+				constexpr uint8 FG = SDPG_Foreground;
+				DrawDebugLine(World, S.PullPoint, S.PullAimPoint, FColor::Cyan, false, -1.0f, FG, 3.0f);
+				DrawDebugPoint(World, S.PullAimPoint, 12.0f, FColor::Cyan, false, -1.0f, FG);
+			}
 
-			// 스무딩 전 raw 방향과의 대조는 EMA 계수를 맞출 때 쓰는 것이라 상세 보기로 둔다.
-			// 노랑 화살표 = raw look-ahead, 각도차 = 이번 프레임 지터. 조준 노드가 프레임마다 튀면 방향이
-			// 통째로 점프한다는 신호라 그 노드 번호도 함께 낸다.
+			// 스무딩 전 raw 방향과의 대조는 EMA 계수를 맞출 때 쓰는 것이라 상세 보기로 둔다. 각도차 =
+			// 이번 프레임 지터. 조준 노드가 프레임마다 튀면 방향이 통째로 점프한다는 신호라 그 노드 번호도
+			// 함께 낸다.
 			if (HasView(EView::Advanced))
 			{
-				AddShape(FGameplayDebuggerShape::MakeArrow(S.PullPoint, S.PullPoint + S.PullDirRaw * DiagLen,
-					6.0f, 1.5f, FColor::Yellow));
 				const float JitterDeg = FMath::RadiansToDegrees(FMath::Acos(
 					FMath::Clamp(static_cast<float>(FVector::DotProduct(S.PullDirRaw, S.PullDirection)), -1.0f, 1.0f)));
 				AddTextLine(FString::Printf(TEXT("    {grey}pull-dir aim=node%d raw<->smooth=%.1f deg dir=%s"),
