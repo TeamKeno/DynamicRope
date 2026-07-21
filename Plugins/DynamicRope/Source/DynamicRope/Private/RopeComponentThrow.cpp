@@ -159,7 +159,7 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 		return false;
 	}
 
-	PrepareForNewGuidedThrow();
+	ResetStateForNewThrow();
 	// 팁 부착물 확보 보험 — 정상 경로는 BeginPlay가 이미 잡았다(런타임 bUseTipMesh 토글 대비; 이미 있으면 no-op).
 	EnsureTipMesh();
 
@@ -402,7 +402,7 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 
 	// 던지기 시작 = 4단계 고정 순서: ① 이전 상태 정리 → ② 체인 리셋(+GPU 재시드) → ③ 채찍 스윙 시작
 	// → ④ Verlet 속도 주입. ④는 ③이 확정한 조준 방향(WhipGuide.GetAimDir)을 쓰므로 순서가 계약이다.
-	AbandonActiveStateForRethrow();
+	ResetStateForNewThrow();
 	// ray가 확정한 mesh+bone을 primary로 저장한다. Assisted는 같은 mesh의 다른 본도 후보/경로에
 	// 허용하고, Guaranteed만 Flight/Contacting/Wrapping 전체를 exact bone으로 제한한다.
 	AimTargeting.SetWrapTargetLock(ResolvedThrow);
@@ -416,9 +416,9 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 		*WhipGuide.GetAimDir().ToCompactString(), ResolvedThrow.ThrowSpeed));
 }
 
-void URopeComponent::AbandonActiveStateForRethrow()
+void URopeComponent::ResetStateForNewThrow()
 {
-	// 재던지기: 잡고 있던 wrap은 수동 해제, 진행 중 페이즈 일시 상태는 폐기, 쿨다운 없이 즉시 던진다.
+	// 새 throw: 잡고 있던 wrap은 수동 해제, 진행 중 페이즈 일시 상태는 폐기, 쿨다운 없이 즉시 던진다.
 	// 커밋된 wrap이었으면 해제를 알려야 한다(FinishWrapRelease와 같은 짝 맞춤) — 안 그러면
 	// OnAnyRopeReleased가 안 나가 cross-actor 대상(랙돌 등)이 로프가 풀렸는데도 영구 고착된다.
 	// mesh/본은 Release가 상태를 비우기 전에 잡고, 통지는 상태 정리 후에 쏜다(DispatchReleased 재진입 계약).
@@ -436,19 +436,6 @@ void URopeComponent::AbandonActiveStateForRethrow()
 	{
 		DispatchReleased(WrappedMesh, WrappedBone, ERopeReleaseReason::Manual, /*bWasWrapped*/ true);
 	}
-}
-
-void URopeComponent::PrepareForNewGuidedThrow()
-{
-	// Prepared/Free 모두 정상적으로는 Reel에서 들어와 active wrap이 없어야 한다. 기존 방어 동작은
-	// 그대로 유지하되, 커밋된 wrap의 release 통지 계약이 필요한 일반 재던지기는 Abandon*이 맡는다.
-	if (WrapController.IsActive())
-	{
-		WrapController.Release(ERopeReleaseReason::Manual);
-	}
-	ResetKinematicVirtualBridges();
-	ResetTransientPhaseState();
-	ReleaseCooldown = 0.0f;
 }
 
 bool URopeComponent::BeginGuidedThrowState(FRopePreparedThrowPreview&& Prepared, bool bFreeThrow)
@@ -769,7 +756,7 @@ void URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext,
 	Free.RenderPreview.Radius = FMath::Max(0.1f, Radius * 1.05f);
 	Free.RenderPreview.NumSides = FMath::Clamp(NumSides, 3, 32);
 
-	PrepareForNewGuidedThrow();
+	ResetStateForNewThrow();
 	const FString PhaseReason = FString::Printf(TEXT("free throw to ray-end, len=%.0f"),
 		static_cast<float>((EndpointWorld - Origin).Size()));
 	if (!BeginGuidedThrowState(MoveTemp(Free), /*bFreeThrow*/ true))

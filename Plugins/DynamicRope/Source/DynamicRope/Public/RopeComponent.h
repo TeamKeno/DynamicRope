@@ -1055,11 +1055,9 @@ private:
 	// 던지기 시작은 아래 4단계 헬퍼의 고정 순서로 읽는다(StartFreshThrow가 오케스트레이션만).
 	void StartFreshThrow(const FRopeThrowContext& ThrowContext);
 
-	/** ① 이전 상태 정리: 잡고 있던 wrap 수동 해제 + 페이즈 일시 상태 폐기 + 쿨다운 0(즉시 재던지기). */
-	void AbandonActiveStateForRethrow();
-
-	/** GuidedThrow 공통 사전 정리: wrap/bridge/일시 상태를 폐기하고 release cooldown을 없앤다. */
-	void PrepareForNewGuidedThrow();
+	/** ① 모든 throw의 공통 사전 정리: active wrap은 정상 release 통지와 함께 해제하고,
+	 *  bridge/페이즈 일시 상태를 폐기한 뒤 쿨다운 없이 새 throw를 시작할 수 있게 한다. */
+	void ResetStateForNewThrow();
 
 	/** Prepared/Free 공용 GuidedThrow 상태와 시작 노드 pin을 구성한다. */
 	bool BeginGuidedThrowState(FRopePreparedThrowPreview&& Prepared, bool bFreeThrow);

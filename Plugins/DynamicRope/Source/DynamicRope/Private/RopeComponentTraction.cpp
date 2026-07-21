@@ -310,19 +310,13 @@ namespace
 			}
 		}
 		// (4) 캐릭터: MOVE_None(랙돌 셋업 관례)이면 무브먼트가 힘을 소비하지 않으니 앵커로 본다.
-		if (const ACharacter* Character = Cast<ACharacter>(Owner))
+		if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Owner))
 		{
-			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-			{
-				if (Movement->MovementMode != MOVE_None)
-				{
-					Out.Kind = ERopeEndpointKind::Character;
-					Out.Movement = Movement;
-					const float BraceScale = Movement->IsMovingOnGround() ? FMath::Max(GroundBraceFactor, 1.0f) : 1.0f;
-					Out.Mass = Movement->Mass * BraceScale;
-					return Out;
-				}
-			}
+			Out.Kind = ERopeEndpointKind::Character;
+			Out.Movement = Movement;
+			const float BraceScale = Movement->IsMovingOnGround() ? FMath::Max(GroundBraceFactor, 1.0f) : 1.0f;
+			Out.Mass = Movement->Mass * BraceScale;
+			return Out;
 		}
 		// (5) 정적/키네마틱/MOVE_None/비시뮬 비캐릭터 → 앵커(질량 0). 위치 폴백만 가능하다.
 		Out.Kind = ERopeEndpointKind::Anchor;
