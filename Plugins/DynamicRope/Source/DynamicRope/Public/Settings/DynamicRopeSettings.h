@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "Core/RopeConfigTypes.h"
 #include "Engine/DeveloperSettings.h"
+class URopePullGaugeWidget;
+
 #include "DynamicRopeSettings.generated.h"
 
 class ARopeController;
@@ -82,6 +84,15 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Demo", meta = (ToolTip = "Aim-ray demo HUD widget class (crosshair + wrappable-bone highlight ring). Spawned by URopeWielderComponent for the local player when bShowAimHudWidget is on. Defaults to the C++ URopeAimWidget (works with no assets); point it at a WBP subclass to restyle. Clear it to disable the HUD."))
 	TSoftClassPtr<URopeAimWidget> AimHudWidgetClass;
+
+	/**
+	 * Pull 장전/발동 게이지 위젯 클래스(장전 임계까지의 진행 링).
+	 * URopeWielderComponent가 bShowPullGaugeWidget일 때 생성해 로컬 플레이어 뷰포트에 올린다.
+	 * 기본값 = C++ URopePullGaugeWidget(에셋 없이 동작). WBP 서브클래스로 리스타일 가능.
+	 * 비우면 게이지를 띄우지 않는다(게터/이벤트는 그대로 쓸 수 있다).
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Demo", meta = (ToolTip = "Pull gauge widget class (ring showing progress toward the pull engage tension). Spawned by URopeWielderComponent for the local player when bShowPullGaugeWidget is on. Defaults to the C++ URopePullGaugeWidget (works with no assets); point it at a WBP subclass to restyle. Clear it to disable the gauge."))
+	TSoftClassPtr<URopePullGaugeWidget> PullGaugeWidgetClass;
 
 	/**
 	 * 데모 프리셋 순환 목록 — 소비처는 콘솔 명령 Rope.Preset.Cycle / .Apply / .List

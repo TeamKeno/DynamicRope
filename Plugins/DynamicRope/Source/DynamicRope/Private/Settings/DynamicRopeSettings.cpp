@@ -3,6 +3,7 @@
 #include "Settings/DynamicRopeSettings.h"
 #include "Collision/RopeController.h"
 #include "UI/RopeAimWidget.h"
+#include "UI/RopePullGaugeWidget.h"
 
 UDynamicRopeSettings::UDynamicRopeSettings()
 {
@@ -15,6 +16,9 @@ UDynamicRopeSettings::UDynamicRopeSettings()
 
 	// 기본값: 에셋 없이 동작하는 C++ 조준 HUD 위젯. WBP 서브클래스로 교체하거나 None으로 끌 수 있다.
 	AimHudWidgetClass = URopeAimWidget::StaticClass();
+
+	// 기본값: 에셋 없이 동작하는 C++ Pull 게이지 위젯. WBP로 교체하거나 None으로 끌 수 있다.
+	PullGaugeWidgetClass = URopePullGaugeWidget::StaticClass();
 }
 
 const UDynamicRopeSettings* UDynamicRopeSettings::Get()

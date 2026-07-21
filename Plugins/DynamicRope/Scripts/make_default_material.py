@@ -13,9 +13,14 @@
 #   2) 불규칙 섬유 거침:  Custom HLSL 값노이즈(UV 고정, 로프 움직여도 안 헤엄침)
 #      - float4(섬유노말.xyz, 높이) 1회 평가 → 미세 노말 + Roughness 얼룩에 공용.
 #      - FiberScale(주파수) / FiberNormalStrength(범프) / FiberRoughness(거칠기 얼룩).
+#   3) Pull 피드백 에미시브: PullGlow(0..N) × PullGlowColor를 가닥 마스크로 변조해 방출한다.
+#      - 가닥 능선(mask=1)에서만 밝아져 "줄의 꼬임을 따라 달아오르는" 룩이 된다(균일 발광보다 로프답다).
+#      - 런타임에서 URopeWielderComponent가 MID로 PullGlow에 장전~발동 진행도(0..1, 발동 시 >1)를 싣는다.
+#        기본값 0이라 이 기능을 안 쓰면 기존 룩과 완전히 동일하다.
 # 노출 파라미터: Tint / StrandCount / TwistTurns / SubStrandCount / SubTwistTurns / SubStrength /
 #                Roughness / NormalStrength / CavityStrength /
-#                FiberScale / FiberNormalStrength / FiberRoughness
+#                FiberScale / FiberNormalStrength / FiberRoughness /
+#                PullGlow / PullGlowColor
 #
 # 실행: Tools → Execute Python Script... 로 이 파일 선택.
 # 재실행 안전: 기존 에셋을 지우고 같은 경로에 다시 만든다(idempotent). 자식 MI_* 인스턴스는
@@ -128,6 +133,19 @@ spec_base = constant(-300, 40, 0.5)
 spec = node(unreal.MaterialExpressionMultiply, -120, 40)
 wire(spec_base, spec, "A"); wire(cavity, spec, "B")
 mel.connect_material_property(spec, "", unreal.MaterialProperty.MP_SPECULAR)
+
+# ---- Pull 피드백 에미시브: PullGlowColor × PullGlow × mask ----------------------
+# 게임플레이(Pull 장전/발동) 상태를 로프 자체에 싣는 채널. 기본 PullGlow=0 → 방출 0이라
+# 이 기능을 안 쓰는 프로젝트의 룩은 그대로다. mask를 곱해 가닥 능선만 밝아지게 한다.
+pull_glow = scalar_param("PullGlow", 0.0, -700, 200)
+pull_color = node(unreal.MaterialExpressionVectorParameter, -700, 240)
+pull_color.set_editor_property("parameter_name", "PullGlowColor")
+pull_color.set_editor_property("default_value", unreal.LinearColor(0.25, 1.0, 0.55, 1.0))  # 게이지 발동색과 같은 톤
+glow_amt = node(unreal.MaterialExpressionMultiply, -520, 220)
+wire(pull_color, glow_amt, "A"); wire(pull_glow, glow_amt, "B")
+glow_masked = node(unreal.MaterialExpressionMultiply, -340, 220)
+wire(glow_amt, glow_masked, "A"); wire(mask, glow_masked, "B")
+mel.connect_material_property(glow_masked, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
 # ---- 불규칙 섬유 노이즈: Custom HLSL, float4(노말.xyz, 높이) ------------------
 # UV*Scale 값노이즈(smoothstep 보간) + 해석적 미분으로 탄젠트공간 노말. UV 기준이라

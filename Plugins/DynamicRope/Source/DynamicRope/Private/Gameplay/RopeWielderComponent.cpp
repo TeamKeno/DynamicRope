@@ -2,6 +2,7 @@
 
 #include "Gameplay/RopeWielderComponent.h"
 #include "RopeComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
 // ResolveBindingWorld — 조준 HUD 샘플의 본 위치(링 중심) 해석.
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
@@ -9,6 +10,7 @@
 // 조준 HUD 위젯(생성은 프로젝트 세팅의 클래스, 수명은 이 컴포넌트가 관리).
 #include "Settings/DynamicRopeSettings.h"
 #include "UI/RopeAimWidget.h"
+#include "UI/RopePullGaugeWidget.h"
 #include "Blueprint/UserWidget.h"
 
 #include "Components/SceneComponent.h"
@@ -131,6 +133,11 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		AimHudWidget->RemoveFromParent();
 		AimHudWidget = nullptr;
 	}
+	if (PullGaugeWidget)
+	{
+		PullGaugeWidget->RemoveFromParent();
+		PullGaugeWidget = nullptr;
+	}
 	if (Rope)
 	{
 		Rope->CancelQueuedGuaranteedAimThrow();
@@ -163,6 +170,8 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	UpdateGroundExit();
 	UpdateSwingAirControl();
 	UpdatePullEngage();
+	UpdatePullGlowMaterial();
+	UpdatePullGaugeWidget();
 	UpdateAimHudSample();
 	UpdateAimHudWidget();
 	UpdateThrowPreview();
@@ -298,6 +307,47 @@ void URopeWielderComponent::UpdateAimHudWidget()
 	if (AimHudWidget)
 	{
 		AimHudWidget->AddToViewport();
+	}
+}
+
+void URopeWielderComponent::UpdatePullGaugeWidget()
+{
+	// 게이지는 aim 모드와 무관하다(①에서도 감고 당길 수 있다) — 토글만 보고 유지한다.
+	// 장전 전에는 위젯이 아무것도 그리지 않으므로 상태별 생성/파괴를 하지 않는다(깜빡임 방지).
+	if (!bShowPullGaugeWidget)
+	{
+		if (PullGaugeWidget)
+		{
+			PullGaugeWidget->RemoveFromParent();
+			PullGaugeWidget = nullptr;
+		}
+		return;
+	}
+	if (PullGaugeWidget)
+	{
+		return;
+	}
+
+	// 로컬 플레이어 컨트롤러가 준비된 뒤에만 생성한다(지연 빙의 대비 — 준비 전에는 다음 틱 재시도).
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+	if (!PC || !PC->IsLocalController())
+	{
+		return;
+	}
+
+	// 위젯 클래스는 프로젝트 세팅 단일 소스(기본 = C++ URopePullGaugeWidget). 비우면 게이지 없음.
+	UClass* WidgetClass = UDynamicRopeSettings::Get()->PullGaugeWidgetClass.LoadSynchronous();
+	if (!WidgetClass)
+	{
+		return;
+	}
+	PullGaugeWidget = CreateWidget<URopePullGaugeWidget>(PC, WidgetClass);
+	if (PullGaugeWidget)
+	{
+		// 위젯이 소유 폰에서 wielder를 스스로 찾지만, 여기서는 확정적으로 배선해 준다.
+		PullGaugeWidget->SetWielder(this);
+		PullGaugeWidget->AddToViewport();
 	}
 }
 
@@ -660,7 +710,7 @@ void URopeWielderComponent::StartPull()
 {
 	// 장전(토글 on): 힘/몽타주는 여기서 시작하지 않는다 — 발동은 UpdatePullEngage가 "Wrapped + 장력이
 	// PullEngageTension을 처음 넘는 순간" 1회 수행한다. 감기 전에 장전해 두면 감겨서 당겨지는 순간 발동한다.
-	bPullArmed = true;
+	SetPullArmed(true);
 }
 
 void URopeWielderComponent::UpdatePullEngage()
@@ -678,7 +728,8 @@ void URopeWielderComponent::UpdatePullEngage()
 	{
 		if (bPullEngaged)
 		{
-			bPullEngaged = false; // 재무장 — 장전은 유지된 채 다음 wrap에서 다시 발동한다.
+			// 재무장 — 장전은 유지된 채 다음 wrap에서 다시 발동한다. UI가 발동 표시를 끄도록 알린다.
+			SetPullEngaged(false, 0.0f);
 			StopPullNow();
 		}
 		return;
@@ -695,7 +746,7 @@ void URopeWielderComponent::UpdatePullEngage()
 	{
 		return;
 	}
-	bPullEngaged = true;
+	SetPullEngaged(true, Rope->GetMaxTension());
 	// 발동 순간 스냅샷(원샷) — PullEngageTension 튜닝용 관측.
 	UE_LOG(LogDynamicRope, Log,
 		TEXT("[PullEngage] share=%.2f tautT=%.0f tetherT=%.0f overshoot=%.0f"),
@@ -732,9 +783,80 @@ void URopeWielderComponent::StopPull()
 {
 	// 장전 해제(토글 off) + 힘 정지 + 발동 래치 리셋. 몽타주는 중단하지 않는다 — 단일 재생 계약이라 재생
 	// 수명을 여기서 관리하지 않고 자연 종료에 맡긴다(해제 순간 모션이 뚝 끊기는 것 방지).
-	bPullArmed = false;
-	bPullEngaged = false;
+	SetPullArmed(false);
+	SetPullEngaged(false, 0.0f);
 	StopPullNow();
+}
+
+void URopeWielderComponent::SetPullArmed(bool bNewArmed)
+{
+	if (bPullArmed == bNewArmed)
+	{
+		return;
+	}
+	bPullArmed = bNewArmed;
+	OnPullArmedChanged.Broadcast(bPullArmed);
+}
+
+void URopeWielderComponent::SetPullEngaged(bool bNewEngaged, float Tension)
+{
+	if (bPullEngaged == bNewEngaged)
+	{
+		return;
+	}
+	bPullEngaged = bNewEngaged;
+	OnPullEngagedChanged.Broadcast(bPullEngaged, bPullEngaged ? Tension : 0.0f);
+}
+
+float URopeWielderComponent::GetPullEngageProgress() const
+{
+	if (!Rope || Rope->GetPhase() != ERopePhase::Wrapped)
+	{
+		// 감기기 전에는 임계 자체가 성립하지 않는다 — 게이지를 0으로 두면 "아직 감아야 한다"가 읽힌다.
+		return 0.0f;
+	}
+	if (bPullEngaged)
+	{
+		return 1.0f;
+	}
+	if (PullEngageTension <= 0.0f)
+	{
+		// 임계 0 = 팽팽 판정만으로 발동 — 연속값이 없으므로 게이트와 같은 판정을 0/1로 돌려준다.
+		return Rope->IsPullTaut() ? 1.0f : 0.0f;
+	}
+	return FMath::Clamp(Rope->GetMaxTension() / PullEngageTension, 0.0f, 1.0f);
+}
+
+void URopeWielderComponent::UpdatePullGlowMaterial()
+{
+	if (!bDrivePullGlowMaterial || !Rope)
+	{
+		return;
+	}
+
+	// 한 번도 장전한 적 없으면 머티리얼 배선을 건드리지 않는다 — pull을 안 쓰는 로프의 렌더 상태를
+	// 이 기능이 조용히 바꾸지 않게 하는 게 목적이다.
+	UMaterialInstanceDynamic* MID = PullGlowMID.Get();
+	if (!MID && !bPullArmed)
+	{
+		return;
+	}
+
+	// 프리셋 적용 등으로 로프 머티리얼이 교체되면 우리 MID는 더 이상 로프에 붙어 있지 않다 — 다시 만든다.
+	if (!MID || Rope->GetMaterial(0) != MID)
+	{
+		MID = Rope->CreateAndSetMaterialInstanceDynamic(0);
+		PullGlowMID = MID;
+		if (!MID)
+		{
+			return;
+		}
+	}
+
+	const float Progress = GetPullEngageProgress();
+	const float GlowValue = bPullEngaged ? PullGlowEngagedValue : Progress;
+	// 파라미터가 없는 머티리얼이면 이 호출은 무해한 no-op다(경고도 없다).
+	MID->SetScalarParameterValue(PullGlowParameterName, bPullArmed ? GlowValue : 0.0f);
 }
 
 void URopeWielderComponent::Cut()

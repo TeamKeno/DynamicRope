@@ -26,6 +26,7 @@ class UInputAction;
 class UInputMappingContext;
 class UEnhancedInputLocalPlayerSubsystem;
 class UAnimMontage;
+class UMaterialInstanceDynamic;
 
 // NOTE: 종전의 ERopeWielderThrowMode(PhysicsSimulation/PreviewPathLocked)와
 // ERopeWielderAimMode(FrameForward/AimRayHitDirection)는 제거됐다(2026-07-13 회의 결정 F).
@@ -72,8 +73,13 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FRopeWielderOnThrown);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeWielderOnThrowRejected, ERopeThrowRejectReason, Reason);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeWielderOnAimTargetChanged, USceneComponent*, Mesh, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FRopeWielderOnAimTargetLost);
+/** Pull 장전 토글이 바뀐 순간(① 해제 ↔ ② 장전). */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeWielderOnPullArmedChanged, bool, bArmed);
+/** Pull 발동 래치가 바뀐 순간(② 대기 ↔ ③ 발동). Tension은 발동 시점 관측 장력(해제 시 0). */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeWielderOnPullEngagedChanged, bool, bEngaged, float, Tension);
 
 class URopeAimWidget;
+class URopePullGaugeWidget;
 
 /**
  * 조준 HUD용 프레임 샘플: aim ray가 지금 어떤 감김 가능 대상을 겨누고 있는가.
@@ -216,6 +222,14 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|HUD")
 	bool bShowAimHudWidget = true;
+
+	/**
+	 * Pull 장전/발동 게이지를 로컬 플레이어 뷰포트에 자동으로 띄울지. 위젯 클래스는
+	 * Project Settings > Dynamic Rope > PullGaugeWidgetClass가 정한다(기본 = C++ URopePullGaugeWidget).
+	 * 게이지는 장전 상태에서만 그려지므로(해제 시 빈 화면) 평상시 화면을 가리지 않는다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback")
+	bool bShowPullGaugeWidget = true;
 
 	/** 조준에 aim ray(대상 잠금)를 쓰는가 — 로프 ResolveMode에서 유도된다(②③ = true, ① = false).
 	 *  **모드 단위** 판정이라 phase와 무관하다. 지금 조준이 살아 있는지는 IsAimActive(). */
@@ -367,6 +381,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull", meta = (ClampMin = "0.0"))
 	float PullEngageTension = 0.0f;
 
+	/**
+	 * 장전~발동 진행도를 로프 머티리얼에 밀어 넣을지(기본 켬). 로프는 플레이어 시선에 항상 있어서
+	 * HUD보다 놓치기 어려운 피드백 채널이다 — M_RopeDefault의 PullGlow 스칼라가 이 값을 받는다.
+	 * 실제 MID는 **처음 장전할 때** 만든다(그 전까지는 머티리얼 배선을 건드리지 않는다).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback")
+	bool bDrivePullGlowMaterial = true;
+
+	/** 진행도를 받을 스칼라 파라미터 이름. 머티리얼에 없으면 무시된다(무해). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback", meta = (EditCondition = "bDrivePullGlowMaterial"))
+	FName PullGlowParameterName = TEXT("PullGlow");
+
+	/** 발동(③) 상태에서 파라미터에 실을 값. 1보다 크게 두면 발동이 대기보다 확실히 밝다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback", meta = (ClampMin = "0.0", EditCondition = "bDrivePullGlowMaterial"))
+	float PullGlowEngagedValue = 1.5f;
+
 	//~ API ----------------------------------------------------------------
 	/**
 	 * 던지기 시작. ThrowMontage가 설정돼 있으면 몽타주를 재생(실제 던지기는 몽타주의 UAnimNotify_RopeThrow가
@@ -424,6 +454,22 @@ public:
 	/** 능동 Pull 장전 해제(토글 off) + 힘 정지 + 발동 래치 리셋. 몽타주는 중단하지 않는다(단일 재생 — 자연 종료). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StopPull();
+
+	/** Pull 장전(토글) 상태 — ① 해제 / ② 장전. 힘이 실렸는지는 IsPullEngaged. */
+	UFUNCTION(BlueprintPure, Category = "Rope|Pull")
+	bool IsPullArmed() const { return bPullArmed; }
+
+	/** Pull이 발동해 힘이 실린 상태인가(③). wrap이 풀리면 false로 돌아가며 장전은 유지된다. */
+	UFUNCTION(BlueprintPure, Category = "Rope|Pull")
+	bool IsPullEngaged() const { return bPullEngaged; }
+
+	/**
+	 * 발동 임계까지의 진행도 0..1 — "눌렀는데 왜 안 당겨지지"를 게이지로 답하는 값.
+	 * 발동 후에는 1. Wrapped가 아니면 0(감기기 전에는 임계 자체가 성립하지 않는다).
+	 * PullEngageTension이 0(팽팽 판정만으로 발동)이면 연속값이 없으므로 IsPullTaut 기준 0 또는 1이다.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Rope|Pull")
+	float GetPullEngageProgress() const;
 
 	/** 로프 절단(ERopeReleaseReason::Cut으로 강제 해제 — 게임플레이 절단 이벤트용 패스스루). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
@@ -495,6 +541,21 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Rope|Aim HUD")
 	FRopeWielderOnAimTargetLost OnAimTargetLost;
 
+	/**
+	 * Pull 장전 토글 변화(StartPull/StopPull — ① 해제 ↔ ② 장전). 장전음/UI 표시 전환용.
+	 * 발동(힘이 실제로 실리는 순간)은 아래 OnPullEngagedChanged다 — 둘은 다른 사건이다.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "Rope|Pull")
+	FRopeWielderOnPullArmedChanged OnPullArmedChanged;
+
+	/**
+	 * Pull 발동 래치 변화(② 대기 ↔ ③ 발동). true = 장력 임계를 넘어 힘이 실린 순간(wrap당 1회),
+	 * false = wrap이 풀려 재무장했거나 장전을 해제한 순간. **UI는 반드시 false도 처리해야 한다** —
+	 * 발동 표시가 켜진 채 남는 흔한 버그가 여기서 갈린다.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "Rope|Pull")
+	FRopeWielderOnPullEngagedChanged OnPullEngagedChanged;
+
 	/** 최근 정상 collider gather에서 확정한 조준 HUD 샘플(aim ray 모드에서 틱마다 소비·갱신). */
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim HUD")
 	const FRopeAimHudSample& GetAimHudSample() const { return AimHudSample; }
@@ -528,6 +589,10 @@ private:
 	/** 자동 생성한 조준 HUD 위젯(로컬 플레이어 전용). bShowAimHudWidget/모드 변경에 따라 생성·제거. */
 	UPROPERTY(Transient)
 	TObjectPtr<URopeAimWidget> AimHudWidget = nullptr;
+
+	/** 자동 생성한 Pull 게이지 위젯(로컬 플레이어 전용). bShowPullGaugeWidget에 따라 생성·제거. */
+	UPROPERTY(Transient)
+	TObjectPtr<URopePullGaugeWidget> PullGaugeWidget = nullptr;
 
 	/**
 	 * aim 요청을 등록하고 정상 gather의 최근 결과로 HUD 샘플을 갱신한 뒤, 대상 (Mesh, Bone) 변화 시
@@ -653,10 +718,25 @@ private:
 	// LocalPlayer에 등록되므로, EndPlay가 폰의 현재 컨트롤러에 의존하지 않고 여기서 possession 무관하게
 	// 제거한다(#11 — 폰이 먼저 unpossess된 뒤 파괴돼도 IMC가 로컬 플레이어에 잔류하는 것 방지). LP 파괴 시 null.
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> MappedInputSubsystem;
+	/** bPullArmed 변경 + OnPullArmedChanged 브로드캐스트(변화가 있을 때만). */
+	void SetPullArmed(bool bNewArmed);
+
+	/** bPullEngaged 변경 + OnPullEngagedChanged 브로드캐스트(변화가 있을 때만). */
+	void SetPullEngaged(bool bNewEngaged, float Tension);
+
+	/** 진행도를 로프 MID의 스칼라 파라미터로 민다(bDrivePullGlowMaterial일 때, 첫 장전 이후에만). */
+	void UpdatePullGlowMaterial();
+
+	/** Pull 게이지 위젯 수명 관리(로컬 플레이어 준비 후 생성, 토글 꺼짐/EndPlay에 제거). */
+	void UpdatePullGaugeWidget();
+
 	// pull 장전 상태(StartPull~StopPull 사이 토글). 발동 판정은 UpdatePullEngage.
 	bool bPullArmed = false;
 	// pull 발동 래치(장전 중 장력 임계 최초 돌파 시 true — 몽타주 단일 재생/힘 장전 완료). wrap 해제 시 재무장.
 	bool bPullEngaged = false;
+	// 로프 머티리얼에 진행도를 싣기 위해 만든 MID. 프리셋 적용 등으로 로프 머티리얼이 교체되면
+	// GetMaterial(0)과 어긋나므로, 그때 다시 만든다(매 틱 확인 — 포인터 비교 1회).
+	TWeakObjectPtr<UMaterialInstanceDynamic> PullGlowMID;
 	// AirControl 부스트 원복용 저장 상태(스윙 진입 시 저장, 종료/EndPlay 시 복원).
 	bool bAirControlBoosted = false;
 	float SavedAirControl = 0.0f;
