@@ -9,7 +9,8 @@
 
 #include "CoreMinimal.h"
 #include "UObject/WeakObjectPtrTemplates.h"
-#include "Core/RopeTypes.h"
+#include "Core/RopeContactTrackingTypes.h"
+#include "Core/RopeSimTypes.h"
 
 class IRopeCollider;
 class USceneComponent;

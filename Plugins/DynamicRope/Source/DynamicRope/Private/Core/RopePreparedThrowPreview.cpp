@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Core/RopeTypes.h"
+#include "Core/RopeThrowTypes.h"
 
 #include "Components/SceneComponent.h"
 
