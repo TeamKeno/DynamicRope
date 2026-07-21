@@ -544,7 +544,7 @@ namespace
 		FRopeWrappingPhase PreviewWrappingPhase;
 		// 게이트 통과 collider 저장소 — FContext보다 오래 살아야 한다(참조 보유).
 		TArray<IRopeCollider*> WrappableColliders;
-		if (!PreviewWrappingPhase.BuildPreviewCenterline(LatchAnchor, Mesh, Candidate.Bone,
+		if (!PreviewWrappingPhase.BuildPreviewCenterline(LatchAnchor,
 			SourceSim, MakeWrappingContext(Input, WrappableColliders), PreviewPoints))
 		{
 			RopeMath::SetPreviewFailureReason(OutFailureReason,

@@ -11,18 +11,74 @@
 // RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
 #include "RopeMathHelpers.h"
 
+namespace
+{
+	const USceneComponent* ResolveWrappingMesh(
+		const FRopeWrappingState& State, const FRopeSurfaceAnchor& Anchor)
+	{
+		if (const USceneComponent* AnchorMesh = Anchor.Mesh.Get())
+		{
+			return AnchorMesh;
+		}
+		return State.Mesh.Get();
+	}
+
+	struct FCompositeHelixStepKinematics
+	{
+		float Radius = 0.0f;
+		float BaseTangentialStep = 0.0f;
+		float CircumferenceStep = 0.0f;
+		float AxisStep = 0.0f;
+		float AngleStepRad = 0.0f;
+	};
+
+	int32 ComputeCompositeRadiusEntryStepCount(
+		float StartRadius, float TargetRadius, float StepDistance)
+	{
+		const float RadiusDelta = FMath::Abs(TargetRadius - StartRadius);
+		return RadiusDelta > KINDA_SMALL_NUMBER
+			? FMath::Max(2, FMath::CeilToInt(
+				RadiusDelta / (FMath::Max(StepDistance, KINDA_SMALL_NUMBER) * 0.6f)))
+			: 0;
+	}
+
+	FCompositeHelixStepKinematics EvaluateCompositeHelixStep(
+		int32 StepIndex, float StepDistance, int32 RadiusEntryStepCount,
+		float StartRadius, float TargetRadius, float PreviousRadius,
+		float PitchScale, float WindingSign)
+	{
+		FCompositeHelixStepKinematics Result;
+		const float RadiusAlpha = RadiusEntryStepCount > 0
+			? FMath::Clamp(static_cast<float>(StepIndex) /
+				static_cast<float>(RadiusEntryStepCount), 0.0f, 1.0f)
+			: 1.0f;
+		Result.Radius = FMath::Lerp(StartRadius, TargetRadius, RadiusAlpha);
+		const float RadialStep = Result.Radius - PreviousRadius;
+		Result.BaseTangentialStep = FMath::Sqrt(FMath::Max(
+			0.0f, FMath::Square(StepDistance) - FMath::Square(RadialStep)));
+		const float LengthScale = FMath::Sqrt(1.0f + FMath::Square(PitchScale));
+		Result.CircumferenceStep = Result.BaseTangentialStep /
+			FMath::Max(LengthScale, KINDA_SMALL_NUMBER);
+		Result.AxisStep = Result.CircumferenceStep * PitchScale;
+		const float MeanRadius = FMath::Max(
+			(PreviousRadius + Result.Radius) * 0.5f, KINDA_SMALL_NUMBER);
+		Result.AngleStepRad = WindingSign * Result.CircumferenceStep / MeanRadius;
+		return Result;
+	}
+}
+
 #pragma region Wrapping Lifecycle and Path Build Dispatch
 
-bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
-	float Duration, const FRopeSimState& Sim, const FContext& Ctx)
+bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, float Duration,
+	const FRopeSimState& Sim, const FContext& Ctx)
 {
 	// 새 throw는 조건이 맞으면 Composite Analytic Helix부터 시작한다. 이 플래그는 같은 throw 안에서
 	// 해당 경로가 terminal failure로 끝났을 때만 켜져 두 번째 composite 시도와 무한 fallback을 막는다.
 	State.bPathUsesSingleBoneFallback = false;
 	State.PathBuildFailureReason.Reset();
 	State.PathCompositeProjectionFailureCount = 0;
-	State.BoneName = Bone;
-	State.Mesh = Mesh;
+	State.BoneName = LatchAnchor.Bone;
+	State.Mesh = LatchAnchor.Mesh;
 	State.Elapsed = 0.0f;
 	State.Duration = Duration;
 	State.FirstNode = TNumericLimits<int32>::Max();
@@ -35,7 +91,8 @@ bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, const USce
 			*Ctx.OwnerName,
 			State.PathBuildFailureReason.IsEmpty() ? TEXT("UnknownInitializationFailure") : *State.PathBuildFailureReason,
 			*LatchAnchor.Bone.ToString(), LatchAnchor.NodeIndex,
-			Mesh ? *Mesh->GetName() : TEXT("None"), Sim.Num(), Sim.SegmentLength,
+			*GetNameSafe(LatchAnchor.Mesh.Get()),
+			Sim.Num(), Sim.SegmentLength,
 			Ctx.Colliders.Num());
 		return false;
 	}
@@ -474,11 +531,11 @@ bool FRopeWrappingPhase::ShouldAbortFailedShortWrap(const FRopeSimState& Sim, co
 	return OutAngleDeg < MinRequiredAngleDeg;
 }
 
-FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim, const USceneComponent* Mesh) const
+FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim) const
 {
 	FRopeWrapState Seed;
-	Seed.BoneName = State.BoneName;
-	Seed.Mesh = Mesh;
+	Seed.BoneName = State.LatchAnchor.Bone;
+	Seed.Mesh = ResolveWrappingMesh(State, State.LatchAnchor);
 
 	//각 LatchedNode에 정보 입력
 	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
@@ -556,11 +613,12 @@ void FRopeWrappingPhase::ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNode
 
 #pragma region Preview Path Generation
 
-bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
+bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor,
 	const FRopeSimState& Sim, const FContext& Ctx, TArray<FVector>& OutCenterline) const
 {
 	OutCenterline.Reset();
-	if (!Mesh || Bone.IsNone() || !Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex) || Sim.Num() < 2)
+	if (!LatchAnchor.Mesh.IsValid() || LatchAnchor.Bone.IsNone() ||
+		!Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex) || Sim.Num() < 2)
 	{
 		return false;
 	}
@@ -577,7 +635,7 @@ bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchA
 	PreviewCtx.ResolveMode = Ctx.ResolveMode;
 
 	FRopeWrappingPhase PreviewPhase;
-	if (!PreviewPhase.Begin(LatchAnchor, Mesh, Bone,
+	if (!PreviewPhase.Begin(LatchAnchor,
 		FMath::Max(0.01f, PreviewConfig.WrappingMotionDuration), Sim, PreviewCtx))
 	{
 		return false;
@@ -636,11 +694,7 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_BeginProgressiveWrapPathBuild);
 
-	const USceneComponent* Mesh = State.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = LatchAnchor.Mesh.Get();
-	}
+	const USceneComponent* Mesh = ResolveWrappingMesh(State, LatchAnchor);
 	if (!Mesh || !Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex) || LatchAnchor.Bone.IsNone())
 	{
 		State.PathBuildFailureReason = TEXT("InvalidLatchInput");
@@ -757,11 +811,7 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 		return false;
 	}
 
-	const USceneComponent* IslandMesh = State.LatchAnchor.Mesh.Get();
-	if (!IslandMesh)
-	{
-		IslandMesh = State.Mesh.Get();
-	}
+	const USceneComponent* IslandMesh = ResolveWrappingMesh(State, State.LatchAnchor);
 	if (!IslandMesh)
 	{
 		FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixMissingMesh"));
@@ -811,15 +861,12 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 		return false;
 	}
 	const float PitchScale = State.PathCompositeHelixPitchScale;
-	const float LengthScale = FMath::Sqrt(1.0f + FMath::Square(PitchScale));
 	const float PreviousRawAngleRad = State.PathCompositeSweepAngleRad;
 
 	// 래치 표면 반지름에서 island 전체 반지름으로 한 probe에 순간 이동하지 않는다. 각 raw point는
 	// 직전 projection 결과와 무관하게 래치/축/contact pitch만으로 독립 계산한다.
-	const float RadiusDelta = FMath::Abs(HelixRadius - LatchRadius);
-	const int32 RadiusEntrySegmentCount = RadiusDelta > KINDA_SMALL_NUMBER
-		? FMath::Max(2, FMath::CeilToInt(RadiusDelta / (ProbeStepDistance * 0.6f)))
-		: 0;
+	const int32 RadiusEntrySegmentCount = ComputeCompositeRadiusEntryStepCount(
+		LatchRadius, HelixRadius, ProbeStepDistance);
 	float IdealRadius = LatchRadius;
 	float AxisAdvance = 0.0f;
 	float AngleRadians = 0.0f;
@@ -828,20 +875,12 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 	for (int32 IdealStepIndex = 1; IdealStepIndex <= ProbeStepIndex; ++IdealStepIndex)
 	{
 		PreviousIdealHelixWorld = IdealHelixWorld;
-		const float PreviousRadius = IdealRadius;
-		const float RadiusAlpha = RadiusEntrySegmentCount > 0
-			? FMath::Clamp(static_cast<float>(IdealStepIndex) /
-				static_cast<float>(RadiusEntrySegmentCount), 0.0f, 1.0f)
-			: 1.0f;
-		IdealRadius = FMath::Lerp(LatchRadius, HelixRadius, RadiusAlpha);
-		const float RadialStep = IdealRadius - PreviousRadius;
-		const float CircumferenceStep = FMath::Sqrt(FMath::Max(
-			0.0f, FMath::Square(ProbeStepDistance) - FMath::Square(RadialStep))) /
-			FMath::Max(LengthScale, KINDA_SMALL_NUMBER);
-		AxisAdvance += CircumferenceStep * PitchScale;
-		const float MeanRadius = FMath::Max(
-			(PreviousRadius + IdealRadius) * 0.5f, KINDA_SMALL_NUMBER);
-		AngleRadians += State.PathWindingSign * CircumferenceStep / MeanRadius;
+		const FCompositeHelixStepKinematics Step = EvaluateCompositeHelixStep(
+			IdealStepIndex, ProbeStepDistance, RadiusEntrySegmentCount,
+			LatchRadius, HelixRadius, IdealRadius, PitchScale, State.PathWindingSign);
+		IdealRadius = Step.Radius;
+		AxisAdvance += Step.AxisStep;
+		AngleRadians += Step.AngleStepRad;
 
 		const FVector StepRadial = FQuat(AxisDirection, AngleRadians)
 			.RotateVector(LatchRadial)
@@ -1264,11 +1303,7 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_InitSurfaceVectorFieldProgressivePath);
 
-	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = State.Mesh.Get();
-	}
+	const USceneComponent* Mesh = ResolveWrappingMesh(State, LatchAnchor);
 	if (!Mesh || LatchAnchor.Bone.IsNone())
 	{
 		return false;
@@ -1628,26 +1663,20 @@ bool FRopeWrappingPhase::InitializeSurfaceVectorFieldProgressiveWrapPath(const F
 							Sim.SegmentLength, KINDA_SMALL_NUMBER);
 						const int32 PlannedPathSegmentCount = FMath::Max(
 							0, Sim.Num() - LatchAnchor.NodeIndex - 1);
-						const float RadiusDelta = FMath::Abs(
-							State.PathCompositeHelixRadius - CurrentSurfaceRadius);
-						const int32 RadiusEntrySegmentCount = RadiusDelta > KINDA_SMALL_NUMBER
-							? FMath::Max(2, FMath::CeilToInt(
-								RadiusDelta / (SegmentLength * 0.6f)))
-							: 0;
+						const int32 RadiusEntrySegmentCount =
+							ComputeCompositeRadiusEntryStepCount(
+								CurrentSurfaceRadius, State.PathCompositeHelixRadius,
+								SegmentLength);
 						float PreviousPlannedRadius = CurrentSurfaceRadius;
 						for (int32 StepIndex = 1;
 							StepIndex <= PlannedPathSegmentCount; ++StepIndex)
 						{
-							const float RadiusAlpha = RadiusEntrySegmentCount > 0
-								? FMath::Clamp(static_cast<float>(StepIndex) /
-									static_cast<float>(RadiusEntrySegmentCount), 0.0f, 1.0f)
-								: 1.0f;
-							const float PlannedRadius = FMath::Lerp(
-								CurrentSurfaceRadius, State.PathCompositeHelixRadius, RadiusAlpha);
-							const float RadialStep = PlannedRadius - PreviousPlannedRadius;
-							PitchPlannedBaseTravel += FMath::Sqrt(FMath::Max(
-								0.0f, FMath::Square(SegmentLength) - FMath::Square(RadialStep)));
-							PreviousPlannedRadius = PlannedRadius;
+							const FCompositeHelixStepKinematics Step = EvaluateCompositeHelixStep(
+								StepIndex, SegmentLength, RadiusEntrySegmentCount,
+								CurrentSurfaceRadius, State.PathCompositeHelixRadius,
+								PreviousPlannedRadius, 0.0f, 1.0f);
+							PitchPlannedBaseTravel += Step.BaseTangentialStep;
+							PreviousPlannedRadius = Step.Radius;
 						}
 
 						if (PitchPlannedBaseTravel > KINDA_SMALL_NUMBER)
@@ -1752,11 +1781,7 @@ bool FRopeWrappingPhase::AdvanceSurfaceVectorFieldProgressiveWrapPath(int32 Step
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AdvanceSurfaceVectorFieldProgressivePath);
 
-	const USceneComponent* Mesh = State.LatchAnchor.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = State.Mesh.Get();
-	}
+	const USceneComponent* Mesh = ResolveWrappingMesh(State, State.LatchAnchor);
 	if (!Mesh || State.LatchAnchor.Bone.IsNone())
 	{
 		FinishPathBuild(/*bFailed=*/true, TEXT("AdvanceMissingMeshOrLatchBone"));
@@ -2202,11 +2227,7 @@ bool FRopeWrappingPhase::AppendWrappingAnchorFromPathPoint(int32 PathIndex, cons
 	}
 
 	const FRopeSurfaceAnchor& LatchAnchor = State.LatchAnchor;
-	const USceneComponent* Mesh = State.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = LatchAnchor.Mesh.Get();
-	}
+	const USceneComponent* Mesh = ResolveWrappingMesh(State, LatchAnchor);
 	if (!Mesh || LatchAnchor.Bone.IsNone())
 	{
 		return false;
@@ -2314,11 +2335,7 @@ bool FRopeWrappingPhase::ComputeWrappedAngleAtLastBuiltPoint(const FRopeSimState
 	}
 
 	const FRopeSurfaceAnchor& LatchAnchor = State.LatchAnchor;
-	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = State.Mesh.Get();
-	}
+	const USceneComponent* Mesh = ResolveWrappingMesh(State, LatchAnchor);
 	if (!Mesh || LatchAnchor.Bone.IsNone())
 	{
 		return false;
@@ -2577,11 +2594,7 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::CaptureTravelPlane)
 	{
 		bTriedCaptureTravelPlane = true;
-		const USceneComponent* CaptureMesh = LatchAnchor.Mesh.Get();
-		if (!CaptureMesh)
-		{
-			CaptureMesh = State.Mesh.Get();
-		}
+		const USceneComponent* CaptureMesh = ResolveWrappingMesh(State, LatchAnchor);
 		if (CaptureMesh && FindGuidePlaneAxis(LatchAnchor, Ctx, CaptureMesh, OutAxisOrigin, OutAxisDirection))
 		{
 			LogAxisSource(TEXT("CaptureTravelPlane"), CaptureMesh);
@@ -2589,11 +2602,7 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 		}
 	}
 
-	const USceneComponent* Mesh = LatchAnchor.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = State.Mesh.Get();
-	}
+	const USceneComponent* Mesh = ResolveWrappingMesh(State, LatchAnchor);
 	if (!Mesh || LatchAnchor.Bone.IsNone())
 	{
 		return false;
@@ -3422,7 +3431,7 @@ bool FRopeWrappingPhase::ProjectWrapPointToSingleBone(const USceneComponent* Mes
 		Ctx,
 		InOutCircumferenceDir);
 	InOutBone = LatchBone;
-	OutMesh = Mesh ? Mesh : State.LatchAnchor.Mesh.Get();
+	OutMesh = Mesh ? Mesh : ResolveWrappingMesh(State, State.LatchAnchor);
 	return true;
 }
 
@@ -3801,11 +3810,7 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 bool FRopeWrappingPhase::ResolveWrappingAnchorPoint(
 	const FRopeSurfaceAnchor& Anchor, FRopeWrapPathPoint& OutPoint) const
 {
-	const USceneComponent* Mesh = Anchor.Mesh.Get();
-	if (!Mesh)
-	{
-		Mesh = State.Mesh.Get();
-	}
+	const USceneComponent* Mesh = ResolveWrappingMesh(State, Anchor);
 	if (!Mesh || Anchor.Bone.IsNone())
 	{
 		return false;

@@ -511,7 +511,7 @@ void URopeComponent::StartWrappingFromContacting()
 		}
 	}
 
-	if (!WrappingPhase.Begin(LatchAnchor, Mesh, PendingWrapSeed.BoneName,
+	if (!WrappingPhase.Begin(LatchAnchor,
 		FMath::Max(0.01f, WrapConfig.WrappingMotionDuration), Sim, MakeWrappingContext()))
 	{
 		LogWrappingFailureState(GetName(), TEXT("StartWrapping.Begin"), WrappingPhase.State, Sim);
@@ -754,7 +754,7 @@ void URopeComponent::CommitWrapping()
 			WrappingPhase.State.PathCompositeProjectionFailureCount, *VisitedBoneList);
 	}
 
-	const FRopeWrapState Seed = WrappingPhase.BuildCommitSeed(Sim, Mesh);
+	const FRopeWrapState Seed = WrappingPhase.BuildCommitSeed(Sim);
 	if (Seed.Anchors.Num() == 0)
 	{
 		WrappingPhase.State.PathBuildFailureReason = TEXT("CommitSeedHasNoValidAnchors");

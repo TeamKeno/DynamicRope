@@ -78,12 +78,13 @@ public:
 	/**
 	 * Wrapping 시작: 상태를 시드(bone/mesh/duration)로 채우고 latch anchor에서 progressive
 	 * 경로 빌드를 개시한다(첫 경로점+앵커 확보까지). 성공 시 안정 추적도 초기화한다.
+	 * dominant 대상의 Mesh/Bone은 LatchAnchor가 유일한 원본이다.
 	 * 시드 다중화(MaxWrapSeeds > 1): 보조 시드 앵커는 State.SecondarySeedAnchors에 *이 호출 전에*
 	 * 실어야 한다 — 경로 길이(NumTailNodes)를 첫 보조 노드 앞까지로 클램프하는 데 여기서 읽는다.
 	 * @return 경로 빌드를 시작할 수 없으면 false — 호출자는 상태를 버리고 Flight로 돌아가야 한다.
 	 */
-	bool Begin(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
-		float Duration, const FRopeSimState& Sim, const FContext& Ctx);
+	bool Begin(const FRopeSurfaceAnchor& LatchAnchor, float Duration,
+		const FRopeSimState& Sim, const FContext& Ctx);
 
 	/** wrapping을 계속할 수 있는 상태인가(활성 + mesh 생존 + bone 유효). */
 	bool IsStillValid() const
@@ -133,13 +134,13 @@ public:
 	 * 현재 앵커들로 Wrapped 핸드오프용 시드를 조립한다(FRopeWrapController::BeginWrap 입력).
 	 * 유효 노드가 없으면 Anchors가 빈 시드가 반환된다 — 호출자가 검사해 abort한다.
 	 */
-	FRopeWrapState BuildCommitSeed(const FRopeSimState& Sim, const USceneComponent* Mesh) const;
+	FRopeWrapState BuildCommitSeed(const FRopeSimState& Sim) const;
 
 	/** abort 시 앵커 노드들의 솔버 복귀(InvMass=1 + Prev=Pos 튐 방지)를 OutFrame에 담는다. */
 	void ReturnNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
 	/** Builds a complete target centerline using the same helix/vector-field path code as runtime wrapping. */
-	bool BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor, const USceneComponent* Mesh, FName Bone,
+	bool BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchAnchor,
 		const FRopeSimState& Sim, const FContext& Ctx, TArray<FVector>& OutCenterline) const;
 
 private:

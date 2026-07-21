@@ -164,7 +164,7 @@ bool FRopeWrappingSingleBoneFallbackTest::RunTest(const FString& Parameters)
 	// Surface Vector Field fallback으로 자동 전환해야 한다.
 	FRopeWrappingPhase AutomaticFallbackWrapping;
 	TestTrue(TEXT("automatic fallback scenario initializes as a valid wrap"),
-		AutomaticFallbackWrapping.Begin(Latch, Mesh, BodyVolume.Bone, 0.5f, Sim, Ctx));
+		AutomaticFallbackWrapping.Begin(Latch, 0.5f, Sim, Ctx));
 	TestTrue(TEXT("full simulation enables composite multi-bone"),
 		AutomaticFallbackWrapping.State.bPathUsesPoseSpaceIsland);
 	// island 불변식을 깨 terminal failure를 유도한다. public dispatcher가 이를 감지해
@@ -186,7 +186,7 @@ bool FRopeWrappingSingleBoneFallbackTest::RunTest(const FString& Parameters)
 	AssistedCtx.ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 	FRopeWrappingPhase AssistedWrapping;
 	TestTrue(TEXT("assisted sequential multi-bone scenario initializes"),
-		AssistedWrapping.Begin(Latch, Mesh, BodyVolume.Bone, 0.5f, Sim, AssistedCtx));
+		AssistedWrapping.Begin(Latch, 0.5f, Sim, AssistedCtx));
 	TestFalse(TEXT("assisted mode does not enable composite multi-bone"),
 		AssistedWrapping.State.bPathUsesPoseSpaceIsland);
 	TestEqual(TEXT("assisted mode does not build a composite island"),

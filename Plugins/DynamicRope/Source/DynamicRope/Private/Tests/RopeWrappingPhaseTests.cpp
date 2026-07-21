@@ -66,7 +66,7 @@ bool FRopeWrappingCapsuleAngleTest::RunTest(const FString& Parameters)
 		/*bHasGuidePlaneNormal*/ true, /*GuidePlaneNormal*/ FVector::ZAxisVector };
 
 	FRopeWrappingPhase Wrapping;
-	TestTrue(TEXT("wrapping begins on capsule"), Wrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, Ctx));
+	TestTrue(TEXT("wrapping begins on capsule"), Wrapping.Begin(Latch, 0.16f, Sim, Ctx));
 
 	for (int32 Iteration = 0; Iteration < 256 && Wrapping.State.bPathBuildActive; ++Iteration)
 	{
@@ -145,7 +145,7 @@ bool FRopeWrappingSecondarySeedTest::RunTest(const FString& Parameters)
 
 	FRopeWrappingPhase Wrapping;
 	Wrapping.State.SecondarySeedAnchors.Add(Secondary);
-	TestTrue(TEXT("wrapping begins with a secondary seed"), Wrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, Ctx));
+	TestTrue(TEXT("wrapping begins with a secondary seed"), Wrapping.Begin(Latch, 0.16f, Sim, Ctx));
 
 	// ① 경로는 보조 노드(6) 앞까지만: NumTailNodes 6 == 노드 0~5.
 	TestEqual(TEXT("path length clamps before the secondary node"), Wrapping.State.NumTailNodes, 6);
@@ -175,7 +175,7 @@ bool FRopeWrappingSecondarySeedTest::RunTest(const FString& Parameters)
 		(Frame.Flags[8] & RopeNodeOverride::Position) == 0);
 
 	// ③ 커밋 시드: 경로 앵커 6개 + 보조 앵커 1개, 보조 본/mesh가 그대로 실린다.
-	const FRopeWrapState Seed = Wrapping.BuildCommitSeed(Sim, Mesh);
+	const FRopeWrapState Seed = Wrapping.BuildCommitSeed(Sim);
 	TestEqual(TEXT("commit seed carries path + secondary anchors"), Seed.Anchors.Num(), 7);
 	const FRopeSurfaceAnchor* Committed = Seed.Anchors.FindByPredicate(
 		[](const FRopeSurfaceAnchor& Anchor) { return Anchor.NodeIndex == 6; });
@@ -225,7 +225,7 @@ bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 
 	FRopeWrappingPhase CaptureWrapping;
 	TestTrue(TEXT("wrapping begins with capture travel-plane axis"),
-		CaptureWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, CaptureCtx));
+		CaptureWrapping.Begin(Latch, 0.16f, Sim, CaptureCtx));
 	TestTrue(FString::Printf(TEXT("CaptureTravelPlane axis follows the guide plane normal (dir=%s)"),
 			*CaptureWrapping.State.PathAxisDirection.ToString()),
 		FMath::Abs(FVector::DotProduct(CaptureWrapping.State.PathAxisDirection, GuidePlaneNormal)) > 0.99f);
@@ -237,7 +237,7 @@ bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 
 	FRopeWrappingPhase DefaultWrapping;
 	TestTrue(TEXT("wrapping begins with default axis source"),
-		DefaultWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, DefaultCtx));
+		DefaultWrapping.Begin(Latch, 0.16f, Sim, DefaultCtx));
 	TestTrue(FString::Printf(TEXT("BoneCenteredGuidePlane follows the guide plane normal (dir=%s)"),
 			*DefaultWrapping.State.PathAxisDirection.ToString()),
 		FMath::Abs(FVector::DotProduct(DefaultWrapping.State.PathAxisDirection, GuidePlaneNormal)) > 0.99f);
@@ -288,7 +288,7 @@ bool FRopeWrappingCaptureTravelPlaneTest::RunTest(const FString& Parameters)
 
 	FRopeWrappingPhase FrameWrapping;
 	TestTrue(TEXT("wrapping begins with a capture frame"),
-		FrameWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, FrameCtx));
+		FrameWrapping.Begin(Latch, 0.16f, Sim, FrameCtx));
 	TestTrue(FString::Printf(TEXT("axis origin sits at the contact region center (origin=%s)"),
 			*FrameWrapping.State.PathAxisOrigin.ToString()),
 		FrameWrapping.State.PathAxisOrigin.Equals(FVector(0, 0, 30), 0.1f));
@@ -305,7 +305,7 @@ bool FRopeWrappingCaptureTravelPlaneTest::RunTest(const FString& Parameters)
 
 	FRopeWrappingPhase NoFrameWrapping;
 	TestTrue(TEXT("wrapping begins without a capture frame"),
-		NoFrameWrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, NoFrameCtx));
+		NoFrameWrapping.Begin(Latch, 0.16f, Sim, NoFrameCtx));
 	TestTrue(FString::Printf(TEXT("axis origin falls back to the bone location (origin=%s)"),
 			*NoFrameWrapping.State.PathAxisOrigin.ToString()),
 		NoFrameWrapping.State.PathAxisOrigin.Equals(FVector::ZeroVector, 0.1f));
@@ -361,7 +361,7 @@ bool FRopeWrappingGapBridgeTest::RunTest(const FString& Parameters)
 		/*bHasGuidePlaneNormal*/ true, /*GuidePlaneNormal*/ FVector(0, 0, 1), &Frame };
 
 	FRopeWrappingPhase Wrapping;
-	TestTrue(TEXT("wrapping begins on the pair"), Wrapping.Begin(Latch, Mesh, FName("legs"), 0.16f, Sim, Ctx));
+	TestTrue(TEXT("wrapping begins on the pair"), Wrapping.Begin(Latch, 0.16f, Sim, Ctx));
 
 	for (int32 Iteration = 0; Iteration < 512 && Wrapping.State.bPathBuildActive; ++Iteration)
 	{
@@ -492,7 +492,7 @@ bool FRopeWrappingClusterAxisOriginTest::RunTest(const FString& Parameters)
 
 	FRopeWrappingPhase Wrapping;
 	TestTrue(TEXT("wrapping begins from a one-leg capture"),
-		Wrapping.Begin(Latch, Mesh, FName("legs"), 0.16f, Sim, Ctx));
+		Wrapping.Begin(Latch, 0.16f, Sim, Ctx));
 
 	// 축 origin이 첫 접촉점(42,0,0)이 아니라 collider 군집 중심(두 캡슐 중점 = x 0)으로 옮겨진다.
 	TestTrue(FString::Printf(TEXT("axis origin recentered between the legs (origin=%s)"),
@@ -551,7 +551,7 @@ bool FRopeWrappingWrapAngleCapTest::RunTest(const FString& Parameters)
 		/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true };
 
 	FRopeWrappingPhase Wrapping;
-	TestTrue(TEXT("wrapping begins"), Wrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, Ctx));
+	TestTrue(TEXT("wrapping begins"), Wrapping.Begin(Latch, 0.16f, Sim, Ctx));
 
 	for (int32 Iteration = 0; Iteration < 512 && Wrapping.State.bPathBuildActive; ++Iteration)
 	{
@@ -627,7 +627,7 @@ bool FRopeWrappingEnclosureCoverageTest::RunTest(const FString& Parameters)
 	{
 		FRopeSimState Sim = RopeTest::MakeStraightRope(NumNodes, RopeLength, FVector(25, 0, 0), FVector(0, 1, 0));
 		FRopeWrappingPhase Wrapping;
-		if (!Wrapping.Begin(Latch, Mesh, FName("arm"), 0.16f, Sim, Ctx))
+		if (!Wrapping.Begin(Latch, 0.16f, Sim, Ctx))
 		{
 			return false;
 		}
