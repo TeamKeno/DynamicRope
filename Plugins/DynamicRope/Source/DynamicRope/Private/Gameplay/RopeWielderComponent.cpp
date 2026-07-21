@@ -792,41 +792,6 @@ void URopeWielderComponent::OnPullInputStarted()
 	}
 }
 
-FVector URopeWielderComponent::GetAimDirection() const
-{
-	const AActor* Owner = GetOwner();
-	if (!Owner)
-	{
-		return FVector::ForwardVector;
-	}
-
-	switch (AimSource)
-	{
-	case ERopeAimSource::ActorForward:
-		return Owner->GetActorForwardVector();
-
-	case ERopeAimSource::CameraForward:
-		if (const UCameraComponent* Cam = Owner->FindComponentByClass<UCameraComponent>())
-		{
-			return Cam->GetForwardVector();
-		}
-		// 카메라 없으면 ControlRotation 폴백.
-		[[fallthrough]];
-
-	case ERopeAimSource::ControlRotation:
-	default:
-		if (const APawn* Pawn = Cast<APawn>(Owner))
-		{
-			if (Pawn->Controller)
-			{
-				return Pawn->GetControlRotation().Vector();
-			}
-		}
-		// 컨트롤러 없으면 액터 forward.
-		return Owner->GetActorForwardVector();
-	}
-}
-
 FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& AimDir) const
 {
 	return BuildThrowContextInternal(AimDir);
@@ -861,7 +826,9 @@ FVector URopeWielderComponent::GetAimRayOrigin() const
 		break;
 
 	case ERopeAimRayOriginMode::ViewLocation:
-		if (AimSource == ERopeAimSource::CameraForward)
+		// 방향을 카메라에서 가져오는 설정이면 원점도 카메라에 맞춘다 — ray의 원점과 방향이 서로 다른 기준을
+		// 쓰면 조준선이 화면과 어긋난다. 그 외에는 눈높이(PawnViewLocation).
+		if (Rope && Rope->ThrowParams.FrameMode == ERopeThrowFrameMode::OwnerCamera)
 		{
 			if (const UCameraComponent* Camera = Owner->FindComponentByClass<UCameraComponent>())
 			{

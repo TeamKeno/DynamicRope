@@ -27,18 +27,6 @@ class UInputMappingContext;
 class UEnhancedInputLocalPlayerSubsystem;
 class UAnimMontage;
 
-/** 던질 때 조준 방향을 어디서 가져올지. */
-UENUM(BlueprintType)
-enum class ERopeAimSource : uint8
-{
-	/** 컨트롤러 회전(보통 카메라/조준 방향). 기본. */
-	ControlRotation,
-	/** owner의 UCameraComponent forward(있으면). 없으면 ControlRotation 폴백. */
-	CameraForward,
-	/** owner 액터 forward. */
-	ActorForward
-};
-
 // NOTE: 종전의 ERopeWielderThrowMode(PhysicsSimulation/PreviewPathLocked)와
 // ERopeWielderAimMode(FrameForward/AimRayHitDirection)는 제거됐다(2026-07-13 회의 결정 F).
 // 조준의 '의미'(aim ray 사용)와 던지기 확정 방식(preview 구속)은 이제 로프의
@@ -59,24 +47,25 @@ enum class ERopeAimRayOriginMode : uint8
 	/** Owner actor 위치. Character에서는 보통 capsule 중심에 가깝다. */
 	OwnerActorLocation UMETA(DisplayName = "Owner Actor Location"),
 
-	/** Pawn view/camera 위치. 머리/눈높이 기준이 필요할 때만 사용한다. */
+	/** Pawn 눈높이(GetPawnViewLocation). 단, 로프 ThrowParams.FrameMode가 OwnerCamera면 카메라 위치를
+	 *  쓴다 — 방향과 원점이 같은 기준을 보게 하기 위해서다. 머리/눈높이 기준이 필요할 때만 사용한다. */
 	ViewLocation UMETA(DisplayName = "View Location")
 };
 
 /** 던지기 입력이 실행되지 못한 사유. OnThrowRejected로 전달된다(UI 피드백/게임 반응용). */
+// NOTE: 값 번호를 못 박는다 — 1/2는 삭제된 NoPreparedPreview/PreparedInvalid의 **영구 결번**이다.
+// 그냥 지우고 뒤를 당기면 이미 저장된 BP switch 핀이 조용히 다른 사유로 재매핑된다(에러 없이 오동작).
+// 두 사유가 사라진 이유: 2026-07-14 재정의로 prepared preview 없는 던지기는 거부가 아니라 레이 끝점
+// 아치 폴백이 됐다 — 발화 지점이 코드에서 사라졌다.
 UENUM(BlueprintType)
 enum class ERopeThrowRejectReason : uint8
 {
 	/** CanThrow() 게이트(서브클래스 게임 규칙 — 스태미나/상태 등)가 거부. */
-	Gated,
-	/** @deprecated 발화하지 않는다. 2026-07-14 재정의로 prepared preview 없는 던지기는 거부 대신 아치 폴백. */
-	NoPreparedPreview,
-	/** @deprecated 발화하지 않는다. 위와 같은 이유로 몽타주 notify 시점의 무효 prepared도 아치 폴백. */
-	PreparedInvalid,
+	Gated = 0,
 	/** RopeComponent가 prepared preview throw를 거부함(CanWrapTarget 게이트 포함). */
-	RopeRejected,
+	RopeRejected = 3,
 	/** ③을 Reel(장전) 밖에서 던지려 함 — EnterReel()이 먼저다. */
-	NotInReel
+	NotInReel = 4
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FRopeWielderOnThrown);
@@ -187,9 +176,10 @@ public:
 	//~ Aim ----------------------------------------------------------------
 	// Wielder는 조준 원점 세부만 소유한다. aim ray 방향은 Rope ThrowParams.FrameMode(Owner/OwnerCamera/Socket 등)를
 	// 따른다. aim ray를 쓸지(조준의 '의미')는 로프의 ResolveMode가 결정한다 — UsesAimRay() 참조.
-	/** Legacy 조준 방향 선택자. 현재 aim ray 방향은 FrameMode를 따르며, ViewLocation 원점의 camera 폴백에만 관여한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
-	ERopeAimSource AimSource = ERopeAimSource::ControlRotation;
+	// NOTE: 종전의 ERopeAimSource/AimSource(ControlRotation/CameraForward/ActorForward)와 조회 헬퍼
+	// GetAimDirection()은 제거됐다 — FrameMode가 방향의 단일 소스가 된 뒤로 던지기/조준 방향에 아무 영향이
+	// 없는 죽은 배선이었다(설정해도 결과가 안 바뀜). 유일하게 살아 있던 소비처인 ViewLocation 원점의 카메라
+	// 폴백은 FrameMode == OwnerCamera가 직접 판정하도록 옮겼다 — 원점이 방향과 같은 기준을 본다.
 
 	/** Aim ray 시작점을 mesh bounds 중심, attach component, socket/bone 중에서 선택한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
@@ -390,7 +380,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	virtual FRopeThrowContext BuildThrowContext(const FVector& AimDir) const;
 
-	/** Legacy API. AimDir은 더 이상 주 방향이 아니며, 실제 방향은 로프 ThrowParams.FrameMode의 Forward를 사용한다. */
+	/** 방향을 명시해 던진다. AimDir이 유효하면 frame forward를 대체하고(aim ray도 같은 방향으로 쏜다),
+	 *  ZeroVector면 로프 ThrowParams.FrameMode의 Forward를 그대로 쓴다(= ThrowNow와 동일). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowInDirection(const FVector& AimDir);
 
@@ -454,11 +445,6 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	URopeComponent* GetRope() const { return Rope; }
 
-	/** Legacy AimSource 기준 방향 조회 헬퍼. 내부 aim ray/던지기/preview 방향은 Rope ThrowParams.FrameMode를
-	 *  단일 소스로 사용하므로 이 함수가 바꾸지 않는다. 외부 게임 코드의 보조 방향 조회용으로만 유지한다. */
-	UFUNCTION(BlueprintPure, Category = "Rope")
-	virtual FVector GetAimDirection() const;
-
 	/** 입력을 수동으로 바인딩한다. 자동 바인딩이 타이밍상 실패하면(InputComponent 미준비) Pawn의
 	 *  SetupPlayerInputComponent에서 호출하라. 이미 바인딩됐으면 무시. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Input")
@@ -513,7 +499,7 @@ protected:
 	//~ 확장 훅(서브클래스용) ------------------------------------------------
 	// URopeComponent와 같은 원칙: 전부 게임 스레드·프레임 단위(콜드 패스)에서만 불린다.
 	// 훅을 추가할 때는 호출 시점/빈도를 주석에 명시하는 것을 계약의 일부로 삼는다.
-	// (public의 GetAimDirection/BuildThrowContext도 virtual 확장 훅이다.)
+	// (public의 BuildThrowContext도 virtual 확장 훅이다.)
 
 	/**
 	 * 던지기 입력 게이트: Throw() 진입 시 1회 호출. false면 입력을 버리고 Gated 사유로 알린다.
