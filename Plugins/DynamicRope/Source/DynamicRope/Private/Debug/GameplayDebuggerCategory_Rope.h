@@ -15,6 +15,8 @@
 #if WITH_GAMEPLAY_DEBUGGER
 
 #include "GameplayDebuggerCategory.h"
+// ERopeDebugCapture — 켜진 보기를 캡처 측에 넘기는 범위 비트
+#include "Debug/RopeDebugSnapshot.h"
 
 class APlayerController;
 class AActor;
@@ -54,6 +56,10 @@ private:
 	static constexpr uint8 DefaultViewMask = static_cast<uint8>(EView::Aim);
 
 	bool HasView(EView Flag) const { return (ViewMask & static_cast<uint8>(Flag)) != 0; }
+
+	/** 켜진 보기를 캡처 범위로 옮긴다. 비트를 그대로 흘리지 않고 명시적으로 매핑한다 — 두 열거형은
+	 *  용도가 달라(표시 토글 vs 수집 범위) 우연히 같은 배치인 것에 기대면 한쪽만 바뀔 때 조용히 어긋난다. */
+	ERopeDebugCapture BuildCaptureMask() const;
 
 	// 키 핸들러(카테고리 활성 중 해당 키로 토글).
 	void OnToggleNodes();

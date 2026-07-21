@@ -9,6 +9,27 @@
 #include "CoreMinimal.h"
 #include "Core/RopeTypes.h"
 
+/**
+ * 캡처 범위 비트. 카테고리의 보기 토글에서 만들어져 **캡처 측까지** 전달된다 — 그리기에서만 막으면
+ * 꺼진 보기의 수집 비용(노드×콜라이더 재질의, Flight 추가 sweep, collider 형상/컨벡스 헐 재구성)이
+ * 그대로 남아 디버거가 시뮬레이션을 계속 무겁게 한다.
+ * Aim은 Wielder를 라이브로 읽고 Advanced는 표시 상세도라 캡처 비용이 없다 — 비트를 두지 않는다.
+ * 헤더 요약(phase/노드 위치/솔브 경로)은 항상 채운다: 어느 보기를 켜든 필요하고 값도 싸다.
+ */
+enum class ERopeDebugCapture : uint8
+{
+	None      = 0,
+	// 노드별 근접 재질의 — 노드 수 × collider 수의 CPU Query라 가장 비싸다.
+	Nodes     = 1 << 0,
+	// Flight 노드 재스윕 + 후보/whip 가이드 사본.
+	Flight    = 1 << 1,
+	// Wrapped 상세(latch 사본/pull 관측치)와 감김 축.
+	Wrap      = 1 << 2,
+	// collider 형상 사본 + 컨벡스 헐 엣지 재구성(O(plane³)).
+	Colliders = 1 << 3,
+};
+ENUM_CLASS_FLAGS(ERopeDebugCapture);
+
 // flight 노드별 디버그: 이전→현재 이동 + (필요 시) 접촉. 캡처 대상 로프에서만 채워진다.
 struct FRopeFlightNodeDebug
 {

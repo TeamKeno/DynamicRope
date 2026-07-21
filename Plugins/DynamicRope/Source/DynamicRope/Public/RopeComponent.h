@@ -38,6 +38,8 @@ class FRegisterComponentContext;
 struct FRopeDebugSnapshot;
 // 디버거 노드별 flight 시각화 항목(Debug/RopeDebugSnapshot.h).
 struct FRopeFlightNodeDebug;
+// 디버거 캡처 범위 비트(Debug/RopeDebugSnapshot.h) — 켜진 보기만 수집하도록 캡처 측에 전달된다.
+enum class ERopeDebugCapture : uint8;
 
 /**
  * Composite Analytic Helix의 bounded no-anchor 구간을 양쪽 실제 anchor 사이 직선으로 유지하는
@@ -1048,7 +1050,8 @@ private:
 
 #if WITH_GAMEPLAY_DEBUGGER
 	// 디버그 캡처 대상일 때 centerline/wrapped/collider 공통 필드를 스냅샷에 채운다(FinalizeSimFrame에서 호출).
-	void FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const;
+	/** 헤더 요약은 항상, 나머지 섹션은 CaptureMask에 든 것만 채운다(꺼진 보기의 수집 비용을 내지 않는다). */
+	void FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugCapture CaptureMask) const;
 #endif
 
 	//~ Throw ----------------------------------------------------------------

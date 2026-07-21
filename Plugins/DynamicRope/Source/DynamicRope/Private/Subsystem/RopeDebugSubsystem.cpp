@@ -18,10 +18,16 @@ bool URopeDebugSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType)
 
 #if WITH_GAMEPLAY_DEBUGGER
 
-void URopeDebugSubsystem::SetTarget(AActor* InActor)
+void URopeDebugSubsystem::SetTarget(AActor* InActor, ERopeDebugCapture InCaptureMask)
 {
 	TargetActor = InActor;
+	CaptureMask = InCaptureMask;
 	LastActiveFrame = GFrameCounter;
+}
+
+ERopeDebugCapture URopeDebugSubsystem::GetCaptureMask() const
+{
+	return CaptureMask;
 }
 
 bool URopeDebugSubsystem::ShouldCapture(const URopeComponent* Rope) const
@@ -72,8 +78,9 @@ const FRopeDebugSnapshot* URopeDebugSubsystem::GetSnapshot(const URopeComponent*
 
 #else // !WITH_GAMEPLAY_DEBUGGER — 디버그 비활성 빌드: 모두 no-op.
 
-void URopeDebugSubsystem::SetTarget(AActor*) {}
+void URopeDebugSubsystem::SetTarget(AActor*, ERopeDebugCapture) {}
 bool URopeDebugSubsystem::ShouldCapture(const URopeComponent*) const { return false; }
+ERopeDebugCapture URopeDebugSubsystem::GetCaptureMask() const { return ERopeDebugCapture::None; }
 void URopeDebugSubsystem::SubmitSnapshot(const URopeComponent*, FRopeDebugSnapshot&&) {}
 const FRopeDebugSnapshot* URopeDebugSubsystem::GetSnapshot(const URopeComponent*) const { return nullptr; }
 

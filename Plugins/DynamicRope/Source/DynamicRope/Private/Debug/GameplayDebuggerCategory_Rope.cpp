@@ -149,6 +149,17 @@ void FGameplayDebuggerCategory_Rope::OnToggleColliders() { ViewMask ^= static_ca
 void FGameplayDebuggerCategory_Rope::OnToggleAim()       { ViewMask ^= static_cast<uint8>(EView::Aim); }
 void FGameplayDebuggerCategory_Rope::OnToggleAdvanced()  { ViewMask ^= static_cast<uint8>(EView::Advanced); }
 
+ERopeDebugCapture FGameplayDebuggerCategory_Rope::BuildCaptureMask() const
+{
+	ERopeDebugCapture Mask = ERopeDebugCapture::None;
+	if (HasView(EView::Nodes))     { Mask |= ERopeDebugCapture::Nodes; }
+	if (HasView(EView::Flight))    { Mask |= ERopeDebugCapture::Flight; }
+	if (HasView(EView::Wrap))      { Mask |= ERopeDebugCapture::Wrap; }
+	if (HasView(EView::Colliders)) { Mask |= ERopeDebugCapture::Colliders; }
+	// Aim/Advanced는 수집이 없다 — 전자는 Wielder 라이브 읽기, 후자는 이미 모은 것의 표시 상세도다.
+	return Mask;
+}
+
 void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AActor* DebugActor)
 {
 	if (!DebugActor)
@@ -157,11 +168,12 @@ void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AAc
 		return;
 	}
 
-	// 대상 액터를 등록 → sim tick(GT)이 다음 프레임 이 액터의 로프만 캡처한다.
+	// 대상 액터 + 캡처 범위를 등록 → sim tick(GT)이 다음 프레임 이 액터의 로프를, 켜진 보기만 캡처한다.
+	// 보기를 토글하면 반영이 한 프레임 늦는다(대상 등록 자체가 원래 그렇다).
 	URopeDebugSubsystem* Dbg = URopeDebugSubsystem::Get(DebugActor->GetWorld());
 	if (Dbg)
 	{
-		Dbg->SetTarget(DebugActor);
+		Dbg->SetTarget(DebugActor, BuildCaptureMask());
 	}
 
 	auto OnOff = [](bool b) { return b ? TEXT("{green}on") : TEXT("{grey}off"); };

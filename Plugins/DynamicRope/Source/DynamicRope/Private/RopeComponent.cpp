@@ -1176,8 +1176,12 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 #if WITH_GAMEPLAY_DEBUGGER
 	URopeDebugSubsystem* DebugSub = URopeDebugSubsystem::Get(GetWorld());
 	const bool bDebugCapture = DebugSub && DebugSub->ShouldCapture(this);
+	// 켜진 보기만 수집한다. 특히 Flight 비트가 없으면 아래 관측 단계가 노드마다 돌리는 재스윕 자체를
+	// 건너뛴다 — 그리기에서만 막으면 이 비용이 그대로 남는다.
+	const ERopeDebugCapture CaptureMask = bDebugCapture ? DebugSub->GetCaptureMask() : ERopeDebugCapture::None;
 	FRopeDebugSnapshot DebugSnapshot;
-	FRopeDebugSnapshot* const FlightSnapshot = bDebugCapture ? &DebugSnapshot : nullptr;
+	FRopeDebugSnapshot* const FlightSnapshot =
+		EnumHasAnyFlags(CaptureMask, ERopeDebugCapture::Flight) ? &DebugSnapshot : nullptr;
 #else
 	constexpr bool bDebugCapture = false;
 	FRopeDebugSnapshot* const FlightSnapshot = nullptr;
@@ -1245,7 +1249,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 #if WITH_GAMEPLAY_DEBUGGER
 	if (bDebugCapture)
 	{
-		FillDebugSnapshot(DebugSnapshot);
+		FillDebugSnapshot(DebugSnapshot, CaptureMask);
 		DebugSub->SubmitSnapshot(this, MoveTemp(DebugSnapshot));
 	}
 #endif
@@ -2002,7 +2006,7 @@ namespace
 	}
 }
 
-void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
+void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugCapture CaptureMask) const
 {
 	Snapshot.Phase = Phase;
 	Snapshot.PhaseAtFrameStart = DebugPhaseAtFrameStart;
@@ -2027,8 +2031,8 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 		Snapshot.LatchedNodes.Add(Latch.NodeIndex);
 	}
 
-	// wrapped 상세(테이블용)는 Wrapped phase일 때만.
-	if (Phase == ERopePhase::Wrapped && Wrap.IsWrapped())
+	// wrapped 상세(테이블용)는 Wrapped phase + [I] wrap 보기일 때만.
+	if (EnumHasAnyFlags(CaptureMask, ERopeDebugCapture::Wrap) && Phase == ERopePhase::Wrapped && Wrap.IsWrapped())
 	{
 		Snapshot.bHasWrapped = true;
 		Snapshot.WrapBone = Wrap.BoneName;
@@ -2071,7 +2075,8 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 
 	// 감김 축 시각화: Wrapping 페이즈에서 ResolveWrappingAxis가 정한 경로 축(원점+방향)을 담는다 —
 	// [I] wrap 뷰가 선으로 그려 "이번 wrap이 어느 축으로 감기는지"를 눈으로 확인하게 한다.
-	if (Phase == ERopePhase::Wrapping && WrappingPhase.State.IsActive())
+	if (EnumHasAnyFlags(CaptureMask, ERopeDebugCapture::Wrap)
+		&& Phase == ERopePhase::Wrapping && WrappingPhase.State.IsActive())
 	{
 		Snapshot.bHasWrapAxis = true;
 		Snapshot.WrapAxisOrigin = WrappingPhase.State.PathAxisOrigin;
@@ -2084,7 +2089,10 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 	// 이 로프가 이번 프레임 질의한 collider 시각화(provider bDrawDebug 대체). 상호 배타 accessor 순서로
 	// 실제 형상 분류: 캡슐(세그먼트) / 박스(회전 OBB) / 컨벡스(헐 와이어) / 그 외(SDF 등 월드 AABB 폴백).
 	// FrameColliders는 provider 소유라 이 프레임 동안만 유효(GT Phase-3 직렬 실행이라 스레딩 무관).
+	// [O] colliders 보기일 때만 — 형상 사본과 컨벡스 헐 엣지 재구성(O(plane³) + 매 프레임 배열 할당)이
+	// 여기 전부 들어 있어, 보기가 꺼져 있으면 통째로 건너뛰는 것이 이 게이트의 요지다.
 	Snapshot.Colliders.Reset();
+	if (EnumHasAnyFlags(CaptureMask, ERopeDebugCapture::Colliders))
 	for (const IRopeCollider* Collider : SimFrame.FrameColliders)
 	{
 		if (!Collider)
@@ -2139,11 +2147,14 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot) const
 	// 마주하는지(법선)를 기록한다. GPU 런타임은 접촉을 리드백하지 않으므로 여기서 CPU로 다시 질의한다. 질의
 	// 반경 = CollisionRadius + 여유라 정착(표면에서 ~반경 떨어져 쉬는) 노드도 잡힌다 — solver가 실제로 처리한
 	// 접촉 집합이 아니라는 뜻이고, 화면도 그 여유를 함께 밝힌다. 노드당 가장 깊은 것 1개만.
+	// 노드 수 × collider 수의 CPU Query라 캡처 항목 중 가장 비싸다 — [P] nodes 보기일 때만 돈다.
 	constexpr float ProximityQueryMargin = 4.0f;
 	Snapshot.NodeProximity.Reset();
 	Snapshot.ProximityQueryMargin = ProximityQueryMargin;
 	const float DebugQueryRadius = GetEffectiveCollisionRadius() + ProximityQueryMargin;
-	for (int32 i = 0; i < Sim.Positions.Num(); ++i)
+	const int32 ProximityNodeCount = EnumHasAnyFlags(CaptureMask, ERopeDebugCapture::Nodes)
+		? Sim.Positions.Num() : 0;
+	for (int32 i = 0; i < ProximityNodeCount; ++i)
 	{
 		const FVector NodePos = Sim.Positions[i];
 		FRopeContact Best;

@@ -26,11 +26,15 @@ public:
 	/** 월드의 rope debug subsystem(게임/PIE에서만 유효, 그 외엔 nullptr). */
 	static URopeDebugSubsystem* Get(const UWorld* World);
 
-	/** 게이트플레이 디버거 카테고리가 그릴 때마다 호출: 현재 디버그 대상 액터 등록(+이번 프레임 활성 표시). */
-	void SetTarget(AActor* InActor);
+	/** 게이트플레이 디버거 카테고리가 그릴 때마다 호출: 현재 디버그 대상 액터 + 켜진 보기의 캡처 범위를
+	 *  등록한다(+이번 프레임 활성 표시). 마스크는 다음 sim tick이 읽으므로 토글 반영은 한 프레임 뒤다. */
+	void SetTarget(AActor* InActor, ERopeDebugCapture InCaptureMask);
 
 	/** 이 로프를 이번 프레임 디버그 캡처할지: 카테고리가 최근 활성이고 로프 owner가 대상 액터일 때만 true. */
 	bool ShouldCapture(const URopeComponent* Rope) const;
+
+	/** 이번 프레임 채울 섹션. 캡처 대상 로프가 어느 수집을 건너뛸지 판단하는 데 쓴다. */
+	ERopeDebugCapture GetCaptureMask() const;
 
 	/** sim tick(GT)이 채운 스냅샷을 제출한다(대상 로프에 한해 호출). */
 	void SubmitSnapshot(const URopeComponent* Rope, FRopeDebugSnapshot&& Snapshot);
@@ -49,6 +53,7 @@ private:
 
 	TWeakObjectPtr<AActor> TargetActor;
 	uint64 LastActiveFrame = 0;
+	ERopeDebugCapture CaptureMask = ERopeDebugCapture::None;
 	TMap<TWeakObjectPtr<const URopeComponent>, FRopeDebugSnapshot> Snapshots;
 #endif
 };
