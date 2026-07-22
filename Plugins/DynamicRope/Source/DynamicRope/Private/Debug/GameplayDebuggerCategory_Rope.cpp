@@ -382,10 +382,14 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 		? FString::Printf(TEXT("%s{grey}→{white}%s"), DebugPhaseName(PhaseStart), DebugPhaseName(PhaseEnd))
 		: FString(DebugPhaseName(PhaseEnd));
 
-	// 스냅샷 나이(프레임). 0이면 이번 프레임 것, 커지면 sim이 캡처를 못 낸 것이다(대상 해제/일시정지).
+	// 스냅샷이 이번 프레임보다 몇 프레임 뒤처졌나. 0이면(이번 프레임 캡처) 아예 내지 않으므로, 이 토큰이
+	// 보인다는 것 자체가 지연 상태다 — 커질수록 sim이 캡처를 못 따라오는 것(대상 해제/일시정지). 반대
+	// 분기 (live — diag pending)과 짝을 이루도록 풀어쓴 괄호체로 낸다.
+	const uint64 AgeFrames = (Snap && GFrameCounter > Snap->FrameStamp) ? (GFrameCounter - Snap->FrameStamp) : 0;
 	const FString AgeText = Snap
-		? ((GFrameCounter > Snap->FrameStamp)
-			? FString::Printf(TEXT("  {grey}age=%lluf"), static_cast<unsigned long long>(GFrameCounter - Snap->FrameStamp))
+		? ((AgeFrames > 0)
+			? FString::Printf(TEXT("  {grey}(%llu frame%s behind)"),
+				static_cast<unsigned long long>(AgeFrames), (AgeFrames == 1) ? TEXT("") : TEXT("s"))
 			: FString())
 		: FString(TEXT("  {grey}(live — diag pending)"));
 
