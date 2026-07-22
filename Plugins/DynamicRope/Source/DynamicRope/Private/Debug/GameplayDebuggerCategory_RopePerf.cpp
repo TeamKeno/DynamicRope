@@ -10,6 +10,7 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "Camera/PlayerCameraManager.h"
+#include "DrawDebugHelpers.h"
 // 등록된 로프 목록(GetRegisteredRopes) — 이 화면의 단일 소스
 #include "Subsystem/RopeSimSubsystem.h"
 
@@ -47,17 +48,72 @@ namespace
 		// 월드 원점에 있지도 않은 로프의 #n 라벨이 찍혀(여럿이면 겹쳐 쌓여) 엉뚱한 곳을 찾게 만든다.
 		bool bHasAnchor = false;
 	};
+
+	// 포인트는 화면 픽셀 크기다. 가까운 마커는 잘 보이게 유지하되, 원거리에서 여러 로프가 모일 때 점이
+	// 라벨을 덮지 않도록 5m→100m 구간에서 6px→3px로 줄인다. 번호 라벨은 거리와 무관하게 항상 표시한다.
+	float MarkerPixelSize(float Distance)
+	{
+		if (Distance < 0.0f)
+		{
+			return 6.0f;
+		}
+
+		return FMath::GetMappedRangeValueClamped(
+			FVector2D(500.0f, 10000.0f), FVector2D(6.0f, 3.0f), Distance);
+	}
 }
 
 FGameplayDebuggerCategory_RopePerf::FGameplayDebuggerCategory_RopePerf()
 {
 	// 디버그 액터 없이도 월드 전역을 그린다.
 	bShowOnlyWithDebugActor = false;
+
+	// ResetOnTick(기본) — 수집 틱마다 비워지므로 CollectData에서 따로 Reset하지 않는다.
+	SetDataPackReplication<FRepData>(&DataPack);
+}
+
+void FGameplayDebuggerCategory_RopePerf::FRepData::Serialize(FArchive& Ar)
+{
+	int32 NumMarkers = Markers.Num();
+	Ar << NumMarkers;
+	if (Ar.IsLoading())
+	{
+		Markers.SetNum(NumMarkers);
+	}
+	for (FMarker& Marker : Markers)
+	{
+		Ar << Marker.Location;
+		Ar << Marker.Color;
+		Ar << Marker.PixelSize;
+		Ar << Marker.DisplayIndex;
+	}
 }
 
 TSharedRef<FGameplayDebuggerCategory> FGameplayDebuggerCategory_RopePerf::MakeInstance()
 {
 	return MakeShareable(new FGameplayDebuggerCategory_RopePerf());
+}
+
+void FGameplayDebuggerCategory_RopePerf::DrawData(
+	APlayerController* OwnerPC, FGameplayDebuggerCanvasContext& CanvasContext)
+{
+	FGameplayDebuggerCategory::DrawData(OwnerPC, CanvasContext);
+
+	UWorld* World = CanvasContext.World.Get();
+	if (!World)
+	{
+		return;
+	}
+
+	for (const FRepData::FMarker& Marker : DataPack.Markers)
+	{
+		DrawDebugPoint(World, Marker.Location, Marker.PixelSize, Marker.Color,
+			false, -1.0f, SDPG_Foreground);
+		// 리스트↔월드 대응 번호는 원거리에서도 식별할 수 있도록 겹침 여부와 무관하게 모두 표시한다.
+		DrawDebugString(World, Marker.Location + FVector(0.0, 0.0, 10.0),
+			FString::Printf(TEXT("#%d"), Marker.DisplayIndex), nullptr, Marker.Color,
+			0.0f, true, 1.0f);
+	}
 }
 
 void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC, AActor* DebugActor)
@@ -196,8 +252,11 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 		{
 			const FColor MarkerColor = R.bSleeping ? FColor::Cyan
 				: ((R.bGpuStepped || R.bCpuSolved) ? FColor::White : FColor(140, 140, 140));
-			AddShape(FGameplayDebuggerShape::MakePoint(R.Anchor, 6.0f, MarkerColor,
-				FString::Printf(TEXT("#%d"), i + 1)));
+			FRepData::FMarker& Marker = DataPack.Markers.AddDefaulted_GetRef();
+			Marker.Location = R.Anchor;
+			Marker.Color = MarkerColor;
+			Marker.PixelSize = MarkerPixelSize(R.Distance);
+			Marker.DisplayIndex = i + 1;
 		}
 	}
 	if (Rows.Num() > MaxRows)

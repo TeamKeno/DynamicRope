@@ -30,8 +30,29 @@ public:
 	FGameplayDebuggerCategory_RopePerf();
 
 	virtual void CollectData(APlayerController* OwnerPC, AActor* DebugActor) override;
+	virtual void DrawData(APlayerController* OwnerPC, FGameplayDebuggerCanvasContext& CanvasContext) override;
 
 	static TSharedRef<FGameplayDebuggerCategory> MakeInstance();
+
+private:
+	// MakePoint는 16분할 와이어 구체라 마커 하나당 512 FBatchedLine을 만든다. 위치/색/픽셀 크기/번호만
+	// 복제하고 보는 클라이언트의 DrawData에서 DrawDebugPoint + DrawDebugString으로 그려 렌더 부하를 줄인다.
+	struct FRepData
+	{
+		struct FMarker
+		{
+			FVector Location = FVector::ZeroVector;
+			FColor Color = FColor::White;
+			float PixelSize = 6.0f;
+			int32 DisplayIndex = INDEX_NONE;
+		};
+
+		TArray<FMarker> Markers;
+
+		void Serialize(FArchive& Ar);
+	};
+
+	FRepData DataPack;
 };
 
 #endif // WITH_GAMEPLAY_DEBUGGER
