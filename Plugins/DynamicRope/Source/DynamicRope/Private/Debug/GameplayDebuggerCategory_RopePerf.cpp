@@ -86,7 +86,7 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 		}
 	}
 
-	// 월드의 활성 로프를 훑어 라이브 값 수집(서브시스템 private 목록 대신 월드 순회 — 등록 여부로 필터).
+	// 서브시스템의 등록 로프 목록을 훑어 라이브 값 수집(아래 GetRegisteredRopes — 사유는 그 옆 주석).
 	TArray<FPerfRow> Rows;
 	int32 NumGpu = 0, NumCpu = 0, NumSleeping = 0, NumGdf = 0;
 	int64 TotalParticles = 0;
