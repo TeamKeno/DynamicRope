@@ -148,7 +148,13 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugC
 {
 	Snapshot.Phase = Phase;
 	Snapshot.PhaseAtFrameStart = DebugPhaseAtFrameStart;
-	Snapshot.Positions = Sim.Positions;
+	// centerline 위치는 [P]nodes/[U]flight/[I]wrap 오버레이만 읽는다 — 기본(aim만) 상태에선 헤더 nodes=만
+	// 필요하므로 전체 배열을 복사하지 않고 개수 스칼라만 담아 매 프레임 배열 할당을 없앤다.
+	Snapshot.NodeCount = Sim.Positions.Num();
+	if (EnumHasAnyFlags(CaptureMask, ERopeDebugCapture::Nodes | ERopeDebugCapture::Flight | ERopeDebugCapture::Wrap))
+	{
+		Snapshot.Positions = Sim.Positions;
+	}
 
 	// 정체성과 모드는 어느 보기를 켜든 헤더가 낸다 — 질의가 아니라 이름 복사라 게이트를 두지 않는다.
 	Snapshot.ComponentName = GetName();

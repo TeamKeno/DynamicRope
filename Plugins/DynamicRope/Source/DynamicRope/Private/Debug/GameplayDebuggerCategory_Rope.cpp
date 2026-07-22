@@ -372,6 +372,9 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 	const ERopePhase PhaseEnd = Snap ? Snap->Phase : Rope.GetPhase();
 	const ERopePhase PhaseStart = Snap ? Snap->PhaseAtFrameStart : PhaseEnd;
 	const TArray<FVector>& Points = Snap ? Snap->Positions : Rope.GetCenterlinePositions();
+	// 헤더 nodes= 개수. 기본(aim만) 상태에선 Positions를 복사하지 않으므로 Points.Num()이 0이다 —
+	// 스냅샷에는 항상 담기는 NodeCount 스칼라를 쓴다(라이브 첫 프레임에는 Points.Num()).
+	const int32 NodeCount = Snap ? Snap->NodeCount : Points.Num();
 	const FName Bone = Snap ? Snap->WrapBoneName : Rope.GetWrappedBoneName();
 	const bool bSleeping = Snap ? Snap->bSleeping : Rope.IsSleeping();
 	const float LODScale = Snap ? Snap->LodScale : Rope.GetSolverLODScale();
@@ -404,7 +407,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 	AddTextLine(FString::Printf(
 		TEXT("{yellow}%s{grey}@%s{white} phase=%s mode=%s nodes=%d wrapBone=%s%s%s%s"),
 		*NameText, *OwnerText, *PhaseText,
-		DebugResolveModeName(Snap ? Snap->ResolveMode : Rope.ResolveMode), Points.Num(),
+		DebugResolveModeName(Snap ? Snap->ResolveMode : Rope.ResolveMode), NodeCount,
 		Bone.IsNone() ? TEXT("-") : *Bone.ToString(),
 		bSleeping ? TEXT("  {cyan}asleep") : TEXT(""),
 		LODScale < 0.999f ? *FString::Printf(TEXT("  {cyan}lod=x%.2f"), LODScale) : TEXT(""),

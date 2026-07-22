@@ -121,7 +121,11 @@ struct FRopeDebugSnapshot
 	// "Flight에서 시작해 Contacting으로 끝난 프레임"처럼 전이 전후를 함께 담는다 — 이때 flight 오버레이는
 	// 전이를 일으킨 바로 그 관측이라 유효하다(phase가 다르다는 이유로 숨기면 전이 원인을 잃는다).
 	ERopePhase PhaseAtFrameStart = ERopePhase::Free;
+	// centerline 위치. Nodes/Flight/Wrap 오버레이만 읽으므로 그 보기가 하나라도 켜졌을 때만 채운다 —
+	// 기본(aim만) 상태에서는 비어 있다(헤더 nodes=는 아래 NodeCount 스칼라가 낸다).
 	TArray<FVector> Positions;
+	// 노드 수. Positions를 복사하지 않는 보기에서도 헤더가 nodes=를 내야 하므로 항상 담는다.
+	int32 NodeCount = 0;
 	// centerline 상에서 강조할 latch 노드 인덱스.
 	TArray<int32> LatchedNodes;
 
