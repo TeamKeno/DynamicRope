@@ -16,6 +16,49 @@ bool URopeDebugSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType)
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
 }
 
+void URopeDebugSubsystem::Tick(float DeltaTime)
+{
+#if WITH_GAMEPLAY_DEBUGGER
+	if (Snapshots.Num() == 0)
+	{
+		return;
+	}
+
+	// 카테고리가 최근(ActiveFrameWindow 내) 그리지 않았으면 비활성 — 제출이 멈춰도 마지막 배열이 월드
+	// 종료까지 남지 않도록 보관분을 통째로 비운다.
+	if (GFrameCounter - LastActiveFrame > ActiveFrameWindow)
+	{
+		Snapshots.Reset();
+		return;
+	}
+
+	// 활성 중 스테일/무효 정리는 여기 한 곳에서 프레임당 한 번만 — SubmitSnapshot마다 전체 맵을 훑던
+	// O(제출수×로프수)를 없앤다.
+	for (auto It = Snapshots.CreateIterator(); It; ++It)
+	{
+		if (!It.Key().IsValid() || GFrameCounter - It.Value().FrameStamp > ActiveFrameWindow)
+		{
+			It.RemoveCurrent();
+		}
+	}
+#endif
+}
+
+TStatId URopeDebugSubsystem::GetStatId() const
+{
+	RETURN_QUICK_DECLARE_CYCLE_STAT(URopeDebugSubsystem, STATGROUP_Tickables);
+}
+
+bool URopeDebugSubsystem::IsTickable() const
+{
+	// 디버그 전용 수명 관리 — WITH_GAMEPLAY_DEBUGGER가 꺼진 빌드에선 틱할 게 없다.
+#if WITH_GAMEPLAY_DEBUGGER
+	return true;
+#else
+	return false;
+#endif
+}
+
 #if WITH_GAMEPLAY_DEBUGGER
 
 void URopeDebugSubsystem::SetTarget(AActor* InActor, ERopeDebugCapture InCaptureMask)
@@ -55,15 +98,7 @@ void URopeDebugSubsystem::SubmitSnapshot(const URopeComponent* Rope, FRopeDebugS
 	}
 	Snapshot.FrameStamp = GFrameCounter;
 	Snapshots.Add(Rope, MoveTemp(Snapshot));
-
-	// 죽었거나 오래된 항목 정리(서브시스템이 tick하지 않으므로 제출 시 기회적으로 청소).
-	for (auto It = Snapshots.CreateIterator(); It; ++It)
-	{
-		if (!It.Key().IsValid() || GFrameCounter - It.Value().FrameStamp > ActiveFrameWindow)
-		{
-			It.RemoveCurrent();
-		}
-	}
+	// 스테일/무효 정리는 Tick이 프레임당 한 번 돈다 — 여기서 매 제출마다 전체 맵을 훑지 않는다.
 }
 
 const FRopeDebugSnapshot* URopeDebugSubsystem::GetSnapshot(const URopeComponent* Rope) const

@@ -23,7 +23,7 @@ class URopeComponent;
 class AActor;
 
 UCLASS()
-class URopeDebugSubsystem : public UWorldSubsystem
+class URopeDebugSubsystem : public UTickableWorldSubsystem
 {
 	GENERATED_BODY()
 
@@ -49,6 +49,13 @@ public:
 
 	//~ UWorldSubsystem
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
+
+	//~ FTickableGameObject (UTickableWorldSubsystem) — 스냅샷 수명 관리를 프레임당 한 번 돌린다: 활성
+	//   중엔 스테일/무효 항목만 정리(제출마다 전체 맵을 훑던 O(제출수×로프수) 제거), 카테고리가 비활성이면
+	//   보관분을 통째로 비운다(제출이 멈춰도 마지막 배열이 월드 종료까지 남지 않게). 디버그 빌드에서만 틱한다.
+	virtual void Tick(float DeltaTime) override;
+	virtual TStatId GetStatId() const override;
+	virtual bool IsTickable() const override;
 
 private:
 #if WITH_GAMEPLAY_DEBUGGER
