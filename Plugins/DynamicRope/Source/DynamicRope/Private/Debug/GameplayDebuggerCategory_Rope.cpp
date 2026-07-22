@@ -287,14 +287,11 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 		return;
 	}
 	// 조준 모드는 맞지만 지금 던질 수 없는 phase — GuaranteedWrap은 Loaded(장전)에서만 조준이 성립한다.
-	// 진입하면 해소되는 일시 상태라 "왜 조준이 안 잡히나"의 답이 된다. 다만 평소엔 자리만 차지하므로
-	// 상세 보기에서만 낸다.
+	// 진입하면 해소되는 일시 상태라 "왜 조준이 안 잡히나"의 답이 된다. [J]를 켰는데 ray가 안 보이는
+	// 이유 그 자체이므로 상세 보기와 무관하게 낸다.
 	if (!Wielder.IsAimActive())
 	{
-		if (HasView(EView::Advanced))
-		{
-			AddTextLine(TEXT("  {white}aim: {grey}inactive — GuaranteedWrap aims from Loaded only"));
-		}
+		AddTextLine(TEXT("  {white}aim: {grey}inactive — GuaranteedWrap aims from Loaded only"));
 		return;
 	}
 
@@ -611,11 +608,11 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 				DrawDebugLine(World, AxisO - AxisDir * AxisLen, AxisO + AxisDir * AxisLen, FColor::Yellow, false, -1.0f, FG, 3.0f);
 				DrawDebugDirectionalArrow(World, AxisO, AxisO + AxisDir * AxisLen, 16.0f, FColor::Yellow, false, -1.0f, FG, 3.0f);
 			}
-			// 축 방향은 위 노란 선/화살표가 이미 보여준다 — 숫자 벡터는 스크린샷으로 값을 대조할 때만
-			// 필요하므로 상세 보기에서만. 축이 퇴화(0벡터)해 선을 못 그린 경우엔 그 사실을 알려야 하므로 낸다.
-			if (HasView(EView::Advanced) || AxisDir.IsNearlyZero())
+			// 정상 축의 방향은 위 노란 선/화살표가 이미 보여주므로 문자열로 반복하지 않는다. 축이
+			// 퇴화(0벡터)하면 선 자체를 그릴 수 없으니 그 사실만 낸다.
+			if (AxisDir.IsNearlyZero())
 			{
-				AddTextLine(FString::Printf(TEXT("  {yellow}wrapAxis{grey} dir=%s"), *AxisDir.ToCompactString()));
+				AddTextLine(TEXT("  {red}wrapAxis degenerate{grey} (zero direction)"));
 			}
 		}
 	}
@@ -689,8 +686,8 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 				}
 				const float JitterDeg = FMath::RadiansToDegrees(FMath::Acos(
 					FMath::Clamp(static_cast<float>(FVector::DotProduct(S.PullDirRaw, S.PullDirection)), -1.0f, 1.0f)));
-				AddTextLine(FString::Printf(TEXT("    {grey}pull-dir aim=node%d rawAim<->smooth=%.1f deg dir=%s"),
-					S.PullAimNode, JitterDeg, *S.PullDirection.ToCompactString()));
+				AddTextLine(FString::Printf(TEXT("    {grey}pull-dir aim=node%d rawAim<->smooth=%.1f deg"),
+					S.PullAimNode, JitterDeg));
 			}
 		}
 
@@ -761,21 +758,19 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 			AddTextLine(TEXT("    {grey}pull n/a (no hand-side anchor)"));
 		}
 
-		// latch 테이블. 개수는 위 wrapped 줄의 latched=N이, 위치는 3D 노란 박스가 이미 보여주고, bone은
-		// 헤더·wrapped 줄과 겹친다. 남는 고유 정보는 본 로컬 좌표뿐인데 화면에서 정오를 판단할 방법이
-		// 없으므로(대조할 기준이 없다) 상세 보기에서만 낸다.
-		const int32 MaxRows = HasView(EView::Advanced) ? FMath::Min(12, S.Latched.Num()) : 0;
+		// latch 테이블에서 고유한 정보는 "어느 노드가 어느 본에 붙었나"뿐이다 — 위치는 3D 노란 박스가,
+		// 개수는 위 wrapped 줄의 latched=N이 낸다. latch가 하나면 그 줄의 bone=/latched=1로 같은 내용이
+		// 이미 나오므로 여럿일 때만, 그것도 상세 보기에서만 낸다.
+		const int32 MaxRows = (HasView(EView::Advanced) && S.Latched.Num() >= 2)
+			? FMath::Min(12, S.Latched.Num()) : 0;
 		for (int32 i = 0; i < MaxRows; ++i)
 		{
 			const FRopeLatchNode& Latch = S.Latched[i];
-			const FVector WorldPos = S.Positions.IsValidIndex(Latch.NodeIndex)
-				? S.Positions[Latch.NodeIndex] : FVector::ZeroVector;
-			AddTextLine(FString::Printf(TEXT("      {grey}node=%d bone=%s local=%s world=%s"),
-				Latch.NodeIndex, *Latch.Bone.ToString(),
-				*Latch.BoneLocalPos.ToCompactString(), *WorldPos.ToCompactString()));
+			AddTextLine(FString::Printf(TEXT("      {grey}node=%d bone=%s"),
+				Latch.NodeIndex, *Latch.Bone.ToString()));
 		}
-		// 잘린 나머지 안내는 표를 실제로 낸 경우에만 — 상세가 꺼져 MaxRows=0이면 "... N more"가 전체
-		// 개수로 떠서 표가 잘린 것처럼 읽힌다(개수는 이미 latched=N이 냈다).
+		// 잘린 나머지 안내는 표를 실제로 낸 경우에만 — 표를 내지 않은 프레임(MaxRows=0)에 내면 "... N more"가
+		// 전체 개수로 떠서 표가 잘린 것처럼 읽힌다(개수는 이미 latched=N이 냈다).
 		if (MaxRows > 0 && S.Latched.Num() > MaxRows)
 		{
 			AddTextLine(FString::Printf(TEXT("      {grey}... %d more"), S.Latched.Num() - MaxRows));
