@@ -71,6 +71,14 @@ struct FRopePullDriveState
 	 */
 	bool bChainTaut = false;
 
+	/**
+	 * bChainTaut 해제 유예의 잔여 시간(초, HoldConfig.TautReleaseGraceTime이 상수). 팽팽 조건이 참인 프레임마다
+	 * 만충되고, 조건이 깨지면 소진될 때까지 래치를 유지한다 — 최소 전달 장력 관측치의 프레임 단위 채터링
+	 * (임계 0 = 무히스테리시스 + GPU 미러 지연)이 "전량 삭감 ↔ 자유" 교대(wielder 들썩임)로 새는 것을 막는다.
+	 * ResetTransient에서 리셋.
+	 */
+	float TautGraceRemaining = 0.0f;
+
 	// (레거시 서보 시절의 주입 장부(TowedVelDebt)/슬랙 브레이크는 제거됐다 — λ의 위치 회수 항은
 	//  MaxBiasSpeed로 유계라 회수할 과잉 주입 자체가 없다. Docs/PoC/05 §3.5.)
 
@@ -96,8 +104,20 @@ struct FRopePullDriveState
 	int32 PrevAnchorNode = -1;
 	bool bPrevFreeRestValid = false;
 
-	// (Constraint 모드의 스켈레탈 대상 관측/인가 상태는 여기 없다 — 랙돌 절반은 엔진 물리 제약이 담당한다:
-	//  URopeComponent::UpdatePhysicalTether. GT 임펄스 관측 상태(점 속도 EMA)는 그 전환으로 폐기됐다.)
+	/**
+	 * (Constraint 모드) 앵커 점(LastPullSample.WorldPoint)의 실측 속도 EMA(cm/s). Anchor-kind 대상
+	 * (정적/키네마틱/애니메이션 구동 — 물리 속도 API가 없는 끝)의 끝 속도로 벌어짐 속도 s에 실린다:
+	 * 움직이는 오브젝트에 감긴 로프의 towing이 bias 상한(TetherMaxBiasSpeed)에 막히지 않고 벌어짐 상쇄
+	 * 항으로 추종된다(정지 앵커는 ≈0이라 무영향). 프레임 차분은 rest 변화율과 같은 가드(앵커 노드 불변
+	 * 프레임)만 신뢰하고, EMA 상수는 PullDirSmoothTime 재사용(같은 관측 노이즈 계열 — 스키닝/노드 지터).
+	 * PrevAnchorWorldPoint가 차분의 직전 값(유효성은 bPrevFreeRestValid 공유). ResetTransient에서 리셋.
+	 */
+	FVector SmoothedAnchorPointVelocity = FVector::ZeroVector;
+	FVector PrevAnchorWorldPoint = FVector::ZeroVector;
+
+	// (Constraint 모드의 시뮬 바디 대상 관측/인가 상태는 여기 없다 — 시뮬 바디 절반(스켈레탈+컴포넌트)은
+	//  엔진 물리 제약이 담당한다: URopeComponent::UpdatePhysicalTether. GT 임펄스 관측 상태(점 속도 EMA)는
+	//  그 전환으로 폐기됐다.)
 
 	/**
 	 * 이번 프레임 유효 대상 몫(shareT) [0..1] — wielder 게이트(URopeWielderComponent::IsWielderTetherActive)와
@@ -132,11 +152,14 @@ struct FRopePullDriveState
 		bTargetPullableInit = false; // 다음 wrap 시작 시 순수 비교로 다시 시드.
 		bPullTaut = false;
 		bChainTaut = false;
+		TautGraceRemaining = 0.0f;
 		LastTetherLambda = 0.0f;
 		LastTetherLambdaDt = 0.0f;
 		PrevFreeRestLen = 0.0f;
 		PrevAnchorNode = -1;
 		bPrevFreeRestValid = false;
+		SmoothedAnchorPointVelocity = FVector::ZeroVector;
+		PrevAnchorWorldPoint = FVector::ZeroVector;
 		bLoggedPullNoReceiver = false;
 	}
 };

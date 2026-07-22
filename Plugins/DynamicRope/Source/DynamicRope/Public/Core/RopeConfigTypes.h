@@ -431,21 +431,33 @@ struct FRopeHoldConfig
 	float TetherSlack = 5.0f;
 
 	/**
-	 * (물리 바디 대상 한정 — 컴포넌트 시뮬 바디) λ 임펄스는 로프 축 성분만 만드므로, 끌던 방향을 급전환하면
-	 * 옛 방향 관성이 직교로 남아 대상이 옆으로/위로 날아간다("관성 과다"). 이 비율(0 = 보존, 1 = 완전 제거)로
-	 * 그 잔여 관성을 몇 프레임에 걸쳐 빼되(중력/스윙은 매 프레임 재축적돼 대부분 보존) fling을 억제한다.
-	 * CMC 캐릭터/랙돌(물리 제약)에는 적용하지 않는다.
+	 * (wielder 쪽 시뮬 루트 한정) λ 임펄스는 로프 축 성분만 만드므로, 방향이 급전환하면 옛 방향 관성이
+	 * 직교로 남아 날아간다("관성 과다"). 이 비율(0 = 보존, 1 = 완전 제거)로 그 잔여 관성을 몇 프레임에
+	 * 걸쳐 빼 fling을 억제한다. 값은 60fps 기준 프레임당 비율이고 적용 시 dt로 보정된다(프레임률 독립).
+	 * **대상 쪽 시뮬 바디(프랍/랙돌)는 물리 제약 테더가 담당해 이 감쇠를 타지 않는다** — 남는 수신자는
+	 * wielder가 물리 액터 구성(시뮬 루트)일 때뿐이다. CMC 캐릭터에도 적용하지 않는다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TetherPerpDamping = 0.3f;
 
 	/**
-	 * 테더 속도 안전 상한(cm/s). 두 역할: ①λ의 위치 회수 명령 상한(SolveTetherLambda의 MaxBiasSpeed —
-	 * 커밋 직후 C가 큰 프레임의 스파이크 방지이자 슬랙 코스팅 잔류의 상한), ②인가 결과 속력의 2차 클램프
-	 * (ClampInjectedVelocity — 기존에 더 빠른 외부 운동은 보존). 0 = 클램프 없음(비권장).
+	 * 테더 속도 안전 상한(cm/s) — 인가 결과 속력의 2차 클램프(ClampInjectedVelocity — 기존에 더 빠른 외부
+	 * 운동은 보존). 0 = 클램프 없음(비권장). λ의 위치 회수 명령 상한은 별도 노브다(TetherMaxBiasSpeed —
+	 * 종전엔 이 값을 재사용해 회수가 사실상 무상한이었다).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float TetherMaxSpeed = 1500.0f;
+
+	/**
+	 * λ 위치 회수(bias) 명령 속도의 상한(cm/s) — SolveTetherLambda의 MaxBiasSpeed. 벌어짐 상쇄(SepSpeed)와
+	 * 달리 이 항만 운동량으로 남는다(단방향 제약이라 슬랙 전환 후 제동이 없다 — 이 값이 곧 슬랙 코스팅
+	 * 속도의 상한). 종전엔 TetherMaxSpeed(1500)를 재사용해 가벼운 대상이 한두 프레임에 15m/s로 가속된 뒤
+	 * 슬랙 전환과 함께 그대로 날아갔다("휙") — 안착 회수는 이 값이면 충분하다. 테더는 "벌어짐을 막는 것"이
+	 * 본분이고 초과분을 능동적으로 되감는 건 회수 항뿐이므로, 이 상한이 테더의 윈치성(性)을 정한다.
+	 * 0 = 회수 없음(벌어짐 저지만 — 초과분은 되감기/자연 접근으로만 준다).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float TetherMaxBiasSpeed = 150.0f;
 
 	/**
 	 * 접지(발 디딘) 캐릭터가 자기 Mass의 몇 배까지 마찰로 버티는가(유효질량 = Mass × 이 값). 클수록 단단히
@@ -580,9 +592,19 @@ struct FRopeHoldConfig
 	float TautMaxSag = 20.0f;
 
 	/**
+	 * 전 체인 팽팽 판정의 해제 유예(초). 팽팽 조건이 깨진 뒤에도 이 시간 동안은 래치를 유지한다(진입은 즉시).
+	 * 3중 게이트 중 최소 전달 장력 관측치(SegmentTension)는 임계 0(기본)에서 진입/유지 임계가 같아
+	 * 히스테리시스가 소멸하고, GPU 로프에선 1~2프레임 지연 미러라 경계 상태에서 taut↔slack이 프레임 단위로
+	 * 퍼덕인다 — 그때마다 "한 프레임 전량 속도 삭감 ↔ 자유"가 교대해 wielder가 들썩이므로, 시간 래치로
+	 * 그 채터링을 끊는다. 슬랙 오판(가짜 C)의 노출 시간도 이 값으로 유계다. 0 = 유예 없음(즉시 해제).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
+	float TautReleaseGraceTime = 0.1f;
+
+	/**
 	 * 초과분 C의 위치 회수 시상수(초). β = 1−exp(−dt/이 값)만큼 매 프레임 C를 닫는
 	 * 접근 속도를 명령한다 — 작을수록 단단(즉시 안착), 클수록 부드러운 추종. 0 = 한 프레임 전량(β=1).
-	 * 프레임률 독립. 회수 명령 속도의 절대 상한은 TetherMaxSpeed를 재사용한다(SolveTetherLambda의
+	 * 프레임률 독립. 회수 명령 속도의 절대 상한은 TetherMaxBiasSpeed다(SolveTetherLambda의
 	 * MaxBiasSpeed — 커밋 직후 C가 큰 프레임의 스파이크 방지이자 슬랙 코스팅 잔류의 상한).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
@@ -604,6 +626,20 @@ struct FRopeHoldConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float TetherCompliance = 0.0f;
+
+	/**
+	 * 물리 제약 테더(컴포넌트 바디 대상 — 프랍)의 소프트 리밋 강성. 단일 강체에 하드 리밋 + 위치 투영을
+	 * 걸면 코너 추종 프록시가 매 프레임 리밋을 어길 때마다 위반량이 위치 스냅으로 닫혀 스냅→반동→재위반이
+	 * 프레임 주기로 반복된다(고주파 진동 — 랙돌은 관절 사슬이 완충해 무증상). 컴포넌트 바디는 투영을 끄고
+	 * 이 강성/아래 감쇠의 스프링-댐퍼 리밋으로 흡수한다. 0 = 하드 리밋(비권장 — 진동 재발).
+	 * 스켈레탈(랙돌) 제약에는 적용하지 않는다(PIE 검증된 하드 리밋 유지).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	float PhysicalTetherStiffness = 1000.0f;
+
+	/** 물리 제약 테더 소프트 리밋의 감쇠(위 강성과 세트 — 진동 에너지를 실제로 빼는 항). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
+	float PhysicalTetherDamping = 100.0f;
 
 	/**
 	 * 능동 Pull의 **견인 목표 속도**(cm/s). 능동 Pull은 대상을 이 속도로 당김 방향을 따라 몰되(장력 상한 PullForce

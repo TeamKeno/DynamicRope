@@ -1025,27 +1025,35 @@ private:
 	void UpdateConstraintTether(float DeltaTime);
 
 	// (Constraint 테더 — 랙돌 대상 절반) 엔진 물리 제약: 코너의 키네마틱 프록시 ↔ 감긴 본의 앵커 점을
-	// 다리 rest 길이의 구면 리밋으로 묶는다. GT 프레임당 임펄스는 관절체에서 "전신 크기 kick → 폭주" vs
-	// "본 크기 λ → 견인력 붕괴" 딜레마가 있어(2026-07-20 Pierce 실측 반복), 랙돌 쪽은 Chaos 제약이
-	// 서브스텝에서 관절·접촉과 함께 푼다(Docs/PoC/05 §3.4-1). 갱신은 UpdateConstraintTether가 매 Wrapped
-	// 프레임, 해체는 phase 전이(ResetTransientPhaseState)/모드 이탈/대상·본 변경/EndPlay에서.
-	void UpdatePhysicalTether(class USkeletalMeshComponent* TargetSkel, FName Bone,
+	// 다리 rest 길이의 구면 리밋으로 묶는다. 대상은 **시뮬 바디 전부**(스켈레탈 본 + 컴포넌트 바디):
+	// GT 프레임당 속도 임펄스는 관절체의 "전신 크기 kick → 폭주" vs "본 크기 λ → 견인력 붕괴" 딜레마
+	// (2026-07-20 Pierce 실측 반복)에 더해, 공중 하중(매달린 프랍)에서도 구조적으로 진다 — 중력·스윙이
+	// 물리 서브스텝에서 진행되는 동안 GT는 한 박자 늦게 사후 상쇄만 하므로 부유·진자 펌핑·직교 감쇠
+	// 의존이 생긴다(2026-07-22 PIE). Chaos 제약은 서브스텝에서 중력·관절·접촉과 함께 푼다(Docs/PoC/05
+	// §3.4-1·§9). 갱신은 UpdateConstraintTether가 매 Wrapped 프레임, 해체는 phase 전이
+	// (ResetTransientPhaseState)/대상·본 변경/EndPlay에서.
+	void UpdatePhysicalTether(class UPrimitiveComponent* TargetPrim, FName Bone,
 		const FVector& AnchorWorld, const FVector& CornerWorld, float LegRestLen, float DeltaTime);
 	void TeardownPhysicalTether();
 
-	/** 물리 제약 테더의 키네마틱 프록시(코너 추종)와 제약 — 런타임 전용, Constraint 모드 스켈레탈 대상에서만 산다. */
+	/** 물리 제약 테더의 키네마틱 프록시(코너 추종)와 제약 — 런타임 전용, 시뮬 바디 대상에서만 산다. */
 	UPROPERTY(Transient)
 	TObjectPtr<class USphereComponent> PhysicalTetherProxy;
 	UPROPERTY(Transient)
 	TObjectPtr<class UPhysicsConstraintComponent> PhysicalTetherConstraint;
 	// 제약이 묶은 대상/본(변경 감지 → 재생성)과 현재 리밋(cm — 갱신 스킵용, <0 = 미설정).
-	TWeakObjectPtr<class USkeletalMeshComponent> PhysicalTetherTarget;
+	TWeakObjectPtr<class UPrimitiveComponent> PhysicalTetherTarget;
 	FName PhysicalTetherBone = NAME_None;
 	float PhysicalTetherLimit = -1.0f;
+	// 생성 시 고정한 바디-로컬 앵커(제약 Frame2) — wrap 앵커가 같은 (대상,본) 안에서 재배치되면
+	// 드리프트를 감지해 재생성하는 가드의 기준값.
+	FVector PhysicalTetherAnchorLocal = FVector::ZeroVector;
 
 	// (테더) wielder 견인 방향(손(노드0)→로프 첫 다리 = 앵커 쪽)을 산출해 PullDrive.SmoothedWielderPullDir로
 	// EMA 스무딩(PullDirSmoothTime)해 반환 — 방향 지터로 인가 축이 튀는 것을 막는다(180° 반전 축퇴는 raw 재시드).
-	FVector ComputeSmoothedWielderDir(const FVector& Aim, const FVector& DirToAim, float DeltaTime);
+	// bInstantaneous면 EMA를 생략하고 순간 기하를 그대로 쓴다(공중 스윙 — 궤도 회전을 EMA가 못 따라와
+	// 래그 방향의 접선 오차가 스윙 조작을 방해한다; 상태는 계속 시드해 착지 시 EMA 재진입이 연속).
+	FVector ComputeSmoothedWielderDir(const FVector& Aim, const FVector& DirToAim, float DeltaTime, bool bInstantaneous);
 
 	// 이번 Wrapped 프레임의 끌림 가능 판정을 overshoot와 무관하게 갱신한다 — 능동 Pull의 climb-in 방향과
 	// 분배 관측(LastTargetShare 이진값)이 PullDrive.bTargetPullable을 공유. 양끝 유효질량 비교 + 히스테리시스.
