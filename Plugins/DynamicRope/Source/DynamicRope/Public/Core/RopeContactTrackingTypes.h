@@ -120,12 +120,6 @@ struct DYNAMICROPE_API FRopeContactTracker
 		Targets.Reset();
 	}
 
-	UE_DEPRECATED(5.7, "Use Update(Candidates, DeltaTime) instead.")
-	void BeginOrUpdate(const TArray<FRopeContactCandidate>& Candidates)
-	{
-		Update(Candidates, 0.0f);
-	}
-
 	void Decay(float DeltaTime)
 	{
 		DwellTime = FMath::Max(0.0f, DwellTime - DeltaTime);

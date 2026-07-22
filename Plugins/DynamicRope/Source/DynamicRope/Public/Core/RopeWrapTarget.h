@@ -4,18 +4,16 @@
 // "랩 대상 = 스켈레탈 메시의 본 하나"라는 가정을 코드에서 뽑아내, 정적 메시 랩(피드백 5번)과
 // 본 그룹 랩(피드백 3번)이 공유하는 공통 기반을 제공한다. 설계 근거: Notion "랩 대상 추상화 설계 초안".
 //
-// 두 개의 seam으로 분해된다:
-//   A. 바인딩(binding)     — 앵커 하나가 매 프레임 "무엇"을 따라가는가.
-//                            FRopeBindingFrame + ResolveBindingWorld.  (Hold/BeginWrap이 소비)
-//   B. 집계(aggregation)   — 접촉 집계가 노드를 "무슨 단위"로 묶는가.
-//                            FRopeWrapTargetKey + IRopeWrapTargetRegistry.
-//                            (소비자: 현행 런타임은 Contacting 페이즈의 FRopeContactTracker)
+// 바인딩(binding) seam — 앵커 하나가 매 프레임 "무엇"을 따라가는가.
+//   FRopeBindingFrame + ResolveBindingWorld.  (Hold/BeginWrap이 소비)
 //
-// [배선 상태] seam A(ResolveBindingWorld)는 랩 경로 전체(Hold/BeginWrap/경로 빌드/앵커 복원/프리뷰)에
-// 배선 완료. 스켈레톤 구조 질의(RopeWrapTargets:: — 부모/자식 키, 스켈레탈 판별)도 랩 경로의 인라인
-// Cast를 대체해 배선됐다 — 랩 흐름의 스켈레탈 가정은 이 파일 쌍(.h/.cpp)에만 존재한다.
-// seam B(FRopeWrapTargetKey + IRopeWrapTargetRegistry)는 미배선 — 본 그룹(피드백 3번)/디자이너 축
-// 요구가 구체화되면 RopeWrapTargets:: 구현 내부를 registry 조회로 교체한다(설계 초안 Increment 2~4).
+// [배선 상태] ResolveBindingWorld는 랩 경로 전체(Hold/BeginWrap/경로 빌드/앵커 복원/프리뷰)에 배선
+// 완료. 스켈레톤 구조 질의(RopeWrapTargets:: — 부모/자식 키, 스켈레탈 판별)도 랩 경로의 인라인 Cast를
+// 대체해 배선됐다 — 랩 흐름의 스켈레탈 가정은 이 파일 쌍(.h/.cpp)에만 존재한다.
+//
+// [확장 여지] 본 그룹(피드백 3번)/디자이너 축 opt-in 이 구체화되면 "접촉 집계를 무슨 단위로 묶는가"의
+// 집계(aggregation) seam이 필요해진다 — 그때 대상 소유 provider가 선언하는 registry를 도입하고
+// RopeWrapTargets:: 구현 내부를 그 조회로 교체한다(설계 초안 Increment 2~4). 실수요 전까지는 넣지 않는다.
 
 #pragma once
 
@@ -98,50 +96,3 @@ namespace RopeWrapTargets
 		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
 		TArray<IRopeCollider*>& OutColliders);
 }
-
-/**
- * 접촉 집계가 노드를 묶는 단위(POD). 기존엔 FName Bone 하나였다.
- *   단일 본   : Name = 그 본 이름       (기존과 동일)
- *   정적 opt-in: Name = 합성(가상) 본 이름 (5번)
- *   본 그룹   : Name = 그룹 이름         — 그룹에 속한 여러 본이 같은 Key 로 접힌다(3번)
- * TMap 키로 쓰이므로 == 와 GetTypeHash 를 제공한다(FName 위임).
- */
-struct FRopeWrapTargetKey
-{
-	FName Name = NAME_None;
-
-	bool IsValid() const { return !Name.IsNone(); }
-	bool operator==(const FRopeWrapTargetKey& Other) const { return Name == Other.Name; }
-	bool operator!=(const FRopeWrapTargetKey& Other) const { return Name != Other.Name; }
-
-	friend uint32 GetTypeHash(const FRopeWrapTargetKey& Key) { return GetTypeHash(Key.Name); }
-};
-
-/**
- * "무엇이 wrap 가능하고, 접촉이 어느 대상으로 묶이는가"를 선언하는 레지스트리.
- * 로프가 아니라 "감기는 대상" 액터가 provider 로 소유/등록한다 — cross-actor 랩이라 로프는 자신이 어떤
- * 스켈레톤에 맞을지 미리 모르기 때문이다(콜라이더 provider 와 동일한 lifecycle / gather 경로).
- * 피드백 5번(정적 opt-in)과 3번(본 그룹 선언)의 디자이너 opt-in 이 전부 여기 모인다.
- */
-class DYNAMICROPE_API IRopeWrapTargetRegistry
-{
-public:
-	virtual ~IRopeWrapTargetRegistry() = default;
-
-	/**
-	 * 이 접촉을 wrap 대상으로 인정하는가? 인정하면 집계 키 + 이 노드의 바인딩 프레임을 채우고 true.
-	 *   스켈레탈 단일 본 : OutKey.Name = Contact.Bone,   OutFrame = { SourceMesh, Contact.Bone }
-	 *   스켈레탈 + 그룹  : OutKey.Name = 그룹명,          OutFrame = { SourceMesh, Contact.Bone(각자 유지) }
-	 *   정적 opt-in      : OutKey.Name = 가상 본 이름,    OutFrame = { 정적 컴포넌트, 소켓? }
-	 *   정적 비-opt-in   : false(충돌만 되고 랩 불가 — 기존 동작 유지)
-	 */
-	virtual bool ResolveTarget(const FRopeContact& Contact,
-		FRopeWrapTargetKey& OutKey, FRopeBindingFrame& OutFrame) const = 0;
-
-	/**
-	 * 대상의 "대표" 바인딩 프레임 — Wrapping 경로 빌드(FRopeWrappingPhase)의 축/원점 기준으로 쓴다.
-	 * 단일 본이면 그 본 프레임을 그대로, 그룹이면 멤버 본들의 합성(두 캡슐 convex hull 실린더 축, 3번)을
-	 * 반환한다. Hold 는 이걸 쓰지 않는다(앵커가 각자 자기 Binding 프레임으로 따라감) — 경로 형상 유도 전용.
-	 */
-	virtual FRopeBindingFrame GetRepresentativeFrame(const FRopeWrapTargetKey& Key) const = 0;
-};

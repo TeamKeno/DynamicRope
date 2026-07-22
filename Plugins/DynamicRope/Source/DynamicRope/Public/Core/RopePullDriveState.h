@@ -38,16 +38,6 @@ struct FRopePullDriveState
 	FVector LastPullDirRaw = FVector::ZeroVector;
 
 	/**
-	 * 앵커(LastPullSample.WorldPoint)의 월드 속도 추정(cm/s, EMA). 매 Wrapped 유효 프레임에 WorldPoint의
-	 * 프레임 간 차분으로 갱신한다. 디버거/BP 관찰용 관측치 — 레거시 피드포워드 소비는 제거됐다(λ 제약은
-	 * 끝 속도를 실측해 움직이는 앵커를 자동 추종한다). bPrevAnchorPointValid=false면 미시드(첫 유효
-	 * 프레임엔 prev만 채운다). ResetTransient에서 리셋.
-	 */
-	FVector SmoothedAnchorVelocity = FVector::ZeroVector;
-	FVector PrevAnchorPoint = FVector::ZeroVector;
-	bool bPrevAnchorPointValid = false;
-
-	/**
 	 * Pull 조준 노드의 시간 스무딩 상태(fractional). ComputePull이 고른 정수 AimNode를 float로 EMA해 노드
 	 * 사이를 보간 → 방향/tether를 연속화(이산 홉 제거). <0 = 미초기화(wrap 시작 후 첫 유효 프레임에 시드).
 	 * ResetTransient에서 -1로 리셋. PullAimSmoothTime이 상수.
@@ -139,9 +129,6 @@ struct FRopePullDriveState
 		SmoothedPullDir = FVector::ZeroVector;
 		SmoothedWielderPullDir = FVector::ZeroVector;
 		SmoothedAimNodeF = -1.0f;
-		SmoothedAnchorVelocity = FVector::ZeroVector;
-		PrevAnchorPoint = FVector::ZeroVector;
-		bPrevAnchorPointValid = false;
 		bTargetPullableInit = false; // 다음 wrap 시작 시 순수 비교로 다시 시드.
 		bPullTaut = false;
 		bChainTaut = false;

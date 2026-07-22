@@ -100,21 +100,6 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 	PullDrive.SmoothedPullDir = RopeTraction::SmoothDirection(
 		PullDrive.SmoothedPullDir, DirIn, RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
 	PullDrive.LastPullSample.Direction = PullDrive.SmoothedPullDir;
-
-	// (3) 앵커 월드 속도 추정(WorldPoint 프레임 차분 → EMA) — wielder 견인 피드포워드의 관측치.
-	// 리엘(overshoot P 제어)은 오차만 닫으므로 순항 중인 앵커(비행 몬스터 등)는 영영 못 따라잡는다 —
-	// 이 속도의 로프 축 성분을 견인 목표에 더해 따라잡음은 피드포워드가, 오차 수렴은 리엘이 맡는다.
-	// 정지 앵커는 0이라 동작 불변. 첫 유효 프레임은 prev만 채워 0에서 램프업(wrap 직후 홱 당김 방지).
-	// 노드 위치 지터는 방향 EMA와 같은 상수(PullDirSmoothTime)로 다듬는다.
-	const FVector AnchorPoint = PullDrive.LastPullSample.WorldPoint;
-	if (PullDrive.bPrevAnchorPointValid && DeltaTime > 1e-4f)
-	{
-		const FVector RawAnchorVel = (AnchorPoint - PullDrive.PrevAnchorPoint) / DeltaTime;
-		PullDrive.SmoothedAnchorVelocity = FMath::Lerp(PullDrive.SmoothedAnchorVelocity, RawAnchorVel,
-			RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
-	}
-	PullDrive.PrevAnchorPoint = AnchorPoint;
-	PullDrive.bPrevAnchorPointValid = true;
 }
 
 void URopeComponent::ApplyWrappedTraction(float DeltaTime)

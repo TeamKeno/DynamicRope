@@ -10,7 +10,7 @@
 #include "Core/RopeSimTypes.h"
 #include "Core/RopeTractionTypes.h"
 #include "Core/RopeWrappingTypes.h"
-// 랩 대상 추상화: FRopeBindingFrame/ResolveBindingWorld(Hold 바인딩, seam A) + FRopeWrapTargetKey(seam B)
+// 랩 대상 추상화: FRopeBindingFrame/ResolveBindingWorld(Hold 바인딩) + RopeWrapTargets:: 구조 질의
 #include "Core/RopeWrapTarget.h"
 
 class USkeletalMeshComponent;

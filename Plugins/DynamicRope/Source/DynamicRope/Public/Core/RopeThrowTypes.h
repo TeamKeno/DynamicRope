@@ -50,35 +50,38 @@ struct DYNAMICROPE_API FRopeThrowContext
 	 */
 	static FRopeThrowContext MakeDefault(const USceneComponent& RopeComponent, const FRopeThrowParams& Params);
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	// 이 struct는 throw 순간 계산되는 런타임 스냅샷이라 저장형 UPROPERTY 멤버로 노출되지 않는다 —
+	// 디테일 패널 편집(EditAnywhere)은 매 던지기마다 덮어써져 의미가 없다. BP Make/Break로 컨텍스트를
+	// 조립하는 호출자를 위해 BlueprintReadWrite만 남긴다.
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	FVector Origin = FVector::ZeroVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	FVector FrameForward = FVector::ForwardVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	FVector FrameUp = FVector::UpVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	FVector FrameRight = FVector::RightVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	FVector OwnerVelocity = FVector::ZeroVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	FVector SocketVelocity = FVector::ZeroVector;
 
 	/** Wielder가 소유하는 던지기 속도. 0 이하이면 RopeComponent의 fallback 값을 사용한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
 	float ThrowSpeed = 0.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	ERopeThrowFrameMode FrameMode = ERopeThrowFrameMode::Owner;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	ERopeSwingPlane SwingPlane = ERopeSwingPlane::AimAndFrameUp;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
 
 	/** 이 컨텍스트를 조준 ray 경로가 만들었는지 나타낸다 — hit/miss와 무관하게 참이다.
