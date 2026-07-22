@@ -113,6 +113,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
 	FTransform TipMeshRelativeTransform = FTransform::Identity;
 
+	// 팁(창날/작살/추)은 자유단을 매 프레임 따라가는 표시 전용 메쉬라, 충돌 바디가 켜져 있으면 캐릭터
+	// 캡슐/월드와 부딪히거나 로프의 충돌 질의와 간섭해 로프 거동이 튄다 — **기본 꺼짐**. 켜면 우리가
+	// 스폰한 팁은 전체 충돌(QueryAndPhysics)을, 태그로 재사용한 외부 컴포넌트는 저작 충돌(획득 시점 값)을
+	// 갖는다. 적용 시점은 팁 확보(EnsureTipMesh)와 에디터/PIE 편집(PostEditChangeProperty)이다.
+
+	/** 팁 메쉬의 충돌을 켠다. **기본 꺼짐** — 표시 전용 팁의 충돌이 로프/캐릭터와 간섭하는 것을 막는다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
+	bool bTipMeshCollision = false;
+
 	// 끔 = 게임 코드가 GetTipMeshComponent()로 Free 배치를 직접 구동하라는 확장점(로프는 손대지 않는다).
 	// Free 외 페이즈(Flight/GuidedThrow/Wrapping/Wrapped/Releasing/Loaded)는 이 값과 무관하게 항상 추종한다.
 
@@ -767,6 +776,10 @@ private:
 	// (프리셋 전환)이 매 프레임 배치가 덮어쓴 트랜스폼을 저작 기준선으로 오캡처하는 것(스케일 누적 오염)을 막는다.
 	FTransform TipMeshAuthoredRelative = FTransform::Identity;
 
+	// 태그 재사용 팁의 획득 시점 충돌 설정(저작 원본). bTipMeshCollision=false로 껐다가 Teardown에서
+	// 이 값으로 되돌린다(외부 컴포넌트 소유 존중). 스폰분에는 무의미(우리가 만든 것).
+	TEnumAsByte<ECollisionEnabled::Type> TipMeshAuthoredCollision = ECollisionEnabled::QueryAndPhysics;
+
 	// 존재 여부만 필요한 분기가 socket transform까지 읽지 않도록 분리한 경량 질의.
 	bool HasTipSocket(FName Socket) const;
 
@@ -774,6 +787,9 @@ private:
 	void EnsureTipMesh();
 	void TeardownSpawnedTipMesh();
 	void UpdateTipMeshTransform();
+
+	// bTipMeshCollision을 현재 팁 컴포넌트에 반영한다(팁이 없으면 no-op). 확보 시점과 편집 시점이 호출.
+	void ApplyTipMeshCollision();
 
 	//~ Pierce 임베드(소켓 기반) 헬퍼 -------------------------------------------
 	// 소켓 배치 활성 조건의 **단일 소스** = 팁 사용 + 소켓 옵트인 + ③(Guaranteed). Head를 꽂힘 지점에

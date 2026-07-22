@@ -103,6 +103,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip", meta = (EditCondition = "bUseTipMesh"))
 	FTransform TipMeshRelativeTransform = FTransform::Identity;
 
+	/** 팁 메쉬의 충돌을 켠다. **기본 꺼짐** — 표시 전용 팁의 충돌이 로프/캐릭터와 간섭하는 것을 막는다. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip", meta = (EditCondition = "bUseTipMesh"))
+	bool bTipMeshCollision = false;
+
 	/** Free에서 팁을 매 프레임 로프 끝에 맞춘다. 끄면 Free 동안 팁을 건드리지 않는다. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip", meta = (EditCondition = "bUseTipMesh"))
 	bool bSyncTipMeshOnFree = true;

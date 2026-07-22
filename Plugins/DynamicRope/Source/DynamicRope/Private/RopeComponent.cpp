@@ -146,6 +146,7 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	bUseTipMesh = Preset->bUseTipMesh;
 	TipMesh = Preset->TipMesh;
 	TipMeshRelativeTransform = Preset->TipMeshRelativeTransform;
+	bTipMeshCollision = Preset->bTipMeshCollision;
 	bSyncTipMeshOnFree = Preset->bSyncTipMeshOnFree;
 	bUseTipMeshSockets = Preset->bUseTipMeshSockets;
 	TipSocketName = Preset->TipSocketName;
@@ -622,6 +623,11 @@ void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 		PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, RopeLength))
 	{
 		InitRope();
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, bTipMeshCollision))
+	{
+		// PIE 중 토글 시 현재 팁에 즉시 반영(팁이 없으면 no-op — 다음 확보 때 적용된다).
+		ApplyTipMeshCollision();
 	}
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);

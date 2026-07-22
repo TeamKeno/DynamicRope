@@ -67,6 +67,9 @@ void URopeComponent::EnsureTipMesh()
 			// TipMeshAuthoredRelative로 원상 복구하므로(Teardown), 재획득이 오염된 값을 다시 캡처하지 않는다.
 			TipMeshAuthoredScale = TipMeshComponent ? TipMeshComponent->GetComponentScale() : FVector::OneVector;
 			TipMeshAuthoredRelative = TipMeshComponent ? TipMeshComponent->GetRelativeTransform() : FTransform::Identity;
+			// 저작 충돌 캡처 후 bTipMeshCollision 반영(기본 끔). Teardown에서 이 값으로 복원한다.
+			TipMeshAuthoredCollision = TipMeshComponent ? TipMeshComponent->GetCollisionEnabled() : ECollisionEnabled::QueryAndPhysics;
+			ApplyTipMeshCollision();
 			// 태그 컴포넌트가 TipMesh 에셋보다 우선하고 외부 컴포넌트의 메시는 바꾸지 않는다(인스턴스 소유).
 			// 프리셋 전환에서 "TipMesh가 적용 안 된다"로 보이는 침묵을 없애기 위해 알린다.
 			if (TipMesh)
@@ -95,12 +98,13 @@ void URopeComponent::EnsureTipMesh()
 	Owner->AddInstanceComponent(Spawned);
 	Spawned->SetupAttachment(this);
 	Spawned->SetStaticMesh(TipMesh);
-	Spawned->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Spawned->RegisterComponent();
 
 	TipMeshComponent = Spawned;
 	bTipMeshSpawnedByUs = true;
 	TipMeshAuthoredScale = FVector::OneVector;
+	// 스폰분의 충돌은 bTipMeshCollision을 따른다(기본 끔 = NoCollision, 켬 = QueryAndPhysics).
+	ApplyTipMeshCollision();
 }
 
 void URopeComponent::TeardownSpawnedTipMesh()
@@ -116,11 +120,29 @@ void URopeComponent::TeardownSpawnedTipMesh()
 		// 되돌린다. 안 돌리면 다음 획득(프리셋 전환)이 "저작값×직전 프리셋 스케일"을 새 기준선으로 캡처해
 		// 스케일이 누적 오염된다. 월드가 아닌 *상대* 트랜스폼 복원 — 부모가 움직였어도 저작 자세가 유지된다.
 		TipMeshComponent->SetRelativeTransform(TipMeshAuthoredRelative);
+		// 저작 충돌 복원 — bTipMeshCollision=false로 우리가 껐을 수 있으므로(외부 컴포넌트 소유 존중).
+		TipMeshComponent->SetCollisionEnabled(TipMeshAuthoredCollision);
 	}
 	TipMeshComponent = nullptr;
 	bTipMeshSpawnedByUs = false;
 	TipMeshAuthoredScale = FVector::OneVector;
 	TipMeshAuthoredRelative = FTransform::Identity;
+	TipMeshAuthoredCollision = ECollisionEnabled::QueryAndPhysics;
+}
+
+void URopeComponent::ApplyTipMeshCollision()
+{
+	if (!TipMeshComponent)
+	{
+		return;
+	}
+	// 기본은 충돌 끔 — 표시 전용 팁의 충돌 바디가 로프 충돌 질의/캐릭터·월드와 간섭하는 것을 막는다.
+	// 켜면 우리가 스폰한 팁은 전체 충돌(QueryAndPhysics)을, 태그로 재사용한 외부 컴포넌트는 저작 충돌
+	// (획득 시점 값)을 되살린다 — 외부 컴포넌트에 우리가 임의의 프로파일을 강제하지 않는다.
+	const ECollisionEnabled::Type Target = bTipMeshCollision
+		? (bTipMeshSpawnedByUs ? ECollisionEnabled::QueryAndPhysics : TipMeshAuthoredCollision.GetValue())
+		: ECollisionEnabled::NoCollision;
+	TipMeshComponent->SetCollisionEnabled(Target);
 }
 
 void URopeComponent::UpdateTipMeshTransform()
