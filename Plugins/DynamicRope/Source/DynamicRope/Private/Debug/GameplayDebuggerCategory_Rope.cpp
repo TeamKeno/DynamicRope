@@ -527,35 +527,43 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 			return false;
 		};
 
-		// 노드별 이동선(prev→pos)은 감지에 걸린 노드마다 한 줄씩 늘어 화면을 덮는다. 접촉점·법선·후보가
-		// 이미 결과를 보여주므로, "노드가 그 사이 어디를 지났나"까지 봐야 할 때만 상세 보기로 낸다.
-		const bool bShowNodeTrails = HasView(EView::Advanced);
+		// 기본 [U]은 "무엇을 포착하려는가 + 접촉 성공/실패"만, [U]+[K]은 후보 선정·Whip의 원시 관측치까지.
+		// 이 게이트 하나로 flight 오버레이의 기본/상세를 가른다.
+		const bool bAdvanced = HasView(EView::Advanced);
+
 		for (const FRopeFlightNodeDebug& Node : S.NodeDebug)
 		{
-			if (bShowNodeTrails)
+			if (bAdvanced)
 			{
+				// 노드 이동선(prev→pos): "그 사이 어디를 지났나". 노드 수만큼 늘어 상세 보기 전용.
 				AddShape(FGameplayDebuggerShape::MakeSegment(Node.PrevPosition, Node.Position, 1.0f, FColor::White));
-			}
-
-			if (Node.bNearBody)
-			{
-				AddPoint(Node.Position, 8.0f, FColor::Yellow);
+				// near-body: 접촉이 없는 노드만 — 접촉점(초록/빨강)이 이미 상태를 낸 노드에 노란 점을 겹치면
+				// 덮여서 안 보인다.
+				if (Node.bNearBody && !Node.Contact.bHit)
+				{
+					AddPoint(Node.Position, 8.0f, FColor::Yellow);
+				}
 			}
 
 			if (Node.Contact.bHit)
 			{
+				// 접촉 성공(유효 후보로 이어짐)=초록 / 탈락=빨강. 이 판정이 기본 [U]의 핵심이라 상시 표시.
 				const FColor HitColor = HasValidCandidateFor(Node) ? FColor::Green : FColor::Red;
 				AddPoint(Node.Contact.SurfacePoint, 10.0f, HitColor);
-				AddShape(FGameplayDebuggerShape::MakeSegment(Node.Contact.SurfacePoint,
-					Node.Contact.SurfacePoint + Node.Contact.Normal.GetSafeNormal() * 22.0f, 1.0f, FColor::Blue));
+				if (bAdvanced)
+				{
+					// 접촉 법선(원시 관측치)은 상세 보기 전용. 길이는 노드 스케일에 비례(고정 22cm 대신).
+					const float NormalLen = FMath::Clamp(S.NodeCollisionRadius * 3.0f, 12.0f, 40.0f);
+					AddShape(FGameplayDebuggerShape::MakeSegment(Node.Contact.SurfacePoint,
+						Node.Contact.SurfacePoint + Node.Contact.Normal.GetSafeNormal() * NormalLen, 1.0f, FColor::Blue));
+				}
 			}
 		}
 
 		// 후보 박스 선택. 기본 [U]은 포착 대상(tracker (Mesh,Bone)) 대표 1개만, [U]+[K]은 대표 + penetration
 		// 상위 일반 후보로 최대 5개까지. 대표는 top-N 밖이어도 항상 포함한다(predictive 대표는 penetration이
 		// 낮아 정렬 꼴찌이기 쉬운데, 그게 "곧 무엇에 걸리려 하나"라 가장 보고 싶은 값이다). 선택 규칙은
-		// 순수 함수라 단위 테스트로 고정한다(RopeFlightDebugSelectionTests).
-		const bool bAdvanced = HasView(EView::Advanced);
+		// 순수 함수라 단위 테스트로 고정한다(RopeFlightDebugSelectionTests). bAdvanced는 위에서 정의.
 		const RopeFlightDebug::FCandidateSelection Sel = RopeFlightDebug::SelectCandidateBoxes(
 			S.Candidates, S.CandidateMeshKeys, S.TrackerBone, S.TrackerMeshKey,
 			bAdvanced ? 5 : 1, /*bFillWithGeneral=*/bAdvanced);
@@ -601,24 +609,17 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 				Sel.TotalValid, Sel.Shown, Sel.Hidden));
 		}
 
-		// whip 가이드.
+		// 후보 박스 출처 색 범례(상세 보기 전용) — 색만으로 출처를 구분해야 하므로 [K]에서 한 줄로 낸다.
+		if (bAdvanced)
+		{
+			AddTextLine(TEXT("  {grey}box src: {cyan}Actual {green}PredictiveFree {magenta}PredictiveGuided"));
+		}
+
+		// whip 가이드. 색은 한 계열(cyan)로 통일한다 — 접촉 성공/실패의 초록/빨강과 섞이지 않게.
 		if (S.bWhipActive && S.Positions.Num() >= 2)
 		{
 			const int32 LastNode = S.Positions.Num() - 1;
-			AddShape(FGameplayDebuggerShape::MakeBox(S.Positions[0], FVector(4.5f), FColor::White));
-			for (int32 i = 1; i <= LastNode; ++i)
-			{
-				const float Frac = static_cast<float>(i) / static_cast<float>(LastNode);
-				if (Frac <= S.WhipGuidedEnd)
-				{
-					AddShape(FGameplayDebuggerShape::MakeBox(S.Positions[i], FVector(3.5f), FColor::Cyan));
-				}
-				else
-				{
-					AddPoint(S.Positions[i], 8.0f, FColor::Green);
-				}
-			}
-			// 가이드 커브 자체(타깃 점 + 이음선)는 기본으로 낸다 — 스윙이 어디로 향하는지가 요지다.
+			// 가이드 커브(타깃 점 + 이음선)는 기본으로 — 스윙이 어디로 향하는지가 요지다.
 			for (int32 i = 0; i < S.WhipGuideTargets.Num(); ++i)
 			{
 				AddPoint(S.WhipGuideTargets[i], 10.0f, FColor::Cyan);
@@ -627,16 +628,33 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 					AddShape(FGameplayDebuggerShape::MakeSegment(S.WhipGuideTargets[i], S.WhipGuideTargets[i + 1], 1.0f, FColor::Cyan));
 				}
 			}
-			// 노드→타깃 보정선은 노드마다 한 줄씩 늘어 Flight의 짧은 순간에 화면을 덮는다. 가이드가 실제로
-			// 어느 노드를 얼마나 끌고 있는지 봐야 할 때만 상세 보기로.
-			if (HasView(EView::Advanced))
+			// 기본 [U]은 guided/free 경계 하나만 마커로 — "어디까지 가이드가 끄는가"가 요지고, 노드별 표시는
+			// 상세 보기로 뺀다. 경계 노드 = Frac이 WhipGuidedEnd 이하인 마지막 노드.
+			const int32 BoundaryNode = FMath::Clamp(FMath::FloorToInt(S.WhipGuidedEnd * LastNode), 0, LastNode);
+			AddShape(FGameplayDebuggerShape::MakeBox(S.Positions[BoundaryNode], FVector(5.0f), FColor::Cyan));
+
+			if (bAdvanced)
 			{
+				// guided/free 노드별 표시(원시) — 한 색 계열: guided=cyan 박스, free=옅은 cyan 점.
+				for (int32 i = 1; i <= LastNode; ++i)
+				{
+					const float Frac = static_cast<float>(i) / static_cast<float>(LastNode);
+					if (Frac <= S.WhipGuidedEnd)
+					{
+						AddShape(FGameplayDebuggerShape::MakeBox(S.Positions[i], FVector(3.5f), FColor::Cyan));
+					}
+					else
+					{
+						AddPoint(S.Positions[i], 8.0f, FColor(90, 170, 170));
+					}
+				}
+				// 노드→가이드 타깃 보정선(원시): 어느 노드를 어느 타깃으로 얼마나 끄는가. cyan 계열(teal)로.
 				for (int32 i = 0; i < S.WhipGuideTargets.Num(); ++i)
 				{
 					if (S.WhipGuideNodeIndices.IsValidIndex(i) && S.Positions.IsValidIndex(S.WhipGuideNodeIndices[i]))
 					{
 						AddShape(FGameplayDebuggerShape::MakeSegment(S.Positions[S.WhipGuideNodeIndices[i]],
-							S.WhipGuideTargets[i], 1.0f, FColor(255, 140, 0)));
+							S.WhipGuideTargets[i], 1.0f, FColor(0, 180, 200)));
 					}
 				}
 			}
