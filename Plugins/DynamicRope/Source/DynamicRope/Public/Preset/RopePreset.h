@@ -6,7 +6,7 @@
 // override 표면 폭발을 의도적으로 배제 — 2026-07-18 회의 11번 안건).
 //
 // 담지 않는 것(인스턴스 배선 — 액터/스켈레톤에 결합된 값이라 프리셋이 덮으면 배선이 깨진다):
-// TipMeshComponentTag(소유 액터의 컴포넌트 태그), ReelHandSocket(소유 스켈레톤 소켓),
+// TipMeshComponentTag(소유 액터의 컴포넌트 태그), LoadedHandSocket(소유 스켈레톤 소켓),
 // Wielder 쪽 전부(AttachMesh/입력/Movement — v1 범위 밖).
 //
 // 필드는 URopeComponent의 동명 프로퍼티와 1:1 미러다 — 기본값·Clamp meta·툴팁을 컴포넌트와
@@ -24,9 +24,9 @@ class UStaticMesh;
 
 /**
  * 로프 프리셋 — 검증된 로프 구성(그래플링 훅/포획 로프/자유 시뮬 등) 한 벌을 에셋으로 담아
- * URopeComponent::ApplyPreset()으로 통째 적용한다(Free/Reel 페이즈에서만).
+ * URopeComponent::ApplyPreset()으로 통째 적용한다(Free/Loaded 페이즈에서만).
  */
-UCLASS(BlueprintType, meta = (ToolTip = "A complete rope configuration (mode, physics, detection, hold, tip, render) applied to a URopeComponent as one stamp via ApplyPreset(). Values are copied — no live link. Only applies while the rope is in Free or Reel phase."))
+UCLASS(BlueprintType, meta = (ToolTip = "A complete rope configuration (mode, physics, detection, hold, tip, render) applied to a URopeComponent as one stamp via ApplyPreset(). Values are copied — no live link. Only applies while the rope is in Free or Loaded phase."))
 class DYNAMICROPE_API URopePreset : public UDataAsset
 {
 	GENERATED_BODY()
@@ -88,7 +88,7 @@ public:
 	FRopeWhipConfig WhipConfig;
 
 	//~ Tip(팁 부착물) -------------------------------------------------------
-	// TipMeshComponentTag/ReelHandSocket은 인스턴스 배선이라 프리셋에 없다(파일 머리 주석).
+	// TipMeshComponentTag/LoadedHandSocket은 인스턴스 배선이라 프리셋에 없다(파일 머리 주석).
 	// 적용 시 기존 팁(우리가 스폰한 것만)은 파괴 후 새 설정으로 재확보된다.
 
 	/** 팁 부착물을 사용한다. 끄면 아래 Tip 설정이 전부 무시되고 팁 없는 일반 로프가 된다. */

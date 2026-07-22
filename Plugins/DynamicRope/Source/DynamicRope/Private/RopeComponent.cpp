@@ -45,68 +45,68 @@ URopeComponent::URopeComponent()
 
 #pragma region Public_API
 
-void URopeComponent::EnterReel()
+void URopeComponent::EnterLoaded()
 {
-	// ③(GuaranteedWrap) 전용 던지기 준비 상태. 창(팁)을 손 소켓에 들고, 로프 튜브 표시는 bShowRopeInReel을 따른다.
+	// ③(GuaranteedWrap) 전용 던지기 준비 상태. 창(팁)을 손 소켓에 들고, 로프 튜브 표시는 bShowRopeWhenLoaded을 따른다.
 	// 꽂힌 뒤 release로 Free가 된 상태에서만 진입한다(초기 BeginPlay 진입은 예외).
 	if (ResolveMode != ERopeWrapResolveMode::GuaranteedWrap)
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] EnterReel ignored: Reel은 GuaranteedWrap(③) 전용이다."), *GetName());
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] EnterLoaded ignored: Loaded은 GuaranteedWrap(③) 전용이다."), *GetName());
 		return;
 	}
-	if (Phase != ERopePhase::Free && Phase != ERopePhase::Reel)
+	if (Phase != ERopePhase::Free && Phase != ERopePhase::Loaded)
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] EnterReel ignored: phase=%s (Free/Reel에서만 장전 가능)."),
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] EnterLoaded ignored: phase=%s (Free/Loaded에서만 장전 가능)."),
 			*GetName(), PhaseName(Phase));
 		return;
 	}
 
-	// 이미 Reel이면 재장전(상태 리셋)은 하되 연출 훅은 다시 부르지 않는다 — 프리셋 적용이 ③ 로프에
-	// EnterReel()을 무조건 호출하는데(ApplyPreset [7]), 그때 SetPhase는 no-op이라 페이즈 이벤트는 안 나가면서
-	// OnEnterReel만 재발화해 enter/deploy 짝이 어긋났다. 오버라이드가 VFX를 스폰하면 중복 스폰이 된다.
-	const bool bAlreadyReel = (Phase == ERopePhase::Reel);
+	// 이미 Loaded이면 재장전(상태 리셋)은 하되 연출 훅은 다시 부르지 않는다 — 프리셋 적용이 ③ 로프에
+	// EnterLoaded()을 무조건 호출하는데(ApplyPreset [7]), 그때 SetPhase는 no-op이라 페이즈 이벤트는 안 나가면서
+	// OnEnterLoaded만 재발화해 enter/deploy 짝이 어긋났다. 오버라이드가 VFX를 스폰하면 중복 스폰이 된다.
+	const bool bAlreadyLoaded = (Phase == ERopePhase::Loaded);
 
 	EnsureRopeInitialized();
 	ResetTransientPhaseState();
 	ReleaseCooldown = 0.0f;
 	EnsureTipMesh();      // 확보 보험 — 정상 경로는 BeginPlay가 이미 잡았다(이미 있으면 no-op).
-	if (!bAlreadyReel)
+	if (!bAlreadyLoaded)
 	{
-		OnEnterReel();    // 기본: 로프 튜브 숨김(override 가능). 진입 에지에서만.
+		OnEnterLoaded();    // 기본: 로프 튜브 숨김(override 가능). 진입 에지에서만.
 	}
-	SetPhase(ERopePhase::Reel, TEXT("reload"));
+	SetPhase(ERopePhase::Loaded, TEXT("reload"));
 }
 
-void URopeComponent::SetShowRopeInReel(bool bShow)
+void URopeComponent::SetShowRopeWhenLoaded(bool bShow)
 {
-	if (bShowRopeInReel == bShow)
+	if (bShowRopeWhenLoaded == bShow)
 	{
 		return;
 	}
-	bShowRopeInReel = bShow;
+	bShowRopeWhenLoaded = bShow;
 
-	// Reel 중이면 즉시 반영한다(가시성 적용 시점이 진입 에지뿐이라, 없으면 다음 장전까지 안 바뀐다).
-	// 그 외 페이즈는 전개 상태(항상 표시)라 건드리지 않는다 — 다음 OnEnterReel()이 이 값을 소비한다.
-	if (Phase == ERopePhase::Reel)
+	// Loaded 중이면 즉시 반영한다(가시성 적용 시점이 진입 에지뿐이라, 없으면 다음 장전까지 안 바뀐다).
+	// 그 외 페이즈는 전개 상태(항상 표시)라 건드리지 않는다 — 다음 OnEnterLoaded()이 이 값을 소비한다.
+	if (Phase == ERopePhase::Loaded)
 	{
-		SetVisibility(bShowRopeInReel, /*bPropagateToChildren*/ false);
+		SetVisibility(bShowRopeWhenLoaded, /*bPropagateToChildren*/ false);
 	}
 }
 
-bool URopeComponent::ToggleShowRopeInReel()
+bool URopeComponent::ToggleShowRopeWhenLoaded()
 {
-	SetShowRopeInReel(!bShowRopeInReel);
-	return bShowRopeInReel;
+	SetShowRopeWhenLoaded(!bShowRopeWhenLoaded);
+	return bShowRopeWhenLoaded;
 }
 
-void URopeComponent::OnEnterReel()
+void URopeComponent::OnEnterLoaded()
 {
-	// 기본 구현: bShowRopeInReel에 따라 로프 튜브 렌더를 켜고 끈다(끔 = 창만 손 소켓에 보인다).
-	// 창 위치는 UpdateTipMeshTransform이 Reel 분기로 처리.
-	SetVisibility(bShowRopeInReel, /*bPropagateToChildren*/ false);
+	// 기본 구현: bShowRopeWhenLoaded에 따라 로프 튜브 렌더를 켜고 끈다(끔 = 창만 손 소켓에 보인다).
+	// 창 위치는 UpdateTipMeshTransform이 Loaded 분기로 처리.
+	SetVisibility(bShowRopeWhenLoaded, /*bPropagateToChildren*/ false);
 }
 
-void URopeComponent::OnDeployFromReel()
+void URopeComponent::OnDeployFromLoaded()
 {
 	// 기본 구현: 로프 튜브를 다시 표시하고, 전개용으로 전체 길이를 복원한다.
 	SetVisibility(true, /*bPropagateToChildren*/ false);
@@ -115,23 +115,23 @@ void URopeComponent::OnDeployFromReel()
 
 bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 {
-	// [1] 게이트 — 유휴 페이즈(Free/Reel)에서만 통째 적용이 성립한다. 날아가거나 감고 있는 중의
+	// [1] 게이트 — 유휴 페이즈(Free/Loaded)에서만 통째 적용이 성립한다. 날아가거나 감고 있는 중의
 	// 재구성은 지원 범위 밖(시드/래치/경로가 옛 토폴로지를 물고 있다) — 거부하고 아무것도 안 바꾼다.
 	if (!Preset)
 	{
 		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] ApplyPreset ignored: preset이 null이다."), *GetName());
 		return false;
 	}
-	if (Phase != ERopePhase::Free && Phase != ERopePhase::Reel)
+	if (Phase != ERopePhase::Free && Phase != ERopePhase::Loaded)
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] ApplyPreset('%s') ignored: phase=%s (Free/Reel에서만 적용 가능)."),
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] ApplyPreset('%s') ignored: phase=%s (Free/Loaded에서만 적용 가능)."),
 			*GetName(), *Preset->GetName(), PhaseName(Phase));
 		return false;
 	}
-	const bool bWasReel = (Phase == ERopePhase::Reel);
+	const bool bWasLoaded = (Phase == ERopePhase::Loaded);
 
 	// [2] 값 스탬프 — RopeMaterial만 세터(SetMaterial) 경유가 필요해 [5]로 미룬다.
-	// (인스턴스 배선 값 TipMeshComponentTag/ReelHandSocket은 프리셋에 없다 — 헤더 주석 참조.)
+	// (인스턴스 배선 값 TipMeshComponentTag/LoadedHandSocket은 프리셋에 없다 — 헤더 주석 참조.)
 	ResolveMode = Preset->ResolveMode;
 	NumParticles = Preset->NumParticles;
 	RopeLength = Preset->RopeLength;
@@ -175,15 +175,15 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	TeardownSpawnedTipMesh();
 	EnsureTipMesh();
 
-	// [7] 모드-페이즈 정합 — ③은 Reel(장전)에서만 던질 수 있으므로 즉시 장전한다(BeginPlay와 같은 규약).
-	// 반대로 Reel이었는데 ①②가 되면 Reel이 무의미해지므로 전개(가시성/길이 복원) 후 Free로 돌린다.
+	// [7] 모드-페이즈 정합 — ③은 Loaded(장전)에서만 던질 수 있으므로 즉시 장전한다(BeginPlay와 같은 규약).
+	// 반대로 Loaded이었는데 ①②가 되면 Reel이 무의미해지므로 전개(가시성/길이 복원) 후 Free로 돌린다.
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
-		EnterReel();
+		EnterLoaded();
 	}
-	else if (bWasReel)
+	else if (bWasLoaded)
 	{
-		OnDeployFromReel();
+		OnDeployFromLoaded();
 		SetPhase(ERopePhase::Free, TEXT("preset applied"));
 	}
 
@@ -322,18 +322,18 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 		SimFrame.bSolveThisFrame = false;
 		break;
 
-	case ERopePhase::Reel:
+	case ERopePhase::Loaded:
 	{
 		// 던지기 준비 상태(③ 전용): 창(팁)은 손 소켓에 고정하고, 그 뒤 로프는 물리로 자연스럽게 늘어뜨린다.
 		// node 0은 위의 pin 로직(StartPinTarget)이 손을 따라가므로, 팁만 소켓에 고정하면 사이 로프가 처진다.
 		// 팁 고정이 필요한 이유: 던지는 순간 팁 렌더가 소켓 → 마지막 노드로 바뀌므로(UpdateTipMeshTransform),
 		// 마지막 노드가 소켓에 있어야 창이 튀지 않는다. 솔브를 켜야 프리즈 없이 캐릭터를 따라간다.
 		// (Wrapped의 Hold와 동일 패턴: 위치 + InvMass=0 override → 나머지 노드는 솔버가 굴린다.)
-		const int32 ReelTipNode = Sim.Num() - 1;
-		const FTransform ReelTipWorld = GetReelTipTransform();
+		const int32 LoadedTipNode = Sim.Num() - 1;
+		const FTransform LoadedTipWorld = GetLoadedTipTransform();
 		SimFrame.OverrideFrame.EnsureSize(Sim.Num());
-		SimFrame.OverrideFrame.SetPosition(ReelTipNode, ResolveTipRopeAttachWorld(ReelTipWorld), /*bZeroVelocity*/ true);
-		SimFrame.OverrideFrame.SetInvMass(ReelTipNode, 0.0f);
+		SimFrame.OverrideFrame.SetPosition(LoadedTipNode, ResolveTipRopeAttachWorld(LoadedTipWorld), /*bZeroVelocity*/ true);
+		SimFrame.OverrideFrame.SetInvMass(LoadedTipNode, 0.0f);
 		SimFrame.bSolveThisFrame = true;
 		break;
 	}
@@ -517,10 +517,10 @@ void URopeComponent::BeginPlay()
 	// Free에서도 팁이 로프 끝에 보이려면 여기서 확보돼 있어야 한다. Sim을 읽지 않아 초기화 순서 의존이 없다.
 	EnsureTipMesh();
 
-	// ③ Guaranteed 로프는 던지기 준비(Reel) 상태로 시작한다 — 창을 손에 든 채 대기(로프 숨김).
+	// ③ Guaranteed 로프는 던지기 준비(Loaded) 상태로 시작한다 — 창을 손에 든 채 대기(로프 숨김).
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
-		EnterReel();
+		EnterLoaded();
 	}
 }
 

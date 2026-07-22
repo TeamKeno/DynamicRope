@@ -114,17 +114,17 @@ public:
 	FTransform TipMeshRelativeTransform = FTransform::Identity;
 
 	// 끔 = 게임 코드가 GetTipMeshComponent()로 Free 배치를 직접 구동하라는 확장점(로프는 손대지 않는다).
-	// Free 외 페이즈(Flight/GuidedThrow/Wrapping/Wrapped/Releasing/Reel)는 이 값과 무관하게 항상 추종한다.
+	// Free 외 페이즈(Flight/GuidedThrow/Wrapping/Wrapped/Releasing/Loaded)는 이 값과 무관하게 항상 추종한다.
 
 	/** Free에서 팁을 매 프레임 로프 끝에 맞춘다. 끄면 Free 동안 팁을 건드리지 않는다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
 	bool bSyncTipMeshOnFree = true;
 
-	// 기본 GetReelTipTransform() 구현이 사용한다 — 배치 규약을 바꾸려면 그 virtual을 override.
+	// 기본 GetLoadedTipTransform() 구현이 사용한다 — 배치 규약을 바꾸려면 그 virtual을 override.
 
-	/** Reel(장전)에서 팁을 붙일 Owner 스켈레탈 메시 소켓. 없으면 컴포넌트(손) 트랜스폼. */
+	/** Loaded(장전)에서 팁을 붙일 Owner 스켈레탈 메시 소켓. 없으면 컴포넌트(손) 트랜스폼. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
-	FName ReelHandSocket = NAME_None;
+	FName LoadedHandSocket = NAME_None;
 
 	// 켬 = Tail이 로프 끝에, Head가 꽂힘 지점에 오도록 메쉬 원점을 역산하고 그 자세를 bone-local로 얼려
 	// 대상 애니메이션을 따라간다. 끔 = 소켓을 일절 읽지 않는다(위 폴백). ①②에는 무의미.
@@ -166,16 +166,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float ReelSpeed = 150.0f;
 
-	// Reel(장전) 동안의 로프 튜브 가시성. 기본 OnEnterReel() 구현이 소비하는 값이라, 그 훅을 override해
+	// Loaded(장전) 동안의 로프 튜브 가시성. 기본 OnEnterLoaded() 구현이 소비하는 값이라, 그 훅을 override해
 	// 자체 연출을 넣으면 이 값은 무시된다. 끔 = 창만 손 소켓에 보이는 연출, 켬 = 손~창 사이 늘어진
-	// 로프가 그대로 보인다(Reel에서도 솔브는 돌아 로프가 처진다).
-	// 직접 대입은 Reel 중이면 반영되지 않으므로(가시성 적용 시점이 Reel 진입 에지) BlueprintReadOnly +
-	// SetShowRopeInReel/ToggleShowRopeInReel 세터를 쓴다(RopeMaterial과 같은 이유).
+	// 로프가 그대로 보인다(Loaded에서도 솔브는 돌아 로프가 처진다).
+	// 직접 대입은 Loaded 중이면 반영되지 않으므로(가시성 적용 시점이 Loaded 진입 에지) BlueprintReadOnly +
+	// SetShowRopeWhenLoaded/ToggleShowRopeWhenLoaded 세터를 쓴다(RopeMaterial과 같은 이유).
 
-	/** Reel(장전) 상태에서 로프 튜브를 보인다. ③(GuaranteedWrap) 전용 연출 스위치. */
+	/** Loaded(장전) 상태에서 로프 튜브를 보인다. ③(GuaranteedWrap) 전용 연출 스위치. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope",
 		meta = (EditCondition = "ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
-	bool bShowRopeInReel = false;
+	bool bShowRopeWhenLoaded = false;
 
 	// 아래 도메인별 설정 구조체는 전부 ShowOnlyInnerProperties로 노출한다 — 디테일 패널에서 카테고리
 	// 헤더(Rope|Solver / Rope|Throw / …) 바로 아래에 필드가 펼쳐지므로, "카테고리 → 구조체 이름 →
@@ -288,17 +288,17 @@ public:
 	//~ API ---------------------------------------------------------------
 
 	/**
-	 * 프리셋(URopePreset) 통째 적용 — 값 복사(스탬프) 후 로프를 재초기화한다. **Free/Reel에서만**
+	 * 프리셋(URopePreset) 통째 적용 — 값 복사(스탬프) 후 로프를 재초기화한다. **Free/Loaded에서만**
 	 * 성립하고 그 외 페이즈(날아가거나 감고 있는 중)는 false를 반환하며 아무것도 바꾸지 않는다.
-	 * 적용 시: Sim 재시드(InitRope) + 렌더/MID 재구성 + 팁 재확보 + 모드-페이즈 정합(③이면 Reel
-	 * 진입, Reel이었는데 ①②가 되면 Free 복귀).
+	 * 적용 시: Sim 재시드(InitRope) + 렌더/MID 재구성 + 팁 재확보 + 모드-페이즈 정합(③이면 Loaded
+	 * 진입, Loaded이었는데 ①②가 되면 Free 복귀).
 	 * TipMeshComponentTag 등 인스턴스 배선 값은 프리셋 밖이라 유지된다 — 태그로 잡은 외부 팁을
 	 * bUseTipMesh=false 프리셋이 숨겨 주지는 않는다(인스턴스 책임). 리플리케이션 없음(로컬 스탬프).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	bool ApplyPreset(const URopePreset* Preset);
 
-	/** rope를 발사한다. ①②는 초기 tip 속도를 받아 물리 Flight로, ③은 Reel에서만 성립하며 확정 경로를
+	/** rope를 발사한다. ①②는 초기 tip 속도를 받아 물리 Flight로, ③은 Loaded에서만 성립하며 확정 경로를
 	 *  따라가는 GuidedThrow로 진입한다(모드가 경로를 정한다). 실제 방향은 ThrowParams.FrameMode의
 	 *  Forward가 단일 소스다. 방향을 직접 지정하려면 ThrowWithContext(FRopeThrowContext)를 쓸 것. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
@@ -371,29 +371,29 @@ public:
 	void CancelQueuedGuaranteedAimThrow();
 
 	/**
-	 * 던지기 준비(Reel/장전) 상태로 진입한다 — 창(팁)을 손 소켓에 든다(로프 튜브 표시는
-	 * bShowRopeInReel, 기본 숨김). **③ 전용**이고
-	 * **Free/Reel에서만** 유효하다(그 외엔 no-op — 날아가거나 꽂혀 있는 중엔 장전할 수 없다).
-	 * ③ 로프는 BeginPlay에서 Reel로 시작한다. 던지기는 이 상태에서만 성립(CanThrowNow).
+	 * 던지기 준비(Loaded/장전) 상태로 진입한다 — 창(팁)을 손 소켓에 든다(로프 튜브 표시는
+	 * bShowRopeWhenLoaded, 기본 숨김). **③ 전용**이고
+	 * **Free/Loaded에서만** 유효하다(그 외엔 no-op — 날아가거나 꽂혀 있는 중엔 장전할 수 없다).
+	 * ③ 로프는 BeginPlay에서 Loaded로 시작한다. 던지기는 이 상태에서만 성립(CanThrowNow).
 	 * 장전 입력 바인딩은 사용자 몫이다(이 API를 호출).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
-	void EnterReel();
+	void EnterLoaded();
 
-	/** Reel(장전) 중 로프 튜브 표시를 설정한다. Reel 중이면 즉시 반영되고, 그 외 페이즈에서는
-	 *  다음 Reel 진입부터 적용된다(전개 상태의 가시성은 건드리지 않는다). */
+	/** Loaded(장전) 중 로프 튜브 표시를 설정한다. Loaded 중이면 즉시 반영되고, 그 외 페이즈에서는
+	 *  다음 Loaded 진입부터 적용된다(전개 상태의 가시성은 건드리지 않는다). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
-	void SetShowRopeInReel(bool bShow);
+	void SetShowRopeWhenLoaded(bool bShow);
 
-	/** Reel 로프 표시를 뒤집는다(입력 한 키에 물리는 용도). 반환값 = 뒤집은 뒤의 값. */
+	/** Loaded 로프 표시를 뒤집는다(입력 한 키에 물리는 용도). 반환값 = 뒤집은 뒤의 값. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
-	bool ToggleShowRopeInReel();
+	bool ToggleShowRopeWhenLoaded();
 
-	/** Reel 중 로프 튜브를 보이도록 설정돼 있는가. */
+	/** Loaded 중 로프 튜브를 보이도록 설정돼 있는가. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
-	bool IsShowRopeInReel() const { return bShowRopeInReel; }
+	bool IsShowRopeWhenLoaded() const { return bShowRopeWhenLoaded; }
 
-	/** 지금 이 로프에 throw가 성립하는가(모드 × 현재 phase). ③은 Reel에서만, ①②는 항상 true.
+	/** 지금 이 로프에 throw가 성립하는가(모드 × 현재 phase). ③은 Loaded에서만, ①②는 항상 true.
 	 *  던지기 진입과 조준 HUD가 공유하는 게이트다. 게임 규칙(스태미나 등)은 별개 — Wielder의 CanThrow(). */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool CanThrowNow() const { return RopeWrapModes::CanThrowInPhase(ResolveMode, Phase); }
@@ -651,21 +651,21 @@ protected:
 	/** 페이즈 전이 직후, OnRopePhaseChanged 브로드캐스트 직전에 호출(전이당 1회, 같은 페이즈 재설정 제외). */
 	virtual void OnPhaseChanged(ERopePhase OldPhase, ERopePhase NewPhase) {}
 
-	//~ Reel(장전) 연출 훅 — 전부 게임 스레드(콜드 패스). 기본 구현을 override해 연출을 커스텀한다.
+	//~ Loaded(장전) 연출 훅 — 전부 게임 스레드(콜드 패스). 기본 구현을 override해 연출을 커스텀한다.
 
-	/** Reel 중 창(팁)을 놓을 월드 트랜스폼. 기본: Owner 스켈레탈 메시의 ReelHandSocket 소켓(없으면 컴포넌트 트랜스폼).
+	/** Loaded 중 창(팁)을 놓을 월드 트랜스폼. 기본: Owner 스켈레탈 메시의 LoadedHandSocket 소켓(없으면 컴포넌트 트랜스폼).
 	 *  ⚠ 전이당이 아니라 **Reel인 동안 매 프레임 2회** 불린다(노드 구동 + 팁 메쉬 배치) — 무거운 계산은 캐시할 것. */
-	virtual FTransform GetReelTipTransform() const;
+	virtual FTransform GetLoadedTipTransform() const;
 
-	/** Reel 진입 **에지에서만** 1회(이미 Reel일 때 EnterReel()을 다시 불러도 재발화하지 않는다 —
-	 *  프리셋 적용이 ③ 로프에 EnterReel()을 무조건 호출하기 때문). 기본: bShowRopeInReel에 따라
-	 *  로프 튜브 렌더를 켜거나 끈다. OnDeployFromReel과 1:1로 짝지어진다. */
-	virtual void OnEnterReel();
+	/** Loaded 진입 **에지에서만** 1회(이미 Reel일 때 EnterLoaded()을 다시 불러도 재발화하지 않는다 —
+	 *  프리셋 적용이 ③ 로프에 EnterLoaded()을 무조건 호출하기 때문). 기본: bShowRopeWhenLoaded에 따라
+	 *  로프 튜브 렌더를 켜거나 끈다. OnDeployFromLoaded과 1:1로 짝지어진다. */
+	virtual void OnEnterLoaded();
 
 	/** Reel을 벗어나는 순간 1회(throw 성립 또는 프리셋으로 ①②가 될 때). 기본: 로프 튜브를 다시 표시하고
 	 *  전체 길이(RopeLength)를 복원한다.
-	 *  ⚠ 호출 시점의 GetPhase()는 **아직 Reel**이다(페이즈 전이는 이 훅 뒤에 일어난다). */
-	virtual void OnDeployFromReel();
+	 *  ⚠ 호출 시점의 GetPhase()는 **아직 Loaded**이다(페이즈 전이는 이 훅 뒤에 일어난다). */
+	virtual void OnDeployFromLoaded();
 
 	/**
 	 * wrap 대상 게이트. false면 그 (Mesh, Bone) 후보는 없는 것으로 취급된다 — 팀/태그 등 게임 규칙으로

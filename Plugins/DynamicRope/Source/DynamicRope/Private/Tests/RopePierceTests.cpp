@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
 // Pierce(꽂힘) 결착 모드 단위 테스트 — ③ GuaranteedWrap 전용, aim-hit 접점에 단일 앵커로 성립.
-// 다섯 계약을 잠근다: ①②③↔결착 조합 제약, throw phase 게이트(③=Reel 전용), preview 빌더의 단일 앵커
+// 다섯 계약을 잠근다: ①②③↔결착 조합 제약, throw phase 게이트(③=Loaded 전용), preview 빌더의 단일 앵커
 // 산출, 단일 앵커 커밋(BeginWrap), ③ 연출 진입/이탈(Reel→GuidedThrow→Releasing).
 
 #include "Misc/AutomationTest.h"
@@ -23,7 +23,7 @@ namespace
 	}
 }
 
-// throw phase 게이트: ③는 Reel에서만 던질 수 있고, ①②는 phase 게이트가 없다.
+// throw phase 게이트: ③는 Loaded에서만 던질 수 있고, ①②는 phase 게이트가 없다.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceThrowPhaseGateTest,
 	"DynamicRope.Pierce.ThrowPhaseGateContract",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -35,24 +35,24 @@ bool FRopePierceThrowPhaseGateTest::RunTest(const FString& Parameters)
 	// ERopePhase에는 Count/MAX 센티넬이 없다(Reel로 끝남) — 새 phase가 추가되면 여기에 손으로 더해야 한다.
 	static const ERopePhase AllPhases[] = {
 		ERopePhase::Free, ERopePhase::Flight, ERopePhase::Contacting, ERopePhase::Wrapping,
-		ERopePhase::Wrapped, ERopePhase::Releasing, ERopePhase::GuidedThrow, ERopePhase::Reel
+		ERopePhase::Wrapped, ERopePhase::Releasing, ERopePhase::GuidedThrow, ERopePhase::Loaded
 	};
 
-	// ③ GuaranteedWrap = Reel 전용.
-	TestTrue(TEXT("③+Reel 던지기 성립"),
-		CanThrowInPhase(ERopeWrapResolveMode::GuaranteedWrap, ERopePhase::Reel));
+	// ③ GuaranteedWrap = Loaded 전용.
+	TestTrue(TEXT("③+Loaded 던지기 성립"),
+		CanThrowInPhase(ERopeWrapResolveMode::GuaranteedWrap, ERopePhase::Loaded));
 	for (const ERopePhase Phase : AllPhases)
 	{
-		if (Phase == ERopePhase::Reel)
+		if (Phase == ERopePhase::Loaded)
 		{
 			continue;
 		}
-		TestFalse(*FString::Printf(TEXT("③+%d 던지기 불가(Reel 아님)"), static_cast<int32>(Phase)),
+		TestFalse(*FString::Printf(TEXT("③+%d 던지기 불가(Loaded 아님)"), static_cast<int32>(Phase)),
 			CanThrowInPhase(ERopeWrapResolveMode::GuaranteedWrap, Phase));
 	}
 
 	// ①② = phase 게이트 없음 → 모든 phase에서 true.
-	// 이 술어를 `Phase == Reel`로 "단순화"하면 여기서 터진다 — ①②가 조용히 막히는 회귀 방지선이다.
+	// 이 술어를 `Phase == Loaded`로 "단순화"하면 여기서 터진다 — ①②가 조용히 막히는 회귀 방지선이다.
 	for (const ERopePhase Phase : AllPhases)
 	{
 		TestTrue(*FString::Printf(TEXT("①+%d 게이트 없음"), static_cast<int32>(Phase)),
@@ -155,33 +155,33 @@ bool FRopePierceSingleAnchorBeginWrapTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Reel(장전) 전이: ③ 로프는 Free에서 EnterReel() → Reel. 비-③는 no-op. 던지기는 Reel에서만(허용 조건).
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceEnterReelTest,
-	"DynamicRope.Pierce.EnterReelTransition",
+// Loaded(장전) 전이: ③ 로프는 Free에서 EnterLoaded() → Loaded. 비-③는 no-op. 던지기는 Loaded에서만(허용 조건).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceEnterLoadedTest,
+	"DynamicRope.Pierce.EnterLoadedTransition",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FRopePierceEnterReelTest::RunTest(const FString& Parameters)
+bool FRopePierceEnterLoadedTest::RunTest(const FString& Parameters)
 {
-	// ③ 로프: 기본 Free → EnterReel → Reel.
+	// ③ 로프: 기본 Free → EnterLoaded → Loaded.
 	URopeComponent* Guaranteed = NewObject<URopeComponent>();
 	Guaranteed->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
 	TestEqual(TEXT("기본 phase는 Free"), Guaranteed->GetPhase(), ERopePhase::Free);
-	Guaranteed->EnterReel();
-	TestEqual(TEXT("③ EnterReel → Reel"), Guaranteed->GetPhase(), ERopePhase::Reel);
+	Guaranteed->EnterLoaded();
+	TestEqual(TEXT("③ EnterLoaded → Loaded"), Guaranteed->GetPhase(), ERopePhase::Loaded);
 
-	// 비-③(② Assisted): EnterReel은 no-op → Free 유지(Reel은 ③ 전용).
+	// 비-③(② Assisted): EnterLoaded은 no-op → Free 유지(Loaded은 ③ 전용).
 	URopeComponent* Assisted = NewObject<URopeComponent>();
 	Assisted->ResolveMode = ERopeWrapResolveMode::AssistedJudged;
-	Assisted->EnterReel();
-	TestEqual(TEXT("② EnterReel은 no-op"), Assisted->GetPhase(), ERopePhase::Free);
+	Assisted->EnterLoaded();
+	TestEqual(TEXT("② EnterLoaded은 no-op"), Assisted->GetPhase(), ERopePhase::Free);
 
-	// Reel 허용 조건: Reel에서 다시 EnterReel은 Reel 유지(재진입 허용), 그 외 phase에선 무효.
-	Guaranteed->EnterReel();
-	TestEqual(TEXT("Reel에서 재진입해도 Reel"), Guaranteed->GetPhase(), ERopePhase::Reel);
+	// Loaded 허용 조건: Loaded에서 다시 EnterLoaded은 Loaded 유지(재진입 허용), 그 외 phase에선 무효.
+	Guaranteed->EnterLoaded();
+	TestEqual(TEXT("Loaded에서 재진입해도 Loaded"), Guaranteed->GetPhase(), ERopePhase::Loaded);
 	return true;
 }
 
-// ③ 연출 진입/이탈 phase 계약: Reel → (prepared throw) → GuidedThrow → (수동 해제) → Releasing.
+// ③ 연출 진입/이탈 phase 계약: Loaded → (prepared throw) → GuidedThrow → (수동 해제) → Releasing.
 // 이 수동 해제가 FinishWrapRelease의 GuidedThrow 분기(커밋 전 release)로 들어가는 유일한 public 진입로다.
 //
 // [테스트 범위의 한계 — 사실대로 적는다] 연출 중 abort(AbortGuidedThrow → OnRopeReleased)는 여기서
@@ -227,12 +227,12 @@ bool FRopePierceGuidedThrowEntryTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	// Reel 밖에서는 던질 수 없다(CanThrowInPhase 계약의 실제 경로 확인).
+	// Loaded 밖에서는 던질 수 없다(CanThrowInPhase 계약의 실제 경로 확인).
 	TestFalse(TEXT("Free에서는 prepared throw 거부"), Rope->ThrowWithPreparedPreview(Prepared));
 	TestEqual(TEXT("거부 후 phase 불변"), Rope->GetPhase(), ERopePhase::Free);
 
-	Rope->EnterReel();
-	TestTrue(TEXT("Reel에서 prepared throw 성립"), Rope->ThrowWithPreparedPreview(Prepared));
+	Rope->EnterLoaded();
+	TestTrue(TEXT("Loaded에서 prepared throw 성립"), Rope->ThrowWithPreparedPreview(Prepared));
 	TestEqual(TEXT("prepared throw → GuidedThrow"), Rope->GetPhase(), ERopePhase::GuidedThrow);
 
 	// 연출 중 수동 해제 → Releasing(커밋 전이므로 중앙 신호는 안 나가야 하지만 world 없이는 관측 불가).

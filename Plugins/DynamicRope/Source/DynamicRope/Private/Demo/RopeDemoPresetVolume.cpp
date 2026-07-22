@@ -144,7 +144,7 @@ void ARopeDemoPresetVolume::ApplyToActor(AActor* Actor, const URopePreset* InPre
 			continue;
 		}
 
-		// 비행/감김 중 — Free/Reel로 돌아오는 첫 순간에 적용하려고 구독해 둔다.
+		// 비행/감김 중 — Free/Loaded로 돌아오는 첫 순간에 적용하려고 구독해 둔다.
 		bool bAlreadyPending = false;
 		PendingRopes.Add(Rope, &bAlreadyPending);
 		if (!bAlreadyPending)
@@ -158,7 +158,7 @@ void ARopeDemoPresetVolume::ApplyToActor(AActor* Actor, const URopePreset* InPre
 
 bool ARopeDemoPresetVolume::ApplyToRope(URopeComponent* Rope, const URopePreset* InPreset)
 {
-	// ApplyPreset이 Free/Reel 게이트를 직접 판정하므로(거부 시 false, 아무것도 안 바꿈) 여기서
+	// ApplyPreset이 Free/Loaded 게이트를 직접 판정하므로(거부 시 false, 아무것도 안 바꿈) 여기서
 	// 페이즈를 다시 해석하지 않는다 — 게이트의 단일 소스는 컴포넌트다.
 	if (!IsValid(Rope) || !InPreset || !Rope->ApplyPreset(InPreset))
 	{

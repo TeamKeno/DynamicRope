@@ -4,10 +4,10 @@
 // 성격을 바꿔(자유 시뮬 / 포획용 / 그래플링 훅) "튜닝 하나로 완전히 다른 로프가 된다"를 보여주는 게
 // 목적이다. 나가면서 ExitPreset을 지정해 두면 되돌리는 것도 된다.
 //
-// ApplyPreset은 **Free/Reel에서만** 성립한다(날아가거나 감고 있는 중에 값을 갈아끼우면 시뮬이
+// ApplyPreset은 **Free/Loaded에서만** 성립한다(날아가거나 감고 있는 중에 값을 갈아끼우면 시뮬이
 // 튄다). 그래서 볼륨에 들어온 순간 로프가 비행/감김 중이면 적용이 실패하는데, 그때 조용히 넘어가면
 // "문을 통과했는데 로프가 안 바뀌는" 상황이 된다. bApplyWhenRopeSettles를 켜면(기본) 실패한 로프를
-// 대기열에 넣고 OnRopePhaseChanged를 구독해, **볼륨 안에 있는 동안** 로프가 Free/Reel로 돌아오는
+// 대기열에 넣고 OnRopePhaseChanged를 구독해, **볼륨 안에 있는 동안** 로프가 Free/Loaded로 돌아오는
 // 첫 순간에 적용한다.
 //
 // 되돌리기가 자동이 아닌 이유: URopeComponent는 프리셋을 "스탬프"(값 복사)로 적용하고 프리셋 포인터를
@@ -58,7 +58,7 @@ public:
 
 	/**
 	 * 들어온 시점에 로프가 비행/감김 중이라 적용이 거부되면, 볼륨 안에 있는 동안 기다렸다가
-	 * Free/Reel로 돌아오는 순간 적용한다. 끄면 그 순간 실패로 끝난다.
+	 * Free/Loaded로 돌아오는 순간 적용한다. 끄면 그 순간 실패로 끝난다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo")
 	bool bApplyWhenRopeSettles = true;
@@ -77,7 +77,7 @@ private:
 	void HandleEndOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 
-	/** 대기 중인 로프가 Free/Reel로 돌아왔는지 확인해 적용을 재시도한다. */
+	/** 대기 중인 로프가 Free/Loaded로 돌아왔는지 확인해 적용을 재시도한다. */
 	UFUNCTION()
 	void HandleRopePhaseChanged(ERopePhase OldPhase, ERopePhase NewPhase);
 
@@ -93,6 +93,6 @@ private:
 	/** 액터 단위 오버랩 카운트(랙돌 등 다중 바디 대응 — RopeDemoPressurePlate와 같은 이유). */
 	TMap<TWeakObjectPtr<AActor>, int32> OverlapCounts;
 
-	/** Free/Reel 복귀를 기다리는 로프. */
+	/** Free/Loaded 복귀를 기다리는 로프. */
 	TSet<TWeakObjectPtr<URopeComponent>> PendingRopes;
 };

@@ -78,7 +78,7 @@ namespace
 		case ERopePhase::Wrapped:    return TEXT("Wrapped");
 		case ERopePhase::Releasing:  return TEXT("Releasing");
 		case ERopePhase::GuidedThrow: return TEXT("GuidedThrow");
-		case ERopePhase::Reel:       return TEXT("Reel");
+		case ERopePhase::Loaded:       return TEXT("Loaded");
 		default:                     return TEXT("?");
 		}
 	}
@@ -286,14 +286,14 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 	{
 		return;
 	}
-	// 조준 모드는 맞지만 지금 던질 수 없는 phase — GuaranteedWrap은 Reel(장전)에서만 조준이 성립한다.
+	// 조준 모드는 맞지만 지금 던질 수 없는 phase — GuaranteedWrap은 Loaded(장전)에서만 조준이 성립한다.
 	// 진입하면 해소되는 일시 상태라 "왜 조준이 안 잡히나"의 답이 된다. 다만 평소엔 자리만 차지하므로
 	// 상세 보기에서만 낸다.
 	if (!Wielder.IsAimActive())
 	{
 		if (HasView(EView::Advanced))
 		{
-			AddTextLine(TEXT("  {white}aim: {grey}inactive — GuaranteedWrap aims from Reel only"));
+			AddTextLine(TEXT("  {white}aim: {grey}inactive — GuaranteedWrap aims from Loaded only"));
 		}
 		return;
 	}

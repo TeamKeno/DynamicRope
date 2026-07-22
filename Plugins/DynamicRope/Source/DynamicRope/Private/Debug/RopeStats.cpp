@@ -44,7 +44,7 @@ void RopeStats::RecordFrameStats(TConstArrayView<TObjectPtr<URopeComponent>> Rop
 		}
 		TotalParticles += Rope->GetNodeCount();
 
-		// physics/logic 경계 = 솔버가 굴리는 페이즈(Free/Flight)인가 아닌가. 나머지(Contacting..Reel)는 전부 로직.
+		// physics/logic 경계 = 솔버가 굴리는 페이즈(Free/Flight)인가 아닌가. 나머지(Contacting..Loaded)는 전부 로직.
 		const ERopePhase Phase = Rope->GetPhase();
 		if (Phase == ERopePhase::Free || Phase == ERopePhase::Flight)
 		{

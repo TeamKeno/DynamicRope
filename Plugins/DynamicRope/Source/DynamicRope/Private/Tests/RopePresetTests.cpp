@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
 // URopePreset(DataAsset) + URopeComponent::ApplyPreset의 유닛 테스트 — world 없이 NewObject로 검증
-// (EnterReel/ApplyPreset이 world 비의존인 것은 RopePierceTests의 phase 계약 테스트와 같은 전제).
+// (EnterLoaded/ApplyPreset이 world 비의존인 것은 RopePierceTests의 phase 계약 테스트와 같은 전제).
 //
 // [테스트 범위의 한계 — RopePierceTests와 동일한 이유] OnPresetApplied(dynamic delegate) 발화와
 // Wielder의 RefreshModeDerivedState 연쇄는 여기서 검증할 수 없다: dynamic delegate는 UFUNCTION을
@@ -162,8 +162,8 @@ bool FRopePresetApplyStampsValuesTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 모드-페이즈 정합: Free+③프리셋 → 즉시 Reel(장전) 진입 + 던지기 게이트 통과.
-// 이어서 Reel에서 ①프리셋 → 전개 후 Free 복귀(①은 게이트 없음).
+// 모드-페이즈 정합: Free+③프리셋 → 즉시 Loaded(장전) 진입 + 던지기 게이트 통과.
+// 이어서 Loaded에서 ①프리셋 → 전개 후 Free 복귀(①은 게이트 없음).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePresetModePhaseReconciliationTest,
 	"DynamicRope.Preset.ModePhaseReconciliation",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -176,19 +176,19 @@ bool FRopePresetModePhaseReconciliationTest::RunTest(const FString& Parameters)
 	Guaranteed->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
 
 	TestTrue(TEXT("Free에서 ③ 적용 성공"), Rope->ApplyPreset(Guaranteed));
-	TestEqual(TEXT("③ 적용 → Reel 진입"), Rope->GetPhase(), ERopePhase::Reel);
-	TestTrue(TEXT("Reel에서 던지기 게이트 통과"), Rope->CanThrowNow());
+	TestEqual(TEXT("③ 적용 → Loaded 진입"), Rope->GetPhase(), ERopePhase::Loaded);
+	TestTrue(TEXT("Loaded에서 던지기 게이트 통과"), Rope->CanThrowNow());
 
 	URopePreset* FreeSim = NewObject<URopePreset>();
 	FreeSim->ResolveMode = ERopeWrapResolveMode::FullSimulation;
 
-	TestTrue(TEXT("Reel에서 ① 적용 성공(Reel은 허용 페이즈)"), Rope->ApplyPreset(FreeSim));
+	TestTrue(TEXT("Loaded에서 ① 적용 성공(Loaded은 허용 페이즈)"), Rope->ApplyPreset(FreeSim));
 	TestEqual(TEXT("①로 전환 → Free 복귀"), Rope->GetPhase(), ERopePhase::Free);
 	TestTrue(TEXT("①은 페이즈 게이트 없음"), Rope->CanThrowNow());
 	return true;
 }
 
-// 페이즈 게이트 음성: Free/Reel 밖(Wrapped)에서는 false를 반환하고 **아무 필드도 바꾸지 않는다**
+// 페이즈 게이트 음성: Free/Loaded 밖(Wrapped)에서는 false를 반환하고 **아무 필드도 바꾸지 않는다**
 // (게이트가 스탬프보다 앞이라는 순서 계약의 증명).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePresetRejectsOutsideFreeReelTest,
 	"DynamicRope.Preset.RejectsOutsideFreeReel",

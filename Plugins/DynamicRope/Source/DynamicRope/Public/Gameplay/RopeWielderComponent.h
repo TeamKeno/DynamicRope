@@ -65,8 +65,8 @@ enum class ERopeThrowRejectReason : uint8
 	Gated = 0,
 	/** RopeComponent가 prepared preview throw를 거부함(CanWrapTarget 게이트 포함). */
 	RopeRejected = 3,
-	/** ③을 Reel(장전) 밖에서 던지려 함 — EnterReel()이 먼저다. */
-	NotInReel = 4
+	/** ③을 Loaded(장전) 밖에서 던지려 함 — EnterLoaded()이 먼저다. */
+	NotLoaded = 4
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FRopeWielderOnThrown);
@@ -237,7 +237,7 @@ public:
 	bool UsesAimRay() const;
 
 	/** 지금 조준이 의미가 있는가 = UsesAimRay() && 로프가 던질 수 있는 phase(CanThrowNow).
-	 *  UsesAimRay()의 **프레임 단위 쌍둥이** — ③은 Reel에서만 true, ①②는 UsesAimRay()와 동치.
+	 *  UsesAimRay()의 **프레임 단위 쌍둥이** — ③은 Loaded에서만 true, ①②는 UsesAimRay()와 동치.
 	 *  조준 HUD·위젯·디버거 시각화가 전부 이 하나를 게이트로 쓴다. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim")
 	bool IsAimActive() const;
@@ -254,7 +254,7 @@ public:
 	// 무시되던 이중을 해소. Wielder는 조준 방향과 손 소켓 원점 등 "출처"만 컨텍스트에 얹는다.
 
 	//~ Preview(GuaranteedWrap 모드 전용) ----------------------------------
-	// preview는 GuaranteedWrap만 쓴다 — Reel에서 조준한 대상을 확정 throw로 던지기 위한 prepared path를
+	// preview는 GuaranteedWrap만 쓴다 — Loaded에서 조준한 대상을 확정 throw로 던지기 위한 prepared path를
 	// 만든다. FullSimulation/AssistedJudged는 감김이 판정/창발이라 던지기 전에 확정할 경로가 없어 preview가
 	// 없다(AssistedJudged의 조준 표시는 aim ray HUD가 담당). 아래 필드는 전부 GuaranteedWrap의 표시/보류 정책이다.
 	/** 비어 있으면 owner에서 찾는다. */
@@ -308,7 +308,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputAction> ReelOutAction = nullptr;
 
-	/** 장전 액션. Started에 Rope->EnterReel() — ③(Guaranteed) 로프를 던지기 준비(Reel) 상태로 전환한다. */
+	/** 장전 액션. Started에 Rope->EnterLoaded() — ③(Guaranteed) 로프를 던지기 준비(Loaded) 상태로 전환한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputAction> ReloadAction = nullptr;
 
@@ -529,7 +529,7 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeWielderOnThrown OnThrown;
 
-	/** 던지기 입력이 실행되지 못했을 때(사유 포함) — UI 피드백용. ③을 Reel 밖에서 던지려 한 경우도 여기로 온다. */
+	/** 던지기 입력이 실행되지 못했을 때(사유 포함) — UI 피드백용. ③을 Loaded 밖에서 던지려 한 경우도 여기로 온다. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeWielderOnThrowRejected OnThrowRejected;
 

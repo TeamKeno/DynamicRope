@@ -24,7 +24,7 @@ namespace RopeComponentPrivate
 		case ERopePhase::Wrapped:     return TEXT("Wrapped");
 		case ERopePhase::GuidedThrow: return TEXT("GuidedThrow");
 		case ERopePhase::Releasing:   return TEXT("Releasing");
-		case ERopePhase::Reel:        return TEXT("Reel");
+		case ERopePhase::Loaded:        return TEXT("Loaded");
 		default:                      return TEXT("?");
 		}
 	}

@@ -34,8 +34,8 @@ enum class ERopePhase : uint8
 	Releasing = 6,
 
 	/** ③(GuaranteedWrap) 전용: 창(팁)을 손에 든 던지기 준비 상태. 로프는 숨기고, 이 상태에서만 throw가 성립한다.
-	 *  꽂힌 뒤 release로 Free가 된 상태에서 EnterReel()로 진입한다. */
-	Reel = 7
+	 *  꽂힌 뒤 release로 Free가 된 상태에서 EnterLoaded()로 진입한다. */
+	Loaded = 7
 };
 
 /** 이 로프의 engagement(접촉/성립/③ 조준 던지기)가 끝난 이유. **성립(wrap) 전 abort도 포함**한다 —
@@ -91,7 +91,7 @@ enum class ERopeWrapResolveMode : uint8
 	// 사거리 밖) 거부가 아니라 레이 끝점을 향해 아치로 날아가 안 꽂히고 Free로 떨어진다 — 보장은
 	// '조준한 대상'에 대한 것이라 이것도 정상 결과다. 자동 release(장력/거리)는 무효 — 명시 해제만.
 
-	/** ③ 무조건 성립 — 조준한 대상에 실패 없이 결착. Reel(장전)에서만 던질 수 있다(데모/연출/이동기). */
+	/** ③ 무조건 성립 — 조준한 대상에 실패 없이 결착. Loaded(장전)에서만 던질 수 있다(데모/연출/이동기). */
 	GuaranteedWrap = 2 UMETA(DisplayName = "Guaranteed")
 };
 
@@ -100,16 +100,16 @@ enum class ERopeWrapResolveMode : uint8
 namespace RopeWrapModes
 {
 	/**
-	 * 이 모드에서 이 phase에 throw가 성립하는가. ③(GuaranteedWrap)는 Reel(장전) 전용이고,
+	 * 이 모드에서 이 phase에 throw가 성립하는가. ③(GuaranteedWrap)는 Loaded(장전) 전용이고,
 	 * ①②는 phase 게이트가 없어 **항상 true**다.
 	 *
-	 * [함정] 이건 "던지기 게이트에 걸리지 않는다"는 뜻이지 **"③이고 Reel이다"가 아니다**.
-	 * `X && Phase == Reel` 꼴을 이 함수 단독으로 바꾸면 ①②가 true로 새어 들어간다 —
+	 * [함정] 이건 "던지기 게이트에 걸리지 않는다"는 뜻이지 **"③이고 Loaded이다"가 아니다**.
+	 * `X && Phase == Loaded` 꼴을 이 함수 단독으로 바꾸면 ①②가 true로 새어 들어간다 —
 	 * 그런 자리는 반드시 `X && CanThrowInPhase(...)` 꼴을 유지할 것.
 	 */
 	inline bool CanThrowInPhase(ERopeWrapResolveMode Mode, ERopePhase Phase)
 	{
-		return Mode != ERopeWrapResolveMode::GuaranteedWrap || Phase == ERopePhase::Reel;
+		return Mode != ERopeWrapResolveMode::GuaranteedWrap || Phase == ERopePhase::Loaded;
 	}
 }
 

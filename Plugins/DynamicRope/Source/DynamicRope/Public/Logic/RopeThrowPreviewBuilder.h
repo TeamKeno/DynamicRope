@@ -44,7 +44,7 @@ public:
 		float QueryRadius = 0.0f;
 	};
 
-	// GuaranteedWrap 모드 전용: Reel에서 조준한 대상의 확정 throw path(contact/anchor 포함)를 만든다.
+	// GuaranteedWrap 모드 전용: Loaded에서 조준한 대상의 확정 throw path(contact/anchor 포함)를 만든다.
 	static bool BuildFreePreparedPreview(const FInput& Input, FRopePreparedThrowPreview& OutPrepared,
 		FString* OutFailureReason = nullptr);
 };

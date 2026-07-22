@@ -73,10 +73,10 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 	// 빌드 파라미터(Arc Search)는 로프 멤버가 단일 소스라 Wielder 경로와 항상 일치한다.
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
-		// ③는 Reel(장전) 상태에서만 throw가 성립한다. 꽂힌 뒤 release로 Free가 된 상태에서는 EnterReel() 후에야 던진다.
+		// ③는 Loaded(장전) 상태에서만 throw가 성립한다. 꽂힌 뒤 release로 Free가 된 상태에서는 EnterLoaded() 후에야 던진다.
 		if (!CanThrowNow())
 		{
-			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw rejected: not in Reel (phase=%s). Call EnterReel() first."),
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw rejected: not in Loaded (phase=%s). Call EnterLoaded() first."),
 				*GetName(), PhaseName(Phase));
 			return;
 		}
@@ -86,7 +86,7 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 		const FRopeThrowContext ResolvedThrow = ResolveThrowContext(ThrowContext);
 		if (BuildPreparedWrappingPreviewFromResolvedContext(ResolvedThrow, Prepared, &FailureReason))
 		{
-			// 대상 조준 성공 → 무조건 꽂힘(GuidedThrow, 내부에서 OnDeployFromReel).
+			// 대상 조준 성공 → 무조건 꽂힘(GuidedThrow, 내부에서 OnDeployFromLoaded).
 			if (!ThrowWithPreparedPreview(Prepared))
 			{
 				UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed prepared throw failed after build: %s"),
@@ -101,7 +101,7 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 			*GetName(), FailureReason.IsEmpty() ? TEXT("no preview") : *FailureReason);
 		const float FreeLen = FMath::Max(Sim.RopeLength, RopeLength);
 		const FVector FreeEndpoint = ResolvedThrow.Origin + ResolvedThrow.FrameForward.GetSafeNormal() * FreeLen;
-		OnDeployFromReel();
+		OnDeployFromLoaded();
 		StartFreeGuidedThrow(ResolvedThrow, FreeEndpoint);
 		return;
 	}
@@ -119,7 +119,7 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 		return false;
 	}
 
-	// ③ Guaranteed는 Reel(장전) 상태에서만 throw가 성립한다(Wielder 직행 방어 — ThrowWithContext와 동일 게이트).
+	// ③ Guaranteed는 Loaded(장전) 상태에서만 throw가 성립한다(Wielder 직행 방어 — ThrowWithContext와 동일 게이트).
 	if (!CanThrowNow())
 	{
 		return false;
@@ -150,8 +150,8 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 		return false;
 	}
 
-	// Reel에서 나가는 순간 전개 — 로프 표시 복원 + 전체 길이 복원(기본 구현, override 가능).
-	OnDeployFromReel();
+	// Loaded에서 나가는 순간 전개 — 로프 표시 복원 + 전체 길이 복원(기본 구현, override 가능).
+	OnDeployFromLoaded();
 
 	SetPhase(ERopePhase::GuidedThrow, *PhaseReason);
 	return true;
@@ -288,11 +288,11 @@ void URopeComponent::CancelQueuedGuaranteedAimThrow()
 bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext,
 	FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason) const
 {
-	// Prepared preview는 아직 던지기 전인 Free/Releasing/Reel에서만 의미가 있다(Reel=GuaranteedWrap 장전
-	// 준비 상태 — 조준 preview 표시 + Reel에서의 던지기 진입이 이 빌드를 쓴다). Flight 이후 phase는 이미
+	// Prepared preview는 아직 던지기 전인 Free/Releasing/Loaded에서만 의미가 있다(Loaded=GuaranteedWrap 장전
+	// 준비 상태 — 조준 preview 표시 + Loaded에서의 던지기 진입이 이 빌드를 쓴다). Flight 이후 phase는 이미
 	// 실제 접촉/감김 상태라 preview가 없다(FullSimulation/AssistedJudged는 preview 자체가 없고,
 	// GuaranteedWrap은 이 prepared 경로가 유일한 preview다).
-	if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing && Phase != ERopePhase::Reel)
+	if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing && Phase != ERopePhase::Loaded)
 	{
 		OutPrepared.Reset();
 		RopeMath::SetPreviewFailureReason(OutFailureReason,
@@ -414,7 +414,7 @@ bool URopeComponent::ExecutePendingGuaranteedAimThrow()
 			const FRopeThrowContext ResolvedThrow = ResolveThrowContext(Pending.ResolvedContext);
 			const float FreeLen = FMath::Max(Sim.RopeLength, RopeLength);
 			const FVector FreeEndpoint = ResolvedThrow.Origin + ResolvedThrow.FrameForward.GetSafeNormal() * FreeLen;
-			OnDeployFromReel();
+			OnDeployFromLoaded();
 			StartFreeGuidedThrow(ResolvedThrow, FreeEndpoint);
 			bExecuted = Phase == ERopePhase::GuidedThrow;
 		}

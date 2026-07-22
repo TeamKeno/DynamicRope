@@ -87,7 +87,7 @@ namespace RopePresetConsole
 
 	static FAutoConsoleCommandWithWorldAndArgs GCycleCmd(
 		TEXT("Rope.Preset.Cycle"),
-		TEXT("DemoPresets(프로젝트 설정)의 다음 프리셋을 월드 내 모든 로프에 적용한다. Free/Reel이 아닌 로프는 거부 로그."),
+		TEXT("DemoPresets(프로젝트 설정)의 다음 프리셋을 월드 내 모든 로프에 적용한다. Free/Loaded이 아닌 로프는 거부 로그."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			if (!EnsureDemoPresetList())

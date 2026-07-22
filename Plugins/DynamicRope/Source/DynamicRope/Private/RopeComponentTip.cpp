@@ -16,16 +16,16 @@ using RopeComponentPrivate::ResolveAimGuideHitWorld;
 
 #pragma region Tip_Public_API
 
-FTransform URopeComponent::GetReelTipTransform() const
+FTransform URopeComponent::GetLoadedTipTransform() const
 {
-	// 기본 구현: Owner의 스켈레탈 메시에서 ReelHandSocket 소켓 트랜스폼. 없으면 컴포넌트(손) 트랜스폼.
+	// 기본 구현: Owner의 스켈레탈 메시에서 LoadedHandSocket 소켓 트랜스폼. 없으면 컴포넌트(손) 트랜스폼.
 	if (const AActor* Owner = GetOwner())
 	{
 		if (const USkeletalMeshComponent* Mesh = Owner->FindComponentByClass<USkeletalMeshComponent>())
 		{
-			if (!ReelHandSocket.IsNone() && Mesh->DoesSocketExist(ReelHandSocket))
+			if (!LoadedHandSocket.IsNone() && Mesh->DoesSocketExist(LoadedHandSocket))
 			{
-				return Mesh->GetSocketTransform(ReelHandSocket);
+				return Mesh->GetSocketTransform(LoadedHandSocket);
 			}
 		}
 	}
@@ -39,7 +39,7 @@ FTransform URopeComponent::GetReelTipTransform() const
 
 void URopeComponent::EnsureTipMesh()
 {
-	// BeginPlay에서 호출(런타임에 bUseTipMesh를 켜는 경로 대비로 던지기/Reel 진입에서도 호출 — idempotent).
+	// BeginPlay에서 호출(런타임에 bUseTipMesh를 켜는 경로 대비로 던지기/Loaded 진입에서도 호출 — idempotent).
 	// ① Owner에 붙은 태그 컴포넌트를 우선 재사용(파괴 안 함) → ② 없고 TipMesh 에셋이 있으면 스폰(파괴는
 	// 우리 몫). 이미 확보돼 있으면 no-op. 질량·충돌 없는 표시 전용이다.
 	// 팁 확보의 유일한 경로라, 여기서 막으면 팁 서브시스템 전체가 꺼진다(나머지는 TipMeshComponent 널 가드).
@@ -132,11 +132,11 @@ void URopeComponent::UpdateTipMeshTransform()
 		return;
 	}
 
-	// Reel(장전) 상태에서는 창을 손 소켓에 든다(마지막 노드가 아니라 GetReelTipTransform — override 가능).
-	// Free 게이트보다 앞: Reel은 ③의 손 소켓 고정이라 bSyncTipMeshOnFree와 무관하게 항상 유효해야 한다.
-	if (Phase == ERopePhase::Reel)
+	// Loaded(장전) 상태에서는 창을 손 소켓에 든다(마지막 노드가 아니라 GetLoadedTipTransform — override 가능).
+	// Free 게이트보다 앞: Loaded은 ③의 손 소켓 고정이라 bSyncTipMeshOnFree와 무관하게 항상 유효해야 한다.
+	if (Phase == ERopePhase::Loaded)
 	{
-		TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(GetReelTipTransform()));
+		TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(GetLoadedTipTransform()));
 		return;
 	}
 

@@ -61,7 +61,7 @@ DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("World GDF Dispatches"), STAT_Rope_GdfDis
 // ── [페이즈 분포] 설계의 physics/logic 경계만 요약(합 = Active Ropes). 부하가 솔버에서 나오는지 로직에서
 //    나오는지 한눈에 — 페이즈 8종 내역은 'RopePerf' 게임플레이 디버거가 per-rope로 보여준다. ────────────
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Phase: Physics (Free/Flight)"), STAT_Rope_PhasePhysics, STATGROUP_DynamicRope, );
-DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Phase: Logic (Contacting..Reel)"), STAT_Rope_PhaseLogic, STATGROUP_DynamicRope, );
+DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Phase: Logic (Contacting..Loaded)"), STAT_Rope_PhaseLogic, STATGROUP_DynamicRope, );
 
 namespace RopeStats
 {

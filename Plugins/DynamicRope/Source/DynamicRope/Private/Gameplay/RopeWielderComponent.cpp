@@ -191,7 +191,7 @@ void URopeWielderComponent::UpdateAimHudSample()
 	bHasAimRayFrameThrowContext = false;
 	AimRayFrameContextStamp = GFrameCounter;
 	// 던질 수 없는 phase에서는 조준 스윕 자체를 돌리지 않는다 — 샘플이 비면 위젯/디버거가 알아서 숨는다.
-	// (③ 비-Reel에서 이 스윕이 유일한 SDF 비용이었다: UpdateThrowPreview는 이미 prepared를 안 만든다.)
+	// (③ 비-Loaded에서 이 스윕이 유일한 SDF 비용이었다: UpdateThrowPreview는 이미 prepared를 안 만든다.)
 	if (IsAimActive())
 	{
 		const FRopeAimRayThrowRequest CurrentRequest = BuildAimRayThrowRequest(FVector::ZeroVector);
@@ -459,7 +459,7 @@ bool URopeWielderComponent::UsesAimRay() const
 
 bool URopeWielderComponent::IsAimActive() const
 {
-	// 던질 수 없는 phase에서는 조준할 이유가 없다 — ③는 Reel 전용이라 Free/Wrapped 등에서 HUD가 꺼진다.
+	// 던질 수 없는 phase에서는 조준할 이유가 없다 — ③는 Loaded 전용이라 Free/Wrapped 등에서 HUD가 꺼진다.
 	// 게이트는 로프가 소유(CanThrowNow) — 던지기 진입과 같은 술어를 봐야 HUD와 실제 가능 여부가 갈리지 않는다.
 	return UsesAimRay() && Rope->CanThrowNow();
 }
@@ -680,7 +680,7 @@ void URopeWielderComponent::BindInput()
 	}
 	if (ReloadAction)
 	{
-		// 장전은 단발(누름) — ③ 로프를 던지기 준비(Reel) 상태로 전환.
+		// 장전은 단발(누름) — ③ 로프를 던지기 준비(Loaded) 상태로 전환.
 		EIC->BindAction(ReloadAction, ETriggerEvent::Started, this, &URopeWielderComponent::OnReloadInput);
 	}
 	BoundInputComponent = EIC;
@@ -888,7 +888,7 @@ void URopeWielderComponent::OnReloadInput()
 {
 	if (Rope)
 	{
-		Rope->EnterReel();
+		Rope->EnterLoaded();
 	}
 }
 
@@ -1118,8 +1118,8 @@ bool URopeWielderComponent::QueueGuaranteedAimThrow(const FVector& AimDir, bool 
 	if (!Rope || !Rope->CanThrowNow())
 	{
 		bGuaranteedAimThrowQueued = false;
-		NotifyThrowRejected(ERopeThrowRejectReason::NotInReel);
-		OnThrowRejected.Broadcast(ERopeThrowRejectReason::NotInReel);
+		NotifyThrowRejected(ERopeThrowRejectReason::NotLoaded);
+		OnThrowRejected.Broadcast(ERopeThrowRejectReason::NotLoaded);
 		return false;
 	}
 
@@ -1396,7 +1396,7 @@ bool URopeWielderComponent::ShouldHoldPreparedPreview()
 	const UAnimInstance* Anim = AttachMesh ? AttachMesh->GetAnimInstance() : nullptr;
 	if (Anim && Anim->Montage_IsPlaying(ThrowMontage))
 	{
-		// 입력 프레임 PostPhysics에서 확정된 결과는 Rope가 notify까지 보관한다. 프리뷰는 Reel 조준에서만
+		// 입력 프레임 PostPhysics에서 확정된 결과는 Rope가 notify까지 보관한다. 프리뷰는 Loaded 조준에서만
 		// 보이면 되므로 윈드업 중에는 숨기고, 직전 HUD 캐시로 새 path를 만들지 않는다.
 		ClearPreviewDisplay();
 		return true;
@@ -1415,7 +1415,7 @@ bool URopeWielderComponent::ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) c
 {
 	// Guaranteed 모드는 "던지기 전 성공한 preview path"만 새로 만든다. GuidedThrow/Wrapped에서는 이미
 	// 확정된 HeldPreparedPreview를 쓰므로 build를 다시 시도하지 않는다(호출자에서 먼저 걸러진다).
-	// Reel(장전 준비) 상태에서만 조준 preview를 만든다 — Reel에서만 던질 수 있으므로. 던지기 게이트와
+	// Loaded(장전 준비) 상태에서만 조준 preview를 만든다 — Loaded에서만 던질 수 있으므로. 던지기 게이트와
 	// 같은 술어(CanThrowInPhase)를 봐야 "보이는 것 = 던질 수 있는 것"이 유지된다. 라이브 phase가 아니라
 	// 인자 Phase로 물어야 이 함수의 시그니처 계약과 어긋나지 않는다.
 	return RopeWrapModes::CanThrowInPhase(Rope->ResolveMode, Phase);
@@ -1431,7 +1431,7 @@ bool URopeWielderComponent::UpdateHeldPreparedPreviewForPhase(ERopePhase Phase)
 	if (Phase == ERopePhase::GuidedThrow)
 	{
 		// GuidedThrow는 cached preview path를 authoritative하게 따라가는 상태다. 새 path를 build하지
-		// 않는다. 프리뷰는 Reel(조준)에서만 보이면 되므로 발사 후에는 표시를 지운다(HeldPreparedPreview
+		// 않는다. 프리뷰는 Loaded(조준)에서만 보이면 되므로 발사 후에는 표시를 지운다(HeldPreparedPreview
 		// 데이터는 보존 — phase-gate 유효성 검사와 Wrapped-hold 옵션이 참조한다). return true로 이
 		// phase에서 preview 재빌드로 떨어지지 않게 한다.
 		ClearPreviewDisplay();
@@ -1486,7 +1486,7 @@ void URopeWielderComponent::DisplayPreviewCenterline(const FRopeWrapPreviewData&
 
 void URopeWielderComponent::UpdateThrowPreview()
 {
-	// preview는 GuaranteedWrap 모드 전용이다 — Reel(장전)에서 조준한 대상을 확정 throw로 던지기 위한
+	// preview는 GuaranteedWrap 모드 전용이다 — Loaded(장전)에서 조준한 대상을 확정 throw로 던지기 위한
 	// prepared path(contact/anchor 포함)를 만든다. 계산(prepared)과 표시(preview 컴포넌트)는 분리돼
 	// 있어, 표시를 꺼도·컴포넌트가 없어도 prepared는 만들어야 던질 수 있다.
 	// FullSimulation/AssistedJudged는 preview를 쓰지 않는다 — 감김이 판정/창발이라 던지기 전에 확정할

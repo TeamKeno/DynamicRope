@@ -2,7 +2,7 @@
 //
 // Aim-ray 조준의 데모 조준 HUD 위젯. 표시 조건은 URopeWielderComponent::IsAimActive() —
 // 조준 모드(UsesAimRay: ResolveMode가 ①FullSimulation이 아님)이면서 **지금 던질 수 있는 phase**일 때만이다
-// (③GuaranteedWrap은 Reel/장전 전용 → Free 등에서는 십자선까지 통째로 숨는다. ①②는 phase 게이트 없음).
+// (③GuaranteedWrap은 Loaded/장전 전용 → Free 등에서는 십자선까지 통째로 숨는다. ①②는 phase 게이트 없음).
 // 평상시에는 화면 중앙 십자선을, aim ray가 감을 수 있는 본에 걸리는 동안에는 그 본 주위에
 // 스크린 투영된 강조 링(획득 팝 + 펄스)을 그린다.
 //
