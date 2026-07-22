@@ -65,7 +65,7 @@ void FRopeWrappingPhase::ApplyWrappingMotionOverrides(const FRopeSimState& Sim, 
 		TailEndNode = FMath::Min(TailEndNode, LatchNode + State.NumTailNodes - 1);
 	}
 	// 시드 다중화: 경로 구동은 첫 보조 시드 노드 *앞*에서도 끝난다(NumTailNodes 클램프와 같은 경계).
-	// 보조 노드는 아래에서 자기 본에 hold하고, 그 너머 남는 로프도 마찬가지로 동결 유지된다 —
+	// 보조 노드는 아래에서 자기 본에 hold하고, 그 너머 남는 로프는 solver-owned로 유지된다 —
 	// front 직선 연장이 보조 대상 반대편으로 로프를 끌어가는 것을 막는다.
 	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
 	{
@@ -165,27 +165,26 @@ void FRopeWrappingPhase::ApplyWrappingMotionOverrides(const FRopeSimState& Sim, 
 
 void FRopeWrappingPhase::ApplyWrappingKinematicMask(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const
 {
-	const int32 LatchNode = State.LatchAnchor.NodeIndex;
-	const bool bHasValidLatch = Sim.InvMass.IsValidIndex(LatchNode);
-	// 실제 path 범위와 무관하게 Wrapping 애니메이션 동안에는 latch 이후 전체 tail을 kinematic으로
-	// 유지한다. Composite axis limit 이후의 guide-only tail도 ApplyWrappingMotionOverrides가 강제로 애니메이팅하고,
-	// 커밋 시 실제 anchor가 없는 노드만 마지막 위치에서 속도 0 상태로 solver에 반환된다.
-	const int32 DrivenEndNode = Sim.Num() - 1;
-
 	OutFrame.EnsureSize(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		const bool bStartPin = (i == 0 && Sim.bStartPinned);
-		// Radial projection에 실패한 virtual path node만 solver에 남긴다. Composite path 바깥의
-		// guide-only tail은 위 DrivenEndNode 범위에 포함되어 ApplyWrappingMotionOverrides의 위치를 그대로 따른다.
-		const int32 PathIndex = i - LatchNode;
-		const bool bNoAnchorSolverNode =
-			State.Path.IsValidIndex(PathIndex) && State.Path[PathIndex].bVirtual;
+		// 위치를 실제로 구동한 노드만 kinematic이다. Sequential angle cap/secondary seed 뒤의 untouched
+		// tail까지 얼리면 Flight에서 남은 strain이 Wrapping 내내 보존되고, Wrapped 커밋에서 InvMass가
+		// 풀리는 순간 고무줄처럼 수축한다. Position override가 없는 tail/virtual node는 Wrapping 동안에도
+		// solver가 SegmentLength를 유지하게 둔다. active virtual bridge는 이 호출 뒤 Hold가 다시 고정한다.
 		const bool bWrappingDrivenNode =
-			bHasValidLatch && i >= LatchNode && i <= DrivenEndNode && !bNoAnchorSolverNode;
-		// ApplyWrappingMotionOverrides로 위치를 직접 쓰는 노드는 같은 프레임의 solver가 다시 움직이지 못하도록
-		// 질량을 0으로 만든다. Wrapped 커밋 뒤에는 실제 anchor가 없는 guide-only tail이 다시 dynamic이 된다.
-		OutFrame.SetInvMass(i, (bStartPin || bWrappingDrivenNode) ? 0.0f : 1.0f);
+			OutFrame.Flags.IsValidIndex(i) &&
+			(OutFrame.Flags[i] & RopeNodeOverride::Position) != 0;
+		// 바인딩 resolve가 한 프레임 실패하면 Position override가 비어도 이미 확정된 surface anchor는
+		// 현재 위치에서 유지한다. 그렇지 않으면 latch/secondary가 일시적으로 solver에 풀린다.
+		const bool bExplicitAnchorNode =
+			State.Anchors.ContainsByPredicate(
+				[i](const FRopeSurfaceAnchor& Anchor) { return Anchor.NodeIndex == i; }) ||
+			State.SecondarySeedAnchors.ContainsByPredicate(
+				[i](const FRopeSurfaceAnchor& Anchor) { return Anchor.NodeIndex == i; });
+		OutFrame.SetInvMass(i,
+			(bStartPin || bWrappingDrivenNode || bExplicitAnchorNode) ? 0.0f : 1.0f);
 	}
 }
 

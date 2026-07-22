@@ -356,6 +356,42 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 	TestTrue(FString::Printf(TEXT("restored node resumes physics (moved %.2f cm off target)"), MovedDev),
 		MovedDev > 1.0f);
 
+	// 5) Flight/Wrapping phase policy가 전달하는 MaxStretchRatio=1.0: GT에서 과신장된 guide
+	// override를 넣어도 실제 resident pose는 같은 GPU step 끝에 SegmentLength 안으로 돌아와야 한다.
+	{
+		FRopeGPUResidentStep NonStretch = MakeStep(/*NumSub*/ 1, 1.0f / 60.0f);
+		NonStretch.MaxStretchRatio = 1.0f;
+		NonStretch.Gravity = FVector::ZeroVector;
+		NonStretch.OverrideFlags.SetNumZeroed(N);
+		NonStretch.OverridePositions.SetNumZeroed(N);
+		NonStretch.OverrideInvMass.SetNumZeroed(N);
+		const uint8 PoseFlags = static_cast<uint8>(
+			ERopeGPUOverride::Position | ERopeGPUOverride::PrevFromPosition | ERopeGPUOverride::InvMass);
+		for (int32 i = 0; i < N; ++i)
+		{
+			NonStretch.OverrideFlags[i] = PoseFlags;
+			NonStretch.OverridePositions[i] =
+				Sim.StartPinTarget + FVector(2.0f * Sim.SegmentLength * static_cast<float>(i), 0.0f, 0.0f);
+			NonStretch.OverrideInvMass[i] = i == 0 ? 0.0f : 1.0f;
+		}
+		Pump(MoveTemp(NonStretch));
+	}
+
+	FRopeResidentLatest AfterNonStretch;
+	if (!Drain(AfterNonStretch))
+	{
+		AddError(TEXT("비신축 override 후 리드백 drain 실패."));
+		return false;
+	}
+	for (int32 i = 0; i + 1 < AfterNonStretch.Positions.Num(); ++i)
+	{
+		const float EdgeLength = static_cast<float>(
+			FVector::Dist(AfterNonStretch.Positions[i], AfterNonStretch.Positions[i + 1]));
+		TestTrue(FString::Printf(TEXT("GPU non-stretch edge %d-%d (%.3f <= %.3f)"),
+			i, i + 1, EdgeLength, Sim.SegmentLength),
+			EdgeLength <= Sim.SegmentLength + 0.05f);
+	}
+
 	return true;
 }
 

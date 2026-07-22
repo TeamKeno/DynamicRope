@@ -63,6 +63,16 @@ struct FRopeComponentRefactorTestSeam
 	{
 		return Rope.ReleaseCooldown;
 	}
+
+	static void SetPhase(URopeComponent& Rope, ERopePhase Phase)
+	{
+		Rope.Phase = Phase;
+	}
+
+	static void ForceNonStretchThisFrame(URopeComponent& Rope, bool bForce)
+	{
+		Rope.SimFrame.bForceNonStretchThisFrame = bForce;
+	}
 };
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeVirtualBridgeSingleLifecycleTest,
@@ -167,6 +177,47 @@ bool FRopeFreeGuidedThrowCommonEntryTest::RunTest(const FString& Parameters)
 		Sim.Positions[0].Equals(Context.Origin, KINDA_SMALL_NUMBER));
 	TestTrue(TEXT("common preparation clears release cooldown"),
 		FMath::IsNearlyZero(FRopeComponentRefactorTestSeam::GetReleaseCooldown(*Rope)));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePhysicalResolveNonStretchPolicyTest,
+	"DynamicRope.Component.PhysicalResolveUsesNonStretchThrowWrap",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePhysicalResolveNonStretchPolicyTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	Rope->SolverConfig.MaxStretchRatio = 1.5f;
+
+	for (const ERopeWrapResolveMode Mode :
+		{ ERopeWrapResolveMode::FullSimulation, ERopeWrapResolveMode::AssistedJudged })
+	{
+		Rope->ResolveMode = Mode;
+		FRopeComponentRefactorTestSeam::SetPhase(*Rope, ERopePhase::Free);
+		TestTrue(TEXT("Free keeps the configured stretch policy"),
+			FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.5f));
+
+		for (const ERopePhase Phase : { ERopePhase::Flight, ERopePhase::Wrapping })
+		{
+			FRopeComponentRefactorTestSeam::SetPhase(*Rope, Phase);
+			TestTrue(*FString::Printf(TEXT("physical mode %d phase %d is non-stretched"),
+				static_cast<int32>(Mode), static_cast<int32>(Phase)),
+				FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.0f));
+		}
+
+		FRopeComponentRefactorTestSeam::SetPhase(*Rope, ERopePhase::Wrapped);
+		TestTrue(TEXT("stable Wrapped restores the configured stretch policy"),
+			FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.5f));
+		FRopeComponentRefactorTestSeam::ForceNonStretchThisFrame(*Rope, true);
+		TestTrue(TEXT("the Wrapping-to-Wrapped commit frame remains non-stretched"),
+			FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.0f));
+		FRopeComponentRefactorTestSeam::ForceNonStretchThisFrame(*Rope, false);
+	}
+
+	Rope->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
+	FRopeComponentRefactorTestSeam::SetPhase(*Rope, ERopePhase::Wrapped);
+	TestTrue(TEXT("GuaranteedWrap keeps its configured stretch policy"),
+		FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.5f));
 	return true;
 }
 

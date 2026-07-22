@@ -56,6 +56,33 @@ float AimRootSocketInfluence(float RopeAlpha, const FRopeWhipGuide::FConfig& Con
 		: 0.0f;
 }
 
+// Raw spline은 SegmentLength로 리샘플되지만, 그 뒤 노드별 aim envelope/solver blend가 간격을
+// 다시 늘릴 수 있다. 가이드된 run을 root 쪽부터 순차 투영해 각 target edge의 최대 길이만 제한한다.
+// 자유단/solver-owned 노드는 수정하지 않으므로 endpoint envelope 계약과 실제 solver 운동은 유지된다.
+void ClampGuidedTargetStretch(const FVector& RootPosition, float NodeSpacing,
+	const TArray<uint8>& GuidedMask, TArray<FVector>& InOutTargets)
+{
+	const int32 Count = FMath::Min(InOutTargets.Num(), GuidedMask.Num());
+	const float SegmentLength = FMath::Max(NodeSpacing, KINDA_SMALL_NUMBER);
+	FVector Leader = RootPosition;
+	for (int32 NodeIndex = 1; NodeIndex < Count; ++NodeIndex)
+	{
+		if (GuidedMask[NodeIndex] == 0)
+		{
+			Leader = InOutTargets[NodeIndex];
+			continue;
+		}
+
+		const FVector Delta = InOutTargets[NodeIndex] - Leader;
+		const float Distance = Delta.Size();
+		if (Distance > SegmentLength && Distance > KINDA_SMALL_NUMBER)
+		{
+			InOutTargets[NodeIndex] = Leader + Delta * (SegmentLength / Distance);
+		}
+		Leader = InOutTargets[NodeIndex];
+	}
+}
+
 }
 
 FVector FRopeWhipGuide::SafeNormalOr(const FVector& Value, const FVector& Fallback)
@@ -198,6 +225,20 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 			GuidedNodesThisFrame[i] = 1;
 		}
 	}
+
+	// 최종 envelope blend 뒤 가이드 target만 다시 비신축으로 만든다. 자유단은 기존 solver pose를 유지한다.
+	const FVector Root = Sim.bStartPinned ? Sim.StartPinTarget : Sim.Positions[0];
+	ClampGuidedTargetStretch(Root, Sim.SegmentLength, GuidedNodesThisFrame, CurrentTargetsThisFrame);
+	for (int32 i = 1; i <= LastGuidedNode; ++i)
+	{
+		if (GuidedNodesThisFrame.IsValidIndex(i) && GuidedNodesThisFrame[i] != 0 &&
+			CurrentTargetsThisFrame.IsValidIndex(i) && PrevTargetsThisFrame.IsValidIndex(i))
+		{
+			Sim.Positions[i] = CurrentTargetsThisFrame[i];
+			Sim.PrevPositions[i] = CurrentTargetsThisFrame[i];
+			PrevTargetsThisFrame[i] = CurrentTargetsThisFrame[i];
+		}
+	}
 }
 
 void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config)
@@ -286,6 +327,15 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 
 	}
 
+	// ResampleGuideByNodeSpacing 뒤의 endpoint envelope/socket blend가 spacing을 다시 깨뜨리지
+	// 않게 Current/Prev target run을 각각 현재/직전 pin에서 순차 투영한다.
+	const FVector CurrentRoot = Sim.bStartPinned ? Sim.StartPinTarget : Sim.Positions[0];
+	const FVector PreviousRoot = Sim.bStartPinned ? Sim.StartPinPrev : Sim.PrevPositions[0];
+	ClampGuidedTargetStretch(
+		CurrentRoot, Sim.SegmentLength, GuidedNodesThisFrame, CurrentTargetsThisFrame);
+	ClampGuidedTargetStretch(
+		PreviousRoot, Sim.SegmentLength, GuidedNodesThisFrame, PrevTargetsThisFrame);
+
 	PreviousTargets = GuideTargets;
 	bActive = Elapsed < Duration;
 }
@@ -314,19 +364,57 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 	const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * GuidedEnd), 1, LastNode);
 	const float Duration = ResolveGuideDuration(Config, GuideThrowSpeed);
 	const float NextT = FMath::Clamp((Elapsed + DeltaTime) / Duration, 0.0f, 1.0f);
-	BuildGuideTargets(NextT, LastGuidedNode, Sim, Config, OutTargets);
-	if (bHasAimTarget && OutTargets.Num() == Sim.Num())
+	TArray<FVector> GuideTargets;
+	BuildGuideTargets(NextT, LastGuidedNode, Sim, Config, GuideTargets);
+	if (GuideTargets.Num() == 0)
 	{
-		// 예측 접촉도 실제 Flight와 동일한 중앙 가이드/양끝 solver envelope를 사용한다.
-		const FVector SocketOffset = Sim.bStartPinned ? Sim.StartPinTarget - Origin : FVector::ZeroVector;
-		for (int32 i = 1; i <= LastGuidedNode; ++i)
+		return;
+	}
+
+	OutTargets = Sim.Positions;
+	TArray<uint8> PreviewGuidedMask;
+	PreviewGuidedMask.SetNumZeroed(Sim.Num());
+	const FVector SocketOffset = Sim.bStartPinned ? Sim.StartPinTarget - Origin : FVector::ZeroVector;
+	for (int32 i = 1; i <= LastGuidedNode; ++i)
+	{
+		if (!GuideTargets.IsValidIndex(i) ||
+			(Sim.InvMass.IsValidIndex(i) && Sim.InvMass[i] <= 0.0f))
 		{
-			const float S = static_cast<float>(i) / static_cast<float>(LastNode);
-			const float GuideWeight = AimGuideEnvelope(S, Config);
-			const FVector Target = OutTargets[i] + SocketOffset * AimRootSocketInfluence(S, Config);
+			continue;
+		}
+
+		const float S = static_cast<float>(i) / static_cast<float>(LastNode);
+		const float StrongGuideEnd = GuidedEnd * 0.55f;
+		const float GuideFade = (S <= StrongGuideEnd)
+			? 1.0f
+			: 1.0f - RopeMath::SmoothStep((S - StrongGuideEnd) /
+				FMath::Max(GuidedEnd - StrongGuideEnd, KINDA_SMALL_NUMBER));
+		const float RootFade = RopeMath::SmoothStep(S /
+			FMath::Max(StrongGuideEnd, KINDA_SMALL_NUMBER));
+		const float GuideWeight = bHasAimTarget
+			? AimGuideEnvelope(S, Config)
+			: GuideFade * FMath::Lerp(0.65f, 1.0f, RootFade);
+		if (GuideWeight <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+
+		if (bHasAimTarget)
+		{
+			const FVector Target = GuideTargets[i] +
+				SocketOffset * AimRootSocketInfluence(S, Config);
 			OutTargets[i] = FMath::Lerp(Sim.Positions[i], Target, GuideWeight);
 		}
+		else
+		{
+			OutTargets[i] = GuideTargets[i];
+		}
+		PreviewGuidedMask[i] = 1;
 	}
+
+	const FVector CurrentRoot = Sim.bStartPinned ? Sim.StartPinTarget : Sim.Positions[0];
+	ClampGuidedTargetStretch(
+		CurrentRoot, Sim.SegmentLength, PreviewGuidedMask, OutTargets);
 }
 
 void FRopeWhipGuide::ResetFrameOutputs()

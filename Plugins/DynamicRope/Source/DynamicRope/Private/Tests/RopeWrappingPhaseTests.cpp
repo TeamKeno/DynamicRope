@@ -359,6 +359,29 @@ bool FRopeWrappingSecondarySeedTest::RunTest(const FString& Parameters)
 		Frame.Flags.IsValidIndex(8) &&
 		(Frame.Flags[7] & RopeNodeOverride::Position) == 0 &&
 		(Frame.Flags[8] & RopeNodeOverride::Position) == 0);
+	Wrapping.ApplyWrappingKinematicMask(Sim, Frame);
+	TestTrue(TEXT("path and secondary position overrides stay kinematic"),
+		Frame.InvMass.IsValidIndex(6) &&
+		Frame.InvMass[5] == 0.0f && Frame.InvMass[6] == 0.0f);
+	TestTrue(TEXT("untouched rope beyond the secondary remains solver-owned"),
+		Frame.InvMass.IsValidIndex(8) &&
+		Frame.InvMass[7] > 0.0f && Frame.InvMass[8] > 0.0f);
+
+	// 보조 binding이 한 프레임 resolve되지 않아 Position override가 빠져도 확정 anchor 자체는
+	// 현재 위치에서 고정하고, 그 뒤의 일반 tail은 계속 solver-owned여야 한다.
+	Wrapping.State.SecondarySeedAnchors[0].Mesh.Reset();
+	FRopeNodeOverrideFrame MissingBindingFrame;
+	Wrapping.ApplyWrappingMotionOverrides(Sim, 0.0f, Ctx, MissingBindingFrame);
+	TestTrue(TEXT("missing secondary binding emits no position override"),
+		MissingBindingFrame.Flags.IsValidIndex(6) &&
+		(MissingBindingFrame.Flags[6] & RopeNodeOverride::Position) == 0);
+	Wrapping.ApplyWrappingKinematicMask(Sim, MissingBindingFrame);
+	TestTrue(TEXT("missing-binding secondary anchor remains kinematic"),
+		MissingBindingFrame.InvMass.IsValidIndex(6) && MissingBindingFrame.InvMass[6] == 0.0f);
+	TestTrue(TEXT("tail after missing-binding anchor remains solver-owned"),
+		MissingBindingFrame.InvMass.IsValidIndex(8) &&
+		MissingBindingFrame.InvMass[7] > 0.0f && MissingBindingFrame.InvMass[8] > 0.0f);
+	Wrapping.State.SecondarySeedAnchors[0].Mesh = SecondaryMesh;
 
 	// ③ 커밋 시드: 경로 앵커 6개 + 보조 앵커 1개, 보조 본/mesh가 그대로 실린다.
 	const FRopeWrapState Seed = Wrapping.BuildCommitSeed(Sim);
@@ -776,6 +799,12 @@ bool FRopeWrappingWrapAngleCapTest::RunTest(const FString& Parameters)
 		Frame.Flags.IsValidIndex(16) &&
 		(Frame.Flags[LastDrivenNode + 1] & RopeNodeOverride::Position) == 0 &&
 		(Frame.Flags[16] & RopeNodeOverride::Position) == 0);
+	Wrapping.ApplyWrappingKinematicMask(Sim, Frame);
+	TestTrue(TEXT("last path node remains kinematic while wrapping"),
+		Frame.InvMass.IsValidIndex(LastDrivenNode) && Frame.InvMass[LastDrivenNode] == 0.0f);
+	TestTrue(TEXT("leftover rope beyond the cap remains solver-owned"),
+		Frame.InvMass.IsValidIndex(16) &&
+		Frame.InvMass[LastDrivenNode + 1] > 0.0f && Frame.InvMass[16] > 0.0f);
 	return true;
 }
 

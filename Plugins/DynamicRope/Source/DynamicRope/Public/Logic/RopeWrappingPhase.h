@@ -98,7 +98,8 @@ public:
 	/** front를 경로 따라 전진시키고 latch 이후 노드들의 경로 위 타깃(+표면 오프셋)을 OutFrame에 담는다(G2). */
 	void ApplyWrappingMotionOverrides(const FRopeSimState& Sim, float DeltaTime, const FContext& Ctx, FRopeNodeOverrideFrame& OutFrame);
 
-	/** latch 이후 전체 tail을 kinematic으로 만들되 virtual path node는 solver에 남긴다. 시작 핀도 유지한다. */
+	/** 실제 position override가 있는 wrapping 노드, 확정 anchor, 시작 핀만 kinematic으로 만든다.
+	 *  아직 경로가 닿지 않은 tail/virtual path node는 solver에 남겨 rest length를 유지한다. */
 	void ApplyWrappingKinematicMask(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
 	/** 앵커 span이 변하지 않는 시간(StableTime)을 누적한다. 커밋 판정 보조 지표. */

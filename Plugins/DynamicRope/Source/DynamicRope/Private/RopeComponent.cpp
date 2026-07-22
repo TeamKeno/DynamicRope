@@ -211,6 +211,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 	EnsureRopeInitialized();
 	// 프레임 스코프 — 이번 프레임 로직 산출물을 새로 모은다(G2).
 	SimFrame.OverrideFrame.Reset();
+	SimFrame.bForceNonStretchThisFrame = false;
 	const ERopePhase PhaseAtPrepareStart = Phase;
 	bEnteredFlightDuringPrepareThisFrame = false;
 #if WITH_GAMEPLAY_DEBUGGER
@@ -292,7 +293,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 
 	case ERopePhase::Wrapping:
 		UpdateWrapping(DeltaTime);
-		// latch 이전 구간은 solver가 계속 처리한다. latch~tail은 SimFrame.OverrideFrame mass mask로 고정된다.
+		// 실제 wrapping position override/anchor 노드만 mass mask로 고정한다. 아직 경로가 닿지 않은
+		// tail은 solver가 계속 처리해 Flight에서 남은 strain을 Wrapping 중 해소한다.
 		SimFrame.bSolveThisFrame = (Phase == ERopePhase::Wrapping || Phase == ERopePhase::Wrapped);
 		break;
 
@@ -396,6 +398,7 @@ void URopeComponent::SolveSimFrame(float DeltaTime)
 	// 거리 LOD: 원거리에서 constraint iteration만 감쇠(substep은 유지 — 안정성은 substep이 지배).
 	FRopeSolverConfig LODConfig = SolverConfig;
 	LODConfig.Iterations = GetLODScaledIterations();
+	LODConfig.MaxStretchRatio = GetEffectiveMaxStretchRatio();
 	// 반지름 auto(0=렌더 Radius) 해석 — 솔버는 항상 해석된 값만 받는다(GPU step은 서브시스템이 동일 처리).
 	LODConfig.CollisionRadius = GetEffectiveCollisionRadius();
 	// Aim-hit collision-free solve도 solver 자체는 실행하되 빈 목록을 넘겨 push-out만 제외한다.
@@ -404,6 +407,21 @@ void URopeComponent::SolveSimFrame(float DeltaTime)
 		? SimFrame.FrameColliders
 		: NoSolveColliders;
 	Solver.Step(Sim, LODConfig, SolveColliders, DeltaTime);
+}
+
+float URopeComponent::GetEffectiveMaxStretchRatio() const
+{
+	// ①/②의 물리 던지기는 가이드 target과 wrapping position override를 solver 입력으로 쓴다.
+	// 이 구간에서 허용 신장을 남기면 kinematic 노드가 풀리는 순간 rest length로 되감기므로,
+	// 실제 resident pose를 푸는 CPU/GPU strain-limit 단계에서 완전 비신축으로 제한한다.
+	const bool bPhysicalResolveMode = ResolveMode != ERopeWrapResolveMode::GuaranteedWrap;
+	const bool bThrowOrWrapFrame =
+		Phase == ERopePhase::Flight ||
+		Phase == ERopePhase::Wrapping ||
+		SimFrame.bForceNonStretchThisFrame;
+	return bPhysicalResolveMode && bThrowOrWrapFrame
+		? 1.0f
+		: SolverConfig.MaxStretchRatio;
 }
 
 void URopeComponent::FinalizeSimFrame(float DeltaTime)

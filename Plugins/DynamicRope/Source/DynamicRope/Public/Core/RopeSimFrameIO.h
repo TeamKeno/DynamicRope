@@ -19,7 +19,7 @@ class USceneComponent;
  * 로프 하나의 한 프레임 시뮬 입출력(서브시스템 프레임 계약).
  * 수명 규약 요약 — 자세한 흐름은 URopeComponent::PrepareSimFrame 3단계 계약 주석 참조:
  *  - 프레임 스코프(매 프레임 리셋/재작성): FrameColliders, AimFrameColliders, OverrideFrame, bSolveThisFrame,
- *    bSolveCollisionsThisFrame, bGpuSteppedThisFrame, Gpu*Attribution, GpuFlightCandidates,
+ *    bSolveCollisionsThisFrame, bForceNonStretchThisFrame, bGpuSteppedThisFrame, Gpu*Attribution, GpuFlightCandidates,
  *    bGpuContactsThisFrame.
  *  - 프레임을 넘어 유지: SimGeneration(진짜 시드에만 증가), AimRayColliderQueryBounds(에임 모드 동안 유지).
  */
@@ -45,10 +45,13 @@ struct FRopeSimFrameIO
 	FBox AimRayColliderQueryBounds = FBox(ForceInit);
 
 	/**
-	 * 이번 프레임에 Solver.Step을 돌릴지. Free/Flight/Wrapped true(Wrapped는 latch 노드 InvMass=0),
-	 * Contacting/Wrapping/Releasing은 로직 구동이라 false.
+	 * 이번 프레임에 Solver.Step을 돌릴지. Free/Flight/Wrapping/Wrapped true(Wrapping/Wrapped는
+	 * position override/anchor 노드 InvMass=0), Contacting/Releasing은 로직 구동이라 false.
 	 */
 	bool bSolveThisFrame = false;
+
+	/** Wrapping→Wrapped 커밋처럼 동적 노드 소유권이 바뀌는 이번 프레임만 최대 신장을 1.0으로 제한한다. */
+	bool bForceNonStretchThisFrame = false;
 
 	/** Aim-hit Flight는 거리/굽힘/감쇠만 풀고 SDF/collider push-out은 끌 수 있다. 접촉 감지 목록과는 독립. */
 	bool bSolveCollisionsThisFrame = true;

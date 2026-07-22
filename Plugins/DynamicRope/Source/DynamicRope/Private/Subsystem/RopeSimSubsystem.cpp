@@ -781,8 +781,8 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		}
 	}
 
-	// Phase 2: solver step (GPU 상주 / CPU 폴백). Free/Flight/Wrapped는 솔브, Wrapping/Releasing은
-	// override-only, Contacting은 dispatch 없음 — 로프별 판정은 TryBuildResidentStep 안에 있다.
+	// Phase 2: solver step (GPU 상주 / CPU 폴백). Free/Flight/Wrapping/Wrapped는 솔브하고,
+	// Releasing은 override-only, Contacting은 dispatch 없음 — 로프별 판정은 TryBuildResidentStep 안에 있다.
 	if (bUseGPU)
 	{
 		// GPU 상주 경로(M5a). 로프별 영속 버퍼를 매 프레임 in-place로 전진(라운드트립 스톨/슬로모 없음).
@@ -1119,8 +1119,8 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 {
 	FRopeSimState& S = Rope.Sim;
 
-	// GPU 상주 대상: 솔브 프레임(Free/Flight/Wrapped) 또는 로직 산출물이 있는 프레임(Wrapping/Releasing —
-	// override-only). bSolveThisFrame은 Prepare에서 Free/Flight/Wrapped에서만 true라 별도 phase 체크가 필요 없다.
+	// GPU 상주 대상: 솔브 프레임(Free/Flight/Wrapping/Wrapped) 또는 로직 산출물만 있는 Releasing 프레임.
+	// bSolveThisFrame/OverrideFrame이 Prepare에서 권위 있게 정해지므로 여기서는 별도 phase 체크가 필요 없다.
 	// Contacting(산출물 없음)은 dispatch 자체가 없어 GPU 버퍼가 동결 유지된다(CPU의 "솔브 없음"과 동일).
 	const bool bGpuRope = (Rope.SimFrame.bSolveThisFrame || Rope.SimFrame.OverrideFrame.HasAny())
 		&& S.Num() >= 2 && S.Num() <= FRopeGPUSolver::MaxNodes;
@@ -1128,7 +1128,7 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 	Rope.SimFrame.bGpuSteppedThisFrame = bGpuRope;
 	if (!bGpuRope)
 	{
-		// 폴백(노드수 초과 등): CPU 솔브. logic phase는 bSolveThisFrame=false라 자동 스킵.
+		// 폴백(노드수 초과 등): bSolveThisFrame인 자유 구간은 CPU 솔브, override-only 프레임은 스킵.
 		if (Rope.SimFrame.bSolveThisFrame)
 		{
 			Rope.SolveSimFrame(DeltaTime);
@@ -1170,7 +1170,7 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 		Rope.SimFrame.OverrideFrame.ApplyToSim(S);
 	}
 
-	// 고정-timestep 스케줄(CPU accumulator). 로직 프레임(bSolveThisFrame=false)은 적분 없이
+	// 고정-timestep 스케줄(CPU accumulator). override-only 프레임(bSolveThisFrame=false)은 적분 없이
 	// override만 기록한다(NumSub=0) — CPU 경로의 "솔브 없음"과 동일한 시간 처리.
 	FRopeSubstepSchedule Schedule;
 	Schedule.NumSub = 0;
@@ -1190,6 +1190,9 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 
 	// 상주 step 구성(self-contained). 시드 데이터는 매 프레임 제공(RT는 재시드 시에만 GPU 업로드).
 	SeedResidentStep(OutStep, RopeId, Rope.SimFrame.SimGeneration, S, Rope.SolverConfig, Schedule);
+	// CPU SolveSimFrame과 같은 phase별 비신축 계약. GPU의 최신 resident pose에서 strain-limit가
+	// 적용되므로 지연된 CPU mirror를 기준으로 guide target을 보정하는 것보다 정확하다.
+	OutStep.MaxStretchRatio = Rope.GetEffectiveMaxStretchRatio();
 	// 컴포넌트 경계 해석값 덮기: 반지름 auto(0=렌더 Radius) + 컴포넌트 직속으로 이사한 GDF 플래그.
 	OutStep.CollisionRadius = Rope.GetEffectiveCollisionRadius();
 	// solve 충돌과 contact detection은 별도 계약이다. false여도 아래 PackStepColliders는 detect용으로

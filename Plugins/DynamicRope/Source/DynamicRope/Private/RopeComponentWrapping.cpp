@@ -774,6 +774,9 @@ void URopeComponent::CommitWrapping()
 	WrapController.BeginWrap(Sim, Seed, SimFrame.OverrideFrame);
 	HoldKinematicVirtualBridges();
 	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
+	// 이 프레임에 풀린 non-anchor 노드가 남은 strain을 다음 Wrapped 틱까지 저장하지 않게 한다.
+	// 다음 Prepare에서는 false로 리셋되어 안정된 Wrapped의 사용자 MaxStretchRatio 설정으로 복귀한다.
+	SimFrame.bForceNonStretchThisFrame = true;
 
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s), angle=%.0fdeg, coverage=%.0fdeg"),
 		*Seed.BoneName.ToString(), Seed.Latched.Num(), CommitAngleDeg, CommitCoverageDeg));

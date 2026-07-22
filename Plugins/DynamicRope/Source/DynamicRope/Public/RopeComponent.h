@@ -246,6 +246,10 @@ public:
 		return SolverConfig.CollisionRadius > 0.0f ? SolverConfig.CollisionRadius : Radius;
 	}
 
+	/** FullSimulation/Assisted의 Flight/Wrapping 및 커밋 프레임에 사용할 최대 신장 배율.
+	 *  가이드/래핑 override가 만든 간격을 탄성 strain으로 저장하지 않되, 안정된 Wrapped는 설정값으로 복귀한다. */
+	float GetEffectiveMaxStretchRatio() const;
+
 	/** 해석된 접촉 질의 반지름: WrapConfig.ContactQueryRadius(0=auto → 렌더 Radius × 1.5). 감지/랩 경로 경계에서 소비. */
 	float GetEffectiveContactQueryRadius() const
 	{
@@ -905,7 +909,7 @@ private:
 	/** 단일 진실: 솔버/로직/렌더가 공유하는 파티클 체인. */
 	FRopeSimState       Sim;
 
-	/** XPBD 물리(Free/Flight/Wrapped 자유 구간). */
+	/** XPBD 물리(Free/Flight 및 Wrapping/Wrapped의 solver-owned 자유 구간). */
 	FRopeXPBDSolver     Solver;
 
 	/** Throw/Flight: 채찍 스윙(가이드 타깃 계산+적용). */
