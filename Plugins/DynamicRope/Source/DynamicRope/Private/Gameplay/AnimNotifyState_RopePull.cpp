@@ -26,7 +26,11 @@ void UAnimNotifyState_RopePull::NotifyBegin(USkeletalMeshComponent* MeshComp, UA
 
 	if (URopeWielderComponent* Wielder = ResolveWielder(MeshComp))
 	{
-		Wielder->StartPullNow(bIgnoreTautGate);
+		// StopPull 뒤 늦게 도착한 이전 몽타주의 NotifyBegin이 Pull을 다시 켜지 못하게 한다.
+		if (Wielder->IsPullArmed() && Wielder->IsPullEngaged())
+		{
+			Wielder->StartPullNow(bIgnoreTautGate);
+		}
 	}
 }
 
@@ -37,7 +41,11 @@ void UAnimNotifyState_RopePull::NotifyEnd(USkeletalMeshComponent* MeshComp, UAni
 	// (입력을 뗀 경로는 StopPull이 몽타주를 멈추고, 그 몽타주 정지가 다시 여기로 들어와 힘을 끈다.)
 	if (URopeWielderComponent* Wielder = ResolveWielder(MeshComp))
 	{
-		Wielder->StopPullNow();
+		// 취소된 window의 늦은 NotifyEnd는 이미 StopPull이 끝낸 상태를 다시 건드리지 않는다.
+		if (Wielder->IsPullEngaged())
+		{
+			Wielder->StopPullNow();
+		}
 	}
 
 	Super::NotifyEnd(MeshComp, Animation, EventReference);

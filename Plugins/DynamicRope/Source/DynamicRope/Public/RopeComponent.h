@@ -67,6 +67,8 @@ class DYNAMICROPE_API URopeComponent : public UMeshComponent
 	friend struct FRopeWrappingFallbackTestSeam;
 	// 테스트 시임: virtual bridge 수명과 GuidedThrow 공통 진입 상태를 검증하는 최소 접근.
 	friend struct FRopeComponentRefactorTestSeam;
+	// 테스트 시임: Wielder 입력/당김 수명주기와 self-wrap 판정을 world 없이 재현하기 위한 최소 접근.
+	friend struct FRopeWielderComponentTestSeam;
 #endif
 
 public:
@@ -559,6 +561,9 @@ public:
 	/** 현재 감고 있는 본 이름(Wrapped 동안 유효, 아니면 None). 이벤트 파라미터 없이도 조회 가능하게 노출. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
+
+	/** 현재 감고 있는 원본 컴포넌트(스켈레탈/정적 공용). Wrapped가 아니거나 대상이 소실되면 null. */
+	const USceneComponent* GetWrappedComponent() const { return WrapController.State.Mesh.Get(); }
 
 	/** 현재 감고 있는 스켈레탈 메시(Wrapped 동안 유효, 아니면 null). 대상 액터 반응은 GetOwner()로 이어간다.
 	 *  내부 보관은 이제 const USceneComponent weak(정적 랩 대비 일반화) — 여기서는 스켈레탈만 반환하고,

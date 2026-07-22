@@ -155,6 +155,10 @@ class DYNAMICROPE_API URopeWielderComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FRopeWielderComponentTestSeam;
+#endif
+
 public:
 	URopeWielderComponent();
 
@@ -614,7 +618,7 @@ private:
 
 	void ResolvePreviewComponent(bool bAllowAutoCreate);
 
-	/** 컴포넌트 틱이 필요한가 — preview(③)/지상 이탈/스윙 에어컨트롤/aim ray(②③) 중 하나라도.
+	/** 컴포넌트 틱이 필요한가 — Pull 판정/적용된 AirControl 원복/지상 이탈/스윙/aim ray(②③) 중 하나라도.
 	 *  BeginPlay · SetThrowPreviewEnabled · RefreshModeDerivedState가 공유하는 단일 식. */
 	bool ComputeDesiredTickEnabled() const;
 
@@ -705,6 +709,10 @@ private:
 
 	/** AddMappingContext가 꽂은 IMC를 캐시된 서브시스템에서 뗀다(possession 전환/EndPlay 공용). */
 	void RemoveMappingContext();
+	/** 실제로 바인딩했던 InputComponent에서 이 객체의 액션 바인딩만 제거한다. */
+	void ClearBoundInput();
+	/** PullMontage 재생을 시도하고 실제 재생 시작 여부를 반환한다. */
+	bool TryPlayPullMontage();
 
 	// 실제로 바인딩을 건 InputComponent. 같은 컴포넌트의 중복 바인딩을 막고,
 	// 재빙의로 InputComponent가 교체되면 기존 바인딩을 정리한 뒤 새 컴포넌트에 다시 건다.
@@ -713,6 +721,10 @@ private:
 	// LocalPlayer에 등록되므로, EndPlay가 폰의 현재 컨트롤러에 의존하지 않고 여기서 possession 무관하게
 	// 제거한다(#11 — 폰이 먼저 unpossess된 뒤 파괴돼도 IMC가 로컬 플레이어에 잔류하는 것 방지). LP 파괴 시 null.
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> MappedInputSubsystem;
+	// 위 서브시스템에 실제로 추가했던 IMC. 런타임에 MappingContext 프로퍼티가 바뀌어도 제거 시점까지
+	// 정확한 객체를 보존한다(서브시스템의 내부 참조 방식에 수명을 의존하지 않는다).
+	UPROPERTY(Transient)
+	TObjectPtr<UInputMappingContext> MappedInputContext = nullptr;
 	/** bPullArmed 변경 + OnPullArmedChanged 브로드캐스트(변화가 있을 때만). */
 	void SetPullArmed(bool bNewArmed);
 
@@ -745,4 +757,9 @@ private:
 	float HeldPreviewExpireTimeSeconds = 0.0f;
 	// Wrapped 진입 순간을 감지하기 위한 마지막 preview 처리 phase.
 	ERopePhase LastPreviewPhase = ERopePhase::Free;
+
+#if WITH_DEV_AUTOMATION_TESTS
+	// 표시 OFF에서 prepared build에 들어가는지 외부 부작용 없이 검증하는 테스트 전용 계측.
+	int32 TestPreparedPreviewBuildCount = 0;
+#endif
 };

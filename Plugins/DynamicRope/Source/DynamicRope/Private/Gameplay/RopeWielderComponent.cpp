@@ -27,6 +27,7 @@
 #include "Components/InputComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
+#include "InputMappingContext.h"
 
 namespace
 {
@@ -114,13 +115,9 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		Pawn->ReceiveControllerChangedDelegate.RemoveDynamic(this, &URopeWielderComponent::HandlePawnControllerChanged);
 		Pawn->ReceiveRestartedDelegate.RemoveDynamic(this, &URopeWielderComponent::HandlePawnRestarted);
-		if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(Pawn->InputComponent))
-		{
-			EIC->ClearBindingsForObject(this);
-		}
 	}
+	ClearBoundInput();
 	RemoveMappingContext();
-	BoundInputComponent.Reset();
 	ClearThrowPreview();
 	if (PreviewComponent)
 	{
@@ -362,10 +359,10 @@ bool URopeWielderComponent::IsWielderTetherActive() const
 	{
 		return false;
 	}
-	// 셀프랩(자기 자신에 감김)은 테더가 wielder 몫을 주지 않는다.
-	if (const USkeletalMeshComponent* WrappedMesh = Rope->GetWrappedMesh())
+	// 셀프랩(자기 자신에 감김)은 대상 컴포넌트 종류와 무관하게 테더가 wielder 몫을 주지 않는다.
+	if (const USceneComponent* WrappedComponent = Rope->GetWrappedComponent())
 	{
-		if (WrappedMesh->GetOwner() == GetOwner())
+		if (WrappedComponent->GetOwner() == GetOwner())
 		{
 			return false;
 		}
@@ -563,7 +560,10 @@ void URopeWielderComponent::HandlePawnControllerChanged(APawn* OwnerPawn, AContr
 {
 	if (!NewController)
 	{
-		// unpossess — IMC를 그 로컬 플레이어에서 떼어 둔다(다음 빙의 때 새 플레이어에 다시 꽂는다).
+		// unpossess — 홀드 입력의 Completed/Canceled를 더는 받을 수 없으므로 연속 상태를 먼저 정리한다.
+		StopPull();
+		StopReel();
+		// IMC를 그 로컬 플레이어에서 떼어 둔다(다음 빙의 때 새 플레이어에 다시 꽂는다).
 		// 바인딩은 InputComponent에 붙어 있으므로 여기서 건드리지 않는다(같은 컴포넌트로 돌아오면 그대로 유효).
 		RemoveMappingContext();
 		return;
@@ -591,15 +591,15 @@ void URopeWielderComponent::RemoveMappingContext()
 	// IMC는 Pawn이 아니라 LocalPlayer에 등록됐다 — 폰이 먼저 unpossess된 뒤 파괴되면 GetController()가 null이라
 	// 종전엔 제거가 건너뛰어져 IMC가 로컬 플레이어에 영구 잔류했다(#11). 추가 시점에 캐시한 서브시스템으로
 	// possession 상태와 무관하게 제거한다(LocalPlayer가 이미 파괴됐으면 weak가 null → 제거 불필요).
-	if (!MappingContext)
-	{
-		return;
-	}
 	if (UEnhancedInputLocalPlayerSubsystem* Sub = MappedInputSubsystem.Get())
 	{
-		Sub->RemoveMappingContext(MappingContext);
+		if (UInputMappingContext* AddedContext = MappedInputContext.Get())
+		{
+			Sub->RemoveMappingContext(AddedContext);
+		}
 	}
 	MappedInputSubsystem.Reset();
+	MappedInputContext = nullptr;
 }
 
 void URopeWielderComponent::AddMappingContext()
@@ -614,9 +614,19 @@ void URopeWielderComponent::AddMappingContext()
 	if (UEnhancedInputLocalPlayerSubsystem* Sub = LP ? LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>() : nullptr)
 	{
 		Sub->AddMappingContext(MappingContext, MappingPriority);
-		// EndPlay가 possession 무관하게 제거하도록 서브시스템을 캐시(#11).
+		// EndPlay가 possession 및 이후 프로퍼티 변경과 무관하게 정확한 등록 쌍을 제거하도록 캐시한다.
 		MappedInputSubsystem = Sub;
+		MappedInputContext = MappingContext;
 	}
+}
+
+void URopeWielderComponent::ClearBoundInput()
+{
+	if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(BoundInputComponent.Get()))
+	{
+		EIC->ClearBindingsForObject(this);
+	}
+	BoundInputComponent.Reset();
 }
 
 void URopeWielderComponent::BindInput()
@@ -704,6 +714,7 @@ void URopeWielderComponent::StartPull()
 	// 장전(토글 on): 힘/몽타주는 여기서 시작하지 않는다 — 발동은 UpdatePullEngage가 "Wrapped + 장력이
 	// PullEngageTension을 처음 넘는 순간" 1회 수행한다. 감기 전에 장전해 두면 감겨서 당겨지는 순간 발동한다.
 	SetPullArmed(true);
+	SetComponentTickEnabled(ComputeDesiredTickEnabled());
 }
 
 void URopeWielderComponent::UpdatePullEngage()
@@ -748,7 +759,11 @@ void URopeWielderComponent::UpdatePullEngage()
 	if (PullMontage)
 	{
 		// 몽타주 단일 재생 — 힘은 안의 window notify(StartPullNow/StopPullNow)가 싣는다.
-		PlayPullMontage();
+		// 재생에 실패하면 engaged만 남는 죽은 래치를 만들지 않고 무애니 경로로 즉시 폴백한다.
+		if (!TryPlayPullMontage())
+		{
+			StartPullNow();
+		}
 	}
 	else
 	{
@@ -779,6 +794,7 @@ void URopeWielderComponent::StopPull()
 	SetPullArmed(false);
 	SetPullEngaged(false, 0.0f);
 	StopPullNow();
+	SetComponentTickEnabled(ComputeDesiredTickEnabled());
 }
 
 void URopeWielderComponent::SetPullArmed(bool bNewArmed)
@@ -908,7 +924,9 @@ void URopeWielderComponent::OnPullInputStarted()
 
 FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& AimDir) const
 {
-	return BuildThrowContextInternal(AimDir);
+	// 공개 virtual 확장 훅은 모든 실제 throw 요청의 원본 context를 만든다.
+	// Aim hit 캐시 적용은 preview 전용 내부 경로(BuildThrowContextInternal)가 별도로 담당한다.
+	return BuildBaseThrowContext(AimDir);
 }
 
 FVector URopeWielderComponent::GetAimRayOrigin() const
@@ -1056,21 +1074,17 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 
 FRopeThrowContext URopeWielderComponent::BuildThrowContextInternal(const FVector& AimDir) const
 {
-	if (!UsesAimRay())
+	if (UsesAimRay())
 	{
-		return BuildBaseThrowContext(AimDir);
+		if (FRopeThrowContext CachedContext; TryGetCachedAimRayThrowContext(AimDir, CachedContext))
+		{
+			return CachedContext;
+		}
 	}
 
-	if (FRopeThrowContext CachedContext; TryGetCachedAimRayThrowContext(AimDir, CachedContext))
-	{
-		return CachedContext;
-	}
-
-	const FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(AimDir);
-	// 첫 조준 프레임 또는 명시 AimDir은 아직 정상 gather에서 확정한 캐시가 없다. 여기서 provider를
-	// 즉시 재수집하지 않고 base fallback을 반환한다. 실제 throw는 QueueAimRayThrow가 같은 프레임의
-	// PostPhysics gather 직후 확정하며, HUD/preview는 다음 틱부터 위 캐시를 사용한다.
-	return Request.BaseContext;
+	// 첫 조준 프레임 또는 명시 AimDir은 아직 정상 gather 캐시가 없다. 원본 context를 반환하고
+	// 실제 throw는 BuildAimRayThrowRequest가 같은 프레임 PostPhysics gather에서 확정한다.
+	return BuildThrowContext(AimDir);
 }
 
 bool URopeWielderComponent::TryGetCachedAimRayThrowContext(const FVector& AimDir, FRopeThrowContext& OutContext) const
@@ -1091,7 +1105,7 @@ bool URopeWielderComponent::TryGetCachedAimRayThrowContext(const FVector& AimDir
 FRopeAimRayThrowRequest URopeWielderComponent::BuildAimRayThrowRequest(const FVector& AimDir) const
 {
 	FRopeAimRayThrowRequest Request;
-	Request.BaseContext = BuildBaseThrowContext(AimDir);
+	Request.BaseContext = BuildThrowContext(AimDir);
 	// 조준 ray 경로가 만든 컨텍스트임을 표시한다 — preview 빌더가 "조준 miss"와 "조준 자체가 없음
 	// (BP 직행/AI)"을 구분하는 근거다. 조준 컨텍스트의 단일 팩토리인 여기서 한 번만 찍으면 hit/miss는
 	// 물론 ray가 무효(RayLength=0 — reach 구를 안 지남)인 경우까지 덮인다: ResolveAimRayThrowContext와
@@ -1211,7 +1225,7 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 			return;
 		}
 
-		Rope->ThrowWithContext(BuildBaseThrowContext(AimDir));
+		Rope->ThrowWithContext(BuildThrowContext(AimDir));
 		NotifyThrown();
 		OnThrown.Broadcast();
 	}
@@ -1268,11 +1282,11 @@ void URopeWielderComponent::PlayThrowMontage()
 	}
 }
 
-void URopeWielderComponent::PlayPullMontage()
+bool URopeWielderComponent::TryPlayPullMontage()
 {
 	if (!PullMontage)
 	{
-		return;
+		return false;
 	}
 	if (!AttachMesh)
 	{
@@ -1281,13 +1295,17 @@ void URopeWielderComponent::PlayPullMontage()
 	UAnimInstance* Anim = AttachMesh ? AttachMesh->GetAnimInstance() : nullptr;
 	if (Anim)
 	{
-		Anim->Montage_Play(PullMontage, PullMontagePlayRate);
+		return Anim->Montage_Play(PullMontage, PullMontagePlayRate) > 0.0f;
 	}
-	else
-	{
-		UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: no AnimInstance to play PullMontage."),
-			*GetNameSafe(GetOwner()));
-	}
+
+	UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: no AnimInstance to play PullMontage."),
+		*GetNameSafe(GetOwner()));
+	return false;
+}
+
+void URopeWielderComponent::PlayPullMontage()
+{
+	TryPlayPullMontage();
 }
 
 
@@ -1337,11 +1355,9 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 
 bool URopeWielderComponent::ComputeDesiredTickEnabled() const
 {
-	// Guaranteed는 표시를 꺼도 던지기용 prepared 계산에 틱이 필요하다(UsesLockedPreview로 켜진다 —
-	// bShowThrowPreview는 표시 on/off일 뿐 계산 게이트가 아니다). preview 외에 지상 이탈/스윙
-	// 에어컨트롤 감시도 틱이 필요하다 — 전부 꺼져야 틱 정지. Aim ray 모드(Assisted)는 preview
-	// component가 없어도 collider 수집 bounds를 매 프레임 갱신해야 한다.
-	return UsesLockedPreview() || bAutoGroundExitOnUpwardPull ||
+	// 장전된 Pull의 발동 판정과 이미 적용한 AirControl의 원복에는 설정 토글과 별개로 틱이 필요하다.
+	// Aim ray 모드는 preview 표시와 무관하게 collider 수집 bounds/HUD 샘플을 매 프레임 갱신한다.
+	return bPullArmed || bAirControlBoosted || bAutoGroundExitOnUpwardPull ||
 		bBoostAirControlWhileSwinging || UsesAimRay();
 }
 
@@ -1486,11 +1502,15 @@ void URopeWielderComponent::DisplayPreviewCenterline(const FRopeWrapPreviewData&
 
 void URopeWielderComponent::UpdateThrowPreview()
 {
-	// preview는 GuaranteedWrap 모드 전용이다 — Loaded(장전)에서 조준한 대상을 확정 throw로 던지기 위한
-	// prepared path(contact/anchor 포함)를 만든다. 계산(prepared)과 표시(preview 컴포넌트)는 분리돼
-	// 있어, 표시를 꺼도·컴포넌트가 없어도 prepared는 만들어야 던질 수 있다.
+	// 화면용 preview는 표시가 활성화된 동안만 만든다. 실제 Guaranteed throw용 prepared는 입력 순간
+	// QueueGuaranteedAimThrow가 새 정상 gather 결과로 확정하므로 표시 OFF에서 매 틱 미리 만들 필요가 없다.
 	// FullSimulation/AssistedJudged는 preview를 쓰지 않는다 — 감김이 판정/창발이라 던지기 전에 확정할
 	// 경로가 없다. AssistedJudged의 조준 표시는 aim ray HUD(UpdateAimHudSample)가 따로 담당한다.
+	if (!bShowThrowPreview)
+	{
+		ClearPreviewDisplay();
+		return;
+	}
 	if (!Rope)
 	{
 		ResolveRefs();
@@ -1531,8 +1551,11 @@ void URopeWielderComponent::UpdateThrowPreview()
 	}
 
 	FString PreviewBuildReason;
-	const FRopeThrowContext ThrowContext = BuildThrowContext(FVector::ZeroVector);
+	const FRopeThrowContext ThrowContext = BuildThrowContextInternal(FVector::ZeroVector);
 	FRopePreparedThrowPreview Prepared;
+#if WITH_DEV_AUTOMATION_TESTS
+	++TestPreparedPreviewBuildCount;
+#endif
 	if (!Rope->BuildPreparedWrappingPreview(ThrowContext, Prepared, &PreviewBuildReason))
 	{
 		ClearThrowPreview();
