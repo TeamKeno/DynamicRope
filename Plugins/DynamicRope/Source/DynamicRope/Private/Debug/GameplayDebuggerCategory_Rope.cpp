@@ -8,6 +8,8 @@
 #include "Gameplay/RopeWielderComponent.h"
 #include "Debug/RopeDebugSnapshot.h"
 #include "Subsystem/RopeDebugSubsystem.h"
+// RopeFlightDebug::SelectCandidateBoxes — 후보 박스 선택(순수 함수, 단위 테스트 있음)
+#include "Logic/RopeFlightDebugSelection.h"
 #include "GameFramework/Actor.h"
 // RopeGPU::TubeRingBucket / MaxTubeRings — GPU 튜브 경로/버킷 진단
 #include "RopeTubeBuilder.h"
@@ -142,6 +144,18 @@ namespace
 		case ERopeContactCandidateSource::PredictiveFree: return FColor::Green;
 		case ERopeContactCandidateSource::PredictiveGuided: return FColor(255, 80, 255);
 		default: return FColor::White;
+		}
+	}
+
+	// 후보 출처 표시명(요약/범례 텍스트용) — 색과 짝을 이룬다.
+	const TCHAR* CandidateSourceName(ERopeContactCandidateSource Source)
+	{
+		switch (Source)
+		{
+		case ERopeContactCandidateSource::Actual: return TEXT("Actual");
+		case ERopeContactCandidateSource::PredictiveFree: return TEXT("PredictiveFree");
+		case ERopeContactCandidateSource::PredictiveGuided: return TEXT("PredictiveGuided");
+		default: return TEXT("?");
 		}
 	}
 }
@@ -537,34 +551,54 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 			}
 		}
 
-		// 후보 자체를 정렬하면 짝을 이루는 CandidateMeshKeys와 인덱스 대응이 깨진다 — 인덱스를 정렬한다.
-		TArray<int32> SortedIdx;
-		SortedIdx.Reserve(S.Candidates.Num());
-		for (int32 i = 0; i < S.Candidates.Num(); ++i)
-		{
-			SortedIdx.Add(i);
-		}
-		SortedIdx.Sort([&S](int32 A, int32 B)
-			{
-				return S.Candidates[A].Penetration > S.Candidates[B].Penetration;
-			});
+		// 후보 박스 선택. 기본 [U]은 포착 대상(tracker (Mesh,Bone)) 대표 1개만, [U]+[K]은 대표 + penetration
+		// 상위 일반 후보로 최대 5개까지. 대표는 top-N 밖이어도 항상 포함한다(predictive 대표는 penetration이
+		// 낮아 정렬 꼴찌이기 쉬운데, 그게 "곧 무엇에 걸리려 하나"라 가장 보고 싶은 값이다). 선택 규칙은
+		// 순수 함수라 단위 테스트로 고정한다(RopeFlightDebugSelectionTests).
+		const bool bAdvanced = HasView(EView::Advanced);
+		const RopeFlightDebug::FCandidateSelection Sel = RopeFlightDebug::SelectCandidateBoxes(
+			S.Candidates, S.CandidateMeshKeys, S.TrackerBone, S.TrackerMeshKey,
+			bAdvanced ? 5 : 1, /*bFillWithGeneral=*/bAdvanced);
 
-		// flight 진단은 3D 도형만 남긴다 — Flight phase는 찰나라 좌측 패널 텍스트를 읽을 시간이 없다.
-		// (후보 상세 줄과 요약 줄 모두 그래서 제거했다.) 후보는 상위 N개만 박스로.
-		const int32 MaxCandidateShapes = FMath::Min(5, SortedIdx.Num());
-		for (int32 n = 0; n < MaxCandidateShapes; ++n)
+		for (const int32 i : Sel.BoxIndices)
 		{
-			const int32 i = SortedIdx[n];
 			const FRopeContactCandidate& Candidate = S.Candidates[i];
 			const FColor SourceColor = CandidateSourceColor(Candidate.Source);
-			// dominant 판정도 (Mesh, Bone) 쌍으로 — 같은 스켈레톤을 쓰는 두 액터가 붙어 있으면 본 이름만
-			// 으로는 반대편 액터의 후보와 구별되지 않는다.
-			const bool bIsTracker = (Candidate.Bone == S.TrackerBone)
-				&& (!S.CandidateMeshKeys.IsValidIndex(i) || S.CandidateMeshKeys[i] == S.TrackerMeshKey);
-			const FColor CandidateColor = bIsTracker
-				? FColor(FMath::Min(255, SourceColor.R + 40), FMath::Min(255, SourceColor.G + 20), FMath::Min(255, SourceColor.B + 40))
-				: SourceColor;
-			AddShape(FGameplayDebuggerShape::MakeBox(Candidate.WorldPoint, FVector(3.5f), CandidateColor));
+			if (i == Sel.CaptureTargetIndex)
+			{
+				// 포착 대상: 흰 외곽 박스 + 출처색 내부 박스 두 겹으로 "이게 대표"임을 크기/외곽으로 드러낸다.
+				AddShape(FGameplayDebuggerShape::MakeBox(Candidate.WorldPoint, FVector(4.5f), FColor::White));
+				AddShape(FGameplayDebuggerShape::MakeBox(Candidate.WorldPoint, FVector(2.8f), SourceColor));
+			}
+			else
+			{
+				AddShape(FGameplayDebuggerShape::MakeBox(Candidate.WorldPoint, FVector(3.5f), SourceColor));
+			}
+		}
+
+		// 요약 한 줄: 무엇을 포착하려는가(capture-target=Mesh:Bone) + 출처 + 후보 총수/표시/숨김.
+		// mesh 이름은 dangling 가능한 raw 포인터 대신 키로 안전 해석(죽었으면 ?).
+		if (Sel.CaptureTargetIndex != INDEX_NONE)
+		{
+			const FRopeContactCandidate& Cap = S.Candidates[Sel.CaptureTargetIndex];
+			FString MeshName(TEXT("?"));
+			if (S.CandidateMeshKeys.IsValidIndex(Sel.CaptureTargetIndex))
+			{
+				if (const UObject* M = S.CandidateMeshKeys[Sel.CaptureTargetIndex].ResolveObjectPtr())
+				{
+					MeshName = M->GetName();
+				}
+			}
+			AddTextLine(FString::Printf(
+				TEXT("  {grey}flight capture-target=%s:%s src=%s candidates=%d shown=%d hidden=%d"),
+				*MeshName, *Cap.Bone.ToString(), CandidateSourceName(Cap.Source),
+				Sel.TotalValid, Sel.Shown, Sel.Hidden));
+		}
+		else
+		{
+			AddTextLine(FString::Printf(
+				TEXT("  {grey}flight capture-target=none candidates=%d shown=%d hidden=%d"),
+				Sel.TotalValid, Sel.Shown, Sel.Hidden));
 		}
 
 		// whip 가이드.
