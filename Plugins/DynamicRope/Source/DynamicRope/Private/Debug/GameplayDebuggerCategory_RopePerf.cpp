@@ -231,10 +231,16 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 	{
 		const FPerfRow& R = Rows[i];
 
-		// 솔브 경로 토큰: 슬립이 우선(잠들면 솔브 자체가 없다), 그 다음 gpu/cpu/idle.
-		const TCHAR* Solve = R.bSleeping ? TEXT("{cyan}SLEEP")
-			: (R.bGpuStepped ? TEXT("{green}gpu")
-			: (R.bCpuSolved ? TEXT("{red}cpu") : TEXT("{grey}idle")));
+		// 솔브 경로 토큰: 실제 수행한 작업을 먼저 낸다 — 상단 gpu/cpu 카운터와 같은 기준이라야 집계와
+		// 행이 어긋나지 않는다. SLEEP은 아무 일도 안 한 프레임에만 경로로 쓴다. 슬립은 솔브 후 Finalize에서
+		// 전이할 수 있어(솔브 O + 슬립 O), 그 경우엔 아래 asleep로 별도 표기한다.
+		const TCHAR* Solve = R.bGpuStepped ? TEXT("{green}gpu")
+			: (R.bCpuSolved ? TEXT("{red}cpu")
+			: (R.bSleeping ? TEXT("{cyan}SLEEP") : TEXT("{grey}idle")));
+		// 이번 프레임 솔브했는데 곧 슬립으로 전이한 로프 — sleeping 카운터에도 잡히므로 상태를 덧붙여,
+		// gpu/cpu로 집계된 행이 화면에서 SLEEP으로만 보이지 않게 한다.
+		const FString Asleep = (R.bSleeping && (R.bGpuStepped || R.bCpuSolved))
+			? FString(TEXT(" {cyan}asleep")) : FString();
 
 		const FString Lod = (R.LodScale < 0.999f)
 			? FString::Printf(TEXT(" {cyan}lod=x%.2f"), R.LodScale) : FString();
@@ -242,8 +248,8 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 			? FString::Printf(TEXT(" {grey}d=%.0f"), R.Distance) : FString();
 
 		AddTextLine(FString::Printf(
-			TEXT("{yellow}#%d {white}%s{white} n=%d %s{white}%s %s%s"),
-			i + 1, PerfPhaseName(R.Phase), R.Nodes, Solve, *Lod,
+			TEXT("{yellow}#%d {white}%s{white} n=%d %s%s{white}%s %s%s"),
+			i + 1, PerfPhaseName(R.Phase), R.Nodes, Solve, *Asleep, *Lod,
 			R.bGdf ? TEXT("{green}gdf") : TEXT("{grey}gdf-off"), *Dist));
 
 		// 앵커 마커(월드↔리스트 상관용). 슬립=cyan, 솔브 중=흰, idle=회색.
