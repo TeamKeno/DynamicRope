@@ -96,19 +96,19 @@ namespace
 		}
 	}
 
-	// 근접 노드 인덱스를 연속 구간으로 압축한 문자열("12-16,23-24"). 개수만으로는 알 수 없는 "어디부터 닿았나 /
-	// 한 덩어리인가"를 한 줄로 읽게 한다. 입력은 캡처 루프가 노드 순서대로 채워 이미 오름차순 — 정렬하지 않는다.
-	FString ProximityRangeString(const TArray<FRopeNodeProximityDebug>& Proximity)
+	// 오름차순 노드 인덱스를 연속 구간으로 압축한 문자열("12-16,23-24"). 개수만으로는 알 수 없는 "어디부터
+	// 어디까지 / 한 덩어리인가"를 한 줄로 읽게 한다. 입력이 오름차순이 아니면 구간이 잘게 쪼개진다.
+	FString NodeRangeString(const TArray<int32>& Ascending)
 	{
 		FString Out;
-		for (int32 i = 0; i < Proximity.Num(); )
+		for (int32 i = 0; i < Ascending.Num(); )
 		{
-			const int32 RunStart = Proximity[i].NodeIndex;
+			const int32 RunStart = Ascending[i];
 			int32 RunEnd = RunStart;
-			while (i + 1 < Proximity.Num() && Proximity[i + 1].NodeIndex == RunEnd + 1)
+			while (i + 1 < Ascending.Num() && Ascending[i + 1] == RunEnd + 1)
 			{
 				++i;
-				RunEnd = Proximity[i].NodeIndex;
+				RunEnd = Ascending[i];
 			}
 			++i;
 			if (!Out.IsEmpty())
@@ -120,6 +120,18 @@ namespace
 				: FString::Printf(TEXT("%d-%d"), RunStart, RunEnd);
 		}
 		return Out;
+	}
+
+	// 근접 노드는 캡처 루프가 노드 순서대로 채워 이미 오름차순 — 인덱스만 뽑아 범위 압축에 넘긴다.
+	FString ProximityRangeString(const TArray<FRopeNodeProximityDebug>& Proximity)
+	{
+		TArray<int32> Idx;
+		Idx.Reserve(Proximity.Num());
+		for (const FRopeNodeProximityDebug& P : Proximity)
+		{
+			Idx.Add(P.NodeIndex);
+		}
+		return NodeRangeString(Idx);
 	}
 
 	FColor CandidateSourceColor(ERopeContactCandidateSource Source)
@@ -758,22 +770,33 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 			AddTextLine(TEXT("    {grey}pull n/a (no hand-side anchor)"));
 		}
 
-		// latch 테이블에서 고유한 정보는 "어느 노드가 어느 본에 붙었나"뿐이다 — 위치는 3D 노란 박스가,
-		// 개수는 위 wrapped 줄의 latched=N이 낸다. latch가 하나면 그 줄의 bone=/latched=1로 같은 내용이
-		// 이미 나오므로 여럿일 때만, 그것도 상세 보기에서만 낸다.
-		const int32 MaxRows = (HasView(EView::Advanced) && S.Latched.Num() >= 2)
-			? FMath::Min(12, S.Latched.Num()) : 0;
-		for (int32 i = 0; i < MaxRows; ++i)
+		// latch를 bone 단위로 접어 낸다 — latch 노드는 대부분 연속이라 per-node 행은 같은 본 이름을
+		// 반복할 뿐이고, 넓게 감기면 수십~수백 행이 되어 스크롤 없는 패널에서 잘린다. 본당 한 줄로
+		// 개수 + 노드 구간을 내면(감는 본 수는 적어 잘림이 없다) "어느 본에 몇 개가 어느 구간에 걸렸나"가
+		// 드러난다. 위치는 3D 노란 박스가, 총개수는 wrapped 줄의 latched=N이 낸다. latch가 하나면 그
+		// 줄과 완전 중복이라 여럿일 때만, 그것도 상세 보기에서만 낸다.
+		if (HasView(EView::Advanced) && S.Latched.Num() >= 2)
 		{
-			const FRopeLatchNode& Latch = S.Latched[i];
-			AddTextLine(FString::Printf(TEXT("      {grey}node=%d bone=%s"),
-				Latch.NodeIndex, *Latch.Bone.ToString()));
-		}
-		// 잘린 나머지 안내는 표를 실제로 낸 경우에만 — 표를 내지 않은 프레임(MaxRows=0)에 내면 "... N more"가
-		// 전체 개수로 떠서 표가 잘린 것처럼 읽힌다(개수는 이미 latched=N이 냈다).
-		if (MaxRows > 0 && S.Latched.Num() > MaxRows)
-		{
-			AddTextLine(FString::Printf(TEXT("      {grey}... %d more"), S.Latched.Num() - MaxRows));
+			// 등장 순서(첫 latch 노드 순)를 보존해 노드 인덱스 흐름대로 읽히게 한다.
+			TArray<FName> BoneOrder;
+			TMap<FName, TArray<int32>> ByBone;
+			for (const FRopeLatchNode& Latch : S.Latched)
+			{
+				TArray<int32>& Idx = ByBone.FindOrAdd(Latch.Bone);
+				if (Idx.Num() == 0)
+				{
+					BoneOrder.Add(Latch.Bone);
+				}
+				Idx.Add(Latch.NodeIndex);
+			}
+			for (const FName& LatchBone : BoneOrder)
+			{
+				TArray<int32>& Idx = ByBone[LatchBone];
+				// 같은 본에 감김 섬이 둘 이상이면 인덱스가 뒤섞일 수 있어 방어적으로 정렬한다.
+				Idx.Sort();
+				AddTextLine(FString::Printf(TEXT("      {grey}bone=%s count=%d nodes=%s"),
+					*LatchBone.ToString(), Idx.Num(), *NodeRangeString(Idx)));
+			}
 		}
 	}
 
