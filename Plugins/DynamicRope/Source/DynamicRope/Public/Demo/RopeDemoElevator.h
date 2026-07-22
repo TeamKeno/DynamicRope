@@ -107,6 +107,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Travel", meta = (ClampMin = "0.1", Units = "cm"))
 	float ArrivalTolerance = 5.0f;
 
+	//~ 안정성(탑승 전복 방지) -------------------------------------------------
+
+	/** 플랫폼의 피치/롤 회전을 잠가 항상 수평을 유지한다(**기본 켬**). 캐릭터가 한쪽에 올라타도 기울지
+	 *  않는다 — 물리 승강(수직 이동)은 그대로 두고 전복 자유도만 제거하는, 탑승 플랫폼의 표준 해법.
+	 *  끄면 자유 물리(기울고 전복 가능). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Stability")
+	bool bLockPlatformTilt = true;
+
+	/** 요(yaw, 수직축 회전)까지 잠근다. 켜면 플랫폼이 전혀 회전하지 않는다(방향 고정). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Stability")
+	bool bLockPlatformYaw = false;
+
+	/** 플랫폼 각감쇠 — 회전(흔들림)을 진정시킨다. 잠금이 꺼져 있어도 전복을 늦춘다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Stability", meta = (ClampMin = "0.0"))
+	float PlatformAngularDamping = 10.0f;
+
+	/** 플랫폼 질량 오버라이드(kg, 0=메쉬 기본). 무거울수록 캐릭터 하중의 상대 토크가 작아 안정적이다
+	 *  (대신 ClimbForce/테더 장력도 그만큼 커야 든다). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Stability", meta = (ClampMin = "0.0", Units = "kg"))
+	float PlatformMass = 0.0f;
+
 protected:
 	/** 탑승 플랫폼(물리 바디, 루트). climb-in의 견인 수신자다. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
@@ -132,6 +153,9 @@ private:
 
 	/** 앵커의 조준 목표 월드 위치(없으면 앵커 액터 위치). */
 	FVector ResolveAnchorAimWorld() const;
+
+	/** 안정성 설정(회전 잠금/각감쇠/질량)을 플랫폼 물리 바디에 적용한다(BeginPlay). */
+	void ApplyPlatformStability();
 
 	/** 압력판 상태 변화(델리게이트 시그니처) — 눌림=위, 풀림=아래. */
 	UFUNCTION()

@@ -10,6 +10,7 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "PhysicsEngine/BodyInstance.h"
 #include "UObject/ConstructorHelpers.h"
 
 ARopeDemoElevator::ARopeDemoElevator()
@@ -71,9 +72,35 @@ void ARopeDemoElevator::BeginPlay()
 			*GetName());
 	}
 
+	ApplyPlatformStability();
+
 	// 시작은 아래층(바닥에서 대기). 그래플은 첫 틱부터 확립을 시도한다.
 	bTargetTop = false;
 	bArrivedBroadcast = false;
+}
+
+void ARopeDemoElevator::ApplyPlatformStability()
+{
+	if (!Platform)
+	{
+		return;
+	}
+
+	if (PlatformMass > 0.0f)
+	{
+		Platform->SetMassOverrideInKg(NAME_None, PlatformMass, /*bOverrideMass*/ true);
+	}
+	Platform->SetAngularDamping(PlatformAngularDamping);
+
+	// 피치/롤(전복) 자유도 제거 → 캐릭터가 한쪽에 올라타도 수평 유지. 물리 수직 이동(climb-in)은 보존.
+	// 요는 옵션(bLockPlatformYaw). 잠금이 모두 꺼져 있으면 SixDOF는 자유 물리와 동일하다.
+	if (FBodyInstance* Body = Platform->GetBodyInstance())
+	{
+		Body->bLockXRotation = bLockPlatformTilt;
+		Body->bLockYRotation = bLockPlatformTilt;
+		Body->bLockZRotation = bLockPlatformYaw;
+		Body->SetDOFLock(EDOFMode::SixDOF);
+	}
 }
 
 void ARopeDemoElevator::EndPlay(const EEndPlayReason::Type EndPlayReason)
