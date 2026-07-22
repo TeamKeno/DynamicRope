@@ -110,7 +110,10 @@ private:
 	// centerline, 진단 오버레이가 모두 같은 스냅샷에서 나온다. 헤더만 라이브로 두면 같은 노드가 두 시점에
 	// 겹쳐 그려져 시뮬 떨림이나 latch 불안정으로 오독된다. 스냅샷 나이는 헤더의 age=Nf로 드러낸다.
 	// Snap==null(캡처 첫 프레임)일 때만 헤더를 라이브로 내고 (live) 라벨을 붙이며, 오버레이는 생략한다.
-	void DrawRope(const URopeComponent& Rope, const FRopeDebugSnapshot* Snap);
+	// flight 오버레이는 라이브가 Flight가 아니면 HeldFlight(hold된 마지막 flight, 0.5초 창)에서 그린다 —
+	// 캡처 결정 직후에도 잔류시켜 보게 한다(HeldFlightAgeSeconds는 그 경과초, (held Xs) 라벨용).
+	void DrawRope(const URopeComponent& Rope, const FRopeDebugSnapshot* Snap,
+		const FRopeDebugSnapshot* HeldFlight, float HeldFlightAgeSeconds);
 
 	// 조준 ray를 그린다. 질의는 하지 않는다 — Wielder가 이미 매 틱 스윕해 캐시한 샘플을 읽기만 한다
 	// (green=감김 가능 / red=걸렸지만 감김 불가 / cyan=미스). aim ray 모드가 아니면 빈 샘플이라 no target.

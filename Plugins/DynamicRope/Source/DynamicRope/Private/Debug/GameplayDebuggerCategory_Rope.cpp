@@ -287,7 +287,12 @@ void FGameplayDebuggerCategory_Rope::CollectData(APlayerController* OwnerPC, AAc
 
 		// phase/centerline 등 상시 정보는 라이브에서, 진단 오버레이는 스냅샷(있으면)에서.
 		const FRopeDebugSnapshot* Snap = Dbg ? Dbg->GetSnapshot(Rope) : nullptr;
-		DrawRope(*Rope, Snap);
+		// flight 오버레이 소스: 라이브가 Flight면 그걸 쓰고, 아니면 hold된 마지막 flight(0.5초 창)를 잔류
+		// 소스로 넘긴다(캡처 결정 직후 Wrapping으로 넘어가도 잠시 보이게).
+		float HeldFlightAge = 0.0f;
+		const FRopeDebugSnapshot* HeldFlight = (Snap && Snap->bHasFlight) ? nullptr
+			: (Dbg ? Dbg->GetHeldFlightSnapshot(Rope, HeldFlightAge) : nullptr);
+		DrawRope(*Rope, Snap, HeldFlight, HeldFlightAge);
 	}
 
 	if (Count == 0)
@@ -378,7 +383,8 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 	}
 }
 
-void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const FRopeDebugSnapshot* Snap)
+void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const FRopeDebugSnapshot* Snap,
+	const FRopeDebugSnapshot* HeldFlight, float HeldFlightAgeSeconds)
 {
 	// 화면 한 장은 하나의 시간 기준만 쓴다 — 스냅샷이 있으면 헤더·centerline·오버레이가 모두 그 스냅샷을
 	// 읽는다. 헤더만 라이브로 두면 같은 노드가 두 시점에 겹쳐 그려져 시뮬 떨림/latch 불안정처럼 보인다.
@@ -504,22 +510,32 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 	}
 
 	//~ flight -----------------------------------------------------------
-	if (HasView(EView::Flight) && S.bHasFlight)
+	// flight 오버레이의 소스: 라이브가 Flight면 라이브, 아니면 hold된 마지막 flight(0.5초 창)를 쓴다.
+	// hold면 결정 순간의 값(WorldPoint/SurfacePoint/Positions/MeshKeys — 전부 값·키라 frozen 안전)을 그대로
+	// 그려, 캡처 직후 Wrapping으로 넘어가도 잠시 정지한 채 보이게 한다. 헤더/wrap/노드 등 나머지는 라이브 S.
+	const FRopeDebugSnapshot* FlightSnap = (Snap && Snap->bHasFlight) ? Snap : HeldFlight;
+	if (HasView(EView::Flight) && FlightSnap && FlightSnap->bHasFlight)
 	{
+		const FRopeDebugSnapshot& FS = *FlightSnap;
+		const bool bHeld = (FlightSnap != Snap);
+		// hold 중이면 요약에 붙일 경과 라벨.
+		const FString HeldText = bHeld
+			? FString::Printf(TEXT("  {yellow}(held %.1fs)"), HeldFlightAgeSeconds) : FString();
+
 		// 이 노드의 접촉이 유효 후보로 이어졌는가. 같은 노드가 한 프레임에 여러 대상에 닿을 수 있으므로
 		// 노드 인덱스만으로는 판정할 수 없고, 대상 식별 계약대로 (NodeIndex, Bone, Mesh) 3자를 모두 본다.
 		// 후보 수가 작아 선형 탐색으로 충분하다.
-		auto HasValidCandidateFor = [&S](const FRopeFlightNodeDebug& Node)
+		auto HasValidCandidateFor = [&FS](const FRopeFlightNodeDebug& Node)
 		{
-			for (int32 i = 0; i < S.Candidates.Num(); ++i)
+			for (int32 i = 0; i < FS.Candidates.Num(); ++i)
 			{
-				const FRopeContactCandidate& Candidate = S.Candidates[i];
+				const FRopeContactCandidate& Candidate = FS.Candidates[i];
 				if (!Candidate.bValid || Candidate.NodeIndex != Node.NodeIndex || Candidate.Bone != Node.Contact.Bone)
 				{
 					continue;
 				}
 				// 키 배열은 Candidates와 1:1. 없으면(구 스냅샷) 본까지만 맞은 것으로 본다.
-				if (!S.CandidateMeshKeys.IsValidIndex(i) || S.CandidateMeshKeys[i] == Node.ContactMeshKey)
+				if (!FS.CandidateMeshKeys.IsValidIndex(i) || FS.CandidateMeshKeys[i] == Node.ContactMeshKey)
 				{
 					return true;
 				}
@@ -531,7 +547,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 		// 이 게이트 하나로 flight 오버레이의 기본/상세를 가른다.
 		const bool bAdvanced = HasView(EView::Advanced);
 
-		for (const FRopeFlightNodeDebug& Node : S.NodeDebug)
+		for (const FRopeFlightNodeDebug& Node : FS.NodeDebug)
 		{
 			if (bAdvanced)
 			{
@@ -553,7 +569,7 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 				if (bAdvanced)
 				{
 					// 접촉 법선(원시 관측치)은 상세 보기 전용. 길이는 노드 스케일에 비례(고정 22cm 대신).
-					const float NormalLen = FMath::Clamp(S.NodeCollisionRadius * 3.0f, 12.0f, 40.0f);
+					const float NormalLen = FMath::Clamp(FS.NodeCollisionRadius * 3.0f, 12.0f, 40.0f);
 					AddShape(FGameplayDebuggerShape::MakeSegment(Node.Contact.SurfacePoint,
 						Node.Contact.SurfacePoint + Node.Contact.Normal.GetSafeNormal() * NormalLen, 1.0f, FColor::Blue));
 				}
@@ -565,12 +581,12 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 		// 낮아 정렬 꼴찌이기 쉬운데, 그게 "곧 무엇에 걸리려 하나"라 가장 보고 싶은 값이다). 선택 규칙은
 		// 순수 함수라 단위 테스트로 고정한다(RopeFlightDebugSelectionTests). bAdvanced는 위에서 정의.
 		const RopeFlightDebug::FCandidateSelection Sel = RopeFlightDebug::SelectCandidateBoxes(
-			S.Candidates, S.CandidateMeshKeys, S.TrackerBone, S.TrackerMeshKey,
+			FS.Candidates, FS.CandidateMeshKeys, FS.TrackerBone, FS.TrackerMeshKey,
 			bAdvanced ? 5 : 1, /*bFillWithGeneral=*/bAdvanced);
 
 		for (const int32 i : Sel.BoxIndices)
 		{
-			const FRopeContactCandidate& Candidate = S.Candidates[i];
+			const FRopeContactCandidate& Candidate = FS.Candidates[i];
 			const FColor SourceColor = CandidateSourceColor(Candidate.Source);
 			if (i == Sel.CaptureTargetIndex)
 			{
@@ -584,29 +600,29 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 			}
 		}
 
-		// 요약 한 줄: 무엇을 포착하려는가(capture-target=Mesh:Bone) + 출처 + 후보 총수/표시/숨김.
+		// 요약 한 줄: 무엇을 포착하려는가(capture-target=Mesh:Bone) + 출처 + 후보 총수/표시/숨김. hold면 (held Xs).
 		// mesh 이름은 dangling 가능한 raw 포인터 대신 키로 안전 해석(죽었으면 ?).
 		if (Sel.CaptureTargetIndex != INDEX_NONE)
 		{
-			const FRopeContactCandidate& Cap = S.Candidates[Sel.CaptureTargetIndex];
+			const FRopeContactCandidate& Cap = FS.Candidates[Sel.CaptureTargetIndex];
 			FString MeshName(TEXT("?"));
-			if (S.CandidateMeshKeys.IsValidIndex(Sel.CaptureTargetIndex))
+			if (FS.CandidateMeshKeys.IsValidIndex(Sel.CaptureTargetIndex))
 			{
-				if (const UObject* M = S.CandidateMeshKeys[Sel.CaptureTargetIndex].ResolveObjectPtr())
+				if (const UObject* M = FS.CandidateMeshKeys[Sel.CaptureTargetIndex].ResolveObjectPtr())
 				{
 					MeshName = M->GetName();
 				}
 			}
 			AddTextLine(FString::Printf(
-				TEXT("  {grey}flight capture-target=%s:%s src=%s candidates=%d shown=%d hidden=%d"),
+				TEXT("  {grey}flight capture-target=%s:%s src=%s candidates=%d shown=%d hidden=%d%s"),
 				*MeshName, *Cap.Bone.ToString(), CandidateSourceName(Cap.Source),
-				Sel.TotalValid, Sel.Shown, Sel.Hidden));
+				Sel.TotalValid, Sel.Shown, Sel.Hidden, *HeldText));
 		}
 		else
 		{
 			AddTextLine(FString::Printf(
-				TEXT("  {grey}flight capture-target=none candidates=%d shown=%d hidden=%d"),
-				Sel.TotalValid, Sel.Shown, Sel.Hidden));
+				TEXT("  {grey}flight capture-target=none candidates=%d shown=%d hidden=%d%s"),
+				Sel.TotalValid, Sel.Shown, Sel.Hidden, *HeldText));
 		}
 
 		// 후보 박스 출처 색 범례(상세 보기 전용) — 색만으로 출처를 구분해야 하므로 [K]에서 한 줄로 낸다.
@@ -616,22 +632,22 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 		}
 
 		// whip 가이드. 색은 한 계열(cyan)로 통일한다 — 접촉 성공/실패의 초록/빨강과 섞이지 않게.
-		if (S.bWhipActive && S.Positions.Num() >= 2)
+		if (FS.bWhipActive && FS.Positions.Num() >= 2)
 		{
-			const int32 LastNode = S.Positions.Num() - 1;
+			const int32 LastNode = FS.Positions.Num() - 1;
 			// 가이드 커브(타깃 점 + 이음선)는 기본으로 — 스윙이 어디로 향하는지가 요지다.
-			for (int32 i = 0; i < S.WhipGuideTargets.Num(); ++i)
+			for (int32 i = 0; i < FS.WhipGuideTargets.Num(); ++i)
 			{
-				AddPoint(S.WhipGuideTargets[i], 10.0f, FColor::Cyan);
-				if (i + 1 < S.WhipGuideTargets.Num())
+				AddPoint(FS.WhipGuideTargets[i], 10.0f, FColor::Cyan);
+				if (i + 1 < FS.WhipGuideTargets.Num())
 				{
-					AddShape(FGameplayDebuggerShape::MakeSegment(S.WhipGuideTargets[i], S.WhipGuideTargets[i + 1], 1.0f, FColor::Cyan));
+					AddShape(FGameplayDebuggerShape::MakeSegment(FS.WhipGuideTargets[i], FS.WhipGuideTargets[i + 1], 1.0f, FColor::Cyan));
 				}
 			}
 			// 기본 [U]은 guided/free 경계 하나만 마커로 — "어디까지 가이드가 끄는가"가 요지고, 노드별 표시는
 			// 상세 보기로 뺀다. 경계 노드 = Frac이 WhipGuidedEnd 이하인 마지막 노드.
-			const int32 BoundaryNode = FMath::Clamp(FMath::FloorToInt(S.WhipGuidedEnd * LastNode), 0, LastNode);
-			AddShape(FGameplayDebuggerShape::MakeBox(S.Positions[BoundaryNode], FVector(5.0f), FColor::Cyan));
+			const int32 BoundaryNode = FMath::Clamp(FMath::FloorToInt(FS.WhipGuidedEnd * LastNode), 0, LastNode);
+			AddShape(FGameplayDebuggerShape::MakeBox(FS.Positions[BoundaryNode], FVector(5.0f), FColor::Cyan));
 
 			if (bAdvanced)
 			{
@@ -639,22 +655,22 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 				for (int32 i = 1; i <= LastNode; ++i)
 				{
 					const float Frac = static_cast<float>(i) / static_cast<float>(LastNode);
-					if (Frac <= S.WhipGuidedEnd)
+					if (Frac <= FS.WhipGuidedEnd)
 					{
-						AddShape(FGameplayDebuggerShape::MakeBox(S.Positions[i], FVector(3.5f), FColor::Cyan));
+						AddShape(FGameplayDebuggerShape::MakeBox(FS.Positions[i], FVector(3.5f), FColor::Cyan));
 					}
 					else
 					{
-						AddPoint(S.Positions[i], 8.0f, FColor(90, 170, 170));
+						AddPoint(FS.Positions[i], 8.0f, FColor(90, 170, 170));
 					}
 				}
 				// 노드→가이드 타깃 보정선(원시): 어느 노드를 어느 타깃으로 얼마나 끄는가. cyan 계열(teal)로.
-				for (int32 i = 0; i < S.WhipGuideTargets.Num(); ++i)
+				for (int32 i = 0; i < FS.WhipGuideTargets.Num(); ++i)
 				{
-					if (S.WhipGuideNodeIndices.IsValidIndex(i) && S.Positions.IsValidIndex(S.WhipGuideNodeIndices[i]))
+					if (FS.WhipGuideNodeIndices.IsValidIndex(i) && FS.Positions.IsValidIndex(FS.WhipGuideNodeIndices[i]))
 					{
-						AddShape(FGameplayDebuggerShape::MakeSegment(S.Positions[S.WhipGuideNodeIndices[i]],
-							S.WhipGuideTargets[i], 1.0f, FColor(0, 180, 200)));
+						AddShape(FGameplayDebuggerShape::MakeSegment(FS.Positions[FS.WhipGuideNodeIndices[i]],
+							FS.WhipGuideTargets[i], 1.0f, FColor(0, 180, 200)));
 					}
 				}
 			}

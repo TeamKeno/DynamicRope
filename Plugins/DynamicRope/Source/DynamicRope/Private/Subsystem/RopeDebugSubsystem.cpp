@@ -19,16 +19,17 @@ bool URopeDebugSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType)
 void URopeDebugSubsystem::Tick(float DeltaTime)
 {
 #if WITH_GAMEPLAY_DEBUGGER
-	if (Snapshots.Num() == 0)
+	if (Snapshots.Num() == 0 && HeldFlight.Num() == 0)
 	{
 		return;
 	}
 
 	// 카테고리가 최근(ActiveFrameWindow 내) 그리지 않았으면 비활성 — 제출이 멈춰도 마지막 배열이 월드
-	// 종료까지 남지 않도록 보관분을 통째로 비운다.
+	// 종료까지 남지 않도록 보관분을 통째로 비운다(hold 보관소 포함).
 	if (GFrameCounter - LastActiveFrame > ActiveFrameWindow)
 	{
 		Snapshots.Reset();
+		HeldFlight.Reset();
 		return;
 	}
 
@@ -39,6 +40,20 @@ void URopeDebugSubsystem::Tick(float DeltaTime)
 		if (!It.Key().IsValid() || GFrameCounter - It.Value().FrameStamp > ActiveFrameWindow)
 		{
 			It.RemoveCurrent();
+		}
+	}
+
+	// hold 보관소는 실시간 창(FlightHoldSeconds) 기준으로 만료 — 무효 키도 함께 제거.
+	if (HeldFlight.Num() > 0)
+	{
+		const UWorld* World = GetWorld();
+		const double Now = World ? World->GetRealTimeSeconds() : 0.0;
+		for (auto It = HeldFlight.CreateIterator(); It; ++It)
+		{
+			if (!It.Key().IsValid() || Now - It.Value().RealTimeSeconds > FlightHoldSeconds)
+			{
+				It.RemoveCurrent();
+			}
 		}
 	}
 #endif
@@ -97,6 +112,16 @@ void URopeDebugSubsystem::SubmitSnapshot(const URopeComponent* Rope, FRopeDebugS
 		return;
 	}
 	Snapshot.FrameStamp = GFrameCounter;
+	// flight 오버레이는 다음(Wrapping) 프레임 스냅샷에 덮여 사라지므로, bHasFlight면 별도로 복사 보관해
+	// 실시간 FlightHoldSeconds 동안 잔류시킨다("무엇을 잡기로 했나"를 결정 직후에도 보게). 아래 MoveTemp가
+	// 원본을 소비하므로 그 전에 복사한다.
+	if (Snapshot.bHasFlight)
+	{
+		FHeldFlightSnapshot& Held = HeldFlight.FindOrAdd(Rope);
+		Held.Snapshot = Snapshot;
+		const UWorld* World = GetWorld();
+		Held.RealTimeSeconds = World ? World->GetRealTimeSeconds() : 0.0;
+	}
 	Snapshots.Add(Rope, MoveTemp(Snapshot));
 	// 스테일/무효 정리는 Tick이 프레임당 한 번 돈다 — 여기서 매 제출마다 전체 맵을 훑지 않는다.
 }
@@ -111,6 +136,25 @@ const FRopeDebugSnapshot* URopeDebugSubsystem::GetSnapshot(const URopeComponent*
 	return Found;
 }
 
+const FRopeDebugSnapshot* URopeDebugSubsystem::GetHeldFlightSnapshot(const URopeComponent* Rope, float& OutAgeSeconds) const
+{
+	OutAgeSeconds = 0.0f;
+	const FHeldFlightSnapshot* Found = HeldFlight.Find(Rope);
+	if (!Found)
+	{
+		return nullptr;
+	}
+	const UWorld* World = GetWorld();
+	const double Now = World ? World->GetRealTimeSeconds() : 0.0;
+	const double Age = Now - Found->RealTimeSeconds;
+	if (Age < 0.0 || Age > FlightHoldSeconds)
+	{
+		return nullptr;
+	}
+	OutAgeSeconds = static_cast<float>(Age);
+	return &Found->Snapshot;
+}
+
 #else // !WITH_GAMEPLAY_DEBUGGER — 디버그 비활성 빌드: 모두 no-op.
 
 void URopeDebugSubsystem::SetTarget(AActor*, ERopeDebugCapture) {}
@@ -118,5 +162,6 @@ bool URopeDebugSubsystem::ShouldCapture(const URopeComponent*) const { return fa
 ERopeDebugCapture URopeDebugSubsystem::GetCaptureMask() const { return ERopeDebugCapture::None; }
 void URopeDebugSubsystem::SubmitSnapshot(const URopeComponent*, FRopeDebugSnapshot&&) {}
 const FRopeDebugSnapshot* URopeDebugSubsystem::GetSnapshot(const URopeComponent*) const { return nullptr; }
+const FRopeDebugSnapshot* URopeDebugSubsystem::GetHeldFlightSnapshot(const URopeComponent*, float& OutAgeSeconds) const { OutAgeSeconds = 0.0f; return nullptr; }
 
 #endif // WITH_GAMEPLAY_DEBUGGER

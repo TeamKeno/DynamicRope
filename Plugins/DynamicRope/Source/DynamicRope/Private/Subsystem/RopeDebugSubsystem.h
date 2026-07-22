@@ -47,6 +47,10 @@ public:
 	/** 카테고리가 그릴 때 읽는다. 스냅샷이 없거나 너무 오래됐으면(대상 해제 등) nullptr. */
 	const FRopeDebugSnapshot* GetSnapshot(const URopeComponent* Rope) const;
 
+	/** hold된 마지막 flight 스냅샷(실시간 FlightHoldSeconds 창 내). 없으면 nullptr, 있으면 OutAgeSeconds에
+	 *  경과초를 담는다. Flight를 벗어난 직후에도 flight 오버레이를 잔류시키는 데 쓴다. */
+	const FRopeDebugSnapshot* GetHeldFlightSnapshot(const URopeComponent* Rope, float& OutAgeSeconds) const;
+
 	//~ UWorldSubsystem
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 
@@ -67,5 +71,16 @@ private:
 	uint64 LastActiveFrame = 0;
 	ERopeDebugCapture CaptureMask = ERopeDebugCapture::None;
 	TMap<TWeakObjectPtr<const URopeComponent>, FRopeDebugSnapshot> Snapshots;
+
+	// 마지막 flight 스냅샷 보관: bHasFlight 프레임은 다음(Wrapping) 프레임 스냅샷에 덮여 사라지므로,
+	// 실시간 FlightHoldSeconds 동안 별도로 들고 있어 flight 오버레이를 결정 순간 위치에 잔류시킨다.
+	struct FHeldFlightSnapshot
+	{
+		FRopeDebugSnapshot Snapshot;
+		// 캡처 시각 World->GetRealTimeSeconds() — slomo/pause와 무관한 실시간이라 hold 창이 벽시계 기준.
+		double RealTimeSeconds = 0.0;
+	};
+	TMap<TWeakObjectPtr<const URopeComponent>, FHeldFlightSnapshot> HeldFlight;
+	static constexpr double FlightHoldSeconds = 2.5;
 #endif
 };
