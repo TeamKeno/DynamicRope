@@ -177,24 +177,31 @@ public:
 		meta = (EditCondition = "ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
 	bool bShowRopeInReel = false;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
+	// 아래 도메인별 설정 구조체는 전부 ShowOnlyInnerProperties로 노출한다 — 디테일 패널에서 카테고리
+	// 헤더(Rope|Solver / Rope|Throw / …) 바로 아래에 필드가 펼쳐지므로, "카테고리 → 구조체 이름 →
+	// 필드"의 이중 확장 없이 한 단계로 편집된다. BP/직렬화에는 영향이 없다(구조체는 그대로 하나의
+	// BlueprintReadWrite 변수). 각 필드의 세부 카테고리(Rope|Solver|Scaling 등)는 구조체 내부에서 유지된다.
+
+	/** XPBD 솔버 튜닝(Free/Flight 물리). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ShowOnlyInnerProperties))
 	FRopeSolverConfig SolverConfig;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	/** 던지기/발사 파라미터(Flight 진입). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ShowOnlyInnerProperties))
 	FRopeThrowParams ThrowParams;
 
 	/** physics → logic (wrap) 핸드오프 — *성립*(경로 빌드/판정/커밋) 튜닝. 감지는 DetectConfig. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ShowOnlyInnerProperties))
 	FRopeWrapConfig WrapConfig;
 
 	/** Flight/Contacting *감지*(언제 잡혔다고 볼 것인가) 튜닝 — 성립(WrapConfig)과 분리된 도메인
 	 *  (2026-07-13 표면 감사 B-1). 공유 프로브 반경(ContactQueryRadius)은 WrapConfig 소유. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ShowOnlyInnerProperties))
 	FRopeDetectConfig DetectConfig;
 
 	/** Wrapped *이후*(유지/당김/풀림) 튜닝 — 성립 판정(WrapConfig)과 분리된 Post-Wrap 도메인
 	 *  (2026-07-13 표면 감사 B-1; 설계 노트 01 도메인, 도달 모드·결착 모델 무관 공통). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ShowOnlyInnerProperties))
 	FRopeHoldConfig HoldConfig;
 
 	//~ Collision(충돌 도메인) ----------------------------------------------
@@ -237,7 +244,7 @@ public:
 	//~ Whip(던지기 스윙 설정) ----------------------------------------------
 	/** 던지기 초반 채찍 스윙 튜닝. 런타임 상태는 WhipGuide가 소유하고, 호출 시
 	 *  MakeWhipGuideConfig()로 스냅샷을 만들어 넘긴다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ShowOnlyInnerProperties))
 	FRopeWhipConfig WhipConfig;
 
 	/** 현재 whip 스윙 경과 시간(s). 스윙 비활성 시 0. */
