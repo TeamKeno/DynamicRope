@@ -33,12 +33,26 @@ ARopeDemoElevator::ARopeDemoElevator()
 		Platform->SetStaticMesh(CubeMesh.Object);
 	}
 
-	Rope = CreateDefaultSubobject<URopeComponent>(TEXT("Rope"));
-	Rope->SetupAttachment(Platform);
-	// 플랫폼 윗면에서 로프가 나간다(판 절반 두께 ≈ 10cm 위).
-	Rope->SetRelativeLocation(FVector(0.0f, 0.0f, 10.0f));
-	// 천장 앵커를 실패 없이 감아야 하는 데모라 ③ GuaranteedWrap 고정.
-	Rope->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
+	// 네 모서리 케이블 — 플랫폼 윗면(±80, ±80, +10cm)에서 각각 천장 앵커를 감는다.
+	const FVector Corners[NumRopes] = {
+		FVector( 80.0f,  80.0f, 10.0f),
+		FVector( 80.0f, -80.0f, 10.0f),
+		FVector(-80.0f,  80.0f, 10.0f),
+		FVector(-80.0f, -80.0f, 10.0f),
+	};
+	Ropes.Reserve(NumRopes);
+	for (int32 Index = 0; Index < NumRopes; ++Index)
+	{
+		URopeComponent* Cable = CreateDefaultSubobject<URopeComponent>(*FString::Printf(TEXT("Rope%d"), Index));
+		if (Cable)
+		{
+			Cable->SetupAttachment(Platform);
+			Cable->SetRelativeLocation(Corners[Index]);
+			// 천장 앵커를 실패 없이 감아야 하는 데모라 ③ GuaranteedWrap 고정.
+			Cable->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
+			Ropes.Add(Cable);
+		}
+	}
 }
 
 void ARopeDemoElevator::BeginPlay()
@@ -76,20 +90,19 @@ void ARopeDemoElevator::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (!Rope)
+	if (Ropes.Num() == 0)
 	{
 		return;
 	}
 
-	//~ 1) 그래플 확립 단계 — 천장 앵커를 감을 때까지 주기적으로 재발사한다.
+	//~ 1) 그래플 확립 단계 — 네 케이블이 모두 천장 앵커를 감을 때까지 주기적으로 재발사한다.
 	if (!bGrappleReady)
 	{
-		if (Rope->GetPhase() == ERopePhase::Wrapped)
+		if (AreAllRopesWrapped())
 		{
 			bGrappleReady = true;
 			bArrivedBroadcast = false;
-			UE_LOG(LogDynamicRope, Log, TEXT("[%s] elevator grapple established (bone='%s')."),
-				*GetName(), *Rope->GetWrappedBoneName().ToString());
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] elevator grapple established (%d cables)."), *GetName(), NumRopes);
 			return;
 		}
 
@@ -98,68 +111,80 @@ void ARopeDemoElevator::Tick(float DeltaSeconds)
 			EstablishRetryRemaining -= DeltaSeconds;
 			if (EstablishRetryRemaining <= 0.0f)
 			{
-				FireGrapple();
+				FireGrapples();
 				EstablishRetryRemaining = 1.0f; // 1초 간격 재시도(gather/장전 에지 안정화 여유).
 			}
 		}
 		return;
 	}
 
-	//~ 2) 그래플이 풀렸으면(대상 소실 등) 확립 단계로 되돌아간다.
-	if (Rope->GetPhase() != ERopePhase::Wrapped)
+	//~ 2) 케이블이 하나라도 풀렸으면(대상 소실 등) 확립 단계로 되돌아가 그 케이블만 재발사한다.
+	if (!AreAllRopesWrapped())
 	{
 		bGrappleReady = false;
 		EstablishRetryRemaining = 0.5f;
-		Rope->SetReelRate(0.0f);
-		Rope->SetActivePull(0.0f);
+		for (URopeComponent* Cable : Ropes)
+		{
+			if (Cable)
+			{
+				Cable->SetReelRate(0.0f);
+				Cable->SetActivePull(0.0f);
+			}
+		}
 		return;
 	}
 
-	//~ 3) 목표 층으로 릴 구동. 상승=릴-인(+climb-in), 하강=릴-아웃(중력).
-	const float Length = Rope->GetCurrentRopeLength();
-	const float MinLength = Rope->MinRopeLength;
-	const float MaxLength = FMath::Max(Rope->RopeLength, MinLength);
-
-	if (bTargetTop)
+	//~ 3) 목표 층으로 릴 구동. 상승=릴-인(+케이블당 climb-in), 하강=릴-아웃(중력). 모든 케이블이
+	//     목표에 닿아야 도착으로 본다(네 케이블 길이가 함께 수렴).
+	bool bAllArrived = true;
+	for (URopeComponent* Cable : Ropes)
 	{
-		if (Length > MinLength + ArrivalTolerance)
+		if (!Cable)
 		{
-			Rope->SetReelRate(AscendReelSpeed);
-			if (ClimbForce > 0.0f)
+			continue;
+		}
+		const float Length = Cable->GetCurrentRopeLength();
+		const float MinLength = Cable->MinRopeLength;
+		const float MaxLength = FMath::Max(Cable->RopeLength, MinLength);
+
+		if (bTargetTop)
+		{
+			if (Length > MinLength + ArrivalTolerance)
 			{
-				Rope->SetActivePull(ClimbForce);
+				Cable->SetReelRate(AscendReelSpeed);
+				if (ClimbForce > 0.0f)
+				{
+					Cable->SetActivePull(ClimbForce);
+				}
+				bAllArrived = false;
+			}
+			else
+			{
+				Cable->SetReelRate(0.0f);
+				Cable->SetActivePull(0.0f);
 			}
 		}
 		else
 		{
-			Rope->SetReelRate(0.0f);
-			Rope->SetActivePull(0.0f);
-			if (!bArrivedBroadcast)
+			if (Length < MaxLength - ArrivalTolerance)
 			{
-				bArrivedBroadcast = true;
-				UE_LOG(LogDynamicRope, Log, TEXT("[%s] elevator arrived at top."), *GetName());
-				OnElevatorArrived.Broadcast(this, /*bAtTop*/ true);
+				Cable->SetReelRate(-DescendReelSpeed);
+				Cable->SetActivePull(0.0f);
+				bAllArrived = false;
+			}
+			else
+			{
+				Cable->SetReelRate(0.0f);
+				Cable->SetActivePull(0.0f);
 			}
 		}
 	}
-	else
+
+	if (bAllArrived && !bArrivedBroadcast)
 	{
-		if (Length < MaxLength - ArrivalTolerance)
-		{
-			Rope->SetReelRate(-DescendReelSpeed);
-			Rope->SetActivePull(0.0f);
-		}
-		else
-		{
-			Rope->SetReelRate(0.0f);
-			Rope->SetActivePull(0.0f);
-			if (!bArrivedBroadcast)
-			{
-				bArrivedBroadcast = true;
-				UE_LOG(LogDynamicRope, Log, TEXT("[%s] elevator arrived at bottom."), *GetName());
-				OnElevatorArrived.Broadcast(this, /*bAtTop*/ false);
-			}
-		}
+		bArrivedBroadcast = true;
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] elevator arrived at %s."), *GetName(), bTargetTop ? TEXT("top") : TEXT("bottom"));
+		OnElevatorArrived.Broadcast(this, bTargetTop);
 	}
 }
 
@@ -179,27 +204,54 @@ void ARopeDemoElevator::HandleCallPlateChanged(ARopeDemoPressurePlate* /*Plate*/
 	SetTargetTop(bPressed);
 }
 
+bool ARopeDemoElevator::AreAllRopesWrapped() const
+{
+	if (Ropes.Num() == 0)
+	{
+		return false;
+	}
+	for (const URopeComponent* Cable : Ropes)
+	{
+		if (!Cable || Cable->GetPhase() != ERopePhase::Wrapped)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 FVector ARopeDemoElevator::ResolveAnchorAimWorld() const
 {
 	// 앵커 액터 위치를 조준한다 — swept aim ray가 그 방향의 wrappable 본을 sweep해 잠근다.
 	return AnchorTarget ? AnchorTarget->GetActorLocation() : GetActorLocation();
 }
 
-bool ARopeDemoElevator::FireGrapple()
+void ARopeDemoElevator::FireGrapples()
 {
-	if (!Rope || !AnchorTarget)
+	for (URopeComponent* Cable : Ropes)
+	{
+		if (Cable && Cable->GetPhase() != ERopePhase::Wrapped)
+		{
+			FireGrappleFor(Cable);
+		}
+	}
+}
+
+bool ARopeDemoElevator::FireGrappleFor(URopeComponent* InRope)
+{
+	if (!InRope || !AnchorTarget)
 	{
 		return false;
 	}
 
 	// ③은 Loaded(장전)에서만 던질 수 있다. 아니면 장전만 하고 다음 시도에서 발사한다(장전 에지 안정화).
-	if (Rope->GetPhase() != ERopePhase::Loaded)
+	if (InRope->GetPhase() != ERopePhase::Loaded)
 	{
-		Rope->EnterLoaded();
+		InRope->EnterLoaded();
 		return false;
 	}
 
-	const FVector Origin = Rope->GetComponentLocation();
+	const FVector Origin = InRope->GetComponentLocation();
 	const FVector AnchorWorld = ResolveAnchorAimWorld();
 	const FVector ToAnchor = AnchorWorld - Origin;
 	const float Dist = ToAnchor.Size();
@@ -233,5 +285,5 @@ bool ARopeDemoElevator::FireGrapple()
 	Request.SweepStep = 2.0f;
 
 	// 몽타주 없이 정상 gather 직후 즉시 실행한다.
-	return Rope->QueueGuaranteedAimThrow(Request, /*bExecuteWhenReady*/ true);
+	return InRope->QueueGuaranteedAimThrow(Request, /*bExecuteWhenReady*/ true);
 }

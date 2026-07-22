@@ -46,16 +46,16 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
-	/** 위층으로 올라가도록 지시한다(그래플이 확립돼 있어야 실제로 움직인다). */
-	UFUNCTION(BlueprintCallable, Category = "Rope|Demo")
+	/** 위층으로 올라가도록 지시한다(그래플이 확립돼 있어야 실제로 움직인다). 디테일 패널 버튼으로도 호출. */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void RequestAscend() { SetTargetTop(true); }
 
-	/** 아래층으로 내려가도록 지시한다. */
-	UFUNCTION(BlueprintCallable, Category = "Rope|Demo")
+	/** 아래층으로 내려가도록 지시한다. 디테일 패널 버튼으로도 호출. */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void RequestDescend() { SetTargetTop(false); }
 
-	/** 목표 층을 뒤집는다(입력 한 키 토글용). */
-	UFUNCTION(BlueprintCallable, Category = "Rope|Demo")
+	/** 목표 층을 뒤집는다(입력 한 키/디테일 패널 버튼용). */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void ToggleTarget() { SetTargetTop(!bTargetTop); }
 
 	/** 목표 층을 직접 지정한다(true=위, false=아래). */
@@ -98,10 +98,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Travel", meta = (ClampMin = "1.0", Units = "cm/s"))
 	float DescendReelSpeed = 120.0f;
 
-	/** 상승 중 능동 Pull(climb-in) 견인력. 릴-인만으로 플랫폼 무게를 못 들면 이 힘이 보태 끌어올린다.
-	 *  0이면 릴-인 + 테더만으로 상승(테더 MaxTetherTension이 플랫폼 무게를 넘어야 한다). */
+	/** 상승 중 **케이블당** 능동 Pull(climb-in) 견인력(로프 4개 → 총 힘 ×4). 릴-인만으로 플랫폼 무게를
+	 *  못 들면 이 힘이 보태 끌어올린다. 0이면 릴-인 + 테더만으로 상승(테더 MaxTetherTension이 무게를 넘어야). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Travel", meta = (ClampMin = "0.0"))
-	float ClimbForce = 200000.0f;
+	float ClimbForce = 60000.0f;
 
 	/** 목표 길이 도달 판정 여유(cm). 현재 로프 길이가 최소/최대에서 이 값 이내면 도착으로 본다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Travel", meta = (ClampMin = "0.1", Units = "cm"))
@@ -112,15 +112,25 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<UStaticMeshComponent> Platform = nullptr;
 
-	/** 천장 앵커를 감는 ③ GuaranteedWrap 로프. 플랫폼 위에 부착돼 있어 시작점이 플랫폼을 따라간다. */
+	/** 천장 앵커를 감는 ③ GuaranteedWrap 로프 4개(플랫폼 네 모서리 = 4점 케이블). 함께 감고 함께 릴한다 —
+	 *  하중이 네 모서리에 분산돼 단일 중앙 로프보다 기울어짐이 적다. 모두 같은 AnchorTarget을 감는다. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
-	TObjectPtr<URopeComponent> Rope = nullptr;
+	TArray<TObjectPtr<URopeComponent>> Ropes;
 
 private:
-	/** 앵커를 향해 Guaranteed 그래플을 발사한다(Wrapped 확립 시도). 성공 큐잉 시 true. */
-	bool FireGrapple();
+	/** 케이블 수(플랫폼 네 모서리). */
+	static constexpr int32 NumRopes = 4;
 
-	/** 앵커의 조준 목표 월드 위치(지정 소켓/본이 있으면 그 위치, 없으면 앵커 액터 위치). */
+	/** 아직 감기지 않은 모든 로프를 앵커로 향해 Guaranteed 발사한다(Wrapped 확립 시도). */
+	void FireGrapples();
+
+	/** 로프 하나를 앵커로 향해 Guaranteed 발사한다. 성공 큐잉 시 true. */
+	bool FireGrappleFor(URopeComponent* InRope);
+
+	/** 로프 4개가 모두 Wrapped인가(= 그래플 확립 완료). */
+	bool AreAllRopesWrapped() const;
+
+	/** 앵커의 조준 목표 월드 위치(없으면 앵커 액터 위치). */
 	FVector ResolveAnchorAimWorld() const;
 
 	/** 압력판 상태 변화(델리게이트 시그니처) — 눌림=위, 풀림=아래. */
