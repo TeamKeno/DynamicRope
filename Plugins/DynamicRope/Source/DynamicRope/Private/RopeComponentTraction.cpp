@@ -741,8 +741,12 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		PhysicalTetherProxy->SetupAttachment(this);
 		PhysicalTetherProxy->SetAbsolute(true, true, true); // 월드 배치(로프 컴포넌트 트랜스폼 무관).
 		PhysicalTetherProxy->InitSphereRadius(4.0f);
-		// 바디는 필요하고(제약의 한쪽) 충돌은 없어야 한다: 물리 켬 + 전 채널 무시.
-		PhysicalTetherProxy->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		// 바디는 필요하고(제약의 한쪽) 충돌도 쿼리도 없어야 한다 — PhysicsOnly + 전 채널 무시.
+		// 쿼리를 켜면 안 되는 이유: USphereComponent의 오브젝트 타입 기본값은 WorldDynamic이고,
+		// 채널 응답 Ignore는 **채널 질의**에만 듣는다(오브젝트 타입 질의는 셰이프의 오브젝트 타입만
+		// 본다). 그래서 쿼리가 켜져 있으면 URopeStaticBodyProvider의 OverlapMultiByObjectType 스캔에
+		// 잡혀, 코너를 매 프레임 따라다니는 push-out 콜라이더가 되어 제 로프의 wrap 노드를 민다.
+		PhysicalTetherProxy->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
 		PhysicalTetherProxy->SetCollisionResponseToAllChannels(ECR_Ignore);
 		PhysicalTetherProxy->SetSimulatePhysics(false); // 키네마틱 — 매 프레임 코너로 이동.
 		PhysicalTetherProxy->SetHiddenInGame(true);
