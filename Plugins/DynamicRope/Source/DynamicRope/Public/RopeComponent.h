@@ -221,12 +221,21 @@ public:
 	// GetEffective* 헬퍼가 렌더 Radius에서 유도한다(반지름 3종 자동 정합).
 
 	/**
-	 * 기본적으로 rope는 월드의 모든 collider provider와 충돌하되 **자기 owner(던진 본인)의 provider는 제외**한다
+	 * 기본적으로 rope는 월드의 모든 collider provider와 충돌하되 **자기 owner(던진 본인)의 것은 제외**한다
 	 * — throw 시 늘어진 로프가 던진 사람 팔다리에 엉키는 것을 막기 위함. cross-actor wrap(다른 액터 body 잡기)은
 	 * 그 액터가 "전체"에 포함되므로 자동으로 동작한다.
-	 * 켜면 owner provider도 포함한다(로프가 자기 owner 몸을 일부러 감아야 하는 드문 경우).
+	 *
+	 * 제외 범위는 두 갈래다:
+	 *  - 스켈레톤/랩 대상 provider는 **provider 단위**(owner의 provider를 통째로 건너뜀).
+	 *  - 정적 월드 provider(URopeStaticBodyProvider)는 **바디 단위** — 월드를 훑다가 잡은 셰이프 중 출처
+	 *    액터가 owner인 것만 뺀다(테더 프록시·팁 메쉬·든 무기 등이 로프를 따라다니며 제 로프를 미는 것 방지).
+	 *    바닥/기둥 등 다른 액터의 월드 지오메트리는 그대로 남는다.
+	 *
+	 * **로프를 프롭에 얹은 구성(기둥·크레인·앵커 액터에 URopeComponent를 붙인 경우)은 이 값을 켜야 한다** —
+	 * 끄면 그 받침대의 콜리전도 owner 소유라 제외되어 로프가 받침대를 통과한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision",
+		meta = (ToolTip = "끄면(기본) 자기 owner의 콜라이더를 제외합니다 — 정적 월드 provider가 잡은 owner 소유 셰이프(테더 프록시/팁/무기)도 바디 단위로 빠집니다. 로프를 기둥 등 프롭 액터에 붙였다면 켜세요(안 켜면 받침대를 통과)."))
 	bool bIncludeOwnerColliders = false;
 
 	/**

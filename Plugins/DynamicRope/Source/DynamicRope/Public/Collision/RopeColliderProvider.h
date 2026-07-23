@@ -118,6 +118,23 @@ public:
 namespace RopeColliderGather
 {
 	/**
+	 * 콜라이더 하나가 "제외 대상 owner의 몸"인지 — 정적 월드 provider처럼 provider 단위 소유자 제외를
+	 * 면제받는 경로에서, 월드 지오메트리는 남기고 로프 소유 액터의 셰이프만 골라 빼는 판정이다.
+	 *
+	 * 폴백 계약(두 경우 모두 false = 아무것도 제외하지 않음):
+	 *  - OwnerToExclude == nullptr: 로프가 owner 콜라이더를 옵트인(bIncludeOwnerColliders)한 상태.
+	 *  - SourceActors에 이 인덱스가 없음: provider가 출처를 안 줬거나 길이가 어긋남 → provider 단위 판정에 맡긴다.
+	 * 즉 출처 정보가 불완전할 때 조용히 과도하게 제외하는 일이 없다(충돌이 사라지는 쪽으로 실패하지 않는다).
+	 */
+	inline bool IsExcludedOwnerBody(TConstArrayView<const AActor*> SourceActors, int32 Index,
+		const AActor* OwnerToExclude)
+	{
+		return OwnerToExclude != nullptr
+			&& SourceActors.IsValidIndex(Index)
+			&& SourceActors[Index] == OwnerToExclude;
+	}
+
+	/**
 	 * 스켈레톤형(전 콜라이더 빌드 후 배정) provider 공용 매핑 헬퍼: 풀의 [StartIndex, Colliders.Num())
 	 * 구간 — 이 provider가 이번 호출에 추가한 콜라이더들 — 을 각 region에 배정한다.
 	 * 그룹 유니언 bounds로 먼저 거절하므로 멀리 있는 영역은 region당 1회 비교로 끝나고(메시당 O(region)),

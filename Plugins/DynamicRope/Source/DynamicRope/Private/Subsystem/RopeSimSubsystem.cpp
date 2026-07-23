@@ -563,9 +563,7 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 	// 빈 배열이라 항상 false(= 기존 provider 단위 판정 그대로).
 	auto IsOwnBodyCollider = [OwnerToExclude](const FFrameProviderColliders& P, int32 Index)
 	{
-		return OwnerToExclude != nullptr
-			&& P.SourceActors.IsValidIndex(Index)
-			&& P.SourceActors[Index] == OwnerToExclude;
+		return RopeColliderGather::IsExcludedOwnerBody(P.SourceActors, Index, OwnerToExclude);
 	};
 
 	for (const FFrameProviderColliders& FP : FrameProviders)
