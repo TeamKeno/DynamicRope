@@ -104,5 +104,11 @@ namespace RopeTest
 		{
 			return FBox(Center - FVector(Radius), Center + FVector(Radius));
 		}
+
+		virtual void GetGPUAttribution(FName& OutBone, const USceneComponent*& OutMesh) const override
+		{
+			OutBone = Bone;
+			OutMesh = SourceMesh;
+		}
 	};
 }

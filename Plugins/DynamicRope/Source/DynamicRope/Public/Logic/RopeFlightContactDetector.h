@@ -99,9 +99,32 @@ public:
 		}
 	};
 
+	/**
+	 * Assisted exact-target GT sweep의 안전 상한. 일반 detector/GPU의 고정 예산은 유지하되, 비동기
+	 * readback 유실을 막는 이 소수-collider 경로만 2cm 샘플 간격을 최대 512cm 이동까지 보존한다.
+	 */
+	static constexpr int32 ReliableGuidedSweepMaxSamples = 256;
+
 	/** 솔브 전후 위치(Sim.PrevPositions → Positions)의 이동 경로에서 실제 접촉 후보를 수집한다. */
 	static void DetectContactCandidates(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
 		const FParams& Params, TArray<FRopeContactCandidate>& OutCandidates);
+
+	/**
+	 * CPU에서 이미 계산된 whip 가이드의 실제 프레임 이동(PrevTargets → CurrentTargets)과 현재 가이드
+	 * centerline edge(가이드/solver-owned 경계 포함)를 검사해 Actual 후보를 추가한다. GPU resident Pos/Prev와 비동기 contact readback은
+	 * 1~2프레임 늦거나 중간 프레임을 버릴 수 있으므로, Assisted의 잠긴 target을 같은 프레임에 확정하는
+	 * 동기 경로다. 같은 (node, bone, mesh) 후보는 기존 후보와 병합한다.
+	 */
+	static void AddGuidedContactCandidates(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
+		const FParams& Params, const FWhipGuideView& Whip, TArray<FRopeContactCandidate>& InOutCandidates);
+
+	/**
+	 * 현재 Sim centerline의 노드와 edge만 검사해 Actual 후보를 추가한다. Contacting에서 마지막 Flight의
+	 * PrevTargets 이동 pulse를 재생하지 않고, 동기화된 현재 pose가 exact primary에 실제로 닿는지만 본다.
+	 */
+	static void AddCurrentCenterlineContactCandidates(const FRopeSimState& Sim,
+		const TArray<IRopeCollider*>& Colliders, const FParams& Params,
+		TArray<FRopeContactCandidate>& InOutCandidates);
 
 	/**
 	 * 예측 접촉 후보 추가: 빠른/tail/가이드 노드의 다음 위치를 외삽한 경로를 스윕해, 아직 닿지
@@ -157,6 +180,10 @@ public:
 	static bool IsWrappableBone(FName Bone) { return !Bone.IsNone(); }
 
 private:
+	/** 같은 node/bone/mesh 후보의 source mask를 합친다. 새 Actual은 지연 후보의 접촉 geometry를 갱신한다. */
+	static void AddUniqueCandidate(TArray<FRopeContactCandidate>& InOutCandidates,
+		const FRopeContactCandidate& Candidate);
+
 	/** 가이드 활성 프레임엔 가이드/tail/빠른 노드만 예측 검사를 돌린다(비용 절약). */
 	static bool ShouldRunPredictiveContactForNode(const FRopeSimState& Sim, const FWhipGuideView& Whip,
 		int32 NodeIndex, const FVector& FrameDisplacement);

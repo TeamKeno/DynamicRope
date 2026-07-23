@@ -10,6 +10,7 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "RopeComponentInternal.h"
 #include "RopeMathHelpers.h"
+#include "Subsystem/RopeSimSubsystem.h"
 
 using RopeComponentPrivate::PhaseName;
 using RopeComponentPrivate::ReleaseCooldownSeconds;
@@ -448,6 +449,42 @@ void URopeComponent::ResolvePendingAimThrow()
 
 void URopeComponent::FilterFrameCollidersForAimWrapTarget()
 {
+	const bool bPromoteLockedTarget = AimTargeting.IsLockActive(Phase);
+	if (bPromoteLockedTarget)
+	{
+		// collider gather는 pending aim throw 해석보다 먼저 실행된다. 원거리 target은 이 첫 Flight
+		// 프레임에 AimFrameColliders에만 있으므로, 잠금 정책에 맞는 skeletal collider만 물리/detect
+		// 목록으로 승격한다. 조준 ray 주변의 unrelated/world-static collider까지 새게 하지는 않는다.
+		FBox RefreshedTargetBounds(ForceInit);
+		for (IRopeCollider* Collider : SimFrame.AimFrameColliders)
+		{
+			if (!Collider || Collider->IsWorldStatic())
+			{
+				continue;
+			}
+
+			FName ColliderBone = NAME_None;
+			const USceneComponent* ColliderMesh = nullptr;
+			Collider->GetGPUAttribution(ColliderBone, ColliderMesh);
+			// Full의 IsWrapTarget은 의도적으로 모든 물체를 허용한다. 승격에는 그 넓은 predicate를 쓰지
+			// 않고 실제 잠긴 mesh identity를 적용해야 aim-ray 주변 unrelated collider가 물리 목록에 새지 않는다.
+			if (ColliderMesh && ColliderMesh == AimTargeting.GetLockedTargetMesh())
+			{
+				SimFrame.FrameColliders.AddUnique(Collider);
+				RefreshedTargetBounds += Collider->GetWorldBounds();
+			}
+		}
+		// 일시적인 provider budget/mapping miss에는 직전 bounds를 유지해 다음 프레임 재수집 기회를 남긴다.
+		// 정상 갱신이 있으면 움직이는 target을 따라 최신 collider 유니언으로 교체한다.
+		if (RefreshedTargetBounds.IsValid)
+		{
+			SimFrame.LockedTargetColliderQueryBounds = RefreshedTargetBounds;
+		}
+	}
+	else
+	{
+		SimFrame.LockedTargetColliderQueryBounds = FBox(ForceInit);
+	}
 	AimTargeting.FilterCollidersToTarget(Phase, ResolveMode, SimFrame.FrameColliders);
 }
 
@@ -543,6 +580,9 @@ void URopeComponent::ResetStateForNewThrow()
 	}
 	ResetKinematicVirtualBridges();
 	ResetTransientPhaseState();
+	// 새 throw의 target identity가 정해지기 전 이전 throw의 원거리 bounds를 반드시 끊는다. 같은 throw의
+	// Contacting→Flight 복귀도 ResetTransientPhaseState를 쓰므로 캐시 해제는 이 throw 경계에만 둔다.
+	SimFrame.LockedTargetColliderQueryBounds = FBox(ForceInit);
 	ReleaseCooldown = 0.0f;
 	if (bWasWrapped)
 	{
@@ -970,6 +1010,11 @@ TArray<FRopeContactCandidate>& URopeComponent::GetOrBuildFlightContactCandidates
 		BuildCpuFlightContactCandidates(DeltaTime, DetectParams, Candidates);
 	}
 
+	// Assisted는 solver push-out을 선택적으로 끌 수 있어 접촉이 한 프레임 pulse로 끝난다. 그 pulse를
+	// 비동기 GPU readback에만 맡기면 in-flight copy 사이에서 영구 유실될 수 있으므로, CPU가 이미 가진
+	// guide target을 정확한 aim primary collider에 동기 검사한다(CPU fallback에서도 동일 결과 보장).
+	AddSynchronousAssistedAimContactCandidates(DeltaTime, DetectParams, Candidates);
+
 	// CanWrapTarget 게이트(Contacting 재수집과 공용 헬퍼).
 	RemoveNonWrappableCandidates(Candidates);
 	return Candidates;
@@ -1004,6 +1049,79 @@ void URopeComponent::BuildCpuFlightContactCandidates(float DeltaTime,
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightEvaluateCandidates);
 		FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, OutCandidates);
 	}
+}
+
+void URopeComponent::AddSynchronousAssistedAimContactCandidates(float DeltaTime,
+	const FRopeFlightContactDetector::FParams& DetectParams,
+	TArray<FRopeContactCandidate>& InOutCandidates)
+{
+	const bool bFlight = Phase == ERopePhase::Flight;
+	const bool bContacting = Phase == ERopePhase::Contacting;
+	if (ResolveMode != ERopeWrapResolveMode::AssistedJudged || !AimTargeting.IsLockActive(Phase) ||
+		(!bFlight && !bContacting) || (bFlight && WhipGuide.GetGuidedNodeMask().Num() == 0))
+	{
+		return;
+	}
+
+	// Assisted는 같은 mesh의 이웃 본도 wrapping 재료로 유지하지만 capture primary는 exact aim bone이다.
+	// 전체 목록의 '가장 깊은 1개'만 검사하면 몸통/이웃 본이 조준 본을 가리므로 이 probe만 exact로 좁힌다.
+	TArray<IRopeCollider*> PrimaryColliders;
+	for (IRopeCollider* Collider : SimFrame.FrameColliders)
+	{
+		if (!Collider || Collider->IsWorldStatic())
+		{
+			continue;
+		}
+		FName ColliderBone = NAME_None;
+		const USceneComponent* ColliderMesh = nullptr;
+		Collider->GetGPUAttribution(ColliderBone, ColliderMesh);
+		if (AimTargeting.IsPrimaryTarget(ColliderMesh, ColliderBone))
+		{
+			PrimaryColliders.Add(Collider);
+		}
+	}
+	if (PrimaryColliders.Num() == 0)
+	{
+		return;
+	}
+
+	FRopeFlightContactDetector::FParams ReliableParams = DetectParams;
+	ReliableParams.ContactMaxSweepSamples = FMath::Max(
+		ReliableParams.ContactMaxSweepSamples,
+		FRopeFlightContactDetector::ReliableGuidedSweepMaxSamples);
+
+	if (bFlight)
+	{
+		FRopeFlightContactDetector::FWhipGuideView WhipView;
+		WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
+		WhipView.CurrentTargets = &WhipGuide.GetCurrentTargets();
+		WhipView.PrevTargets = &WhipGuide.GetPrevTargets();
+		const bool bIncludePrediction = ReliableParams.PredictiveContactFrames > KINDA_SMALL_NUMBER;
+		if (bIncludePrediction)
+		{
+			NextGuideTargetScratch.Reset();
+			WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargetScratch);
+			WhipView.NextTargets = &NextGuideTargetScratch;
+		}
+
+		FRopeFlightContactDetector::AddGuidedContactCandidates(
+			Sim, PrimaryColliders, ReliableParams, WhipView, InOutCandidates);
+		if (bIncludePrediction)
+		{
+			FRopeFlightContactDetector::AddPredictedContactCandidates(
+				Sim, PrimaryColliders, ReliableParams, WhipView, InOutCandidates);
+		}
+	}
+	else
+	{
+		// 마지막 Flight의 PrevTarget→CurrentTarget pulse는 다시 쓰지 않는다. GPU handoff로 동기화된
+		// 현재 rope centerline이 exact primary에 실제 접촉하는지만 보아 dwell의 허위 누적을 막는다.
+		FRopeFlightContactDetector::AddCurrentCenterlineContactCandidates(
+			Sim, PrimaryColliders, ReliableParams, InOutCandidates);
+	}
+	// 새로 추가된 GT 후보까지 GPU/CPU 후보와 동일한 상대운동 필드를 갖게 한다. 캡처 자체는 현재 이
+	// 점수를 gate로 쓰지 않지만 tracker dominant 점수와 디버그 관측은 같은 계약을 유지해야 한다.
+	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, ReliableParams, InOutCandidates);
 }
 
 FRopeFlightCaptureEvaluation URopeComponent::EvaluateFlightCapture(
@@ -1044,6 +1162,18 @@ bool URopeComponent::ApplyFlightCaptureEvaluation(float DeltaTime,
 	if (Evaluation.bShouldCapture)
 	{
 		FlightNoContactElapsed = 0.0f;
+		// GPU 경로는 이 Finalize보다 앞에서 RT pending queue에 step을 넣었을 뿐, CPU Sim은 아직 그
+		// post-step pose가 아닐 수 있다. non-GDF(Aim collision-free) step은 지금 원자적으로 소비/readback해
+		// Flight의 swept hit을 CPU와 같은 캡처 프레임에 확정한다. Scene GDF가 필요한 step만 persistent
+		// 표식으로 Contacting에 넘겨 유효한 view dispatch 뒤 재시도한다.
+		bPendingGpuCaptureHandoff = SimFrame.bGpuSteppedThisFrame;
+		if (bPendingGpuCaptureHandoff)
+		{
+			if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
+			{
+				bPendingGpuCaptureHandoff = !SimSubsystem->SyncGpuPositionsForHandoff(*this);
+			}
+		}
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightBuildContactingState);
 		BuildContactingState(MoveTemp(Evaluation.Tracker), Candidates, DeltaTime);
 		SetPhase(ERopePhase::Contacting, *FString::Printf(TEXT("bone=%s, %d node(s)"),
@@ -1051,7 +1181,9 @@ bool URopeComponent::ApplyFlightCaptureEvaluation(float DeltaTime,
 		DispatchCaptured(ContactTracker.CandidateBone);
 		// 캡처 프레임 자체도 실제 접촉 1프레임이다. 기본 WrapDecisionTime(약 1프레임)을 이미 채웠다면
 		// 다음 프레임 재검출을 기다리지 않고 즉시 Wrapping으로 넘겨 움직이는 대상에서 튕김을 줄인다.
-		if (ShouldStartWrapping())
+		// CPU는 현재 Sim이 이미 권위값이므로 즉시 전이를 유지한다. GPU는 persistent handoff가 끝난
+		// Contacting 프레임에서 current-centerline 접촉을 다시 확인한 뒤 전이한다.
+		if (ShouldStartWrapping() && !bPendingGpuCaptureHandoff)
 		{
 			StartWrappingFromContacting();
 		}
@@ -1085,14 +1217,38 @@ void URopeComponent::BuildContactingState(FRopeContactTracker&& EvaluatedTracker
 {
 	ContactTracker = MoveTemp(EvaluatedTracker);
 	// 평가 단계의 0초 집계는 대상 선택만 수행하므로 캡처 프레임의 실제 접촉 시간은 여기서 반영한다.
-	// 이 프레임을 dwell에 반영해 기본 1-frame decision이 진짜로 같은 프레임에 성립하게 한다.
-	const float CapturedFrameDwell = FMath::Max(0.0f, DeltaTime);
-	ContactTracker.DwellTime = FMath::Max(ContactTracker.DwellTime, CapturedFrameDwell);
+	// Assisted의 잠긴 대상에서 Actual swept hit이 확인되면 최소 nominal 60Hz 한 프레임의 dwell로 환산한다.
+	// 120Hz 이상에서 raw DeltaTime만 더하고 다음 current-only 프레임까지 미루면 collision-free guide가 얇은
+	// limb 반대편까지 지나 GPU/CPU 모두 놓칠 수 있다. 더 긴 사용자 WrapDecisionTime은 그대로 추가 접촉을
+	// 요구하며, Predictive-only 후보도 boost하지 않아 아직 닿지 않은 상태가 곧바로 wrap으로 승격되지 않는다.
+	const uint8 ActualMask = static_cast<uint8>(ERopeContactCandidateSource::Actual);
+	const bool bDominantHasActual = Candidates.ContainsByPredicate(
+		[this, ActualMask](const FRopeContactCandidate& Candidate)
+		{
+			return Candidate.bValid
+				&& Candidate.Mesh == ContactTracker.CandidateMesh
+				&& Candidate.Bone == ContactTracker.CandidateBone
+				&& (Candidate.SourceMask & ActualMask) != 0;
+		});
+	const bool bConfirmedAssistedActual = ResolveMode == ERopeWrapResolveMode::AssistedJudged
+		&& AimTargeting.IsLockActive(Phase)
+		&& ContactTracker.CandidateMesh == AimTargeting.GetLockedTargetMesh()
+		&& ContactTracker.CandidateBone == AimTargeting.GetLockedTargetBone()
+		&& bDominantHasActual;
+	const float BaseCapturedFrameDwell = FMath::Max(0.0f, DeltaTime);
+	constexpr float NominalContactFrameSeconds = 1.0f / 60.0f;
+	const float DominantCapturedFrameDwell = bConfirmedAssistedActual
+		? FMath::Max(BaseCapturedFrameDwell, NominalContactFrameSeconds)
+		: BaseCapturedFrameDwell;
+	ContactTracker.DwellTime = FMath::Max(ContactTracker.DwellTime, DominantCapturedFrameDwell);
 	for (FRopeTrackedContactTarget& Target : ContactTracker.Targets)
 	{
 		if (Target.Nodes.Num() > 0)
 		{
-			Target.DwellTime = FMath::Max(Target.DwellTime, CapturedFrameDwell);
+			const bool bDominantTarget = Target.Mesh == ContactTracker.CandidateMesh
+				&& Target.Bone == ContactTracker.CandidateBone;
+			Target.DwellTime = FMath::Max(Target.DwellTime,
+				bDominantTarget ? DominantCapturedFrameDwell : BaseCapturedFrameDwell);
 		}
 	}
 	ContactingElapsed = 0.0f;

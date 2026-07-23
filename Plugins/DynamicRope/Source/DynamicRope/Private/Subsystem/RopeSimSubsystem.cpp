@@ -367,8 +367,11 @@ void URopeSimSubsystem::SetAnimPrerequisites(const UActorComponent* Source, bool
 
 FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope, bool bIncludeAimRay)
 {
-	// 조준 region 요청인데 조준 중이 아니면 수집 자체가 필요 없다 — 무효 박스(= 조준 목록 비움).
-	if (bIncludeAimRay && !Rope.SimFrame.AimRayColliderQueryBounds.IsValid)
+	const bool bHasAimRayBounds = Rope.SimFrame.AimRayColliderQueryBounds.IsValid != 0;
+	const bool bHasLockedTargetBounds = Rope.AimTargeting.IsLockActive(Rope.Phase) &&
+		Rope.SimFrame.LockedTargetColliderQueryBounds.IsValid;
+	// 조준 region 요청인데 ray/활성 target 둘 다 없으면 수집 자체가 필요 없다 — 무효 박스(= 목록 비움).
+	if (bIncludeAimRay && !bHasAimRayBounds && !bHasLockedTargetBounds)
 	{
 		return FBox(ForceInit);
 	}
@@ -385,23 +388,36 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope, bool 
 		MaxFrameDispSq = FMath::Max(MaxFrameDispSq,
 			static_cast<float>(FVector::DistSquared(Rope.Sim.Positions[i], Rope.Sim.PrevPositions[i])));
 	}
+	const float BaseMargin = Rope.GetEffectiveCollisionRadius() + Rope.GetEffectiveContactQueryRadius()
+		+ FMath::Max(2.0f * Rope.Sim.SegmentLength, 50.0f);
+	const float PredictiveMotionMargin = FMath::Sqrt(MaxFrameDispSq)
+		* FMath::Max(Rope.DetectConfig.PredictiveContactFrames, 1.0f);
+	const float QueryMargin = BaseMargin + PredictiveMotionMargin;
 	if (RopeBounds.IsValid)
 	{
 		// 여유: 접촉 질의 반경 + 스윕 여유 + 예측 접촉의 전방 외삽 거리(프레임 변위 × 예측 프레임).
 		// 넉넉히 잡는다 — 과대 컬링 여유는 안전(콜라이더가 몇 개 더 실릴 뿐).
-		const float Margin = Rope.GetEffectiveCollisionRadius() + Rope.GetEffectiveContactQueryRadius()
-			+ FMath::Max(2.0f * Rope.Sim.SegmentLength, 50.0f)
-			+ FMath::Sqrt(MaxFrameDispSq) * FMath::Max(Rope.DetectConfig.PredictiveContactFrames, 1.0f);
-		RopeBounds = RopeBounds.ExpandBy(Margin);
+		RopeBounds = RopeBounds.ExpandBy(QueryMargin);
 	}
 	if (bIncludeAimRay)
 	{
+		// 조준이 끝난 뒤 active aim lock만 남은 프레임에는 로프↔대상 사이의 거대한 AABB를 만들지 않고
+		// 직전 target collider bounds 주변만 재수집한다. 결과는 component target 필터를 거쳐 승격된다.
+		if (!bHasAimRayBounds && bHasLockedTargetBounds)
+		{
+			return Rope.SimFrame.LockedTargetColliderQueryBounds.ExpandBy(QueryMargin);
+		}
 		// 조준 region 전용: preview ray는 현재 rope centerline과 떨어진 곳을 지나갈 수 있다. 이 구간을
 		// 합치지 않으면 ray가 SDF를 관통해도 해당 collider가 조준 목록에 없어 cyan miss가 된다.
 		// 로프 주변까지 함께 덮는 합집합이라, 조준 질의(hit 판정/preview 아크 탐색)가 보는 범위는
 		// 분리 이전과 같다 — 좁아지는 것은 물리·디버그가 쓰는 FrameColliders 쪽뿐이다.
 		RopeBounds += Rope.SimFrame.AimRayColliderQueryBounds.Min;
 		RopeBounds += Rope.SimFrame.AimRayColliderQueryBounds.Max;
+		if (bHasLockedTargetBounds)
+		{
+			RopeBounds += Rope.SimFrame.LockedTargetColliderQueryBounds.Min;
+			RopeBounds += Rope.SimFrame.LockedTargetColliderQueryBounds.Max;
+		}
 	}
 	return RopeBounds;
 }
@@ -809,6 +825,12 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 					++NumGdfRopes;
 				}
 				Steps.Add(MoveTemp(Step));
+			}
+			else if (Rope->bPendingGpuCaptureHandoff && Rope->bUseWorldGDF)
+			{
+				// Contacting은 새 GPU step을 만들지 않지만 ReadbackNow가 Scene GDF pending을 보류했을 수
+				// 있다. handoff가 끝날 때까지 GDF 수요를 유지해야 다음 view dispatch가 그 step을 소비한다.
+				++NumGdfRopes;
 			}
 		}
 		// 이 씬에 활성 GDF 로프가 있으면 커스텀 FX 시스템이 GDF를 요구 → 엔진이 온디맨드로 빌드한다.

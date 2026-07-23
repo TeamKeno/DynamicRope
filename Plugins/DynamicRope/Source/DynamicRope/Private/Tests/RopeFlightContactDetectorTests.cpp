@@ -233,6 +233,236 @@ bool FRopeFlightPredictGuidedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightGuidedActualPathTest,
+	"DynamicRope.FlightContact.AssistedGuidedPathUsesCpuTargets",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightGuidedActualPathTest::RunTest(const FString& Parameters)
+{
+	FRopeSimState Sim = RopeTest::MakeStraightRope(4, 60.0f, FVector(0.0f, 100.0f, 0.0f));
+	RopeTest::FSphereMockCollider Target(FVector(60.0f, 0.0f, 0.0f), 5.0f, FName("upperarm_l"));
+	TArray<IRopeCollider*> Colliders = { &Target };
+
+	TArray<uint8> Mask;
+	Mask.SetNumZeroed(Sim.Num());
+	Mask[2] = 1;
+	TArray<FVector> CurrentTargets, PrevTargets;
+	CurrentTargets.SetNumZeroed(Sim.Num());
+	PrevTargets.SetNumZeroed(Sim.Num());
+	PrevTargets[2] = FVector::ZeroVector;
+	CurrentTargets[2] = FVector(100.0f, 0.0f, 0.0f);
+
+	FRopeFlightContactDetector::FWhipGuideView Whip;
+	Whip.GuidedNodeMask = &Mask;
+	Whip.CurrentTargets = &CurrentTargets;
+	Whip.PrevTargets = &PrevTargets;
+	TArray<FRopeContactCandidate> Candidates;
+	FRopeFlightContactDetector::AddGuidedContactCandidates(
+		Sim, Colliders, MakeDetectParams(/*MinLatchNodes*/ 1), Whip, Candidates);
+
+	TestEqual(TEXT("the CPU guide path preserves a same-frame contact pulse"), Candidates.Num(), 1);
+	if (Candidates.Num() == 1)
+	{
+		TestEqual(TEXT("guided contact belongs to the guided node"), Candidates[0].NodeIndex, 2);
+		TestEqual(TEXT("guided actual contact keeps aimed bone attribution"), Candidates[0].Bone, FName("upperarm_l"));
+		TestEqual(TEXT("guided actual path is not mislabeled predictive"), Candidates[0].Source,
+			ERopeContactCandidateSource::Actual);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightGuidedEdgeContactTest,
+	"DynamicRope.FlightContact.AssistedGuidedCenterlineDetectsBetweenNodes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightGuidedEdgeContactTest::RunTest(const FString& Parameters)
+{
+	FRopeSimState Sim = RopeTest::MakeStraightRope(4, 60.0f, FVector(0.0f, 100.0f, 0.0f));
+	RopeTest::FSphereMockCollider ThinTarget(FVector::ZeroVector, 3.0f, FName("forearm_l"));
+	TArray<IRopeCollider*> Colliders = { &ThinTarget };
+
+	TArray<uint8> Mask;
+	Mask.SetNumZeroed(Sim.Num());
+	Mask[1] = 1;
+	Mask[2] = 1;
+	TArray<FVector> CurrentTargets, PrevTargets;
+	CurrentTargets.SetNumZeroed(Sim.Num());
+	PrevTargets.SetNumZeroed(Sim.Num());
+	CurrentTargets[1] = PrevTargets[1] = FVector(0.0f, -20.0f, 0.0f);
+	CurrentTargets[2] = PrevTargets[2] = FVector(0.0f, 20.0f, 0.0f);
+
+	FRopeFlightContactDetector::FWhipGuideView Whip;
+	Whip.GuidedNodeMask = &Mask;
+	Whip.CurrentTargets = &CurrentTargets;
+	Whip.PrevTargets = &PrevTargets;
+	TArray<FRopeContactCandidate> Candidates;
+	FRopeFlightContactDetector::AddGuidedContactCandidates(
+		Sim, Colliders, MakeDetectParams(/*MinLatchNodes*/ 1), Whip, Candidates);
+
+	TestEqual(TEXT("a target between guided nodes is detected on the rope centerline"), Candidates.Num(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightGuidedBoundaryEdgeContactTest,
+	"DynamicRope.FlightContact.AssistedGuidedBoundaryEdgeDetectsBetweenNodes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightGuidedBoundaryEdgeContactTest::RunTest(const FString& Parameters)
+{
+	FRopeSimState Sim = RopeTest::MakeStraightRope(3, 40.0f, FVector(-20.0f, 0.0f, 0.0f));
+	RopeTest::FSphereMockCollider ThinTarget(FVector::ZeroVector, 3.0f, FName("forearm_l"));
+	TArray<IRopeCollider*> Colliders = { &ThinTarget };
+
+	TArray<uint8> Mask;
+	Mask.SetNumZeroed(Sim.Num());
+	Mask[1] = 1;
+	TArray<FVector> CurrentTargets = Sim.Positions;
+	TArray<FVector> PrevTargets = Sim.PrevPositions;
+	CurrentTargets[1] = PrevTargets[1] = FVector(20.0f, 0.0f, 0.0f);
+
+	FRopeFlightContactDetector::FWhipGuideView Whip;
+	Whip.GuidedNodeMask = &Mask;
+	Whip.CurrentTargets = &CurrentTargets;
+	Whip.PrevTargets = &PrevTargets;
+	TArray<FRopeContactCandidate> Candidates;
+	FRopeFlightContactDetector::AddGuidedContactCandidates(
+		Sim, Colliders, MakeDetectParams(/*MinLatchNodes*/ 1), Whip, Candidates);
+
+	TestEqual(TEXT("a target on the solver-owned to guided boundary edge is detected"), Candidates.Num(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightGuidedFastSweepBudgetTest,
+	"DynamicRope.FlightContact.AssistedGuidedFastPathKeepsSweepSpacing",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightGuidedFastSweepBudgetTest::RunTest(const FString& Parameters)
+{
+	FRopeSimState Sim = RopeTest::MakeStraightRope(4, 60.0f, FVector(0.0f, 100.0f, 0.0f));
+	// 400cm / default cap16 = 25cm spacing. x=12.5의 reach 4cm target은 두 샘플 사이에 완전히
+	// 놓이지만 reliable guided budget은 기본 2cm step을 유지해 잡아야 한다.
+	RopeTest::FSphereMockCollider ThinTarget(FVector(12.5f, 0.0f, 0.0f), 3.0f, FName("forearm_l"));
+	TArray<IRopeCollider*> Colliders = { &ThinTarget };
+
+	TArray<uint8> Mask;
+	Mask.SetNumZeroed(Sim.Num());
+	Mask[2] = 1;
+	TArray<FVector> CurrentTargets = Sim.Positions;
+	TArray<FVector> PrevTargets = Sim.PrevPositions;
+	PrevTargets[2] = FVector::ZeroVector;
+	CurrentTargets[2] = FVector(400.0f, 0.0f, 0.0f);
+
+	FRopeFlightContactDetector::FWhipGuideView Whip;
+	Whip.GuidedNodeMask = &Mask;
+	Whip.CurrentTargets = &CurrentTargets;
+	Whip.PrevTargets = &PrevTargets;
+	TArray<FRopeContactCandidate> Candidates;
+	FRopeFlightContactDetector::AddGuidedContactCandidates(
+		Sim, Colliders, MakeDetectParams(/*MinLatchNodes*/ 1, /*PredictiveFrames*/ 0.0f,
+			/*ContactRadius*/ 1.0f), Whip, Candidates);
+
+	TestEqual(TEXT("a thin target survives a 400cm guided frame path"), Candidates.Num(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightGuidedActualRefreshesDelayedGeometryTest,
+	"DynamicRope.FlightContact.AssistedGuidedActualRefreshesDelayedGeometry",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightGuidedActualRefreshesDelayedGeometryTest::RunTest(const FString& Parameters)
+{
+	USkeletalMeshComponent* Mesh = NewObject<USkeletalMeshComponent>();
+	const FName Bone("upperarm_l");
+	FRopeSimState Sim = RopeTest::MakeStraightRope(4, 60.0f, FVector(0.0f, 100.0f, 0.0f));
+	RopeTest::FSphereMockCollider Target(FVector::ZeroVector, 3.0f, Bone, Mesh);
+	Target.SurfaceVelocity = FVector(1.0f, 2.0f, 3.0f);
+	TArray<IRopeCollider*> Colliders = { &Target };
+
+	TArray<uint8> Mask;
+	Mask.SetNumZeroed(Sim.Num());
+	Mask[2] = 1;
+	TArray<FVector> CurrentTargets = Sim.Positions;
+	TArray<FVector> PrevTargets = Sim.PrevPositions;
+	PrevTargets[2] = FVector(-20.0f, 0.0f, 0.0f);
+	CurrentTargets[2] = FVector(20.0f, 0.0f, 0.0f);
+	FRopeFlightContactDetector::FWhipGuideView Whip;
+	Whip.GuidedNodeMask = &Mask;
+	Whip.CurrentTargets = &CurrentTargets;
+	Whip.PrevTargets = &PrevTargets;
+
+	FRopeContactCandidate Delayed;
+	Delayed.bValid = true;
+	Delayed.NodeIndex = 2;
+	Delayed.Bone = Bone;
+	Delayed.Mesh = Mesh;
+	Delayed.Source = ERopeContactCandidateSource::Actual;
+	Delayed.SourceMask = static_cast<uint8>(Delayed.Source);
+	Delayed.WorldPoint = FVector(999.0f);
+	Delayed.Normal = FVector::ForwardVector;
+	Delayed.Penetration = 0.1f;
+	Delayed.SurfaceVelocity = FVector(999.0f);
+	TArray<FRopeContactCandidate> Candidates = { Delayed };
+
+	FRopeFlightContactDetector::AddGuidedContactCandidates(
+		Sim, Colliders, MakeDetectParams(/*MinLatchNodes*/ 1), Whip, Candidates);
+
+	TestEqual(TEXT("same key is merged instead of duplicated"), Candidates.Num(), 1);
+	if (Candidates.Num() == 1)
+	{
+		TestFalse(TEXT("same-frame actual replaces the delayed world point"),
+			Candidates[0].WorldPoint.Equals(Delayed.WorldPoint, KINDA_SMALL_NUMBER));
+		TestTrue(TEXT("same-frame actual replaces surface velocity"),
+			Candidates[0].SurfaceVelocity.Equals(Target.SurfaceVelocity, KINDA_SMALL_NUMBER));
+		TestTrue(TEXT("same-frame actual replaces penetration"), Candidates[0].Penetration > Delayed.Penetration);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightAssistedPrimaryShadowTest,
+	"DynamicRope.FlightContact.AssistedPrimaryNotShadowedByDeeperNeighbor",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightAssistedPrimaryShadowTest::RunTest(const FString& Parameters)
+{
+	USkeletalMeshComponent* Mesh = NewObject<USkeletalMeshComponent>();
+	const FName PrimaryBone("upperarm_l");
+	const FName NeighborBone("clavicle_l");
+	RopeTest::FSphereMockCollider Primary(FVector(40.0f, 0.0f, 0.0f), 8.0f, PrimaryBone, Mesh);
+	RopeTest::FSphereMockCollider DeeperNeighbor(FVector(60.0f, 0.0f, 0.0f), 15.0f, NeighborBone, Mesh);
+
+	FRopeSimState Sim = RopeTest::MakeStraightRope(4, 60.0f, FVector(0.0f, 100.0f, 0.0f));
+	Sim.PrevPositions[2] = FVector::ZeroVector;
+	Sim.Positions[2] = FVector(100.0f, 0.0f, 0.0f);
+	const FRopeFlightContactDetector::FParams Params = MakeDetectParams(/*MinLatchNodes*/ 1);
+	TArray<FRopeContactCandidate> Candidates;
+	TArray<IRopeCollider*> AllColliders = { &Primary, &DeeperNeighbor };
+	FRopeFlightContactDetector::DetectContactCandidates(Sim, AllColliders, Params, Candidates);
+	TestTrue(TEXT("the regular deepest-only pass demonstrates the neighboring-bone shadow"),
+		Candidates.Num() == 1 && Candidates[0].Bone == NeighborBone);
+
+	TArray<uint8> Mask;
+	Mask.SetNumZeroed(Sim.Num());
+	Mask[2] = 1;
+	TArray<FVector> CurrentTargets = Sim.Positions;
+	TArray<FVector> PrevTargets = Sim.PrevPositions;
+	FRopeFlightContactDetector::FWhipGuideView Whip;
+	Whip.GuidedNodeMask = &Mask;
+	Whip.CurrentTargets = &CurrentTargets;
+	Whip.PrevTargets = &PrevTargets;
+	TArray<IRopeCollider*> ExactPrimary = { &Primary };
+	FRopeFlightContactDetector::AddGuidedContactCandidates(Sim, ExactPrimary, Params, Whip, Candidates);
+
+	FRopeFlightCapturePolicy Policy;
+	Policy.PreferredMesh = Mesh;
+	Policy.PreferredBone = PrimaryBone;
+	Policy.bRequirePreferred = true;
+	const FRopeFlightCaptureEvaluation Evaluation =
+		FRopeFlightContactDetector::EvaluateCapture(Candidates, Params, Policy);
+	TestTrue(TEXT("the exact aimed bone survives a deeper same-mesh neighbor"), Evaluation.bShouldCapture);
+	TestEqual(TEXT("the aimed bone remains dominant"), Evaluation.Tracker.CandidateBone, PrimaryBone);
+	return true;
+}
+
 // 감김 방향 점수: 손 쪽으로 미끄러지면 +, 반대면 -, 표면과 같이 움직이면(상대속도 0) 0인가.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightWrapDirectionScoreTest,
 	"DynamicRope.FlightContact.WrapDirectionScoreSign",

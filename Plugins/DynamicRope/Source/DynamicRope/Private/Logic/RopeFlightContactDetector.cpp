@@ -41,6 +41,159 @@ void FRopeFlightContactDetector::DetectContactCandidates(const FRopeSimState& Si
 	}
 }
 
+void FRopeFlightContactDetector::AddGuidedContactCandidates(const FRopeSimState& Sim,
+	const TArray<IRopeCollider*>& Colliders, const FParams& Params, const FWhipGuideView& Whip,
+	TArray<FRopeContactCandidate>& InOutCandidates)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightAddGuidedContactCandidates);
+	if (!Whip.HasGuidedNodes() || !Whip.CurrentTargets || Colliders.Num() == 0)
+	{
+		return;
+	}
+
+	// 일반 detector/GPU의 샘플 예산은 프레임 비용을 위해 작게 유지한다. 이 경로는 Assisted의 exact
+	// primary collider 몇 개만 검사하므로, 빠른 guide 이동에서도 ContactSweepStep 간격이 즉시 16등분으로
+	// 벌어져 얇은 본을 건너뛰지 않도록 더 큰 안전 상한을 쓴다.
+	FParams ReliableParams = Params;
+	ReliableParams.ContactMaxSweepSamples = FMath::Max(
+		ReliableParams.ContactMaxSweepSamples, ReliableGuidedSweepMaxSamples);
+
+	TArray<IRopeCollider*> NearbyColliders;
+	auto AddPathContact = [&](int32 NodeIndex, const FVector& PathStart, const FVector& PathEnd)
+	{
+		GatherNearbyColliders(PathStart, PathEnd, Colliders, ReliableParams, NearbyColliders);
+		if (NearbyColliders.Num() == 0)
+		{
+			return;
+		}
+
+		const FRopeContact Contact = SweepOrSampleContact(Sim, PathStart, PathEnd, NearbyColliders, ReliableParams);
+		if (!Contact.bHit || Contact.Bone.IsNone())
+		{
+			return;
+		}
+
+		FRopeContactCandidate Candidate = MakeCandidate(NodeIndex, Contact);
+		Candidate.Source = ERopeContactCandidateSource::Actual;
+		Candidate.SourceMask = static_cast<uint8>(Candidate.Source);
+		AddUniqueCandidate(InOutCandidates, Candidate);
+	};
+
+	const int32 NodeCount = FMath::Min(Sim.Num(), Whip.CurrentTargets->Num());
+	for (int32 NodeIndex = 0; NodeIndex < NodeCount; ++NodeIndex)
+	{
+		if (!Whip.IsGuidedNode(NodeIndex))
+		{
+			continue;
+		}
+
+		const FVector Current = (*Whip.CurrentTargets)[NodeIndex];
+		const FVector Previous = Whip.PrevTargets && Whip.PrevTargets->IsValidIndex(NodeIndex)
+			? (*Whip.PrevTargets)[NodeIndex]
+			: (Sim.PrevPositions.IsValidIndex(NodeIndex) ? Sim.PrevPositions[NodeIndex] : Current);
+		// GPU detector의 post-solve Prev→Pos는 마지막 substep만 보며, readback도 지연된다. 가이드가
+		// 실제로 이번 프레임 그린 경로를 GT에서 직접 검사해 한 프레임짜리 target hit를 보존한다.
+		AddPathContact(NodeIndex, Previous, Current);
+
+	}
+
+	// Full solver에는 node-edge 내부 충돌이 있지만 collision-free Assisted detector는 노드만 봤다.
+	// 현재 centerline edge도 검사한다. 한쪽만 guided인 root/tip 경계에서는 guide target과 solver pose를
+	// 이어야 하며, guided-guided만 보면 바로 그 경계 틈으로 얇은 본이 빠진다.
+	for (int32 NodeIndex = 0; NodeIndex + 1 < Sim.Num(); ++NodeIndex)
+	{
+		const int32 NextNode = NodeIndex + 1;
+		if (!Whip.IsGuidedNode(NodeIndex) && !Whip.IsGuidedNode(NextNode))
+		{
+			continue;
+		}
+
+		const FVector Current = Whip.IsGuidedNode(NodeIndex) && Whip.CurrentTargets->IsValidIndex(NodeIndex)
+			? (*Whip.CurrentTargets)[NodeIndex] : Sim.Positions[NodeIndex];
+		const FVector NextCurrent = Whip.IsGuidedNode(NextNode) && Whip.CurrentTargets->IsValidIndex(NextNode)
+			? (*Whip.CurrentTargets)[NextNode] : Sim.Positions[NextNode];
+		GatherNearbyColliders(Current, NextCurrent, Colliders, ReliableParams, NearbyColliders);
+		if (NearbyColliders.Num() == 0)
+		{
+			continue;
+		}
+
+		const FRopeContact Contact = SweepOrSampleContact(
+			Sim, Current, NextCurrent, NearbyColliders, ReliableParams);
+		if (!Contact.bHit || Contact.Bone.IsNone())
+		{
+			continue;
+		}
+
+		const int32 ContactNode = FVector::DistSquared(Contact.SurfacePoint, Current)
+			<= FVector::DistSquared(Contact.SurfacePoint, NextCurrent) ? NodeIndex : NextNode;
+		FRopeContactCandidate Candidate = MakeCandidate(ContactNode, Contact);
+		Candidate.Source = ERopeContactCandidateSource::Actual;
+		Candidate.SourceMask = static_cast<uint8>(Candidate.Source);
+		AddUniqueCandidate(InOutCandidates, Candidate);
+	}
+}
+
+void FRopeFlightContactDetector::AddCurrentCenterlineContactCandidates(const FRopeSimState& Sim,
+	const TArray<IRopeCollider*>& Colliders, const FParams& Params,
+	TArray<FRopeContactCandidate>& InOutCandidates)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightAddCurrentCenterlineContactCandidates);
+	if (Sim.Num() == 0 || Colliders.Num() == 0)
+	{
+		return;
+	}
+
+	FParams ReliableParams = Params;
+	ReliableParams.ContactMaxSweepSamples = FMath::Max(
+		ReliableParams.ContactMaxSweepSamples, ReliableGuidedSweepMaxSamples);
+	TArray<IRopeCollider*> NearbyColliders;
+
+	auto AddContact = [&](int32 NodeIndex, const FVector& Start, const FVector& End)
+	{
+		GatherNearbyColliders(Start, End, Colliders, ReliableParams, NearbyColliders);
+		if (NearbyColliders.Num() == 0)
+		{
+			return;
+		}
+		const FRopeContact Contact = SweepOrSampleContact(Sim, Start, End, NearbyColliders, ReliableParams);
+		if (!Contact.bHit || Contact.Bone.IsNone())
+		{
+			return;
+		}
+		FRopeContactCandidate Candidate = MakeCandidate(NodeIndex, Contact);
+		Candidate.Source = ERopeContactCandidateSource::Actual;
+		Candidate.SourceMask = static_cast<uint8>(Candidate.Source);
+		AddUniqueCandidate(InOutCandidates, Candidate);
+	};
+
+	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
+	{
+		AddContact(NodeIndex, Sim.Positions[NodeIndex], Sim.Positions[NodeIndex]);
+	}
+	for (int32 NodeIndex = 0; NodeIndex + 1 < Sim.Num(); ++NodeIndex)
+	{
+		const FVector& Current = Sim.Positions[NodeIndex];
+		const FVector& Next = Sim.Positions[NodeIndex + 1];
+		GatherNearbyColliders(Current, Next, Colliders, ReliableParams, NearbyColliders);
+		if (NearbyColliders.Num() == 0)
+		{
+			continue;
+		}
+		const FRopeContact Contact = SweepOrSampleContact(Sim, Current, Next, NearbyColliders, ReliableParams);
+		if (!Contact.bHit || Contact.Bone.IsNone())
+		{
+			continue;
+		}
+		const int32 ContactNode = FVector::DistSquared(Contact.SurfacePoint, Current)
+			<= FVector::DistSquared(Contact.SurfacePoint, Next) ? NodeIndex : NodeIndex + 1;
+		FRopeContactCandidate Candidate = MakeCandidate(ContactNode, Contact);
+		Candidate.Source = ERopeContactCandidateSource::Actual;
+		Candidate.SourceMask = static_cast<uint8>(Candidate.Source);
+		AddUniqueCandidate(InOutCandidates, Candidate);
+	}
+}
+
 void FRopeFlightContactDetector::AddPredictedContactCandidates(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
 	const FParams& Params, const FWhipGuideView& Whip, TArray<FRopeContactCandidate>& InOutCandidates)
 {
@@ -50,25 +203,6 @@ void FRopeFlightContactDetector::AddPredictedContactCandidates(const FRopeSimSta
 	{
 		return;
 	}
-
-	auto AddUniqueCandidate = [&InOutCandidates](const FRopeContactCandidate& Candidate)
-	{
-		for (FRopeContactCandidate& Existing : InOutCandidates)
-		{
-			if (Existing.NodeIndex == Candidate.NodeIndex && Existing.Bone == Candidate.Bone && Existing.Mesh == Candidate.Mesh)
-			{
-				Existing.SourceMask |= Candidate.SourceMask;
-				if (Candidate.Source == ERopeContactCandidateSource::PredictiveGuided ||
-					(Existing.Source == ERopeContactCandidateSource::Actual && Candidate.Source == ERopeContactCandidateSource::PredictiveFree))
-				{
-					Existing.Source = Candidate.Source;
-				}
-				return;
-			}
-		}
-
-		InOutCandidates.Add(Candidate);
-	};
 
 	TArray<IRopeCollider*> NearbyColliders;
 	const bool bHasGuidedNodes = Whip.HasGuidedNodes();
@@ -148,8 +282,39 @@ void FRopeFlightContactDetector::AddPredictedContactCandidates(const FRopeSimSta
 		FRopeContactCandidate Candidate = MakeCandidate(i, Contact);
 		Candidate.Source = Source;
 		Candidate.SourceMask = static_cast<uint8>(Source);
-		AddUniqueCandidate(Candidate);
+		AddUniqueCandidate(InOutCandidates, Candidate);
 	}
+}
+
+void FRopeFlightContactDetector::AddUniqueCandidate(TArray<FRopeContactCandidate>& InOutCandidates,
+	const FRopeContactCandidate& Candidate)
+{
+	for (FRopeContactCandidate& Existing : InOutCandidates)
+	{
+		if (Existing.NodeIndex == Candidate.NodeIndex && Existing.Bone == Candidate.Bone && Existing.Mesh == Candidate.Mesh)
+		{
+			Existing.SourceMask |= Candidate.SourceMask;
+			// GPU 후보는 1~2프레임 지연될 수 있다. 같은 키의 synchronous guide Actual이 도착했는데
+			// source bit만 합치면 캡처는 성공해도 anchor가 낡은 접촉점/normal에서 시작한다.
+			if (Candidate.Source == ERopeContactCandidateSource::Actual)
+			{
+				Existing.bValid = Candidate.bValid;
+				Existing.WorldPoint = Candidate.WorldPoint;
+				Existing.Normal = Candidate.Normal;
+				Existing.Penetration = Candidate.Penetration;
+				Existing.SurfaceVelocity = Candidate.SurfaceVelocity;
+			}
+			if (Candidate.Source == ERopeContactCandidateSource::PredictiveGuided ||
+				(Existing.Source == ERopeContactCandidateSource::Actual &&
+					Candidate.Source == ERopeContactCandidateSource::PredictiveFree))
+			{
+				Existing.Source = Candidate.Source;
+			}
+			return;
+		}
+	}
+
+	InOutCandidates.Add(Candidate);
 }
 
 void FRopeFlightContactDetector::EvaluateRelativeMotion(const FRopeSimState& Sim, const FParams& Params,

@@ -928,6 +928,9 @@ private:
 
 	/** Contacting: 캡처 시 만들어 둔 wrap 시드(Wrapping 진입 재료). */
 	FRopeWrapState      PendingWrapSeed;
+	/** GPU Flight 캡처 직후 pending RT step과 CPU Sim을 아직 권위 있게 맞추지 못한 상태. 이 동안
+	 *  Contacting의 dwell/dismiss/seed 판정을 전부 보류하고 SyncGpuPositionsForHandoff를 재시도한다. */
+	bool bPendingGpuCaptureHandoff = false;
 
 	/** Contacting~Wrapping: 캡처 순간의 로프 진행 좌표계 스냅샷(속도/누운 방향/진행 평면 normal —
 	 *  Contacting부터는 노드가 정지해 이 순간에만 잴 수 있다). CaptureTravelPlane 축의 가이드 평면 폴백. */
@@ -1194,6 +1197,16 @@ private:
 	void BuildCpuFlightContactCandidates(float DeltaTime,
 		const FRopeFlightContactDetector::FParams& DetectParams,
 		TArray<FRopeContactCandidate>& OutCandidates);
+
+	/**
+	 * Assisted aim lock 전용 동기 보완: GPU 비동기 결과와 별개로 CPU whip target의 실제 경로를
+	 * 정확히 잠근 본 collider에 검사한다. readback 중간 프레임 유실과 same-mesh 깊은 이웃 본의
+	 * primary 가림을 막는다. Flight에서는 예측 경로도 포함하고 Contacting에서는 actual-only로 유지한다.
+	 * 일반 Full/비조준 Flight에는 비용을 추가하지 않는다.
+	 */
+	void AddSynchronousAssistedAimContactCandidates(float DeltaTime,
+		const FRopeFlightContactDetector::FParams& DetectParams,
+		TArray<FRopeContactCandidate>& InOutCandidates);
 
 	/** ②a 후보를 한 번 집계해 캡처 판정과 관측이 공유할 frame-local 결과를 만든다. */
 	FRopeFlightCaptureEvaluation EvaluateFlightCapture(const TArray<FRopeContactCandidate>& Candidates,

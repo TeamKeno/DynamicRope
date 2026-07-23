@@ -21,7 +21,8 @@ class USceneComponent;
  *  - 프레임 스코프(매 프레임 리셋/재작성): FrameColliders, AimFrameColliders, OverrideFrame, bSolveThisFrame,
  *    bSolveCollisionsThisFrame, bForceNonStretchThisFrame, bGpuSteppedThisFrame, Gpu*Attribution, GpuFlightCandidates,
  *    bGpuContactsThisFrame.
- *  - 프레임을 넘어 유지: SimGeneration(진짜 시드에만 증가), AimRayColliderQueryBounds(에임 모드 동안 유지).
+ *  - 프레임을 넘어 유지: SimGeneration(진짜 시드에만 증가), AimRayColliderQueryBounds(에임 모드 동안 유지),
+ *    LockedTargetColliderQueryBounds(aim lock Flight/Contacting/Wrapping 동안 유지).
  */
 struct FRopeSimFrameIO
 {
@@ -37,12 +38,21 @@ struct FRopeSimFrameIO
 	 * 본 콜라이더 전부가 솔버 패킹·접촉 감지·노드 근접 디버그 질의에 실리면 안 되기 때문이다.
 	 * 소비처: aim ray hit 판정, GuaranteedWrap preview 빌드. 수집은 FrameColliders와 같은 규칙
 	 * (owner 제외 / 정적 예산 / cross-actor)을 따르고, 같은 collider가 양쪽 목록에 들어올 수 있다.
-	 * AimRayColliderQueryBounds가 무효면(조준 종료) 비어 있다. 포인터 수명은 FrameColliders와 동일.
+	 * AimRayColliderQueryBounds가 무효여도 active lock의 cached target bounds로 다시 채워질 수 있다.
+	 * 포인터 수명은 FrameColliders와 동일.
 	 */
 	TArray<IRopeCollider*> AimFrameColliders;
 
 	/** 조준 ray가 검사할 영역 AABB. 위 AimFrameColliders의 수집 영역이며, 물리 수집 영역과는 무관하다. */
 	FBox AimRayColliderQueryBounds = FBox(ForceInit);
+
+	/**
+	 * aim throw를 확정한 첫 프레임의 target collider 유니언 bounds. Wielder가 다음 프레임에 ray bounds를
+	 * 지운 뒤에도 GPU 지연 CPU mirror보다 앞서 움직이는 target을 AimFrameColliders에 계속 재수집하기 위한
+	 * throw 수명 캐시다. FilterFrameCollidersForAimWrapTarget이 허용 target만으로 갱신/해제하며, 이 bounds로
+	 * 모은 collider도 target 필터를 거친 뒤에만 FrameColliders로 승격된다.
+	 */
+	FBox LockedTargetColliderQueryBounds = FBox(ForceInit);
 
 	/**
 	 * 이번 프레임에 Solver.Step을 돌릴지. Free/Flight/Wrapping/Wrapped true(Wrapping/Wrapped는
