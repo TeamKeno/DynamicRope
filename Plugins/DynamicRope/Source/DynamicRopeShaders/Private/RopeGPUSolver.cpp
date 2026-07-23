@@ -448,9 +448,9 @@ struct FRopeResidentSharedResults
 	TMap<uint32, FRopeResidentContacts> Contacts;
 	// 소비되지 못하고 교체된 pending step의 시뮬 시간(초). RT가 쌓고 GT가 DrainDroppedSimTime으로 비운다.
 	TMap<uint32, float> DroppedSimTime;
-	// wrap 핸드오프 동기 리드백의 프레임 스냅샷(ReadbackNow). 한 프레임에 여러 로프가 감겨도 GPU idle
-	// 대기는 첫 요청 1회뿐이고, 나머지는 이 캐시를 락으로 읽는다(GT stall 없음).
-	uint64 HandoffFrame = 0;
+	// wrap 핸드오프 동기 리드백의 마지막 권위 스냅샷. ReadbackNow는 앞선 pending step까지 RT에서
+	// 소비한 뒤 이 맵과 Map을 함께 승격한다. 프레임 캐시는 같은 프레임의 새 pending step을 가릴 수 있어
+	// 사용하지 않는다(핸드오프는 드문 이벤트이고 정확성이 우선).
 	TMap<uint32, FRopeResidentLatest> HandoffSnapshots;
 };
 
@@ -490,6 +490,9 @@ struct FRopeGPUSolver::FImpl
 
 	// GDF 경로(EnqueueSteps)로 쌓인 이번 프레임 step들. 뷰 확장이 DispatchPending_RenderThread에서 소비. RT 전용.
 	TArray<FRopeGPUResidentStep> PendingSteps;
+	// ReadbackNow가 View/GDF 없이 실행할 수 없어 보류한 로프. 다음 씬 dispatch 전까지 다른 로프의
+	// EnqueueSteps 교체 시맨틱이 해당 step을 버리지 않도록 보호한다.
+	TSet<uint32> HandoffGDFBlockedRopes;
 };
 
 bool RopeGPU::IsRuntimeSupported()
@@ -541,6 +544,7 @@ void FRopeGPUSolver::ReleaseAll_RenderThread()
 	Impl->RtRopes.Empty();
 	// 소비되지 않은 step도 함께 버린다 — 남으면 다음 dispatch가 방금 비운 상주 맵을 되살린다.
 	Impl->PendingSteps.Reset();
+	Impl->HandoffGDFBlockedRopes.Reset();
 	// 전역 SDF 상주 버퍼/캐시 해제(TRefCountPtr auto-release).
 	Impl->GlobalSDF = FRopeGlobalSDFCache{};
 }
@@ -566,6 +570,7 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 			// 씬 렌더가 없는 프레임에는 교체도 일어나지 않는다.)
 			Impl->PendingSteps.RemoveAll(
 				[RopeId](const FRopeGPUResidentStep& Step) { return Step.RopeId == RopeId; });
+			Impl->HandoffGDFBlockedRopes.Remove(RopeId);
 
 			if (FRopeResidentRope* Resident = Impl->RtRopes.Find(RopeId))
 			{
@@ -602,108 +607,148 @@ void FRopeGPUSolver::GetLatestContacts(TMap<uint32, FRopeResidentContacts>& Out)
 
 bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, TArray<FVector>& OutPrevPositions, uint32& OutGeneration)
 {
-	// GT 블로킹(M5c): 상주 미러(GetLatest)는 1~2프레임 낡아 wrap 시드 정밀도에 못 쓴다 — 핸드오프 순간만
-	// 지금 값을 받는다. 비용은 GPU idle 대기 + 렌더 커맨드 flush라 프레임당 여러 번 내면 그대로 hitch다.
-	// 그래서 **프레임 단위로 한 번만** 뜬다: 첫 요청이 상주 로프 전체를 한 그래프에서 복사하고 idle을
-	// 1회 기다려 스냅샷을 만들고, 같은 프레임의 나머지 로프는 락만 잡고 그 스냅샷을 읽는다(대기 0).
-	// 한 프레임 안에서는 dispatch가 아직 없어(솔브는 Prepare 뒤) 모든 로프에 같은 스냅샷이 유효하다.
-	// 여분 복사(안 감기는 로프까지)는 로프당 수십 KB로, stall 한 번보다 훨씬 싸다.
-	const uint64 FrameId = GFrameCounter;
-
-	auto CopyOutFromCache = [&]() -> bool
+	// GT 블로킹(M5c): EnqueueSteps는 RT pending 큐만 채우므로 단순 resident copy는 바로 앞 Flight
+	// step보다 오래된 pose를 반환할 수 있다. RT command ordering을 이용해 이 RopeId의 non-GDF pending
+	// step을 먼저 전용 그래프에서 실행하고, 그 결과를 같은 command에서 copy/readback한다.
+	// GDF step은 유효한 Scene View/GDF가 필요한 관계로 여기서 lean permutation으로 실행하지 않고 보류한다.
+	struct FImmediateReadbackResult
 	{
-		const FRopeResidentLatest* Snap = Impl->Results->HandoffSnapshots.Find(RopeId);
-		if (!Snap || Snap->NumNodes < 2)
-		{
-			return false;
-		}
-		OutPositions = Snap->Positions;
-		OutPrevPositions = Snap->PrevPositions;
-		OutGeneration = Snap->Generation;
-		return true;
+		bool bSuccess = false;
+		FRopeResidentLatest Snapshot;
 	};
-
-	{
-		FScopeLock SL(&Impl->Results->Lock);
-		if (Impl->Results->HandoffFrame == FrameId)
-		{
-			return CopyOutFromCache();
-		}
-	}
+	const TSharedRef<FImmediateReadbackResult, ESPMode::ThreadSafe> Result =
+		MakeShared<FImmediateReadbackResult, ESPMode::ThreadSafe>();
 
 	ENQUEUE_RENDER_COMMAND(RopeGPUReadbackNow)(
-		[this, FrameId](FRHICommandListImmediate& RHICmdList)
+		[this, RopeId, Result](FRHICommandListImmediate& RHICmdList)
 		{
-			// 상주 로프 전체의 Pos/Prev를 한 그래프에 모아 복사한다(패스는 많아도 idle 대기는 1회).
-			TArray<uint32> Ids;
-			TArray<TUniquePtr<FRHIGPUBufferReadback>> PosRbs;
-			TArray<TUniquePtr<FRHIGPUBufferReadback>> PrevRbs;
-			TArray<int32> Nodes;
+			check(IsInRenderingThread());
+
+			const int32 PendingIndex = Impl->PendingSteps.IndexOfByPredicate(
+				[RopeId](const FRopeGPUResidentStep& Step) { return Step.RopeId == RopeId; });
+			if (PendingIndex != INDEX_NONE)
 			{
-				FRDGBuilder GraphBuilder(RHICmdList);
-				for (TPair<uint32, FRopeResidentRope>& Pair : Impl->RtRopes)
+				if (Impl->PendingSteps[PendingIndex].bUseWorldGDF)
 				{
-					FRopeResidentRope& Resident = Pair.Value;
-					if (!Resident.PosBuf.IsValid() || !Resident.PrevBuf.IsValid() || Resident.NumNodes < 2)
-					{
-						continue;
-					}
-					const uint32 Bytes = (uint32)Resident.NumNodes * sizeof(FVector4f);
-					TUniquePtr<FRHIGPUBufferReadback> PosRb =
-						MakeUnique<FRHIGPUBufferReadback>(TEXT("Rope.PosReadbackNow"));
-					TUniquePtr<FRHIGPUBufferReadback> PrevRb =
-						MakeUnique<FRHIGPUBufferReadback>(TEXT("Rope.PrevReadbackNow"));
-					AddEnqueueCopyPass(GraphBuilder, PosRb.Get(),
-						GraphBuilder.RegisterExternalBuffer(Resident.PosBuf), Bytes);
-					AddEnqueueCopyPass(GraphBuilder, PrevRb.Get(),
-						GraphBuilder.RegisterExternalBuffer(Resident.PrevBuf), Bytes);
-					Ids.Add(Pair.Key);
-					Nodes.Add(Resident.NumNodes);
-					PosRbs.Add(MoveTemp(PosRb));
-					PrevRbs.Add(MoveTemp(PrevRb));
+					// 다음 씬 graph dispatch가 소비할 때까지 EnqueueSteps의 전역 교체에서 보호한다.
+					Impl->HandoffGDFBlockedRopes.Add(RopeId);
+					FScopeLock SL(&Impl->Results->Lock);
+					Impl->Results->HandoffSnapshots.Remove(RopeId);
+					return;
 				}
-				GraphBuilder.Execute();
+
+				TArray<FRopeGPUResidentStep> ImmediateSteps;
+				ImmediateSteps.Add(MoveTemp(Impl->PendingSteps[PendingIndex]));
+				Impl->PendingSteps.RemoveAt(PendingIndex, 1, EAllowShrinking::No);
+				Impl->HandoffGDFBlockedRopes.Remove(RopeId);
+
+				FRDGBuilder SolveGraph(RHICmdList);
+				RunSteps_RenderThread(SolveGraph, ImmediateSteps, nullptr, nullptr, FVector3f::ZeroVector);
+				SolveGraph.Execute();
+			}
+
+			FRopeResidentRope* Resident = Impl->RtRopes.Find(RopeId);
+			if (!Resident || !Resident->PosBuf.IsValid() || !Resident->PrevBuf.IsValid() || Resident->NumNodes < 2)
+			{
+				return;
+			}
+
+			const int32 NumNodes = Resident->NumNodes;
+			const uint32 NodeBytes = static_cast<uint32>(NumNodes) * sizeof(FVector4f);
+			TUniquePtr<FRHIGPUBufferReadback> PosRb =
+				MakeUnique<FRHIGPUBufferReadback>(TEXT("Rope.PosReadbackNow"));
+			TUniquePtr<FRHIGPUBufferReadback> PrevRb =
+				MakeUnique<FRHIGPUBufferReadback>(TEXT("Rope.PrevReadbackNow"));
+			{
+				// SolveGraph가 외부 버퍼로 확정한 뒤 새 그래프에서 register/copy한다.
+				FRDGBuilder CopyGraph(RHICmdList);
+				AddEnqueueCopyPass(CopyGraph, PosRb.Get(), CopyGraph.RegisterExternalBuffer(Resident->PosBuf), NodeBytes);
+				AddEnqueueCopyPass(CopyGraph, PrevRb.Get(), CopyGraph.RegisterExternalBuffer(Resident->PrevBuf), NodeBytes);
+				CopyGraph.Execute();
 			}
 			RHICmdList.BlockUntilGPUIdle();
 
-			TMap<uint32, FRopeResidentLatest> Snapshots;
-			Snapshots.Reserve(Ids.Num());
-			for (int32 i = 0; i < Ids.Num(); ++i)
+			const FVector4f* SrcPos = static_cast<const FVector4f*>(PosRb->Lock(NodeBytes));
+			const FVector4f* SrcPrev = static_cast<const FVector4f*>(PrevRb->Lock(NodeBytes));
+			if (!SrcPos || !SrcPrev)
 			{
-				const int32 NumNodes = Nodes[i];
-				const uint32 Bytes = (uint32)NumNodes * sizeof(FVector4f);
-				const FVector4f* SrcPos = (const FVector4f*)PosRbs[i]->Lock(Bytes);
-				const FVector4f* SrcPrev = SrcPos ? (const FVector4f*)PrevRbs[i]->Lock(Bytes) : nullptr;
-				if (SrcPos && SrcPrev)
-				{
-					FRopeResidentLatest Snap;
-					Snap.NumNodes = NumNodes;
-					Snap.Positions.SetNumUninitialized(NumNodes);
-					Snap.PrevPositions.SetNumUninitialized(NumNodes);
-					for (int32 k = 0; k < NumNodes; ++k)
-					{
-						Snap.Positions[k] = FVector(SrcPos[k].X, SrcPos[k].Y, SrcPos[k].Z);
-						Snap.PrevPositions[k] = FVector(SrcPrev[k].X, SrcPrev[k].Y, SrcPrev[k].Z);
-					}
-					if (const FRopeResidentRope* Resident = Impl->RtRopes.Find(Ids[i]))
-					{
-						Snap.Generation = Resident->Generation;
-					}
-					Snapshots.Add(Ids[i], MoveTemp(Snap));
-				}
-				if (SrcPos) { PosRbs[i]->Unlock(); }
-				if (SrcPrev) { PrevRbs[i]->Unlock(); }
+				if (SrcPos) { PosRb->Unlock(); }
+				if (SrcPrev) { PrevRb->Unlock(); }
+				return;
 			}
 
-			FScopeLock SL(&Impl->Results->Lock);
-			Impl->Results->HandoffSnapshots = MoveTemp(Snapshots);
-			Impl->Results->HandoffFrame = FrameId;
+			FRopeResidentLatest Snapshot;
+			Snapshot.NumNodes = NumNodes;
+			Snapshot.Generation = Resident->Generation;
+			Snapshot.Positions.SetNumUninitialized(NumNodes);
+			Snapshot.PrevPositions.SetNumUninitialized(NumNodes);
+			for (int32 NodeIndex = 0; NodeIndex < NumNodes; ++NodeIndex)
+			{
+				Snapshot.Positions[NodeIndex] = FVector(SrcPos[NodeIndex].X, SrcPos[NodeIndex].Y, SrcPos[NodeIndex].Z);
+				Snapshot.PrevPositions[NodeIndex] = FVector(SrcPrev[NodeIndex].X, SrcPrev[NodeIndex].Y, SrcPrev[NodeIndex].Z);
+			}
+			PosRb->Unlock();
+			PrevRb->Unlock();
+
+			// RunSteps가 기존 async copy를 consume하지 못했거나 새 copy를 재무장했더라도, 위 idle 뒤에는
+			// 전부 안전하게 drain할 수 있다. 플래그를 남기면 다음 step이 이 authoritative snapshot보다
+			// 오래된 pose/contact를 Results에 다시 승격할 수 있다.
+			auto DrainReadback = [](FRHIGPUBufferReadback* Readback, uint32 Bytes)
+			{
+				if (Readback && Readback->IsReady())
+				{
+					if (Readback->Lock(Bytes))
+					{
+						Readback->Unlock();
+					}
+				}
+			};
+			if (Resident->bReadbackArmed)
+			{
+				DrainReadback(Resident->PosReadback, NodeBytes);
+				DrainReadback(Resident->PrevReadback, NodeBytes);
+			}
+			if (Resident->bLambdaArmed)
+			{
+				DrainReadback(Resident->LambdaReadback, static_cast<uint32>(NumNodes) * sizeof(float));
+			}
+			if (Resident->bContactArmed)
+			{
+				DrainReadback(Resident->ContactReadback,
+					static_cast<uint32>(2 * NumNodes) * sizeof(FRopeGPUContactGPU));
+			}
+			Resident->bReadbackArmed = false;
+			Resident->bLambdaArmed = false;
+			Resident->bContactArmed = false;
+
+			{
+				FScopeLock SL(&Impl->Results->Lock);
+				if (const FRopeResidentLatest* Existing = Impl->Results->Map.Find(RopeId))
+				{
+					if (Existing->Generation == Snapshot.Generation && Existing->NumNodes == Snapshot.NumNodes)
+					{
+						Snapshot.SegmentTension = Existing->SegmentTension;
+					}
+				}
+				// GetLatest도 같은 권위 pose를 보게 해 다음 GT Tick에서 stale async mirror로 롤백되지 않게 한다.
+				Impl->Results->Map.Add(RopeId, Snapshot);
+				Impl->Results->HandoffSnapshots.Add(RopeId, Snapshot);
+				Impl->Results->Contacts.Remove(RopeId);
+			}
+			Result->Snapshot = MoveTemp(Snapshot);
+			Result->bSuccess = true;
 		});
 	// RT 커맨드 완료까지 GT 대기(스냅샷 확정).
 	FlushRenderingCommands();
 
-	FScopeLock SL(&Impl->Results->Lock);
-	return CopyOutFromCache();
+	if (!Result->bSuccess || Result->Snapshot.NumNodes < 2)
+	{
+		return false;
+	}
+	OutPositions = Result->Snapshot.Positions;
+	OutPrevPositions = Result->Snapshot.PrevPositions;
+	OutGeneration = Result->Snapshot.Generation;
+	return true;
 }
 
 FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes,
@@ -1781,15 +1826,29 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 	ENQUEUE_RENDER_COMMAND(RopeEnqueueSteps)(
 		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate&) mutable
 		{
+			TSet<uint32> IncomingRopeIds;
+			for (const FRopeGPUResidentStep& Step : Steps)
+			{
+				IncomingRopeIds.Add(Step.RopeId);
+			}
+			TArray<FRopeGPUResidentStep> PreservedHandoffGDFSteps;
 			// 교체 시맨틱: 이번 프레임 step으로 대체한다(직전 프레임분이 뷰 확장에서 소비 안 됐어도 — 씬
 			// 렌더가 없던 프레임 등 — 최신만 유효하므로 누적하지 않는다). 다만 **시간은 버리지 않는다**:
 			// 덮어쓰는 step이 들고 있던 substep 분량을 장부에 적어 GT가 accumulator로 되돌리게 한다
-			// (그냥 버리면 그 시간만큼 시뮬이 영구히 뒤처진다 — DrainDroppedSimTime 주석).
+			// (그냥 버리면 그 시간만큼 시뮬이 영구히 뒤처진다 — DrainDroppedSimTime 주석). 단,
+			// handoff가 Scene GDF를 기다리는 step은 같은 RopeId의 더 최신 step이 오기 전까지 보존한다.
 			if (Impl->PendingSteps.Num() > 0)
 			{
 				FScopeLock SL(&Impl->Results->Lock);
-				for (const FRopeGPUResidentStep& Dropped : Impl->PendingSteps)
+				for (FRopeGPUResidentStep& Dropped : Impl->PendingSteps)
 				{
+					if (Impl->HandoffGDFBlockedRopes.Contains(Dropped.RopeId)
+						&& !IncomingRopeIds.Contains(Dropped.RopeId))
+					{
+						PreservedHandoffGDFSteps.Add(MoveTemp(Dropped));
+						continue;
+					}
+					Impl->HandoffGDFBlockedRopes.Remove(Dropped.RopeId);
 					if (Dropped.NumSub > 0 && Dropped.FixedDt > 0.0f)
 					{
 						Impl->Results->DroppedSimTime.FindOrAdd(Dropped.RopeId) +=
@@ -1798,6 +1857,7 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 				}
 			}
 			Impl->PendingSteps = MoveTemp(Steps);
+			Impl->PendingSteps.Append(MoveTemp(PreservedHandoffGDFSteps));
 		});
 }
 
@@ -1810,6 +1870,10 @@ void FRopeGPUSolver::DispatchPending_RenderThread(FRDGBuilder& GraphBuilder, con
 	if (Impl->PendingSteps.Num() == 0)
 	{
 		return;
+	}
+	for (const FRopeGPUResidentStep& Step : Impl->PendingSteps)
+	{
+		Impl->HandoffGDFBlockedRopes.Remove(Step.RopeId);
 	}
 	RunSteps_RenderThread(GraphBuilder, Impl->PendingSteps, View, GDF, PreViewTranslation);
 	Impl->PendingSteps.Reset();

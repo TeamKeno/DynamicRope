@@ -165,18 +165,72 @@ void URopeComponent::ReleaseWrapAs(ERopeReleaseReason Reason)
 
 void URopeComponent::UpdateContacting(float DeltaTime)
 {
+	// GPU Flight 캡처의 pending step과 CPU Sim을 먼저 하나의 시간축으로 맞춘다. 실패한 프레임에는
+	// stale centerline으로 dwell/dismiss/seed 어느 것도 갱신하지 않는다. 특히 TryBuildResidentStep이
+	// Contacting에서 bGpuSteppedThisFrame를 false로 바꾸므로 캡처 순간 세운 persistent flag를 써야 한다.
+	bool bSyncedGpuHandoff = false;
+	if (bPendingGpuCaptureHandoff)
+	{
+		URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld());
+		if (!SimSubsystem || !SimSubsystem->SyncGpuPositionsForHandoff(*this))
+		{
+			return;
+		}
+		bPendingGpuCaptureHandoff = false;
+		bSyncedGpuHandoff = true;
+	}
+	// 캡처 프레임의 swept actual만으로 이미 decision dwell을 채웠다면 그 crossing은 유효한 접촉이다.
+	// 동기화 후 current-only 재검출을 강제하면 collision-free guided step이 얇은 limb를 완전히 지난
+	// 경우 GPU에서만 놓치므로, 저장된 surface seed로 정확히 한 번 CPU 즉시-wrap과 같은 결정을 낸다.
+	if (bSyncedGpuHandoff && ShouldStartWrapping())
+	{
+		// Deferred Scene-GDF 경로는 BuildContactingState 당시 CPU mirror가 낡았을 수 있다. surface seed의
+		// 노드/점으로 후보를 복원해 post-step Sim 기준 진행 속도·평면을 갱신한 뒤 commit한다.
+		TArray<FRopeContactCandidate> SyncedCaptureCandidates;
+		SyncedCaptureCandidates.Reserve(PendingWrapSeed.Anchors.Num());
+		for (const FRopeSurfaceAnchor& Anchor : PendingWrapSeed.Anchors)
+		{
+			const USceneComponent* Mesh = Anchor.Mesh.Get();
+			if (!Mesh || !Sim.Positions.IsValidIndex(Anchor.NodeIndex))
+			{
+				continue;
+			}
+			const FTransform BindingWorld = ResolveBindingWorld(Mesh, Anchor.Bone);
+			FRopeContactCandidate& Candidate = SyncedCaptureCandidates.AddDefaulted_GetRef();
+			Candidate.bValid = true;
+			Candidate.NodeIndex = Anchor.NodeIndex;
+			Candidate.Mesh = Mesh;
+			Candidate.Bone = Anchor.Bone;
+			Candidate.Source = ERopeContactCandidateSource::Actual;
+			Candidate.SourceMask = static_cast<uint8>(ERopeContactCandidateSource::Actual);
+			Candidate.WorldPoint = BindingWorld.TransformPosition(Anchor.LocalSurfacePosition);
+			Candidate.Normal = BindingWorld.TransformVectorNoScale(Anchor.LocalNormal)
+				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		}
+		if (SyncedCaptureCandidates.Num() > 0)
+		{
+			CaptureTravelFrame = FRopeCaptureTravelFrame::Compute(
+				Sim, SyncedCaptureCandidates, DeltaTime);
+		}
+		StartWrappingFromContacting();
+		return;
+	}
+
 	// 총 체류(아래 정체 안전망 판단용 — 감김 판정 자체는 트래커 dwell).
 	ContactingElapsed += DeltaTime;
 
 	// 매 프레임 실제 접촉을 재수집한다 — 캡처 순간의 1회 스냅샷만 믿고 타이머를 돌리던 이전 구조는
 	// (1) dismiss가 사실상 불발이었고(트래커 미갱신) (2) 움직이는 대상(랙돌/드래곤)에서 시드와 실제
 	// 지오메트리의 어긋남이 WrapDecisionTime 동안 누적됐다. Contacting은 솔브가 없어 노드가 정지
-	// 상태라 스윕은 점 질의로 축퇴하고, 대상 이탈은 collider 쪽 이동으로 감지된다.
-	// 예측/whip 분기는 Flight 전용이므로 여기서는 actual 접촉만 수집한다(비용: 근접 노드 점 질의뿐).
+	// 상태이므로 과거 Prev→Pos 경로를 다시 재생하면 이미 빠져나온 접촉도 매 프레임 되살아난다.
+	// 일반 actual 재수집 뒤 Assisted exact-primary current-centerline 보완을 합친다. 후자는 마지막
+	// Flight의 temporal/predictive path를 재생하지 않으므로 아직 닿지 않은 상태로 dwell이 쌓이지 않는다.
 	const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
 	TArray<FRopeContactCandidate>& Candidates = ContactCandidateScratch;
 	Candidates.Reset();
-	FRopeFlightContactDetector::DetectContactCandidates(Sim, SimFrame.FrameColliders, DetectParams, Candidates);
+	FRopeFlightContactDetector::AddCurrentCenterlineContactCandidates(
+		Sim, SimFrame.FrameColliders, DetectParams, Candidates);
+	AddSynchronousAssistedAimContactCandidates(DeltaTime, DetectParams, Candidates);
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
 	// CanWrapTarget 게이트(Flight 후보 산출과 공용 헬퍼).
 	RemoveNonWrappableCandidates(Candidates);
@@ -207,6 +261,12 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 	if (Candidates.Num() > 0 && !ContactTracker.CandidateBone.IsNone())
 	{
 		PendingWrapSeed = BuildWrapSeedFromContactingState(Candidates);
+		if (bSyncedGpuHandoff)
+		{
+			// Flight Finalize에서 만든 snapshot은 비동기 GPU mirror 기준일 수 있다. 동기화에 성공한
+			// 첫 Contacting 프레임에만 같은 post-step pose/candidate로 진행 좌표계를 다시 만든다.
+			CaptureTravelFrame = FRopeCaptureTravelFrame::Compute(Sim, Candidates, DeltaTime);
+		}
 	}
 
 	if (ShouldStartWrapping())
@@ -440,13 +500,6 @@ void URopeComponent::StartWrappingFromContacting()
 		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight).
 		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone, TEXT("invalid wrapping seed"));
 		return;
-	}
-
-	// M5c: GPU 상주 로프의 CPU 미러는 1~2프레임 낡다 — wrap 핸드오프 순간만 1회 동기 리드백으로
-	// 최신 위치를 받아 시드(StartWorldPosition/fallback 앵커)의 정밀도를 확보한다(이벤트당 1회, 블로킹).
-	if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
-	{
-		SimSubsystem->SyncGpuPositionsForHandoff(*this);
 	}
 
 	// 무조건 첫 번째 latch node 하나만 기준으로 잡는다

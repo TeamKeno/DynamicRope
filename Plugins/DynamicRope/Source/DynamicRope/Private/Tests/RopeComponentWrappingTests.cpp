@@ -49,6 +49,41 @@ struct FRopeWrappingFallbackTestSeam
 	{
 		return Rope.WrappingPhase.State;
 	}
+
+	static void ConfigureAssistedContacting(URopeComponent& Rope, USkeletalMeshComponent* Mesh,
+		FName PrimaryBone, IRopeCollider& Primary, IRopeCollider& DeeperNeighbor)
+	{
+		Rope.Sim = RopeTest::MakeStraightRope(4, 60.0f);
+		Rope.Radius = 1.0f;
+		Rope.WrapConfig.ContactQueryRadius = 3.0f;
+		Rope.DetectConfig.WrapDecisionTime = 0.05f;
+		Rope.ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+		Rope.Phase = ERopePhase::Contacting;
+
+		FRopeThrowContext Context;
+		Context.bHasAimGuideHit = true;
+		Context.AimGuideMesh = Mesh;
+		Context.AimGuideBone = PrimaryBone;
+		Rope.AimTargeting.SetWrapTargetLock(Context);
+		Rope.SimFrame.FrameColliders = { &Primary, &DeeperNeighbor };
+
+		// Flight에서 exact primary로 이미 capture된 상태. 다음 120Hz Contacting tick에서도 deeper
+		// same-mesh neighbor가 primary를 가려 dismiss시키지 않는지 검증한다.
+		Rope.ContactTracker.CandidateMesh = Mesh;
+		Rope.ContactTracker.CandidateBone = PrimaryBone;
+		Rope.ContactTracker.CandidateNodes = { 1 };
+		Rope.ContactTracker.DwellTime = 1.0f / 120.0f;
+	}
+
+	static void UpdateContacting(URopeComponent& Rope, float DeltaTime)
+	{
+		Rope.UpdateContacting(DeltaTime);
+	}
+
+	static const FRopeContactTracker& GetContactTracker(const URopeComponent& Rope)
+	{
+		return Rope.ContactTracker;
+	}
 };
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSyntheticLatchAnchorFallbackTest,
@@ -100,6 +135,35 @@ bool FRopeSyntheticLatchAnchorFallbackTest::RunTest(const FString& Parameters)
 		WrappingState.LatchAnchor.LocalNormal.Equals(FVector::UpVector, KINDA_SMALL_NUMBER));
 	TestTrue(TEXT("fallback starts from the current latch node position"),
 		WrappingState.LatchAnchor.StartWorldPosition.Equals(FVector(25.0f, 0.0f, 0.0f), KINDA_SMALL_NUMBER));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAssistedContactingPrimaryShadowTest,
+	"DynamicRope.Component.Contacting.AssistedPrimarySurvivesDeeperNeighborAtHighFPS",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeAssistedContactingPrimaryShadowTest::RunTest(const FString& Parameters)
+{
+	USkeletalMeshComponent* Mesh = NewObject<USkeletalMeshComponent>();
+	const FName PrimaryBone("upperarm_l");
+	RopeTest::FSphereMockCollider Primary(FVector(20.0f, 0.0f, 0.0f), 8.0f, PrimaryBone, Mesh);
+	RopeTest::FSphereMockCollider DeeperNeighbor(
+		FVector(20.0f, 0.0f, 0.0f), 15.0f, FName("clavicle_l"), Mesh);
+
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	FRopeWrappingFallbackTestSeam::ConfigureAssistedContacting(
+		*Rope, Mesh, PrimaryBone, Primary, DeeperNeighbor);
+	const float InitialDwell = FRopeWrappingFallbackTestSeam::GetContactTracker(*Rope).DwellTime;
+
+	FRopeWrappingFallbackTestSeam::UpdateContacting(*Rope, 1.0f / 120.0f);
+	const FRopeContactTracker& Tracker = FRopeWrappingFallbackTestSeam::GetContactTracker(*Rope);
+
+	TestEqual(TEXT("exact primary contact remains in Contacting"), Rope->GetPhase(), ERopePhase::Contacting);
+	TestEqual(TEXT("deeper same-mesh neighbor does not replace the aimed bone"),
+		Tracker.CandidateBone, PrimaryBone);
+	TestTrue(TEXT("the aimed mesh identity is preserved"), Tracker.CandidateMesh == Mesh);
+	TestTrue(TEXT("the exact primary node remains tracked"), Tracker.CandidateNodes.Contains(1));
+	TestTrue(TEXT("primary dwell advances at 120Hz instead of dismissing"), Tracker.DwellTime > InitialDwell);
 	return true;
 }
 

@@ -727,6 +727,7 @@ void URopeComponent::ResetTransientPhaseState()
 	PendingGuaranteedAimThrow.Reset();
 	ContactTracker.Reset();
 	PendingWrapSeed.Reset();
+	bPendingGpuCaptureHandoff = false;
 	TeardownPhysicalTether(); // Constraint 모드 랙돌 제약 — wrap 시도 단위 수명(무해 no-op 가능).
 	CaptureTravelFrame.Reset();
 	WrappingPhase.State.Reset();

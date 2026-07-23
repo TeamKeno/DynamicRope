@@ -406,7 +406,9 @@ public:
 	void GetLatestContacts(TMap<uint32, FRopeResidentContacts>& Out);
 
 	/**
-	 * GT 블로킹 동기 리드백(M5c): 이 로프의 상주 Pos/Prev를 *지금* 값으로 가져온다(GPU idle 대기 포함).
+	 * GT 블로킹 동기 리드백(M5c): 이 로프의 RT pending non-GDF step을 먼저 실행한 뒤 상주 Pos/Prev를
+	 * *지금* 값으로 가져온다(GPU idle 대기 포함). Scene GDF가 필요한 pending step은 유효한 View 없이
+	 * 실행하지 않고 false를 반환하며, 다음 scene dispatch까지 보존한다.
 	 * wrap 핸드오프처럼 "이벤트당 1회, 최신 위치가 꼭 필요한" 곳 전용 — 매 프레임 호출 금지.
 	 * OutGeneration은 버퍼가 대응하는 시드 generation(호출자가 자기 generation과 대조해 stale 거부).
 	 * @return 상주 버퍼가 있고 회수에 성공하면 true.

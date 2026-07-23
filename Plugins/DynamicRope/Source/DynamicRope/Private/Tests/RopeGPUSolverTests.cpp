@@ -1074,5 +1074,139 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUPendingReadbackConsumesStandaloneStepTest,
+	"DynamicRope.Solver.GPUPendingReadbackConsumesStandaloneStep",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUPendingReadbackConsumesStandaloneStepTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU pending handoff 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	constexpr uint32 RopeId = 0xA55157EDu;
+	constexpr uint32 Generation = 37u;
+	constexpr int32 NumNodes = 4;
+	FRopeSimState Sim = RopeTest::MakeStraightRope(NumNodes, 60.0f);
+	FRopeGPUSolver GpuSolver;
+
+	auto MakeOverrideStep = [&](const FVector& Target)
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId = RopeId;
+		Step.Generation = Generation;
+		Step.NumNodes = NumNodes;
+		Step.SeedPositions = Sim.Positions;
+		Step.SeedPrevPositions = Sim.PrevPositions;
+		Step.InvMass = Sim.InvMass;
+		Step.SegmentLength = Sim.SegmentLength;
+		Step.Iterations = 1;
+		Step.bSolveCollisions = false;
+		Step.NumSub = 0;
+		Step.FixedDt = 1.0f / 60.0f;
+		Step.OverrideFlags.SetNumZeroed(NumNodes);
+		Step.OverridePositions.SetNumZeroed(NumNodes);
+		Step.OverrideFlags[2] = static_cast<uint8>(
+			ERopeGPUOverride::Position | ERopeGPUOverride::PrevFromPosition);
+		Step.OverridePositions[2] = Target;
+		return Step;
+	};
+
+	auto EnqueueAndRead = [&](const FVector& Target, TArray<FVector>& OutPos, TArray<FVector>& OutPrev,
+		uint32& OutGeneration)
+	{
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(MakeOverrideStep(Target));
+		// 일부러 별도 dispatch/flush 없이 pending에만 넣는다. ReadbackNow가 RT ordering으로 이 step을
+		// 먼저 실행해야 하며, resident가 없던 첫 호출도 성공해야 한다.
+		GpuSolver.EnqueueSteps(MoveTemp(Steps));
+		return GpuSolver.ReadbackNow(RopeId, OutPos, OutPrev, OutGeneration);
+	};
+
+	const FVector FirstTarget(31.0f, 17.0f, -9.0f);
+	TArray<FVector> Pos;
+	TArray<FVector> Prev;
+	uint32 ReadGeneration = 0;
+	if (!TestTrue(TEXT("ReadbackNow consumes an undispatched pending step"),
+		EnqueueAndRead(FirstTarget, Pos, Prev, ReadGeneration)))
+	{
+		return false;
+	}
+	TestEqual(TEXT("pending handoff generation"), ReadGeneration, Generation);
+	TestEqual(TEXT("pending handoff node count"), Pos.Num(), NumNodes);
+	if (Pos.Num() != NumNodes || Prev.Num() != NumNodes)
+	{
+		return false;
+	}
+	TestTrue(TEXT("pending override position is authoritative"), FVector::Dist(Pos[2], FirstTarget) < 0.01f);
+	TestTrue(TEXT("PrevFromPosition is included in the same snapshot"), FVector::Dist(Prev[2], FirstTarget) < 0.01f);
+
+	// 같은 GFrameCounter에 새 pending이 들어와도 과거 handoff cache를 반환하면 안 된다.
+	const FVector SecondTarget(-12.0f, 44.0f, 6.0f);
+	Pos.Reset();
+	Prev.Reset();
+	if (!TestTrue(TEXT("same-frame second pending step invalidates the old handoff snapshot"),
+		EnqueueAndRead(SecondTarget, Pos, Prev, ReadGeneration)))
+	{
+		return false;
+	}
+	TestTrue(TEXT("same-frame readback returns the second override"),
+		Pos.IsValidIndex(2) && FVector::Dist(Pos[2], SecondTarget) < 0.01f);
+
+	TMap<uint32, FRopeResidentLatest> Latest;
+	GpuSolver.GetLatest(Latest);
+	const FRopeResidentLatest* Published = Latest.Find(RopeId);
+	TestTrue(TEXT("authoritative handoff snapshot is promoted to GetLatest"), Published != nullptr);
+	if (Published && Published->Positions.IsValidIndex(2))
+	{
+		TestTrue(TEXT("GetLatest cannot roll back to the pre-handoff pose"),
+			FVector::Dist(Published->Positions[2], SecondTarget) < 0.01f);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUPendingReadbackDoesNotBypassGDFTest,
+	"DynamicRope.Solver.GPUPendingReadbackDoesNotBypassSceneGDF",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUPendingReadbackDoesNotBypassGDFTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU GDF handoff 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	constexpr uint32 RopeId = 0x6DFCA57u;
+	constexpr uint32 Generation = 11u;
+	FRopeSimState Sim = RopeTest::MakeStraightRope(4, 60.0f);
+	FRopeGPUSolver GpuSolver;
+	FRopeGPUResidentStep Step;
+	Step.RopeId = RopeId;
+	Step.Generation = Generation;
+	Step.NumNodes = Sim.Num();
+	Step.SeedPositions = Sim.Positions;
+	Step.SeedPrevPositions = Sim.PrevPositions;
+	Step.InvMass = Sim.InvMass;
+	Step.SegmentLength = Sim.SegmentLength;
+	Step.Iterations = 1;
+	Step.bSolveCollisions = true;
+	Step.bUseWorldGDF = true;
+	Step.NumSub = 1;
+	Step.FixedDt = 1.0f / 60.0f;
+
+	TArray<FRopeGPUResidentStep> Steps;
+	Steps.Add(MoveTemp(Step));
+	GpuSolver.EnqueueSteps(MoveTemp(Steps));
+	TArray<FVector> Pos;
+	TArray<FVector> Prev;
+	uint32 ReadGeneration = 0;
+	TestFalse(TEXT("ReadbackNow must not execute a Scene-GDF step through the null-View lean path"),
+		GpuSolver.ReadbackNow(RopeId, Pos, Prev, ReadGeneration));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
 
