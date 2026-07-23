@@ -69,6 +69,17 @@ private:
 	TArray<FBox> CvxWorldBounds;
 
 	/**
+	 * 프레임당 collider별 출처 액터 캐시(Boxes/Capsules/Convexes와 평행). RecordExtractedGroup이 추출 시
+	 * 채우고, GatherColliders가 풀과 같은 순서로 Gather.ColliderSourceActors에 흘려보낸다. 서브시스템이
+	 * 이걸로 "이 콜라이더가 로프 소유 액터의 몸인가"를 바디 단위로 판정한다 — 이 provider는 월드를
+	 * 훑으므로 로프 소유 액터에 붙은 셰이프(테더 프록시 등)도 함께 잡히고, provider 단위 소유자 제외
+	 * 면제만으로는 그것이 제 로프를 미는 것을 막지 못한다.
+	 */
+	TArray<const AActor*> BoxSourceActors;
+	TArray<const AActor*> CapSourceActors;
+	TArray<const AActor*> CvxSourceActors;
+
+	/**
 	 * 추출 그룹: 컴포넌트(또는 ISM 호출) 1회가 추가한 콜라이더의 타입별 로컬 인덱스 range + 유니언 bounds.
 	 * gather의 region 오버랩이 이미 아는 "이 바디가 어느 로프 근처인가"를 그룹 단위로 보존해,
 	 * 서브시스템의 로프별 풀 전체 재-컬(O(로프×풀))을 "그룹 유니언 선-거절 → 히트 그룹만 콜라이더별
@@ -85,9 +96,10 @@ private:
 
 	/**
 	 * 스냅샷(각 Start) 이후 Boxes/Capsules/Convexes에 추가된 분량을 유니언 bounds와 함께 그룹으로 기록.
-	 * 아무것도 추가되지 않았으면 무시.
+	 * 아무것도 추가되지 않았으면 무시. SourceActor는 그 셰이프를 소유한 컴포넌트의 owner(바디 단위
+	 * 소유자 제외용) — 모르면 nullptr.
 	 */
-	void RecordExtractedGroup(int32 BoxStart, int32 CapStart, int32 CvxStart);
+	void RecordExtractedGroup(int32 BoxStart, int32 CapStart, int32 CvxStart, const AActor* SourceActor);
 
 	/**
 	 * 마지막으로 빌드한 GFrameCounter. 같은 프레임에 여러 로프가 호출해도 재빌드 안 함(디둡).

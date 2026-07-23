@@ -54,6 +54,9 @@ void URopeStaticBodyProvider::GatherColliders(FRopeColliderGatherContext& Gather
 		BoxWorldBounds.Reset();
 		CapWorldBounds.Reset();
 		CvxWorldBounds.Reset();
+		BoxSourceActors.Reset();
+		CapSourceActors.Reset();
+		CvxSourceActors.Reset();
 		BuildColliders(Gather);
 	}
 
@@ -71,6 +74,16 @@ void URopeStaticBodyProvider::GatherColliders(FRopeColliderGatherContext& Gather
 	{
 		Gather.Colliders.Add(&Convex);
 	}
+
+	// 콜라이더별 출처 액터를 풀과 같은 순서(boxes → capsules → convexes)로 흘려보낸다 — 서브시스템이
+	// 소유자 제외를 provider가 아니라 바디 단위로 판정하는 근거다. 앞선 append분(PoolBase)은 이 provider
+	// 소관이 아니므로 nullptr로 자리만 채워 배열을 풀과 평행하게 유지한다.
+	Gather.ColliderSourceActors.Reset();
+	Gather.ColliderSourceActors.SetNumZeroed(PoolBase);
+	Gather.ColliderSourceActors.Reserve(Gather.Colliders.Num());
+	Gather.ColliderSourceActors.Append(BoxSourceActors);
+	Gather.ColliderSourceActors.Append(CapSourceActors);
+	Gather.ColliderSourceActors.Append(CvxSourceActors);
 
 	// region 매핑: 추출 그룹(=오버랩이 이미 판정한 컴포넌트 단위) 유니언 선-거절 → 히트한 그룹만
 	// 콜라이더별 bounds로 정밀 배정. 풀 순서는 위 append와 동일(boxes → capsules → convexes)이라
@@ -118,7 +131,8 @@ void URopeStaticBodyProvider::GatherColliders(FRopeColliderGatherContext& Gather
 	}
 }
 
-void URopeStaticBodyProvider::RecordExtractedGroup(int32 BoxStart, int32 CapStart, int32 CvxStart)
+void URopeStaticBodyProvider::RecordExtractedGroup(int32 BoxStart, int32 CapStart, int32 CvxStart,
+	const AActor* SourceActor)
 {
 	FExtractedGroup Group;
 	Group.BoxStart = BoxStart;
@@ -133,25 +147,32 @@ void URopeStaticBodyProvider::RecordExtractedGroup(int32 BoxStart, int32 CapStar
 	}
 	// 월드 AABB를 collider당 1회 계산해 Group.Bounds와 캐시에 함께 넣는다 — 아래 GatherColliders의 region
 	// 매핑이 collider×region마다 GetWorldBounds를 재계산하지 않게 한다(#10). 캐시는 collider 배열과 평행.
+	// 출처 액터도 같은 루프에서 collider별로 채운다(배열은 collider 배열과 평행).
 	BoxWorldBounds.SetNum(Boxes.Num());
+	BoxSourceActors.SetNumZeroed(Boxes.Num());
 	for (int32 i = Group.BoxStart; i < Group.BoxStart + Group.BoxCount; ++i)
 	{
 		const FBox WB = Boxes[i].GetWorldBounds();
 		BoxWorldBounds[i] = WB;
+		BoxSourceActors[i] = SourceActor;
 		Group.Bounds += WB;
 	}
 	CapWorldBounds.SetNum(Capsules.Num());
+	CapSourceActors.SetNumZeroed(Capsules.Num());
 	for (int32 i = Group.CapStart; i < Group.CapStart + Group.CapCount; ++i)
 	{
 		const FBox WB = Capsules[i].GetWorldBounds();
 		CapWorldBounds[i] = WB;
+		CapSourceActors[i] = SourceActor;
 		Group.Bounds += WB;
 	}
 	CvxWorldBounds.SetNum(Convexes.Num());
+	CvxSourceActors.SetNumZeroed(Convexes.Num());
 	for (int32 i = Group.CvxStart; i < Group.CvxStart + Group.CvxCount; ++i)
 	{
 		const FBox WB = Convexes[i].GetWorldBounds();
 		CvxWorldBounds[i] = WB;
+		CvxSourceActors[i] = SourceActor;
 		Group.Bounds += WB;
 	}
 	Groups.Add(Group);
@@ -242,7 +263,7 @@ void URopeStaticBodyProvider::BuildColliders(const FRopeColliderGatherContext& G
 				// 추가된 만큼은 기록해 매핑에서 빠지지 않게 한다).
 				const int32 BoxStart = Boxes.Num(), CapStart = Capsules.Num(), CvxStart = Convexes.Num();
 				const bool bWithinBudget = AppendInstancedBodyColliders(*ISM, Region, SeenInstances.FindOrAdd(ISM), MaxColliders, MaxConvexPlanes);
-				RecordExtractedGroup(BoxStart, CapStart, CvxStart);
+				RecordExtractedGroup(BoxStart, CapStart, CvxStart, ISM->GetOwner());
 				if (!bWithinBudget)
 				{
 					bBudgetClipped = true;
@@ -277,7 +298,7 @@ void URopeStaticBodyProvider::BuildColliders(const FRopeColliderGatherContext& G
 				// 서브시스템 재-컬 없이 로프별 배정에 쓴다(겹치는 region은 매핑 단계에서 양쪽에 배정).
 				const int32 BoxStart = Boxes.Num(), CapStart = Capsules.Num(), CvxStart = Convexes.Num();
 				const bool bWithinBudget = AppendBodyColliders(*Setup, CompTM, PrevTM, CompInvDt, MaxColliders, MaxConvexPlanes);
-				RecordExtractedGroup(BoxStart, CapStart, CvxStart);
+				RecordExtractedGroup(BoxStart, CapStart, CvxStart, Prim->GetOwner());
 				if (!bWithinBudget)
 				{
 					bBudgetClipped = true;

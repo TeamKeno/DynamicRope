@@ -207,6 +207,14 @@ private:
 		TArray<IRopeCollider*> Colliders;
 
 		/**
+		 * Colliders와 평행한 콜라이더별 출처 액터. provider가 Gather.ColliderSourceActors를 채웠고 길이가
+		 * 맞을 때만 담긴다(그 외에는 빈 배열 = provider 단위 판정). 로프별 소유자 제외를 provider가 아니라
+		 * 바디 단위로 판정하는 데 쓴다 — 정적 바디 provider는 월드를 훑으면서 로프 소유 액터에 붙은
+		 * 셰이프까지 잡으므로, provider 단위 면제만으로는 그것이 제 로프를 미는 것을 못 막는다.
+		 */
+		TArray<const AActor*> SourceActors;
+
+		/**
 		 * provider가 gather 때 함께 돌려준 region(=로프 인덱스)별 풀 인덱스 매핑. bHasRegionMapping이면
 		 * 로프별 배정이 이 리스트 소비로 끝난다 — O(로프×풀) bounds 재-컬 제거(2026-07 수집 방식 변경).
 		 */

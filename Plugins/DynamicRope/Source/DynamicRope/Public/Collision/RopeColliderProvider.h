@@ -16,6 +16,8 @@
 #include "Collision/RopeCollider.h"
 #include "RopeColliderProvider.generated.h"
 
+class AActor;
+
 /**
  * 프레임당 1회의 collider 수집 입출력 묶음. 서브시스템(BuildFrameColliders)이 provider마다 하나씩 만들어
  * 넘기고, provider는 풀(Colliders)과 — 가능하면 — region별 인덱스 매핑을 채운다.
@@ -62,6 +64,17 @@ struct FRopeColliderGatherContext
 	 * 매핑을 만들 수 없는 provider의 합법적 폴백 경로.
 	 */
 	bool bHasRegionMapping = false;
+
+	/**
+	 * 출력(선택): Colliders와 **평행한** 콜라이더별 출처 액터 — 그 셰이프를 소유한 컴포넌트의 owner.
+	 * 채우면 서브시스템의 "자기 owner 제외"가 provider 단위가 아니라 **콜라이더(=바디) 단위**로
+	 * 판정된다. 월드 지오메트리를 서빙하면서 로프 소유 액터에 붙은 셰이프까지 함께 긁을 수 있는
+	 * provider(정적 바디)에 필요하다 — provider 단위로 면제하면 그런 셰이프가 제 로프를 미는 push-out
+	 * 콜라이더가 되기 때문이다(ProvidesWorldStaticColliders 주석 참조).
+	 * 길이가 Colliders와 다르면 신뢰하지 않고 provider 단위 판정으로 폴백한다. 출처를 모르는 자리는
+	 * nullptr로 둘 것. 수명은 collider 포인터와 같다(해당 프레임).
+	 */
+	TArray<const AActor*> ColliderSourceActors;
 };
 
 UINTERFACE(MinimalAPI)
@@ -92,6 +105,12 @@ public:
 	 * 이 provider가 정적 월드 지오메트리 collider를 공급하는지(예: URopeStaticBodyProvider). true면
 	 * 서브시스템의 로프별 "자기 owner provider 제외"에서 면제된다 — 정적 월드는 "던진 본인의 몸"이
 	 * 될 수 없는데, 로프 소유 액터에 붙였다는 이유만으로 월드 충돌이 조용히 사라지는 것을 막는다.
+	 *
+	 * 주의: 이 면제는 provider 단위라 그 자체로는 너무 넓다. 이런 provider는 월드를 훑으면서 로프 소유
+	 * 액터에 붙은 셰이프(테더 프록시·팁 메쉬·든 무기 등)도 같이 긁을 수 있고, 그것이 그대로 제 로프를
+	 * 미는 push-out 콜라이더가 된다. 그래서 Gather.ColliderSourceActors로 콜라이더별 출처를 함께
+	 * 돌려줘야 서브시스템이 바디 단위로 소유자를 걸러낼 수 있다(월드 지오메트리는 출처가 다른 액터라
+	 * 그대로 남는다).
 	 */
 	virtual bool ProvidesWorldStaticColliders() const { return false; }
 };

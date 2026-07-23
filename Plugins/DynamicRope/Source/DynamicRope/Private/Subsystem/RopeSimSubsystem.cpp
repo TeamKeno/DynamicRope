@@ -504,6 +504,12 @@ void URopeSimSubsystem::BuildFrameColliders()
 		// 정적 월드 provider는 소유자 제외 면제.
 		FP.bWorldStatic = Provider->ProvidesWorldStaticColliders();
 		FP.Colliders = MoveTemp(Gather.Colliders);
+		// 콜라이더별 출처 액터도 길이가 맞을 때만 신뢰한다 — 어긋나면 인덱스가 엉켜 엉뚱한 콜라이더를
+		// 제외하게 되므로, 빈 채로 두고 provider 단위 판정으로 폴백한다.
+		if (Gather.ColliderSourceActors.Num() == FP.Colliders.Num())
+		{
+			FP.SourceActors = MoveTemp(Gather.ColliderSourceActors);
+		}
 		// region 매핑은 길이가 로프 수와 일치할 때만 신뢰(불일치 = provider 버그 → bounds 재-컬 폴백으로 강등).
 		FP.bHasRegionMapping = Gather.bHasRegionMapping
 			&& Gather.RegionColliderIndices.Num() == FrameRopeRegions.Num();
@@ -550,10 +556,23 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 	// 정적 월드 후보는 따로 모아 예산 초과 시 "가장 먼 것"부터 버린다(스켈레톤은 위에서 이미 무조건 포함).
 	TArray<IRopeCollider*> WorldStaticCandidates;
 
+	// 콜라이더(=바디) 단위 소유자 제외. 정적 월드 provider는 아래에서 provider 단위 제외를 면제받는데,
+	// 그 면제가 노리는 것은 "바닥/기둥 같은 월드 지오메트리"뿐이다. 같은 provider가 월드를 훑다가 로프
+	// 소유 액터에 붙은 셰이프(테더 프록시·팁 메쉬·든 무기 등)까지 잡으면, 그것은 로프를 따라다니며 제
+	// 로프를 미는 push-out 콜라이더가 된다 — 출처 액터로 그런 것만 골라 뺀다. 출처를 안 주는 provider는
+	// 빈 배열이라 항상 false(= 기존 provider 단위 판정 그대로).
+	auto IsOwnBodyCollider = [OwnerToExclude](const FFrameProviderColliders& P, int32 Index)
+	{
+		return OwnerToExclude != nullptr
+			&& P.SourceActors.IsValidIndex(Index)
+			&& P.SourceActors[Index] == OwnerToExclude;
+	};
+
 	for (const FFrameProviderColliders& FP : FrameProviders)
 	{
 		// 자기 owner provider 제외 — 단 정적 월드 provider는 면제(정적 월드는 "던진 본인의 몸"이 아니므로,
-		// 로프 소유 액터에 붙였다는 이유로 월드 충돌이 사라지면 안 된다).
+		// 로프 소유 액터에 붙였다는 이유로 월드 충돌이 사라지면 안 된다). 면제분에 섞인 자기 몸 셰이프는
+		// 위 IsOwnBodyCollider가 콜라이더 단위로 걸러낸다.
 		if (!FP.bWorldStatic && FP.Owner == OwnerToExclude && OwnerToExclude != nullptr)
 		{
 			continue;
@@ -561,7 +580,13 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 		if (!bCull)
 		{
 			// region 없는 로프(빈 sim 등) → 전체 폴백(예산 우회, 드묾 — 기존 동작 유지).
-			OutColliders.Append(FP.Colliders);
+			for (int32 c = 0; c < FP.Colliders.Num(); ++c)
+			{
+				if (FP.Colliders[c] && !IsOwnBodyCollider(FP, c))
+				{
+					OutColliders.Add(FP.Colliders[c]);
+				}
+			}
 			continue;
 		}
 
@@ -576,7 +601,7 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 			for (const int32 Idx : FP.RegionIndices[RegionIndex])
 			{
 				IRopeCollider* Collider = FP.Colliders.IsValidIndex(Idx) ? FP.Colliders[Idx] : nullptr;
-				if (!Collider)
+				if (!Collider || IsOwnBodyCollider(FP, Idx))
 				{
 					continue;
 				}
@@ -598,11 +623,21 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 		if (FP.Bounds.Num() != FP.Colliders.Num())
 		{
 			// bounds 캐시 불일치 → 전체 폴백(드묾).
-			OutColliders.Append(FP.Colliders);
+			for (int32 c = 0; c < FP.Colliders.Num(); ++c)
+			{
+				if (FP.Colliders[c] && !IsOwnBodyCollider(FP, c))
+				{
+					OutColliders.Add(FP.Colliders[c]);
+				}
+			}
 			continue;
 		}
 		for (int32 c = 0; c < FP.Colliders.Num(); ++c)
 		{
+			if (IsOwnBodyCollider(FP, c))
+			{
+				continue;
+			}
 			if (FP.Colliders[c] && FP.Bounds[c].IsValid && FP.Bounds[c].Intersect(RopeBounds))
 			{
 				if (FP.bWorldStatic)
