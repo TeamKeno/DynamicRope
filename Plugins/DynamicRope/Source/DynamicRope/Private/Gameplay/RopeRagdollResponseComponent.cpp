@@ -217,6 +217,7 @@ void URopeRagdollResponseComponent::EnterRagdoll()
 	}
 
 	Mesh->SetCollisionProfileName(RagdollCollisionProfileName);
+	ApplyRagdollOverlapEvents(Mesh);
 	Mesh->SetSimulatePhysics(true);
 
 	bRagdolled = true;
@@ -273,6 +274,7 @@ void URopeRagdollResponseComponent::EnterPartialRagdoll(FName BoneName)
 
 	// 캡슐/무브먼트는 유지 — 시뮬 안 하는 나머지 본은 애니메이션을 계속 탄다.
 	Mesh->SetCollisionProfileName(RagdollCollisionProfileName);
+	ApplyRagdollOverlapEvents(Mesh);
 	Mesh->SetAllBodiesBelowSimulatePhysics(BodyBone, true, /*bIncludeSelf*/ true);
 	Mesh->SetAllBodiesBelowPhysicsBlendWeight(BodyBone, 1.0f);
 
@@ -314,6 +316,7 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 	Mesh->SetAllBodiesPhysicsBlendWeight(0.0f);
 	Mesh->SetSimulatePhysics(false);
 	Mesh->SetCollisionProfileName(SavedCollisionProfile);
+	Mesh->SetGenerateOverlapEvents(bSavedMeshOverlapEvents);
 
 	if (!bPartial)
 	{
@@ -367,9 +370,21 @@ USkeletalMeshComponent* URopeRagdollResponseComponent::ResolveMesh() const
 	return Owner->FindComponentByClass<USkeletalMeshComponent>();
 }
 
+void URopeRagdollResponseComponent::ApplyRagdollOverlapEvents(USkeletalMeshComponent* Mesh)
+{
+	// 랙돌 중 오버랩 이벤트를 낼 수 있는 컴포넌트가 하나도 없는 상태를 막는다: 풀 랙돌은 캡슐을 끄고,
+	// ACharacter의 메시는 애초에 GenerateOverlapEvents가 꺼져 있다(엔진 기본). 프로파일 전환은 이
+	// 플래그를 건드리지 않으므로 여기서 명시적으로 켠다 — 안 켜면 트리거 볼륨이 랙돌을 못 본다.
+	if (bGenerateOverlapEventsWhileRagdolled)
+	{
+		Mesh->SetGenerateOverlapEvents(true);
+	}
+}
+
 void URopeRagdollResponseComponent::SaveRestoreState(USkeletalMeshComponent* Mesh)
 {
 	SavedCollisionProfile = Mesh->GetCollisionProfileName();
+	bSavedMeshOverlapEvents = Mesh->GetGenerateOverlapEvents();
 	SavedMeshRelative = Mesh->GetRelativeTransform();
 	SavedAttachParent = Mesh->GetAttachParent();
 	SavedAttachSocket = Mesh->GetAttachSocketName();

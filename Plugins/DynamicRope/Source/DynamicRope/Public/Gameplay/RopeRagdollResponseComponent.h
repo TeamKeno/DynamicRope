@@ -110,6 +110,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll")
 	FName RagdollCollisionProfileName = TEXT("Ragdoll");
 
+	/**
+	 * 랙돌 동안 메시의 오버랩 이벤트를 켤지. ACharacter는 생성자에서 메시의 GenerateOverlapEvents를
+	 * **끄고**(캡슐이 대표해서 낸다), 풀 랙돌은 그 캡슐마저 끄므로 — 엔진은 양쪽 컴포넌트 모두 이 플래그가
+	 * 켜져 있어야 오버랩을 발생시킨다 — 랙돌 상태의 캐릭터가 트리거 볼륨(압력판/데미지 볼륨 등)에 아예
+	 * 안 잡힌다. 켜 두면 진입 시 켜고 복귀 시 원래 값으로 되돌린다. 끄는 경우: 대상이 트리거와 무관하고
+	 * 바디 수가 많아 매 프레임 바디별 오버랩 질의 비용이 아까울 때.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll")
+	bool bGenerateOverlapEventsWhileRagdolled = true;
+
 	/** 풀 랙돌 전환: 메시 전체 물리 시뮬 + 캡슐 콜리전/무브먼트 정지(ACharacter일 때). */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
 	void EnterRagdoll();
@@ -131,6 +141,9 @@ private:
 
 	/** 전환 직전 원상복구용 상태 저장(프로파일/부착/상대 트랜스폼). */
 	void SaveRestoreState(USkeletalMeshComponent* Mesh);
+
+	/** 랙돌 진입 시 메시의 오버랩 이벤트 반영(bGenerateOverlapEventsWhileRagdolled). 복귀는 저장값으로 되돌린다. */
+	void ApplyRagdollOverlapEvents(USkeletalMeshComponent* Mesh);
 
 	//~ 중앙 신호 핸들러(URopeSimSubsystem).
 	/** 월드 어느 로프든 wrap 성립 시 — Info.Mesh가 내 메시면 (지연 후) 자동 랙돌 예약. */
@@ -163,6 +176,8 @@ private:
 	TWeakObjectPtr<USceneComponent> SavedAttachParent;
 	FName SavedAttachSocket = NAME_None;
 	TEnumAsByte<ECollisionEnabled::Type> SavedCapsuleCollision = ECollisionEnabled::QueryAndPhysics;
+	// 진입 전 메시의 오버랩 이벤트 플래그 — bGenerateOverlapEventsWhileRagdolled로 덮어썼을 수 있어 복귀 때 되돌린다.
+	bool bSavedMeshOverlapEvents = false;
 	// 진입 전 무브먼트 모드 — 복귀 때 그대로 되돌린다(종전에는 MOVE_Walking 하드코딩이라 Flying/Swimming/
 	// Custom으로 랙돌에 들어간 대상이 걸어 나왔다). MOVE_None으로 들어갔던 경우만 Walking으로 구제한다.
 	TEnumAsByte<EMovementMode> SavedMovementMode = MOVE_Walking;
