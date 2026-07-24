@@ -89,6 +89,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
+	/** 시뮬레이션 품질(정밀도/성능). Custom이 아니면 Substeps/Iterations/스윕 샘플링을 스탬프한다
+	 *  (ApplySimQuality — 에디터 편집·InitRope 시). 개별 Advanced 솔버 필드를 직접 만지려면 Custom. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
+	ERopeSimQuality SimQuality = ERopeSimQuality::Medium;
+
 	//~ Tip(팁 부착물 — 창날/작살/추) ----------------------------------------
 	// 밧줄 자유단(GetNodeCount()-1)에 붙는 표시 전용 StaticMesh. 질량·충돌 없음(팁 질량 솔버 반영
 	// 안 함 — 2026-07-14 확정). **결착 모델 무관 공통 기능**이다(2026-07-17): bUseTipMesh 하나로
@@ -269,6 +274,24 @@ public:
 	{
 		return WrapConfig.ContactQueryRadius > 0.0f ? WrapConfig.ContactQueryRadius : Radius * 1.5f;
 	}
+
+	/** 해석된 팽팽 슬랙 허용 비율: HoldConfig.TautSensitivity(0=느슨~1=엄격)의 기하 보간
+	 *  (0→0.09, 0.5→0.03(기존 기본), 1→0.01). RopeComponentTraction.cpp의 chord 게이트가 소비. */
+	float GetEffectiveTautSlackRatio() const
+	{
+		return 0.09f * FMath::Pow(0.01f / 0.09f, FMath::Clamp(HoldConfig.TautSensitivity, 0.0f, 1.0f));
+	}
+
+	/** 해석된 팽팽 최대 허용 처짐(cm): HoldConfig.TautSensitivity의 기하 보간
+	 *  (0→80, 0.5→20(기존 기본), 1→5). RopeComponentTraction.cpp의 sag 게이트가 소비. */
+	float GetEffectiveTautMaxSag() const
+	{
+		return 80.0f * FMath::Pow(5.0f / 80.0f, FMath::Clamp(HoldConfig.TautSensitivity, 0.0f, 1.0f));
+	}
+
+	/** SimQuality != Custom이면 품질 프리셋 값을 SolverConfig/DetectConfig/WrapConfig에 스탬프한다.
+	 *  에디터 SimQuality 변경(PostEditChangeProperty)과 InitRope에서 호출. Custom이면 no-op. */
+	void ApplySimQuality();
 
 	//~ Whip(던지기 스윙 설정) ----------------------------------------------
 	/** 던지기 초반 채찍 스윙 튜닝. 런타임 상태는 WhipGuide가 소유하고, 호출 시

@@ -672,6 +672,11 @@ void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 		// PIE 중 토글 시 현재 팁에 즉시 반영(팁이 없으면 no-op — 다음 확보 때 적용된다).
 		ApplyTipMeshCollision();
 	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(URopeComponent, SimQuality))
+	{
+		// 품질 프리셋을 개별 솔버/감지 필드에 즉시 스탬프(Custom이면 no-op).
+		ApplySimQuality();
+	}
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
@@ -774,8 +779,41 @@ void URopeComponent::ResetTransientPhaseState(bool bPreservePhysicalTether)
 
 // ===== 초기화/유틸 ===========================================================
 
+void URopeComponent::ApplySimQuality()
+{
+	// SimQuality 프리셋을 솔버/감지/랩 샘플링에 스탬프한다. Custom이면 개별 필드 값을 그대로 둔다.
+	// Medium = 기존 기본값과 동일(무변화). 에디터 SimQuality 변경과 InitRope에서 호출된다.
+	switch (SimQuality)
+	{
+	case ERopeSimQuality::Low:
+		SolverConfig.Substeps = 6;  SolverConfig.Iterations = 2;
+		SolverConfig.SweepStep = 4.0f;  SolverConfig.MaxSweepSamples = 8;
+		DetectConfig.ContactSweepStep = 4.0f;  DetectConfig.ContactMaxSweepSamples = 8;
+		WrapConfig.WrappingPathBuildStepsPerFrame = 4;
+		break;
+	case ERopeSimQuality::High:
+		SolverConfig.Substeps = 16; SolverConfig.Iterations = 6;
+		SolverConfig.SweepStep = 1.5f;  SolverConfig.MaxSweepSamples = 24;
+		DetectConfig.ContactSweepStep = 1.5f;  DetectConfig.ContactMaxSweepSamples = 32;
+		WrapConfig.WrappingPathBuildStepsPerFrame = 12;
+		break;
+	case ERopeSimQuality::Medium:
+		SolverConfig.Substeps = 12; SolverConfig.Iterations = 4;
+		SolverConfig.SweepStep = 2.0f;  SolverConfig.MaxSweepSamples = 16;
+		DetectConfig.ContactSweepStep = 2.0f;  DetectConfig.ContactMaxSweepSamples = 16;
+		WrapConfig.WrappingPathBuildStepsPerFrame = 8;
+		break;
+	case ERopeSimQuality::Custom:
+	default:
+		break;
+	}
+}
+
 void URopeComponent::InitRope()
 {
+	// 품질 프리셋을 솔버/감지 샘플링에 반영한다(Custom이면 no-op). BP/런타임 경로에서도 적용되도록 여기서.
+	ApplySimQuality();
+
 	// GPU 솔버 상한(스레드그룹 = MaxNodes)을 넘으면 조용히 CPU 솔브+튜브 폴백이 되어 성능 절벽이 된다.
 	// 에디터 ClampMax와 별개로 BP/코드 경로도 하드 클램프한다 — 값을 써 넣어 프록시 NumNodes(= NumParticles)와
 	// Sim 크기가 일치하도록(불일치 시 BuildTube가 스킵된다). 초과 시 1회 경고.

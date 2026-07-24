@@ -27,6 +27,20 @@ enum class ERopeWrappingAxisSource : uint8
 	CaptureTravelPlane = 1 UMETA(DisplayName = "Capture Travel Plane")
 };
 
+/**
+ * 시뮬레이션 품질 프리셋 — 정밀도/성능 균형을 한 값으로 고른다. Custom이 아니면 컴포넌트가
+ * Substeps/Iterations/스윕 샘플링을 스탬프한다(URopeComponent::ApplySimQuality). 개별 Advanced
+ * 솔버 필드를 직접 조정하려면 Custom으로 둔다. Medium = 기존 기본값과 동일(무변화).
+ */
+UENUM(BlueprintType)
+enum class ERopeSimQuality : uint8
+{
+	Low = 0 UMETA(DisplayName = "Low"),
+	Medium = 1 UMETA(DisplayName = "Medium"),
+	High = 2 UMETA(DisplayName = "High"),
+	Custom = 3 UMETA(DisplayName = "Custom")
+};
+
 /** XPBD solver 튜닝(디자이너용). */
 USTRUCT(BlueprintType)
 struct FRopeSolverConfig
@@ -265,7 +279,7 @@ struct FRopeWrapConfig
 	 * SurfaceVectorField path point가 latch bone 하나에 고정되지 않고 graph 후보 본으로 넘어갈지 여부.
 	 * false면 후보 graph depth/cost가 0이 되어 현재 본만 평가하므로 기존 단일 본 동작에 가깝게 돌아간다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Advanced|MultiBone")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone")
 	bool bEnableMultiBoneWrapping = true;
 
 	// NOTE: 아래 멀티본 투영 스코어링 세부(깊이/비용/가중치/보너스/히스테리시스 12종)는 실측 튜닝이
@@ -445,11 +459,11 @@ struct FRopeHoldConfig
 	 * GetConstraintTension/MaxTetherTension과 같은 단위이며 XPBD SegmentTension과 혼용하지 않는다.
 	 * (자동 release는 도달 모드 ①②에서만 유효 — ③ Guaranteed는 명시 해제만.)
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced|Release", meta = (ClampMin = "0.0"))
 	float TensionReleaseForce = 0.0f;
 
 	/** 장력 release 판정의 지속 시간(초). 순간 스파이크(충격 프레임)로 풀리는 것을 막는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced|Release", meta = (ClampMin = "0.0", Units = "s"))
 	float TensionReleaseTime = 0.05f;
 
 	/**
@@ -509,7 +523,7 @@ struct FRopeHoldConfig
 	 * "테더가 버티다가 이 한계를 넘으면 놓친다"가 된다 — 테더가 충분히 강하면 초과분이 안 쌓여
 	 * 발동하지 않고, 테더 없이 쓰면 순수 거리 제한으로 동작한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "0.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced|Release", meta = (ClampMin = "0.0", Units = "cm"))
 	float DistanceReleaseSlack = 0.0f;
 
 	/**
@@ -567,68 +581,23 @@ struct FRopeHoldConfig
 	float ActivePullTautTension = 0.0f;
 
 	/**
-	 * 팽팽 판정 히스테리시스 비율 [0..1]. 일단 팽팽으로 판정되면 장력이 ActivePullTautTension×이 값 아래로
-	 * 떨어져야 팽팽 해제된다(진입/유지 임계 분리 — 임계 경계의 장력 지터로 게이트가 퍼덕이는 것을 방지).
-	 * 1 = 히스테리시스 없음(진입=유지). ActivePullTautTension이 0이면 무의미.
+	 * 전 체인 팽팽(taut) 판정 민감도 [0..1] — 0=느슨(적은 팽팽함에도 견인 시작), 1=엄격(더 확실히 펴져야
+	 * 견인). 슬랙 허용 비율과 최대 허용 처짐(cm)을 한 값으로 함께 스케일한다(URopeComponent의
+	 * GetEffectiveTautSlackRatio / GetEffectiveTautMaxSag — 기하 보간). 0.5(기본) = 기존 튜닝
+	 * (슬랙 3%, 처짐 20cm). 0 → 슬랙 9%·처짐 80cm, 1 → 슬랙 1%·처짐 5cm. 판정 히스테리시스·해제 유예는
+	 * 실측 튜닝이 끝난 내부 상수다(RopeComponentTraction.cpp). "시각적으로 펴졌을 때만 끌린다"의 단일 손잡이.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float ActivePullTautReleaseRatio = 0.5f;
-
-	/**
-	 * 전 체인 팽팽 판정의 슬랙 허용 비율 [0..1]. 앵커→손 코너-다리 chord 합이 자유 구간 rest 길이 ×
-	 * (1 − 이 값) 이상이어야 로프 전체가 팽팽한 것으로 보고, **팽팽할 때만 견인(테더 + 능동 Pull)이
-	 * 인가된다**. 앵커 인접 국소 관측치(세그먼트 장력/sub-leg overshoot)는 움직이는 대상이 슬랙 로프에서도
-	 * 만들어내므로(핀 노드가 이웃을 순간 스트레치 — 공중 Pierce/움직이는 정적 메시에서 늘어진 줄이 끌려가던
-	 * 증상) 그것만으론 게이트가 못 된다. 코너에 걸린 팽팽한 로프는 다리별 chord가 rest에 근접해 팽팽으로
-	 * 인정된다(벽 코너 시나리오 보존). 비율이라 로프 길이/되감기(SegmentLength 축소)에 자동 스케일.
-	 * 0 = 게이트 없음(종전 동작 — 국소 관측치만으로 판정).
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float TautSlackRatio = 0.03f;
-
-	/**
-	 * 전 체인 팽팽 판정 히스테리시스 배율(≥ 1). 일단 팽팽으로 판정되면 슬랙 비율이 TautSlackRatio × 이 값을
-	 * 넘어야 해제된다(진입/유지 임계 분리 — 경계의 chord 지터로 게이트가 켜졌다 꺼졌다 퍼덕이는 것을 방지).
-	 * 1 = 히스테리시스 없음(진입=유지). TautSlackRatio가 0이면 무의미.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "1.0"))
-	float TautSlackReleaseScale = 2.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Taut Sensitivity"))
+	float TautSensitivity = 0.5f;
 
 	/**
 	 * Legacy particle-chord analytic fallback의 오염 방지 임계. Wielder/live material geometry가 없는
 	 * 경로에서만 자유 구간 XPBD SegmentTension 최솟값을 검사해 부분 스트레치 정귀환을 차단한다.
-	 * 정상 Pawn hard-constraint/Chaos 경로의 taut·장력에는 참여하지 않는다.
+	 * 정상 Pawn hard-constraint/Chaos 경로의 taut·장력에는 참여하지 않는다. 0(기본) = 끔. 판정
+	 * 히스테리시스는 내부 상수(RopeComponentTraction.cpp).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "0.0"))
 	float TautMinTension = 0.0f;
-
-	/**
-	 * 최소 전달 장력 판정의 히스테리시스 비율 [0..1] — ActivePullTautReleaseRatio와 같은 방식(일단 팽팽이면
-	 * TautMinTension×이 값 아래로 떨어져야 해제). TautMinTension이 0이면 무의미. 1 = 히스테리시스 없음.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float TautMinTensionReleaseRatio = 0.5f;
-
-	/**
-	 * 전 체인 팽팽 판정의 최대 허용 처짐(cm). 코너-다리 내부 노드가 다리 chord 직선에서 이보다 멀리
-	 * 처지면(MaxLegSag 초과) 팽팽이 아니다 — "시각적으로 펴졌을 때만 끌린다"의 정본 손잡이. chord 비율
-	 * (TautSlackRatio)은 처짐의 제곱에만 반응해 눈에 띄는 처짐(600cm 로프에서 ~45cm)도 통과시키지만,
-	 * 이 값은 처짐 cm를 직접 잰다. 절대값(cm)인 이유: 허용 처짐은 "로프가 얼마나 늘어졌나"가 아니라
-	 * "화면에서 얼마나 휘어 보이나"의 문제라 로프 길이와 무관하다. 히스테리시스는 TautSlackReleaseScale
-	 * 공용(일단 팽팽이면 이 값×스케일까지 유지). 0 = 비활성(chord 비율/최소 장력만 판정).
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "0.0", Units = "cm"))
-	float TautMaxSag = 20.0f;
-
-	/**
-	 * 전 체인 팽팽 판정의 해제 유예(초). 팽팽 조건이 깨진 뒤에도 이 시간 동안은 래치를 유지한다(진입은 즉시).
-	 * 3중 게이트 중 최소 전달 장력 관측치(SegmentTension)는 임계 0(기본)에서 진입/유지 임계가 같아
-	 * 히스테리시스가 소멸하고, GPU 로프에선 1~2프레임 지연 미러라 경계 상태에서 taut↔slack이 프레임 단위로
-	 * 퍼덕인다 — 그때마다 "한 프레임 전량 속도 삭감 ↔ 자유"가 교대해 wielder가 들썩이므로, 시간 래치로
-	 * 그 채터링을 끊는다. 슬랙 오판(가짜 C)의 노출 시간도 이 값으로 유계다. 0 = 유예 없음(즉시 해제).
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Advanced", meta = (ClampMin = "0.0", Units = "s"))
-	float TautReleaseGraceTime = 0.1f;
 
 	/**
 	 * 비신축(TetherCompliance=0) 제약에서 초과분 C의 위치 회수 시상수(초).

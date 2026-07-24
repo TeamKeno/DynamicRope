@@ -17,6 +17,16 @@
 #include "RopeMathHelpers.h"
 #include "Templates/Function.h"
 
+namespace
+{
+	// C1: taut 판정 히스테리시스·해제 유예는 실측 튜닝이 끝난 내부 상수다(단일 TautSensitivity로 통합하며
+	// 디자이너 노출에서 제거). 값을 조정하려면 여기서.
+	constexpr float TautSlackReleaseScaleConst = 2.0f;       // 슬랙/처짐 게이트 유지 배율(≥1, 진입/해제 임계 분리)
+	constexpr float TautReleaseGraceTimeConst = 0.1f;        // bChainTaut 해제 유예(초)
+	constexpr float ActivePullTautReleaseRatioConst = 0.5f;  // 능동 Pull load 임계 히스테리시스 [0..1]
+	constexpr float TautMinTensionReleaseRatioConst = 0.5f;  // 최소 전달 장력 히스테리시스 [0..1]
+}
+
 #pragma region Tension_Query
 
 float URopeComponent::GetSegmentTension(int32 SegmentIndex) const
@@ -61,15 +71,18 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 
 	// Legacy/self-wrap fallback still uses sag + chord geometry. SegmentTension is deliberately
 	// excluded from gameplay taut; it remains only as a legacy analytic-path contamination guard.
-	const float SagLimit = HoldConfig.TautMaxSag
-		* (PullDrive.bChainTaut ? FMath::Max(HoldConfig.TautSlackReleaseScale, 1.0f) : 1.0f);
+	// 슬랙 비율·처짐 상한은 단일 TautSensitivity에서 해석한다(GetEffectiveTaut*), 히스테리시스는 내부 상수.
+	const float EffectiveTautMaxSag = GetEffectiveTautMaxSag();
+	const float EffectiveTautSlackRatio = GetEffectiveTautSlackRatio();
+	const float SagLimit = EffectiveTautMaxSag
+		* (PullDrive.bChainTaut ? TautSlackReleaseScaleConst : 1.0f);
 	const bool bLegacyGeometryTaut =
-		(HoldConfig.TautMaxSag <= 0.0f || PullDrive.LastPullSample.MaxLegSag <= SagLimit)
-		&& (HoldConfig.TautSlackRatio <= 0.0f || RopeTraction::EvaluateChainTautGate(
+		(EffectiveTautMaxSag <= 0.0f || PullDrive.LastPullSample.MaxLegSag <= SagLimit)
+		&& (EffectiveTautSlackRatio <= 0.0f || RopeTraction::EvaluateChainTautGate(
 			PullDrive.LastPullSample.TautChordLen,
 			PullDrive.LastPullSample.FreeRestLen,
-			HoldConfig.TautSlackRatio,
-			HoldConfig.TautSlackReleaseScale,
+			EffectiveTautSlackRatio,
+			TautSlackReleaseScaleConst,
 			PullDrive.bChainTaut));
 	const bool bRawChainTaut = PullDrive.LastPullSample.bValid
 		&& (bHasLiveConstraint ? bLiveBoundaryTaut : bLegacyGeometryTaut);
@@ -80,7 +93,7 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	if (bRawChainTaut)
 	{
 		PullDrive.bChainTaut = true;
-		PullDrive.TautGraceRemaining = HoldConfig.TautReleaseGraceTime;
+		PullDrive.TautGraceRemaining = TautReleaseGraceTimeConst;
 	}
 	else if (!PullDrive.LastPullSample.bValid)
 	{
@@ -156,7 +169,7 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 		PullDrive.bPullTaut = PullDrive.bChainTaut && RopeTraction::EvaluateTautGate(
 			GetConstraintTension(),
 			HoldConfig.ActivePullTautTension,
-			HoldConfig.ActivePullTautReleaseRatio,
+			ActivePullTautReleaseRatioConst,
 			PullDrive.bPullTaut);
 	}
 
@@ -819,7 +832,7 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 	const bool bLegacyPathLoaded = bHasPullSample && RopeTraction::EvaluateTautGate(
 		PullDrive.LastPullSample.MinFreeTension,
 		HoldConfig.TautMinTension,
-		HoldConfig.TautMinTensionReleaseRatio,
+		TautMinTensionReleaseRatioConst,
 		PullDrive.bChainTaut);
 	if (!bHasLiveConstraint && !bHardWielderAttempt &&
 		(!PullDrive.bChainTaut || !bLegacyPathLoaded))
