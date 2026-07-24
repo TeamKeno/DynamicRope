@@ -673,7 +673,10 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 	GroupMemoryBarrierWithGroupSync();
 
 	const float Dt2     = P.FixedDt * P.FixedDt;
-	const float Damp    = 1.0f - clamp(P.Damping, 0.0f, 1.0f);
+	// Damping = "60fps 기준 *프레임*당 속도 감소 비율". substep마다 그대로 곱하면 감쇠가 substep 수에 비례해
+	// 쌓여 유효 항력이 수십 배가 된다(종단속도 급락 = 리본처럼 뜨는 낙하). 지수로 substep 크기에 맞춰 나눈다.
+	// CPU FRopeXPBDSolver::Integrate와 동일 식(파리티).
+	const float Damp    = pow(1.0f - clamp(P.Damping, 0.0f, 1.0f), P.FixedDt * 60.0f);
 	const float Seg     = P.SegmentLength;
 	const float MaxStep = max(Seg * 2.0f, 1.0f);
 	const float MaxStepSq = MaxStep * MaxStep;

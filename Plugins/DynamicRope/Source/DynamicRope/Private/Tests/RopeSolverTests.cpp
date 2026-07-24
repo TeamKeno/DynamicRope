@@ -309,9 +309,11 @@ bool FRopeSolverColliderCandidateTest::RunTest(const FString& Parameters)
 
 	// (1) 먼 decoy collider는 결과에 영향이 없어야 한다.
 	{
-		// 감쇠를 조금 줘서 스윙이 멎고 구 위에 안착하게 한다(두 런에 똑같이 적용되니 비교엔 무영향).
+		// 감쇠를 세게 줘서 90프레임 안에 스윙이 멎고 구 위에 안착하게 한다 — 아래 비교는 "로프가 실제로
+		// 구에 걸쳐 있을 때" 의미가 있으므로 연출용 셋업이다(두 런에 똑같이 적용되니 비교엔 무영향).
+		// Damping은 60fps 프레임당 비율이라 0.3 => 초당 잔존율 0.7^60, 즉 즉시 정지에 가깝다.
 		FRopeSolverConfig DrapeConfig = Config;
-		DrapeConfig.Damping = 0.05f;
+		DrapeConfig.Damping = 0.3f;
 		// 양 끝 고정 + 여유 길이(span 160 < rest 220) → 가운데가 구 위로 늘어져 실제 접촉이 생긴다.
 		auto MakeDrapedRope = []() -> FRopeSimState
 		{

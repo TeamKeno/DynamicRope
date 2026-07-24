@@ -115,6 +115,9 @@ struct FRopeSolverConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver")
 	FVector Gravity = FVector(0.0f, 0.0f, -980.0f);
 
+	/** 공기 저항. 단위는 **60fps 기준 프레임당 속도 감소 비율**(substep 수와 무관 — Integrate가 지수로 보정).
+	 *  0.02면 초당 잔존율 0.98^60 ≈ 0.30, 유효 항력 k ≈ 1.2/s → 자유낙하 종단속도 ≈ g/k ≈ 8m/s.
+	 *  올릴수록 종단속도가 낮아지고 운동량이 빨리 죽어 "가벼운 리본"처럼 보인다 — 무게감이 필요하면 낮춘다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Damping = 0.02f;
 

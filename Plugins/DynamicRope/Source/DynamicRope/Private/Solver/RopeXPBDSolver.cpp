@@ -278,7 +278,10 @@ void FRopeXPBDSolver::SolveStrainLimit(FRopeSimState& State, const FRopeSolverCo
 
 void FRopeXPBDSolver::Integrate(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt) const
 {
-	const float Damp = 1.0f - FMath::Clamp(Config.Damping, 0.0f, 1.0f);
+	// Damping = "60fps 기준 *프레임*당 속도 감소 비율". substep마다 그대로 곱하면 감쇠가 substep 수에 비례해
+	// 쌓여(12 substep이면 초당 720회) 유효 항력이 수십 배가 된다 → 종단속도가 1m/s 아래로 내려앉아 로프가
+	// 리본처럼 등속으로 떠내려온다. 지수로 substep 크기에 맞춰 나눠 무게감(가속 램프·운동량)을 보존한다.
+	const float Damp = FMath::Pow(1.0f - FMath::Clamp(Config.Damping, 0.0f, 1.0f), SubDt * 60.0f);
 	const float Dt2 = SubDt * SubDt;
 	// substep당 변위를 제한하여 chain이 절대 발산/explode하지 않도록 한다.
 	const float MaxStep = FMath::Max(State.SegmentLength * 2.0f, 1.0f);
