@@ -135,6 +135,11 @@ struct FRopeWrappingFallbackTestSeam
 	{
 		return Rope.PullDrive.LastPullSample;
 	}
+
+	static void Reel(URopeComponent& Rope, float DeltaTime)
+	{
+		Rope.UpdateReel(DeltaTime);
+	}
 };
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSyntheticLatchAnchorFallbackTest,
@@ -320,6 +325,54 @@ bool FRopeWrappingHardLeashContinuityTest::RunTest(const FString& Parameters)
 	FRopeWielderMovementConstraint ReleasedConstraint;
 	TestFalse(TEXT("release clears the hard leash"),
 		Rope->BuildWielderMovementConstraint(ReleasedConstraint));
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeReelFeasibilityStallTest,
+	"DynamicRope.Component.Reel.WrappedFeasibilityStall",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeReelFeasibilityStallTest::RunTest(const FString& Parameters)
+{
+	// Wrapped 릴-인 실속 게이트: 비신축 로프는 손↔앵커 직선 거리보다 짧아질 수 없다 — 대상이 안
+	// 끌려오는데 계속 감으면 위반이 무한 누적돼 하드 Chaos 리밋이 관절과 싸운다(스네어 바둥거림).
+	USceneComponent* Target = NewObject<USceneComponent>();
+	Target->SetWorldLocation(FVector(20.0f, 0.0f, 0.0f)); // 앵커 월드 = 20 + 60 = (80,0,0)
+
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	FRopeWrappingFallbackTestSeam::ConfigureExternalAnchor(*Rope, Target, ERopePhase::Wrapped);
+	Rope->RopeLength = 60.0f;    // SetRopeLength 클램프 상한을 Sim(60cm)과 일치.
+	Rope->MinRopeLength = 10.0f; // 하한 클램프가 실속 판정을 가리지 않게.
+	Rope->SetReelRate(120.0f);
+	const float Dt = 1.0f / 60.0f;
+
+	// (1) 실속: 손(-10)↔앵커(80) 직선 90cm > 재질 60cm — 더 감기지 않는다.
+	Rope->SetWorldLocation(FVector(-10.0f, 0.0f, 0.0f));
+	FRopeWrappingFallbackTestSeam::Reel(*Rope, Dt);
+	TestTrue(TEXT("reel stalls when the straight span already exceeds material length"),
+		FMath::IsNearlyEqual(Rope->GetCurrentRopeLength(), 60.0f, 0.01f));
+
+	// (2) 정상 견인: 거리 30cm < 60cm — 종전 속도 그대로 감긴다.
+	Rope->SetWorldLocation(FVector(50.0f, 0.0f, 0.0f));
+	FRopeWrappingFallbackTestSeam::Reel(*Rope, Dt);
+	TestTrue(TEXT("reel proceeds at full rate while the span leaves room"),
+		FMath::IsNearlyEqual(Rope->GetCurrentRopeLength(), 60.0f - 120.0f * Dt, 0.01f));
+
+	// (3) 하한 안착: 계속 감으면 거리 − 슬랙(릴 2프레임 스텝)에서 멈춘다 = 유계 당김 바이어스.
+	for (int32 i = 0; i < 60; ++i)
+	{
+		FRopeWrappingFallbackTestSeam::Reel(*Rope, Dt);
+	}
+	const float StallSlack = FMath::Max(120.0f * Dt * 2.0f, 1.0f);
+	TestTrue(TEXT("reel settles at span minus the bounded pull bias"),
+		FMath::IsNearlyEqual(Rope->GetCurrentRopeLength(), 30.0f - StallSlack, 0.1f));
+
+	// (4) 풀기(-)는 게이트 무관 — 종전 그대로 늘어난다.
+	Rope->SetReelRate(-120.0f);
+	FRopeWrappingFallbackTestSeam::Reel(*Rope, Dt);
+	TestTrue(TEXT("reel-out is not gated"),
+		Rope->GetCurrentRopeLength() > 30.0f - StallSlack + 1.0f);
 	return true;
 }
 

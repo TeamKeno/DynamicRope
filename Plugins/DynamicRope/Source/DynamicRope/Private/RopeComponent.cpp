@@ -914,7 +914,27 @@ void URopeComponent::UpdateReel(float DeltaTime)
 	{
 		return;
 	}
-	SetRopeLength(Sim.RopeLength - ReelRate * DeltaTime);
+	float NewLength = Sim.RopeLength - ReelRate * DeltaTime;
+	// 감기(+)의 실현 가능성 실속(stall): 비신축 로프의 재질 길이는 손↔앵커 직선 거리(필요 길이의 하한)보다
+	// 짧아질 수 없다. 대상이 무겁거나 걸려 안 끌려오는데 릴이 계속 감으면 위반 C가 무한 누적되고, 시뮬
+	// 대상의 하드 Chaos 리밋이 매 서브스텝 그 대형 위반을 관절과 싸우며 닫으려 해 랙돌이 요동한다
+	// (스네어 양팔 결박 바둥거림, 2026-07-24). 윈치가 하중에 실속하듯 "대상이 실제로 끌려온 만큼만" 따라
+	// 감는다 — 위반이 릴 프레임 스텝 수준(슬랙)으로 유계가 되어 당김 바이어스는 남고 싸움은 사라진다.
+	// 풀기(-)와 자기 랩/제약 비활성(live 바인딩 없음)은 종전 그대로.
+	if (ReelRate > 0.0f && Phase == ERopePhase::Wrapped)
+	{
+		FRopeWielderMovementConstraint LiveConstraint;
+		if (BuildWielderMovementConstraint(LiveConstraint))
+		{
+			const float RequiredLength = static_cast<float>(
+				FVector::Distance(GetComponentLocation(), LiveConstraint.PivotWorld));
+			// 슬랙 = 릴 2프레임 스텝(최소 1cm): 정상 견인(대상이 릴 속도로 따라오는 중)은 건드리지 않는다.
+			const float StallSlack = FMath::Max(ReelRate * DeltaTime * 2.0f, 1.0f);
+			// 하한은 "더 못 감"이지 "되풀기"가 아니다 — 위반이 이미 커도 길이를 늘리진 않는다(현재 길이 상한).
+			NewLength = FMath::Max(NewLength, FMath::Min(RequiredLength - StallSlack, Sim.RopeLength));
+		}
+	}
+	SetRopeLength(NewLength);
 }
 
 #pragma endregion Rope_Length_Reel_And_LOD
