@@ -48,6 +48,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	int32 GetOccupantCount() const { return OccupantCount; }
 
+	/** 자격 있는 점유 액터 목록(액터 단위, 파괴분 제외) — 눌림 판정과 같은 기준. 덫(스네어)이
+	 *  "판을 밟은 대상"을 조회할 때 쓴다. */
+	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
+	TArray<AActor*> GetQualifyingOccupants() const;
+
 	/** 눌림 상태 변화 브로드캐스트. 문(ARopeDemoDoor)이 여기에 구독한다. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope|Demo")
 	FRopeDemoPlatePressedSignature OnPlatePressedChanged;

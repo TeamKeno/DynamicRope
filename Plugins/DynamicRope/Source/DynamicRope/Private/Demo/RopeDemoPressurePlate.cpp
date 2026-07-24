@@ -142,6 +142,23 @@ void ARopeDemoPressurePlate::HandleEndOverlap(UPrimitiveComponent* /*OverlappedC
 	RefreshPressedState();
 }
 
+TArray<AActor*> ARopeDemoPressurePlate::GetQualifyingOccupants() const
+{
+	// 점유는 액터 단위 합산(OverlapCounts)이라 그대로 훑는다 — 자격 판정은 눌림 계산과 같은
+	// IsQualifyingOccupant를 공유해 "눌렸다는데 목록은 비는" 어긋남이 없다.
+	TArray<AActor*> Occupants;
+	Occupants.Reserve(OverlapCounts.Num());
+	for (const TPair<TWeakObjectPtr<AActor>, int32>& Pair : OverlapCounts)
+	{
+		AActor* Occupant = Pair.Key.Get();
+		if (IsQualifyingOccupant(Occupant))
+		{
+			Occupants.Add(Occupant);
+		}
+	}
+	return Occupants;
+}
+
 bool ARopeDemoPressurePlate::IsQualifyingOccupant(const AActor* OtherActor) const
 {
 	if (!IsValid(OtherActor))

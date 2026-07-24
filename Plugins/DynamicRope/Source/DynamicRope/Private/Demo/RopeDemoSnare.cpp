@@ -90,9 +90,13 @@ void ARopeDemoSnare::BeginPlay()
 
 	if (!TargetActor)
 	{
-		UE_LOG(LogDynamicRope, Warning,
-			TEXT("[%s] demo snare has no TargetActor — set the character/ragdoll to bind or it will never fire."),
-			*GetName());
+		// 판이 있으면 덫 모드(눌림 순간 점유 액터를 잡는다)라 무대상이 정상이다.
+		if (!TriggerPlate)
+		{
+			UE_LOG(LogDynamicRope, Warning,
+				TEXT("[%s] demo snare has no TargetActor and no TriggerPlate — set a target, or wire a plate for trap mode, or it will never fire."),
+				*GetName());
+		}
 	}
 	else if (!ResolveTargetMesh())
 	{
@@ -166,6 +170,20 @@ void ARopeDemoSnare::Tick(float DeltaSeconds)
 		return;
 	}
 
+	//~ 2.5) 자동 놓기: 결박 성립 후 AutoReleaseDelay가 지나면 놓는다(0 = 끔). 판이 계속 눌려 있어도
+	// 재결박하지 않는다 — 재무장은 판의 다음 눌림 에지나 수동 TriggerSnare 몫이다.
+	if (AutoReleaseDelay > 0.0f)
+	{
+		AutoReleaseRemaining -= DeltaSeconds;
+		if (AutoReleaseRemaining <= 0.0f)
+		{
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] snare auto-released after %.1fs."),
+				*GetName(), AutoReleaseDelay);
+			ReleaseSnare();
+			return;
+		}
+	}
+
 	//~ 3) 사지를 벌린다 — 목표 길이까지 릴-인(+슬롯당 능동 Pull). 테더가 본을 앵커 쪽으로 끌어당긴다.
 	for (int32 Index = 0; Index < Ropes.Num(); ++Index)
 	{
@@ -189,6 +207,12 @@ void ARopeDemoSnare::TriggerSnare()
 	if (bTriggered)
 	{
 		return;
+	}
+	// 덫 모드(지정 대상 없음): 수동/BP 발동이어도 판이 이미 눌려 있으면 점유 액터를 잡아본다
+	// (판 경로로 온 호출은 HandleTriggerPlateChanged가 이미 해석해 두어 no-op).
+	if (!TargetActor && !AutoTargetActor.IsValid())
+	{
+		ResolveAutoTargetFromPlate();
 	}
 	bTriggered = true;
 	FireRetryRemaining = 0.0f; // 다음 틱에 곧바로 첫 발사.
@@ -221,6 +245,8 @@ void ARopeDemoSnare::ReleaseSnare()
 	}
 
 	SetSnared(false);
+	// 덫 모드 대상은 결박 생명주기와 같다 — 해제하면 비워 다음 눌림에서 새 대상을 획득한다.
+	AutoTargetActor.Reset();
 }
 
 void ARopeDemoSnare::ToggleSnare()
@@ -295,20 +321,48 @@ bool ARopeDemoSnare::AreAllBoundRopesWrapped() const
 	return ActiveCount > 0 && GetBoundRopeCount() == ActiveCount;
 }
 
+AActor* ARopeDemoSnare::GetEffectiveTargetActor() const
+{
+	return TargetActor ? TargetActor.Get() : AutoTargetActor.Get();
+}
+
 USkeletalMeshComponent* ARopeDemoSnare::ResolveTargetMesh() const
 {
-	return TargetActor ? TargetActor->FindComponentByClass<USkeletalMeshComponent>() : nullptr;
+	AActor* Target = GetEffectiveTargetActor();
+	return Target ? Target->FindComponentByClass<USkeletalMeshComponent>() : nullptr;
+}
+
+void ARopeDemoSnare::ResolveAutoTargetFromPlate()
+{
+	AutoTargetActor.Reset();
+	if (!TriggerPlate)
+	{
+		return;
+	}
+	// 본을 감는 데모라 스켈레탈 메시 보유자만 대상이 된다(물리 상자 등은 건너뜀). 점유가 여러 개면
+	// 첫 번째 해당자 — 점유 자격(태그/물리 시뮬)은 판 쪽 설정이 정한다.
+	for (AActor* Occupant : TriggerPlate->GetQualifyingOccupants())
+	{
+		if (Occupant && Occupant != this && Occupant->FindComponentByClass<USkeletalMeshComponent>())
+		{
+			AutoTargetActor = Occupant;
+			UE_LOG(LogDynamicRope, Log, TEXT("[%s] trap target acquired from plate: %s"),
+				*GetName(), *Occupant->GetName());
+			return;
+		}
+	}
 }
 
 void ARopeDemoSnare::ForceTargetRagdoll()
 {
-	if (!bForceRagdollOnSnare || !TargetActor)
+	AActor* Target = GetEffectiveTargetActor();
+	if (!bForceRagdollOnSnare || !Target)
 	{
 		return;
 	}
 	// 사지가 순순히 벌어지려면 **감기 전에** 물리로 넘어가 있어야 한다. 응답 컴포넌트가 없으면
 	// 감김 이벤트 기반 자동 전환도 없다는 뜻이라 그대로 둔다(정적 메시 대상 등).
-	if (URopeRagdollResponseComponent* Response = TargetActor->FindComponentByClass<URopeRagdollResponseComponent>())
+	if (URopeRagdollResponseComponent* Response = Target->FindComponentByClass<URopeRagdollResponseComponent>())
 	{
 		if (!Response->IsRagdolled())
 		{
@@ -338,6 +392,8 @@ void ARopeDemoSnare::SetSnared(bool bNewSnared)
 			}
 		}
 		UE_LOG(LogDynamicRope, Log, TEXT("[%s] snare bound (%d cables): %s"), *GetName(), GetBoundRopeCount(), *BoundBones);
+		// 자동 놓기 카운트다운은 결박 **성립** 순간부터 잰다(발사/재시도 시간은 미포함).
+		AutoReleaseRemaining = AutoReleaseDelay;
 	}
 	else
 	{
@@ -352,6 +408,18 @@ void ARopeDemoSnare::HandleTriggerPlateChanged(ARopeDemoPressurePlate* /*Plate*/
 	// 함정 트리거: 밟으면 결박, 벗어나면 해제.
 	if (bPressed)
 	{
+		// 덫 모드: 지정 대상이 없으면 "판을 밟은 그 액터"를 눌림 순간 1회 확정한다.
+		if (!TargetActor)
+		{
+			ResolveAutoTargetFromPlate();
+			if (!AutoTargetActor.IsValid())
+			{
+				UE_LOG(LogDynamicRope, Warning,
+					TEXT("[%s] plate pressed but no occupant has a skeletal mesh — snare not triggered."),
+					*GetName());
+				return;
+			}
+		}
 		TriggerSnare();
 	}
 	else

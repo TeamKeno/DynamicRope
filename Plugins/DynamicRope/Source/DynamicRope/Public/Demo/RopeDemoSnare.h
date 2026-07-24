@@ -13,6 +13,8 @@
 //
 // 대상 조건:
 //   - TargetActor에 스켈레탈 메시 + 로프 콜라이더 프로바이더(캡슐/SDF)가 있어야 감긴다.
+//   - TargetActor를 비우고 TriggerPlate만 지정하면 덫 모드다: 판이 눌리는 순간 판 위 점유 액터
+//     (스켈레탈 메시 보유)를 자동 대상으로 잡고, 판이 풀리면 해제와 함께 대상도 비운다.
 //   - 팔다리가 물리로 끌려가려면 랙돌이어야 한다. 대상에 URopeRagdollResponseComponent가 있으면
 //     감김 이벤트로 자동 전환되지만, 결박은 **감기 전에** 랙돌이어야 사지가 순순히 벌어지므로
 //     bForceRagdollOnSnare(기본 켬)가 발사 시점에 먼저 랙돌로 만든다.
@@ -91,13 +93,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	int32 GetActiveBindingCount() const;
 
+	/** 이번 결박의 실제 대상 — 지정 TargetActor가 항상 우선, 없으면 판에서 자동 획득한 대상(덫 모드). */
+	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
+	AActor* GetEffectiveTargetActor() const;
+
 	/** 결박 성립/해제 브로드캐스트. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope|Demo")
 	FRopeDemoSnareStateSignature OnSnareStateChanged;
 
 	//~ 대상/슬롯 -------------------------------------------------------------
 
-	/** 결박할 대상 액터(스켈레탈 메시 보유). 레벨에서 지정한다 — 비면 경고 후 no-op. */
+	/** 결박할 대상 액터(스켈레탈 메시 보유). 레벨에서 지정하며 항상 최우선이다.
+	 *  비워도 TriggerPlate가 있으면 덫 모드로 동작한다(판을 밟은 점유 액터를 자동 대상으로 획득).
+	 *  둘 다 없으면 경고 후 no-op. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Rope|Demo")
 	TObjectPtr<AActor> TargetActor = nullptr;
 
@@ -136,6 +144,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Snare")
 	bool bForceRagdollOnSnare = true;
 
+	/** 결박 성립(모든 슬롯 감김) 후 이 시간이 지나면 자동으로 놓는다(초, 0 = 끔).
+	 *  놓은 뒤 대상이 판을 계속 누르고 있어도 재결박하지 않는다 — 재무장은 판의 다음
+	 *  눌림 에지(벗어났다 다시 밟음)나 수동 TriggerSnare 몫이다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Snare", meta = (ClampMin = "0.0", Units = "s"))
+	float AutoReleaseDelay = 0.0f;
+
 protected:
 	/** 앵커 기준점(고정 루트). 슬롯 표식/로프가 여기에 붙는다. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
@@ -168,8 +182,11 @@ private:
 	/** 활성 슬롯이 모두 Wrapped인가(= 결박 성립). 활성 슬롯이 없으면 false. */
 	bool AreAllBoundRopesWrapped() const;
 
-	/** 대상의 스켈레탈 메시(첫 번째). 없으면 nullptr. */
+	/** 대상의 스켈레탈 메시(첫 번째). 없으면 nullptr. 대상 = GetEffectiveTargetActor(). */
 	USkeletalMeshComponent* ResolveTargetMesh() const;
+
+	/** TargetActor가 비어 있을 때 TriggerPlate 점유 중 스켈레탈 메시 보유 액터를 자동 대상으로 잡는다. */
+	void ResolveAutoTargetFromPlate();
 
 	/** 대상에 랙돌 응답 컴포넌트가 있으면 즉시 랙돌로 만든다(bForceRagdollOnSnare). */
 	void ForceTargetRagdoll();
@@ -180,6 +197,12 @@ private:
 	/** 압력판 상태 변화(델리게이트 시그니처) — 눌림=결박, 풀림=해제. */
 	UFUNCTION()
 	void HandleTriggerPlateChanged(ARopeDemoPressurePlate* Plate, bool bPressed);
+
+	/** 판에서 자동 획득한 대상(덫 모드). 해제 시 비운다 — 지정 TargetActor가 있으면 무시된다. */
+	TWeakObjectPtr<AActor> AutoTargetActor;
+
+	/** 자동 놓기 카운트다운(초). 결박 성립 시 AutoReleaseDelay로 시드, 0 도달 시 ReleaseSnare. */
+	float AutoReleaseRemaining = 0.0f;
 
 	/** 결박 시도 중인가(TriggerSnare ~ ReleaseSnare). */
 	bool bTriggered = false;
