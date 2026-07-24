@@ -1227,6 +1227,8 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 
 	// 고정-timestep 스케줄(CPU accumulator). override-only 프레임(bSolveThisFrame=false)은 적분 없이
 	// override만 기록한다(NumSub=0) — CPU 경로의 "솔브 없음"과 동일한 시간 처리.
+	// SimQuality 반영 솔버 설정(비파괴) — schedule/seed가 같은 effective 값을 쓴다.
+	const FRopeSolverConfig EffSolverCfg = Rope.GetEffectiveSolverConfig();
 	FRopeSubstepSchedule Schedule;
 	Schedule.NumSub = 0;
 	Schedule.FixedDt = 0.0f;
@@ -1240,11 +1242,11 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 		{
 			S.TimeAccumulator += Refund;
 		}
-		Schedule = RopeSolverSubsteps(S, Rope.SolverConfig, DeltaTime);
+		Schedule = RopeSolverSubsteps(S, EffSolverCfg, DeltaTime);
 	}
 
 	// 상주 step 구성(self-contained). 시드 데이터는 매 프레임 제공(RT는 재시드 시에만 GPU 업로드).
-	SeedResidentStep(OutStep, RopeId, Rope.SimFrame.SimGeneration, S, Rope.SolverConfig, Schedule);
+	SeedResidentStep(OutStep, RopeId, Rope.SimFrame.SimGeneration, S, EffSolverCfg, Schedule);
 	// CPU SolveSimFrame과 같은 phase별 비신축 계약. GPU의 최신 resident pose에서 strain-limit가
 	// 적용되므로 지연된 CPU mirror를 기준으로 guide target을 보정하는 것보다 정확하다.
 	OutStep.MaxStretchRatio = Rope.GetEffectiveMaxStretchRatio();
@@ -1292,9 +1294,10 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 	Step.bDetectContacts = true;
 	Step.ContactRadius = Rope.GetEffectiveContactQueryRadius();
 	Step.PredictionFrames = Rope.DetectConfig.PredictiveContactFrames;
-	// 감지 스윕 해상도(터널링 방지) — CPU MakeFlightDetectParams와 같은 소스에서 온다.
-	Step.ContactSweepStep = Rope.DetectConfig.ContactSweepStep;
-	Step.ContactMaxSweepSamples = Rope.DetectConfig.ContactMaxSweepSamples;
+	// 감지 스윕 해상도(터널링 방지) — CPU MakeFlightDetectParams와 같은 소스(SimQuality 해석값)에서 온다.
+	const FRopeDetectConfig EffectiveDetect = Rope.GetEffectiveDetectConfig();
+	Step.ContactSweepStep = EffectiveDetect.ContactSweepStep;
+	Step.ContactMaxSweepSamples = EffectiveDetect.ContactMaxSweepSamples;
 	// 예측 접촉 free 노드 외삽의 substep→프레임 변위 환산(#8). Step.FixedDt(=Schedule.FixedDt=(1/60)/Substeps)는
 	// SeedResidentStep이 이미 채웠다 — CPU MakeFlightDetectParams의 FrameDeltaTime/SubstepDeltaTime과 동일 값.
 	Step.ContactFrameToSubstepRatio = (Step.FixedDt > KINDA_SMALL_NUMBER) ? (DeltaTime / Step.FixedDt) : 1.0f;

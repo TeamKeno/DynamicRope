@@ -126,35 +126,22 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 		FlushRenderingCommands();
 	}
 
-	// 마지막 step의 리드백을 drain: consume은 다음 Step의 loop1에서 일어나므로 NumSub=0 step으로 펌프한다.
-	TMap<uint32, FRopeResidentLatest> Latest;
-	bool bGot = false;
-	for (int32 Spin = 0; Spin < 64 && !bGot; ++Spin)
+	// 최종 프레임 결과를 결정론적으로 회수: ReadbackNow는 상주 버퍼를 BlockUntilGPUIdle로 동기 리드백한다.
+	// 전용 Step 경로는 PendingSteps에 쌓지 않으므로 추가 solve 없이 마지막 dispatch 상태를 그대로 읽는다
+	// (비동기 GetLatest 미러는 어느 프레임 결과인지 특정할 수 없어 실행 간 비결정적이다).
+	FlushRenderingCommands();
+	TArray<FVector> RbPos, RbPrev;
+	uint32 RbGen = 0;
+	if (!GpuSolver.ReadbackNow(RopeId, RbPos, RbPrev, RbGen) ||
+		RbGen != Gen || RbPos.Num() != GpuSim.Num() || RbPrev.Num() != GpuSim.Num())
 	{
-		FlushRenderingCommands();
-		TArray<FRopeGPUResidentStep> Drain;
-		// NumSub=0 → 적분 없이 직전 리드백만 consume.
-		Drain.Add(MakeStep(GpuSim, 0, 1.0f / 60.0f));
-		GpuSolver.Step(MoveTemp(Drain));
-		FlushRenderingCommands();
-		GpuSolver.GetLatest(Latest);
-		if (const FRopeResidentLatest* L = Latest.Find(RopeId))
-		{
-			if (L->Generation == Gen && L->Positions.Num() == GpuSim.Num() && L->PrevPositions.Num() == GpuSim.Num())
-			{
-				for (int32 i = 0; i < GpuSim.Num(); ++i)
-				{
-					GpuSim.Positions[i]     = L->Positions[i];
-					GpuSim.PrevPositions[i] = L->PrevPositions[i];
-				}
-				bGot = true;
-			}
-		}
-	}
-	if (!bGot)
-	{
-		AddError(TEXT("GPU 상주 결과를 회수하지 못함(리드백 drain 실패)."));
+		AddError(TEXT("GPU 상주 결과를 회수하지 못함(ReadbackNow 최종 상태)."));
 		return false;
+	}
+	for (int32 i = 0; i < GpuSim.Num(); ++i)
+	{
+		GpuSim.Positions[i]     = RbPos[i];
+		GpuSim.PrevPositions[i] = RbPrev[i];
 	}
 
 	// (1) 안정성: NaN 없음.
@@ -866,34 +853,22 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 		FlushRenderingCommands();
 	}
 
-	// 마지막 결과 drain(NumSub=0 펌프 — 위 parity 테스트와 동일 패턴).
-	TMap<uint32, FRopeResidentLatest> Latest;
-	bool bGot = false;
-	for (int32 Spin = 0; Spin < 64 && !bGot; ++Spin)
+	// 최종 프레임 결과를 결정론적으로 회수: ReadbackNow는 상주 버퍼를 BlockUntilGPUIdle로 동기 리드백한다.
+	// 전용 Step 경로는 PendingSteps에 쌓지 않으므로 추가 solve 없이 마지막 dispatch 상태를 그대로 읽는다
+	// (비동기 GetLatest 미러는 어느 프레임 결과인지 특정할 수 없어 실행 간 비결정적이다).
+	FlushRenderingCommands();
+	TArray<FVector> RbPos, RbPrev;
+	uint32 RbGen = 0;
+	if (!GpuSolver.ReadbackNow(RopeId, RbPos, RbPrev, RbGen) ||
+		RbGen != Gen || RbPos.Num() != GpuSim.Num() || RbPrev.Num() != GpuSim.Num())
 	{
-		FlushRenderingCommands();
-		TArray<FRopeGPUResidentStep> Drain;
-		Drain.Add(MakeStep(GpuSim, 0, 1.0f / 60.0f));
-		GpuSolver.Step(MoveTemp(Drain));
-		FlushRenderingCommands();
-		GpuSolver.GetLatest(Latest);
-		if (const FRopeResidentLatest* L = Latest.Find(RopeId))
-		{
-			if (L->Generation == Gen && L->Positions.Num() == GpuSim.Num() && L->PrevPositions.Num() == GpuSim.Num())
-			{
-				for (int32 i = 0; i < GpuSim.Num(); ++i)
-				{
-					GpuSim.Positions[i]     = L->Positions[i];
-					GpuSim.PrevPositions[i] = L->PrevPositions[i];
-				}
-				bGot = true;
-			}
-		}
-	}
-	if (!bGot)
-	{
-		AddError(TEXT("GPU 박스 parity: 상주 결과를 회수하지 못함."));
+		AddError(TEXT("GPU 박스 parity: 상주 결과를 회수하지 못함(ReadbackNow)."));
 		return false;
+	}
+	for (int32 i = 0; i < GpuSim.Num(); ++i)
+	{
+		GpuSim.Positions[i]     = RbPos[i];
+		GpuSim.PrevPositions[i] = RbPrev[i];
 	}
 
 	TestFalse(TEXT("CPU no NaN"), RopeTest::AnyNaN(CpuSim));
@@ -1016,33 +991,22 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		FlushRenderingCommands();
 	}
 
-	TMap<uint32, FRopeResidentLatest> Latest;
-	bool bGot = false;
-	for (int32 Spin = 0; Spin < 64 && !bGot; ++Spin)
+	// 최종 프레임 결과를 결정론적으로 회수: ReadbackNow는 상주 버퍼를 BlockUntilGPUIdle로 동기 리드백한다.
+	// 전용 Step 경로는 PendingSteps에 쌓지 않으므로 추가 solve 없이 마지막 dispatch 상태를 그대로 읽는다
+	// (비동기 GetLatest 미러는 어느 프레임 결과인지 특정할 수 없어 실행 간 비결정적이다).
+	FlushRenderingCommands();
+	TArray<FVector> RbPos, RbPrev;
+	uint32 RbGen = 0;
+	if (!GpuSolver.ReadbackNow(RopeId, RbPos, RbPrev, RbGen) ||
+		RbGen != Gen || RbPos.Num() != GpuSim.Num() || RbPrev.Num() != GpuSim.Num())
 	{
-		FlushRenderingCommands();
-		TArray<FRopeGPUResidentStep> Drain;
-		Drain.Add(MakeStep(GpuSim, 0, 1.0f / 60.0f));
-		GpuSolver.Step(MoveTemp(Drain));
-		FlushRenderingCommands();
-		GpuSolver.GetLatest(Latest);
-		if (const FRopeResidentLatest* L = Latest.Find(RopeId))
-		{
-			if (L->Generation == Gen && L->Positions.Num() == GpuSim.Num() && L->PrevPositions.Num() == GpuSim.Num())
-			{
-				for (int32 i = 0; i < GpuSim.Num(); ++i)
-				{
-					GpuSim.Positions[i]     = L->Positions[i];
-					GpuSim.PrevPositions[i] = L->PrevPositions[i];
-				}
-				bGot = true;
-			}
-		}
-	}
-	if (!bGot)
-	{
-		AddError(TEXT("GPU 컨벡스 parity: 상주 결과를 회수하지 못함."));
+		AddError(TEXT("GPU 컨벡스 parity: 상주 결과를 회수하지 못함(ReadbackNow)."));
 		return false;
+	}
+	for (int32 i = 0; i < GpuSim.Num(); ++i)
+	{
+		GpuSim.Positions[i]     = RbPos[i];
+		GpuSim.PrevPositions[i] = RbPrev[i];
 	}
 
 	TestFalse(TEXT("CPU no NaN"), RopeTest::AnyNaN(CpuSim));

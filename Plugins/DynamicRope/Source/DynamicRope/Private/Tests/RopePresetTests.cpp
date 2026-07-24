@@ -14,6 +14,7 @@
 
 #include "Preset/RopePreset.h"
 #include "RopeComponent.h"
+#include "Core/RopeThrowTypes.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Actor.h"
 #if WITH_EDITOR
@@ -43,6 +44,18 @@ struct FRopePresetTestSeam
 	static float GetTimeAccumulator(const URopeComponent& Rope)
 	{
 		return Rope.Sim.TimeAccumulator;
+	}
+
+	// 던지기 세기 계약 게이트(private) — 모든 던지기 경로가 상태 변경 전에 공유 호출하는 단일 지점.
+	static bool TryThrowSpeed(const URopeComponent& Rope, const FRopeThrowContext& Ctx, float& Out)
+	{
+		return Rope.TryResolveValidThrowSpeed(Ctx, Out);
+	}
+
+	// StartFreshThrow(private) — 무효 속도 reject 경로가 상태 변경 전에 빠져나오는지(state 보존) 검증용.
+	static void CallStartFreshThrow(URopeComponent& Rope, const FRopeThrowContext& Ctx)
+	{
+		Rope.StartFreshThrow(Ctx);
 	}
 };
 
@@ -159,6 +172,166 @@ bool FRopePresetApplyStampsValuesTest::RunTest(const FString& Parameters)
 
 	// ② 프리셋은 페이즈를 옮기지 않는다.
 	TestEqual(TEXT("Free 유지"), Rope->GetPhase(), ERopePhase::Free);
+	return true;
+}
+
+// SimQuality는 저장 SolverConfig를 비파괴로 해석한다(GetEffectiveSolverConfig) — 프리셋/Custom 세부를
+// 덮어쓰지 않고, High→Custom 왕복에도 Custom 세부가 살아 있다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSimQualityEffectiveTest,
+	"DynamicRope.SimQuality.EffectiveConfig",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSimQualityEffectiveTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	Rope->SolverConfig.Substeps = 7;
+	Rope->SolverConfig.Iterations = 3;
+
+	// Custom: 저장 값 그대로.
+	Rope->SimQuality = ERopeSimQuality::Custom;
+	TestEqual(TEXT("Custom Substeps 유지"), Rope->GetEffectiveSolverConfig().Substeps, 7);
+	TestEqual(TEXT("Custom Iterations 유지"), Rope->GetEffectiveSolverConfig().Iterations, 3);
+
+	// Medium: 저장 값 무시하고 12/4.
+	Rope->SimQuality = ERopeSimQuality::Medium;
+	TestEqual(TEXT("Medium Substeps=12"), Rope->GetEffectiveSolverConfig().Substeps, 12);
+	TestEqual(TEXT("Medium Iterations=4"), Rope->GetEffectiveSolverConfig().Iterations, 4);
+
+	// High → Custom 왕복: 저장 SolverConfig는 불변이라 Custom으로 되돌리면 7/3이 그대로.
+	Rope->SimQuality = ERopeSimQuality::High;
+	TestEqual(TEXT("High Substeps=16"), Rope->GetEffectiveSolverConfig().Substeps, 16);
+	TestEqual(TEXT("High에서도 저장 SolverConfig 불변"), Rope->SolverConfig.Substeps, 7);
+	Rope->SimQuality = ERopeSimQuality::Custom;
+	TestEqual(TEXT("Custom 복귀 시 세부 유지"), Rope->GetEffectiveSolverConfig().Substeps, 7);
+
+	// 프리셋 SimQuality가 적용에 복사되고, 저장 SolverConfig는 프리셋 값 그대로 유지된다.
+	URopePreset* Preset = NewObject<URopePreset>();
+	Preset->SimQuality = ERopeSimQuality::Low;
+	Preset->SolverConfig.Substeps = 9;
+	TestTrue(TEXT("프리셋 적용 성공"), Rope->ApplyPreset(Preset));
+	TestTrue(TEXT("프리셋 SimQuality 복사"), Rope->SimQuality == ERopeSimQuality::Low);
+	TestEqual(TEXT("저장 SolverConfig는 프리셋 값 그대로(9)"), Rope->SolverConfig.Substeps, 9);
+	TestEqual(TEXT("Low effective Substeps=6"), Rope->GetEffectiveSolverConfig().Substeps, 6);
+
+	return true;
+}
+
+// SimQuality가 Solver뿐 아니라 접촉 감지 스윕·감김 경로 빌드 예산까지 비파괴로 해석하는지 —
+// Detect/Wrap이 저장 원본을 그대로 쓰던(품질 부분 무동작) 회귀의 방어. Custom은 저장값 유지.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSimQualityDetectWrapTest,
+	"DynamicRope.SimQuality.EffectiveDetectAndWrap",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSimQualityDetectWrapTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+
+	Rope->SimQuality = ERopeSimQuality::Low;
+	TestEqual(TEXT("Low ContactSweepStep=4"), Rope->GetEffectiveDetectConfig().ContactSweepStep, 4.0f);
+	TestEqual(TEXT("Low ContactMaxSweepSamples=8"), Rope->GetEffectiveDetectConfig().ContactMaxSweepSamples, 8);
+	TestEqual(TEXT("Low WrappingPathBuildSteps=4"), Rope->GetEffectiveWrappingPathBuildSteps(), 4);
+
+	// Medium = 저장 기본값(2.0 / 16 / 8)과 동일.
+	Rope->SimQuality = ERopeSimQuality::Medium;
+	TestEqual(TEXT("Medium ContactSweepStep=2"), Rope->GetEffectiveDetectConfig().ContactSweepStep, 2.0f);
+	TestEqual(TEXT("Medium ContactMaxSweepSamples=16"), Rope->GetEffectiveDetectConfig().ContactMaxSweepSamples, 16);
+	TestEqual(TEXT("Medium WrappingPathBuildSteps=8"), Rope->GetEffectiveWrappingPathBuildSteps(), 8);
+
+	Rope->SimQuality = ERopeSimQuality::High;
+	TestEqual(TEXT("High ContactSweepStep=1.5"), Rope->GetEffectiveDetectConfig().ContactSweepStep, 1.5f);
+	TestEqual(TEXT("High ContactMaxSweepSamples=32"), Rope->GetEffectiveDetectConfig().ContactMaxSweepSamples, 32);
+	TestEqual(TEXT("High WrappingPathBuildSteps=12"), Rope->GetEffectiveWrappingPathBuildSteps(), 12);
+
+	// Custom: 저장값 그대로 반환.
+	Rope->DetectConfig.ContactSweepStep = 3.3f;
+	Rope->DetectConfig.ContactMaxSweepSamples = 21;
+	Rope->WrapConfig.WrappingPathBuildStepsPerFrame = 25;
+	Rope->SimQuality = ERopeSimQuality::Custom;
+	TestEqual(TEXT("Custom ContactSweepStep 유지"), Rope->GetEffectiveDetectConfig().ContactSweepStep, 3.3f);
+	TestEqual(TEXT("Custom ContactMaxSweepSamples 유지"), Rope->GetEffectiveDetectConfig().ContactMaxSweepSamples, 21);
+	TestEqual(TEXT("Custom WrappingPathBuildSteps 유지"), Rope->GetEffectiveWrappingPathBuildSteps(), 25);
+
+	// 비파괴: High로 바꿔도 저장 DetectConfig/WrapConfig는 불변.
+	Rope->SimQuality = ERopeSimQuality::High;
+	TestEqual(TEXT("High에서도 저장 DetectConfig 불변"), Rope->DetectConfig.ContactSweepStep, 3.3f);
+	TestEqual(TEXT("High에서도 저장 WrapConfig 불변"), Rope->WrapConfig.WrappingPathBuildStepsPerFrame, 25);
+
+	return true;
+}
+
+// 던지기 세기 계약: ThrowSpeed는 양수(cm/s)여야 하고, 0/음수는 ThrowParams로 폴백해 해석한다.
+// 무효(≥해석 후 <1) 속도면 상태 변경 전에 거부한다(Phase/transient 보존) — "느린데 갑자기 빠른" 모순 제거.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeThrowInvalidSpeedTest,
+	"DynamicRope.Throw.InvalidSpeedPreservesState",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeThrowInvalidSpeedTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+
+	// 1) Context 0 & ThrowParams 0 → 거부.
+	Rope->ThrowParams.ThrowSpeed = 0.0f;
+	FRopeThrowContext Ctx;
+	Ctx.ThrowSpeed = 0.0f;
+	float Out = -1.0f;
+	TestFalse(TEXT("0 속도 거부"), FRopePresetTestSeam::TryThrowSpeed(*Rope, Ctx, Out));
+
+	// 2) Context 0 → ThrowParams(1500) 폴백 → 통과.
+	Rope->ThrowParams.ThrowSpeed = 1500.0f;
+	TestTrue(TEXT("0 컨텍스트는 ThrowParams로 폴백"), FRopePresetTestSeam::TryThrowSpeed(*Rope, Ctx, Out));
+	TestEqual(TEXT("폴백 속도=1500"), Out, 1500.0f);
+
+	// 3) 0<속도<1 → 거부(하한 계약).
+	Ctx.ThrowSpeed = 0.5f;
+	TestFalse(TEXT("0.5 속도 거부"), FRopePresetTestSeam::TryThrowSpeed(*Rope, Ctx, Out));
+
+	// 4) 양수 속도 → 통과, 값 그대로.
+	Ctx.ThrowSpeed = 900.0f;
+	TestTrue(TEXT("900 속도 통과"), FRopePresetTestSeam::TryThrowSpeed(*Rope, Ctx, Out));
+	TestEqual(TEXT("해석 속도=900"), Out, 900.0f);
+
+	// 5) 상태 보존: StartFreshThrow가 무효 속도면 상태 변경(ResetStateForNewThrow) 전에 거부한다 →
+	//    Phase 유지 + 이전 transient(장력) 보존(정상 던지기면 InitRope가 이를 비운다).
+	Rope->ThrowParams.ThrowSpeed = 0.0f; // 폴백도 무효가 되도록
+	FRopePresetTestSeam::ForcePhase(*Rope, ERopePhase::Free);
+	FRopePresetTestSeam::SeedTransientSimState(*Rope);
+	FRopeThrowContext ZeroCtx;
+	ZeroCtx.ThrowSpeed = 0.0f;
+	FRopePresetTestSeam::CallStartFreshThrow(*Rope, ZeroCtx);
+	TestEqual(TEXT("거부 시 Phase 불변(Free)"), Rope->GetPhase(), ERopePhase::Free);
+	TestEqual(TEXT("거부 시 transient 장력 보존"), FRopePresetTestSeam::GetSegmentTensionNum(*Rope), 2);
+
+	return true;
+}
+
+// Taut Sensitivity → 슬랙 비율·최대 처짐의 기하 보간(방향/값 검증). 0=느슨(큰 허용), 1=엄격(작은 허용).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTautSensitivityMappingTest,
+	"DynamicRope.Taut.SensitivityMapping",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeTautSensitivityMappingTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+
+	Rope->HoldConfig.TautSensitivity = 0.5f;
+	TestEqual(TEXT("0.5 슬랙≈0.03"), Rope->GetEffectiveTautSlackRatio(), 0.03f, 0.002f);
+	TestEqual(TEXT("0.5 처짐≈20"), Rope->GetEffectiveTautMaxSag(), 20.0f, 0.5f);
+
+	Rope->HoldConfig.TautSensitivity = 0.0f;
+	TestEqual(TEXT("0 슬랙≈0.09"), Rope->GetEffectiveTautSlackRatio(), 0.09f, 0.002f);
+	TestEqual(TEXT("0 처짐≈80"), Rope->GetEffectiveTautMaxSag(), 80.0f, 0.5f);
+
+	Rope->HoldConfig.TautSensitivity = 1.0f;
+	TestEqual(TEXT("1 슬랙≈0.01"), Rope->GetEffectiveTautSlackRatio(), 0.01f, 0.002f);
+	TestEqual(TEXT("1 처짐≈5"), Rope->GetEffectiveTautMaxSag(), 5.0f, 0.5f);
+
+	// 방향: 민감도↑ → 허용↓(엄격).
+	Rope->HoldConfig.TautSensitivity = 0.3f;
+	const float Slack03 = Rope->GetEffectiveTautSlackRatio();
+	Rope->HoldConfig.TautSensitivity = 0.7f;
+	const float Slack07 = Rope->GetEffectiveTautSlackRatio();
+	TestTrue(TEXT("민감도 높을수록 슬랙 허용 작다"), Slack07 < Slack03);
+
 	return true;
 }
 

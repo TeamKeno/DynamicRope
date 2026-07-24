@@ -64,6 +64,10 @@ public:
 		 *  0이면 미해석 호출(단위 테스트 등) — Config 원값 폴백(GetContactRadius). */
 		float ResolvedContactRadius = 0.0f;
 
+		/** 컴포넌트 경계에서 SimQuality로 해석된 프레임당 경로 빌드 step 예산(GetEffectiveWrappingPathBuildSteps).
+		 *  0이면 미해석(단위/preview) — Config 원값 폴백(GetPathBuildStepsPerFrame). Config가 참조라 별도 필드로 싣는다. */
+		int32 ResolvedPathBuildStepsPerFrame = 0;
+
 		/** Composite Multi-Bone(여러 본을 하나의 pose-space island로 취급) 사용 자격.
 		 *  FullSimulation에서만 활성화하며, 다른 모드는 기존 Sequential Multi-Bone 경로를 쓴다. */
 		ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::FullSimulation;
@@ -72,6 +76,12 @@ public:
 		float GetContactRadius() const
 		{
 			return ResolvedContactRadius > 0.0f ? ResolvedContactRadius : Config.ContactQueryRadius;
+		}
+
+		/** 경로 빌드가 쓰는 프레임 step 예산의 단일 접근자(SimQuality 해석값 우선, 미해석 시 Config). */
+		int32 GetPathBuildStepsPerFrame() const
+		{
+			return ResolvedPathBuildStepsPerFrame > 0 ? ResolvedPathBuildStepsPerFrame : Config.WrappingPathBuildStepsPerFrame;
 		}
 	};
 
@@ -92,8 +102,12 @@ public:
 		return State.IsActive() && State.Mesh.IsValid() && !State.BoneName.IsNone();
 	}
 
-	/** 프레임 예산(WrappingPathBuildStepsPerFrame)만큼 경로/앵커 점진 생성을 전진시킨다. */
+	/** 프레임 예산(품질 해석값)만큼 경로/앵커 점진 생성을 전진시킨다. */
 	void AdvancePathBuild(const FRopeSimState& Sim, const FContext& Ctx);
+
+	/** 프레임당 경로 빌드 step 예산: 크기 비례 기준(총작업/4≈Medium)을 품질 steps/frame으로 배율한다.
+	 *  하한이 아니라 배율이라 큰 로프에서도 Low/Medium/High가 실효한다. 순수 함수(단위 테스트 대상). */
+	static int32 ComputePathStepBudget(int32 NumTailNodes, int32 QualityStepsPerFrame);
 
 	/** front를 경로 따라 전진시키고 latch 이후 노드들의 경로 위 타깃(+표면 오프셋)을 OutFrame에 담는다(G2). */
 	void ApplyWrappingMotionOverrides(const FRopeSimState& Sim, float DeltaTime, const FContext& Ctx, FRopeNodeOverrideFrame& OutFrame);

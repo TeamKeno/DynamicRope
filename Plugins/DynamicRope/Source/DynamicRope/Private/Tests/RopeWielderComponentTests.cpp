@@ -45,6 +45,12 @@ struct FRopeWielderComponentTestSeam
 		return Wielder.ComputeDesiredTickEnabled();
 	}
 
+	static FVector ComputeHandSwingVelocityWorld(const FVector& Prev, const FVector& Cur, float Dt,
+		const FTransform& Xform, float MaxSpeed)
+	{
+		return URopeWielderComponent::ComputeHandSwingVelocityWorld(Prev, Cur, Dt, Xform, MaxSpeed);
+	}
+
 	static void ForceWrappedTaut(URopeComponent& Rope)
 	{
 		Rope.Phase = ERopePhase::Wrapped;
@@ -1299,6 +1305,44 @@ bool FRopeWielderStaticSelfWrapIsNotTetherTest::RunTest(const FString& Parameter
 
 	TestFalse(TEXT("wrapping any component owned by the wielder is a self-wrap, not an external tether"),
 		FRopeWielderComponentTestSeam::IsWielderTetherActive(*Wielder));
+	return true;
+}
+
+// 손 스윙 상대 속도는 실제 DeltaTime으로 나누므로 프레임레이트에 무관하다 — 같은 손 이동(월드 V)이면
+// 15/20/30fps에서 같은 속도를 낸다(저프레임에서 속도가 죽던 회귀 방어). 상한 클램프·0 나눗셈 방어도 확인.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeHandSwingVelocityFrameRateTest,
+	"DynamicRope.Wielder.HandSwingVelocityFrameRateConsistent",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeHandSwingVelocityFrameRateTest::RunTest(const FString& Parameters)
+{
+	const FTransform Identity = FTransform::Identity;
+	const FVector V(300.0f, 0.0f, 0.0f);   // 목표 월드 손 속도 cm/s (상한 2000 아래)
+	constexpr float MaxSpeed = 2000.0f;
+
+	for (float F : { 15.0f, 20.0f, 30.0f })
+	{
+		const float Dt = 1.0f / F;
+		const FVector Cur = V * Dt;         // dt 동안의 변위(= V*dt), Prev=0
+		const FVector Vel = FRopeWielderComponentTestSeam::ComputeHandSwingVelocityWorld(
+			FVector::ZeroVector, Cur, Dt, Identity, MaxSpeed);
+		TestTrue(FString::Printf(TEXT("%.0ffps 속도 프레임레이트 무관(≈V)"), F), Vel.Equals(V, 0.1f));
+	}
+
+	// 상한: 3000cm/s 상당 변위는 MaxSpeed로 클램프.
+	{
+		const float Dt = 1.0f / 30.0f;
+		const FVector Vel = FRopeWielderComponentTestSeam::ComputeHandSwingVelocityWorld(
+			FVector::ZeroVector, FVector(3000.0f, 0.0f, 0.0f) * Dt, Dt, Identity, MaxSpeed);
+		TestEqual(TEXT("상한 클램프=2000"), static_cast<float>(Vel.Size()), 2000.0f, 0.5f);
+	}
+
+	// dt≈0 방어: 0 반환(0 나눗셈 없음).
+	{
+		const FVector Vel = FRopeWielderComponentTestSeam::ComputeHandSwingVelocityWorld(
+			FVector::ZeroVector, FVector(10.0f, 0.0f, 0.0f), 0.0f, Identity, MaxSpeed);
+		TestTrue(TEXT("dt=0이면 0"), Vel.IsNearlyZero());
+	}
 	return true;
 }
 

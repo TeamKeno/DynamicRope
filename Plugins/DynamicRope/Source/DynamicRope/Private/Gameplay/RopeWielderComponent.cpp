@@ -170,6 +170,9 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	// 손 소켓 애니메이션 상대 속도 측정(던지기 시 HandAnimationVelocity로 실림).
+	UpdateHandAnimVelocity(DeltaTime);
+
 	// Movement prerequisite 뒤의 같은 PrePhysics 틱에서 처리한다. CharacterMovement 내부 delegate는
 	// SkeletalMesh child update가 scoped/deferred인 동안 호출될 수 있어 실제 손 socket 위치가 stale하다.
 	// CMC 틱이 완전히 끝난 이 시점이면 mesh/socket transform과 최종 root-motion/slide 결과가 모두 확정된다.
@@ -185,6 +188,71 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	UpdateAimHudSample();
 	UpdateAimHudWidget();
 	UpdateThrowPreview();
+}
+
+void URopeWielderComponent::UpdateHandAnimVelocity(float DeltaTime)
+{
+	// 손 소켓의 애니메이션 상대 속도를 컴포넌트-로컬 위치 델타로 측정해 월드로 변환한다(캐릭터 이동 제외).
+	// GetPhysicsLinearVelocity(물리 바디 의존, 없으면 0)의 함정과 역방향 버그를 피한다 — 던지기 시
+	// HandAnimationVelocity로 실려, 정지 상태에서 팔만 휘둘러도 그 스윙이 반영된다.
+	// 2fps 이하 극단 히치/일시정지 프레임만 델타를 끊는다 — 재활성화·리그 변경은 별도 재시드로 처리하므로
+	// 지속 저프레임(15~30fps)은 그대로 실제 DeltaTime으로 계산해 속도가 프레임레이트에 안 흔들린다.
+	constexpr float MaxSampleDeltaTime = 0.5f;
+	constexpr float MaxHandAnimSpeed = 2000.0f;  // cm/s, 텔레포트/애님 리셋 과대 변화 상한(fling 방지)
+
+	if (!AttachMesh || DeltaTime <= KINDA_SMALL_NUMBER || DeltaTime > MaxSampleDeltaTime)
+	{
+		ResetHandAnimVelocitySample();
+		return;
+	}
+
+	// 리그(mesh/socket)가 바뀌면 이전 위치가 다른 공간이라 델타가 의미 없다 — 이 프레임은 재시드만.
+	const bool bRigChanged =
+		PreviousHandSampleMesh.Get() != AttachMesh || PreviousHandSampleSocket != HandSocketName;
+
+	const FVector SocketLocCS =
+		AttachMesh->GetSocketTransform(HandSocketName, RTS_Component).GetLocation();
+	MeasuredHandAnimVelocityWorld = (bHasHandSocketSample && !bRigChanged)
+		? ComputeHandSwingVelocityWorld(PreviousHandSocketLocationCS, SocketLocCS, DeltaTime,
+			AttachMesh->GetComponentTransform(), MaxHandAnimSpeed)
+		: FVector::ZeroVector;
+	PreviousHandSocketLocationCS = SocketLocCS;
+	PreviousHandSampleMesh = AttachMesh;
+	PreviousHandSampleSocket = HandSocketName;
+	bHasHandSocketSample = true;
+}
+
+FVector URopeWielderComponent::ComputeHandSwingVelocityWorld(
+	const FVector& PrevSocketCS, const FVector& CurSocketCS, float DeltaTime,
+	const FTransform& ComponentXform, float MaxSpeed)
+{
+	if (DeltaTime <= KINDA_SMALL_NUMBER)
+	{
+		return FVector::ZeroVector;
+	}
+	const FVector RelVelCS = (CurSocketCS - PrevSocketCS) / DeltaTime;
+	const FVector RelVelWorld = ComponentXform.TransformVectorNoScale(RelVelCS);
+	return RelVelWorld.GetClampedToMaxSize(MaxSpeed);
+}
+
+void URopeWielderComponent::ResetHandAnimVelocitySample()
+{
+	bHasHandSocketSample = false;
+	PreviousHandSocketLocationCS = FVector::ZeroVector;
+	MeasuredHandAnimVelocityWorld = FVector::ZeroVector;
+	PreviousHandSampleMesh = nullptr;
+	PreviousHandSampleSocket = NAME_None;
+}
+
+void URopeWielderComponent::RefreshTickEnabled()
+{
+	// off→on 재활성화면 이전(오래된) 소켓 위치와의 델타가 큰 spike를 낳으므로 샘플을 끊고 재시드한다.
+	const bool bWant = ComputeDesiredTickEnabled();
+	if (bWant && !IsComponentTickEnabled())
+	{
+		ResetHandAnimVelocitySample();
+	}
+	SetComponentTickEnabled(bWant);
 }
 
 void URopeWielderComponent::UpdateAimHudSample()
@@ -731,7 +799,7 @@ void URopeWielderComponent::StartPull()
 	// 장전(토글 on): 힘/몽타주는 여기서 시작하지 않는다 — 발동은 UpdatePullEngage가 "Wrapped + 장력이
 	// PullEngageTension을 처음 넘는 순간" 1회 수행한다. 감기 전에 장전해 두면 감겨서 당겨지는 순간 발동한다.
 	SetPullArmed(true);
-	SetComponentTickEnabled(ComputeDesiredTickEnabled());
+	RefreshTickEnabled();
 }
 
 void URopeWielderComponent::UpdatePullEngage()
@@ -811,7 +879,7 @@ void URopeWielderComponent::StopPull()
 	SetPullArmed(false);
 	SetPullEngaged(false, 0.0f);
 	StopPullNow();
-	SetComponentTickEnabled(ComputeDesiredTickEnabled());
+	RefreshTickEnabled();
 }
 
 void URopeWielderComponent::SetPullArmed(bool bNewArmed)
@@ -1019,7 +1087,8 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 	Context.FrameUp = Owner ? Owner->GetActorUpVector() : FVector::UpVector;
 	Context.FrameRight = Owner ? Owner->GetActorRightVector() : FVector::RightVector;
 	Context.OwnerVelocity = Owner ? Owner->GetVelocity() : FVector::ZeroVector;
-	Context.SocketVelocity = Context.OwnerVelocity;
+	// 손 소켓의 애니메이션 상대 속도(캐릭터 이동 제외)는 Tick에서 컴포넌트-로컬 위치 델타로 측정한다.
+	Context.HandAnimationVelocity = MeasuredHandAnimVelocityWorld;
 	Context.FrameMode = Params.FrameMode;
 	Context.SwingPlane = Params.SwingPlane;
 	Context.CustomSwingPlaneNormal = Params.CustomSwingPlaneNormal;
@@ -1031,7 +1100,6 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 	if (AttachMesh)
 	{
 		Context.Origin = AttachMesh->GetSocketLocation(HandSocketName);
-		Context.SocketVelocity = AttachMesh->GetPhysicsLinearVelocity(HandSocketName);
 	}
 
 	switch (Params.FrameMode)
@@ -1359,6 +1427,12 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 	{
 		ResolveRefs();
 		ResolvePreviewComponent(/*bAllowAutoCreate*/ true);
+		// off→on: preview는 틱을 강제 ON(ComputeDesiredTickEnabled 무관)하므로 RefreshTickEnabled를
+		// 거치지 않는다 — 재활성화 시 stale 소켓 델타 spike를 막도록 손 속도 샘플을 여기서 직접 재시드한다.
+		if (!IsComponentTickEnabled())
+		{
+			ResetHandAnimVelocitySample();
+		}
 		SetComponentTickEnabled(true);
 		UpdateThrowPreview();
 	}
@@ -1366,7 +1440,7 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 	{
 		// 표시만 끈다 — prepared(던지기용)는 그대로 두고, ③/aim ray는 계산 틱을 계속 돌린다.
 		ClearPreviewDisplay();
-		SetComponentTickEnabled(ComputeDesiredTickEnabled());
+		RefreshTickEnabled();
 	}
 }
 
@@ -1378,14 +1452,17 @@ bool URopeWielderComponent::ComputeDesiredTickEnabled() const
 		Cast<APawn>(GetOwner()) && Rope &&
 		Rope->HoldConfig.bEnforceWielderLengthConstraint &&
 		(Rope->GetPhase() == ERopePhase::Wrapping || Rope->GetPhase() == ERopePhase::Wrapped);
-	return bNeedsPawnLeash || bPullArmed || bAirControlBoosted || bAutoGroundExitOnUpwardPull ||
-		bBoostAirControlWhileSwinging || UsesAimRay();
+	// 던질 수 있는 상태(Loaded 등)에선 손 애니메이션 스윙을 매 프레임 측정해야 던지기에 실린다 —
+	// FullSimulation·이동 보조 OFF로 다른 조건이 모두 꺼져도 이 샘플링만으로 틱을 유지한다.
+	const bool bNeedsHandVelocitySampling = Rope && AttachMesh && Rope->CanThrowNow();
+	return bNeedsHandVelocitySampling || bNeedsPawnLeash || bPullArmed || bAirControlBoosted ||
+		bAutoGroundExitOnUpwardPull || bBoostAirControlWhileSwinging || UsesAimRay();
 }
 
 void URopeWielderComponent::HandleRopePhaseChanged(
 	ERopePhase /*OldPhase*/, ERopePhase NewPhase)
 {
-	SetComponentTickEnabled(ComputeDesiredTickEnabled());
+	RefreshTickEnabled();
 	if (Rope &&
 		(NewPhase == ERopePhase::Wrapping ||
 			NewPhase == ERopePhase::Wrapped))
@@ -1674,7 +1751,7 @@ void URopeWielderComponent::RefreshModeDerivedState()
 		bGuaranteedAimThrowQueued = false;
 		ClearPreviewDisplay();
 	}
-	SetComponentTickEnabled(ComputeDesiredTickEnabled());
+	RefreshTickEnabled();
 	UpdateAimHudWidget();
 	UpdateAimHudSample();
 	if (UsesLockedPreview())

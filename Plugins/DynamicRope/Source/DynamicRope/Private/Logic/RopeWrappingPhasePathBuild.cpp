@@ -93,6 +93,16 @@ void FRopeWrappingPhase::CollectCompletedVirtualBridgeRuns()
 	}
 }
 
+int32 FRopeWrappingPhase::ComputePathStepBudget(int32 NumTailNodes, int32 QualityStepsPerFrame)
+{
+	// 총 작업량 = NumTailNodes*2(SVF는 경로점당 스텝 2개 소모). 크기 비례 기준(Medium=~4프레임 완주)을
+	// 품질이 배율한다: 높을수록 프레임당 더 많이(=더 빨리 완성), 낮을수록 적게. 큰 로프에서도 품질이
+	// 실효하도록 하한이 아니라 배율로 쓴다. preview(4096)는 사실상 전량이라 한 프레임에 완주. 최소 1.
+	constexpr int32 MediumStepsPerFrame = 8;   // GetEffectiveWrappingPathBuildSteps(Medium)와 동기
+	const int32 SizeBaseline = FMath::DivideAndRoundUp(FMath::Max(0, NumTailNodes) * 2, 4);
+	return FMath::Max(1, SizeBaseline * FMath::Max(1, QualityStepsPerFrame) / MediumStepsPerFrame);
+}
+
 void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FContext& Ctx)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_AdvanceProgressiveWrapPathBuild);
@@ -105,11 +115,10 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 		return;
 	}
 
-	// 프레임 예산 자동화(표면 감사 B-2): 설정값은 하한(내부 기본 8)이고, 실제 예산은 로프 길이에
-	// 비례해 자동 상향된다 — 노드가 많아도 빌드가 ~4프레임 안에 끝나도록(SVF는 경로점당 스텝 2개 소모).
-	// preview 경로는 설정값을 4096으로 덮어 한 번에 완주한다(BuildPreviewCenterline).
-	const int32 AutoBudget = FMath::DivideAndRoundUp(State.NumTailNodes * 2, 4);
-	const int32 StepBudget = FMath::Max3(1, Ctx.Config.WrappingPathBuildStepsPerFrame, AutoBudget);
+	// 프레임 예산(표면 감사 B-2): 총 작업량(SVF는 경로점당 스텝 2개)을 크기 비례 기준으로 잡고 품질로
+	// 배율한다 — 큰 로프에서도 Low/Medium/High가 갈리도록(단순 하한 아님). preview는 4096으로 한 번에 완주.
+	const int32 StepBudget = FRopeWrappingPhase::ComputePathStepBudget(
+		State.NumTailNodes, Ctx.GetPathBuildStepsPerFrame());
 	if (State.bPathUsesPoseSpaceIsland)
 	{
 		// Composite의 한 raw probe는 실제 projection 이동량에 따라 출력 node를 0개 또는 여러 개

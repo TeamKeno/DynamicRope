@@ -16,8 +16,8 @@ FRopeThrowContext FRopeThrowContext::MakeDefault(const USceneComponent& RopeComp
 	if (const AActor* Owner = RopeComponent.GetOwner())
 	{
 		Context.OwnerVelocity = Owner->GetVelocity();
-		// 기본 진입점은 소켓 속도를 따로 측정하지 못한다 — owner 속도로 근사(Wielder 경로는 직접 채움).
-		Context.SocketVelocity = Context.OwnerVelocity;
+		// 기본 진입점은 손 스윙을 측정하지 못한다 — 애니메이션 상대 속도 0(Wielder 경로만 측정해 채운다).
+		Context.HandAnimationVelocity = FVector::ZeroVector;
 	}
 
 	// 설정 패스스루.

@@ -68,8 +68,11 @@ struct DYNAMICROPE_API FRopeThrowContext
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	FVector OwnerVelocity = FVector::ZeroVector;
 
+	/** 손 소켓의 애니메이션 상대 속도(월드, 캐릭터 이동 제외) — 정지 상태에서 팔만 휘둘러도 그 스윙이
+	 *  던지기에 실린다. Wielder가 컴포넌트-로컬 소켓 위치 델타로 측정해 채운다(GetPhysicsLinearVelocity의
+	 *  물리 바디 의존/역방향 문제를 피한다). 소켓 추적이 없는 경로(BP 직접 Throw)는 0. */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
-	FVector SocketVelocity = FVector::ZeroVector;
+	FVector HandAnimationVelocity = FVector::ZeroVector;
 
 	/** Wielder가 소유하는 던지기 속도. 0 이하이면 RopeComponent의 fallback 값을 사용한다. */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
@@ -159,7 +162,7 @@ struct FRopeThrowParams
 	ERopeSwingPlane SwingPlane = ERopeSwingPlane::AimAndFrameUp;
 
 	/** Wielder를 거치지 않고 RopeComponent::Throw를 직접 호출할 때 쓰는 fallback 속도. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Throw Speed"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "1.0", UIMin = "100.0", UIMax = "5000.0", Units = "cm/s", DisplayName = "Throw Speed"))
 	float ThrowSpeed = 1500.0f;
 
 	/**

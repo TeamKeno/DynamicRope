@@ -62,22 +62,32 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	// "segment must stretch -> tension appears -> tether may enforce no stretch".
 	FRopeWielderMovementConstraint LiveConstraint;
 	const bool bHasLiveConstraint = BuildWielderMovementConstraint(LiveConstraint);
-	const bool bLiveBoundaryTaut = bHasLiveConstraint &&
-		static_cast<float>(FVector::Distance(GetComponentLocation(), LiveConstraint.PivotWorld))
-			>= FMath::Max(
-				0.0f,
-				LiveConstraint.MaxDistance -
-					FMath::Max(HoldConfig.LengthConstraintActivationSlop, 0.0f));
+	// 슬랙 비율·처짐 상한은 단일 TautSensitivity에서 해석한다(GetEffectiveTaut*), 히스테리시스는 내부 상수.
+	// live material-length 경로와 legacy geometry 경로가 **같은 방향으로** 반응해야 하므로(기본값
+	// bEnforceWielderLengthConstraint=true에서도 슬라이더가 체감되도록) 두 경로가 이 값들을 공유한다.
+	// 진입/유지 히스테리시스: 일단 팽팽으로 판정되면 허용을 넓혀 임계 경계의 채터링을 막는다(+ 아래 grace 래치).
+	const float EffectiveTautMaxSag = GetEffectiveTautMaxSag();
+	const float EffectiveTautSlackRatio = GetEffectiveTautSlackRatio();
+	const float TautHysteresis = PullDrive.bChainTaut ? TautSlackReleaseScaleConst : 1.0f;
+	const float SagLimit = EffectiveTautMaxSag * TautHysteresis;
+	const bool bSagTaut =
+		EffectiveTautMaxSag <= 0.0f || PullDrive.LastPullSample.MaxLegSag <= SagLimit;
+
+	// live 경계: 견인 시작 거리 slack을 TautSensitivity에서 파생하되, LengthConstraintActivationSlop은
+	// 수치 안정성용 최소 허용치로 유지한다(둘 중 큰 값). "시각적으로 펴졌을 때만"을 위해 sag 게이트도 공유.
+	const float LiveSlackAllowance = FMath::Max(
+		FMath::Max(HoldConfig.LengthConstraintActivationSlop, 0.0f),
+		LiveConstraint.MaxDistance * EffectiveTautSlackRatio * TautHysteresis);
+	const float LiveDistance =
+		static_cast<float>(FVector::Distance(GetComponentLocation(), LiveConstraint.PivotWorld));
+	const bool bLiveBoundaryTaut = bHasLiveConstraint
+		&& LiveDistance >= FMath::Max(0.0f, LiveConstraint.MaxDistance - LiveSlackAllowance)
+		&& bSagTaut;
 
 	// Legacy/self-wrap fallback still uses sag + chord geometry. SegmentTension is deliberately
 	// excluded from gameplay taut; it remains only as a legacy analytic-path contamination guard.
-	// 슬랙 비율·처짐 상한은 단일 TautSensitivity에서 해석한다(GetEffectiveTaut*), 히스테리시스는 내부 상수.
-	const float EffectiveTautMaxSag = GetEffectiveTautMaxSag();
-	const float EffectiveTautSlackRatio = GetEffectiveTautSlackRatio();
-	const float SagLimit = EffectiveTautMaxSag
-		* (PullDrive.bChainTaut ? TautSlackReleaseScaleConst : 1.0f);
 	const bool bLegacyGeometryTaut =
-		(EffectiveTautMaxSag <= 0.0f || PullDrive.LastPullSample.MaxLegSag <= SagLimit)
+		bSagTaut
 		&& (EffectiveTautSlackRatio <= 0.0f || RopeTraction::EvaluateChainTautGate(
 			PullDrive.LastPullSample.TautChordLen,
 			PullDrive.LastPullSample.FreeRestLen,

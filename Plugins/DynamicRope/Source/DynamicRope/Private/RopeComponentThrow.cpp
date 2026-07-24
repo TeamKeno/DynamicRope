@@ -100,6 +100,12 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 		// 조준 던지기와 아치를 통일한다(2026-07-14 보장 재정의: 보장은 '조준한 대상'에 대한 것).
 		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw: no aim target (%s) — arc toss toward ray-end."),
 			*GetName(), FailureReason.IsEmpty() ? TEXT("no preview") : *FailureReason);
+		// 던지기 세기 계약: 상태 변경(OnDeployFromLoaded) 전에 검증한다.
+		float FreeThrowSpeed = 0.0f;
+		if (!TryResolveValidThrowSpeed(ResolvedThrow, FreeThrowSpeed))
+		{
+			return;
+		}
 		const float FreeLen = FMath::Max(Sim.RopeLength, RopeLength);
 		const FVector FreeEndpoint = ResolvedThrow.Origin + ResolvedThrow.FrameForward.GetSafeNormal() * FreeLen;
 		OnDeployFromLoaded();
@@ -128,6 +134,13 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 
 	// 서브클래스 wrap 대상 게이트: preview 빌드는 이 게이트를 모르므로(정적 빌더) 진입점에서 거른다.
 	if (!CanWrapTarget(Prepared.Mesh.Get(), Prepared.Bone))
+	{
+		return false;
+	}
+
+	// 던지기 세기 계약: **상태 변경(ResetStateForNewThrow) 전에** 검증해 무효 속도면 전개/초기화 없이 거부한다.
+	float PreparedThrowSpeed = 0.0f;
+	if (!TryResolveValidThrowSpeed(Prepared.ThrowContext, PreparedThrowSpeed))
 	{
 		return false;
 	}
@@ -413,11 +426,15 @@ bool URopeComponent::ExecutePendingGuaranteedAimThrow()
 			// 입력 프레임의 miss를 notify 시점에 다시 질의하지 않는다. 그때 확정한 방향 그대로 free arc로 던진다.
 			EnsureRopeInitialized();
 			const FRopeThrowContext ResolvedThrow = ResolveThrowContext(Pending.ResolvedContext);
-			const float FreeLen = FMath::Max(Sim.RopeLength, RopeLength);
-			const FVector FreeEndpoint = ResolvedThrow.Origin + ResolvedThrow.FrameForward.GetSafeNormal() * FreeLen;
-			OnDeployFromLoaded();
-			StartFreeGuidedThrow(ResolvedThrow, FreeEndpoint);
-			bExecuted = Phase == ERopePhase::GuidedThrow;
+			// 던지기 세기 계약: 상태 변경(OnDeployFromLoaded) 전에 검증한다.
+			float FreeThrowSpeed = 0.0f;
+			if (TryResolveValidThrowSpeed(ResolvedThrow, FreeThrowSpeed))
+			{
+				const float FreeLen = FMath::Max(Sim.RopeLength, RopeLength);
+				const FVector FreeEndpoint = ResolvedThrow.Origin + ResolvedThrow.FrameForward.GetSafeNormal() * FreeLen;
+				OnDeployFromLoaded();
+				bExecuted = StartFreeGuidedThrow(ResolvedThrow, FreeEndpoint);
+			}
 		}
 	}
 
@@ -539,19 +556,42 @@ FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& T
 	return Resolved;
 }
 
+bool URopeComponent::TryResolveValidThrowSpeed(const FRopeThrowContext& Context, float& OutThrowSpeed) const
+{
+	// ThrowSpeed는 양수(cm/s) 계약: 0/음수면 whip/guided duration이 방어코드로 되돌아가 "느린데 갑자기
+	// 빠른" 모순이 생긴다. Context가 0이면 컴포넌트 기본(ThrowParams.ThrowSpeed)으로 폴백해 해석한다.
+	OutThrowSpeed = Context.ThrowSpeed > 0.0f ? Context.ThrowSpeed : ThrowParams.ThrowSpeed;
+	constexpr float MinValidThrowSpeed = 1.0f;
+	if (OutThrowSpeed < MinValidThrowSpeed)
+	{
+		UE_LOG(LogDynamicRope, Warning,
+			TEXT("[%s] Throw rejected: ThrowSpeed must be positive (got %.2f cm/s)."),
+			*GetName(), OutThrowSpeed);
+		return false;
+	}
+	return true;
+}
+
 FVector URopeComponent::ComputeThrowInheritedVelocity(const FRopeThrowContext& ThrowContext) const
 {
-	// 캐릭터 이동(OwnerVelocity)은 MotionInheritance 배율로 싣고, 손 소켓의 애니메이션 스윙은 소켓 월드
-	// 속도에서 캐릭터 이동을 뺀 상대분(SocketVelocity - OwnerVelocity)만 1배로 싣는다. 소켓 속도가 이미
-	// 캐릭터 이동을 포함하므로(GetPhysicsLinearVelocity) 이렇게 빼야 이동이 이중 반영되지 않는다
-	// — 소켓을 따로 측정 못 하는 경로는 Socket=Owner라 스윙 몫이 자동으로 0이 된다.
+	// 캐릭터 이동(OwnerVelocity)은 MotionInheritance 배율로, 손 소켓의 애니메이션 스윙(캐릭터 이동을 제외한
+	// 손 상대 속도)은 별도로 1배 싣는다. HandAnimationVelocity가 이미 owner-상대(Wielder가 컴포넌트-로컬
+	// 위치 델타로 측정)라 이동 이중 반영이 없고, MotionInheritance=0이어도 역방향 속도가 생기지 않는다
+	// — 물리 바디 유무와 무관하다(GetPhysicsLinearVelocity=0의 역방향 버그 제거).
 	return ThrowContext.OwnerVelocity * ThrowParams.MotionInheritance +
-		(ThrowContext.SocketVelocity - ThrowContext.OwnerVelocity);
+		ThrowContext.HandAnimationVelocity;
 }
 
 void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 {
 	const FRopeThrowContext ResolvedThrow = ResolveThrowContext(ThrowContext);
+
+	// 던지기 세기 계약(상태 변경 전 게이트): 유효하지 않은 ThrowSpeed면 전개/초기화 없이 거부(에디터 ClampMin과 이중 방어).
+	float ResolvedThrowSpeed = 0.0f;
+	if (!TryResolveValidThrowSpeed(ResolvedThrow, ResolvedThrowSpeed))
+	{
+		return;
+	}
 
 	// 던지기 시작 = 4단계 고정 순서: ① 이전 상태 정리 → ② 체인 리셋(+GPU 재시드) → ③ 채찍 스윙 시작
 	// → ④ Verlet 속도 주입. ④는 ③이 확정한 조준 방향(WhipGuide.GetAimDir)을 쓰므로 순서가 계약이다.
@@ -597,6 +637,14 @@ void URopeComponent::ResetStateForNewThrow()
 bool URopeComponent::BeginGuidedThrowState(FRopePreparedThrowPreview&& Prepared, bool bFreeThrow)
 {
 	if (Sim.Num() < 2)
+	{
+		return false;
+	}
+
+	// 던지기 세기 계약 최종 방어: 정상 경로는 상태 변경 전에 이미 검증했다(TryResolveValidThrowSpeed).
+	// 직접 호출자(테스트/미래 경로) 대비로 여기서도 막는다 — 여기 도달은 아직 상태 변경 전이다.
+	float GuidedThrowSpeed = 0.0f;
+	if (!TryResolveValidThrowSpeed(Prepared.ThrowContext, GuidedThrowSpeed))
 	{
 		return false;
 	}
@@ -901,14 +949,14 @@ void URopeComponent::FinishGuidedThrow()
 	DispatchWrapped(WrappedInfo);
 }
 
-void URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld)
+bool URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld)
 {
 	// 허공(대상 없음) 던지기: 손 원점 → 레이 끝점 직선을 아치로 재생하고, 완료 시 꽂힘 없이 Free로 낙하한다.
 	// preview는 straight 월드 라인만 채운다 — ResolveGuidePointWorld는 owner-local이 없으면 월드 Points로 폴백한다.
 	EnsureRopeInitialized();
 	if (Sim.Num() < 2)
 	{
-		return;
+		return false;
 	}
 
 	const FVector Origin = ThrowContext.Origin;
@@ -930,10 +978,11 @@ void URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext,
 		static_cast<float>((EndpointWorld - Origin).Size()));
 	if (!BeginGuidedThrowState(MoveTemp(Free), /*bFreeThrow*/ true))
 	{
-		return;
+		return false;
 	}
 
 	SetPhase(ERopePhase::GuidedThrow, *PhaseReason);
+	return true;
 }
 
 FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
@@ -982,12 +1031,13 @@ FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float
 	Params.PredictiveContactFrames = DetectConfig.PredictiveContactFrames;
 	Params.MinLatchNodes = DetectConfig.MinLatchNodes;
 	Params.FallbackForward = GetForwardVector();
-	// 감지 스윕 해상도(터널링 방지) — GPU step에도 같은 값이 실린다(RequestContactDetection).
-	Params.ContactSweepStep = DetectConfig.ContactSweepStep;
-	Params.ContactMaxSweepSamples = DetectConfig.ContactMaxSweepSamples;
+	// 감지 스윕 해상도(터널링 방지) — SimQuality 해석값. GPU step에도 같은 값이 실린다(RequestContactDetection).
+	const FRopeDetectConfig EffectiveDetect = GetEffectiveDetectConfig();
+	Params.ContactSweepStep = EffectiveDetect.ContactSweepStep;
+	Params.ContactMaxSweepSamples = EffectiveDetect.ContactMaxSweepSamples;
 	// substep dt = FixedDt(=(1/60)/Substeps) — 로프 Verlet 변위(마지막 substep 델타)와 표면속도(cm/s)를 같은
 	// 단위로 맞추는 다리(RopeSolverSubsteps의 FixedDt와 동일 식). 프레임 dt가 아님 — 자세한 이유는 FParams 주석.
-	Params.SubstepDeltaTime = (1.0f / 60.0f) / static_cast<float>(FMath::Clamp(SolverConfig.Substeps, 1, 16));
+	Params.SubstepDeltaTime = (1.0f / 60.0f) / static_cast<float>(FMath::Clamp(GetEffectiveSolverConfig().Substeps, 1, 16));
 	// 프레임 dt: 예측 접촉 외삽이 substep 변위를 프레임 변위로 환산하는 데 쓴다(FParams::FrameDeltaTime 주석).
 	Params.FrameDeltaTime = DeltaTime;
 	return Params;

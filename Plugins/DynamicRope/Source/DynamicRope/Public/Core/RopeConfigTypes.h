@@ -29,8 +29,9 @@ enum class ERopeWrappingAxisSource : uint8
 
 /**
  * 시뮬레이션 품질 프리셋 — 정밀도/성능 균형을 한 값으로 고른다. Custom이 아니면 컴포넌트가
- * Substeps/Iterations/스윕 샘플링을 스탬프한다(URopeComponent::ApplySimQuality). 개별 Advanced
- * 솔버 필드를 직접 조정하려면 Custom으로 둔다. Medium = 기존 기본값과 동일(무변화).
+ * 솔버(Substeps/Iterations/스윕)·접촉 감지 스윕·감김 경로 빌드 예산을 이 값으로 해석한다
+ * (URopeComponent::GetEffective{Solver,Detect}Config·GetEffectiveWrappingPathBuildSteps, 비파괴 —
+ * 저장 원본 불변). 개별 Advanced 필드를 직접 조정하려면 Custom. Medium = 기존 기본값과 동일(무변화).
  */
 UENUM(BlueprintType)
 enum class ERopeSimQuality : uint8
@@ -588,7 +589,7 @@ struct FRopeHoldConfig
 	 * (슬랙 3%, 처짐 20cm). 0 → 슬랙 9%·처짐 80cm, 1 → 슬랙 1%·처짐 5cm. 판정 히스테리시스·해제 유예는
 	 * 실측 튜닝이 끝난 내부 상수다(RopeComponentTraction.cpp). "시각적으로 펴졌을 때만 끌린다"의 단일 손잡이.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Taut Sensitivity"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Taut Sensitivity"))
 	float TautSensitivity = 0.5f;
 
 	/**

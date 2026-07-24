@@ -89,8 +89,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
-	/** 시뮬레이션 품질(정밀도/성능). Custom이 아니면 Substeps/Iterations/스윕 샘플링을 스탬프한다
-	 *  (ApplySimQuality — 에디터 편집·InitRope 시). 개별 Advanced 솔버 필드를 직접 만지려면 Custom. */
+	/** 시뮬레이션 품질(정밀도/성능). Custom이 아니면 솔버(Substeps/Iterations/스윕)·접촉 감지 스윕·
+	 *  감김 경로 빌드 예산을 이 값으로 해석한다(GetEffective{Solver,Detect}Config·
+	 *  GetEffectiveWrappingPathBuildSteps, 비파괴 — 저장 원본 불변). 개별 Advanced 필드는 Custom에서. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeSimQuality SimQuality = ERopeSimQuality::Medium;
 
@@ -289,9 +290,19 @@ public:
 		return 80.0f * FMath::Pow(5.0f / 80.0f, FMath::Clamp(HoldConfig.TautSensitivity, 0.0f, 1.0f));
 	}
 
-	/** SimQuality != Custom이면 품질 프리셋 값을 SolverConfig/DetectConfig/WrapConfig에 스탬프한다.
-	 *  에디터 SimQuality 변경(PostEditChangeProperty)과 InitRope에서 호출. Custom이면 no-op. */
-	void ApplySimQuality();
+	/** SimQuality를 반영한 런타임 솔버 설정(비파괴 — 저장된 SolverConfig는 건드리지 않는다).
+	 *  Custom이면 SolverConfig 그대로, 그 외엔 Substeps/Iterations/SweepStep/MaxSweepSamples를
+	 *  품질 프리셋 값으로 덮은 사본을 반환한다. 솔버 소비 지점(서브시스템 step, CPU LODConfig,
+	 *  SubstepDeltaTime, LOD iteration)이 이 값을 쓴다. Medium = 저장 기본값과 동일.
+	 *  비파괴라 High→Custom으로 되돌려도 Custom 세부가 그대로 살아 있다. */
+	FRopeSolverConfig GetEffectiveSolverConfig() const;
+
+	/** SimQuality가 해석한 접촉 감지 설정(스윕 해상도) — 비파괴 복사본, Custom은 저장 원본 그대로.
+	 *  Flight 감지(CPU MakeFlightDetectParams·GPU RequestContactDetection)가 이 값을 쓴다. */
+	FRopeDetectConfig GetEffectiveDetectConfig() const;
+
+	/** SimQuality가 해석한 프레임당 감김 경로 빌드 step 예산 — Custom은 WrapConfig 저장값 그대로. */
+	int32 GetEffectiveWrappingPathBuildSteps() const;
 
 	//~ Whip(던지기 스윙 설정) ----------------------------------------------
 	/** 던지기 초반 채찍 스윙 튜닝. 런타임 상태는 WhipGuide가 소유하고, 호출 시
@@ -1097,7 +1108,7 @@ private:
 	// 거리 LOD 배율 계산(Prepare, GT): 서브시스템이 프레임당 한 번 구한 카메라 위치를 거리로 바꿔 Throttle에 위임.
 	void ComputeSolverLOD(const TOptional<FVector>& CameraLocation);
 	// LOD 반영된 유효 iteration(CPU 솔브/GPU 스텝 공용 — 서브시스템이 호출).
-	int32 GetLODScaledIterations() const { return Throttle.LODScaledIterations(SolverConfig.Iterations); }
+	int32 GetLODScaledIterations() const { return Throttle.LODScaledIterations(GetEffectiveSolverConfig().Iterations); }
 
 	// 동작 1 — 자동 견인(테더, Docs/PoC/05): 관측(전 체인 C·벌어짐 속도)→λ 솔브→양끝 임펄스 쌍 인가.
 	// ApplyWrappedTraction이 매 Wrapped 프레임 호출한다. 결과는 LengthConstraintState에 단일 단위로 기록된다.
@@ -1261,9 +1272,13 @@ private:
 	void DispatchCaptured(FName Bone);
 
 	/** 허공(대상 없음) 던지기: 레이 끝점(EndpointWorld)을 향한 아치 GuidedThrow를 시작한다(꽂힘 없이 완료 시 Free). */
-	void StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld);
+	bool StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld);
 
 	FVector ComputeThrowInheritedVelocity(const FRopeThrowContext& ThrowContext) const;
+
+	/** 던지기 세기 계약 게이트: Context.ThrowSpeed(0이면 ThrowParams.ThrowSpeed 폴백)를 해석해
+	 *  양수(≥1cm/s)면 OutThrowSpeed에 담고 true, 아니면 경고 로그 후 false. **상태 변경 전에** 호출한다. */
+	bool TryResolveValidThrowSpeed(const FRopeThrowContext& Context, float& OutThrowSpeed) const;
 
 	/** WhipGuide에 넘길 설정 스냅샷을 Rope|Whip UPROPERTY들로부터 만든다. */
 	FRopeWhipGuide::FConfig MakeWhipGuideConfig() const;

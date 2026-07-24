@@ -666,6 +666,29 @@ private:
 
 	void UpdateThrowPreview();
 
+	/** 손 소켓의 애니메이션 상대 속도를 컴포넌트-로컬 위치 델타로 측정한다(Tick). 던지기 시 컨텍스트의
+	 *  HandAnimationVelocity로 실린다 — GetPhysicsLinearVelocity의 물리 바디 의존/역방향 문제를 피한다. */
+	void UpdateHandAnimVelocity(float DeltaTime);
+
+	/** 컴포넌트-로컬 소켓 위치 델타 → 월드 상대 속도(캐릭터 이동 제외), 상한 클램프. 실제 DeltaTime으로
+	 *  나누므로 프레임레이트에 무관하다(같은 손 스윙 = 같은 속도). 순수 함수(측정 로직 단위 테스트 seam). */
+	static FVector ComputeHandSwingVelocityWorld(const FVector& PrevSocketCS, const FVector& CurSocketCS,
+		float DeltaTime, const FTransform& ComponentXform, float MaxSpeed);
+
+	/** 손 속도 샘플 초기화(재활성화/리그 변경/텔레포트/히치 시 stale 델타로 fling 나는 것 방지). */
+	void ResetHandAnimVelocitySample();
+
+	/** ComputeDesiredTickEnabled()를 반영해 틱을 갱신 — off→on 전환이면 손 속도 샘플을 재시드한다. */
+	void RefreshTickEnabled();
+
+	// 손 소켓 애니메이션 속도 측정 상태: 컴포넌트-로컬 이전 위치 + 측정된 월드 속도 + 첫 샘플 여부 +
+	// 리그 변경 감지(mesh/socket 바뀌면 델타를 끊고 재시드).
+	FVector PreviousHandSocketLocationCS = FVector::ZeroVector;
+	FVector MeasuredHandAnimVelocityWorld = FVector::ZeroVector;
+	bool bHasHandSocketSample = false;
+	TWeakObjectPtr<USkeletalMeshComponent> PreviousHandSampleMesh;
+	FName PreviousHandSampleSocket = NAME_None;
+
 	/** 주어진 centerline을 preview 컴포넌트에 넘겨 그린다(표시 OFF/컴포넌트 없음이면 no-op). */
 	void DisplayPreviewCenterline(const FRopeWrapPreviewData& Centerline);
 
