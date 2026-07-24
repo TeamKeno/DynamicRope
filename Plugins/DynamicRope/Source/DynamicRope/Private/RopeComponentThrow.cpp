@@ -541,8 +541,12 @@ FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& T
 
 FVector URopeComponent::ComputeThrowInheritedVelocity(const FRopeThrowContext& ThrowContext) const
 {
-	return ThrowContext.OwnerVelocity * ThrowParams.OwnerVelocityScale +
-		ThrowContext.SocketVelocity * ThrowParams.SocketVelocityScale;
+	// 캐릭터 이동(OwnerVelocity)은 MotionInheritance 배율로 싣고, 손 소켓의 애니메이션 스윙은 소켓 월드
+	// 속도에서 캐릭터 이동을 뺀 상대분(SocketVelocity - OwnerVelocity)만 1배로 싣는다. 소켓 속도가 이미
+	// 캐릭터 이동을 포함하므로(GetPhysicsLinearVelocity) 이렇게 빼야 이동이 이중 반영되지 않는다
+	// — 소켓을 따로 측정 못 하는 경로는 Socket=Owner라 스윙 몫이 자동으로 0이 된다.
+	return ThrowContext.OwnerVelocity * ThrowParams.MotionInheritance +
+		(ThrowContext.SocketVelocity - ThrowContext.OwnerVelocity);
 }
 
 void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
@@ -603,7 +607,18 @@ bool URopeComponent::BeginGuidedThrowState(FRopePreparedThrowPreview&& Prepared,
 	GuidedThrowState.Prepared = MoveTemp(Prepared);
 	GuidedThrowState.StartPositions = Sim.Positions;
 	GuidedThrowState.Elapsed = 0.0f;
-	GuidedThrowState.Duration = FMath::Max(0.01f, WrapConfig.WrappingMotionDuration);
+	// GuidedThrow 진행 시간도 Throw Speed로 잡는다: 손→목표 거리 / ThrowSpeed(안정 범위 0.08~2.0s).
+	// 멀수록 오래, 빠를수록 빨리 도달한다. 좌표는 UpdateGuidedThrow와 같은 preview 월드 해석을 쓴다.
+	{
+		const FRopePreparedThrowPreview& Prep = GuidedThrowState.Prepared;
+		const float GuideThrowSpeed = Prep.ThrowContext.ThrowSpeed > KINDA_SMALL_NUMBER
+			? Prep.ThrowContext.ThrowSpeed : ThrowParams.ThrowSpeed;
+		const FVector HandWorld = Prep.ResolveGuideOriginWorld();
+		const FVector TargetWorld = Prep.ResolveGuidePointWorld(Sim.Num() - 1);
+		const float TravelDist = static_cast<float>((TargetWorld - HandWorld).Size());
+		GuidedThrowState.Duration = FMath::Clamp(
+			TravelDist / FMath::Max(GuideThrowSpeed, KINDA_SMALL_NUMBER), 0.08f, 2.0f);
+	}
 
 	Sim.bStartPinned = true;
 	Sim.StartPinPrev = Origin;
@@ -923,11 +938,17 @@ void URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext,
 
 FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
 {
+	// 휘두름 시간은 Throw Speed 하나로 제어한다: 내부 기준(ReferenceWhipThrowSpeed에서
+	// ReferenceWhipDuration)만 넘기면 ResolveGuideDuration이 EffectiveDuration =
+	// ReferenceWhipDuration × ReferenceWhipThrowSpeed / ThrowSpeed 로 스케일한다(빠를수록 짧게).
+	static constexpr float ReferenceWhipDuration = 0.35f;
+	static constexpr float ReferenceWhipThrowSpeed = 1500.0f;
+
 	FRopeWhipGuide::FConfig Config;
-	Config.Duration = WhipConfig.Duration;
+	Config.Duration = ReferenceWhipDuration;
 	Config.GuidedLength = WhipConfig.GuidedLength;
 	Config.SweepAngleDegrees = WhipConfig.SweepAngleDegrees;
-	Config.ReferenceThrowSpeed = ThrowParams.ThrowSpeed;
+	Config.ReferenceThrowSpeed = ReferenceWhipThrowSpeed;
 	Config.ComponentRopeLength = RopeLength;
 	// CPU/GPU/preview가 동일한 Aim-hit endpoint envelope와 방향 bias를 사용하도록 component 설정을 전달한다.
 	Config.AimHitRootSolverFraction = WhipConfig.AimHitRootSolverFraction;

@@ -159,7 +159,7 @@ struct FRopeThrowParams
 	ERopeSwingPlane SwingPlane = ERopeSwingPlane::AimAndFrameUp;
 
 	/** Wielder를 거치지 않고 RopeComponent::Throw를 직접 호출할 때 쓰는 fallback 속도. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0", DisplayName = "Throw Speed"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Throw Speed"))
 	float ThrowSpeed = 1500.0f;
 
 	/**
@@ -184,16 +184,13 @@ struct FRopeThrowParams
 	float GuidedThrowArcHeightRatio = 0.25f;
 
 	/**
-	 * 던질 때 owner(캐릭터) 속도를 로프에 상속시키는 배율. 물리적 사실값은 1이지만 기본 5인 이유:
-	 * 달리며 던질 때 로프가 눈에 띄게 앞서 나가는 "관성 과장" 연출 — 게임필 튜닝값이다.
-	 * 0 = 상속 없음(제자리 던지기와 동일).
+	 * 던질 때 캐릭터 이동 속도를 로프에 상속시키는 배율("관성 과장" 게임필). 물리 사실값은 1이지만 기본 5 —
+	 * 달리며 던질 때 로프가 눈에 띄게 앞서 나간다. 0 = 상속 없음(제자리 던지기와 동일).
+	 * 손 소켓의 애니메이션 스윙(캐릭터 이동을 뺀 손 상대 속도)은 이 배율과 무관하게 항상 1배 실린다 —
+	 * 소켓 월드 속도가 이미 캐릭터 이동을 포함하므로 그 몫을 빼(ComputeThrowInheritedVelocity) 이중 반영을 막는다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced", meta = (ClampMin = "0.0"))
-	float OwnerVelocityScale = 5.0f;
-
-	/** 던질 때 손 소켓(애니메이션 스윙) 속도를 로프에 상속시키는 배율. 1 = 물리 그대로. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced", meta = (ClampMin = "0.0"))
-	float SocketVelocityScale = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced", meta = (ClampMin = "0.0", DisplayName = "Motion Inheritance"))
+	float MotionInheritance = 5.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
 	FVector CustomFrameForward = FVector::ForwardVector;
@@ -208,18 +205,17 @@ struct FRopeThrowParams
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
 };
 
-/** 던지기 초반 채찍 스윙(FRopeWhipGuide) 튜닝 값. 런타임 상태는 URopeComponent::WhipGuide가 소유한다. */
+/** 던지기 초반 채찍 스윙(FRopeWhipGuide) 튜닝 값. 런타임 상태는 URopeComponent::WhipGuide가 소유한다.
+ *  스윙 시간은 Throw Speed에서 파생한다 — 내부 기준(1500cm/s에서 0.35s)으로
+ *  EffectiveDuration = 0.35 × 1500 / ThrowSpeed(MakeWhipGuideConfig + RopeWhipGuide::ResolveGuideDuration).
+ *  빠를수록 짧게 휘둘러, Throw Speed 하나가 휘두름·비행 세기를 함께 정한다(별도 duration 노브 없음). */
 USTRUCT(BlueprintType)
 struct FRopeWhipConfig
 {
 	GENERATED_BODY()
 
-	/** 스윙 전체 시간(s). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced", meta = (ClampMin = "0.01", ClampMax = "1.0", Units = "s"))
-	float Duration = 0.35f;
-
-	/** 가이드가 잡는 로프 길이 비율(0~1). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced", meta = (ClampMin = "0.1", ClampMax = "0.95"))
+	/** 가이드가 잡는 로프 길이 비율(0~1) — 스윙 궤적 형태 조절. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "0.95"))
 	float GuidedLength = 0.65f;
 
 	/** 시작 각도(조준 반대편)에서 조준 방향까지의 스윕 각. */
