@@ -414,9 +414,12 @@ void URopeWielderComponent::UpdateSwingAirControl()
 		return;
 	}
 
-	// 스윙 = 공중 + wielder 몫 테더 활성. 끝나면(착지/release/설정 변경) 저장해 둔 원래 값으로 복원.
-	// 부스트 중 외부에서 AirControl을 바꾸면 복원 시 덮어쓴다(데모 수준 한계 — 주석으로 계약).
-	const bool bSwinging = bBoostAirControlWhileSwinging && Movement->IsFalling() && IsWielderTetherActive();
+	// 스윙 = 공중 + wielder 몫 테더 활성 + 전 체인 팽팽. 끝나면(착지/release/슬랙/설정 변경) 저장해 둔
+	// 원래 값으로 복원. 부스트 중 외부에서 AirControl을 바꾸면 복원 시 덮어쓴다(데모 수준 한계 — 주석으로 계약).
+	// 팽팽 게이트(IsChainTaut)는 UpdateGroundExit와 같은 판정 — 테더가 실제로 wielder를 끌 때만 조향을
+	// 살린다. 슬랙 체인에서는 테더 힘이 없어 에어컨트롤을 올려도 "스윙 조향"이 아니라 그냥 공중 부양이 된다.
+	const bool bSwinging = bBoostAirControlWhileSwinging && Movement->IsFalling()
+		&& IsWielderTetherActive() && Rope->IsChainTaut();
 	if (bSwinging && !bAirControlBoosted)
 	{
 		SavedAirControl = Movement->AirControl;
