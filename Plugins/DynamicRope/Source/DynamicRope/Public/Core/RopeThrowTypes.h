@@ -152,14 +152,14 @@ struct FRopeThrowParams
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced")
 	ERopeThrowFrameMode FrameMode = ERopeThrowFrameMode::Owner;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced")
 	ERopeSwingPlane SwingPlane = ERopeSwingPlane::AimAndFrameUp;
 
 	/** Wielder를 거치지 않고 RopeComponent::Throw를 직접 호출할 때 쓰는 fallback 속도. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0", DisplayName = "Throw Speed"))
 	float ThrowSpeed = 1500.0f;
 
 	/**
@@ -168,7 +168,7 @@ struct FRopeThrowParams
 	 * Throw 순간 Verlet 속도 분배에만 쓰는 연출 배율이다. 종전 이름 TipMass(기본 5 = 1배라는 숨은
 	 * 정규화)에서 개명·정규화(표면 감사 B-2) — 이제 값이 곧 배율이고 소비처에서 [0.25, 3]으로 클램프.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.25", ClampMax = "3.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced", meta = (ClampMin = "0.25", ClampMax = "3.0"))
 	float TipVelocityBoost = 1.0f;
 
 	/**
@@ -179,7 +179,7 @@ struct FRopeThrowParams
 	 * 떨어지는 궤적이 되어, 조준선과 실제로 보이는 비행이 눈에 띄게 어긋난다.
 	 * BP 런타임 쓰기는 이 meta를 우회하므로 소비처에서도 같은 범위로 클램프한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced",
 		meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float GuidedThrowArcHeightRatio = 0.25f;
 
@@ -188,11 +188,11 @@ struct FRopeThrowParams
 	 * 달리며 던질 때 로프가 눈에 띄게 앞서 나가는 "관성 과장" 연출 — 게임필 튜닝값이다.
 	 * 0 = 상속 없음(제자리 던지기와 동일).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced", meta = (ClampMin = "0.0"))
 	float OwnerVelocityScale = 5.0f;
 
 	/** 던질 때 손 소켓(애니메이션 스윙) 속도를 로프에 상속시키는 배율. 1 = 물리 그대로. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced", meta = (ClampMin = "0.0"))
 	float SocketVelocityScale = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
@@ -215,15 +215,15 @@ struct FRopeWhipConfig
 	GENERATED_BODY()
 
 	/** 스윙 전체 시간(s). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.01", ClampMax = "1.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced", meta = (ClampMin = "0.01", ClampMax = "1.0", Units = "s"))
 	float Duration = 0.35f;
 
 	/** 가이드가 잡는 로프 길이 비율(0~1). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "0.95"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced", meta = (ClampMin = "0.1", ClampMax = "0.95"))
 	float GuidedLength = 0.65f;
 
 	/** 시작 각도(조준 반대편)에서 조준 방향까지의 스윕 각. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg", DisplayName = "Sweep Angle"))
 	float SweepAngleDegrees = 180.0f;
 
 	/** Aim-hit Flight에서 손 쪽 guide를 solver에 넘기는 로프 길이 비율. 0이면 중앙 spline이 손 바로 옆까지 지배한다. */

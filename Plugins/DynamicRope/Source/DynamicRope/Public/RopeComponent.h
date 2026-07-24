@@ -166,7 +166,7 @@ public:
 
 	// ClampMax 512 = FRopeGPUSolver::MaxNodes(GPU 솔버 스레드그룹 상한). 초과하면 조용히 CPU 솔브+튜브
 	// 폴백이 되어 성능 절벽 + 저작 무신호라 에디터에서 막는다(BP/코드 경로는 InitRope가 하드 클램프).
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "2", ClampMax = "512"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Rope", meta = (ClampMin = "2", ClampMax = "512"))
 	int32 NumParticles = 72;
 
 	/** 초기(최대) 로프 길이(cm). 런타임 현재 길이는 GetCurrentRopeLength/SetRopeLength. */
@@ -174,7 +174,7 @@ public:
 	float RopeLength = 600.0f;
 
 	/** 되감기(reel-in)로 줄일 수 있는 최소 길이(cm). RopeLength(초기)가 상한이다. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "10.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Rope", meta = (ClampMin = "10.0", Units = "cm"))
 	float MinRopeLength = 100.0f;
 
 	/** 되감기/풀기 입력이 쓰는 기본 릴 속도(cm/s). 길이 변경은 로프 도메인이라 여기 산다
@@ -285,11 +285,11 @@ public:
 	// 프록시 재생성 전까지 반영되지 않아 BlueprintReadOnly(에디터 변경은 렌더 상태 재생성으로 반영됨).
 
 	/** 시각적 tube 반지름(cm). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (ClampMin = "0.1", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (ClampMin = "0.1", Units = "cm", DisplayName = "Rope Radius"))
 	float Radius = 2.0f;
 
 	/** tube 단면의 변 개수. 높을수록 더 둥글어진다. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (ClampMin = "3", ClampMax = "32"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Rope|Render", meta = (ClampMin = "3", ClampMax = "32"))
 	int32 NumSides = 8;
 
 	/** 렌더 튜브 스무딩: 세그먼트당 Catmull-Rom 서브분할 수(1=끔). 시뮬 노드는 그대로 두고 렌더 센터라인만
@@ -373,7 +373,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "1.0", Units = "cm", DisplayName = "Arc Sample Step"))
 	float PreviewSampleStep = 80.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Arc Query Radius"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Arc Query Radius (0=Auto)"))
 	float PreviewQueryRadius = 0.0f;
 
 	//~ Wielder 계약(C++ 전용) ----------------------------------------------
