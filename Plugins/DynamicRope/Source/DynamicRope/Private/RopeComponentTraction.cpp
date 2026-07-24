@@ -728,10 +728,19 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		}
 	}
 	const FVector AnchorLocal = BodyTM.InverseTransformPosition(AnchorWorld);
-	if (PhysicalTetherConstraint
-		&& FVector::DistSquared(AnchorLocal, PhysicalTetherAnchorLocal) > FMath::Square(5.0f))
+	// 순간 anchorLocal은 로프 Sim(GPU 지연 미러)과 현재 본 TM의 지연차로 빠른 랙돌에서 프레임마다 크게
+	// 흔들린다 — 순간값으로 5cm 가드를 대면 진짜 재배치가 없어도 매 프레임 재생성(thrash)돼 제약이
+	// warm start를 못 쌓고 오히려 떨린다(계측: 재생성 70%·힘 0 89%). 그래서 anchorLocal을 EMA로 스무딩해
+	// 그 값으로 판정한다: 지연 노이즈는 평균으로 상쇄되고(스무딩값은 고정 앵커 근처에 머묾), 지속적
+	// 재배치(시드 합류/승격)만 평균을 옮겨 임계를 넘긴다. 임계도 10cm로 올려 여유를 둔다.
+	if (PhysicalTetherConstraint)
 	{
-		TeardownPhysicalTether();
+		const float SmoothAlpha = RopeTraction::ExpSmoothAlpha(0.12f, DeltaTime); // ≈0.12s 시상수.
+		PhysicalTetherSmoothedAnchorLocal = FMath::Lerp(PhysicalTetherSmoothedAnchorLocal, AnchorLocal, SmoothAlpha);
+		if (FVector::DistSquared(PhysicalTetherSmoothedAnchorLocal, PhysicalTetherAnchorLocal) > FMath::Square(10.0f))
+		{
+			TeardownPhysicalTether();
+		}
 	}
 
 	if (!PhysicalTetherProxy)
@@ -793,6 +802,7 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		PhysicalTetherTarget = TargetPrim;
 		PhysicalTetherBone = Bone;
 		PhysicalTetherAnchorLocal = AnchorLocal;
+		PhysicalTetherSmoothedAnchorLocal = AnchorLocal; // EMA를 생성 앵커로 시드(첫 프레임 가짜 드리프트 방지).
 		PhysicalTetherLimit = -1.0f; // 아래에서 강제 갱신.
 		UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] physical tether created: %s/%s"),
 			*GetName(), *GetNameSafe(TargetPrim), *Bone.ToString());

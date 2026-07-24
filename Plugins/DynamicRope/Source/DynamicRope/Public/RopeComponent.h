@@ -1069,6 +1069,11 @@ private:
 	// 생성 시 고정한 바디-로컬 앵커(제약 Frame2) — wrap 앵커가 같은 (대상,본) 안에서 재배치되면
 	// 드리프트를 감지해 재생성하는 가드의 기준값.
 	FVector PhysicalTetherAnchorLocal = FVector::ZeroVector;
+	// 관측 anchorLocal의 EMA — 드리프트 가드가 매 프레임 재생성하는 thrash 방지. AnchorWorld는 로프 Sim
+	// (GPU 1~2프레임 지연 미러)에서, BodyTM은 현재 본에서 오므로, 빠른 랙돌 본에서 둘의 지연차가
+	// anchorLocal을 프레임마다 크게 흔든다(진짜 재배치 아님). 순간값이 아니라 이 스무딩값으로 판정해야
+	// 지연 노이즈는 걸러지고 지속적 재배치(시드 합류/승격)만 잡힌다.
+	FVector PhysicalTetherSmoothedAnchorLocal = FVector::ZeroVector;
 
 	// (테더) wielder 견인 방향(손(노드0)→로프 첫 다리 = 앵커 쪽)을 산출해 PullDrive.SmoothedWielderPullDir로
 	// EMA 스무딩(PullDirSmoothTime)해 반환 — 방향 지터로 인가 축이 튀는 것을 막는다(180° 반전 축퇴는 raw 재시드).
