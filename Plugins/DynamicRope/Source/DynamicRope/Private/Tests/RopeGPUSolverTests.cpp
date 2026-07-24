@@ -811,6 +811,13 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 	FRopeGPUSolver GpuSolver;
 	const uint32 RopeId = 23;
 	const uint32 Gen = 1;
+	// 120 frames keeps the original long-run stability coverage. Absolute CPU/GPU positions are
+	// compared at frame 30 while the rope is still interacting with the box; after it falls free,
+	// tiny solver-order differences accumulate into unrelated trajectory drift.
+	constexpr int32 NumSimulationFrames = 120;
+	constexpr int32 ParitySampleFrame = 30;
+	TArray<FVector> ParityCpuPositions;
+	TArray<FVector> ParityGpuPositions;
 
 	auto MakeStep = [&](const FRopeSimState& Src, int32 NumSub, float FixedDt) -> FRopeGPUResidentStep
 	{
@@ -842,7 +849,7 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 		return Step;
 	};
 
-	for (int32 Frame = 0; Frame < 120; ++Frame)
+	for (int32 Frame = 0; Frame < NumSimulationFrames; ++Frame)
 	{
 		Solver.Step(CpuSim, Config, Colliders, 1.0f / 60.0f);
 
@@ -851,6 +858,18 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 		Steps.Add(MakeStep(GpuSim, Schedule.NumSub, Schedule.FixedDt));
 		GpuSolver.Step(MoveTemp(Steps));
 		FlushRenderingCommands();
+		if (Frame + 1 == ParitySampleFrame)
+		{
+			TArray<FVector> SnapshotPrev;
+			uint32 SnapshotGen = 0;
+			if (!GpuSolver.ReadbackNow(RopeId, ParityGpuPositions, SnapshotPrev, SnapshotGen) ||
+				SnapshotGen != Gen || ParityGpuPositions.Num() != CpuSim.Num())
+			{
+				AddError(TEXT("GPU 박스 parity: 접촉 구간 스냅샷을 회수하지 못함."));
+				return false;
+			}
+			ParityCpuPositions = CpuSim.Positions;
+		}
 	}
 
 	// 최종 프레임 결과를 결정론적으로 회수: ReadbackNow는 상주 버퍼를 BlockUntilGPUIdle로 동기 리드백한다.
@@ -874,9 +893,9 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("CPU no NaN"), RopeTest::AnyNaN(CpuSim));
 	TestFalse(TEXT("GPU no NaN"), RopeTest::AnyNaN(GpuSim));
 
-	// (1) 관통 없음: 어떤 GPU 노드도 박스 내부에 있으면 안 된다(원래 버그의 회귀 조건).
+	// (1) 접촉 구간 관통 없음: 어떤 GPU 노드도 박스 내부에 있으면 안 된다(원래 버그의 회귀 조건).
 	float MaxInsideDepth = 0.0f;
-	for (const FVector& P : GpuSim.Positions)
+	for (const FVector& P : ParityGpuPositions)
 	{
 		const FVector A = P.GetAbs();
 		if (A.X < HalfExtents.X && A.Y < HalfExtents.Y && A.Z < HalfExtents.Z)
@@ -889,14 +908,33 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 		MaxInsideDepth < 0.5f);
 
 	// (2) CPU 근사 일치: 정착 드레이프 형상이 가까운지(비트일치 아님 — 컬러링/샘플 순서 차).
+	if (!TestEqual(TEXT("박스 parity CPU 스냅샷 노드 수"), ParityCpuPositions.Num(), N) ||
+		!TestEqual(TEXT("박스 parity GPU 스냅샷 노드 수"), ParityGpuPositions.Num(), N))
+	{
+		return false;
+	}
 	float MaxDev = 0.0f;
+	int32 MaxDevNode = INDEX_NONE;
 	for (int32 i = 0; i < N; ++i)
 	{
-		MaxDev = FMath::Max(MaxDev, static_cast<float>(FVector::Dist(CpuSim.Positions[i], GpuSim.Positions[i])));
+		const float Dev = static_cast<float>(FVector::Dist(ParityCpuPositions[i], ParityGpuPositions[i]));
+		if (Dev > MaxDev)
+		{
+			MaxDev = Dev;
+			MaxDevNode = i;
+		}
 	}
-	AddInfo(FString::Printf(TEXT("박스 드레이프 CPU↔GPU 최대 노드 편차: %.2f cm"), MaxDev));
+	AddInfo(FString::Printf(TEXT("박스 접촉 구간(%d frame) CPU↔GPU 최대 노드 편차: %.2f cm"),
+		ParitySampleFrame, MaxDev));
+	if (MaxDevNode != INDEX_NONE)
+	{
+		AddInfo(FString::Printf(TEXT("박스 최대 편차 node=%d CPU=%s GPU=%s"),
+			MaxDevNode,
+			*ParityCpuPositions[MaxDevNode].ToCompactString(),
+			*ParityGpuPositions[MaxDevNode].ToCompactString()));
+	}
 	TestTrue(FString::Printf(TEXT("CPU↔GPU max node deviation %.2f cm within tolerance"), MaxDev),
-		MaxDev < Length * 0.25f);
+		MaxDev < Length * 0.10f);
 
 	return true;
 }
@@ -943,6 +981,12 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 	FRopeGPUSolver GpuSolver;
 	const uint32 RopeId = 29;
 	const uint32 Gen = 1;
+	// Keep the 120-frame stability run, but compare CPU/GPU shape at the contact snapshot rather
+	// than after both free ropes have left the convex and accumulated unrelated flight drift.
+	constexpr int32 NumSimulationFrames = 120;
+	constexpr int32 ParitySampleFrame = 30;
+	TArray<FVector> ParityCpuPositions;
+	TArray<FVector> ParityGpuPositions;
 
 	auto MakeStep = [&](const FRopeSimState& Src, int32 NumSub, float FixedDt) -> FRopeGPUResidentStep
 	{
@@ -981,7 +1025,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		return Step;
 	};
 
-	for (int32 Frame = 0; Frame < 120; ++Frame)
+	for (int32 Frame = 0; Frame < NumSimulationFrames; ++Frame)
 	{
 		Solver.Step(CpuSim, Config, Colliders, 1.0f / 60.0f);
 		const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(GpuSim, Config, 1.0f / 60.0f);
@@ -989,6 +1033,18 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		Steps.Add(MakeStep(GpuSim, Schedule.NumSub, Schedule.FixedDt));
 		GpuSolver.Step(MoveTemp(Steps));
 		FlushRenderingCommands();
+		if (Frame + 1 == ParitySampleFrame)
+		{
+			TArray<FVector> SnapshotPrev;
+			uint32 SnapshotGen = 0;
+			if (!GpuSolver.ReadbackNow(RopeId, ParityGpuPositions, SnapshotPrev, SnapshotGen) ||
+				SnapshotGen != Gen || ParityGpuPositions.Num() != CpuSim.Num())
+			{
+				AddError(TEXT("GPU 컨벡스 parity: 접촉 구간 스냅샷을 회수하지 못함."));
+				return false;
+			}
+			ParityCpuPositions = CpuSim.Positions;
+		}
 	}
 
 	// 최종 프레임 결과를 결정론적으로 회수: ReadbackNow는 상주 버퍼를 BlockUntilGPUIdle로 동기 리드백한다.
@@ -1012,9 +1068,9 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("CPU no NaN"), RopeTest::AnyNaN(CpuSim));
 	TestFalse(TEXT("GPU no NaN"), RopeTest::AnyNaN(GpuSim));
 
-	// (1) 관통 없음: 어떤 GPU 노드도 컨벡스(=박스) 내부에 있으면 안 된다.
+	// (1) 접촉 구간 관통 없음: 어떤 GPU 노드도 컨벡스(=박스) 내부에 있으면 안 된다.
 	float MaxInsideDepth = 0.0f;
-	for (const FVector& P : GpuSim.Positions)
+	for (const FVector& P : ParityGpuPositions)
 	{
 		const FVector A = P.GetAbs();
 		if (A.X < H.X && A.Y < H.Y && A.Z < H.Z)
@@ -1026,14 +1082,37 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		MaxInsideDepth < 0.5f);
 
 	// (2) CPU 근사 일치.
+	if (!TestEqual(TEXT("컨벡스 parity CPU 스냅샷 노드 수"), ParityCpuPositions.Num(), N) ||
+		!TestEqual(TEXT("컨벡스 parity GPU 스냅샷 노드 수"), ParityGpuPositions.Num(), N))
+	{
+		return false;
+	}
 	float MaxDev = 0.0f;
 	for (int32 i = 0; i < N; ++i)
 	{
-		MaxDev = FMath::Max(MaxDev, static_cast<float>(FVector::Dist(CpuSim.Positions[i], GpuSim.Positions[i])));
+		MaxDev = FMath::Max(MaxDev,
+			static_cast<float>(FVector::Dist(ParityCpuPositions[i], ParityGpuPositions[i])));
 	}
-	AddInfo(FString::Printf(TEXT("컨벡스 드레이프 CPU↔GPU 최대 노드 편차: %.2f cm"), MaxDev));
+	AddInfo(FString::Printf(TEXT("컨벡스 접촉 구간(%d frame) CPU↔GPU 최대 노드 편차: %.2f cm"),
+		ParitySampleFrame, MaxDev));
+	int32 MaxDevNode = INDEX_NONE;
+	for (int32 i = 0; i < N; ++i)
+	{
+		if (FVector::Dist(ParityCpuPositions[i], ParityGpuPositions[i]) >= MaxDev - KINDA_SMALL_NUMBER)
+		{
+			MaxDevNode = i;
+			break;
+		}
+	}
+	if (MaxDevNode != INDEX_NONE)
+	{
+		AddInfo(FString::Printf(TEXT("컨벡스 최대 편차 node=%d CPU=%s GPU=%s"),
+			MaxDevNode,
+			*ParityCpuPositions[MaxDevNode].ToCompactString(),
+			*ParityGpuPositions[MaxDevNode].ToCompactString()));
+	}
 	TestTrue(FString::Printf(TEXT("CPU↔GPU max node deviation %.2f cm within tolerance"), MaxDev),
-		MaxDev < Length * 0.25f);
+		MaxDev < Length * 0.10f);
 
 	return true;
 }
