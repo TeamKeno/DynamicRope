@@ -56,7 +56,7 @@ public:
 	bool bRagdollOnWrapped = true;
 
 	/** 자동 전환까지의 지연(초). 감긴 직후 vs 잠시 뒤 전환의 차이를 조절. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Advanced", meta = (ClampMin = "0.0", Units = "s", EditCondition = "bRagdollOnWrapped"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (ClampMin = "0.0", Units = "s", EditCondition = "bRagdollOnWrapped"))
 	float RagdollOnWrappedDelay = 0.3f;
 
 	/**
@@ -77,7 +77,7 @@ public:
 	 * 몫 분배가 여전히 틀린다. 기본값 false로 두는 한 무해하다 — 풀 랙돌은 전 바디가 시뮬이라 키네마틱 앵커가
 	 * 없고 관절로 몸 전체가 끌려오므로 정상 동작한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Advanced", meta = (EditCondition = "bRagdollOnWrapped"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (EditCondition = "bRagdollOnWrapped"))
 	bool bOnlyBelowWrappedBone = false;
 
 	/**
@@ -103,11 +103,11 @@ public:
 	 * pelvis. 드래곤/동물 등 스켈레톤이 다르면 주 물리 바디 본으로 바꾼다. 스켈레톤에 없으면 재정렬을
 	 * 건너뛴다(경고 후 종전 동작).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Advanced", meta = (EditCondition = "bMoveCapsuleToMeshOnRecover"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (EditCondition = "bMoveCapsuleToMeshOnRecover"))
 	FName RecoverAnchorBoneName = TEXT("pelvis");
 
 	/** 랙돌 동안 메시에 줄 콜리전 프로파일. 마네킹 기본(CharacterMesh)은 물리 충돌이 없어 전환이 필수. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Advanced")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning")
 	FName RagdollCollisionProfileName = TEXT("Ragdoll");
 
 	/**
@@ -117,7 +117,7 @@ public:
 	 * 안 잡힌다. 켜 두면 진입 시 켜고 복귀 시 원래 값으로 되돌린다. 끄는 경우: 대상이 트리거와 무관하고
 	 * 바디 수가 많아 매 프레임 바디별 오버랩 질의 비용이 아까울 때.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Advanced")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning")
 	bool bGenerateOverlapEventsWhileRagdolled = true;
 
 	/** 풀 랙돌 전환: 메시 전체 물리 시뮬 + 캡슐 콜리전/무브먼트 정지(ACharacter일 때). */

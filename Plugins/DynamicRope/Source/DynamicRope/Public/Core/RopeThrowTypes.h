@@ -152,10 +152,10 @@ struct FRopeThrowParams
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning")
 	ERopeThrowFrameMode FrameMode = ERopeThrowFrameMode::Owner;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning")
 	ERopeSwingPlane SwingPlane = ERopeSwingPlane::AimAndFrameUp;
 
 	/** Wielder를 거치지 않고 RopeComponent::Throw를 직접 호출할 때 쓰는 fallback 속도. */
@@ -168,7 +168,7 @@ struct FRopeThrowParams
 	 * Throw 순간 Verlet 속도 분배에만 쓰는 연출 배율이다. 종전 이름 TipMass(기본 5 = 1배라는 숨은
 	 * 정규화)에서 개명·정규화(표면 감사 B-2) — 이제 값이 곧 배율이고 소비처에서 [0.25, 3]으로 클램프.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced", meta = (ClampMin = "0.25", ClampMax = "3.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (ClampMin = "0.25", ClampMax = "3.0"))
 	float TipVelocityBoost = 1.0f;
 
 	/**
@@ -179,7 +179,7 @@ struct FRopeThrowParams
 	 * 떨어지는 궤적이 되어, 조준선과 실제로 보이는 비행이 눈에 띄게 어긋난다.
 	 * BP 런타임 쓰기는 이 meta를 우회하므로 소비처에서도 같은 범위로 클램프한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning",
 		meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float GuidedThrowArcHeightRatio = 0.25f;
 
@@ -189,7 +189,7 @@ struct FRopeThrowParams
 	 * 손 소켓의 애니메이션 스윙(캐릭터 이동을 뺀 손 상대 속도)은 이 배율과 무관하게 항상 1배 실린다 —
 	 * 소켓 월드 속도가 이미 캐릭터 이동을 포함하므로 그 몫을 빼(ComputeThrowInheritedVelocity) 이중 반영을 막는다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Advanced", meta = (ClampMin = "0.0", DisplayName = "Motion Inheritance"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (ClampMin = "0.0", DisplayName = "Motion Inheritance"))
 	float MotionInheritance = 5.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
@@ -223,19 +223,19 @@ struct FRopeWhipConfig
 	float SweepAngleDegrees = 180.0f;
 
 	/** Aim-hit Flight에서 손 쪽 guide를 solver에 넘기는 로프 길이 비율. 0이면 중앙 spline이 손 바로 옆까지 지배한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
 	float AimHitRootSolverFraction = 0.20f;
 
 	/** Hit direction 보간 편향. 1은 선형 강도, 클수록 같은 Flight 시점에서 spline이 더 빨리 hit 방향을 향한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced|Aim Hit", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit", meta = (ClampMin = "1.0", ClampMax = "4.0"))
 	float AimHitDirectionBias = 2.0f;
 
 	/** Aim-hit Flight에서 자유단 쪽 guide를 solver에 넘기는 로프 길이 비율. 클수록 끝이 더 관성적으로 움직인다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
 	float AimHitTipSolverFraction = 0.25f;
 
 	/** Aim-hit Flight에서 거리/굽힘/감쇠 solver는 유지하고 collider push-out만 끈다. 접촉 감지는 계속 동작한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced|Aim Hit")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit")
 	bool bAimHitCollisionFreeSolve = true;
 };
 

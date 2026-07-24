@@ -138,11 +138,11 @@ public:
 	int32 NumSides = 8;
 
 	/** 렌더 튜브 스무딩: 세그먼트당 Catmull-Rom 서브분할 수(1=끔). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Render|Advanced", meta = (ClampMin = "1", ClampMax = "8"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Render|Tuning", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 TubeSmoothingSubdiv = 1;
 
 	/** 렌더 튜브 스무딩의 Catmull-Rom knot α: 0=uniform, 0.5=centripetal, 1=chordal. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Render|Advanced", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Render|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TubeSmoothingAlpha = 0.5f;
 
 	/** rope tube에 적용되는 material. 비우면 엔진 기본 material. */
