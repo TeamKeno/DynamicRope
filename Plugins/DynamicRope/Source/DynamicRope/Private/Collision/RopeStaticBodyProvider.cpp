@@ -248,6 +248,18 @@ void URopeStaticBodyProvider::BuildColliders(const FRopeColliderGatherContext& G
 			{
 				continue;
 			}
+			// 트리거/오버랩 볼륨 배제: 오브젝트 타입 오버랩은 상대의 채널 응답을 안 보고 QueryOnly 바디도
+			// 잡으므로, 감지 전용 볼륨(압력판 Trigger 등 눈에 안 보이는 QueryOnly 박스)이 그대로 solid
+			// 콜라이더가 되어 로프를 민다(2026-07-24 스네어 끌어올림 떨림). 로프는 물리 오브젝트처럼
+			// 행동한다는 계약으로 걸러낸다 — "물리 충돌이 켜져 있고(ECollisionEnabled에 Physics 포함)
+			// PhysicsBody 채널을 Block하는" 셰이프만 밀어낼 자격이 있다. 보이지 않아도 물리로 막는
+			// BlockingVolume류는 통과(랙돌/프랍을 막으니 로프도 막는 게 일관) — 의도적 예외는
+			// IgnoredComponents가 담당한다.
+			if (!Prim->IsPhysicsCollisionEnabled()
+				|| Prim->GetCollisionResponseToChannel(ECC_PhysicsBody) != ECR_Block)
+			{
+				continue;
+			}
 			// ISM/HISM(M3): 인스턴스별 처리 — 한 컴포넌트가 공유 메시 콜리전을 여러 인스턴스에 배치한다.
 			// GetBodySetup은 인스턴스 트랜스폼을 모르는 원본(로컬) 셰이프를 주므로, 근접 인스턴스마다 그
 			// 월드 트랜스폼으로 추출해야 한다(HISM도 이 베이스로 캐치). 컴포넌트 단위 Seen에 넣지 않고
