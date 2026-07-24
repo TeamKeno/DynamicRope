@@ -8,8 +8,8 @@
 //        → Snared(케이블을 SnareLength까지 릴-인 → 사지가 앵커 쪽으로 벌어짐)
 //        → ReleaseSnare() → Idle(감김 해제 + 길이 복원)
 //
-// 앵커 슬롯은 4개(팔 2 + 다리 2)지만 **Bindings에 넣은 만큼만** 쓴다 — 2개면 양팔 결박
-// (2로프 스파이크), 4개면 완전한 대자다. 코드 변경 없이 레벨에서 늘린다.
+// 앵커 슬롯은 4개(팔 2 + 다리 2)이고 **Bindings에 넣은 만큼만** 쓴다. 기본은 사지 4슬롯
+// (완전한 대자) — 레벨에서 항목을 지우거나 Bone을 비우면 그 슬롯은 쏘지 않는다(2개만 남기면 양팔 결박).
 //
 // 대상 조건:
 //   - TargetActor에 스켈레탈 메시 + 로프 콜라이더 프로바이더(캡슐/SDF)가 있어야 감긴다.
@@ -109,7 +109,7 @@ public:
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Rope|Demo")
 	TObjectPtr<AActor> TargetActor = nullptr;
 
-	/** 결박 슬롯(최대 4). 기본값은 양팔 2슬롯 — 다리 2슬롯을 추가하면 완전한 대자가 된다. */
+	/** 결박 슬롯(최대 4). 기본값은 사지 4슬롯(완전한 대자) — 항목 삭제/Bone 비움으로 줄인다. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TArray<FRopeDemoSnareBinding> Bindings;
 

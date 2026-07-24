@@ -53,8 +53,9 @@ ARopeDemoSnare::ARopeDemoSnare()
 		}
 	}
 
-	// 기본 = 양팔 2슬롯(2로프 스파이크). 대상이 +X를 보고 원점에 선 배치를 가정한다(왼쪽 = -Y).
-	// 다리 2슬롯(foot_l / foot_r)을 추가하면 그대로 완전한 대자가 된다.
+	// 기본 = 사지 4슬롯(완전한 대자). 대상이 +X를 보고 원점에 선 배치를 가정한다(왼쪽 = -Y).
+	// 손은 위쪽 대각, 발은 아래쪽 대각 앵커 — 레벨에서 슬롯을 비우거나(Bone 비움/항목 삭제)
+	// AnchorOffset을 조정해 자유롭게 줄인다(2개만 남기면 종전 양팔 결박).
 	Bindings.Reserve(MaxBindings);
 	{
 		FRopeDemoSnareBinding LeftHand;
@@ -66,6 +67,16 @@ ARopeDemoSnare::ARopeDemoSnare()
 		RightHand.Bone = TEXT("hand_r");
 		RightHand.AnchorOffset = FVector(0.0f, 250.0f, 200.0f);
 		Bindings.Add(RightHand);
+
+		FRopeDemoSnareBinding LeftFoot;
+		LeftFoot.Bone = TEXT("foot_l");
+		LeftFoot.AnchorOffset = FVector(0.0f, -250.0f, 30.0f);
+		Bindings.Add(LeftFoot);
+
+		FRopeDemoSnareBinding RightFoot;
+		RightFoot.Bone = TEXT("foot_r");
+		RightFoot.AnchorOffset = FVector(0.0f, 250.0f, 30.0f);
+		Bindings.Add(RightFoot);
 	}
 }
 
@@ -366,7 +377,9 @@ void ARopeDemoSnare::ForceTargetRagdoll()
 	{
 		if (!Response->IsRagdolled())
 		{
-			Response->EnterRagdoll();
+			// 로프 구동 진입으로 분류(true) — 스네어가 놓으면(마지막 로프 release) 자동 복귀 대상이 된다.
+			// 종전엔 수동 분류라 자동 복귀 게이트(bRagdollWasAutoTriggered)에서 걸러져 영구 랙돌이었다.
+			Response->EnterRagdoll(/*bAutoRecoverOnRelease*/ true);
 		}
 	}
 }
