@@ -170,23 +170,16 @@ void URopeRagdollResponseComponent::FireAutoRagdoll()
 	{
 		UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: wrap → 감긴 본(%s) 이하 부분 랙돌 자동 전환."),
 			*GetNameSafe(GetOwner()), *PendingWrappedBone.ToString());
-		EnterPartialRagdoll(PendingWrappedBone);
+		EnterPartialRagdoll(PendingWrappedBone, /*bAutoRecoverOnRelease*/ true);
 	}
 	else
 	{
 		UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: wrap → 풀 랙돌 자동 전환."), *GetNameSafe(GetOwner()));
-		EnterRagdoll();
-	}
-
-	// Enter*가 성공해 랙돌에 들어갔으면 이 전환은 "자동"으로 표시한다(Enter*는 수동 기준으로 false를
-	// 세팅하므로 여기서 덮어써야 한다 — 자동 복귀 게이트가 이 플래그를 본다).
-	if (bRagdolled)
-	{
-		bRagdollWasAutoTriggered = true;
+		EnterRagdoll(/*bAutoRecoverOnRelease*/ true);
 	}
 }
 
-void URopeRagdollResponseComponent::EnterRagdoll()
+void URopeRagdollResponseComponent::EnterRagdoll(bool bAutoRecoverOnRelease)
 {
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh || bRagdolled)
@@ -219,15 +212,17 @@ void URopeRagdollResponseComponent::EnterRagdoll()
 	Mesh->SetCollisionProfileName(RagdollCollisionProfileName);
 	ApplyRagdollOverlapEvents(Mesh);
 	Mesh->SetSimulatePhysics(true);
+	ApplyRagdollCCD(Mesh, true);
 
 	bRagdolled = true;
 	bPartial = false;
-	// 기본은 수동 진입 — 자동 경로(FireAutoRagdoll)가 성공 후 true로 덮는다.
-	bRagdollWasAutoTriggered = false;
+	// 로프 구동 진입(wrap 자동 전환·스네어 강제 랙돌)은 true — release 자동 복귀 게이트 대상.
+	// false = 수동/치트 진입(로프가 멋대로 일으키지 않는다).
+	bRagdollWasAutoTriggered = bAutoRecoverOnRelease;
 	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 풀 랙돌 진입."), *GetNameSafe(GetOwner()));
 }
 
-void URopeRagdollResponseComponent::EnterPartialRagdoll(FName BoneName)
+void URopeRagdollResponseComponent::EnterPartialRagdoll(FName BoneName, bool bAutoRecoverOnRelease)
 {
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	if (!Mesh || bRagdolled)
@@ -277,10 +272,11 @@ void URopeRagdollResponseComponent::EnterPartialRagdoll(FName BoneName)
 	ApplyRagdollOverlapEvents(Mesh);
 	Mesh->SetAllBodiesBelowSimulatePhysics(BodyBone, true, /*bIncludeSelf*/ true);
 	Mesh->SetAllBodiesBelowPhysicsBlendWeight(BodyBone, 1.0f);
+	ApplyRagdollCCD(Mesh, true);
 
 	bRagdolled = true;
 	bPartial = true;
-	bRagdollWasAutoTriggered = false;
+	bRagdollWasAutoTriggered = bAutoRecoverOnRelease;
 	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 부분 랙돌 진입(본 %s 이하)."),
 		*GetNameSafe(GetOwner()), *BodyBone.ToString());
 }
@@ -317,6 +313,7 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 	Mesh->SetSimulatePhysics(false);
 	Mesh->SetCollisionProfileName(SavedCollisionProfile);
 	Mesh->SetGenerateOverlapEvents(bSavedMeshOverlapEvents);
+	ApplyRagdollCCD(Mesh, false);
 
 	if (!bPartial)
 	{
@@ -378,6 +375,18 @@ void URopeRagdollResponseComponent::ApplyRagdollOverlapEvents(USkeletalMeshCompo
 	if (bGenerateOverlapEventsWhileRagdolled)
 	{
 		Mesh->SetGenerateOverlapEvents(true);
+	}
+}
+
+void URopeRagdollResponseComponent::ApplyRagdollCCD(USkeletalMeshComponent* Mesh, bool bEnable)
+{
+	// 얇은 바닥(엔진 기본 Plane 등 두께 0 콜리전)은 랙돌 바디가 한 스텝에 면을 넘어가면 접촉이 생성되지
+	// 않아 뚫린다 — 랙돌 동안만 전 바디 CCD로 스텝 사이를 스윕한다. 원복은 일괄 false: 피직스 에셋이
+	// 저작 시점에 켜둔 바디까지 함께 꺼지는 한계는 감수한다(복귀 후엔 시뮬 off라 실효가 없고, 이
+	// 컴포넌트로 재진입하면 다시 켠다).
+	if (bUseCCDWhileRagdolled)
+	{
+		Mesh->SetAllUseCCD(bEnable);
 	}
 }
 

@@ -120,13 +120,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning")
 	bool bGenerateOverlapEventsWhileRagdolled = true;
 
-	/** 풀 랙돌 전환: 메시 전체 물리 시뮬 + 캡슐 콜리전/무브먼트 정지(ACharacter일 때). */
-	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
-	void EnterRagdoll();
+	/**
+	 * 랙돌 동안 모든 바디에 CCD를 켠다(기본 켬, 복귀 시 원복). 얇은 바닥(엔진 기본 Plane 등 두께 0
+	 * 콜리전)은 랙돌 바디가 한 스텝에 면을 넘어가면 접촉이 아예 생성되지 않아 뚫린다 — CCD가 스텝
+	 * 사이를 스윕해 막는다. 바디 수만큼 스윕 비용이 들므로 대량 랙돌에서 아까우면 끄고 바닥 두께로
+	 * 해결할 것(Plane 대신 Cube 권장).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning")
+	bool bUseCCDWhileRagdolled = true;
 
-	/** 부분 랙돌 전환: BoneName 이하 바디만 물리 시뮬(blend weight 1). 나머지는 애니메이션 유지. */
+	/** 풀 랙돌 전환: 메시 전체 물리 시뮬 + 캡슐 콜리전/무브먼트 정지(ACharacter일 때).
+	 *  bAutoRecoverOnRelease: true = 로프 구동 진입으로 분류 — 감은 로프가 모두 풀리면 자동 복귀 대상
+	 *  (스네어 강제 랙돌 등, bRecoverRagdollOnRopeRelease 게이트 통과). 기본 false = 수동/치트 진입
+	 *  (로프 release와 무관하게 유지 — 종전 동작). */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
-	void EnterPartialRagdoll(FName BoneName);
+	void EnterRagdoll(bool bAutoRecoverOnRelease = false);
+
+	/** 부분 랙돌 전환: BoneName 이하 바디만 물리 시뮬(blend weight 1). 나머지는 애니메이션 유지.
+	 *  bAutoRecoverOnRelease 의미는 EnterRagdoll과 동일. */
+	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
+	void EnterPartialRagdoll(FName BoneName, bool bAutoRecoverOnRelease = false);
 
 	/** 애니메이션 복귀. 풀 랙돌이었다면 메시를 원래 부착/상대 트랜스폼으로 되돌린다(의도된 포즈 팝). */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
@@ -157,6 +170,9 @@ private:
 
 	/** RagdollOnWrappedDelay 만료 시 실제 전환(예약된 본은 PendingWrappedBone). */
 	void FireAutoRagdoll();
+
+	/** bUseCCDWhileRagdolled 게이트 하에 전 바디 CCD를 켜고/끈다(진입 시 켬, 복귀 시 원복). */
+	void ApplyRagdollCCD(USkeletalMeshComponent* Mesh, bool bEnable);
 
 	bool bRagdolled = false;
 	bool bPartial = false;
