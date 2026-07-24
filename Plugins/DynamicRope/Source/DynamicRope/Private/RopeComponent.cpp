@@ -308,7 +308,24 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 			// 대상 mesh 소실 — release 완료(솔브 없음).
 			break;
 		}
-		UpdateWrappedPullSample(DeltaTime);
+		// Hold는 current bone 위치를 OverrideFrame에만 기록하고 실제 Sim 적용은 Prepare 끝의 단일
+		// ApplyToSim 계약까지 미룬다. Pull/tether가 직전 solve pose를 읽지 않도록 별도 관측 view에
+		// 현재 손 pin + Hold override를 먼저 합성한다. GPU 내부 자유 노드는 mirror일 수 있지만,
+		// movement hard constraint는 이 view가 아니라 live CPU binding descriptor를 사용한다.
+		PullObservationSim = Sim;
+		if (PullObservationSim.Positions.IsValidIndex(0))
+		{
+			PullObservationSim.Positions[0] = Sim.StartPinTarget;
+			if (PullObservationSim.PrevPositions.IsValidIndex(0))
+			{
+				PullObservationSim.PrevPositions[0] = Sim.StartPinTarget;
+			}
+		}
+		if (SimFrame.OverrideFrame.HasAny())
+		{
+			SimFrame.OverrideFrame.ApplyToSim(PullObservationSim);
+		}
+		UpdateWrappedPullSample(DeltaTime, PullObservationSim);
 		ApplyWrappedTraction(DeltaTime);
 		if (CheckWrappedAutoRelease(DeltaTime))
 		{
@@ -419,7 +436,15 @@ float URopeComponent::GetEffectiveMaxStretchRatio() const
 		Phase == ERopePhase::Flight ||
 		Phase == ERopePhase::Wrapping ||
 		SimFrame.bForceNonStretchThisFrame;
-	return bPhysicalResolveMode && bThrowOrWrapFrame
+	// Once held, the visual solver must obey the same material contract as movement and
+	// reaction tension. A rigid authoritative hold cannot leave MaxStretchRatio=1.5 as a
+	// second, hidden elasticity source. Positive TetherCompliance explicitly opts back into
+	// the configured visual stretch policy.
+	const bool bRigidAuthoritativeHold =
+		HoldConfig.bEnforceWielderLengthConstraint &&
+		HoldConfig.TetherCompliance <= KINDA_SMALL_NUMBER &&
+		(Phase == ERopePhase::Wrapping || Phase == ERopePhase::Wrapped);
+	return (bPhysicalResolveMode && bThrowOrWrapFrame) || bRigidAuthoritativeHold
 		? 1.0f
 		: SolverConfig.MaxStretchRatio;
 }
@@ -721,14 +746,17 @@ void URopeComponent::SetPhase(ERopePhase NewPhase, const TCHAR* Reason)
 	}
 }
 
-void URopeComponent::ResetTransientPhaseState()
+void URopeComponent::ResetTransientPhaseState(bool bPreservePhysicalTether)
 {
 	AimTargeting.ResetPendingThrow();
 	PendingGuaranteedAimThrow.Reset();
 	ContactTracker.Reset();
 	PendingWrapSeed.Reset();
 	bPendingGpuCaptureHandoff = false;
-	TeardownPhysicalTether(); // Constraint 모드 랙돌 제약 — wrap 시도 단위 수명(무해 no-op 가능).
+	if (!bPreservePhysicalTether)
+	{
+		TeardownPhysicalTether(); // abort/release/new throw/end play: attempt-scoped constraint.
+	}
 	CaptureTravelFrame.Reset();
 	WrappingPhase.State.Reset();
 	GuidedThrowState.Reset();
@@ -737,6 +765,7 @@ void URopeComponent::ResetTransientPhaseState()
 	TensionOverTime = 0.0f;
 	// Pull 샘플/EMA 3종/경고 래치만. 생존 필드는 FRopePullDriveState 주석 참조.
 	PullDrive.ResetTransient();
+	LengthConstraintState.ResetTransient();
 }
 
 #pragma endregion Phase_State_Machine

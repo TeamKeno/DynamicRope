@@ -84,6 +84,57 @@ struct FRopeWrappingFallbackTestSeam
 	{
 		return Rope.ContactTracker;
 	}
+
+	static FRopeSurfaceAnchor ConfigureExternalAnchor(
+		URopeComponent& Rope, const USceneComponent* Mesh, ERopePhase Phase,
+		int32 AnchorNode = 3)
+	{
+		Rope.Sim = RopeTest::MakeStraightRope(4, 60.0f);
+		Rope.Sim.bStartPinned = true;
+		Rope.Sim.StartPinPrev = Rope.Sim.Positions[0];
+		Rope.Sim.StartPinTarget = Rope.Sim.Positions[0];
+		Rope.Sim.InvMass[0] = 0.0f;
+		Rope.HoldConfig.bEnforceWielderLengthConstraint = true;
+		Rope.Phase = Phase;
+
+		FRopeSurfaceAnchor Anchor;
+		Anchor.NodeIndex = AnchorNode;
+		Anchor.Mesh = Mesh;
+		Anchor.Bone = FName("root");
+		Anchor.LocalSurfacePosition = FVector(60.0f, 0.0f, 0.0f);
+		Anchor.LocalNormal = FVector::UpVector;
+		Anchor.SurfaceOffset = 0.0f;
+
+		if (Phase == ERopePhase::Wrapping)
+		{
+			Rope.WrappingPhase.State.Mesh = Mesh;
+			Rope.WrappingPhase.State.BoneName = Anchor.Bone;
+			Rope.WrappingPhase.State.Anchors = { Anchor };
+			Rope.WrappingPhase.State.LatchAnchor = Anchor;
+		}
+		else if (Phase == ERopePhase::Wrapped)
+		{
+			Rope.WrapController.State.Mesh = Mesh;
+			Rope.WrapController.State.Anchors = { Anchor };
+			Rope.bWrappedMassMaskDirty = true;
+		}
+		return Anchor;
+	}
+
+	static void CommitWrapping(URopeComponent& Rope)
+	{
+		Rope.CommitWrapping();
+	}
+
+	static void Prepare(URopeComponent& Rope, float DeltaTime)
+	{
+		Rope.PrepareSimFrame(DeltaTime, TOptional<FVector>());
+	}
+
+	static const FRopePullSample& GetPullSample(const URopeComponent& Rope)
+	{
+		return Rope.PullDrive.LastPullSample;
+	}
 };
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSyntheticLatchAnchorFallbackTest,
@@ -164,6 +215,111 @@ bool FRopeAssistedContactingPrimaryShadowTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("the aimed mesh identity is preserved"), Tracker.CandidateMesh == Mesh);
 	TestTrue(TEXT("the exact primary node remains tracked"), Tracker.CandidateNodes.Contains(1));
 	TestTrue(TEXT("primary dwell advances at 120Hz instead of dismissing"), Tracker.DwellTime > InitialDwell);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeCurrentFrameWrappedGeometryTest,
+	"DynamicRope.Component.Wrapping.CurrentFramePinAndAnchorGeometry",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeCurrentFrameWrappedGeometryTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* Target = NewObject<USceneComponent>();
+	Target->SetWorldLocation(FVector(20.0f, 0.0f, 0.0f));
+
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	FRopeWrappingFallbackTestSeam::ConfigureExternalAnchor(
+		*Rope, Target, ERopePhase::Wrapped);
+	Rope->SetWorldLocation(FVector(-10.0f, 0.0f, 0.0f));
+
+	FRopeWrappingFallbackTestSeam::Prepare(*Rope, 1.0f / 60.0f);
+	const FRopePullSample& Pull = FRopeWrappingFallbackTestSeam::GetPullSample(*Rope);
+
+	TestTrue(TEXT("pull sample is valid"), Pull.bValid);
+	TestTrue(TEXT("pull sees the current target binding, not the prior Sim anchor"),
+		Pull.WorldPoint.Equals(FVector(80.0f, 0.0f, 0.0f), 0.01f));
+	TestTrue(TEXT("pull sees the current start pin in the same Prepare"),
+		FMath::IsNearlyEqual(Pull.PathChordLen, 90.0f, 0.01f));
+	TestTrue(TEXT("material free-rest remains unchanged"),
+		FMath::IsNearlyEqual(Pull.FreeRestLen, 60.0f, 0.01f));
+	TestTrue(TEXT("geometry taut does not require delayed XPBD SegmentTension"),
+		Rope->IsChainTaut());
+	TestTrue(TEXT("default pull taut is geometry-only and can start its own load"),
+		Rope->IsPullTaut());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingHardLeashContinuityTest,
+	"DynamicRope.Movement.HardLeash.WrappingCommitContinuity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingHardLeashContinuityTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* Target = NewObject<USceneComponent>();
+	Target->SetWorldLocation(FVector(20.0f, 0.0f, 0.0f));
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	FRopeWrappingFallbackTestSeam::ConfigureExternalAnchor(
+		*Rope, Target, ERopePhase::Wrapping);
+
+	FRopeWielderMovementConstraint WrappingConstraint;
+	TestTrue(TEXT("hard leash arms during Wrapping before commit"),
+		Rope->BuildWielderMovementConstraint(WrappingConstraint));
+	TestTrue(TEXT("live binding is used during Wrapping"),
+		WrappingConstraint.PivotWorld.Equals(FVector(80.0f, 0.0f, 0.0f), 0.01f));
+	TestTrue(TEXT("hard leash uses material length, not soft tether slack"),
+		FMath::IsNearlyEqual(WrappingConstraint.MaxDistance, 60.0f, 0.01f));
+
+	Rope->HoldConfig.TetherSlack = 500.0f;
+	FRopeWielderMovementConstraint SlackIndependentConstraint;
+	TestTrue(TEXT("soft tether tuning does not disable hard leash"),
+		Rope->BuildWielderMovementConstraint(SlackIndependentConstraint));
+	TestTrue(TEXT("TetherSlack does not enlarge the hard material boundary"),
+		FMath::IsNearlyEqual(SlackIndependentConstraint.MaxDistance, 60.0f, 0.01f));
+
+	URopeComponent* NodeZeroRope = NewObject<URopeComponent>();
+	FRopeWrappingFallbackTestSeam::ConfigureExternalAnchor(
+		*NodeZeroRope, Target, ERopePhase::Wrapping, /*AnchorNode*/ 0);
+	FRopeWielderMovementConstraint NodeZeroConstraint;
+	TestTrue(TEXT("a real node-zero contact arms an immediate hard leash"),
+		NodeZeroRope->BuildWielderMovementConstraint(NodeZeroConstraint));
+	TestTrue(TEXT("node-zero contact has an exact zero-radius material span"),
+		FMath::IsNearlyZero(NodeZeroConstraint.MaxDistance));
+	FVector NodeZeroProjected = FVector::ZeroVector;
+	FVector NodeZeroNormal = FVector::ZeroVector;
+	bool bNodeZeroWasProjected = false;
+	NodeZeroRope->ConstrainWielderLocation(
+		FVector(79.0f, 0.0f, 0.0f),
+		NodeZeroProjected, NodeZeroNormal, bNodeZeroWasProjected);
+	TestTrue(TEXT("node-zero contact pins the hand to its live contact point"),
+		bNodeZeroWasProjected &&
+		NodeZeroProjected.Equals(NodeZeroConstraint.PivotWorld, 0.01f));
+
+	FRopeWrappingFallbackTestSeam::CommitWrapping(*Rope);
+	TestEqual(TEXT("fixture exercised the real Wrapping commit path"),
+		Rope->GetPhase(), ERopePhase::Wrapped);
+	FRopeWielderMovementConstraint WrappedConstraint;
+	TestTrue(TEXT("commit has no inactive hard-leash frame"),
+		Rope->BuildWielderMovementConstraint(WrappedConstraint));
+	TestTrue(TEXT("commit preserves the same pivot"),
+		WrappedConstraint.PivotWorld.Equals(WrappingConstraint.PivotWorld, 0.01f));
+	TestTrue(TEXT("commit preserves the same material radius"),
+		FMath::IsNearlyEqual(
+			WrappedConstraint.MaxDistance, WrappingConstraint.MaxDistance, 0.01f));
+
+	FVector Constrained = FVector::ZeroVector;
+	FVector Normal = FVector::ZeroVector;
+	bool bProjected = false;
+	TestTrue(TEXT("public movement adapter sees the committed constraint"),
+		Rope->ConstrainWielderLocation(
+			FVector(-20.0f, 0.0f, 0.0f), Constrained, Normal, bProjected));
+	TestTrue(TEXT("outward point is projected"), bProjected);
+	TestTrue(TEXT("projection stops on the current material boundary"),
+		Constrained.Equals(FVector(20.0f, 0.0f, 0.0f), 0.01f));
+
+	Rope->ReleaseWrap();
+	FRopeWielderMovementConstraint ReleasedConstraint;
+	TestFalse(TEXT("release clears the hard leash"),
+		Rope->BuildWielderMovementConstraint(ReleasedConstraint));
 	return true;
 }
 

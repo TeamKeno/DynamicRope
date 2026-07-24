@@ -25,7 +25,9 @@ enum class ERopeEndpointKind : uint8
 
 /**
  * 테더/능동 Pull이 공유하는 수신자 해석 결과. UObject 포인터는 한 GT 프레임 동안만 소비하며 소유하지 않는다.
- * 종류·실제 인가점·유효질량을 한 번에 확정해 판정과 인가가 서로 다른 endpoint를 보지 않게 한다.
+ * 종류·실제 인가 바디·기본 유효질량을 한 번에 확정해 판정과 인가가 서로 다른 endpoint를 보지 않게 한다.
+ * SimBody의 analytic material solve는 실제 world attachment point와 방향이 정해진 뒤 이 Mass를
+ * point Jacobian(병진+회전)으로 정밀화한다.
  */
 struct FRopeTetherEndpoint
 {
@@ -147,14 +149,14 @@ struct FRopePullSample
 
 	/**
 	 * 앵커→손 코너-다리 chord 합의 **비클램프** 값(cm) — TautChordLen과 달리 다리별 rest 클램프를 하지
-	 * 않아, 스트레치된 다리는 그만큼 합을 키운다. Constraint 테더의 제약 위반 관측치: C = 이 값 −
-	 * (FreeRestLen + TetherSlack). (TautChordLen의 클램프는 팽팽 *게이트* 전용 규약이라 제약 위반량으로는
-	 * 못 쓴다 — 클램프 합은 정의상 FreeRestLen을 넘지 못해 C가 항상 음수가 된다.)
+	 * 않아, 스트레치된 다리는 그만큼 합을 키운다. Live movement binding이 없는 legacy/custom-mover
+	 * fallback의 진단 관측치로만 남는다. Authoritative C는 live hand↔first-anchor 거리 − material
+	 * length이며 TetherSlack을 더하지 않는다.
 	 *
-	 * ⚠ C > 0은 발화의 **필요조건일 뿐**이다(∧ bChainTaut — 랙돌 PIE 2026-07-20 교훈): 랙돌 본 요동이
+	 * ⚠ legacy fallback에서는 C > 0만으로 충분하지 않다: 랙돌 본 요동이
 	 * 앵커 인접 다리만 strain limit까지 늘리면 나머지가 늘어져 있어도 합이 rest를 넘어 슬랙 로프에서
 	 * C > 0이 된다(부분 스트레치 오염). 그 가짜 C에 λ가 발화하면 견인→요동→스트레치의 정귀환 폭주가
-	 * 된다 — "전체가 펴졌는가"의 정본은 여전히 3중 팽팽 게이트다.
+	 * 되므로 그 fallback만 geometry/legacy tension contamination guard를 유지한다.
 	 */
 	float   PathChordLen = 0.0f;
 

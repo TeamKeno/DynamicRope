@@ -211,10 +211,33 @@ void URopeComponent::FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugC
 		// 청록 = 스무딩된 fractional 조준 위치(방향 EMA의 입력). 실제 인가 방향은 위 PullDirection이다.
 		Snapshot.PullAimPoint = PullDrive.LastPullSample.bValid ? PullDrive.LastPullSample.AimPos
 			: PullDrive.LastPullSample.WorldPoint;
-		Snapshot.PullTension = PullDrive.LastPullSample.Tension;
-		Snapshot.TetherOvershoot = PullDrive.LastTetherOvershoot;
-		Snapshot.TetherTension = GetTetherTension();
+		Snapshot.PullTension = GetConstraintTension();
+		Snapshot.TetherOvershoot = LengthConstraintState.LastViolation;
+		Snapshot.TetherTension = GetConstraintTension();
 		Snapshot.MaxTetherTension = HoldConfig.MaxTetherTension;
+		switch (LengthConstraintState.Backend)
+		{
+		case ERopeLengthConstraintBackend::Chaos:
+			Snapshot.ConstraintBackend = TEXT("Chaos");
+			break;
+		case ERopeLengthConstraintBackend::HardReaction:
+			Snapshot.ConstraintBackend = TEXT("HardReaction");
+			break;
+		case ERopeLengthConstraintBackend::Analytic:
+			Snapshot.ConstraintBackend = TEXT("Analytic");
+			break;
+		default:
+			Snapshot.ConstraintBackend = TEXT("None");
+			break;
+		}
+		Snapshot.AttemptedOutwardSpeed =
+			LengthConstraintState.WielderAttemptFrame == GFrameCounter
+				? LengthConstraintState.WielderAttemptSeparatingSpeed
+				: 0.0f;
+		Snapshot.AttemptedViolation =
+			LengthConstraintState.WielderAttemptFrame == GFrameCounter
+				? LengthConstraintState.WielderAttemptViolation
+				: 0.0f;
 		Snapshot.ActivePullForce = PullDrive.ActivePullForce;
 		Snapshot.bActivePullApplied = DebugActivePullPassedGate;
 		Snapshot.bPullTaut = PullDrive.bPullTaut;

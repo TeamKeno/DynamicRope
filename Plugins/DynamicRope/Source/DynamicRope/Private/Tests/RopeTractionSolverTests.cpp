@@ -354,6 +354,49 @@ namespace
 	}
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePointMassJacobianTest,
+	"DynamicRope.Traction.PointMassJacobianMatchesAppliedImpulse",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePointMassJacobianTest::RunTest(const FString& Parameters)
+{
+	RopeTraction::FRopePointMassProperties Body;
+	Body.Mass = 10.0f;
+	Body.InertiaTensor = FVector(100.0f, 200.0f, 300.0f);
+	Body.MassSpaceToWorld = FTransform(
+		FQuat::Identity,
+		FVector(5.0f, 0.0f, 0.0f));
+
+	TestEqual(TEXT("COM application has translational inverse mass"),
+		RopeTraction::ComputePointInverseMass(
+			Body,
+			Body.MassSpaceToWorld.GetLocation(),
+			FVector::XAxisVector),
+		0.1f,
+		0.0001f);
+
+	const FVector Point = Body.MassSpaceToWorld.GetLocation() +
+		FVector(0.0f, 10.0f, 0.0f);
+	const float PointInvMass = RopeTraction::ComputePointInverseMass(
+		Body, Point, FVector::XAxisVector);
+	TestEqual(TEXT("off-COM Jacobian includes rotational inverse mass"),
+		PointInvMass,
+		0.1f + 100.0f / 300.0f,
+		0.0001f);
+
+	constexpr float Lambda = 50.0f;
+	const FVector PointDelta = RopeTraction::ComputePointVelocityDelta(
+		Body, Point, FVector::XAxisVector * Lambda);
+	TestEqual(TEXT("point impulse produces lambda times point inverse mass"),
+		static_cast<float>(FVector::DotProduct(
+			PointDelta, FVector::XAxisVector)),
+		Lambda * PointInvMass,
+		0.001f);
+	TestTrue(TEXT("off-COM rope impulse produces point motion"),
+		!PointDelta.IsNearlyZero());
+	return true;
+}
+
 // 단방향성: 로프는 밀지도(슬랙), 접근을 제동하지도 않는다. 양끝 다 앵커면 아무도 못 움직인다.
 // λ의 정의 검증: 인가 총량(λ × w합)이 "벌어짐 상쇄 + 위치 회수 명령"을 정확히 닫는다.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTetherLambdaUnilateralTest,
@@ -364,9 +407,15 @@ bool FRopeTetherLambdaUnilateralTest::RunTest(const FString& Parameters)
 {
 	const float Dt = 1.0f / 60.0f;
 
-	// 슬랙(C ≤ 0): 벌어지는 중이어도 무동작 — 팽팽하지 않은 로프는 힘이 없다(별도 게이트 불필요).
+	// Material slack stays unloaded, but the exact boundary rejects outward motion.
 	TestEqual(TEXT("슬랙이면 0"), RopeTraction::SolveTetherLambda(MakeLambdaInput(-5.0f, 500.0f), Dt), 0.0f);
-	TestEqual(TEXT("경계(C=0)도 0"), RopeTraction::SolveTetherLambda(MakeLambdaInput(0.0f, 500.0f), Dt), 0.0f);
+	{
+		const RopeTraction::FRopeTetherConstraint Boundary = MakeLambdaInput(0.0f, 500.0f);
+		const float Lambda = RopeTraction::SolveTetherLambda(Boundary, Dt);
+		TestTrue(TEXT("경계에서 벌어지면 비신축 반력"), Lambda > 0.0f);
+		TestEqual(TEXT("경계 반력이 벌어짐 속도를 정확히 상쇄"),
+			Lambda * (Boundary.InvMassTarget + Boundary.InvMassWielder), 500.0f, 0.01f);
+	}
 
 	// dt 축퇴 가드.
 	TestEqual(TEXT("dt 0이면 0"), RopeTraction::SolveTetherLambda(MakeLambdaInput(10.0f, 500.0f), 0.0f), 0.0f);
@@ -449,15 +498,20 @@ bool FRopeTetherLambdaCapsTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("장력 상한 클램프"), RopeTraction::SolveTetherLambda(In, Dt), 60000.0f * Dt, 0.01f);
 	}
 
-	// 컴플라이언스: 분모에 α/dt²가 더해져 λ가 줄어든다 = 의도적 탄성. 0 = 비신축(정확 폐합).
+	// 컴플라이언스: α는 역강성이고 후단 Kelvin-Voigt 상태를 implicit하게 푼다.
+	// 0은 비신축(정확 폐합), 양수면 안정적인 탄성 반응으로 λ가 줄어든다.
 	{
 		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(30.0f, 0.0f);
 		In.InvMassTarget = 0.0f; // wielder 단독(w = 0.01)로 수치를 단순화.
 		const float Rigid = RopeTraction::SolveTetherLambda(In, Dt);
 		TestEqual(TEXT("비신축 λ"), Rigid, 1800.0f / 0.01f, 0.5f);
-		In.Compliance = 0.0005f; // α/dt² = 1.8 → 분모 0.01 + 1.8
+		In.Compliance = 0.0005f;
 		const float Soft = RopeTraction::SolveTetherLambda(In, Dt);
-		TestEqual(TEXT("탄성 λ"), Soft, 1800.0f / 1.81f, 0.5f);
+		const float W = In.InvMassWielder;
+		const float R = 2.0f * FMath::Sqrt(In.Compliance / W);
+		const float ExpectedTension =
+			In.C / (In.Compliance + W * Dt * (R + Dt));
+		TestEqual(TEXT("탄성 λ"), Soft, ExpectedTension * Dt, 0.5f);
 		TestTrue(TEXT("탄성이 λ를 줄인다"), Soft < Rigid);
 	}
 

@@ -19,6 +19,7 @@
 #include "GameFramework/Actor.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/MovementComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Animation/AnimInstance.h"
@@ -67,6 +68,8 @@ URopeWielderComponent::URopeWielderComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = false;
+	// Hard leash must run after Pawn movement but before Chaos/Rope PostPhysics.
+	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 }
 
 void URopeWielderComponent::BeginPlay()
@@ -104,7 +107,9 @@ void URopeWielderComponent::BeginPlay()
 	if (Rope)
 	{
 		Rope->OnPresetApplied.AddUniqueDynamic(this, &URopeWielderComponent::HandleRopePresetApplied);
+		Rope->OnRopePhaseChanged.AddUniqueDynamic(this, &URopeWielderComponent::HandleRopePhaseChanged);
 	}
+	RegisterMovementConstraintHooks();
 	RefreshModeDerivedState();
 }
 
@@ -141,7 +146,9 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		// Wielder가 사라진 뒤에도 로프의 collider 수집 범위가 조준 ray 방향으로 남지 않게 정리한다.
 		Rope->ClearAimRayColliderQueryBounds();
 		Rope->OnPresetApplied.RemoveDynamic(this, &URopeWielderComponent::HandleRopePresetApplied);
+		Rope->OnRopePhaseChanged.RemoveDynamic(this, &URopeWielderComponent::HandleRopePhaseChanged);
 	}
+	UnregisterMovementConstraintHooks();
 
 	// 스윙 중 파괴/레벨 전환 시 AirControl 원복 누락 방지.
 	if (bAirControlBoosted)
@@ -163,6 +170,13 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	// Movement prerequisite 뒤의 같은 PrePhysics 틱에서 처리한다. CharacterMovement 내부 delegate는
+	// SkeletalMesh child update가 scoped/deferred인 동안 호출될 수 있어 실제 손 socket 위치가 stale하다.
+	// CMC 틱이 완전히 끝난 이 시점이면 mesh/socket transform과 최종 root-motion/slide 결과가 모두 확정된다.
+	if (Cast<APawn>(GetOwner()))
+	{
+		EnforceWielderLengthConstraint(DeltaTime);
+	}
 	UpdateGroundExit();
 	UpdateSwingAirControl();
 	UpdatePullEngage();
@@ -748,17 +762,17 @@ void URopeWielderComponent::UpdatePullEngage()
 	// 발동 판정: 임계 0 = 팽팽 래치(IsPullTaut — 로프 게이트와 동일 판정), > 0 = 최대 장력 임계.
 	const bool bEngage = (PullEngageTension <= 0.0f)
 		? Rope->IsPullTaut()
-		: (Rope->GetMaxTension() >= PullEngageTension);
+		: (Rope->GetConstraintTension() >= PullEngageTension);
 	if (!bEngage)
 	{
 		return;
 	}
-	SetPullEngaged(true, Rope->GetMaxTension());
+	SetPullEngaged(true, Rope->GetConstraintTension());
 	// 발동 순간 스냅샷(원샷) — PullEngageTension 튜닝용 관측.
 	UE_LOG(LogDynamicRope, Log,
 		TEXT("[PullEngage] share=%.2f tautT=%.0f tetherT=%.0f overshoot=%.0f"),
 		Rope->GetEffectiveTetherTargetShare(),
-		Rope->GetMaxTension(), Rope->GetTetherTension(), Rope->GetTetherOvershoot());
+		Rope->GetConstraintTension(), Rope->GetTetherTension(), Rope->GetTetherOvershoot());
 	if (PullMontage)
 	{
 		// 몽타주 단일 재생 — 힘은 안의 window notify(StartPullNow/StopPullNow)가 싣는다.
@@ -836,7 +850,7 @@ float URopeWielderComponent::GetPullEngageProgress() const
 		// 임계 0 = 팽팽 판정만으로 발동 — 연속값이 없으므로 게이트와 같은 판정을 0/1로 돌려준다.
 		return Rope->IsPullTaut() ? 1.0f : 0.0f;
 	}
-	return FMath::Clamp(Rope->GetMaxTension() / PullEngageTension, 0.0f, 1.0f);
+	return FMath::Clamp(Rope->GetConstraintTension() / PullEngageTension, 0.0f, 1.0f);
 }
 
 void URopeWielderComponent::UpdatePullGlowMaterial()
@@ -1360,8 +1374,288 @@ bool URopeWielderComponent::ComputeDesiredTickEnabled() const
 {
 	// 장전된 Pull의 발동 판정과 이미 적용한 AirControl의 원복에는 설정 토글과 별개로 틱이 필요하다.
 	// Aim ray 모드는 preview 표시와 무관하게 collider 수집 bounds/HUD 샘플을 매 프레임 갱신한다.
-	return bPullArmed || bAirControlBoosted || bAutoGroundExitOnUpwardPull ||
+	const bool bNeedsPawnLeash =
+		Cast<APawn>(GetOwner()) && Rope &&
+		Rope->HoldConfig.bEnforceWielderLengthConstraint &&
+		(Rope->GetPhase() == ERopePhase::Wrapping || Rope->GetPhase() == ERopePhase::Wrapped);
+	return bNeedsPawnLeash || bPullArmed || bAirControlBoosted || bAutoGroundExitOnUpwardPull ||
 		bBoostAirControlWhileSwinging || UsesAimRay();
+}
+
+void URopeWielderComponent::HandleRopePhaseChanged(
+	ERopePhase /*OldPhase*/, ERopePhase NewPhase)
+{
+	SetComponentTickEnabled(ComputeDesiredTickEnabled());
+	if (Rope &&
+		(NewPhase == ERopePhase::Wrapping ||
+			NewPhase == ERopePhase::Wrapped))
+	{
+		FRopeWielderMovementConstraint Constraint;
+		if (Rope->BuildWielderMovementConstraint(Constraint))
+		{
+			RefreshTargetMovementConstraintHooks(Constraint);
+			return;
+		}
+	}
+	ClearTargetMovementConstraintHooks();
+}
+
+void URopeWielderComponent::RegisterMovementConstraintHooks()
+{
+	UnregisterMovementConstraintHooks();
+
+	AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return;
+	}
+
+	UMovementComponent* Movement = nullptr;
+	if (ACharacter* Character = Cast<ACharacter>(Owner))
+	{
+		Movement = Character->GetCharacterMovement();
+	}
+	else if (APawn* Pawn = Cast<APawn>(Owner))
+	{
+		Movement = Pawn->GetMovementComponent();
+	}
+	if (!Movement)
+	{
+		Movement = Owner->FindComponentByClass<UMovementComponent>();
+	}
+	ConstraintMovementComponent = Movement;
+	if (Movement)
+	{
+		// Wielder must observe the completed movement (including Character mesh child propagation),
+		// then project before Chaos and the Rope subsystem's PostPhysics simulation.
+		AddTickPrerequisiteComponent(Movement);
+	}
+}
+
+void URopeWielderComponent::UnregisterMovementConstraintHooks()
+{
+	ClearTargetMovementConstraintHooks();
+	if (UMovementComponent* Movement = ConstraintMovementComponent.Get())
+	{
+		RemoveTickPrerequisiteComponent(Movement);
+	}
+	ConstraintMovementComponent.Reset();
+	bLeashCorrectionBlockedLogged = false;
+}
+
+void URopeWielderComponent::RefreshTargetMovementConstraintHooks(
+	const FRopeWielderMovementConstraint& Constraint)
+{
+	USceneComponent* TargetComponent =
+		const_cast<USceneComponent*>(Constraint.TargetComponent.Get());
+	UMovementComponent* TargetMovement = nullptr;
+	AActor* TargetOwner =
+		TargetComponent ? TargetComponent->GetOwner() : nullptr;
+	if (ACharacter* Character = Cast<ACharacter>(TargetOwner))
+	{
+		TargetMovement = Character->GetCharacterMovement();
+	}
+	else if (APawn* Pawn = Cast<APawn>(TargetOwner))
+	{
+		TargetMovement = Pawn->GetMovementComponent();
+	}
+	if (!TargetMovement && TargetOwner)
+	{
+		TargetMovement =
+			TargetOwner->FindComponentByClass<UMovementComponent>();
+	}
+
+	if (ConstraintTargetActor.Get() == TargetOwner &&
+		ConstraintTargetComponent.Get() == TargetComponent &&
+		ConstraintTargetMovementComponent.Get() == TargetMovement)
+	{
+		return;
+	}
+	ClearTargetMovementConstraintHooks();
+	if (TargetOwner && TargetOwner != GetOwner())
+	{
+		AddTickPrerequisiteActor(TargetOwner);
+		ConstraintTargetActor = TargetOwner;
+	}
+	if (TargetMovement &&
+		TargetMovement != ConstraintMovementComponent.Get())
+	{
+		AddTickPrerequisiteComponent(TargetMovement);
+		ConstraintTargetMovementComponent = TargetMovement;
+	}
+	if (TargetComponent)
+	{
+		AddTickPrerequisiteComponent(TargetComponent);
+		ConstraintTargetComponent = TargetComponent;
+	}
+}
+
+void URopeWielderComponent::ClearTargetMovementConstraintHooks()
+{
+	if (AActor* TargetActor = ConstraintTargetActor.Get())
+	{
+		RemoveTickPrerequisiteActor(TargetActor);
+	}
+	if (UMovementComponent* TargetMovement =
+		ConstraintTargetMovementComponent.Get())
+	{
+		RemoveTickPrerequisiteComponent(TargetMovement);
+	}
+	if (USceneComponent* TargetComponent =
+		ConstraintTargetComponent.Get())
+	{
+		RemoveTickPrerequisiteComponent(TargetComponent);
+	}
+	ConstraintTargetActor.Reset();
+	ConstraintTargetMovementComponent.Reset();
+	ConstraintTargetComponent.Reset();
+}
+
+void URopeWielderComponent::EnforceWielderLengthConstraint(float DeltaTime)
+{
+	if (!Rope || DeltaTime <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+	// Replicated simulated proxies must follow authoritative movement snapshots. The plugin does not
+	// replicate wrap descriptors yet; projecting a proxy locally would fight network smoothing.
+	if (const APawn* Pawn = Cast<APawn>(GetOwner());
+		Pawn && Pawn->GetLocalRole() == ROLE_SimulatedProxy)
+	{
+		return;
+	}
+
+	FRopeWielderMovementConstraint Constraint;
+	if (!Rope->BuildWielderMovementConstraint(Constraint, DeltaTime))
+	{
+		bLeashCorrectionBlockedLogged = false;
+		return;
+	}
+	RefreshTargetMovementConstraintHooks(Constraint);
+
+	const FVector DesiredPinWorld = Rope->GetComponentLocation();
+	const RopeMovementConstraint::FProjectionResult Projection =
+		RopeMovementConstraint::ProjectPoint(
+			DesiredPinWorld, Constraint.PivotWorld, Constraint.MaxDistance);
+	const bool bHardProjectionApplied =
+		Rope->HoldConfig.TetherCompliance <= KINDA_SMALL_NUMBER;
+	const float WielderPositionCorrectionShare =
+		(bHardProjectionApplied && Projection.bConstrained)
+			? Rope->ComputeWielderLengthPositionCorrectionShare(
+				Constraint)
+			: 1.0f;
+
+	UMovementComponent* Movement = ConstraintMovementComponent.Get();
+	USceneComponent* MovementUpdatedComponent = Movement ? Movement->UpdatedComponent.Get() : nullptr;
+	USceneComponent* UpdatedComponent = MovementUpdatedComponent;
+	if (!UpdatedComponent && GetOwner())
+	{
+		UpdatedComponent = GetOwner()->GetRootComponent();
+	}
+	const FVector AttemptedVelocity = Movement ? Movement->Velocity : FVector::ZeroVector;
+
+	if (bHardProjectionApplied && Projection.bConstrained && UpdatedComponent)
+	{
+		// A movable physical target receives the complementary correction through the
+		// same-frame Chaos constraint. Keep only the Wielder's generalized share here;
+		// projecting the hand 100% and then moving the target would shorten the real span.
+		const FVector Correction =
+			(Projection.Position - DesiredPinWorld) *
+			WielderPositionCorrectionShare;
+		const FVector ExpectedPinWorld =
+			DesiredPinWorld + Correction;
+		FHitResult Hit;
+		if (Movement && MovementUpdatedComponent == UpdatedComponent)
+		{
+			Movement->SafeMoveUpdatedComponent(
+				Correction, UpdatedComponent->GetComponentQuat(), /*bSweep*/ true, Hit);
+		}
+		else
+		{
+			UpdatedComponent->MoveComponent(
+				Correction,
+				UpdatedComponent->GetComponentQuat(),
+				/*bSweep*/ true,
+				&Hit,
+				MOVECOMP_NoFlags,
+				ETeleportType::None);
+		}
+
+		const float Residual =
+			static_cast<float>(FVector::Distance(
+				Rope->GetComponentLocation(),
+				ExpectedPinWorld));
+		if (Residual > 0.5f)
+		{
+			if (!bLeashCorrectionBlockedLogged)
+			{
+				UE_LOG(LogDynamicRope, Warning,
+					TEXT("[%s] hard rope leash correction blocked by collision (residual %.2f cm); ")
+					TEXT("world collision and fixed cable length are simultaneously infeasible."),
+					*GetName(), Residual);
+				bLeashCorrectionBlockedLogged = true;
+			}
+		}
+		else
+		{
+			bLeashCorrectionBlockedLogged = false;
+		}
+	}
+	else
+	{
+		bLeashCorrectionBlockedLogged = false;
+	}
+
+	FVector BoundaryNormal = Projection.OutwardNormal;
+	FVector ConstrainedVelocity = AttemptedVelocity;
+	FVector FullyConstrainedVelocity = AttemptedVelocity;
+	if (bHardProjectionApplied && Movement && Projection.bAtLimit)
+	{
+		BoundaryNormal =
+			(Rope->GetComponentLocation() - Constraint.PivotWorld).GetSafeNormal();
+		if (BoundaryNormal.IsNearlyZero())
+		{
+			BoundaryNormal = Projection.OutwardNormal;
+		}
+		FullyConstrainedVelocity = RopeMovementConstraint::RemoveOutwardVelocity(
+			AttemptedVelocity, Constraint.PivotVelocity, BoundaryNormal);
+		// Velocity uses the same generalized split as position. A simulated target receives
+		// its complementary share in the same Chaos step; fixed/kinematic targets make this
+		// share 1 so the Wielder alone closes the boundary.
+		const float WielderReactionShare =
+			Rope->ComputeWielderLengthReactionShare(Constraint);
+		ConstrainedVelocity = FMath::Lerp(
+			AttemptedVelocity,
+			FullyConstrainedVelocity,
+			WielderReactionShare);
+		Movement->Velocity = ConstrainedVelocity;
+
+		if (UCharacterMovementComponent* CharacterMovement =
+			Cast<UCharacterMovementComponent>(Movement))
+		{
+			CharacterMovement->bForceNextFloorCheck = true;
+		}
+	}
+
+	// Preserve the motion rejected by the coupled hard correction. A physical target is not
+	// position-corrected until the same-frame Chaos step, while a fixed target is already at
+	// C=0 here; both still need the original attempted load for authoritative tension.
+	// PositionViolation also covers teleport/custom movement without Velocity.
+	const float RejectedSeparatingSpeed =
+		RopeMovementConstraint::ComputeRejectedSeparatingSpeed(
+			AttemptedVelocity,
+			FullyConstrainedVelocity,
+			BoundaryNormal,
+			Projection.Violation,
+			DeltaTime);
+	Rope->PrepareWielderLengthConstraint(
+		Constraint,
+		BoundaryNormal,
+		RejectedSeparatingSpeed,
+		Projection.Violation,
+		Projection.bAtLimit,
+		bHardProjectionApplied,
+		DeltaTime);
 }
 
 void URopeWielderComponent::RefreshModeDerivedState()

@@ -3,6 +3,7 @@
 #include "RopeComponent.h"
 
 #include "Core/RopeWrapTarget.h"
+#include "Components/PrimitiveComponent.h"
 #include "DynamicRopeLog.h"
 #include "Engine/World.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -47,11 +48,227 @@ namespace
 		return true;
 	}
 
+	bool ResolveAnchorCenterlineWorld(
+		const FRopeSurfaceAnchor& Anchor,
+		const USceneComponent* FallbackMesh,
+		FName FallbackBone,
+		const USceneComponent*& OutMesh,
+		FName& OutBone,
+		FVector& OutWorld)
+	{
+		OutMesh = Anchor.Mesh.IsValid() ? Anchor.Mesh.Get() : FallbackMesh;
+		if (!OutMesh)
+		{
+			return false;
+		}
+
+		OutBone = Anchor.Bone.IsNone() ? FallbackBone : Anchor.Bone;
+		const FTransform BindingWorld = ResolveBindingWorld(OutMesh, OutBone);
+		const FVector SurfaceWorld =
+			BindingWorld.TransformPosition(Anchor.LocalSurfacePosition);
+		const FVector NormalWorld =
+			BindingWorld.TransformVectorNoScale(Anchor.LocalNormal)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		OutWorld = SurfaceWorld + NormalWorld * Anchor.SurfaceOffset;
+		return true;
+	}
+
 }
 
 #pragma endregion File_Local_Helpers_And_Debug
 
 #pragma region Wrapping_Public_API
+
+bool URopeComponent::BuildWielderMovementConstraint(
+	FRopeWielderMovementConstraint& OutConstraint,
+	float PendingReelDeltaTime) const
+{
+	OutConstraint = FRopeWielderMovementConstraint();
+	if (!HoldConfig.bEnforceWielderLengthConstraint ||
+		(Phase != ERopePhase::Wrapping && Phase != ERopePhase::Wrapped) ||
+		Sim.SegmentLength <= KINDA_SMALL_NUMBER)
+	{
+		return false;
+	}
+
+	const FRopeSurfaceAnchor* FirstAnchor = nullptr;
+	const USceneComponent* StateMesh = nullptr;
+	FName StateBone = NAME_None;
+
+	auto ConsiderAnchor = [this, &FirstAnchor](const FRopeSurfaceAnchor& Anchor)
+	{
+		if (Anchor.NodeIndex < 0 || !Sim.Positions.IsValidIndex(Anchor.NodeIndex))
+		{
+			return;
+		}
+		if (!FirstAnchor || Anchor.NodeIndex < FirstAnchor->NodeIndex)
+		{
+			FirstAnchor = &Anchor;
+		}
+	};
+
+	if (Phase == ERopePhase::Wrapping)
+	{
+		StateMesh = WrappingPhase.State.Mesh.Get();
+		StateBone = WrappingPhase.State.BoneName;
+		for (const FRopeSurfaceAnchor& Anchor : WrappingPhase.State.Anchors)
+		{
+			ConsiderAnchor(Anchor);
+		}
+		for (const FRopeSurfaceAnchor& Anchor : WrappingPhase.State.SecondarySeedAnchors)
+		{
+			ConsiderAnchor(Anchor);
+		}
+		ConsiderAnchor(WrappingPhase.State.LatchAnchor);
+	}
+	else
+	{
+		StateMesh = WrapController.State.Mesh.Get();
+		StateBone = WrapController.State.BoneName;
+		for (const FRopeSurfaceAnchor& Anchor : WrapController.State.Anchors)
+		{
+			ConsiderAnchor(Anchor);
+		}
+	}
+
+	const USceneComponent* TargetComponent = nullptr;
+	FName TargetBone = NAME_None;
+	FVector AnchorWorld = FVector::ZeroVector;
+	int32 AnchorNode = INDEX_NONE;
+
+	if (FirstAnchor)
+	{
+		if (!ResolveAnchorCenterlineWorld(
+			*FirstAnchor, StateMesh, StateBone, TargetComponent, TargetBone, AnchorWorld))
+		{
+			return false;
+		}
+		AnchorNode = FirstAnchor->NodeIndex;
+	}
+	else if (Phase == ERopePhase::Wrapped)
+	{
+		// Legacy seeds can contain only Latched. Keep their binding semantics until the legacy
+		// path is removed, but still choose the minimum hand-side node deterministically.
+		const FRopeLatchNode* FirstLatch = nullptr;
+		for (const FRopeLatchNode& Latch : WrapController.State.Latched)
+		{
+			if (Latch.NodeIndex >= 0 && Sim.Positions.IsValidIndex(Latch.NodeIndex) &&
+				(!FirstLatch || Latch.NodeIndex < FirstLatch->NodeIndex))
+			{
+				FirstLatch = &Latch;
+			}
+		}
+		if (!FirstLatch || !StateMesh)
+		{
+			return false;
+		}
+
+		TargetComponent = StateMesh;
+		TargetBone = FirstLatch->Bone.IsNone() ? StateBone : FirstLatch->Bone;
+		AnchorWorld =
+			ResolveBindingWorld(TargetComponent, TargetBone).TransformPosition(FirstLatch->BoneLocalPos);
+		AnchorNode = FirstLatch->NodeIndex;
+	}
+	else
+	{
+		return false;
+	}
+
+	// A rope wrapped onto its own owner has no external relative endpoint. Moving the owner moves
+	// both points together, so a world-space leash would falsely lock the actor in place.
+	if (!TargetComponent || (GetOwner() && TargetComponent->GetOwner() == GetOwner()))
+	{
+		return false;
+	}
+
+	OutConstraint.PivotWorld = AnchorWorld;
+	// Velocity must belong to the actual anchor point, not just the component origin. Physics
+	// bodies provide the exact linear + angular point velocity. For a kinematic/animated binding,
+	// target tick prerequisites make AnchorWorld current; finite-difference it against the prior
+	// PostPhysics sample instead of reusing the one-frame-old smoothed velocity.
+	OutConstraint.PivotVelocity = TargetComponent->GetComponentVelocity();
+	if (UPrimitiveComponent* Primitive =
+		const_cast<UPrimitiveComponent*>(Cast<UPrimitiveComponent>(TargetComponent));
+		Primitive && Primitive->IsSimulatingPhysics(TargetBone))
+	{
+		OutConstraint.PivotVelocity =
+			Primitive->GetPhysicsLinearVelocityAtPoint(AnchorWorld, TargetBone);
+	}
+	else if (Phase == ERopePhase::Wrapped &&
+		LengthConstraintState.bPrevGeometryValid &&
+		LengthConstraintState.PrevAnchorNode == AnchorNode)
+	{
+		const float VelocityDt =
+			PendingReelDeltaTime > KINDA_SMALL_NUMBER
+				? PendingReelDeltaTime
+				: (GetWorld()
+					? GetWorld()->GetDeltaSeconds()
+					: 0.0f);
+		if (VelocityDt > KINDA_SMALL_NUMBER)
+		{
+			OutConstraint.PivotVelocity =
+				(AnchorWorld -
+					LengthConstraintState.PrevAnchorWorldPoint) /
+				VelocityDt;
+		}
+	}
+	OutConstraint.AnchorWorld = AnchorWorld;
+	float ConstraintSegmentLength = Sim.SegmentLength;
+	// RopeSimSubsystem applies reel in PostPhysics, while the Wielder's hard boundary runs
+	// in PrePhysics. Predict exactly that pending material-length change here so a continuous
+	// reel-in cannot leave one frame of impossible fixed-end stretch behind.
+	if (Phase == ERopePhase::Wrapped &&
+		PendingReelDeltaTime > KINDA_SMALL_NUMBER &&
+		!FMath::IsNearlyZero(ReelRate) &&
+		Sim.Num() >= 2)
+	{
+		const float MaxLen = FMath::Max(RopeLength, MinRopeLength);
+		const float PredictedLength = FMath::Clamp(
+			Sim.RopeLength - ReelRate * PendingReelDeltaTime,
+			FMath::Min(MinRopeLength, MaxLen),
+			MaxLen);
+		ConstraintSegmentLength =
+			PredictedLength / static_cast<float>(Sim.Num() - 1);
+	}
+	OutConstraint.MaxDistance =
+		static_cast<float>(AnchorNode) * ConstraintSegmentLength;
+	OutConstraint.AnchorNode = AnchorNode;
+	OutConstraint.TargetComponent = TargetComponent;
+	OutConstraint.TargetBone = TargetBone;
+	return OutConstraint.IsValid();
+}
+
+bool URopeComponent::ConstrainWielderLocation(
+	FVector DesiredPinWorld,
+	FVector& OutConstrainedPinWorld,
+	FVector& OutBoundaryNormal,
+	bool& bOutWasConstrained) const
+{
+	OutConstrainedPinWorld = DesiredPinWorld;
+	OutBoundaryNormal = FVector::ZeroVector;
+	bOutWasConstrained = false;
+
+	FRopeWielderMovementConstraint Constraint;
+	if (!BuildWielderMovementConstraint(Constraint))
+	{
+		return false;
+	}
+	if (HoldConfig.TetherCompliance > KINDA_SMALL_NUMBER)
+	{
+		// An elastic cable intentionally permits boundary extension. The same compliance
+		// drives the analytic/Chaos backend, so this convenience API must not reintroduce
+		// a separate unconditional hard projection.
+		return true;
+	}
+
+	const RopeMovementConstraint::FProjectionResult Projection =
+		RopeMovementConstraint::ProjectPoint(
+			DesiredPinWorld, Constraint.PivotWorld, Constraint.MaxDistance);
+	OutConstrainedPinWorld = Projection.Position;
+	OutBoundaryNormal = Projection.OutwardNormal;
+	bOutWasConstrained = Projection.bConstrained;
+	return true;
+}
 
 void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog)
 {
@@ -833,7 +1050,9 @@ void URopeComponent::CommitWrapping()
 
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s), angle=%.0fdeg, coverage=%.0fdeg"),
 		*Seed.BoneName.ToString(), Seed.Latched.Num(), CommitAngleDeg, CommitCoverageDeg));
-	ResetTransientPhaseState();
+	// Wrapping PrePhysics may already have created the Chaos tether. A successful commit keeps its
+	// identity/warm-start; abort/release paths still use the default teardown.
+	ResetTransientPhaseState(/*bPreservePhysicalTether*/ true);
 	const FRopeWrappedEventInfo WrappedInfo = MakeWrappedEventInfo(Seed, CommitAngleDeg, CommitCoverageDeg);
 	DispatchWrapped(WrappedInfo);
 }
@@ -1198,14 +1417,15 @@ bool URopeComponent::CheckWrappedAutoRelease(float DeltaTime)
 	}
 
 	// ④-2 거리 release: 손~앵커 직선 거리의 가용 로프 길이 초과분(테더 초과분과 동일 소스 —
-	// UpdateTether가 이번 프레임 갱신한 PullDrive.LastTetherOvershoot)이 한계를 넘으면 놓친다.
+	// UpdateConstraintTether가 이번 프레임 갱신한 LengthConstraintState.LastViolation)이 한계를 넘으면 놓친다.
 	// 기하 기반이라 지속 시간 없이 즉시 판정(장력처럼 노이즈가 없다).
-	if (HoldConfig.DistanceReleaseSlack > 0.0f && PullDrive.LastTetherOvershoot > HoldConfig.DistanceReleaseSlack)
+	if (HoldConfig.DistanceReleaseSlack > 0.0f &&
+		LengthConstraintState.LastViolation > HoldConfig.DistanceReleaseSlack)
 	{
 		const FName Bone = WrapController.State.BoneName;
 		FinishWrapRelease(Bone, ERopeReleaseReason::Distance,
 			FString::Printf(TEXT("distance release overshoot %.0f > %.0f, bone=%s"),
-				PullDrive.LastTetherOvershoot, HoldConfig.DistanceReleaseSlack, *Bone.ToString()));
+				LengthConstraintState.LastViolation, HoldConfig.DistanceReleaseSlack, *Bone.ToString()));
 		return true;
 	}
 	return false;

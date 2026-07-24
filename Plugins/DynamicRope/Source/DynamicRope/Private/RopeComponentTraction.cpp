@@ -8,6 +8,8 @@
 #include "GameFramework/Actor.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Core/RopeMovementConstraint.h"
+#include "Logic/RopeLengthConstraintSolver.h"
 #include "Logic/RopeTractionSolver.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "PhysicsEngine/PhysicsConstraintComponent.h"
@@ -35,37 +37,42 @@ float URopeComponent::GetMaxTension() const
 
 #pragma region Wrapped_Pull_Sampling_And_Application
 
-void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
+void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimState& ObservationSim)
 {
-	// ② 장력 모델: 솔버가 채운 세그먼트 장력(F=λ/h², GPU 로프는 1~2프레임 지연 미러)의 최대치를
-	// wrap 상태에 반영한다. 게임플레이(당김/절단 판정)와 디버거가 이 값을 읽는다.
-	WrapController.State.Tension = GetMaxTension();
+	// Gameplay tension is the material-length reaction, not delayed XPBD segment strain.
+	// ApplyWrappedTraction refreshes this again after the current frame's backend has solved.
+	WrapController.State.Tension = GetConstraintTension();
 
 	// Pull 샘플 산출(항상 — 디버거/BP 관찰 + 견인/release의 공용 입력). 방향은 첫 직선 다리 추종(공간).
 	PullDrive.LastPullSample = FRopePullSample();
-	WrapController.ComputePull(Sim, HoldConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
+	WrapController.ComputePull(ObservationSim, HoldConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
 
-	// 전 체인 팽팽 게이트 갱신(히스테리시스 래치) — 견인 인가(③: 테더 + 능동 Pull)의 공용 선행 조건.
-	// 앵커 인접 국소 관측치(세그먼트 장력/sub-leg overshoot)는 움직이는 대상이 슬랙 로프에서도 만들어내므로
-	// (핀 노드가 이웃을 순간 스트레치 — 공중 Pierce/움직이는 정적 메시에서 늘어진 줄이 끌려가던 증상),
-	// "로프 전체가 펴졌는가"를 서로 보완하는 세 관측치의 AND로 판정한다:
-	//  - 처짐(다리별 내부 노드의 chord 직선 이탈 cm): "시각적으로 펴졌는가"의 정본 — chord 비율은
-	//    처짐의 제곱에만 반응해 눈에 띄는 처짐(600cm 로프 chord 590 = ~45cm 처짐)도 통과시킨다.
-	//  - 기하(chord 합 vs rest, 다리별 rest 클램프): 완만한 대형 처짐/압축(노드 뭉침)의 백스톱.
-	//  - 최소 전달 장력(자유 구간 세그먼트 장력 최솟값): 기하가 못 보는 지그재그 구김/부분 스트레치를
-	//    거른다 — 팽팽함 = 장력이 앵커에서 손까지 전 구간 전달(어딘가 슬랙이면 최솟값 0).
-	// 샘플이 무효면 무조건 false(아래 early return과 무관하게 이번 프레임 값이 확정돼야 한다).
-	// 세 판정 모두 직전 래치(bChainTaut)를 히스테리시스 기준으로 공유한다(처짐은 유지 시 ×ReleaseScale 완화).
+	// Taut is geometry, not a prerequisite XPBD load. Prefer the same live hand/anchor
+	// material boundary used by movement authority. This removes the circular dependency
+	// "segment must stretch -> tension appears -> tether may enforce no stretch".
+	FRopeWielderMovementConstraint LiveConstraint;
+	const bool bHasLiveConstraint = BuildWielderMovementConstraint(LiveConstraint);
+	const bool bLiveBoundaryTaut = bHasLiveConstraint &&
+		static_cast<float>(FVector::Distance(GetComponentLocation(), LiveConstraint.PivotWorld))
+			>= FMath::Max(
+				0.0f,
+				LiveConstraint.MaxDistance -
+					FMath::Max(HoldConfig.LengthConstraintActivationSlop, 0.0f));
+
+	// Legacy/self-wrap fallback still uses sag + chord geometry. SegmentTension is deliberately
+	// excluded from gameplay taut; it remains only as a legacy analytic-path contamination guard.
 	const float SagLimit = HoldConfig.TautMaxSag
 		* (PullDrive.bChainTaut ? FMath::Max(HoldConfig.TautSlackReleaseScale, 1.0f) : 1.0f);
-	const bool bRawChainTaut = PullDrive.LastPullSample.bValid
-		&& (HoldConfig.TautMaxSag <= 0.0f || PullDrive.LastPullSample.MaxLegSag <= SagLimit)
+	const bool bLegacyGeometryTaut =
+		(HoldConfig.TautMaxSag <= 0.0f || PullDrive.LastPullSample.MaxLegSag <= SagLimit)
 		&& (HoldConfig.TautSlackRatio <= 0.0f || RopeTraction::EvaluateChainTautGate(
-			PullDrive.LastPullSample.TautChordLen, PullDrive.LastPullSample.FreeRestLen,
-			HoldConfig.TautSlackRatio, HoldConfig.TautSlackReleaseScale, PullDrive.bChainTaut))
-		&& RopeTraction::EvaluateTautGate(
-			PullDrive.LastPullSample.MinFreeTension, HoldConfig.TautMinTension,
-			HoldConfig.TautMinTensionReleaseRatio, PullDrive.bChainTaut);
+			PullDrive.LastPullSample.TautChordLen,
+			PullDrive.LastPullSample.FreeRestLen,
+			HoldConfig.TautSlackRatio,
+			HoldConfig.TautSlackReleaseScale,
+			PullDrive.bChainTaut));
+	const bool bRawChainTaut = PullDrive.LastPullSample.bValid
+		&& (bHasLiveConstraint ? bLiveBoundaryTaut : bLegacyGeometryTaut);
 	// 해제 유예(시간 래치): 최소 전달 장력 관측치는 임계 0(기본)에서 진입/유지 임계가 같아 히스테리시스가
 	// 소멸하고 GPU 로프에선 1~2프레임 지연 미러라, 경계 상태에서 판정이 프레임 단위로 퍼덕이며 "전량 속도
 	// 삭감 ↔ 자유"가 교대한다(wielder 들썩임). 진입은 즉시, 해제만 TautReleaseGraceTime 동안 유예해 채터링을
@@ -90,12 +97,6 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 		PullDrive.bChainTaut = false;
 	}
 
-	// 팽팽(taut) 게이트 갱신(히스테리시스 래치) — 능동 Pull 인가(③)와 IsPullTaut()가 공용으로 읽는다.
-	// 전 체인 기하(bChainTaut) ∧ 장력 임계(보조 게이트 — ActivePullTautTension 0이면 "장력 > ~0").
-	PullDrive.bPullTaut = PullDrive.bChainTaut && RopeTraction::EvaluateTautGate(
-		PullDrive.LastPullSample.Tension, HoldConfig.ActivePullTautTension,
-		HoldConfig.ActivePullTautReleaseRatio, PullDrive.bPullTaut);
-
 	// Pull 스무딩(2단): (1) 조준 노드 fractional 스무딩 — 정수 AimNode의 프레임 간 이산 홉(방향 통째 점프
 	// + tether 초과분 불연속)을 float EMA + 노드 사이 보간으로 없앤다. (2) 방향 EMA — 그 위에 남는 노드 위치
 	// 노이즈(GPU 미러 지연 등)를 다듬는다. wrap 시작 후 첫 유효 프레임은 측정값으로 시드(래그 없음).
@@ -113,12 +114,14 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime)
 		? RawAimF // 첫 유효 프레임은 측정값으로 시드(래그 없음).
 		: FMath::Lerp(PullDrive.SmoothedAimNodeF, RawAimF, RopeTraction::ExpSmoothAlpha(HoldConfig.PullAimSmoothTime, DeltaTime));
 	const float AimF = FMath::Clamp(PullDrive.SmoothedAimNodeF, 0.0f, static_cast<float>(PullDrive.LastPullSample.AnchorNode));
-	const FVector AimPos = RopeTraction::SampleFractionalAim(Sim.Positions, AimF, PullDrive.LastPullSample.AnchorNode);
+	const FVector AimPos = RopeTraction::SampleFractionalAim(
+		ObservationSim.Positions, AimF, PullDrive.LastPullSample.AnchorNode);
 	PullDrive.LastPullSample.AimNodeF = AimF;
 	PullDrive.LastPullSample.AimPos = AimPos;
 
 	// (2) 연속 조준으로 방향 재계산 후 방향 EMA. 축퇴(조준=앵커)면 raw 방향 유지.
-	const FVector DirF = (AimPos - Sim.Positions[PullDrive.LastPullSample.AnchorNode]).GetSafeNormal();
+	const FVector DirF =
+		(AimPos - ObservationSim.Positions[PullDrive.LastPullSample.AnchorNode]).GetSafeNormal();
 	const FVector DirIn = DirF.IsNearlyZero() ? PullDrive.LastPullSample.Direction : DirF;
 	PullDrive.SmoothedPullDir = RopeTraction::SmoothDirection(
 		PullDrive.SmoothedPullDir, DirIn, RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
@@ -139,6 +142,23 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 	// ③-1 자동 견인(테더): 단일 λ 임펄스 제약 + 랙돌 물리 제약(Docs/PoC/05). 슬랙 브레이크는 없다 —
 	// λ의 위치 회수 항은 MaxBiasSpeed로 유계라 장부에 남을 과잉 주입 자체가 없다(레거시 서보 시절 유물).
 	UpdateConstraintTether(DeltaTime);
+	WrapController.State.Tension = GetConstraintTension();
+
+	// Geometry starts a pull; load is an optional gameplay threshold, never a prerequisite
+	// for the passive length solve. Threshold zero explicitly means geometry-only so a
+	// stationary taut cable can begin an active pull and create its own reaction.
+	if (HoldConfig.ActivePullTautTension <= 0.0f)
+	{
+		PullDrive.bPullTaut = PullDrive.bChainTaut;
+	}
+	else
+	{
+		PullDrive.bPullTaut = PullDrive.bChainTaut && RopeTraction::EvaluateTautGate(
+			GetConstraintTension(),
+			HoldConfig.ActivePullTautTension,
+			HoldConfig.ActivePullTautReleaseRatio,
+			PullDrive.bPullTaut);
+	}
 
 	// ③-2 능동 Pull(상수 힘): 사용자 입력(SetActivePull/Wielder)이 준 힘을 팽팽할 때만 인가한다.
 	// 팽팽 판정은 ②가 갱신한 bPullTaut 래치 = 전 체인 기하(bChainTaut) ∧ 장력 임계
@@ -268,10 +288,10 @@ namespace
 		Out.Actor = Owner;
 
 		// (1) 스켈레탈 **자유 랙돌**(시뮬 본이 루트 바디까지 관절로만 이어짐): 감긴 본에서 부모 체인으로 승격한
-		// 가장 가까운 *시뮬 본*(바디 없는 트위스트 본 대응)에 인가한다. 유효 질량은 본 바디가 아니라 **전신 바디
-		// 질량 합**(GetMass) — 본 하나를 당겨도 관절로 끌려오는 것은 몸 전체라, 본 바디 질량(팔뚝 3kg)을 쓰면
-		// 몫/끌림 판정이 "가벼운 대상"으로 오판해 물리적으로 낼 수 없는 회수를 전량
-		// 배정받고 로프만 늘어난다(탄성 끌림 증상 — Docs/PoC/05 §3.4).
+		// 가장 가까운 *시뮬 본*(바디 없는 트위스트 본 대응)에 인가한다. 여기 저장하는 기본 질량은 **전신 바디
+		// 질량 합**(GetMass)이다 — hard Chaos 반력의 coarse wielder/target 몫과 pullability가 본 바디
+		// (팔뚝 3kg)를 "가벼운 대상"으로 오판하지 않게 한다. Compliant analytic solve는 실제 world
+		// attachment가 정해진 뒤 이 기본값을 선택 본의 병진+회전 point Jacobian으로 정밀화한다.
 		//
 		// **부분 랙돌**(시뮬 본 위 부모 체인에 키네마틱 바디 존재)은 여기서 받지 않고 아래로 폴스루한다: 본을
 		// 아무리 서보해도 키네마틱 구속이 흡수해 로프만 늘어난다(2026-07-15 보류했던 rung 1 한계 — 이 폴스루가
@@ -356,6 +376,66 @@ namespace
 		return RopeTraction::InvMassFromMass(Endpoint.Mass);
 	}
 
+	bool BuildPointMassProperties(
+		const FRopeTetherEndpoint& Endpoint,
+		RopeTraction::FRopePointMassProperties& Out)
+	{
+		if (Endpoint.Kind != ERopeEndpointKind::SimBody ||
+			!Endpoint.Prim)
+		{
+			return false;
+		}
+		FBodyInstance* Body =
+			Endpoint.Prim->GetBodyInstance(Endpoint.Bone);
+		if (!Body)
+		{
+			return false;
+		}
+		Out.Mass = static_cast<float>(Body->GetBodyMass());
+		Out.InertiaTensor = Body->GetBodyInertiaTensor();
+		Out.MassSpaceToWorld = Body->GetMassSpaceToWorldSpace();
+		return Out.Mass > KINDA_SMALL_NUMBER;
+	}
+
+	float EndpointPointInvMass(
+		const FRopeTetherEndpoint& Endpoint,
+		const FVector& PointWorld,
+		const FVector& DirectionWorld)
+	{
+		RopeTraction::FRopePointMassProperties Body;
+		if (BuildPointMassProperties(Endpoint, Body))
+		{
+			const float PointInvMass =
+				RopeTraction::ComputePointInverseMass(
+					Body, PointWorld, DirectionWorld);
+			if (PointInvMass > KINDA_SMALL_NUMBER)
+			{
+				return PointInvMass;
+			}
+		}
+		return EndpointInvMass(Endpoint);
+	}
+
+	FVector EndpointVelocityAtPoint(
+		const FRopeTetherEndpoint& Endpoint,
+		const FVector& PointWorld)
+	{
+		switch (Endpoint.Kind)
+		{
+		case ERopeEndpointKind::SimBody:
+			return Endpoint.Prim
+				? Endpoint.Prim->GetPhysicsLinearVelocityAtPoint(
+					PointWorld, Endpoint.Bone)
+				: FVector::ZeroVector;
+		case ERopeEndpointKind::Character:
+			return Endpoint.Movement
+				? Endpoint.Movement->Velocity
+				: FVector::ZeroVector;
+		default:
+			return FVector::ZeroVector;
+		}
+	}
+
 
 	// 테더 인가 공용 컨텍스트 — 양끝 수신자 해석 + 확장 관문. 관측/λ 산출·상태 보관은 컴포넌트가 한다.
 	struct FRopeTetherContext
@@ -430,6 +510,125 @@ const FRopeResolvedWrappedEndpoints* URopeComponent::GetOrResolveWrappedEndpoint
 	return &WrappedEndpointCache;
 }
 
+float URopeComponent::ComputeWielderLengthReactionShare(
+	const FRopeWielderMovementConstraint& Constraint) const
+{
+	if (!Constraint.IsValid())
+	{
+		return 1.0f;
+	}
+
+	USceneComponent* TargetComponent =
+		const_cast<USceneComponent*>(Constraint.TargetComponent.Get());
+	const FRopeTetherEndpoint Target = ResolveTetherEndpoint(
+		TargetComponent,
+		TargetComponent ? TargetComponent->GetOwner() : nullptr,
+		Constraint.TargetBone,
+		HoldConfig.GroundBraceFactor);
+	const FRopeTetherEndpoint Wielder = ResolveTetherEndpoint(
+		nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor);
+	if (Phase == ERopePhase::Wrapping &&
+		Target.Kind != ERopeEndpointKind::SimBody)
+	{
+		// Wrapped PostPhysics applies the complementary analytic target share. Wrapping
+		// deliberately does not run that traction stage yet, so a nonphysical target has
+		// no same-frame receiver for its share; close relative velocity on the Wielder
+		// instead until commit. SimBody targets still receive their share through Chaos.
+		return 1.0f;
+	}
+	const float WTarget = EndpointInvMass(Target);
+	const float WWielder = EndpointInvMass(Wielder);
+	const float WSum = WTarget + WWielder;
+	return WSum > KINDA_SMALL_NUMBER
+		? FMath::Clamp(WWielder / WSum, 0.0f, 1.0f)
+		: 1.0f;
+}
+
+float URopeComponent::ComputeWielderLengthPositionCorrectionShare(
+	const FRopeWielderMovementConstraint& Constraint) const
+{
+	if (!Constraint.IsValid() ||
+		HoldConfig.TetherCompliance > KINDA_SMALL_NUMBER)
+	{
+		return 1.0f;
+	}
+
+	USceneComponent* TargetComponent =
+		const_cast<USceneComponent*>(Constraint.TargetComponent.Get());
+	const FRopeTetherEndpoint Target = ResolveTetherEndpoint(
+		TargetComponent,
+		TargetComponent ? TargetComponent->GetOwner() : nullptr,
+		Constraint.TargetBone,
+		HoldConfig.GroundBraceFactor);
+	return Target.Kind == ERopeEndpointKind::SimBody
+		? ComputeWielderLengthReactionShare(Constraint)
+		: 1.0f;
+}
+
+void URopeComponent::PrepareWielderLengthConstraint(
+	const FRopeWielderMovementConstraint& Constraint,
+	const FVector& OutwardNormal,
+	float RejectedSeparatingSpeed,
+	float PositionViolation,
+	bool bAtLimit,
+	bool bHardProjectionApplied,
+	float DeltaTime)
+{
+	if (!Constraint.IsValid() || DeltaTime <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	if (bHardProjectionApplied &&
+		bAtLimit &&
+		(RejectedSeparatingSpeed > KINDA_SMALL_NUMBER ||
+			PositionViolation > KINDA_SMALL_NUMBER))
+	{
+		LengthConstraintState.RecordWielderAttempt(
+			GFrameCounter,
+			Constraint.AnchorNode,
+			PositionViolation,
+			RejectedSeparatingSpeed,
+			OutwardNormal,
+			bAtLimit);
+	}
+
+	USceneComponent* TargetComponent =
+		const_cast<USceneComponent*>(Constraint.TargetComponent.Get());
+	AActor* TargetOwner = TargetComponent ? TargetComponent->GetOwner() : nullptr;
+	const FRopeTetherEndpoint Target = ResolveTetherEndpoint(
+		TargetComponent, TargetOwner, Constraint.TargetBone, HoldConfig.GroundBraceFactor);
+
+	if (Target.Kind != ERopeEndpointKind::SimBody ||
+		!Target.Prim ||
+		HoldConfig.TetherCompliance > KINDA_SMALL_NUMBER)
+	{
+		// Runtime SimulatePhysics/compliance transitions are immediate. A compliant cable
+		// uses the common analytic lambda solve (including its force cap) for every endpoint
+		// type; Chaos is reserved for the uncapped, truly rigid substep constraint.
+		TeardownPhysicalTether();
+		return;
+	}
+
+	// The Wielder already kept only its generalized position-correction share. The
+	// complementary target share must therefore be driven from that exact resulting hand
+	// point. Reconstructing another offset from the original violation double-corrects the
+	// position (full hand projection + target motion), creating artificial slack/tension
+	// pulses and separating a zero-length hand/target pair.
+	const FVector ChaosProxyWorld = GetComponentLocation();
+	UpdatePhysicalTether(
+		Target.Prim,
+		Target.Bone,
+		Constraint.AnchorWorld,
+		ChaosProxyWorld,
+		Constraint.MaxDistance,
+		DeltaTime);
+	if (PhysicalTetherConstraint)
+	{
+		PhysicalTetherPrePhysicsFrame = GFrameCounter;
+	}
+}
+
 #pragma endregion Traction_Endpoint_And_Tether_Policies
 
 #pragma region Tether_And_Pull_Application
@@ -438,7 +637,7 @@ FVector URopeComponent::ComputeSmoothedWielderDir(const FVector& Aim, const FVec
 {
 	// 방향 = 손(노드 0)에서 로프의 첫 직선 다리를 따라. 조준(AimPos)이 벽 모서리면 모서리를 향하고, 로프가 곧아
 	// 조준=손이면(chord ~0) 앵커→조준의 역방향(=손→앵커)으로 폴백한다.
-	const FVector HandPos = Sim.Positions.IsValidIndex(0) ? Sim.Positions[0] : Aim;
+	const FVector HandPos = GetComponentLocation();
 	FVector WielderDirRaw = Aim - HandPos;
 	if (!WielderDirRaw.Normalize(KINDA_SMALL_NUMBER))
 	{
@@ -462,104 +661,187 @@ FVector URopeComponent::ComputeSmoothedWielderDir(const FVector& Aim, const FVec
 
 void URopeComponent::UpdateConstraintTether(float DeltaTime)
 {
-	// (Constraint 모드 — Docs/PoC/05) 관측(C·s·d·w) → λ 솔브(RopeTraction::SolveTetherLambda, 유닛 테스트
-	// 대상) → 크기가 같은 임펄스 쌍 인가. 상시 리엘이 없고(능동 견인 = 되감기의 rest 변화율이 s에 실림),
-	// 발화는 C > 0 ∧ 전 체인 팽팽(bChainTaut — 아래 게이트 주석)일 때만이다.
-	PullDrive.LastTetherOvershoot = 0.0f;
-	PullDrive.LastTetherLambda = 0.0f;
-	PullDrive.LastTetherLambdaDt = DeltaTime;
-	if (!PullDrive.LastPullSample.bValid || DeltaTime <= 1e-4f)
+	// One logical C <= 0 material constraint with mutually exclusive application backends:
+	//   1) simulated target -> Chaos constraint,
+	//   2) hard-projected Wielder -> rejected-motion reaction,
+	//   3) no movement adapter -> legacy analytic endpoint impulse.
+	// Position authority and tension therefore observe the same live material boundary.
+	LengthConstraintState.BeginFrame(DeltaTime);
+	if (DeltaTime <= 1e-4f)
 	{
-		PullDrive.bPrevFreeRestValid = false; // 관측 공백 — 다음 유효 프레임에 rest 차분 재시드.
+		LengthConstraintState.bPrevGeometryValid = false;
 		return;
 	}
 
-	// 제약 위반 C = 실제 경로 길이(비클램프 chord 합) − (자유 구간 rest + 여유). 슬랙/구김/처짐은 chord가
-	// rest보다 짧아 C < 0 → 무동작. 스냅샷/거리 release가 읽는 overshoot는 C의 0 클램프다(의미 동일).
-	const float FreeRest = PullDrive.LastPullSample.FreeRestLen + FMath::Max(HoldConfig.TetherSlack, 0.0f);
-	float C = PullDrive.LastPullSample.PathChordLen - FreeRest;
-
-	// rest 변화율(되감기/SetRopeLength → 감김 = rest 감소 = 벌어짐 취급): 앵커 노드가 같은 프레임 간
-	// 차분만 신뢰한다 — 앵커가 옮겨간 프레임의 rest는 불연속이라 속도가 아니다.
-	// 같은 가드에서 앵커 점 속도도 실측한다(프레임 차분 + EMA — 스키닝/노드 지터 흡수): Anchor-kind 대상
-	// (정적/키네마틱/애니메이션 구동)은 물리 속도 API가 없어 끝 속도가 0으로 잡히는데, 그러면 움직이는
-	// 오브젝트 towing이 벌어짐 상쇄 항에서 빠져 bias 상한(TetherMaxBiasSpeed)이 사실상 추종 상한이 된다
-	// — 앵커가 그보다 빠르면 C만 순증(줄 늘어남·견인 무력). 레거시 앵커 피드포워드(CL 428)를 CL 545가
-	// 끝 속도 실측으로 대체할 때 Anchor-kind가 누락된 것(당시엔 bias 상한 1500이 회수 항으로 가려 무증상).
-	// 슬랙 프레임에도 갱신해 발화 시점에 EMA가 예열돼 있게 한다.
-	float RestRate = 0.0f;
-	if (PullDrive.bPrevFreeRestValid && PullDrive.PrevAnchorNode == PullDrive.LastPullSample.AnchorNode)
+	FRopeWielderMovementConstraint LiveConstraint;
+	const bool bHasLiveConstraint = BuildWielderMovementConstraint(LiveConstraint);
+	const bool bHasPullSample = PullDrive.LastPullSample.bValid;
+	if (!bHasLiveConstraint && !bHasPullSample)
 	{
-		RestRate = (FreeRest - PullDrive.PrevFreeRestLen) / DeltaTime;
-		const FVector RawAnchorVel = (PullDrive.LastPullSample.WorldPoint - PullDrive.PrevAnchorWorldPoint) / DeltaTime;
-		PullDrive.SmoothedAnchorPointVelocity = FMath::Lerp(PullDrive.SmoothedAnchorPointVelocity, RawAnchorVel,
+		LengthConstraintState.bPrevGeometryValid = false;
+		return;
+	}
+	const int32 ConstraintAnchorNode = bHasLiveConstraint
+		? LiveConstraint.AnchorNode
+		: PullDrive.LastPullSample.AnchorNode;
+	const FVector Anchor = bHasLiveConstraint
+		? LiveConstraint.PivotWorld
+		: PullDrive.LastPullSample.WorldPoint;
+	const float MaterialLength = bHasLiveConstraint
+		? LiveConstraint.MaxDistance
+		: PullDrive.LastPullSample.FreeRestLen;
+	const float RequiredLength = bHasLiveConstraint
+		? static_cast<float>(FVector::Distance(GetComponentLocation(), Anchor))
+		: PullDrive.LastPullSample.PathChordLen;
+	float C = RequiredLength - MaterialLength;
+	LengthConstraintState.LastViolation = FMath::Max(C, 0.0f);
+	const bool bHardWielderAttempt =
+		LengthConstraintState.HasWielderAttempt(GFrameCounter, ConstraintAnchorNode);
+
+	// Reel/material-length and kinematic anchor rates are sampled from the same live
+	// geometry. TetherSlack is intentionally absent: activation tolerance must not add
+	// physical cable length.
+	float RestRate = 0.0f;
+	if (LengthConstraintState.bPrevGeometryValid &&
+		LengthConstraintState.PrevAnchorNode == ConstraintAnchorNode)
+	{
+		RestRate =
+			(MaterialLength - LengthConstraintState.PrevMaterialLength) / DeltaTime;
+		const FVector RawAnchorVel =
+			(Anchor - LengthConstraintState.PrevAnchorWorldPoint) / DeltaTime;
+		LengthConstraintState.SmoothedAnchorPointVelocity = FMath::Lerp(
+			LengthConstraintState.SmoothedAnchorPointVelocity,
+			RawAnchorVel,
 			RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
 	}
-	PullDrive.PrevFreeRestLen = FreeRest;
-	PullDrive.PrevAnchorWorldPoint = PullDrive.LastPullSample.WorldPoint;
-	PullDrive.PrevAnchorNode = PullDrive.LastPullSample.AnchorNode;
-	PullDrive.bPrevFreeRestValid = true;
+	LengthConstraintState.PrevMaterialLength = MaterialLength;
+	LengthConstraintState.PrevAnchorWorldPoint = Anchor;
+	LengthConstraintState.PrevAnchorNode = ConstraintAnchorNode;
+	LengthConstraintState.bPrevGeometryValid = true;
 
-	// 수신자 해석은 C 안정화(아래)가 본 위치를 필요로 해 게이트보다 먼저 한다(프레임 캐시라 추가 비용 없음).
+	FRopeResolvedWrappedEndpoints LiveEndpoints;
 	const FRopeResolvedWrappedEndpoints* Endpoints = GetOrResolveWrappedEndpoints();
+	if (!Endpoints && bHasLiveConstraint)
+	{
+		// Pull sampling needs at least one hand-side segment and is therefore invalid for a
+		// legitimate node-0 constraint (and during short observation gaps). Resolve the same
+		// live binding directly so hard projection/Chaos can still publish reaction tension.
+		USceneComponent* TargetComponent =
+			const_cast<USceneComponent*>(LiveConstraint.TargetComponent.Get());
+		LiveEndpoints.Target = ResolveTetherEndpoint(
+			TargetComponent,
+			TargetComponent ? TargetComponent->GetOwner() : nullptr,
+			LiveConstraint.TargetBone,
+			HoldConfig.GroundBraceFactor);
+		LiveEndpoints.Wielder = ResolveTetherEndpoint(
+			nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor);
+		LiveEndpoints.TargetMesh = TargetComponent;
+		LiveEndpoints.TargetBone = LiveConstraint.TargetBone;
+		Endpoints = &LiveEndpoints;
+	}
 	if (!Endpoints)
 	{
-		PullDrive.LastTetherOvershoot = FMath::Max(0.0f, C);
 		return;
 	}
 	USceneComponent* MeshComp = Endpoints->TargetMesh.Get();
 	if (!MeshComp)
 	{
-		PullDrive.LastTetherOvershoot = FMath::Max(0.0f, C);
+		return;
+	}
+	const bool bSelfWrap =
+		(GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner());
+	const float ResolvedInvMassTarget =
+		EndpointInvMass(Endpoints->Target);
+	const float ResolvedInvMassWielder =
+		bSelfWrap ? 0.0f : EndpointInvMass(Endpoints->Wielder);
+	const float ResolvedWSum =
+		ResolvedInvMassTarget + ResolvedInvMassWielder;
+	// Chaos needs a share before the rope directions/point Jacobians below are built.
+	// Analytic paths replace this with their exact point-mass split before solving.
+	PullDrive.LastTargetShare =
+		(ResolvedWSum > KINDA_SMALL_NUMBER)
+			? (ResolvedInvMassTarget / ResolvedWSum)
+			: 0.0f;
+
+	const bool bPhysicalTarget = (Endpoints->Target.Kind == ERopeEndpointKind::SimBody
+		&& Endpoints->Target.Prim != nullptr);
+	const bool bUseChaosBackend =
+		bPhysicalTarget &&
+		HoldConfig.TetherCompliance <= KINDA_SMALL_NUMBER;
+
+	const FVector Aim = bHasPullSample
+		? PullDrive.LastPullSample.AimPos
+		: GetComponentLocation();
+	if (bUseChaosBackend)
+	{
+		// Simulated targets are exclusively owned by Chaos. Never add the analytic
+		// rejected-motion impulse on top of this constraint.
+		LengthConstraintState.Backend = ERopeLengthConstraintBackend::Chaos;
+		const float LegRest = bHasLiveConstraint
+			? MaterialLength
+			: FMath::Max(0.0f,
+				(static_cast<float>(PullDrive.LastPullSample.AnchorNode) -
+					PullDrive.LastPullSample.AimNodeF) * Sim.SegmentLength);
+		const bool bDrivenByWielderThisFrame =
+			PhysicalTetherPrePhysicsFrame == GFrameCounter &&
+			PhysicalTetherTarget.Get() == Endpoints->Target.Prim &&
+			PhysicalTetherBone == Endpoints->Target.Bone;
+		if (bDrivenByWielderThisFrame)
+		{
+			// PrePhysics already wrote the attempted, unclamped hand point and material-length
+			// limit. Do not replace it with the soft Aim/TetherSlack contract after Chaos.
+			SamplePhysicalTetherForce(DeltaTime);
+		}
+		else
+		{
+			// Legacy/custom-mover fallback when no Wielder drove the authoritative path.
+			// A live material constraint always uses the actual hand point. Pull Aim is a
+			// look-ahead node and can sit deep inside a curved/sagging leg; pairing it with
+			// the full hand-to-anchor rest length silently creates unrelated slack.
+			const FVector ProxyWorld = bHasLiveConstraint
+				? GetComponentLocation()
+				: Aim;
+			UpdatePhysicalTether(
+				Endpoints->Target.Prim,
+				Endpoints->Target.Bone,
+				Anchor,
+				ProxyWorld,
+				LegRest,
+				DeltaTime);
+		}
+		return;
+	}
+	TeardownPhysicalTether();
+
+	// Only the fallback that still derives C from delayed/deformable particle chords needs
+	// the historical partial-stretch contamination guard. Live material geometry and hard
+	// movement attempts never depend on XPBD SegmentTension.
+	const bool bLegacyPathLoaded = bHasPullSample && RopeTraction::EvaluateTautGate(
+		PullDrive.LastPullSample.MinFreeTension,
+		HoldConfig.TautMinTension,
+		HoldConfig.TautMinTensionReleaseRatio,
+		PullDrive.bChainTaut);
+	if (!bHasLiveConstraint && !bHardWielderAttempt &&
+		(!PullDrive.bChainTaut || !bLegacyPathLoaded))
+	{
 		return;
 	}
 
-	// 시뮬 바디 대상 식별 — **시뮬 바디 전부(스켈레탈 본 + 컴포넌트 바디)를 물리 제약 절반**으로 보낸다.
-	// GT 프레임당 속도 임펄스는 관절체의 "전신 크기 kick → 관절 솔버 지연 반응 → 폭주" vs "본 크기 λ →
-	// 견인력 붕괴" 딜레마(2026-07-20 Pierce 실측 반복)에 더해, **공중 하중(매달린 프랍)에서도 구조적으로
-	// 진다**(2026-07-22 PIE): 중력·스윙이 물리 서브스텝에서 진행되는 동안 GT는 한 박자 늦게 사후 상쇄만
-	// 하므로 ①부유(중력이 만든 속도를 매 프레임 지우는 톱니 = 둥둥 뜸) ②진자 펌핑(방향 EMA 래그의 접선
-	// 오차 성분 주입 = 사방으로 날아가려는 잔류 에너지) ③직교 감쇠 의존(펌핑을 먹이려면 부유가 심해지는
-	// 트레이드오프)이 생긴다. **엔진 물리 제약**(UpdatePhysicalTether — Chaos가 서브스텝에서 중력·관절·
-	// 접촉과 함께 솔브)은 매달림=진짜 진자, 슬랙=자유 낙하가 공짜다. λ 솔브에서 대상 끝은 앵커(w=0) —
-	// wielder 몫만 λ가 담당하고, 대상이 잘 따라오면 C가 안 쌓여 wielder도 자유, 대상이 걸리면 C가 쌓여
-	// wielder가 로프 끝에 잡힌다(랙돌 사가에서 검증한 분업을 시뮬 바디 전체로 일반화 — 끌림 가능 판정
-	// (UpdateTargetPullable)은 climb-in 방향 결정용으로 그대로 남고, 실제 견인은 제약이 한다).
-	const bool bPhysicalTarget = (Endpoints->Target.Kind == ERopeEndpointKind::SimBody
-		&& Endpoints->Target.Prim != nullptr);
-	PullDrive.LastTetherOvershoot = FMath::Max(0.0f, C);
-
-	// 물리 제약 테더 갱신은 발화 게이트보다 **앞**이다: 프록시(코너 추종)와 리밋(되감기 반영)은 슬랙에서도
-	// 따라가야 하고, 슬랙이면 리밋이 안 걸려 힘이 0인 것이 곧 물리적 무동작이다(별도 게이트 불필요).
-	const FVector Anchor = PullDrive.LastPullSample.WorldPoint;
-	const FVector Aim = PullDrive.LastPullSample.AimPos;
-	if (bPhysicalTarget)
-	{
-		const float LegRest = FMath::Max(0.0f,
-			static_cast<float>(PullDrive.LastPullSample.AnchorNode) - PullDrive.LastPullSample.AimNodeF)
-			* Sim.SegmentLength + FMath::Max(HoldConfig.TetherSlack, 0.0f);
-		UpdatePhysicalTether(Endpoints->Target.Prim, Endpoints->Target.Bone, Anchor, Aim, LegRest, DeltaTime);
-	}
-	else
-	{
-		TeardownPhysicalTether(); // 대상이 시뮬 바디에서 벗어남(소실/재해석) — 제약 정리.
-	}
-
-	// 발화 게이트 = C > 0 ∧ 전 체인 팽팽(bChainTaut — ②가 갱신하는 3중 게이트 래치). C만으로는 안 된다는
-	// 것이 랙돌 PIE의 교훈(2026-07-20): C의 소스(비클램프 chord 합)는 **부분 스트레치에 오염**된다 — 랙돌
-	// 본이 요동치면 앵커 인접 다리만 strain limit(1.5×)까지 늘어나, 나머지가 늘어져 있어도 합이 rest를 넘어
-	// C > 0으로 읽힌다. 그 가짜 C에 λ가 상한까지 발화 → 쌍 임펄스로 랙돌·wielder 동시 견인 → 요동 가속 →
-	// 더 큰 스트레치의 정귀환(슬랙 로프인데 T가 상한 클램프로 빨강). 클램프 chord 비율·최소 전달 장력·처짐
-	// 3중 게이트(레거시가 같은 이유로 3차 보강해 얻은 판정 — CL 466→470)가 "전체가 펴졌는가"의 정본이다.
-	if (C <= 0.0f || !PullDrive.bChainTaut)
-	{
-		return; // 슬랙(또는 부분 스트레치의 가짜 C) — λ 없음.
-	}
-
-	// 끝 방향(안쪽 = 상대 쪽): 대상 = 앵커→첫 다리(스무딩된 look-ahead), wielder = 손→첫 다리(EMA —
-	// 이 프레임은 인가 후보라 무조건 진행시킨다). 축퇴 폴백은 앵커→조준 span 직선.
+	// The live constraint uses the exact hand/anchor normal. Legacy paths retain their
+	// smoothed look-ahead direction for corner noise.
 	const FVector Span = (Aim - Anchor).GetSafeNormal();
-	const FVector DirTarget = PullDrive.SmoothedPullDir.IsNearlyZero() ? Span : PullDrive.SmoothedPullDir;
+	const FVector CurrentLiveOutward =
+		(GetComponentLocation() - Anchor).GetSafeNormal();
+	const FVector LiveOutward =
+		!CurrentLiveOutward.IsNearlyZero()
+			? CurrentLiveOutward
+			: (bHardWielderAttempt
+				? LengthConstraintState.WielderAttemptOutwardNormal
+				: FVector::ZeroVector);
+	const FVector LegacyTargetDir =
+		PullDrive.SmoothedPullDir.IsNearlyZero() ? Span : PullDrive.SmoothedPullDir;
+	const FVector DirTarget =
+		(bHasLiveConstraint && !LiveOutward.IsNearlyZero()) ? LiveOutward : LegacyTargetDir;
 	if (DirTarget.IsNearlyZero())
 	{
 		return; // 축퇴(조준=앵커) — 방향 정의 불가.
@@ -569,7 +851,10 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 	// AirControl 부스트가 무력해지는 "특정 순간의 힘"). 접지는 코너/노드 노이즈가 커 EMA 유지.
 	const bool bWielderAirborne = (Endpoints->Wielder.Kind == ERopeEndpointKind::Character
 		&& Endpoints->Wielder.Movement && Endpoints->Wielder.Movement->IsFalling());
-	const FVector DirWielder = ComputeSmoothedWielderDir(Aim, DirTarget, DeltaTime, bWielderAirborne);
+	const FVector DirWielder =
+		(bHasLiveConstraint && !LiveOutward.IsNearlyZero())
+			? -LiveOutward
+			: ComputeSmoothedWielderDir(Aim, DirTarget, DeltaTime, bWielderAirborne);
 	if (DirWielder.IsNearlyZero())
 	{
 		return;
@@ -577,55 +862,83 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 
 	// 자기 랩(owner == 대상): 양끝이 같은 몸이라 쌍 인가가 자가 상쇄된다 — wielder 끝을 앵커(w=0)로 취급해
 	// 대상 끝만 움직인다(레거시 특례와 동일).
-	const bool bSelfWrap = (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner());
-
 	// 벌어짐 속도 s = −(vT·dT + vW·dW) − dRest/dt. 끝 속도는 수신자 해석과 같은 rung에서 실측한다 —
 	// 움직이는 앵커(드래곤)의 순항은 vT에 실려 별도 피드포워드 없이 추종된다(레거시의 앵커 속도 EMA 대체).
-	auto EndpointVelocity = [](const FRopeTetherEndpoint& Endpoint) -> FVector
-	{
-		switch (Endpoint.Kind)
-		{
-		case ERopeEndpointKind::SimBody:
-			return Endpoint.Prim ? Endpoint.Prim->GetPhysicsLinearVelocity(Endpoint.Bone) : FVector::ZeroVector;
-		case ERopeEndpointKind::Character:
-			return Endpoint.Movement ? Endpoint.Movement->Velocity : FVector::ZeroVector;
-		default:
-			return FVector::ZeroVector; // 앵커/None — 정지.
-		}
-	};
-	// 시뮬 바디 대상은 물리 제약이 담당하므로 λ 관점에서 앵커(정지·w=0) 취급 — s 기여 0.
+	const FVector TargetPoint = Anchor;
+	const FVector WielderPoint = GetComponentLocation();
+	const float InvMassTarget = EndpointPointInvMass(
+		Endpoints->Target, TargetPoint, DirTarget);
+	const float InvMassWielder = bSelfWrap
+		? 0.0f
+		: EndpointPointInvMass(
+			Endpoints->Wielder, WielderPoint, DirWielder);
+	const float WSum = InvMassTarget + InvMassWielder;
+	// Analytic material response and actual point impulse use the same Jacobian. In
+	// particular an off-COM wrap includes rotational inverse mass instead of pretending
+	// the selected bone's COM translation is the rope attachment response.
+	PullDrive.LastTargetShare =
+		(WSum > KINDA_SMALL_NUMBER)
+			? (InvMassTarget / WSum)
+			: 0.0f;
+
 	// Anchor-kind 대상(정적/키네마틱/애니메이션 구동)은 물리 속도가 없어 앵커 점 실측 EMA로 채운다 —
 	// 움직이는 오브젝트 towing이 bias 상한과 무관하게 벌어짐 상쇄로 추종된다(정지 앵커는 ≈0 = 무영향;
-	// 2차 안전망은 인가 쪽 ClampInjectedVelocity(TetherMaxSpeed) 그대로). 남는 실측 경로는 Character(CMC
-	// 구동 대상 — 부분 랙돌 폴스루 포함)뿐이다.
-	const FVector VelTarget = bPhysicalTarget ? FVector::ZeroVector
-		: (Endpoints->Target.Kind == ERopeEndpointKind::Anchor)
-			? PullDrive.SmoothedAnchorPointVelocity
-			: EndpointVelocity(Endpoints->Target);
+	// 2차 안전망은 인가 쪽 ClampInjectedVelocity(TetherMaxSpeed) 그대로). SimBody는 반드시 rope
+	// attachment point의 vCOM+ω×r를 읽고, Character는 CMC 속도를 읽는다.
+	const FVector VelTarget = (Endpoints->Target.Kind == ERopeEndpointKind::Anchor)
+			? (bHasLiveConstraint
+				? LiveConstraint.PivotVelocity
+				: LengthConstraintState.SmoothedAnchorPointVelocity)
+			: EndpointVelocityAtPoint(
+				Endpoints->Target, TargetPoint);
 	const float SepTarget = -static_cast<float>(FVector::DotProduct(VelTarget, DirTarget));
 	const float SepWielder = bSelfWrap ? 0.0f
-		: -static_cast<float>(FVector::DotProduct(EndpointVelocity(Endpoints->Wielder), DirWielder));
-	const float SepSpeed = SepTarget + SepWielder - RestRate;
+		: -static_cast<float>(FVector::DotProduct(
+			EndpointVelocityAtPoint(
+				Endpoints->Wielder, WielderPoint),
+			DirWielder));
+	const float SepSpeed =
+		RopeMovementConstraint::ComputeConstraintSeparatingSpeed(
+			bHardWielderAttempt,
+			LengthConstraintState.WielderAttemptSeparatingSpeed,
+			SepTarget + SepWielder,
+			RestRate);
 
-	RopeTraction::FRopeTetherConstraint In;
-	In.C = C;
-	In.SepSpeed = SepSpeed;
-	// 시뮬 바디 대상은 물리 제약이 담당 — λ에서는 앵커(w=0). 그 외(Character 등)는 종전(유효질량의 역).
-	In.InvMassTarget = bPhysicalTarget ? 0.0f : EndpointInvMass(Endpoints->Target);
-	In.InvMassWielder = bSelfWrap ? 0.0f : EndpointInvMass(Endpoints->Wielder);
-	In.SettleAlpha = RopeTraction::ExpSmoothAlpha(HoldConfig.TetherSettleTime, DeltaTime);
-	// 회수 상한은 총 속도 상한(TetherMaxSpeed)과 별도 노브다 — 회수 항만 운동량으로 남으므로(슬랙 코스팅)
-	// 1500을 재사용하면 가벼운 대상이 한두 프레임에 15m/s로 가속돼 슬랙 전환과 함께 날아간다("휙").
+	RopeLengthConstraint::FInput In;
+	LengthConstraintState.Backend = bHardWielderAttempt
+		? ERopeLengthConstraintBackend::HardReaction
+		: ERopeLengthConstraintBackend::Analytic;
+	// C is sampled after the hard projection, so its rejected position is already gone and
+	// normal hard frames see C=0. Any positive value left here is new live error (for example
+	// an external target that moved later in PrePhysics) and must not be hidden by the attempt
+	// stamp. The original rejected distance still enters only through its recorded speed.
+	In.Violation = C;
+	In.SeparatingSpeed = SepSpeed;
+	In.EffectiveInverseMass = WSum;
+	In.ActivationSlop = FMath::Max(HoldConfig.LengthConstraintActivationSlop, 0.0f);
+	// The projection's original error is absent from live C. A later-moving external
+	// target can create a new positive residual in the same frame, and that residual needs
+	// normal position bias even though a hard attempt stamp also exists.
+	In.SettleAlpha =
+		(bHardWielderAttempt && C <= KINDA_SMALL_NUMBER)
+			? 0.0f
+			: RopeTraction::ExpSmoothAlpha(
+				HoldConfig.TetherSettleTime, DeltaTime);
 	In.MaxBiasSpeed = FMath::Max(HoldConfig.TetherMaxBiasSpeed, 0.0f);
 	In.Compliance = HoldConfig.TetherCompliance;
-	In.MaxTension = HoldConfig.MaxTetherTension;
-	const float Lambda = RopeTraction::SolveTetherLambda(In, DeltaTime);
-	// Max 병합: 랙돌 물리 제약의 실측 장력(UpdatePhysicalTether가 위에서 실은 값)을 λ 발화 프레임이
-	// 덮어쓰지 않게 한다(덮으면 게이트 통과 프레임마다 제약 장력이 디버거/스냅샷에서 사라진다).
-	PullDrive.LastTetherLambda = FMath::Max(PullDrive.LastTetherLambda, Lambda);
+	// A strictly inextensible constraint cannot also cap its reaction under arbitrary
+	// kinematic input: exceeding a cap must either stretch, slip, or break. Rigid mode
+	// preserves length and reports the full reaction (MaxTetherTension is then an overload
+	// threshold); compliant mode may yield and therefore uses the configured force cap.
+	In.MaxTension = HoldConfig.TetherCompliance > KINDA_SMALL_NUMBER
+		? HoldConfig.MaxTetherTension
+		: 0.0f;
+	const RopeLengthConstraint::FResult SolveResult =
+		RopeLengthConstraint::Solve(In, DeltaTime);
+	const float Lambda = SolveResult.Lambda;
+	LengthConstraintState.LastLambda = Lambda;
+
 	// 유효 분배 몫(wielder 게이트/디버거 호환) = 역질량비 — λ 발화와 무관하게 이번 프레임 값으로 확정한다.
-	const float WSum = In.InvMassTarget + In.InvMassWielder;
-	PullDrive.LastTargetShare = (WSum > KINDA_SMALL_NUMBER) ? (In.InvMassTarget / WSum) : 0.0f;
 	if (Lambda <= 0.0f)
 	{
 		return; // 이미 충분히 접근 중이거나 양끝 다 앵커.
@@ -633,9 +946,9 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 
 	// ---- 인가: 끝별 ΔV = λ × w(cm/s), 각자 다리 방향 ----
 	// 모든 경로가 로프 축(+직교 감쇠) 성분만 건드려 스윙/중력은 보존되고, 결과 속력은 TetherMaxSpeed로
-	// 2차 클램프된다. 시뮬 바디 대상은 w=0이라 대상 쪽 인가가 없다(물리 제약이 담당) — 실질 수신자는
-	// wielder(CMC/시뮬 루트)와 Character-kind 대상뿐. 기존 디스패치 골격(ApplyToTetherEndpoint)을 그대로
-	// 지나므로 확장 관문(ApplyTractionToReceiver, Amount = ΔV cm/s)도 동일.
+	// 2차 클램프된다. 강체 시뮬 대상은 Chaos가 독점하고, compliant 시뮬 대상과 시뮬 wielder는 실제
+	// 물리 임펄스(ΔV×유효질량)를 받는다. 기존 디스패치 골격(ApplyToTetherEndpoint)을 그대로 지나므로
+	// 확장 관문(ApplyTractionToReceiver, Amount = ΔV cm/s)도 동일하다.
 	const float SpeedCap = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
 	// 직교 감쇠 dt 보정: 설정값은 60fps 기준 프레임당 비율 → 유효 비율 = 1−(1−d)^(dt·60). 종전엔 비율을
 	// 프레임당 그대로 써 고프레임률일수록 감쇠가 세지는 프레임률 의존 물리였다.
@@ -643,22 +956,101 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 	const float PerpDamp = (PerpDampCfg > 0.0f && PerpDampCfg < 1.0f)
 		? (1.0f - FMath::Pow(1.0f - PerpDampCfg, DeltaTime * 60.0f))
 		: PerpDampCfg;
-	auto ApplySimBody = [&](UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float DeltaV) -> float
+	auto ApplySimBody = [&](
+		UPrimitiveComponent* Prim,
+		FName BoneName,
+		const FVector& Dir,
+		const FVector& PointWorld,
+		float DeltaV,
+		float PointInvMass) -> float
 	{
-		// (대상 쪽 시뮬 바디는 여기 오지 않는다 — 물리 제약이 담당, w=0이라 ΔV도 0. 이 경로의 실수요는
-		// wielder 쪽 시뮬 루트(물리 액터 구성 — rung 3, 본 없음)뿐이다.)
-		// 컴포넌트 단위 시뮬 바디: 임펄스(bVelChange) + 직교 잔여 관성 부분 감쇠 + 결과 속력 클램프.
+		// Compliant 대상 또는 물리 wielder: solver와 같은 attachment-point Jacobian으로
+		// ΔV=λ*w를 계산했으므로 실제 로프 임펄스는 정확히 J=λ*d=(ΔV/w)*d다.
+		// AddImpulseAtLocation이 ω×r와 토크를 함께 만들며, 관측도 같은 점 속도를 읽는다.
 		// (직교 감쇠는 전 축 대상이다 — 수직 성분 제외안은 검토 후 되돌림. 중력 낙하가 감쇠와 평형을
 		// 이뤄 저속(≈g·dt/비율)에 갇히는 "무중력" 룩은 이 값의 크기 튜닝으로 대응한다.)
-		const FVector CurVel = Prim->GetPhysicsLinearVelocity(BoneName);
-		FVector Impulse = Dir * DeltaV;
-		if (PerpDamp > 0.0f)
+		if (PointInvMass <= KINDA_SMALL_NUMBER)
 		{
-			const FVector PerpVel = CurVel - Dir * static_cast<float>(FVector::DotProduct(CurVel, Dir));
-			Impulse -= PerpVel * PerpDamp;
+			return DeltaV;
 		}
-		const FVector NewVel = RopeTraction::ClampInjectedVelocity(CurVel + Impulse, CurVel, SpeedCap);
-		Prim->AddImpulse(NewVel - CurVel, BoneName, /*bVelChange*/ true);
+		const FVector CurVel =
+			Prim->GetPhysicsLinearVelocityAtPoint(
+				PointWorld, BoneName);
+		FVector PointImpulse =
+			Dir * (DeltaV / PointInvMass);
+
+		FRopeTetherEndpoint SimEndpoint;
+		SimEndpoint.Kind = ERopeEndpointKind::SimBody;
+		SimEndpoint.Prim = Prim;
+		SimEndpoint.Bone = BoneName;
+		RopeTraction::FRopePointMassProperties Body;
+		if (BuildPointMassProperties(SimEndpoint, Body))
+		{
+			if (PerpDamp > 0.0f)
+			{
+				const FVector PerpVel =
+					CurVel -
+					Dir * static_cast<float>(
+						FVector::DotProduct(CurVel, Dir));
+				const float PerpSpeed =
+					static_cast<float>(PerpVel.Size());
+				if (PerpSpeed > KINDA_SMALL_NUMBER)
+				{
+					const FVector PerpDir =
+						-PerpVel / PerpSpeed;
+					const float PerpInvMass =
+						RopeTraction::ComputePointInverseMass(
+							Body, PointWorld, PerpDir);
+					if (PerpInvMass > KINDA_SMALL_NUMBER)
+					{
+						PointImpulse +=
+							PerpDir *
+							(PerpSpeed * PerpDamp /
+								PerpInvMass);
+					}
+				}
+			}
+
+			// Predict the actual point response (including angular motion), then scale the
+			// whole injected impulse if the gameplay safety cap would be exceeded.
+			const FVector PredictedDelta =
+				RopeTraction::ComputePointVelocityDelta(
+					Body, PointWorld, PointImpulse);
+			const FVector SafeVelocity =
+				RopeTraction::ClampInjectedVelocity(
+					CurVel + PredictedDelta,
+					CurVel,
+					SpeedCap);
+			const FVector SafeDelta = SafeVelocity - CurVel;
+			const float PredictedSizeSq =
+				static_cast<float>(PredictedDelta.SizeSquared());
+			if (PredictedSizeSq > SMALL_NUMBER)
+			{
+				const float ImpulseScale = FMath::Clamp(
+					static_cast<float>(
+						FVector::DotProduct(
+							SafeDelta, PredictedDelta)) /
+						PredictedSizeSq,
+					0.0f,
+					1.0f);
+				PointImpulse *= ImpulseScale;
+			}
+			Prim->AddImpulseAtLocation(
+				PointImpulse, PointWorld, BoneName);
+		}
+		else
+		{
+			// Defensive fallback for an endpoint whose body vanished after resolution.
+			const FVector NewVel =
+				RopeTraction::ClampInjectedVelocity(
+					CurVel + Dir * DeltaV,
+					CurVel,
+					SpeedCap);
+			Prim->AddImpulse(
+				(NewVel - CurVel) / PointInvMass,
+				BoneName,
+				/*bVelChange*/ false);
+		}
 		return DeltaV;
 	};
 	auto ApplyCharacter = [&](UCharacterMovementComponent* Movement, const FVector& Dir, float DeltaV)
@@ -673,19 +1065,30 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 	auto TractionGate = [this](const FRopeTractionRequest& Req) { return ApplyTractionToReceiver(Req); };
 	const FRopeTetherContext Ctx{ Endpoints->Target, Endpoints->Wielder, DeltaTime, TractionGate };
 
-	const float DvTarget = Lambda * In.InvMassTarget;
+	const float DvTarget = Lambda * InvMassTarget;
 	if (DvTarget > KINDA_SMALL_NUMBER)
 	{
 		ApplyToTetherEndpoint(Ctx, /*bWielderSide*/ false, DirTarget, DvTarget,
-			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ApplySimBody(P, B, D, S); },
+			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S)
+			{
+				return ApplySimBody(
+					P, B, D, TargetPoint, S, InvMassTarget);
+			},
 			[&](UCharacterMovementComponent* M, const FVector& D, float S) { ApplyCharacter(M, D, S); },
 			[&](AActor*, const FVector&, float) { /* 앵커 = w 0이라 ΔV도 0 — 도달 불가 */ });
 	}
-	const float DvWielder = bSelfWrap ? 0.0f : Lambda * In.InvMassWielder;
+	// The hard movement adapter already removed this exact outward velocity from the
+	// Wielder. Applying its analytic share again would create an inward rebound.
+	const float DvWielder =
+		(bSelfWrap || bHardWielderAttempt) ? 0.0f : Lambda * InvMassWielder;
 	if (DvWielder > KINDA_SMALL_NUMBER)
 	{
 		ApplyToTetherEndpoint(Ctx, /*bWielderSide*/ true, DirWielder, DvWielder,
-			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S) { return ApplySimBody(P, B, D, S); },
+			[&](UPrimitiveComponent* P, FName B, const FVector& D, float S)
+			{
+				return ApplySimBody(
+					P, B, D, WielderPoint, S, InvMassWielder);
+			},
 			[&](UCharacterMovementComponent* M, const FVector& D, float S) { ApplyCharacter(M, D, S); },
 			[&](AActor*, const FVector&, float) { /* 앵커 무동작 */ });
 	}
@@ -772,24 +1175,21 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		PhysicalTetherConstraint->RegisterComponent();
 		PhysicalTetherConstraint->SetWorldLocation(CornerWorld);
 		PhysicalTetherConstraint->SetDisableCollision(false);
-		// 컴포넌트 바디(단일 강체)는 하드 리밋 + 위치 투영(projection)이 고주파 진동을 만든다(2026-07-22
-		// PIE: 스태틱 메시 당김 폭주 — 프록시가 매 프레임 이동하며 리밋을 어길 때 투영이 위반량을 위치
-		// 스냅으로 닫고, 강체는 관절 완충이 없어 스냅→반동→재위반이 프레임 주기로 반복). 투영을 끄고
-		// 소프트 리밋(스프링-댐퍼, PhysicalTetherStiffness/Damping — 강성 0 = 하드 유지)으로 흡수한다.
-		// 프로파일은 제약 초기화(SetConstrainedComponents) **전**에 세팅해야 반영된다.
-		// 스켈레탈(랙돌)은 PIE 검증 그대로(하드 리밋 + 엔진 기본 투영 — 관절 사슬이 완충).
+		// A single body plus positional projection can snap/rebound at the moving limit, so
+		// component bodies keep projection disabled. This backend is exclusively the
+		// inextensible path and must always be a hard Chaos limit. Positive compliance is
+		// owned by the common analytic material solver and never reaches this function.
+		// The profile must be configured before SetConstrainedComponents initializes Chaos.
+		FConstraintProfileProperties& Profile =
+			PhysicalTetherConstraint->ConstraintInstance.ProfileInstance;
 		if (!SkelBody)
 		{
-			FConstraintProfileProperties& Profile = PhysicalTetherConstraint->ConstraintInstance.ProfileInstance;
 			Profile.bEnableProjection = false;
-			if (HoldConfig.PhysicalTetherStiffness > 0.0f)
-			{
-				Profile.LinearLimit.bSoftConstraint = true;
-				Profile.LinearLimit.Stiffness = HoldConfig.PhysicalTetherStiffness;
-				Profile.LinearLimit.Damping = FMath::Max(HoldConfig.PhysicalTetherDamping, 0.0f);
-				Profile.LinearLimit.Restitution = 0.0f;
-			}
 		}
+		Profile.LinearLimit.bSoftConstraint = false;
+		Profile.LinearLimit.Stiffness = 0.0f;
+		Profile.LinearLimit.Damping = 0.0f;
+		Profile.LinearLimit.Restitution = 0.0f;
 		PhysicalTetherConstraint->SetConstrainedComponents(PhysicalTetherProxy, NAME_None, TargetPrim, Bone);
 		// 제약 프레임 오리진: 프록시 쪽 = 프록시 원점(코너), 대상 쪽 = 앵커의 바디-로컬(위 AnchorLocal —
 		// wrap이 얼린 본-로컬 앵커와 같은 규약, 창 끝 레버 포함). 거리 리밋은 이 두 점 사이에 걸린다.
@@ -808,22 +1208,47 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 			*GetName(), *GetNameSafe(TargetPrim), *Bone.ToString());
 	}
 
-	// 구면 거리 리밋 = 다리 rest(되감기/앵커 이동 자동 반영). XYZ Limited + 동일값 = 반경 리밋.
-	const float Limit = FMath::Max(LegRestLen, 1.0f);
-	if (!FMath::IsNearlyEqual(PhysicalTetherLimit, Limit, 0.5f))
+	// Spherical distance limit = material leg length. Node zero is an exact zero-radius
+	// contract, not a 1 cm convenience slack: represent it with XYZ Locked because Chaos
+	// Limited(0) is not a portable zero-distance limit across solver paths.
+	const float Limit = FMath::Max(LegRestLen, 0.0f);
+	const bool bWasZeroLimit =
+		PhysicalTetherLimit >= 0.0f &&
+		PhysicalTetherLimit <= KINDA_SMALL_NUMBER;
+	const bool bIsZeroLimit =
+		Limit <= KINDA_SMALL_NUMBER;
+	if (bWasZeroLimit != bIsZeroLimit ||
+		!FMath::IsNearlyEqual(PhysicalTetherLimit, Limit, 0.5f))
 	{
-		PhysicalTetherConstraint->SetLinearXLimit(LCM_Limited, Limit);
-		PhysicalTetherConstraint->SetLinearYLimit(LCM_Limited, Limit);
-		PhysicalTetherConstraint->SetLinearZLimit(LCM_Limited, Limit);
+		const ELinearConstraintMotion Motion =
+			bIsZeroLimit
+				? LCM_Locked
+				: LCM_Limited;
+		PhysicalTetherConstraint->SetLinearXLimit(Motion, Limit);
+		PhysicalTetherConstraint->SetLinearYLimit(Motion, Limit);
+		PhysicalTetherConstraint->SetLinearZLimit(Motion, Limit);
 		PhysicalTetherLimit = Limit;
 	}
 
-	// 장력 관측: 제약이 실제로 낸 힘(kg·cm/s²)을 λ 채널(λ = T×dt)로 실어 GetTetherTension()/디버거와 호환.
+	SamplePhysicalTetherForce(DeltaTime);
+}
+
+void URopeComponent::SamplePhysicalTetherForce(float DeltaTime)
+{
+	if (!PhysicalTetherConstraint || DeltaTime <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	// Physical backend is authoritative for this frame. Store its measured force in the
+	// common lambda channel; do not add/max an analytic hard-reaction estimate on top.
+	LengthConstraintState.Backend = ERopeLengthConstraintBackend::Chaos;
 	FVector LinearForce = FVector::ZeroVector;
 	FVector AngularForce = FVector::ZeroVector;
 	PhysicalTetherConstraint->GetConstraintForce(LinearForce, AngularForce);
-	PullDrive.LastTetherLambda = FMath::Max(PullDrive.LastTetherLambda,
-		static_cast<float>(LinearForce.Size()) * DeltaTime);
+	LengthConstraintState.LastLambda =
+		static_cast<float>(LinearForce.Size()) * DeltaTime;
+	LengthConstraintState.LastLambdaDt = DeltaTime;
 }
 
 void URopeComponent::TeardownPhysicalTether()
@@ -842,6 +1267,7 @@ void URopeComponent::TeardownPhysicalTether()
 	PhysicalTetherTarget = nullptr;
 	PhysicalTetherBone = NAME_None;
 	PhysicalTetherLimit = -1.0f;
+	PhysicalTetherPrePhysicsFrame = MAX_uint64;
 	PhysicalTetherAnchorLocal = FVector::ZeroVector;
 }
 

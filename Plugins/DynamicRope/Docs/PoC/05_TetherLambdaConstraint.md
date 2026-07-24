@@ -97,14 +97,36 @@ rest가 줄어 s가 커지고, λ가 그만큼 당긴다. **앵커 속도 피드
 
 ### 3.3 λ 솔브 (프레임당 해석적 1회 — 반복 불필요)
 
+비신축(`α = 0`) 제약:
+
 ```
 β      = 1 − exp(−dt / TetherSettleTime)     // 위치 오차 회수 게인(프레임률 독립)
 s*     = −β · C / dt                          // 목표: 이번 프레임 C의 β 비율 회수
 Δs     = s* − s                               // 필요한 접근 속도 변화(음수여야 당김)
-λ      = clamp( −Δs / (w_t + w_w + α/dt²),  0,  λ_max )
-λ_max  = MaxTetherTension · dt                // 장력 상한(임펄스로 환산)
-α      = TetherCompliance                     // 0 = 비신축(기본), > 0 = 의도적 탄성
+λ      = max( −Δs / (w_t + w_w), 0 )
 ```
+
+비신축 로프는 임의의 kinematic 입력에도 exact length를 지키므로 유한 force cap과 양립할 수 없다.
+따라서 `MaxTetherTension`은 이 경로에서 반력을 자르는 값이 아니라 overload 기준선이다.
+
+탄성(`α > 0`) 재료는 후단 상태에서 Kelvin-Voigt 힘을 평가하도록 동시에 푼다:
+
+```
+k      = 1 / α
+m_eff  = 1 / (w_t + w_w)
+c_crit = 2 · sqrt(k · m_eff)
+s+     = s − (w_t + w_w) · λ
+C+     = max(C, 0) + dt · s+
+λ      = dt · (k · C+ + c_crit · s+)
+T      = clamp(λ / dt, 0, MaxTetherTension)
+λ      = T · dt
+```
+
+폐형식은 `r=2√(α/(w_t+w_w))`일 때
+`T=[max(C,0)+(r+dt)s] / [α+(w_t+w_w)dt(r+dt)]`다. `α`를 persistent λ 없는 1회
+속도 솔브의 단순 `α/dt²`로 쓰거나 현재 힘 `T·dt`를 explicit 적용하면 저FPS에서 감쇠가 상대속도를
+뒤집는다. 후단 implicit 식은 모든 dt에서 안정적이고, 일정 하중 F에는 프레임률과 무관하게
+`C→αF`, `T→F`로 수렴한다.
 
 인가(임펄스 쌍 — 크기 같고 각 끝의 다리 방향):
 
@@ -132,21 +154,19 @@ s*     = −β · C / dt                          // 목표: 이번 프레임 C�
 기존 `ResolveTetherEndpoint` 래더와 `ApplyToTetherEndpoint` 디스패치, `ApplyTractionToReceiver`
 관문을 그대로 쓴다. 정정/규약:
 
-1. **풀 랙돌**: ~~인가 = 전체 평행이동~~ → **(정정 2026-07-20, Pierce PIE 5차) 점 Jacobian으로 교체**:
-   관측 s = 앵커 점 속도(EMA), 유효 역질량 w_point = 1/m + (r×d)ᵀI⁻¹(r×d), 인가 =
-   `AddImpulseAtLocation(λ·d, 앵커, 본)`. COM 평행이동은 레버(Pierce 창 끝) 스윙이 만드는 점 오차를
-   **영영 닫을 수 없어** λ가 상한으로 와인드업하는 구조적 폭주가 있었다 — 점 임펄스는 오차를 직접
-   닫고(당기면 창이 로프 방향으로 정렬), 관측·질량·인가가 같은 Jacobian이라 자기일관적이다.
-   임펄스는 λ 상한으로 유계라 구 velocity-set 단일 본 슬램(무한 힘)과 다르다. 잔여 스핀은 인가 후
-   각속도 클램프(ActivePullMaxAngularSpeed). 분배/pullable 판정의 유효질량은 종전대로 전신 바디 합.
+1. **풀 랙돌/물리 대상**: 비신축 모드는 Chaos 거리 제약이 서브스텝에서 중력·관절·접촉과 함께
+   반력을 푼다. 탄성 모드는 공통 analytic λ를 쓰되 실제 wrap attachment의 점 속도
+   `v_point=vCOM+ω×r`, 점 역질량 `w=1/m+(r×d)ᵀI⁻¹(r×d)`를 관측/솔브하고,
+   같은 점에 `AddImpulseAtLocation(λ·d, point, bone)`을 인가한다. COM 속도·전신 질량으로
+   계산한 ΔV를 단일 본에 `bVelChange=true`로 직접 쓰는 질량/Jacobian 불일치는 금지한다.
 2. **부분 랙돌(시뮬 본이 키네마틱 체인에 묶임)**: rung 1에서 **Character로 폴스루**한다
    (유효질량 = CMC 질량 × 브레이스, 인가 = CMC). 감긴 본에는 시각 반응용 소량 임펄스만 옵션.
    → `ResolveTetherEndpoint` rung 1 주석의 "알려진 한계"(2026-07-15 보류)를 이 설계로 해소.
 3. **CMC**: `Movement->Velocity += Δv_w` 직접(이번 프레임 반영 계약 유지). 접지 브레이스
    (GroundBraceFactor)는 유효질량으로 계속 표현. 접지 마찰이 다음 틱에 ΔV를 깎는 것은
    "버티는 발"의 정당한 물리로 취급한다(λ가 다음 프레임 C로 다시 관측 — 정상 수렴 루프).
-4. **컴포넌트 시뮬 바디**: `AddImpulse(bVelChange)`. 위치 스윕 이동은 v1에서 제거(β·C/dt가
-   위치 오차를 닫는다). PIE에서 관통/드리프트가 보이면 위치 패스를 후속 추가.
+4. **컴포넌트 시뮬 바디**: 풀 랙돌과 같은 backend 정책을 쓴다. 비신축은 hard Chaos limit,
+   탄성은 공통 analytic λ의 attachment-point impulse다.
 5. **앵커**: w=0, 인가 없음(현행 위치 오프셋 폴백 삭제 — 앵커는 정의상 안 움직인다).
 6. **자기 랩(owner == 대상)**: 양끝이 같은 몸 — 현행대로 대상 몫 전량 특례 유지.
 7. **2차 방어 유지**: 인가 결과 속력을 `ClampInjectedVelocity`(TetherMaxSpeed)로 클램프 —
@@ -209,7 +229,7 @@ s*     = −β · C / dt                          // 목표: 이번 프레임 C�
 | 데모 | λ 모델에서의 표현 |
 |---|---|
 | **입체기동** (키 입력 → 대상 쪽 고속 이동) | 되감기(ReelRate↑) → dL_rest/dt가 s에 유입 → λ가 wielder를 당김(w_w 몫). 목표 속도감은 ReelRate가, 힘 한계는 MaxTetherTension이 담당. 기존 GroundExit/스윙 에어컨트롤 게이트 호환(§4.4) |
-| **도르래** (턱에 걸린 줄, 낙하 wielder ↔ 대상) | 코너 다리 방향 d_t/d_w가 각자 계산되고 같은 λ가 양끝에 걸림 = 이상 도르래 그 자체. wielder 낙하가 C를 늘리고 λ가 질량비대로 대상을 끌어올린다. **별도 구현 없음** — 현행 구조에선 표현 불가였던 것 |
+| **도르래 느낌** (감긴 대상 ↔ wielder) | 현재 단일 material-length 제약의 같은 λ가 양쪽 수신자에 질량비로 전달되어 비신축 장력/하중 교환은 표현한다. 다만 wrap anchor는 material point에 고정되므로, 줄이 가이드를 마찰 없이 미끄러지며 두 leg 길이를 재분배하는 **완전한 2-sided pulley topology는 별도 후속**이다. |
 | **드래곤** (로프 박고 이동) | v_t = 드래곤 본 실측 속도 → 순항 추종이 제약 정의에 내장(피드포워드 삭제). Pierce 앵커도 동일 경로 |
 
 ## 6. 구현 계획 (CL 단위)
@@ -314,3 +334,12 @@ wielder 들썩임)의 정정. 원인과 수정:
    강성 0 = 하드 복귀). 스켈레탈은 PIE 검증된 하드 리밋 + 기본 투영 유지. 동반: 바디-로컬 앵커 드리프트
    가드 — 제약 프레임(Frame2)은 생성 시 고정이라 같은 (대상,본) 안에서 wrap 앵커가 재배치되면 상시
    위반=진동이 되므로, 5cm 초과 드리프트 시 해체 후 즉시 재생성.
+10. **탄성/장력 단일 material solve(2026-07-23, 9번 대체)**: `TetherCompliance=0`은 Pawn의
+    PrePhysics hard projection과 물리 대상의 hard Chaos limit가 material length를 보존하고, 그 제약이
+    거부한 속도/Chaos force가 곧 authoritative tension이다. `TetherCompliance>0`은 별도 Chaos spring을
+    만들지 않고 모든 endpoint가 §3.3의 implicit Kelvin-Voigt λ를 공유한다. 물리 endpoint는 §3.4의
+    attachment-point Jacobian/impulse를 사용한다. 따라서 `PhysicalTetherStiffness/Damping`은 기존
+    asset 역직렬화용 deprecated 값일 뿐이며, 9번의 soft-limit 튜닝 경로는 더 이상 실행되지 않는다.
+    비신축 SimBody의 위치 위반은 Wielder/target generalized-mass 몫으로 나누고 Chaos proxy를 보정 후
+    **실제 hand point**에 둔다. 손을 경계까지 전량 투영한 뒤 target도 움직이는 이중 보정은 실제 span을
+    material length보다 짧게 만들어 다음 프레임 장력이 끊기는 원인이므로 금지한다.

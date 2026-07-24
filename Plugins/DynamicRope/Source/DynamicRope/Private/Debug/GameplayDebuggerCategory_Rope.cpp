@@ -838,6 +838,9 @@ void FGameplayDebuggerCategory_Rope::DrawRope(const URopeComponent& Rope, const 
 					S.bChainTaut ? TEXT("{green}Y") : TEXT("{grey}N"),
 					S.TautChordLen, S.FreeRestLen, S.MinFreeTension, S.MaxLegSag,
 					TensionColor, S.TetherTension, S.MaxTetherTension));
+				AddTextLine(FString::Printf(
+					TEXT("      {grey}length-constraint=%s attempted=%.0fcm/s rejected=%.2fcm"),
+					*S.ConstraintBackend, S.AttemptedOutwardSpeed, S.AttemptedViolation));
 			}
 		}
 		else

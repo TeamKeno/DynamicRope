@@ -54,6 +54,29 @@ namespace RopeTraction
 	DYNAMICROPE_API float InvMassFromMass(float Mass);
 
 	/**
+	 * 월드 점에 로프 임펄스를 받는 강체의 순간 질량 특성.
+	 * InertiaTensor는 MassSpaceToWorld 회전 프레임에서 대각 성분이다.
+	 */
+	struct FRopePointMassProperties
+	{
+		float Mass = 0.0f;
+		FVector InertiaTensor = FVector::ZeroVector;
+		FTransform MassSpaceToWorld = FTransform::Identity;
+	};
+
+	/** 같은 월드 점에 ImpulseWorld를 인가했을 때 그 점의 순간 속도 변화 K·J. */
+	DYNAMICROPE_API FVector ComputePointVelocityDelta(
+		const FRopePointMassProperties& Body,
+		const FVector& PointWorld,
+		const FVector& ImpulseWorld);
+
+	/** 월드 점/방향의 스칼라 로프 Jacobian J M^-1 J^T. */
+	DYNAMICROPE_API float ComputePointInverseMass(
+		const FRopePointMassProperties& Body,
+		const FVector& PointWorld,
+		const FVector& DirectionWorld);
+
+	/**
 	 * 프레임률 독립 지수 스무딩 계수 α = 1 − exp(−dt/Tau). dt가 아무리 커도 α ≤ 1이라 오버슛하지 않고,
 	 * 프레임률이 달라져도 같은 시상수(Tau 초)로 수렴한다(α를 상수로 두면 프레임률에 따라 반응이 달라진다).
 	 * Tau ≤ 0 = 스무딩 없음(α = 1, 한 프레임에 목표 도달).
@@ -102,7 +125,10 @@ namespace RopeTraction
 	 */
 	struct FRopeTetherConstraint
 	{
-		/** 초과분 C = 앵커→손 경로 chord 합 − 자유 구간 rest 길이(cm). ≤ 0 = 슬랙(λ = 0). */
+		/**
+		 * 초과분 C = 필요한 경로 길이 − material 길이(cm). < 0 = 슬랙.
+		 * C == 0은 경계이므로 SepSpeed > 0이면 비신축 반력 λ가 발생한다.
+		 */
 		float C = 0.0f;
 
 		/**
@@ -130,7 +156,10 @@ namespace RopeTraction
 		 */
 		float MaxBiasSpeed = 0.0f;
 
-		/** 컴플라이언스 α(s²/kg — XPBD 표준형, 분모에 α/dt²). 0 = 비신축(기본), > 0 = 의도적 탄성(연출). */
+		/**
+		 * 재료 컴플라이언스 α(s²/kg = 역강성). 0 = 비신축(기본).
+		 * > 0이면 k=1/α인 implicit Kelvin-Voigt 장력과 generalized critical damping을 사용한다.
+		 */
 		float Compliance = 0.0f;
 
 		/** 장력 상한(kg·cm/s², 0 = 무제한). λ ≤ 이 값 × dt — 무거운 대상 뒤처짐/한계 장력 연출의 물리 노브. */
@@ -142,8 +171,8 @@ namespace RopeTraction
 	 * 인가는 호출자 몫: 각 끝에 Δv = d × (λ × w) — 크기가 같은 임펄스 쌍이라 분배(무거운 쪽이 덜
 	 * 움직임/앵커는 정지)가 자동이고, 상대 *접근*만 만들므로 끝별 독립 서보와 달리 에너지 주입이
 	 * 없다(바이어스 항만 예외 — MaxBiasSpeed 주석). 성질:
-	 *  - 단방향: 슬랙(C ≤ 0)이거나 이미 목표 이상으로 접근 중이면 0 — 로프는 밀지도, 접근을 제동하지도
-	 *    않는다(슬랙 코스팅은 정당한 물리).
+	 *  - 단방향: 슬랙(C < 0)이거나 이미 목표 이상으로 접근 중이면 0 — 로프는 밀지도, 접근을 제동하지도
+	 *    않는다. 정확한 경계(C == 0)에서 벌어지는 중이면 비신축 반력이 생긴다.
 	 *  - 양끝 다 앵커(w 합 ~0)면 0 — 아무도 못 움직인다(한계 이탈은 거리 release가 처리).
 	 *  - MaxTension 상한에 걸리면 남은 C가 다음 프레임으로 이월된다(무거운 대상 뒤처짐).
 	 * 유닛 테스트: Tests/RopeTractionSolverTests.cpp의 TetherLambda* 계열.

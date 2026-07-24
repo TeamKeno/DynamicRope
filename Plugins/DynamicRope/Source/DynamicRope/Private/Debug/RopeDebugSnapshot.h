@@ -217,6 +217,10 @@ struct FRopeDebugSnapshot
 	// 이번 프레임 테더 장력(λ/dt 또는 랙돌 물리 제약 실측력, kg·cm/s²)과 그 상한 — 디버거 표시용.
 	float TetherTension = 0.0f;
 	float MaxTetherTension = 0.0f;
+	// Authoritative material-constraint backend and the PrePhysics motion it rejected.
+	FString ConstraintBackend;
+	float AttemptedOutwardSpeed = 0.0f;
+	float AttemptedViolation = 0.0f;
 	// 능동 Pull **요청** 힘(0=입력 없음). SetActivePull이 저장한 값이라 인가 여부와는 별개다.
 	float ActivePullForce = 0.0f;
 	// 그 요청이 이번 프레임 팽팽 게이트를 통과해 실제로 인가됐는가. 요청값만 내면 "taut=N인데 우회 설정으로

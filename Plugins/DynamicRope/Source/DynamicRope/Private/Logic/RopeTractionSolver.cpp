@@ -1,6 +1,7 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeTractionSolver.h"
+#include "Logic/RopeLengthConstraintSolver.h"
 
 namespace RopeTraction
 {
@@ -32,6 +33,60 @@ namespace RopeTraction
 	float InvMassFromMass(float Mass)
 	{
 		return (Mass > KINDA_SMALL_NUMBER) ? (1.0f / Mass) : 0.0f;
+	}
+
+	FVector ComputePointVelocityDelta(
+		const FRopePointMassProperties& Body,
+		const FVector& PointWorld,
+		const FVector& ImpulseWorld)
+	{
+		const float InvMass = InvMassFromMass(Body.Mass);
+		if (InvMass <= 0.0f)
+		{
+			return FVector::ZeroVector;
+		}
+
+		const FVector Arm =
+			PointWorld - Body.MassSpaceToWorld.GetLocation();
+		const FVector AngularImpulseWorld =
+			FVector::CrossProduct(Arm, ImpulseWorld);
+		const FQuat MassRotation =
+			Body.MassSpaceToWorld.GetRotation().GetNormalized();
+		const FVector AngularImpulseLocal =
+			MassRotation.UnrotateVector(AngularImpulseWorld);
+		const FVector InvInertiaLocal(
+			Body.InertiaTensor.X > KINDA_SMALL_NUMBER
+				? 1.0f / Body.InertiaTensor.X
+				: 0.0f,
+			Body.InertiaTensor.Y > KINDA_SMALL_NUMBER
+				? 1.0f / Body.InertiaTensor.Y
+				: 0.0f,
+			Body.InertiaTensor.Z > KINDA_SMALL_NUMBER
+				? 1.0f / Body.InertiaTensor.Z
+				: 0.0f);
+		const FVector AngularVelocityDeltaWorld =
+			MassRotation.RotateVector(
+				AngularImpulseLocal * InvInertiaLocal);
+		return ImpulseWorld * InvMass +
+			FVector::CrossProduct(AngularVelocityDeltaWorld, Arm);
+	}
+
+	float ComputePointInverseMass(
+		const FRopePointMassProperties& Body,
+		const FVector& PointWorld,
+		const FVector& DirectionWorld)
+	{
+		const FVector Direction = DirectionWorld.GetSafeNormal();
+		if (Direction.IsNearlyZero())
+		{
+			return 0.0f;
+		}
+		return FMath::Max(
+			0.0f,
+			static_cast<float>(FVector::DotProduct(
+				Direction,
+				ComputePointVelocityDelta(
+					Body, PointWorld, Direction))));
 	}
 
 	float ExpSmoothAlpha(float Tau, float DeltaTime)
@@ -85,35 +140,15 @@ namespace RopeTraction
 
 	float SolveTetherLambda(const FRopeTetherConstraint& In, float DeltaTime)
 	{
-		if (In.C <= 0.0f || DeltaTime <= 1e-4f)
-		{
-			return 0.0f; // 슬랙(또는 dt 축퇴) — 로프는 밀지 못한다. 이게 슬랙 게이트의 전부다.
-		}
 		const float WSum = FMath::Max(In.InvMassTarget, 0.0f) + FMath::Max(In.InvMassWielder, 0.0f);
-		const float Denom = WSum + FMath::Max(In.Compliance, 0.0f) / (DeltaTime * DeltaTime);
-		if (Denom <= KINDA_SMALL_NUMBER)
-		{
-			return 0.0f; // 양끝 다 앵커 — 아무도 못 움직인다(한계 이탈은 거리 release가 처리).
-		}
-
-		// 위치 회수 명령(접근 속도): 이번 프레임 C의 β 비율을 닫는다. C가 큰 프레임(커밋 직후 이미 초과 등)의
-		// 스파이크는 MaxBiasSpeed로 상한 — 벌어짐 상쇄와 달리 이 항만 운동량에 바이어스로 남으므로
-		// (슬랙 전환 후 접근 코스팅 상한 = 이 값), 상한이 곧 테더가 만들 수 있는 최대 접근 속도다.
-		const float Beta = FMath::Clamp(In.SettleAlpha, 0.0f, 1.0f);
-		float BiasSpeed = Beta * In.C / DeltaTime;
-		if (In.MaxBiasSpeed > 0.0f)
-		{
-			BiasSpeed = FMath::Min(BiasSpeed, In.MaxBiasSpeed);
-		}
-
-		// 필요한 접근 속도 변화 = 목표(−BiasSpeed) − 현재(SepSpeed). 이미 목표 이상으로 접근 중이면
-		// 무동작(단방향 — 로프는 접근을 제동하지 않는다).
-		const float DeltaS = -BiasSpeed - In.SepSpeed;
-		if (DeltaS >= 0.0f)
-		{
-			return 0.0f;
-		}
-		const float Lambda = -DeltaS / Denom;
-		return (In.MaxTension > 0.0f) ? FMath::Min(Lambda, In.MaxTension * DeltaTime) : Lambda;
+		RopeLengthConstraint::FInput LengthIn;
+		LengthIn.Violation = In.C;
+		LengthIn.SeparatingSpeed = In.SepSpeed;
+		LengthIn.EffectiveInverseMass = WSum;
+		LengthIn.SettleAlpha = In.SettleAlpha;
+		LengthIn.MaxBiasSpeed = In.MaxBiasSpeed;
+		LengthIn.Compliance = In.Compliance;
+		LengthIn.MaxTension = In.MaxTension;
+		return RopeLengthConstraint::Solve(LengthIn, DeltaTime).Lambda;
 	}
 }

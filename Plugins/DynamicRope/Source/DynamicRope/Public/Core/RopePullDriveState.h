@@ -82,42 +82,9 @@ struct FRopePullDriveState
 	// (레거시 서보 시절의 주입 장부(TowedVelDebt)/슬랙 브레이크는 제거됐다 — λ의 위치 회수 항은
 	//  MaxBiasSpeed로 유계라 회수할 과잉 주입 자체가 없다. Docs/PoC/05 §3.5.)
 
-	/** 이번 프레임 테더 초과분(cm) — 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). 디버거 표시용.
-	 *  (Constraint 모드에선 제약 위반 C의 0 클램프 — 산출원만 다르고 의미는 동일하다.) */
-	float LastTetherOvershoot = 0.0f;
-
-	/**
-	 * (Constraint 모드) 이번 프레임 λ(장력 임펄스, kg·cm/s). 0 = 미발화(슬랙/접근 중/비Constraint 모드).
-	 * 테더 장력 관측치 GetTetherTension() = 이 값 / dt — 그 dt를 함께 보관한다. 디버거·BP 조회 소스.
-	 * ResetTransient에서 리셋.
-	 */
-	float LastTetherLambda = 0.0f;
-	float LastTetherLambdaDt = 0.0f;
-
-	/**
-	 * (Constraint 모드) 직전 프레임의 자유 구간 rest 길이(cm, TetherSlack 포함) — 되감기/SetRopeLength에
-	 * 의한 rest 변화율(dRest/dt)을 프레임 차분으로 관측해 벌어짐 속도(s)에 싣는다(감김 = rest 감소 = 벌어짐
-	 * 취급 → λ가 당긴다 = 리엘의 유일한 견인 경로). 앵커 노드가 바뀐 프레임은 rest가 불연속이라 차분을
-	 * 쓰지 않는다(PrevAnchorNode 비교). bPrevFreeRestValid=false = 미시드. ResetTransient에서 리셋.
-	 */
-	float PrevFreeRestLen = 0.0f;
-	int32 PrevAnchorNode = -1;
-	bool bPrevFreeRestValid = false;
-
-	/**
-	 * (Constraint 모드) 앵커 점(LastPullSample.WorldPoint)의 실측 속도 EMA(cm/s). Anchor-kind 대상
-	 * (정적/키네마틱/애니메이션 구동 — 물리 속도 API가 없는 끝)의 끝 속도로 벌어짐 속도 s에 실린다:
-	 * 움직이는 오브젝트에 감긴 로프의 towing이 bias 상한(TetherMaxBiasSpeed)에 막히지 않고 벌어짐 상쇄
-	 * 항으로 추종된다(정지 앵커는 ≈0이라 무영향). 프레임 차분은 rest 변화율과 같은 가드(앵커 노드 불변
-	 * 프레임)만 신뢰하고, EMA 상수는 PullDirSmoothTime 재사용(같은 관측 노이즈 계열 — 스키닝/노드 지터).
-	 * PrevAnchorWorldPoint가 차분의 직전 값(유효성은 bPrevFreeRestValid 공유). ResetTransient에서 리셋.
-	 */
-	FVector SmoothedAnchorPointVelocity = FVector::ZeroVector;
-	FVector PrevAnchorWorldPoint = FVector::ZeroVector;
-
-	// (Constraint 모드의 시뮬 바디 대상 관측/인가 상태는 여기 없다 — 시뮬 바디 절반(스켈레탈+컴포넌트)은
-	//  엔진 물리 제약이 담당한다: URopeComponent::UpdatePhysicalTether. GT 임펄스 관측 상태(점 속도 EMA)는
-	//  그 전환으로 폐기됐다.)
+	// Passive material-length reaction state (violation/lambda/attempted movement/rest rate)
+	// lives in FRopeLengthConstraintState. PullDrive owns only pull command, direction and
+	// receiver-policy state.
 
 	/**
 	 * 이번 프레임 유효 대상 몫(shareT) [0..1] — wielder 게이트(URopeWielderComponent::IsWielderTetherActive)와
@@ -140,7 +107,7 @@ struct FRopePullDriveState
 	/**
 	 * 페이즈 전이 시 폐기할 "진행 중 wrap" 일시 상태만 리셋(URopeComponent::ResetTransientPhaseState가 호출).
 	 * 의도적으로 남기는 것: ActivePullForce/bActivePullIgnoresTaut(입력 홀드 상태 — 해제는 SetActivePull(0)의 몫),
-	 * LastPullDirRaw/LastTetherOvershoot(디버거 표시용 잔상 — 다음 Wrapped 프레임이 덮어쓴다).
+	 * LastPullDirRaw(디버거 표시용 잔상 — 다음 Wrapped 프레임이 덮어쓴다).
 	 */
 	void ResetTransient()
 	{
@@ -153,13 +120,6 @@ struct FRopePullDriveState
 		bPullTaut = false;
 		bChainTaut = false;
 		TautGraceRemaining = 0.0f;
-		LastTetherLambda = 0.0f;
-		LastTetherLambdaDt = 0.0f;
-		PrevFreeRestLen = 0.0f;
-		PrevAnchorNode = -1;
-		bPrevFreeRestValid = false;
-		SmoothedAnchorPointVelocity = FVector::ZeroVector;
-		PrevAnchorWorldPoint = FVector::ZeroVector;
 		bLoggedPullNoReceiver = false;
 	}
 };

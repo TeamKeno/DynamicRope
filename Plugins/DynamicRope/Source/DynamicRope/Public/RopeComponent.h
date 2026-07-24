@@ -10,6 +10,8 @@
 
 #include "CoreMinimal.h"
 #include "Components/MeshComponent.h"
+#include "Core/RopeLengthConstraintState.h"
+#include "Core/RopeMovementConstraint.h"
 #include "Core/RopeTypes.h"
 #include "Core/RopeSimFrameIO.h"
 #include "Core/RopePullDriveState.h"
@@ -59,6 +61,9 @@ class DYNAMICROPE_API URopeComponent : public UMeshComponent
 	// 서브시스템이 프레임 구동을 위해 Sim/SolverConfig/Phase/WhipGuide + SimFrame(프레임 계약 묶음 —
 	// FRopeSimFrameIO 주석 참조)에 직접 접근한다(GPU 배치 솔브 포함; CPU 경로는 SolveSimFrame 사용).
 	friend class URopeSimSubsystem;
+	// PrePhysics movement authority: the Wielder consumes the CPU constraint and primes the
+	// physical target tether before Chaos without exposing the mutation API to general callers.
+	friend class URopeWielderComponent;
 
 #if WITH_DEV_AUTOMATION_TESTS
 	// 테스트 시임: ApplyPreset 페이즈 게이트 음성 테스트(RopePresetTests)가 SetPhase를 강제하기 위한 최소 접근.
@@ -256,7 +261,7 @@ public:
 	}
 
 	/** FullSimulation/Assisted의 Flight/Wrapping 및 커밋 프레임에 사용할 최대 신장 배율.
-	 *  가이드/래핑 override가 만든 간격을 탄성 strain으로 저장하지 않되, 안정된 Wrapped는 설정값으로 복귀한다. */
+	 *  rigid authoritative Wrapped(TetherCompliance=0)도 1.0을 유지하며, compliant hold만 설정값으로 복귀한다. */
 	float GetEffectiveMaxStretchRatio() const;
 
 	/** 해석된 접촉 질의 반지름: WrapConfig.ContactQueryRadius(0=auto → 렌더 Radius × 1.5). 감지/랩 경로 경계에서 소비. */
@@ -438,6 +443,32 @@ public:
 	ERopePhase GetPhase() const { return Phase; }
 
 	/**
+	 * Builds the current gameplay-authoritative hand-side length constraint.
+	 *
+	 * Valid from Wrapping through Wrapped, independent of tension/taut state and GPU readback.
+	 * The pivot is resolved from the live target binding and MaxDistance is the material length
+	 * from node 0 to the first hand-side anchor. A node-0 contact is a valid zero-radius constraint;
+	 * self-wrap and invalid bindings return false.
+	 */
+	bool BuildWielderMovementConstraint(
+		FRopeWielderMovementConstraint& OutConstraint,
+		float PendingReelDeltaTime = 0.0f) const;
+
+	/**
+	 * Projects a proposed rope-pin world position into the current hard length boundary.
+	 * Custom Pawn/Mover implementations can call this immediately before applying their final move.
+	 *
+	 * @return true when a valid Wrapping/Wrapped constraint exists. bOutWasConstrained tells whether
+	 *         DesiredPinWorld was outside and actually projected.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Rope|Hold")
+	bool ConstrainWielderLocation(
+		FVector DesiredPinWorld,
+		FVector& OutConstrainedPinWorld,
+		FVector& OutBoundaryNormal,
+		bool& bOutWasConstrained) const;
+
+	/**
 	 * 세그먼트(SegmentIndex = 노드 i~i+1) 장력. 솔버의 XPBD distance λ에서 유도한 힘(F=max(0,-λ)/h²,
 	 * 질량 1 노드 기준 상대 단위 — 매달린 노드 1개의 중력 하중 ≈ 980). 스트레치만 양수, 슬랙/압축 = 0.
 	 * GPU 상주 로프는 1~2프레임 지연 미러. 솔브가 없는 페이즈(Contacting/Releasing)는 직전 값 유지.
@@ -445,40 +476,37 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetSegmentTension(int32 SegmentIndex) const;
 
-	/** 전체 세그먼트 중 최대 장력. Wrapped 중에는 매 프레임 FRopeWrapState::Tension에도 반영된다. */
+	/**
+	 * 전체 XPBD 세그먼트 중 최대 진단 장력. 시각 솔버/디버그 전용이며 gameplay load,
+	 * Pull 발동, 자동 release에는 GetConstraintTension을 사용한다.
+	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetMaxTension() const;
 
 	/**
-	 * 이번 프레임 Pull(당김) 데이터: 손 쪽 첫 앵커가 받는 당김 방향(단위)과 그 세그먼트 장력.
-	 * Wrapped 동안 매 프레임 산출된다. 게임 효과(포획 진행도, 이동 방해 등) 판정용.
+	 * 이번 프레임 Pull 데이터: 손 쪽 첫 앵커 방향과 authoritative constraint tension.
+	 * Wrapped 동안 매 프레임 산출된다.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool GetPullSample(FVector& OutDirection, float& OutTension) const
 	{
 		OutDirection = PullDrive.LastPullSample.Direction;
-		OutTension = PullDrive.LastPullSample.Tension;
+		OutTension = GetConstraintTension();
 		return PullDrive.LastPullSample.bValid;
 	}
 
 	/**
-	 * 이번 프레임 로프가 팽팽(taut)한가 — 능동 Pull 게이트와 같은 판정: 전 체인 기하(코너-다리 chord 합 vs
-	 * 자유 구간 rest 길이, HoldConfig.TautSlackRatio) ∧ 장력 임계(Pull 샘플 장력 vs
-	 * HoldConfig.ActivePullTautTension), 둘 다 히스테리시스 포함. Wrapped 동안 매 프레임 갱신되며 그 외
-	 * phase는 false. bActivePullRequiresTaut=false여도 판정 자체는 계속 갱신된다 — 애니메이션 pull window/
-	 * BP가 "지금 당겨도 되는 구간인가"를 물을 때 이 하나를 읽는다.
+	 * 이번 프레임 로프가 팽팽(taut)한가. 기본 임계(0)에서는 순수 material-length 기하 판정이고,
+	 * ActivePullTautTension > 0일 때만 authoritative constraint tension을 추가 load gate로 사용한다.
+	 * XPBD SegmentTension은 이 판정에 참여하지 않는다.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool IsPullTaut() const { return PullDrive.bPullTaut; }
 
 	/**
-	 * 이번 프레임 전 체인이 팽팽한가 — 세 관측치의 AND(모두 히스테리시스 포함): 처짐(다리별 chord 직선
-	 * 이탈 cm vs HoldConfig.TautMaxSag — "시각적 펴짐"의 정본) ∧ 기하(코너-다리 chord 합 vs 자유 구간
-	 * rest 길이, HoldConfig.TautSlackRatio — 대형 처짐/압축 백스톱) ∧ 최소 전달 장력(자유 구간 세그먼트
-	 * 장력 최솟값 vs HoldConfig.TautMinTension — 지그재그 구김/부분 스트레치 거름). 견인(테더 + 능동 Pull)
-	 * 의 공용 선행 조건 — 테더 overshoot는 슬랙 체인에서도 sub-leg 스트레치로 >0일 수 있으므로,
-	 * overshoot 소비자는 이 게이트를 함께 봐야 한다. IsPullTaut = 이 값 ∧ 앵커 인접 장력 임계.
-	 * Wrapped 동안 매 프레임 갱신되며 그 외 phase는 false.
+	 * 이번 프레임 전 체인이 기하적으로 팽팽한가. Live hand/anchor material boundary가 있으면 그것을
+	 * 정본으로 쓰고, legacy 경로에서만 sag + chord 히스테리시스로 폴백한다. SegmentTension은 시각
+	 * 솔버 진단값이며 이 gameplay 상태의 선행 조건이 아니다.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool IsChainTaut() const { return PullDrive.bChainTaut; }
@@ -486,7 +514,7 @@ public:
 	/** 이번 프레임 테더 초과분(cm): 손~앵커 직선 거리 - 가용 로프 길이(0 미만은 0). Wrapped 동안
 	 *  매 프레임 산출된다(테더 off여도 계산). wielder 견인/지상 이탈 판정 등 게임 반응용. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
-	float GetTetherOvershoot() const { return PullDrive.LastTetherOvershoot; }
+	float GetTetherOvershoot() const { return LengthConstraintState.LastViolation; }
 
 	/** 이번 프레임 실제 사용된 테더 대상 몫(shareT) [0..1]. 자동(질량 기반)/수동 공통 최종값 —
 	 *  1이면 wielder 몫 0(전량 대상), 0이면 전량 wielder. wielder 견인 활성 판정/디버그용. */
@@ -494,15 +522,16 @@ public:
 	float GetEffectiveTetherTargetShare() const { return PullDrive.LastTargetShare; }
 
 	/**
-	 * (Constraint 테더 모드) 이번 프레임 테더 장력 = λ/dt(kg·cm/s² — HoldConfig.MaxTetherTension과 같은
-	 * 단위계라 직접 비교 가능). 슬랙/비Constraint 모드/비Wrapped면 0. 절단·연출 임계 판정과 디버거의
-	 * 관측치. (레거시 장력 관측 GetMaxTension은 XPBD 세그먼트 λ 유래로 단위계가 다르다 — 혼용 금지.)
+	 * 이번 프레임 gameplay-authoritative material constraint 장력 = λ/dt(kg·cm/s²).
+	 * Backend는 상호배타적이다: physical target은 Chaos constraint force, hard-projected Pawn은
+	 * 투영 전 거부 운동의 반력, legacy/custom 경로는 analytic solve를 사용한다.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
-	float GetTetherTension() const
-	{
-		return (PullDrive.LastTetherLambdaDt > 1e-4f) ? (PullDrive.LastTetherLambda / PullDrive.LastTetherLambdaDt) : 0.0f;
-	}
+	float GetConstraintTension() const { return LengthConstraintState.GetTension(); }
+
+	/** Backward-compatible name. New gameplay code should use GetConstraintTension. */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	float GetTetherTension() const { return GetConstraintTension(); }
 
 	/**
 	 * 끌림 가능 판정(능동 Pull climb-in 방향의 정본) — 순수 함수(UObject 무의존, 유닛 테스트 가능).
@@ -884,10 +913,11 @@ private:
 	 * 페이즈 전이 시 함께 폐기해야 하는 "진행 중 작업" 일시 상태 세트를 리셋한다:
 	 * ContactTracker / PendingWrapSeed / CaptureTravelFrame / WrappingPhase.State / ContactingElapsed /
 	 * FlightNoContactElapsed / TensionOverTime.
+	 * 성공적인 Wrapping commit만 bPreservePhysicalTether=true로 기존 Chaos constraint identity를 유지한다.
 	 * 유휴 상태의 멤버에 대해서는 no-op이라 어떤 전이에서 불러도 안전하다.
 	 * (ReleaseCooldown은 전이마다 값이 달라 호출자가 직접 설정한다.)
 	 */
-	void ResetTransientPhaseState();
+	void ResetTransientPhaseState(bool bPreservePhysicalTether = false);
 
 	// Aim-ray 조준 로직/상태는 FRopeAimTargeting(AimTargeting 멤버)으로 분리됐다. 여기엔 서브시스템
 	// 프레임 계약 진입점만 남는다 — StartFreshThrow 전이(오케스트레이션)와 SimFrame 접근이 걸려
@@ -917,6 +947,8 @@ private:
 	// 아래 로직 4개는 로프 수명 순서와 1:1 대응한다: Throw/Flight → Contacting → Wrapping → Wrapped.
 	/** 단일 진실: 솔버/로직/렌더가 공유하는 파티클 체인. */
 	FRopeSimState       Sim;
+	/** Wrapped 관측 전용 current-frame view: Sim 복사에 최신 start pin/anchor override를 덮은 GT scratch. */
+	FRopeSimState       PullObservationSim;
 
 	/** XPBD 물리(Free/Flight 및 Wrapping/Wrapped의 solver-owned 자유 구간). */
 	FRopeXPBDSolver     Solver;
@@ -1023,6 +1055,9 @@ private:
 	// Wrapped 견인/스무딩 상태 묶음(Pull 샘플/EMA 3종/능동 Pull/테더 초과분/경고 래치). 멤버별 의미와
 	// 전이 시 리셋 규약(무엇이 살아남는가)은 FRopePullDriveState(Core/RopePullDriveState.h) 주석 참조.
 	FRopePullDriveState PullDrive;
+	// Passive material-length authority: rejected movement, constraint λ/tension and live
+	// material/anchor history. Never sourced from XPBD SegmentTension.
+	FRopeLengthConstraintState LengthConstraintState;
 	FRopeResolvedWrappedEndpoints WrappedEndpointCache;
 
 	// 되감기 속도(cm/s, +감기/-풀기, 0=정지). SetReelRate가 설정, UpdateReel이 프레임마다 적용.
@@ -1042,7 +1077,7 @@ private:
 	int32 GetLODScaledIterations() const { return Throttle.LODScaledIterations(SolverConfig.Iterations); }
 
 	// 동작 1 — 자동 견인(테더, Docs/PoC/05): 관측(전 체인 C·벌어짐 속도)→λ 솔브→양끝 임펄스 쌍 인가.
-	// ApplyWrappedTraction이 매 Wrapped 프레임 호출한다. λ/장력 관측치는 PullDrive.LastTetherLambda(+Dt).
+	// ApplyWrappedTraction이 매 Wrapped 프레임 호출한다. 결과는 LengthConstraintState에 단일 단위로 기록된다.
 	void UpdateConstraintTether(float DeltaTime);
 
 	// (Constraint 테더 — 랙돌 대상 절반) 엔진 물리 제약: 코너의 키네마틱 프록시 ↔ 감긴 본의 앵커 점을
@@ -1051,10 +1086,35 @@ private:
 	// (2026-07-20 Pierce 실측 반복)에 더해, 공중 하중(매달린 프랍)에서도 구조적으로 진다 — 중력·스윙이
 	// 물리 서브스텝에서 진행되는 동안 GT는 한 박자 늦게 사후 상쇄만 하므로 부유·진자 펌핑·직교 감쇠
 	// 의존이 생긴다(2026-07-22 PIE). Chaos 제약은 서브스텝에서 중력·관절·접촉과 함께 푼다(Docs/PoC/05
-	// §3.4-1·§9). 갱신은 UpdateConstraintTether가 매 Wrapped 프레임, 해체는 phase 전이
-	// (ResetTransientPhaseState)/대상·본 변경/EndPlay에서.
+	// §3.4-1·§9). Wielder가 있으면 PrePhysics에서 단일 drive하고 PostPhysics는 힘만 관측한다.
+	// Wielder가 없는 custom mover는 UpdateConstraintTether의 legacy drive를 쓴다. 해체는 abort/release,
+	// 대상·본 변경, EndPlay에서 수행한다.
 	void UpdatePhysicalTether(class UPrimitiveComponent* TargetPrim, FName Bone,
 		const FVector& AnchorWorld, const FVector& CornerWorld, float LegRestLen, float DeltaTime);
+	/** 현재 Chaos constraint force만 읽는다. proxy/limit transform은 변경하지 않는다. */
+	void SamplePhysicalTetherForce(float DeltaTime);
+	/**
+	 * Wielder가 movement 직후/Chaos 직전에 호출한다. 투영 전 시도와 실제 거부 속도를 authoritative
+	 * reaction으로 기록하고, physical target이면 같은 시도를 Chaos proxy에도 전달한다.
+	 */
+	void PrepareWielderLengthConstraint(
+		const FRopeWielderMovementConstraint& Constraint,
+		const FVector& OutwardNormal,
+		float RejectedSeparatingSpeed,
+		float PositionViolation,
+		bool bAtLimit,
+		bool bHardProjectionApplied,
+		float DeltaTime);
+	/** Generalized-mass share of the hard velocity reaction already applied to the Wielder. */
+	float ComputeWielderLengthReactionShare(
+		const FRopeWielderMovementConstraint& Constraint) const;
+	/**
+	 * Position-correction share for a hard Wielder projection. Only a simulated target has
+	 * a same-frame Chaos receiver for the complementary position; all other targets require
+	 * the Wielder to take the full correction.
+	 */
+	float ComputeWielderLengthPositionCorrectionShare(
+		const FRopeWielderMovementConstraint& Constraint) const;
 	void TeardownPhysicalTether();
 
 	/** 물리 제약 테더의 키네마틱 프록시(코너 추종)와 제약 — 런타임 전용, 시뮬 바디 대상에서만 산다. */
@@ -1066,6 +1126,8 @@ private:
 	TWeakObjectPtr<class UPrimitiveComponent> PhysicalTetherTarget;
 	FName PhysicalTetherBone = NAME_None;
 	float PhysicalTetherLimit = -1.0f;
+	/** GFrameCounter: Wielder가 이 프레임 PrePhysics에서 authoritative proxy/limit을 이미 썼는가. */
+	uint64 PhysicalTetherPrePhysicsFrame = MAX_uint64;
 	// 생성 시 고정한 바디-로컬 앵커(제약 Frame2) — wrap 앵커가 같은 (대상,본) 안에서 재배치되면
 	// 드리프트를 감지해 재생성하는 가드의 기준값.
 	FVector PhysicalTetherAnchorLocal = FVector::ZeroVector;
@@ -1342,9 +1404,9 @@ private:
 	 *  Broken release를 마치고 false — 호출자는 이 프레임을 여기서 끝낸다. */
 	bool HoldWrappedNodesToBone(float DeltaTime);
 
-	/** ② 관측치 산출: wrap 장력(GetMaxTension) + Pull 샘플(ComputePull) + 2단 스무딩(조준 fractional
+	/** ② 관측치 산출: authoritative constraint 장력 + Pull 샘플(ComputePull) + 2단 스무딩(조준 fractional
 	 *  EMA → 방향 EMA). 견인(③)/release 판정(④)/디버거/BP가 공용으로 읽는 입력을 만든다. */
-	void UpdateWrappedPullSample(float DeltaTime);
+	void UpdateWrappedPullSample(float DeltaTime, const FRopeSimState& ObservationSim);
 
 	/** ③ 견인 인가: 테더(λ 임펄스 제약 + 랙돌 물리 제약) + 능동 Pull(팽팽할 때 상수 힘/climb-in). */
 	void ApplyWrappedTraction(float DeltaTime);

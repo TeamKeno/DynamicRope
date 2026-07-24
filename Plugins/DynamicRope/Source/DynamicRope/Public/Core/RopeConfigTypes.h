@@ -409,7 +409,8 @@ struct FRopeDetectConfig
  * Wrapped *이후*(유지/당김/풀림)의 튜닝 — 설계 노트 01(Post-Wrap 모델)의 도메인이자, "성립 이후는
  * 도달 모드·결착 모델 무관 공통"(02 문서 §3) 경계와 일치한다. 종전에는 FRopeWrapConfig(성립 판정)에
  * 섞여 있던 것을 분리했다(2026-07-13 표면 감사 B-1 — 기존 BP 튜닝 미승계 클린 브레이크).
- * 소비자: URopeComponent의 Wrapped 4단계(Hold→Pull 샘플→테더/Pull 인가→자동 release).
+ * 소비자: Wrapping/운동 제약 + URopeComponent의 Wrapped 4단계
+ * (Hold→Pull 샘플→테더/Pull 인가→자동 release).
  */
 USTRUCT(BlueprintType)
 struct FRopeHoldConfig
@@ -417,9 +418,31 @@ struct FRopeHoldConfig
 	GENERATED_BODY()
 
 	/**
-	 * Wrapped 중 로프 최대 장력(FRopeSimState::SegmentTension 단위 — 질량 1 노드 기준 상대 힘)이 이 값을
-	 * TensionReleaseTime 동안 지속해서 넘으면 자동 release한다(ERopeReleaseReason::Tension). 0 = 비활성.
-	 * 값 감: 매달린 노드 1개의 중력 하중이 약 980이므로, 로프 전체 무게의 몇 배를 버틸지로 잡는다.
+	 * Wrapping이 시작된 순간부터 wielder의 손 쪽 자유 구간을 material rest length 안에 강제한다.
+	 * true면 RopeWielder가 CharacterMovement의 최종 이동(입력/root motion/slide 포함)을 같은 PrePhysics
+	 * 프레임에 구면 제약으로 투영하고, 일반 Pawn은 movement tick 직후 같은 안전망을 적용한다.
+	 *
+	 * 이 제약은 SegmentTension/GPU readback/아래 TetherSlack과 무관한 gameplay authority다. 따라서
+	 * TetherCompliance=0인 로프가 kinematic Pawn 이동 때문에 먼저 늘어난 뒤 사후 회수되는 것을 막는다.
+	 * TetherCompliance>0이면 의도적 탄성을 허용하므로 hard projection은 자동 비활성화된다.
+	 * Wielder가 없는 custom movement는 URopeComponent::ConstrainWielderLocation을 이동 적용 전에 호출할 것.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold")
+	bool bEnforceWielderLengthConstraint = true;
+
+	/**
+	 * Material-length constraint activation tolerance(cm). This is a numerical boundary band:
+	 * it allows an outward attempt within this distance to produce a stable reaction, but it is
+	 * never added to rope length and therefore cannot make an inextensible rope longer.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold",
+		meta = (ClampMin = "0.0", Units = "cm"))
+	float LengthConstraintActivationSlop = 0.5f;
+
+	/**
+	 * Wrapped 중 authoritative material-constraint 장력(kg·cm/s²)이 이 값을 TensionReleaseTime 동안
+	 * 지속해서 넘으면 자동 release한다(ERopeReleaseReason::Tension). 0 = 비활성.
+	 * GetConstraintTension/MaxTetherTension과 같은 단위이며 XPBD SegmentTension과 혼용하지 않는다.
 	 * (자동 release는 도달 모드 ①②에서만 유효 — ③ Guaranteed는 명시 해제만.)
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
@@ -429,8 +452,13 @@ struct FRopeHoldConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
 	float TensionReleaseTime = 0.05f;
 
-	/** 테더 발동 전 허용 여유(cm). 경계 지터/미세 슬랙에서 발동하는 것을 막는다(가용 길이에 더해짐). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "cm"))
+	/**
+	 * Legacy soft-tether length allowance. The authoritative material constraint no longer adds
+	 * this value to rope length; use LengthConstraintActivationSlop for numerical stabilization.
+	 * Kept for existing asset serialization while legacy/custom-mover fallback is retired.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold",
+		meta = (ClampMin = "0.0", Units = "cm"))
 	float TetherSlack = 5.0f;
 
 	/**
@@ -475,8 +503,9 @@ struct FRopeHoldConfig
 	//  하나로 통일. RopeComponent.cpp UpdateTargetPullable의 PullMassHysteresis 참조.)
 
 	/**
-	 * 거리 release: Wrapped 중 손~앵커 직선 거리가 가용 로프 길이(+TetherSlack)를 이만큼(cm) 더
-	 * 초과하면 자동 release한다(ERopeReleaseReason::Distance). 0 = 비활성(기본). 테더와 함께 쓰면
+	 * 거리 release: Wrapped 중 authoritative material-length 위반량이 이 값(cm)을
+	 * 초과하면 자동 release한다(ERopeReleaseReason::Distance). TetherSlack은 포함하지 않는다.
+	 * 0 = 비활성(기본). 테더와 함께 쓰면
 	 * "테더가 버티다가 이 한계를 넘으면 놓친다"가 된다 — 테더가 충분히 강하면 초과분이 안 쌓여
 	 * 발동하지 않고, 테더 없이 쓰면 순수 거리 제한으로 동작한다.
 	 */
@@ -530,9 +559,9 @@ struct FRopeHoldConfig
 	bool bActivePullRequiresTaut = true;
 
 	/**
-	 * 팽팽(taut) 판정의 장력 임계. 0(기본) = 장력이 조금이라도 있으면 팽팽(종전 동작). > 0이면 Pull 샘플의
-	 * 세그먼트 장력(XPBD λ 유래 — PullForce와 같은 힘 단위)이 이 값을 넘어야 팽팽으로 본다 — "제대로 당겨져
-	 * 있을 때만 pull이 걸리는" 게임플레이 임계. 경계 지터는 ActivePullTautReleaseRatio 히스테리시스가 흡수한다.
+	 * 팽팽(taut) 판정의 선택적 load 임계. 0(기본) = 순수 기하 taut이면 능동 Pull을 시작할 수 있다.
+	 * > 0이면 authoritative GetConstraintTension()이 이 값을 넘어야 load-bearing으로 본다.
+	 * XPBD SegmentTension은 사용하지 않는다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float ActivePullTautTension = 0.0f;
@@ -566,12 +595,9 @@ struct FRopeHoldConfig
 	float TautSlackReleaseScale = 2.0f;
 
 	/**
-	 * 전 체인 팽팽 판정의 최소 전달 장력. 자유 구간(손~앵커) 세그먼트 장력의 **최솟값**이 이 값을 넘어야
-	 * 팽팽으로 본다 — 팽팽함의 물리적 정의는 "장력이 앵커에서 손까지 전 구간 전달"이라, 어딘가 한 구간이라도
-	 * 슬랙이면(장력 0) 게이트가 닫힌다. chord 합 기하(TautSlackRatio)가 못 보는 **지그재그로 구겨진 슬랙**
-	 * (다리가 잘게 쪼개져 chord 합이 rest에 붙음)과 **부분 스트레치**(앵커 쪽 다리만 늘어나 슬랙을 은폐)를
-	 * 잡는다. 0(기본) = 전 구간 장력이 조금이라도 있으면 통과(">~0"). 기하 게이트와 AND — 완만한 처짐(자중
-	 * 장력은 전 구간 양수)은 기하가, 구김/부분 스트레치는 이게 거른다.
+	 * Legacy particle-chord analytic fallback의 오염 방지 임계. Wielder/live material geometry가 없는
+	 * 경로에서만 자유 구간 XPBD SegmentTension 최솟값을 검사해 부분 스트레치 정귀환을 차단한다.
+	 * 정상 Pawn hard-constraint/Chaos 경로의 taut·장력에는 참여하지 않는다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float TautMinTension = 0.0f;
@@ -605,42 +631,43 @@ struct FRopeHoldConfig
 	float TautReleaseGraceTime = 0.1f;
 
 	/**
-	 * 초과분 C의 위치 회수 시상수(초). β = 1−exp(−dt/이 값)만큼 매 프레임 C를 닫는
+	 * 비신축(TetherCompliance=0) 제약에서 초과분 C의 위치 회수 시상수(초).
+	 * β = 1−exp(−dt/이 값)만큼 매 프레임 C를 닫는
 	 * 접근 속도를 명령한다 — 작을수록 단단(즉시 안착), 클수록 부드러운 추종. 0 = 한 프레임 전량(β=1).
 	 * 프레임률 독립. 회수 명령 속도의 절대 상한은 TetherMaxBiasSpeed다(SolveTetherLambda의
 	 * MaxBiasSpeed — 커밋 직후 C가 큰 프레임의 스파이크 방지이자 슬랙 코스팅 잔류의 상한).
+	 * 탄성 모드는 이 값을 쓰지 않고 TetherCompliance의 kC 복원력으로 초과 길이를 회수한다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", Units = "s"))
 	float TetherSettleTime = 0.08f;
 
 	/**
-	 * 테더가 낼 수 있는 최대 장력(kg·cm/s², 0 = 무제한). λ ≤ 이 값 × dt로 클램프돼
-	 * 무거운 대상은 이 장력 한계 안에서 천천히 끌리고(뒤처짐 — 질량 의존이 물리적), 고속 이탈 대상의
-	 * 한 프레임 역전 슬램도 이 한계가 막는다(구 TetherMaxAcceleration의 질량 의존 물리화 — 100kg 기준
-	 * 기본값 500000 ≈ 5g 감속, 600cm/s 낙하를 ~0.12초에 흡수). 절단 연출 임계와 같은 단위계다
-	 * (GetTetherTension() = λ/dt 관측치와 직접 비교 가능).
+	 * 장력 한계/과부하 기준(kg·cm/s², 0 = 무제한).
+	 * TetherCompliance>0인 탄성 모드에서는 λ ≤ 이 값 × dt인 실제 force cap이다.
+	 * TetherCompliance=0인 비신축 모드에서는 유한 force cap과 exact length를 동시에 만족할 수 없으므로
+	 * 길이를 우선하고 full reaction을 보고한다. 이때 이 값은 debugger의 overload 기준선일 뿐이며,
+	 * 실제 끊김/해제는 TensionReleaseForce 또는 별도 게임 규칙으로 명시한다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float MaxTetherTension = 500000.0f;
 
 	/**
-	 * 컴플라이언스 α(s²/kg — XPBD 표준형, 분모에 α/dt²). 0(기본) = 비신축 로프.
-	 * > 0이면 λ가 줄어 의도적 탄성(번지 등 연출)이 된다 — 값 감: 0.0005면 60fps에서 강성이 약 1/180로 준다.
+	 * 재료 컴플라이언스 α(s²/kg = 역강성). 0(기본) = 비신축 로프.
+	 * > 0이면 k=1/α인 implicit spring + generalized critical damping으로 common game
+	 * frame rate에서도 안정적인 의도적 탄성(번지 등)을 만든다. 예: 0.0005 → k=2000 kg/s².
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float TetherCompliance = 0.0f;
 
 	/**
-	 * 물리 제약 테더(컴포넌트 바디 대상 — 프랍)의 소프트 리밋 강성. 단일 강체에 하드 리밋 + 위치 투영을
-	 * 걸면 코너 추종 프록시가 매 프레임 리밋을 어길 때마다 위반량이 위치 스냅으로 닫혀 스냅→반동→재위반이
-	 * 프레임 주기로 반복된다(고주파 진동 — 랙돌은 관절 사슬이 완충해 무증상). 컴포넌트 바디는 투영을 끄고
-	 * 이 강성/아래 감쇠의 스프링-댐퍼 리밋으로 흡수한다. 0 = 하드 리밋(비권장 — 진동 재발).
-	 * 스켈레탈(랙돌) 제약에는 적용하지 않는다(PIE 검증된 하드 리밋 유지).
+	 * Deprecated compatibility value. Physical softness is now derived only from
+	 * TetherCompliance (stiffness = 1/compliance), so TetherCompliance=0 always creates
+	 * a hard Chaos limit. Kept only so existing assets deserialize without data loss.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float PhysicalTetherStiffness = 1000.0f;
 
-	/** 물리 제약 테더 소프트 리밋의 감쇠(위 강성과 세트 — 진동 에너지를 실제로 빼는 항). */
+	/** Deprecated compatibility value. Compliant damping is now derived from effective mass and stiffness. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Hold", meta = (ClampMin = "0.0"))
 	float PhysicalTetherDamping = 100.0f;
 

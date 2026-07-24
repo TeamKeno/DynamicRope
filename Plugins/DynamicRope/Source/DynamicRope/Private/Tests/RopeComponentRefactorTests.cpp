@@ -271,18 +271,22 @@ bool FRopePhysicalResolveNonStretchPolicyTest::RunTest(const FString& Parameters
 		}
 
 		FRopeComponentRefactorTestSeam::SetPhase(*Rope, ERopePhase::Wrapped);
-		TestTrue(TEXT("stable Wrapped restores the configured stretch policy"),
-			FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.5f));
+		TestTrue(TEXT("rigid authoritative Wrapped remains visually non-stretched"),
+			FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.0f));
 		FRopeComponentRefactorTestSeam::ForceNonStretchThisFrame(*Rope, true);
 		TestTrue(TEXT("the Wrapping-to-Wrapped commit frame remains non-stretched"),
 			FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.0f));
 		FRopeComponentRefactorTestSeam::ForceNonStretchThisFrame(*Rope, false);
+		Rope->HoldConfig.TetherCompliance = 0.0005f;
+		TestTrue(TEXT("positive material compliance restores configured visual elasticity"),
+			FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.5f));
+		Rope->HoldConfig.TetherCompliance = 0.0f;
 	}
 
 	Rope->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
 	FRopeComponentRefactorTestSeam::SetPhase(*Rope, ERopePhase::Wrapped);
-	TestTrue(TEXT("GuaranteedWrap keeps its configured stretch policy"),
-		FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.5f));
+	TestTrue(TEXT("GuaranteedWrap obeys the same rigid material hold"),
+		FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.0f));
 	return true;
 }
 

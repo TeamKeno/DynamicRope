@@ -20,6 +20,7 @@
 class URopeComponent;
 class URopePreset;
 class URopePreviewComponent;
+class AActor;
 struct FRopeAimRayThrowRequest;
 class USkeletalMeshComponent;
 class UInputAction;
@@ -27,6 +28,8 @@ class UInputMappingContext;
 class UEnhancedInputLocalPlayerSubsystem;
 class UAnimMontage;
 class UMaterialInstanceDynamic;
+class UMovementComponent;
+struct FRopeWielderMovementConstraint;
 
 // NOTE: 종전의 ERopeWielderThrowMode(PhysicsSimulation/PreviewPathLocked)와
 // ERopeWielderAimMode(FrameForward/AimRayHitDirection)는 제거됐다(2026-07-13 회의 결정 F).
@@ -376,8 +379,8 @@ public:
 	//~ Pull(능동 견인 정책) --------------------------------------------------
 	// 힘의 크기는 로프 도메인이다(HoldConfig.PullForce) — 여기 있는 것은 "언제 발동하는가"뿐이다.
 	/**
-	 * Pull 발동 임계 장력(FRopeSimState::SegmentTension 단위 — ActivePullTautTension/TensionReleaseForce와
-	 * 같은 단위계, 매달린 노드 1개의 중력 하중 ≈ 980). Pull 입력으로 **장전**해 두면(토글 on) Wrapped에서
+	 * Pull 발동 임계 장력(GetConstraintTension, kg·cm/s²). XPBD SegmentTension/GetMaxTension과
+	 * 혼용하지 않는다. Pull 입력으로 **장전**해 두면(토글 on) Wrapped에서
 	 * 장력이 이 값을 처음 넘는 순간 발동한다(0 = 팽팽 판정(IsPullTaut)만으로) — "제대로 당겨졌을 때만
 	 * 끌려가기 시작"의 게임플레이 임계. 몽타주 유무와 무관하게 발동을 지배하므로 Animation이 아니라
 	 * 여기 있다(무애니면 발동이 즉시 힘을 장전한다). 발동/수명 규칙은 UpdatePullEngage 주석 참조.
@@ -618,9 +621,26 @@ private:
 
 	void ResolvePreviewComponent(bool bAllowAutoCreate);
 
-	/** 컴포넌트 틱이 필요한가 — Pull 판정/적용된 AirControl 원복/지상 이탈/스윙/aim ray(②③) 중 하나라도.
+	/** 컴포넌트 틱이 필요한가 — hard leash/Pull 판정/적용된 AirControl 원복/지상 이탈/스윙/aim ray(②③) 중 하나라도.
 	 *  BeginPlay · SetThrowPreviewEnabled · RefreshModeDerivedState가 공유하는 단일 식. */
 	bool ComputeDesiredTickEnabled() const;
+
+	/** Rope phase 변화 시 Pawn hard-leash tick을 즉시 켜거나 끈다. */
+	UFUNCTION()
+	void HandleRopePhaseChanged(ERopePhase OldPhase, ERopePhase NewPhase);
+
+	/** Owner의 실제 movement component를 찾아 PrePhysics tick prerequisite를 등록/해제한다. */
+	void RegisterMovementConstraintHooks();
+	void UnregisterMovementConstraintHooks();
+	void RefreshTargetMovementConstraintHooks(
+		const FRopeWielderMovementConstraint& Constraint);
+	void ClearTargetMovementConstraintHooks();
+
+	/**
+	 * 현재 손/대상의 coupled material-length 경계를 강제하고 바깥 상대속도를 제거한다.
+	 * 고정 대상은 손이 전량, SimBody는 손/Chaos 대상이 generalized-mass 몫으로 위치를 나눈다.
+	 */
+	void EnforceWielderLengthConstraint(float DeltaTime);
 
 	/** 로프 ApplyPreset 성공 신호(OnPresetApplied) 핸들러 — 모드 유도 상태 재동기화. */
 	UFUNCTION()
@@ -637,7 +657,7 @@ private:
 
 	/**
 	 * 장전된 Pull(bPullArmed)의 발동 판정(매 틱, GT). Wrapped + 장력 조건(임계 0 = IsPullTaut, > 0 =
-	 * GetMaxTension ≥ PullEngageTension)을 처음 만족하는 순간 발동한다(래치 — wrap당 1회): 몽타주 셋업이면
+	 * GetConstraintTension ≥ PullEngageTension)을 처음 만족하는 순간 발동한다(래치 — wrap당 1회): 몽타주 셋업이면
 	 * PullMontage **단일 재생**(힘은 window notify가 싣는다 — 반복/중단 관리 없음), 무애니면 즉시 힘 장전.
 	 * 비Wrapped가 되면 힘을 끄고 재무장한다(장전 유지 — 다음 wrap에서 재발동).
 	 */
@@ -725,6 +745,13 @@ private:
 	// 정확한 객체를 보존한다(서브시스템의 내부 참조 방식에 수명을 의존하지 않는다).
 	UPROPERTY(Transient)
 	TObjectPtr<UInputMappingContext> MappedInputContext = nullptr;
+
+	/** hard-leash 자동 적용 대상. Wielder의 PrePhysics tick이 이 component 뒤에서 실행된다. */
+	TWeakObjectPtr<UMovementComponent> ConstraintMovementComponent;
+	TWeakObjectPtr<AActor> ConstraintTargetActor;
+	TWeakObjectPtr<USceneComponent> ConstraintTargetComponent;
+	TWeakObjectPtr<UMovementComponent> ConstraintTargetMovementComponent;
+	bool bLeashCorrectionBlockedLogged = false;
 	/** bPullArmed 변경 + OnPullArmedChanged 브로드캐스트(변화가 있을 때만). */
 	void SetPullArmed(bool bNewArmed);
 
