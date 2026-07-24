@@ -166,7 +166,7 @@ public:
 
 	// ClampMax 512 = FRopeGPUSolver::MaxNodes(GPU 솔버 스레드그룹 상한). 초과하면 조용히 CPU 솔브+튜브
 	// 폴백이 되어 성능 절벽 + 저작 무신호라 에디터에서 막는다(BP/코드 경로는 InitRope가 하드 클램프).
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Rope", meta = (ClampMin = "2", ClampMax = "512"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Advanced", meta = (ClampMin = "2", ClampMax = "512"))
 	int32 NumParticles = 72;
 
 	/** 초기(최대) 로프 길이(cm). 런타임 현재 길이는 GetCurrentRopeLength/SetRopeLength. */
@@ -174,7 +174,7 @@ public:
 	float RopeLength = 600.0f;
 
 	/** 되감기(reel-in)로 줄일 수 있는 최소 길이(cm). RopeLength(초기)가 상한이다. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Rope", meta = (ClampMin = "10.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Advanced", meta = (ClampMin = "10.0", Units = "cm"))
 	float MinRopeLength = 100.0f;
 
 	/** 되감기/풀기 입력이 쓰는 기본 릴 속도(cm/s). 길이 변경은 로프 도메인이라 여기 산다
@@ -289,7 +289,7 @@ public:
 	float Radius = 2.0f;
 
 	/** tube 단면의 변 개수. 높을수록 더 둥글어진다. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Rope|Render", meta = (ClampMin = "3", ClampMax = "32"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Advanced", meta = (ClampMin = "3", ClampMax = "32"))
 	int32 NumSides = 8;
 
 	/** 렌더 튜브 스무딩: 세그먼트당 Catmull-Rom 서브분할 수(1=끔). 시뮬 노드는 그대로 두고 렌더 센터라인만
@@ -297,13 +297,13 @@ public:
 	 *  폴리라인 바깥으로 부풀 수 있어(특히 벽을 짚는 구간) 노드가 촘촘하면 직선 연결이 더 정확하다.
 	 *  성긴 로프만 올려 둥글게 보이게 하고, 오버슈트는 TubeSmoothingAlpha(centripetal)로 줄인다.
 	 *  NumRings=(NumParticles-1)*Subdiv+1이 GPU 튜브 링 상한을 넘으면 프록시가 자동 하향한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Rope|Render", meta = (ClampMin = "1", ClampMax = "8"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Advanced", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 TubeSmoothingSubdiv = 1;
 
 	/** 렌더 튜브 스무딩의 Catmull-Rom knot α: 0=uniform, 0.5=centripetal(급한 코너에서 접선 오버슈트↓ —
 	 *  벽을 짚는 구간의 중간 링이 벽 밖으로 덜 부푼다), 1=chordal. CPU 스무딩과 GPU resident 스무딩이
 	 *  같은 값을 써 렌더가 일관된다. TubeSmoothingSubdiv=1이면 효과 없음. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Rope|Render", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Advanced", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TubeSmoothingAlpha = 0.5f;
 
 	/** rope tube에 적용되는 material. 설정하지 않으면 엔진 기본 material을 사용한다.

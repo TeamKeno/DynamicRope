@@ -204,19 +204,19 @@ public:
 	FName AimRayOriginSocketName = NAME_None;
 
 	/** SDF ray march의 샘플 간격이다. 작을수록 얇은 팔/다리 충돌 정확도가 높아진다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Aim", meta = (ClampMin = "0.5", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Advanced", meta = (ClampMin = "0.5", Units = "cm"))
 	float AimRaySweepStep = 2.0f;
 
 	/** 중심선 주변을 함께 검사할 반경이다. 0이면 Rope Radius와 Contact Radius 중 큰 값을 기본 반경으로 사용한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Aim", meta = (ClampMin = "0.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Advanced", meta = (ClampMin = "0.0", Units = "cm"))
 	float AimRayQueryRadius = 0.0f;
 
 	/** 로프 길이상 현재 스윙 방향을 hit 방향으로 보간하기 시작하는 비율. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Aim", meta = (ClampMin = "0.0", ClampMax = "0.9"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Advanced", meta = (ClampMin = "0.0", ClampMax = "0.9"))
 	float AimRayGuideSteerStartAlpha = 0.25f;
 
 	/** 로프 길이상 hit 방향 공간 보간이 최대가 되는 비율. Flight 시간 보간 전에는 완전히 고정되지 않는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Aim", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Advanced", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float AimRayGuideLockAlpha = 0.50f;
 
 	// NOTE: aim ray 시각화 플래그(bDrawAimRayDebug)는 사라졌다 — 시각화는 Gameplay Debugger의 Rope
@@ -272,7 +272,7 @@ public:
 	TObjectPtr<URopePreviewComponent> PreviewComponent = nullptr;
 
 	/** Guaranteed가 Wrapped로 확정된 뒤에도 preview path를 잠깐 남길 시간. 0이면 Wrapped 진입 시 즉시 지운다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Locked Wrapped Preview Hold Time"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Advanced", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Locked Wrapped Preview Hold Time"))
 	float LockedWrappedPreviewHoldTime = 0.0f;
 
 	//~ Input(선택) — 비우면 무시, Throw()를 직접 호출하면 된다 ------------
@@ -284,7 +284,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputMappingContext> MappingContext = nullptr;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input", meta = (EditCondition = "MappingContext != nullptr"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input|Advanced", meta = (EditCondition = "MappingContext != nullptr"))
 	int32 MappingPriority = 0;
 
 	/** 던지기 액션. Started에 Throw(). */
@@ -296,7 +296,7 @@ public:
 	TObjectPtr<UInputAction> ReleaseAction = nullptr;
 
 	/** ReleaseAction이 비었을 때, ThrowAction을 던지기/해제 토글로 사용. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input|Advanced")
 	bool bThrowActionToggles = true;
 
 	// NOTE: 힘/속도 수치(PullForce/ReelSpeed)는 로프로 이사했다(2026-07-13 표면 감사 A-2 —
@@ -333,11 +333,11 @@ public:
 	bool bAutoGroundExitOnUpwardPull = true;
 
 	/** 상향 판정 임계: 견인 방향(손→앵커, 단위 벡터)의 Z 성분이 이 값 이상일 때만 지상 이탈. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bAutoGroundExitOnUpwardPull"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement|Advanced", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bAutoGroundExitOnUpwardPull"))
 	float GroundExitUpDot = 0.35f;
 
 	/** 지상 이탈에 필요한 최소 테더 초과분(cm). 경계 지터로 모드가 퍼덕이는 것을 막는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bAutoGroundExitOnUpwardPull"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement|Advanced", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bAutoGroundExitOnUpwardPull"))
 	float GroundExitMinOvershoot = 10.0f;
 
 	/**
@@ -349,7 +349,7 @@ public:
 	bool bBoostAirControlWhileSwinging = true;
 
 	/** 스윙 중 적용할 AirControl(0~1). 0.35~1 권장 — 1이면 공중에서 지상급 조향. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bBoostAirControlWhileSwinging"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement|Advanced", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bBoostAirControlWhileSwinging"))
 	float SwingAirControl = 1.0f;
 
 	//~ Animation(선택) ----------------------------------------------------
@@ -361,7 +361,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation")
 	TObjectPtr<UAnimMontage> ThrowMontage = nullptr;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation", meta = (ClampMin = "0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation|Advanced", meta = (ClampMin = "0.1"))
 	float ThrowMontagePlayRate = 1.0f;
 
 	/**
@@ -373,7 +373,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation")
 	TObjectPtr<UAnimMontage> PullMontage = nullptr;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation", meta = (ClampMin = "0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation|Advanced", meta = (ClampMin = "0.1"))
 	float PullMontagePlayRate = 1.0f;
 
 	//~ Pull(능동 견인 정책) --------------------------------------------------

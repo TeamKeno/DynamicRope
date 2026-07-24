@@ -227,19 +227,19 @@ struct FRopeWhipConfig
 	float SweepAngleDegrees = 180.0f;
 
 	/** Aim-hit Flight에서 손 쪽 guide를 solver에 넘기는 로프 길이 비율. 0이면 중앙 spline이 손 바로 옆까지 지배한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
 	float AimHitRootSolverFraction = 0.20f;
 
 	/** Hit direction 보간 편향. 1은 선형 강도, 클수록 같은 Flight 시점에서 spline이 더 빨리 hit 방향을 향한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced|Aim Hit", meta = (ClampMin = "1.0", ClampMax = "4.0"))
 	float AimHitDirectionBias = 2.0f;
 
 	/** Aim-hit Flight에서 자유단 쪽 guide를 solver에 넘기는 로프 길이 비율. 클수록 끝이 더 관성적으로 움직인다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Whip|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
 	float AimHitTipSolverFraction = 0.25f;
 
 	/** Aim-hit Flight에서 거리/굽힘/감쇠 solver는 유지하고 collider push-out만 끈다. 접촉 감지는 계속 동작한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rope|Whip|Aim Hit")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Advanced|Aim Hit")
 	bool bAimHitCollisionFreeSolve = true;
 };
 

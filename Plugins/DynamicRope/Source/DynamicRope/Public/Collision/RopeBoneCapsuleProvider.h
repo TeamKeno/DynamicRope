@@ -36,7 +36,7 @@ public:
 	float CapsuleRadius = 8.0f;
 
 	/** 자동 모드의 스켈레톤 폴백에서 이 길이(cm) 미만의 본 세그먼트는 제외한다(손가락/트위스트 잡음 컷). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (ClampMin = "0.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|Advanced", meta = (ClampMin = "0.0", Units = "cm"))
 	float AutoMinBoneLength = 5.0f;
 
 protected:
