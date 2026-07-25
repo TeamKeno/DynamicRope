@@ -107,6 +107,9 @@ groupshared float  gInvMass[ROPE_MAX_NODES];
 groupshared float  gLambdaDist[ROPE_MAX_NODES];
 // stick k(노드 k,k+2) 당 1개
 groupshared float  gLambdaBend[ROPE_MAX_NODES];
+// strain limit 발동 플래그(substep당 병렬 초과 검사 → thread0 직렬 스윕 게이트). 초과 세그먼트가 없으면
+// 스윕 전체가 no-op(ClampToward가 전부 early-return)이라 스킵해도 결과가 비트 동일하다.
+groupshared uint   gStrainAny;
 
 // ===== 충돌 스테이지 본체(커널에서 분리) ==============================================================
 // RopeXPBDSolveCS의 collision pass 본체. 게이트(활성/질량/개수)와 배리어는 커널이 소유하고 — 배리어는
@@ -887,15 +890,30 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		// 세그먼트가 폭주 → 거대 장력·접선 휩 지터)을 substep 끝에 상한 안으로 가둔다. 순차 sweep(전방+후방)이라
 		// thread 0이 groupshared 전체를 직렬 처리(단일 writer=race 없음), 나머지 스레드는 배리어 대기. 앞뒤
 		// 배리어로 세그먼트 chord 결과 가시화 후 처리 + 결과를 write-back/다음 substep 전에 전파. CPU 미러.
+		// 조기 탈출: 스윕 전에 각 스레드가 자기 세그먼트의 초과를 병렬 검사(gStrainAny) — 초과가 하나도 없으면
+		// 직렬 스윕(세그먼트 63×4회의 의존 사슬, 63스레드 대기)을 통째로 스킵한다. 스윕은 초과가 없으면 전부
+		// early-return이라 스킵 결과가 비트 동일하고, 검사 부호(>)도 ClampToward의 통과 부호(<=)와 정확히 상보.
+		// 평시(침전·완만한 드레이프) 대부분의 substep이 이 경로다. 배리어 +1은 직렬 사슬 제거 대비 미미.
+		const bool  bStrainOn = (P.MaxStretchRatio >= 1.0f && P.SegmentLength > 1e-4f);
+		const float StrainMaxLen = P.MaxStretchRatio * P.SegmentLength;
+		if (i == 0) { gStrainAny = 0u; }
 		GroupMemoryBarrierWithGroupSync();
-		if (i == 0 && P.MaxStretchRatio >= 1.0f && P.SegmentLength > 1e-4f)
+		if (bStrainOn && i < (uint)(N - 1))
 		{
-			const float MaxLen = P.MaxStretchRatio * P.SegmentLength;
+			const float3 StrainD = gPos[i + 1] - gPos[i];
+			if (dot(StrainD, StrainD) > StrainMaxLen * StrainMaxLen)
+			{
+				InterlockedOr(gStrainAny, 1u);
+			}
+		}
+		GroupMemoryBarrierWithGroupSync();
+		if (i == 0 && bStrainOn && gStrainAny != 0u)
+		{
 			[loop] for (int sp = 0; sp < 2; ++sp)
 			{
 				// 전방: leader=kf, follower=kf+1 / 후방: leader=kb+1, follower=kb (CPU와 동일 순서).
-				[loop] for (int kf = 0; kf < N - 1; ++kf)    { RopeClampStretchToward(kf, kf + 1, MaxLen); }
-				[loop] for (int kb = N - 2; kb >= 0; --kb)   { RopeClampStretchToward(kb + 1, kb, MaxLen); }
+				[loop] for (int kf = 0; kf < N - 1; ++kf)    { RopeClampStretchToward(kf, kf + 1, StrainMaxLen); }
+				[loop] for (int kb = N - 2; kb >= 0; --kb)   { RopeClampStretchToward(kb + 1, kb, StrainMaxLen); }
 			}
 		}
 		GroupMemoryBarrierWithGroupSync();
