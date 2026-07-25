@@ -187,9 +187,8 @@ struct FRopeWrapConfig
 	/**
 	 * SurfaceVectorField path point가 latch bone 하나에 고정되지 않고 graph 후보 본으로 넘어갈지 여부.
 	 * false면 후보 graph depth/cost가 0이 되어 현재 본만 평가하므로 기존 단일 본 동작에 가깝게 돌아간다.
-	 * (MultiBone 하위 그룹을 Tuning 앞에 두려고 선언 순서상 여기에 배치 — 디테일 패널은 선언 순서로 하위 그룹을 정렬.)
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|MultiBone")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
 	bool bEnableMultiBoneWrapping = true;
 
 	/**
@@ -252,7 +251,7 @@ struct FRopeWrapConfig
 	float WrappingStableTime = 0.10f;
 
 	/** Time used to pull tail nodes onto their generated surface wrap targets. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.01", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.01", Units = "s"))
 	float WrappingMotionDuration = 0.50f;
 
 	/**

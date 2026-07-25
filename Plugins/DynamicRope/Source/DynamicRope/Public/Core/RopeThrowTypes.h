@@ -155,10 +155,10 @@ struct FRopeThrowParams
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	ERopeThrowFrameMode FrameMode = ERopeThrowFrameMode::Owner;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw")
 	ERopeSwingPlane SwingPlane = ERopeSwingPlane::AimAndFrameUp;
 
 	/** Wielder를 거치지 않고 RopeComponent::Throw를 직접 호출할 때 쓰는 fallback 속도. */
@@ -195,16 +195,16 @@ struct FRopeThrowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (ClampMin = "0.0", DisplayName = "Motion Inheritance"))
 	float MotionInheritance = 5.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
 	FVector CustomFrameForward = FVector::ForwardVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
 	FVector CustomFrameUp = FVector::UpVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
 	FVector CustomFrameRight = FVector::RightVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (EditCondition = "SwingPlane == ERopeSwingPlane::CustomNormal"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "SwingPlane == ERopeSwingPlane::CustomNormal"))
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
 };
 
