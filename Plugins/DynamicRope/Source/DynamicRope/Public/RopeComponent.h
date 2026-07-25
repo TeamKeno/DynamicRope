@@ -212,8 +212,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ShowOnlyInnerProperties))
 	FRopeThrowParams ThrowParams;
 
+	// ③(GuaranteedWrap)는 preview 기반이라 감김 판정/경로 빌드가 없다 → WrapConfig는 ③에서 회색처리한다.
+	// EditCondition을 구조체 *멤버*(컴포넌트 직속, ResolveMode를 볼 수 있음)에 걸면 ShowOnlyInnerProperties로
+	// 승격된 인라인 자식까지 edit-const가 전파돼 함께 회색이 된다(카테고리 숨김과 달리 프로퍼티 노드 트리에서
+	// 동작 — 디스플레이 승격과 무관). 값은 보존되고 편집만 막힌다(EditConditionHides 기본 false = 숨김 아님).
+
 	/** physics → logic (wrap) 핸드오프 — 캡처 판정 문턱과 *성립*(경로 빌드/판정/커밋) 튜닝. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ShowOnlyInnerProperties))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap",
+		meta = (ShowOnlyInnerProperties, EditCondition = "ResolveMode != ERopeWrapResolveMode::GuaranteedWrap"))
 	FRopeWrapConfig WrapConfig;
 
 	/** Flight 감지 스윕의 해상도/비용. SimQuality가 해석하는 파생값이라 디테일 패널에 노출하지 않는다
@@ -307,7 +313,10 @@ public:
 	//~ Whip(던지기 스윙 설정) ----------------------------------------------
 	/** 던지기 초반 채찍 스윙 튜닝. 런타임 상태는 WhipGuide가 소유하고, 호출 시
 	 *  MakeWhipGuideConfig()로 스냅샷을 만들어 넘긴다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ShowOnlyInnerProperties))
+	// ③(GuaranteedWrap)는 채찍 Flight 대신 GuidedThrow 아치를 타므로 Whip 튜닝은 무의미 → ③에서 회색처리
+	// (WrapConfig와 같은 구조체-멤버 EditCondition 방식 — 위 WrapConfig 주석 참조).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip",
+		meta = (ShowOnlyInnerProperties, EditCondition = "ResolveMode != ERopeWrapResolveMode::GuaranteedWrap"))
 	FRopeWhipConfig WhipConfig;
 
 	/** 현재 whip 스윙 경과 시간(s). 스윙 비활성 시 0. */
