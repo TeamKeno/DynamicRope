@@ -4,10 +4,13 @@
 #include "Collision/RopeCollider.h"
 
 bool FRopeSolverThrottle::UpdateSleepState(ERopePhase Phase, const FRopeSimState& Sim,
-	const FRopeSolverConfig& Config, float DeltaTime)
+	const FRopeSolverConfig& Config, float DeltaTime, bool bHoldAwake)
 {
-	// Free + 슬립 허용에서만 측정. 그 외에는 누적을 버려 상태 오염을 막는다(캐시는 다음 Free 진입 시 재구축).
-	if (Phase != ERopePhase::Free || !Config.bAllowSleep || bAsleep || DeltaTime <= KINDA_SMALL_NUMBER)
+	// Free/Wrapped + 슬립 허용에서만 측정. 그 외에는 누적을 버려 상태 오염을 막는다(캐시는 다음 슬립
+	// 페이즈 진입 시 재구축). Wrapped는 로직(Hold/견인/자동 release)이 계속 도는 채 솔브만 쉬는 페이즈라
+	// Free와 동일한 침전 측정이 성립한다 — 본이 움직이면 Hold가 쓴 노드 변위가 측정에 그대로 잡힌다.
+	const bool bSleepPhase = (Phase == ERopePhase::Free || Phase == ERopePhase::Wrapped);
+	if (!bSleepPhase || !Config.bAllowSleep || bAsleep || DeltaTime <= KINDA_SMALL_NUMBER)
 	{
 		SleepTimer = 0.0f;
 		SleepPrevFramePositions.Reset();
@@ -25,11 +28,14 @@ bool FRopeSolverThrottle::UpdateSleepState(ERopePhase Phase, const FRopeSimState
 			MaxDistSq = FMath::Max(MaxDistSq, static_cast<float>(FVector::DistSquared(Sim.Positions[i], SleepPrevFramePositions[i])));
 		}
 		const float MaxSpeed = FMath::Sqrt(MaxDistSq) / DeltaTime;
-		SleepTimer = (MaxSpeed < Config.SleepVelocityThreshold) ? SleepTimer + DeltaTime : 0.0f;
+		// bHoldAwake는 진입만 막는다(타이머 리셋) — 측정 캐시는 계속 갱신해 게이트 해제 시 delay가 깨끗이 재시작.
+		SleepTimer = (!bHoldAwake && MaxSpeed < Config.SleepVelocityThreshold) ? SleepTimer + DeltaTime : 0.0f;
 		if (SleepTimer >= Config.SleepDelay)
 		{
 			bAsleep = true;
 			SleepPinPos = Sim.StartPinTarget;
+			// 드리프트 wake 기준(슬립 중 로직 쓰기 감지 — ShouldWakeFromSleep).
+			SleepNodePositions = Sim.Positions;
 			// 전이 로그는 호출자(컴포넌트) 담당.
 			bJustSlept = true;
 		}
@@ -49,6 +55,18 @@ bool FRopeSolverThrottle::ShouldWakeFromSleep(const FRopeSimState& Sim, const FR
 	if (FVector::DistSquared(Sim.StartPinTarget, SleepPinPos) > FMath::Square(1.0f))
 	{
 		return true;
+	}
+	// 슬립 중 로직 쓰기로 노드가 슬립 시점에서 이동 — Wrapped의 Hold 본 추종이 대표(랩 대상/엘리베이터가
+	// 움직이는 중). Free는 슬립 중 노드를 쓰는 주체가 없어 자연히 no-op. 임계 0.5cm(콜라이더 정지 판정과 동일).
+	if (SleepNodePositions.Num() == Sim.Num())
+	{
+		for (int32 i = 0; i < Sim.Num(); ++i)
+		{
+			if (FVector::DistSquared(Sim.Positions[i], SleepNodePositions[i]) > 0.25)
+			{
+				return true;
+			}
+		}
 	}
 	// 되감기/풀기 중.
 	if (!FMath::IsNearlyZero(ReelRate))

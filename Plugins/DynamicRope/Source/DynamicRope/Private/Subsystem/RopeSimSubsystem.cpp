@@ -1268,7 +1268,13 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 	}
 
 	// 충돌: 이 로프의 collider를 capsule(M2)/SDF(M3)로 분류(+ 감지 시 귀속 테이블 병행).
-	PackStepColliders(Rope, bDetectThisRope, OutStep);
+	// 소비자(솔브 substep 루프 / 감지 커널)가 있을 때만 — override-only 프레임(Wrapped 수면,
+	// 고fps로 NumSub=0인 프레임)은 커널이 콜라이더를 안 읽으므로 평탄화/업로드를 통째로 스킵한다
+	// (RT 팩은 빈 배열에 더미 1개만 올린다). wake 판정용 콜라이더는 FrameColliders(gather)로 별도.
+	if (OutStep.NumSub > 0 || bDetectThisRope)
+	{
+		PackStepColliders(Rope, bDetectThisRope, OutStep);
+	}
 
 	// G2: 로직 페이즈 산출물(OverrideFrame)을 override로 주입 — 로직 페이즈 재시드 대체.
 	// CPU Sim에 적용된 것과 완전히 같은 데이터(비트 미러는 위 static_assert로 보증).

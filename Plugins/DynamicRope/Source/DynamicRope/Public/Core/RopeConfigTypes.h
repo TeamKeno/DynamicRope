@@ -139,9 +139,11 @@ struct FRopeSolverConfig
 	//~ 스케일링(슬립/LOD) — 다수 로프가 존재할 때 유휴/원거리 비용을 줄인다 ------------------
 
 	/**
-	 * 슬립: Free 페이즈에서 모든 노드 속도가 SleepVelocityThreshold 미만으로 SleepDelay 동안 유지되면
-	 * 솔브를 통째로 스킵한다(GPU 로프는 dispatch 자체가 없음). 핀 이동/되감기/움직이는 collider 근접
-	 * /페이즈 전환에서 깨어난다. 다른 페이즈(Flight~Releasing)는 항상 활성.
+	 * 슬립: Free/Wrapped 페이즈에서 모든 노드 속도가 SleepVelocityThreshold 미만으로 SleepDelay 동안
+	 * 유지되면 솔브를 스킵한다 — Free는 dispatch 자체가 없고, Wrapped는 본 추종(Hold)·견인·자동 release
+	 * 로직이 계속 도는 채 자유 구간 솔브만 쉰다(GPU는 override-only dispatch). 핀 이동/되감기/움직이는
+	 * collider 근접/랩 본 이동(노드 드리프트)/능동 Pull 장전/페이즈 전환에서 깨어난다.
+	 * 그 외 페이즈(Flight/Contacting/Wrapping/Releasing)는 항상 활성.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling")
 	bool bAllowSleep = true;

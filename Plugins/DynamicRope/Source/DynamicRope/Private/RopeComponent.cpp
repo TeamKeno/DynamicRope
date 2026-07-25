@@ -238,8 +238,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 	// 거리 LOD 배율(iteration 감쇠) — 솔브 판정 전에 이번 프레임 값 확정(GPU 스텝/CPU 솔브 공용).
 	ComputeSolverLOD(LODCameraLocation);
 
-	// 슬립은 Free 전용 — 다른 페이즈로 넘어가면 즉시 해제(전이 자체가 활동).
-	if (Phase != ERopePhase::Free && Throttle.IsAsleep())
+	// 슬립은 Free/Wrapped 전용 — 그 외 페이즈로 넘어가면 즉시 해제(전이 자체가 활동).
+	if (Phase != ERopePhase::Free && Phase != ERopePhase::Wrapped && Throttle.IsAsleep())
 	{
 		Throttle.Wake();
 	}
@@ -332,7 +332,19 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 			// 장력/거리 release 발생(솔브 없음).
 			break;
 		}
-		SimFrame.bSolveThisFrame = true;
+		// Wrapped 정지 스로틀(Free 슬립의 확장): 핀·랩 본·근접 콜라이더가 모두 정지하면 자유 구간 솔브를
+		// 쉰다. 위 ①~④(Hold/관측/견인/자동 release)는 수면 중에도 그대로 돈다 — 스킵되는 건 solver
+		// substep뿐이라 GPU는 override-only dispatch(NumSub=0)로 줄어든다. 진입은 Finalize의
+		// UpdateSleepState(속도 침전, 능동 Pull 장전 중엔 bHoldAwake로 차단)가 공용 처리. 랩 본 이동은
+		// Hold가 쓴 노드 드리프트로 깨우는데, 관측 view(PullObservationSim)가 이번 프레임 핀+override를
+		// 이미 합성했으므로 지연 없이 감지된다(엘리베이터가 출발하는 그 프레임에 wake).
+		if (Throttle.IsAsleep()
+			&& (PullDrive.ActivePullForce > 0.0f
+				|| Throttle.ShouldWakeFromSleep(PullObservationSim, SolverConfig, ReelRate, SimFrame.FrameColliders)))
+		{
+			Throttle.Wake();
+		}
+		SimFrame.bSolveThisFrame = !Throttle.IsAsleep();
 		break;
 	}
 
@@ -522,8 +534,10 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		RopeDebug::RecordWrappedStats(Sim, WrapController.State);
 	}
 
-	// 슬립 전이 측정(Free 전용 — 프레임간 노드 변위 기반이라 이번 프레임 결과가 확정된 여기서).
-	if (Throttle.UpdateSleepState(Phase, Sim, SolverConfig, DeltaTime))
+	// 슬립 전이 측정(Free/Wrapped — 프레임간 노드 변위 기반이라 이번 프레임 결과가 확정된 여기서).
+	// Wrapped에서 능동 Pull이 장전된 동안은 진입을 막는다(bHoldAwake — 견인 임펄스/climb-in은 적분 전제).
+	if (Throttle.UpdateSleepState(Phase, Sim, SolverConfig, DeltaTime,
+		/*bHoldAwake*/ Phase == ERopePhase::Wrapped && PullDrive.ActivePullForce > 0.0f))
 	{
 		UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] rope asleep (max speed < %.1f cm/s for %.2fs)"),
 			*GetName(), SolverConfig.SleepVelocityThreshold, SolverConfig.SleepDelay);
