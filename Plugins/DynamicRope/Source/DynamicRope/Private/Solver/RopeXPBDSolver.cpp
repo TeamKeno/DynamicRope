@@ -652,8 +652,11 @@ void FRopeXPBDSolver::SolveSegmentContacts(FRopeSimState& State, const FRopeSolv
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_SegContacts);
 	const float Radius = FMath::Max(0.0f, Config.CollisionRadius);
 	const bool bHasBounds = ColliderBounds.Num() == Colliders.Num();
-	// 샘플 간격(cm — 노드 점 충돌과 동일 config 재사용)과 세그먼트당 내부 샘플 상한.
-	const float SweepStep = FMath::Max(Config.SweepStep, 0.1f);
+	// 샘플 간격: config 하한 vs 검출 보장 한계(2×노드 반지름) 중 큰 쪽. 내부 샘플은 반경 Radius 점질의라
+	// 인접 프로브(양 끝 노드 질의 포함) 간격 ≤ 2×R이면 chord 위 어떤 지점도 프로브에서 R 이내 — 두께 0의
+	// 벽도 못 빠져나간다(삼각부등식). 고정 2cm는 굵은 로프에서 커버리지가 겹치는 과밀 프로브였다.
+	// GPU RopeSolveSegmentChord와 동일 식(파리티). 상한(MaxSweepSamples)은 기존과 동일.
+	const float SweepStep = FMath::Max(FMath::Max(Config.SweepStep, 0.1f), 2.0f * Radius);
 	const int32 MaxSamples = FMath::Max(1, Config.MaxSweepSamples);
 	const int32 Count = State.Num() - 1;
 	for (int32 k = 0; k < Count; ++k)

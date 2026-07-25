@@ -511,7 +511,12 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 	}
 
 	const float SegLen  = distance(gPos[i], gPos[i + 1]);
-	const float SegStep = max(P.SweepStep, 0.1f);
+	// 샘플 간격: config 하한 vs 검출 보장 한계(2×노드 반지름) 중 큰 쪽. 내부 샘플은 반경 CollisionRadius
+	// 점질의라 인접 프로브(양 끝 노드 질의 포함) 간격 ≤ 2×R이면 chord 위 어떤 지점도 프로브에서 R 이내 —
+	// 두께 0의 벽도 못 빠져나간다(삼각부등식; NumInner+1 ≥ SegLen/SegStep이라 간격 ≤ SegStep 보장).
+	// 고정 2cm는 굵은 로프에서 커버리지가 겹치는 과밀 프로브로, 콜라이더 수 × 샘플 수 곱(근접 스파이크의
+	// 주항)을 불필요하게 키웠다. CPU FRopeXPBDSolver::SolveSegmentContacts와 동일 식(파리티).
+	const float SegStep = max(max(P.SweepStep, 0.1f), 2.0f * P.CollisionRadius);
 	const int   NumInner = clamp((int)floor(SegLen / SegStep), 1, max(P.MaxSweepSamples, 1));
 	for (int si = 1; si <= NumInner; ++si)
 	{
