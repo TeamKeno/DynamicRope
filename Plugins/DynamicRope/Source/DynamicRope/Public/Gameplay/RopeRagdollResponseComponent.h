@@ -145,6 +145,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
 	void RecoverFromRagdoll();
 
+	/** 로프 구동으로 분류된 랙돌(bAutoRecoverOnRelease=true 진입)을, 지금 이 메시를 감고 있는 로프가
+	 *  하나도 없을 때만 복귀시킨다. 자동 복귀는 release 이벤트로만 발화하므로 "랙돌 진입은 했는데 로프가
+	 *  감기기 전에 상황이 끝난"(스네어가 발사 전에 해제되는 등) 경로에서는 영영 안 일어난다 — 그 구멍을
+	 *  막는 명시 호출용. 복귀 자격 규칙은 자동 복귀와 동일하게 존중한다: 수동/치트 진입 랙돌과
+	 *  bRecoverRagdollOnRopeRelease=false는 건드리지 않고, 다른 로프가 아직 감고 있으면 마지막 release의
+	 *  자동 복귀에 맡긴다. 복귀를 실제로 수행했으면 true. */
+	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
+	bool RecoverFromRagdollIfUnheld();
+
 	UFUNCTION(BlueprintPure, Category = "Rope|Ragdoll")
 	bool IsRagdolled() const { return bRagdolled; }
 

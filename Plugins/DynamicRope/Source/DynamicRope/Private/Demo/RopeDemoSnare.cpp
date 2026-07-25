@@ -247,12 +247,27 @@ void ARopeDemoSnare::ReleaseSnare()
 		}
 		Cable->SetReelRate(0.0f);
 		Cable->SetActivePull(0.0f);
-		if (Cable->GetPhase() == ERopePhase::Wrapped)
-		{
-			Cable->ReleaseWrap();
-		}
+		// 아직 안 나간 발사 큐 폐기 — 안 걷으면 해제 *후에* 큐가 실행돼 대상 없는 결박이 마저 날아간다.
+		Cable->CancelQueuedGuaranteedAimThrow();
+		// Wrapped만 풀던 종전 게이트가 구멍이었다: 비행 중(GuidedThrow)/잡는 중(Contacting/Wrapping) 로프가
+		// 해제 *후에* 마저 감기면 bTriggered=false라 Tick이 관리하지 않고 ③은 자동 release도 없어 영구
+		// 결박이 됐다(밟자마자 이탈하는 빠른 에지에서 재현). ReleaseWrap(ReleaseWrapAs)이 네 페이즈를 전부
+		// 게이트하므로 무조건 호출한다(그 외 페이즈는 내부에서 no-op).
+		Cable->ReleaseWrap();
 		// 다음 결박이 같은 길이에서 시작하도록 감았던 만큼 되돌린다.
 		Cable->SetRopeLength(Cable->RopeLength);
+	}
+
+	// 강제 랙돌 원복(감기기 전 해제 경로): 자동 복귀는 "감았던 로프의 release 이벤트"로만 발화하므로,
+	// 로프가 하나도 안 감긴 채 해제되면(밟자마자 이탈 등) 영구 랙돌이 됐다. 감긴 로프는 위 ReleaseWrap의
+	// release 이벤트 → 컴포넌트 자동 복귀가 처리하고, 여기서는 "아무도 안 감은" 잔여 케이스만 명시
+	// 복귀한다(다른 로프가 잡고 있으면 IfUnheld 내부 게이트가 보류).
+	if (AActor* Target = GetEffectiveTargetActor())
+	{
+		if (URopeRagdollResponseComponent* Response = Target->FindComponentByClass<URopeRagdollResponseComponent>())
+		{
+			Response->RecoverFromRagdollIfUnheld();
+		}
 	}
 
 	SetSnared(false);

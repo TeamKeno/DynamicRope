@@ -147,6 +147,25 @@ void URopeRagdollResponseComponent::HandleAnyRopeReleased(const URopeComponent* 
 	}
 }
 
+bool URopeRagdollResponseComponent::RecoverFromRagdollIfUnheld()
+{
+	// 자동 복귀(HandleAnyRopeReleased)와 동일 게이트 — 이 API는 "release 이벤트가 영영 안 오는" 경로의
+	// 명시 트리거일 뿐, 복귀 자격 규칙을 넓히지 않는다(수동/치트 랙돌·복귀 옵트아웃은 그대로 존중).
+	if (!bRecoverRagdollOnRopeRelease || !bRagdolled || !bRagdollWasAutoTriggered)
+	{
+		return false;
+	}
+	// 아직 감고 있는 로프가 있으면 그 마지막 release의 자동 복귀 몫이다(하나만 풀렸는데 일으키기 방지).
+	if (PruneWrappingRopes() > 0)
+	{
+		return false;
+	}
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 감은 로프 없음 → 로프 구동 랙돌 명시 복귀(IfUnheld)."),
+		*GetNameSafe(GetOwner()));
+	RecoverFromRagdoll();
+	return true;
+}
+
 int32 URopeRagdollResponseComponent::PruneWrappingRopes()
 {
 	for (auto It = WrappingRopes.CreateIterator(); It; ++It)
