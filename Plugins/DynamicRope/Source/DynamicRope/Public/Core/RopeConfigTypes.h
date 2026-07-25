@@ -55,8 +55,11 @@ struct FRopeSolverConfig
 	 *
 	 *  매 iteration 푸는 편이 sharp한 끼인각에서 더 강하다(충돌이 distance/bending과 매번 경쟁하므로 장력에
 	 *  안 밀린다). N을 키우면 그 경쟁 횟수를 줄여 비용을 선형으로 깎는 대신 관통 여유가 줄어든다.
-	 *  Query가 비싼 SDF 콜라이더에서 CPU 폴백 비용을 직접 나누는 유일한 손잡이다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "1"))
+	 *  Query가 비싼 SDF 콜라이더에서 CPU 폴백 비용을 직접 나누는 유일한 손잡이다.
+	 *
+	 *  비노출(BP 전용): 소비처가 FRopeXPBDSolver 하나뿐이라 **CPU 폴백에서만 작동한다**. GPU가 단일
+	 *  런타임 경로이므로(쿡/-nullrhi/서버/초과 크기에서만 CPU) 정상 플레이에서는 효과가 없다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "1"))
 	int32 ContactSolveInterval = 1;
 
 	/** XPBD stretch compliance(stiffness의 역수). 0 = 신장 불가(inextensible). */
@@ -477,7 +480,7 @@ struct FRopeHoldConfig
 	 * TetherCompliance>0이면 의도적 탄성을 허용하므로 hard projection은 자동 비활성화된다.
 	 * Wielder가 없는 custom movement는 URopeComponent::ConstrainWielderLocation을 이동 적용 전에 호출할 것.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (DisplayName = "Enforce Rope Length"))
 	bool bEnforceWielderLengthConstraint = true;
 
 	/**
@@ -519,7 +522,7 @@ struct FRopeHoldConfig
 	 * Chaos 물리 제약이 독점하므로(UpdateConstraintTether의 bUseChaosBackend 분기) 이 감쇠를 타지 않고,
 	 * CMC 캐릭터에도 적용하지 않는다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Tether Sideways Damping"))
 	float TetherPerpDamping = 0.3f;
 
 	/**
@@ -538,7 +541,7 @@ struct FRopeHoldConfig
 	 * 본분이고 초과분을 능동적으로 되감는 건 회수 항뿐이므로, 이 상한이 테더의 윈치성(性)을 정한다.
 	 * 0 = 회수 없음(벌어짐 저지만 — 초과분은 되감기/자연 접근으로만 준다).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "cm/s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Tether Recovery Speed"))
 	float TetherMaxBiasSpeed = 150.0f;
 
 	/**
@@ -571,7 +574,7 @@ struct FRopeHoldConfig
 	 * chord가 된다. 크게 잡으면(완만한 굴곡 무시) 더 chord에 가깝고, 작게 잡으면 미세한 꺾임에도 민감.
 	 * 팽팽할 때의 처짐/노드 지터는 이 임계 아래이고, 벽 모서리는 위라 구분된다(잔여 지터는 SmoothTime이 흡수).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "1.0", ClampMax = "179.0", Units = "deg"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "1.0", ClampMax = "179.0", Units = "deg", DisplayName = "Pull Corner Angle"))
 	float PullBendThresholdDeg = 30.0f;
 
 	/**
@@ -616,7 +619,7 @@ struct FRopeHoldConfig
 	 * bActivePullRequiresTaut를 끄면 팽팽 판정 자체를 안 보므로 회색 처리된다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning",
-		meta = (ClampMin = "0.0", EditCondition = "bActivePullRequiresTaut"))
+		meta = (ClampMin = "0.0", EditCondition = "bActivePullRequiresTaut", DisplayName = "Pull Load Threshold"))
 	float ActivePullTautTension = 0.0f;
 
 	/**
@@ -670,7 +673,7 @@ struct FRopeHoldConfig
 	 * > 0이면 k=1/α인 implicit spring + generalized critical damping으로 common game
 	 * frame rate에서도 안정적인 의도적 탄성(번지 등)을 만든다. 예: 0.0005 → k=2000 kg/s².
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", DisplayName = "Rope Elasticity"))
 	float TetherCompliance = 0.0f;
 
 	/**
@@ -687,6 +690,6 @@ struct FRopeHoldConfig
 	 * 능동 Pull 대상 물리 바디의 각속도 상한(deg/s, 0 = 무제한). 힘을 무게중심(AddForce)에 주면 토크가 없어
 	 * 스핀 원인이 대부분 사라지지만, 랙돌 관절 다이내믹이 만드는 잔여 스핀을 이 상한이 마저 억제한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "deg/s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "deg/s", DisplayName = "Pull Spin Limit"))
 	float ActivePullMaxAngularSpeed = 720.0f;
 };

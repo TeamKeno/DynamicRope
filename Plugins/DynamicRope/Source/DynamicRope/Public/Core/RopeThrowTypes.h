@@ -128,19 +128,21 @@ struct DYNAMICROPE_API FRopeThrowContext
 	float AimGuideLockAlpha = 0.50f;
 };
 
-/** Runtime centerline data for the pre-wrapped rope preview. */
+/** Runtime centerline data for the pre-wrapped rope preview.
+ *  매 프레임 빌더가 새로 채우는 **결과물**이라 저작 대상이 아니다 — 읽기 전용으로 노출한다
+ *  (EditAnywhere를 붙이면 이 구조체를 멤버로 내보내는 순간 "편집 가능한 좌표 배열"이 패널에 뜬다). */
 USTRUCT(BlueprintType)
 struct FRopeWrapPreviewData
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview")
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Preview")
 	TArray<FVector> Points;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "0.1", Units = "cm"))
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Preview", meta = (ClampMin = "0.1", Units = "cm"))
 	float Radius = 2.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview", meta = (ClampMin = "3", ClampMax = "32"))
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Preview", meta = (ClampMin = "3", ClampMax = "32"))
 	int32 NumSides = 8;
 
 	bool IsValid() const

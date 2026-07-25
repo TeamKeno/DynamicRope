@@ -76,8 +76,12 @@ public:
 	 * 고치려면 두 겹 다 필요하다(테더도 CMC 동반 구동 + 키네마틱에 묶인 본은 캐릭터 질량 보고). 인가만 고치면
 	 * 몫 분배가 여전히 틀린다. 기본값 false로 두는 한 무해하다 — 풀 랙돌은 전 바디가 시뮬이라 키네마틱 앵커가
 	 * 없고 관절로 몸 전체가 끌려오므로 정상 동작한다.
+	 *
+	 * 위 결함이 남아 있는 동안은 패널에 노출하지 않는다(BP 전용) — 기본값 false로는 무해하지만
+	 * 체크박스로 놓여 있으면 켜지고, 증상이 "능동 Pull은 되는데 테더만 안 됨"이라 원인 추적이 어렵다.
+	 * 두 겹(테더의 CMC 동반 구동 + 키네마틱 구속 본의 질량 보고)을 고칠 때 다시 노출할 것.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (EditCondition = "bRagdollOnWrapped"))
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (EditCondition = "bRagdollOnWrapped"))
 	bool bOnlyBelowWrappedBone = false;
 
 	/**
@@ -94,8 +98,10 @@ public:
 	 * 되돌아가며 크게 순간이동한다 — 대신 캡슐을 메시(RecoverAnchorBoneName 본) 쪽으로 옮겨 그
 	 * 되돌아감이 시각적 no-op이 되게 한다. 위치만(수평), 회전/높이는 유지하고 지면 스냅은 복귀한
 	 * 무브먼트 모드가 처리한다. 부분 랙돌에는 적용 안 함(메시를 리셋하지 않아 순간이동이 없다).
+	 *
+	 * 비노출(BP 전용): 끄면 위 순간이동 아티팩트가 그대로 돌아오는 열화 스위치라 끌 이유가 없다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll")
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Ragdoll")
 	bool bMoveCapsuleToMeshOnRecover = true;
 
 	/**

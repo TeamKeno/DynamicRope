@@ -209,23 +209,31 @@ public:
 	 * WBP 서브클래스로 리스타일 가능). Aim ray 모드(= 로프 ResolveMode가 ①이 아닐 때)에서만 의미가 있다.
 	 * (HUD 하위 그룹을 Tuning 앞에 두려고 선언 순서상 여기에 배치 — 디테일 패널은 선언 순서로 하위 그룹을 정렬.)
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|HUD")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
 	bool bShowAimHudWidget = true;
 
 	/** SDF ray march의 샘플 간격이다. 작을수록 얇은 팔/다리 충돌 정확도가 높아진다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.5", Units = "cm"))
 	float AimRaySweepStep = 2.0f;
 
-	/** 중심선 주변을 함께 검사할 반경이다. 0이면 Rope Radius와 Contact Radius 중 큰 값을 기본 반경으로 사용한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.0", Units = "cm"))
+	/** 중심선 주변을 함께 검사할 반경이다. 0이면 Rope Radius와 Contact Radius 중 큰 값을 기본 반경으로 사용한다.
+	 *
+	 *  비노출(BP 전용): auto가 로프 반지름을 따라가므로 로프 굵기를 정하면 함께 맞는다. 명시값을 넣는
+	 *  순간 그 자동 정합이 깨진다 — FRopeWrapConfig::ContactQueryRadius와 같은 규약이다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.0", Units = "cm"))
 	float AimRayQueryRadius = 0.0f;
 
-	/** 로프 길이상 현재 스윙 방향을 hit 방향으로 보간하기 시작하는 비율. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.0", ClampMax = "0.9"))
+	/** 로프 길이상 현재 스윙 방향을 hit 방향으로 보간하기 시작하는 비율.
+	 *
+	 *  비노출(BP 전용): 아래 LockAlpha와 한 쌍인 가이드 커브 내부 수학이라 사용자가 고를 근거가 없다.
+	 *  조준 연출을 바꾸려면 GuidedLength/SweepAngleDegrees(Whip) 쪽이 의도가 드러나는 손잡이다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.0", ClampMax = "0.9"))
 	float AimRayGuideSteerStartAlpha = 0.25f;
 
-	/** 로프 길이상 hit 방향 공간 보간이 최대가 되는 비율. Flight 시간 보간 전에는 완전히 고정되지 않는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	/** 로프 길이상 hit 방향 공간 보간이 최대가 되는 비율. Flight 시간 보간 전에는 완전히 고정되지 않는다.
+	 *
+	 *  비노출(BP 전용): 위 SteerStartAlpha와 한 쌍. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float AimRayGuideLockAlpha = 0.50f;
 
 	// NOTE: aim ray 시각화 플래그(bDrawAimRayDebug)는 사라졌다 — 시각화는 Gameplay Debugger의 Rope
@@ -270,7 +278,7 @@ public:
 	 * 컴포넌트가 0~1개인 보통의 액터에서는 지정할 필요가 없다. 한 액터에 preview 컴포넌트가 여러 개일 때
 	 * (wielder 둘, 또는 머티리얼을 달리 세팅해 둔 것 중 하나를 골라야 할 때) 바인딩할 유일한 수단이다.
 	 */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopePreviewComponent", DisplayName = "Preview Component"))
+	UPROPERTY(EditAnywhere, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopePreviewComponent", DisplayName = "Preview Component"))
 	FComponentReference PreviewComponentReference;
 
 	UPROPERTY(Transient)
@@ -333,12 +341,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement")
 	bool bAutoGroundExitOnUpwardPull = true;
 
-	/** 상향 판정 임계: 견인 방향(손→앵커, 단위 벡터)의 Z 성분이 이 값 이상일 때만 지상 이탈. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bAutoGroundExitOnUpwardPull"))
+	/** 상향 판정 임계: 견인 방향(손→앵커, 단위 벡터)의 Z 성분이 이 값 이상일 때만 지상 이탈.
+	 *
+	 *  비노출(BP 전용): 지상 이탈 자체를 켜고 끄는 건 위 bAutoGroundExitOnUpwardPull이고, 이건 그
+	 *  판정의 내부 임계라 사용자가 다른 값을 고를 근거가 없다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Movement|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bAutoGroundExitOnUpwardPull"))
 	float GroundExitUpDot = 0.35f;
 
-	/** 지상 이탈에 필요한 최소 테더 초과분(cm). 경계 지터로 모드가 퍼덕이는 것을 막는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement|Tuning", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bAutoGroundExitOnUpwardPull"))
+	/** 지상 이탈에 필요한 최소 테더 초과분(cm). 경계 지터로 모드가 퍼덕이는 것을 막는다.
+	 *
+	 *  비노출(BP 전용): 실측으로 정해진 히스테리시스 상수다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Movement|Tuning", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bAutoGroundExitOnUpwardPull"))
 	float GroundExitMinOvershoot = 10.0f;
 
 	/**
