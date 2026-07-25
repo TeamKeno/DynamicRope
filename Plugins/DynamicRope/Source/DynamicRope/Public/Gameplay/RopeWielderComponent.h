@@ -264,17 +264,17 @@ public:
 	//~ Preview(GuaranteedWrap 모드 전용) ----------------------------------
 	// preview는 GuaranteedWrap만 쓴다 — Loaded에서 조준한 대상을 확정 throw로 던지기 위한 prepared path를
 	// 만든다. FullSimulation/AssistedJudged는 감김이 판정/창발이라 던지기 전에 확정할 경로가 없어 preview가
-	// 없다(AssistedJudged의 조준 표시는 aim ray HUD가 담당). 아래 필드는 전부 GuaranteedWrap의 표시/보류 정책이다.
-	/** 비어 있으면 owner에서 찾는다. */
-	UPROPERTY(EditAnywhere, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopePreviewComponent", DisplayName = "Preview Component"))
+	// 없다(AssistedJudged의 조준 표시는 aim ray HUD가 담당). 아래 필드는 전부 GuaranteedWrap의 표시 정책이다.
+	/**
+	 * 비우면 owner에서 아직 점유되지 않은 것을 찾고, 그래도 없으면 자동 생성한다 — 그래서 preview
+	 * 컴포넌트가 0~1개인 보통의 액터에서는 지정할 필요가 없다. 한 액터에 preview 컴포넌트가 여러 개일 때
+	 * (wielder 둘, 또는 머티리얼을 달리 세팅해 둔 것 중 하나를 골라야 할 때) 바인딩할 유일한 수단이다.
+	 */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "Rope|Preview", meta = (UseComponentPicker, AllowedClasses = "/Script/DynamicRope.RopePreviewComponent", DisplayName = "Preview Component"))
 	FComponentReference PreviewComponentReference;
 
 	UPROPERTY(Transient)
 	TObjectPtr<URopePreviewComponent> PreviewComponent = nullptr;
-
-	/** Guaranteed가 Wrapped로 확정된 뒤에도 preview path를 잠깐 남길 시간. 0이면 Wrapped 진입 시 즉시 지운다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Tuning", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Locked Wrapped Preview Hold Time"))
-	float LockedWrappedPreviewHoldTime = 0.0f;
 
 	//~ Input(선택) — 비우면 무시, Throw()를 직접 호출하면 된다 ------------
 	/** Action/MappingContext가 설정돼 있으면 BeginPlay에 자동 바인딩할지. */
@@ -692,9 +692,6 @@ private:
 	/** 주어진 centerline을 preview 컴포넌트에 넘겨 그린다(표시 OFF/컴포넌트 없음이면 no-op). */
 	void DisplayPreviewCenterline(const FRopeWrapPreviewData& Centerline);
 
-	/** 확정된 HeldPreparedPreview를 새 build 없이 그대로 유지 표시한다(표시 OFF면 no-op). */
-	void DisplayHeldPreparedPreview();
-
 	/** 표시만 정리한다 — prepared(던지기용 데이터)는 유지된다. */
 	void ClearPreviewDisplay();
 
@@ -804,10 +801,6 @@ private:
 
 	// ③ 실행 중(GuidedThrow 포함) 화면에 유지할 확정 path.
 	FRopeWrapPreviewData HeldPreparedPreview;
-	// Wrapped 후 preview path를 잠깐 남길 때 사용하는 만료 시각. LockedWrappedPreviewHoldTime이 0이면 즉시 만료된다.
-	float HeldPreviewExpireTimeSeconds = 0.0f;
-	// Wrapped 진입 순간을 감지하기 위한 마지막 preview 처리 phase.
-	ERopePhase LastPreviewPhase = ERopePhase::Free;
 
 #if WITH_DEV_AUTOMATION_TESTS
 	// 표시 OFF에서 prepared build에 들어가는지 외부 부작용 없이 검증하는 테스트 전용 계측.

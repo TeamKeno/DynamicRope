@@ -156,10 +156,6 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	TubeSmoothingAlpha = Preset->TubeSmoothingAlpha;
 	bIncludeOwnerColliders = Preset->bIncludeOwnerColliders;
 	bUseWorldGDF = Preset->bUseWorldGDF;
-	PreviewReachScale = Preset->PreviewReachScale;
-	PreviewSegmentCount = Preset->PreviewSegmentCount;
-	PreviewSampleStep = Preset->PreviewSampleStep;
-	PreviewQueryRadius = Preset->PreviewQueryRadius;
 
 	// [4] Sim 재시드 — 항상 호출(분기 없는 단일 경로). NumParticles/RopeLength 소비 + GPU 상주 버퍼
 	// 재시드 세대 증가까지 포함한다. EnsureRopeInitialized는 비었을 때만이라 여기서는 부적합.

@@ -76,7 +76,6 @@ namespace
 		Preset->NumSides = 12;
 		Preset->bIncludeOwnerColliders = true;
 		Preset->bUseWorldGDF = false;
-		Preset->PreviewReachScale = 1.5f;
 		return Preset;
 	}
 }
@@ -162,7 +161,6 @@ bool FRopePresetApplyStampsValuesTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("NumSides 스탬프"), Rope->NumSides, 12);
 	TestEqual(TEXT("bIncludeOwnerColliders 스탬프"), Rope->bIncludeOwnerColliders, true);
 	TestEqual(TEXT("bUseWorldGDF 스탬프"), Rope->bUseWorldGDF, false);
-	TestEqual(TEXT("PreviewReachScale 스탬프"), Rope->PreviewReachScale, 1.5f);
 
 	// InitRope 실행 증명 — Sim 토폴로지/길이가 새 값으로 재시드됐다.
 	TestEqual(TEXT("노드 수 재시드"), Rope->GetNodeCount(), 32);

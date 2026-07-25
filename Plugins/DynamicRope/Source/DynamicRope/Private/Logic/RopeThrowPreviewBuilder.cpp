@@ -5,93 +5,26 @@
 #include "Collision/RopeCollider.h"
 // ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
 #include "Core/RopeWrapTarget.h"
-#include "Logic/RopeFlightContactDetector.h"
-#include "Logic/RopeWhipGuide.h"
 #include "Logic/RopeWrappingPhase.h"
 #include "RopeMathHelpers.h"
 #include "Components/SkeletalMeshComponent.h"
 
 namespace
 {
-	/** Builder 내부에서만 사용하는 던지기 탐색 호. 렌더·Blueprint·외부 API에는 노출하지 않는다. */
-	struct FRopeArcPreviewData
-	{
-		FVector Origin = FVector::ZeroVector;
-		FVector AimDir = FVector::ForwardVector;
-		FVector GuideUp = FVector::UpVector;
-		float Radius = 0.0f;
-		float SweepAngleDegrees = 180.0f;
-		int32 SegmentCount = 32;
-	};
-
 	const TArray<IRopeCollider*>& GetColliders(const FRopeThrowPreviewBuilder::FInput& Input)
 	{
 		static const TArray<IRopeCollider*> EmptyColliders;
 		return Input.Colliders ? *Input.Colliders : EmptyColliders;
 	}
 
-	bool BuildThrowArcPreview(const FRopeThrowPreviewBuilder::FInput& Input, FRopeArcPreviewData& OutPreview,
-		FString* OutFailureReason)
-	{
-		OutPreview = FRopeArcPreviewData();
-
-		const FRopeSimState* Sim = Input.Sim;
-		const float ClampedReachScale = FMath::Max(Input.ReachScale, 0.0f);
-		if (ClampedReachScale <= KINDA_SMALL_NUMBER)
-		{
-			RopeMath::SetPreviewFailureReason(OutFailureReason,
-				FString::Printf(TEXT("throw arc preview build failed: reach scale too small (reachScale=%.2f)"),
-					Input.ReachScale));
-			return false;
-		}
-
-		const FRopeThrowContext& ThrowContext = Input.ThrowContext;
-		const FRopeWhipGuide::FSwingBasis SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
-			ThrowContext, ThrowContext.SwingPlane, ThrowContext.CustomSwingPlaneNormal);
-		const float SourceRopeLength = FMath::Max(Sim ? Sim->RopeLength : 0.0f, Input.RopeLength);
-
-		OutPreview.Origin = ThrowContext.Origin;
-		OutPreview.AimDir = SwingBasis.AimDir;
-		OutPreview.GuideUp = SwingBasis.GuideUp;
-		OutPreview.Radius = SourceRopeLength * ClampedReachScale;
-		OutPreview.SweepAngleDegrees = FMath::Clamp(Input.SweepAngleDegrees, 1.0f, 180.0f);
-		OutPreview.SegmentCount = FMath::Clamp(Input.SegmentCount, 1, 128);
-		if (OutPreview.Radius <= KINDA_SMALL_NUMBER)
-		{
-			RopeMath::SetPreviewFailureReason(OutFailureReason,
-				FString::Printf(TEXT("throw arc preview build failed (reachScale=%.2f, segmentCount=%d, ropeLength=%.2f)"),
-					Input.ReachScale, Input.SegmentCount, SourceRopeLength));
-			return false;
-		}
-		return true;
-	}
-
 	struct FThrowPreviewContactCandidate
 	{
 		FRopeContactCandidate Candidate;
-		float AngleAlpha = 1.0f;
-		float DistanceAlpha = 1.0f;
-		float ArcStartAngleDegrees = 180.0f;
+		/** 접점 뒤로 남는 노드를 펼칠 방향(origin→hit). 접점이 마지막 노드면 쓰이지 않는다. */
 		FVector Direction = FVector::ForwardVector;
-		// 준비된 preview에서만 origin->hit 직선을 사용한다. 실제 Flight 노드를 hit에 고정하는 옵션이 아니다.
-		bool bForceDirectPathToContact = false;
 	};
 
-	bool IsBetterThrowPreviewContactCandidate(const FThrowPreviewContactCandidate& Candidate,
-		const FThrowPreviewContactCandidate& Best)
-	{
-		if (!FMath::IsNearlyEqual(Candidate.ArcStartAngleDegrees, Best.ArcStartAngleDegrees, 0.1f))
-		{
-			return Candidate.ArcStartAngleDegrees < Best.ArcStartAngleDegrees;
-		}
-		if (!FMath::IsNearlyEqual(Candidate.DistanceAlpha, Best.DistanceAlpha, 0.01f))
-		{
-			return Candidate.DistanceAlpha < Best.DistanceAlpha;
-		}
-		return Candidate.AngleAlpha < Best.AngleAlpha;
-	}
-
-	bool BuildAimGuideHitCandidate(const FRopeArcPreviewData& Preview, const FRopeThrowContext& ThrowContext,
+	bool BuildAimGuideHitCandidate(const FRopeThrowContext& ThrowContext,
 		const FRopeSimState& Sim, FThrowPreviewContactCandidate& OutCandidate)
 	{
 		OutCandidate = FThrowPreviewContactCandidate();
@@ -101,9 +34,9 @@ namespace
 			return false;
 		}
 
-		const FVector ToHit = ThrowContext.AimGuideHitWorldPos - Preview.Origin;
+		const FVector ToHit = ThrowContext.AimGuideHitWorldPos - ThrowContext.Origin;
 		const float HitDistance = ToHit.Size();
-		const FVector HitDir = ToHit.GetSafeNormal(KINDA_SMALL_NUMBER, Preview.AimDir);
+		const FVector HitDir = ToHit.GetSafeNormal();
 		if (HitDistance <= KINDA_SMALL_NUMBER || HitDir.IsNearlyZero())
 		{
 			return false;
@@ -115,7 +48,7 @@ namespace
 		const int32 AimGuideNodeIndex = DistanceNodeIndex;
 
 		// aim ray 조준은 이미 SDF/collider swept query로 본을 고른 상태다.
-		// 여기서 arc 전체를 다시 뒤지면 다른 본/다른 방향 후보가 선택될 수 있으므로 ray hit를 직접 prepared 후보로 쓴다.
+		// prepared 후보는 그 hit을 그대로 쓴다 — 던지기 방향 주변을 다시 훑으면 다른 본/다른 방향이 뽑힌다.
 		// SurfacePoint는 SDF 투영점이라 ray 위의 노란 hit와 다를 수 있다. spline 방향 기준은 반드시 HitWorldPos다.
 		// 이 후보의 node는 실제 hit 거리로만 정한다. AimGuideLockAlpha/DirectionBias는 물리 Flight의
 		// 곡선 보간 설정이며 prepared latch 위치를 바꾸지 않는다.
@@ -132,164 +65,11 @@ namespace
 		Candidate.WrapDirectionScore = 0.0f;
 
 		OutCandidate.Candidate = Candidate;
-		OutCandidate.AngleAlpha = 1.0f;
-		OutCandidate.DistanceAlpha = FMath::Clamp(HitDistance / FMath::Max(Preview.Radius, KINDA_SMALL_NUMBER), 0.0f, 1.0f);
-		OutCandidate.ArcStartAngleDegrees = 0.0f;
 		OutCandidate.Direction = HitDir;
-		OutCandidate.bForceDirectPathToContact = true;
 		return true;
 	}
 
-	bool FindThrowPreviewContactCandidate(const FRopeArcPreviewData& Preview, const TArray<IRopeCollider*>& Colliders,
-		float RopeRadius, const FRopeWrapConfig& WrapConfig, const FRopeSimState& Sim,
-		float SampleStep, float QueryRadius,
-		const TFunction<bool(const USceneComponent*, FName)>& CanWrapTarget,
-		FThrowPreviewContactCandidate& OutCandidate,
-		FString* OutFailureReason = nullptr)
-	{
-		OutCandidate = FThrowPreviewContactCandidate();
-		if (Preview.Radius <= KINDA_SMALL_NUMBER)
-		{
-			RopeMath::SetPreviewFailureReason(OutFailureReason,
-				FString::Printf(TEXT("free search rejected: arc radius too small (radius=%.2f)"), Preview.Radius));
-			return false;
-		}
-		if (Colliders.Num() == 0)
-		{
-			RopeMath::SetPreviewFailureReason(OutFailureReason, TEXT("free search rejected: no frame colliders"));
-			return false;
-		}
-		if (Sim.Num() < 2)
-		{
-			RopeMath::SetPreviewFailureReason(OutFailureReason,
-				FString::Printf(TEXT("free search rejected: rope sim has too few nodes (nodes=%d)"), Sim.Num()));
-			return false;
-		}
-
-		constexpr int32 MaxPreviewAngleSamples = 24;
-		constexpr int32 MaxPreviewRadialSamples = 16;
-		constexpr int32 MaxPreviewTotalSamples = 256;
-
-		const int32 AngleSamples = FMath::Clamp(Preview.SegmentCount, 1, MaxPreviewAngleSamples);
-		const float RadialStep = FMath::Max(SampleStep, 1.0f);
-		const int32 RequestedRadialSamples = FMath::Max(1, FMath::CeilToInt(Preview.Radius / RadialStep));
-		const int32 TotalLimitedRadialSamples = FMath::Max(1, MaxPreviewTotalSamples / (AngleSamples + 1));
-		const int32 RadialSamples = FMath::Clamp(RequestedRadialSamples, 1,
-			FMath::Min(MaxPreviewRadialSamples, TotalLimitedRadialSamples));
-		const float EffectiveQueryRadius = QueryRadius > KINDA_SMALL_NUMBER
-			? QueryRadius
-			: FMath::Max(RopeRadius, WrapConfig.ContactQueryRadius);
-
-		FBox PreviewBounds(EForceInit::ForceInit);
-		PreviewBounds += Preview.Origin;
-		for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
-		{
-			const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
-			const FVector Direction = RopeMath::ArcDirectionAtAlpha(Preview.AimDir, Preview.GuideUp, Preview.SweepAngleDegrees, AngleAlpha);
-			if (!Direction.IsNearlyZero())
-			{
-				PreviewBounds += Preview.Origin + Direction * Preview.Radius;
-			}
-		}
-		PreviewBounds = PreviewBounds.ExpandBy(EffectiveQueryRadius);
-
-		TArray<IRopeCollider*, TInlineAllocator<8>> CandidateColliders;
-		for (IRopeCollider* Collider : Colliders)
-		{
-			if (Collider && Collider->GetWorldBounds().ExpandBy(EffectiveQueryRadius).Intersect(PreviewBounds))
-			{
-				CandidateColliders.Add(Collider);
-			}
-		}
-		if (CandidateColliders.Num() == 0)
-		{
-			RopeMath::SetPreviewFailureReason(OutFailureReason,
-				FString::Printf(TEXT("free search found no colliders inside arc bounds (frameColliders=%d, radius=%.1f, queryRadius=%.1f)"),
-					Colliders.Num(), Preview.Radius, EffectiveQueryRadius));
-			return false;
-		}
-
-		const float SegmentLength = FMath::Max(Sim.SegmentLength, 1.0f);
-		const FVector ArcStartDirection = RopeMath::ArcDirectionAtAlpha(Preview.AimDir, Preview.GuideUp, Preview.SweepAngleDegrees, 0.0f);
-		bool bFoundCandidate = false;
-		FThrowPreviewContactCandidate BestCandidate;
-		int32 HitCount = 0;
-		int32 InvalidHitCount = 0;
-		for (int32 AngleIndex = 0; AngleIndex <= AngleSamples; ++AngleIndex)
-		{
-			const float AngleAlpha = static_cast<float>(AngleIndex) / static_cast<float>(AngleSamples);
-			const FVector Direction = RopeMath::ArcDirectionAtAlpha(Preview.AimDir, Preview.GuideUp, Preview.SweepAngleDegrees, AngleAlpha);
-			if (Direction.IsNearlyZero())
-			{
-				continue;
-			}
-
-			for (int32 RadialIndex = 1; RadialIndex <= RadialSamples; ++RadialIndex)
-			{
-				const float DistanceAlpha = static_cast<float>(RadialIndex) / static_cast<float>(RadialSamples);
-				const float Distance = Preview.Radius * DistanceAlpha;
-				const FVector SamplePoint = Preview.Origin + Direction * Distance;
-
-				for (const IRopeCollider* Collider : CandidateColliders)
-				{
-					const FRopeContact Contact = Collider->Query(SamplePoint, EffectiveQueryRadius);
-					if (!Contact.bHit || Contact.Bone.IsNone() || !Contact.SourceMesh)
-					{
-						if (Contact.bHit)
-						{
-							++InvalidHitCount;
-						}
-						continue;
-					}
-					// 서브클래스 wrap 대상 게이트 — aim 경로(FindAimRayBoneHit)와 같은 기준으로 거른다.
-					// 이 검사가 빠지면 aim이 금지한 대상을 arc 탐색이 주워 preview와 aim의 판정이 갈린다
-					// (throw 진입점이 결국 거부하므로 증상은 "보이는데 안 던져짐"이 된다).
-					// 미설정(단위 테스트/게이트 없는 호출자)이면 전부 허용 — CanWrapTarget 기본 구현과 같다.
-					if (CanWrapTarget && !CanWrapTarget(Contact.SourceMesh, Contact.Bone))
-					{
-						++InvalidHitCount;
-						continue;
-					}
-					++HitCount;
-
-					const FVector OriginToContact = Contact.SurfacePoint - Preview.Origin;
-					const FVector ContactDirection = OriginToContact.GetSafeNormal(KINDA_SMALL_NUMBER, Direction);
-					const float ArcStartDot = FMath::Clamp(FVector::DotProduct(ArcStartDirection, ContactDirection),
-						-1.0f, 1.0f);
-
-					FThrowPreviewContactCandidate Candidate;
-					Candidate.Candidate = FRopeFlightContactDetector::MakeCandidate(
-						FMath::Clamp(FMath::RoundToInt(Distance / SegmentLength), 1, Sim.Num() - 1),
-						Contact);
-					Candidate.Candidate.Source = ERopeContactCandidateSource::PredictiveFree;
-					Candidate.Candidate.SourceMask = static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree);
-					Candidate.AngleAlpha = AngleAlpha;
-					Candidate.DistanceAlpha = DistanceAlpha;
-					Candidate.ArcStartAngleDegrees = FMath::RadiansToDegrees(FMath::Acos(ArcStartDot));
-					Candidate.Direction = Direction;
-					if (Candidate.Candidate.bValid &&
-						(!bFoundCandidate || IsBetterThrowPreviewContactCandidate(Candidate, BestCandidate)))
-					{
-						BestCandidate = Candidate;
-						bFoundCandidate = true;
-					}
-				}
-			}
-		}
-
-		if (!bFoundCandidate)
-		{
-			RopeMath::SetPreviewFailureReason(OutFailureReason,
-				FString::Printf(TEXT("free search found no valid contact (candidateColliders=%d, angleSamples=%d, radialSamples=%d, hits=%d, invalidHits=%d, queryRadius=%.1f)"),
-					CandidateColliders.Num(), AngleSamples, RadialSamples, HitCount, InvalidHitCount, EffectiveQueryRadius));
-			return false;
-		}
-
-		OutCandidate = BestCandidate;
-		return true;
-	}
-
-	FRopeSimState BuildThrowPreviewSim(const FRopeSimState& SourceSim, const FRopeArcPreviewData& Preview,
+	FRopeSimState BuildThrowPreviewSim(const FRopeSimState& SourceSim, const FVector& Origin,
 		const FThrowPreviewContactCandidate& ContactCandidate)
 	{
 		FRopeSimState PreviewSim = SourceSim;
@@ -306,8 +86,7 @@ namespace
 		const int32 LatchNode = FMath::Clamp(ContactCandidate.Candidate.NodeIndex, 1, NumNodes - 1);
 		const float SegmentLength = FMath::Max(SourceSim.SegmentLength, 1.0f);
 		const FVector SurfacePoint = ContactCandidate.Candidate.WorldPoint;
-		const FVector ToSurface = SurfacePoint - Preview.Origin;
-		const float SurfaceDistance = FMath::Max(ToSurface.Size(), SegmentLength);
+		const FVector ToSurface = SurfacePoint - Origin;
 		const FVector ApproachDir = ToSurface.GetSafeNormal(KINDA_SMALL_NUMBER, ContactCandidate.Direction);
 		const FVector TailDir = ContactCandidate.Direction.GetSafeNormal(KINDA_SMALL_NUMBER, ApproachDir);
 
@@ -316,27 +95,13 @@ namespace
 			FVector Position = FVector::ZeroVector;
 			if (NodeIndex <= LatchNode)
 			{
+				// 조준 hit 방향이 이미 확정돼 있으므로 origin->hit 직선이 spline prefix의 권위 있는 모양이다.
 				const float Alpha = LatchNode > 0
 					? static_cast<float>(NodeIndex) / static_cast<float>(LatchNode)
 					: 0.0f;
-				if (NodeIndex == LatchNode)
-				{
-					Position = SurfacePoint;
-				}
-				else if (ContactCandidate.bForceDirectPathToContact)
-				{
-					// aim ray 조준에서는 preview arc를 섞지 않는다.
-					// hit 방향이 이미 확정된 상태이므로 origin->hit 직선이 spline prefix의 권위 있는 모양이다.
-					Position = FMath::Lerp(Preview.Origin, SurfacePoint, Alpha);
-				}
-				else
-				{
-					const float ArcAlpha = FMath::Lerp(0.0f, ContactCandidate.AngleAlpha, Alpha);
-					const FVector ArcDirection = RopeMath::ArcDirectionAtAlpha(Preview.AimDir, Preview.GuideUp, Preview.SweepAngleDegrees, ArcAlpha);
-					const FVector ArcPosition = Preview.Origin + ArcDirection * (SurfaceDistance * Alpha);
-					const FVector ContactLinePosition = FMath::Lerp(Preview.Origin, SurfacePoint, Alpha);
-					Position = FMath::Lerp(ArcPosition, ContactLinePosition, Alpha * Alpha);
-				}
+				Position = (NodeIndex == LatchNode)
+					? SurfacePoint
+					: FMath::Lerp(Origin, SurfacePoint, Alpha);
 			}
 			else
 			{
@@ -592,49 +357,26 @@ bool FRopeThrowPreviewBuilder::BuildFreePreparedPreview(const FInput& Input, FRo
 	const FRopeSimState* Sim = Input.Sim;
 	if (!Sim)
 	{
-		RopeMath::SetPreviewFailureReason(OutFailureReason, TEXT("free search rejected: no rope sim"));
-		return false;
-	}
-
-	FRopeArcPreviewData ArcPreview;
-	if (!BuildThrowArcPreview(Input, ArcPreview, OutFailureReason))
-	{
+		RopeMath::SetPreviewFailureReason(OutFailureReason, TEXT("prepared preview rejected: no rope sim"));
 		return false;
 	}
 
 	FThrowPreviewContactCandidate ContactCandidate;
-	if (!BuildAimGuideHitCandidate(ArcPreview, Input.ThrowContext, *Sim, ContactCandidate))
+	if (!BuildAimGuideHitCandidate(Input.ThrowContext, *Sim, ContactCandidate))
 	{
-		// aim hit이 없을 때 arc 전체를 다시 뒤지면 "조준하지 않은" 옆 대상이 선택된다 —
-		// BuildAimGuideHitCandidate 주석이 hit 경로에 대해 이미 경고한 그 위험이 miss 경로로 샌 것이다.
-		// 아래 두 경우엔 재탐색하지 않고 실패로 끝낸다. 그러면 호출자(ThrowWithContext ③ 분기)가
-		// StartFreeGuidedThrow(레이 끝점 허공 아치)로 가고, 조준이 빗나가면 안 꽂히는 게 정상 결과다.
-		//   - 조준 ray가 돌았는데 대상을 못 잡음: ③ 계약상 보장 대상은 "조준한 대상"뿐이다.
-		//   - ③(Pierce): 창은 조준한 곳에 꽂히는 것이 전부라 arc 탐색(최대 SweepAngleDegrees 폭)이
-		//     의미를 갖지 않는다. 조준 ray가 없는 BP 직행/AI라도 방향만 보고 옆 대상에 꽂으면 안 된다.
-		// 아래 arc 탐색은 감김 모델(①②)의 요청 — "이 방향으로 던져 거기 있는 걸 감아라" — 을 위한
-		// 경로다. 이 함수 자체가 ③ 전용이라 실사용에서는 위 두 게이트에서 끝나고, 탐색까지 내려오는
-		// 것은 ①② 입력을 직접 넣는 단위 테스트뿐이다.
-		if (Input.ThrowContext.bAimRayEvaluated)
-		{
-			RopeMath::SetPreviewFailureReason(OutFailureReason,
-				TEXT("prepared preview rejected: aim ray found no target (aimed throw does not re-search the arc)"));
-			return false;
-		}
-		if (Input.ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
-		{
-			RopeMath::SetPreviewFailureReason(OutFailureReason,
-				TEXT("prepared preview rejected: pierce requires an aim hit (arc search is wrap-only)"));
-			return false;
-		}
-		if (!FindThrowPreviewContactCandidate(ArcPreview, GetColliders(Input), Input.RopeRadius, Input.WrapConfig, *Sim,
-			Input.SampleStep, Input.QueryRadius, Input.CanWrapTarget, ContactCandidate, OutFailureReason))
-		{
-			return false;
-		}
+		// prepared preview는 **조준한 대상**에만 성립한다. aim hit이 없다고 던지기 방향 주변을 훑어
+		// 후보를 고르면 조준과 무관한 옆 대상이 뽑히고, 화면의 miss 표시와 preview 연결선이 어긋난다.
+		// 그래서 대안 탐색 없이 여기서 끝낸다 — 호출자(ThrowWithContext ③ 분기)가 StartFreeGuidedThrow
+		// (레이 끝점 허공 아치)로 폴백하며, 조준이 빗나가면 안 꽂히는 게 정상 결과다.
+		// 사유는 "조준이 돌았는데 빗나감"과 "조준 흐름 자체가 없음(BP 직행/AI)"을 구분한다 — 로그만 보고
+		// 조준 설정 문제인지 호출 경로 문제인지 갈라야 하기 때문이다.
+		RopeMath::SetPreviewFailureReason(OutFailureReason, Input.ThrowContext.bAimRayEvaluated
+			? TEXT("prepared preview rejected: aim ray found no target")
+			: TEXT("prepared preview rejected: requires an aim hit"));
+		return false;
 	}
 
-	FRopeSimState PreviewSim = BuildThrowPreviewSim(*Sim, ArcPreview, ContactCandidate);
+	FRopeSimState PreviewSim = BuildThrowPreviewSim(*Sim, Input.ThrowContext.Origin, ContactCandidate);
 	ContactCandidate.Candidate.NodeIndex = FMath::Clamp(ContactCandidate.Candidate.NodeIndex, 1, PreviewSim.Num() - 1);
 	return BuildPreparedFromCandidate(
 		Input, ContactCandidate.Candidate, PreviewSim, OutPrepared, OutFailureReason);

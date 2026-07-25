@@ -1333,7 +1333,6 @@ void URopeWielderComponent::OnGuaranteedAimPrepared(FRopePreparedThrowPreview& P
 	HeldPreparedPreview = Prepared.IsValid()
 		? ResolvePreparedPreviewForDisplay(Prepared)
 		: FRopeWrapPreviewData();
-	HeldPreviewExpireTimeSeconds = 0.0f;
 	ClearPreviewDisplay();
 }
 
@@ -1822,45 +1821,20 @@ bool URopeWielderComponent::UpdateHeldPreparedPreviewForPhase(ERopePhase Phase)
 	{
 		// GuidedThrow는 cached preview path를 authoritative하게 따라가는 상태다. 새 path를 build하지
 		// 않는다. 프리뷰는 Loaded(조준)에서만 보이면 되므로 발사 후에는 표시를 지운다(HeldPreparedPreview
-		// 데이터는 보존 — phase-gate 유효성 검사와 Wrapped-hold 옵션이 참조한다). return true로 이
-		// phase에서 preview 재빌드로 떨어지지 않게 한다.
+		// 데이터는 보존 — phase-gate 유효성 검사가 참조한다). return true로 이 phase에서 preview
+		// 재빌드로 떨어지지 않게 한다.
 		ClearPreviewDisplay();
-		LastPreviewPhase = Phase;
 		return true;
 	}
 
 	if (Phase == ERopePhase::Wrapped)
 	{
-		// Wrapped 진입 후에도 옵션 시간만큼 path를 남길 수 있다.
-		// 기본값 0초에서는 여기서 바로 ClearThrowPreview()로 떨어진다.
-		const float NowSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
-		if (LastPreviewPhase != ERopePhase::Wrapped)
-		{
-			HeldPreviewExpireTimeSeconds = NowSeconds + FMath::Max(0.0f, LockedWrappedPreviewHoldTime);
-		}
-
-		if (LockedWrappedPreviewHoldTime > KINDA_SMALL_NUMBER && NowSeconds < HeldPreviewExpireTimeSeconds)
-		{
-			DisplayHeldPreparedPreview();
-			LastPreviewPhase = Phase;
-			return true;
-		}
-
+		// 꽂힘이 확정된 뒤에는 조준용 path가 의미를 잃으므로 데이터까지 버린다.
 		ClearThrowPreview();
-		LastPreviewPhase = Phase;
 		return true;
 	}
 
 	return false;
-}
-
-void URopeWielderComponent::DisplayHeldPreparedPreview()
-{
-	// 이미 확정된 path를 그대로 유지 표시한다(새 build 없음). 표시가 꺼져 있으면 조용히 넘어간다.
-	if (bShowThrowPreview && PreviewComponent && HeldPreparedPreview.IsValid())
-	{
-		PreviewComponent->SetWrapPreviewWorld(HeldPreparedPreview);
-	}
 }
 
 void URopeWielderComponent::DisplayPreviewCenterline(const FRopeWrapPreviewData& Centerline)
@@ -1912,7 +1886,6 @@ void URopeWielderComponent::UpdateThrowPreview()
 	{
 		// 이 phase에서는 preview build 자체가 의미 없으므로 실패 로그를 만들지 않고 조용히 정리한다.
 		ClearThrowPreview();
-		LastPreviewPhase = RopePhase;
 		return;
 	}
 	if (!bHasAimRayFrameThrowContext)
@@ -1920,7 +1893,6 @@ void URopeWielderComponent::UpdateThrowPreview()
 		// 첫 조준 프레임은 아직 정상 gather 결과가 없다. base fallback으로 허공 preview를 한 프레임
 		// 그렸다가 target path로 바뀌는 깜빡임을 만들지 않고, 다음 틱의 확정 결과를 기다린다.
 		ClearThrowPreview();
-		LastPreviewPhase = RopePhase;
 		return;
 	}
 
@@ -1933,16 +1905,12 @@ void URopeWielderComponent::UpdateThrowPreview()
 	if (!Rope->BuildPreparedWrappingPreview(ThrowContext, Prepared, &PreviewBuildReason))
 	{
 		ClearThrowPreview();
-		LastPreviewPhase = RopePhase;
 		return;
 	}
 
 	StoreAimGuideFrameIfNeeded(Prepared);
 	HeldPreparedPreview = ResolvePreparedPreviewForDisplay(Prepared);
-	HeldPreviewExpireTimeSeconds = 0.0f;
 	DisplayPreviewCenterline(HeldPreparedPreview);
-
-	LastPreviewPhase = RopePhase;
 }
 
 void URopeWielderComponent::ClearPreviewDisplay()
@@ -1957,7 +1925,6 @@ void URopeWielderComponent::ClearPreviewDisplay()
 void URopeWielderComponent::ClearPreparedThrow()
 {
 	HeldPreparedPreview = FRopeWrapPreviewData();
-	HeldPreviewExpireTimeSeconds = 0.0f;
 }
 
 void URopeWielderComponent::ClearThrowPreview()

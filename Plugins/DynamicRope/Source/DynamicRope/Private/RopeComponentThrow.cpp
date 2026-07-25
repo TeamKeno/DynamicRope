@@ -325,11 +325,11 @@ bool URopeComponent::BuildPreparedWrappingPreviewFromResolvedContext(
 
 	FRopeThrowPreviewBuilder::FInput Input;
 	Input.Sim = &Sim;
-	// 아크 탐색은 aim ray hit 판정과 같은 목록을 봐야 한다 — 조준 중이면 조준 스냅샷(원거리 대상 포함),
-	// 아니면 물리 스냅샷(BP 직행 Throw 경로). GetAimQueryColliders 주석 참조.
+	// preview 경로 빌드는 aim ray hit 판정과 같은 목록을 봐야 한다 — 조준 중이면 조준 스냅샷(원거리 대상
+	// 포함), 아니면 물리 스냅샷(BP 직행 Throw 경로). GetAimQueryColliders 주석 참조.
 	Input.Colliders = &GetAimQueryColliders();
-	// wrap 대상 게이트 주입(aim 경로의 ResolveAimRayThrowContext와 같은 패턴) — arc 탐색이 aim과 같은
-	// 기준으로 후보를 거르게 한다. 주입 전에는 금지 대상이 preview에만 보이고 throw 진입점에서 거부됐다.
+	// wrap 대상 게이트 주입(aim 경로의 ResolveAimRayThrowContext와 같은 패턴) — preview가 aim과 같은
+	// 기준으로 대상을 거르게 한다. 없으면 금지 대상이 preview에만 보이고 throw 진입점에서 거부된다.
 	Input.CanWrapTarget = [this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); };
 	Input.ThrowContext = ResolvedThrowContext;
 	Input.WrapConfig = WrapConfig;
@@ -338,14 +338,7 @@ bool URopeComponent::BuildPreparedWrappingPreviewFromResolvedContext(
 	Input.ResolveMode = ResolveMode;
 	Input.RopeRadius = Radius;
 	Input.RopeNumSides = NumSides;
-	Input.RopeLength = FMath::Max(Sim.RopeLength, RopeLength);
-	Input.SweepAngleDegrees = MakeWhipGuideConfig().SweepAngleDegrees;
 	Input.OwnerName = GetName();
-	// 아크 탐색 튜닝은 로프 멤버가 단일 소스 — Wielder 경로와 BP 직행 Throw() 경로가 항상 같은 값을 본다.
-	Input.ReachScale = PreviewReachScale;
-	Input.SegmentCount = PreviewSegmentCount;
-	Input.SampleStep = PreviewSampleStep;
-	Input.QueryRadius = PreviewQueryRadius;
 	const bool bBuilt = FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, OutPrepared, OutFailureReason);
 	if (bBuilt)
 	{

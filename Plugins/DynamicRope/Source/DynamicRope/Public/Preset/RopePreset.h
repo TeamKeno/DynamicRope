@@ -155,20 +155,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Collision")
 	bool bUseWorldGDF = true;
 
-	//~ Preview 탐색(Arc Search) --------------------------------------------
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Preview", meta = (ClampMin = "0.0", DisplayName = "Arc Reach Scale"))
-	float PreviewReachScale = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Preview", meta = (ClampMin = "1", ClampMax = "128", DisplayName = "Arc Segment Count"))
-	int32 PreviewSegmentCount = 32;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Preview", meta = (ClampMin = "1.0", Units = "cm", DisplayName = "Arc Sample Step"))
-	float PreviewSampleStep = 80.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Preview", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Arc Query Radius"))
-	float PreviewQueryRadius = 0.0f;
-
 #if WITH_EDITOR
 	//~ 에디터 검증 — 저작 실수(길이 역전 등)를 에셋 저장 시점에 알린다.
 	virtual EDataValidationResult IsDataValid(FDataValidationContext& Context) const override;

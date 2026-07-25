@@ -376,28 +376,10 @@ public:
 	/** 실제 throw를 최신 collider 수집 직후 확정하도록 요청을 큐에 넣는다. */
 	void QueueAimRayThrow(const FRopeAimRayThrowRequest& Request);
 
-	//~ Preview 탐색(Arc Search) 파라미터 ------------------------------------
-	// GuaranteedWrap prepared 빌드가 쓰는 아크 탐색 튜닝의 **단일 소스**. Wielder 경로와 BP 직행 Throw()
-	// 경로가 같은 값을 봐야 하므로 로프가 소유한다(종전엔 URopePreviewComponent에 있고 ThrowWithContext가
-	// 같은 값을 하드코딩 복사해 조용히 발산할 수 있었다). 표시 전용 값(반지름/변 수/머티리얼)은
-	// 렌더 쪽(URopePreviewComponent)에 남는다.
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "0.0", DisplayName = "Arc Reach Scale"))
-	float PreviewReachScale = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "1", ClampMax = "128", DisplayName = "Arc Segment Count"))
-	int32 PreviewSegmentCount = 32;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "1.0", Units = "cm", DisplayName = "Arc Sample Step"))
-	float PreviewSampleStep = 80.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Arc Search", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Arc Query Radius (0=Auto)"))
-	float PreviewQueryRadius = 0.0f;
-
 	//~ Wielder 계약(C++ 전용) ----------------------------------------------
 	// URopeWielderComponent의 조준/GuaranteedWrap preview 구속 흐름이 쓰는 진입점. 일반 사용자 API가 아니라
 	// BP 미노출 — 게임 코드에서 직접 부를 일은 보통 없다(Wielder를 붙이거나 같은 계약을 재구현할 때만).
-	// 아크 탐색 튜닝은 인자가 아니라 위 Preview 파라미터(멤버)를 읽는다 — 호출처마다 값이 갈리지 않게.
+	// preview 대상은 조준 결과(aim hit)로만 정해진다 — 던지기 방향 주변을 훑는 대안 탐색은 없다.
 
 	/** GuaranteedWrap용 preview build. 렌더 centerline뿐 아니라 실제 GuidedThrow/Wrapped 진입에 필요한 contact/anchor도 반환한다. */
 	bool BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext, FRopePreparedThrowPreview& OutPrepared,

@@ -34,14 +34,7 @@ public:
 
 		float RopeRadius = 0.0f;
 		int32 RopeNumSides = 8;
-		float RopeLength = 0.0f;
-		float SweepAngleDegrees = 180.0f;
 		FString OwnerName;
-
-		float ReachScale = 1.0f;
-		int32 SegmentCount = 32;
-		float SampleStep = 80.0f;
-		float QueryRadius = 0.0f;
 	};
 
 	// GuaranteedWrap 모드 전용: Loaded에서 조준한 대상의 확정 throw path(contact/anchor 포함)를 만든다.
