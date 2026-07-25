@@ -225,12 +225,19 @@ struct FRopeWhipConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg", DisplayName = "Sweep Angle"))
 	float SweepAngleDegrees = 180.0f;
 
-	/** Aim-hit Flight에서 손 쪽 guide를 solver에 넘기는 로프 길이 비율. 0이면 중앙 spline이 손 바로 옆까지 지배한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
+	/**
+	 * Aim-hit Flight에서 손 쪽 guide를 solver에 넘기는 로프 길이 비율. 0이면 중앙 spline이 손 바로 옆까지 지배한다.
+	 * 같은 값이 손 소켓 오프셋을 뿌리 구간에 섞는 범위이기도 해서(FRopeWhipGuide의 AimRootSocketInfluence),
+	 * 0에서는 guide가 던진 순간의 Origin에 고정돼 손 애니메이션을 따라가지 않는다.
+	 * 디자이너 노출 없이 이 기본값으로 고정한다. 소비처는 0~0.45로 클램프한다.
+	 */
 	float AimHitRootSolverFraction = 0.20f;
 
-	/** Hit direction 보간 편향. 1은 선형 강도, 클수록 같은 Flight 시점에서 spline이 더 빨리 hit 방향을 향한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+	/**
+	 * Hit direction 보간 편향. 1은 선형 강도, 클수록 같은 Flight 시점에서 spline이 더 빨리 hit 방향을 향한다.
+	 * RopeMath::BuildWhipGuideRawPoints의 aim-hit 분기는 직선 spline이라 이 값을 읽지 않는다.
+	 * 그 분기에 곡선 보간을 넣을 때 함께 살릴 자리로 남겨둔다 — 디자이너 노출 없음.
+	 */
 	float AimHitDirectionBias = 2.0f;
 
 	/** Aim-hit Flight에서 자유단 쪽 guide를 solver에 넘기는 로프 길이 비율. 클수록 끝이 더 관성적으로 움직인다. */
