@@ -169,7 +169,7 @@ struct FRopeThrowParams
 
 	/** Whip 종료 후 이 시간 동안 캡처하지 못하면 던지기 실패로 보고 Free로 복귀한다(초).
 	 *  0이면 컴포넌트의 기본 실패 복귀 쿨다운(ReleaseCooldownSeconds)을 쓴다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (ClampMin = "0.0", Units = "s", DisplayName = "Return If No Contact"))
 	float FlightNoContactReturnTime = 0.0f;
 
 	/**
@@ -190,7 +190,7 @@ struct FRopeThrowParams
 	 * BP 런타임 쓰기는 이 meta를 우회하므로 소비처에서도 같은 범위로 클램프한다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning",
-		meta = (ClampMin = "0.0", ClampMax = "0.5"))
+		meta = (ClampMin = "0.0", ClampMax = "0.5", DisplayName = "Arc Height"))
 	float GuidedThrowArcHeightRatio = 0.25f;
 
 	/**
@@ -202,16 +202,16 @@ struct FRopeThrowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (ClampMin = "0.0", DisplayName = "Motion Inheritance"))
 	float MotionInheritance = 5.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom", DisplayName = "Custom Forward"))
 	FVector CustomFrameForward = FVector::ForwardVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom", DisplayName = "Custom Up"))
 	FVector CustomFrameUp = FVector::UpVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "FrameMode == ERopeThrowFrameMode::Custom", DisplayName = "Custom Right"))
 	FVector CustomFrameRight = FVector::RightVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "SwingPlane == ERopeSwingPlane::CustomNormal"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (EditCondition = "SwingPlane == ERopeSwingPlane::CustomNormal", DisplayName = "Custom Plane Normal"))
 	FVector CustomSwingPlaneNormal = FVector::RightVector;
 };
 
@@ -248,11 +248,11 @@ struct FRopeWhipConfig
 	float AimHitDirectionBias = 2.0f;
 
 	/** Aim-hit Flight에서 자유단 쪽 guide를 solver에 넘기는 로프 길이 비율. 클수록 끝이 더 관성적으로 움직인다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45", DisplayName = "Tip Physics Blend"))
 	float AimHitTipSolverFraction = 0.25f;
 
 	/** Aim-hit Flight에서 거리/굽힘/감쇠 solver는 유지하고 collider push-out만 끈다. 접촉 감지는 계속 동작한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit", meta = (DisplayName = "Skip Collision"))
 	bool bAimHitCollisionFreeSolve = true;
 };
 

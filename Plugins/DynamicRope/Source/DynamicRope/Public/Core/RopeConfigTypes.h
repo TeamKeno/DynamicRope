@@ -63,7 +63,7 @@ struct FRopeSolverConfig
 	int32 ContactSolveInterval = 1;
 
 	/** XPBD stretch compliance(stiffness의 역수). 0 = 신장 불가(inextensible). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", DisplayName = "Stretch Softness"))
 	float StretchCompliance = 0.0f;
 
 	/** Strain limiting(최대 신장 클램프): substep solve 뒤, 핀/앵커 고정 노드에서 체인을 따라 walk하며 각
@@ -72,11 +72,11 @@ struct FRopeSolverConfig
 	 *  전파되지 못해 앵커 인접 세그먼트에 신장이 폭주(6배+)·거대 장력·접선 휩 지터가 생긴다. 순차 sweep은
 	 *  한 번에 체인 전체로 전파돼 이 폭주를 상한 안으로 가둔다(PBD long-range constraint 표준 해법).
 	 *  1.5 = 최대 50% 신장 허용(기본). 1.0 = 완전 비신축(가장 빡빡). **0 또는 <1 = 비활성**(strain limit 끔). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", DisplayName = "Max Stretch"))
 	float MaxStretchRatio = 1.5f;
 
 	/** XPBD bending compliance. 클수록 더 흐물거린다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", DisplayName = "Bend Softness"))
 	float BendCompliance = 0.02f;
 
 	/** 각도-허용 벤딩: 굽힘이 급할수록 펴는 힘을 놔준다(코너/랩 경계에서 free 노드가 각지게 튀는 것 완화).
@@ -95,7 +95,7 @@ struct FRopeSolverConfig
 
 	/** 자유단(끝)으로 갈수록 friction을 약화시키는 배율(고정점=1, 끝=이 값). 끝 노드는 장력이 가장 낮아
 	 *  마찰에 잘 붙잡히므로, 끝쪽 그립만 낮춰 잘 놔주게 한다. 1.0이면 테이퍼 없음(균일 friction). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Tip Grip Falloff"))
 	float TipFrictionScale = 1.0f;
 
 	/** 충돌 질의 반지름(cm) — 솔버가 노드를 접촉 표면에서 이만큼 띄운다. **기본 0 = auto: 렌더 튜브
@@ -143,7 +143,7 @@ struct FRopeSolverConfig
 	bool bAllowSleep = true;
 
 	/** 슬립 진입 판정 속도(cm/s) — 프레임간 최대 노드 변위 / dt가 이 값 미만이어야 한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.1", DisplayName = "Sleep Speed Threshold"))
 	float SleepVelocityThreshold = 3.0f;
 
 	/** 슬립 진입까지 저속 상태가 유지되어야 하는 시간(초). */
@@ -158,14 +158,14 @@ struct FRopeSolverConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling")
 	bool bEnableDistanceLOD = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "LOD Start"))
 	float LODStartDistance = 3000.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "LOD End"))
 	float LODEndDistance = 8000.0f;
 
 	/** 최원거리에서의 iteration 배율(1=감소 없음). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.05", ClampMax = "1.0", DisplayName = "LOD Min Iterations"))
 	float LODMinIterationScale = 0.25f;
 };
 
@@ -235,7 +235,7 @@ struct FRopeWrapConfig
 	 * FRopeSolverConfig::SweepStep과 같은 사고방식이되, 감지는 Flight에서만 돌아 예산을 따로 둔다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
-		meta = (ClampMin = "0.1", Units = "cm"))
+		meta = (ClampMin = "0.1", Units = "cm", DisplayName = "Sweep Step"))
 	float ContactSweepStep = 2.0f;
 
 	/** 위 감지 스윕의 샘플 수 상한(비용 한도). 매우 빠른 노드는 간격이 이 상한에 눌려 넓어지므로,
@@ -502,13 +502,13 @@ struct FRopeHoldConfig
 	 * GetConstraintTension/MaxTetherTension과 같은 단위이며 XPBD SegmentTension과 혼용하지 않는다.
 	 * (자동 release는 도달 모드 ①②에서만 유효 — ③ Guaranteed는 명시 해제만.)
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0", DisplayName = "Release At Tension"))
 	float TensionReleaseForce = 0.0f;
 
 	/** 장력 release 판정의 지속 시간(초). 순간 스파이크(충격 프레임)로 풀리는 것을 막는다.
 	 *  TensionReleaseForce = 0(장력 release 끔)이면 판정 자체가 없어 회색 처리된다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release",
-		meta = (ClampMin = "0.0", Units = "s", EditCondition = "TensionReleaseForce > 0.0"))
+		meta = (ClampMin = "0.0", Units = "s", EditCondition = "TensionReleaseForce > 0.0", DisplayName = "Release Delay"))
 	float TensionReleaseTime = 0.05f;
 
 	/**
@@ -530,7 +530,7 @@ struct FRopeHoldConfig
 	 * 운동은 보존). 0 = 클램프 없음(비권장). λ의 위치 회수 명령 상한은 별도 노브다(TetherMaxBiasSpeed —
 	 * 종전엔 이 값을 재사용해 회수가 사실상 무상한이었다).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "cm/s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Tether Speed Limit"))
 	float TetherMaxSpeed = 1500.0f;
 
 	/**
@@ -563,7 +563,7 @@ struct FRopeHoldConfig
 	 * "테더가 버티다가 이 한계를 넘으면 놓친다"가 된다 — 테더가 충분히 강하면 초과분이 안 쌓여
 	 * 발동하지 않고, 테더 없이 쓰면 순수 거리 제한으로 동작한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Release At Overstretch"))
 	float DistanceReleaseSlack = 0.0f;
 
 	/**
@@ -609,7 +609,7 @@ struct FRopeHoldConfig
 	 * (연출/특수 게임플레이용). 팽팽 판정 자체는 URopeComponent::IsPullTaut()로 항상 조회 가능하다(이 스위치와
 	 * 무관하게 갱신 — 애니 pull window 등 외부 판단용).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (DisplayName = "Pull Requires Taut"))
 	bool bActivePullRequiresTaut = true;
 
 	/**
@@ -665,7 +665,7 @@ struct FRopeHoldConfig
 	 * 에서는 회색 처리된다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning",
-		meta = (ClampMin = "0.0", EditCondition = "TetherCompliance > 0.0"))
+		meta = (ClampMin = "0.0", EditCondition = "TetherCompliance > 0.0", DisplayName = "Tether Tension Limit"))
 	float MaxTetherTension = 500000.0f;
 
 	/**

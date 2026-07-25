@@ -86,7 +86,7 @@ public:
 	// Wielder 없이 이 값만으로 완결된다. 모드별 계약은 ERopeWrapResolveMode 열거자 주석 참조.
 
 	/** 감김 해결(도달) 모드 — 던지기~결착까지 무엇을 보장하는가. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (DisplayName = "Wrap Mode"))
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
 	//~ Tip(팁 부착물 — 창날/작살/추) ----------------------------------------
@@ -109,15 +109,15 @@ public:
 	bool bUseTipMesh = false;
 
 	/** 팁에 스폰할 StaticMesh. 비어 있고 태그로도 못 찾으면 팁 없음. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Mesh"))
 	TObjectPtr<UStaticMesh> TipMesh = nullptr;
 
 	/** Owner에 이미 붙은 이 태그의 StaticMeshComponent를 팁으로 재사용(스폰보다 우선, 파괴 안 함). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Component Tag"))
 	FName TipMeshComponentTag = NAME_None;
 
 	/** 팁 배치 오프셋(팁 노드 프레임 기준). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Relative Transform"))
 	FTransform TipMeshRelativeTransform = FTransform::Identity;
 
 	// 팁(창날/작살/추)은 자유단을 매 프레임 따라가는 표시 전용 메쉬라, 충돌 바디가 켜져 있으면 캐릭터
@@ -126,14 +126,14 @@ public:
 	// 갖는다. 적용 시점은 팁 확보(EnsureTipMesh)와 에디터/PIE 편집(PostEditChangeProperty)이다.
 
 	/** 팁 메쉬의 충돌을 켠다. **기본 꺼짐** — 표시 전용 팁의 충돌이 로프/캐릭터와 간섭하는 것을 막는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Enable Collision"))
 	bool bTipMeshCollision = false;
 
 	// 끔 = 게임 코드가 GetTipMeshComponent()로 Free 배치를 직접 구동하라는 확장점(로프는 손대지 않는다).
 	// Free 외 페이즈(Flight/GuidedThrow/Wrapping/Wrapped/Releasing/Loaded)는 이 값과 무관하게 항상 추종한다.
 
 	/** Free에서 팁을 매 프레임 로프 끝에 맞춘다. 끄면 Free 동안 팁을 건드리지 않는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Sync While Free"))
 	bool bSyncTipMeshOnFree = true;
 
 	// 기본 GetLoadedTipTransform() 구현이 사용한다 — 배치 규약을 바꾸려면 그 virtual을 override.
@@ -147,17 +147,17 @@ public:
 
 	/** ③(Guaranteed) 전용 — Head/Tail 소켓으로 팁을 정밀 배치한다. 끄면 메쉬 원점이 로프 끝에 놓인다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
-		meta = (EditCondition = "bUseTipMesh && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
+		meta = (EditCondition = "bUseTipMesh && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap", DisplayName = "Use Sockets"))
 	bool bUseTipMeshSockets = false;
 
 	/** Head 소켓 — 팁의 뾰족한 끝. 이 소켓이 조준 히트점에 박힌다. 없으면 위 보정 비활성. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
-		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
+		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap", DisplayName = "Tip Socket"))
 	FName TipSocketName = NAME_None;
 
 	/** Tail 소켓 — 로프 자유단이 연결될 지점. 없으면 메쉬 원점에 연결. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
-		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
+		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap", DisplayName = "Rope Socket"))
 	FName TipRopeSocketName = NAME_None;
 
 	// 아래 초기화 전용 값들(NumParticles/RopeLength/MinRopeLength)은 InitRope 시점에만 소비된다 —
@@ -166,7 +166,7 @@ public:
 
 	// ClampMax 512 = FRopeGPUSolver::MaxNodes(GPU 솔버 스레드그룹 상한). 초과하면 조용히 CPU 솔브+튜브
 	// 폴백이 되어 성능 절벽 + 저작 무신호라 에디터에서 막는다(BP/코드 경로는 InitRope가 하드 클램프).
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "2", ClampMax = "512"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "2", ClampMax = "512", DisplayName = "Node Count"))
 	int32 NumParticles = 72;
 
 	/** 초기(최대) 로프 길이(cm). 런타임 현재 길이는 GetCurrentRopeLength/SetRopeLength. */
@@ -241,7 +241,7 @@ public:
 	 * 끄면 그 받침대의 콜리전도 owner 소유라 제외되어 로프가 받침대를 통과한다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision",
-		meta = (ToolTip = "끄면(기본) 자기 owner의 콜라이더를 제외합니다 — 정적 월드 provider가 잡은 owner 소유 셰이프(테더 프록시/팁/무기)도 바디 단위로 빠집니다. 로프를 기둥 등 프롭 액터에 붙였다면 켜세요(안 켜면 받침대를 통과)."))
+		meta = (ToolTip = "끄면(기본) 자기 owner의 콜라이더를 제외합니다 — 정적 월드 provider가 잡은 owner 소유 셰이프(테더 프록시/팁/무기)도 바디 단위로 빠집니다. 로프를 기둥 등 프롭 액터에 붙였다면 켜세요(안 켜면 받침대를 통과).", DisplayName = "Collide With Owner"))
 	bool bIncludeOwnerColliders = false;
 
 	/**
@@ -252,7 +252,7 @@ public:
 	 * 엔진이 GDF를 온디맨드로 빌드한다. 밀어내기 반경/마찰은 CollisionRadius/Friction/TipFrictionScale 공유.
 	 * (SolverConfig에서 컴포넌트 직속으로 이사 — 충돌 도메인 응집.)
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (DisplayName = "Use World Distance Field"))
 	bool bUseWorldGDF = true;
 
 	/** 해석된 솔버 충돌 반지름: SolverConfig.CollisionRadius(0=auto → 렌더 Radius). 솔브/GPU step 경계에서 소비. */
@@ -307,7 +307,7 @@ public:
 	float Radius = 2.0f;
 
 	/** tube 단면의 변 개수. 높을수록 더 둥글어진다. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Tuning", meta = (ClampMin = "3", ClampMax = "32"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Tuning", meta = (ClampMin = "3", ClampMax = "32", DisplayName = "Sides"))
 	int32 NumSides = 8;
 
 	/** 렌더 튜브 스무딩: 세그먼트당 Catmull-Rom 서브분할 수(1=끔). 시뮬 노드는 그대로 두고 렌더 센터라인만
@@ -315,13 +315,13 @@ public:
 	 *  폴리라인 바깥으로 부풀 수 있어(특히 벽을 짚는 구간) 노드가 촘촘하면 직선 연결이 더 정확하다.
 	 *  성긴 로프만 올려 둥글게 보이게 하고, 오버슈트는 TubeSmoothingAlpha(centripetal)로 줄인다.
 	 *  NumRings=(NumParticles-1)*Subdiv+1이 GPU 튜브 링 상한을 넘으면 프록시가 자동 하향한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Tuning", meta = (ClampMin = "1", ClampMax = "8"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Tuning", meta = (ClampMin = "1", ClampMax = "8", DisplayName = "Smoothing Subdivisions"))
 	int32 TubeSmoothingSubdiv = 1;
 
 	/** 렌더 튜브 스무딩의 Catmull-Rom knot α: 0=uniform, 0.5=centripetal(급한 코너에서 접선 오버슈트↓ —
 	 *  벽을 짚는 구간의 중간 링이 벽 밖으로 덜 부푼다), 1=chordal. CPU 스무딩과 GPU resident 스무딩이
 	 *  같은 값을 써 렌더가 일관된다. TubeSmoothingSubdiv=1이면 효과 없음. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Smoothing Strength"))
 	float TubeSmoothingAlpha = 0.5f;
 
 	/** rope tube에 적용되는 material. 설정하지 않으면 엔진 기본 material을 사용한다.
@@ -329,7 +329,7 @@ public:
 	 *  MarkRenderStateDirty가 없어 다음 프록시 재생성 전까지 교체가 반영되지 않는다.
 	 *  BP의 직접 Set은 후킹할 수 없어 BlueprintReadWrite가 아니다 — RopeLength가 BlueprintReadOnly +
 	 *  SetRopeLength인 것과 같은 이유. 에디터 디테일 패널 편집은 PostEditChangeProperty가 처리한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (DisplayName = "Material"))
 	TObjectPtr<UMaterialInterface> RopeMaterial = nullptr;
 
 	//~ API ---------------------------------------------------------------

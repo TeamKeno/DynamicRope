@@ -180,7 +180,7 @@ public:
 	TObjectPtr<USkeletalMeshComponent> AttachMesh = nullptr;
 
 	/** 로프를 붙일 소켓/본 이름. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wielder")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wielder", meta = (DisplayName = "Hand Socket"))
 	FName HandSocketName = TEXT("hand_r");
 
 	/** BeginPlay에 로프를 소켓에 자동 부착할지. */
@@ -196,11 +196,11 @@ public:
 	// 폴백은 FrameMode == OwnerCamera가 직접 판정하도록 옮겼다 — 원점이 방향과 같은 기준을 본다.
 
 	/** Aim ray 시작점을 mesh bounds 중심, attach component, socket/bone 중에서 선택한다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (DisplayName = "Ray Origin"))
 	ERopeAimRayOriginMode AimRayOriginMode = ERopeAimRayOriginMode::AttachMeshBoundsCenter;
 
 	/** AttachSocketOrBone 모드에서 ray origin으로 사용할 socket 또는 bone 이름이다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (EditCondition = "AimRayOriginMode == ERopeAimRayOriginMode::AttachSocketOrBone"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (EditCondition = "AimRayOriginMode == ERopeAimRayOriginMode::AttachSocketOrBone", DisplayName = "Origin Socket"))
 	FName AimRayOriginSocketName = NAME_None;
 
 	/**
@@ -209,11 +209,11 @@ public:
 	 * WBP 서브클래스로 리스타일 가능). Aim ray 모드(= 로프 ResolveMode가 ①이 아닐 때)에서만 의미가 있다.
 	 * (HUD 하위 그룹을 Tuning 앞에 두려고 선언 순서상 여기에 배치 — 디테일 패널은 선언 순서로 하위 그룹을 정렬.)
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim", meta = (DisplayName = "Show Aim HUD"))
 	bool bShowAimHudWidget = true;
 
 	/** SDF ray march의 샘플 간격이다. 작을수록 얇은 팔/다리 충돌 정확도가 높아진다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.5", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.5", Units = "cm", DisplayName = "Ray Sweep Step"))
 	float AimRaySweepStep = 2.0f;
 
 	/** 중심선 주변을 함께 검사할 반경이다. 0이면 Rope Radius와 Contact Radius 중 큰 값을 기본 반경으로 사용한다.
@@ -244,7 +244,7 @@ public:
 	 * Project Settings > Dynamic Rope > PullGaugeWidgetClass가 정한다(기본 = C++ URopePullGaugeWidget).
 	 * 게이지는 장전 상태에서만 그려지므로(해제 시 빈 화면) 평상시 화면을 가리지 않는다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback", meta = (DisplayName = "Show Pull Gauge"))
 	bool bShowPullGaugeWidget = true;
 
 	/** 조준에 aim ray(대상 잠금)를 쓰는가 — 로프 ResolveMode에서 유도된다(②③ = true, ① = false).
@@ -305,7 +305,7 @@ public:
 	TObjectPtr<UInputAction> ReleaseAction = nullptr;
 
 	/** ReleaseAction이 비었을 때, ThrowAction을 던지기/해제 토글로 사용. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input|Tuning")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input|Tuning", meta = (DisplayName = "Throw Toggles Hold"))
 	bool bThrowActionToggles = true;
 
 	// NOTE: 힘/속도 수치(PullForce/ReelSpeed)는 로프로 이사했다(2026-07-13 표면 감사 A-2 —
@@ -338,7 +338,7 @@ public:
 	 * 충분하고 초과분이 쌓여 있으면 자동으로 Falling 전환해 몸이 뜨게 한다(착지 복귀는 엔진이 처리).
 	 * 되감기(ReelIn)와 조합하면 입체기동식 "감으면 끌려 올라감"이 된다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Movement", meta = (DisplayName = "Leave Ground On Upward Pull"))
 	bool bAutoGroundExitOnUpwardPull = true;
 
 	/** 상향 판정 임계: 견인 방향(손→앵커, 단위 벡터)의 Z 성분이 이 값 이상일 때만 지상 이탈.
@@ -375,7 +375,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation")
 	TObjectPtr<UAnimMontage> ThrowMontage = nullptr;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation|Tuning", meta = (ClampMin = "0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation|Tuning", meta = (ClampMin = "0.1", DisplayName = "Throw Play Rate"))
 	float ThrowMontagePlayRate = 1.0f;
 
 	/**
@@ -387,7 +387,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation")
 	TObjectPtr<UAnimMontage> PullMontage = nullptr;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation|Tuning", meta = (ClampMin = "0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Animation|Tuning", meta = (ClampMin = "0.1", DisplayName = "Pull Play Rate"))
 	float PullMontagePlayRate = 1.0f;
 
 	//~ Pull(능동 견인 정책) --------------------------------------------------
@@ -407,15 +407,15 @@ public:
 	 * HUD보다 놓치기 어려운 피드백 채널이다 — M_RopeDefault의 PullGlow 스칼라가 이 값을 받는다.
 	 * 실제 MID는 **처음 장전할 때** 만든다(그 전까지는 머티리얼 배선을 건드리지 않는다).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback", meta = (DisplayName = "Drive Glow Material"))
 	bool bDrivePullGlowMaterial = true;
 
 	/** 진행도를 받을 스칼라 파라미터 이름. 머티리얼에 없으면 무시된다(무해). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback", meta = (EditCondition = "bDrivePullGlowMaterial"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback", meta = (EditCondition = "bDrivePullGlowMaterial", DisplayName = "Glow Parameter"))
 	FName PullGlowParameterName = TEXT("PullGlow");
 
 	/** 발동(③) 상태에서 파라미터에 실을 값. 1보다 크게 두면 발동이 대기보다 확실히 밝다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback", meta = (ClampMin = "0.0", EditCondition = "bDrivePullGlowMaterial"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull|Feedback", meta = (ClampMin = "0.0", EditCondition = "bDrivePullGlowMaterial", DisplayName = "Glow Engaged Value"))
 	float PullGlowEngagedValue = 1.5f;
 
 	//~ API ----------------------------------------------------------------
