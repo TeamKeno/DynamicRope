@@ -1301,8 +1301,8 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 	Step.ContactRadius = Rope.GetEffectiveContactQueryRadius();
 	Step.PredictionFrames = Rope.WrapConfig.PredictiveContactFrames;
 	// 감지 스윕 해상도(터널링 방지) — CPU MakeFlightDetectParams와 같은 저장값에서 온다.
-	Step.ContactSweepStep = Rope.DetectConfig.ContactSweepStep;
-	Step.ContactMaxSweepSamples = Rope.DetectConfig.ContactMaxSweepSamples;
+	Step.ContactSweepStep = Rope.WrapConfig.ContactSweepStep;
+	Step.ContactMaxSweepSamples = Rope.WrapConfig.ContactMaxSweepSamples;
 	// 예측 접촉 free 노드 외삽의 substep→프레임 변위 환산(#8). Step.FixedDt(=Schedule.FixedDt=(1/60)/Substeps)는
 	// SeedResidentStep이 이미 채웠다 — CPU MakeFlightDetectParams의 FrameDeltaTime/SubstepDeltaTime과 동일 값.
 	Step.ContactFrameToSubstepRatio = (Step.FixedDt > KINDA_SMALL_NUMBER) ? (DeltaTime / Step.FixedDt) : 1.0f;

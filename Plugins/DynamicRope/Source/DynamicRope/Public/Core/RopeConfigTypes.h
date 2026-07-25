@@ -106,10 +106,16 @@ struct FRopeSolverConfig
 	// NOTE: bUseWorldGDF는 URopeComponent 직속("Rope|Collision" 카테고리)으로 이사했다
 	// (2026-07-13 표면 감사 CL-4 — 충돌 도메인 응집: bIncludeOwnerColliders와 한자리).
 
-	/** Swept collision sample spacing in cm. Lower values reduce tunneling at higher query cost. */
+	/** 충돌 스윕의 샘플 간격(cm) — 노드가 한 substep에 이동한 경로를 이 간격으로 질의한다.
+	 *  낮출수록 터널링에 강하고 질의 비용이 는다. 아래 MaxSweepSamples와 짝으로 움직인다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning",
+		meta = (ClampMin = "0.1", Units = "cm"))
 	float SweepStep = 2.0f;
 
-	/** Maximum swept samples per segment, used as a cost cap for very fast nodes. */
+	/** 구간당 스윕 샘플 수 상한(비용 한도). 매우 빠른 노드는 간격이 이 상한에 눌려 넓어지므로,
+	 *  SweepStep을 낮췄는데 효과가 없으면 이 값도 함께 올려야 한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning",
+		meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxSweepSamples = 16;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning")
@@ -187,10 +193,10 @@ struct FRopeWrapConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Contact Query Radius (0=Auto)"))
 	float ContactQueryRadius = 0.0f;
 
-	//~ 캡처 판정(감지 문턱) --------------------------------------------------
-	// Flight에서 "잡혔다"고 볼 문턱값. ①FullSimulation/②AssistedJudged의 판정 경로 전용이고,
-	// ③GuaranteedWrap은 GuidedThrow가 확정한 앵커로만 성립하므로 이 셋을 보지 않는다.
-	// 감지 스윕의 해상도/비용은 FRopeDetectConfig가 갖는다.
+	//~ 캡처 판정(감지) --------------------------------------------------------
+	// Flight에서 "잡혔다"고 볼 문턱값과, 그 판정이 딛는 접촉 감지 스윕. 문턱값 셋은
+	// ①FullSimulation/②AssistedJudged의 판정 경로 전용이고, ③GuaranteedWrap은 GuidedThrow가 확정한
+	// 앵커로만 성립하므로 보지 않는다(스윕은 Flight 감지 자체라 모드와 무관).
 
 	/** 스치는 접촉이 아니라 catch로 간주하기 위해 한 bone에 닿아야 하는 최소 rope 노드 수. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "1"))
@@ -203,6 +209,22 @@ struct FRopeWrapConfig
 	/** 얇은 사지/SDF 후보를 놓치지 않기 위한 Flight 예측 lookahead(프레임 변위 배수). 0이면 예측 끔. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", ClampMax = "4.0"))
 	float PredictiveContactFrames = 1.0f;
+
+	/**
+	 * 접촉 감지 스윕의 샘플 간격(cm). 노드가 한 프레임에 이동한 경로를 이 간격으로 점질의해 최심 접촉을
+	 * 찾는다 — **터널링을 막는 값**이라 잡으려는 대상의 얇은 쪽 두께(팔뚝/난간)보다 작아야 한다.
+	 * 빠른 던지기가 가는 대상을 그냥 통과해 캡처를 놓치면 이 값을 낮춘다. 솔버 충돌의
+	 * FRopeSolverConfig::SweepStep과 같은 사고방식이되, 감지는 Flight에서만 돌아 예산을 따로 둔다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
+		meta = (ClampMin = "0.1", Units = "cm"))
+	float ContactSweepStep = 2.0f;
+
+	/** 위 감지 스윕의 샘플 수 상한(비용 한도). 매우 빠른 노드는 간격이 이 상한에 눌려 넓어지므로,
+	 *  ContactSweepStep을 낮췄는데 효과가 없으면 이 값도 함께 올려야 한다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
+		meta = (ClampMin = "1", ClampMax = "64"))
+	int32 ContactMaxSweepSamples = 16;
 
 	/**
 	 * 한 번의 캡처에서 채택할 수 있는 wrap 시드(접촉 대상) 최대 개수. 1(기본) = 기존 단일 시드 동작.
@@ -273,7 +295,11 @@ struct FRopeWrapConfig
 	 *  4단계부터 commit 제한 시간으로는 각도 매핑을 쓸 수 없는 DistanceFallback 경로에만 적용한다. */
 	float WrappingTailDelayPerSegment = 0.024f;
 
-	/** Wrapping 중 한 프레임에 진행할 surface path 적분 step 수. 높이면 빨라지지만 순간 비용이 커진다. */
+	/** Wrapping 중 한 프레임에 진행할 surface path 적분 step 수. 높이면 감김 경로가 빨리 완성되지만
+	 *  순간 비용이 커진다. 실제 예산은 로프 크기에 비례해 이 값으로 배율된다
+	 *  (FRopeWrappingPhase::ComputePathStepBudget — 기준 8). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
+		meta = (ClampMin = "1", ClampMax = "128"))
 	int32 WrappingPathBuildStepsPerFrame = 8;
 
 	/**
@@ -375,26 +401,6 @@ struct FRopeWrapConfig
 	// NOTE: 종전의 [미배선] WrappingContactGraceTime은 삭제됐다(2026-07-13 표면 감사 B-2 — 소비 코드가
 	// 없는 죽은 설정). grace 로직을 실제로 배선할 때 그 CL에서 설정도 함께 되살릴 것.
 
-};
-
-/**
- * Flight 접촉 감지 스윕의 해상도/비용. 저장값이 곧 CPU/GPU 감지 경로에 실리는 값이다
- * (CPU MakeFlightDetectParams · GPU RequestContactDetection). 솔버 충돌 쪽
- * FRopeSolverConfig::SweepStep/MaxSweepSamples와 같은 성격이되, 감지는 Flight에서만 돌아
- * 예산을 따로 둔다. 캡처 문턱값(MinLatchNodes/WrapDecisionTime/PredictiveContactFrames)은
- * FRopeWrapConfig, 던지기 실패 복귀 시간은 FRopeThrowParams 소유다.
- */
-struct FRopeDetectConfig
-{
-	/**
-	 * 접촉 감지 스윕의 샘플 간격(cm). 노드가 한 프레임에 이동한 경로를 이 간격으로 점질의해 최심 접촉을
-	 * 찾는다 — **터널링을 막는 값**이라 대상의 얇은 쪽 두께(팔뚝/난간)보다 작아야 한다. 솔버 충돌의
-	 * FRopeSolverConfig::SweepStep과 같은 사고방식이되, 감지는 Flight에서만 도므로 예산을 따로 둔다.
-	 */
-	float ContactSweepStep = 2.0f;
-
-	/** 위 스윕의 샘플 수 상한(비용 한도). 매우 빠른 노드는 간격이 이 상한에 눌려 넓어진다. */
-	int32 ContactMaxSweepSamples = 16;
 };
 
 /**

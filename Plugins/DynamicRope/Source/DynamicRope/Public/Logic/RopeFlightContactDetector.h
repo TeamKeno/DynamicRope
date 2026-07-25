@@ -55,10 +55,10 @@ public:
 		/** ExpectedWrapTangent 퇴화 케이스용(컴포넌트 전방). */
 		FVector FallbackForward = FVector::ForwardVector;
 
-		/** DetectConfig.ContactSweepStep: 감지 스윕 샘플 간격(cm). 터널링 방지의 핵심 값 — 그쪽 주석 참고. */
+		/** WrapConfig.ContactSweepStep: 감지 스윕 샘플 간격(cm). 터널링 방지의 핵심 값 — 그쪽 주석 참고. */
 		float ContactSweepStep = 2.0f;
 
-		/** DetectConfig.ContactMaxSweepSamples: 스윕 샘플 수 상한(비용 한도). */
+		/** WrapConfig.ContactMaxSweepSamples: 스윕 샘플 수 상한(비용 한도). */
 		int32 ContactMaxSweepSamples = 16;
 
 		/**

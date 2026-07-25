@@ -216,10 +216,6 @@ public:
 		meta = (ShowOnlyInnerProperties, EditCondition = "ResolveMode != ERopeWrapResolveMode::GuaranteedWrap"))
 	FRopeWrapConfig WrapConfig;
 
-	/** Flight 감지 스윕의 해상도/비용. 아직 디테일 패널에 노출하지 않는다(C++ 전용) — 저장값이
-	 *  그대로 CPU/GPU 감지 경로에 실린다. */
-	FRopeDetectConfig DetectConfig;
-
 	/** Wrapped *이후*(유지/당김/풀림) 튜닝 — 성립 판정(WrapConfig)과 분리된 Post-Wrap 도메인
 	 *  (2026-07-13 표면 감사 B-1; 설계 노트 01 도메인, 도달 모드·결착 모델 무관 공통). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ShowOnlyInnerProperties))

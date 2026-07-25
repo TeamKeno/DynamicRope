@@ -192,8 +192,8 @@ bool FRopeStoredConfigIsRuntimeConfigTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("기본 MaxSweepSamples=16"), Rope->SolverConfig.MaxSweepSamples, 16);
 
 	// 접촉 감지 스윕 + 감김 경로 빌드 예산 기본값.
-	TestEqual(TEXT("기본 ContactSweepStep=2"), Rope->DetectConfig.ContactSweepStep, 2.0f);
-	TestEqual(TEXT("기본 ContactMaxSweepSamples=16"), Rope->DetectConfig.ContactMaxSweepSamples, 16);
+	TestEqual(TEXT("기본 ContactSweepStep=2"), Rope->WrapConfig.ContactSweepStep, 2.0f);
+	TestEqual(TEXT("기본 ContactMaxSweepSamples=16"), Rope->WrapConfig.ContactMaxSweepSamples, 16);
 	TestEqual(TEXT("기본 WrappingPathBuildSteps=8"), Rope->WrapConfig.WrappingPathBuildStepsPerFrame, 8);
 
 	// 프리셋 스탬프 후에도 저장값이 그대로 남는다(적용 이후 재해석 없음).

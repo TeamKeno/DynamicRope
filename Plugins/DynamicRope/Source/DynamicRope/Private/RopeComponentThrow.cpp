@@ -1032,8 +1032,8 @@ FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float
 	Params.MinLatchNodes = WrapConfig.MinLatchNodes;
 	Params.FallbackForward = GetForwardVector();
 	// 감지 스윕 해상도(터널링 방지). GPU step에도 같은 값이 실린다(RequestContactDetection).
-	Params.ContactSweepStep = DetectConfig.ContactSweepStep;
-	Params.ContactMaxSweepSamples = DetectConfig.ContactMaxSweepSamples;
+	Params.ContactSweepStep = WrapConfig.ContactSweepStep;
+	Params.ContactMaxSweepSamples = WrapConfig.ContactMaxSweepSamples;
 	// substep dt = FixedDt(=(1/60)/Substeps) — 로프 Verlet 변위(마지막 substep 델타)와 표면속도(cm/s)를 같은
 	// 단위로 맞추는 다리(RopeSolverSubsteps의 FixedDt와 동일 식). 프레임 dt가 아님 — 자세한 이유는 FParams 주석.
 	Params.SubstepDeltaTime = (1.0f / 60.0f) / static_cast<float>(FMath::Clamp(SolverConfig.Substeps, 1, 16));
