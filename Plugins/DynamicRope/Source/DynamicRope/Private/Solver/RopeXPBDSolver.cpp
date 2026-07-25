@@ -82,8 +82,11 @@ FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverC
 	// substep을 돌린다 → substep당 변위가 항상 일정 → 충돌/터널링이 frame rate에 의존하지 않는다.
 	const int32 SubPerRef = FMath::Clamp(Config.Substeps, 1, 16);
 	const float FixedDt = (1.0f / 60.0f) / static_cast<float>(SubPerRef);
-	// spiral-of-death 상한(과부하 시 slow-mo).
-	const int32 MaxSubsteps = FMath::Clamp(SubPerRef * 2, 1, 32);
+	// spiral-of-death 상한(과부하 시 slow-mo). ×1.5 = 40fps까지는 실시간 캐치업, 그 밑은 slow-mo.
+	// 종전 ×2(30fps까지 캐치업)는 프레임당 substep을 최대 2배로 몰아, 솔브 부하로 프레임이 떨어질수록
+	// 다음 프레임 부하가 더 커지는 정귀환(스파이럴)을 키웠다 — 상한을 낮춰 최악 프레임의 솔브 비용을
+	// 정상 상태의 1.5배로 묶는다. 긴 정지 뒤 몰아치기(MaxAccum 클램프)도 같은 상한을 따른다.
+	const int32 MaxSubsteps = FMath::Clamp((SubPerRef * 3) / 2, 1, 32);
 
 	State.TimeAccumulator += DeltaSeconds;
 	const float MaxAccum = FixedDt * static_cast<float>(MaxSubsteps);
