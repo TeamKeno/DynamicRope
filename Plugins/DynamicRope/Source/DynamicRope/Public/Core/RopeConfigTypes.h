@@ -427,7 +427,7 @@ struct FRopeHoldConfig
 	 * true면 RopeWielder가 CharacterMovement의 최종 이동(입력/root motion/slide 포함)을 같은 PrePhysics
 	 * 프레임에 구면 제약으로 투영하고, 일반 Pawn은 movement tick 직후 같은 안전망을 적용한다.
 	 *
-	 * 이 제약은 SegmentTension/GPU readback/아래 TetherSlack과 무관한 gameplay authority다. 따라서
+	 * 이 제약은 SegmentTension/GPU readback과 무관한 gameplay authority다. 따라서
 	 * TetherCompliance=0인 로프가 kinematic Pawn 이동 때문에 먼저 늘어난 뒤 사후 회수되는 것을 막는다.
 	 * TetherCompliance>0이면 의도적 탄성을 허용하므로 hard projection은 자동 비활성화된다.
 	 * Wielder가 없는 custom movement는 URopeComponent::ConstrainWielderLocation을 이동 적용 전에 호출할 것.
@@ -456,15 +456,6 @@ struct FRopeHoldConfig
 	/** 장력 release 판정의 지속 시간(초). 순간 스파이크(충격 프레임)로 풀리는 것을 막는다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0", Units = "s"))
 	float TensionReleaseTime = 0.05f;
-
-	/**
-	 * Legacy soft-tether length allowance. The authoritative material constraint no longer adds
-	 * this value to rope length; use LengthConstraintActivationSlop for numerical stabilization.
-	 * Kept for existing asset serialization while legacy/custom-mover fallback is retired.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning",
-		meta = (ClampMin = "0.0", Units = "cm"))
-	float TetherSlack = 5.0f;
 
 	/**
 	 * (wielder 쪽 시뮬 루트 한정) λ 임펄스는 로프 축 성분만 만드므로, 방향이 급전환하면 옛 방향 관성이
@@ -509,7 +500,7 @@ struct FRopeHoldConfig
 
 	/**
 	 * 거리 release: Wrapped 중 authoritative material-length 위반량이 이 값(cm)을
-	 * 초과하면 자동 release한다(ERopeReleaseReason::Distance). TetherSlack은 포함하지 않는다.
+	 * 초과하면 자동 release한다(ERopeReleaseReason::Distance).
 	 * 0 = 비활성(기본). 테더와 함께 쓰면
 	 * "테더가 버티다가 이 한계를 넘으면 놓친다"가 된다 — 테더가 충분히 강하면 초과분이 안 쌓여
 	 * 발동하지 않고, 테더 없이 쓰면 순수 거리 제한으로 동작한다.
@@ -618,18 +609,6 @@ struct FRopeHoldConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0"))
 	float TetherCompliance = 0.0f;
-
-	/**
-	 * Deprecated compatibility value. Physical softness is now derived only from
-	 * TetherCompliance (stiffness = 1/compliance), so TetherCompliance=0 always creates
-	 * a hard Chaos limit. Kept only so existing assets deserialize without data loss.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0"))
-	float PhysicalTetherStiffness = 1000.0f;
-
-	/** Deprecated compatibility value. Compliant damping is now derived from effective mass and stiffness. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0"))
-	float PhysicalTetherDamping = 100.0f;
 
 	/**
 	 * 능동 Pull의 **견인 목표 속도**(cm/s). 능동 Pull은 대상을 이 속도로 당김 방향을 따라 몰되(장력 상한 PullForce

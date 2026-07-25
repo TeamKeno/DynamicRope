@@ -704,7 +704,7 @@ bool FRopeWielderCharacterHardLeashSameFrameTest::RunTest(const FString& Paramet
 		ProxyX,
 		static_cast<float>(Rope->GetComponentLocation().X),
 		0.1f);
-	TestTrue(TEXT("physical target uses the hard material limit, not TetherSlack"),
+	TestTrue(TEXT("physical target uses the hard material limit"),
 		FMath::IsNearlyEqual(
 			FRopeWielderComponentTestSeam::GetPhysicalTetherLimit(*Rope), 60.0f, 0.1f));
 	TestTrue(TEXT("cancelled outward hand motion pulls the simulated target in the same Chaos step"),
@@ -716,7 +716,7 @@ bool FRopeWielderCharacterHardLeashSameFrameTest::RunTest(const FString& Paramet
 		ERopeLengthConstraintBackend::Chaos);
 	TestFalse(TEXT("zero material compliance creates a hard Chaos limit"),
 		FRopeWielderComponentTestSeam::IsPhysicalTetherSoft(*Rope));
-	TestTrue(TEXT("legacy physical stiffness cannot re-enable elasticity"),
+	TestTrue(TEXT("a hard Chaos limit carries no linear-limit stiffness"),
 		FMath::IsNearlyZero(
 			FRopeWielderComponentTestSeam::GetPhysicalTetherStiffness(*Rope)));
 
@@ -766,8 +766,6 @@ bool FRopeWielderHardReactionTensionTest::RunTest(const FString& Parameters)
 	Rope->SetupAttachment(Character->GetMesh());
 	FRopeWielderComponentTestSeam::ConfigureExternalHardLeash(
 		*Rope, TargetRoot, /*AnchorNode*/ 3, /*RopeLength*/ 60.0f);
-	// Legacy soft slack must not enlarge the material cable or suppress boundary load.
-	Rope->HoldConfig.TetherSlack = 500.0f;
 	Rope->RegisterComponent();
 
 	URopeWielderComponent* Wielder = NewObject<URopeWielderComponent>(Character);

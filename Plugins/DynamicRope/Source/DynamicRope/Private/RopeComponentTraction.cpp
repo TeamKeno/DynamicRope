@@ -722,8 +722,7 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		LengthConstraintState.HasWielderAttempt(GFrameCounter, ConstraintAnchorNode);
 
 	// Reel/material-length and kinematic anchor rates are sampled from the same live
-	// geometry. TetherSlack is intentionally absent: activation tolerance must not add
-	// physical cable length.
+	// geometry. Activation tolerance must not add physical cable length.
 	float RestRate = 0.0f;
 	if (LengthConstraintState.bPrevGeometryValid &&
 		LengthConstraintState.PrevAnchorNode == ConstraintAnchorNode)
@@ -812,7 +811,7 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		if (bDrivenByWielderThisFrame)
 		{
 			// PrePhysics already wrote the attempted, unclamped hand point and material-length
-			// limit. Do not replace it with the soft Aim/TetherSlack contract after Chaos.
+			// limit. Do not replace it with the look-ahead Aim contract after Chaos.
 			SamplePhysicalTetherForce(DeltaTime);
 		}
 		else

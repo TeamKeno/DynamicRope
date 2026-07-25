@@ -61,8 +61,11 @@ E(Constraint 기본 승격) CL 568, **F(레거시 제거) 이 문서와 동반 C
 C = L_path − L_rest          (cm, C > 0 = 초과 = 위반)
 L_path = ComputePull의 코너-다리 chord 합에서 "앵커→손" 경로 부분
          (현행 TautChordLen — 다리별 rest 클램프 포함)
-L_rest = AnchorNode × SegmentLength + TetherSlack
+L_rest = AnchorNode × SegmentLength          (material length — 허용오차를 더하지 않는다)
 ```
+
+`LengthConstraintActivationSlop`은 C의 발화 경계를 재는 수치 허용오차일 뿐 `L_rest`에 더하지 않는다 —
+더하면 비신축 로프가 그만큼 길어진다.
 
 현행 overshoot(`UpdateTether`의 fractional aim 기반 첫 다리 초과분)와 달리 **전 체인** 기하를
 쓴다. 처짐/구김 = chord 합 < rest = C < 0 = λ = 0.
@@ -195,7 +198,7 @@ T      = clamp(λ / dt, 0, MaxTetherTension)
 
 ### 4.2 유지 (의미 불변)
 
-`TetherSlack`, `GroundBraceFactor`, `TetherMaxSpeed`(2차 안전망), `TetherPerpDamping`(물리 바디),
+`GroundBraceFactor`, `TetherMaxSpeed`(2차 안전망), `TetherPerpDamping`(wielder 시뮬 루트 — §9 8항),
 `DistanceReleaseSlack`, `PullBendThresholdDeg`, `PullDirSmoothTime`, `PullAimSmoothTime`,
 능동 Pull 전부(`PullForce`/`ActivePullMaxLinearSpeed`/`ActivePullMaxAngularSpeed`/taut 게이트),
 `TensionReleaseForce`/`Time`(SegmentTension 기준 유지).
@@ -212,6 +215,8 @@ T      = clamp(λ / dt, 0, MaxTetherTension)
 | `bAutoTetherShare` / `TetherMassBias` / `TetherTargetShare` | 삭제 — 분배는 λ·w 자동. 강제 분배가 실수요면 후속으로 끝별 w 스케일 1개 검토 |
 | `TetherCharacterSmoothTime` | 삭제(주석 자체가 "0이 정답"이라 실질 무사용) |
 | `TetherSlackBrakeTime` | 삭제(장부 폐기) |
+| `TetherSlack` | 삭제 — authoritative material constraint가 `L_rest`에 더하지 않아 소비처가 없다. 수치 허용오차는 `LengthConstraintActivationSlop` |
+| `PhysicalTetherStiffness` / `PhysicalTetherDamping` | 삭제 — soft-limit 경로가 §9 10항으로 대체돼 소비처가 없다 |
 | Taut 3종 + 히스테리시스 | **이름/값 유지**, 소비처가 능동 Pull 게이트로 축소(주석 갱신) |
 
 ### 4.4 파생 상태/API 재정의
@@ -330,16 +335,16 @@ wielder 들썩임)의 정정. 원인과 수정:
    (projection)을 걸면, 코너 추종 프록시가 매 프레임 이동하며 리밋을 어길 때마다 위반량이 위치 스냅으로
    닫히고, 강체는 관절 완충이 없어 스냅→물리 반동→재위반이 프레임 주기로 반복된다(랙돌이 조용했던
    이유 = 관절 사슬이 흡수). 수정: 컴포넌트 바디 한정 bEnableProjection=false + 소프트 리밋
-   (`PhysicalTetherStiffness` 1000 / `PhysicalTetherDamping` 100, restitution 0 — **PIE 튜닝 대상 노브**,
-   강성 0 = 하드 복귀). 스켈레탈은 PIE 검증된 하드 리밋 + 기본 투영 유지. 동반: 바디-로컬 앵커 드리프트
+   (강성 1000 / 감쇠 100, restitution 0 — 강성 0 = 하드 복귀). 스켈레탈은 PIE 검증된 하드 리밋 + 기본 투영 유지. 동반: 바디-로컬 앵커 드리프트
    가드 — 제약 프레임(Frame2)은 생성 시 고정이라 같은 (대상,본) 안에서 wrap 앵커가 재배치되면 상시
    위반=진동이 되므로, 5cm 초과 드리프트 시 해체 후 즉시 재생성.
 10. **탄성/장력 단일 material solve(2026-07-23, 9번 대체)**: `TetherCompliance=0`은 Pawn의
     PrePhysics hard projection과 물리 대상의 hard Chaos limit가 material length를 보존하고, 그 제약이
     거부한 속도/Chaos force가 곧 authoritative tension이다. `TetherCompliance>0`은 별도 Chaos spring을
     만들지 않고 모든 endpoint가 §3.3의 implicit Kelvin-Voigt λ를 공유한다. 물리 endpoint는 §3.4의
-    attachment-point Jacobian/impulse를 사용한다. 따라서 `PhysicalTetherStiffness/Damping`은 기존
-    asset 역직렬화용 deprecated 값일 뿐이며, 9번의 soft-limit 튜닝 경로는 더 이상 실행되지 않는다.
+    attachment-point Jacobian/impulse를 사용한다. 9번의 soft-limit 튜닝 경로는 실행되지 않으므로
+    그 강성/감쇠 노브(`PhysicalTetherStiffness`/`PhysicalTetherDamping`)는 제거됐다 — 물리적 무름은
+    `TetherCompliance` 하나에서만 온다.
     비신축 SimBody의 위치 위반은 Wielder/target generalized-mass 몫으로 나누고 Chaos proxy를 보정 후
     **실제 hand point**에 둔다. 손을 경계까지 전량 투영한 뒤 target도 움직이는 이중 보정은 실제 span을
     material length보다 짧게 만들어 다음 프레임 장력이 끊기는 원인이므로 금지한다.

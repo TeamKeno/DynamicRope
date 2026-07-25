@@ -151,7 +151,7 @@ struct FRopePullSample
 	 * 앵커→손 코너-다리 chord 합의 **비클램프** 값(cm) — TautChordLen과 달리 다리별 rest 클램프를 하지
 	 * 않아, 스트레치된 다리는 그만큼 합을 키운다. Live movement binding이 없는 legacy/custom-mover
 	 * fallback의 진단 관측치로만 남는다. Authoritative C는 live hand↔first-anchor 거리 − material
-	 * length이며 TetherSlack을 더하지 않는다.
+	 * length다.
 	 *
 	 * ⚠ legacy fallback에서는 C > 0만으로 충분하지 않다: 랙돌 본 요동이
 	 * 앵커 인접 다리만 strain limit까지 늘리면 나머지가 늘어져 있어도 합이 rest를 넘어 슬랙 로프에서

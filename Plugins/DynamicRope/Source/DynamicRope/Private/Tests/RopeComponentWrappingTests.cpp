@@ -271,15 +271,8 @@ bool FRopeWrappingHardLeashContinuityTest::RunTest(const FString& Parameters)
 		Rope->BuildWielderMovementConstraint(WrappingConstraint));
 	TestTrue(TEXT("live binding is used during Wrapping"),
 		WrappingConstraint.PivotWorld.Equals(FVector(80.0f, 0.0f, 0.0f), 0.01f));
-	TestTrue(TEXT("hard leash uses material length, not soft tether slack"),
+	TestTrue(TEXT("hard leash uses the material length"),
 		FMath::IsNearlyEqual(WrappingConstraint.MaxDistance, 60.0f, 0.01f));
-
-	Rope->HoldConfig.TetherSlack = 500.0f;
-	FRopeWielderMovementConstraint SlackIndependentConstraint;
-	TestTrue(TEXT("soft tether tuning does not disable hard leash"),
-		Rope->BuildWielderMovementConstraint(SlackIndependentConstraint));
-	TestTrue(TEXT("TetherSlack does not enlarge the hard material boundary"),
-		FMath::IsNearlyEqual(SlackIndependentConstraint.MaxDistance, 60.0f, 0.01f));
 
 	URopeComponent* NodeZeroRope = NewObject<URopeComponent>();
 	FRopeWrappingFallbackTestSeam::ConfigureExternalAnchor(
