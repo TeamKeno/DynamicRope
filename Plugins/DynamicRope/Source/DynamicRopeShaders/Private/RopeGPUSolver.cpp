@@ -1699,7 +1699,26 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	FRDGBufferRef GlobalSDFVolRDG = nullptr;
 	RopeEnsureGlobalSDFVolumes(GraphBuilder, Steps, Impl->GlobalSDF, GlobalSDFDistRDG, GlobalSDFVolRDG);
 
-	// --- Loop 2: 로프별 seed/register → 패킹 → 솔브 → 리드백 재무장 → 감지 → 외부(SRV) 배리어.
+	// --- Loop 2(페이즈 배칭): 준비(2a) → 솔브 dispatch 연속(2b) → 리드백 무장(2c) → 감지(2d) → 외부 배리어(2e).
+	// 종전에는 로프마다 [솔브 → 리드백 copy → 감지 → SRV 전이]를 인터리브해, 로프 N의 copy/전이 배리어가
+	// N 솔브 완주를 기다린 뒤에야 N+1 솔브가 발행됐다 — 64스레드(그룹 1개)짜리 dispatch가 로프 수만큼 GPU에서
+	// 직렬화돼 벽시계가 "그룹당 지연 × 로프 수"로 자랐다('DynamicRope Solve'가 로프 수에 비례). 단계별로 묶으면
+	// 솔브 dispatch 사이에 배리어가 없어(로프끼리 버퍼 독립, 전역 SDF는 read-read) GPU가 그룹들을 병렬 실행한다
+	// → 벽시계 ≈ 가장 느린 로프 1개. per-rope 시맨틱(솔브→copy→감지→SRV 전이)은 로프 단위로 그대로고,
+	// 전역 순서만 재배열이다 — 업로드는 어차피 RDG 프롤로그에서 일괄 실행이라 2a에 남는다.
+	struct FRopePreparedStep
+	{
+		const FRopeGPUResidentStep* Step = nullptr;
+		FRopeStepBuild Build;
+		// 솔브 패스가 만든 장력(λ) transient 버퍼 — 리드백 무장(2c)이 소비.
+		FRDGBufferRef LambdaRDG = nullptr;
+		// GDF permutation 여부(2b 정렬 키 — 같은 PSO끼리 연속 배치해 스위치 최소화).
+		bool bGDFPerm = false;
+	};
+	TArray<FRopePreparedStep> Prepared;
+	Prepared.Reserve(Steps.Num());
+
+	// --- 2a: 로프별 seed/register + 콜라이더/오버라이드 패킹.
 	for (const FRopeGPUResidentStep& Step : Steps)
 	{
 		const int32 NumNodes = Step.NumNodes;
@@ -1718,47 +1737,82 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		// Aim Flight에서 충돌 solve를 끌 때 GDF push-out도 함께 끄며, 별도 detect 커널에는 영향을 주지 않는다.
 		Resident.bUseWorldGDF = Step.bSolveCollisions && Step.bUseWorldGDF;
 
-		FRopeStepBuild Build;
-		RopeEnsureResidentBuffers(GraphBuilder, Step, Resident, Build);
+		FRopePreparedStep Entry;
+		Entry.Step = &Step;
+		RopeEnsureResidentBuffers(GraphBuilder, Step, Resident, Entry.Build);
 
 		// G0: 오버라이드는 적분 없이도(NumSub=0) 기록해야 한다 — 로직 페이즈 프레임(Wrapping/Releasing 등).
-		Build.bHasOverrides = Step.HasOverrides() && Step.OverrideFlags.Num() == NumNodes;
-		if (Step.HasOverrides() && !Build.bHasOverrides)
+		Entry.Build.bHasOverrides = Step.HasOverrides() && Step.OverrideFlags.Num() == NumNodes;
+		if (Step.HasOverrides() && !Entry.Build.bHasOverrides)
 		{
 			UE_LOG(LogDynamicRopeGPU, Warning, TEXT("GPU override ignored: flags %d != nodes %d."),
 				Step.OverrideFlags.Num(), NumNodes);
 		}
 
-		if (Step.NumSub <= 0 && !Build.bHasOverrides && !Step.bDetectContacts)
+		if (Step.NumSub <= 0 && !Entry.Build.bHasOverrides && !Step.bDetectContacts)
 		{
 			// 이번 프레임 적분/기록/감지 없음 — 위치 불변, 리드백도 그대로 둠. 상태만 외부 읽기(SRV)로
-			// 확정한다(시드 업로드 직후 조기 종료 프레임 포함) — 아래 dispatch 경로의 호출과 동일 목적.
-			GraphBuilder.UseExternalAccessMode(Build.PosRDG, ERHIAccess::SRVMask);
+			// 확정한다(시드 업로드 직후 조기 종료 프레임 포함) — 2e의 호출과 동일 목적.
+			GraphBuilder.UseExternalAccessMode(Entry.Build.PosRDG, ERHIAccess::SRVMask);
 			continue;
 		}
 
-		RopePackCapsules(GraphBuilder, Step, Build);
-		RopePackSDFColliders(GraphBuilder, Step, Build, Impl->GlobalSDF.KeyToIndex,
+		RopePackCapsules(GraphBuilder, Step, Entry.Build);
+		RopePackSDFColliders(GraphBuilder, Step, Entry.Build, Impl->GlobalSDF.KeyToIndex,
 			GlobalSDFDistRDG, GlobalSDFVolRDG);
-		RopePackBoxes(GraphBuilder, Step, Build);
-		RopePackConvexes(GraphBuilder, Step, Build);
-		RopePackOverrides(GraphBuilder, Step, Build);
+		RopePackBoxes(GraphBuilder, Step, Entry.Build);
+		RopePackConvexes(GraphBuilder, Step, Entry.Build);
+		RopePackOverrides(GraphBuilder, Step, Entry.Build);
 
-		const FRDGBufferRef LambdaRDG = RopeAddSolvePass(GraphBuilder, Step, Resident, Build,
+		// RopeAddSolvePass의 bUseGDFPerm 판정과 동일식(여기서는 정렬 키로만 사용 — 실제 선택은 그쪽이 단일 소스).
+		Entry.bGDFPerm = bGDFInSolver && Resident.bUseWorldGDF && (bGDFSolverValid != 0);
+		Prepared.Add(MoveTemp(Entry));
+	}
+
+	// 같은 permutation(노드 버킷, GDF)끼리 연속 배치 — 솔브 dispatch 사이 PSO 스위치 최소화.
+	// 안정 정렬이라 같은 키 안에서는 step 순서(= 등록 순서)가 유지된다.
+	Prepared.StableSort([](const FRopePreparedStep& A, const FRopePreparedStep& B)
+	{
+		const int32 BucketA = RopeNodeBucket(A.Step->NumNodes);
+		const int32 BucketB = RopeNodeBucket(B.Step->NumNodes);
+		if (BucketA != BucketB) { return BucketA < BucketB; }
+		return !A.bGDFPerm && B.bGDFPerm;
+	});
+
+	// --- 2b: 솔브 dispatch만 연속 발행 — 이 로프들의 버퍼를 건드리는 copy/감지가 아직 없어 사이에 배리어가
+	// 없다. (2a 이후 RtRopes에 추가가 없으므로 아래 Find 참조는 안정.)
+	for (FRopePreparedStep& Entry : Prepared)
+	{
+		const FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Entry.Step->RopeId);
+		Entry.LambdaRDG = RopeAddSolvePass(GraphBuilder, *Entry.Step, Resident, Entry.Build,
 			bGDFInSolver ? View : nullptr, GDFSolverParams, bGDFSolverValid, PreViewTranslation);
-		RopeArmReadbacks(GraphBuilder, Step, Resident, Build, LambdaRDG);
+	}
 
-		if (Step.bDetectContacts)
+	// --- 2c: 리드백 재무장(비동기 copy). 감지(2d)보다 앞 — Pos가 UAV→CopySrc→SRV로 한 방향만 전이한다.
+	for (FRopePreparedStep& Entry : Prepared)
+	{
+		FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Entry.Step->RopeId);
+		RopeArmReadbacks(GraphBuilder, *Entry.Step, Resident, Entry.Build, Entry.LambdaRDG);
+	}
+
+	// --- 2d: 접촉 감지(Flight 로프만). 솔브 결과를 SRV로 읽는다 — 순서는 RDG 의존성이 보장.
+	for (FRopePreparedStep& Entry : Prepared)
+	{
+		if (Entry.Step->bDetectContacts)
 		{
-			RopeAddDetectPass(GraphBuilder, Step, Resident, Build);
+			FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Entry.Step->RopeId);
+			RopeAddDetectPass(GraphBuilder, *Entry.Step, Resident, Entry.Build);
 		}
+	}
 
-		// 렌더 raw 튜브 경로(M5b/B2)가 이 그래프 *밖에서* PosBuf를 SRV로 직독한다 — 외부 접근 모드로
-		// 마지막 패스(solve/copy/detect) 뒤 SRV 전이(배리어)를 매 프레임 확정한다. 이게 없으면 그래프
-		// 종료 상태가 리드백 copy 유무에 따라 UAVCompute/CopySrc로 오락가락해, 배리어 없는 프레임에
-		// 튜브가 이전/미완성 위치를 읽어 wrap 노드가 떨린다(CL167 회귀). GDF 충돌은 이제 솔브 CS 안(substep
-		// 제약)에서 처리하므로 별도 post-solve 쓰기가 없고, 이 solve 패스가 PosBuf의 마지막 쓰기다.
-		GraphBuilder.UseExternalAccessMode(Build.PosRDG, ERHIAccess::SRVMask);
+	// --- 2e: 외부(SRV) 접근 확정 일괄. 렌더 raw 튜브 경로(M5b/B2)가 이 그래프 *밖에서* PosBuf를 SRV로
+	// 직독한다 — 마지막 패스(solve/copy/detect) 뒤 SRV 전이(배리어)를 매 프레임 확정한다. 이게 없으면 그래프
+	// 종료 상태가 리드백 copy 유무에 따라 UAVCompute/CopySrc로 오락가락해, 배리어 없는 프레임에 튜브가
+	// 이전/미완성 위치를 읽어 wrap 노드가 떨린다(CL167 회귀). GDF 충돌은 솔브 CS 안(substep 제약)에서
+	// 처리하므로 별도 post-solve 쓰기가 없고, 감지 없는 로프는 solve 패스가 PosBuf의 마지막 쓰기다.
+	for (FRopePreparedStep& Entry : Prepared)
+	{
+		GraphBuilder.UseExternalAccessMode(Entry.Build.PosRDG, ERHIAccess::SRVMask);
 	}
 
 #if STATS
