@@ -912,7 +912,6 @@ FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 	// Config가 참조 전달이라 해석값을 별도 필드로 싣는다. 미주입 시 ContactQueryRadius=0(auto)
 	// 로프만 wrapping 경로에서 질의 반경 0으로 떨어지는 갭이 있었다.
 	Ctx.ResolvedContactRadius = GetEffectiveContactQueryRadius();
-	Ctx.ResolvedPathBuildStepsPerFrame = GetEffectiveWrappingPathBuildSteps();
 	Ctx.ResolveMode = ResolveMode;
 	return Ctx;
 }

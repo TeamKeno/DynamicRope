@@ -93,14 +93,14 @@ void FRopeWrappingPhase::CollectCompletedVirtualBridgeRuns()
 	}
 }
 
-int32 FRopeWrappingPhase::ComputePathStepBudget(int32 NumTailNodes, int32 QualityStepsPerFrame)
+int32 FRopeWrappingPhase::ComputePathStepBudget(int32 NumTailNodes, int32 StepsPerFrame)
 {
-	// 총 작업량 = NumTailNodes*2(SVF는 경로점당 스텝 2개 소모). 크기 비례 기준(Medium=~4프레임 완주)을
-	// 품질이 배율한다: 높을수록 프레임당 더 많이(=더 빨리 완성), 낮을수록 적게. 큰 로프에서도 품질이
+	// 총 작업량 = NumTailNodes*2(SVF는 경로점당 스텝 2개 소모). 크기 비례 기준(기준값에서 ~4프레임 완주)을
+	// 설정값이 배율한다: 높을수록 프레임당 더 많이(=더 빨리 완성), 낮을수록 적게. 큰 로프에서도 설정이
 	// 실효하도록 하한이 아니라 배율로 쓴다. preview(4096)는 사실상 전량이라 한 프레임에 완주. 최소 1.
-	constexpr int32 MediumStepsPerFrame = 8;   // GetEffectiveWrappingPathBuildSteps(Medium)와 동기
+	constexpr int32 BaselineStepsPerFrame = 8;   // FRopeWrapConfig::WrappingPathBuildStepsPerFrame 기본값과 동기
 	const int32 SizeBaseline = FMath::DivideAndRoundUp(FMath::Max(0, NumTailNodes) * 2, 4);
-	return FMath::Max(1, SizeBaseline * FMath::Max(1, QualityStepsPerFrame) / MediumStepsPerFrame);
+	return FMath::Max(1, SizeBaseline * FMath::Max(1, StepsPerFrame) / BaselineStepsPerFrame);
 }
 
 void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FContext& Ctx)
@@ -115,8 +115,8 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 		return;
 	}
 
-	// 프레임 예산(표면 감사 B-2): 총 작업량(SVF는 경로점당 스텝 2개)을 크기 비례 기준으로 잡고 품질로
-	// 배율한다 — 큰 로프에서도 Low/Medium/High가 갈리도록(단순 하한 아님). preview는 4096으로 한 번에 완주.
+	// 프레임 예산: 총 작업량(SVF는 경로점당 스텝 2개)을 크기 비례 기준으로 잡고 설정 steps/frame으로
+	// 배율한다 — 큰 로프에서도 설정이 갈리도록(단순 하한 아님). preview는 4096으로 한 번에 완주.
 	const int32 StepBudget = FRopeWrappingPhase::ComputePathStepBudget(
 		State.NumTailNodes, Ctx.GetPathBuildStepsPerFrame());
 	if (State.bPathUsesPoseSpaceIsland)

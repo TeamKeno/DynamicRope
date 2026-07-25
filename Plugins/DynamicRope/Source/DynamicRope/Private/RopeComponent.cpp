@@ -133,7 +133,6 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	// [2] 값 스탬프 — RopeMaterial만 세터(SetMaterial) 경유가 필요해 [5]로 미룬다.
 	// (인스턴스 배선 값 TipMeshComponentTag/LoadedHandSocket은 프리셋에 없다 — 헤더 주석 참조.)
 	ResolveMode = Preset->ResolveMode;
-	SimQuality = Preset->SimQuality;
 	NumParticles = Preset->NumParticles;
 	RopeLength = Preset->RopeLength;
 	MinRopeLength = Preset->MinRopeLength;
@@ -425,8 +424,7 @@ void URopeComponent::SolveSimFrame(float DeltaTime)
 	}
 
 	// 거리 LOD: 원거리에서 constraint iteration만 감쇠(substep은 유지 — 안정성은 substep이 지배).
-	// SimQuality 반영 사본에서 시작(비파괴) — 이후 Iterations만 LOD로 다시 감쇠한다.
-	FRopeSolverConfig LODConfig = GetEffectiveSolverConfig();
+	FRopeSolverConfig LODConfig = SolverConfig;
 	LODConfig.Iterations = GetLODScaledIterations();
 	LODConfig.MaxStretchRatio = GetEffectiveMaxStretchRatio();
 	// 반지름 auto(0=렌더 Radius) 해석 — 솔버는 항상 해석된 값만 받는다(GPU step은 서브시스템이 동일 처리).
@@ -687,8 +685,6 @@ void URopeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 		// PIE 중 토글 시 현재 팁에 즉시 반영(팁이 없으면 no-op — 다음 확보 때 적용된다).
 		ApplyTipMeshCollision();
 	}
-	// SimQuality 변경은 별도 처리 불필요 — 저장 SolverConfig를 건드리지 않고 소비 시점에
-	// GetEffectiveSolverConfig()가 다음 프레임부터 해석한다(비파괴).
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
@@ -790,71 +786,6 @@ void URopeComponent::ResetTransientPhaseState(bool bPreservePhysicalTether)
 #pragma region Initialization_And_Debug
 
 // ===== 초기화/유틸 ===========================================================
-
-FRopeSolverConfig URopeComponent::GetEffectiveSolverConfig() const
-{
-	// 비파괴: 저장된 SolverConfig는 건드리지 않고, SimQuality를 반영한 사본을 반환한다.
-	// SimQuality는 솔버 정밀도/성능 파라미터를 좌우한다(Substeps/Iterations/스윕 샘플링) — 감지/감김
-	// 쪽은 GetEffectiveDetectConfig·GetEffectiveWrappingPathBuildSteps가 같은 규약으로 함께 해석한다.
-	// High→Custom으로 되돌리면 Custom 세부가 그대로 살아 있다(파괴적 스탬프 아님).
-	FRopeSolverConfig Result = SolverConfig;
-	switch (SimQuality)
-	{
-	case ERopeSimQuality::Low:
-		Result.Substeps = 6;  Result.Iterations = 2;
-		Result.SweepStep = 4.0f;  Result.MaxSweepSamples = 8;
-		break;
-	case ERopeSimQuality::High:
-		Result.Substeps = 16; Result.Iterations = 6;
-		Result.SweepStep = 1.5f;  Result.MaxSweepSamples = 24;
-		break;
-	case ERopeSimQuality::Medium:
-		Result.Substeps = 12; Result.Iterations = 4;
-		Result.SweepStep = 2.0f;  Result.MaxSweepSamples = 16;
-		break;
-	case ERopeSimQuality::Custom:
-	default:
-		break; // 저장된 SolverConfig 그대로.
-	}
-	return Result;
-}
-
-FRopeDetectConfig URopeComponent::GetEffectiveDetectConfig() const
-{
-	// 솔버와 동일한 비파괴 규약: 저장된 DetectConfig는 불변, SimQuality가 접촉 감지 스윕 해상도만 해석한다.
-	// Flight 감지(CPU MakeFlightDetectParams·GPU RequestContactDetection)가 이 사본을 쓴다. Custom은 원본.
-	FRopeDetectConfig Result = DetectConfig;
-	switch (SimQuality)
-	{
-	case ERopeSimQuality::Low:
-		Result.ContactSweepStep = 4.0f;  Result.ContactMaxSweepSamples = 8;
-		break;
-	case ERopeSimQuality::High:
-		Result.ContactSweepStep = 1.5f;  Result.ContactMaxSweepSamples = 32;
-		break;
-	case ERopeSimQuality::Medium:
-		Result.ContactSweepStep = 2.0f;  Result.ContactMaxSweepSamples = 16;
-		break;
-	case ERopeSimQuality::Custom:
-	default:
-		break; // 저장된 DetectConfig 그대로.
-	}
-	return Result;
-}
-
-int32 URopeComponent::GetEffectiveWrappingPathBuildSteps() const
-{
-	// SimQuality가 프레임당 감김 경로 빌드 예산을 해석한다(Custom은 WrapConfig 저장값 그대로).
-	switch (SimQuality)
-	{
-	case ERopeSimQuality::Low:    return 4;
-	case ERopeSimQuality::Medium: return 8;
-	case ERopeSimQuality::High:   return 12;
-	case ERopeSimQuality::Custom:
-	default:
-		return WrapConfig.WrappingPathBuildStepsPerFrame;
-	}
-}
 
 void URopeComponent::InitRope()
 {

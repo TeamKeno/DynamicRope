@@ -911,22 +911,22 @@ bool FRopeWrapTargetGateFilterTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 프레임당 경로 빌드 예산이 큰 로프에서도 품질에 따라 갈리는지(단순 하한이 아니라 크기 비례 배율).
-// 72 tail 노드처럼 SizeBaseline이 커도 Low<Medium<High가 유지돼야 한다(품질 무효화 회귀 방어).
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrapStepBudgetQualityTest,
-	"DynamicRope.Wrapping.StepBudgetScalesWithQuality",
+// 프레임당 경로 빌드 예산이 큰 로프에서도 설정 steps/frame에 따라 갈리는지(단순 하한이 아니라
+// 크기 비례 배율). 72 tail 노드처럼 SizeBaseline이 커도 설정값 순서가 유지돼야 한다(무효화 회귀 방어).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrapStepBudgetScalingTest,
+	"DynamicRope.Wrapping.StepBudgetScalesWithStepsPerFrame",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FRopeWrapStepBudgetQualityTest::RunTest(const FString& Parameters)
+bool FRopeWrapStepBudgetScalingTest::RunTest(const FString& Parameters)
 {
-	// 72 tail 노드: SizeBaseline = ceil(144/4) = 36. Low(4)=18, Medium(8)=36, High(12)=54.
-	const int32 Low    = FRopeWrappingPhase::ComputePathStepBudget(72, 4);
-	const int32 Medium = FRopeWrappingPhase::ComputePathStepBudget(72, 8);
-	const int32 High   = FRopeWrappingPhase::ComputePathStepBudget(72, 12);
-	TestEqual(TEXT("72노드 Low=18"), Low, 18);
-	TestEqual(TEXT("72노드 Medium=36"), Medium, 36);
-	TestEqual(TEXT("72노드 High=54"), High, 54);
-	TestTrue(TEXT("큰 로프에서도 품질이 갈린다(Low<Medium<High)"), Low < Medium && Medium < High);
+	// 72 tail 노드: SizeBaseline = ceil(144/4) = 36. steps/frame 4=18, 8(기본)=36, 12=54.
+	const int32 Sparse   = FRopeWrappingPhase::ComputePathStepBudget(72, 4);
+	const int32 Baseline = FRopeWrappingPhase::ComputePathStepBudget(72, 8);
+	const int32 Dense    = FRopeWrappingPhase::ComputePathStepBudget(72, 12);
+	TestEqual(TEXT("72노드 steps/frame=4 → 18"), Sparse, 18);
+	TestEqual(TEXT("72노드 steps/frame=8 → 36"), Baseline, 36);
+	TestEqual(TEXT("72노드 steps/frame=12 → 54"), Dense, 54);
+	TestTrue(TEXT("큰 로프에서도 설정값이 갈린다"), Sparse < Baseline && Baseline < Dense);
 
 	// preview(4096)는 사실상 전량 → 한 프레임에 완주(총작업 = NumTailNodes*2 이상).
 	TestTrue(TEXT("preview는 총작업 이상"), FRopeWrappingPhase::ComputePathStepBudget(72, 4096) >= 72 * 2);

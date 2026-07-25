@@ -1031,13 +1031,12 @@ FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float
 	Params.PredictiveContactFrames = WrapConfig.PredictiveContactFrames;
 	Params.MinLatchNodes = WrapConfig.MinLatchNodes;
 	Params.FallbackForward = GetForwardVector();
-	// 감지 스윕 해상도(터널링 방지) — SimQuality 해석값. GPU step에도 같은 값이 실린다(RequestContactDetection).
-	const FRopeDetectConfig EffectiveDetect = GetEffectiveDetectConfig();
-	Params.ContactSweepStep = EffectiveDetect.ContactSweepStep;
-	Params.ContactMaxSweepSamples = EffectiveDetect.ContactMaxSweepSamples;
+	// 감지 스윕 해상도(터널링 방지). GPU step에도 같은 값이 실린다(RequestContactDetection).
+	Params.ContactSweepStep = DetectConfig.ContactSweepStep;
+	Params.ContactMaxSweepSamples = DetectConfig.ContactMaxSweepSamples;
 	// substep dt = FixedDt(=(1/60)/Substeps) — 로프 Verlet 변위(마지막 substep 델타)와 표면속도(cm/s)를 같은
 	// 단위로 맞추는 다리(RopeSolverSubsteps의 FixedDt와 동일 식). 프레임 dt가 아님 — 자세한 이유는 FParams 주석.
-	Params.SubstepDeltaTime = (1.0f / 60.0f) / static_cast<float>(FMath::Clamp(GetEffectiveSolverConfig().Substeps, 1, 16));
+	Params.SubstepDeltaTime = (1.0f / 60.0f) / static_cast<float>(FMath::Clamp(SolverConfig.Substeps, 1, 16));
 	// 프레임 dt: 예측 접촉 외삽이 substep 변위를 프레임 변위로 환산하는 데 쓴다(FParams::FrameDeltaTime 주석).
 	Params.FrameDeltaTime = DeltaTime;
 	return Params;

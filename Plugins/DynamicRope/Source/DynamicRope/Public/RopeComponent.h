@@ -89,12 +89,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
-	/** 시뮬레이션 품질(정밀도/성능). Custom이 아니면 솔버(Substeps/Iterations/스윕)·접촉 감지 스윕·
-	 *  감김 경로 빌드 예산을 이 값으로 해석한다(GetEffective{Solver,Detect}Config·
-	 *  GetEffectiveWrappingPathBuildSteps, 비파괴 — 저장 원본 불변). 개별 Advanced 필드는 Custom에서. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope")
-	ERopeSimQuality SimQuality = ERopeSimQuality::Medium;
-
 	//~ Tip(팁 부착물 — 창날/작살/추) ----------------------------------------
 	// 밧줄 자유단(GetNodeCount()-1)에 붙는 표시 전용 StaticMesh. 질량·충돌 없음(팁 질량 솔버 반영
 	// 안 함 — 2026-07-14 확정). **결착 모델 무관 공통 기능**이다(2026-07-17): bUseTipMesh 하나로
@@ -222,9 +216,8 @@ public:
 		meta = (ShowOnlyInnerProperties, EditCondition = "ResolveMode != ERopeWrapResolveMode::GuaranteedWrap"))
 	FRopeWrapConfig WrapConfig;
 
-	/** Flight 감지 스윕의 해상도/비용. SimQuality가 해석하는 파생값이라 디테일 패널에 노출하지 않는다
-	 *  — 소비처는 GetEffectiveDetectConfig()의 해석된 사본을 받는다. C++/테스트에서 SimQuality=Custom과
-	 *  함께 쓰면 여기 저장값이 그대로 나간다. */
+	/** Flight 감지 스윕의 해상도/비용. 아직 디테일 패널에 노출하지 않는다(C++ 전용) — 저장값이
+	 *  그대로 CPU/GPU 감지 경로에 실린다. */
 	FRopeDetectConfig DetectConfig;
 
 	/** Wrapped *이후*(유지/당김/풀림) 튜닝 — 성립 판정(WrapConfig)과 분리된 Post-Wrap 도메인
@@ -295,20 +288,6 @@ public:
 	{
 		return 80.0f * FMath::Pow(5.0f / 80.0f, FMath::Clamp(HoldConfig.TautSensitivity, 0.0f, 1.0f));
 	}
-
-	/** SimQuality를 반영한 런타임 솔버 설정(비파괴 — 저장된 SolverConfig는 건드리지 않는다).
-	 *  Custom이면 SolverConfig 그대로, 그 외엔 Substeps/Iterations/SweepStep/MaxSweepSamples를
-	 *  품질 프리셋 값으로 덮은 사본을 반환한다. 솔버 소비 지점(서브시스템 step, CPU LODConfig,
-	 *  SubstepDeltaTime, LOD iteration)이 이 값을 쓴다. Medium = 저장 기본값과 동일.
-	 *  비파괴라 High→Custom으로 되돌려도 Custom 세부가 그대로 살아 있다. */
-	FRopeSolverConfig GetEffectiveSolverConfig() const;
-
-	/** SimQuality가 해석한 접촉 감지 설정(스윕 해상도) — 비파괴 복사본, Custom은 저장 원본 그대로.
-	 *  Flight 감지(CPU MakeFlightDetectParams·GPU RequestContactDetection)가 이 값을 쓴다. */
-	FRopeDetectConfig GetEffectiveDetectConfig() const;
-
-	/** SimQuality가 해석한 프레임당 감김 경로 빌드 step 예산 — Custom은 WrapConfig 저장값 그대로. */
-	int32 GetEffectiveWrappingPathBuildSteps() const;
 
 	//~ Whip(던지기 스윙 설정) ----------------------------------------------
 	/** 던지기 초반 채찍 스윙 튜닝. 런타임 상태는 WhipGuide가 소유하고, 호출 시
@@ -1117,7 +1096,7 @@ private:
 	// 거리 LOD 배율 계산(Prepare, GT): 서브시스템이 프레임당 한 번 구한 카메라 위치를 거리로 바꿔 Throttle에 위임.
 	void ComputeSolverLOD(const TOptional<FVector>& CameraLocation);
 	// LOD 반영된 유효 iteration(CPU 솔브/GPU 스텝 공용 — 서브시스템이 호출).
-	int32 GetLODScaledIterations() const { return Throttle.LODScaledIterations(GetEffectiveSolverConfig().Iterations); }
+	int32 GetLODScaledIterations() const { return Throttle.LODScaledIterations(SolverConfig.Iterations); }
 
 	// 동작 1 — 자동 견인(테더, Docs/PoC/05): 관측(전 체인 C·벌어짐 속도)→λ 솔브→양끝 임펄스 쌍 인가.
 	// ApplyWrappedTraction이 매 Wrapped 프레임 호출한다. 결과는 LengthConstraintState에 단일 단위로 기록된다.

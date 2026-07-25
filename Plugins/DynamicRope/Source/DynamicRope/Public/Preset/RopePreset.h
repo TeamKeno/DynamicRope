@@ -61,11 +61,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Rope", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float ReelSpeed = 150.0f;
 
-	/** 시뮬레이션 품질(정밀도/성능). Custom이 아니면 컴포넌트가 런타임에 Substeps/Iterations/스윕 샘플링을
-	 *  이 값으로 해석한다(URopeComponent::GetEffectiveSolverConfig). Custom이면 아래 SolverConfig 그대로. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Rope")
-	ERopeSimQuality SimQuality = ERopeSimQuality::Medium;
-
 	/** 솔버(XPBD) 튜닝 — substep/iteration/컴플라이언스/마찰/중력/슬립/LOD. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Rope")
 	FRopeSolverConfig SolverConfig;

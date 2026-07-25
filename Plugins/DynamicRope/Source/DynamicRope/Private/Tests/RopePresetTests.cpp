@@ -175,86 +175,34 @@ bool FRopePresetApplyStampsValuesTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// SimQuality는 저장 SolverConfig를 비파괴로 해석한다(GetEffectiveSolverConfig) — 프리셋/Custom 세부를
-// 덮어쓰지 않고, High→Custom 왕복에도 Custom 세부가 살아 있다.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSimQualityEffectiveTest,
-	"DynamicRope.SimQuality.EffectiveConfig",
+// 저장 설정이 곧 런타임 값이다 — 중간 해석 단계가 없다. 정밀도/비용 기본값은 문서화된 값을
+// 유지해야 하고(회귀 방어), 프리셋은 그 값을 그대로 스탬프한다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeStoredConfigIsRuntimeConfigTest,
+	"DynamicRope.Preset.StoredConfigIsRuntimeConfig",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FRopeSimQualityEffectiveTest::RunTest(const FString& Parameters)
+bool FRopeStoredConfigIsRuntimeConfigTest::RunTest(const FString& Parameters)
 {
 	URopeComponent* Rope = NewObject<URopeComponent>();
-	Rope->SolverConfig.Substeps = 7;
-	Rope->SolverConfig.Iterations = 3;
 
-	// Custom: 저장 값 그대로.
-	Rope->SimQuality = ERopeSimQuality::Custom;
-	TestEqual(TEXT("Custom Substeps 유지"), Rope->GetEffectiveSolverConfig().Substeps, 7);
-	TestEqual(TEXT("Custom Iterations 유지"), Rope->GetEffectiveSolverConfig().Iterations, 3);
+	// 솔버 정밀도/스윕 기본값.
+	TestEqual(TEXT("기본 Substeps=12"), Rope->SolverConfig.Substeps, 12);
+	TestEqual(TEXT("기본 Iterations=4"), Rope->SolverConfig.Iterations, 4);
+	TestEqual(TEXT("기본 SweepStep=2"), Rope->SolverConfig.SweepStep, 2.0f);
+	TestEqual(TEXT("기본 MaxSweepSamples=16"), Rope->SolverConfig.MaxSweepSamples, 16);
 
-	// Medium: 저장 값 무시하고 12/4.
-	Rope->SimQuality = ERopeSimQuality::Medium;
-	TestEqual(TEXT("Medium Substeps=12"), Rope->GetEffectiveSolverConfig().Substeps, 12);
-	TestEqual(TEXT("Medium Iterations=4"), Rope->GetEffectiveSolverConfig().Iterations, 4);
+	// 접촉 감지 스윕 + 감김 경로 빌드 예산 기본값.
+	TestEqual(TEXT("기본 ContactSweepStep=2"), Rope->DetectConfig.ContactSweepStep, 2.0f);
+	TestEqual(TEXT("기본 ContactMaxSweepSamples=16"), Rope->DetectConfig.ContactMaxSweepSamples, 16);
+	TestEqual(TEXT("기본 WrappingPathBuildSteps=8"), Rope->WrapConfig.WrappingPathBuildStepsPerFrame, 8);
 
-	// High → Custom 왕복: 저장 SolverConfig는 불변이라 Custom으로 되돌리면 7/3이 그대로.
-	Rope->SimQuality = ERopeSimQuality::High;
-	TestEqual(TEXT("High Substeps=16"), Rope->GetEffectiveSolverConfig().Substeps, 16);
-	TestEqual(TEXT("High에서도 저장 SolverConfig 불변"), Rope->SolverConfig.Substeps, 7);
-	Rope->SimQuality = ERopeSimQuality::Custom;
-	TestEqual(TEXT("Custom 복귀 시 세부 유지"), Rope->GetEffectiveSolverConfig().Substeps, 7);
-
-	// 프리셋 SimQuality가 적용에 복사되고, 저장 SolverConfig는 프리셋 값 그대로 유지된다.
+	// 프리셋 스탬프 후에도 저장값이 그대로 남는다(적용 이후 재해석 없음).
 	URopePreset* Preset = NewObject<URopePreset>();
-	Preset->SimQuality = ERopeSimQuality::Low;
 	Preset->SolverConfig.Substeps = 9;
+	Preset->SolverConfig.Iterations = 5;
 	TestTrue(TEXT("프리셋 적용 성공"), Rope->ApplyPreset(Preset));
-	TestTrue(TEXT("프리셋 SimQuality 복사"), Rope->SimQuality == ERopeSimQuality::Low);
-	TestEqual(TEXT("저장 SolverConfig는 프리셋 값 그대로(9)"), Rope->SolverConfig.Substeps, 9);
-	TestEqual(TEXT("Low effective Substeps=6"), Rope->GetEffectiveSolverConfig().Substeps, 6);
-
-	return true;
-}
-
-// SimQuality가 Solver뿐 아니라 접촉 감지 스윕·감김 경로 빌드 예산까지 비파괴로 해석하는지 —
-// Detect/Wrap이 저장 원본을 그대로 쓰던(품질 부분 무동작) 회귀의 방어. Custom은 저장값 유지.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSimQualityDetectWrapTest,
-	"DynamicRope.SimQuality.EffectiveDetectAndWrap",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FRopeSimQualityDetectWrapTest::RunTest(const FString& Parameters)
-{
-	URopeComponent* Rope = NewObject<URopeComponent>();
-
-	Rope->SimQuality = ERopeSimQuality::Low;
-	TestEqual(TEXT("Low ContactSweepStep=4"), Rope->GetEffectiveDetectConfig().ContactSweepStep, 4.0f);
-	TestEqual(TEXT("Low ContactMaxSweepSamples=8"), Rope->GetEffectiveDetectConfig().ContactMaxSweepSamples, 8);
-	TestEqual(TEXT("Low WrappingPathBuildSteps=4"), Rope->GetEffectiveWrappingPathBuildSteps(), 4);
-
-	// Medium = 저장 기본값(2.0 / 16 / 8)과 동일.
-	Rope->SimQuality = ERopeSimQuality::Medium;
-	TestEqual(TEXT("Medium ContactSweepStep=2"), Rope->GetEffectiveDetectConfig().ContactSweepStep, 2.0f);
-	TestEqual(TEXT("Medium ContactMaxSweepSamples=16"), Rope->GetEffectiveDetectConfig().ContactMaxSweepSamples, 16);
-	TestEqual(TEXT("Medium WrappingPathBuildSteps=8"), Rope->GetEffectiveWrappingPathBuildSteps(), 8);
-
-	Rope->SimQuality = ERopeSimQuality::High;
-	TestEqual(TEXT("High ContactSweepStep=1.5"), Rope->GetEffectiveDetectConfig().ContactSweepStep, 1.5f);
-	TestEqual(TEXT("High ContactMaxSweepSamples=32"), Rope->GetEffectiveDetectConfig().ContactMaxSweepSamples, 32);
-	TestEqual(TEXT("High WrappingPathBuildSteps=12"), Rope->GetEffectiveWrappingPathBuildSteps(), 12);
-
-	// Custom: 저장값 그대로 반환.
-	Rope->DetectConfig.ContactSweepStep = 3.3f;
-	Rope->DetectConfig.ContactMaxSweepSamples = 21;
-	Rope->WrapConfig.WrappingPathBuildStepsPerFrame = 25;
-	Rope->SimQuality = ERopeSimQuality::Custom;
-	TestEqual(TEXT("Custom ContactSweepStep 유지"), Rope->GetEffectiveDetectConfig().ContactSweepStep, 3.3f);
-	TestEqual(TEXT("Custom ContactMaxSweepSamples 유지"), Rope->GetEffectiveDetectConfig().ContactMaxSweepSamples, 21);
-	TestEqual(TEXT("Custom WrappingPathBuildSteps 유지"), Rope->GetEffectiveWrappingPathBuildSteps(), 25);
-
-	// 비파괴: High로 바꿔도 저장 DetectConfig/WrapConfig는 불변.
-	Rope->SimQuality = ERopeSimQuality::High;
-	TestEqual(TEXT("High에서도 저장 DetectConfig 불변"), Rope->DetectConfig.ContactSweepStep, 3.3f);
-	TestEqual(TEXT("High에서도 저장 WrapConfig 불변"), Rope->WrapConfig.WrappingPathBuildStepsPerFrame, 25);
+	TestEqual(TEXT("Substeps 스탬프"), Rope->SolverConfig.Substeps, 9);
+	TestEqual(TEXT("Iterations 스탬프"), Rope->SolverConfig.Iterations, 5);
 
 	return true;
 }

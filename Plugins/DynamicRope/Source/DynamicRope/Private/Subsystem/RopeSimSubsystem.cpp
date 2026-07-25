@@ -1227,8 +1227,8 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 
 	// 고정-timestep 스케줄(CPU accumulator). override-only 프레임(bSolveThisFrame=false)은 적분 없이
 	// override만 기록한다(NumSub=0) — CPU 경로의 "솔브 없음"과 동일한 시간 처리.
-	// SimQuality 반영 솔버 설정(비파괴) — schedule/seed가 같은 effective 값을 쓴다.
-	const FRopeSolverConfig EffSolverCfg = Rope.GetEffectiveSolverConfig();
+	// schedule/seed가 같은 솔버 설정을 쓴다.
+	const FRopeSolverConfig& EffSolverCfg = Rope.SolverConfig;
 	FRopeSubstepSchedule Schedule;
 	Schedule.NumSub = 0;
 	Schedule.FixedDt = 0.0f;
@@ -1300,10 +1300,9 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 	Step.bDetectContacts = true;
 	Step.ContactRadius = Rope.GetEffectiveContactQueryRadius();
 	Step.PredictionFrames = Rope.WrapConfig.PredictiveContactFrames;
-	// 감지 스윕 해상도(터널링 방지) — CPU MakeFlightDetectParams와 같은 소스(SimQuality 해석값)에서 온다.
-	const FRopeDetectConfig EffectiveDetect = Rope.GetEffectiveDetectConfig();
-	Step.ContactSweepStep = EffectiveDetect.ContactSweepStep;
-	Step.ContactMaxSweepSamples = EffectiveDetect.ContactMaxSweepSamples;
+	// 감지 스윕 해상도(터널링 방지) — CPU MakeFlightDetectParams와 같은 저장값에서 온다.
+	Step.ContactSweepStep = Rope.DetectConfig.ContactSweepStep;
+	Step.ContactMaxSweepSamples = Rope.DetectConfig.ContactMaxSweepSamples;
 	// 예측 접촉 free 노드 외삽의 substep→프레임 변위 환산(#8). Step.FixedDt(=Schedule.FixedDt=(1/60)/Substeps)는
 	// SeedResidentStep이 이미 채웠다 — CPU MakeFlightDetectParams의 FrameDeltaTime/SubstepDeltaTime과 동일 값.
 	Step.ContactFrameToSubstepRatio = (Step.FixedDt > KINDA_SMALL_NUMBER) ? (DeltaTime / Step.FixedDt) : 1.0f;

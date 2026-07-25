@@ -27,22 +27,7 @@ enum class ERopeWrappingAxisSource : uint8
 	CaptureTravelPlane = 1 UMETA(DisplayName = "Capture Travel Plane")
 };
 
-/**
- * 시뮬레이션 품질 프리셋 — 정밀도/성능 균형을 한 값으로 고른다. Custom이 아니면 컴포넌트가
- * 솔버(Substeps/Iterations/스윕)·접촉 감지 스윕·감김 경로 빌드 예산을 이 값으로 해석한다
- * (URopeComponent::GetEffective{Solver,Detect}Config·GetEffectiveWrappingPathBuildSteps, 비파괴 —
- * 저장 원본 불변). 개별 Advanced 필드를 직접 조정하려면 Custom. Medium = 기존 기본값과 동일(무변화).
- */
-UENUM(BlueprintType)
-enum class ERopeSimQuality : uint8
-{
-	Low = 0 UMETA(DisplayName = "Low"),
-	Medium = 1 UMETA(DisplayName = "Medium"),
-	High = 2 UMETA(DisplayName = "High"),
-	Custom = 3 UMETA(DisplayName = "Custom")
-};
-
-/** XPBD solver 튜닝(디자이너용). */
+/** XPBD solver 튜닝(디자이너용). 저장값이 곧 런타임 적용값이다. */
 USTRUCT(BlueprintType)
 struct FRopeSolverConfig
 {
@@ -205,7 +190,7 @@ struct FRopeWrapConfig
 	//~ 캡처 판정(감지 문턱) --------------------------------------------------
 	// Flight에서 "잡혔다"고 볼 문턱값. ①FullSimulation/②AssistedJudged의 판정 경로 전용이고,
 	// ③GuaranteedWrap은 GuidedThrow가 확정한 앵커로만 성립하므로 이 셋을 보지 않는다.
-	// 감지 스윕의 해상도/비용은 SimQuality가 정한다(FRopeDetectConfig).
+	// 감지 스윕의 해상도/비용은 FRopeDetectConfig가 갖는다.
 
 	/** 스치는 접촉이 아니라 catch로 간주하기 위해 한 bone에 닿아야 하는 최소 rope 노드 수. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "1"))
@@ -393,11 +378,11 @@ struct FRopeWrapConfig
 };
 
 /**
- * Flight 접촉 감지 스윕의 해상도/비용 — SimQuality가 정하는 파생값이라 디테일 패널에 노출하지 않는다
- * (솔버 충돌 쪽 FRopeSolverConfig::SweepStep/MaxSweepSamples와 같은 취급). 컴포넌트 경계의
- * URopeComponent::GetEffectiveDetectConfig가 품질 등급으로 채워 CPU/GPU 감지 경로에 넘긴다.
- * 캡처 문턱값(MinLatchNodes/WrapDecisionTime/PredictiveContactFrames)은 FRopeWrapConfig,
- * 던지기 실패 복귀 시간은 FRopeThrowParams 소유다.
+ * Flight 접촉 감지 스윕의 해상도/비용. 저장값이 곧 CPU/GPU 감지 경로에 실리는 값이다
+ * (CPU MakeFlightDetectParams · GPU RequestContactDetection). 솔버 충돌 쪽
+ * FRopeSolverConfig::SweepStep/MaxSweepSamples와 같은 성격이되, 감지는 Flight에서만 돌아
+ * 예산을 따로 둔다. 캡처 문턱값(MinLatchNodes/WrapDecisionTime/PredictiveContactFrames)은
+ * FRopeWrapConfig, 던지기 실패 복귀 시간은 FRopeThrowParams 소유다.
  */
 struct FRopeDetectConfig
 {
