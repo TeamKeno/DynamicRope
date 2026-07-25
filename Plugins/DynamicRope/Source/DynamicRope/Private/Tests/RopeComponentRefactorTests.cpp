@@ -357,7 +357,7 @@ bool FRopeAssistedActualSweepDecisionIsFrameRateIndependentTest::RunTest(const F
 		URopeComponent* Rope = NewObject<URopeComponent>();
 		FRopeComponentRefactorTestSeam::ConfigureSim(*Rope, 4, 60.0f);
 		FRopeComponentRefactorTestSeam::ConfigureAssistedAimLock(*Rope, Mesh, Bone);
-		Rope->DetectConfig.WrapDecisionTime = 0.016f;
+		Rope->WrapConfig.WrapDecisionTime = 0.016f;
 		return Rope;
 	};
 
@@ -378,7 +378,7 @@ bool FRopeAssistedActualSweepDecisionIsFrameRateIndependentTest::RunTest(const F
 	TestEqual(TEXT("locked Assisted Actual sweep receives one nominal 60 Hz contact frame at 240 Hz"),
 		ActualDwell, 1.0f / 60.0f);
 	TestTrue(TEXT("nominal contact frame clears the default time-based decision"),
-		ActualDwell >= ActualRope->DetectConfig.WrapDecisionTime);
+		ActualDwell >= ActualRope->WrapConfig.WrapDecisionTime);
 
 	Candidate.Source = ERopeContactCandidateSource::PredictiveGuided;
 	Candidate.SourceMask = static_cast<uint8>(ERopeContactCandidateSource::PredictiveGuided);
@@ -399,7 +399,7 @@ bool FRopeAssistedGpuCaptureDefersImmediateWrapTest::RunTest(const FString& Para
 	URopeComponent* Rope = NewObject<URopeComponent>();
 	FRopeComponentRefactorTestSeam::ConfigureSim(*Rope, 4, 60.0f);
 	FRopeComponentRefactorTestSeam::SetPhase(*Rope, ERopePhase::Flight);
-	Rope->DetectConfig.WrapDecisionTime = 0.0f;
+	Rope->WrapConfig.WrapDecisionTime = 0.0f;
 	USceneComponent* Mesh = NewObject<USceneComponent>();
 	const FName Bone("upperarm_l");
 

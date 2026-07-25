@@ -141,7 +141,6 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	SolverConfig = Preset->SolverConfig;
 	ThrowParams = Preset->ThrowParams;
 	WrapConfig = Preset->WrapConfig;
-	DetectConfig = Preset->DetectConfig;
 	HoldConfig = Preset->HoldConfig;
 	WhipConfig = Preset->WhipConfig;
 	bUseTipMesh = Preset->bUseTipMesh;

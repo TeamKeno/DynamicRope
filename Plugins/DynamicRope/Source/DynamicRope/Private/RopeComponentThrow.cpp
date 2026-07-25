@@ -1028,8 +1028,8 @@ FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float
 	FRopeFlightContactDetector::FParams Params;
 	Params.ContactRadius = GetEffectiveContactQueryRadius();
 	Params.RopeRadius = Radius;
-	Params.PredictiveContactFrames = DetectConfig.PredictiveContactFrames;
-	Params.MinLatchNodes = DetectConfig.MinLatchNodes;
+	Params.PredictiveContactFrames = WrapConfig.PredictiveContactFrames;
+	Params.MinLatchNodes = WrapConfig.MinLatchNodes;
 	Params.FallbackForward = GetForwardVector();
 	// 감지 스윕 해상도(터널링 방지) — SimQuality 해석값. GPU step에도 같은 값이 실린다(RequestContactDetection).
 	const FRopeDetectConfig EffectiveDetect = GetEffectiveDetectConfig();
@@ -1099,7 +1099,7 @@ void URopeComponent::BuildCpuFlightContactCandidates(float DeltaTime,
 	// 예측이 꺼져 있으면(PredictiveContactFrames<=0) 검출기가 어차피 early-out이라 미리보기를 만들지 않는다.
 	// NextGuideTargetScratch는 뷰가 가리키는 멤버 버퍼 — 감지가 끝난 뒤 다음 CPU 사용 때 Reset한다.
 	FRopeFlightContactDetector::FWhipGuideView WhipView;
-	if (DetectConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
+	if (WrapConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
 	{
 		WhipGuide.PreviewNextTargets(DeltaTime, Sim, MakeWhipGuideConfig(), NextGuideTargetScratch);
 		WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
@@ -1265,8 +1265,8 @@ bool URopeComponent::ApplyFlightCaptureEvaluation(float DeltaTime,
 	// 후보가 계속 있어도 MinLatchNodes/품질 조건을 넘지 못하면 Flight에 갇힐 수 있으므로 리셋하지 않는다.
 	if (!WhipGuide.IsActive())
 	{
-		const float FlightReturnTime = DetectConfig.FlightNoContactReturnTime > 0.0f
-			? DetectConfig.FlightNoContactReturnTime
+		const float FlightReturnTime = ThrowParams.FlightNoContactReturnTime > 0.0f
+			? ThrowParams.FlightNoContactReturnTime
 			: ReleaseCooldownSeconds;
 		FlightNoContactElapsed += DeltaTime;
 		if (FlightNoContactElapsed >= FlightReturnTime)

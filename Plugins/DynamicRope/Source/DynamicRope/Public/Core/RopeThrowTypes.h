@@ -165,6 +165,11 @@ struct FRopeThrowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "1.0", UIMin = "100.0", UIMax = "5000.0", Units = "cm/s", DisplayName = "Throw Speed"))
 	float ThrowSpeed = 1500.0f;
 
+	/** Whip 종료 후 이 시간 동안 캡처하지 못하면 던지기 실패로 보고 Free로 복귀한다(초).
+	 *  0이면 컴포넌트의 기본 실패 복귀 쿨다운(ReleaseCooldownSeconds)을 쓴다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw|Tuning", meta = (ClampMin = "0.0", Units = "s"))
+	float FlightNoContactReturnTime = 0.0f;
+
 	/**
 	 * 던지기 속도 주입의 팁 부스트 배율(1 = 균등, >1 = 끝으로 갈수록 세게 — 채찍처럼 끝이 앞서 나감).
 	 * 질량이 아니다: 솔버에는 어떤 질량도 반영되지 않고(2026-07-13 회의 — 팁 질량 솔버 무반영),

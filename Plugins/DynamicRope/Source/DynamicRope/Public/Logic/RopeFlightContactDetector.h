@@ -46,10 +46,10 @@ public:
 		/** 튜브 반지름(broad-phase 바운즈 여유에 합산). */
 		float RopeRadius = 2.0f;
 
-		/** DetectConfig.PredictiveContactFrames: 예측 외삽 프레임 수. */
+		/** WrapConfig.PredictiveContactFrames: 예측 외삽 프레임 수. */
 		float PredictiveContactFrames = 0.0f;
 
-		/** DetectConfig.MinLatchNodes: 캡처에 필요한 최소 접촉 노드 수. */
+		/** WrapConfig.MinLatchNodes: 캡처에 필요한 최소 접촉 노드 수. */
 		int32 MinLatchNodes = 1;
 
 		/** ExpectedWrapTangent 퇴화 케이스용(컴포넌트 전방). */

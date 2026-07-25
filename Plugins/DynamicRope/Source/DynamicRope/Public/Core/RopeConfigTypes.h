@@ -193,16 +193,29 @@ struct FRopeWrapConfig
 
 	/**
 	 * 접촉 *질의* 반지름(cm) — 이름이 말하듯 특정 단계 소유가 아니라 **감지(Flight/Contacting)와
-	 * 성립(경로 빌드 투영/스냅 상한/DecideWrap)이 공유하는 표면 질의 프로브 반경**이다(그래서 감지
-	 * 4종이 DetectConfig로 분리될 때 여기 남았다 — 표면 감사 B-1 축소안, 구 이름 ContactRadius).
+	 * 성립(경로 빌드 투영/스냅 상한/DecideWrap)이 공유하는 표면 질의 프로브 반경**이다.
 	 * **기본 0 = auto: 렌더 튜브 Radius × 1.5**(반지름 3종 자동 정합; 명시값을 넣으면 그 값). 해석은
 	 * 컴포넌트 경계(GetEffectiveContactQueryRadius)에서 — 소비처는 해석된 값을 받는다. 주의: 컴포넌트
 	 * 없이 직접 쓰는 소비자(유닛 테스트 등)에는 auto 해석이 없다 — 반드시 명시값을 넣을 것. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Contact Query Radius (0=Auto)"))
 	float ContactQueryRadius = 0.0f;
 
-	// NOTE: 순수 감지 튜닝 4종(MinLatchNodes/WrapDecisionTime/PredictiveContactFrames/
-	// FlightNoContactReturnTime)은 FRopeDetectConfig("Rope|Detect")로 분리됐다(표면 감사 B-1).
+	//~ 캡처 판정(감지 문턱) --------------------------------------------------
+	// Flight에서 "잡혔다"고 볼 문턱값. ①FullSimulation/②AssistedJudged의 판정 경로 전용이고,
+	// ③GuaranteedWrap은 GuidedThrow가 확정한 앵커로만 성립하므로 이 셋을 보지 않는다.
+	// 감지 스윕의 해상도/비용은 SimQuality가 정한다(FRopeDetectConfig).
+
+	/** 스치는 접촉이 아니라 catch로 간주하기 위해 한 bone에 닿아야 하는 최소 rope 노드 수. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "1"))
+	int32 MinLatchNodes = 1;
+
+	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "s"))
+	float WrapDecisionTime = 0.016f;
+
+	/** 얇은 사지/SDF 후보를 놓치지 않기 위한 Flight 예측 lookahead(프레임 변위 배수). 0이면 예측 끔. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float PredictiveContactFrames = 1.0f;
 
 	/**
 	 * 한 번의 캡처에서 채택할 수 있는 wrap 시드(접촉 대상) 최대 개수. 1(기본) = 기존 단일 시드 동작.
@@ -378,45 +391,22 @@ struct FRopeWrapConfig
 };
 
 /**
- * Flight/Contacting 감지 튜닝 — "언제 잡혔다고 볼 것인가"의 단계로, 성립(FRopeWrapConfig)과
- * 다른 도메인이라 분리했다(2026-07-13 표면 감사 B-1). 공유 프로브 반경(ContactQueryRadius)은
- * 성립 쪽도 쓰므로 WrapConfig에 남아 있다(그쪽 주석 참고).
+ * Flight 접촉 감지 스윕의 해상도/비용 — SimQuality가 정하는 파생값이라 디테일 패널에 노출하지 않는다
+ * (솔버 충돌 쪽 FRopeSolverConfig::SweepStep/MaxSweepSamples와 같은 취급). 컴포넌트 경계의
+ * URopeComponent::GetEffectiveDetectConfig가 품질 등급으로 채워 CPU/GPU 감지 경로에 넘긴다.
+ * 캡처 문턱값(MinLatchNodes/WrapDecisionTime/PredictiveContactFrames)은 FRopeWrapConfig,
+ * 던지기 실패 복귀 시간은 FRopeThrowParams 소유다.
  */
-USTRUCT(BlueprintType)
 struct FRopeDetectConfig
 {
-	GENERATED_BODY()
-
-	/** 스치는 접촉이 아니라 catch로 간주하기 위해 한 bone에 닿아야 하는 최소 rope 노드 수. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "1"))
-	int32 MinLatchNodes = 1;
-
-	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "0.0", Units = "s"))
-	float WrapDecisionTime = 0.016f;
-
-	/** Extra Flight lookahead in frame-displacements for thin limb/SDF candidate detection. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "0.0", ClampMax = "4.0"))
-	float PredictiveContactFrames = 1.0f;
-
-	/** Whip 종료 후 이 시간 동안 캡처하지 못하면 Free로 복귀한다. 0이면 기본 실패 복귀 쿨다운을 쓴다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "0.0", Units = "s"))
-	float FlightNoContactReturnTime = 0.0f;
-
 	/**
 	 * 접촉 감지 스윕의 샘플 간격(cm). 노드가 한 프레임에 이동한 경로를 이 간격으로 점질의해 최심 접촉을
-	 * 찾는다 — **터널링을 막는 값**이라 대상의 얇은 쪽 두께(팔뚝/난간)보다 작아야 한다.
-	 *
-	 * 종전에는 간격을 `SegmentLength` 기준으로 잡고 샘플을 4개로 잘랐다. 세그먼트 길이는 대상 두께와
-	 * 아무 관계가 없어서(로프 20cm 세그먼트 vs 팔뚝 8cm) 빠른 던지기는 샘플 사이로 대상을 그냥 지나쳤고,
-	 * CPU/GPU가 똑같이 틀려 parity 테스트도 통과했다. 이제 cm 단위로 끊는다 — solver 충돌의
+	 * 찾는다 — **터널링을 막는 값**이라 대상의 얇은 쪽 두께(팔뚝/난간)보다 작아야 한다. 솔버 충돌의
 	 * FRopeSolverConfig::SweepStep과 같은 사고방식이되, 감지는 Flight에서만 도므로 예산을 따로 둔다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "0.1", Units = "cm"))
 	float ContactSweepStep = 2.0f;
 
 	/** 위 스윕의 샘플 수 상한(비용 한도). 매우 빠른 노드는 간격이 이 상한에 눌려 넓어진다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 ContactMaxSweepSamples = 16;
 };
 

@@ -76,13 +76,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Throw")
 	FRopeThrowParams ThrowParams;
 
-	/** physics → logic (wrap) 핸드오프 — *성립*(경로 빌드/판정/커밋) 튜닝. */
+	/** physics → logic (wrap) 핸드오프 — 캡처 판정 문턱과 *성립*(경로 빌드/판정/커밋) 튜닝. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Wrap")
 	FRopeWrapConfig WrapConfig;
-
-	/** Flight/Contacting *감지*(언제 잡혔다고 볼 것인가) 튜닝. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Detect")
-	FRopeDetectConfig DetectConfig;
 
 	/** Wrapped *이후*(유지/당김/풀림) 튜닝. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Hold")

@@ -212,13 +212,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ShowOnlyInnerProperties))
 	FRopeThrowParams ThrowParams;
 
-	/** physics → logic (wrap) 핸드오프 — *성립*(경로 빌드/판정/커밋) 튜닝. 감지는 DetectConfig. */
+	/** physics → logic (wrap) 핸드오프 — 캡처 판정 문턱과 *성립*(경로 빌드/판정/커밋) 튜닝. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ShowOnlyInnerProperties))
 	FRopeWrapConfig WrapConfig;
 
-	/** Flight/Contacting *감지*(언제 잡혔다고 볼 것인가) 튜닝 — 성립(WrapConfig)과 분리된 도메인
-	 *  (2026-07-13 표면 감사 B-1). 공유 프로브 반경(ContactQueryRadius)은 WrapConfig 소유. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Detect", meta = (ShowOnlyInnerProperties))
+	/** Flight 감지 스윕의 해상도/비용. SimQuality가 해석하는 파생값이라 디테일 패널에 노출하지 않는다
+	 *  — 소비처는 GetEffectiveDetectConfig()의 해석된 사본을 받는다. C++/테스트에서 SimQuality=Custom과
+	 *  함께 쓰면 여기 저장값이 그대로 나간다. */
 	FRopeDetectConfig DetectConfig;
 
 	/** Wrapped *이후*(유지/당김/풀림) 튜닝 — 성립 판정(WrapConfig)과 분리된 Post-Wrap 도메인

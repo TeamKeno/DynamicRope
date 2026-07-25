@@ -23,7 +23,7 @@ struct FRopeWrappingFallbackTestSeam
 		Rope.ContactTracker.CandidateMesh = Mesh;
 		Rope.ContactTracker.CandidateBone = FName("arm");
 		Rope.ContactTracker.CandidateNodes = { 0 };
-		Rope.ContactTracker.DwellTime = Rope.DetectConfig.WrapDecisionTime;
+		Rope.ContactTracker.DwellTime = Rope.WrapConfig.WrapDecisionTime;
 		Rope.SimFrame.FrameColliders = { &Collider };
 
 		// BoneCenteredGuidePlane이 캡슐의 Z축을 사용하도록 고정해 테스트가 컴포넌트 축 폴백의
@@ -56,7 +56,7 @@ struct FRopeWrappingFallbackTestSeam
 		Rope.Sim = RopeTest::MakeStraightRope(4, 60.0f);
 		Rope.Radius = 1.0f;
 		Rope.WrapConfig.ContactQueryRadius = 3.0f;
-		Rope.DetectConfig.WrapDecisionTime = 0.05f;
+		Rope.WrapConfig.WrapDecisionTime = 0.05f;
 		Rope.ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 		Rope.Phase = ERopePhase::Contacting;
 

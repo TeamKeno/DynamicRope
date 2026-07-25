@@ -391,7 +391,7 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope, bool 
 	const float BaseMargin = Rope.GetEffectiveCollisionRadius() + Rope.GetEffectiveContactQueryRadius()
 		+ FMath::Max(2.0f * Rope.Sim.SegmentLength, 50.0f);
 	const float PredictiveMotionMargin = FMath::Sqrt(MaxFrameDispSq)
-		* FMath::Max(Rope.DetectConfig.PredictiveContactFrames, 1.0f);
+		* FMath::Max(Rope.WrapConfig.PredictiveContactFrames, 1.0f);
 	const float QueryMargin = BaseMargin + PredictiveMotionMargin;
 	if (RopeBounds.IsValid)
 	{
@@ -1293,7 +1293,7 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 	// 같은 순서로 채우므로 여기서 먼저 리셋한다.
 	Step.bDetectContacts = true;
 	Step.ContactRadius = Rope.GetEffectiveContactQueryRadius();
-	Step.PredictionFrames = Rope.DetectConfig.PredictiveContactFrames;
+	Step.PredictionFrames = Rope.WrapConfig.PredictiveContactFrames;
 	// 감지 스윕 해상도(터널링 방지) — CPU MakeFlightDetectParams와 같은 소스(SimQuality 해석값)에서 온다.
 	const FRopeDetectConfig EffectiveDetect = Rope.GetEffectiveDetectConfig();
 	Step.ContactSweepStep = EffectiveDetect.ContactSweepStep;

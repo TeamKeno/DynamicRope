@@ -468,7 +468,7 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 			TEXT("[%s] Contacting dismissed before wrap: reason=ContactTrackerEmpty candidates=%d trackerBone=%s trackerNodes=%d dwell=%.3fs required=%.3fs elapsed=%.3fs colliders=%d"),
 			*GetName(), Candidates.Num(), *ContactTracker.CandidateBone.ToString(),
 			ContactTracker.CandidateNodes.Num(), ContactTracker.DwellTime,
-			DetectConfig.WrapDecisionTime, ContactingElapsed, SimFrame.FrameColliders.Num());
+			WrapConfig.WrapDecisionTime, ContactingElapsed, SimFrame.FrameColliders.Num());
 		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight: 재진입 계약).
 		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone, TEXT("contact lost before wrapping"));
 		return;
@@ -494,18 +494,18 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 
 	// 정체 안전망: 접촉이 깜빡여 dwell이 임계에 못 미친 채 오래 머물면(커밋도 dismiss도 안 됨)
 	// Flight로 돌려보낸다. Flight에서 재캡처는 자유이므로 잃는 것 없이 무한 체류만 막는다.
-	const float StallTimeout = FMath::Max(DetectConfig.WrapDecisionTime * 10.0f, 1.0f);
+	const float StallTimeout = FMath::Max(WrapConfig.WrapDecisionTime * 10.0f, 1.0f);
 	if (ContactingElapsed >= StallTimeout)
 	{
 		UE_LOG(LogRopeWrap, Warning,
 			TEXT("[%s] Contacting stalled before wrap: candidates=%d trackerBone=%s trackerNodes=%d targets=%d dwell=%.3fs required=%.3fs elapsed=%.3fs timeout=%.3fs"),
 			*GetName(), Candidates.Num(), *ContactTracker.CandidateBone.ToString(),
 			ContactTracker.CandidateNodes.Num(), ContactTracker.Targets.Num(),
-			ContactTracker.DwellTime, DetectConfig.WrapDecisionTime, ContactingElapsed, StallTimeout);
+			ContactTracker.DwellTime, WrapConfig.WrapDecisionTime, ContactingElapsed, StallTimeout);
 		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight).
 		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone,
 			*FString::Printf(TEXT("contacting stalled %.2fs (dwell %.2fs < %.2fs)"),
-				ContactingElapsed, ContactTracker.DwellTime, DetectConfig.WrapDecisionTime));
+				ContactingElapsed, ContactTracker.DwellTime, WrapConfig.WrapDecisionTime));
 	}
 }
 
@@ -519,7 +519,7 @@ bool URopeComponent::ShouldStartWrapping() const
 	// 판정은 "한 본과의 지속 접촉"(트래커 dwell — 지배 본이 바뀌면 0부터) 기준. 총 경과가 아니라
 	// dwell을 쓰는 것이 원 설계 의도(노드들이 WrapDecisionTime 동안 한 본에 유지)와 일치한다.
 	// 안정 접촉에서는 dwell == 총 경과라 기존과 동일하고, 본이 튀는 전이 프레임에서만 엄격해진다.
-	return ContactTracker.DwellTime >= DetectConfig.WrapDecisionTime
+	return ContactTracker.DwellTime >= WrapConfig.WrapDecisionTime
 		&& PendingWrapSeed.Latched.Num() > 0
 		&& !PendingWrapSeed.BoneName.IsNone();
 }
@@ -572,7 +572,7 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 		{
 			const bool bDominant = Target.Bone == ContactTracker.CandidateBone &&
 				Target.Mesh == ContactTracker.CandidateMesh;
-			if (!bDominant && Target.DwellTime >= DetectConfig.WrapDecisionTime)
+			if (!bDominant && Target.DwellTime >= WrapConfig.WrapDecisionTime)
 			{
 				Sorted.Add(&Target);
 			}
