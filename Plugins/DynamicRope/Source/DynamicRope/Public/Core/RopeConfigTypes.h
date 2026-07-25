@@ -432,8 +432,12 @@ struct FRopeHoldConfig
 	 * Material-length constraint activation tolerance(cm). This is a numerical boundary band:
 	 * it allows an outward attempt within this distance to produce a stable reaction, but it is
 	 * never added to rope length and therefore cannot make an inextensible rope longer.
+	 *
+	 * 비노출(BP 전용): 견인 시작 경계는 `max(이 값, MaxDistance × TautSlackRatio × 히스테리시스)`라
+	 * 실사용 길이의 로프에서는 뒤 항이 항상 이긴다(600cm 로프면 ≈18cm 대 0.5cm). 경계를 옮기는
+	 * 디자이너 노브는 TautSensitivity이고, 이 값은 그 아래를 받치는 수치 안정성 바닥이다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning",
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Hold|Tuning",
 		meta = (ClampMin = "0.0", Units = "cm"))
 	float LengthConstraintActivationSlop = 0.5f;
 
@@ -446,16 +450,22 @@ struct FRopeHoldConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0"))
 	float TensionReleaseForce = 0.0f;
 
-	/** 장력 release 판정의 지속 시간(초). 순간 스파이크(충격 프레임)로 풀리는 것을 막는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0", Units = "s"))
+	/** 장력 release 판정의 지속 시간(초). 순간 스파이크(충격 프레임)로 풀리는 것을 막는다.
+	 *  TensionReleaseForce = 0(장력 release 끔)이면 판정 자체가 없어 회색 처리된다. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release",
+		meta = (ClampMin = "0.0", Units = "s", EditCondition = "TensionReleaseForce > 0.0"))
 	float TensionReleaseTime = 0.05f;
 
 	/**
-	 * (wielder 쪽 시뮬 루트 한정) λ 임펄스는 로프 축 성분만 만드므로, 방향이 급전환하면 옛 방향 관성이
-	 * 직교로 남아 날아간다("관성 과다"). 이 비율(0 = 보존, 1 = 완전 제거)로 그 잔여 관성을 몇 프레임에
-	 * 걸쳐 빼 fling을 억제한다. 값은 60fps 기준 프레임당 비율이고 적용 시 dt로 보정된다(프레임률 독립).
-	 * **대상 쪽 시뮬 바디(프랍/랙돌)는 물리 제약 테더가 담당해 이 감쇠를 타지 않는다** — 남는 수신자는
-	 * wielder가 물리 액터 구성(시뮬 루트)일 때뿐이다. CMC 캐릭터에도 적용하지 않는다.
+	 * (analytic λ 경로의 시뮬 바디 한정) λ 임펄스는 로프 축 성분만 만드므로, 방향이 급전환하면 옛 방향
+	 * 관성이 직교로 남아 날아간다("관성 과다"). 이 비율(0 = 보존, 1 = 완전 제거)로 그 잔여 관성을 몇
+	 * 프레임에 걸쳐 빼 fling을 억제한다. 값은 60fps 기준 프레임당 비율이고 적용 시 dt로 보정된다
+	 * (프레임률 독립).
+	 *
+	 * 수신자는 ApplySimBody를 지나는 끝점뿐이다 — **wielder가 물리 액터 구성(시뮬 루트)일 때**, 그리고
+	 * **TetherCompliance > 0인 탄성 모드의 시뮬 대상**. 비신축(TetherCompliance = 0)인 시뮬 대상은
+	 * Chaos 물리 제약이 독점하므로(UpdateConstraintTether의 bUseChaosBackend 분기) 이 감쇠를 타지 않고,
+	 * CMC 캐릭터에도 적용하지 않는다.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TetherPerpDamping = 0.3f;
@@ -485,7 +495,7 @@ struct FRopeHoldConfig
 	 * 시작하는가"의 교차점을 정하는 유일한 튜닝 노브 — 기본값으로 대부분 무설정.
 	 * λ 분배(유효 역질량)와 끌림 가능 판정(climb-in)이 공용으로 쓴다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "1.0"))
 	float GroundBraceFactor = 1.5f;
 
 	// (끌림 가능 판정의 히스테리시스는 비노출 내부 상수다 — 질량 노브는 GroundBraceFactor
@@ -551,8 +561,10 @@ struct FRopeHoldConfig
 	 * 팽팽(taut) 판정의 선택적 load 임계. 0(기본) = 순수 기하 taut이면 능동 Pull을 시작할 수 있다.
 	 * > 0이면 authoritative GetConstraintTension()이 이 값을 넘어야 load-bearing으로 본다.
 	 * XPBD SegmentTension은 사용하지 않는다.
+	 * bActivePullRequiresTaut를 끄면 팽팽 판정 자체를 안 보므로 회색 처리된다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning",
+		meta = (ClampMin = "0.0", EditCondition = "bActivePullRequiresTaut"))
 	float ActivePullTautTension = 0.0f;
 
 	/**
@@ -570,8 +582,12 @@ struct FRopeHoldConfig
 	 * 경로에서만 자유 구간 XPBD SegmentTension 최솟값을 검사해 부분 스트레치 정귀환을 차단한다.
 	 * 정상 Pawn hard-constraint/Chaos 경로의 taut·장력에는 참여하지 않는다. 0(기본) = 끔. 판정
 	 * 히스테리시스는 내부 상수(RopeComponentTraction.cpp).
+	 *
+	 * 비노출(BP 전용): 도달 조건이 "Chaos 백엔드 아님 ∧ live constraint 없음 ∧ hard wielder attempt
+	 * 없음"이라, bEnforceWielderLengthConstraint가 켜진 Wielder 구성에서는 실행되지 않는다.
+	 * 이 fallback을 직접 타는 custom mover를 짜는 경우에만 의미가 있다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0"))
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0"))
 	float TautMinTension = 0.0f;
 
 	/**
@@ -590,9 +606,11 @@ struct FRopeHoldConfig
 	 * TetherCompliance>0인 탄성 모드에서는 λ ≤ 이 값 × dt인 실제 force cap이다.
 	 * TetherCompliance=0인 비신축 모드에서는 유한 force cap과 exact length를 동시에 만족할 수 없으므로
 	 * 길이를 우선하고 full reaction을 보고한다. 이때 이 값은 debugger의 overload 기준선일 뿐이며,
-	 * 실제 끊김/해제는 TensionReleaseForce 또는 별도 게임 규칙으로 명시한다.
+	 * 실제 끊김/해제는 TensionReleaseForce 또는 별도 게임 규칙으로 명시한다 — 그래서 비신축(기본)
+	 * 에서는 회색 처리된다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning",
+		meta = (ClampMin = "0.0", EditCondition = "TetherCompliance > 0.0"))
 	float MaxTetherTension = 500000.0f;
 
 	/**
@@ -609,7 +627,8 @@ struct FRopeHoldConfig
 	 * a=F/m로 한 프레임에 목표를 훌쩍 넘겨 튕기던(먼지/턱턱) 문제를 없앤다. 무거운 대상은 장력 한계로 이 속도까지
 	 * 못 끌어 뒤처진다(현실적 질량 의존). 0 = 견인 없음. 견인 중에만 적용.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "cm/s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold",
+		meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Pull Speed"))
 	float ActivePullMaxLinearSpeed = 300.0f;
 
 	/**
