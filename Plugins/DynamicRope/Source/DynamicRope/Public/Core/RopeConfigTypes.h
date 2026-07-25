@@ -180,8 +180,10 @@ struct FRopeWrapConfig
 	/**
 	 * SurfaceVectorField path point가 latch bone 하나에 고정되지 않고 graph 후보 본으로 넘어갈지 여부.
 	 * false면 후보 graph depth/cost가 0이 되어 현재 본만 평가하므로 기존 단일 본 동작에 가깝게 돌아간다.
+	 *
+	 * 비노출(BP 전용): 끄면 단일 본 동작으로 열화되는 폴백 스위치라 디버깅 외에 끌 이유가 없다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap")
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap")
 	bool bEnableMultiBoneWrapping = true;
 
 	/**
@@ -189,8 +191,11 @@ struct FRopeWrapConfig
 	 * 성립(경로 빌드 투영/스냅 상한/DecideWrap)이 공유하는 표면 질의 프로브 반경**이다.
 	 * **기본 0 = auto: 렌더 튜브 Radius × 1.5**(반지름 3종 자동 정합; 명시값을 넣으면 그 값). 해석은
 	 * 컴포넌트 경계(GetEffectiveContactQueryRadius)에서 — 소비처는 해석된 값을 받는다. 주의: 컴포넌트
-	 * 없이 직접 쓰는 소비자(유닛 테스트 등)에는 auto 해석이 없다 — 반드시 명시값을 넣을 것. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Contact Query Radius (0=Auto)"))
+	 * 없이 직접 쓰는 소비자(유닛 테스트 등)에는 auto 해석이 없다 — 반드시 명시값을 넣을 것.
+	 *
+	 * 비노출(BP 전용): auto가 렌더 튜브 Radius를 따라가므로 프리셋이 Radius만 정하면 함께 맞는다.
+	 * 명시값을 넣는 순간 그 자동 정합이 깨진다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "cm"))
 	float ContactQueryRadius = 0.0f;
 
 	//~ 캡처 판정(감지) --------------------------------------------------------
@@ -198,16 +203,26 @@ struct FRopeWrapConfig
 	// ①FullSimulation/②AssistedJudged의 판정 경로 전용이고, ③GuaranteedWrap은 GuidedThrow가 확정한
 	// 앵커로만 성립하므로 보지 않는다(스윕은 Flight 감지 자체라 모드와 무관).
 
-	/** 스치는 접촉이 아니라 catch로 간주하기 위해 한 bone에 닿아야 하는 최소 rope 노드 수. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "1"))
+	/** 스치는 접촉이 아니라 catch로 간주하기 위해 한 bone에 닿아야 하는 최소 rope 노드 수.
+	 *
+	 *  비노출(BP 전용): 기본 1이 최대한 관대하고, "부실한 걸 안 잡는다"는 목적은 커밋 시점의 각도
+	 *  관문(FailedWrapMinAngleDeg/CommitMin*)이 더 정확하게 달성한다. 올릴 이유가 남는 유일한 경우는
+	 *  감기려다 마는 헛동작 자체를 시작조차 안 하게 하려는 것(경로 빌드 낭비/시각적 false start 방지)이다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "1"))
 	int32 MinLatchNodes = 1;
 
-	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "s"))
+	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초).
+	 *
+	 *  비노출(BP 전용): 기본 0.016 = 60fps 1프레임이라 사실상 dwell이 없다. MinLatchNodes와 같은
+	 *  질문("얼마나 확실히 닿아야 잡히나")에 대한 두 번째 레버라 중복이다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "s"))
 	float WrapDecisionTime = 0.016f;
 
-	/** 얇은 사지/SDF 후보를 놓치지 않기 위한 Flight 예측 lookahead(프레임 변위 배수). 0이면 예측 끔. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	/** 얇은 사지/SDF 후보를 놓치지 않기 위한 Flight 예측 lookahead(프레임 변위 배수). 0이면 예측 끔.
+	 *
+	 *  비노출(BP 전용): "빠른 던지기가 대상을 통과한다"는 같은 증상에 ContactSweepStep이 더 직접적인
+	 *  레버이고 그쪽 주석이 대응 순서를 안내한다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", ClampMax = "4.0"))
 	float PredictiveContactFrames = 1.0f;
 
 	/**
@@ -223,7 +238,7 @@ struct FRopeWrapConfig
 	/** 위 감지 스윕의 샘플 수 상한(비용 한도). 매우 빠른 노드는 간격이 이 상한에 눌려 넓어지므로,
 	 *  ContactSweepStep을 낮췄는데 효과가 없으면 이 값도 함께 올려야 한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
-		meta = (ClampMin = "1", ClampMax = "64"))
+		meta = (ClampMin = "1", ClampMax = "64", DisplayName = "Max Sweep Samples"))
 	int32 ContactMaxSweepSamples = 16;
 
 	/**
@@ -239,8 +254,12 @@ struct FRopeWrapConfig
 	/**
 	 * 감김 축 유도 소스. BoneCenteredGuidePlane(기본)은 Assisted 단일 본 wrapping을 위해 latch 본을
 	 * 축 원점으로 사용한다. CaptureTravelPlane은 접촉 영역/군집 중심 축으로 Composite wrapping을 지원한다.
+	 *
+	 * 프리셋마다 달라야 하는 값이라 노출을 유지한다(볼라 = CaptureTravelPlane, 단일 본 포획 =
+	 * BoneCenteredGuidePlane). 사용자가 개별로 만지기보다 프리셋이 정해 주는 쪽이 맞다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
+		meta = (DisplayName = "Axis Source"))
 	ERopeWrappingAxisSource WrappingAxisSource = ERopeWrappingAxisSource::BoneCenteredGuidePlane;
 
 	/**
@@ -253,7 +272,8 @@ struct FRopeWrapConfig
 	 *     현수/직선 형태를 잡고, 대상이 벌어지면 장력이 걸린다(묶임의 실제 물리).
 	 * 이 거리를 넘겨도 표면에 재진입하지 못하면 종전과 같은 실패 처리로 떨어진다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
+		meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Max Gap Bridge"))
 	float WrappingMaxGapBridgeDistance = 0.0f;
 
 	/**
@@ -264,17 +284,35 @@ struct FRopeWrapConfig
 	 * 등으로 번지는 "문어발 랩"의 방지책. 상한에서 마감된 경로 밖의 남는 로프는 Wrapping 동안
 	 * 동결됐다가 커밋 후 자유 구간으로 늘어진다(front 모션도 경로 밖 노드는 끌지 않는다).
 	 * 양다리 bola면 400~540°(한 바퀴 + 여유)가 자연스럽다.
-	 * Composite AnalyticHelix에는 적용되지 않는다.
+	 *
+	 * **[함정] Composite AnalyticHelix에는 적용되지 않는다** — 그리고 어느 전략을 타는지는 설정이
+	 * 아니라 *대상 지오메트리*가 런타임에 정한다: 둘 이상의 본이 같은 pose-space 기둥으로 묶이면
+	 * Composite다(경로 빌드의 bPathUsesPoseSpaceIsland). 팔뚝 하나는 Sequential이라 이 상한이 걸리고,
+	 * 양다리는 Composite라 걸리지 않는다. 즉 이 값이 막으려는 "문어발 랩"이 가장 잘 나는 다중 본
+	 * 대상에서 정작 무효다 — 그 경우의 과다 감김은 CommitMinWrapAngleDeg/CommitMinWrapCoverageDeg
+	 * 관문으로 걸러야 한다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "deg"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
+		meta = (ClampMin = "0.0", Units = "deg", DisplayName = "Max Wrap Angle"))
 	float WrappingMaxWrapAngleDeg = 0.0f;
 
 	/** Wrapping phase must keep the same accumulated latch span stable this long before committing. */
 	float WrappingStableTime = 0.10f;
 
-	/** Time used to pull tail nodes onto their generated surface wrap targets. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap", meta = (ClampMin = "0.01", Units = "s"))
-	float WrappingMotionDuration = 0.50f;
+	/**
+	 * Wrapping 페이즈의 **최소 길이**(초) — 감김에 걸리는 시간이 아니다. 두 경로에서 역할이 다르다.
+	 *
+	 * ① 정상(각도 매핑) 경로 — 감김 속도는 WrappingAngularSpeedDegPerSec가 정하고 소요 시간은 그
+	 *    결과다. 이 값은 하한으로만 작동한다: front가 목표에 일찍 도달해도 Wrapping 시작부터 이
+	 *    시간이 지나기 전에는 커밋하지 않는다. 그 대기 동안 로프는 이미 완성된 랩 자세로 **정지해
+	 *    있다**(Wrapping은 logic-driven이라 solver가 돌지 않는다). 즉 이 값이 정하는 건 "감김 완료"와
+	 *    "장력 시작(Wrapped 진입)" 사이의 간(間)이다 — 뜸을 없애려면 실측 감김 시간 이하로 낮춘다.
+	 * ② DistanceFallback(각도 매핑 불가) 경로 — 역전된다. 이 값이 실제 소요 시간을 정하고
+	 *    front 속도를 FullDistance / (이 값 + tail delay)로 역산한다. 여기선 각속도 설정이 쓰이지 않는다.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap",
+		meta = (ClampMin = "0.01", Units = "s", DisplayName = "Min Wrap Duration"))
+	float WrappingMotionDuration = 0.20f;
 
 	/**
 	 * wrapping animation의 easing 적용 전 기준 각속도(deg/s).
@@ -286,8 +324,11 @@ struct FRopeWrapConfig
 	float WrappingAngularSpeedDegPerSec = 1100.0f;
 
 	/** 각도 매핑 front가 angle+distance 목표에 도달한 뒤 Wrapped commit 전에 확보할 짧은
-	 *  안정화 시간. 마지막 kinematic node/anchor 전환에서 발생할 수 있는 한 프레임 튐을 막는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
+	 *  안정화 시간. 마지막 kinematic node/anchor 전환에서 발생할 수 있는 한 프레임 튐을 막는다.
+	 *
+	 *  비노출(BP 전용): 실측으로 정해진 폴리시 상수라 다른 값을 고를 근거가 없다. 감김의 속도/길이는
+	 *  WrappingAngularSpeedDegPerSec와 WrappingMotionDuration이 정한다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "0.0", ClampMax = "1.0", Units = "s"))
 	float WrappingPostFrontSettleTime = 0.08f;
 
@@ -295,18 +336,26 @@ struct FRopeWrapConfig
 	 *  4단계부터 commit 제한 시간으로는 각도 매핑을 쓸 수 없는 DistanceFallback 경로에만 적용한다. */
 	float WrappingTailDelayPerSegment = 0.024f;
 
-	/** Wrapping 중 한 프레임에 진행할 surface path 적분 step 수. 높이면 감김 경로가 빨리 완성되지만
-	 *  순간 비용이 커진다. 실제 예산은 로프 크기에 비례해 이 값으로 배율된다
-	 *  (FRopeWrappingPhase::ComputePathStepBudget — 기준 8). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
+	/** Wrapping 중 한 프레임에 진행할 surface path 적분 step 예산의 **배율**(step 수 자체가 아니다).
+	 *  실제 예산은 로프 크기에 비례한 기준값을 이 값으로 배율한 것이다
+	 *  (FRopeWrappingPhase::ComputePathStepBudget — 기준 8이므로 8 = 1배).
+	 *  높이면 감김 경로가 빨리 완성되지만 순간 비용이 커진다.
+	 *
+	 *  비노출(BP 전용): 바꿀 주된 이유인 "큰 로프에서 경로 완성이 느리다"를 크기 비례 스케일이 이미
+	 *  처리한다. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "1", ClampMax = "128"))
 	int32 WrappingPathBuildStepsPerFrame = 8;
 
 	/**
 	 * Axis distance advanced per circumference distance for Sequential SurfaceVectorField wrapping.
 	 * Composite Analytic Helix는 이 값을 사용하지 않고 Contacting 순간 tail 기울기에서 자동 산출한다.
+	 *
+	 * 비노출(BP 전용): 어느 전략을 타는지는 대상 지오메트리가 런타임에 정하므로(아래
+	 * WrappingMaxWrapAngleDeg 주석의 pose-space island 설명 참조), 값을 바꿔도 대상에 따라 반응이
+	 * 갈려 인과를 배울 수 없다.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "-2.0", ClampMax = "2.0"))
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "-2.0", ClampMax = "2.0"))
 	float WrappingHelixPitchScale = 0.25f;
 
 	// NOTE: 아래 멀티본 투영 스코어링 세부(깊이/비용/가중치/보너스/히스테리시스 12종)는 실측 튜닝이
@@ -371,7 +420,8 @@ struct FRopeWrapConfig
 	 * 물리적으로 불가능해 큰 대상 wrap이 구조적으로 전멸했다. 감싼 각도는 대상 크기와 무관한
 	 * "걸림 품질" 척도다(120° = 1/3바퀴 훅).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning|Quality",
+		meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg", DisplayName = "Min Angle On Path Failure"))
 	float FailedWrapMinAngleDeg = 120.0f;
 
 	/**
@@ -382,7 +432,8 @@ struct FRopeWrapConfig
 	 * 커밋이 나올 수 있고, settle 타임아웃 커밋은 앵커 1개로도 통과한다 — 그런 부실 랩을 게임
 	 * 규칙으로 거르고 싶을 때 opt-in으로 켠다(팁 살짝 걸침도 유효한 디자인이면 0 유지).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning|Quality",
+		meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg", DisplayName = "Min Commit Angle"))
 	float CommitMinWrapAngleDeg = 0.0f;
 
 	/**
@@ -395,7 +446,8 @@ struct FRopeWrapConfig
 	 * 의미가 정확하다(BoneCenteredGuidePlane의 rolling axis에서는 마지막 축 기준 근사).
 	 * 양다리 잠금 용도면 300° 안팎, 느슨한 훅도 허용하려면 0 유지.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning|Quality",
+		meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg", DisplayName = "Min Commit Coverage"))
 	float CommitMinWrapCoverageDeg = 0.0f;
 
 	// NOTE: 종전의 [미배선] WrappingContactGraceTime은 삭제됐다(2026-07-13 표면 감사 B-2 — 소비 코드가
