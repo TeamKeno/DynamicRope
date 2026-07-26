@@ -47,6 +47,15 @@ struct FRopeLengthConstraintState
 	int32 PrevAnchorNode = INDEX_NONE;
 	bool bPrevGeometryValid = false;
 
+	/**
+	 * Previous hand-side (wielder-end) point sample. An Anchor-kind wielder endpoint (a
+	 * kinematic carrier such as a helicopter) has no physics velocity, so the constraint
+	 * measures the hand point by finite difference and smooths it here — the wielder-side
+	 * mirror of SmoothedAnchorPointVelocity. Guarded by the same bPrevGeometryValid.
+	 */
+	FVector PrevWielderWorldPoint = FVector::ZeroVector;
+	FVector SmoothedWielderPointVelocity = FVector::ZeroVector;
+
 	void BeginFrame(float DeltaTime)
 	{
 		Backend = ERopeLengthConstraintBackend::None;
@@ -100,5 +109,7 @@ struct FRopeLengthConstraintState
 		SmoothedAnchorPointVelocity = FVector::ZeroVector;
 		PrevAnchorNode = INDEX_NONE;
 		bPrevGeometryValid = false;
+		PrevWielderWorldPoint = FVector::ZeroVector;
+		SmoothedWielderPointVelocity = FVector::ZeroVector;
 	}
 };

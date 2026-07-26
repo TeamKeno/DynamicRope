@@ -25,6 +25,7 @@ namespace
 	constexpr float TautReleaseGraceTimeConst = 0.1f;        // bChainTaut 해제 유예(초)
 	constexpr float ActivePullTautReleaseRatioConst = 0.5f;  // 능동 Pull load 임계 히스테리시스 [0..1]
 	constexpr float TautMinTensionReleaseRatioConst = 0.5f;  // 최소 전달 장력 히스테리시스 [0..1]
+	constexpr float TetherLiftLaunchSpeedConst = 100.0f;     // 접지 캐릭터 Walking→Falling 전환 상향 임계(cm/s)
 }
 
 #pragma region Tension_Query
@@ -735,9 +736,18 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 			LengthConstraintState.SmoothedAnchorPointVelocity,
 			RawAnchorVel,
 			RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
+		// 손 점(wielder 끝) 실측 속도 — Anchor-kind wielder(키네마틱 캐리어: 헬기/이동 플랫폼)는 물리
+		// 속도가 없어 유한차분으로 채운다. 대상 쪽 SmoothedAnchorPointVelocity의 wielder 거울.
+		const FVector RawWielderVel =
+			(GetComponentLocation() - LengthConstraintState.PrevWielderWorldPoint) / DeltaTime;
+		LengthConstraintState.SmoothedWielderPointVelocity = FMath::Lerp(
+			LengthConstraintState.SmoothedWielderPointVelocity,
+			RawWielderVel,
+			RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
 	}
 	LengthConstraintState.PrevMaterialLength = MaterialLength;
 	LengthConstraintState.PrevAnchorWorldPoint = Anchor;
+	LengthConstraintState.PrevWielderWorldPoint = GetComponentLocation();
 	LengthConstraintState.PrevAnchorNode = ConstraintAnchorNode;
 	LengthConstraintState.bPrevGeometryValid = true;
 
@@ -903,6 +913,38 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 			? (InvMassTarget / WSum)
 			: 0.0f;
 
+	// ---- 대상 하드 투영(키네마틱 캐릭터 캐리) ----
+	// wielder 끝이 무한질량(Anchor — 헬기 등 키네마틱 캐리어)이고 대상이 CMC 캐릭터면, λ 속도 인가만으로는
+	// 위치 오차 회수가 bias 상한(TetherMaxBiasSpeed)에 캡혀 캐리어가 그보다 빠를 때 로프가 무한히 늘어난다.
+	// wielder 쪽 하드 투영(ConstrainWielderLocation)의 대상 거울: 캡슐을 현 반경 방향으로 부족분만큼 손
+	// 쪽으로 스윕 이동해 위치 오차를 같은 프레임에 소거한다(벽에 막히면 잔여가 C로 남아 λ/관측이 받는다).
+	// 양끝이 모두 유한질량이면 λ 쌍 인가가 분배를 소유하므로 발동하지 않는다(이중 보정 방지). 탄성 모드
+	// (TetherCompliance>0)는 의도적 신장이라 제외.
+	if (HoldConfig.bEnforceTargetLengthConstraint
+		&& HoldConfig.TetherCompliance <= KINDA_SMALL_NUMBER
+		&& bHasLiveConstraint && !bSelfWrap
+		&& Endpoints->Target.Kind == ERopeEndpointKind::Character
+		&& Endpoints->Wielder.Kind == ERopeEndpointKind::Anchor
+		&& Endpoints->Target.Actor && Endpoints->Target.Movement
+		&& !LiveOutward.IsNearlyZero()
+		&& C > FMath::Max(HoldConfig.LengthConstraintActivationSlop, 0.0f))
+	{
+		AActor* TargetActor = Endpoints->Target.Actor;
+		const FVector OldLoc = TargetActor->GetActorLocation();
+		TargetActor->SetActorLocation(OldLoc + LiveOutward * C, /*bSweep*/ true);
+		const FVector Applied = TargetActor->GetActorLocation() - OldLoc;
+		C = FMath::Max(
+			C - static_cast<float>(FVector::DotProduct(Applied, LiveOutward)), 0.0f);
+		LengthConstraintState.LastViolation = C;
+		// 접지 캐릭터를 유의미한 속도로 들어올렸으면 Walking의 바닥 스냅/Z 삭제가 되돌리기 전에 Falling으로
+		// 넘긴다(Launch 관례). 수평 towing(Applied.Z ≈ 0)은 임계 미달로 통과 — 지상 끌기 거동 유지.
+		if (Endpoints->Target.Movement->IsMovingOnGround()
+			&& Applied.Z > TetherLiftLaunchSpeedConst * DeltaTime)
+		{
+			Endpoints->Target.Movement->SetMovementMode(MOVE_Falling);
+		}
+	}
+
 	// Anchor-kind 대상(정적/키네마틱/애니메이션 구동)은 물리 속도가 없어 앵커 점 실측 EMA로 채운다 —
 	// 움직이는 오브젝트 towing이 bias 상한과 무관하게 벌어짐 상쇄로 추종된다(정지 앵커는 ≈0 = 무영향;
 	// 2차 안전망은 인가 쪽 ClampInjectedVelocity(TetherMaxSpeed) 그대로). SimBody는 반드시 rope
@@ -914,11 +956,14 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 			: EndpointVelocityAtPoint(
 				Endpoints->Target, TargetPoint);
 	const float SepTarget = -static_cast<float>(FVector::DotProduct(VelTarget, DirTarget));
+	// Anchor-kind wielder(키네마틱 캐리어)도 대칭으로 손 점 실측 EMA를 쓴다 — 캐리어의 이탈 속도가 λ의
+	// 벌어짐 상쇄에 실려 bias 상한(TetherMaxBiasSpeed)과 무관하게 추종된다(정지 소유자는 ≈0 = 무영향).
+	const FVector VelWielder = (Endpoints->Wielder.Kind == ERopeEndpointKind::Anchor)
+		? LengthConstraintState.SmoothedWielderPointVelocity
+		: EndpointVelocityAtPoint(
+			Endpoints->Wielder, WielderPoint);
 	const float SepWielder = bSelfWrap ? 0.0f
-		: -static_cast<float>(FVector::DotProduct(
-			EndpointVelocityAtPoint(
-				Endpoints->Wielder, WielderPoint),
-			DirWielder));
+		: -static_cast<float>(FVector::DotProduct(VelWielder, DirWielder));
 	const float SepSpeed =
 		RopeMovementConstraint::ComputeConstraintSeparatingSpeed(
 			bHardWielderAttempt,
@@ -1082,6 +1127,14 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		// 전 축 주입 유지.)
 		const FVector OldVel = Movement->Velocity;
 		Movement->Velocity = RopeTraction::ClampInjectedVelocity(OldVel + Dir * DeltaV, OldVel, SpeedCap);
+		// 상향 주입이 임계를 넘는 접지 캐릭터는 Falling으로 — Walking은 다음 틱에 Z 속도를 바닥 구속으로
+		// 버리므로(들어올리기 무력화) Launch와 같은 관례로 모드를 넘겨야 주입이 살아남는다. 수평 towing은
+		// Z 주입 ≈ 0이라 통과.
+		if (static_cast<float>(Movement->Velocity.Z - OldVel.Z) > TetherLiftLaunchSpeedConst
+			&& Movement->IsMovingOnGround())
+		{
+			Movement->SetMovementMode(MOVE_Falling);
+		}
 	};
 
 	auto TractionGate = [this](const FRopeTractionRequest& Req) { return ApplyTractionToReceiver(Req); };

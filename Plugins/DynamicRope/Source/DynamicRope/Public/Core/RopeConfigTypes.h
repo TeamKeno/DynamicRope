@@ -484,6 +484,18 @@ struct FRopeHoldConfig
 	bool bEnforceWielderLengthConstraint = true;
 
 	/**
+	 * 위 wielder 하드 투영의 **대상 쪽 거울**: 감긴 대상이 CMC 구동 캐릭터(키네마틱 캡슐)이고 wielder 끝이
+	 * 무한질량(Anchor — 헬기/키네마틱 캐리어)일 때, 대상 캡슐을 손 중심·다리 rest 길이 반경의 구면 안으로
+	 * 같은 프레임에 스윕 투영한다. 이 조합에서만 발동한다 — 양끝이 다 움직일 수 있으면 λ 쌍 인가가 이미
+	 * 역질량비로 분배하므로 투영이 개입하면 이중 보정이 된다.
+	 *
+	 * 이게 없으면 캐리어 이동을 쫓는 수단이 위치 회수(bias, TetherMaxBiasSpeed 상한)뿐이라, 캐리어가
+	 * 그보다 빠르면 로프가 무한히 늘어난다. TetherCompliance>0(의도적 탄성)이면 자동 비활성화.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (DisplayName = "Enforce Rope Length (Target)"))
+	bool bEnforceTargetLengthConstraint = true;
+
+	/**
 	 * Material-length constraint activation tolerance(cm). This is a numerical boundary band:
 	 * it allows an outward attempt within this distance to produce a stable reaction, but it is
 	 * never added to rope length and therefore cannot make an inextensible rope longer.
