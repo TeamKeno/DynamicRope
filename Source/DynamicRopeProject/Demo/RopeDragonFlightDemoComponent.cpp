@@ -10,15 +10,15 @@
 #include "Subsystem/RopeSimSubsystem.h"
 #include "UObject/UObjectIterator.h"
 
-// 데모 전용 로그 카테고리 — 플러그인의 LogDynamicRope는 export되지 않아 게임 모듈에서 못 쓴다.
+// A demo-only log category, since the plugin's LogDynamicRope is not exported and cannot be used from the game module.
 DEFINE_LOG_CATEGORY_STATIC(LogRopeDragonDemo, Log, All);
 
 namespace RopeDragonDemo
 {
-	/** HowlAnim이 비어 있을 때 쓰는 하울링 길이(초). */
+	/** The howl duration, in seconds, used when no howl animation is assigned. */
 	static constexpr float FallbackHowlDuration = 1.5f;
 
-	/** 0→1 구간을 부드럽게(가감속) 만든다 — 상승/하강의 팝 방지. */
+	/** Eases the range from zero to one in and out, which prevents a pop at the start and end of the ascent and descent. */
 	static float Ease(float Alpha)
 	{
 		const float T = FMath::Clamp(Alpha, 0.0f, 1.0f);
@@ -43,13 +43,13 @@ void URopeDragonFlightDemoComponent::BeginPlay()
 
 	if (!ResolveMesh())
 	{
-		UE_LOG(LogRopeDragonDemo, Warning, TEXT("[%s] DragonDemo: 스켈레탈 메시를 찾지 못했다 — 애니메이션 전환 없이 이동만 한다."),
+		UE_LOG(LogRopeDragonDemo, Warning, TEXT("[%s] DragonDemo: no skeletal mesh was found, so it moves without switching animations."),
 			*GetNameSafe(GetOwner()));
 	}
 
 	PlayAnim(IdleAnim, /*bLoop*/ true);
 
-	// 자기를 감을 로프를 미리 몰라도 되도록 월드 중앙 신호를 구독한다(랙돌 반응 컴포넌트와 같은 패턴).
+	// Subscribes to the central world signal so the rope that will wrap it need not be known in advance, the same pattern as the ragdoll response component.
 	if (URopeSimSubsystem* Sim = URopeSimSubsystem::Get(GetWorld()))
 	{
 		WrappedHandle = Sim->OnAnyRopeWrapped.AddUObject(this, &URopeDragonFlightDemoComponent::HandleAnyRopeWrapped);
@@ -74,11 +74,11 @@ void URopeDragonFlightDemoComponent::HandleAnyRopeWrapped(const FRopeWrappedEven
 	}
 	if (State != ERopeDragonDemoState::Idle || PendingTriggerTime >= 0.0f)
 	{
-		// 이미 발동했거나 대기 중 — 두 번째 로프가 걸려도 연출을 다시 시작하지 않는다.
+		// Already triggered or waiting, so a second rope catching it does not restart the sequence.
 		return;
 	}
 
-	UE_LOG(LogRopeDragonDemo, Log, TEXT("[%s] DragonDemo: 로프 감김(본 %s) → %.2f초 뒤 하울링 시작."),
+	UE_LOG(LogRopeDragonDemo, Log, TEXT("[%s] DragonDemo: a rope wrapped (bone %s); howling starts in %.2f s."),
 		*GetNameSafe(GetOwner()), *Info.Bone.ToString(), TriggerDelay);
 	PendingTriggerTime = FMath::Max(TriggerDelay, 0.0f);
 }
@@ -90,7 +90,7 @@ void URopeDragonFlightDemoComponent::StartSequence()
 		return;
 	}
 
-	// 발동 시점 트랜스폼이 연출 전체의 원점/기저다. Yaw만 쓰므로 8자는 항상 지면과 수평이다.
+	// The transform at the moment of triggering is the origin and basis for the whole sequence. Only the yaw is used, so the figure of eight is always parallel to the ground.
 	if (const AActor* Owner = GetOwner())
 	{
 		AnchorLocation = Owner->GetActorLocation();
@@ -110,7 +110,7 @@ void URopeDragonFlightDemoComponent::ResetSequence()
 	TimeInState = 0.0f;
 	ApplyPose(FVector::ZeroVector, 0.0f, 0.0f, 0.0f);
 	PlayAnim(IdleAnim, /*bLoop*/ true);
-	UE_LOG(LogRopeDragonDemo, Log, TEXT("[%s] DragonDemo: 리셋 — 발동 지점으로 복귀."), *GetNameSafe(GetOwner()));
+	UE_LOG(LogRopeDragonDemo, Log, TEXT("[%s] DragonDemo: reset, returning to the trigger point."), *GetNameSafe(GetOwner()));
 }
 
 void URopeDragonFlightDemoComponent::EnterState(ERopeDragonDemoState NewState)
@@ -130,11 +130,11 @@ void URopeDragonFlightDemoComponent::EnterState(ERopeDragonDemoState NewState)
 		PlayAnim(IdleAnim, /*bLoop*/ true);
 		break;
 	default:
-		// Ascend/Descend는 Thrash에서 켠 비행 루프를 그대로 이어 쓴다(재생 위치 리셋 방지).
+		// The ascent and descent continue the flight loop started during the thrash, which avoids resetting its playback position.
 		break;
 	}
 
-	UE_LOG(LogRopeDragonDemo, Log, TEXT("[%s] DragonDemo: 단계 → %s"),
+	UE_LOG(LogRopeDragonDemo, Log, TEXT("[%s] DragonDemo: stage -> %s"),
 		*GetNameSafe(GetOwner()), *UEnum::GetValueAsString(NewState));
 }
 
@@ -168,7 +168,7 @@ void URopeDragonFlightDemoComponent::TickComponent(float DeltaTime, ELevelTick T
 	{
 	case ERopeDragonDemoState::Howl:
 	{
-		// 제자리에서 하울링만 — 위치는 발동 지점 그대로 고정한다.
+	// Howling in place alone; the position stays pinned at the trigger point.
 		ApplyPose(FVector::ZeroVector, 0.0f, 0.0f, 0.0f);
 		if (TimeInState >= ResolveHowlDuration())
 		{
@@ -179,8 +179,9 @@ void URopeDragonFlightDemoComponent::TickComponent(float DeltaTime, ELevelTick T
 
 	case ERopeDragonDemoState::Thrash:
 	{
-		// 8자 = 리사주 1:2 곡선 (sin u, sin 2u). 긴 축 = 발동 시점 전방, 교차점 = 발동 지점.
-		// ThrashLoops가 정수라 u가 2π의 배수로 끝나며, 시작/끝이 모두 원점이라 앞뒤 단계와 매끄럽게 이어진다.
+		// The figure of eight is a 1:2 Lissajous curve, sin u against sin 2u. Its long axis is the forward direction at
+		// the moment of triggering and its crossing point is the trigger point.
+		// The loop count is an integer, so u ends on a multiple of 2 pi and both the start and the end are at the origin, which joins smoothly to the stages before and after.
 		const float Alpha = FMath::Clamp(TimeInState / FMath::Max(ThrashDuration, KINDA_SMALL_NUMBER), 0.0f, 1.0f);
 		const float U = Alpha * 2.0f * PI * FMath::Max(ThrashLoops, 1);
 
@@ -190,16 +191,16 @@ void URopeDragonFlightDemoComponent::TickComponent(float DeltaTime, ELevelTick T
 		const float Cos2U = FMath::Cos(2.0f * U);
 
 		FVector Offset;
-		Offset.X = ThrashLength * SinU;						// 전방 축
-		Offset.Y = ThrashWidth * Sin2U;						// 좌우 축(2배 주파수 = 8자)
-		Offset.Z = ThrashBobHeight * (0.5f - 0.5f * Cos2U);	// 0에서 시작/끝나는 상하 흔들림
+		Offset.X = ThrashLength * SinU;						// The forward axis.
+		Offset.Y = ThrashWidth * Sin2U;						// The lateral axis, at twice the frequency, which makes the figure of eight.
+		Offset.Z = ThrashBobHeight * (0.5f - 0.5f * Cos2U);	// A vertical bob starting and ending at zero.
 
-		// 진행 방향 = 궤적의 접선. 몸이 항상 가는 쪽을 본다.
+		// The heading is the curve's tangent, so the body always faces the way it is going.
 		const float TangentX = ThrashLength * CosU;
 		const float TangentY = 2.0f * ThrashWidth * Cos2U;
 		const float LocalYaw = FMath::RadiansToDegrees(FMath::Atan2(TangentY, TangentX));
 
-		// 뱅크: 교차 구간에서 최대로 눕는다(선회 방향과 부호가 맞는다 — sin2U가 우선회 구간에서 양수).
+	// The bank is greatest through the crossing, and its sign matches the turn direction, since the lateral term is positive through a right turn.
 		const float Roll = ThrashBankDeg * Sin2U;
 
 		ApplyPose(Offset, LocalYaw, 0.0f, Roll);
@@ -217,7 +218,7 @@ void URopeDragonFlightDemoComponent::TickComponent(float DeltaTime, ELevelTick T
 		const float E = RopeDragonDemo::Ease(Alpha);
 
 		const FVector Offset(AscendForward * E, 0.0f, AscendHeight * E);
-		// 피치는 가운데서 최대, 끝에서 0 — 다음 단계(하강)와 이어질 때 각도가 튀지 않는다.
+	// The pitch peaks in the middle and is zero at both ends, so the angle does not jump when it joins the descent.
 		const float Pitch = ClimbPitchDeg * FMath::Sin(PI * Alpha);
 		ApplyPose(Offset, 0.0f, Pitch, 0.0f);
 
@@ -265,7 +266,7 @@ void URopeDragonFlightDemoComponent::ApplyPose(const FVector& LocalOffset, float
 	const FVector World = AnchorLocation + AnchorBasis.RotateVector(LocalOffset);
 	const FRotator Rotation(PitchDeg, AnchorYawDeg + YawDeg, RollDeg);
 
-	// 연출 전용 — 경로를 그대로 덮어쓴다(스윕 없음, 테더/충돌 변위는 남지 않는다).
+	// Presentation only: the path is written over directly, with no sweep, so displacement from the tether or a collision does not persist.
 	Owner->SetActorLocationAndRotation(World, Rotation, /*bSweep*/ false);
 }
 
@@ -289,7 +290,7 @@ void URopeDragonFlightDemoComponent::PlayAnim(UAnimSequenceBase* Anim, bool bLoo
 	{
 		return;
 	}
-	// AnimBP 없이 싱글 노드 모드로 직접 재생 — PlayAnimation이 모드 전환까지 겸한다.
+	// Played directly in single node mode with no animation Blueprint; PlayAnimation switches the mode as well.
 	Mesh->PlayAnimation(Anim, bLoop);
 }
 
@@ -301,7 +302,7 @@ USkeletalMeshComponent* URopeDragonFlightDemoComponent::ResolveMesh() const
 
 #if !UE_BUILD_SHIPPING
 //======================================================================================
-// 촬영용 콘솔 명령 — 월드 내 이 컴포넌트가 붙은 액터 전부에 적용.
+// Console commands for filming, applied to every actor in the world carrying this component.
 //======================================================================================
 
 namespace RopeDragonDemoConsole
@@ -321,13 +322,13 @@ namespace RopeDragonDemoConsole
 		if (Count == 0)
 		{
 			UE_LOG(LogRopeDragonDemo, Warning,
-				TEXT("URopeDragonFlightDemoComponent가 붙은 액터가 없다 — 드래곤 BP에 컴포넌트를 추가할 것."));
+				TEXT("No actor has a URopeDragonFlightDemoComponent. Add the component to the dragon Blueprint."));
 		}
 	}
 
 	static FAutoConsoleCommandWithWorldAndArgs GStartCmd(
 		TEXT("Rope.Demo.Dragon"),
-		TEXT("드래곤 데모 연출 시작(하울링 → 8자 몸부림 → 상승 → 하강)."),
+		TEXT("Starts the dragon demo sequence: howl, then a figure-of-eight thrash, then ascend and descend."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			ForEach(World, [](URopeDragonFlightDemoComponent& Comp)
@@ -338,7 +339,7 @@ namespace RopeDragonDemoConsole
 
 	static FAutoConsoleCommandWithWorldAndArgs GResetCmd(
 		TEXT("Rope.Demo.Dragon.Reset"),
-		TEXT("드래곤 데모 연출 리셋(발동 지점/Idle로 복귀 — 반복 촬영용)."),
+		TEXT("Resets the dragon demo sequence, returning to the trigger point and idle, for repeated takes."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			ForEach(World, [](URopeDragonFlightDemoComponent& Comp)
