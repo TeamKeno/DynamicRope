@@ -1,9 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// URopeSDFData를 IRopeCollider로 공급하는 skeletal collider provider. 본별 볼륨을 현재 본 월드
-// 트랜스폼으로 변환해 매 프레임 FRopeSDFCollider를 빌드한다. URopeBoneCapsuleProvider와 같은
-// 베이스(URopeSkeletalColliderProvider)라 캡슐과 공존/대체 가능(비블로킹). 미베이크 볼륨은 건너뛰므로
-// 데이터가 비어도 안전한 no-op. 등록/메시 해석/프레임 디둡/gather 파이프라인은 베이스가 소유한다.
+// The skeletal collider provider that supplies URopeSDFData as IRopeColliders. It builds an
+// FRopeSDFCollider each frame by transforming the per-bone volumes by their current bone-to-world
+// transforms. It shares its base, URopeSkeletalColliderProvider, with URopeBoneCapsuleProvider, so
+// the two can coexist or replace one another without blocking. Unbaked volumes are skipped, which
+// makes it a safe no-op with no data. Registration, mesh resolution, per-frame deduplication and the
+// gather pipeline all belong to the base.
 
 #pragma once
 
@@ -15,7 +17,7 @@
 class URopeSDFData;
 class USkeletalMeshComponent;
 
-/** SDF slice heatmap이 통과하는 축(평면은 나머지 두 축에 평행). */
+/** The axis the SDF slice heatmap runs along; the plane it draws is parallel to the other two axes. */
 UENUM()
 enum class ERopeSDFSliceAxis : uint8
 {
@@ -24,7 +26,8 @@ enum class ERopeSDFSliceAxis : uint8
 	Z
 };
 
-/** 베이크된 본 중 어떤 본을 실제 collider로 노출할지 고르는 모드(베이크는 그대로, 런타임 필터). */
+/** Chooses which of the baked bones are exposed as colliders. It is a runtime filter and leaves the
+ *  bake untouched. */
 UENUM()
 enum class ERopeSDFBoneFilterMode : uint8
 {
@@ -42,7 +45,7 @@ class DYNAMICROPE_API URopeSDFProvider : public URopeSkeletalColliderProvider
 	GENERATED_BODY()
 
 public:
-	/** 본별 SDF 볼륨 에셋. 비어 있으면 collider를 공급하지 않는다. */
+	/** The per-bone SDF volume asset. No colliders are supplied while it is empty. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	TObjectPtr<URopeSDFData> SDFData = nullptr;
 
@@ -69,13 +72,15 @@ protected:
 	virtual bool HasColliderData() const override;
 
 private:
-	/** BoneFilter 드롭다운(GetOptions)에 노출할 후보: SDFData에 베이크된 본 이름들. */
+	/** The candidates offered in the Bone Filter dropdown: the bone names actually baked into
+	 *  SDFData. */
 	UFUNCTION()
 	TArray<FName> GetBakedBoneNames() const;
 
-	// 프레임당 1회 재구성되는 백킹 스토리지. 넘겨준 포인터는 해당 프레임 동안 유효하다.
+	// The backing storage, rebuilt once per frame. The pointers handed out are valid for that frame.
 	TArray<FRopeSDFCollider> Colliders;
 
-	// 본별 이전 프레임 BoneToWorld. 표면 속도(드래그) 산출용 — collider 빌드 시 (현재, 이전)으로 속도를 만든다.
+	// The previous frame's bone-to-world transform per bone, used to derive surface velocity, which
+	// produces drag; building a collider pairs the current transform with the previous one.
 	TMap<FName, FTransform> PrevBoneToWorld;
 };

@@ -20,16 +20,19 @@ public:
 		const FRopeSimState* Sim = nullptr;
 		const TArray<IRopeCollider*>* Colliders = nullptr;
 
-		/** wrap 대상 게이트(URopeComponent::CanWrapTarget 주입 — 빌더는 UObject-free라 virtual을 직접 못 부른다).
-		 *  arc 탐색이 aim 경로(FindAimRayBoneHit)와 **같은 기준**으로 후보를 거르게 하는 유일한 통로다:
-		 *  이게 없으면 aim이 거부한 대상을 preview가 주워 둘의 판정이 갈린다. 미설정이면 전부 허용
-		 *  (CanWrapTarget의 기본 구현과 같은 의미) — 월드 없는 단위 테스트는 설정하지 않아도 된다. */
+		/** The wrap target gate, injected from URopeComponent::CanWrapTarget because the builder is
+		 *  free of UObject dependencies and cannot call the virtual itself.
+		 *  It is the only way to make the arc search filter candidates on the same basis as the aiming
+		 *  path in FindAimRayBoneHit: without it the preview would pick up a target aiming had refused,
+		 *  and the two would disagree. Leaving it unset permits everything, which matches the default
+		 *  implementation of CanWrapTarget, so unit tests without a world need not set it. */
 		TFunction<bool(const USceneComponent*, FName)> CanWrapTarget;
 
 		FRopeThrowContext ThrowContext;
 		FRopeWrapConfig WrapConfig;
-		/** 도달 모드 스냅샷(컴포넌트 ResolveMode). GuaranteedWrap이면 감김 나선 경로 대신 aim-hit 접점에
-		 *  단일 앵커로 꽂는다(Pierce). 감김 축/경로 선택도 이 값을 본다. */
+		/** A snapshot of the component's resolve mode. Under GuaranteedWrap the rope embeds with a
+		 *  single anchor at the aim hit point instead of building a wrapping helix, and the choice of
+		 *  wrap axis and path reads this value too. */
 		ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
 		float RopeRadius = 0.0f;
@@ -37,7 +40,8 @@ public:
 		FString OwnerName;
 	};
 
-	// GuaranteedWrap 모드 전용: Loaded에서 조준한 대상의 확정 throw path(contact/anchor 포함)를 만든다.
+	// GuaranteedWrap only: builds the committed throw path, including the contact and anchor, for the
+	// target aimed at while Loaded.
 	static bool BuildFreePreparedPreview(const FInput& Input, FRopePreparedThrowPreview& OutPrepared,
 		FString* OutFailureReason = nullptr);
 };

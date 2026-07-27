@@ -8,9 +8,11 @@ class USceneComponent;
 struct FRopeSimState;
 
 /**
- * Flight 접촉 후보의 출처(비트 조합 가능 — 같은 노드×본이 여러 경로로 잡히면 SourceMask에 OR).
- * Actual = 이번 프레임 이동 경로(Prev→Pos)의 실제 스윕 접촉,
- * PredictiveFree = 자유 노드의 관성 외삽 예측 접촉, PredictiveGuided = whip 가이드 타깃 외삽 예측 접촉.
+ * Where a Flight contact candidate came from. The values combine as bits, so a node and bone caught
+ * through several paths has them ORed together in SourceMask.
+ * Actual is a real swept contact along this frame's travel path, from Prev to Pos. PredictiveFree is
+ * a predicted contact from extrapolating a free node's inertia, and PredictiveGuided is a predicted
+ * contact from extrapolating the whip guide targets.
  */
 enum class ERopeContactCandidateSource : uint8
 {
@@ -19,7 +21,8 @@ enum class ERopeContactCandidateSource : uint8
 	PredictiveGuided = 4
 };
 
-/** Flight/Contacting이 소비하는 접촉 후보 1건(노드×본). FRopeContact + 상대운동 평가 산출물. */
+/** One contact candidate, per node and bone, consumed by the Flight and Contacting phases. It is an
+ *  FRopeContact plus the output of the relative motion evaluation. */
 struct FRopeContactCandidate
 {
 	bool bValid = false;
@@ -36,34 +39,42 @@ struct FRopeContactCandidate
 	float Penetration = 0.0f;
 	float RelativeTangentialSpeed = 0.0f;
 
-	/** 감김 방향이면 +, 반대면 -. */
+	/** Positive when the motion is in the wrapping direction and negative when it opposes it. */
 	float WrapDirectionScore = 0.0f;
 };
 
 /**
- * 캡처(Flight→Contacting) 순간의 로프 진행 좌표계 스냅샷(진행 방향 기반 wrap 2단계).
- * Contacting부터는 솔브가 없어 노드가 정지하므로, "로프가 어느 방향으로 날아와 어떻게 누웠는가"는
- * 이 순간에만 잴 수 있다 — BuildContactingState가 채우고 ResetTransientPhaseState가 폐기한다.
- * 소비자: CaptureTravelPlane 축(가이드 평면이 없는 던지기의 폴백 normal, 3단계에서 축 origin으로
- * RegionCenter 사용 예정). GPU 상주 로프는 CPU 미러가 1~2프레임 낡을 수 있으나 방향 성분은 충분하다.
+ * A snapshot of the rope's travel frame at the moment of capture, that is the Flight to Contacting
+ * transition. There is no solve from Contacting onwards, so the nodes come to rest and the questions
+ * "which way was the rope flying" and "how did it come to lie" can only be answered at this instant.
+ * BuildContactingState fills it in and ResetTransientPhaseState discards it.
+ * Its consumer is the CaptureTravelPlane axis, where it provides the fallback plane normal for a
+ * throw with no guide plane and the region centre used as the axis origin. On a GPU-resident rope the
+ * CPU mirror can be one to two frames stale, which is still accurate enough for the direction
+ * components.
  */
 struct DYNAMICROPE_API FRopeCaptureTravelFrame
 {
 	bool bValid = false;
 
-	/** 접촉 후보 표면점(WorldPoint)들의 평균 — 접촉 영역 중심(월드). */
+	/** The mean of the candidates' surface points, which is the centre of the contact region in world
+	 *  space. */
 	FVector RegionCenter = FVector::ZeroVector;
 
-	/** 접촉 노드들의 평균 Verlet 속도(cm/s). dt<=0이면 Zero. */
+	/** The mean Verlet velocity of the contacting nodes (cm/s). Zero when the delta time is at or
+	 *  below 0. */
 	FVector AverageVelocity = FVector::ZeroVector;
 
-	/** 접촉 span의 head→tail 단위 방향(로프가 누운 방향). 접촉이 한 노드뿐이면 이웃 노드로 넓혀 잰다. */
+	/** The unit direction from head to tail across the contact span, that is the direction the rope
+	 *  lies in. With only one contacting node, the span is widened to its neighbours to measure it. */
 	FVector SpanDirection = FVector::ZeroVector;
 
-	/** AverageVelocity × SpanDirection 유도 성공 여부(속도 0/평행이면 false — 자연 폴백 신호). */
+	/** Whether deriving a normal from AverageVelocity crossed with SpanDirection succeeded. It is
+	 *  false when the velocity is zero or the two are parallel, which signals a natural fallback. */
 	bool bHasPlaneNormal = false;
 
-	/** 유도된 진행 평면 normal(단위). 부호는 소비자(winding/OrientAxisByTail)가 해석한다. */
+	/** The derived travel plane normal, as a unit vector. Its sign is interpreted by the consumer,
+	 *  meaning the winding decision and OrientWrappingAxisByTail. */
 	FVector PlaneNormal = FVector::ZeroVector;
 
 	void Reset()
@@ -71,34 +82,40 @@ struct DYNAMICROPE_API FRopeCaptureTravelFrame
 		*this = FRopeCaptureTravelFrame();
 	}
 
-	/** 캡처 순간의 Sim/후보에서 스냅샷을 계산한다(UObject-free). 구현은 RopeTypes.cpp. */
+	/** Computes the snapshot from the simulation state and candidates at the moment of capture. Free of
+	 *  UObject dependencies; implemented in RopeTypes.cpp. */
 	static FRopeCaptureTravelFrame Compute(const FRopeSimState& Sim,
 		const TArray<FRopeContactCandidate>& Candidates, float DeltaTime);
 };
 
-/** 트래커가 dominant 외에도 유지하는 (Mesh, Bone) 대상별 접촉 집계(시드 다중화 재료). */
+/** The per-target contact aggregate, keyed by (mesh, bone), that the tracker maintains alongside the
+ *  dominant target. It is the input to seeding several wraps at once. */
 struct FRopeTrackedContactTarget
 {
 	FName Bone = NAME_None;
 	const USceneComponent* Mesh = nullptr;
 
-	/** 이번 프레임 이 대상에 닿은 노드들(매 갱신 최신 후보로 교체). */
+	/** The nodes touching this target this frame, replaced with the latest candidates on every
+	 *  update. */
 	TArray<int32> Nodes;
 
-	/** 이 대상의 지속 접촉 시간. 접촉이 끊긴 프레임에는 같은 양만큼 감쇠하고 0이 되면 목록에서 빠진다. */
+	/** How long contact with this target has been sustained. On frames with no contact it decays by
+	 *  the same amount, and the target is dropped from the list once it reaches 0. */
 	float DwellTime = 0.0f;
 };
 
 /**
- * 접촉 후보들에서 dominant 대상 — (Mesh, Bone) 쌍 — 을 추적하는 POD 트래커. 본 이름만 키로 쓰면
- * 같은 스켈레톤을 쓰는 두 액터가 동시에 닿을 때 후보가 합산/오귀속되므로 mesh까지 키에 포함한다.
- * Flight의 캡처 판정(ShouldCapture)과 Contacting의 체류 추적이 공용으로 쓴다.
- * 동률은 head(손 쪽) 노드가 앞선 대상 → 점수(관통+감김 방향) 순으로 깨져 프레임 간 안정적이다.
- * 대상이 바뀌면(본 또는 mesh) DwellTime이 0부터 다시 쌓인다(전이 프레임 오탐 방어 — 랙돌 테스트 (c)가
- * 고정하는 계약).
- * dominant와 별개로 접촉 중인 모든 (Mesh, Bone) 대상을 Targets에 dwell과 함께 유지한다 —
- * 시드 다중화(MaxWrapSeeds > 1)가 보조 시드 후보를 고르는 재료다. dominant 선정/리셋 계약은
- * Targets 도입과 무관하게 종전과 동일하다.
+ * A plain-data tracker that follows the dominant target, as a (mesh, bone) pair, across the contact
+ * candidates. Keying on the bone name alone would merge and misattribute candidates when two actors
+ * sharing a skeleton are touched at the same time, so the mesh is part of the key.
+ * It is shared by the Flight capture decision and the dwell tracking in Contacting.
+ * Ties are broken first by whichever target has a node closer to the head, that is the hand, and then
+ * by score, which combines penetration and wrap direction, which keeps it stable between frames.
+ * When the target changes, whether the bone or the mesh, DwellTime restarts from 0, which guards
+ * against false positives on the transition frame.
+ * Alongside the dominant target it keeps every (mesh, bone) currently in contact in Targets, together
+ * with their dwell times, which is what lets several wrap seeds be chosen when MaxWrapSeeds is above
+ * 1. The rules for selecting and resetting the dominant target are unaffected by Targets.
  */
 struct DYNAMICROPE_API FRopeContactTracker
 {
@@ -108,7 +125,8 @@ struct DYNAMICROPE_API FRopeContactTracker
 	TArray<int32> CandidateNodes;
 	float DwellTime = 0.0f;
 
-	/** 접촉 중인 모든 대상의 (Mesh, Bone)별 집계. dominant도 포함된다(같은 키로 조회 가능). */
+	/** The aggregate for every target in contact, keyed by (mesh, bone). The dominant target is
+	 *  included and can be looked up by the same key. */
 	TArray<FRopeTrackedContactTarget> Targets;
 
 	void Reset()
@@ -124,8 +142,9 @@ struct DYNAMICROPE_API FRopeContactTracker
 	{
 		DwellTime = FMath::Max(0.0f, DwellTime - DeltaTime);
 
-		// 접촉이 전무한 프레임: 모든 대상의 dwell을 같은 비율로 소진시킨다(짧은 플리커 관용은 동일).
-		// 노드 목록은 이번 프레임 접촉이 아니므로 비워 stale 소비를 막는다.
+		// On a frame with no contact at all, drain every target's dwell at the same rate, which keeps
+		// the same tolerance for brief flicker. The node lists are cleared because they do not describe
+		// this frame's contact and must not be consumed stale.
 		for (int32 Index = Targets.Num() - 1; Index >= 0; --Index)
 		{
 			Targets[Index].DwellTime -= DeltaTime;
@@ -142,11 +161,14 @@ struct DYNAMICROPE_API FRopeContactTracker
 		}
 	}
 
-	// [Assisted 멀티 본 계약] Targets에는 모든 허용 본을 보존하면서 CandidateBone만 조준 본으로
-	// 고정할 수 있어야 한다. 그래서 일반 rank를 덮어쓰는 preferred target 입력을 이 공용 tracker에 둔다.
-	/** 후보를 (Mesh, Bone) 쌍별 집계해 dominant 대상/노드/체류 시간을 갱신한다.
-	 *  Preferred target이 현재 후보에 있으면 일반 rank보다 우선한다. bRequirePreferred인데 없으면
-	 *  dominant를 비우되 Targets의 secondary 집계는 유지한다. 구현은 RopeTypes.cpp. */
+	// Assisted multi-bone contract: Targets must keep every permitted bone while CandidateBone alone
+	// is pinned to the aimed bone. That is why the preferred target input, which overrides the normal
+	// ranking, lives on this shared tracker.
+	/** Aggregates the candidates by (mesh, bone) pair and updates the dominant target, its nodes and
+	 *  its dwell time.
+	 *  A preferred target present among the current candidates takes priority over the normal ranking.
+	 *  With bRequirePreferred set and no such candidate, the dominant target is cleared while the
+	 *  secondary aggregates in Targets are kept. Implemented in RopeTypes.cpp. */
 	void Update(const TArray<FRopeContactCandidate>& Candidates, float DeltaTime,
 		const USceneComponent* PreferredMesh = nullptr, FName PreferredBone = NAME_None,
 		bool bRequirePreferred = false);

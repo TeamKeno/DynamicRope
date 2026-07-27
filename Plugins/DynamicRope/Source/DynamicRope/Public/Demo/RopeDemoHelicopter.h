@@ -1,23 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 데모 씬용 로프 구조 헬기 — 상공을 호버링하다가 승객이 아래 잡기 구역에 들어오면 로프를 내려꽂아
-// (③ GuaranteedWrap으로 손 본을 감아) 릴-인으로 끌어올린 뒤, 경유지(Waypoints)를 따라 비행해
-// 목적지에서 내려준다(release). 놓은 뒤에는 시작 지점으로 복귀해 다음 승객을 기다린다.
+// Demo rescue helicopter. Hovers overhead until a passenger enters the grab zone below, drops its
+// cable to wrap the passenger's hand bone (GuaranteedWrap resolve mode), reels them up, flies the
+// configured waypoints and releases them at the destination. It then returns home for the next run.
 //
-// 진행 개요:
-//   Idle(호버+로터) → [잡기 구역 진입/Grab()] Grabbing(손 본으로 Guaranteed 발사, 재시도)
-//        → Carrying(릴-인으로 끌어올림 → Waypoints 순회 비행)
-//        → [마지막 경유지 도착] ReleaseCarried() → Returning(홈 복귀) → Idle
+// State flow:
+//   Idle (hover + rotor) -> [grab zone entered / Grab()] Grabbing (guaranteed throw, retried)
+//        -> Carrying (reel in, then fly the waypoints)
+//        -> [last waypoint reached] ReleaseCarried() -> Returning (fly home) -> Idle
 //
-// 콘텐츠 의존:
-//   - 기체/로터 메시는 레벨/BP에서 지정한다(BodyMesh/RotorMesh — 플러그인 → /Game 참조 금지 규칙).
-//   - 승객은 스켈레탈 메시 + 로프 콜라이더 프로바이더(캡슐/SDF)가 있어야 감긴다(GrabBone 기본 hand_r).
-//   - 승객에 URopeRagdollResponseComponent(bRagdollOnWrapped)가 있으면 감기는 순간 랙돌이 된다 —
-//     축 늘어진 "매달린 화물" 연출이면 그대로 두고, 조작을 유지할 플레이어면 붙이지 말 것.
+// Content requirements:
+//   - Body and rotor meshes are assigned by the level or Blueprint (BodyMesh / RotorMesh); the
+//     plugin never references /Game content itself.
+//   - A passenger needs a skeletal mesh plus a rope collider provider (capsule or SDF) to be
+//     wrappable, and must own the bone named by GrabBone (hand_r by default).
+//   - If the passenger has a URopeRagdollResponseComponent with bRagdollOnWrapped, it goes limp the
+//     moment the wrap lands. Leave it on for a dangling-cargo look; leave it off to keep the
+//     passenger controllable.
 //
-// ⚠ 물리 튜닝은 PIE 실측이 정본이다: 걷는 캐릭터를 지면에서 들어올리는 힘은 릴-인 테더와
-//   CarryPullForce의 합이 결정한다 — 안 들리면 LiftReelSpeed/CarryPullForce를 올린다.
-//   (스네어와 동일한 계약: 해제 시 발사 큐 취소 + 전 페이즈 ReleaseWrap — CL 768의 교훈 반영.)
+// Lifting a walking character clear of the ground is the combined effect of the reel-in tether and
+// CarryPullForce; raise LiftReelSpeed or CarryPullForce if the passenger stays grounded.
 
 #pragma once
 
@@ -30,7 +32,7 @@ class UStaticMeshComponent;
 class USphereComponent;
 class USkeletalMeshComponent;
 
-/** 승객을 실었/내렸을 때(감김 성립/해제 시점). */
+/** Fired when a passenger is picked up or set down (wrap established / released). */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeDemoHelicopterCarrySignature,
 	ARopeDemoHelicopter*, Helicopter, bool, bCarrying);
 
@@ -47,194 +49,206 @@ public:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 
-	/** 지정 승객을 향해 로프를 내려꽂는다(잡기 시작). Idle에서만 유효 — 성공 시 true. 자동 잡기
-	 *  (bAutoGrab) 대신/외에 BP·코드로 직접 태울 때 쓴다. */
+	/** Drops the cable towards the given passenger. Only valid while idle; returns true on success.
+	 *  Use this to pick a passenger explicitly instead of, or alongside, automatic grabbing. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Demo")
 	bool Grab(AActor* Passenger);
 
-	/** 진행 중인 잡기 시도를 중단한다(발사 큐/비행 중 로프 회수 포함). Carrying에는 ReleaseCarried를 쓸 것. */
+	/** Aborts the grab attempt in progress, cancelling any queued throw and recalling the cable.
+	 *  Use ReleaseCarried instead once the passenger is being carried. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void CancelGrab();
 
-	/** 실은 승객을 내려놓는다(감김 해제 + 로프 길이 복원). 이후 bReturnHomeAfterRelease에 따라 홈으로
-	 *  복귀하거나 그 자리에서 호버한다. 디테일 패널 버튼으로도 호출. */
+	/** Sets the carried passenger down: releases the wrap and restores the cable length. The
+	 *  helicopter then returns home or hovers in place depending on bReturnHomeAfterRelease. Also
+	 *  exposed as a details panel button. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void ReleaseCarried();
 
-	/** 승객을 감아 실은 상태인가(끌어올리는 중 포함). */
+	/** True while a passenger is wrapped, including during the reel-in. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	bool IsCarrying() const;
 
-	/** 현재 실은(또는 잡는 중인) 승객. 없으면 nullptr. */
+	/** The passenger currently carried or being grabbed, or nullptr. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	AActor* GetCarriedActor() const { return CarryTarget.Get(); }
 
-	/** 감김 성립/해제 브로드캐스트. */
+	/** Broadcast when a passenger is picked up or set down. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope|Demo")
 	FRopeDemoHelicopterCarrySignature OnCarryStateChanged;
 
-	//~ 경로 -------------------------------------------------------------------
+	//~ Route -------------------------------------------------------------------
 
-	/** 승객을 실은 뒤 순서대로 지나는 경유지(TargetPoint 등 아무 액터). 마지막이 목적지다.
-	 *  비면 제자리에서 들고만 있는다(호버 크레인). */
+	/** Waypoints flown in order once a passenger is aboard (any actor, for example a TargetPoint);
+	 *  the last one is the destination. Leave empty to hold position like a hovering crane. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Rope|Demo")
 	TArray<TObjectPtr<AActor>> Waypoints;
 
-	//~ 잡기(승객 획득) ---------------------------------------------------------
+	//~ Grabbing ----------------------------------------------------------------
 
-	/** 잡기 구역에 스켈레탈 메시 보유 액터가 들어오면 자동으로 로프를 내려꽂는다. 끄면 Grab() 호출 전용. */
+	/** Automatically drop the cable when an actor with a skeletal mesh enters the grab zone. Turn
+	 *  off to pick passengers through Grab() only. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Grab")
 	bool bAutoGrab = true;
 
-	/** 감을 승객 본(잡는 손). 승객 스켈레톤에 없으면 잡기가 시작되지 않는다(경고 로그). */
+	/** Passenger bone to wrap. Grabbing does not start if the passenger's skeleton lacks it, and a
+	 *  warning is logged. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Grab")
 	FName GrabBone = TEXT("hand_r");
 
-	/** 잡기 구역(구) 중심의 기체 아래 거리(cm). 로프가 내려꽂힐 사거리 안이어야 한다. */
+	/** Distance below the body to the centre of the grab zone (cm). Must be within cable range. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Grab", meta = (ClampMin = "0.0", Units = "cm"))
 	float GrabZoneDrop = 600.0f;
 
-	/** 잡기 구역 반지름(cm). */
+	/** Radius of the grab zone (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Grab", meta = (ClampMin = "10.0", Units = "cm"))
 	float GrabZoneRadius = 250.0f;
 
-	/** 잡기 재시도 간격(초) — 스네어와 동일한 장전 에지 안정화 여유. */
+	/** Delay between grab retries (s), which also settles the throw arming edge. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Grab", meta = (ClampMin = "0.1", Units = "s"))
 	float GrabRetryPeriod = 1.0f;
 
-	/** 이 시간 안에 감기지 못하면 잡기를 포기한다(초, 0 = 무제한). */
+	/** Give up grabbing if no wrap lands within this time (s). 0 disables the timeout. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Grab", meta = (ClampMin = "0.0", Units = "s"))
 	float GrabTimeout = 8.0f;
 
-	//~ 수송(끌어올림/비행) -----------------------------------------------------
+	//~ Carrying ----------------------------------------------------------------
 
-	/** 수송 중 케이블 길이(cm) — 릴-인으로 이 길이까지 감아 승객을 끌어올린다(짧을수록 높이 매달림). */
+	/** Cable length while carrying (cm). The passenger is reeled in to this length; shorter values
+	 *  hang them closer to the body. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Carry", meta = (ClampMin = "50.0", Units = "cm"))
 	float CarryRopeLength = 350.0f;
 
-	/** 끌어올리는 릴-인 속도(cm/s). */
+	/** Reel-in speed used to lift the passenger (cm/s). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Carry", meta = (ClampMin = "1.0", Units = "cm/s"))
 	float LiftReelSpeed = 200.0f;
 
-	/** 수송 중 능동 Pull 견인력(0 = 릴-인 테더만). 릴만으로 승객이 지면에서 안 뜨면 보탠다. */
+	/** Active pull force applied while carrying. 0 relies on the reel-in tether alone; add force
+	 *  when reeling by itself does not lift the passenger clear of the ground. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Carry", meta = (ClampMin = "0.0"))
 	float CarryPullForce = 0.0f;
 
-	/** 케이블 길이 도달 판정 여유(cm) — 이 안이면 "다 끌어올렸다"로 보고 비행을 시작한다. */
+	/** Tolerance on the carry length (cm) below which the lift counts as finished and flight starts. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Carry", meta = (ClampMin = "0.1", Units = "cm"))
 	float LiftTolerance = 15.0f;
 
-	/** 마지막 경유지에 도착하면 자동으로 내려놓는다. 끄면 ReleaseCarried 호출 전까지 들고 호버한다. */
+	/** Release the passenger automatically on reaching the last waypoint. Turn off to keep hovering
+	 *  with the passenger until ReleaseCarried is called. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Carry")
 	bool bReleaseAtLastWaypoint = true;
 
-	/** 내려놓은 뒤 시작 지점으로 복귀한다. 끄면 그 자리에서 호버하며 다음 승객을 기다린다. */
+	/** Fly back to the start position after releasing. Turn off to hover in place and wait for the
+	 *  next passenger. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Carry")
 	bool bReturnHomeAfterRelease = true;
 
-	//~ 비행 연출 --------------------------------------------------------------
+	//~ Flight ------------------------------------------------------------------
 
-	/** 순항 속도(cm/s). */
+	/** Cruise speed (cm/s). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Flight", meta = (ClampMin = "1.0", Units = "cm/s"))
 	float FlySpeed = 600.0f;
 
-	/** 경유지 도착 판정 반경(cm). */
+	/** Radius within which a waypoint counts as reached (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Flight", meta = (ClampMin = "1.0", Units = "cm"))
 	float WaypointTolerance = 100.0f;
 
-	/** 진행 방향으로 기수를 돌린다(요만 — 기울임 없음). */
+	/** Turn the nose towards the direction of travel (yaw only, no banking). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Flight")
 	bool bFaceTravelDirection = true;
 
-	/** 기수 회전 속도(도/초). */
+	/** Yaw turn rate (degrees per second). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Flight", meta = (ClampMin = "1.0"))
 	float TurnRateDeg = 90.0f;
 
-	/** 호버 승강 흔들림 진폭(cm, 0 = 끔). */
+	/** Vertical hover bob amplitude (cm). 0 disables the bob. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Flight", meta = (ClampMin = "0.0", Units = "cm"))
 	float HoverBobAmplitude = 15.0f;
 
-	/** 호버 흔들림 주기(초). */
+	/** Hover bob period (s). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Flight", meta = (ClampMin = "0.1", Units = "s"))
 	float HoverBobPeriod = 3.0f;
 
-	/** 로터 회전 속도(RPM, 0 = 정지). RotorMesh에만 적용된다. */
+	/** Rotor spin rate (RPM). 0 stops the rotor. Only applies to RotorMesh. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Flight", meta = (ClampMin = "0.0"))
 	float RotorRPM = 300.0f;
 
 protected:
-	/** 루트(비행 기준점). 기체는 키네마틱으로 이 액터 위치를 직접 움직인다. */
+	/** Root and flight reference point. The helicopter is kinematic and drives the actor location
+	 *  directly. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<USceneComponent> Base = nullptr;
 
-	/** 기체 메시(레벨/BP에서 지정). 충돌 설정은 에셋을 따른다 — PhysicsBody를 Block하면 다른 로프가 감/부딪을 수 있다. */
+	/** Body mesh, assigned by the level or Blueprint. Collision follows the asset settings: blocking
+	 *  PhysicsBody lets other ropes wrap or collide with it. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<UStaticMeshComponent> BodyMesh = nullptr;
 
-	/** 로터 메시(선택 — 기체와 분리된 로터 에셋이 있을 때 지정). RotorRPM으로 요 축 회전한다. */
+	/** Optional rotor mesh, assigned when the rotor is a separate asset from the body. Spun about
+	 *  the yaw axis at RotorRPM. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<UStaticMeshComponent> RotorMesh = nullptr;
 
-	/** 로프가 매달리는 기체 하단 지점(디테일에서 위치 조정). */
+	/** Point under the body the cable hangs from; adjust its location in the details panel. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<USceneComponent> RopeAttach = nullptr;
 
-	/** 구조 케이블(③ GuaranteedWrap). 승객 손 본을 감는다. */
+	/** The rescue cable, configured for GuaranteedWrap. Wraps the passenger's hand bone. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<URopeComponent> Rope = nullptr;
 
-	/** 잡기 구역(기체 아래 구 — QueryOnly라 로프 콜라이더로는 수집되지 않는다). */
+	/** Grab zone sphere below the body. Query-only, so rope collider gathering ignores it. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<USphereComponent> GrabVolume = nullptr;
 
 private:
-	/** 데모 상태(전이는 Tick/각 API가 소유). */
+	/** Demo state. Transitions are owned by Tick and the public entry points. */
 	enum class EState : uint8 { Idle, Grabbing, Carrying, Returning };
 
-	/** 승객을 향해 케이블을 Guaranteed 발사한다(③ 장전 에지 포함). 큐잉 성공 시 true. */
+	/** Fires a guaranteed throw at the passenger, including the arming edge. True once queued. */
 	bool FireRopeAtTarget();
 
-	/** 승객의 스켈레탈 메시(첫 번째). */
+	/** The passenger's first skeletal mesh component. */
 	USkeletalMeshComponent* ResolveTargetMesh() const;
 
-	/** 케이블 회수 공통부: 발사 큐 취소 + 전 페이즈 release + 길이/견인 복원(CL 768과 동일 위생). */
+	/** Shared cable recall: cancels a queued throw, releases the wrap in any phase and restores the
+	 *  cable length and traction settings. */
 	void RecallRope();
 
-	/** 목표점으로 등속 이동(+선택 기수 회전). 남은 거리를 돌려준다. */
+	/** Moves towards Dest at cruise speed, optionally turning the nose. Returns the distance left. */
 	float MoveTowards(const FVector& Dest, float DeltaSeconds);
 
-	/** 현 위치(흔들림 제외 기준점)와 기수를 액터에 반영한다. */
+	/** Writes the current navigation position and heading back onto the actor. */
 	void ApplyPose();
 
-	/** 잡기 구역 진입(자동 잡기). */
+	/** Grab zone entry handler for automatic grabbing. */
 	UFUNCTION()
 	void HandleGrabZoneBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
 
 	EState State = EState::Idle;
 
-	/** 잡는 중/실은 승객(파괴 안전 weak). */
+	/** Passenger being grabbed or carried. Weak so a destroyed passenger is safe. */
 	TWeakObjectPtr<AActor> CarryTarget;
 
-	/** 호버 기준점(흔들림 제외). Idle/Returning의 목적지이기도 하다. */
+	/** Hover reference point, excluding the bob. Doubles as the Idle and Returning destination. */
 	FVector IdleAnchor = FVector::ZeroVector;
 
-	/** 이동 기준 현재 위치(흔들림 제외 — 흔들림은 표시에만 얹는다). */
+	/** Current navigation position, excluding the bob (the bob is display only). */
 	FVector NavPos = FVector::ZeroVector;
 
-	/** 현재 기수 요(도). */
+	/** Current heading yaw (degrees). */
 	float NavYaw = 0.0f;
 
-	/** 호버 흔들림 시계(초). */
+	/** Hover bob clock (s). */
 	float BobTime = 0.0f;
 
-	/** 잡기 재시도 쿨다운/경과(초). */
+	/** Grab retry cooldown and elapsed grab time (s). */
 	float GrabRetryRemaining = 0.0f;
 	float GrabElapsed = 0.0f;
 
-	/** 현재 향하는 경유지 인덱스. */
+	/** Index of the waypoint currently being flown to. */
 	int32 WaypointIndex = 0;
 
-	/** 감김 성립을 브로드캐스트했는가(중복 방지). */
+	/** Whether the pick-up has already been broadcast (guards against duplicates). */
 	bool bCarryBroadcast = false;
 };

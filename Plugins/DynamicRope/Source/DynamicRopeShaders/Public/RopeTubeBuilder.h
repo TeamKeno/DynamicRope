@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// GPU 튜브 메시 생성(M5b). 센터라인 위치 버퍼에서 parallel-transport frame으로 튜브 정점 위치를 계산해
-// 외부(렌더러) vertex buffer UAV에 직접 기록한다 → CPU BuildTube/리드백 없이 GPU 상태를 바로 렌더.
-// 이 모듈(DynamicRopeShaders)은 DynamicRope 렌더 타입에 의존하지 않는다 → opaque RHI view 핸들만 받는다.
+// GPU tube mesh generation. It computes the tube's vertex positions from a centreline position
+// buffer using a parallel-transport frame and writes them straight into the renderer's vertex buffer
+// UAV, which renders the GPU state directly with no CPU tube build and no readback.
+// This module, DynamicRopeShaders, does not depend on the DynamicRope render types, so it takes
+// opaque RHI view handles only.
 
 #pragma once
 
@@ -14,25 +16,34 @@ class FRHICommandList;
 
 namespace RopeGPU
 {
-	/** GPU 튜브가 지원하는 최대 링 수(= 최상단 스레드그룹 버킷). NumRings가 이보다 크면 CPU 튜브로 폴백해야 한다.
-	 *  호출자(씬 프록시)가 bUseGpuTube 판정에 쓴다 — 버킷 상한과 프록시 게이트가 어긋나지 않도록 단일 소스. */
+	/** The maximum number of rings the GPU tube supports, which is the largest thread group bucket. A
+	 *  rope with more rings than this must fall back to the CPU tube.
+	 *  The caller, the scene proxy, uses it to decide whether the GPU tube applies, which keeps the
+	 *  bucket limit and the proxy's gate from diverging. */
 	DYNAMICROPESHADERS_API int32 MaxTubeRings();
 
-	/** NumRings 이상인 가장 작은 스레드그룹 버킷(64/128/256/512). 상한 초과면 0(→ CPU 폴백). 디스패치가
-	 *  퍼뮤테이션 선택에 쓰고, 디버그 오버레이가 실제 사용 버킷 표시에 쓴다(단일 소스). */
+	/** The smallest thread group bucket at least as large as NumRings, from 64, 128, 256 and 512.
+	 *  Returns 0 above the limit, which means falling back to the CPU. The dispatch uses it to select a
+	 *  permutation and the debug overlay to show the bucket actually in use, from this single source. */
 	DYNAMICROPESHADERS_API int32 TubeRingBucket(int32 NumRings);
 
-	/** 렌더 튜브 Subdiv 결정. WantedSubdiv(1..8)를 쓰되 NumRings=(NumNodes-1)*Subdiv+1이 MaxTubeRings를
-	 *  넘지 않도록 하향한다 → 노드가 많아도 GPU 튜브를 유지하고 렌더 스무딩만 완만히 줄어든다.
-	 *  씬 프록시가 실제 Subdiv 결정에, 디버그 오버레이가 적격성 표시에 쓴다(단일 소스). */
+	/** Decides the render tube's subdivision. It uses WantedSubdiv, from 1 to 8, reduced as needed so
+	 *  that NumRings, which is (NumNodes - 1) * Subdiv + 1, does not exceed MaxTubeRings. A rope with
+	 *  many nodes therefore keeps the GPU tube and only loses render smoothing gradually.
+	 *  The scene proxy uses it to decide the actual subdivision and the debug overlay to show
+	 *  eligibility, from this single source. */
 	DYNAMICROPESHADERS_API int32 ComputeTubeSubdiv(int32 NumNodes, int32 WantedSubdiv);
 
 	/**
-	 * 렌더 스레드. 센터라인(InCenterlineSRV: R32_FLOAT 타입, ring r 위치 = float[r*3..])에서 튜브 정점
-	 * 위치를 OutPositionsUAV(R32_FLOAT, v당 float3)에 기록한다. 로프 1개 = 1 디스패치.
-	 * 좌표계 변환 없음 — 입력/출력 동일 공간(B1: component-local). 호출자가 UAV 배리어를 책임진다.
-	 * OutTangentsUAV(R32_UINT, v당 uint2 = FPackedNormal TangentX/TangentZ) + OutTexCoordsUAV(R32_FLOAT,
-	 * v당 float2)를 주면 tangent/UV도 GPU 생성한다(B2-full, CPU BuildTube 불필요). null이면 위치만.
+	 * Render thread. Writes the tube's vertex positions into OutPositionsUAV, which is R32_FLOAT with
+	 * three floats per vertex, from the centreline in InCenterlineSRV, which is R32_FLOAT with ring r's
+	 * position at float indices r*3 onwards. One rope is one dispatch.
+	 * There is no coordinate conversion; the input and output share a space, which is component-local.
+	 * The caller is responsible for the UAV barriers.
+	 * Supplying OutTangentsUAV, which is R32_UINT with a uint2 per vertex holding the packed tangent
+	 * basis, and OutTexCoordsUAV, which is R32_FLOAT with a float2 per vertex, also generates the
+	 * tangents and UVs on the GPU, removing the need for the CPU tube build. Pass null for either to
+	 * generate positions only.
 	 */
 	DYNAMICROPESHADERS_API void BuildTube_RenderThread(
 		FRHICommandList& RHICmdList,
@@ -43,9 +54,12 @@ namespace RopeGPU
 		int32 NumRings, int32 NumSides, float Radius);
 
 	/**
-	 * 렌더 스레드(B2-full). 솔버 resident PosBuf(StructuredBuffer<float4>, 월드, 시뮬 노드 NumSrcNodes개)를
-	 * GPU에서 Catmull-Rom 스무딩(Subdiv)해 렌더 센터라인(NumRings)을 만든 뒤 튜브 pos/tangent/UV를 생성한다.
-	 * CPU 미러 업로드/스무딩 불필요. WorldToLocal로 component-local 변환. 호출자가 UAV 배리어 책임.
+	 * Render thread. Takes the solver's resident position buffer, a StructuredBuffer of float4 in world
+	 * space holding NumSrcNodes simulation nodes, smooths it on the GPU with Catmull-Rom interpolation
+	 * at the given subdivision to produce the render centreline of NumRings, and then generates the
+	 * tube's positions, tangents and UVs.
+	 * No CPU mirror upload or smoothing is needed. WorldToLocal converts into component-local space. The
+	 * caller is responsible for the UAV barriers.
 	 */
 	DYNAMICROPESHADERS_API void BuildTubeFromResident_RenderThread(
 		FRHICommandList& RHICmdList,

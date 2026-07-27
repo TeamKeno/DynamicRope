@@ -19,7 +19,7 @@ DECLARE_LOG_CATEGORY_EXTERN(LogDynamicRopeEditor, Log, All);
 DECLARE_LOG_CATEGORY_EXTERN(LogRopeSDFBake, Log, All);
 
 /**
- * SDF 베이크 결과(coarsening된 본 등)를 사용자에게 보고하는 Message Log 리스닝 이름.
- * 모듈 startup에서 등록하고, 패널이 베이크 후 이 이름으로 기록한다.
+ * The message log listing name used to report bake results to the user, such as bones that were
+ * coarsened. It is registered during module startup, and the panel writes to it after a bake.
  */
 inline const FName RopeSDFMessageLogName(TEXT("DynamicRopeSDF"));

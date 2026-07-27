@@ -1,7 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 던지는 모션 몽타주에 배치하는 AnimNotify. 손에서 로프가 떠나는 프레임에 두면, 그 순간 메시 owner의
-// URopeWielderComponent::ThrowNow()를 호출해 실제 로프 던지기를 발사한다(모션과 타이밍 동기).
+// The anim notify placed in a throwing montage. Put it on the frame the rope leaves the hand and it
+// calls URopeWielderComponent::ThrowNow() on the mesh's owner at that instant, which fires the actual
+// throw in sync with the motion.
 
 #pragma once
 

@@ -1,22 +1,28 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Aim-ray 조준의 데모 조준 HUD 위젯. 표시 조건은 URopeWielderComponent::IsAimActive() —
-// 조준 모드(UsesAimRay: ResolveMode가 ①FullSimulation이 아님)이면서 **지금 던질 수 있는 phase**일 때만이다
-// (③GuaranteedWrap은 Loaded/장전 전용 → Free 등에서는 십자선까지 통째로 숨는다. ①②는 phase 게이트 없음).
-// 평상시에는 화면 중앙 십자선을, aim ray가 감을 수 있는 본에 걸리는 동안에는 그 본 주위에
-// 스크린 투영된 강조 링(획득 팝 + 펄스)을 그린다.
+// The demo aiming HUD widget for aim ray targeting. It is shown exactly while
+// URopeWielderComponent::IsAimActive(), meaning the rope is in an aim ray mode, that is any resolve
+// mode other than FullSimulation, and is in a phase it can currently be thrown from. GuaranteedWrap
+// is restricted to the Loaded phase, so in Free and elsewhere even the crosshair is hidden; the
+// other modes have no phase gate.
+// Normally it draws a crosshair in the centre of the screen, and while the aim ray is on a wrappable
+// bone it draws a screen-projected highlight ring around that bone, with an acquisition pop and a
+// pulse.
 //
-// RopePluginInfoWidget과 같은 "C++ 베이스 + WBP 리스타일" 구성이다:
-//  - 에셋 없이 C++ NativePaint가 십자선/링을 직접 그리므로 이 클래스만으로 즉시 동작한다.
-//  - WBP 서브클래스로 리스타일하려면: 스타일 프로퍼티(색/두께/펄스)를 디폴트에서 덮어쓰거나,
-//    bDrawBuiltInVisuals를 꺼서 내장 페인트를 끄고 GetAimSample()/GetTargetScreenPosition()으로
-//    자체 비주얼(이미지/애니메이션)을 배치한다. OnAimTargetChanged/OnAimTargetLost 이벤트로
-//    사운드/추가 연출을 붙인다.
-//  - 어떤 위젯 클래스를 쓸지는 Project Settings > Dynamic Rope > AimHudWidgetClass가 정하고,
-//    생성/수명은 URopeWielderComponent가 관리한다(로컬 플레이어 전용, bShowAimHudWidget).
+// It follows the same "C++ base plus Blueprint restyle" arrangement as RopePluginInfoWidget:
+//  - The C++ NativePaint draws the crosshair and ring directly with no assets, so this class works
+//    on its own.
+//  - To restyle it with a Blueprint subclass, either override the style properties from their
+//    defaults, or clear bDrawBuiltInVisuals to disable the built-in painting and place your own
+//    visuals, such as images and animations, using GetAimSample() and GetTargetScreenPosition().
+//    Sounds and additional effects hang off the OnAimTargetChanged and OnAimTargetLost events.
+//  - Which widget class is used is decided by
+//    Project Settings > Dynamic Rope > AimHudWidgetClass, and its creation and lifetime are managed
+//    by URopeWielderComponent for the local player only, subject to bShowAimHudWidget.
 //
-// 데이터 소스는 wielder가 틱마다 캐시하는 FRopeAimHudSample 하나다 — 위젯은 조준 로직을 다시
-// 돌리지 않고 읽기만 한다(스크린 투영/펄스 타이밍만 위젯 소유).
+// The single data source is the FRopeAimHudSample the wielder caches each tick; the widget only
+// reads it and never re-runs the aiming logic. It owns only the screen projection and the pulse
+// timing.
 
 #pragma once
 
@@ -35,90 +41,100 @@ class DYNAMICROPE_API URopeAimWidget : public UUserWidget
 public:
 	URopeAimWidget(const FObjectInitializer& ObjectInitializer);
 
-	//~ 스타일(WBP 디폴트에서 덮어쓰기 가능) ---------------------------------
+	//~ Style, overridable from a Blueprint subclass's defaults ------------------
 
-	/** 내장 페인트(십자선+링)를 그릴지. WBP가 자체 비주얼을 쓰면 끈다(데이터 게터/이벤트는 계속 동작). */
+	/** Whether to draw the built-in crosshair and ring. Turn it off when a Blueprint provides its own
+	 *  visuals; the data getters and events keep working. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD")
 	bool bDrawBuiltInVisuals = true;
 
-	/** 십자선 색. */
+	/** Crosshair colour. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Crosshair")
 	FLinearColor CrosshairColor = FLinearColor(1.0f, 1.0f, 1.0f, 0.9f);
 
-	/** 십자선 한 팔 길이(px). */
+	/** Length of one crosshair arm (px). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Crosshair", meta = (ClampMin = "1.0"))
 	float CrosshairArmLength = 8.0f;
 
-	/** 십자선 중앙 공백 반경(px). */
+	/** Radius of the gap at the centre of the crosshair (px). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Crosshair", meta = (ClampMin = "0.0"))
 	float CrosshairGap = 5.0f;
 
-	/** 십자선 선 두께(px). */
+	/** Crosshair line thickness (px). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Crosshair", meta = (ClampMin = "0.5"))
 	float CrosshairThickness = 2.0f;
 
-	/** 대상이 잡혀 있는 동안 십자선에 섞을 색(획득 피드백 — 링과 같은 톤 권장). */
+	/** Colour blended into the crosshair while a target is held, as acquisition feedback. Matching the
+	 *  ring's tone is recommended. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Crosshair")
 	FLinearColor CrosshairTargetColor = FLinearColor(0.2f, 1.0f, 0.4f, 1.0f);
 
-	/** ray는 걸렸지만 wrap 불가일 때(월드 정적/게이트 거부/본 없음) 십자선·링에 쓸 색. */
+	/** Colour used for the crosshair and ring when the ray hit something that cannot be wrapped,
+	 *  whether static world geometry, a target refused by the gate, or something with no bone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD")
 	FLinearColor BlockedColor = FLinearColor(1.0f, 0.2f, 0.15f, 0.9f);
 
-	/** 강조 링 색. */
+	/** Highlight ring colour. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring")
 	FLinearColor RingColor = FLinearColor(0.2f, 1.0f, 0.4f, 0.9f);
 
-	/** 링 선 두께(px). */
+	/** Ring line thickness (px). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring", meta = (ClampMin = "0.5"))
 	float RingThickness = 2.0f;
 
-	/** 링 세그먼트 수(원 근사 정밀도). */
+	/** Number of ring segments, which is how closely it approximates a circle. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring", meta = (ClampMin = "8", ClampMax = "64"))
 	int32 RingSegments = 32;
 
-	/** 대상 월드 반경 → 링 반경 배율(1보다 살짝 크게 잡아 본을 여유 있게 감싼다). */
+	/** Multiplier from the target's world radius to the ring radius. Slightly above 1 leaves a little
+	 *  room around the bone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring", meta = (ClampMin = "0.5"))
 	float RingRadiusScale = 1.15f;
 
-	/** 링 최소 화면 반경(px) — 먼 대상에서 링이 점으로 뭉개지는 것 방지. */
+	/** Minimum ring radius on screen (px), which stops the ring collapsing into a dot on a distant
+	 *  target. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring", meta = (ClampMin = "1.0"))
 	float RingMinScreenRadius = 18.0f;
 
-	/** 획득 순간 팝 지속(초): 링이 이 시간 동안 크게 시작해 제 크기로 수축한다. 0 = 팝 없음. */
+	/** Duration of the acquisition pop (s), over which the ring starts oversized and contracts to its
+	 *  proper size. 0 disables the pop. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring", meta = (ClampMin = "0.0", Units = "s"))
 	float AcquirePopDuration = 0.15f;
 
-	/** 유지 중 펄스 주기(초). 0 = 펄스 없음. */
+	/** Pulse period while a target is held (s). 0 disables the pulse. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring", meta = (ClampMin = "0.0", Units = "s"))
 	float PulsePeriod = 1.2f;
 
-	/** 펄스 반경 진폭(비율 — 0.06이면 ±6%). */
+	/** Pulse amplitude as a fraction of the radius, so 0.06 means plus or minus 6 percent. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float PulseAmplitude = 0.06f;
 
-	//~ WBP/게임 소비용 데이터 ------------------------------------------------
+	//~ Data for Blueprint and game code ----------------------------------------
 
-	/** wielder가 틱마다 캐시한 조준 샘플(대상 유무/본/월드 위치/반경). wielder가 없으면 빈 샘플. */
+	/** The aiming sample the wielder cached this tick, covering whether a target exists and its bone,
+	 *  world position and radius. An empty sample when there is no wielder. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim HUD")
 	FRopeAimHudSample GetAimSample() const;
 
-	/** 이 위젯이 붙어 있는 로컬 폰의 wielder(NativeConstruct에서 해석). */
+	/** The wielder on the local pawn this widget is attached to, resolved during NativeConstruct. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim HUD")
 	URopeWielderComponent* GetWielder() const { return Wielder.Get(); }
 
 	/**
-	 * 이번 프레임 대상의 스크린(뷰포트 위젯 공간) 위치/반경. 자체 비주얼을 쓰는 WBP용.
-	 * @return 대상이 있고 화면 안에 투영됐으면 true.
+	 * This frame's target position and radius in screen space, meaning viewport widget space, for a
+	 * Blueprint providing its own visuals.
+	 * @return true when a target exists and projects on screen.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim HUD")
 	bool GetTargetScreenPosition(FVector2D& OutPosition, float& OutRadius) const;
 
-	/** AimRayOriginMode를 반영한 실제 ray의 hit(또는 끝점)를 투영한 조준원 위치. */
+	/** The projected reticle position, taken from the actual ray's hit, or the end of the ray, with
+	 *  AimRayOriginMode applied. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim HUD")
 	bool GetAimScreenPosition(FVector2D& OutPosition) const;
 
-	//~ BP 연출 훅(사운드/추가 이펙트) — wielder 델리게이트를 위젯 이벤트로 중계 ----
+	//~ Blueprint effect hooks for sounds and extra effects, relaying the wielder's delegates as widget
+	//~ events.
 	UFUNCTION(BlueprintImplementableEvent, Category = "Rope|Aim HUD")
 	void OnAimTargetChanged(USceneComponent* Mesh, FName Bone);
 
@@ -135,7 +151,7 @@ protected:
 		FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle,
 		bool bParentEnabled) const override;
 
-	/** wielder 델리게이트 → BP 이벤트 중계 핸들러(획득 팝 타이머도 여기서 리셋). */
+	/** Relays the wielder's delegates to the Blueprint events, and resets the acquisition pop timer. */
 	UFUNCTION()
 	void HandleAimTargetChanged(USceneComponent* Mesh, FName Bone);
 
@@ -143,19 +159,22 @@ protected:
 	void HandleAimTargetLost();
 
 private:
-	/** 소유 폰에서 wielder를 찾는다(폰 교체/지연 빙의 대비 — 틱에서 무효 시 재시도). */
+	/** Finds the wielder on the owning pawn, retried from the tick while invalid so that a replaced
+	 *  pawn or late possession is handled. */
 	void ResolveWielder();
 
-	/** 조준 HUD가 그려져야 하는 상태인가(wielder 유효 + IsAimActive — 조준 모드이면서 던질 수 있는 phase). */
+	/** Whether the aiming HUD should be drawn: a valid wielder and IsAimActive, meaning an aim ray mode
+	 *  in a phase that can be thrown from. */
 	bool IsAimHudActive() const;
 
 	TWeakObjectPtr<URopeWielderComponent> Wielder;
 
-	//~ NativeTick이 캐시하고 NativePaint(const)가 읽는 프레임 상태 -------------
+	//~ Frame state cached by NativeTick and read by the const NativePaint ---------
 	bool bHasScreenAim = false;
 	FVector2D AimScreenPos = FVector2D::ZeroVector;
 	bool bHasScreenTarget = false;
-	// 이번 프레임 화면 대상이 wrap 불가(빨강)인가. bHasScreenTarget일 때만 의미.
+	// Whether this frame's on-screen target cannot be wrapped, which is drawn in the blocked colour.
+	// Only meaningful while bHasScreenTarget is set.
 	bool bScreenTargetBlocked = false;
 	FVector2D TargetScreenPos = FVector2D::ZeroVector;
 	float TargetScreenRadius = 0.0f;

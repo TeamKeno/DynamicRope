@@ -1,9 +1,10 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Wrapped 견인/스무딩 상태 묶음. Wrapped 틱 4단계 중 ② 관측치 산출(UpdateWrappedPullSample)과
-// ③ 견인 인가(ApplyWrappedTraction: 테더 + 능동 Pull)가 쓰고 갱신하는 프레임 간 상태를 한 타입으로
-// 모은다 — 로직은 URopeComponent에 남고(UObject 접근/훅 호출), 여기는 상태와 리셋 규약만 담는다.
-// 필드 이름은 컴포넌트 낱개 멤버 시절 그대로다(접근 경로만 PullDrive.X로 변경 — CL 305).
+// The traction and smoothing state used while wrapped. It gathers into one type the state that
+// persists between frames and is read and updated by two of the four stages of a wrapped tick:
+// producing the observations (UpdateWrappedPullSample) and applying traction, that is the tether and
+// active pull (ApplyWrappedTraction). The logic stays on URopeComponent, which needs UObject access
+// and calls the extension hooks; this holds only state and the reset contract.
 
 #pragma once
 
@@ -13,110 +14,134 @@
 struct FRopePullDriveState
 {
 	/**
-	 * 이번 프레임 Pull 산출물(Wrapped 동안 매 프레임 산출). BP 조회/디버거 화살표 소스.
-	 * Direction은 아래 SmoothedPullDir(시간 스무딩된 방향)으로 매 프레임 덮어써서 소비자(테더/능동 Pull)가
-	 * 스무딩된 값을 쓰게 한다.
+	 * This frame's pull output, produced every frame while wrapped. It is the source for Blueprint
+	 * queries and the debugger's arrow.
+	 * Direction is overwritten each frame with SmoothedPullDir below, so consumers, meaning the tether
+	 * and active pull, use the time-smoothed value.
 	 */
 	FRopePullSample LastPullSample;
 
 	/**
-	 * Pull 방향의 시간 스무딩 상태(EMA). ComputePull의 look-ahead 방향(공간 평균)을 프레임 간 지수이동평균해
-	 * 잔여 지터 + GPU 미러 지연 노이즈를 흡수한다. 영벡터 = 미초기화(wrap 시작 후 첫 유효 프레임에 측정값으로
-	 * 시드). ResetTransient에서 리셋. 테더/능동 Pull이 이 방향을 공용으로 쓴다.
+	 * The time-smoothed pull direction, as an exponential moving average. It smooths the look-ahead
+	 * direction from ComputePull, which is already a spatial average, across frames to absorb residual
+	 * jitter and the noise of the delayed GPU mirror. A zero vector means uninitialized and is seeded
+	 * from the measurement on the first valid frame after a wrap starts. Reset in ResetTransient. The
+	 * tether and active pull share this direction.
 	 */
 	FVector SmoothedPullDir = FVector::ZeroVector;
 
 	/**
-	 * wielder 견인 방향(손(노드0)→로프 첫 다리)의 시간 스무딩 상태(EMA — SmoothedPullDir과 동일 상수
-	 * PullDirSmoothTime). 영벡터 = 미초기화(첫 유효 프레임에 시드), ResetTransient에서 리셋.
-	 * 방향이 프레임마다 튀면 속도 톱업이 매번 다른 축으로 들어가 벡터가 랜덤워크로 불어난다(폭주) —
-	 * 방향 안정화가 1차 방어(속력 상한은 ClampInjectedVelocity의 2차 방어).
+	 * The time-smoothed wielder traction direction, from the hand at node 0 towards the rope's first
+	 * leg, as an exponential moving average using the same time constant as SmoothedPullDir. A zero
+	 * vector means uninitialized and is seeded on the first valid frame; reset in ResetTransient.
+	 * If the direction jumps around between frames, the velocity top-up lands on a different axis each
+	 * time and the vector grows by random walk, so stabilizing the direction is the first line of
+	 * defence against that runaway; the speed cap in ClampInjectedVelocity is the second.
 	 */
 	FVector SmoothedWielderPullDir = FVector::ZeroVector;
 
-	/** 스무딩 전 look-ahead 방향(EMA 입력 원본). 디버거가 raw vs smoothed를 나란히 그려 지터 진단에 쓴다. */
+	/** The look-ahead direction before smoothing, that is the raw input to the moving average. The
+	 *  debugger draws raw and smoothed side by side to diagnose jitter. */
 	FVector LastPullDirRaw = FVector::ZeroVector;
 
 	/**
-	 * Pull 조준 노드의 시간 스무딩 상태(fractional). ComputePull이 고른 정수 AimNode를 float로 EMA해 노드
-	 * 사이를 보간 → 방향/tether를 연속화(이산 홉 제거). <0 = 미초기화(wrap 시작 후 첫 유효 프레임에 시드).
-	 * ResetTransient에서 -1로 리셋. PullAimSmoothTime이 상수.
+	 * The time-smoothed pull aim node, kept fractional. The integer aim node chosen by ComputePull is
+	 * averaged as a float so it interpolates between nodes, which makes the direction and the tether
+	 * continuous and removes the discrete hops. Below 0 means uninitialized and is seeded on the first
+	 * valid frame after a wrap starts; reset to -1 in ResetTransient. The time constant is
+	 * PullAimSmoothTime.
 	 */
 	float SmoothedAimNodeF = -1.0f;
 
-	/** 능동 Pull의 현재 힘(SetActivePull이 설정, 0=꺼짐). Wrapped + 팽팽할 때만 인가된다(아래 bPullTaut 게이트). */
+	/** The current active pull force, set by SetActivePull, where 0 is off. It is only applied while
+	 *  wrapped and taut, subject to the bPullTaut gate below. */
 	float ActivePullForce = 0.0f;
 
 	/**
-	 * 이번 능동 Pull이 팽팽 게이트를 무시하는가(SetActivePull의 per-call 인자). true면 config
-	 * (bActivePullRequiresTaut)와 무관하게 유효 샘플만으로 인가한다 — 애니 pull window의 "팽팽 무시" 구간용.
-	 * ActivePullForce와 같은 입력 상태라 ResetTransient에서 남긴다(해제는 SetActivePull의 몫).
+	 * Whether this active pull ignores the taut gate, taken from the per-call argument to
+	 * SetActivePull. When true it is applied on a valid sample alone, regardless of the
+	 * bActivePullRequiresTaut setting, which exists for the scripted section of an animation pull
+	 * window.
+	 * It is input state like ActivePullForce, so ResetTransient leaves it alone; clearing it is
+	 * SetActivePull's job.
 	 */
 	bool bActivePullIgnoresTaut = false;
 
 	/**
-	 * 이번 프레임 팽팽(taut) 게이트 상태(히스테리시스 래치 — RopeTraction::EvaluateTautGate).
-	 * UpdateWrappedPullSample(②)이 매 Wrapped 프레임 갱신하고, 능동 Pull 인가(③ ApplyWrappedTraction)와
-	 * URopeComponent::IsPullTaut()가 공용으로 읽는다. 유효 Pull 샘플이 없으면(비Wrapped 포함) false.
-	 * ResetTransient에서 리셋.
+	 * This frame's taut gate state, as a hysteresis latch from RopeTraction::EvaluateTautGate.
+	 * UpdateWrappedPullSample refreshes it every wrapped frame, and both the application of active pull
+	 * in ApplyWrappedTraction and URopeComponent::IsPullTaut() read it. It is false whenever there is
+	 * no valid pull sample, which includes not being wrapped. Reset in ResetTransient.
 	 */
 	bool bPullTaut = false;
 
 	/**
-	 * 이번 프레임 전 체인 팽팽(기하) 게이트 상태(히스테리시스 래치 — RopeTraction::EvaluateChainTautGate).
-	 * 앵커→손 코너-다리 chord 합 vs 자유 구간 rest 길이의 비교로, 로프 **전체**가 펴져 있는가를 판정한다.
-	 * UpdateWrappedPullSample(②)이 매 Wrapped 프레임 갱신하고, 견인 인가(③: 테더 + 능동 Pull)가 선행
-	 * 조건으로 읽는다 — 국소 관측치(앵커 인접 장력/sub-leg overshoot)는 슬랙 로프에서도 발생하므로
-	 * 이 게이트가 닫혀 있으면 견인하지 않는다. bPullTaut는 이 값 ∧ 장력 임계다. ResetTransient에서 리셋.
+	 * This frame's whole-chain geometric taut gate state, as a hysteresis latch from
+	 * RopeTraction::EvaluateChainTautGate. It compares the sum of the corner-to-corner leg chords from
+	 * the anchor to the hand against the free-span rest length to decide whether the whole rope is
+	 * straight.
+	 * UpdateWrappedPullSample refreshes it every wrapped frame, and applying traction, both the tether
+	 * and active pull, reads it as a precondition: local observations such as tension near the anchor
+	 * or a sub-leg overshoot occur even on a slack rope, so nothing is pulled while this gate is
+	 * closed. bPullTaut is this value combined with the tension threshold. Reset in ResetTransient.
 	 */
 	bool bChainTaut = false;
 
 	/**
-	 * bChainTaut 해제 유예의 잔여 시간(초, HoldConfig.TautReleaseGraceTime이 상수). 팽팽 조건이 참인 프레임마다
-	 * 만충되고, 조건이 깨지면 소진될 때까지 래치를 유지한다 — 최소 전달 장력 관측치의 프레임 단위 채터링
-	 * (임계 0 = 무히스테리시스 + GPU 미러 지연)이 "전량 삭감 ↔ 자유" 교대(wielder 들썩임)로 새는 것을 막는다.
-	 * ResetTransient에서 리셋.
+	 * The time remaining on the grace period before bChainTaut releases (s); the constant is
+	 * HoldConfig.TautReleaseGraceTime. It is refilled on every frame the taut condition holds, and once
+	 * the condition breaks the latch is kept until it drains. That stops per-frame chatter in the
+	 * minimum transmitted tension observation, caused by a threshold of 0, meaning no hysteresis,
+	 * combined with the delayed GPU mirror, from leaking out as an alternation between fully damped and
+	 * free that shows up as the wielder juddering.
+	 * Reset in ResetTransient.
 	 */
 	float TautGraceRemaining = 0.0f;
-
-	// (레거시 서보 시절의 주입 장부(TowedVelDebt)/슬랙 브레이크는 제거됐다 — λ의 위치 회수 항은
-	//  MaxBiasSpeed로 유계라 회수할 과잉 주입 자체가 없다. Docs/PoC/05 §3.5.)
 
 	// Passive material-length reaction state (violation/lambda/attempted movement/rest rate)
 	// lives in FRopeLengthConstraintState. PullDrive owns only pull command, direction and
 	// receiver-policy state.
 
 	/**
-	 * 이번 프레임 유효 대상 몫(shareT) [0..1] — wielder 게이트(URopeWielderComponent::IsWielderTetherActive)와
-	 * 디버거가 읽는다. 1이면 wielder 몫 0(전량 대상). UpdateTargetPullable이 끌림 판정의 이진값(가능=1,
-	 * 불가=0)으로 채우고, λ가 실제 발화한 프레임엔 UpdateConstraintTether가 역질량비(w_t/w합)로 덮는다.
+	 * This frame's effective target share, from 0 to 1, read by the wielder gate
+	 * (URopeWielderComponent::IsWielderTetherActive) and by the debugger. A value of 1 leaves the
+	 * wielder no share at all. UpdateTargetPullable fills it in with the binary result of the drag
+	 * test, 1 for pullable and 0 for not, and on frames where lambda actually fired,
+	 * UpdateConstraintTether overwrites it with the inverse mass ratio w_t divided by the sum of the
+	 * inverse masses.
 	 */
 	float LastTargetShare = 1.0f;
 
 	/**
-	 * 대상을 끌 수 있는가의 sticky 판정 상태(능동 Pull climb-in 방향의 정본) — 대상 유효질량 ≤ wielder
-	 * 유효질량이면 true. bTargetPullableInit이 false면 미시드(다음 유효 프레임에 히스테리시스 없이 순수
-	 * 비교로 시드), true면 내부 히스테리시스로만 뒤집힌다. ResetTransient에서 미시드로 되돌린다.
+	 * The sticky verdict on whether the target can be dragged, which is the authority on the direction
+	 * of an active pull climb-in: true when the target's effective mass is at or below the wielder's.
+	 * While bTargetPullableInit is false it is unseeded and will be seeded on the next valid frame by a
+	 * plain comparison with no hysteresis; once seeded it only flips through its internal hysteresis.
+	 * ResetTransient returns it to the unseeded state.
 	 */
 	bool bTargetPullable = true;
 	bool bTargetPullableInit = false;
 
-	/** Pull 힘 수신자 없음 경고를 wrap당 1회만 내보내기 위한 래치(ResetTransient에서 리셋). */
+	/** A latch that limits the "no pull force receiver" warning to once per wrap. Reset in
+	 *  ResetTransient. */
 	bool bLoggedPullNoReceiver = false;
 
 	/**
-	 * 페이즈 전이 시 폐기할 "진행 중 wrap" 일시 상태만 리셋(URopeComponent::ResetTransientPhaseState가 호출).
-	 * 의도적으로 남기는 것: ActivePullForce/bActivePullIgnoresTaut(입력 홀드 상태 — 해제는 SetActivePull(0)의 몫),
-	 * LastPullDirRaw(디버거 표시용 잔상 — 다음 Wrapped 프레임이 덮어쓴다).
+	 * Resets only the transient "wrap in progress" state, which is discarded on a phase transition.
+	 * Called by URopeComponent::ResetTransientPhaseState.
+	 * Deliberately preserved: ActivePullForce and bActivePullIgnoresTaut, which are held input state
+	 * cleared by SetActivePull(0); and LastPullDirRaw, which is a leftover for the debugger's display
+	 * and is overwritten by the next wrapped frame.
 	 */
 	void ResetTransient()
 	{
 		LastPullSample = FRopePullSample();
-		// 스무딩 상태는 미초기화 값으로 되돌린다 — 다음 wrap 시작 시 측정값으로 다시 시드.
+		// Return the smoothing state to its uninitialized value so the next wrap reseeds it from a
+		// fresh measurement.
 		SmoothedPullDir = FVector::ZeroVector;
 		SmoothedWielderPullDir = FVector::ZeroVector;
 		SmoothedAimNodeF = -1.0f;
-		bTargetPullableInit = false; // 다음 wrap 시작 시 순수 비교로 다시 시드.
+		bTargetPullableInit = false; // Reseed from a plain comparison when the next wrap starts.
 		bPullTaut = false;
 		bChainTaut = false;
 		TautGraceRemaining = 0.0f;

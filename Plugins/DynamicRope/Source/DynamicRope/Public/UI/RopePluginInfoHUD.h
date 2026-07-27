@@ -1,14 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 플러그인 설명 HUD. URopePluginInfoWidget(WBP)을 생성해 뷰포트에 올리고, 입력 키로 각 패널
-// (키 안내 / 필요 컴포넌트 / 지원·한계)을 개별 토글한다. GameMode의 HUDClass에 이 클래스(또는 BP 자식)를
-// 지정하면 끝 — 별도 셋업 없이 Play만 하면 뜬다.
+// The plugin's information HUD. It creates a URopePluginInfoWidget, adds it to the viewport, and
+// toggles each panel individually from an input key: the key guide, the required components, and the
+// capabilities and limitations. Set this class, or a Blueprint child of it, as the game mode's HUD
+// class and nothing else is needed; it appears on Play.
 //
-// 입력: AActor::EnableInput + InputComponent->BindKey로 토글 키를 직접 바인딩한다(Input Action 에셋 불필요).
-//       기본 키는 F1~F4라 게임플레이 IMC와 잘 겹치지 않는다. 필요하면 EditDefaultsOnly로 바꾼다.
+// Input: it binds the toggle keys directly through AActor::EnableInput and InputComponent->BindKey,
+// so no input action assets are required. The defaults are F1 to F4, which rarely clash with a
+// gameplay mapping context; change them on the class defaults if needed.
 //
-// 위젯 폴백: InfoWidgetClass를 비워 두면(WBP 미제작) DrawHUD가 Canvas로 같은 콘텐츠를 텍스트로 그린다.
-//            아트 없이도 즉시 확인 가능. WBP를 지정하면 Canvas 폴백은 자동으로 꺼진다.
+// Widget fallback: leaving InfoWidgetClass empty, as when no Blueprint has been authored, makes
+// DrawHUD render the same content as canvas text, so it can be checked immediately without any art.
+// Assigning a Blueprint disables the canvas fallback automatically.
 
 #pragma once
 
@@ -28,20 +31,21 @@ class DYNAMICROPE_API ARopePluginInfoHUD : public AHUD
 public:
 	ARopePluginInfoHUD();
 
-	//~ AActor / AHUD
+	//~ AActor and AHUD
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void DrawHUD() override;
 
-	/** 뷰포트에 올릴 위젯 클래스(보통 이 부모로 만든 WBP). 비우면 Canvas 텍스트 폴백을 쓴다. */
+	/** The widget class added to the viewport, normally a Blueprint deriving from it. Leave it empty to
+	 *  use the canvas text fallback. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Rope|Info")
 	TSubclassOf<URopePluginInfoWidget> InfoWidgetClass;
 
-	/** InfoWidgetClass가 비었을 때 DrawHUD가 Canvas로 콘텐츠를 그릴지. */
+	/** Whether DrawHUD renders the content to the canvas while InfoWidgetClass is empty. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Rope|Info")
 	bool bDrawCanvasFallbackWhenNoWidget = true;
 
-	//~ 토글 키(개별) — 게임플레이와 잘 안 겹치는 F1~F4가 기본 -----------------------------
+	//~ The individual toggle keys, defaulting to F1 to F4 to avoid clashing with gameplay.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Rope|Info|Input")
 	FKey KeyGuideToggleKey;
 
@@ -57,48 +61,52 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Rope|Info|Input")
 	FKey ToolsToggleKey;
 
-	/** 전체 HUD를 한 번에 표시/숨김. */
+	/** Shows or hides the entire HUD at once. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Rope|Info|Input")
 	FKey MasterToggleKey;
 
 	//~ API ----------------------------------------------------------------
-	/** 지정 패널을 토글한다(위젯이 있으면 위젯에, 없으면 Canvas 폴백 상태에 반영). */
+	/** Toggles the given panel, applying it to the widget when there is one and to the canvas fallback
+	 *  state otherwise. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Info")
 	void TogglePanel(ERopeInfoPanel Panel);
 
-	/** 열린 패널을 모두 숨긴다 / 다시 누르면 마지막 패널을 복원한다. 상시 힌트 줄은 영향받지 않는다. */
+	/** Hides every open panel, and restores the last one when pressed again. The always-visible hint
+	 *  line is unaffected. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Info")
 	void ToggleAll();
 
-	/** 현재 토글 키 라벨로 상시 힌트 줄 텍스트를 만든다(위젯/ Canvas 폴백 공용). */
+	/** Builds the text of the always-visible hint line from the current toggle key labels, shared by
+	 *  the widget and the canvas fallback. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Info")
 	FText BuildHintText() const;
 
-	/** 생성된 위젯(없으면 null — Canvas 폴백 사용 중). */
+	/** The created widget, or null while the canvas fallback is in use. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Info")
 	URopePluginInfoWidget* GetInfoWidget() const { return InfoWidget; }
 
 protected:
-	/** EnableInput 후 토글 키들을 InputComponent에 바인딩한다. */
+	/** Binds the toggle keys to the input component after EnableInput. */
 	void SetupInputBindings();
 
-	// 키 핸들러(BindKey 대상).
+	// The key handlers bound through BindKey.
 	void OnKeyGuideKey()     { TogglePanel(ERopeInfoPanel::KeyGuide); }
 	void OnComponentsKey()   { TogglePanel(ERopeInfoPanel::Components); }
 	void OnCapabilitiesKey() { TogglePanel(ERopeInfoPanel::Capabilities); }
 	void OnLimitationsKey()  { TogglePanel(ERopeInfoPanel::Limitations); }
 	void OnToolsKey()        { TogglePanel(ERopeInfoPanel::Tools); }
 
-	// Canvas 폴백: 제목 + 본문 블록을 그리고 다음 블록의 Y를 돌려준다.
+	// Canvas fallback: draws a title and body block and returns the Y position of the next block.
 	float DrawFallbackBlock(const FString& Title, const FText& Body, float X, float Y);
 
-	/** 생성된 위젯 인스턴스. Canvas 폴백일 땐 null. */
+	/** The created widget instance, null while using the canvas fallback. */
 	UPROPERTY(Transient)
 	TObjectPtr<URopePluginInfoWidget> InfoWidget = nullptr;
 
-	// Canvas 폴백에서만 쓰는 패널 표시 상태(위젯이 있으면 위젯이 진실을 소유한다). 힌트 줄은 상시.
+	// Panel visibility used by the canvas fallback only; when a widget exists it owns the truth. The
+	// hint line is always visible.
 	bool bFallbackPanelVisible[5] = { true, false, false, false, false };
 
-	// ToggleAll이 "숨김 → 복원"할 때 되살릴 마지막으로 연 패널.
+	// The panel most recently opened, restored when ToggleAll goes from hidden back to shown.
 	ERopeInfoPanel LastShownPanel = ERopeInfoPanel::KeyGuide;
 };

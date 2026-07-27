@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 본별 SDF 볼륨 하나를 IRopeCollider로 감싸는 콜라이더. 본 로컬 grid를 현재 본 월드 트랜스폼으로
-// 변환해 solver의 node query에 응답한다. FCapsuleCollider의 SDF 대응물이며, 동일한 FROZEN
-// FRopeContact 계약을 따른다(Normal 바깥쪽 단위, Penetration은 query 반지름 기준, Bone 비-None).
+// A collider that wraps a single per-bone SDF volume as an IRopeCollider. It transforms the
+// bone-local grid by the bone's current world transform to answer the solver's node queries. It is
+// the SDF counterpart of FCapsuleCollider and obeys the same frozen FRopeContact contract: the normal
+// is an outward unit vector, the penetration is measured against the query radius, and the bone is
+// never None.
 
 #pragma once
 
@@ -10,33 +12,42 @@
 #include "Collision/RopeCollider.h"
 
 struct FRopeBoneSDFVolume;
-// 랩 대상 추상화(Decision 0): 귀속 mesh를 USceneComponent로 일반화. SDF는 스켈레탈만 넘긴다.
+// Wrap target abstraction: the attributed mesh is generalized to USceneComponent, although the SDF
+// path only ever passes skeletal ones.
 class USceneComponent;
 
-/** 본 로컬 SDF 볼륨 1개에 대한 해석적 collider. v1 / 캡슐과 동일 인터페이스. */
+/** An analytic collider over one bone-local SDF volume, presenting the same interface as the capsule
+ *  collider. */
 class DYNAMICROPE_API FRopeSDFCollider : public IRopeCollider
 {
 public:
-	// 본 로컬 distance grid. 해당 프레임 solve 동안 유효한 포인터(provider가 소유).
+	// The bone-local distance grid. The pointer is owned by the provider and is valid for the duration
+	// of that frame's solve.
 	const FRopeBoneSDFVolume* Volume = nullptr;
 
-	// 본 → 월드 트랜스폼(grid를 월드에 배치). 매 프레임 메시에서 갱신.
+	// The bone-to-world transform that places the grid in the world, refreshed from the mesh each
+	// frame.
 	FTransform BoneToWorld = FTransform::Identity;
 
-	// 이전 프레임의 본 → 월드 트랜스폼. 표면 속도(드래그) 산출용. 첫 프레임엔 BoneToWorld와 동일(속도 0).
+	// The previous frame's bone-to-world transform, used to derive surface velocity, which produces
+	// drag. On the first frame it equals BoneToWorld, giving zero velocity.
 	FTransform PrevBoneToWorld = FTransform::Identity;
 
-	// 1/프레임dt. 표면 변위를 속도(cm/s)로 환산. 0이면 표면 속도 0(정적 취급).
+	// The reciprocal of the frame delta, which converts surface displacement into a velocity in cm/s.
+	// 0 gives zero surface velocity, treating the collider as static.
 	float InvDeltaTime = 0.0f;
 
-	// 이 볼륨이 귀속된 본. FRopeContact.Bone으로 전파된다.
+	// The bone this volume belongs to, propagated to FRopeContact::Bone.
 	FName Bone = NAME_None;
 
-	// 본을 소유한 메시. cross-actor follow를 위해 contact로 전달된다. 타입은 USceneComponent로 일반화.
+	// The mesh owning the bone, passed through the contact so cross-actor follow works. Typed as
+	// USceneComponent for generality.
 	const USceneComponent* SourceMesh = nullptr;
 
-	// 볼륨 안정 식별자(provider가 URopeSDFData 런타임 ID + 본 인덱스로 계산). GetGPUSDF가 뷰로 전달 → GPU SDF
-	// 캐시 키. raw 포인터 대신 써서 에셋 언로드→주소 재사용 오샘플을 막는다.
+	// A stable identifier for the volume, computed by the provider from the URopeSDFData runtime ID
+	// and the bone index. GetGPUSDF passes it through on the view, where it is the GPU SDF cache key.
+	// Using it instead of a raw pointer prevents mis-sampling when an asset is unloaded and its address
+	// is reused.
 	uint64 VolumeKey = 0;
 
 	FRopeSDFCollider() = default;
@@ -48,12 +59,14 @@ public:
 
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
 	virtual FRopeSurfaceProjection ProjectToSurface(const FVector& WorldPos, float MaxDistance) const override;
-	// 상대 운동 swept query: prev/curr 본 트랜스폼을 substep 알파로 보간해, 노드 경로를 collider
-	// 로컬 상대 프레임에서 샘플한다(움직이는 본이 노드를 앞면에서 잡음). 표면 속도도 함께 채운다.
+	// The relative-motion swept query: it interpolates the previous and current bone transforms by the
+	// substep alpha and samples the node's path in the collider's local relative frame, so a moving bone
+	// catches the node on its leading face. It also fills in the surface velocity.
 	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const override;
 	virtual FBox GetWorldBounds() const override;
 	virtual bool GetGPUSDF(FRopeSDFColliderView& OutView) const override;
-	// 이번 프레임 본 모션(prev->curr). solver가 substep sub-포즈를 호이스팅하는 데 쓴다.
+	// This frame's bone motion, from the previous transform to the current one. The solver uses it to
+	// hoist the substep sub-poses.
 	virtual bool GetFrameMotion(FTransform& OutPrev, FTransform& OutCurr) const override
 	{
 		OutPrev = PrevBoneToWorld; OutCurr = BoneToWorld; return true;

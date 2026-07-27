@@ -1,23 +1,28 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Pull 장전/발동 상태를 보여주는 게이지 위젯. 이 UI가 답해야 하는 질문은 "토글이 켜졌나"가 아니라
-// **"눌렀는데 왜 아직 안 당겨지나"**다. 그래서 On/Off 램프가 아니라 발동 임계까지의 진행도를 링으로
-// 그린다(URopeWielderComponent::GetPullEngageProgress) — 링이 안 차 있으면 "줄이 아직 안 팽팽하다"가
-// 그림만으로 읽힌다.
+// The gauge widget showing the pull arming and engagement state. The question this UI has to answer
+// is not "is the toggle on" but "I pressed it, so why is nothing pulling yet". It therefore draws
+// progress towards the engage threshold as a ring, from
+// URopeWielderComponent::GetPullEngageProgress, rather than an on/off lamp: an unfilled ring reads at
+// a glance as "the rope is not taut yet".
 //
-// 상태는 셋이고 각각 다르게 보인다:
-//   ① 해제        — 아무것도 안 그린다.
-//   ② 장전(대기)  — 배경 링 + 진행도만큼 채워진 호. 진행도가 오르면 색이 대기색→발동색으로 섞인다.
-//   ③ 발동        — 꽉 찬 링 + 발동 순간 한 번의 팝(EngagePopTime 동안 확대/페이드).
+// There are three states and each looks different:
+//   Disarmed  draws nothing.
+//   Armed     draws a background ring plus an arc filled to the current progress. As progress rises,
+//             the colour blends from the armed colour towards the engaged colour.
+//   Engaged   draws a full ring plus a single pop at the moment of engagement, expanding and fading
+//             over EngagePopTime.
 //
-// RopeAimWidget과 같은 "C++ 베이스 + WBP 리스타일" 구성이다:
-//  - 에셋 없이 NativePaint가 직접 그리므로 이 클래스만 화면에 올려도 즉시 동작한다.
-//  - WBP 서브클래스로 리스타일하려면 스타일 프로퍼티를 덮어쓰거나, bDrawBuiltInVisuals를 꺼서 내장
-//    페인트를 끄고 IsPullArmed()/IsPullEngaged()/GetProgress()로 자체 비주얼을 구성한다.
-//    상태 전환 연출(사운드/애니메이션)은 OnPullArmedStateChanged/OnPullEngagedStateChanged 이벤트로 붙인다.
+// It follows the same "C++ base plus Blueprint restyle" arrangement as RopeAimWidget:
+//  - NativePaint draws it directly with no assets, so putting this class on screen is enough.
+//  - To restyle it with a Blueprint subclass, either override the style properties, or clear
+//    bDrawBuiltInVisuals to disable the built-in painting and build your own visuals from
+//    IsPullArmed(), IsPullEngaged() and GetProgress(). Effects for state transitions, such as sounds
+//    and animations, hang off the OnPullArmedStateChanged and OnPullEngagedStateChanged events.
 //
-// wielder는 소유 폰에서 스스로 찾는다(RopeAimWidget과 동일 규약) — HUD에 얹기만 하면 배선이 끝난다.
-// 명시 배선이 필요하면 SetWielder()로 지정한다.
+// The widget finds the wielder on its owning pawn by itself, following the same convention as
+// RopeAimWidget, so adding it to the HUD is all the wiring needed. Use SetWielder() when it must be
+// wired explicitly.
 
 #pragma once
 
@@ -35,77 +40,80 @@ class DYNAMICROPE_API URopePullGaugeWidget : public UUserWidget
 public:
 	URopePullGaugeWidget(const FObjectInitializer& ObjectInitializer);
 
-	//~ 데이터 --------------------------------------------------------------
+	//~ Data ---------------------------------------------------------------------
 
-	/** 이 위젯이 읽는 wielder를 명시 지정(비우면 소유 폰에서 자동 탐색). */
+	/** Sets the wielder this widget reads explicitly. Leave it unset to find one on the owning pawn. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Pull HUD")
 	void SetWielder(URopeWielderComponent* InWielder);
 
-	/** Pull 장전 상태(② 이상). */
+	/** Whether pull is armed, that is armed or engaged. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Pull HUD")
 	bool IsPullArmed() const;
 
-	/** Pull 발동 상태(③). */
+	/** Whether pull has engaged. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Pull HUD")
 	bool IsPullEngaged() const;
 
-	/** 발동 임계까지의 진행도 0..1. */
+	/** Progress towards the engage threshold, from 0 to 1. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Pull HUD")
 	float GetProgress() const;
 
-	//~ 이벤트(WBP에서 사운드/애니메이션을 붙이는 지점) -----------------------
+	//~ Events, where Blueprint attaches sounds and animations --------------------
 
-	/** 장전 토글이 바뀐 순간. */
+	/** Fired when the arming toggle changes. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Rope|Pull HUD")
 	void OnPullArmedStateChanged(bool bArmed);
 
-	/** 발동 래치가 바뀐 순간(false = wrap 해제로 재무장). */
+	/** Fired when the engage latch changes; false means the wrap released and pull rearmed. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Rope|Pull HUD")
 	void OnPullEngagedStateChanged(bool bEngaged, float Tension);
 
-	//~ 스타일 --------------------------------------------------------------
+	//~ Style --------------------------------------------------------------------
 
-	/** 내장 페인트를 그릴지. WBP가 자체 비주얼을 쓰면 끈다(게터/이벤트는 계속 동작). */
+	/** Whether to draw the built-in visuals. Turn it off when a Blueprint provides its own; the getters
+	 *  and events keep working. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD")
 	bool bDrawBuiltInVisuals = true;
 
-	/** 게이지 중심(위젯 로컬 좌표 비율 0..1). 기본은 화면 중앙 살짝 아래 — 십자선과 겹치지 않게. */
+	/** The gauge centre, as a fraction of the widget's local space from 0 to 1. The default sits just
+	 *  below the centre of the screen so it does not overlap the crosshair. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD")
 	FVector2D CenterAnchor = FVector2D(0.5f, 0.62f);
 
-	/** 링 반경(px). */
+	/** Ring radius (px). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD", meta = (ClampMin = "4.0"))
 	float Radius = 26.0f;
 
-	/** 링 선 두께(px). */
+	/** Ring line thickness (px). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD", meta = (ClampMin = "0.5"))
 	float Thickness = 3.0f;
 
-	/** 링 세그먼트 수(원 근사 정밀도). */
+	/** Number of ring segments, which is how closely it approximates a circle. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD", meta = (ClampMin = "8", ClampMax = "128"))
 	int32 Segments = 48;
 
-	/** 채워지지 않은 배경 링 색(장전 중에만 보인다). */
+	/** Colour of the unfilled background ring, visible only while armed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD")
 	FLinearColor TrackColor = FLinearColor(1.0f, 1.0f, 1.0f, 0.18f);
 
-	/** 진행도 0에서의 색(장전했지만 아직 느슨함). */
+	/** Colour at zero progress, meaning armed but still slack. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD")
 	FLinearColor ArmedColor = FLinearColor(1.0f, 0.72f, 0.15f, 0.95f);
 
-	/** 진행도 1/발동에서의 색. */
+	/** Colour at full progress and once engaged. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD")
 	FLinearColor EngagedColor = FLinearColor(0.2f, 1.0f, 0.45f, 1.0f);
 
-	/** 발동 순간 팝 연출 시간(초). 0이면 팝 없음. */
+	/** Duration of the pop at the moment of engagement (s). 0 disables the pop. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD", meta = (ClampMin = "0.0", Units = "s"))
 	float EngagePopTime = 0.25f;
 
-	/** 팝이 최대일 때 반경 배율. */
+	/** Radius multiplier at the peak of the pop. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD", meta = (ClampMin = "1.0"))
 	float EngagePopScale = 1.35f;
 
-	/** 게이지 표시 진행도의 보간 속도(1/s). 장력이 떨리는 프레임에 링이 파르르 떠는 걸 막는다. */
+	/** Interpolation speed of the displayed progress (1/s), which stops the ring flickering on frames
+	 *  where the tension wobbles. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Pull HUD", meta = (ClampMin = "0.0"))
 	float ProgressInterpSpeed = 12.0f;
 
@@ -118,10 +126,12 @@ protected:
 		FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
 
 private:
-	/** 무효일 때만 소유 폰에서 wielder를 찾는다(평시 무비용). */
+	/** Finds the wielder on the owning pawn, but only while the cached one is invalid, so it costs
+	 *  nothing in the normal case. */
 	void ResolveWielder();
 
-	/** wielder 이벤트 구독/해제 — 폰 교체로 wielder가 바뀌면 다시 건다. */
+	/** Subscribes to and unsubscribes from the wielder's events, rebinding when a replaced pawn changes
+	 *  which wielder is used. */
 	void BindWielder(URopeWielderComponent* NewWielder);
 
 	UFUNCTION()
@@ -130,15 +140,17 @@ private:
 	UFUNCTION()
 	void HandlePullEngagedChanged(bool bEngaged, float Tension);
 
-	/** 링(또는 그 일부 호)을 선분으로 근사해 그린다. Alpha01 = 그릴 비율(1이면 완전한 원). */
+	/** Draws a ring, or an arc of one, approximated by line segments. Alpha01 is the fraction to draw,
+	 *  where 1 is a complete circle. */
 	void DrawArc(const FGeometry& Geometry, FSlateWindowElementList& OutDrawElements, int32 LayerId,
 		const FVector2D& Center, float InRadius, float Alpha01, const FLinearColor& Color) const;
 
 	TWeakObjectPtr<URopeWielderComponent> Wielder;
 
-	/** 표시용 보간 진행도(실제 값은 wielder가 소유 — 이건 순수 연출 상태). */
+	/** The interpolated progress used for display. The real value belongs to the wielder; this is
+	 *  purely presentation state. */
 	float DisplayProgress = 0.0f;
 
-	/** 발동 팝 경과(EngagePopTime을 넘으면 팝 종료). */
+	/** Time since engagement, where exceeding EngagePopTime ends the pop. */
 	float TimeSinceEngage = BIG_NUMBER;
 };

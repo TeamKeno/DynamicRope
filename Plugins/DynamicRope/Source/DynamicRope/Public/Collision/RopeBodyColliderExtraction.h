@@ -31,8 +31,9 @@ namespace RopeBodyColliderExtraction
 	 * no bone, making it push-out only, which is the URopeStaticBodyProvider path. Supplying them
 	 * attaches a virtual bone and a source mesh to the box, sphyl and sphere elements, and to the
 	 * convex OBB fallback, which makes them wrappable and able to take part in detection; that is the
-	 * full-set mode of URopeWrapTargetComponent. A genuine convex, meaning a set of planes, cannot be
-	 * attributed because GPU detection does not support that type, so it is always push-out only.
+	 * full-set mode of URopeWrapTargetComponent. Genuine convexes (plane sets) are attributed the
+	 * same way - the GPU detect kernel runs a convex loop over the wrappable range, so an attributed
+	 * convex joins detection exactly like the box and capsule elements.
 	 */
 	DYNAMICROPE_API bool AppendBodyColliders(
 		const UBodySetup& Setup, const FTransform& CompTM, const FTransform& PrevCompTM,

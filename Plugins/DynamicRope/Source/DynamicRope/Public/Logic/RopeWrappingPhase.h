@@ -1,80 +1,92 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Wrapping 페이즈 로직: Contacting에서 확정된 latch anchor로부터 감김 경로를 점진 생성하고
-// (Composite AnalyticHelix / Sequential SurfaceVectorField), 로프 앞단(front)을 경로 따라 이동시키며, 감긴 노드의
-// 질량을 마스킹하고, 커밋 시드(FRopeWrapState)를 조립한다. 물리가 아니라 LOGIC이다 —
-// FRopeWrapController(Wrapped 이후)의 앞 단계에 해당한다.
+// Logic for the Wrapping phase. Starting from the latch anchor established during Contacting, it
+// progressively builds the wrap path, either as a composite analytic helix or a sequential surface
+// vector field, moves the front of the rope along that path, masks the mass of wrapped nodes, and
+// assembles the commit seed (FRopeWrapState). This is logic rather than physics, and is the stage
+// before FRopeWrapController, which takes over once wrapped.
 //
-// FRopeWrapController와 같은 패턴: 작업 상태(FRopeWrappingState)를 값으로 소유하는
-// UObject 비의존 클래스. 페이즈 전이/이벤트 브로드캐스트는 URopeComponent가 결정하고,
-// 여기는 상태와 지오메트리만 다룬다. UObject 컨텍스트(WrapConfig, collider 스냅샷,
-// 로그용 이름)는 FContext로 호출마다 주입받는다.
+// It follows the same pattern as FRopeWrapController: a class with no UObject dependency that owns
+// its working state (FRopeWrappingState) by value. Phase transitions and event broadcasts are
+// decided by URopeComponent, while this class deals only with state and geometry. UObject context,
+// namely the wrap config, the collider snapshot and the name used in logs, is injected per call
+// through FContext.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Core/RopeTypes.h"
 
-// 랩 대상 추상화(Decision 0): mesh 파라미터를 USceneComponent로 일반화. 스켈레탈 그래프 API가 필요한
-// 함수(축/후보 본)는 RopeWrapTargets:: 구조 질의(부모/자식 키)로 해석한다 — 정적 대상은 그래프가
-// 비어 단일 본으로 자연 폴백(스켈레탈 가정은 Core/RopeWrapTarget.cpp에 격리).
+// Wrap targets are abstract: mesh parameters are generalized to USceneComponent. Functions that need
+// a skeletal graph API, such as those choosing an axis or candidate bones, resolve it through the
+// structural queries in RopeWrapTargets:: (parent and child keys). A static target has an empty
+// graph and falls back naturally to a single bone; the assumption that a target is skeletal is
+// isolated in Core/RopeWrapTarget.cpp.
 class USceneComponent;
 class IRopeCollider;
 
 class DYNAMICROPE_API FRopeWrappingPhase
 {
 public:
-	/** Wrapping 작업 상태(POD). 전이 시 URopeComponent::ResetTransientPhaseState가 Reset한다. */
+	/** Plain-data working state for Wrapping. URopeComponent::ResetTransientPhaseState resets it on a
+	 *  phase transition. */
 	FRopeWrappingState State;
 
 	/**
-	 * 한 호출의 컨텍스트(비소유 참조 묶음 — 호출 동안만 유효).
-	 * 디자이너 설정 원본(UPROPERTY)은 URopeComponent에 남고 여기로 참조만 넘어온다.
+	 * Context for a single call: a bundle of non-owning references valid only for that call.
+	 * The designer settings themselves stay as UPROPERTYs on URopeComponent and are only referenced
+	 * from here.
 	 */
 	struct FContext
 	{
-		/** 감김 튜닝(pitch/tail delay/step budget/contact radius). */
+		/** Wrap tuning: pitch, tail delay, step budget and contact radius. */
 		const FRopeWrapConfig& Config;
 
-		/** 표면 투영용 프레임 collider 스냅샷. */
+		/** The frame's collider snapshot, used for surface projection. */
 		const TArray<IRopeCollider*>& Colliders;
 
-		/** 튜브 반지름(표면에서 로프 중심까지 띄우는 거리). */
+		/** Tube radius, that is how far the rope centre is held off the surface. */
 		float SurfaceOffset;
 
-		/** 로그 컨텍스트(컴포넌트 이름). */
+		/** Log context, the component's name. */
 		FString OwnerName;
 
-		/** preview처럼 partial path를 정상 결과로 쓰는 호출에서 true. */
+		/** Set on calls such as the preview, which treat a partial path as a normal result. */
 		bool bSuppressPathFailureLog = false;
 
-		/** Flight whip guide spline 평면 normal을 runtime wrapping에 전달한다. */
+		/** Passes the Flight whip guide spline's plane normal through to runtime wrapping. */
 		bool bHasGuidePlaneNormal = false;
 		FVector GuidePlaneNormal = FVector::RightVector;
 
 		/**
-		 * 캡처 순간의 진행 좌표계 스냅샷(비소유 — 컴포넌트의 CaptureTravelFrame, 유효할 때만 non-null).
-		 * CaptureTravelPlane에서만 소비된다: 축 origin을 latch 본 위치 대신 접촉 영역 중심(RegionCenter)에
-		 * 두고(양다리에서 축이 쌍의 중심을 지나게), winding 부호를 latch tangent 대신 캡처 속도로 정한다.
-		 * BoneCenteredGuidePlane(기본)에서는 읽지 않는다 — Assisted 단일 본 동작 불변.
+		 * A snapshot of the travel frame at the moment of capture. Non-owning, pointing at the
+		 * component's CaptureTravelFrame and only non-null while that is valid.
+		 * Consumed by CaptureTravelPlane alone, which puts the axis origin at the centre of the contact
+		 * region rather than at the latch bone, so that wrapping around two legs runs the axis through
+		 * the centre of the pair, and takes the winding sign from the capture velocity rather than the
+		 * latch tangent.
+		 * BoneCenteredGuidePlane, the default, never reads it, so single-bone assisted behaviour is
+		 * unchanged.
 		 */
 		const FRopeCaptureTravelFrame* TravelFrame = nullptr;
 
-		/** 컴포넌트 경계에서 해석된 접촉 질의 반지름(ContactQueryRadius 0=auto — 렌더 Radius 유도).
-		 *  0이면 미해석 호출(단위 테스트 등) — Config 원값 폴백(GetContactRadius). */
+		/** The contact query radius as resolved at the component boundary, where a ContactQueryRadius
+		 *  of 0 means automatic and is derived from the render radius. 0 here means an unresolved call,
+		 *  such as from a unit test, and falls back to the raw config value through GetContactRadius. */
 		float ResolvedContactRadius = 0.0f;
 
-		/** Composite Multi-Bone(여러 본을 하나의 pose-space island로 취급) 사용 자격.
-		 *  FullSimulation에서만 활성화하며, 다른 모드는 기존 Sequential Multi-Bone 경로를 쓴다. */
+		/** Eligibility for composite multi-bone wrapping, which treats several bones as one pose-space
+		 *  island. Only enabled in FullSimulation; the other modes use the sequential multi-bone path. */
 		ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::FullSimulation;
 
-		/** 경로 빌드/투영이 쓰는 접촉 반지름의 단일 접근자. */
+		/** The single accessor for the contact radius used by the path build and by projection. */
 		float GetContactRadius() const
 		{
 			return ResolvedContactRadius > 0.0f ? ResolvedContactRadius : Config.ContactQueryRadius;
 		}
 
-		/** 경로 빌드가 쓰는 프레임 step 예산의 단일 접근자. preview는 Config 사본에 큰 값을 넣어 한 번에 완주한다. */
+		/** The single accessor for the per-frame step budget used by the path build. The preview puts a
+		 *  large value into its own copy of the config so it completes in one go. */
 		int32 GetPathBuildStepsPerFrame() const
 		{
 			return Config.WrappingPathBuildStepsPerFrame;
@@ -82,72 +94,90 @@ public:
 	};
 
 	/**
-	 * Wrapping 시작: 상태를 시드(bone/mesh/duration)로 채우고 latch anchor에서 progressive
-	 * 경로 빌드를 개시한다(첫 경로점+앵커 확보까지). 성공 시 안정 추적도 초기화한다.
-	 * dominant 대상의 Mesh/Bone은 LatchAnchor가 유일한 원본이다.
-	 * 시드 다중화(MaxWrapSeeds > 1): 보조 시드 앵커는 State.SecondarySeedAnchors에 *이 호출 전에*
-	 * 실어야 한다 — 경로 길이(NumTailNodes)를 첫 보조 노드 앞까지로 클램프하는 데 여기서 읽는다.
-	 * @return 경로 빌드를 시작할 수 없으면 false — 호출자는 상태를 버리고 Flight로 돌아가야 한다.
+	 * Starts wrapping: seeds the state with the bone, mesh and duration, and begins the progressive
+	 * path build from the latch anchor, running until the first path point and anchor are secured. On
+	 * success it also initializes stability tracking.
+	 * LatchAnchor is the only source for the dominant target's mesh and bone.
+	 * With MaxWrapSeeds above 1, secondary seed anchors must be loaded into
+	 * State.SecondarySeedAnchors before this call, because it reads them to clamp the path length
+	 * (NumTailNodes) to end before the first secondary node.
+	 * @return false when the path build cannot start, in which case the caller must discard the state
+	 *         and return to Flight.
 	 */
 	bool Begin(const FRopeSurfaceAnchor& LatchAnchor, float Duration,
 		const FRopeSimState& Sim, const FContext& Ctx);
 
-	/** wrapping을 계속할 수 있는 상태인가(활성 + mesh 생존 + bone 유효). */
+	/** Whether wrapping can continue: active, with a surviving mesh and a valid bone. */
 	bool IsStillValid() const
 	{
 		return State.IsActive() && State.Mesh.IsValid() && !State.BoneName.IsNone();
 	}
 
-	/** 프레임 예산(설정 steps/frame 기준)만큼 경로/앵커 점진 생성을 전진시킨다. */
+	/** Advances the progressive path and anchor generation by one frame's budget, derived from the
+	 *  configured steps per frame. */
 	void AdvancePathBuild(const FRopeSimState& Sim, const FContext& Ctx);
 
-	/** 프레임당 경로 빌드 step 예산: 크기 비례 기준(총작업/4)을 설정된 steps/frame으로 배율한다.
-	 *  하한이 아니라 배율이라 큰 로프에서도 설정값이 실효한다. 순수 함수(단위 테스트 대상). */
+	/** The per-frame path build step budget: a size-proportional baseline of total work divided by
+	 *  four, scaled by the configured steps per frame. It is a multiplier rather than a floor, so the
+	 *  configured value still has effect on large ropes. Pure, and covered by unit tests. */
 	static int32 ComputePathStepBudget(int32 NumTailNodes, int32 StepsPerFrame);
 
-	/** front를 경로 따라 전진시키고 latch 이후 노드들의 경로 위 타깃(+표면 오프셋)을 OutFrame에 담는다(G2). */
+	/** Advances the front along the path and writes the on-path targets, including the surface offset,
+	 *  for the nodes after the latch into OutFrame. */
 	void ApplyWrappingMotionOverrides(const FRopeSimState& Sim, float DeltaTime, const FContext& Ctx, FRopeNodeOverrideFrame& OutFrame);
 
-	/** 실제 position override가 있는 wrapping 노드, 확정 anchor, 시작 핀만 kinematic으로 만든다.
-	 *  아직 경로가 닿지 않은 tail/virtual path node는 solver에 남겨 rest length를 유지한다. */
+	/** Makes only the wrapping nodes that actually have a position override, the established anchors,
+	 *  and the start pin kinematic. Tail and virtual path nodes the path has not reached yet are left
+	 *  to the solver so they keep their rest length. */
 	void ApplyWrappingKinematicMask(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
-	/** 앵커 span이 변하지 않는 시간(StableTime)을 누적한다. 커밋 판정 보조 지표. */
+	/** Accumulates the time the anchor span has stayed unchanged, in StableTime. A supporting measure
+	 *  for the commit decision. */
 	void UpdateAnchorSpanStability(float DeltaTime);
 
-	/** 커밋 조건: 앵커 확보 + 경로 빌드 종료 + front 도달 + (모션 완료 또는 settle 타임아웃). */
+	/** Commit conditions: anchors secured, path build finished, front arrived, and either the motion
+	 *  completed or the settling timeout elapsed. */
 	bool IsReadyToCommit(const FRopeSimState& Sim, const FRopeWrapConfig& Config) const;
 
 	/**
-	 * 경로 생성이 실패했을 때, 마지막으로 성공한 지점까지의 감싼 각도(도)가 최소치에 못 미치면
-	 * "감긴 척 붙는" 상태로 커밋하지 않도록 abort 여부를 알려준다. 기준이 회전 수가 아니라 각도인
-	 * 이유는 FRopeWrapConfig::FailedWrapMinAngleDeg 주석 참고(대상 크기 무관 척도).
+	 * Reports whether to abort after a path build failure, which happens when the angle wrapped up to
+	 * the last successful point falls short of the minimum and committing would leave the rope merely
+	 * stuck to the target while looking wrapped. The measure is an angle rather than a number of turns
+	 * because that is independent of target size; see the comment on
+	 * FRopeWrapConfig::FailedWrapMinAngleDeg.
 	 */
 	bool ShouldAbortFailedShortWrap(const FRopeSimState& Sim, const FContext& Ctx,
 		float MinRequiredAngleDeg, float& OutAngleDeg) const;
 
-	/** built path의 누적 감싼 각도(도)를 반환한다. 누적값이 없으면 마지막 성공 path/anchor 거리로 근사한다.
-	 *  실패 조기 abort(위)와 커밋 품질 관문(CommitMinWrapAngleDeg — URopeComponent::CommitWrapping)이
-	 *  같은 척도를 쓰도록 공개한다. 커밋 로그의 angle 표기도 이 값. */
+	/** Returns the accumulated wrapped angle of the built path, in degrees, approximating it from the
+	 *  last successful path and anchor distances when no accumulated value exists. It is public so the
+	 *  early abort above and the commit quality gate (CommitMinWrapAngleDeg, in
+	 *  URopeComponent::CommitWrapping) use the same measure. The angle in the commit log is this value
+	 *  as well. */
 	bool ComputeBuiltPathWrapAngle(const FRopeSimState& Sim, const FContext& Ctx, float& OutAngleDeg) const;
 
 	/**
-	 * 형상 기준 묶임 척도(5단계): 감김 축 둘레에서 경로점들이 실제로 둘러싼 각도 커버리지(도, 0~360).
-	 * 경로점 각도를 정렬해 최대 공백을 찾고 360°에서 뺀다 — 누적 각도와 달리 표면 위 진동/왕복으로
-	 * 부풀지 않아 "대상이 빠져나갈 공백이 남았는가"를 직접 답한다. 브리지(chord) 점도 포함한다:
-	 * chord가 가로지른 구간도 로프가 막고 있는 방향이다. 커밋 관문(CommitMinWrapCoverageDeg)과
-	 * 전이 로그가 소비한다.
-	 * @return 경로점이 2개 미만이거나 축이 축퇴(모든 점이 축 위)면 false — 호출자는 관문을 건너뛴다.
+	 * A shape-based measure of how well the target is bound: the angular coverage the path points
+	 * actually enclose around the wrap axis, in degrees from 0 to 360. The path point angles are
+	 * sorted, the largest gap is found, and it is subtracted from 360. Unlike the accumulated angle it
+	 * is not inflated by oscillation or backtracking over the surface, so it answers directly whether
+	 * a gap remains for the target to escape through. Bridge (chord) points are included, since the
+	 * stretch a chord crosses is also a direction the rope blocks. Consumed by the commit gate
+	 * (CommitMinWrapCoverageDeg) and by the transition log.
+	 * @return false when there are fewer than two path points, or the axis is degenerate because every
+	 *         point lies on it, in which case the caller skips the gate.
 	 */
 	bool ComputeWrapEnclosureCoverage(float& OutCoverageDeg) const;
 
 	/**
-	 * 현재 앵커들로 Wrapped 핸드오프용 시드를 조립한다(FRopeWrapController::BeginWrap 입력).
-	 * 유효 노드가 없으면 Anchors가 빈 시드가 반환된다 — 호출자가 검사해 abort한다.
+	 * Assembles the seed for the Wrapped handoff from the current anchors, which is the input to
+	 * FRopeWrapController::BeginWrap.
+	 * With no valid nodes the returned seed has empty Anchors, which the caller checks and aborts on.
 	 */
 	FRopeWrapState BuildCommitSeed(const FRopeSimState& Sim) const;
 
-	/** abort 시 앵커 노드들의 솔버 복귀(InvMass=1 + Prev=Pos 튐 방지)를 OutFrame에 담는다. */
+	/** On abort, writes the return of the anchored nodes to the solver into OutFrame, setting InvMass
+	 *  to 1 and Prev to Pos so they do not jump. */
 	void ReleaseAnchoredNodesToSolver(const FRopeSimState& Sim, FRopeNodeOverrideFrame& OutFrame) const;
 
 	/** Builds a complete target centerline using the same helix/vector-field path code as runtime wrapping. */
@@ -156,13 +186,16 @@ public:
 
 private:
 #if WITH_DEV_AUTOMATION_TESTS
-	// 현재 포즈의 surface gap으로 전환 깊이 없는 복합 island가 구성되는지 직접 검증한다.
+	// Verifies directly that the surface gap in the current pose forms a composite island without any
+	// notion of transition depth.
 	friend class FRopeWrappingPoseSpaceIslandTest;
-	// 복합 경로 폐기 뒤 최초 latch 본 하나로만 재초기화되는지 검증한다.
+	// Verifies that discarding a composite path reinitializes around the original latch bone alone.
 	friend class FRopeWrappingSingleBoneFallbackTest;
-	// surface/bridge/virtual path point의 저장 좌표와 centerline 변환 계약을 검증한다.
+	// Verifies the stored coordinates of surface, bridge and virtual path points and the centreline
+	// conversion contract.
 	friend class FRopeWrappingPathPointCoordinateContractTest;
-	// virtual run 단일 산출과 컴포넌트 bridge 수명 인계를 검증한다.
+	// Verifies that a virtual run is produced once and that bridge ownership is handed to the
+	// component.
 	friend struct FRopeComponentRefactorTestSeam;
 #endif
 
@@ -174,12 +207,14 @@ private:
 		bool bCurrentBone = false;
 	};
 
-	//~ progressive 경로 빌드(프레임 분할). Begin이 개시하고 AdvancePathBuild가 예산만큼 전진.
+	//~ Progressive path build, split across frames. Begin starts it and AdvancePathBuild advances it
+	//~ by one budget.
 	bool BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor& LatchAnchor,
 		const FRopeSimState& Sim, const FContext& Ctx);
 
-	/** 출력 Path.Num()과 독립적으로 ideal helix raw probe를 한 step 전진한다. 실제 projected
-	 *  centerline arc가 SegmentLength 경계를 넘을 때만 출력 path point를 0개 이상 생성한다. */
+	/** Advances the ideal helix raw probe by one step, independently of Path.Num(). It emits zero or
+	 *  more output path points, and only when the actual projected centreline arc crosses a
+	 *  SegmentLength boundary. */
 	bool AdvanceCompositeAnalyticHelixProbeStep(const FRopeSimState& Sim, const FContext& Ctx);
 
 	struct FCompositeHelixStepKinematics
@@ -204,70 +239,87 @@ private:
 
 	bool AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudget, const FRopeSimState& Sim, const FContext& Ctx);
 
-	/** Composite Analytic Helix의 terminal failure 시 기존 경로/앵커를 버리고 최초 latch 본 하나로 재시도한다. */
+	/** On terminal failure of the composite analytic helix, discards the existing path and anchors and
+	 *  retries around the original latch bone alone. */
 	bool RestartPathBuildAsSingleBoneFallback(const FRopeSimState& Sim, const FContext& Ctx,
 		const TCHAR* CompositeFailureReason);
 
 	bool ProcessPathPointForAnchoring(int32 PathIndex, const FRopeSimState& Sim, const FContext& Ctx);
 
-	/** Anchor가 지정한 mesh를 우선하고, 없으면 wrapping state의 mesh를 사용한다. */
+	/** Prefers the mesh named by the anchor, falling back to the wrapping state's mesh. */
 	static const USceneComponent* ResolveWrappingMesh(
 		const FRopeWrappingState& State, const FRopeSurfaceAnchor& Anchor);
 
-	/** 새로 닫힌 virtual run을 Path에서 한 번만 발견해 State.VirtualBridgeRuns에 기록한다. */
+	/** Finds each newly closed virtual run in Path exactly once and records it in
+	 *  State.VirtualBridgeRuns. */
 	void CollectCompletedVirtualBridgeRuns();
 
-	/** 경로 빌드 종료 기록(성공=Complete / 실패=Failed, 둘 다 Active 해제). 커밋 판정 등 독자들은
-	 *  세 플래그를 "빌드가 끝났나"(OR)로만 소비한다 — 개별 조합을 구분해 읽는 곳은 없다. */
+	/** Records the end of a path build, as complete on success or failed on failure, clearing the
+	 *  active flag either way. Readers such as the commit decision only consume the three flags as
+	 *  "has the build finished", that is their disjunction; nothing distinguishes the individual
+	 *  combinations. */
 	void FinishPathBuild(bool bFailed, const TCHAR* FailureReason = nullptr);
 
-	//~ 감김 지오메트리
+	//~ Wrap geometry
 	FVector ComputeSurfaceVectorFieldTangent(const FVector& AxisOrigin, const FVector& AxisDirection,
 		const FVector& LatchRadial, float WindingSign, const FVector& SurfaceWorld,
 		const FVector& NormalWorld, const FContext& Ctx, FVector& InOutCircumferenceDir) const;
 
 	/**
-	 * 감김 축 유도. Config.WrappingAxisSource에 따라 같은 진행 평면 normal을 서로 다른 원점에 배치한다.
-	 *  0) CaptureTravelPlane: 캡처 접촉 영역/collider 군집 중심에 축을 고정한다(Composite wrapping).
-	 *  1) BoneCenteredGuidePlane: latch 본 위치에 축을 세우고 본 전환마다 재해석한다(Assisted single bone).
-	 *  2) 본→부모 축(스켈레탈), 비-스켈레탈은 컴포넌트 기저축 중 latch normal에 가장 수직인 축.
-	 *  3) 본 로컬 X.
-	 * SurfaceVectorField에서는 latch 시 1회로 끝나지 않는다 — 본 전환마다
-	 * ReseedWrappingAxisOnBoneTransition이 새 본 기준으로 재호출한다(rolling axis).
-	 * CaptureTravelPlane에서는 재시드에서도 캡처 진행 평면 축이 유지된다.
+	 * Derives the wrap axis. Depending on Config.WrappingAxisSource, the same travel plane normal is
+	 * placed at a different origin:
+	 *  0) CaptureTravelPlane pins the axis at the centre of the captured contact region or collider
+	 *     cluster, used by composite wrapping.
+	 *  1) BoneCenteredGuidePlane stands the axis at the latch bone location and re-resolves it on every
+	 *     bone transition, used by assisted single-bone wrapping.
+	 *  2) The bone-to-parent axis on a skeletal target; on a non-skeletal one, whichever of the
+	 *     component's basis axes is most perpendicular to the latch normal.
+	 *  3) The bone's local X axis.
+	 * On the surface vector field path this is not a one-off at latch time: on every bone transition
+	 * ReseedWrappingAxisOnBoneTransition calls it again against the new bone, giving a rolling axis.
+	 * Under CaptureTravelPlane the captured travel plane axis is preserved across reseeds.
 	 */
 	bool ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection) const;
 
 	/**
-	 * 본 전환 직후 감김 축을 새 본 기준으로 재해석한다(rolling axis). 필드가 옛 본 축을 계속 돌면
-	 * 전환 뒤 표면과 어긋나 projection 실패로 조기 종료되기 쉽다 — 현재 경로 지점의 표면 프레임을
-	 * 새 본 로컬로 옮긴 합성 anchor로 ResolveWrappingAxis를 다시 돌리고, 새 축의 부호는 이전 축과
-	 * 정렬(피치 드리프트 연속), winding은 현재 진행 tangent 기준으로 재선출해 전환점에서 감김
-	 * 방향이 뒤집히지 않게 한다. 축 유도 실패 시 기존 축을 유지한다(종전 단일 축 동작 폴백).
+	 * Re-resolves the wrap axis against the new bone immediately after a transition, giving a rolling
+	 * axis. A field that keeps circling the old bone's axis drifts away from the surface after the
+	 * transition and tends to terminate early on a projection failure. So ResolveWrappingAxis is run
+	 * again with a synthetic anchor that moves the current path point's surface frame into the new
+	 * bone's local space; the new axis is signed to align with the previous one, keeping the pitch
+	 * drift continuous, and the winding is re-elected from the current travel tangent so the wrap
+	 * direction cannot flip at the transition. If deriving an axis fails, the existing axis is kept,
+	 * which behaves as a single fixed axis.
 	 */
 	void ReseedWrappingAxisOnBoneTransition(FName Bone, const USceneComponent* Mesh, const FContext& Ctx);
 
-	/** Flight guided spline 평면 normal을 감김 축 방향으로 돌려준다.
-	 *  CaptureTravelPlane + 캡처 스냅샷이 있으면 origin을 접촉 영역/collider 군집 중심으로 대체한다
-	 *  (구현부 주석 참고 — 양다리처럼 접촉이 한쪽에서만 시작해도 축이 쌍의 중심을 지나게). */
+	/** Returns the Flight guided spline's plane normal as the wrap axis direction.
+	 *  Under CaptureTravelPlane, and with a capture snapshot available, the origin is replaced by the
+	 *  centre of the contact region or collider cluster, so that the axis runs through the centre of a
+	 *  pair even when contact starts on one side only, as when wrapping two legs. */
 	static bool FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx, const USceneComponent* Mesh,
 		FVector& OutAxisOrigin, FVector& OutAxisDirection);
 
-	/** collider의 대표 중심(캡슐 중점/박스 중심/SDF bounds 중심). 군집 origin 보정용. */
+	/** A collider's representative centre: the midpoint of a capsule, the centre of a box, or the
+	 *  centre of an SDF's bounds. Used to correct the cluster origin. */
 	static bool GetColliderCenter(const IRopeCollider& Collider, FVector& OutCenter);
 
 	void OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
 		const USceneComponent* Mesh, FVector& InOutAxisDirection) const;
 
-	/** 비복합 경로용 skeleton parent/child 후보 본 수집. 단일 본 fallback은 이 경로를 사용하지 않는다. */
+	/** Collects skeleton parent and child candidate bones for the non-composite path. The single-bone
+	 *  fallback does not use this path. */
 	void GatherSurfaceVectorFieldBoneCandidates(FName CurrentBone, const USceneComponent* Mesh,
 		TArray<FSurfaceVectorFieldBoneCandidate>& OutCandidates, const FContext& Ctx) const;
 
 	/**
-	 * 접촉 순간의 pose-space collider island를 구성한다. 현재 감김 축의 얇은 slab 안에서 실제 표면 gap이
-	 * 로프 지름보다 작거나, 열린 gap을 통과할 추가 경로보다 가용 slack이 부족한 collider만 연결한다.
-	 * 결과는 bone transition 횟수와 무관하며 wrapping 시도 동안 고정된다.
+	 * Assembles the pose-space collider island at the moment of contact. Within a thin slab about the
+	 * current wrap axis, it connects only those colliders whose actual surface gap is smaller than the
+	 * rope diameter, or where the slack available is less than the extra path needed to thread through
+	 * an open gap.
+	 * The result is independent of how many bone transitions occur, and is fixed for the duration of
+	 * the wrap attempt.
 	 */
 	void GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
 		const USceneComponent* Mesh, TArray<FName>& OutBones,
@@ -275,13 +327,15 @@ private:
 		TArray<FRopeWrapIslandPortal>& OutPortals, float& OutAvailableSlack,
 		const FContext& Ctx) const;
 
-	/** 복합 실패 폴백 전용. 후보 graph 없이 최초 latch 본 collider만 투영한다. */
+	/** For the composite failure fallback only. Projects against the original latch bone's collider
+	 *  alone, with no candidate graph. */
 	bool ProjectWrapPointToLatchBone(const USceneComponent* Mesh,
 		const FRopeSimState& Sim, const FContext& Ctx,
 		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
 		FVector& InOutCircumferenceDir, FName& InOutBone, const USceneComponent*& OutMesh) const;
 
-	/** 후보 본들의 표면 projection을 graph 비용/hysteresis와 함께 점수화해 path point의 Bone/Mesh를 선택한다. */
+	/** Scores the surface projections of the candidate bones, together with the graph cost and
+	 *  hysteresis, to choose the path point's bone and mesh. */
 	bool ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, const USceneComponent* Mesh,
 		const FRopeSimState& Sim, const FContext& Ctx,
 		FName PreviousBone, float DistanceSinceLastTransition, const FVector& RopeNodeWorld,
@@ -293,24 +347,27 @@ private:
 		const FRopeSimState& Sim, const FContext& Ctx,
 		FVector& InOutSurfaceWorld, FVector& InOutNormalWorld) const;
 
-	//~ front 이동
+	//~ Front motion
 	void AdvanceWrappingFront(float DeltaTime, const FRopeSimState& Sim, const FContext& Ctx);
 
-	/** 움직이는 anchor frame을 현재 world-space path point로 해석한다. */
+	/** Resolves a moving anchor frame into a world-space path point for the current frame. */
 	bool ResolveWrappingAnchorPoint(const FRopeSurfaceAnchor& Anchor,
 		FRopeWrapPathPoint& OutPoint) const;
 
-	/** 이번 프레임에 사용할 world-space path를 path/anchor의 정렬 순서를 이용해 선형 시간에 만든다. */
+	/** Builds this frame's world-space path in linear time, using the sorted order of the path points
+	 *  and anchors. */
 	bool BuildResolvedWrappingPath(TArray<FRopeWrapPathPoint>& OutResolvedPath) const;
 
-	/** bVirtual만 이미 centerline을 저장한다. 일반 surface와 bridge는 normal offset을 적용한다. */
+	/** Only virtual points already store a centreline; normal surface and bridge points have the normal
+	 *  offset applied. */
 	static FVector GetPathPointCenterlineWorld(const FRopeWrapPathPoint& Point, float SurfaceOffset);
 
-	/** centerline을 FRopeWrapPathPoint의 저장 규약으로 되돌린다. bVirtual이면 그대로, 아니면 offset을 뺀다. */
+	/** Converts a centreline back into the storage convention of FRopeWrapPathPoint: unchanged for a
+	 *  virtual point, and with the offset subtracted otherwise. */
 	static FVector EncodePathPointPositionFromCenterline(const FVector& CenterlineWorld,
 		const FVector& NormalWorld, bool bVirtual, float SurfaceOffset);
 
-	/** 거리 순으로 정렬된 resolved path를 binary search해 보간한다. */
+	/** Interpolates the resolved path, which is sorted by distance, using a binary search. */
 	static bool SampleResolvedWrappingPath(const TArray<FRopeWrapPathPoint>& ResolvedPath,
 		float DistanceFromLatch, float SurfaceOffset, FRopeWrapPathPoint& OutPoint);
 
@@ -318,6 +375,7 @@ private:
 		const FRopeWrapPathPoint& UpperPoint, float SampleDistance, float SurfaceOffset,
 		FRopeWrapPathPoint& OutPoint);
 
-	/** ApplyWrappingMotionOverrides 전용 재사용 버퍼. 매 프레임 path point/anchor를 반복 해석하지 않는다. */
+	/** Reusable buffer for ApplyWrappingMotionOverrides, so path points and anchors are not resolved
+	 *  again every frame. */
 	TArray<FRopeWrapPathPoint> ResolvedPathScratch;
 };

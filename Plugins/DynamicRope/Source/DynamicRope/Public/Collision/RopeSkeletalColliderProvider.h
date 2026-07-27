@@ -1,14 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 스켈레탈 메시에서 매 프레임 per-bone collider를 공급하는 provider의 추상 베이스. 캡슐
-// (URopeBoneCapsuleProvider)과 SDF(URopeSDFProvider)가 공유하던 배선 — 서브시스템 등록/해제,
-// 메시 해석, 프레임당 1회 빌드 디둡, gather 파이프라인(append + region 매핑) — 을 여기로 모은다.
-// 서브클래스는 자기 스토리지(캡슐/SDF collider 배열)와 빌드 소스만 채운다: RebuildColliders +
-// AppendColliderPointers 두 훅.
+// The abstract base for providers that supply per-bone colliders from a skeletal mesh each frame. It
+// gathers the wiring shared by the capsule provider (URopeBoneCapsuleProvider) and the SDF provider
+// (URopeSDFProvider): registering with and unregistering from the subsystem, resolving the mesh,
+// deduplicating the build to once per frame, and the gather pipeline that appends colliders and maps
+// them to regions. A subclass fills in only its own storage, whether an array of capsule or SDF
+// colliders, and its build source, through the two hooks RebuildColliders and AppendColliderPointers.
 //
-// **범위: 스켈레탈 전용.** 월드/정적 provider(GDF·StaticBody)는 ResolveMesh/본/prev-transform
-// 기계를 공유하지 않고 ProvidesWorldStaticColliders 계약이 다르므로 이 베이스를 상속하지 않는다 —
-// IRopeColliderProvider 인터페이스를 직접 구현한다.
+// Scope: skeletal targets only. World and static providers, meaning the global distance field and
+// static body providers, share none of the mesh resolution, bone or previous-transform machinery and
+// have a different ProvidesWorldStaticColliders contract, so they do not derive from this base and
+// implement IRopeColliderProvider directly.
 
 #pragma once
 
@@ -27,50 +29,62 @@ class DYNAMICROPE_API URopeSkeletalColliderProvider : public UActorComponent, pu
 public:
 	URopeSkeletalColliderProvider();
 
-	//~ UActorComponent — RopeSimSubsystem 중앙 레지스트리에 등록/해제(프레임당 1회 중앙 gather).
+	//~ UActorComponent. Registers with and unregisters from the RopeSimSubsystem's central registry,
+	//~ which gathers once per frame.
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	/** 본들이 collider가 되는 mesh. null로 두면 owner로부터 자동으로 해석된다. */
+	/** The mesh whose bones become colliders. Leave it null to resolve it from the owner
+	 *  automatically. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	TObjectPtr<USkeletalMeshComponent> SkeletalMesh = nullptr;
 
-	//~ IRopeColliderProvider — 공용 gather 파이프라인(프레임 디둡 + 서브클래스 빌드 + region 매핑).
+	//~ IRopeColliderProvider. The shared gather pipeline: per-frame deduplication, the subclass build,
+	//~ and the region mapping.
 	virtual void GatherColliders(FRopeColliderGatherContext& Gather) override;
 
 protected:
-	/** SkeletalMesh(비면 owner의 첫 USkeletalMeshComponent)를 해석해 캐시한다. */
+	/** Resolves and caches SkeletalMesh, falling back to the owner's first USkeletalMeshComponent when
+	 *  it is unset. */
 	USkeletalMeshComponent* ResolveMesh();
 
 	/**
-	 * 이번 프레임 collider를 서브클래스 스토리지에 (재)빌드한다. 프레임당 1회만 호출된다(BuiltFrame 디둡).
-	 * 서브클래스가 스토리지 Reset + prev-state(표면속도용) 갱신을 소유한다.
-	 * @param Mesh   해석된 스켈레탈 메시(non-null 보장).
-	 * @param InvDt  표면속도 산출용 1/frameDt(첫 프레임/정지 프레임은 0 = 속도 0).
+	 * Rebuilds this frame's colliders into the subclass's storage. Called once per frame, deduplicated
+	 * through BuiltFrame. The subclass owns resetting its storage and refreshing the previous state
+	 * used for surface velocity.
+	 * @param Mesh   The resolved skeletal mesh, guaranteed non-null.
+	 * @param InvDt  The reciprocal of the frame delta, used to derive surface velocity. It is 0 on the
+	 *               first frame and on paused frames, which gives zero velocity.
 	 *
-	 * UObject는 CDO 생성 때문에 C++ 순수 가상(=0)을 가질 수 없어(추상 클래스 인스턴스화 불가) UE 관용구
-	 * PURE_VIRTUAL을 쓴다 — 본문을 제공하되 잘못 호출되면 fatal. 실 인스턴스는 항상 서브클래스라 미발화.
+	 * A UObject cannot have a C++ pure virtual, since an abstract class cannot be instantiated and the
+	 * class default object must be, so this uses the engine's PURE_VIRTUAL idiom: a body is provided
+	 * that is fatal if it is ever actually called. Real instances are always subclasses, so it never
+	 * fires.
 	 */
 	virtual void RebuildColliders(USkeletalMeshComponent* Mesh, float InvDt)
 		PURE_VIRTUAL(URopeSkeletalColliderProvider::RebuildColliders, );
 
-	/** 서브클래스 스토리지의 collider 포인터를 Gather.Colliders에 append한다(reserve 포함, 중앙 수집 pass마다 호출). */
+	/** Appends the collider pointers from the subclass's storage to Gather.Colliders, including the
+	 *  reserve. Called on every central gather pass. */
 	virtual void AppendColliderPointers(FRopeColliderGatherContext& Gather)
 		PURE_VIRTUAL(URopeSkeletalColliderProvider::AppendColliderPointers, );
 
 	/**
-	 * 빌드 가능한 데이터가 있는지(mesh 외). 기본 true(캡슐은 mesh만 있으면 충분). SDF는 SDFData 유무로
-	 * 게이트해, 데이터가 없으면 프레임 빌드에 진입하지 않고 no-op한다(빈 collider 공급).
+	 * Whether there is anything to build from besides the mesh. It defaults to true, since a capsule
+	 * provider needs only the mesh. The SDF provider gates on whether it has SDF data, so that without
+	 * data it never enters the frame build and simply supplies no colliders.
 	 */
 	virtual bool HasColliderData() const { return true; }
 
 private:
-	/** 마지막으로 collider를 빌드한 GFrameCounter. 같은 프레임에 여러 로프가 호출해도 재빌드 안 함(디둡). */
+	/** The frame counter value at which colliders were last built, which deduplicates the rebuild when
+	 *  several ropes call in during the same frame. */
 	uint64 BuiltFrame = static_cast<uint64>(-1);
 
 	/**
-	 * 이번 프레임에 실제로 빌드했는지(#12 근접 게이트). 어느 로프 region도 메시 근처에 없으면 false로 두고
-	 * collider 공급을 통째로 건너뛴다(스테일 append 방지). 프레임당 첫 호출이 판정, 같은 프레임 뒤 호출은 재사용.
+	 * Whether a build actually happened this frame. When no rope region is anywhere near the mesh this
+	 * stays false and supplying colliders is skipped entirely, which prevents appending stale ones. The
+	 * first call of the frame decides it and later calls in the same frame reuse the answer.
 	 */
 	bool bBuiltThisFrame = false;
 };

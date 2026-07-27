@@ -1,10 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 최소 구현 skeletal collider provider: 매 프레임 skeletal mesh로부터 본별 capsule(bone -> parent 세그먼트
-// 또는 Physics Asset 셰이프)을 생성하는 v1 collider 소스. per-bone SDF provider(URopeSDFProvider)와
-// 같은 베이스(URopeSkeletalColliderProvider) 뒤에 있어 대상별로 선택해 쓴다 — 해석적 캡슐이라 베이크가
-// 필요 없어 가볍다. 등록/메시 해석/프레임 디둡/gather 파이프라인은 베이스가 소유하고, 여기서는 캡슐
-// 빌드(RebuildColliders)와 포인터 append(AppendColliderPointers)만 채운다.
+// The minimal skeletal collider provider and the first collider source: it builds a capsule per bone
+// from the skeletal mesh each frame, either along the bone-to-parent segment or from the physics
+// asset's shapes. It sits behind the same base as the per-bone SDF provider
+// (URopeSDFProvider), so either can be chosen per target; being analytic, capsules need no bake and
+// are cheap. Registration, mesh resolution, per-frame deduplication and the gather pipeline all
+// belong to the base, leaving only the capsule build (RebuildColliders) and the pointer append
+// (AppendColliderPointers) here.
 
 #pragma once
 
@@ -22,20 +24,25 @@ class DYNAMICROPE_API URopeBoneCapsuleProvider : public URopeSkeletalColliderPro
 
 public:
 	/**
-	 * capsule로 노출할 본들. 각 capsule은 해당 본에서 그 parent까지를 잇는다(반지름 = CapsuleRadius).
-	 * 비워두면 자동 모드: 메시의 Physics Asset 바디(capsule/sphere/box 셰이프, 본별 실제 치수 —
-	 * box는 장축 캡슐 근사)로 캡슐을 만든다. Physics Asset이 없거나 쓸 수 있는 셰이프가 하나도
-	 * 없으면(convex 전용 등) 레퍼런스 스켈레톤의 모든 본-부모 세그먼트로 폴백한다(AutoMinBoneLength
-	 * 미만 제외 — 단 IK/트위스트 본의 가짜 세그먼트가 섞일 수 있으니 캐릭터는 Physics Asset 권장).
+	 * The bones to expose as capsules. Each capsule spans from that bone to its parent, with a radius
+	 * of CapsuleRadius.
+	 * Leave it empty for automatic mode, which builds capsules from the mesh's physics asset bodies,
+	 * using the real per-bone dimensions of their capsule, sphere and box shapes, where a box is
+	 * approximated by a capsule along its longest axis. With no physics asset, or none of its shapes
+	 * usable, as when it holds only convexes, it falls back to every bone-to-parent segment in the
+	 * reference skeleton, excluding those shorter than AutoMinBoneLength. That fallback can include
+	 * spurious segments from IK and twist bones, so a physics asset is recommended for characters.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision")
 	TArray<FName> Bones;
 
-	/** 각 본 세그먼트를 감싸는 capsule 반지름(cm). 명시 Bones/스켈레톤 폴백 경로에서만 쓴다(Physics Asset은 셰이프 반지름). */
+	/** The radius of the capsule around each bone segment (cm). Used only on the explicit Bones path
+	 *  and the skeleton fallback; a physics asset supplies its shapes' own radii. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (ClampMin = "0.0", Units = "cm"))
 	float CapsuleRadius = 8.0f;
 
-	/** 자동 모드의 스켈레톤 폴백에서 이 길이(cm) 미만의 본 세그먼트는 제외한다(손가락/트위스트 잡음 컷). */
+	/** On the skeleton fallback of automatic mode, bone segments shorter than this (cm) are excluded,
+	 *  which cuts out finger and twist bone noise. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision|Tuning", meta = (ClampMin = "0.0", Units = "cm"))
 	float AutoMinBoneLength = 5.0f;
 
@@ -45,19 +52,24 @@ protected:
 	virtual void AppendColliderPointers(FRopeColliderGatherContext& Gather) override;
 
 private:
-	/** 프레임당 1회 재구성되는 백킹 스토리지. 넘겨준 포인터들은 해당 프레임 동안 유효하다. */
+	/** The backing storage, rebuilt once per frame. The pointers handed out are valid for that frame. */
 	TArray<FCapsuleCollider> Capsules;
 
 	/**
-	 * 캡슐별(빌드 순서 인덱스 정렬) 이전 프레임 끝점(A, B). 표면 속도(드래그)/상대 운동 CCD의 prev 소스 —
-	 * SDF provider의 PrevBoneToWorld 대응. 빌드 순서는 소스(Bones 목록/Physics Asset/스켈레톤)가 프레임 간
-	 * 동일해 인덱스로 안정 — 개수가 바뀌면(구성 변경) 리셋하고 그 프레임은 정적(속도 0) 취급.
+	 * The previous frame's endpoints, A and B, per capsule, aligned by build order index. They are the
+	 * previous-state source for surface velocity, which produces drag, and for relative continuous
+	 * collision, and correspond to PrevBoneToWorld on the SDF provider. The build order is stable
+	 * between frames because its source, whether the Bones list, the physics asset or the skeleton, is
+	 * the same each time, so indices line up. If the count changes, meaning the configuration changed,
+	 * this is reset and that frame is treated as static with zero velocity.
 	 */
 	TArray<TPair<FVector, FVector>> PrevEndpoints;
 
 	/**
-	 * 이번 프레임 캡슐 목록(A/B/반지름/본)을 Capsules에 빌드한다. Bones 명시 목록 → Physics Asset 자동 →
-	 * 스켈레톤 폴백 순. prev 끝점/InvDt는 RebuildColliders가 인덱스 정렬로 이어 붙인다.
+	 * Builds this frame's capsule list, that is the endpoints, radii and bones, into Capsules. It tries
+	 * the explicit Bones list first, then the physics asset, then the skeleton fallback. The previous
+	 * endpoints and the reciprocal delta time are joined on by RebuildColliders using the aligned
+	 * indices.
 	 */
 	void BuildCapsules(USkeletalMeshComponent* Mesh);
 };

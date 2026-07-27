@@ -10,8 +10,9 @@ class USceneComponent;
 class URopeComponent;
 
 /**
- * 라이프사이클 단계. 물리(solver)는 Free/Flight에서 전체를, Wrapping/Wrapped에서는 마스크되지 않은
- * 자유 구간만 굴린다. Contacting/Wrapping/Wrapped/Releasing의 판정·구동은 로직(Logic/ F-클래스) 담당.
+ * Lifecycle phases. Physics, that is the solver, runs the whole rope in Free and Flight, and only the
+ * unmasked free stretches in Wrapping and Wrapped. The decisions and driving for Contacting,
+ * Wrapping, Wrapped and Releasing belong to the logic classes under Logic/.
  */
 UENUM(BlueprintType)
 enum class ERopePhase : uint8
@@ -19,93 +20,115 @@ enum class ERopePhase : uint8
 	Free = 0,
 	Flight = 1,
 
-	/** 접촉 후보를 매 프레임 재수집하며 트래커 dwell로 wrap 진입을 판정하는 중. */
+	/** Re-collecting contact candidates every frame and deciding, from the tracker's dwell time,
+	 *  whether to begin wrapping. */
 	Contacting = 2,
 
-	/** 감기는 중(표면 경로 점진 생성 + front 모션 + 질량 마스크). */
+	/** Wrapping: progressively building the surface path, moving the front along it, and masking
+	 *  mass. */
 	Wrapping = 3,
 
 	Wrapped = 4,
 
-	/** ③ 전용. 물리 Flight를 타지 않는다 — 조준 던지기는 확정 preview path를, 허공 던지기는 레이 끝점
-	 *  아치를 따라간다(bFreeThrow). 전자는 Wrapped로, 후자는 Free로 빠진다. */
+	/** GuaranteedWrap only. It does not go through the physical Flight phase: an aimed throw follows
+	 *  the committed preview path, and a throw into open space follows an arc towards the far end of
+	 *  the ray (bFreeThrow). The former ends in Wrapped and the latter in Free. */
 	GuidedThrow = 5,
 
 	Releasing = 6,
 
-	/** ③(GuaranteedWrap) 전용: 창(팁)을 손에 든 던지기 준비 상태. 로프는 숨기고, 이 상태에서만 throw가 성립한다.
-	 *  꽂힌 뒤 release로 Free가 된 상태에서 EnterLoaded()로 진입한다. */
+	/** GuaranteedWrap only: ready to throw with the tip held in the hand. The rope is hidden, and a
+	 *  throw is only valid from this phase. It is entered through EnterLoaded() from Free, including
+	 *  after a release from an embedded state. */
 	Loaded = 7
 };
 
-/** 이 로프의 engagement(접촉/성립/③ 조준 던지기)가 끝난 이유. **성립(wrap) 전 abort도 포함**한다 —
- *  OnRopeReleased는 wrap 없이도 발화한다(Bone이 None일 수 있다). 중앙 OnAnyRopeReleased만 커밋된 wrap 전용. */
+/** Why this rope's engagement ended, covering contact, an established wrap, and a GuaranteedWrap
+ *  aimed throw. It includes aborts from before a wrap was established: OnRopeReleased fires without
+ *  a wrap too, in which case the bone can be None. Only the central OnAnyRopeReleased is restricted
+ *  to committed wraps. */
 UENUM(BlueprintType)
 enum class ERopeReleaseReason : uint8
 {
-	/** 게임플레이가 명시적으로 해제(URopeComponent::ReleaseWrap). */
+	/** Gameplay released it explicitly, through URopeComponent::ReleaseWrap. */
 	Manual = 0,
 
-	/** 손~앵커 거리가 가용 로프 길이 + DistanceReleaseSlack 초과(자동). */
+	/** The hand-to-anchor distance exceeded the available rope length plus DistanceReleaseSlack,
+	 *  automatically. */
 	Distance = 1,
 
-	/** 최대 장력이 TensionReleaseForce를 지속 초과(자동). */
+	/** The maximum tension stayed above TensionReleaseForce, automatically. */
 	Tension = 2,
 
-	/** 대상 소실/wrap 실패 등 내부 사유. 성립 전 abort(접촉/감김/③ 연출 중 대상 소실)도 여기다. */
+	/** An internal cause such as the target being lost or the wrap failing. Aborts before the wrap is
+	 *  established, where the target is lost during contact, wrapping or a guaranteed throw, also land
+	 *  here. */
 	Broken = 3,
 
-	/** 외부 게임플레이가 로프를 절단(URopeComponent::CutRope). */
+	/** External gameplay cut the rope, through URopeComponent::CutRope. */
 	Cut = 4,
 
 	/**
-	 * ③ 연출(GuidedThrow) 중 게임 규칙이 보장을 깼다 — ShouldAbortGuaranteedThrow 오버라이드가 true를 반환.
-	 * 내부 실패(Broken)와 달리 **의도된 게임플레이 결과**다(대상이 회피/텔레포트했다 등). 소비자가 둘을
-	 * 구분해야 "엔진 문제"와 "설계된 회피"에 다르게 반응할 수 있다.
+	 * A game rule broke the guarantee during a guaranteed throw, meaning the ShouldAbortGuaranteedThrow
+	 * override returned true. Unlike an internal failure it is an intended gameplay outcome, such as
+	 * the target dodging or teleporting away. Consumers need the two distinguished so they can react
+	 * differently to an engine problem and to a designed evasion.
 	 */
 	ThrowAborted = 5
 };
 
 /**
- * 감김 해결(도달) 모드 — 이 로프가 던지기~결착까지 무엇을 보장하는지의 계약.
- * 조준·preview의 지위와 판정 관문 사용 여부를 결정하고, Wielder의 조준/던지기 방식도 여기서 유도된다.
- * Wrapped 성립 이후(Hold/Pull/테더/release)는 모드 무관 공통. 근거: Docs/PoC/02_WrapResolveModes.md.
+ * The wrap resolve mode: the contract for what this rope guarantees between the throw and the bind.
+ * It decides the standing of aiming and the preview, and whether the judgement gates are used, and
+ * the wielder's aiming and throwing behaviour is derived from it.
+ * Everything after a wrap is established, that is holding, pulling, tethering and releasing, is
+ * common to all modes.
  */
 
 UENUM(BlueprintType)
 enum class ERopeWrapResolveMode : uint8
 {
-	// 날리기부터 결착까지 전부 창발. 조준 보정/preview가 없어 빗나감·스침·판정 미달이 전부 정상
-	// 결과다(현실 대응).
+	// Everything from the throw to the bind is emergent. There is no aim assistance and no preview,
+	// so missing, grazing and falling short of the judgement gates are all normal outcomes, matching
+	// reality.
 
-	/** ① 전체 시뮬 — 아무것도 보장하지 않는다. 빗나감도 정상(샌드박스/리서치). */
+	/** Full simulation, guaranteeing nothing. Missing is a normal result, for sandboxes and
+	 *  research. */
 	FullSimulation = 0 UMETA(DisplayName = "Full Simulation"),
 
-	// aim ray가 대상을 잠가 명중은 보장하되, 결착 성립은 판정(감싼 각도/커버리지 관문)이 결정한다.
-	// preview는 표시용(비구속).
+	// An aim ray locks the target, so the hit is guaranteed while whether a bind is established is
+	// decided by judgement, through the wrapped angle and coverage gates. The preview is display only
+	// and does not constrain the throw.
 
-	/** ② 보조+판정 — 명중은 보장, 결착은 판정. 실패(release)도 정상(전투/스킬). */
+	/** Assisted and judged: the hit is guaranteed, the bind is judged. Failure, that is a release, is
+	 *  a normal result, for combat and skills. */
 	AssistedJudged = 1 UMETA(DisplayName = "Assisted (Judged)"),
 
-	// 던지는 순간 확정한 preview가 곧 실행 경로라 연출 후 실패가 없다. 조준이 안 잡히면(대상 없음/
-	// 사거리 밖) 거부가 아니라 레이 끝점을 향해 아치로 날아가 안 꽂히고 Free로 떨어진다 — 보장은
-	// '조준한 대상'에 대한 것이라 이것도 정상 결과다. 자동 release(장력/거리)는 무효 — 명시 해제만.
+	// The preview committed to at the moment of the throw is the execution path itself, so there is no
+	// failure after the throw plays out. When aiming does not resolve, because there is no target or
+	// it is out of range, the throw is not refused: the rope arcs towards the far end of the ray,
+	// embeds in nothing and falls to Free. The guarantee applies to the target that was aimed at, so
+	// that is a normal result too. Automatic releases from tension and distance do not apply; only an
+	// explicit release does.
 
-	/** ③ 무조건 성립 — 조준한 대상에 실패 없이 결착. Loaded(장전)에서만 던질 수 있다(데모/연출/이동기). */
+	/** Guaranteed: it binds the aimed target without fail. It can only be thrown from the Loaded
+	 *  phase. For demos, scripted sequences and traversal. */
 	GuaranteedWrap = 2 UMETA(DisplayName = "Guaranteed")
 };
 
-/** 도달 모드가 강제하는 제약의 단일 소스 — phase 게이트(CanThrowInPhase). 던지기 진입·조준 HUD·
- *  테스트가 공용 소비한다. UObject/월드 의존이 없어 헤더 인라인 + 단위 테스트가 가능하다. */
+/** The single source for the constraints a resolve mode imposes, namely the phase gate
+ *  CanThrowInPhase. Shared by the throw entry points, the aiming HUD and the tests. It has no
+ *  UObject or world dependency, so it can be inlined in the header and unit tested. */
 namespace RopeWrapModes
 {
 	/**
-	 * 이 모드에서 이 phase에 throw가 성립하는가. ③(GuaranteedWrap)는 Loaded(장전) 전용이고,
-	 * ①②는 phase 게이트가 없어 **항상 true**다.
+	 * Whether a throw is valid in this phase for this mode. GuaranteedWrap is restricted to the Loaded
+	 * phase, while the other modes have no phase gate and are always true.
 	 *
-	 * [함정] 이건 "던지기 게이트에 걸리지 않는다"는 뜻이지 **"③이고 Loaded이다"가 아니다**.
-	 * `X && Phase == Loaded` 꼴을 이 함수 단독으로 바꾸면 ①②가 true로 새어 들어간다 —
-	 * 그런 자리는 반드시 `X && CanThrowInPhase(...)` 꼴을 유지할 것.
+	 * Careful: this means "the throw gate does not block", not "the mode is GuaranteedWrap and the
+	 * phase is Loaded". Replacing an expression of the form `X && Phase == Loaded` with this function
+	 * alone would let the other two modes leak through as true; such places must keep the form
+	 * `X && CanThrowInPhase(...)`.
 	 */
 	inline bool CanThrowInPhase(ERopeWrapResolveMode Mode, ERopePhase Phase)
 	{
@@ -114,49 +137,56 @@ namespace RopeWrapModes
 }
 
 /**
- * Wrapped 성립 이벤트 페이로드(OnRopeWrapped / NotifyWrapped). 종전의 본 이름 하나에서 확장
- * (2026-07-13 회의 결정 G — Pierce 데미지 훅, 포획 강도 게임 규칙의 입구; 시그니처 변경은
- * 모드 도입과 함께 1회로 끝내는 클린 브레이크).
+ * The payload of the wrap established event, delivered through OnRopeWrapped and NotifyWrapped. It
+ * carries more than the dominant bone so that game rules such as pierce damage hooks and capture
+ * strength have the information they need.
  */
 USTRUCT(BlueprintType)
 struct FRopeWrappedEventInfo
 {
 	GENERATED_BODY()
 
-	/** 대표(지배) 본 — 종전 OnRopeWrapped(FName)와 같은 값. */
+	/** The representative, that is dominant, bone. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	FName Bone;
 
-	/** 앵커가 걸친 모든 본(대표 본 우선, 중복 제거) — 양다리처럼 복수 본 성립의 전체 정보. */
+	/** Every bone the anchors span, with the dominant bone first and duplicates removed. This is the
+	 *  full picture when a wrap establishes across several bones, as when catching both legs. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	TArray<FName> Bones;
 
-	/** 감긴 대상 mesh(cross-actor 포함). 이벤트 시점 이후 파괴될 수 있으니 weak. */
+	/** The mesh that was wrapped, which can belong to another actor. Weak, since it can be destroyed
+	 *  after the event. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	TWeakObjectPtr<USceneComponent> Mesh;
 
-	/** 성립 당시 이 로프의 도달 모드(③ Guaranteed 성립은 판정값이 -1이다 — preview 기반). */
+	/** The rope's resolve mode when the wrap was established. A GuaranteedWrap is preview based, so
+	 *  its judgement values are -1. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
-	/** 커밋 시점 누적 감싼 각도(도). 계산 불가/preview 기반(③) = -1. */
+	/** The accumulated wrapped angle at commit time (degrees), or -1 when it cannot be computed or the
+	 *  wrap was preview based. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	float AngleDeg = -1.0f;
 
-	/** 커밋 시점 축 둘레 커버리지(도, 0~360 — "빠져나갈 공백이 없는가"). 계산 불가/③ = -1. */
+	/** The angular coverage about the axis at commit time (degrees, 0 to 360), which answers whether a
+	 *  gap remains to escape through. -1 when it cannot be computed or the wrap was preview based. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	float CoverageDeg = -1.0f;
 
-	/** 성립 앵커(래치 노드) 수 — 포획 강도의 보조 지표. */
+	/** The number of anchors, that is latched nodes, established. A supporting measure of capture
+	 *  strength. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	int32 AnchorCount = 0;
 
 	/**
-	 * 이 wrap을 성립시킨 로프 — 중앙 신호(OnAnyRopeWrapped) 구독자가 **어느 로프가 감았는지**를 알기 위한
-	 * 식별자다. 대상 하나를 여러 로프가 동시에 감을 수 있으므로(양팔 포박 등), 구독자는 이 값으로 활성
-	 * engagement 집합을 유지해야 한다 — mesh만 보면 로프 하나가 풀렸을 때 나머지가 남아 있는데도 반응을
-	 * 되돌린다(URopeRagdollResponseComponent의 조기 복구 버그, 2026-07-20). 짝이 되는 해제 신호
-	 * OnAnyRopeReleased도 같은 로프 포인터를 싣는다. 이벤트 이후 파괴될 수 있으니 weak.
+	 * The rope that established this wrap, which identifies it to subscribers of the central
+	 * OnAnyRopeWrapped signal. Several ropes can wrap one target at the same time, as when binding both
+	 * arms, so subscribers must maintain their set of active engagements keyed by this value.
+	 * Reacting to the mesh alone would revert the reaction when one rope released even though others
+	 * remain attached. The matching release signal, OnAnyRopeReleased, carries the same rope pointer.
+	 * Weak, since it can be destroyed after the event.
 	 */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope")
 	TWeakObjectPtr<URopeComponent> Rope;

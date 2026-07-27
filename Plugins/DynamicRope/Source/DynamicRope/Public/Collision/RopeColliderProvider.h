@@ -1,78 +1,90 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 매 프레임 rope solver에 collider를 공급하는 컴포넌트/오브젝트. skeletal provider는
-// 후보 bone들에 대해 per-bone collider(capsule/SDF)를 빌드한다.
+// Components and objects that supply colliders to the rope solver each frame. A skeletal provider
+// builds a per-bone collider, capsule or SDF, for each candidate bone.
 //
-// 2026-07 수집 방식 변경(노션 "GatherCollidersForRope O(로프×풀)" 이슈): 이전 계약(flat 배열 반환)은
-// provider가 gather 시점에 이미 아는 "region(=로프)↔collider" 매핑을 버렸고, 서브시스템이 로프마다
-// 풀 전체를 bounds 재테스트해 O(로프 수 × 전체 콜라이더)로 매핑을 재구성했다. 이제 provider가
-// flat 디둡 풀 + region별 인덱스 매핑을 함께 돌려줘 그 재-컬을 없앤다.
+// A provider already knows which region, that is which rope, each collider belongs to at the moment
+// it gathers, so it returns that mapping alongside a flat deduplicated pool. Returning the pool
+// alone would throw the mapping away and force the subsystem to rebuild it by re-testing the whole
+// pool against every rope's bounds, which costs O(ropes x colliders) every frame.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "UObject/Interface.h"
-// RopeColliderGather::MapCollidersToRegionsByBounds가 GetWorldBounds를 쓴다.
+// RopeColliderGather::MapCollidersToRegionsByBounds uses GetWorldBounds.
 #include "Collision/RopeCollider.h"
 #include "RopeColliderProvider.generated.h"
 
 class AActor;
 
 /**
- * 프레임당 1회의 collider 수집 입출력 묶음. 서브시스템(BuildFrameColliders)이 provider마다 하나씩 만들어
- * 넘기고, provider는 풀(Colliders)과 — 가능하면 — region별 인덱스 매핑을 채운다.
+ * The input and output bundle for one frame's collider gather. The subsystem, in
+ * BuildFrameColliders, creates one per provider and passes it in; the provider fills in the pool
+ * (Colliders) and, where it can, the per-region index mapping.
  */
 struct FRopeColliderGatherContext
 {
 	/**
-	 * 입력: 물리/조준 활성 영역. 로프 수를 N이라 할 때 레이아웃은 [0, N) 물리 region,
-	 * [N, 2N) 같은 로프의 조준 region이다. 조준 중이 아닌 로프의 조준 region과 region이 없는 로프는
-	 * !IsValid 박스로 자리를 유지한다 — provider는 !IsValid를 건너뛴다.
-	 * bounds-aware provider는 이 리스트로 멀리 동떨어진 로프 사이 빈 공간을 스캔에서 배제한다.
+	 * Input: the active physics and aim regions. With N ropes, the layout is [0, N) for the physics
+	 * regions and [N, 2N) for the aim regions of the same ropes in the same order. The aim region of a
+	 * rope that is not aiming, and any slot with no region at all, holds its place as an invalid box,
+	 * which providers skip.
+	 * A bounds-aware provider uses this list to exclude the empty space between widely separated ropes
+	 * from its scan.
 	 */
 	TArrayView<const FBox> RopeRegions;
 
-	/** RopeRegions 앞쪽에 있는 물리 region 수(N). 뒤쪽 N개는 같은 순서의 조준 region이다. */
+	/** The number of physics regions, N, at the front of RopeRegions. The N entries after them are the
+	 *  aim regions in the same order. */
 	int32 NumPhysicsRegions = 0;
 
 	/**
-	 * 입력(선택): region 처리 우선순위 — 앞에 오는 region 인덱스부터 스캔한다. 전역 추출 상한이 있는
-	 * provider(정적 바디)용: 선착순 소진이면 앞 순서의 한가한 로프 주변 잡동사니가 상한을 먼저 먹어
-	 * 활성 로프가 충돌을 굶을 수 있다 — 서브시스템이 활성(사용 중 페이즈, 비슬립) 물리 region을
-	 * 먼저 두고, 조준 region은 모든 물리 region 뒤에 둔다.
-	 * 순서만 바꿀 뿐 region 인덱스 자체는 불변이라 RegionColliderIndices 매핑에는 영향이 없다.
-	 * 비어 있으면 인덱스 순서(0..N-1)로 처리한다. 상한 없는 provider는 무시해도 된다.
+	 * Optional input: the order to process regions in, scanning the listed region indices first. It
+	 * exists for providers with a global extraction limit, such as the static body provider: consuming
+	 * that limit first come, first served would let clutter around an idle rope early in the list eat
+	 * the budget and starve an active rope of collisions. The subsystem therefore puts active physics
+	 * regions, meaning ropes in a phase that is in use and not asleep, first, and places every aim
+	 * region after every physics region.
+	 * It only changes the order; the region indices themselves are unchanged, so RegionColliderIndices
+	 * is unaffected. When empty, regions are processed in index order from 0 to N-1. Providers with no
+	 * limit may ignore it.
 	 */
 	TArrayView<const int32> RegionGatherOrder;
 
 	/**
-	 * 출력: flat 디둡 풀(이전 계약과 동일). collider↔region은 다대다(겹치는 영역)라 풀은 provider가
-	 * 컴포넌트/본 단위로 디둡해 1회만 담고, 다중 소속은 아래 매핑으로 표현한다. 가리키는 collider들은
-	 * provider 소유 스토리지이며 이번 프레임 solve가 끝날 때까지 유효해야 한다.
+	 * Output: the flat deduplicated pool. Colliders and regions are many-to-many, since regions
+	 * overlap, so the provider deduplicates per component or bone and adds each collider once, while
+	 * membership in several regions is expressed through the mapping below. The colliders pointed to
+	 * belong to the provider's own storage and must stay valid until this frame's solve finishes.
 	 */
 	TArray<IRopeCollider*> Colliders;
 
 	/**
-	 * 출력(권장): region r이 문 콜라이더의 Colliders 인덱스 리스트. bHasRegionMapping=true일 때만
-	 * 소비되며, 그때 길이는 RopeRegions.Num()과 같아야 한다(서브시스템이 불일치 시 폴백으로 강등).
+	 * Recommended output: for each region r, the indices into Colliders of the colliders it contains.
+	 * Consumed only while bHasRegionMapping is set, in which case its length must equal
+	 * RopeRegions.Num(); the subsystem downgrades to the fallback on a mismatch.
 	 */
 	TArray<TArray<int32>> RegionColliderIndices;
 
 	/**
-	 * true면 서브시스템이 RegionColliderIndices로 로프별 배정을 바로 끝낸다(bounds 재테스트 없음 —
-	 * 이 변경의 핵심). false(기본)면 이전 방식대로 서브시스템이 collider bounds로 로프별 재-컬한다 —
-	 * 매핑을 만들 수 없는 provider의 합법적 폴백 경로.
+	 * When true the subsystem completes the per-rope assignment straight from RegionColliderIndices,
+	 * with no bounds re-testing. When false, the default, the subsystem re-culls per rope using
+	 * collider bounds, which is the legitimate fallback for a provider that cannot produce a mapping.
 	 */
 	bool bHasRegionMapping = false;
 
 	/**
-	 * 출력(선택): Colliders와 **평행한** 콜라이더별 출처 액터 — 그 셰이프를 소유한 컴포넌트의 owner.
-	 * 채우면 서브시스템의 "자기 owner 제외"가 provider 단위가 아니라 **콜라이더(=바디) 단위**로
-	 * 판정된다. 월드 지오메트리를 서빙하면서 로프 소유 액터에 붙은 셰이프까지 함께 긁을 수 있는
-	 * provider(정적 바디)에 필요하다 — provider 단위로 면제하면 그런 셰이프가 제 로프를 미는 push-out
-	 * 콜라이더가 되기 때문이다(ProvidesWorldStaticColliders 주석 참조).
-	 * 길이가 Colliders와 다르면 신뢰하지 않고 provider 단위 판정으로 폴백한다. 출처를 모르는 자리는
-	 * nullptr로 둘 것. 수명은 collider 포인터와 같다(해당 프레임).
+	 * Optional output: the source actor of each collider, parallel to Colliders, meaning the owner of
+	 * the component that holds that shape. Filling it in makes the subsystem's owner exclusion a
+	 * per-collider, that is per-body, decision instead of a per-provider one.
+	 * It is needed by any provider that serves world geometry while also sweeping up shapes attached to
+	 * the rope's own actor, such as the static body provider: exempting it per provider would turn
+	 * those shapes into push-out colliders against their own rope. See the comment on
+	 * ProvidesWorldStaticColliders.
+	 * A length that does not match Colliders is not trusted and falls back to the per-provider
+	 * decision. Leave entries with an unknown source as nullptr. Its lifetime matches the collider
+	 * pointers, that is this frame.
 	 */
 	TArray<const AActor*> ColliderSourceActors;
 };
@@ -89,28 +101,33 @@ class IRopeColliderProvider
 
 public:
 	/**
-	 * 이번 프레임의 collider를 수집한다(broad phase는 여기서 수행). 서브시스템이 프레임당 1회,
-	 * 물리/조준 region 리스트(Gather.RopeRegions)와 함께 호출한다. 공개 레이아웃 계약은
-	 * Gather.NumPhysicsRegions 주석을 따른다.
-	 *  - region을 실제로 쓰는 provider(정적 바디): region별 오버랩 결과를 풀에 디둡해 담고, 어느
-	 *    region이 어느 콜라이더를 물었는지 RegionColliderIndices로 함께 돌려준다.
-	 *  - region 무시 provider(스켈레톤): 전 collider를 빌드해 풀에 담은 뒤
-	 *    RopeColliderGather::MapCollidersToRegionsByBounds로 매핑을 만들면 된다(유니언 선-거절이라
-	 *    원거리 로프는 O(1)에 통째로 떨어져 나간다).
-	 *  - 매핑을 못 만들면 bHasRegionMapping=false로 두면 된다 — 서브시스템이 bounds 재-컬로 폴백.
+	 * Gathers this frame's colliders, performing the broad phase here. The subsystem calls it once per
+	 * frame with the physics and aim region lists in Gather.RopeRegions; the published layout contract
+	 * is described on Gather.NumPhysicsRegions.
+	 *  - A provider that genuinely uses regions, such as the static body provider, deduplicates its
+	 *    per-region overlap results into the pool and returns which region caught which collider in
+	 *    RegionColliderIndices.
+	 *  - A provider that ignores regions, such as a skeleton provider, can build every collider into
+	 *    the pool and then produce the mapping with
+	 *    RopeColliderGather::MapCollidersToRegionsByBounds, whose union pre-rejection drops a distant
+	 *    rope entirely in constant time.
+	 *  - A provider that cannot produce a mapping simply leaves bHasRegionMapping false and the
+	 *    subsystem falls back to re-culling by bounds.
 	 */
 	virtual void GatherColliders(FRopeColliderGatherContext& Gather) = 0;
 
 	/**
-	 * 이 provider가 정적 월드 지오메트리 collider를 공급하는지(예: URopeStaticBodyProvider). true면
-	 * 서브시스템의 로프별 "자기 owner provider 제외"에서 면제된다 — 정적 월드는 "던진 본인의 몸"이
-	 * 될 수 없는데, 로프 소유 액터에 붙였다는 이유만으로 월드 충돌이 조용히 사라지는 것을 막는다.
+	 * Whether this provider supplies static world geometry colliders, as URopeStaticBodyProvider does.
+	 * When true it is exempt from the subsystem's per-rope exclusion of the rope's own owner provider,
+	 * because static world geometry can never be "the thrower's own body" and world collision must not
+	 * disappear silently merely because the provider happens to be attached to the rope's actor.
 	 *
-	 * 주의: 이 면제는 provider 단위라 그 자체로는 너무 넓다. 이런 provider는 월드를 훑으면서 로프 소유
-	 * 액터에 붙은 셰이프(테더 프록시·팁 메쉬·든 무기 등)도 같이 긁을 수 있고, 그것이 그대로 제 로프를
-	 * 미는 push-out 콜라이더가 된다. 그래서 Gather.ColliderSourceActors로 콜라이더별 출처를 함께
-	 * 돌려줘야 서브시스템이 바디 단위로 소유자를 걸러낼 수 있다(월드 지오메트리는 출처가 다른 액터라
-	 * 그대로 남는다).
+	 * Note that the exemption is per provider and is therefore too broad on its own. Such a provider
+	 * sweeps the world and can pick up shapes attached to the rope's owner, such as a tether proxy, a
+	 * tip mesh or a held weapon, and those become push-out colliders against their own rope. It must
+	 * therefore also return per-collider sources in Gather.ColliderSourceActors so the subsystem can
+	 * filter out the owner per body, leaving world geometry, which has a different source actor,
+	 * untouched.
 	 */
 	virtual bool ProvidesWorldStaticColliders() const { return false; }
 };
@@ -118,13 +135,17 @@ public:
 namespace RopeColliderGather
 {
 	/**
-	 * 콜라이더 하나가 "제외 대상 owner의 몸"인지 — 정적 월드 provider처럼 provider 단위 소유자 제외를
-	 * 면제받는 경로에서, 월드 지오메트리는 남기고 로프 소유 액터의 셰이프만 골라 빼는 판정이다.
+	 * Whether one collider belongs to the owner being excluded. On paths exempt from the per-provider
+	 * owner exclusion, such as a static world provider, this is what keeps world geometry while
+	 * dropping the shapes belonging to the rope's own actor.
 	 *
-	 * 폴백 계약(두 경우 모두 false = 아무것도 제외하지 않음):
-	 *  - OwnerToExclude == nullptr: 로프가 owner 콜라이더를 옵트인(bIncludeOwnerColliders)한 상태.
-	 *  - SourceActors에 이 인덱스가 없음: provider가 출처를 안 줬거나 길이가 어긋남 → provider 단위 판정에 맡긴다.
-	 * 즉 출처 정보가 불완전할 때 조용히 과도하게 제외하는 일이 없다(충돌이 사라지는 쪽으로 실패하지 않는다).
+	 * Fallback contract, where both cases return false and therefore exclude nothing:
+	 *  - OwnerToExclude is nullptr, meaning the rope opted into its owner's colliders through
+	 *    bIncludeOwnerColliders.
+	 *  - The index is absent from SourceActors, meaning the provider supplied no sources or the length
+	 *    did not match, which leaves the decision to the per-provider rule.
+	 * Incomplete source information therefore never silently over-excludes: it does not fail in the
+	 * direction of collisions disappearing.
 	 */
 	inline bool IsExcludedOwnerBody(TConstArrayView<const AActor*> SourceActors, int32 Index,
 		const AActor* OwnerToExclude)
@@ -135,10 +156,12 @@ namespace RopeColliderGather
 	}
 
 	/**
-	 * 스켈레톤형(전 콜라이더 빌드 후 배정) provider 공용 매핑 헬퍼: 풀의 [StartIndex, Colliders.Num())
-	 * 구간 — 이 provider가 이번 호출에 추가한 콜라이더들 — 을 각 region에 배정한다.
-	 * 그룹 유니언 bounds로 먼저 거절하므로 멀리 있는 영역은 region당 1회 비교로 끝나고(메시당 O(region)),
-	 * 유니언에 걸린 가까운 로프만 콜라이더별 bounds로 정밀 배정한다(이전 서브시스템 재-컬과 동일 판정).
+	 * Shared mapping helper for skeleton-style providers, which build every collider and then assign
+	 * them. It assigns the pool range [StartIndex, Colliders.Num()), that is the colliders this
+	 * provider added during this call, to the regions.
+	 * A group union bounds test rejects first, so a distant region costs one comparison per region,
+	 * which is linear in regions per mesh, and only the nearby ropes that pass the union are assigned
+	 * precisely by per-collider bounds, using the same test the subsystem's re-cull would.
 	 */
 	inline void MapCollidersToRegionsByBounds(FRopeColliderGatherContext& Gather, int32 StartIndex)
 	{
@@ -150,7 +173,7 @@ namespace RopeColliderGather
 			return;
 		}
 
-		// collider bounds 1회 캐시 + 그룹 유니언(선-거절용).
+		// Cache the collider bounds once, and build the group union used for pre-rejection.
 		TArray<FBox, TInlineAllocator<64>> Bounds;
 		Bounds.Reserve(EndIndex - StartIndex);
 		FBox GroupBounds(ForceInit);

@@ -1,18 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 데모 씬용 압력판(버튼). 위에 "무언가가 올라와 있으면" 판이 눌리고, 비면 되돌아온다 —
-// 로프로 물건을 옮겨 판을 채우는 퍼즐의 최소 단위다.
+// Demo pressure plate. It presses down while something is resting on it and returns when the plate
+// clears, which is the smallest unit of a puzzle about moving objects onto plates with the rope.
 //
-// 기본 판정은 **물리 시뮬 중인 바디만 인정**한다(bRequireSimulatingPhysics). 즉 플레이어가 제 발로
-// 올라서는 것으로는 안 눌리고, 물리 스태틱 메시나 랙돌 상태의 캐릭터를 얹어야 한다 — "로프로 옮겨라"가
-// 퍼즐의 요구가 되도록 하는 게 이 기본값의 목적이다. 걸어 올라서는 것도 허용하려면 꺼라.
+// By default only physically simulating bodies count (bRequireSimulatingPhysics), so a player
+// walking onto the plate does not press it and a simulating static mesh or a limp character must be
+// placed on it instead. That default exists to make "move it with the rope" the actual requirement
+// of the puzzle. Turn it off to let walking onto the plate count as well.
 //
-// 랙돌은 본마다 바디가 있어 한 액터가 오버랩 이벤트를 여러 번 낸다. 그래서 점유 수는 컴포넌트가 아니라
-// **액터 단위**로 센다(OverlapCounts). 또 랙돌이 판 위에서 애니메이션으로 복귀하면(=시뮬 해제) 오버랩
-// 이벤트 없이 자격만 사라지므로, 추적 중인 액터의 자격은 매 틱 재평가한다.
+// A ragdoll has one body per bone, so a single actor raises many overlap events. Occupancy is
+// therefore counted per actor rather than per component, in OverlapCounts. A ragdoll that recovers
+// to animation while on the plate also stops simulating without raising any overlap event, so the
+// eligibility of every tracked actor is re-evaluated each tick.
 //
-// 콘텐츠 의존이 없다(엔진 기본 셰이프 + 포인트 라이트). 플러그인 데모 맵이 프로젝트 에셋을 참조하지
-// 않아야 배포본에서 그대로 열린다.
+// There are no content dependencies, only engine basic shapes and a point light. The plugin's demo
+// map must not reference project assets if it is to open as-is in a distributed build.
 
 #pragma once
 
@@ -24,7 +26,7 @@ class UBoxComponent;
 class UPointLightComponent;
 class UStaticMeshComponent;
 
-/** 압력판의 눌림 상태가 바뀔 때. bPressed = 지금 눌린 상태인지. */
+/** Fired when the plate's pressed state changes. bPressed is whether it is pressed now. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeDemoPlatePressedSignature,
 	ARopeDemoPressurePlate*, Plate, bool, bPressed);
 
@@ -40,69 +42,72 @@ public:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 
-	/** 지금 눌려 있는가(= 자격 있는 점유 수 >= RequiredOccupants). */
+	/** Whether the plate is pressed, that is whether the eligible occupant count has reached
+	 *  RequiredOccupants. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	bool IsPressed() const { return bPressed; }
 
-	/** 자격 있는 점유 액터 수. HUD/디버그 표시용. */
+	/** How many eligible actors are occupying the plate, for HUD and debug display. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	int32 GetOccupantCount() const { return OccupantCount; }
 
-	/** 자격 있는 점유 액터 목록(액터 단위, 파괴분 제외) — 눌림 판정과 같은 기준. 덫(스네어)이
-	 *  "판을 밟은 대상"을 조회할 때 쓴다. */
+	/** The eligible occupying actors, counted per actor and excluding destroyed ones, on the same
+	 *  basis as the pressed test. A snare uses this to ask which target stepped on the plate. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	TArray<AActor*> GetQualifyingOccupants() const;
 
-	/** 눌림 상태 변화 브로드캐스트. 문(ARopeDemoDoor)이 여기에 구독한다. */
+	/** Broadcast when the pressed state changes. ARopeDemoDoor subscribes to this. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope|Demo")
 	FRopeDemoPlatePressedSignature OnPlatePressedChanged;
 
-	/** 판이 눌리는 데 필요한 점유 액터 수. */
+	/** How many occupying actors are needed to press the plate. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo", meta = (ClampMin = "1"))
 	int32 RequiredOccupants = 1;
 
-	/** 물리 시뮬 중인 바디만 점유로 인정. 끄면 걸어 올라선 폰도 인정한다. */
+	/** Count only physically simulating bodies as occupants. Turn it off to accept a pawn that walked
+	 *  on as well. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo")
 	bool bRequireSimulatingPhysics = true;
 
-	/** 지정하면 이 태그를 가진 액터만 점유로 인정(비면 태그 무관). 특정 물체 전용 판을 만들 때. */
+	/** When set, only actors carrying this tag count as occupants; leave it empty to ignore tags. Use
+	 *  it to build a plate that accepts one specific object. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo")
 	FName RequiredActorTag = NAME_None;
 
-	/** 눌렸을 때 판이 내려가는 깊이(cm). 연출 전용 — 판정과 무관. */
+	/** How far the pad sinks when pressed (cm). Presentation only, with no bearing on the test. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Presentation", meta = (ClampMin = "0.0", Units = "cm"))
 	float PressDepth = 8.0f;
 
-	/** 판이 내려가고 올라오는 속도(cm/s). */
+	/** How fast the pad sinks and rises (cm/s). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Presentation", meta = (ClampMin = "1.0"))
 	float PressSpeed = 40.0f;
 
-	/** 눌림 여부를 색으로 알리는 인디케이터 라이트를 쓸지. */
+	/** Whether to use the indicator light that signals the pressed state by colour. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Presentation")
 	bool bUseIndicatorLight = true;
 
-	/** 안 눌린 상태의 라이트 색. */
+	/** Light colour while not pressed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Presentation", meta = (EditCondition = "bUseIndicatorLight"))
 	FLinearColor IdleColor = FLinearColor(1.0f, 0.25f, 0.1f);
 
-	/** 눌린 상태의 라이트 색. */
+	/** Light colour while pressed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Presentation", meta = (EditCondition = "bUseIndicatorLight"))
 	FLinearColor PressedColor = FLinearColor(0.15f, 1.0f, 0.3f);
 
 protected:
-	/** 고정 프레임(테두리). 판이 내려갈 자리를 시각적으로 잡아준다. */
+	/** The fixed surround, which visually frames where the pad sinks to. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<UStaticMeshComponent> Frame = nullptr;
 
-	/** 실제로 내려가는 판. 연출은 이 컴포넌트의 상대 Z만 움직인다. */
+	/** The pad that actually sinks. The presentation only moves this component's relative Z. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<UStaticMeshComponent> Pad = nullptr;
 
-	/** 점유 감지 볼륨. 판 위 공간을 덮는다. */
+	/** Occupancy detection volume, covering the space above the pad. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<UBoxComponent> Trigger = nullptr;
 
-	/** 눌림 인디케이터. */
+	/** The pressed-state indicator. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<UPointLightComponent> IndicatorLight = nullptr;
 
@@ -115,21 +120,23 @@ private:
 	void HandleEndOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 
-	/** 태그/물리 시뮬 조건을 만족하는 점유인지. */
+	/** Whether an occupant satisfies the tag and physics simulation conditions. */
 	bool IsQualifyingOccupant(const AActor* OtherActor) const;
 
-	/** 추적 중인 액터를 재평가해 OccupantCount/bPressed를 갱신하고, 변화 시 브로드캐스트한다. */
+	/** Re-evaluates the tracked actors, updates OccupantCount and bPressed, and broadcasts on a
+	 *  change. */
 	void RefreshPressedState();
 
-	/** 인디케이터 색을 현재 상태에 맞춘다. */
+	/** Applies the indicator colour for the current state. */
 	void ApplyIndicatorColor();
 
-	/** 액터 단위 오버랩 카운트(랙돌 = 본 바디 다수 → 액터 하나로 합산). */
+	/** Overlap count per actor, so a ragdoll's many bone bodies collapse into a single actor. */
 	TMap<TWeakObjectPtr<AActor>, int32> OverlapCounts;
 
 	int32 OccupantCount = 0;
 	bool  bPressed = false;
 
-	/** 현재 판의 상대 Z(연출 보간 상태). 0 = 원위치, -PressDepth = 완전히 눌림. */
+	/** The pad's current relative Z while interpolating. 0 is at rest and -PressDepth is fully
+	 *  pressed. */
 	float CurrentPadOffset = 0.0f;
 };

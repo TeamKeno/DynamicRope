@@ -1,19 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 모든 활성 URopeComponent의 시뮬레이션을 한 곳에서 구동하는 world subsystem. 컴포넌트가 각자
-// tick하던 것을 대체하는 단일 오케스트레이션 지점으로, 프레임당 1회 collider 중앙 수집(provider
-// 레지스트리 + region 매핑), Prepare→Solve(로프 간 병렬/GPU 배치)→Finalize 3단계 구동, 슬립/LOD
-// 반영까지 담당한다. 남은 확장 후보: 프레임당 총 솔브 예산 상한.
+// World subsystem that drives the simulation of every active URopeComponent from one place, instead
+// of each component ticking itself. It is the single orchestration point: it gathers colliders
+// centrally once per frame (provider registry plus region mapping), runs the three stages
+// Prepare -> Solve (parallel across ropes, batched on the GPU) -> Finalize, and applies sleep and
+// LOD. A per-frame total solve budget remains a possible extension.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
-// FTickFunction (TG_PostPhysics 틱).
+// FTickFunction, for the TG_PostPhysics tick.
 #include "Engine/EngineBaseTypes.h"
-// FRopeGPUSolver (DynamicRopeShaders): 비동기 GPU 솔브 인스턴스.
+// FRopeGPUSolver (DynamicRopeShaders): the asynchronous GPU solve instance.
 #include "RopeGPUSolver.h"
-// FRopeWrappedEventInfo / ERopeReleaseReason — 아래 wrap/release 중앙 신호의 페이로드.
+// FRopeWrappedEventInfo and ERopeReleaseReason, the payloads of the central wrap and release signals
+// below.
 #include "Core/RopeLifecycleTypes.h"
 #include "RopeSimSubsystem.generated.h"
 
@@ -25,32 +27,39 @@ class IRopeCollider;
 class AActor;
 
 /**
- * 월드 내 *어느* 로프든 wrap이 성립/해제되면 쏘는 중앙 native 신호(비-BP). 로프의 per-instance
- * BP 델리게이트(URopeComponent::OnRopeWrapped/OnRopeReleased)와 달리, 대상 측(감기는 쪽)이 자기를
- * 감을 로프를 미리 알 수 없어도 구독만 해두면 반응할 수 있게 하는 용도다 — 대상이 매 프레임 로프를
- * 전수 순회(구 데모 폴링)하던 것을 대체한다. wrap은 페이로드에 Mesh(weak)를 이미 실어오고, release는
- * 해제 순간의 감겼던 mesh를 함께 싣는다(release 델리게이트 자체는 mesh를 안 실어서). 리스너가
- * Mesh로 "이게 내 메시인가"를 판별한다. 서브시스템 수명 동안 유효, 등록은 리스너의 BeginPlay/EndPlay.
+ * Central native (non-Blueprint) signals fired whenever any rope in the world establishes or
+ * releases a wrap. Unlike a rope's per-instance Blueprint delegates
+ * (URopeComponent::OnRopeWrapped and OnRopeReleased), these let the target side react by
+ * subscribing once, without knowing in advance which rope will wrap it, and without walking every
+ * rope in the world each frame. The wrap payload already carries the mesh as a weak pointer, and the
+ * release signal carries the mesh that was wrapped at the moment of release, since the release
+ * delegate itself does not. Listeners use that mesh to decide whether the event concerns them.
+ * The signals are valid for the lifetime of the subsystem; register and unregister from the
+ * listener's BeginPlay and EndPlay.
  *
- * 두 신호 모두 **어느 로프인지**를 함께 싣는다(wrap은 FRopeWrappedEventInfo::Rope, release는 Rope 인자).
- * 대상 하나를 여러 로프가 동시에 감을 수 있으므로, 구독자는 mesh만이 아니라 (mesh, rope) 쌍으로 활성
- * engagement를 세어야 한다 — 로프 하나가 풀렸다고 반응을 되돌리면 남은 로프가 무시된다. */
+ * Both signals also identify the rope involved: FRopeWrappedEventInfo::Rope for wraps, and the Rope
+ * argument for releases. Several ropes can wrap one target at the same time, so subscribers must
+ * count active engagements per (mesh, rope) pair rather than per mesh. Reverting the reaction as
+ * soon as one rope releases would ignore the ropes still attached.
+ */
 DECLARE_MULTICAST_DELEGATE_OneParam(FRopeWrappedNotify, const FRopeWrappedEventInfo& /*Info*/);
 DECLARE_MULTICAST_DELEGATE_FourParams(FRopeReleasedNotify, const URopeComponent* /*Rope*/, const USceneComponent* /*WrappedMesh*/, FName /*Bone*/, ERopeReleaseReason /*Reason*/);
 
 /**
- * 서브시스템 Tick을 TG_PostPhysics에서 구동하는 틱 함수(기존 tickable 대체).
- * tickable(TickObjects)은 엔진의 호출 위치(현재 TG_PostPhysics 뒤)에 묵시적으로 얹혀 있었다 — 명시
- * 그룹 + 스켈레탈 메시 틱 선행조건으로 "본 트랜스폼(애니 평가) 이후 로프 시뮬" 순서를 계약으로 만든다.
- * 같은 그룹 내 순서는 선행조건이 담당: 메시 틱 완료는 병렬 애니 완료 태스크를 DontCompleteUntil로
- * 물고 있어(SkeletalMeshComponent), 선행조건만으로 포즈 버퍼 플립(최신 포즈)까지 보장된다.
+ * Tick function that drives the subsystem from TG_PostPhysics. An explicit tick group plus skeletal
+ * mesh tick prerequisites turn "simulate the rope after the bone transforms are evaluated" into a
+ * contract, rather than relying implicitly on where the engine happens to call tickable objects.
+ * Ordering within the group is handled by the prerequisites: a skeletal mesh component holds its
+ * parallel animation completion task with DontCompleteUntil, so the prerequisite alone also
+ * guarantees the pose buffer has been flipped to the latest pose.
  */
 USTRUCT()
 struct DYNAMICROPE_API FRopeSimTickFunction : public FTickFunction
 {
 	GENERATED_BODY()
 
-	/** 대상 서브시스템(월드 수명). 틱 함수는 OnWorldBeginPlay~Deinitialize 동안만 등록된다. */
+	/** The subsystem being driven, which lives as long as the world. The tick function is registered
+	 *  only between OnWorldBeginPlay and Deinitialize. */
 	class URopeSimSubsystem* Target = nullptr;
 
 	virtual void ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type CurrentThread,
@@ -71,242 +80,302 @@ class DYNAMICROPE_API URopeSimSubsystem : public UWorldSubsystem
 	GENERATED_BODY()
 
 public:
-	/** 활성 로프를 시뮬레이션 목록에 등록/해제한다(컴포넌트 BeginPlay/EndPlay에서 호출). */
+	/** Adds and removes an active rope from the simulation list. Called from the component's
+	 *  BeginPlay and EndPlay. */
 	void RegisterRope(URopeComponent* Rope);
 	void UnregisterRope(URopeComponent* Rope);
 
 	/**
-	 * 이번 프레임 이 서브시스템이 구동하는 로프 목록(읽기 전용). 등록/해제는 위 두 함수가 단일 통로다.
-	 * 진단 화면이 월드에서 로프를 직접 찾지 않게 하려고 연다 — 전체 UObject 스캔은 로프 수와 무관하게
-	 * 비싸고, 무엇보다 성능을 재려고 켠 화면이 스스로 측정 대상을 무겁게 만든다.
-	 * 무효 항목(파괴 후 GC 대기)이 섞일 수 있으므로 소비자가 IsValid로 거른다 — Tick의 무효 정리는
-	 * 프레임 경계에서만 돈다.
+	 * Read-only view of the ropes this subsystem drives this frame; the two calls above are the only
+	 * way in and out. It exists so diagnostic screens do not have to find ropes in the world
+	 * themselves: a full UObject scan is expensive regardless of how many ropes exist, and worse, a
+	 * screen opened to measure performance would then weigh down what it is measuring.
+	 * The array can contain invalid entries that are destroyed and awaiting garbage collection, so
+	 * consumers must filter with IsValid; Tick only prunes them on frame boundaries.
 	 */
 	const TArray<TObjectPtr<URopeComponent>>& GetRegisteredRopes() const { return Ropes; }
 
 	/**
-	 * wrap 성립/해제 중앙 신호(위 델리게이트 주석 참고). 로프가 자기 이벤트를 broadcast할 때 함께 쏜다.
-	 * 대상 반응 컴포넌트(URopeRagdollResponseComponent 등)가 구독한다 — 구독자가 없으면 사실상 무비용.
+	 * Central wrap and release signals, described on the delegates above. They are fired alongside a
+	 * rope broadcasting its own events, and are subscribed to by target-side reaction components such
+	 * as URopeRagdollResponseComponent. With no subscribers they cost essentially nothing.
 	 */
 	FRopeWrappedNotify OnAnyRopeWrapped;
 	FRopeReleasedNotify OnAnyRopeReleased;
 
 	/**
-	 * collider provider(IRopeColliderProvider를 구현한 UActorComponent)를 중앙 레지스트리에 등록/해제한다
-	 * (provider BeginPlay/EndPlay에서 호출). 로프마다 월드를 스캔하던 것을 대체 — 프레임당 1회 중앙 빌드.
+	 * Adds and removes a collider provider, an actor component implementing IRopeColliderProvider,
+	 * from the central registry. Called from the provider's BeginPlay and EndPlay. This replaces each
+	 * rope scanning the world for itself with one central build per frame.
 	 */
 	void RegisterColliderProvider(UActorComponent* Provider);
 	void UnregisterColliderProvider(UActorComponent* Provider);
 
-	/** 월드의 rope sim subsystem(게임/PIE 월드에서 유효, 그 외엔 nullptr). */
+	/** The world's rope sim subsystem, valid in game and PIE worlds and nullptr elsewhere. */
 	static URopeSimSubsystem* Get(const UWorld* World);
 
-	/** GPU 상주 솔버 포인터(월드 수명). M5b: scene proxy가 resident PosBuf SRV를 가져오는 데 쓴다. */
+	/** The GPU-resident solver, which lives as long as the world. The scene proxy uses it to obtain
+	 *  the resident position buffer SRV. */
 	FRopeGPUSolver* GetGpuSolver() { return &GpuSolver; }
 
 	/**
-	 * wrap 핸드오프 정밀 동기(M5c): GPU 상주 로프의 CPU 미러(Sim)는 1~2프레임 낡으므로,
-	 * Wrapping 진입 순간 1회 동기 리드백으로 최신 위치를 Sim에 반영한다(시드 정밀도 확보).
-	 * GPU 솔버가 꺼져 있거나 상주 버퍼가 없거나 generation이 어긋나면 no-op(false).
-	 * 블로킹(GPU idle 대기) — 이벤트당 1회 용도로만 호출할 것.
+	 * Synchronizes positions precisely for a wrap handoff. The CPU mirror (Sim) of a GPU-resident rope
+	 * lags one to two frames behind, so this performs a single synchronous readback on entering the
+	 * Wrapping phase to give the seed the latest positions.
+	 * A no-op returning false when the GPU solver is off, there is no resident buffer, or the seed
+	 * generation does not match.
+	 * It blocks waiting for the GPU to go idle, so call it once per event only.
 	 */
 	bool SyncGpuPositionsForHandoff(URopeComponent& Rope);
 
-	/** 프레임 시뮬 구동 — FRopeSimTickFunction이 TG_PostPhysics에서 호출한다(테스트는 직접 호출 가능). */
+	/** Drives one simulation frame. Called by FRopeSimTickFunction from TG_PostPhysics; tests may call
+	 *  it directly. */
 	void Tick(float DeltaTime);
 
-	/** 호환용 레거시 API. 즉시 provider 재수집은 제거됐으므로 아무 상태도 바꾸지 않고 false를 반환한다. */
+	/** Legacy compatibility API. Immediate provider re-gathering was removed, so this changes no state
+	 *  and returns false. */
 	UE_DEPRECATED(5.7, "Immediate collider refresh was removed. Queue aim work for the normal subsystem gather.")
 	bool RefreshAimFrameCollidersForImmediateQuery(URopeComponent& Rope);
 
 	//~ UWorldSubsystem
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
-	//~ 틱 함수 등록 + 씬→솔버 등록(GDF 통합 경로에서 뷰 확장이 솔버를 찾는 용도). 해제는 Deinitialize.
+	//~ Registers the tick function and the scene-to-solver mapping, which the view extension uses to
+	//~ find the solver on the global distance field path. Deinitialize undoes both.
 	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 	virtual void Deinitialize() override;
 
 private:
-	/** TG_PostPhysics 틱 함수(월드 BeginPlay~Deinitialize 동안 등록). 선행조건은 아래 SetAnimPrerequisites가 관리. */
+	/** The TG_PostPhysics tick function, registered between the world's BeginPlay and Deinitialize.
+	 *  Its prerequisites are managed by SetAnimPrerequisites below. */
 	FRopeSimTickFunction SimTickFunction;
 
 	/**
-	 * 소스 컴포넌트(로프/provider) 소유 액터의 스켈레탈 메시 틱을 SimTickFunction 선행조건으로 등록/해제한다.
-	 * 등록·해제 사이에 액터의 메시 구성이 바뀌어 잔여 항목이 남아도 FTickPrerequisite는 weak라 무해(스킵됨).
+	 * Adds and removes the skeletal mesh ticks of the source component's owning actor, whether a rope
+	 * or a provider, as prerequisites of SimTickFunction. If the actor's mesh set changes between
+	 * registering and unregistering, a leftover entry is harmless because FTickPrerequisite is weak
+	 * and simply skipped.
 	 *
-	 * 같은 메시를 여러 소비자(같은 액터의 로프 + collider provider, 로프 여러 개)가 요구할 수 있고
-	 * AddPrerequisite는 유니크라 중복 add가 1건으로 합쳐진다 — 그래서 **해제도 소비자 수로 세야 한다**.
-	 * 종전에는 한 소비자가 빠질 때 RemovePrerequisite를 그대로 호출해 남은 소비자의 "애니 평가 이후
-	 * 시뮬" 보장까지 같이 지워졌고, 그 뒤 PostPhysics gather가 직전 프레임 본 트랜스폼을 읽었다.
-	 * AnimPrereqRefCount가 메시별 소비자 수를 세어 0→1에서만 add, 1→0에서만 remove 한다.
+	 * Several consumers can require the same mesh, such as a rope and a collider provider on one
+	 * actor, or several ropes, and AddPrerequisite is unique, so duplicate adds collapse into one
+	 * entry. Removal must therefore be counted as well: calling RemovePrerequisite whenever any one
+	 * consumer leaves would also drop the "simulate after animation is evaluated" guarantee for the
+	 * consumers that remain, and the PostPhysics gather would then read the previous frame's bone
+	 * transforms. AnimPrereqRefCount counts consumers per mesh and only adds on 0 to 1 and removes on
+	 * 1 to 0.
 	 */
 	void SetAnimPrerequisites(const UActorComponent* Source, bool bAdd);
 
-	/** 메시별 선행조건 소비자 수(위 주석). 액터가 먼저 죽으면 키가 만료되므로 weak — 만료분은 add 때 청소. */
+	/** Consumer count per mesh for the prerequisites above. Weak, because the key expires when the
+	 *  actor dies first; expired entries are cleaned up on the next add. */
 	TMap<TWeakObjectPtr<USkeletalMeshComponent>, int32> AnimPrereqRefCount;
 
-	/** 등록된 활성 로프(컴포넌트는 UObject → GC 추적). */
+	/** Registered active ropes. Components are UObjects, so this is garbage-collection tracked. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<URopeComponent>> Ropes;
 
 	/**
-	 * 등록된 로프의 GPU RopeId 대장. Ropes와 짝을 이루되 **컴포넌트가 죽어도 남는다** — 이게 요점이다.
-	 * 로프가 UnregisterRope 없이 사라지면(액터 파괴 후 GC) Tick의 무효 정리가 배열에서 빼는 것으로 끝나
-	 * 상주 VRAM/리드백이 월드 종료까지 남았는데, 포인터가 이미 없어 RopeId를 되찾을 방법도 없었다.
-	 * ID를 따로 들고 있으면 "대장에는 있는데 살아있는 로프에는 없는" 차집합이 곧 누수분이다.
+	 * Ledger of the GPU rope IDs of registered ropes. It parallels Ropes but deliberately outlives a
+	 * dead component. When a rope disappears without UnregisterRope, because its actor was destroyed
+	 * and collected, Tick's invalid-entry pruning only drops it from the array, which would leave its
+	 * resident VRAM and readback allocated until the world shuts down, with the pointer already gone
+	 * and no way to recover the rope ID. Keeping the IDs separately makes the leak exactly the set
+	 * difference: present in the ledger, absent from the live ropes.
 	 */
 	TSet<uint32> RegisteredRopeIds;
 
-	/** 죽은 로프의 GPU 상주 자원을 RopeId 대장과의 차집합으로 회수한다(Tick 무효 정리 직후). */
+	/** Reclaims the GPU resident resources of dead ropes using that set difference, immediately after
+	 *  Tick prunes invalid entries. */
 	void ReleaseGpuResourcesForDeadRopes();
 
 	/**
-	 * 뷰 확장이 소비하지 못해 교체된 step의 시뮬 시간(초, RopeId별). 매 틱 솔버에서 회수해 쌓아두고,
-	 * 그 로프가 실제로 솔브하는 프레임에 TimeAccumulator로 되돌린 뒤 항목을 지운다 — 로직 프레임처럼
-	 * 이번 틱에 안 쓰이면 다음 기회까지 보존한다(그 자리에서 버리면 되돌릴 시간을 또 잃는다).
-	 * 몰아치기 방어는 따로 두지 않는다: RopeSolverSubsteps가 이미 accumulator를 MaxAccum으로 클램프한다.
+	 * Simulation time, in seconds and keyed by rope ID, from steps that were replaced because the view
+	 * extension could not consume them. It is collected from the solver every tick and returned to the
+	 * TimeAccumulator on the frame that rope actually solves, at which point the entry is erased. Like
+	 * a logic frame, time unused this tick is preserved until the next opportunity; discarding it
+	 * on the spot would lose the very time that needs returning.
+	 * No separate burst protection is needed here: RopeSolverSubsteps already clamps the accumulator
+	 * to MaxAccum.
 	 */
 	TMap<uint32, float> PendingSimTimeRefund;
 
 	/**
-	 * Tick 순회 재진입 가드. Prepare/Finalize 순회 중 델리게이트 핸들러(OnRopeWrapped/OnRopeReleased/
-	 * OnRopePhaseChanged)가 로프 컴포넌트를 가진 액터를 스폰/파괴하면 Register/UnregisterRope가 Ropes를
-	 * 즉시 변형해 (1) ranged-for 이터레이터 무효화(개발 빌드 assert 크래시 / Shipping 댕글링)와
-	 * (2) FrameRopeRegions 인덱스 매핑 붕괴(로프가 남의 region collider를 받음)를 일으킨다. 그래서 틱
-	 * 순회 중에는 변형을 아래 Deferred 리스트로 미루고(bTickingRopes=true), 순회가 끝난 뒤
-	 * ApplyDeferredRopeChanges에서 실제로 반영한다. 순회 루프는 IsValid 가드로 이 프레임 파괴된
-	 * (pending-kill) 로프를 건너뛴다. Deferred 리스트는 한 틱 안에서만 살고 즉시 비워지므로 raw 포인터.
+	 * Re-entrancy guard for the Tick iteration. If a delegate handler run during the Prepare or
+	 * Finalize loops (OnRopeWrapped, OnRopeReleased, OnRopePhaseChanged) spawns or destroys an actor
+	 * carrying a rope component, Register or UnregisterRope would mutate Ropes immediately, causing
+	 * two failures: the ranged-for iterator is invalidated, which asserts in development builds and
+	 * dangles in Shipping, and the FrameRopeRegions index mapping collapses, so a rope receives
+	 * another rope's region colliders. Mutations during iteration are therefore deferred to the lists
+	 * below while bTickingRopes is set, and applied afterwards in ApplyDeferredRopeChanges. The loops
+	 * additionally guard with IsValid to skip ropes destroyed during this frame. The deferred lists
+	 * live within a single tick and are emptied immediately, so raw pointers are safe.
 	 */
 	bool bTickingRopes = false;
 	TArray<URopeComponent*> DeferredRopeRegister;
 	TArray<URopeComponent*> DeferredRopeUnregister;
 
-	/** 틱 순회 중 미뤄둔 로프 등록/해제를 반영한다(Tick 말미, bTickingRopes=false 이후). */
+	/** Applies the rope registrations and unregistrations deferred during iteration, at the end of
+	 *  Tick once bTickingRopes is clear. */
 	void ApplyDeferredRopeChanges();
 
-	/** 등록된 collider provider(IRopeColliderProvider 구현 컴포넌트). GC 추적. */
+	/** Registered collider providers, that is components implementing IRopeColliderProvider.
+	 *  Garbage-collection tracked. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UActorComponent>> ColliderProviders;
 
 	/**
-	 * OnWorldBeginPlay에서 자동 스폰한 로프 매니저 액터(정적 월드 충돌 프로바이더 호스트). 세팅
-	 * StaticBodyControllerClass가 None이면 null(자동 스폰 opt-out). Deinitialize에서 파괴한다.
+	 * The rope manager actor spawned automatically during OnWorldBeginPlay, which hosts the static
+	 * world collision provider. Null when the StaticBodyControllerClass setting is None, which opts
+	 * out of the automatic spawn. Destroyed in Deinitialize.
 	 */
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> SpawnedStaticBodyController = nullptr;
 
-	/** 프레임당 1회 중앙 빌드한 collider(provider별 소유 액터 + collider 포인터). 포인터는 provider 소유라 해당 프레임만 유효. */
+	/** Colliders built centrally once per frame: the owning actor of each provider plus its collider
+	 *  pointers. The pointers are owned by the provider and are only valid for that frame. */
 	struct FFrameProviderColliders
 	{
-		/** 소스 필터링용(provider 컴포넌트의 owner 액터). */
+		/** The provider component's owning actor, used for source filtering. */
 		AActor* Owner = nullptr;
 
-		/** 정적 월드 provider — 로프별 소유자 제외 면제(ProvidesWorldStaticColliders). */
+		/** A static world provider, which is exempt from the per-rope owner exclusion
+		 *  (ProvidesWorldStaticColliders). */
 		bool bWorldStatic = false;
 
-		/** provider->GatherColliders가 채운 포인터(provider 백킹 스토리지를 가리킴). */
+		/** The pointers filled in by provider->GatherColliders, referring to the provider's backing
+		 *  storage. */
 		TArray<IRopeCollider*> Colliders;
 
 		/**
-		 * Colliders와 평행한 콜라이더별 출처 액터. provider가 Gather.ColliderSourceActors를 채웠고 길이가
-		 * 맞을 때만 담긴다(그 외에는 빈 배열 = provider 단위 판정). 로프별 소유자 제외를 provider가 아니라
-		 * 바디 단위로 판정하는 데 쓴다 — 정적 바디 provider는 월드를 훑으면서 로프 소유 액터에 붙은
-		 * 셰이프까지 잡으므로, provider 단위 면제만으로는 그것이 제 로프를 미는 것을 못 막는다.
+		 * Per-collider source actors, parallel to Colliders. Populated only when the provider filled in
+		 * Gather.ColliderSourceActors and the lengths match; otherwise this is empty and the decision is
+		 * made per provider. It exists so the per-rope owner exclusion can be decided per body rather
+		 * than per provider: a static body provider sweeps the world and picks up shapes attached to
+		 * the rope's own actor, which a provider-level exemption alone cannot stop from pushing that
+		 * rope.
 		 */
 		TArray<const AActor*> SourceActors;
 
 		/**
-		 * provider가 gather 때 함께 돌려준 region(=로프 인덱스)별 풀 인덱스 매핑. bHasRegionMapping이면
-		 * 로프별 배정이 이 리스트 소비로 끝난다 — O(로프×풀) bounds 재-컬 제거(2026-07 수집 방식 변경).
+		 * The pool index mapping per region, where a region corresponds to a rope index, returned by
+		 * the provider alongside the gather. When bHasRegionMapping is set, assigning colliders per
+		 * rope is just consuming this list, which removes the O(ropes x pool) bounds re-cull.
 		 */
 		TArray<TArray<int32>> RegionIndices;
 		bool bHasRegionMapping = false;
 
-		/** (매핑 없는 provider 폴백 전용) collider별 월드 bounds 캐시 — 이전 방식의 로프별 거리 컬링에 쓴다. */
+		/** World bounds cache per collider, used only on the fallback path for providers without a
+		 *  region mapping, where culling is done per rope by distance. */
 		TArray<FBox> Bounds;
 	};
 	TArray<FFrameProviderColliders> FrameProviders;
 
 	/**
-	 * 이번 프레임 region 목록. provider gather와 로프별 배정이 같은 박스를 쓰는 단일 소스로,
-	 * BuildFrameColliders가 채운다. 레이아웃은 **로프 수(N)의 두 배**다:
-	 *  - [0, N)   물리 region — 로프 tight AABB + 마진(Ropes 인덱스와 1:1).
-	 *  - [N, 2N)  조준 region — 물리 region ∪ aim ray AABB(조준 중이 아니면 !IsValid).
-	 * 조준 region을 따로 두는 이유는 FRopeSimFrameIO::AimFrameColliders 주석 참조. region 없는 자리는
-	 * !IsValid 박스로 유지한다(provider가 돌려주는 매핑 인덱스가 그대로 대응하도록 — provider는 건너뜀).
+	 * This frame's region list, filled in by BuildFrameColliders. It is the single source that makes
+	 * the provider gather and the per-rope assignment use the same boxes. The layout is twice the
+	 * number of ropes, N:
+	 *  - [0, N)   physics regions, each a rope's tight AABB plus a margin, one-to-one with Ropes.
+	 *  - [N, 2N)  aim regions, the physics region unioned with the aim ray AABB, or invalid when not
+	 *             aiming.
+	 * See the comment on FRopeSimFrameIO::AimFrameColliders for why aim regions are kept separate.
+	 * Slots without a region are left as invalid boxes so the mapping indices returned by providers
+	 * still line up; providers skip them.
 	 */
 	TArray<FBox> FrameRopeRegions;
 
-	/** 로프 인덱스 → 조준 region 인덱스(위 레이아웃). 물리 region 인덱스는 로프 인덱스 그대로다. */
+	/** Maps a rope index to its aim region index in the layout above. The physics region index is the
+	 *  rope index itself. */
 	int32 AimRegionIndexOf(int32 RopeIndex) const { return Ropes.Num() + RopeIndex; }
 
 	/**
-	 * 이번 프레임 region 처리 우선순위(활성 로프 먼저 — 사용 중 페이즈 > Free 깨어있음 > 슬립 > 무효).
-	 * 전역 추출 상한이 있는 provider(정적 바디)가 이 순서로 스캔해, 한가한 로프 주변 잡동사니가 상한을
-	 * 선점해 활성 로프가 충돌을 굶는 것을 막는다. 순서일 뿐 region 인덱스는 불변(매핑 무영향).
+	 * The order regions are processed in this frame, active ropes first: phases that are in use, then
+	 * awake Free ropes, then sleeping ones, then invalid entries. Providers with a global extraction
+	 * budget, such as the static body provider, scan in this order so clutter around an idle rope
+	 * cannot consume the budget and starve an active rope of collisions. It only affects order; region
+	 * indices are unchanged, so mappings are unaffected.
 	 */
 	TArray<int32> FrameRegionGatherOrder;
 
-	/** 등록된 provider 전부에서 1회 collider를 모은다(Prepare 이전). provider에는 물리/조준 region 리스트를 넘긴다. */
+	/** Gathers colliders once from every registered provider, before Prepare. Providers are handed the
+	 *  physics and aim region lists. */
 	void BuildFrameColliders();
 
 	/**
-	 * 한 region의 collider를 중앙 빌드에서 모은다: 기본은 전체, 자기 owner provider만 제외(bIncludeOwnerColliders로 옵트인).
-	 * RegionIndex = FrameRopeRegions 인덱스(물리면 로프 인덱스, 조준이면 AimRegionIndexOf) — provider 매핑의
-	 * region 인덱스와 동일해야 한다. owner 제외·정적 예산·cross-actor 규칙은 양쪽 region에 똑같이 적용된다.
+	 * Collects one region's colliders from the central build. By default every provider is included
+	 * except the rope's own owner, which can be opted back in with bIncludeOwnerColliders.
+	 * RegionIndex is an index into FrameRopeRegions, which is the rope index for a physics region and
+	 * AimRegionIndexOf for an aim region, and must match the region index in the provider mapping. The
+	 * owner exclusion, the static budget and the cross-actor rules apply identically to both region
+	 * kinds.
 	 */
 	void GatherCollidersForRope(const URopeComponent& Rope, int32 RegionIndex, TArray<IRopeCollider*>& OutColliders) const;
 
 	/**
-	 * 한 로프의 조준 collider 스냅샷(SimFrame.AimFrameColliders)을 조준 region으로 채운다.
-	 * 조준 중이 아니면(aim bounds 무효) 즉시 비운다 — 프레임을 넘어 남은 포인터를 쓰지 않게.
+	 * Fills a rope's aim collider snapshot (SimFrame.AimFrameColliders) from its aim region. When the
+	 * rope is not aiming, and the aim bounds are therefore invalid, the snapshot is cleared
+	 * immediately so no pointer outlives its frame.
 	 */
 	void GatherAimCollidersForRope(URopeComponent& Rope, int32 RopeIndex) const;
 
 	/**
-	 * 한 로프의 broad-phase 질의 bounds(Pos∪Prev tight AABB + 접촉/예측 마진). provider에 넘기는 region과
-	 * per-rope collider 컬링이 동일 박스를 쓰도록 한 곳에서 계산한다(무효면 !IsValid 박스 반환).
-	 * bIncludeAimRay면 조준 ray AABB까지 합친 조준 region을 만든다 — 조준 중이 아니면(ray bounds 무효)
-	 * 조준 region 자체가 필요 없으므로 !IsValid 박스를 반환한다(수집 없음 = 조준 목록 비움).
+	 * A rope's broad-phase query bounds: the tight AABB over its current and previous positions plus
+	 * the contact and prediction margins. Computed in one place so the region handed to providers and
+	 * the per-rope collider culling use the same box; an invalid box is returned when there is none.
+	 * With bIncludeAimRay the aim ray AABB is unioned in to form the aim region. When the rope is not
+	 * aiming, and the ray bounds are invalid, no aim region is needed and an invalid box is returned,
+	 * which gathers nothing and leaves the aim list empty.
 	 */
 	static FBox ComputeRopeQueryBounds(const URopeComponent& Rope, bool bIncludeAimRay = false);
 
 	/**
-	 * GPU 상주 솔버(M5). 영속 버퍼(로프별)를 매 프레임 in-place 전진. 인스턴스 상태라 월드별 1개.
-	 * G4: 렌더 가능 RHI면 이게 유일 런타임 경로. RHI 없으면(쿡/-nullrhi/서버) CPU 솔버로 자동 폴백.
+	 * The GPU-resident solver, which advances persistent per-rope buffers in place every frame. It
+	 * holds instance state, so there is one per world.
+	 * It is the only runtime path whenever a renderable RHI exists; without one, as in a cook, under
+	 * -nullrhi, or on a server, the CPU solver takes over automatically.
 	 */
 	FRopeGPUSolver GpuSolver;
 
-	/** GetLatest로 회수한 RopeId별 최신(약간 지연) 위치 캐시. 매 프레임 갱신분을 각 Sim에 매핑한다. */
+	/** Cache of the latest, slightly delayed positions per rope ID, obtained through GetLatest. Each
+	 *  frame's update is mapped back onto the corresponding Sim state. */
 	TMap<uint32, FRopeResidentLatest> GpuLatest;
 
-	/** GetLatestContacts로 회수한 RopeId별 최신(약간 지연) GPU 접촉 감지 결과(G3). Finalize 전에 귀속. */
+	/** Cache of the latest, slightly delayed GPU contact detection results per rope ID, obtained
+	 *  through GetLatestContacts. Attributed before Finalize. */
 	TMap<uint32, FRopeResidentContacts> GpuLatestContacts;
 
 	/**
-	 * GPU 감지 결과(콜라이더 인덱스)를 로프의 귀속 테이블로 FRopeContactCandidate로 복원해 컴포넌트에
-	 * 채운다(Finalize의 Flight 접촉 소스). 지연분이 현재 시드 generation과 맞을 때만 유효.
+	 * Rebuilds the GPU detection results, which are collider indices, into FRopeContactCandidate
+	 * entries through the rope's attribution table and fills them into the component, where they are
+	 * the contact source for the Flight phase in Finalize. The delayed results are only valid when
+	 * they match the current seed generation.
 	 */
 	void BuildGpuFlightCandidates(URopeComponent& Rope);
 
 	/**
-	 * Phase 2(GPU) 헬퍼 — 한 로프의 GPU 상주 step을 구성한다. GPU 상주 대상이면 OutStep을 채우고 true를
-	 * 반환(디스패치 목록에 추가), 노드수 초과 등 폴백이면 내부에서 CPU 솔브 후 false. Rope.SimFrame.bGpuSteppedThisFrame도 세팅.
+	 * Builds one rope's GPU resident step. Returns true after filling in OutStep when the rope belongs
+	 * on the GPU, adding it to the dispatch list; returns false when it falls back, for example
+	 * because it exceeds the node count, having already solved it on the CPU. Also sets
+	 * Rope.SimFrame.bGpuSteppedThisFrame.
 	 */
 	bool TryBuildResidentStep(URopeComponent& Rope, float DeltaTime, FRopeGPUResidentStep& OutStep);
 
-	/** G3: Flight 로프의 접촉 감지 요청(+ whip 예측 입력)을 Step에 세팅하고 귀속 테이블을 리셋한다. */
+	/** Sets the contact detection request, and the whip prediction inputs, on a Flight rope's step and
+	 *  resets its attribution table. */
 	void RequestContactDetection(URopeComponent& Rope, float DeltaTime, FRopeGPUResidentStep& Step) const;
 
-	/** 이 로프의 FrameColliders를 capsule/SDF로 분류해 Step에 싣는다. bDetectThisRope면 귀속 테이블도 병행 채움. */
+	/** Classifies this rope's frame colliders into capsules and SDFs and loads them onto the step. With
+	 *  bDetectThisRope the attribution table is filled in at the same time. */
 	void PackStepColliders(URopeComponent& Rope, bool bDetectThisRope, FRopeGPUResidentStep& Step) const;
 
-	/** G1: Flight whip 가이드 타깃을 override로 Step에 패킹한다(적분 전 적용, 비-Flight면 no-op). */
+	/** Packs the Flight whip guide targets onto the step as overrides, applied before integration. A
+	 *  no-op outside the Flight phase. */
 	void PackWhipOverride(const URopeComponent& Rope, FRopeGPUResidentStep& Step) const;
 
 	/**
-	 * GPU 표현(GetGPUCapsule/SDF/Box/Convex) 없는 collider의 "조용한 GPU 제외" 1회성 경고 래치.
-	 * 커스텀 IRopeCollider가 CPU 계약만 구현하면 테스트(CPU)에선 되고 런타임(GPU)에선 무시되는
-	 * 함정을 로그로 드러낸다. PackStepColliders(const)에서 세팅되므로 mutable(진단 상태일 뿐 로직 무관).
+	 * One-shot warning latch for colliders silently excluded from the GPU because they have no GPU
+	 * representation (GetGPUCapsule, GetGPUSDF, GetGPUBox or GetGPUConvex). It surfaces the trap where
+	 * a custom IRopeCollider implements only the CPU contract, so it works in tests, which run on the
+	 * CPU, and is ignored at runtime, which runs on the GPU. Mutable because it is set from
+	 * PackStepColliders, which is const; it is diagnostic state with no bearing on logic.
 	 */
 	mutable bool bWarnedGpuUnrepresentedCollider = false;
 };

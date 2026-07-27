@@ -1,11 +1,14 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Aim-ray 조준 로직/상태(UObject-free F-클래스). Wielder의 조준 흐름이 쓰는 swept ray 본 질의
-// (FindAimRayBoneHit), aim throw 컨텍스트 해석, collider 수집 확장 AABB 계산, 그리고 throw당
-// wrap primary 잠금(mesh+bone), resolve mode별 허용 범위 + pending HUD/preview query와 aim throw 큐를 담당한다.
-// UObject 컨텍스트(collider 스냅샷/폴백 치수/CanWrapTarget 게이트)는 호출마다
-// 파라미터로 주입된다 — 월드 없이 단위 테스트 가능. StartFreshThrow *전이*가 걸린 진입점
-// (QueueAimRayThrow/ResolvePendingAimThrow)은 URopeComponent에 남는다(오케스트레이션).
+// The aim ray targeting logic and state, as a class with no UObject dependency. It provides the
+// swept ray bone query used by the wielder's aiming flow (FindAimRayBoneHit), resolves the aim throw
+// context, computes the AABB that extends collider gathering, and owns the per-throw lock on the
+// wrap primary (mesh plus bone), the permitted range per resolve mode, the pending HUD and preview
+// query, and the aim throw queue.
+// UObject context, meaning the collider snapshot, the fallback dimensions and the CanWrapTarget
+// gate, is injected as parameters per call, so it can be unit tested without a world. The entry
+// points that involve the StartFreshThrow transition, namely QueueAimRayThrow and
+// ResolvePendingAimThrow, stay on URopeComponent as orchestration.
 
 #pragma once
 
@@ -17,47 +20,54 @@
 class IRopeCollider;
 class USceneComponent;
 
-/** Wielder aim ray가 rope collider/SDF에서 찾은 가장 가까운 wrap 가능 본 hit. */
+/** The nearest wrappable bone hit the wielder's aim ray found on a rope collider or SDF. */
 struct FRopeAimRayHitResult
 {
-	// 아래 mesh/bone/표면 데이터가 모두 유효한 결과인지 나타낸다.
+	// Whether the mesh, bone and surface data below are all valid.
 	bool bHit = false;
-	// 이 throw에서 wrap 대상으로 잠글 bone 이름이다.
+	// The bone to lock as the wrap target for this throw.
 	FName Bone = NAME_None;
-	// 같은 이름의 bone을 가진 다른 actor와 구분하기 위한 component이다.
+	// The component the bone belongs to, which distinguishes another actor sharing the same bone name.
 	const USceneComponent* Mesh = nullptr;
-	// swept ray가 collider에 처음 진입한 월드 위치이다.
+	// The world position at which the swept ray first entered the collider.
 	FVector HitWorldPos = FVector::ZeroVector;
-	// SDF/contact projection으로 얻은 실제 표면점이다.
+	// The actual surface point obtained by SDF or contact projection.
 	FVector SurfacePoint = FVector::ZeroVector;
-	// 표면점의 바깥 방향 법선이다.
+	// The outward normal at the surface point.
 	FVector Normal = FVector::UpVector;
-	// ray origin에서 HitWorldPos까지의 투영 거리이다.
+	// The projected distance from the ray origin to HitWorldPos.
 	float Distance = 0.0f;
-	// 맞은 콜라이더의 월드 bounds 반경 근사(반대각 길이). 조준 HUD 강조 링 크기 산정용(가산 필드).
+	// An approximation of the hit collider's world bounds radius, as the half-diagonal length, used to
+	// size the aiming HUD's highlight ring.
 	float TargetBoundsRadius = 0.0f;
 };
 
-/** Guaranteed prepared가 정상 gather에서 확정됐을 때 실행한다. 콜백은 실제 throw에 쓸 값을 수정할 수 있다. */
+/** Run once a guaranteed prepared throw has been resolved by the normal gather. The callback may
+ *  modify the values that will be used for the actual throw. */
 DECLARE_DELEGATE_OneParam(FRopeAimPreparedDelegate, FRopePreparedThrowPreview&);
 
-/** Wielder가 입력 순간 고정하고 RopeSimSubsystem의 최신 collider 수집 직후 해결할 Aim throw 요청. */
+/** An aim throw request the wielder freezes at the moment of input, to be resolved right after
+ *  RopeSimSubsystem's latest collider gather. */
 struct FRopeAimRayThrowRequest
 {
 	FRopeThrowContext BaseContext;
 	FVector RayOrigin = FVector::ZeroVector;
 	FVector RayDirection = FVector::ForwardVector;
 	float RayLength = 0.0f;
-	// 실제 로프 도달 판정 기준. RayOrigin(카메라/바운즈 중심)과 throw origin(손 소켓)이 다를 수 있어 별도로 보관한다.
+	// The reference for deciding whether the rope actually reaches. It is stored separately because
+	// RayOrigin, at the camera or the bounds centre, can differ from the throw origin at the hand
+	// socket.
 	FVector ReachOrigin = FVector::ZeroVector;
 	float ReachLength = 0.0f;
 	float QueryRadius = 0.0f;
 	float SweepStep = 2.0f;
-	// Guaranteed prepared가 확정된 직후, 실제 실행 전에 호출한다(owner-local guide frame 저장 등).
+	// Called immediately after a guaranteed prepared throw is resolved and before it executes, for
+	// work such as storing the owner-local guide frame.
 	FRopeAimPreparedDelegate OnPrepared;
-	// StartFreshThrow 완료 뒤 실행한다. Wielder를 직접 참조하지 않는 C++ 전용 완료 알림이다.
+	// Called once StartFreshThrow has completed. A C++-only completion notification that avoids
+	// referencing the wielder directly.
 	FSimpleDelegate OnResolved;
-	// 큐 등록 또는 실제 실행이 거부됐을 때 실행한다.
+	// Called when queueing, or the actual execution, was refused.
 	FSimpleDelegate OnRejected;
 
 	bool IsValid() const
@@ -66,7 +76,8 @@ struct FRopeAimRayThrowRequest
 	}
 };
 
-/** 정상 collider gather 직후 해석해 다음 Wielder tick의 HUD/preview가 소비하는 조준 결과. */
+/** The aiming result resolved right after the normal collider gather, consumed by the HUD and the
+ *  preview on the following wielder tick. */
 struct FRopeAimRayQueryResult
 {
 	FRopeAimRayThrowRequest Request;
@@ -74,7 +85,8 @@ struct FRopeAimRayQueryResult
 	FRopeAimRayHitResult Hit;
 	FRopeAimRayHitResult BlockedHit;
 	bool bHitTarget = false;
-	// Hit 공개 계약은 raw pointer를 유지하되, 프레임을 넘겨 캐시하는 동안에는 이 약참조가 수명을 검증한다.
+	// The published hit contract keeps raw pointers, so these weak references verify their lifetime
+	// while the result is cached across a frame boundary.
 	TWeakObjectPtr<const USceneComponent> CachedHitMesh = nullptr;
 	TWeakObjectPtr<const USceneComponent> CachedBlockedMesh = nullptr;
 
@@ -94,34 +106,44 @@ struct FRopeAimRayQueryResult
 class DYNAMICROPE_API FRopeAimTargeting
 {
 public:
-	/** 질의 공통 컨텍스트. 호출자(URopeComponent)가 프레임 값으로 조립해 넘긴다. */
+	/** The context shared by the queries, assembled from this frame's values by the caller,
+	 *  URopeComponent. */
 	struct FQueryContext
 	{
-		// 이번 프레임 조준 collider 스냅샷(URopeComponent::GetAimQueryColliders). 호출 범위 동안만 유효.
+		// This frame's aiming collider snapshot, from URopeComponent::GetAimQueryColliders. Valid only
+		// for the duration of the call.
 		const TArray<IRopeCollider*>* Colliders = nullptr;
-		// RayLength 미지정(<=0) 시 폴백 길이: max(현재 Sim.RopeLength, 초기 RopeLength).
+		// The fallback length used when RayLength is unspecified, meaning at or below 0: the larger of
+		// the current Sim.RopeLength and the initial RopeLength.
 		float FallbackRayLength = 0.0f;
-		// QueryRadius 미지정(<=0) 시 폴백 반경: max(튜브 Radius, WrapConfig.ContactQueryRadius).
+		// The fallback radius used when QueryRadius is unspecified, meaning at or below 0: the larger of
+		// the tube radius and WrapConfig.ContactQueryRadius.
 		float FallbackQueryRadius = 0.0f;
 	};
 
-	//~ 질의(상태 불변 — static, 부작용 없음) --------------------------------
-	// 시각화는 여기 없다 — Gameplay Debugger의 Rope 카테고리([J]aim)가 Wielder의 FRopeAimHudSample을
-	// 읽어 그린다(디버그 진입점 단일화: RopeDebugSubsystem.h 참조). 이 클래스는 순수 질의만 한다.
+	//~ Queries. They do not change state, so they are static and free of side effects.
+	// Visualization does not live here: the Gameplay Debugger's Rope category ([J] aim) draws it by
+	// reading the wielder's FRopeAimHudSample, which keeps the debug entry point single; see
+	// RopeDebugSubsystem.h. This class performs pure queries only.
 
-	/** QueryRadius 미지정(<=0) 시 폴백 반경으로 해석한다. 질의와 시각화가 **같은 반경**을 보도록
-	 *  이 규칙의 단일 소스 — 호출처가 삼항식을 복사하면 조용히 발산한다. */
+	/** Resolves an unspecified QueryRadius, meaning at or below 0, to the fallback radius. It is the
+	 *  single source for that rule so the query and the visualization see the same radius; copying the
+	 *  ternary into call sites would let them diverge silently. */
 	static float ResolveEffectiveQueryRadius(const FQueryContext& Ctx, float QueryRadius);
 
-	/** Aim ray가 실제 로프 도달 구(ReachOrigin, ReachLength)를 통과하는 가장 먼 ray 거리.
-	 *  RayOrigin이 손/로프 시작점과 달라도 조준 ray가 너무 짧거나 길게 판정되지 않도록 한다. */
+	/** The furthest ray distance at which the aim ray still passes through the sphere the rope can
+	 *  actually reach, defined by ReachOrigin and ReachLength. It keeps the aim ray from being judged
+	 *  too short or too long when RayOrigin differs from the hand, that is the start of the rope. */
 	static float ResolveRayLengthForReach(const FVector& RayOrigin, const FVector& AimDir,
 		const FVector& ReachOrigin, float ReachLength);
 
-	/** swept SDF 질의로 ray에서 가장 가까운 wrap 가능 mesh+bone을 찾는다(broad phase → QuerySwept →
-	 *  ray 진행 거리 최솟값). CanWrapTarget 게이트를 통과 못 한 후보는 없는 것으로 취급.
-	 *  OutBlockedHit(옵션): ray가 콜라이더에 맞았지만 wrap은 불가능한(본 없음/SourceMesh 없음/게이트 거부)
-	 *  가장 가까운 hit. 반환값(wrap 가능 hit 유무)과 독립 — 조준 HUD의 "빨강" 표시용. */
+	/** Finds the nearest wrappable mesh and bone along the ray using a swept SDF query: a broad phase,
+	 *  then QuerySwept, then the minimum distance travelled along the ray. A candidate that fails the
+	 *  CanWrapTarget gate is treated as absent.
+	 *  OutBlockedHit is optional: the nearest hit where the ray struck a collider that cannot be
+	 *  wrapped, whether because it has no bone, no source mesh, or was refused by the gate. It is
+	 *  independent of the return value, which reports whether a wrappable hit exists, and drives the
+	 *  blocked indication on the aiming HUD. */
 	static bool FindAimRayBoneHit(const FQueryContext& Ctx,
 		const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
 		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
@@ -134,47 +156,57 @@ public:
 		FRopeAimRayHitResult& OutHit,
 		FRopeAimRayHitResult* OutBlockedHit = nullptr);
 
-	/** Aim 요청을 hit 컨텍스트(FrameForward/AimGuide*)로 해석한다. hit이 없으면 OutContext는
-	 *  BaseContext fallback(반환 false). 선택 출력으로 같은 단일 sweep의 hit/blocked 결과를 돌려준다. */
+	/** Resolves an aim request into a hit context, filling in the frame forward and the aim guide
+	 *  fields. With no hit, OutContext falls back to BaseContext and false is returned. The optional
+	 *  outputs return the hit and blocked results from that same single sweep. */
 	static bool ResolveAimRayThrowContext(const FQueryContext& Ctx, const FRopeAimRayThrowRequest& Request,
 		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
 		FRopeThrowContext& OutContext,
 		FRopeAimRayHitResult* OutHit = nullptr,
 		FRopeAimRayHitResult* OutBlockedHit = nullptr);
 
-	/** Aim ray가 검사할 collider 수집 확장 AABB를 만든다. 무효 입력이면 FBox(ForceInit)
-	 *  (= 수집 확장 없음 — SimFrame.AimRayColliderQueryBounds의 clear와 동일 의미). */
+	/** Builds the AABB that extends collider gathering to cover what the aim ray tests. Invalid input
+	 *  returns FBox(ForceInit), meaning no extension, which is equivalent to clearing
+	 *  SimFrame.AimRayColliderQueryBounds. */
 	static FBox MakeAimRayQueryBounds(const FQueryContext& Ctx,
 		const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius);
 
-	//~ wrap 대상 잠금(throw당) ---------------------------------------------
-	/** throw 컨텍스트의 AimGuide hit로 잠금을 설정/해제한다(StartFreshThrow/prepared throw 진입 시 1회). */
+	//~ Wrap target lock, held for the duration of one throw ---------------------
+	/** Sets or clears the lock from the aim guide hit on a throw context, once on entering
+	 *  StartFreshThrow or a prepared throw. */
 	void SetWrapTargetLock(const FRopeThrowContext& ThrowContext);
 
-	/** 잠금이 이 페이즈에 적용 중인가. 한 throw의 접근/접촉/감김(Flight/Contacting/Wrapping)에만
-	 *  적용한다 — Free preview와 Wrapped 이후의 일반 충돌은 유지한다. */
+	/** Whether the lock applies in this phase. It applies only to one throw's approach, contact and
+	 *  wrap, that is Flight, Contacting and Wrapping, leaving the Free preview and ordinary collision
+	 *  after Wrapped untouched. */
 	bool IsLockActive(ERopePhase Phase) const;
 
-	/** 정확히 aim ray가 잠근 primary (Mesh, Bone)인가. Assisted의 캡처/dominant 고정이 소비한다. */
+	/** Whether this is exactly the primary (mesh, bone) the aim ray locked. Consumed when assisted
+	 *  aiming pins its capture and dominant target. */
 	bool IsPrimaryTarget(const USceneComponent* Mesh, FName Bone) const;
 
-	// [Assisted 멀티 본 계약] 조준 본은 primary 판정용이고, 같은 mesh의 다른 본은 감김 경로 후보용이다.
-	// 이 둘을 하나의 exact-bone 조건으로 합치면 Assisted에서 다른 본 collider가 다시 사라진다.
-	/** (Mesh, Bone)이 현재 resolve mode에서 허용되는 wrap 대상인가(잠금 비활성이면 모두 통과).
-	 *  Assisted는 primary와 같은 mesh의 다른 본도 후보/경로 투영에 허용하고, Guaranteed는 exact bone만 허용한다. */
+	// Assisted multi-bone contract: the aimed bone decides the primary, while other bones on the same
+	// mesh remain candidates for the wrap path. Merging the two into one exact-bone condition would
+	// make the other bones' colliders disappear again in assisted mode.
+	/** Whether (mesh, bone) is a permitted wrap target under the current resolve mode. Everything
+	 *  passes while the lock is inactive.
+	 *  Assisted permits other bones on the primary's mesh as candidates and for path projection, while
+	 *  Guaranteed permits the exact bone only. */
 	bool IsWrapTarget(ERopePhase Phase, ERopeWrapResolveMode ResolveMode,
 		const USceneComponent* Mesh, FName Bone) const;
 
-	/** 잠금 활성 시 resolve mode 정책에 맞지 않는 skeletal collider를 제거한다.
-	 *  Assisted는 같은 mesh의 모든 본을 유지하고 Guaranteed는 exact bone만 유지한다.
-	 *  월드 정적 형상은 궤적/환경 충돌용이므로 항상 유지한다. 잠금 비활성이면 no-op. */
+	/** While the lock is active, removes the skeletal colliders that do not match the resolve mode's
+	 *  policy. Assisted keeps every bone on the same mesh and Guaranteed keeps the exact bone only.
+	 *  Static world geometry is always kept, since it is needed for trajectory and environment
+	 *  collision. A no-op while the lock is inactive. */
 	void FilterCollidersToTarget(ERopePhase Phase, ERopeWrapResolveMode ResolveMode,
 		TArray<IRopeCollider*>& Colliders) const;
 
 	const USceneComponent* GetLockedTargetMesh() const { return TargetMesh.Get(); }
 	FName GetLockedTargetBone() const { return TargetBone; }
 
-	//~ pending HUD/preview query(PrePhysics 등록 → PostPhysics collider gather 직후 해석) ---
+	//~ The pending HUD and preview query, registered during PrePhysics and resolved right after the
+	//~ PostPhysics collider gather.
 	void QueuePendingQuery(const FRopeAimRayThrowRequest& Request) { PendingQuery = Request; }
 	bool TakePendingQuery(FRopeAimRayThrowRequest& OutRequest);
 	void StoreLatestQueryResult(FRopeAimRayQueryResult Result)
@@ -189,12 +221,14 @@ public:
 		LatestQueryResult.Reset();
 	}
 
-	//~ pending aim throw(입력 순간 고정 → collider gather 직후 소비) ---------
+	//~ The pending aim throw, frozen at the moment of input and consumed right after the collider
+	//~ gather.
 	void QueuePendingThrow(const FRopeAimRayThrowRequest& Request) { PendingThrow = Request; }
 	bool HasPendingThrow() const { return PendingThrow.IsSet(); }
 
-	/** pending을 값으로 꺼내며 비운다(없으면 false). 호출자(ResolvePendingAimThrow)의 StartFreshThrow가
-	 *  transient 상태를 리셋하므로, 요청은 반드시 꺼낸 값으로 이어서 처리한다. */
+	/** Takes the pending request by value and clears it, returning false when there is none. The
+	 *  caller's StartFreshThrow, in ResolvePendingAimThrow, resets the transient state, so the request
+	 *  must be carried forward as the value taken here. */
 	bool TakePendingThrow(FRopeAimRayThrowRequest& OutRequest);
 
 	void ResetPendingThrow() { PendingThrow.Reset(); }
@@ -207,15 +241,18 @@ private:
 		FRopeAimRayHitResult* OutBlockedHit,
 		const FVector* ReachOrigin, float ReachLength);
 
-	// throw 시작 때 ray hit로 확정한 대상. 같은 bone 이름을 가진 다른 액터를 막기 위해 mesh도 함께 저장한다.
+	// The target established from the ray hit when the throw started. The mesh is stored alongside the
+	// bone to rule out another actor with the same bone name.
 	bool bLocked = false;
 	FName TargetBone = NAME_None;
 	TWeakObjectPtr<const USceneComponent> TargetMesh = nullptr;
 
-	// Wielder가 현재 프레임 등록한 요청과 정상 gather에서 확정한 직전 결과. 결과는 다음 Wielder tick까지 유지한다.
+	// The request the wielder registered this frame, and the most recent result resolved by the normal
+	// gather. The result is kept until the next wielder tick.
 	TOptional<FRopeAimRayThrowRequest> PendingQuery;
 	TOptional<FRopeAimRayQueryResult> LatestQueryResult;
 
-	// 입력 순간의 ray/frame을 보존하며, Subsystem collider gather 직후 한 번 소비한다.
+	// Preserves the ray and frame from the moment of input, consumed once right after the subsystem's
+	// collider gather.
 	TOptional<FRopeAimRayThrowRequest> PendingThrow;
 };

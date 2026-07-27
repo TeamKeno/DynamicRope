@@ -1,12 +1,14 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 던지기 초반의 "채찍 스윙" 연출 로직. 조준 반대편에서 시작해 조준 방향까지 스윕하는 가이드
-// 곡선을 시간에 따라 회전시킨다. 일반 throw는 앞쪽 가이드 구간을 잡고, Aim-hit throw는 중앙을
-// 강하게 잡되 손/자유단으로 갈수록 solver 상태와 부드럽게 섞는다. Flight 동안만 활성이다.
+// The whip swing presentation at the start of a throw. It rotates a guide curve over time, sweeping
+// from the side opposite the aim round to the aim direction. An ordinary throw takes hold of the
+// leading stretch of the guide, while an aim-hit throw holds the middle firmly and blends smoothly
+// into the solver's own state towards the hand and the free end. It is active only during Flight.
 //
-// 타깃 계산(스윕 각도 → 가이드 곡선 → 노드 간격 리샘플)은 게임 스레드에 남고, 적용은 CPU의
-// ApplyToSim 또는 GPU resident override가 같은 프레임 산출물을 소비한다. CurrentTargets/
-// PrevTargets/GuidedNodeMask가 두 경로의 공통 데이터 계약이다.
+// Computing the targets, meaning the sweep angle, the guide curve and the resampling to node
+// spacing, stays on the game thread, while application is done either by ApplyToSim on the CPU or by
+// the GPU resident override pass, both consuming the same frame output. CurrentTargets, PrevTargets
+// and GuidedNodeMask are the data contract shared by the two paths.
 
 #pragma once
 
@@ -18,27 +20,28 @@ class DYNAMICROPE_API FRopeWhipGuide
 {
 public:
 	/**
-	 * 디자이너 설정 스냅샷. UPROPERTY 직렬화 경로를 지키기 위해 원본 프로퍼티는
-	 * URopeComponent(Rope|Whip 카테고리)에 남고, 호출할 때마다 여기로 복사해 넘긴다.
+	 * A snapshot of the designer settings. The properties themselves stay on URopeComponent, under the
+	 * Rope|Whip category, to keep their serialization path, and are copied here on every call.
 	 */
 	struct FConfig
 	{
-		/** 스윙 전체 시간(s). */
+		/** Total swing duration (s). */
 		float Duration = 0.35f;
 
-		/** 가이드가 잡는 로프 길이 비율(0~1). */
+		/** The fraction of the rope length the guide controls, from 0 to 1. */
 		float GuidedLength = 0.65f;
 
-		/** 시작 각도(조준 반대편)에서 조준 방향까지의 스윕 각. */
+		/** The angle swept from the starting angle, opposite the aim, round to the aim direction. */
 		float SweepAngleDegrees = 180.0f;
 
-		/** 이 속도일 때 Duration 그대로 사용한다. */
+		/** The throw speed at which Duration is used as given. */
 		float ReferenceThrowSpeed = 1500.0f;
 
-		/** 가이드 길이 산정용: max(Sim.RopeLength, 이 값) 사용. */
+		/** Used when sizing the guide: the larger of Sim.RopeLength and this value. */
 		float ComponentRopeLength = 0.0f;
 
-		/** Aim-hit에서 손 쪽/자유단 쪽 guide 완화 구간과 hit direction 보간을 앞당기는 지수. */
+		/** For an aim hit: the stretches at the hand and free ends where the guide relaxes, and the
+		 *  exponent that brings the hit direction blend forward. */
 		float AimHitRootSolverFraction = 0.20f;
 		float AimHitTipSolverFraction = 0.25f;
 		float AimHitDirectionBias = 2.0f;
@@ -51,16 +54,20 @@ public:
 		FVector GuideRight = FVector::RightVector;
 	};
 
-	/** 퇴화 벡터를 fallback으로 정규화한다. throw frame/swing basis 해석 공용. */
+	/** Normalizes a vector, substituting the fallback when it is degenerate. Shared by the throw frame
+	 *  and swing basis resolution. */
 	static FVector SafeNormalOr(const FVector& Value, const FVector& Fallback);
 
-	/** ThrowContext와 SwingPlane 설정을 WhipGuide가 실제로 쓰는 Aim/Up/Right 기준축으로 해석한다. */
+	/** Resolves a throw context and a swing plane setting into the aim, up and right axes the whip
+	 *  guide actually uses. */
 	static FSwingBasis ResolveSwingBasis(const FRopeThrowContext& ThrowContext,
 		ERopeSwingPlane SwingPlane, const FVector& CustomPlaneNormal);
 
 	/**
-	 * throw 시 호출: 조준 방향 기준의 가이드 좌표계(Forward/Up)를 구성하고 스윙을 활성화한다.
-	 * Fallback* 벡터들은 퇴화 케이스(조준이 0이거나 수직에 가까울 때)에 쓸 컴포넌트 축.
+	 * Called on a throw: builds the guide frame, that is the forward and up axes, about the aim
+	 * direction and activates the swing.
+	 * The fallback vectors are the component axes used in degenerate cases, such as a zero aim or one
+	 * close to vertical.
 	 */
 	void Begin(const FVector& InAimDir, const FVector& InOrigin,
 		const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide,
@@ -69,39 +76,48 @@ public:
 		float InAimSteerStartAlpha = 0.25f, float InAimLockAlpha = 0.50f);
 
 	/**
-	 * throw 직후 초기 포즈(T=0) 스냅: 일반 가이드 구간은 타깃에 놓고, Aim-hit은 중앙만 강하게
-	 * 배치하며 양끝 envelope는 기존 solver 위치와 섞는다. StartFreshThrow에서 1회 호출.
+	 * Snaps the initial pose immediately after a throw, at time zero: an ordinary guide places its
+	 * stretch on the targets, while an aim hit places only the middle firmly and blends the envelopes at
+	 * both ends with the existing solver positions. Called once from StartFreshThrow.
 	 */
 	void SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config);
 
 	/**
-	 * 매 프레임(Flight, GT): Elapsed 전진 → 가이드 타깃/마스크 *계산만* 한다(Sim 불변).
-	 * 적용은 두 갈래가 같은 산출물을 소비한다: CPU 솔브 경로는 ApplyToSim, GPU 상주 경로는
-	 * override 패스(ERopeGPUOverride::Position|Prev — 서브시스템이 step에 실어 보냄).
-	 * 스윙이 끝나면(Elapsed >= Duration) 스스로 비활성화된다.
+	 * Called every frame during Flight on the game thread: advances the elapsed time and computes the
+	 * guide targets and mask only, leaving the simulation state untouched.
+	 * The two application paths consume the same output: the CPU solve path calls ApplyToSim, and the
+	 * GPU resident path uses the override pass, with the position and previous-position flags, which
+	 * the subsystem carries on the step.
+	 * The guide deactivates itself once the swing ends, that is when the elapsed time reaches the
+	 * duration.
 	 */
 	void Advance(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config);
 
 	/**
-	 * CPU 경로의 적용 절반: Advance가 계산한 타깃/마스크를 Sim에 기록한다(가이드 노드만,
-	 * Pos=현재 타깃 / Prev=직전 타깃 → 차이가 Verlet 속도). GPU 로프에는 호출하지 않는다.
+	 * The application half of the CPU path: writes the targets and mask computed by Advance into the
+	 * simulation state, for guided nodes only, setting the position to the current target and the
+	 * previous position to the last one so their difference becomes the Verlet velocity. It is not
+	 * called for GPU ropes.
 	 */
 	void ApplyToSim(FRopeSimState& Sim) const;
 
-	/** 예측 접촉용: 다음 프레임 시점(Elapsed + DeltaTime)의 가이드 타깃 미리보기(상태 불변). */
+	/** For predictive contact: previews the guide targets as of the next frame, that is at the elapsed
+	 *  time plus the delta, without changing any state. */
 	void PreviewNextTargets(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config,
 		TArray<FVector>& OutTargets) const;
 
-	/** 이 프레임의 산출물만 비운다(비활성 프레임에 stale 데이터가 남지 않도록). */
+	/** Clears this frame's output alone, so no stale data is left on an inactive frame. */
 	void ResetFrameOutputs();
 
 	bool IsActive() const { return bActive; }
 	float GetElapsed() const { return Elapsed; }
 
-	/** 정규화된 조준 방향(퇴화 시 fallback 적용 후). throw 임펄스 주입에도 쓰인다. */
+	/** The normalized aim direction, after any fallback has been applied. It is also used when
+	 *  injecting the throw impulse. */
 	const FVector& GetAimDir() const { return AimDir; }
 
-	//~ 프레임 산출물(데이터 계약) — SnapToInitialPose/Advance가 채우고 다음 갱신까지 유효.
+	//~ The frame output, which is the data contract. Filled in by SnapToInitialPose and Advance and
+	//~ valid until the next update.
 	const TArray<FVector>& GetCurrentTargets() const { return CurrentTargetsThisFrame; }
 	const TArray<FVector>& GetPrevTargets() const { return PrevTargetsThisFrame; }
 	const TArray<uint8>& GetGuidedNodeMask() const { return GuidedNodesThisFrame; }
@@ -110,18 +126,22 @@ public:
 		return GuidedNodesThisFrame.IsValidIndex(NodeIndex) && GuidedNodesThisFrame[NodeIndex] != 0;
 	}
 
-	/** 실제 프레임 산출물에서 guided node 수를 센다. stat/관측이 필요할 때만 호출한다. */
+	/** Counts the guided nodes in the actual frame output. Call it only when statistics or observation
+	 *  need it. */
 	int32 GetGuidedNodeCountThisFrame() const;
 
-	/** 실제 프레임 산출물을 디버그 스냅샷 배열로 복사한다. 시뮬레이션 상태는 변경하지 않는다. */
+	/** Copies the actual frame output into debug snapshot arrays, leaving the simulation state
+	 *  unchanged. */
 	void CopyGuidedTargetsForDebug(TArray<int32>& OutNodeIndices, TArray<FVector>& OutTargets) const;
 
 private:
-	/** NormalizedTime(0~1) 시점의 가이드 곡선을 만들고 노드 간격으로 리샘플해 타깃을 채운다. */
+	/** Builds the guide curve at the given normalized time, from 0 to 1, and resamples it to the node
+	 *  spacing to fill in the targets. */
 	void BuildGuideTargets(float NormalizedTime, int32 LastGuidedNode,
 		const FRopeSimState& Sim, const FConfig& Config, TArray<FVector>& OutTargets) const;
 
-	/** 원시 곡선 점들을 로프 노드 간격(세그먼트 길이)에 맞춰 등간격 리샘플한다. */
+	/** Resamples raw curve points at even intervals matching the rope's node spacing, that is its
+	 *  segment length. */
 	void ResampleGuideByNodeSpacing(const TArray<FVector>& SourcePoints, float NodeSpacing,
 		int32 DesiredPointCount, TArray<FVector>& OutPoints) const;
 
@@ -135,16 +155,18 @@ private:
 	FVector GuideInheritedVelocity = FVector::ZeroVector;
 	float GuideThrowSpeed = 0.0f;
 
-	/** Aim target은 노드 고정점이 아니라 최종 방향과 공간 보간 파라미터로만 보관한다. */
+	/** An aim target is kept only as a final direction plus the spatial blend parameters, never as a
+	 *  fixed node position. */
 	bool bHasAimTarget = false;
 	FVector AimTarget = FVector::ZeroVector;
 	float AimSteerStartAlpha = 0.25f;
 	float AimLockAlpha = 0.50f;
 
-	/** 직전 프레임의 가이드 타깃(가이드 노드의 Verlet 속도 주입: PrevPositions ← 이 값). */
+	/** The previous frame's guide targets, which inject the Verlet velocity of the guided nodes by
+	 *  becoming their previous positions. */
 	TArray<FVector> PreviousTargets;
 
-	//~ 프레임 산출물
+	//~ Frame output
 	TArray<FVector> PrevTargetsThisFrame;
 	TArray<FVector> CurrentTargetsThisFrame;
 	TArray<uint8> GuidedNodesThisFrame;

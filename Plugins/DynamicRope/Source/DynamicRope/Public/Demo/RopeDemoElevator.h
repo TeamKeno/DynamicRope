@@ -1,23 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 데모 씬용 로프 엘리베이터 — "천장을 그래플로 감아 스스로를 릴로 감아올리는 탑승 플랫폼".
-// 물리 climb-in 데모다: 플랫폼(물리 바디)에 붙은 ③ GuaranteedWrap 로프가 천장 앵커를 감으면(Wrapped),
-// 릴-인 + 능동 Pull(climb-in)이 플랫폼을 앵커 쪽으로 끌어올린다. 릴-아웃하면 로프가 풀려 중력으로 내려온다.
+// Demo rope elevator: a rideable platform that grapples the ceiling and reels itself up. It is the
+// physical climb-in demo. A GuaranteedWrap rope attached to the platform, which is a physics body,
+// wraps a ceiling anchor, and reeling in plus active pull hauls the platform up towards it. Reeling
+// out pays the rope back out and the platform descends under gravity.
 //
-// 진행 개요:
-//   Idle → (앵커로 Guaranteed 그래플 발사) → Establishing → (Wrapped 확인) → Docked
-//        → RequestAscend → Ascending → (최소 길이 도달) → 정지(위)
-//        → RequestDescend → Descending → (최대 길이 도달) → 정지(아래)
-// 그래플은 **한 번만** 확립하고 이후엔 릴로만 오르내린다(실제 엘리베이터 케이블처럼 계속 붙어 있다).
+// State flow:
+//   Idle -> fire a guaranteed grapple at the anchor -> Establishing -> wrap confirmed -> Docked
+//        -> RequestAscend -> Ascending -> minimum length reached -> stopped at the top
+//        -> RequestDescend -> Descending -> maximum length reached -> stopped at the bottom
+// The grapple is established once only; from then on the elevator travels by reeling alone and stays
+// attached, like a real elevator cable.
 //
-// 콘텐츠 의존:
-//   - 플랫폼/셰이프는 엔진 기본 큐브(플러그인 → /Game 참조 금지 규칙 준수).
-//   - **천장 앵커만 예외**: 로프가 감으려면 wrappable 대상(스켈레탈 본 콜라이더 / SDF)이어야 하므로,
-//     AnchorTarget에 그런 컴포넌트를 레벨에서 지정한다(1-본 스켈레탈 "고리" 등). 없으면 경고 후 no-op.
-//
-// ⚠ 물리 튜닝은 PIE 실측이 정본이다: 테더/climb-in은 캐릭터 wielder로 튜닝됐어서, 물리 플랫폼을 수직으로
-//   견인하는 건 첫 실측이다. 탑승 안정성(흔들림/캐릭터 충돌), 상승력(ClimbForce vs 플랫폼 질량),
-//   하강 속도(DescendReelSpeed vs 중력 낙하)는 아래 노브로 조정한다.
+// Content requirements:
+//   - The platform and shapes are engine basic cubes, since the plugin never references /Game
+//     content.
+//   - The ceiling anchor is the one exception: the rope can only wrap something wrappable, meaning it
+//     has a skeletal bone collider or an SDF provider, so AnchorTarget must be assigned such a
+//     component from the level, for example a single-bone skeletal ring. Without one it warns and
+//     does nothing.
 
 #pragma once
 
@@ -29,7 +30,8 @@ class URopeComponent;
 class UStaticMeshComponent;
 class ARopeDemoPressurePlate;
 
-/** 엘리베이터가 목표 층(위/아래)에 도착한 순간(연출 완료가 아니라 정지 전이 시점). */
+/** Fired when the elevator reaches the target floor, at the stop transition rather than when the
+ *  motion finishes. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeDemoElevatorArrivedSignature,
 	ARopeDemoElevator*, Elevator, bool, bAtTop);
 
@@ -46,130 +48,148 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
-	/** 위층으로 올라가도록 지시한다(그래플이 확립돼 있어야 실제로 움직인다). 디테일 패널 버튼으로도 호출. */
+	/** Sends the elevator to the upper floor; it only actually moves once the grapple is established.
+	 *  Also exposed as a details panel button. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void RequestAscend() { SetTargetTop(true); }
 
-	/** 아래층으로 내려가도록 지시한다. 디테일 패널 버튼으로도 호출. */
+	/** Sends the elevator to the lower floor. Also exposed as a details panel button. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void RequestDescend() { SetTargetTop(false); }
 
-	/** 목표 층을 뒤집는다(입력 한 키/디테일 패널 버튼용). */
+	/** Flips the target floor, for a single input key or a details panel button. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void ToggleTarget() { SetTargetTop(!bTargetTop); }
 
-	/** 목표 층을 직접 지정한다(true=위, false=아래). */
+	/** Sets the target floor directly: true for the top, false for the bottom. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Demo")
 	void SetTargetTop(bool bNewTargetTop);
 
-	/** 그래플이 확립돼(천장에 감겨) 승강이 가능한 상태인가. */
+	/** Whether the grapple is established on the ceiling and the elevator can travel. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	bool IsGrappleReady() const { return bGrappleReady; }
 
-	/** 현재 목표가 위층인가. */
+	/** Whether the current target is the upper floor. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	bool IsTargetTop() const { return bTargetTop; }
 
-	/** 목표 층 도착 브로드캐스트. */
+	/** Broadcast on arriving at the target floor. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope|Demo")
 	FRopeDemoElevatorArrivedSignature OnElevatorArrived;
 
-	//~ 앵커(천장 그래플 대상) -------------------------------------------------
+	//~ Anchor (the ceiling grapple target) -------------------------------------
 
-	/** 로프가 감을 천장 앵커. **wrappable해야 한다**(스켈레탈 본 콜라이더 / SDF 프로바이더 보유).
-	 *  레벨에서 지정한다 — 비면 그래플이 확립되지 않아 엘리베이터가 움직이지 않는다(경고 로그). */
+	/** The ceiling anchor the ropes wrap. It must be wrappable, meaning it carries a skeletal bone
+	 *  collider or an SDF provider, and is assigned in the level. Leaving it empty means the grapple
+	 *  never establishes and the elevator never moves, which is logged as a warning. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Rope|Demo")
 	TObjectPtr<AActor> AnchorTarget = nullptr;
 
-	//~ 트리거(호출 버튼) -----------------------------------------------------
+	//~ Trigger (the call button) -----------------------------------------------
 
-	/** 이 압력판이 눌리면 위층, 풀리면 아래층으로 향한다(호출 버튼). 비워도 BP/코드로 직접 제어 가능. */
+	/** Travels up while this pressure plate is pressed and down when it clears, acting as the call
+	 *  button. Leave it empty to drive the elevator from Blueprint or code instead. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<ARopeDemoPressurePlate> CallPlate = nullptr;
 
-	//~ 승강 튜닝(PIE 실측) ---------------------------------------------------
+	//~ Travel tuning -----------------------------------------------------------
 
-	/** 상승 시 릴-인 속도(cm/s). 로프가 짧아지며 테더가 플랫폼을 앵커 쪽으로 끌어올린다. */
+	/** Reel-in speed while ascending (cm/s). The rope shortens and the tether hauls the platform up
+	 *  towards the anchor. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Travel", meta = (ClampMin = "1.0", Units = "cm/s"))
 	float AscendReelSpeed = 150.0f;
 
-	/** 하강 시 릴-아웃 속도(cm/s). 로프가 길어지며 플랫폼이 중력으로 내려온다. 중력 낙하보다 느리면
-	 *  테더에 매달려 천천히 내려오고, 빠르면 자유낙하에 가깝다 — PIE로 맞춘다. */
+	/** Reel-out speed while descending (cm/s). The rope lengthens and the platform falls under
+	 *  gravity. Slower than free fall leaves it hanging from the tether and descending gently; faster
+	 *  approaches free fall. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Travel", meta = (ClampMin = "1.0", Units = "cm/s"))
 	float DescendReelSpeed = 120.0f;
 
-	/** 상승 중 **케이블당** 능동 Pull(climb-in) 견인력(로프 4개 → 총 힘 ×4). 릴-인만으로 플랫폼 무게를
-	 *  못 들면 이 힘이 보태 끌어올린다. 0이면 릴-인 + 테더만으로 상승(테더 MaxTetherTension이 무게를 넘어야). */
+	/** Active pull force per cable while ascending, so with four ropes the total is four times this.
+	 *  It supplements reeling in when that alone cannot lift the platform's weight. 0 ascends on the
+	 *  reel-in and tether alone, which requires the tether's MaxTetherTension to exceed the weight. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Travel", meta = (ClampMin = "0.0"))
 	float ClimbForce = 60000.0f;
 
-	/** 목표 길이 도달 판정 여유(cm). 현재 로프 길이가 최소/최대에서 이 값 이내면 도착으로 본다. */
+	/** Tolerance on reaching the target length (cm). The elevator counts as arrived once the current
+	 *  rope length is within this of the minimum or maximum. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Travel", meta = (ClampMin = "0.1", Units = "cm"))
 	float ArrivalTolerance = 5.0f;
 
-	//~ 안정성(탑승 전복 방지) -------------------------------------------------
+	//~ Stability (keeping the platform from tipping) ----------------------------
 
-	/** 플랫폼의 피치/롤 회전을 잠가 항상 수평을 유지한다(**기본 켬**). 캐릭터가 한쪽에 올라타도 기울지
-	 *  않는다 — 물리 승강(수직 이동)은 그대로 두고 전복 자유도만 제거하는, 탑승 플랫폼의 표준 해법.
-	 *  끄면 자유 물리(기울고 전복 가능). */
+	/** Locks the platform's pitch and roll so it always stays level, on by default, which stops it
+	 *  tilting when a character stands on one side. It leaves the physical travel along the vertical
+	 *  free and removes only the degrees of freedom that let it tip, the standard solution for a
+	 *  rideable platform. Turn it off for free physics, where it can tilt and overturn. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Stability")
 	bool bLockPlatformTilt = true;
 
-	/** 요(yaw, 수직축 회전)까지 잠근다. 켜면 플랫폼이 전혀 회전하지 않는다(방향 고정). */
+	/** Also locks yaw, that is rotation about the vertical, so the platform does not rotate at all and
+	 *  keeps a fixed heading. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Stability")
 	bool bLockPlatformYaw = false;
 
-	/** 플랫폼 각감쇠 — 회전(흔들림)을 진정시킨다. 잠금이 꺼져 있어도 전복을 늦춘다. */
+	/** Angular damping on the platform, which settles rotation and sway. It slows tipping even with
+	 *  the locks disabled. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Stability", meta = (ClampMin = "0.0"))
 	float PlatformAngularDamping = 10.0f;
 
-	/** 플랫폼 질량 오버라이드(kg, 0=메쉬 기본). 무거울수록 캐릭터 하중의 상대 토크가 작아 안정적이다
-	 *  (대신 ClimbForce/테더 장력도 그만큼 커야 든다). */
+	/** Platform mass override (kg). 0 uses the mesh default. A heavier platform is more stable because
+	 *  a character's load produces relatively less torque, at the cost of needing a correspondingly
+	 *  larger ClimbForce and tether tension to lift. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Stability", meta = (ClampMin = "0.0", Units = "kg"))
 	float PlatformMass = 0.0f;
 
 protected:
-	/** 탑승 플랫폼(물리 바디, 루트). climb-in의 견인 수신자다. */
+	/** The rideable platform, a physics body and the actor root. It is the receiver of the climb-in
+	 *  traction. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<UStaticMeshComponent> Platform = nullptr;
 
-	/** 천장 앵커를 감는 ③ GuaranteedWrap 로프 4개(플랫폼 네 모서리 = 4점 케이블). 함께 감고 함께 릴한다 —
-	 *  하중이 네 모서리에 분산돼 단일 중앙 로프보다 기울어짐이 적다. 모두 같은 AnchorTarget을 감는다. */
+	/** Four GuaranteedWrap ropes that wrap the ceiling anchor, one at each corner of the platform.
+	 *  They wrap and reel together, which spreads the load across the corners and tilts far less than a
+	 *  single central rope would. All four wrap the same AnchorTarget. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TArray<TObjectPtr<URopeComponent>> Ropes;
 
 private:
-	/** 케이블 수(플랫폼 네 모서리). */
+	/** The number of cables, one per platform corner. */
 	static constexpr int32 NumRopes = 4;
 
-	/** 아직 감기지 않은 모든 로프를 앵커로 향해 Guaranteed 발사한다(Wrapped 확립 시도). */
+	/** Fires a guaranteed throw at the anchor from every rope not yet wrapped, attempting to establish
+	 *  the grapple. */
 	void FireGrapples();
 
-	/** 로프 하나를 앵커로 향해 Guaranteed 발사한다. 성공 큐잉 시 true. */
+	/** Fires a guaranteed throw at the anchor from one rope. True once queued. */
 	bool FireGrappleFor(URopeComponent* InRope);
 
-	/** 로프 4개가 모두 Wrapped인가(= 그래플 확립 완료). */
+	/** Whether all four ropes are wrapped, which completes the grapple. */
 	bool AreAllRopesWrapped() const;
 
-	/** 앵커의 조준 목표 월드 위치(없으면 앵커 액터 위치). */
+	/** The world position to aim at on the anchor, falling back to the anchor actor's location. */
 	FVector ResolveAnchorAimWorld() const;
 
-	/** 안정성 설정(회전 잠금/각감쇠/질량)을 플랫폼 물리 바디에 적용한다(BeginPlay). */
+	/** Applies the stability settings, that is the rotation locks, angular damping and mass, to the
+	 *  platform's physics body during BeginPlay. */
 	void ApplyPlatformStability();
 
-	/** 압력판 상태 변화(델리게이트 시그니처) — 눌림=위, 풀림=아래. */
+	/** Pressure plate state change handler, matching the delegate signature. Pressed travels up and
+	 *  cleared travels down. */
 	UFUNCTION()
 	void HandleCallPlateChanged(ARopeDemoPressurePlate* Plate, bool bPressed);
 
-	/** 그래플 미확립 상태에서 재발사 쿨다운(초). Wrapped 될 때까지 주기적으로 재시도한다. */
+	/** Cooldown before firing again while the grapple is not yet established (s). It retries
+	 *  periodically until every rope is wrapped. */
 	float EstablishRetryRemaining = 0.0f;
 
-	/** 그래플이 천장에 감겨 승강 가능한가(Phase==Wrapped 확인 시 true). */
+	/** Whether the grapple is wrapped on the ceiling and travel is possible, set once the phase is
+	 *  confirmed as Wrapped. */
 	bool bGrappleReady = false;
 
-	/** 현재 목표 층(true=위, false=아래). */
+	/** The current target floor: true for the top, false for the bottom. */
 	bool bTargetTop = false;
 
-	/** 이번 목표에 도착해 이미 브로드캐스트했는가(중복 발화 방지). */
+	/** Whether arrival at this target has already been broadcast, which prevents duplicates. */
 	bool bArrivedBroadcast = false;
 };

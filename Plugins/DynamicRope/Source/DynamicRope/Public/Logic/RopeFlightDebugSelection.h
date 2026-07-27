@@ -1,9 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Flight 디버거의 후보 박스 선택 — 순수 함수라 월드/UObject 없이 단위 테스트한다. 디버거 그리기
-// (WITH_GAMEPLAY_DEBUGGER)와 자동화 테스트가 공유한다. 스냅샷이 이미 모은 배열만 소비하고 아무것도
-// 추가로 수집하지 않는다. Mesh 식별은 raw 포인터가 아니라 FObjectKey로 — 스냅샷 수명(수 프레임) 뒤
-// 포인터가 죽어 있을 수 있어 비교/해석 모두 키로 한다.
+// Candidate box selection for the Flight debugger. It is a pure function, so it can be unit tested
+// without a world or any UObject, and is shared by the debugger drawing, under
+// WITH_GAMEPLAY_DEBUGGER, and by the automated tests. It consumes only the arrays the snapshot has
+// already collected and gathers nothing further.
+// Meshes are identified by FObjectKey rather than by raw pointer, because a snapshot outlives its
+// frame by several frames and the pointer may be dead by then; both comparison and resolution go
+// through the key.
 
 #pragma once
 
@@ -13,27 +16,34 @@
 
 namespace RopeFlightDebug
 {
-	// 후보 박스 선택 결과. 인덱스는 입력 Candidates 배열의 원본 인덱스다.
+	// The result of selecting candidate boxes. Every index refers to the input Candidates array.
 	struct FCandidateSelection
 	{
-		// 포착 대상(tracker와 (Mesh,Bone)이 일치하는 대표) 후보의 원본 인덱스. 없으면 INDEX_NONE.
+		// The index of the capture target candidate, meaning the one whose mesh and bone match the
+		// tracker, or INDEX_NONE when there is none.
 		int32 CaptureTargetIndex = INDEX_NONE;
-		// 그릴 박스들의 원본 인덱스. 대표가 있으면 [0]이 대표, 그 뒤가 penetration 상위 일반 후보.
+		// The indices of the boxes to draw. When a capture target exists it is at index 0, followed by
+		// the general candidates with the greatest penetration.
 		TArray<int32> BoxIndices;
-		// 유효(bValid) 후보 총수 — 요약의 candidates=.
+		// The total number of valid candidates, reported as the candidate count in the summary.
 		int32 TotalValid = 0;
-		// 실제 그리는 박스 수(BoxIndices.Num())와, 그중 제외된 유효 후보 수.
+		// The number of boxes actually drawn, that is BoxIndices.Num(), and how many valid candidates
+		// were left out.
 		int32 Shown = 0;
 		int32 Hidden = 0;
 	};
 
 	/**
-	 * 그릴 후보 박스를 고른다. 대표(포착 대상)는 penetration top-N 밖이어도 항상 포함한다 — "곧 무엇에
-	 * 걸리려 하나"가 predictive 대표여서 penetration이 낮을 때가 정작 가장 보고 싶은 순간이기 때문.
-	 *  - MeshKeys: Candidates와 1:1(같은 인덱스). 짧으면(구 스냅샷) 그 인덱스는 본만으로 tracker와 대조한다.
-	 *  - MaxBoxes: 그릴 박스 상한(기본 [U]=1, [U]+[K]=5).
-	 *  - bFillWithGeneral: true면 남는 칸을 penetration 상위 일반 후보로 채운다(Advanced). false면 대표만(기본).
-	 * 순위 규칙: penetration 내림차순, 동률이면 NodeIndex 오름차순, 그래도 동률이면 원본 인덱스 오름차순 — 결정적.
+	 * Chooses which candidate boxes to draw. The capture target is always included even when it falls
+	 * outside the top N by penetration: what the rope is about to catch on is a predictive candidate,
+	 * so the moment its penetration is low is exactly the moment worth seeing.
+	 *  - MeshKeys is one-to-one with Candidates, sharing indices. Where it is shorter, as with an older
+	 *    snapshot, those indices are matched against the tracker by bone alone.
+	 *  - MaxBoxes caps how many boxes are drawn.
+	 *  - bFillWithGeneral fills the remaining slots with the general candidates that have the greatest
+	 *    penetration; false draws the capture target alone, which is the default.
+	 * The ranking is deterministic: penetration descending, then node index ascending, then the
+	 * original index ascending.
 	 */
 	DYNAMICROPE_API FCandidateSelection SelectCandidateBoxes(
 		const TArray<FRopeContactCandidate>& Candidates,

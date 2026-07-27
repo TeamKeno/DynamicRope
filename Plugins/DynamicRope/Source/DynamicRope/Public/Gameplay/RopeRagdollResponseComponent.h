@@ -1,37 +1,44 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 로프에 감긴 스켈레탈 대상의 랙돌 반응 컴포넌트(옵트인). 감길 대상(마네킹/동물/드래곤 — ACharacter
-// 또는 스켈레탈 메시를 가진 아무 액터)에 붙이면:
-//  - bRagdollOnWrapped(기본 켜짐): 로프가 이 메시를 감으면(Wrapped) RagdollOnWrappedDelay 후 자동
-//    랙돌 전환. bOnlyBelowWrappedBone이면 감긴 본 이하만 부분 랙돌.
-//  - bRecoverRagdollOnRopeRelease(기본 켜짐): *자동 전환된* 랙돌은 감았던 로프가 풀리면 자동 복귀
-//    (감으면 자빠지고 놓으면 일어난다 — 대칭). 수동/치트로 진입한 랙돌은 로프 release와 무관하게 유지.
-//  - EnterRagdoll/EnterPartialRagdoll/RecoverFromRagdoll: BP/코드에서 직접 제어하는 정식 API.
+// Opt-in ragdoll response for a skeletal target wrapped by a rope. Add it to anything wrappable, a
+// mannequin, an animal, a dragon, or any actor with a skeletal mesh, and it provides:
+//  - bRagdollOnWrapped, on by default: going limp automatically RagdollOnWrappedDelay seconds after
+//    a rope wraps this mesh. With bOnlyBelowWrappedBone, only the bones below the wrapped one
+//    simulate.
+//  - bRecoverRagdollOnRopeRelease, on by default: a ragdoll entered automatically recovers by itself
+//    once the rope that wrapped it releases, so wrapping knocks the target down and releasing stands
+//    it back up. A ragdoll entered manually is unaffected by rope releases.
+//  - EnterRagdoll, EnterPartialRagdoll and RecoverFromRagdoll, the explicit API for Blueprint and
+//    code.
 //
-// 한 대상을 여러 로프가 동시에 감을 수 있으므로(양팔 포박 등) 활성 engagement를 로프 단위 집합으로
-// 센다 — 자동 복귀는 **마지막 로프가 풀렸을 때만** 한다(WrappingRopes 참고).
+// Several ropes can wrap one target at once, for example binding both arms, so active engagements
+// are counted as a set of ropes and automatic recovery only happens once the last rope releases; see
+// WrappingRopes.
 //
-// 자기를 감을 로프를 미리 알 수 없으므로(cross-actor throw가 흔함), 매 프레임 로프를 전수 순회하는 대신
-// 서브시스템의 중앙 wrap/release 신호(URopeSimSubsystem::OnAnyRopeWrapped/OnAnyRopeReleased)에 구독해
-// 자기 메시가 감겼는지/풀렸는지로 반응한다. 랙돌 전환 자체는 게임/컴포넌트 책임이라는 계약(플러그인
-// 코어는 랙돌을 요구하지 않는다 — RopeMovingSurfaceRegressionTests.cpp 주석)에 따라 이 컴포넌트는 어디까지나
-// 옵트인 편의/레퍼런스 구현이며, 게임이 자체 랙돌 로직을 그대로 쓸 수도 있다.
+// A target cannot know in advance which rope will wrap it, since cross-actor throws are common, so
+// rather than walking every rope each frame it subscribes to the subsystem's central signals,
+// URopeSimSubsystem::OnAnyRopeWrapped and OnAnyRopeReleased, and reacts when its own mesh is wrapped
+// or released. Going limp is the game's responsibility rather than the plugin's, so this component
+// is an opt-in convenience and reference implementation; a game is free to keep its own ragdoll
+// logic instead.
 //
-// #if !UE_BUILD_SHIPPING 콘솔 명령(이 컴포넌트가 붙은 월드 내 모든 액터에 일괄 적용 — 개발 확인용):
-//   Rope.Ragdoll             풀 랙돌 토글(랙돌 중이면 복귀)
-//   Rope.Ragdoll spine_01    해당 본 이하만 부분 랙돌
-//   Rope.Ragdoll.Recover     애니메이션 복귀
-//   Rope.Ragdoll.Destroy     대상 액터 파괴(감긴 중 파괴 → 로프 release 확인용)
+// Console commands, in non-shipping builds only, applied to every actor in the world carrying this
+// component:
+//   Rope.Ragdoll             toggle a full ragdoll, recovering if already limp
+//   Rope.Ragdoll spine_01    partial ragdoll below the given bone
+//   Rope.Ragdoll.Recover     recover to animation
+//   Rope.Ragdoll.Destroy     destroy the target actor, to check the rope releases when its wrap
+//                            target is destroyed mid-wrap
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-// FTimerHandle(자동 전환 지연) 멤버.
+// FTimerHandle, for the automatic transition delay member.
 #include "Engine/TimerHandle.h"
-// ERopeReleaseReason / FRopeWrappedEventInfo — 중앙 신호 페이로드.
+// ERopeReleaseReason and FRopeWrappedEventInfo, the central signal payloads.
 #include "Core/RopeLifecycleTypes.h"
-// EMovementMode — 랙돌 진입 전 무브먼트 모드 저장 멤버.
+// EMovementMode, for the movement mode saved before going limp.
 #include "Engine/EngineTypes.h"
 #include "RopeRagdollResponseComponent.generated.h"
 
@@ -49,148 +56,178 @@ class DYNAMICROPE_API URopeRagdollResponseComponent : public UActorComponent
 public:
 	URopeRagdollResponseComponent();
 
-	//~ UActorComponent — 중앙 wrap/release 신호에 구독/해제. 틱은 랙돌 카메라 추적 동안만 켠다.
+	//~ UActorComponent. Subscribes to and unsubscribes from the central wrap and release signals. The
+	//~ tick is only enabled while the ragdoll camera is following.
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
 		FActorComponentTickFunction* ThisTickFunction) override;
 
-	/** 로프가 이 액터의 메시를 감으면(Wrapped) 자동으로 랙돌 전환한다. */
+	/** Go limp automatically when a rope wraps this actor's mesh. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll")
 	bool bRagdollOnWrapped = true;
 
-	/** 자동 전환까지의 지연(초). 감긴 직후 vs 잠시 뒤 전환의 차이를 조절. */
+	/** Delay before going limp (s), which controls whether the target drops the instant it is wrapped
+	 *  or a moment later. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (ClampMin = "0.0", Units = "s", EditCondition = "bRagdollOnWrapped", DisplayName = "Delay"))
 	float RagdollOnWrappedDelay = 0.3f;
 
 	/**
-	 * 자동 전환 시 풀 랙돌 대신 감긴 본 이하만 부분 랙돌(회의의 "감긴 본만 전환" 안).
+	 * Simulate only the bones below the wrapped one instead of the whole body.
 	 *
-	 * ⚠ 켜기 전에 읽을 것 — 켜면 **테더(자동 회수)가 대상을 못 끈다**(2026-07-15 조사, 미수정: 재현 조건이
-	 * 기본 off이고 쓸 계획이 없어 보류). 부분 랙돌은 정의상 캡슐/무브먼트를 살려두므로(EnterPartialRagdoll)
-	 * 감긴 본만 시뮬이고 그 부모는 키네마틱이다. 로프 쪽에서 두 겹으로 깨진다:
-	 *  1) 인가: 테더는 감긴 본에만 서보를 넣는데 키네마틱 부모 구속(무한질량)이 그걸 흡수해 액터로 전달되지
-	 *     않는다 — 팔이 관절 한계까지 휘적일 뿐 캐릭터는 안 움직인다. 능동 Pull은 이 경우 이동체에도 같은
-	 *     힘을 함께 준다(URopeComponent::ApplyPullForce의 이중 인가) → **키 입력 Pull은 되는데 테더만 안 되는**
-	 *     비대칭으로 보인다.
-	 *  2) 질량/판정: 테더의 수신자 해석(ResolveTetherEndpoint)은 그 본의 *바디* 질량(팔뚝 ≈ 3kg)을 유효질량으로
-	 *     보고한다 — 실제로는 키네마틱에 묶여 유효질량이 무한인데도. 그 거짓값이 MassShare의 몫 분배(가벼운
-	 *     대상 = 거의 전량 배정 → wielder는 양보 안 함)와 BinaryPullable의 끌림 판정(pullable=true → wielder
-	 *     완전 자유)을 모두 오염시켜, overshoot가 닫히지 않고 로프만 늘어난다.
-	 * 고치려면 두 겹 다 필요하다(테더도 CMC 동반 구동 + 키네마틱에 묶인 본은 캐릭터 질량 보고). 인가만 고치면
-	 * 몫 분배가 여전히 틀린다. 기본값 false로 두는 한 무해하다 — 풀 랙돌은 전 바디가 시뮬이라 키네마틱 앵커가
-	 * 없고 관절로 몸 전체가 끌려오므로 정상 동작한다.
+	 * Known limitation, read before enabling: with this on, the tether cannot drag the target. A
+	 * partial ragdoll keeps the capsule and movement alive by definition (see EnterPartialRagdoll), so
+	 * only the wrapped bone simulates and its parent stays kinematic. That breaks the rope side in two
+	 * separate ways:
+	 *  1) Application: the tether servos only the wrapped bone, and the kinematic parent constraint,
+	 *     which is effectively infinite mass, absorbs it instead of passing it on to the actor. The
+	 *     arm flails to its joint limit while the character does not move. Active pull applies the
+	 *     same force to the movement component as well, so it appears as the asymmetry "pulling with
+	 *     the key works but the tether does not".
+	 *  2) Mass and gating: the tether's endpoint resolution (ResolveTetherEndpoint) reports that
+	 *     bone's own body mass, roughly 3 kg for a forearm, as the effective mass, even though being
+	 *     bound to a kinematic parent makes the real effective mass infinite. That false value
+	 *     corrupts both the share distribution, where a light target is assigned nearly all of it so
+	 *     the wielder never yields, and the BinaryPullable drag test, which reports the target as
+	 *     pullable and leaves the wielder entirely free. The overshoot then never closes and only the
+	 *     rope stretches.
+	 * Fixing this needs both layers: the tether must drive the character movement component as well,
+	 * and a bone bound to a kinematic parent must report the character's mass. Fixing application
+	 * alone would still distribute the shares wrongly. It is harmless while left at the default of
+	 * false, since a full ragdoll simulates every body, has no kinematic anchor, and drags the whole
+	 * body through its joints correctly.
 	 *
-	 * 위 결함이 남아 있는 동안은 패널에 노출하지 않는다(BP 전용) — 기본값 false로는 무해하지만
-	 * 체크박스로 놓여 있으면 켜지고, 증상이 "능동 Pull은 되는데 테더만 안 됨"이라 원인 추적이 어렵다.
-	 * 두 겹(테더의 CMC 동반 구동 + 키네마틱 구속 본의 질량 보고)을 고칠 때 다시 노출할 것.
+	 * It is kept out of the details panel while that limitation stands (Blueprint only). The default
+	 * is harmless, but a visible checkbox invites being turned on, and the symptom, "active pull works
+	 * but the tether does not", is hard to trace back to its cause. Expose it again once both layers
+	 * are fixed.
 	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (EditCondition = "bRagdollOnWrapped"))
 	bool bOnlyBelowWrappedBone = false;
 
 	/**
-	 * 자동 전환된 랙돌을, 감았던 로프가 풀리면(release) 자동으로 복귀시킨다(기본 켜짐 — 감으면 자빠지고
-	 * 놓으면 일어나는 대칭). 끄면 로프가 풀려도 랙돌을 유지한다(RecoverFromRagdoll을 직접 부르기 전까지).
-	 * 수동/치트로 진입한 랙돌에는 적용되지 않는다 — 로프가 멋대로 일으키지 않도록 자동 전환분만 대상.
+	 * Recover an automatically entered ragdoll once the rope that wrapped it releases, on by default,
+	 * so wrapping knocks the target down and releasing stands it back up. Turn it off to stay limp
+	 * after a release, until RecoverFromRagdoll is called directly.
+	 * It never applies to a ragdoll entered manually, so a rope cannot stand up a target the game put
+	 * down for its own reasons.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll", meta = (DisplayName = "Recover On Release"))
 	bool bRecoverRagdollOnRopeRelease = true;
 
 	/**
-	 * 풀 랙돌 동안 플레이어 카메라가 랙돌(앵커 본)을 따라가게 한다(기본 켜짐). 소유자가 플레이어
-	 * 컨트롤 폰일 때만 동작. 랙돌은 무브먼트/캡슐이 꺼져 액터(=스프링암 카메라)가 제자리에 남으므로,
-	 * 몸만 실려 가면 화면이 빈 자리를 비춘다 — 진입 순간의 카메라 POV 위치에 카메라 액터를 스폰해
-	 * 뷰타깃으로 전환하고(무블렌드 = 이음새 없음), 본→카메라 오프셋을 유지한 채 러그 보간으로
-	 * 추적한다. 액터 텔레포트 방식(폐기)과 달리 캡슐/스프링암을 건드리지 않아 카메라 랙과의
-	 * 정귀환(폭주)이 구조적으로 없다. 복귀 시 폰 카메라로 블렌드 백. 부분 랙돌은 캡슐/무브먼트가
-	 * 살아 있어 대상 아님.
+	 * Have the player camera follow the ragdoll's anchor bone during a full ragdoll, on by default.
+	 * Only active when the owner is a player-controlled pawn. A full ragdoll disables movement and the
+	 * capsule, so the actor, and with it a spring arm camera, stays where it was and the screen would
+	 * show an empty spot while the body is carried away. Instead a camera actor is spawned at the
+	 * camera's point of view at that moment and made the view target with no blend, which is seamless,
+	 * and it then follows the bone with lag interpolation while preserving the bone-to-camera offset.
+	 * Unlike teleporting the actor, this touches neither the capsule nor the spring arm, so there is
+	 * no feedback loop with the camera lag. Recovery blends back to the pawn camera. Partial ragdolls
+	 * keep their capsule and movement and are not affected.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll", meta = (DisplayName = "Follow Camera While Ragdolled"))
 	bool bViewTargetFollowRagdoll = true;
 
-	/** 카메라 추적 러그(보간 속도, 1/s). 0 = 러그 없이 스냅. 클수록 밀착. */
+	/** Camera follow lag as an interpolation speed (1/s). 0 snaps with no lag; larger values follow
+	 *  more tightly. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (ClampMin = "0.0", EditCondition = "bViewTargetFollowRagdoll", DisplayName = "Follow Camera Lag"))
 	float FollowCameraLagSpeed = 5.0f;
 
-	/** 복귀 시 폰 카메라로 돌아가는 블렌드 시간(초). 0 = 즉시 컷. */
+	/** Blend time back to the pawn camera on recovery (s). 0 cuts immediately. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (ClampMin = "0.0", Units = "s", EditCondition = "bViewTargetFollowRagdoll", DisplayName = "Recover Camera Blend"))
 	float RecoverCameraBlendTime = 0.5f;
 
 	/**
-	 * 풀 랙돌 복귀 시 캡슐(액터)을 랙돌이 멈춘 위치로 수평 이동한다(기본 켜짐). 랙돌 동안 무브먼트가
-	 * 꺼져 캡슐은 제자리인데 메시만 물리로(예: pull) 끌려가므로, 그냥 복귀하면 메시가 원래 캡슐로
-	 * 되돌아가며 크게 순간이동한다 — 대신 캡슐을 메시(RecoverAnchorBoneName 본) 쪽으로 옮겨 그
-	 * 되돌아감이 시각적 no-op이 되게 한다. 위치만(수평), 회전/높이는 유지하고 지면 스냅은 복귀한
-	 * 무브먼트 모드가 처리한다. 부분 랙돌에는 적용 안 함(메시를 리셋하지 않아 순간이동이 없다).
+	 * Move the capsule, and therefore the actor, horizontally to where the ragdoll came to rest when
+	 * recovering from a full ragdoll, on by default. Movement is disabled while limp, so the capsule
+	 * stays put while physics drags the mesh away, for example through a pull. Recovering without this
+	 * would snap the mesh back to the original capsule, a large visible teleport; moving the capsule
+	 * to the mesh, at the RecoverAnchorBoneName bone, makes that snap a visual no-op instead.
+	 * Only the horizontal position changes: rotation and height are preserved, and ground snapping is
+	 * left to the restored movement mode. Partial ragdolls are unaffected, since their mesh is never
+	 * reset and there is no teleport.
 	 *
-	 * 비노출(BP 전용): 끄면 위 순간이동 아티팩트가 그대로 돌아오는 열화 스위치라 끌 이유가 없다.
+	 * Blueprint only: turning it off simply restores the teleport artefact, so there is no reason to.
 	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Ragdoll")
 	bool bMoveCapsuleToMeshOnRecover = true;
 
 	/**
-	 * 위 캡슐 재정렬의 기준 본 — "랙돌이 어디서 멈췄나"를 대표하는 본(보통 몸통 중심). 마네킹 기본은
-	 * pelvis. 드래곤/동물 등 스켈레톤이 다르면 주 물리 바디 본으로 바꾼다. 스켈레톤에 없으면 재정렬을
-	 * 건너뛴다(경고 후 종전 동작).
+	 * The reference bone for the capsule realignment above, the one that best represents where the
+	 * ragdoll came to rest, usually near the centre of the body. The mannequin default is pelvis;
+	 * change it to the main physics body bone for other skeletons such as dragons and animals. If the
+	 * skeleton lacks it, realignment is skipped after a warning.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (EditCondition = "bMoveCapsuleToMeshOnRecover", DisplayName = "Recover Anchor Bone"))
 	FName RecoverAnchorBoneName = TEXT("pelvis");
-
+
 	/**
-	 * 캡슐 재정렬 시 앵커 본 아래로 바닥을 탐색하는 거리(cm). 종전 재정렬은 수평만 옮기고 Z를 버리는
-	 * 평지 전제라, 수직 수송(헬기 캐리 등) 후 복귀하면 옛 높이로 되돌아갔다 — 랙돌이 멈춘 지점의
-	 * 높이를 포함해 착지시킨다: 앵커에서 이 거리만큼 아래로 트레이스해 바닥을 찾으면 캡슐 바닥을 그
-	 * 위에 세우고, 못 찾으면(공중 하차) 앵커 높이에서 낙하(Falling)로 복귀한다. 0 = 종전 수평 전용.
-	 * ACharacter 한정(비캐릭터는 원래 수평만 유지).
+	 * How far below the anchor bone to search for the ground during capsule realignment (cm).
+	 * Realigning horizontally alone assumes flat ground and discards Z, which sends a target recovered
+	 * after vertical transport, such as a helicopter carry, back to its old height. With a search
+	 * distance the resting height is included: a trace runs this far down from the anchor, and the
+	 * capsule is stood on the ground if it is found, or recovers in a falling state from the anchor
+	 * height if it is not, which covers being dropped in mid-air. 0 restores horizontal-only
+	 * behaviour. Applies to ACharacter only; other actors always keep horizontal-only realignment.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bMoveCapsuleToMeshOnRecover", DisplayName = "Recover Ground Search"))
 	float RecoverGroundSearchDistance = 500.0f;
 
-	/** 랙돌 동안 메시에 줄 콜리전 프로파일. 마네킹 기본(CharacterMesh)은 물리 충돌이 없어 전환이 필수. */
+	/** Collision profile applied to the mesh while limp. The mannequin default, CharacterMesh, has no
+	 *  physics collision, so switching profiles is required. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (DisplayName = "Collision Profile"))
 	FName RagdollCollisionProfileName = TEXT("Ragdoll");
 
 	/**
-	 * 랙돌 동안 메시의 오버랩 이벤트를 켤지. ACharacter는 생성자에서 메시의 GenerateOverlapEvents를
-	 * **끄고**(캡슐이 대표해서 낸다), 풀 랙돌은 그 캡슐마저 끄므로 — 엔진은 양쪽 컴포넌트 모두 이 플래그가
-	 * 켜져 있어야 오버랩을 발생시킨다 — 랙돌 상태의 캐릭터가 트리거 볼륨(압력판/데미지 볼륨 등)에 아예
-	 * 안 잡힌다. 켜 두면 진입 시 켜고 복귀 시 원래 값으로 되돌린다. 끄는 경우: 대상이 트리거와 무관하고
-	 * 바디 수가 많아 매 프레임 바디별 오버랩 질의 비용이 아까울 때.
+	 * Whether to enable overlap events on the mesh while limp. ACharacter disables the mesh's
+	 * GenerateOverlapEvents in its constructor, letting the capsule report on its behalf, and a full
+	 * ragdoll disables that capsule too. Since the engine only generates an overlap when the flag is
+	 * set on both components, a limp character would otherwise be invisible to trigger volumes such as
+	 * pressure plates and damage volumes. With this on, the flag is enabled on entry and restored to
+	 * its previous value on recovery. Turn it off when the target never interacts with triggers and
+	 * has enough bodies that per-body overlap queries every frame are not worth the cost.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (DisplayName = "Generate Overlap Events"))
 	bool bGenerateOverlapEventsWhileRagdolled = true;
 
 	/**
-	 * 랙돌 동안 모든 바디에 CCD를 켠다(기본 켬, 복귀 시 원복). 얇은 바닥(엔진 기본 Plane 등 두께 0
-	 * 콜리전)은 랙돌 바디가 한 스텝에 면을 넘어가면 접촉이 아예 생성되지 않아 뚫린다 — CCD가 스텝
-	 * 사이를 스윕해 막는다. 바디 수만큼 스윕 비용이 들므로 대량 랙돌에서 아까우면 끄고 바닥 두께로
-	 * 해결할 것(Plane 대신 Cube 권장).
+	 * Enable continuous collision detection on every body while limp, on by default and restored on
+	 * recovery. Thin floors, such as the engine's default Plane with zero collision thickness, are
+	 * passed straight through when a ragdoll body crosses the surface within a single step, because no
+	 * contact is ever generated; continuous detection sweeps between steps and stops that. It costs
+	 * one sweep per body, so turn it off when that is not worth it for large numbers of ragdolls and
+	 * solve the problem with floor thickness instead, preferring a cube over a plane.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (DisplayName = "Use CCD"))
 	bool bUseCCDWhileRagdolled = true;
 
-	/** 풀 랙돌 전환: 메시 전체 물리 시뮬 + 캡슐 콜리전/무브먼트 정지(ACharacter일 때).
-	 *  bAutoRecoverOnRelease: true = 로프 구동 진입으로 분류 — 감은 로프가 모두 풀리면 자동 복귀 대상
-	 *  (스네어 강제 랙돌 등, bRecoverRagdollOnRopeRelease 게이트 통과). 기본 false = 수동/치트 진입
-	 *  (로프 release와 무관하게 유지 — 종전 동작). */
+	/** Goes fully limp: the whole mesh simulates, and on an ACharacter the capsule collision and
+	 *  movement stop.
+	 *  bAutoRecoverOnRelease marks this as rope-driven, which makes it eligible for automatic recovery
+	 *  once every rope wrapping it releases, subject to the bRecoverRagdollOnRopeRelease gate; the
+	 *  snare's forced ragdoll uses this. The default of false marks it as a manual entry, which is
+	 *  unaffected by rope releases. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
 	void EnterRagdoll(bool bAutoRecoverOnRelease = false);
 
-	/** 부분 랙돌 전환: BoneName 이하 바디만 물리 시뮬(blend weight 1). 나머지는 애니메이션 유지.
-	 *  bAutoRecoverOnRelease 의미는 EnterRagdoll과 동일. */
+	/** Goes partially limp: only the bodies below BoneName simulate, at blend weight 1, while the rest
+	 *  keeps animating. bAutoRecoverOnRelease means the same as in EnterRagdoll. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
 	void EnterPartialRagdoll(FName BoneName, bool bAutoRecoverOnRelease = false);
 
-	/** 애니메이션 복귀. 풀 랙돌이었다면 메시를 원래 부착/상대 트랜스폼으로 되돌린다(의도된 포즈 팝). */
+	/** Recovers to animation. After a full ragdoll the mesh is returned to its original attachment and
+	 *  relative transform, which produces an intentional pose pop. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
 	void RecoverFromRagdoll();
 
-	/** 로프 구동으로 분류된 랙돌(bAutoRecoverOnRelease=true 진입)을, 지금 이 메시를 감고 있는 로프가
-	 *  하나도 없을 때만 복귀시킨다. 자동 복귀는 release 이벤트로만 발화하므로 "랙돌 진입은 했는데 로프가
-	 *  감기기 전에 상황이 끝난"(스네어가 발사 전에 해제되는 등) 경로에서는 영영 안 일어난다 — 그 구멍을
-	 *  막는 명시 호출용. 복귀 자격 규칙은 자동 복귀와 동일하게 존중한다: 수동/치트 진입 랙돌과
-	 *  bRecoverRagdollOnRopeRelease=false는 건드리지 않고, 다른 로프가 아직 감고 있으면 마지막 release의
-	 *  자동 복귀에 맡긴다. 복귀를 실제로 수행했으면 true. */
+	/** Recovers a rope-driven ragdoll, one entered with bAutoRecoverOnRelease, but only while no rope
+	 *  is wrapping this mesh. Automatic recovery only fires on a release event, so it never happens on
+	 *  paths where the target went limp but the situation ended before any rope wrapped it, such as a
+	 *  snare cancelled before it fires; this call closes that gap. It respects the same eligibility
+	 *  rules as automatic recovery: a manually entered ragdoll and bRecoverRagdollOnRopeRelease set to
+	 *  false are left alone, and while another rope is still attached it defers to the automatic
+	 *  recovery on the last release. Returns true when a recovery actually happened. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Ragdoll")
 	bool RecoverFromRagdollIfUnheld();
 
@@ -198,47 +235,61 @@ public:
 	bool IsRagdolled() const { return bRagdolled; }
 
 private:
-	/** 대상 메시: ACharacter면 GetMesh(), 아니면 owner의 첫 USkeletalMeshComponent. */
+	/** The target mesh: GetMesh() on an ACharacter, otherwise the owner's first
+	 *  USkeletalMeshComponent. */
 	USkeletalMeshComponent* ResolveMesh() const;
 
-	/** 전환 직전 원상복구용 상태 저장(프로파일/부착/상대 트랜스폼). */
+	/** Saves the state needed to restore the mesh afterwards: collision profile, attachment and
+	 *  relative transform. */
 	void SaveRestoreState(USkeletalMeshComponent* Mesh);
 
-	/** 랙돌 진입 시 메시의 오버랩 이벤트 반영(bGenerateOverlapEventsWhileRagdolled). 복귀는 저장값으로 되돌린다. */
+	/** Applies bGenerateOverlapEventsWhileRagdolled to the mesh on entry. Recovery restores the saved
+	 *  value. */
 	void ApplyRagdollOverlapEvents(USkeletalMeshComponent* Mesh);
 
-	//~ 중앙 신호 핸들러(URopeSimSubsystem).
-	/** 월드 어느 로프든 wrap 성립 시 — Info.Mesh가 내 메시면 (지연 후) 자동 랙돌 예약. */
+	//~ Handlers for the central signals on URopeSimSubsystem.
+	/** Any rope in the world established a wrap. If Info.Mesh is this component's mesh, the automatic
+	 *  ragdoll is scheduled after the configured delay. */
 	void HandleAnyRopeWrapped(const FRopeWrappedEventInfo& Info);
-	/** 월드 어느 로프든 release 시 — 내 메시를 감던 마지막 로프가 풀렸고 자동 랙돌이었으면 복귀(+예약 취소). */
+	/** Any rope in the world released. If the last rope wrapping this mesh has now let go and the
+	 *  ragdoll was automatic, recover and cancel any pending schedule. */
 	void HandleAnyRopeReleased(const URopeComponent* Rope, const USceneComponent* WrappedMesh, FName Bone,
 		ERopeReleaseReason Reason);
 
-	/** 파괴된 로프(weak 만료)를 engagement 집합에서 걷어내고 남은 수를 돌려준다. */
+	/** Drops destroyed ropes, whose weak pointers have expired, from the engagement set and returns
+	 *  how many remain. */
 	int32 PruneWrappingRopes();
 
-	/** RagdollOnWrappedDelay 만료 시 실제 전환(예약된 본은 PendingWrappedBone). */
+	/** Performs the transition when RagdollOnWrappedDelay expires, using the bone recorded in
+	 *  PendingWrappedBone. */
 	void FireAutoRagdoll();
 
-	/** bUseCCDWhileRagdolled 게이트 하에 전 바디 CCD를 켜고/끈다(진입 시 켬, 복귀 시 원복). */
+	/** Enables or disables continuous collision detection on every body, subject to the
+	 *  bUseCCDWhileRagdolled gate. Enabled on entry and restored on recovery. */
 	void ApplyRagdollCCD(USkeletalMeshComponent* Mesh, bool bEnable);
 
-	/** 풀 랙돌 진입 시 카메라 액터 스폰 + 뷰타깃 전환(플레이어 폰 한정). 실패하면 조용히 no-op. */
+	/** Spawns the camera actor and switches the view target when a full ragdoll begins, for player
+	 *  pawns only. Silently does nothing on failure. */
 	void BeginRagdollCameraFollow();
-	/** 뷰타깃을 폰으로 블렌드 백하고 카메라 액터를 수명 종료시킨다(블렌드 동안 생존 필요). */
+	/** Blends the view target back to the pawn and ends the camera actor's lifetime, which must
+	 *  outlast the blend. */
 	void EndRagdollCameraFollow();
 
 	bool bRagdolled = false;
 	bool bPartial = false;
-	// 현재 랙돌이 wrap 자동 전환으로 들어간 것인가(수동/치트 진입과 구분 — 자동 복귀 대상 게이트).
+	// Whether the current ragdoll was entered automatically by a wrap, as opposed to manually. This
+	// gates eligibility for automatic recovery.
 	bool bRagdollWasAutoTriggered = false;
-	// 자동 전환 예약 시점에 감긴 본(부분 랙돌 대상). FireAutoRagdoll이 소비.
+	// The bone that was wrapped when the automatic transition was scheduled, used as the partial
+	// ragdoll root. Consumed by FireAutoRagdoll.
 	FName PendingWrappedBone = NAME_None;
 	FTimerHandle AutoRagdollTimer;
 
-	// 지금 이 액터의 메시를 감고 있는 로프들(중앙 wrap/release 신호로 유지). 자동 복귀 게이트가 "비었나"를
-	// 본다 — mesh 일치만으로 복구하면 로프 둘이 감은 상태에서 하나만 풀려도 일어서 버린다. 로프는 감긴
-	// 채 파괴될 수 있으므로 weak(만료분은 PruneWrappingRopes가 정리).
+	// The ropes currently wrapping this actor's mesh, maintained from the central wrap and release
+	// signals. The automatic recovery gate checks whether this is empty: recovering on a mesh match
+	// alone would stand the target up as soon as one of two attached ropes released. A rope can be
+	// destroyed while still wrapped, so these are weak and expired entries are cleaned up by
+	// PruneWrappingRopes.
 	TSet<TWeakObjectPtr<URopeComponent>> WrappingRopes;
 
 	FName SavedCollisionProfile = NAME_None;
@@ -246,20 +297,24 @@ private:
 	TWeakObjectPtr<USceneComponent> SavedAttachParent;
 	FName SavedAttachSocket = NAME_None;
 	TEnumAsByte<ECollisionEnabled::Type> SavedCapsuleCollision = ECollisionEnabled::QueryAndPhysics;
-	// 진입 전 메시의 오버랩 이벤트 플래그 — bGenerateOverlapEventsWhileRagdolled로 덮어썼을 수 있어 복귀 때 되돌린다.
+	// The mesh's overlap event flag before entry, which bGenerateOverlapEventsWhileRagdolled may have
+	// overwritten, restored on recovery.
 	bool bSavedMeshOverlapEvents = false;
-	// 진입 전 무브먼트 모드 — 복귀 때 그대로 되돌린다(종전에는 MOVE_Walking 하드코딩이라 Flying/Swimming/
-	// Custom으로 랙돌에 들어간 대상이 걸어 나왔다). MOVE_None으로 들어갔던 경우만 Walking으로 구제한다.
+	// The movement mode before entry, restored exactly on recovery. Restoring a hardcoded walking mode
+	// instead would make a target that went limp while flying, swimming or in a custom mode walk out
+	// of the ragdoll. Only an entry made in MOVE_None is rescued to walking.
 	TEnumAsByte<EMovementMode> SavedMovementMode = MOVE_Walking;
 	uint8 SavedCustomMovementMode = 0;
 
-	// 랙돌 카메라 추적 상태 — 컨트롤러/카메라 액터는 소유하지 않는 weak(복귀·소멸 어느 쪽이 먼저여도 안전).
+	// Ragdoll camera follow state. The controller and camera actor are not owned here, so they are
+	// held weakly and it is safe whether recovery or destruction happens first.
 	TWeakObjectPtr<APlayerController> FollowController;
 	TWeakObjectPtr<ACameraActor> FollowCamera;
-	// 진입 순간의 앵커 본→카메라 월드 오프셋(추적 동안 유지 — 보던 각도/거리 보존).
+	// The world offset from the anchor bone to the camera at the moment of entry, preserved while
+	// following so the viewing angle and distance are kept.
 	FVector FollowCameraOffset = FVector::ZeroVector;
 
-	// 신호 구독 핸들(EndPlay 해제용).
+	// Signal subscription handles, released in EndPlay.
 	FDelegateHandle WrappedHandle;
 	FDelegateHandle ReleasedHandle;
 };

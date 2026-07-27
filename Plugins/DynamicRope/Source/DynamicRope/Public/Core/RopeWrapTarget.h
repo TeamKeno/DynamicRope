@@ -1,19 +1,23 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 랩 대상 추상화(Wrap Target Abstraction).
-// "랩 대상 = 스켈레탈 메시의 본 하나"라는 가정을 코드에서 뽑아내, 정적 메시 랩(피드백 5번)과
-// 본 그룹 랩(피드백 3번)이 공유하는 공통 기반을 제공한다. 설계 근거: Notion "랩 대상 추상화 설계 초안".
+// The wrap target abstraction. It lifts the assumption that a wrap target is one bone on a skeletal
+// mesh out of the code, providing the common foundation shared by wrapping a static mesh and
+// wrapping a group of bones.
 //
-// 바인딩(binding) seam — 앵커 하나가 매 프레임 "무엇"을 따라가는가.
-//   FRopeBindingFrame + ResolveBindingWorld.  (Hold/BeginWrap이 소비)
+// The binding seam is what one anchor follows each frame: FRopeBindingFrame together with
+// ResolveBindingWorld, consumed by Hold and BeginWrap.
 //
-// [배선 상태] ResolveBindingWorld는 랩 경로 전체(Hold/BeginWrap/경로 빌드/앵커 복원/프리뷰)에 배선
-// 완료. 스켈레톤 구조 질의(RopeWrapTargets:: — 부모/자식 키, 스켈레탈 판별)도 랩 경로의 인라인 Cast를
-// 대체해 배선됐다 — 랩 흐름의 스켈레탈 가정은 이 파일 쌍(.h/.cpp)에만 존재한다.
+// ResolveBindingWorld is wired through the whole wrap path, covering Hold, BeginWrap, the path
+// build, anchor restoration and the preview. The skeleton structure queries in RopeWrapTargets::,
+// namely the parent and child keys and the skeletal test, likewise replace the inline casts that
+// used to be spread through the wrap path, so the assumption that a target is skeletal now exists
+// only in this header and its implementation file.
 //
-// [확장 여지] 본 그룹(피드백 3번)/디자이너 축 opt-in 이 구체화되면 "접촉 집계를 무슨 단위로 묶는가"의
-// 집계(aggregation) seam이 필요해진다 — 그때 대상 소유 provider가 선언하는 registry를 도입하고
-// RopeWrapTargets:: 구현 내부를 그 조회로 교체한다(설계 초안 Increment 2~4). 실수요 전까지는 넣지 않는다.
+// Room to extend: once wrapping a group of bones, or an opt-in designer axis, becomes concrete, an
+// aggregation seam is needed for the question of what unit contacts are aggregated under. At that
+// point a registry declared by the provider that owns the target can be introduced and the bodies of
+// the RopeWrapTargets:: functions replaced with lookups into it, leaving the call sites unchanged.
+// It is deliberately not added before there is a real need for it.
 
 #pragma once
 
@@ -27,69 +31,85 @@ class USceneComponent;
 class IRopeCollider;
 
 /**
- * 앵커/랩 노드가 "무엇에 붙어 매 프레임 따라가는가"를 기술하는 바인딩 프레임(POD — 핫 루프 규칙 준수).
- * 지금 코드 곳곳에 흩어진 Mesh->GetSocketTransform(Bone) 을 이 한 타입 + ResolveBindingWorld 로 대체한다.
- * Component 는 weak — cross-actor 대상이 파괴되면 안전하게 null 이 된다(기존 FRopeWrapState::Mesh 규칙 계승).
+ * The binding frame describing what an anchor or wrap node is attached to and follows each frame.
+ * Plain data, in keeping with the hot-loop rule. It replaces the calls to
+ * Mesh->GetSocketTransform(Bone) scattered through the code with this one type plus
+ * ResolveBindingWorld.
+ * The component is held weakly, so a destroyed cross-actor target becomes null safely, following the
+ * same rule as FRopeWrapState::Mesh.
  */
 struct FRopeBindingFrame
 {
 	/**
-	 * 붙는 대상 컴포넌트. 스켈레탈이면 USkeletalMeshComponent 로 다운캐스트해 소켓(스키닝) 트랜스폼을,
-	 * 그 외(정적/무버블 프롭)면 컴포넌트/소켓 트랜스폼을 쓴다. ResolveBindingWorld 가 종류를 판별한다.
+	 * The component being followed. A skeletal one is downcast to USkeletalMeshComponent to use the
+	 * skinned socket transform; anything else, such as a static or movable prop, uses the component or
+	 * socket transform. ResolveBindingWorld decides which.
 	 */
 	TWeakObjectPtr<const USceneComponent> Component = nullptr;
 
-	/** 스켈레탈: 본/소켓 이름. 정적: 소켓이 있으면 그 이름, 없으면 None(= 컴포넌트 트랜스폼). */
+	/** For a skeletal target, the bone or socket name. For a static one, the socket name if there is
+	 *  one, or None to mean the component transform. */
 	FName SocketOrBone = NAME_None;
 
-	/** 유효한 트랜스폼을 낼 수 있는가(대상 파괴 감지). 호출자는 false면 release 한다. */
+	/** Whether a valid transform can still be produced, which detects a destroyed target. A caller
+	 *  seeing false should release. */
 	bool IsValid() const { return Component.IsValid(); }
 };
 
 /**
- * 바인딩 프레임 → 이번 프레임 월드 트랜스폼. 랩 경로의 Mesh->GetSocketTransform(Bone) 을 통째로 대체하는
- * 단일 해석 지점이다. 스켈레탈이면서 본 이름이 있으면 스키닝된 소켓 트랜스폼(기존 경로와 100% 동일),
- * 그 외면 컴포넌트/소켓 트랜스폼(정적은 트랜스폼 불변이라 자동으로 "안 움직이는 hold", 무버블 프롭은 추종).
- * Component 가 유효하지 않으면 Identity 를 반환한다(호출자는 IsValid()로 먼저 걸러 release 하는 것을 권장).
+ * Resolves a binding frame into this frame's world transform. It is the single resolution point that
+ * replaces every Mesh->GetSocketTransform(Bone) on the wrap path. A skeletal component with a bone
+ * name gives the skinned socket transform; anything else gives the component or socket transform,
+ * which makes a static target hold still automatically, since its transform never changes, while a
+ * movable prop is followed.
+ * An invalid component returns the identity; callers are advised to filter with IsValid() and release
+ * first.
  */
 DYNAMICROPE_API FTransform ResolveBindingWorld(const FRopeBindingFrame& Frame);
 
 /**
- * 위와 동일한 해석의 raw 포인터 오버로드 — (Mesh, Bone)을 이미 들고 있는 호출자(경로 빌드/앵커 배치 등
- * 프레임 내 다회 호출)가 weak 프레임을 만들지 않고 직접 쓴다. null Component 는 Identity.
+ * The same resolution as a raw pointer overload, for callers that already hold a mesh and bone and
+ * call it several times within a frame, such as the path build and anchor placement, so they need not
+ * construct a weak frame. A null component gives the identity.
  */
 DYNAMICROPE_API FTransform ResolveBindingWorld(const USceneComponent* Component, FName SocketOrBone);
 
 /**
- * 랩 대상의 스켈레톤 *구조* 질의 모음. 랩 흐름(감김 축/본 그래프/분류)이 대상 종류를 직접 Cast로
- * 판별하는 대신 이 질의를 쓴다 — 스켈레탈 가정이 이 구현 파일 하나에 격리된다.
- * [확장 지점] 본 그룹(피드백 3번)/디자이너 전환 edge가 들어오면 이 함수들 내부를
- * IRopeWrapTargetRegistry 조회로 교체한다 — 호출부는 그대로.
+ * Structural queries about a wrap target's skeleton. The wrap flow, meaning the wrap axis, the bone
+ * graph and classification, uses these instead of casting to decide what kind of target it has, which
+ * isolates the skeletal assumption in this one implementation file.
+ * Extension point: once bone groups or designer-authored transition edges arrive, the bodies of these
+ * functions become registry lookups, leaving the call sites unchanged.
  */
 namespace RopeWrapTargets
 {
-	/** 대상이 스켈레탈(본 그래프 보유)인가. 정적/가상 본 대상은 false. */
+	/** Whether the target is skeletal, meaning it has a bone graph. False for static and virtual-bone
+	 *  targets. */
 	DYNAMICROPE_API bool IsSkeletalTarget(const USceneComponent* Mesh);
 
-	/** 대상 키(본)의 부모 키. 스켈레탈 = 부모 본 이름, 그 외(정적/가상 본/루트) = None(그래프 없음). */
+	/** The parent key of a target key, that is a bone. On a skeletal target this is the parent bone
+	 *  name; on anything else, including a static target, a virtual bone or a root, it is None because
+	 *  there is no graph. */
 	DYNAMICROPE_API FName GetParentTargetKey(const USceneComponent* Mesh, FName Bone);
 
 	/**
-	 * 대상 키(본)의 자식 키들을 OutChildren에 append. 스켈레탈 = 스켈레톤에서 부모가 Bone인 본 전부,
-	 * 그 외 = 없음. SurfaceVectorField 본 그래프 확장(bounded Dijkstra)의 이웃 열거에 쓴다.
+	 * Appends the child keys of a target key to OutChildren. On a skeletal target these are every bone
+	 * whose parent is Bone; on anything else there are none. Used to enumerate neighbours while
+	 * expanding the surface vector field's bone graph with a bounded Dijkstra search.
 	 */
 	DYNAMICROPE_API void AppendChildTargetKeys(const USceneComponent* Mesh, FName Bone, TArray<FName>& OutChildren);
 
 	/**
-	 * URopeComponent::CanWrapTarget 게이트를 collider 스냅샷에 적용해 OutColliders를 채운다
-	 * (감김 경로 빌드가 금지된 대상 위에 앵커를 깔지 않게 하는 관문).
+	 * Applies the URopeComponent::CanWrapTarget gate to a collider snapshot and fills in OutColliders.
+	 * It is the gate that stops the wrap path build from laying anchors on a forbidden target.
 	 *
-	 * 판정 기준은 감김 경로가 대상을 식별하는 방법과 **같은 것**을 쓴다 — IRopeCollider::GetGPUAttribution.
-	 * 귀속이 없는 collider(월드 정적 등: Bone=None && Mesh=null)는 애초에 감김 대상이 될 수 없고
-	 * 표면 기하로만 쓰이므로 게이트와 무관하게 남긴다.
+	 * It identifies targets the same way the wrap path does, through IRopeCollider::GetGPUAttribution.
+	 * A collider with no attribution, such as static world geometry where the bone is None and the mesh
+	 * is null, can never be a wrap target in the first place and is used purely as surface geometry, so
+	 * it is kept regardless of the gate.
 	 *
-	 * 게이트 기본 구현이 전부 허용이면 결과는 입력과 동일하다 — 즉 **오버라이드하지 않은 로프의
-	 * 동작은 정의상 불변**이다.
+	 * When the gate's default implementation permits everything, the output equals the input, so a rope
+	 * that does not override it behaves identically by definition.
 	 */
 	DYNAMICROPE_API void FilterWrappableColliders(
 		const TArray<IRopeCollider*>& InColliders,

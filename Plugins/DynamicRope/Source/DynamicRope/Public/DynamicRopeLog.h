@@ -1,27 +1,32 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// DynamicRope(Runtime) 로그 카테고리. 아키텍처의 경계(파사드/솔버/로직/충돌·렌더)에 맞춰 나눈다.
-// 어떤 .cpp든 이 헤더만 include하면 UE_LOG(LogRope..., ...)를 쓸 수 있다.
-// 정의(DEFINE)는 DynamicRope.cpp 한 곳에 있다.
+// Log categories for the DynamicRope runtime module, split along the boundaries of the architecture:
+// the facade, the solver, the logic, and collision and rendering.
+// Including this header alone is enough for any .cpp to use UE_LOG(LogRope..., ...); the definitions
+// live in DynamicRope.cpp.
 //
-// 사용 기준:
-//   LogDynamicRope     — 컴포넌트/서브시스템/모듈 수명주기, phase 전이 등 상위 흐름.
-//   LogRopeSolver      — XPBD 솔버(물리). substep/constraint/수렴 관련 hot-path 진단.
-//   LogRopeWrap        — wrap 컨트롤러(로직). BeginWrap/Hold/Pull/Release.
-//   LogRopeCollision   — collider/provider/SDF 런타임 질의(브로드·내로우 페이즈).
+// Which to use:
+//   LogDynamicRope     high-level flow, such as the lifecycles of components, subsystems and modules,
+//                      and phase transitions.
+//   LogRopeSolver      the XPBD solver, meaning physics. Hot-path diagnostics for substeps,
+//                      constraints and convergence.
+//   LogRopeWrap        the wrap controller, meaning logic: BeginWrap, Hold, Pull and Release.
+//   LogRopeCollision   runtime collider, provider and SDF queries, in both the broad and narrow
+//                      phases.
 
 #pragma once
 
 #include "Logging/LogMacros.h"
 
-/** 상위 흐름: 컴포넌트(파사드)·서브시스템·모듈 수명주기·phase 전이. */
+/** High-level flow: the component facade, the subsystem, module lifecycles and phase transitions. */
 DECLARE_LOG_CATEGORY_EXTERN(LogDynamicRope, Log, All);
 
-/** 물리: XPBD 솔버. substep/distance·bending·collision constraint 진단. */
+/** Physics: the XPBD solver. Diagnostics for substeps and the distance, bending and collision
+ *  constraints. */
 DECLARE_LOG_CATEGORY_EXTERN(LogRopeSolver, Log, All);
 
-/** 로직: wrap 컨트롤러(BeginWrap/Hold/Pull/Release). */
+/** Logic: the wrap controller, covering BeginWrap, Hold, Pull and Release. */
 DECLARE_LOG_CATEGORY_EXTERN(LogRopeWrap, Log, All);
 
-/** 충돌: collider/provider/SDF 런타임 질의(broad/narrow phase). */
+/** Collision: runtime collider, provider and SDF queries in the broad and narrow phases. */
 DECLARE_LOG_CATEGORY_EXTERN(LogRopeCollision, Log, All);

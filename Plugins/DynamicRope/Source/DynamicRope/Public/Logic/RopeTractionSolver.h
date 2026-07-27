@@ -1,13 +1,17 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 견인(테더 + 능동 Pull) 축 드라이브의 공용 수학(UObject-free). 테더 두 모드 × 양끝과 능동 Pull은 전부
-// "로프 축 속도를 목표로 서보한다"는 같은 골격이고, 목표/접근 방식/상한만 다르다 — 그 차이를 FRopeAxisServo로
-// 기술하고 산수는 여기서 한 번만 한다. 월드 없이 단위 테스트 가능(Tests/RopeTractionSolverTests.cpp).
+// The shared, UObject-free maths of the traction axis drive, covering both the tether and active
+// pull. Every case, that is both tether modes at both ends plus active pull, has the same skeleton:
+// servo the velocity along the rope axis towards a target. Only the target, the approach and the
+// limits differ, so those differences are described by FRopeAxisServo and the arithmetic is written
+// once, here. It can be unit tested without a world; see Tests/RopeTractionSolverTests.cpp.
 //
-// 여기 없는 것 = 인가(어떤 UObject API로 꽂는가). 수신자마다 의미가 달라 통일할 수 없다 — 특히 CMC 캐릭터는
-// Movement->Velocity 직접 세팅이 *이번 프레임*에 반영되고 Movement->AddImpulse는 *다음 틱*
-// (ApplyAccumulatedForces)에 반영돼 서로 교환 불가다. 호출자(URopeComponent)가 여기서 ΔV/임펄스만 받아
-// 자기 수신자 방식으로 인가한다.
+// What is deliberately absent is application, that is which UObject API the result is fed into. The
+// meaning differs per receiver and cannot be unified: on a character movement component in
+// particular, setting Movement->Velocity directly takes effect this frame while
+// Movement->AddImpulse takes effect on the next tick, through ApplyAccumulatedForces, so the two are
+// not interchangeable. The caller, URopeComponent, takes only the delta velocity or impulse from
+// here and applies it the way its own receiver requires.
 
 #pragma once
 
@@ -16,46 +20,61 @@
 namespace RopeTraction
 {
 	/**
-	 * 축 속도 서보 스펙. 로프 축(인가 방향) 성분만 다룬다 — 직교 성분(중력/스윙)은 호출자가 보존한다.
+	 * The specification of an axis velocity servo. It deals only with the component along the rope
+	 * axis, which is the direction of application; the orthogonal components, such as gravity and
+	 * swing, are preserved by the caller.
 	 */
 	struct FRopeAxisServo
 	{
-		/** 목표 축 속도(cm/s, +가 인가 방향). */
+		/** Target axis speed (cm/s), positive along the direction of application. */
 		float TargetSpeed = 0.0f;
-		/** 목표까지 이번 프레임에 접근할 비율 [0..1]. 1 = 정확 도달(감쇠 없음), 작을수록 여러 프레임에 걸쳐 부드럽게. */
+		/** How much of the remaining gap to close this frame, from 0 to 1. 1 reaches the target exactly
+		 *  with no damping; smaller values approach it smoothly over several frames. */
 		float Alpha = 1.0f;
-		/** false = 가속만(목표에 부족할 때만 인가, 감속 안 함) / true = 제동도(목표 초과 관성 제거 — 코스팅·오버슛 방지). */
+		/** False accelerates only, applying force when short of the target and never slowing down. True
+		 *  also brakes, removing momentum beyond the target, which prevents coasting and overshoot. */
 		bool bBidirectional = false;
-		/** true = 바깥(음수) 축 속도를 먼저 0으로 상쇄한 뒤 목표로 접근(CMC walk 상쇄: 즉시·완전, Alpha 무관). */
+		/** True cancels any outward, that is negative, axis velocity to zero first and then approaches
+		 *  the target. The cancellation is immediate and complete, and ignores Alpha; it exists for
+		 *  cancelling a character movement component's walking velocity. */
 		bool bCancelOutward = false;
 	};
 
 	/**
-	 * 이번 프레임 인가할 축 ΔV(cm/s). 0이면 무동작 — 호출자는 그걸로 스킵을 판단한다.
-	 * 단방향(bBidirectional=false)은 목표 이상이면 0을 반환해 역추진/제동을 하지 않는다.
+	 * The axis delta velocity to apply this frame (cm/s). 0 means do nothing, which is how the caller
+	 * decides to skip.
+	 * A one-directional servo, with bBidirectional false, returns 0 once at or beyond the target so it
+	 * never thrusts backwards or brakes.
 	 */
 	DYNAMICROPE_API float ComputeAxisDeltaV(float CurAlong, const FRopeAxisServo& Servo);
 
 	/**
-	 * ΔV를 실제 임펄스로: J = 질량 × ΔV, 상한이 있으면 ±MaxImpulse로 클램프(양방향 — 가속/제동 대칭).
-	 * MaxImpulse = 최대 장력 × dt. 0 = 무제한(질량 무관하게 ΔV를 그대로 내는 정확 서보).
-	 * 질량 M이 속도 V에 한 프레임 만에 도달하는 문턱 장력 ≈ M·V·fps — 그보다 작으면 뒤처진다(무게감).
+	 * Turns a delta velocity into an actual impulse: J = mass * deltaV, clamped symmetrically to plus
+	 * or minus MaxImpulse when a limit is set, so acceleration and braking are treated alike.
+	 * MaxImpulse is the maximum tension multiplied by dt. 0 means unlimited, which gives an exact servo
+	 * that produces the requested delta velocity regardless of mass.
+	 * The threshold tension at which a mass M reaches a speed V within one frame is approximately
+	 * M * V * fps; below that the receiver lags behind, which reads as weight.
 	 */
 	DYNAMICROPE_API float ClampAxisImpulse(float DeltaV, float Mass, float MaxImpulse);
 
 	/**
-	 * 속도 주입 결과의 절대 속력 상한 = max(SpeedCap, 기존 속력). 방향이 흔들리면 주입이 프레임마다 다른
-	 * 축으로 들어가 감쇠 없는 Falling에서 벡터가 계속 커질 수 있다(폭주 2차 방어 — 1차는 방향 EMA).
-	 * 기존에 더 빠른 외부 운동(자유낙하 등)은 보존한다. SpeedCap=0(클램프 없음 설정)이면 그대로 통과.
+	 * Caps the absolute speed after a velocity injection at the larger of SpeedCap and the existing
+	 * speed. If the direction wobbles, injections land on a different axis each frame and the vector
+	 * can keep growing while falling, where nothing damps it; this is the second line of defence
+	 * against that runaway, the first being the direction EMA.
+	 * External motion that is already faster, such as free fall, is preserved. A SpeedCap of 0 disables
+	 * the clamp and passes the value through.
 	 */
 	DYNAMICROPE_API FVector ClampInjectedVelocity(const FVector& NewVel, const FVector& OldVel, float SpeedCap);
 
-	/** 유효 역질량(w = 1/유효질량). Mass 0(또는 ~0) = 앵커(무한질량) → 0. */
+	/** Effective inverse mass, w = 1 / effective mass. A mass of 0, or near it, is an anchor of
+	 *  infinite mass and gives 0. */
 	DYNAMICROPE_API float InvMassFromMass(float Mass);
 
 	/**
-	 * 월드 점에 로프 임펄스를 받는 강체의 순간 질량 특성.
-	 * InertiaTensor는 MassSpaceToWorld 회전 프레임에서 대각 성분이다.
+	 * The instantaneous mass properties of a rigid body receiving a rope impulse at a world point.
+	 * InertiaTensor holds the diagonal components in the MassSpaceToWorld rotation frame.
 	 */
 	struct FRopePointMassProperties
 	{
@@ -64,118 +83,150 @@ namespace RopeTraction
 		FTransform MassSpaceToWorld = FTransform::Identity;
 	};
 
-	/** 같은 월드 점에 ImpulseWorld를 인가했을 때 그 점의 순간 속도 변화 K·J. */
+	/** The instantaneous velocity change K*J at a world point when ImpulseWorld is applied at that same
+	 *  point. */
 	DYNAMICROPE_API FVector ComputePointVelocityDelta(
 		const FRopePointMassProperties& Body,
 		const FVector& PointWorld,
 		const FVector& ImpulseWorld);
 
-	/** 월드 점/방향의 스칼라 로프 Jacobian J M^-1 J^T. */
+	/** The scalar rope Jacobian J M^-1 J^T for a world point and direction. */
 	DYNAMICROPE_API float ComputePointInverseMass(
 		const FRopePointMassProperties& Body,
 		const FVector& PointWorld,
 		const FVector& DirectionWorld);
 
 	/**
-	 * 프레임률 독립 지수 스무딩 계수 α = 1 − exp(−dt/Tau). dt가 아무리 커도 α ≤ 1이라 오버슛하지 않고,
-	 * 프레임률이 달라져도 같은 시상수(Tau 초)로 수렴한다(α를 상수로 두면 프레임률에 따라 반응이 달라진다).
-	 * Tau ≤ 0 = 스무딩 없음(α = 1, 한 프레임에 목표 도달).
+	 * The framerate-independent exponential smoothing coefficient alpha = 1 - exp(-dt / Tau). However
+	 * large dt grows, alpha stays at or below 1 so it never overshoots, and it converges on the same
+	 * time constant of Tau seconds at any framerate; a constant alpha would make the response depend on
+	 * the framerate instead.
+	 * A Tau at or below 0 disables smoothing, giving alpha = 1 and reaching the target in one frame.
 	 */
 	DYNAMICROPE_API float ExpSmoothAlpha(float Tau, float DeltaTime);
 
 	/**
-	 * 방향 EMA(단위 벡터 전용). 견인 방향이 프레임마다 튀면 클램프/톱업이 매번 다른 축으로 들어가 벡터가
-	 * 랜덤워크로 불어난다(폭주) — 그 1차 방어다(2차는 ClampInjectedVelocity의 속력 상한).
-	 *  - Current가 ~0(미시드)이면 Target으로 시드한다(첫 유효 프레임 래그 없음).
-	 *  - 그 외엔 Lerp 후 재정규화. **180° 반전 순간 Lerp가 정확히 상쇄돼 0이 되면 Target으로 재시드한다** —
-	 *    재시드가 없으면 방향이 0이 된 채로 남아 축이 사라진다(호출자 폴백에 의존하게 된다).
-	 * Target은 단위 벡터라고 가정한다(호출자가 정규화해 넘긴다).
+	 * An exponential moving average over a direction, for unit vectors only. If the traction direction
+	 * jumps around between frames, the clamps and top-ups land on a different axis each time and the
+	 * vector grows by random walk, which is the runaway this guards against as the first line of
+	 * defence; the second is the speed cap in ClampInjectedVelocity.
+	 *  - When Current is near zero, meaning unseeded, it is seeded from Target so the first valid frame
+	 *    has no lag.
+	 *  - Otherwise it interpolates and renormalizes. If a 180 degree reversal makes the interpolation
+	 *    cancel exactly to zero, it reseeds from Target: without that, the direction would stay at zero
+	 *    and the axis would vanish, leaving the caller relying on its fallback.
+	 * Target is assumed to be a unit vector, normalized by the caller.
 	 */
 	DYNAMICROPE_API FVector SmoothDirection(const FVector& Current, const FVector& Target, float Alpha);
 
 	/**
-	 * fractional 조준 위치: 조준 노드 사이를 선형 보간한다. 정수 조준 노드를 그대로 쓰면 프레임 간 이산 홉으로
-	 * 방향이 통째로 점프하고 초과분이 노드 단위로 뚝뚝 튄다(견인 "뚝뚝 끊김") — 그 연속화다.
-	 * AimF는 [0, AnchorNode] 범위로 클램프해 넘긴다. 인덱스가 범위 밖이면 ZeroVector.
+	 * A fractional aim position, interpolating linearly between aim nodes. Using the integer aim node
+	 * directly makes the direction jump wholesale as it hops discretely between frames, and the
+	 * overshoot step in node-sized jumps, which reads as traction stuttering; this makes it continuous.
+	 * AimF is clamped by the caller to the range from 0 to AnchorNode. An index outside the range
+	 * returns a zero vector.
 	 */
 	DYNAMICROPE_API FVector SampleFractionalAim(const TArray<FVector>& Positions, float AimF, int32 AnchorNode);
 
 	/**
-	 * 능동 Pull 팽팽(taut) 게이트 판정(히스테리시스 래치). 팽팽 판정의 정본은 **장력**(XPBD λ 유래)이다 —
-	 * 테더 overshoot는 기하라 여기 쓰지 않는다. Threshold ≤ 0(기본) = 장력이 조금이라도 있으면 팽팽
-	 * (종전 하드코딩 게이트 "Tension > ~0"과 동일 — 동작 불변). Threshold > 0이면 진입은 Threshold 초과,
-	 * 유지(bWasTaut=true)는 Threshold×ReleaseRatio 초과로 판정해 임계 경계의 장력 지터로 게이트가
-	 * 켜졌다 꺼졌다 퍼덕이는 것을 막는다(ReleaseRatio는 [0..1]로 클램프).
+	 * The taut gate for active pull, as a hysteresis latch. Tautness is defined by tension, derived
+	 * from the XPBD lambda; the tether overshoot is geometric and is not used here.
+	 * A threshold at or below 0, the default, treats any tension at all as taut. Above 0, engaging
+	 * requires exceeding the threshold while staying engaged, with bWasTaut set, only requires
+	 * exceeding the threshold multiplied by ReleaseRatio, which stops tension jitter at the boundary
+	 * from flapping the gate on and off. ReleaseRatio is clamped to the range 0 to 1.
 	 */
 	DYNAMICROPE_API bool EvaluateTautGate(float Tension, float Threshold, float ReleaseRatio, bool bWasTaut);
 
 	/**
-	 * 전 체인 팽팽(taut) 기하 게이트 판정(히스테리시스 래치). 앵커→손 코너-다리 chord 합(ChordLen)이 자유
-	 * 구간 rest 길이(RestLen) × (1 − SlackRatio) 이상이면 로프 전체가 팽팽하다 — 처짐은 다리 chord를 rest보다
-	 * 짧게 만들고, 코너에 걸린 팽팽한 로프는 다리별 chord가 rest에 근접해 팽팽으로 인정된다(코너는 손해가
-	 * 아니다). 앵커 인접 국소 관측치(세그먼트 장력/sub-leg overshoot)는 움직이는 대상이 슬랙 로프에서도
-	 * 만들어내므로(핀 노드가 이웃을 순간 스트레치) 그것만으론 "줄이 다 펴졌나"를 판정할 수 없다 — 그 보완이다.
-	 * 유지(bWasTaut=true)는 SlackRatio × ReleaseScale(≥1)로 완화해 경계의 chord 지터로 게이트가 퍼덕이는
-	 * 것을 막는다. RestLen ≤ 0이면 false(판정 불능).
+	 * The whole-chain geometric taut gate, as a hysteresis latch. The rope counts as taut along its
+	 * whole length once the sum of the corner-to-corner leg chords from the anchor to the hand
+	 * (ChordLen) reaches the free-span rest length (RestLen) multiplied by (1 - SlackRatio). Sag makes a
+	 * leg's chord shorter than its rest length, while a taut rope running over corners has each leg's
+	 * chord close to its rest length and is correctly recognized as taut, so corners are not penalized.
+	 * Local observations near the anchor, such as segment tension or a sub-leg overshoot, cannot answer
+	 * whether the whole rope is straight, because a moving target produces them even on a slack rope
+	 * when a pinned node momentarily stretches its neighbours; this gate complements them.
+	 * Staying taut, with bWasTaut set, relaxes the requirement by SlackRatio multiplied by ReleaseScale,
+	 * which is at least 1, so chord jitter at the boundary does not flap the gate. A RestLen at or below
+	 * 0 returns false, meaning no verdict is possible.
 	 */
 	DYNAMICROPE_API bool EvaluateChainTautGate(float ChordLen, float RestLen, float SlackRatio, float ReleaseScale, bool bWasTaut);
 
 	/**
-	 * 테더 λ 제약 입력(단위: cm / kg / s — SolveTetherLambda 참조). 설계는 Docs/PoC/05.
+	 * The inputs to the tether lambda constraint, in centimetres, kilograms and seconds; see
+	 * SolveTetherLambda.
 	 */
 	struct FRopeTetherConstraint
 	{
 		/**
-		 * 초과분 C = 필요한 경로 길이 − material 길이(cm). < 0 = 슬랙.
-		 * C == 0은 경계이므로 SepSpeed > 0이면 비신축 반력 λ가 발생한다.
+		 * The violation C, that is the required path length minus the material length (cm). Below 0
+		 * means slack.
+		 * C == 0 is the boundary, so an inextensible reaction lambda still arises there when SepSpeed is
+		 * positive.
 		 */
 		float C = 0.0f;
 
 		/**
-		 * 벌어지는 속도(cm/s, + = 벌어지는 중) = −(vT·dT + vW·dW) − dRest/dt.
-		 * vT/vW = 양끝 속도, dT/dW = 각 끝의 안쪽(로프를 따라 상대 쪽) 단위 방향. 되감기(rest 축소)는
-		 * dRest/dt < 0이라 +로 유입돼 λ가 그만큼 당긴다(리엘 = rest 길이 변화, 별도 견인 경로 없음).
+		 * The separation speed (cm/s, positive while separating), equal to -(vT.dT + vW.dW) - dRest/dt.
+		 * vT and vW are the velocities of the two ends and dT and dW are the inward unit directions at
+		 * each end, meaning towards the other along the rope. Reeling in shrinks the rest length, making
+		 * dRest/dt negative, which enters as a positive contribution so lambda pulls by that much: the
+		 * reel is expressed purely as a change in rest length with no separate traction path.
 		 */
 		float SepSpeed = 0.0f;
 
-		/** 양끝 유효 역질량(1/kg). 0 = 앵커(무한질량 — 그 끝은 ΔV를 받지 않는다). */
+		/** The effective inverse mass at each end (1/kg). 0 is an anchor of infinite mass, and that end
+		 *  receives no delta velocity. */
 		float InvMassTarget = 0.0f;
 		float InvMassWielder = 0.0f;
 
 		/**
-		 * 위치 회수 게인 β [0..1] — 이번 프레임에 C의 이 비율을 닫는 접근 속도를 명령한다.
-		 * ExpSmoothAlpha(TetherSettleTime, dt)로 산출해 넘긴다(프레임률 독립). 0 = 속도 제약만
-		 * (벌어짐 상쇄만 하고 이미 쌓인 C는 안 닫는다 — 드리프트 허용).
+		 * The positional recovery gain beta, from 0 to 1, which commands an approach speed closing this
+		 * fraction of C during this frame. Compute it with ExpSmoothAlpha(TetherSettleTime, dt) so it is
+		 * framerate independent. 0 leaves a velocity-only constraint, cancelling separation without
+		 * closing any C already accumulated, which permits drift.
 		 */
 		float SettleAlpha = 1.0f;
 
 		/**
-		 * 위치 회수 명령 속도 상한(cm/s, 0 = 무제한). β·C/dt는 C가 큰 프레임(커밋 직후 이미 초과 등)에
-		 * 스파이크가 된다 — 이 항만이 벌어짐 상쇄와 달리 운동량에 바이어스로 남으므로(슬랙 전환 후
-		 * 접근 코스팅의 상한이 곧 이 값), 상한이 곧 "테더가 만들 수 있는 최대 접근 속도"다.
+		 * The cap on the commanded positional recovery speed (cm/s, 0 for unlimited). beta * C / dt
+		 * spikes on frames where C is large, such as immediately after a commit that is already
+		 * violated. This is the one term that leaves a bias in the momentum, unlike cancelling
+		 * separation, so the cap is also the ceiling on coasting after the rope goes slack, which makes
+		 * it the maximum approach speed the tether can ever produce.
 		 */
 		float MaxBiasSpeed = 0.0f;
 
 		/**
-		 * 재료 컴플라이언스 α(s²/kg = 역강성). 0 = 비신축(기본).
-		 * > 0이면 k=1/α인 implicit Kelvin-Voigt 장력과 generalized critical damping을 사용한다.
+		 * Material compliance alpha (s^2/kg, the inverse of stiffness). 0 is inextensible, the default.
+		 * Above 0 it uses an implicit Kelvin-Voigt tension with k = 1/alpha and generalized critical
+		 * damping.
 		 */
 		float Compliance = 0.0f;
 
-		/** 장력 상한(kg·cm/s², 0 = 무제한). λ ≤ 이 값 × dt — 무거운 대상 뒤처짐/한계 장력 연출의 물리 노브. */
+		/** The tension limit (kg*cm/s^2, 0 for unlimited): lambda is capped at this value multiplied by
+		 *  dt. This is the physical knob behind a heavy target lagging behind and behind limited-tension
+		 *  behaviour generally. */
 		float MaxTension = 0.0f;
 	};
 
 	/**
-	 * 테더 λ 제약 솔브(프레임당 1회, 해석적 — 반복 불필요). 반환 = 장력 임펄스 λ ≥ 0(kg·cm/s).
-	 * 인가는 호출자 몫: 각 끝에 Δv = d × (λ × w) — 크기가 같은 임펄스 쌍이라 분배(무거운 쪽이 덜
-	 * 움직임/앵커는 정지)가 자동이고, 상대 *접근*만 만들므로 끝별 독립 서보와 달리 에너지 주입이
-	 * 없다(바이어스 항만 예외 — MaxBiasSpeed 주석). 성질:
-	 *  - 단방향: 슬랙(C < 0)이거나 이미 목표 이상으로 접근 중이면 0 — 로프는 밀지도, 접근을 제동하지도
-	 *    않는다. 정확한 경계(C == 0)에서 벌어지는 중이면 비신축 반력이 생긴다.
-	 *  - 양끝 다 앵커(w 합 ~0)면 0 — 아무도 못 움직인다(한계 이탈은 거리 release가 처리).
-	 *  - MaxTension 상한에 걸리면 남은 C가 다음 프레임으로 이월된다(무거운 대상 뒤처짐).
-	 * 유닛 테스트: Tests/RopeTractionSolverTests.cpp의 TetherLambda* 계열.
+	 * Solves the tether lambda constraint, once per frame and analytically with no iteration. It
+	 * returns the tension impulse lambda, which is at or above 0 (kg*cm/s).
+	 * Applying it is the caller's job: each end receives dv = d * (lambda * w). Because it is a pair of
+	 * equal and opposite impulses, the distribution follows automatically, with the heavier end moving
+	 * less and an anchor not at all, and because it produces only relative approach it injects no
+	 * energy, unlike independent per-end servos; the bias term is the sole exception, described on
+	 * MaxBiasSpeed. Its properties are:
+	 *  - One-directional: it returns 0 when slack, with C below 0, or when already approaching faster
+	 *    than the target, so the rope neither pushes nor brakes an approach. Exactly at the boundary,
+	 *    with C == 0 and still separating, an inextensible reaction arises.
+	 *  - It returns 0 when both ends are anchors, that is the sum of the inverse masses is near zero,
+	 *    because nothing can move; exceeding the limit is handled by the distance release instead.
+	 *  - When the MaxTension limit binds, the remaining C carries over to the next frame, which is what
+	 *    makes a heavy target lag behind.
+	 * Unit tests: the TetherLambda family in Tests/RopeTractionSolverTests.cpp.
 	 */
 	DYNAMICROPE_API float SolveTetherLambda(const FRopeTetherConstraint& In, float DeltaTime);
 }

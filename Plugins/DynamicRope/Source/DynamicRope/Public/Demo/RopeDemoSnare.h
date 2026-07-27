@@ -1,29 +1,32 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 데모 씬용 "대자 결박" 함정 — 여러 로프가 각각 대상의 다른 팔다리를 감아 사방으로 당겨,
-// 대상을 대(大)자로 벌린 채 고정한다.
+// Demo spread-eagle snare. Several ropes each wrap a different limb of the target and pull outwards,
+// holding it spread and immobilized.
 //
-// 진행 개요:
-//   Idle → TriggerSnare() → Binding(팔다리별 ③ Guaranteed 조준 발사, 전부 Wrapped 될 때까지 재시도)
-//        → Snared(케이블을 SnareLength까지 릴-인 → 사지가 앵커 쪽으로 벌어짐)
-//        → ReleaseSnare() → Idle(감김 해제 + 길이 복원)
+// State flow:
+//   Idle -> TriggerSnare() -> Binding (a guaranteed aimed throw per limb, retried until every rope
+//        is wrapped)
+//        -> Snared (reel the cables in to SnareLength, spreading the limbs towards their anchors)
+//        -> ReleaseSnare() -> Idle (release every wrap and restore the cable lengths)
 //
-// 앵커 슬롯은 4개(팔 2 + 다리 2)이고 **Bindings에 넣은 만큼만** 쓴다. 기본은 사지 4슬롯
-// (완전한 대자) — 레벨에서 항목을 지우거나 Bone을 비우면 그 슬롯은 쏘지 않는다(2개만 남기면 양팔 결박).
+// There are four anchor slots, two arms and two legs, and only as many are used as Bindings holds.
+// The default fills all four for a full spread; deleting an entry or clearing its bone stops that
+// slot from firing, so leaving two bound restrains the arms alone.
 //
-// 대상 조건:
-//   - TargetActor에 스켈레탈 메시 + 로프 콜라이더 프로바이더(캡슐/SDF)가 있어야 감긴다.
-//   - TargetActor를 비우고 TriggerPlate만 지정하면 덫 모드다: 판이 눌리는 순간 판 위 점유 액터
-//     (스켈레탈 메시 보유)를 자동 대상으로 잡고, 판이 풀리면 해제와 함께 대상도 비운다.
-//   - 팔다리가 물리로 끌려가려면 랙돌이어야 한다. 대상에 URopeRagdollResponseComponent가 있으면
-//     감김 이벤트로 자동 전환되지만, 결박은 **감기 전에** 랙돌이어야 사지가 순순히 벌어지므로
-//     bForceRagdollOnSnare(기본 켬)가 발사 시점에 먼저 랙돌로 만든다.
+// Target requirements:
+//   - TargetActor needs a skeletal mesh plus a rope collider provider, capsule or SDF, to be
+//     wrappable.
+//   - Leaving TargetActor empty and assigning only TriggerPlate enables trap mode: the moment the
+//     plate is pressed, an occupying actor with a skeletal mesh is picked up as the target
+//     automatically, and releasing the plate clears the target along with the snare.
+//   - Limbs can only be dragged by physics while limp. A target with a
+//     URopeRagdollResponseComponent goes limp from the wrap event by itself, but the limbs only
+//     spread freely if it is already limp before the wrap lands, so bForceRagdollOnSnare, on by
+//     default, makes it limp at the moment the ropes fire.
 //
-// ⚠ Guaranteed는 조준 ray가 **처음 맞은** wrappable 본을 잠근다 — hand_l을 조준해도 앞을 가로막은
-//   lowerarm_l이 잡힐 수 있다(대자 연출로는 둘 다 무방). 실제로 무엇을 잡았는지는 결박 완료 로그가 찍는다.
-//
-// ⚠ 물리 튜닝은 PIE 실측이 정본이다: 랙돌 한 구를 여러 테더가 동시에 당기는 건 이 데모가 첫 실측이라
-//   릴 속도/최종 길이/추가 견인력을 아래 노브로 맞춘다.
+// GuaranteedWrap locks onto the first wrappable bone the aim ray hits, so aiming at hand_l can catch
+// lowerarm_l if that is in the way; either reads fine as a spread-eagle. What was actually caught is
+// recorded in the completion log.
 
 #pragma once
 
@@ -36,22 +39,24 @@ class UStaticMeshComponent;
 class USkeletalMeshComponent;
 class ARopeDemoPressurePlate;
 
-/** 결박 슬롯 하나 — "이 본을, 저 앵커 위치로 당긴다". */
+/** One snare slot: pull this bone towards that anchor. */
 USTRUCT(BlueprintType)
 struct FRopeDemoSnareBinding
 {
 	GENERATED_BODY()
 
-	/** 감을 대상 본(예: hand_l / hand_r / foot_l / foot_r). 비면 이 슬롯은 쓰지 않는다. */
+	/** The target bone to wrap, such as hand_l, hand_r, foot_l or foot_r. The slot is unused when
+	 *  empty. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo")
 	FName Bone = NAME_None;
 
-	/** 이 본을 당길 앵커 위치(스네어 액터 로컬, cm). 앵커 표식과 로프 시작점이 여기에 놓인다. */
+	/** Where to pull the bone to, in snare actor local space (cm). The anchor marker and the start of
+	 *  the rope are placed here. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo")
 	FVector AnchorOffset = FVector::ZeroVector;
 };
 
-/** 결박이 성립(모든 슬롯 Wrapped)하거나 풀린 순간. */
+/** Fired when the snare is established, with every slot wrapped, or released. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeDemoSnareStateSignature,
 	ARopeDemoSnare*, Snare, bool, bSnared);
 
@@ -69,147 +74,165 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
-	/** 결박을 시작한다(슬롯별 조준 발사 → 전부 감길 때까지 재시도). 디테일 패널 버튼으로도 호출. */
+	/** Starts the snare: fires an aimed throw per slot and retries until every rope is wrapped. Also
+	 *  exposed as a details panel button. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void TriggerSnare();
 
-	/** 결박을 푼다(모든 감김 해제 + 케이블 길이 복원). 디테일 패널 버튼으로도 호출. */
+	/** Releases the snare, releasing every wrap and restoring the cable lengths. Also exposed as a
+	 *  details panel button. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void ReleaseSnare();
 
-	/** 결박 상태를 뒤집는다(입력 한 키/디테일 패널 버튼용). */
+	/** Toggles the snare state, for a single input key or a details panel button. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Rope|Demo")
 	void ToggleSnare();
 
-	/** 모든 슬롯이 감겨 결박이 성립했는가. */
+	/** Whether every slot is wrapped and the snare is established. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	bool IsSnared() const { return bSnared; }
 
-	/** 지금 실제로 감겨 있는 케이블 수(진행 표시용). */
+	/** How many cables are actually wrapped right now, for progress display. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	int32 GetBoundRopeCount() const;
 
-	/** 쓰이는 슬롯 수(= Bone이 지정된 Bindings 수, 최대 4). */
+	/** How many slots are in use, that is how many Bindings have a bone assigned, up to four. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	int32 GetActiveBindingCount() const;
 
-	/** 이번 결박의 실제 대상 — 지정 TargetActor가 항상 우선, 없으면 판에서 자동 획득한 대상(덫 모드). */
+	/** The actual target of this snare: an assigned TargetActor always wins, otherwise the target
+	 *  picked up from the plate in trap mode. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Demo")
 	AActor* GetEffectiveTargetActor() const;
 
-	/** 결박 성립/해제 브로드캐스트. */
+	/** Broadcast when the snare is established or released. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope|Demo")
 	FRopeDemoSnareStateSignature OnSnareStateChanged;
 
-	//~ 대상/슬롯 -------------------------------------------------------------
+	//~ Target and slots --------------------------------------------------------
 
-	/** 결박할 대상 액터(스켈레탈 메시 보유). 레벨에서 지정하며 항상 최우선이다.
-	 *  비워도 TriggerPlate가 있으면 덫 모드로 동작한다(판을 밟은 점유 액터를 자동 대상으로 획득).
-	 *  둘 다 없으면 경고 후 no-op. */
+	/** The actor to snare, which must have a skeletal mesh. Assigned in the level and always takes
+	 *  priority. Leaving it empty still works as a trap when TriggerPlate is set, picking up whichever
+	 *  actor stands on the plate. With neither set, triggering warns and does nothing. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Rope|Demo")
 	TObjectPtr<AActor> TargetActor = nullptr;
 
-	/** 결박 슬롯(최대 4). 기본값은 사지 4슬롯(완전한 대자) — 항목 삭제/Bone 비움으로 줄인다. */
+	/** The snare slots, up to four. The default fills all four limbs for a full spread; reduce it by
+	 *  deleting entries or clearing their bone. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TArray<FRopeDemoSnareBinding> Bindings;
 
-	/** 이 압력판이 눌리면 결박, 풀리면 해제한다(함정 트리거). 비워도 BP/코드로 직접 제어 가능. */
+	/** Snares when this pressure plate is pressed and releases when it clears, acting as the trap
+	 *  trigger. Leave it empty to drive the snare from Blueprint or code instead. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<ARopeDemoPressurePlate> TriggerPlate = nullptr;
 
-	/** BeginPlay에 곧바로 결박을 시작한다(트리거 없이 "이미 걸려 있는" 연출/실측용). */
+	/** Snares immediately during BeginPlay, for showing or measuring an already-sprung trap with no
+	 *  trigger. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo")
 	bool bSnareOnBeginPlay = false;
 
-	//~ 결박 튜닝(PIE 실측) ---------------------------------------------------
+	//~ Snare tuning ------------------------------------------------------------
 
-	/** 감긴 뒤 사지를 벌리는 릴-인 속도(cm/s). 로프가 짧아지며 본이 앵커 쪽으로 끌려간다. */
+	/** Reel-in speed used to spread the limbs once wrapped (cm/s). The rope shortens and drags the
+	 *  bone towards its anchor. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Snare", meta = (ClampMin = "1.0", Units = "cm/s"))
 	float SnareReelSpeed = 120.0f;
 
-	/** 결박 완료 시 케이블 길이(cm, 0=각 로프의 MinRopeLength까지). 짧을수록 강하게 벌어진다. */
+	/** Cable length once the snare is established (cm). 0 reels each rope to its own MinRopeLength.
+	 *  Shorter values spread the target more forcefully. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Snare", meta = (ClampMin = "0.0", Units = "cm"))
 	float SnareLength = 0.0f;
 
-	/** 길이 도달 판정 여유(cm). */
+	/** Tolerance on reaching the target length (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Snare", meta = (ClampMin = "0.1", Units = "cm"))
 	float ArrivalTolerance = 5.0f;
 
-	/** 결박 중 **슬롯당** 능동 Pull 견인력(0=릴-인 + 테더만). 릴만으로 사지가 덜 벌어질 때 보탠다. */
+	/** Active pull force per slot while snared. 0 relies on the reel-in and tether alone; add force
+	 *  when reeling by itself does not spread the limbs far enough. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Snare", meta = (ClampMin = "0.0"))
 	float LimbPullForce = 0.0f;
 
-	/** 발사 시점에 대상을 먼저 랙돌로 만든다(대상에 URopeRagdollResponseComponent가 있을 때).
-	 *  끄면 감김 이벤트가 만드는 자동 전환에 맡긴다 — 사지가 애니메이션에 붙들려 덜 벌어질 수 있다. */
+	/** Makes the target limp at the moment the ropes fire, when it has a
+	 *  URopeRagdollResponseComponent. Turn it off to leave it to the automatic transition on the wrap
+	 *  event, which can leave the limbs held by animation and spreading less. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Snare")
 	bool bForceRagdollOnSnare = true;
 
-	/** 결박 성립(모든 슬롯 감김) 후 이 시간이 지나면 자동으로 놓는다(초, 0 = 끔).
-	 *  놓은 뒤 대상이 판을 계속 누르고 있어도 재결박하지 않는다 — 재무장은 판의 다음
-	 *  눌림 에지(벗어났다 다시 밟음)나 수동 TriggerSnare 몫이다. */
+	/** Releases automatically this long after the snare is established with every slot wrapped (s).
+	 *  0 disables it.
+	 *  After releasing, a target still standing on the plate is not snared again: rearming requires
+	 *  the plate's next pressing edge, that is stepping off and back on, or a manual TriggerSnare. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Snare", meta = (ClampMin = "0.0", Units = "s"))
 	float AutoReleaseDelay = 0.0f;
 
 protected:
-	/** 앵커 기준점(고정 루트). 슬롯 표식/로프가 여기에 붙는다. */
+	/** The fixed root the anchors are measured from. Slot markers and ropes attach here. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<USceneComponent> Base = nullptr;
 
-	/** 앵커 표식 4개(슬롯 위치 시각화). 쓰이지 않는 슬롯은 숨긴다. */
+	/** Four anchor markers that visualize the slot positions. Unused slots are hidden. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TArray<TObjectPtr<UStaticMeshComponent>> AnchorMarkers;
 
-	/** 슬롯별 ③ GuaranteedWrap 로프 4개. Bindings에 채운 만큼만 발사/릴한다. */
+	/** Four GuaranteedWrap ropes, one per slot. Only as many fire and reel as Bindings fills. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TArray<TObjectPtr<URopeComponent>> Ropes;
 
 private:
-	/** 슬롯 수 상한(팔 2 + 다리 2). */
+	/** The maximum number of slots, two arms plus two legs. */
 	static constexpr int32 MaxBindings = 4;
 
-	/** 슬롯 i가 쓰이는가(Bindings 범위 안 + Bone 지정 + 로프 유효). */
+	/** Whether slot i is in use: within the Bindings range, with a bone assigned and a valid rope. */
 	bool IsSlotActive(int32 SlotIndex) const;
 
-	/** 앵커 표식/로프를 Bindings의 AnchorOffset에 맞춰 배치하고, 미사용 슬롯을 숨긴다. */
+	/** Places the anchor markers and ropes at the AnchorOffsets from Bindings and hides unused
+	 *  slots. */
 	void ApplyBindingLayout();
 
-	/** 아직 감기지 않은 모든 슬롯을 대상 본으로 향해 Guaranteed 발사한다. */
+	/** Fires a guaranteed throw at the target bone from every slot that is not yet wrapped. */
 	void FireSnareRopes();
 
-	/** 슬롯 하나를 대상 본으로 향해 Guaranteed 발사한다. 큐잉 성공 시 true. */
+	/** Fires a guaranteed throw at the target bone from one slot. True once queued. */
 	bool FireSnareRopeFor(int32 SlotIndex);
 
-	/** 활성 슬롯이 모두 Wrapped인가(= 결박 성립). 활성 슬롯이 없으면 false. */
+	/** Whether every active slot is wrapped, which establishes the snare. False when no slot is
+	 *  active. */
 	bool AreAllBoundRopesWrapped() const;
 
-	/** 대상의 스켈레탈 메시(첫 번째). 없으면 nullptr. 대상 = GetEffectiveTargetActor(). */
+	/** The target's first skeletal mesh, or nullptr. The target is GetEffectiveTargetActor(). */
 	USkeletalMeshComponent* ResolveTargetMesh() const;
 
-	/** TargetActor가 비어 있을 때 TriggerPlate 점유 중 스켈레탈 메시 보유 액터를 자동 대상으로 잡는다. */
+	/** Picks up an occupying actor with a skeletal mesh from TriggerPlate as the target when
+	 *  TargetActor is empty. */
 	void ResolveAutoTargetFromPlate();
 
-	/** 대상에 랙돌 응답 컴포넌트가 있으면 즉시 랙돌로 만든다(bForceRagdollOnSnare). */
+	/** Makes the target limp immediately when it has a ragdoll response component, subject to
+	 *  bForceRagdollOnSnare. */
 	void ForceTargetRagdoll();
 
-	/** 결박 성립/해제를 상태에 반영하고 변화 시 브로드캐스트한다. */
+	/** Applies the established or released state and broadcasts on a change. */
 	void SetSnared(bool bNewSnared);
 
-	/** 압력판 상태 변화(델리게이트 시그니처) — 눌림=결박, 풀림=해제. */
+	/** Pressure plate state change handler, matching the delegate signature. Pressed snares and
+	 *  cleared releases. */
 	UFUNCTION()
 	void HandleTriggerPlateChanged(ARopeDemoPressurePlate* Plate, bool bPressed);
 
-	/** 판에서 자동 획득한 대상(덫 모드). 해제 시 비운다 — 지정 TargetActor가 있으면 무시된다. */
+	/** The target picked up from the plate in trap mode, cleared on release. Ignored while an assigned
+	 *  TargetActor exists. */
 	TWeakObjectPtr<AActor> AutoTargetActor;
 
-	/** 자동 놓기 카운트다운(초). 결박 성립 시 AutoReleaseDelay로 시드, 0 도달 시 ReleaseSnare. */
+	/** Automatic release countdown (s), seeded with AutoReleaseDelay when the snare is established and
+	 *  calling ReleaseSnare on reaching 0. */
 	float AutoReleaseRemaining = 0.0f;
 
-	/** 결박 시도 중인가(TriggerSnare ~ ReleaseSnare). */
+	/** Whether a snare attempt is in progress, between TriggerSnare and ReleaseSnare. */
 	bool bTriggered = false;
 
-	/** 활성 슬롯이 모두 감겨 결박이 성립했는가. */
+	/** Whether every active slot is wrapped and the snare is established. */
 	bool bSnared = false;
 
-	/** 미성립 상태에서 재발사 쿨다운(초). */
+	/** Cooldown before firing again while the snare is not yet established (s). */
 	float FireRetryRemaining = 0.0f;
 };

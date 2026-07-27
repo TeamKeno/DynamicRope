@@ -1,9 +1,12 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 솔브 스로틀(UObject-free F-클래스): Free/Wrapped 정지 슬립(솔브/디스패치 스킵) + 거리 LOD(iteration 감쇠).
-// 상태(슬립 타이머/측정 캐시/LOD 배율)와 전이·해제 판정을 소유한다. UObject 컨텍스트는 호출마다
-// 주입된다 — 카메라 접근(거리 산출)과 슬립 전이 로그는 URopeComponent에 남는다(UpdateSleepState가
-// 잠든 프레임에 true를 반환해 로그 시점을 알린다). 월드 없이 단위 테스트 가능.
+// The solve throttle, a class with no UObject dependency. It provides sleep for stationary ropes in
+// the Free and Wrapped phases, which skips the solve and its dispatch, and a distance LOD that
+// reduces the iteration count. It owns the state, that is the sleep timer, the measurement caches and
+// the LOD scale, along with the decisions to enter and leave sleep. UObject context is injected per
+// call: reading the camera to compute the distance, and logging sleep transitions, stay on
+// URopeComponent, where UpdateSleepState returning true on the frame the rope falls asleep tells it
+// when to log. It can be unit tested without a world.
 
 #pragma once
 
@@ -17,55 +20,67 @@ class IRopeCollider;
 class DYNAMICROPE_API FRopeSolverThrottle
 {
 public:
-	//~ 슬립(Free/Wrapped — 정지 판정으로 솔브 스킵) -----------------------------
+	//~ Sleep, in the Free and Wrapped phases, which skips the solve once the rope is judged
+	//~ stationary.
 	bool IsAsleep() const { return bAsleep; }
 
-	/** 즉시 깨움(타이머/드리프트 캐시 리셋 포함). 비슬립 페이즈 진입/해제 판정 통과 시 호출. 측정 캐시
-	 *  (SleepPrevFramePositions)는 UpdateSleepState가 비슬립 페이즈에서 스스로 폐기하므로 안 건드린다. */
+	/** Wakes immediately, resetting the timer and the drift cache. Called on entering a phase that
+	 *  cannot sleep and when a wake condition passes. The measurement cache,
+	 *  SleepPrevFramePositions, is left alone because UpdateSleepState discards it itself in
+	 *  non-sleeping phases. */
 	void Wake() { bAsleep = false; SleepTimer = 0.0f; SleepNodePositions.Reset(); }
 
-	/** 슬립 전이 측정(Finalize, 매 프레임): Free/Wrapped + 슬립 허용에서 프레임간 최대 노드 속도가 임계
-	 *  미만으로 SleepDelay 지속되면 잠든다. 그 외 페이즈에서는 누적/캐시를 폐기한다(상태 오염 방지).
-	 *  bHoldAwake=true인 프레임은 진입만 막는다(타이머 리셋, 측정 캐시는 유지) — Wrapped에서 능동 Pull이
-	 *  장전된 동안 정지해 있어도 잠들지 않게 하는 게이트(견인 임펄스는 적분을 전제).
-	 *  이번 호출에 막 잠들었으면 true — 호출자(컴포넌트)가 전이 로그를 담당한다. */
+	/** The sleep measurement, run every frame during Finalize. In the Free and Wrapped phases, with
+	 *  sleep permitted, the rope falls asleep once the maximum per-frame node speed has stayed below
+	 *  the threshold for SleepDelay. In other phases the accumulator and caches are discarded so the
+	 *  state cannot be polluted.
+	 *  A frame with bHoldAwake set only blocks entry, resetting the timer while keeping the measurement
+	 *  cache. That is the gate that keeps a wrapped rope awake while active pull is armed even though
+	 *  it is stationary, because traction impulses assume integration is running.
+	 *  Returns true on the call where the rope has just fallen asleep, so the caller, the component,
+	 *  can log the transition. */
 	bool UpdateSleepState(ERopePhase Phase, const FRopeSimState& Sim, const FRopeSolverConfig& Config,
 		float DeltaTime, bool bHoldAwake = false);
 
-	/** 슬립 해제 판정(Prepare): 핀(손) 이동 / 노드 드리프트(슬립 중 로직 쓰기 — Wrapped Hold의 본 추종이
-	 *  대표, 랩 대상/엘리베이터가 움직이면 여기서 깬다) / 되감기 중 / 움직이는 근접 collider. Colliders는
-	 *  이미 로프 bounds로 컬링된 프레임 스냅샷(SimFrame.FrameColliders)을 기대한다. */
+	/** The wake decision, made during Prepare. It wakes on movement of the pin at the hand, on node
+	 *  drift caused by logic writes while asleep, of which the bone following of a wrapped hold is the
+	 *  main case so a moving wrap target or elevator wakes here, while reeling, and on a moving
+	 *  collider nearby. Colliders is expected to be the frame snapshot already culled to the rope's
+	 *  bounds, that is SimFrame.FrameColliders. */
 	bool ShouldWakeFromSleep(const FRopeSimState& Sim, const FRopeSolverConfig& Config, float ReelRate,
 		const TArray<IRopeCollider*>& Colliders) const;
 
-	//~ 거리 LOD(원거리 iteration 감쇠 — 안정성은 substep이 지배하므로 iteration만) ---
-	/** LOD 배율 갱신(Prepare, 매 프레임). CameraDistance 미설정(서버/카메라 없음) = 풀 품질(1). */
+	//~ Distance LOD, which reduces iterations at a distance. Only iterations are reduced, because
+	//~ stability is governed by the substep count.
+	/** Refreshes the LOD scale, during Prepare and every frame. An unset camera distance, as on a
+	 *  server or with no camera, gives full quality, that is 1. */
 	void ComputeSolverLOD(const FRopeSolverConfig& Config, const TOptional<float>& CameraDistance);
 
 	float GetSolverLODScale() const { return SolverLODScale; }
 
-	/** LOD 반영된 유효 iteration(CPU 솔브/GPU 스텝 공용). */
+	/** The effective iteration count with the LOD applied, shared by the CPU solve and the GPU step. */
 	int32 LODScaledIterations(int32 ConfigIterations) const
 	{
 		return FMath::Max(1, FMath::RoundToInt(static_cast<float>(ConfigIterations) * SolverLODScale));
 	}
 
 private:
-	/** Free/Wrapped 정지 판정으로 솔브 스킵 중. */
+	/** Whether the solve is being skipped because the rope was judged stationary in Free or Wrapped. */
 	bool  bAsleep = false;
 
-	/** 저속 유지 누적(초). */
+	/** How long the rope has stayed below the speed threshold (s). */
 	float SleepTimer = 0.0f;
 
-	/** 슬립 진입 시 핀 위치(이동 시 wake). */
+	/** The pin position when sleep was entered, which wakes the rope if it moves. */
 	FVector SleepPinPos = FVector::ZeroVector;
 
-	/** 슬립 진입 시 노드 위치(드리프트 wake 기준 — Wrapped Hold가 mirror에 쓴 본 이동 감지). Wake가 비운다. */
+	/** The node positions when sleep was entered, which is the reference for the drift wake and
+	 *  detects the bone movement a wrapped hold writes into the mirror. Cleared by Wake. */
 	TArray<FVector> SleepNodePositions;
 
-	/** 프레임간 변위 측정 캐시(Finalize에서 갱신). */
+	/** The cache used to measure per-frame displacement, refreshed during Finalize. */
 	TArray<FVector> SleepPrevFramePositions;
 
-	/** 거리 LOD iteration 배율(Prepare가 계산, 1=풀). */
+	/** The distance LOD iteration scale, computed during Prepare, where 1 is full quality. */
 	float SolverLODScale = 1.0f;
 };

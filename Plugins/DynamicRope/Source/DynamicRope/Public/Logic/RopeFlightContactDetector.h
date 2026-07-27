@@ -1,14 +1,17 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Flight 중 접촉 후보 감지 파이프라인: 솔브 결과의 이동 경로에서 실제 접촉을 찾고(Detect),
-// 빠른 노드/whip 가이드 노드의 다음 위치를 외삽해 예측 접촉을 추가하고(AddPredicted),
-// 표면 대비 상대운동을 평가한 뒤(EvaluateRelativeMotion), tracker와 캡처 여부를 함께 만든다(EvaluateCapture).
-// FinalizeSimFrame(GT)에서 매 프레임 호출된다 — Flight → Contacting 전이의 입력을 만드는 곳.
+// The contact candidate detection pipeline used during Flight. It finds actual contacts along the
+// travel path produced by the solve (Detect), extrapolates the next positions of fast-moving and
+// whip-guided nodes to add predicted contacts (AddPredicted), evaluates motion relative to the
+// surface (EvaluateRelativeMotion), and then produces the tracker and the capture decision together
+// (EvaluateCapture). It is called every frame from FinalizeSimFrame on the game thread, and produces
+// the input to the Flight to Contacting transition.
 //
-// 솔버/랩 컨트롤러와 같은 UObject 비의존 패턴. 상태가 없어 전부 static이다.
-// 입력은 POD(FRopeSimState) + collider 스냅샷 + 파라미터 스냅샷(FParams) + whip 가이드
-// 데이터 뷰(FWhipGuideView)뿐이라 월드 없이 단위 테스트할 수 있고, 위치가 CPU 솔버에서
-// 오든 GPU 미러에서 오든 동작이 같다(GPU 전환 후에도 그대로 살아남는 레이어).
+// It follows the same pattern as the solver and the wrap controller and has no UObject dependency.
+// It holds no state, so everything is static.
+// Its inputs are only plain data (FRopeSimState), a collider snapshot, a parameter snapshot
+// (FParams) and a view of the whip guide data (FWhipGuideView), so it can be unit tested without a
+// world and behaves identically whether the positions come from the CPU solver or the GPU mirror.
 
 #pragma once
 
@@ -19,7 +22,8 @@
 class IRopeCollider;
 class USceneComponent;
 
-/** Flight 캡처에서 dominant 대상을 고르는 정책. Assisted 조준은 preferred 대상을 필수로 지정한다. */
+/** The policy for choosing the dominant target during a Flight capture. Assisted aiming names a
+ *  preferred target and requires it. */
 struct FRopeFlightCapturePolicy
 {
 	const USceneComponent* PreferredMesh = nullptr;
@@ -27,7 +31,8 @@ struct FRopeFlightCapturePolicy
 	bool bRequirePreferred = false;
 };
 
-/** 한 번의 후보 집계로 만든 Flight 캡처 판정 결과. 게임 전이와 관측이 같은 Tracker를 소비한다. */
+/** The Flight capture verdict produced by a single pass over the candidates. Gameplay transitions and
+ *  observation consume the same tracker. */
 struct FRopeFlightCaptureEvaluation
 {
 	FRopeContactTracker Tracker;
@@ -37,54 +42,65 @@ struct FRopeFlightCaptureEvaluation
 class DYNAMICROPE_API FRopeFlightContactDetector
 {
 public:
-	/** 검출 파라미터 스냅샷. 디자이너 원본(UPROPERTY)은 URopeComponent에 남고 호출 시 복사한다. */
+	/** A snapshot of the detection parameters. The designer settings themselves stay on
+	 *  URopeComponent and are copied here per call. */
 	struct FParams
 	{
-		/** WrapConfig.ContactQueryRadius: 접촉 질의 반경. */
+		/** WrapConfig.ContactQueryRadius: the contact query radius. */
 		float ContactRadius = 3.0f;
 
-		/** 튜브 반지름(broad-phase 바운즈 여유에 합산). */
+		/** Tube radius, added to the broad-phase bounds margin. */
 		float RopeRadius = 2.0f;
 
-		/** WrapConfig.PredictiveContactFrames: 예측 외삽 프레임 수. */
+		/** WrapConfig.PredictiveContactFrames: how many frames to extrapolate for prediction. */
 		float PredictiveContactFrames = 0.0f;
 
-		/** WrapConfig.MinLatchNodes: 캡처에 필요한 최소 접촉 노드 수. */
+		/** WrapConfig.MinLatchNodes: the minimum number of contacting nodes needed to capture. */
 		int32 MinLatchNodes = 1;
 
-		/** ExpectedWrapTangent 퇴화 케이스용(컴포넌트 전방). */
+		/** Component forward, used for the degenerate case in ExpectedWrapTangent. */
 		FVector FallbackForward = FVector::ForwardVector;
 
-		/** WrapConfig.ContactSweepStep: 감지 스윕 샘플 간격(cm). 터널링 방지의 핵심 값 — 그쪽 주석 참고. */
+		/** WrapConfig.ContactSweepStep: the sample spacing of the detection sweep (cm). This is the key
+		 *  value for preventing tunnelling; see the comment there. */
 		float ContactSweepStep = 2.0f;
 
-		/** WrapConfig.ContactMaxSweepSamples: 스윕 샘플 수 상한(비용 한도). */
+		/** WrapConfig.ContactMaxSweepSamples: the cap on sweep samples, which bounds the cost. */
 		int32 ContactMaxSweepSamples = 16;
 
 		/**
-		 * 로프 Verlet 변위 1회의 시간 폭(초) = **substep dt**(= FixedDt). SurfaceVelocity(FROZEN 계약 — cm/s)를
-		 * 로프 변위(Positions-PrevPositions)와 같은 단위로 환산하는 다리다. 핵심: 로프 변위는 *프레임*이 아니라
-		 * *마지막 substep* 델타(≈ v·FixedDt)라, 프레임 dt가 아니라 substep dt(=(1/60)/Substeps)로 환산해야 한다.
-		 * 프레임 dt를 쓰면 Substeps>1일 때 표면속도가 Substeps배 과대 반영돼 상대 접선속도/방향점수가 틀린다
-		 * (2026-07-14 수정 — 이전엔 프레임 dt를 넣어 이 버그가 있었다). sim 호출자(FinalizeSimFrame)는
-		 * FixedDt를 넣는다. 기본값은 dt가 무의미한 호출자(preview: 정적 스냅샷이라 표면속도 0)용 placeholder.
+		 * The time span of one rope Verlet displacement (s), which is the substep delta time, equal to
+		 * FixedDt. It is the bridge that converts SurfaceVelocity, defined in cm/s by the frozen contact
+		 * contract, into the same units as the rope displacement (Positions minus PrevPositions).
+		 * The key point is that the rope displacement is the last substep's delta, roughly v * FixedDt,
+		 * not a frame's, so it must be converted with the substep delta time, (1/60) / Substeps, rather
+		 * than the frame delta. Using the frame delta would overstate the surface velocity by a factor
+		 * of Substeps whenever Substeps exceeds 1, which makes the relative tangential velocity and the
+		 * direction score wrong. The simulation caller, FinalizeSimFrame, passes FixedDt. The default is
+		 * a placeholder for callers where the delta is meaningless, such as the preview, which is a
+		 * static snapshot with zero surface velocity.
 		 */
 		float SubstepDeltaTime = 1.0f / 60.0f;
 
 	/**
-	 * 이번 프레임 델타(초). 예측 접촉 외삽(AddPredictedContactCandidates 자유 노드 분기)에서 로프 Verlet
-	 * 변위(= 마지막 substep 델타, ≈ v·SubstepDeltaTime)를 *프레임* 변위로 환산하는 다리다
-	 * (× FrameDeltaTime/SubstepDeltaTime). 이게 없으면 PredictiveContactFrames가 substep 단위로 해석돼
-	 * lookahead가 Substeps배 과소 적용된다(가이드 노드 분기는 프레임 단위 타깃 차분이라 환산하지 않는다).
-	 * 정적 스냅샷 호출자(preview)는 예측을 안 쓰므로 기본값으로 충분.
+	 * This frame's delta time (s). It is the bridge that converts the rope Verlet displacement, which
+	 * is the last substep's delta of roughly v * SubstepDeltaTime, into a frame displacement, by
+	 * multiplying by FrameDeltaTime / SubstepDeltaTime. It is used by the free-node branch of
+	 * AddPredictedContactCandidates. Without it, PredictiveContactFrames would be interpreted in
+	 * substeps and the lookahead would be applied a factor of Substeps too small. The guided-node
+	 * branch differences frame-rate targets and needs no conversion.
+	 * Callers working from a static snapshot, such as the preview, do not use prediction, so the
+	 * default suffices.
 	 */
 	float FrameDeltaTime = 1.0f / 60.0f;
 	};
 
-	// whip 가이드 프레임 데이터 뷰(예측 접촉의 가이드 노드 분기 입력). 포인터는 소유하지 않으며
-	// 호출 동안만 유효하면 된다. 가이드 비활성이면 기본값(전부 nullptr) 그대로 넘긴다.
-	// NextTargets는 다음 프레임 시점의 가이드 타깃(FRopeWhipGuide::PreviewNextTargets 결과)으로,
-	// 호출자가 미리 계산해 넣는다 — 검출기는 가이드 클래스가 아니라 데이터만 본다.
+	// A view of the whip guide's frame data, which is the input to the guided-node branch of
+	// predictive contact. The pointers are not owned and need only stay valid for the duration of the
+	// call. With the guide inactive, pass the defaults, that is all nullptr.
+	// NextTargets holds the guide targets as of the next frame, the result of
+	// FRopeWhipGuide::PreviewNextTargets, computed by the caller beforehand: the detector sees data
+	// only, never the guide class.
 	struct FWhipGuideView
 	{
 		const TArray<uint8>* GuidedNodeMask = nullptr;
@@ -100,91 +116,108 @@ public:
 	};
 
 	/**
-	 * Assisted exact-target GT sweep의 안전 상한. 일반 detector/GPU의 고정 예산은 유지하되, 비동기
-	 * readback 유실을 막는 이 소수-collider 경로만 2cm 샘플 간격을 최대 512cm 이동까지 보존한다.
+	 * The safety cap for the assisted exact-target sweep on the game thread. The general detector and
+	 * the GPU keep their fixed budgets; only this few-collider path, which exists to avoid losing an
+	 * asynchronous readback, preserves a 2 cm sample spacing over up to 512 cm of travel.
 	 */
 	static constexpr int32 ReliableGuidedSweepMaxSamples = 256;
 
-	/** 솔브 전후 위치(Sim.PrevPositions → Positions)의 이동 경로에서 실제 접촉 후보를 수집한다. */
+	/** Collects actual contact candidates along the travel path between the positions before and after
+	 *  the solve, that is from Sim.PrevPositions to Sim.Positions. */
 	static void DetectContactCandidates(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
 		const FParams& Params, TArray<FRopeContactCandidate>& OutCandidates);
 
 	/**
-	 * CPU에서 이미 계산된 whip 가이드의 실제 프레임 이동(PrevTargets → CurrentTargets)과 현재 가이드
-	 * centerline edge(가이드/solver-owned 경계 포함)를 검사해 Actual 후보를 추가한다. GPU resident Pos/Prev와 비동기 contact readback은
-	 * 1~2프레임 늦거나 중간 프레임을 버릴 수 있으므로, Assisted의 잠긴 target을 같은 프레임에 확정하는
-	 * 동기 경로다. 같은 (node, bone, mesh) 후보는 기존 후보와 병합한다.
+	 * Adds actual candidates by testing the whip guide's real frame movement, already computed on the
+	 * CPU as PrevTargets to CurrentTargets, together with the current guide centreline edges including
+	 * the boundary between guided and solver-owned nodes. The GPU-resident positions and the
+	 * asynchronous contact readback lag one to two frames and can drop intermediate frames, so this is
+	 * the synchronous path that lets assisted aiming confirm its locked target within the same frame.
+	 * A candidate matching an existing (node, bone, mesh) is merged into it.
 	 */
 	static void AddGuidedContactCandidates(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
 		const FParams& Params, const FWhipGuideView& Whip, TArray<FRopeContactCandidate>& InOutCandidates);
 
 	/**
-	 * 현재 Sim centerline의 노드와 edge만 검사해 Actual 후보를 추가한다. Contacting에서 마지막 Flight의
-	 * PrevTargets 이동 pulse를 재생하지 않고, 동기화된 현재 pose가 exact primary에 실제로 닿는지만 본다.
+	 * Adds actual candidates by testing only the nodes and edges of the current Sim centreline. During
+	 * Contacting it does not replay the movement pulse from the last Flight frame's PrevTargets, and
+	 * asks only whether the synchronized current pose genuinely touches the exact primary target.
 	 */
 	static void AddCurrentCenterlineContactCandidates(const FRopeSimState& Sim,
 		const TArray<IRopeCollider*>& Colliders, const FParams& Params,
 		TArray<FRopeContactCandidate>& InOutCandidates);
 
 	/**
-	 * 예측 접촉 후보 추가: 빠른/tail/가이드 노드의 다음 위치를 외삽한 경로를 스윕해, 아직 닿지
-	 * 않았지만 곧 닿을 접촉을 같은 후보 파이프라인으로 승격한다. 같은 (node, bone, mesh) 후보는
-	 * SourceMask를 합치고 우선순위(Guided > Actual > Free)로 Source를 갱신한다.
+	 * Adds predicted contact candidates by sweeping the extrapolated next positions of fast-moving,
+	 * tail and guided nodes, which promotes contacts that have not landed yet but are about to into
+	 * the same candidate pipeline. A candidate matching an existing (node, bone, mesh) has its
+	 * SourceMask merged, and its Source updated by the priority order Guided, Actual, Free.
 	 */
 	static void AddPredictedContactCandidates(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
 		const FParams& Params, const FWhipGuideView& Whip, TArray<FRopeContactCandidate>& InOutCandidates);
 
-	/** 각 후보의 표면 대비 상대 접선 속도와 감김 방향 점수(WrapDirectionScore)를 채운다. */
+	/** Fills in each candidate's tangential velocity relative to the surface and its wrap direction
+	 *  score. */
 	static void EvaluateRelativeMotion(const FRopeSimState& Sim, const FParams& Params,
 		TArray<FRopeContactCandidate>& Candidates);
 
-	/** 후보를 한 번 집계해 dominant tracker와 캡처 여부를 함께 만든다. */
+	/** Aggregates the candidates once to produce the dominant tracker and the capture decision
+	 *  together. */
 	static FRopeFlightCaptureEvaluation EvaluateCapture(const TArray<FRopeContactCandidate>& Candidates,
 		const FParams& Params, const FRopeFlightCapturePolicy& Policy = {});
 
-	/** 구 C++ 편의 API. 새 코드는 tracker를 재사용할 수 있는 EvaluateCapture를 쓸 것. */
+	/** Older C++ convenience API. New code should use EvaluateCapture so the tracker can be reused. */
 	UE_DEPRECATED(5.7, "Use EvaluateCapture so gameplay and observation can share the tracker.")
 	static bool ShouldCapture(const TArray<FRopeContactCandidate>& Candidates, const FParams& Params);
 
 	/**
-	 * 현재 추가 품질 필터는 적용하지 않는다. 외부 호출 호환성을 위해 유지하며 항상 true를 반환한다.
+	 * No additional quality filter is applied at present. Kept for compatibility with external callers
+	 * and always returns true.
 	 */
 	static bool PassesCaptureQualityGate(const FRopeContactTracker& Tracker,
 		const TArray<FRopeContactCandidate>& Candidates, const FParams& Params);
 
-	//~ 개별 헬퍼 — 디버그 수집(FinalizeSimFrame)과 Contacting 시드 빌드에서도 쓰인다.
-	// (노드 프레임 이동 거리는 FRopeSimState::NodeSpeed로 이동 — 체인 자체의 측정이라 여기 소속이
-	//  아니었다. "빠른 노드" 임계 판정(> SegmentLength)은 이 detector의 정책으로 남는다.)
-	/** 로프 끝(tail) 근처 노드인가(마지막 4개). tail은 속도와 무관하게 항상 검사 대상. */
+	//~ Individual helpers, also used by debug collection in FinalizeSimFrame and by the Contacting
+	//~ seed build. The per-frame node travel distance lives on FRopeSimState::NodeSpeed, since it
+	//~ measures the chain itself; the "fast node" threshold test against SegmentLength remains this
+	//~ detector's policy.
+	/** Whether the node is near the tail of the rope, meaning one of the last four. Tail nodes are
+	 *  always tested regardless of speed. */
 	static bool IsTailNode(const FRopeSimState& Sim, int32 NodeIndex);
 
-	/** 세그먼트(Prev→Pos) 바운즈가 어떤 collider 바운즈와도 겹치는가(broad phase). */
+	/** Whether the bounds of the segment from Prev to Pos overlap any collider's bounds, as the broad
+	 *  phase. */
 	static bool IsNearAnyColliderSegment(const FVector& PrevPosition, const FVector& Position,
 		const TArray<IRopeCollider*>& Colliders, const FParams& Params);
 
-	/** 세그먼트 바운즈와 겹치는 collider만 추린다(broad phase). */
+	/** Narrows the list to the colliders whose bounds overlap the segment bounds, as the broad
+	 *  phase. */
 	static void GatherNearbyColliders(const FVector& PrevPosition, const FVector& Position,
 		const TArray<IRopeCollider*>& Colliders, const FParams& Params, TArray<IRopeCollider*>& OutNearbyColliders);
 
-	/** 이동 경로를 몇 개 샘플로 나눠 질의해 가장 깊은 접촉을 고른다(캡슐/SDF 공통 경로). */
+	/** Splits the travel path into a number of samples, queries each, and picks the deepest contact.
+	 *  Shared by the capsule and SDF paths. */
 	static FRopeContact SweepOrSampleContact(const FRopeSimState& Sim, const FVector& PrevPosition,
 		const FVector& Position, const TArray<IRopeCollider*>& Colliders, const FParams& Params);
 
-	/** FRopeContact → 후보 변환(SurfaceVelocity 포함). */
+	/** Converts an FRopeContact into a candidate, including its surface velocity. */
 	static FRopeContactCandidate MakeCandidate(int32 NodeIndex, const FRopeContact& Contact);
 
-	/** 접촉점에서 손(node 0) 쪽으로 향하는, 표면 접선면에 투영된 기대 감김 방향. */
+	/** The expected wrap direction: from the contact point towards the hand, that is node 0, projected
+	 *  onto the surface tangent plane. */
 	static FVector ExpectedWrapTangent(const FRopeSimState& Sim, const FRopeContactCandidate& Candidate,
 		const FVector& FallbackForward);
 
 	static bool IsWrappableBone(FName Bone) { return !Bone.IsNone(); }
 
 private:
-	/** 같은 node/bone/mesh 후보의 source mask를 합친다. 새 Actual은 지연 후보의 접촉 geometry를 갱신한다. */
+	/** Merges the source masks of candidates sharing a node, bone and mesh. A new actual contact
+	 *  refreshes the contact geometry of a predicted candidate. */
 	static void AddUniqueCandidate(TArray<FRopeContactCandidate>& InOutCandidates,
 		const FRopeContactCandidate& Candidate);
 
-	/** 가이드 활성 프레임엔 가이드/tail/빠른 노드만 예측 검사를 돌린다(비용 절약). */
+	/** On frames where the guide is active, runs the predictive test only for guided, tail and
+	 *  fast-moving nodes, which saves cost. */
 	static bool ShouldRunPredictiveContactForNode(const FRopeSimState& Sim, const FWhipGuideView& Whip,
 		int32 NodeIndex, const FVector& FrameDisplacement);
 };

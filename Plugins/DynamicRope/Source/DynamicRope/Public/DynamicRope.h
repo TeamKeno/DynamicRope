@@ -8,7 +8,7 @@ class FDynamicRopeModule : public IModuleInterface
 {
 public:
 
-	/** IModuleInterface 구현 */
+	/** IModuleInterface implementation. */
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 };

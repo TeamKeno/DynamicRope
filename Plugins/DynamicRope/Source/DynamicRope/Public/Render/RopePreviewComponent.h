@@ -9,7 +9,7 @@
 
 class UMaterialInterface;
 
-/** 미리보기 호 전용 material slot. Rope 본체 material과 분리한다. */
+/** The material slot used by the preview arc alone, kept separate from the rope's own material. */
 UENUM(BlueprintType)
 enum class ERopePreviewMaterialSlot : uint8
 {
@@ -17,9 +17,10 @@ enum class ERopePreviewMaterialSlot : uint8
 };
 
 /**
- * 던지기 전 preview centerline의 보관과 렌더링을 담당하는 **표시 전용** 컴포넌트다.
- * 경로 계산과 실제 로프 시뮬레이션/감김 상태는 RopeComponent가 소유하고, 이 컴포넌트는 주어진
- * centerline을 튜브로 그리는 일만 한다(SetWrapPreviewWorld / ClearPreview).
+ * A display-only component that stores and renders the preview centreline shown before a throw.
+ * Computing the path, and the actual rope simulation and wrap state, belong to RopeComponent; this
+ * component only draws the centreline it is given as a tube, through SetWrapPreviewWorld and
+ * ClearPreview.
  */
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopePreviewComponent : public UMeshComponent
@@ -30,19 +31,22 @@ public:
 	URopePreviewComponent();
 
 	/**
-	 * 프리뷰 튜브의 색을 결정하는 유일한 값이다(비우면 엔진 기본 머티리얼 — 불투명 회색). 튜브는 vertex
-	 * color를 기본값(흰색)으로만 두므로 하드코딩된 색은 없다. 반투명/색을 원하면 머티리얼이 그걸 해야 한다.
+	 * The only thing that decides the preview tube's colour. Left empty it uses the engine's default
+	 * material, which is opaque grey. The tube leaves its vertex colour at the default of white, so
+	 * there is no hardcoded colour anywhere; a translucent or coloured preview is the material's job.
 	 *
-	 * 런타임 교체는 반드시 SetMaterial(0, M)으로 할 것. 씬 프록시가 **생성 시점에** 머티리얼을 캡처하고
-	 * 이후 dynamic data는 centerline만 갱신하므로, 이 프로퍼티를 직접 쓰면 프록시는 옛 머티리얼을 계속 쓴다.
-	 * BlueprintReadWrite가 아닌 이유가 이것 — BP의 직접 Set은 후킹할 수 없다. 에디터 디테일 패널 편집은
-	 * 컴포넌트 재등록(FComponentReregisterContext)을 거치므로 안전하다.
+	 * Replace it at runtime through SetMaterial(0, M) only. The scene proxy captures the material when
+	 * it is created, and later dynamic data updates the centreline alone, so writing this property
+	 * directly leaves the proxy on the old material. That is why it is not BlueprintReadWrite: a direct
+	 * Blueprint set cannot be hooked. Editing it in the editor's details panel is safe, because that
+	 * goes through a component re-registration.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Preview|Material")
 	TObjectPtr<UMaterialInterface> WrapPreviewMaterial = nullptr;
 
-	// NOTE: 아크 탐색 튜닝(Reach Scale/Segment Count/Sample Step/Query Radius)은 URopeComponent로 이사했다 —
-	// 이 컴포넌트는 표시 전용이고, 그 값들은 Wielder 경로와 BP 직행 Throw()가 공유해야 하는 게임플레이 입력이다.
+	// The arc search tuning, namely the reach scale, segment count, sample step and query radius,
+	// lives on URopeComponent: this component is display only, and those values are gameplay inputs
+	// that the wielder path and a direct Blueprint call to Throw() have to share.
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Preview|Shape", meta = (ClampMin = "0.1", Units = "cm"))
 	float WrapPreviewRadius = 2.0f;
@@ -74,9 +78,9 @@ public:
 	virtual void SetMaterial(int32 ElementIndex, UMaterialInterface* Material) override;
 
 private:
-	// 이미 local인 preview를 렌더 상태와 bounds에 반영한다.
+	// Applies an already-local preview to the render state and the bounds.
 	void SetWrapPreviewLocal(const FRopeWrapPreviewData& InPreview);
-	// 외부 월드 preview를 이 컴포넌트 기준 local 좌표로 변환한다.
+	// Converts an external world-space preview into this component's local space.
 	FRopeWrapPreviewData ConvertWrapPreviewToLocal(const FRopeWrapPreviewData& InPreview) const;
 	void RebuildLocalBounds();
 
