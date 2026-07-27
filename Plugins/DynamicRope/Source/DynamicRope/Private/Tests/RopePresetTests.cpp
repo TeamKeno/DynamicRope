@@ -46,6 +46,18 @@ struct FRopePresetTestSeam
 		return Rope.Sim.TimeAccumulator;
 	}
 
+	// Loaded tip placement: the private compose helper plus the protected socket virtual it builds on,
+	// so the offset contract can be checked without a world.
+	static FTransform GetLoadedTipBaseWorld(const URopeComponent& Rope)
+	{
+		return Rope.MakeLoadedTipBaseWorld();
+	}
+
+	static FTransform GetLoadedSocketWorld(const URopeComponent& Rope)
+	{
+		return Rope.GetLoadedTipTransform();
+	}
+
 	// 던지기 세기 계약 게이트(private) — 모든 던지기 경로가 상태 변경 전에 공유 호출하는 단일 지점.
 	static bool TryThrowSpeed(const URopeComponent& Rope, const FRopeThrowContext& Ctx, float& Out)
 	{
@@ -101,6 +113,11 @@ bool FRopePresetDefaultsValidTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Substeps 기본값 일치"), Preset->SolverConfig.Substeps, Rope->SolverConfig.Substeps);
 	TestEqual(TEXT("bUseWorldGDF 기본값 일치"), Preset->bUseWorldGDF, Rope->bUseWorldGDF);
 	TestEqual(TEXT("bUseTipMesh 기본값 일치"), Preset->bUseTipMesh, Rope->bUseTipMesh);
+	TestEqual(TEXT("LoadedHandSocket 기본값 일치"), Preset->LoadedHandSocket, Rope->LoadedHandSocket);
+	TestTrue(TEXT("LoadedTipRelativeTransform 기본값 일치"),
+		Preset->LoadedTipRelativeTransform.Equals(Rope->LoadedTipRelativeTransform));
+	// 소켓 오버라이드는 기본 꺼짐이어야 기존 프리셋 적용이 인스턴스 배선을 지우지 않는다.
+	TestFalse(TEXT("bOverrideLoadedHandSocket 기본 꺼짐"), Preset->bOverrideLoadedHandSocket);
 	// 기본 머티리얼도 미러 — 프리셋 None이면 스탬프가 기본 머티리얼을 벗겨 회색 폴백이 된다(생성자 FObjectFinder 동기화).
 	TestEqual(TEXT("RopeMaterial 기본값 일치"), Preset->RopeMaterial.Get(), Rope->RopeMaterial.Get());
 	return true;
@@ -331,6 +348,81 @@ bool FRopePresetRejectsOutsideFreeReelTest::RunTest(const FString& Parameters)
 
 	// null 프리셋도 거부.
 	TestFalse(TEXT("null 프리셋 거부"), Rope->ApplyPreset(nullptr));
+	return true;
+}
+
+// 손 소켓은 소유 스켈레톤에 결합된 인스턴스 배선이라, 옵트인한 프리셋만 덮어쓴다.
+// 기본(꺼짐) 프리셋은 소켓을 비워 둔 채로 적용되므로 배선을 지우면 안 된다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePresetLoadedHandSocketOverrideGateTest,
+	"DynamicRope.Preset.LoadedHandSocketOverrideGate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePresetLoadedHandSocketOverrideGateTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	Rope->LoadedHandSocket = FName(TEXT("hand_r"));
+
+	// 게이트 꺼짐(기본) — 소켓이 채워져 있어도 인스턴스 값을 보존한다.
+	URopePreset* KeepPreset = NewObject<URopePreset>();
+	KeepPreset->bUseTipMesh = true;
+	KeepPreset->LoadedHandSocket = FName(TEXT("hand_l"));
+	TestTrue(TEXT("게이트 꺼짐 프리셋 적용 성공"), Rope->ApplyPreset(KeepPreset));
+	TestEqual(TEXT("옵트인 전에는 인스턴스 소켓 보존"), Rope->LoadedHandSocket, FName(TEXT("hand_r")));
+
+	// 게이트 켬 — 프리셋 소켓으로 교체된다.
+	URopePreset* OverridePreset = NewObject<URopePreset>();
+	OverridePreset->bUseTipMesh = true;
+	OverridePreset->bOverrideLoadedHandSocket = true;
+	OverridePreset->LoadedHandSocket = FName(TEXT("hand_l"));
+	TestTrue(TEXT("게이트 켬 프리셋 적용 성공"), Rope->ApplyPreset(OverridePreset));
+	TestEqual(TEXT("옵트인 시 소켓 교체"), Rope->LoadedHandSocket, FName(TEXT("hand_l")));
+
+	// 옵트인 프리셋은 빈 소켓도 그대로 스탬프한다(명시적 초기화 경로).
+	URopePreset* ClearPreset = NewObject<URopePreset>();
+	ClearPreset->bUseTipMesh = true;
+	ClearPreset->bOverrideLoadedHandSocket = true;
+	TestTrue(TEXT("빈 소켓 옵트인 프리셋 적용 성공"), Rope->ApplyPreset(ClearPreset));
+	TestEqual(TEXT("옵트인 빈 소켓은 초기화"), Rope->LoadedHandSocket, NAME_None);
+	return true;
+}
+
+// Loaded 배치 오프셋은 무조건 스탬프되고(Identity=현행 동작), 소켓 프레임 기준으로 합성된다.
+// 팀 별 소비처(팁 메쉬 배치 / 마지막 노드 핀)가 이 하나를 공유하므로 합성식 자체를 못 박아 둔다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePresetLoadedTipOffsetStampedTest,
+	"DynamicRope.Preset.LoadedTipOffsetStamped",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePresetLoadedTipOffsetStampedTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+
+	// The socket fallback is the component transform, and an identity socket would make Offset*Socket
+	// and Socket*Offset agree - which is exactly the mistake this test exists to catch. Push the
+	// component somewhere non-trivial first, and fail loudly if that did not take.
+	Rope->SetRelativeTransform(FTransform(FQuat(FVector(1, 0, 0), HALF_PI), FVector(-40.0f, 7.0f, 100.0f)));
+	Rope->UpdateComponentToWorld();
+	TestFalse(TEXT("소켓 폴백이 비-Identity여야 순서 검증이 성립"),
+		FRopePresetTestSeam::GetLoadedSocketWorld(*Rope).Equals(FTransform::Identity));
+
+	// 기본 Identity 오프셋에서는 합성 결과가 소켓 트랜스폼 그대로여야 한다(회귀 방어).
+	TestTrue(TEXT("Identity면 소켓 트랜스폼 그대로"),
+		FRopePresetTestSeam::GetLoadedTipBaseWorld(*Rope).Equals(
+			FRopePresetTestSeam::GetLoadedSocketWorld(*Rope)));
+
+	const FTransform Offset(FQuat(FVector(0, 0, 1), HALF_PI), FVector(12.0f, -3.0f, 5.0f));
+	URopePreset* Preset = NewObject<URopePreset>();
+	Preset->bUseTipMesh = true;
+	Preset->LoadedTipRelativeTransform = Offset;
+	TestTrue(TEXT("프리셋 적용 성공"), Rope->ApplyPreset(Preset));
+	TestTrue(TEXT("Loaded 오프셋 스탬프"), Rope->LoadedTipRelativeTransform.Equals(Offset));
+
+	// 소켓 로컬 프레임 기준 = Offset * SocketWorld (Offset이 먼저 적용된다).
+	const FTransform SocketWorld = FRopePresetTestSeam::GetLoadedSocketWorld(*Rope);
+	TestTrue(TEXT("소켓 프레임 기준으로 합성"),
+		FRopePresetTestSeam::GetLoadedTipBaseWorld(*Rope).Equals(Offset * SocketWorld));
+	// 반대 순서로는 성립하지 않아야 한다 — 합성 순서가 실제로 계약임을 못 박는다.
+	TestFalse(TEXT("반대 합성 순서는 불일치"),
+		FRopePresetTestSeam::GetLoadedTipBaseWorld(*Rope).Equals(SocketWorld * Offset));
 	return true;
 }
 

@@ -33,6 +33,17 @@ FTransform URopeComponent::GetLoadedTipTransform() const
 }
 #pragma endregion Tip_Public_API
 
+#pragma region Tip_Loaded_Placement
+
+FTransform URopeComponent::MakeLoadedTipBaseWorld() const
+{
+	// The authored offset is expressed in the hand socket's frame, so it composes *before* the socket
+	// transform. Applying it on top of the virtual keeps overridden placements offset-aware for free.
+	return LoadedTipRelativeTransform * GetLoadedTipTransform();
+}
+
+#pragma endregion Tip_Loaded_Placement
+
 #pragma region Tip_Mesh
 
 // ===== 팁 부착물(표시 전용) =================================================
@@ -158,7 +169,7 @@ void URopeComponent::UpdateTipMeshTransform()
 	// Free 게이트보다 앞: Loaded은 ③의 손 소켓 고정이라 bSyncTipMeshOnFree와 무관하게 항상 유효해야 한다.
 	if (Phase == ERopePhase::Loaded)
 	{
-		TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(GetLoadedTipTransform()));
+		TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(MakeLoadedTipBaseWorld()));
 		return;
 	}
 

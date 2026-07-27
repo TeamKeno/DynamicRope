@@ -142,6 +142,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
 	FName LoadedHandSocket = NAME_None;
 
+	// While Loaded this offset is composed onto the hand socket frame by MakeLoadedTipBaseWorld(), which
+	// drives *both* the tip mesh and the pinned free-end node - route every Loaded placement through that
+	// helper or the spear and the rope end drift apart. Distinct from TipMeshRelativeTransform, which
+	// applies in every phase and cancels out along the socket/pierce paths, so tuning the grip here
+	// cannot disturb the embed alignment.
+
+	/** Offset applied to the tip while Loaded, expressed in the hand socket's frame. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
+		meta = (EditCondition = "bUseTipMesh", DisplayName = "Loaded Relative Transform"))
+	FTransform LoadedTipRelativeTransform = FTransform::Identity;
+
 	// 켬 = Tail이 로프 끝에, Head가 꽂힘 지점에 오도록 메쉬 원점을 역산하고 그 자세를 bone-local로 얼려
 	// 대상 애니메이션을 따라간다. 끔 = 소켓을 일절 읽지 않는다(위 폴백). ①②에는 무의미.
 
@@ -837,6 +848,11 @@ private:
 
 	// bTipMeshCollision을 현재 팁 컴포넌트에 반영한다(팁이 없으면 no-op). 확보 시점과 편집 시점이 호출.
 	void ApplyTipMeshCollision();
+
+	// Single source for where the tip sits while Loaded: LoadedTipRelativeTransform composed onto the
+	// (overridable) GetLoadedTipTransform() socket frame. Both Loaded consumers - the tip mesh placement
+	// and the pinned free-end node - must read this, never the raw socket transform.
+	FTransform MakeLoadedTipBaseWorld() const;
 
 	//~ Pierce 임베드(소켓 기반) 헬퍼 -------------------------------------------
 	// 소켓 배치 활성 조건의 **단일 소스** = 팁 사용 + 소켓 옵트인 + ③(Guaranteed). Head를 꽂힘 지점에

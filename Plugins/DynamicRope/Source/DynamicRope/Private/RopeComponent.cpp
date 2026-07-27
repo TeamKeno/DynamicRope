@@ -131,7 +131,8 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	const bool bWasLoaded = (Phase == ERopePhase::Loaded);
 
 	// [2] 값 스탬프 — RopeMaterial만 세터(SetMaterial) 경유가 필요해 [5]로 미룬다.
-	// (인스턴스 배선 값 TipMeshComponentTag/LoadedHandSocket은 프리셋에 없다 — 헤더 주석 참조.)
+	// (인스턴스 배선 값 TipMeshComponentTag은 프리셋에 없고, LoadedHandSocket은 옵트인일 때만 덮는다
+	//  — 아래 bOverrideLoadedHandSocket 분기 및 헤더 주석 참조.)
 	ResolveMode = Preset->ResolveMode;
 	NumParticles = Preset->NumParticles;
 	RopeLength = Preset->RopeLength;
@@ -147,6 +148,14 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	TipMeshRelativeTransform = Preset->TipMeshRelativeTransform;
 	bTipMeshCollision = Preset->bTipMeshCollision;
 	bSyncTipMeshOnFree = Preset->bSyncTipMeshOnFree;
+	LoadedTipRelativeTransform = Preset->LoadedTipRelativeTransform;
+	if (Preset->bOverrideLoadedHandSocket)
+	{
+		// The hand socket is wiring bound to the owning skeleton, so preserving it is the default: an
+		// unconditional stamp would let any preset that left the socket empty wipe the instance wiring.
+		// Only authoring that wants the preset to pick the hand (per weapon) opts in.
+		LoadedHandSocket = Preset->LoadedHandSocket;
+	}
 	bUseTipMeshSockets = Preset->bUseTipMeshSockets;
 	TipSocketName = Preset->TipSocketName;
 	TipRopeSocketName = Preset->TipRopeSocketName;
@@ -356,8 +365,11 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 		// 팁 고정이 필요한 이유: 던지는 순간 팁 렌더가 소켓 → 마지막 노드로 바뀌므로(UpdateTipMeshTransform),
 		// 마지막 노드가 소켓에 있어야 창이 튀지 않는다. 솔브를 켜야 프리즈 없이 캐릭터를 따라간다.
 		// (Wrapped의 Hold와 동일 패턴: 위치 + InvMass=0 override → 나머지 노드는 솔버가 굴린다.)
+		// MakeLoadedTipBaseWorld = hand socket + LoadedTipRelativeTransform. This must use the *same* base
+		// as the Loaded branch of UpdateTipMeshTransform - offsetting only one of the two would leave the
+		// spear and the rope end apart.
 		const int32 LoadedTipNode = Sim.Num() - 1;
-		const FTransform LoadedTipWorld = GetLoadedTipTransform();
+		const FTransform LoadedTipWorld = MakeLoadedTipBaseWorld();
 		SimFrame.OverrideFrame.EnsureSize(Sim.Num());
 		SimFrame.OverrideFrame.SetPosition(LoadedTipNode, ResolveTipRopeAttachWorld(LoadedTipWorld), /*bZeroVelocity*/ true);
 		SimFrame.OverrideFrame.SetInvMass(LoadedTipNode, 0.0f);

@@ -6,8 +6,9 @@
 // override 표면 폭발을 의도적으로 배제 — 2026-07-18 회의 11번 안건).
 //
 // 담지 않는 것(인스턴스 배선 — 액터/스켈레톤에 결합된 값이라 프리셋이 덮으면 배선이 깨진다):
-// TipMeshComponentTag(소유 액터의 컴포넌트 태그), LoadedHandSocket(소유 스켈레톤 소켓),
-// Wielder 쪽 전부(AttachMesh/입력/Movement — v1 범위 밖).
+// TipMeshComponentTag(소유 액터의 컴포넌트 태그), Wielder 쪽 전부(AttachMesh/입력/Movement — v1 범위 밖).
+// LoadedHandSocket(소유 스켈레톤 소켓)만 예외로, bOverrideLoadedHandSocket을 켜둔 프리셋만 덮어쓴다
+// (기본 꺼짐 = 배선 보존).
 //
 // 필드는 URopeComponent의 동명 프로퍼티와 1:1 미러다 — 기본값·Clamp meta·툴팁을 컴포넌트와
 // 동일하게 유지할 것(기본값 프리셋 적용 = 기본 로프 = 회귀 없음이 계약).
@@ -84,8 +85,8 @@ public:
 	FRopeWhipConfig WhipConfig;
 
 	//~ Tip(팁 부착물) -------------------------------------------------------
-	// TipMeshComponentTag/LoadedHandSocket은 인스턴스 배선이라 프리셋에 없다(파일 머리 주석).
-	// 적용 시 기존 팁(우리가 스폰한 것만)은 파괴 후 새 설정으로 재확보된다.
+	// TipMeshComponentTag은 인스턴스 배선이라 프리셋에 없고, LoadedHandSocket은 옵트인 스탬프다
+	// (파일 머리 주석). 적용 시 기존 팁(우리가 스폰한 것만)은 파괴 후 새 설정으로 재확보된다.
 
 	/** 팁 부착물을 사용한다. 끄면 아래 Tip 설정이 전부 무시되고 팁 없는 일반 로프가 된다. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip")
@@ -106,6 +107,23 @@ public:
 	/** Free에서 팁을 매 프레임 로프 끝에 맞춘다. 끄면 Free 동안 팁을 건드리지 않는다. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip", meta = (EditCondition = "bUseTipMesh"))
 	bool bSyncTipMeshOnFree = true;
+
+	// Loaded (hand) placement. The socket name is wiring bound to the owning skeleton, so it is stamped
+	// only when opted in; the offset defaults to Identity - which is exactly the current behaviour - and
+	// is stamped unconditionally like the rest of the Tip fields.
+
+	/** Stamp Loaded Hand Socket onto the component. Leave off to keep the instance's own socket wiring. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip", meta = (EditCondition = "bUseTipMesh"))
+	bool bOverrideLoadedHandSocket = false;
+
+	/** Socket on the owner's skeletal mesh the tip is held at while Loaded. Empty falls back to the component transform. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip",
+		meta = (EditCondition = "bUseTipMesh && bOverrideLoadedHandSocket"))
+	FName LoadedHandSocket = NAME_None;
+
+	/** Offset applied to the tip while Loaded, expressed in the hand socket's frame. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip", meta = (EditCondition = "bUseTipMesh"))
+	FTransform LoadedTipRelativeTransform = FTransform::Identity;
 
 	/** ③(Guaranteed) 전용 — Head/Tail 소켓으로 팁을 정밀 배치한다. 끄면 메쉬 원점이 로프 끝에 놓인다. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset|Tip",
