@@ -6,19 +6,27 @@
 // URopeComponent 완전정의 — WrappingRopes(engagement 집합)의 weak 키 타입.
 #include "RopeComponent.h"
 #include "Subsystem/RopeSimSubsystem.h"
+#include "Camera/CameraActor.h"
+#include "CollisionQueryParams.h"
+#include "Camera/CameraComponent.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/PlayerController.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "TimerManager.h"
 #include "UObject/UObjectIterator.h"
 
 URopeRagdollResponseComponent::URopeRagdollResponseComponent()
 {
-	// 반응은 전적으로 중앙 wrap/release 신호 + 타이머로 구동한다 — 틱 불필요.
-	PrimaryComponentTick.bCanEverTick = false;
+	// 반응은 중앙 wrap/release 신호 + 타이머로 구동한다. 틱은 랙돌 카메라 추적(풀 랙돌 동안만) 전용 —
+	// 평시에는 꺼 둔다. PostPhysics = 랙돌 본 최종 포즈 이후, 카메라 매니저 갱신 이전.
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
+	PrimaryComponentTick.TickGroup = TG_PostPhysics;
 }
 
 void URopeRagdollResponseComponent::BeginPlay()
@@ -52,6 +60,9 @@ void URopeRagdollResponseComponent::EndPlay(const EEndPlayReason::Type EndPlayRe
 		World->GetTimerManager().ClearTimer(AutoRagdollTimer);
 	}
 	WrappingRopes.Reset();
+	// 카메라 추적 정리 — 컴포넌트만 떼는 경우의 원복(RecoverFromRagdoll)보다 먼저 불려도, 나중에
+	// 중복으로 불려도 무해(내부 가드). 월드 소멸 중엔 블렌드 없이 정리만 된다.
+	EndRagdollCameraFollow();
 
 	// 컴포넌트만 떼는 경우(DestroyComponent/UnregisterComponent)의 원복: 랙돌 상태는 이 컴포넌트가 만든
 	// 것이고 복구에 필요한 저장값(프로파일/부착/무브먼트 모드)도 이 컴포넌트에만 있다 — 그대로 사라지면
@@ -238,6 +249,7 @@ void URopeRagdollResponseComponent::EnterRagdoll(bool bAutoRecoverOnRelease)
 	// 로프 구동 진입(wrap 자동 전환·스네어 강제 랙돌)은 true — release 자동 복귀 게이트 대상.
 	// false = 수동/치트 진입(로프가 멋대로 일으키지 않는다).
 	bRagdollWasAutoTriggered = bAutoRecoverOnRelease;
+	BeginRagdollCameraFollow();
 	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 풀 랙돌 진입."), *GetNameSafe(GetOwner()));
 }
 
@@ -343,15 +355,48 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 		}
 		Mesh->SetRelativeTransform(SavedMeshRelative);
 
-		// 리셋으로 메시가 캡슐 위치의 ref 포즈로 돌아왔다. 캡슐(액터)을 랙돌이 멈춘 곳으로 수평 이동해,
-		// 그 되돌아감이 시각적 순간이동이 아니게 만든다. 이동량 = (랙돌 앵커 - 현재 앵커 월드), Z는 0으로
-		// 눌러 지면 높이를 유지(캡슐이 pelvis 높이만큼 가라앉는 것 방지 — 지면 스냅은 이어지는 무브먼트가 처리).
+		// 리셋으로 메시가 캡슐 위치의 ref 포즈로 돌아왔다. 캡슐(액터)을 랙돌이 멈춘 곳으로 이동해 그
+		// 되돌아감이 시각적 순간이동이 아니게 만든다. 이동량 = (랙돌 앵커 - 현재 앵커 월드). 높이는 캐릭터
+		// + RecoverGroundSearchDistance > 0일 때만 반영한다(수직 수송 — 헬기 캐리 — 후 옛 높이로 되돌아가는
+		// 것 방지): 앵커 아래로 바닥을 트레이스해 캡슐 바닥을 그 위에 세우고, 못 찾으면(공중 하차) 앵커
+		// 높이에서 낙하로 잇는다. 그 외(비캐릭터/탐색 0)는 종전대로 Z를 눌러 지면 높이 유지.
+		bool bRecoveredAirborne = false;
 		if (!RealignAnchor.IsNone())
 		{
 			if (AActor* Owner = GetOwner())
 			{
 				FVector Delta = RagdollAnchorWorld - Mesh->GetSocketLocation(RealignAnchor);
-				Delta.Z = 0.0f;
+				const ACharacter* OwnerCharacter = Cast<ACharacter>(Owner);
+				const UCapsuleComponent* Capsule =
+					OwnerCharacter ? OwnerCharacter->GetCapsuleComponent() : nullptr;
+				if (Capsule && RecoverGroundSearchDistance > 0.0f && GetWorld())
+				{
+					// 캡슐 콜리전은 아직 꺼져 있고(진입 시 NoCollision) 랙돌 메시는 남아 있으므로 자기
+					// 액터를 명시 제외한다. 채널은 캡슐이 걷는 것과 같은 Pawn 기준.
+					FCollisionQueryParams Params(SCENE_QUERY_STAT(RopeRagdollRecoverGround),
+						/*bTraceComplex*/ false, Owner);
+					const float HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+					const FVector TraceStart = RagdollAnchorWorld + FVector(0.0f, 0.0f, HalfHeight);
+					const FVector TraceEnd =
+						RagdollAnchorWorld - FVector(0.0f, 0.0f, RecoverGroundSearchDistance);
+					FHitResult Hit;
+					float TargetCenterZ;
+					if (GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Pawn, Params))
+					{
+						TargetCenterZ = static_cast<float>(Hit.ImpactPoint.Z) + HalfHeight;
+					}
+					else
+					{
+						// 탐색 거리 안에 바닥 없음 = 공중 하차 — 앵커 높이에서 낙하로 복귀.
+						TargetCenterZ = static_cast<float>(RagdollAnchorWorld.Z);
+						bRecoveredAirborne = true;
+					}
+					Delta.Z = TargetCenterZ - static_cast<float>(Capsule->GetComponentLocation().Z);
+				}
+				else
+				{
+					Delta.Z = 0.0f;
+				}
 				Owner->AddActorWorldOffset(Delta, /*bSweep*/ false);
 			}
 		}
@@ -360,16 +405,146 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 		{
 			Character->GetCapsuleComponent()->SetCollisionEnabled(SavedCapsuleCollision);
 			// 진입 시 모드로 복귀한다. 단 MOVE_None(이미 무브먼트가 꺼진 상태에서 진입)으로 되돌리면
-			// 조작 불능이 그대로 남으므로 그 한 경우만 Walking으로 구제한다.
-			const EMovementMode RestoreMode = (SavedMovementMode == MOVE_None) ? MOVE_Walking : SavedMovementMode.GetValue();
+			// 조작 불능이 그대로 남으므로 그 한 경우만 Walking으로 구제하고, 공중 하차(위 트레이스 실패)는
+			// 접지 모드 대신 낙하로 잇는다(Walking 복귀는 바닥 탐색 실패 시 첫 틱에 어차피 낙하 전환되지만,
+			// 명시해 한 프레임 바닥 스냅 시도를 없앤다). 비행/수영 저장 모드는 그대로 존중.
+			EMovementMode RestoreMode = (SavedMovementMode == MOVE_None) ? MOVE_Walking : SavedMovementMode.GetValue();
+			if (bRecoveredAirborne && (RestoreMode == MOVE_Walking || RestoreMode == MOVE_NavWalking))
+			{
+				RestoreMode = MOVE_Falling;
+			}
 			Character->GetCharacterMovement()->SetMovementMode(RestoreMode, SavedCustomMovementMode);
 		}
 	}
+
+	// 캡슐 재정렬/무브먼트 복구가 끝난 뒤에 카메라를 폰으로 블렌드 백한다 — 목적지(폰 카메라)가
+	// 최종 위치에 있어야 블렌드가 헛돌지 않는다.
+	EndRagdollCameraFollow();
 
 	bRagdolled = false;
 	bPartial = false;
 	bRagdollWasAutoTriggered = false;
 	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 랙돌 복귀."), *GetNameSafe(GetOwner()));
+}
+
+void URopeRagdollResponseComponent::BeginRagdollCameraFollow()
+{
+	// 플레이어가 보고 있는 폰의 풀 랙돌만 대상. 실패 조건은 전부 조용한 no-op — 카메라는 편의 기능이고
+	// 랙돌 본체(물리 전환)의 성패와 무관해야 한다.
+	if (!bViewTargetFollowRagdoll || FollowCamera.IsValid())
+	{
+		return;
+	}
+	APawn* Pawn = Cast<APawn>(GetOwner());
+	APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+	USkeletalMeshComponent* Mesh = ResolveMesh();
+	UWorld* World = GetWorld();
+	if (!PC || !PC->PlayerCameraManager || !Mesh || !World)
+	{
+		return;
+	}
+	// 이미 다른 뷰타깃(시네마틱 등)을 보고 있으면 빼앗지 않는다.
+	if (PC->GetViewTarget() != Pawn)
+	{
+		return;
+	}
+
+	// 추적 기준점: 캡슐 재정렬과 같은 앵커 본(스켈레톤에 없으면 메시 원점).
+	const bool bHasAnchorBone =
+		!RecoverAnchorBoneName.IsNone() && Mesh->GetBoneIndex(RecoverAnchorBoneName) != INDEX_NONE;
+	const FVector AnchorPos =
+		bHasAnchorBone ? Mesh->GetSocketLocation(RecoverAnchorBoneName) : Mesh->GetComponentLocation();
+
+	// 현재 POV 그 자리에 스폰 + 무블렌드 전환 = 화면상 이음새 없음.
+	const FVector CamLoc = PC->PlayerCameraManager->GetCameraLocation();
+	const FRotator CamRot = PC->PlayerCameraManager->GetCameraRotation();
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = GetOwner();
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	ACameraActor* Cam = World->SpawnActor<ACameraActor>(CamLoc, CamRot, SpawnParams);
+	if (!Cam)
+	{
+		return;
+	}
+	if (UCameraComponent* CamComp = Cam->GetCameraComponent())
+	{
+		CamComp->SetFieldOfView(PC->PlayerCameraManager->GetFOVAngle());
+		CamComp->bConstrainAspectRatio = false;
+	}
+	PC->SetViewTargetWithBlend(Cam, 0.0f);
+
+	FollowController = PC;
+	FollowCamera = Cam;
+	FollowCameraOffset = CamLoc - AnchorPos;
+	// 본 최종 포즈(물리 블렌드) 이후에 읽도록 메시를 선행조건으로 — 한 프레임 지연 흔들림 방지.
+	AddTickPrerequisiteComponent(Mesh);
+	SetComponentTickEnabled(true);
+}
+
+void URopeRagdollResponseComponent::EndRagdollCameraFollow()
+{
+	SetComponentTickEnabled(false);
+	APlayerController* PC = FollowController.Get();
+	ACameraActor* Cam = FollowCamera.Get();
+	FollowController.Reset();
+	FollowCamera.Reset();
+	if (!Cam)
+	{
+		return;
+	}
+
+	AActor* Owner = GetOwner();
+	UWorld* World = GetWorld();
+	const bool bWorldAlive = World && !World->bIsTearingDown;
+	// 우리가 아직 뷰타깃일 때만 폰으로 블렌드 백(그 사이 시네마틱 등이 가져갔으면 존중). 소유자가
+	// 죽는 중이면 목적지가 없다 — 카메라를 그대로 두고 수명만 걸어 카메라 매니저 폴백에 맡긴다.
+	if (PC && bWorldAlive && PC->GetViewTarget() == Cam
+		&& IsValid(Owner) && !Owner->IsActorBeingDestroyed())
+	{
+		PC->SetViewTargetWithBlend(Owner, FMath::Max(RecoverCameraBlendTime, 0.0f),
+			VTBlend_Cubic);
+	}
+	// 블렌드가 끝날 때까지 원본 뷰타깃이 살아 있어야 한다 — 즉시 파괴 대신 수명으로 정리.
+	if (bWorldAlive)
+	{
+		Cam->SetLifeSpan(FMath::Max(RecoverCameraBlendTime, 0.0f) + 0.5f);
+	}
+	else
+	{
+		Cam->Destroy();
+	}
+}
+
+void URopeRagdollResponseComponent::TickComponent(float DeltaTime, ELevelTick TickType,
+	FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	ACameraActor* Cam = FollowCamera.Get();
+	USkeletalMeshComponent* Mesh = ResolveMesh();
+	APlayerController* PC = FollowController.Get();
+	// 추적 전제가 무너지면(복귀 외 경로: 메시 소실/컨트롤러 소멸/뷰타깃 피탈) 정리하고 끝낸다.
+	if (!Cam || !Mesh || !bRagdolled || bPartial || !PC || PC->GetViewTarget() != Cam)
+	{
+		EndRagdollCameraFollow();
+		return;
+	}
+
+	const bool bHasAnchorBone =
+		!RecoverAnchorBoneName.IsNone() && Mesh->GetBoneIndex(RecoverAnchorBoneName) != INDEX_NONE;
+	const FVector AnchorPos =
+		bHasAnchorBone ? Mesh->GetSocketLocation(RecoverAnchorBoneName) : Mesh->GetComponentLocation();
+	const FVector Desired = AnchorPos + FollowCameraOffset;
+	// 위치는 일방향 러그 추적(카메라→본 피드백 없음 = 폭주 불가), 시선은 항상 랙돌을 향한다.
+	const FVector NewLoc = FollowCameraLagSpeed > 0.0f
+		? FMath::VInterpTo(Cam->GetActorLocation(), Desired, DeltaTime, FollowCameraLagSpeed)
+		: Desired;
+	Cam->SetActorLocation(NewLoc);
+	const FVector ToAnchor = AnchorPos - NewLoc;
+	if (!ToAnchor.IsNearlyZero())
+	{
+		Cam->SetActorRotation(ToAnchor.Rotation());
+	}
 }
 
 USkeletalMeshComponent* URopeRagdollResponseComponent::ResolveMesh() const

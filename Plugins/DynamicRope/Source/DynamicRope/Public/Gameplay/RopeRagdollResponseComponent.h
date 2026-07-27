@@ -38,6 +38,8 @@
 class USkeletalMeshComponent;
 class USceneComponent;
 class URopeComponent;
+class ACameraActor;
+class APlayerController;
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeRagdollResponseComponent : public UActorComponent
@@ -47,9 +49,11 @@ class DYNAMICROPE_API URopeRagdollResponseComponent : public UActorComponent
 public:
 	URopeRagdollResponseComponent();
 
-	//~ UActorComponent — 중앙 wrap/release 신호에 구독/해제.
+	//~ UActorComponent — 중앙 wrap/release 신호에 구독/해제. 틱은 랙돌 카메라 추적 동안만 켠다.
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
+		FActorComponentTickFunction* ThisTickFunction) override;
 
 	/** 로프가 이 액터의 메시를 감으면(Wrapped) 자동으로 랙돌 전환한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll")
@@ -93,6 +97,26 @@ public:
 	bool bRecoverRagdollOnRopeRelease = true;
 
 	/**
+	 * 풀 랙돌 동안 플레이어 카메라가 랙돌(앵커 본)을 따라가게 한다(기본 켜짐). 소유자가 플레이어
+	 * 컨트롤 폰일 때만 동작. 랙돌은 무브먼트/캡슐이 꺼져 액터(=스프링암 카메라)가 제자리에 남으므로,
+	 * 몸만 실려 가면 화면이 빈 자리를 비춘다 — 진입 순간의 카메라 POV 위치에 카메라 액터를 스폰해
+	 * 뷰타깃으로 전환하고(무블렌드 = 이음새 없음), 본→카메라 오프셋을 유지한 채 러그 보간으로
+	 * 추적한다. 액터 텔레포트 방식(폐기)과 달리 캡슐/스프링암을 건드리지 않아 카메라 랙과의
+	 * 정귀환(폭주)이 구조적으로 없다. 복귀 시 폰 카메라로 블렌드 백. 부분 랙돌은 캡슐/무브먼트가
+	 * 살아 있어 대상 아님.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll", meta = (DisplayName = "Follow Camera While Ragdolled"))
+	bool bViewTargetFollowRagdoll = true;
+
+	/** 카메라 추적 러그(보간 속도, 1/s). 0 = 러그 없이 스냅. 클수록 밀착. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (ClampMin = "0.0", EditCondition = "bViewTargetFollowRagdoll", DisplayName = "Follow Camera Lag"))
+	float FollowCameraLagSpeed = 5.0f;
+
+	/** 복귀 시 폰 카메라로 돌아가는 블렌드 시간(초). 0 = 즉시 컷. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (ClampMin = "0.0", Units = "s", EditCondition = "bViewTargetFollowRagdoll", DisplayName = "Recover Camera Blend"))
+	float RecoverCameraBlendTime = 0.5f;
+
+	/**
 	 * 풀 랙돌 복귀 시 캡슐(액터)을 랙돌이 멈춘 위치로 수평 이동한다(기본 켜짐). 랙돌 동안 무브먼트가
 	 * 꺼져 캡슐은 제자리인데 메시만 물리로(예: pull) 끌려가므로, 그냥 복귀하면 메시가 원래 캡슐로
 	 * 되돌아가며 크게 순간이동한다 — 대신 캡슐을 메시(RecoverAnchorBoneName 본) 쪽으로 옮겨 그
@@ -111,6 +135,16 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (EditCondition = "bMoveCapsuleToMeshOnRecover", DisplayName = "Recover Anchor Bone"))
 	FName RecoverAnchorBoneName = TEXT("pelvis");
+
+	/**
+	 * 캡슐 재정렬 시 앵커 본 아래로 바닥을 탐색하는 거리(cm). 종전 재정렬은 수평만 옮기고 Z를 버리는
+	 * 평지 전제라, 수직 수송(헬기 캐리 등) 후 복귀하면 옛 높이로 되돌아갔다 — 랙돌이 멈춘 지점의
+	 * 높이를 포함해 착지시킨다: 앵커에서 이 거리만큼 아래로 트레이스해 바닥을 찾으면 캡슐 바닥을 그
+	 * 위에 세우고, 못 찾으면(공중 하차) 앵커 높이에서 낙하(Falling)로 복귀한다. 0 = 종전 수평 전용.
+	 * ACharacter 한정(비캐릭터는 원래 수평만 유지).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bMoveCapsuleToMeshOnRecover", DisplayName = "Recover Ground Search"))
+	float RecoverGroundSearchDistance = 500.0f;
 
 	/** 랙돌 동안 메시에 줄 콜리전 프로파일. 마네킹 기본(CharacterMesh)은 물리 충돌이 없어 전환이 필수. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Ragdoll|Tuning", meta = (DisplayName = "Collision Profile"))
@@ -189,6 +223,11 @@ private:
 	/** bUseCCDWhileRagdolled 게이트 하에 전 바디 CCD를 켜고/끈다(진입 시 켬, 복귀 시 원복). */
 	void ApplyRagdollCCD(USkeletalMeshComponent* Mesh, bool bEnable);
 
+	/** 풀 랙돌 진입 시 카메라 액터 스폰 + 뷰타깃 전환(플레이어 폰 한정). 실패하면 조용히 no-op. */
+	void BeginRagdollCameraFollow();
+	/** 뷰타깃을 폰으로 블렌드 백하고 카메라 액터를 수명 종료시킨다(블렌드 동안 생존 필요). */
+	void EndRagdollCameraFollow();
+
 	bool bRagdolled = false;
 	bool bPartial = false;
 	// 현재 랙돌이 wrap 자동 전환으로 들어간 것인가(수동/치트 진입과 구분 — 자동 복귀 대상 게이트).
@@ -213,6 +252,12 @@ private:
 	// Custom으로 랙돌에 들어간 대상이 걸어 나왔다). MOVE_None으로 들어갔던 경우만 Walking으로 구제한다.
 	TEnumAsByte<EMovementMode> SavedMovementMode = MOVE_Walking;
 	uint8 SavedCustomMovementMode = 0;
+
+	// 랙돌 카메라 추적 상태 — 컨트롤러/카메라 액터는 소유하지 않는 weak(복귀·소멸 어느 쪽이 먼저여도 안전).
+	TWeakObjectPtr<APlayerController> FollowController;
+	TWeakObjectPtr<ACameraActor> FollowCamera;
+	// 진입 순간의 앵커 본→카메라 월드 오프셋(추적 동안 유지 — 보던 각도/거리 보존).
+	FVector FollowCameraOffset = FVector::ZeroVector;
 
 	// 신호 구독 핸들(EndPlay 해제용).
 	FDelegateHandle WrappedHandle;
