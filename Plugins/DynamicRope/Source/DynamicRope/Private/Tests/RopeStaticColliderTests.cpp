@@ -403,4 +403,61 @@ bool FRopeBodyExtractionAttributionTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+
+// convex 귀속 계약(WrapTarget 전체 세트): 가상 본이 있으면 감지 참여 + Query가 본/메시를 실어주고,
+// 귀속 추출은 전단 박스(비균등 스케일 x 회전 elem -> convex 라우팅)에도 본을 싣는다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexWrapAttributionTest,
+	"DynamicRope.Collision.ConvexWrapAttribution",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeConvexWrapAttributionTest::RunTest(const FString& Parameters)
+{
+	const FName VirtualBone(TEXT("Prop_RopeWrapAnchor"));
+
+	// 1) 직접 구성한 박스형 convex(6평면, 반폭 50): 귀속 전 정적 -> 귀속 후 감지 참여 + Query 본 전달.
+	{
+		TArray<FPlane> Planes;
+		Planes.Add(FPlane(FVector(1, 0, 0), 50.0));
+		Planes.Add(FPlane(FVector(-1, 0, 0), 50.0));
+		Planes.Add(FPlane(FVector(0, 1, 0), 50.0));
+		Planes.Add(FPlane(FVector(0, -1, 0), 50.0));
+		Planes.Add(FPlane(FVector(0, 0, 1), 50.0));
+		Planes.Add(FPlane(FVector(0, 0, -1), 50.0));
+		FRopeConvexCollider Cv(MoveTemp(Planes), FBox(FVector(-50.0), FVector(50.0)));
+		TestTrue(TEXT("unattributed convex stays static"), Cv.IsWorldStatic());
+
+		Cv.Bone = VirtualBone;
+		TestFalse(TEXT("attributed convex joins detect"), Cv.IsWorldStatic());
+		const FRopeContact C = Cv.Query(FVector(48.0, 0.0, 0.0), 3.0f);
+		TestTrue(TEXT("attributed convex contact hit"), C.bHit);
+		TestEqual(TEXT("contact carries virtual bone"), C.Bone, VirtualBone);
+	}
+
+	// 2) 귀속 추출: 회전 elem + 비균등 스케일 박스는 convex로 라우팅되고 본이 실린다.
+	{
+		UBodySetup* Setup = NewObject<UBodySetup>(GetTransientPackage());
+		FKBoxElem BoxElem(20.0f, 30.0f, 40.0f);
+		BoxElem.Rotation = FRotator(0.0f, 30.0f, 0.0f);
+		Setup->AggGeom.BoxElems.Add(BoxElem);
+
+		FTransform CompTM = FTransform::Identity;
+		CompTM.SetScale3D(FVector(1.0, 2.0, 1.0));
+
+		TArray<FRopeBoxCollider> Boxes;
+		TArray<FRopeStaticCapsuleCollider> Capsules;
+		TArray<FRopeConvexCollider> Convexes;
+		RopeBodyColliderExtraction::AppendBodyColliders(*Setup, CompTM, CompTM, 0.0f, 32, 32,
+			Boxes, Capsules, Convexes, [](int32) {}, VirtualBone, /*AttributionMesh*/ nullptr);
+
+		TestEqual(TEXT("sheared box routed to convex"), Convexes.Num(), 1);
+		if (Convexes.Num() == 1)
+		{
+			TestEqual(TEXT("extracted convex virtual bone"), Convexes[0].Bone, VirtualBone);
+			TestFalse(TEXT("extracted convex joins detect"), Convexes[0].IsWorldStatic());
+		}
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

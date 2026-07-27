@@ -260,6 +260,22 @@ bool FRopeWrappingPhase::GetColliderCenter(const IRopeCollider& Collider, FVecto
 		return true;
 	}
 
+	// 랩 가능 convex(WrapTarget 전체 세트): 로컬 bounds 중심을 강체로 월드 변환.
+	TConstArrayView<FPlane> ConvexPlanes;
+	FBox ConvexLocalBounds(ForceInit);
+	FQuat ConvexRot = FQuat::Identity;
+	FQuat ConvexPrevRot = FQuat::Identity;
+	FVector ConvexTrans = FVector::ZeroVector;
+	FVector ConvexPrevTrans = FVector::ZeroVector;
+	float ConvexInvDt = 0.0f;
+	if (Collider.GetGPUConvex(ConvexPlanes, ConvexLocalBounds, ConvexRot, ConvexTrans,
+			ConvexPrevRot, ConvexPrevTrans, ConvexInvDt)
+		&& ConvexLocalBounds.IsValid)
+	{
+		OutCenter = ConvexRot.RotateVector(ConvexLocalBounds.GetCenter()) + ConvexTrans;
+		return true;
+	}
+
 	return false;
 }
 

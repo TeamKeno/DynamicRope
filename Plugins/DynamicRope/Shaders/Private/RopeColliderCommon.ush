@@ -100,9 +100,9 @@ StructuredBuffer<float>          SDFDistances;
 StructuredBuffer<FRopeSDFVolume> SDFVolumes;
 // 로프별 SDF collider 인스턴스
 StructuredBuffer<FRopeSDFCollider> SDFColliders;
-// 로프별 정적 박스(OBB) — 감지 커널은 미참조(정적은 랩 대상 아님)
+// 로프별 박스(OBB) — 앞쪽 [0, DetectNumBoxes)는 랩 가능(감지 참여), 뒤는 정적 push-out
 StructuredBuffer<FRopeBox>       Boxes;
-// 로프별 정적 컨벡스 헤더
+// 로프별 컨벡스 헤더 — 앞쪽 [0, DetectNumConvexes)는 랩 가능(감지 참여), 뒤는 정적 push-out
 StructuredBuffer<FRopeConvex>    Convexes;
 // 전 컨벡스 평면 평탄 풀((nx,ny,nz,w), 월드·바깥)
 StructuredBuffer<float4>         ConvexPlanes;

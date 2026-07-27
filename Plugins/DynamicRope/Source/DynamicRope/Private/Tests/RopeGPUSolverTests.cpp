@@ -514,6 +514,159 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// 랩 가능 convex 감지 패리티: 박스형 convex(가상 본)를 CPU 감지와 GPU 감지 커널의 convex 루프가
+// 동일한 히트 집합/침투/법선으로 잡는가(NumDetectConvexes 경계 + ColliderType=3 배선 검증).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUConvexContactParityTest,
+	"DynamicRope.Solver.GPUConvexContactParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU convex 감지 패리티 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		return true;
+	}
+
+	const int32 N = 8;
+	const float Length = 140.0f;
+	const float ContactRadius = 3.0f;
+
+	// 정적 로프(prev==pos)를 z=15에. 박스형 convex(6평면): x=60 중심, 반폭 (30,50,30) → 노드 2/3/4가 내부.
+	FRopeSimState Sim = RopeTest::MakeStraightRope(N, Length, FVector(0, 0, 15));
+	TArray<FPlane> Planes;
+	Planes.Add(FPlane(FVector(1, 0, 0), 30.0));
+	Planes.Add(FPlane(FVector(-1, 0, 0), 30.0));
+	Planes.Add(FPlane(FVector(0, 1, 0), 50.0));
+	Planes.Add(FPlane(FVector(0, -1, 0), 50.0));
+	Planes.Add(FPlane(FVector(0, 0, 1), 30.0));
+	Planes.Add(FPlane(FVector(0, 0, -1), 30.0));
+	FRopeConvexCollider Convex(MoveTemp(Planes), FBox(FVector(-30.0, -50.0, -30.0), FVector(30.0, 50.0, 30.0)),
+		FQuat::Identity, FVector(60.0, 0.0, 0.0));
+	Convex.Bone = FName(TEXT("prop"));
+	TArray<IRopeCollider*> Colliders = { &Convex };
+
+	// --- CPU ground-truth 감지.
+	FRopeFlightContactDetector::FParams Params;
+	Params.ContactRadius = ContactRadius;
+	Params.RopeRadius = 2.0f;
+	Params.PredictiveContactFrames = 0.0f;
+	Params.MinLatchNodes = 1;
+	TArray<FRopeContactCandidate> CpuCandidates;
+	FRopeFlightContactDetector::DetectContactCandidates(Sim, Colliders, Params, CpuCandidates);
+
+	// --- GPU 감지: 감지 전용 step. convex를 pass-1 규약(평탄 평면 풀 + NumDetectConvexes)으로 패킹.
+	FRopeGPUSolver GpuSolver;
+	const uint32 RopeId = 13;
+	const uint32 Gen = 1;
+
+	auto MakeDetectStep = [&]() -> FRopeGPUResidentStep
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId            = RopeId;
+		Step.Generation        = Gen;
+		Step.NumNodes          = Sim.Num();
+		Step.SeedPositions     = Sim.Positions;
+		Step.SeedPrevPositions = Sim.PrevPositions;
+		Step.InvMass           = Sim.InvMass;
+		Step.SegmentLength     = Sim.SegmentLength;
+		Step.NumSub            = 0;
+		Step.FixedDt           = 1.0f / 60.0f;
+		Step.bDetectContacts   = true;
+		Step.ContactRadius     = ContactRadius;
+		TConstArrayView<FPlane> LocalPlanes;
+		FBox LocalBounds(ForceInit);
+		FQuat CvRot, CvPrevRot;
+		FVector CvTrans, CvPrevTrans;
+		float CvInvDt = 0.0f;
+		if (Convex.GetGPUConvex(LocalPlanes, LocalBounds, CvRot, CvTrans, CvPrevRot, CvPrevTrans, CvInvDt))
+		{
+			FRopeGPUConvex Cv;
+			Cv.PlaneOffset = 0;
+			Cv.PlaneCount = LocalPlanes.Num();
+			Cv.LocalBoundsCenter = LocalBounds.GetCenter();
+			Cv.LocalBoundsExtent = LocalBounds.GetExtent();
+			Cv.Rot = CvRot; Cv.Trans = CvTrans;
+			Cv.PrevRot = CvPrevRot; Cv.PrevTrans = CvPrevTrans;
+			Cv.InvDeltaTime = CvInvDt;
+			for (const FPlane& Pl : LocalPlanes)
+			{
+				Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W));
+			}
+			Step.Convexes.Add(Cv);
+			Step.NumDetectConvexes = 1;
+		}
+		return Step;
+	};
+	auto SyncGPU = []()
+	{
+		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
+			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.BlockUntilGPUIdle(); });
+		FlushRenderingCommands();
+	};
+
+	FRopeResidentContacts GpuContacts;
+	bool bGot = false;
+	for (int32 Spin = 0; Spin < 16 && !bGot; ++Spin)
+	{
+		SyncGPU();
+		{
+			TArray<FRopeGPUResidentStep> Steps;
+			Steps.Add(MakeDetectStep());
+			GpuSolver.Step(MoveTemp(Steps));
+			FlushRenderingCommands();
+		}
+		SyncGPU();
+		TMap<uint32, FRopeResidentContacts> Latest;
+		GpuSolver.GetLatestContacts(Latest);
+		if (const FRopeResidentContacts* C = Latest.Find(RopeId))
+		{
+			if (C->Generation == Gen)
+			{
+				GpuContacts = *C;
+				bGot = true;
+			}
+		}
+	}
+	if (!bGot)
+	{
+		AddError(TEXT("GPU convex 접촉 감지 결과를 회수하지 못함."));
+		return false;
+	}
+
+	TMap<int32, const FRopeContactCandidate*> CpuByNode;
+	for (const FRopeContactCandidate& C : CpuCandidates) { CpuByNode.Add(C.NodeIndex, &C); }
+	TMap<int32, const FRopeGPUContactResult*> GpuByNode;
+	for (const FRopeGPUContactResult& C : GpuContacts.Contacts) { GpuByNode.Add(C.NodeIndex, &C); }
+
+	AddInfo(FString::Printf(TEXT("CPU 접촉 %d개, GPU 접촉 %d개"), CpuCandidates.Num(), GpuContacts.Contacts.Num()));
+	TestTrue(TEXT("적어도 하나의 convex 접촉이 감지됨"), CpuCandidates.Num() > 0);
+	TestEqual(TEXT("히트 노드 수 일치"), GpuContacts.Contacts.Num(), CpuCandidates.Num());
+	for (const FRopeGPUContactResult& C : GpuContacts.Contacts)
+	{
+		TestEqual(TEXT("GPU 접촉의 ColliderType은 convex(3)"), C.ColliderType, 3);
+	}
+
+	for (const TPair<int32, const FRopeContactCandidate*>& Pair : CpuByNode)
+	{
+		const int32 Node = Pair.Key;
+		const FRopeGPUContactResult** GpuC = GpuByNode.Find(Node);
+		if (!TestTrue(FString::Printf(TEXT("GPU도 노드 %d를 히트"), Node), GpuC != nullptr))
+		{
+			continue;
+		}
+		const float PenDev = FMath::Abs((*GpuC)->Penetration - Pair.Value->Penetration);
+		TestTrue(FString::Printf(TEXT("노드 %d 침투 일치(차 %.3f)"), Node, PenDev), PenDev < 0.1f);
+		const float NormalDot = FVector::DotProduct((*GpuC)->Normal.GetSafeNormal(), Pair.Value->Normal.GetSafeNormal());
+		TestTrue(FString::Printf(TEXT("노드 %d 법선 일치(dot %.3f)"), Node, NormalDot), NormalDot > 0.99f);
+		const float PointDev = static_cast<float>(FVector::Dist((*GpuC)->WorldPoint, Pair.Value->WorldPoint));
+		TestTrue(FString::Printf(TEXT("노드 %d 접촉점 일치(차 %.3f cm)"), Node, PointDev), PointDev < 0.5f);
+	}
+
+	return true;
+}
+
+
 // 예측 접촉 패리티(G3b): 아직 안 닿았지만 외삽 경로가 캡슐을 지나는 tail 노드가 predictive 슬롯에
 // 잡히고, CPU AddPredictedContactCandidates와 침투/소스가 일치하는가. actual 슬롯은 비어야 한다.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUPredictiveParityTest,

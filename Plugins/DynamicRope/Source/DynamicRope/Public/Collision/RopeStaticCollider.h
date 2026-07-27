@@ -116,8 +116,11 @@ public:
  * response. Computing the exact closest point on an edge or vertex, as the box does, requires
  * adjacency information and is expensive, so this approximation is the standard choice for static
  * world collision.
- * Under the frozen FRopeContact contract it is non-skeletal, so its bone is None, its source mesh is
- * null and its surface velocity is zero.
+ * The attribution rule matches the box and static-capsule colliders: by default, with no bone,
+ * IsWorldStatic() is true, so it is a push-out-only world shape excluded from detection. Filling in
+ * a virtual bone and a source mesh makes it wrappable (it joins detection) - the WrapTarget
+ * full-set mode serves convex elems through this path. Surface velocity is reconstructed from the
+ * material point when the body is dynamic (InvDeltaTime > 0), under the frozen FRopeContact contract.
  */
 class DYNAMICROPE_API FRopeConvexCollider : public IRopeCollider
 {
@@ -143,6 +146,11 @@ public:
 	FVector PrevTrans = FVector::ZeroVector;
 	float   InvDeltaTime = 0.0f;
 
+	/** A wrappable convex: a non-None virtual bone plus a source mesh makes this a wrap target that
+	 *  joins detection. The defaults keep it a static world shape. */
+	FName Bone = NAME_None;
+	const USceneComponent* SourceMesh = nullptr;
+
 	FRopeConvexCollider() = default;
 
 	/** A convenience constructor for the static case: local planes, local bounds and a rigid transform
@@ -156,7 +164,14 @@ public:
 	virtual FRopeContact Query(const FVector& WorldPos, float NodeRadius) const override;
 	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const override;
 	virtual FBox GetWorldBounds() const override;
-	virtual bool IsWorldStatic() const override { return true; }
+	/** The same rule as the box: with a virtual bone this is a wrap target that joins detection,
+	 *  without one it is static world geometry, push-out only. */
+	virtual bool IsWorldStatic() const override { return Bone.IsNone(); }
+	virtual void GetGPUAttribution(FName& OutBone, const USceneComponent*& OutMesh) const override
+	{
+		OutBone = Bone;
+		OutMesh = SourceMesh;
+	}
 	virtual bool GetGPUConvex(TConstArrayView<FPlane>& OutLocalPlanes, FBox& OutLocalBounds,
 		FQuat& OutRot, FVector& OutTrans, FQuat& OutPrevRot, FVector& OutPrevTrans, float& OutInvDeltaTime) const override
 	{

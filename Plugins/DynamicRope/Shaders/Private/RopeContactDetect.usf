@@ -19,7 +19,7 @@
 struct FRopeGPUContact
 {
 	int    bHit;
-	// 0=capsule, 1=SDF
+	// 0=capsule, 1=SDF, 2=box, 3=convex
 	int    ColliderType;
 	int    ColliderIndex;
 	// 1=Actual, 2=PredictiveFree, 4=PredictiveGuided
@@ -37,6 +37,8 @@ int   DetectNumCapsules;
 int   DetectNumSDF;
 // 랩 가능 박스(OBB) 수. Boxes 앞쪽 [0, DetectNumBoxes)만 감지(정적 박스 제외).
 int   DetectNumBoxes;
+// 랩 가능 convex 수. Convexes 앞쪽 [0, DetectNumConvexes)만 감지(정적 convex 제외).
+int   DetectNumConvexes;
 float DetectContactRadius;
 float DetectSegmentLength;
 // 감지 스윕 샘플 간격(cm)과 샘플 수 상한 — CPU FParams::ContactSweepStep/ContactMaxSweepSamples 미러.
@@ -162,6 +164,29 @@ FRopeGPUContact RopeDetectSweep(float3 A, float3 B, int SourceFlag)
 				const float  InvDt = Col.PrevTranslation.w;
 				const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Col.Scale.xyz) + Col.PrevTranslation.xyz;
 				Best.SurfaceVel = float4((P - Wprev) * InvDt, 0.0f);
+			}
+		}
+
+		// --- convex (랩 가능만; 정적 convex는 [DetectNumConvexes, ..) 뒤라 제외. CPU FRopeConvexCollider::Query 미러)
+		for (int cvx = 0; cvx < DetectNumConvexes; ++cvx)
+		{
+			const FRopeConvex Cv = Convexes[cvx];
+			float3 CNrm; float CPen; float3 CClosest; float3 CLp;
+			if (RopeQueryConvexLocal(Cv, Cv.Rot, Cv.Trans.xyz, P, DetectContactRadius, CNrm, CPen, CClosest, CLp)
+				&& CPen > BestPen)
+			{
+				BestPen = CPen;
+				Best.bHit = 1;
+				// convex
+				Best.ColliderType = 3;
+				Best.ColliderIndex = cvx;
+				Best.Normal = float4(CNrm, 0.0f);
+				// 표면점 + w=Pen
+				Best.WorldPoint = float4(CClosest, CPen);
+				// surfVel: 재질점(로컬)의 (현재-이전 포즈)*InvDt. 정적(InvDt 0)이면 0.
+				const float  InvDt = Cv.LocalBoundsExtent.w;
+				const float3 Wprev = RopeQuatRotate(Cv.PrevRot, CLp) + Cv.PrevTrans.xyz;
+				Best.SurfaceVel = float4((CClosest - Wprev) * InvDt, 0.0f);
 			}
 		}
 	}

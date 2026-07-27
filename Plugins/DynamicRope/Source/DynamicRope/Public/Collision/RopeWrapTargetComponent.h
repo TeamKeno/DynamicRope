@@ -15,8 +15,8 @@
 // Scope: with Shape set to Auto and simple collision present, it serves the full set, meaning every
 // sphyl, sphere and box element of the simple collision, plus the OBB fallback for convexes, each
 // attributed to the virtual bone. The rope then wraps with exactly the precision
-// URopeStaticBodyProvider extracts; only genuine convex elements remain push-out only, because the
-// GPU detection kernel does not support that type. Forcing Shape to Capsule or Box, or having no
+// URopeStaticBodyProvider extracts; genuine convex elements wrap too, through the detect kernel's
+// convex loop. Forcing Shape to Capsule or Box, or having no
 // simple collision at all, falls back to a single shape approximated from the dominant primitive or
 // the bounds. Wrapping a group, such as both legs of a character, is separate work.
 
@@ -127,12 +127,13 @@ private:
 	 * The wrappable backing storage for full-set mode, used when Shape is Auto and simple collision
 	 * exists. Every sphyl and sphere, served as capsules, and every box, plus the OBB fallback for
 	 * convexes, takes part in detection attributed to the virtual bone and source mesh, at the same
-	 * precision the static body provider extracts. Only genuine convex elements fall through to
-	 * PushOutConvexes with no attribution. Rebuilt once per frame, with pointers valid until that
+	 * precision the static body provider extracts. Genuine convex elements are attributed the same
+	 * way into WrapConvexes and wrap as well. Rebuilt once per frame, with pointers valid until that
 	 * frame's solve finishes.
 	 */
 	TArray<FRopeBoxCollider>           WrapBoxes;
 	TArray<FRopeStaticCapsuleCollider> WrapCapsules;
+	TArray<FRopeConvexCollider>        WrapConvexes;
 
 	/** Whether this frame is being served in full-set mode, in which case the Wrap arrays are used
 	 *  instead of the single capsule or box. */
@@ -196,11 +197,10 @@ private:
 	bool EffectiveServeBox(USceneComponent* Comp) const;
 
 	/**
-	 * Builds full-set mode: extracts the target's simple collision with attribution into WrapBoxes and
-	 * WrapCapsules, which are wrappable, and PushOutConvexes for genuine convexes, which are
-	 * unattributed and discarded when the channel already covers them. Returns false when not a single
-	 * wrappable element results, in which case the caller falls back to the single-shape path, as with
-	 * a convex-only target or one with no collision.
+	 * Builds full-set mode: extracts the target's simple collision with attribution into WrapBoxes,
+	 * WrapCapsules and WrapConvexes, all wrappable. Returns false when not a single wrappable element
+	 * results, in which case the caller falls back to the single-shape path, as with a target that has
+	 * no authored collision.
 	 */
 	bool BuildFullSet(USceneComponent* Comp);
 

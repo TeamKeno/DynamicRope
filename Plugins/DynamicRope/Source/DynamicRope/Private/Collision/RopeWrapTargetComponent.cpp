@@ -338,10 +338,10 @@ bool URopeWrapTargetComponent::BuildFullSet(USceneComponent* Comp)
 	const float InvDt = (bHasPrevCompTM && FrameDt > KINDA_SMALL_NUMBER) ? 1.0f / FrameDt : 0.0f;
 	const FTransform PrevTM = bHasPrevCompTM ? PrevCompTM : CompTM;
 
-	// 심플 콜리전 전체를 가상 본 귀속으로 추출 — sphyl/sphere/box(+convex OBB 폴백)는 감기 가능
-	// (WrapCapsules/WrapBoxes), 진짜 convex는 타입상 비귀속(PushOutConvexes, 감지 제외).
+	// 심플 콜리전 전체를 가상 본 귀속으로 추출 — sphyl/sphere/box·convex 전 요소가 감기 가능
+	// (GPU 감지 커널의 convex 루프가 있어 convex도 감지에 참여한다).
 	RopeBodyColliderExtraction::AppendBodyColliders(*Setup, CompTM, PrevTM, InvDt, MaxCol, MaxPlanes,
-		WrapBoxes, WrapCapsules, PushOutConvexes, [](int32) {}, ResolvedBone, Comp);
+		WrapBoxes, WrapCapsules, WrapConvexes, [](int32) {}, ResolvedBone, Comp);
 	PrevCompTM = CompTM;
 	bHasPrevCompTM = true;
 
@@ -354,21 +354,11 @@ bool URopeWrapTargetComponent::BuildFullSet(USceneComponent* Comp)
 		}
 	}
 
-	// convex push-out 잔여의 채널 중복 제거: 대상이 StaticBodyProvider 스캔 채널이면 그쪽이 이미 같은
-	// convex를 push-out으로 서빙하므로 버린다(감기 세트는 귀속이 달라 중복 아님 — 그대로 유지).
-	const ECollisionChannel ObjType = Prim->GetCollisionObjectType();
-	const bool bCoveredByStaticProvider = ObjType == ECC_WorldStatic ||
-		(Settings && Settings->bIncludeWorldDynamic && ObjType == ECC_WorldDynamic);
-	if (bCoveredByStaticProvider)
-	{
-		PushOutConvexes.Reset();
-	}
 
-	// 감기 가능 요소가 하나도 없으면(콜리전이 convex 전용 등) 단일 셰이프 경로로 폴백 — 이때 채운
-	// convex 잔여도 버린다(폴백 경로가 자기 규칙으로 다시 채운다).
-	if (WrapBoxes.Num() + WrapCapsules.Num() == 0)
+	// 감기 가능 요소가 하나도 없으면(저작 콜리전 부재) 단일 셰이프 경로로 폴백한다.
+	if (WrapBoxes.Num() + WrapCapsules.Num() + WrapConvexes.Num() == 0)
 	{
-		PushOutConvexes.Reset();
+		WrapConvexes.Reset();
 		return false;
 	}
 	return true;
@@ -430,6 +420,7 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 		BuiltFrame = Frame;
 		WrapBoxes.Reset();
 		WrapCapsules.Reset();
+		WrapConvexes.Reset();
 		PushOutBoxes.Reset();
 		PushOutCapsules.Reset();
 		PushOutConvexes.Reset();
@@ -488,8 +479,8 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 			if (bServeFullSet)
 			{
 				UE_LOG(LogRopeCollision, Log,
-					TEXT("[WrapTarget] %s: 랩 전체 세트 생성 capsules=%d boxes=%d (convex pushout=%d) bone=%s"),
-					*GetNameSafe(GetOwner()), WrapCapsules.Num(), WrapBoxes.Num(), PushOutConvexes.Num(),
+					TEXT("[WrapTarget] %s: 랩 전체 세트 생성 capsules=%d boxes=%d convexes=%d bone=%s"),
+					*GetNameSafe(GetOwner()), WrapCapsules.Num(), WrapBoxes.Num(), WrapConvexes.Num(),
 					*ResolvedBone.ToString());
 			}
 			else if (bServeBox)
@@ -521,6 +512,7 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 		// 전체 세트: 감기 가능 요소 전부(가상 본 귀속 — 감지 참여).
 		for (FRopeBoxCollider& B : WrapBoxes)              { Gather.Colliders.Add(&B); }
 		for (FRopeStaticCapsuleCollider& C : WrapCapsules) { Gather.Colliders.Add(&C); }
+		for (FRopeConvexCollider& Cv : WrapConvexes)       { Gather.Colliders.Add(&Cv); }
 	}
 	else if (bServeBox)
 	{

@@ -206,6 +206,12 @@ struct FRopeGPUResidentStep
 	 */
 	int32 NumDetectBoxes = 0;
 
+	/**
+	 * 감지 커널이 볼 랩 가능 convex 수. Convexes 앞쪽 [0, NumDetectConvexes)만 감지에 참여한다
+	 * (박스와 동일 계약 — 정적 convex는 뒤에 append돼 자동 제외).
+	 */
+	int32 NumDetectConvexes = 0;
+
 	/** 감지 스윕 샘플 간격(cm)과 샘플 수 상한 — CPU FParams::ContactSweepStep/ContactMaxSweepSamples 미러. */
 	float ContactSweepStep = 2.0f;
 	int32 ContactMaxSweepSamples = 16;

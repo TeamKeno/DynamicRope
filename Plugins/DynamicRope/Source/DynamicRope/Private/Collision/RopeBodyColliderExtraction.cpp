@@ -163,6 +163,8 @@ namespace RopeBodyColliderExtraction
 						Cv.PrevTrans = PrevCompTM.GetTranslation();
 						Cv.InvDeltaTime = InvDeltaTime;
 					}
+					Cv.Bone = AttributionBone;
+					Cv.SourceMesh = AttributionMesh;
 					OutConvexes.Add(MoveTemp(Cv));
 				}
 			}
@@ -195,6 +197,8 @@ namespace RopeBodyColliderExtraction
 						Cv.PrevTrans = PrevCompTM.GetTranslation();
 						Cv.InvDeltaTime = InvDeltaTime;
 					}
+					Cv.Bone = AttributionBone;
+					Cv.SourceMesh = AttributionMesh;
 					OutConvexes.Add(MoveTemp(Cv));
 					continue;
 				}
@@ -208,7 +212,7 @@ namespace RopeBodyColliderExtraction
 				const FQuat   RotW = M.GetMatrixWithoutScale().ToQuat();
 				const FVector HalfW = Convex.ElemBox.GetExtent() * static_cast<float>(Scale3D.GetAbsMin());
 				FRopeBoxCollider FallbackBox(CenterW, RotW, HalfW);
-				// 귀속 모드면 폴백 OBB도 랩 가능으로 — "진짜 convex만 감지 불가" 규칙을 균일하게 유지한다.
+				// 귀속 모드면 폴백 OBB도 다른 요소와 똑같이 랩 가능으로 귀속한다.
 				FallbackBox.Bone = AttributionBone;
 				FallbackBox.SourceMesh = AttributionMesh;
 				OutBoxes.Add(MoveTemp(FallbackBox));

@@ -361,6 +361,7 @@ public:
 		SHADER_PARAMETER(int32, DetectNumCapsules)
 		SHADER_PARAMETER(int32, DetectNumSDF)
 		SHADER_PARAMETER(int32, DetectNumBoxes)
+		SHADER_PARAMETER(int32, DetectNumConvexes)
 		SHADER_PARAMETER(float, DetectContactRadius)
 		SHADER_PARAMETER(float, DetectSegmentLength)
 		SHADER_PARAMETER(float, DetectSweepStep)
@@ -374,6 +375,9 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
 		// 랩 가능 박스 감지(정적 박스는 NumDetectBoxes로 자름).
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeBox>, Boxes)
+		// 랩 가능 convex 감지(정적 convex는 DetectNumConvexes로 자름).
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeConvex>, Convexes)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConvexPlanes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPrevPositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, DetectGuidedMask)
@@ -1611,6 +1615,8 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	DetectParams->DetectNumSDF         = Build.NumValidSDFCol;
 	// 랩 가능 박스만 감지(정적 박스는 뒤라 제외). 박스도 노드당 최심 접촉 슬롯을 캡슐/SDF와 공유한다.
 	DetectParams->DetectNumBoxes       = FMath::Clamp(Step.NumDetectBoxes, 0, Build.NumValidBoxes);
+	// 랩 가능 convex만 감지(정적 convex는 뒤라 제외) — 박스와 동일 계약.
+	DetectParams->DetectNumConvexes    = FMath::Clamp(Step.NumDetectConvexes, 0, Build.NumValidConvexes);
 	DetectParams->DetectContactRadius  = Step.ContactRadius;
 	DetectParams->DetectSegmentLength  = Step.SegmentLength;
 	DetectParams->DetectSweepStep      = FMath::Max(Step.ContactSweepStep, 0.1f);
@@ -1623,6 +1629,8 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	DetectParams->SDFVolumes           = GraphBuilder.CreateSRV(Build.SDFVolBuf);
 	DetectParams->SDFColliders         = GraphBuilder.CreateSRV(Build.SDFColBuf);
 	DetectParams->Boxes                = GraphBuilder.CreateSRV(Build.BoxesBuf);
+	DetectParams->Convexes             = GraphBuilder.CreateSRV(Build.ConvexBuf);
+	DetectParams->ConvexPlanes         = GraphBuilder.CreateSRV(Build.ConvexPlanesBuf);
 	DetectParams->DetectPositions      = GraphBuilder.CreateSRV(Build.PosRDG);
 	DetectParams->DetectPrevPositions  = GraphBuilder.CreateSRV(Build.PrevRDG);
 	DetectParams->DetectGuidedMask     = GraphBuilder.CreateSRV(GMaskBuf);

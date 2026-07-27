@@ -193,6 +193,10 @@ FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadiu
 	const FVector LocalSurface = Lp - LocalNormal * MaxD;
 	Contact.bHit = true;
 	// 월드 바깥 법선(FROZEN 계약, 부호 load-bearing).
+	// A wrappable convex (virtual bone) carries its attribution so the contact rides the normal
+	// contact-to-wrap decision path. The static default keeps both at None.
+	Contact.Bone = Bone;
+	Contact.SourceMesh = SourceMesh;
 	Contact.Normal = Rot.RotateVector(LocalNormal);
 	Contact.Penetration = NodeRadius - static_cast<float>(MaxD);
 	Contact.SurfacePoint = Rot.RotateVector(LocalSurface) + Trans;
@@ -293,6 +297,8 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 		const FVector ClosestT = RotT.RotateVector(LocalSurface) + TransT;
 		const FVector ClosestEnd = RotE.RotateVector(LocalSurface) + TransE;
 		Contact.bHit = true;
+		Contact.Bone = Bone;
+		Contact.SourceMesh = SourceMesh;
 		Contact.Normal = RotT.RotateVector(LocalNormal);
 		Contact.Penetration = Q.NodeRadius - static_cast<float>(MaxD);
 		OutHitWorldPos = Pt + (ClosestEnd - ClosestT);

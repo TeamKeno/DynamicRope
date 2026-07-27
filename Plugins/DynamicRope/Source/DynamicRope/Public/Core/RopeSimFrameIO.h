@@ -132,6 +132,9 @@ struct FRopeSimFrameIO
 	/** Parallel to the GPU boxes, for attributing detections against wrappable boxes. */
 	TArray<FGpuColliderAttribution> GpuBoxAttribution;
 
+	/** Parallel to the GPU convexes, for attributing detections against wrappable convexes. */
+	TArray<FGpuColliderAttribution> GpuConvexAttribution;
+
 	/**
 	 * An ordered signature over the (bone, mesh) pairs of the attribution sets above. The subsystem
 	 * recomputes it on every GPU step frame that detects, carries it on the dispatch as

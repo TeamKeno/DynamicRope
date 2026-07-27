@@ -1079,15 +1079,18 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 	for (const FRopeGPUContactResult& C : Contacts->Contacts)
 	{
 		// 콜라이더 인덱스 → (bone, mesh) 귀속. 범위 밖(콜라이더 집합 변화)은 건너뛴다(자기수정).
-		const TArray<FRopeSimFrameIO::FGpuColliderAttribution>& Attr =
-			(C.ColliderType == 0) ? Rope.SimFrame.GpuCapsuleAttribution :
-			(C.ColliderType == 1) ? Rope.SimFrame.GpuSdfAttribution :
-			                        Rope.SimFrame.GpuBoxAttribution;
-		if (!Attr.IsValidIndex(C.ColliderIndex))
+		// 명시 디스패치 — 미지 타입은 누구의 테이블로도 오귀속하지 않고 드롭한다(종전 else는 box로 오귀속 함정).
+		const TArray<FRopeSimFrameIO::FGpuColliderAttribution>* AttrPtr =
+			(C.ColliderType == 0) ? &Rope.SimFrame.GpuCapsuleAttribution :
+			(C.ColliderType == 1) ? &Rope.SimFrame.GpuSdfAttribution :
+			(C.ColliderType == 2) ? &Rope.SimFrame.GpuBoxAttribution :
+			(C.ColliderType == 3) ? &Rope.SimFrame.GpuConvexAttribution :
+			                        nullptr;
+		if (!AttrPtr || !AttrPtr->IsValidIndex(C.ColliderIndex))
 		{
 			continue;
 		}
-		const FRopeSimFrameIO::FGpuColliderAttribution& A = Attr[C.ColliderIndex];
+		const FRopeSimFrameIO::FGpuColliderAttribution& A = (*AttrPtr)[C.ColliderIndex];
 		if (A.Bone.IsNone())
 		{
 			// 귀속 불가(비-스켈레탈 collider) — 캡처 대상 아님.
@@ -1309,6 +1312,7 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 	Rope.SimFrame.GpuCapsuleAttribution.Reset();
 	Rope.SimFrame.GpuSdfAttribution.Reset();
 	Rope.SimFrame.GpuBoxAttribution.Reset();
+	Rope.SimFrame.GpuConvexAttribution.Reset();
 
 	// 예측 접촉(G3b): whip 활성 프레임엔 가이드 마스크/현재·직전·다음 타깃을 실어 GPU가
 	// 가이드 노드를 외삽하게 한다(CPU AddPredictedContactCandidates와 동일 입력).
@@ -1372,6 +1376,38 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 				*Rope.GetName(), Collider->IsWorldStatic() ? 1 : 0, *Bone.ToString(), *GetNameSafe(Mesh));
 		};
 
+	// convex 패킹 공용(pass 1 = 랩 가능 / pass 2 = 정적 push-out): 바디-로컬 평면을 평탄 풀에
+	// 이어붙이고 오프셋/개수로 참조 + 강체(curr/prev) + InvDt. 성공 시 true.
+	auto TryPackConvex = [&Step](IRopeCollider* Collider) -> bool
+	{
+		TConstArrayView<FPlane> LocalPlanes;
+		FBox LocalBounds(ForceInit);
+		FQuat CvRot, CvPrevRot;
+		FVector CvTrans, CvPrevTrans;
+		float CvInvDt = 0.0f;
+		if (!Collider->GetGPUConvex(LocalPlanes, LocalBounds, CvRot, CvTrans, CvPrevRot, CvPrevTrans, CvInvDt)
+			|| LocalPlanes.Num() == 0 || !LocalBounds.IsValid)
+		{
+			return false;
+		}
+		FRopeGPUConvex Cv;
+		Cv.PlaneOffset = Step.ConvexPlanes.Num();
+		Cv.PlaneCount = LocalPlanes.Num();
+		Cv.LocalBoundsCenter = LocalBounds.GetCenter();
+		Cv.LocalBoundsExtent = LocalBounds.GetExtent();
+		Cv.Rot = CvRot; Cv.Trans = CvTrans;
+		Cv.PrevRot = CvPrevRot; Cv.PrevTrans = CvPrevTrans;
+		Cv.InvDeltaTime = CvInvDt;
+		Step.ConvexPlanes.Reserve(Step.ConvexPlanes.Num() + LocalPlanes.Num());
+		for (const FPlane& Pl : LocalPlanes)
+		{
+			// 로컬·단위·바깥, PlaneDot=dot(N,p)-W
+			Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W));
+		}
+		Step.Convexes.Add(Cv);
+		return true;
+	};
+
 	// FrameColliders는 Prepare에서 GT gather된 스냅샷. 2-pass: 비-정적(스켈레탈) collider를 먼저,
 	// 정적(월드) collider를 뒤에 패킹한다. 감지(detect) 커널은 capsule을 [0, NumDetectCapsules)만
 	// 보므로 정적 캡슐이 감지에서 자동 제외된다 — 감지는 노드당 최심 접촉 1개만 남겨, 벽 접촉이
@@ -1416,13 +1452,24 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			}
 			continue;
 		}
-			// 비-정적은 capsule/SDF/box만 GPU에 실린다 — 둘 다 아니면 제외.
-			WarnGpuUnrepresented(Collider);
+		if (TryPackConvex(Collider))
+		{
+			// 랩 가능 convex(가상 본): 감지 범위 앞쪽에 패킹.
+			if (bDetectThisRope)
+			{
+				Rope.SimFrame.GpuConvexAttribution.Add(MakeAttribution(Collider));
+			}
+			continue;
+		}
+		// 비-정적은 capsule/SDF/box/convex만 GPU에 실린다 — 전부 아니면 제외.
+		WarnGpuUnrepresented(Collider);
 	}
 	// 감지 경계: 여기까지가 비-정적 캡슐.
 	Step.NumDetectCapsules = Step.Capsules.Num();
 	// 박스 감지 경계: 여기까지가 랩 가능 박스.
 	Step.NumDetectBoxes = Step.Boxes.Num();
+	// convex 감지 경계: 여기까지가 랩 가능 convex.
+	Step.NumDetectConvexes = Step.Convexes.Num();
 
 	// pass 2: 정적(월드) collider — solve 전용. 캡슐(스피어/스필)은 감지 경계 뒤에 append,
 	// 박스는 전용 배열. 귀속 테이블은 인덱스 정렬 유지를 위해 정적 캡슐 분도 채운다(None/null —
@@ -1457,35 +1504,16 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			}
 			continue;
 		}
-		TConstArrayView<FPlane> LocalPlanes;
-		FBox LocalBounds(ForceInit);
-		FQuat CvRot, CvPrevRot;
-		FVector CvTrans, CvPrevTrans;
-		float CvInvDt = 0.0f;
-		if (!Collider->GetGPUConvex(LocalPlanes, LocalBounds, CvRot, CvTrans, CvPrevRot, CvPrevTrans, CvInvDt)
-			|| LocalPlanes.Num() == 0 || !LocalBounds.IsValid)
+		if (!TryPackConvex(Collider))
 		{
 			// 정적은 capsule/box/convex만 GPU에 실린다 — 전부 아니면 제외.
 			WarnGpuUnrepresented(Collider);
 			continue;
 		}
+		if (bDetectThisRope)
 		{
-			// 바디-로컬 평면을 평탄 풀에 이어붙이고 오프셋/개수로 참조 + 강체(curr/prev) + InvDt.
-			FRopeGPUConvex Cv;
-			Cv.PlaneOffset = Step.ConvexPlanes.Num();
-			Cv.PlaneCount = LocalPlanes.Num();
-			Cv.LocalBoundsCenter = LocalBounds.GetCenter();
-			Cv.LocalBoundsExtent = LocalBounds.GetExtent();
-			Cv.Rot = CvRot; Cv.Trans = CvTrans;
-			Cv.PrevRot = CvPrevRot; Cv.PrevTrans = CvPrevTrans;
-			Cv.InvDeltaTime = CvInvDt;
-			Step.ConvexPlanes.Reserve(Step.ConvexPlanes.Num() + LocalPlanes.Num());
-			for (const FPlane& Pl : LocalPlanes)
-			{
-				// 로컬·단위·바깥, PlaneDot=dot(N,p)-W
-				Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W));
-			}
-			Step.Convexes.Add(Cv);
+			// 정적 - None(감지 미참여, 인덱스 정렬용)
+			Rope.SimFrame.GpuConvexAttribution.Add(MakeAttribution(Collider));
 		}
 	}
 
@@ -1497,6 +1525,7 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuCapsuleAttribution, Sig);
 		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuSdfAttribution, Sig);
 		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuBoxAttribution, Sig);
+		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuConvexAttribution, Sig);
 		// 서명 0은 "미설정"이라는 뜻으로 예약돼 있다 — 해시가 우연히 0이면 1로 밀어 워밍업과 구분한다.
 		Rope.SimFrame.GpuAttribSig = (Sig == 0) ? 1u : Sig;
 		// 이 dispatch가 쓰는 집합의 서명을 step에 싣는다(감지 결과가 그대로 되싣고 돌아온다).
