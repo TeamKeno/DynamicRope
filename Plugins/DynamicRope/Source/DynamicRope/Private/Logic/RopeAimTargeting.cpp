@@ -47,6 +47,25 @@ float FRopeAimTargeting::ResolveRayLengthForReach(const FVector& RayOrigin, cons
 	return FMath::Max(0.0f, Along + HalfChord);
 }
 
+FVector FRopeAimTargeting::ResolveOpenSpaceThrowEndpoint(const FQueryContext& Ctx, const FVector& Origin,
+	const FVector& AimDir, float RayLength, float Clearance)
+{
+	const FVector RayDir = AimDir.GetSafeNormal();
+	const FVector RayEnd = Origin + RayDir * FMath::Max(RayLength, 0.0f);
+
+	FVector BlockPoint = FVector::ZeroVector;
+	float BlockDistance = 0.0f;
+	if (RayDir.IsNearlyZero() || !Ctx.TraceWorldBlocker ||
+		!Ctx.TraceWorldBlocker(Origin, RayEnd, BlockPoint, BlockDistance))
+	{
+		return RayEnd;
+	}
+
+	// Stop in front of the surface rather than on it, so the tube is not left half buried once the nodes
+	// are handed back to physics on landing.
+	return Origin + RayDir * FMath::Max(BlockDistance - FMath::Max(Clearance, 0.0f), 0.0f);
+}
+
 bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 	const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
 	TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,
@@ -121,6 +140,28 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 	bool bFoundBlocked = false;
 	FRopeAimRayHitResult BestBlocked;
 
+	// The opaque world geometry along the ray, probed once before the collider loop. Everything past it is
+	// out of sight and therefore out of aim. The tolerance is the query radius, because the swept query
+	// reports a hit as soon as the ray comes within that distance of a surface, so a target resting against
+	// the blocker would otherwise be judged to be behind it.
+	FVector WorldBlockPoint = FVector::ZeroVector;
+	float WorldBlockDistance = 0.0f;
+	const bool bWorldBlocked = Ctx.TraceWorldBlocker &&
+		Ctx.TraceWorldBlocker(RayStart, RayEnd, WorldBlockPoint, WorldBlockDistance);
+	if (bWorldBlocked)
+	{
+		// The blocker is itself a blocked candidate, so aiming at a bare wall or floor lights the HUD's
+		// blocked indication rather than showing nothing at all. It carries no bone or mesh, which is
+		// exactly what an unwrappable collider hit reports too.
+		BestBlocked = FRopeAimRayHitResult();
+		BestBlocked.bHit = true;
+		BestBlocked.HitWorldPos = WorldBlockPoint;
+		BestBlocked.SurfacePoint = WorldBlockPoint;
+		BestBlocked.Distance = WorldBlockDistance;
+		bFoundBlocked = true;
+	}
+	const float WorldBlockTolerance = EffectiveQueryRadius;
+
 	// Only colliders that passed the broad-phase bounds are tested with the same swept query, and the smallest distance along the ray is taken.
 	for (const IRopeCollider* Collider : *Ctx.Colliders)
 	{
@@ -141,6 +182,12 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 		}
 
 		const float Distance = FVector::DotProduct(HitWorldPos - RayStart, RayDir);
+		if (bWorldBlocked && Distance > WorldBlockDistance + WorldBlockTolerance)
+		{
+			// Behind a wall or under the floor. It is dropped outright rather than demoted to a blocked
+			// candidate, because the blocker in front of it is nearer and already holds that slot.
+			continue;
+		}
 	// For the size of the aim HUD's highlight ring: an approximation of the hit collider's world bounds radius. The extent is a half size, so its length is the half diagonal.
 		const float BoundsRadius = static_cast<float>(Collider->GetWorldBounds().GetExtent().Size());
 

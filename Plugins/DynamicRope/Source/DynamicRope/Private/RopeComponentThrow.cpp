@@ -3,9 +3,12 @@
 #include "RopeComponent.h"
 
 #include "Collision/RopeCollider.h"
+#include "CollisionQueryParams.h"
 #include "Core/RopeWrapTarget.h"
 #include "Debug/RopeDebugSnapshot.h"
 #include "DynamicRopeLog.h"
+// The aim blocking trace: the one engine world query the throw path makes.
+#include "Engine/World.h"
 #include "Logic/RopeThrowPreviewBuilder.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "RopeComponentInternal.h"
@@ -112,8 +115,7 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 		{
 			return;
 		}
-		const float FreeLen = FMath::Max(Sim.RopeLength, RopeLength);
-		const FVector FreeEndpoint = ResolvedThrow.Origin + ResolvedThrow.FrameForward.GetSafeNormal() * FreeLen;
+		const FVector FreeEndpoint = ResolveFreeThrowEndpoint(ResolvedThrow);
 		OnDeployFromLoaded();
 		StartFreeGuidedThrow(ResolvedThrow, FreeEndpoint);
 		return;
@@ -197,7 +199,45 @@ FRopeAimTargeting::FQueryContext URopeComponent::MakeAimQueryContext() const
 	Ctx.Colliders = &GetAimQueryColliders();
 	Ctx.FallbackRayLength = FMath::Max(Sim.RopeLength, RopeLength);
 	Ctx.FallbackQueryRadius = FMath::Max(Radius, GetEffectiveContactQueryRadius());
+	// The world blocking probe, injected because FRopeAimTargeting has no world of its own.
+	Ctx.TraceWorldBlocker = [this](const FVector& Start, const FVector& End,
+		FVector& OutBlockPoint, float& OutDistance)
+	{
+		return TraceWorldAimBlocker(Start, End, OutBlockPoint, OutDistance);
+	};
 	return Ctx;
+}
+
+bool URopeComponent::TraceWorldAimBlocker(const FVector& Start, const FVector& End,
+	FVector& OutBlockPoint, float& OutDistance) const
+{
+	OutBlockPoint = End;
+	OutDistance = 0.0f;
+	// No world means the component default object or a unit test, where nothing can block.
+	const UWorld* World = GetWorld();
+	if (!World || (End - Start).IsNearlyZero())
+	{
+		return false;
+	}
+
+	// The thrower is excluded for the same reason the collider gather excludes its own owner: the rope's
+	// own body, tip mesh and tether proxy sit right on the ray origin and would block every throw.
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(RopeAimBlocker), /*bInTraceComplex*/ false);
+	Params.AddIgnoredActor(GetOwner());
+
+	// Visibility, with no per-rope channel setting: it is already the channel that answers "does this
+	// geometry block sight", and that answer belongs to the geometry. Level geometry the rope should be
+	// able to aim through says so through its own Visibility response, which keeps one answer in one place
+	// instead of splitting it between the level and every rope.
+	FHitResult Hit;
+	if (!World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+	{
+		return false;
+	}
+
+	OutBlockPoint = Hit.ImpactPoint;
+	OutDistance = static_cast<float>(FVector::DotProduct(Hit.ImpactPoint - Start, (End - Start).GetSafeNormal()));
+	return true;
 }
 
 float URopeComponent::GetAimRayEffectiveQueryRadius(float RequestedRadius) const
@@ -447,8 +487,7 @@ bool URopeComponent::ExecutePendingGuaranteedAimThrow()
 			float FreeThrowSpeed = 0.0f;
 			if (TryResolveValidThrowSpeed(ResolvedThrow, FreeThrowSpeed))
 			{
-				const float FreeLen = FMath::Max(Sim.RopeLength, RopeLength);
-				const FVector FreeEndpoint = ResolvedThrow.Origin + ResolvedThrow.FrameForward.GetSafeNormal() * FreeLen;
+				const FVector FreeEndpoint = ResolveFreeThrowEndpoint(ResolvedThrow);
 				OnDeployFromLoaded();
 				bExecuted = StartFreeGuidedThrow(ResolvedThrow, FreeEndpoint);
 			}
@@ -1019,6 +1058,14 @@ void URopeComponent::FinishGuidedThrow()
 	// meaning not measured.
 	const FRopeWrappedEventInfo WrappedInfo = MakeWrappedEventInfo(Seed, /*AngleDeg*/ -1.0f, /*CoverageDeg*/ -1.0f);
 	DispatchWrapped(WrappedInfo);
+}
+
+FVector URopeComponent::ResolveFreeThrowEndpoint(const FRopeThrowContext& ResolvedThrow) const
+{
+	// One rope radius of clearance is enough to keep the tube off the surface and needs no knob of its own.
+	return FRopeAimTargeting::ResolveOpenSpaceThrowEndpoint(MakeAimQueryContext(),
+		ResolvedThrow.Origin, ResolvedThrow.FrameForward,
+		FMath::Max(Sim.RopeLength, RopeLength), FMath::Max(Radius, 1.0f));
 }
 
 bool URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld)

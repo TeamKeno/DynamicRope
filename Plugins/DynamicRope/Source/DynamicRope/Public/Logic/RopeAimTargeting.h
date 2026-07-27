@@ -119,6 +119,14 @@ public:
 		// The fallback radius used when QueryRadius is unspecified, meaning at or below 0: the larger of
 		// the tube radius and WrapConfig.ContactQueryRadius.
 		float FallbackQueryRadius = 0.0f;
+
+		/** The opaque world geometry probe, injected from URopeComponent because this class has no world.
+		 *  It returns true when the segment is blocked, filling in the nearest blocking point and its
+		 *  distance from Start. The rope's own collider pool cannot answer this: the static body provider
+		 *  extracts simple collision only, so landscapes and complex-collision-only floors never appear in
+		 *  it, and an engine line trace is the only thing that sees them.
+		 *  Leaving it unset means nothing blocks, which is what the unit tests rely on. */
+		TFunction<bool(const FVector& Start, const FVector& End, FVector& OutBlockPoint, float& OutDistance)> TraceWorldBlocker;
 	};
 
 	//~ Queries. They do not change state, so they are static and free of side effects.
@@ -137,13 +145,23 @@ public:
 	static float ResolveRayLengthForReach(const FVector& RayOrigin, const FVector& AimDir,
 		const FVector& ReachOrigin, float ReachLength);
 
+	/** The endpoint for a throw into open space, meaning one with no aim target: the ray end at RayLength,
+	 *  pulled back to Clearance in front of the surface when Ctx.TraceWorldBlocker reports the path
+	 *  blocked. Without the clamp the endpoint can sit below the floor, and the guided throw replays node
+	 *  positions with the solver switched off, so the rope would pass straight through it. */
+	static FVector ResolveOpenSpaceThrowEndpoint(const FQueryContext& Ctx, const FVector& Origin,
+		const FVector& AimDir, float RayLength, float Clearance);
+
 	/** Finds the nearest wrappable mesh and bone along the ray using a swept SDF query: a broad phase,
 	 *  then QuerySwept, then the minimum distance travelled along the ray. A candidate that fails the
 	 *  CanWrapTarget gate is treated as absent.
+	 *  A candidate lying behind opaque world geometry, as reported by Ctx.TraceWorldBlocker, is treated
+	 *  as absent in the same way: what cannot be seen cannot be aimed at, so the aimed throw the mode
+	 *  guarantees never starts through a wall.
 	 *  OutBlockedHit is optional: the nearest hit where the ray struck a collider that cannot be
-	 *  wrapped, whether because it has no bone, no source mesh, or was refused by the gate. It is
-	 *  independent of the return value, which reports whether a wrappable hit exists, and drives the
-	 *  blocked indication on the aiming HUD. */
+	 *  wrapped, whether because it has no bone, no source mesh, was refused by the gate, or was cut off
+	 *  by the world blocker. It is independent of the return value, which reports whether a wrappable
+	 *  hit exists, and drives the blocked indication on the aiming HUD. */
 	static bool FindAimRayBoneHit(const FQueryContext& Ctx,
 		const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
 		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,

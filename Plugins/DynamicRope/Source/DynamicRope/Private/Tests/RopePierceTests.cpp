@@ -2,10 +2,11 @@
 //
 // Unit tests for the pierce binding mode, which belongs to GuaranteedWrap alone and establishes a single
 // anchor at the aim hit point.
-// They pin six contracts: the permitted combinations of resolve mode and binding, the throw phase gate
+// They pin eight contracts: the permitted combinations of resolve mode and binding, the throw phase gate
 // restricting GuaranteedWrap to Loaded, the preview builder producing a single anchor, the requirement
-// that a preview target come from an aim hit, the single-anchor commit through BeginWrap, and entering and
-// leaving the guided throw phase.
+// that a preview target come from an aim hit, the single-anchor commit through BeginWrap, entering and
+// leaving the guided throw phase, the rejection of targets hidden behind world geometry, and the clamp that
+// keeps a throw into open space from ending up under the floor.
 
 #include "Misc/AutomationTest.h"
 
@@ -287,6 +288,128 @@ bool FRopePierceAimHitRequiredForPreviewTest::RunTest(const FString& Parameters)
 			bAimRayEvaluated ? 1 : 0),
 			FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, Prepared, &Failure));
 		TestFalse(TEXT("the prepared throw is invalid"), Prepared.IsValid());
+	}
+	return true;
+}
+
+namespace
+{
+	/** A stand-in for the engine line trace URopeComponent injects: it blocks at a fixed distance along the
+	 *  ray. It is what lets the two tests below run with no world. */
+	FRopeAimTargeting::FQueryContext MakeBlockerContext(const TArray<IRopeCollider*>* Colliders,
+		float BlockDistance, float QueryRadius)
+	{
+		FRopeAimTargeting::FQueryContext Ctx;
+		Ctx.Colliders = Colliders;
+		Ctx.FallbackQueryRadius = QueryRadius;
+		if (BlockDistance > 0.0f)
+		{
+			Ctx.TraceWorldBlocker = [BlockDistance](const FVector& Start, const FVector& End,
+				FVector& OutBlockPoint, float& OutDistance)
+			{
+				OutBlockPoint = Start + (End - Start).GetSafeNormal() * BlockDistance;
+				OutDistance = BlockDistance;
+				return true;
+			};
+		}
+		return Ctx;
+	}
+}
+
+// Aiming through opaque world geometry. A target behind a wall or under the floor is not aimable, so the
+// guaranteed throw never starts towards something it cannot reach in a straight line. The blocker itself is
+// reported as blocked instead, which is what the aiming HUD draws.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceOccludedAimTargetTest,
+	"DynamicRope.Pierce.OccludedAimTargetRejected",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePierceOccludedAimTargetTest::RunTest(const FString& Parameters)
+{
+	USkeletalMeshComponent* Mesh = MakePierceMockMesh();
+	// A wrappable target on the aim axis, centred 200 cm ahead.
+	FCapsuleCollider Target(FVector(200, -20, 0), FVector(200, 20, 0), 25.0f, FName("spine"), Mesh);
+	TArray<IRopeCollider*> Colliders = { &Target };
+
+	const FVector Origin = FVector::ZeroVector;
+	const FVector AimDir = FVector(1, 0, 0);
+	const float QueryRadius = 3.0f;
+	auto PermitAll = [](const USceneComponent*, FName) { return true; };
+
+	// With nothing in the way the target is acquired, which is the baseline the gate must not disturb.
+	{
+		FRopeAimRayHitResult Hit;
+		FRopeAimRayHitResult Blocked;
+		const FRopeAimTargeting::FQueryContext Ctx = MakeBlockerContext(&Colliders, /*BlockDistance*/ 0.0f, QueryRadius);
+		TestTrue(TEXT("an unobstructed target is acquired"),
+			FRopeAimTargeting::FindAimRayBoneHit(Ctx, Origin, AimDir, 400.0f, QueryRadius, 2.0f,
+				PermitAll, Hit, &Blocked));
+		TestTrue(TEXT("the acquired bone is the spine"), Hit.Bone == FName("spine"));
+	}
+
+	// A wall in front of the target hides it: no hit, and the wall is reported as the blocked result.
+	{
+		FRopeAimRayHitResult Hit;
+		FRopeAimRayHitResult Blocked;
+		const FRopeAimTargeting::FQueryContext Ctx = MakeBlockerContext(&Colliders, /*BlockDistance*/ 100.0f, QueryRadius);
+		TestFalse(TEXT("a target behind a wall is not acquired"),
+			FRopeAimTargeting::FindAimRayBoneHit(Ctx, Origin, AimDir, 400.0f, QueryRadius, 2.0f,
+				PermitAll, Hit, &Blocked));
+		TestFalse(TEXT("no hit is reported"), Hit.bHit);
+		TestTrue(TEXT("the wall is reported as blocked"), Blocked.bHit);
+		TestEqual(TEXT("the blocked distance is the wall's"), Blocked.Distance, 100.0f);
+	}
+
+	// A blocker behind the target does not hide it. Without this the gate would reject every target that has
+	// anything at all behind it, which is nearly all of them.
+	{
+		FRopeAimRayHitResult Hit;
+		FRopeAimRayHitResult Blocked;
+		const FRopeAimTargeting::FQueryContext Ctx = MakeBlockerContext(&Colliders, /*BlockDistance*/ 300.0f, QueryRadius);
+		TestTrue(TEXT("a target in front of the wall is still acquired"),
+			FRopeAimTargeting::FindAimRayBoneHit(Ctx, Origin, AimDir, 400.0f, QueryRadius, 2.0f,
+				PermitAll, Hit, &Blocked));
+		TestTrue(TEXT("the acquired bone is the spine"), Hit.Bone == FName("spine"));
+	}
+	return true;
+}
+
+// The endpoint of a throw into open space. Aiming at bare floor acquires no target, so the rope is driven
+// towards the ray end; that endpoint has to be clamped to the surface, because the guided throw replays node
+// positions with the solver switched off and would otherwise carry the rope through the floor.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceFreeThrowEndpointClampTest,
+	"DynamicRope.Pierce.FreeThrowEndpointClampedByBlocker",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePierceFreeThrowEndpointClampTest::RunTest(const FString& Parameters)
+{
+	const FVector Origin = FVector(0, 0, 200);
+	const FVector AimDir = FVector(0, 0, -1); // Straight down at the floor.
+	const float RopeLen = 500.0f;
+	const float Clearance = 2.0f;
+
+	// With nothing in the way the endpoint stays at the ray end, one rope length ahead.
+	{
+		const FRopeAimTargeting::FQueryContext Ctx = MakeBlockerContext(nullptr, /*BlockDistance*/ 0.0f, 3.0f);
+		const FVector Endpoint = FRopeAimTargeting::ResolveOpenSpaceThrowEndpoint(Ctx, Origin, AimDir, RopeLen, Clearance);
+		TestTrue(TEXT("with no blocker the endpoint is the ray end"),
+			Endpoint.Equals(Origin + AimDir * RopeLen, 0.01f));
+	}
+
+	// A floor 150 cm below pulls the endpoint back to just above it, well short of the ray end at 500 cm.
+	{
+		const FRopeAimTargeting::FQueryContext Ctx = MakeBlockerContext(nullptr, /*BlockDistance*/ 150.0f, 3.0f);
+		const FVector Endpoint = FRopeAimTargeting::ResolveOpenSpaceThrowEndpoint(Ctx, Origin, AimDir, RopeLen, Clearance);
+		TestTrue(TEXT("the endpoint is clamped to just in front of the floor"),
+			Endpoint.Equals(Origin + AimDir * (150.0f - Clearance), 0.01f));
+		TestTrue(TEXT("the endpoint stays above the floor"), Endpoint.Z > Origin.Z - 150.0f);
+	}
+
+	// A blocker closer than the clearance clamps to the origin rather than producing a throw that runs
+	// backwards through the thrower.
+	{
+		const FRopeAimTargeting::FQueryContext Ctx = MakeBlockerContext(nullptr, /*BlockDistance*/ 1.0f, 3.0f);
+		const FVector Endpoint = FRopeAimTargeting::ResolveOpenSpaceThrowEndpoint(Ctx, Origin, AimDir, RopeLen, Clearance);
+		TestTrue(TEXT("a blocker inside the clearance clamps to the origin"), Endpoint.Equals(Origin, 0.01f));
 	}
 	return true;
 }

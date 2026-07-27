@@ -266,6 +266,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (DisplayName = "Use World Distance Field"))
 	bool bUseWorldGDF = true;
 
+
 	/** 해석된 솔버 충돌 반지름: SolverConfig.CollisionRadius(0=auto → 렌더 Radius). 솔브/GPU step 경계에서 소비. */
 	float GetEffectiveCollisionRadius() const
 	{
@@ -1255,6 +1256,30 @@ private:
 
 	/** 허공(대상 없음) 던지기: 레이 끝점(EndpointWorld)을 향한 아치 GuidedThrow를 시작한다(꽂힘 없이 완료 시 Free). */
 	bool StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld);
+
+	/** The endpoint for a throw into open space: the ray end at rope length, pulled back to just in front
+	 *  of the surface when world geometry blocks the path. The clamp is what keeps the rope above the
+	 *  floor — GuidedThrow runs no solver, so an endpoint below it is replayed as a straight pass through.
+	 *  Both open-space throw sites, the direct Blueprint one and the aim-miss one, resolve it here so they
+	 *  cannot drift apart. */
+	FVector ResolveFreeThrowEndpoint(const FRopeThrowContext& ResolvedThrow) const;
+
+	/**
+	 * Whether opaque world geometry, meaning a wall or a floor, blocks the segment, and the single place
+	 * the engine trace behind it is issued. It settles two things:
+	 *  - A target behind the blocking point is not aimable, because what cannot be seen cannot be aimed at.
+	 *    The aiming HUD shows it as blocked instead of as a target.
+	 *  - A throw with no target, that is into open space, has its endpoint pulled back to just in front of
+	 *    the blocking surface. GuidedThrow replays node positions with the solver switched off, so without
+	 *    the clamp the rope travels straight through the floor to a point underneath it.
+	 * It uses an engine trace rather than the rope's own collider pool, because the static world provider
+	 * extracts simple collision only and therefore never sees landscapes or floors that carry complex
+	 * collision alone. At most one trace per aim resolve.
+	 * Returns false when there is no world, as in a unit test, or nothing blocks. The rope's own actor is
+	 * ignored, so the thrower's body and its tip mesh never count as a wall.
+	 */
+	bool TraceWorldAimBlocker(const FVector& Start, const FVector& End,
+		FVector& OutBlockPoint, float& OutDistance) const;
 
 	FVector ComputeThrowInheritedVelocity(const FRopeThrowContext& ThrowContext) const;
 
