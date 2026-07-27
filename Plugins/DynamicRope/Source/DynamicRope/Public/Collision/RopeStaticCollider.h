@@ -1,10 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 정적 월드 지오메트리(스태틱 바디의 심플 콜리전)용 해석적 collider들. GDF(Global Distance Field)는
-// 복셀 클립맵이라 모서리가 복셀 크기만큼 둥글게 침식되어 로프가 박스 모서리를 타고 관통한다 —
-// 여기의 박스(OBB) collider는 해석적 클램프 질의라 모서리/엣지에서 정확한 대각 normal을 준다.
-// URopeStaticBodyProvider가 근접 정적 바디의 UBodySetup에서 추출해 서빙한다. GDF는 심플 콜리전이
-// 없는 랜드스케이프/거대 메시용 far-field 폴백으로 강등된다.
+// Analytic colliders for static world geometry, that is the simple collision of static bodies. The
+// global distance field is a voxel clipmap, so its corners are eroded by roughly the voxel size and a
+// rope slides over a box corner and passes through it. The box collider here is an analytic clamp
+// query, which gives an exact diagonal normal at corners and edges.
+// URopeStaticBodyProvider extracts these from the UBodySetup of nearby static bodies and serves them,
+// which demotes the global distance field to a far-field fallback for landscapes and huge meshes
+// with no simple collision.
 
 #pragma once
 
@@ -12,30 +14,36 @@
 #include "Collision/RopeCollider.h"
 
 /**
- * 해석적 박스(OBB) collider. 기본은 정적 월드 지오메트리 — 프레임 모션 없음(SurfaceVelocity 0),
- * Bone=None/SourceMesh=null → IsWorldStatic()=true → 감지(detect) 제외(push-out 전용).
- * 랩 가능 박스(피드백 5번 박스 랩): Bone(가상 본)+SourceMesh(대상 컴포넌트)를 채우면 IsWorldStatic()=false가
- * 되어 감지에 참여하고, FRopeContact에 그 귀속을 실어 기존 접촉→랩 판정 경로로 랩된다(FROZEN 계약 준용).
+ * An analytic oriented box collider. By default it is static world geometry: it has no frame motion,
+ * so its surface velocity is zero, and with no bone and no source mesh IsWorldStatic() is true, which
+ * excludes it from detection and leaves it push-out only.
+ * Filling in a virtual bone and a source mesh makes IsWorldStatic() false, so it takes part in
+ * detection and carries that attribution on the contact, which wraps it through the existing
+ * contact-to-wrap path while obeying the frozen contract.
  */
 class DYNAMICROPE_API FRopeBoxCollider : public IRopeCollider
 {
 public:
-	/** 월드 공간 박스 중심/회전과 로컬 반폭(스케일 반영 후). */
+	/** The box centre and rotation in world space, and its local half extents with scale already
+	 *  applied. */
 	FVector Center = FVector::ZeroVector;
 	FQuat   Rot = FQuat::Identity;
 	FVector HalfExtents = FVector::ZeroVector;
 
 	/**
-	 * 동적 바디 표면 속도용: 이전 프레임 center/rot + 1/프레임dt. provider가 움직이는 바디에 채운다.
-	 * InvDeltaTime=0(기본)이면 정적 — prev는 무시되고 기존 동작과 동일. 스케일은 프레임 간 불변 가정.
+	 * For the surface velocity of a dynamic body: the previous frame's centre and rotation, plus the
+	 * reciprocal frame delta. Providers fill these in for moving bodies.
+	 * An InvDeltaTime of 0, the default, means static, in which case the previous values are ignored.
+	 * The scale is assumed not to change between frames.
 	 */
 	FVector PrevCenter = FVector::ZeroVector;
 	FQuat   PrevRot = FQuat::Identity;
 	float   InvDeltaTime = 0.0f;
 
 	/**
-	 * 랩 가능 박스: 비-None Bone(가상 본) + SourceMesh(대상 컴포넌트)면 랩 대상(감지 참여). 기본(None/null)이면
-	 * 정적 월드 push-out 전용(기존 URopeStaticBodyProvider 동작 — 감지 제외).
+	 * A wrappable box has a non-None bone, which is a virtual one, plus a source mesh naming the target
+	 * component, and takes part in detection. The defaults leave it static world geometry, push-out
+	 * only and excluded from detection.
 	 */
 	FName Bone = NAME_None;
 	const USceneComponent* SourceMesh = nullptr;
@@ -48,7 +56,8 @@ public:
 	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const override;
 	virtual FBox GetWorldBounds() const override;
 
-	/** 가상 본이 있으면 랩 대상(감지 포함) → 비-정적. 없으면 정적 월드(push-out 전용, 감지 제외). */
+	/** A virtual bone makes this a wrap target and therefore non-static, so it is detected. Without one
+	 *  it is static world geometry, push-out only and excluded from detection. */
 	virtual bool IsWorldStatic() const override { return Bone.IsNone(); }
 	virtual void GetGPUAttribution(FName& OutBone, const USceneComponent*& OutMesh) const override
 	{
@@ -66,7 +75,8 @@ public:
 	{
 		if (InvDeltaTime <= 0.0f)
 		{
-			// 정적 — 호출자가 prev=현재, InvDt=0으로 폴백.
+			// Static, so the caller falls back to a previous transform equal to the current one and a
+			// reciprocal delta of 0.
 			return false;
 		}
 		OutPrevCenter = PrevCenter;
@@ -74,43 +84,59 @@ public:
 		OutInvDeltaTime = InvDeltaTime;
 		return true;
 	}
-	// ProjectToSurface: 기본 구현 그대로.
+	// ProjectToSurface keeps the default implementation.
 };
 
 /**
- * 정적 캡슐/스피어(스피어 = A==B 축퇴 캡슐). FCapsuleCollider의 질의를 그대로 쓰되
- * IsWorldStatic()=true로 detect 제외 대상임을 표시한다. Bone/SourceMesh는 기본값(None/null),
- * InvDeltaTime=0(정적 — 표면 속도 0)을 유지할 것.
+ * A static capsule or sphere, where a sphere is a degenerate capsule with coincident endpoints. It
+ * reuses FCapsuleCollider's queries, but by default, with no bone, IsWorldStatic() is true so it is
+ * excluded from detection and is push-out only.
+ * Filling in a virtual bone and a source mesh makes it wrappable and detected, on the same convention
+ * as FRopeBoxCollider; that is how the full-set mode of URopeWrapTargetComponent serves sphyl and
+ * sphere elements, with the GPU attribution and surface velocity handled by the parent machinery
+ * unchanged. For a dynamic body, fill in the reciprocal delta and the previous endpoints as well.
  */
 class DYNAMICROPE_API FRopeStaticCapsuleCollider : public FCapsuleCollider
 {
 public:
 	using FCapsuleCollider::FCapsuleCollider;
 
-	virtual bool IsWorldStatic() const override { return true; }
+	/** The same convention as the box: a virtual bone makes it a wrap target and therefore detected,
+	 *  and without one it is static world geometry, push-out only. */
+	virtual bool IsWorldStatic() const override { return Bone.IsNone(); }
 };
 
 /**
- * 해석적 컨벡스(평면 집합) collider. 정적 월드 지오메트리(스태틱 바디의 convex 심플 콜리전) 전용.
- * 질의는 max-plane: 점이 가장 많이 위반한 평면까지의 부호 거리를 침투 응답에 쓴다 — **내부에서는 정확**,
- * **외부 엣지/꼭짓점 근방에서는 거리를 과소추정**(무한 평면이 유한 엣지보다 가까우므로)해 접촉이 살짝
- * 이르게 걸린다(터널링 없는 보수적 동작이라 페널티 응답엔 충분). 박스처럼 정확한 최근접점(엣지/꼭짓점)
- * 계산은 인접 정보가 필요해 비싸므로, 정적 월드 충돌엔 이 근사가 표준(Obi 등과 동일).
- * FRopeContact FROZEN 계약: 비-스켈레탈이라 Bone=None, SourceMesh=null, SurfaceVelocity=0.
+ * An analytic convex collider, expressed as a set of planes, for static world geometry only, that is
+ * the convex simple collision of static bodies.
+ * The query takes the maximum plane: the signed distance to the most violated plane is used as the
+ * penetration response. That is exact inside the shape, and outside it underestimates the distance
+ * near edges and vertices, because an infinite plane is nearer than the finite edge is, so contact
+ * engages slightly early. That is conservative and free of tunnelling, which is enough for a penalty
+ * response. Computing the exact closest point on an edge or vertex, as the box does, requires
+ * adjacency information and is expensive, so this approximation is the standard choice for static
+ * world collision.
+ * Under the frozen FRopeContact contract it is non-skeletal, so its bone is None, its source mesh is
+ * null and its surface velocity is zero.
  */
 class DYNAMICROPE_API FRopeConvexCollider : public IRopeCollider
 {
 public:
 	/**
-	 * 바디-로컬 평면(단위 법선·바깥, 스케일 반영·강체 미적용). PlaneDot(p)=dot(N,p)-W: 로컬 내부는 모든 평면 <0.
-	 * 월드 평면 = 로컬 ∘ 강체(Rot,Trans). 강체만 프레임 간 움직이고 로컬 평면은 불변(스케일 불변 가정).
+	 * The body-local planes, with outward unit normals and scale applied but no rigid transform. With
+	 * PlaneDot(p) = dot(N, p) - W, a point inside is below zero on every plane.
+	 * A world plane is the local plane composed with the rigid transform of Rot and Trans. Only that
+	 * rigid transform changes between frames; the local planes are invariant, assuming the scale does
+	 * not change.
 	 */
 	TArray<FPlane> LocalPlanes;
 
-	/** 바디-로컬 AABB(질의 컬). */
+	/** The body-local AABB, used to cull queries. */
 	FBox LocalBounds = FBox(ForceInit);
 
-	/** 바디의 강체 트랜스폼(컴포넌트 rot+trans). curr + 이전 프레임(동적 표면 속도/CCD). InvDeltaTime=0이면 정적. */
+	/** The body's rigid transform, that is the component's rotation and translation, both current and
+	 *  from the previous frame for dynamic surface velocity and continuous collision. An InvDeltaTime
+	 *  of 0 means static. */
 	FQuat   Rot = FQuat::Identity;
 	FVector Trans = FVector::ZeroVector;
 	FQuat   PrevRot = FQuat::Identity;
@@ -119,7 +145,9 @@ public:
 
 	FRopeConvexCollider() = default;
 
-	/** 정적 편의 생성자: 로컬 평면 + 로컬 bounds + 강체(기본 identity → 월드=로컬). 테스트/정적 경로용. */
+	/** A convenience constructor for the static case: local planes, local bounds and a rigid transform
+	 *  that defaults to the identity, making world space equal local space. For tests and static
+	 *  paths. */
 	FRopeConvexCollider(TArray<FPlane>&& InLocalPlanes, const FBox& InLocalBounds,
 		const FQuat& InRot = FQuat::Identity, const FVector& InTrans = FVector::ZeroVector)
 		: LocalPlanes(MoveTemp(InLocalPlanes)), LocalBounds(InLocalBounds)
@@ -139,5 +167,5 @@ public:
 		OutInvDeltaTime = InvDeltaTime;
 		return true;
 	}
-	// ProjectToSurface: 기본 구현 그대로.
+	// ProjectToSurface keeps the default implementation.
 };

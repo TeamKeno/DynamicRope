@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// UBodySetup 심플 콜리전(sphyl/sphere/box/convex)을 월드 공간 push-out 콜라이더로 추출하는 공용 헬퍼.
-// URopeStaticBodyProvider(채널 오버랩 경로)와 URopeWrapTargetComponent(대상 직접 추출 경로)가 공유한다 —
-// 추출된 콜라이더는 Bone=None → IsWorldStatic()=true → detect 제외(push-out 전용).
+// A shared helper that extracts the simple collision of a UBodySetup, that is its sphyls, spheres,
+// boxes and convexes, into world-space push-out colliders. It is used both by
+// URopeStaticBodyProvider, which finds bodies through channel overlaps, and by
+// URopeWrapTargetComponent, which extracts a target's bodies directly. An extracted collider has no
+// bone, which makes IsWorldStatic() true and excludes it from detection, leaving it push-out only.
 
 #pragma once
 
@@ -11,14 +13,26 @@
 #include "Collision/RopeStaticCollider.h"
 
 class UBodySetup;
+class USceneComponent;
 
 namespace RopeBodyColliderExtraction
 {
 	/**
-	 * Setup의 심플 콜리전을 타입별 out-배열에 월드 공간 콜라이더로 append한다. 예산(MaxColliders)은 세 배열의
-	 * 합으로 세고, 초과하면 false를 반환한다(부분 추출). PrevCompTM/InvDeltaTime은 동적 바디 표면 속도용 —
-	 * 정적이면 PrevCompTM=CompTM, InvDeltaTime=0을 넘긴다. MaxConvexPlanes 초과/미쿡 컨벡스는 ElemBox OBB로
-	 * 폴백하며 OnConvexFallback(평면 수)로 통지한다(호출자 로깅용). 콜라이더는 Bone=None(push-out 전용)으로 만든다.
+	 * Appends the setup's simple collision to the per-type output arrays as world-space colliders. The
+	 * budget, MaxColliders, counts the sum of all three arrays, and exceeding it returns false after a
+	 * partial extraction.
+	 * PrevCompTM and InvDeltaTime supply the surface velocity of a dynamic body; for a static one, pass
+	 * PrevCompTM equal to CompTM and an InvDeltaTime of 0.
+	 * A convex with more planes than MaxConvexPlanes, or one that is not cooked, falls back to the
+	 * element box OBB and reports it through OnConvexFallback, which receives the plane count, for the
+	 * caller to log.
+	 *
+	 * Attribution: with the defaults, meaning no bone and a null mesh, every collider is produced with
+	 * no bone, making it push-out only, which is the URopeStaticBodyProvider path. Supplying them
+	 * attaches a virtual bone and a source mesh to the box, sphyl and sphere elements, and to the
+	 * convex OBB fallback, which makes them wrappable and able to take part in detection; that is the
+	 * full-set mode of URopeWrapTargetComponent. A genuine convex, meaning a set of planes, cannot be
+	 * attributed because GPU detection does not support that type, so it is always push-out only.
 	 */
 	DYNAMICROPE_API bool AppendBodyColliders(
 		const UBodySetup& Setup, const FTransform& CompTM, const FTransform& PrevCompTM,
@@ -26,5 +40,6 @@ namespace RopeBodyColliderExtraction
 		TArray<FRopeBoxCollider>& OutBoxes,
 		TArray<FRopeStaticCapsuleCollider>& OutCapsules,
 		TArray<FRopeConvexCollider>& OutConvexes,
-		const TFunctionRef<void(int32 NumPlanes)>& OnConvexFallback);
+		const TFunctionRef<void(int32 NumPlanes)>& OnConvexFallback,
+		FName AttributionBone = NAME_None, const USceneComponent* AttributionMesh = nullptr);
 }

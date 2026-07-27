@@ -8,6 +8,8 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Collision/RopeStaticCollider.h"
+#include "Collision/RopeBodyColliderExtraction.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "Solver/RopeXPBDSolver.h"
 #include "RopeTestHelpers.h"
 
@@ -320,6 +322,84 @@ bool FRopeBoxSolverCornerDrapeTest::RunTest(const FString& Parameters)
 
 	TestTrue(FString::Printf(TEXT("max inside depth %.3f cm should be < 0.5"), MaxInsideDepth), MaxInsideDepth < 0.5f);
 	TestFalse(TEXT("no NaN"), RopeTest::AnyNaN(Sim));
+	return true;
+}
+
+
+// ===== 심플 콜리전 귀속 추출(전체 세트 랩) =====
+
+// 귀속 파라미터 유무에 따라 sphyl/box(+convex OBB 폴백)의 Bone/SourceMesh와 IsWorldStatic이 갈리는가.
+// URopeWrapTargetComponent 전체 세트 모드의 계약: 귀속 세트는 감지 참여, 미귀속(종전 호출)은 push-out 전용.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBodyExtractionAttributionTest,
+	"DynamicRope.Collision.BodyExtractionAttribution",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeBodyExtractionAttributionTest::RunTest(const FString& Parameters)
+{
+	UBodySetup* Setup = NewObject<UBodySetup>(GetTransientPackage());
+
+	FKSphylElem Sphyl(10.0f, 60.0f);
+	Setup->AggGeom.SphylElems.Add(Sphyl);
+	FKSphereElem Sphere(8.0f);
+	Setup->AggGeom.SphereElems.Add(Sphere);
+	FKBoxElem BoxElem(20.0f, 30.0f, 40.0f);
+	Setup->AggGeom.BoxElems.Add(BoxElem);
+	// 미쿡 convex(평면 없음) + 유효 ElemBox → OBB 폴백 경로(귀속 대상).
+	FKConvexElem Convex;
+	Convex.ElemBox = FBox(FVector(-5.0), FVector(5.0));
+	Setup->AggGeom.ConvexElems.Add(Convex);
+
+	const FTransform CompTM = FTransform::Identity;
+	const FName VirtualBone(TEXT("Prop_RopeWrapAnchor"));
+
+	// 1) 귀속 호출: 캡슐 2(sphyl+sphere)·박스 2(box+convex 폴백) 전부 가상 본 + 감지 참여.
+	{
+		TArray<FRopeBoxCollider> Boxes;
+		TArray<FRopeStaticCapsuleCollider> Capsules;
+		TArray<FRopeConvexCollider> Convexes;
+		int32 FallbackCount = 0;
+		RopeBodyColliderExtraction::AppendBodyColliders(*Setup, CompTM, CompTM, 0.0f, 32, 32,
+			Boxes, Capsules, Convexes, [&FallbackCount](int32) { ++FallbackCount; },
+			VirtualBone, /*AttributionMesh*/ nullptr);
+
+		TestEqual(TEXT("attributed capsules (sphyl+sphere)"), Capsules.Num(), 2);
+		TestEqual(TEXT("attributed boxes (box+convex fallback)"), Boxes.Num(), 2);
+		TestEqual(TEXT("no cooked convex colliders"), Convexes.Num(), 0);
+		TestEqual(TEXT("convex fallback fired once"), FallbackCount, 1);
+		for (const FRopeStaticCapsuleCollider& Cap : Capsules)
+		{
+			TestEqual(TEXT("capsule virtual bone"), Cap.Bone, VirtualBone);
+			TestFalse(TEXT("attributed capsule joins detect"), Cap.IsWorldStatic());
+		}
+		for (const FRopeBoxCollider& B : Boxes)
+		{
+			TestEqual(TEXT("box virtual bone"), B.Bone, VirtualBone);
+			TestFalse(TEXT("attributed box joins detect"), B.IsWorldStatic());
+		}
+		// 귀속 캡슐의 Query가 FRopeContact에 본을 실어주는가(접촉→랩 판정 경로의 입력 계약).
+		const FRopeContact C = Capsules[0].Query(Capsules[0].A + FVector(0, 0, 1) * (Capsules[0].Radius + 1.0f), 3.0f);
+		TestTrue(TEXT("attributed capsule contact hit"), C.bHit);
+		TestEqual(TEXT("contact carries virtual bone"), C.Bone, VirtualBone);
+	}
+
+	// 2) 미귀속 호출(종전 URopeStaticBodyProvider 경로): 전부 Bone=None → push-out 전용, 동작 불변.
+	{
+		TArray<FRopeBoxCollider> Boxes;
+		TArray<FRopeStaticCapsuleCollider> Capsules;
+		TArray<FRopeConvexCollider> Convexes;
+		RopeBodyColliderExtraction::AppendBodyColliders(*Setup, CompTM, CompTM, 0.0f, 32, 32,
+			Boxes, Capsules, Convexes, [](int32) {});
+
+		for (const FRopeStaticCapsuleCollider& Cap : Capsules)
+		{
+			TestTrue(TEXT("unattributed capsule stays static"), Cap.Bone.IsNone() && Cap.IsWorldStatic());
+		}
+		for (const FRopeBoxCollider& B : Boxes)
+		{
+			TestTrue(TEXT("unattributed box stays static"), B.Bone.IsNone() && B.IsWorldStatic());
+		}
+	}
+
 	return true;
 }
 

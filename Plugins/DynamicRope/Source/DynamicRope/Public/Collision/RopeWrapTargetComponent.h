@@ -1,30 +1,39 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 정적 메시 랩 opt-in(피드백 5번). 랩 가능한 정적/무버블 액터(기둥·가로등·갈고리 등)에 붙이는
-// 마커 겸 collider provider. 매 프레임 대상 지오메트리 주위에 "랩 가능한" 해석적 캡슐 하나를 만들어
-// 서빙한다 — 이 캡슐은 IsWorldStatic()=false라(정적 월드 push-out 콜라이더와 달리) 접촉 감지(detect)
-// 파이프라인에 포함되고, 합성(가상) 본 이름 + SourceMesh(=대상 컴포넌트)를 보고해 기존 접촉→랩
-// 판정 경로를 그대로 탄다(FRopeContact FROZEN 계약 준용 — 필드 추가 없음).
+// The opt-in for wrapping static meshes. Add it to a wrappable static or movable actor, such as a
+// pillar, a lamppost or a hook, where it acts as both a marker and a collider provider. Each frame it
+// builds and serves wrappable analytic colliders around the target geometry. Unlike the push-out
+// colliders of the static world provider these report IsWorldStatic() as false, so they take part in
+// contact detection, and they report a synthetic virtual bone name plus a source mesh, which is the
+// target component, so they follow the existing contact-to-wrap path with no change to the frozen
+// FRopeContact contract.
 //
-// 감긴 뒤에는 앵커가 대상 컴포넌트 트랜스폼을 따라간다(ResolveBindingWorld의 정적 분기) — 정적은
-// 불변이라 hold가 단순하고, 무버블 프롭(엘리베이터 기둥 등)도 컴포넌트 추종으로 공짜 지원된다.
+// Once wrapped, the anchors follow the target component's transform through the static branch of
+// ResolveBindingWorld. A static target never moves, which makes holding trivial, and a movable prop
+// such as an elevator pillar is supported for free by following the component.
 //
-// 스코프(v1): 대상 컴포넌트 1개당 축정렬 캡슐 1개(기둥류가 주 타깃이므로 충분). 스태틱 메시 SDF
-// 베이크·복합 형상은 후속. 그룹(양쪽 다리)은 별개 작업(피드백 3번).
+// Scope: with Shape set to Auto and simple collision present, it serves the full set, meaning every
+// sphyl, sphere and box element of the simple collision, plus the OBB fallback for convexes, each
+// attributed to the virtual bone. The rope then wraps with exactly the precision
+// URopeStaticBodyProvider extracts; only genuine convex elements remain push-out only, because the
+// GPU detection kernel does not support that type. Forcing Shape to Capsule or Box, or having no
+// simple collision at all, falls back to a single shape approximated from the dominant primitive or
+// the bounds. Wrapping a group, such as both legs of a character, is separate work.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Collision/RopeColliderProvider.h"
-// FCapsuleCollider / FRopeBoxCollider (값 멤버).
+// FCapsuleCollider and FRopeBoxCollider, held by value as members.
 #include "Collision/RopeCollider.h"
 #include "Collision/RopeStaticCollider.h"
 #include "RopeWrapTargetComponent.generated.h"
 
 class USceneComponent;
 
-/** 랩 캡슐 장축(대상 컴포넌트 로컬). EAxis::Type은 UENUM이 아니라 UPROPERTY로 못 쓰므로 전용 enum. */
+/** The long axis of the wrap capsule, in the target component's local space. EAxis::Type is not a
+ *  UENUM and cannot be used in a UPROPERTY, hence this dedicated enum. */
 UENUM(BlueprintType)
 enum class ERopeWrapAxis : uint8
 {
@@ -33,17 +42,18 @@ enum class ERopeWrapAxis : uint8
 	Z
 };
 
-/** 랩 대상 셰이프 선택. */
+/** The shape used for the wrap target. */
 UENUM(BlueprintType)
 enum class ERopeWrapShape : uint8
 {
-	/** 심플 콜리전의 지배 프리미티브로 자동(box→Box, sphyl/sphere→Capsule, 없으면 Capsule). */
+	/** Chosen automatically from the dominant primitive of the simple collision: a box becomes Box, a
+	 *  sphyl or sphere becomes Capsule, and with none at all it becomes Capsule. */
 	Auto,
 
-	/** 강제 캡슐(원기둥/기둥). */
+	/** Force a capsule, for cylinders and pillars. */
 	Capsule,
 
-	/** 강제 박스(OBB). */
+	/** Force a box, as an OBB. */
 	Box
 };
 
@@ -55,104 +65,154 @@ class DYNAMICROPE_API URopeWrapTargetComponent : public UActorComponent, public 
 public:
 	URopeWrapTargetComponent();
 
-	//~ UActorComponent — RopeSimSubsystem 중앙 레지스트리에 등록/해제(프레임당 1회 중앙 gather).
+	//~ UActorComponent. Registers with and unregisters from the RopeSimSubsystem's central registry,
+	//~ which gathers once per frame.
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	/** 감길 지오메트리(정적/무버블). 비우면 owner의 첫 UStaticMeshComponent, 없으면 루트 컴포넌트. */
+	/** The geometry to be wrapped, static or movable. Leave it empty to use the owner's first static
+	 *  mesh component, or the root component when there is none. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap Target")
 	TObjectPtr<USceneComponent> TargetComponent = nullptr;
 
-	/** 랩 캡슐 반지름(cm). 0 이하이면 대상 컴포넌트 로컬 bounds에서 자동 추정한다. */
+	/** An override for the wrap capsule radius (cm). At or below 0 it is derived automatically from the
+	 *  authored collision or the bounds. In full-set mode it is applied uniformly to every extracted
+	 *  capsule element, leaving box elements unaffected; on the single-shape path it behaves as
+	 *  before. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap Target", meta = (ClampMin = "0.0", Units = "cm"))
 	float Radius = 0.0f;
 
-	/** 캡슐 장축을 대상 bounds의 최장축으로 자동 선택할지. 끄면 아래 Axis를 쓴다. */
+	/** Whether to pick the capsule's long axis automatically as the longest axis of the target bounds.
+	 *  Turn it off to use Axis below. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap Target")
 	bool bAutoAxis = true;
 
-	/** 캡슐 장축(대상 컴포넌트 로컬). 기둥=Z(기본), 가로보=X/Y. bAutoAxis가 꺼져 있을 때만 쓴다. */
+	/** The capsule's long axis in the target component's local space: Z for a pillar, which is the
+	 *  default, or X or Y for a crossbeam. Used only while bAutoAxis is off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap Target", meta = (EditCondition = "!bAutoAxis"))
 	ERopeWrapAxis Axis = ERopeWrapAxis::Z;
 
-	/** 랩 대상 셰이프. Auto(기본)=심플 콜리전의 지배 프리미티브로 자동(박스 콜리전→Box, 캡슐/구→Capsule).
-	 *  Capsule/Box로 강제할 수도 있다. */
+	/** The wrap target shape. Auto, the default, serves the full set of simple collision, so every
+	 *  sphyl, sphere and box can be wrapped at the precision of the authored collision, falling back to
+	 *  a bounds capsule when there is no simple collision. Capsule and Box force the single-shape path,
+	 *  approximated from the dominant primitive, as a designer escape hatch. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap Target")
 	ERopeWrapShape Shape = ERopeWrapShape::Auto;
 
 	/**
-	 * 이 랩 대상의 합성(가상) 본 이름 — FRopeContact::Bone 귀속에 쓰인다(접촉 집계가 이 이름으로 랩을
-	 * 건다). 비우면 대상 컴포넌트 이름 기반으로 자동 발급한다. 스태틱 메시의 실재 소켓 이름을 넣으면
-	 * hold가 그 소켓을 따르고, 그 외(가상 이름)면 컴포넌트 트랜스폼을 따른다.
+	 * The synthetic virtual bone name for this wrap target, used as the FRopeContact::Bone attribution
+	 * that contact aggregation binds the wrap to. Leave it empty to issue one automatically from the
+	 * target component's name. Naming an actual socket on the static mesh makes the hold follow that
+	 * socket; any other, virtual, name makes it follow the component transform.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap Target")
 	FName WrapBoneName = NAME_None;
 
 	//~ IRopeColliderProvider
-	// ProvidesWorldStaticColliders는 기본값(false) 유지 — 정적 "월드" push-out 프로바이더가 아니라 랩
-	// 대상이므로 detect에 포함되어야 하고, owner 제외 규칙도 스켈레탈 provider와 동일하게 적용받는다.
+	// ProvidesWorldStaticColliders keeps its default of false: this is a wrap target rather than a
+	// static world push-out provider, so it must take part in detection and is subject to the same
+	// owner exclusion rule as the skeletal providers.
 	virtual void GatherColliders(FRopeColliderGatherContext& Gather) override;
 
 private:
-	/** 프레임당 1회 재구성되는 백킹 스토리지(넘겨준 포인터는 해당 프레임 solve 끝까지 유효).
-	 *  Capsule은 Shape=Capsule, Box는 Shape=Box(랩 가능 OBB: 가상 본 + SourceMesh)일 때 서빙. */
+	/** The backing storage, rebuilt once per frame; the pointers handed out stay valid until that
+	 *  frame's solve finishes. Capsule is served when Shape is Capsule and Box when Shape is Box, the
+	 *  latter as a wrappable OBB carrying the virtual bone and source mesh. */
 	FCapsuleCollider Capsule;
 	FRopeBoxCollider Box;
 	FName            ResolvedBone = NAME_None;
 	uint64           BuiltFrame = static_cast<uint64>(-1);
 
-	/** 무버블 프롭 표면 속도용: 이전 프레임 끝점 + 1/dt. 정적이면 InvDeltaTime 0(속도 0)로 남는다. */
+	/**
+	 * The wrappable backing storage for full-set mode, used when Shape is Auto and simple collision
+	 * exists. Every sphyl and sphere, served as capsules, and every box, plus the OBB fallback for
+	 * convexes, takes part in detection attributed to the virtual bone and source mesh, at the same
+	 * precision the static body provider extracts. Only genuine convex elements fall through to
+	 * PushOutConvexes with no attribution. Rebuilt once per frame, with pointers valid until that
+	 * frame's solve finishes.
+	 */
+	TArray<FRopeBoxCollider>           WrapBoxes;
+	TArray<FRopeStaticCapsuleCollider> WrapCapsules;
+
+	/** Whether this frame is being served in full-set mode, in which case the Wrap arrays are used
+	 *  instead of the single capsule or box. */
+	bool bServeFullSet = false;
+
+	/** For the surface velocity of a movable prop: the previous frame's endpoints plus the reciprocal
+	 *  delta time. A static target leaves InvDeltaTime at 0, giving zero velocity. */
 	FVector PrevA = FVector::ZeroVector;
 	FVector PrevB = FVector::ZeroVector;
 	bool    bHasPrevEndpoints = false;
 
 	/**
-	 * 디테일 push-out 백킹 스토리지: 대상이 StaticBodyProvider 스캔 밖 채널(PhysicsBody 등 — Movable+Simulate
-	 * Physics로 drag하는 프롭)일 때, 대상 심플 콜리전 전체를 여기 담아 wrap 셰이프와 함께 서빙한다. Bone=None →
-	 * IsWorldStatic()=true → detect 제외(push-out 전용, wrap엔 단일 Capsule/Box만 참여). 프레임당 1회 재구성이라
-	 * 넘겨준 포인터는 solve 끝까지 유효(StaticBodyProvider와 동일 계약).
+	 * The detailed push-out backing storage. When the target sits on a channel outside the static body
+	 * provider's scan, such as PhysicsBody for a movable simulating prop that is dragged around, its
+	 * entire simple collision is placed here and served alongside the wrap shapes. These have no bone,
+	 * which makes IsWorldStatic() true and excludes them from detection, leaving them push-out only,
+	 * while only the single capsule or box takes part in wrapping. It is rebuilt once per frame, so the
+	 * pointers stay valid until the solve finishes, on the same contract as the static body provider.
 	 */
 	TArray<FRopeBoxCollider>            PushOutBoxes;
 	TArray<FRopeStaticCapsuleCollider> PushOutCapsules;
 	TArray<FRopeConvexCollider>        PushOutConvexes;
 
-	/** push-out 셰이프의 무버블 표면 속도용: 이전 프레임 컴포넌트 월드 트랜스폼(+1/dt). 정적이면 InvDt 0. */
+	/** For the surface velocity of movable push-out shapes: the previous frame's component world
+	 *  transform, plus the reciprocal delta time. A static target leaves that at 0. */
 	FTransform PrevCompTM = FTransform::Identity;
 	bool       bHasPrevCompTM = false;
 
-	/** 진단 로그 1회 가드(등록/대상/캡슐 상태를 스팸 없이 한 번만 남긴다). */
+	/** A one-shot guard so the diagnostic log, covering registration, the target and the capsule state,
+	 *  is written once rather than spamming. */
 	bool    bDiagnosticsLogged = false;
 
-	/** 마지막 캡슐이 심플 콜리전(true)에서 왔는지 bounds 폴백(false)인지 — 진단 로그용. */
+	/** Whether the last capsule came from simple collision, when true, or the bounds fallback, when
+	 *  false. For the diagnostic log. */
 	bool    bUsedSimpleCollision = false;
 
-	/** 이번 프레임 서빙 셰이프(Box=true / Capsule=false). Auto면 EffectiveServeBox가 심플 콜리전으로 결정. */
+	/** The shape being served this frame: true for a box and false for a capsule. Under Auto,
+	 *  EffectiveServeBox decides it from the simple collision. */
 	bool    bServeBox = false;
 
-	/** 대상 컴포넌트 해석(+가상 본 이름 확정). 실패 시 null. */
+	/** Resolves the target component and settles the virtual bone name. Null on failure. */
 	USceneComponent* ResolveTarget();
 
-	/** 랩 캡슐을 만들어 Capsule에 채운다(가상 본 + SourceMesh=대상). 심플 콜리전 우선, 없으면 bounds 폴백. */
+	/** Builds the wrap capsule into Capsule, carrying the virtual bone and the source mesh. It prefers
+	 *  simple collision and falls back to the bounds. */
 	void BuildCapsule(USceneComponent* Comp);
 
 	/**
-	 * 랩 가능 박스(가상 본 + SourceMesh)를 만들어 Box에 채운다. 심플 콜리전의 가장 큰 박스 elem을 타이트한
-	 * OBB로 쓰고, 없으면 컴포넌트 로컬 bounds OBB로 폴백한다.
+	 * Builds a wrappable box into Box, carrying the virtual bone and the source mesh. It uses the
+	 * largest box element of the simple collision as a tight OBB, falling back to the component's local
+	 * bounds OBB.
 	 */
 	void BuildBox(USceneComponent* Comp);
 
 	/**
-	 * Shape=Auto일 때 이 대상에 박스를 서빙할지 결정: 심플 콜리전의 지배(최대) 프리미티브가 박스면 true,
-	 * sphyl/sphere면 false. 심플 콜리전이 없으면 false(캡슐 bounds 폴백). Capsule/Box 강제면 그대로.
+	 * Under Shape set to Auto, decides whether to serve a box for this target: true when the dominant,
+	 * that is largest, primitive of the simple collision is a box, and false for a sphyl or sphere.
+	 * With no simple collision it returns false, giving the capsule bounds fallback. Forcing Capsule or
+	 * Box uses that choice directly.
 	 */
 	bool EffectiveServeBox(USceneComponent* Comp) const;
 
 	/**
-	 * 대상 UBodySetup 심플 콜리전(sphyl/box/sphere)에서 월드 캡슐 끝점+반지름을 뽑는다. 시각 메시에 타이트
-	 * 해 뜸을 없앤다. 저작 콜리전이 없거나 convex뿐이면 false(호출자가 bounds 폴백).
+	 * Builds full-set mode: extracts the target's simple collision with attribution into WrapBoxes and
+	 * WrapCapsules, which are wrappable, and PushOutConvexes for genuine convexes, which are
+	 * unattributed and discarded when the channel already covers them. Returns false when not a single
+	 * wrappable element results, in which case the caller falls back to the single-shape path, as with
+	 * a convex-only target or one with no collision.
+	 */
+	bool BuildFullSet(USceneComponent* Comp);
+
+	/**
+	 * Extracts world-space capsule endpoints and a radius from the target's UBodySetup simple collision,
+	 * covering sphyls, boxes and spheres. Being tight to the visual mesh removes any floating gap.
+	 * Returns false when there is no authored collision or it holds convexes only, in which case the
+	 * caller falls back to the bounds.
 	 */
 	bool BuildCapsuleFromSimpleCollision(USceneComponent* Comp, FVector& OutA, FVector& OutB, float& OutRadius) const;
 
-	/** 대상 로컬 bounds에서 축정렬 랩 캡슐(끝점+반지름)을 근사한다 — 심플 콜리전이 없을 때의 폴백. */
+	/** Approximates an axis-aligned wrap capsule, as endpoints and a radius, from the target's local
+	 *  bounds. This is the fallback when there is no simple collision. */
 	void BuildCapsuleFromBounds(USceneComponent* Comp, FVector& OutA, FVector& OutB, float& OutRadius) const;
 };

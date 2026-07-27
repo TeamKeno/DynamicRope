@@ -61,7 +61,8 @@ namespace RopeBodyColliderExtraction
 	bool AppendBodyColliders(const UBodySetup& Setup, const FTransform& CompTM, const FTransform& PrevCompTM,
 		float InvDeltaTime, int32 MaxColliders, int32 MaxConvexPlanes,
 		TArray<FRopeBoxCollider>& OutBoxes, TArray<FRopeStaticCapsuleCollider>& OutCapsules,
-		TArray<FRopeConvexCollider>& OutConvexes, const TFunctionRef<void(int32)>& OnConvexFallback)
+		TArray<FRopeConvexCollider>& OutConvexes, const TFunctionRef<void(int32)>& OnConvexFallback,
+		FName AttributionBone, const USceneComponent* AttributionMesh)
 	{
 		const FVector Scale3D = CompTM.GetScale3D();
 		const auto BudgetLeft = [&]() { return OutBoxes.Num() + OutCapsules.Num() + OutConvexes.Num() < MaxColliders; };
@@ -89,6 +90,8 @@ namespace RopeBodyColliderExtraction
 				Cap.PrevB = PrevCenter - PrevAxis * HalfLen;
 				Cap.InvDeltaTime = InvDeltaTime;
 			}
+			Cap.Bone = AttributionBone;
+			Cap.SourceMesh = AttributionMesh;
 			OutCapsules.Add(MoveTemp(Cap));
 		}
 
@@ -109,6 +112,8 @@ namespace RopeBodyColliderExtraction
 				Cap.PrevB = PrevCenter;
 				Cap.InvDeltaTime = InvDeltaTime;
 			}
+			Cap.Bone = AttributionBone;
+			Cap.SourceMesh = AttributionMesh;
 			OutCapsules.Add(MoveTemp(Cap));
 		}
 
@@ -137,6 +142,8 @@ namespace RopeBodyColliderExtraction
 					BoxCol.PrevRot = PrevElemTM.GetRotation();
 					BoxCol.InvDeltaTime = InvDeltaTime;
 				}
+				BoxCol.Bone = AttributionBone;
+				BoxCol.SourceMesh = AttributionMesh;
 				OutBoxes.Add(MoveTemp(BoxCol));
 			}
 			else
@@ -200,7 +207,11 @@ namespace RopeBodyColliderExtraction
 				const FVector CenterW = M.TransformPosition(Convex.ElemBox.GetCenter());
 				const FQuat   RotW = M.GetMatrixWithoutScale().ToQuat();
 				const FVector HalfW = Convex.ElemBox.GetExtent() * static_cast<float>(Scale3D.GetAbsMin());
-				OutBoxes.Add(FRopeBoxCollider(CenterW, RotW, HalfW));
+				FRopeBoxCollider FallbackBox(CenterW, RotW, HalfW);
+				// 귀속 모드면 폴백 OBB도 랩 가능으로 — "진짜 convex만 감지 불가" 규칙을 균일하게 유지한다.
+				FallbackBox.Bone = AttributionBone;
+				FallbackBox.SourceMesh = AttributionMesh;
+				OutBoxes.Add(MoveTemp(FallbackBox));
 				OnConvexFallback(ElemPlanes.Num());
 			}
 		}
