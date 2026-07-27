@@ -4,8 +4,9 @@
 #include "DynamicRopeEditorLog.h"
 #include "SDF/SRopeSDFAuthoringPanel.h"
 #include "SDF/RopeBoneSDFVolumeCustomization.h"
-#include "Details/RopeComponentDetails.h"
+#include "Details/RopeResolveModeDetails.h"
 #include "RopeComponent.h"
+#include "Preset/RopePreset.h"
 #include "Collision/SDF/RopeSDFProvider.h"
 #include "Collision/SDF/RopeSDFData.h"
 
@@ -54,10 +55,14 @@ void FDynamicRopeEditorModule::StartupModule()
 			FRopeBoneSDFVolume::StaticStruct()->GetFName(),
 			FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FRopeBoneSDFVolumeCustomization::MakeInstance));
 
-		// URopeComponent 디테일 패널: ResolveMode에 따라 카테고리 게이트(RopeComponentDetails 주석 참조).
+		// URopeComponent / URopePreset 디테일 패널: ResolveMode에 따라 게이트(RopeResolveModeDetails 주석 참조).
+		// 프리셋은 컴포넌트 프로퍼티의 미러라 같은 커스터마이즈를 공유한다.
 		PropertyModule.RegisterCustomClassLayout(
 			URopeComponent::StaticClass()->GetFName(),
-			FOnGetDetailCustomizationInstance::CreateStatic(&FRopeComponentDetails::MakeInstance));
+			FOnGetDetailCustomizationInstance::CreateStatic(&TRopeResolveModeDetails<URopeComponent>::MakeInstance));
+		PropertyModule.RegisterCustomClassLayout(
+			URopePreset::StaticClass()->GetFName(),
+			FOnGetDetailCustomizationInstance::CreateStatic(&TRopeResolveModeDetails<URopePreset>::MakeInstance));
 
 		PropertyModule.NotifyCustomizationModuleChanged();
 	}
@@ -87,6 +92,7 @@ void FDynamicRopeEditorModule::ShutdownModule()
 			FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 		PropertyModule.UnregisterCustomPropertyTypeLayout(FRopeBoneSDFVolume::StaticStruct()->GetFName());
 		PropertyModule.UnregisterCustomClassLayout(URopeComponent::StaticClass()->GetFName());
+		PropertyModule.UnregisterCustomClassLayout(URopePreset::StaticClass()->GetFName());
 		PropertyModule.NotifyCustomizationModuleChanged();
 	}
 

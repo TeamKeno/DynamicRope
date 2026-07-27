@@ -113,6 +113,8 @@ bool FRopePresetDefaultsValidTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Substeps 기본값 일치"), Preset->SolverConfig.Substeps, Rope->SolverConfig.Substeps);
 	TestEqual(TEXT("bUseWorldGDF 기본값 일치"), Preset->bUseWorldGDF, Rope->bUseWorldGDF);
 	TestEqual(TEXT("bUseTipMesh 기본값 일치"), Preset->bUseTipMesh, Rope->bUseTipMesh);
+	TestEqual(TEXT("bShowRopeWhenLoaded 기본값 일치"),
+		Preset->bShowRopeWhenLoaded, Rope->IsShowRopeWhenLoaded());
 	TestEqual(TEXT("LoadedHandSocket 기본값 일치"), Preset->LoadedHandSocket, Rope->LoadedHandSocket);
 	TestTrue(TEXT("LoadedTipRelativeTransform 기본값 일치"),
 		Preset->LoadedTipRelativeTransform.Equals(Rope->LoadedTipRelativeTransform));
@@ -321,6 +323,35 @@ bool FRopePresetModePhaseReconciliationTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Loaded에서 ① 적용 성공(Loaded은 허용 페이즈)"), Rope->ApplyPreset(FreeSim));
 	TestEqual(TEXT("①로 전환 → Free 복귀"), Rope->GetPhase(), ERopePhase::Free);
 	TestTrue(TEXT("①은 페이즈 게이트 없음"), Rope->CanThrowNow());
+	return true;
+}
+
+// Loaded 표시 스위치 스탬프: ③ 프리셋의 bShowRopeWhenLoaded이 장전 가시성까지 반영된다.
+// 두 번째(Loaded → Loaded) 적용이 핵심 — EnterLoaded가 진입 에지가 아니라 OnEnterLoaded을 다시 부르지
+// 않으므로, 스탬프가 세터를 경유하지 않으면 새 값이 다음 장전까지 묻힌다.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePresetStampsShowRopeWhenLoadedTest,
+	"DynamicRope.Preset.StampsShowRopeWhenLoaded",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePresetStampsShowRopeWhenLoadedTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+
+	URopePreset* Hidden = NewObject<URopePreset>();
+	Hidden->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
+	Hidden->bShowRopeWhenLoaded = false;
+
+	TestTrue(TEXT("Free에서 ③ 적용 성공"), Rope->ApplyPreset(Hidden));
+	TestEqual(TEXT("③ 적용 → Loaded 진입"), Rope->GetPhase(), ERopePhase::Loaded);
+	TestFalse(TEXT("끈 프리셋 → 장전 중 로프 튜브 숨김"), Rope->GetVisibleFlag());
+
+	URopePreset* Shown = NewObject<URopePreset>();
+	Shown->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
+	Shown->bShowRopeWhenLoaded = true;
+
+	TestTrue(TEXT("Loaded에서 ③ 재적용 성공"), Rope->ApplyPreset(Shown));
+	TestTrue(TEXT("켠 프리셋 → 값 스탬프"), Rope->IsShowRopeWhenLoaded());
+	TestTrue(TEXT("Loaded 재적용도 가시성 즉시 반영"), Rope->GetVisibleFlag());
 	return true;
 }
 

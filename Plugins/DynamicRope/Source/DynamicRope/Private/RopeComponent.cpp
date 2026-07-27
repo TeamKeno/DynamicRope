@@ -130,7 +130,8 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	}
 	const bool bWasLoaded = (Phase == ERopePhase::Loaded);
 
-	// [2] 값 스탬프 — RopeMaterial만 세터(SetMaterial) 경유가 필요해 [5]로 미룬다.
+	// [2] 값 스탬프 — 세터 경유가 필요한 둘만 예외다: bShowRopeWhenLoaded는 이 블록 끝에서
+	// SetShowRopeWhenLoaded로, RopeMaterial은 [5]에서 SetMaterial로 넣는다.
 	// (인스턴스 배선 값 TipMeshComponentTag은 프리셋에 없고, LoadedHandSocket은 옵트인일 때만 덮는다
 	//  — 아래 bOverrideLoadedHandSocket 분기 및 헤더 주석 참조.)
 	ResolveMode = Preset->ResolveMode;
@@ -165,6 +166,10 @@ bool URopeComponent::ApplyPreset(const URopePreset* Preset)
 	TubeSmoothingAlpha = Preset->TubeSmoothingAlpha;
 	bIncludeOwnerColliders = Preset->bIncludeOwnerColliders;
 	bUseWorldGDF = Preset->bUseWorldGDF;
+
+	// 세터 경유 — Loaded 중 재적용이면 [7]의 EnterLoaded가 진입 에지가 아니라 OnEnterLoaded을 다시 부르지
+	// 않으므로(가시성은 그 훅이 적용한다), 직접 대입은 다음 장전까지 묻힌다.
+	SetShowRopeWhenLoaded(Preset->bShowRopeWhenLoaded);
 
 	// [4] Sim 재시드 — 항상 호출(분기 없는 단일 경로). NumParticles/RopeLength 소비 + GPU 상주 버퍼
 	// 재시드 세대 증가까지 포함한다. EnsureRopeInitialized는 비었을 때만이라 여기서는 부적합.
