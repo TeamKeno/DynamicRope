@@ -293,6 +293,149 @@ bool FRopeWrappingPhase::GetColliderCenter(const IRopeCollider& Collider, FVecto
 	return false;
 }
 
+namespace
+{
+	// The candidate wrap axes a collider's shape offers, as direction plus extent pairs: a capsule offers
+	// its segment axis with the full length as the extent; a box its three rotated basis axes with the
+	// full side lengths; a convex its rigid-rotated local-bounds axes likewise. The extent is what makes
+	// a log pick its long axis: girth wrapping winds about the direction the shape is longest in.
+	void AppendColliderAxisCandidates(const IRopeCollider& Collider,
+		TArray<TPair<FVector, float>, TInlineAllocator<9>>& Out)
+	{
+		FVector CapA = FVector::ZeroVector;
+		FVector CapB = FVector::ZeroVector;
+		float CapRadius = 0.0f;
+		if (Collider.GetGPUCapsule(CapA, CapB, CapRadius))
+		{
+			FVector Dir = CapB - CapA;
+			const float SegLen = static_cast<float>(Dir.Size());
+			if (Dir.Normalize(KINDA_SMALL_NUMBER))
+			{
+				Out.Emplace(Dir, SegLen + 2.0f * CapRadius);
+			}
+			return;
+		}
+
+		FVector BoxCenter = FVector::ZeroVector;
+		FVector BoxHalf = FVector::ZeroVector;
+		FQuat BoxRot = FQuat::Identity;
+		if (Collider.GetGPUBox(BoxCenter, BoxRot, BoxHalf))
+		{
+			Out.Emplace(BoxRot.GetAxisX(), 2.0f * static_cast<float>(BoxHalf.X));
+			Out.Emplace(BoxRot.GetAxisY(), 2.0f * static_cast<float>(BoxHalf.Y));
+			Out.Emplace(BoxRot.GetAxisZ(), 2.0f * static_cast<float>(BoxHalf.Z));
+			return;
+		}
+
+		TConstArrayView<FPlane> ConvexPlanes;
+		FBox ConvexLocalBounds(ForceInit);
+		FQuat ConvexRot = FQuat::Identity;
+		FQuat ConvexPrevRot = FQuat::Identity;
+		FVector ConvexTrans = FVector::ZeroVector;
+		FVector ConvexPrevTrans = FVector::ZeroVector;
+		float ConvexInvDt = 0.0f;
+		if (Collider.GetGPUConvex(ConvexPlanes, ConvexLocalBounds, ConvexRot, ConvexTrans,
+				ConvexPrevRot, ConvexPrevTrans, ConvexInvDt)
+			&& ConvexLocalBounds.IsValid)
+		{
+			const FVector Extent = ConvexLocalBounds.GetExtent();
+			Out.Emplace(ConvexRot.GetAxisX(), 2.0f * static_cast<float>(Extent.X));
+			Out.Emplace(ConvexRot.GetAxisY(), 2.0f * static_cast<float>(Extent.Y));
+			Out.Emplace(ConvexRot.GetAxisZ(), 2.0f * static_cast<float>(Extent.Z));
+		}
+	}
+
+	// The shape-extent axis for a non-skeletal target: among the axis candidates offered by the
+	// wrappable colliders attributed to the latch bone, pick the longest one that stays at least
+	// ~60 degrees away from the latch surface normal. Girth wrapping winds about the direction the
+	// shape is longest in, so a log picks its long axis however it is rotated; an end hit rejects
+	// the near-normal long axis and falls to the larger cross axis. Returns false when no attributed
+	// candidate survives (no colliders in the snapshot, or every axis is too close to the normal).
+	// The axis origin is the centre of the attributed colliders' union, not the component pivot: a
+	// prop authored with its pivot at an end or on its resting surface (a log pivoted at ground
+	// level) would otherwise put the winding axis along its edge, and the radial and circumferential
+	// directions the surface walk derives from that axis degenerate near the pivot side.
+	bool TryResolveShapeExtentAxis(const FRopeSurfaceAnchor& LatchAnchor,
+		const FRopeWrappingPhase::FContext& Ctx, const USceneComponent* Mesh,
+		const FTransform& BoneXform, FVector& OutAxisOrigin, FVector& OutAxisDirection)
+	{
+		const FVector NormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
+			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+
+		constexpr float MaxParallelToNormal = 0.5f;
+		FVector BestShapeAxis = FVector::ZeroVector;
+		float BestShapeExtent = 0.0f;
+		const auto ConsiderCandidate = [&](const FVector& Dir, float Extent)
+		{
+			const float ParallelToNormal =
+				FMath::Abs(static_cast<float>(FVector::DotProduct(Dir, NormalWorld)));
+			if (ParallelToNormal <= MaxParallelToNormal && Extent > BestShapeExtent)
+			{
+				BestShapeExtent = Extent;
+				BestShapeAxis = Dir;
+			}
+		};
+
+		// The union of the attributed colliders, in the component-oriented frame: authored simple
+		// collision is often a decomposition into chunks (a log split lengthwise into near-cubes), so
+		// the per-piece bounds lose the overall long axis entirely - only the union still knows the
+		// prop is long. World AABBs of the pieces are gathered into a rigid component frame so the
+		// union's axes follow the prop's rotation.
+		const FTransform CompRigid(Mesh->GetComponentQuat(), Mesh->GetComponentLocation());
+		FBox LocalUnion(ForceInit);
+		for (const IRopeCollider* Collider : Ctx.Colliders)
+		{
+			if (!Collider)
+			{
+				continue;
+			}
+			FName ColliderBone = NAME_None;
+			const USceneComponent* ColliderMesh = nullptr;
+			Collider->GetGPUAttribution(ColliderBone, ColliderMesh);
+			if (ColliderBone != LatchAnchor.Bone || (ColliderMesh && Mesh && ColliderMesh != Mesh))
+			{
+				continue;
+			}
+
+			// Per-piece shape axes: a single rotated elem (a diagonal capsule) offers its own exact
+			// axis, which the axis-aligned union would inflate.
+			TArray<TPair<FVector, float>, TInlineAllocator<9>> Candidates;
+			AppendColliderAxisCandidates(*Collider, Candidates);
+			for (const TPair<FVector, float>& Candidate : Candidates)
+			{
+				ConsiderCandidate(Candidate.Key, Candidate.Value);
+			}
+
+			const FBox WorldBounds = Collider->GetWorldBounds();
+			if (WorldBounds.IsValid)
+			{
+				FVector Corners[8];
+				WorldBounds.GetVertices(Corners);
+				for (const FVector& Corner : Corners)
+				{
+					LocalUnion += CompRigid.InverseTransformPosition(Corner);
+				}
+			}
+		}
+		if (LocalUnion.IsValid)
+		{
+			const FVector UnionExtent = LocalUnion.GetExtent();
+			ConsiderCandidate(CompRigid.GetUnitAxis(EAxis::X), 2.0f * static_cast<float>(UnionExtent.X));
+			ConsiderCandidate(CompRigid.GetUnitAxis(EAxis::Y), 2.0f * static_cast<float>(UnionExtent.Y));
+			ConsiderCandidate(CompRigid.GetUnitAxis(EAxis::Z), 2.0f * static_cast<float>(UnionExtent.Z));
+		}
+		if (BestShapeExtent <= 0.0f)
+		{
+			return false;
+		}
+		OutAxisOrigin = LocalUnion.IsValid
+			? CompRigid.TransformPosition(LocalUnion.GetCenter())
+			: BoneXform.GetLocation();
+		OutAxisDirection = BestShapeAxis.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		return true;
+	}
+}
+
 bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnchor, const FContext& Ctx,
 	FVector& OutAxisOrigin, FVector& OutAxisDirection) const
 {
@@ -332,6 +475,23 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 	const FName ParentBone = RopeWrapTargets::GetParentTargetKey(Mesh, LatchAnchor.Bone);
 	const FVector BoneLocation = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
 
+	// A non-skeletal target under the default axis source wraps about what its shape dictates, ahead of
+	// the guide plane: the travel-plane normal is the throw's swing direction, so on a static prop it
+	// makes the wrap direction depend on where the rope was thrown from - a log approached along its
+	// length wound about a cross axis and the rope lay down the log. The shape-extent axis is the
+	// physically wrappable direction regardless of the throw. Skeletal targets and an explicitly
+	// configured CaptureTravelPlane, the multi-target composite intent, keep the travel-plane priority.
+	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::BoneCenteredGuidePlane &&
+		!RopeWrapTargets::IsSkeletalTarget(Mesh))
+	{
+		const FTransform ShapeBoneXform = ResolveBindingWorld(Mesh, LatchAnchor.Bone);
+		if (TryResolveShapeExtentAxis(LatchAnchor, Ctx, Mesh, ShapeBoneXform, OutAxisOrigin, OutAxisDirection))
+		{
+			LogAxisSource(TEXT("ShapeExtent"), Mesh);
+			return true;
+		}
+	}
+
 	// Under BoneCenteredGuidePlane the same travel plane normal is stood at the latch bone's location.
 	// Had the mode been CaptureTravelPlane it would already have been attempted and failed above, so the
 	// same input is not retried.
@@ -357,16 +517,29 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 
 	const FTransform BoneXform = ResolveBindingWorld(Mesh, LatchAnchor.Bone);
 
-	// A static or non-skeletal target has no bone graph, so the axis is derived from the component basis:
-	// whichever of the component's X, Y and Z axes is most perpendicular to the latch surface normal is
-	// chosen as the wrap axis. The long axis of a cylinder or capsule is perpendicular to the radial
-	// direction, which is the surface normal, so an axis-aligned wrap capsule, Z for a pillar and X or Y
-	// for a crossbeam, automatically selects the correct wrap axis. A skeletal target with a parent has
-	// already returned above; a skeletal root bone falls through to the local X fallback below.
+	// A static or non-skeletal target has no bone graph, so the axis comes from the shape itself: among
+	// the axis candidates offered by the wrappable colliders attributed to this bone (capsule axis, box
+	// and convex bounds axes, each with its extent), pick the longest one that stays sufficiently
+	// perpendicular to the latch surface normal. Girth wrapping winds about the direction the shape is
+	// longest in, so a log picks its long axis however it is rotated - the old component-basis rule
+	// compared only perpendicularity to the normal, which ties on a lying cylinder (a top hit is
+	// perpendicular to both horizontal axes) and then picked X by iteration order.
 	if (!RopeWrapTargets::IsSkeletalTarget(Mesh))
 	{
+		// Reached under CaptureTravelPlane with no travel frame, or with no guide plane at all: the
+		// shape still decides first, then the component basis.
+		if (TryResolveShapeExtentAxis(LatchAnchor, Ctx, Mesh, BoneXform, OutAxisOrigin, OutAxisDirection))
+		{
+			LogAxisSource(TEXT("ShapeExtentFallback"), Mesh);
+			return true;
+		}
+
 		const FVector NormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+
+		// No attributed shape candidate survived (no colliders in the snapshot, or every axis is too
+		// close to the normal): keep the previous component-basis rule, whichever of X, Y and Z is most
+		// perpendicular to the latch normal.
 		FVector BestAxis = BoneXform.GetUnitAxis(EAxis::Z);
 		float BestParallel = TNumericLimits<float>::Max();
 		for (const EAxis::Type CandidateAxis : { EAxis::X, EAxis::Y, EAxis::Z })

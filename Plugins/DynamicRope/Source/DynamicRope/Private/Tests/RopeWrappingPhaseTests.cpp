@@ -9,6 +9,8 @@
 
 #include "Logic/RopeWrappingPhase.h"
 #include "Collision/RopeCollider.h"
+// FRopeConvexCollider (ShapeExtentAxis 테스트의 통나무 convex)
+#include "Collision/RopeStaticCollider.h"
 #include "Core/RopeWrapTarget.h"
 #include "Components/SceneComponent.h"
 #include "RopeTestHelpers.h"
@@ -422,9 +424,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingAxisSourceTest,
 
 bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 {
-	// The guide plane normal is Y. This test has no capture snapshot, so both modes use the mock bone's
-	// origin, and it also verifies that the default mode does not fall back to the removed collider shape
-	// axis.
+	// The guide plane normal is Y. CaptureTravelPlane, the explicit composite intent, follows the guide
+	// plane. The default mode on a non-skeletal target now prefers the shape-extent axis - the capsule's
+	// long axis Z - over the guide plane, so a static prop wraps about what its shape dictates regardless
+	// of the throw direction.
 	USceneComponent* Mesh = MakeMockTarget();
 	FCapsuleCollider Capsule(FVector(0, 0, -50), FVector(0, 0, 50), 25.0f, FName("arm"), Mesh);
 	TArray<IRopeCollider*> Colliders = { &Capsule };
@@ -464,14 +467,148 @@ bool FRopeWrappingAxisSourceTest::RunTest(const FString& Parameters)
 	FRopeWrappingPhase DefaultWrapping;
 	TestTrue(TEXT("wrapping begins with default axis source"),
 		DefaultWrapping.Begin(Latch, 0.16f, Sim, DefaultCtx));
-	TestTrue(FString::Printf(TEXT("BoneCenteredGuidePlane follows the guide plane normal (dir=%s)"),
+	TestTrue(FString::Printf(TEXT("default mode prefers the shape-extent axis over the guide plane (dir=%s)"),
 			*DefaultWrapping.State.PathAxisDirection.ToString()),
-		FMath::Abs(FVector::DotProduct(DefaultWrapping.State.PathAxisDirection, GuidePlaneNormal)) > 0.99f);
+		FMath::Abs(FVector::DotProduct(DefaultWrapping.State.PathAxisDirection, FVector(0, 0, 1))) > 0.99f);
 	TestTrue(FString::Printf(TEXT("BoneCenteredGuidePlane uses the latch bone origin (origin=%s)"),
 			*DefaultWrapping.State.PathAxisOrigin.ToString()),
 		DefaultWrapping.State.PathAxisOrigin.Equals(FVector::ZeroVector, 0.1f));
 	return true;
 }
+
+	// The shape-extent axis for non-skeletal targets: with no guide plane, a log-shaped convex picks its
+	// long axis however the component basis is oriented (the old component-basis rule tied on a top hit
+	// and picked X by iteration order), and an end hit rejects the near-normal long axis and falls to the
+	// larger cross axis.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingShapeExtentAxisTest,
+	"DynamicRope.Wrapping.ShapeExtentAxis",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingShapeExtentAxisTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* Mesh = MakeMockTarget();
+	const FName LogBone(TEXT("log"));
+
+	// A log-shaped convex: local bounds 60 x 200 x 60, long axis Y, at the origin.
+	const auto MakeLogConvex = [&]() -> FRopeConvexCollider
+	{
+		TArray<FPlane> Planes;
+		Planes.Add(FPlane(FVector(1, 0, 0), 30.0));
+		Planes.Add(FPlane(FVector(-1, 0, 0), 30.0));
+		Planes.Add(FPlane(FVector(0, 1, 0), 100.0));
+		Planes.Add(FPlane(FVector(0, -1, 0), 100.0));
+		Planes.Add(FPlane(FVector(0, 0, 1), 30.0));
+		Planes.Add(FPlane(FVector(0, 0, -1), 30.0));
+		FRopeConvexCollider Convex(MoveTemp(Planes),
+			FBox(FVector(-30.0, -100.0, -30.0), FVector(30.0, 100.0, 30.0)));
+		Convex.Bone = LogBone;
+		Convex.SourceMesh = Mesh;
+		return Convex;
+	};
+
+	// 1) A top hit (normal Z): the long axis Y must win. The old basis rule tied X and Y at
+	// perpendicularity 0 and took X by iteration order.
+	{
+		FRopeConvexCollider Convex = MakeLogConvex();
+		TArray<IRopeCollider*> Colliders = { &Convex };
+		FRopeSimState Sim = RopeTest::MakeStraightRope(9, 160.0f, FVector(0, 0, 31), FVector(1, 0, 0));
+
+		FRopeSurfaceAnchor Latch;
+		Latch.NodeIndex = 0;
+		Latch.Bone = LogBone;
+		Latch.Mesh = Mesh;
+		Latch.LocalSurfacePosition = FVector(0, 0, 30);
+		Latch.LocalNormal = FVector(0, 0, 1);
+		Latch.LocalTangent = FVector(1, 0, 0);
+		Latch.StartWorldPosition = FVector(0, 0, 30);
+		Latch.SurfaceOffset = 1.0f;
+
+		FRopeWrapConfig Config = MakeTestWrapConfig();
+		const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
+			/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+			/*bHasGuidePlaneNormal*/ false, FVector::ZeroVector };
+
+		FRopeWrappingPhase Wrapping;
+		TestTrue(TEXT("wrapping begins on the log top hit"), Wrapping.Begin(Latch, 0.16f, Sim, Ctx));
+		TestTrue(FString::Printf(TEXT("top hit picks the log's long axis Y (dir=%s)"),
+				*Wrapping.State.PathAxisDirection.ToString()),
+			FMath::Abs(FVector::DotProduct(Wrapping.State.PathAxisDirection, FVector(0, 1, 0))) > 0.99f);
+	}
+
+	// 2) An end hit (normal Y, parallel to the long axis): the long axis is rejected by the normal gate
+	// and the larger cross axis, X or Z at 60 each, must win - never the near-normal Y.
+	{
+		FRopeConvexCollider Convex = MakeLogConvex();
+		TArray<IRopeCollider*> Colliders = { &Convex };
+		FRopeSimState Sim = RopeTest::MakeStraightRope(9, 160.0f, FVector(0, 101, 0), FVector(1, 0, 0));
+
+		FRopeSurfaceAnchor Latch;
+		Latch.NodeIndex = 0;
+		Latch.Bone = LogBone;
+		Latch.Mesh = Mesh;
+		Latch.LocalSurfacePosition = FVector(0, 100, 0);
+		Latch.LocalNormal = FVector(0, 1, 0);
+		Latch.LocalTangent = FVector(1, 0, 0);
+		Latch.StartWorldPosition = FVector(0, 100, 0);
+		Latch.SurfaceOffset = 1.0f;
+
+		FRopeWrapConfig Config = MakeTestWrapConfig();
+		const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
+			/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+			/*bHasGuidePlaneNormal*/ false, FVector::ZeroVector };
+
+		FRopeWrappingPhase Wrapping;
+		TestTrue(TEXT("wrapping begins on the log end hit"), Wrapping.Begin(Latch, 0.16f, Sim, Ctx));
+		TestTrue(FString::Printf(TEXT("end hit rejects the near-normal long axis (dir=%s)"),
+				*Wrapping.State.PathAxisDirection.ToString()),
+			FMath::Abs(FVector::DotProduct(Wrapping.State.PathAxisDirection, FVector(0, 1, 0))) < 0.5f);
+	}
+
+
+	// 3) A ground-pivoted log (rigid translation lifts the body 50 above the component pivot): the axis
+	// origin must sit at the shape's centre, not at the pivot - an axis along the log's bottom edge
+	// degenerates the radial/circumferential directions the surface walk derives from it.
+	{
+		TArray<FPlane> Planes;
+		Planes.Add(FPlane(FVector(1, 0, 0), 30.0));
+		Planes.Add(FPlane(FVector(-1, 0, 0), 30.0));
+		Planes.Add(FPlane(FVector(0, 1, 0), 100.0));
+		Planes.Add(FPlane(FVector(0, -1, 0), 100.0));
+		Planes.Add(FPlane(FVector(0, 0, 1), 30.0));
+		Planes.Add(FPlane(FVector(0, 0, -1), 30.0));
+		FRopeConvexCollider Convex(MoveTemp(Planes),
+			FBox(FVector(-30.0, -100.0, -30.0), FVector(30.0, 100.0, 30.0)),
+			FQuat::Identity, FVector(0.0, 0.0, 50.0));
+		Convex.Bone = LogBone;
+		Convex.SourceMesh = Mesh;
+		TArray<IRopeCollider*> Colliders = { &Convex };
+		FRopeSimState Sim = RopeTest::MakeStraightRope(9, 160.0f, FVector(0, 0, 81), FVector(1, 0, 0));
+
+		FRopeSurfaceAnchor Latch;
+		Latch.NodeIndex = 0;
+		Latch.Bone = LogBone;
+		Latch.Mesh = Mesh;
+		Latch.LocalSurfacePosition = FVector(0, 0, 80);
+		Latch.LocalNormal = FVector(0, 0, 1);
+		Latch.LocalTangent = FVector(1, 0, 0);
+		Latch.StartWorldPosition = FVector(0, 0, 80);
+		Latch.SurfaceOffset = 1.0f;
+
+		FRopeWrapConfig Config = MakeTestWrapConfig();
+		const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
+			/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+			/*bHasGuidePlaneNormal*/ false, FVector::ZeroVector };
+
+		FRopeWrappingPhase Wrapping;
+		TestTrue(TEXT("wrapping begins on the pivoted log"), Wrapping.Begin(Latch, 0.16f, Sim, Ctx));
+		TestTrue(FString::Printf(TEXT("axis origin sits at the shape centre, not the pivot (origin=%s)"),
+				*Wrapping.State.PathAxisOrigin.ToString()),
+			FMath::Abs(Wrapping.State.PathAxisOrigin.Z - 50.0) < 1.0);
+	}
+
+	return true;
+}
+
 
 	// Consuming the capture snapshot, which applies to CaptureTravelPlane alone:
 	// - the axis origin is the contact region centre rather than the latch bone's location, which measures
