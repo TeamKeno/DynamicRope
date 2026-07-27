@@ -2,13 +2,14 @@
 
 #include "Logic/RopeWrappingPhase.h"
 #include "Components/SceneComponent.h"
-// ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+// ResolveBindingWorld, the single point that resolves a wrap binding, whether a bone, a socket or a
+// component, into a transform.
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-// RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
+// RopeMath::AnyTangentFromNormal, included here to avoid a duplicate definition in the unity build.
 #include "RopeMathHelpers.h"
 
 const USceneComponent* FRopeWrappingPhase::ResolveWrappingMesh(
@@ -95,10 +96,12 @@ void FRopeWrappingPhase::CollectCompletedVirtualBridgeRuns()
 
 int32 FRopeWrappingPhase::ComputePathStepBudget(int32 NumTailNodes, int32 StepsPerFrame)
 {
-	// 총 작업량 = NumTailNodes*2(SVF는 경로점당 스텝 2개 소모). 크기 비례 기준(기준값에서 ~4프레임 완주)을
-	// 설정값이 배율한다: 높을수록 프레임당 더 많이(=더 빨리 완성), 낮을수록 적게. 큰 로프에서도 설정이
-	// 실효하도록 하한이 아니라 배율로 쓴다. preview(4096)는 사실상 전량이라 한 프레임에 완주. 최소 1.
-	constexpr int32 BaselineStepsPerFrame = 8;   // FRopeWrapConfig::WrappingPathBuildStepsPerFrame 기본값과 동기
+	// The total work is twice NumTailNodes, since the surface vector field consumes two steps per path
+	// point. A size-proportional baseline, which completes in roughly four frames at the reference value,
+	// is scaled by the configured value: higher finishes sooner and lower takes longer. It is used as a
+	// multiplier rather than a floor so the setting still has effect on large ropes. The preview passes a
+	// very large value, which effectively completes in a single frame. The minimum is 1.
+	constexpr int32 BaselineStepsPerFrame = 8;   // Kept in step with the default of FRopeWrapConfig::WrappingPathBuildStepsPerFrame.
 	const int32 SizeBaseline = FMath::DivideAndRoundUp(FMath::Max(0, NumTailNodes) * 2, 4);
 	return FMath::Max(1, SizeBaseline * FMath::Max(1, StepsPerFrame) / BaselineStepsPerFrame);
 }
@@ -115,15 +118,18 @@ void FRopeWrappingPhase::AdvancePathBuild(const FRopeSimState& Sim, const FConte
 		return;
 	}
 
-	// 프레임 예산: 총 작업량(SVF는 경로점당 스텝 2개)을 크기 비례 기준으로 잡고 설정 steps/frame으로
-	// 배율한다 — 큰 로프에서도 설정이 갈리도록(단순 하한 아님). preview는 4096으로 한 번에 완주.
+	// The frame budget: the total work, two steps per path point for the surface vector field, is taken as
+	// a size-proportional baseline and scaled by the configured steps per frame, so the setting still
+	// makes a difference on large ropes rather than acting as a simple floor. The preview completes in one
+	// go.
 	const int32 StepBudget = FRopeWrappingPhase::ComputePathStepBudget(
 		State.NumTailNodes, Ctx.GetPathBuildStepsPerFrame());
 	if (State.bPathUsesPoseSpaceIsland)
 	{
-		// Composite의 한 raw probe는 실제 projection 이동량에 따라 출력 node를 0개 또는 여러 개
-		// 만들 수 있다. probe 호출 전 Path.Num()을 기억하고, 이번 호출에서 새로 생긴 범위 전체에
-		// 순서대로 anchor를 붙여 LastAnchoredPathPointCount의 연속성을 보장한다.
+		// One composite raw probe can produce zero or several output nodes, depending on how far the
+		// projection actually moved. The path point count is recorded before the probe call and anchors are
+		// attached in order across the whole range added by this call, which keeps the anchored path point
+		// count contiguous.
 		for (int32 StepIndex = 0;
 			StepIndex < StepBudget && State.Path.Num() < State.NumTailNodes;
 			++StepIndex)
@@ -173,8 +179,9 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_BeginProgressiveWrapPathBuild);
 
-	// 모든 초기화 시도는 비활성 상태에서 시작한다. 아래 어느 검증 단계에서 실패하더라도
-	// FinishPathBuild를 거쳐 Active/Complete/Failed 플래그가 하나의 일관된 종료 상태를 갖는다.
+	// Every initialization attempt starts from the inactive state. Whichever validation step below fails,
+	// it goes through FinishPathBuild so the active, complete and failed flags always end in one
+	// consistent terminal state.
 	State.bPathBuildActive = false;
 	State.bPathBuildComplete = false;
 	State.bPathBuildFailed = false;
@@ -203,10 +210,11 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.VirtualRunLeftPathIndex = INDEX_NONE;
 	State.LatchAnchor = StoredLatchAnchor;
 	State.NumTailNodes = Sim.Num() - StoredLatchAnchor.NodeIndex;
-	// 시드 다중화: 첫 보조 시드 노드부터는 경로가 아니라 보조 앵커가 노드를 소유한다 — 경로 길이를
-	// 그 앞까지로 줄여 같은 노드를 경로 앵커와 보조 앵커가 이중으로 잡지 않게 한다(커밋 시드/Hold의
-	// 마지막 쓰기 승자 경합 방지). 남는 로프(보조 노드 이후)는 Wrapping 동안 마스크로 동결됐다가
-	// 커밋 후 자유 구간이 된다.
+	// Seed multiplexing: from the first secondary seed node onwards the nodes are owned by the secondary
+	// anchors rather than the path, so the path length is cut to end before it. That stops a path anchor
+	// and a secondary anchor both claiming the same node, which would otherwise be a last-writer-wins race
+	// between the commit seed and Hold. The rope beyond the secondary nodes is frozen by the mask during
+	// Wrapping and becomes a free span after the commit.
 	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
 	{
 		if (Secondary.NodeIndex > StoredLatchAnchor.NodeIndex)
@@ -233,8 +241,9 @@ bool FRopeWrappingPhase::BeginProgressiveWrapPathBuild(const FRopeSurfaceAnchor&
 	State.PathBridgeDistance = 0.0f;
 	State.FrontDistance = 0.0f;
 	State.FrontWrapAngleRad = 0.0f;
-	// 새 progressive path마다 4단계 완료 게이트도 초기화한다. 이전 throw의 최종 목표나
-	// 목표 도달 시간이 남으면 새 wrap이 즉시 commit될 수 있으므로 반드시 함께 리셋해야 한다.
+	// Each new progressive path also resets the four-stage completion gate. Leaving the previous throw's
+	// final target, or the time it reached it, would let a new wrap commit immediately, so they must be
+	// reset together.
 	State.FrontTargetDistance = 0.0f;
 	State.FrontTargetWrapAngleRad = 0.0f;
 	State.bFrontUsesAngleMapping = false;
@@ -294,8 +303,9 @@ bool FRopeWrappingPhase::RestartPathBuildAsSingleBoneFallback(
 
 	State.bPathUsesSingleBoneFallback = true;
 	State.PathBuildFailureReason.Reset();
-	// 복합 경로가 활성화되면서 제거한 seed를 부분적으로 복구할 수는 없다. 단일 본 경로가 전체 tail의
-	// 소유권을 명확하게 갖도록 남은 seed도 비운 뒤 최초 latch부터 다시 만든다.
+	// The seeds removed when the composite path was activated cannot be partially restored. The remaining
+	// seeds are cleared as well so the single-bone path unambiguously owns the entire tail, and it is
+	// rebuilt from the original latch.
 	State.SecondarySeedAnchors.Reset();
 	UE_LOG(LogRopeWrap, Log,
 		TEXT("[%s] Wrap algorithm fallback: from=CompositeAnalyticHelix to=SingleBoneSurfaceVectorField reason=%s "
@@ -356,9 +366,10 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 		State.PathAxisDirection,
 		State.PathLatchRadial)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(State.PathNormalWorld));
-	// winding 기준 방향: 기본은 latch tangent(로프가 누운 방향). CaptureTravelPlane에서 캡처 속도가
-	// 있으면 속도를 쓴다 — 감기 시작 방향이 "로프가 실제로 움직이던 쪽"과 일치해, 충돌 프레임의
-	// tangent 노이즈에 흔들리지 않는다(진행 방향 기반 wrap 3단계).
+	// The reference direction for the winding is the latch tangent by default, which is the direction the
+	// rope lies in. Under CaptureTravelPlane, where a capture velocity exists, the velocity is used
+	// instead, so the direction wrapping starts in matches the way the rope was actually moving and is not
+	// shaken by tangent noise on the collision frame.
 	FVector WindingReference = LatchTangentWorld;
 	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::CaptureTravelPlane &&
 		Ctx.TravelFrame && Ctx.TravelFrame->bValid &&
@@ -392,23 +403,27 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 	State.PathCompositeAxisMaxDistance = 0.0f;
 	State.bPathCompositeAxisRangeValid = false;
 	State.PathCompositeSweepAngleRad = 0.0f;
-	// Composite Multi-Bone은 순수 물리 결과를 쓰는 FullSimulation 전용이다. Assisted/Guaranteed는
-	// island를 만들지 않고 아래 기존 SurfaceVectorField parent/child 순차 전환 경로를 그대로 탄다.
+	// Composite multi-bone wrapping is for FullSimulation alone, which uses the pure physical outcome. The
+	// assisted and guaranteed modes build no island and take the existing sequential parent and child
+	// transition path of the surface vector field below.
 	if (Ctx.ResolveMode == ERopeWrapResolveMode::FullSimulation &&
 		Ctx.Config.bEnableMultiBoneWrapping && !State.bPathUsesSingleBoneFallback)
 	{
 		GatherPoseSpaceWrapIsland(LatchAnchor, Sim, Mesh,
 			State.PathWrapIslandBones, State.PathWrapIslandMembers,
 			State.PathWrapIslandPortals, State.PathAvailableSlack, Ctx);
-		// 단일 표면은 기존 projection/축 수학을 그대로 사용해 단일 본 감김의 각도와 튜닝을 보존한다.
-		// 실제로 둘 이상의 본이 같은 pose-space 기둥으로 묶였을 때만 composite selector를 켠다.
+		// A single surface keeps the existing projection and axis maths, which preserves the angles and
+		// tuning of single-bone wrapping. The composite selector is enabled only when two or more bones
+		// really did group into one pose-space column.
 		State.bPathUsesPoseSpaceIsland = State.PathWrapIslandBones.Num() > 1;
 		if (State.bPathUsesPoseSpaceIsland)
 		{
-			// ResolveWrappingAxis는 island를 만들기 전에 호출되므로, 팔에서 먼저 닿으면 축 원점도 팔
-			// collider 중심에 남는다. 그 축으로 outer support를 재면 반대편 팔이 과도하게 바깥으로
-			// 보이고, 한 번 팔로 넘어간 경로가 몸통으로 돌아오지 못한다. 방향/감김 부호는 투척 프레임의
-			// 정보를 그대로 보존하고, 원점의 축 수직 성분만 접촉 순간 복합 단면의 외곽 중심으로 옮긴다.
+			// ResolveWrappingAxis runs before the island is built, so contacting an arm first leaves the axis
+			// origin at that arm's collider centre. Measuring the outer support against that axis makes the
+			// opposite arm appear excessively far out, and a path that once crossed to an arm can never
+			// return to the torso. The direction and the winding sign preserve the throw frame's information
+			// exactly; only the component of the origin perpendicular to the axis moves to the outline centre
+			// of the composite cross-section at the moment of contact.
 			const FVector AxisDirection = State.PathAxisDirection.GetSafeNormal(
 				KINDA_SMALL_NUMBER, FVector::UpVector);
 			const FVector PlaneU = RopeMath::AnyTangentFromNormal(AxisDirection)
@@ -428,9 +443,10 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 			float IslandMaxAxisCoordinate = -TNumericLimits<float>::Max();
 			int32 IslandBoundsContributorCount = 0;
 
-			// OBB의 12개 edge와 latch 평면의 교점을 투영하면, 본 개수나 SDF bounds의 축 방향
-			// 길이에 편향되지 않는 실제 단면 외곽 범위를 얻을 수 있다. SDF OBB가 없을 때만 world AABB를
-			// identity OBB로 사용한다.
+			// Projecting the intersections of the twelve edges of the oriented boxes with the latch plane
+			// gives the real outline extent of the cross-section, unbiased by the number of bones or by the
+			// axial length of the SDF bounds. The world AABB is used as an identity-oriented box only where
+			// no SDF box exists.
 			static constexpr int32 BoxEdges[12][2] =
 			{
 				{ 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 },
@@ -527,8 +543,9 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 				CrossSectionContributorCount += bMemberContributed ? 1 : 0;
 			}
 
-			// 복합 단면에 실제로 둘 이상의 표면이 있을 때만 재중앙화한다. island graph만 이어졌지만
-			// latch 높이에는 한 표면밖에 없는 경우는 기존 latch 축이 더 안전하다.
+			// Re-centring happens only where the composite cross-section genuinely holds two or more
+			// surfaces. Where the island graph merely connects but only one surface exists at the latch
+			// height, the original latch axis is safer.
 			if (CrossSectionContributorCount >= 2)
 			{
 				const FVector PreviousAxisOrigin = State.PathAxisOrigin;
@@ -569,8 +586,9 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 					*Ctx.OwnerName, CrossSectionContributorCount);
 			}
 
-			// support query는 현재 선택된 팔 표면 근처가 아니라 복합 단면 전체의 바깥에서 시작한다.
-			// 단면 반대편 collider도 같은 probe로 평가할 수 있도록 외곽 반대각 길이에 여유를 더한다.
+			// The support query starts outside the whole composite cross-section rather than near the arm
+			// surface currently selected. Extra margin is added to the outline half-diagonal so a collider on
+			// the far side of the cross-section can be evaluated by the same probe.
 			const float CurrentAxisDistance = FVector::DotProduct(
 				State.PathSurfaceWorld - State.PathAxisOrigin, AxisDirection);
 			const FVector CurrentAxisPoint =
@@ -618,9 +636,10 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 				KINDA_SMALL_NUMBER, State.PathNormalWorld);
 			State.PathCompositeSweepAngleRad = 0.0f;
 
-			// 새 독립 Analytic Helix의 pitch는 디자이너 상수가 아니라 Contacting 순간 로프가 누운
-			// tail 방향에서 읽는다. radial 접근 성분을 제거한 뒤 T ~= C + A*pitch로 분해하면
-			// pitch = dot(T,A) / dot(T,C)다. 원주 성분이 거의 없으면 비율이 폭주하므로 0으로 둔다.
+			// The pitch of the new independent analytic helix is not a designer constant: it is read from the
+			// tail direction the rope was lying in at the moment of contact. Removing the radial approach
+			// component and decomposing the tangent into circumferential and axial parts gives the pitch as
+			// their ratio. With almost no circumferential component that ratio explodes, so it is set to zero.
 			const TCHAR* PitchSource = TEXT("NotUsed");
 			float PitchAxisComponent = 0.0f;
 			float PitchCircumferenceComponent = 0.0f;
@@ -663,18 +682,20 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 						PitchAxisComponent / PitchCircumferenceComponent;
 					State.PathCompositeHelixPitchScale = UnclampedPitchScale;
 
-					// Contact에서 얻은 pitch의 부호/기울기는 유지하되, 그 방향의 island 축 여유 안에
-					// 계획된 전체 helix가 들어가도록 크기만 줄인다. 각 step의 실제 수식은
-					//   axial = sqrt(segment^2 - radialStep^2) * pitch / sqrt(1 + pitch^2)
-					// 이므로 radial entry까지 포함한 pitch=0 기준 진행량(BaseTravel)을 먼저 합산한다.
+					// The sign and slope of the pitch taken from the contact are preserved, and only its
+					// magnitude is reduced so the whole planned helix fits within the island's axial extent in
+					// that direction. Since each step's real expression makes the axial travel depend on the
+					// pitch through a square-root term, the pitch-zero travel including the radial entry is
+					// summed first as the baseline.
 					if (State.bPathCompositeAxisRangeValid &&
 						!FMath::IsNearlyZero(UnclampedPitchScale))
 					{
 						PitchAvailableAxisDistance = UnclampedPitchScale > 0.0f
 							? State.PathCompositeAxisMaxDistance - CurrentAxisDistance
 							: CurrentAxisDistance - State.PathCompositeAxisMinDistance;
-						// 마지막으로 잘 감긴 pitch(-0.062)가 불필요하게 줄지 않도록 한 node의 일부만
-						// 경계 여유로 둔다. ContactRadius보다 작은 여유는 SDF cap 양자화에 취약하다.
+						// A fraction of one node is left as boundary margin so a pitch that wrapped well is
+						// not reduced unnecessarily. Margins smaller than the contact radius are vulnerable to
+						// the quantization of the SDF cap.
 						PitchAxisSafetyMargin = FMath::Max(
 							Ctx.GetContactRadius(), Sim.SegmentLength * 0.25f);
 						PitchUsableAxisDistance = FMath::Max(
@@ -731,8 +752,9 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 				PitchSource = TEXT("DegenerateContactDirectionZero");
 			}
 
-			// 동일한 초기 helix 방향에서 두 tangent를 분리한다. PathTangentWorld는 표면 anchor용으로
-			// normal 평면에 투영하고, RawGuide는 projection 전 방향을 유지해 tail 흔들림을 차단한다.
+			// Two tangents are separated from the same initial helix direction: the path tangent is projected
+			// onto the normal plane for the surface anchor, while the raw guide keeps the pre-projection
+			// direction, which stops the tail wobbling.
 			State.PathCompositeRawGuideTangentWorld =
 				(State.PathCircumferenceDir + AxisDirection *
 					State.PathCompositeHelixPitchScale)
@@ -761,9 +783,10 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 				PitchUsableAxisDistance, PitchAxisSafetyMargin, PitchPlannedBaseTravel,
 				PitchAxisComponent, PitchCircumferenceComponent);
 
-			// 복합 island 자체가 여러 접촉 표면을 소유한다. 구형 secondary seed가 경로를 첫 보조 노드
-			// 앞에서 잘라버리면 팔-몸통-팔 외곽을 만들 길이가 사라지므로, 이 경우에만 전체 tail을
-			// progressive path에 돌려주고 보조 hold/commit 경합을 제거한다.
+			// A composite island owns several contact surfaces by itself. If an older secondary seed cut the
+			// path short before the first secondary node, there would be no length left to trace the
+			// arm-torso-arm outline, so in that case alone the whole tail is returned to the progressive path
+			// and the contention between the secondary hold and the commit is removed.
 			State.NumTailNodes = Sim.Num() - LatchAnchor.NodeIndex;
 			if (State.SecondarySeedAnchors.Num() > 0)
 			{
@@ -824,21 +847,21 @@ bool FRopeWrappingPhase::ProcessPathPointForAnchoring(int32 PathIndex, const FRo
 
 	const FRopeWrapPathPoint& Point = State.Path[PathIndex];
 
-	// 허공 브리지(chord)와 composite virtual helix point는 표면 프레임이 없으므로 앵커를 만들지
-	// 않는다 — 커밋 후 이 노드는 자유 로프로 남아 solver가 chord/현수 형태를 잡는다. 앵커 카운터는
-	// 전진시켜야 한다: 이 함수는
-	// PathIndex == LastAnchoredPathPointCount일 때만 신규 처리하므로, 여기서 멈추면 브리지 뒤
-	// 재진입한 표면 경로점들의 앵커 생성이 전부 막힌다.
+	// A mid-air bridge chord, and a composite virtual helix point, have no surface frame and therefore
+	// produce no anchor; after the commit those nodes remain free rope and the solver gives them their
+	// chord or catenary shape. The anchor counter still has to advance: this function only processes a new
+	// point when the path index equals the anchored path point count, so stopping here would block anchor
+	// creation for every surface path point after the bridge re-enters the surface.
 	if (Point.bBridge || Point.bVirtual)
 	{
 		State.LastAnchoredPathPointCount = PathIndex + 1;
 		return true;
 	}
 
-	// MVP의 핵심: 경로점이 선택한 본을 그대로 anchor 소유 본으로 사용한다.
-	// 이전 구현은 모든 anchor를 LatchAnchor.Bone 로컬로 저장했기 때문에,
-	// path가 이웃 본 표면으로 넘어가더라도 Wrapped/Hold 단계에서는 한 본에 고정되어 보였다.
-	// Point.Bone이 비어 있는 경우는 AnalyticHelix/legacy fallback으로 보고 latch bone을 사용한다.
+	// The heart of it: the bone the path point selected is used as the bone that owns the anchor.
+	// Storing every anchor in the latch bone's local space meant that even when the path crossed onto a
+	// neighbouring bone's surface, the wrapped and hold stages still appeared pinned to a single bone.
+	// A path point with no bone is treated as an analytic helix or legacy fallback and uses the latch bone.
 	FName AnchorBone = Point.Bone.IsNone() ? LatchAnchor.Bone : Point.Bone;
 	const USceneComponent* AnchorMesh = Point.Mesh.Get();
 	if (!AnchorMesh)
@@ -861,8 +884,8 @@ bool FRopeWrappingPhase::ProcessPathPointForAnchoring(int32 PathIndex, const FRo
 	Anchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(Point.TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 	if (Point.bHasWrappingGuideTangent)
 	{
-		// guide도 anchor bone-local로 저장해 Wrapping 도중 캐릭터 애니메이션은 따라가되,
-		// 표면 normal의 미세 굴곡에는 다시 투영되지 않게 한다.
+		// The guide is stored in the anchor bone's local space too, so it follows the character's animation
+		// during Wrapping without being reprojected onto the fine variation of the surface normal.
 		Anchor.LocalWrappingGuideTangent = BoneXform.InverseTransformVectorNoScale(
 			Point.WrappingGuideTangentWorld)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, Anchor.LocalTangent);

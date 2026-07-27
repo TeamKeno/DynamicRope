@@ -23,29 +23,33 @@
 #include "RHI.h"
 // FApp::CanEverRender
 #include "Misc/App.h"
-// UE_VERSION_OLDER_THAN — 엔진 버전 가드(GetMaterialRelevance 시그니처가 5.7에서 변경)
+// UE_VERSION_OLDER_THAN, the engine version guard, since the GetMaterialRelevance signature changed in 5.7.
 #include "Misc/EngineVersionComparison.h"
-// RHI 버퍼 생성 버전차 래퍼(5.6+ FRHIBufferCreateDesc vs 5.5 구 경로)
+// The wrapper covering the RHI buffer creation difference between engine versions.
 #include "RopeRHICompat.h"
-// bWriteVelocity — 프록시 생성 시 1회 스냅샷
+// bWriteVelocity, snapshotted once when the proxy is created.
 #include "Settings/DynamicRopeSettings.h"
 
-// 렌더 튜닝 값의 출처: 튜브 스무딩(Subdiv/α)은 로프별 UPROPERTY(URopeComponent::TubeSmoothingSubdiv/
-// TubeSmoothingAlpha), velocity 출력 여부는 프로젝트 설정(UDynamicRopeSettings::bWriteVelocity).
-// 셋 다 proxy 생성 시 1회 스냅샷 — 변경은 렌더 상태 재생성(에디터 프로퍼티 편집/재PIE) 후 반영.
-// resident 튜브(노드 직독)는 GPU에서 직접 스무딩하므로 Subdiv>1이어도 유지되고, 비-resident 프레임만
-// CPU 스무딩 후 업로드한다.
+// Where the render tuning comes from: the tube smoothing, meaning the subdivision and the knot
+// parameter, is a per-rope property on URopeComponent, while whether velocity is written is a project
+// setting on UDynamicRopeSettings.
+// All three are snapshotted once when the proxy is created, so a change takes effect after the render
+// state is recreated, whether by editing the property in the editor or restarting PIE.
+// The resident tube, which reads the nodes directly, smooths on the GPU and therefore still applies with
+// a subdivision above 1; only non-resident frames smooth on the CPU before uploading.
 
 void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	IndexBufferRHI = RopeRHI::CreateIndexBuffer(RHICmdList, TEXT("FRopeIndexBuffer"), sizeof(int32), NumIndices,
 		EBufferUsageFlags::Dynamic | EBufferUsageFlags::ShaderResource);
 
-	// BuildTube가 채우기 전(예: PIE 밖, 서브시스템 틱이 없어 센터라인이 안 올라온 상태)에 캐시된 정적
-	// 드로우가 미초기화 인덱스(쓰레기 값)를 그리면 원점을 가로지르는 degenerate 삼각형 = 월드를 가르는
-	// 검은 번짐이 생긴다. 0으로 초기화하면 모든 삼각형이 정점 0으로 수축한 zero-area라 아무것도 안 그려진다
-	// (정상 데이터가 채워지면 그대로 렌더). 정적 드로우는 버퍼를 in-place로 갱신하는 설계라 DrawStaticElements를
-	// bHasData로 가드하면 커맨드가 재캐싱되지 않아 영영 안 그려지므로, 가드 대신 안전한 초기 상태로 둔다.
+	// Before BuildTube fills them in, as outside PIE where there is no subsystem tick and no centreline
+	// has been uploaded, a cached static draw would render uninitialized, that is garbage, indices,
+	// producing degenerate triangles across the origin and a black smear across the world. Initializing
+	// them to zero collapses every triangle onto vertex 0 with zero area, so nothing is drawn, and real
+	// data renders normally once it arrives. Static draws are designed to update their buffers in place,
+	// so guarding DrawStaticElements on whether data exists would stop the command being recached and it
+	// would never draw at all; a safe initial state is used instead of a guard.
 	if (NumIndices > 0)
 	{
 		void* Dst = RHICmdList.LockBuffer(IndexBufferRHI, 0, NumIndices * sizeof(int32), RLM_WriteOnly);
@@ -54,7 +58,8 @@ void FRopeIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 	}
 }
 
-// M5b: UAV 가능 position vertex buffer. 컴퓨트가 R32_FLOAT UAV로 쓰고, VF가 R32_FLOAT SRV/stream으로 읽는다.
+// The UAV-capable position vertex buffer. The compute shader writes it through an R32_FLOAT UAV and the
+// vertex factory reads it as an R32_FLOAT SRV and stream.
 void FRopeGpuPositionBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	const uint32 Bytes = static_cast<uint32>(NumVertices) * sizeof(FVector3f);
@@ -74,9 +79,11 @@ void FRopeGpuPositionBuffer::ReleaseRHI()
 	FVertexBuffer::ReleaseRHI();
 }
 
-// M5b(B1 임시): 매 프레임 CPU centerline을 올려 컴퓨트가 읽는 버퍼. R32_FLOAT SRV.
-// Dynamic 미사용 — Dynamic은 lock 시 backing을 orphan해 영속 SRV를 무효화할 수 있다(FPositionVertexBuffer와
-// 동일하게 static+ShaderResource를 매 프레임 lock하면 SRV가 유지된다).
+// The buffer the compute shader reads, filled each frame by uploading the CPU centreline, with an
+// R32_FLOAT SRV.
+// It is deliberately not dynamic: a dynamic buffer can orphan its backing store on lock and invalidate a
+// persistent SRV, whereas locking a static buffer with the shader resource flag every frame, as
+// FPositionVertexBuffer does, keeps the SRV valid.
 void FRopeCenterlineBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	const uint32 Bytes = static_cast<uint32>(NumFloats) * sizeof(float);
@@ -93,8 +100,9 @@ void FRopeCenterlineBuffer::ReleaseRHI()
 	FVertexBuffer::ReleaseRHI();
 }
 
-// B2-full: tangent basis 버퍼. 컴퓨트는 R32_UINT UAV로 v당 uint4(SNORM16 packed)를 쓰고, VF는 VET_Short4N
-// 스트림(TangentX@0, TangentZ@8, stride 16) + R16G16B16A16_SNORM SRV(매뉴얼 페치)로 읽는다.
+// The tangent basis buffer. The compute shader writes a uint4 of packed SNORM16 values per vertex through
+// an R32_UINT UAV, and the vertex factory reads it as VET_Short4N streams, with tangent X at offset 0 and
+// tangent Z at offset 8 and a stride of 16, plus an R16G16B16A16_SNORM SRV for the manual fetch.
 void FRopeGpuTangentBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	// TangentX(8) + TangentZ(8)
@@ -115,7 +123,8 @@ void FRopeGpuTangentBuffer::ReleaseRHI()
 	FVertexBuffer::ReleaseRHI();
 }
 
-// B2-full: UV 버퍼. 컴퓨트는 R32_FLOAT UAV로 v당 float2, VF는 VET_Float2 스트림 + G32R32F SRV(매뉴얼 페치)로 읽는다.
+// The UV buffer. The compute shader writes a float2 per vertex through an R32_FLOAT UAV, and the vertex
+// factory reads it as a VET_Float2 stream plus a G32R32F SRV for the manual fetch.
 void FRopeGpuTexCoordBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	const uint32 Bytes = static_cast<uint32>(NumVertices) * sizeof(FVector2f);
@@ -145,7 +154,8 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	: FPrimitiveSceneProxy(Component)
 	, Material(Component->GetMaterial(0))
 	, VertexFactory(GetScene().GetFeatureLevel(), "FRopeSceneProxy")
-	// 5.7에서 GetMaterialRelevance 인자가 ERHIFeatureLevel::Type→EShaderPlatform으로 바뀜 — 버전 가드.
+	// In 5.7 the GetMaterialRelevance argument changed from a feature level to a shader platform, hence
+	// the version guard.
 	, MaterialRelevance(Component->GetMaterialRelevance(
 #if UE_VERSION_OLDER_THAN(5, 7, 0)
 		GetScene().GetFeatureLevel()
@@ -154,9 +164,10 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 #endif
 	))
 	, NumNodes(FMath::Max(2, Component->NumParticles))
-	// GPU 튜브 링 상한에 맞춰 자동 하향(RopeGPU::ComputeTubeSubdiv — 디버그 오버레이와 공유하는 단일 소스).
+	// Reduced automatically to fit the GPU tube's ring limit, through RopeGPU::ComputeTubeSubdiv, which is
+	// the single source shared with the debug overlay.
 	, Subdiv(RopeGPU::ComputeTubeSubdiv(NumNodes, Component->TubeSmoothingSubdiv))
-	// 스무딩된 렌더 링 수(Subdiv=1이면 NumNodes와 동일).
+	// The number of smoothed render rings, which equals the node count when there is no subdivision.
 	, NumRings((NumNodes - 1) * Subdiv + 1)
 	, NumSides(FMath::Max(3, Component->NumSides))
 	, Radius(Component->Radius)
@@ -166,15 +177,20 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	VertexBuffers.InitWithDummyData(&VertexFactory, GetRequiredVertexCount());
 	IndexBuffer.NumIndices = GetRequiredIndexCount();
 
-	// GPU 튜브 상시화: 렌더 가능 RHI + NumRings<=MaxTubeRings(최상단 스레드그룹 버킷)이면 GPU 튜브
-	// (pos/tangent/UV 컴퓨트), 아니면(쿡/-nullrhi/서버, 또는 링>상한) CPU BuildTube 폴백. CVar 토글 없음 —
-	// G4 솔버와 동일한 자동 선택. 상한은 RopeTubeBuilder의 버킷 정의를 단일 소스로 참조(드리프트 방지).
-	// 생성 시점에 한 번 결정(링 수는 proxy 수명 동안 고정).
-	// 런타임 지원 판정은 솔버 게이트와 같은 함수(RopeGPU::IsRuntimeSupported — RHI 유무 + SM5 이상)를 쓴다.
-	// 두 게이트가 어긋나면 솔버는 GPU인데 튜브만 CPU인 반쪽 상태가 된다.
+	// The GPU tube is the default path: with a renderable RHI and a ring count within the maximum, which
+	// is the largest thread group bucket, the positions, tangents and UVs are produced by compute
+	// shaders; otherwise, as in a cook, under -nullrhi, on a server, or when the rings exceed the limit,
+	// it falls back to the CPU tube build. There is no console variable, and the selection is automatic
+	// exactly as it is for the solver. The limit references the bucket definition in RopeTubeBuilder as a
+	// single source, which prevents the two drifting apart.
+	// It is decided once at creation, since the ring count is fixed for the proxy's lifetime.
+	// The runtime support test uses the same function as the solver's gate, RopeGPU::IsRuntimeSupported,
+	// which checks for an RHI and at least SM5. Letting the two gates diverge would produce the half state
+	// of a GPU solver with a CPU tube.
 	bUseGpuTube = RopeGPU::IsRuntimeSupported() && NumRings <= RopeGPU::MaxTubeRings();
 
-	// B2-lite: 솔버 resident PosBuf를 직접 읽기 위한 핸들(GT에서 캡처). 솔버는 월드 수명이라 proxy 동안 유효.
+	// The handle used to read the solver's resident position buffer directly, captured on the game thread.
+	// The solver lives as long as the world, so it stays valid for the proxy's lifetime.
 	RopeId = Component->GetUniqueID();
 	if (URopeSimSubsystem* Sub = URopeSimSubsystem::Get(Component->GetWorld()))
 	{
@@ -186,18 +202,20 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 		Material = UMaterial::GetDefaultMaterial(MD_Surface);
 	}
 
-	// 우리는 매 프레임 vertex buffer를 직접 다시 쓴다(RHI lock). 렌더러의 Auto
-	// shadow-cache 휴리스틱(WPO / transform 델타)은 이를 감지하지 못하므로, Virtual Shadow Map은
-	// 오래된 cached page를 유지하고, 근처에서 움직임이 발생해 page가 무효화될 때까지 rope의 그림자가
-	// 바닥에 중복된 잔상을 남긴다. `Always`는 이 primitive를 ShadowScene의
-	// AlwaysInvalidatingPrimitives에 넣어, VSM이 매 프레임 무조건 무효화하게 한다
+	// We rewrite the vertex buffer directly every frame, through an RHI lock. The renderer's automatic
+	// shadow cache heuristics, which look at world position offset and transform deltas, cannot detect
+	// that, so a virtual shadow map keeps its stale cached page and the rope's shadow leaves a duplicated
+	// afterimage on the floor until movement nearby happens to invalidate the page. Setting this to always
+	// puts the primitive into the shadow scene's always-invalidating list, which makes the virtual shadow
+	// map invalidate it unconditionally every frame.
 	// (VirtualShadowMapCacheManager: GetAlwaysInvalidatingPrimitives -> UpdatedTransform).
 	bHasDeformableMesh = true;
 	ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Always;
-	// rope는 직접 buffer 쓰기로 매 프레임 변형되므로 그 그림자는 절대 캐싱되어서는 안 된다.
-	// 이를 false로 강제하면 component의 Mobility(블루프린트/인스턴스가 조용히 Static으로 설정할 수 있음)와
-	// 무관하게 IsMeshShapeOftenMoving() == true가 되어, rope를 캐싱되지 않는
-	// dynamic VSM shadow 경로에 유지한다(VirtualShadowMapCacheManager가 이로부터 CachePrimitiveAsDynamic를 설정).
+	// A rope deforms every frame through direct buffer writes, so its shadow must never be cached.
+	// Forcing this to false makes IsMeshShapeOftenMoving() true regardless of the component's mobility,
+	// which a Blueprint or an instance could quietly have set to static, and keeps the rope on the
+	// uncached dynamic virtual shadow map path; the cache manager derives its dynamic-primitive decision
+	// from it.
 	bGoodCandidateForCachedShadowmap = false;
 
 	ENQUEUE_RENDER_COMMAND(InitRopeResources)(
@@ -207,7 +225,8 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 
 			if (bUseGpuTube)
 			{
-				// B2-full: position/tangent/UV 스트림을 모두 GPU 컴퓨트가 쓰는 UAV 버퍼로 교체(color만 VertexBuffers).
+				// Every stream, meaning the positions, tangents and UVs, is replaced by a UAV buffer the
+				// compute shader writes; only the colour comes from the standard vertex buffers.
 				const int32 VertCount = GetRequiredVertexCount();
 				GpuPositionBuffer.NumVertices = VertCount;
 				GpuPositionBuffer.InitResource(RHICmdList);
@@ -218,8 +237,10 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 				CenterlineBuffer.NumFloats = NumRings * 3;
 				CenterlineBuffer.InitResource(RHICmdList);
 
-				// FDataType 직접 구성: position/tangent/texcoord는 커스텀 UAV 버퍼(스트림 + 매뉴얼 페치 SRV),
-				// color는 VertexBuffers.ColorVertexBuffer(InitWithDummyData가 먼저 enqueue돼 이 시점 초기화됨).
+				// The data type is constructed directly: the positions, tangents and texture coordinates use
+				// the custom UAV buffers, as streams plus manual-fetch SRVs, while the colour uses the
+				// standard colour vertex buffer, which is already initialized at this point because the
+				// dummy-data initialization was enqueued first.
 				FLocalVertexFactory::FDataType Data;
 				Data.PositionComponent = FVertexStreamComponent(&GpuPositionBuffer, 0, sizeof(FVector3f), VET_Float3);
 				Data.PositionComponentSRV = GpuPositionBuffer.SRV;
@@ -229,7 +250,7 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 				Data.TangentBasisComponents[1] = FVertexStreamComponent(&GpuTangentBuffer, 8, 16, VET_Short4N);
 				Data.TangentsSRV = GpuTangentBuffer.SRV;
 
-				// UV: VET_Float2, stride 8. SRV = G32R32F. TexCoord 1개.
+				// UVs: VET_Float2 with a stride of 8, an SRV of G32R32F, and one texture coordinate set.
 				Data.TextureCoordinates.Empty();
 				Data.TextureCoordinates.Add(FVertexStreamComponent(&GpuTexCoordBuffer, 0, sizeof(FVector2f), VET_Float2));
 				Data.TextureCoordinatesSRV = GpuTexCoordBuffer.SRV;
@@ -249,7 +270,7 @@ FRopeSceneProxy::~FRopeSceneProxy()
 	VertexBuffers.ColorVertexBuffer.ReleaseResource();
 	IndexBuffer.ReleaseResource();
 	VertexFactory.ReleaseResource();
-	// M5b: GPU 튜브 버퍼(미초기화여도 ReleaseResource는 안전).
+	// The GPU tube buffers; releasing them is safe even when they were never initialized.
 	GpuPositionBuffer.ReleaseResource();
 	GpuTangentBuffer.ReleaseResource();
 	GpuTexCoordBuffer.ReleaseResource();
@@ -260,7 +281,8 @@ void FRopeSceneProxy::BuildSmoothedCenterline(const TArray<FVector>& Nodes, TArr
 {
 	Out.SetNumUninitialized(NumRings);
 
-	// Subdiv=1: 스무딩 없음 → 노드를 그대로 복사(1:1). (방어적으로 개수 불일치 시 clamp)
+	// With no subdivision there is no smoothing, so the nodes are copied one-to-one, clamping
+	// defensively if the counts disagree.
 	if (Subdiv <= 1 || Nodes.Num() < 2)
 	{
 		for (int32 r = 0; r < NumRings; ++r)
@@ -273,26 +295,29 @@ void FRopeSceneProxy::BuildSmoothedCenterline(const TArray<FVector>& Nodes, TArr
 	const int32 LastNode = NumNodes - 1;
 	for (int32 r = 0; r < NumRings; ++r)
 	{
-		// 이 링이 속한 세그먼트(노드 Seg..Seg+1).
+		// The segment this ring belongs to, spanning nodes Seg and Seg + 1.
 		const int32 Seg = r / Subdiv;
-		// 세그먼트 내 서브 인덱스.
+		// The sub-index within that segment.
 		const int32 Sub = r % Subdiv;
 		if (Seg >= LastNode)
 		{
-			// 마지막 노드에 정확히 놓이는 끝 링.
+			// The final ring, which lands exactly on the last node.
 			Out[r] = Nodes[LastNode];
 			continue;
 		}
 		const float T = static_cast<float>(Sub) / static_cast<float>(Subdiv);
 
-		// Catmull-Rom 제어점(끝에서 clamp). 접선은 이웃 노드로부터 → 국소 곡률 추정.
+		// The Catmull-Rom control points, clamped at the ends. The tangents come from the neighbouring
+		// nodes, which estimates the local curvature.
 		const FVector P0 = Nodes[FMath::Max(Seg - 1, 0)];
 		const FVector P1 = Nodes[Seg];
 		const FVector P2 = Nodes[Seg + 1];
 		const FVector P3 = Nodes[FMath::Min(Seg + 2, LastNode)];
 
-		// 매개변수화 Catmull-Rom(GPU RopeCatmullSmooth 미러). α=SmoothParam: 0=uniform(구 표준, 장력 0.5),
-		// 0.5=centripetal(급한 코너 접선 오버슈트↓ → 벽 짚는 중간 링이 벽에 더 붙음). knot=|ΔP|^α(하한 EPS).
+		// A parameterized Catmull-Rom, mirroring RopeCatmullSmooth on the GPU. The knot parameter is 0 for
+		// uniform, the older standard with a tension of 0.5, and 0.5 for centripetal, which reduces tangent
+		// overshoot at sharp corners so the middle rings hug a wall more closely. The knot is the distance
+		// between points raised to that power, with a lower bound.
 		const double EPS = 1e-4;
 		const double t01 = FMath::Pow(FMath::Max((P1 - P0).Size(), EPS), (double)SmoothParam);
 		const double t12 = FMath::Pow(FMath::Max((P2 - P1).Size(), EPS), (double)SmoothParam);
@@ -309,15 +334,17 @@ void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDyna
 {
 	if (Data.Points.Num() != NumNodes)
 	{
-		// centerline(시뮬 노드)은 proxy 생성 기준 노드 수와 일치해야 한다.
+		// The centreline, meaning the simulation nodes, has to match the node count the proxy was created
+		// with.
 		return;
 	}
-	// 시뮬 노드 → 스무딩된 렌더 센터라인(NumRings). Subdiv=1이면 노드 그대로(1:1). 이하 링 빌드는 스무딩 점을 쓴다.
+	// Simulation nodes become the smoothed render centreline. With no subdivision the nodes are used
+	// as-is. Everything below builds rings from the smoothed points.
 	TArray<FVector> Points;
 	BuildSmoothedCenterline(Data.Points, Points);
 
-	// 첫 tangent에 수직인 frame을 시드한 뒤, ring 단위로 parallel-transport한다
-	// (최소 회전). 그러면 tube가 Frenet frame처럼 twist-pop하지 않는다.
+	// Seed a frame perpendicular to the first tangent and then parallel-transport it ring by ring, which
+	// is the minimum rotation. That stops the tube twist-popping the way a Frenet frame does.
 	FVector3f PrevTangent = FVector3f(Points[1] - Points[0]).GetSafeNormal();
 	if (PrevTangent.IsNearlyZero())
 	{
@@ -327,7 +354,8 @@ void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDyna
 	FVector3f U = (SeedUp ^ PrevTangent).GetSafeNormal();
 	FVector3f V = (PrevTangent ^ U).GetSafeNormal();
 
-	// UV.x = 누적 호길이 / 원주(2πR) → U,V가 같은 물리 스케일. 로프 길이와 무관하게 트위스트 밀도 일정.
+	// U is the accumulated arc length divided by the circumference, so U and V share a physical scale and
+	// the twist density stays constant regardless of the rope's length.
 	const float InvCirc = 1.0f / FMath::Max(2.0f * PI * Radius, KINDA_SMALL_NUMBER);
 	float AlongLen = 0.0f;
 
@@ -366,14 +394,16 @@ void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDyna
 			VertexBuffers.PositionVertexBuffer.VertexPosition(VertIdx) = Center + Radial * Radius;
 			VertexBuffers.StaticMeshVertexBuffer.SetVertexUV(VertIdx, 0, FVector2f(AlongFrac, AroundFrac));
 			VertexBuffers.ColorVertexBuffer.VertexColor(VertIdx) = FColor::White;
-			// 바이탄젠트 = Tangent^Radial = +UV.y(원주 증가) 방향(노말맵 Y 정합). Radial^Tangent는 부호 반대라 원주 노말이 뒤집힘.
+			// The bitangent is the tangent crossed with the radial, which points along increasing V, that is
+			// around the circumference, and matches normal map conventions. The opposite order has the
+			// opposite sign and would invert the circumferential normal.
 			VertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(VertIdx, Tangent, FVector3f(Tangent ^ Radial), Radial);
 			++VertIdx;
 		}
 	}
 	check(VertIdx == static_cast<uint32>(GetRequiredVertexCount()));
 
-	// vertex stream을 업로드한다.
+	// Upload the vertex streams.
 	{
 		FPositionVertexBuffer& VB = VertexBuffers.PositionVertexBuffer;
 		void* Dst = RHICmdList.LockBuffer(VB.VertexBufferRHI, 0, VB.GetNumVertices() * VB.GetStride(), RLM_WriteOnly);
@@ -399,7 +429,7 @@ void FRopeSceneProxy::BuildTube(FRHICommandListBase& RHICmdList, const FRopeDyna
 		RHICmdList.UnlockBuffer(SB.TexCoordVertexBuffer.VertexBufferRHI);
 	}
 
-	// index를 만들고 업로드한다(topology은 일정하지만 다시 채우는 비용이 저렴하다).
+	// Build and upload the indices. The topology is constant, but refilling it is cheap.
 	int32* Indices = static_cast<int32*>(RHICmdList.LockBuffer(IndexBuffer.IndexBufferRHI, 0, GetRequiredIndexCount() * sizeof(int32), RLM_WriteOnly));
 	uint32 Out = 0;
 	for (int32 i = 0; i < NumRings - 1; ++i)
@@ -439,7 +469,8 @@ void FRopeSceneProxy::SetDynamicData_RenderThread(FRHICommandListBase& RHICmdLis
 
 void FRopeSceneProxy::BuildGpuStaticBuffers(FRHICommandListBase& RHICmdList)
 {
-	// B2-full: 매 프레임 불변인 index topology + 상수 color(white)를 1회만 채운다(CPU BuildTube 대체).
+	// Fill the index topology, which never changes between frames, and the constant white colour once,
+	// replacing the CPU tube build.
 	{
 		int32* Indices = static_cast<int32*>(RHICmdList.LockBuffer(IndexBuffer.IndexBufferRHI, 0, GetRequiredIndexCount() * sizeof(int32), RLM_WriteOnly));
 		uint32 Out = 0;
@@ -472,7 +503,8 @@ void FRopeSceneProxy::BuildGpuStaticBuffers(FRHICommandListBase& RHICmdList)
 
 void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, const FRopeDynamicData& Data)
 {
-	// 렌더 스레드. 컴퓨트 디스패치/transition엔 즉시 커맨드리스트가 필요(전달된 base list와 동일 객체).
+	// Render thread. Dispatching compute work and issuing transitions need an immediate command list,
+	// which is the same object as the base list passed in.
 	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
 
 	if (Data.Points.Num() != NumNodes)
@@ -480,32 +512,38 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 		return;
 	}
 
-	// B2-full: index topology + color를 1회 채운다(이후 프레임은 위치/tangent/UV만 GPU 재생성).
+	// Fill the index topology and the colour once; later frames regenerate only the positions, tangents
+	// and UVs.
 	if (!bGpuStaticsBuilt)
 	{
 		BuildGpuStaticBuffers(RHICmdList);
 	}
 
-	// B2-full: 솔버 resident PosBuf(월드, 시뮬 노드 NumNodes개)를 직접 읽어 GPU에서 스무딩한다.
-	// 단 이번 프레임에 실제로 GPU step된 로프만(Data.bGpuResident) — whip/throw/CPU-폴백 프레임엔 PosBuf가
-	// stale이라 CPU 미러(Data.Points)를 CPU 스무딩해 업로드하는 B1 경로로 그린다.
-	// GDF 모드(솔브가 PreRenderBasePass)에서 이 커맨드는 솔브보다 먼저 실행되므로 직전 프레임 솔브 결과를
-	// 읽는다(의도된 1프레임 렌더 지연). 튜브를 솔브 뒤에 다시 빌드하면 depth prepass(이 빌드 결과)와 base
-	// pass 지오메트리가 어긋나 EQUAL 깊이 테스트에서 픽셀이 탈락한다(로프가 검게 탐) — 그래서 프레임당 이
-	// 1회 빌드만 유지하고 모든 패스가 같은 지오메트리를 보게 한다.
+	// Read the solver's resident position buffer, holding the simulation nodes in world space, directly
+	// and smooth it on the GPU.
+	// Only for a rope actually stepped on the GPU this frame: on a whip, throw or CPU fallback frame that
+	// buffer is stale, so the CPU mirror is smoothed on the CPU and uploaded instead.
+	// On the global distance field path, where the solve runs during PreRenderBasePass, this command runs
+	// before the solve and therefore reads the previous frame's result, which is an intended one-frame
+	// render delay. Rebuilding the tube after the solve would leave the depth prepass, which used this
+	// build, inconsistent with the base pass geometry and the pixels would fail the equal-depth test,
+	// turning the rope black, so this single build per frame is kept and every pass sees the same
+	// geometry.
 	int32 ResidentNodes = 0;
 	uint32 ResidentGeneration = 0;
 	FRHIShaderResourceView* ResidentSRV = (Data.bGpuResident && SolverPtr)
 		? SolverPtr->GetResidentPositionSRV_RenderThread(RopeId, ResidentNodes, ResidentGeneration) : nullptr;
-	// 노드 수 + **시드 generation**이 모두 맞아야 직접 읽는다. 재시드 프레임에는 버퍼가 아직 옛 세대라
-	// (재시드는 그 프레임 dispatch에서 일어난다) 노드 수만 보면 직전 로프 포즈가 한 프레임 그려진다.
-	// 이 프레임은 CPU 미러로 폴백하는데, 미러는 새 시드를 이미 담고 있어 정확하다.
+	// Both the node count and the seed generation have to match before reading directly. On a reseed frame
+	// the buffer is still on the old generation, because the reseed happens in that frame's dispatch, so
+	// checking the node count alone would draw the previous rope pose for one frame.
+	// That frame falls back to the CPU mirror, which already holds the new seed and is therefore correct.
 	const bool bResident = (ResidentSRV != nullptr && ResidentNodes == NumNodes
 		&& ResidentGeneration == Data.SimGeneration);
 
 	if (!bResident)
 	{
-		// 비-resident 폴백: CPU 미러(Data.Points)를 Catmull-Rom 스무딩해 CenterlineBuffer에 업로드(B1).
+		// The non-resident fallback: the CPU mirror is smoothed with Catmull-Rom interpolation and uploaded
+		// to the centreline buffer.
 		TArray<FVector> Smoothed;
 		BuildSmoothedCenterline(Data.Points, Smoothed);
 		const int32 NumFloats = NumRings * 3;
@@ -519,7 +557,8 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 		RHICmdList.UnlockBuffer(CenterlineBuffer.VertexBufferRHI);
 	}
 
-	// pos/tangent/UV UAV에 GPU 튜브 생성. UAV write → vertex stream read 사이 배리어(세 버퍼 모두).
+	// Generate the tube into the position, tangent and UV UAVs, with a barrier between the UAV write and
+	// the vertex stream read for all three buffers.
 	FRHITransitionInfo ToUAV[3] = {
 		FRHITransitionInfo(GpuPositionBuffer.VertexBufferRHI, ERHIAccess::Unknown, ERHIAccess::UAVCompute),
 		FRHITransitionInfo(GpuTangentBuffer.VertexBufferRHI,  ERHIAccess::Unknown, ERHIAccess::UAVCompute),
@@ -529,11 +568,13 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 
 	if (bResident)
 	{
-		// 월드 PosBuf → component-local 변환. GT가 이번 프레임 GetComponentTransform()으로 만든 역행렬을
-		// 쓴다(Data.WorldToLocal) — 여기서 GetLocalToWorld().Inverse()를 읽으면 안 된다: 이 커맨드는
-		// UpdateAllPrimitiveSceneInfos(이번 프레임 트랜스폼 적용)보다 먼저 실행돼 한 프레임 이전 값이라,
-		// 빌드(N-1)/드로우(N) 불일치로 월드 고정점(wrap 노드)이 컴포넌트 이동량만큼 떨린다.
-		// GPU가 시뮬 노드(NumNodes)를 Subdiv로 Catmull-Rom 스무딩해 NumRings 센터라인 → 튜브 생성.
+		// Convert the world-space position buffer into component-local space, using the inverse matrix the
+		// game thread built from this frame's component transform. Reading GetLocalToWorld().Inverse() here
+		// would be wrong: this command runs before UpdateAllPrimitiveSceneInfos applies this frame's
+		// transform, so it would be one frame behind, and building at frame N-1 while drawing at frame N
+		// makes a world-fixed point, such as a wrap node, jitter by exactly the component's movement.
+		// The GPU smooths the simulation nodes with Catmull-Rom interpolation at the subdivision factor to
+		// produce the render centreline, and then builds the tube.
 		RopeGPU::BuildTubeFromResident_RenderThread(RHICmdList, ResidentSRV,
 			GpuPositionBuffer.UAV, GpuTangentBuffer.UAV, GpuTexCoordBuffer.UAV,
 			NumRings, NumSides, Radius, NumNodes, Subdiv, SmoothParam, Data.WorldToLocal);
@@ -557,9 +598,9 @@ void FRopeSceneProxy::BuildTubeGPU(FRHICommandListBase& /*RHICmdListBase*/, cons
 
 void FRopeSceneProxy::DrawStaticElements(FStaticPrimitiveDrawInterface* PDI)
 {
-	// Cable 스타일의 static draw 경로: 지속적인 vertex factory에 대한 cached mesh draw command.
-	// 매 프레임 BuildTube()가 vertex buffer를 제자리에서 갱신하므로, cached command가
-	// 현재 geometry를 렌더링한다. static relevance(Movable/dynamic이 아님)는 잘못된 motion-vector ghosting을 피한다.
+	// The cable-style static draw path: a cached mesh draw command against the persistent vertex factory.
+	// BuildTube() updates the vertex buffer in place every frame, so the cached command renders the current
+	// geometry. Static relevance, rather than movable or dynamic, avoids incorrect motion vector ghosting.
 	if (HasViewDependentDPG())
 	{
 		return;
@@ -637,8 +678,9 @@ void FRopeSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView*>& Vi
 
 FPrimitiveViewRelevance FRopeSceneProxy::GetViewRelevance(const FSceneView* View) const
 {
-	// FCableSceneProxy를 그대로 따른다: 일반 view에는 static relevance(DrawStaticElements를 통한 cached draw),
-	// wireframe / rich / debug view에만 dynamic(GetDynamicMeshElements에서 처리).
+	// This follows FCableSceneProxy exactly: static relevance for ordinary views, through the cached draw
+	// in DrawStaticElements, and dynamic only for wireframe, rich and debug views, handled in
+	// GetDynamicMeshElements.
 	FPrimitiveViewRelevance Result;
 	Result.bDrawRelevance = IsShown(View);
 	Result.bShadowRelevance = IsShadowCast(View);
@@ -657,9 +699,11 @@ FPrimitiveViewRelevance FRopeSceneProxy::GetViewRelevance(const FSceneView* View
 	}
 
 	MaterialRelevance.SetPrimitiveViewRelevance(Result);
-	// (A) 모션블러 잔상 제거: 기본적으로 velocity를 출력하지 않아 per-object 모션블러 대상에서 제외한다.
-	// 프로젝트 설정(UDynamicRopeSettings::bWriteVelocity)으로 레거시(velocity 출력) 동작과 A/B 비교 가능
-	// (프록시 생성 시 스냅샷 — 렌더 스레드에서 설정 CDO를 직접 읽지 않는다).
+	// Removing motion blur smearing: no velocity is written by default, which excludes the rope from
+	// per-object motion blur.
+	// The project setting UDynamicRopeSettings::bWriteVelocity restores the legacy behaviour of writing
+	// velocity for an A/B comparison. It is snapshotted when the proxy is created rather than read from the
+	// settings object on the render thread.
 	Result.bVelocityRelevance = bWriteVelocity
 		&& DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
 	return Result;

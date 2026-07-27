@@ -3,11 +3,11 @@
 #include "Gameplay/RopeWielderComponent.h"
 #include "RopeComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
-// ResolveBindingWorld — 조준 HUD 샘플의 본 위치(링 중심) 해석.
+// ResolveBindingWorld, which resolves the bone position, that is the ring centre, of the aiming HUD sample.
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Render/RopePreviewComponent.h"
-// 조준 HUD 위젯(생성은 프로젝트 세팅의 클래스, 수명은 이 컴포넌트가 관리).
+// The aiming HUD widget. Its class comes from the project settings and this component manages its lifetime.
 #include "Settings/DynamicRopeSettings.h"
 #include "UI/RopeAimWidget.h"
 #include "UI/RopePullGaugeWidget.h"
@@ -91,8 +91,9 @@ void URopeWielderComponent::BeginPlay()
 
 	if (bAutoBindInput)
 	{
-		// 늦은/재 빙의 대응: 지금 되면 지금 걸고, 안 되면 possession/restart 훅이 다시 시도한다.
-		// (컨트롤러 없이 스폰된 폰, 클라이언트 지연 빙의, unpossess 후 재빙의 — 종전엔 전부 영구 누락)
+		// Cover late and repeated possession: bind now if it is possible now, and let the possession and
+		// restart hooks try again if it is not. Without that, a pawn spawned with no controller, a client
+		// possessing late, or a repossession after unpossessing would all leave input permanently unbound.
 		if (APawn* OwnerPawn = Cast<APawn>(GetOwner()))
 		{
 			OwnerPawn->ReceiveControllerChangedDelegate.AddDynamic(this, &URopeWielderComponent::HandlePawnControllerChanged);
@@ -101,9 +102,10 @@ void URopeWielderComponent::BeginPlay()
 		RefreshInputRegistration();
 	}
 
-	// 모드 유도 상태(preview 생성/틱 활성/조준 샘플)는 RefreshModeDerivedState 한 곳으로 통일 —
-	// 런타임 프리셋 적용(ApplyPreset → OnPresetApplied)이 같은 경로를 재사용한다. Rope가 BeginPlay
-	// 이후에 해석되는 비정상 순서라면 구독이 빠진다 — 그때는 게임 코드가 Refresh를 수동 호출한다.
+	// The mode-derived state, meaning preview creation, tick activation and the aiming sample, is unified
+	// in RefreshModeDerivedState, which applying a preset at runtime reuses through OnPresetApplied. In
+	// the abnormal order where the rope is resolved after BeginPlay the subscription is missed, and game
+	// code has to call Refresh by hand.
 	if (Rope)
 	{
 		Rope->OnPresetApplied.AddUniqueDynamic(this, &URopeWielderComponent::HandleRopePresetApplied);
@@ -115,7 +117,7 @@ void URopeWielderComponent::BeginPlay()
 
 void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// 입력 바인딩/매핑 정리(컴포넌트 파괴 후 댕글링 델리게이트 방지).
+	// Clear the input bindings and mapping, which stops delegates dangling after the component is destroyed.
 	if (APawn* Pawn = Cast<APawn>(GetOwner()))
 	{
 		Pawn->ReceiveControllerChangedDelegate.RemoveDynamic(this, &URopeWielderComponent::HandlePawnControllerChanged);
@@ -143,14 +145,16 @@ void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		Rope->CancelQueuedGuaranteedAimThrow();
 		bGuaranteedAimThrowQueued = false;
-		// Wielder가 사라진 뒤에도 로프의 collider 수집 범위가 조준 ray 방향으로 남지 않게 정리한다.
+	// Make sure the rope's collider gather region does not stay widened along the aim ray after the
+	// wielder is gone.
 		Rope->ClearAimRayColliderQueryBounds();
 		Rope->OnPresetApplied.RemoveDynamic(this, &URopeWielderComponent::HandleRopePresetApplied);
 		Rope->OnRopePhaseChanged.RemoveDynamic(this, &URopeWielderComponent::HandleRopePhaseChanged);
 	}
 	UnregisterMovementConstraintHooks();
 
-	// 스윙 중 파괴/레벨 전환 시 AirControl 원복 누락 방지.
+	// Prevent air control from being left boosted if the character is destroyed or the level changes
+	// mid-swing.
 	if (bAirControlBoosted)
 	{
 		if (const ACharacter* Character = Cast<ACharacter>(GetOwner()))
@@ -170,12 +174,15 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// 손 소켓 애니메이션 상대 속도 측정(던지기 시 HandAnimationVelocity로 실림).
+	// Measure the hand socket's animation-relative velocity, which is carried as HandAnimationVelocity on
+	// a throw.
 	UpdateHandAnimVelocity(DeltaTime);
 
-	// Movement prerequisite 뒤의 같은 PrePhysics 틱에서 처리한다. CharacterMovement 내부 delegate는
-	// SkeletalMesh child update가 scoped/deferred인 동안 호출될 수 있어 실제 손 socket 위치가 stale하다.
-	// CMC 틱이 완전히 끝난 이 시점이면 mesh/socket transform과 최종 root-motion/slide 결과가 모두 확정된다.
+	// This runs in the same PrePhysics tick, after the movement prerequisite. A delegate inside the
+	// character movement component can fire while the skeletal mesh child update is still scoped or
+	// deferred, which leaves the real hand socket position stale.
+	// By this point the movement tick has fully finished, so the mesh and socket transforms and the final
+	// root motion and slide results are all settled.
 	if (Cast<APawn>(GetOwner()))
 	{
 		EnforceWielderLengthConstraint(DeltaTime);
@@ -192,13 +199,16 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 void URopeWielderComponent::UpdateHandAnimVelocity(float DeltaTime)
 {
-	// 손 소켓의 애니메이션 상대 속도를 컴포넌트-로컬 위치 델타로 측정해 월드로 변환한다(캐릭터 이동 제외).
-	// GetPhysicsLinearVelocity(물리 바디 의존, 없으면 0)의 함정과 역방향 버그를 피한다 — 던지기 시
-	// HandAnimationVelocity로 실려, 정지 상태에서 팔만 휘둘러도 그 스윙이 반영된다.
-	// 2fps 이하 극단 히치/일시정지 프레임만 델타를 끊는다 — 재활성화·리그 변경은 별도 재시드로 처리하므로
-	// 지속 저프레임(15~30fps)은 그대로 실제 DeltaTime으로 계산해 속도가 프레임레이트에 안 흔들린다.
+	// Measure the hand socket's animation-relative velocity from its component-local position delta and
+	// convert it to world space, excluding character movement.
+	// That avoids the pitfalls of reading a physics linear velocity, which depends on a physics body and
+	// is zero without one, along with its sign problem. It is carried as HandAnimationVelocity on a
+	// throw, so swinging the arm while standing still is reflected.
+	// Only an extreme hitch or a paused frame, below two frames per second, breaks the delta.
+	// Reactivation and rig changes are handled by an explicit reseed instead, so a sustained low
+	// framerate of 15 to 30 still uses the real delta time and the velocity does not vary with it.
 	constexpr float MaxSampleDeltaTime = 0.5f;
-	constexpr float MaxHandAnimSpeed = 2000.0f;  // cm/s, 텔레포트/애님 리셋 과대 변화 상한(fling 방지)
+	constexpr float MaxHandAnimSpeed = 2000.0f;  // cm/s. Caps an oversized change from a teleport or an animation reset, which would otherwise fling the rope.
 
 	if (!AttachMesh || DeltaTime <= KINDA_SMALL_NUMBER || DeltaTime > MaxSampleDeltaTime)
 	{
@@ -206,7 +216,8 @@ void URopeWielderComponent::UpdateHandAnimVelocity(float DeltaTime)
 		return;
 	}
 
-	// 리그(mesh/socket)가 바뀌면 이전 위치가 다른 공간이라 델타가 의미 없다 — 이 프레임은 재시드만.
+	// A changed rig, meaning the mesh or socket, puts the previous position in a different space and
+	// makes the delta meaningless, so this frame only reseeds.
 	const bool bRigChanged =
 		PreviousHandSampleMesh.Get() != AttachMesh || PreviousHandSampleSocket != HandSocketName;
 
@@ -246,7 +257,8 @@ void URopeWielderComponent::ResetHandAnimVelocitySample()
 
 void URopeWielderComponent::RefreshTickEnabled()
 {
-	// off→on 재활성화면 이전(오래된) 소켓 위치와의 델타가 큰 spike를 낳으므로 샘플을 끊고 재시드한다.
+	// On an off-to-on reactivation, the delta against the previous, now stale, socket position would
+	// produce a large spike, so the sample is broken and reseeded.
 	const bool bWant = ComputeDesiredTickEnabled();
 	if (bWant && !IsComponentTickEnabled())
 	{
@@ -269,13 +281,16 @@ void URopeWielderComponent::UpdateAimHudSample()
 	AimHudSample = FRopeAimHudSample();
 	bHasAimRayFrameThrowContext = false;
 	AimRayFrameContextStamp = GFrameCounter;
-	// 던질 수 없는 phase에서는 조준 스윕 자체를 돌리지 않는다 — 샘플이 비면 위젯/디버거가 알아서 숨는다.
-	// (③ 비-Loaded에서 이 스윕이 유일한 SDF 비용이었다: UpdateThrowPreview는 이미 prepared를 안 만든다.)
+	// In a phase the rope cannot be thrown from, the aiming sweep does not run at all; an empty sample
+	// makes the widgets and the debugger hide themselves.
+	// For GuaranteedWrap outside Loaded this sweep was the only remaining SDF cost, since
+	// UpdateThrowPreview already builds no prepared preview there.
 	if (IsAimActive())
 	{
 		const FRopeAimRayThrowRequest CurrentRequest = BuildAimRayThrowRequest(FVector::ZeroVector);
-		// PrePhysics에서는 요청만 등록한다. PostPhysics의 정상 collider gather 직후 Rope가 해석하고,
-		// 여기서는 직전 gather 결과를 소비한다(최대 1프레임 지연, 전역 provider 수집은 프레임당 1회).
+		// PrePhysics only registers the request. The rope resolves it right after the normal collider
+		// gather in PostPhysics, and what is consumed here is the previous gather's result. That costs at
+		// most one frame of latency, and the global provider gather stays at once per frame.
 		Rope->QueueAimRayQuery(CurrentRequest);
 
 		FRopeAimRayQueryResult QueryResult;
@@ -288,18 +303,21 @@ void URopeWielderComponent::UpdateAimHudSample()
 		AimHudSample.RayOrigin = DisplayRequest.RayOrigin;
 		AimHudSample.RayDirection = RayDirection;
 		AimHudSample.RayLength = DisplayRequest.RayLength;
-		// 설정 반경이 0(기본)이면 로프/접촉 폴백이 걸린다 — 질의가 실제로 쓴 값을 그대로 담아야
-		// HUD/디버거가 검사 두께를 정확히 그린다.
+		// A configured radius of 0, the default, engages the rope or contact fallback, so recording the
+		// value the query actually used is what lets the HUD and the debugger draw the real tested
+		// thickness.
 		AimHudSample.QueryRadius = Rope->GetAimRayEffectiveQueryRadius(DisplayRequest.QueryRadius);
 		AimHudSample.AimWorldPos = DisplayRequest.RayOrigin + RayDirection * DisplayRequest.RayLength;
-		// 이 샘플이 조준 시각화의 단일 소스다 — HUD 위젯과 Gameplay Debugger([J]aim)가 함께 읽는다.
+		// This sample is the single source for aiming visualization, read by both the HUD widget and the
+		// Gameplay Debugger's aim view.
 		if (bHasResolvedQuery && QueryResult.bHitTarget && QueryResult.Hit.bHit && QueryResult.Hit.Mesh)
 		{
 			const FRopeAimRayHitResult& Hit = QueryResult.Hit;
 			const USceneComponent* HitMesh = Hit.Mesh;
 			AimHudSample.bHasTarget = true;
 			AimHudSample.Bone = Hit.Bone;
-			// 샘플은 읽기 전용 계약(헤더 주석) — BP 노출을 위해 non-const로 보관만 한다.
+			// The sample is read-only by contract, as documented in the header; it is held non-const only
+			// so it can be exposed to Blueprint.
 			AimHudSample.Mesh = const_cast<USceneComponent*>(HitMesh);
 			AimHudSample.TargetWorldPos = ResolveBindingWorld(HitMesh, Hit.Bone).GetLocation();
 			AimHudSample.HitWorldPos = Hit.HitWorldPos;
@@ -310,7 +328,8 @@ void URopeWielderComponent::UpdateAimHudSample()
 		else if (bHasResolvedQuery && QueryResult.BlockedHit.bHit)
 		{
 			const FRopeAimRayHitResult& Blocked = QueryResult.BlockedHit;
-			// ray는 맞았지만 wrap 불가 — 빨강 표시. 본 바인딩이 없을 수 있어 걸린 지점을 링 중심으로 쓴다.
+			// The ray hit something that cannot be wrapped, which is shown as blocked. There may be no bone
+			// binding, so the point that was hit is used as the ring centre.
 			AimHudSample.bBlocked = true;
 			AimHudSample.Bone = Blocked.Bone;
 			AimHudSample.Mesh = const_cast<USceneComponent*>(Blocked.Mesh);
@@ -334,11 +353,13 @@ void URopeWielderComponent::UpdateAimHudSample()
 			Rope->CancelQueuedGuaranteedAimThrow();
 			bGuaranteedAimThrowQueued = false;
 		}
-		// 조준 불가능한 phase에서는 이전 ray bounds가 collider 수집 범위를 계속 넓히지 않게 한다.
+		// In a phase that cannot aim, stop the previous ray bounds from continuing to widen the collider
+		// gather region.
 		Rope->ClearAimRayColliderQueryBounds();
 	}
 
-	// 대상 (Mesh, Bone) 변화 통지 — 진입/전환은 Changed, 이탈은 Lost.
+	// Report changes of the (mesh, bone) target: entering or switching fires Changed and leaving fires
+	// Lost.
 	if (AimHudSample.bHasTarget && (!bHadTarget || AimHudSample.Mesh != PrevMesh || AimHudSample.Bone != PrevBone))
 	{
 		OnAimTargetChanged.Broadcast(AimHudSample.Mesh, AimHudSample.Bone);
@@ -366,7 +387,8 @@ void URopeWielderComponent::UpdateAimHudWidget()
 		return;
 	}
 
-	// 로컬 플레이어 컨트롤러가 준비된 뒤에만 생성한다(지연 빙의 대비 — 준비 전에는 다음 틱 재시도).
+	// Create it only once the local player controller is ready, which covers late possession; before then
+	// it is retried on the next tick.
 	const APawn* Pawn = Cast<APawn>(GetOwner());
 	APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
 	if (!PC || !PC->IsLocalController())
@@ -374,8 +396,9 @@ void URopeWielderComponent::UpdateAimHudWidget()
 		return;
 	}
 
-	// 위젯 클래스는 프로젝트 세팅 단일 소스(기본 = C++ URopeAimWidget, WBP로 교체 가능). 비우면 HUD 없음.
-	// 데모 HUD 규모라 동기 로드를 허용한다(최초 1회).
+	// The widget class has a single source in the project settings, defaulting to the C++ URopeAimWidget
+	// and replaceable with a Blueprint. Leaving it empty means no HUD.
+	// It is the size of a demo HUD, so a synchronous load is acceptable for the one-off.
 	UClass* WidgetClass = UDynamicRopeSettings::Get()->AimHudWidgetClass.LoadSynchronous();
 	if (!WidgetClass)
 	{
@@ -390,8 +413,10 @@ void URopeWielderComponent::UpdateAimHudWidget()
 
 void URopeWielderComponent::UpdatePullGaugeWidget()
 {
-	// 게이지는 aim 모드와 무관하다(①에서도 감고 당길 수 있다) — 토글만 보고 유지한다.
-	// 장전 전에는 위젯이 아무것도 그리지 않으므로 상태별 생성/파괴를 하지 않는다(깜빡임 방지).
+	// The gauge is independent of the aiming mode, since a rope can be wrapped and pulled in
+	// FullSimulation too, so it follows the toggle alone.
+	// Before pull is armed the widget draws nothing, so it is not created and destroyed per state, which
+	// would flicker.
 	if (!bShowPullGaugeWidget)
 	{
 		if (PullGaugeWidget)
@@ -406,7 +431,8 @@ void URopeWielderComponent::UpdatePullGaugeWidget()
 		return;
 	}
 
-	// 로컬 플레이어 컨트롤러가 준비된 뒤에만 생성한다(지연 빙의 대비 — 준비 전에는 다음 틱 재시도).
+	// Create it only once the local player controller is ready, which covers late possession; before then
+	// it is retried on the next tick.
 	const APawn* Pawn = Cast<APawn>(GetOwner());
 	APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
 	if (!PC || !PC->IsLocalController())
@@ -414,7 +440,8 @@ void URopeWielderComponent::UpdatePullGaugeWidget()
 		return;
 	}
 
-	// 위젯 클래스는 프로젝트 세팅 단일 소스(기본 = C++ URopePullGaugeWidget). 비우면 게이지 없음.
+	// The widget class has a single source in the project settings, defaulting to the C++
+	// URopePullGaugeWidget. Leaving it empty means no gauge.
 	UClass* WidgetClass = UDynamicRopeSettings::Get()->PullGaugeWidgetClass.LoadSynchronous();
 	if (!WidgetClass)
 	{
@@ -423,7 +450,8 @@ void URopeWielderComponent::UpdatePullGaugeWidget()
 	PullGaugeWidget = CreateWidget<URopePullGaugeWidget>(PC, WidgetClass);
 	if (PullGaugeWidget)
 	{
-		// 위젯이 소유 폰에서 wielder를 스스로 찾지만, 여기서는 확정적으로 배선해 준다.
+		// The widget finds the wielder on its owning pawn by itself, but wiring it explicitly here is
+		// deterministic.
 		PullGaugeWidget->SetWielder(this);
 		PullGaugeWidget->AddToViewport();
 	}
@@ -435,13 +463,15 @@ bool URopeWielderComponent::IsWielderTetherActive() const
 	{
 		return false;
 	}
-	// wielder가 실제로 테더 몫을 받을 때만 — 이번 프레임 유효 몫(λ 역질량비/끌림 판정 이진값)이
-	// 전량 대상(=1)이면 wielder는 자유끝이라 스윙/지상이탈 반응이 무의미하다.
+	// Only while the wielder actually receives a tether share. If this frame's effective share, whether
+	// the inverse-mass ratio of the lambda solve or the binary result of the drag test, is entirely the
+	// target's, the wielder is a free end and swing and ground-exit responses are meaningless.
 	if (Rope->GetEffectiveTetherTargetShare() >= 1.0f - KINDA_SMALL_NUMBER)
 	{
 		return false;
 	}
-	// 셀프랩(자기 자신에 감김)은 대상 컴포넌트 종류와 무관하게 테더가 wielder 몫을 주지 않는다.
+	// A self-wrap, where the rope wraps its own owner, never gives the wielder a tether share, whatever
+	// kind of component the target is.
 	if (const USceneComponent* WrappedComponent = Rope->GetWrappedComponent())
 	{
 		if (WrappedComponent->GetOwner() == GetOwner())
@@ -458,8 +488,9 @@ void URopeWielderComponent::UpdateGroundExit()
 	{
 		return;
 	}
-	// 전 체인이 팽팽해야 테더가 실제로 인가된다 — overshoot는 슬랙 체인에서도 sub-leg 스트레치로
-	// >0일 수 있으므로(움직이는 앵커), 그것만 보고 지상을 이탈하면 견인 없는 헛 낙하가 된다.
+	// The whole chain has to be taut for the tether to actually apply. An overshoot can exceed zero on a
+	// slack chain through a sub-leg stretch, as with a moving anchor, so leaving the ground on that alone
+	// would produce a fall with no traction behind it.
 	if (!Rope->IsChainTaut() || Rope->GetTetherOvershoot() < GroundExitMinOvershoot)
 	{
 		return;
@@ -472,8 +503,10 @@ void URopeWielderComponent::UpdateGroundExit()
 		return;
 	}
 
-	// 견인 방향(손→앵커) = Pull 샘플 방향(앵커→손 다리 추종)의 역. 상향 성분이 충분할 때만 이탈 —
-	// 수평 견인은 walking 그대로 끌리는 게 자연스럽다. 착지 시 walking 복귀는 엔진이 처리한다.
+	// The traction direction, from the hand to the anchor, is the reverse of the pull sample's direction,
+	// which follows the leg from the anchor to the hand. The ground exit only triggers with enough upward
+	// component, since horizontal traction reads more naturally as being dragged while walking. Returning
+	// to walking on landing is handled by the engine.
 	FVector DirToHand = FVector::ZeroVector;
 	float Tension = 0.0f;
 	if (!Rope->GetPullSample(DirToHand, Tension))
@@ -496,10 +529,13 @@ void URopeWielderComponent::UpdateSwingAirControl()
 		return;
 	}
 
-	// 스윙 = 공중 + wielder 몫 테더 활성 + 전 체인 팽팽. 끝나면(착지/release/슬랙/설정 변경) 저장해 둔
-	// 원래 값으로 복원. 부스트 중 외부에서 AirControl을 바꾸면 복원 시 덮어쓴다(데모 수준 한계 — 주석으로 계약).
-	// 팽팽 게이트(IsChainTaut)는 UpdateGroundExit와 같은 판정 — 테더가 실제로 wielder를 끌 때만 조향을
-	// 살린다. 슬랙 체인에서는 테더 힘이 없어 에어컨트롤을 올려도 "스윙 조향"이 아니라 그냥 공중 부양이 된다.
+	// Swinging means airborne, receiving a wielder tether share, and the whole chain taut. When it ends,
+	// on landing, on release, on going slack or on a settings change, the saved original value is
+	// restored. Changing air control externally while the boost is active is overwritten on restore,
+	// which is a demo-level limitation stated here as the contract.
+	// The taut gate is the same test UpdateGroundExit uses: steering is only enabled while the tether is
+	// genuinely pulling the wielder. On a slack chain there is no tether force, so raising air control
+	// would not steer a swing, it would simply let the character float.
 	const bool bSwinging = bBoostAirControlWhileSwinging && Movement->IsFalling()
 		&& IsWielderTetherActive() && Rope->IsChainTaut();
 	if (bSwinging && !bAirControlBoosted)
@@ -532,8 +568,8 @@ void URopeWielderComponent::ResolveRefs()
 	}
 }
 
-// 조준/던지기 방식은 로프 ResolveMode에서 유도된다(2026-07-13 회의 결정 F — 종전 AimMode/
-// ThrowMode 스위치 대체). 로프가 없으면 조준 보정도 preview 구속도 없다(①과 동일하게 동작).
+// Aiming and throwing behaviour are derived from the rope's ResolveMode. With no rope there is neither
+// aim assistance nor a preview-locked throw, which behaves the same as FullSimulation.
 bool URopeWielderComponent::UsesAimRay() const
 {
 	return Rope && Rope->ResolveMode != ERopeWrapResolveMode::FullSimulation;
@@ -541,8 +577,10 @@ bool URopeWielderComponent::UsesAimRay() const
 
 bool URopeWielderComponent::IsAimActive() const
 {
-	// 던질 수 없는 phase에서는 조준할 이유가 없다 — ③는 Loaded 전용이라 Free/Wrapped 등에서 HUD가 꺼진다.
-	// 게이트는 로프가 소유(CanThrowNow) — 던지기 진입과 같은 술어를 봐야 HUD와 실제 가능 여부가 갈리지 않는다.
+	// There is no reason to aim in a phase the rope cannot be thrown from. GuaranteedWrap is restricted
+	// to Loaded, so the HUD is off in Free, Wrapped and elsewhere.
+	// The rope owns the gate, through CanThrowNow: sharing the predicate with the throw entry point is
+	// what keeps the HUD and actual throwability from diverging.
 	return UsesAimRay() && Rope->CanThrowNow();
 }
 
@@ -608,9 +646,11 @@ void URopeWielderComponent::ResolvePreviewComponent(bool bAllowAutoCreate)
 
 	if (!PreviewComponent && bAllowAutoCreate)
 	{
-		// 편의 자동 생성 — 표시를 원하는 ③에서만(BeginPlay가 그렇게 호출한다). 게임플레이 필수는 아니다:
-		// prepared 계산은 Rope/Wielder가 하므로 이 컴포넌트가 없어도 ③은 정상적으로 던져진다.
-		// 이미 레벨/BP에 배치된 PreviewComponent가 있으면 그 설정을 우선 사용하고 여기로 오지 않는다.
+		// A convenience automatic creation, only for GuaranteedWrap when display is wanted, which is how
+		// BeginPlay calls it. It is not required for gameplay: the prepared calculation belongs to the
+		// rope and the wielder, so GuaranteedWrap throws correctly without this component.
+		// A preview component already placed in the level or Blueprint takes priority and never reaches
+		// here.
 		const FName PreviewName = MakeUniqueObjectName(Owner, URopePreviewComponent::StaticClass(), TEXT("RopePreviewComponent"));
 		PreviewComponent = NewObject<URopePreviewComponent>(Owner, URopePreviewComponent::StaticClass(), PreviewName);
 		if (PreviewComponent)
@@ -645,27 +685,33 @@ void URopeWielderComponent::HandlePawnControllerChanged(APawn* OwnerPawn, AContr
 {
 	if (!NewController)
 	{
-		// unpossess — 홀드 입력의 Completed/Canceled를 더는 받을 수 없으므로 연속 상태를 먼저 정리한다.
+		// Unpossessed: the Completed and Canceled events of held inputs can no longer arrive, so any
+		// continuous state is cleared first.
 		StopPull();
 		StopReel();
-		// IMC를 그 로컬 플레이어에서 떼어 둔다(다음 빙의 때 새 플레이어에 다시 꽂는다).
-		// 바인딩은 InputComponent에 붙어 있으므로 여기서 건드리지 않는다(같은 컴포넌트로 돌아오면 그대로 유효).
+		// Detach the mapping context from that local player; the next possession attaches it to the new
+		// one.
+		// The bindings live on the input component and are left alone here, so returning to the same
+		// component keeps them valid.
 		RemoveMappingContext();
 		return;
 	}
-	// 빙의 직후엔 InputComponent가 아직 없을 수 있다 — 그 경우 아래 restart 훅이 마저 성사시킨다.
+	// The input component may not exist yet immediately after possession, in which case the restart hook
+	// below completes the job.
 	RefreshInputRegistration();
 }
 
 void URopeWielderComponent::HandlePawnRestarted(APawn* OwnerPawn)
 {
-	// PawnClientRestart(→ SetupPlayerInputComponent) 이후라 InputComponent가 준비돼 있다.
+	// This is after PawnClientRestart, and therefore after SetupPlayerInputComponent, so the input
+	// component is ready.
 	RefreshInputRegistration();
 }
 
 void URopeWielderComponent::RefreshInputRegistration()
 {
-	// 빙의가 바뀌면 IMC가 붙어야 할 로컬 플레이어도 바뀔 수 있다 — 옛 곳에서 떼고 새 곳에 꽂는다.
+	// A change of possession can also change which local player the mapping context belongs on, so it is
+	// detached from the old one and attached to the new.
 	RemoveMappingContext();
 	AddMappingContext();
 	BindInput();
@@ -673,9 +719,11 @@ void URopeWielderComponent::RefreshInputRegistration()
 
 void URopeWielderComponent::RemoveMappingContext()
 {
-	// IMC는 Pawn이 아니라 LocalPlayer에 등록됐다 — 폰이 먼저 unpossess된 뒤 파괴되면 GetController()가 null이라
-	// 종전엔 제거가 건너뛰어져 IMC가 로컬 플레이어에 영구 잔류했다(#11). 추가 시점에 캐시한 서브시스템으로
-	// possession 상태와 무관하게 제거한다(LocalPlayer가 이미 파괴됐으면 weak가 null → 제거 불필요).
+	// The mapping context is registered on the local player rather than the pawn. If the pawn is
+	// unpossessed and then destroyed, GetController() returns null, and removing it through the pawn's
+	// controller would be skipped, leaving the context on the local player permanently. Removing it
+	// through the subsystem cached when it was added works regardless of possession; a local player
+	// already destroyed leaves the weak pointer null and nothing needs removing.
 	if (UEnhancedInputLocalPlayerSubsystem* Sub = MappedInputSubsystem.Get())
 	{
 		if (UInputMappingContext* AddedContext = MappedInputContext.Get())
@@ -699,7 +747,8 @@ void URopeWielderComponent::AddMappingContext()
 	if (UEnhancedInputLocalPlayerSubsystem* Sub = LP ? LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>() : nullptr)
 	{
 		Sub->AddMappingContext(MappingContext, MappingPriority);
-		// EndPlay가 possession 및 이후 프로퍼티 변경과 무관하게 정확한 등록 쌍을 제거하도록 캐시한다.
+		// Cached so that EndPlay removes exactly the pair that was registered, independently of possession
+		// and of any later property change.
 		MappedInputSubsystem = Sub;
 		MappedInputContext = MappingContext;
 	}
@@ -719,28 +768,29 @@ void URopeWielderComponent::BindInput()
 	APawn* Pawn = Cast<APawn>(GetOwner());
 	if (!Pawn)
 	{
-		// 입력은 Pawn 전용.
+		// Input is for pawns only.
 		return;
 	}
 	UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(Pawn->InputComponent);
 	if (!EIC)
 	{
-		// 아직 빙의/입력 셋업 전일 수 있다 — bAutoBindInput이면 possession/restart 훅이 다시 부른다.
-		// 수동 모드라면 Pawn의 SetupPlayerInputComponent에서 BindInput()을 호출하면 된다.
+		// Possession or input setup may not have happened yet. With bAutoBindInput the possession and
+		// restart hooks call back in.
+		// In manual mode, call BindInput() from the pawn's SetupPlayerInputComponent.
 		UE_LOG(LogDynamicRope, Verbose, TEXT("RopeWielder on %s: EnhancedInputComponent not ready — will retry on possess/restart (or call BindInput() from SetupPlayerInputComponent)."),
 			*GetNameSafe(GetOwner()));
 		return;
 	}
 
-	// 실제 바인딩 대상이 같은 컴포넌트일 때만 중복으로 본다. 재빙의로 InputComponent가 교체되면
-	// 아래에서 기존 바인딩을 정리하고 새 컴포넌트에 다시 건다.
+	// It only counts as a duplicate when the binding target is the same component. When repossession
+	// replaces the input component, the existing bindings are cleared below and rebound onto the new one.
 	if (BoundInputComponent.Get() == EIC)
 	{
 		return;
 	}
 	if (UInputComponent* Old = BoundInputComponent.Get())
 	{
-		// 옛 컴포넌트가 아직 살아 있으면 이중 발화하지 않게 우리 바인딩만 걷어낸다.
+		// If the old component is still alive, remove only our bindings so nothing fires twice.
 		if (UEnhancedInputComponent* OldEIC = Cast<UEnhancedInputComponent>(Old))
 		{
 			OldEIC->ClearBindingsForObject(this);
@@ -757,8 +807,9 @@ void URopeWielderComponent::BindInput()
 	}
 	if (PullAction)
 	{
-		// 토글 시맨틱: 누를 때마다 장전↔해제. 발동 시점은 장력 임계가 정한다(UpdatePullEngage) —
-		// Completed/Canceled 바인딩 불필요(홀드 아님).
+		// Toggle semantics: each press arms or disarms. When it engages is decided by the tension
+		// threshold, in UpdatePullEngage, so Completed and Canceled need no binding since this is not a
+		// hold.
 		EIC->BindAction(PullAction, ETriggerEvent::Started, this, &URopeWielderComponent::OnPullInputStarted);
 	}
 	if (ReelInAction)
@@ -775,7 +826,7 @@ void URopeWielderComponent::BindInput()
 	}
 	if (ReloadAction)
 	{
-		// 장전은 단발(누름) — ③ 로프를 던지기 준비(Loaded) 상태로 전환.
+		// Loading is a single press that moves a GuaranteedWrap rope into the ready-to-throw Loaded phase.
 		EIC->BindAction(ReloadAction, ETriggerEvent::Started, this, &URopeWielderComponent::OnReloadInput);
 	}
 	BoundInputComponent = EIC;
@@ -783,7 +834,7 @@ void URopeWielderComponent::BindInput()
 
 void URopeWielderComponent::OnThrowInput()
 {
-	// ReleaseAction이 없고 토글 모드면 한 버튼으로 던지기/해제.
+	// With no release action and toggle mode enabled, one button both throws and releases.
 	if (!ReleaseAction && bThrowActionToggles)
 	{
 		ToggleThrow();
@@ -796,19 +847,23 @@ void URopeWielderComponent::OnThrowInput()
 
 void URopeWielderComponent::StartPull()
 {
-	// 장전(토글 on): 힘/몽타주는 여기서 시작하지 않는다 — 발동은 UpdatePullEngage가 "Wrapped + 장력이
-	// PullEngageTension을 처음 넘는 순간" 1회 수행한다. 감기 전에 장전해 두면 감겨서 당겨지는 순간 발동한다.
+	// Arming, as a toggle. Neither the force nor the montage starts here: UpdatePullEngage engages once,
+	// the first moment the rope is wrapped and the tension crosses PullEngageTension. Arming before the
+	// wrap lands means it engages by itself the moment the rope goes tight.
 	SetPullArmed(true);
 	RefreshTickEnabled();
 }
 
 void URopeWielderComponent::UpdatePullEngage()
 {
-	// 장전(bPullArmed)된 Pull의 발동 판정: Wrapped + 장력 조건을 처음 만족하는 **순간** 발동하는 래치
-	// (wrap당 1회). 애니 window(UAnimNotifyState_RopePull)가 정하던 "언제 힘을 싣나"를 장력 임계가 대신하고,
-	// 몽타주 셋업이면 그 window를 품은 몽타주를 **단일 재생**한다(반복/중단 관리 없음 — 자연 종료).
-	// 무애니 셋업이면 즉시 힘을 장전한다. 발동 후 프레임별 인가 게이트(bActivePullRequiresTaut 등)는
-	// 로프가 동일하게 판정하고, wrap이 풀리면 힘을 끄고 재무장한다(장전 유지 — 다음 wrap에서 재발동).
+	// The engage decision for an armed pull: a latch that fires the moment the rope is wrapped and the
+	// tension condition is first satisfied, once per wrap. The tension threshold takes over the question
+	// of when force is applied, which used to belong to the animation window, and with a montage set up
+	// the montage carrying that window is played once, with no repeat or interruption management, and
+	// left to finish naturally.
+	// Without a montage the force is applied immediately. After engaging, the per-frame application gates,
+	// such as bActivePullRequiresTaut, are judged by the rope exactly as before, and releasing the wrap
+	// stops the force and rearms, keeping the armed state so the next wrap can engage again.
 	if (!bPullArmed || !Rope)
 	{
 		return;
@@ -817,7 +872,8 @@ void URopeWielderComponent::UpdatePullEngage()
 	{
 		if (bPullEngaged)
 		{
-			// 재무장 — 장전은 유지된 채 다음 wrap에서 다시 발동한다. UI가 발동 표시를 끄도록 알린다.
+			// Rearm: the armed state is kept and the next wrap engages again. The UI is told so it can
+			// clear its engagement indicator.
 			SetPullEngaged(false, 0.0f);
 			StopPullNow();
 		}
@@ -825,9 +881,10 @@ void URopeWielderComponent::UpdatePullEngage()
 	}
 	if (bPullEngaged)
 	{
-		return; // wrap당 1회 — 유지/해제는 로프 게이트와 wrap 수명이 담당.
+		return; // Once per wrap; maintaining and clearing it belong to the rope's gates and the wrap's lifetime.
 	}
-	// 발동 판정: 임계 0 = 팽팽 래치(IsPullTaut — 로프 게이트와 동일 판정), > 0 = 최대 장력 임계.
+	// The engage test: a threshold of 0 uses the taut latch, IsPullTaut, which is the same judgement the
+	// rope's gate makes, and above 0 it uses the maximum tension threshold.
 	const bool bEngage = (PullEngageTension <= 0.0f)
 		? Rope->IsPullTaut()
 		: (Rope->GetConstraintTension() >= PullEngageTension);
@@ -836,15 +893,17 @@ void URopeWielderComponent::UpdatePullEngage()
 		return;
 	}
 	SetPullEngaged(true, Rope->GetConstraintTension());
-	// 발동 순간 스냅샷(원샷) — PullEngageTension 튜닝용 관측.
+	// A one-shot snapshot at the moment of engagement, as an observation for tuning PullEngageTension.
 	UE_LOG(LogDynamicRope, Log,
 		TEXT("[PullEngage] share=%.2f tautT=%.0f tetherT=%.0f overshoot=%.0f"),
 		Rope->GetEffectiveTetherTargetShare(),
 		Rope->GetConstraintTension(), Rope->GetTetherTension(), Rope->GetTetherOvershoot());
 	if (PullMontage)
 	{
-		// 몽타주 단일 재생 — 힘은 안의 window notify(StartPullNow/StopPullNow)가 싣는다.
-		// 재생에 실패하면 engaged만 남는 죽은 래치를 만들지 않고 무애니 경로로 즉시 폴백한다.
+		// The montage is played once and the force is carried by the window notify inside it, through
+		// StartPullNow and StopPullNow.
+		// If playback fails, fall back immediately to the montage-free path rather than leaving a dead
+		// latch that is engaged with nothing driving it.
 		if (!TryPlayPullMontage())
 		{
 			StartPullNow();
@@ -874,8 +933,9 @@ void URopeWielderComponent::StopPullNow()
 
 void URopeWielderComponent::StopPull()
 {
-	// 장전 해제(토글 off) + 힘 정지 + 발동 래치 리셋. 몽타주는 중단하지 않는다 — 단일 재생 계약이라 재생
-	// 수명을 여기서 관리하지 않고 자연 종료에 맡긴다(해제 순간 모션이 뚝 끊기는 것 방지).
+	// Disarm, stop the force and reset the engage latch. The montage is not interrupted: it is played
+	// once by contract, so its lifetime is not managed here and it is left to finish, which avoids the
+	// motion cutting off abruptly on release.
 	SetPullArmed(false);
 	SetPullEngaged(false, 0.0f);
 	StopPullNow();
@@ -906,7 +966,8 @@ float URopeWielderComponent::GetPullEngageProgress() const
 {
 	if (!Rope || Rope->GetPhase() != ERopePhase::Wrapped)
 	{
-		// 감기기 전에는 임계 자체가 성립하지 않는다 — 게이지를 0으로 두면 "아직 감아야 한다"가 읽힌다.
+		// The threshold does not apply before the wrap lands, so leaving the gauge at zero reads as "you
+		// still have to wrap something".
 		return 0.0f;
 	}
 	if (bPullEngaged)
@@ -915,7 +976,8 @@ float URopeWielderComponent::GetPullEngageProgress() const
 	}
 	if (PullEngageTension <= 0.0f)
 	{
-		// 임계 0 = 팽팽 판정만으로 발동 — 연속값이 없으므로 게이트와 같은 판정을 0/1로 돌려준다.
+		// A threshold of 0 engages on the taut test alone, which has no continuous value, so the same
+		// judgement as the gate is returned as 0 or 1.
 		return Rope->IsPullTaut() ? 1.0f : 0.0f;
 	}
 	return FMath::Clamp(Rope->GetConstraintTension() / PullEngageTension, 0.0f, 1.0f);
@@ -928,15 +990,16 @@ void URopeWielderComponent::UpdatePullGlowMaterial()
 		return;
 	}
 
-	// 한 번도 장전한 적 없으면 머티리얼 배선을 건드리지 않는다 — pull을 안 쓰는 로프의 렌더 상태를
-	// 이 기능이 조용히 바꾸지 않게 하는 게 목적이다.
+	// While pull has never been armed, the material wiring is left untouched. The point is that this
+	// feature does not quietly change the render state of a rope that never uses pull.
 	UMaterialInstanceDynamic* MID = PullGlowMID.Get();
 	if (!MID && !bPullArmed)
 	{
 		return;
 	}
 
-	// 프리셋 적용 등으로 로프 머티리얼이 교체되면 우리 MID는 더 이상 로프에 붙어 있지 않다 — 다시 만든다.
+	// Applying a preset can replace the rope material, which leaves our dynamic instance no longer
+	// attached to the rope, so it is recreated.
 	if (!MID || Rope->GetMaterial(0) != MID)
 	{
 		MID = Rope->CreateAndSetMaterialInstanceDynamic(0);
@@ -949,7 +1012,7 @@ void URopeWielderComponent::UpdatePullGlowMaterial()
 
 	const float Progress = GetPullEngageProgress();
 	const float GlowValue = bPullEngaged ? PullGlowEngagedValue : Progress;
-	// 파라미터가 없는 머티리얼이면 이 호출은 무해한 no-op다(경고도 없다).
+	// On a material without the parameter this call is a harmless no-op, with no warning.
 	MID->SetScalarParameterValue(PullGlowParameterName, bPullArmed ? GlowValue : 0.0f);
 }
 
@@ -995,7 +1058,8 @@ void URopeWielderComponent::OnReloadInput()
 
 void URopeWielderComponent::OnPullInputStarted()
 {
-	// 토글: 누를 때마다 장전 ↔ 해제. 발동(힘/몽타주 단일 재생)은 장전 상태에서 장력 임계가 정한다
+	// A toggle: each press arms or disarms. Engaging, which plays the montage once or applies the force,
+	// is decided by the tension threshold while armed.
 	// (UpdatePullEngage — PullEngageTension).
 	if (bPullArmed)
 	{
@@ -1009,8 +1073,9 @@ void URopeWielderComponent::OnPullInputStarted()
 
 FRopeThrowContext URopeWielderComponent::BuildThrowContext(const FVector& AimDir) const
 {
-	// 공개 virtual 확장 훅은 모든 실제 throw 요청의 원본 context를 만든다.
-	// Aim hit 캐시 적용은 preview 전용 내부 경로(BuildThrowContextInternal)가 별도로 담당한다.
+	// The public virtual extension hook produces the original context for every real throw request.
+	// Applying the aim hit cache is handled separately by the preview-only internal path,
+	// BuildThrowContextInternal.
 	return BuildBaseThrowContext(AimDir);
 }
 
@@ -1024,8 +1089,9 @@ FVector URopeWielderComponent::GetAimRayOrigin() const
 
 	const USkeletalMeshComponent* OriginMesh = AttachMesh ? AttachMesh.Get() : Owner->FindComponentByClass<USkeletalMeshComponent>();
 
-	// AimRay는 로프/손 소켓 위치가 아니라 Wielder가 고른 조준 기준 위치에서 쏜다.
-	// 최종 투척 방향은 아래에서 Hit - ThrowOrigin으로 다시 계산한다.
+	// The aim ray is cast from the aiming reference position the wielder chose, not from the rope or the
+	// hand socket.
+	// The final throw direction is recomputed below as the hit minus the throw origin.
 	switch (AimRayOriginMode)
 	{
 	case ERopeAimRayOriginMode::AttachSocketOrBone:
@@ -1043,8 +1109,9 @@ FVector URopeWielderComponent::GetAimRayOrigin() const
 		break;
 
 	case ERopeAimRayOriginMode::ViewLocation:
-		// 방향을 카메라에서 가져오는 설정이면 원점도 카메라에 맞춘다 — ray의 원점과 방향이 서로 다른 기준을
-		// 쓰면 조준선이 화면과 어긋난다. 그 외에는 눈높이(PawnViewLocation).
+		// When the direction comes from the camera, the origin follows the camera too: a ray whose origin
+		// and direction use different references produces an aiming line that does not match the screen.
+		// Otherwise it uses eye height, from the pawn's view location.
 		if (Rope && Rope->ThrowParams.FrameMode == ERopeThrowFrameMode::OwnerCamera)
 		{
 			if (const UCameraComponent* Camera = Owner->FindComponentByClass<UCameraComponent>())
@@ -1077,8 +1144,9 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 
 	const AActor* Owner = GetOwner();
 
-	// 던지기 파라미터의 단일 소스는 로프의 ThrowParams다(2026-07-13 표면 감사 A-1 — Wielder 사본
-	// 7종 제거). Wielder는 손 소켓 원점/소켓 속도/조준 유도 등 "출처"만 컨텍스트에 얹는다.
+	// The single source for throw parameters is the rope's ThrowParams. The wielder only contributes the
+	// origin at the hand socket, the socket velocity and the aim guidance, that is where the throw comes
+	// from.
 	const FRopeThrowParams DefaultParams;
 	const FRopeThrowParams& Params = Rope ? Rope->ThrowParams : DefaultParams;
 
@@ -1087,7 +1155,8 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 	Context.FrameUp = Owner ? Owner->GetActorUpVector() : FVector::UpVector;
 	Context.FrameRight = Owner ? Owner->GetActorRightVector() : FVector::RightVector;
 	Context.OwnerVelocity = Owner ? Owner->GetVelocity() : FVector::ZeroVector;
-	// 손 소켓의 애니메이션 상대 속도(캐릭터 이동 제외)는 Tick에서 컴포넌트-로컬 위치 델타로 측정한다.
+	// The hand socket's animation-relative velocity, excluding character movement, is measured in Tick
+	// from a component-local position delta.
 	Context.HandAnimationVelocity = MeasuredHandAnimVelocityWorld;
 	Context.FrameMode = Params.FrameMode;
 	Context.SwingPlane = Params.SwingPlane;
@@ -1146,8 +1215,10 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 		break;
 	}
 
-	// ThrowInDirection의 명시적 입력이 있으면 ray와 throw가 같은 방향을 사용해야 한다.
-	// 기존 Throw()/ThrowNow()는 ZeroVector를 넘기므로 설정된 frame forward 동작을 그대로 유지한다.
+	// When ThrowInDirection supplies an explicit direction, the ray and the throw have to use the same
+	// one.
+	// The existing Throw() and ThrowNow() pass a zero vector, which preserves the configured frame
+	// forward behaviour.
 	const FVector ExplicitAimDir = AimDir.GetSafeNormal();
 	if (!ExplicitAimDir.IsNearlyZero())
 	{
@@ -1167,8 +1238,9 @@ FRopeThrowContext URopeWielderComponent::BuildThrowContextInternal(const FVector
 		}
 	}
 
-	// 첫 조준 프레임 또는 명시 AimDir은 아직 정상 gather 캐시가 없다. 원본 context를 반환하고
-	// 실제 throw는 BuildAimRayThrowRequest가 같은 프레임 PostPhysics gather에서 확정한다.
+	// The first aiming frame, and an explicit aim direction, have no cached result from a normal gather
+	// yet. The original context is returned and the real throw is settled by BuildAimRayThrowRequest from
+	// the same frame's PostPhysics gather.
 	return BuildThrowContext(AimDir);
 }
 
@@ -1191,10 +1263,12 @@ FRopeAimRayThrowRequest URopeWielderComponent::BuildAimRayThrowRequest(const FVe
 {
 	FRopeAimRayThrowRequest Request;
 	Request.BaseContext = BuildThrowContext(AimDir);
-	// 조준 ray 경로가 만든 컨텍스트임을 표시한다 — preview 빌더가 "조준 miss"와 "조준 자체가 없음
-	// (BP 직행/AI)"을 구분하는 근거다. 조준 컨텍스트의 단일 팩토리인 여기서 한 번만 찍으면 hit/miss는
-	// 물론 ray가 무효(RayLength=0 — reach 구를 안 지남)인 경우까지 덮인다: ResolveAimRayThrowContext와
-	// BuildThrowContextInternal 둘 다 결과를 BaseContext에서 출발시키므로 플래그가 살아남는다.
+	// Mark the context as having come from the aim ray path, which is how the preview builder
+	// distinguishes an aiming miss from there being no aiming at all, as on a direct Blueprint or AI
+	// call. Setting it once here, in the single factory for aiming contexts, covers hits and misses and
+	// also the case of an invalid ray, with a length of 0 because it never crosses the reach sphere: both
+	// ResolveAimRayThrowContext and BuildThrowContextInternal start their result from the base context,
+	// so the flag survives.
 	Request.BaseContext.bAimRayEvaluated = true;
 	Request.RayOrigin = GetAimRayOrigin();
 	Request.RayDirection = Request.BaseContext.FrameForward;
@@ -1211,7 +1285,8 @@ bool URopeWielderComponent::QueueGuaranteedAimThrow(const FVector& AimDir, bool 
 {
 	if (bGuaranteedAimThrowQueued)
 	{
-		// 같은 입력/몽타주 요청이 이미 정상 gather 또는 notify를 기다리는 중이다. 기존 요청을 보존한다.
+		// The same input or montage request is already waiting for the normal gather or for the notify, so
+		// the existing request is preserved.
 		return false;
 	}
 	if (!Rope || !Rope->CanThrowNow())
@@ -1242,7 +1317,8 @@ bool URopeWielderComponent::QueueGuaranteedAimThrow(const FVector& AimDir, bool 
 
 void URopeWielderComponent::Throw()
 {
-	// 서브클래스 게임 규칙 게이트(스태미나/상태 등). 몽타주 경로의 ThrowNow는 재검사하지 않는다(헤더 계약).
+	// The subclass game rule gate, such as stamina or character state. ThrowNow on the montage path is not
+	// re-tested; see the contract in the header.
 	if (!CanThrow())
 	{
 		NotifyThrowRejected(ERopeThrowRejectReason::Gated);
@@ -1252,8 +1328,9 @@ void URopeWielderComponent::Throw()
 
 	if (UsesLockedPreview())
 	{
-		// ③ 실제 발사는 화면용 1프레임 캐시를 쓰지 않는다. 입력 순간 ray를 같은 프레임 정상 gather에서
-		// prepared로 확정하고, 몽타주가 있으면 그 결과만 notify까지 보관한다.
+		// A real GuaranteedWrap throw does not use the one-frame cache kept for display. The ray captured
+		// at the moment of input is resolved into a prepared throw by the same frame's normal gather, and
+		// with a montage that result alone is held until the notify.
 		if (!QueueGuaranteedAimThrow(FVector::ZeroVector, /*bExecuteWhenReady*/ !ThrowMontage))
 		{
 			return;
@@ -1267,7 +1344,7 @@ void URopeWielderComponent::Throw()
 
 	if (ThrowMontage)
 	{
-		// 실제 던지기는 몽타주의 UAnimNotify_RopeThrow → ThrowNow().
+		// The actual throw happens through the montage's UAnimNotify_RopeThrow calling ThrowNow().
 		PlayThrowMontage();
 	}
 	else
@@ -1287,15 +1364,16 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 	{
 		if (UsesLockedPreview())
 		{
-			// 몽타주 입력이 이미 큐를 만들었다면 notify는 실행 의사만 전달한다. gather가 아직이면 준비 직후,
-			// 이미 prepared가 준비됐으면 지금 실행된다.
+			// If the montage input already created a queue entry, the notify only conveys the intent to
+			// execute: before the gather it runs as soon as the prepared result is ready, and afterwards it
+			// runs now.
 			if (Rope->RequestExecuteQueuedGuaranteedAimThrow())
 			{
 				return;
 			}
 
-			// ThrowInDirection 직행(BP/코드)처럼 선행 Throw()가 없으면 여기서 현재 ray 요청을 만들고
-			// 정상 gather 직후 실행한다.
+			// Where there was no preceding Throw(), as with a direct ThrowInDirection from Blueprint or
+			// code, the current ray request is created here and executed right after the normal gather.
 			QueueGuaranteedAimThrow(AimDir, /*bExecuteWhenReady*/ true);
 			return;
 		}
@@ -1303,7 +1381,8 @@ void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 		ClearThrowPreview();
 		if (UsesAimRay())
 		{
-			// 최신 collider 수집 직후 hit/fallback을 확정하도록 값 타입 요청만 큐에 넣는다.
+		// Only a value-type request is queued, so the hit or fallback is settled right after the latest
+		// collider gather.
 			FRopeAimRayThrowRequest Request = BuildAimRayThrowRequest(AimDir);
 			Request.OnResolved = FSimpleDelegate::CreateUObject(this, &URopeWielderComponent::OnAimRayThrowResolved);
 			Rope->QueueAimRayThrow(Request);
@@ -1320,15 +1399,18 @@ void URopeWielderComponent::OnAimRayThrowResolved()
 {
 	bGuaranteedAimThrowQueued = false;
 	ClearPreviewDisplay();
-	// Rope가 실제 실행 페이즈(Assisted=Flight, Guaranteed=GuidedThrow)에 진입한 뒤 성공 알림을 보낸다.
+	// The success notification is sent after the rope has entered its real execution phase, which is
+	// Flight for AssistedJudged and GuidedThrow for GuaranteedWrap.
 	NotifyThrown();
 	OnThrown.Broadcast();
 }
 
 void URopeWielderComponent::OnGuaranteedAimPrepared(FRopePreparedThrowPreview& Prepared)
 {
-	// 입력 프레임에 확정한 world path를 owner-local로 바꿔, 몽타주 동안 캐릭터가 움직여도 notify 실행 시
-	// 기존 ③ 계약처럼 현재 owner transform 기준으로 복원한다. 실제 실행 전에 같은 값을 직접 수정한다.
+	// Convert the world path settled on the input frame into owner-local space, so that when the notify
+	// executes it is restored against the current owner transform, as the GuaranteedWrap contract
+	// requires, even if the character moved during the montage. The same value is modified directly
+	// before execution.
 	StoreAimGuideFrameIfNeeded(Prepared);
 	HeldPreparedPreview = Prepared.IsValid()
 		? ResolvePreparedPreviewForDisplay(Prepared)
@@ -1426,8 +1508,9 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 	{
 		ResolveRefs();
 		ResolvePreviewComponent(/*bAllowAutoCreate*/ true);
-		// off→on: preview는 틱을 강제 ON(ComputeDesiredTickEnabled 무관)하므로 RefreshTickEnabled를
-		// 거치지 않는다 — 재활성화 시 stale 소켓 델타 spike를 막도록 손 속도 샘플을 여기서 직접 재시드한다.
+		// Off to on: a preview forces the tick on regardless of ComputeDesiredTickEnabled and therefore
+		// does not go through RefreshTickEnabled, so the hand velocity sample is reseeded directly here to
+		// avoid a stale socket delta spike on reactivation.
 		if (!IsComponentTickEnabled())
 		{
 			ResetHandAnimVelocitySample();
@@ -1437,7 +1520,8 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 	}
 	else
 	{
-		// 표시만 끈다 — prepared(던지기용)는 그대로 두고, ③/aim ray는 계산 틱을 계속 돌린다.
+		// Only the display is turned off. The prepared data used for throwing is left alone, and
+		// GuaranteedWrap and the aim ray keep their calculation tick running.
 		ClearPreviewDisplay();
 		RefreshTickEnabled();
 	}
@@ -1445,14 +1529,17 @@ void URopeWielderComponent::SetThrowPreviewEnabled(bool bEnabled)
 
 bool URopeWielderComponent::ComputeDesiredTickEnabled() const
 {
-	// 장전된 Pull의 발동 판정과 이미 적용한 AirControl의 원복에는 설정 토글과 별개로 틱이 필요하다.
-	// Aim ray 모드는 preview 표시와 무관하게 collider 수집 bounds/HUD 샘플을 매 프레임 갱신한다.
+	// The engage decision for an armed pull, and restoring an air control boost that was already applied,
+	// both need a tick regardless of the settings toggles.
+	// Aim ray modes refresh the collider gather bounds and the HUD sample every frame, independently of
+	// preview display.
 	const bool bNeedsPawnLeash =
 		Cast<APawn>(GetOwner()) && Rope &&
 		Rope->HoldConfig.bEnforceWielderLengthConstraint &&
 		(Rope->GetPhase() == ERopePhase::Wrapping || Rope->GetPhase() == ERopePhase::Wrapped);
-	// 던질 수 있는 상태(Loaded 등)에선 손 애니메이션 스윙을 매 프레임 측정해야 던지기에 실린다 —
-	// FullSimulation·이동 보조 OFF로 다른 조건이 모두 꺼져도 이 샘플링만으로 틱을 유지한다.
+	// In a throwable state such as Loaded, the hand's animation swing has to be measured every frame to be
+	// carried into the throw. Even with FullSimulation and every movement assist disabled, this sampling
+	// alone keeps the tick alive.
 	const bool bNeedsHandVelocitySampling = Rope && AttachMesh && Rope->CanThrowNow();
 	return bNeedsHandVelocitySampling || bNeedsPawnLeash || bPullArmed || bAirControlBoosted ||
 		bAutoGroundExitOnUpwardPull || bBoostAirControlWhileSwinging || UsesAimRay();
@@ -1736,10 +1823,12 @@ void URopeWielderComponent::EnforceWielderLengthConstraint(float DeltaTime)
 
 void URopeWielderComponent::RefreshModeDerivedState()
 {
-	// preview는 Guaranteed 모드 전용이다 — 표시를 원하는 Guaranteed에서만 런타임 컴포넌트를 만들어준다
-	// (수동 배치가 있으면 그걸 쓴다). ③이 아니게 되면 잔류 preview 표시만 지운다(컴포넌트는 유휴로
-	// 남긴다 — 다시 ③이 되면 재사용). HUD 위젯은 UpdateAimHudWidget이 틱마다 재유도하지만, ①로
-	// 바뀌며 틱 자체가 꺼질 수 있으므로 꺼지기 전에 위젯 생성/제거를 한 번 정리하고 나간다.
+	// The preview belongs to GuaranteedWrap alone, so a runtime component is created only for that mode
+	// when display is wanted; a manually placed one is used instead where it exists. Leaving that mode
+	// clears any lingering preview display while keeping the component idle for reuse if the mode returns.
+	// The HUD widget is re-derived every tick by UpdateAimHudWidget, but switching to FullSimulation can
+	// disable the tick itself, so widget creation and destruction are settled once here before that
+	// happens.
 	ResolvePreviewComponent(/*bAllowAutoCreate*/ bShowThrowPreview && UsesLockedPreview());
 	if (!UsesLockedPreview())
 	{
@@ -1772,7 +1861,8 @@ bool URopeWielderComponent::ShouldHoldPreparedPreview()
 	}
 	if (!ThrowMontage)
 	{
-		// 즉시 실행도 PostPhysics gather까지는 큐 상태다. 그 사이 직전 HUD 캐시로 preview를 다시 만들지 않는다.
+		// Even an immediate execution stays queued until the PostPhysics gather. The preview is not rebuilt
+		// from the previous HUD cache in the meantime.
 		ClearPreviewDisplay();
 		return true;
 	}
@@ -1785,13 +1875,14 @@ bool URopeWielderComponent::ShouldHoldPreparedPreview()
 	const UAnimInstance* Anim = AttachMesh ? AttachMesh->GetAnimInstance() : nullptr;
 	if (Anim && Anim->Montage_IsPlaying(ThrowMontage))
 	{
-		// 입력 프레임 PostPhysics에서 확정된 결과는 Rope가 notify까지 보관한다. 프리뷰는 Loaded 조준에서만
-		// 보이면 되므로 윈드업 중에는 숨기고, 직전 HUD 캐시로 새 path를 만들지 않는다.
+		// The result settled by the input frame's PostPhysics is held by the rope until the notify. The
+		// preview only needs to be visible while aiming from Loaded, so it is hidden during the windup and
+		// no new path is built from the previous HUD cache.
 		ClearPreviewDisplay();
 		return true;
 	}
 
-	// 몽타주가 notify 없이 끝났거나 재생에 실패했다면 예약된 실제 throw도 함께 취소한다.
+	// If the montage ended without a notify, or failed to play, the scheduled real throw is cancelled too.
 	if (Rope)
 	{
 		Rope->CancelQueuedGuaranteedAimThrow();
@@ -1802,11 +1893,13 @@ bool URopeWielderComponent::ShouldHoldPreparedPreview()
 
 bool URopeWielderComponent::ShouldUpdateThrowPreviewForPhase(ERopePhase Phase) const
 {
-	// Guaranteed 모드는 "던지기 전 성공한 preview path"만 새로 만든다. GuidedThrow/Wrapped에서는 이미
-	// 확정된 HeldPreparedPreview를 쓰므로 build를 다시 시도하지 않는다(호출자에서 먼저 걸러진다).
-	// Loaded(장전 준비) 상태에서만 조준 preview를 만든다 — Loaded에서만 던질 수 있으므로. 던지기 게이트와
-	// 같은 술어(CanThrowInPhase)를 봐야 "보이는 것 = 던질 수 있는 것"이 유지된다. 라이브 phase가 아니라
-	// 인자 Phase로 물어야 이 함수의 시그니처 계약과 어긋나지 않는다.
+	// GuaranteedWrap only builds a fresh preview path for a throw that has not happened yet. During
+	// GuidedThrow and Wrapped the already-settled HeldPreparedPreview is used and no build is attempted;
+	// the caller filters those out first.
+	// The aiming preview is built only in the ready-to-throw Loaded phase, because that is the only phase
+	// it can be thrown from. Sharing the predicate with the throw gate, CanThrowInPhase, is what keeps
+	// "what you see" and "what you can throw" aligned. Asking with the Phase argument rather than the live
+	// phase is what keeps this function consistent with its own signature.
 	return RopeWrapModes::CanThrowInPhase(Rope->ResolveMode, Phase);
 }
 
@@ -1819,17 +1912,17 @@ bool URopeWielderComponent::UpdateHeldPreparedPreviewForPhase(ERopePhase Phase)
 
 	if (Phase == ERopePhase::GuidedThrow)
 	{
-		// GuidedThrow는 cached preview path를 authoritative하게 따라가는 상태다. 새 path를 build하지
-		// 않는다. 프리뷰는 Loaded(조준)에서만 보이면 되므로 발사 후에는 표시를 지운다(HeldPreparedPreview
-		// 데이터는 보존 — phase-gate 유효성 검사가 참조한다). return true로 이 phase에서 preview
-		// 재빌드로 떨어지지 않게 한다.
+		// GuidedThrow authoritatively follows the cached preview path and builds no new one. The preview
+		// only needs to be visible while aiming from Loaded, so the display is cleared after the throw
+		// while the HeldPreparedPreview data is preserved, since the phase-gate validity check reads it.
+		// Returning true stops this phase falling through to a preview rebuild.
 		ClearPreviewDisplay();
 		return true;
 	}
 
 	if (Phase == ERopePhase::Wrapped)
 	{
-		// 꽂힘이 확정된 뒤에는 조준용 path가 의미를 잃으므로 데이터까지 버린다.
+		// Once the embed is committed the aiming path has no meaning, so the data is discarded as well.
 		ClearThrowPreview();
 		return true;
 	}
@@ -1839,7 +1932,8 @@ bool URopeWielderComponent::UpdateHeldPreparedPreviewForPhase(ERopePhase Phase)
 
 void URopeWielderComponent::DisplayPreviewCenterline(const FRopeWrapPreviewData& Centerline)
 {
-	// 표시는 전적으로 선택 사항 — 계산과 분리돼 있어 여기서 실패해도 prepared(던지기용)는 건드리지 않는다.
+	// Display is entirely optional and separate from the calculation, so failing here never touches the
+	// prepared data used for throwing.
 	if (!bShowThrowPreview || !PreviewComponent || !Rope)
 	{
 		return;
@@ -1850,10 +1944,12 @@ void URopeWielderComponent::DisplayPreviewCenterline(const FRopeWrapPreviewData&
 
 void URopeWielderComponent::UpdateThrowPreview()
 {
-	// 화면용 preview는 표시가 활성화된 동안만 만든다. 실제 Guaranteed throw용 prepared는 입력 순간
-	// QueueGuaranteedAimThrow가 새 정상 gather 결과로 확정하므로 표시 OFF에서 매 틱 미리 만들 필요가 없다.
-	// FullSimulation/AssistedJudged는 preview를 쓰지 않는다 — 감김이 판정/창발이라 던지기 전에 확정할
-	// 경로가 없다. AssistedJudged의 조준 표시는 aim ray HUD(UpdateAimHudSample)가 따로 담당한다.
+	// The on-screen preview is built only while display is enabled. The prepared data for a real
+	// GuaranteedWrap throw is settled at the moment of input by QueueGuaranteedAimThrow from a fresh
+	// normal gather, so there is no need to build it every tick while display is off.
+	// FullSimulation and AssistedJudged use no preview: their wrap is judged or emergent, so there is no
+	// path to settle before the throw. Aiming feedback for AssistedJudged is handled separately by the aim
+	// ray HUD, in UpdateAimHudSample.
 	if (!bShowThrowPreview)
 	{
 		ClearPreviewDisplay();
@@ -1884,14 +1980,16 @@ void URopeWielderComponent::UpdateThrowPreview()
 	}
 	if (!ShouldUpdateThrowPreviewForPhase(RopePhase))
 	{
-		// 이 phase에서는 preview build 자체가 의미 없으므로 실패 로그를 만들지 않고 조용히 정리한다.
+		// A preview build is meaningless in this phase, so it is cleared quietly without producing a
+		// failure log.
 		ClearThrowPreview();
 		return;
 	}
 	if (!bHasAimRayFrameThrowContext)
 	{
-		// 첫 조준 프레임은 아직 정상 gather 결과가 없다. base fallback으로 허공 preview를 한 프레임
-		// 그렸다가 target path로 바뀌는 깜빡임을 만들지 않고, 다음 틱의 확정 결과를 기다린다.
+		// The first aiming frame has no result from a normal gather yet. Rather than drawing an
+		// open-space preview from the base fallback for one frame and then flickering to the target path,
+		// it waits for the settled result on the next tick.
 		ClearThrowPreview();
 		return;
 	}
@@ -1915,7 +2013,7 @@ void URopeWielderComponent::UpdateThrowPreview()
 
 void URopeWielderComponent::ClearPreviewDisplay()
 {
-	// 표시만 정리 — prepared(던지기용)는 건드리지 않는다.
+	// Clear the display only; the prepared data used for throwing is left alone.
 	if (PreviewComponent && PreviewComponent->IsPreviewOwner(this))
 	{
 		PreviewComponent->ClearPreview();
@@ -1947,21 +2045,24 @@ void URopeWielderComponent::StoreAimGuideFrameIfNeeded(FRopePreparedThrowPreview
 		return;
 	}
 
-	// aim ray 조준 path는 소켓/로프 컴포넌트 로컬이 아니라 wielder owner 로컬 기준으로 고정한다.
+	// An aim ray path is fixed in the wielder's owner-local space rather than that of the socket or the
+	// rope component.
 	Prepared.StoreGuideFrameLocal(OwnerRoot);
 }
 
 FRopeWrapPreviewData URopeWielderComponent::ResolvePreparedPreviewForDisplay(const FRopePreparedThrowPreview& Prepared) const
 {
-	// owner-local로 저장되지 않은 일반 preview는 원래 월드 점을 그대로 반환한다.
+	// An ordinary preview, not stored in owner-local space, returns its original world points unchanged.
 	FRopeWrapPreviewData Preview = Prepared.ResolveRenderPreviewWorld();
 	if (!Rope || Rope->ResolveMode != ERopeWrapResolveMode::GuaranteedWrap || !Preview.IsValid())
 	{
 		return Preview;
 	}
 
-	// Pierce의 throw용 prepared 경로는 마지막 노드가 Tail 소켓에 오도록 RopeComponent가 TailWorld까지 줄인다.
-	// 표시는 플레이어가 조준한 Head/Hit 지점까지 이어져야 하므로, 렌더 전용 centerline만 HitPoint까지 다시 편다.
+	// On the prepared throw path for Pierce, the rope component shortens the path to the tail world
+	// position so the last node lands on the tail socket.
+	// The display has to reach the head, that is the point the player aimed at, so the render-only
+	// centreline alone is extended back out to the hit point.
 	const FRopeSurfaceAnchor* Anchor = Prepared.Anchors.Num() > 0 ? &Prepared.Anchors[0] : &Prepared.LatchAnchor;
 	if (!Anchor || Anchor->NodeIndex == INDEX_NONE)
 	{
@@ -1971,7 +2072,8 @@ FRopeWrapPreviewData URopeWielderComponent::ResolvePreparedPreviewForDisplay(con
 	FVector HitPoint = Anchor->StartWorldPosition;
 	if (Prepared.ThrowContext.bHasAimGuideHit)
 	{
-		// Aim guide preview의 표시 끝점은 anchor local을 다시 푼 값이 아니라, 조준 레이가 실제로 선택한 hit이다.
+		// The display endpoint of an aim guide preview is the hit the aiming ray actually selected, not a
+		// value unpacked again from the anchor's local space.
 		HitPoint = Prepared.ThrowContext.AimGuideHitWorldPos;
 	}
 	else

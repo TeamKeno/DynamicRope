@@ -272,14 +272,17 @@ bool URopeComponent::ConstrainWielderLocation(
 
 void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog)
 {
-	// 모든 release 트리거(수동/절단/장력/거리/대상 소실)의 공용 마무리: 페이즈 전환 + 노드 반환 +
-	// 일시 상태 폐기 + 쿨다운 + 이벤트. 사유별 차이는 호출자에서 끝난 상태로 들어온다.
-	// 감겼던 mesh는 Release/Reset이 wrap 상태를 비우기 전에 캡처한다 — 중앙 release 신호가 실어 보내
-	// 대상 반응 컴포넌트가 "내 메시가 풀렸나"를 판별하게 한다(release BP 델리게이트는 mesh 미포함).
+	// The shared ending for every release trigger, whether manual, a cut, tension, distance or a lost
+	// target: change phase, return the nodes, discard the transient state, start the cooldown and fire
+	// the events. Anything that differs by reason has already been settled by the caller.
+	// The wrapped mesh is captured before Release and Reset clear the wrap state, because the central
+	// release signal carries it so target reaction components can decide whether it was their mesh that
+	// let go; the Blueprint release delegate does not include a mesh.
 	const USceneComponent* WrappedMesh = WrapController.State.Mesh.Get();
-	// ReleaseWrapAs는 Wrapped뿐 아니라 Contacting/Wrapping/GuidedThrow(전부 커밋 전)에서도 들어온다 —
-	// 커밋 전이면 중앙 신호를 쏘면 안 된다(아래 DispatchReleased 주석: 다른 로프가 감아 랙돌시킨 대상을
-	// 이 로프의 abort가 잘못 복구시킨다). WrapController.Release가 상태를 비우기 전에 잡는다.
+	// ReleaseWrapAs is entered not only from Wrapped but also from Contacting, Wrapping and GuidedThrow,
+	// all of which are before the commit, and before the commit the central signal must not fire; see the
+	// DispatchReleased comment, where this rope's abort would wrongly recover a target another rope had
+	// wrapped and knocked down. It is captured before WrapController.Release clears the state.
 	const bool bWasWrapped = WrapController.IsActive();
 	SetPhase(ERopePhase::Releasing, *ReasonLog);
 	WrapController.Release(Reason);
@@ -287,17 +290,21 @@ void URopeComponent::FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, co
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
 	DispatchReleased(WrappedMesh, Bone, Reason, bWasWrapped);
-	// 팁 부착물은 여기서 파괴하지 않는다 — 수명은 전 모드 BeginPlay~EndPlay다(2026-07-17 모드 무관화).
-	// 종전엔 ①②만 release에 파괴했으나, 그러면 Free에 팁이 없어 bSyncTipMeshOnFree가 무의미해진다.
+	// The tip attachment is not destroyed here: its lifetime spans BeginPlay to EndPlay in every mode.
+	// Destroying it on release would leave no tip in Free, which makes bSyncTipMeshOnFree meaningless.
 }
 
 void URopeComponent::FinishPreCommitReleaseToFlight(FName Bone, const TCHAR* PhaseLog)
 {
-	// 성립 전(Captured~Wrapping) 이탈의 공용 마무리 — 정리(Flight 전이 + 일시 상태 폐기) 후에 통지한다.
-	// 정리 전에 쏘면(구 버그) 아직 Contacting인 게이트를 핸들러의 ReleaseWrap()이 통과해 이중 release +
-	// 핸들러가 확정한 Releasing을 곧바로 이 SetPhase(Flight)가 덮어썼다(AbortGuidedThrow와 같은 계약으로 통일).
-	// Bone은 인자로 값 캡처되어 ResetTransientPhaseState(트래커 비움) 이후에도 유효하다. 커밋 전이라
-	// bWasWrapped=false — 중앙 신호(OnAnyRopeReleased) 없이 per-instance만(다른 로프가 감은 대상 오복구 방지).
+	// The shared ending for leaving before a wrap is established, that is between capture and wrapping.
+	// It reports after cleaning up, meaning after the transition to Flight and discarding the transient
+	// state. Reporting before the cleanup would let a handler's call to ReleaseWrap() pass a gate that
+	// still reads as Contacting, producing a double release, and the Releasing phase the handler settled
+	// would immediately be overwritten by this SetPhase(Flight). AbortGuidedThrow follows the same
+	// contract.
+	// The bone is captured by value as an argument and stays valid after ResetTransientPhaseState clears
+	// the tracker. This is before the commit, so only the per-instance delegate fires and the central
+	// OnAnyRopeReleased does not, which prevents wrongly recovering a target another rope has wrapped.
 	SetPhase(ERopePhase::Flight, PhaseLog);
 	ReleaseKinematicVirtualBridgesToSolver();
 	ResetTransientPhaseState();
@@ -306,9 +313,11 @@ void URopeComponent::FinishPreCommitReleaseToFlight(FName Bone, const TCHAR* Pha
 
 void URopeComponent::DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped)
 {
-	// Wrapped 통지가 아직 진행 중이면(핸들러가 그 안에서 ReleaseWrap을 불렀다) 통지를 미룬다 —
-	// 지금 쏘면 구독자가 Released를 Wrapped보다 먼저 받는다(FDeferredReleaseNotice 주석 참고).
-	// 상태는 이미 정리된 뒤이므로 미루는 것은 통지뿐이고, 큐는 Wrapped 통지가 끝나는 즉시 비워진다.
+	// If a wrapped notification is still in progress, meaning a handler called ReleaseWrap from inside
+	// it, the notification is deferred: firing now would let subscribers receive the release before the
+	// wrap; see the comment on FDeferredReleaseNotice.
+	// The state is already cleaned up, so only the notification waits, and the queue is drained the
+	// moment the wrapped notification finishes.
 	if (WrappedDispatchDepth > 0)
 	{
 		FDeferredReleaseNotice& Notice = DeferredReleaseNotices.AddDefaulted_GetRef();
@@ -319,17 +328,20 @@ void URopeComponent::DispatchReleased(const USceneComponent* WrappedMesh, FName 
 		return;
 	}
 
-	// per-instance: Captured/Wrapped로 시작된 engagement의 종료를 항상 알린다(짝 맞춤).
+	// Per-instance: the end of an engagement that began with a capture or a wrap is always reported, so
+	// the events stay paired.
 	NotifyReleased(Bone, Reason);
 	OnRopeReleased.Broadcast(Bone, Reason);
-	// 중앙 신호는 OnAnyRopeWrapped와 짝 — 실제 성립(Wrapped)이 있었을 때만. 성립 전 abort(bWasWrapped=false)에서
-	// 쏘면, 다른 로프가 감아 랙돌시킨 같은 대상을 이 로프의 abort가 잘못 복구시킨다.
+	// The central signal is the counterpart of OnAnyRopeWrapped and only fires when a wrap was actually
+	// established. Firing it on an abort before the commit would let this rope's abort wrongly recover
+	// the same target another rope had wrapped and knocked down.
 	if (bWasWrapped)
 	{
 		if (URopeSimSubsystem* SimSubsystem = URopeSimSubsystem::Get(GetWorld()))
 		{
-			// 로프 자신을 함께 싣는다 — 대상을 여러 로프가 감았을 때 구독자가 "내 engagement 중 어느
-			// 것이 끝났나"를 mesh만으로는 구분할 수 없다(FRopeWrappedEventInfo::Rope와 짝).
+			// The rope itself is carried too: when several ropes have wrapped one target, a subscriber
+			// cannot tell from the mesh alone which of its engagements ended. It pairs with
+			// FRopeWrappedEventInfo::Rope.
 			SimSubsystem->OnAnyRopeReleased.Broadcast(this, WrappedMesh, Bone, Reason);
 		}
 	}
@@ -382,9 +394,10 @@ void URopeComponent::ReleaseWrapAs(ERopeReleaseReason Reason)
 
 void URopeComponent::UpdateContacting(float DeltaTime)
 {
-	// GPU Flight 캡처의 pending step과 CPU Sim을 먼저 하나의 시간축으로 맞춘다. 실패한 프레임에는
-	// stale centerline으로 dwell/dismiss/seed 어느 것도 갱신하지 않는다. 특히 TryBuildResidentStep이
-	// Contacting에서 bGpuSteppedThisFrame를 false로 바꾸므로 캡처 순간 세운 persistent flag를 써야 한다.
+	// Put the GPU Flight capture's pending step and the CPU simulation state onto one timeline first. On
+	// a frame where that fails, neither the dwell, the dismissal nor the seed is updated from a stale
+	// centreline. In particular TryBuildResidentStep clears bGpuSteppedThisFrame during Contacting, so the
+	// persistent flag raised at the moment of capture is what has to be used.
 	bool bSyncedGpuHandoff = false;
 	if (bPendingGpuCaptureHandoff)
 	{
@@ -396,13 +409,16 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 		bPendingGpuCaptureHandoff = false;
 		bSyncedGpuHandoff = true;
 	}
-	// 캡처 프레임의 swept actual만으로 이미 decision dwell을 채웠다면 그 crossing은 유효한 접촉이다.
-	// 동기화 후 current-only 재검출을 강제하면 collision-free guided step이 얇은 limb를 완전히 지난
-	// 경우 GPU에서만 놓치므로, 저장된 surface seed로 정확히 한 번 CPU 즉시-wrap과 같은 결정을 낸다.
+	// If the swept actual contact on the capture frame alone already satisfied the decision dwell, that
+	// crossing is a valid contact. Forcing a current-only re-detection after synchronizing would lose it
+	// on the GPU alone whenever a collision-free guided step passed completely through a thin limb, so
+	// the stored surface seed is used to reach exactly the same decision once, matching the CPU's
+	// immediate wrap.
 	if (bSyncedGpuHandoff && ShouldStartWrapping())
 	{
-		// Deferred Scene-GDF 경로는 BuildContactingState 당시 CPU mirror가 낡았을 수 있다. surface seed의
-		// 노드/점으로 후보를 복원해 post-step Sim 기준 진행 속도·평면을 갱신한 뒤 commit한다.
+		// On the deferred scene distance field path the CPU mirror may have been stale when
+		// BuildContactingState ran. The candidate is restored from the surface seed's node and point, its
+		// travel speed and plane are refreshed against the post-step simulation state, and then committed.
 		TArray<FRopeContactCandidate> SyncedCaptureCandidates;
 		SyncedCaptureCandidates.Reserve(PendingWrapSeed.Anchors.Num());
 		for (const FRopeSurfaceAnchor& Anchor : PendingWrapSeed.Anchors)
@@ -433,15 +449,19 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 		return;
 	}
 
-	// 총 체류(아래 정체 안전망 판단용 — 감김 판정 자체는 트래커 dwell).
+	// Total time spent here, used by the stall safety net below; the wrap decision itself uses the
+	// tracker's dwell.
 	ContactingElapsed += DeltaTime;
 
-	// 매 프레임 실제 접촉을 재수집한다 — 캡처 순간의 1회 스냅샷만 믿고 타이머를 돌리던 이전 구조는
-	// (1) dismiss가 사실상 불발이었고(트래커 미갱신) (2) 움직이는 대상(랙돌/드래곤)에서 시드와 실제
-	// 지오메트리의 어긋남이 WrapDecisionTime 동안 누적됐다. Contacting은 솔브가 없어 노드가 정지
-	// 상태이므로 과거 Prev→Pos 경로를 다시 재생하면 이미 빠져나온 접촉도 매 프레임 되살아난다.
-	// 일반 actual 재수집 뒤 Assisted exact-primary current-centerline 보완을 합친다. 후자는 마지막
-	// Flight의 temporal/predictive path를 재생하지 않으므로 아직 닿지 않은 상태로 dwell이 쌓이지 않는다.
+	// Real contacts are re-collected every frame. Running a timer from a single snapshot taken at the
+	// moment of capture meant, first, that dismissal effectively never fired because the tracker was
+	// never updated, and second, that on a moving target such as a ragdoll or a dragon the divergence
+	// between the seed and the real geometry accumulated for the whole decision time. Contacting has no
+	// solve, so the nodes are stationary, and replaying the old previous-to-current path would revive a
+	// contact the rope had already left on every frame.
+	// The general actual re-collection is combined with the assisted exact-primary current-centreline
+	// supplement. The latter does not replay the temporal or predictive path of the last Flight frame, so
+	// dwell does not accumulate for something that has not touched yet.
 	const FRopeFlightContactDetector::FParams DetectParams = MakeFlightDetectParams(DeltaTime);
 	TArray<FRopeContactCandidate>& Candidates = ContactCandidateScratch;
 	Candidates.Reset();
@@ -449,12 +469,14 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 		Sim, SimFrame.FrameColliders, DetectParams, Candidates);
 	AddSynchronousAssistedAimContactCandidates(DeltaTime, DetectParams, Candidates);
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
-	// CanWrapTarget 게이트(Flight 후보 산출과 공용 헬퍼).
+	// The CanWrapTarget gate, through the helper shared with Flight candidate production.
 	RemoveNonWrappableCandidates(Candidates);
 
-	// 트래커 갱신: 같은 본이면 dwell 누적, 지배 본이 바뀌면 dwell 리셋(전이 프레임 오탐 방어 —
-	// dwell 재시작 계약을 캡처 후 구간에도 실제로 적용), 접촉이 끊기면 dwell이 소진되며 트래커가
-	// 비워져 아래 dismiss로 떨어진다(짧은 플리커는 그동안 쌓인 dwell만큼 관용).
+	// Update the tracker: the dwell accumulates while the bone is the same, resets when the dominant bone
+	// changes, which guards against false positives on a transition frame by genuinely applying the
+	// dwell-restart contract after capture as well, and drains when contact breaks until the tracker
+	// empties and falls through to the dismissal below. Brief flicker is tolerated for as long as the
+	// dwell accumulated so far.
 	const bool bRequireAimPrimary = ResolveMode == ERopeWrapResolveMode::AssistedJudged
 		&& AimTargeting.IsLockActive(Phase);
 	ContactTracker.Update(Candidates, DeltaTime,
@@ -469,19 +491,22 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 			*GetName(), Candidates.Num(), *ContactTracker.CandidateBone.ToString(),
 			ContactTracker.CandidateNodes.Num(), ContactTracker.DwellTime,
 			WrapConfig.WrapDecisionTime, ContactingElapsed, SimFrame.FrameColliders.Num());
-		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight: 재진입 계약).
+		// Left before the wrap was established: report per-instance after cleaning up, through
+		// FinishPreCommitReleaseToFlight, which owns the re-entrancy contract.
 		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone, TEXT("contact lost before wrapping"));
 		return;
 	}
 
-	// 시드 갱신: Wrapping이 시작되는 프레임의 최신 접촉 지오메트리에서 경로 생성이 출발하게 한다.
+	// Refresh the seed so path generation starts from the newest contact geometry on the frame Wrapping
+	// begins.
 	if (Candidates.Num() > 0 && !ContactTracker.CandidateBone.IsNone())
 	{
 		PendingWrapSeed = BuildWrapSeedFromContactingState(Candidates);
 		if (bSyncedGpuHandoff)
 		{
-			// Flight Finalize에서 만든 snapshot은 비동기 GPU mirror 기준일 수 있다. 동기화에 성공한
-			// 첫 Contacting 프레임에만 같은 post-step pose/candidate로 진행 좌표계를 다시 만든다.
+			// The snapshot built during Flight's Finalize may be based on the asynchronous GPU mirror. The
+			// travel frame is rebuilt from the same post-step pose and candidates only on the first
+			// Contacting frame where synchronization succeeded.
 			CaptureTravelFrame = FRopeCaptureTravelFrame::Compute(Sim, Candidates, DeltaTime);
 		}
 	}
@@ -492,8 +517,9 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 		return;
 	}
 
-	// 정체 안전망: 접촉이 깜빡여 dwell이 임계에 못 미친 채 오래 머물면(커밋도 dismiss도 안 됨)
-	// Flight로 돌려보낸다. Flight에서 재캡처는 자유이므로 잃는 것 없이 무한 체류만 막는다.
+	// The stall safety net: if contact flickers and the dwell stays below the threshold for a long time,
+	// so the rope neither commits nor dismisses, it is sent back to Flight. Recapturing from Flight is
+	// free, so nothing is lost and only an unbounded stay is prevented.
 	const float StallTimeout = FMath::Max(WrapConfig.WrapDecisionTime * 10.0f, 1.0f);
 	if (ContactingElapsed >= StallTimeout)
 	{
@@ -502,7 +528,8 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 			*GetName(), Candidates.Num(), *ContactTracker.CandidateBone.ToString(),
 			ContactTracker.CandidateNodes.Num(), ContactTracker.Targets.Num(),
 			ContactTracker.DwellTime, WrapConfig.WrapDecisionTime, ContactingElapsed, StallTimeout);
-		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight).
+		// Left before the wrap was established: report per-instance after cleaning up, through
+		// FinishPreCommitReleaseToFlight.
 		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone,
 			*FString::Printf(TEXT("contacting stalled %.2fs (dwell %.2fs < %.2fs)"),
 				ContactingElapsed, ContactTracker.DwellTime, WrapConfig.WrapDecisionTime));
@@ -516,9 +543,11 @@ bool URopeComponent::ShouldDismissContacting() const
 
 bool URopeComponent::ShouldStartWrapping() const
 {
-	// 판정은 "한 본과의 지속 접촉"(트래커 dwell — 지배 본이 바뀌면 0부터) 기준. 총 경과가 아니라
-	// dwell을 쓰는 것이 원 설계 의도(노드들이 WrapDecisionTime 동안 한 본에 유지)와 일치한다.
-	// 안정 접촉에서는 dwell == 총 경과라 기존과 동일하고, 본이 튀는 전이 프레임에서만 엄격해진다.
+	// The decision is based on sustained contact with one bone, that is the tracker's dwell, which
+	// restarts from zero when the dominant bone changes. Using the dwell rather than the total elapsed
+	// time matches the original intent, namely that the nodes stay on one bone for the decision time.
+	// Under stable contact the dwell equals the total elapsed time, so this is unchanged; it only becomes
+	// stricter on transition frames where the bone jumps.
 	return ContactTracker.DwellTime >= WrapConfig.WrapDecisionTime
 		&& PendingWrapSeed.Latched.Num() > 0
 		&& !PendingWrapSeed.BoneName.IsNone();
@@ -535,8 +564,9 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 		return Seed;
 	}
 
-	// dominant 시드: 시드의 [0]번 latch/anchor 자리다(StartWrappingFromContacting이 [0]을 경로
-	// 빌드 출발점으로 소비하는 계약). anchor 구성이 실패해도 latch는 남긴다(종전 동작).
+	// The dominant seed occupies slot 0 of the seed's latches and anchors; StartWrappingFromContacting
+	// consumes slot 0 as the starting point of the path build by contract. If assembling the anchor
+	// fails, the latch is still kept.
 	{
 		FRopeLatchNode Latch;
 		FRopeSurfaceAnchor Anchor;
@@ -555,16 +585,18 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 		}
 	}
 
-	// 보조 시드(시드 다중화, MaxWrapSeeds > 1): dominant보다 tail 쪽에서 *다른* (mesh, bone)에
-	// dwell을 채운 대상을 추가 시드로 채택한다(예: 양다리 — 반대쪽 다리). head 쪽 대상은 받지
-	// 않는다: Wrapping의 경로/마스크가 latch 이후(tail) 구간만 소유하므로 head 쪽 노드는 고정할
-	// 통로가 없다. 보조 시드는 anchor까지 만들어졌을 때만 유효하다(경로 없이 본에 hold만 하므로
-	// 표면 프레임이 필수). dominant anchor가 없으면 보조도 받지 않는다 — Anchors[0]은 dominant
-	// 자리라는 계약(StartWrappingFromContacting의 경로 출발점)이 보조 anchor로 오염되면 안 된다.
+	// Secondary seeds, used when MaxWrapSeeds is above 1: a target further along the tail than the
+	// dominant one that has accumulated dwell on a different (mesh, bone) is adopted as an extra seed,
+	// such as the opposite leg when catching both. Targets on the head side are not accepted, because
+	// Wrapping's path and mask own only the stretch after the latch, so there is no way to pin a node on
+	// the head side. A secondary seed is valid only once its anchor exists, since it is held against its
+	// bone with no path and therefore needs a surface frame. Without a dominant anchor no secondary is
+	// accepted either: Anchors[0] is contractually the dominant slot, the starting point of the path in
+	// StartWrappingFromContacting, and must not be polluted by a secondary anchor.
 	if (WrapConfig.MaxWrapSeeds > 1 && Seed.Anchors.Num() > 0)
 	{
-		// 노드 간 최소 이격(세그먼트 수): dominant 나선이 쓸 최소 구간을 보장하고, 이웃 노드가
-		// 서로 다른 시드로 갈라지는 것을 막는다.
+		// The minimum separation between nodes, in segments. It guarantees the stretch the dominant helix
+		// needs and stops neighbouring nodes splitting between different seeds.
 		constexpr int32 MinSeedNodeSeparation = 2;
 
 		TArray<const FRopeTrackedContactTarget*> Sorted;
@@ -577,7 +609,8 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 				Sorted.Add(&Target);
 			}
 		}
-		// dominant에 가까운(head 쪽) 대상부터 — 프레임 간 안정적 채택 순서.
+		// Nearest the dominant, that is on the head side, first, which gives a stable adoption order
+		// between frames.
 		Sorted.Sort([this](const FRopeTrackedContactTarget& A, const FRopeTrackedContactTarget& B)
 		{
 			return RopeMath::HeadValidNodeIndex(A.Nodes, Sim.Positions)
@@ -644,8 +677,9 @@ bool URopeComponent::BuildSeedLatchForTarget(const TArray<FRopeContactCandidate>
 			continue;
 		}
 
-		// 같은 본 이름을 쓰는 두 액터가 함께 닿는 프레임의 오귀속 방어(트래커의 (Mesh, Bone) 키와
-		// 같은 이유). 트래커 mesh가 없을 때만 후보 mesh를 그대로 받는다(종전 폴백 유지).
+		// Guards against misattribution on a frame where two actors sharing a bone name are both touched,
+		// for the same reason the tracker keys on the pair of mesh and bone. The candidate's mesh is taken
+		// as-is only when the tracker has none, which preserves the previous fallback.
 		if (TrackedMesh && Candidate.Mesh && Candidate.Mesh != TrackedMesh)
 		{
 			continue;
@@ -698,13 +732,15 @@ bool URopeComponent::BuildSeedLatchForTarget(const TArray<FRopeContactCandidate>
 
 void URopeComponent::StartWrappingFromContacting()
 {
-	// PendingWrapSeed를 바로 BeginWrap에 넣지 않고, WrappingPhase 상태로 변환한다.
-	// 새 시도는 이전 Composite virtual run의 점진 scan 상태를 절대 이어받지 않는다.
+	// PendingWrapSeed is converted into wrapping phase state rather than being handed straight to
+	// BeginWrap.
+	// A new attempt never inherits the incremental scan state of the previous composite virtual run.
 	ResetKinematicVirtualBridges();
 	WrappingPhase.State.Reset();
 
-	// 감길 메시는 접촉에서 확정된다(FRopeContact.SourceMesh → seed). 여기 비어 있으면 시드가
-	// 비정상인 것 — owner 메시로 때우면 cross-actor에서 엉뚱한 본에 붙으므로 폴백 없이 복귀한다.
+	// The mesh to wrap is established by the contact, propagated from FRopeContact::SourceMesh into the
+	// seed. Finding it empty here means the seed is malformed: substituting the owner's mesh would attach
+	// to the wrong bone in a cross-actor wrap, so it returns rather than falling back.
 	const USceneComponent* Mesh = PendingWrapSeed.Mesh.Get();
 	if (!Mesh || PendingWrapSeed.BoneName.IsNone() || PendingWrapSeed.Latched.Num() == 0)
 	{
@@ -714,27 +750,32 @@ void URopeComponent::StartWrappingFromContacting()
 			PendingWrapSeed.Latched.Num(), PendingWrapSeed.Anchors.Num(),
 			*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num(),
 			ContactTracker.DwellTime, ContactingElapsed, Sim.Num());
-		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight).
+		// Left before the wrap was established: report per-instance after cleaning up, through
+		// FinishPreCommitReleaseToFlight.
 		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone, TEXT("invalid wrapping seed"));
 		return;
 	}
 
-	// 무조건 첫 번째 latch node 하나만 기준으로 잡는다
+	// Always take exactly the first latch node as the reference.
 	const FRopeLatchNode& Latch = PendingWrapSeed.Latched[0];
 	FRopeSurfaceAnchor LatchAnchor;
 
-	// 정상 경로: BuildWrapSeedFromContactingState()가 실제 contact candidate 기반으로
-	// surface anchor를 이미 만들어 둔 경우 — 그대로 사용한다.
+	// The normal path: BuildWrapSeedFromContactingState() has already built a surface anchor from a real
+	// contact candidate, so it is used as-is.
 	if (PendingWrapSeed.Anchors.Num() > 0)
 	{
 		LatchAnchor = PendingWrapSeed.Anchors[0];
 		LatchAnchor.Mesh = Mesh;
 	}
-	// 비상비상: 아래 fallback은 contact candidate 기반의 정확한 SDF surface anchor가 없을 때만 쓰는 임시 anchor 경로다.
-	// 현재 rope particle 위치와 임시 normal/tangent로 시작점을 때우므로, wrapping 품질/방향이 흔들릴 수 있다.
-	// 정상 경로는 PendingWrapSeed.Anchors[0]에 실제 contact surface point/normal/tangent가 들어오는 것이다.
-	// Contacting이 매 프레임 시드를 최신 후보로 재조립하게 된 뒤로는(개선 2호) 후보가 있는 한 Anchors[0]가
-	// 항상 채워져 이 경로는 사실상 도달 불가로 추정된다 — 아래 경고로 실전 도달 여부를 관측한 뒤 제거 후보.
+	// Emergency only: the fallback below is a stopgap anchor path used when there is no accurate SDF
+	// surface anchor from a contact candidate.
+	// It substitutes the current rope particle position and a placeholder normal and tangent as the
+	// starting point, so the wrap quality and direction may wobble.
+	// The normal path is for PendingWrapSeed.Anchors[0] to hold a real contact surface point, normal and
+	// tangent.
+	// Since Contacting began reassembling the seed from the newest candidates every frame, Anchors[0] is
+	// always filled while any candidate exists, so this path is believed to be effectively unreachable;
+	// the warning below is there to observe whether it is ever reached in practice before removing it.
 	else if (Sim.Positions.IsValidIndex(Latch.NodeIndex))
 	{
 		UE_LOG(LogDynamicRope, Warning,
@@ -746,9 +787,9 @@ void URopeComponent::StartWrappingFromContacting()
 
 		if (Sim.Positions.IsValidIndex(Latch.NodeIndex + 1))
 		{
-			// tangent는 가능하면 다음 rope node 방향을 쓴다 — "로프가 tail 방향으로 어느 쪽으로
-			// 뻗어 있는가"를 잡기 위한 값으로, 이후 Composite Analytic Helix / Sequential Surface Vector Field에서
-			// 감기는 방향(WindingSign)을 정할 때 중요하다.
+			// The tangent uses the direction to the next rope node where possible. It captures which way
+			// the rope extends towards the tail, which matters later when the composite analytic helix or
+			// the sequential surface vector field decides the winding direction.
 			TangentWorld = (Sim.Positions[Latch.NodeIndex + 1] - Sim.Positions[Latch.NodeIndex])
 				.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 		}
@@ -757,8 +798,8 @@ void URopeComponent::StartWrappingFromContacting()
 		LatchAnchor.NodeIndex = Latch.NodeIndex;
 		LatchAnchor.Bone = Latch.Bone;
 		LatchAnchor.Mesh = Mesh;
-		// 현재 latch node 위치를 bone-local surface position처럼 저장하고,
-		// normal은 실제 SDF normal이 아니라 임시로 UpVector를 쓴다.
+		// Store the current latch node position as though it were a bone-local surface position, and use
+		// an up vector as a placeholder normal rather than a real SDF normal.
 		LatchAnchor.LocalSurfacePosition = BoneXform.InverseTransformPosition(Sim.Positions[Latch.NodeIndex]);
 		LatchAnchor.LocalNormal = BoneXform.InverseTransformVectorNoScale(NormalWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 		LatchAnchor.LocalTangent = BoneXform.InverseTransformVectorNoScale(TangentWorld).GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
@@ -767,10 +808,11 @@ void URopeComponent::StartWrappingFromContacting()
 		LatchAnchor.RopeDistance = 0.0f;
 	}
 
-	// 시드 다중화: Anchors[0]은 dominant(경로 출발점), [1..]는 보조 시드 앵커다. Begin *전에*
-	// 상태에 실어야 경로 빌드가 NumTailNodes를 첫 보조 노드 앞까지로 클램프한다(필드 주석 참고).
-	// dominant latch보다 tail 쪽 노드만 유효하다(시드 조립이 보장하지만, 시드가 오래된 프레임일
-	// 가능성에 대비해 한 번 더 거른다).
+	// Seed multiplexing: Anchors[0] is the dominant seed, which is the path's starting point, and the
+	// rest are secondary seed anchors. They have to be loaded into the state before Begin so the path
+	// build clamps NumTailNodes to end before the first secondary node; see the field's comment.
+	// Only nodes further along the tail than the dominant latch are valid. Seed assembly guarantees that,
+	// but it is filtered once more here in case the seed came from an older frame.
 	for (int32 AnchorIndex = 1; AnchorIndex < PendingWrapSeed.Anchors.Num(); ++AnchorIndex)
 	{
 		const FRopeSurfaceAnchor& Secondary = PendingWrapSeed.Anchors[AnchorIndex];
@@ -784,7 +826,8 @@ void URopeComponent::StartWrappingFromContacting()
 		FMath::Max(0.01f, WrapConfig.WrappingMotionDuration), Sim, MakeWrappingContext()))
 	{
 		LogWrappingFailureState(GetName(), TEXT("StartWrapping.Begin"), WrappingPhase.State, Sim);
-		// 성립 전 이탈 — 정리 후 per-instance 통지(FinishPreCommitReleaseToFlight).
+		// Left before the wrap was established: report per-instance after cleaning up, through
+		// FinishPreCommitReleaseToFlight.
 		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone, TEXT("no valid wrapping anchors"));
 		return;
 	}
@@ -813,16 +856,17 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 	const FRopeWrappingPhase::FContext WrappingCtx = MakeWrappingContext();
 	WrappingPhase.AdvancePathBuild(Sim, WrappingCtx);
 
-	// Composite Analytic Helix가 terminal failure 뒤 SingleBone으로 fallback하면 이미 고정한 virtual node를 즉시
-	// solver에 돌려준다. 새 Single 경로의 front/mass override가 아래에서 같은 프레임에 다시 적용된다.
+	// When the composite analytic helix falls back to a single bone after a terminal failure, the virtual
+	// nodes already pinned are returned to the solver immediately. The new single-bone path's front and
+	// mass overrides are reapplied on the same frame below.
 	if (!WrappingPhase.State.bPathUsesPoseSpaceIsland &&
 		(KinematicVirtualBridges.Num() > 0 || KinematicVirtualBridgeRunCursor > 0))
 	{
 		ReleaseKinematicVirtualBridgesToSolver();
 	}
 
-	// fallback 초기화 자체가 실패한 경우를 위한 마지막 안전망이다. 이후 SingleBone 진행 중 생긴
-	// projection failure는 기존 partial-path 품질 판정에 맡긴다.
+	// The last safety net, for the case where initializing the fallback itself failed. Projection failures
+	// arising later during the single-bone run are left to the existing partial-path quality test.
 	if (WrappingPhase.State.bPathBuildFailed &&
 		WrappingPhase.State.PathBuildFailureReason == TEXT("SingleBoneFallbackInitializationFailure"))
 	{
@@ -838,10 +882,11 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 		return;
 	}
 
-	// 안전장치: 표면 경로 생성이 중간에 실패했을 때, 그때까지 감싼 각도가 임계 미만이면 "조금 닿았는데
-	// 바로 wrapped로 철썩 붙는" 상태를 만들지 않고 release한다. 기준은 회전 수가 아니라 감싼 각도(도,
-	// FailedWrapMinAngleDeg — 0이면 가드 끔): 회전 수는 로프 2πr을 요구해 큰 대상(드래곤 몸통)에서
-	// 물리적으로 도달 불가능한 기준이 됐다. 상세는 config 주석.
+	// A safeguard: when surface path generation fails part-way through, and the angle wrapped up to that
+	// point is below the threshold, the rope releases instead of latching onto something it barely
+	// touched. The measure is the wrapped angle in degrees, FailedWrapMinAngleDeg, where 0 disables the
+	// guard, rather than a number of turns: turns demand a rope of 2*pi*r and become physically
+	// unreachable on a large target such as a dragon's torso. See the config comment for detail.
 	float FailedWrapAngleDeg = 0.0f;
 	if (WrappingPhase.ShouldAbortFailedShortWrap(Sim, WrappingCtx, WrapConfig.FailedWrapMinAngleDeg, FailedWrapAngleDeg))
 	{
@@ -858,8 +903,9 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 
 	if (WrappingPhase.State.bPathUsesPoseSpaceIsland)
 	{
-		// ApplyWrappingMotionOverrides가 오른쪽 실제 표면 노드를 먼저 붙이고 ApplyWrappingKinematicMask가 virtual node를 기본
-		// 동적 상태로 만든 뒤 실행한다. 따라서 front가 닫은 구간만 이 마지막 override로 즉시 조인다.
+		// It runs after ApplyWrappingMotionOverrides has pinned the real surface node on the right and
+		// ApplyWrappingKinematicMask has returned the virtual nodes to their default dynamic state, so this
+		// final override tightens only the stretch the front has closed.
 		UpdateWrappingKinematicVirtualBridges(
 			WrappingPhase.State.VirtualBridgeRuns,
 			WrappingPhase.State.Anchors,
@@ -878,9 +924,10 @@ void URopeComponent::UpdateWrapping(float DeltaTime)
 
 FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 {
-	// CaptureTravelPlane 전용 폴백: whip guide 평면이 없는 던지기(BP 직행 등)에서는 캡처 순간
-	// 스냅샷(속도×누운 방향)으로 유도한 진행 평면 normal을 대신 싣는다. 기본값(BoneCenteredGuidePlane)
-	// 에서는 주입하지 않는다 — BoneCenteredGuidePlane은 whip guide에서 얻은 normal만 사용한다.
+	// A fallback for CaptureTravelPlane alone: on a throw with no whip guide plane, such as a direct
+	// Blueprint call, the travel plane normal derived from the capture-time snapshot, that is the velocity
+	// crossed with the direction the rope lies in, is supplied instead. Nothing is injected under the
+	// default, BoneCenteredGuidePlane, which uses only the normal obtained from the whip guide.
 	bool bGuidePlane = bHasFlightGuidePlaneNormal;
 	FVector GuidePlane = FlightGuidePlaneNormal;
 	if (!bGuidePlane &&
@@ -891,9 +938,10 @@ FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 		GuidePlane = CaptureTravelFrame.PlaneNormal;
 	}
 
-	// wrap 대상 게이트(CanWrapTarget)를 감김 경로에도 적용한다 — 조준/preview/판정이 이미 거른 대상을
-	// 경로 빌드만 모르고 주워 앵커를 까는 불일치를 막는다. 게이트 기본값(전부 허용)이면 결과는
-	// FrameColliders와 동일하다.
+	// Apply the wrap target gate, CanWrapTarget, to the wrapping path as well, which prevents the
+	// inconsistency of the path build alone picking up and anchoring to a target that aiming, the preview
+	// and the judgement have all already filtered out. With the default gate, which permits everything,
+	// the result is identical to the frame colliders.
 	RopeWrapTargets::FilterWrappableColliders(SimFrame.FrameColliders,
 		[this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); },
 		WrappableColliders);
@@ -908,9 +956,10 @@ FRopeWrappingPhase::FContext URopeComponent::MakeWrappingContext() const
 		GuidePlane,
 		CaptureTravelFrame.bValid ? &CaptureTravelFrame : nullptr
 	};
-	// 0=auto 해석은 컴포넌트 경계 책임 — preview 경로(FInput 값 사본에 덮어씀)와 달리 여기는
-	// Config가 참조 전달이라 해석값을 별도 필드로 싣는다. 미주입 시 ContactQueryRadius=0(auto)
-	// 로프만 wrapping 경로에서 질의 반경 0으로 떨어지는 갭이 있었다.
+	// Resolving the automatic value is the component boundary's responsibility. Unlike the preview path,
+	// which overwrites a copy inside its input struct, the config here is passed by reference, so the
+	// resolved value is carried in a separate field. Without injecting it, a rope with an automatic
+	// contact query radius would fall through to a query radius of zero on the wrapping path alone.
 	Ctx.ResolvedContactRadius = GetEffectiveContactQueryRadius();
 	Ctx.ResolveMode = ResolveMode;
 	return Ctx;
@@ -920,7 +969,7 @@ void URopeComponent::CommitWrapping()
 {
 	const USceneComponent* Mesh = WrappingPhase.State.Mesh.Get();
 
-	//Wrapping 정보가 적절하지 않으면 바로 releasing
+	// Release immediately if the wrapping information is not usable.
 	if (!Mesh || WrappingPhase.State.BoneName.IsNone() || WrappingPhase.State.Anchors.Num() == 0)
 	{
 		WrappingPhase.State.PathBuildFailureReason = TEXT("CommitStateInvalid");
@@ -930,13 +979,16 @@ void URopeComponent::CommitWrapping()
 		return;
 	}
 
-	// 커밋 시점 감싼 각도(도): 커밋 품질 관문(아래)과 전이 로그가 공용으로 쓴다. 실패 조기 abort와
-	// 같은 척도라 로그의 angle 수치를 그대로 비교/튜닝에 쓸 수 있다. 계산 불가(축 축퇴 등)면 -1 표기.
+	// The wrapped angle at commit time, in degrees, shared by the commit quality gate below and the
+	// transition log. It is the same measure the early abort on failure uses, so the angle in the log can
+	// be compared and tuned against directly. Where it cannot be computed, as with a degenerate axis, it
+	// is reported as -1.
 	float CommitAngleDeg = -1.0f;
 	WrappingPhase.ComputeBuiltPathWrapAngle(Sim, MakeWrappingContext(), CommitAngleDeg);
 
-	// 커밋 품질 관문(opt-in — CommitMinWrapAngleDeg 0이면 기존 동작 그대로): 경로가 정상 완료됐거나
-	// settle 타임아웃으로 왔어도, 감은 각도가 하한 미만인 부실 랩은 Wrapped로 확정하지 않는다.
+	// The commit quality gate, opt-in through CommitMinWrapAngleDeg where 0 keeps the previous behaviour:
+	// even when the path completed normally or arrived through the settle timeout, a poor wrap whose angle
+	// is below the floor is not confirmed as Wrapped.
 	if (WrapConfig.CommitMinWrapAngleDeg > 0.0f && CommitAngleDeg >= 0.0f
 		&& CommitAngleDeg < WrapConfig.CommitMinWrapAngleDeg)
 	{
@@ -949,10 +1001,12 @@ void URopeComponent::CommitWrapping()
 		return;
 	}
 
-	// 형상 기준 묶임 관문(opt-in — CommitMinWrapCoverageDeg 0이면 기존 동작 그대로): 축 둘레 각도
-	// 커버리지(진동으로 부풀지 않는 기하 척도 — FRopeWrapConfig 주석 참고)가 하한 미만이면 대상을
-	// 둘러싸지 못한 랩이다 — 커밋하지 않는다. 계산 불가(경로점 부족/축 축퇴, -1 표기)면 관문을
-	// 건너뛴다(계산 가능성으로 벌하지 않는다). 전이 로그에 항상 실려 실측 튜닝의 관측값이 된다.
+	// The shape-based binding gate, opt-in through CommitMinWrapCoverageDeg where 0 keeps the previous
+	// behaviour: when the angular coverage about the axis, a geometric measure that oscillation does not
+	// inflate as described on FRopeWrapConfig, is below the floor, the wrap has failed to enclose the
+	// target and is not committed. Where it cannot be computed, from too few path points or a degenerate
+	// axis and reported as -1, the gate is skipped rather than penalizing a rope for being hard to
+	// measure. It is always included in the transition log as an observation for tuning.
 	float CommitCoverageDeg = -1.0f;
 	if (!WrappingPhase.ComputeWrapEnclosureCoverage(CommitCoverageDeg))
 	{
@@ -1028,8 +1082,9 @@ void URopeComponent::CommitWrapping()
 		return;
 	}
 
-	// Wrapping 중 만든 bridge를 버리고 Path를 다시 스캔하지 않는다. 최종 commit seed의 anchor를
-	// 정본으로 재해석해 같은 bridge의 binding만 갱신하고 모두 활성화한다.
+	// The bridges built during Wrapping are not discarded and Path is not scanned again. The anchors of
+	// the final commit seed are reinterpreted as authoritative, which refreshes only the bindings of the
+	// same bridges and activates them all.
 	if (!FinalizeKinematicVirtualBridges(WrappingPhase.State.VirtualBridgeRuns, Seed.Anchors))
 	{
 		WrappingPhase.State.PathBuildFailureReason = TEXT("KinematicVirtualBridgeFinalizeFailed");
@@ -1040,12 +1095,14 @@ void URopeComponent::CommitWrapping()
 		return;
 	}
 
-	// 감길 mesh는 Seed.Mesh로 전파(접촉 유래, cross-actor 포함).
+	// The mesh to wrap propagates through Seed.Mesh, which came from the contact and covers the
+	// cross-actor case.
 	WrapController.BeginWrap(Sim, Seed, SimFrame.OverrideFrame);
 	HoldKinematicVirtualBridges();
 	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
-	// 이 프레임에 풀린 non-anchor 노드가 남은 strain을 다음 Wrapped 틱까지 저장하지 않게 한다.
-	// 다음 Prepare에서는 false로 리셋되어 안정된 Wrapped의 사용자 MaxStretchRatio 설정으로 복귀한다.
+	// Stops a non-anchor node released on this frame carrying its remaining strain into the next wrapped
+	// tick. The next Prepare resets it to false and returns to the user's configured maximum stretch for
+	// the settled wrapped state.
 	SimFrame.bForceNonStretchThisFrame = true;
 
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("bone=%s, %d latched node(s), angle=%.0fdeg, coverage=%.0fdeg"),
@@ -1059,12 +1116,14 @@ void URopeComponent::CommitWrapping()
 
 void URopeComponent::DispatchWrapped(const FRopeWrappedEventInfo& Info)
 {
-	// wrap 성립의 단일 브로드캐스트 지점: 네이티브 훅(서브클래스) → per-instance BP 델리게이트 →
-	// 월드 중앙 신호(대상 반응 컴포넌트가 자기 로프를 몰라도 구독으로 반응). 두 성립 경로(③ preview /
-	// 판정) 공용.
-	// 이 구간 동안 release 통지는 큐로 간다 — 핸들러가 곧바로 ReleaseWrap을 불러도 구독자가 보는 순서는
-	// 항상 Wrapped → Released다(FDeferredReleaseNotice 주석). 통지 중 예외는 없는 코드지만, 깊이를
-	// 짝지어 내리는 것은 이 함수의 단일 책임이므로 마지막에 반드시 내린다.
+	// The single broadcast point for an established wrap: the native subclass hook, then the per-instance
+	// Blueprint delegate, then the world's central signal, which lets a target reaction component respond
+	// by subscribing without knowing which rope wrapped it. It is shared by both routes to an established
+	// wrap, the GuaranteedWrap preview and the judged one.
+	// Release notifications are queued for the duration, so even if a handler immediately calls
+	// ReleaseWrap, subscribers always observe the order wrapped then released; see the comment on
+	// FDeferredReleaseNotice. No code in the notification can throw, but pairing the depth increment with
+	// its decrement is this function's single responsibility, so it always decrements at the end.
 	++WrappedDispatchDepth;
 	NotifyWrapped(Info);
 	OnRopeWrapped.Broadcast(Info);
@@ -1079,13 +1138,14 @@ void URopeComponent::DispatchWrapped(const FRopeWrappedEventInfo& Info)
 
 void URopeComponent::FlushDeferredReleaseNotices()
 {
-	// 중첩된 Wrapped 통지가 아직 남아 있으면 가장 바깥에서만 흘린다(순서 보장의 유일한 지점).
+	// While a nested wrapped notification is still outstanding, only the outermost one drains, which is
+	// the single point that guarantees the ordering.
 	if (WrappedDispatchDepth > 0 || DeferredReleaseNotices.Num() == 0)
 	{
 		return;
 	}
 
-	// 흘리는 도중 핸들러가 또 release를 부를 수 있으므로 큐를 먼저 비우고 사본을 돈다.
+	// A handler may call release again while draining, so the queue is emptied first and a copy is walked.
 	TArray<FDeferredReleaseNotice> Pending = MoveTemp(DeferredReleaseNotices);
 	DeferredReleaseNotices.Reset();
 	for (const FDeferredReleaseNotice& Notice : Pending)
@@ -1099,16 +1159,19 @@ FRopeWrappedEventInfo URopeComponent::MakeWrappedEventInfo(const FRopeWrapState&
 {
 	FRopeWrappedEventInfo Info;
 	Info.Bone = Seed.BoneName;
-	// 성립 주체(이 로프) — 중앙 신호 구독자의 engagement 집합 키. release 신호도 같은 포인터를 싣는다.
+	// The rope that established it, which is the engagement set key for subscribers of the central signal.
+	// The release signal carries the same pointer.
 	Info.Rope = const_cast<URopeComponent*>(this);
-	// 이벤트 페이로드는 읽기 전용 의미라 대상 mesh의 const를 벗겨 BP에 노출한다(수정 계약 아님).
+	// The event payload is read-only by intent, so the target mesh's constness is cast away purely to
+	// expose it to Blueprint; it is not a licence to modify it.
 	Info.Mesh = const_cast<USceneComponent*>(Seed.Mesh.Get());
 	Info.ResolveMode = ResolveMode;
 	Info.AngleDeg = AngleDeg;
 	Info.CoverageDeg = CoverageDeg;
 	Info.AnchorCount = Seed.Anchors.Num();
 
-	// 앵커가 걸친 본 전체(대표 본 우선, 중복 제거) — 양다리처럼 복수 본 성립의 전체 정보.
+	// Every bone the anchors span, with the representative bone first and duplicates removed, which is the
+	// full picture when a wrap establishes across several bones such as both legs.
 	if (!Seed.BoneName.IsNone())
 	{
 		Info.Bones.Add(Seed.BoneName);
@@ -1128,11 +1191,13 @@ void URopeComponent::AbortWrapping(ERopeReleaseReason Reason)
 	UE_LOG(LogDynamicRope, Log, TEXT("[%s] AbortWrapping reason=%d"),
 		*GetName(), static_cast<int32>(Reason));
 
-	// Captured 짝 맞춤: Wrapping은 Contacting(Captured 발화)에서만 진입하므로 이 abort는 항상 앞선 Captured와
-	// 짝이다. 성립 전이라 per-instance만(중앙 신호는 커밋된 wrap 전용). 본 이름은 값으로 잡아 두고
-	// **정리가 다 끝난 뒤에** 통지한다 — FinishPreCommitReleaseToFlight와 같은 계약(정리 전에 쏘면
-	// 핸들러의 ReleaseWrap/재던지기가 아직 살아 있는 wrapping 상태 위에서 돌고, 그 결과를 이 아래
-	// 정리가 덮어쓴다). 호출자는 전부 SetPhase(Releasing)을 마친 뒤 들어온다.
+	// Pairing with Captured: Wrapping is only ever entered from Contacting, which fires Captured, so this
+	// abort always pairs with a preceding one. It is before the commit, so only the per-instance delegate
+	// fires; the central signal is for committed wraps alone. The bone name is captured by value and
+	// reported only after the cleanup is complete, following the same contract as
+	// FinishPreCommitReleaseToFlight: reporting first would run a handler's ReleaseWrap or re-throw on top
+	// of wrapping state that is still alive, and the cleanup below would then overwrite the result.
+	// Every caller enters having already called SetPhase(Releasing).
 	const FName AbortedBone = WrappingPhase.State.BoneName;
 
 	WrappingPhase.ReleaseAnchoredNodesToSolver(Sim, SimFrame.OverrideFrame);
@@ -1148,8 +1213,9 @@ void URopeComponent::UpdateWrappingKinematicVirtualBridges(
 	const TArray<FRopeVirtualBridgeRun>& Runs,
 	const TArray<FRopeSurfaceAnchor>& Anchors, float FrontDistance)
 {
-	// Path의 virtual run 탐색은 WrappingPhase가 한 번만 수행한다. 컴포넌트는 아직 소비하지 않은 run에
-	// 양쪽 anchor를 연결해 runtime bridge를 한 번 만들고, anchor가 늦으면 같은 run부터 다음 프레임 재시도한다.
+	// The wrapping phase discovers each virtual run in Path exactly once. The component connects the
+	// anchors on both sides of a run it has not consumed yet to build the runtime bridge once, and retries
+	// from the same run next frame when an anchor is late.
 	KinematicVirtualBridgeRunCursor = FMath::Clamp(
 		KinematicVirtualBridgeRunCursor, 0, Runs.Num());
 	while (KinematicVirtualBridgeRunCursor < Runs.Num())
@@ -1159,7 +1225,8 @@ void URopeComponent::UpdateWrappingKinematicVirtualBridges(
 		const FRopeSurfaceAnchor* RightAnchor = FindSurfaceAnchorByNode(Anchors, Run.RightNodeIndex);
 		if (!LeftAnchor || !RightAnchor)
 		{
-			// 경로와 anchor 추가 순서가 갈린 경우 현재 run을 소비하지 않고 다음 프레임에 재시도한다.
+			// Where the order of path points and anchor additions diverged, the current run is left
+			// unconsumed and retried next frame.
 			break;
 		}
 
@@ -1184,8 +1251,9 @@ void URopeComponent::UpdateWrappingKinematicVirtualBridges(
 		++KinematicVirtualBridgeRunCursor;
 	}
 
-	// 오른쪽 anchor 거리까지 front가 도달했다는 것은 ApplyWrappingMotionOverrides가 양쪽 경계를 실제 표면 위치로
-	// 고정했다는 뜻이다. 그 프레임부터 내부 virtual node를 직선으로 묶어 Wrapped 전 출렁임을 없앤다.
+	// The front reaching the distance of the right-hand anchor means ApplyWrappingMotionOverrides has
+	// pinned both boundaries to real surface positions. From that frame the interior virtual nodes are
+	// tied into a straight line, which removes the sway before Wrapped.
 	const float FrontTolerance = FMath::Max(0.01f, Sim.SegmentLength * 0.001f);
 	for (FKinematicVirtualBridge& Bridge : KinematicVirtualBridges)
 	{
@@ -1205,8 +1273,9 @@ bool URopeComponent::FinalizeKinematicVirtualBridges(
 	const TArray<FRopeVirtualBridgeRun>& Runs,
 	const TArray<FRopeSurfaceAnchor>& CommitAnchors)
 {
-	// Commit은 같은 run을 다시 찾거나 bridge를 재생성하지 않는다. Wrapping 중 산출/등록된 목록이
-	// 완전한지 먼저 확인한 뒤 최종 seed anchor 사본으로 binding만 교체한다.
+	// The commit neither searches for the same run again nor recreates the bridge. It first confirms that
+	// the list produced and registered during Wrapping is complete, then replaces only the bindings with
+	// copies of the final seed anchors.
 	if (KinematicVirtualBridgeRunCursor != Runs.Num() || KinematicVirtualBridges.Num() != Runs.Num())
 	{
 		UE_LOG(LogRopeWrap, Error,
@@ -1276,7 +1345,8 @@ void URopeComponent::HoldKinematicVirtualBridges()
 	{
 		if (!Bridge.bActive)
 		{
-			// 경로 생성만 완료되고 front가 아직 오른쪽 anchor에 도달하지 않은 구간은 solver에 맡긴다.
+			// The stretch where path generation is complete but the front has not yet reached the
+			// right-hand anchor is left to the solver.
 			continue;
 		}
 
@@ -1319,7 +1389,8 @@ void URopeComponent::HoldKinematicVirtualBridges()
 			const float Alpha = static_cast<float>(BridgeNodeIndex + 1) /
 				static_cast<float>(NumBridgeSegments);
 			const FVector TargetWorld = FMath::Lerp(LeftWorld, RightWorld, Alpha);
-			// Pos와 Prev를 함께 덮어 보정 속도 주입을 없애고, solver가 다시 밀지 못하게 hard pin한다.
+			// Overwrite both the current and previous positions so the correction injects no velocity, and
+			// hard pin it so the solver cannot push it again.
 			SimFrame.OverrideFrame.SetPosition(NodeIndex, TargetWorld, /*bZeroVelocity*/ true);
 			SimFrame.OverrideFrame.SetInvMass(NodeIndex, 0.0f);
 		}
@@ -1328,8 +1399,9 @@ void URopeComponent::HoldKinematicVirtualBridges()
 
 void URopeComponent::ResetKinematicVirtualBridges()
 {
-	// bridge binding과 WrappingPhase 산출물 소비 cursor를 함께 비워야 다음 wrap이 이전 run을 이어 읽지
-	// 않는다. 이 함수 자체는 질량을 복구하지 않으므로 활성 bridge 해제에는 Release*를 쓴다.
+	// The bridge bindings and the cursor consuming the wrapping phase's output have to be cleared together,
+	// or the next wrap would carry on reading the previous run. This function does not restore mass, so
+	// use the release helpers to deactivate a live bridge.
 	KinematicVirtualBridges.Reset();
 	KinematicVirtualBridgeRunCursor = 0;
 	bWrappedMassMaskDirty = true;
@@ -1337,8 +1409,9 @@ void URopeComponent::ResetKinematicVirtualBridges()
 
 void URopeComponent::ReleaseKinematicVirtualBridgesToSolver()
 {
-	// Composite→Single fallback, abort, 정상 release 공용 경로. 활성 여부와 관계없이 등록된 모든
-	// virtual node를 동적 질량으로 돌려 stale hard pin이 다음 phase까지 남지 않게 한다.
+	// The path shared by the composite-to-single fallback, aborts and a normal release. Every registered
+	// virtual node is returned to dynamic mass regardless of whether it is active, so no stale hard pin
+	// survives into the next phase.
 	if (KinematicVirtualBridges.Num() > 0)
 	{
 		SimFrame.OverrideFrame.EnsureSize(Sim.Num());
@@ -1351,7 +1424,8 @@ void URopeComponent::ReleaseKinematicVirtualBridgesToSolver()
 					continue;
 				}
 
-				// bridge 해제 프레임에 Pos-Prev 차이가 속도로 튀지 않도록 현재 위치에서 정지시킨다.
+				// Stop it at its current position so the difference between the current and previous
+				// positions does not become a velocity spike on the frame the bridge is released.
 				const bool bStartPin = NodeIndex == 0 && Sim.bStartPinned;
 				SimFrame.OverrideFrame.SetInvMass(NodeIndex, bStartPin ? 0.0f : 1.0f);
 				SimFrame.OverrideFrame.SetPrevFromPosition(NodeIndex);
@@ -1367,14 +1441,16 @@ void URopeComponent::ReleaseKinematicVirtualBridgesToSolver()
 #pragma region Wrapped_Hold_And_Pull_Sampling
 
 // ===== Wrapped ==============================================================
-// PrepareSimFrame의 Wrapped 케이스는 아래 4단계 헬퍼의 고정 순서로 돈다:
+// The Wrapped case of PrepareSimFrame runs the four helpers below in a fixed order:
 // ① HoldWrappedNodesToBone → ② UpdateWrappedPullSample → ③ ApplyWrappedTraction → ④ CheckWrappedAutoRelease
 
 bool URopeComponent::HoldWrappedNodesToBone(float DeltaTime)
 {
-	// ① latch된 node는 skinned bone을 따라간다(GT). latch 노드는 InvMass=0이라 솔브는 자유 구간만.
-	// Hold가 false면 wrap 대상 mesh가 사라진 것(예: cross-actor 대상 액터 파괴) →
-	// 노드를 솔버에 되돌려 안전하게 release한다(dangling 포인터 역참조 방지는 Hold 내부에서).
+	// Step one: latched nodes follow their skinned bones on the game thread. A latched node has an inverse
+	// mass of 0, so the solve covers only the free stretches.
+	// Hold returning false means the wrapped mesh is gone, as when a cross-actor target actor is
+	// destroyed, so the nodes are returned to the solver and the rope releases safely; Hold itself is what
+	// avoids dereferencing the dangling pointer.
 	if (!WrapController.Hold(Sim, DeltaTime, SimFrame.OverrideFrame))
 	{
 		const FName Bone = WrapController.State.BoneName;
@@ -1392,16 +1468,19 @@ bool URopeComponent::HoldWrappedNodesToBone(float DeltaTime)
 
 bool URopeComponent::CheckWrappedAutoRelease(float DeltaTime)
 {
-	// ③ GuaranteedWrap: 자동 release(장력/거리)는 무효 — "무조건 성립"의 보장은 해제에도 대칭이라
-	// 명시 해제(ReleaseWrap/CutRope/게임 이벤트)만 유효하다(2026-07-13 회의 결정 G). ①②는 종전대로.
-	// (대상 mesh 소실 release는 자동 release가 아니라 안전 계약이라 모드 무관 — HoldWrappedNodesToBone.)
+	// Step three, for GuaranteedWrap: the automatic tension and distance releases do not apply, because
+	// the guarantee of establishing without fail is symmetric and only an explicit release, whether
+	// ReleaseWrap, CutRope or a game event, is valid. The other modes behave as before.
+	// A release caused by losing the target mesh is a safety contract rather than an automatic release, so
+	// it applies in every mode; see HoldWrappedNodesToBone.
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
 		return false;
 	}
 
-	// ④-1 임계 장력 release: 최대 장력이 TensionReleaseForce를 TensionReleaseTime 동안 지속해 넘으면
-	// 풀린다(순간 스파이크 무시). 0 = 비활성. 흐름은 mesh-lost release와 동일, 사유만 Tension.
+	// Step four, part one, the tension release: the rope lets go once the maximum tension has stayed above
+	// TensionReleaseForce for TensionReleaseTime, which ignores momentary spikes. 0 disables it. The flow
+	// matches the lost-mesh release and only the reason differs.
 	if (HoldConfig.TensionReleaseForce > 0.0f)
 	{
 		TensionOverTime = (WrapController.State.Tension > HoldConfig.TensionReleaseForce)
@@ -1416,9 +1495,10 @@ bool URopeComponent::CheckWrappedAutoRelease(float DeltaTime)
 		}
 	}
 
-	// ④-2 거리 release: 손~앵커 직선 거리의 가용 로프 길이 초과분(테더 초과분과 동일 소스 —
-	// UpdateConstraintTether가 이번 프레임 갱신한 LengthConstraintState.LastViolation)이 한계를 넘으면 놓친다.
-	// 기하 기반이라 지속 시간 없이 즉시 판정(장력처럼 노이즈가 없다).
+	// Step four, part two, the distance release: the rope lets go once the straight-line distance from the
+	// hand to the anchor exceeds the available rope length by more than the limit. It uses the same source
+	// as the tether overshoot, namely the violation UpdateConstraintTether refreshed this frame.
+	// Being geometric it is decided immediately with no duration, since unlike tension it carries no noise.
 	if (HoldConfig.DistanceReleaseSlack > 0.0f &&
 		LengthConstraintState.LastViolation > HoldConfig.DistanceReleaseSlack)
 	{

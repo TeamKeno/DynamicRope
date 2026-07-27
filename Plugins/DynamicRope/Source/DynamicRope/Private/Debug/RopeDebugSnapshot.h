@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// rope 디버그의 한 프레임 스냅샷. sim tick(GT)이 채워 URopeDebugSubsystem에 제출하고,
-// FGameplayDebuggerCategory_Rope가 읽어 AddShape/AddTextLine으로 그린다. 즉시모드 DrawDebug*를
-// 대체하는 데이터 운반체 — 모두 POD라 UObject 결합이 없다(솔버/로직 철학과 동일).
+// One frame's debug snapshot of a rope. The sim tick fills it in on the game thread and submits it to
+// URopeDebugSubsystem, and FGameplayDebuggerCategory_Rope reads it back and draws it through AddShape
+// and AddTextLine. It is the data carrier that replaces immediate-mode debug drawing, and like the
+// solver and the logic classes it is plain data with no UObject coupling.
 
 #pragma once
 
@@ -13,27 +14,31 @@
 #include "Core/RopeWrappingTypes.h"
 
 /**
- * 캡처 범위 비트. 카테고리의 보기 토글에서 만들어져 **캡처 측까지** 전달된다 — 그리기에서만 막으면
- * 꺼진 보기의 수집 비용(노드×콜라이더 재질의, Flight 추가 sweep, collider 형상/컨벡스 헐 재구성)이
- * 그대로 남아 디버거가 시뮬레이션을 계속 무겁게 한다.
- * Aim은 Wielder를 라이브로 읽고 Advanced는 표시 상세도라 캡처 비용이 없다 — 비트를 두지 않는다.
- * 헤더 요약(phase/노드 위치/솔브 경로)은 항상 채운다: 어느 보기를 켜든 필요하고 값도 싸다.
+ * Capture scope bits. They are produced by the category's view toggles and carried all the way to the
+ * capture side. Blocking only the drawing would leave the collection cost of a disabled view in
+ * place, namely re-querying nodes against colliders, the extra Flight sweep, and rebuilding collider
+ * shapes and convex hulls, so the debugger would keep weighing down the simulation.
+ * Aim reads the wielder live and Advanced only changes display detail, so neither costs anything to
+ * capture and neither has a bit.
+ * The header summary, that is the phase, the node positions and the solve path, is always filled in:
+ * it is needed whichever view is on and it is cheap.
  */
 enum class ERopeDebugCapture : uint8
 {
 	None      = 0,
-	// 노드별 근접 재질의 — 노드 수 × collider 수의 CPU Query라 가장 비싸다.
+	// Per-node proximity re-query. The most expensive item, at one CPU query per node per collider.
 	Nodes     = 1 << 0,
-	// Flight 노드 재스윕 + 후보/whip 가이드 사본.
+	// The Flight node re-sweep plus copies of the candidates and the whip guide.
 	Flight    = 1 << 1,
-	// Wrapped 상세(latch 사본/pull 관측치)와 감김 축.
+	// Wrapped detail, meaning copies of the latches and the pull observations, plus the wrap axis.
 	Wrap      = 1 << 2,
-	// collider 형상 사본 + 컨벡스 헐 엣지 재구성(O(plane³)).
+	// Collider shape copies plus convex hull edge reconstruction, which is cubic in the plane count.
 	Colliders = 1 << 3,
 };
 ENUM_CLASS_FLAGS(ERopeDebugCapture);
 
-// flight 노드별 디버그: 이전→현재 이동 + (필요 시) 접촉. 캡처 대상 로프에서만 채워진다.
+// Per-node Flight debug: the movement from the previous position to the current one, plus the contact
+// where there is one. Filled in only for the rope being captured.
 struct FRopeFlightNodeDebug
 {
 	int32 NodeIndex = INDEX_NONE;
@@ -41,53 +46,64 @@ struct FRopeFlightNodeDebug
 	FVector Position = FVector::ZeroVector;
 	bool bNearBody = false;
 	FRopeContact Contact;
-	// Contact.SourceMesh를 캡처 시점에 굳힌 비교 전용 키(후보와 같은 대상인지 판정). 스냅샷은 몇 프레임
-	// 살아남으므로 그리기 시점에 raw 포인터로 키를 만들면 이미 파괴된 컴포넌트를 역참조한다.
+	// The source mesh of the contact, frozen at capture time into a comparison-only key that says
+	// whether a candidate refers to the same target. A snapshot outlives its frame by several frames,
+	// so building the key from a raw pointer at draw time would dereference an already-destroyed
+	// component.
 	FObjectKey ContactMeshKey;
 };
 
-// collider 시각화 형상 종류. 채우기(FillDebugSnapshot)가 상호 배타 accessor로 분류한다.
+// The kind of collider visualization shape. FillDebugSnapshot classifies them through mutually
+// exclusive accessors.
 enum class ERopeDebugColliderShape : uint8
 {
-	// A-B 세그먼트 + 반지름(스켈레탈 본 / 정적 스피어·스필)
+	// An A-to-B segment plus a radius, for skeletal bones and static spheres and sphyls.
 	Capsule,
-	// 회전 OBB(Center/Rot/HalfExtents) — 정적 박스
+	// An oriented box, from its centre, rotation and half extents, for static boxes.
 	Box,
-	// 헐 와이어프레임(ConvexEdges: 연속 2개가 한 엣지) — 정적 컨벡스/전단 박스
+	// A hull wireframe, where consecutive pairs in ConvexEdges form one edge, for static convexes and
+	// shear boxes.
 	Convex,
-	// 월드 AABB 폴백(SDF 등 형상 미상)
+	// The world AABB fallback, for shapes of unknown form such as SDFs.
 	Bounds,
 };
 
-// 노드별 **근접** 진단: post-solve 노드 위치를 collider에 다시 질의해 "이 노드가 어느 면을 어느 법선으로
-// 마주하고 있나"를 데이터로 남긴다(GPU 런타임은 접촉을 리드백하지 않으므로 디버그 전용 CPU 질의).
-// solver가 실제로 처리한 접촉이 **아니다** — 질의 반경을 CollisionRadius보다 넓혀 던지므로 닿지 않은
-// 근처 노드도 잡힌다. 노드가 벽/면에 붙는 증상을 눈으로 확정하기 위한 것이라 그 편이 유용하다.
+// Per-node proximity diagnostics. It re-queries the post-solve node positions against the colliders to
+// record, as data, which face a node is up against and with what normal. The GPU runtime does not read
+// contacts back, so this is a debug-only CPU query.
+// These are not the contacts the solver actually resolved: the query radius is deliberately wider than
+// the collision radius, so nearby nodes that never touched are caught too. That is what makes it
+// useful for confirming by eye that a node is sticking to a wall or a face.
 struct FRopeNodeProximityDebug
 {
 	int32   NodeIndex = INDEX_NONE;
-	// 노드 월드 위치(화살표 시작)
+	// The node's world position, which is where the arrow starts.
 	FVector Position = FVector::ZeroVector;
-	// 접촉 바깥 법선(단위) — 어느 면인지 = 이 방향
+	// The outward contact normal as a unit vector; which face it is showing is this direction.
 	FVector Normal = FVector::ZeroVector;
-	// 이 접촉을 낸 collider의 IsWorldStatic() — 색 구분용. 본 유무로 추론하지 않는다(본을 보고하지 않는
-	// 커스텀 non-static collider와, 가상 본을 가진 정적 프롭이 둘 다 반례다).
+	// IsWorldStatic() of the collider that produced this contact, used to colour it. It is not inferred
+	// from whether a bone exists, since a custom non-static collider that reports no bone and a static
+	// prop carrying a virtual bone are both counterexamples.
 	bool    bWorldStatic = false;
-	// 스켈레탈이면 본 이름(없으면 None=정적).
+	// The bone name on a skeletal collider, or None for a static one.
 	FName   Bone = NAME_None;
 };
 
-// collider 시각화 한 개. Shape에 따라 해당 필드만 유효하다.
+// One collider visualization. Only the fields matching Shape are valid.
 struct FRopeDebugCollider
 {
 	ERopeDebugColliderShape Shape = ERopeDebugColliderShape::Bounds;
-	// 정적 월드(박스/컨벡스/정적 캡슐) vs 스켈레탈 — 색 구분용.
+	// Static world geometry, meaning boxes, convexes and static capsules, versus skeletal, used to
+	// colour it.
 	bool bWorldStatic = false;
-	// 정적 메시 랩 대상(URopeWrapTargetComponent가 서빙): 가상 본은 있지만(감지 참여) SourceMesh가 스켈레탈이
-	// 아니다. 감김 가능 대상 전체가 아니라 이 정적 opt-in 대상만 세는 값이라 화면 라벨도 staticWrapTargets다.
+	// A static mesh wrap target served by URopeWrapTargetComponent: it has a virtual bone, so it joins
+	// detection, but its source mesh is not skeletal. It counts only these static opt-in targets rather
+	// than every wrappable target, which is why the on-screen label reads staticWrapTargets.
 	bool bWrapTarget = false;
-	// 이 collider에 실제로 감길 수 있는가 = 귀속(본+메시)이 유효하고 CanWrapTarget() 게이트를 통과했는가.
-	// IsWorldStatic()과는 별개다 — 감지에는 들어오지만 게이트가 거부하는 대상이 있다.
+	// Whether this collider can actually be wrapped, meaning its attribution of bone and mesh is valid
+	// and it passed the CanWrapTarget() gate.
+	// That is separate from IsWorldStatic(): a target can take part in detection and still be refused
+	// by the gate.
 	bool bWrapAllowed = false;
 
 	// Capsule
@@ -100,160 +116,196 @@ struct FRopeDebugCollider
 	FQuat   Rot = FQuat::Identity;
 	FVector HalfExtents = FVector::ZeroVector;
 
-	// Convex: 월드 공간 엣지 끝점(연속 2개 = 한 엣지). 디버그 그리기 전용(런타임 콜라이더엔 저장 안 함).
+	// Convex only: world-space edge endpoints, where consecutive pairs form one edge. It exists purely
+	// for debug drawing and is not stored on the runtime collider.
 	TArray<FVector> ConvexEdges;
 
-	// Bounds 폴백
+	// The bounds fallback.
 	FBox Bounds = FBox(ForceInit);
 };
 
-// 한 로프의 한 프레임 디버그 스냅샷. centerline/flight/whip/wrapped/collider를 한데 담는다.
-// 비어 있는 섹션은 b*Has 플래그로 구분(예: bHasFlight는 Flight phase에서만 true).
+// One frame's debug snapshot of a single rope, holding the centreline, Flight, whip, Wrapped and
+// collider sections together. An empty section is identified by its bHas flag; bHasFlight, for
+// example, is only true during the Flight phase.
 struct FRopeDebugSnapshot
 {
-	// 제출 프레임(GFrameCounter). 카테고리는 너무 오래된 스냅샷을 무시한다(대상 해제 후 잔상 방지).
+	// The frame the snapshot was submitted on. The category ignores snapshots that are too old, which
+	// stops a released target leaving an afterimage on screen.
 	uint64 FrameStamp = 0;
 
-	//~ centerline(항상) ---------------------------------------------------
-	// 프레임 종료 시점 phase(제출 직전). 아래 PhaseAtFrameStart와 다르면 이번 프레임에 전이한 것이다.
+	//~ Centreline, always present ------------------------------------------
+	// The phase at the end of the frame, just before submission. Differing from PhaseAtFrameStart below
+	// means the rope changed phase during this frame.
 	ERopePhase Phase = ERopePhase::Free;
-	// 프레임 시작(Prepare 진입) 시점 phase. 전이는 Prepare/Finalize 안에서 일어나므로, 한 스냅샷이
-	// "Flight에서 시작해 Contacting으로 끝난 프레임"처럼 전이 전후를 함께 담는다 — 이때 flight 오버레이는
-	// 전이를 일으킨 바로 그 관측이라 유효하다(phase가 다르다는 이유로 숨기면 전이 원인을 잃는다).
+	// The phase at the start of the frame, on entering Prepare. Transitions happen inside Prepare and
+	// Finalize, so one snapshot can span both sides of a transition, such as a frame that began in
+	// Flight and ended in Contacting. The Flight overlay is still valid on such a frame, because it
+	// holds the very observations that caused the transition; hiding it because the phase no longer
+	// matches would discard the reason the transition happened.
 	ERopePhase PhaseAtFrameStart = ERopePhase::Free;
-	// centerline 위치. Nodes/Flight/Wrap 오버레이만 읽으므로 그 보기가 하나라도 켜졌을 때만 채운다 —
-	// 기본(aim만) 상태에서는 비어 있다(헤더 nodes=는 아래 NodeCount 스칼라가 낸다).
+	// The centreline positions. Only the Nodes, Flight and Wrap overlays read them, so they are filled
+	// in only when at least one of those views is on and are left empty in the default aim-only state.
+	// The node count in the header comes from the NodeCount scalar below instead.
 	TArray<FVector> Positions;
-	// 노드 수. Positions를 복사하지 않는 보기에서도 헤더가 nodes=를 내야 하므로 항상 담는다.
+	// The node count. It is always carried, because the header has to report it even in views that do
+	// not copy the positions.
 	int32 NodeCount = 0;
-	// centerline 상에서 강조할 latch 노드 인덱스.
+	// The index of the latch node to highlight on the centreline.
 	TArray<int32> LatchedNodes;
 
-	//~ 헤더 표시용 프레임 상태 -------------------------------------------
-	// 화면 한 장이 하나의 시간 기준만 쓰도록, 헤더도 라이브 컴포넌트 대신 이 값들을 읽는다. 라이브와
-	// 섞으면 같은 노드가 두 시점에 겹쳐 그려져 시뮬 떨림처럼 보인다.
-	// (주의: GPU 경로에서는 Sim.Positions 자체가 리드백 미러라 1~2프레임 지연된다. 여기서 맞추는 것은
-	//  디버거 내부의 일관성이지, 실제 GPU 버퍼로 그려지는 튜브와의 일치가 아니다.)
-	// 정체성 — 로프가 여럿일 때 화면의 어느 줄이 어느 컴포넌트인지 가리는 유일한 수단(구 `Rope #N`
-	// 인덱스는 수집 순서라 프레임마다 바뀔 수 있다). 소유 액터까지 내는 이유는 cross-actor 감김에서
-	// "어느 캐릭터의 로프인가"가 인덱스로는 드러나지 않기 때문.
+	//~ Frame state for the header ------------------------------------------
+	// The header reads these values rather than the live component so that one screen only ever uses a
+	// single point in time. Mixing them with live data would draw the same node at two different
+	// moments and read as simulation jitter.
+	// Note that on the GPU path Sim.Positions is itself a readback mirror and lags one to two frames.
+	// What is being aligned here is consistency within the debugger, not agreement with the tube the
+	// GPU buffers actually draw.
+	// Identity. With several ropes on screen this is the only way to tell which line belongs to which
+	// component, since an index into the collection order can change from frame to frame. The owning
+	// actor is reported as well because in a cross-actor wrap an index does not reveal which character
+	// the rope belongs to.
 	FString ComponentName;
 	FString OwnerActorName;
-	// 도달 모드. 모드마다 성립 계약과 유효한 설정이 통째로 달라, 화면의 나머지를 해석하는 전제다.
+	// The resolve mode. Each mode has an entirely different contract for establishing a wrap and a
+	// different set of meaningful settings, so it is the premise for reading the rest of the screen.
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
-	// 해석된 노드 충돌 반지름(cm) = GetEffectiveCollisionRadius(). 솔버가 노드를 접촉 표면에서 띄우는
-	// 거리이고, 기본(SolverConfig.CollisionRadius=0=auto)에서는 렌더 튜브 Radius와 같다.
-	// latch 마커의 크기를 이 값에서 유도해 "박스가 얼마만 한가"가 실제 의미를 갖게 한다.
+	// The resolved node collision radius (cm), from GetEffectiveCollisionRadius(). It is how far the
+	// solver holds a node off a contact surface, and with the default automatic setting it equals the
+	// render tube radius.
+	// The latch marker size is derived from it, which gives "how big is that box" a real meaning.
 	float NodeCollisionRadius = 0.0f;
 
 	FName WrapBoneName = NAME_None;
 	bool  bSleeping = false;
 	float LodScale = 1.0f;
-	// tube 적격성 계산 입력(씬 프록시와 같은 소스인 설정값).
+	// The input to the tube eligibility calculation, taken from the same settings the scene proxy uses.
 	int32 NumParticles = 0;
 	int32 TubeSmoothingSubdiv = 1;
-	// 솔브 경로 토큰 산출 입력 — 세 값의 조합이 6종을 가른다(bSleeping 포함).
+	// The input to the solve path token; the combination of the three values, including bSleeping,
+	// distinguishes six cases.
 	bool  bSolveThisFrame = false;
 	bool  bGpuStepped = false;
 	bool  bLogicOverride = false;
 
-	//~ flight(Flight phase에서만) ----------------------------------------
-	// (캡처 판정 3종은 담지 않는다: MinLatchNodes는 런타임에 안 바뀌는 config 상수고, bShouldCapture는
-	//  true가 되는 즉시 같은 프레임에 Contacting으로 전이해 헤더의 `Flight→Contacting`과 중복이며,
-	//  TrackerNodes의 위치는 후보 박스가 이미 그린다. 셋 다 찰나의 값이라 누적해서 읽는 stat RopeFlight의
-	//  Candidate Nodes / Capture Decisions가 유효한 형태다.)
+	//~ Flight, during the Flight phase only ---------------------------------
+	// The three capture decision values are deliberately absent. MinLatchNodes is a config constant
+	// that does not change at runtime; bShouldCapture transitions to Contacting within the same frame
+	// it becomes true, which duplicates the Flight to Contacting arrow in the header; and the positions
+	// in TrackerNodes are already drawn by the candidate boxes. All three are momentary, so the
+	// accumulating counters in stat RopeFlight, namely the candidate nodes and capture decisions, are
+	// the useful form.
 	bool bHasFlight = false;
 	FName TrackerBone = NAME_None;
-	// dominant 대상의 mesh를 캡처 시점에 변환한 키. 접촉 대상의 식별 계약은 (Mesh, Bone) 쌍이다
-	// (FRopeContactTracker 주석 참조) — 본 이름만 비교하면 같은 스켈레톤을 쓰는 두 액터가 붙어 있을 때
-	// 엉뚱한 후보가 dominant처럼 강조된다.
+	// The dominant target's mesh, converted to a key at capture time. The identity contract for a
+	// contact target is the pair of mesh and bone, described on FRopeContactTracker: comparing bone
+	// names alone would highlight the wrong candidate as dominant whenever two actors sharing a
+	// skeleton are touching.
 	FObjectKey TrackerMeshKey;
 	TArray<FRopeFlightNodeDebug> NodeDebug;
-	// 주의: Candidates[].Mesh는 raw 포인터다. 스냅샷이 몇 프레임 살아남으므로 **역참조 금지** —
-	// 대상 일치 판정은 아래 CandidateMeshKeys(캡처 시 변환)로 한다. 인덱스는 Candidates와 1:1이다.
+	// Note that Candidates[].Mesh is a raw pointer. A snapshot outlives its frame by several frames, so
+	// it must never be dereferenced; decide target identity through CandidateMeshKeys below, which is
+	// converted at capture time and indexed one-to-one with Candidates.
 	TArray<FRopeContactCandidate> Candidates;
 	TArray<FObjectKey> CandidateMeshKeys;
 
-	//~ whip guide(whip 활성 시) ------------------------------------------
+	//~ Whip guide, while the whip is active ---------------------------------
 	bool bWhipActive = false;
 	float WhipGuidedEnd = 0.0f;
 	TArray<int32> WhipGuideNodeIndices;
 	TArray<FVector> WhipGuideTargets;
 
-	//~ wrapped(Wrapped phase에서만) --------------------------------------
+	//~ Wrapped, during the Wrapped phase only -------------------------------
 	bool bHasWrapped = false;
 	FString MeshName;
 	TArray<FRopeLatchNode> Latched;
-	// 최대 세그먼트 장력(FRopeWrapState::Tension 미러)
+	// The maximum segment tension, mirroring FRopeWrapState::Tension.
 	float WrapTension = 0.0f;
-	// 임계 장력(0=비활성) — 표시용
+	// The threshold tension, where 0 means disabled. For display.
 	float TensionReleaseForce = 0.0f;
-	// 장력/거리 자동 해제가 실제로 동작하는가. GuaranteedWrap은 CheckWrappedAutoRelease가 조기 반환해
-	// 임계치를 보지 않는다(보장 계약은 해제에도 대칭이라 명시 해제만 유효).
+	// Whether the automatic tension and distance releases actually apply. GuaranteedWrap returns early
+	// from CheckWrappedAutoRelease and never looks at the thresholds, since its guarantee is symmetric
+	// and only an explicit release is valid.
 	bool bAutoReleaseEnabled = true;
-	// 임계 장력을 연속 초과한 시간과 발동까지 필요한 시간(0 = 임계 release 비활성). 임계를 넘어도
-	// TensionReleaseTime 동안 지속돼야 풀리므로 그 진행도를 표시한다.
+	// How long the tension has stayed above the threshold, and how long it must, where 0 disables the
+	// tension release. Exceeding the threshold has to persist for TensionReleaseTime before the rope
+	// lets go, so the progress towards that is displayed.
 	float TensionOverTime = 0.0f;
 	float TensionReleaseTime = 0.0f;
-	// ComputePull 성공(앵커/방향 유효 — 장력 0이어도 true)
+	// Whether ComputePull succeeded, meaning the anchor and direction are valid; it is true even at
+	// zero tension.
 	bool bPullValid = false;
-	// 힘 인가점(앵커 월드)
+	// The point the force is applied at, which is the anchor in world space.
 	FVector PullPoint = FVector::ZeroVector;
-	// 당김 단위 방향(EMA 스무딩 후 — 실제 인가 방향)
+	// The unit pull direction after smoothing, which is the direction actually applied.
 	FVector PullDirection = FVector::ZeroVector;
-	// 스무딩 전 look-ahead 방향(원본) — 지터 진단용(스무딩 대비)
+	// The look-ahead direction before smoothing, kept to diagnose jitter against the smoothed value.
 	FVector PullDirRaw = FVector::ZeroVector;
-	// 첫 직선 다리 끝 = 스무딩된 fractional 조준 위치(AimPos) — 방향 EMA의 입력.
-	// 정수 노드 위치가 아니다: 조준 인덱스를 EMA로 다듬은 뒤 노드 사이를 보간한 값이라 노드에 놓이지 않는다.
+	// The end of the first straight leg, as the smoothed fractional aim position that feeds the
+	// direction average.
+	// It is not an integer node position: the aim index is smoothed and then interpolated between
+	// nodes, so it does not land on one.
 	FVector PullAimPoint = FVector::ZeroVector;
-	// 스무딩 전 정수 조준 노드 인덱스(프레임마다 튀면 방향 불안정 신호) — 위 fractional 위치의 원본
+	// The integer aim node index before smoothing. Jumping between frames signals an unstable
+	// direction, and it is the raw source of the fractional position above.
 	int32 PullAimNode = INDEX_NONE;
-	// 앵커 세그먼트 장력
+	// The tension in the anchor segment.
 	float PullTension = 0.0f;
-	// 테더 반응(0=비활성) — 표시용
-	// 가용 로프 길이 초과분(cm, 0=팽팽하지 않음)
+	// The tether response, where 0 means disabled. For display.
+	// How far the required path exceeds the available rope length (cm), where 0 means not taut.
 	float TetherOvershoot = 0.0f;
-	// 이번 프레임 테더 장력(λ/dt 또는 랙돌 물리 제약 실측력, kg·cm/s²)과 그 상한 — 디버거 표시용.
+	// This frame's tether tension, either lambda divided by dt or the measured force of the ragdoll
+	// physics constraint (kg*cm/s^2), together with its limit. For display.
 	float TetherTension = 0.0f;
 	float MaxTetherTension = 0.0f;
 	// Authoritative material-constraint backend and the PrePhysics motion it rejected.
 	FString ConstraintBackend;
 	float AttemptedOutwardSpeed = 0.0f;
 	float AttemptedViolation = 0.0f;
-	// 능동 Pull **요청** 힘(0=입력 없음). SetActivePull이 저장한 값이라 인가 여부와는 별개다.
+	// The requested active pull force, where 0 means no input. It is the value SetActivePull stored and
+	// is independent of whether it was applied.
 	float ActivePullForce = 0.0f;
-	// 그 요청이 이번 프레임 팽팽 게이트를 통과해 실제로 인가됐는가. 요청값만 내면 "taut=N인데 우회 설정으로
-	// 인가된" 경우와 "입력은 있으나 막힌" 경우가 같은 숫자로 보인다.
+	// Whether that request passed this frame's taut gate and was actually applied. Reporting the
+	// request alone would make "not taut but applied through the bypass setting" and "input present but
+	// blocked" look like the same number.
 	bool bActivePullApplied = false;
-	// 팽팽(taut) 게이트 상태 — 능동 Pull 인가 조건(IsPullTaut와 동일 래치)
+	// The taut gate state, which is the condition for applying active pull; the same latch as
+	// IsPullTaut.
 	bool bPullTaut = false;
-	// 전 체인 팽팽(기하) 게이트 — 견인(테더+능동 Pull) 공용 선행 조건(코너-다리 chord 합 vs rest 길이)
+	// The whole-chain geometric taut gate, a shared precondition for traction, both the tether and
+	// active pull. It compares the sum of the corner-to-corner leg chords against the rest length.
 	bool bChainTaut = false;
-	// 앵커→손 코너-다리 chord 합(cm) — bChainTaut의 관측치
+	// The sum of the corner-to-corner leg chords from the anchor to the hand (cm), which is the
+	// observation behind bChainTaut.
 	float TautChordLen = 0.0f;
-	// 자유 구간(손~앵커) rest 길이(cm) = AnchorNode × SegmentLength
+	// The rest length of the free span from the hand to the anchor (cm), that is AnchorNode multiplied
+	// by SegmentLength.
 	float FreeRestLen = 0.0f;
-	// 자유 구간 세그먼트 장력 최솟값 — 0이면 어딘가 슬랙(장력이 손까지 전달 안 됨 = 구김/부분 스트레치)
+	// The minimum segment tension across the free span. 0 means something is slack, so the tension is
+	// not reaching the hand, whether from a kink or a partial stretch.
 	float MinFreeTension = 0.0f;
-	// 다리별 최대 처짐(cm) — 내부 노드의 다리 chord 직선 이탈. 시각적 "펴짐"의 직접 관측치
+	// The largest sag on any leg (cm), measured as how far an interior node departs from its leg chord.
+	// It is the direct observation behind how straight the rope looks.
 	float MaxLegSag = 0.0f;
-	// 거리 release 한계(cm, 0=비활성) — 표시용
+	// The distance release limit (cm), where 0 means disabled. For display.
 	float DistanceReleaseSlack = 0.0f;
 
-	//~ colliders(이 로프가 이번 프레임 질의한 collider들) ----------------
+	//~ Colliders, those this rope queried this frame ------------------------
 	TArray<FRopeDebugCollider> Colliders;
 
-	//~ 노드별 근접(디버그 CPU 재질의) — 붙는 노드 진단 -------------------
+	//~ Per-node proximity from the debug CPU re-query, for diagnosing sticking nodes ----
 	TArray<FRopeNodeProximityDebug> NodeProximity;
-	// 재질의에 더한 여유 반경(cm). 화면이 "이건 solver 접촉이 아니라 r+N cm 질의 결과"라고 밝히는 데 쓴다.
+	// The extra radius added for the re-query (cm). The screen uses it to state that these are the
+	// results of a query at radius plus this margin rather than solver contacts.
 	float ProximityQueryMargin = 0.0f;
 
-	//~ 감김 축(Wrapping에서 ResolveWrappingAxis가 정한 경로 축) — [I] wrap 뷰 선 시각화용 ---
-	// Wrapping 페이즈에서만 유효(bHasWrapAxis). 어느 축으로 감기는지 눈으로 확인하기 위한 것.
+	//~ The wrap axis, chosen by ResolveWrappingAxis during Wrapping, drawn as a line by the wrap view ---
+	// Valid during the Wrapping phase only, indicated by bHasWrapAxis. It exists to confirm by eye
+	// which axis the rope is wrapping about.
 	bool    bHasWrapAxis = false;
 	FVector WrapAxisOrigin = FVector::ZeroVector;
 	FVector WrapAxisDirection = FVector::ForwardVector;
-	// 축 시각화 길이 도출용 세그먼트 길이. 디버거가 max(80, ×6) 수식으로 로프 스케일에 비례한 축을 그린다.
+	// The segment length used to derive the length of the axis visualization. The debugger draws an axis
+	// proportional to the rope's scale, as the larger of 80 and six times this value.
 	float   WrapAxisSegmentLength = 0.0f;
 };

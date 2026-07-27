@@ -2,13 +2,14 @@
 
 #include "Logic/RopeWrappingPhase.h"
 #include "Components/SceneComponent.h"
-// ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+// ResolveBindingWorld, the single point that resolves a wrap binding, whether a bone, a socket or a
+// component, into a transform.
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-// RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
+// RopeMath::AnyTangentFromNormal, included here to avoid a duplicate definition in the unity build.
 #include "RopeMathHelpers.h"
 
 #pragma region Sequential Surface Vector Field Path
@@ -25,15 +26,17 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 	}
 
 	const float StepSize = FMath::Max(1.0f, Sim.SegmentLength * 0.5f);
-	// Composite probe와 같은 전체 시도 상한을 둔다. PathSweepDistance는 projection이 제자리여도
-	// 매 integration step마다 StepSize만큼 증가하므로 별도 persistent counter 없이 무한 정체를 막는다.
+	// The same overall attempt limit as the composite probe. The sweep distance grows by the step size on
+	// every integration step even when the projection stays put, so an unbounded stall is prevented with
+	// no separate persistent counter.
 	const int32 MaxIntegrationStepCount = FMath::Max(32, State.NumTailNodes * 16);
 	const float MaxIntegrationSweepDistance =
 		StepSize * static_cast<float>(MaxIntegrationStepCount);
 	int32 StepsRemaining = FMath::Max(1, StepBudget);
 
-	// 현재 축 기준 radial(축에서 점으로 향하는 단위벡터). 스텝 전/후 radial 사이 각도가 그 스텝의
-	// 감싼 각도 증분이다 — 점이 축 위(축퇴)면 false.
+	// The radial about the current axis, meaning the unit vector from the axis to the point. The angle
+	// between the radials before and after a step is that step's wrapped angle increment; it returns
+	// false when the point lies on the axis and is degenerate.
 	const auto ComputeAxisRadial = [this](const FVector& Point, FVector& OutRadial) -> bool
 	{
 		const float AxisDistance = FVector::DotProduct(Point - State.PathAxisOrigin, State.PathAxisDirection);
@@ -48,8 +51,8 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 		const int32 PathIndex = State.Path.Num();
 		bool bConsumedStep = false;
 
-		// 한 번의 predictor/projection을 실제 centerline integration segment 하나로 취급한다.
-		// 노드 생성 여부와 관계없이 매 outer iteration에서 정확히 한 step을 소비한다.
+		// One predictor and projection pair is treated as exactly one centreline integration segment.
+		// Every outer iteration consumes exactly one step, whether or not a node was produced.
 		while (StepsRemaining > 0 && !bConsumedStep)
 		{
 			const float StepDistance = StepSize;
@@ -72,7 +75,8 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 			const FVector PathPredictorWorld =
 				PreviousSurfaceWorld + State.PathTangentWorld * StepDistance;
 
-			// 아래의 스냅 거리/브리지 코드는 State.PathSurfaceWorld를 이번 step의 경로 predictor로 읽는다.
+			// The snap distance and bridging code below reads State.PathSurfaceWorld as this step's path
+			// predictor.
 			State.PathSurfaceWorld = PathPredictorWorld;
 			const FName CurrentBone = State.PathCurrentBone.IsNone()
 				? State.LatchAnchor.Bone
@@ -83,15 +87,15 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 				ProjectedMesh = Mesh;
 			}
 
-			// SingleBone fallback과 sequential multi-bone 모두 tangent predictor에서 projection한다.
-			// 실제 rope node 위치를 tie-break에 넣어 거의 같은 후보 사이에서 현재 로프 몸체와 가까운
-			// 표면을 고른다.
+			// Both the single-bone fallback and sequential multi-bone projection work from the tangent
+			// predictor. The actual rope node position is used as a tie-break, so between near-identical
+			// candidates the surface nearest the rope's own body wins.
 			const int32 RopeNodeIndex = State.LatchAnchor.NodeIndex + PathIndex;
 			const FVector RopeNodeWorld = Sim.Positions.IsValidIndex(RopeNodeIndex)
 				? Sim.Positions[RopeNodeIndex]
 				: State.PathSurfaceWorld;
-			// 투영 결과는 로컬로 받는다: 브리징(아래)에서 스냅을 거부할 수 있으므로, 수용이 확정되기
-			// 전에는 State를 건드리지 않는다.
+			// The projection result is taken into a local: bridging below may reject the snap, so the state
+			// is left untouched until acceptance is settled.
 			FVector ProjectedSurface = State.PathSurfaceWorld;
 			FVector ProjectedNormal = State.PathNormalWorld;
 			FVector ProjectedTangent = State.PathTangentWorld;
@@ -116,19 +120,25 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 				? TEXT("None")
 				: TEXT("ProjectionMiss");
 
-			// 갭 브리징(WrappingMaxGapBridgeDistance > 0)에서는 스냅 수용에 두 가지 관문을 둔다.
-			// 브리징 비활성 시에는 아무 관문도 없다 — 관대한 스냅으로 abort를 줄이는 종전 동작(기본값) 그대로.
-			//  ① 스냅 거리 상한: 표면이 예측점에서 한 세그먼트 이상 떨어져 있으면 "여기엔 감을 표면이
-			//     없다"로 보고 chord로 간다. 없으면 관대한 QueryRadius(세그먼트×3) 때문에 대상 사이
-			//     허공에서도 먼 표면으로 끌려가 경로가 골짜기로 말려든다.
-			//  ② winding 역행(taut-string 이탈점): 스냅을 수용한 결과가 축 기준 중심각을 되돌리면
-			//     경로가 첫 대상의 뒤편을 맴돌고 있는 것이다 — 쌍(양다리)을 도는 감김은 중심각이
-			//     winding 방향으로 단조 전진한다. 팽팽한 줄은 여기서 표면을 떠나 chord로 간다.
-			//     이 관문이 없으면 예측점이 항상 직전 표면점 근처라 ①에 안 걸리고(원 단면 위에서는
-			//     스냅 변위가 어디서나 균일하게 작다 — 국소 신호로는 이탈점을 구분할 수 없다),
-			//     경로가 첫 대상만 영원히 궤도 돌아 쌍으로 건너가지 못한다. 단일 대상 감김은 중심각이
-			//     본래 단조라 오탐하지 않는다(이탈은 하울 접점보다 약간 늦게 오고, 남는 느슨함은
-			//     커밋 후 자유 노드를 solver가 당겨 정리한다).
+			// With gap bridging enabled, accepting a snap has to pass two gates. With bridging disabled
+			// there are no gates at all, which preserves the previous, permissive behaviour that reduced
+			// aborts and is still the default.
+			//  First, a snap distance limit: a surface more than one segment away from the predicted point
+			//     is treated as "there is no surface to wrap here" and the path continues as a chord.
+			//     Without it, the permissive query radius of three segments would drag the path towards a
+			//     distant surface even in mid-air between targets, curling it into the valley between them.
+			//  Second, winding reversal, which is the point a taut string leaves the surface: if accepting
+			//     the snap would reverse the central angle about the axis, the path is circling behind the
+			//     first target. Wrapping around a pair, such as two legs, advances the central angle
+			//     monotonically in the winding direction, and a taut rope leaves the surface here and
+			//     continues as a chord.
+			//     Without this gate the predicted point always sits near the previous surface point, so the
+			//     first gate never fires, since on a circular cross-section the snap displacement is
+			//     uniformly small everywhere and no local signal can identify the departure point, and the
+			//     path would orbit the first target forever and never cross to the pair. Wrapping a single
+			//     target is unaffected, because its central angle is monotonic by nature; the departure
+			//     comes slightly after the true tangent point, and the slack left over is taken up by the
+			//     solver pulling the free nodes after the commit.
 			const float MaxBridgeDistance = Ctx.Config.WrappingMaxGapBridgeDistance;
 			if (bOnSurface && MaxBridgeDistance > 0.0f)
 			{
@@ -155,8 +165,9 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 				}
 			}
 
-			// 표면도 없고 브리지도 소진/비활성 — 종전과 같은 실패 처리(각도 적분 전에 끊어,
-			// 걷지 못한 스텝이 실패 시점 각도(ShouldAbortFailedShortWrap)에 섞이지 않게 한다).
+			// Neither a surface nor any remaining bridge, whether exhausted or disabled, so this fails as
+			// before. It breaks before integrating the angle, which keeps a step that was never walked out
+			// of the angle reported at the moment of failure, in ShouldAbortFailedShortWrap.
 			if (!bOnSurface &&
 				(MaxBridgeDistance <= 0.0f ||
 					State.PathBridgeDistance + StepDistance > MaxBridgeDistance))
@@ -186,10 +197,10 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 				return false;
 			}
 
-			// 감싼 각도 적분: 이번 스텝이 만든 radial 회전량을 누적한다. 축 재해석(아래 accept 분기의
-			// reseed) *전에*, 이 스텝을 실제로 걸었던 축 기준으로 전/후 radial을 재야 한다. 브리지
-			// 스텝도 적분한다 — chord가 가로지른 각도 구간도 "감쌌다"에 포함되는 것이 둘레 커버리지
-			// 척도(5단계 형상 기준 판정)와 일치한다.
+			// Integrate the wrapped angle by accumulating the radial rotation this step produced. It has to
+			// be measured before the axis is re-resolved, in the reseed inside the accept branch below, and
+			// against the axis this step was actually walked on. Bridge steps are integrated too: the angular
+			// span a chord crosses counts as wrapped, which matches the circumferential coverage measure.
 			const float PreviousForwardAngleRad = State.PathForwardAngleRad;
 			const FVector PostStepPosition = bOnSurface ? ProjectedSurface : State.PathSurfaceWorld;
 			FVector StepRadialAfter = FVector::ZeroVector;
@@ -201,8 +212,10 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 				const float UnsignedStepAngleRad = FMath::Acos(RadialDot);
 				State.PathAccumulatedAngleRad += UnsignedStepAngleRad;
 
-				// acos 누적은 전진/후퇴를 모두 양수로 더한다. 같은 step을 atan2로도 측정해 winding
-				// 방향 전진과 역방향 흔들림을 분리한다. 기존 각도 기반 동작/품질 판정은 건드리지 않는다.
+				// The accumulation through acos adds both forward and backward motion as positive. The same
+				// step is also measured with atan2 to separate advance along the winding direction from
+				// backward wobble, which leaves the existing angle-based behaviour and quality tests
+				// untouched.
 				const FVector StepAxisDirection = State.PathAxisDirection.GetSafeNormal(
 					KINDA_SMALL_NUMBER, FVector::UpVector);
 				const float SignedStepAngleRad = FMath::Atan2(
@@ -250,16 +263,17 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 				State.PathCircumferenceDir = ProjectedCircumference;
 				State.PathBridgeDistance = 0.0f;
 
-				// ProjectWrapPointToSurfaceMultiBone이 hysteresis까지 적용해 최종 본을 돌려준다.
-				// 여기서는 상태만 갱신한다. 전환했다면 직전 본을 기록해 다음 step에서 바로 되돌아가는 후보에
-				// penalty를 줄 수 있게 하고, 전환 거리 누적은 0으로 다시 시작한다.
+				// ProjectWrapPointToSurfaceMultiBone applies the hysteresis and returns the final bone, so
+				// only the state is updated here. On a transition the previous bone is recorded so a
+				// candidate that returns to it immediately can be penalized on the next step, and the
+				// distance since the transition restarts from zero.
 				if (ProjectedBone != CurrentBone)
 				{
 					++State.PathBoneTransitionCount;
 					State.PathPreviousBone = CurrentBone;
 					State.PathCurrentBone = ProjectedBone;
 					State.PathDistanceSinceBoneTransition = 0.0f;
-					// 순차 본 전환은 새 본 형상 축으로 rolling axis를 재시드한다.
+					// A sequential bone transition reseeds the rolling axis against the new bone's shape.
 					ReseedWrappingAxisOnBoneTransition(ProjectedBone, ProjectedMesh, Ctx);
 				}
 				else
@@ -271,9 +285,11 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 			}
 			else
 			{
-				// 브리지 스텝: 예측 위치(tangent 직진)를 그대로 쓰고 앵커 프레임 없이 지나간다.
-				// normal은 축 radial로 유지해 다음 스텝의 원주 tangent가 깨끗하게 나오게 한다.
-				// bone/mesh는 유지 — 재진입 후보를 현재 본 중심 그래프에서 계속 찾는다.
+				// A bridge step uses the predicted position, continuing straight along the tangent, and
+				// passes through with no anchor frame.
+				// The normal is kept as the axis radial so the next step's circumferential tangent comes out
+				// cleanly. The bone and mesh are kept, so re-entry candidates are still searched from the
+				// graph centred on the current bone.
 				State.PathBridgeDistance += StepDistance;
 				State.PathDistanceSinceBoneTransition += StepDistance;
 				FVector BridgeRadial = FVector::ZeroVector;
@@ -283,9 +299,10 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 				}
 			}
 
-			// predictor/sweep가 시도한 명목 거리와 projection 결과가 실제로 만든 centerline 길이를
-			// 분리한다. 이전 구현은 아래 ActualStepDistance와 무관하게 StepDistance를 경로 길이로
-			// 기록해, 표면 스냅이 짧거나 긴 구간에서 rope node 간격이 뭉치거나 늘어났다.
+			// The nominal distance the predictor or sweep attempted is kept separate from the centreline
+			// length the projection actually produced. Recording the attempted step distance as the path
+			// length, independently of the actual one, would bunch or stretch the rope node spacing
+			// wherever a surface snap was shorter or longer.
 			const float CenterlineOffset = FMath::Max(0.0f, Ctx.SurfaceOffset);
 			const FVector PreviousCenterlineWorld =
 				PreviousSurfaceWorld + PreviousNormalWorld * CenterlineOffset;
@@ -296,9 +313,10 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 			const float ArcStartDistance = State.PathCurrentDistance;
 			const float ArcEndDistance = ArcStartDistance + ActualStepDistance;
 
-			// 이번 실제 integration segment가 하나 이상의 SegmentLength 경계를 통과하면 각 경계에서
-			// centerline frame을 재샘플링한다. 한 projection 점프가 여러 node 경계를 넘을 수 있으므로
-			// if가 아니라 while이다. DistanceFromLatch/RopeDistance는 이제 실제 polyline arc 좌표다.
+			// When this actual integration segment crosses one or more segment length boundaries, the
+			// centreline frame is resampled at each. A single projection jump can cross several node
+			// boundaries, hence a while loop rather than an if. The distance from the latch is therefore a
+			// real arc coordinate along the polyline.
 			if (ActualStepDistance > KINDA_SMALL_NUMBER)
 			{
 				while (State.Path.Num() < State.NumTailNodes)
@@ -328,7 +346,8 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 
 					FRopeWrapPathPoint Point;
 					Point.bVirtual = false;
-					// 브리지에서 출발하거나 이번 step이 브리지면 보간점도 허공 chord로 취급한다.
+					// If the step starts on a bridge, or is itself a bridge, the interpolated point is
+					// treated as a mid-air chord too.
 					Point.bBridge = bPreviousPointWasBridge || !bOnSurface;
 					Point.SurfaceWorld = EncodePathPointPositionFromCenterline(
 						SampleCenterlineWorld, SampleNormalWorld,
@@ -342,17 +361,19 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 						? State.PathCurrentMesh.Get()
 						: Mesh;
 					Point.DistanceFromLatch = TargetArcDistance;
-					// 물리 위치는 실제 centerline arc로 재샘플링하되 animation phase는 같은
-					// integration segment의 forward signed angle을 보간한다. reverse 성분을 빼므로
-					// point angle은 감소하지 않고 angle -> distance binary search가 안정적으로 동작한다.
+					// The physical position is resampled along the real centreline arc while the animation
+					// phase interpolates the forward signed angle of the same integration segment. Removing
+					// the reverse component keeps the point angle non-decreasing, which keeps the
+					// angle-to-distance binary search stable.
 					Point.WrapAngleFromLatchRad = FMath::Lerp(
 						PreviousForwardAngleRad, State.PathForwardAngleRad, Alpha);
 					State.Path.Add(Point);
 					if (!ProcessPathPointForAnchoring(SamplePathIndex, Sim, Ctx))
 					{
-						// Path와 anchor 처리를 하나의 원자적 append로 취급한다. 현재 점 또는 같은
-						// integration segment에서 아직 처리하지 못한 뒤쪽 점을 남기면 이후 resolve가
-						// 저장 당시 월드 위치를 정상 anchor처럼 사용할 수 있으므로 모두 제거한다.
+						// Appending a path point and its anchor is treated as one atomic operation. Leaving
+						// the current point, or any later point of the same integration segment, unprocessed
+						// would let a later resolve treat the world position stored at the time as though it
+						// were a proper anchor, so they are all removed.
 						State.Path.SetNum(FMath::Clamp(
 							State.LastAnchoredPathPointCount, 0, State.Path.Num()));
 						FinishPathBuild(/*bFailed=*/true, TEXT("SequentialAnchorBuildFailed"));
@@ -378,12 +399,13 @@ bool FRopeWrappingPhase::AdvanceSequentialSurfaceVectorFieldPath(int32 StepBudge
 			Ctx,
 			State.PathCircumferenceDir);
 
-		// 감는 양 상한(WrappingMaxWrapAngleDeg > 0): 누적 감싼 각도가 목표에 닿으면 경로를 여기서
-		// *성공*으로 마감한다 — 나선이 목표 바퀴수를 넘어 남은 로프 전량을 감아 들어가는 것을 막고,
-		// 경로 밖 로프는 커밋 후 자유 구간으로 늘어뜨린다. NumTailNodes를 빌드된 경로 길이로 줄여
-		// front/커밋 목표 거리(RequestedFrontDistance = (NumTailNodes-1)·세그먼트)가 실제 경로와
-		// 일치하게 한다 — 전체 로프 기준 그대로면 front가 경로 밖 거리를 겨냥해 도달 판정이 영원히
-		// 안 되고 settle 타임아웃 커밋으로만 떨어진다.
+		// The wrap amount limit, active when the maximum wrap angle is above 0: once the accumulated
+		// wrapped angle reaches the target the path finishes here as a success. That stops the helix
+		// exceeding the intended number of turns and drawing in the entire remaining rope, leaving the rope
+		// beyond the path hanging as a free span after the commit. NumTailNodes is reduced to the length of
+		// the path that was built, so the front and commit target distance matches the real path: leaving
+		// it at the whole rope would aim the front at a distance beyond the path, the arrival test would
+		// never pass, and the wrap would only ever commit through the settle timeout.
 		if (Ctx.Config.WrappingMaxWrapAngleDeg > 0.0f &&
 			FMath::RadiansToDegrees(State.PathAccumulatedAngleRad) >= Ctx.Config.WrappingMaxWrapAngleDeg)
 		{
@@ -500,8 +522,8 @@ void FRopeWrappingPhase::GatherSurfaceVectorFieldBoneCandidates(FName CurrentBon
 		return;
 	}
 
-	// 기존 Sequential Multi-Bone/비복합 동작을 보존하기 위한 skeleton parent/child 후보만 수집한다.
-	// 복합 SDF 실패 폴백은 이 함수 자체를 호출하지 않는다.
+	// Only skeleton parent and child candidates are collected, which preserves the existing sequential
+	// multi-bone behaviour. The composite SDF failure fallback does not call this function at all.
 	struct FBoneQueueEntry
 	{
 		FName Bone = NAME_None;
@@ -628,17 +650,22 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 	bool bFound = false;
 	bool bFoundCurrentBone = false;
 
-	// 이 함수는 SurfaceVectorField 전용 projection 선택기다.
-	// 기존 단일 본 방식은 LatchAnchor.Bone만 통과시켰지만, 여기서는 후보 본마다
-	// "예측 위치에서 가장 그럴듯한 표면점"을 평가한 뒤 path point의 Bone/Mesh로 보존한다.
+	// This is the projection selector used by the surface vector field alone.
+	// The older single-bone approach admitted only the latch anchor's bone, whereas this evaluates the
+	// most plausible surface point from the predicted position for each candidate bone and preserves the
+	// winner as the path point's bone and mesh.
 	//
-	// 점수 항목:
-	// - Projection.Distance: 예측 위치에서 표면까지 얼마나 멀리 튀었는지. 낮을수록 좋다.
-	// - RopeNodeDistance: 실제 rope node와 표면점이 가까운 후보를 선호한다.
-	// - GraphCost: parent/child graph를 많이 건넌 후보일수록 불리하다.
-	// - Tangent/NormalPenalty: 이전 frame/step의 surface field와 갑자기 꺾이는 후보를 줄인다.
-	// - CurrentBoneBonus + hysteresis: 현재 본이 아직 쓸 만하면 새 본이 확실히 좋아야 전환한다.
-	// - ImmediateBoneReturnPenalty: 직전 본으로 바로 돌아가는 A->B->A 왕복을 줄인다.
+	// The scoring terms are:
+	// - The projection distance, meaning how far it jumped from the predicted position to the surface;
+	//   lower is better.
+	// - The rope node distance, which prefers a candidate whose surface point is near the actual rope node.
+	// - The graph cost, which penalizes a candidate reached across more parent and child edges.
+	// - The tangent and normal penalties, which discourage a candidate that turns sharply away from the
+	//   previous step's surface field.
+	// - The current bone bonus and its hysteresis, which require a new bone to be clearly better before
+	//   switching while the current one is still usable.
+	// - The immediate return penalty, which discourages the A to B to A oscillation of going straight back
+	//   to the bone just left.
 	const FVector PreviousTangent = PreviousTangentWorld.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 	const FVector PreviousNormal = PreviousNormalWorld.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 	const float QueryRadius = FMath::Max3(
@@ -690,10 +717,11 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 		const float NormalPenalty = 1.0f - FMath::Clamp(FVector::DotProduct(CandidateNormal, PreviousNormal), -1.0f, 1.0f);
 		const bool bCurrentBone = Projection.Bone == CurrentBone;
 
-		// 낮은 Score가 이긴다.
-		// distance 계열은 "예측 path/실제 node에서 얼마나 멀어졌는가"이고,
-		// continuity 계열은 "표면 field가 얼마나 갑자기 꺾였는가"다.
-		// CurrentBoneBonus는 실제 보너스이므로 마지막에 빼서, 동점 근처에서는 현재 본을 유지하게 한다.
+		// The lowest score wins.
+		// The distance terms measure how far it moved from the predicted path and the actual node, and the
+		// continuity terms measure how sharply the surface field turned.
+		// The current bone bonus is a genuine bonus, so it is subtracted last, which keeps the current bone
+		// near a tie.
 		float Score =
 			Projection.Distance * Ctx.Config.ProjectionDistanceWeight +
 			FVector::Dist(Projection.SurfacePoint, RopeNodeWorld) * Ctx.Config.RopeNodeDistanceWeight +
@@ -704,8 +732,9 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 
 		if (!PreviousBone.IsNone() && Projection.Bone == PreviousBone && Projection.Bone != CurrentBone)
 		{
-			// 방금 떠난 본으로 바로 돌아가는 후보는 표면 projection이 조금 좋아 보여도
-			// A->B->A 왕복 떨림을 만들 가능성이 높다. 완전 금지는 아니고 점수만 불리하게 만든다.
+			// A candidate that returns straight to the bone just left is likely to produce an A to B to A
+			// oscillation even when its surface projection looks slightly better. It is not forbidden
+			// outright, only penalized.
 			Score += Ctx.Config.ImmediateBoneReturnPenalty;
 		}
 
@@ -761,10 +790,11 @@ bool FRopeWrappingPhase::ProjectWrapPointToSurfaceMultiBone(FName CurrentBone, c
 
 	if (bFoundCurrentBone && BestProjection.Bone != CurrentBone)
 	{
-		// 현재 본 projection도 아직 성공했다면 전환은 보수적으로 한다.
-		// 새 본이 hysteresis만큼 확실히 좋고, 마지막 전환 이후 최소 거리도 지난 경우에만 Best를 유지한다.
-		// 둘 중 하나라도 부족하면 CurrentBoneProjection으로 되돌려, path point/anchor가 짧은 구간에서
-		// 여러 본 사이를 흔들며 저장되는 것을 막는다.
+		// While the current bone's projection still succeeds, switching is conservative.
+		// The best candidate is kept only when it beats the current one by the hysteresis margin and the
+		// minimum distance since the last transition has also elapsed.
+		// If either condition is unmet it reverts to the current bone's projection, which stops path points
+		// and anchors being stored while flickering between several bones over a short stretch.
 		const bool bEnoughScoreMargin =
 			BestProjection.Score + Ctx.Config.BoneTransitionHysteresis < CurrentBoneProjection.Score;
 		const bool bEnoughDistanceSinceTransition =
@@ -805,8 +835,9 @@ bool FRopeWrappingPhase::ProjectWrapPointToLatchBone(const USceneComponent* Mesh
 	FVector& InOutSurfaceWorld, FVector& InOutNormalWorld, FVector& InOutTangentWorld,
 	FVector& InOutCircumferenceDir, FName& InOutBone, const USceneComponent*& OutMesh) const
 {
-	// 복합 경로의 후보/graph 상태를 재사용하지 않는다. 최초 latch 본과 동일 mesh에 귀속된 collider만
-	// 기존 단일 본 projection으로 찾고, 그 표면 프레임에서 tangent를 다시 계산한다.
+	// The composite path's candidate and graph state is not reused. Only colliders attributed to the same
+	// mesh as the original latch bone are searched, through the existing single-bone projection, and the
+	// tangent is recomputed from that surface frame.
 	const FName LatchBone = State.LatchAnchor.Bone;
 	if (LatchBone.IsNone() ||
 		!ProjectWrapPointToSurface(LatchBone, Mesh, Sim, Ctx, InOutSurfaceWorld, InOutNormalWorld))

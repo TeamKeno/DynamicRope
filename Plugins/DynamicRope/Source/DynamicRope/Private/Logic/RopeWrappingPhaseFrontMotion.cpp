@@ -2,13 +2,14 @@
 
 #include "Logic/RopeWrappingPhase.h"
 #include "Components/SceneComponent.h"
-// ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+// ResolveBindingWorld, the single point that resolves a wrap binding, whether a bone, a socket or a
+// component, into a transform.
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-// RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
+// RopeMath::AnyTangentFromNormal, included here to avoid a duplicate definition in the unity build.
 #include "RopeMathHelpers.h"
 
 #pragma region Wrapping Front Motion and Path Sampling
@@ -27,9 +28,9 @@ void FRopeWrappingPhase::ApplyWrappingMotionOverrides(const FRopeSimState& Sim, 
 		return;
 	}
 
-	// Path와 anchor는 PathIndex/NodeIndex 순서로 함께 생성된다. 현재 프레임의 움직이는 bone frame을
-	// 한 번만 해석해 재사용하면, 아래 각 노드가 SampleWrappingPath의 path/anchor 선형 탐색을
-	// 반복하던 O(N²) 비용을 피할 수 있다.
+	// Path points and anchors are produced together, in path and node index order. Resolving the moving
+	// bone frames of the current frame once and reusing them avoids the quadratic cost of every node
+	// below repeating the linear search over the path and anchors inside SampleWrappingPath.
 	if (!BuildResolvedWrappingPath(ResolvedPathScratch))
 	{
 		return;
@@ -44,29 +45,33 @@ void FRopeWrappingPhase::ApplyWrappingMotionOverrides(const FRopeSimState& Sim, 
 	}
 
 	const FVector FrontWorld = GetPathPointCenterlineWorld(FrontPoint, SurfaceOffset);
-	// 이미 감긴 위치는 projected surface path를 따르지만, 아직 감기지 않은 tail의 연장 방향은
-	// SDF normal에 투영하지 않은 ideal helix guide를 우선 사용한다. Sequential 경로와 guide가
-	// 없는 구형 데이터는 종전 surface tangent로 폴백한다.
+	// Positions already wrapped follow the projected surface path, while the direction the not-yet-wrapped
+	// tail extends in prefers the ideal helix guide, which is never projected onto the SDF normal. The
+	// sequential path, and older data with no guide, fall back to the surface tangent as before.
 	const FVector TailGuideDirection =
 		State.bPathUsesPoseSpaceIsland && FrontPoint.bHasWrappingGuideTangent
 			? FrontPoint.WrappingGuideTangentWorld.GetSafeNormal(
 				KINDA_SMALL_NUMBER, FrontPoint.TangentWorld)
 			: FrontPoint.TangentWorld;
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
-	// 실제 surface path/anchor의 소유 범위와 Wrapping 중 시각적으로 구동할 범위를 분리한다.
-	// Composite analytic helix는 island 축 범위에서 path가 먼저 끝나더라도 남은 tail 전체를 현재
-	// ideal helix guide 방향으로 정렬한다. NumTailNodes 자체는 줄어든 path/commit 범위를 계속 뜻한다.
+	// The range the real surface path and anchors own is kept separate from the range driven visually
+	// during Wrapping. A composite analytic helix aligns the whole remaining tail along the current ideal
+	// helix guide even when the path ended earlier, at the limit of the island's axis. NumTailNodes itself
+	// still means the reduced path and commit range.
 	const bool bDriveFullCompositeTail = State.bPathUsesPoseSpaceIsland;
 	int32 TailEndNode = Sim.Num() - 1;
 	if (!bDriveFullCompositeTail && State.NumTailNodes > 0)
 	{
-		// Sequential은 기존 정책을 유지한다. 실제로 생성된 path가 소유하는 노드까지만 움직이고,
-		// 그 뒤 자유 tail은 이 단계의 강제 위치 애니메이션에 포함하지 않는다.
+		// The sequential path keeps the existing policy: it moves only the nodes the path it actually
+		// produced owns, and the free tail beyond that is left out of this stage's forced position
+		// animation.
 		TailEndNode = FMath::Min(TailEndNode, LatchNode + State.NumTailNodes - 1);
 	}
-	// 시드 다중화: 경로 구동은 첫 보조 시드 노드 *앞*에서도 끝난다(NumTailNodes 클램프와 같은 경계).
-	// 보조 노드는 아래에서 자기 본에 hold하고, 그 너머 남는 로프는 solver-owned로 유지된다 —
-	// front 직선 연장이 보조 대상 반대편으로 로프를 끌어가는 것을 막는다.
+	// Seed multiplexing: path-driven motion also ends before the first secondary seed node, which is the
+	// same boundary the NumTailNodes clamp uses.
+	// The secondary nodes are held against their own bones below, and the rope beyond them stays
+	// solver-owned, which stops the front's straight extension dragging the rope past the far side of the
+	// secondary target.
 	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
 	{
 		if (!bDriveFullCompositeTail && Secondary.NodeIndex > LatchNode)
@@ -84,9 +89,9 @@ void FRopeWrappingPhase::ApplyWrappingMotionOverrides(const FRopeSimState& Sim, 
 			continue;
 		}
 
-		// Radial SDF ray가 표면을 찾지 못한 composite helix point는 이 페이즈에서도
-		// 위치 override를 주지 않는다. 이 노드만 즉시 solver가 계산하게 해 Wrapped
-		// 커밋 순간 virtual guide가 한꺼번에 사라지는 위치 discontinuity를 없앤다.
+	// A composite helix point whose radial SDF ray found no surface receives no position override in this
+	// phase either. Letting the solver compute that node immediately removes the positional discontinuity
+	// of every virtual guide disappearing at once at the moment of the wrapped commit.
 		const int32 PathIndex = NodeIndex - LatchNode;
 		if (State.Path.IsValidIndex(PathIndex) && State.Path[PathIndex].bVirtual)
 		{
@@ -97,9 +102,9 @@ void FRopeWrappingPhase::ApplyWrappingMotionOverrides(const FRopeSimState& Sim, 
 		FVector World = FVector::ZeroVector;
 		if (NodeDistance <= State.FrontDistance + KINDA_SMALL_NUMBER)
 		{
-			// 감김 front가 이미 지나간 노드는 실제 SDF projection 경로의 같은 rope distance를
-			// 따른다. Path point는 정확히 PathIndex * SegmentLength 간격으로 생성되므로 이번 프레임에
-			// 한 번 해석한 배열을 직접 인덱싱할 수 있다.
+			// Nodes the wrapping front has already passed follow the same rope distance along the real SDF
+			// projection path. Path points are produced at exactly one segment length apart, so the array
+			// resolved once this frame can be indexed directly.
 			if (State.Path.IsValidIndex(PathIndex) &&
 				ResolvedPathScratch.IsValidIndex(PathIndex))
 			{
@@ -108,8 +113,8 @@ void FRopeWrappingPhase::ApplyWrappingMotionOverrides(const FRopeSimState& Sim, 
 			}
 			else
 			{
-				// Path가 없는 구형 anchors-only 상태는 이번 프레임에 resolve/정렬한 anchor 배열을
-				// binary search한다. 이 경계 상태에서도 노드마다 anchor 전체를 다시 훑지 않는다.
+				// Older anchors-only state, with no path, binary searches the anchor array resolved and
+				// sorted this frame. Even in that edge state it does not rescan every anchor per node.
 				FRopeWrapPathPoint NodePoint;
 				if (!SampleResolvedWrappingPath(
 					ResolvedPathScratch, NodeDistance, SurfaceOffset, NodePoint))
@@ -121,20 +126,24 @@ void FRopeWrappingPhase::ApplyWrappingMotionOverrides(const FRopeSimState& Sim, 
 		}
 		else
 		{
-			// Composite tail은 SDF projection tangent가 아니라 초기 ideal helix guide를 따른다.
-			// 위치는 계속 projected surface path를 사용하되, 미세 normal 변화가 tail 전체를 흔들지 않는다.
-			// Composite에서는 실제 path가 island 축 끝에서 먼저 종료돼도 이 식을 마지막 rope node까지
-			// 적용한다. 이 구간에는 새 surface anchor를 만들지 않고 Wrapping 동안의 시각적 정렬만 준다.
-			//   tail 위치 = 현재 front 위치 + helix guide 방향 * front에서 남은 rope 길이
+			// The composite tail follows the initial ideal helix guide rather than the SDF projection
+			// tangent. The positions keep using the projected surface path, so fine variation in the normal
+			// does not shake the whole tail.
+			// In composite mode this expression is applied out to the last rope node even when the real path
+			// terminated earlier at the end of the island axis. No new surface anchor is created over that
+			// stretch; it is purely visual alignment for the duration of Wrapping.
+			//   tail position = current front position + helix guide direction * rope length remaining
+			//   beyond the front
 			World = FrontWorld + TailGuideDirection * (NodeDistance - State.FrontDistance);
 		}
 
 		OutFrame.SetPosition(NodeIndex, World, /*bZeroVelocity*/ true);
 	}
 
-	// 보조 시드 노드 hold: 경로/front와 무관하게 자기 본의 표면 앵커 프레임을 따라간다(움직이는
-	// 대상 추종 — Wrapped의 Hold와 같은 수식). mesh가 사라진 프레임은 건너뛴다 — 노드는 마스크
-	// 동결로 제자리에 남고, 커밋 후 Hold가 mesh 소실을 정식으로 감지해 release한다.
+	// Holding the secondary seed nodes: independently of the path and the front, they follow the surface
+	// anchor frame of their own bone, which follows a moving target using the same expression as Hold does
+	// while wrapped. A frame where the mesh is gone is skipped: the node stays put through the mask freeze,
+	// and after the commit Hold detects the lost mesh properly and releases.
 	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
 	{
 		if (!Sim.Positions.IsValidIndex(Secondary.NodeIndex) ||
@@ -169,15 +178,18 @@ void FRopeWrappingPhase::ApplyWrappingKinematicMask(const FRopeSimState& Sim, FR
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		const bool bStartPin = (i == 0 && Sim.bStartPinned);
-		// 위치를 실제로 구동한 노드만 kinematic이다. Sequential angle cap/secondary seed 뒤의 untouched
-		// tail까지 얼리면 Flight에서 남은 strain이 Wrapping 내내 보존되고, Wrapped 커밋에서 InvMass가
-		// 풀리는 순간 고무줄처럼 수축한다. Position override가 없는 tail/virtual node는 Wrapping 동안에도
-		// solver가 SegmentLength를 유지하게 둔다. active virtual bridge는 이 호출 뒤 Hold가 다시 고정한다.
+	// Only nodes whose positions were actually driven are kinematic. Freezing the untouched tail beyond a
+	// sequential angle cap or a secondary seed as well would preserve the strain left over from Flight for
+	// the whole of Wrapping, and it would contract like a rubber band the moment the inverse mass is
+	// released at the wrapped commit. A tail or virtual node with no position override is left to the
+	// solver to keep at its segment length even during Wrapping. An active virtual bridge is pinned again
+	// by Hold after this call.
 		const bool bWrappingDrivenNode =
 			OutFrame.Flags.IsValidIndex(i) &&
 			(OutFrame.Flags[i] & RopeNodeOverride::Position) != 0;
-		// 바인딩 resolve가 한 프레임 실패하면 Position override가 비어도 이미 확정된 surface anchor는
-		// 현재 위치에서 유지한다. 그렇지 않으면 latch/secondary가 일시적으로 solver에 풀린다.
+	// If resolving a binding fails for one frame, leaving the position override empty, an already
+	// established surface anchor is held at its current position; otherwise the latch and the secondary
+	// seeds would be released to the solver momentarily.
 		const bool bExplicitAnchorNode =
 			State.Anchors.ContainsByPredicate(
 				[i](const FRopeSurfaceAnchor& Anchor) { return Anchor.NodeIndex == i; }) ||
@@ -207,7 +219,8 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 		BuiltPathMaxAngleRad = FMath::Max(
 			BuiltPathMaxAngleRad, Point.WrapAngleFromLatchRad);
 	}
-	// Legacy/실패 초기화처럼 Path가 비어 있는 경우만 anchor 거리를 폴백으로 쓴다.
+	// Only where Path is empty, as with legacy state or a failed initialization, does the anchor distance
+	// serve as the fallback.
 	if (State.Path.Num() == 0)
 	{
 		for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
@@ -218,8 +231,9 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 	}
 
 	const float TargetFrontDistance = FMath::Min(FullDistance, BuiltPathMaxDistance);
-	// Advance와 commit이 서로 다른 목표를 보지 않도록, 이번 프레임에 사용한 실제 거리 cap을
-	// 상태에 보존한다. 최종 path build가 끝나면 이 값이 최종 완료 거리로 확정된다.
+	// The actual distance cap used this frame is preserved in the state so that advancing and committing
+	// never look at different targets. Once the final path build finishes, this value becomes the final
+	// completion distance.
 	State.FrontTargetDistance = TargetFrontDistance;
 	if (TargetFrontDistance <= KINDA_SMALL_NUMBER)
 	{
@@ -232,8 +246,9 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 	const float BaseFrontSpeed = FullDistance / TotalDuration;
 	const auto EvaluateSpeedScale = [](float ProgressAlpha)
 	{
-		// 기존 front의 초반 완속/후반 가속 곡선은 보존하고 입력 위상만 distance progress에서
-		// Single/Composite 공통 angle progress로 바꾼다.
+		// The front's existing curve, slow at first and accelerating later, is preserved and only its input
+		// phase changes, from distance progress to the angle progress shared by the single and composite
+		// modes.
 		const float StartSpeedScale = 0.5f;
 		const float EndSpeedScale = 3.0f;
 		return FMath::Lerp(StartSpeedScale, EndSpeedScale,
@@ -248,7 +263,7 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 	float BaseAngularSpeedDegPerSec = 0.0f;
 	const bool bUseAngleMappedFront = State.Path.Num() >= 2 &&
 		BuiltPathMaxAngleRad > KINDA_SMALL_NUMBER;
-	// IsReadyToCommit에서도 동일한 정책을 선택할 수 있도록 현재 front 구동 방식을 기록한다.
+	// Record how the front is currently driven so IsReadyToCommit can select the same policy.
 	State.bFrontUsesAngleMapping = bUseAngleMappedFront;
 	const TCHAR* FrontPolicy = bUseAngleMappedFront
 		? TEXT("AngleMapped")
@@ -256,9 +271,10 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 
 	if (bUseAngleMappedFront)
 	{
-		// 두 모드의 path는 distance와 animation angle이 모두 단조 증가한다. 현재까지 빌드된 path만
-		// 대상으로 양방향 보간을 제공해 front가 progressive build를 앞질러 순간 점프하지 않게 한다.
-		// build cap에 막힌 동안 미소비 angle debt도 별도로 쌓지 않는다.
+		// On both modes the path increases monotonically in both distance and animation angle. Interpolation
+		// in either direction is offered only over the path built so far, which stops the front jumping
+		// ahead of the progressive build.
+		// No unconsumed angle debt accumulates separately while the build cap is holding it back.
 		const auto FindAngleAtDistance = [this](float SampleDistance)
 		{
 			if (State.Path.Num() == 0)
@@ -347,8 +363,9 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 				LowerPoint.DistanceFromLatch, UpperPoint.DistanceFromLatch, Alpha);
 		};
 
-		// 초기 몇 frame에 angle point가 아직 없어 distance fallback이 먼저 움직였더라도, angular
-		// path가 준비되는 순간 현재 distance의 angle로 이어 받아 위치가 latch로 되감기지 않게 한다.
+		// Even if no angle points existed for the first few frames and the distance fallback moved first,
+		// the moment the angular path is ready it continues from the angle at the current distance, so the
+		// position does not wind back to the latch.
 		if (State.FrontWrapAngleRad <= KINDA_SMALL_NUMBER &&
 			State.FrontDistance > KINDA_SMALL_NUMBER)
 		{
@@ -357,8 +374,9 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 		}
 
 		TargetFrontAngleRad = FindAngleAtDistance(TargetFrontDistance);
-		// 빌드 중에는 최종 angle을 아직 모르므로 현재 평균 angular density를 FullDistance까지
-		// 외삽한다. 이렇게 해야 짧게 빌드된 path의 끝에 닿았다는 이유로 easing이 즉시 3배가 되지 않는다.
+		// The final angle is unknown while the build is still running, so the current mean angular density
+		// is extrapolated out to the full distance. That stops the easing tripling the instant the end of a
+		// partially built path is reached.
 		float EstimatedFinalAngleRad = TargetFrontAngleRad;
 		if (!State.bPathBuildComplete && BuiltPathMaxDistance > KINDA_SMALL_NUMBER)
 		{
@@ -383,7 +401,8 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 	}
 	else
 	{
-		// 각도 parameter가 없는 legacy/degenerate path만 기존 distance front로 안전하게 폴백한다.
+		// Only a legacy or degenerate path with no angle parameters falls back safely to the existing
+		// distance-driven front.
 		ProgressAlpha = State.FrontDistance / FMath::Max(FullDistance, KINDA_SMALL_NUMBER);
 		SpeedScale = EvaluateSpeedScale(ProgressAlpha);
 		const float FrontSpeed = BaseFrontSpeed * SpeedScale;
@@ -399,8 +418,9 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 			0.0f, State.Elapsed - FMath::Max(0.0f, DeltaTime));
 	}
 
-	// AngleMapped는 두 모드 모두 point별 실제 animation angle을 쓴다. legacy/degenerate fallback만
-	// Sequential 누적 forward angle의 전체 평균으로 timing 로그를 추정한다.
+	// Angle-mapped fronts use the real per-point animation angle in both modes. Only the legacy and
+	// degenerate fallback estimates the timing log from the overall mean of the sequential accumulated
+	// forward angle.
 	const float ModeBuiltAngleRad = bUseAngleMappedFront
 		? BuiltPathMaxAngleRad
 		: State.PathForwardAngleRad;
@@ -425,9 +445,9 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 	}
 	State.FrontTargetWrapAngleRad = TargetFrontAngleRad;
 
-	// 4단계 완료 게이트는 progressive build의 임시 cap이 아니라 최종 path에 대해서만 arm한다.
-	// angle과 distance가 모두 끝난 최초 시간을 기록해 기존 per-segment tail deadline 대신 짧은
-	// post-front settle 시간을 잴 수 있게 한다.
+	// The four-stage completion gate is armed only against the final path, never the progressive build's
+	// temporary cap. The first time both the angle and the distance are complete is recorded, which allows
+	// a short post-front settle time to be measured instead of the previous per-segment tail deadline.
 	const float DistanceCompletionTolerance = FMath::Max(0.01f, SegmentLength * 0.001f);
 	const float AngleCompletionToleranceRad = FMath::DegreesToRadians(0.1f);
 	const bool bAngleTargetDone = !bUseAngleMappedFront ||
@@ -451,8 +471,9 @@ void FRopeWrappingPhase::AdvanceWrappingFront(float DeltaTime, const FRopeSimSta
 			Ctx.Config.WrappingPostFrontSettleTime);
 	}
 
-	// Progressive build가 끝난 뒤 한 번만 출력한다. 두 모드의 measuredLinearSpeed가 path의
-	// 구간별 cm/rad에 따라 달라도 measuredAngularSpeed는 같은 공통 angular policy를 따라야 한다.
+	// Emitted once, after the progressive build finishes. The measured linear speed of the two modes can
+	// differ with the path's local centimetres per radian, but the measured angular speed has to follow the
+	// same shared angular policy.
 	if (State.bPathBuildComplete && !State.bFrontMotionStartLogged)
 	{
 		const float SafeDeltaTime = FMath::Max(0.0f, DeltaTime);
@@ -533,8 +554,9 @@ bool FRopeWrappingPhase::ResolveWrappingAnchorPoint(
 		.GetSafeNormal(KINDA_SMALL_NUMBER, RopeMath::AnyTangentFromNormal(OutPoint.NormalWorld));
 	if (Anchor.bHasWrappingGuideTangent)
 	{
-		// surface tangent와 달리 guide에는 normal 평면 투영을 적용하지 않는다. 이 벡터는
-		// 충돌/고정 프레임이 아니라 front 뒤 tail의 시각적 연장 방향으로만 소비된다.
+		// Unlike the surface tangent, the guide is not projected onto the normal plane. This vector is
+		// consumed only as the visual extension direction of the tail behind the front, never as a collision
+		// or pinning frame.
 		OutPoint.WrappingGuideTangentWorld = BoneXform.TransformVectorNoScale(
 			Anchor.LocalWrappingGuideTangent)
 			.GetSafeNormal(KINDA_SMALL_NUMBER, OutPoint.TangentWorld);
@@ -550,8 +572,8 @@ FVector FRopeWrappingPhase::GetPathPointCenterlineWorld(
 	const FRopeWrapPathPoint& Point, float SurfaceOffset)
 {
 	const float ClampedSurfaceOffset = FMath::Max(0.0f, SurfaceOffset);
-	// bVirtual만 SurfaceWorld에 이미 rope centerline을 저장한다. Sequential bridge는
-	// anchor가 없을 뿐 일반 surface point와 같은 offset 이전 기준 위치를 저장한다.
+	// Only a virtual point stores the rope centreline directly in its surface field. A sequential bridge
+	// merely has no anchor and stores the same pre-offset reference position an ordinary surface point does.
 	return Point.SurfaceWorld +
 		(Point.bVirtual
 			? FVector::ZeroVector
@@ -586,14 +608,16 @@ void FRopeWrappingPhase::InterpolateWrappingPathPoints(
 		(SampleDistance - LowerPoint.DistanceFromLatch) /
 		(UpperPoint.DistanceFromLatch - LowerPoint.DistanceFromLatch),
 		0.0f, 1.0f);
-	// 두 플래그 모두 anchor 생략 정책에는 참여하지만 좌표 저장 규약은 bVirtual만 결정한다.
+	// Both flags take part in the anchor omission policy, but only the virtual flag decides the coordinate
+	// storage convention.
 	OutPoint.bBridge = LowerPoint.bBridge || UpperPoint.bBridge;
 	OutPoint.bVirtual = LowerPoint.bVirtual || UpperPoint.bVirtual;
 	OutPoint.NormalWorld = FMath::Lerp(
 		LowerPoint.NormalWorld, UpperPoint.NormalWorld, Alpha)
 		.GetSafeNormal(KINDA_SMALL_NUMBER, LowerPoint.NormalWorld);
-	// 저장 표현(surface 기준/virtual centerline)을 직접 섞지 않는다. 양 끝점을 centerline으로
-	// 해석해 보간한 뒤, 출력 point가 따르는 저장 규약으로 한 번만 되돌린다.
+	// The two storage representations, surface-relative and virtual centreline, are never mixed directly.
+	// Both endpoints are resolved to centrelines and interpolated, and the result is converted back once
+	// into whichever convention the output point follows.
 	const FVector LowerCenterlineWorld = GetPathPointCenterlineWorld(
 		LowerPoint, SurfaceOffset);
 	const FVector UpperCenterlineWorld = GetPathPointCenterlineWorld(
@@ -611,8 +635,9 @@ void FRopeWrappingPhase::InterpolateWrappingPathPoints(
 		LowerPoint.bHasWrappingGuideTangent || UpperPoint.bHasWrappingGuideTangent;
 	if (OutPoint.bHasWrappingGuideTangent)
 	{
-		// front가 두 path point 사이를 이동할 때 guide도 같은 alpha로 보간해 방향이 node
-		// 경계에서 계단식으로 바뀌지 않게 한다. guide가 없는 쪽은 surface tangent로 폴백한다.
+		// As the front moves between two path points the guide is interpolated by the same alpha, so the
+		// direction does not change in steps at node boundaries. A side with no guide falls back to the
+		// surface tangent.
 		const FVector LowerGuide = LowerPoint.bHasWrappingGuideTangent
 			? LowerPoint.WrappingGuideTangentWorld
 			: LowerPoint.TangentWorld;
@@ -680,15 +705,16 @@ bool FRopeWrappingPhase::BuildResolvedWrappingPath(
 				OutResolvedPath.Reset();
 				return false;
 			}
-			// 움직이는 본에서 위치/법선은 anchor frame으로 갱신하되, path가 빌드될 때
-			// 확정한 animation angle parameter는 저장된 point 값으로 복원한다.
+			// On a moving bone the position and normal are refreshed from the anchor frame, while the
+			// animation angle parameter settled when the path was built is restored from the stored point.
 			ResolvedPoint.WrapAngleFromLatchRad = StoredPoint.WrapAngleFromLatchRad;
 			OutResolvedPath[PathIndex] = MoveTemp(ResolvedPoint);
 			++AnchorIndex;
 		}
 		else
 		{
-			// Progressive build에서 anchor가 아직 붙기 전인 같은 프레임의 짧은 창은 스냅샷을 쓴다.
+			// The snapshot is used for the short window within the same frame of a progressive build, before
+			// the anchor has been attached.
 			OutResolvedPath[PathIndex] = StoredPoint;
 		}
 	}

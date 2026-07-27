@@ -3,7 +3,7 @@
 #include "Gameplay/RopeRagdollResponseComponent.h"
 
 #include "DynamicRopeLog.h"
-// URopeComponent 완전정의 — WrappingRopes(engagement 집합)의 weak 키 타입.
+// The full definition of URopeComponent, which is the weak key type of the WrappingRopes engagement set.
 #include "RopeComponent.h"
 #include "Subsystem/RopeSimSubsystem.h"
 #include "Camera/CameraActor.h"
@@ -22,8 +22,10 @@
 
 URopeRagdollResponseComponent::URopeRagdollResponseComponent()
 {
-	// 반응은 중앙 wrap/release 신호 + 타이머로 구동한다. 틱은 랙돌 카메라 추적(풀 랙돌 동안만) 전용 —
-	// 평시에는 꺼 둔다. PostPhysics = 랙돌 본 최종 포즈 이후, 카메라 매니저 갱신 이전.
+	// The response is driven by the central wrap and release signals plus a timer. The tick exists only
+	// for the ragdoll camera follow, during a full ragdoll, and is disabled the rest of the time.
+	// PostPhysics puts it after the ragdoll bones reach their final pose and before the camera manager
+	// updates.
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = false;
 	PrimaryComponentTick.TickGroup = TG_PostPhysics;
@@ -35,11 +37,12 @@ void URopeRagdollResponseComponent::BeginPlay()
 
 	if (!ResolveMesh())
 	{
-		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] RopeRagdollResponse: 스켈레탈 메시를 찾지 못했다 — 랙돌 반응 비활성."),
+		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] RopeRagdollResponse: no skeletal mesh found - the ragdoll response is disabled."),
 			*GetNameSafe(GetOwner()));
 	}
 
-	// 월드 어느 로프든 wrap/release되면 알림을 받는다(자기를 감을 로프를 미리 몰라도 반응 가능).
+	// Receive a notification whenever any rope in the world wraps or releases, which allows a reaction
+	// without knowing in advance which rope will wrap this actor.
 	if (URopeSimSubsystem* Sim = URopeSimSubsystem::Get(GetWorld()))
 	{
 		WrappedHandle = Sim->OnAnyRopeWrapped.AddUObject(this, &URopeRagdollResponseComponent::HandleAnyRopeWrapped);
@@ -60,14 +63,17 @@ void URopeRagdollResponseComponent::EndPlay(const EEndPlayReason::Type EndPlayRe
 		World->GetTimerManager().ClearTimer(AutoRagdollTimer);
 	}
 	WrappingRopes.Reset();
-	// 카메라 추적 정리 — 컴포넌트만 떼는 경우의 원복(RecoverFromRagdoll)보다 먼저 불려도, 나중에
-	// 중복으로 불려도 무해(내부 가드). 월드 소멸 중엔 블렌드 없이 정리만 된다.
+	// Clean up the camera follow. It is harmless whether it runs before the recovery path that fires when
+	// only the component is removed, or a second time afterwards, thanks to its internal guard. While the
+	// world is being torn down it only cleans up, with no blend.
 	EndRagdollCameraFollow();
 
-	// 컴포넌트만 떼는 경우(DestroyComponent/UnregisterComponent)의 원복: 랙돌 상태는 이 컴포넌트가 만든
-	// 것이고 복구에 필요한 저장값(프로파일/부착/무브먼트 모드)도 이 컴포넌트에만 있다 — 그대로 사라지면
-	// 대상은 시뮬 켜진 채 무브먼트가 꺼져 영구히 조작 불능이 된다. 액터/월드가 함께 죽는 경우는 원복해도
-	// 의미가 없고 죽어가는 객체를 건드리는 위험만 있으므로 제외한다.
+	// Recovery for the case where only the component is removed, through DestroyComponent or
+	// UnregisterComponent. The ragdoll state was created by this component, and the values needed to undo
+	// it, namely the collision profile, the attachment and the movement mode, exist only here, so
+	// disappearing would leave the target simulating with movement disabled and permanently uncontrollable.
+	// Where the actor or the world is dying too, recovering means nothing and only risks touching an object
+	// already being destroyed, so it is skipped.
 	AActor* Owner = GetOwner();
 	const bool bComponentOnlyTeardown = bRagdolled
 		&& IsValid(Owner) && !Owner->IsActorBeingDestroyed()
@@ -75,7 +81,7 @@ void URopeRagdollResponseComponent::EndPlay(const EEndPlayReason::Type EndPlayRe
 	if (bComponentOnlyTeardown)
 	{
 		UE_LOG(LogDynamicRope, Log,
-			TEXT("[%s] RopeRagdollResponse: 컴포넌트 제거 — 랙돌 상태를 원복하고 나간다."), *GetNameSafe(Owner));
+			TEXT("[%s] RopeRagdollResponse: component removed - restoring the ragdoll state before leaving."), *GetNameSafe(Owner));
 		RecoverFromRagdoll();
 	}
 	Super::EndPlay(EndPlayReason);
@@ -86,12 +92,13 @@ void URopeRagdollResponseComponent::HandleAnyRopeWrapped(const FRopeWrappedEvent
 	const USkeletalMeshComponent* MyMesh = ResolveMesh();
 	if (!MyMesh || Info.Mesh.Get() != MyMesh)
 	{
-		// 다른 메시가 감긴 이벤트 — 무시.
+		// A different mesh was wrapped, so this is ignored.
 		return;
 	}
 
-	// engagement 등록은 랙돌 게이트보다 **먼저** 한다 — 이미 랙돌 중이어도 두 번째 로프를 세어야
-	// 하나가 풀렸을 때 조기 복구를 막을 수 있다(종전엔 bRagdolled면 곧장 return이라 아예 기록되지 않았다).
+	// The engagement is registered before the ragdoll gate: a second rope has to be counted even while
+	// already limp, or releasing one of them would recover the target early. Returning immediately when
+	// already limp would mean it was never recorded at all.
 	if (Info.Rope.IsValid())
 	{
 		WrappingRopes.Add(Info.Rope);
@@ -124,12 +131,13 @@ void URopeRagdollResponseComponent::HandleAnyRopeReleased(const URopeComponent* 
 	}
 
 	WrappingRopes.Remove(const_cast<URopeComponent*>(Rope));
-	// 감긴 채 파괴된 로프는 release 신호를 못 쏘므로 만료 weak로만 남는다 — 여기서 걷어내지 않으면
-	// 집합이 영영 비지 않아 자동 복귀가 죽는다.
+	// A rope destroyed while still wrapped can never fire a release signal and remains only as an expired
+	// weak pointer. Without pruning them here the set would never empty and automatic recovery would die.
 	const int32 RemainingRopes = PruneWrappingRopes();
 
-	// 지연 대기 중 풀렸다면(빠른 wrap→release) 예약된 자동 전환을 취소한다. 단 다른 로프가 아직 감고
-	// 있으면 그 로프의 예약이므로 유지한다.
+	// If the wrap released while the delay was still pending, as in a fast wrap and release, the scheduled
+	// automatic transition is cancelled, unless another rope is still wrapped, in which case the schedule
+	// belongs to that rope and is kept.
 	if (RemainingRopes == 0)
 	{
 		if (UWorld* World = GetWorld())
@@ -138,21 +146,22 @@ void URopeRagdollResponseComponent::HandleAnyRopeReleased(const URopeComponent* 
 		}
 	}
 
-	// 한 대상을 여러 로프가 감을 수 있다 — 마지막 로프가 풀렸을 때만 일으킨다(하나만 풀렸는데 복구하면
-	// 남은 로프에 감긴 채 서 있게 된다).
+	// Several ropes can wrap one target, so the target is stood up only once the last of them releases;
+	// recovering when just one released would leave it standing while still wrapped by the others.
 	if (RemainingRopes > 0)
 	{
 		UE_LOG(LogDynamicRope, Verbose,
-			TEXT("[%s] RopeRagdollResponse: 로프 release(%s) — 아직 %d개 로프가 감고 있어 복귀 보류."),
+			TEXT("[%s] RopeRagdollResponse: rope released (%s) - %d rope(s) still wrapped, so recovery is deferred."),
 			*GetNameSafe(GetOwner()), *UEnum::GetValueAsString(Reason), RemainingRopes);
 		return;
 	}
 
-	// 자동 전환된 랙돌만 자동 복귀(수동/치트 진입은 유지). RecoverFromRagdoll이 메시 유효성/랙돌 여부를
-	// 다시 가드하므로 대상 소실(Broken) 등으로 메시가 없으면 조용히 no-op.
+	// Only an automatically entered ragdoll recovers automatically; a manual entry is kept. RecoverFromRagdoll
+	// guards the mesh validity and the ragdoll state again, so a lost target, as with a Broken release,
+	// simply becomes a quiet no-op.
 	if (bRecoverRagdollOnRopeRelease && bRagdolled && bRagdollWasAutoTriggered)
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 로프 release(%s) → 자동 랙돌 복귀."),
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: rope released (%s) - recovering the automatic ragdoll."),
 			*GetNameSafe(GetOwner()), *UEnum::GetValueAsString(Reason));
 		RecoverFromRagdoll();
 	}
@@ -160,18 +169,20 @@ void URopeRagdollResponseComponent::HandleAnyRopeReleased(const URopeComponent* 
 
 bool URopeRagdollResponseComponent::RecoverFromRagdollIfUnheld()
 {
-	// 자동 복귀(HandleAnyRopeReleased)와 동일 게이트 — 이 API는 "release 이벤트가 영영 안 오는" 경로의
-	// 명시 트리거일 뿐, 복귀 자격 규칙을 넓히지 않는다(수동/치트 랙돌·복귀 옵트아웃은 그대로 존중).
+	// The same gate as the automatic recovery in HandleAnyRopeReleased. This API is only an explicit
+	// trigger for paths where the release event never arrives, and does not widen the eligibility rules: a
+	// manual ragdoll and an opt-out of recovery are both still respected.
 	if (!bRecoverRagdollOnRopeRelease || !bRagdolled || !bRagdollWasAutoTriggered)
 	{
 		return false;
 	}
-	// 아직 감고 있는 로프가 있으면 그 마지막 release의 자동 복귀 몫이다(하나만 풀렸는데 일으키기 방지).
+	// While any rope is still wrapped, recovery belongs to the automatic path on that last release, which
+	// prevents standing the target up when only one of several has let go.
 	if (PruneWrappingRopes() > 0)
 	{
 		return false;
 	}
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 감은 로프 없음 → 로프 구동 랙돌 명시 복귀(IfUnheld)."),
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: no rope still wrapped - explicitly recovering the rope-driven ragdoll."),
 		*GetNameSafe(GetOwner()));
 	RecoverFromRagdoll();
 	return true;
@@ -198,13 +209,13 @@ void URopeRagdollResponseComponent::FireAutoRagdoll()
 
 	if (bOnlyBelowWrappedBone && !PendingWrappedBone.IsNone())
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: wrap → 감긴 본(%s) 이하 부분 랙돌 자동 전환."),
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: wrapped - going partially limp below the wrapped bone (%s)."),
 			*GetNameSafe(GetOwner()), *PendingWrappedBone.ToString());
 		EnterPartialRagdoll(PendingWrappedBone, /*bAutoRecoverOnRelease*/ true);
 	}
 	else
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: wrap → 풀 랙돌 자동 전환."), *GetNameSafe(GetOwner()));
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: wrapped - going fully limp."), *GetNameSafe(GetOwner()));
 		EnterRagdoll(/*bAutoRecoverOnRelease*/ true);
 	}
 }
@@ -217,16 +228,16 @@ void URopeRagdollResponseComponent::EnterRagdoll(bool bAutoRecoverOnRelease)
 		return;
 	}
 
-	// 피직스 에셋 검증은 **아무것도 바꾸기 전에** 한다. 바디가 없으면 SetSimulatePhysics(true)가 조용히
-	// 무효가 되는데, 그 전에 무브먼트/캡슐 콜리전을 먼저 껐다면 대상은 "랙돌도 아니고 걷지도 못하는"
-	// 상태로 bRagdolled=true인 채 고착된다(조작 불능). 부분 랙돌 경로는 원래 이 순서를 지키고 있었다 —
-	// 풀 랙돌만 비대칭이었다.
+	// Validate the physics asset before changing anything. Without bodies, SetSimulatePhysics(true) fails
+	// silently, and having already disabled movement and capsule collision first would leave the target
+	// neither limp nor able to walk, stuck with the ragdoll flag set and no way to control it. The partial
+	// ragdoll path already followed this order; only the full ragdoll was asymmetric.
 	const UPhysicsAsset* PhysAsset = Mesh->GetPhysicsAsset();
 	if (!PhysAsset || PhysAsset->SkeletalBodySetups.Num() == 0)
 	{
 		UE_LOG(LogDynamicRope, Warning,
-			TEXT("[%s] RopeRagdollResponse: 메시에 피직스 바디가 없어(에셋 %s) 풀 랙돌을 건너뛴다."),
-			*GetNameSafe(GetOwner()), PhysAsset ? TEXT("바디 0개") : TEXT("없음"));
+			TEXT("[%s] RopeRagdollResponse: the mesh has no physics bodies (asset: %s), so the full ragdoll is skipped."),
+			*GetNameSafe(GetOwner()), PhysAsset ? TEXT("zero bodies") : TEXT("none"));
 		return;
 	}
 
@@ -246,11 +257,12 @@ void URopeRagdollResponseComponent::EnterRagdoll(bool bAutoRecoverOnRelease)
 
 	bRagdolled = true;
 	bPartial = false;
-	// 로프 구동 진입(wrap 자동 전환·스네어 강제 랙돌)은 true — release 자동 복귀 게이트 대상.
-	// false = 수동/치트 진입(로프가 멋대로 일으키지 않는다).
+	// A rope-driven entry, whether the automatic transition on a wrap or a snare forcing it, passes true and
+	// is eligible for the automatic recovery gate on release.
+	// False marks a manual entry, which a rope must never stand up on its own.
 	bRagdollWasAutoTriggered = bAutoRecoverOnRelease;
 	BeginRagdollCameraFollow();
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 풀 랙돌 진입."), *GetNameSafe(GetOwner()));
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: entering a full ragdoll."), *GetNameSafe(GetOwner()));
 }
 
 void URopeRagdollResponseComponent::EnterPartialRagdoll(FName BoneName, bool bAutoRecoverOnRelease)
@@ -262,19 +274,21 @@ void URopeRagdollResponseComponent::EnterPartialRagdoll(FName BoneName, bool bAu
 	}
 	if (BoneName == NAME_None || Mesh->GetBoneIndex(BoneName) == INDEX_NONE)
 	{
-		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] RopeRagdollResponse: 본 '%s'을(를) 찾지 못해 부분 랙돌을 건너뛴다."),
+		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] RopeRagdollResponse: bone '%s' not found, so the partial ragdoll is skipped."),
 			*GetNameSafe(GetOwner()), *BoneName.ToString());
 		return;
 	}
 
-	// 스켈레톤에는 있어도 피직스 에셋에 바디가 없는 본(트위스트/IK 등)이면 SetAllBodiesBelow*가
-	// 잡을 바디가 없어 조용히 무시된다(감긴 본을 그대로 넘기는 bOnlyBelowWrappedBone 자동 경로에서
-	// 특히 잘 걸린다). 부모 체인을 올라가 바디가 있는 본으로 승격한다 — 플러그인 Pull 쪽
-	// FindNearestSimulatingBone과 같은 원리(여기는 "시뮬 중"이 아니라 "바디 존재"가 기준).
+	// A bone that exists in the skeleton but has no body in the physics asset, such as a twist or IK bone,
+	// gives SetAllBodiesBelow nothing to act on and is silently ignored. That is particularly easy to hit on
+	// the automatic bOnlyBelowWrappedBone path, which passes the wrapped bone straight through. The parent
+	// chain is walked up to a bone that does have a body. It is the same principle as
+	// FindNearestSimulatingBone on the pull side, except that the criterion here is having a body rather
+	// than currently simulating.
 	UPhysicsAsset* PhysAsset = Mesh->GetPhysicsAsset();
 	if (!PhysAsset)
 	{
-		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] RopeRagdollResponse: 피직스 에셋이 없어 부분 랙돌을 건너뛴다."),
+		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] RopeRagdollResponse: no physics asset, so the partial ragdoll is skipped."),
 			*GetNameSafe(GetOwner()));
 		return;
 	}
@@ -286,19 +300,19 @@ void URopeRagdollResponseComponent::EnterPartialRagdoll(FName BoneName, bool bAu
 	if (BodyBone.IsNone())
 	{
 		UE_LOG(LogDynamicRope, Warning,
-			TEXT("[%s] RopeRagdollResponse: 본 '%s' 및 부모 체인에 피직스 바디가 없어 부분 랙돌을 건너뛴다."),
+			TEXT("[%s] RopeRagdollResponse: neither bone '%s' nor its parent chain has a physics body, so the partial ragdoll is skipped."),
 			*GetNameSafe(GetOwner()), *BoneName.ToString());
 		return;
 	}
 	if (BodyBone != BoneName)
 	{
-		UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 본 '%s'에 바디가 없어 '%s'(으)로 승격."),
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: bone '%s' has no body, so it was promoted to '%s'."),
 			*GetNameSafe(GetOwner()), *BoneName.ToString(), *BodyBone.ToString());
 	}
 
 	SaveRestoreState(Mesh);
 
-	// 캡슐/무브먼트는 유지 — 시뮬 안 하는 나머지 본은 애니메이션을 계속 탄다.
+	// The capsule and movement are kept: the remaining bones, which do not simulate, keep animating.
 	Mesh->SetCollisionProfileName(RagdollCollisionProfileName);
 	ApplyRagdollOverlapEvents(Mesh);
 	Mesh->SetAllBodiesBelowSimulatePhysics(BodyBone, true, /*bIncludeSelf*/ true);
@@ -308,7 +322,7 @@ void URopeRagdollResponseComponent::EnterPartialRagdoll(FName BoneName, bool bAu
 	bRagdolled = true;
 	bPartial = true;
 	bRagdollWasAutoTriggered = bAutoRecoverOnRelease;
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 부분 랙돌 진입(본 %s 이하)."),
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: entering a partial ragdoll below bone %s."),
 		*GetNameSafe(GetOwner()), *BodyBone.ToString());
 }
 
@@ -320,8 +334,9 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 		return;
 	}
 
-	// 캡슐 재정렬(풀 랙돌 한정): 시뮬을 끄기 전(= 아직 랙돌 포즈일 때) 앵커 본의 월드 위치를 캡처한다.
-	// 아래에서 시뮬을 끄고 메시를 ref 포즈로 리셋하면 이 위치 정보가 사라지므로 여기서 미리 잡아둔다.
+	// Capsule realignment, for a full ragdoll only: capture the anchor bone's world position before the
+	// simulation is disabled, while the ragdoll pose still exists. Disabling the simulation below resets the
+	// mesh to its reference pose and destroys that information, so it is taken in advance here.
 	FName RealignAnchor = NAME_None;
 	FVector RagdollAnchorWorld = FVector::ZeroVector;
 	if (bMoveCapsuleToMeshOnRecover && !bPartial)
@@ -334,7 +349,7 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 		else
 		{
 			UE_LOG(LogDynamicRope, Warning,
-				TEXT("[%s] RopeRagdollResponse: 재정렬 앵커 본 '%s'을(를) 스켈레톤에서 찾지 못해 캡슐 재정렬을 건너뛴다."),
+				TEXT("[%s] RopeRagdollResponse: realignment anchor bone '%s' not found in the skeleton, so the capsule realignment is skipped."),
 				*GetNameSafe(GetOwner()), *RecoverAnchorBoneName.ToString());
 		}
 	}
@@ -348,18 +363,22 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 
 	if (!bPartial)
 	{
-		// 풀 랙돌은 메시가 물리를 따라 캡슐에서 떨어져 나갔으므로 원래 부착 관계로 되돌린다.
+		// A full ragdoll let the mesh follow physics away from the capsule, so the original attachment is
+		// restored.
 		if (USceneComponent* Parent = SavedAttachParent.Get())
 		{
 			Mesh->AttachToComponent(Parent, FAttachmentTransformRules::KeepRelativeTransform, SavedAttachSocket);
 		}
 		Mesh->SetRelativeTransform(SavedMeshRelative);
 
-		// 리셋으로 메시가 캡슐 위치의 ref 포즈로 돌아왔다. 캡슐(액터)을 랙돌이 멈춘 곳으로 이동해 그
-		// 되돌아감이 시각적 순간이동이 아니게 만든다. 이동량 = (랙돌 앵커 - 현재 앵커 월드). 높이는 캐릭터
-		// + RecoverGroundSearchDistance > 0일 때만 반영한다(수직 수송 — 헬기 캐리 — 후 옛 높이로 되돌아가는
-		// 것 방지): 앵커 아래로 바닥을 트레이스해 캡슐 바닥을 그 위에 세우고, 못 찾으면(공중 하차) 앵커
-		// 높이에서 낙하로 잇는다. 그 외(비캐릭터/탐색 0)는 종전대로 Z를 눌러 지면 높이 유지.
+		// The reset returned the mesh to its reference pose at the capsule's location. Moving the capsule,
+		// that is the actor, to where the ragdoll came to rest makes that return invisible rather than a
+		// teleport. The offset is the ragdoll anchor minus the current anchor in world space. The height is
+		// only applied on a character and when the ground search distance is above 0, which prevents
+		// returning to the old height after vertical transport such as a helicopter carry: the ground is
+		// traced for below the anchor and the capsule is stood on it, and where none is found, meaning it
+		// was dropped in mid-air, it continues falling from the anchor height. Otherwise, on a non-character
+		// or with a search distance of 0, Z is held as before to keep the ground height.
 		bool bRecoveredAirborne = false;
 		if (!RealignAnchor.IsNone())
 		{
@@ -371,8 +390,9 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 					OwnerCharacter ? OwnerCharacter->GetCapsuleComponent() : nullptr;
 				if (Capsule && RecoverGroundSearchDistance > 0.0f && GetWorld())
 				{
-					// 캡슐 콜리전은 아직 꺼져 있고(진입 시 NoCollision) 랙돌 메시는 남아 있으므로 자기
-					// 액터를 명시 제외한다. 채널은 캡슐이 걷는 것과 같은 Pawn 기준.
+					// Capsule collision is still disabled, having been set to none on entry, and the ragdoll
+					// mesh is still present, so this actor is explicitly excluded. The channel matches the one
+					// the capsule walks on.
 					FCollisionQueryParams Params(SCENE_QUERY_STAT(RopeRagdollRecoverGround),
 						/*bTraceComplex*/ false, Owner);
 					const float HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
@@ -387,7 +407,8 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 					}
 					else
 					{
-						// 탐색 거리 안에 바닥 없음 = 공중 하차 — 앵커 높이에서 낙하로 복귀.
+						// No ground within the search distance, meaning it was dropped in mid-air, so it
+						// continues falling from the anchor height.
 						TargetCenterZ = static_cast<float>(RagdollAnchorWorld.Z);
 						bRecoveredAirborne = true;
 					}
@@ -404,10 +425,12 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 		if (ACharacter* Character = Cast<ACharacter>(GetOwner()))
 		{
 			Character->GetCapsuleComponent()->SetCollisionEnabled(SavedCapsuleCollision);
-			// 진입 시 모드로 복귀한다. 단 MOVE_None(이미 무브먼트가 꺼진 상태에서 진입)으로 되돌리면
-			// 조작 불능이 그대로 남으므로 그 한 경우만 Walking으로 구제하고, 공중 하차(위 트레이스 실패)는
-			// 접지 모드 대신 낙하로 잇는다(Walking 복귀는 바닥 탐색 실패 시 첫 틱에 어차피 낙하 전환되지만,
-			// 명시해 한 프레임 바닥 스냅 시도를 없앤다). 비행/수영 저장 모드는 그대로 존중.
+			// Restore the movement mode recorded on entry. Restoring MOVE_None, which happens when it was
+			// entered with movement already disabled, would leave the target uncontrollable, so that one case
+			// is rescued to walking; and being dropped in mid-air, meaning the trace above failed, continues
+			// falling rather than returning to a grounded mode. Returning to walking would fall on the first
+			// tick anyway once the ground search failed, but stating it explicitly removes one frame's
+			// attempt at a ground snap. Saved flying and swimming modes are respected as they are.
 			EMovementMode RestoreMode = (SavedMovementMode == MOVE_None) ? MOVE_Walking : SavedMovementMode.GetValue();
 			if (bRecoveredAirborne && (RestoreMode == MOVE_Walking || RestoreMode == MOVE_NavWalking))
 			{
@@ -417,20 +440,22 @@ void URopeRagdollResponseComponent::RecoverFromRagdoll()
 		}
 	}
 
-	// 캡슐 재정렬/무브먼트 복구가 끝난 뒤에 카메라를 폰으로 블렌드 백한다 — 목적지(폰 카메라)가
-	// 최종 위치에 있어야 블렌드가 헛돌지 않는다.
+	// The camera blends back to the pawn only after the capsule realignment and the movement recovery are
+	// complete, so its destination, the pawn camera, is already at its final position and the blend does not
+	// chase it.
 	EndRagdollCameraFollow();
 
 	bRagdolled = false;
 	bPartial = false;
 	bRagdollWasAutoTriggered = false;
-	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: 랙돌 복귀."), *GetNameSafe(GetOwner()));
+	UE_LOG(LogDynamicRope, Log, TEXT("[%s] RopeRagdollResponse: recovered from the ragdoll."), *GetNameSafe(GetOwner()));
 }
 
 void URopeRagdollResponseComponent::BeginRagdollCameraFollow()
 {
-	// 플레이어가 보고 있는 폰의 풀 랙돌만 대상. 실패 조건은 전부 조용한 no-op — 카메라는 편의 기능이고
-	// 랙돌 본체(물리 전환)의 성패와 무관해야 한다.
+	// Only a full ragdoll on the pawn the player is watching. Every failure condition is a quiet no-op: the
+	// camera is a convenience and must not affect whether the ragdoll itself, meaning the physics
+	// transition, succeeded.
 	if (!bViewTargetFollowRagdoll || FollowCamera.IsValid())
 	{
 		return;
@@ -443,19 +468,20 @@ void URopeRagdollResponseComponent::BeginRagdollCameraFollow()
 	{
 		return;
 	}
-	// 이미 다른 뷰타깃(시네마틱 등)을 보고 있으면 빼앗지 않는다.
+	// If another view target, such as a cinematic, is already active, it is not taken over.
 	if (PC->GetViewTarget() != Pawn)
 	{
 		return;
 	}
 
-	// 추적 기준점: 캡슐 재정렬과 같은 앵커 본(스켈레톤에 없으면 메시 원점).
+	// The follow reference is the same anchor bone the capsule realignment uses, falling back to the mesh
+	// origin when the skeleton lacks it.
 	const bool bHasAnchorBone =
 		!RecoverAnchorBoneName.IsNone() && Mesh->GetBoneIndex(RecoverAnchorBoneName) != INDEX_NONE;
 	const FVector AnchorPos =
 		bHasAnchorBone ? Mesh->GetSocketLocation(RecoverAnchorBoneName) : Mesh->GetComponentLocation();
 
-	// 현재 POV 그 자리에 스폰 + 무블렌드 전환 = 화면상 이음새 없음.
+	// Spawning at the current point of view and switching with no blend makes it seamless on screen.
 	const FVector CamLoc = PC->PlayerCameraManager->GetCameraLocation();
 	const FRotator CamRot = PC->PlayerCameraManager->GetCameraRotation();
 	FActorSpawnParameters SpawnParams;
@@ -476,7 +502,8 @@ void URopeRagdollResponseComponent::BeginRagdollCameraFollow()
 	FollowController = PC;
 	FollowCamera = Cam;
 	FollowCameraOffset = CamLoc - AnchorPos;
-	// 본 최종 포즈(물리 블렌드) 이후에 읽도록 메시를 선행조건으로 — 한 프레임 지연 흔들림 방지.
+	// The mesh is a prerequisite so this reads the bones after their final pose, including the physics
+	// blend, which prevents a one-frame lag from showing as jitter.
 	AddTickPrerequisiteComponent(Mesh);
 	SetComponentTickEnabled(true);
 }
@@ -496,15 +523,17 @@ void URopeRagdollResponseComponent::EndRagdollCameraFollow()
 	AActor* Owner = GetOwner();
 	UWorld* World = GetWorld();
 	const bool bWorldAlive = World && !World->bIsTearingDown;
-	// 우리가 아직 뷰타깃일 때만 폰으로 블렌드 백(그 사이 시네마틱 등이 가져갔으면 존중). 소유자가
-	// 죽는 중이면 목적지가 없다 — 카메라를 그대로 두고 수명만 걸어 카메라 매니저 폴백에 맡긴다.
+	// Blend back to the pawn only while we are still the view target, respecting anything, such as a
+	// cinematic, that took it in the meantime. If the owner is dying there is no destination, so the camera
+	// is left alone and only given a lifetime, leaving it to the camera manager's fallback.
 	if (PC && bWorldAlive && PC->GetViewTarget() == Cam
 		&& IsValid(Owner) && !Owner->IsActorBeingDestroyed())
 	{
 		PC->SetViewTargetWithBlend(Owner, FMath::Max(RecoverCameraBlendTime, 0.0f),
 			VTBlend_Cubic);
 	}
-	// 블렌드가 끝날 때까지 원본 뷰타깃이 살아 있어야 한다 — 즉시 파괴 대신 수명으로 정리.
+	// The original view target has to survive until the blend finishes, so it is given a lifetime rather
+	// than being destroyed immediately.
 	if (bWorldAlive)
 	{
 		Cam->SetLifeSpan(FMath::Max(RecoverCameraBlendTime, 0.0f) + 0.5f);
@@ -523,7 +552,8 @@ void URopeRagdollResponseComponent::TickComponent(float DeltaTime, ELevelTick Ti
 	ACameraActor* Cam = FollowCamera.Get();
 	USkeletalMeshComponent* Mesh = ResolveMesh();
 	APlayerController* PC = FollowController.Get();
-	// 추적 전제가 무너지면(복귀 외 경로: 메시 소실/컨트롤러 소멸/뷰타깃 피탈) 정리하고 끝낸다.
+	// If a precondition of following breaks, through a path other than recovery such as a lost mesh, a
+	// destroyed controller or the view target being taken, it cleans up and stops.
 	if (!Cam || !Mesh || !bRagdolled || bPartial || !PC || PC->GetViewTarget() != Cam)
 	{
 		EndRagdollCameraFollow();
@@ -535,7 +565,8 @@ void URopeRagdollResponseComponent::TickComponent(float DeltaTime, ELevelTick Ti
 	const FVector AnchorPos =
 		bHasAnchorBone ? Mesh->GetSocketLocation(RecoverAnchorBoneName) : Mesh->GetComponentLocation();
 	const FVector Desired = AnchorPos + FollowCameraOffset;
-	// 위치는 일방향 러그 추적(카메라→본 피드백 없음 = 폭주 불가), 시선은 항상 랙돌을 향한다.
+	// The position follows with a one-way lag, with no feedback from the camera back to the bone, which
+	// makes a runaway impossible, while the view always points at the ragdoll.
 	const FVector NewLoc = FollowCameraLagSpeed > 0.0f
 		? FMath::VInterpTo(Cam->GetActorLocation(), Desired, DeltaTime, FollowCameraLagSpeed)
 		: Desired;
@@ -563,9 +594,10 @@ USkeletalMeshComponent* URopeRagdollResponseComponent::ResolveMesh() const
 
 void URopeRagdollResponseComponent::ApplyRagdollOverlapEvents(USkeletalMeshComponent* Mesh)
 {
-	// 랙돌 중 오버랩 이벤트를 낼 수 있는 컴포넌트가 하나도 없는 상태를 막는다: 풀 랙돌은 캡슐을 끄고,
-	// ACharacter의 메시는 애초에 GenerateOverlapEvents가 꺼져 있다(엔진 기본). 프로파일 전환은 이
-	// 플래그를 건드리지 않으므로 여기서 명시적으로 켠다 — 안 켜면 트리거 볼륨이 랙돌을 못 본다.
+	// Prevent the state where no component at all can raise overlap events: a full ragdoll disables the
+	// capsule, and an ACharacter's mesh has overlap events disabled to begin with, which is the engine
+	// default. Switching the collision profile does not touch that flag, so it is enabled explicitly here;
+	// without it a trigger volume cannot see the ragdoll.
 	if (bGenerateOverlapEventsWhileRagdolled)
 	{
 		Mesh->SetGenerateOverlapEvents(true);
@@ -574,10 +606,12 @@ void URopeRagdollResponseComponent::ApplyRagdollOverlapEvents(USkeletalMeshCompo
 
 void URopeRagdollResponseComponent::ApplyRagdollCCD(USkeletalMeshComponent* Mesh, bool bEnable)
 {
-	// 얇은 바닥(엔진 기본 Plane 등 두께 0 콜리전)은 랙돌 바디가 한 스텝에 면을 넘어가면 접촉이 생성되지
-	// 않아 뚫린다 — 랙돌 동안만 전 바디 CCD로 스텝 사이를 스윕한다. 원복은 일괄 false: 피직스 에셋이
-	// 저작 시점에 켜둔 바디까지 함께 꺼지는 한계는 감수한다(복귀 후엔 시뮬 off라 실효가 없고, 이
-	// 컴포넌트로 재진입하면 다시 켠다).
+	// A thin floor, such as the engine's default plane with zero collision thickness, is passed through when
+	// a ragdoll body crosses the surface within one step, because no contact is generated. Continuous
+	// collision is therefore enabled on every body for the duration of the ragdoll, sweeping between steps.
+	// Restoring sets them all to false, which accepts the limitation that a body the physics asset had
+	// enabled at authoring time is disabled too: after recovery the simulation is off so it has no effect,
+	// and re-entering through this component enables them again.
 	if (bUseCCDWhileRagdolled)
 	{
 		Mesh->SetAllUseCCD(bEnable);
@@ -592,7 +626,8 @@ void URopeRagdollResponseComponent::SaveRestoreState(USkeletalMeshComponent* Mes
 	SavedAttachParent = Mesh->GetAttachParent();
 	SavedAttachSocket = Mesh->GetAttachSocketName();
 
-	// 무브먼트 모드도 저장한다 — 복귀 때 되돌리기 위함(비행/수영/커스텀 중 감긴 대상이 걸어 나오면 안 된다).
+	// The movement mode is saved as well, so it can be restored on recovery: a target wrapped while flying,
+	// swimming or in a custom mode must not walk out of the ragdoll.
 	SavedMovementMode = MOVE_Walking;
 	SavedCustomMovementMode = 0;
 	if (const ACharacter* Character = Cast<ACharacter>(GetOwner()))
@@ -607,7 +642,7 @@ void URopeRagdollResponseComponent::SaveRestoreState(USkeletalMeshComponent* Mes
 
 #if !UE_BUILD_SHIPPING
 //======================================================================================
-// 개발 확인용 콘솔 명령 — 이 컴포넌트가 붙은 월드 내 모든 액터에 일괄 적용.
+// Console commands for development checks, applied to every actor in the world carrying this component.
 //======================================================================================
 
 namespace RopeRagdollConsole
@@ -627,13 +662,13 @@ namespace RopeRagdollConsole
 		if (Count == 0)
 		{
 			UE_LOG(LogDynamicRope, Warning,
-				TEXT("RopeRagdollResponseComponent가 붙은 액터가 없다 — 대상 캐릭터 BP(또는 레벨 인스턴스)에 컴포넌트를 추가할 것."));
+				TEXT("No actor has a RopeRagdollResponseComponent - add the component to the target character Blueprint, or to the level instance."));
 		}
 	}
 
 	static FAutoConsoleCommandWithWorldAndArgs GRagdollCmd(
 		TEXT("Rope.Ragdoll"),
-		TEXT("랙돌 반응 토글. 인자 없음: 풀 랙돌 토글(랙돌 중이면 복귀). 본 이름 인자: 그 본 이하 부분 랙돌."),
+		TEXT("Toggles the ragdoll response. With no argument it toggles a full ragdoll, recovering if already limp. With a bone name it goes partially limp below that bone."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			ForEach(World, [&Args](URopeRagdollResponseComponent& Comp)
@@ -655,7 +690,7 @@ namespace RopeRagdollConsole
 
 	static FAutoConsoleCommandWithWorldAndArgs GRecoverCmd(
 		TEXT("Rope.Ragdoll.Recover"),
-		TEXT("랙돌 반응: 애니메이션 복귀(풀 랙돌은 포즈 팝 — wrap 중이면 로프 무속도 추종 확인)."),
+		TEXT("Ragdoll response: recover to animation. A full ragdoll produces a pose pop; while wrapped, this checks the rope follows with no velocity."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			ForEach(World, [](URopeRagdollResponseComponent& Comp)
@@ -666,14 +701,14 @@ namespace RopeRagdollConsole
 
 	static FAutoConsoleCommandWithWorldAndArgs GDestroyCmd(
 		TEXT("Rope.Ragdoll.Destroy"),
-		TEXT("랙돌 반응: 대상 액터 파괴(감긴 중 파괴 → 로프 weak mesh 경로 release 확인)."),
+		TEXT("Ragdoll response: destroy the target actor, which checks the rope's weak-mesh release path when the target dies mid-wrap."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			ForEach(World, [](URopeRagdollResponseComponent& Comp)
 			{
 				if (AActor* Owner = Comp.GetOwner())
 				{
-					UE_LOG(LogDynamicRope, Log, TEXT("[%s] 파괴(대상 소실 release 테스트)."), *GetNameSafe(Owner));
+					UE_LOG(LogDynamicRope, Log, TEXT("[%s] Destroyed, to test the lost-target release."), *GetNameSafe(Owner));
 					Owner->Destroy();
 				}
 			});

@@ -55,8 +55,8 @@ namespace
 
 void URopeComponent::Throw()
 {
-	// 프레임 기저 규약은 FRopeThrowContext::MakeDefault(RopeTypes.cpp) 주석 참고. 커스텀 지점은
-	// ResolveThrowContext 하나다 — ThrowWithContext가 그 관문을 태운다.
+	// The frame basis convention is described on FRopeThrowContext::MakeDefault in RopeTypes.cpp. There
+	// is exactly one customization point, ResolveThrowContext, and ThrowWithContext routes through it.
 	ThrowWithContext(FRopeThrowContext::MakeDefault(*this, ThrowParams));
 }
 
@@ -68,13 +68,16 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 
 	EnsureRopeInitialized();
 
-	// ③ GuaranteedWrap의 BP 직행/AI 경로: Wielder의 조준 흐름 없이 Throw가 불려도 보장 계약을 지킨다 —
-	// 컴포넌트가 스스로 prepared preview를 빌드해 구속 경로로 던진다. 빌드 성공 = 조준한 대상에 무조건 꽂힘,
-	// 빌드 실패(대상 없음/사거리 밖) = 거부가 아니라 레이 끝점 아치 투척으로 폴백(2026-07-14 보장 재정의).
-	// 빌드 파라미터(Arc Search)는 로프 멤버가 단일 소스라 Wielder 경로와 항상 일치한다.
+	// The direct Blueprint and AI path for GuaranteedWrap: Throw can be called without the wielder's
+	// aiming flow and the guarantee still holds, because the component builds the prepared preview
+	// itself and throws along the committed path. A successful build means the aimed target is wrapped
+	// without fail; a failed one, whether there is no target or it is out of range, falls back to an
+	// arcing throw towards the end of the ray rather than refusing.
+	// The build parameters have a single source on the rope, so they always agree with the wielder path.
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
-		// ③는 Loaded(장전) 상태에서만 throw가 성립한다. 꽂힌 뒤 release로 Free가 된 상태에서는 EnterLoaded() 후에야 던진다.
+		// GuaranteedWrap is only throwable from the Loaded phase. After embedding and releasing back to
+		// Free, EnterLoaded() must be called before throwing again.
 		if (!CanThrowNow())
 		{
 			UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw rejected: not in Loaded (phase=%s). Call EnterLoaded() first."),
@@ -87,7 +90,8 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 		const FRopeThrowContext ResolvedThrow = ResolveThrowContext(ThrowContext);
 		if (BuildPreparedWrappingPreviewFromResolvedContext(ResolvedThrow, Prepared, &FailureReason))
 		{
-			// 대상 조준 성공 → 무조건 꽂힘(GuidedThrow, 내부에서 OnDeployFromLoaded).
+			// The target was acquired, so it embeds without fail through GuidedThrow, which calls
+			// OnDeployFromLoaded internally.
 			if (!ThrowWithPreparedPreview(Prepared))
 			{
 				UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed prepared throw failed after build: %s"),
@@ -96,11 +100,13 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 			return;
 		}
 
-		// preview 실패(대상 없음/사거리 밖) → 거부가 아니라 레이 끝점을 향한 아치 던지기로 폴백(꽂힘 없이 Free 낙하).
-		// 조준 던지기와 아치를 통일한다(2026-07-14 보장 재정의: 보장은 '조준한 대상'에 대한 것).
+		// The preview failed, whether there is no target or it is out of range, so rather than refusing
+		// this falls back to an arcing throw towards the end of the ray, which embeds in nothing and
+		// falls to Free. Aimed and arcing throws share one path, since the guarantee applies to the
+		// target that was aimed at.
 		UE_LOG(LogDynamicRope, Log, TEXT("[%s] Guaranteed throw: no aim target (%s) — arc toss toward ray-end."),
 			*GetName(), FailureReason.IsEmpty() ? TEXT("no preview") : *FailureReason);
-		// 던지기 세기 계약: 상태 변경(OnDeployFromLoaded) 전에 검증한다.
+		// The throw strength contract is checked before any state changes in OnDeployFromLoaded.
 		float FreeThrowSpeed = 0.0f;
 		if (!TryResolveValidThrowSpeed(ResolvedThrow, FreeThrowSpeed))
 		{
@@ -118,27 +124,31 @@ void URopeComponent::ThrowWithContext(const FRopeThrowContext& ThrowContext)
 
 bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& Prepared)
 {
-	// ③의 핵심 진입점: 여기서는 StartFreshThrow처럼 Flight로 보내지 않는다.
-	// preview build가 고른 path/contact/anchor를 authoritative하게 사용해야 실제 결과가 preview와 갈라지지 않는다.
+	// The core entry point for GuaranteedWrap. Unlike StartFreshThrow it does not send the rope to
+	// Flight: the path, contact and anchor the preview build chose have to be authoritative, or the
+	// real outcome would diverge from the preview.
 	EnsureRopeInitialized();
 	if (!Prepared.IsValid() || Prepared.RenderPreview.Points.Num() < 2 || Sim.Num() < 2)
 	{
 		return false;
 	}
 
-	// ③ Guaranteed는 Loaded(장전) 상태에서만 throw가 성립한다(Wielder 직행 방어 — ThrowWithContext와 동일 게이트).
+	// GuaranteedWrap is only throwable from the Loaded phase; this is the same gate as ThrowWithContext,
+	// guarding against the wielder calling in directly.
 	if (!CanThrowNow())
 	{
 		return false;
 	}
 
-	// 서브클래스 wrap 대상 게이트: preview 빌드는 이 게이트를 모르므로(정적 빌더) 진입점에서 거른다.
+	// The subclass wrap target gate. The preview build is a static builder and knows nothing about it,
+	// so it is applied here at the entry point.
 	if (!CanWrapTarget(Prepared.Mesh.Get(), Prepared.Bone))
 	{
 		return false;
 	}
 
-	// 던지기 세기 계약: **상태 변경(ResetStateForNewThrow) 전에** 검증해 무효 속도면 전개/초기화 없이 거부한다.
+	// The throw strength contract, checked before ResetStateForNewThrow changes any state, so an invalid
+	// speed is refused without deploying or reinitializing anything.
 	float PreparedThrowSpeed = 0.0f;
 	if (!TryResolveValidThrowSpeed(Prepared.ThrowContext, PreparedThrowSpeed))
 	{
@@ -146,11 +156,13 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 	}
 
 	ResetStateForNewThrow();
-	// 팁 부착물 확보 보험 — 정상 경로는 BeginPlay가 이미 잡았다(런타임 bUseTipMesh 토글 대비; 이미 있으면 no-op).
+	// Insurance that the tip attachment exists. The normal path already secured it during BeginPlay;
+	// this covers toggling bUseTipMesh at runtime and is a no-op when one is already present.
 	EnsureTipMesh();
 
 	FRopePreparedThrowPreview ResolvedPrepared = Prepared;
-	// 입력 때 저장한 owner-local path를 throw 실행 시점의 owner transform으로 다시 해석한다.
+	// Resolve the owner-local path stored at the moment of input against the owner transform as it is
+	// when the throw executes.
 	ResolvedPrepared.RenderPreview = Prepared.ResolveRenderPreviewWorld();
 	ResolvedPrepared.ThrowContext.Origin = Prepared.ResolveGuideOriginWorld();
 	ClearPreparedGuideFrameLocal(ResolvedPrepared);
@@ -164,7 +176,8 @@ bool URopeComponent::ThrowWithPreparedPreview(const FRopePreparedThrowPreview& P
 		return false;
 	}
 
-	// Loaded에서 나가는 순간 전개 — 로프 표시 복원 + 전체 길이 복원(기본 구현, override 가능).
+	// Deploy on leaving Loaded: restore the rope's visibility and its full length. This is the default
+	// implementation and can be overridden.
 	OnDeployFromLoaded();
 
 	SetPhase(ERopePhase::GuidedThrow, *PhaseReason);
@@ -178,7 +191,8 @@ const TArray<IRopeCollider*>& URopeComponent::GetAimQueryColliders() const
 
 FRopeAimTargeting::FQueryContext URopeComponent::MakeAimQueryContext() const
 {
-	// 폴백 치수 규약: ray 길이 = 현재/초기 로프 길이 중 큰 값, 질의 반경 = 튜브/접촉 반경 중 큰 값.
+	// The fallback dimensions: the ray length is the larger of the current and initial rope lengths, and
+	// the query radius is the larger of the tube and contact radii.
 	FRopeAimTargeting::FQueryContext Ctx;
 	Ctx.Colliders = &GetAimQueryColliders();
 	Ctx.FallbackRayLength = FMath::Max(Sim.RopeLength, RopeLength);
@@ -194,7 +208,8 @@ float URopeComponent::GetAimRayEffectiveQueryRadius(float RequestedRadius) const
 void URopeComponent::SetAimRayColliderQueryBounds(const FVector& Origin, const FVector& AimDir,
 	float RayLength, float QueryRadius)
 {
-	// 무효 입력이면 FBox(ForceInit) 반환 = clear와 동일(수집 확장 없음).
+	// Invalid input returns FBox(ForceInit), which is equivalent to clearing it and extends the gather
+	// by nothing.
 	SimFrame.AimRayColliderQueryBounds =
 		FRopeAimTargeting::MakeAimRayQueryBounds(MakeAimQueryContext(), Origin, AimDir, RayLength, QueryRadius);
 }
@@ -202,8 +217,9 @@ void URopeComponent::SetAimRayColliderQueryBounds(const FVector& Origin, const F
 void URopeComponent::ClearAimRayColliderQueryBounds()
 {
 	SimFrame.AimRayColliderQueryBounds = FBox(ForceInit);
-	// 조준 목록은 이 bounds로만 채워진다 — bounds가 사라진 프레임에 함께 비워, 다음 조준 전까지
-	// 지난 프레임 provider 포인터가 남지 않게 한다(수명은 해당 프레임 한정).
+	// The aim list is filled only from these bounds, so it is cleared on the same frame the bounds
+	// disappear. That keeps a provider pointer from the previous frame from surviving until the next
+	// time aiming happens; their lifetime is that frame alone.
 	SimFrame.AimFrameColliders.Reset();
 	AimTargeting.ResetQuery();
 }
@@ -217,8 +233,9 @@ void URopeComponent::QueueAimRayQuery(const FRopeAimRayThrowRequest& Request)
 	}
 
 	AimTargeting.QueuePendingQuery(Request);
-	// 같은 PrePhysics 구간에 실제 throw가 먼저 큐에 들어왔다면 HUD 요청이 그 입력 bounds를 덮지 않는다.
-	// 실제 요청은 이 프레임 gather에서 정확히 포함돼야 하고, HUD 결과는 어차피 phase 전이 뒤 소비되지 않는다.
+	// If a real throw was queued earlier in this same PrePhysics window, the HUD request must not
+	// overwrite its input bounds. The real request has to be covered exactly by this frame's gather,
+	// and the HUD result would not be consumed after the phase transition anyway.
 	if (!AimTargeting.HasPendingThrow() &&
 		(!PendingGuaranteedAimThrow.bQueued || PendingGuaranteedAimThrow.bResolved))
 	{
@@ -234,8 +251,8 @@ bool URopeComponent::GetLatestAimRayQueryResult(FRopeAimRayQueryResult& OutResul
 
 bool URopeComponent::RefreshAimRayQueryColliders(const FRopeAimRayThrowRequest& Request)
 {
-	// 소스 호환만 유지한다. 이름과 달리 provider를 즉시 다시 돌리지 않으며, 결과는 정상 gather 뒤
-	// GetLatestAimRayQueryResult로 소비해야 한다.
+	// Kept for source compatibility only. Despite the name it does not re-run the providers
+	// immediately; consume the result through GetLatestAimRayQueryResult after the normal gather.
 	QueueAimRayQuery(Request);
 	return false;
 }
@@ -250,7 +267,8 @@ bool URopeComponent::ResolveAimRayThrowContext(const FRopeAimRayThrowRequest& Re
 
 void URopeComponent::QueueAimRayThrow(const FRopeAimRayThrowRequest& Request)
 {
-	// 무효 요청은 즉시 fallback throw — StartFreshThrow 전이라 컴포넌트가 직접 처리한다(F-클래스 밖).
+	// An invalid request falls back to an immediate throw. This is before StartFreshThrow, so the
+	// component handles it directly rather than the logic classes.
 	if (!Request.IsValid())
 	{
 		StartFreshThrow(Request.BaseContext);
@@ -302,10 +320,11 @@ void URopeComponent::CancelQueuedGuaranteedAimThrow()
 bool URopeComponent::BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext,
 	FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason) const
 {
-	// Prepared preview는 아직 던지기 전인 Free/Releasing/Loaded에서만 의미가 있다(Loaded=GuaranteedWrap 장전
-	// 준비 상태 — 조준 preview 표시 + Loaded에서의 던지기 진입이 이 빌드를 쓴다). Flight 이후 phase는 이미
-	// 실제 접촉/감김 상태라 preview가 없다(FullSimulation/AssistedJudged는 preview 자체가 없고,
-	// GuaranteedWrap은 이 prepared 경로가 유일한 preview다).
+	// A prepared preview only means anything before the throw, that is in Free, Releasing and Loaded,
+	// where Loaded is the ready-to-throw state of GuaranteedWrap and both the aiming preview and the
+	// throw itself use this build. Phases from Flight onwards are already in real contact or wrapped and
+	// have no preview: FullSimulation and AssistedJudged have none at all, and for GuaranteedWrap this
+	// prepared path is the only preview there is.
 	if (Phase != ERopePhase::Free && Phase != ERopePhase::Releasing && Phase != ERopePhase::Loaded)
 	{
 		OutPrepared.Reset();
@@ -325,16 +344,19 @@ bool URopeComponent::BuildPreparedWrappingPreviewFromResolvedContext(
 
 	FRopeThrowPreviewBuilder::FInput Input;
 	Input.Sim = &Sim;
-	// preview 경로 빌드는 aim ray hit 판정과 같은 목록을 봐야 한다 — 조준 중이면 조준 스냅샷(원거리 대상
-	// 포함), 아니면 물리 스냅샷(BP 직행 Throw 경로). GetAimQueryColliders 주석 참조.
+	// The preview path build has to see the same list as the aim ray hit test: the aiming snapshot while
+	// aiming, which includes distant targets, and the physics snapshot otherwise, as on the direct
+	// Blueprint throw path. See the comment on GetAimQueryColliders.
 	Input.Colliders = &GetAimQueryColliders();
-	// wrap 대상 게이트 주입(aim 경로의 ResolveAimRayThrowContext와 같은 패턴) — preview가 aim과 같은
-	// 기준으로 대상을 거르게 한다. 없으면 금지 대상이 preview에만 보이고 throw 진입점에서 거부된다.
+	// Inject the wrap target gate, the same pattern ResolveAimRayThrowContext uses on the aim path, so
+	// the preview filters targets on the same basis as aiming. Without it a forbidden target would
+	// appear in the preview only to be refused at the throw entry point.
 	Input.CanWrapTarget = [this](const USceneComponent* Mesh, FName Bone) { return CanWrapTarget(Mesh, Bone); };
 	Input.ThrowContext = ResolvedThrowContext;
 	Input.WrapConfig = WrapConfig;
-	Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // 0=auto 해석 승계
-	// 도달 모드를 preview 빌더로 전파 — ③이면 감김 나선 대신 단일 앵커 꽂힘 경로를 탄다.
+	Input.WrapConfig.ContactQueryRadius = GetEffectiveContactQueryRadius(); // Carry the resolved automatic value.
+	// Propagate the resolve mode to the preview builder: GuaranteedWrap takes the single-anchor embed
+	// path instead of building a wrapping helix.
 	Input.ResolveMode = ResolveMode;
 	Input.RopeRadius = Radius;
 	Input.RopeNumSides = NumSides;
@@ -349,7 +371,8 @@ bool URopeComponent::BuildPreparedWrappingPreviewFromResolvedContext(
 
 void URopeComponent::DispatchCaptured(FName Bone)
 {
-	// 통지 순서는 엔진 Notify 관례 — 네이티브 훅 먼저, 그다음 BP 델리게이트.
+	// The notification order follows the engine's Notify convention: the native hook first, then the
+	// Blueprint delegate.
 	NotifyCaptured(Bone);
 	OnRopeCaptured.Broadcast(Bone);
 }
@@ -416,10 +439,11 @@ bool URopeComponent::ExecutePendingGuaranteedAimThrow()
 		}
 		else
 		{
-			// 입력 프레임의 miss를 notify 시점에 다시 질의하지 않는다. 그때 확정한 방향 그대로 free arc로 던진다.
+			// A miss on the input frame is not re-queried at notify time. The throw uses the direction
+			// established then, as a free arc.
 			EnsureRopeInitialized();
 			const FRopeThrowContext ResolvedThrow = ResolveThrowContext(Pending.ResolvedContext);
-			// 던지기 세기 계약: 상태 변경(OnDeployFromLoaded) 전에 검증한다.
+			// The throw strength contract is checked before any state changes in OnDeployFromLoaded.
 			float FreeThrowSpeed = 0.0f;
 			if (TryResolveValidThrowSpeed(ResolvedThrow, FreeThrowSpeed))
 			{
@@ -444,7 +468,8 @@ bool URopeComponent::ExecutePendingGuaranteedAimThrow()
 
 void URopeComponent::ResolvePendingAimThrow()
 {
-	// StartFreshThrow가 transient state를 초기화하므로 요청을 먼저 값으로 꺼내고 pending 상태를 비운다.
+	// StartFreshThrow resets the transient state, so take the request by value first and clear the
+	// pending slot before calling it.
 	FRopeAimRayThrowRequest Request;
 	if (!AimTargeting.TakePendingThrow(Request))
 	{
@@ -462,9 +487,10 @@ void URopeComponent::FilterFrameCollidersForAimWrapTarget()
 	const bool bPromoteLockedTarget = AimTargeting.IsLockActive(Phase);
 	if (bPromoteLockedTarget)
 	{
-		// collider gather는 pending aim throw 해석보다 먼저 실행된다. 원거리 target은 이 첫 Flight
-		// 프레임에 AimFrameColliders에만 있으므로, 잠금 정책에 맞는 skeletal collider만 물리/detect
-		// 목록으로 승격한다. 조준 ray 주변의 unrelated/world-static collider까지 새게 하지는 않는다.
+		// The collider gather runs before the pending aim throw is resolved. A distant target exists only
+		// in AimFrameColliders on this first Flight frame, so promote just the skeletal colliders that
+		// match the lock policy into the physics and detection lists, without letting unrelated or
+		// world-static colliders near the aim ray leak through.
 		FBox RefreshedTargetBounds(ForceInit);
 		for (IRopeCollider* Collider : SimFrame.AimFrameColliders)
 		{
@@ -476,16 +502,18 @@ void URopeComponent::FilterFrameCollidersForAimWrapTarget()
 			FName ColliderBone = NAME_None;
 			const USceneComponent* ColliderMesh = nullptr;
 			Collider->GetGPUAttribution(ColliderBone, ColliderMesh);
-			// Full의 IsWrapTarget은 의도적으로 모든 물체를 허용한다. 승격에는 그 넓은 predicate를 쓰지
-			// 않고 실제 잠긴 mesh identity를 적용해야 aim-ray 주변 unrelated collider가 물리 목록에 새지 않는다.
+			// IsWrapTarget in FullSimulation deliberately permits everything. Promotion must not use that
+			// broad predicate and instead applies the actual locked mesh identity, which keeps unrelated
+			// colliders near the aim ray out of the physics list.
 			if (ColliderMesh && ColliderMesh == AimTargeting.GetLockedTargetMesh())
 			{
 				SimFrame.FrameColliders.AddUnique(Collider);
 				RefreshedTargetBounds += Collider->GetWorldBounds();
 			}
 		}
-		// 일시적인 provider budget/mapping miss에는 직전 bounds를 유지해 다음 프레임 재수집 기회를 남긴다.
-		// 정상 갱신이 있으면 움직이는 target을 따라 최신 collider 유니언으로 교체한다.
+		// A transient provider budget or mapping miss keeps the previous bounds, which leaves a chance to
+		// gather again next frame. A successful refresh replaces them with the latest collider union so a
+		// moving target is followed.
 		if (RefreshedTargetBounds.IsValid)
 		{
 			SimFrame.LockedTargetColliderQueryBounds = RefreshedTargetBounds;
@@ -508,13 +536,17 @@ FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& T
 {
 	FRopeThrowContext Resolved = ThrowContext;
 
-	// 최종 프레임은 정규직교(오른손계)를 보증한다 — 생산자(MakeDefault/Wielder/BP 직접 호출)가 무엇을
-	// 넣었든 하류(WhipGuide 스윙 기저, 프리뷰 빌더)는 이 결과만 믿는다. 이전 구현은 세 축을 각각
-	// 정규화만 해서 비직교 Custom 축이나 폴백으로 교체된 축이 서로 안 맞는 프레임으로 통과했다.
-	// 규약: Forward가 기준축(방향 보존, 정규화만). Up은 Forward에 직교화(Gram-Schmidt) — 입력 Up이
-	// Forward와 평행하면 월드 Up → 컴포넌트 Up 순으로 폴백, 전부 평행하면 임의 수직축.
-	// Right는 항상 Up×Forward로 재유도하고 입력 Right는 무시한다 — 반대편 스윙 의도는 뒤집힌 Right가
-	// 아니라 SwingPlane의 AimAndFrameLeft/Right로 표현하는 것이 지원 계약이다.
+	// The final frame is guaranteed orthonormal and right-handed. Whatever a producer supplied, whether
+	// MakeDefault, the wielder or a direct Blueprint call, everything downstream, meaning the whip
+	// guide's swing basis and the preview builder, trusts only this result. Normalizing the three axes
+	// independently would let a non-orthogonal custom basis, or one whose axes came from different
+	// fallbacks, pass through inconsistently.
+	// The convention: Forward is the reference axis and is only normalized, preserving its direction. Up
+	// is orthogonalized against Forward by Gram-Schmidt; if the supplied Up is parallel to Forward it
+	// falls back to world up and then to the component up, and to an arbitrary perpendicular if all are
+	// parallel.
+	// Right is always re-derived as Up cross Forward and the supplied Right is ignored: swinging to the
+	// other side is expressed through the SwingPlane options, not by flipping Right.
 	Resolved.FrameForward = FRopeWhipGuide::SafeNormalOr(Resolved.FrameForward, GetForwardVector());
 	const FVector Forward = Resolved.FrameForward;
 
@@ -531,7 +563,7 @@ FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& T
 	}
 	if (Up.IsNearlyZero())
 	{
-		// 수직 던지기 + 수직 컴포넌트 축 — 임의 수직축 폴백.
+		// A vertical throw with a vertical component axis, which falls back to an arbitrary perpendicular.
 		Up = RopeMath::AnyTangentFromNormal(Forward);
 	}
 	Resolved.FrameUp = Up;
@@ -551,8 +583,10 @@ FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& T
 
 bool URopeComponent::TryResolveValidThrowSpeed(const FRopeThrowContext& Context, float& OutThrowSpeed) const
 {
-	// ThrowSpeed는 양수(cm/s) 계약: 0/음수면 whip/guided duration이 방어코드로 되돌아가 "느린데 갑자기
-	// 빠른" 모순이 생긴다. Context가 0이면 컴포넌트 기본(ThrowParams.ThrowSpeed)으로 폴백해 해석한다.
+	// ThrowSpeed is contractually positive, in cm/s. Zero or negative would send the whip and guided
+	// durations back through their defensive fallbacks and produce the contradiction of a slow throw
+	// that is suddenly fast. A context value of 0 resolves to the component default from
+	// ThrowParams.ThrowSpeed.
 	OutThrowSpeed = Context.ThrowSpeed > 0.0f ? Context.ThrowSpeed : ThrowParams.ThrowSpeed;
 	constexpr float MinValidThrowSpeed = 1.0f;
 	if (OutThrowSpeed < MinValidThrowSpeed)
@@ -567,10 +601,12 @@ bool URopeComponent::TryResolveValidThrowSpeed(const FRopeThrowContext& Context,
 
 FVector URopeComponent::ComputeThrowInheritedVelocity(const FRopeThrowContext& ThrowContext) const
 {
-	// 캐릭터 이동(OwnerVelocity)은 MotionInheritance 배율로, 손 소켓의 애니메이션 스윙(캐릭터 이동을 제외한
-	// 손 상대 속도)은 별도로 1배 싣는다. HandAnimationVelocity가 이미 owner-상대(Wielder가 컴포넌트-로컬
-	// 위치 델타로 측정)라 이동 이중 반영이 없고, MotionInheritance=0이어도 역방향 속도가 생기지 않는다
-	// — 물리 바디 유무와 무관하다(GetPhysicsLinearVelocity=0의 역방향 버그 제거).
+	// Character movement is carried at the MotionInheritance multiplier, while the hand socket's
+	// animation swing, meaning the hand velocity relative to the character, is carried separately at
+	// one. HandAnimationVelocity is already relative to the owner, having been measured by the wielder
+	// from a component-local position delta, so movement is not counted twice and no reversed velocity
+	// appears even at a MotionInheritance of 0. It also does not depend on whether a physics body
+	// exists, unlike reading a physics linear velocity.
 	return ThrowContext.OwnerVelocity * ThrowParams.MotionInheritance +
 		ThrowContext.HandAnimationVelocity;
 }
@@ -579,23 +615,27 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 {
 	const FRopeThrowContext ResolvedThrow = ResolveThrowContext(ThrowContext);
 
-	// 던지기 세기 계약(상태 변경 전 게이트): 유효하지 않은 ThrowSpeed면 전개/초기화 없이 거부(에디터 ClampMin과 이중 방어).
+	// The throw strength gate, applied before any state changes: an invalid throw speed is refused
+	// without deploying or reinitializing, which backs up the editor's clamp.
 	float ResolvedThrowSpeed = 0.0f;
 	if (!TryResolveValidThrowSpeed(ResolvedThrow, ResolvedThrowSpeed))
 	{
 		return;
 	}
 
-	// 던지기 시작 = 4단계 고정 순서: ① 이전 상태 정리 → ② 체인 리셋(+GPU 재시드) → ③ 채찍 스윙 시작
-	// → ④ Verlet 속도 주입. ④는 ③이 확정한 조준 방향(WhipGuide.GetAimDir)을 쓰므로 순서가 계약이다.
+	// Starting a throw is four steps in a fixed order: clear the previous state, reset the chain and
+	// reseed the GPU buffers, start the whip swing, and inject the Verlet velocity. The last step uses
+	// the aim direction the third established, through WhipGuide.GetAimDir, so the order is a contract.
 	ResetStateForNewThrow();
-	// ray가 확정한 mesh+bone을 primary로 저장한다. Assisted는 같은 mesh의 다른 본도 후보/경로에
-	// 허용하고, Guaranteed만 Flight/Contacting/Wrapping 전체를 exact bone으로 제한한다.
+	// Store the mesh and bone the ray established as the primary. AssistedJudged also permits other
+	// bones on the same mesh as candidates and for the path, while only GuaranteedWrap restricts
+	// Flight, Contacting and Wrapping to the exact bone.
 	AimTargeting.SetWrapTargetLock(ResolvedThrow);
 	ResetChainForThrow(ResolvedThrow.Origin);
 	BeginWhipSwingFromThrow(ResolvedThrow);
 	InjectThrowVelocityIntoVerlet(ResolvedThrow);
-	// 팁 부착물 확보 보험 — 정상 경로는 BeginPlay가 이미 잡았다(이미 있으면 no-op).
+	// Insurance that the tip attachment exists; the normal path already secured it during BeginPlay, and
+	// this is a no-op when one is present.
 	EnsureTipMesh();
 
 	SetPhase(ERopePhase::Flight, *FString::Printf(TEXT("fresh throw impulse, aim=%s, speed=%.1f"),
@@ -604,10 +644,13 @@ void URopeComponent::StartFreshThrow(const FRopeThrowContext& ThrowContext)
 
 void URopeComponent::ResetStateForNewThrow()
 {
-	// 새 throw: 잡고 있던 wrap은 수동 해제, 진행 중 페이즈 일시 상태는 폐기, 쿨다운 없이 즉시 던진다.
-	// 커밋된 wrap이었으면 해제를 알려야 한다(FinishWrapRelease와 같은 짝 맞춤) — 안 그러면
-	// OnAnyRopeReleased가 안 나가 cross-actor 대상(랙돌 등)이 로프가 풀렸는데도 영구 고착된다.
-	// mesh/본은 Release가 상태를 비우기 전에 잡고, 통지는 상태 정리 후에 쏜다(DispatchReleased 재진입 계약).
+	// A new throw releases any wrap being held, as a manual release, discards the transient state of the
+	// phase in progress, and throws immediately with no cooldown.
+	// A committed wrap has to report its release, matching FinishWrapRelease. Otherwise OnAnyRopeReleased
+	// never fires and a cross-actor target, such as a ragdoll, stays stuck permanently even though the
+	// rope has let go.
+	// The mesh and bone are captured before Release clears the state, and the notification is sent after
+	// the state has been cleaned up, following the DispatchReleased re-entrancy contract.
 	const USceneComponent* WrappedMesh = WrapController.State.Mesh.Get();
 	const FName WrappedBone = WrapController.State.BoneName;
 	const bool bWasWrapped = WrapController.IsActive();
@@ -617,8 +660,9 @@ void URopeComponent::ResetStateForNewThrow()
 	}
 	ResetKinematicVirtualBridges();
 	ResetTransientPhaseState();
-	// 새 throw의 target identity가 정해지기 전 이전 throw의 원거리 bounds를 반드시 끊는다. 같은 throw의
-	// Contacting→Flight 복귀도 ResetTransientPhaseState를 쓰므로 캐시 해제는 이 throw 경계에만 둔다.
+	// The distant bounds of the previous throw must be cut before the new throw's target identity is
+	// established. A Contacting to Flight return within the same throw also uses
+	// ResetTransientPhaseState, so clearing the cache belongs on this throw boundary alone.
 	SimFrame.LockedTargetColliderQueryBounds = FBox(ForceInit);
 	ReleaseCooldown = 0.0f;
 	if (bWasWrapped)
@@ -634,8 +678,9 @@ bool URopeComponent::BeginGuidedThrowState(FRopePreparedThrowPreview&& Prepared,
 		return false;
 	}
 
-	// 던지기 세기 계약 최종 방어: 정상 경로는 상태 변경 전에 이미 검증했다(TryResolveValidThrowSpeed).
-	// 직접 호출자(테스트/미래 경로) 대비로 여기서도 막는다 — 여기 도달은 아직 상태 변경 전이다.
+	// The final defence for the throw strength contract. The normal path already validated it before
+	// changing state, through TryResolveValidThrowSpeed; this guards direct callers such as tests and
+	// future paths, and reaching here is still before any state change.
 	float GuidedThrowSpeed = 0.0f;
 	if (!TryResolveValidThrowSpeed(Prepared.ThrowContext, GuidedThrowSpeed))
 	{
@@ -648,8 +693,10 @@ bool URopeComponent::BeginGuidedThrowState(FRopePreparedThrowPreview&& Prepared,
 	GuidedThrowState.Prepared = MoveTemp(Prepared);
 	GuidedThrowState.StartPositions = Sim.Positions;
 	GuidedThrowState.Elapsed = 0.0f;
-	// GuidedThrow 진행 시간도 Throw Speed로 잡는다: 손→목표 거리 / ThrowSpeed(안정 범위 0.08~2.0s).
-	// 멀수록 오래, 빠를수록 빨리 도달한다. 좌표는 UpdateGuidedThrow와 같은 preview 월드 해석을 쓴다.
+	// The GuidedThrow duration is also derived from the throw speed: the hand-to-target distance divided
+	// by ThrowSpeed, clamped to a stable range of 0.08 to 2.0 seconds. Further targets take longer and
+	// faster throws arrive sooner. The coordinates use the same preview world resolution as
+	// UpdateGuidedThrow.
 	{
 		const FRopePreparedThrowPreview& Prep = GuidedThrowState.Prepared;
 		const float GuideThrowSpeed = Prep.ThrowContext.ThrowSpeed > KINDA_SMALL_NUMBER
@@ -674,8 +721,9 @@ bool URopeComponent::BeginGuidedThrowState(FRopePreparedThrowPreview&& Prepared,
 
 void URopeComponent::ResetChainForThrow(const FVector& HandOrigin)
 {
-	// 체인 위치를 통째로 재설정하는 곳이므로 GPU 상주 버퍼 재시드 세대(M5)도 여기서 함께 올린다 —
-	// 리셋과 재시드는 한 몸이다(따로 두면 한쪽만 하는 버그가 생긴다).
+	// This is where the whole chain is repositioned, so the GPU resident buffer's reseed generation is
+	// raised here too: the reset and the reseed are one action, and separating them invites doing only
+	// half of it.
 	++SimFrame.SimGeneration;
 	bWrappedMassMaskDirty = true;
 
@@ -684,7 +732,8 @@ void URopeComponent::ResetChainForThrow(const FVector& HandOrigin)
 		return;
 	}
 
-	// 손(노드 0)을 던지기 원점에 핀. 전 노드 Prev=Pos(속도 0) — 던지기 속도는 ④가 따로 싣는다.
+	// Pin the hand, node 0, at the throw origin. Every node has its previous position set equal to its
+	// current one, giving zero velocity; the throw velocity is injected separately in the last step.
 	Sim.bStartPinned = true;
 	Sim.StartPinPrev = HandOrigin;
 	Sim.StartPinTarget = HandOrigin;
@@ -699,15 +748,16 @@ void URopeComponent::ResetChainForThrow(const FVector& HandOrigin)
 
 void URopeComponent::BeginWhipSwingFromThrow(const FRopeThrowContext& ResolvedThrow)
 {
-	// WhipGuide.Begin의 입력(조준/가이드 축, 상속 속도)은 전부 ResolvedThrow에서 파생된다 —
-	// 파생 값 조립을 여기 가둬서 호출부(StartFreshThrow)에는 단계 이름만 남긴다.
+	// Everything WhipGuide.Begin needs, meaning the aim and guide axes and the inherited velocity, is
+	// derived from the resolved throw. Confining that assembly here leaves the caller, StartFreshThrow,
+	// reading as a list of step names.
 	const FRopeWhipGuide::FSwingBasis SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
 		ResolvedThrow, ResolvedThrow.SwingPlane, ResolvedThrow.CustomSwingPlaneNormal);
 	const FVector InheritedVelocity = ComputeThrowInheritedVelocity(ResolvedThrow);
 	FlightGuidePlaneNormal = SwingBasis.GuideRight.GetSafeNormal();
 	bHasFlightGuidePlaneNormal = !FlightGuidePlaneNormal.IsNearlyZero();
 
-	// 채찍 스윙 가이드 좌표계 구성 + 활성화(퇴화 케이스 fallback은 컴포넌트 축).
+	// Build the whip swing guide frame and activate it; degenerate cases fall back to the component axes.
 	WhipGuide.Begin(SwingBasis.AimDir, ResolvedThrow.Origin,
 		ResolvedThrow.FrameForward, SwingBasis.GuideUp, SwingBasis.GuideRight,
 		ResolvedThrow.ThrowSpeed, InheritedVelocity,
@@ -716,7 +766,7 @@ void URopeComponent::BeginWhipSwingFromThrow(const FRopeThrowContext& ResolvedTh
 
 	if (Sim.Num() >= 2)
 	{
-		// 가이드 구간 노드를 T=0 가이드 곡선 위에 스냅(속도 0).
+		// Snap the guided nodes onto the guide curve at time zero, with zero velocity.
 		WhipGuide.SnapToInitialPose(Sim, MakeWhipGuideConfig());
 	}
 }
@@ -729,11 +779,15 @@ void URopeComponent::InjectThrowVelocityIntoVerlet(const FRopeThrowContext& Reso
 		return;
 	}
 
-	// Verlet 적분에서 속도는 (Pos - Prev)/dt 로 암묵 표현된다. Prev를 원하는 속도의 반대 방향으로
-	// v·dt만큼 밀면 위치는 그대로인 채 다음 스텝부터 그 속도가 실린다(순수 속도 주입).
-	// 분배: 손→끝으로 갈수록 가중(SmoothStep + tail 가중)하고 TipVelocityBoost로 끝을 부스트해 채찍처럼
-	// 끝이 앞서 나가게 한다. 상속 속도(owner/socket)는 전 노드 균일. ReferenceDt는 첫 스텝 실제 dt와
-	// 무관한 고정 환산 기준(프레임레이트에 따라 던지기 세기가 변하지 않게).
+	// Verlet integration expresses velocity implicitly as the current position minus the previous one,
+	// divided by dt. Pushing the previous position backwards along the desired velocity by v * dt leaves
+	// the position untouched while carrying that velocity from the next step onwards, which is a pure
+	// velocity injection.
+	// Distribution: the weight rises from the hand towards the tip, through a smoothstep plus a tail
+	// weighting, and TipVelocityBoost drives the tip harder so it runs ahead like a whip. The inherited
+	// velocity, from the owner and the socket, is uniform across every node. ReferenceDt is a fixed
+	// conversion basis, independent of the first step's actual dt, so throw strength does not vary with
+	// the framerate.
 	const FVector ThrowDir = WhipGuide.GetAimDir();
 	const float ReferenceDt = 1.0f / 60.0f;
 	const float BaseImpulse = ResolvedThrow.ThrowSpeed * ReferenceDt;
@@ -752,18 +806,20 @@ void URopeComponent::InjectThrowVelocityIntoVerlet(const FRopeThrowContext& Reso
 
 void URopeComponent::AbortGuidedThrow(ERopeReleaseReason Reason, const TCHAR* ReasonLog)
 {
-	// 허공 던지기는 대상이 없어 engagement를 연 적이 없다 → release를 쏘면 짝이 안 맞는 유령 신호가 된다
-	// (DispatchReleased 계약 참고). 조준 던지기만 알린다.
+	// A throw into open space never had a target and therefore never opened an engagement, so firing a
+	// release would be an unpaired phantom signal; see the DispatchReleased contract. Only an aimed
+	// throw reports.
 	const bool bNotify = !GuidedThrowState.bFreeThrow;
-	// ResetTransientPhaseState가 GuidedThrowState를 비우므로 먼저 복사한다.
+	// ResetTransientPhaseState clears GuidedThrowState, so copy it first.
 	const FName Bone = GuidedThrowState.Prepared.Bone;
 
 	SetPhase(ERopePhase::Releasing, ReasonLog);
 	ResetTransientPhaseState();
 	ReleaseCooldown = ReleaseCooldownSeconds;
 
-	// 상태를 모두 정리한 뒤에 알린다 — 핸들러가 ReleaseWrap 등을 다시 부를 수 있다(OnRopeReleased 계약).
-	// 커밋 전이므로 중앙 신호는 나가지 않는다(bWasWrapped=false).
+	// Report only after the state is fully cleaned up, because a handler may call back into ReleaseWrap
+	// and the like, following the OnRopeReleased contract.
+	// This is before the commit, so no central signal is sent.
 	if (bNotify)
 	{
 		DispatchReleased(nullptr, Bone, Reason, /*bWasWrapped*/ false);
@@ -772,24 +828,29 @@ void URopeComponent::AbortGuidedThrow(ERopeReleaseReason Reason, const TCHAR* Re
 
 void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 {
-	// 허공(free) 던지기는 대상 mesh/bone 없이 RenderPreview 직선만 따라가므로 IsValid(대상 요구) 대신 경로만 확인한다.
+	// A throw into open space follows the straight render preview with no target mesh or bone, so the
+	// path alone is checked rather than IsValid, which requires a target.
 	const bool bFree = GuidedThrowState.bFreeThrow;
 	const bool bValidPath = bFree ? GuidedThrowState.Prepared.RenderPreview.IsValid()
 		: GuidedThrowState.Prepared.IsValid();
 	if (!GuidedThrowState.bActive || !bValidPath || Sim.Num() < 2)
 	{
-		// 대상 mesh 소실/경로 무효 — 비자발적 실패라 Broken.
+	// The target mesh was lost or the path became invalid, which is an involuntary failure and reported
+	// as Broken.
 		AbortGuidedThrow(ERopeReleaseReason::Broken, TEXT("guided throw invalid"));
 		return;
 	}
 
-	// ③ 연출 중 인터럽트 훅(기본 false = "그래도 보장"): 대상 사망/텔레포트 등 게임 규칙이 보장을
-	// 깨야 할 때만 서브클래스가 true를 반환한다(2026-07-13 회의 결정 G — 깡통 오버라이드).
-	// 허공 던지기는 폴링하지 않는다 — 깰 보장이 없고, Prepared가 stub(Mesh=null)이라 훅이 문서화한
-	// 용례(대상 사망/텔레포트)를 판단할 수 없다. 취소가 필요하면 ReleaseWrap()이 있다.
+	// The interrupt hook during a guaranteed throw, defaulting to false so the guarantee holds. A
+	// subclass returns true only when a game rule has to break it, such as the target dying or
+	// teleporting away.
+	// A throw into open space is not polled: there is no guarantee to break, and its prepared data is a
+	// stub with a null mesh, so the hook cannot judge the cases it is documented for. Use ReleaseWrap()
+	// when such a throw needs cancelling.
 	if (!bFree && ShouldAbortGuaranteedThrow(GuidedThrowState.Prepared))
 	{
-		// 게임 규칙이 의도적으로 깬 것 — 내부 실패(Broken)와 구분해 소비자가 다르게 반응할 수 있게 한다.
+		// A game rule broke it deliberately, which is distinguished from an internal failure so consumers
+		// can react differently.
 		AbortGuidedThrow(ERopeReleaseReason::ThrowAborted, TEXT("guided throw aborted by game rule"));
 		return;
 	}
@@ -799,19 +860,25 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 	const float EasedAlpha = Alpha * Alpha * (3.0f - 2.0f * Alpha);
 	const FRopePreparedThrowPreview& Prepared = GuidedThrowState.Prepared;
 
-	// 상향 포물선 아치(조준·허공 공통): 팁이 손→목표 직선 위로 부풀었다 착지한다. Alpha=0.5 정점, 0·1에서 0.
-	// NodeFrac 선형이라 매 순간 로프는 일직선이고 팁 궤적만 포물선. Alpha=1에서 오프셋 0이라 착지 지점은 정확히 유지.
+	// An upward parabolic arc, shared by aimed and open-space throws: the tip bulges above the straight
+	// line from the hand to the target and comes back down to land. The apex is at an alpha of 0.5 and
+	// the offset is zero at 0 and 1.
+	// The interpolation along the rope is linear, so at every instant the rope itself is straight and
+	// only the tip traces a parabola. The offset being zero at an alpha of 1 preserves the landing point
+	// exactly.
 	const FVector ArcOriginW = Prepared.ResolveGuideOriginWorld();
 	const FVector ArcTipW = Prepared.ResolveGuidePointWorld(Sim.Num() - 1);
-	// BP 런타임 쓰기는 UPROPERTY meta의 Clamp를 우회하므로 소비 시점에 같은 범위로 접는다.
+	// Blueprint writes at runtime bypass the clamp in the property metadata, so fold it to the same range
+	// where it is consumed.
 	const float ArcHeightRatio = FMath::Clamp(ThrowParams.GuidedThrowArcHeightRatio, 0.0f, 0.5f);
 	const float ArcHeight = ArcHeightRatio * static_cast<float>((ArcTipW - ArcOriginW).Size());
 	const float ArcT = 4.0f * Alpha * (1.0f - Alpha);
 	const int32 LastNode = Sim.Num() - 1;
 
-	// 조준 던지기(비-허공)면 팁 목표를 매 프레임 현재 대상 본 위치로 재조준한다 — 비행 중 대상이
-	// 움직여도 팁 궤적이 조준한 신체 지점으로 수렴하고 착지 순간 튐(pop)이 없다. 프리뷰 가이드 점은
-	// thrower-local이라 대상 이동을 반영하지 못하므로 끝점만 실시간 대상으로 대체한다.
+	// On an aimed, that is non-open-space, throw the tip target is re-aimed at the target bone's current
+	// position every frame, so the tip converges on the body point that was aimed at even while the
+	// target moves, with no pop on landing. The preview guide points are thrower-local and cannot follow
+	// the target's movement, so only the endpoint is replaced with the live target.
 	const bool bTrackAimTarget = !bFree && Prepared.ThrowContext.bHasAimGuideLocalHit;
 	const FVector AimTargetWorld = bTrackAimTarget
 		? ResolveAimGuideHitWorld(Prepared.ThrowContext)
@@ -820,11 +887,13 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 	SimFrame.OverrideFrame.EnsureSize(Sim.Num());
 	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
 	{
-		// 손 앵커(node 0)는 보간하지 않고 항상 "현재" 손 위치에 붙어 있어야 한다. 가이드 원점(ResolveGuideOriginWorld)은
-		// 던진 순간의 좌표라(허공 던지기는 guide-frame-local이 없어 ThrowContext.Origin에 완전 고정) 그걸 목표로
-		// 삼으면 던지는 동안 캐릭터가 움직일 때 0번 노드가 손에서 떨어진다. GuidedThrow는 솔브를 끄므로 솔버의
-		// 손 핀도 걸리지 않는다 → 여기서 직접 현재 손에 고정한다.
-		// StartPinTarget은 PrepareSimFrame이 이번 프레임 GetComponentLocation()으로 이미 갱신했다.
+		// The hand anchor, node 0, is never interpolated and must stay attached to the hand's current
+		// position. The guide origin is the location as it was at the moment of the throw, and a throw
+		// into open space has no owner-local guide frame and is pinned entirely to the throw context
+		// origin, so aiming at it would detach node 0 from the hand whenever the character moves during
+		// the throw. GuidedThrow disables the solve, so the solver's hand pin does not apply either;
+		// it is pinned to the current hand directly here.
+		// PrepareSimFrame already refreshed StartPinTarget from this frame's component location.
 		if (NodeIndex == 0 && Sim.bStartPinned)
 		{
 			SimFrame.OverrideFrame.SetPosition(0, Sim.StartPinTarget, /*bZeroVelocity*/ true);
@@ -832,8 +901,10 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 			continue;
 		}
 
-		// 나머지 노드는 시작 위치 → preview 결과 위치로 보간하고, 시간 기반 상향 아치 오프셋을 더한다.
-		// 조준 던지기의 팁 노드만 실시간 대상 위치로 재조준한다(나머지는 프리뷰 가이드 점 유지).
+		// Every other node interpolates from its starting position towards the preview result and has the
+		// time-based upward arc offset added.
+		// On an aimed throw only the tip node is re-aimed at the live target position; the rest keep their
+		// preview guide points.
 		const FVector Target = (bTrackAimTarget && NodeIndex == LastNode)
 			? AimTargetWorld
 			: Prepared.ResolveGuidePointWorld(NodeIndex);
@@ -853,7 +924,8 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 	{
 		if (bFree)
 		{
-			// 허공 던지기: 꽂힘 없이 완료 → 비-핀 노드를 물리로 되돌리고 Free로 낙하시킨다.
+			// A throw into open space completes without embedding: the unpinned nodes are returned to
+			// physics and it falls to Free.
 			for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
 			{
 				SimFrame.OverrideFrame.SetInvMass(NodeIndex, (NodeIndex == 0 && Sim.bStartPinned) ? 0.0f : 1.0f);
@@ -871,7 +943,8 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 
 void URopeComponent::FinishGuidedThrow()
 {
-	// 여기는 조준 던지기 전용이다 — 허공 던지기는 UpdateGuidedThrow가 Free로 착지시키고 오지 않는다.
+	// This is for aimed throws only. A throw into open space lands in Free through UpdateGuidedThrow and
+	// never reaches here.
 	const FRopePreparedThrowPreview Prepared = GuidedThrowState.Prepared;
 	if (!Prepared.IsValid() || Prepared.Anchors.Num() == 0 || !Prepared.Mesh.IsValid())
 	{
@@ -879,8 +952,9 @@ void URopeComponent::FinishGuidedThrow()
 		return;
 	}
 
-	// preview builder가 만든 anchor들을 그대로 wrapped seed로 승격한다.
-	// 그래서 완료 시점에 contact를 다시 찾지 않고, preview와 동일한 bone/local anchor에 고정된다.
+	// The anchors the preview builder produced are promoted directly into the wrapped seed, so no contact
+	// is searched for again on completion and the rope is pinned to exactly the bones and local anchors
+	// the preview used.
 	FRopeWrapState Seed;
 	Seed.BoneName = Prepared.Bone;
 	Seed.Mesh = Prepared.Mesh;
@@ -893,14 +967,17 @@ void URopeComponent::FinishGuidedThrow()
 		Seed.Latched.Add(Latch);
 	}
 
-	// Pierce: 팁 소켓이 조준 히트점에 박히도록 메쉬 자세를 얼려 앵커에 싣는다(회전 freeze + 꼬리 연결).
-	// LocalMeshTransform = 팁 렌더 자세(bone-local), LocalSurfacePosition = 로프 연결점(꼬리, bone-local).
-	// 소켓 미설정이면 앵커를 그대로 둬 현행(원점=히트점, 세그먼트 추종) 폴백.
+	// Pierce: freeze the mesh pose so the tip socket sits embedded at the aim hit point, and carry it on
+	// the anchor, which freezes the rotation while keeping the tail connected.
+	// LocalMeshTransform is the tip's render pose in bone-local space and LocalSurfacePosition is where
+	// the rope connects, at the tail, in the same space.
+	// With no sockets configured the anchor is left as it is, which falls back to the current behaviour
+	// of the origin at the hit point and the tip following the segment.
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap && Seed.Anchors.Num() > 0)
 	{
 		FRopeSurfaceAnchor& Anchor = Seed.Anchors[0];
 		const USceneComponent* Mesh = Seed.Mesh.Get();
-		FVector HitPoint = Anchor.StartWorldPosition; // 빌더가 꽂힘 지점으로 세팅.
+		FVector HitPoint = Anchor.StartWorldPosition; // Set to the embed point by the builder.
 		ResolvePreparedPierceHitPoint(Prepared, HitPoint);
 		FVector PierceDir = (HitPoint - Sim.Positions[0]).GetSafeNormal();
 		if (PierceDir.IsNearlyZero())
@@ -928,24 +1005,28 @@ void URopeComponent::FinishGuidedThrow()
 
 	ApplyWrappedMassMask(/*bResetDynamicNodeVelocity*/ true);
 
-	// ③은 Flight/Contacting을 거치지 않아 Captured가 한 번도 발화하지 않았다 — 그런데 release는 발화하므로
-	// 소비자 입장에선 "Captured 없는 Released"라는 짝 안 맞는 이벤트 쌍이 됐다. 도달 = 잡힘이므로 여기서
-	// 발화해 ①②와 같은 (Captured → Wrapped) 순서를 만든다. BeginWrap 성공 뒤에 두어, Captured만 나가고
-	// Wrapped가 안 나오는 중간 실패 구간이 생기지 않게 한다.
+	// GuaranteedWrap passes through neither Flight nor Contacting, so Captured never fired even once,
+	// yet the release does fire, which left consumers with the unpaired pair of a release with no
+	// capture. Arriving is capturing here, so it is fired to produce the same Captured then Wrapped
+	// order as the other modes. It is placed after BeginWrap succeeds so there is no window in which
+	// Captured fires and Wrapped never follows.
 	DispatchCaptured(Seed.BoneName);
 
 	SetPhase(ERopePhase::Wrapped, *FString::Printf(TEXT("guided throw bone=%s, %d anchor(s)"),
 		*Seed.BoneName.ToString(), Seed.Anchors.Num()));
 	ResetTransientPhaseState();
-	// ③ preview 기반 성립은 판정을 거치지 않으므로 판정값은 -1(미측정) 계약이다.
+	// A preview-based commit passes through no judgement, so the judgement values are contractually -1,
+	// meaning not measured.
 	const FRopeWrappedEventInfo WrappedInfo = MakeWrappedEventInfo(Seed, /*AngleDeg*/ -1.0f, /*CoverageDeg*/ -1.0f);
 	DispatchWrapped(WrappedInfo);
 }
 
 bool URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld)
 {
-	// 허공(대상 없음) 던지기: 손 원점 → 레이 끝점 직선을 아치로 재생하고, 완료 시 꽂힘 없이 Free로 낙하한다.
-	// preview는 straight 월드 라인만 채운다 — ResolveGuidePointWorld는 owner-local이 없으면 월드 Points로 폴백한다.
+	// A throw into open space, with no target: it plays the straight line from the hand origin to the end
+	// of the ray as an arc, and on completion falls to Free without embedding.
+	// The preview holds only that straight world line; ResolveGuidePointWorld falls back to the world
+	// points when there is no owner-local frame.
 	EnsureRopeInitialized();
 	if (Sim.Num() < 2)
 	{
@@ -955,7 +1036,7 @@ bool URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext,
 	const FVector Origin = ThrowContext.Origin;
 
 	FRopePreparedThrowPreview Free;
-	Free.bValid = false; // 대상 없음 — free 경로는 GuidedThrowState.bFreeThrow로 진행한다(IsValid 불요).
+	Free.bValid = false; // No target: the free path proceeds through GuidedThrowState.bFreeThrow and needs no IsValid.
 	Free.ThrowContext = ThrowContext;
 	Free.RenderPreview.Points.SetNum(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
@@ -980,9 +1061,9 @@ bool URopeComponent::StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext,
 
 FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
 {
-	// 휘두름 시간은 Throw Speed 하나로 제어한다: 내부 기준(ReferenceWhipThrowSpeed에서
-	// ReferenceWhipDuration)만 넘기면 ResolveGuideDuration이 EffectiveDuration =
-	// ReferenceWhipDuration × ReferenceWhipThrowSpeed / ThrowSpeed 로 스케일한다(빠를수록 짧게).
+	// The swing duration is controlled by throw speed alone: passing the internal reference values is
+	// enough, and ResolveGuideDuration scales the effective duration as the reference duration multiplied
+	// by the reference speed and divided by the actual throw speed, so faster throws swing for less time.
 	static constexpr float ReferenceWhipDuration = 0.35f;
 	static constexpr float ReferenceWhipThrowSpeed = 1500.0f;
 
@@ -992,7 +1073,8 @@ FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
 	Config.SweepAngleDegrees = WhipConfig.SweepAngleDegrees;
 	Config.ReferenceThrowSpeed = ReferenceWhipThrowSpeed;
 	Config.ComponentRopeLength = RopeLength;
-	// CPU/GPU/preview가 동일한 Aim-hit endpoint envelope와 방향 bias를 사용하도록 component 설정을 전달한다.
+	// Pass the component settings through so the CPU, the GPU and the preview all use the same aim-hit
+	// endpoint envelope and direction bias.
 	Config.AimHitRootSolverFraction = WhipConfig.AimHitRootSolverFraction;
 	Config.AimHitTipSolverFraction = WhipConfig.AimHitTipSolverFraction;
 	Config.AimHitDirectionBias = WhipConfig.AimHitDirectionBias;
@@ -1024,28 +1106,35 @@ FRopeFlightContactDetector::FParams URopeComponent::MakeFlightDetectParams(float
 	Params.PredictiveContactFrames = WrapConfig.PredictiveContactFrames;
 	Params.MinLatchNodes = WrapConfig.MinLatchNodes;
 	Params.FallbackForward = GetForwardVector();
-	// 감지 스윕 해상도(터널링 방지). GPU step에도 같은 값이 실린다(RequestContactDetection).
+	// The detection sweep resolution, which is what prevents tunnelling. The same value is carried on the
+	// GPU step through RequestContactDetection.
 	Params.ContactSweepStep = WrapConfig.ContactSweepStep;
 	Params.ContactMaxSweepSamples = WrapConfig.ContactMaxSweepSamples;
-	// substep dt = FixedDt(=(1/60)/Substeps) — 로프 Verlet 변위(마지막 substep 델타)와 표면속도(cm/s)를 같은
-	// 단위로 맞추는 다리(RopeSolverSubsteps의 FixedDt와 동일 식). 프레임 dt가 아님 — 자세한 이유는 FParams 주석.
+	// The substep delta, (1/60) divided by the substep count, is the bridge that puts the rope's Verlet
+	// displacement, which is the last substep's delta, into the same units as the surface velocity in
+	// cm/s. It is the same expression the solver uses. It is not the frame delta; see the comment on
+	// FParams for why.
 	Params.SubstepDeltaTime = (1.0f / 60.0f) / static_cast<float>(FMath::Clamp(SolverConfig.Substeps, 1, 16));
-	// 프레임 dt: 예측 접촉 외삽이 substep 변위를 프레임 변위로 환산하는 데 쓴다(FParams::FrameDeltaTime 주석).
+	// The frame delta, used by the predictive contact extrapolation to convert a substep displacement
+	// into a frame displacement; see the comment on FParams::FrameDeltaTime.
 	Params.FrameDeltaTime = DeltaTime;
 	return Params;
 }
 
 void URopeComponent::RemoveNonWrappableCandidates(TArray<FRopeContactCandidate>& Candidates) const
 {
-	// 서브클래스 wrap 대상 게이트(CanWrapTarget): 거른 대상은 트래커/캡처 판정에서 아예 안 보이게
-	// 제거한다 — 금지 대상에 트래커가 고착돼 페이즈가 정체되는 것을 막는다. 기본 구현은 전부 true라
-	// 필터가 no-op이고, 후보 수가 적어(프레임당 수십 개 상한) 비용은 무시 가능.
-	// Flight(후보 산출)와 Contacting(재수집)이 공용 — 조건이 한쪽만 바뀌면 두 페이즈가 서로 다른
-	// 후보 집합으로 판정하는 미묘한 버그가 되므로 반드시 이 헬퍼를 거친다.
+	// The subclass wrap target gate, CanWrapTarget. Filtered targets are removed entirely so they are
+	// invisible to the tracker and the capture decision, which stops the tracker latching onto a
+	// forbidden target and stalling the phase. The default implementation permits everything, so the
+	// filter is a no-op, and with only a few dozen candidates per frame at most the cost is negligible.
+	// Flight, which produces the candidates, and Contacting, which re-collects them, share it: if the
+	// condition changed on only one side, the two phases would judge from different candidate sets,
+	// which is a subtle bug. Both therefore go through this helper.
 	Candidates.RemoveAll([this](const FRopeContactCandidate& Candidate)
 	{
-		// GPU 지연/외부 주입 후보도 모드 정책을 통과시킨다. Assisted는 같은 mesh의 다른 본을
-		// secondary/multi-bone 재료로 유지하고, Guaranteed만 exact mesh+bone으로 제한한다.
+		// Candidates from the GPU delay or injected externally are put through the mode policy too.
+		// AssistedJudged keeps other bones on the same mesh as material for secondary and multi-bone
+		// wrapping, while only GuaranteedWrap restricts it to the exact mesh and bone.
 		return !AimTargeting.IsWrapTarget(Phase, ResolveMode, Candidate.Mesh, Candidate.Bone) ||
 			!CanWrapTarget(Candidate.Mesh, Candidate.Bone);
 	});
@@ -1060,9 +1149,11 @@ TArray<FRopeContactCandidate>& URopeComponent::GetOrBuildFlightContactCandidates
 
 	if (SimFrame.bGpuContactsThisFrame)
 	{
-		// GPU 감지 경로(G3): actual+predictive 후보 모두 GPU 커널이 산출한 것을 쓴다(귀속·중복제거는
-		// 서브시스템이 복원). SimFrame 배열을 직접 후처리해 frame-local 복사/할당을 만들지 않는다.
-		// 상대운동 평가(ExpectedWrapTangent는 hand=node0 위치 필요)만 GT에서 돌린다.
+		// On the GPU detection path both actual and predictive candidates come from the GPU kernel, with
+		// the subsystem restoring their attribution and deduplication. The frame arrays are post-processed
+		// in place rather than copied or allocated per frame.
+		// Only the relative motion evaluation runs on the game thread, because ExpectedWrapTangent needs
+		// the hand position at node 0.
 		TRACE_CPUPROFILER_EVENT_SCOPE(Rope_FlightGpuContacts);
 		FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, Candidates);
 	}
@@ -1073,12 +1164,14 @@ TArray<FRopeContactCandidate>& URopeComponent::GetOrBuildFlightContactCandidates
 		BuildCpuFlightContactCandidates(DeltaTime, DetectParams, Candidates);
 	}
 
-	// Assisted는 solver push-out을 선택적으로 끌 수 있어 접촉이 한 프레임 pulse로 끝난다. 그 pulse를
-	// 비동기 GPU readback에만 맡기면 in-flight copy 사이에서 영구 유실될 수 있으므로, CPU가 이미 가진
-	// guide target을 정확한 aim primary collider에 동기 검사한다(CPU fallback에서도 동일 결과 보장).
+	// AssistedJudged can optionally disable the solver push-out, which makes a contact last a single
+	// frame as a pulse. Leaving that pulse to the asynchronous GPU readback alone risks losing it
+	// permanently between in-flight copies, so the guide targets the CPU already holds are tested
+	// synchronously against the exact aim primary collider, which gives the same result on the CPU
+	// fallback.
 	AddSynchronousAssistedAimContactCandidates(DeltaTime, DetectParams, Candidates);
 
-	// CanWrapTarget 게이트(Contacting 재수집과 공용 헬퍼).
+	// The CanWrapTarget gate, through the helper shared with the Contacting re-collection.
 	RemoveNonWrappableCandidates(Candidates);
 	return Candidates;
 }
@@ -1086,10 +1179,12 @@ TArray<FRopeContactCandidate>& URopeComponent::GetOrBuildFlightContactCandidates
 void URopeComponent::BuildCpuFlightContactCandidates(float DeltaTime,
 	const FRopeFlightContactDetector::FParams& DetectParams, TArray<FRopeContactCandidate>& OutCandidates)
 {
-	// CPU 예측 접촉에만 whip 데이터 뷰가 필요하다. GPU 경로는 subsystem이 dispatch 전에 같은
-	// 다음 프레임 타깃을 이미 계산해 GPU step에 실었으므로 Finalize에서 다시 만들지 않는다.
-	// 예측이 꺼져 있으면(PredictiveContactFrames<=0) 검출기가 어차피 early-out이라 미리보기를 만들지 않는다.
-	// NextGuideTargetScratch는 뷰가 가리키는 멤버 버퍼 — 감지가 끝난 뒤 다음 CPU 사용 때 Reset한다.
+	// Only CPU predictive contact needs a view of the whip data. On the GPU path the subsystem already
+	// computed the same next-frame targets before dispatch and carried them on the GPU step, so they are
+	// not built again during Finalize.
+	// With prediction disabled the detector early-outs anyway, so no preview is built.
+	// NextGuideTargetScratch is the member buffer the view points at; it is reset on its next CPU use
+	// after detection finishes.
 	FRopeFlightContactDetector::FWhipGuideView WhipView;
 	if (WrapConfig.PredictiveContactFrames > KINDA_SMALL_NUMBER && WhipGuide.GetGuidedNodeMask().Num() > 0)
 	{
@@ -1126,8 +1221,10 @@ void URopeComponent::AddSynchronousAssistedAimContactCandidates(float DeltaTime,
 		return;
 	}
 
-	// Assisted는 같은 mesh의 이웃 본도 wrapping 재료로 유지하지만 capture primary는 exact aim bone이다.
-	// 전체 목록의 '가장 깊은 1개'만 검사하면 몸통/이웃 본이 조준 본을 가리므로 이 probe만 exact로 좁힌다.
+	// AssistedJudged keeps neighbouring bones on the same mesh as wrapping material, but the capture
+	// primary is the exact aimed bone. Testing only the deepest single contact across the whole list
+	// would let the torso or a neighbouring bone hide the aimed one, so this probe alone is narrowed to
+	// the exact target.
 	TArray<IRopeCollider*> PrimaryColliders;
 	for (IRopeCollider* Collider : SimFrame.FrameColliders)
 	{
@@ -1177,13 +1274,15 @@ void URopeComponent::AddSynchronousAssistedAimContactCandidates(float DeltaTime,
 	}
 	else
 	{
-		// 마지막 Flight의 PrevTarget→CurrentTarget pulse는 다시 쓰지 않는다. GPU handoff로 동기화된
-		// 현재 rope centerline이 exact primary에 실제 접촉하는지만 보아 dwell의 허위 누적을 막는다.
+		// The movement pulse from the last Flight frame's previous to current targets is not reused. Only
+		// whether the current rope centreline, synchronized by the GPU handoff, genuinely touches the
+		// exact primary is considered, which prevents dwell accumulating falsely.
 		FRopeFlightContactDetector::AddCurrentCenterlineContactCandidates(
 			Sim, PrimaryColliders, ReliableParams, InOutCandidates);
 	}
-	// 새로 추가된 GT 후보까지 GPU/CPU 후보와 동일한 상대운동 필드를 갖게 한다. 캡처 자체는 현재 이
-	// 점수를 gate로 쓰지 않지만 tracker dominant 점수와 디버그 관측은 같은 계약을 유지해야 한다.
+	// Newly added game-thread candidates are given the same relative motion fields as the GPU and CPU
+	// ones. Capture does not currently gate on that score, but the tracker's dominant scoring and the
+	// debug observations have to keep the same contract.
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, ReliableParams, InOutCandidates);
 }
 
@@ -1191,8 +1290,9 @@ FRopeFlightCaptureEvaluation URopeComponent::EvaluateFlightCapture(
 	const TArray<FRopeContactCandidate>& Candidates,
 	const FRopeFlightContactDetector::FParams& DetectParams) const
 {
-	// Assisted aim lock은 dominant만 조준 본으로 고정한다. Tracker.Update는 전체 후보를 집계하므로
-	// 같은 mesh의 다른 본은 Targets에 남아 secondary dwell과 multi-bone 경로 재료가 된다.
+	// An assisted aim lock pins only the dominant target to the aimed bone. Tracker.Update aggregates
+	// every candidate, so other bones on the same mesh remain in Targets as material for secondary dwell
+	// and the multi-bone path.
 	const bool bRequireAimPrimary = ResolveMode == ERopeWrapResolveMode::AssistedJudged
 		&& AimTargeting.IsLockActive(Phase);
 	FRopeFlightCapturePolicy Policy;
@@ -1209,9 +1309,11 @@ FRopeFlightCaptureEvaluation URopeComponent::EvaluateFlightCapture(
 		Evaluation = FRopeFlightContactDetector::EvaluateCapture(Candidates, DetectParams, Policy);
 	}
 
-	// ③ GuaranteedWrap은 정상 경로로는 Flight를 타지 않는다 — ThrowWithContext가 조준 던지기(prepared)와
-	// 허공 던지기(레이 끝점 아치) 양쪽 모두 GuidedThrow로 보낸다. 그래도 어떤 경로로든 Flight에 들어왔다면
-	// 캡처는 금지한다: ③의 성립은 GuidedThrow가 확정한 앵커로만 이뤄진다(방어적 백스톱).
+	// GuaranteedWrap does not reach Flight on the normal path: ThrowWithContext sends both the aimed
+	// throw, through the prepared preview, and the open-space throw, as an arc to the end of the ray, to
+	// GuidedThrow. Should it reach Flight by any route, capture is forbidden anyway, because a
+	// GuaranteedWrap is only ever established from the anchors GuidedThrow committed to. This is a
+	// defensive backstop.
 	if (ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 	{
 		Evaluation.bShouldCapture = false;
@@ -1225,10 +1327,12 @@ bool URopeComponent::ApplyFlightCaptureEvaluation(float DeltaTime,
 	if (Evaluation.bShouldCapture)
 	{
 		FlightNoContactElapsed = 0.0f;
-		// GPU 경로는 이 Finalize보다 앞에서 RT pending queue에 step을 넣었을 뿐, CPU Sim은 아직 그
-		// post-step pose가 아닐 수 있다. non-GDF(Aim collision-free) step은 지금 원자적으로 소비/readback해
-		// Flight의 swept hit을 CPU와 같은 캡처 프레임에 확정한다. Scene GDF가 필요한 step만 persistent
-		// 표식으로 Contacting에 넘겨 유효한 view dispatch 뒤 재시도한다.
+		// The GPU path only queued a step on the render thread's pending queue before this Finalize, so
+		// the CPU simulation state may not be at that post-step pose yet. A step that needs no global
+		// distance field, meaning an aim collision-free one, is consumed and read back atomically now, so
+		// a Flight swept hit is established on the same capture frame as it would be on the CPU. Only
+		// steps that need the scene's distance field are handed to Contacting with a persistent marker
+		// and retried after a valid view dispatch.
 		bPendingGpuCaptureHandoff = SimFrame.bGpuSteppedThisFrame;
 		if (bPendingGpuCaptureHandoff)
 		{
@@ -1242,10 +1346,12 @@ bool URopeComponent::ApplyFlightCaptureEvaluation(float DeltaTime,
 		SetPhase(ERopePhase::Contacting, *FString::Printf(TEXT("bone=%s, %d node(s)"),
 			*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num()));
 		DispatchCaptured(ContactTracker.CandidateBone);
-		// 캡처 프레임 자체도 실제 접촉 1프레임이다. 기본 WrapDecisionTime(약 1프레임)을 이미 채웠다면
-		// 다음 프레임 재검출을 기다리지 않고 즉시 Wrapping으로 넘겨 움직이는 대상에서 튕김을 줄인다.
-		// CPU는 현재 Sim이 이미 권위값이므로 즉시 전이를 유지한다. GPU는 persistent handoff가 끝난
-		// Contacting 프레임에서 current-centerline 접촉을 다시 확인한 뒤 전이한다.
+		// The capture frame is itself one frame of real contact. If the default decision time, which is
+		// about one frame, is already satisfied, the rope moves to Wrapping immediately rather than
+		// waiting to detect again next frame, which reduces bouncing off a moving target.
+		// On the CPU the current simulation state is already authoritative, so the immediate transition
+		// stands. On the GPU it transitions after re-confirming contact against the current centreline on
+		// the Contacting frame that follows the persistent handoff.
 		if (ShouldStartWrapping() && !bPendingGpuCaptureHandoff)
 		{
 			StartWrappingFromContacting();
@@ -1253,8 +1359,9 @@ bool URopeComponent::ApplyFlightCaptureEvaluation(float DeltaTime,
 		return true;
 	}
 
-	// Whip이 끝난 뒤 캡처하지 못하고 남아 있으면 실패로 보고 Free로 복귀한다.
-	// 후보가 계속 있어도 MinLatchNodes/품질 조건을 넘지 못하면 Flight에 갇힐 수 있으므로 리셋하지 않는다.
+	// Failing to capture before the whip ends is treated as a failed throw and returns the rope to Free.
+	// The timer is not reset while candidates keep appearing, because failing to meet MinLatchNodes or
+	// the quality conditions could otherwise trap the rope in Flight.
 	if (!WhipGuide.IsActive())
 	{
 		const float FlightReturnTime = ThrowParams.FlightNoContactReturnTime > 0.0f
@@ -1279,11 +1386,13 @@ void URopeComponent::BuildContactingState(FRopeContactTracker&& EvaluatedTracker
 	const TArray<FRopeContactCandidate>& Candidates, float DeltaTime)
 {
 	ContactTracker = MoveTemp(EvaluatedTracker);
-	// 평가 단계의 0초 집계는 대상 선택만 수행하므로 캡처 프레임의 실제 접촉 시간은 여기서 반영한다.
-	// Assisted의 잠긴 대상에서 Actual swept hit이 확인되면 최소 nominal 60Hz 한 프레임의 dwell로 환산한다.
-	// 120Hz 이상에서 raw DeltaTime만 더하고 다음 current-only 프레임까지 미루면 collision-free guide가 얇은
-	// limb 반대편까지 지나 GPU/CPU 모두 놓칠 수 있다. 더 긴 사용자 WrapDecisionTime은 그대로 추가 접촉을
-	// 요구하며, Predictive-only 후보도 boost하지 않아 아직 닿지 않은 상태가 곧바로 wrap으로 승격되지 않는다.
+	// The zero-second aggregation during evaluation only selects a target, so the capture frame's real
+	// contact time is applied here. When an actual swept hit is confirmed on an assisted lock, it counts
+	// as at least one nominal frame of dwell at 60 Hz.
+	// Above 120 Hz, adding the raw delta alone and deferring to the next current-only frame would let a
+	// collision-free guide pass clear through a thin limb, which both the GPU and the CPU would miss. A
+	// longer user-configured decision time still demands further contact, and predictive-only candidates
+	// are not boosted, so something that has not touched yet is never promoted straight to a wrap.
 	const uint8 ActualMask = static_cast<uint8>(ERopeContactCandidateSource::Actual);
 	const bool bDominantHasActual = Candidates.ContainsByPredicate(
 		[this, ActualMask](const FRopeContactCandidate& Candidate)
@@ -1317,8 +1426,9 @@ void URopeComponent::BuildContactingState(FRopeContactTracker&& EvaluatedTracker
 	ContactingElapsed = 0.0f;
 	PendingWrapSeed = BuildWrapSeedFromContactingState(Candidates);
 
-	// 진행 좌표계 스냅샷은 이 순간이 마지막 기회다 — Contacting부터는 솔브가 없어 노드가 정지하고
-	// (Pos==Prev로 수렴) 속도 정보가 죽는다. Wrapping의 CaptureTravelPlane 축이 소비한다.
+	// This is the last chance to snapshot the travel frame: from Contacting onwards there is no solve, so
+	// the nodes come to rest, their current and previous positions converge and the velocity information
+	// dies. The CaptureTravelPlane axis in Wrapping consumes it.
 	CaptureTravelFrame = FRopeCaptureTravelFrame::Compute(Sim, Candidates, DeltaTime);
 }
 
