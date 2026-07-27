@@ -1,30 +1,41 @@
 # -*- coding: utf-8 -*-
 #
-# DynamicRope 기본 밧줄 머티리얼 생성기 (M_RopeDefault)
+# DynamicRope default rope material generator (M_RopeDefault)
 # ------------------------------------------------------------------------------
-# 헴프/황마 절차적 밧줄 룩. 텍스처 에셋 없이 UV만으로 표현한다.
-#   1) 꼬임(strand) 패턴:  phase = V*StrandCount + U*TwistTurns
-#      (U=길이축 UV=누적 호길이/원주, V=원주 UV. 튜브 빌더가 U,V를 같은 물리 스케일로 채워
-#       TwistTurns=원주-길이당 회전 수 → 로프 길이 무관 밀도 일정. StrandCount≈TwistTurns면 ~45° 레이.)
-#      - sin(phase) → strand 마스크 → BaseColor 2톤 + 골 캐비티(AO)/Specular 감쇠 + Roughness 홈 변화
-#      - cos(phase) → 탄젠트공간 노말 섭동(꼬임선 음영). NormalStrength로 세기.
-#      - 2단 가닥: phase_sub=V*SubStrandCount+U*SubTwistTurns(역방향 lay)로 각 strand 속 세부 실 결을
-#        노말에 한 겹 더(진폭은 1차 strand mask로 변조 → 마루에서만 뚜렷). SubStrength로 세기.
-#   2) 불규칙 섬유 거침:  Custom HLSL 값노이즈(UV 고정, 로프 움직여도 안 헤엄침)
-#      - float4(섬유노말.xyz, 높이) 1회 평가 → 미세 노말 + Roughness 얼룩에 공용.
-#      - FiberScale(주파수) / FiberNormalStrength(범프) / FiberRoughness(거칠기 얼룩).
-#   3) Pull 피드백 에미시브: PullGlow(0..N) × PullGlowColor를 가닥 마스크로 변조해 방출한다.
-#      - 가닥 능선(mask=1)에서만 밝아져 "줄의 꼬임을 따라 달아오르는" 룩이 된다(균일 발광보다 로프답다).
-#      - 런타임에서 URopeWielderComponent가 MID로 PullGlow에 장전~발동 진행도(0..1, 발동 시 >1)를 싣는다.
-#        기본값 0이라 이 기능을 안 쓰면 기존 룩과 완전히 동일하다.
-# 노출 파라미터: Tint / StrandCount / TwistTurns / SubStrandCount / SubTwistTurns / SubStrength /
+# A procedural hemp or jute rope look, expressed from the UVs alone with no texture assets.
+#   1) The strand pattern: phase = V * StrandCount + U * TwistTurns.
+#      U is the length axis, as the accumulated arc length over the circumference, and V runs around the
+#      circumference. The tube builder fills U and V at the same physical scale, so TwistTurns is turns
+#      per circumference-length and the density is independent of the rope's length. With StrandCount
+#      close to TwistTurns the lay is roughly 45 degrees.
+#      - The sine of the phase gives the strand mask, which drives a two-tone base colour, the cavity
+#        occlusion and specular falloff in the grooves, and the roughness variation there.
+#      - The cosine of the phase perturbs the tangent-space normal, which shades the twist lines, scaled
+#        by NormalStrength.
+#      - A second level of strands adds the fine yarn grain inside each strand as another normal layer,
+#        with a reversed lay. Its amplitude is modulated by the first-level strand mask so it is distinct
+#        only on the crests, scaled by SubStrength.
+#   2) Irregular fibre roughness: a custom HLSL value noise fixed to the UVs, so it does not swim as the
+#      rope moves.
+#      - One evaluation returns the fibre normal and a height, shared by the fine normal and the
+#        roughness mottling.
+#      - Controlled by FiberScale for the frequency, FiberNormalStrength for the bump, and FiberRoughness
+#        for the roughness mottling.
+#   3) The pull feedback emissive: PullGlow multiplied by PullGlowColor, modulated by the strand mask.
+#      - Only the strand crests brighten, which reads as the rope heating along its twist, and looks more
+#        like a rope than a uniform glow would.
+#      - At runtime URopeWielderComponent drives PullGlow through a dynamic material instance with the
+#        arming-to-engagement progress, which exceeds one on engagement.
+#        It defaults to 0, so a project not using the feature sees exactly the original look.
+# Exposed parameters: Tint / StrandCount / TwistTurns / SubStrandCount / SubTwistTurns / SubStrength /
 #                Roughness / NormalStrength / CavityStrength /
 #                FiberScale / FiberNormalStrength / FiberRoughness /
 #                PullGlow / PullGlowColor
 #
-# 실행: Tools → Execute Python Script... 로 이 파일 선택.
-# 재실행 안전: 기존 에셋을 지우고 같은 경로에 다시 만든다(idempotent). 자식 MI_* 인스턴스는
-# 이 스크립트에서 로드/저장하지 않으므로 .uasset이 그대로라 부모 경로 참조가 유지된다.
+# To run: select this file through Tools -> Execute Python Script...
+# Safe to re-run: it deletes the existing asset and recreates it at the same path, so it is idempotent.
+# The child MI_* instances are neither loaded nor saved here, so their .uasset files are untouched and
+# their references to the parent path survive.
 
 import unreal
 
@@ -64,25 +75,25 @@ def scalar_param(name, default, x, y):
     return p
 
 
-# ---- 파라미터 -----------------------------------------------------------------
+# ---- Parameters ---------------------------------------------------------------
 tint = node(unreal.MaterialExpressionVectorParameter, -1700, -320)
 tint.set_editor_property("parameter_name", "Tint")
-tint.set_editor_property("default_value", unreal.LinearColor(0.62, 0.44, 0.24, 1.0))  # 따뜻한 헴프 탄
+tint.set_editor_property("default_value", unreal.LinearColor(0.62, 0.44, 0.24, 1.0))  # A warm hemp tan.
 
-strand = scalar_param("StrandCount", 3.0, -1900, 60)   # 원주 방향 가닥 수
-twist = scalar_param("TwistTurns", 3.0, -1900, 160)    # 원주-길이(2πR)당 꼬임 회전 수(UV.x=호길이/원주)
+strand = scalar_param("StrandCount", 3.0, -1900, 60)   # Strands around the circumference.
+twist = scalar_param("TwistTurns", 3.0, -1900, 160)    # Twist turns per circumference-length, where U is the arc length over the circumference.
 rough_p = scalar_param("Roughness", 0.82, -520, 300)
-nstr = scalar_param("NormalStrength", 0.55, -900, 560)  # 꼬임선 노말 세기(도드라지게 ↑)
+nstr = scalar_param("NormalStrength", 0.55, -900, 560)  # How pronounced the twist line normals are.
 
-fiber_scale = scalar_param("FiberScale", 40.0, -1500, 900)          # 섬유 노이즈 주파수
-fiber_nstr = scalar_param("FiberNormalStrength", 0.30, -1500, 1000)  # 섬유 미세 범프 세기
-fiber_rough = scalar_param("FiberRoughness", 0.15, -520, 460)        # 섬유 거칠기 얼룩 양
-cavity_str = scalar_param("CavityStrength", 0.5, -1500, 1100)        # 가닥 골 자기그림자(AO) 세기: 골에서 albedo/Specular 감쇠
-sub_strand = scalar_param("SubStrandCount", 12.0, -1900, 260)        # 2단: strand 속 세부 실(yarn) 수(원주)
-sub_twist = scalar_param("SubTwistTurns", -9.0, -1900, 360)          # 2단: 서브-yarn 꼬임(음수=1차와 반대 lay)
-sub_str = scalar_param("SubStrength", 0.4, -900, 660)                # 2단: 서브-yarn 노말 세기(1차 대비)
+fiber_scale = scalar_param("FiberScale", 40.0, -1500, 900)          # Fibre noise frequency.
+fiber_nstr = scalar_param("FiberNormalStrength", 0.30, -1500, 1000)  # Fibre micro-bump strength.
+fiber_rough = scalar_param("FiberRoughness", 0.15, -520, 460)        # How much the fibres mottle the roughness.
+cavity_str = scalar_param("CavityStrength", 0.5, -1500, 1100)        # Strand groove self-shadowing: how much the albedo and specular fall off in the grooves.
+sub_strand = scalar_param("SubStrandCount", 12.0, -1900, 260)        # Second level: yarns around the circumference within a strand.
+sub_twist = scalar_param("SubTwistTurns", -9.0, -1900, 360)          # Second level: sub-yarn twist, where a negative value reverses the lay.
+sub_str = scalar_param("SubStrength", 0.4, -900, 660)                # Second level: sub-yarn normal strength, relative to the first.
 
-# ---- UV 분해: U(길이), V(원주) ------------------------------------------------
+# ---- UV split: U along the length, V around the circumference -----------------
 uv = node(unreal.MaterialExpressionTextureCoordinate, -2100, 20)
 u = node(unreal.MaterialExpressionComponentMask, -1900, -60)
 u.set_editor_property("r", True); u.set_editor_property("g", False)
@@ -100,7 +111,7 @@ wire(u, u_mul, "A"); wire(twist, u_mul, "B")
 phase = node(unreal.MaterialExpressionAdd, -1380, 70)
 wire(v_mul, phase, "A"); wire(u_mul, phase, "B")
 
-# ---- strand 마스크: sin(phase)*0.5 + 0.5 (0..1) -------------------------------
+# ---- The strand mask, from the sine of the phase mapped into 0 to 1 -----------
 sine = node(unreal.MaterialExpressionSine, -1180, 20)
 sine.set_editor_property("period", 1.0)  # sin(2π*phase)
 wire(phase, sine, "")
@@ -110,8 +121,9 @@ wire(sine, mask_mul, "A"); wire(half, mask_mul, "B")
 mask = node(unreal.MaterialExpressionAdd, -840, 20)
 wire(mask_mul, mask, "A"); wire(half, mask, "B")
 
-# ---- 가닥 골 캐비티(AO): Cavity = lerp(1-CavityStrength, 1, mask) — 골(mask=0)에서 어두워짐 -----
-# 가닥 사이 자기그림자를 흉내내 BaseColor를 누르고 Specular를 죽인다(하이라이트가 능선에만 앉음).
+# ---- Strand groove cavity: interpolated so the grooves, where the mask is zero, darken ----
+# It imitates the self-shadowing between strands, pushing the base colour down and killing the specular
+# so the highlight sits only on the crests.
 cav_one = constant(-880, 60, 1.0)
 cav_lo = node(unreal.MaterialExpressionSubtract, -700, 120)   # 1 - CavityStrength
 wire(cav_one, cav_lo, "A"); wire(cavity_str, cav_lo, "B")
@@ -128,28 +140,31 @@ basecol_cav = node(unreal.MaterialExpressionMultiply, -120, -180)
 wire(basecol, basecol_cav, "A"); wire(cavity, basecol_cav, "B")
 mel.connect_material_property(basecol_cav, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
-# ---- Specular: 기본 0.5 × Cavity — 골에서 스펙큘러 감쇠(하이라이트 능선 집중) ------------
+# ---- Specular: the default multiplied by the cavity, so it falls off in the grooves and the highlight
+# ---- concentrates on the crests ------------
 spec_base = constant(-300, 40, 0.5)
 spec = node(unreal.MaterialExpressionMultiply, -120, 40)
 wire(spec_base, spec, "A"); wire(cavity, spec, "B")
 mel.connect_material_property(spec, "", unreal.MaterialProperty.MP_SPECULAR)
 
-# ---- Pull 피드백 에미시브: PullGlowColor × PullGlow × mask ----------------------
-# 게임플레이(Pull 장전/발동) 상태를 로프 자체에 싣는 채널. 기본 PullGlow=0 → 방출 0이라
-# 이 기능을 안 쓰는 프로젝트의 룩은 그대로다. mask를 곱해 가닥 능선만 밝아지게 한다.
+# ---- The pull feedback emissive: PullGlowColor multiplied by PullGlow and the mask ----------------
+# The channel that carries the gameplay pull state onto the rope itself. PullGlow defaults to 0, giving
+# no emission, so a project not using the feature sees an unchanged look. Multiplying by the mask
+# brightens only the strand crests.
 pull_glow = scalar_param("PullGlow", 0.0, -700, 200)
 pull_color = node(unreal.MaterialExpressionVectorParameter, -700, 240)
 pull_color.set_editor_property("parameter_name", "PullGlowColor")
-pull_color.set_editor_property("default_value", unreal.LinearColor(0.25, 1.0, 0.55, 1.0))  # 게이지 발동색과 같은 톤
+pull_color.set_editor_property("default_value", unreal.LinearColor(0.25, 1.0, 0.55, 1.0))  # The same tone as the gauge's engaged colour.
 glow_amt = node(unreal.MaterialExpressionMultiply, -520, 220)
 wire(pull_color, glow_amt, "A"); wire(pull_glow, glow_amt, "B")
 glow_masked = node(unreal.MaterialExpressionMultiply, -340, 220)
 wire(glow_amt, glow_masked, "A"); wire(mask, glow_masked, "B")
 mel.connect_material_property(glow_masked, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
-# ---- 불규칙 섬유 노이즈: Custom HLSL, float4(노말.xyz, 높이) ------------------
-# UV*Scale 값노이즈(smoothstep 보간) + 해석적 미분으로 탄젠트공간 노말. UV 기준이라
-# 로프가 움직여도 표면에 고정된다(월드 노이즈의 헤엄 현상 없음).
+# ---- Irregular fibre noise: custom HLSL returning the normal and a height ------------------
+# A value noise over the scaled UVs with smoothstep interpolation, plus an analytic derivative for the
+# tangent-space normal. Being UV-based it stays fixed to the surface as the rope moves, with none of the
+# swimming of world-space noise.
 fiber = node(unreal.MaterialExpressionCustom, -1000, 900)
 fiber.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT4)
 fiber.set_editor_property("description", "RopeFiberDetail")
@@ -181,11 +196,11 @@ wire(uv, fiber, "UV")
 wire(fiber_scale, fiber, "Scale")
 wire(fiber_nstr, fiber, "Strength")
 
-fiber_n = node(unreal.MaterialExpressionComponentMask, -760, 860)  # 섬유 노말(xyz)
+fiber_n = node(unreal.MaterialExpressionComponentMask, -760, 860)  # The fibre normal.
 fiber_n.set_editor_property("r", True); fiber_n.set_editor_property("g", True)
 fiber_n.set_editor_property("b", True); fiber_n.set_editor_property("a", False)
 wire(fiber, fiber_n, "")
-fiber_h = node(unreal.MaterialExpressionComponentMask, -760, 1000)  # 섬유 높이(a)
+fiber_h = node(unreal.MaterialExpressionComponentMask, -760, 1000)  # The fibre height.
 fiber_h.set_editor_property("r", False); fiber_h.set_editor_property("g", False)
 fiber_h.set_editor_property("b", False); fiber_h.set_editor_property("a", True)
 wire(fiber, fiber_h, "")
@@ -199,7 +214,7 @@ inv_amt = node(unreal.MaterialExpressionMultiply, -200, 420)
 wire(inv, inv_amt, "A"); wire(amt, inv_amt, "B")
 rough_strand = node(unreal.MaterialExpressionAdd, -40, 340)
 wire(rough_p, rough_strand, "A"); wire(inv_amt, rough_strand, "B")
-# 섬유 거칠기 얼룩: (height-0.5)*FiberRoughness
+# The fibre roughness mottling, centred on zero and scaled by FiberRoughness.
 fh_half = constant(-520, 1080, 0.5)
 fh_c = node(unreal.MaterialExpressionSubtract, -360, 1000)
 wire(fiber_h, fh_c, "A"); wire(fh_half, fh_c, "B")
@@ -209,8 +224,9 @@ rough = node(unreal.MaterialExpressionAdd, 120, 400)
 wire(rough_strand, rough, "A"); wire(fh_amt, rough, "B")
 mel.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
 
-# ---- Normal: 꼬임선(strand) + 서브-yarn(2단) + 섬유 미세 노말 = whiteout 블렌드 -------
-# 꼬임선 노말: cos(phase) 로 탄젠트공간 섭동(x=길이, y=원주, z=1)
+# ---- Normal: the twist lines, the second-level sub-yarns and the fine fibre normal, whiteout blended --
+# The twist line normal perturbs tangent space from the cosine of the phase, along the length and the
+# circumference.
 cosine = node(unreal.MaterialExpressionCosine, -1180, 620)
 cosine.set_editor_property("period", 1.0)
 wire(phase, cosine, "")
@@ -235,9 +251,10 @@ wire(app1, app2, "A"); wire(onez, app2, "B")
 strand_n = node(unreal.MaterialExpressionNormalize, -160, 720)
 wire(app2, strand_n, "")
 
-# ---- 2단 가닥(서브-yarn): 각 strand 안에 반대 방향으로 꼬인 세부 실 결 --------------------
-# phase_sub = V*SubStrandCount + U*SubTwistTurns(역방향 lay). 진폭을 1차 strand mask로 변조해
-# 마루(strand)에서만 뚜렷하고 골에선 사라진다(가려지는 부분). 노말 레이어로만 얹는다.
+# ---- Second-level strands, the sub-yarns: the fine grain twisted the opposite way inside each strand --
+# The sub-phase uses the sub-strand count and a reversed sub-twist. Its amplitude is modulated by the
+# first-level strand mask, so it is distinct on the crests and disappears in the grooves, where it would
+# be hidden. It is added as a normal layer alone.
 vs_mul = node(unreal.MaterialExpressionMultiply, -1600, 1040)
 wire(v, vs_mul, "A"); wire(sub_strand, vs_mul, "B")
 us_mul = node(unreal.MaterialExpressionMultiply, -1600, 1160)
@@ -247,7 +264,7 @@ wire(vs_mul, phase_sub, "A"); wire(us_mul, phase_sub, "B")
 cos_sub = node(unreal.MaterialExpressionCosine, -1180, 1080)
 cos_sub.set_editor_property("period", 1.0)
 wire(phase_sub, cos_sub, "")
-# ns_sub = -NormalStrength * SubStrength * (1차 strand mask) — 마루에서만 세부 결
+# The sub-yarn strength is scaled by the first-level strand mask, which confines the fine grain to the crests.
 ns_sub0 = node(unreal.MaterialExpressionMultiply, -1000, 1120)
 wire(ns_neg, ns_sub0, "A"); wire(sub_str, ns_sub0, "B")
 ns_sub = node(unreal.MaterialExpressionMultiply, -900, 1200)
@@ -268,29 +285,31 @@ wire(sub_app1, sub_app2, "A"); wire(onez2, sub_app2, "B")
 sub_n = node(unreal.MaterialExpressionNormalize, -160, 1180)
 wire(sub_app2, sub_n, "")
 
-# 꼬임선 + 서브-yarn + 섬유 노말 = whiteout 3레이어(xy는 모두 더하고 z는 모두 곱). 단순 Add→Normalize보다
-# z가 희석되지 않아 세 디테일이 모두 살아난다(편미분 노말 블렌딩과 유사).
-sn_xy = node(unreal.MaterialExpressionComponentMask, 60, 700)   # strand 노말 xy
+# The twist line, sub-yarn and fibre normals are blended as three whiteout layers, summing the tangential
+# components and multiplying the vertical ones. Unlike a plain add and normalize, that keeps the vertical
+# component from being diluted and all three details survive; it is analogous to blending partial
+# derivatives.
+sn_xy = node(unreal.MaterialExpressionComponentMask, 60, 700)   # The strand normal's tangential part.
 sn_xy.set_editor_property("r", True); sn_xy.set_editor_property("g", True)
 sn_xy.set_editor_property("b", False); sn_xy.set_editor_property("a", False)
 wire(strand_n, sn_xy, "")
-fn_xy = node(unreal.MaterialExpressionComponentMask, 60, 780)   # fiber 노말 xy
+fn_xy = node(unreal.MaterialExpressionComponentMask, 60, 780)   # The fibre normal's tangential part.
 fn_xy.set_editor_property("r", True); fn_xy.set_editor_property("g", True)
 fn_xy.set_editor_property("b", False); fn_xy.set_editor_property("a", False)
 wire(fiber_n, fn_xy, "")
-sn_z = node(unreal.MaterialExpressionComponentMask, 60, 860)    # strand 노말 z
+sn_z = node(unreal.MaterialExpressionComponentMask, 60, 860)    # The strand normal's vertical part.
 sn_z.set_editor_property("r", False); sn_z.set_editor_property("g", False)
 sn_z.set_editor_property("b", True); sn_z.set_editor_property("a", False)
 wire(strand_n, sn_z, "")
-fn_z = node(unreal.MaterialExpressionComponentMask, 60, 940)    # fiber 노말 z
+fn_z = node(unreal.MaterialExpressionComponentMask, 60, 940)    # The fibre normal's vertical part.
 fn_z.set_editor_property("r", False); fn_z.set_editor_property("g", False)
 fn_z.set_editor_property("b", True); fn_z.set_editor_property("a", False)
 wire(fiber_n, fn_z, "")
-sub_xy = node(unreal.MaterialExpressionComponentMask, 60, 1020)  # 서브-yarn 노말 xy
+sub_xy = node(unreal.MaterialExpressionComponentMask, 60, 1020)  # The sub-yarn normal's tangential part.
 sub_xy.set_editor_property("r", True); sub_xy.set_editor_property("g", True)
 sub_xy.set_editor_property("b", False); sub_xy.set_editor_property("a", False)
 wire(sub_n, sub_xy, "")
-sub_z = node(unreal.MaterialExpressionComponentMask, 60, 1100)   # 서브-yarn 노말 z
+sub_z = node(unreal.MaterialExpressionComponentMask, 60, 1100)   # The sub-yarn normal's vertical part.
 sub_z.set_editor_property("r", False); sub_z.set_editor_property("g", False)
 sub_z.set_editor_property("b", True); sub_z.set_editor_property("a", False)
 wire(sub_n, sub_z, "")
@@ -308,7 +327,7 @@ norm = node(unreal.MaterialExpressionNormalize, 620, 820)
 wire(norm_app, norm, "")
 mel.connect_material_property(norm, "", unreal.MaterialProperty.MP_NORMAL)
 
-# ---- 컴파일 + 저장 ------------------------------------------------------------
+# ---- Compile and save ----------------------------------------------------------
 mel.recompile_material(mat)
 eal.save_asset(FULL)
 unreal.log("[DynamicRope] Rebuilt {}".format(FULL))

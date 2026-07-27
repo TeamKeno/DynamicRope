@@ -14,9 +14,10 @@ void URopeBoneCapsuleProvider::RebuildColliders(USkeletalMeshComponent* Mesh, fl
 	Capsules.Reset();
 	BuildCapsules(Mesh);
 
-	// 이전 프레임 끝점을 인덱스 정렬로 이어 붙인다(캡슐별 (현재-이전)/dt = 표면 속도). 개수 불일치
-	// (첫 프레임/구성 변경)면 이 프레임은 정적(InvDt 0 = 속도 0) 취급 — FCapsuleCollider가 이미
-	// prev=현재로 초기화된 상태 그대로 둔다.
+	// The previous frame's endpoints are matched up by index, so that the difference between the current and previous
+	// endpoints over the delta gives each capsule's surface velocity. On a count mismatch, meaning the first frame or
+	// a configuration change, this frame is treated as static, with an inverse delta of zero giving zero velocity,
+	// leaving FCapsuleCollider with its previous endpoints already initialized to the current ones.
 	if (PrevEndpoints.Num() == Capsules.Num())
 	{
 		for (int32 i = 0; i < Capsules.Num(); ++i)
@@ -27,7 +28,7 @@ void URopeBoneCapsuleProvider::RebuildColliders(USkeletalMeshComponent* Mesh, fl
 		}
 	}
 
-	// 다음 프레임용으로 현재 끝점 저장.
+	// Stores the current endpoints for the next frame.
 	PrevEndpoints.Reset(Capsules.Num());
 	for (const FCapsuleCollider& Cap : Capsules)
 	{
@@ -46,7 +47,7 @@ void URopeBoneCapsuleProvider::AppendColliderPointers(FRopeColliderGatherContext
 
 void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 {
-	// 1) 명시 목록: 나열된 본마다 본→부모 세그먼트 캡슐(반지름 = CapsuleRadius). 기존 동작.
+	// 1) The explicit list: one capsule per listed bone, spanning the bone to its parent, with the configured radius. This is the existing behaviour.
 	if (Bones.Num() > 0)
 	{
 		for (const FName& Bone : Bones)
@@ -65,11 +66,13 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 		return;
 	}
 
-	// 2) 자동 — Physics Asset: 바디 셰이프를 캡슐로 쓴다. sphyl은 그대로, sphere는 A==B 축퇴 캡슐,
-	// box는 장축 정렬 캡슐 근사(축 = 최장변, 반지름 = 나머지 두 반폭의 최대 — 단면 모서리만 살짝
-	// 초과 커버). 본별 실제 치수를 얻고, 스킨 없는 IK/트위스트 본의 가짜 세그먼트도 자연히 배제된다.
-	// convex 등 나머지 셰이프는 건너뛴다 — 그래서 셰이프를 하나도 못 만들면 아래 스켈레톤 폴백으로
-	// 진행한다(convex 전용 PA에서 충돌이 통째로 사라지는 것 방지).
+	// 2) Automatic, from a physics asset: the body shapes are used as capsules. A sphyl is used as it is, a sphere as a
+	// degenerate capsule whose endpoints coincide, and a box as a capsule approximation aligned to its long axis, with
+	// the axis being the longest side and the radius the larger of the other two half extents, which over-covers the
+	// cross-section's corners slightly. This gives the real dimensions per bone and naturally excludes the phantom
+	// segments of unskinned IK and twist bones.
+	// Every other shape, such as a convex, is skipped, which is why producing no shapes at all falls through to the
+	// skeleton fallback below, so that a physics asset made entirely of convexes does not lose its collision entirely.
 	if (const UPhysicsAsset* PhysAsset = Mesh->GetPhysicsAsset())
 	{
 		for (const TObjectPtr<USkeletalBodySetup>& Setup : PhysAsset->SkeletalBodySetups)
@@ -82,7 +85,7 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 			const int32 BoneIndex = Mesh->GetBoneIndex(BoneName);
 			if (BoneIndex == INDEX_NONE)
 			{
-				// 에셋에만 있고 현재 메시에 없는 본.
+				// A bone present in the asset but absent from the current mesh.
 				continue;
 			}
 			const FTransform BoneTM = Mesh->GetBoneTransform(BoneIndex);
@@ -91,7 +94,7 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 			for (const FKSphylElem& Sphyl : Setup->AggGeom.SphylElems)
 			{
 				const FTransform ElemTM = Sphyl.GetTransform() * BoneTM;
-				// sphyl 축 = 로컬 Z.
+				// A sphyl's axis is its local Z.
 				const FVector Axis = ElemTM.GetUnitAxis(EAxis::Z);
 				const FVector Center = ElemTM.GetLocation();
 				const float HalfLen = Sphyl.GetScaledCylinderLength(Scale3D) * 0.5f;
@@ -106,9 +109,11 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 			}
 			for (const FKBoxElem& Box : Setup->AggGeom.BoxElems)
 			{
-				// X/Y/Z는 전체 길이. 최장변을 캡슐 축으로, 나머지 두 반폭의 최대(= 세 반폭의 중간값)를
-				// 반지름으로 — 단면 직사각형의 긴 변까지 덮는다(모서리만 살짝 초과). 세그먼트 반길이 =
-				// 최장 반폭 - 반지름(반구가 상자 끝을 안 넘게, 음수면 0 = 구).
+				// The X, Y and Z are full lengths. The longest side becomes the capsule axis and the larger of the
+				// other two half extents, being the median of the three, becomes the radius, which covers the long
+				// side of the cross-section rectangle and over-covers only its corners. The segment's half length is
+				// the longest half extent minus the radius, so the hemispheres do not extend past the ends of the
+				// box, clamped to zero, which gives a sphere.
 				const double UniformScale = Scale3D.GetAbsMin();
 				const double Hx = Box.X * 0.5 * UniformScale;
 				const double Hy = Box.Y * 0.5 * UniformScale;
@@ -134,9 +139,10 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 			*GetNameSafe(GetOwner()), *GetNameSafe(PhysAsset));
 	}
 
-	// 3) 자동 — 스켈레톤 폴백(Physics Asset 없음): 모든 본-부모 세그먼트(반지름 = CapsuleRadius).
-	// AutoMinBoneLength 미만은 제외(손가락/트위스트 잡음 컷). 스킨 없는 본(IK 등)의 가짜 세그먼트가
-	// 섞일 수 있다 — 러프한 테스트용이며 캐릭터는 Physics Asset을 두는 쪽을 권장.
+	// 3) Automatic, from the skeleton, as a fallback when there is no physics asset: every bone-to-parent segment,
+	// with the configured radius. Segments shorter than AutoMinBoneLength are excluded, which cuts out finger and
+	// twist noise. Phantom segments from unskinned bones such as IK bones can be included, so this is for rough
+	// testing and a character is better given a physics asset.
 	const USkinnedAsset* Asset = Mesh->GetSkinnedAsset();
 	if (!Asset)
 	{
@@ -150,7 +156,7 @@ void URopeBoneCapsuleProvider::BuildCapsules(USkeletalMeshComponent* Mesh)
 		const int32 ParentIndex = RefSkel.GetParentIndex(i);
 		if (ParentIndex == INDEX_NONE)
 		{
-			// 루트: 부모 세그먼트 없음.
+			// The root, which has no parent segment.
 			continue;
 		}
 		const FVector P0 = Mesh->GetBoneTransform(i).GetLocation();

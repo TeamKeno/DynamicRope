@@ -2,13 +2,14 @@
 
 #include "Logic/RopeWrappingPhase.h"
 #include "Components/SceneComponent.h"
-// ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+// ResolveBindingWorld, the single point that resolves a wrap binding, whether a bone, a socket or a
+// component, into a transform.
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-// RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
+// RopeMath::AnyTangentFromNormal, included here to avoid a duplicate definition in the unity build.
 #include "RopeMathHelpers.h"
 
 int32 FRopeWrappingPhase::ComputeCompositeRadiusEntryStepCount(
@@ -67,8 +68,9 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 		return false;
 	}
 
-	// 출력 Path.Num()과 독립적인 작은 probe step으로 ideal helix를 계산한다. projection 결과가
-	// 거의 움직이지 않아 출력 node가 생기지 않아도 PathSweepDistance는 계속 전진한다.
+	// The ideal helix is advanced in small probe steps, independently of the number of output path points.
+	// The sweep distance keeps advancing even when the projection barely moves and no output node is
+	// produced.
 	const FVector AxisDirection = State.PathAxisDirection.GetSafeNormal(
 		KINDA_SMALL_NUMBER, FVector::UpVector);
 	const FVector LatchSurfaceWorld = State.Path[0].SurfaceWorld;
@@ -89,15 +91,17 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 		: LatchRadius;
 
 	const float SegmentLength = FMath::Max(Sim.SegmentLength, KINDA_SMALL_NUMBER);
-	// 출력 node 간격보다 촘촘한 반-segment probe로 원본 projection polyline을 만든다.
-	// Path.Num()과 무관한 PathSweepDistance에서 probe 번호를 복원하므로, 표면점이 제자리여서
-	// 이번 probe가 node를 만들지 못해도 다음 ideal helix 위상으로 전진할 수 있다.
+	// The raw projection polyline is built with half-segment probes, finer than the output node spacing.
+	// The probe number is recovered from the sweep distance, which is independent of the path point count,
+	// so a probe that produces no node because the surface point stayed put can still advance to the next
+	// ideal helix phase.
 	const float ProbeStepDistance = FMath::Max(0.5f, SegmentLength * 0.5f);
 	const int32 ProbeStepIndex = FMath::RoundToInt(
 		State.PathSweepDistance / ProbeStepDistance) + 1;
 	const int32 MaxProbeStepCount = FMath::Max(32, State.NumTailNodes * 16);
-	// projection이 계속 같은 점을 반환하는 폐곡면/축퇴 상황에서 Path.Num()이 영원히 늘지 않는
-	// 무한 progressive build를 막는다. 정상 경로는 보통 node당 2~수 회 probe 안에 끝난다.
+	// This prevents an unbounded progressive build where the projection keeps returning the same point, as
+	// on a closed or degenerate surface, and the path point count never grows. A healthy path normally
+	// finishes within a few probes per node.
 	if (ProbeStepIndex > MaxProbeStepCount)
 	{
 		FinishPathBuild(/*bFailed=*/true, TEXT("CompositeAnalyticHelixProbeExhausted"));
@@ -112,8 +116,9 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 	const float PitchScale = State.PathCompositeHelixPitchScale;
 	const float PreviousRawAngleRad = State.PathCompositeSweepAngleRad;
 
-	// 래치 표면 반지름에서 island 전체 반지름으로 한 probe에 순간 이동하지 않는다. 각 raw point는
-	// 직전 projection 결과와 무관하게 래치/축/contact pitch만으로 독립 계산한다.
+	// It never jumps from the latch surface radius to the whole island radius in a single probe. Each raw
+	// point is computed independently from the latch, the axis and the contact pitch alone, with no
+	// dependence on the previous projection result.
 	const int32 RadiusEntrySegmentCount = ComputeCompositeRadiusEntryStepCount(
 		LatchRadius, HelixRadius, ProbeStepDistance);
 	float IdealRadius = LatchRadius;
@@ -151,8 +156,9 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 		const float ActualCmPerRad = BuiltAngleRad > KINDA_SMALL_NUMBER
 			? BuiltDistance / BuiltAngleRad
 			: 0.0f;
-		// Single Bone SurfaceVectorField의 저작 pitch를 기준 밀도로 사용한다. 이 값은 Composite
-		// projection 자체의 arc 변화 진단용이며 angle-mapped front의 속도에는 사용하지 않는다.
+		// The authored pitch of the single-bone surface vector field serves as the reference density. This
+		// value diagnoses the arc variation of the composite projection itself and is not used for the speed
+		// of the angle-mapped front.
 		const float ReferencePitch = Ctx.Config.WrappingHelixPitchScale;
 		const float ReferenceCmPerRad = HelixRadius *
 			FMath::Sqrt(1.0f + FMath::Square(ReferencePitch));
@@ -205,10 +211,11 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 		return false;
 	}
 
-	// Ideal helix point에서 같은 축 높이의 axis point를 향해 radial ray를 쏜다. 각 SDF의
-	// 첫 교차점 중 ray 시작점에 가장 가까운 것만 사용한다. outer band/후보 점수/직전 path
-	// 방향은 전혀 사용하지 않으므로 각 raw probe의 결과는 독립적인 analytic helix 위상에만
-	// 의존한다. 어떤 SDF도 ray와 교차하지 않으면 이 점은 no-anchor solver node로 남긴다.
+	// A radial ray is cast from the ideal helix point towards the axis point at the same height along the
+	// axis. Of each SDF's first intersection, only the one nearest the ray's origin is used. The outer
+	// band, the candidate scoring and the previous path direction are not consulted at all, so each raw
+	// probe's result depends only on the independent analytic helix phase. Where no SDF intersects the ray,
+	// the point is left as a no-anchor solver node.
 	bool bFound = false;
 	float BestRadialHitDistance = TNumericLimits<float>::Max();
 	FRopeSurfaceProjection BestProjection;
@@ -241,8 +248,9 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 		}
 		++MatchingSDFCount;
 
-		// QuerySwept의 step은 SDF 로컬 공간에서 소비된다. 가장 작은 voxel의 절반으로
-		// 샘플해 얇은 표면도 건너뛰지 않게 하고, ray 전체가 항상 샘플되도록 상한을 산출한다.
+		// The sweep step is consumed in the SDF's local space. Sampling at half the smallest voxel keeps
+		// even a thin surface from being stepped over, and the sample limit is derived so the whole ray is
+		// always covered.
 		const FVector VoxelSize(
 			SDFView.LocalSize.X / FMath::Max(1, SDFView.ResX - 1),
 			SDFView.LocalSize.Y / FMath::Max(1, SDFView.ResY - 1),
@@ -261,8 +269,9 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 		FRopeSweptQuery RadialQuery;
 		RadialQuery.WorldStart = RadialRayStartWorld;
 		RadialQuery.WorldEnd = RadialRayEndWorld;
-		// 0보다 아주 조금 큰 값으로 부호가 양자화된 표면 voxel도 첫 교차로 잡되,
-		// 저장 위치는 Contact.SurfacePoint이므로 rope radius만큼 부풀리지 않는다.
+		// A threshold just above zero catches even a surface voxel whose sign was quantized as the first
+		// intersection, while the position stored is the contact's surface point and is therefore not
+		// inflated by the rope radius.
 		RadialQuery.NodeRadius = 0.05f;
 		RadialQuery.SweepStep = SweepStep;
 		RadialQuery.MaxSamples = MaxSamples;
@@ -300,8 +309,9 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 			BestProjection.SurfacePoint - State.PathAxisOrigin, AxisDirection);
 	}
 
-	// State.Path*는 마지막 출력 node가 아니라 직전 raw projection을 보관한다. 그래야 출력 경계
-	// 사이에 몇 번의 probe가 끼더라도 실제 raw polyline의 길이를 빠짐없이 누적할 수 있다.
+	// The path state holds the previous raw projection rather than the last output node. That is what
+	// allows the real raw polyline's length to be accumulated in full even when several probes fall between
+	// output boundaries.
 	const FVector PreviousRawSurfaceWorld = State.PathSurfaceWorld;
 	const FVector PreviousRawNormalWorld = State.PathNormalWorld;
 	const FVector PreviousRawTangentWorld = State.PathTangentWorld;
@@ -349,9 +359,9 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 		RawPoint.bVirtual = true;
 	}
 
-	// Raw projection polyline의 실제 rope centerline 길이를 누적한다. 짧게 스냅된 probe는
-	// 출력 node를 만들지 않고 다음 probe로 넘어가며, 큰 projection 이동은 while에서 여러
-	// SegmentLength 경계로 나누어 출력한다.
+	// Accumulates the real rope centreline length of the raw projection polyline. A probe that snapped only
+	// a short way produces no output node and moves on to the next, while a large projection movement is
+	// split across several segment length boundaries by the loop.
 	const float CenterlineOffset = FMath::Max(0.0f, Ctx.SurfaceOffset);
 	const FVector PreviousRawCenterlineWorld = PreviousRawSurfaceWorld +
 		(bPreviousRawVirtual ? FVector::ZeroVector : PreviousRawNormalWorld * CenterlineOffset);
@@ -388,9 +398,11 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 			const FVector InterpolatedTangentWorld = FMath::Lerp(
 				PreviousRawTangentWorld, RawPoint.TangentWorld, Alpha)
 				.GetSafeNormal(KINDA_SMALL_NUMBER, RawPoint.TangentWorld);
-			// Arc-length는 위치 간격만 보정한다. projection chord를 tangent로 쓰면 SDF support가
-			// 바뀌는 순간 chord 방향이 급회전하고, front 뒤 tail 전체의 직선 연장 방향까지 튄다.
-			// 독립 analytic helix가 만든 전/후 tangent를 보간해 원래 감김 흐름을 유지한다.
+			// Arc length corrects the spacing of the positions alone. Using the projection chord as the
+			// tangent would make its direction swing sharply the moment the SDF support changes, and that
+			// would jerk the straight extension direction of the whole tail behind the front. Interpolating
+			// the tangents the independent analytic helix produced before and after preserves the original
+			// wrapping flow.
 			FVector SampleTangentWorld = (InterpolatedTangentWorld - FVector::DotProduct(
 				InterpolatedTangentWorld, SampleNormalWorld) * SampleNormalWorld)
 				.GetSafeNormal(KINDA_SMALL_NUMBER, RawPoint.TangentWorld);
@@ -398,8 +410,9 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 				PreviousRawGuideTangentWorld, IdealTangentWorld, Alpha)
 				.GetSafeNormal(KINDA_SMALL_NUMBER, IdealTangentWorld);
 
-			// 같은 raw 구간이 두 본 사이를 잇는 경우 재샘플 위치에 더 가까운 쪽의 bone frame을
-			// anchor 소유자로 고른다. 어느 한쪽이 virtual이면 출력점도 virtual이라 bone은 쓰지 않는다.
+			// Where one raw span bridges two bones, the bone frame nearer the resample position is chosen as
+			// the anchor's owner. If either side is virtual the output point is virtual too and no bone is
+			// used.
 			const bool bUseCurrentBinding =
 				bPreviousRawVirtual || (!RawPoint.bVirtual && Alpha >= 0.5f);
 			FRopeWrapPathPoint SamplePoint;
@@ -431,8 +444,9 @@ bool FRopeWrappingPhase::AdvanceCompositeAnalyticHelixProbeStep(
 		State.PathCurrentBone = RawPoint.Bone;
 		State.PathCurrentMesh = RawPoint.Mesh;
 	}
-	// 출력 node 생성 여부와 상관없이 raw 상태와 sweep 위상은 항상 갱신한다. PathCurrentDistance는
-	// 실제 centerline arc, PathSweepDistance는 ideal helix probe의 명목 진행량이다.
+	// The raw state and the sweep phase are always updated, whether or not an output node was produced. The
+	// current distance is the real centreline arc and the sweep distance is the nominal advance of the
+	// ideal helix probe.
 	State.PathSurfaceWorld = RawPoint.SurfaceWorld;
 	State.PathNormalWorld = RawPoint.NormalWorld;
 	State.PathTangentWorld = RawPoint.TangentWorld;
@@ -522,13 +536,15 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 		return;
 	}
 
-	// 로프 중심선의 configuration-space 반지름. 두 실제 표면의 gap이 이 지름보다 작으면
-	// 로프 중심선은 사이를 통과할 수 없으므로 같은 복합 기둥의 일부로 본다.
+	// The configuration-space radius of the rope centreline. Where the gap between two real surfaces is
+	// smaller than that diameter, the rope centreline cannot pass between them and they are treated as part
+	// of the same composite column.
 	const float EffectiveRadius = FMath::Max3(
 		Ctx.GetContactRadius(), Ctx.SurfaceOffset, Sim.SegmentLength * 0.25f);
 	const float EffectiveDiameter = EffectiveRadius * 2.0f;
-	// island 판정은 구형 secondary seed가 잘라 놓은 경로 길이가 아니라 실제 미고정 tail 전체를 본다.
-	// island가 둘 이상으로 확정되면 호출자가 해당 seed를 제거하고 이 길이를 경로에 사용한다.
+	// The island test looks at the whole real unpinned tail rather than the path length an older secondary
+	// seed cut short. Once the island is established as spanning two or more bones, the caller removes that
+	// seed and uses this length for the path.
 	const int32 FullTailNodeCount = FMath::Max(0, Sim.Num() - LatchAnchor.NodeIndex);
 	const float FreeRestLength = FMath::Max(
 		0.0f, static_cast<float>(FMath::Max(0, FullTailNodeCount - 1)) * Sim.SegmentLength);
@@ -589,8 +605,9 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 		const bool bLatchCollider = Bone == LatchAnchor.Bone;
 		if (!bLatchCollider)
 		{
-			// 최초 투척 단면과 무관한 골반/다리까지 skeleton 연결을 타고 내려가는 것을 막는다.
-			// bounds의 축 방향 extent까지 고려하므로 긴 몸통처럼 slab을 가로지르는 형상은 유지된다.
+	// This stops the skeleton connectivity walking all the way down to the pelvis and legs, which have
+	// nothing to do with the original throw's cross-section. It also accounts for the axial extent of the
+	// bounds, so a shape that genuinely crosses the slab, such as a long torso, is retained.
 			const float AxialOffset = FMath::Abs(FVector::DotProduct(
 				Center - State.PathSurfaceWorld, AxisDirection));
 			const float AxialExtent = FVector::DotProduct(Extent, AbsAxis);
@@ -615,8 +632,9 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 		Candidate.Member.Bone = Bone;
 		Candidate.Member.WorldBounds = Bounds;
 
-		// SDF grid의 로컬 bounds와 당시 bone transform을 그대로 스냅샷한다. 이후 복합 단면 계산은
-		// 이 oriented box를 사용해 SDF를 다시 샘플링하거나 메시로 변환하지 않는다.
+	// The SDF grid's local bounds and the bone transform at that moment are snapshotted as they are. The
+	// composite cross-section calculation then uses those oriented boxes and never resamples the SDF or
+	// converts it to a mesh.
 		FRopeSDFColliderView SDFView;
 		if (Collider->GetGPUSDF(SDFView))
 		{
@@ -711,8 +729,9 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 					: ERopeWrapIslandPortalState::Open);
 			Portal.SurfaceGap = SurfaceGap;
 
-			// 모든 후보 쌍을 Log로 출력하면 한 번의 접촉에 O(n^2) 줄이 쌓여 실제 경로 실패가
-			// 묻힌다. 상세 pair 진단은 VeryVerbose에 남기고, 일반 로그에는 아래 집계만 출력한다.
+			// Logging every candidate pair would accumulate a quadratic number of lines for a single contact
+			// and bury the real path failure. The detailed pair diagnostics stay at the most verbose level
+			// and the ordinary log carries only the summary below.
 			UE_LOG(LogRopeWrap, VeryVerbose,
 				TEXT("[%s] Wrap island portal: a=%s b=%s state=%s gap=%.2f diameter=%.2f "
 					"requiredExtra=%.2f slack=%.2f boundsGap=%.2f"),
@@ -764,8 +783,9 @@ void FRopeWrappingPhase::GatherPoseSpaceWrapIsland(const FRopeSurfaceAnchor& Lat
 		OutBones.Add(LatchAnchor.Bone);
 	}
 
-	// 채택된 island에 닿아 있던 portal만 남긴다. Open portal도 왜 합쳐지지 않았는지 볼 수 있어야 하므로
-	// 폐쇄 edge만 필터링하지 않는다. 모두 위 판정 루프에서 이미 계산된 값의 복사본이다.
+	// Only the portals touching the adopted island are kept. Open portals are kept too, since why something
+	// did not merge has to be visible, so closed edges are not filtered out. All of them are copies of
+	// values the test loop above already computed.
 	for (const FRopeWrapIslandPortal& Portal : EvaluatedPortals)
 	{
 		if (OutBones.Contains(Portal.BoneA) || OutBones.Contains(Portal.BoneB))

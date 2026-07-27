@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// URopeWielderComponent 입력/애니메이션/preview 수명주기 회귀 테스트.
+// Regression tests for URopeWielderComponent's input, animation and preview lifetimes.
 
 #include "Misc/AutomationTest.h"
 
@@ -1306,8 +1306,9 @@ bool FRopeWielderStaticSelfWrapIsNotTetherTest::RunTest(const FString& Parameter
 	return true;
 }
 
-// 손 스윙 상대 속도는 실제 DeltaTime으로 나누므로 프레임레이트에 무관하다 — 같은 손 이동(월드 V)이면
-// 15/20/30fps에서 같은 속도를 낸다(저프레임에서 속도가 죽던 회귀 방어). 상한 클램프·0 나눗셈 방어도 확인.
+// The hand swing's relative velocity is divided by the real delta time and is therefore independent of the frame
+// rate: the same hand movement in world space gives the same velocity at 15, 20 and 30 fps, which guards against the
+// velocity dying at a low frame rate. The upper clamp and the guard against dividing by zero are checked too.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeHandSwingVelocityFrameRateTest,
 	"DynamicRope.Wielder.HandSwingVelocityFrameRateConsistent",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1315,31 +1316,31 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeHandSwingVelocityFrameRateTest,
 bool FRopeHandSwingVelocityFrameRateTest::RunTest(const FString& Parameters)
 {
 	const FTransform Identity = FTransform::Identity;
-	const FVector V(300.0f, 0.0f, 0.0f);   // 목표 월드 손 속도 cm/s (상한 2000 아래)
+	const FVector V(300.0f, 0.0f, 0.0f);   // The target world hand velocity in cm/s, below the limit of 2000.
 	constexpr float MaxSpeed = 2000.0f;
 
 	for (float F : { 15.0f, 20.0f, 30.0f })
 	{
 		const float Dt = 1.0f / F;
-		const FVector Cur = V * Dt;         // dt 동안의 변위(= V*dt), Prev=0
+		const FVector Cur = V * Dt;         // The displacement over the delta, being the velocity times the delta, with the previous position at zero.
 		const FVector Vel = FRopeWielderComponentTestSeam::ComputeHandSwingVelocityWorld(
 			FVector::ZeroVector, Cur, Dt, Identity, MaxSpeed);
-		TestTrue(FString::Printf(TEXT("%.0ffps 속도 프레임레이트 무관(≈V)"), F), Vel.Equals(V, 0.1f));
+		TestTrue(FString::Printf(TEXT("the velocity at %.0f fps is frame-rate independent and about V"), F), Vel.Equals(V, 0.1f));
 	}
 
-	// 상한: 3000cm/s 상당 변위는 MaxSpeed로 클램프.
+	// The upper limit: a displacement equivalent to 3000 cm/s is clamped to the maximum speed.
 	{
 		const float Dt = 1.0f / 30.0f;
 		const FVector Vel = FRopeWielderComponentTestSeam::ComputeHandSwingVelocityWorld(
 			FVector::ZeroVector, FVector(3000.0f, 0.0f, 0.0f) * Dt, Dt, Identity, MaxSpeed);
-		TestEqual(TEXT("상한 클램프=2000"), static_cast<float>(Vel.Size()), 2000.0f, 0.5f);
+		TestEqual(TEXT("the upper clamp is 2000"), static_cast<float>(Vel.Size()), 2000.0f, 0.5f);
 	}
 
-	// dt≈0 방어: 0 반환(0 나눗셈 없음).
+	// The guard for a delta of about zero: it returns zero, with no division by zero.
 	{
 		const FVector Vel = FRopeWielderComponentTestSeam::ComputeHandSwingVelocityWorld(
 			FVector::ZeroVector, FVector(10.0f, 0.0f, 0.0f), 0.0f, Identity, MaxSpeed);
-		TestTrue(TEXT("dt=0이면 0"), Vel.IsNearlyZero());
+		TestTrue(TEXT("a delta of zero gives zero"), Vel.IsNearlyZero());
 	}
 	return true;
 }

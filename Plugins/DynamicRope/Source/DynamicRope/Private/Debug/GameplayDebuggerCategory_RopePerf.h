@@ -1,17 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 'RopePerf' 게임플레이 디버거 카테고리 — 월드 전역 로프 perf/스로틀 개관. 기존 'Rope' 카테고리가 디버그
-// 액터 한 명의 로프를 깊게 그리는 데 반해, 이쪽은 월드의 **모든** 활성 로프를 훑어 프레임 부하를 한눈에
-// 집계한다(안 보고 있는 로프 — 드래곤 등 — 의 perf 문제를 잡는 용도). 'stat DynamicRope' 그룹과 같은 값을
-// per-rope 라인 + 상단 집계로 HUD에 얹는다.
+// The 'RopePerf' gameplay debugger category, a world-wide overview of rope performance and throttling. Where the
+// 'Rope' category draws one debug actor's ropes in depth, this one walks every active rope in the world and
+// aggregates the frame load at a glance, which is what catches a performance problem on a rope nobody is looking at.
+// It puts the same values as the 'stat DynamicRope' group onto the HUD as per-rope lines plus a summary at the top.
 //
-// 로프 목록은 URopeSimSubsystem::GetRegisteredRopes() 하나에서 온다 — 이 화면이 집계하는 "이번 프레임
-// 실제로 틱되는 로프"의 정의가 곧 그 등록 목록이라, 월드를 따로 훑으면 서브시스템이 안 도는 로프까지
-// 섞여 프레임 부하와 어긋난다.
-// 목록을 얻은 뒤의 값은 전부 URopeComponent의 public 게터(GetPhase/GetNodeCount/IsSleeping/
-// GetSolverLODScale/IsGpuSteppedThisFrame/WasSolvedThisFrame/bUseWorldGDF/GetCenterlinePositions)에서
-// 라이브로 읽는다 — 스냅샷 의존은 없다. 카메라 거리는 OwnerPC 카메라에서 직접 산출.
-// WITH_GAMEPLAY_DEBUGGER가 꺼진 빌드(shipping 등)에서는 전체가 컴파일에서 제외된다.
+// The rope list comes from URopeSimSubsystem::GetRegisteredRopes() alone: the definition of the "ropes actually
+// ticked this frame" that this screen aggregates is exactly that registration list, and walking the world separately
+// would mix in ropes the subsystem never drives, which would disagree with the frame load.
+// Once the list is obtained, every value is read live from URopeComponent's public getters: GetPhase, GetNodeCount,
+// IsSleeping, GetSolverLODScale, IsGpuSteppedThisFrame, WasSolvedThisFrame, bUseWorldGDF and GetCenterlinePositions.
+// Nothing depends on a snapshot. The camera distance is derived directly from the owning player controller's camera.
+// The whole file is excluded from the compile in builds where WITH_GAMEPLAY_DEBUGGER is off, such as shipping.
 
 #pragma once
 
@@ -35,8 +35,9 @@ public:
 	static TSharedRef<FGameplayDebuggerCategory> MakeInstance();
 
 private:
-	// MakePoint는 16분할 와이어 구체라 마커 하나당 512 FBatchedLine을 만든다. 위치/색/픽셀 크기/번호만
-	// 복제하고 보는 클라이언트의 DrawData에서 DrawDebugPoint + DrawDebugString으로 그려 렌더 부하를 줄인다.
+	// MakePoint is a wire sphere of sixteen divisions and therefore produces 512 batched lines per marker. Only the
+	// position, colour, pixel size and number are replicated, and the viewing client draws them from its draw data
+	// with DrawDebugPoint and DrawDebugString, which reduces the render load.
 	struct FRepData
 	{
 		struct FMarker

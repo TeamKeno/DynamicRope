@@ -9,17 +9,19 @@
 // FComputeShaderUtils
 #include "RenderGraphUtils.h"
 #include "DataDrivenShaderPlatformInfo.h"
-// 'stat DynamicRope' 튜브 빌드 대역폭 계측(GFrameNumberRenderThread / SET_*_STAT). 그룹 선언은 모듈 공용 헤더.
+// Tube build bandwidth instrumentation for 'stat DynamicRope'. The stat group is declared in the module's shared header.
 #include "RenderingThread.h"
 #include "Stats/Stats.h"
 #include "RopeGPUStatGroup.h"
 
-// 링 버킷(스레드그룹 크기 == groupshared frame 배열 크기). 로프 1개 = 스레드그룹 1개라, NumRings 이상인 가장
-// 작은 버킷을 퍼뮤테이션으로 골라 idle 스레드를 줄인다. 최상단 512가 GPU 튜브 링 상한(Subdiv=3 기준 노드
-// ~170까지; 그 이상은 CPU 폴백). numthreads/groupshared는 .usf에서 ROPE_TUBE_MAX_RINGS로 스케일 —
-// 퍼뮤테이션이 그 define을 버킷 값으로 설정한다. groupshared 예산: 링당 5×float3=60B → 512링 = 30KB(<32KB).
+// The ring buckets, whose size is both the thread group size and the size of the groupshared frame array. One rope is
+// one thread group, so the smallest bucket at least as large as the ring count is selected as a permutation to reduce
+// idle threads. The largest, 512, is the GPU tube's ring limit, which covers roughly 170 nodes at a subdivision of 3;
+// anything larger falls back to the CPU. The thread count and the groupshared array scale from ROPE_TUBE_MAX_RINGS in
+// the shader, which the permutation sets to the bucket value. The groupshared budget is five float3 per ring, meaning
+// 60 bytes, so 512 rings is 30 KB, under the 32 KB limit.
 static constexpr int32 GRopeTubeRingBuckets[] = { 64, 128, 256, 512 };
-// 최상단 버킷 = GPU 튜브 링 상한(초과 시 CPU 폴백).
+// The largest bucket is the GPU tube's ring limit, beyond which it falls back to the CPU.
 static constexpr int32 ROPE_TUBE_MAX_RINGS_CAP = 512;
 
 int32 RopeGPU::TubeRingBucket(int32 NumRings)
@@ -28,7 +30,7 @@ int32 RopeGPU::TubeRingBucket(int32 NumRings)
 	{
 		if (NumRings <= Bucket) { return Bucket; }
 	}
-	// 상한 초과 → 호출자가 CPU 튜브로 폴백.
+	// Beyond the limit, so the caller falls back to the CPU tube.
 	return 0;
 }
 
@@ -54,7 +56,7 @@ public:
 	DECLARE_GLOBAL_SHADER(FRopeBuildTubeCS);
 	SHADER_USE_PARAMETER_STRUCT(FRopeBuildTubeCS, FGlobalShader);
 
-	// 링 버킷 = numthreads/groupshared 크기. 값이 곧 ROPE_TUBE_MAX_RINGS define으로 .usf에 전달된다.
+	// The ring bucket is the thread count and the groupshared size. The value is passed to the shader as ROPE_TUBE_MAX_RINGS.
 	class FRingBucket : SHADER_PERMUTATION_SPARSE_INT("ROPE_TUBE_MAX_RINGS", 64, 128, 256, 512);
 	using FPermutationDomain = TShaderPermutationDomain<FRingBucket>;
 
@@ -76,7 +78,7 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FRopeBuildTubeCS, "/Plugin/DynamicRope/Private/RopeBuildTube.usf", "RopeBuildTubeCS", SF_Compute);
 
-// B2-lite: resident PosBuf(StructuredBuffer<float4>, 월드)에서 직접 생성 + WorldToLocal 변환.
+// Builds directly from the resident world-space position buffer, applying the world-to-local transform.
 class FRopeBuildTubeResidentCS : public FGlobalShader
 {
 public:
@@ -108,39 +110,43 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FRopeBuildTubeResidentCS, "/Plugin/DynamicRope/Private/RopeBuildTube.usf", "RopeBuildTubeResidentCS", SF_Compute);
 
-// ── 'stat DynamicRopeGPU' — GPU 튜브 빌드 대역폭 ───────────────────────────────────────────────────
-// RopeGPUSolver.cpp가 같은 "DynamicRopeGPU" 그룹으로 솔버/충돌 업로드(GPU Upload/Frame *)를 계측하지만, 튜브
-// 중심선 업로드는 그 RunSteps 경로 밖 — 프록시(FRopeSceneProxy::BuildTubeGPU)별 렌더 커맨드라 거기서 빠진다.
-// 그래서 여기서 따로 잡는다. 그룹 선언은 RopeGPUStatGroup.h(모듈 공용, include guard)가 소유 — 개별 stat은
-// static이라 이 TU 로컬이다.
-// 비-resident 프레임에만 발생: 프록시가 CPU 중심선 미러(NumRings×float3)를 매 프레임 CenterlineBuffer로 올려
-// 컴퓨트가 읽는다(BuildTube_RenderThread). resident 프레임은 솔버 상주 PosBuf를 직접 읽어 업로드 0 — 그
-// 절약분을 Resident 카운터로 대비해 본다(resident 비율이 높을수록 이 대역폭은 0에 수렴).
+//~ 'stat DynamicRopeGPU' — GPU tube build bandwidth
+// RopeGPUSolver.cpp instruments the solver and collision uploads under the same "DynamicRopeGPU" group, but the tube
+// centreline upload is outside that path: it is a render command per proxy, in FRopeSceneProxy::BuildTubeGPU, and so
+// falls outside it. It is therefore measured separately here. The group declaration is owned by RopeGPUStatGroup.h,
+// shared across the module behind an include guard, while the individual stats are static and therefore local to this
+// translation unit.
+// The upload occurs on non-resident frames alone: the proxy uploads the CPU centreline mirror, one float3 per ring,
+// into the centreline buffer every frame for the compute pass to read. Resident frames read the solver's resident
+// position buffer directly and upload nothing, and that saving is read by comparing against the resident counter,
+// since the higher the resident proportion the closer this bandwidth is to zero.
 DECLARE_MEMORY_STAT(TEXT("GPU Tube Upload/Frame (Centerline)"), STAT_RopeGPU_TubeUpload, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Tube Builds/Frame"), STAT_RopeGPU_TubeBuilds, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Tube Resident Builds/Frame"), STAT_RopeGPU_TubeResidentBuilds, STATGROUP_DynamicRopeGPU);
 
-// GPU 타임라인 stat — 튜브 빌드 커널의 **실제 GPU 시간**('stat gpu' / ProfileGPU / Insights GPU 트랙). 위
-// 대역폭 카운터와 달리 이 그룹 HUD에는 안 나온다. 튜브 빌드는 RDG가 아니라 즉시 RHI 커맨드 리스트에 dispatch
-// 하므로(프록시별 렌더 커맨드) RDG_EVENT_SCOPE_STAT이 아니라 RHI_BREADCRUMB_EVENT_STAT을 쓴다 — 5.7에서
-// SCOPED_GPU_STAT은 no-op이다(자세한 버전 계약은 RopeGPUSolver.cpp의 같은 블록 주석 참조).
+// The GPU timeline stat, meaning the tube build kernel's actual GPU time as seen in 'stat gpu', ProfileGPU or the
+// Insights GPU track. Unlike the bandwidth counters above it does not appear on this group's HUD. The tube build
+// dispatches onto the immediate RHI command list rather than through RDG, being a render command per proxy, so it
+// uses RHI_BREADCRUMB_EVENT_STAT rather than RDG_EVENT_SCOPE_STAT; SCOPED_GPU_STAT is a no-op here. The version
+// contract is described in the matching comment block in RopeGPUSolver.cpp.
 DECLARE_GPU_STAT_NAMED(RopeGPUTube, TEXT("DynamicRope Tube"));
 
 #if STATS
-// 튜브 빌드는 로프(프록시)별 렌더 커맨드라 솔버 RunSteps 같은 단일 프레임 진입점이 없다. RT 프레임 번호가
-// 바뀌는 그 프레임 첫 빌드에서 직전 프레임 누산분을 stat에 밀어넣고 리셋하는 지연-플러시로 프레임당 값을
-// 만든다(프레임에 GPU 튜브 빌드가 아예 없으면 마지막 값이 유지되는 것도 솔버와 동일 — HUD 관례).
-static uint64 GRopeTubeUploadBytes = 0;    // 이번 프레임 중심선 업로드 바이트(비-resident 빌드 합)
-static uint32 GRopeTubeBuildCount = 0;     // 이번 프레임 GPU 튜브 빌드 수
-static uint32 GRopeTubeResidentCount = 0;  // 그중 resident(업로드 0) 빌드 수
-static uint32 GRopeTubeStatsFrame = 0;     // 마지막 플러시 시점의 RT 프레임 번호
+// The tube build is a render command per rope, meaning per proxy, so it has no single frame entry point as the
+// solver's RunSteps does. A per-frame value is produced by a deferred flush: the first build of a frame in which the
+// render thread frame number changed pushes the previous frame's accumulation into the stats and resets it. As with
+// the solver, a frame with no GPU tube build at all keeps the last value, which is the HUD convention.
+static uint64 GRopeTubeUploadBytes = 0;    // Centreline upload bytes this frame, summed over non-resident builds.
+static uint32 GRopeTubeBuildCount = 0;     // GPU tube builds this frame.
+static uint32 GRopeTubeResidentCount = 0;  // How many of those were resident, meaning they uploaded nothing.
+static uint32 GRopeTubeStatsFrame = 0;     // The render thread frame number at the last flush.
 
 static void RopeTube_AccumBuild(bool bResident, uint64 CenterlineBytes)
 {
 	const uint32 Frame = GFrameNumberRenderThread;
 	if (Frame != GRopeTubeStatsFrame)
 	{
-		// 프레임 경계 — 직전 프레임 누산분 publish 후 리셋.
+		// A frame boundary: publish the previous frame's accumulation and reset.
 		SET_MEMORY_STAT(STAT_RopeGPU_TubeUpload, GRopeTubeUploadBytes);
 		SET_DWORD_STAT(STAT_RopeGPU_TubeBuilds, GRopeTubeBuildCount);
 		SET_DWORD_STAT(STAT_RopeGPU_TubeResidentBuilds, GRopeTubeResidentCount);
@@ -168,7 +174,7 @@ void RopeGPU::BuildTube_RenderThread(
 	if (!InCenterlineSRV || !OutPositionsUAV || !OutTangentsUAV || !OutTexCoordsUAV
 		|| NumRings < 2 || Bucket == 0 || NumSides < 3)
 	{
-		// Bucket==0 = NumRings가 상한 초과 → 호출자가 CPU 폴백.
+		// A bucket of zero means the ring count is beyond the limit, so the caller falls back to the CPU.
 		return;
 	}
 
@@ -185,10 +191,10 @@ void RopeGPU::BuildTube_RenderThread(
 	Params.OutTangents  = OutTangentsUAV;
 	Params.OutTexCoords = OutTexCoordsUAV;
 
-	// 로프 1개 = 스레드그룹 1개(numthreads=버킷). UAV 배리어는 호출자(proxy)가 처리.
+	// One rope is one thread group, whose thread count is the bucket. The UAV barrier is the caller's, meaning the proxy's, responsibility.
 	RHI_BREADCRUMB_EVENT_STAT(RHICmdList, RopeGPUTube, "DynamicRope Tube");
 #if STATS
-	// 비-resident: 프록시가 이번 프레임 CenterlineBuffer에 올린 중심선(NumRings×float3)이 이 업로드 대역폭이다.
+	// Non-resident: the centreline the proxy uploaded into the centreline buffer this frame, one float3 per ring, is this upload bandwidth.
 	RopeTube_AccumBuild(/*bResident*/false, (uint64)NumRings * 3 * sizeof(float));
 #endif
 
@@ -210,7 +216,7 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 	if (!InResidentPositionsSRV || !OutPositionsUAV || !OutTangentsUAV || !OutTexCoordsUAV
 		|| NumRings < 2 || Bucket == 0 || NumSides < 3 || NumSrcNodes < 2)
 	{
-		// Bucket==0 = NumRings가 상한 초과 → 호출자가 CPU 폴백.
+		// A bucket of zero means the ring count is beyond the limit, so the caller falls back to the CPU.
 		return;
 	}
 
@@ -233,7 +239,7 @@ void RopeGPU::BuildTubeFromResident_RenderThread(
 
 	RHI_BREADCRUMB_EVENT_STAT(RHICmdList, RopeGPUTube, "DynamicRope Tube");
 #if STATS
-	// resident: 솔버 상주 PosBuf 직독 — CPU→GPU 중심선 업로드 없음(업로드 대역폭 0).
+	// Resident: it reads the solver's resident position buffer directly, so there is no centreline upload from the CPU and the upload bandwidth is zero.
 	RopeTube_AccumBuild(/*bResident*/true, 0);
 #endif
 

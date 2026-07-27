@@ -9,7 +9,7 @@
 #include "Collision/SDF/RopeSDFData.h"
 #include "Collision/SDF/RopeSDFCollider.h"
 
-// trilinear 샘플이 해석적 구 SDF와 일치하는가(표면 0, 안쪽 음수, 바깥 양수).
+// Whether a trilinear sample matches the analytic sphere SDF: zero at the surface, negative inside and positive outside.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFSamplerSphereTest,
 	"DynamicRope.SDF.SamplerMatchesAnalyticSphere",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -20,19 +20,19 @@ bool FRopeSDFSamplerSphereTest::RunTest(const FString& Parameters)
 		RopeSDFSynthetic::MakeSphere(FName("test"), FVector::ZeroVector, 20.0f, FIntVector(31), 10.0f);
 
 	TestTrue(TEXT("synthetic volume is baked"), V.IsBaked());
-	// 표면 (20,0,0) ~ 0
+	// The surface, at about zero.
 	TestTrue(TEXT("surface ~ 0"),
 		FMath::Abs(RopeSDFSampler::SampleTrilinear(V, FVector(20, 0, 0))) < 1.0f);
-	// 안쪽 (5,0,0) ~ -15
+	// Inside, at about minus fifteen.
 	TestTrue(TEXT("inside ~ -15"),
 		FMath::Abs(RopeSDFSampler::SampleTrilinear(V, FVector(5, 0, 0)) + 15.0f) < 1.5f);
-	// 바깥 (28,0,0) ~ +8
+	// Outside, at about plus eight.
 	TestTrue(TEXT("outside ~ +8"),
 		FMath::Abs(RopeSDFSampler::SampleTrilinear(V, FVector(28, 0, 0)) - 8.0f) < 1.5f);
 	return true;
 }
 
-// gradient가 표면에서 바깥쪽(+X)을 단위 벡터로 가리키는가(= Query 법선 계약).
+// Whether the gradient at the surface points outwards along positive X as a unit vector, which is the query normal contract.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFGradientTest,
 	"DynamicRope.SDF.GradientPointsOutward",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -75,17 +75,19 @@ bool FRopeSDFProjectionOutsideBoundsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 미러링(음수 스케일) 대상에서 질의 좌표와 법선이 모두 뒤집힌 축을 따라가는가.
-// 구를 원점에서 +X로 밀어 비대칭으로 만든 뒤 X축을 뒤집으면, 월드에서 표면은 -X쪽에 생기고 바깥
-// 법선도 -X여야 한다. 부호를 잃으면 법선이 +X(안쪽)로 나오고 — FRopeContact 계약 위반이라 로프가
-// 몸 안으로 빨려 들어간다 — GPU 쪽은 역스케일이 max() 클램프에 걸려 좌표가 1e6배로 폭발한다.
+// Whether both the query coordinate and the normal follow the flipped axis on a mirrored, meaning negatively scaled,
+// target. Pushing the sphere from the origin along positive X makes it asymmetric, so after flipping the X axis the
+// world surface appears on the negative X side and the outward normal has to be negative X too. Losing the sign gives
+// a normal along positive X, pointing inwards, which violates the FRopeContact contract and sucks the rope into the
+// body, while on the GPU side the inverse scale is caught by a maximum clamp and the coordinate explodes by a factor
+// of a million.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFNegativeScaleTest,
 	"DynamicRope.SDF.NegativeScaleMirrorsQueryAndNormal",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeSDFNegativeScaleTest::RunTest(const FString& Parameters)
 {
-	// 로컬 중심 (10,0,0), 반지름 20 → 로컬 표면은 x=30. X 미러 후 월드 표면은 x=-30.
+	// A local centre at ten along X with a radius of twenty puts the local surface at x = 30, so after mirroring X the world surface is at x = -30.
 	const FRopeBoneSDFVolume V =
 		RopeSDFSynthetic::MakeSphere(FName("test"), FVector(10, 0, 0), 20.0f, FIntVector(31), 10.0f);
 
@@ -96,11 +98,11 @@ bool FRopeSDFNegativeScaleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("mirrored surface is hit on the -X side"), Hit.bHit);
 	TestTrue(TEXT("outward normal follows the mirrored axis (-X)"),
 		FVector::DotProduct(Hit.Normal, FVector(-1, 0, 0)) > 0.9);
-	// 표면 위 질의라 침투는 노드 반지름 전체(거리 ~0).
+	// The query is on the surface, so the penetration is the whole node radius at a distance of about zero.
 	TestTrue(TEXT("penetration equals the node radius at the surface"),
 		FMath::Abs(Hit.Penetration - 2.0f) < 0.5f);
 
-	// 미러되지 않은 +X쪽에는 아무것도 없다(좌표 부호를 잃으면 여기가 맞았다).
+	// There is nothing on the unmirrored positive X side, which is where a lost coordinate sign would have hit.
 	const FRopeContact Miss = Collider.Query(FVector(30.0, 0.0, 0.0), 2.0f);
 	TestFalse(TEXT("nothing on the unmirrored +X side"), Miss.bHit);
 	return true;
@@ -123,21 +125,22 @@ bool FRopeSDFProjectionBoundaryGradientTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 최적화된 trilinear가 "느리지만 명백한" 참조 구현과 *비트 단위로* 같은가.
+// Whether the optimised trilinear sample is bit-for-bit identical to a slow but obvious reference implementation.
 //
-// 샘플러는 탭마다 하던 디코드/인덱싱 상수 계산을 호출당 1회로 접고, 격자 내부 셀에서는 축별 클램프를
-// 건너뛰는 고속 경로를 탄다. 어느 쪽도 값을 바꾸면 안 된다 — 참조 구현은 공개 API(DecodeDistance)만
-// 써서 최적화 전 코드를 그대로 옮긴 것이고, 여기서는 근사 비교가 아니라 == 로 못박는다.
+// The sampler folds the decode and indexing constants it used to compute per tap into one computation per call, and
+// takes a fast path skipping the per-axis clamp for cells inside the grid. Neither may change a value: the reference
+// implementation uses the public API alone, meaning DecodeDistance, and is a transcription of the code before the
+// optimisation, so this is pinned with equality rather than an approximate comparison.
 //
-// 특히 고속/느린 경로의 분기점인 격자 Max 면을 반드시 지나도록 샘플 좌표를 잡는다(경계에서 갈리면
-// 본 이음매에서 법선이 튀는 회귀 #4가 재발한다).
+// In particular the sample coordinates are chosen to pass through the grid's maximum faces, which is where the fast
+// and slow paths diverge; a difference at the boundary is what makes normals jump at bone seams.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFSamplerBitExactTest,
 	"DynamicRope.SDF.SamplerMatchesReferenceExactly",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeSDFSamplerBitExactTest::RunTest(const FString& Parameters)
 {
-	// 최적화 이전 구현 그대로(공개 DecodeDistance 사용).
+	// Exactly as the implementation was before the optimisation, using the public DecodeDistance.
 	auto RefSampleAt = [](const FRopeBoneSDFVolume& V, int32 X, int32 Y, int32 Z) -> float
 	{
 		X = FMath::Clamp(X, 0, V.Resolution.X - 1);
@@ -177,7 +180,7 @@ bool FRopeSDFSamplerBitExactTest::RunTest(const FString& Parameters)
 		return FMath::Lerp(FMath::Lerp(X00, X10, Fy), FMath::Lerp(X01, X11, Fy), Fz);
 	};
 
-	// 짝수/홀수 해상도 둘 다(고속 경로 인덱싱이 스트라이드에 의존한다).
+	// Both an even and an odd resolution, since the fast path's indexing depends on the stride.
 	const FRopeBoneSDFVolume Volumes[] = {
 		RopeSDFSynthetic::MakeSphere(FName("odd"),  FVector::ZeroVector, 20.0f, FIntVector(31), 10.0f),
 		RopeSDFSynthetic::MakeSphere(FName("even"), FVector::ZeroVector, 14.0f, FIntVector(16), 6.0f),
@@ -191,7 +194,7 @@ bool FRopeSDFSamplerBitExactTest::RunTest(const FString& Parameters)
 		const FVector Min = V.LocalBounds.Min;
 		const FVector Size = V.LocalBounds.GetSize();
 
-		// 격자를 촘촘히 훑되 t=0 / t=1(Min·Max 면)을 정확히 포함시킨다 → 느린(클램프) 경로를 반드시 탄다.
+		// Walks the grid finely while including exactly t = 0 and t = 1, the minimum and maximum faces, which forces the slow clamping path.
 		constexpr int32 Steps = 17;
 		for (int32 ix = 0; ix <= Steps; ++ix)
 		for (int32 iy = 0; iy <= Steps; ++iy)
@@ -219,7 +222,7 @@ bool FRopeSDFSamplerBitExactTest::RunTest(const FString& Parameters)
 			}
 		}
 
-		// 볼륨 밖(클램프 경로)도 확인한다.
+	// Outside the volume, on the clamping path, is checked too.
 		for (const FVector& Outside : { FVector(1000, 0, 0), FVector(-1000, -1000, -1000), Min - Size })
 		{
 			const float Got = RopeSDFSampler::SampleTrilinear(V, Outside);
@@ -236,30 +239,32 @@ bool FRopeSDFSamplerBitExactTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// SampleGradient의 격자 경계 폴백(#4, CL 463)을 직접 못박는다.
+// Pins the grid boundary fallback in SampleGradient directly.
 //
-// 축당 순방향 차분은 +H 프로브가 그리드 Max 면을 벗어나면 SampleTrilinear가 경계면으로 클램프해
-// 그 축 차분이 0으로 죽는다 → 법선에서 그 축 성분이 통째로 사라져 본 이음매(절단면) 밖에서 법선이
-// 접선 방향으로 눕고, 노드가 표면 밖이 아니라 옆으로 밀린다. CL 463이 그 축만 후방 차분으로
-// 대체해 고쳤지만 그 수정을 직접 검증하는 테스트가 없었다.
+// With a per-axis forward difference, a probe at plus H leaving the grid's maximum face makes the trilinear sample
+// clamp to the boundary face and that axis's difference dies at zero, so the axis component disappears from the
+// normal entirely. Outside a bone seam, meaning a cut face, the normal then lies along the tangent and the node is
+// pushed sideways rather than out of the surface. The fix replaces that axis alone with a backward difference, and
+// there was no test verifying it directly.
 //
-// 임계값은 폴백이 빠졌을 때 반드시 실패하도록 잡았다: 축이 죽으면 gradient가 축퇴해 샘플러가 +Z로
-// 폴백하는데, 모서리에서 참 법선은 (1,1,1)/sqrt(3)이라 +Z와의 내적이 0.577이다. 그래서 0.9를 쓴다
-// (0.5로 두면 폴백 벡터도 통과해 버려 테스트가 아무것도 못 잡는다).
+// The threshold is chosen so the test necessarily fails without the fallback: a dead axis makes the gradient
+// degenerate and the sampler falls back to positive Z, while at a corner the true normal is (1,1,1)/sqrt(3), whose
+// dot product with positive Z is 0.577. Hence 0.9, since 0.5 would let the fallback vector pass and the test would
+// catch nothing.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSDFGradientAtGridMaxFaceTest,
 	"DynamicRope.SDF.GradientAtGridMaxFace",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeSDFGradientAtGridMaxFaceTest::RunTest(const FString& Parameters)
 {
-	// MakeSphere는 양자화 밴드를 데이터 최댓값에 맞추므로(클램프 없음) 경계/모서리에서도 거리가
-	// 포화되지 않는다 = 여기서 재는 gradient는 실제 정보를 담고 있다.
+	// MakeSphere fits the quantization band to the data's maximum with no clamping, so the distance does not saturate
+	// even at a boundary or corner, which means the gradient measured here carries real information.
 	const FRopeBoneSDFVolume V =
 		RopeSDFSynthetic::MakeSphere(FName("face"), FVector::ZeroVector, 20.0f, FIntVector(31), 10.0f);
 	TestTrue(TEXT("synthetic volume is baked"), V.IsBaked());
 	const FVector Max = V.LocalBounds.Max;
 
-	// (1) +X Max 면 위(정확히 경계). 참 법선 = +X. 폴백이 없으면 X 성분이 죽어 실패한다.
+	// One: exactly on the positive X maximum face, where the true normal is positive X. With no fallback the X component dies and this fails.
 	{
 		const FVector N = RopeSDFSampler::SampleGradient(V, FVector(Max.X, 0.0, 0.0));
 		TestTrue(FString::Printf(TEXT("+X max-face normal is unit (len=%.4f)"), N.Size()),
@@ -268,7 +273,7 @@ bool FRopeSDFGradientAtGridMaxFaceTest::RunTest(const FString& Parameters)
 			FVector::DotProduct(N, FVector::XAxisVector) > 0.9);
 	}
 
-	// (2) 세 축이 동시에 Max인 모서리 — 세 축 모두 폴백을 타야 한다.
+	// Two: a corner where all three axes are at their maximum, so all three have to take the fallback.
 	{
 		const FVector N = RopeSDFSampler::SampleGradient(V, Max);
 		const FVector Truth = Max.GetSafeNormal();
@@ -278,7 +283,7 @@ bool FRopeSDFGradientAtGridMaxFaceTest::RunTest(const FString& Parameters)
 			FVector::DotProduct(N, Truth) > 0.9);
 	}
 
-	// (3) Min 면은 +H 프로브가 경계 안이라 순방향 차분 그대로 — 폴백과 무관하게 정상이어야 한다(대조).
+	// Three: on a minimum face the plus H probe stays inside the boundary, so the forward difference stands and this has to pass regardless of the fallback, as a control.
 	{
 		const FVector N = RopeSDFSampler::SampleGradient(V, FVector(V.LocalBounds.Min.X, 0.0, 0.0));
 		TestTrue(FString::Printf(TEXT("-X min-face normal points -X (n=%s)"), *N.ToString()),

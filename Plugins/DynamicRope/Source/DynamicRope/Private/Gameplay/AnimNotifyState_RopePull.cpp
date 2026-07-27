@@ -7,7 +7,7 @@
 
 namespace
 {
-	// AnimNotify_RopeThrow와 같은 해석: notify를 받은 메시의 owner에서 wielder를 찾는다.
+	// Resolved the same way as AnimNotify_RopeThrow: the wielder is found on the owner of the mesh that received the notify.
 	URopeWielderComponent* ResolveWielder(USkeletalMeshComponent* MeshComp)
 	{
 		if (!MeshComp)
@@ -26,7 +26,7 @@ void UAnimNotifyState_RopePull::NotifyBegin(USkeletalMeshComponent* MeshComp, UA
 
 	if (URopeWielderComponent* Wielder = ResolveWielder(MeshComp))
 	{
-		// StopPull 뒤 늦게 도착한 이전 몽타주의 NotifyBegin이 Pull을 다시 켜지 못하게 한다.
+		// Stops a NotifyBegin from a previous montage, arriving late after StopPull, from switching the pull back on.
 		if (Wielder->IsPullArmed() && Wielder->IsPullEngaged())
 		{
 			Wielder->StartPullNow(bIgnoreTautGate);
@@ -37,11 +37,12 @@ void UAnimNotifyState_RopePull::NotifyBegin(USkeletalMeshComponent* MeshComp, UA
 void UAnimNotifyState_RopePull::NotifyEnd(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
 	const FAnimNotifyEventReference& EventReference)
 {
-	// 몽타주 인터럽트/블렌드아웃에도 엔진이 활성 state의 NotifyEnd를 호출한다 — 창의 해제는 이 한 곳이다.
-	// (입력을 뗀 경로는 StopPull이 몽타주를 멈추고, 그 몽타주 정지가 다시 여기로 들어와 힘을 끈다.)
+	// The engine calls the active state's NotifyEnd even when the montage is interrupted or blends out, so releasing
+	// the window happens in this one place.
+	// (On the path where the input is released, StopPull stops the montage, and that montage stopping comes back through here and turns the force off.)
 	if (URopeWielderComponent* Wielder = ResolveWielder(MeshComp))
 	{
-		// 취소된 window의 늦은 NotifyEnd는 이미 StopPull이 끝낸 상태를 다시 건드리지 않는다.
+	// A late NotifyEnd from a cancelled window does not touch the state StopPull has already finished with.
 		if (Wielder->IsPullEngaged())
 		{
 			Wielder->StopPullNow();

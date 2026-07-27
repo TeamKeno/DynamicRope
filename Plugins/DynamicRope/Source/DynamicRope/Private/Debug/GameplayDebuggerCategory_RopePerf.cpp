@@ -11,7 +11,7 @@
 #include "GameFramework/Pawn.h"
 #include "Camera/PlayerCameraManager.h"
 #include "DrawDebugHelpers.h"
-// 등록된 로프 목록(GetRegisteredRopes) — 이 화면의 단일 소스
+// The registered rope list, which is the single source for this screen.
 #include "Subsystem/RopeSimSubsystem.h"
 
 namespace
@@ -32,25 +32,27 @@ namespace
 		}
 	}
 
-	// per-rope 한 줄에 필요한 라이브 스냅(정렬용으로 미리 모은다).
+	// The live snapshot each per-rope line needs, gathered up front so the lines can be sorted.
 	struct FPerfRow
 	{
 		ERopePhase Phase = ERopePhase::Free;
 		int32 Nodes = 0;
-		bool bGpuStepped = false;   // 이번 프레임 GPU 상주 step
-		bool bCpuSolved = false;    // 솔브했지만 GPU 아님 = CPU 폴백
-		bool bSleeping = false;     // Free 정지 슬립
-		bool bGdf = false;          // bUseWorldGDF 설정
+		bool bGpuStepped = false;   // Stepped this frame with resident GPU state.
+		bool bCpuSolved = false;    // Solved, but not on the GPU, meaning the CPU fallback.
+		bool bSleeping = false;     // Asleep because it is Free and at rest.
+		bool bGdf = false;          // Configured to use the world global distance field.
 		float LodScale = 1.0f;
-		float Distance = -1.0f;     // 카메라→앵커(cm), 카메라 없으면 -1
+		float Distance = -1.0f;     // From the camera to the anchor, in centimetres, or minus one with no camera.
 		FVector Anchor = FVector::ZeroVector;
-		// centerline이 아직 없으면(시드 전/노드 0) Anchor는 의미 없는 0벡터다. 그대로 마커를 그리면
-		// 월드 원점에 있지도 않은 로프의 #n 라벨이 찍혀(여럿이면 겹쳐 쌓여) 엉뚱한 곳을 찾게 만든다.
+		// With no centreline yet, meaning before seeding or with zero nodes, the anchor is a meaningless zero vector.
+		// Drawing the marker anyway stamps a numbered label at the world origin for a rope that is not there, and
+		// several of them stack up, sending the reader to the wrong place.
 		bool bHasAnchor = false;
 	};
 
-	// 포인트는 화면 픽셀 크기다. 가까운 마커는 잘 보이게 유지하되, 원거리에서 여러 로프가 모일 때 점이
-	// 라벨을 덮지 않도록 5m→100m 구간에서 6px→3px로 줄인다. 번호 라벨은 거리와 무관하게 항상 표시한다.
+	// The point size is in screen pixels. Near markers stay large enough to see, while over the range from 5 m to
+	// 100 m the size drops from six to three pixels so that the dots do not cover the labels when several ropes
+	// converge at a distance. The number label is always shown, regardless of distance.
 	float MarkerPixelSize(float Distance)
 	{
 		if (Distance < 0.0f)
@@ -65,10 +67,10 @@ namespace
 
 FGameplayDebuggerCategory_RopePerf::FGameplayDebuggerCategory_RopePerf()
 {
-	// 디버그 액터 없이도 월드 전역을 그린다.
+	// The whole world is drawn with no debug actor required.
 	bShowOnlyWithDebugActor = false;
 
-	// ResetOnTick(기본) — 수집 틱마다 비워지므로 CollectData에서 따로 Reset하지 않는다.
+	// Resetting on tick, the default, clears it every collection tick, so CollectData does not reset separately.
 	SetDataPackReplication<FRepData>(&DataPack);
 }
 
@@ -109,7 +111,7 @@ void FGameplayDebuggerCategory_RopePerf::DrawData(
 	{
 		DrawDebugPoint(World, Marker.Location, Marker.PixelSize, Marker.Color,
 			false, -1.0f, SDPG_Foreground);
-		// 리스트↔월드 대응 번호는 원거리에서도 식별할 수 있도록 겹침 여부와 무관하게 모두 표시한다.
+	// The numbers correlating the list with the world are all shown, whether or not they overlap, so they can be identified at a distance.
 		DrawDebugString(World, Marker.Location + FVector(0.0, 0.0, 10.0),
 			FString::Printf(TEXT("#%d"), Marker.DisplayIndex), nullptr, Marker.Color,
 			0.0f, true, 1.0f);
@@ -125,7 +127,7 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 		return;
 	}
 
-	// 카메라 위치(거리 산출용): 카메라 매니저 우선, 없으면 폰. 둘 다 없으면 거리 생략.
+	// The camera position, used to compute the distance: the camera manager first, then the pawn. With neither, the distance is omitted.
 	bool bHasCam = false;
 	FVector CamLoc = FVector::ZeroVector;
 	if (OwnerPC)
@@ -142,14 +144,15 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 		}
 	}
 
-	// 서브시스템의 등록 로프 목록을 훑어 라이브 값 수집(아래 GetRegisteredRopes — 사유는 그 옆 주석).
+	// Walks the subsystem's registered rope list to collect live values; see GetRegisteredRopes below for why.
 	TArray<FPerfRow> Rows;
 	int32 NumGpu = 0, NumCpu = 0, NumSleeping = 0, NumGdf = 0;
 	int64 TotalParticles = 0;
-	// 서브시스템의 등록 목록을 읽는다 — 이 화면이 세는 것은 "월드에 있는 로프"가 아니라 **이 서브시스템이
-	// 실제로 구동하는 로프**다(등록 안 된 로프는 틱되지 않아 비용도 0이라 성능 화면의 분모로 맞지 않다).
-	// 전체 UObject 스캔을 쓰면 로프 수와 무관하게 비싸고, 성능을 재려고 켠 화면이 스스로 프레임을
-	// 무겁게 만들어 측정 대상을 왜곡한다.
+	// It reads the subsystem's registered list because what this screen counts is not the ropes in the world but the
+	// ropes this subsystem actually drives: an unregistered rope is never ticked and costs nothing, which makes it
+	// the wrong denominator for a performance screen.
+	// A full UObject scan would be expensive regardless of the rope count, and a screen opened to measure performance
+	// would weigh down the frame itself and distort what it is measuring.
 	const URopeSimSubsystem* SimSub = URopeSimSubsystem::Get(World);
 	if (!SimSub)
 	{
@@ -158,7 +161,7 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 	}
 	for (const TObjectPtr<URopeComponent>& RopePtr : SimSub->GetRegisteredRopes())
 	{
-		// 파괴 후 GC 대기 중인 항목이 섞일 수 있다(무효 정리는 Tick 프레임 경계에서만 돈다).
+		// Entries destroyed and awaiting collection can be present, since invalid ones are cleaned up only at a tick frame boundary.
 		const URopeComponent* Rope = RopePtr.Get();
 		if (!IsValid(Rope))
 		{
@@ -196,9 +199,10 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 	const int32 NumRopes = Rows.Num();
 	const int32 NumIdle = FMath::Max(0, NumRopes - NumGpu - NumCpu);
 
-	// 상단 집계. registered = 서브시스템에 등록돼 이번 프레임 구동된 로프 수이지 월드에 배치된 수가 아니다
-	// — 등록 전(스폰 직후 BeginPlay 전)이거나 등록에 실패한 로프는 틱되지 않으므로 여기 없다.
-	// 그 구성(gpu + cpu + idle)은 ‘stat DynamicRope’의 Active와 같은 정의다.
+	// The summary at the top. The registered count is the number of ropes registered with the subsystem and driven
+	// this frame rather than the number placed in the world: a rope before registration, meaning just spawned and
+	// before BeginPlay, or one whose registration failed is never ticked and does not appear here.
+	// Its breakdown into GPU, CPU and idle uses the same definitions as Active in 'stat DynamicRope'.
 	AddTextLine(FString::Printf(
 		TEXT("{white}Rope Perf (world){grey}  registered=%d  {green}gpu=%d {red}cpu=%d {grey}idle=%d  {cyan}sleeping=%d"),
 		NumRopes, NumGpu, NumCpu, NumIdle, NumSleeping));
@@ -213,7 +217,7 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 		return;
 	}
 
-	// 정렬: 솔브 중(비용 있는) 로프를 위로, 그 안에서 노드 수 내림차순 — 상한을 넘겨 잘려도 비싼 로프가 남는다.
+	// Sorting puts the ropes being solved, which is where the cost is, at the top, and within those orders by node count descending, so that the expensive ropes survive being cut off at the limit.
 	Rows.Sort([](const FPerfRow& A, const FPerfRow& B)
 	{
 		const bool bActiveA = A.bGpuStepped || A.bCpuSolved;
@@ -225,20 +229,21 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 		return A.Nodes > B.Nodes;
 	});
 
-	// per-rope 한 줄 + 월드에서 로프 위치를 찾도록 앵커에 phase색 점 + '#i' 라벨(리스트↔월드 상관).
+	// One line per rope, plus a phase-coloured dot at the anchor with a '#i' label, so a rope can be located in the world and correlated with the list.
 	const int32 MaxRows = FMath::Min(40, Rows.Num());
 	for (int32 i = 0; i < MaxRows; ++i)
 	{
 		const FPerfRow& R = Rows[i];
 
-		// 솔브 경로 토큰: 실제 수행한 작업을 먼저 낸다 — 상단 gpu/cpu 카운터와 같은 기준이라야 집계와
-		// 행이 어긋나지 않는다. SLEEP은 아무 일도 안 한 프레임에만 경로로 쓴다. 슬립은 솔브 후 Finalize에서
-		// 전이할 수 있어(솔브 O + 슬립 O), 그 경우엔 아래 asleep로 별도 표기한다.
+		// The solve path token states what was actually done first, on the same basis as the GPU and CPU counters
+		// above, so that the summary and the rows cannot disagree. SLEEP is used as the path only on a frame where
+		// nothing at all happened: a rope can go to sleep in Finalize after solving, meaning it both solved and
+		// slept, and that case is marked separately as asleep below.
 		const TCHAR* Solve = R.bGpuStepped ? TEXT("{green}gpu")
 			: (R.bCpuSolved ? TEXT("{red}cpu")
 			: (R.bSleeping ? TEXT("{cyan}SLEEP") : TEXT("{grey}idle")));
-		// 이번 프레임 솔브했는데 곧 슬립으로 전이한 로프 — sleeping 카운터에도 잡히므로 상태를 덧붙여,
-		// gpu/cpu로 집계된 행이 화면에서 SLEEP으로만 보이지 않게 한다.
+		// A rope that solved this frame but then went to sleep. It is counted by the sleeping counter as well, so the
+		// state is appended to keep a row counted as GPU or CPU from appearing on screen as SLEEP alone.
 		const FString Asleep = (R.bSleeping && (R.bGpuStepped || R.bCpuSolved))
 			? FString(TEXT(" {cyan}asleep")) : FString();
 
@@ -252,8 +257,8 @@ void FGameplayDebuggerCategory_RopePerf::CollectData(APlayerController* OwnerPC,
 			i + 1, PerfPhaseName(R.Phase), R.Nodes, Solve, *Asleep, *Lod,
 			R.bGdf ? TEXT("{green}gdf") : TEXT("{grey}gdf-off"), *Dist));
 
-		// 앵커 마커(월드↔리스트 상관용). 슬립=cyan, 솔브 중=흰, idle=회색.
-		// centerline이 없는 로프는 찍을 위치가 없다 — 0벡터로 그리면 월드 원점에 유령 마커가 생긴다.
+		// The anchor marker, correlating the world with the list: cyan for asleep, white for solving and grey for idle.
+		// A rope with no centreline has nowhere to draw: plotting the zero vector would leave a ghost marker at the world origin.
 		if (R.bHasAnchor)
 		{
 			const FColor MarkerColor = R.bSleeping ? FColor::Cyan

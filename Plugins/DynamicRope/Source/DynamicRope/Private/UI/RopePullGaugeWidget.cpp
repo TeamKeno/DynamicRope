@@ -9,7 +9,7 @@
 URopePullGaugeWidget::URopePullGaugeWidget(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	// 입력을 먹지 않는 순수 표시 위젯.
+	// A pure display widget that never consumes input.
 	SetVisibility(ESlateVisibility::HitTestInvisible);
 }
 
@@ -21,7 +21,7 @@ void URopePullGaugeWidget::NativeConstruct()
 
 void URopePullGaugeWidget::NativeDestruct()
 {
-	// 위젯이 먼저 사라져도 wielder 델리게이트에 죽은 핸들러가 남지 않게 한다.
+	// Ensures no dead handler is left on the wielder's delegates if the widget disappears first.
 	BindWielder(nullptr);
 	Super::NativeDestruct();
 }
@@ -69,7 +69,7 @@ void URopePullGaugeWidget::HandlePullArmedChanged(bool bArmed)
 {
 	if (!bArmed)
 	{
-		// 해제되면 다음 장전이 0에서 다시 차오르도록 표시 상태를 되돌린다.
+		// On release the display state is reset so the next arming fills again from zero.
 		DisplayProgress = 0.0f;
 		TimeSinceEngage = BIG_NUMBER;
 	}
@@ -84,7 +84,7 @@ void URopePullGaugeWidget::HandlePullEngagedChanged(bool bEngaged, float Tension
 	}
 	else
 	{
-		// 재무장(wrap 해제) — 팝을 끄지 않으면 발동 표시가 켜진 채 남는다.
+		// Rearming, meaning the wrap was released. Without turning the pop off, the engaged indicator would stay lit.
 		TimeSinceEngage = BIG_NUMBER;
 	}
 	OnPullEngagedStateChanged(bEngaged, Tension);
@@ -112,12 +112,12 @@ void URopePullGaugeWidget::NativeTick(const FGeometry& MyGeometry, float InDelta
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 
-	// 폰 교체/지연 빙의 대비 재해석(무효일 때만).
+	// Re-resolved in case the pawn was replaced or possession was deferred, and only when invalid.
 	ResolveWielder();
 
 	TimeSinceEngage += InDeltaTime;
 
-	// 장력은 프레임마다 떨리므로 표시값만 부드럽게 따라가게 한다(판정값은 건드리지 않는다).
+	// The tension jitters from frame to frame, so the displayed value alone follows it smoothly; the value used for decisions is untouched.
 	const float Target = GetProgress();
 	DisplayProgress = (ProgressInterpSpeed > 0.0f)
 		? FMath::FInterpTo(DisplayProgress, Target, InDeltaTime, ProgressInterpSpeed)
@@ -133,7 +133,7 @@ void URopePullGaugeWidget::DrawArc(const FGeometry& Geometry, FSlateWindowElemen
 		return;
 	}
 
-	// 12시에서 시계 방향으로 채운다(게이지의 통념).
+	// Fills clockwise from twelve o'clock, as a gauge is conventionally read.
 	const int32 SegmentCount = FMath::Max(1, FMath::CeilToInt(Segments * Fraction));
 	const float TotalAngle = 2.0f * PI * Fraction;
 
@@ -155,7 +155,7 @@ int32 URopePullGaugeWidget::NativePaint(const FPaintArgs& Args, const FGeometry&
 {
 	const int32 Result = Super::NativePaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
 
-	// ① 해제 상태에서는 아무것도 그리지 않는다 — 평상시 화면을 비워 둔다.
+	// Nothing is drawn while disarmed, which leaves the screen clear in normal play.
 	if (!bDrawBuiltInVisuals || !IsPullArmed())
 	{
 		return Result;
@@ -164,20 +164,20 @@ int32 URopePullGaugeWidget::NativePaint(const FPaintArgs& Args, const FGeometry&
 	const FVector2D LocalSize = AllottedGeometry.GetLocalSize();
 	const FVector2D Center(LocalSize.X * CenterAnchor.X, LocalSize.Y * CenterAnchor.Y);
 
-	// 발동 팝: 짧은 시간 동안 반경을 키웠다 되돌린다(사건임을 알리는 한 방).
+	// The engagement pop briefly grows the radius and returns it, as a single beat announcing the event.
 	float PopScale = 1.0f;
 	if (EngagePopTime > 0.0f && TimeSinceEngage < EngagePopTime)
 	{
 		const float T = TimeSinceEngage / EngagePopTime;
-		// 0에서 최대, 끝에서 1로 수렴.
+		// From zero to the maximum, converging on one at the end.
 		PopScale = FMath::Lerp(EngagePopScale, 1.0f, FMath::Sin(T * PI * 0.5f));
 	}
 	const float DrawRadius = Radius * PopScale;
 
-	// 배경 링(남은 몫) — 얼마나 더 당겨야 하는지가 보이도록 항상 완전한 원으로 깐다.
+	// The background ring, being the remainder, is always laid down as a full circle so it is clear how much further there is to pull.
 	DrawArc(AllottedGeometry, OutDrawElements, LayerId + 1, Center, DrawRadius, 1.0f, TrackColor);
 
-	// 진행 호. 색은 대기색 → 발동색 보간이라, 다 차기 전에도 "가까워지고 있다"가 색으로 읽힌다.
+	// The progress arc. Its colour interpolates from the waiting colour to the engaged colour, so that approaching the threshold is readable from the colour before it fills.
 	const float Shown = IsPullEngaged() ? 1.0f : FMath::Clamp(DisplayProgress, 0.0f, 1.0f);
 	const FLinearColor ArcColor = FMath::Lerp(ArmedColor, EngagedColor, Shown);
 	DrawArc(AllottedGeometry, OutDrawElements, LayerId + 2, Center, DrawRadius, Shown, ArcColor);

@@ -1,15 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 랙돌 전환 매트릭스 단위 테스트(빌드 점검2 피드백 #1).
-// 랙돌 전환 자체는 플러그인 밖(게임 코드)에서 일어나지만, 그 순간 로프가 지켜야 할 계약은
-// 로직 레벨에서 월드 없이 검증할 수 있다:
-//   (a) Hold: 본 트랜스폼이 한 프레임에 크게 점프해도 속도 주입 없이(Prev=Pos) 그대로 추종한다.
-//   (b) Hold: 감긴 대상이 파괴되면(weak null) 폴백 없이 false — 호출자가 release.
-//   (c) 솔버 마찰: 표면속도 스파이크의 드래그가 Coulomb 한계 μ·λ·w로 클램프된다(스파이크 크기 비비례).
-//   (d) 감지기: 상대운동 평가가 표면속도를 빼고 계산한다 + 스파이크가 캡처 게이트에서 안 걸리는
-//       현재 동작의 특성 고정(방어선은 Contacting 체류 + 후보 소실 dismiss라는 문서화).
-// (지배 본 스왑 시 dwell 재시작은 런타임 FRopeContactTracker 담당 — DecideWrap 제거로 이 파일에서 빠짐.)
-// 실제 물리 본(IsSimulatingPhysics 분기), 부분 랙돌, 캡슐 재빌드는 PIE 체크리스트로 커버한다.
+// Unit tests for the ragdoll transition matrix.
+// Going limp happens outside the plugin, in game code, but the contracts the rope has to honour at that
+// moment can be verified at the logic level with no world:
+//   (a) Hold follows a bone transform that jumps a long way in one frame, with no velocity injected, by
+//       writing the previous position equal to the current one.
+//   (b) Hold returns false with no fallback once the wrapped target is destroyed and the weak pointer is
+//       null, so the caller releases.
+//   (c) Solver friction: the drag from a surface velocity spike is clamped by the Coulomb limit and is
+//       therefore not proportional to the size of the spike.
+//   (d) The detector: relative motion evaluation subtracts the surface velocity, and a spike does not
+//       block the capture gate, which pins the current behaviour and documents that the real defences are
+//       the dwell in Contacting and dismissal when the candidates disappear.
+// Restarting the dwell when the dominant bone changes belongs to the runtime contact tracker.
+// Real physics bodies, partial ragdolls and capsule rebuilds are covered by the play-in-editor checklist.
 
 #include "Misc/AutomationTest.h"
 
@@ -25,10 +29,10 @@
 namespace
 {
 	/**
-	 * 트랜스폼을 움직일 수 있는 mock mesh. 스켈레탈 에셋이 없으므로 GetSocketTransform(NAME_None)이
-	 * 경고 없이 컴포넌트 트랜스폼을 반환한다 — 테스트에서는 컴포넌트 트랜스폼이 "본" 역할을 한다
-	 * (랙돌 포즈 팝 = 이 트랜스폼의 한 프레임 점프로 모델링). 미등록 컴포넌트라 MoveComponent 경로를
-	 * 타지 않도록 _Direct + UpdateComponentToWorld로 직접 옮긴다.
+	 * A mock mesh whose transform can be moved. With no skeletal asset, the socket lookup returns the
+	 * component transform with no warning, so in these tests the component transform plays the part of the
+	 * bone; a ragdoll pose pop is modelled as that transform jumping in one frame. The component is
+	 * unregistered, so it is moved directly rather than through the move path.
 	 */
 	USkeletalMeshComponent* MakeMovableMockMesh()
 	{
@@ -43,7 +47,7 @@ namespace
 		Mesh->UpdateComponentToWorld();
 	}
 
-	/** 본 이름 없이(=컴포넌트 트랜스폼 추종) 노드 하나를 latch한 wrap을 시작한다. */
+	/** Starts a wrap with one node latched with no bone name, which follows the component transform. */
 	void BeginMockWrap(FRopeWrapController& Wrap, const FRopeSimState& Sim,
 		USkeletalMeshComponent* Mesh, int32 NodeIndex, FRopeNodeOverrideFrame& OutFrame)
 	{
@@ -58,16 +62,16 @@ namespace
 	}
 }
 
-// (a) 랙돌 전환 프레임: 본(=mock 트랜스폼)이 한 프레임에 크게 점프해도 Hold가 노드를
-// 새 본 위치에 정확히 재배치하고, 속도는 0으로 쓴다(PrevFromPosition) — 점프가 솔버로
-// 속도로 주입되지 않는 것이 랙돌 전환 시 로프가 튀지 않는 근거다.
+// (a) The ragdoll transition frame: even when the bone, meaning the mock transform, jumps a long way in one
+// frame, Hold replaces the node exactly at the new bone position and writes zero velocity. That the jump is
+// not injected into the solver as velocity is why the rope does not snap on going limp.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeRagdollHoldFollowsJumpTest,
 	"DynamicRope.Ragdoll.HoldFollowsBoneJumpWithZeroVelocity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeRagdollHoldFollowsJumpTest::RunTest(const FString& Parameters)
 {
-	// 노드 x = 0,20,...,140. 노드 3(x=60)을 latch. mesh는 원점(identity)에서 시작.
+	// The nodes are evenly spaced along X, one of them is latched, and the mesh starts at the identity.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	USkeletalMeshComponent* Mesh = MakeMovableMockMesh();
 	const FVector NodeWorld = Sim.Positions[3];
@@ -77,13 +81,13 @@ bool FRopeRagdollHoldFollowsJumpTest::RunTest(const FString& Parameters)
 	BeginMockWrap(Wrap, Sim, Mesh, 3, BeginFrame);
 	TestTrue(TEXT("wrap holds after BeginWrap"), Wrap.State.IsWrapped());
 
-	// 점프 전 Hold: 앵커는 begin 시점 위치 그대로.
+	// Before the jump, the anchor stays where it was when the wrap began.
 	FRopeNodeOverrideFrame HoldFrame;
 	TestTrue(TEXT("Hold succeeds before jump"), Wrap.Hold(Sim, 0.016f, HoldFrame));
 	TestTrue(TEXT("node stays at latch position before jump"),
 		HoldFrame.Positions[3].Equals(NodeWorld, 0.01f));
 
-	// 랙돌 포즈 팝: 본이 한 프레임에 +Z 500cm 점프.
+	// The ragdoll pose pop: the bone jumps a long way upwards in a single frame.
 	const FVector Jump(0.0f, 0.0f, 500.0f);
 	TeleportMockMesh(Mesh, Jump);
 	TestTrue(TEXT("mock mesh transform actually moved (test rig sanity)"),
@@ -91,20 +95,20 @@ bool FRopeRagdollHoldFollowsJumpTest::RunTest(const FString& Parameters)
 
 	FRopeNodeOverrideFrame JumpFrame;
 	TestTrue(TEXT("Hold succeeds on jump frame"), Wrap.Hold(Sim, 0.016f, JumpFrame));
-	// 노드는 본을 따라 정확히 점프량만큼 이동.
+	// The node moves with the bone by exactly that amount.
 	TestTrue(FString::Printf(TEXT("node follows bone jump exactly (%s)"), *JumpFrame.Positions[3].ToCompactString()),
 		JumpFrame.Positions[3].Equals(NodeWorld + Jump, 0.01f));
-	// 속도 0 기록(PrevFromPosition): 점프가 Verlet 속도로 주입되지 않는다.
+	// Zero velocity is recorded, so the jump is not injected as a Verlet velocity.
 	TestTrue(TEXT("jump is written with zero velocity (PrevFromPosition)"),
 		(JumpFrame.Flags[3] & RopeNodeOverride::PrevFromPosition) != 0);
-	// 노드는 여전히 logic 소유(InvMass 0).
+	// The node is still owned by logic, with an inverse mass of zero.
 	TestTrue(TEXT("node stays logic-owned (InvMass override 0)"),
 		(JumpFrame.Flags[3] & RopeNodeOverride::InvMass) != 0 && JumpFrame.InvMass[3] == 0.0f);
 	return true;
 }
 
-// (b) 감긴 대상 소실: 랙돌 사망 연출 등으로 mesh가 파괴되면 Hold가 false를 반환해
-// 호출자(component)가 release하게 한다 — dangling 역참조/엉뚱한 위치로 끌기 없음.
+// (b) Losing the wrapped target: when the mesh is destroyed, as by a ragdoll death effect, Hold returns
+// false so the caller releases, with no dangling dereference and no dragging towards a wrong position.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeRagdollHoldMeshLossTest,
 	"DynamicRope.Ragdoll.HoldReleasesOnMeshLoss",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -121,7 +125,7 @@ bool FRopeRagdollHoldMeshLossTest::RunTest(const FString& Parameters)
 	FRopeNodeOverrideFrame HoldFrame;
 	TestTrue(TEXT("Hold succeeds while mesh alive"), Wrap.Hold(Sim, 0.016f, HoldFrame));
 
-	// 대상 파괴(가비지 마킹 → weak Get() null).
+	// Destroy the target, which marks it for collection and makes the weak pointer null.
 	Mesh->MarkAsGarbage();
 	FRopeNodeOverrideFrame LostFrame;
 	TestFalse(TEXT("Hold returns false after mesh loss (caller must release)"),
@@ -130,18 +134,20 @@ bool FRopeRagdollHoldMeshLossTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// (c) 전이 프레임 표면속도 스파이크: 랙돌 켜지는 프레임에 본이 튀면 캡슐 prev 끝점 대비
-// 이동이 커져 SurfaceVelocity가 스파이크한다. 마찰 드래그는 Coulomb 한계 μ·λ·w로 클램프되므로
-// 로프가 스파이크 속도에 비례해 쓸려가면 안 된다 — 스파이크를 10배로 키워도 프레임 변위가
-// 거의 그대로여야 한다(클램프 활성 증명).
+// (c) A surface velocity spike on the transition frame: when the bone jumps as the ragdoll is enabled, its
+// movement relative to the capsule's previous endpoints is large and the surface velocity spikes. The
+// friction drag is clamped by the Coulomb limit, so the rope must not be swept along in proportion to that
+// spike: multiplying the spike tenfold has to leave the per-frame displacement almost unchanged, which
+// proves the clamp is active.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeRagdollFrictionClampTest,
 	"DynamicRope.Ragdoll.FrictionClampBoundsSurfaceVelocitySpike",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeRagdollFrictionClampTest::RunTest(const FString& Parameters)
 {
-	// 구(중심 (60,0,-200), r200): 상단 표면이 z=0 근방 → z=0 직선 로프의 x=60 주변 노드가
-	// CollisionRadius(2) 안으로 침투해 접촉·마찰 활성. 중력이 로프를 표면에 눌러 λ가 쌓인다.
+	// A sphere whose upper surface sits near the rope's plane, so the nodes around it penetrate within the
+	// collision radius and contact and friction engage. Gravity presses the rope onto the surface and builds
+	// up the constraint force.
 	auto MaxXDisplacementAfterOneStep = [](float SpikeSpeed) -> float
 	{
 		FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
@@ -149,12 +155,13 @@ bool FRopeRagdollFrictionClampTest::RunTest(const FString& Parameters)
 
 		USkeletalMeshComponent* Mesh = NewObject<USkeletalMeshComponent>();
 		RopeTest::FSphereMockCollider Body(FVector(60.0f, 0.0f, -200.0f), 200.0f, FName("body"), Mesh);
-		// 포즈 팝: 접선(+X) 스파이크
+		// The pose pop, as a tangential spike.
 		Body.SurfaceVelocity = FVector(SpikeSpeed, 0.0f, 0.0f);
 		TArray<IRopeCollider*> Colliders = { &Body };
 
-		// Friction 0.5(기본)/중력 -Z. CollisionRadius는 명시 2 — 구조체 기본은 0=auto로 바뀌었고
-		// auto 해석은 컴포넌트 경계에만 있다(직접 솔버 호출은 명시 필수).
+		// With the default friction and gravity. The collision radius is stated explicitly, because the
+		// struct default became automatic and automatic resolution exists only at the component boundary, so
+		// a direct solver call has to state it.
 		FRopeSolverConfig Config;
 		Config.CollisionRadius = 2.0f;
 		FRopeXPBDSolver Solver;
@@ -169,36 +176,40 @@ bool FRopeRagdollFrictionClampTest::RunTest(const FString& Parameters)
 		return RopeTest::AnyNaN(Sim) ? -1.0f : MaxDisp;
 	};
 
-	// 600 m/s 스파이크: 무클램프 전량 전달이면 프레임당 60000/60 = 1000cm 쓸림.
+	// A large spike: with no clamp and full transfer it would sweep the rope a long way per frame.
 	const float Disp1x = MaxXDisplacementAfterOneStep(60000.0f);
-	// 10배 스파이크(6 km/s): 무클램프면 변위도 ~10배.
+	// A tenfold spike, which with no clamp would displace it roughly ten times as far.
 	const float Disp10x = MaxXDisplacementAfterOneStep(600000.0f);
 
 	TestTrue(TEXT("no NaN with 1x spike"), Disp1x >= 0.0f);
 	TestTrue(TEXT("no NaN with 10x spike"), Disp10x >= 0.0f);
-	// 스모크 상한: 표면 이동량(1000cm)의 절반도 전달되지 않아야 한다(클램프가 없으면 ~1000).
+	// The smoke bound: less than half of the surface's own movement may be transferred; with no clamp it
+	// would be nearly all of it.
 	TestTrue(FString::Printf(TEXT("drag is far below full surface transport (%.1fcm < 500cm)"), Disp1x),
 		Disp1x < 500.0f);
-	// 핵심 성질: 클램프 한계는 μ·λ·w(스파이크와 무관) → 스파이크 10배에도 변위는 거의 동일해야 한다.
+	// The essential property: the clamp limit depends on the constraint force rather than the spike, so a
+	// tenfold spike has to leave the displacement almost identical.
 	TestTrue(FString::Printf(TEXT("drag does not scale with spike (1x=%.2fcm, 10x=%.2fcm)"), Disp1x, Disp10x),
 		Disp10x < Disp1x * 2.0f + 1.0f);
 	return true;
 }
 
-// (d) 상대운동 평가와 캡처의 현재 계약 고정:
-//  - EvaluateRelativeMotion은 로프 프레임 변위(cm/프레임)에서 표면속도(cm/s)를 dt로 환산해 뺀다.
-//    정지 로프 + 움직이는 표면이면 상대 접선 속도 = 표면 속도 × dt(cm/프레임 단위 — 움직이는 본
-//    위에서도 "스침" 판정이 가능한 근거). dt 환산 누락으로 ~1/dt배 과대였던 버그를 여기서 고정한다.
-//  - EvaluateCapture는 추가 품질 필터를 적용하지 않아 스파이크가 캡처를 막지 않는다(특성 고정).
-//    전이 프레임 오탐의 실제 방어선은 Contacting 체류(WrapDecisionTime)와 후보 소실 dismiss,
-//    그리고 위 (c)의 dwell 재시작이다.
+// (d) Pinning the current contract of relative motion evaluation and capture:
+//  - Relative motion subtracts the surface velocity from the rope's per-frame displacement after
+//    converting it by the delta. A stationary rope on a moving surface therefore has a relative tangential
+//    speed of the surface speed times the delta, which is what makes grazing detectable even on a moving
+//    bone. Omitting that conversion overstated it by the reciprocal of the delta, and this pins the fix.
+//  - Capture applies no additional quality filter, so a spike does not prevent a capture, which is pinned
+//    as current behaviour. The real defences against a false positive on the transition frame are the dwell
+//    in Contacting, dismissal when the candidates disappear, and the clamp in (c).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeRagdollRelativeMotionTest,
 	"DynamicRope.Ragdoll.RelativeMotionSubtractsSurfaceVelocity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeRagdollRelativeMotionTest::RunTest(const FString& Parameters)
 {
-	// 정지 로프(Prev == Pos), 표면은 +X 500으로 이동 중. 법선 +Z → 표면 운동은 전부 접선 성분.
+	// A stationary rope, with the previous positions equal to the current ones, on a surface moving along X.
+	// The normal is vertical, so the surface motion is entirely tangential.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	USkeletalMeshComponent* Mesh = NewObject<USkeletalMeshComponent>();
 
@@ -218,7 +229,7 @@ bool FRopeRagdollRelativeMotionTest::RunTest(const FString& Parameters)
 
 	FRopeFlightContactDetector::FParams Params;
 	Params.MinLatchNodes = 2;
-	// 단위 환산 검증을 위해 substep dt 명시(0.02s).
+	// The substep delta is stated explicitly to verify the unit conversion.
 	Params.SubstepDeltaTime = 0.02f;
 
 	TArray<FRopeContactCandidate> Candidates;
@@ -227,14 +238,16 @@ bool FRopeRagdollRelativeMotionTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("candidate stays valid (mock mesh has no bone axis to judge miss cone)"),
 		Candidates[0].bValid);
-	// 정지 로프 + 표면 500cm/s → 상대 접선 속도 = 500 × substep dt(0.02) = 10(cm/s를 그대로 빼면 500이
-	// 나온다 — 그 단위 버그의 회귀 방지가 이 단언의 존재 이유).
+	// A stationary rope on a surface moving at a given speed gives a relative tangential speed of that speed
+	// times the substep delta; subtracting the surface velocity without converting it would give the raw
+	// speed instead, and preventing that regression is why this assertion exists.
 	TestTrue(FString::Printf(TEXT("relative tangential speed equals surface speed x dt for a resting rope (%.2f)"),
 		Candidates[0].RelativeTangentialSpeed),
 		FMath::IsNearlyEqual(Candidates[0].RelativeTangentialSpeed, 10.0f, 0.05f));
 
-	// 캡처 특성 고정: 표면속도 스파이크(60000)가 있어도 MinLatchNodes만 차면 캡처된다.
-	// 추가 품질 필터를 도입할 때는 스파이크 컷 기준과 함께 이 단언을 갱신할 것.
+	// Pinning the capture behaviour: even with a surface velocity spike, meeting the minimum latch node
+	// count is enough to capture.
+	// Any future quality filter has to update this assertion along with its spike cut-off.
 	TArray<FRopeContactCandidate> SpikeCandidates;
 	SpikeCandidates.Add(MakeSpikeCandidate(3, 60000.0f));
 	SpikeCandidates.Add(MakeSpikeCandidate(4, 60000.0f));

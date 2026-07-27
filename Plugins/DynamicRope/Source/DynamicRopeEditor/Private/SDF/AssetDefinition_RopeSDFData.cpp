@@ -30,8 +30,9 @@ TConstArrayView<FAssetCategoryPath> UAssetDefinition_RopeSDFData::GetAssetCatego
 
 EAssetCommandResult UAssetDefinition_RopeSDFData::OpenAssets(const FAssetOpenArgs& OpenArgs) const
 {
-	// 오써링 탭은 단일 인스턴스이므로 다중 선택이어도 첫 에셋만 연다(나머지를 열 곳이 없다).
-	// 에셋 프로퍼티(SourceMesh/Bone Volumes) 확인·편집은 패널 내장 디테일 뷰가 담당한다.
+	// The authoring tab is a single instance, so even with a multiple selection only the first asset is opened, since
+	// there is nowhere to open the rest. Inspecting and editing the asset's properties, its source mesh and bone
+	// volumes, is the job of the details view built into the panel.
 	const TArray<URopeSDFData*> Objects = OpenArgs.LoadObjects<URopeSDFData>();
 	if (Objects.Num() > 0)
 	{

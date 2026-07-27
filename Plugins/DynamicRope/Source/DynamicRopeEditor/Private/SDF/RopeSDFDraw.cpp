@@ -10,7 +10,7 @@
 
 namespace
 {
-	// 정규화 좌표(각 0~1)를 본 로컬 위치로 변환.
+	// Converts normalized coordinates, each from zero to one, into a bone-local position.
 	FORCEINLINE FVector LocalFromNorm(const FBox& Local, double Tx, double Ty, double Tz)
 	{
 		const FVector Mn = Local.Min;
@@ -18,7 +18,7 @@ namespace
 		return FVector(Mn.X + Sz.X * Tx, Mn.Y + Sz.Y * Ty, Mn.Z + Sz.Z * Tz);
 	}
 
-	// 발산형 heatmap: 음(안)=빨강, 0=흰, 양(밖)=파랑. Scale(cm)에서 포화.
+	// A diverging heatmap: negative, meaning inside, is red, zero is white and positive, meaning outside, is blue, saturating at the scale in centimetres.
 	FLinearColor HeatColor(float D, float Scale)
 	{
 		const float T = FMath::Clamp(D / FMath::Max(Scale, KINDA_SMALL_NUMBER), -1.0f, 1.0f);
@@ -27,8 +27,9 @@ namespace
 			: FMath::Lerp(FLinearColor::White, FLinearColor::Red, -T);
 	}
 
-	// 볼륨 비대칭 밴드에서 포화(클램프된 placeholder) 여부: 바깥 D >= +NBOuter 또는 안쪽 D <= -NBInner.
-	// 그 영역은 실제 거리/방향 정보가 없다. 범위(Inner+Outer)가 무효면 판정 비활성(false).
+	// Whether a sample is saturated, meaning a clamped placeholder, against the volume's asymmetric band: outside at
+	// or beyond the outer narrow band, or inside at or beyond the inner one. Those regions carry no real distance or
+	// direction information. The test is disabled, returning false, if the band range is invalid.
 	FORCEINLINE bool IsSaturatedSample(const FRopeBoneSDFVolume& V, float D)
 	{
 		const float NBIn = V.NarrowBandInner;
@@ -100,9 +101,10 @@ void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVol
 				{
 					continue;
 				}
-				// 포화(바깥 +NBOuter / 안쪽 -NBInner 도달) 샘플은 클램프된 placeholder라 스킵 — Band 최댓값에서
-				// 바깥 plateau가 통째로 들어와 박스를 채우며 튀는 현상을 막는다(안쪽은 자동 밴드가 내부를 덮어
-				// 최심점만 해당). 밴드 무효면 스킵 비활성.
+				// Saturated samples, having reached the outer or inner narrow band, are clamped placeholders and are
+				// skipped, which stops the entire outer plateau being pulled in at the band's maximum and filling the
+				// box. On the inside the automatic band covers the interior, so only the deepest point is affected.
+				// Skipping is disabled if the band is invalid.
 				if (IsSaturatedSample(V, D))
 				{
 					continue;
@@ -111,7 +113,7 @@ void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVol
 					Mn.X + Sz.X * (static_cast<double>(X) / (NX - 1)),
 					Mn.Y + Sz.Y * (static_cast<double>(Y) / (NY - 1)),
 					Mn.Z + Sz.Z * (static_cast<double>(Z) / (NZ - 1)));
-				// slice heatmap(HeatColor)과 동일 규약: 안(음)=빨강, 밖(양)=파랑, ≈0=흰색.
+				// The same convention as the slice heatmap: inside, being negative, is red, outside, being positive, is blue, and near zero is white.
 				const FLinearColor C = (D < -0.01f) ? FLinearColor::Red
 					: (D > 0.01f) ? FLinearColor(0.0f, 0.4f, 1.0f)
 					: FLinearColor::White;
@@ -124,7 +126,7 @@ void RopeSDFDraw::DrawVoxels(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVol
 void RopeSDFDraw::DrawSlice(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolume& V, const FTransform& Xform,
 	ERopeSDFSliceAxis Axis, float Pos01, int32 Res, float Scale)
 {
-	// 포화(바깥 +NBOuter / 안쪽 -NBInner 도달) 샘플용 흐린 회색 — 무의미 plateau를 유의미 밴드와 시각적으로 분리한다.
+	// A dim grey for saturated samples, having reached the outer or inner narrow band, which separates the meaningless plateau visually from the meaningful band.
 	static const FLinearColor SaturatedColor(0.15f, 0.15f, 0.15f);
 	Res = FMath::Max(2, Res);
 	for (int32 I = 0; I < Res; ++I)
@@ -143,8 +145,9 @@ void RopeSDFDraw::DrawSlice(FPrimitiveDrawInterface* PDI, const FRopeBoneSDFVolu
 			}
 			const FVector L = LocalFromNorm(V.LocalBounds, Tx, Ty, Tz);
 			const float D = RopeSDFSampler::SampleTrilinear(V, L);
-			// 포화(바깥 +NBOuter / 안쪽 -NBInner)된 샘플은 실제 거리 정보가 없는 상수 plateau → 회색으로 그려
-			// 유의미 밴드(표면·연속장·내부)와 구분한다. 밴드 무효면 기존대로 전부 heatmap.
+			// Saturated samples, at the outer or inner narrow band, are a constant plateau with no real distance
+			// information, so they are drawn grey to distinguish them from the meaningful band covering the surface,
+			// the continuous field and the interior. With an invalid band everything is drawn as a heatmap as before.
 			const FLinearColor C = IsSaturatedSample(V, D) ? SaturatedColor : HeatColor(D, Scale);
 			PDI->DrawPoint(Xform.TransformPosition(L), C, 5.0f, SDPG_World);
 		}
@@ -161,7 +164,7 @@ void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDF
 	{
 		return;
 	}
-	// 축당 ~6개로 스트라이드(빽빽함 방지).
+	// Strided to about six per axis, to avoid crowding.
 	const int32 SX = FMath::Max(1, (NX - 1) / 6);
 	const int32 SY = FMath::Max(1, (NY - 1) / 6);
 	const int32 SZ = FMath::Max(1, (NZ - 1) / 6);
@@ -181,8 +184,9 @@ void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDF
 				{
 					continue;
 				}
-				// 포화(바깥 +NBOuter / 안쪽 -NBInner 도달) 샘플은 방향 정보가 없으므로(평탄=up 폴백, 경계=노이즈)
-				// 스킵한다. 밴드 무효면 스킵 비활성, 기존대로 그린다.
+				// Saturated samples, having reached the outer or inner narrow band, carry no direction information,
+				// being flat, which falls back to the up vector, or noisy at the boundary, so they are skipped. With
+				// an invalid band skipping is disabled and they are drawn as before.
 				if (IsSaturatedSample(V, D))
 				{
 					continue;
@@ -192,8 +196,9 @@ void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDF
 					static_cast<double>(Y) / (NY - 1),
 					static_cast<double>(Z) / (NZ - 1));
 				const FVector G = RopeSDFSampler::SampleGradient(V, L);
-				// 머리 달린 화살표로 그려 push-out(바깥) 방향이 보이게 한다. +X축을 그라디언트 방향으로
-				// 회전시킨 행렬을 만들고 샘플 위치를 원점으로 둔다(스케일 비균등 대비 NoScale 변환).
+				// Drawn as an arrow with a head so the push-out direction, meaning outwards, is visible. A matrix
+				// rotating the positive X axis onto the gradient direction is built with the sample position as its
+				// origin, using a no-scale transform in case the scale is non-uniform.
 				const FVector WorldDir = Xform.TransformVectorNoScale(G).GetSafeNormal();
 				if (WorldDir.IsNearlyZero())
 				{
@@ -202,7 +207,7 @@ void RopeSDFDraw::DrawGradients(FPrimitiveDrawInterface* PDI, const FRopeBoneSDF
 				FMatrix ArrowToWorld = FRotationMatrix::MakeFromX(WorldDir);
 				ArrowToWorld.SetOrigin(Xform.TransformPosition(L));
 				DrawDirectionalArrow(PDI, ArrowToWorld, FLinearColor::Green,
-					Length /*길이(cm)*/, Length * 0.05f /*화살촉 크기*/, SDPG_World, 0.2f /*두께*/);
+					Length /*Length in centimetres*/, Length * 0.05f /*Arrowhead size*/, SDPG_World, 0.2f /*Thickness*/);
 			}
 		}
 	}

@@ -5,21 +5,24 @@
 
 namespace
 {
-	// 샘플 규약: 그리드 노드는 LocalBounds를 Min..Max 포함으로 균등 분할한다. 노드 i의 정규화 좌표는
-	// i/(Res-1), 따라서 첫 노드=Min, 마지막 노드=Max. 베이커(B3)도 반드시 이 규약을 따라야 한다.
+	// The sampling convention: the grid nodes divide the local bounds evenly from the minimum to the maximum
+	// inclusive. Node i has a normalized coordinate of i/(Res-1), so the first node is the minimum and the last is
+	// the maximum. The baker must follow the same convention.
 
 	/**
-	 * 볼륨 1개의 디코드/인덱싱 상수를 미리 뽑아 둔 뷰.
+	 * A view holding a single volume's decode and indexing constants, extracted in advance.
 	 *
-	 * 기존에는 탭 하나마다 FRopeBoneSDFVolume::DecodeDistance가 QuantRange() 재계산, BytesPerCode() 분기,
-	 * Range/MaxCode 나눗셈, Distances.IsValidIndex() 경계검사를 다시 했다. trilinear 1회가 8탭이고
-	 * SampleGradient는 trilinear를 4회 부르므로 접촉 1회당 40탭 — 전부 같은 볼륨에 대한 같은 계산이다.
-	 * 그 상수들을 샘플 진입 시 1회만 만들어 돌려 쓴다.
+	 * Previously every tap had FRopeBoneSDFVolume::DecodeDistance recompute the quantization range, branch on the
+	 * bytes per code, divide by the range and the maximum code, and bounds-check the distance array again. One
+	 * trilinear sample is eight taps and SampleGradient calls trilinear four times, giving forty taps per contact,
+	 * all of them the same computation on the same volume. Those constants are built once on entry and reused.
 	 *
-	 * 값은 한 비트도 바뀌지 않는다: 나눗셈 Range/MaxCodeF는 결정적이라 1회 계산이든 8회 계산이든 같은
-	 * float이고, `- NarrowBandInner`를 `+ (-NarrowBandInner)`로 쓴 것도 IEEE754에서 동일하다.
-	 * 경계검사를 생략할 수 있는 근거는 IsBaked()다 — Distances.Num() == ResX*ResY*ResZ*BytesPerCode를
-	 * 보장하므로, 축별로 [0,Res-1]에 갇힌 인덱스는 항상 유효하다. 공개 진입점은 모두 IsBaked()를 먼저 본다.
+	 * Not a single bit of the value changes: the division of the range by the maximum code is deterministic and
+	 * gives the same float whether computed once or eight times, and writing a subtraction as an addition of the
+	 * negation is identical under IEEE 754.
+	 * The bounds check can be omitted because IsBaked() guarantees the distance count equals the product of the three
+	 * resolutions and the bytes per code, so an index clamped to the range of each axis is always valid. Every public
+	 * entry point checks IsBaked() first.
 	 */
 	struct FVolumeReader
 	{
@@ -27,11 +30,11 @@ namespace
 		int32 ResX = 0;
 		int32 ResY = 0;
 		int32 ResZ = 0;
-		/** 인덱싱 스트라이드(= ResX, ResX*ResY). 탭마다 곱셈을 되풀이하지 않으려고 뽑아 둔다. */
+		/** The indexing strides, being the X resolution and the product of the X and Y resolutions, extracted to avoid repeating the multiplication per tap. */
 		int32 StrideY = 0;
 		int32 StrideZ = 0;
 		int32 Bpc = 1;
-		/** 코드 → cm 선형 복원: Code * DecodeScale + DecodeBias (DecodeDistance와 동일 식). */
+		/** The linear restoration from a code to centimetres, being the code times the scale plus the bias, which is the same expression as DecodeDistance. */
 		float DecodeScale = 0.0f;
 		float DecodeBias = 0.0f;
 
@@ -49,20 +52,20 @@ namespace
 			DecodeScale = V.QuantRange() / MaxCodeF;
 		}
 
-		/** 복셀 인덱스 → cm. 인덱스가 유효하다는 전제(IsBaked + 축별 clamp)라 경계검사 없음. */
+		/** A voxel index to centimetres. It assumes the index is valid, being baked and clamped per axis, so there is no bounds check. */
 		FORCEINLINE float Decode(int32 Index) const
 		{
 			const int32 Base = Index * Bpc;
 			uint32 Code = Data[Base];
 			if (Bpc >= 2)
 			{
-				// 리틀엔디안.
+				// Little-endian.
 				Code |= static_cast<uint32>(Data[Base + 1]) << 8;
 			}
 			return static_cast<float>(Code) * DecodeScale + DecodeBias;
 		}
 
-		/** 격자 밖 좌표를 경계면으로 클램프해 읽는다(그리드 Max 면에 정확히 걸친 탭 전용 경로). */
+		/** Reads a coordinate outside the grid by clamping it to the boundary face, on the path taken by taps landing exactly on the grid's maximum face. */
 		FORCEINLINE float FetchClamped(int32 X, int32 Y, int32 Z) const
 		{
 			X = FMath::Clamp(X, 0, ResX - 1);
@@ -82,7 +85,7 @@ namespace
 		return T * (Res - 1);
 	}
 
-	/** 리더를 이미 만든 뒤의 trilinear 본체. SampleGradient처럼 한 볼륨을 여러 번 찌르는 쪽이 재사용한다. */
+	/** The body of the trilinear sample once a reader has been built, reused by callers such as SampleGradient that probe one volume several times. */
 	float SampleTrilinearWith(const FVolumeReader& R, const FRopeBoneSDFVolume& V, const FVector& LocalPos)
 	{
 		const FVector Min = V.LocalBounds.Min;
@@ -100,9 +103,10 @@ namespace
 		const float Fz = static_cast<float>(Gz - Z0);
 
 		float C000, C100, C010, C110, C001, C101, C011, C111;
-		// 고속 경로: 셀이 격자 내부면 +1 탭이 범위를 못 넘으므로 축별 클램프(8탭 × 3축)를 통째로 생략하고
-		// 코너 인덱스를 스트라이드 오프셋으로 바로 짚는다. 클램프가 실제로 무는 경우는 GridCoord가 정확히
-		// Res-1을 뱉는 격자 Max 면뿐이라, 아래 느린 경로는 거의 타지 않는다.
+		// The fast path: when the cell is inside the grid a tap one further along cannot leave the range, so the
+		// per-axis clamp, eight taps across three axes, is skipped entirely and the corner index is addressed
+		// directly through the stride offsets. The clamp actually bites only on the grid's maximum face, where the
+		// grid coordinate comes out at exactly one less than the resolution, so the slow path below is rarely taken.
 		if (X0 + 1 < R.ResX && Y0 + 1 < R.ResY && Z0 + 1 < R.ResZ && X0 >= 0 && Y0 >= 0 && Z0 >= 0)
 		{
 			const int32 I = X0 + Y0 * R.StrideY + Z0 * R.StrideZ;
@@ -158,12 +162,15 @@ FVector RopeSDFSampler::SampleGradient(const FRopeBoneSDFVolume& V, const FVecto
 	const double Hy = (V.Resolution.Y > 1) ? (Size.Y / (V.Resolution.Y - 1)) : 1.0;
 	const double Hz = (V.Resolution.Z > 1) ? (Size.Z / (V.Resolution.Z - 1)) : 1.0;
 
-	// Forward difference(center + 축당 1샘플 = 4) — 기존 central(6)보다 trilinear 2회 적다(핫패스 비용↓).
-	// SDF 내부는 단조로워 push-out 법선 방향엔 충분(완전 대칭 정확도는 약간 손해).
-	// 단 +H 프로브가 그리드 Max 경계 밖이면 SampleTrilinear가 경계면으로 클램프돼 그 축 차분이 0으로
-	// 축퇴한다(경계 법선 성분 소실 → 접선 방향 법선). 절단면(본 이음매) 밖에서 노드가 옆으로 밀리는 #4를
-	// 막기 위해, 그 축만 후방 차분으로 대체한다(내부 점은 종전 순방향 그대로 — 핫패스 4샘플 유지).
-	// 리더는 4번의 trilinear가 공유한다(볼륨이 같으므로 디코드 상수도 같다).
+	// A forward difference, being the centre plus one sample per axis, giving four, which is two trilinear samples
+	// fewer than the previous central difference of six and therefore cheaper on the hot path. The interior of an SDF
+	// is monotonic enough for the push-out normal direction, at a slight cost in symmetric accuracy.
+	// However, when the probe at plus H falls outside the grid's maximum boundary, the trilinear sample clamps to the
+	// boundary face and that axis's difference degenerates to zero, losing the normal's component along that axis and
+	// leaving the normal along the tangent. To stop nodes being pushed sideways outside a cut face, meaning a bone
+	// seam, that axis alone is replaced with a backward difference; interior points keep the forward difference and
+	// the hot path stays at four samples.
+	// The reader is shared by all four trilinear samples, since the volume, and therefore the decode constants, is the same.
 	const FVolumeReader R(V);
 	const float C = SampleTrilinearWith(R, V, LocalPos);
 	const auto AxisDeriv = [&R, &V, &LocalPos, C](int32 Axis, double H) -> float
@@ -197,7 +204,7 @@ FVector RopeSDFSampler::SampleProjectionGradient(const FRopeBoneSDFVolume& V, co
 		(V.Resolution.Y > 1) ? (Size.Y / (V.Resolution.Y - 1)) : 1.0,
 		(V.Resolution.Z > 1) ? (Size.Z / (V.Resolution.Z - 1)) : 1.0);
 
-	// 6번의 trilinear가 리더 하나를 공유한다.
+	// All six trilinear samples share a single reader.
 	const FVolumeReader R(V);
 	auto AxisDerivative = [&](int32 Axis, float Step)
 	{

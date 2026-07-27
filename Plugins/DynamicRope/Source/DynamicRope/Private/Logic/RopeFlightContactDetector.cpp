@@ -26,9 +26,9 @@ void FRopeFlightContactDetector::DetectContactCandidates(const FRopeSimState& Si
 		if (!bNearBody)
 			continue;
 
-		// 현재 위치만 보지 않고 이동 경로를 본다.
-		// 캡슐은 segment-vs-capsule로 가능.
-		// SDF는 path를 몇 개 샘플링하거나 SweepQuery adapter가 필요.
+		// It looks at the path of travel rather than the current position alone.
+		// A capsule can do this as a segment against a capsule.
+		// An SDF needs the path sampled at a few points, or a swept query adapter.
 		FRopeContact Contact = SweepOrSampleContact(Sim, Sim.PrevPositions[i], Sim.Positions[i], NearbyColliders, Params);
 
 		if (Contact.bHit)
@@ -51,9 +51,9 @@ void FRopeFlightContactDetector::AddGuidedContactCandidates(const FRopeSimState&
 		return;
 	}
 
-	// 일반 detector/GPU의 샘플 예산은 프레임 비용을 위해 작게 유지한다. 이 경로는 Assisted의 exact
-	// primary collider 몇 개만 검사하므로, 빠른 guide 이동에서도 ContactSweepStep 간격이 즉시 16등분으로
-	// 벌어져 얇은 본을 건너뛰지 않도록 더 큰 안전 상한을 쓴다.
+	// The sample budget of the ordinary detector and of the GPU is kept small for the sake of the frame cost. This
+	// path checks only the few exact primary colliders of an assisted throw, so it uses a larger safety limit to stop
+	// a fast guide movement immediately widening the contact sweep step into sixteen divisions and skipping a thin bone.
 	FParams ReliableParams = Params;
 	ReliableParams.ContactMaxSweepSamples = FMath::Max(
 		ReliableParams.ContactMaxSweepSamples, ReliableGuidedSweepMaxSamples);
@@ -91,15 +91,17 @@ void FRopeFlightContactDetector::AddGuidedContactCandidates(const FRopeSimState&
 		const FVector Previous = Whip.PrevTargets && Whip.PrevTargets->IsValidIndex(NodeIndex)
 			? (*Whip.PrevTargets)[NodeIndex]
 			: (Sim.PrevPositions.IsValidIndex(NodeIndex) ? Sim.PrevPositions[NodeIndex] : Current);
-		// GPU detector의 post-solve Prev→Pos는 마지막 substep만 보며, readback도 지연된다. 가이드가
-		// 실제로 이번 프레임 그린 경로를 GT에서 직접 검사해 한 프레임짜리 target hit를 보존한다.
+		// The GPU detector's post-solve previous-to-current difference sees only the last substep, and the readback
+		// lags as well. Checking the path the guide actually drew this frame directly on the game thread preserves a
+		// target hit that lasts a single frame.
 		AddPathContact(NodeIndex, Previous, Current);
 
 	}
 
-	// Full solver에는 node-edge 내부 충돌이 있지만 collision-free Assisted detector는 노드만 봤다.
-	// 현재 centerline edge도 검사한다. 한쪽만 guided인 root/tip 경계에서는 guide target과 solver pose를
-	// 이어야 하며, guided-guided만 보면 바로 그 경계 틈으로 얇은 본이 빠진다.
+	// The full solver has node-against-edge internal collision, but the collision-free assisted detector looked at
+	// nodes alone. The current centreline edges are now checked too. At the boundary between the root and the tip,
+	// where only one side is guided, the guide target has to be joined to the solver pose; looking at guided pairs
+	// alone lets a thin bone slip through exactly that boundary gap.
 	for (int32 NodeIndex = 0; NodeIndex + 1 < Sim.Num(); ++NodeIndex)
 	{
 		const int32 NextNode = NodeIndex + 1;
@@ -207,9 +209,10 @@ void FRopeFlightContactDetector::AddPredictedContactCandidates(const FRopeSimSta
 	TArray<IRopeCollider*> NearbyColliders;
 	const bool bHasGuidedNodes = Whip.HasGuidedNodes();
 
-	// 로프 Verlet 변위(Positions-PrevPositions)는 *마지막 substep* 델타(≈ v·SubstepDeltaTime)라, 프레임
-	// 단위 lookahead(PredictiveContactFrames)로 쓰려면 프레임/substep 비로 환산한다 — 안 하면 Substeps배
-	// (기본 12배) 과소 적용된다. 가이드 노드 분기는 프레임 단위 타깃 차분을 쓰므로 이 환산을 적용하지 않는다.
+	// The rope's Verlet displacement, current minus previous, is the delta of the last substep alone, meaning roughly
+	// the velocity times the substep delta, so using it as a per-frame lookahead requires converting it by the ratio
+	// of the frame to the substep. Without that it is applied too weakly by the substep count, twelve by default. The
+	// guided node branch uses a per-frame target difference and does not apply this conversion.
 	const float FrameToSubstepRatio = (Params.SubstepDeltaTime > KINDA_SMALL_NUMBER)
 		? (Params.FrameDeltaTime / Params.SubstepDeltaTime) : 1.0f;
 
@@ -222,7 +225,8 @@ void FRopeFlightContactDetector::AddPredictedContactCandidates(const FRopeSimSta
 
 		FVector CurrentPosition = Sim.Positions[i];
 		FVector PredictedPosition = CurrentPosition;
-		// substep 변위 → 프레임 변위 환산(위 주석). bFastNode/ShouldRun 임계와 자유 노드 예측이 모두 이 값을 쓴다.
+		// Converts the substep displacement to a frame displacement, as described above. The fast node and run
+		// thresholds and the free node prediction all use this value.
 		const FVector FrameDisplacement = Sim.Displacement(i) * FrameToSubstepRatio;
 		if (bHasGuidedNodes && !ShouldRunPredictiveContactForNode(Sim, Whip, i, FrameDisplacement))
 		{
@@ -294,8 +298,9 @@ void FRopeFlightContactDetector::AddUniqueCandidate(TArray<FRopeContactCandidate
 		if (Existing.NodeIndex == Candidate.NodeIndex && Existing.Bone == Candidate.Bone && Existing.Mesh == Candidate.Mesh)
 		{
 			Existing.SourceMask |= Candidate.SourceMask;
-			// GPU 후보는 1~2프레임 지연될 수 있다. 같은 키의 synchronous guide Actual이 도착했는데
-			// source bit만 합치면 캡처는 성공해도 anchor가 낡은 접촉점/normal에서 시작한다.
+			// A GPU candidate can lag by one or two frames. When a synchronous guide's actual contact arrives with
+			// the same key, merging the source bits alone leaves the capture succeeding but the anchor starting from
+			// a stale contact point and normal.
 			if (Candidate.Source == ERopeContactCandidateSource::Actual)
 			{
 				Existing.bValid = Candidate.bValid;
@@ -328,10 +333,12 @@ void FRopeFlightContactDetector::EvaluateRelativeMotion(const FRopeSimState& Sim
 			continue;
 		}
 
-		// RopeVelocity는 Verlet 차분 = *마지막 substep*의 변위(cm/substep, ≈ v·FixedDt), SurfaceVelocity는 FROZEN
-		// 계약상 cm/초. 같은 단위로 빼려면 표면속도를 *substep dt*(SubstepDeltaTime=FixedDt)로 환산해야 한다 —
-		// 프레임 dt로 환산하면 Substeps>1일 때 표면속도가 Substeps배 과대 반영돼 상대운동 방향/속도가 틀린다.
-		// 솔버 마찰(ApplyContactFriction)이 SubDt로 환산하는 것과 동일한 원칙.
+		// The rope velocity is a Verlet difference, meaning the displacement of the last substep in centimetres per
+		// substep, roughly the velocity times the fixed delta, while the surface velocity is contractually in
+		// centimetres per second. Subtracting them in the same units requires converting the surface velocity by the
+		// substep delta: converting by the frame delta overstates it by the substep count whenever there is more than
+		// one substep and gives a wrong direction and magnitude for the relative motion. This is the same principle
+		// by which the solver's friction converts to the substep delta.
 		const FVector RopeVelocity = Sim.Positions[Candidate.NodeIndex] - Sim.PrevPositions[Candidate.NodeIndex];
 		const FVector RelativeVelocity = RopeVelocity - Candidate.SurfaceVelocity * Params.SubstepDeltaTime;
 		const FVector TangentVelocity = RelativeVelocity - FVector::DotProduct(RelativeVelocity, Candidate.Normal) * Candidate.Normal;
@@ -393,8 +400,9 @@ void FRopeFlightContactDetector::GatherNearbyColliders(const FVector& PrevPositi
 
 	for (IRopeCollider* Collider : Colliders)
 	{
-		// 정적 월드 collider는 감지에서 제외 — 랩 대상(본 귀속)이 아니고, 최심-1건 후보 선정에서
-		// 벽 접촉이 본 접촉을 가려 캡처를 조용히 막는다(GPU 감지 커널의 정적 제외와 동일 규약).
+		// Static world colliders are excluded from detection: they are not wrap targets, having no bone attribution,
+		// and in the deepest-single-candidate selection a wall contact would hide a bone contact and silently prevent
+		// a capture. The GPU detection kernel excludes static colliders under the same convention.
 		if (!Collider || Collider->IsWorldStatic())
 		{
 			continue;
@@ -411,9 +419,11 @@ FRopeContact FRopeFlightContactDetector::SweepOrSampleContact(const FRopeSimStat
 {
 	FRopeContact Best;
 	const float Travel = FVector::Dist(PrevPosition, Position);
-	// 샘플 간격은 **cm**로 끊는다(세그먼트 길이가 아니라). 세그먼트 길이는 대상 두께와 무관해서, 종전
-	// "Travel/SegmentLength, 최대 4"는 빠른 노드가 얇은 collider를 샘플 사이로 통과하게 놔뒀다.
-	// GPU RopeDetectSweep과 같은 식을 쓴다(둘이 갈라지면 parity 테스트가 못 잡는 종류의 버그가 된다).
+	// The sample spacing is measured in centimetres rather than in segment lengths. The segment length has nothing to
+	// do with the target's thickness, and the previous rule of the travel distance over the segment length, capped at
+	// four, let a fast node pass through a thin collider between samples.
+	// The same expression is used as in the GPU sweep, since a divergence between them is exactly the kind of bug the
+	// parity test cannot catch.
 	const float Step = FMath::Max(Params.ContactSweepStep, 0.1f);
 	const int32 MaxSamples = FMath::Max(Params.ContactMaxSweepSamples, 1);
 	const int32 SampleCount = FMath::Clamp(FMath::CeilToInt(Travel / Step), 1, MaxSamples);
@@ -424,8 +434,9 @@ FRopeContact FRopeFlightContactDetector::SweepOrSampleContact(const FRopeSimStat
 		const FVector SamplePos = FMath::Lerp(PrevPosition, Position, Alpha);
 		for (const IRopeCollider* Collider : Colliders)
 		{
-			// 정적 제외: 내부 호출은 GatherNearbyColliders가 이미 걸렀지만, 디버그 경로가 이 함수를
-			// FrameColliders로 직접 부르므로 여기서도 방어한다(규약은 위 gather 주석 참조).
+			// The static exclusion: internal callers have already been filtered by the gather, but the debug path
+			// calls this function directly with the frame colliders, so it is defended here as well. The convention
+			// is described in the gather comment above.
 			if (!Collider || Collider->IsWorldStatic())
 			{
 				continue;
@@ -456,7 +467,7 @@ FRopeContactCandidate FRopeFlightContactDetector::MakeCandidate(int32 NodeIndex,
 	Candidate.Penetration = Contact.Penetration;
 	Candidate.WrapDirectionScore = 0.0f;
 
-	//움직이는 bone 위에서 로프가 상대적으로 어떻게 미끄러지는지 판단할 때 필요함.
+	// Needed to judge how the rope slides relative to a bone that is itself moving.
 	Candidate.SurfaceVelocity = Contact.SurfaceVelocity;
 
 	return Candidate;

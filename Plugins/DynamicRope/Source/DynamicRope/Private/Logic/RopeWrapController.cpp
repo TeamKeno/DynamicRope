@@ -2,7 +2,7 @@
 
 #include "Logic/RopeWrapController.h"
 #include "Components/SceneComponent.h"
-// FRopeBindingFrame + ResolveBindingWorld (바인딩 배선 seam A)
+// FRopeBindingFrame and ResolveBindingWorld, the binding resolution seam.
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 
@@ -10,8 +10,10 @@ void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapSta
 {
 	State = Seed;
 
-	// 붙잡힌 bone 을 소유한 mesh 는 시드에 실려 온다(접촉의 SourceMesh 에서 전파 — cross-actor 포함).
-	// 없으면 잘못된 시드다: 아무것도 latch 하지 않고 상태를 비워 "감긴 척"하는 상태를 남기지 않는다.
+	// The mesh owning the caught bone arrives on the seed, propagated from the contact's source mesh,
+	// which covers the cross-actor case.
+	// Without one the seed is malformed: nothing is latched and the state is cleared, so no state is left
+	// pretending to be wrapped.
 	const USceneComponent* Mesh = State.Mesh.Get();
 	if (!Mesh)
 	{
@@ -24,9 +26,10 @@ void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapSta
 	UE_LOG(LogRopeWrap, Log, TEXT("BeginWrap: bone=%s, %d latched node(s), mesh=%s"),
 		*State.BoneName.ToString(), State.Latched.Num(), *Mesh->GetName());
 
-	// 각 접촉 노드의 현재 월드 위치를 bone-local 로 변환하여 동결한다(InvMass 0).
-	// 이 시점부터 노드는 솔버가 아니라 logic(skinning 된 bone)에 의해 구동된다.
-// Anchor가 없는 legacy seed면 Latched에서 임시 Anchor를 만든다.
+	// Freeze each contacting node's current world position into bone-local space, with an inverse mass of
+	// zero. From this point the nodes are driven by logic, meaning the skinned bone, rather than by the
+	// solver.
+// A legacy seed with no anchors builds temporary anchors from the latches.
 	if (State.Anchors.Num() == 0)
 	{
 		for (const FRopeLatchNode& Latch : State.Latched)
@@ -83,7 +86,8 @@ void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapSta
 			AnchorComp = Mesh;
 		}
 
-		// 바인딩 배선(seam A): 대상 트랜스폼을 단일 지점에서 해석 — 스켈레탈=스키닝 소켓, 정적=컴포넌트 트랜스폼.
+		// The binding seam: the target transform is resolved in one place, as a skinned socket on a
+		// skeletal target and as the component transform on a static one.
 		FRopeBindingFrame Binding;
 		Binding.Component = AnchorComp;
 		Binding.SocketOrBone = Anchor.Bone;
@@ -120,17 +124,18 @@ void FRopeWrapController::BeginWrap(const FRopeSimState& Sim, const FRopeWrapSta
 
 bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOverrideFrame& OutFrame)
 {
-	// bone 이 붙잡힌 mesh 를 따라간다. State.Mesh 는 BeginWrap 에서 확정되어 weak 포인터로
-	// 영속화된다(cross-actor 대상일 수 있다). 대상 액터가 파괴되면 weak 가 null 이 되어
-	// raw 포인터 역참조(use-after-free) 없이 안전하게 감지된다 — 엉뚱한 bone 으로 노드를
-	// 끌어당기지 않도록 폴백 없이 false 를 반환해 호출자가 release 하게 한다.
+	// The bone follows the mesh it was caught on. State.Mesh is established in BeginWrap and persisted as
+	// a weak pointer, since the target may belong to another actor. If that actor is destroyed the weak
+	// pointer becomes null, which is detected safely with no raw pointer dereference, and false is
+	// returned with no fallback so the caller releases rather than dragging the nodes towards the wrong
+	// bone.
 	const USceneComponent* Mesh = State.Mesh.Get();
 	if (!Mesh)
 	{
 		return false;
 	}
 
-	// 새 방식: surface anchor 기반 hold
+	// The current mechanism: holding against surface anchors.
 	if (State.Anchors.Num() > 0)
 	{
 		for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
@@ -149,7 +154,8 @@ bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOver
 			}
 
 			const FName Bone = Anchor.Bone.IsNone() ? State.BoneName : Anchor.Bone;
-			// 바인딩 배선(seam A): 매 프레임 대상 추종을 단일 지점에서 — 스켈레탈=스키닝 소켓, 정적=컴포넌트 트랜스폼.
+			// The binding seam: following the target each frame is resolved in one place, as a skinned
+			// socket on a skeletal target and as the component transform on a static one.
 			FRopeBindingFrame Binding;
 			Binding.Component = AnchorComp;
 			Binding.SocketOrBone = Bone;
@@ -173,9 +179,10 @@ bool FRopeWrapController::Hold(const FRopeSimState& Sim, float Dt, FRopeNodeOver
 		return true;
 	}
 
-	// 기존 방식 fallback
-	// wrap 이 skinning 을 타고 가도록 매 프레임 각 latched 노드를 자신의 (애니메이션된) bone 위에 재배치한다.
-	// bone 의 움직임이 솔버로 주입되지 않도록 노드의 속도를 0 으로 둔다(Prev = Pos).
+	// The legacy fallback.
+	// Each latched node is replaced onto its own animated bone every frame so the wrap follows the
+	// skinning. The node's velocity is held at zero, with the previous position equal to the current one,
+	// so the bone's movement is not injected into the solver.
 	for (const FRopeLatchNode& Latch : State.Latched)
 	{
 		if (!Sim.Positions.IsValidIndex(Latch.NodeIndex))
@@ -200,8 +207,9 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 		return false;
 	}
 
-	// 손 쪽 첫 앵커(최소 노드 인덱스): 손~앵커 사이 자유 구간의 장력이 여기로 전달된다.
-	// 새 방식(Anchors) 우선, legacy(Latched) 폴백 — Hold와 동일한 우선순위.
+	// The first anchor on the hand side, meaning the lowest node index: the tension of the free span
+	// between the hand and the anchor is delivered here.
+	// Anchors take priority with the latches as a fallback, matching the priority Hold uses.
 	int32 AnchorNode = INDEX_NONE;
 	FName AnchorBone = NAME_None;
 	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
@@ -226,45 +234,54 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 		}
 	}
 
-	// 앵커가 노드 0(손 핀 자체)이면 손 쪽 세그먼트가 없다 → 당김 없음.
+	// An anchor at node 0, which is the hand pin itself, leaves no segment on the hand side and therefore
+	// no pull.
 	if (AnchorNode <= 0)
 	{
 		return false;
 	}
 
-	// 당김 방향 = 앵커에서 손 쪽으로 로프를 따라 걸으며 찾은 "첫 직선 다리"의 끝 노드를 향하는 방향.
-	// 각 스텝에서 다음 세그먼트가 지금까지의 누적 다리 방향(앵커→현재 조준노드 chord)에서 임계 이상 꺾이면
-	// 멈춘다. 곧으면 손(노드 0)까지 걸어가 정확히 chord가 되고, 벽/모서리에선 그 직전에 멈춰 첫 다리를 따른다.
-	// 누적 chord 기준이라 90도 코너는 뚜렷이 감지하면서 한 노드의 처짐엔 둔감하다.
+	// The pull direction points at the end node of the first straight leg, found by walking along the rope
+	// from the anchor towards the hand.
+	// At each step the walk stops if the next segment bends more than the threshold away from the leg
+	// direction accumulated so far, which is the chord from the anchor to the current aim node. On a
+	// straight rope it walks all the way to the hand at node 0 and gives exactly that chord, and at a wall
+	// or an edge it stops just before and follows the first leg.
+	// Comparing against the accumulated chord detects a 90 degree corner clearly while staying insensitive
+	// to the sag of a single node.
 	//
-	// 단, 조준을 anchor-1(세그먼트 1개)에서 시작하면 첫 스텝의 chord도 세그먼트 1개라 노드 노이즈에 취약해,
-	// 팽팽한 로프에서도 인접 두 세그먼트가 임계를 넘겨 anchor-1에 조기 종료 → baseline이 1세그먼트로 짧아져
-	// 방향 각도 지터가 폭증했다(어제 pull 지터의 주범). 인접 2세그먼트를 무조건 포함해 baseline을 확보한 뒤
-	// 코너 판정을 시작한다(손이 더 가까우면 손까지). 잔여 시간 지터/이산 홉은 호출자의 fractional 스무딩이 흡수.
+	// Starting the aim one segment from the anchor would make the first step's chord a single segment and
+	// leave it vulnerable to node noise: even on a taut rope two adjacent segments could exceed the
+	// threshold and terminate immediately, shortening the baseline to one segment and making the direction
+	// angle jitter badly. Two adjacent segments are therefore always included to establish a baseline
+	// before corner testing begins, or fewer if the hand is nearer. Residual jitter over time, and the
+	// discrete hops, are absorbed by the caller's fractional smoothing.
 	const float CosThresh = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(BendThresholdDeg, 1.0f, 179.0f)));
 	const FVector AnchorPos = Sim.Positions[AnchorNode];
-	// 다리(leg) 단위 walk: 앵커에서 손(노드 0)까지 코너마다 다리를 끊어 걷는다. 첫 다리의 끝(AimNode)은
-	// 방향/테더 overshoot의 조준(종전과 동일 산출)이고, 모든 다리의 chord 합(TautChordLen)은 "전 체인 팽팽"
-	// 판정의 관측치다 — 처짐은 chord를 rest보다 짧게 만들고, 코너에 걸린 팽팽한 로프는 다리별 chord가
-	// rest에 근접해 팽팽으로 남는다(코너는 손해가 아니다).
+	// The walk proceeds leg by leg, from the anchor to the hand at node 0, breaking a leg at each corner.
+	// The end of the first leg is the aim node, which gives the direction and the tether overshoot exactly
+	// as before, while the sum of every leg's chord is the observation behind the whole-chain taut test:
+	// sag makes a chord shorter than its rest length, and a taut rope caught on a corner keeps each leg's
+	// chord close to its rest length and is still recognized as taut, so corners are not penalized.
 	int32 LegStart = AnchorNode;
-	// 첫 다리는 2세그먼트 시드(가능하면) — 첫 스텝 단일 세그먼트 노이즈 회피(종전 동작).
+	// The first leg is seeded with two segments where possible, which avoids the single-segment noise of
+	// the first step.
 	int32 LegEnd = FMath::Max(AnchorNode - 2, 0);
-	int32 AimNode = INDEX_NONE; // 첫 다리의 끝(아래 첫 바퀴에 확정)
+	int32 AimNode = INDEX_NONE; // The end of the first leg, settled on the first pass below.
 	float ChordSum = 0.0f;
-	float ChordSumRaw = 0.0f; // 비클램프 chord 합 — Constraint 테더의 C 관측치(FRopePullSample::PathChordLen 주석 참조).
+	float ChordSumRaw = 0.0f; // The unclamped chord sum, which is the violation observation for the constraint tether; see FRopePullSample::PathChordLen.
 	float MaxSag = 0.0f;
 	while (true)
 	{
 		for (int32 j = LegEnd - 1; j >= 0; --j)
 		{
-			// LegSoFar = 누적 다리 chord(긴 baseline), NextSeg = 다음 세그먼트.
+			// The accumulated leg chord gives the long baseline, against which the next segment is compared.
 			const FVector LegSoFar = (Sim.Positions[LegEnd] - Sim.Positions[LegStart]).GetSafeNormal();
 			const FVector NextSeg  = (Sim.Positions[j] - Sim.Positions[LegEnd]).GetSafeNormal();
 			if (LegSoFar.IsNearlyZero() || NextSeg.IsNearlyZero()
 				|| FVector::DotProduct(NextSeg, LegSoFar) < CosThresh)
 			{
-				// 코너(또는 축퇴) — 직전 노드(LegEnd)가 이 다리의 끝.
+			// A corner, or a degenerate step: the previous node ends this leg.
 				break;
 			}
 			LegEnd = j;
@@ -273,15 +290,17 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 		{
 			AimNode = LegEnd;
 		}
-		// 다리 chord는 그 다리의 rest 길이로 클램프한다 — 움직이는 앵커가 다리를 스트레치시키면(세그먼트 >
-		// rest) chord가 rest를 초과해 다른 구간의 슬랙을 상쇄·은폐한다(스트레치는 팽팽함의 증거가 아니라
-		// 그 다리 하나의 사정이다). 클램프하면 chord 합의 상한이 정확히 FreeRestLen이 된다.
+		// Each leg's chord is clamped to that leg's rest length. If a moving anchor stretches a leg, so a
+		// segment exceeds its rest length, an unclamped chord would exceed the rest length and mask slack
+		// elsewhere; a stretch is evidence about that one leg, not about the rope being taut. Clamping
+		// makes the chord sum's upper bound exactly the free-span rest length.
 		const float LegChord = static_cast<float>((Sim.Positions[LegEnd] - Sim.Positions[LegStart]).Size());
 		const float LegRest = static_cast<float>(LegStart - LegEnd) * Sim.SegmentLength;
 		ChordSum += FMath::Min(LegChord, LegRest);
 		ChordSumRaw += LegChord;
-		// 다리 내부 노드의 chord 직선 대비 최대 수직 이탈(처짐, cm) — 코너 판정(각도)이 못 잡는 완만한
-		// catenary 처짐을 선형 감도로 잰다. 코너에 걸린 팽팽한 로프는 다리별로 곧아 값이 작다.
+		// The largest perpendicular departure of a leg's interior nodes from its chord, in cm. It measures,
+		// with linear sensitivity, the gentle catenary sag that the angular corner test cannot see. A taut
+		// rope caught on a corner is straight within each leg and gives a small value.
 		for (int32 k = LegEnd + 1; k < LegStart; ++k)
 		{
 			MaxSag = FMath::Max(MaxSag, static_cast<float>(
@@ -291,14 +310,15 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 		{
 			break;
 		}
-		// 다음 다리: 코너 노드에서 재시작(1세그먼트 시드 — chord 합엔 baseline 노이즈 영향이 미미하다).
+		// The next leg restarts at the corner node, seeded with one segment, since baseline noise barely
+		// affects the chord sum.
 		LegStart = LegEnd;
 		LegEnd = LegEnd - 1;
 	}
 	const FVector Along = (Sim.Positions[AimNode] - AnchorPos).GetSafeNormal();
 	if (Along.IsNearlyZero())
 	{
-		// 축퇴(조준 노드와 앵커 겹침) — 방향 정의 불가.
+		// Degenerate, where the aim node coincides with the anchor, so no direction is defined.
 		return false;
 	}
 
@@ -308,14 +328,18 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 	Out.Bone = AnchorBone;
 	Out.WorldPoint = Sim.Positions[AnchorNode];
 	Out.Direction = Along;
-	// 앵커-손 쪽 인접 세그먼트(인덱스 AnchorNode-1)의 장력. 아직 솔브 전이면(배열 비어 있음) 0.
+	// The tension of the segment adjacent to the anchor on the hand side. It is 0 before the first solve,
+	// when the array is empty.
 	Out.Tension = Sim.SegmentTension.IsValidIndex(AnchorNode - 1) ? Sim.SegmentTension[AnchorNode - 1] : 0.0f;
-	// 전 체인 팽팽 관측치: 다리 chord 합 + 자유 구간 rest 길이(소비 = 컴포넌트의 EvaluateChainTautGate).
+	// The whole-chain taut observations: the sum of the leg chords and the rest length of the free span,
+	// consumed by the component's chain taut gate.
 	Out.TautChordLen = ChordSum;
 	Out.PathChordLen = ChordSumRaw;
 	Out.FreeRestLen = static_cast<float>(AnchorNode) * Sim.SegmentLength;
-	// 자유 구간 세그먼트 장력의 최솟값 — 팽팽함 = 장력이 손까지 전 구간 전달(어딘가 슬랙이면 0).
-	// chord 합 기하가 못 보는 지그재그 슬랙/부분 스트레치의 판별자다. 솔브 전(배열 부족)은 0으로 취급.
+	// The minimum segment tension across the free span. Being taut means the tension reaches the hand
+	// across every segment, so any slack anywhere gives zero.
+	// It discriminates the zigzag slack and partial stretches the chord sum geometry cannot see. Before the
+	// first solve, where the array is too short, it is treated as zero.
 	float MinT = TNumericLimits<float>::Max();
 	for (int32 i = 0; i < AnchorNode; ++i)
 	{

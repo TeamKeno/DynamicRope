@@ -21,7 +21,7 @@ namespace
 
 float FRopeAimTargeting::ResolveEffectiveQueryRadius(const FQueryContext& Ctx, float QueryRadius)
 {
-	// 0 설정은 선 ray가 아니라 rope/contact 기본 두께를 사용한다. 명시값이 있으면 그 반경으로 sweep한다.
+	// A setting of zero uses the rope's or the contact's default thickness rather than a line ray. An explicit value sweeps at that radius.
 	return QueryRadius > KINDA_SMALL_NUMBER ? QueryRadius : Ctx.FallbackQueryRadius;
 }
 
@@ -121,7 +121,7 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 	bool bFoundBlocked = false;
 	FRopeAimRayHitResult BestBlocked;
 
-	// broad phase bounds를 통과한 collider만 같은 swept query로 검사하고 ray 진행 거리의 최솟값을 고른다.
+	// Only colliders that passed the broad-phase bounds are tested with the same swept query, and the smallest distance along the ray is taken.
 	for (const IRopeCollider* Collider : *Ctx.Colliders)
 	{
 		if (!Collider || !Collider->GetWorldBounds().Intersect(ExpandedRayBounds))
@@ -141,10 +141,10 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 		}
 
 		const float Distance = FVector::DotProduct(HitWorldPos - RayStart, RayDir);
-		// 조준 HUD 강조 링 크기용 — 맞은 콜라이더의 월드 bounds 반경 근사(extent = 반크기라 Size()가 반대각).
+	// For the size of the aim HUD's highlight ring: an approximation of the hit collider's world bounds radius. The extent is a half size, so its length is the half diagonal.
 		const float BoundsRadius = static_cast<float>(Collider->GetWorldBounds().GetExtent().Size());
 
-		// ray는 맞았지만 wrap 불가(본 없음/SourceMesh 없음/게이트 거부)면 blocked 후보로만 기록한다.
+	// A ray that hit something that cannot be wrapped, having no bone, no source mesh or being refused by the gate, is recorded as a blocked candidate alone.
 		const bool bWrappable = !Contact.Bone.IsNone() && Contact.SourceMesh &&
 			CanWrapTarget(Contact.SourceMesh, Contact.Bone);
 		if (!bWrappable)
@@ -225,7 +225,7 @@ bool FRopeAimTargeting::ResolveAimRayThrowContext(const FQueryContext& Ctx, cons
 		*OutHit = Hit;
 	}
 
-	// ray 시작점이 아니라 실제 throw origin에서 hit으로 향하는 벡터가 최종 guide forward다.
+	// The final guide forward is the vector from the real throw origin to the hit, not from the ray's start point.
 	const FVector HitAimDir = (Hit.HitWorldPos - OutContext.Origin).GetSafeNormal();
 	if (HitAimDir.IsNearlyZero())
 	{
@@ -238,8 +238,8 @@ bool FRopeAimTargeting::ResolveAimRayThrowContext(const FQueryContext& Ctx, cons
 	const USceneComponent* HitMesh = Hit.Mesh;
 	OutContext.AimGuideMesh = HitMesh;
 	OutContext.AimGuideHitWorldPos = Hit.HitWorldPos;
-	// 조준 hit을 대상 본 기준 로컬로도 저장한다 — 비행/커밋 시 현재 본 트랜스폼으로 복원해
-	// 움직이는 대상을 추종한다(월드 고정 AimGuideHitWorldPos만으로는 팁이 허공에 뜬다).
+	// The aim hit is also stored in the target bone's local space, so it can be restored through the bone's current
+	// transform in flight and at commit and follow a moving target. A world-fixed hit position alone would leave the tip hanging in the air.
 	if (HitMesh && !Hit.Bone.IsNone())
 	{
 		const FTransform BoneXform = ResolveBindingWorld(HitMesh, Hit.Bone);
@@ -257,7 +257,7 @@ FBox FRopeAimTargeting::MakeAimRayQueryBounds(const FQueryContext& Ctx,
 	const float EffectiveRayLength = RayLength > KINDA_SMALL_NUMBER ? RayLength : Ctx.FallbackRayLength;
 	if (RayDir.IsNearlyZero() || EffectiveRayLength <= KINDA_SMALL_NUMBER)
 	{
-		// 무효 = 수집 확장 없음(clear와 동일).
+	// Invalid means no extension of the gather, which is the same as clearing it.
 		return FBox(ForceInit);
 	}
 
@@ -277,7 +277,7 @@ void FRopeAimTargeting::SetWrapTargetLock(const FRopeThrowContext& ThrowContext)
 
 bool FRopeAimTargeting::IsLockActive(ERopePhase Phase) const
 {
-	// 잠금은 한 throw의 접근/접촉/감김 경로에만 적용한다. Free preview와 Wrapped 이후의 일반 충돌은 유지한다.
+	// The lock applies to a single throw's approach, contact and wrap path alone. The Free preview and ordinary collision after a wrap are unaffected.
 	const bool bLockingPhase = Phase == ERopePhase::Flight ||
 		Phase == ERopePhase::Contacting || Phase == ERopePhase::Wrapping;
 	return bLockingPhase && bLocked && !TargetBone.IsNone() && TargetMesh.IsValid();
@@ -288,8 +288,8 @@ bool FRopeAimTargeting::IsPrimaryTarget(const USceneComponent* Mesh, FName Bone)
 	return bLocked && Mesh == TargetMesh.Get() && Bone == TargetBone;
 }
 
-// 이 파일의 변경 이유: 종전에는 aim lock을 collider 허용 범위와 동일하게 취급해 Assisted도 한 본만
-// 남았다. primary 판정은 exact bone으로 유지하되, 허용 범위는 resolve mode별로 분리한다.
+// The permitted range is separated per resolve mode while the primary decision stays on the exact bone: treating the
+// aim lock as identical to the permitted collider range would leave an assisted throw with one bone as well.
 bool FRopeAimTargeting::IsWrapTarget(ERopePhase Phase, ERopeWrapResolveMode ResolveMode,
 	const USceneComponent* Mesh, FName Bone) const
 {
@@ -298,8 +298,9 @@ bool FRopeAimTargeting::IsWrapTarget(ERopePhase Phase, ERopeWrapResolveMode Reso
 		return true;
 	}
 
-	// Assisted의 ray hit은 "첫 캡처/주 시드"만 고정한다. 같은 mesh의 이웃 본은 contact tracker의
-	// secondary target과 SurfaceVectorField의 multi-bone 투영 재료로 남겨야 한다.
+	// An assisted throw's ray hit fixes the first capture, meaning the primary seed, alone. Neighbouring bones on the
+	// same mesh have to remain as secondary target material for the contact tracker and as multi-bone projection
+	// material for the surface vector field.
 	return ResolveMode == ERopeWrapResolveMode::AssistedJudged
 		? Mesh == TargetMesh.Get()
 		: IsPrimaryTarget(Mesh, Bone);
@@ -321,7 +322,7 @@ void FRopeAimTargeting::FilterCollidersToTarget(ERopePhase Phase, ERopeWrapResol
 		}
 		if (Collider->IsWorldStatic())
 		{
-			// 월드 정적 형상은 궤적/환경 충돌용이므로 유지하고 skeletal 본 collider만 target으로 제한한다.
+	// Static world geometry is kept, being needed for trajectory and environment collision, and the restriction to targets applies to skeletal bone colliders alone.
 			return false;
 		}
 

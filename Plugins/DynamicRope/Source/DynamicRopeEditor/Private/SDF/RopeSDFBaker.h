@@ -1,98 +1,112 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// URopeSDFData를 본별 signed distance 볼륨으로 채우는 에디터 전용 CPU 베이커.
-// 스켈레탈 메시의 에디터 소스 모델(WITH_EDITOR)을 읽어, 삼각형을 스킨 가중치로 본에 배정하고,
-// 본 로컬 공간으로 변환한 뒤 좁은밴드 SDF를 voxel화한다. 거리(unsigned)는 본별 삼각형으로 재서 본 귀속을
-// 유지하되, 부호(안/밖)는 메시 전체(닫힌 표면)에 대한 generalized winding number(GeometryCore fast
-// winding)로 매긴다 — 본별 열린 패치로 적분하면 짧고 넓은 본 토막의 내부가 w<0.5로 바깥 오판되므로,
-// 전역 메시로 적분해야 강건하다.
+// The editor-only CPU baker that fills a URopeSDFData with per-bone signed distance volumes.
+// It reads the skeletal mesh's editor source model, assigns triangles to bones by skin weight,
+// transforms them into bone-local space, and voxelizes a narrow-band SDF.
+// The unsigned distance is measured against that bone's own triangles, which preserves the attribution,
+// while the sign, meaning inside or outside, comes from the generalized winding number over the whole
+// mesh, treated as a closed surface, using the fast winding implementation in GeometryCore. Integrating
+// over a bone's open patch alone would misjudge the interior of a short, wide bone segment as outside, so
+// integrating over the global mesh is what makes it robust.
 //
-// 규약(런타임 FRopeSDFCollider::Query 샘플러와 반드시 일치): 샘플은 grid 코너에 놓인다.
-// 즉 인덱스 (x,y,z)의 샘플 위치 = LocalBounds.Min + (x,y,z) * VoxelSize,
-// LocalBounds.Max == Min + (Resolution - 1) * VoxelSize. 거리 단위 cm, 바깥쪽 양수.
+// The convention, which must match the runtime sampler in FRopeSDFCollider::Query: samples sit on grid
+// corners, so the sample at index (x, y, z) is at the bounds minimum plus (x, y, z) times the voxel size,
+// and the bounds maximum equals the minimum plus the resolution minus one, times the voxel size.
+// Distances are in centimetres and positive outside.
 
 #pragma once
 
 #include "CoreMinimal.h"
-// FRopeSDFBakeProgress(TFunction) 진행 콜백
+// The progress callback type.
 #include "Templates/Function.h"
-// FRopeSDFBakeSettings(런타임 USTRUCT, 에셋에 저장)
+// FRopeSDFBakeSettings, a runtime struct stored on the asset.
 #include "Collision/SDF/RopeSDFData.h"
 
 class USkeletalMesh;
 struct FRopeBoneSDFVolume;
 
-// FRopeSDFBakeSettings는 런타임 모듈(RopeSDFData.h)로 승격되었다 — 베이크 설정을 에셋에 함께
-// 저장(URopeSDFData::LastBakeSettings)해 재오써링 시 비교 기준으로 쓰기 위함. 여기서는 그 타입을
-// 그대로 입력으로 받는다.
+// FRopeSDFBakeSettings was promoted to the runtime module, in RopeSDFData.h, so the bake settings can be
+// stored on the asset as URopeSDFData::LastBakeSettings and used as the comparison baseline when
+// authoring again. It is taken here as the input type directly.
 
 /**
- * 본 단위 진행/취소 콜백. 타깃 본 하나의 voxel화를 시작할 때마다 한 번 호출된다.
- *  - Done : 지금 시작하는 본의 0-기반 순번(0..Total).
- *  - Total: 전체 타깃 본 수.
- *  - Bone : 지금 시작하는 본 이름.
- * 반환값이 false면 베이크를 즉시 중단한다(true=계속). 비어 있으면(기본) 보고/취소 없이 끝까지 굽는다.
+ * The per-bone progress and cancellation callback, invoked once as the voxelization of each target bone
+ * begins.
+ *  - Done is the zero-based ordinal of the bone about to start.
+ *  - Total is the number of target bones.
+ *  - Bone is the name of the bone about to start.
+ * Returning false aborts the bake immediately, while true continues. Left empty, the default, it bakes
+ * to completion with no reporting and no cancellation.
  */
 using FRopeSDFBakeProgress = TFunction<bool(int32 /*Done*/, int32 /*Total*/, const FName& /*Bone*/)>;
 
 /**
- * 베이크 도중 자주(본 내부 voxel 배치 사이마다) 호출되는 취소 폴. true면 즉시 중단한다.
- * 무거운 본의 voxel화가 게임 스레드를 오래 점유하지 않도록, 배치 사이에서 이 폴을 통해 슬로우 태스크
- * UI를 펌프하고 취소 버튼 입력을 처리한다. 비어 있으면(기본) 본 단위 취소(Progress 반환값)만 동작한다.
+ * A cancellation poll called frequently during a bake, between the voxel batches within a bone.
+ * Returning true aborts immediately.
+ * It exists so that voxelizing a heavy bone does not occupy the game thread for a long time: between
+ * batches this poll pumps the slow task UI and processes the cancel button. Left empty, the default,
+ * only per-bone cancellation through the progress callback's return value applies.
  */
 using FRopeSDFBakeCancelPoll = TFunction<bool()>;
 
-/** BakeMesh 결과. */
+/** The result of BakeMesh. */
 enum class ERopeSDFBakeResult : uint8
 {
-	// 정상 완료(결과가 0개 본일 수도 있음).
+	// Completed normally, although the result may contain zero bones.
 	Success,
-	// CPU 지오메트리 없음(쿡/스트립) 또는 null 메시 — 베이크 불가.
+	// There is no CPU geometry, as in a cooked or stripped build, or the mesh is null, so it cannot be
+	// baked.
 	NoGeometry,
-	// 진행 콜백이 중단 요청 — OutVolumes는 미완성이므로 자산에 반영하지 말 것.
+	// A callback requested an abort. The output volumes are incomplete and must not be written to the
+	// asset.
 	Cancelled,
 };
 
 /**
- * 요청 VoxelSize가 MaxResolution 상한 때문에 키워진(coarsen된) 본 하나의 기록.
- * 사용자가 "내가 넣은 간격이 왜 더 굵게 구워졌나"를 Message Log로 확인할 수 있게 한다.
+ * A record of one bone whose requested voxel size had to be increased, that is coarsened, because of the
+ * maximum resolution limit.
+ * It lets the user see in the message log why the spacing they entered was baked more coarsely.
  */
 struct FRopeSDFCoarsenedBone
 {
-	// 해당 본 이름
+	// The bone's name.
 	FName      Bone;
-	// 사용자가 입력한 S.VoxelSize(cm)
+	// The voxel size the user entered (cm).
 	float      RequestedVoxelSize;
-	// 상한에 맞추느라 키워진 실제 voxel 크기(cm)
+	// The voxel size actually used after coarsening to fit the limit (cm).
 	float      ActualVoxelSize;
-	// 최종 grid 해상도(축별 샘플 수)
+	// The final grid resolution, as a sample count per axis.
 	FIntVector Resolution;
 };
 
-/** BakeMesh 한 번의 집계 통계(에디터 보고용, 에셋에 저장하지 않는 plain 타입). */
+/** Aggregate statistics for one BakeMesh call, for editor reporting. A plain type that is not stored on
+ *  the asset. */
 struct FRopeSDFBakeStats
 {
-	// 실제로 볼륨이 구워진 본 수
+	// The number of bones actually baked into volumes.
 	int32 BonesBaked = 0;
-	// coarsening이 발생한 본만 기록
+	// Only the bones that were coarsened are recorded.
 	TArray<FRopeSDFCoarsenedBone> CoarsenedBones;
-	// girth < MinBoneGirth 로 제외(drop)된 본
+	// Bones dropped because their girth fell below the configured minimum.
 	TArray<FName> DroppedThinBones;
 };
 
-/** 무상태 본별 SDF 베이커. 에디터 전용(임포트 소스 모델 사용). */
+/** The stateless per-bone SDF baker. Editor only, since it uses the import source model. */
 class FRopeSDFBaker
 {
 public:
 	/**
-	 * 요청된 본마다 본 로컬 볼륨 하나를 OutVolumes에 굽는다.
-	 *  - Bones가 비면 => 스킨 지오메트리가 있는 모든 본.
-	 *  - 자격 삼각형이 없는 본은 조용히 건너뛴다.
-	 *  - Progress가 있으면 본 하나를 처리하기 직전마다 호출한다(진행률 표시 + 본 단위 취소, 옵션).
-	 *  - CancelPoll이 있으면 본 내부 voxel 배치 사이마다 호출해 무거운 본 도중에도 취소를 받는다(옵션).
-	 *    Progress나 CancelPoll이 취소를 신호하면 Cancelled를 반환하며 OutVolumes는 미완성 상태로 남는다.
-	 *  - OutStats가 있으면 구워진 본 수와 coarsening이 발생한 본 목록을 채운다(옵션, 보고용).
-	 * 메시에 CPU 지오메트리가 없으면(예: 쿡/스트립) NoGeometry를 반환한다.
+	 * Bakes one bone-local volume per requested bone into the output array.
+	 *  - An empty bone list means every bone with skinned geometry.
+	 *  - A bone with no eligible triangles is skipped silently.
+	 *  - Where a progress callback is supplied it is called just before each bone is processed, which
+	 *    drives the progress display and optional per-bone cancellation.
+	 *  - Where a cancellation poll is supplied it is called between the voxel batches within a bone, so a
+	 *    cancellation is honoured even part-way through a heavy one.
+	 *    A cancellation from either callback returns Cancelled and leaves the output volumes incomplete.
+	 *  - Where statistics are supplied they are filled in with the number of bones baked and the list of
+	 *    bones that were coarsened, for reporting.
+	 * A mesh with no CPU geometry, as in a cooked or stripped build, returns NoGeometry.
 	 */
 	static ERopeSDFBakeResult BakeMesh(USkeletalMesh* Mesh, const TArray<FName>& Bones,
 		const FRopeSDFBakeSettings& Settings, TArray<FRopeBoneSDFVolume>& OutVolumes,

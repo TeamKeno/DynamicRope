@@ -7,7 +7,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "RopeTubeBuilder.h"
-// FRHIGPUBufferReadback 완전정의 + RHI 버퍼 생성 버전차 래퍼
+// The complete definition of FRHIGPUBufferReadback, plus the wrapper covering version differences in RHI buffer creation.
 #include "RHIGPUReadback.h"
 #include "RopeRHICompat.h"
 #include "RHI.h"
@@ -15,9 +15,12 @@
 #include "RenderingThread.h"
 #include "Misc/App.h"
 
-// B2-full 튜브 컴퓨트: 셰이더가 컴파일되고 (1) 위치가 CPU parallel-transport 결과와 일치, (2) tangent(SNORM16
-// 언팩)가 단위이며 TangentX=전방접선/TangentZ=radial, (3) UV가 (누적 호길이/원주, side/NumSides)인지 검증.
-// 직선 센터라인(전방=+X)이라 프레임이 상수(U=+Y, V=+Z)여서 기대값이 결정적이다.
+// The tube compute pass: whether the shader compiles and whether (1) the positions match the CPU parallel transport
+// result, (2) the tangents, unpacked from signed normalized 16-bit, are unit vectors with the tangent X being the
+// forward tangent and the tangent Z the radial normal, and (3) the UVs are the accumulated arc length over the
+// circumference and the side index over the side count.
+// The centreline is straight, with its forward direction along positive X, so the frame is constant, with U along
+// positive Y and V along positive Z, which makes the expected values deterministic.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUTubeTangentUVTest,
 	"DynamicRope.Solver.GPUTubeTangentUV",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -26,7 +29,7 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 {
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU 튜브 tangent/UV 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("Skipping the GPU tube tangent and UV test: there is no renderable RHI, meaning this is headless."));
 		return true;
 	}
 
@@ -36,12 +39,12 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 	const int32 VertsPerRing = NumSides + 1;
 	const int32 NumVerts = NumRings * VertsPerRing;
 
-	// 직선 센터라인(+X). 전방접선=+X, U=cross(+Z,+X)=+Y, V=cross(+X,+Y)=+Z.
+	// A straight centreline along positive X. The forward tangent is positive X, U is the cross product of positive Z and positive X, giving positive Y, and V is the cross product of positive X and positive Y, giving positive Z.
 	TArray<FVector3f> Centerline;
 	Centerline.SetNum(NumRings);
 	for (int32 i = 0; i < NumRings; ++i) { Centerline[i] = FVector3f(10.0f * i, 0, 0); }
 
-	// GPU 디스패치 + 리드백(렌더 스레드).
+	// The GPU dispatch and readback, on the render thread.
 	TArray<float> OutPos, OutUV;
 	TArray<uint32> OutTan;
 	OutPos.SetNumZeroed(NumVerts * 3);
@@ -73,7 +76,7 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 			FBufferRHIRef TanBuf = MakeBuf(TEXT("TubeTest.Tan"), NumVerts * 4 * sizeof(uint32), PF_R32_UINT,  true,  TanSRV, TanUAV);
 			FBufferRHIRef UVBuf  = MakeBuf(TEXT("TubeTest.UV"),  NumVerts * 2 * sizeof(float), PF_R32_FLOAT, true,  UVSRV, UVUAV);
 
-			// 입력 센터라인 업로드.
+			// Uploading the input centreline.
 			{
 				float* Dst = static_cast<float*>(RHICmdList.LockBuffer(InBuf, 0, NumRings * 3 * sizeof(float), RLM_WriteOnly));
 				for (int32 i = 0; i < NumRings; ++i) { Dst[i * 3 + 0] = Centerline[i].X; Dst[i * 3 + 1] = Centerline[i].Y; Dst[i * 3 + 2] = Centerline[i].Z; }
@@ -96,7 +99,7 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 		});
 	FlushRenderingCommands();
 
-	// SNORM16 언팩.
+	// Unpacking the signed normalized 16-bit values.
 	auto Snorm = [](uint32 packed, int half) -> float
 	{
 		const int16 s = static_cast<int16>((packed >> (half * 16)) & 0xFFFF);
@@ -120,12 +123,12 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 			const FVector3f TX(Snorm(OutTan[v * 4 + 0], 0), Snorm(OutTan[v * 4 + 0], 1), Snorm(OutTan[v * 4 + 1], 0));
 			const FVector3f TZ(Snorm(OutTan[v * 4 + 2], 0), Snorm(OutTan[v * 4 + 2], 1), Snorm(OutTan[v * 4 + 3], 0));
 			MaxTanLenDev = FMath::Max(MaxTanLenDev, FMath::Abs(TZ.Size() - 1.0f));
-			// 전방접선 +X
+			// The forward tangent, positive X.
 			MaxTxDev = FMath::Max(MaxTxDev, (TX - FVector3f(1, 0, 0)).Size());
-			// 법선 = radial
+			// The normal, which is radial.
 			MaxTanLenDev = FMath::Max(MaxTanLenDev, (TZ - Radial).Size());
 
-			// UV.x = 누적 호길이(직선 10cm 간격이라 10*ring) / 원주(2πR).
+			// The U coordinate is the accumulated arc length, which at a straight 10 cm spacing is ten per ring, over the circumference.
 			const float ExpU = (10.0f * static_cast<float>(ring)) / (2.0f * PI * Radius);
 			const float ExpV = static_cast<float>(side) / static_cast<float>(NumSides);
 			MaxUVDev = FMath::Max(MaxUVDev, FMath::Abs(OutUV[v * 2 + 0] - ExpU));
@@ -135,16 +138,17 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 
 	AddInfo(FString::Printf(TEXT("pos dev %.4f, tangentX dev %.4f, normal/len dev %.4f, UV dev %.5f"),
 		MaxPosDev, MaxTxDev, MaxTanLenDev, MaxUVDev));
-	TestTrue(TEXT("위치가 CPU parallel-transport와 일치"), MaxPosDev < 0.01f);
-	TestTrue(TEXT("TangentX = 전방접선(+X)"), MaxTxDev < 0.01f);
-	TestTrue(TEXT("TangentZ = radial 법선(단위)"), MaxTanLenDev < 0.01f);
-	TestTrue(TEXT("UV = (누적 호길이/원주, side/NumSides)"), MaxUVDev < 0.001f);
+	TestTrue(TEXT("the positions match the CPU parallel transport"), MaxPosDev < 0.01f);
+	TestTrue(TEXT("the tangent X is the forward tangent, positive X"), MaxTxDev < 0.01f);
+	TestTrue(TEXT("the tangent Z is the radial normal and is a unit vector"), MaxTanLenDev < 0.01f);
+	TestTrue(TEXT("the UV is the accumulated arc length over the circumference and the side index over the side count"), MaxUVDev < 0.001f);
 	return true;
 }
 
-// GPU 튜브 스무딩(B2-full): resident 엔트리가 시뮬 노드(NumNodes)를 GPU에서 Catmull-Rom 스무딩한 결과가
-// CPU 스무딩 후 B1 엔트리로 만든 튜브와 일치하는가(정점 위치 비교). 프레임/정점 수식은 공유하므로 편차는
-// 스무딩 포팅의 정확도만 반영한다. 곡선 노드로 스무딩이 실제로 작동하는 케이스.
+// GPU tube smoothing: whether smoothing the simulation nodes of a resident entry with Catmull-Rom on the GPU matches
+// the tube built from a non-resident entry after smoothing on the CPU, compared by vertex position. The frame and
+// vertex expressions are shared, so any deviation reflects the accuracy of the smoothing port alone. Curved nodes
+// make this a case where the smoothing actually does something.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUTubeSmoothingTest,
 	"DynamicRope.Solver.GPUTubeSmoothing",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -153,7 +157,7 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 {
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU 튜브 스무딩 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("Skipping the GPU tube smoothing test: there is no renderable RHI, meaning this is headless."));
 		return true;
 	}
 
@@ -166,7 +170,7 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 	const int32 VertsPerRing = NumSides + 1;
 	const int32 NumVerts = NumRings * VertsPerRing;
 
-	// 곡선 시뮬 노드(월드=로컬, WorldToLocal=identity). 지그재그로 곡률을 준다.
+	// Curved simulation nodes, with world space equal to local space and an identity world-to-local transform. The zigzag gives it curvature.
 	TArray<FVector3f> Nodes;
 	Nodes.Add(FVector3f(0, 0, 0));
 	Nodes.Add(FVector3f(10, 8, 0));
@@ -174,7 +178,7 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 	Nodes.Add(FVector3f(30, 5, -3));
 	Nodes.Add(FVector3f(40, 0, 6));
 
-	// CPU 스무딩(FRopeSceneProxy::BuildSmoothedCenterline / GPU RopeCatmullSmooth 미러). α=centripetal.
+	// CPU smoothing, in FRopeSceneProxy::BuildSmoothedCenterline, mirrored by RopeCatmullSmooth on the GPU, with a centripetal alpha.
 	const float SmoothParam = 0.5f;
 	TArray<FVector3f> Smoothed;
 	Smoothed.SetNum(NumRings);
@@ -201,7 +205,7 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 		}
 	}
 
-	// A=B1(CPU 스무딩), B=resident(GPU 스무딩)
+	// A is the non-resident entry with CPU smoothing and B is the resident entry with GPU smoothing.
 	TArray<float> PosA, PosB;
 	PosA.SetNumZeroed(NumVerts * 3);
 	PosB.SetNumZeroed(NumVerts * 3);
@@ -240,13 +244,13 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 			FBufferRHIRef TBufB  = MakeTyped(TEXT("Sm.TB"), NumVerts * 4 * sizeof(uint32), PF_R32_UINT, true, TSRVb, TUAVb);
 			FBufferRHIRef UBufB  = MakeTyped(TEXT("Sm.UB"), NumVerts * 2 * sizeof(float), PF_R32_FLOAT, true, USRVb, UUAVb);
 
-			// A 입력: CPU 스무딩 센터라인(component-local).
+			// The input to A: the CPU-smoothed centreline, in component-local space.
 			{
 				float* Dst = static_cast<float*>(RHICmdList.LockBuffer(InBuf, 0, NumRings * 3 * sizeof(float), RLM_WriteOnly));
 				for (int32 i = 0; i < NumRings; ++i) { Dst[i*3+0]=Smoothed[i].X; Dst[i*3+1]=Smoothed[i].Y; Dst[i*3+2]=Smoothed[i].Z; }
 				RHICmdList.UnlockBuffer(InBuf);
 			}
-			// B 입력: resident 시뮬 노드(월드=로컬, float4).
+			// The input to B: the resident simulation nodes, with world space equal to local space, as float4.
 			{
 				FVector4f* Dst = static_cast<FVector4f*>(RHICmdList.LockBuffer(ResBuf, 0, NumNodes * sizeof(FVector4f), RLM_WriteOnly));
 				for (int32 i = 0; i < NumNodes; ++i) { Dst[i] = FVector4f(Nodes[i].X, Nodes[i].Y, Nodes[i].Z, 0.0f); }
@@ -277,8 +281,8 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 		const FVector3f B(PosB[v*3+0], PosB[v*3+1], PosB[v*3+2]);
 		MaxDev = FMath::Max(MaxDev, (A - B).Size());
 	}
-	AddInfo(FString::Printf(TEXT("GPU-스무딩 vs CPU-스무딩 최대 정점 편차 %.5f cm"), MaxDev));
-	TestTrue(FString::Printf(TEXT("GPU Catmull-Rom 스무딩이 CPU와 일치(편차 %.5f)"), MaxDev), MaxDev < 0.05f);
+	AddInfo(FString::Printf(TEXT("The maximum vertex deviation between GPU and CPU smoothing is %.5f cm"), MaxDev));
+	TestTrue(FString::Printf(TEXT("the GPU Catmull-Rom smoothing matches the CPU, with a deviation of %.5f"), MaxDev), MaxDev < 0.05f);
 	return true;
 }
 

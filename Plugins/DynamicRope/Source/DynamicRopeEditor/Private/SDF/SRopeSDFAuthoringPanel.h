@@ -1,7 +1,7 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// SDF 오써링 도크탭의 콘텐츠 패널. 타깃 URopeSDFData를 골라 본별 SDF를 베이크하고, 베이크 전
-// 설정(VoxelSize 등)을 조정하는 컨트롤을 호스팅한다.
+// The content panel of the SDF authoring dock tab. It selects a target URopeSDFData, bakes the per-bone
+// SDFs, and hosts the controls for adjusting the pre-bake settings such as the voxel size.
 
 #pragma once
 
@@ -24,95 +24,116 @@ public:
 
 	void Construct(const FArguments& InArgs);
 
-	/** 타깃 에셋을 외부에서 지정한다(에셋 더블클릭 → 탭 연결 진입점). nullptr이면 타깃 해제.
-	    베이크 설정 복원/프리뷰 갱신 등 픽커로 고른 것과 동일한 경로를 탄다. */
+	/** Assigns the target asset from outside, which is the entry point used when double-clicking an asset
+	    opens the tab. Passing nullptr clears the target.
+	    It takes the same path as choosing one through the picker, including restoring the bake settings and
+	    refreshing the preview. */
 	void SetTargetAsset(URopeSDFData* InData);
 
 private:
-	/** 선택된 타깃에 대해 본별 베이크를 실행해 결과를 자산 메모리에 써넣는다(디스크 저장은 Save 버튼). */
+	/** Runs the per-bone bake for the selected target and writes the result into the asset in memory;
+	 *  committing it to disk is what the Save button does. */
 	FReply OnBakeClicked();
 
-	/** 에셋 입력 박스에서 선택한 타깃 URopeSDFData. */
+	/** The target URopeSDFData chosen in the asset picker. */
 	TWeakObjectPtr<URopeSDFData> Target;
 
-	/** 베이크 설정 값. */
+	/** The bake settings. */
 	FRopeSDFBakeSettings Settings;
 
-	/** 베이크할 본. 비우면 = 스킨된 모든 본(v1). 본 선택 UI는 추후. */
+	/** The bones to bake. Empty means every skinned bone. A bone selection UI is future work. */
 	TArray<FName> BoneFilter;
 
 	FString GetTargetPath() const;
 	void OnTargetChanged(const FAssetData& InAssetData);
 	bool CanBake() const;
 
-	//~ Save / Refresh 버튼.
-	/** 저장할 변경이 있는가(타깃 패키지가 dirty인가). Save 버튼 활성화 및 "Save *" 표시 기준. */
+	//~ The Save and Refresh buttons.
+	/** Whether there are unsaved changes, meaning the target's package is dirty. It drives both enabling
+	 *  the Save button and showing its modified marker. */
 	bool CanSave() const;
-	/** 저장이 필요하면 "Save *", 아니면 "Save". */
+	/** The Save button's label, which marks it when saving is needed. */
 	FText GetSaveButtonText() const;
-	/** 타깃 패키지를 디스크에 저장한다(베이크 결과 커밋). 성공 시 패키지 dirty가 해제된다. */
+	/** Saves the target package to disk, committing the bake result. On success the package is no longer
+	 *  dirty. */
 	FReply OnSaveClicked();
-	/** 프리뷰 뷰포트를 다시 그릴 수 있는가(타깃 + SourceMesh 존재). */
+	/** Whether the preview viewport can be redrawn, which requires a target and a source mesh. */
 	bool CanRefresh() const;
-	/** 현재 베이크된 데이터 기준으로 프리뷰 뷰포트 오버레이를 다시 그린다(카메라는 유지). */
+	/** Redraws the preview viewport overlays from the currently baked data, preserving the camera. */
 	FReply OnRefreshClicked();
-	/** 오버레이 갱신 본체(베이크 직후 자동 반영 + Refresh 버튼 공용). */
+	/** The body of the overlay refresh, shared by the automatic update after a bake and the Refresh
+	 *  button. */
 	void RefreshPreviewOverlay();
 
-	/** 현재 타깃의 SourceMesh를 동기 로드해 프리뷰 뷰포트에 반영한다(없으면 빈 뷰 + 안내). */
+	/** Synchronously loads the current target's source mesh and shows it in the preview viewport; without
+	 *  one it shows an empty view and a hint. */
 	void RefreshPreviewMesh();
 
-	/** 내장 디테일 뷰에서 에셋 프로퍼티가 바뀌었을 때 — SourceMesh 변경이면 프리뷰 메시를 갱신한다. */
+	/** Called when an asset property changes in the embedded details view; a change of source mesh
+	 *  refreshes the preview mesh. */
 	void OnAssetPropertyChanged(const FPropertyChangedEvent& Event);
 
-	/** 타깃 에셋의 원본 프로퍼티(SourceMesh/Bone Volumes)를 보여주는 내장 디테일 뷰.
-	    더블클릭이 제네릭 프로퍼티 에디터 대신 이 탭을 열므로, 확인·편집은 여기서 한다. */
+	/** The embedded details view showing the target asset's own properties, namely the source mesh and the
+	    bone volumes.
+	    Double-clicking opens this tab instead of the generic property editor, so inspection and editing
+	    happen here. */
 	TSharedPtr<IDetailsView> DetailsView;
 
-	/** 프리뷰할 메시가 없을 때만 보이는 안내 오버레이의 가시성. */
+	/** The visibility of the hint overlay, shown only when there is no mesh to preview. */
 	EVisibility GetPreviewHintVisibility() const;
 
-	/** 우측 3D 프리뷰 뷰포트(베이크 대상 메시 + 향후 SDF 오버레이). */
+	/** The 3D preview viewport on the right, showing the mesh being baked and the SDF overlays. */
 	TSharedPtr<SRopeSDFPreviewViewport> PreviewViewport;
 
-	/** FRopeSDFBakeSettings 멤버에 바인딩된 라벨+숫자 입력 행을 만든다(필드별 중복 제거).
-	    Tip을 주면 행 전체에 hover 툴팁을 단다(비우면 툴팁 없음 — 오써링 탭은 커스텀 Slate라
-	    UPROPERTY ToolTip 메타를 읽지 않으므로 여기서 직접 단다). */
+	/** Builds a labelled numeric entry row bound to a member of the bake settings, which removes the
+	    duplication across fields.
+	    Supplying a tip attaches a hover tooltip to the whole row; leaving it empty gives none. The
+	    authoring tab is custom Slate and does not read the property tooltip metadata, so tooltips are
+	    attached here directly. */
 	TSharedRef<class SWidget> MakeFloatRow(const FText& Label, float FRopeSDFBakeSettings::* Member, float MinVal, float MaxVal, const FText& Tip = FText::GetEmpty());
 	TSharedRef<class SWidget> MakeIntRow(const FText& Label, int32 FRopeSDFBakeSettings::* Member, int32 MinVal, int32 MaxVal, const FText& Tip = FText::GetEmpty());
 
-	/** Settings.Quantization(uint8/uint16) 선택 행: 라벨 + 두 개의 상호배타 옵션(라디오처럼 동작). */
+	/** The quantization selection row: a label plus two mutually exclusive options that behave like radio
+	 *  buttons. */
 	TSharedRef<class SWidget> MakeQuantizationRow();
 
-	//~ 프리뷰 오버레이(패널 로컬 상태 = PreviewViewport->AccessDrawOptions())에 바인딩되는 컨트롤들.
-	/** 오버레이 토글 체크박스 행(bounds/voxels/slice/gradient). */
+	//~ Controls bound to the preview overlay state, which is panel-local and lives on the viewport's draw
+	//~ options.
+	/** An overlay toggle checkbox row, for the bounds, voxels, slice and gradient overlays. */
 	TSharedRef<class SWidget> MakeOverlayToggleRow(const FText& Label, bool FRopeSDFPreviewDrawOptions::* Member);
-	/** 오버레이 float/int 파라미터 행(band/slice/gradient). */
+	/** A numeric overlay parameter row, for the band, slice and gradient settings. */
 	TSharedRef<class SWidget> MakePreviewFloatRow(const FText& Label, float FRopeSDFPreviewDrawOptions::* Member, float MinVal, float MaxVal);
 	TSharedRef<class SWidget> MakePreviewIntRow(const FText& Label, int32 FRopeSDFPreviewDrawOptions::* Member, int32 MinVal, int32 MaxVal);
-	/** slice 축을 X→Y→Z로 순환시키는 버튼 + 현재 축 라벨. */
+	/** The button that cycles the slice axis through X, Y and Z, plus a label showing the current one. */
 	FReply OnCycleSliceAxis();
 	FText GetSliceAxisLabel() const;
 
-	//~ 오버레이 활성/가시성(베이크 데이터 유무 + 토글 종속).
-	/** 오버레이 컨트롤을 편집할 수 있는가(프리뷰 볼륨 스냅샷 존재). 없으면 섹션 전체를 비활성(회색)한다. */
+	//~ Overlay enablement and visibility, which depend on baked data existing and on the toggles.
+	/** Whether the overlay controls can be edited, which requires a preview volume snapshot. Without one
+	 *  the whole section is greyed out. */
 	bool CanEditOverlay() const;
-	/** 편집 불가일 때만 보이는 안내("Bake + Refresh") 텍스트의 가시성. */
+	/** The visibility of the hint shown only while editing is disabled, telling the user to bake and
+	 *  refresh. */
 	EVisibility GetOverlayDisabledHintVisibility() const;
-	/** 토글 종속 그룹(설명/범례/수치)의 가시성: 해당 토글이 켜져 있으면 Visible, 아니면 Collapsed. */
+	/** The visibility of a toggle-dependent group, covering its description, legend and values: visible
+	 *  while that toggle is on and collapsed otherwise. */
 	EVisibility GetToggleGroupVisibility(bool FRopeSDFPreviewDrawOptions::* Member) const;
 
-	/** 오버레이 설명 한 줄(연한 텍스트). 토글 그룹 안에 들어가 무엇을 그리는지 알려준다. */
+	/** A one-line overlay description, in muted text. It sits inside a toggle group and says what is being
+	 *  drawn. */
 	TSharedRef<class SWidget> MakeOverlayDescription(const FText& Text);
-	/** 색상 범례 한 줄: 색 스와치 + 라벨. 디버그 색이 무엇을 뜻하는지 알려준다. */
+	/** One line of the colour legend: a swatch plus a label, saying what each debug colour means. */
 	TSharedRef<class SWidget> MakeLegendRow(const FLinearColor& Color, const FText& Label);
 
 	/**
-	 * Band Threshold 행. 상한을 베이크 당시 NarrowBand로 제한한다 — 그 밖은 ±NarrowBand로 포화돼
-	 * 방향/거리 정보가 없으므로 더 올려봐야 무의미하다. Voxels·Gradients 그룹 양쪽에서 같은 멤버를 공유.
+	 * The band threshold row. Its maximum is limited to the narrow band used at bake time, because
+	 * everything beyond that saturates at the band limits and carries no direction or distance
+	 * information, so raising it further would achieve nothing. The voxel and gradient groups share the
+	 * same member.
 	 */
 	TSharedRef<class SWidget> MakeBandThresholdRow();
-	/** Band Threshold 상한 = 타깃의 LastBakeSettings.NarrowBand(타깃 없으면 폴백). */
+	/** The band threshold's maximum, taken from the target's last bake settings, with a fallback when
+	 *  there is no target. */
 	float GetBandThresholdMax() const;
 	TOptional<float> GetBandThresholdMaxOpt() const;
 };

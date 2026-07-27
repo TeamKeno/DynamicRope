@@ -3,7 +3,7 @@
 #include "Logic/RopeThrowPreviewBuilder.h"
 
 #include "Collision/RopeCollider.h"
-// ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+// ResolveBindingWorld is the single point at which a wrap binding, meaning a bone, socket or component, is resolved to a transform.
 #include "Core/RopeWrapTarget.h"
 #include "Logic/RopeWrappingPhase.h"
 #include "RopeMathHelpers.h"
@@ -20,7 +20,7 @@ namespace
 	struct FThrowPreviewContactCandidate
 	{
 		FRopeContactCandidate Candidate;
-		/** 접점 뒤로 남는 노드를 펼칠 방향(origin→hit). 접점이 마지막 노드면 쓰이지 않는다. */
+		/** The direction, from origin to hit, along which the nodes left behind the contact point are laid out. Unused when the contact is the last node. */
 		FVector Direction = FVector::ForwardVector;
 	};
 
@@ -44,14 +44,16 @@ namespace
 
 		const float SegmentLength = FMath::Max(Sim.SegmentLength, 1.0f);
 		const int32 DistanceNodeIndex = FMath::Clamp(FMath::RoundToInt(HitDistance / SegmentLength), 1, Sim.Num() - 1);
-		// LockAlpha는 spline의 공간 보간 구간일 뿐 latch 위치가 아니다. 실제 hit 거리의 노드를 사용한다.
+		// The lock alpha is only the spline's spatial interpolation range and is not the latch position, so the node at the real hit distance is used.
 		const int32 AimGuideNodeIndex = DistanceNodeIndex;
 
-		// aim ray 조준은 이미 SDF/collider swept query로 본을 고른 상태다.
-		// prepared 후보는 그 hit을 그대로 쓴다 — 던지기 방향 주변을 다시 훑으면 다른 본/다른 방향이 뽑힌다.
-		// SurfacePoint는 SDF 투영점이라 ray 위의 노란 hit와 다를 수 있다. spline 방향 기준은 반드시 HitWorldPos다.
-		// 이 후보의 node는 실제 hit 거리로만 정한다. AimGuideLockAlpha/DirectionBias는 물리 Flight의
-		// 곡선 보간 설정이며 prepared latch 위치를 바꾸지 않는다.
+		// Aiming with the aim ray has already picked a bone through a swept SDF or collider query.
+		// A prepared candidate uses that hit as it stands: sweeping the area around the throw direction again would
+		// pick a different bone in a different direction.
+		// The surface point is an SDF projection and can differ from the yellow hit on the ray, so the reference for
+		// the spline direction has to be the world hit position.
+		// This candidate's node is decided by the real hit distance alone. The aim guide lock alpha and direction
+		// bias are curve interpolation settings for the physical flight and do not move the prepared latch position.
 		FRopeContactCandidate Candidate;
 		Candidate.bValid = true;
 		Candidate.NodeIndex = AimGuideNodeIndex;
@@ -95,7 +97,7 @@ namespace
 			FVector Position = FVector::ZeroVector;
 			if (NodeIndex <= LatchNode)
 			{
-				// 조준 hit 방향이 이미 확정돼 있으므로 origin->hit 직선이 spline prefix의 권위 있는 모양이다.
+				// The aim hit direction is already fixed, so the straight line from origin to hit is the authoritative shape of the spline prefix.
 				const float Alpha = LatchNode > 0
 					? static_cast<float>(NodeIndex) / static_cast<float>(LatchNode)
 					: 0.0f;
@@ -118,16 +120,16 @@ namespace
 		return PreviewSim;
 	}
 
-	// OutColliderStorage는 호출자가 소유한다 — FContext가 배열을 참조로 들기 때문에 임시 저장소를
-	// 여기서 만들면 dangling이 된다. 런타임(URopeComponent::MakeWrappingContext)과 같은 게이트를
-	// 태워, preview가 고른 대상과 실제 감김 경로가 같은 집합을 보게 한다.
+	// The collider storage is owned by the caller: the context holds the array by reference, so building temporary
+	// storage here would leave it dangling. It goes through the same gate as the runtime path
+	// (URopeComponent::MakeWrappingContext), so the preview's chosen target and the real wrapping path see the same set.
 	FRopeWrappingPhase::FContext MakeWrappingContext(const FRopeThrowPreviewBuilder::FInput& Input,
 		TArray<IRopeCollider*>& OutColliderStorage)
 	{
 		RopeWrapTargets::FilterWrappableColliders(GetColliders(Input),
 			[&Input](const USceneComponent* Mesh, FName Bone)
 			{
-				// 미설정(단위 테스트/게이트 없는 호출자)이면 전부 허용 — CanWrapTarget 기본 구현과 같다.
+				// Unset, as in a unit test or a caller with no gate, permits everything, matching the default CanWrapTarget implementation.
 				return !Input.CanWrapTarget || Input.CanWrapTarget(Mesh, Bone);
 			},
 			OutColliderStorage);
@@ -192,11 +194,13 @@ namespace
 			return;
 		}
 
-		// 주의: 이 함수는 ③의 확정 RenderPreview 전용이다. 물리 Flight의 WhipGuide에는
-		// 호출되지 않으므로, 여기서 HitPoint를 고정해도 Flight 노드가 미리 고정되는 현상과는 무관하다.
-		// BuildPreviewCenterline은 latch 이후 wrapping path를 만들면서 latch node를 표면 path로 다시 덮을 수 있다.
-		// aim ray 조준에서는 화면에 보이는 spline prefix가 반드시 ray hit point를 향해야 하므로
-		// 최종 렌더 포인트 생성 후에도 시작점부터 latch node까지를 Origin->Hit 직선으로 고정한다.
+		// Note that this function is for the fixed render preview of GuaranteedWrap alone. It is never called for the
+		// whip guide of the physical flight, so fixing the hit point here has nothing to do with flight nodes being
+		// pinned in advance.
+		// BuildPreviewCenterline builds the wrapping path after the latch and can overwrite the latch node with the
+		// surface path. When aiming with the aim ray, the spline prefix on screen has to point at the ray hit point,
+		// so after the final render points are produced the span from the start to the latch node is pinned back onto
+		// the straight origin-to-hit line.
 		const int32 LastPrefixNode = FMath::Clamp(Candidate.NodeIndex, 1, InOutPreviewPoints.Num() - 1);
 		for (int32 NodeIndex = 0; NodeIndex <= LastPrefixNode; ++NodeIndex)
 		{
@@ -205,8 +209,9 @@ namespace
 		}
 	}
 
-	// Pierce(꽂힘): 밧줄 끝(팁=창)이 꽂힘 지점에 오도록 손 원점 → 꽂힘 지점 직선으로 전체 노드를 편다.
-	// 팁 뒤로 남는 로프는 없다 — 여분 길이는 손~팁 사이 slack이며 물리(솔버)가 drape로 처리한다.
+	// Pierce lays every node out along the straight line from the hand origin to the embed point, so that the rope's
+	// end, meaning the spear tip, lands there. No rope is left behind the tip: the spare length is slack between the
+	// hand and the tip and the solver drapes it.
 	void BuildPierceStraightCenterline(const FRopeThrowPreviewBuilder::FInput& Input,
 		const FRopeContactCandidate& Candidate, const FRopeSimState& SourceSim, TArray<FVector>& OutCenterline)
 	{
@@ -221,7 +226,7 @@ namespace
 		const FVector Hit = Candidate.WorldPoint;
 		const int32 Last = N - 1;
 
-		// 손(0)~팁(Last) 전체를 직선으로. 팁(마지막 노드)이 꽂힘 지점 = 창이 박히는 곳. 팁 뒤 여분 없음.
+		// A straight line covering the whole rope from the hand at node zero to the tip at the last node, where the tip embeds. Nothing is left behind it.
 		for (int32 NodeIndex = 0; NodeIndex <= Last; ++NodeIndex)
 		{
 			const float Alpha = static_cast<float>(NodeIndex) / static_cast<float>(Last);
@@ -273,14 +278,16 @@ namespace
 		LatchAnchor.SurfaceOffset = FMath::Max(0.0f, Input.RopeRadius);
 		LatchAnchor.RopeDistance = 0.0f;
 
-		// ③(Guaranteed) = Pierce: 감김 경로 빌드(BuildPreviewCenterline)와 경로 앵커 확장을 건너뛰고,
-		// aim-hit 접점에 단일 앵커로 성립한다. RenderPreview는 손→꽂힘 지점 직선(연출용).
-		// 이후 FinishGuidedThrow가 Anchors(=1개)를 그대로 Wrapped seed로 승격한다(커밋 경로 무변경).
+		// GuaranteedWrap means pierce: it skips the wrapping path build and the path anchor expansion and establishes
+		// a single anchor at the aim hit contact point. The render preview is the straight line from the hand to the
+		// embed point, for presentation. FinishGuidedThrow then promotes those anchors, of which there is one,
+		// straight into the wrapped seed, leaving the commit path unchanged.
 		if (Input.ResolveMode == ERopeWrapResolveMode::GuaranteedWrap)
 		{
-			// 창(팁)이 꽂히는 것이므로 앵커는 거리 기반 접점 노드(Candidate.NodeIndex)가 아니라
-			// 밧줄 끝(마지막 노드 = 팁 mesh 위치)이어야 한다. 그러지 않으면 안쪽 노드가 고정되고
-			// 팁 + 여분 로프가 접점 아래로 늘어진다. 앵커 로컬 위치는 이미 꽂힘 지점(Candidate.WorldPoint)이다.
+			// It is the tip, the spear, that embeds, so the anchor has to be the rope's end, meaning the last node
+			// where the tip mesh sits, rather than the distance-based contact node. Otherwise an interior node is
+			// pinned and the tip plus the spare rope hangs below the contact point. The anchor's local position is
+			// already the embed point.
 			LatchAnchor.NodeIndex = SourceSim.Num() - 1;
 			LatchAnchor.StartWorldPosition = Candidate.WorldPoint;
 
@@ -304,14 +311,14 @@ namespace
 			OutPrepared.Mesh = Mesh;
 			OutPrepared.Bone = Candidate.Bone;
 			OutPrepared.Anchors.Reset();
-			OutPrepared.Anchors.Add(LatchAnchor); // 단일 앵커 = Pierce의 정상 형태(AnchorCount=1)
+			OutPrepared.Anchors.Add(LatchAnchor); // A single anchor is the normal shape of a pierce.
 
 			return OutPrepared.IsValid();
 		}
 
 		TArray<FVector> PreviewPoints;
 		FRopeWrappingPhase PreviewWrappingPhase;
-		// 게이트 통과 collider 저장소 — FContext보다 오래 살아야 한다(참조 보유).
+		// Storage for the colliders that passed the gate, which has to outlive the context that holds it by reference.
 		TArray<IRopeCollider*> WrappableColliders;
 		if (!PreviewWrappingPhase.BuildPreviewCenterline(LatchAnchor,
 			SourceSim, MakeWrappingContext(Input, WrappableColliders), PreviewPoints))
@@ -364,12 +371,14 @@ bool FRopeThrowPreviewBuilder::BuildFreePreparedPreview(const FInput& Input, FRo
 	FThrowPreviewContactCandidate ContactCandidate;
 	if (!BuildAimGuideHitCandidate(Input.ThrowContext, *Sim, ContactCandidate))
 	{
-		// prepared preview는 **조준한 대상**에만 성립한다. aim hit이 없다고 던지기 방향 주변을 훑어
-		// 후보를 고르면 조준과 무관한 옆 대상이 뽑히고, 화면의 miss 표시와 preview 연결선이 어긋난다.
-		// 그래서 대안 탐색 없이 여기서 끝낸다 — 호출자(ThrowWithContext ③ 분기)가 StartFreeGuidedThrow
-		// (레이 끝점 허공 아치)로 폴백하며, 조준이 빗나가면 안 꽂히는 게 정상 결과다.
-		// 사유는 "조준이 돌았는데 빗나감"과 "조준 흐름 자체가 없음(BP 직행/AI)"을 구분한다 — 로그만 보고
-		// 조준 설정 문제인지 호출 경로 문제인지 갈라야 하기 때문이다.
+		// A prepared preview is established for the aimed target alone. Sweeping the area around the throw direction
+		// for a candidate because there was no aim hit would pick a neighbouring target unrelated to the aim, and the
+		// miss indicator on screen would disagree with the preview's connecting line.
+		// It therefore ends here with no alternative search: the caller falls back to StartFreeGuidedThrow, an arc
+		// into empty space at the ray's end point, and a missed aim not embedding is the correct outcome.
+		// The reason distinguishes an aim that was evaluated and missed from there being no aiming flow at all, as on
+		// a direct Blueprint or AI call, because the log alone has to separate an aim configuration problem from a
+		// call path problem.
 		RopeMath::SetPreviewFailureReason(OutFailureReason, Input.ThrowContext.bAimRayEvaluated
 			? TEXT("prepared preview rejected: aim ray found no target")
 			: TEXT("prepared preview rejected: requires an aim hit"));

@@ -1,9 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// GDF 온디맨드 빌드를 위한 최소 커스텀 FX 시스템. Niagara처럼 씬의 FFXSystemSet에 sibling으로 등록되어,
-// 엔진 GDF 빌드 게이트(ShouldPrepareGlobalDistanceField)가 OR로 읽는 UsesGlobalDistanceField()에
-// "이 씬에 GDF 로프가 활성인가"(RopeGDF::IsGDFActive)를 실어준다. 나머지 FFXSystemInterface 순수가상은
-// 전부 no-op 스텁 — 이 시스템은 실제 시뮬/렌더를 하지 않고 GDF 필요 신호만 전달한다.
+// A minimal custom FX system for building the global distance field on demand. Like Niagara it registers as a sibling
+// in the scene's FFXSystemSet, so that the engine's build gate, ShouldPrepareGlobalDistanceField, which reads
+// UsesGlobalDistanceField() as an OR, is told whether this scene has an active rope using the field, through
+// RopeGDF::IsGDFActive. Every other pure virtual of FFXSystemInterface is a no-op stub: this system runs no
+// simulation and no rendering and only conveys the signal that the field is needed.
 
 #pragma once
 
@@ -14,7 +15,7 @@
 class FRopeGDFFXSystem final : public FFXSystemInterface
 {
 public:
-	/** RegisterCustomFXSystem에 넘길 고유 이름. */
+	/** The unique name passed to RegisterCustomFXSystem. */
 	static const FName Name;
 
 	FRopeGDFFXSystem(ERHIFeatureLevel::Type InFeatureLevel, EShaderPlatform InShaderPlatform, FGPUSortManager* InGPUSortManager)
@@ -24,13 +25,13 @@ public:
 	{
 	}
 
-	//~ 핵심: 이 씬에 GDF 로프가 활성이면 true → 엔진이 GDF를 빌드한다.
+	//~ The essential one: true when this scene has an active rope using the field, which makes the engine build it.
 	virtual bool UsesGlobalDistanceField() const override;
 
-	//~ GPUSortManager는 생성 시 받은 것을 그대로 돌려줘야 한다(렌더 루프가 사용).
+	//~ The GPU sort manager must be returned exactly as it was given at construction, since the render loop uses it.
 	virtual FGPUSortManager* GetGPUSortManager() const override { return GPUSortManager; }
 
-	//~ 이하 순수가상 스텁(이 시스템은 파티클/벡터필드/GPU 시뮬을 하지 않음).
+	//~ The pure virtual stubs below; this system runs no particles, vector fields or GPU simulation.
 	virtual void Tick(UWorld* /*World*/, float /*DeltaSeconds*/) override {}
 #if WITH_EDITOR
 	virtual void Suspend() override {}
@@ -54,5 +55,5 @@ private:
 	FGPUSortManager*       GPUSortManager = nullptr;
 };
 
-/** RegisterCustomFXSystem 팩토리. 씬 생성 시 엔진이 호출해 sibling FX 시스템을 만든다. */
+/** The RegisterCustomFXSystem factory, called by the engine when a scene is created to build the sibling FX system. */
 FFXSystemInterface* CreateRopeGDFFXSystem(ERHIFeatureLevel::Type InFeatureLevel, EShaderPlatform InShaderPlatform, FGPUSortManager* InGPUSortManager);

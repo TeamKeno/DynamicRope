@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// URopeComponent의 Contacting -> Wrapping 오케스트레이션 회귀 테스트.
+// Regression tests for URopeComponent's orchestration from Contacting into Wrapping.
 
 #include "Misc/AutomationTest.h"
 
@@ -26,8 +26,8 @@ struct FRopeWrappingFallbackTestSeam
 		Rope.ContactTracker.DwellTime = Rope.WrapConfig.WrapDecisionTime;
 		Rope.SimFrame.FrameColliders = { &Collider };
 
-		// BoneCenteredGuidePlane이 캡슐의 Z축을 사용하도록 고정해 테스트가 컴포넌트 축 폴백의
-		// 동률 선택 순서에 의존하지 않게 한다.
+		// Pins BoneCenteredGuidePlane to the capsule's Z axis so the test does not depend on the tie-breaking order of
+		// the component axis fallback.
 		Rope.bHasFlightGuidePlaneNormal = true;
 		Rope.FlightGuidePlaneNormal = FVector::ZAxisVector;
 		Rope.PendingWrapSeed = Rope.BuildWrapSeedFromContactingState(Candidates);
@@ -67,8 +67,8 @@ struct FRopeWrappingFallbackTestSeam
 		Rope.AimTargeting.SetWrapTargetLock(Context);
 		Rope.SimFrame.FrameColliders = { &Primary, &DeeperNeighbor };
 
-		// Flight에서 exact primary로 이미 capture된 상태. 다음 120Hz Contacting tick에서도 deeper
-		// same-mesh neighbor가 primary를 가려 dismiss시키지 않는지 검증한다.
+		// Already captured on an exact primary during Flight. This verifies that on the next contacting tick at 120 Hz
+		// a deeper neighbour on the same mesh does not hide the primary and cause it to be dismissed.
 		Rope.ContactTracker.CandidateMesh = Mesh;
 		Rope.ContactTracker.CandidateBone = PrimaryBone;
 		Rope.ContactTracker.CandidateNodes = { 1 };
@@ -166,7 +166,7 @@ bool FRopeSyntheticLatchAnchorFallbackTest::RunTest(const FString& Parameters)
 	URopeComponent* Rope = NewObject<URopeComponent>();
 	FRopeWrappingFallbackTestSeam::ConfigureContactingSeed(*Rope, Mesh, Capsule, Candidates);
 
-	// 정상 Contacting 시드 조립은 실제 contact point/normal/tangent 기반 anchor를 반드시 만든다.
+	// A normal contacting seed assembly must produce an anchor based on the real contact point, normal and tangent.
 	const FRopeWrapState& NormalSeed = FRopeWrappingFallbackTestSeam::GetPendingSeed(*Rope);
 	TestEqual(TEXT("valid Contacting candidate creates one latch"), NormalSeed.Latched.Num(), 1);
 	TestEqual(TEXT("valid Contacting candidate creates one surface anchor"), NormalSeed.Anchors.Num(), 1);
@@ -176,8 +176,8 @@ bool FRopeSyntheticLatchAnchorFallbackTest::RunTest(const FString& Parameters)
 			NormalSeed.Anchors[0].LocalNormal.Equals(FVector::XAxisVector, KINDA_SMALL_NUMBER));
 	}
 
-	// 정상 조립 결과에서 anchor만 제거해 문제 상태를 재현한다. 경고 발생과 함께 synthetic anchor가
-	// 만들어지고 Wrapping이 시작되면 fallback 분기가 실제 실행 가능한 코드임이 확인된다.
+	// The problem state is reproduced by removing the anchor alone from a normal assembly. A warning together with a
+	// synthetic anchor being created and wrapping starting confirms the fallback branch is genuinely reachable code.
 	AddExpectedError(TEXT("StartWrapping fell back to the synthetic latch anchor"),
 		EAutomationExpectedErrorFlags::Contains, 1);
 	FRopeWrappingFallbackTestSeam::RemoveContactAnchorAndStartWrapping(*Rope);
@@ -328,31 +328,32 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeReelFeasibilityStallTest,
 
 bool FRopeReelFeasibilityStallTest::RunTest(const FString& Parameters)
 {
-	// Wrapped 릴-인 실속 게이트: 비신축 로프는 손↔앵커 직선 거리보다 짧아질 수 없다 — 대상이 안
-	// 끌려오는데 계속 감으면 위반이 무한 누적돼 하드 Chaos 리밋이 관절과 싸운다(스네어 바둥거림).
+	// The wrapped reel-in stall gate: an inextensible rope cannot become shorter than the straight-line distance from
+	// the hand to the anchor, so reeling in while the target does not come closer accumulates an unbounded violation
+	// and the hard Chaos limit fights the joints.
 	USceneComponent* Target = NewObject<USceneComponent>();
-	Target->SetWorldLocation(FVector(20.0f, 0.0f, 0.0f)); // 앵커 월드 = 20 + 60 = (80,0,0)
+	Target->SetWorldLocation(FVector(20.0f, 0.0f, 0.0f)); // The anchor's world position is 20 + 60 = (80,0,0).
 
 	URopeComponent* Rope = NewObject<URopeComponent>();
 	FRopeWrappingFallbackTestSeam::ConfigureExternalAnchor(*Rope, Target, ERopePhase::Wrapped);
-	Rope->RopeLength = 60.0f;    // SetRopeLength 클램프 상한을 Sim(60cm)과 일치.
-	Rope->MinRopeLength = 10.0f; // 하한 클램프가 실속 판정을 가리지 않게.
+	Rope->RopeLength = 60.0f;    // Matches the SetRopeLength clamp's upper bound to the simulation's 60 cm.
+	Rope->MinRopeLength = 10.0f; // Keeps the lower clamp from hiding the stall decision.
 	Rope->SetReelRate(120.0f);
 	const float Dt = 1.0f / 60.0f;
 
-	// (1) 실속: 손(-10)↔앵커(80) 직선 90cm > 재질 60cm — 더 감기지 않는다.
+	// (1) Stalled: the straight line from the hand at -10 to the anchor at 80 is 90 cm, longer than the material's 60 cm, so it reels in no further.
 	Rope->SetWorldLocation(FVector(-10.0f, 0.0f, 0.0f));
 	FRopeWrappingFallbackTestSeam::Reel(*Rope, Dt);
 	TestTrue(TEXT("reel stalls when the straight span already exceeds material length"),
 		FMath::IsNearlyEqual(Rope->GetCurrentRopeLength(), 60.0f, 0.01f));
 
-	// (2) 정상 견인: 거리 30cm < 60cm — 종전 속도 그대로 감긴다.
+	// (2) Normal traction: a distance of 30 cm is under 60 cm, so it reels in at the previous rate.
 	Rope->SetWorldLocation(FVector(50.0f, 0.0f, 0.0f));
 	FRopeWrappingFallbackTestSeam::Reel(*Rope, Dt);
 	TestTrue(TEXT("reel proceeds at full rate while the span leaves room"),
 		FMath::IsNearlyEqual(Rope->GetCurrentRopeLength(), 60.0f - 120.0f * Dt, 0.01f));
 
-	// (3) 하한 안착: 계속 감으면 거리 − 슬랙(릴 2프레임 스텝)에서 멈춘다 = 유계 당김 바이어스.
+	// (3) Settling at the lower bound: reeling in continuously stops at the distance minus the slack, being two frames of reel step, giving a bounded pulling bias.
 	for (int32 i = 0; i < 60; ++i)
 	{
 		FRopeWrappingFallbackTestSeam::Reel(*Rope, Dt);
@@ -361,7 +362,7 @@ bool FRopeReelFeasibilityStallTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("reel settles at span minus the bounded pull bias"),
 		FMath::IsNearlyEqual(Rope->GetCurrentRopeLength(), 30.0f - StallSlack, 0.1f));
 
-	// (4) 풀기(-)는 게이트 무관 — 종전 그대로 늘어난다.
+	// (4) Paying out, being negative, is unaffected by the gate and lengthens exactly as before.
 	Rope->SetReelRate(-120.0f);
 	FRopeWrappingFallbackTestSeam::Reel(*Rope, Dt);
 	TestTrue(TEXT("reel-out is not gated"),

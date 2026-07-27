@@ -1,20 +1,23 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// ResolveMode == ③ GuaranteedWrap일 때 의미 없는 튜닝을 디테일 패널에서 걷어내는 클래스 커스터마이즈.
-// URopeComponent와 URopePreset **양쪽에 등록한다** — 프리셋은 컴포넌트 프로퍼티의 1:1 미러라
-// (ResolveMode/HoldConfig가 같은 이름의 형제 멤버) 규칙이 그대로 성립하고, 두 패널이 어긋나지 않도록
-// 규칙을 한 곳에만 둔다. 그래서 클래스가 소유 타입으로 템플릿화되어 있다.
+// A class customization that removes tuning made meaningless by a resolve mode of GuaranteedWrap from the details panel.
+// It is registered for both URopeComponent and URopePreset: the preset is a one-to-one mirror of the component's
+// properties, with ResolveMode and HoldConfig as sibling members of the same name, so the rule holds identically, and
+// keeping it in one place stops the two panels disagreeing. That is why the class is templated on its owning type.
 //
-// 역할 분담:
-//  - WrapConfig / WhipConfig: 클래스 직속 struct 멤버라 ResolveMode를 볼 수 있어 각 헤더
-//    (RopeComponent.h / RopePreset.h)의 구조체-멤버 EditCondition으로 회색처리한다(여기서 손대지 않음).
-//    ShowOnlyInnerProperties로 승격된 인라인 자식까지 edit-const가 프로퍼티 노드 트리를 타고 함께 회색이 된다.
-//  - 이 클래스가 담당하는 유일한 대상: HoldConfig 내부의 Release 필드 3종. 구조체 *안*이라 EditCondition이
-//    바깥의 ResolveMode를 볼 수 없으므로, 여기서 HideProperty로 숨긴다(자동 release는 ①②만 유효 —
-//    ③은 명시 해제만이라 무의미. 제자리 회색처리가 마땅치 않아 숨김으로 정함 — 2026-07-25 결정).
-//    Hold의 나머지(Pull/Tether/Taut)는 ③에서도 유효하므로 건드리지 않는다.
+// The division of responsibility:
+//  - WrapConfig and WhipConfig are struct members directly on the class and can therefore see the resolve mode, so
+//    they are greyed out by a struct-member EditCondition in each header, RopeComponent.h and RopePreset.h, and are
+//    not touched here. The edit-const propagates down the property node tree to the inline children promoted by
+//    ShowOnlyInnerProperties as well.
+//  - The only thing this class handles is the three release fields inside HoldConfig. They are inside a struct, so
+//    their EditCondition cannot see the resolve mode outside it, and they are hidden here through HideProperty. The
+//    automatic release is meaningful under FullSimulation and AssistedJudged alone, since GuaranteedWrap releases
+//    explicitly, and there is no clean way to grey them in place, so hiding them was chosen.
+//    The rest of the hold configuration, being the pull, tether and taut settings, is meaningful under GuaranteedWrap
+//    too and is left alone.
 //
-// ①FullSimulation·②AssistedJudged는 전부 그대로 편집 가능하다.
+// FullSimulation and AssistedJudged remain fully editable.
 
 #pragma once
 
@@ -27,7 +30,7 @@
 #include "DetailLayoutBuilder.h"
 #include "PropertyHandle.h"
 
-/** TRopeOwner: ResolveMode와 HoldConfig를 멤버로 갖는 클래스(URopeComponent / URopePreset). */
+/** TRopeOwner is a class with ResolveMode and HoldConfig as members, being URopeComponent or URopePreset. */
 template <typename TRopeOwner>
 class TRopeResolveModeDetails : public IDetailCustomization
 {
@@ -40,8 +43,8 @@ public:
 	//~ IDetailCustomization
 	virtual void CustomizeDetails(IDetailLayoutBuilder& DetailBuilder) override
 	{
-		// ResolveMode가 바뀌면 숨김 대상이 달라지므로 패널을 강제 리프레시한다.
-		// (customization은 EditCondition과 달리 값 변경만으로 재실행되지 않는다.)
+		// Changing the resolve mode changes what is hidden, so the panel is force-refreshed.
+		// (Unlike an EditCondition, a customization is not re-run by a value change alone.)
 		const TSharedRef<IPropertyHandle> ResolveModeHandle =
 			DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(TRopeOwner, ResolveMode));
 		if (ResolveModeHandle->IsValidHandle())
@@ -64,7 +67,7 @@ public:
 			}
 		}
 
-		// 대상이 전부 ③일 때만 게이트한다. ①②가 하나라도 섞이면(다중 선택) 보수적으로 그대로 둔다.
+		// Gated only when every selected object is GuaranteedWrap. If even one FullSimulation or AssistedJudged is mixed in, as with a multiple selection, it is conservatively left alone.
 		if (OwnerCount == 0 || !bAllGuaranteed)
 		{
 			return;

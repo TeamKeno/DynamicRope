@@ -7,7 +7,7 @@ uint64 URopeSDFData::GetRuntimeVolumeId() const
 {
 	if (RuntimeVolumeId == 0)
 	{
-		// 프로세스 전역 단조 증가 카운터(재사용 없음). collider 조립(GT)에서 호출된다.
+		// A process-wide monotonically increasing counter, never reused. Called during collider assembly on the game thread.
 		static FThreadSafeCounter64 GRuntimeVolumeIdCounter(0);
 		RuntimeVolumeId = static_cast<uint64>(GRuntimeVolumeIdCounter.Increment());
 	}

@@ -37,7 +37,7 @@ void FRopePreparedThrowPreview::StoreGuideFrameLocal(const USceneComponent* InGu
 		return;
 	}
 
-	// spline 점과 throw origin을 같은 owner frame에 저장해야 애니메이션 소켓 이동과 분리된다.
+	// The spline points and the throw origin have to be stored in the same owner frame to stay decoupled from the animated socket's movement.
 	const FTransform GuideTransform = InGuideFrame->GetComponentTransform();
 	GuideFrameLocalPoints.Reserve(RenderPreview.Points.Num());
 	for (const FVector& Point : RenderPreview.Points)

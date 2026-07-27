@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// RopeFlightDebug::SelectCandidateBoxes 단위 테스트 — Flight 디버거의 후보 박스 선택 규칙을 월드 없이
-// 검증한다. 핵심: 포착 대상(tracker) 대표는 penetration top-N 밖이어도 항상 포함하되 중복은 없고,
-// Mesh가 다르면 같은 Bone이어도 대표로 오인하지 않는다. 기본은 대표만, Advanced는 top5로 채운다.
+// Unit tests for RopeFlightDebug::SelectCandidateBoxes, verifying the flight debugger's candidate box selection rules
+// with no world. The essentials: the representative of the tracked target is always included even when it falls
+// outside the top N by penetration, never duplicated, and a matching bone name on a different mesh is not mistaken
+// for the representative. The default draws the representative alone, while the advanced view fills up to five.
 
 #include "Misc/AutomationTest.h"
 
@@ -32,7 +33,7 @@ namespace
 	}
 }
 
-// 포착 대상이 penetration 상 꼴찌(top-5 밖)여도 기본/Advanced 모두에 포함된다.
+// A tracked target last by penetration, meaning outside the top five, is included in both the default and the advanced view.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightSelectCaptureOutsideTopTest,
 	"DynamicRope.FlightDebug.CaptureTargetIncludedEvenIfLowPenetration",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -43,7 +44,7 @@ bool FRopeFlightSelectCaptureOutsideTopTest::RunTest(const FString& Parameters)
 	USceneComponent* MeshB = NewObject<USceneComponent>();
 	const FObjectKey KeyA(MeshA), KeyB(MeshB);
 
-	// arm/MeshB 5개(높은 penetration) + spine/MeshA 1개(가장 낮은 penetration = tracker).
+	// Five arm candidates on mesh B with high penetration, plus one spine candidate on mesh A with the lowest penetration, which is the tracked one.
 	TArray<FRopeContactCandidate> Cands = {
 		MakeCand(10, FName("arm"), 50.0f), MakeCand(11, FName("arm"), 40.0f),
 		MakeCand(12, FName("arm"), 30.0f), MakeCand(13, FName("arm"), 20.0f),
@@ -51,7 +52,7 @@ bool FRopeFlightSelectCaptureOutsideTopTest::RunTest(const FString& Parameters)
 	};
 	const TArray<FObjectKey> Keys = { KeyB, KeyB, KeyB, KeyB, KeyB, KeyA };
 
-	// 기본 [U]: 대표 1개만.
+	// The default view: the representative alone.
 	const RopeFlightDebug::FCandidateSelection Base =
 		RopeFlightDebug::SelectCandidateBoxes(Cands, Keys, FName("spine"), KeyA, 1, false);
 	TestEqual(TEXT("base capture idx"), Base.CaptureTargetIndex, 5);
@@ -59,7 +60,7 @@ bool FRopeFlightSelectCaptureOutsideTopTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("base hidden"), Base.Hidden, 5);
 	TestTrue(TEXT("base box is capture"), Base.BoxIndices.Num() == 1 && Base.BoxIndices[0] == 5);
 
-	// Advanced [U]+[K]: 대표 + top4 = 5, 대표 포함.
+	// The advanced view: the representative plus the top four, giving five, with the representative included.
 	const RopeFlightDebug::FCandidateSelection Adv =
 		RopeFlightDebug::SelectCandidateBoxes(Cands, Keys, FName("spine"), KeyA, 5, true);
 	TestEqual(TEXT("adv shown"), Adv.Shown, 5);
@@ -69,7 +70,7 @@ bool FRopeFlightSelectCaptureOutsideTopTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 포착 대상이 이미 top-5 안(최고 penetration)이면 대표 슬롯과 일반 채우기에서 중복되지 않는다.
+// A tracked target already inside the top five, with the highest penetration, is not duplicated between the representative slot and the ordinary fill.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightSelectNoDuplicateTest,
 	"DynamicRope.FlightDebug.CaptureTargetNotDuplicatedWhenInTop",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -80,7 +81,7 @@ bool FRopeFlightSelectNoDuplicateTest::RunTest(const FString& Parameters)
 	USceneComponent* MeshB = NewObject<USceneComponent>();
 	const FObjectKey KeyA(MeshA), KeyB(MeshB);
 
-	// tracker(spine/MeshA)가 최고 penetration.
+	// The tracked spine on mesh A has the highest penetration.
 	TArray<FRopeContactCandidate> Cands = {
 		MakeCand(20, FName("spine"), 100.0f), MakeCand(10, FName("arm"), 40.0f),
 		MakeCand(11, FName("arm"), 30.0f), MakeCand(12, FName("arm"), 20.0f),
@@ -92,17 +93,17 @@ bool FRopeFlightSelectNoDuplicateTest::RunTest(const FString& Parameters)
 		RopeFlightDebug::SelectCandidateBoxes(Cands, Keys, FName("spine"), KeyA, 5, true);
 	TestEqual(TEXT("capture idx"), Adv.CaptureTargetIndex, 0);
 	TestEqual(TEXT("shown 5"), Adv.Shown, 5);
-	// 인덱스 0이 정확히 한 번만 등장.
+	// Index zero appears exactly once.
 	int32 CountZero = 0;
 	for (int32 i : Adv.BoxIndices) { if (i == 0) { ++CountZero; } }
 	TestEqual(TEXT("capture appears once"), CountZero, 1);
-	// 전 인덱스 유일(중복 없음).
+	// Every index is unique, with no duplicates.
 	TSet<int32> Unique(Adv.BoxIndices);
 	TestEqual(TEXT("all indices unique"), Unique.Num(), Adv.BoxIndices.Num());
 	return true;
 }
 
-// Bone 이름이 같아도 Mesh가 다르면 포착 대상으로 오인하지 않는다.
+// A matching bone name on a different mesh is not mistaken for the tracked target.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightSelectMeshDistinctTest,
 	"DynamicRope.FlightDebug.SameBoneDifferentMeshIsNotCaptureTarget",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -113,7 +114,7 @@ bool FRopeFlightSelectMeshDistinctTest::RunTest(const FString& Parameters)
 	USceneComponent* MeshB = NewObject<USceneComponent>();
 	const FObjectKey KeyA(MeshA), KeyB(MeshB);
 
-	// tracker = (spine, MeshA)지만 후보의 spine은 MeshB다.
+	// The tracked target is the spine on mesh A, but the candidate's spine is on mesh B.
 	TArray<FRopeContactCandidate> Cands = { MakeCand(20, FName("spine"), 100.0f) };
 	const TArray<FObjectKey> Keys = { KeyB };
 
@@ -122,7 +123,7 @@ bool FRopeFlightSelectMeshDistinctTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("no capture (mesh differs)"), Base.CaptureTargetIndex, (int32)INDEX_NONE);
 	TestEqual(TEXT("base shows nothing"), Base.Shown, 0);
 
-	// Advanced는 대표가 없으니 일반 후보로 채운다(1개뿐).
+	// With no representative, the advanced view fills from the ordinary candidates, of which there is one.
 	const RopeFlightDebug::FCandidateSelection Adv =
 		RopeFlightDebug::SelectCandidateBoxes(Cands, Keys, FName("spine"), KeyA, 5, true);
 	TestEqual(TEXT("adv no capture"), Adv.CaptureTargetIndex, (int32)INDEX_NONE);
@@ -130,21 +131,21 @@ bool FRopeFlightSelectMeshDistinctTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 포착 대상이 없으면 기본은 0개, Advanced는 top5.
+// With no tracked target the default view draws none and the advanced view draws the top five.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightSelectNoTrackerTest,
 	"DynamicRope.FlightDebug.NoTrackerBaseZeroAdvancedTop5",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeFlightSelectNoTrackerTest::RunTest(const FString& Parameters)
 {
-	// tracker 없음(TrackerBone = None). 유효 6개 + 무효 1개.
+	// No tracked target, meaning the tracker bone is none. Six valid candidates plus one invalid.
 	TArray<FRopeContactCandidate> Cands = {
 		MakeCand(10, FName("arm"), 60.0f), MakeCand(11, FName("arm"), 50.0f),
 		MakeCand(12, FName("arm"), 40.0f), MakeCand(13, FName("arm"), 30.0f),
 		MakeCand(14, FName("arm"), 20.0f), MakeCand(15, FName("arm"), 10.0f),
 		MakeCand(16, FName("arm"), 5.0f, ERopeContactCandidateSource::Actual, /*bValid=*/false),
 	};
-	const TArray<FObjectKey> Keys; // 비움 — 이 테스트는 mesh 무관.
+	const TArray<FObjectKey> Keys; // Empty, since this test does not depend on the mesh.
 
 	const RopeFlightDebug::FCandidateSelection Base =
 		RopeFlightDebug::SelectCandidateBoxes(Cands, Keys, NAME_None, FObjectKey(), 1, false);
@@ -156,21 +157,21 @@ bool FRopeFlightSelectNoTrackerTest::RunTest(const FString& Parameters)
 		RopeFlightDebug::SelectCandidateBoxes(Cands, Keys, NAME_None, FObjectKey(), 5, true);
 	TestEqual(TEXT("adv shown 5"), Adv.Shown, 5);
 	TestEqual(TEXT("adv hidden 1"), Adv.Hidden, 1);
-	// 무효 후보(index 6)는 그려지지 않는다.
+	// The invalid candidate at index six is not drawn.
 	TestFalse(TEXT("invalid not drawn"), Contains(Adv.BoxIndices, 6));
-	// penetration 상위 5개(60/50/40/30/20 = index 0..4)만.
+	// The top five by penetration alone, being 60, 50, 40, 30 and 20 at indices zero to four.
 	TestEqual(TEXT("top by penetration"), Adv.BoxIndices[0], 0);
 	return true;
 }
 
-// 동률 penetration이면 NodeIndex 오름차순으로 결정적.
+// Equal penetrations are ordered deterministically by ascending node index.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightSelectTieBreakTest,
 	"DynamicRope.FlightDebug.TieBreakByNodeIndexDeterministic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeFlightSelectTieBreakTest::RunTest(const FString& Parameters)
 {
-	// 같은 penetration, NodeIndex만 다름 — 낮은 NodeIndex가 먼저.
+	// The same penetration with different node indices, so the lower node index comes first.
 	TArray<FRopeContactCandidate> Cands = {
 		MakeCand(30, FName("arm"), 50.0f), MakeCand(10, FName("arm"), 50.0f),
 		MakeCand(20, FName("arm"), 50.0f),

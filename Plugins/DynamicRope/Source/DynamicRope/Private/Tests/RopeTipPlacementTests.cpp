@@ -8,8 +8,9 @@
 
 #include "Logic/RopeTipPlacement.h"
 
-// Pierce 임베드 배치 수학: 팁 소켓이 히트점에 관통 방향으로 박히고, 꼬리 소켓이 로프 연결점이 되는가.
-// FRopeTipPlacement는 world 무의존이라 소켓 로컬만으로 계약을 잠근다.
+// The placement mathematics of a pierce embed: whether the tip socket embeds at the hit point along the pierce
+// direction and the tail socket becomes the rope's attachment point.
+// FRopeTipPlacement has no world dependency, so the contract is pinned with socket locals alone.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceEmbedMathTest,
 	"DynamicRope.Pierce.EmbedPlacesTipAtHit",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -17,11 +18,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceEmbedMathTest,
 bool FRopePierceEmbedMathTest::RunTest(const FString& Parameters)
 {
 	const FVector HitPoint(0, 60, 0);
-	const FVector PierceDir(0, 1, 0); // 축 비정렬 방향으로 회전까지 검증.
+	const FVector PierceDir(0, 1, 0); // An axis-misaligned direction, so the rotation is verified too.
 
-	// 팁 소켓은 메쉬 X로 +50, 비자명 회전(Z 90°)까지 줘 소켓 회전에 무관한 계약을 확인한다.
+	// The tip socket is 50 along the mesh's X with a non-trivial rotation, 90 degrees about Z, which confirms the contract is independent of the socket's rotation.
 	const FTransform TipSocketLocal(FQuat(FVector(0, 0, 1), HALF_PI), FVector(50, 10, 0));
-	const FTransform TailSocketLocal(FQuat::Identity, FVector(-30, -5, 0)); // 꼬리는 Head와 다른 두 점 축을 만든다.
+	const FTransform TailSocketLocal(FQuat::Identity, FVector(-30, -5, 0)); // The tail forms a two-point axis distinct from the head.
 
 	FTransform ComponentWorld;
 	FVector TailWorld;
@@ -29,13 +30,13 @@ bool FRopePierceEmbedMathTest::RunTest(const FString& Parameters)
 		/*bHasTailSocket*/ true, TailSocketLocal, ComponentWorld, TailWorld);
 
 	const FTransform TipWorld = TipSocketLocal * ComponentWorld;
-	TestTrue(TEXT("팁 소켓이 히트점에 박힘"), TipWorld.GetLocation().Equals(HitPoint, 0.01f));
-	TestTrue(TEXT("Head-Tail 벡터 = 관통 방향"),
+	TestTrue(TEXT("the tip socket embeds at the hit point"), TipWorld.GetLocation().Equals(HitPoint, 0.01f));
+	TestTrue(TEXT("the head-to-tail vector is the pierce direction"),
 		(TipWorld.GetLocation() - TailWorld).GetSafeNormal().Equals(PierceDir, 0.01f));
 
-	// 로프 연결점 = 꼬리 소켓 월드.
+	// The rope's attachment point is the tail socket in world space.
 	const FVector ExpectedTail = (TailSocketLocal * ComponentWorld).GetLocation();
-	TestTrue(TEXT("꼬리 소켓이 로프 연결점"), TailWorld.Equals(ExpectedTail, 0.01f));
+	TestTrue(TEXT("the tail socket is the rope attachment point"), TailWorld.Equals(ExpectedTail, 0.01f));
 
 	const FTransform Relative(FQuat::Identity, FVector::ZeroVector, FVector(0.2f, 0.2f, 0.2f));
 	const FTransform EffectiveTipSocketLocal = TipSocketLocal * Relative;
@@ -47,25 +48,25 @@ bool FRopePierceEmbedMathTest::RunTest(const FString& Parameters)
 	const FTransform ScaledMeshWorld = Relative * ScaledBaseWorld;
 	const FTransform ScaledTipWorld = TipSocketLocal * ScaledMeshWorld;
 	const FTransform ScaledTailTransform = TailSocketLocal * ScaledMeshWorld;
-	TestTrue(TEXT("Relative scale 이후에도 팁 소켓이 히트점에 박힘"),
+	TestTrue(TEXT("the tip socket still embeds at the hit point after a relative scale"),
 		ScaledTipWorld.GetLocation().Equals(HitPoint, 0.01f));
-	TestTrue(TEXT("Relative scale 이후에도 꼬리 소켓이 로프 연결점"),
+	TestTrue(TEXT("the tail socket is still the rope attachment point after a relative scale"),
 		ScaledTailWorld.Equals(ScaledTailTransform.GetLocation(), 0.01f));
-	TestTrue(TEXT("Relative scale 이후에도 Head-Tail 벡터 = 관통 방향"),
+	TestTrue(TEXT("the head-to-tail vector is still the pierce direction after a relative scale"),
 		(ScaledTipWorld.GetLocation() - ScaledTailTransform.GetLocation()).GetSafeNormal().Equals(PierceDir, 0.01f));
-	TestTrue(TEXT("Relative scale 0.2 유지"),
+	TestTrue(TEXT("the relative scale of 0.2 is preserved"),
 		ScaledMeshWorld.GetScale3D().Equals(Relative.GetScale3D(), 0.001f));
 
-	// 꼬리 소켓 없음 → 연결점은 메쉬 원점.
+	// With no tail socket the attachment point is the mesh origin.
 	FTransform CW2;
 	FVector Tail2;
 	FRopeTipPlacement::SolvePierceEmbed(HitPoint, PierceDir, TipSocketLocal,
 		/*bHasTailSocket*/ false, FTransform::Identity, CW2, Tail2);
-	TestTrue(TEXT("꼬리 소켓 없으면 연결점=메쉬 원점"), Tail2.Equals(CW2.GetLocation(), 0.01f));
+	TestTrue(TEXT("with no tail socket the attachment point is the mesh origin"), Tail2.Equals(CW2.GetLocation(), 0.01f));
 	return true;
 }
 
-// Tail 소켓 추종 수학: 로프 끝 노드가 메쉬 원점이 아니라 꼬리 소켓에 붙어야 한다.
+// The mathematics of following the tail socket: the rope's end node has to attach to the tail socket rather than to the mesh origin.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceTailSocketFollowMathTest,
 	"DynamicRope.Pierce.TailSocketFollowMath",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -83,9 +84,9 @@ bool FRopePierceTailSocketFollowMathTest::RunTest(const FString& Parameters)
 
 	const FTransform TailWorld = TailSocketLocal * ComponentWorld;
 	const FTransform HeadWorld = HeadSocketLocal * ComponentWorld;
-	TestTrue(TEXT("꼬리 소켓 위치 = 로프 연결점"),
+	TestTrue(TEXT("the tail socket's position is the rope attachment point"),
 		TailWorld.GetLocation().Equals(RopeAttachWorld, 0.01f));
-	TestTrue(TEXT("Head-Tail 벡터 = 로프 끝 방향"),
+	TestTrue(TEXT("the head-to-tail vector is the direction of the rope's end"),
 		(HeadWorld.GetLocation() - TailWorld.GetLocation()).GetSafeNormal().Equals(ForwardDir, 0.01f));
 
 	const FTransform Relative(
@@ -102,17 +103,17 @@ bool FRopePierceTailSocketFollowMathTest::RunTest(const FString& Parameters)
 	const FTransform RenderedMeshWorld = Relative * BaseWorld;
 	const FTransform RenderedTailWorld = TailSocketLocal * RenderedMeshWorld;
 	const FTransform RenderedHeadWorld = HeadSocketLocal * RenderedMeshWorld;
-	TestTrue(TEXT("RelativeTransform 이후에도 꼬리 소켓 위치 유지"),
+	TestTrue(TEXT("the tail socket's position is preserved through a relative transform"),
 		RenderedTailWorld.GetLocation().Equals(RopeAttachWorld, 0.01f));
-	TestTrue(TEXT("RelativeTransform 이후에도 Head-Tail 방향 유지"),
+	TestTrue(TEXT("the head-to-tail direction is preserved through a relative transform"),
 		(RenderedHeadWorld.GetLocation() - RenderedTailWorld.GetLocation()).GetSafeNormal().Equals(ForwardDir, 0.01f));
-	TestTrue(TEXT("Relative scale 0.2 유지"),
+	TestTrue(TEXT("the relative scale of 0.2 is preserved"),
 		RenderedMeshWorld.GetScale3D().Equals(Relative.GetScale3D(), 0.001f));
 	return true;
 }
 
-// Wrapped 복원 round-trip: 얼린 bone-local(LocalMeshTransform)을 본 트랜스폼으로 되살리면 커밋 자세와 일치.
-// UpdateTipMeshTransform의 Wrapped 분기(MeshWorld = LocalMeshTransform * BoneXform)가 이 항등에 의존한다.
+// The wrapped restoration round trip: reviving the frozen bone-local transform through the bone transform matches the
+// pose at commit. The wrapped branch of UpdateTipMeshTransform depends on that identity.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceEmbedBoneLocalRoundTripTest,
 	"DynamicRope.Pierce.EmbedBoneLocalRoundTrip",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -128,16 +129,16 @@ bool FRopePierceEmbedBoneLocalRoundTripTest::RunTest(const FString& Parameters)
 	FRopeTipPlacement::SolvePierceEmbed(HitPoint, PierceDir, TipSocketLocal,
 		/*bHasTailSocket*/ false, FTransform::Identity, ComponentWorld, TailWorld);
 
-	// 임의의 본 트랜스폼(위치+회전+스케일).
+	// An arbitrary bone transform, with a position, a rotation and a scale.
 	const FTransform BoneXform(FQuat(FVector(0, 0, 1), 1.1f), FVector(300, 50, 20), FVector(1.0f));
 
-	// 커밋 시 저장: LocalMeshTransform = ComponentWorld를 본 기준으로.
+	// Stored at commit: the local mesh transform is the component's world transform relative to the bone.
 	const FTransform LocalMeshTransform = ComponentWorld.GetRelativeTransform(BoneXform);
-	// 매 프레임 복원: MeshWorld = LocalMeshTransform * BoneXform == ComponentWorld여야 팝/드리프트가 없다.
+	// Restored every frame: the mesh world transform is the local mesh transform composed with the bone transform, which has to equal the component's world transform or there is a pop and drift.
 	const FTransform Restored = LocalMeshTransform * BoneXform;
 
-	TestTrue(TEXT("복원 위치 = 커밋 위치"), Restored.GetLocation().Equals(ComponentWorld.GetLocation(), 0.01f));
-	TestTrue(TEXT("복원 회전 = 커밋 회전"),
+	TestTrue(TEXT("the restored position matches the position at commit"), Restored.GetLocation().Equals(ComponentWorld.GetLocation(), 0.01f));
+	TestTrue(TEXT("the restored rotation matches the rotation at commit"),
 		Restored.GetRotation().Equals(ComponentWorld.GetRotation(), 0.001f));
 	return true;
 }
@@ -153,15 +154,15 @@ bool FRopePierceAimYawLockTest::RunTest(const FString& Parameters)
 	const FVector AimDir = FVector(0.0f, 1.0f, 0.4f).GetSafeNormal();
 	const FVector Locked = FRopeTipPlacement::MakeAimYawLockedDirection(SourceDir, AimDir, Up);
 
-	TestTrue(TEXT("상하 기울기 유지"),
+	TestTrue(TEXT("the vertical tilt is preserved"),
 		FMath::IsNearlyEqual(FVector::DotProduct(Locked, Up), FVector::DotProduct(SourceDir, Up), 0.001f));
 	const FVector LockedFlat = FVector::VectorPlaneProject(Locked, Up).GetSafeNormal();
 	const FVector AimFlat = FVector::VectorPlaneProject(AimDir, Up).GetSafeNormal();
-	TestTrue(TEXT("수평 yaw는 aim 방향"), LockedFlat.Equals(AimFlat, 0.001f));
+	TestTrue(TEXT("the horizontal yaw is the aim direction"), LockedFlat.Equals(AimFlat, 0.001f));
 
 	const FVector VerticalAimResult = FRopeTipPlacement::MakeAimYawLockedDirection(
 		SourceDir, FVector::UpVector, Up);
-	TestTrue(TEXT("수평 aim이 없으면 원래 방향 유지"), VerticalAimResult.Equals(SourceDir, 0.001f));
+	TestTrue(TEXT("with no horizontal aim the original direction is preserved"), VerticalAimResult.Equals(SourceDir, 0.001f));
 	return true;
 }
 

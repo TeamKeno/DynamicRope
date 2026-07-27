@@ -7,9 +7,9 @@ namespace RopeTraction
 {
 	float ComputeAxisDeltaV(float CurAlong, const FRopeAxisServo& Servo)
 	{
-		// 상쇄 기준: 바깥으로 가고 있으면 0에서 출발한 것으로 본다(그 상쇄분은 아래 ΔV에 포함돼 함께 인가된다).
+		// The baseline for cancellation: movement outwards is treated as starting from zero, and that cancelled amount is included in the velocity delta below and applied with it.
 		const float Base = Servo.bCancelOutward ? FMath::Max(CurAlong, 0.0f) : CurAlong;
-		// 가속만 모드에서 이미 목표 이상이면 Base 유지(= 제동 없음).
+		// In accelerate-only mode, already being at or past the target keeps the baseline, meaning no braking.
 		const bool bApproach = Servo.bBidirectional || (Servo.TargetSpeed > Base);
 		const float Final = bApproach ? (Base + (Servo.TargetSpeed - Base) * Servo.Alpha) : Base;
 		return Final - CurAlong;
@@ -98,10 +98,10 @@ namespace RopeTraction
 	{
 		if (Current.IsNearlyZero())
 		{
-			return Target; // 미시드 — 측정값으로 시드(래그 없음).
+			return Target; // Unseeded, so it is seeded from the measurement, with no lag.
 		}
 		const FVector Smoothed = FMath::Lerp(Current, Target, Alpha).GetSafeNormal();
-		// 정반대 방향 상쇄 축퇴(180° 반전 순간): Lerp가 0이 되면 raw로 재시드한다.
+		// The degenerate case where exactly opposite directions cancel, at the instant of a 180 degree reversal: when the interpolation reaches zero it is reseeded from the raw value.
 		return Smoothed.IsNearlyZero() ? Target : Smoothed;
 	}
 
@@ -118,7 +118,7 @@ namespace RopeTraction
 
 	bool EvaluateTautGate(float Tension, float Threshold, float ReleaseRatio, bool bWasTaut)
 	{
-		// 진입/유지 임계 분리(히스테리시스). Threshold ≤ 0이면 둘 다 "장력 > ~0"으로 수렴한다(종전 게이트).
+		// Separate engage and sustain thresholds, giving hysteresis. At a threshold of zero or below, both converge on a tension above about zero, which is the previous gate.
 		const float EnterAbove = FMath::Max(Threshold, KINDA_SMALL_NUMBER);
 		const float StayAbove = FMath::Max(Threshold * FMath::Clamp(ReleaseRatio, 0.0f, 1.0f), KINDA_SMALL_NUMBER);
 		return Tension > (bWasTaut ? StayAbove : EnterAbove);
@@ -128,11 +128,12 @@ namespace RopeTraction
 	{
 		if (RestLen <= KINDA_SMALL_NUMBER)
 		{
-			// 자유 구간 없음(앵커=손) 등 판정 불능 — 팽팽 아님.
+			// Undecidable, as when there is no free span because the anchor is the hand, so it is not taut.
 			return false;
 		}
-		// 진입/유지 임계 분리(히스테리시스): 유지는 슬랙 허용을 ReleaseScale배로 완화한다. 곱이 1 이상이면
-		// "슬랙 전량 허용"(래치된 게이트가 chord와 무관하게 유지)으로 수렴한다 — 1로 캡해 음수 임계를 막는다.
+		// Separate engage and sustain thresholds, giving hysteresis: sustaining relaxes the permitted slack by the
+		// release scale. A product of one or more converges on permitting all the slack, meaning a latched gate is
+		// sustained regardless of the chord, so it is capped at one to prevent a negative threshold.
 		const float Ratio = FMath::Clamp(SlackRatio, 0.0f, 1.0f);
 		const float EffRatio = bWasTaut ? FMath::Min(Ratio * FMath::Max(ReleaseScale, 1.0f), 1.0f) : Ratio;
 		return ChordLen >= RestLen * (1.0f - EffRatio);

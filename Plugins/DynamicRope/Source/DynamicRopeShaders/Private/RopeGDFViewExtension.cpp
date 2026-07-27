@@ -18,7 +18,7 @@ void FRopeGDFViewExtension::EnsureRegistered()
 	if (!GRopeGDFViewExtension.IsValid())
 	{
 		GRopeGDFViewExtension = FSceneViewExtensions::NewExtension<FRopeGDFViewExtension>();
-		UE_LOG(LogDynamicRopeGPU, Log, TEXT("[GDF] 씬 뷰 확장 등록됨."));
+		UE_LOG(LogDynamicRopeGPU, Log, TEXT("[GDF] The scene view extension is registered."));
 	}
 }
 
@@ -33,7 +33,7 @@ void FRopeGDFViewExtension::Shutdown()
 
 void FRopeGDFViewExtension::PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily)
 {
-	// GDF 빌드 이전 시점 — 여기선 dispatch하지 않고, base pass 훅에서 쓸 패밀리만 캡처한다.
+	// This runs before the distance field is built, so nothing is dispatched here; it only captures the family the base pass hook will use.
 	CurrentFamily = &InViewFamily;
 }
 
@@ -41,7 +41,7 @@ void FRopeGDFViewExtension::PreRenderBasePass_RenderThread(FRDGBuilder& GraphBui
 {
 	check(IsInRenderingThread());
 
-	// 캡처한 패밀리는 이번 훅에서 1회만 소비(뒤따르는 base pass 없는 경로에서 stale 재사용 방지).
+	// The captured family is consumed exactly once by this hook, which prevents a stale reuse on a path with no base pass following.
 	FSceneViewFamily* Family = CurrentFamily;
 	CurrentFamily = nullptr;
 
@@ -62,7 +62,7 @@ void FRopeGDFViewExtension::PreRenderBasePass_RenderThread(FRDGBuilder& GraphBui
 		return;
 	}
 
-	// 씬별 프레임당 1회(한 프레임에 여러 패밀리/뷰가 올 수 있음).
+	// Once per frame per scene, since a frame can carry several families and views.
 	const uint32 FrameNumber = Family->FrameNumber;
 	if (const uint32* Last = LastDispatchedFrame.Find(Scene); Last && *Last == FrameNumber)
 	{
@@ -76,17 +76,19 @@ void FRopeGDFViewExtension::PreRenderBasePass_RenderThread(FRDGBuilder& GraphBui
 		return;
 	}
 
-	// 이 뷰의 GDF 파라미터(카메라 중심 clipmap; 미빌드면 null 또는 클립맵 0). 솔버가 null-체크해 스킵.
+	// This view's global distance field parameters, being a camera-centred clipmap, which are null or an empty clipmap if it is not built. The solver null-checks and skips.
 	const FGlobalDistanceFieldParameterData* GDF =
 		UE::FXRenderingUtils::GetGlobalDistanceFieldParameterData(MakeStridedView(sizeof(FSceneView), View, 1));
 
-	// GDF 함수는 TranslatedWorld를 받으므로 월드→TranslatedWorld 오프셋을 넘긴다.
+	// The distance field functions take translated world space, so the offset from world to translated world is passed in.
 	const FVector3f PreViewTranslation = (FVector3f)View->ViewMatrices.GetPreViewTranslation();
 
-	// 솔브를 씬 그래프에 얹는다. View 전달 — 솔브 CS가 bUseWorldGDF 로프에 GDF permutation을 골라 매 substep
-	// 벽을 투영한다(정적 월드 GDF 충돌은 솔브 안에서 처리; 이 뷰 확장 경로에서만 유효).
-	// 튜브는 여기서 다시 빌드하지 않는다: 솔브(=prepass 이후)에서 튜브를 덮어쓰면 depth prepass 지오메트리와
-	// base pass 지오메트리가 어긋나 EQUAL 깊이 테스트에서 픽셀이 탈락한다(로프가 검게 탐). 튜브는 프록시가
-	// 프레임 초 SetDynamicData에서 직전 프레임 PosBuf로 1회 빌드해 모든 패스에 일관되게 그린다(1프레임 렌더 지연).
+	// Adds the solve to the scene graph. The view is passed through so the solve compute shader can select the
+	// distance field permutation for ropes using the world field and project against walls every substep; static world
+	// collision against the field is handled inside the solve and is valid on this view extension path alone.
+	// The tube is not rebuilt here: overwriting it at solve time, meaning after the prepass, would leave the depth
+	// prepass geometry and the base pass geometry disagreeing and the pixels would fail the equal depth test, leaving
+	// the rope black. The tube is built once by the proxy at the start of the frame in SetDynamicData, from the
+	// previous frame's position buffer, so every pass draws it consistently, at a one-frame render latency.
 	Solver->DispatchPending_RenderThread(GraphBuilder, View, GDF, PreViewTranslation);
 }

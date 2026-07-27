@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 솔버/로직 단위 테스트용 헬퍼 — POD FRopeSimState fixture 빌더와 스크립트된 IRopeCollider mock.
-// UObject 의존이 없어 월드 없이도 순수 단위 테스트가 가능하다(솔버가 POD로 설계된 이유).
+// Helpers for the solver and logic unit tests: a POD FRopeSimState fixture builder and a scripted IRopeCollider mock.
+// They have no UObject dependency, which is what allows pure unit tests with no world, and is why the solver is POD.
 
 #pragma once
 
@@ -12,7 +12,7 @@
 
 namespace RopeTest
 {
-	/** 직선 체인 fixture. InvMass 1, 속도 0(Prev=Pos), 기본은 핀 없음(자유 체인). */
+	/** A straight chain fixture. Inverse mass one, zero velocity with the previous positions equal to the current ones, and by default no pins, giving a free chain. */
 	inline FRopeSimState MakeStraightRope(int32 NumNodes, float Length,
 		const FVector& Start = FVector::ZeroVector, const FVector& Dir = FVector(1, 0, 0))
 	{
@@ -35,7 +35,7 @@ namespace RopeTest
 		return S;
 	}
 
-	/** 최대 세그먼트 길이 오차 |len - SegmentLength|. */
+	/** The maximum segment length error, being the absolute difference between the length and the segment length. */
 	inline float MaxSegmentError(const FRopeSimState& S)
 	{
 		float MaxErr = 0.0f;
@@ -60,10 +60,12 @@ namespace RopeTest
 	}
 
 	/**
-	 * 스크립트된 구체 collider. center 반경 Radius 안의 query에 바깥쪽 normal로 컨택트를 보고한다.
-	 * FRopeContact 계약대로 SourceMesh도 보고한다(스켈레탈 콜라이더는 소유 mesh를 채워야 하고,
-	 * wrap 파이프라인이 이 값으로 감길 mesh를 확정한다). 테스트에서는 NewObject로 만든
-	 * 빈 USkeletalMeshComponent를 넘기면 된다(저장/식별용 — 역참조는 latch 시점에만 일어난다).
+	 * A scripted sphere collider. It reports a contact with an outward normal for any query within the radius of its
+	 * centre.
+	 * As the FRopeContact contract requires, it reports a source mesh too, since a skeletal collider has to fill in
+	 * the mesh that owns the bone and the wrap pipeline decides the mesh to wrap from that value. A test can pass an
+	 * empty USkeletalMeshComponent created with NewObject; it is stored for identity alone and is dereferenced only at
+	 * the moment of latching.
 	 */
 	class FSphereMockCollider : public IRopeCollider
 	{
@@ -72,8 +74,9 @@ namespace RopeTest
 		float   Radius = 0.0f;
 		FName   Bone = NAME_None;
 		const USkeletalMeshComponent* SourceMesh = nullptr;
-		// 접촉점의 표면 속도(cm/s). 계약상 additive 필드(기본 0 = 정지 표면)라 기존 테스트와 호환.
-		// 랙돌 전환 프레임의 포즈 팝 스파이크(마찰 클램프/상대운동 평가) 테스트에 쓴다.
+		// The contact point's surface velocity, in centimetres per second. It is contractually an additive field,
+		// defaulting to zero for a static surface, so it is compatible with the existing tests.
+		// Used by the tests covering a pose pop spike on a ragdoll transition frame, meaning the friction clamp and the relative motion evaluation.
 		FVector SurfaceVelocity = FVector::ZeroVector;
 
 		FSphereMockCollider() = default;

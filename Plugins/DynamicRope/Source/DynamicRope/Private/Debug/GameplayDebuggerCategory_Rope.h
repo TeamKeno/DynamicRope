@@ -1,22 +1,28 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// rope 디버그의 단일 진입점. 인게임에서 게이트플레이 디버거를 켜고 'Rope' 카테고리를 토글하면 디버그
-// 대상 액터의 URopeComponent들을 표시한다. 매 프레임 대상 액터를 URopeDebugSubsystem에 등록하면
-// sim tick(GT)이 그 로프만 캡처해 스냅샷을 남기고, 여기서 읽어 AddShape/AddTextLine으로 그린다.
-// 하위 보기(Nodes/Flight/Wrap/Colliders/Aim)와 상세 수준(Advanced)은 카테고리 input binding 키로 토글한다.
-// Aim 보기만은 로프가 아니라 대상 액터의 URopeWielderComponent가 매 틱 캐시하는 FRopeAimHudSample을
-// 라이브로 읽어 그린다 — 조준은 Wielder 소유라 로프 스냅샷에 실을 수 없다.
-// WITH_GAMEPLAY_DEBUGGER가 꺼진 빌드(shipping 등)에서는 전체가 컴파일에서 제외된다.
+// The single entry point for rope debugging. Enabling the gameplay debugger in game and toggling the
+// Rope category displays the URopeComponents of the debugged actor. Registering that actor with
+// URopeDebugSubsystem every frame makes the sim tick capture only those ropes and leave a snapshot,
+// which is read back here and drawn through AddShape and AddTextLine.
+// The sub-views, covering nodes, flight, wrap, colliders and aim, and the detail level are toggled with
+// the category's input binding keys.
+// The aim view alone is drawn live from the FRopeAimHudSample the actor's URopeWielderComponent caches
+// each tick, rather than from the rope: aiming belongs to the wielder and cannot be carried on a rope
+// snapshot.
+// The whole file is compiled out in builds without the gameplay debugger, such as shipping.
 //
-// **지원 범위: Standalone / 로컬 플레이 전용.** 3D 오버레이 상당수(collider·aim·wrapAxis·node proximity·
-// pull leg)는 전경 표시(SDPG_Foreground)가 필요해 AddShape 대신 DrawDebug*를 직접 부른다 — AddShape는
-// depth priority가 SDPG_World로 하드코딩돼 캐릭터 메시 안의 앵커 같은 것이 묻힌다.
-// 그 대가로 이 도형들은 **원격 클라이언트에 복제되지 않는다**: CollectData()는 authority에서 돌고
-// DrawDebug*는 그 월드에만 그린다(AddTextLine/AddShape/아래 FRepData 점 표시는 복제된다).
-// 이것은 "네트워크와 무관"해서가 아니라 **현재 지원 범위 밖이라 받아들인 기술 부채**다 — 플러그인
-// 시뮬레이션 자체가 로컬 전용이라 지금은 손실이 없지만, 멀티플레이를 지원하게 되면 끝점을 직렬화해
-// 클라이언트 렌더 단계에서 그리는 작업이 함께 필요하다.
-// 점 표시(노드/후보/가이드)는 그 작업을 이미 마친 형태다 — FRepData로 복제하고 DrawData()에서 그린다.
+// Supported scope: standalone and local play. Many of the 3D overlays, namely the colliders, the aim,
+// the wrap axis, the node proximity and the pull leg, need to draw in the foreground and therefore call
+// DrawDebug* directly rather than AddShape, because AddShape hardcodes its depth priority to world and
+// something like an anchor inside a character mesh would be buried.
+// The cost is that those shapes are not replicated to a remote client: data collection runs on the
+// authority and DrawDebug* draws only into that world. Text lines, shapes and the replicated point data
+// below do reach the client.
+// This is accepted technical debt within the current supported scope rather than a claim that the
+// debugger is network-agnostic: the plugin's simulation is local-only today so nothing is lost, but
+// supporting multiplayer would also require serializing the endpoints and drawing them during the
+// client's render step.
+// The point display already works that way: it is replicated as data and drawn in DrawData().
 
 #pragma once
 
@@ -25,7 +31,7 @@
 #if WITH_GAMEPLAY_DEBUGGER
 
 #include "GameplayDebuggerCategory.h"
-// ERopeDebugCapture — 켜진 보기를 캡처 측에 넘기는 범위 비트
+// ERopeDebugCapture, the scope bits that carry the enabled views to the capture side.
 #include "Debug/RopeDebugSnapshot.h"
 
 class APlayerController;
@@ -45,19 +51,21 @@ public:
 	static TSharedRef<FGameplayDebuggerCategory> MakeInstance();
 
 private:
-	// 점 표시 전용 복제 데이터. AddShape(MakePoint)를 쓰지 않는 이유는 성능이다 — 엔진의 Point 셰이프는
-	// 실제 점이 아니라 16분할 와이어 구체(FGameplayDebuggerShape::Draw → DrawDebugSphere)라 점 하나가
-	// 512 FBatchedLine이 된다. 기본 24노드 로프 하나만 켜도 프레임당 1만 라인을 넘고, latch 강조와 로프
-	// 개수만큼 배로 는다.
-	// 대신 위치·색·크기만 복제하고 DrawData()에서 DrawDebugPoint로 그린다 — 점 하나가 라인 0개다.
-	// 그리는 쪽이 로컬(보는 클라이언트)이므로 이 경로는 DrawDebug* 직접 호출과 달리 복제도 유지된다.
+	// Replicated data for point display alone. AddShape's point is avoided for performance: the engine's
+	// point shape is not a real point but a sphere drawn as sixteen wire segments, so one point becomes
+	// 512 batched lines. A single rope with the default node count exceeds ten thousand lines per frame,
+	// and the latch highlight and the number of ropes multiply that further.
+	// Instead only the position, colour and size are replicated and DrawData() draws them with
+	// DrawDebugPoint, where a point costs no lines at all.
+	// Because the drawing happens locally, on the viewing client, this path keeps its replication, unlike
+	// calling DrawDebug* directly.
 	struct FRepData
 	{
 		struct FPoint
 		{
 			FVector Location = FVector::ZeroVector;
 			FColor  Color = FColor::White;
-			// 화면 픽셀 크기(월드 반경이 아니다 — DrawDebugPoint의 인자 규약).
+			// The size in screen pixels, not a world radius, which is what DrawDebugPoint expects.
 			float   Size = 6.0f;
 		};
 
@@ -66,39 +74,42 @@ private:
 		void Serialize(FArchive& Ar);
 	};
 
-	/** 이번 수집 프레임의 점 하나. Size는 월드 반경이 아니라 화면 픽셀 크기다. */
+	/** One point from this collection frame. The size is in screen pixels rather than a world radius. */
 	void AddPoint(const FVector& Location, float PixelSize, const FColor& Color);
 
 	FRepData DataPack;
 
-	// 하위 보기 토글 비트(input binding 키로 켜고 끈다). 분류 기준은 "무엇에 대한 진단인가"다:
-	// 노드 상태는 Nodes, 감김 경로/결과는 Wrap, 충돌 형상은 Colliders. Summary(헤더 두 줄)는 비트가
-	// 없고 항상 나온다.
+	// The sub-view toggle bits, switched with the input binding keys. They are classified by what the
+	// diagnosis is about: node state is Nodes, the wrap path and result are Wrap, and collision shapes are
+	// Colliders. The summary, meaning the two header lines, has no bit and is always shown.
 	enum class EView : uint8
 	{
-		// 노드 점 + latch 강조 + 노드별 근접 재질의(법선 화살표).
+		// Node points, the latch highlight, and the per-node proximity re-query drawn as normal arrows.
 		Nodes     = 1 << 0,
-		// Flight 후보/sweep/whip 가이드.
+		// Flight candidates, sweeps and the whip guide.
 		Flight    = 1 << 1,
-		// Wrapping 경로 축 + Wrapped 결과(latch/장력/pull).
+		// The wrapping path axis plus the wrapped result, covering latches, tension and pull.
 		Wrap      = 1 << 2,
-		// collider 형상만.
+		// Collider shapes only.
 		Colliders = 1 << 3,
 		Aim       = 1 << 4,
-		// 켜진 보기의 상세 수치까지 낸다(알고리즘 튜닝용). 끄면 통합 사용자용 요약만 남는다.
+		// Adds the detailed numbers of whichever views are enabled, for tuning the algorithms. Without it
+		// only the summary an integrating user needs is shown.
 		Advanced  = 1 << 5,
 	};
 
-	// 기본값: 통합 사용자가 처음 켰을 때 화면이 덮이지 않도록 최소로 둔다. 상세 보기는 필요할 때 키로.
+	// The defaults are minimal so the screen is not covered the first time an integrating user enables it.
+	// Detail is a key away when it is wanted.
 	static constexpr uint8 DefaultViewMask = static_cast<uint8>(EView::Aim);
 
 	bool HasView(EView Flag) const { return (ViewMask & static_cast<uint8>(Flag)) != 0; }
 
-	/** 켜진 보기를 캡처 범위로 옮긴다. 비트를 그대로 흘리지 않고 명시적으로 매핑한다 — 두 열거형은
-	 *  용도가 달라(표시 토글 vs 수집 범위) 우연히 같은 배치인 것에 기대면 한쪽만 바뀔 때 조용히 어긋난다. */
+	/** Converts the enabled views into a capture scope. The bits are mapped explicitly rather than passed
+	 *  through, because the two enumerations serve different purposes, display toggles and collection
+	 *  scope, and relying on them happening to share a layout would break silently when only one changes. */
 	ERopeDebugCapture BuildCaptureMask() const;
 
-	// 키 핸들러(카테고리 활성 중 해당 키로 토글).
+	// The key handlers, which toggle their view while the category is active.
 	void OnToggleNodes();
 	void OnToggleFlight();
 	void OnToggleWrap();
@@ -106,17 +117,21 @@ private:
 	void OnToggleAim();
 	void OnToggleAdvanced();
 
-	// 한 로프를 그린다. **한 화면은 하나의 시간 기준만 쓴다** — 헤더(phase/nodes/wrapBone/solve)와
-	// centerline, 진단 오버레이가 모두 같은 스냅샷에서 나온다. 헤더만 라이브로 두면 같은 노드가 두 시점에
-	// 겹쳐 그려져 시뮬 떨림이나 latch 불안정으로 오독된다. 스냅샷 나이는 헤더의 age=Nf로 드러낸다.
-	// Snap==null(캡처 첫 프레임)일 때만 헤더를 라이브로 내고 (live) 라벨을 붙이며, 오버레이는 생략한다.
-	// flight 오버레이는 라이브가 Flight가 아니면 HeldFlight(hold된 마지막 flight, 0.5초 창)에서 그린다 —
-	// 캡처 결정 직후에도 잔류시켜 보게 한다(HeldFlightAgeSeconds는 그 경과초, (held Xs) 라벨용).
+	// Draws one rope. One screen uses a single point in time: the header, covering the phase, node count,
+	// wrapped bone and solve path, along with the centreline and the diagnostic overlays, all come from the
+	// same snapshot. Leaving the header live would draw the same node at two different moments and be
+	// misread as simulation jitter or an unstable latch. The snapshot's age is reported in the header.
+	// Only on the first capture frame, where there is no snapshot, is the header taken live and labelled
+	// as such, with the overlays omitted.
+	// The flight overlay is drawn from the last held flight snapshot, within a half-second window, whenever
+	// the live rope is not in Flight, which keeps it visible for a moment after the capture decision. The
+	// held age in seconds is what the held label reports.
 	void DrawRope(const URopeComponent& Rope, const FRopeDebugSnapshot* Snap,
 		const FRopeDebugSnapshot* HeldFlight, float HeldFlightAgeSeconds);
 
-	// 조준 ray를 그린다. 질의는 하지 않는다 — Wielder가 이미 매 틱 스윕해 캐시한 샘플을 읽기만 한다
-	// (green=감김 가능 / red=걸렸지만 감김 불가 / cyan=미스). aim ray 모드가 아니면 빈 샘플이라 no target.
+	// Draws the aim ray. It performs no query and only reads the sample the wielder already swept and
+	// cached this tick, using green for wrappable, red for hit but not wrappable, and cyan for a miss.
+	// Outside an aim ray mode the sample is empty and it reports no target.
 	void DrawAim(const URopeWielderComponent& Wielder);
 
 	uint8 ViewMask = DefaultViewMask;

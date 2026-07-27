@@ -2,13 +2,13 @@
 
 #include "Modules/ModuleManager.h"
 #include "DynamicRopeShadersLog.h"
-// 커스텀 FX 시스템(GDF 온디맨드 소비자)
+// The custom FX system, the on-demand consumer of the global distance field.
 #include "RopeGDFFXSystem.h"
-// GDF 씬 뷰 확장
+// The global distance field scene view extension.
 #include "RopeGDFViewExtension.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
-// OnPostEngineInit (뷰 확장 생성 타이밍)
+// OnPostEngineInit, for the timing of the view extension's creation.
 #include "Misc/CoreDelegates.h"
 // FFXSystemInterface::RegisterCustomFXSystem
 #include "FXSystem.h"
@@ -17,16 +17,18 @@
 
 DEFINE_LOG_CATEGORY(LogDynamicRopeGPU);
 
-// 얇은 모듈: 유일한 책임은 글로벌 셰이더 컴파일 이전에 .usf 가상경로를 매핑하는 것.
-// (글로벌 셰이더 타입 IMPLEMENT_GLOBAL_SHADER는 RopeGPUSolver.cpp의 static init에서 등록된다 —
-//  이 모듈이 PostConfigInit에 로드되므로 InitializeShaderTypes 이전에 타입+매핑이 모두 준비된다.)
+// A thin module whose only responsibility is mapping the shader virtual path before the global shaders are compiled.
+// The global shader types declared through IMPLEMENT_GLOBAL_SHADER are registered by static initialization in
+// RopeGPUSolver.cpp, and because this module loads at PostConfigInit both the types and the mapping are ready before
+// InitializeShaderTypes runs.
 class FDynamicRopeShadersModule : public IModuleInterface
 {
 public:
 	virtual void StartupModule() override
 	{
-		// 가상 "/Plugin/DynamicRope" -> <플러그인>/Shaders. 실제 셰이더는 Shaders/Private/*.usf 이며
-		// IMPLEMENT_GLOBAL_SHADER는 "/Plugin/DynamicRope/Private/RopeXPBD.usf"로 참조한다(엔진 /Engine/Private 관례).
+		// Maps the virtual "/Plugin/DynamicRope" to the plugin's Shaders directory. The actual shaders are under
+		// Shaders/Private/*.usf and IMPLEMENT_GLOBAL_SHADER refers to them as
+		// "/Plugin/DynamicRope/Private/RopeXPBD.usf", following the engine's /Engine/Private convention.
 		if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("DynamicRope")))
 		{
 			const FString ShaderDir = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Shaders"));
@@ -38,13 +40,14 @@ public:
 			UE_LOG(LogDynamicRopeGPU, Warning, TEXT("Could not find 'DynamicRope' plugin to map shader directory — GPU solver shaders will fail to compile."));
 		}
 
-		// 커스텀 FX 시스템을 등록한다(GDF 온디맨드 소비자). 씬의 FFXSystemSet은 월드/씬 생성 시 1회 빌드되므로
-		// PostConfigInit(월드 생성 전)에 등록해야 이후 모든 씬에 sibling으로 들어간다.
+		// Registers the custom FX system, the on-demand consumer of the global distance field. A scene's FFXSystemSet
+		// is built once when the world and scene are created, so registering at PostConfigInit, before any world
+		// exists, is what makes it a sibling in every scene thereafter.
 		FFXSystemInterface::RegisterCustomFXSystem(
 			FRopeGDFFXSystem::Name,
 			FCreateCustomFXSystemDelegate::CreateStatic(&CreateRopeGDFFXSystem));
 
-		// 뷰 확장은 GEngine이 필요하므로 엔진 초기화 이후 생성한다(PostConfigInit은 너무 이름).
+		// The view extension needs GEngine, so it is created after engine initialization; PostConfigInit is too early.
 		FCoreDelegates::OnPostEngineInit.AddStatic(&FRopeGDFViewExtension::EnsureRegistered);
 	}
 

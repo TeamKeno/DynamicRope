@@ -1,7 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// FRopeBoxCollider 단위 테스트. 핵심은 모서리/엣지에서의 정확한 대각 normal —
-// GDF 복셀 라운딩으로 로프가 박스 모서리를 관통하던 버그의 회귀 게이트다.
+// Unit tests for FRopeBoxCollider. The central point is the exact diagonal normal at corners and edges,
+// which is the regression gate for the rope passing through a box corner where the voxel global distance
+// field rounded it off.
 
 #include "Misc/AutomationTest.h"
 
@@ -13,14 +14,15 @@
 #include "Solver/RopeXPBDSolver.h"
 #include "RopeTestHelpers.h"
 
-// 모서리 바깥 사선 위치에서 push-out normal이 (면 법선이 아닌) 정확한 대각 방향인가.
+// Whether the push-out normal at a diagonal position outside a corner is the exact diagonal direction
+// rather than a face normal.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBoxCornerPushOutTest,
 	"DynamicRope.Collision.BoxCornerPushOut",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeBoxCornerPushOutTest::RunTest(const FString& Parameters)
 {
-	// 1) 축 정렬 박스: 코너 (50,50,50) 바깥 대각 2cm, 질의 반경 5cm.
+	// One: an axis-aligned box, queried from a short diagonal distance outside a corner.
 	{
 		const FRopeBoxCollider Box(FVector::ZeroVector, FQuat::Identity, FVector(50.0));
 		const FVector Corner(50.0, 50.0, 50.0);
@@ -30,22 +32,22 @@ bool FRopeBoxCornerPushOutTest::RunTest(const FString& Parameters)
 		const FRopeContact C = Box.Query(P, 5.0f);
 		TestTrue(TEXT("corner overlap hit"), C.bHit);
 		TestTrue(TEXT("normal is unit"), FMath::IsNearlyEqual(static_cast<float>(C.Normal.Size()), 1.0f, 1e-3f));
-		// 대각 normal — GDF였다면 복셀 라운딩으로 면 법선 쪽으로 뭉개지던 값.
+		// The diagonal normal, which the global distance field would have rounded towards a face normal.
 		TestTrue(FString::Printf(TEXT("normal %s should equal corner diagonal %s"), *C.Normal.ToString(), *Dir.ToString()),
 			C.Normal.Equals(Dir, 1e-3));
 		TestTrue(TEXT("penetration = 5 - 2 = 3"), FMath::IsNearlyEqual(C.Penetration, 3.0f, 1e-3f));
-		// push-out 후 노드는 코너에서 정확히 질의 반경만큼 떨어진다.
+		// After the push-out the node sits exactly the query radius away from the corner.
 		const FVector Pushed = P + C.Normal * C.Penetration;
 		TestTrue(TEXT("pushed node sits at query radius from corner"),
 			FMath::IsNearlyEqual(static_cast<float>(FVector::Dist(Pushed, Corner)), 5.0f, 1e-3f));
 		TestTrue(TEXT("surface point is the corner"), C.SurfacePoint.Equals(Corner, 1e-3));
-		// 정적 월드 지오메트리 계약: 귀속 없음 / 표면 속도 0.
+		// The static world geometry contract: no attribution and no surface velocity.
 		TestTrue(TEXT("no bone attribution"), C.Bone.IsNone());
 		TestTrue(TEXT("no source mesh"), C.SourceMesh == nullptr);
 		TestTrue(TEXT("zero surface velocity"), C.SurfaceVelocity.IsNearlyZero());
 	}
 
-	// 2) 회전 + 평행이동된 박스에서도 동일해야 한다(로컬 변환 검증).
+	// Two: the same has to hold for a rotated and translated box, which verifies the local transform.
 	{
 		const FQuat Rot(FVector::UpVector, PI / 6.0);
 		const FVector Center(100.0, -40.0, 25.0);
@@ -60,7 +62,8 @@ bool FRopeBoxCornerPushOutTest::RunTest(const FString& Parameters)
 			C.Normal.Equals(DirW, 1e-3));
 		TestTrue(TEXT("rotated penetration = 3"), FMath::IsNearlyEqual(C.Penetration, 3.0f, 1e-3f));
 
-		// OBB -> AABB bounds가 회전된 코너를 포함하는가(브로드페이즈 계약).
+		// Whether the oriented box's world AABB contains the rotated corners, which is the broad-phase
+		// contract.
 		const FBox Bounds = Box.GetWorldBounds();
 		TestTrue(TEXT("world bounds contains rotated corner"), Bounds.IsInsideOrOn(CornerW));
 	}
@@ -68,7 +71,7 @@ bool FRopeBoxCornerPushOutTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 박스 내부 노드는 침투가 가장 얕은 면의 바깥으로 밀려나는가.
+// Whether a node inside the box is pushed out through the least-penetrated face.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBoxInsideMinFaceTest,
 	"DynamicRope.Collision.BoxInsideMinFace",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -76,14 +79,15 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBoxInsideMinFaceTest,
 bool FRopeBoxInsideMinFaceTest::RunTest(const FString& Parameters)
 {
 	const FRopeBoxCollider Box(FVector::ZeroVector, FQuat::Identity, FVector(50.0));
-	// 내부점: +X 면까지 5, +Y 면까지 40, -Z 면까지 30 -> 최소 침투 면은 +X.
+	// An interior point nearest the positive X face, which is therefore the minimum-penetration face.
 	const FVector P(45.0, 10.0, -20.0);
 
 	const FRopeContact C = Box.Query(P, 2.0f);
 	TestTrue(TEXT("inside hit"), C.bHit);
 	TestTrue(FString::Printf(TEXT("normal %s should be +X face"), *C.Normal.ToString()),
 		C.Normal.Equals(FVector(1, 0, 0), 1e-4));
-	// 침투 = 노드 반지름(2) + 면까지 깊이(5) = 7 -> push-out 후 x = 52 (표면 + 반지름).
+	// The penetration is the node radius plus the depth to that face, so after the push-out the node sits at
+	// the surface plus the radius.
 	TestTrue(TEXT("penetration = 7"), FMath::IsNearlyEqual(C.Penetration, 7.0f, 1e-3f));
 	const FVector Pushed = P + C.Normal * C.Penetration;
 	TestTrue(TEXT("pushed to surface + radius"), Pushed.Equals(FVector(52.0, 10.0, -20.0), 1e-3));
@@ -91,14 +95,15 @@ bool FRopeBoxInsideMinFaceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 기본 QuerySwept(라인 샘플 폴백)가 얇은 박스 벽을 통과하지 않고 진입면에서 잡는가.
+// Whether the default swept query, which falls back to line samples, catches a thin box wall at its entry
+// face rather than passing through it.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBoxSweptTunnelingTest,
 	"DynamicRope.Collision.BoxQuerySweptTunneling",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeBoxSweptTunnelingTest::RunTest(const FString& Parameters)
 {
-	// 두께 4cm(반폭 2)의 얇은 벽을 60cm 이동으로 관통 시도.
+	// It attempts to pass through a thin wall in a single long movement.
 	const FRopeBoxCollider Wall(FVector::ZeroVector, FQuat::Identity, FVector(2.0, 100.0, 100.0));
 
 	FRopeSweptQuery Q;
@@ -119,8 +124,10 @@ bool FRopeBoxSweptTunnelingTest::RunTest(const FString& Parameters)
 
 namespace
 {
-	// 축 정렬 박스(중심 Center, 반폭 H)를 6평면 컨벡스로 — 컨벡스 질의를 박스와 비교/검증하는 fixture.
-	// 각 면: 바깥 법선 ±axis, PlaneDot(p)=dot(N,p)-W. +X 면 x=Cx+Hx → FPlane((1,0,0), Cx+Hx).
+	// Builds an axis-aligned box, from a centre and half extents, as a six-plane convex. It is the fixture
+	// used to compare and verify the convex query against the box.
+	// Each face has an outward axis normal, so the positive X face at the box's maximum X becomes a plane
+	// with that normal and offset.
 	TArray<FPlane> MakeAABoxPlanes(const FVector& Center, const FVector& H)
 	{
 		TArray<FPlane> P;
@@ -134,7 +141,8 @@ namespace
 	}
 }
 
-// 컨벡스 내부 점: max-plane이 침투 가장 얕은 면을 정확히 고르고 박스 질의와 일치하는가(내부는 정확).
+// Whether the maximum-plane test picks exactly the least-penetrated face for a point inside a convex and
+// matches the box query, since it is exact inside.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexInsideExactTest,
 	"DynamicRope.Collision.ConvexInsideExact",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -145,7 +153,8 @@ bool FRopeConvexInsideExactTest::RunTest(const FString& Parameters)
 	FRopeConvexCollider Convex(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H));
 	FRopeBoxCollider Box(FVector::ZeroVector, FQuat::Identity, H);
 
-	// 내부점: +X 면까지 5(최소). 박스와 동일 결과여야 한다(내부는 max-plane이 정확).
+	// The interior point is nearest the positive X face. It has to give the same result as the box, because
+	// the maximum-plane test is exact inside.
 	const FVector P(45.0, 10.0, -20.0);
 	const FRopeContact C = Convex.Query(P, 2.0f);
 	const FRopeContact B = Box.Query(P, 2.0f);
@@ -157,7 +166,7 @@ bool FRopeConvexInsideExactTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 컨벡스 면 바깥: 바깥 법선 + 침투, 반경 넘어가면 미접촉.
+// Outside a convex face: an outward normal and a penetration, with no contact beyond the radius.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexOutsideFaceTest,
 	"DynamicRope.Collision.ConvexOutsideFace",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -167,14 +176,14 @@ bool FRopeConvexOutsideFaceTest::RunTest(const FString& Parameters)
 	const FVector H(50.0);
 	FRopeConvexCollider Convex(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H));
 
-	// +X 면 바깥 2cm, 반경 5 → 접촉. 법선 +X, 침투 3.
+	// Just outside the positive X face and within the radius, so it contacts with that normal.
 	{
 		const FRopeContact C = Convex.Query(FVector(52.0, 0, 0), 5.0f);
 		TestTrue(TEXT("outside face hit"), C.bHit);
 		TestTrue(TEXT("normal +X"), C.Normal.Equals(FVector(1, 0, 0), 1e-4));
 		TestTrue(TEXT("penetration = 3"), FMath::IsNearlyEqual(C.Penetration, 3.0f, 1e-3f));
 	}
-	// 반경 넘어감(6cm 바깥, 반경 5) → 미접촉.
+	// Beyond the radius, so there is no contact.
 	{
 		const FRopeContact C = Convex.Query(FVector(56.0, 0, 0), 5.0f);
 		TestFalse(TEXT("beyond radius no hit"), C.bHit);
@@ -182,8 +191,10 @@ bool FRopeConvexOutsideFaceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 컨벡스 엣지 바깥: max-plane은 거리를 과소추정 → 접촉이 보수적으로(살짝 이르게) 걸린다(터널링 방지). 법선은
-// 바깥을 향하는 유효한 방향(면 법선). 박스의 정확한 대각 normal과 달리 근사임을 문서화하는 회귀 테스트.
+// Outside a convex edge: the maximum-plane test underestimates the distance, so contact engages
+// conservatively, meaning slightly early, which prevents tunnelling. The normal is still a valid outward
+// direction, namely a face normal. This regression test documents that it is an approximation, unlike the
+// box's exact diagonal normal.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexEdgeConservativeTest,
 	"DynamicRope.Collision.ConvexEdgeConservative",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -193,32 +204,36 @@ bool FRopeConvexEdgeConservativeTest::RunTest(const FString& Parameters)
 	const FVector H(50.0);
 	FRopeConvexCollider Convex(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H));
 
-	// +X/+Y 엣지 바깥 대각: 각 면까지 3, 실제 엣지까지 거리 ~4.24. max-plane은 3으로 과소추정.
+	// Diagonally outside the positive X and Y edge: each face is three away while the real edge is further,
+	// and the maximum-plane test underestimates it as three.
 	const FVector P(53.0, 53.0, 0.0);
-	// 반경 4: 실제 거리(4.24)면 미접촉이어야 하지만, 과소추정(3<4)이라 접촉으로 걸린다(보수적).
+	// At this radius the real distance would mean no contact, but the underestimate registers one, which is
+	// the conservative behaviour.
 	const FRopeContact C = Convex.Query(P, 4.0f);
 	TestTrue(TEXT("edge contact triggers early (conservative)"), C.bHit);
 	TestTrue(TEXT("penetration = 4 - 3 = 1"), FMath::IsNearlyEqual(C.Penetration, 1.0f, 1e-3f));
-	// 법선은 두 면 중 하나(축 정렬) — 바깥을 향하는 단위 벡터.
+	// The normal is one of the two faces, axis aligned, and is a unit vector pointing outwards.
 	TestTrue(TEXT("normal is unit"), FMath::IsNearlyEqual(static_cast<float>(C.Normal.Size()), 1.0f, 1e-3f));
 	const bool bAxisAligned = C.Normal.Equals(FVector(1, 0, 0), 1e-3) || C.Normal.Equals(FVector(0, 1, 0), 1e-3);
 	TestTrue(TEXT("normal is an outward face normal"), bAxisAligned);
 	return true;
 }
 
-// 동적 박스: 이전 프레임 트랜스폼으로 표면 속도가 (현재 - 이전 재질점)/dt 로 산출되는가(움직이는 표면 드래그).
+// A dynamic box: whether the surface velocity is derived from the previous frame's transform as the
+// movement of the material point over the delta, which is what drags a rope along a moving surface.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBoxSurfaceVelocityTest,
 	"DynamicRope.Collision.BoxSurfaceVelocity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeBoxSurfaceVelocityTest::RunTest(const FString& Parameters)
 {
-	// 박스가 이번 프레임 +X로 10cm 이동(prev center = -10). dt=1/60 → InvDt=60.
+	// The box moved along positive X this frame, with the previous centre offset accordingly.
 	FRopeBoxCollider Box(FVector::ZeroVector, FQuat::Identity, FVector(50.0));
 	Box.PrevCenter = FVector(-10.0, 0.0, 0.0);
 	Box.InvDeltaTime = 60.0f;
 
-	// +X 면 바깥 접촉. 재질점 로컬 (50,0,0): curr 월드 (50,0,0), prev 월드 (40,0,0). 표면 속도 +X 600cm/s.
+	// Contact just outside the positive X face. The material point's world position moved by that same
+	// offset, giving a surface velocity along positive X.
 	const FRopeContact C = Box.Query(FVector(52.0, 0.0, 0.0), 5.0f);
 	TestTrue(TEXT("moving box hit"), C.bHit);
 	TestTrue(TEXT("normal +X"), C.Normal.Equals(FVector(1, 0, 0), 1e-4));
@@ -227,18 +242,21 @@ bool FRopeBoxSurfaceVelocityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 컨벡스 강체 트랜스폼: 바디-로컬 평면 + 강체(Rot,Trans)로 월드 질의가 올바른가(월드 = 로컬 ∘ 강체).
+// The convex rigid transform: whether a world query is correct given body-local planes plus a rigid
+// transform, where world space is the local space composed with it.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexRigidTransformTest,
 	"DynamicRope.Collision.ConvexRigidTransform",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeConvexRigidTransformTest::RunTest(const FString& Parameters)
 {
-	// 로컬 박스(반폭 50, 원점) 6평면 + 강체 Trans=(100,0,0). 월드에서 +X 면은 x=150.
+	// A local box as six planes, with a translation, which puts its positive X face further out in world
+	// space.
 	const FVector H(50.0);
 	FRopeConvexCollider Cv(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H), FQuat::Identity, FVector(100.0, 0.0, 0.0));
 
-	// 월드 (152,0,0): 로컬 (52,0,0) → +X 면 위반 2. 법선 +X, 표면점 월드 (150,0,0), 침투 5-2=3.
+	// A world point just outside that face maps to a local point violating the positive X plane, giving that
+	// normal, a surface point on the face, and the expected penetration.
 	const FRopeContact C = Cv.Query(FVector(152.0, 0.0, 0.0), 5.0f);
 	TestTrue(TEXT("translated convex hit"), C.bHit);
 	TestTrue(TEXT("normal +X"), C.Normal.Equals(FVector(1, 0, 0), 1e-3));
@@ -246,11 +264,13 @@ bool FRopeConvexRigidTransformTest::RunTest(const FString& Parameters)
 		C.SurfacePoint.Equals(FVector(150.0, 0.0, 0.0), 1e-3));
 	TestTrue(TEXT("penetration = 3"), FMath::IsNearlyEqual(C.Penetration, 3.0f, 1e-3f));
 
-	// 회전된 강체도: 90도 Z 회전 + Trans. 로컬 +X 면이 월드에서 +Y 방향이 된다.
+	// The same with a rotated rigid transform: a quarter turn about Z plus a translation puts the local
+	// positive X face along positive Y in world space.
 	{
 		const FQuat Rot(FVector::UpVector, HALF_PI);
 		FRopeConvexCollider CvR(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H), Rot, FVector::ZeroVector);
-		// 로컬 +X(50,0,0) → 월드 (0,50,0). 그 바깥 (0,52,0) 질의 → 법선 월드 +Y.
+		// The local positive X face maps to positive Y in world space, so a query just outside it gives a
+		// world normal along positive Y.
 		const FRopeContact CR = CvR.Query(FVector(0.0, 52.0, 0.0), 5.0f);
 		TestTrue(TEXT("rotated convex hit"), CR.bHit);
 		TestTrue(FString::Printf(TEXT("rotated normal %s should be +Y"), *CR.Normal.ToString()),
@@ -259,7 +279,7 @@ bool FRopeConvexRigidTransformTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 동적 컨벡스: 강체 이동 시 표면 속도 산출.
+// A dynamic convex: deriving the surface velocity when the rigid transform moves.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexSurfaceVelocityTest,
 	"DynamicRope.Collision.ConvexSurfaceVelocity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -268,11 +288,12 @@ bool FRopeConvexSurfaceVelocityTest::RunTest(const FString& Parameters)
 {
 	const FVector H(50.0);
 	FRopeConvexCollider Cv(MakeAABoxPlanes(FVector::ZeroVector, H), FBox(-H, H), FQuat::Identity, FVector(100.0, 0.0, 0.0));
-	// 이번 프레임 +X로 10cm 이동
+	// It moved along positive X this frame.
 	Cv.PrevTrans = FVector(90.0, 0.0, 0.0);
 	Cv.InvDeltaTime = 60.0f;
 
-	// 재질점 로컬 (50,0,0): curr 월드 (150,0,0), prev 월드 (140,0,0). 표면 속도 +X 600cm/s.
+	// The material point's world position moved by that same offset, giving a surface velocity along
+	// positive X.
 	const FRopeContact C = Cv.Query(FVector(152.0, 0.0, 0.0), 5.0f);
 	TestTrue(TEXT("moving convex hit"), C.bHit);
 	TestTrue(FString::Printf(TEXT("surface velocity %s should be (600,0,0)"), *C.SurfaceVelocity.ToString()),
@@ -280,15 +301,15 @@ bool FRopeConvexSurfaceVelocityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 솔버 통합: 박스 모서리 위로 드레이프된 로프가 여러 프레임 뒤에도 박스 내부로 파고들지 않는가
-// (GDF 모서리 라운딩 관통 버그의 솔버 레벨 회귀 테스트).
+// Solver integration: whether a rope draped over a box corner stays out of the box's interior after many
+// frames. It is the solver-level regression test for the corner rounding that let the rope pass through.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBoxSolverCornerDrapeTest,
 	"DynamicRope.Solver.BoxCornerNoPenetration",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeBoxSolverCornerDrapeTest::RunTest(const FString& Parameters)
 {
-	// 박스(반폭 50) 위 z=55에서 +X 엣지(x=50)를 가로질러 걸친 로프. 중력으로 낙하/드레이프.
+	// The rope lies across the positive X edge above the box and drapes under gravity.
 	const FVector HalfExtents(50.0);
 	FRopeBoxCollider Box(FVector::ZeroVector, FQuat::Identity, HalfExtents);
 	TArray<IRopeCollider*> Colliders;
@@ -307,7 +328,8 @@ bool FRopeBoxSolverCornerDrapeTest::RunTest(const FString& Parameters)
 	for (int32 Frame = 0; Frame < 120; ++Frame)
 	{
 		Solver.Step(Sim, Config, Colliders, 1.0f / 60.0f);
-		// 매 프레임 검사: 어떤 노드도 박스 내부로 파고들면 안 된다(순간 관통도 잡는다).
+		// Checked every frame: no node may penetrate the box's interior, which catches even a momentary
+		// pass-through.
 		for (const FVector& P : Sim.Positions)
 		{
 			const FVector A = P.GetAbs();
@@ -326,10 +348,12 @@ bool FRopeBoxSolverCornerDrapeTest::RunTest(const FString& Parameters)
 }
 
 
-// ===== 심플 콜리전 귀속 추출(전체 세트 랩) =====
+// ===== Attributed extraction of simple collision, for the full-set wrap =====
 
-// 귀속 파라미터 유무에 따라 sphyl/box(+convex OBB 폴백)의 Bone/SourceMesh와 IsWorldStatic이 갈리는가.
-// URopeWrapTargetComponent 전체 세트 모드의 계약: 귀속 세트는 감지 참여, 미귀속(종전 호출)은 push-out 전용.
+// Whether the presence of the attribution parameters decides the bone, source mesh and static status of
+// the sphyls and boxes, including the convex OBB fallback.
+// The contract of URopeWrapTargetComponent's full-set mode: an attributed set takes part in detection,
+// while an unattributed one, as produced by the previous callers, is push-out only.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeBodyExtractionAttributionTest,
 	"DynamicRope.Collision.BodyExtractionAttribution",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -344,7 +368,8 @@ bool FRopeBodyExtractionAttributionTest::RunTest(const FString& Parameters)
 	Setup->AggGeom.SphereElems.Add(Sphere);
 	FKBoxElem BoxElem(20.0f, 30.0f, 40.0f);
 	Setup->AggGeom.BoxElems.Add(BoxElem);
-	// 미쿡 convex(평면 없음) + 유효 ElemBox → OBB 폴백 경로(귀속 대상).
+	// An uncooked convex, with no planes, plus a valid element box takes the OBB fallback path, which is
+	// eligible for attribution.
 	FKConvexElem Convex;
 	Convex.ElemBox = FBox(FVector(-5.0), FVector(5.0));
 	Setup->AggGeom.ConvexElems.Add(Convex);
@@ -352,7 +377,8 @@ bool FRopeBodyExtractionAttributionTest::RunTest(const FString& Parameters)
 	const FTransform CompTM = FTransform::Identity;
 	const FName VirtualBone(TEXT("Prop_RopeWrapAnchor"));
 
-	// 1) 귀속 호출: 캡슐 2(sphyl+sphere)·박스 2(box+convex 폴백) 전부 가상 본 + 감지 참여.
+	// One: an attributed call gives every capsule and box, including the convex fallback, a virtual bone and
+	// makes them take part in detection.
 	{
 		TArray<FRopeBoxCollider> Boxes;
 		TArray<FRopeStaticCapsuleCollider> Capsules;
@@ -376,13 +402,15 @@ bool FRopeBodyExtractionAttributionTest::RunTest(const FString& Parameters)
 			TestEqual(TEXT("box virtual bone"), B.Bone, VirtualBone);
 			TestFalse(TEXT("attributed box joins detect"), B.IsWorldStatic());
 		}
-		// 귀속 캡슐의 Query가 FRopeContact에 본을 실어주는가(접촉→랩 판정 경로의 입력 계약).
+	// Whether an attributed capsule's query carries the bone on the contact, which is the input contract of
+	// the contact-to-wrap path.
 		const FRopeContact C = Capsules[0].Query(Capsules[0].A + FVector(0, 0, 1) * (Capsules[0].Radius + 1.0f), 3.0f);
 		TestTrue(TEXT("attributed capsule contact hit"), C.bHit);
 		TestEqual(TEXT("contact carries virtual bone"), C.Bone, VirtualBone);
 	}
 
-	// 2) 미귀속 호출(종전 URopeStaticBodyProvider 경로): 전부 Bone=None → push-out 전용, 동작 불변.
+	// Two: an unattributed call, as on the previous static body provider path, leaves everything with no
+	// bone, making it push-out only, with behaviour unchanged.
 	{
 		TArray<FRopeBoxCollider> Boxes;
 		TArray<FRopeStaticCapsuleCollider> Capsules;
@@ -404,8 +432,9 @@ bool FRopeBodyExtractionAttributionTest::RunTest(const FString& Parameters)
 }
 
 
-// convex 귀속 계약(WrapTarget 전체 세트): 가상 본이 있으면 감지 참여 + Query가 본/메시를 실어주고,
-// 귀속 추출은 전단 박스(비균등 스케일 x 회전 elem -> convex 라우팅)에도 본을 싣는다.
+// The convex attribution contract for a wrap target's full set: a virtual bone makes it take part in
+// detection and makes its query carry the bone and mesh, and attributed extraction also carries the bone on
+// a sheared box, which a rotated element with a non-uniform scale routes to a convex.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeConvexWrapAttributionTest,
 	"DynamicRope.Collision.ConvexWrapAttribution",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -414,7 +443,8 @@ bool FRopeConvexWrapAttributionTest::RunTest(const FString& Parameters)
 {
 	const FName VirtualBone(TEXT("Prop_RopeWrapAnchor"));
 
-	// 1) 직접 구성한 박스형 convex(6평면, 반폭 50): 귀속 전 정적 -> 귀속 후 감지 참여 + Query 본 전달.
+	// One: a hand-built box-shaped convex of six planes is static before attribution and takes part in
+	// detection, carrying the bone on its query, afterwards.
 	{
 		TArray<FPlane> Planes;
 		Planes.Add(FPlane(FVector(1, 0, 0), 50.0));
@@ -433,7 +463,8 @@ bool FRopeConvexWrapAttributionTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("contact carries virtual bone"), C.Bone, VirtualBone);
 	}
 
-	// 2) 귀속 추출: 회전 elem + 비균등 스케일 박스는 convex로 라우팅되고 본이 실린다.
+	// Two: attributed extraction routes a rotated element with a non-uniform scale to a convex and carries
+	// the bone on it.
 	{
 		UBodySetup* Setup = NewObject<UBodySetup>(GetTransientPackage());
 		FKBoxElem BoxElem(20.0f, 30.0f, 40.0f);

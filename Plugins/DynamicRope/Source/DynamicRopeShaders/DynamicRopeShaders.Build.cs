@@ -2,10 +2,11 @@
 
 using UnrealBuildTool;
 
-// GPU 솔버(글로벌 컴퓨트 셰이더 + RDG)와 .usf 가상경로 매핑만 담는 얇은 모듈.
-// LoadingPhase=PostConfigInit(.uplugin): 글로벌 셰이더 컴파일(InitializeShaderTypes) 이전에 로드되어
-// 셰이더 디렉터리 매핑을 등록한다. 게임플레이/런타임 모듈(DynamicRope, Default)과 분리해 초기화 시점을 독립시킨다.
-// DynamicRope 런타임 타입에 의존하지 않는다(POD FRopeGPUJob) → 순환 의존 없음.
+// A thin module holding only the GPU solver, being global compute shaders on RDG, and the shader virtual path mapping.
+// Its loading phase in the .uplugin is PostConfigInit, so it loads before the global shaders are compiled in
+// InitializeShaderTypes and registers the shader directory mapping. Keeping it separate from the gameplay and runtime
+// module, DynamicRope at the Default phase, makes its initialization timing independent.
+// It does not depend on DynamicRope's runtime types, working from the POD FRopeGPUJob, so there is no circular dependency.
 public class DynamicRopeShaders : ModuleRules
 {
 	public DynamicRopeShaders(ReadOnlyTargetRules Target) : base(Target)
@@ -22,13 +23,13 @@ public class DynamicRopeShaders : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				// 글로벌 셰이더 / RDG 구현은 private 소스에서만 사용한다.
+				// The global shader and RDG implementations are used from private sources alone.
 				"RenderCore",
-				// GPU 버퍼 / 리드백
+				// GPU buffers and readback.
 				"RHI",
-				// IPluginManager — .usf 가상경로 매핑
+				// IPluginManager, for the shader virtual path mapping.
 				"Projects",
-				// FSceneViewExtension / FFXSystemInterface (GDF 월드 충돌)
+				// FSceneViewExtension and FFXSystemInterface, for world collision against the global distance field.
 				"Engine",
 				// UE::FXRenderingUtils::GetGlobalDistanceFieldParameterData + FGlobalDistanceFieldParameters2
 				"Renderer",

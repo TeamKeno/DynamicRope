@@ -6,26 +6,26 @@
 #include "DynamicRopeEditorLog.h"
 #include "Collision/SDF/RopeSDFData.h"
 
-// 베이크 결과(coarsening) 보고
+// Reporting the bake result, including coarsening.
 #include "Logging/MessageLog.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Layout/SBorder.h"
-// 고급 베이크 설정 접이식 섹션
+// The collapsible section holding the advanced bake settings.
 #include "Widgets/Layout/SExpandableArea.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SNumericEntryBox.h"
-// 범례 색 스와치
+// The legend's colour swatches.
 #include "Widgets/Colors/SColorBlock.h"
-// 색 스와치 크기 고정
+// Fixing the swatch size.
 #include "Widgets/Layout/SBox.h"
 #include "Styling/AppStyle.h"
 // SObjectPropertyEntryBox
 #include "PropertyCustomizationHelpers.h"
-// 내장 디테일 뷰 생성
+// Creating the embedded details view.
 #include "PropertyEditorModule.h"
 #include "IDetailsView.h"
 #include "Modules/ModuleManager.h"
@@ -34,7 +34,7 @@
 #include "Framework/Notifications/NotificationManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
 
-// 베이크 후 임시 자동저장.
+// A temporary automatic save after baking.
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 #include "Misc/PackageName.h"
@@ -43,17 +43,19 @@
 
 void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 {
-	// 내장 디테일 뷰(타깃 에셋의 원본 프로퍼티). 더블클릭이 제네릭 프로퍼티 에디터 대신 이 탭을
-	// 열므로 SourceMesh/Bone Volumes 확인·편집은 여기서 한다. ChildSlot에 넣기 전에 먼저 만든다.
+	// The embedded details view showing the target asset's own properties. Double-clicking opens this tab
+	// instead of the generic property editor, so the source mesh and bone volumes are inspected and edited
+	// here. It is created before being placed in the child slot.
 	{
 		FPropertyEditorModule& PropertyModule =
 			FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
 		FDetailsViewArgs DetailsArgs;
 		DetailsArgs.bHideSelectionTip = true;
-		// 타깃 이름은 위 픽커가 이미 보여준다.
+		// The target's name is already shown by the picker above.
 		DetailsArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 		DetailsView = PropertyModule.CreateDetailView(DetailsArgs);
-		// 디테일 뷰 경유로 SourceMesh가 바뀌는 경로 대응(픽커 경유가 아니므로 별도 훅이 필요).
+		// Covers the path where the source mesh changes through the details view rather than the picker,
+		// which needs its own hook.
 		DetailsView->OnFinishedChangingProperties().AddSP(this, &SRopeSDFAuthoringPanel::OnAssetPropertyChanged);
 	}
 
@@ -62,7 +64,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 		SNew(SSplitter)
 		.Orientation(Orient_Horizontal)
 
-		// 좌: 컨트롤(타깃 피커 + 베이크 + 설정).
+		// Left: the controls, meaning the target picker, the bake button and the settings.
 		+ SSplitter::Slot()
 		.Value(0.4f)
 		[
@@ -90,7 +92,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					"Pick a Rope SDF Data asset (its SourceMesh must be set), then Bake."))
 			]
 
-			// 타깃 에셋 피커.
+			// The target asset picker.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(0.0f, 0.0f, 0.0f, 8.0f)
@@ -108,7 +110,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 			[
 				SNew(SHorizontalBox)
 
-				// Bake: 현재 설정으로 본별 SDF를 굽는다(자산 메모리에만 반영 — 디스크 저장은 Save).
+				// Bake produces the per-bone SDFs with the current settings, writing them into the asset in
+				// memory; committing to disk is what Save does.
 				+ SHorizontalBox::Slot()
 				.FillWidth(1.0f)
 				.Padding(0.0f, 0.0f, 4.0f, 0.0f)
@@ -120,7 +123,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					.OnClicked(this, &SRopeSDFAuthoringPanel::OnBakeClicked)
 				]
 
-				// Save: 베이크 결과를 디스크에 쓴다. 저장할 변경이 있을 때만 활성화되고 "Save *"로 표시.
+				// Save writes the bake result to disk. It is enabled only when there are unsaved changes and
+				// marks itself accordingly.
 				+ SHorizontalBox::Slot()
 				.FillWidth(1.0f)
 				.Padding(0.0f, 0.0f, 4.0f, 0.0f)
@@ -132,8 +136,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					.OnClicked(this, &SRopeSDFAuthoringPanel::OnSaveClicked)
 				]
 
-				// Refresh: 현재 베이크된 데이터 기준으로 프리뷰 뷰포트를 다시 그린다.
-				// (베이크 직후에는 자동 반영되므로, 수동 갱신이 필요할 때만 쓴다.)
+				// Refresh redraws the preview viewport from the currently baked data.
+				// It is applied automatically right after a bake, so this is only for a manual refresh.
 				+ SHorizontalBox::Slot()
 				.FillWidth(1.0f)
 				[
@@ -145,7 +149,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				]
 			]
 
-			// 베이크 설정(베이크 전 편집 가능).
+			// The bake settings, editable before baking.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(0.0f, 14.0f, 0.0f, 4.0f)
@@ -154,7 +158,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				.Text(LOCTEXT("SettingsHeader", "Bake Settings (last bake)"))
 			]
 
-			// 메인 노브: 일상 사용자가 다루는 값(품질 목표 + 충돌 밴드 + 가는 본 drop)을 노출한다.
+			// The main knobs: the values an everyday user works with, namely the quality target, the
+			// collision band, and dropping thin bones.
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 			[ MakeFloatRow(LOCTEXT("VoxelSize", "Voxel Size (cm)"), &FRopeSDFBakeSettings::VoxelSize, 0.25f, 10.0f,
 				LOCTEXT("VoxelSizeTip", "Sample spacing in cm (cube voxel). Smaller sharpens the surface but increases memory and bake time.")) ]
@@ -163,13 +168,14 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 			[ MakeFloatRow(LOCTEXT("NarrowBand", "Narrow Band - outward (cm)"), &FRopeSDFBakeSettings::NarrowBand, 1.0f, 50.0f,
 				LOCTEXT("NarrowBandTip", "Outward (free-space) detection band in cm: how far outside the surface the rope starts reacting to the body. Contact happens at CollisionRadius, so ~2-3x that is stable. The inward (inside-body) band is auto-sized per bone to the deepest interior distance at bake, so the whole interior is covered - no setting needed.")) ]
 
-			// 가는 본 drop 임계값. 단면 girth가 이 값 미만인 본은 baking에서 제외 → 손가락 등 군더더기 볼륨 제거.
+			// The thin-bone drop threshold. A bone whose cross-sectional girth falls below it is excluded
+			// from baking, which removes redundant volumes such as fingers.
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 			[ MakeFloatRow(LOCTEXT("MinGirth", "Min Bone Girth (cm)"), &FRopeSDFBakeSettings::MinBoneGirth, 0.0f, 20.0f,
 				LOCTEXT("MinGirthTip", "Bones whose cross-section girth is thinner than this (cm) are dropped from baking (not merged into the parent). A rope cannot catch features finer than its radius, so set this near (or above) the CollisionRadius of the thinnest rope that will use this SDF. 0 bakes every bone.")) ]
 
-			// 고급 설정: Max Resolution(메모리/시간 상한 — Voxel Size를 덮어쓸 수 있음)과
-			// 잘 안 건드리는 튜닝값들은 기본 접힘으로 숨긴다.
+			// Advanced settings: the maximum resolution, which bounds memory and time and can override the
+			// voxel size, along with the tuning values that are rarely touched, are collapsed by default.
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 			[
 				SNew(SExpandableArea)
@@ -182,7 +188,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				[
 					SNew(SVerticalBox)
 
-					// 양자화 비트수(uint8/uint16). 출력 용량/정밀도 트레이드오프 — 기본값으로 충분해 고급으로 숨긴다.
+					// The quantization bit depth, which trades output size against precision. The default is
+					// sufficient, so it is hidden under the advanced section.
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 					[ MakeQuantizationRow() ]
 
@@ -200,7 +207,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				]
 			]
 
-			// 프리뷰 오버레이(자산 비변경 · 패널 로컬). RopeSDFDraw 헬퍼로 그린다.
+			// The preview overlays, which change no asset and are panel-local. They are drawn by the
+			// RopeSDFDraw helpers.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(0.0f, 14.0f, 0.0f, 4.0f)
@@ -209,7 +217,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				.Text(LOCTEXT("OverlayHeader", "Preview Overlay"))
 			]
 
-			// 베이크 데이터(프리뷰 볼륨 스냅샷)가 없으면 컨트롤은 보이되 비활성. 이유를 안내한다.
+			// With no baked data, meaning no preview volume snapshot, the controls remain visible but
+			// disabled, with a hint explaining why.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(0.0f, 0.0f, 0.0f, 4.0f)
@@ -222,8 +231,9 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					"No baked data to preview. Bake the asset to enable these overlays."))
 			]
 
-			// 오버레이 컨트롤 전체를 한 컨테이너로 감싼다. 프리뷰 볼륨이 없으면 IsEnabled가 자식 전체로
-			// 전파되어 통째로 회색 비활성된다(어떤 디버그가 있는지는 계속 보이되 못 쓰는 상태).
+			// Every overlay control is wrapped in one container, so that with no preview volume the disabled
+			// state propagates to all of its children and the whole section greys out; what debugging is
+			// available stays visible while being unusable.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			[
@@ -263,8 +273,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 1.0f, 0.0f, 0.0f)
 					[ MakeLegendRow(FLinearColor(0.0f, 0.4f, 1.0f), LOCTEXT("LegendOutside", "Outside (positive)")) ]
 
-					// Band Threshold는 Voxels·Gradients 공용 파라미터다. 양쪽 그룹에 함께 노출하되 같은
-					// 멤버(BandThreshold)에 바인딩되므로 한쪽을 바꾸면 다른 쪽도 자동으로 따라온다.
+					// The band threshold is shared by the voxel and gradient groups. It appears in both, but
+					// both bind to the same member, so changing one updates the other automatically.
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
 					[ MakeBandThresholdRow() ]
 				]
@@ -288,7 +298,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 1.0f, 0.0f, 0.0f)
 					[ MakeLegendRow(FLinearColor(0.0f, 0.4f, 1.0f), LOCTEXT("LegendOutside2", "Outside (positive)")) ]
 
-					// Slice 파라미터: 축(순환 버튼) / 위치 / 해상도 / 색 스케일.
+					// The slice parameters: the axis, through a cycling button, plus the position, the
+					// resolution and the colour scale.
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
 					[
 						SNew(SHorizontalBox)
@@ -327,7 +338,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
 					[ MakeLegendRow(FLinearColor::Green, LOCTEXT("LegendGradient", "Gradient direction (outward)")) ]
 
-					// Voxels 그룹과 공유하는 Band Threshold(같은 멤버 바인딩 → 자동 동기화).
+					// The band threshold shared with the voxel group, bound to the same member and therefore
+					// synchronized automatically.
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
 					[ MakeBandThresholdRow() ]
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
@@ -335,8 +347,9 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				]
 			]
 
-			// 타깃 에셋 원본 프로퍼티(SourceMesh/Bone Volumes). 라이브 에셋을 직접 보므로 Bake 결과가
-			// 즉시 반영된다. FRopeBoneSDFVolume 커스터마이즈(배열 요소 헤더에 본 이름)도 그대로 적용.
+			// The target asset's own properties, namely the source mesh and the bone volumes. It views the
+			// live asset directly, so a bake result appears immediately. The customization that puts the
+			// bone name in each array element's header applies here as well.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(0.0f, 14.0f, 0.0f, 4.0f)
@@ -345,7 +358,8 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				.Text(LOCTEXT("DetailsHeader", "Asset Details"))
 			]
 
-			// 남는 세로 공간을 차지하며 내부 스크롤을 가진다(좌측 컬럼 자체는 스크롤이 없다).
+			// It takes the remaining vertical space and scrolls internally; the left column itself does not
+			// scroll.
 			+ SVerticalBox::Slot()
 			.FillHeight(1.0f)
 			[
@@ -354,7 +368,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 		]
 		]
 
-		// 우: 3D 프리뷰 뷰포트(베이크 대상 메시 + 향후 SDF 오버레이).
+		// Right: the 3D preview viewport, showing the mesh being baked and the SDF overlays.
 		+ SSplitter::Slot()
 		.Value(0.6f)
 		[
@@ -365,7 +379,7 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 				SAssignNew(PreviewViewport, SRopeSDFPreviewViewport)
 			]
 
-			// 프리뷰할 메시가 없을 때만 보이는 안내.
+			// The hint shown only when there is no mesh to preview.
 			+ SOverlay::Slot()
 			.HAlign(HAlign_Center)
 			.VAlign(VAlign_Center)
@@ -380,15 +394,15 @@ void SRopeSDFAuthoringPanel::Construct(const FArguments& InArgs)
 		]
 	];
 
-	// 패널 생성 시점에 타깃이 이미 있을 수 있으니 한 번 반영.
+	// A target may already be assigned when the panel is created, so it is applied once here.
 	RefreshPreviewMesh();
 }
 
 TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeFloatRow(const FText& Label,
 	float FRopeSDFBakeSettings::* Member, float MinVal, float MaxVal, const FText& Tip)
 {
-	// 툴팁은 행 컨테이너에 단다 — Slate가 hover 위젯에서 부모로 올라가며 툴팁을 찾으므로
-	// 라벨/입력칸 어디에 마우스를 올려도 동일하게 보인다. Tip이 비면 표시되지 않는다.
+	// The tooltip is attached to the row container: Slate walks up from the hovered widget looking for one,
+	// so hovering either the label or the entry box shows the same tooltip. An empty tip shows nothing.
 	return SNew(SHorizontalBox)
 		.ToolTipText(Tip)
 		+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
@@ -409,7 +423,8 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeFloatRow(const FText& Label,
 TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeIntRow(const FText& Label,
 	int32 FRopeSDFBakeSettings::* Member, int32 MinVal, int32 MaxVal, const FText& Tip)
 {
-	// 툴팁은 행 컨테이너에 단다(MakeFloatRow와 동일 규약). Tip이 비면 표시되지 않는다.
+	// The tooltip is attached to the row container, on the same convention as the float row. An empty tip
+	// shows nothing.
 	return SNew(SHorizontalBox)
 		.ToolTipText(Tip)
 		+ SHorizontalBox::Slot().FillWidth(0.55f).VAlign(VAlign_Center)
@@ -429,8 +444,9 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeIntRow(const FText& Label,
 
 TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeQuantizationRow()
 {
-	// 두 옵션(8/16-bit)을 라디오처럼: 켜진 것만 checked, 다른 걸 켜면 Settings.Quantization이 바뀌며
-	// 이전 것이 자동으로 unchecked된다(이미 켜진 걸 다시 눌러 끄는 건 무시 → 항상 하나는 선택).
+	// The two options behave like radio buttons: only the active one is checked, and selecting the other
+	// changes the setting so the previous one unchecks automatically. Clicking the already-active one to
+	// uncheck it is ignored, so one is always selected.
 	auto MakeOpt = [this](ERopeSDFQuantBits Bits, const FText& Label)
 	{
 		return SNew(SCheckBox)
@@ -576,8 +592,9 @@ FText SRopeSDFAuthoringPanel::GetSliceAxisLabel() const
 
 bool SRopeSDFAuthoringPanel::CanEditOverlay() const
 {
-	// 베이크 여부가 아니라 "지금 뷰포트가 그릴 볼륨 스냅샷이 있는가"가 정확한 기준이다. 베이크 직후에는
-	// 자동 Refresh로 스냅샷이 채워지지만, 그 전(에셋만 선택한 상태 등)엔 그릴 게 없으므로 비활성으로 둔다.
+	// The correct criterion is not whether a bake has happened but whether the viewport has a volume
+	// snapshot to draw. After a bake the automatic refresh fills that in, but before it, as when an asset
+	// has merely been selected, there is nothing to draw and the controls stay disabled.
 	return PreviewViewport.IsValid() && PreviewViewport->HasPreviewVolumes();
 }
 
@@ -618,12 +635,13 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeLegendRow(const FLinearColor& Co
 
 float SRopeSDFAuthoringPanel::GetBandThresholdMax() const
 {
-	// 베이크 당시 NarrowBand가 유효 표시 범위의 상한. 그 밖은 ±NarrowBand로 포화돼 의미가 없다.
+	// The narrow band used at bake time is the upper limit of the useful display range; beyond it everything
+	// saturates at the band limits and means nothing.
 	if (const URopeSDFData* Data = Target.Get())
 	{
 		return FMath::Max(Data->LastBakeSettings.NarrowBand, KINDA_SMALL_NUMBER);
 	}
-	// 타깃 없음(편집 불가 상태) 폴백.
+	// The fallback when there is no target, which is the disabled state.
 	return 50.0f;
 }
 
@@ -655,7 +673,7 @@ TSharedRef<SWidget> SRopeSDFAuthoringPanel::MakeBandThresholdRow()
 			{
 				if (PreviewViewport.IsValid())
 				{
-					// 상한(NarrowBand)을 넘겨 입력돼도 잘라 저장한다.
+					// A value entered above the limit is clamped before it is stored.
 					PreviewViewport->AccessDrawOptions().BandThreshold = FMath::Clamp(NewVal, 0.0f, GetBandThresholdMax());
 					PreviewViewport->InvalidatePreview();
 				}
@@ -677,8 +695,9 @@ void SRopeSDFAuthoringPanel::SetTargetAsset(URopeSDFData* InData)
 {
 	Target = InData;
 
-	// 이미 베이크된 에셋이면 그 당시 설정을 패널로 복원해, 디자이너가 현재 결과와 비교하며 값을
-	// 조정할 수 있게 한다. 미베이크 에셋이면 기본값(신규 베이크 출발점)을 유지한다.
+	// For an already-baked asset the settings used at the time are restored into the panel, so a designer
+	// can adjust them while comparing against the current result. An unbaked asset keeps the defaults,
+	// which are the starting point for a new bake.
 	if (URopeSDFData* Data = Target.Get(); Data && Data->HasAnyBakedVolume())
 	{
 		Settings = Data->LastBakeSettings;
@@ -688,15 +707,16 @@ void SRopeSDFAuthoringPanel::SetTargetAsset(URopeSDFData* InData)
 		Settings = FRopeSDFBakeSettings();
 	}
 
-	// 타깃이 바뀌면 NarrowBand(=Band Threshold 상한)도 바뀌므로, 이전 타깃에서 남은 값이 새 상한을
-	// 넘지 않도록 잘라준다(슬라이더 상한은 입력만 막을 뿐 기존 저장값은 안 줄이므로).
+	// Changing the target also changes the narrow band, and therefore the band threshold's upper limit, so
+	// a value left over from the previous target is clamped to the new limit; the slider's limit only
+	// constrains new input and does not reduce a value already stored.
 	if (PreviewViewport.IsValid())
 	{
 		float& Band = PreviewViewport->AccessDrawOptions().BandThreshold;
 		Band = FMath::Clamp(Band, 0.0f, GetBandThresholdMax());
 	}
 
-	// 내장 디테일 뷰도 새 타깃을 보게 한다(nullptr이면 빈 디테일 뷰).
+	// Point the embedded details view at the new target as well; a null target gives an empty details view.
 	if (DetailsView.IsValid())
 	{
 		DetailsView->SetObject(InData);
@@ -707,7 +727,8 @@ void SRopeSDFAuthoringPanel::SetTargetAsset(URopeSDFData* InData)
 
 void SRopeSDFAuthoringPanel::OnAssetPropertyChanged(const FPropertyChangedEvent& Event)
 {
-	// 디테일 뷰에서 SourceMesh를 바꾸면 픽커 경로(OnTargetChanged)를 타지 않으므로 여기서 프리뷰를 갱신.
+	// Changing the source mesh through the details view does not go through the picker's handler, so the
+	// preview is refreshed here.
 	if (Event.GetPropertyName() == GET_MEMBER_NAME_CHECKED(URopeSDFData, SourceMesh))
 	{
 		RefreshPreviewMesh();
@@ -724,7 +745,8 @@ void SRopeSDFAuthoringPanel::RefreshPreviewMesh()
 	USkeletalMesh* Mesh = nullptr;
 	if (URopeSDFData* Data = Target.Get())
 	{
-		// soft 참조이므로 오써링 시점에 동기 로드(없거나 로드 실패면 nullptr → 빈 뷰).
+	// It is a soft reference, so it is loaded synchronously while authoring; a missing or failed load gives
+	// an empty view.
 		Mesh = Data->SourceMesh.LoadSynchronous();
 	}
 	PreviewViewport->SetPreviewMesh(Mesh);
@@ -760,20 +782,24 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 		return FReply::Handled();
 	}
 
-	// 진행률 총량을 1.0으로 두고, 베이커가 본 하나를 시작할 때마다 1/Total씩 진행시킨다.
-	// 취소 버튼을 띄우고, 콜백에서 ShouldCancel()을 보고 false를 반환하면 베이커가 중단한다.
+	// The total progress is treated as one, and the baker advances it by one over the bone count as each
+	// bone begins.
+	// A cancel button is shown, and the callback returning false, after seeing that cancellation was
+	// requested, aborts the bake.
 	FScopedSlowTask Slow(1.0f, LOCTEXT("Baking", "Baking per-bone SDF..."));
 	Slow.MakeDialog(true /*bShowCancelButton*/);
 
-	// 베이크 중에는 슬로우 태스크가 주기적으로 Slate를 펌프하므로(취소 버튼 처리), 그 틈에 사용자가
-	// 설정/본 필터를 바꿔도 베이크 도중 입력값이 흔들리지 않도록 호출 시점 값으로 스냅샷해 넘긴다.
+	// During a bake the slow task pumps Slate periodically to process the cancel button, and the user could
+	// change the settings or the bone filter in that window, so both are snapshotted at the moment of the
+	// call and passed in, which keeps the inputs stable for the duration.
 	const FRopeSDFBakeSettings SettingsSnapshot = Settings;
 	const TArray<FName> BoneFilterSnapshot = BoneFilter;
 
 	TArray<FRopeBoneSDFVolume> Volumes;
 	FRopeSDFBakeStats Stats;
 	const ERopeSDFBakeResult Result = FRopeSDFBaker::BakeMesh(Mesh, BoneFilterSnapshot, SettingsSnapshot, Volumes,
-		// 본 단위: 진행률 한 칸 전진(+ UI 펌프) 후 취소 여부를 읽는다.
+	// Per bone: advance the progress by one step, which also pumps the UI, then read whether it was
+	// cancelled.
 		[&Slow](int32 Done, int32 Total, const FName& Bone) -> bool
 		{
 			const float Frac = (Total > 0) ? (1.0f / static_cast<float>(Total)) : 1.0f;
@@ -782,7 +808,8 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 				FText::FromName(Bone), FText::AsNumber(Done + 1), FText::AsNumber(Total)));
 			return !Slow.ShouldCancel();
 		},
-		// 본 내부 voxel 배치 사이: UI를 펌프(ShouldCancel 내부)하고 취소 클릭을 처리한다.
+	// Between voxel batches within a bone: pump the UI, inside the cancellation check, and process a click
+	// on cancel.
 		[&Slow]() -> bool { return Slow.ShouldCancel(); },
 		&Stats);
 
@@ -796,31 +823,32 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 
 	if (Result == ERopeSDFBakeResult::Cancelled)
 	{
-		// 자산은 건드리지 않는다(부분 결과 버림) — 기존 베이크 결과 유지.
+		// The asset is left untouched, discarding the partial result, so the previous bake survives.
 		FNotificationInfo Info(LOCTEXT("BakeCancelled", "Bake cancelled — asset unchanged."));
 		Info.ExpireDuration = 4.0f;
 		FSlateNotificationManager::Get().AddNotification(Info);
 		return FReply::Handled();
 	}
 
-	// 베이크 결과는 자산 메모리에만 반영하고 패키지를 dirty로 표시한다. 디스크 저장은 Save 버튼 담당
-	// (자동 저장 제거). 뷰포트에는 아래에서 바로 반영한다.
+	// The bake result is applied to the asset in memory and the package is marked dirty. Writing to disk is
+	// what the Save button does. The viewport is updated directly below.
 	Data->Modify();
 	Data->BoneVolumes = MoveTemp(Volumes);
-	// 베이크에 실제로 사용된 설정을 에셋에 기록 — 다음에 이 에셋을 열면 패널이 이 값을 복원해
-	// 현재 결과와 비교하며 재조정할 수 있다.
+	// Record the settings actually used for the bake on the asset, so that reopening it restores them into
+	// the panel and they can be adjusted against the current result.
 	Data->LastBakeSettings = SettingsSnapshot;
 	Data->MarkPackageDirty();
 
-	// 베이크 결과를 프리뷰 뷰포트에 즉시 반영한다(Refresh 버튼을 따로 누를 필요 없음).
+	// Apply the bake result to the preview viewport immediately, with no need to press Refresh.
 	RefreshPreviewOverlay();
 
 	UE_LOG(LogRopeSDFBake, Log, TEXT("Baked %s: %d bone volume(s) (unsaved — press Save)."),
 		*Data->GetName(), Data->BoneVolumes.Num());
 
-	// 베이크 결과를 Message Log로 보고한다. Max Resolution 상한 때문에 사용자가 요청한 Voxel Size보다
-	// 굵게 구워진(coarsen된) 본이 있으면, 그 본 이름과 요청→실제 크기를 경고로 나열하고 로그 창을 띄운다.
-	// (조용한 덮어쓰기를 가시화 — 상세는 토스트에 넣지 않고 Message Log에만 둔다.)
+	// Report the bake result to the message log. Where the maximum resolution limit forced a bone to be
+	// baked more coarsely than the requested voxel size, the bone's name and the requested against actual
+	// sizes are listed as a warning and the log window is brought forward.
+	// That makes the silent override visible; the detail stays in the message log rather than a toast.
 	{
 		FMessageLog Log(RopeSDFMessageLogName);
 		Log.NewPage(FText::Format(LOCTEXT("BakePage", "SDF bake: {0}"), FText::FromString(Data->GetName())));
@@ -840,7 +868,7 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 					FText::AsNumber(C.RequestedVoxelSize), FText::AsNumber(C.ActualVoxelSize),
 					FText::AsNumber(C.Resolution.X), FText::AsNumber(C.Resolution.Y), FText::AsNumber(C.Resolution.Z)));
 			}
-			// coarsening이 있으면 로그 창을 앞으로 꺼내 알린다.
+	// Bring the log window forward when anything was coarsened.
 			Log.Open(EMessageSeverity::Warning);
 		}
 		else
@@ -850,7 +878,8 @@ FReply SRopeSDFAuthoringPanel::OnBakeClicked()
 				FText::AsNumber(Stats.BonesBaked), FText::AsNumber(SettingsSnapshot.VoxelSize)));
 		}
 
-		// MinBoneGirth로 제외(drop)된 가는 본들을 한 줄로 보고(쉼표 구분). drop이 0개면 보고 안 함.
+		// Report the thin bones dropped by the minimum girth setting on one comma-separated line. Nothing is
+		// reported when none were dropped.
 		if (Stats.DroppedThinBones.Num() > 0)
 		{
 			TArray<FString> DroppedNames;
@@ -884,7 +913,7 @@ bool SRopeSDFAuthoringPanel::CanSave() const
 
 FText SRopeSDFAuthoringPanel::GetSaveButtonText() const
 {
-	// 저장이 필요하면(=dirty) "Save *"로 미저장 상태를 알린다.
+	// Mark the button when saving is needed, which signals the unsaved state.
 	return CanSave() ? LOCTEXT("SaveDirty", "Save *") : LOCTEXT("Save", "Save");
 }
 
@@ -896,7 +925,7 @@ FReply SRopeSDFAuthoringPanel::OnSaveClicked()
 		return FReply::Handled();
 	}
 
-	// (read-only Perforce 파일이면 쓰기 실패 — 소스컨트롤 체크아웃 연동은 추후 개선.)
+	// A read-only Perforce file fails to write; integrating with source control checkout is future work.
 	bool bSaved = false;
 	if (UPackage* Package = Data->GetPackage())
 	{
@@ -938,7 +967,8 @@ FReply SRopeSDFAuthoringPanel::OnRefreshClicked()
 
 void SRopeSDFAuthoringPanel::RefreshPreviewOverlay()
 {
-	// 메시는 그대로 두어 카메라를 유지하고, 베이크된 데이터 출처만 다시 지정해 오버레이를 다시 그린다.
+	// The mesh is left alone so the camera is preserved, and only the source of the baked data is
+	// reassigned to redraw the overlays.
 	if (PreviewViewport.IsValid())
 	{
 		PreviewViewport->SetPreviewData(Target.Get());

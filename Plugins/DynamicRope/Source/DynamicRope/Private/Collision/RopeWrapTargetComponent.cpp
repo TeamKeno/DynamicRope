@@ -2,17 +2,20 @@
 
 #include "Collision/RopeWrapTargetComponent.h"
 #include "Subsystem/RopeSimSubsystem.h"
-// LogRopeCollision(진단 로그)
+// LogRopeCollision, the diagnostic log category.
 #include "DynamicRopeLog.h"
 #include "Components/StaticMeshComponent.h"
-// GetBodySetup(심플 콜리전 추출) / UBodySetup / FKAggregateGeom(sphyl/box/sphere)
+// GetBodySetup for the simple collision extraction, plus UBodySetup and FKAggregateGeom for the sphyl,
+// box and sphere elements.
 #include "Components/PrimitiveComponent.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "GameFramework/Actor.h"
 #include "Engine/World.h"
-// 심플 콜리전 전체 → push-out 콜라이더 추출(StaticBodyProvider와 공용 헬퍼)
+// Extracting the whole simple collision into push-out colliders, through the helper shared with the
+// static body provider.
 #include "Collision/RopeBodyColliderExtraction.h"
-// UDynamicRopeSettings(예산/컨벡스 평면 상한 + bIncludeWorldDynamic 채널 판정)
+// UDynamicRopeSettings, for the budget, the convex plane limit and the channel decision behind
+// bIncludeWorldDynamic.
 #include "Settings/DynamicRopeSettings.h"
 
 URopeWrapTargetComponent::URopeWrapTargetComponent()
@@ -29,12 +32,13 @@ void URopeWrapTargetComponent::BeginPlay()
 		Sim->RegisterColliderProvider(this);
 	}
 
-	// 진단: 등록됐는지 + 대상 컴포넌트/가상 본이 해석됐는지 1회 로그.
+	// Diagnostics: log once whether it registered and whether the target component and virtual bone
+	// resolved.
 	USceneComponent* Comp = ResolveTarget();
 	UE_LOG(LogRopeCollision, Log,
 		TEXT("[WrapTarget] BeginPlay actor=%s: subsystem=%s, target=%s, virtualBone=%s"),
 		*GetNameSafe(GetOwner()),
-		Sim ? TEXT("OK") : TEXT("NULL(등록 실패)"),
+		Sim ? TEXT("OK") : TEXT("NULL (registration failed)"),
 		*GetNameSafe(Comp),
 		*ResolvedBone.ToString());
 }
@@ -54,7 +58,8 @@ USceneComponent* URopeWrapTargetComponent::ResolveTarget()
 	{
 		if (AActor* Owner = GetOwner())
 		{
-			// 기본: 첫 스태틱 메시(기둥 본체), 없으면 루트 컴포넌트.
+			// The default is the first static mesh, which is the pillar body itself, falling back to the
+			// root component.
 			USceneComponent* Found = Owner->FindComponentByClass<UStaticMeshComponent>();
 			if (!Found)
 			{
@@ -67,7 +72,8 @@ USceneComponent* URopeWrapTargetComponent::ResolveTarget()
 	USceneComponent* Comp = TargetComponent;
 	if (Comp && ResolvedBone.IsNone())
 	{
-		// 합성(가상) 본 이름: 지정값 우선, 없으면 컴포넌트 이름 기반으로 안정적 발급.
+		// The synthetic virtual bone name: the assigned value takes priority, and otherwise a stable one is
+		// issued from the component's name.
 		ResolvedBone = WrapBoneName.IsNone()
 			? FName(*FString::Printf(TEXT("%s_RopeWrapAnchor"), *Comp->GetName()))
 			: WrapBoneName;
@@ -81,25 +87,28 @@ void URopeWrapTargetComponent::BuildCapsule(USceneComponent* Comp)
 	FVector WorldB = FVector::ZeroVector;
 	float   CapRadius = 0.0f;
 
-	// 우선 대상의 저작 심플 콜리전(sphyl/box/sphere)에서 캡슐을 뽑는다 — 시각 메시에 타이트해 로프가
-	// 표면에서 뜨지 않는다. 심플 콜리전이 없으면(또는 convex뿐이면) 로컬 bounds 근사로 폴백한다.
+	// The capsule is taken from the target's authored simple collision first, whether a sphyl, box or
+	// sphere, because it is tight to the visual mesh and leaves no gap between the rope and the surface.
+	// With no simple collision, or only convexes, it falls back to approximating the local bounds.
 	bUsedSimpleCollision = BuildCapsuleFromSimpleCollision(Comp, WorldA, WorldB, CapRadius);
 	if (!bUsedSimpleCollision)
 	{
 		BuildCapsuleFromBounds(Comp, WorldA, WorldB, CapRadius);
 	}
 
-	// 디자이너 반지름 override: 형상/축(끝점)은 유지하고 두께만 바꾼다.
+	// The designer's radius override changes the thickness alone, keeping the shape and the axis endpoints.
 	if (Radius > 0.0f)
 	{
 		CapRadius = Radius;
 	}
 
-	// 랩 가능 캡슐: 가상 본 + SourceMesh=대상 컴포넌트. IsWorldStatic()=false(FCapsuleCollider 기본)라
-	// detect 파이프라인에 포함된다 — 정적 월드 push-out 콜라이더(FRopeStaticCapsuleCollider)와 대조.
+	// A wrappable capsule: a virtual bone plus a source mesh naming the target component. IsWorldStatic()
+	// is false, which is the capsule collider's default, so it takes part in the detection pipeline,
+	// unlike the static world push-out capsule.
 	Capsule = FCapsuleCollider(WorldA, WorldB, CapRadius, ResolvedBone, Comp);
 
-	// 무버블 프롭 표면 속도: (현재-이전 끝점)/dt. 정적이면 사실상 0(=기존 동작). 첫 프레임은 prev 없음 → 0.
+	// The surface velocity of a movable prop, from the change in endpoints over the frame delta. A static
+	// target gives effectively zero, and the first frame has no previous state and gives zero.
 	const float FrameDt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
 	const float InvDt = (FrameDt > KINDA_SMALL_NUMBER) ? (1.0f / FrameDt) : 0.0f;
 	if (bHasPrevEndpoints && InvDt > 0.0f)
@@ -127,10 +136,12 @@ bool URopeWrapTargetComponent::BuildCapsuleFromSimpleCollision(USceneComponent* 
 	const FTransform CompTM = Comp->GetComponentTransform();
 	const FVector Scale = CompTM.GetScale3D();
 
-	// 우선순위: sphyl(캡슐) → box → sphere. 같은 타입은 가장 큰 것(주 몸체)을 고른다. convex뿐이면 실패
-	// 반환 → bounds 폴백. 스케일 규약은 본 캡슐/정적 provider와 동일(GetScaled*).
+	// The priority is sphyl, then box, then sphere, and within one type the largest, which is the main
+	// body. With only convexes it returns a failure and the caller falls back to the bounds. The scale
+	// convention matches the bone capsule and the static provider.
 
-	// 1) sphyl — 가장 긴 것(원기둥 기둥은 여기서 반지름이 정확히 맞아 뜸이 사라진다).
+	// First, sphyls, taking the longest; a cylindrical pillar matches its radius exactly here and the gap
+	// disappears.
 	{
 		const FKSphylElem* Best = nullptr;
 		float BestSize = -1.0f;
@@ -146,7 +157,7 @@ bool URopeWrapTargetComponent::BuildCapsuleFromSimpleCollision(USceneComponent* 
 		if (Best)
 		{
 			const FTransform ElemTM = Best->GetTransform() * CompTM;
-			// sphyl 축 = 로컬 Z.
+			// A sphyl's axis is its local Z.
 			const FVector AxisDir = ElemTM.GetUnitAxis(EAxis::Z);
 			const FVector Center = ElemTM.GetLocation();
 			const float HalfLen = Best->GetScaledCylinderLength(Scale) * 0.5f;
@@ -157,7 +168,8 @@ bool URopeWrapTargetComponent::BuildCapsuleFromSimpleCollision(USceneComponent* 
 		}
 	}
 
-	// 2) box → 캡슐(장축 정렬, 반지름 = 나머지 두 반폭의 최대) — 본 캡슐 provider와 동일 근사.
+	// Second, a box converted to a capsule, aligned to its longest axis with a radius of the larger of the
+	// other two half extents, which is the same approximation the bone capsule provider uses.
 	{
 		const FKBoxElem* Best = nullptr;
 		double BestSize = -1.0;
@@ -190,7 +202,7 @@ bool URopeWrapTargetComponent::BuildCapsuleFromSimpleCollision(USceneComponent* 
 		}
 	}
 
-	// 3) sphere — A==B 축퇴 캡슐(구).
+	// Third, a sphere, as a degenerate capsule with coincident endpoints.
 	{
 		const FKSphereElem* Best = nullptr;
 		float BestRadius = -1.0f;
@@ -213,7 +225,7 @@ bool URopeWrapTargetComponent::BuildCapsuleFromSimpleCollision(USceneComponent* 
 		}
 	}
 
-	// sphyl/box/sphere 없음(예: convex 전용) → 호출자가 bounds 폴백.
+	// No sphyl, box or sphere, as with a convex-only body, so the caller falls back to the bounds.
 	return false;
 }
 
@@ -222,18 +234,21 @@ void URopeWrapTargetComponent::BuildCapsuleFromBounds(USceneComponent* Comp,
 {
 	const FTransform CompTM = Comp->GetComponentTransform();
 
-	// 로컬 공간 축정렬 bounds(LocalToWorld=Identity → 로컬 반폭/중심).
+	// The axis-aligned bounds in local space, obtained with an identity transform, which gives local half
+	// extents and a local centre.
 	const FBoxSphereBounds LocalBounds = Comp->CalcBounds(FTransform::Identity);
-	// 로컬 반폭과 로컬 중심.
+	// The local half extents and centre.
 	const FVector Ext = LocalBounds.BoxExtent;
 	const FVector LocalCenter = LocalBounds.Origin;
-	// 컴포넌트 스케일을 반영한 월드 반폭. 반지름/세그먼트가 월드 단위여야 스케일된 대상에서 두께가 축 길이와
-	// 어긋나지 않는다(#5 — 종전엔 반지름만 로컬이라 스케일 S 대상이 축 S배·두께 1배로 표면을 관통). 끝점은
-	// 아래에서 월드 중심+월드 축 단위로 배치한다(CompTM 스케일 이중 적용 방지). 스케일 1이면 동작 불변.
+	// The world half extents with the component scale applied. The radius and segment have to be in world
+	// units or the thickness would not match the axis length on a scaled target: with only the radius in
+	// local space, a target scaled by S would have its axis scaled but not its thickness and would pass
+	// through the surface. The endpoints are placed below from the world centre along the world axis unit
+	// vector, which avoids applying the component scale twice. A scale of 1 leaves the behaviour unchanged.
 	const FVector Scale = CompTM.GetScale3D().GetAbs();
 	const FVector ScaledExt = Ext * Scale;
 
-	// 장축 인덱스 결정: 자동(최장 월드 반폭) 또는 지정.
+	// Choose the long axis, either automatically as the largest world half extent, or as configured.
 	int32 AxisIdx;
 	if (bAutoAxis)
 	{
@@ -244,7 +259,8 @@ void URopeWrapTargetComponent::BuildCapsuleFromBounds(USceneComponent* Comp,
 		AxisIdx = (Axis == ERopeWrapAxis::X) ? 0 : (Axis == ERopeWrapAxis::Y) ? 1 : 2;
 	}
 
-	// 반지름: 나머지 두 월드 반폭의 최대(축정렬 단면을 덮는 캡슐 근사 — 사각 단면 모서리만 살짝 초과).
+	// The radius is the larger of the other two world half extents, which is the capsule approximation
+	// covering the axis-aligned cross-section; only the corners of a rectangular section poke out slightly.
 	double OtherMax = 0.0;
 	for (int32 k = 0; k < 3; ++k)
 	{
@@ -255,12 +271,14 @@ void URopeWrapTargetComponent::BuildCapsuleFromBounds(USceneComponent* Comp,
 	}
 	OutRadius = static_cast<float>(FMath::Max(OtherMax, 1.0));
 
-	// 세그먼트 반길이(월드) = 장축 월드 반폭 - 반지름(반구가 끝을 넘지 않게; 음수면 0 = 구).
+	// The segment half length in world units is the long axis half extent minus the radius, which keeps
+	// the hemispherical caps from overshooting the ends; a negative value becomes zero, giving a sphere.
 	const float SegHalf = static_cast<float>(FMath::Max(static_cast<double>(ScaledExt[AxisIdx]) - OutRadius, 0.0));
 
-	// 끝점: 월드 중심에서 월드 축 단위벡터로 SegHalf(월드)만큼. 스케일은 ScaledExt에 이미 반영됐으므로
-	// 오프셋에 CompTM 스케일을 다시 곱하지 않는다(방향만 회전 — TransformVectorNoScale). 스케일 1에서
-	// 종전 CompTM.TransformPosition(LocalCenter + Axis*SegHalf)와 동일 결과.
+	// The endpoints are the world centre offset along the world axis unit vector by the segment half
+	// length. The scale is already applied to the extents, so the component scale is not applied again to
+	// the offset and only the rotation is used. At a scale of 1 this gives the same result as transforming
+	// the local centre and offset together.
 	FVector LocalAxis = FVector::ZeroVector;
 	LocalAxis[AxisIdx] = 1.0;
 	const FVector WorldAxis = CompTM.TransformVectorNoScale(LocalAxis).GetSafeNormal();
@@ -278,7 +296,8 @@ void URopeWrapTargetComponent::BuildBox(USceneComponent* Comp)
 	FVector HalfExtents = FVector::ZeroVector;
 	FQuat   Rot = FQuat::Identity;
 
-	// 1) 심플 콜리전의 가장 큰 박스 elem → 타이트 OBB(저작 형상에 정확히 맞음).
+	// First, the largest box element of the simple collision, as a tight oriented box that matches the
+	// authored shape exactly.
 	UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Comp);
 	UBodySetup* Setup = Prim ? Prim->GetBodySetup() : nullptr;
 	const FKBoxElem* Best = nullptr;
@@ -301,19 +320,22 @@ void URopeWrapTargetComponent::BuildBox(USceneComponent* Comp)
 		const FTransform ElemTM = Best->GetTransform() * CompTM;
 		WorldCenter = ElemTM.GetLocation();
 		Rot = ElemTM.GetRotation();
-		// X/Y/Z=전체 길이 → 반폭×스케일.
+		// The element's dimensions are full lengths, so they become half extents scaled by the component.
 		HalfExtents = FVector(Best->X, Best->Y, Best->Z) * 0.5 * Scale;
 	}
 	else
 	{
-		// 2) 폴백: 컴포넌트 로컬 bounds OBB(박스 심플 콜리전이 없을 때).
+		// Second, the fallback: the component's local bounds as an oriented box, used when there is no box
+		// simple collision.
 		const FBoxSphereBounds LocalBounds = Comp->CalcBounds(FTransform::Identity);
 		WorldCenter = CompTM.TransformPosition(LocalBounds.Origin);
 		Rot = CompTM.GetRotation();
 		HalfExtents = LocalBounds.BoxExtent * Scale;
 	}
 
-	// 가상 본 + SourceMesh → IsWorldStatic()=false → 감지 참여(랩 대상). v1은 정적 가정(InvDt=0, 표면 속도 0).
+	// A virtual bone plus a source mesh makes IsWorldStatic() false, so it takes part in detection as a
+	// wrap target. It assumes a static target, with a zero reciprocal delta and therefore no surface
+	// velocity.
 	Box = FRopeBoxCollider(WorldCenter, Rot, HalfExtents);
 	Box.Bone = ResolvedBone;
 	Box.SourceMesh = Comp;
@@ -332,20 +354,23 @@ bool URopeWrapTargetComponent::BuildFullSet(USceneComponent* Comp)
 	const int32 MaxCol = Settings ? Settings->StaticBodyMaxCollidersPerRope : 32;
 	const int32 MaxPlanes = Settings ? Settings->StaticBodyMaxConvexPlanes : 32;
 
-	// 무버블 프롭 표면 속도: 컴포넌트 강체 prev(추출 헬퍼가 요소별 prev 끝점/트랜스폼으로 전개).
+	// The surface velocity of a movable prop, from the component's previous rigid transform, which the
+	// extraction helper expands into per-element previous endpoints and transforms.
 	const FTransform CompTM = Comp->GetComponentTransform();
 	const float FrameDt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
 	const float InvDt = (bHasPrevCompTM && FrameDt > KINDA_SMALL_NUMBER) ? 1.0f / FrameDt : 0.0f;
 	const FTransform PrevTM = bHasPrevCompTM ? PrevCompTM : CompTM;
 
-	// 심플 콜리전 전체를 가상 본 귀속으로 추출 — sphyl/sphere/box·convex 전 요소가 감기 가능
-	// (GPU 감지 커널의 convex 루프가 있어 convex도 감지에 참여한다).
+	// Extract the whole simple collision with virtual bone attribution, which makes every sphyl, sphere,
+	// box and convex element wrappable; the GPU detection kernel has a convex loop, so convexes take part
+	// in detection too.
 	RopeBodyColliderExtraction::AppendBodyColliders(*Setup, CompTM, PrevTM, InvDt, MaxCol, MaxPlanes,
 		WrapBoxes, WrapCapsules, WrapConvexes, [](int32) {}, ResolvedBone, Comp);
 	PrevCompTM = CompTM;
 	bHasPrevCompTM = true;
 
-	// 디자이너 반지름 override: 단일 셰이프 경로와 같은 의미(형상/축 유지, 두께만) — 전 캡슐 일괄.
+	// The designer's radius override means the same as on the single-shape path, keeping the shape and the
+	// axis and changing only the thickness, applied uniformly across every capsule.
 	if (Radius > 0.0f)
 	{
 		for (FRopeStaticCapsuleCollider& Cap : WrapCapsules)
@@ -355,7 +380,8 @@ bool URopeWrapTargetComponent::BuildFullSet(USceneComponent* Comp)
 	}
 
 
-	// 감기 가능 요소가 하나도 없으면(저작 콜리전 부재) 단일 셰이프 경로로 폴백한다.
+	// With not a single wrappable element, as when no collision was authored, it falls back to the
+	// single-shape path.
 	if (WrapBoxes.Num() + WrapCapsules.Num() + WrapConvexes.Num() == 0)
 	{
 		WrapConvexes.Reset();
@@ -369,12 +395,13 @@ bool URopeWrapTargetComponent::EffectiveServeBox(USceneComponent* Comp) const
 	if (Shape == ERopeWrapShape::Box)     { return true; }
 	if (Shape == ERopeWrapShape::Capsule) { return false; }
 
-	// Auto: 심플 콜리전의 지배(최대) 프리미티브가 박스면 Box, sphyl/sphere면 Capsule.
+	// Under Auto: a box when the dominant, that is largest, primitive of the simple collision is a box,
+	// and a capsule for a sphyl or a sphere.
 	UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Comp);
 	UBodySetup* Setup = Prim ? Prim->GetBodySetup() : nullptr;
 	if (!Setup)
 	{
-		// 심플 콜리전 없음 → 캡슐(bounds 폴백).
+		// With no simple collision it becomes a capsule, through the bounds fallback.
 		return false;
 	}
 	const FKAggregateGeom& Agg = Setup->AggGeom;
@@ -394,7 +421,8 @@ bool URopeWrapTargetComponent::EffectiveServeBox(USceneComponent* Comp) const
 		CapsuleSize = FMath::Max(CapsuleSize, static_cast<double>(2.0f * Sphere.Radius));
 	}
 
-	// 박스가 있고 캡슐형(sphyl/sphere)보다 크거나 같으면 Box. 박스가 없으면 캡슐.
+	// A box wins when one exists and is at least as large as the capsule-like primitives; with no box it is
+	// a capsule.
 	return BoxSize > 0.0 && BoxSize >= CapsuleSize;
 }
 
@@ -407,13 +435,14 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 		{
 			bDiagnosticsLogged = true;
 			UE_LOG(LogRopeCollision, Warning,
-				TEXT("[WrapTarget] %s: 대상 컴포넌트 없음 — 랩 캡슐 미생성(TargetComponent 지정 또는 스태틱 메시 필요)."),
+				TEXT("[WrapTarget] %s: no target component, so no wrap capsule was created. Assign TargetComponent or add a static mesh."),
 				*GetNameSafe(GetOwner()));
 		}
 		return;
 	}
 
-	// 프레임당 1회만 빌드(디둡): 같은 대상을 노리는 여러 로프가 호출해도 캡슐을 재구성하지 않는다.
+	// Built once per frame, deduplicated, so several ropes aiming at the same target do not rebuild the
+	// capsule.
 	const uint64 Frame = GFrameCounter;
 	if (BuiltFrame != Frame)
 	{
@@ -425,13 +454,14 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 		PushOutCapsules.Reset();
 		PushOutConvexes.Reset();
 
-		// 전체 세트 모드(Auto + 심플 콜리전): 지배 프리미티브 1개 근사 대신 심플 콜리전 요소 전부를
-		// 감기 가능으로 서빙(StaticBodyProvider 추출 정밀도). 실패(콜리전 부재/convex 전용)나 Capsule/Box
-		// 강제면 종전 단일 셰이프 경로.
+		// Full-set mode, meaning Auto with simple collision present: instead of approximating with a single
+		// dominant primitive, every simple collision element is served as wrappable, at the precision the
+		// static body provider extracts. On failure, whether from absent collision or a convex-only body,
+		// or when Capsule or Box is forced, it takes the single-shape path.
 		bServeFullSet = (Shape == ERopeWrapShape::Auto) && BuildFullSet(Comp);
 		if (!bServeFullSet)
 		{
-			// Auto면 심플 콜리전으로 셰이프 결정.
+			// Under Auto the shape is decided from the simple collision.
 			bServeBox = EffectiveServeBox(Comp);
 			if (bServeBox)
 			{
@@ -442,11 +472,14 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 				BuildCapsule(Comp);
 			}
 
-			// 디테일 push-out(auto 채널 판단): 대상이 StaticBodyProvider의 스캔 채널(WorldStatic + 설정 시 WorldDynamic)
-			// 밖(PhysicsBody 등 — drag 위해 Movable+Simulate Physics로 만든 프롭)이면 StaticBodyProvider가 그 프롭을
-			// 못 보므로, 대상 심플 콜리전 전체를 push-out 콜라이더로 직접 추출한다(Bone=None → detect 제외, wrap엔 위
-			// 단일 셰이프만 참여). 커버되는 채널이면 스킵 → StaticBodyProvider가 담당(중복 없음). 조건이 bIncludeWorldDynamic을
-			// 읽어 StaticBodyProvider의 실제 스캔 범위를 미러링한다(공백 채움: 설정 off면 WorldDynamic도 여기서 채움).
+			// Detailed push-out, decided automatically from the channel: when the target sits outside the
+			// static body provider's scan channels, meaning WorldStatic plus WorldDynamic where enabled, as
+			// a physics-body prop made movable and simulating so it can be dragged, that provider cannot see
+			// it, so the target's whole simple collision is extracted here as push-out colliders. Those have
+			// no bone and are excluded from detection, leaving only the single shape above to take part in
+			// wrapping. Where the channel is covered this is skipped and the static body provider handles
+			// it, so nothing is duplicated. The condition reads bIncludeWorldDynamic to mirror the
+			// provider's real scan range, which fills the gap when that setting is off.
 			if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Comp))
 			{
 				const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
@@ -468,10 +501,12 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 					bHasPrevCompTM = true;
 				}
 			}
-		} // !bServeFullSet (단일 셰이프 폴백 경로 끝)
+		} // End of the single-shape fallback path.
 
-		// 진단: 첫 빌드 시 셰이프/형상·본을 1회 로그(이 로그가 안 뜨면 GatherColliders 미호출 =
-		// provider 미등록 또는 로프 소유자 제외(같은 액터) 또는 근처 로프 없음).
+		// Diagnostics: log the shape, its geometry and its bone once on the first build. This log never
+		// appearing means GatherColliders was never called, which is either the provider not being
+		// registered, the rope's owner being excluded because it is the same actor, or no rope being
+		// nearby.
 		if (!bDiagnosticsLogged)
 		{
 			bDiagnosticsLogged = true;
@@ -479,21 +514,21 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 			if (bServeFullSet)
 			{
 				UE_LOG(LogRopeCollision, Log,
-					TEXT("[WrapTarget] %s: 랩 전체 세트 생성 capsules=%d boxes=%d convexes=%d bone=%s"),
+					TEXT("[WrapTarget] %s: built the full wrap set, capsules=%d boxes=%d convexes=%d bone=%s"),
 					*GetNameSafe(GetOwner()), WrapCapsules.Num(), WrapBoxes.Num(), WrapConvexes.Num(),
 					*ResolvedBone.ToString());
 			}
 			else if (bServeBox)
 			{
 				UE_LOG(LogRopeCollision, Log,
-					TEXT("[WrapTarget] %s: 랩 박스 생성 localExtent=%s | center=%s half=%s bone=%s"),
+					TEXT("[WrapTarget] %s: built a wrap box, localExtent=%s | center=%s half=%s bone=%s"),
 					*GetNameSafe(GetOwner()), *DiagBounds.BoxExtent.ToCompactString(),
 					*Box.Center.ToCompactString(), *Box.HalfExtents.ToCompactString(), *Box.Bone.ToString());
 			}
 			else
 			{
 				UE_LOG(LogRopeCollision, Log,
-					TEXT("[WrapTarget] %s: 랩 캡슐 생성 source=%s localExtent=%s | A=%s B=%s R=%.1f len=%.1f bone=%s"),
+					TEXT("[WrapTarget] %s: built a wrap capsule, source=%s localExtent=%s | A=%s B=%s R=%.1f len=%.1f bone=%s"),
 					*GetNameSafe(GetOwner()),
 					bUsedSimpleCollision ? TEXT("simpleCollision") : TEXT("bounds"),
 					*DiagBounds.BoxExtent.ToCompactString(),
@@ -504,12 +539,13 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 		}
 	}
 
-	// 캐시된 콜라이더 포인터를 풀에 담고(해당 프레임 solve 동안 유효), region 매핑은 bounds 헬퍼가 만든다
-	// (스켈레탈 provider와 동일 계약 — 셰이프 1개라 유니언=자기 자신).
+	// The cached collider pointers are placed in the pool, valid for that frame's solve, and the region
+	// mapping is produced by the bounds helper, on the same contract as the skeletal providers; with a
+	// single shape the union is simply itself.
 	const int32 StartIndex = Gather.Colliders.Num();
 	if (bServeFullSet)
 	{
-		// 전체 세트: 감기 가능 요소 전부(가상 본 귀속 — 감지 참여).
+		// Full set: every wrappable element, attributed to the virtual bone so it takes part in detection.
 		for (FRopeBoxCollider& B : WrapBoxes)              { Gather.Colliders.Add(&B); }
 		for (FRopeStaticCapsuleCollider& C : WrapCapsules) { Gather.Colliders.Add(&C); }
 		for (FRopeConvexCollider& Cv : WrapConvexes)       { Gather.Colliders.Add(&Cv); }
@@ -522,8 +558,10 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 	{
 		Gather.Colliders.Add(&Capsule);
 	}
-	// 디테일 push-out 셰이프도 함께 서빙(있을 때만 — auto 판단으로 채널 밖일 때만 채워짐). wrap 셰이프와 한
-	// 그룹으로 region 매핑(GetWorldBounds 기반이라 타입 혼재 무관, 매핑은 아래 한 번 호출로 충분).
+	// The detailed push-out shapes are served alongside, where they exist, which is only when the automatic
+	// channel decision found the target outside the covered channels. They are mapped to regions as one
+	// group with the wrap shapes: the mapping works from world bounds, so mixing types is irrelevant and a
+	// single call below suffices.
 	for (FRopeBoxCollider& B : PushOutBoxes)              { Gather.Colliders.Add(&B); }
 	for (FRopeStaticCapsuleCollider& C : PushOutCapsules) { Gather.Colliders.Add(&C); }
 	for (FRopeConvexCollider& Cv : PushOutConvexes)       { Gather.Colliders.Add(&Cv); }

@@ -9,9 +9,11 @@
 
 namespace
 {
-	// 로프 region(브로드페이즈 질의 bounds) 중 하나라도 메시의 현재 월드 bounds와 겹치는지. 어느 로프도
-	// 근처에 없으면 전 본 collider 재빌드를 건너뛴다(#12). 보수적: bounds가 불명이면 true(빌드)로 본다.
-	// region은 접촉/예측 마진을, 메시 bounds는 스킨 범위를 이미 포함하므로 겹치면 접촉 가능 = 빌드.
+	// Whether any of the rope regions, meaning the broad-phase query bounds, overlaps the mesh's current world bounds.
+	// If no rope is nearby, the rebuild of every bone collider is skipped. It is conservative: unknown bounds are
+	// treated as true and the build proceeds.
+	// The region already includes the contact and prediction margins and the mesh bounds already include the skinning
+	// range, so an overlap means contact is possible and the build is required.
 	bool AnyRopeRegionNearMesh(const USkeletalMeshComponent& Mesh, TArrayView<const FBox> Regions)
 	{
 		const FBox MeshBox = Mesh.Bounds.GetBox();
@@ -76,22 +78,24 @@ void URopeSkeletalColliderProvider::GatherColliders(FRopeColliderGatherContext& 
 	}
 	if (!HasColliderData())
 	{
-		// 데이터 없음(예: SDFData 미지정) — 서브클래스가 사유를 로그하고 no-op.
+		// There is no data, as when no SDF data is assigned, so the subclass logs the reason and this is a no-op.
 		return;
 	}
 
-	// 프레임당 1회만 빌드(디둡): 같은 메시를 잡는 여러 로프가 호출해도 collider를 재구성하지 않는다.
-	// region별 배정은 아래 MapCollidersToRegionsByBounds가 만든다(빌드는 region 무관 — 전 본 빌드).
+	// Built once per frame, deduplicated, so that several ropes catching the same mesh do not rebuild the colliders.
+	// The per-region assignment is produced by MapCollidersToRegionsByBounds below; the build itself is
+	// region-independent and covers every bone.
 	const uint64 Frame = GFrameCounter;
 	if (BuiltFrame != Frame)
 	{
 		BuiltFrame = Frame;
-		// 근접 게이트(#12): 어느 로프 region도 이 메시 근처에 없으면 전 본 collider 재빌드를 건너뛴다. 본은 매
-		// 프레임 애니로 움직여 캐시가 무의미하므로, 근접 로프가 없으면 아예 만들지 않는다(빌드/append 스킵).
+	// The proximity gate: if no rope region is near this mesh, the rebuild of every bone collider is skipped. Bones
+	// move with the animation every frame, which makes a cache pointless, so with no rope nearby they are not built at
+	// all and neither the build nor the append happens.
 		bBuiltThisFrame = AnyRopeRegionNearMesh(*Mesh, Gather.RopeRegions);
 		if (bBuiltThisFrame)
 		{
-			// 표면 속도(드래그) 산출용 프레임 dt. 서브클래스가 (현재-이전)/dt 로 collider의 표면 속도를 만든다.
+			// The frame delta used to derive the surface velocity, meaning the drag. The subclass produces each collider's surface velocity as the current minus the previous transform over the delta.
 			const float FrameDt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
 			const float InvDt = (FrameDt > KINDA_SMALL_NUMBER) ? (1.0f / FrameDt) : 0.0f;
 			RebuildColliders(Mesh, InvDt);
@@ -99,13 +103,13 @@ void URopeSkeletalColliderProvider::GatherColliders(FRopeColliderGatherContext& 
 	}
 	if (!bBuiltThisFrame)
 	{
-		// 이 프레임 근접 로프 없음 → collider 공급 없음(스테일 append 방지).
+		// No rope was nearby this frame, so no colliders are supplied, which prevents appending stale ones.
 		return;
 	}
 
-	// 캐시된 collider 포인터를 넘긴다(해당 프레임 동안 유효). region 매핑: 메시(collider 유니언) 선-거절 →
-	// 걸린 로프만 collider별 bounds 배정. 원거리 로프는 메시당 비교 1회로 끝난다 — 서브시스템의 로프별
-	// 풀 전체 재-컬(O(로프×풀))을 대체하는 부분.
+	// Passes the cached collider pointers, which stay valid for the frame. The region mapping rejects early on the
+	// mesh, being the union of its colliders, and assigns per-collider bounds for the ropes that pass. A distant rope
+	// costs one comparison per mesh, which is what replaces the subsystem re-culling the whole pool per rope.
 	const int32 StartIndex = Gather.Colliders.Num();
 	AppendColliderPointers(Gather);
 	RopeColliderGather::MapCollidersToRegionsByBounds(Gather, StartIndex);

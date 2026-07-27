@@ -47,7 +47,7 @@ void FDynamicRopeEditorModule::StartupModule()
 	UToolMenus::RegisterStartupCallback(
 		FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FDynamicRopeEditorModule::RegisterMenus));
 
-	// 디테일 패널 프로퍼티 타입 커스터마이즈: FRopeBoneSDFVolume 배열 요소 헤더에 본 이름 표시.
+	// The details panel property type customization that shows the bone name on an FRopeBoneSDFVolume array element's header.
 	{
 		FPropertyEditorModule& PropertyModule =
 			FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
@@ -55,8 +55,8 @@ void FDynamicRopeEditorModule::StartupModule()
 			FRopeBoneSDFVolume::StaticStruct()->GetFName(),
 			FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FRopeBoneSDFVolumeCustomization::MakeInstance));
 
-		// URopeComponent / URopePreset 디테일 패널: ResolveMode에 따라 게이트(RopeResolveModeDetails 주석 참조).
-		// 프리셋은 컴포넌트 프로퍼티의 미러라 같은 커스터마이즈를 공유한다.
+		// The URopeComponent and URopePreset details panels, gated on the resolve mode; see the comments in RopeResolveModeDetails.
+		// The preset mirrors the component's properties and therefore shares the same customization.
 		PropertyModule.RegisterCustomClassLayout(
 			URopeComponent::StaticClass()->GetFName(),
 			FOnGetDetailCustomizationInstance::CreateStatic(&TRopeResolveModeDetails<URopeComponent>::MakeInstance));
@@ -67,11 +67,11 @@ void FDynamicRopeEditorModule::StartupModule()
 		PropertyModule.NotifyCustomizationModuleChanged();
 	}
 
-	// 베이크 결과(coarsening된 본 목록 등)를 보고할 Message Log 리스닝 등록.
+	// Registers listening on the message log used to report bake results, such as the list of coarsened bones.
 	{
 		FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
 		FMessageLogInitializationOptions Options;
-		// 베이크마다 페이지를 분리해 이력을 남긴다.
+		// A separate page per bake, which keeps the history.
 		Options.bShowPages = true;
 		Options.bAllowClear = true;
 		Options.bShowFilters = true;
@@ -138,8 +138,8 @@ TSharedRef<SDockTab> FDynamicRopeEditorModule::SpawnSDFAuthoringTab(const FSpawn
 
 void FDynamicRopeEditorModule::OpenSDFAuthoringTabForAsset(URopeSDFData* InData)
 {
-	// 탭을 열거나(없으면 생성) 앞으로 가져온 뒤 콘텐츠 패널에 타깃을 지정한다.
-	// SpawnSDFAuthoringTab이 콘텐츠로 항상 SRopeSDFAuthoringPanel을 넣으므로 캐스트는 안전하다.
+	// Opens the tab, creating it if there is none, brings it to the front and then sets the target on the content panel.
+	// SpawnSDFAuthoringTab always puts an SRopeSDFAuthoringPanel in as the content, so the cast is safe.
 	if (TSharedPtr<SDockTab> Tab = FGlobalTabmanager::Get()->TryInvokeTab(RopeSDFAuthoringTabId))
 	{
 		StaticCastSharedRef<SRopeSDFAuthoringPanel>(Tab->GetContent())->SetTargetAsset(InData);

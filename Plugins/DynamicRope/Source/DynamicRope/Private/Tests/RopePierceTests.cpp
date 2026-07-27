@@ -1,9 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Pierce(꽂힘) 결착 모드 단위 테스트 — ③ GuaranteedWrap 전용, aim-hit 접점에 단일 앵커로 성립.
-// 여섯 계약을 잠근다: ①②③↔결착 조합 제약, throw phase 게이트(③=Loaded 전용), preview 빌더의 단일 앵커
-// 산출, preview 대상의 출처(aim hit 필수), 단일 앵커 커밋(BeginWrap),
-// ③ 연출 진입/이탈(Reel→GuidedThrow→Releasing).
+// Unit tests for the pierce binding mode, which belongs to GuaranteedWrap alone and establishes a single
+// anchor at the aim hit point.
+// They pin six contracts: the permitted combinations of resolve mode and binding, the throw phase gate
+// restricting GuaranteedWrap to Loaded, the preview builder producing a single anchor, the requirement
+// that a preview target come from an aim hit, the single-anchor commit through BeginWrap, and entering and
+// leaving the guided throw phase.
 
 #include "Misc/AutomationTest.h"
 
@@ -24,7 +26,8 @@ namespace
 	}
 }
 
-// throw phase 게이트: ③는 Loaded에서만 던질 수 있고, ①②는 phase 게이트가 없다.
+// The throw phase gate: GuaranteedWrap can be thrown from Loaded alone, while the other modes have no
+// phase gate.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceThrowPhaseGateTest,
 	"DynamicRope.Pierce.ThrowPhaseGateContract",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -33,14 +36,14 @@ bool FRopePierceThrowPhaseGateTest::RunTest(const FString& Parameters)
 {
 	using namespace RopeWrapModes;
 
-	// ERopePhase에는 Count/MAX 센티넬이 없다(Reel로 끝남) — 새 phase가 추가되면 여기에 손으로 더해야 한다.
+	// ERopePhase has no count or maximum sentinel, so a newly added phase has to be added here by hand.
 	static const ERopePhase AllPhases[] = {
 		ERopePhase::Free, ERopePhase::Flight, ERopePhase::Contacting, ERopePhase::Wrapping,
 		ERopePhase::Wrapped, ERopePhase::Releasing, ERopePhase::GuidedThrow, ERopePhase::Loaded
 	};
 
-	// ③ GuaranteedWrap = Loaded 전용.
-	TestTrue(TEXT("③+Loaded 던지기 성립"),
+	// GuaranteedWrap is restricted to Loaded.
+	TestTrue(TEXT("GuaranteedWrap can be thrown from Loaded"),
 		CanThrowInPhase(ERopeWrapResolveMode::GuaranteedWrap, ERopePhase::Loaded));
 	for (const ERopePhase Phase : AllPhases)
 	{
@@ -48,30 +51,32 @@ bool FRopePierceThrowPhaseGateTest::RunTest(const FString& Parameters)
 		{
 			continue;
 		}
-		TestFalse(*FString::Printf(TEXT("③+%d 던지기 불가(Loaded 아님)"), static_cast<int32>(Phase)),
+		TestFalse(*FString::Printf(TEXT("GuaranteedWrap cannot be thrown from phase %d, which is not Loaded"), static_cast<int32>(Phase)),
 			CanThrowInPhase(ERopeWrapResolveMode::GuaranteedWrap, Phase));
 	}
 
-	// ①② = phase 게이트 없음 → 모든 phase에서 true.
-	// 이 술어를 `Phase == Loaded`로 "단순화"하면 여기서 터진다 — ①②가 조용히 막히는 회귀 방지선이다.
+	// The other modes have no phase gate and are therefore true in every phase.
+	// Simplifying the predicate to a direct phase comparison would fail here, which is the regression line
+	// stopping the other modes being silently blocked.
 	for (const ERopePhase Phase : AllPhases)
 	{
-		TestTrue(*FString::Printf(TEXT("①+%d 게이트 없음"), static_cast<int32>(Phase)),
+		TestTrue(*FString::Printf(TEXT("FullSimulation has no gate in phase %d"), static_cast<int32>(Phase)),
 			CanThrowInPhase(ERopeWrapResolveMode::FullSimulation, Phase));
-		TestTrue(*FString::Printf(TEXT("②+%d 게이트 없음"), static_cast<int32>(Phase)),
+		TestTrue(*FString::Printf(TEXT("AssistedJudged has no gate in phase %d"), static_cast<int32>(Phase)),
 			CanThrowInPhase(ERopeWrapResolveMode::AssistedJudged, Phase));
 	}
 	return true;
 }
 
-// Pierce preview 빌더: aim-hit 후보에서 감김 나선 없이 단일 앵커(LatchAnchor)만 산출하는가.
+// The pierce preview builder: whether it produces a single latch anchor from the aim hit candidate, with no
+// wrapping helix.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceSingleAnchorPreviewTest,
 	"DynamicRope.Pierce.PreviewYieldsSingleAnchor",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopePierceSingleAnchorPreviewTest::RunTest(const FString& Parameters)
 {
-	// 노드 x=0,20,...,140(segLen 20). aim이 (60,0,0)의 "spine" 본을 맞힘 → node 3에 단일 앵커.
+	// The nodes are evenly spaced along X. The aim hits the spine bone, which produces a single anchor.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	USkeletalMeshComponent* Mesh = MakePierceMockMesh();
 
@@ -94,22 +99,23 @@ bool FRopePierceSingleAnchorPreviewTest::RunTest(const FString& Parameters)
 
 	TestTrue(FString::Printf(TEXT("pierce prepared preview builds (%s)"), *Failure), bBuilt);
 	TestTrue(TEXT("prepared valid"), Prepared.IsValid());
-	TestEqual(TEXT("Pierce는 단일 앵커"), Prepared.Anchors.Num(), 1);
-	TestTrue(TEXT("앵커 본 = 대상 본"), Prepared.Bone == FName("spine"));
-	TestTrue(TEXT("앵커 mesh = 대상 mesh"), Prepared.Mesh.Get() == Mesh);
+	TestEqual(TEXT("pierce produces a single anchor"), Prepared.Anchors.Num(), 1);
+	TestTrue(TEXT("the anchor's bone is the target bone"), Prepared.Bone == FName("spine"));
+	TestTrue(TEXT("the anchor's mesh is the target mesh"), Prepared.Mesh.Get() == Mesh);
 	if (Prepared.Anchors.Num() == 1)
 	{
-		TestTrue(TEXT("단일 앵커 = LatchAnchor 노드"), Prepared.Anchors[0].NodeIndex == Prepared.LatchAnchor.NodeIndex);
-		// Pierce는 창(팁=마지막 노드)이 꽂히는 것 — 거리 기반 안쪽 노드가 아니라 밧줄 끝에 앵커가 박혀야
-		// 팁 mesh가 꽂힘 지점에 오고 끝이 처지지 않는다.
-		TestEqual(TEXT("Pierce 앵커는 밧줄 끝(팁=창) 노드"),
+		TestTrue(TEXT("the single anchor is the latch anchor's node"), Prepared.Anchors[0].NodeIndex == Prepared.LatchAnchor.NodeIndex);
+		// Pierce embeds the tip, which is the last node, so the anchor has to be at the end of the rope for
+		// the tip mesh to land at the embed point and the end not to sag.
+		TestEqual(TEXT("the pierce anchor is the rope's end node, where the tip is"),
 			Prepared.Anchors[0].NodeIndex, Sim.Num() - 1);
 	}
-	TestTrue(TEXT("렌더 preview 유효(직선 centerline)"), Prepared.RenderPreview.IsValid());
+	TestTrue(TEXT("the render preview is valid, as a straight centreline"), Prepared.RenderPreview.IsValid());
 	return true;
 }
 
-// 단일 앵커 커밋: 앵커 1개 seed를 BeginWrap이 그대로 Wrapped로 고정하는가(커밋 경로 앵커 개수 무관).
+// The single-anchor commit: whether BeginWrap pins a one-anchor seed straight to wrapped, regardless of how
+// many anchors the commit path normally carries.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceSingleAnchorBeginWrapTest,
 	"DynamicRope.Pierce.SingleAnchorBeginWrap",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -119,7 +125,7 @@ bool FRopePierceSingleAnchorBeginWrapTest::RunTest(const FString& Parameters)
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	const USkeletalMeshComponent* Mesh = MakePierceMockMesh();
 
-	// Pierce가 만드는 것과 동형인 단일 앵커 seed(노드 3).
+	// A single-anchor seed of the same shape pierce produces.
 	const int32 PierceNode = 3;
 	FRopeWrapState Seed;
 	Seed.BoneName = FName("spine");
@@ -142,52 +148,57 @@ bool FRopePierceSingleAnchorBeginWrapTest::RunTest(const FString& Parameters)
 	FRopeNodeOverrideFrame Frame;
 	Wrap.BeginWrap(Sim, Seed, Frame);
 
-	TestTrue(TEXT("단일 앵커로 Wrapped 성립"), Wrap.State.IsWrapped());
-	TestEqual(TEXT("앵커 1개 유지"), Wrap.State.Anchors.Num(), 1);
-	TestTrue(TEXT("커밋 본 = spine"), Wrap.State.BoneName == FName("spine"));
-	// 꽂힌 노드는 InvMass=0으로 핀(솔버가 아니라 본이 구동).
-	TestTrue(TEXT("override frame이 산출됨"), Frame.HasAny());
+	TestTrue(TEXT("a single anchor establishes a wrap"), Wrap.State.IsWrapped());
+	TestEqual(TEXT("the one anchor is kept"), Wrap.State.Anchors.Num(), 1);
+	TestTrue(TEXT("the committed bone is the spine"), Wrap.State.BoneName == FName("spine"));
+	// The embedded node is pinned with an inverse mass of zero, so it is driven by the bone rather than the
+	// solver.
+	TestTrue(TEXT("an override frame was produced"), Frame.HasAny());
 	if (Frame.InvMass.IsValidIndex(PierceNode))
 	{
-		TestEqual(TEXT("꽂힌 노드 InvMass=0 핀"), Frame.InvMass[PierceNode], 0.0f);
+		TestEqual(TEXT("the embedded node is pinned with a zero inverse mass"), Frame.InvMass[PierceNode], 0.0f);
 	}
 	return true;
 }
 
-// Loaded(장전) 전이: ③ 로프는 Free에서 EnterLoaded() → Loaded. 비-③는 no-op. 던지기는 Loaded에서만(허용 조건).
+// The Loaded transition: a GuaranteedWrap rope moves from Free to Loaded through EnterLoaded(), while other
+// modes treat it as a no-op. Throwing is possible from Loaded alone.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceEnterLoadedTest,
 	"DynamicRope.Pierce.EnterLoadedTransition",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopePierceEnterLoadedTest::RunTest(const FString& Parameters)
 {
-	// ③ 로프: 기본 Free → EnterLoaded → Loaded.
+	// A GuaranteedWrap rope starts in Free and enters Loaded.
 	URopeComponent* Guaranteed = NewObject<URopeComponent>();
 	Guaranteed->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
-	TestEqual(TEXT("기본 phase는 Free"), Guaranteed->GetPhase(), ERopePhase::Free);
+	TestEqual(TEXT("the default phase is Free"), Guaranteed->GetPhase(), ERopePhase::Free);
 	Guaranteed->EnterLoaded();
 	TestEqual(TEXT("③ EnterLoaded → Loaded"), Guaranteed->GetPhase(), ERopePhase::Loaded);
 
-	// 비-③(② Assisted): EnterLoaded은 no-op → Free 유지(Loaded은 ③ 전용).
+	// On an assisted rope EnterLoaded is a no-op and it stays in Free, since Loaded belongs to
+	// GuaranteedWrap alone.
 	URopeComponent* Assisted = NewObject<URopeComponent>();
 	Assisted->ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 	Assisted->EnterLoaded();
-	TestEqual(TEXT("② EnterLoaded은 no-op"), Assisted->GetPhase(), ERopePhase::Free);
+	TestEqual(TEXT("EnterLoaded is a no-op in AssistedJudged"), Assisted->GetPhase(), ERopePhase::Free);
 
-	// Loaded 허용 조건: Loaded에서 다시 EnterLoaded은 Loaded 유지(재진입 허용), 그 외 phase에선 무효.
+	// Re-entering Loaded from Loaded keeps it there, which is permitted; from any other phase it does nothing.
 	Guaranteed->EnterLoaded();
-	TestEqual(TEXT("Loaded에서 재진입해도 Loaded"), Guaranteed->GetPhase(), ERopePhase::Loaded);
+	TestEqual(TEXT("re-entering from Loaded stays in Loaded"), Guaranteed->GetPhase(), ERopePhase::Loaded);
 	return true;
 }
 
-// ③ 연출 진입/이탈 phase 계약: Loaded → (prepared throw) → GuidedThrow → (수동 해제) → Releasing.
-// 이 수동 해제가 FinishWrapRelease의 GuidedThrow 분기(커밋 전 release)로 들어가는 유일한 public 진입로다.
+// The phase contract for entering and leaving a guided throw: Loaded, then a prepared throw, then
+// GuidedThrow, then a manual release into Releasing.
+// That manual release is the only public route into the guided throw branch of the release path, meaning a
+// release before the commit.
 //
-// [테스트 범위의 한계 — 사실대로 적는다] 연출 중 abort(AbortGuidedThrow → OnRopeReleased)는 여기서
-// 검증할 수 없다: ① UpdateGuidedThrow/PrepareSimFrame이 private이고 friend는 URopeSimSubsystem 하나뿐이라
-// 구동할 수 없고, ② OnRopeReleased는 dynamic delegate라 UFUNCTION을 가진 UObject 리스너가 필요한데
-// Private/Tests에 UCLASS가 없으며, ③ world가 없어 중앙 신호(OnAnyRopeReleased)는 애초에 도달 불가다
-// (URopeSimSubsystem::Get(nullptr) == nullptr). 이벤트 발화 검증은 PIE 체크리스트가 담당한다.
+// A limit of this test's scope, stated plainly: aborting mid-throw, and the release event it fires, cannot
+// be verified here. The functions that would drive it are private with only the subsystem as a friend; the
+// release event is a dynamic delegate and needs a UObject listener, which this test module has none of; and
+// with no world the central signal is unreachable in the first place. Verifying those events is the
+// play-in-editor checklist's job.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceGuidedThrowEntryTest,
 	"DynamicRope.Pierce.GuidedThrowEntryAndManualRelease",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -199,7 +210,8 @@ bool FRopePierceGuidedThrowEntryTest::RunTest(const FString& Parameters)
 	Rope->RopeLength = 140.0f;
 	Rope->NumParticles = 8;
 
-	// 조준 성공 상황의 prepared를 world 없이 조립한다(PreviewYieldsSingleAnchor와 같은 경로).
+	// A prepared throw for a successful aim, assembled with no world, on the same path as the preview test
+	// above.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	USkeletalMeshComponent* Mesh = MakePierceMockMesh();
 
@@ -224,22 +236,25 @@ bool FRopePierceGuidedThrowEntryTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	// Loaded 밖에서는 던질 수 없다(CanThrowInPhase 계약의 실제 경로 확인).
-	TestFalse(TEXT("Free에서는 prepared throw 거부"), Rope->ThrowWithPreparedPreview(Prepared));
-	TestEqual(TEXT("거부 후 phase 불변"), Rope->GetPhase(), ERopePhase::Free);
+	// Throwing is impossible outside Loaded, which checks the real path of the phase gate contract.
+	TestFalse(TEXT("a prepared throw is refused from Free"), Rope->ThrowWithPreparedPreview(Prepared));
+	TestEqual(TEXT("the phase is unchanged after the refusal"), Rope->GetPhase(), ERopePhase::Free);
 
 	Rope->EnterLoaded();
-	TestTrue(TEXT("Loaded에서 prepared throw 성립"), Rope->ThrowWithPreparedPreview(Prepared));
+	TestTrue(TEXT("a prepared throw succeeds from Loaded"), Rope->ThrowWithPreparedPreview(Prepared));
 	TestEqual(TEXT("prepared throw → GuidedThrow"), Rope->GetPhase(), ERopePhase::GuidedThrow);
 
-	// 연출 중 수동 해제 → Releasing(커밋 전이므로 중앙 신호는 안 나가야 하지만 world 없이는 관측 불가).
+	// A manual release mid-throw moves it to Releasing. It is before the commit, so no central signal should
+	// fire, although that cannot be observed without a world.
 	Rope->ReleaseWrap();
-	TestEqual(TEXT("GuidedThrow 중 ReleaseWrap → Releasing"), Rope->GetPhase(), ERopePhase::Releasing);
+	TestEqual(TEXT("releasing during a guided throw moves to Releasing"), Rope->GetPhase(), ERopePhase::Releasing);
 	return true;
 }
-// preview 대상은 **조준 결과(aim hit)** 하나로만 정해진다. aim hit이 없을 때 던지기 방향 주변을 훑어
-// 대상을 주우면 조준과 무관한 옆 대상에 꽂히므로, 대상이 바로 옆에 있어도 preview는 성립하지 않는다.
-// 조준 ray가 빗나간 경우와 조준 흐름 자체가 없는 BP 직행/AI 경우 모두 같다.
+// A preview target is decided by the aim hit alone. Sweeping the area around the throw direction for a
+// target when there is no aim hit would embed the rope in a neighbouring target that was never aimed at, so
+// the preview does not succeed even with a target immediately beside it.
+// That holds both when the aim ray missed and when there was no aiming flow at all, as on a direct
+// Blueprint or AI call.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePierceAimHitRequiredForPreviewTest,
 	"DynamicRope.Pierce.AimHitRequiredForPreview",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -248,8 +263,8 @@ bool FRopePierceAimHitRequiredForPreviewTest::RunTest(const FString& Parameters)
 {
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	USkeletalMeshComponent* Mesh = MakePierceMockMesh();
-	// aim 축(+X)에서 비켜난 곳(원점에서 +Z로 70 = 로프 길이 140의 절반)에 놓인 대상 —
-	// 던지기 방향 주변을 훑는 구현이라면 반드시 주울 위치다.
+	// A target placed off the aim axis, at a distance from the origin equal to half the rope's length, which
+	// is exactly where an implementation sweeping around the throw direction would pick it up.
 	FCapsuleCollider Target(FVector(0, -20, 70), FVector(0, 20, 70), 25.0f, FName("spine"), Mesh);
 	TArray<IRopeCollider*> Colliders = { &Target };
 
@@ -263,15 +278,15 @@ bool FRopePierceAimHitRequiredForPreviewTest::RunTest(const FString& Parameters)
 		Input.ThrowContext.Origin = FVector::ZeroVector;
 		Input.ThrowContext.FrameForward = FVector(1, 0, 0);
 		Input.ThrowContext.FrameUp = FVector(0, 0, 1);
-		Input.ThrowContext.bAimRayEvaluated = bAimRayEvaluated; // true=조준 빗나감, false=조준 흐름 없음
-		// bHasAimGuideHit = false(기본) — 두 갈래 공통 전제.
+		Input.ThrowContext.bAimRayEvaluated = bAimRayEvaluated; // True means the aim missed and false means there was no aiming flow.
+		// The aim guide hit flag stays false, which is the premise shared by both branches.
 
 		FRopePreparedThrowPreview Prepared;
 		FString Failure;
-		TestFalse(*FString::Printf(TEXT("aim hit 없으면 옆 대상이 있어도 preview 실패 (aimRayEvaluated=%d)"),
+		TestFalse(*FString::Printf(TEXT("with no aim hit the preview fails even with a target beside it (aimRayEvaluated=%d)"),
 			bAimRayEvaluated ? 1 : 0),
 			FRopeThrowPreviewBuilder::BuildFreePreparedPreview(Input, Prepared, &Failure));
-		TestFalse(TEXT("prepared 무효"), Prepared.IsValid());
+		TestFalse(TEXT("the prepared throw is invalid"), Prepared.IsValid());
 	}
 	return true;
 }

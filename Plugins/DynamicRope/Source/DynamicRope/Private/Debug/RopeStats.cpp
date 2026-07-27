@@ -24,7 +24,7 @@ DEFINE_STAT(STAT_Rope_PhaseLogic);
 void RopeStats::RecordFrameStats(TConstArrayView<TObjectPtr<URopeComponent>> Ropes, const FRopeFrameCounters& Frame)
 {
 #if STATS
-	// 그룹 미수집이면 순회 자체를 건너뛴다(수집 안 할 때 핫 패스 오버헤드 0).
+	// If the group is not collecting, the walk itself is skipped, so the hot path costs nothing when stats are off.
 	if (!FThreadStats::IsCollectingData(GET_STATID(STAT_Rope_Active)))
 	{
 		return;
@@ -44,14 +44,14 @@ void RopeStats::RecordFrameStats(TConstArrayView<TObjectPtr<URopeComponent>> Rop
 		}
 		TotalParticles += Rope->GetNodeCount();
 
-		// physics/logic 경계 = 솔버가 굴리는 페이즈(Free/Flight)인가 아닌가. 나머지(Contacting..Loaded)는 전부 로직.
+	// The boundary between physics and logic is whether the phase is one the solver drives, being Free or Flight. Everything else, from Contacting through Loaded, is logic.
 		const ERopePhase Phase = Rope->GetPhase();
 		if (Phase == ERopePhase::Free || Phase == ERopePhase::Flight)
 		{
 			++NumPhysicsPhase;
 		}
 
-		// 솔브 경로 분할: GPU step > (솔브했지만 GPU 아님 = CPU 폴백) > 나머지는 솔브 없음(카운터 없음, Active에서 차감).
+	// The solve path breakdown: a GPU step first, then solved but not on the GPU, meaning the CPU fallback, and the remainder did not solve at all, which has no counter and is subtracted from the active count.
 		if (Rope->IsGpuSteppedThisFrame())
 		{
 			++NumGpuStepped;

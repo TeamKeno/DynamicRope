@@ -1,10 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// DynamicRopeShaders 모듈 로그 카테고리. 이 모듈은 DynamicRope에 의존하지 않으므로 자체 카테고리를 둔다.
+// The DynamicRopeShaders module's log category. This module does not depend on DynamicRope, so it has its own category.
 
 #pragma once
 
 #include "Logging/LogMacros.h"
 
-/** GPU 솔버 / 셰이더 배선(경로 매핑, 디스패치/리드백 진단). */
+/** The GPU solver and shader plumbing: path mapping and dispatch or readback diagnostics. */
 DECLARE_LOG_CATEGORY_EXTERN(LogDynamicRopeGPU, Log, All);

@@ -7,8 +7,9 @@
 
 URopePreset::URopePreset()
 {
-	// URopeComponent 생성자와 같은 기본 머티리얼(헴프 밧줄) — 미러 계약(헤더 주석). 에셋이
-	// 없으면(.Succeeded()==false) null 유지 → 컴포넌트와 같은 회색 폴백(빌드/쿠킹 안전).
+	// The same default material as URopeComponent's constructor, being hemp rope, which is a mirroring contract
+	// described in the header. If the asset is missing, meaning the find did not succeed, it stays null and falls back
+	// to the same grey as the component, which is safe for builds and cooking.
 	static ConstructorHelpers::FObjectFinder<UMaterialInterface> DefaultRopeMaterial(
 		TEXT("/DynamicRope/Materials/M_RopeDefault.M_RopeDefault"));
 	if (DefaultRopeMaterial.Succeeded())
@@ -24,7 +25,7 @@ EDataValidationResult URopePreset::IsDataValid(FDataValidationContext& Context) 
 {
 	EDataValidationResult Result = Super::IsDataValid(Context);
 
-	// SetRopeLength가 [MinRopeLength, RopeLength]로 클램프하므로 역전 구간은 저작 실수다.
+	// SetRopeLength clamps to the range from the minimum to the maximum rope length, so an inverted range is an authoring mistake.
 	if (MinRopeLength > RopeLength)
 	{
 		Context.AddWarning(FText::Format(

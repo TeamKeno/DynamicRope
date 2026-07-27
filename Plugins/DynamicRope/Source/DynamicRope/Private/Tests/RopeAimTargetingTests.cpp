@@ -12,8 +12,8 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "RopeTestHelpers.h"
 
-// resolve mode별 aim lock 범위: Assisted는 같은 캐릭터의 다른 본까지 multi-bone 후보로 허용하고,
-// Guaranteed는 prepared target의 exact bone만 허용한다.
+// The aim lock's permitted range per resolve mode: assisted permits other bones on the same character as multi-bone
+// candidates, while guaranteed permits the prepared target's exact bone alone.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimTargetResolvePolicyTest,
 	"DynamicRope.FlightContact.AimTargetResolvePolicy",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -106,12 +106,12 @@ bool FRopeAimRayResolveOutputsTest::RunTest(const FString& Parameters)
 		QueryContext, Request,
 		[](const USceneComponent*, FName) { return true; },
 		Resolved, &Hit, &Blocked);
-	TestTrue(TEXT("wrap 가능 target은 context까지 해석"), bResolved);
-	TestTrue(TEXT("같은 sweep의 hit 반환"), Hit.bHit);
-	TestFalse(TEXT("wrap 가능 target은 blocked 아님"), Blocked.bHit);
-	TestTrue(TEXT("context에 aim guide 설정"), Resolved.bHasAimGuideHit);
-	TestTrue(TEXT("context와 hit의 mesh 일치"), Resolved.AimGuideMesh.Get() == Hit.Mesh);
-	TestEqual(TEXT("context와 hit의 bone 일치"), Resolved.AimGuideBone, Hit.Bone);
+	TestTrue(TEXT("a wrappable target resolves the context as well"), bResolved);
+	TestTrue(TEXT("it returns the hit from the same sweep"), Hit.bHit);
+	TestFalse(TEXT("a wrappable target is not blocked"), Blocked.bHit);
+	TestTrue(TEXT("the aim guide is set on the context"), Resolved.bHasAimGuideHit);
+	TestTrue(TEXT("the context's mesh matches the hit's"), Resolved.AimGuideMesh.Get() == Hit.Mesh);
+	TestEqual(TEXT("the context's bone matches the hit's"), Resolved.AimGuideBone, Hit.Bone);
 
 	Resolved = FRopeThrowContext();
 	Hit = FRopeAimRayHitResult();
@@ -120,10 +120,10 @@ bool FRopeAimRayResolveOutputsTest::RunTest(const FString& Parameters)
 		QueryContext, Request,
 		[](const USceneComponent*, FName) { return false; },
 		Resolved, &Hit, &Blocked);
-	TestFalse(TEXT("게이트 거부 target은 context fallback"), bRejected);
-	TestFalse(TEXT("게이트 거부 target은 valid hit 아님"), Hit.bHit);
-	TestTrue(TEXT("게이트 거부 target은 blocked로 반환"), Blocked.bHit);
-	TestFalse(TEXT("fallback context에는 aim guide 없음"), Resolved.bHasAimGuideHit);
+	TestFalse(TEXT("a target refused by the gate falls back to the plain context"), bRejected);
+	TestFalse(TEXT("a target refused by the gate is not a valid hit"), Hit.bHit);
+	TestTrue(TEXT("a target refused by the gate is returned as blocked"), Blocked.bHit);
+	TestFalse(TEXT("the fallback context carries no aim guide"), Resolved.bHasAimGuideHit);
 	return true;
 }
 

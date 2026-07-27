@@ -5,7 +5,7 @@
 
 namespace RopeGDF
 {
-	// 두 맵 모두 game/render 스레드에서 접근되므로 하나의 락으로 보호한다(맵이 작아 경합 무시 가능).
+	// Both maps are accessed from the game and render threads, so one lock protects them; the maps are small enough that contention is negligible.
 	static FCriticalSection GRegistryCS;
 	static TMap<FSceneInterface*, FRopeGPUSolver*> GSolvers;
 	static TMap<FSceneInterface*, int32>           GGDFActiveCounts;

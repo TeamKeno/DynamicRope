@@ -11,7 +11,7 @@
 #include "Solver/RopeXPBDSolver.h"
 #include "RopeTestHelpers.h"
 
-// Aim-hit guide는 중앙만 잡고 양끝은 solver 상태를 유지하는가.
+// Whether an aim-hit guide holds the middle alone and leaves the solver state at both ends.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimHitEndpointSolverBlendTest,
 	"DynamicRope.Solver.AimHitEndpointSolverBlend",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -19,7 +19,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimHitEndpointSolverBlendTest,
 bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 {
 	FRopeSimState Sim = RopeTest::MakeStraightRope(21, 200.0f);
-	// 움직인 손 pin을 구성해 root 쪽 소켓 추종과 중앙 가이드가 함께 적용되는 조건을 만든다.
+	// A moved hand pin is set up so that following the socket at the root end and guiding the middle apply together.
 	Sim.bStartPinned = true;
 	Sim.StartPinPrev = Sim.Positions[0];
 	Sim.StartPinTarget = Sim.Positions[0] + FVector(0.0f, 25.0f, 0.0f);
@@ -43,7 +43,7 @@ bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 
 	const int32 LastNode = Sim.Num() - 1;
 	const int32 MiddleNode = LastNode / 2;
-	// 자유단을 spline 밖으로 옮겨 Advance가 끝 노드를 다시 덮어쓰지 않는지 검증한다.
+	// The free end is moved off the spline to verify that Advance does not overwrite the end node again.
 	const FVector FreeTipBefore(200.0f, 40.0f, -15.0f);
 	Sim.Positions[LastNode] = FreeTipBefore;
 	Sim.PrevPositions[LastNode] = FreeTipBefore;
@@ -73,8 +73,9 @@ bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// SegmentLength 리샘플 뒤 aim envelope를 노드별 Lerp하면 가중치 변화 구간에서 spacing이 다시
-// 벌어질 수 있다. GPU override에 실리는 최종 Current/Prev/예측 target까지 같은 비신축 계약을 지키는가.
+// Interpolating the aim envelope per node after resampling to the segment length can widen the spacing again across
+// the range where the weight changes. Whether the same inextensibility contract holds all the way to the final
+// current, previous and predicted targets carried on the GPU override.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimHitGuideSegmentSpacingTest,
 	"DynamicRope.Solver.AimHitGuidePreservesSegmentSpacing",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -145,8 +146,9 @@ bool FRopeAimHitGuideSegmentSpacingTest::RunTest(const FString& Parameters)
 	Guide.PreviewNextTargets(1.0f / 60.0f, Sim, Config, PreviewTargets);
 	CheckGuidedSpacing(TEXT("predictive target"), PreviewTargets, Sim.StartPinTarget);
 
-	// 실제 CPU/GPU 공통 strain-limit 계약(phase policy가 1.0을 전달)은 target/free-tail 경계까지
-	// resident pose 전체에서 제거한다. CPU 미러로 같은 solver 결과를 검증한다.
+	// The real strain limit contract shared by the CPU and the GPU, where the phase policy passes one, removes it
+	// across the whole resident pose including the boundary between the targets and the free tail. The same solver
+	// result is verified through the CPU mirror.
 	FRopeSimState Solved = Sim;
 	Guide.ApplyToSim(Solved);
 	FRopeSolverConfig SolverConfig;
@@ -170,8 +172,8 @@ bool FRopeAimHitGuideSegmentSpacingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 일반 FullSimulation whip은 앞쪽 guide만 스냅한다. 간격 보정을 위해 solver-owned tail까지
-// 순간이동시키지 않으면서, 실제 guided run은 충분히 움직이고 SegmentLength 상한을 지키는가.
+// An ordinary FullSimulation whip snaps the leading guide alone. Whether the guided run actually moves far enough and
+// respects the segment length limit, without teleporting the solver-owned tail to correct the spacing.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWhipInitialPoseOwnershipTest,
 	"DynamicRope.Solver.WhipInitialPosePreservesSolverOwnedTail",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

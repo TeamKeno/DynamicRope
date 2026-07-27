@@ -1,7 +1,7 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Logic/RopeWhipGuide.h"
-// RopeMath::SmoothStep (unity 빌드 중복 정의 방지)
+// RopeMath::SmoothStep, shared to avoid a duplicate definition in a unity build.
 #include "RopeMathHelpers.h"
 
 namespace
@@ -33,7 +33,7 @@ float ResolveGuideDuration(const FRopeWhipGuide::FConfig& Config, float ThrowSpe
 	return FMath::Clamp(BaseDuration * ReferenceSpeed / ThrowSpeed, KINDA_SMALL_NUMBER, 10.0f);
 }
 
-// 로프 중앙은 spline 가중치 1, 손/자유단은 0으로 완화해 양끝을 solver에 돌려준다.
+// The middle of the rope has a spline weight of one, easing to zero at the hand and the free end, which hands both ends back to the solver.
 float AimGuideEnvelope(float RopeAlpha, const FRopeWhipGuide::FConfig& Config)
 {
 	const float RootRange = FMath::Clamp(Config.AimHitRootSolverFraction, 0.0f, 0.45f);
@@ -47,7 +47,7 @@ float AimGuideEnvelope(float RopeAlpha, const FRopeWhipGuide::FConfig& Config)
 	return FMath::Min(RootWeight, TipWeight);
 }
 
-// throw origin과 현재 손 소켓의 차이는 뿌리 구간에만 섞어 애니메이션을 자연스럽게 따라간다.
+// The difference between the throw origin and the current hand socket is mixed into the root span alone, so it follows the animation naturally.
 float AimRootSocketInfluence(float RopeAlpha, const FRopeWhipGuide::FConfig& Config)
 {
 	const float RootRange = FMath::Clamp(Config.AimHitRootSolverFraction, 0.0f, 0.45f);
@@ -56,9 +56,10 @@ float AimRootSocketInfluence(float RopeAlpha, const FRopeWhipGuide::FConfig& Con
 		: 0.0f;
 }
 
-// Raw spline은 SegmentLength로 리샘플되지만, 그 뒤 노드별 aim envelope/solver blend가 간격을
-// 다시 늘릴 수 있다. 가이드된 run을 root 쪽부터 순차 투영해 각 target edge의 최대 길이만 제한한다.
-// 자유단/solver-owned 노드는 수정하지 않으므로 endpoint envelope 계약과 실제 solver 운동은 유지된다.
+// The raw spline is resampled to the segment length, but the per-node aim envelope and solver blend applied
+// afterwards can stretch the spacing again. The guided run is projected sequentially from the root end, which limits
+// the maximum length of each target edge alone.
+// The free end and solver-owned nodes are not modified, so the endpoint envelope contract and the real solver motion are preserved.
 void ClampGuidedTargetStretch(const FVector& RootPosition, float NodeSpacing,
 	const TArray<uint8>& GuidedMask, TArray<FVector>& InOutTargets)
 {
@@ -170,7 +171,7 @@ void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
 	GuideUp = FVector::CrossProduct(GuideForward, GuideSide).GetSafeNormal();
 	GuideThrowSpeed = InThrowSpeed;
 	GuideInheritedVelocity = InInheritedVelocity;
-	// Aim hit은 좌표 고정점이 아니라 origin에서 hit으로 향하는 최종 방향과 보간 구간으로만 저장한다.
+	// An aim hit is stored not as a fixed coordinate but as the final direction from the origin towards the hit, plus its interpolation ranges.
 	bHasAimTarget = bInHasAimTarget && !(InAimTarget - InOrigin).IsNearlyZero();
 	AimTarget = InAimTarget;
 	AimSteerStartAlpha = FMath::Clamp(InAimSteerStartAlpha, 0.0f, 0.9f);
@@ -179,7 +180,7 @@ void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
 	Elapsed = 0.0f;
 	bActive = true;
 
-	// 새 스윙 시작: 직전 스윙의 프레임 산출물이 이번 throw로 새어들지 않게 비운다.
+	// Starting a new swing clears the previous swing's per-frame products so they cannot leak into this throw.
 	PrevTargetsThisFrame.Reset();
 	CurrentTargetsThisFrame.Reset();
 	GuidedNodesThisFrame.Reset();
@@ -193,7 +194,7 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 		return;
 	}
 
-	// Aim hit은 중앙만 spline에 강하게 스냅하고 양끝은 solver가 자연스럽게 이어받는다.
+	// An aim hit snaps the middle hard to the spline and lets the solver take both ends over naturally.
 	const float GuidedEnd = bHasAimTarget ? 1.0f : FMath::Clamp(Config.GuidedLength, 0.05f, 0.95f);
 	const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * GuidedEnd), 1, LastNode);
 	TArray<FVector> GuideTargets;
@@ -209,7 +210,7 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 			break;
 		}
 
-		// 같은 envelope로 중앙만 초기 spline에 배치하고, 손 쪽에는 현재 소켓 이동량을 더한다.
+		// The same envelope places the middle on the initial spline, and the hand end has the socket's current movement added.
 		const float S = static_cast<float>(i) / static_cast<float>(LastNode);
 		const float GuideWeight = bHasAimTarget ? AimGuideEnvelope(S, Config) : 1.0f;
 		const float SocketInfluence = bHasAimTarget ? AimRootSocketInfluence(S, Config) : 0.0f;
@@ -226,7 +227,7 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 		}
 	}
 
-	// 최종 envelope blend 뒤 가이드 target만 다시 비신축으로 만든다. 자유단은 기존 solver pose를 유지한다.
+	// After the final envelope blend, the guided targets alone are made inextensible again. The free end keeps its existing solver pose.
 	const FVector Root = Sim.bStartPinned ? Sim.StartPinTarget : Sim.Positions[0];
 	ClampGuidedTargetStretch(Root, Sim.SegmentLength, GuidedNodesThisFrame, CurrentTargetsThisFrame);
 	for (int32 i = 1; i <= LastGuidedNode; ++i)
@@ -268,12 +269,12 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 	PrevTargetsThisFrame = Sim.PrevPositions;
 	CurrentTargetsThisFrame = Sim.Positions;
 	GuidedNodesThisFrame.SetNumZeroed(Sim.Num());
-	// 현재/이전 pin 오프셋을 각각 적용해 손 소켓의 이동 속도까지 Verlet 상태에 보존한다.
+	// The current and previous pin offsets are applied separately, which preserves the hand socket's movement speed in the Verlet state as well.
 	const FVector CurrentSocketOffset = Sim.bStartPinned ? Sim.StartPinTarget - Origin : FVector::ZeroVector;
 	const FVector PreviousSocketOffset = Sim.bStartPinned ? Sim.StartPinPrev - Origin : FVector::ZeroVector;
 
-	// 마스크/디버그 계산만 — 실제 기록은 CPU 경로의 ApplyToSim 또는 GPU override 패스가
-	// 같은 산출물(CurrentTargets/PrevTargets/mask)을 소비해서 수행한다.
+	// This computes the mask and the debug data alone; the actual write is performed by ApplyToSim on the CPU path or
+	// by the GPU override pass, which consume the same products, meaning the current and previous targets and the mask.
 	for (int32 i = 1; i <= LastGuidedNode; ++i)
 	{
 		if (Sim.InvMass.IsValidIndex(i) && Sim.InvMass[i] <= 0.0f)
@@ -287,7 +288,7 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 			break;
 		}
 
-		// 뿌리 쪽(손 근처)과 가이드 구간 끝은 서서히 가이드에서 놓아준다.
+	// The root end, near the hand, and the end of the guided span are released from the guide gradually.
 		const float StrongGuideEnd = GuidedEnd * 0.55f;
 		const float GuideFade = (S <= StrongGuideEnd)
 			? 1.0f
@@ -308,7 +309,7 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 			const FVector PreviousGuide = PreviousTargets.IsValidIndex(i)
 				? PreviousTargets[i] + PreviousSocketOffset * SocketInfluence
 				: CurrentGuide;
-			// 중앙은 spline에 고정하고, 양끝으로 갈수록 현재 solver 상태를 보존해 부드럽게 넘긴다.
+			// The middle is pinned to the spline, and towards both ends the current solver state is increasingly preserved, which hands over smoothly.
 			CurrentTargetsThisFrame[i] = FMath::Lerp(Sim.Positions[i], CurrentGuide, GuideWeight);
 			PrevTargetsThisFrame[i] = FMath::Lerp(Sim.PrevPositions[i], PreviousGuide, GuideWeight);
 		}
@@ -327,8 +328,8 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 
 	}
 
-	// ResampleGuideByNodeSpacing 뒤의 endpoint envelope/socket blend가 spacing을 다시 깨뜨리지
-	// 않게 Current/Prev target run을 각각 현재/직전 pin에서 순차 투영한다.
+	// So that the endpoint envelope and socket blend applied after ResampleGuideByNodeSpacing do not break the spacing
+	// again, the current and previous target runs are each projected sequentially from the current and previous pin.
 	const FVector CurrentRoot = Sim.bStartPinned ? Sim.StartPinTarget : Sim.Positions[0];
 	const FVector PreviousRoot = Sim.bStartPinned ? Sim.StartPinPrev : Sim.PrevPositions[0];
 	ClampGuidedTargetStretch(
@@ -491,7 +492,7 @@ void FRopeWhipGuide::BuildGuideTargets(float NormalizedTime, int32 LastGuidedNod
 	{
 		SweepDir = Forward;
 	}
-	// HitPoint 자체에 노드를 고정하지 않고 (HitPoint - throw Origin)의 정규화 방향만 spline에 전달한다.
+	// No node is pinned to the hit point itself; only the normalized direction from the throw origin to the hit point is passed to the spline.
 	const FVector LockedAimDir = bHasAimTarget
 		? (AimTarget - HandPos).GetSafeNormal(KINDA_SMALL_NUMBER, Forward)
 		: Forward;

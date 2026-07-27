@@ -14,7 +14,7 @@ ARopeDemoPresetVolume::ARopeDemoPresetVolume()
 
 	Trigger = CreateDefaultSubobject<UBoxComponent>(TEXT("Trigger"));
 	SetRootComponent(Trigger);
-	// 문 하나 폭 정도의 통과 영역(400x200x300cm). 레벨에 맞춰 조정한다.
+	// A passage roughly one doorway wide, at 400 x 200 x 300 cm, adjusted to suit the level.
 	Trigger->SetBoxExtent(FVector(200.0f, 100.0f, 150.0f));
 	Trigger->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	Trigger->SetCollisionObjectType(ECC_WorldStatic);
@@ -45,7 +45,7 @@ void ARopeDemoPresetVolume::BeginPlay()
 
 void ARopeDemoPresetVolume::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// 대기 구독을 남긴 채 사라지면 로프 쪽 델리게이트에 죽은 핸들러가 남는다.
+	// Disappearing while a pending subscription remains would leave a dead handler on the rope's delegates.
 	for (const TWeakObjectPtr<URopeComponent>& WeakRope : PendingRopes)
 	{
 		if (URopeComponent* Rope = WeakRope.Get())
@@ -66,7 +66,7 @@ void ARopeDemoPresetVolume::HandleBeginOverlap(UPrimitiveComponent* /*Overlapped
 		return;
 	}
 
-	// 랙돌·다중 콜리전 액터는 이벤트가 여러 번 오므로 액터 단위로 센다. 첫 진입에서만 적용한다.
+	// A ragdoll or an actor with several collision shapes sends the event more than once, so it is counted per actor and applied on first entry alone.
 	int32& Count = OverlapCounts.FindOrAdd(OtherActor);
 	if (++Count > 1)
 	{
@@ -94,7 +94,7 @@ void ARopeDemoPresetVolume::HandleEndOverlap(UPrimitiveComponent* /*OverlappedCo
 	}
 	OverlapCounts.Remove(OtherActor);
 
-	// 완전히 빠져나갔다 — 아직 기다리던 로프가 있으면 포기한다(볼륨 밖에서 뒤늦게 바뀌면 안 된다).
+	// It has left entirely, so any rope still waiting is abandoned, since nothing should change late, outside the volume.
 	TArray<URopeComponent*> Ropes;
 	OtherActor->GetComponents<URopeComponent>(Ropes);
 	for (URopeComponent* Rope : Ropes)
@@ -104,7 +104,7 @@ void ARopeDemoPresetVolume::HandleEndOverlap(UPrimitiveComponent* /*OverlappedCo
 
 	if (ExitPreset)
 	{
-		// 나가는 길에는 기다리지 않는다 — 이미 볼륨 밖이라 대기 조건(안에 있는 동안)이 성립하지 않는다.
+	// It does not wait on the way out: it is already outside the volume, so the waiting condition, being inside it, no longer holds.
 		ApplyToActor(OtherActor, ExitPreset, /*bWaitIfBusy=*/false);
 	}
 }
@@ -144,7 +144,7 @@ void ARopeDemoPresetVolume::ApplyToActor(AActor* Actor, const URopePreset* InPre
 			continue;
 		}
 
-		// 비행/감김 중 — Free/Loaded로 돌아오는 첫 순간에 적용하려고 구독해 둔다.
+		// It is in flight or wrapping, so it subscribes in order to apply the preset the first moment it returns to Free or Loaded.
 		bool bAlreadyPending = false;
 		PendingRopes.Add(Rope, &bAlreadyPending);
 		if (!bAlreadyPending)
@@ -158,8 +158,8 @@ void ARopeDemoPresetVolume::ApplyToActor(AActor* Actor, const URopePreset* InPre
 
 bool ARopeDemoPresetVolume::ApplyToRope(URopeComponent* Rope, const URopePreset* InPreset)
 {
-	// ApplyPreset이 Free/Loaded 게이트를 직접 판정하므로(거부 시 false, 아무것도 안 바꿈) 여기서
-	// 페이즈를 다시 해석하지 않는다 — 게이트의 단일 소스는 컴포넌트다.
+	// ApplyPreset decides the Free and Loaded gate itself, returning false and changing nothing on a refusal, so the
+	// phase is not interpreted again here: the single source for the gate is the component.
 	if (!IsValid(Rope) || !InPreset || !Rope->ApplyPreset(InPreset))
 	{
 		return false;
@@ -174,8 +174,8 @@ bool ARopeDemoPresetVolume::ApplyToRope(URopeComponent* Rope, const URopePreset*
 
 void ARopeDemoPresetVolume::HandleRopePhaseChanged(ERopePhase /*OldPhase*/, ERopePhase /*NewPhase*/)
 {
-	// 델리게이트 페이로드에 로프가 실려 오지 않으므로 대기열을 훑는다(대기열은 길어야 로프 몇 개다).
-	// 적용은 성공한 것만 대기열에서 빠지므로, 아직 안 되는 로프는 다음 전이에서 다시 시도된다.
+	// The delegate payload does not carry the rope, so the pending list is walked; it is a few ropes long at most.
+	// Only those applied successfully leave the list, so a rope that is still not ready is retried on the next transition.
 	TArray<TWeakObjectPtr<URopeComponent>> Snapshot = PendingRopes.Array();
 	for (const TWeakObjectPtr<URopeComponent>& WeakRope : Snapshot)
 	{

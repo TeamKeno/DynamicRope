@@ -6,9 +6,11 @@
 bool FRopeSolverThrottle::UpdateSleepState(ERopePhase Phase, const FRopeSimState& Sim,
 	const FRopeSolverConfig& Config, float DeltaTime, bool bHoldAwake)
 {
-	// Free/Wrapped + 슬립 허용에서만 측정. 그 외에는 누적을 버려 상태 오염을 막는다(캐시는 다음 슬립
-	// 페이즈 진입 시 재구축). Wrapped는 로직(Hold/견인/자동 release)이 계속 도는 채 솔브만 쉬는 페이즈라
-	// Free와 동일한 침전 측정이 성립한다 — 본이 움직이면 Hold가 쓴 노드 변위가 측정에 그대로 잡힌다.
+	// Measured in Free and Wrapped alone, and only where sleeping is permitted. Elsewhere the accumulation is
+	// discarded to prevent the state being contaminated, and the cache is rebuilt on entering the next sleepable
+	// phase. Wrapped is a phase where the logic, meaning Hold, traction and the automatic release, keeps running while
+	// the solve alone rests, so the same settling measurement as Free applies: when the bone moves, the node
+	// displacement Hold wrote is picked up by the measurement directly.
 	const bool bSleepPhase = (Phase == ERopePhase::Free || Phase == ERopePhase::Wrapped);
 	if (!bSleepPhase || !Config.bAllowSleep || bAsleep || DeltaTime <= KINDA_SMALL_NUMBER)
 	{
@@ -17,8 +19,8 @@ bool FRopeSolverThrottle::UpdateSleepState(ERopePhase Phase, const FRopeSimState
 		return false;
 	}
 
-	// 프레임간 최대 노드 변위 → 속도. Verlet substep 변위가 아니라 프레임 캐시 비교라 substep 수/GPU
-	// 미러 지연과 무관하게 동작한다.
+	// The maximum node displacement between frames, giving a speed. It compares against a per-frame cache rather than
+	// the Verlet substep displacement, so it works regardless of the substep count or the GPU mirror's latency.
 	bool bJustSlept = false;
 	if (SleepPrevFramePositions.Num() == Sim.Num())
 	{
@@ -28,15 +30,15 @@ bool FRopeSolverThrottle::UpdateSleepState(ERopePhase Phase, const FRopeSimState
 			MaxDistSq = FMath::Max(MaxDistSq, static_cast<float>(FVector::DistSquared(Sim.Positions[i], SleepPrevFramePositions[i])));
 		}
 		const float MaxSpeed = FMath::Sqrt(MaxDistSq) / DeltaTime;
-		// bHoldAwake는 진입만 막는다(타이머 리셋) — 측정 캐시는 계속 갱신해 게이트 해제 시 delay가 깨끗이 재시작.
+		// Holding it awake prevents entering sleep alone, by resetting the timer; the measurement cache keeps updating so that the delay restarts cleanly when the gate is released.
 		SleepTimer = (!bHoldAwake && MaxSpeed < Config.SleepVelocityThreshold) ? SleepTimer + DeltaTime : 0.0f;
 		if (SleepTimer >= Config.SleepDelay)
 		{
 			bAsleep = true;
 			SleepPinPos = Sim.StartPinTarget;
-			// 드리프트 wake 기준(슬립 중 로직 쓰기 감지 — ShouldWakeFromSleep).
+			// The baseline for waking on drift, which detects a logic write while asleep, in ShouldWakeFromSleep.
 			SleepNodePositions = Sim.Positions;
-			// 전이 로그는 호출자(컴포넌트) 담당.
+			// Logging the transition is the caller's, meaning the component's, responsibility.
 			bJustSlept = true;
 		}
 	}
@@ -51,13 +53,14 @@ bool FRopeSolverThrottle::ShouldWakeFromSleep(const FRopeSimState& Sim, const FR
 	{
 		return true;
 	}
-	// 핀(손)이 슬립 시점에서 이동 — 캐릭터가 움직였다.
+	// The pin, meaning the hand, has moved since it went to sleep, so the character moved.
 	if (FVector::DistSquared(Sim.StartPinTarget, SleepPinPos) > FMath::Square(1.0f))
 	{
 		return true;
 	}
-	// 슬립 중 로직 쓰기로 노드가 슬립 시점에서 이동 — Wrapped의 Hold 본 추종이 대표(랩 대상/엘리베이터가
-	// 움직이는 중). Free는 슬립 중 노드를 쓰는 주체가 없어 자연히 no-op. 임계 0.5cm(콜라이더 정지 판정과 동일).
+	// A logic write while asleep moved the nodes since it went to sleep. The typical case is Wrapped's Hold following
+	// its bone, meaning the wrap target or the elevator is moving. In Free nothing writes the nodes while asleep, so
+	// this is naturally a no-op. The threshold is 0.5 cm, the same as the collider rest test.
 	if (SleepNodePositions.Num() == Sim.Num())
 	{
 		for (int32 i = 0; i < Sim.Num(); ++i)
@@ -68,13 +71,14 @@ bool FRopeSolverThrottle::ShouldWakeFromSleep(const FRopeSimState& Sim, const FR
 			}
 		}
 	}
-	// 되감기/풀기 중.
+	// It is reeling in or paying out.
 	if (!FMath::IsNearlyZero(ReelRate))
 	{
 		return true;
 	}
-	// 움직이는 collider 근접: 전달된 목록은 이미 로프 bounds로 컬링돼 있어(서브시스템) 근접분만 남는다.
-	// 정지 본(prev==curr)은 무시 — 애니 idle 미세 흔들림은 0.5cm 임계로 걸러진다.
+	// A moving collider nearby: the list supplied has already been culled against the rope's bounds by the subsystem,
+	// so only nearby ones remain. A stationary bone, whose previous and current transforms match, is ignored, and the
+	// small wobble of an animation idle is filtered out by the 0.5 cm threshold.
 	for (const IRopeCollider* Collider : Colliders)
 	{
 		if (!Collider)
@@ -107,7 +111,7 @@ void FRopeSolverThrottle::ComputeSolverLOD(const FRopeSolverConfig& Config, cons
 	SolverLODScale = 1.0f;
 	if (!Config.bEnableDistanceLOD || Config.LODStartDistance <= 0.0f || !CameraDistance.IsSet())
 	{
-		// 비활성 또는 카메라 없음(서버) = 풀 품질.
+		// Inactive, or with no camera as on a server, means full quality.
 		return;
 	}
 	const float Range = FMath::Max(Config.LODEndDistance - Config.LODStartDistance, 1.0f);

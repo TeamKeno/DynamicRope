@@ -2,13 +2,14 @@
 
 #include "Logic/RopeWrappingPhase.h"
 #include "Components/SceneComponent.h"
-// ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+// ResolveBindingWorld, the single point that resolves a wrap binding, whether a bone, a socket or a
+// component, into a transform.
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-// RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
+// RopeMath::AnyTangentFromNormal, included here to avoid a duplicate definition in the unity build.
 #include "RopeMathHelpers.h"
 
 #pragma region Wrapping Geometry and Axis Resolution
@@ -21,8 +22,9 @@ bool FRopeWrappingPhase::ComputeBuiltPathWrapAngle(const FRopeSimState& Sim, con
 		return false;
 	}
 
-	// Sequential SurfaceVectorField와 Composite AnalyticHelix 모두 경로 빌드 중 누적한 실제 위상을
-	// 우선 사용한다. 아직 한 스텝도 진행하지 못한 경로만 아래의 단일 축 근사로 폴백한다.
+	// Both the sequential surface vector field and the composite analytic helix prefer the real phase
+	// accumulated during the path build. Only a path that has not advanced a single step falls back to the
+	// single-axis approximation below.
 	if (State.PathAccumulatedAngleRad > KINDA_SMALL_NUMBER)
 	{
 		OutAngleDeg = FMath::RadiansToDegrees(State.PathAccumulatedAngleRad);
@@ -64,13 +66,15 @@ bool FRopeWrappingPhase::ComputeBuiltPathWrapAngle(const FRopeSimState& Sim, con
 		LastBuiltDistance = FMath::Max(LastBuiltDistance, State.Path.Last().DistanceFromLatch);
 	}
 
-	// 실제 SurfaceVectorField 경로가 얼마나 울퉁불퉁했는지와 별개로, 실패 판정은 helix 기준 누적
-	// 감싼 각도만 본다. 각도(도) 반환 — 회전 수(=각도/360)는 2πr 로프를 요구해 대상 크기에 비례하는
-	// 기준이 되므로 쓰지 않는다(FRopeWrapConfig::FailedWrapMinAngleDeg 주석 참고).
+	// However uneven the real surface vector field path was, the failure test looks only at the wrapped
+	// angle accumulated against the helix. It returns degrees: a number of turns is not used, because a
+	// turn demands a rope of 2*pi*r and therefore scales the criterion with the target's size; see the
+	// comment on FRopeWrapConfig::FailedWrapMinAngleDeg.
 	if (State.bPathUsesPoseSpaceIsland && State.Path.Num() > 1)
 	{
-		// 자동 pitch와 진입 반지름을 사용한 독립 helix는 이미 실제 누적 위상을 저장한다.
-		// 고정 config pitch로 다시 역산하면 커밋 로그/품질 관문의 각도가 경로와 달라진다.
+		// An independent helix using an automatic pitch and entry radius already stores its real
+		// accumulated phase. Recomputing it from the fixed config pitch would make the angle in the commit
+		// log and the quality gate disagree with the path.
 		OutAngleDeg = FMath::RadiansToDegrees(
 			FMath::Abs(State.PathCompositeSweepAngleRad));
 		return true;
@@ -105,8 +109,9 @@ bool FRopeWrappingPhase::ComputeWrapEnclosureCoverage(float& OutCoverageDeg) con
 		return OutRadial.Normalize(KINDA_SMALL_NUMBER);
 	};
 
-	// 각 경로점의 축 둘레 각도(첫 비축퇴 점 기준, (-180,180]). 브리지 점도 포함한다 —
-	// chord가 가로지른 방향도 로프가 막고 있는 방향이다.
+	// The angle of each path point about the axis, measured from the first non-degenerate point over a
+	// half-open turn. Bridge points are included, since the direction a chord crosses is also a direction
+	// the rope blocks.
 	FVector RefRadial = FVector::ZeroVector;
 	TArray<float, TInlineAllocator<128>> AngleDegrees;
 	for (const FRopeWrapPathPoint& Point : State.Path)
@@ -133,9 +138,10 @@ bool FRopeWrappingPhase::ComputeWrapEnclosureCoverage(float& OutCoverageDeg) con
 		return false;
 	}
 
-	// 정렬 후 최대 각도 공백(이웃 간 + 양끝 wrap-around)을 찾는다. 커버리지 = 360 − 최대 공백:
-	// 점들이 축 둘레를 빈틈없이 두르면 공백이 스텝 각 수준으로 작아 360에 수렴하고,
-	// 반쪽 훅이면 반대편이 통째로 비어 커버리지가 그만큼 낮다.
+	// After sorting, find the largest angular gap, both between neighbours and across the wrap-around at
+	// the ends. The coverage is 360 minus that gap: points spread evenly around the axis leave a gap no
+	// larger than one step and converge on 360, while a half hook leaves the opposite side entirely empty
+	// and its coverage is lower by exactly that much.
 	AngleDegrees.Sort();
 	float MaxGapDeg = 360.0f - (AngleDegrees.Last() - AngleDegrees[0]);
 	for (int32 Index = 1; Index < AngleDegrees.Num(); ++Index)
@@ -161,22 +167,29 @@ bool FRopeWrappingPhase::FindGuidePlaneAxis(const FRopeSurfaceAnchor& LatchAncho
 		return false;
 	}
 
-	// CaptureTravelPlane: 축 origin을 latch 본 위치가 아니라 캡처 순간의 접촉 영역 중심에 둔다 —
-	// 여러 본/대상에 걸친 접촉(양다리)에서 감김 반경이 한쪽 대상이 아닌 쌍의 중심을 기준으로 잡힌다.
-	// origin은 캡처 시점 고정값이라 본 전환 재시드(rolling axis)에서도 움직이지 않는다.
-	// BoneCenteredGuidePlane은 종전처럼 본 위치를 쓴다 — Assisted 단일 본 동작 불변.
+	// Under CaptureTravelPlane the axis origin is placed at the centre of the contact region captured at
+	// that moment rather than at the latch bone, so that with contact spanning several bones or targets,
+	// such as two legs, the wrap radius is measured about the centre of the pair rather than one of them.
+	// The origin is fixed at capture time and therefore does not move when the axis is reseeded on a bone
+	// transition.
+	// BoneCenteredGuidePlane uses the bone location as before, which leaves single-bone assisted behaviour
+	// unchanged.
 	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::CaptureTravelPlane &&
 		Ctx.TravelFrame && Ctx.TravelFrame->bValid)
 	{
 		FVector Origin = Ctx.TravelFrame->RegionCenter;
 
-		// 접촉 군집 보정(브리징 = 분리 대상 랩 모드에서만): RegionCenter는 "첫 접촉" 순간의 접촉점
-		// 평균이라, 캡처가 첫 다리에 닿는 즉시 일어나면(MinLatchNodes 기본 1) 한쪽 다리 위에 있다 —
-		// 축이 대상 안을 지나면 그 대상만 도는 궤도가 winding 순방향이 되어 이탈 관문이 침묵하고,
-		// 반대쪽 다리로 못 건너간다(PIE 실측 2026-07-13: 한 다리 1725° 나선, coverage는 축이 대상
-		// 안이라 무의미하게 높음). 접촉 못 한 이웃 대상도 collider 스냅샷에는 있으므로, 같은 mesh의
-		// 근방(브리지 거리) collider 중심들을 평균해 축이 군집(양다리 쌍)의 중심을 지나게 한다.
-		// 축 방향 성분은 버린다 — 축은 선이라 수직 성분만 의미가 있다.
+		// Correcting for the contact cluster, only in the wrap mode that bridges between separate targets:
+		// the region centre is the mean of the contact points at the moment of first contact, so when
+		// capture happens the instant the rope touches the first leg, which it does with the default
+		// minimum latch count of one, it sits on that one leg. An axis passing through a target makes
+		// orbiting that target alone the forward winding direction, which silences the departure gate and
+		// leaves the path unable to cross to the other leg.
+		// Neighbouring targets that were not touched are still present in the collider snapshot, so the
+		// centres of nearby colliders on the same mesh, within the bridge distance, are averaged to put the
+		// axis through the centre of the cluster, that is the pair of legs.
+		// The component along the axis is discarded: an axis is a line, so only the perpendicular component
+		// means anything.
 		const float ClusterRadius = Ctx.Config.WrappingMaxGapBridgeDistance;
 		if (ClusterRadius > 0.0f)
 		{
@@ -260,7 +273,8 @@ bool FRopeWrappingPhase::GetColliderCenter(const IRopeCollider& Collider, FVecto
 		return true;
 	}
 
-	// 랩 가능 convex(WrapTarget 전체 세트): 로컬 bounds 중심을 강체로 월드 변환.
+	// A wrappable convex, from a wrap target's full set: its local bounds centre transformed into world
+	// space by the rigid transform.
 	TConstArrayView<FPlane> ConvexPlanes;
 	FBox ConvexLocalBounds(ForceInit);
 	FQuat ConvexRot = FQuat::Identity;
@@ -294,8 +308,9 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 			*OutAxisDirection.ToString());
 	};
 
-	// CaptureTravelPlane: 진행 평면 normal 축을 캡처 접촉 영역/collider 군집 중심에 고정한다.
-	// 여러 본에 걸친 Composite wrapping이 특정 latch 본의 위치에 끌려가지 않도록 하는 모드다.
+	// Under CaptureTravelPlane the travel plane normal axis is pinned to the centre of the captured contact
+	// region or collider cluster. It is the mode that keeps composite wrapping across several bones from
+	// being dragged towards the location of one particular latch bone.
 	bool bTriedCaptureTravelPlane = false;
 	if (Ctx.Config.WrappingAxisSource == ERopeWrappingAxisSource::CaptureTravelPlane)
 	{
@@ -317,15 +332,16 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 	const FName ParentBone = RopeWrapTargets::GetParentTargetKey(Mesh, LatchAnchor.Bone);
 	const FVector BoneLocation = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
 
-	// BoneCenteredGuidePlane: 같은 진행 평면 normal을 latch 본 위치에 세운다.
-	// CaptureTravelPlane이었다면 이미 위에서 시도·실패한 것이므로 같은 입력을 재시도하지 않는다.
+	// Under BoneCenteredGuidePlane the same travel plane normal is stood at the latch bone's location.
+	// Had the mode been CaptureTravelPlane it would already have been attempted and failed above, so the
+	// same input is not retried.
 	if (!bTriedCaptureTravelPlane && FindGuidePlaneAxis(LatchAnchor, Ctx, Mesh, OutAxisOrigin, OutAxisDirection))
 	{
 		LogAxisSource(TEXT("BoneCenteredGuidePlane"), Mesh);
 		return true;
 	}
 
-	// rope 평면 축을 만들 수 없으면 스켈레탈 대상은 bone-parent 축으로 폴백한다.
+	// Where no rope plane axis can be produced, a skeletal target falls back to the bone-to-parent axis.
 	if (!ParentBone.IsNone())
 	{
 		const FVector ParentLocation = ResolveBindingWorld(Mesh, ParentBone).GetLocation();
@@ -341,10 +357,12 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 
 	const FTransform BoneXform = ResolveBindingWorld(Mesh, LatchAnchor.Bone);
 
-	// 정적/비-스켈레탈 대상(피드백 5): 본 그래프가 없어 축을 컴포넌트 기저에서 유도한다. 컴포넌트
-	// 기저축(X/Y/Z) 중 latch 표면 normal에 가장 수직인 축을 감김 축으로 고른다 — 원기둥/캡슐의 장축은
-	// 반경 방향(표면 normal)에 수직이므로, 축정렬 랩 캡슐(기둥=Z, 가로보=X/Y)에서 올바른 감김 축이
-	// 자동 선택된다(부모가 있는 스켈레탈은 위에서 이미 반환됨 — 스켈레탈 루트 본은 아래 로컬 X 폴백).
+	// A static or non-skeletal target has no bone graph, so the axis is derived from the component basis:
+	// whichever of the component's X, Y and Z axes is most perpendicular to the latch surface normal is
+	// chosen as the wrap axis. The long axis of a cylinder or capsule is perpendicular to the radial
+	// direction, which is the surface normal, so an axis-aligned wrap capsule, Z for a pillar and X or Y
+	// for a crossbeam, automatically selects the correct wrap axis. A skeletal target with a parent has
+	// already returned above; a skeletal root bone falls through to the local X fallback below.
 	if (!RopeWrapTargets::IsSkeletalTarget(Mesh))
 	{
 		const FVector NormalWorld = BoneXform.TransformVectorNoScale(LatchAnchor.LocalNormal)
@@ -430,9 +448,10 @@ void FRopeWrappingPhase::ReseedWrappingAxisOnBoneTransition(FName Bone, const US
 		return;
 	}
 
-	// ResolveWrappingAxis의 입력 계약(본/메시 + 본 로컬 표면 프레임)만 채운 합성 anchor. 현재 경로
-	// 지점의 표면 프레임을 새 본 로컬로 옮겨 담아, collider 형상 축 실패 시의 폴백(guide 평면/기저축)도
-	// 새 본 위치·현재 normal 기준으로 동작하게 한다.
+	// A synthetic anchor filling in only what ResolveWrappingAxis contractually needs, namely the bone and
+	// mesh plus a bone-local surface frame. Moving the current path point's surface frame into the new
+	// bone's local space makes the fallbacks used when the collider shape axis fails, whether the guide
+	// plane or the basis axes, work from the new bone's location and the current normal.
 	FRopeSurfaceAnchor AxisAnchor;
 	AxisAnchor.Bone = Bone;
 	AxisAnchor.Mesh = Mesh;
@@ -447,21 +466,24 @@ void FRopeWrappingPhase::ReseedWrappingAxisOnBoneTransition(FName Bone, const US
 	FVector NewAxisDirection = State.PathAxisDirection;
 	if (!ResolveWrappingAxis(AxisAnchor, Ctx, NewAxisOrigin, NewAxisDirection))
 	{
-		// 새 본 축 유도 실패 — 직전 본 축으로 계속 진행한다(종전 단일 축 동작과 동일한 폴백).
+		// Deriving an axis for the new bone failed, so it continues with the previous bone's axis, which is
+		// the same fallback as behaving with a single fixed axis.
 		return;
 	}
 
-	// 부호 정렬: 체인 본의 이웃 축은 대체로 이어지므로 이전 축과 반대면 뒤집는다 — 피치 드리프트
-	// 방향(감기며 축을 따라 미끄러지는 쪽)이 전환점에서 반전되지 않게 한다. OrientWrappingAxisByTail은
-	// latch 시점 tail 위치 휴리스틱이라 경로 중간 재해석에는 부적합하다.
+	// Sign alignment: neighbouring axes along a bone chain generally continue in the same direction, so an
+	// axis opposed to the previous one is flipped. That keeps the pitch drift direction, meaning which way
+	// the wrap slides along the axis, from reversing at a transition. OrientWrappingAxisByTail is a
+	// heuristic based on the tail position at latch time and is unsuitable for re-resolving mid-path.
 	if (FVector::DotProduct(NewAxisDirection, State.PathAxisDirection) < 0.0f)
 	{
 		NewAxisDirection *= -1.0f;
 	}
 
-	// 현재 표면점 기준 radial/원주 재계산 + winding 재선출: 새 필드가 지금 진행 방향(tangent) 그대로
-	// 새 축 주위를 돌게 한다. 여기서 winding을 다시 뽑지 않으면 전환 지점의 기하에 따라 감김 방향이
-	// 뒤집힐 수 있다.
+	// The radial and circumferential directions are recomputed from the current surface point and the
+	// winding is re-elected, so the new field turns about the new axis in the direction the path is
+	// currently travelling. Without re-electing the winding here, the wrap direction could reverse
+	// depending on the geometry at the transition point.
 	const float AxisDistance = FVector::DotProduct(State.PathSurfaceWorld - NewAxisOrigin, NewAxisDirection);
 	const FVector AxisPoint = NewAxisOrigin + NewAxisDirection * AxisDistance;
 	const FVector Radial = (State.PathSurfaceWorld - AxisPoint)

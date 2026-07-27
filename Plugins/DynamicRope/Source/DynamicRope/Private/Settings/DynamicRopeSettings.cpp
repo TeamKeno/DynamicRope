@@ -10,14 +10,14 @@ UDynamicRopeSettings::UDynamicRopeSettings()
 	CategoryName = TEXT("Plugins");
 	SectionName = TEXT("Dynamic Rope");
 
-	// 기본값: 플러그인 내장 ARopeController. 프로젝트가 서브클래스로 덮거나 None으로 자동 스폰을 끌 수 있다
-	// (config 필드라 DefaultGame.ini에 저장된 값이 있으면 로드 시 이 기본값을 덮어쓴다).
+	// The default is the plugin's built-in ARopeController. A project can override it with a subclass or set it to
+	// none to disable the automatic spawn. It is a config field, so a value saved in DefaultGame.ini overwrites this default on load.
 	StaticBodyControllerClass = ARopeController::StaticClass();
 
-	// 기본값: 에셋 없이 동작하는 C++ 조준 HUD 위젯. WBP 서브클래스로 교체하거나 None으로 끌 수 있다.
+	// The default is the C++ aim HUD widget, which works with no assets. It can be replaced with a widget Blueprint subclass or set to none to disable it.
 	AimHudWidgetClass = URopeAimWidget::StaticClass();
 
-	// 기본값: 에셋 없이 동작하는 C++ Pull 게이지 위젯. WBP로 교체하거나 None으로 끌 수 있다.
+	// The default is the C++ pull gauge widget, which works with no assets. It can be replaced with a widget Blueprint or set to none to disable it.
 	PullGaugeWidgetClass = URopePullGaugeWidget::StaticClass();
 }
 

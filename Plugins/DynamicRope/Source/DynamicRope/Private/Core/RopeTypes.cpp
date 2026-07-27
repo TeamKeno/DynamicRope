@@ -1,7 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// RopeTypes.h 데이터 타입들의 비-인라인 멤버함수 모음. 헤더는 타입 정의(대부분 POD)에 집중하고,
-// 엔진 컴포넌트 include가 필요하거나 분량이 있는 로직은 여기로 모은다.
+// The out-of-line member functions of the data types in RopeTypes.h. The header concentrates on the type
+// definitions, most of which are POD, and logic that needs engine component includes or has any bulk to it is
+// collected here.
 
 #include "Core/RopeTypes.h"
 
@@ -16,19 +17,21 @@ FRopeThrowContext FRopeThrowContext::MakeDefault(const USceneComponent& RopeComp
 	if (const AActor* Owner = RopeComponent.GetOwner())
 	{
 		Context.OwnerVelocity = Owner->GetVelocity();
-		// 기본 진입점은 손 스윙을 측정하지 못한다 — 애니메이션 상대 속도 0(Wielder 경로만 측정해 채운다).
+		// The default entry point cannot measure the hand's swing, so the animation-relative velocity is zero; the wielder path alone measures and fills it in.
 		Context.HandAnimationVelocity = FVector::ZeroVector;
 	}
 
-	// 설정 패스스루.
+	// Configuration passed straight through.
 	Context.FrameMode = Params.FrameMode;
 	Context.ThrowSpeed = Params.ThrowSpeed;
 	Context.SwingPlane = Params.SwingPlane;
 	Context.CustomSwingPlaneNormal = Params.CustomSwingPlaneNormal;
 
-	// 프레임 기저: FrameMode당 한 곳에서 세 축을 함께 확정한다. (이전 구현은 컴포넌트 기저를 먼저
-	// 넣고 모드별 if가 일부 축만 덮어써 — World의 Up만 삼항으로 따로 정해지는 식 — 순서 의존이 있었다.)
-	// 여기서는 원값만 조립하고, 정규화/직교 폴백은 ResolveThrowContext가 담당한다(책임 분리).
+	// The frame basis: all three axes are decided together in one place per frame mode. An earlier implementation put
+	// the component basis in first and had per-mode branches overwrite some of the axes, deciding the world mode's up
+	// vector separately in a ternary, which made it order-dependent.
+	// Only the raw values are assembled here; normalization and the orthogonal fallback are ResolveThrowContext's
+	// responsibility, which keeps the two separate.
 	auto SetComponentBasis = [&Context, &RopeComponent]()
 	{
 		Context.FrameForward = RopeComponent.GetForwardVector();
@@ -55,7 +58,7 @@ FRopeThrowContext FRopeThrowContext::MakeDefault(const USceneComponent& RopeComp
 		}
 		else
 		{
-			// 카메라 없는 owner — 컴포넌트 기저 폴백(기존 동작 유지).
+			// An owner with no camera falls back to the component basis.
 			SetComponentBasis();
 		}
 		break;
@@ -81,8 +84,9 @@ FRopeCaptureTravelFrame FRopeCaptureTravelFrame::Compute(const FRopeSimState& Si
 {
 	FRopeCaptureTravelFrame Frame;
 
-	// 유효 후보 수집: 표면점 평균(RegionCenter), 접촉 노드 범위(span), 노드별 속도 평균.
-	// 같은 노드가 여러 콜라이더에 잡혀 후보가 중복될 수 있으므로 속도 평균은 노드 단위로 센다.
+	// Collects the valid candidates: the mean of the surface points, giving the region centre, the range of contacting
+	// nodes, giving the span, and the mean velocity per node.
+	// The same node can be caught by several colliders and appear as duplicate candidates, so the velocity is averaged per node.
 	FVector CenterSum = FVector::ZeroVector;
 	int32 CenterCount = 0;
 	FVector VelocitySum = FVector::ZeroVector;
@@ -125,7 +129,7 @@ FRopeCaptureTravelFrame FRopeCaptureTravelFrame::Compute(const FRopeSimState& Si
 		Frame.AverageVelocity = VelocitySum / static_cast<float>(VelocityCount);
 	}
 
-	// span: 접촉이 한 노드뿐이면(팁 우선 착지에서 흔함) 이웃 노드로 넓혀 로프가 누운 방향을 확보한다.
+	// The span: when only one node is in contact, which is common when the tip lands first, it is widened to the neighbouring nodes to establish the direction the rope lies in.
 	const int32 SpanStart = FMath::Max(0, MinNode - 1);
 	const int32 SpanEnd = FMath::Min(Sim.Num() - 1, MaxNode + 1);
 	if (SpanEnd > SpanStart)
@@ -133,9 +137,11 @@ FRopeCaptureTravelFrame FRopeCaptureTravelFrame::Compute(const FRopeSimState& Si
 		Frame.SpanDirection = (Sim.Positions[SpanEnd] - Sim.Positions[SpanStart]).GetSafeNormal();
 	}
 
-	// 진행 평면 normal = 속도 방향 × 누운 방향(둘 다 단위벡터 — 외적 크기가 곧 sin(사잇각)).
-	// 속도가 0이거나 로프가 진행 방향으로 일자 비행(창던지기)이면 축퇴한다 — bHasPlaneNormal=false로
-	// 남겨 소비자가 다음 폴백(형상 축 등)으로 넘어가게 한다. 사잇각 ~6° 미만은 수치 노이즈로 보고 버린다.
+	// The travel plane normal is the cross product of the velocity direction and the direction the rope lies in, both
+	// unit vectors, so the magnitude of the cross product is the sine of the angle between them.
+	// It degenerates when the velocity is zero or the rope flies straight along its own direction, as in a spear
+	// throw, in which case the plane normal flag is left false so that the consumer moves on to the next fallback,
+	// such as the shape axis. An angle below about six degrees is treated as numerical noise and discarded.
 	const FVector VelocityDir = Frame.AverageVelocity.GetSafeNormal();
 	const FVector Cross = FVector::CrossProduct(VelocityDir, Frame.SpanDirection);
 	constexpr float MinPlaneSinAngle = 0.1f;
@@ -156,9 +162,9 @@ void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates
 		return;
 	}
 
-	// 집계 키는 (Mesh, Bone) 쌍이다. 본 이름만 키로 쓰면 같은 스켈레톤(같은 본 이름)을 쓰는 두 액터가
-	// 한 프레임에 함께 닿을 때 서로 다른 대상의 후보가 한 버킷으로 합산되고 mesh가 마지막 후보로
-	// 오귀속된다(cross-actor 밀집 상황의 캡처 오귀속 — 2026-07 주석 전수조사에서 발견).
+	// The aggregation key is the pair of mesh and bone. Keying on the bone name alone would, when two actors sharing a
+	// skeleton and therefore the bone names are touched in the same frame, sum candidates from different targets into
+	// one bucket and attribute the mesh to whichever candidate came last.
 	using FTargetKey = TPair<const USceneComponent*, FName>;
 	TMap<FTargetKey, TArray<int32>> NodesByTarget;
 	TMap<FTargetKey, float> ScoreByTarget;
@@ -183,9 +189,11 @@ void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates
 		}
 	}
 
-	// 대상별 dwell 대장 갱신(시드 다중화 재료): 이번 프레임 존재하는 키는 dwell 누적 + 노드 교체,
-	// 빠진 키는 같은 양만큼 감쇠 후 소진되면 제거(플리커 관용은 dominant dwell과 같은 규칙).
-	// dominant 선정(아래)은 이 대장과 독립적으로 종전 로직을 그대로 쓴다 — 단일 시드 동작 불변.
+	// Updates the per-target dwell ledger, which is the material for seed multiplexing: a key present this frame
+	// accumulates dwell and replaces its nodes, while a key that has dropped out decays by the same amount and is
+	// removed once exhausted, with the same flicker tolerance rule as the dominant dwell.
+	// The dominant selection below is independent of this ledger and keeps the existing logic, so single-seed
+	// behaviour is unchanged.
 	for (int32 Index = Targets.Num() - 1; Index >= 0; --Index)
 	{
 		FRopeTrackedContactTarget& Target = Targets[Index];
@@ -226,8 +234,8 @@ void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates
 	int32 BestCount = 0;
 	int32 BestHeadNode = INDEX_NONE;
 	float BestScore = 0.0f;
-	// 이 파일의 변경 이유: pelvis처럼 노드 수가 많은 본이 조준한 팔을 rank로 역전하지 않도록 한다.
-	// preferred는 dominant 선택에만 관여하며, 위 Targets 갱신은 모든 본에 대해 그대로 수행한다.
+	// The preferred bone stops a bone with many nodes, such as the pelvis, outranking the arm that was aimed at.
+	// It affects the dominant selection alone, and the target update above is performed for every bone regardless.
 	const FTargetKey PreferredTarget(PreferredMesh, PreferredBone);
 	const bool bHasPreferredTarget = PreferredMesh && !PreferredBone.IsNone()
 		&& NodesByTarget.Contains(PreferredTarget);
@@ -270,7 +278,7 @@ void FRopeContactTracker::Update(const TArray<FRopeContactCandidate>& Candidates
 		return;
 	}
 
-	// dwell 연속성도 (Mesh, Bone) 쌍 기준: 본 이름이 같아도 mesh가 바뀌면 다른 대상이므로 리셋한다.
+	// Dwell continuity is also keyed on the pair of mesh and bone: the same bone name on a different mesh is a different target and is reset.
 	if (BestTarget.Value == CandidateBone && BestTarget.Key == CandidateMesh)
 	{
 		DwellTime += DeltaTime;

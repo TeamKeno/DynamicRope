@@ -15,7 +15,7 @@ DECLARE_DWORD_COUNTER_STAT(TEXT("Actual Candidates"), STAT_RopeFlightActualCandi
 DECLARE_DWORD_COUNTER_STAT(TEXT("Predictive Free Candidates"), STAT_RopeFlightPredictiveFreeCandidates, STATGROUP_RopeFlight);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Predictive Guided Candidates"), STAT_RopeFlightPredictiveGuidedCandidates, STATGROUP_RopeFlight);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Candidate Nodes"), STAT_RopeFlightCandidateNodes, STATGROUP_RopeFlight);
-// 이번 프레임 캡처 판정을 통과한 로프 수(설정값이 아니라 판정 결과의 합).
+// The number of ropes that passed the capture decision this frame, being the sum of the decisions rather than a configured value.
 DECLARE_DWORD_COUNTER_STAT(TEXT("Capture Decisions"), STAT_RopeFlightCaptureDecisions, STATGROUP_RopeFlight);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Whip Guided Nodes"), STAT_RopeFlightWhipGuidedNodes, STATGROUP_RopeFlight);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Whip Guide Points"), STAT_RopeFlightWhipGuidePoints, STATGROUP_RopeFlight);
@@ -117,7 +117,7 @@ void RopeDebug::RecordWrappedStats(const FRopeSimState& Sim, const FRopeWrapStat
 	INC_DWORD_STAT_BY(STAT_RopeWrappedLatchedNodes, Wrap.Latched.Num());
 }
 
-#else // UE_BUILD_SHIPPING — 모두 no-op
+#else // UE_BUILD_SHIPPING — everything is a no-op.
 
 bool RopeDebug::IsFlightStatEnabled() { return false; }
 bool RopeDebug::IsWrappedStatEnabled() { return false; }

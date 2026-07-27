@@ -6,7 +6,7 @@
 URopeTestMoverComponent::URopeTestMoverComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
-	// 기본 틱 그룹(PrePhysics)에서 먼저 액터를 옮긴 뒤, TG_PostPhysics의 로프 시뮬이 갱신된 위치를 읽는다.
+	// The actor is moved first, in the default tick group of PrePhysics, and the rope simulation in TG_PostPhysics then reads the updated position.
 }
 
 void URopeTestMoverComponent::BeginPlay()
@@ -31,11 +31,11 @@ void URopeTestMoverComponent::TickComponent(float DeltaTime, ELevelTick TickType
 
 	ElapsedTime += DeltaTime;
 
-	// sin 왕복(진폭 MoveOffset). 로컬 공간이면 시작 회전 기준으로 오프셋을 회전시킨다.
+	// A sinusoidal oscillation with the move offset as its amplitude. In local space the offset is rotated by the starting rotation.
 	const float   Alpha = FMath::Sin(2.0f * PI * ElapsedTime / FMath::Max(Period, 0.05f));
 	const FVector Offset = bMoveInLocalSpace ? StartRotation.RotateVector(MoveOffset * Alpha) : (MoveOffset * Alpha);
 	const FRotator Rot = StartRotation + RotationRate * ElapsedTime;
 
-	// 텔레포트 이동(sweep 없음) — 테스트 관찰용. Movable 메시여야 실제로 움직인다.
+	// Moved as a teleport, with no sweep, for observation in tests. The mesh has to be movable for it actually to move.
 	Owner->SetActorLocationAndRotation(StartLocation + Offset, Rot);
 }

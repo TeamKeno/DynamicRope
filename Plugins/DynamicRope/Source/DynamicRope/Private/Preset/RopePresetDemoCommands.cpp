@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 데모/기능 테스트용 프리셋 전환 콘솔 명령(비Shipping 전용) — 2026-07-18 회의 11번 안건의
-// "런타임 모드 전환"을 프리셋 순환 하나로 해소한다. 목록 소스는 프로젝트 설정
-// UDynamicRopeSettings::DemoPresets. 정식 게임 코드는 URopeComponent::ApplyPreset을 직접 호출한다.
+// Console commands for switching presets in demos and feature tests, in non-shipping builds alone, which reduce
+// switching modes at runtime to cycling through presets. The list comes from the project setting
+// UDynamicRopeSettings::DemoPresets. Real game code calls URopeComponent::ApplyPreset directly.
 
 #include "CoreMinimal.h"
 
@@ -17,11 +17,11 @@
 
 namespace RopePresetConsole
 {
-	// 순환 상태 — 마지막으로 적용한 DemoPresets 인덱스(-1 = 아직 없음). Apply가 이름/인덱스로
-	// 적용해도 동기화해, 이어지는 Cycle이 그 다음 항목부터 돈다.
+	// The cycling state, being the index into DemoPresets that was last applied, or minus one for none yet. Applying
+	// by name or index synchronizes it too, so a subsequent cycle continues from the next entry.
 	static int32 GLastAppliedIndex = -1;
 
-	/** 월드 내 모든 로프에 Fn 적용(템플릿/파괴 중 제외). Rope.Ragdoll의 ForEach 관례 미러. */
+	/** Applies the function to every rope in the world, excluding templates and those being destroyed. Mirrors the ForEach convention of the Rope.Ragdoll commands. */
 	static void ForEachRope(UWorld* World, TFunctionRef<void(URopeComponent&)> Fn)
 	{
 		int32 Count = 0;
@@ -36,11 +36,11 @@ namespace RopePresetConsole
 		}
 		if (Count == 0)
 		{
-			UE_LOG(LogDynamicRope, Warning, TEXT("월드에 URopeComponent가 없다."));
+			UE_LOG(LogDynamicRope, Warning, TEXT("There is no URopeComponent in the world."));
 		}
 	}
 
-	/** DemoPresets[Index]를 동기 로드한다. 실패 시 null + 경고. */
+	/** Loads DemoPresets[Index] synchronously, returning null with a warning on failure. */
 	static URopePreset* LoadDemoPreset(int32 Index)
 	{
 		const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
@@ -48,17 +48,17 @@ namespace RopePresetConsole
 		{
 			return nullptr;
 		}
-		// 데모 전용 명령이라 동기 로드 히치를 수용한다(첫 적용 1회).
+		// This is a demo-only command, so the hitch of a synchronous load is accepted, once on first application.
 		URopePreset* Preset = Settings->DemoPresets[Index].LoadSynchronous();
 		if (!Preset)
 		{
-			UE_LOG(LogDynamicRope, Warning, TEXT("DemoPresets[%d] 로드 실패: %s"),
+			UE_LOG(LogDynamicRope, Warning, TEXT("Failed to load DemoPresets[%d]: %s"),
 				Index, *Settings->DemoPresets[Index].ToString());
 		}
 		return Preset;
 	}
 
-	/** 프리셋을 월드의 모든 로프에 적용하고 인덱스를 동기화한다. 거부(페이즈)는 ApplyPreset이 로그로 남긴다. */
+	/** Applies a preset to every rope in the world and synchronizes the index. A refusal on phase grounds is logged by ApplyPreset. */
 	static void ApplyToWorld(UWorld* World, URopePreset* Preset, int32 Index)
 	{
 		if (!Preset)
@@ -66,20 +66,20 @@ namespace RopePresetConsole
 			return;
 		}
 		GLastAppliedIndex = Index;
-		UE_LOG(LogDynamicRope, Log, TEXT("Rope.Preset: '%s' (DemoPresets[%d]) 적용 시작."), *Preset->GetName(), Index);
+		UE_LOG(LogDynamicRope, Log, TEXT("Rope.Preset: applying '%s' (DemoPresets[%d])."), *Preset->GetName(), Index);
 		ForEachRope(World, [Preset](URopeComponent& Rope)
 		{
 			Rope.ApplyPreset(Preset);
 		});
 	}
 
-	/** 설정 배열이 비었으면 안내 경고 후 false. */
+	/** Returns false, with an explanatory warning, if the settings array is empty. */
 	static bool EnsureDemoPresetList()
 	{
 		if (UDynamicRopeSettings::Get()->DemoPresets.Num() == 0)
 		{
 			UE_LOG(LogDynamicRope, Warning,
-				TEXT("DemoPresets가 비어 있다 — Project Settings > Plugins > Dynamic Rope > Demo에 URopePreset 에셋을 등록할 것."));
+				TEXT("DemoPresets is empty. Register URopePreset assets under Project Settings > Plugins > Dynamic Rope > Demo."));
 			return false;
 		}
 		return true;
@@ -87,7 +87,7 @@ namespace RopePresetConsole
 
 	static FAutoConsoleCommandWithWorldAndArgs GCycleCmd(
 		TEXT("Rope.Preset.Cycle"),
-		TEXT("DemoPresets(프로젝트 설정)의 다음 프리셋을 월드 내 모든 로프에 적용한다. Free/Loaded이 아닌 로프는 거부 로그."),
+		TEXT("Applies the next preset in DemoPresets, from the project settings, to every rope in the world. A rope that is neither Free nor Loaded is refused and logged."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			if (!EnsureDemoPresetList())
@@ -101,12 +101,12 @@ namespace RopePresetConsole
 
 	static FAutoConsoleCommandWithWorldAndArgs GApplyCmd(
 		TEXT("Rope.Preset.Apply"),
-		TEXT("지정 프리셋 적용: 인자 = DemoPresets 인덱스(숫자) 또는 에셋 이름 부분일치. 순환 인덱스도 동기화된다."),
+		TEXT("Applies a named preset. The argument is either a numeric index into DemoPresets or a partial match on the asset name. The cycling index is synchronized as well."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			if (Args.Num() == 0)
 			{
-				UE_LOG(LogDynamicRope, Warning, TEXT("사용법: Rope.Preset.Apply <인덱스|이름부분일치> — 목록은 Rope.Preset.List."));
+				UE_LOG(LogDynamicRope, Warning, TEXT("Usage: Rope.Preset.Apply <index|name substring>. Use Rope.Preset.List for the list."));
 				return;
 			}
 			if (!EnsureDemoPresetList())
@@ -122,7 +122,7 @@ namespace RopePresetConsole
 			}
 			else
 			{
-				// 이름 부분일치(대소문자 무시) — soft ref의 에셋 이름으로 검색(로드 없이).
+				// A case-insensitive partial name match, searched against the soft reference's asset name without loading it.
 				for (int32 i = 0; i < Settings->DemoPresets.Num(); ++i)
 				{
 					if (Settings->DemoPresets[i].GetAssetName().Contains(Args[0]))
@@ -135,7 +135,7 @@ namespace RopePresetConsole
 
 			if (!Settings->DemoPresets.IsValidIndex(Index))
 			{
-				UE_LOG(LogDynamicRope, Warning, TEXT("'%s'에 해당하는 DemoPresets 항목이 없다(0..%d) — Rope.Preset.List로 확인."),
+				UE_LOG(LogDynamicRope, Warning, TEXT("No DemoPresets entry matches '%s' (0..%d). Check Rope.Preset.List."),
 					*Args[0], Settings->DemoPresets.Num() - 1);
 				return;
 			}
@@ -144,15 +144,15 @@ namespace RopePresetConsole
 
 	static FAutoConsoleCommandWithWorldAndArgs GListCmd(
 		TEXT("Rope.Preset.List"),
-		TEXT("DemoPresets 목록과 현재 순환 인덱스를 출력한다."),
+		TEXT("Prints the DemoPresets list and the current cycling index."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
-			UE_LOG(LogDynamicRope, Log, TEXT("DemoPresets %d개 (현재 인덱스=%d):"),
+			UE_LOG(LogDynamicRope, Log, TEXT("%d DemoPresets (current index %d):"),
 				Settings->DemoPresets.Num(), GLastAppliedIndex);
 			for (int32 i = 0; i < Settings->DemoPresets.Num(); ++i)
 			{
-				// 로드된 에셋이면 모드까지, 아니면 이름만(목록 조회로 로드를 유발하지 않는다).
+				// A loaded asset also reports its mode; an unloaded one reports its name alone, so listing never triggers a load.
 				const URopePreset* Loaded = Settings->DemoPresets[i].Get();
 				if (Loaded)
 				{
@@ -162,7 +162,7 @@ namespace RopePresetConsole
 				}
 				else
 				{
-					UE_LOG(LogDynamicRope, Log, TEXT("  [%d]%s %s (미로드)"),
+					UE_LOG(LogDynamicRope, Log, TEXT("  [%d]%s %s (not loaded)"),
 						i, (i == GLastAppliedIndex ? TEXT("*") : TEXT(" ")), *Settings->DemoPresets[i].GetAssetName());
 				}
 			}

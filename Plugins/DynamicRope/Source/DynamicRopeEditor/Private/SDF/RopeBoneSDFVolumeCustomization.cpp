@@ -18,21 +18,21 @@ TSharedRef<IPropertyTypeCustomization> FRopeBoneSDFVolumeCustomization::MakeInst
 void FRopeBoneSDFVolumeCustomization::CustomizeHeader(TSharedRef<IPropertyHandle> PropertyHandle,
 	FDetailWidgetRow& HeaderRow, IPropertyTypeCustomizationUtils& CustomizationUtils)
 {
-	// 본 이름 자식 핸들. 람다에 값으로 캡처해 헤더 텍스트를 실시간으로 따라가게 한다.
+	// The bone name child handle, captured by value into the lambda so the header text follows it live.
 	const TSharedPtr<IPropertyHandle> BoneHandle =
 		PropertyHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FRopeBoneSDFVolume, Bone));
 
 	HeaderRow
 	.NameContent()
 	[
-		// 기본 이름 위젯 = 배열 요소의 "Index [n]".
+	// The default name widget is the array element's "Index [n]".
 		PropertyHandle->CreatePropertyNameWidget()
 	]
 	.ValueContent()
 	.HAlign(HAlign_Left)
 	.MinDesiredWidth(180.0f)
 	[
-		// 값 칸에 본 이름을 표시 → 헤더 행이 "Index [n]    <본 이름>" 형태로 보인다.
+	// Showing the bone name in the value column makes the header row read as "Index [n]    <bone name>".
 		SNew(STextBlock)
 		.Font(CustomizationUtils.GetRegularFont())
 		.Text_Lambda([BoneHandle]()
@@ -52,7 +52,7 @@ void FRopeBoneSDFVolumeCustomization::CustomizeHeader(TSharedRef<IPropertyHandle
 void FRopeBoneSDFVolumeCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> PropertyHandle,
 	IDetailChildrenBuilder& ChildBuilder, IPropertyTypeCustomizationUtils& CustomizationUtils)
 {
-	// 펼쳤을 때는 구조체의 모든 멤버를 기본 방식으로 보여준다(Bone/LocalBounds/Resolution/VoxelSize/Distances).
+	// When expanded, every member of the struct is shown in the default way: the bone, local bounds, resolution, voxel size and distances.
 	uint32 NumChildren = 0;
 	PropertyHandle->GetNumChildren(NumChildren);
 	for (uint32 Index = 0; Index < NumChildren; ++Index)
@@ -61,7 +61,7 @@ void FRopeBoneSDFVolumeCustomization::CustomizeChildren(TSharedRef<IPropertyHand
 		{
 			if(Child->GetProperty()->GetFName() == GET_MEMBER_NAME_CHECKED(FRopeBoneSDFVolume, Bone))
 			{
-				// 헤더 행에서 이미 Bone을 표시했으므로, 펼친 자식 행에서는 Bone을 생략한다.
+				// The bone is already shown on the header row, so it is omitted from the expanded child rows.
 				continue;
 			}
 			ChildBuilder.AddProperty(Child.ToSharedRef());

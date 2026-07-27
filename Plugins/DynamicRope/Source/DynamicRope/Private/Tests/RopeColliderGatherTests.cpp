@@ -1,10 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 콜라이더 수집의 소유자 제외 판정(RopeColliderGather::IsExcludedOwnerBody) 단위 테스트.
-// 이 판정은 정적 월드 provider처럼 provider 단위 제외를 면제받는 경로에서 "월드 지오메트리는 남기고
-// 로프 소유 액터의 셰이프만 뺀다"를 담당한다 — 잘못 넓히면 바닥이 사라지고, 잘못 좁히면 로프를
-// 따라다니는 자기 셰이프(테더 프록시/팁/무기)가 제 로프를 밀어 요동이 재발한다. 양쪽 실패를 다 고정한다.
-// 액터 포인터는 식별(비교)에만 쓰이므로 트랜지언트 객체로 충분하다 — 역참조하지 않는다.
+// Unit tests for the owner exclusion decision in collider gathering, RopeColliderGather::IsExcludedOwnerBody.
+// On paths exempt from per-provider exclusion, such as the static world provider, this decision is what keeps world
+// geometry while removing the shapes belonging to the rope's own actor. Widening it wrongly makes the floor
+// disappear, and narrowing it wrongly lets the rope's own shapes that follow it around, such as the tether proxy, the
+// tip or a weapon, push their own rope and bring the oscillation back. Both failures are pinned here.
+// The actor pointers are used for identity comparison alone, so transient objects suffice; they are never dereferenced.
 
 #include "Misc/AutomationTest.h"
 #include "Collision/RopeColliderProvider.h"
@@ -14,7 +15,7 @@
 
 namespace
 {
-	// 비교 전용 더미 액터(월드 불필요). 이름만 다르면 포인터가 달라 식별에 충분하다.
+	// Dummy actors for comparison alone, needing no world. Distinct names give distinct pointers, which is enough for identity.
 	AActor* MakeIdentityActor()
 	{
 		return NewObject<AActor>(GetTransientPackage());
@@ -31,18 +32,18 @@ bool FRopeColliderGatherOwnerBodyTest::RunTest(const FString& Parameters)
 	AActor* WorldProp = MakeIdentityActor();
 	AActor* WrapTarget = MakeIdentityActor();
 
-	// 풀: [0] 로프 소유 액터의 셰이프(테더 프록시/팁), [1] 바닥 같은 월드 지오메트리,
-	//     [2] 감는 대상(다른 액터), [3] 출처 미상(nullptr).
+	// The pool: [0] a shape belonging to the rope's owner, such as the tether proxy or the tip, [1] world geometry
+	//     such as the floor, [2] the target being wrapped, on another actor, and [3] one of unknown origin, being null.
 	const TArray<const AActor*> SourceActors = { RopeOwner, WorldProp, WrapTarget, nullptr };
 
-	// 기본(bIncludeOwnerColliders = false): owner 몸만 빠지고 나머지는 전부 남는다.
-	TestTrue(TEXT("로프 소유 액터의 셰이프는 제외된다"),
+	// By default, with bIncludeOwnerColliders false, the owner's own body drops out and everything else remains.
+	TestTrue(TEXT("a shape belonging to the rope's owner is excluded"),
 		RopeColliderGather::IsExcludedOwnerBody(SourceActors, 0, RopeOwner));
-	TestFalse(TEXT("다른 액터의 월드 지오메트리(바닥/기둥)는 남는다"),
+	TestFalse(TEXT("world geometry on another actor, such as a floor or a pillar, remains"),
 		RopeColliderGather::IsExcludedOwnerBody(SourceActors, 1, RopeOwner));
-	TestFalse(TEXT("감는 대상(cross-actor)은 남는다"),
+	TestFalse(TEXT("a cross-actor wrap target remains"),
 		RopeColliderGather::IsExcludedOwnerBody(SourceActors, 2, RopeOwner));
-	TestFalse(TEXT("출처 미상(nullptr) 항목은 제외되지 않는다"),
+	TestFalse(TEXT("an entry of unknown origin, being null, is not excluded"),
 		RopeColliderGather::IsExcludedOwnerBody(SourceActors, 3, RopeOwner));
 
 	return true;
@@ -57,20 +58,20 @@ bool FRopeColliderGatherOwnerBodyFallbackTest::RunTest(const FString& Parameters
 	AActor* RopeOwner = MakeIdentityActor();
 	const TArray<const AActor*> SourceActors = { RopeOwner, RopeOwner };
 
-	// 옵트인(bIncludeOwnerColliders = true → OwnerToExclude = nullptr): 아무것도 제외하지 않는다.
-	// 프롭에 얹은 로프가 자기 받침대와 계속 충돌하게 하는 탈출구라, 이 성질이 깨지면 그 구성이 조용히 망가진다.
-	TestFalse(TEXT("owner 콜라이더 옵트인이면 owner 몸도 남는다"),
+	// Opting in, with bIncludeOwnerColliders true and therefore nothing to exclude, excludes nothing at all.
+	// It is the escape hatch that lets a rope mounted on a prop keep colliding with its own base, so breaking this property would silently break that configuration.
+	TestFalse(TEXT("with owner colliders opted in, the owner's own body remains"),
 		RopeColliderGather::IsExcludedOwnerBody(SourceActors, 0, nullptr));
 
-	// 출처를 안 주는 provider(스켈레톤/랩 대상): 빈 배열 → 아무것도 제외하지 않고 provider 단위 판정에 맡긴다.
+	// A provider that supplies no attribution, such as the skeletal or wrap target providers, gives an empty array, so nothing is excluded and the decision is left to the per-provider filter.
 	const TArray<const AActor*> NoAttribution;
-	TestFalse(TEXT("출처 미제공 provider는 콜라이더 단위로 제외하지 않는다"),
+	TestFalse(TEXT("a provider supplying no attribution excludes nothing per collider"),
 		RopeColliderGather::IsExcludedOwnerBody(NoAttribution, 0, RopeOwner));
 
-	// 길이가 어긋난 배열(provider 버그): 범위 밖 인덱스는 제외하지 않는다 — 충돌이 사라지는 쪽으로 실패하지 않는다.
-	TestFalse(TEXT("길이 불일치 시 범위 밖 인덱스는 제외되지 않는다"),
+	// A mismatched array length, meaning a provider bug: an index out of range is not excluded, so it never fails in the direction of losing a collision.
+	TestFalse(TEXT("on a length mismatch an index out of range is not excluded"),
 		RopeColliderGather::IsExcludedOwnerBody(SourceActors, 5, RopeOwner));
-	TestFalse(TEXT("음수 인덱스는 제외되지 않는다"),
+	TestFalse(TEXT("a negative index is not excluded"),
 		RopeColliderGather::IsExcludedOwnerBody(SourceActors, -1, RopeOwner));
 
 	return true;

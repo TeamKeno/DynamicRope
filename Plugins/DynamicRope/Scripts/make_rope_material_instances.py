@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 #
-# DynamicRope 밧줄 머티리얼 인스턴스 프리셋 생성기
+# DynamicRope rope material instance preset generator
 # ------------------------------------------------------------------------------
-# M_RopeDefault(부모)의 노출 파라미터(Tint / StrandCount / TwistTurns / Roughness /
-# NormalStrength)만 오버라이드하는 MaterialInstanceConstant 프리셋들을 만든다.
-# 부모 머티리얼 그래프는 건드리지 않는다 — 색감/꼬임/거칠기만 바꾼다.
+# Creates MaterialInstanceConstant presets that override only the parameters M_RopeDefault, the parent,
+# exposes: Tint, StrandCount, TwistTurns, Roughness and NormalStrength.
+# The parent material graph is left untouched; only the colour, the twist and the roughness change.
 #
-# 실행: make_default_material.py 와 동일(Tools → Execute Python Script...).
-#       부모 M_RopeDefault 가 먼저 존재해야 한다.
-# 재실행하면 기존 프리셋을 지우고 다시 만든다(idempotent).
+# To run: the same as make_default_material.py, through Tools -> Execute Python Script...
+#         The parent M_RopeDefault has to exist first.
+# Re-running deletes the existing presets and recreates them, so it is idempotent.
 
 import unreal
 
@@ -21,18 +21,19 @@ tools = unreal.AssetToolsHelpers.get_asset_tools()
 
 parent = eal.load_asset(PARENT_PATH)
 if parent is None:
-    raise Exception("부모 머티리얼이 없습니다: {} — 먼저 make_default_material.py 실행".format(PARENT_PATH))
+    raise Exception("Parent material not found: {} - run make_default_material.py first".format(PARENT_PATH))
 
 # name -> (Tint RGB, StrandCount, TwistTurns, Roughness, NormalStrength)
-# TwistTurns는 이제 "원주-길이(2πR)당 회전 수"(UV.x=호길이/원주). StrandCount와 비슷하면 ~45° 레이.
+# TwistTurns is the number of turns per circumference-length, where U is the arc length over the
+# circumference. Close to StrandCount it gives roughly a 45 degree lay.
 PRESETS = {
-    # 밝은 천연 마닐라/사이잘
+    # Light natural manila or sisal.
     "MI_Rope_Manila":       ((0.74, 0.60, 0.36), 3.0, 3.0, 0.88, 0.42),
-    # 오래된 짙은 황마
+    # Aged dark jute.
     "MI_Rope_JuteDark":     ((0.34, 0.24, 0.13), 3.0, 3.5, 0.90, 0.50),
-    # 검은 나일론 파라코드 — 촘촘한 꼬임 + 약간 광택
+    # Black nylon paracord: a tight twist with a little sheen.
     "MI_Rope_ParacordBlack":((0.02, 0.02, 0.025),5.0, 6.0, 0.50, 0.22),
-    # 장식용 붉은 밧줄
+    # A decorative red rope.
     "MI_Rope_Crimson":      ((0.42, 0.05, 0.05), 3.0, 3.0, 0.65, 0.35),
 }
 

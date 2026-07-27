@@ -12,7 +12,7 @@ FText UAssetDefinition_RopePreset::GetAssetDisplayName() const
 
 FLinearColor UAssetDefinition_RopePreset::GetAssetColor() const
 {
-	// 로프(황마) 계열 — SDF(하늘색)와 구분되는 플러그인 에셋 색.
+	// A rope, meaning jute, tone, which distinguishes this plugin asset from the SDF data's sky blue.
 	return FLinearColor(FColor(214, 154, 62));
 }
 
@@ -23,7 +23,7 @@ TSoftClassPtr<UObject> UAssetDefinition_RopePreset::GetAssetClass() const
 
 TConstArrayView<FAssetCategoryPath> UAssetDefinition_RopePreset::GetAssetCategories() const
 {
-	// SDF와 같은 "Dynamic Rope" Add 메뉴 카테고리를 공유한다.
+	// Shares the same "Dynamic Rope" Add menu category as the SDF data.
 	static const TArray<FAssetCategoryPath> Categories = { FAssetCategoryPath(LOCTEXT("DynamicRopeCategory", "Dynamic Rope")) };
 	return Categories;
 }

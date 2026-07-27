@@ -12,7 +12,7 @@ URopeDebugSubsystem* URopeDebugSubsystem::Get(const UWorld* World)
 
 bool URopeDebugSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
-	// sim 서브시스템과 동일하게 게임/PIE에서만(에디터 프리뷰/인스펙터 월드 제외).
+	// In a game or in play-in-editor alone, as with the simulation subsystem, which excludes editor preview and inspector worlds.
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
 }
 
@@ -24,8 +24,9 @@ void URopeDebugSubsystem::Tick(float DeltaTime)
 		return;
 	}
 
-	// 카테고리가 최근(ActiveFrameWindow 내) 그리지 않았으면 비활성 — 제출이 멈춰도 마지막 배열이 월드
-	// 종료까지 남지 않도록 보관분을 통째로 비운다(hold 보관소 포함).
+	// If the category has not drawn recently, meaning within the active frame window, it is inactive and the whole
+	// store, including the hold store, is cleared so that the last array does not survive until the world shuts down
+	// after submissions stop.
 	if (GFrameCounter - LastActiveFrame > ActiveFrameWindow)
 	{
 		Snapshots.Reset();
@@ -33,8 +34,8 @@ void URopeDebugSubsystem::Tick(float DeltaTime)
 		return;
 	}
 
-	// 활성 중 스테일/무효 정리는 여기 한 곳에서 프레임당 한 번만 — SubmitSnapshot마다 전체 맵을 훑던
-	// O(제출수×로프수)를 없앤다.
+	// Cleaning up stale and invalid entries while active happens here alone, once per frame, which removes the walk of
+	// the whole map on every SubmitSnapshot.
 	for (auto It = Snapshots.CreateIterator(); It; ++It)
 	{
 		if (!It.Key().IsValid() || GFrameCounter - It.Value().FrameStamp > ActiveFrameWindow)
@@ -43,7 +44,7 @@ void URopeDebugSubsystem::Tick(float DeltaTime)
 		}
 	}
 
-	// hold 보관소는 실시간 창(FlightHoldSeconds) 기준으로 만료 — 무효 키도 함께 제거.
+	// The hold store expires against the real-time window of FlightHoldSeconds, and invalid keys are removed with it.
 	if (HeldFlight.Num() > 0)
 	{
 		const UWorld* World = GetWorld();
@@ -66,7 +67,7 @@ TStatId URopeDebugSubsystem::GetStatId() const
 
 bool URopeDebugSubsystem::IsTickable() const
 {
-	// 디버그 전용 수명 관리 — WITH_GAMEPLAY_DEBUGGER가 꺼진 빌드에선 틱할 게 없다.
+	// Debug-only lifetime management, so there is nothing to tick in a build where WITH_GAMEPLAY_DEBUGGER is off.
 #if WITH_GAMEPLAY_DEBUGGER
 	return true;
 #else
@@ -95,7 +96,7 @@ bool URopeDebugSubsystem::ShouldCapture(const URopeComponent* Rope) const
 		return false;
 	}
 
-	// 카테고리가 최근(ActiveFrameWindow 내) 그렸는가 = 디버거/카테고리 활성.
+	// Whether the category drew recently, meaning within the active frame window, which is what marks the debugger and the category active.
 	if (GFrameCounter - LastActiveFrame > ActiveFrameWindow)
 	{
 		return false;
@@ -112,9 +113,10 @@ void URopeDebugSubsystem::SubmitSnapshot(const URopeComponent* Rope, FRopeDebugS
 		return;
 	}
 	Snapshot.FrameStamp = GFrameCounter;
-	// flight 오버레이는 다음(Wrapping) 프레임 스냅샷에 덮여 사라지므로, bHasFlight면 별도로 복사 보관해
-	// 실시간 FlightHoldSeconds 동안 잔류시킨다("무엇을 잡기로 했나"를 결정 직후에도 보게). 아래 MoveTemp가
-	// 원본을 소비하므로 그 전에 복사한다.
+	// The flight overlay is overwritten and lost by the next frame's snapshot, taken while wrapping, so a snapshot
+	// carrying flight data is copied and held separately for FlightHoldSeconds of real time, which keeps what the rope
+	// decided to catch visible just after the decision. The copy is taken first because the MoveTemp below consumes
+	// the original.
 	if (Snapshot.bHasFlight)
 	{
 		FHeldFlightSnapshot& Held = HeldFlight.FindOrAdd(Rope);
@@ -123,7 +125,7 @@ void URopeDebugSubsystem::SubmitSnapshot(const URopeComponent* Rope, FRopeDebugS
 		Held.RealTimeSeconds = World ? World->GetRealTimeSeconds() : 0.0;
 	}
 	Snapshots.Add(Rope, MoveTemp(Snapshot));
-	// 스테일/무효 정리는 Tick이 프레임당 한 번 돈다 — 여기서 매 제출마다 전체 맵을 훑지 않는다.
+	// Stale and invalid entries are cleaned up once per frame by the tick, so the whole map is not walked on every submission here.
 }
 
 const FRopeDebugSnapshot* URopeDebugSubsystem::GetSnapshot(const URopeComponent* Rope) const
@@ -155,7 +157,7 @@ const FRopeDebugSnapshot* URopeDebugSubsystem::GetHeldFlightSnapshot(const URope
 	return &Found->Snapshot;
 }
 
-#else // !WITH_GAMEPLAY_DEBUGGER — 디버그 비활성 빌드: 모두 no-op.
+#else // !WITH_GAMEPLAY_DEBUGGER — in a build with debugging disabled, everything is a no-op.
 
 void URopeDebugSubsystem::SetTarget(AActor*, ERopeDebugCapture) {}
 bool URopeDebugSubsystem::ShouldCapture(const URopeComponent*) const { return false; }

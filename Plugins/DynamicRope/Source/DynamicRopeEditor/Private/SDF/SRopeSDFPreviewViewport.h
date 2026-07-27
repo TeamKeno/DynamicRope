@@ -1,19 +1,21 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// SDF 오써링 패널에 박히는 3D 프리뷰 뷰포트. FAdvancedPreviewScene(조명/바닥) 위에 베이크 대상
-// 스켈레탈 메시(URopeSDFData::SourceMesh)를 ref 포즈로 띄워 orbit 카메라로 검수한다.
-// SDF 오버레이(bounds/voxels/slice/gradient)는 뷰포트 클라이언트의 Draw(View, PDI)에서 본별
-// 볼륨을 RopeSDFDraw 헬퍼로 그린다.
-// 토글/파라미터는 자산이 아니라 이 위젯의 FRopeSDFPreviewDrawOptions(패널 로컬 상태)에 둔다.
+// The 3D preview viewport embedded in the SDF authoring panel. It shows the skeletal mesh being baked,
+// URopeSDFData::SourceMesh, in its reference pose over an FAdvancedPreviewScene providing lighting and a floor, for
+// inspection with an orbit camera.
+// The SDF overlay, meaning the bounds, voxels, slice and gradient, is drawn from the viewport client's Draw, which
+// renders each bone's volume through the RopeSDFDraw helpers.
+// The toggles and parameters live in this widget's FRopeSDFPreviewDrawOptions, which is panel-local state, rather
+// than in the asset.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "SEditorViewport.h"
 #include "UObject/GCObject.h"
-// ERopeSDFSliceAxis (오버레이 옵션 기본값)
+// ERopeSDFSliceAxis, for the overlay option defaults.
 #include "Collision/SDF/RopeSDFProvider.h"
-// FRopeBoneSDFVolume (오버레이 스냅샷 보관)
+// FRopeBoneSDFVolume, held as the overlay snapshot.
 #include "Collision/SDF/RopeSDFData.h"
 
 class FAdvancedPreviewScene;
@@ -24,8 +26,9 @@ class URopeSDFData;
 class USkeletalMesh;
 
 /**
- * 프리뷰 SDF 오버레이의 표시 토글/파라미터. 런타임 URopeSDFProvider의 WITH_EDITORONLY_DATA 토글과는
- * 별개의 "패널 로컬 상태"이며, 자산을 더럽히지 않는다(provider 의존 X). 기본값은 레벨 비주얼라이저와 일치.
+ * Display toggles and parameters for the preview SDF overlay. This is panel-local state, separate from the runtime
+ * URopeSDFProvider's editor-only toggles, and never dirties the asset, having no dependency on the provider. The
+ * defaults match the level visualizer.
  */
 struct FRopeSDFPreviewDrawOptions
 {
@@ -34,27 +37,27 @@ struct FRopeSDFPreviewDrawOptions
 	bool bDrawSlice = false;
 	bool bDrawGradient = false;
 
-	/** voxel/gradient 표시 밴드 두께(cm). |distance| <= 이 값만 그린다. */
+	/** The band thickness for voxel and gradient display, in centimetres. Only samples whose absolute distance is within it are drawn. */
 	float BandThreshold = 3.0f;
 
-	/** slice 평면이 통과하는 축. */
+	/** The axis the slice plane passes through. */
 	ERopeSDFSliceAxis SliceAxis = ERopeSDFSliceAxis::Z;
-	/** 축을 따른 slice 위치(0~1). */
+	/** The slice position along that axis, from zero to one. */
 	float SlicePosition = 0.5f;
-	/** slice 샘플 격자 한 변 개수. */
+	/** The number of slice samples along one side of the grid. */
 	int32 SliceResolution = 24;
-	/** slice 색 매핑 스케일(cm): |distance| = 이 값에서 포화. */
+	/** The slice colour mapping scale, in centimetres, at which the absolute distance saturates. */
 	float SliceColorScale = 10.0f;
 
-	/** gradient 화살표 길이(cm). */
+	/** The gradient arrow length, in centimetres. */
 	float GradientLength = 4.0f;
 
 	bool AnyEnabled() const { return bDrawBounds || bDrawVoxels || bDrawSlice || bDrawGradient; }
 };
 
 /**
- * 오써링 패널 우측에 배치되는 프리뷰 뷰포트 위젯. 프리뷰 씬과 메시 컴포넌트의 소유자이며,
- * 메시 컴포넌트를 GC로부터 보호한다(FGCObject).
+ * The preview viewport widget placed on the right of the authoring panel. It owns the preview scene and the mesh
+ * component, and protects the mesh component from collection through FGCObject.
  */
 class SRopeSDFPreviewViewport : public SEditorViewport, public FGCObject
 {
@@ -67,30 +70,30 @@ public:
 
 	void Construct(const FArguments& InArgs);
 
-	/** 프리뷰할 메시를 교체한다. nullptr이면 빈 씬(메시 제거)으로 둔다. */
+	/** Replaces the mesh being previewed. A null mesh leaves an empty scene, with the mesh removed. */
 	void SetPreviewMesh(USkeletalMesh* InMesh);
 
 	/**
-	 * SDF 오버레이가 그릴 본별 볼륨을, 이 자산의 현재 BoneVolumes로 스냅샷한다(사본 보관). 호출 시점의
-	 * 데이터로 고정되므로, 이후 자산이 베이크돼 바뀌어도 SetPreviewData를 다시 부를 때까지 갱신되지 않는다
-	 * (Bake는 뷰포트에 즉시 반영 X, Refresh 시 반영). nullptr이면 오버레이를 비운다.
+	 * Snapshots the per-bone volumes the SDF overlay draws, as a copy, from this asset's current bone volumes. It is
+	 * fixed to the data as of the call, so a later bake does not update it until SetPreviewData is called again,
+	 * meaning a bake is not reflected in the viewport until a refresh. A null asset clears the overlay.
 	 */
 	void SetPreviewData(URopeSDFData* InData);
 
-	/** 패널 UI가 토글/파라미터를 읽고 쓰는 진입점. 변경 후 InvalidatePreview() 호출 권장. */
+	/** The entry point through which the panel UI reads and writes the toggles and parameters. Calling InvalidatePreview() after a change is recommended. */
 	FRopeSDFPreviewDrawOptions& AccessDrawOptions() { return DrawOptions; }
 
 	/**
-	 * 오버레이가 실제로 그릴 본별 볼륨 스냅샷이 있는가. 패널이 오버레이 컨트롤의 활성/비활성을 정하는
-	 * 기준 — 베이크 여부가 아니라 "지금 뷰포트가 그릴 데이터가 있는가"가 정확한 조건이다(스냅샷은
-	 * SetPreviewData/Refresh 때만 갱신되므로).
+	 * Whether there is a per-bone volume snapshot for the overlay to draw. It is the basis on which the panel enables
+	 * or disables the overlay controls: the precise condition is whether the viewport has data to draw right now
+	 * rather than whether a bake has happened, since the snapshot updates only on SetPreviewData or a refresh.
 	 */
 	bool HasPreviewVolumes() const { return PreviewVolumes.Num() > 0; }
 
-	/** 다음 프레임 리드로우를 강제한다(토글/파라미터 변경 반영). */
+	/** Forces a redraw on the next frame, so a toggle or parameter change takes effect. */
 	void InvalidatePreview();
 
-	/** 뷰포트 클라이언트의 Draw(View, PDI)에서 호출 — 본별 SDF 오버레이를 PDI로 그린다. */
+	/** Called from the viewport client's Draw to render the per-bone SDF overlay through the PDI. */
 	void DrawSDFOverlay(FPrimitiveDrawInterface* PDI);
 
 	// FGCObject
@@ -100,23 +103,24 @@ public:
 protected:
 	// SEditorViewport
 	virtual TSharedRef<FEditorViewportClient> MakeEditorViewportClient() override;
-	/** 상단 뷰포트 툴바(UE 5.7 통합 툴바): 카메라(스피드 포함) + 뷰 모드(와이어프레임 전환) 메뉴. */
+	/** The viewport's top toolbar: the camera menu, including its speed, and the view mode menu, which switches wireframe on. */
 	virtual TSharedPtr<SWidget> BuildViewportToolbar() override;
 
 private:
-	/** 조명/바닥/환경을 제공하는 프리뷰 월드. */
+	/** The preview world providing the lighting, floor and environment. */
 	TSharedPtr<FAdvancedPreviewScene> PreviewScene;
 
-	/** 프리뷰 씬에 추가된 메시 컴포넌트(ref 포즈). SDF 오버레이가 본 트랜스폼을 가져온다. */
+	/** The mesh component added to the preview scene, in its reference pose. The SDF overlay takes its bone transforms from it. */
 	TObjectPtr<UDebugSkelMeshComponent> PreviewMeshComponent;
 
-	/** 카메라/렌더링을 담당하는 뷰포트 클라이언트. */
+	/** The viewport client responsible for the camera and rendering. */
 	TSharedPtr<FRopeSDFPreviewViewportClient> ViewportClient;
 
-	/** 오버레이가 그릴 본별 볼륨의 스냅샷 사본. SetPreviewData 호출 때만 갱신된다(라이브 자산과 디커플링).
-	    포화 스킵/회색 처리는 각 볼륨의 비대칭 밴드(NarrowBandInner/Outer)에서 직접 판정한다(별도 필드 불필요). */
+	/** A snapshot copy of the per-bone volumes the overlay draws, updated only when SetPreviewData is called, which
+	    decouples it from the live asset. Skipping saturated samples and greying them out is decided directly from
+	    each volume's asymmetric inner and outer narrow band, so no separate field is needed. */
 	TArray<FRopeBoneSDFVolume> PreviewVolumes;
 
-	/** 오버레이 표시 토글/파라미터(패널 로컬 상태). */
+	/** The overlay's display toggles and parameters, as panel-local state. */
 	FRopeSDFPreviewDrawOptions DrawOptions;
 };

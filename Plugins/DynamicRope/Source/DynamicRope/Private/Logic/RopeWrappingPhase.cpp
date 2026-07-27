@@ -2,13 +2,13 @@
 
 #include "Logic/RopeWrappingPhase.h"
 #include "Components/SceneComponent.h"
-// ResolveBindingWorld — 랩 바인딩(본/소켓/컴포넌트) 트랜스폼 해석의 단일 지점(seam A).
+// ResolveBindingWorld is the single point at which a wrap binding, meaning a bone, socket or component, is resolved to a transform.
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Collision/RopeCollider.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-// RopeMath::AnyTangentFromNormal (unity 빌드 중복 정의 방지)
+// RopeMath::AnyTangentFromNormal, shared to avoid a duplicate definition in a unity build.
 #include "RopeMathHelpers.h"
 
 #pragma region Wrapping Lifecycle, Commit, and Preview
@@ -16,8 +16,9 @@
 bool FRopeWrappingPhase::Begin(const FRopeSurfaceAnchor& LatchAnchor, float Duration,
 	const FRopeSimState& Sim, const FContext& Ctx)
 {
-	// 새 throw는 조건이 맞으면 Composite Analytic Helix부터 시작한다. 이 플래그는 같은 throw 안에서
-	// 해당 경로가 terminal failure로 끝났을 때만 켜져 두 번째 composite 시도와 무한 fallback을 막는다.
+	// A new throw starts from the composite analytic helix when the conditions are met. This flag is set only when
+	// that path ended in a terminal failure within the same throw, which prevents a second composite attempt and an
+	// endless fallback.
 	State.bPathUsesSingleBoneFallback = false;
 	State.PathBuildFailureReason.Reset();
 	State.PathCompositeProjectionFailureCount = 0;
@@ -87,8 +88,8 @@ bool FRopeWrappingPhase::IsReadyToCommit(const FRopeSimState& Sim, const FRopeWr
 		? BuiltPathMaxDistance
 		: RequestedFrontDistance;
 
-	// 정상 AngleMapped path는 animation phase와 물리 배치가 모두 끝나야 commit한다. path build
-	// 실패/degenerate fallback은 angle target이 없을 수 있으므로 기존 distance 정책을 유지한다.
+	// A normal angle-mapped path commits only once both the animation phase and the physical placement have finished.
+	// A failed path build or a degenerate fallback may have no angle target, so those keep the previous distance policy.
 	const bool bUseAngularCompletion = State.bFrontUsesAngleMapping &&
 		State.bPathBuildComplete && !State.bPathBuildFailed &&
 		State.FrontTargetWrapAngleRad > KINDA_SMALL_NUMBER;
@@ -104,8 +105,8 @@ bool FRopeWrappingPhase::IsReadyToCommit(const FRopeSimState& Sim, const FRopeWr
 			State.FrontTargetWrapAngleRad;
 	const bool bFrontDone = bAngleDone && bDistanceDone;
 
-	// DistanceFallback에만 종전 per-segment deadline을 적용한다. AngleMapped는 front가 목표에
-	// 도달한 뒤의 짧은 settle과 최소 phase duration만 기다려 중복 tail delay를 제거한다.
+	// The previous per-segment deadline applies to the distance fallback alone. An angle-mapped path waits only for a
+	// short settle after the front reaches its target, plus the minimum phase duration, which removes the duplicated tail delay.
 	const bool bLegacyMotionDone = State.Elapsed >= State.Duration + MaxTailDelay;
 	const bool bMinimumPhaseDurationDone = State.Elapsed >= State.Duration;
 	const bool bPostFrontSettleDone = State.FrontReachedTargetElapsed >= 0.0f &&
@@ -124,8 +125,8 @@ bool FRopeWrappingPhase::IsReadyToCommit(const FRopeSimState& Sim, const FRopeWr
 		State.bPathBuildComplete ||
 		State.bPathBuildFailed;
 
-	// timeout은 front 목표 자체를 건너뛰지는 않지만, 비정상적으로 안정화/settle이 끝나지 않는
-	// 경우의 마지막 탈출구로 종전과 같이 timing gate를 우회한다.
+	// A timeout does not skip the front's target itself, but as before it bypasses the timing gate as a last resort
+	// for the case where stabilization or settling abnormally never finishes.
 	const bool bNormalCompletion = bFrontDone && bStable && bCompletionTimingDone;
 	const bool bTimeoutCompletion = bFrontDone && bTimedOutWithAnchors;
 	return bHasEnoughAnchors && bPathReadyToCommit &&
@@ -155,7 +156,7 @@ FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim) con
 	Seed.BoneName = State.LatchAnchor.Bone;
 	Seed.Mesh = ResolveWrappingMesh(State, State.LatchAnchor);
 
-	//각 LatchedNode에 정보 입력
+	// Fills in the information for each latched node.
 	for (const FRopeSurfaceAnchor& Anchor : State.Anchors)
 	{
 		if (!Sim.Positions.IsValidIndex(Anchor.NodeIndex))
@@ -170,9 +171,9 @@ FRopeWrapState FRopeWrappingPhase::BuildCommitSeed(const FRopeSimState& Sim) con
 		Seed.Anchors.Add(Anchor);
 	}
 
-	// 시드 다중화: 보조 시드 앵커도 커밋에 합류한다 — BeginWrap/Hold는 앵커별 (Bone, Mesh)를
-	// 이미 지원하므로 이 뒤로는 경로 앵커와 동일하게 취급된다. 노드 중복은 경로 길이 클램프가
-	// 막지만(빌드 시점 보장), 시드가 어긋난 경우를 대비해 한 번 더 거른다.
+	// Seed multiplexing: the secondary seed anchors join the commit too. BeginWrap and Hold already support a bone and
+	// mesh per anchor, so from here on they are treated exactly like path anchors. Duplicate nodes are prevented by
+	// the path length clamp, guaranteed at build time, but are filtered once more in case a seed has drifted out of step.
 	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
 	{
 		if (!Sim.Positions.IsValidIndex(Secondary.NodeIndex))
@@ -220,7 +221,7 @@ void FRopeWrappingPhase::ReleaseAnchoredNodesToSolver(const FRopeSimState& Sim, 
 	{
 		ReturnNode(Anchor.NodeIndex);
 	}
-	// 보조 시드 노드도 abort 시 함께 복귀한다(front hold로 위치가 덮여 왔으므로 Prev=Pos 튐 방지 동일).
+	// The secondary seed nodes are returned along with the rest on an abort, since their positions were being overwritten by the front hold and the same previous-equals-current jump has to be prevented.
 	for (const FRopeSurfaceAnchor& Secondary : State.SecondarySeedAnchors)
 	{
 		ReturnNode(Secondary.NodeIndex);
@@ -241,7 +242,7 @@ bool FRopeWrappingPhase::BuildPreviewCenterline(const FRopeSurfaceAnchor& LatchA
 	PreviewConfig.WrappingPathBuildStepsPerFrame = 4096;
 	FContext PreviewCtx{ PreviewConfig, Ctx.Colliders, Ctx.SurfaceOffset, Ctx.OwnerName, true };
 
-	// preview에도 runtime과 같은 축/접촉/resolve 컨텍스트를 승계한다.
+	// The preview inherits the same axis, contact and resolve context as the runtime.
 	PreviewCtx.bHasGuidePlaneNormal = Ctx.bHasGuidePlaneNormal;
 	PreviewCtx.GuidePlaneNormal = Ctx.GuidePlaneNormal;
 	PreviewCtx.TravelFrame = Ctx.TravelFrame;

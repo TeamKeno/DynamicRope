@@ -25,20 +25,20 @@ public class DynamicRope : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
-				// [규약] public 헤더가 include하는 모듈은 반드시 여기(public)에 둔다 — private에 두면
-				// 그 헤더를 include하는 하위(게임) 모듈이 include 경로를 못 받아 컴파일에 실패한다.
+				// Convention: a module included by a public header must be listed here, publicly. Listing it privately
+				// leaves a downstream game module that includes that header without the include path, and it fails to compile.
 				"Core",
 				"DeveloperSettings",
-				// UObject/Interface.h(IRopeColliderProvider), 전 public 헤더의 UObject 계열
+				// UObject/Interface.h for IRopeColliderProvider, and the UObject family across every public header.
 				"CoreUObject",
-				// Components/MeshComponent.h(URopeComponent), GameFramework/Actor.h(ARopeController) 등
+				// Components/MeshComponent.h for URopeComponent, GameFramework/Actor.h for ARopeController and so on.
 				"Engine",
-				// Subsystem/RopeSimSubsystem.h가 RopeGPUSolver.h를 include(FRopeGPUSolver 값 멤버) —
-				// 이 헤더가 유일한 공개 확장 seam(RegisterColliderProvider)을 담고 있다.
+				// Subsystem/RopeSimSubsystem.h includes RopeGPUSolver.h, holding an FRopeGPUSolver by value.
+				// That header carries the only public extension seam, RegisterColliderProvider.
 				"DynamicRopeShaders",
 				// UI/ — Blueprint/UserWidget.h(URopeAimWidget, URopePluginInfoWidget)
 				"UMG",
-				// UI/ — Slate 타입(위젯 페인트 시그니처: FGeometry/FSlateRect/FSlateWindowElementList)
+				// UI/ — the Slate types in the widget paint signatures: FGeometry, FSlateRect and FSlateWindowElementList.
 				"Slate",
 				"SlateCore",
 				// UI/RopePluginInfoHUD.h — InputCoreTypes.h(FKey)
@@ -54,7 +54,7 @@ public class DynamicRope : ModuleRules
 				"RenderCore",
 				// RopeSceneProxy
 				"RHI",
-				// URopeWielderComponent 선택적 입력 자동 바인딩(public 헤더는 전방선언만 — private 유지)
+				// The optional automatic input binding of URopeWielderComponent; the public header forward-declares it alone, so this stays private.
 				"EnhancedInput",
 				// ... add private dependencies that you statically link with here ...
 			}
@@ -68,8 +68,8 @@ public class DynamicRope : ModuleRules
 			}
 			);
 
-		// Gameplay Debugger 카테고리(rope 인트로스펙션) — 의존성 + WITH_GAMEPLAY_DEBUGGER 매크로를
-		// 타깃에 맞게 설정한다(shipping에서는 자동으로 빠진다).
+		// The gameplay debugger category, for rope introspection. This sets both the dependency and the
+		// WITH_GAMEPLAY_DEBUGGER macro to match the target, so it drops out automatically in shipping.
 		SetupGameplayDebuggerSupport(Target);
 	}
 }

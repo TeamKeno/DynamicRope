@@ -7,8 +7,8 @@
 
 FTransform ResolveBindingWorld(const FRopeBindingFrame& Frame)
 {
-	// 대상 소실(cross-actor 파괴 등)이면 포인터 오버로드가 Identity를 반환한다.
-	// 호출자는 IsValid()로 먼저 걸러 release 하는 것을 권장.
+	// If the target is lost, as when a cross-actor target is destroyed, the pointer overload returns the identity.
+	// Callers are advised to filter with IsValid() first and release.
 	return ResolveBindingWorld(Frame.Component.Get(), Frame.SocketOrBone);
 }
 
@@ -19,7 +19,7 @@ FTransform ResolveBindingWorld(const USceneComponent* Component, FName SocketOrB
 		return FTransform::Identity;
 	}
 
-	// 스켈레탈 + 본 이름이 있으면 스키닝된 소켓 트랜스폼 — 기존 Mesh->GetSocketTransform(Bone) 과 100% 동일.
+	// With a skeletal mesh and a bone name it is the skinned socket transform, exactly as Mesh->GetSocketTransform(Bone) would give.
 	if (const USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Component))
 	{
 		if (!SocketOrBone.IsNone())
@@ -28,9 +28,10 @@ FTransform ResolveBindingWorld(const USceneComponent* Component, FName SocketOrB
 		}
 	}
 
-	// 정적/무버블 컴포넌트: 지정된 이름이 실재 소켓이면 소켓 트랜스폼, 아니면(가상 본 이름 등) 컴포넌트
-	// 트랜스폼(5번 정적 랩 경로). DoesSocketExist 가드로, 랩 대상이 발급한 합성(가상) 본 이름이 우연히
-	// 스태틱 메시 소켓과 겹치지 않는 한 항상 컴포넌트 트랜스폼을 따르게 해 거동을 결정적으로 만든다.
+	// A static or movable component: the socket transform if the given name is a real socket, and otherwise, as with a
+	// virtual bone name, the component transform, which is the static wrap path. The DoesSocketExist guard makes the
+	// behaviour deterministic by always following the component transform unless a synthetic virtual bone name issued
+	// by a wrap target happens to collide with a static mesh socket.
 	if (!SocketOrBone.IsNone() && Component->DoesSocketExist(SocketOrBone))
 	{
 		return Component->GetSocketTransform(SocketOrBone);
@@ -47,7 +48,7 @@ namespace RopeWrapTargets
 
 	FName GetParentTargetKey(const USceneComponent* Mesh, FName Bone)
 	{
-		// 스켈레탈만 본 그래프가 있다. 정적/가상 본 대상(Cast 실패) 또는 루트 본이면 None.
+	// Only a skeletal mesh has a bone graph, so a static or virtual bone target, where the cast fails, or the root bone gives none.
 		const USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Mesh);
 		return (Skel && !Bone.IsNone()) ? Skel->GetParentBone(Bone) : NAME_None;
 	}
@@ -60,8 +61,9 @@ namespace RopeWrapTargets
 			return;
 		}
 
-		// 자식 열거는 전 본 스캔(스켈레톤에 자식 인덱스 테이블이 없다). 호출자(SVF 그래프 확장)는
-		// depth/cost 상한이 있는 소규모 탐색이라 이 O(본 수) 스캔이 기존 구현과 동일 비용이다.
+	// Enumerating children is a scan of every bone, since a skeleton carries no child index table. The caller, being
+	// the surface vector field's graph expansion, is a small search bounded by depth and cost, so this scan over the
+	// bone count costs the same as the previous implementation.
 		const int32 NumBones = Skel->GetNumBones();
 		for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
 		{
@@ -90,7 +92,7 @@ namespace RopeWrapTargets
 			const USceneComponent* Mesh = nullptr;
 			Collider->GetGPUAttribution(Bone, Mesh);
 
-			// 귀속 없음 = 감김 대상이 아니라 표면 기하일 뿐 → 게이트 대상에서 제외(항상 유지).
+			// With no attribution it is not a wrap target but merely surface geometry, so it is excluded from the gate and always kept.
 			const bool bAttributed = !Bone.IsNone() || Mesh != nullptr;
 			if (bAttributed && !CanWrapTarget(Mesh, Bone))
 			{

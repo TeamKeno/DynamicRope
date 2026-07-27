@@ -7,12 +7,12 @@ const FName FRopeGDFFXSystem::Name(TEXT("DynamicRopeGDF"));
 
 bool FRopeGDFFXSystem::UsesGlobalDistanceField() const
 {
-	// 씬은 FFXSystemSet이 생성 직후 SetSceneInterface로 채운다. 이 씬에 GDF 로프가 활성이면 GDF 빌드 요구.
+	// The scene is filled in by FFXSystemSet through SetSceneInterface immediately after construction. If this scene has an active rope using the global distance field, the field's build is requested.
 	return RopeGDF::IsGDFActive(GetSceneInterface());
 }
 
 FFXSystemInterface* CreateRopeGDFFXSystem(ERHIFeatureLevel::Type InFeatureLevel, EShaderPlatform InShaderPlatform, FGPUSortManager* InGPUSortManager)
 {
-	// FFXSystemSet이 소유권을 가져가며(shared ptr + custom deleter), 파괴는 엔진이 렌더 스레드에서 처리한다.
+	// FFXSystemSet takes ownership, as a shared pointer with a custom deleter, and the engine destroys it on the render thread.
 	return new FRopeGDFFXSystem(InFeatureLevel, InShaderPlatform, InGPUSortManager);
 }

@@ -11,12 +11,12 @@
 
 ARopeDemoDoor::ARopeDemoDoor()
 {
-	// 문짝 이동 보간에만 틱이 필요하다.
+	// Only interpolating the door panel's movement needs a tick.
 	PrimaryActorTick.bCanEverTick = true;
 
 	Frame = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Frame"));
 	SetRootComponent(Frame);
-	// 문틀은 문짝보다 약간 크고 얇은 판(220x20x260cm). 엔진 큐브(100cm) 기준 배율.
+	// The frame is a thin plate slightly larger than the door, at 220 x 20 x 260 cm, scaled from the engine's 100 cm cube.
 	Frame->SetRelativeScale3D(FVector(2.2f, 0.2f, 2.6f));
 	Frame->SetRelativeLocation(FVector(0.0f, 0.0f, 130.0f));
 	Frame->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -25,14 +25,14 @@ ARopeDemoDoor::ARopeDemoDoor()
 
 	Leaf = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Leaf"));
 	Leaf->SetupAttachment(Frame);
-	// 부모 스케일의 역수를 곱해 절대 크기를 잡는다 — 문짝 200x30x250cm.
+	// Multiplied by the reciprocal of the parent's scale to establish the absolute size, giving a 200 x 30 x 250 cm door panel.
 	Leaf->SetRelativeScale3D(FVector(2.0f / 2.2f, 0.3f / 0.2f, 2.5f / 2.6f));
 	Leaf->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Leaf->SetCollisionObjectType(ECC_WorldStatic);
-	// 열릴 때 실제로 움직이므로 Movable이어야 한다(Static이면 이동이 반영되지 않는다).
+	// It actually moves when it opens, so it has to be movable; a static one would not reflect the movement.
 	Leaf->SetMobility(EComponentMobility::Movable);
 
-	// 콘텐츠 의존을 만들지 않으려고 엔진 기본 셰이프만 쓴다(플러그인 → /Game 참조 금지).
+	// Engine primitive shapes alone, to avoid creating a content dependency, since a plugin must not reference /Game.
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	if (CubeMesh.Succeeded())
 	{
@@ -66,7 +66,7 @@ void ARopeDemoDoor::BeginPlay()
 			TEXT("[%s] demo door has no plates linked — set Plates or PlateTag, or it will never open."), *GetName());
 	}
 
-	// 레벨에 물체를 미리 얹어 둔 배치도 지원하려면 시작 시 한 번 평가해야 한다.
+	// Evaluated once at startup so that objects placed on the plates in the level are supported too.
 	EvaluateOpenCondition();
 }
 
@@ -92,7 +92,7 @@ void ARopeDemoDoor::Tick(float DeltaSeconds)
 		return;
 	}
 
-	// 부모 스케일이 걸려 있으므로 월드 cm 오프셋을 상대 좌표로 환산한다.
+	// The parent's scale applies, so the world offset in centimetres is converted into relative coordinates.
 	const FVector ParentScale = Frame ? Frame->GetRelativeScale3D() : FVector::OneVector;
 	const FVector SafeScale(
 		FMath::Max(KINDA_SMALL_NUMBER, FMath::Abs(ParentScale.X)),
@@ -107,7 +107,7 @@ void ARopeDemoDoor::Tick(float DeltaSeconds)
 		return;
 	}
 
-	// 속도는 월드 기준 cm/s이므로 상대 좌표 보간 속도로 환산한다(스케일 축이 다르면 지배 축 기준).
+	// The speed is in world centimetres per second, so it is converted into an interpolation rate in relative coordinates, taken from the dominant axis where the scale differs per axis.
 	const float MaxAxisScale = FMath::Max3(SafeScale.X, SafeScale.Y, SafeScale.Z);
 	const float LocalSpeed = OpenSpeed / MaxAxisScale;
 	Leaf->SetRelativeLocation(FMath::VInterpConstantTo(Current, Target, DeltaSeconds, LocalSpeed));
@@ -133,7 +133,7 @@ int32 ARopeDemoDoor::GetRequiredPlateCount() const
 		return RequiredPressedCount;
 	}
 
-	// 0 = 연결된 판 전부. 유효한 것만 센다.
+	// Zero means every connected plate. Only the valid ones are counted.
 	int32 Valid = 0;
 	for (const ARopeDemoPressurePlate* Plate : Plates)
 	{
@@ -167,14 +167,14 @@ void ARopeDemoDoor::HandlePlatePressedChanged(ARopeDemoPressurePlate* /*Plate*/,
 
 void ARopeDemoDoor::EvaluateOpenCondition()
 {
-	// 한 번 열렸고 bStayOpen이면 조건이 깨져도 유지한다(클리어는 되돌아가지 않는다).
+	// Once it has opened, bStayOpen keeps it open even when the condition breaks, so clearing it does not revert.
 	if (bOpen && bStayOpen)
 	{
 		return;
 	}
 
 	const int32 Required = GetRequiredPlateCount();
-	// 연결된 판이 없으면 열리지 않는다 — 0 >= 0으로 열려 버리는 걸 막는다.
+	// With no connected plates it does not open, which prevents zero being at least zero and opening it.
 	const bool bShouldOpen = Required > 0 && GetPressedPlateCount() >= Required;
 
 	SetOpen(bShouldOpen);
@@ -198,7 +198,7 @@ void ARopeDemoDoor::GatherTaggedPlates()
 		ARopeDemoPressurePlate* Plate = *It;
 		if (IsValid(Plate) && Plate->ActorHasTag(PlateTag))
 		{
-			// AddUnique — Plates에 직접 지정한 것과 겹쳐도 이중 구독이 되지 않게 한다.
+			// AddUnique, so that a plate also named directly in the list is not subscribed twice.
 			Plates.AddUnique(Plate);
 		}
 	}

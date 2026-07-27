@@ -1,8 +1,9 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// RopeTraction 단위 테스트 — 견인(테더/능동 Pull) 축 드라이브 수학을 월드 없이 검증한다.
-// 이 수학은 오래 PIE로만 검증됐고, 그 사이 두 번의 실측 버그(고장력 폭발/영구 뒤처짐)가 났다.
-// 아래 회귀 테스트가 그 둘을 고정한다.
+// Unit tests for RopeTraction, verifying the traction axis drive maths, covering both the tether and
+// active pull, with no world.
+// This maths was verified only through play-in-editor for a long time, and two measured defects arose in
+// that period: an explosion at high tension and a permanent lag. The regression tests below pin both.
 
 #include "Misc/AutomationTest.h"
 
@@ -12,7 +13,7 @@
 
 namespace
 {
-	// 양방향 정확 서보(제동 포함) — FRopeAxisServo 시맨틱 검증용.
+	// A bidirectional exact servo, including braking, used to verify the servo semantics.
 	RopeTraction::FRopeAxisServo MakeReelServo(float TargetSpeed)
 	{
 		RopeTraction::FRopeAxisServo Servo;
@@ -23,7 +24,7 @@ namespace
 		return Servo;
 	}
 
-	// 능동 Pull / wielder 톱업의 단방향 서보(가속만).
+	// The one-directional servo, accelerating only, used by active pull and the wielder top-up.
 	RopeTraction::FRopeAxisServo MakeOneWayServo(float TargetSpeed, float Alpha = 1.0f)
 	{
 		RopeTraction::FRopeAxisServo Servo;
@@ -35,30 +36,34 @@ namespace
 	}
 }
 
-// 양방향 서보는 목표 초과 관성을 제거한다(제동). CL 401 회귀: 단방향(가속만)이면 고장력에서 대상이
-// 경계를 지나쳐 코스팅→슬랙→되튕김→물리 폭발이 났다. 제동이 살아 있어야 경계에 안착한다.
+// A bidirectional servo removes the momentum beyond the target, which is braking. Regression: with
+// acceleration only, high tension let the target overshoot the boundary, coast, go slack, bounce back and
+// explode. Braking is what settles it on the boundary.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionBidirectionalBrakesTest,
 	"DynamicRope.Traction.BidirectionalServoBrakesOvershoot",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeTractionBidirectionalBrakesTest::RunTest(const FString& Parameters)
 {
-	// 목표 100인데 이미 250으로 안쪽으로 질주 중 → 양방향은 -150(제동)을 낸다.
+	// The target is 100 but it is already racing inwards at 250, so the bidirectional servo brakes by 150.
 	const float BrakeDv = RopeTraction::ComputeAxisDeltaV(250.0f, MakeReelServo(100.0f));
 	TestEqual(TEXT("bidirectional brakes excess inward speed"), BrakeDv, -150.0f);
 
-	// 같은 상황에서 단방향은 무동작 → 초과 관성이 남아 경계를 지나쳐 코스팅한다(옛 폭발 경로).
+	// In the same situation the one-directional servo does nothing, leaving the excess momentum to
+	// overshoot and coast, which is the old explosion path.
 	const float OneWayDv = RopeTraction::ComputeAxisDeltaV(250.0f, MakeOneWayServo(100.0f));
 	TestEqual(TEXT("one-directional servo does not brake"), OneWayDv, 0.0f);
 
-	// 경계에서 목표가 0으로 taper되면 양방향은 남은 관성을 전부 뺀다 → 오버슛 없이 정지.
+	// When the target tapers to zero at the boundary, the bidirectional servo removes all remaining
+	// momentum and stops with no overshoot.
 	const float SettleDv = RopeTraction::ComputeAxisDeltaV(80.0f, MakeReelServo(0.0f));
 	TestEqual(TEXT("bidirectional servo stops at the boundary"), SettleDv, -80.0f);
 	return true;
 }
 
-// 장력 클램프가 질량 의존 추종을 만든다(능동 Pull의 ApplyPullVelocityDrive 골격).
-// 문턱 장력 ≈ M·V·fps — 그 이상이면 목표 도달, 미만이면 뒤처진다.
+// The tension clamp is what produces mass-dependent following, which is the skeleton of the active pull
+// velocity drive. The threshold tension is roughly mass times velocity times the frame rate: above it the
+// target is reached, and below it the receiver lags.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionTensionLimitTest,
 	"DynamicRope.Traction.TensionLimitMakesHeavyTargetsLag",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -67,37 +72,42 @@ bool FRopeTractionTensionLimitTest::RunTest(const FString& Parameters)
 {
 	const float Dt = 1.0f / 60.0f;
 	const float VTarget = 400.0f;
-	const float DeltaV = RopeTraction::ComputeAxisDeltaV(0.0f, MakeReelServo(VTarget)); // 정지 → 400 필요.
+	const float DeltaV = RopeTraction::ComputeAxisDeltaV(0.0f, MakeReelServo(VTarget)); // From rest, so the full amount is needed.
 	TestEqual(TEXT("delta v to reach target from rest"), DeltaV, VTarget);
 
-	// 50kg이 400cm/s에 한 프레임 만에 도달하는 문턱 장력 = 50*400*60 = 1,200,000.
+	// The threshold tension for 50 kg to reach 400 cm/s in one frame is 50 * 400 * 60.
 	const float Mass = 50.0f;
 	const float Threshold = Mass * VTarget / Dt;
 
-	// 문턱 이상 → 필요 임펄스(mass*dV)를 그대로 낸다 = 목표 정확 도달(뒤처짐 없음).
+	// At or above the threshold it produces exactly the impulse required, which reaches the target with no
+	// lag.
 	const float JAmple = RopeTraction::ClampAxisImpulse(DeltaV, Mass, Threshold * Dt);
 	TestEqual(TEXT("ample tension reaches the target exactly"), JAmple, Mass * VTarget);
 
-	// 기본값 150000은 문턱보다 훨씬 작다 → 클램프에 걸려 뒤처진다(무게감). ΔV = J/m = 50cm/s뿐.
+	// The default is far below that threshold, so it clamps and lags, which reads as weight; the delta
+	// velocity is only the impulse over the mass.
 	const float JLimited = RopeTraction::ClampAxisImpulse(DeltaV, Mass, 150000.0f * Dt);
 	TestEqual(TEXT("default tension is capped for a 50kg target"), JLimited, 150000.0f * Dt);
 	TestTrue(TEXT("capped impulse lags the target"), JLimited < Mass * VTarget);
 
-	// 같은 장력이라도 가벼우면(1kg) 문턱을 넘어 목표에 도달한다 = 질량 의존 추종.
+	// The same tension on a light body exceeds the threshold and reaches the target, which is what makes
+	// the following mass-dependent.
 	const float JLight = RopeTraction::ClampAxisImpulse(DeltaV, 1.0f, 150000.0f * Dt);
 	TestEqual(TEXT("a light target reaches the target under the same tension"), JLight, 1.0f * VTarget);
 
-	// 상한 0 = 무제한(정확 서보) — 질량 무관하게 목표 도달.
+	// A limit of 0 means unlimited, giving an exact servo that reaches the target regardless of mass.
 	TestEqual(TEXT("zero max impulse means unlimited exact servo"),
 		RopeTraction::ClampAxisImpulse(DeltaV, Mass, 0.0f), Mass * VTarget);
 
-	// 제동 방향도 대칭으로 클램프된다(양방향) — 한쪽만 클램프하면 폭주 방어가 비대칭이 된다.
+	// Braking is clamped symmetrically, since clamping only one direction would make the runaway
+	// protection asymmetric.
 	TestEqual(TEXT("braking impulse is clamped symmetrically"),
 		RopeTraction::ClampAxisImpulse(-VTarget, Mass, 150000.0f * Dt), -150000.0f * Dt);
 	return true;
 }
 
-// bCancelOutward: 바깥 walk는 즉시·완전 상쇄하고(Alpha 무관), 안쪽 회수만 Alpha로 감쇠한다.
+	// Cancelling outward motion is immediate and complete, ignoring the interpolation factor, while only
+	// the inward recovery is damped by it.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionCancelOutwardTest,
 	"DynamicRope.Traction.CancelOutwardIsImmediateButReclaimIsDamped",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -107,68 +117,76 @@ bool FRopeTractionCancelOutwardTest::RunTest(const FString& Parameters)
 	RopeTraction::FRopeAxisServo Servo = MakeOneWayServo(100.0f, /*Alpha*/ 0.5f);
 	Servo.bCancelOutward = true;
 
-	// 바깥으로 200(음수 축)으로 걷는 중: 상쇄 200(즉시·완전) + 목표 100까지 Alpha 0.5 → 50. 합 250.
+	// Walking outwards at 200 along the negative axis: 200 is cancelled immediately and completely, and
+	// half of the remaining 100 to the target is applied, giving 250 in total.
 	TestEqual(TEXT("outward walk is cancelled fully, reclaim is damped"),
 		RopeTraction::ComputeAxisDeltaV(-200.0f, Servo), 250.0f);
 
-	// 목표가 0이어도 바깥 walk 상쇄는 그대로 일어난다(경계 유지).
+	// The outward cancellation still happens even with a target of zero, which holds the boundary.
 	RopeTraction::FRopeAxisServo StopOnly = MakeOneWayServo(0.0f, /*Alpha*/ 1.0f);
 	StopOnly.bCancelOutward = true;
 	TestEqual(TEXT("outward walk is cancelled even with a zero target"),
 		RopeTraction::ComputeAxisDeltaV(-200.0f, StopOnly), 200.0f);
 
-	// 상쇄 없이(bCancelOutward=false) 목표 0이면 "바깥 속도 제거"와 같아진다(not-pullable 시뮬 바디 경로).
+	// Without the cancellation, a target of zero simply removes the outward velocity, which is the path
+	// taken by a simulating body that cannot be pulled.
 	TestEqual(TEXT("zero-target one-way servo removes outward velocity"),
 		RopeTraction::ComputeAxisDeltaV(-200.0f, MakeOneWayServo(0.0f)), 200.0f);
-	// 안쪽으로 가는 중이면 손대지 않는다.
+	// Motion that is already inward is left untouched.
 	TestEqual(TEXT("zero-target one-way servo leaves inward velocity alone"),
 		RopeTraction::ComputeAxisDeltaV(200.0f, MakeOneWayServo(0.0f)), 0.0f);
 	return true;
 }
 
-// 속력 상한 주입: 상한은 max(SpeedCap, 기존 속력) — 기존의 더 빠른 외부 운동은 보존한다.
+	// The injected speed cap is the larger of the cap and the existing speed, so faster external motion is
+	// preserved.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionClampInjectedTest,
 	"DynamicRope.Traction.InjectedVelocityCapPreservesFasterMotion",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeTractionClampInjectedTest::RunTest(const FString& Parameters)
 {
-	// 느리게 있다가 주입으로 상한(1500)을 넘으면 상한으로 잘린다.
+	// Starting slow, an injection that exceeds the cap is clamped to it.
 	const FVector Clamped = RopeTraction::ClampInjectedVelocity(
 		FVector(3000.0f, 0.0f, 0.0f), FVector(100.0f, 0.0f, 0.0f), 1500.0f);
 	TestEqual(TEXT("injection is capped at the speed cap"), static_cast<float>(Clamped.Size()), 1500.0f, 1e-2f);
 
-	// 이미 상한보다 빠른 자유낙하(2000) 중이면 그 속력은 보존된다(주입이 더 키우지만 못함).
+	// Already falling faster than the cap, that speed is preserved and the injection cannot increase it
+	// further.
 	const FVector Fast = RopeTraction::ClampInjectedVelocity(
 		FVector(0.0f, 0.0f, -3000.0f), FVector(0.0f, 0.0f, -2000.0f), 1500.0f);
 	TestEqual(TEXT("pre-existing faster motion is preserved"), static_cast<float>(Fast.Size()), 2000.0f, 1e-2f);
 
-	// SpeedCap=0 = 클램프 없음.
+	// A cap of 0 disables the clamp.
 	const FVector Uncapped = RopeTraction::ClampInjectedVelocity(
 		FVector(9000.0f, 0.0f, 0.0f), FVector::ZeroVector, 0.0f);
 	TestEqual(TEXT("zero cap disables clamping"), static_cast<float>(Uncapped.Size()), 9000.0f, 1e-2f);
 	return true;
 }
 
-// 지수 스무딩 계수: 프레임률이 달라도 같은 시상수로 수렴하고, 큰 dt에서도 오버슛하지 않는다.
+	// The exponential smoothing coefficient converges on the same time constant at any frame rate and does
+	// not overshoot even at a large delta.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionExpSmoothAlphaTest,
 	"DynamicRope.Traction.ExpSmoothAlphaIsFrameRateIndependent",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeTractionExpSmoothAlphaTest::RunTest(const FString& Parameters)
 {
-	// Tau=0(또는 음수) = 스무딩 없음 → 한 프레임에 목표 도달.
+	// A time constant at or below zero disables smoothing and reaches the target in one frame.
 	TestEqual(TEXT("zero tau means no smoothing"), RopeTraction::ExpSmoothAlpha(0.0f, 1.0f / 60.0f), 1.0f);
 	TestEqual(TEXT("negative tau means no smoothing"), RopeTraction::ExpSmoothAlpha(-1.0f, 1.0f / 60.0f), 1.0f);
 
-	// dt = Tau면 α = 1 - 1/e ≈ 0.632(시상수의 정의).
+	// With a delta equal to the time constant the coefficient is one minus the reciprocal of e, which is
+	// the definition of a time constant.
 	TestEqual(TEXT("one time constant leaves 1/e remaining"),
 		RopeTraction::ExpSmoothAlpha(0.12f, 0.12f), 1.0f - FMath::Exp(-1.0f), 1e-4f);
 
-	// dt가 아무리 커도 α ≤ 1 — 오버슛(목표를 지나쳐 반대로 튐)이 원천적으로 없다.
+	// However large the delta, the coefficient stays at or below one, so overshooting past the target is
+	// impossible by construction.
 	TestTrue(TEXT("a huge dt never overshoots"), RopeTraction::ExpSmoothAlpha(0.12f, 10.0f) <= 1.0f);
 
-	// 프레임률 독립: 60fps로 2프레임 간 잔량 == 30fps로 1프레임 간 잔량(둘 다 exp(-dt/Tau) 곱).
+	// Frame rate independence: the remainder after two frames at 60 Hz equals the remainder after one at
+	// 30 Hz, since both multiply by the same exponential.
 	const float Tau = 0.12f;
 	const float Remain60 = (1.0f - RopeTraction::ExpSmoothAlpha(Tau, 1.0f / 60.0f));
 	const float Remain30 = (1.0f - RopeTraction::ExpSmoothAlpha(Tau, 1.0f / 30.0f));
@@ -176,7 +194,9 @@ bool FRopeTractionExpSmoothAlphaTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 방향 EMA: 미시드 시드 / 정상 보간 / **180° 반전 축퇴 재시드**. 재시드가 없으면 방향이 0으로 남아 축이 사라진다.
+	// The direction average: seeding when unseeded, ordinary interpolation, and the degenerate case of a
+	// 180 degree reversal, which has to reseed. Without the reseed the direction stays at zero and the axis
+	// vanishes.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionSmoothDirectionTest,
 	"DynamicRope.Traction.SmoothDirectionReseedsOnDegenerateFlip",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -185,37 +205,40 @@ bool FRopeTractionSmoothDirectionTest::RunTest(const FString& Parameters)
 {
 	const FVector X = FVector::ForwardVector;
 
-	// 미시드(0) → 측정값으로 시드(래그 없음).
+	// Unseeded, it is seeded from the measurement with no lag.
 	TestEqual(TEXT("unseeded direction seeds from the target"),
 		RopeTraction::SmoothDirection(FVector::ZeroVector, X, 0.5f), X);
 
-	// α=1 → 목표에 즉시 도달.
+	// A coefficient of one reaches the target immediately.
 	TestEqual(TEXT("alpha one snaps to the target"),
 		RopeTraction::SmoothDirection(FVector::UpVector, X, 1.0f), X);
 
-	// α=0 → 현재 유지.
+	// A coefficient of zero keeps the current value.
 	TestEqual(TEXT("alpha zero holds the current direction"),
 		RopeTraction::SmoothDirection(X, FVector::UpVector, 0.0f), X);
 
-	// 중간 보간은 단위 벡터로 정규화돼 나온다(길이가 줄어들면 이후 dot 산출이 축소된다).
+	// Intermediate interpolation is renormalized to a unit vector; a shortened vector would shrink every
+	// dot product computed from it.
 	const FVector Half = RopeTraction::SmoothDirection(X, FVector::UpVector, 0.5f);
 	TestEqual(TEXT("smoothed direction stays unit length"), static_cast<float>(Half.Size()), 1.0f, 1e-4f);
 
-	// 180° 반전 + α=0.5 → Lerp가 정확히 0으로 상쇄된다. 재시드가 없으면 여기서 0이 나온다.
+	// A 180 degree reversal at a coefficient of one half cancels exactly to zero, which is where the reseed
+	// is needed.
 	const FVector Flipped = RopeTraction::SmoothDirection(X, -X, 0.5f);
 	TestFalse(TEXT("a 180 degree flip does not collapse to zero"), Flipped.IsNearlyZero());
 	TestEqual(TEXT("a degenerate flip reseeds from the target"), Flipped, -X);
 	return true;
 }
 
-// fractional 조준: 노드 사이 선형 보간. 정수 조준의 이산 홉("뚝뚝 끊김")을 없앤 연속화가 이 함수다.
+	// Fractional aiming interpolates linearly between nodes. This function is what makes the discrete hops
+	// of integer aiming continuous and removes the stutter.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionSampleFractionalAimTest,
 	"DynamicRope.Traction.SampleFractionalAimInterpolatesBetweenNodes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeTractionSampleFractionalAimTest::RunTest(const FString& Parameters)
 {
-	// 노드 x = 0, 100, 200, 300. AnchorNode = 3.
+	// The nodes are evenly spaced along x, with the anchor at the last one.
 	const TArray<FVector> Positions = {
 		FVector(0.0f, 0.0f, 0.0f), FVector(100.0f, 0.0f, 0.0f),
 		FVector(200.0f, 0.0f, 0.0f), FVector(300.0f, 0.0f, 0.0f) };
@@ -225,25 +248,29 @@ bool FRopeTractionSampleFractionalAimTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("fractional aim interpolates between nodes"),
 		RopeTraction::SampleFractionalAim(Positions, 1.25f, 3), FVector(125.0f, 0.0f, 0.0f));
 
-	// 앵커 노드에서는 A1이 앵커로 클램프돼 앵커 위치를 준다(범위 밖 인덱스 접근 없음).
+	// At the anchor node the upper index clamps to the anchor and returns its position, with no
+	// out-of-range access.
 	TestEqual(TEXT("aim at the anchor clamps to the anchor node"),
 		RopeTraction::SampleFractionalAim(Positions, 3.0f, 3), FVector(300.0f, 0.0f, 0.0f));
 
-	// 빈 배열/범위 밖 → ZeroVector(크래시 없음).
+	// An empty array or an out-of-range index returns a zero vector rather than crashing.
 	TestEqual(TEXT("an empty array yields zero"),
 		RopeTraction::SampleFractionalAim(TArray<FVector>(), 0.0f, 0), FVector::ZeroVector);
 	return true;
 }
 
-// 팽팽(taut) 게이트: 임계 0 = 종전 하드코딩 게이트(장력 > ~0)와 동일(동작 불변), 임계 > 0이면
-// 진입/유지 분리 히스테리시스로 경계 지터 퍼덕임을 막는다. 능동 Pull 인가와 IsPullTaut()의 공용 판정.
+	// The taut gate: a threshold of 0 matches the previous hardcoded gate, meaning any tension at all, and
+	// leaves behaviour unchanged, while a threshold above 0 separates the engage and hold levels into a
+	// hysteresis that stops it flapping at the boundary. It is shared by applying active pull and by
+	// IsPullTaut().
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionTautGateTest,
 	"DynamicRope.Traction.TautGateHysteresisPreventsFlapping",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeTractionTautGateTest::RunTest(const FString& Parameters)
 {
-	// 임계 0(기본) = 종전 게이트: 장력이 조금이라도 있으면 팽팽, 0이면 아님 — 래치 상태와 무관(히스테리시스 무력).
+	// A threshold of 0, the default, matches the previous gate: any tension at all is taut and zero is not,
+	// regardless of the latch state, so the hysteresis does nothing.
 	TestTrue(TEXT("zero threshold treats any tension as taut"),
 		RopeTraction::EvaluateTautGate(1.0f, 0.0f, 0.5f, /*bWasTaut*/ false));
 	TestFalse(TEXT("zero threshold treats zero tension as slack"),
@@ -251,36 +278,39 @@ bool FRopeTractionTautGateTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("zero tension is slack even while latched taut"),
 		RopeTraction::EvaluateTautGate(0.0f, 0.0f, 0.5f, /*bWasTaut*/ true));
 
-	// 임계 100, 비율 0.5: 진입은 100 초과여야 한다.
+	// With a threshold of 100 and a release ratio of one half, engaging requires exceeding 100.
 	TestFalse(TEXT("tension below the threshold does not enter taut"),
 		RopeTraction::EvaluateTautGate(80.0f, 100.0f, 0.5f, /*bWasTaut*/ false));
 	TestTrue(TEXT("tension above the threshold enters taut"),
 		RopeTraction::EvaluateTautGate(120.0f, 100.0f, 0.5f, /*bWasTaut*/ false));
 
-	// 히스테리시스: 일단 팽팽이면 100×0.5 = 50까지는 유지, 그 아래로 떨어져야 해제.
+	// Hysteresis: once taut it stays taut down to half the threshold, and only below that does it release.
 	TestTrue(TEXT("latched taut survives a dip below the enter threshold"),
 		RopeTraction::EvaluateTautGate(80.0f, 100.0f, 0.5f, /*bWasTaut*/ true));
 	TestFalse(TEXT("latched taut releases below the stay threshold"),
 		RopeTraction::EvaluateTautGate(40.0f, 100.0f, 0.5f, /*bWasTaut*/ true));
 
-	// 비율 1 = 히스테리시스 없음(진입 임계 = 유지 임계) — 80은 래치 여부와 무관하게 슬랙.
+	// A ratio of 1 removes the hysteresis, making the hold level equal the engage level, so 80 is slack
+	// whatever the latch state.
 	TestFalse(TEXT("ratio one collapses the hysteresis band"),
 		RopeTraction::EvaluateTautGate(80.0f, 100.0f, 1.0f, /*bWasTaut*/ true));
 
-	// 비율은 [0..1] 클램프 — 1 초과를 넘겨도 유지 임계가 진입 임계 위로 올라가지 않는다.
+	// The ratio is clamped to the range 0 to 1, so passing a value above 1 cannot raise the hold level
+	// above the engage level.
 	TestTrue(TEXT("an out-of-range ratio is clamped to the enter threshold"),
 		RopeTraction::EvaluateTautGate(101.0f, 100.0f, 2.0f, /*bWasTaut*/ true));
 	return true;
 }
 
-// 전 체인 팽팽(기하) 게이트: chord 합 vs rest 길이 비교 + 진입/유지 히스테리시스 + 판정 불능 방어.
+	// The whole-chain geometric gate: the chord sum against the rest length, plus engage and hold
+	// hysteresis, plus the guard for when no verdict is possible.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionChainTautGateTest,
 	"DynamicRope.Traction.ChainTautGate",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeTractionChainTautGateTest::RunTest(const FString& Parameters)
 {
-	// rest 100, 슬랙 허용 3%: 진입 임계 = 97.
+	// With a rest length of 100 and 3 percent slack allowed, engaging requires 97.
 	TestTrue(TEXT("chord at rest enters taut"),
 		RopeTraction::EvaluateChainTautGate(100.0f, 100.0f, 0.03f, 2.0f, /*bWasTaut*/ false));
 	TestTrue(TEXT("chord within the slack ratio enters taut"),
@@ -288,7 +318,8 @@ bool FRopeTractionChainTautGateTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("sagging chord stays slack"),
 		RopeTraction::EvaluateChainTautGate(80.0f, 100.0f, 0.03f, 2.0f, /*bWasTaut*/ false));
 
-	// 히스테리시스(배율 2 → 유지 임계 = 94): 일단 팽팽이면 진입 임계 아래로 살짝 처져도 유지된다.
+	// With hysteresis, doubling the allowance to a hold level of 94, a rope once taut stays taut even after
+	// sagging slightly below the engage level.
 	TestFalse(TEXT("chord just below the enter threshold does not enter"),
 		RopeTraction::EvaluateChainTautGate(96.0f, 100.0f, 0.03f, 2.0f, /*bWasTaut*/ false));
 	TestTrue(TEXT("latched taut survives a dip into the hysteresis band"),
@@ -296,12 +327,13 @@ bool FRopeTractionChainTautGateTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("latched taut releases below the stay threshold"),
 		RopeTraction::EvaluateChainTautGate(90.0f, 100.0f, 0.03f, 2.0f, /*bWasTaut*/ true));
 
-	// 배율 1 = 히스테리시스 없음(진입 = 유지).
+	// A scale of 1 removes the hysteresis, making the engage and hold levels equal.
 	TestFalse(TEXT("release scale one collapses the hysteresis band"),
 		RopeTraction::EvaluateChainTautGate(96.0f, 100.0f, 0.03f, 1.0f, /*bWasTaut*/ true));
 
-	// 방어: rest ≤ 0(자유 구간 없음)은 항상 슬랙. 비율×배율 ≥ 1은 "슬랙 전량 허용"으로 수렴 —
-	// 래치된 게이트가 chord와 무관하게 유지된다(캡은 음수 임계 방지일 뿐, 의미는 동일).
+	// Guard: a rest length at or below zero, meaning no free span, is always slack. A ratio and scale whose
+	// product reaches 1 converges on allowing unlimited slack, which keeps a latched gate taut regardless of
+	// the chord; the cap merely prevents a negative threshold and means the same thing.
 	TestFalse(TEXT("zero rest length never reports taut"),
 		RopeTraction::EvaluateChainTautGate(100.0f, 0.0f, 0.03f, 2.0f, /*bWasTaut*/ true));
 	TestTrue(TEXT("ratio times scale of one or more keeps the latched gate open"),
@@ -309,8 +341,9 @@ bool FRopeTractionChainTautGateTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 대상 주입 2차 방어 조합: 주입 결과 벡터가 TetherMaxSpeed를 넘으면 클램프하되, 기존에 더 빠른
-// 외부 운동(자유낙하 등)은 보존한다(wielder 쪽 CorrectMovement와 같은 헬퍼를 대상 servo도 쓴다).
+	// The second line of defence when injecting into a target: an injected vector exceeding the maximum
+	// speed is clamped, while faster existing external motion, such as free fall, is preserved. The target
+	// servo uses the same helper the wielder's movement correction does.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionTargetInjectSpeedCapTest,
 	"DynamicRope.Traction.TargetInjectedSpeedCapPreservesExternalMotion",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -318,30 +351,32 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTractionTargetInjectSpeedCapTest,
 bool FRopeTractionTargetInjectSpeedCapTest::RunTest(const FString& Parameters)
 {
 	const float Cap = 1500.0f;
-	// 주입으로 상한을 넘는 경우 → 상한으로 클램프.
+	// An injection exceeding the cap is clamped to it.
 	{
 		const FVector OldVel(0.0f, 0.0f, 0.0f);
 		const FVector NewVel(2000.0f, 0.0f, 0.0f);
 		const FVector Clamped = RopeTraction::ClampInjectedVelocity(NewVel, OldVel, Cap);
-		TestEqual(TEXT("주입 초과분 클램프"), static_cast<float>(Clamped.Size()), Cap);
+		TestEqual(TEXT("clamps the injected excess"), static_cast<float>(Clamped.Size()), Cap);
 	}
-	// 기존 속력이 이미 상한 초과(자유낙하 등) → 그 속력까지는 허용(주입이 외부 운동을 깎지 않는다).
+	// Where the existing speed already exceeds the cap, as in free fall, that speed is permitted, so an
+	// injection never reduces external motion.
 	{
 		const FVector OldVel(0.0f, 0.0f, -3000.0f);
 		const FVector NewVel(300.0f, 0.0f, -3000.0f);
 		const FVector Clamped = RopeTraction::ClampInjectedVelocity(NewVel, OldVel, Cap);
-		TestTrue(TEXT("기존 고속 외부 운동 보존"), Clamped.Size() >= OldVel.Size() - 1.0f);
+		TestTrue(TEXT("preserves faster existing external motion"), Clamped.Size() >= OldVel.Size() - 1.0f);
 	}
 	return true;
 }
 
 //======================================================================================
-// 테더 λ 제약 솔브(SolveTetherLambda) — Docs/PoC/05 재편의 순수 수학 계층.
+	// The tether lambda constraint solve, which is the pure maths layer of the traction rework.
 //======================================================================================
 
 namespace
 {
-	// 공용 기본 입력: 10kg 대상 + 100kg wielder, β=1, 상한/컴플라이언스 없음. 각 테스트가 필요한 것만 덮는다.
+	// The shared default input: a 10 kg target and a 100 kg wielder, full recovery gain, and no limit or
+	// compliance. Each test overrides only what it needs.
 	RopeTraction::FRopeTetherConstraint MakeLambdaInput(float C, float SepSpeed)
 	{
 		RopeTraction::FRopeTetherConstraint In;
@@ -397,8 +432,10 @@ bool FRopePointMassJacobianTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 단방향성: 로프는 밀지도(슬랙), 접근을 제동하지도 않는다. 양끝 다 앵커면 아무도 못 움직인다.
-// λ의 정의 검증: 인가 총량(λ × w합)이 "벌어짐 상쇄 + 위치 회수 명령"을 정확히 닫는다.
+	// One-directional behaviour: the rope neither pushes when slack nor brakes an approach, and with both
+	// ends anchored nothing can move.
+	// It also verifies the definition of lambda: the total applied, lambda times the summed inverse masses,
+	// exactly closes the separation cancellation plus the commanded positional recovery.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTetherLambdaUnilateralTest,
 	"DynamicRope.Traction.TetherLambdaUnilateralAndAnchors",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -408,49 +445,52 @@ bool FRopeTetherLambdaUnilateralTest::RunTest(const FString& Parameters)
 	const float Dt = 1.0f / 60.0f;
 
 	// Material slack stays unloaded, but the exact boundary rejects outward motion.
-	TestEqual(TEXT("슬랙이면 0"), RopeTraction::SolveTetherLambda(MakeLambdaInput(-5.0f, 500.0f), Dt), 0.0f);
+	TestEqual(TEXT("returns zero when slack"), RopeTraction::SolveTetherLambda(MakeLambdaInput(-5.0f, 500.0f), Dt), 0.0f);
 	{
 		const RopeTraction::FRopeTetherConstraint Boundary = MakeLambdaInput(0.0f, 500.0f);
 		const float Lambda = RopeTraction::SolveTetherLambda(Boundary, Dt);
-		TestTrue(TEXT("경계에서 벌어지면 비신축 반력"), Lambda > 0.0f);
-		TestEqual(TEXT("경계 반력이 벌어짐 속도를 정확히 상쇄"),
+		TestTrue(TEXT("produces an inextensible reaction when separating at the boundary"), Lambda > 0.0f);
+		TestEqual(TEXT("the boundary reaction cancels the separation speed exactly"),
 			Lambda * (Boundary.InvMassTarget + Boundary.InvMassWielder), 500.0f, 0.01f);
 	}
 
-	// dt 축퇴 가드.
-	TestEqual(TEXT("dt 0이면 0"), RopeTraction::SolveTetherLambda(MakeLambdaInput(10.0f, 500.0f), 0.0f), 0.0f);
+	// Guard against a degenerate delta.
+	TestEqual(TEXT("returns zero at a delta of zero"), RopeTraction::SolveTetherLambda(MakeLambdaInput(10.0f, 500.0f), 0.0f), 0.0f);
 
-	// 이미 명령 이상으로 접근 중(β·C/dt = 0.2×10×60 = 120): 제동 없음 — 슬랙 코스팅은 정당한 물리.
+	// Already approaching faster than commanded: no braking, since coasting while slack is legitimate physics.
 	{
 		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(10.0f, -120.0f);
 		In.SettleAlpha = 0.2f;
-		TestEqual(TEXT("명령 속도로 접근 중이면 0"), RopeTraction::SolveTetherLambda(In, Dt), 0.0f);
+		TestEqual(TEXT("returns zero when approaching at the commanded speed"), RopeTraction::SolveTetherLambda(In, Dt), 0.0f);
 		In.SepSpeed = -200.0f;
-		TestEqual(TEXT("명령 초과 접근도 제동하지 않는다"), RopeTraction::SolveTetherLambda(In, Dt), 0.0f);
+		TestEqual(TEXT("does not brake an approach faster than commanded"), RopeTraction::SolveTetherLambda(In, Dt), 0.0f);
 	}
 
-	// 벌어지는 중: λ × w합 = 벌어짐 상쇄(300) + 위치 회수(120) 정확 폐합.
+	// While separating, lambda times the summed inverse masses exactly closes the cancellation plus the
+	// recovery.
 	{
 		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(10.0f, 300.0f);
 		In.SettleAlpha = 0.2f;
 		const float WSum = In.InvMassTarget + In.InvMassWielder;
 		const float Lambda = RopeTraction::SolveTetherLambda(In, Dt);
-		TestTrue(TEXT("벌어지면 λ > 0"), Lambda > 0.0f);
-		TestEqual(TEXT("인가 총량 = 상쇄 + 회수"), Lambda * WSum, 420.0f, 0.01f);
+		TestTrue(TEXT("produces a positive lambda while separating"), Lambda > 0.0f);
+		TestEqual(TEXT("the total applied equals the cancellation plus the recovery"), Lambda * WSum, 420.0f, 0.01f);
 	}
 
-	// 양끝 다 앵커(w합 ~0): 아무도 못 움직인다(한계 이탈은 거리 release가 처리).
+	// With both ends anchored, nothing can move; exceeding the limit is handled by the distance release.
 	{
 		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(50.0f, 500.0f);
 		In.InvMassTarget = 0.0f;
 		In.InvMassWielder = 0.0f;
-		TestEqual(TEXT("양끝 앵커면 0"), RopeTraction::SolveTetherLambda(In, Dt), 0.0f);
+		TestEqual(TEXT("returns zero with both ends anchored"), RopeTraction::SolveTetherLambda(In, Dt), 0.0f);
 	}
 	return true;
 }
 
-// 분배 자동성: 같은 λ가 양끝에 걸려 끝별 ΔV = λ×w — 무거운 쪽이 덜 움직이고(역질량비), 앵커(w=0)는
-// 정지한 채 반대쪽이 전량 회수한다. MassShare 분배/BinaryPullable 양보가 이 한 식에서 유도된다.
+	// Distribution is automatic: the same lambda acts at both ends, so each end's delta velocity is lambda
+	// times its inverse mass, the heavier end moves less, and an anchor stays still while the other end
+	// recovers everything. Both the mass-share distribution and the binary pullable yielding follow from
+	// this one expression.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTetherLambdaDistributionTest,
 	"DynamicRope.Traction.TetherLambdaDistributesByInverseMass",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -459,30 +499,33 @@ bool FRopeTetherLambdaDistributionTest::RunTest(const FString& Parameters)
 {
 	const float Dt = 1.0f / 60.0f;
 
-	// 10kg 대상 vs 100kg wielder: ΔV 비율 10:1(가벼운 쪽이 10배 움직임), 합은 명령(β·C/dt = 1800) 폐합.
+	// A 10 kg target against a 100 kg wielder gives a delta velocity ratio of ten to one, with the lighter
+	// end moving ten times as far, and their sum closes the commanded recovery.
 	{
 		const RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(30.0f, 0.0f);
 		const float Lambda = RopeTraction::SolveTetherLambda(In, Dt);
 		const float DvTarget = Lambda * In.InvMassTarget;
 		const float DvWielder = Lambda * In.InvMassWielder;
-		TestEqual(TEXT("ΔV 비율 = 역질량비(10:1)"), DvTarget / DvWielder, 10.0f, 0.01f);
-		TestEqual(TEXT("끝별 ΔV 합 = 회수 명령"), DvTarget + DvWielder, 1800.0f, 0.1f);
+		TestEqual(TEXT("the delta velocity ratio equals the inverse mass ratio"), DvTarget / DvWielder, 10.0f, 0.01f);
+		TestEqual(TEXT("the per-end delta velocities sum to the commanded recovery"), DvTarget + DvWielder, 1800.0f, 0.1f);
 	}
 
-	// 대상이 앵커(벽): wielder가 전량 회수 — 그리고 λ는 명령을 넘지 않는다(윈치 없음: 회수 명령은
-	// β·C/dt로 유한하고, 상시 리엘 같은 하한이 존재하지 않는다).
+	// With the target anchored, as against a wall, the wielder recovers everything, and lambda never
+	// exceeds the command: there is no winching, because the recovery command is bounded by the gain over
+	// the delta and no constant reeling floor exists.
 	{
 		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(30.0f, 0.0f);
 		In.InvMassTarget = 0.0f;
 		const float Lambda = RopeTraction::SolveTetherLambda(In, Dt);
-		TestEqual(TEXT("앵커 쪽 ΔV = 0"), Lambda * In.InvMassTarget, 0.0f);
-		TestEqual(TEXT("wielder가 전량 회수"), Lambda * In.InvMassWielder, 1800.0f, 0.1f);
+		TestEqual(TEXT("the anchored end receives no delta velocity"), Lambda * In.InvMassTarget, 0.0f);
+		TestEqual(TEXT("the wielder recovers everything"), Lambda * In.InvMassWielder, 1800.0f, 0.1f);
 	}
 	return true;
 }
 
-// 세 상한의 계약: MaxTension(장력 한계 — 무거운 대상 뒤처짐), Compliance(의도적 탄성),
-// MaxBiasSpeed(위치 회수 명령 상한 — 벌어짐 상쇄에는 걸리지 않는다).
+	// The contracts of the three limits: the maximum tension, which makes a heavy target lag; the
+	// compliance, which is deliberate elasticity; and the maximum bias speed, which caps the commanded
+	// positional recovery alone and never the separation cancellation.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTetherLambdaCapsTest,
 	"DynamicRope.Traction.TetherLambdaHonorsTensionComplianceAndBiasCaps",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -491,48 +534,53 @@ bool FRopeTetherLambdaCapsTest::RunTest(const FString& Parameters)
 {
 	const float Dt = 1.0f / 60.0f;
 
-	// 장력 상한: λ ≤ MaxTension × dt. 부족분은 다음 프레임 C로 이월된다(무거운 대상 뒤처짐 — 물리적).
+	// The tension limit caps lambda at the maximum tension times the delta. The shortfall carries over as
+	// violation into the next frame, which is what makes a heavy target lag, and is physical.
 	{
 		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(30.0f, 0.0f);
 		In.MaxTension = 60000.0f;
-		TestEqual(TEXT("장력 상한 클램프"), RopeTraction::SolveTetherLambda(In, Dt), 60000.0f * Dt, 0.01f);
+		TestEqual(TEXT("clamps at the tension limit"), RopeTraction::SolveTetherLambda(In, Dt), 60000.0f * Dt, 0.01f);
 	}
 
-	// 컴플라이언스: α는 역강성이고 후단 Kelvin-Voigt 상태를 implicit하게 푼다.
-	// 0은 비신축(정확 폐합), 양수면 안정적인 탄성 반응으로 λ가 줄어든다.
+	// Compliance is an inverse stiffness and solves the Kelvin-Voigt state implicitly.
+	// Zero is inextensible and closes exactly, while a positive value reduces lambda through a stable
+	// elastic response.
 	{
 		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(30.0f, 0.0f);
-		In.InvMassTarget = 0.0f; // wielder 단독(w = 0.01)로 수치를 단순화.
+		In.InvMassTarget = 0.0f; // The wielder alone, which simplifies the numbers.
 		const float Rigid = RopeTraction::SolveTetherLambda(In, Dt);
-		TestEqual(TEXT("비신축 λ"), Rigid, 1800.0f / 0.01f, 0.5f);
+		TestEqual(TEXT("the inextensible lambda"), Rigid, 1800.0f / 0.01f, 0.5f);
 		In.Compliance = 0.0005f;
 		const float Soft = RopeTraction::SolveTetherLambda(In, Dt);
 		const float W = In.InvMassWielder;
 		const float R = 2.0f * FMath::Sqrt(In.Compliance / W);
 		const float ExpectedTension =
 			In.C / (In.Compliance + W * Dt * (R + Dt));
-		TestEqual(TEXT("탄성 λ"), Soft, ExpectedTension * Dt, 0.5f);
-		TestTrue(TEXT("탄성이 λ를 줄인다"), Soft < Rigid);
+		TestEqual(TEXT("the elastic lambda"), Soft, ExpectedTension * Dt, 0.5f);
+		TestTrue(TEXT("elasticity reduces lambda"), Soft < Rigid);
 	}
 
-	// 바이어스 상한: 위치 회수 명령(β·C/dt = 6000)만 400으로 캡되고, 벌어짐 상쇄(500)는 캡과 무관하다
-	// — 상쇄는 운동량 실체(실제 벌어짐을 멈춤), 바이어스만 코스팅 잔류가 될 수 있어 따로 제한한다.
+	// The bias cap limits the commanded positional recovery alone and leaves the separation cancellation
+	// untouched: cancellation is momentum made real, since it stops an actual separation, while only the
+	// bias can survive as coasting, which is why it is limited separately.
 	{
 		RopeTraction::FRopeTetherConstraint In = MakeLambdaInput(100.0f, 0.0f);
 		In.InvMassTarget = 0.0f;
 		In.MaxBiasSpeed = 400.0f;
-		TestEqual(TEXT("회수 명령이 캡으로 제한"),
+		TestEqual(TEXT("the recovery command is limited by the cap"),
 			RopeTraction::SolveTetherLambda(In, Dt) * In.InvMassWielder, 400.0f, 0.1f);
 		In.SepSpeed = 500.0f;
-		TestEqual(TEXT("벌어짐 상쇄는 캡 위에 더해진다"),
+		TestEqual(TEXT("the separation cancellation is added on top of the cap"),
 			RopeTraction::SolveTetherLambda(In, Dt) * In.InvMassWielder, 900.0f, 0.1f);
 	}
 	return true;
 }
 
-// 수렴성(미니 적분): 자유 양끝이 초과분 C에서 출발하면 λ는 첫 프레임에만 발화하고(재슬램 없음),
-// C는 단조 감소로 경계를 지나 슬랙이 되며, 잔류 접근 속도는 첫 프레임 회수 명령을 넘지 않는다.
-// 옛 시스템의 "코스팅→재팽팽 되튕김" 진동(끝별 서보 + 상시 리엘)이 구조적으로 없음을 고정하는 회귀 테스트.
+	// Convergence, as a miniature integration: starting from a violation with both ends free, lambda fires
+	// on the first frame only, with no re-slam; the violation decreases monotonically past the boundary into
+	// slack; and the residual approach speed never exceeds the first frame's recovery command.
+	// It is the regression test pinning the absence of the old system's coast-then-retighten oscillation,
+	// which came from per-end servos plus constant reeling.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeTetherLambdaConvergenceTest,
 	"DynamicRope.Traction.TetherLambdaConvergesWithoutOscillation",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -544,7 +592,7 @@ bool FRopeTetherLambdaConvergenceTest::RunTest(const FString& Parameters)
 	auto Simulate = [&](float MaxBiasSpeed, float& OutFinalSep, int32& OutFramesWithLambda, bool& bOutMonotonic)
 	{
 		float C = 50.0f;
-		float Sep = 0.0f; // 정지 출발.
+		float Sep = 0.0f; // Starting from rest.
 		OutFramesWithLambda = 0;
 		bOutMonotonic = true;
 		for (int32 Frame = 0; Frame < 120; ++Frame)
@@ -557,7 +605,8 @@ bool FRopeTetherLambdaConvergenceTest::RunTest(const FString& Parameters)
 			{
 				++OutFramesWithLambda;
 			}
-			// 자유 바디: 임펄스 쌍이 상대 접근으로 그대로 반영되고(합산 w), 속도는 다음 프레임까지 보존된다.
+			// With free bodies the impulse pair translates directly into relative approach, using the summed
+			// inverse mass, and the velocity persists into the next frame.
 			Sep -= Lambda * (In.InvMassTarget + In.InvMassWielder);
 			const float NewC = C + Sep * Dt;
 			bOutMonotonic &= (NewC <= C + KINDA_SMALL_NUMBER);
@@ -567,27 +616,29 @@ bool FRopeTetherLambdaConvergenceTest::RunTest(const FString& Parameters)
 		return C;
 	};
 
-	// 상한 없음: 첫 프레임 명령 = β·C/dt = 0.2×50×60 = 600. 이후는 코스팅이 명령을 앞서 λ가 다시 안 나온다.
+	// With no limit the first frame's command is the gain times the violation over the delta. After that the
+	// coasting outruns the command and lambda never fires again.
 	{
 		float FinalSep = 0.0f;
 		int32 FramesWithLambda = 0;
 		bool bMonotonic = false;
 		const float FinalC = Simulate(0.0f, FinalSep, FramesWithLambda, bMonotonic);
-		TestEqual(TEXT("λ는 첫 프레임에만 발화(재슬램 없음)"), FramesWithLambda, 1);
-		TestTrue(TEXT("C 단조 감소(되튕김 없음)"), bMonotonic);
-		TestTrue(TEXT("경계 도달(슬랙 전환)"), FinalC <= 0.0f);
-		TestEqual(TEXT("잔류 접근 = 첫 프레임 회수 명령"), FinalSep, -600.0f, 0.5f);
+		TestEqual(TEXT("lambda fires on the first frame only, with no re-slam"), FramesWithLambda, 1);
+		TestTrue(TEXT("the violation decreases monotonically, with no bounce back"), bMonotonic);
+		TestTrue(TEXT("it reaches the boundary and goes slack"), FinalC <= 0.0f);
+		TestEqual(TEXT("the residual approach equals the first frame's recovery command"), FinalSep, -600.0f, 0.5f);
 	}
 
-	// 바이어스 상한 200: 잔류 접근(코스팅)이 정확히 상한으로 묶인다 — "상한 = 최대 접근 속도" 계약.
+	// With a bias cap the residual coasting approach is bounded by exactly that cap, which is the contract
+	// that the cap is the maximum approach speed.
 	{
 		float FinalSep = 0.0f;
 		int32 FramesWithLambda = 0;
 		bool bMonotonic = false;
 		const float FinalC = Simulate(200.0f, FinalSep, FramesWithLambda, bMonotonic);
-		TestTrue(TEXT("캡 하에서도 경계 도달"), FinalC <= 0.0f);
-		TestTrue(TEXT("C 단조 감소(캡)"), bMonotonic);
-		TestEqual(TEXT("잔류 접근 ≤ 바이어스 상한"), FinalSep, -200.0f, 0.5f);
+		TestTrue(TEXT("it still reaches the boundary under the cap"), FinalC <= 0.0f);
+		TestTrue(TEXT("the violation decreases monotonically under the cap"), bMonotonic);
+		TestEqual(TEXT("the residual approach is bounded by the bias cap"), FinalSep, -200.0f, 0.5f);
 	}
 	return true;
 }

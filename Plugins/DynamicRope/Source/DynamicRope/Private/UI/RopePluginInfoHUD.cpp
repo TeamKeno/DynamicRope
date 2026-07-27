@@ -11,8 +11,8 @@
 
 ARopePluginInfoHUD::ARopePluginInfoHUD()
 {
-	// 숫자키 1/2/3으로 패널 선택, H로 전체 표시/숨김.
-	// (F1~F8은 에디터 뷰포트 ViewMode 단축키와 겹쳐서 피한다.)
+	// The number keys 1, 2 and 3 select a panel and H shows or hides everything.
+	// F1 to F8 are avoided because they collide with the editor viewport's view mode shortcuts.
 	KeyGuideToggleKey = EKeys::One;
 	ComponentsToggleKey = EKeys::Two;
 	CapabilitiesToggleKey = EKeys::Three;
@@ -33,7 +33,7 @@ void ARopePluginInfoHUD::BeginPlay()
 			if (InfoWidget)
 			{
 				InfoWidget->AddToViewport();
-				// 상시 힌트 줄을 실제 토글 키 라벨로 채운다(위젯의 기본 문구를 덮어씀).
+				// Fills the always-visible hint line with the real toggle key labels, overwriting the widget's default wording.
 				InfoWidget->SetHintText(BuildHintText());
 			}
 		}
@@ -60,7 +60,7 @@ void ARopePluginInfoHUD::SetupInputBindings()
 		return;
 	}
 
-	// AActor::EnableInput이 InputComponent를 만들어 플레이어 입력 스택에 올려 준다(Input Action 에셋 불필요).
+	// AActor::EnableInput creates the input component and puts it on the player's input stack, so no input action asset is needed.
 	EnableInput(PC);
 	if (!InputComponent)
 	{
@@ -85,7 +85,7 @@ void ARopePluginInfoHUD::TogglePanel(ERopeInfoPanel Panel)
 		return;
 	}
 
-	// Canvas 폴백 상태(배타 토글 — 하나 켜면 나머지는 꺼짐).
+	// The canvas fallback state, as an exclusive toggle: turning one on turns the rest off.
 	const int32 Idx = static_cast<int32>(Panel);
 	if (Idx < 0 || Idx >= UE_ARRAY_COUNT(bFallbackPanelVisible))
 	{
@@ -101,7 +101,7 @@ void ARopePluginInfoHUD::TogglePanel(ERopeInfoPanel Panel)
 
 void ARopePluginInfoHUD::ToggleAll()
 {
-	// 상시 힌트 줄은 그대로 두고 열린 패널만 숨긴다 / 없으면 마지막 패널을 복원한다.
+	// Hides the open panel alone, leaving the always-visible hint line, or restores the last panel if none is open.
 	if (InfoWidget)
 	{
 		const bool bAnyVisible =
@@ -122,7 +122,7 @@ void ARopePluginInfoHUD::ToggleAll()
 		return;
 	}
 
-	// Canvas 폴백.
+	// The canvas fallback.
 	bool bAnyVisible = false;
 	for (const bool bVisible : bFallbackPanelVisible)
 	{
@@ -161,7 +161,7 @@ float ARopePluginInfoHUD::DrawFallbackBlock(const FString& Title, const FText& B
 		Y += LineH;
 	}
 
-	// 멀티라인 본문을 줄 단위로 그려 Y를 정확히 쌓는다("\n\n" 빈 줄은 보존해 문단 간격이 된다).
+	// Draws multi-line body text line by line so the Y advances exactly. A blank line from "\n\n" is preserved and becomes the paragraph spacing.
 	TArray<FString> Lines;
 	Body.ToString().ParseIntoArray(Lines, TEXT("\n"), false);
 	for (const FString& Line : Lines)
@@ -177,7 +177,7 @@ void ARopePluginInfoHUD::DrawHUD()
 {
 	Super::DrawHUD();
 
-	// 위젯이 살아 있으면 위젯이 그린다. 폴백은 WidgetClass 미설정일 때만.
+	// While the widget is alive the widget draws. The fallback applies only when no widget class is set.
 	if (InfoWidget || !bDrawCanvasFallbackWhenNoWidget || !Canvas)
 	{
 		return;
@@ -187,7 +187,7 @@ void ARopePluginInfoHUD::DrawHUD()
 	float X = 40.0f;
 	float Y = 40.0f;
 
-	// 상시 힌트 줄(패널을 다 숨겨도 계속 보인다).
+	// The always-visible hint line, which stays on screen even when every panel is hidden.
 	DrawText(BuildHintText().ToString(), FLinearColor(0.4f, 1.0f, 0.5f), X, Y, Font);
 	Y += (Font ? Font->GetMaxCharHeight() : 14.0f) + 12.0f;
 

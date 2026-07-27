@@ -1,9 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 해석적 SDF로 FRopeBoneSDFVolume를 채우는 헬퍼. 정답 거리를 아는 구 SDF를 즉석에서 만들어,
-// 샘플러(RopeSDFSampler)의 trilinear·gradient 정확도를 골든 값과 대조하는 회귀 테스트
-// (RopeSDFSamplerTests 등)의 픽스처로 쓴다 — 실제 베이크 볼륨은 정답 거리가 없어 검증 불가.
-// 런타임 경로엔 관여하지 않는 테스트 전용 코드다. 헤더 전용(inline).
+// A helper that fills an FRopeBoneSDFVolume from an analytic SDF. It builds a sphere SDF whose true distances are
+// known on the spot, as the fixture for the regression tests, such as RopeSDFSamplerTests, that compare the
+// sampler's trilinear and gradient accuracy against golden values; a real baked volume has no known true distance and
+// cannot be verified.
+// This is test-only code with no part in the runtime path. It is header-only and inline.
 
 #pragma once
 
@@ -13,8 +14,9 @@
 namespace RopeSDFSynthetic
 {
 	/**
-	 * 본 로컬 공간에 해석적 구 SDF를 굽는다: distance = |P - Center| - Radius (바깥 +, 안 -).
-	 * 샘플은 그리드 노드(Min..Max 포함 균등 분할, RopeSDFSampler 규약)에 위치한다.
+	 * Bakes an analytic sphere SDF in bone-local space, where the distance is the length of P minus the centre, less
+	 * the radius, giving positive outside and negative inside.
+	 * The samples sit on the grid nodes, evenly dividing the minimum to the maximum inclusive, per the RopeSDFSampler convention.
 	 */
 	inline FRopeBoneSDFVolume MakeSphere(FName Bone, const FVector& Center, float Radius,
 		const FIntVector& Resolution, float Padding = 8.0f)
@@ -36,8 +38,9 @@ namespace RopeSDFSynthetic
 		const int32 NZ = V.Resolution.Z;
 		const int32 N = NX * NY * NZ;
 
-		// 1패스: 해석적 거리(float)를 임시로 모으며 최대 |거리|를 구한다. 합성 데이터는 클램프되지 않으므로
-		// 양자화 범위(NarrowBand)를 데이터 최댓값에 맞춰, 클램프 없이 양자화 rounding 손실만 남긴다.
+		// The first pass gathers the analytic distances as floats into a temporary and finds the maximum absolute
+		// distance. Synthetic data is never clamped, so the quantization range, being the narrow band, is fitted to
+		// the data's maximum, leaving quantization rounding as the only loss.
 		TArray<float> Raw;
 		Raw.SetNumUninitialized(N);
 		float MaxAbs = KINDA_SMALL_NUMBER;
@@ -59,8 +62,9 @@ namespace RopeSDFSynthetic
 			}
 		}
 
-		// 2패스: 양자화. 구는 대칭이라 안쪽/바깥 밴드 모두 데이터 최대 |거리|로 둔다(대칭 [-MaxAbs,+MaxAbs]).
-		// 합성/테스트는 uint8로 충분(기본값이지만 명시).
+		// The second pass quantizes. A sphere is symmetric, so both the inner and outer bands are set to the data's
+		// maximum absolute distance, giving a symmetric range.
+		// Unsigned 8-bit is enough for synthetic test data; this is the default but is stated explicitly.
 		V.NarrowBandInner = MaxAbs;
 		V.NarrowBandOuter = MaxAbs;
 		V.QuantBits = ERopeSDFQuantBits::UInt8;

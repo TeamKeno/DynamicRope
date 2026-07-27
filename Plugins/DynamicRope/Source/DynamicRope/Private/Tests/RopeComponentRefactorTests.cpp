@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// URopeComponent의 virtual bridge 수명과 GuidedThrow 공통 진입 회귀 테스트.
+// Regression tests for URopeComponent's virtual bridge lifetime and the shared guided throw entry point.
 
 #include "Misc/AutomationTest.h"
 
@@ -194,7 +194,7 @@ bool FRopeVirtualBridgeSingleLifecycleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("rest span comes from boundary node distance"),
 		FMath::IsNearlyEqual(Bridges[0].RestSpanLength, 30.0f));
 
-	// 재생성 여부를 식별하는 sentinel. Commit finalization이 기존 bridge를 유지하면 이 값이 보존된다.
+	// A sentinel identifying whether it was recreated. If the commit finalization keeps the existing bridge, this value is preserved.
 	Bridges[0].bLoggedStretchWarning = true;
 	Left.LocalSurfacePosition = FVector(10.0f, 0.0f, 0.0f);
 	Right.LocalSurfacePosition = FVector(20.0f, 0.0f, 0.0f);

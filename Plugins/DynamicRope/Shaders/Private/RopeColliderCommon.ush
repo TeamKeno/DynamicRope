@@ -1,27 +1,34 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 로프 콜라이더 공용 모듈: GPU 콜라이더 데이터 모델(캡슐/SDF 구조체 + 버퍼) + 수학/점질의 헬퍼.
-// RopeXPBD.usf(솔브/감지 커널)가 소비하며, 로프 콜라이더를 읽는 다른 셰이더도 이걸 include하면 된다.
-// 버퍼(Capsules/SDFDistances/SDFVolumes/SDFColliders)는 여기서 선언된다 — include하는 셰이더의
-// C++ FParameters가 같은 이름으로 바인딩해야 한다.
+// The shared rope collider module: the GPU collider data model, meaning the capsule and SDF structures
+// and their buffers, plus the maths and point query helpers.
+// RopeXPBD.usf, which holds the solve and detection kernels, consumes it, and any other shader that
+// reads rope colliders can include it as well.
+// The buffers are declared here, so an including shader's C++ parameter struct has to bind them under
+// the same names.
 
 #pragma once
 
-// GPU 충돌(M2)용 해석적 capsule. xyz=세그먼트 끝점, B.w=반지름, PrevB.w=InvDeltaTime(0이면 정적).
-// 캡슐은 리지드 트랜스폼이 없어(두 관절점이 따로 움직임) SDF의 prev quat/trans 대신 prev 끝점을 직접
-// 싣는다. 정적이면 패킹(C++)이 PrevA/PrevB=A/B로 채우므로 커널은 유효성 분기 없이 항상 lerp한다.
+// The analytic capsule used for GPU collision. The xyz components are the segment endpoints, B.w is the
+// radius, and PrevB.w is the reciprocal frame delta, which is 0 when static.
+// A capsule has no rigid transform, since its two joint points move independently, so it carries the
+// previous endpoints directly instead of the previous rotation and translation an SDF uses. When it is
+// static the C++ packing fills the previous endpoints with the current ones, so the kernel always
+// interpolates with no validity branch.
 struct FRopeCapsule
 {
 	float4 A;
 	// w = Radius
 	float4 B;
-	// 이전 프레임 끝점(표면 속도 드래그/substep 상대 운동 CCD)
+	// The previous frame's endpoints, for surface velocity drag and substep relative-motion continuous
+	// collision.
 	float4 PrevA;
 	// w = InvDeltaTime
 	float4 PrevB;
 };
 
-// GPU 충돌(M3)용 SDF 볼륨 헤더. distance는 SDFDistances[DistOffset..]에 행 우선 저장.
+// The SDF volume header used for GPU collision. The distances are stored row-major in SDFDistances from
+// the distance offset onwards.
 struct FRopeSDFVolume
 {
 	int    DistOffset;
@@ -34,44 +41,51 @@ struct FRopeSDFVolume
 	float4 LocalSize;
 };
 
-// GPU 충돌(M3)용 SDF collider 인스턴스. 볼륨 인덱스 + 본→월드 트랜스폼(quat/trans/scale).
+// An SDF collider instance used for GPU collision: a volume index plus the bone-to-world transform, as a
+// rotation, a translation and a scale.
 struct FRopeSDFCollider
 {
 	int    VolumeIndex;
 	int    Pad0;
 	int    Pad1;
 	int    Pad2;
-	// quat (x,y,z,w) — 현재 프레임
+	// The quaternion (x, y, z, w) for the current frame.
 	float4 Rotation;
 	// xyz
 	float4 Translation;
 	// xyz
 	float4 Scale;
-	// quat (x,y,z,w) — 이전 프레임(CCD 상대 운동/표면속도)
+	// The quaternion (x, y, z, w) for the previous frame, used by continuous collision and surface
+	// velocity.
 	float4 PrevRotation;
-	// xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
+	// The translation in xyz, with w holding the reciprocal frame delta, which is 0 when static.
 	float4 PrevTranslation;
 };
 
-// 정적 월드 지오메트리용 해석적 박스(OBB). 스태틱 바디 심플 콜리전 추출분 — 프레임 모션 없음(표면속도 0).
-// GDF(복셀 필드)가 뭉개던 모서리를 로컬 클램프 질의로 정확히 처리하는 것이 존재 이유. C++ FRopeBoxGPU와 1:1.
+// The analytic oriented box used for static world geometry, extracted from the simple collision of
+// static bodies. It has no frame motion, so its surface velocity is zero.
+// It exists to handle exactly the corners the voxel global distance field rounds off, through a local
+// clamp query. It maps one-to-one onto the C++ box collider.
 struct FRopeBox
 {
-	// xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
+	// The centre in xyz, with w holding the reciprocal frame delta, which is 0 when static.
 	float4 Center;
 	// quat (x,y,z,w)
 	float4 Rot;
-	// xyz(스케일 반영 후 반폭)
+	// The half extents in xyz, with scale already applied.
 	float4 HalfExtents;
-	// xyz — 이전 프레임 중심(정적이면 Center와 동일)
+	// The previous frame's centre in xyz, which equals the current centre when static.
 	float4 PrevCenter;
-	// quat — 이전 프레임 회전
+	// The previous frame's rotation, as a quaternion.
 	float4 PrevRot;
 };
 
-// 컨벡스(평면 집합). 평면은 ConvexPlanes 평탄 풀 [PlaneOffset, PlaneOffset+PlaneCount)에 바디-로컬로 저장.
-// C++ FRopeConvexGPU와 1:1. 월드 = 로컬 ∘ 강체(Rot,Trans). LocalBounds는 로컬 AABB(질의 컬), prev 강체 +
-// InvDeltaTime(LocalBoundsExtent.w)로 동적 표면 속도/CCD.
+// A convex, as a set of planes. The planes are stored in body-local space in the flat ConvexPlanes pool,
+// over the range starting at the plane offset.
+// It maps one-to-one onto the C++ convex collider. World space is the local space composed with the rigid
+// transform of the rotation and translation. LocalBounds is the local AABB used to cull queries, and the
+// previous rigid transform plus the reciprocal frame delta, carried in the bounds extent's w component,
+// give the dynamic surface velocity and continuous collision.
 struct FRopeConvex
 {
 	int    PlaneOffset;
@@ -92,37 +106,43 @@ struct FRopeConvex
 	float4 PrevTrans;
 };
 
-// 전 로프 capsule 평탄 배열(per-rope offset/count는 호출자 파라미터)
+// The flat array of capsules across every rope; the per-rope offset and count are caller parameters.
 StructuredBuffer<FRopeCapsule>   Capsules;
-// 전 볼륨 distance grid 연결(볼륨 dedup, 행 우선)
+// Every volume's distance grid concatenated, deduplicated per volume and stored row-major.
 StructuredBuffer<float>          SDFDistances;
-// 볼륨 헤더
+// The volume headers.
 StructuredBuffer<FRopeSDFVolume> SDFVolumes;
-// 로프별 SDF collider 인스턴스
+// The per-rope SDF collider instances.
 StructuredBuffer<FRopeSDFCollider> SDFColliders;
-// 로프별 박스(OBB) — 앞쪽 [0, DetectNumBoxes)는 랩 가능(감지 참여), 뒤는 정적 push-out
+// The per-rope boxes. The leading range is wrappable and takes part in detection; the rest are static
+// push-out only.
 StructuredBuffer<FRopeBox>       Boxes;
-// 로프별 컨벡스 헤더 — 앞쪽 [0, DetectNumConvexes)는 랩 가능(감지 참여), 뒤는 정적 push-out
+// The per-rope convex headers. The leading range is wrappable and takes part in detection; the rest are
+// static push-out only.
 StructuredBuffer<FRopeConvex>    Convexes;
-// 전 컨벡스 평면 평탄 풀((nx,ny,nz,w), 월드·바깥)
+// The flat pool of every convex plane, as (nx, ny, nz, w) in world space with outward normals.
 StructuredBuffer<float4>         ConvexPlanes;
 
-// 단위 quat q로 벡터 v 회전(v' = v + 2w(q×v) + 2(q×(q×v))).
+// Rotates a vector by a unit quaternion.
 float3 RopeQuatRotate(float4 q, float3 v)
 {
 	const float3 t = 2.0f * cross(q.xyz, v);
 	return v + q.w * t + cross(q.xyz, t);
 }
 
-// 두 단위 quat의 nlerp(최단경로): 부호 정렬 후 lerp+정규화. slerp 근사(substep당 작은 회전엔 충분).
-// CPU FTransform::Blend(slerp)와 비트일치하진 않으나 수렴/거동은 동등.
+// The shortest-path normalized interpolation of two unit quaternions: align the signs, interpolate, then
+// normalize. It approximates spherical interpolation, which is sufficient for the small rotations of a
+// single substep.
+// It is not bit-identical to the CPU's transform blend, which uses spherical interpolation, but converges
+// and behaves equivalently.
 float4 RopeQuatNlerp(float4 a, float4 b, float t)
 {
 	if (dot(a, b) < 0.0f) { b = -b; }
 	return normalize(lerp(a, b, t));
 }
 
-// SDF grid 한 점 정수 인덱스 샘플(경계 clamp). 행 우선 idx = x + y*ResX + z*ResX*ResY.
+// Samples the SDF grid at integer indices, clamped at the boundary. The row-major index is
+// x + y * ResX + z * ResX * ResY.
 float RopeSDFSampleAt(FRopeSDFVolume Vol, int x, int y, int z)
 {
 	x = clamp(x, 0, Vol.ResX - 1);
@@ -131,13 +151,15 @@ float RopeSDFSampleAt(FRopeSDFVolume Vol, int x, int y, int z)
 	return SDFDistances[Vol.DistOffset + x + y * Vol.ResX + z * Vol.ResX * Vol.ResY];
 }
 
-// 본 로컬 위치에서 trilinear signed distance(cm, 바깥 +). CPU RopeSDFSampler::SampleTrilinear 미러.
+// The trilinear signed distance at a bone-local position, in cm and positive outside. It mirrors
+// RopeSDFSampler::SampleTrilinear on the CPU.
 float RopeSDFTrilinear(FRopeSDFVolume Vol, float3 LocalPos)
 {
 	const float3 Mn = Vol.LocalMin.xyz;
 	const float3 Sz = Vol.LocalSize.xyz;
 	const int3 Res = int3(Vol.ResX, Vol.ResY, Vol.ResZ);
-	// grid 좌표: T = clamp((P-Min)/Size, 0,1) * (Res-1).
+	// Grid coordinates: the normalized position within the bounds, clamped to 0 to 1, scaled by the
+	// resolution minus one.
 	float3 G;
 	G.x = (Sz.x > 1e-4f && Res.x >= 2) ? saturate((LocalPos.x - Mn.x) / Sz.x) * (Res.x - 1) : 0.0f;
 	G.y = (Sz.y > 1e-4f && Res.y >= 2) ? saturate((LocalPos.y - Mn.y) / Sz.y) * (Res.y - 1) : 0.0f;
@@ -164,7 +186,8 @@ float RopeSDFTrilinear(FRopeSDFVolume Vol, float3 LocalPos)
 	return lerp(Y0V, Y1V, Fz);
 }
 
-// 본 로컬 forward-difference gradient를 정규화(바깥 방향). CPU SampleGradient 미러(6->4 샘플). 축퇴 시 +Z.
+// The normalized forward-difference gradient in bone-local space, pointing outwards. It mirrors
+// SampleGradient on the CPU, using four samples rather than six, and falls back to +Z when degenerate.
 float3 RopeSDFGradient(FRopeSDFVolume Vol, float3 LocalPos)
 {
 	const float3 Sz = Vol.LocalSize.xyz;
@@ -173,8 +196,10 @@ float3 RopeSDFGradient(FRopeSDFVolume Vol, float3 LocalPos)
 	const float Hz = (Vol.ResZ > 1) ? (Sz.z / (Vol.ResZ - 1)) : 1.0f;
 	const float3 Mx = Vol.LocalMin.xyz + Sz;
 	const float C  = RopeSDFTrilinear(Vol, LocalPos);
-	// 축당 순방향 차분. +H 프로브가 Max 경계 밖이면(클램프 → 축 차분 0 축퇴, 경계 법선 소실) 후방 차분
-	// 으로 대체(#4 — 절단면 밖 접선 법선 방지). CPU SampleGradient 미러.
+	// A forward difference per axis. When the forward probe would fall outside the maximum bound, the
+	// clamp would make that axis's difference zero and the boundary normal would be lost, so a backward
+	// difference is used instead, which prevents a tangential normal outside a cut face. It mirrors
+	// SampleGradient on the CPU.
 	float Dx, Dy, Dz;
 	if (LocalPos.x + Hx <= Mx.x) { Dx = RopeSDFTrilinear(Vol, LocalPos + float3(Hx,0,0)) - C; }
 	else                         { Dx = C - RopeSDFTrilinear(Vol, LocalPos - float3(Hx,0,0)); }
@@ -187,7 +212,8 @@ float3 RopeSDFGradient(FRopeSDFVolume Vol, float3 LocalPos)
 	return (Len > 1e-6f) ? (Grad / Len) : float3(0.0f, 0.0f, 1.0f);
 }
 
-// 점 P에서 세그먼트 A-B 위 최근접점. CPU FMath::ClosestPointOnSegment 미러(t를 [0,1]로 clamp).
+// The closest point on segment A-B to the point P. It mirrors the CPU's closest-point-on-segment with the
+// parameter clamped to 0 to 1.
 float3 RopeClosestPointOnSegment(float3 P, float3 A, float3 B)
 {
 	const float3 AB = B - A;
@@ -196,20 +222,26 @@ float3 RopeClosestPointOnSegment(float3 P, float3 A, float3 B)
 	return A + T * AB;
 }
 
-// 점 P의 세그먼트 A-B 위 최근접 파라미터 t(0..1). 캡슐 접촉 재질점 식별(prev 끝점 보간)용.
+// The parameter, from 0 to 1, of the closest point on segment A-B to P. It identifies the material point
+// of a capsule contact, which is what the previous endpoints are interpolated at.
 float RopeSegmentParam(float3 P, float3 A, float3 B)
 {
 	const float3 AB = B - A;
 	return saturate(dot(P - A, AB) / max(dot(AB, AB), 1e-8f));
 }
 
-// ===== 공용 콜라이더 점질의(point query) =============================================================
-// 솔브 노드 스윕 샘플 / 세그먼트(chord) 충돌 / 접촉 감지가 같은 질의 수식을 각자 복붙하던 것을 통합.
-// HLSL 함수는 전부 인라인이라 비용 변화 없음. 수식은 기존 블록과 문자 그대로 동일(GPU 패리티 보존).
+// ===== Shared collider point queries =================================================================
+// The solve node sweep samples, the segment chord collision and the contact detection each used to carry
+// their own copy of the same query expressions; they are unified here.
+// Every HLSL function is inlined, so there is no cost change, and the expressions are character-for-
+// character identical to the previous blocks, which preserves GPU parity.
 
-// 캡슐 점질의: 점 P vs 캡슐(CapA-CapB, 반지름 CapRadius) + 질의 반경 NodeR. 침투 시 true.
-// OutNormal = 바깥 단위(축퇴 시 +Z), OutPen > 0, OutTSeg = 재질점 파라미터(표면속도/이월용),
-// OutClosest = 축 위 최근접점. 비침투에서도 out은 유효한 값으로 채워진다(Pen <= 0).
+// The capsule point query: point P against the capsule from CapA to CapB with radius CapRadius, plus a
+// query radius. It returns true on penetration.
+// The output normal is an outward unit vector, falling back to +Z when degenerate; the penetration is
+// above zero; the segment parameter identifies the material point, used for the surface velocity and for
+// carrying state forward; and the closest point is on the axis. The outputs hold valid values even
+// without penetration, where the penetration is at or below zero.
 bool RopeQueryCapsulePoint(float3 CapA, float3 CapB, float CapRadius, float3 P, float NodeR,
 	out float3 OutNormal, out float OutPen, out float OutTSeg, out float3 OutClosest)
 {
@@ -223,9 +255,11 @@ bool RopeQueryCapsulePoint(float3 CapA, float3 CapB, float CapRadius, float3 P, 
 	return Dist < MinDist;
 }
 
-// 박스(OBB) 점질의: 점 P vs 정적 박스 + 질의 반경 NodeR. 침투 시 true. 로컬 클램프 — 바깥에서는
-// clamp 결과가 모서리/엣지 자체가 되어 normal이 정확한 대각 방향(CPU FRopeBoxCollider::Query 미러).
-// 안쪽에서는 침투가 가장 얕은 면의 바깥 방향. OutClosest = 표면 최근접점(월드, 노드 배치용).
+// The oriented box point query: point P against a static box plus a query radius. It returns true on
+// penetration. Clamping in local space means that outside the box the clamped result is the corner or
+// edge itself, so the normal is the exact diagonal direction, mirroring the CPU box query.
+// Inside the box it is the outward direction of the least-penetrated face. The closest point is the
+// nearest surface point in world space, used to place the node.
 bool RopeQueryBoxPoint(FRopeBox Box, float3 P, float NodeR,
 	out float3 OutNormal, out float OutPen, out float3 OutClosest)
 {
@@ -237,7 +271,7 @@ bool RopeQueryBoxPoint(FRopeBox Box, float3 P, float NodeR,
 
 	float3 NLocal;
 	float3 SurfLocal;
-	// 표면까지 부호 거리(바깥 +, 안쪽 -)
+	// The signed distance to the surface, positive outside and negative inside.
 	float  SignedDist;
 	if (DistOutside > 1e-4f)
 	{
@@ -247,7 +281,7 @@ bool RopeQueryBoxPoint(FRopeBox Box, float3 P, float NodeR,
 	}
 	else
 	{
-		// 각 축 면까지 거리(전부 >= 0)
+		// The distance to each axis face, all of which are at or above zero.
 		const float3 FaceDist = H - abs(Lp);
 		SurfLocal = Lp;
 		if (FaceDist.x <= FaceDist.y && FaceDist.x <= FaceDist.z)
@@ -276,9 +310,12 @@ bool RopeQueryBoxPoint(FRopeBox Box, float3 P, float NodeR,
 	return SignedDist < NodeR;
 }
 
-// 컨벡스 로컬 점질의: 주어진 강체(Rot,Trans)로 월드 P를 바디-로컬로 변환 후 max-plane. 노드-스윕 sub-포즈와
-// 세그먼트(chord) 현재-포즈가 공유(강체만 다르게 넘김). 내부 정확, 외부 엣지 근방 과소추정=보수적. 침투 시 true.
-// OutLocalClosest는 재질점 이월(sub-포즈)/표면 속도 재구성용 로컬 표면점. CPU FRopeConvexCollider 미러.
+// The convex point query in local space: the world point P is transformed into body-local space by the
+// given rigid transform and then tested with the maximum-plane method. The node sweep's sub-poses and the
+// segment chord's current pose share it, passing a different rigid transform each. It is exact inside and
+// underestimates near an outside edge, which is conservative. It returns true on penetration.
+// The local closest point is the local surface point used to carry the material point forward across
+// sub-poses and to reconstruct the surface velocity. It mirrors the CPU convex collider.
 bool RopeQueryConvexLocal(FRopeConvex Cv, float4 Rot, float3 Trans, float3 P, float NodeR,
 	out float3 OutNormal, out float OutPen, out float3 OutClosest, out float3 OutLocalClosest)
 {
@@ -290,16 +327,17 @@ bool RopeQueryConvexLocal(FRopeConvex Cv, float4 Rot, float3 Trans, float3 P, fl
 	{
 		return false;
 	}
-	// 월드 -> 바디-로컬(강체 역): Lp = qInv*(P - Trans).
+	// World to body-local, through the inverse of the rigid transform.
 	const float3 Lp = RopeQuatRotate(float4(-Rot.xyz, Rot.w), P - Trans);
-	// 로컬 AABB 컬(+NodeR 여유).
+	// Cull against the local AABB, with the query radius as margin.
 	const float3 Mn = Cv.LocalBoundsCenter.xyz - Cv.LocalBoundsExtent.xyz - NodeR;
 	const float3 Mx = Cv.LocalBoundsCenter.xyz + Cv.LocalBoundsExtent.xyz + NodeR;
 	if (any(Lp < Mn) || any(Lp > Mx))
 	{
 		return false;
 	}
-	// max-plane(로컬): PlaneDot(p)=dot(N,p)-W 최대인 평면이 표면 근사. 로컬 법선을 월드로 회전한 게 push-out.
+	// The maximum-plane test in local space: the plane with the greatest signed distance approximates the
+	// surface, and rotating its local normal into world space gives the push-out direction.
 	float MaxD = -1e30f;
 	int   Best = -1;
 	for (int i = 0; i < Cv.PlaneCount; ++i)
@@ -313,19 +351,21 @@ bool RopeQueryConvexLocal(FRopeConvex Cv, float4 Rot, float3 Trans, float3 P, fl
 		return false;
 	}
 	const float4 BP = ConvexPlanes[Cv.PlaneOffset + Best];
-	// 로컬 표면점(재질점)
+	// The local surface point, which is the material point.
 	OutLocalClosest = Lp - BP.xyz * MaxD;
-	// 월드 바깥 법선
+	// The outward normal in world space.
 	OutNormal = RopeQuatRotate(Rot, BP.xyz);
-	// 안쪽이면 MaxD<0이라 더 큼
+	// Inside the shape the distance is negative, which makes the penetration larger.
 	OutPen = NodeR - MaxD;
-	// 월드 표면점
+	// The surface point in world space.
 	OutClosest = RopeQuatRotate(Rot, OutLocalClosest) + Trans;
 	return true;
 }
 
-// SDF 로컬 점질의: 좁은밴드 박스 컬(+NodeR 여유) 후 trilinear. 침투 시에만 gradient 계산(기존 블록과
-// 동일 비용 구조 — 비침투 샘플은 gradient를 만들지 않는다). 컬 시 OutDist = NodeR(비침투 안전값).
+// The SDF point query in local space: cull against the narrow-band box, with the query radius as margin,
+// then sample trilinearly. The gradient is computed only on penetration, which keeps the same cost
+// structure as the previous block, where a non-penetrating sample produced no gradient. A culled query
+// returns the query radius as a safe non-penetrating distance.
 bool RopeQuerySDFLocal(FRopeSDFVolume Vol, float3 Lp, float NodeR, out float OutDist, out float3 OutNLocal)
 {
 	OutDist = NodeR;
@@ -345,8 +385,9 @@ bool RopeQuerySDFLocal(FRopeSDFVolume Vol, float3 Lp, float NodeR, out float Out
 	return true;
 }
 
-// 축별 스케일 부호(0/양수 = +1, 음수 = -1). 레벨에서 미러링한 액터(스케일 -1)를 위한 것으로,
-// 부호를 잃으면 아래 역스케일이 max() 클램프에 걸려 좌표가 1e6배로 폭발한다.
+// The sign of the scale per axis, where zero or positive gives +1 and negative gives -1. It exists for
+// actors mirrored in the level, with a scale of -1: losing the sign would make the inverse scaling below
+// hit the maximum clamp and blow the coordinates up by a factor of a million.
 float3 RopeScaleSign(float3 Scl)
 {
 	return float3(Scl.x < 0.0f ? -1.0f : 1.0f,
@@ -354,25 +395,28 @@ float3 RopeScaleSign(float3 Scl)
 	              Scl.z < 0.0f ? -1.0f : 1.0f);
 }
 
-// 부호 보존 역스케일. CPU의 FTransform::InverseTransformPosition이 원래 하던 것과 같은 결과를 준다
-// (그쪽은 부호를 그대로 나눠 미러 로컬 좌표를 만든다) — 종전 GPU 버전은 음수 축에서 CPU와 갈라졌다.
-// 양수 스케일에서는 abs()가 값을 그대로 통과시키므로 기존 동작이 불변이고, 스케일 1이면 정확히 1.0이다.
+// A sign-preserving inverse scale. It gives the same result the CPU's inverse transform always did, since
+// that divides by the signed scale and produces mirrored local coordinates. Taking the absolute value
+// leaves positive scales untouched, so existing behaviour is unchanged, and a scale of 1 gives exactly
+// 1.0.
 float3 RopeInvScaleSigned(float3 Scl)
 {
 	return RopeScaleSign(Scl) / max(abs(Scl), float3(1e-6f, 1e-6f, 1e-6f));
 }
 
-// SDF 월드 점질의(현재 포즈): 월드 P를 collider 로컬로 역변환(InvTransform = qInv*(P-T)/Scale) 후 로컬
-// 점질의, 침투 시 법선을 월드로 회전. sub-포즈가 필요 없는 호출자(세그먼트 충돌/접촉 감지)용.
-// OutLp는 표면점(P - N*Dist)/표면속도(Wprev) 재구성에 쓴다.
+// The SDF point query in world space, at the current pose: the world point is transformed into the
+// collider's local space, queried there, and on penetration the normal is rotated back into world space.
+// It is for callers that need no sub-pose, namely the segment collision and the contact detection.
+// The local point is used to reconstruct the surface point and the surface velocity.
 bool RopeQuerySDFWorld(FRopeSDFCollider Col, FRopeSDFVolume Vol, float3 P, float NodeR,
 	out float3 OutNWorld, out float OutDist, out float3 OutLp)
 {
 	const float3 Scl = Col.Scale.xyz;
 	const float3 InvScale = RopeInvScaleSigned(Scl);
 	OutLp = RopeQuatRotate(float4(-Col.Rotation.xyz, Col.Rotation.w), P - Col.Translation.xyz) * InvScale;
-	// 로컬(베이크) 거리 ↔ 월드 환산(#3): 로컬 cm로 질의하고 결과를 월드로 되돌린다. 균일 스케일 가정
-	// (스케일 1이면 동작 불변). CPU FRopeSDFCollider::Query와 동일.
+	// Converting between baked local distances and world distances: the query is made in local
+	// centimetres and the result is scaled back to world space. It assumes a uniform scale, so a scale of
+	// 1 leaves the behaviour unchanged, and it matches the CPU SDF query.
 	const float ScaleScalar = max(max(abs(Scl.x), abs(Scl.y)), abs(Scl.z));
 	const float LocalNodeR  = NodeR / max(ScaleScalar, 1e-6f);
 	float3 NLocal;
@@ -381,9 +425,10 @@ bool RopeQuerySDFWorld(FRopeSDFCollider Col, FRopeSDFVolume Vol, float3 P, float
 		OutNWorld = float3(0.0f, 0.0f, 1.0f);
 		return false;
 	}
-	OutDist *= ScaleScalar; // 로컬 cm → 월드 cm
-	// 미러 축은 법선도 뒤집어야 바깥을 향한다(FRopeContact 계약: Normal은 outward, 부호가 load-bearing).
-	// 양수 스케일이면 곱하는 값이 정확히 1.0이라 기존 결과와 비트 동일하다.
+	OutDist *= ScaleScalar; // Local centimetres to world centimetres.
+	// A mirrored axis has to flip the normal as well for it to point outwards; the contact contract
+	// requires an outward normal and the sign is load-bearing.
+	// With a positive scale the multiplier is exactly 1.0, so the result is bit-identical to before.
 	OutNWorld = normalize(RopeQuatRotate(Col.Rotation, NLocal * RopeScaleSign(Scl)));
 	return true;
 }

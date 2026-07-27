@@ -18,7 +18,8 @@ using RopeComponentPrivate::ResolveAimGuideHitWorld;
 
 FTransform URopeComponent::GetLoadedTipTransform() const
 {
-	// 기본 구현: Owner의 스켈레탈 메시에서 LoadedHandSocket 소켓 트랜스폼. 없으면 컴포넌트(손) 트랜스폼.
+	// The default implementation: the transform of the LoadedHandSocket on the owner's skeletal mesh,
+	// falling back to the component transform, that is the hand, when there is none.
 	if (const AActor* Owner = GetOwner())
 	{
 		if (const USkeletalMeshComponent* Mesh = Owner->FindComponentByClass<USkeletalMeshComponent>())
@@ -46,14 +47,17 @@ FTransform URopeComponent::MakeLoadedTipBaseWorld() const
 
 #pragma region Tip_Mesh
 
-// ===== 팁 부착물(표시 전용) =================================================
+// ===== The tip attachment, display only =====================================
 
 void URopeComponent::EnsureTipMesh()
 {
-	// BeginPlay에서 호출(런타임에 bUseTipMesh를 켜는 경로 대비로 던지기/Loaded 진입에서도 호출 — idempotent).
-	// ① Owner에 붙은 태그 컴포넌트를 우선 재사용(파괴 안 함) → ② 없고 TipMesh 에셋이 있으면 스폰(파괴는
-	// 우리 몫). 이미 확보돼 있으면 no-op. 질량·충돌 없는 표시 전용이다.
-	// 팁 확보의 유일한 경로라, 여기서 막으면 팁 서브시스템 전체가 꺼진다(나머지는 TipMeshComponent 널 가드).
+	// Called from BeginPlay, and also on a throw and on entering Loaded to cover enabling bUseTipMesh at
+	// runtime; it is idempotent.
+	// It first reuses a tagged component on the owner, which it never destroys, and otherwise spawns one
+	// where a tip mesh asset is set, which it does own and destroy. With one already secured it is a
+	// no-op. The attachment has no mass and no collision and is display only.
+	// It is the only path that secures a tip, so blocking here disables the whole tip subsystem; everything
+	// else simply null-guards the component.
 	if (!bUseTipMesh || TipMeshComponent)
 	{
 		return;
@@ -65,7 +69,8 @@ void URopeComponent::EnsureTipMesh()
 		return;
 	}
 
-	// ① 외부 컴포넌트 탐색(태그) — 있으면 재사용하고 소유는 취하지 않는다.
+	// First, look for an external component by tag; where one exists it is reused and ownership is not
+	// taken.
 	if (!TipMeshComponentTag.IsNone())
 	{
 		TArray<UActorComponent*> Tagged =
@@ -74,26 +79,30 @@ void URopeComponent::EnsureTipMesh()
 		{
 			TipMeshComponent = Cast<UStaticMeshComponent>(Tagged[0]);
 			bTipMeshSpawnedByUs = false;
-			// 저작 기준선 캡처 — 배치(SetWorldTransform)가 덮어쓰기 *전*의 값이어야 한다. 해제 시
-			// TipMeshAuthoredRelative로 원상 복구하므로(Teardown), 재획득이 오염된 값을 다시 캡처하지 않는다.
+			// Capture the authored baseline before placement overwrites the transform. Teardown restores it,
+			// so reacquiring never captures an already-polluted value as the new baseline.
 			TipMeshAuthoredScale = TipMeshComponent ? TipMeshComponent->GetComponentScale() : FVector::OneVector;
 			TipMeshAuthoredRelative = TipMeshComponent ? TipMeshComponent->GetRelativeTransform() : FTransform::Identity;
-			// 저작 충돌 캡처 후 bTipMeshCollision 반영(기본 끔). Teardown에서 이 값으로 복원한다.
+			// Capture the authored collision, then apply bTipMeshCollision, which is off by default.
+			// Teardown restores this value.
 			TipMeshAuthoredCollision = TipMeshComponent ? TipMeshComponent->GetCollisionEnabled() : ECollisionEnabled::QueryAndPhysics;
 			ApplyTipMeshCollision();
-			// 태그 컴포넌트가 TipMesh 에셋보다 우선하고 외부 컴포넌트의 메시는 바꾸지 않는다(인스턴스 소유).
-			// 프리셋 전환에서 "TipMesh가 적용 안 된다"로 보이는 침묵을 없애기 위해 알린다.
+			// A tagged component takes priority over the tip mesh asset, and the external component's mesh
+			// is never changed, since the instance owns it.
+			// This is reported so that switching presets does not silently look like the tip mesh failing to
+			// apply.
 			if (TipMesh)
 			{
 				UE_LOG(LogDynamicRope, Log,
-					TEXT("[%s] 팁: 태그('%s') 컴포넌트가 TipMesh 에셋('%s')보다 우선한다 — 프리셋/에셋이 팁 메시를 소유하려면 TipMeshComponentTag를 비울 것."),
+					TEXT("[%s] Tip: the tagged component ('%s') takes priority over the TipMesh asset ('%s'). Clear TipMeshComponentTag to let the preset or asset own the tip mesh."),
 					*GetName(), *TipMeshComponentTag.ToString(), *TipMesh->GetName());
 			}
 			return;
 		}
 	}
 
-	// ② 스폰(에셋 있을 때만). Wielder의 PreviewComponent 생성 idiom과 동형.
+	// Second, spawn one, only where an asset is set. It mirrors the idiom the wielder uses to create its
+	// preview component.
 	if (!TipMesh)
 	{
 		return;
@@ -114,24 +123,28 @@ void URopeComponent::EnsureTipMesh()
 	TipMeshComponent = Spawned;
 	bTipMeshSpawnedByUs = true;
 	TipMeshAuthoredScale = FVector::OneVector;
-	// 스폰분의 충돌은 bTipMeshCollision을 따른다(기본 끔 = NoCollision, 켬 = QueryAndPhysics).
+	// A spawned tip's collision follows bTipMeshCollision, which is off by default and otherwise enables
+	// full collision.
 	ApplyTipMeshCollision();
 }
 
 void URopeComponent::TeardownSpawnedTipMesh()
 {
-	// 스폰분만 파괴한다 — 외부(태그로 찾은) 컴포넌트는 소유가 아니므로 놔둔다.
+	// Only a spawned tip is destroyed; an external component found by tag is not owned and is left alone.
 	if (TipMeshComponent && bTipMeshSpawnedByUs)
 	{
 		TipMeshComponent->DestroyComponent();
 	}
 	else if (TipMeshComponent)
 	{
-		// 외부(태그) 컴포넌트 해제: 매 프레임 배치(SetWorldTransform)가 덮어쓴 트랜스폼을 저작 원본으로
-		// 되돌린다. 안 돌리면 다음 획득(프리셋 전환)이 "저작값×직전 프리셋 스케일"을 새 기준선으로 캡처해
-		// 스케일이 누적 오염된다. 월드가 아닌 *상대* 트랜스폼 복원 — 부모가 움직였어도 저작 자세가 유지된다.
+		// Releasing an external tagged component: the transform that per-frame placement overwrote is
+		// returned to the authored original. Without that, the next acquisition, as on a preset switch,
+		// would capture the authored value multiplied by the previous preset's scale as its new baseline and
+		// the scale would compound. It restores the relative rather than the world transform, so the
+		// authored pose survives even if the parent moved.
 		TipMeshComponent->SetRelativeTransform(TipMeshAuthoredRelative);
-		// 저작 충돌 복원 — bTipMeshCollision=false로 우리가 껐을 수 있으므로(외부 컴포넌트 소유 존중).
+		// Restore the authored collision, since bTipMeshCollision may have made us disable it, out of
+		// respect for the external component's ownership.
 		TipMeshComponent->SetCollisionEnabled(TipMeshAuthoredCollision);
 	}
 	TipMeshComponent = nullptr;
@@ -147,9 +160,11 @@ void URopeComponent::ApplyTipMeshCollision()
 	{
 		return;
 	}
-	// 기본은 충돌 끔 — 표시 전용 팁의 충돌 바디가 로프 충돌 질의/캐릭터·월드와 간섭하는 것을 막는다.
-	// 켜면 우리가 스폰한 팁은 전체 충돌(QueryAndPhysics)을, 태그로 재사용한 외부 컴포넌트는 저작 충돌
-	// (획득 시점 값)을 되살린다 — 외부 컴포넌트에 우리가 임의의 프로파일을 강제하지 않는다.
+	// Collision is off by default, which stops a display-only tip's collision body interfering with rope
+	// collision queries, the character and the world.
+	// Enabling it gives a tip we spawned full collision, while an external component reused by tag has its
+	// authored collision, as captured on acquisition, restored instead; no arbitrary profile is forced onto
+	// an external component.
 	const ECollisionEnabled::Type Target = bTipMeshCollision
 		? (bTipMeshSpawnedByUs ? ECollisionEnabled::QueryAndPhysics : TipMeshAuthoredCollision.GetValue())
 		: ECollisionEnabled::NoCollision;
@@ -158,37 +173,43 @@ void URopeComponent::ApplyTipMeshCollision()
 
 void URopeComponent::UpdateTipMeshTransform()
 {
-	// 위치 = 끝 노드(자유단), 회전 = 마지막 세그먼트 방향을 X축으로. 노드 위치와 정확히 일치하도록
-	// 상대가 아닌 월드 트랜스폼으로 배치한다(this에 부착돼 있어도 컴포넌트 트랜스폼 영향을 받지 않게).
+	// The position is the end node, that is the free end, and the rotation puts the last segment's
+	// direction on the X axis. It is placed with a world rather than a relative transform so it matches the
+	// node position exactly and is unaffected by the component transform even though it is attached here.
 	if (!TipMeshComponent)
 	{
 		return;
 	}
 
-	// Loaded(장전) 상태에서는 창을 손 소켓에 든다(마지막 노드가 아니라 GetLoadedTipTransform — override 가능).
-	// Free 게이트보다 앞: Loaded은 ③의 손 소켓 고정이라 bSyncTipMeshOnFree와 무관하게 항상 유효해야 한다.
+	// While Loaded the tip is held at the hand socket, from GetLoadedTipTransform, which can be overridden,
+	// rather than at the last node.
+	// It comes before the Free gate because Loaded pins it to the hand socket for GuaranteedWrap and has to
+	// apply regardless of bSyncTipMeshOnFree.
 	if (Phase == ERopePhase::Loaded)
 	{
 		TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(MakeLoadedTipBaseWorld()));
 		return;
 	}
 
-	// Free 확장점: bSyncTipMeshOnFree를 끄면 팁 배치를 게임 코드에 넘긴다(GetTipMeshComponent) —
-	// 여기서 트랜스폼을 건드리지 않는다. Free 외 페이즈는 이 플래그와 무관하게 항상 추종한다.
+	// The Free extension point: turning off bSyncTipMeshOnFree hands tip placement to game code, through
+	// GetTipMeshComponent, and the transform is left untouched here. Every phase other than Free follows
+	// the rope regardless of that flag.
 	if (Phase == ERopePhase::Free && !bSyncTipMeshOnFree)
 	{
 		return;
 	}
 
-	// Pierce 임베드 활성 조건(Pierce 결착 + 소켓 옵트인 + 소켓 실존)은 ReadTipSocketLocal이 전부 판정한다.
-	// 아니면 아래 세그먼트-추종 폴백.
+	// ReadTipSocketLocal decides every condition for the pierce embed being active, namely a pierce
+	// binding, the socket opt-in and the socket actually existing. Otherwise it falls through to the
+	// segment-following fallback below.
 	const bool bPierceSocket = HasTipSocket(TipSocketName);
 
-	// 꽂힌 뒤(Wrapped): 얼린 bone-local 메쉬 자세를 본에서 복원 — 회전 완전 고정 + 대상 애니메이션 추종.
+	// Once embedded, while wrapped: the frozen bone-local mesh pose is restored from the bone, which fixes
+	// the rotation completely while following the target's animation.
 	if (bPierceSocket && Phase == ERopePhase::Wrapped && WrapController.State.Anchors.Num() > 0)
 	{
 		const FRopeSurfaceAnchor& Anchor = WrapController.State.Anchors[0];
-		if (const USceneComponent* Mesh = WrapController.State.Mesh.Get()) // cross-actor 대상 파괴 방어.
+		if (const USceneComponent* Mesh = WrapController.State.Mesh.Get()) // Guards against a destroyed cross-actor target.
 		{
 			const FTransform BoneXform = ResolveBindingWorld(Mesh, Anchor.Bone);
 			const FTransform MeshWorld = Anchor.LocalMeshTransform * BoneXform;
@@ -197,14 +218,15 @@ void URopeComponent::UpdateTipMeshTransform()
 		}
 	}
 
-	// 던지는 중(조준 GuidedThrow): 비행 중반까진 세그먼트 pitch + 조준 yaw 자세(A), Alpha 0.7~1.0에서
-	// 최종 임베드 자세(B)로 slerp/lerp. Alpha=1의 B는 커밋 프레임 Wrapped 자세와 일치하므로 착지 시 팝이 없다.
+	// Mid-throw, during an aimed guided throw: for most of the flight it uses the segment pitch with the
+	// aimed yaw, and over the last part of the flight it interpolates to the final embedded pose. At the end
+	// that pose matches the wrapped pose of the commit frame, so there is no pop on landing.
 	if (bPierceSocket && Phase == ERopePhase::GuidedThrow &&
 		GuidedThrowState.bActive && !GuidedThrowState.bFreeThrow && Sim.Num() >= 2)
 	{
 		const int32 LastNode = Sim.Num() - 1;
 		const FRopePreparedThrowPreview& Prepared = GuidedThrowState.Prepared;
-		FVector HitPoint = Prepared.LatchAnchor.StartWorldPosition; // 빌더가 꽂힘 지점으로 세팅.
+		FVector HitPoint = Prepared.LatchAnchor.StartWorldPosition; // Set to the embed point by the builder.
 		ResolvePreparedPierceHitPoint(Prepared, HitPoint);
 		FVector PierceDir = Prepared.ThrowContext.FrameForward.GetSafeNormal();
 		if (PierceDir.IsNearlyZero())
@@ -239,7 +261,8 @@ void URopeComponent::UpdateTipMeshTransform()
 		return;
 	}
 
-	// 위치 = 끝 노드(자유단), 회전 = 마지막 세그먼트 방향을 X축으로(비-Pierce · 소켓 미설정 폴백).
+	// The position is the end node, that is the free end, and the rotation puts the last segment's
+	// direction on the X axis. This is the fallback for a non-pierce binding or an unconfigured socket.
 	const FVector TipPos = Sim.Positions[N - 1];
 	const FVector SegDir = (Sim.Positions[N - 1] - Sim.Positions[N - 2])
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
@@ -267,7 +290,7 @@ void URopeComponent::UpdateTipMeshTransform()
 
 #pragma region Pierce_Embedding
 
-// ===== Pierce 임베드 헬퍼 ====================================================
+// ===== Pierce embed helpers ==================================================
 
 bool URopeComponent::HasTipSocket(FName Socket) const
 {
@@ -277,12 +300,14 @@ bool URopeComponent::HasTipSocket(FName Socket) const
 
 bool URopeComponent::ReadTipSocketLocal(FName Socket, FTransform& OutLocal) const
 {
-	// 존재/활성 조건은 HasTipSocket 한 곳에서 판정한다. 소켓 보정을 끄면 호출부가 각자의 기존 폴백으로 떨어진다.
+	// Whether it exists and is active is decided in the single place HasTipSocket. Turning off the socket
+	// correction lets each call site fall through to its own existing fallback.
 	if (!HasTipSocket(Socket))
 	{
 		return false;
 	}
-	// RTS_Component = 메쉬 원점 기준 소켓 로컬 트랜스폼. UStaticMeshComponent가 UStaticMesh 소켓을 조회한다.
+	// Component space gives the socket's local transform relative to the mesh origin; the static mesh
+	// component looks the socket up on the static mesh.
 	OutLocal = TipMeshComponent->GetSocketTransform(Socket, RTS_Component);
 	return true;
 }
@@ -338,8 +363,10 @@ bool URopeComponent::ResolvePreparedPierceHitPoint(const FRopePreparedThrowPrevi
 {
 	if (Prepared.ThrowContext.bHasAimGuideHit)
 	{
-		// Aim guide로 만든 Pierce prepared는 조준 레이가 선택한 hit를 Head 기준점으로 유지한다.
-		// 대상 본 기준으로 복원해 조준 이후 대상이 움직여도 조준한 신체 지점을 따라간다.
+		// A pierce prepared throw built from an aim guide keeps the hit the aiming ray selected as the head
+		// reference point.
+		// Restoring it against the target bone makes it follow the body point that was aimed at even after
+		// the target moves.
 		OutHitPoint = ResolveAimGuideHitWorld(Prepared.ThrowContext);
 		return true;
 	}
@@ -408,7 +435,7 @@ bool URopeComponent::ComputePierceEmbed(const FVector& HitPoint, const FVector& 
 	FTransform TipSocketLocal;
 	if (!ReadTipSocketLocal(TipSocketName, TipSocketLocal))
 	{
-		return false; // 팁 소켓 필수 — 없으면 Pierce 임베드 비활성(호출부가 폴백).
+		return false; // A tip socket is required; without one the pierce embed is inactive and the call site falls back.
 	}
 	FTransform TailSocketLocal;
 	const bool bHasTail = ReadTipSocketLocal(TipRopeSocketName, TailSocketLocal);

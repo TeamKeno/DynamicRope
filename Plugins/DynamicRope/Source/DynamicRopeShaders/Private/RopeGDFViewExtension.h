@@ -1,12 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// GDF 월드 충돌용 씬 뷰 확장. GPU 솔브 dispatch를 씬 렌더러 그래프 안(PreRenderBasePass — GDF 빌드 이후·
-// base pass 이전)으로 옮겨, GDF 파라미터가 유효한 타이밍에 돌린다. 런타임 GPU 솔브의 단일 dispatch 경로
-// (솔버 전용 그래프 Step()은 유닛 테스트 하네스로만 남음). 튜브는 여기서 빌드하지 않는다 — 솔브(=depth prepass 이후)에서
-// 튜브를 다시 쓰면 prepass/base pass 지오메트리가 어긋나 EQUAL 깊이 테스트에서 픽셀이 탈락한다(로프가 검게 탐).
-// 튜브는 프록시가 프레임 초 SetDynamicData에서 직전 프레임 PosBuf로 1회 빌드한다(의도된 1프레임 렌더 지연).
+// The scene view extension for world collision against the global distance field. It moves the GPU solve dispatch
+// inside the scene renderer's graph, at PreRenderBasePass, meaning after the global distance field is built and
+// before the base pass, so it runs at a point where the field's parameters are valid. This is the single dispatch
+// path of the runtime GPU solve; the solver's own graph in Step() remains for the unit test harness alone.
+// The tube is not built here: rebuilding it at solve time, meaning after the depth prepass, would leave the prepass
+// and base pass geometry disagreeing and the pixels would fail the equal depth test, leaving the rope black.
+// The tube is built once by the proxy at the start of the frame in SetDynamicData, from the previous frame's position
+// buffer, which is a deliberate one-frame render latency.
 //
-// PreRenderBasePass 훅은 뷰 인자가 없으므로, PreRenderViewFamily에서 이번 패밀리를 캡처해 둔다.
+// The PreRenderBasePass hook takes no view argument, so the family is captured in PreRenderViewFamily.
 
 #pragma once
 
@@ -25,18 +28,18 @@ public:
 	virtual void SetupViewFamily(FSceneViewFamily& /*InViewFamily*/) override {}
 	virtual void SetupView(FSceneViewFamily& /*InViewFamily*/, FSceneView& /*InView*/) override {}
 	virtual void BeginRenderViewFamily(FSceneViewFamily& /*InViewFamily*/) override {}
-	/** 이번 패밀리를 캡처(다음 PreRenderBasePass에서 프라이머리 뷰/씬/GDF를 얻는 데 사용). */
+	/** Captures this family, used by the next PreRenderBasePass to obtain the primary view, the scene and the distance field. */
 	virtual void PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily) override;
-	/** GDF 빌드 이후·base pass 이전. 캡처한 패밀리의 프라이머리 뷰로 GDF를 얻어 해당 씬의 솔버를 dispatch. */
+	/** After the distance field is built and before the base pass: obtains the field from the captured family's primary view and dispatches that scene's solver. */
 	virtual void PreRenderBasePass_RenderThread(FRDGBuilder& GraphBuilder, bool bDepthBufferIsPopulated) override;
 
-	//~ 등록/해제(OnPostEngineInit에서 생성, 모듈 shutdown에서 해제).
+	//~ Registration and unregistration, created on OnPostEngineInit and released on module shutdown.
 	static void EnsureRegistered();
 	static void Shutdown();
 
 private:
-	// 직전 PreRenderViewFamily에서 캡처한 패밀리(PreRenderBasePass에서 소비 후 nullptr로 리셋). 렌더 스레드 전용.
+	// The family captured by the last PreRenderViewFamily, consumed by PreRenderBasePass and reset to null. Render thread only.
 	FSceneViewFamily* CurrentFamily = nullptr;
-	// 씬별 마지막 dispatch 프레임(멀티 뷰/씬캡처에서 프레임당 1회로 dedup). 렌더 스레드 전용.
+	// The last dispatched frame per scene, which deduplicates to once per frame across multiple views and scene captures. Render thread only.
 	TMap<class FSceneInterface*, uint32> LastDispatchedFrame;
 };

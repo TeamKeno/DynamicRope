@@ -12,12 +12,12 @@
 
 ARopeDemoPressurePlate::ARopeDemoPressurePlate()
 {
-	// 연출 보간과 점유 자격 재평가(랙돌 복귀 감지)에 틱이 필요하다.
+	// Interpolating the presentation and re-evaluating occupancy eligibility, which detects a ragdoll recovering, both need a tick.
 	PrimaryActorTick.bCanEverTick = true;
 
 	Frame = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Frame"));
 	SetRootComponent(Frame);
-	// 프레임은 판보다 약간 넓고 아주 얇다 — 120x120x4cm.
+	// The frame is slightly wider than the plate and very thin, at 120 x 120 x 4 cm.
 	Frame->SetRelativeScale3D(FVector(1.2f, 1.2f, 0.04f));
 	Frame->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Frame->SetCollisionObjectType(ECC_WorldStatic);
@@ -25,23 +25,23 @@ ARopeDemoPressurePlate::ARopeDemoPressurePlate()
 
 	Pad = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Pad"));
 	Pad->SetupAttachment(Frame);
-	// 부모(Frame)가 눌린 스케일이라 자식 스케일은 그 역수를 곱해 절대 크기를 맞춘다.
-	// 판 = 100x100x10cm.
+	// The parent frame is at the pressed scale, so the child's scale is multiplied by its reciprocal to keep the absolute size.
+	// The plate is 100 x 100 x 10 cm.
 	Pad->SetRelativeScale3D(FVector(1.0f / 1.2f, 1.0f / 1.2f, 0.1f / 0.04f));
 	Pad->SetRelativeLocation(FVector(0.0f, 0.0f, 7.0f));
-	// 얹힌 물체가 판을 뚫지 않도록 막되, 판 자체는 연출로만 움직이므로 Movable.
+	// It blocks so that an object resting on it cannot fall through, while the plate itself moves for presentation alone and is therefore movable.
 	Pad->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Pad->SetCollisionObjectType(ECC_WorldStatic);
 	Pad->SetMobility(EComponentMobility::Movable);
 
 	Trigger = CreateDefaultSubobject<UBoxComponent>(TEXT("Trigger"));
 	Trigger->SetupAttachment(Frame);
-	// 판 위 공간을 덮는 감지 볼륨(월드 기준 100x100x120cm). 부모 스케일 보정 포함.
+	// The detection volume covering the space above the plate, 100 x 100 x 120 cm in world units, corrected for the parent scale.
 	Trigger->SetBoxExtent(FVector(50.0f, 50.0f, 60.0f));
 	Trigger->SetRelativeScale3D(FVector(1.0f / 1.2f, 1.0f / 1.2f, 1.0f / 0.04f));
 	Trigger->SetRelativeLocation(FVector(0.0f, 0.0f, 60.0f));
 	Trigger->SetMobility(EComponentMobility::Movable);
-	// 질의 전용 + 관심 채널만 오버랩. 랙돌 바디는 PhysicsBody, 물리 스태틱 메시는 보통 WorldDynamic이다.
+	// Query-only, overlapping the channels of interest alone. Ragdoll bodies are PhysicsBody and a physical static mesh is usually WorldDynamic.
 	Trigger->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	Trigger->SetCollisionObjectType(ECC_WorldStatic);
 	Trigger->SetCollisionResponseToAllChannels(ECR_Ignore);
@@ -59,7 +59,7 @@ ARopeDemoPressurePlate::ARopeDemoPressurePlate()
 	IndicatorLight->SetCastShadows(false);
 	IndicatorLight->SetMobility(EComponentMobility::Movable);
 
-	// 콘텐츠 의존을 만들지 않으려고 엔진 기본 셰이프만 쓴다(플러그인 → /Game 참조 금지).
+	// Engine primitive shapes alone, to avoid creating a content dependency, since a plugin must not reference /Game.
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	if (CubeMesh.Succeeded())
 	{
@@ -84,7 +84,7 @@ void ARopeDemoPressurePlate::BeginPlay()
 	}
 	ApplyIndicatorColor();
 
-	// BeginPlay 시점에 이미 겹쳐 있던 액터(레벨에 미리 얹어 둔 물체)도 세어 준다.
+	// Actors already overlapping at BeginPlay, meaning objects placed on it in the level, are counted too.
 	RefreshPressedState();
 }
 
@@ -92,15 +92,15 @@ void ARopeDemoPressurePlate::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	// 랙돌이 판 위에서 애니메이션으로 복귀하면 오버랩 이벤트 없이 자격만 사라진다 — 매 틱 재평가.
+	// A ragdoll recovering into animation while on the plate loses its eligibility with no overlap event, so it is re-evaluated every tick.
 	RefreshPressedState();
 
-	// 눌림 연출: 판의 상대 Z를 목표까지 등속 보간.
+	// The pressing presentation: the plate's relative Z is interpolated to its target at a constant rate.
 	const float TargetOffset = bPressed ? -PressDepth : 0.0f;
 	if (!FMath::IsNearlyEqual(CurrentPadOffset, TargetOffset) && Pad)
 	{
 		CurrentPadOffset = FMath::FInterpConstantTo(CurrentPadOffset, TargetOffset, DeltaSeconds, PressSpeed);
-		// Pad는 눌린 부모 스케일(Frame Z=0.04) 아래에 있으므로, 월드 cm를 상대 좌표로 환산해 적용한다.
+		// The pad is under the parent's pressed scale, whose Z is 0.04, so world centimetres are converted into relative coordinates before being applied.
 		const float ParentZScale = Frame ? FMath::Max(KINDA_SMALL_NUMBER, Frame->GetRelativeScale3D().Z) : 1.0f;
 		FVector Local = Pad->GetRelativeLocation();
 		Local.Z = 7.0f + CurrentPadOffset / ParentZScale;
@@ -116,7 +116,7 @@ void ARopeDemoPressurePlate::HandleBeginOverlap(UPrimitiveComponent* /*Overlappe
 		return;
 	}
 
-	// 랙돌은 본 바디 수만큼 이벤트가 오므로 액터 단위로 합산한다.
+	// A ragdoll sends one event per body, so they are summed per actor.
 	int32& Count = OverlapCounts.FindOrAdd(OtherActor);
 	++Count;
 
@@ -144,8 +144,8 @@ void ARopeDemoPressurePlate::HandleEndOverlap(UPrimitiveComponent* /*OverlappedC
 
 TArray<AActor*> ARopeDemoPressurePlate::GetQualifyingOccupants() const
 {
-	// 점유는 액터 단위 합산(OverlapCounts)이라 그대로 훑는다 — 자격 판정은 눌림 계산과 같은
-	// IsQualifyingOccupant를 공유해 "눌렸다는데 목록은 비는" 어긋남이 없다.
+	// Occupancy is summed per actor in the overlap counts, so those are walked directly. The eligibility decision
+	// shares IsQualifyingOccupant with the press computation, which prevents the plate being pressed while the list is empty.
 	TArray<AActor*> Occupants;
 	Occupants.Reserve(OverlapCounts.Num());
 	for (const TPair<TWeakObjectPtr<AActor>, int32>& Pair : OverlapCounts)
@@ -176,8 +176,8 @@ bool ARopeDemoPressurePlate::IsQualifyingOccupant(const AActor* OtherActor) cons
 		return true;
 	}
 
-	// 물리 시뮬 중인 바디가 하나라도 있으면 인정 — 물리 스태틱 메시, 랙돌(부분 랙돌 포함) 둘 다 걸린다.
-	// 걸어 올라선 캐릭터는 캡슐이 시뮬을 안 하므로 여기서 걸러진다.
+	// A single simulating body is enough to qualify, which catches both a physical static mesh and a ragdoll,
+	// including a partial one. A character who walked onto it is filtered out here, since its capsule does not simulate.
 	TArray<UPrimitiveComponent*> Primitives;
 	OtherActor->GetComponents<UPrimitiveComponent>(Primitives);
 	for (const UPrimitiveComponent* Primitive : Primitives)
@@ -193,7 +193,7 @@ bool ARopeDemoPressurePlate::IsQualifyingOccupant(const AActor* OtherActor) cons
 void ARopeDemoPressurePlate::RefreshPressedState()
 {
 	int32 NewCount = 0;
-	// 파괴된 액터를 정리하면서 자격을 다시 센다.
+	// Recounts eligibility while cleaning out destroyed actors.
 	for (auto It = OverlapCounts.CreateIterator(); It; ++It)
 	{
 		const AActor* Occupant = It.Key().Get();

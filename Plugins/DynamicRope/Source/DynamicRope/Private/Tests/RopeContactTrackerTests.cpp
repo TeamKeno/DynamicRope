@@ -9,16 +9,17 @@
 #include "Core/RopeContactTrackingTypes.h"
 #include "Components/SceneComponent.h"
 
-// 트래커가 (Mesh, Bone) 쌍으로 집계하는가: 같은 본 이름을 쓰는 두 액터(mesh)가 한 프레임에 함께 닿아도
-// 후보가 한 버킷으로 합산되거나 mesh가 마지막 후보로 오귀속되지 않고, 본 이름이 같아도 mesh가 바뀌면
-// dwell이 리셋된다(cross-actor 캡처 오귀속 수정 계약 — 2026-07 주석 전수조사 발견 건).
+// Whether the tracker aggregates by the pair of mesh and bone: when two actors sharing a bone name are touched in the
+// same frame, their candidates must not be summed into one bucket, the mesh must not be attributed to whichever
+// candidate came last, and the dwell has to reset when the mesh changes even though the bone name is the same. This
+// is the contract that keeps a cross-actor capture from being attributed to the wrong target.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightTrackerCrossMeshTest,
 	"DynamicRope.FlightContact.TrackerSeparatesSameBoneAcrossMeshes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeFlightTrackerCrossMeshTest::RunTest(const FString& Parameters)
 {
-	// 식별용 컴포넌트 2개(월드 불필요 — 트래커는 포인터를 역참조하지 않는다).
+	// Two components for identity alone, needing no world, since the tracker never dereferences the pointers.
 	const USceneComponent* MeshA = NewObject<USceneComponent>();
 	const USceneComponent* MeshB = NewObject<USceneComponent>();
 
@@ -33,8 +34,8 @@ bool FRopeFlightTrackerCrossMeshTest::RunTest(const FString& Parameters)
 		return C;
 	};
 
-	// A에 2노드, B에 1노드(전부 같은 본 이름) — dominant는 (MeshA, hand_r)이어야 하고
-	// B의 후보와 합산되면 안 된다(합산됐다면 노드 3개 + mesh가 B로 덮였을 것).
+	// Two nodes on A and one on B, all under the same bone name. The dominant target has to be the hand on mesh A, and
+	// B's candidate must not be summed into it: summing would have given three nodes and overwritten the mesh with B.
 	TArray<FRopeContactCandidate> Candidates;
 	Candidates.Add(MakeCandidate(5, MeshA));
 	Candidates.Add(MakeCandidate(6, MeshA));
@@ -46,11 +47,11 @@ bool FRopeFlightTrackerCrossMeshTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("dominant mesh is A (no cross-mesh merge)"), Tracker.CandidateMesh == MeshA);
 	TestEqual(TEXT("only A's nodes tracked"), Tracker.CandidateNodes.Num(), 2);
 
-	// 같은 대상 유지 → dwell 누적.
+	// Keeping the same target accumulates dwell.
 	Tracker.Update(Candidates, 0.10f);
 	TestTrue(TEXT("dwell accumulates on same (mesh, bone) target"), Tracker.DwellTime > 0.05f);
 
-	// dominant가 (MeshB, hand_r)로 넘어가면 — 본 이름은 그대로여도 — dwell이 리셋되어야 한다.
+	// When the dominant target moves to the hand on mesh B, the dwell has to reset even though the bone name is unchanged.
 	TArray<FRopeContactCandidate> Flipped;
 	Flipped.Add(MakeCandidate(1, MeshB));
 	Flipped.Add(MakeCandidate(2, MeshB));
@@ -62,9 +63,10 @@ bool FRopeFlightTrackerCrossMeshTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 시드 다중화 재료: 트래커가 dominant 외의 접촉 대상도 (Mesh, Bone)별 dwell과 함께 유지하고
-// (Targets), 접촉이 빠진 대상은 같은 비율로 감쇠하다 소진되면 목록에서 빠지는가. dominant
-// 선정/리셋 계약은 Targets 도입과 무관하게 유지된다(위 테스트가 고정).
+// The material for seed multiplexing: whether the tracker keeps contact targets other than the dominant one, with a
+// dwell per mesh and bone, in its target list, and whether a target that has stopped contacting decays at the same
+// rate and drops off the list once exhausted. The dominant selection and reset contract is unaffected by the target
+// list, as the test above pins.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightTrackerMultiTargetTest,
 	"DynamicRope.FlightContact.TrackerKeepsSecondaryTargetDwell",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -84,7 +86,7 @@ bool FRopeFlightTrackerMultiTargetTest::RunTest(const FString& Parameters)
 		return C;
 	};
 
-	// 양다리 시나리오 축약: 한 mesh의 두 본에 동시 접촉(thigh_l 노드 1,2 / calf_r 노드 6,7).
+	// A reduced two-leg scenario: two bones on one mesh contacting at once, the left thigh at nodes 1 and 2 and the right calf at nodes 6 and 7.
 	TArray<FRopeContactCandidate> BothLegs;
 	BothLegs.Add(MakeCandidate(1, FName("thigh_l")));
 	BothLegs.Add(MakeCandidate(2, FName("thigh_l")));
@@ -107,7 +109,7 @@ bool FRopeFlightTrackerMultiTargetTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("secondary dwell accumulates independently"), Secondary->DwellTime > 0.05f);
 	TestEqual(TEXT("secondary nodes current"), Secondary->Nodes.Num(), 2);
 
-	// calf_r 접촉이 끊기면: dwell이 같은 비율로 감쇠(우선 잔존 — 짧은 플리커 관용), 소진되면 제거.
+	// When the right calf stops contacting, its dwell decays at the same rate, surviving briefly to tolerate a short flicker, and is removed once exhausted.
 	TArray<FRopeContactCandidate> OneLeg;
 	OneLeg.Add(MakeCandidate(1, FName("thigh_l")));
 	OneLeg.Add(MakeCandidate(2, FName("thigh_l")));
@@ -127,11 +129,12 @@ bool FRopeFlightTrackerMultiTargetTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 이 파일의 변경 이유: 이후 exact-bone 필터가 되살아나거나 pelvis rank가 primary를 빼앗는 회귀를
-// 자동으로 검출한다. 정책 테스트와 tracker 테스트를 함께 두어 허용 범위/선택 규칙을 각각 고정한다.
-// Assisted의 aim target은 일반 rank(NodeCount > HeadNode > Score)보다 우선하지만, 같은 mesh의
-// 다른 본은 Targets에서 secondary dwell 재료로 계속 추적해야 한다. preferred가 사라지면 몸통으로
-// dominant가 자동 승계되지 않아야 팔 조준이 pelvis 랩으로 바뀌지 않는다.
+// This detects automatically if an exact-bone filter is reintroduced or if the pelvis outranks the primary target.
+// Keeping the policy test and the tracker test together pins the permitted range and the selection rule separately.
+// The assisted policy's aim target takes precedence over the ordinary rank, being the node count, then the head node,
+// then the score, while other bones on the same mesh have to remain tracked in the target list as secondary dwell
+// material. When the preferred target disappears the dominant one must not be automatically inherited by the torso,
+// which is what stops an arm being aimed at turning into a pelvis wrap.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightTrackerPreferredTargetTest,
 	"DynamicRope.FlightContact.TrackerPrefersRequiredAimTarget",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

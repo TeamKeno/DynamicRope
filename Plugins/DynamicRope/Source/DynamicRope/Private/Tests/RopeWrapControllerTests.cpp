@@ -7,19 +7,21 @@
 #include "Logic/RopeWrapController.h"
 #include "RopeTestHelpers.h"
 
-// Pull 산출(ComputePull): 손 쪽 첫 앵커에서 손 쪽 인접 노드 방향 + 해당 세그먼트 장력을 데이터로 내는가.
+// ComputePull: whether it produces, as data, the direction from the first anchor on the hand side towards
+// its adjacent node on that side, plus that segment's tension.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrapComputePullTest,
 	"DynamicRope.Wrap.ComputePullDirectionAndTension",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 {
-	// 노드 x = 0,20,...,140(+X 직선). 앵커 2개(노드 5, 노드 3) → 손 쪽 첫 앵커 = 노드 3.
+	// The nodes are spaced along positive X. With anchors at nodes five and three, the first anchor on the
+	// hand side is node three.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	Sim.SegmentTension.SetNumZeroed(Sim.Num() - 1);
-	// 앵커(3)-손 쪽 인접 노드(2) 세그먼트
+	// The segment between the anchor and its adjacent node on the hand side.
 	Sim.SegmentTension[2] = 1234.0f;
-	// 다른 세그먼트(선택되면 안 됨)
+	// A different segment, which must not be selected.
 	Sim.SegmentTension[4] = 9999.0f;
 
 	FRopeWrapController Wrap;
@@ -32,19 +34,22 @@ bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 		Wrap.State.Anchors.Add(Anchor);
 	}
 
-	// 코너 임계 30도. 곧은 로프는 손(노드 0)까지 걸어가 방향이 정확히 chord(-X)가 된다.
+	// With a corner threshold of 30 degrees, a straight rope walks all the way to the hand at node zero and
+	// its direction is exactly the chord.
 	const float BendDeg = 30.0f;
 	FRopePullSample Pull;
 	TestTrue(TEXT("ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
 	TestTrue(TEXT("pull sample valid"), Pull.bValid);
 	TestEqual(TEXT("hand-side head anchor wins"), Pull.AnchorNode, 3);
 	TestTrue(TEXT("bone attributed"), Pull.Bone == FName("arm"));
-	// 곧은 로프: 앵커(노드 3, x=60)에서 손 쪽 노드(x<60)는 -X → look-ahead가 chord와 일치한다.
+	// On a straight rope every node on the hand side of the anchor lies along negative X, so the look-ahead
+	// coincides with the chord.
 	TestTrue(FString::Printf(TEXT("direction %s points toward hand (-X)"), *Pull.Direction.ToCompactString()),
 		Pull.Direction.Equals(FVector(-1, 0, 0), 0.01f));
 	TestEqual(TEXT("tension from anchor-hand segment"), Pull.Tension, 1234.0f);
 
-	// 앵커가 노드 0(손 핀)뿐이면 손 쪽 세그먼트가 없어 무효.
+	// With the only anchor at node zero, the hand pin, there is no segment on the hand side and it is
+	// invalid.
 	FRopeWrapController WrapAtHand;
 	WrapAtHand.State.BoneName = FName("arm");
 	FRopeSurfaceAnchor HandAnchor;
@@ -53,20 +58,22 @@ bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 	FRopePullSample InvalidPull;
 	TestFalse(TEXT("anchor at hand node yields no pull"), WrapAtHand.ComputePull(Sim, BendDeg, InvalidPull));
 
-	// 꺾인 자유 구간(벽 모서리): 앵커(노드 4)에서 첫 다리는 +Z(위)로 오르고, 모서리(노드 2)에서 손 쪽으로
-	// 수평으로 꺾인다. look-ahead 방향은 로프 경로(첫 다리 = +Z)를 따라야 하며, 앵커→손 직선 chord
-	// (대각선, 모서리를 가로지름)와 명확히 달라야 한다 — 이게 벽에 걸린 로프에서 chord가 벽을 관통하던 버그의 수정.
+	// A bent free span, as at a wall edge: the first leg climbs upwards from the anchor at node four, and at
+	// the corner, node two, it turns horizontally towards the hand. The look-ahead direction has to follow
+	// the rope's path, meaning the first leg, and be clearly different from the straight anchor-to-hand
+	// chord, which is diagonal and cuts across the corner. That difference is the fix for the chord passing
+	// through a wall on a rope caught on one.
 	FRopeSimState Bent;
 	Bent.Positions = {
-		// 0 손
+		// Node zero, the hand.
 		FVector(-40, 0, 40),
 		// 1
 		FVector(-20, 0, 40),
-		// 2 모서리
+		// Node two, the corner.
 		FVector(  0, 0, 40),
-		// 3 첫 다리
+		// Node three, on the first leg.
 		FVector(  0, 0, 20),
-		// 4 앵커
+		// Node four, the anchor.
 		FVector(  0, 0,  0),
 	};
 	Bent.PrevPositions = Bent.Positions;
@@ -79,18 +86,21 @@ bool FRopeWrapComputePullTest::RunTest(const FString& Parameters)
 	}
 	FRopePullSample BentPull;
 	TestTrue(TEXT("bent ComputePull succeeds"), WrapBent.ComputePull(Bent, BendDeg, BentPull));
-	// 첫 다리(노드 4→3→2, +Z)를 걷다 노드 2에서 90도 꺾임 감지 → 멈춤 → 방향 +Z(로프 경로), chord가 아님.
+	// Walking the first leg upwards from node four, it detects the right-angled turn at node two, stops,
+	// and gives an upward direction along the rope's path rather than the chord.
 	TestTrue(FString::Printf(TEXT("bent direction %s follows first leg (+Z)"), *BentPull.Direction.ToCompactString()),
 		BentPull.Direction.Equals(FVector(0, 0, 1), 0.01f));
-	// 대각선(모서리 관통)
+	// The diagonal, which cuts through the corner.
 	const FVector Chord = (Bent.Positions[0] - Bent.Positions[4]).GetSafeNormal();
 	TestFalse(TEXT("bent direction is NOT the straight chord"), BentPull.Direction.Equals(Chord, 0.05f));
 	return true;
 }
 
-// 전 체인 팽팽 관측치(ComputePull): 코너-다리 chord 합(TautChordLen, 다리별 rest 클램프)·자유 구간 rest
-// 길이(FreeRestLen)·최소 전달 장력(MinFreeTension)이 "줄이 다 펴졌는가"를 구분하는가 — 팽팽 직선/슬랙(압축)/
-// 코너에 걸린 팽팽/앵커 다리만 스트레치된 슬랙(움직이는 대상 회귀 케이스) 네 가지.
+// The whole-chain taut observations from ComputePull: whether the sum of the corner-to-corner leg chords,
+// clamped per leg to its rest length, the free span's rest length, and the minimum transmitted tension
+// together distinguish whether the rope is straightened out. Four cases are covered: taut and straight,
+// slack through compression, taut but caught on a corner, and the regression case of a moving target where
+// only the anchor leg is stretched while the rest is slack.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrapComputePullChainTautTest,
 	"DynamicRope.Wrap.ComputePullChainTautObservables",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -107,13 +117,15 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		return Wrap;
 	};
 
-	// ① 곧게 편(팽팽) 로프: 앵커 5, SegmentLength 20 → rest = 100, chord 합 = |P5-P0| = 100.
+	// One: a straight, taut rope. With the anchor at node five and a segment length of twenty, the rest
+	// length is 100 and the chord sum is the distance from the anchor to the hand, also 100.
 	{
 		FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
-		// 최소 전달 장력은 자유 구간(0..앵커-1)만 본다 — 앵커 너머 세그먼트의 낮은 장력은 무시.
+		// The minimum transmitted tension looks only at the free span, so a low tension on a segment beyond
+		// the anchor is ignored.
 		Sim.SegmentTension.Init(500.0f, Sim.Num() - 1);
-		Sim.SegmentTension[2] = 50.0f; // 자유 구간 최솟값
-		Sim.SegmentTension[5] = 1.0f;  // 앵커 너머 — 반영되면 안 됨
+		Sim.SegmentTension[2] = 50.0f; // The minimum within the free span.
+		Sim.SegmentTension[5] = 1.0f;  // Beyond the anchor, which must not be counted.
 		FRopeWrapController Wrap = MakeWrap(5);
 		FRopePullSample Pull;
 		TestTrue(TEXT("straight ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
@@ -124,8 +136,10 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("straight raw chord equals clamped chord"), Pull.PathChordLen, 100.0f, 0.1f);
 	}
 
-	// ② 압축(슬랙) 로프: 노드 간격이 rest(20)의 절반(10)인 직선 — 굴곡 없이도 chord 합이 rest의 절반.
-	// XPBD는 압축에 저항하지 않으므로 "줄이 안 펴진" 대표 형상이다.
+	// Two: a compressed, slack rope. The nodes are spaced at half their rest length along a straight line,
+	// so the chord sum is half the rest length with no bending at all.
+	// XPBD does not resist compression, so this is the archetypal shape of a rope that is not straightened
+	// out.
 	{
 		FRopeSimState Sim = RopeTest::MakeStraightRope(5, 80.0f);
 		for (int32 i = 0; i < Sim.Num(); ++i)
@@ -141,8 +155,9 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("compressed raw chord matches (slack -> constraint C negative)"), Pull.PathChordLen, 40.0f, 0.1f);
 	}
 
-	// ③ 코너에 걸렸지만 두 다리 모두 팽팽: 앵커(4)→모서리(2) 40 + 모서리(2)→손(0) 40 = rest 80.
-	// 코너는 손해가 아니다 — 벽에 걸린 팽팽한 로프는 팽팽으로 인정돼 테더/Pull이 종전대로 발화한다.
+	// Three: caught on a corner but taut in both legs. The two legs sum to the rest length exactly.
+	// A corner is not penalized: a taut rope caught on a wall is recognized as taut and the tether and pull
+	// fire exactly as before.
 	{
 		FRopeSimState Bent;
 		Bent.Positions = {
@@ -157,15 +172,19 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("bent ComputePull succeeds"), Wrap.ComputePull(Bent, BendDeg, Pull));
 		TestEqual(TEXT("bent rest length"), Pull.FreeRestLen, 80.0f, 0.1f);
 		TestEqual(TEXT("bent leg chords sum to rest (taut around a corner)"), Pull.TautChordLen, 80.0f, 0.1f);
-		// 주의: 자유 공중에서 L자로 접힌 슬랙도 기하는 동일하게 rest로 읽는다(맹점) — 벽 코너(전 구간 장력)와
-		// 공중 구김(어딘가 0)의 구분은 MinFreeTension의 몫. 여기선 솔브 전(배열 비어 있음) → 0.
+		// Note the blind spot: slack folded into an L shape in mid-air reads geometrically as the same rest
+		// length. Distinguishing a wall corner, where tension is present throughout, from a kink in the air,
+		// where it is zero somewhere, is what the minimum transmitted tension is for. Here it is before the
+		// solve, so the array is empty and it reads as zero.
 		TestEqual(TEXT("bent MinFreeTension is zero without solved tensions"), Pull.MinFreeTension, 0.0f, 0.01f);
 	}
 
-	// ④ 회귀 케이스(움직이는 대상): 앵커 인접 다리(5→3)만 직선으로 스트레치(세그먼트 27 > rest 20)되고
-	// 꼬리(3→0)는 뭉쳐 처짐. sub-leg만 보면 팽팽해 보이지만 ①스트레치 다리 chord(54)는 다리 rest(40)로
-	// 클램프되고(스트레치가 슬랙을 은폐 못 함) ②구김 구간 장력 0이 최소 전달 장력을 0으로 만든다 —
-	// 늘어진 줄이 끌려가던 증상의 판별이 바로 이 두 관측치다.
+	// Four: the regression case with a moving target. Only the leg adjacent to the anchor is stretched
+	// straight, with a segment longer than its rest length, while the tail bunches and sags. Looking at that
+	// sub-leg alone it appears taut, but the stretched leg's chord is clamped to that leg's rest length, so a
+	// stretch cannot mask slack, and the zero tension across the kinked stretch drives the minimum
+	// transmitted tension to zero. Those two observations are exactly what identifies the symptom of a slack
+	// rope being dragged along.
 	{
 		FRopeSimState Sim = RopeTest::MakeStraightRope(6, 100.0f);
 		Sim.Positions = {
@@ -173,26 +192,30 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 			FVector(46, 0, 0), FVector(73, 0, 0), FVector(100, 0, 0),
 		};
 		Sim.PrevPositions = Sim.Positions;
-		// 앵커 쪽 스트레치 구간만 장력, 구김 구간(0~2)은 0.
+	// Tension exists only on the stretched span near the anchor; the kinked span has none.
 		Sim.SegmentTension = { 0.0f, 0.0f, 0.0f, 800.0f, 900.0f };
 		FRopeWrapController Wrap = MakeWrap(5);
 		FRopePullSample Pull;
 		TestTrue(TEXT("stretched-leg ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
 		TestEqual(TEXT("stretched-leg rest length"), Pull.FreeRestLen, 100.0f, 0.1f);
-		// 첫 다리는 꼬리 처짐 직전(노드 3)에서 멈춘다 — 방향/조준은 종전 산출 그대로.
+		// The first leg still stops just before the tail sags, at node three, so the direction and the aim are
+		// produced exactly as before.
 		TestEqual(TEXT("first leg still aims at the bend"), Pull.AimNode, 3);
-		// 클램프 후 합 ≈ 40(클램프) + 22.8(꼬리) = 62.8 — 스트레치를 rest로 계상하던 90 미만 검사에서 강화.
+		// After clamping, the sum is the clamped leg plus the sagging tail, which is well below the rest
+		// length; counting the stretch at its full length would have hidden that.
 		TestTrue(FString::Printf(TEXT("chord sum %.1f stays well below rest 100 (slack chain)"), Pull.TautChordLen),
 			Pull.TautChordLen < 70.0f);
 		TestEqual(TEXT("crumpled span zeroes the min transmitted tension"), Pull.MinFreeTension, 0.0f, 0.01f);
-		// 비클램프 합은 스트레치 다리를 그대로 계상(54 + 22.8 = 76.8)하되 여전히 rest(100) 미만 —
-		// 부분 스트레치만으로는 Constraint C가 양수가 되지 않는다(전체가 펴져야 λ가 나온다).
+		// The unclamped sum counts the stretched leg in full, yet is still below the rest length: a partial
+		// stretch alone never makes the constraint violation positive, since the whole rope has to be
+		// straightened before lambda appears.
 		TestEqual(TEXT("raw chord counts the stretched leg yet stays below rest"), Pull.PathChordLen, 76.8f, 0.5f);
 	}
 
-	// ⑤ 완만한 catenary 처짐(코너 임계 미만의 굴곡 = 한 다리): chord 비율은 처짐의 제곱에만 반응해
-	// 9cm 처짐도 99%로 통과시키지만(그 둔감함이 PIE "590/600인데 눈에 띄게 처짐"의 원인), MaxLegSag는
-	// 처짐 cm를 직접 낸다 — TautMaxSag 게이트의 관측치.
+	// Five: a gentle catenary sag, meaning a bend below the corner threshold and therefore a single leg. The
+	// chord ratio responds only to the square of the sag, so even a noticeable sag passes at 99 percent, and
+	// that insensitivity is why a rope reading as almost fully taut could still sag visibly. The maximum leg
+	// sag reports the sag in centimetres directly, and is the observation behind the sag gate.
 	{
 		FRopeSimState Sim = RopeTest::MakeStraightRope(5, 80.0f);
 		Sim.Positions = {
@@ -203,16 +226,18 @@ bool FRopeWrapComputePullChainTautTest::RunTest(const FString& Parameters)
 		FRopeWrapController Wrap = MakeWrap(4);
 		FRopePullSample Pull;
 		TestTrue(TEXT("sagging ComputePull succeeds"), Wrap.ComputePull(Sim, BendDeg, Pull));
-		// 완만한 굴곡이라 walk는 손까지 한 다리 — chord ≈ 79/80 = 99%(비율 게이트는 통과해 버린다).
+	// The bend is gentle enough that the walk reaches the hand as one leg, so the chord ratio is about 99
+	// percent and the ratio gate passes.
 		TestEqual(TEXT("gentle sag still walks to the hand"), Pull.AimNode, 0);
 		TestTrue(FString::Printf(TEXT("chord ratio %.3f stays above 0.97 (ratio gate blind)"),
 			Pull.TautChordLen / Pull.FreeRestLen), Pull.TautChordLen / Pull.FreeRestLen > 0.97f);
 		TestEqual(TEXT("max leg sag reads the visible dip"), Pull.MaxLegSag, 9.0f, 0.5f);
 	}
 
-	// ⑥ 팽팽 + 스트레치(노드 간격 22 > rest 20): 두 관측치가 갈라지는 지점 — TautChordLen은 다리별 rest로
-	// 클램프돼 rest에 머물고(게이트 규약), PathChordLen은 실제 경로(110)를 내 Constraint C가 양수가 된다
-	// (C = 110 - 100 - slack > 0 = λ 발화 조건). Docs/PoC/05 §3.1의 관측치 계약.
+	// Six: taut and stretched, with the node spacing above the rest length. This is where the two
+	// observations diverge: the taut chord length is clamped per leg to its rest length and stays there, as
+	// the gate's convention requires, while the path chord length reports the real path and makes the
+	// constraint violation positive, which is the condition for lambda to fire.
 	{
 		FRopeSimState Sim = RopeTest::MakeStraightRope(6, 100.0f);
 		for (int32 i = 0; i < Sim.Num(); ++i)

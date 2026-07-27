@@ -12,8 +12,9 @@
 #include "Collision/SDF/RopeSDFData.h"
 #include "Components/SceneComponent.h"
 
-// 현재 포즈에서 로프 지름보다 좁은 gap으로 이어진 collider들은 skeleton depth와 무관하게 하나의
-// wrap island가 되고, 남은 로프 길이로 도달할 수 없는 표면은 같은 mesh라도 island에서 빠져야 한다.
+// Colliders joined by a gap narrower than the rope's diameter in the current pose form a single wrap island
+// regardless of skeleton depth, and a surface the remaining rope length cannot reach has to drop out of the island
+// even on the same mesh.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingPoseSpaceIslandTest,
 	"DynamicRope.Wrapping.PoseSpaceIslandUsesSurfaceGapAndReach",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -83,8 +84,8 @@ bool FRopeWrappingPoseSpaceIslandTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Composite Analytic Helix 실패 후에는 실패 지점에서 경로를 이어가지 않고, 최초 latch 본 하나로 경로와
-// projection 대상을 완전히 재설정해야 한다.
+// After the composite analytic helix fails, the path must not continue from the point of failure: the path and the
+// projection targets are reset entirely to the single initial latch bone.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingSingleBoneFallbackTest,
 	"DynamicRope.Wrapping.CompositeFailureRestartsSingleBonePath",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -160,15 +161,15 @@ bool FRopeWrappingSingleBoneFallbackTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("single-bone projection ignores the touching arm collider"),
 		SelectedBone, BodyVolume.Bone);
 
-	// Analytic Helix 자체가 terminal failure로 끝나면 같은 throw 안에서 실제 SingleBone
-	// Surface Vector Field fallback으로 자동 전환해야 한다.
+	// When the analytic helix itself ends in a terminal failure, it has to switch automatically to the real
+	// single-bone surface vector field fallback within the same throw.
 	FRopeWrappingPhase AutomaticFallbackWrapping;
 	TestTrue(TEXT("automatic fallback scenario initializes as a valid wrap"),
 		AutomaticFallbackWrapping.Begin(Latch, 0.5f, Sim, Ctx));
 	TestTrue(TEXT("full simulation enables composite multi-bone"),
 		AutomaticFallbackWrapping.State.bPathUsesPoseSpaceIsland);
-	// island 불변식을 깨 terminal failure를 유도한다. public dispatcher가 이를 감지해
-	// 구형 Composite Surface Vector Field를 거치지 않고 fallback을 재초기화해야 한다.
+	// Breaking the island invariant induces a terminal failure. The public dispatcher has to detect it and
+	// reinitialize the fallback without passing through the composite surface vector field.
 	AutomaticFallbackWrapping.State.PathWrapIslandBones.Reset();
 	AutomaticFallbackWrapping.AdvancePathBuild(Sim, Ctx);
 	TestTrue(TEXT("automatic runtime path enters single-bone fallback"),
@@ -180,8 +181,8 @@ bool FRopeWrappingSingleBoneFallbackTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("automatic fallback restarts at the original latch"),
 		AutomaticFallbackWrapping.State.Path.Num(), 1);
 
-	// Composite Multi-Bone은 FullSimulation 전용이다. 같은 collider/config라도 Assisted에서는
-	// pose-space island를 만들지 않고 기존 Sequential Multi-Bone 경로를 사용해야 한다.
+	// Composite multi-bone is for FullSimulation alone. With the same colliders and configuration, an assisted throw
+	// must not build a pose-space island and has to use the existing sequential multi-bone path.
 	FRopeWrappingPhase::FContext AssistedCtx = Ctx;
 	AssistedCtx.ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 	FRopeWrappingPhase AssistedWrapping;

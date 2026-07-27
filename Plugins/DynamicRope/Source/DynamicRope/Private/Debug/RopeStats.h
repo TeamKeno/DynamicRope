@@ -1,33 +1,47 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// 'stat DynamicRope' 대시보드 그룹 — 프레임 단위 시뮬 코스트/부하를 한 화면에 모은다(용도 C: 성능 추적 +
-// 런타임 상태 확인 겸용). per-component 'stat RopeFlight'/'stat RopeWrapped'(RopeDebugDraw)는 그대로 두고,
-// 이 그룹은 URopeSimSubsystem::Tick 프레임 전체를 조망한다.
-//   - CYCLE stat(GT 타이밍): Tick 단계(Gather/Prepare/Solve/Finalize)를 ms로.
-//   - DWORD 카운터(부하): 활성 로프 수·솔브 경로 분기·파티클 총량·collider 수·물리/로직 분포.
+// The 'stat DynamicRope' dashboard group, which gathers the per-frame simulation cost and load onto one
+// screen, serving both performance tracking and a runtime state check. The per-component
+// 'stat RopeFlight' and 'stat RopeWrapped' groups in RopeDebugDraw are left as they are; this group
+// takes in the whole of URopeSimSubsystem::Tick.
+//   - Cycle statistics, timed on the game thread, report each tick stage in milliseconds: the gather,
+//     Prepare, Solve and Finalize.
+//   - Counters report load: the number of active ropes, the solve path split, the total particle count,
+//     the collider count, and the physics against logic distribution.
 //
-// [범위 계약] 이 그룹은 **GT 프레임 대시보드 전용**이다. GPU RT 타이밍/VRAM/대역폭은 별도 'stat DynamicRopeGPU'
-// 그룹(DynamicRopeShaders 모듈, RopeGPUStatGroup.h)이 소유한다 — 한 그룹에 다 넣었더니 53행이 되어 stat HUD
-// 화면을 넘겼다(HUD는 cycle→memory→counter 순으로 그리고 스크롤이 없어서, 정작 보고 싶은 counter 섹션이 화면
-// 아래로 잘려나갔다). 새 stat을 추가할 때 이 분리를 지켜라: GT 프레임 비용은 여기, GPU/RT는 저기.
+// Scope contract: this group is the game thread frame dashboard alone. GPU render thread timings, video
+// memory and bandwidth belong to the separate 'stat DynamicRopeGPU' group, in the DynamicRopeShaders
+// module. Putting them all in one group produced 53 rows and overflowed the stat HUD, which draws
+// cycles, then memory, then counters, and does not scroll, so the counter section that mattered was cut
+// off below the screen. Preserve that split when adding a statistic: game thread frame cost here, GPU
+// and render thread there.
 //
-// 솔브 경로 분할(매 프레임 Active = GpuStepped + CpuSolved + 나머지(솔브 없음)):
-//   - GPU Stepped : 이 프레임 GPU 상주 스텝(솔브 또는 로직 override)로 dispatch된 로프.
-//   - CPU Solved  : 솔브는 했으나 GPU가 아닌 로프 = 진짜 CPU 폴백(노드 > MaxNodes(512), 또는 렌더 가능 RHI
-//                   없음 -nullrhi/서버). TryBuildResidentStep의 bGpuRope=false && bSolveThisFrame 분기.
-//   - (암묵) idle : 둘 다 아닌 로프 — Contacting(동결)·슬립(Free 정지)·로직 override-only 없음 등. Active에서
-//                   두 값을 빼면 나오므로 별도 행을 두지 않는다(per-rope 내역은 RopePerf 디버거).
-// Sleeping은 위 분할과 직교하는 상태 카운터(Free 정지로 잠든 로프; 대개 idle에 포함된다).
-// World GDF Dispatches는 이 프레임 실제 GDF와 함께 dispatch된 수 — phase/슬립/충돌 게이트에 따라 프레임마다
-// 흔들리는 게 정상이다(엔진 온디맨드 GDF 빌드 신호와 동일한 수). 설정(bUseWorldGDF) 자체는 기본값이 true라
-// 세면 Active와 같아지므로 stat으로 두지 않는다 — per-rope 설정은 RopePerf 디버거가 gdf/gdf-off로 보여준다.
+// The solve path split, where the active count equals the GPU-stepped plus the CPU-solved plus the rest,
+// which did not solve:
+//   - GPU Stepped is a rope dispatched as a GPU resident step this frame, whether a solve or a logic
+//                 override.
+//   - CPU Solved  is a rope that solved but not on the GPU, which is a genuine CPU fallback, caused by
+//                 exceeding the maximum node count or by there being no renderable RHI, as under
+//                 -nullrhi or on a server.
+//   - The rest are idle: neither of the above, such as a frozen Contacting rope, one asleep in Free, or
+//                 one with no logic override at all. It is the active count minus the other two, so it
+//                 has no row of its own; the RopePerf debugger shows the per-rope breakdown.
+// Sleeping is a state counter orthogonal to that split, counting ropes asleep because they came to rest
+// in Free; they are usually part of the idle group.
+// The world distance field dispatch count is how many were dispatched together with the field this
+// frame, and it fluctuating between frames with the phase, sleep and collision gates is normal; it
+// matches the engine's on-demand build signal. The setting itself defaults to enabled, so counting it
+// would simply equal the active count and it is not a statistic; the RopePerf debugger shows the
+// per-rope setting.
 //
-// 페이즈는 설계의 physics/logic 경계(Free·Flight = 솔버, 나머지 = 로직)만 2행으로 요약한다. ERopePhase 8종
-// 내역은 'RopePerf' 게임플레이 디버거 카테고리가 per-rope로 이미 보여주므로 HUD에서 8행을 쓰지 않는다.
+// Phases are summarized as two rows along the design's physics and logic boundary, where Free and Flight
+// are the solver and the rest are logic. The full breakdown of all eight phases is already shown per
+// rope by the RopePerf gameplay debugger category, so eight rows are not spent on the HUD.
 //
-// stat 매크로는 STATS 비활성 빌드(shipping 등)에서 자동 no-op이 되므로 별도 #if 가드가 필요없다. EXTERN 선언은
-// 여기, DEFINE_STAT 실체는 RopeStats.cpp에 둔다 — 그래서 SCOPE_CYCLE_COUNTER/SET_DWORD_STAT를 서브시스템 등
-// 다른 번역 단위에서 바로 쓸 수 있다.
+// The statistic macros compile to nothing in builds with statistics disabled, such as shipping, so no
+// separate guard is needed. The declarations live here and the definitions in RopeStats.cpp, which is
+// what lets the scope and counter macros be used directly from other translation units such as the
+// subsystem.
 
 #pragma once
 
@@ -38,18 +52,21 @@
 
 class URopeComponent;
 
-// 'stat DynamicRope' — 런타임 시뮬 프레임 코스트/부하 대시보드.
+// 'stat DynamicRope': the runtime simulation frame cost and load dashboard.
 DECLARE_STATS_GROUP(TEXT("DynamicRope"), STATGROUP_DynamicRope, STATCAT_Advanced);
 
-// ── [GT 타이밍] URopeSimSubsystem::Tick 단계별 소요(GT 벽시계). GPU 경로의 Solve는 dispatch enqueue 비용만
-//    잡힌다(실제 GPU 솔브/감지는 RT — Insights 참조). CPU 폴백 경로의 Solve는 ParallelFor 실 솔브 비용. ──────
+// Game thread timings for each stage of URopeSimSubsystem::Tick, as wall clock. On the GPU path the
+// solve captures only the cost of enqueueing the dispatch, since the real GPU solve and detection happen
+// on the render thread and are visible in Insights. On the CPU fallback path it is the real solve cost
+// of the parallel loop.
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Tick (total)"), STAT_RopeSim_Tick, STATGROUP_DynamicRope, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Gather Colliders"), STAT_RopeSim_Gather, STATGROUP_DynamicRope, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Prepare"), STAT_RopeSim_Prepare, STATGROUP_DynamicRope, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Solve (enqueue/parallel)"), STAT_RopeSim_Solve, STATGROUP_DynamicRope, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Finalize"), STAT_RopeSim_Finalize, STATGROUP_DynamicRope, );
 
-// ── [부하] 이번 프레임 로프 규모/솔브 경로 분기. Active - GpuStepped - CpuSolved = 솔브 없는 로프. ──────
+// Load: this frame's rope scale and solve path split. The active count minus the GPU-stepped and
+// CPU-solved counts gives the ropes that did not solve.
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Active Ropes"), STAT_Rope_Active, STATGROUP_DynamicRope, );
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Total Particles"), STAT_Rope_TotalParticles, STATGROUP_DynamicRope, );
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Frame Colliders"), STAT_Rope_FrameColliders, STATGROUP_DynamicRope, );
@@ -58,22 +75,25 @@ DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("CPU Solved Ropes (fallback)"), STAT_Rope
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Sleeping Ropes"), STAT_Rope_Sleeping, STATGROUP_DynamicRope, );
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("World GDF Dispatches"), STAT_Rope_GdfDispatched, STATGROUP_DynamicRope, );
 
-// ── [페이즈 분포] 설계의 physics/logic 경계만 요약(합 = Active Ropes). 부하가 솔버에서 나오는지 로직에서
-//    나오는지 한눈에 — 페이즈 8종 내역은 'RopePerf' 게임플레이 디버거가 per-rope로 보여준다. ────────────
+// Phase distribution, summarized along the physics and logic boundary alone, summing to the active
+// count. It shows at a glance whether the load comes from the solver or from logic; the full breakdown
+// of all eight phases is shown per rope by the RopePerf gameplay debugger.
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Phase: Physics (Free/Flight)"), STAT_Rope_PhasePhysics, STATGROUP_DynamicRope, );
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Phase: Logic (Contacting..Loaded)"), STAT_Rope_PhaseLogic, STATGROUP_DynamicRope, );
 
 namespace RopeStats
 {
-	// 프레임 스칼라 — 서브시스템만 아는 값(SimFrame이 private, GPU 경로 분기)을 helper로 넘긴다. 나머지 로프별
-	// 카운터(페이즈/GPU스텝/CPU솔브/슬립/파티클)는 RecordFrameStats가 public 게터로 직접 집계한다.
+	// Frame scalars, which only the subsystem knows because the frame state is private and the GPU path
+	// branches there, are passed to the helper. Every other per-rope counter, covering the phase, GPU
+	// steps, CPU solves, sleep and particles, is aggregated by RecordFrameStats through the public getters.
 	struct FRopeFrameCounters
 	{
-		int32 NumGdfDispatched = 0;  // 이번 프레임 GDF와 함께 dispatch된 GPU 스텝 수(엔진 온디맨드 빌드 신호와 동일)
-		int32 FrameColliders = 0;    // 전 로프 FrameColliders 합(SimFrame private → 서브시스템이 집계)
+		int32 NumGdfDispatched = 0;  // GPU steps dispatched together with the distance field this frame, matching the engine's on-demand build signal.
+		int32 FrameColliders = 0;    // The sum of every rope's frame colliders, aggregated by the subsystem because the frame state is private.
 	};
 
-	/** 'stat DynamicRope' 프레임 부하/페이즈 카운터 갱신(그룹 수집 중일 때만; 아니면 순회 스킵). 단계 타이밍은
-	 *  SCOPE_CYCLE_COUNTER로 각 단계 스코프에서 직접 기록한다. */
+	/** Updates the frame load and phase counters of 'stat DynamicRope', only while the group is
+	 *  collecting; otherwise the walk is skipped. Stage timings are recorded directly by the scope macros
+	 *  in each stage. */
 	void RecordFrameStats(TConstArrayView<TObjectPtr<URopeComponent>> Ropes, const FRopeFrameCounters& Frame);
 }

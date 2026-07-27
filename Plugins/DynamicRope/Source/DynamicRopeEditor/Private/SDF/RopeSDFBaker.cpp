@@ -8,7 +8,7 @@
 #include "Rendering/SkeletalMeshLODModel.h"
 #include "Async/ParallelFor.h"
 
-// 부호 판정용 fast winding number(GeometryCore).
+// The fast winding number from GeometryCore, used to decide the sign.
 #include "DynamicMesh/DynamicMesh3.h"
 #include "IndexTypes.h"
 #include "Spatial/MeshAABBTree3.h"
@@ -21,15 +21,20 @@ namespace
 	using UE::Geometry::TFastWindingTree;
 	using UE::Geometry::FIndex3i;
 
-	// 메시 전체 generalized winding number로 점의 안/밖을 판정한다. "안/밖"은 몸 전체(닫힌 표면)에 대한
-	// 전역 속성이라, 본별 열린 패치가 아니라 전체 메시로 winding을 봐야 강건하다(짧고 넓은 본 토막의 내부가
-	// 열린 패치에선 w<0.5로 바깥 오판됨). GeometryCore fast winding(BVH + 다극 근사)으로 query당 O(log T).
-	// 베이크 1회에 한 번 빌드해 voxel마다 질의한다. 빌드 후 동시(read-only) 질의 안전.
+	// Decides whether a point is inside or outside from the generalized winding number over the whole
+	// mesh. Being inside is a global property of the whole body, treated as a closed surface, so the
+	// winding has to be taken over the entire mesh rather than a bone's open patch to be robust; over an
+	// open patch the interior of a short, wide bone segment is misjudged as outside.
+	// The fast winding implementation, a bounding volume hierarchy with a multipole approximation, makes
+	// each query logarithmic in the triangle count. It is built once per bake and queried per voxel, and
+	// concurrent read-only queries after the build are safe.
 	class FRopeSDFWindingClassifier
 	{
 	public:
-		// 삼각형 소프로 빌드(정점을 삼각형마다 복제 → 시임/비매니폴드에도 강건; winding은 연결성과 무관).
-		// 삼각형 t = Positions[Indices[3t+0..2]]. 정점/질의점은 같은 좌표 공간(여기선 컴포넌트 공간)이어야 한다.
+		// Built from a triangle soup, duplicating vertices per triangle, which is robust to seams and
+		// non-manifold geometry since winding does not depend on connectivity.
+		// Triangle t is formed from the three indices starting at 3t. The vertices and the query points
+		// have to be in the same coordinate space, which here is component space.
 		FRopeSDFWindingClassifier(TConstArrayView<FVector3f> Positions, TConstArrayView<uint32> Indices)
 		{
 			if (Positions.Num() == 0 || Indices.Num() < 3)
@@ -58,14 +63,16 @@ namespace
 			{
 				return;
 			}
-			// Tree는 &Mesh를, Winding은 Tree를 가리킨다. 멤버라 객체 수명 동안 주소가 안정적이어야 하므로
-			// 이 분류기는 복사/이동하지 않고 제자리에서 쓴다(BakeMesh에서 지역 const로 생성).
+			// The tree points at the mesh and the winding object points at the tree, so as members their
+			// addresses have to stay stable for the object's lifetime. This classifier is therefore used in
+			// place and never copied or moved; BakeMesh creates it as a local constant.
 			Tree = MakeUnique<TMeshAABBTree3<FDynamicMesh3>>(&Mesh, true);
 			Winding = MakeUnique<TFastWindingTree<FDynamicMesh3>>(Tree.Get(), true);
 		}
 
-		// |generalized winding number(P)| > 0.5 이면 안쪽. 닫힌 메시 내부 |w|≈1, 바깥 ≈0의 중점이며,
-		// abs라 메시 삼각형 방향(CW/CCW)과 무관하다.
+		// A generalized winding number whose magnitude exceeds one half means inside. That is the midpoint
+		// between roughly one inside a closed mesh and roughly zero outside, and taking the magnitude makes
+		// it independent of the triangle winding order.
 		bool IsInside(const FVector& P) const
 		{
 			if (!Winding)
@@ -102,7 +109,7 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 	if (!Model || Model->LODModels.Num() == 0)
 	{
 		UE_LOG(LogRopeSDFBake, Warning, TEXT("BakeMesh aborted: %s has no CPU geometry (cooked/stripped)."), *Mesh->GetName());
-		// CPU 지오메트리 없음(쿡/스트립)
+		// No CPU geometry, as in a cooked or stripped build.
 		return ERopeSDFBakeResult::NoGeometry;
 	}
 
@@ -112,9 +119,11 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 	const FSkeletalMeshLODModel& LOD = Model->LODModels[0];
 	const FReferenceSkeleton& Ref = Mesh->GetRefSkeleton();
 
-	// --- (1) 본별 컴포넌트 공간 ref-pose 트랜스폼을 부모 체인 누적으로 구한다.
-	// 정점은 ref 포즈의 컴포넌트 공간에 저장돼 있다. 이 트랜스폼의 역이 정점을 본 로컬 공간으로 옮기며,
-	// 런타임 provider가 GetSocketTransform으로 재구성하는 프레임과 동일하다.
+	// Step one: compute each bone's component-space reference pose transform by accumulating the parent
+	// chain.
+	// The vertices are stored in the reference pose's component space, so the inverse of that transform
+	// moves them into bone-local space, and it is the same frame the runtime provider reconstructs through
+	// the socket transform.
 	const TArray<FTransform>& LocalPose = Ref.GetRefBonePose();
 	TArray<FTransform> CompSpace;
 	CompSpace.SetNum(LocalPose.Num());
@@ -124,8 +133,10 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		CompSpace[b] = (Parent == INDEX_NONE) ? LocalPose[b] : LocalPose[b] * CompSpace[Parent];
 	}
 
-	// --- (2) 평탄 정점 리스트(전역 인덱스 순, 인덱스 버퍼와 일치) + 정점별 소속 섹션.
-	// 섹션 로컬 influence 인덱스를 BoneMap을 거쳐 스켈레톤 본 인덱스로 풀려면 소속 섹션이 필요하다.
+	// Step two: build the flat vertex list, in global index order matching the index buffer, plus the
+	// section each vertex belongs to.
+	// The section is needed to resolve a section-local influence index into a skeleton bone index through
+	// the bone map.
 	TArray<FSoftSkinVertex> Verts;
 	LOD.GetVertices(Verts);
 
@@ -140,8 +151,8 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		}
 	}
 
-	// 정점이 특정 스켈레톤 본에 대해 갖는 정규화 스킨 가중치(스케일 무관: 가중치 합으로 나누므로
-	// InfluenceWeights가 8비트든 16비트든 동작).
+	// A vertex's normalized skin weight for a given skeleton bone. It is scale-independent, since it
+	// divides by the sum of the weights, so it works whether the influence weights are 8-bit or 16-bit.
 	auto WeightFor = [&](int32 Vtx, int32 BoneIdx) -> float
 	{
 		const FSoftSkinVertex& V = Verts[Vtx];
@@ -160,7 +171,8 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		return Sum > 0.0f ? Match / Sum : 0.0f;
 	};
 
-	// --- 타깃 본 집합. 입력이 비면 => 섹션 BoneMap에 등장하는 모든 본(= 스킨된 본).
+	// The target bone set. An empty input means every bone appearing in a section's bone map, that is
+	// every skinned bone.
 	TArray<int32> Targets;
 	if (BonesIn.Num() > 0)
 	{
@@ -188,9 +200,11 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 
 	const TArray<uint32>& Indices = LOD.IndexBuffer;
 
-	// --- 부호 판정용: 메시 전체로 fast-winding 분류기를 한 번 빌드한다. "안/밖"은 몸 전체(닫힌 표면)에
-	// 대한 전역 속성이라, 본별 열린 패치가 아니라 전체 메시로 winding을 봐야 강건하다(거리는 여전히 본별
-	// 삼각형으로 재므로 본 귀속은 유지된다). 정점은 컴포넌트 공간(Verts 저장 공간) 그대로, query도 동일 공간.
+	// For the sign: build the fast winding classifier once over the whole mesh. Being inside is a global
+	// property of the whole body, treated as a closed surface, so the winding has to be taken over the
+	// entire mesh rather than a bone's open patch to be robust. Distances are still measured against each
+	// bone's own triangles, which preserves the attribution. The vertices stay in component space, the
+	// space they are stored in, and the queries use that same space.
 	TArray<FVector3f> AllPositions;
 	AllPositions.Reserve(Verts.Num());
 	for (const FSoftSkinVertex& V : Verts)
@@ -203,8 +217,8 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 	int32 DoneTargets = 0;
 	for (int32 BoneIdx : Targets)
 	{
-		// 본 처리 직전에 진행 상황을 보고하고(스킵될 본 포함 — 진행률 단위는 '타깃 본'),
-		// 콜백이 false를 반환하면 즉시 중단한다.
+		// Report progress just before processing each bone, including bones that will be skipped, since the
+		// unit of progress is the target bone. A callback returning false aborts immediately.
 		if (Progress)
 		{
 			const FName BoneName = CompSpace.IsValidIndex(BoneIdx) ? Ref.GetBoneName(BoneIdx) : NAME_None;
@@ -223,7 +237,7 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		}
 		const FTransform InvBone = CompSpace[BoneIdx].Inverse();
 
-		// --- (3) 이 본의 삼각형을 본 로컬 공간으로 모으고 AABB도 함께 키운다.
+		// Step three: gather this bone's triangles into bone-local space and grow the AABB alongside.
 		TArray<FVector> TriA, TriB, TriC;
 		FBox Local(ForceInit);
 		for (const FSkelMeshSection& Sec : LOD.Sections)
@@ -249,22 +263,25 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		}
 		if (TriA.Num() == 0)
 		{
-			// 이 본에 귀속된 스킨 없음
+			// No skinned geometry is attributed to this bone.
 			continue;
 		}
 
-		// --- (3b) 가는 본 drop. AABB(확장 전 raw 살 크기) 세 변 중 가장 긴 변(=본 축)을 빼고 남은
-		// 두 단면 변의 '큰 쪽'(= 중간값)이 MinBoneGirth 미만이면 사방으로 가늘다 → 굽지 않는다(drop).
-		// 작은 변이 아니라 중간 변으로 보는 이유: 한 방향만 얇은 납작한 본을 catchable로 살려, 실수로
-		// 떨구지 않게 보수적으로 판정. (drop은 absorb와 달리 삼각형을 부모로 넘기지 않고 그냥 제외.)
+		// Step three (b): drop thin bones. Of the three sides of the raw AABB, before any expansion, the
+		// longest is the bone axis and is discarded; of the two remaining cross-section sides, the larger,
+		// that is the median, is compared against the minimum girth, and a bone thinner than that in every
+		// direction is not baked.
+		// The median rather than the smallest is used so a bone that is flat in only one direction stays
+		// catchable, which keeps the test conservative and avoids dropping one by mistake. Unlike merging,
+		// dropping does not hand the triangles to the parent and simply excludes them.
 		if (S.MinBoneGirth > 0.0f)
 		{
-			// raw 삼각형 AABB(BoundsPadding/NarrowBand 확장 전)
+		// The raw triangle AABB, before the padding and narrow band expansion.
 			const FVector E = Local.GetSize();
 			const double Girth = (E.X + E.Y + E.Z)
-				// 최장변(본 축) 제거
+				// Remove the longest side, which is the bone axis.
 				- FMath::Max3(E.X, E.Y, E.Z)
-				// 최단변 제거 → 중간값만 남음
+				// Remove the shortest side, which leaves the median.
 				- FMath::Min3(E.X, E.Y, E.Z);
 			if (Girth < S.MinBoneGirth)
 			{
@@ -278,7 +295,8 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 			}
 		}
 
-		// --- (4a) grid 크기 산정. 큐브 voxel; 축당 샘플 수가 MaxResolution(상한)을 넘으면 VoxelSize를 키워 맞춘다.
+		// Step four (a): size the grid. The voxels are cubic, and if the sample count on any axis would
+		// exceed the maximum resolution the voxel size is increased to fit.
 		Local = Local.ExpandBy(S.BoundsPadding + S.NarrowBand);
 		float Vox = FMath::Max(S.VoxelSize, KINDA_SMALL_NUMBER);
 		const FVector Size = Local.GetSize();
@@ -292,7 +310,7 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		};
 		FIntVector Res = ResFor(Vox);
 		const int32 MaxAxis = FMath::Max3(Res.X, Res.Y, Res.Z);
-		// 상한 때문에 요청 VoxelSize를 키웠는가(보고용)
+		// Whether the requested voxel size had to be increased because of the limit, for reporting.
 		bool bCoarsened = false;
 		if (MaxAxis > S.MaxResolution)
 		{
@@ -304,36 +322,41 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		Res.Y = FMath::Max(Res.Y, 2);
 		Res.Z = FMath::Max(Res.Z, 2);
 
-		// 간격이 정확히 Vox가 되고 샘플이 코너에 놓이도록 bounds를 스냅한다:
+		// Snap the bounds so the spacing is exactly the voxel size and the samples sit on corners.
 		// sample(x,y,z) = Min + (x,y,z) * Vox,  Max = Min + (Res - 1) * Vox.
 		const FVector Min = Local.Min;
 		const FVector Max = Min + FVector(Res.X - 1, Res.Y - 1, Res.Z - 1) * Vox;
 
-		// --- (4b) voxel화. 샘플마다: unsigned 거리 = (이 본) 최소 점-삼각형 거리, 부호 = 전체 메시 fast-winding.
-		// 평탄 인덱스 배치 단위로 병렬화한다(거리 삼각형·winding 트리 모두 읽기 전용이라 경쟁 없음).
-		// TArray는 int32 카운트라 선형 인덱스도 int32 유지. Res는 MaxResolution으로 상한
-		// (기본 48 => 48^3 ~ 110k)이라 범위 내.
+		// Step four (b): voxelize. For each sample the unsigned distance is the minimum point-to-triangle
+		// distance against this bone, and the sign comes from the whole-mesh fast winding.
+		// It is parallelized over batches of flat indices; both the distance triangles and the winding tree
+		// are read-only, so there is no contention.
+		// Arrays are counted with a 32-bit integer, so the linear index stays 32-bit as well. The resolution
+		// is capped by the maximum resolution setting, which keeps it comfortably in range.
 		const int32 Count = Res.X * Res.Y * Res.Z;
-		// 1패스: 부호 있는 거리(cm, float)를 임시로 모은다 → 본별 안쪽 밴드(NB_in)를 데이터에서 산출한 뒤
-		// 2패스에서 비대칭 양자화한다(안쪽=내부 최대 깊이, 바깥=설정 감지 밴드). RawDist는 인덱스별 독립이라 병렬 안전.
+		// The first pass collects the signed distances as floats. The inward band is then derived per bone
+		// from that data, and the second pass quantizes asymmetrically, with the inward band being the
+		// deepest interior distance and the outward band the configured detection band. Each raw distance
+		// is independent per index and therefore safe to compute in parallel.
 		TArray<float> RawDist;
 		RawDist.SetNumUninitialized(Count);
 
-		// 거리(unsigned)는 이 본 삼각형으로
+		// The distance is measured against this bone's triangles.
 		const int32 NumTris = TriA.Num();
-		// 본 로컬 샘플점 → 컴포넌트 공간(분류기와 동일 프레임)
+		// Converts a bone-local sample point into component space, which is the classifier's frame.
 		const FTransform& BoneToComp = CompSpace[BoneIdx];
 
-		// 평탄 인덱스(Flat = x + y*X + z*X*Y) 하나의 부호 있는 거리를 계산해 기록한다.
+		// Computes and stores the signed distance for one flat index.
 		auto ComputeSample = [&](int32 Flat)
 		{
 			const int32 x = Flat % Res.X;
 			const int32 y = (Flat / Res.X) % Res.Y;
 			const int32 z = Flat / (Res.X * Res.Y);
-			// 본 로컬
+			// In bone-local space.
 			const FVector P = Min + FVector(x, y, z) * Vox;
 
-			// 거리(unsigned): 이 본 삼각형까지의 최소 점-삼각형 거리 → 본 귀속 유지.
+			// The unsigned distance: the minimum point-to-triangle distance against this bone's triangles,
+			// which preserves the attribution.
 			float Best = BIG_NUMBER;
 			for (int32 k = 0; k < NumTris; ++k)
 			{
@@ -341,18 +364,21 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 				Best = FMath::Min(Best, static_cast<float>(FVector::Dist(P, CP)));
 			}
 
-			// 부호(안/밖): 전체 메시 fast-winding으로 가른다(본별 열린 패치는 짧고 넓은 토막의 내부를
-			// 바깥 오판하므로 전역 메시로 봐야 강건). 샘플점을 컴포넌트 공간으로 올려 질의한다.
+			// The sign, meaning inside or outside, comes from the whole-mesh fast winding, because a bone's
+			// open patch misjudges the interior of a short, wide segment as outside. The sample point is
+			// lifted into component space to query it.
 			const FVector Pc = BoneToComp.TransformPosition(P);
-			// 안쪽 음수 / 바깥 양수
+			// Negative inside and positive outside.
 			RawDist[Flat] = WindingClassifier.IsInside(Pc) ? -Best : Best;
 		};
 
-		// 게임 스레드가 취소 버튼을 처리할 수 있도록 무거운 본을 여러 배치로 쪼개고, 배치 사이에서 취소를
-		// 폴링한다. 배치 내부는 그대로 ParallelFor로 전 코어를 쓰며(평탄 인덱스 분할은 결과에 영향 없음),
-		// 가벼운 본은 NumBatches==1이라 기존과 동일한 단일 ParallelFor가 된다.
+		// A heavy bone is split into several batches, with a cancellation poll between them, so the game
+		// thread can process the cancel button. Within a batch it still uses every core through a parallel
+		// loop, and splitting by flat index does not affect the result; a light bone ends up with a single
+		// batch and behaves exactly as one parallel loop.
 		const int64 Work = static_cast<int64>(Count) * static_cast<int64>(FMath::Max(NumTris, 64));
-		// 배치당 대략의 연산량. UI 갱신 throttle(0.2s)보다 짧게 유지해 취소가 즉각 반응하도록 작게 잡는다.
+		// The approximate work per batch. It is kept small, shorter than the UI update throttle, so
+		// cancelling responds immediately.
 		const int64 TargetOpsPerBatch = 1024 * 1024;
 		const int32 NumBatches = static_cast<int32>(FMath::Clamp<int64>(Work / TargetOpsPerBatch, 1, Count));
 		const int32 PerBatch = FMath::DivideAndRoundUp(Count, NumBatches);
@@ -369,29 +395,35 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 			ParallelFor(End - Start, [&](int32 i) { ComputeSample(Start + i); });
 		}
 
-		// --- (4c) 본별 비대칭 밴드 확정 + uint8 양자화(2패스). 바깥 밴드(NB_out)=설정 감지 밴드,
-		// 안쪽 밴드(NB_in)=이 본 내부 최대 깊이(가장 음수인 거리의 크기)로 자동 → 몸통 내부 전체가 밴드
-		// 안에 들어와 깊이 박힌 노드도 최근접 표면 방향으로 회복한다. 안쪽 복셀은 이미 그리드에 존재하므로
-		// 밴드를 넓혀도 복셀 수 불변(0 비용); 대가는 양자화 스텝 = (NB_in+NB_out)/255 가 커지는 것뿐이다.
-		// 가장 음수인 거리(내부 최대 깊이). 내부가 없으면 0 유지 → NB_in 0(바깥에 전체 코드 배분).
+		// Step four (c): settle the per-bone asymmetric bands and quantize, in two passes. The outward band
+		// is the configured detection band, while the inward band is derived automatically as this bone's
+		// deepest interior distance, that is the magnitude of the most negative value, so the whole interior
+		// falls within the band and even a deeply penetrating node recovers towards the nearest surface.
+		// The interior voxels already exist in the grid, so widening the band does not change the voxel
+		// count and costs nothing; the only price is a larger quantization step, since the step is the total
+		// band range divided by the code range.
+		// The most negative distance, that is the deepest interior. With no interior it stays at zero, which
+		// leaves the inward band at zero and allocates the whole code range outwards.
 		float MinD = 0.0f;
 		for (int32 i = 0; i < Count; ++i)
 		{
 			MinD = FMath::Min(MinD, RawDist[i]);
 		}
-		// >= 0 (내부 최대 깊이)
+		// At or above zero; the deepest interior distance.
 		const float NBIn = -FMath::Min(MinD, 0.0f);
-		// 설정 바깥 감지 밴드(0 나눗셈 방지)
+		// The configured outward detection band, floored to avoid dividing by zero.
 		const float NBOut = FMath::Max(S.NarrowBand, KINDA_SMALL_NUMBER);
-		// 설정 비트수
+		// The configured bit depth.
 		const int32 BytesPerCode = (S.Quantization == ERopeSDFQuantBits::UInt16) ? 2 : 1;
 
-		// 양자화 코드 바이트 블롭(복셀당 BytesPerCode, [-NBIn,+NBOut]→[0,MaxCode]).
+		// The blob of quantization codes, holding the configured bytes per voxel and mapping the band range
+		// onto the code range.
 		TArray<uint8> Distances;
 		Distances.SetNumUninitialized(Count * BytesPerCode);
 		ParallelFor(Count, [&](int32 i)
 		{
-			// [-NBIn,+NBOut] clamp + 양자화(EncodeInto가 clamp/바이트 저장 포함). 바깥쪽 양수(frozen FRopeContact 계약).
+			// Clamp to the band and quantize; the encoder handles both the clamping and the byte storage.
+			// Positive is outside, as the frozen contact contract requires.
 			FRopeBoneSDFVolume::EncodeInto(Distances, i, RawDist[i], NBIn, NBOut, BytesPerCode);
 		});
 
@@ -400,11 +432,13 @@ ERopeSDFBakeResult FRopeSDFBaker::BakeMesh(USkeletalMesh* Mesh, const TArray<FNa
 		Volume.LocalBounds = FBox(Min, Max);
 		Volume.Resolution = Res;
 		Volume.VoxelSize = Vox;
-		// dequant: 코드 0 → -NBIn (본별 자동, 내부 커버)
+		// Dequantization: code zero maps to the negative inward band, which is derived per bone and covers
+		// the interior.
 		Volume.NarrowBandInner = NBIn;
-		// dequant: 코드 max → +NBOut (설정 감지 밴드)
+		// Dequantization: the maximum code maps to the positive outward band, which is the configured
+		// detection band.
 		Volume.NarrowBandOuter = NBOut;
-		// 바이트 레이아웃(1 or 2바이트/복셀)
+		// The byte layout, of one or two bytes per voxel.
 		Volume.QuantBits = S.Quantization;
 		Volume.Distances = MoveTemp(Distances);
 		const float StepCm = (NBIn + NBOut) / static_cast<float>((BytesPerCode >= 2) ? 65535 : 255);

@@ -2,14 +2,15 @@
 
 #include "Collision/RopeBodyColliderExtraction.h"
 #include "PhysicsEngine/BodySetup.h"
-// FKConvexElem::GetPlanes(월드 평면 추출)
+// FKConvexElem::GetPlanes, for extracting world planes.
 #include "PhysicsEngine/ConvexElem.h"
 
 namespace
 {
-	// elem 로컬 → 월드 변환 행렬. UE 컨벡스 규약(FKConvexElem::CalcAABB): WT = ElemTM * Scale * Comp(무스케일).
-	// 스케일을 회전/이동과 분리해 매트릭스로 합성한다(FTransform은 전단 표현 불가) — 비균등 스케일 × 회전에서도
-	// 평면이 정확히 변환된다.
+	// The element-local to world matrix. Unreal's convex convention, as in FKConvexElem::CalcAABB, is the element
+	// transform composed with the scale and then with the unscaled component transform. The scale is separated from
+	// the rotation and translation and composed as a matrix, since FTransform cannot represent shear, so the planes
+	// transform exactly even under a non-uniform scale combined with a rotation.
 	FMatrix ComposeConvexToWorld(const FTransform& ElemTM, const FVector& Scale3D, const FTransform& CompTM)
 	{
 		FTransform CompNoScale = CompTM;
@@ -17,15 +18,18 @@ namespace
 		return ElemTM.ToMatrixWithScale() * FScaleMatrix(Scale3D) * CompNoScale.ToMatrixWithScale();
 	}
 
-	// 바디-로컬 변환(elem + 스케일, 컴포넌트 강체 rot/trans 제외). 월드 = 바디로컬 ∘ 강체(컴포넌트 rot/trans).
-	// 강체만 프레임 간 움직이므로(스케일 불변 가정) 바디-로컬 평면은 불변 → 동적 바디의 sub-포즈 강체 보간용.
+	// The body-local transform, meaning the element and the scale but excluding the component's rigid rotation and
+	// translation, so that world space is the body-local space composed with that rigid transform. Only the rigid
+	// part moves between frames, assuming the scale is constant, so the body-local planes are invariant, which is
+	// what allows a dynamic body's substep pose to be interpolated rigidly.
 	FMatrix ComposeConvexBodyLocal(const FTransform& ElemTM, const FVector& Scale3D)
 	{
 		return ElemTM.ToMatrixWithScale() * FScaleMatrix(Scale3D);
 	}
 
-	// 로컬 평면 집합을 월드로 변환 + 정규화(단위 법선·바깥). FPlane::TransformBy가 역전치로 법선을 올바르게
-	// 변환하므로 전단에서도 정확 — 단 길이가 변하므로 (N,W)를 |N|으로 나눠 정규화한다.
+	// Transforms a set of local planes into world space and normalizes them to unit outward normals.
+	// FPlane::TransformBy transforms the normal correctly through the inverse transpose and is therefore exact even
+	// under shear, but the length changes, so the plane is divided by the normal's length.
 	void TransformPlanesToWorld(const TArray<FPlane>& Local, const FMatrix& M, TArray<FPlane>& OutWorld)
 	{
 		OutWorld.Reset(Local.Num());
@@ -41,7 +45,7 @@ namespace
 		}
 	}
 
-	// 로컬 박스(중심 원점, 반폭 Half)의 6평면(바깥 법선 ±축). 전단 박스를 컨벡스로 정확히 라우팅할 때 쓴다.
+	// The six planes, with outward axis normals, of a local box centred on the origin with the given half extents. Used to route a sheared box to a convex exactly.
 	TArray<FPlane> MakeBoxLocalPlanes(const FVector& Half)
 	{
 		TArray<FPlane> P;
@@ -67,8 +71,9 @@ namespace RopeBodyColliderExtraction
 		const FVector Scale3D = CompTM.GetScale3D();
 		const auto BudgetLeft = [&]() { return OutBoxes.Num() + OutCapsules.Num() + OutConvexes.Num() < MaxColliders; };
 
-		// sphyl: 스킨 캡슐 provider와 동일한 스케일 규약(GetScaledRadius/CylinderLength). 동적이면 prev 끝점도
-		// 채워 FCapsuleCollider의 표면 속도/substep CCD machinery를 그대로 탄다(셰이더/GPU 변경 불필요).
+		// A sphyl uses the same scale convention as the skinned capsule provider, GetScaledRadius and
+		// CylinderLength. A dynamic one also fills in the previous endpoints so it rides the existing surface
+		// velocity and substep CCD machinery of FCapsuleCollider with no shader or GPU change.
 		for (const FKSphylElem& Sphyl : Setup.AggGeom.SphylElems)
 		{
 			if (!BudgetLeft())
@@ -76,7 +81,7 @@ namespace RopeBodyColliderExtraction
 				return false;
 			}
 			const FTransform ElemTM = Sphyl.GetTransform() * CompTM;
-			// sphyl 축 = 로컬 Z.
+			// A sphyl's axis is its local Z.
 			const FVector Axis = ElemTM.GetUnitAxis(EAxis::Z);
 			const FVector Center = ElemTM.GetLocation();
 			const float HalfLen = Sphyl.GetScaledCylinderLength(Scale3D) * 0.5f;
@@ -95,7 +100,7 @@ namespace RopeBodyColliderExtraction
 			OutCapsules.Add(MoveTemp(Cap));
 		}
 
-		// sphere: A==B 축퇴 캡슐.
+		// A sphere is a degenerate capsule whose endpoints coincide.
 		for (const FKSphereElem& Sphere : Setup.AggGeom.SphereElems)
 		{
 			if (!BudgetLeft())
@@ -117,21 +122,22 @@ namespace RopeBodyColliderExtraction
 			OutCapsules.Add(MoveTemp(Cap));
 		}
 
-		// box: 해석적 OBB — 모서리 정확 처리의 본체. X/Y/Z는 전체 길이. 전단(비균등 스케일 × 회전 elem)만
-		// 6평면 컨벡스로 정확히 라우팅한다(OBB로는 표현 불가). 나머지는 정확한 OBB.
+		// A box is an analytic OBB, which is the substance of handling corners exactly. The X, Y and Z are full
+		// lengths. Only a shear, meaning an element with a non-uniform scale combined with a rotation, is routed to a
+		// six-plane convex to stay exact, since an OBB cannot represent it. Everything else is an exact OBB.
 		for (const FKBoxElem& Box : Setup.AggGeom.BoxElems)
 		{
 			if (!BudgetLeft())
 			{
 				return false;
 			}
-			// elem 공간 반폭(스케일 전).
+			// The half extents in element space, before the scale.
 			const FVector HalfLocal(Box.X * 0.5, Box.Y * 0.5, Box.Z * 0.5);
 			const FVector AbsScale = Scale3D.GetAbs();
 			const bool bUniform = FMath::IsNearlyEqual(AbsScale.GetMax(), AbsScale.GetMin(), UE_KINDA_SMALL_NUMBER);
 			if (bUniform || Box.Rotation.IsNearlyZero())
 			{
-				// 정확 OBB: 균등 스케일(전 축 동일) 또는 elem 회전 identity(컴포넌트 축 정렬 → 축별 스케일 정확).
+			// An exact OBB, when the scale is uniform across all axes or the element rotation is the identity, meaning it is aligned to the component axes so the per-axis scale is exact.
 				const FTransform ElemTM = Box.GetTransform() * CompTM;
 				const FVector Half = bUniform ? HalfLocal * AbsScale.X : HalfLocal * AbsScale;
 				FRopeBoxCollider BoxCol(ElemTM.GetLocation(), ElemTM.GetRotation(), Half);
@@ -148,8 +154,9 @@ namespace RopeBodyColliderExtraction
 			}
 			else
 			{
-				// 전단: 6평면 컨벡스로 정확히(평면은 전단 행렬로도 정확 변환). 바디-로컬 평면 + 컴포넌트 강체로
-				// 저장해 동적(움직이는 전단 박스)도 지원. M1의 min-scale 근사를 대체.
+				// Shear, handled exactly as a six-plane convex, since planes transform exactly even under a shear
+				// matrix. It is stored as body-local planes plus the component's rigid transform, so a moving sheared
+				// box is supported too.
 				TArray<FPlane> LocalPlanes;
 				const FMatrix BodyLocalM = ComposeConvexBodyLocal(Box.GetTransform(), Scale3D);
 				TransformPlanesToWorld(MakeBoxLocalPlanes(HalfLocal), BodyLocalM, LocalPlanes);
@@ -170,8 +177,9 @@ namespace RopeBodyColliderExtraction
 			}
 		}
 
-		// convex: Chaos convex의 평면 집합을 월드로 변환해 해석적 컨벡스 collider로. 미쿡(빈 평면)이거나
-		// 평면 과다(>상한)면 ElemBox를 OBB 근사로 폴백해 충돌을 통째로 잃지 않는다.
+		// A convex transforms the Chaos convex's plane set into world space as an analytic convex collider. When it
+		// is uncooked, meaning the plane set is empty, or has more planes than the limit, it falls back to the
+		// element box as an OBB approximation rather than losing the collision entirely.
 		for (const FKConvexElem& Convex : Setup.AggGeom.ConvexElems)
 		{
 			if (!BudgetLeft())
@@ -185,7 +193,7 @@ namespace RopeBodyColliderExtraction
 			if (ElemPlanes.Num() >= 4 && ElemPlanes.Num() <= MaxConvexPlanes && Convex.ElemBox.IsValid)
 			{
 				TArray<FPlane> LocalPlanes;
-				// elem -> 바디로컬(강체 제외).
+				// Element space to body-local space, excluding the rigid transform.
 				TransformPlanesToWorld(ElemPlanes, BodyLocalM, LocalPlanes);
 				const FBox LB = Convex.ElemBox.TransformBy(BodyLocalM);
 				if (LocalPlanes.Num() >= 4 && LB.IsValid)
@@ -204,7 +212,8 @@ namespace RopeBodyColliderExtraction
 				}
 			}
 
-			// 폴백: ElemBox OBB 근사(미쿡/평면 과다/무효). 거칠지만 충돌 유지 > 통째 누락. 정적으로 처리(드문 경로).
+			// The fallback, an element box OBB approximation, taken when the convex is uncooked, has too many planes
+			// or is invalid. It is coarse, but keeping a collision beats losing one. It is treated as static, this being a rare path.
 			if (Convex.ElemBox.IsValid)
 			{
 				const FMatrix M = ComposeConvexToWorld(Convex.GetTransform(), Scale3D, CompTM);
@@ -212,7 +221,7 @@ namespace RopeBodyColliderExtraction
 				const FQuat   RotW = M.GetMatrixWithoutScale().ToQuat();
 				const FVector HalfW = Convex.ElemBox.GetExtent() * static_cast<float>(Scale3D.GetAbsMin());
 				FRopeBoxCollider FallbackBox(CenterW, RotW, HalfW);
-				// 귀속 모드면 폴백 OBB도 다른 요소와 똑같이 랩 가능으로 귀속한다.
+			// In attributed mode the fallback OBB is attributed as wrappable exactly like any other element.
 				FallbackBox.Bone = AttributionBone;
 				FallbackBox.SourceMesh = AttributionMesh;
 				OutBoxes.Add(MoveTemp(FallbackBox));

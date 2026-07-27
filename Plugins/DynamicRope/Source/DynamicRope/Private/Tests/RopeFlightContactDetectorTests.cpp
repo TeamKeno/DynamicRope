@@ -1,7 +1,8 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// FRopeFlightContactDetector 단위 테스트 — Flight 접촉 감지 파이프라인(실제/예측 접촉 수집,
-// 상대운동 평가, 캡처 판정)을 월드 없이 POD fixture + mock collider로 검증한다.
+// Unit tests for FRopeFlightContactDetector. They verify the flight contact pipeline, meaning the collection of
+// actual and predicted contacts, the relative motion evaluation and the capture decision, with no world, using a POD
+// fixture and a mock collider.
 
 #include "Misc/AutomationTest.h"
 
@@ -27,14 +28,14 @@ namespace
 	}
 }
 
-// 정지 로프가 collider 반경 안에 있으면 해당 노드들이 Actual 후보로 수집되는가.
+// Whether the nodes of a stationary rope inside a collider's radius are collected as actual candidates.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightDetectActualTest,
 	"DynamicRope.FlightContact.DetectsActualContactAlongPath",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeFlightDetectActualTest::RunTest(const FString& Parameters)
 {
-	// 노드 x = 0,20,...,140. Arm(center 60, r25)+ContactRadius 3 = reach 28 → 노드 40/60/80 접촉(3개).
+	// The nodes are at x = 0, 20 up to 140. An arm centred at 60 with radius 25 plus a contact radius of 3 gives a reach of 28, so the nodes at 40, 60 and 80 contact, giving three.
 	const FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	RopeTest::FSphereMockCollider Arm(FVector(60.0f, 0.0f, 0.0f), 25.0f, FName("arm"));
 	TArray<IRopeCollider*> Colliders = { &Arm };
@@ -52,9 +53,10 @@ bool FRopeFlightDetectActualTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 빠른 노드가 얇은 대상을 샘플 사이로 통과하지 않는가(터널링).
-// 종전 샘플링은 간격을 SegmentLength(=20cm) 기준으로 잡고 4개로 잘라, 100cm 이동에서 25cm 간격이 됐다 —
-// 두께 몇 cm짜리 팔뚝/난간은 그 사이로 그냥 지나갔고 CPU/GPU가 똑같이 틀려 parity 테스트도 통과했다.
+// Whether a fast node passes through a thin target between samples, meaning tunnelling.
+// The previous sampling took its spacing from the segment length of 20 cm and cut it into four, giving a spacing of
+// 25 cm over a movement of 100 cm; a forearm or railing a few centimetres thick simply passed between them, and
+// because the CPU and the GPU were wrong in the same way the parity test passed as well.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightThinColliderTunnelTest,
 	"DynamicRope.FlightContact.FastNodeDoesNotTunnelThinCollider",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -63,8 +65,8 @@ bool FRopeFlightThinColliderTunnelTest::RunTest(const FString& Parameters)
 {
 	const FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 
-	// 한 프레임에 100cm 이동(x=0 → 100). 두께 3cm 대상이 x=60에 있고 질의 반경 1 → 도달 반경 4cm.
-	// 옛 간격 25cm에서는 샘플이 50과 75라 둘 다 4cm 밖(3.75cm 초과)이라 놓쳤다.
+	// A movement of 100 cm in one frame, from x = 0 to 100. A target 3 cm thick sits at x = 60 and the query radius is
+	// 1, giving a reach of 4 cm. At the old spacing of 25 cm the samples were at 50 and 75, both outside that reach, and it was missed.
 	const FVector Prev(0.0f, 0.0f, 0.0f);
 	const FVector Curr(100.0f, 0.0f, 0.0f);
 	RopeTest::FSphereMockCollider Thin(FVector(60.0f, 0.0f, 0.0f), 3.0f, FName("forearm"));
@@ -76,21 +78,21 @@ bool FRopeFlightThinColliderTunnelTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("thin collider is found along a fast path"), Hit.bHit);
 	TestTrue(TEXT("contact is attributed to the thin bone"), Hit.Bone == FName("forearm"));
 
-	// 상한을 4로 낮추면 간격이 25cm로 되돌아가 다시 놓친다 — 이 테스트가 간격 자체를 보고 있음을 고정한다.
+	// Lowering the cap to four returns the spacing to 25 cm and it is missed again, which pins that this test is watching the spacing itself.
 	Params.ContactMaxSweepSamples = 4;
 	const FRopeContact Missed = FRopeFlightContactDetector::SweepOrSampleContact(Sim, Prev, Curr, Colliders, Params);
 	TestFalse(TEXT("a 4-sample cap tunnels through it again"), Missed.bHit);
 	return true;
 }
 
-// dominant bone 접촉 노드 수가 MinLatchNodes 문턱을 넘을 때만 캡처 판정하는가.
+// Whether a capture is decided only once the dominant bone's contact node count passes the minimum latch node threshold.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightShouldCaptureTest,
 	"DynamicRope.FlightContact.ShouldCaptureRespectsMinLatchNodes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeFlightShouldCaptureTest::RunTest(const FString& Parameters)
 {
-	// 위 테스트와 같은 fixture → 노드 3개 접촉.
+	// The same fixture as the test above, giving three contacting nodes.
 	const FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	RopeTest::FSphereMockCollider Arm(FVector(60.0f, 0.0f, 0.0f), 25.0f, FName("arm"));
 	TArray<IRopeCollider*> Colliders = { &Arm };
@@ -110,7 +112,7 @@ bool FRopeFlightShouldCaptureTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Assisted 정책은 조준 본을 dominant로 고르되 같은 mesh의 다른 본도 secondary target으로 보존하는가.
+// Whether the assisted policy picks the aimed bone as dominant while preserving other bones on the same mesh as secondary targets.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightCaptureEvaluationPolicyTest,
 	"DynamicRope.FlightContact.EvaluationSharesPreferredTracker",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -159,15 +161,15 @@ bool FRopeFlightCaptureEvaluationPolicyTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 아직 닿지 않았지만 이동 방향 외삽 경로가 collider를 지나는 tail 노드가 PredictiveFree로 승격되는가.
+// Whether a tail node that has not yet touched anything, but whose extrapolated path along its movement direction passes through a collider, is promoted to a free predictive candidate.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightPredictFreeTest,
 	"DynamicRope.FlightContact.PredictsFreeNodeContactAhead",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeFlightPredictFreeTest::RunTest(const FString& Parameters)
 {
-	// tip(노드 7, x=140)이 +X로 프레임당 20 이동 중. Arm(center 180, r10)+3 = reach 13 →
-	// 현재 위치(140)는 접촉 밖이지만 3프레임 외삽(140→200) 경로가 sphere를 관통한다.
+	// The tip, node 7 at x = 140, is moving along positive X at 20 per frame. An arm centred at 180 with radius 10 plus
+	// 3 gives a reach of 13, so the current position at 140 is outside contact but the three-frame extrapolation from 140 to 200 passes through the sphere.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	Sim.PrevPositions[7] = FVector(120.0f, 0.0f, 0.0f);
 	RopeTest::FSphereMockCollider Arm(FVector(180.0f, 0.0f, 0.0f), 10.0f, FName("arm"));
@@ -191,15 +193,15 @@ bool FRopeFlightPredictFreeTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// whip 가이드 노드의 현재→다음 타깃 외삽 경로에서 PredictiveGuided 후보가 나오는가.
+// Whether a guided predictive candidate comes out of the extrapolated path from a whip guide node's current target to its next one.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightPredictGuidedTest,
 	"DynamicRope.FlightContact.PredictsGuidedNodeContactFromTargets",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeFlightPredictGuidedTest::RunTest(const FString& Parameters)
 {
-	// 노드 2만 가이드. 현재 타깃 (50,0,50) → 다음 타깃 (50,0,25), 2프레임 외삽 → (50,0,0).
-	// Arm(center (50,0,0), r5)+3 = reach 8: 외삽 경로 끝이 sphere 중심을 때린다.
+	// Node 2 alone is guided. Its current target is (50,0,50) and its next is (50,0,25), so a two-frame extrapolation
+	// reaches (50,0,0). An arm centred at (50,0,0) with radius 5 plus 3 gives a reach of 8, so the end of the extrapolated path strikes the sphere's centre.
 	const FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f);
 	RopeTest::FSphereMockCollider Arm(FVector(50.0f, 0.0f, 0.0f), 5.0f, FName("arm"));
 	TArray<IRopeCollider*> Colliders = { &Arm };
@@ -339,8 +341,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightGuidedFastSweepBudgetTest,
 bool FRopeFlightGuidedFastSweepBudgetTest::RunTest(const FString& Parameters)
 {
 	FRopeSimState Sim = RopeTest::MakeStraightRope(4, 60.0f, FVector(0.0f, 100.0f, 0.0f));
-	// 400cm / default cap16 = 25cm spacing. x=12.5의 reach 4cm target은 두 샘플 사이에 완전히
-	// 놓이지만 reliable guided budget은 기본 2cm step을 유지해 잡아야 한다.
+	// 400 cm at the default cap of 16 gives a spacing of 25 cm. A target at x = 12.5 with a reach of 4 cm falls
+	// entirely between two samples, but the reliable guided budget has to keep its default step of 2 cm and catch it.
 	RopeTest::FSphereMockCollider ThinTarget(FVector(12.5f, 0.0f, 0.0f), 3.0f, FName("forearm_l"));
 	TArray<IRopeCollider*> Colliders = { &ThinTarget };
 
@@ -463,14 +465,14 @@ bool FRopeFlightAssistedPrimaryShadowTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 감김 방향 점수: 손 쪽으로 미끄러지면 +, 반대면 -, 표면과 같이 움직이면(상대속도 0) 0인가.
+// The wrap direction score: positive when sliding towards the hand, negative when sliding away, and zero when moving with the surface, meaning a relative velocity of zero.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightWrapDirectionScoreTest,
 	"DynamicRope.FlightContact.WrapDirectionScoreSign",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeFlightWrapDirectionScoreTest::RunTest(const FString& Parameters)
 {
-	// 손(노드 0)이 원점, 접촉 노드 1이 (100,0,0). 표면 normal +Z → 접선면은 XY.
+	// The hand at node zero is at the origin and the contacting node 1 is at (100,0,0). The surface normal is positive Z, so the tangent plane is XY.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(2, 100.0f);
 	const FRopeFlightContactDetector::FParams Params = MakeDetectParams();
 
@@ -481,7 +483,7 @@ bool FRopeFlightWrapDirectionScoreTest::RunTest(const FString& Parameters)
 	Candidate.WorldPoint = FVector(100.0f, 0.0f, 0.0f);
 	Candidate.Normal = FVector::UpVector;
 
-	// 손 쪽(-X)으로 5 이동 → 기대 감김 접선과 정렬 → 점수 +1.
+	// Moving 5 towards the hand along negative X aligns with the expected wrap tangent, giving a score of plus one.
 	Sim.PrevPositions[1] = FVector(105.0f, 0.0f, 0.0f);
 	TArray<FRopeContactCandidate> Candidates = { Candidate };
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, Params, Candidates);
@@ -489,18 +491,18 @@ bool FRopeFlightWrapDirectionScoreTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("tangential speed matches displacement"),
 		FMath::IsNearlyEqual(Candidates[0].RelativeTangentialSpeed, 5.0f, 0.01f));
 
-	// 반대(+X) 이동 → 점수 -1.
+	// Moving the other way, along positive X, gives minus one.
 	Sim.PrevPositions[1] = FVector(95.0f, 0.0f, 0.0f);
 	Candidates = { Candidate };
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, Params, Candidates);
 	TestTrue(TEXT("away-from-hand slide scores negative"), Candidates[0].WrapDirectionScore < -0.9f);
 
-	// 표면이 로프와 같은 속도로 움직이면(상대속도 0) 미끄러짐 없음.
-	// SurfaceVelocity는 cm/s 계약이므로 substep dt를 명시하고, 변위 -5cm와 등속이 되는 cm/s 값을 넣는다.
+	// A surface moving at the same velocity as the rope, giving a relative velocity of zero, means no sliding.
+	// The surface velocity is contractually in centimetres per second, so the substep delta is stated and a value giving the same speed as a displacement of minus 5 cm is used.
 	FRopeFlightContactDetector::FParams DtParams = Params;
 	DtParams.SubstepDeltaTime = 0.02f;
 	Sim.PrevPositions[1] = FVector(105.0f, 0.0f, 0.0f);
-	// -250cm/s × 0.02s = -5cm(이 변위의 substep 폭)
+	// Minus 250 cm/s over 0.02 s is minus 5 cm, which is this displacement over the substep.
 	Candidate.SurfaceVelocity = FVector(-250.0f, 0.0f, 0.0f);
 	Candidates = { Candidate };
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DtParams, Candidates);
@@ -510,16 +512,17 @@ bool FRopeFlightWrapDirectionScoreTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 캡처 순간 진행 좌표계 스냅샷(FRopeCaptureTravelFrame::Compute, 진행 방향 기반 wrap 2단계):
-// 접촉 영역 중심/평균 속도/누운 방향에서 진행 평면 normal(속도×span)을 유도하고,
-// 속도와 span이 평행(창던지기)이거나 dt=0이면 normal 없이(bHasPlaneNormal=false) 폴백 신호를 남긴다.
+// The travel frame snapshot taken at the moment of capture, FRopeCaptureTravelFrame::Compute: it derives the travel
+// plane normal, the cross product of velocity and span, from the contact region's centre, its mean velocity and the
+// direction the rope lies along, and when the velocity and the span are parallel, as in a spear throw, or the delta
+// is zero, it leaves a fallback signal with no normal, meaning the plane normal flag is false.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeCaptureTravelFrameTest,
 	"DynamicRope.FlightContact.CaptureTravelFrameSnapshot",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeCaptureTravelFrameTest::RunTest(const FString& Parameters)
 {
-	// 로프는 Y로 누워 있고(노드 간격 20) 전체가 +X로 비행 중(프레임당 10cm, dt 0.1 → 100cm/s).
+	// The rope lies along Y with a node spacing of 20 and the whole of it is flying along positive X at 10 cm per frame, which at a delta of 0.1 is 100 cm/s.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(8, 140.0f, FVector::ZeroVector, FVector(0, 1, 0));
 	for (int32 Index = 0; Index < Sim.Num(); ++Index)
 	{
@@ -550,7 +553,7 @@ bool FRopeCaptureTravelFrameTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("plane normal is Z"),
 		FMath::Abs(FVector::DotProduct(Frame.PlaneNormal, FVector(0, 0, 1))) > 0.99f);
 
-	// 축퇴 ①: 창던지기 — 로프가 누운 방향(+Y)으로 그대로 비행하면 normal을 만들 수 없다.
+	// Degenerate case one, the spear throw: a rope flying straight along the direction it lies in, positive Y, admits no normal.
 	for (int32 Index = 0; Index < Sim.Num(); ++Index)
 	{
 		Sim.PrevPositions[Index] = Sim.Positions[Index] - FVector(0.0f, 10.0f, 0.0f);
@@ -559,7 +562,7 @@ bool FRopeCaptureTravelFrameTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("javelin frame still captured"), Javelin.bValid);
 	TestTrue(TEXT("javelin flight yields no plane normal"), !Javelin.bHasPlaneNormal);
 
-	// 축퇴 ②: dt=0 — 속도 환산 불가. 스냅샷은 유효하되 normal 없음.
+	// Degenerate case two, a delta of zero: the velocity cannot be converted. The snapshot stays valid but has no normal.
 	const FRopeCaptureTravelFrame NoDt = FRopeCaptureTravelFrame::Compute(Sim, Candidates, 0.0f);
 	TestTrue(TEXT("zero-dt frame still captured"), NoDt.bValid);
 	TestTrue(TEXT("zero-dt velocity is zero"), NoDt.AverageVelocity.IsNearlyZero());

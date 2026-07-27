@@ -15,26 +15,26 @@
 
 ARopeDemoElevator::ARopeDemoElevator()
 {
-	// 승강 구동 + 그래플 확립 폴링에 틱이 필요하다.
+	// Driving the lift and polling for the grapples to be established both need a tick.
 	PrimaryActorTick.bCanEverTick = true;
 
 	Platform = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Platform"));
 	SetRootComponent(Platform);
-	// 200x200x20cm 판(엔진 큐브 100cm 기준). 물리 바디 = climb-in 견인 수신자(SimBody).
+	// A 200 x 200 x 20 cm plate, based on the engine's 100 cm cube. Its physics body is the receiver for climb-in traction, being a simulating body.
 	Platform->SetRelativeScale3D(FVector(2.0f, 2.0f, 0.2f));
 	Platform->SetMobility(EComponentMobility::Movable);
 	Platform->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Platform->SetCollisionObjectType(ECC_PhysicsBody);
 	Platform->SetSimulatePhysics(true);
 
-	// 콘텐츠 의존을 만들지 않으려고 엔진 기본 셰이프만 쓴다(플러그인 → /Game 참조 금지).
+	// Engine primitive shapes alone, to avoid creating a content dependency, since a plugin must not reference /Game.
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	if (CubeMesh.Succeeded())
 	{
 		Platform->SetStaticMesh(CubeMesh.Object);
 	}
 
-	// 네 모서리 케이블 — 플랫폼 윗면(±80, ±80, +10cm)에서 각각 천장 앵커를 감는다.
+	// The four corner cables, each of which wraps a ceiling anchor from the platform's top face at plus or minus 80 in X and Y and 10 cm up.
 	const FVector Corners[NumRopes] = {
 		FVector( 80.0f,  80.0f, 10.0f),
 		FVector( 80.0f, -80.0f, 10.0f),
@@ -49,7 +49,7 @@ ARopeDemoElevator::ARopeDemoElevator()
 		{
 			Cable->SetupAttachment(Platform);
 			Cable->SetRelativeLocation(Corners[Index]);
-			// 천장 앵커를 실패 없이 감아야 하는 데모라 ③ GuaranteedWrap 고정.
+			// The demo has to wrap the ceiling anchors without fail, so it is fixed to GuaranteedWrap.
 			Cable->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
 			Ropes.Add(Cable);
 		}
@@ -74,7 +74,7 @@ void ARopeDemoElevator::BeginPlay()
 
 	ApplyPlatformStability();
 
-	// 시작은 아래층(바닥에서 대기). 그래플은 첫 틱부터 확립을 시도한다.
+	// It starts on the lower floor, waiting on the ground. The grapples try to establish themselves from the first tick.
 	bTargetTop = false;
 	bArrivedBroadcast = false;
 }
@@ -92,8 +92,9 @@ void ARopeDemoElevator::ApplyPlatformStability()
 	}
 	Platform->SetAngularDamping(PlatformAngularDamping);
 
-	// 피치/롤(전복) 자유도 제거 → 캐릭터가 한쪽에 올라타도 수평 유지. 물리 수직 이동(climb-in)은 보존.
-	// 요는 옵션(bLockPlatformYaw). 잠금이 모두 꺼져 있으면 SixDOF는 자유 물리와 동일하다.
+	// Removing the pitch and roll degrees of freedom, which would let it capsize, keeps the platform level when a
+	// character stands on one side, while preserving vertical physical movement for climb-in. Yaw is optional, through
+	// bLockPlatformYaw. With every lock off, the six-degree-of-freedom constraint behaves exactly like free physics.
 	if (FBodyInstance* Body = Platform->GetBodyInstance())
 	{
 		Body->bLockXRotation = bLockPlatformTilt;
@@ -122,7 +123,7 @@ void ARopeDemoElevator::Tick(float DeltaSeconds)
 		return;
 	}
 
-	//~ 1) 그래플 확립 단계 — 네 케이블이 모두 천장 앵커를 감을 때까지 주기적으로 재발사한다.
+	//~ 1) Establishing the grapples: it fires again periodically until all four cables have wrapped a ceiling anchor.
 	if (!bGrappleReady)
 	{
 		if (AreAllRopesWrapped())
@@ -139,13 +140,13 @@ void ARopeDemoElevator::Tick(float DeltaSeconds)
 			if (EstablishRetryRemaining <= 0.0f)
 			{
 				FireGrapples();
-				EstablishRetryRemaining = 1.0f; // 1초 간격 재시도(gather/장전 에지 안정화 여유).
+				EstablishRetryRemaining = 1.0f; // Retry at one-second intervals, leaving room for the gather and the load edge to settle.
 			}
 		}
 		return;
 	}
 
-	//~ 2) 케이블이 하나라도 풀렸으면(대상 소실 등) 확립 단계로 되돌아가 그 케이블만 재발사한다.
+	//~ 2) If any cable has come loose, as when its target is lost, it returns to the establishing stage and refires that cable alone.
 	if (!AreAllRopesWrapped())
 	{
 		bGrappleReady = false;
@@ -161,8 +162,8 @@ void ARopeDemoElevator::Tick(float DeltaSeconds)
 		return;
 	}
 
-	//~ 3) 목표 층으로 릴 구동. 상승=릴-인(+케이블당 climb-in), 하강=릴-아웃(중력). 모든 케이블이
-	//     목표에 닿아야 도착으로 본다(네 케이블 길이가 함께 수렴).
+	//~ 3) Driving the reel to the target floor. Going up reels in, with climb-in per cable, and going down reels out
+	//     under gravity. Arrival requires every cable to have reached its target, so all four lengths converge together.
 	bool bAllArrived = true;
 	for (URopeComponent* Cable : Ropes)
 	{
@@ -222,12 +223,12 @@ void ARopeDemoElevator::SetTargetTop(bool bNewTargetTop)
 		return;
 	}
 	bTargetTop = bNewTargetTop;
-	bArrivedBroadcast = false; // 새 목표 → 도착 판정 재개.
+	bArrivedBroadcast = false; // A new target, so arrival detection resumes.
 }
 
 void ARopeDemoElevator::HandleCallPlateChanged(ARopeDemoPressurePlate* /*Plate*/, bool bPressed)
 {
-	// 호출 버튼: 누르면 위층, 풀면 아래층.
+	// The call button: pressed goes up, released goes down.
 	SetTargetTop(bPressed);
 }
 
@@ -249,7 +250,7 @@ bool ARopeDemoElevator::AreAllRopesWrapped() const
 
 FVector ARopeDemoElevator::ResolveAnchorAimWorld() const
 {
-	// 앵커 액터 위치를 조준한다 — swept aim ray가 그 방향의 wrappable 본을 sweep해 잠근다.
+	// Aims at the anchor actor's position, so the swept aim ray sweeps that direction for a wrappable bone and locks onto it.
 	return AnchorTarget ? AnchorTarget->GetActorLocation() : GetActorLocation();
 }
 
@@ -271,7 +272,7 @@ bool ARopeDemoElevator::FireGrappleFor(URopeComponent* InRope)
 		return false;
 	}
 
-	// ③은 Loaded(장전)에서만 던질 수 있다. 아니면 장전만 하고 다음 시도에서 발사한다(장전 에지 안정화).
+	// GuaranteedWrap can be thrown from Loaded alone, so otherwise it only loads and fires on the next attempt, which keeps the load edge stable.
 	if (InRope->GetPhase() != ERopePhase::Loaded)
 	{
 		InRope->EnterLoaded();
@@ -288,7 +289,7 @@ bool ARopeDemoElevator::FireGrappleFor(URopeComponent* InRope)
 	}
 	const FVector AimDir = ToAnchor / Dist;
 
-	// Wielder의 BuildAimRayThrowRequest를 최소 복제한다(입력 없이 앵커를 고정 조준).
+	// A minimal copy of the wielder's BuildAimRayThrowRequest, aiming at the anchor with no input.
 	FRopeAimRayThrowRequest Request;
 	FRopeThrowContext& Ctx = Request.BaseContext;
 	Ctx.Origin = Origin;
@@ -297,20 +298,20 @@ bool ARopeDemoElevator::FireGrappleFor(URopeComponent* InRope)
 	Ctx.FrameRight = FVector::CrossProduct(AimDir, FVector::UpVector).GetSafeNormal();
 	if (Ctx.FrameRight.IsNearlyZero())
 	{
-		Ctx.FrameRight = FVector::RightVector; // 수직 조준(AimDir∥Up) 축퇴 폴백.
+		Ctx.FrameRight = FVector::RightVector; // The fallback for the degenerate case of a vertical aim, where the aim direction is parallel to the up vector.
 	}
 	Ctx.FrameMode = ERopeThrowFrameMode::Custom;
-	Ctx.bAimRayEvaluated = true; // 조준 ray가 만든 컨텍스트임을 표시(preview 빌더 계약).
+	Ctx.bAimRayEvaluated = true; // Marks this as a context produced by an aim ray, which is the preview builder's contract.
 
 	Request.RayOrigin = Origin;
 	Request.RayDirection = AimDir;
 	Request.ReachOrigin = Origin;
-	Request.ReachLength = Dist + 200.0f; // 도달 여유(앵커를 확실히 포함).
+	Request.ReachLength = Dist + 200.0f; // Reach margin, so the anchor is certainly included.
 	Request.RayLength = FRopeAimTargeting::ResolveRayLengthForReach(
 		Request.RayOrigin, Request.RayDirection, Request.ReachOrigin, Request.ReachLength);
 	Request.QueryRadius = 0.0f;
 	Request.SweepStep = 2.0f;
 
-	// 몽타주 없이 정상 gather 직후 즉시 실행한다.
+	// Executed immediately after a normal gather, with no montage.
 	return InRope->QueueGuaranteedAimThrow(Request, /*bExecuteWhenReady*/ true);
 }

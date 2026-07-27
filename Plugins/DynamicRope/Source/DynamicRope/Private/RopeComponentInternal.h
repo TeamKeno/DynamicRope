@@ -9,10 +9,10 @@ namespace RopeComponentPrivate
 	void LogWrappingFailureState(const FString& OwnerName, const TCHAR* FailureSite,
 		const FRopeWrappingState& State, const FRopeSimState& Sim);
 
-	// Releasing 진입 시 Free 복귀까지의 쿨다운(초). Abort/Hold 실패/수동 해제 공통.
+	// The cooldown, in seconds, from entering Releasing until the return to Free. Shared by aborts, a failed hold and a manual release.
 	inline constexpr float ReleaseCooldownSeconds = 0.08f;
 
-	// phase 전이 로그용 짧은 이름(UEnum 리플렉션 없이 hot-path에서도 안전).
+	// A short name for the phase transition log, safe on the hot path since it needs no UEnum reflection.
 	inline const TCHAR* PhaseName(ERopePhase Phase)
 	{
 		switch (Phase)
@@ -29,8 +29,9 @@ namespace RopeComponentPrivate
 		}
 	}
 
-	// 조준 hit을 현재 대상 본 트랜스폼 기준 월드로 복원한다. 본-로컬을 저장한 경우 대상의 이동/애니메이션을
-	// 추종하고, 아니면 조준 순간의 월드 값(폴백)을 그대로 쓴다. bone-local 앵커 복원과 대칭이다.
+	// Restores the aim hit to world space through the target bone's current transform. Where a bone-local position was
+	// stored it follows the target's movement and animation, and otherwise the world value from the moment of aiming
+	// is used as a fallback. This is symmetric with restoring a bone-local anchor.
 	inline FVector ResolveAimGuideHitWorld(const FRopeThrowContext& Ctx)
 	{
 		if (Ctx.bHasAimGuideLocalHit && !Ctx.AimGuideBone.IsNone())

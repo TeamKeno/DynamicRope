@@ -1,9 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// RHI 버퍼 생성의 엔진 버전차를 한 곳에 격리한다. 5.6에서 FRHIBufferCreateDesc 빌더가 도입되면서
-// CreateVertex/CreateIndex/CreateStructured + CreateBuffer 형태로 바뀌었고, 5.5는 구 CreateVertexBuffer/
-// CreateIndexBuffer/CreateStructuredBuffer + FRHIResourceCreateInfo 경로다. 호출부(RopeSceneProxy, GPU 튜브
-// 테스트)는 이 래퍼만 쓰고 버전-클린하게 유지한다 — SRV/UAV 생성(FRHIViewDesc)은 5.5에도 있어 그대로 둔다.
+// Isolates the engine version differences in RHI buffer creation in one place. In 5.6 the FRHIBufferCreateDesc
+// builder was introduced and the API became CreateVertex, CreateIndex and CreateStructured followed by CreateBuffer,
+// while 5.5 uses the older CreateVertexBuffer, CreateIndexBuffer and CreateStructuredBuffer with
+// FRHIResourceCreateInfo. Call sites, being RopeSceneProxy and the GPU tube tests, use these wrappers alone and stay
+// version-clean. Creating SRVs and UAVs through FRHIViewDesc exists in 5.5 as well and is left as it is.
 
 #pragma once
 
@@ -14,7 +15,7 @@
 
 namespace RopeRHI
 {
-	/** 버텍스 버퍼(타입드 SRV/UAV용). Bytes = 전체 바이트. */
+	/** A vertex buffer, for typed SRVs and UAVs. The size is in total bytes. */
 	inline FBufferRHIRef CreateVertexBuffer(FRHICommandListBase& RHICmdList, const TCHAR* Name, uint32 Bytes,
 		EBufferUsageFlags Usage)
 	{
@@ -28,7 +29,7 @@ namespace RopeRHI
 #endif
 	}
 
-	/** 인덱스 버퍼. Stride = 인덱스 1개 크기, NumIndices = 개수. */
+	/** An index buffer. The stride is the size of one index and the count is the number of indices. */
 	inline FBufferRHIRef CreateIndexBuffer(FRHICommandListBase& RHICmdList, const TCHAR* Name, uint32 Stride,
 		uint32 NumIndices, EBufferUsageFlags Usage)
 	{
@@ -42,7 +43,7 @@ namespace RopeRHI
 #endif
 	}
 
-	/** 스트럭처드 버퍼. Stride = 원소 크기, Count = 원소 수. */
+	/** A structured buffer. The stride is the element size and the count is the number of elements. */
 	inline FBufferRHIRef CreateStructuredBuffer(FRHICommandListBase& RHICmdList, const TCHAR* Name, uint32 Stride,
 		uint32 Count, EBufferUsageFlags Usage)
 	{

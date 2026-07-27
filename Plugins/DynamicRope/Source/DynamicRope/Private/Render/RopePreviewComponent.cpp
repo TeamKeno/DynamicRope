@@ -11,7 +11,7 @@
 #include "SceneInterface.h"
 #include "SceneManagement.h"
 #include "SceneView.h"
-// UE_VERSION_OLDER_THAN — 엔진 버전 가드(GetMaterialRelevance 시그니처가 5.7에서 변경)
+// UE_VERSION_OLDER_THAN, for the engine version guard, since the GetMaterialRelevance signature changed in 5.7.
 #include "Misc/EngineVersionComparison.h"
 
 namespace
@@ -61,7 +61,7 @@ void DrawPreviewTube(const FSceneView* View, const FRopeWrapPreviewData& Preview
 	TArray<uint32> Indices;
 	Indices.Reserve((NumPoints - 1) * NumSides * 6);
 
-	// 매번 ring vertex 생성
+	// Generate the ring vertices each time.
 	FVector PreviousNormal = FVector::ZeroVector;
 	for (int32 PointIndex = 0; PointIndex < NumPoints; ++PointIndex)
 	{
@@ -88,8 +88,9 @@ void DrawPreviewTube(const FSceneView* View, const FRopeWrapPreviewData& Preview
 		PreviousNormal = Normal;
 
 		const float AlongFrac = static_cast<float>(PointIndex) / static_cast<float>(NumPoints - 1);
-		// 원주 seam의 위치는 같지만 UV 0/1 정점은 분리한다. 하나를 공유하면 마지막 strip에서
-		// 텍스처 좌표가 1 -> 0으로 보간되어 임의 머티리얼의 무늬가 길게 번진다.
+		// The vertices at the circumferential seam share a position but are split by UV, at zero and one. Sharing one
+		// would interpolate the texture coordinate from one back to zero across the last strip and smear an arbitrary
+		// material's pattern along it.
 		for (int32 SideIndex = 0; SideIndex <= NumSides; ++SideIndex)
 		{
 			const float AroundFrac = static_cast<float>(SideIndex) / static_cast<float>(NumSides);
@@ -97,8 +98,8 @@ void DrawPreviewTube(const FSceneView* View, const FRopeWrapPreviewData& Preview
 			const FVector Radial = (Normal * FMath::Cos(Angle) + Binormal * FMath::Sin(Angle))
 				.GetSafeNormal(KINDA_SMALL_NUMBER, Normal);
 			const FVector RingOffset = Radial * Radius;
-			// 색은 전적으로 WrapPreviewMaterial 몫이다. vertex color는 불투명 흰색으로 채워 머티리얼이
-			// 곱해 읽어도 항등원이고, 안 읽는 머티리얼에는 무시되게 둔다.
+		// The colour is entirely the wrap preview material's responsibility. The vertex colour is filled with opaque
+		// white so that it is the identity for a material that multiplies by it and is ignored by one that does not read it.
 			const FVector TangentY = FVector::CrossProduct(Radial, Tangent)
 				.GetSafeNormal(KINDA_SMALL_NUMBER, Binormal);
 			FDynamicMeshVertex Vertex(
@@ -115,7 +116,7 @@ void DrawPreviewTube(const FSceneView* View, const FRopeWrapPreviewData& Preview
 		}
 	}
 
-	// 매번 triangle index 생성
+	// Generate the triangle indices each time.
 	for (int32 PointIndex = 0; PointIndex < NumPoints - 1; ++PointIndex)
 	{
 		const uint32 BaseA = static_cast<uint32>(PointIndex * RingVertexCount);
@@ -149,7 +150,7 @@ class FRopePreviewSceneProxy final : public FPrimitiveSceneProxy
 public:
 	explicit FRopePreviewSceneProxy(const URopePreviewComponent* Component)
 		: FPrimitiveSceneProxy(Component)
-		// 5.7에서 GetMaterialRelevance 인자가 ERHIFeatureLevel::Type→EShaderPlatform으로 바뀜 — 버전 가드.
+		// In 5.7 the GetMaterialRelevance argument changed from ERHIFeatureLevel::Type to EShaderPlatform, hence the version guard.
 		, MaterialRelevance(Component->GetMaterialRelevance(
 #if UE_VERSION_OLDER_THAN(5, 7, 0)
 			GetScene().GetFeatureLevel()
@@ -238,7 +239,7 @@ private:
 
 URopePreviewComponent::URopePreviewComponent()
 {
-	// 표시 전용 — 주어진 centerline을 그리기만 하므로 자체 틱이 필요 없다.
+	// Display only: it merely draws the centreline it is given, so it needs no tick of its own.
 	PrimaryComponentTick.bCanEverTick = false;
 	PrimaryComponentTick.bStartWithTickEnabled = false;
 	Mobility = EComponentMobility::Movable;
@@ -282,13 +283,13 @@ bool URopePreviewComponent::IsPreviewOwner(const UObject* InOwner) const
 
 void URopePreviewComponent::SetWrapPreviewWorld(const FRopeWrapPreviewData& InPreview)
 {
-	// 표시 전용 진입점: 주어진 월드 centerline을 그대로 그린다.
+	// The display-only entry point: draws the world centreline it is given as it stands.
 	SetWrapPreviewLocal(ConvertWrapPreviewToLocal(InPreview));
 }
 
 FRopeWrapPreviewData URopePreviewComponent::ConvertWrapPreviewToLocal(const FRopeWrapPreviewData& InPreview) const
 {
-	// scene proxy에는 local 좌표만 넘겨 component transform이 렌더 단계에서 한 번만 적용되게 한다.
+	// Only local coordinates are passed to the scene proxy, so the component transform is applied exactly once, at the render stage.
 	const FTransform Xform = GetComponentTransform();
 	FRopeWrapPreviewData LocalPreview = InPreview;
 	LocalPreview.Points.Reset(InPreview.Points.Num());
