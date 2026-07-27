@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Unreal Engine **5.7** project (Windows) whose entire purpose is the **DynamicRope** plugin: a
 throwable rope that flies, collides, *wraps* around a skeletal character's bones, and then holds /
-pulls / releases. Code comments are written in **Korean** — match that when editing existing files.
+pulls / releases. Code comments, tooltips and log strings are **English** throughout the plugin — the
+whole exposed surface is English because the plugin ships externally, so keep new ones English too.
 
 Version control is **Perforce**, not git. The working tree is a Perforce client; there is no `.git`.
 Do not assume git commands work. Files in the depot are LF but checked out as CRLF on Windows.
@@ -55,9 +56,10 @@ To run/iterate behavior, open the `.uproject` in the editor and Play.
     `URopeSDFData` baker/factory/asset-definition. **Not** an empty stub.
 - `Source/DynamicRopeProject/` — thin game module (game mode + module boilerplate). Depends only on
   `DynamicRope`.
-- `Plugins/DynamicRope/Docs/PoC/` — design notes (Korean) defining the post-wrap behavior model. The
-  throwaway PoC *code* (`Source/DynamicRope/{Public,Private}/PoC/`) has been removed; these notes are
-  kept as production design rationale.
+- `Plugins/DynamicRope/Docs/PoC/` — design notes (still Korean) defining the post-wrap behavior model.
+  The throwaway PoC *code* (`Source/DynamicRope/{Public,Private}/PoC/`) has been removed; these notes
+  are kept as production design rationale. Code comments no longer cite them — the reasoning that
+  mattered has been inlined in English at the call sites, so don't add new `Docs/PoC` references.
 
 ## Architecture (the big picture)
 
