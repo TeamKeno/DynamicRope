@@ -185,7 +185,7 @@ void BuildTubeFrameAndWrite(uint tid, uint N)
 	}
 }
 
-// B1: component-local centerline(Buffer<float>).
+// Component-local centerline (Buffer<float>).
 [numthreads(ROPE_TUBE_MAX_RINGS, 1, 1)]
 void RopeBuildTubeCS(uint3 GroupThreadId : SV_GroupThreadID)
 {

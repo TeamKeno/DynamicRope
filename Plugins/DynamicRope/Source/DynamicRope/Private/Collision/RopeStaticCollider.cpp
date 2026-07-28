@@ -6,8 +6,9 @@ FRopeContact FRopeBoxCollider::Query(const FVector& WorldPos, float NodeRadius) 
 {
 	FRopeContact Contact;
 
-	// Convert box local to clamp — OBB closest point. Near corners/edges, the clamp result is closer to the corners/edges.
-	// itself, and the normal comes out in the correct diagonal direction (the very information that GDF voxel rounding crushed).
+	// Clamp into the box's local frame for the nearest point on the OBB. Near a corner or an edge the clamped
+	// point lands on that corner or edge itself and the normal comes out along the correct diagonal — exactly
+	// the information GDF voxel rounding destroys.
 	const FVector P = Rot.UnrotateVector(WorldPos - Center);
 	const FVector Clamped(
 		FMath::Clamp(P.X, -HalfExtents.X, HalfExtents.X),
@@ -16,21 +17,21 @@ FRopeContact FRopeBoxCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 	FVector LocalNormal = FVector::UpVector;
 	FVector LocalSurface = Clamped;
-	// Signed distance to surface (outer +, inner -).
+	// Signed distance to the surface: positive outside, negative inside.
 	float   SignedDist = 0.0f;
 
 	const FVector Delta = P - Clamped;
 	const float DistOutside = static_cast<float>(Delta.Size());
 	if (DistOutside > KINDA_SMALL_NUMBER)
 	{
-		// Outside: Clamp point is the nearest surface point, normal = surface -> node (outside) direction.
+		// Outside: the clamped point is the nearest surface point, and the normal runs surface → node, outward.
 		SignedDist = DistOutside;
 		LocalNormal = Delta / DistOutside;
 	}
 	else
 	{
-		// Inside (or on the surface): Push out in the outer direction of the surface with the shallowest penetration.
-		// FaceDist = Distance to each axis face (all >= 0).
+		// Inside, or exactly on the surface: push out through whichever face is shallowest.
+		// FaceDist is the distance to each axis face, all non-negative.
 		const FVector FaceDist = HalfExtents - P.GetAbs();
 		int32 MinAxis = 0;
 		if (FaceDist.Y < FaceDist[MinAxis]) { MinAxis = 1; }
@@ -45,21 +46,22 @@ FRopeContact FRopeBoxCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 	if (SignedDist >= NodeRadius)
 	{
-		// bHit = false: No overlap (same as capsule, boundary is treated as non-contact).
+		// bHit = false: no overlap. As with the capsule, touching exactly counts as no contact.
 		return Contact;
 	}
 
 	Contact.bHit = true;
-	// Normal: Unit, surface -> node (outer) — FRopeContact FROZEN contract (signed load-bearing).
+	// Normal: unit length, surface → node, outward — FRopeContact's frozen contract, where the sign is load-bearing.
 	Contact.Normal = Rot.RotateVector(LocalNormal);
-	// If inside, SignedDist<0, depth to side + node radius.
+	// Inside, SignedDist is negative, so the depth is that plus the node radius.
 	Contact.Penetration = NodeRadius - SignedDist;
 	Contact.SurfacePoint = Rot.RotateVector(LocalSurface) + Center;
-	// If the box can be Wrapped, then virtual bone (detection attribution) + target component. If static, None/null.
+	// A wrappable box reports a virtual bone for detection attribution plus the target component; a static one reports None and null.
 	Contact.Bone = Bone;
 	Contact.SourceMesh = SourceMesh;
-	// surface velocity: (current pose - previous pose) / dt of contact material point (local LocalSurface). A moving body uses a rope
-	// Used to drag in the tangential direction. 0 if InvDeltaTime==0(static/first frame).
+	// Surface velocity: (current pose − previous pose) / dt of the contact material point, held in local space
+	// as LocalSurface. It is what lets a moving body drag the rope tangentially. 0 when InvDeltaTime is 0,
+	// meaning static or the first frame.
 	if (InvDeltaTime > 0.0f)
 	{
 		const FVector PrevWorld = PrevRot.RotateVector(LocalSurface) + PrevCenter;
@@ -70,7 +72,7 @@ FRopeContact FRopeBoxCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 {
-	// stationary box (including first frame) is the same as the default (current pose static sweep) — early delegation.
+	// A still box, the first frame included, behaves exactly as the default static sweep against the current pose, so delegate early.
 	if (InvDeltaTime <= 0.0f || (PrevCenter.Equals(Center) && PrevRot.Equals(Rot)))
 	{
 		return IRopeCollider::QuerySwept(Q, OutHitWorldPos);
@@ -79,7 +81,7 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	FRopeContact Contact;
 	OutHitWorldPos = Q.WorldEnd;
 
-	// Box sub-pose of this substep (interpolation of frame motion prev->curr with SubAlpha). Sweep node path and box motion together.
+	// This substep's box sub-pose, interpolating the frame motion prev → curr by SubAlpha, so the node's path and the box's motion are swept together.
 	const FVector CenterS = FMath::Lerp(PrevCenter, Center, Q.SubAlpha0);
 	const FVector CenterE = FMath::Lerp(PrevCenter, Center, Q.SubAlpha1);
 	const FQuat   RotS = FQuat::Slerp(PrevRot, Rot, Q.SubAlpha0);
@@ -89,14 +91,15 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
 
-	// Separation Guard (RopeCollision::IsSweptSeparating): Omit re-pin if starting inside the contact skin and separating outwards.
-	// Checks the start contact/material point with the start pose box and the end contact with the end pose box.
+	// Separation guard (RopeCollision::IsSweptSeparating): skip the re-pin when the node starts inside the
+	// contact skin and is leaving. The start contact and material point are tested against the start pose's
+	// box, and the end contact against the end pose's.
 	{
 		const FRopeBoxCollider BoxS(CenterS, RotS, HalfExtents);
 		const FRopeContact Start = BoxS.Query(Q.WorldStart, Q.NodeRadius);
 		if (Start.bHit)
 		{
-			// End pose position of the starting material point (local).
+			// Where the starting material point ends up in the end pose, in local space.
 			const FVector Lp0 = RotS.UnrotateVector(Start.SurfacePoint - CenterS);
 			const FVector Closest0End = RotE.RotateVector(Lp0) + CenterE;
 			const FRopeBoxCollider BoxE(CenterE, RotE, HalfExtents);
@@ -112,15 +115,15 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	{
 		const float T = (NumSamples <= 1) ? 1.0f : static_cast<float>(k) / static_cast<float>(NumSamples - 1);
 		const FVector Pt = FMath::Lerp(Q.WorldStart, Q.WorldEnd, T);
-		// Point question with sub-pose box (center/rot interpolation). Create a temporary collider and reuse the local clamp query.
+		// Point query against the sub-posed box (interpolated centre and rotation), building a temporary collider so the local clamp query can be reused.
 		FRopeBoxCollider BoxT(FMath::Lerp(CenterS, CenterE, T), FQuat::Slerp(RotS, RotE, T), HalfExtents);
-		// BoxT is InvDt=0 → surface velocity 0 (not used here).
+		// BoxT carries InvDt = 0, so its surface velocity is 0 — not used here.
 		const FRopeContact C = BoxT.Query(Pt, Q.NodeRadius);
 		if (!C.bHit)
 		{
 			continue;
 		}
-		// Carry over the contact material point (local) to the end pose of the substep — Move the node along with the surface by the remaining amount of motion.
+		// Carry the contact material point (local) into the substep's end pose, moving the node with the surface by the motion that remains.
 		const FVector Lp = BoxT.Rot.UnrotateVector(C.SurfacePoint - BoxT.Center);
 		const FVector ClosestEnd = RotE.RotateVector(Lp) + CenterE;
 		Contact.bHit = true;
@@ -128,10 +131,10 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		Contact.Penetration = C.Penetration;
 		OutHitWorldPos = Pt + (ClosestEnd - C.SurfacePoint);
 		Contact.SurfacePoint = ClosestEnd;
-		// If the box can be Wrapped, then virtual bone (detection attribution) + target component. If static, None/null.
+		// A wrappable box reports a virtual bone for detection attribution plus the target component; a static one reports None and null.
 		Contact.Bone = Bone;
 		Contact.SourceMesh = SourceMesh;
-		// surface velocity: entire frame (prev->curr) displacement of material point / dt.
+		// Surface velocity: the material point's whole-frame (prev → curr) displacement over dt.
 		const FVector WCurr = Rot.RotateVector(Lp) + Center;
 		const FVector WPrev = PrevRot.RotateVector(Lp) + PrevCenter;
 		Contact.SurfaceVelocity = (WCurr - WPrev) * InvDeltaTime;
@@ -142,7 +145,7 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 
 FBox FRopeBoxCollider::GetWorldBounds() const
 {
-	// OBB -> AABB: per axis |rotation basis| · Half width sum.
+	// OBB → AABB: sum of |rotation basis| · half-extents per axis.
 	const FVector AxX = Rot.GetAxisX() * HalfExtents.X;
 	const FVector AxY = Rot.GetAxisY() * HalfExtents.Y;
 	const FVector AxZ = Rot.GetAxisZ() * HalfExtents.Z;
@@ -160,21 +163,22 @@ FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadiu
 	{
 		return Contact;
 	}
-	// world -> body-local (rigid body station): Lp = qInv*(p - Trans). Afterwards, query with local plane/local bounds.
+	// World → body-local through the rigid transform: Lp = qInv·(p − Trans). Everything after this queries the local planes and local bounds.
 	const FVector Lp = Rot.UnrotateVector(WorldPos - Trans);
 	if (!LocalBounds.IsValid || !LocalBounds.ExpandBy(NodeRadius).IsInsideOrOn(Lp))
 	{
-		// outside local AABB(+NodeRadius) → definitely not in contact.
+		// Outside the local AABB expanded by NodeRadius, so certainly not in contact.
 		return Contact;
 	}
 
-	// max-plane(local): The plane (maximum sign distance) that the point violates the most is the surface approximation. Accurate on the inside, near the outside edge
-	// Underestimation (conservative). The push-out direction is the rotation of the local normal of the plane to the world.
+	// Max-plane, in local space: the plane the point violates most — the largest signed distance — approximates
+	// the surface. It is exact inside and slightly underestimates near an outside edge, which is the
+	// conservative direction. The push-out direction is that plane's local normal rotated into world space.
 	double MaxD = -DBL_MAX;
 	int32 Best = INDEX_NONE;
 	for (int32 i = 0; i < LocalPlanes.Num(); ++i)
 	{
-		// dot(N,p) - W (local), outside N.
+		// dot(N, p) − W in local space, with N pointing outward.
 		const double D = LocalPlanes[i].PlaneDot(Lp);
 		if (D > MaxD)
 		{
@@ -184,12 +188,12 @@ FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadiu
 	}
 	if (Best == INDEX_NONE || MaxD >= NodeRadius)
 	{
-		// Some surface out of the NodeRadius is definitely out of convex → definitely out of contact.
+		// Any plane the point is more than NodeRadius outside of puts it certainly outside the convex, so there is no contact.
 		return Contact;
 	}
 
 	const FVector LocalNormal(LocalPlanes[Best].X, LocalPlanes[Best].Y, LocalPlanes[Best].Z);
-	// local surface point (material point).
+	// The surface point in local space — the material point.
 	const FVector LocalSurface = Lp - LocalNormal * MaxD;
 	Contact.bHit = true;
 	// world outer normal (FROZEN contract, sign load-bearing).
@@ -200,7 +204,7 @@ FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadiu
 	Contact.Normal = Rot.RotateVector(LocalNormal);
 	Contact.Penetration = NodeRadius - static_cast<float>(MaxD);
 	Contact.SurfacePoint = Rot.RotateVector(LocalSurface) + Trans;
-	// surface velocity: (current pose - previous pose) / dt of material point (local). A moving body pulls the rope in a tangential direction.
+	// Surface velocity: (current pose − previous pose) / dt of the material point, held in local space. It is what lets a moving body drag the rope tangentially.
 	if (InvDeltaTime > 0.0f)
 	{
 		const FVector PrevWorld = PrevRot.RotateVector(LocalSurface) + PrevTrans;
@@ -211,7 +215,7 @@ FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadiu
 
 FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 {
-	// stationary convex (with first frame) is the same as basic (current pose static sweep) — early delegation.
+	// A still convex, the first frame included, behaves exactly as the default static sweep against the current pose, so delegate early.
 	if (InvDeltaTime <= 0.0f || (PrevTrans.Equals(Trans) && PrevRot.Equals(Rot)))
 	{
 		return IRopeCollider::QuerySwept(Q, OutHitWorldPos);
@@ -220,7 +224,7 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 	FRopeContact Contact;
 	OutHitWorldPos = Q.WorldEnd;
 
-	// substep sub-pose rigid body(prev->curr interpolation).
+	// The substep's sub-posed rigid transform, interpolated prev → curr.
 	const FVector TransS = FMath::Lerp(PrevTrans, Trans, Q.SubAlpha0);
 	const FVector TransE = FMath::Lerp(PrevTrans, Trans, Q.SubAlpha1);
 	const FQuat   RotS = FQuat::Slerp(PrevRot, Rot, Q.SubAlpha0);
@@ -230,8 +234,10 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
 
-	// Separation Guard (RopeCollision::IsSweptSeparating): Omit re-pin if starting inside the contact skin and separating outwards.
-	// Inline the local plane query (same logic as sweep above) with the start/end sub-pose rigid body to obtain the start contact/material point and end contact.
+	// Separation guard (RopeCollision::IsSweptSeparating): skip the re-pin when the node starts inside the
+	// contact skin and is leaving. The local plane query is inlined here — the same logic as the sweep above —
+	// against the start and end sub-posed rigid transforms, giving the start contact and material point and
+	// the end contact.
 	{
 		const FVector Lp0 = RotS.UnrotateVector(Q.WorldStart - TransS);
 		double MaxD0 = -DBL_MAX; int32 Best0 = INDEX_NONE;
@@ -275,7 +281,7 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 		const FVector Pt = FMath::Lerp(Q.WorldStart, Q.WorldEnd, T);
 		const FVector TransT = FMath::Lerp(TransS, TransE, T);
 		const FQuat   RotT = FQuat::Slerp(RotS, RotE, T);
-		// Sub-pose local point query (local transformation to rigid body RotT/TransT).
+		// Point query in the sub-pose's local space, transformed by that rigid transform's RotT and TransT.
 		const FVector Lp = RotT.UnrotateVector(Pt - TransT);
 		if (!LocalBounds.ExpandBy(Q.NodeRadius).IsInsideOrOn(Lp))
 		{
@@ -293,7 +299,7 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 		}
 		const FVector LocalNormal(LocalPlanes[Best].X, LocalPlanes[Best].Y, LocalPlanes[Best].Z);
 		const FVector LocalSurface = Lp - LocalNormal * MaxD;
-		// Carry over the material point to the end sub-pose.
+		// Carry the material point into the end sub-pose.
 		const FVector ClosestT = RotT.RotateVector(LocalSurface) + TransT;
 		const FVector ClosestEnd = RotE.RotateVector(LocalSurface) + TransE;
 		Contact.bHit = true;
@@ -313,7 +319,7 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 
 FBox FRopeConvexCollider::GetWorldBounds() const
 {
-	// Convert local AABB to rigid body (Rot, Trans) → world AABB (broad phase). If invalid, stay as is.
+	// Transform the local AABB by the rigid transform (Rot, Trans) into a world AABB for the broad phase. If it is invalid, leave it alone.
 	if (!LocalBounds.IsValid)
 	{
 		return LocalBounds;

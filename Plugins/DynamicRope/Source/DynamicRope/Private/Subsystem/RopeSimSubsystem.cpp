@@ -45,55 +45,59 @@
 
 namespace
 {
-	// Force toggle CPU solve for debug/profiling. If it is 1, even if there is a renderable RHI, the GPU resident path is turned off and the CPU is
-	// Goes down to fallback solver+detection (solve·detection·handoff synchronization together consistently switches to CPU path — tube is rope-specific)
-	// bGpuSteppedThisFrame becomes false and automatically falls back to the CPU mirror centerline). For verification/performance comparison compared to GPU. Default 0.
+	// Debug and profiling toggle that forces the CPU solve. At 1 the GPU resident path is off even with a
+	// renderable RHI and the rope drops to the CPU fallback solver and detector — solve, detection and the
+	// handoff sync all switch together, and since the rope's bGpuSteppedThisFrame goes false the tube falls
+	// back to the CPU mirror centerline automatically. For verifying and benchmarking against the GPU. Default 0.
 	static TAutoConsoleVariable<int32> CVarForceCPUSolve(
 		TEXT("r.DynamicRope.ForceCPUSolve"),
 		0,
-		TEXT("1이면 GPU가 가용해도 로프 솔브/감지를 CPU 경로로 강제한다(디버그·비교용). 0=자동 선택(기본)."),
+	TEXT("1 forces rope solve and detection onto the CPU path even when the GPU is available (for debugging and comparison). 0 = choose automatically (default)."),
 		ECVF_Default);
 
-	// G4: GPU is the only runtime path. GPU-resident solve+detection if there is a renderable RHI, otherwise (cook/-nullrhi/
-	// Server build) Automatically falls back to CPU solve+detection. The only client toggle above is r.DynamicRope.ForceCPUSolve
-	// (force CPU for debug) — GPU is usually THE path.
-	// FRopeXPBDSolver is maintained for this fallback and parity testing (effectively unused in the runtime client).
+	// The GPU is the only runtime path: with a renderable RHI the rope solves and detects GPU-resident,
+	// and otherwise (a cook, -nullrhi, a server build) it falls back to the CPU for both automatically. The
+	// only client-facing toggle is r.DynamicRope.ForceCPUSolve above, for forcing the CPU while debugging.
+	// FRopeXPBDSolver survives for that fallback and for parity testing, and is effectively unused in a
+	// shipping client.
 	bool RopeGpuRuntimeAvailable()
 	{
-		// If the Force CPU toggle is on, it falls back to CPU fallback regardless of GPU availability.
+		// With the force-CPU toggle on, drop to the CPU fallback regardless of what the GPU could do.
 		if (CVarForceCPUSolve.GetValueOnGameThread() != 0)
 		{
 			return false;
 		}
-		// capable of rendering RHI + SM5 or higher (kernel is compiled with SM5 guard only) — check that RopeGPU::IsRuntimeSupported is
-		// is a single source of truth (bones the same function as the GPU tube gate in the scene proxy).
+		// A renderable RHI and SM5 or above, since the kernels are compiled behind an SM5 guard.
+		// RopeGPU::IsRuntimeSupported is the single source of truth for that test — the scene proxy's GPU tube
+		// gate calls the same function.
 		return RopeGPU::IsRuntimeSupported();
 	}
 
-	// Duplicate world-static provider warning: log + screen mesh (editor/development build). "maximum 1 per world" invariant
-	// Notice this so you don't break it quietly — the second provider will be ignored and the user needs to know why.
+	// Duplicate world-static provider warning: a log line plus an on-screen message in editor and development
+	// builds. The invariant is at most one per world, and saying so out loud is what keeps it from being
+	// broken quietly — the second provider is ignored, and whoever added it needs to know why.
 	void WarnDuplicateWorldStaticProvider(const AActor* Offender)
 	{
 		UE_LOG(LogRopeCollision, Warning,
-			TEXT("정적 월드 콜라이더 프로바이더가 이미 존재합니다 — %s의 중복 프로바이더는 무시됩니다(월드당 1개만 사용)."),
+			TEXT("A static world collider provider already exists — the duplicate provider on %s is ignored (one per world)."),
 			*GetNameSafe(Offender));
 #if !UE_BUILD_SHIPPING
 		if (GEngine)
 		{
-			// key is pinned (a constant instead of GetTypeHash) so that it is updated only once per event rather than every frame.
+			// The key is a fixed constant rather than GetTypeHash, so the message refreshes once per event instead of every frame.
 			GEngine->AddOnScreenDebugMessage(uint64(0x0D0ED1CA), 8.0f, FColor::Yellow,
-				FString::Printf(TEXT("[DynamicRope] 중복 정적 바디 프로바이더 무시됨(%s) — 월드당 1개만 사용됩니다."),
+					FString::Printf(TEXT("[DynamicRope] Duplicate static body provider ignored (%s) — only one per world is used."),
 					*GetNameSafe(Offender)));
 		}
 #endif
 	}
 
-	// SDF collider view (Runtime Collision) → Flat copy SDF collider (Shaders) for GPU upload.
-	// If the field increases, you only need to update this one place (17 lines that were scattered in the tick loop in the past).
+	// Flatten a runtime SDF collider view (Collision) into the GPU upload struct (Shaders).
+	// Adding a field means updating this one place — it used to be seventeen lines scattered through the tick loop.
 	FRopeGPUSDFCollider MakeGpuSdf(const FRopeSDFColliderView& View)
 	{
 		FRopeGPUSDFCollider Sdf;
-		// Code byte blob (dequant when flattening upload)
+		// Code byte blob; dequantized when the upload is flattened.
 		Sdf.Distances       = View.Distances;
 		Sdf.BytesPerCode    = View.BytesPerCode;
 		Sdf.NarrowBandInner = View.NarrowBandInner;
@@ -104,14 +108,14 @@ namespace
 		Sdf.LocalMin        = View.LocalMin;
 		Sdf.LocalSize       = View.LocalSize;
 		Sdf.BoneToWorld     = View.BoneToWorld;
-		// Drag GPU CCD/surfacevelocity.
+		// For GPU CCD and surface-velocity drag.
 		Sdf.PrevBoneToWorld = View.PrevBoneToWorld;
 		Sdf.InvDeltaTime    = View.InvDeltaTime;
 		Sdf.VolumeKey       = View.VolumeKey;
 		return Sdf;
 	}
 
-	// Fill in the solver seed/parameters in the Step (collider·override·whip packing is added in the call section).
+	// Fill in the step's solver seed and parameters. Collider, override and whip packing are added by the caller.
 	void SeedResidentStep(FRopeGPUResidentStep& Step, uint32 RopeId, uint32 Generation,
 		const FRopeSimState& S, const FRopeSolverConfig& Cfg, const FRopeSubstepSchedule& Schedule)
 	{
@@ -134,8 +138,9 @@ namespace
 		Step.Iterations        = Cfg.Iterations;
 		Step.CollisionPasses   = Cfg.CollisionPassesPerSubstep;
 		Step.Gravity           = Cfg.Gravity;
-		// CollisionRadius requires auto(0=render Radius) interpretation, so the caller uses Rope.GetEffectiveCollisionRadius.
-		// is covered (bUseWorldGDF is also moved directly under the component and is under the jurisdiction of the call department — surface audit CL-4).
+		// CollisionRadius needs its auto value resolved (0 = the render Radius), which the caller covers through
+		// Rope.GetEffectiveCollisionRadius. bUseWorldGDF lives directly on the component now and is the
+		// caller's business too.
 		Step.CollisionRadius   = Cfg.CollisionRadius;
 		Step.Friction          = Cfg.Friction;
 		Step.TipFrictionScale  = Cfg.TipFrictionScale;
@@ -146,8 +151,8 @@ namespace
 	}
 }
 
-// FRopeNodeOverrideFrame (Core module) bits must be numerically 1:1 with ERopeGPUOverride (Shaders module) —
-// The constants are mirrored so that Core does not depend on Shaders, and are verified here (where both are visible).
+// FRopeNodeOverrideFrame's bits (Core) must be numerically 1:1 with ERopeGPUOverride (Shaders). Core does not
+// depend on Shaders, so the constants are mirrored, and this is where both are visible and it can be checked.
 static_assert(RopeNodeOverride::Position == static_cast<uint8>(ERopeGPUOverride::Position)
 	&& RopeNodeOverride::Prev == static_cast<uint8>(ERopeGPUOverride::Prev)
 	&& RopeNodeOverride::PrevFromPosition == static_cast<uint8>(ERopeGPUOverride::PrevFromPosition)
@@ -160,15 +165,15 @@ void URopeSimSubsystem::RegisterRope(URopeComponent* Rope)
 	{
 		if (bTickingRopes)
 		{
-			// Re-entry during tick traversal (handler spawns rope actor) — postpones transformation (header bTickingRopes annotation).
+			// Re-entry during the tick traversal — a handler spawning a rope actor — so the mutation is deferred (see the bTickingRopes note in the header).
 			DeferredRopeUnregister.RemoveSingleSwap(Rope);
 			DeferredRopeRegister.AddUnique(Rope);
 			return;
 		}
 		Ropes.AddUnique(Rope);
-		// The owner of the GPU-resident resource is also recorded by ID — the only clue to retrieval if the component disappears without formal release.
+		// The owner of the GPU-resident resources is recorded by ID as well: it is the only way to reclaim them if the component disappears without a proper release.
 		RegisteredRopeIds.Add(Rope->GetUniqueID());
-		// Because the hand pin (socket attachment) follows the possessing character pose.
+		// Because the hand pin, attached to a socket, follows the owning character's pose.
 		SetAnimPrerequisites(Rope, /*bAdd*/ true);
 		UE_LOG(LogDynamicRope, Verbose, TEXT("RegisterRope: %s (%d total)"), *Rope->GetName(), Ropes.Num());
 	}
@@ -178,8 +183,9 @@ void URopeSimSubsystem::UnregisterRope(URopeComponent* Rope)
 {
 	if (bTickingRopes)
 	{
-		// Re-entry during tick traversal (handler destroys rope actor) — actual removal is deferred to ApplyDeferredRopeChanges. this time
-		// For the remaining traversal of the frame, the IsValid guard skips this rope (destroy → pending-kill) (header bTickingRopes annotation).
+		// Re-entry during the tick traversal — a handler destroying a rope actor — so the real removal is
+		// deferred to ApplyDeferredRopeChanges. For the rest of this frame's traversal the IsValid guard skips
+		// this rope, since destroying it marks it pending-kill (see the bTickingRopes note in the header).
 		if (Rope)
 		{
 			DeferredRopeRegister.RemoveSingleSwap(Rope);
@@ -191,8 +197,9 @@ void URopeSimSubsystem::UnregisterRope(URopeComponent* Rope)
 	if (Rope)
 	{
 		SetAnimPrerequisites(Rope, /*bAdd*/ false);
-		// Free GPU resident buffer/readback (in render thread). Remove from both caches and ID ledger.
-		// (GpuLatestContacts was previously missing, so a dead rope's contact snapshot remained throughout the world).
+		// Free the GPU resident buffer and readback on the render thread, and drop the rope from both caches
+		// and from the ID ledger. (GpuLatestContacts used to be missed here, so a dead rope's contact snapshot
+		// lingered for the life of the world.)
 		const uint32 RopeId = Rope->GetUniqueID();
 		GpuSolver.ReleaseRope(RopeId);
 		GpuLatest.Remove(RopeId);
@@ -211,7 +218,7 @@ void URopeSimSubsystem::ReleaseGpuResourcesForDeadRopes()
 		return;
 	}
 
-	// Create a set of IDs for live ropes, and IDs remaining only in the ledger = bone ropes that have not been officially unlocked.
+	// Build the set of live rope IDs; anything left in the ledger alone is a rope that vanished without a proper release.
 	TSet<uint32> LiveIds;
 	LiveIds.Reserve(Ropes.Num());
 	for (const TObjectPtr<URopeComponent>& Rope : Ropes)
@@ -229,11 +236,12 @@ void URopeSimSubsystem::ReleaseGpuResourcesForDeadRopes()
 		{
 			continue;
 		}
-		// The animation prerequisites cannot be solved here (the component already exists, so the owned mesh cannot be traced back). FTickPrerequisite
-		// Dead mesh items that are weak are automatically skipped, so it is harmless if they remain, and if the mesh is alive, the component
-		// This means that it has gone through official EndPlay, so it does not come to this path.
+		// The animation prerequisite cannot be undone here, because the component is already gone and its owned
+		// mesh cannot be traced back. FTickPrerequisite entries are weak and a dead mesh is skipped
+		// automatically, so leaving them is harmless; and if the mesh is alive then the component went through
+		// a proper EndPlay and never reaches this path.
 		UE_LOG(LogDynamicRope, Verbose,
-			TEXT("ReleaseGpuResourcesForDeadRopes: RopeId %u — 정식 해제 없이 사라진 로프의 GPU 자원 회수."), RopeId);
+			TEXT("ReleaseGpuResourcesForDeadRopes: RopeId %u — reclaiming the GPU resources of a rope that vanished without a proper release."), RopeId);
 		GpuSolver.ReleaseRope(RopeId);
 		GpuLatest.Remove(RopeId);
 		GpuLatestContacts.Remove(RopeId);
@@ -244,9 +252,9 @@ void URopeSimSubsystem::ReleaseGpuResourcesForDeadRopes()
 
 void URopeSimSubsystem::ApplyDeferredRopeChanges()
 {
-	// Order: Release first, register later (ropes spawned and destroyed in the same tick also convergence to the final state). bTickingRopes already has
-	// is false, so the call below performs the actual Ropes transformation/GPU release (Register/Unregister does not fire delegates)
-	// , so there is no additional re-entry here).
+	// Order matters: release first, register second, so a rope spawned and destroyed within one tick still
+	// converges to its final state. bTickingRopes is already false, so the calls below perform the real Ropes
+	// mutation and GPU release — and Register/Unregister fire no delegates, so nothing re-enters from here.
 	if (DeferredRopeUnregister.Num() > 0)
 	{
 		TArray<URopeComponent*> ToUnregister = MoveTemp(DeferredRopeUnregister);
@@ -279,9 +287,10 @@ void URopeSimSubsystem::RegisterColliderProvider(UActorComponent* Provider)
 		return;
 	}
 
-	// Anti-duplicate backstop (fragment 2): Only one world-static provider per world. If something is already registered, the second
-	// Reject + Warning. Enforces invariants based on the interface, regardless of the source (manual placement/automatic spawning/runtime).
-	// Priority is "first registered wins" (auto-spawn gives way to the existing one on piece 1, so manual wins).
+	// Duplicate backstop: at most one world-static provider per world. If one is already registered, the second
+	// is rejected with a warning. The invariant is enforced through the interface regardless of where the
+	// provider came from — placed by hand, auto-spawned, or created at runtime — and first registration wins,
+	// which combined with auto-spawn standing down means a hand-placed provider always beats an automatic one.
 	if (const IRopeColliderProvider* Incoming = Cast<IRopeColliderProvider>(Provider))
 	{
 		if (Incoming->ProvidesWorldStaticColliders())
@@ -292,7 +301,7 @@ void URopeSimSubsystem::RegisterColliderProvider(UActorComponent* Provider)
 				if (E && E->ProvidesWorldStaticColliders())
 				{
 					WarnDuplicateWorldStaticProvider(Provider->GetOwner());
-					// Registration refused — GatherColliders for this provider will not be called.
+					// Registration refused, so GatherColliders is never called on this provider.
 					return;
 				}
 			}
@@ -300,7 +309,7 @@ void URopeSimSubsystem::RegisterColliderProvider(UActorComponent* Provider)
 	}
 
 	ColliderProviders.AddUnique(Provider);
-	// Because the bone collider (capsule/SDF) reads the owning character pose.
+	// Because a bone collider — capsule or SDF — reads the owning character's pose.
 	SetAnimPrerequisites(Provider, /*bAdd*/ true);
 	UE_LOG(LogRopeCollision, Verbose, TEXT("RegisterColliderProvider: %s (%d total)"),
 		*Provider->GetName(), ColliderProviders.Num());
@@ -314,10 +323,12 @@ void URopeSimSubsystem::UnregisterColliderProvider(UActorComponent* Provider)
 
 void URopeSimSubsystem::SetAnimPrerequisites(const UActorComponent* Source, bool bAdd)
 {
-	// Ensures "simulate rope after animation evaluation": skeletal mesh ticks of source component owning actor in SimTickFunction
-	// is set as a prerequisite. Mesh tick completion is done through the parallel animation completion task as DontCompleteUntil.
-	// (SkeletalMeshComponent::DispatchParallelEvaluationTasks) This frame's pose (buffer
-	// flip) is guaranteed. Even if the same mesh is registered repeatedly in both rope/provider, AddPrerequisite is unique.
+	// Guarantees the rope simulates after the animation has been evaluated: the skeletal mesh tick of the
+	// source component's owning actor is made a prerequisite of SimTickFunction. The mesh tick's completion
+	// covers the parallel animation task through DontCompleteUntil
+	// (SkeletalMeshComponent::DispatchParallelEvaluationTasks), so this frame's pose — the buffer flip — is
+	// guaranteed. Registering the same mesh through both a rope and a provider is fine, since AddPrerequisite
+	// is idempotent.
 	const AActor* Owner = Source ? Source->GetOwner() : nullptr;
 	if (!Owner)
 	{
@@ -332,8 +343,9 @@ void URopeSimSubsystem::SetAnimPrerequisites(const UActorComponent* Source, bool
 		}
 		if (bAdd)
 		{
-			// Only actually called on the first consumer (AddPrerequisite itself is unique, so duplicate calls are harmless, but
-			// If you do not count, the remaining consumer share is erased upon release — header comment).
+			// Only actually called for the first consumer. AddPrerequisite is idempotent so a duplicate call
+			// would be harmless, but without counting, one consumer releasing would wipe the others' share
+			// (see the header comment).
 			int32& RefCount = AnimPrereqRefCount.FindOrAdd(Mesh);
 			if (++RefCount == 1)
 			{
@@ -353,8 +365,9 @@ void URopeSimSubsystem::SetAnimPrerequisites(const UActorComponent* Source, bool
 
 	if (bAdd)
 	{
-		// If the actor dies without being officially released, the key expires and only the count remains. The prerequisite itself is weak and harmless, but
-		// Clean the map once every add to prevent it from growing indefinitely (release path does not increase cost).
+		// If the actor dies without a proper release, the key goes stale and only the count remains. The
+		// prerequisite itself is weak and harmless, but the map is swept once per add so it cannot grow without
+		// bound — the release path pays nothing extra.
 		for (auto It = AnimPrereqRefCount.CreateIterator(); It; ++It)
 		{
 			if (!It->Key.IsValid())
@@ -370,16 +383,17 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope, bool 
 	const bool bHasAimRayBounds = Rope.SimFrame.AimRayColliderQueryBounds.IsValid != 0;
 	const bool bHasLockedTargetBounds = Rope.AimTargeting.IsLockActive(Rope.Phase) &&
 		Rope.SimFrame.LockedTargetColliderQueryBounds.IsValid;
-	// This is an aiming region request, but if there is no ray/active target, collection itself is not necessary — invalid box (= empty the list).
+	// This is an aiming region request, but with no ray and no active target there is nothing to gather — an invalid box empties the list.
 	if (bIncludeAimRay && !bHasAimRayBounds && !bHasLockedTargetBounds)
 	{
 		return FBox(ForceInit);
 	}
 
-	// rope tight AABB (Pos∪Prev — including frame motion) + margin. provider region and per-rope collider culling
-	// shares the same box (called by both GatherCollidersForRope and BuildFrameColliders).
+	// The rope's tight AABB (Pos ∪ Prev, so this frame's motion is included) plus a margin. The provider's
+	// region and the per-rope collider culling share this one box, called from both GatherCollidersForRope and
+	// BuildFrameColliders.
 	FBox RopeBounds(ForceInit);
-	// For calculating predicted contact (forward extrapolation) margin — maximum node displacement this frame.
+	// For the predicted-contact margin: this frame's largest node displacement, extrapolated forward.
 	float MaxFrameDispSq = 0.0f;
 	for (int32 i = 0; i < Rope.Sim.Num(); ++i)
 	{
@@ -395,22 +409,25 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope, bool 
 	const float QueryMargin = BaseMargin + PredictiveMotionMargin;
 	if (RopeBounds.IsValid)
 	{
-		// Margin: Contact query radius + sweep margin + forward extrapolation distance of predicted contact (frame displacement × predicted frame).
-		// Take plenty — over-culling margin is safe (it just adds a few more colliders).
+		// Margin: the contact query radius, plus the sweep margin, plus the predicted contact's forward
+		// extrapolation (frame displacement × predicted frames). Be generous — over-including is safe, since it
+		// only costs a few more colliders.
 		RopeBounds = RopeBounds.ExpandBy(QueryMargin);
 	}
 	if (bIncludeAimRay)
 	{
-		// After aiming is over, in the frame where only active aim lock remains, a huge AABB between rope↔target is not created.
-		// Re-collects only the area around the previous target collider bounds. The results are promoted through the component target filter.
+		// Once aiming ends and only the active aim lock remains, do not build an enormous AABB spanning rope to
+		// target: re-gather only around the previous target's collider bounds. The results are promoted through
+		// the component's target filter.
 		if (!bHasAimRayBounds && bHasLockedTargetBounds)
 		{
 			return Rope.SimFrame.LockedTargetColliderQueryBounds.ExpandBy(QueryMargin);
 		}
-		// Aiming region only: The preview ray can pass through areas away from the current rope centerline. This section
-		// If you do not merge, even if the ray passes through the SDF, the collider is not in the aiming list and becomes a cyan miss.
-		// It is a union that covers the surrounding area of the rope, so the range seen by the aiming query (hit check/preview arc search) is
-		// Same as before separation — only the FrameColliders side used for physics and debug is narrowed.
+		// The aiming region alone: a preview ray can pass through space nowhere near the current rope
+		// centerline, and without merging that span a ray crossing an SDF would find no collider in the aiming
+		// list and read as a miss. Because it is a union with the area around the rope, what the aiming query
+		// sees — the hit test and the preview arc search — is exactly what it saw before the split; only the
+		// FrameColliders side, used by physics and the debugger, is narrowed.
 		RopeBounds += Rope.SimFrame.AimRayColliderQueryBounds.Min;
 		RopeBounds += Rope.SimFrame.AimRayColliderQueryBounds.Max;
 		if (bHasLockedTargetBounds)
@@ -427,11 +444,12 @@ void URopeSimSubsystem::BuildFrameColliders()
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_BuildColliders);
 	FrameProviders.Reset();
 
-	// Active region list — The front N are physical regions (1:1 with the Ropes index), and the back N are of the same rope.
-	// aiming region(AimRegionIndexOf). Invalid/empty ropes and ropes that are not aiming remain in place as the !IsValid box —
-	// Ensure that the region mapping index returned by the provider corresponds to this index (the provider sets !IsValid to
-	// is skipped). The bounds-aware provider (static body) fills the empty space between distant ropes with this list.
-	// Excluded from scanning. Same as GatherCollidersForRope below box(single source of truth).
+	// The active region list: the first N entries are physics regions, 1:1 with the Ropes index, and the
+	// second N are those same ropes' aiming regions (AimRegionIndexOf). Invalid or empty ropes, and ropes not
+	// aiming, keep their slot as an !IsValid box, so the region mapping index a provider returns still lines up
+	// with this index — a provider skips !IsValid entries. A bounds-aware provider (the static body one) uses
+	// this list to avoid scanning the empty space between distant ropes.
+	// It is the same box GatherCollidersForRope uses below, as the single source of truth.
 	FrameRopeRegions.Reset();
 	FrameRopeRegions.Reserve(Ropes.Num() * 2);
 	for (URopeComponent* Rope : Ropes)
@@ -443,12 +461,13 @@ void URopeSimSubsystem::BuildFrameColliders()
 		FrameRopeRegions.Add(IsValid(Rope) ? ComputeRopeQueryBounds(*Rope, /*bIncludeAimRay*/ true) : FBox(ForceInit));
 	}
 
-	// Region processing priority: active rope first, and physical region before aiming region. global extraction cap
-	// exhausts its budget on a first-come, first-served basis, the next region is used in the frame where the cap is applied.
-	// Can't get scanned — then just rearrange the order so that the starving side doesn't become the "actually simulated rope"
-	// (index immutable → mapping unaffected). The aiming region is for HUD/preview display, so it is postponed to physics.
-	// Keys: 0 = busy phase (Flight~Releasing), 1 = Free awake, 2 = Free sleep, 3 = invalid region.
-	// The aiming region is +4 here (invalid is still 7) and is placed behind the entire physical region.
+	// Region priority: active ropes first, and a physics region before an aiming one. The global extraction cap
+	// spends its budget first-come-first-served, so on a frame that hits the cap some later region goes
+	// unscanned — ordering is simply how we make sure the one that starves is not the rope actually being
+	// simulated. The indices themselves never move, so the mapping is unaffected. An aiming region only feeds
+	// the HUD and the preview, so it yields to physics.
+	// Keys: 0 = a busy phase (Flight through Releasing), 1 = Free and awake, 2 = Free and asleep, 3 = an
+	// invalid region. An aiming region adds 4 to that (invalid staying at 7), placing it behind every physics region.
 	FrameRegionGatherOrder.Reset();
 	FrameRegionGatherOrder.Reserve(FrameRopeRegions.Num());
 	for (int32 r = 0; r < FrameRopeRegions.Num(); ++r)
@@ -475,7 +494,7 @@ void URopeSimSubsystem::BuildFrameColliders()
 		return RegionPriority(A) < RegionPriority(B);
 	});
 
-	// Gather once per registered provider (once per-frame — regardless of the number of ropes). Dead providers are cleaned up.
+	// Gather once per registered provider — once per frame, whatever the rope count. Dead providers are cleaned up.
 	for (int32 i = ColliderProviders.Num() - 1; i >= 0; --i)
 	{
 		UActorComponent* Comp = ColliderProviders[i];
@@ -501,16 +520,17 @@ void URopeSimSubsystem::BuildFrameColliders()
 
 		FFrameProviderColliders FP;
 		FP.Owner = Comp->GetOwner();
-		// static world providers are exempt from owner exclusion.
+		// Static world providers are exempt from the owner exclusion.
 		FP.bWorldStatic = Provider->ProvidesWorldStaticColliders();
 		FP.Colliders = MoveTemp(Gather.Colliders);
-		// The source actor for each collider is also trusted only when the length is correct — if it is misaligned, the index gets tangled and the wrong collider is used.
-		// is excluded, leave it empty and fall back to the provider-level check.
+		// The per-collider source actor is only trusted when the array lengths agree: a mismatch would tangle
+		// the indices and exclude the wrong collider, so it is left empty and the check falls back to
+		// provider granularity.
 		if (Gather.ColliderSourceActors.Num() == FP.Colliders.Num())
 		{
 			FP.SourceActors = MoveTemp(Gather.ColliderSourceActors);
 		}
-		// region mapping is only trusted if length matches the number of ropes (mismatch = provider bug → demoted to bounds re-curl fallback).
+		// The region mapping is only trusted when its length matches the rope count. A mismatch is a provider bug, and it demotes to the bounds re-test fallback.
 		FP.bHasRegionMapping = Gather.bHasRegionMapping
 			&& Gather.RegionColliderIndices.Num() == FrameRopeRegions.Num();
 		if (FP.bHasRegionMapping)
@@ -519,8 +539,8 @@ void URopeSimSubsystem::BuildFrameColliders()
 		}
 		else
 		{
-			// fallback path only: Cache world bounds per collider once per frame — re-curl per rope as many times as the number of ropes
-			// Avoid recalculation with virtual calls.
+			// Fallback path only: cache each collider's world bounds once per frame, so the re-test does not
+			// recompute them through a virtual call once per rope.
 			FP.Bounds.Reserve(FP.Colliders.Num());
 			for (const IRopeCollider* Collider : FP.Colliders)
 			{
@@ -535,32 +555,37 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 {
 	OutColliders.Reset();
 
-	// Basic: Collisions with all providers in the world, excluding its own provider (prevents self-tangle when throwing).
-	// Grabbing the body of another actor (cross-actor) is automatic because that actor is included in the “whole”. Opt in if owner collision is required.
+	// By default a rope collides with every provider in the world except its own, which is what stops a rope in
+	// flight tangling on the thrower. Wrapping another actor's body works automatically, because that actor is
+	// part of "every provider". Opt back in when the owner's own collision is wanted.
 	const AActor* OwnerToExclude = Rope.bIncludeOwnerColliders ? nullptr : Rope.GetOwner();
 
-	// Distance culling: Colliders that do not overlap with rope AABB (Pos∪Prev — including frame motion) are not Loaded at all.
-	// The CPU solver has its own broad-phase, but the GPU kernel loops the entire collider for each node.
-	// Filtering here is the key to scaling (capsules/SDFs of distant characters are not included in the step).
-	// The default path consumes the region mapping returned by the provider when it gathers (no re-curl —
-	// 2026-07 Collection Method Changes). Same box (single source of truth) as the region passed by BuildFrameColliders to the provider.
+	// Distance culling: a collider that does not overlap the rope's AABB (Pos ∪ Prev, so this frame's motion is
+	// included) is never loaded at all. The CPU solver has its own broad phase, but the GPU kernel loops every
+	// collider for every node, so filtering here is what makes the system scale — a distant character's
+	// capsules and SDFs never enter the step.
+	// The default path consumes the region mapping the provider returned when it gathered, with no re-test. It
+	// is the same box BuildFrameColliders handed the provider, as the single source of truth.
 	const FBox RopeBounds = FrameRopeRegions.IsValidIndex(RegionIndex) ? FrameRopeRegions[RegionIndex] : FBox(ForceInit);
 	const bool bCull = RopeBounds.IsValid != 0;
 
-	// Static world collider budget per rope. Apart from the global extraction cap (StaticBodyMaxColliders), this rope is used to solve
-	// Limits the number of static world colliders to be independent for each rope (a distant rope cannot use this rope's budget).
-	// Skeleton colliders (capsule/SDF) are naturally limited by the number of bones and are the core of the wrap, so they are excluded from the budget — directly to OutColliders.
+	// Per-rope budget for static world colliders. Separate from the global extraction cap
+	// (StaticBodyMaxColliders), this bounds how many static world colliders *this* rope solves against, so a
+	// distant rope cannot spend this rope's budget.
+	// Skeletal colliders (capsule, SDF) are naturally bounded by the bone count and are the heart of wrapping,
+	// so they are exempt and go straight into OutColliders.
 	const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
 	const int32 PerRopeBudget = Settings ? FMath::Max(1, Settings->StaticBodyMaxCollidersPerRope) : 32;
 
-	// static world candidates are collected separately and discarded from the "furthest ones" when budget is exceeded (skeletons are already unconditionally included above).
+	// Static world candidates are collected separately, and over budget the furthest ones are dropped. Skeletal colliders were already included unconditionally above.
 	TArray<IRopeCollider*> WorldStaticCandidates;
 
-	// Excluding collider (=body) unit owner. Static world providers are exempt from provider-level exclusion below.
-	// The only thing the exemption targets is "world geometry such as floors/pillars". The same provider scans the world and becomes a rope
-	// If you grab a shape (tether proxy, tip mesh, held weapon, etc.) attached to the owning actor, it will follow the rope and control it.
-	// becomes a push-out collider that pushes the rope — select only those as the source actor. Providers that do not provide a source
-	// is an empty array, so it is always false (= as is the existing provider unit check).
+	// Per-body owner exclusion. A static world provider is exempt from the provider-level exclusion below,
+	// because what the exemption is for is world geometry — floors and pillars. But that same provider scans
+	// the world and may pick up shapes attached to the owning actor — the tether proxy, the tip mesh, a held
+	// weapon — which then follow the rope and become push-out colliders shoving it around. Only those, by
+	// source actor, are removed. A provider that supplies no source actors returns an empty array, so this is
+	// always false and the old provider-level check applies unchanged.
 	auto IsOwnBodyCollider = [OwnerToExclude](const FFrameProviderColliders& P, int32 Index)
 	{
 		return RopeColliderGather::IsExcludedOwnerBody(P.SourceActors, Index, OwnerToExclude);
@@ -568,16 +593,16 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 
 	for (const FFrameProviderColliders& FP : FrameProviders)
 	{
-		// Excluding self-owner providers — However, static world providers are exempt (since static world is not the “body of the person who threw it”)
-		// world collision should not disappear just because it is attached to a rope-owned actor). The shape of one's body mixed with the exemption
-		// IsOwnBodyCollider above filters by collider.
+		// Exclude the owner's own providers — except a static world one, since world collision should not
+		// disappear merely because the provider hangs off a rope-owning actor. Shapes of the owner's own body
+		// that the exemption lets through are filtered per collider by IsOwnBodyCollider above.
 		if (!FP.bWorldStatic && FP.Owner == OwnerToExclude && OwnerToExclude != nullptr)
 		{
 			continue;
 		}
 		if (!bCull)
 		{
-			// rope without region (empty sim, etc.) → full fallback (budget bypass, rare — retain existing behavior).
+			// A rope with no region — an empty sim, say — takes the full fallback, bypassing the budget. Rare, and behaviour is unchanged.
 			for (int32 c = 0; c < FP.Colliders.Num(); ++c)
 			{
 				if (FP.Colliders[c] && !IsOwnBodyCollider(FP, c))
@@ -588,12 +613,12 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 			continue;
 		}
 
-		// Default path: consume region(=this rope) mapping created by provider — no bounds retest.
+		// Default path: consume the mapping the provider built for this region, meaning this rope. No bounds re-test.
 		if (FP.bHasRegionMapping)
 		{
 			if (!FP.RegionIndices.IsValidIndex(RegionIndex))
 			{
-				// A defense line that is not reached because length is verified in the build.
+		// Unreachable, since the length was validated during the build.
 				continue;
 			}
 			for (const int32 Idx : FP.RegionIndices[RegionIndex])
@@ -605,22 +630,22 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 				}
 				if (FP.bWorldStatic)
 				{
-					// Budget Applicable to
+					// Counts against the budget.
 					WorldStaticCandidates.Add(Collider);
 				}
 				else
 				{
-					// skeleton, etc. — always included
+					// Skeletal and the like — always included.
 					OutColliders.Add(Collider);
 				}
 			}
 			continue;
 		}
 
-		// fallback path (provider without mapping): Re-curl collider bounds in the old fashion.
+		// Fallback path, for a provider with no mapping: re-test the collider bounds the old way.
 		if (FP.Bounds.Num() != FP.Colliders.Num())
 		{
-			// bounds Cache mismatch → full fallback (rare).
+			// The bounds cache does not match, so take the full fallback. Rare.
 			for (int32 c = 0; c < FP.Colliders.Num(); ++c)
 			{
 				if (FP.Colliders[c] && !IsOwnBodyCollider(FP, c))
@@ -640,12 +665,12 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 			{
 				if (FP.bWorldStatic)
 				{
-					// Budget Applicable to
+					// Counts against the budget.
 					WorldStaticCandidates.Add(FP.Colliders[c]);
 				}
 				else
 				{
-					// skeleton, etc. — always included
+					// Skeletal and the like — always included.
 					OutColliders.Add(FP.Colliders[c]);
 				}
 			}
@@ -658,9 +683,9 @@ void URopeSimSubsystem::GatherCollidersForRope(const URopeComponent& Rope, int32
 		return;
 	}
 
-	// Exceeded budget: Only the top PerRopeBudgets are Loaded in order of proximity to the actual node of this rope (dropped from the furthest).
-	// Proximity is the least squares distance between the collider world bounds center and rope nodes — calculated only once per candidate (avoiding recalculation during alignment).
-	// This path is a rare path that only runs in budget-exceeded frames.
+	// Over budget: keep only the nearest PerRopeBudget colliders, dropping the furthest. Nearness is the
+	// smallest squared distance from the collider's world bounds centre to any rope node, computed once per
+	// candidate so the sort does not recompute it. This path only runs on a frame that exceeded the budget.
 	struct FRankedCollider { IRopeCollider* Collider; float DistSq; };
 	TArray<FRankedCollider> Ranked;
 	Ranked.Reserve(WorldStaticCandidates.Num());
@@ -690,8 +715,8 @@ void URopeSimSubsystem::GatherAimCollidersForRope(URopeComponent& Rope, int32 Ro
 	const bool bAiming = FrameRopeRegions.IsValidIndex(RegionIndex) && FrameRopeRegions[RegionIndex].IsValid;
 	if (!bAiming)
 	{
-		// If aiming is finished or if aiming is not in progress in the first place, the list is cleared — the last frame provider pointer is
-		// remains, the next aiming query will read storage that has already been destroyed.
+		// If aiming has finished, or was never running, clear the list — the provider pointers from the last
+		// frame would otherwise have the next aiming query read storage that has already been destroyed.
 		Rope.SimFrame.AimFrameColliders.Reset();
 		return;
 	}
@@ -700,8 +725,9 @@ void URopeSimSubsystem::GatherAimCollidersForRope(URopeComponent& Rope, int32 Ro
 
 bool URopeSimSubsystem::RefreshAimFrameCollidersForImmediateQuery(URopeComponent& /*Rope*/)
 {
-	// no-op for ABI/source compatibility. If BuildFrameColliders is called outside of the normal tick, provider once/frame
-	// Because the contract and multi-wielder region consistency are broken again, the path is not restored immediately.
+	// A no-op, kept for ABI and source compatibility. Calling BuildFrameColliders outside the normal tick would
+	// break the once-per-frame provider contract and the multi-wielder region consistency again, so the old
+	// behaviour is not being restored.
 	return false;
 }
 
@@ -710,14 +736,16 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SubsystemTick);
 	SCOPE_CYCLE_COUNTER(STAT_RopeSim_Tick);
 
-	// Cleaning up invalid items. The rope that disappears here has not gone through UnregisterRope (the actor has not been
-	// is destroyed), GPU-resident resources remain — de-array and resource recovery are handled in one piece.
+	// Clean up invalid entries. A rope disappearing here never went through UnregisterRope — its actor was
+	// destroyed — so its GPU resident resources are still held; dropping it from the array and reclaiming those
+	// resources happen together.
 	Ropes.RemoveAllSwap([](const TObjectPtr<URopeComponent>& Rope) { return !IsValid(Rope.Get()); });
 	ReleaseGpuResourcesForDeadRopes();
 	if (Ropes.Num() == 0)
 	{
-		// If the GDF demand is not lowered in the frame where the last rope disappears (previously, setGDFActiveCount below
-		// returned before it was reached) The engine continues to build a Global Distance Field that no one uses.
+	// Not lowering the GDF demand on the frame the last rope disappears — which is what happened when this
+	// returned before reaching SetGDFActiveCount below — leaves the engine building a Global Distance Field
+	// nobody uses.
 		if (const UWorld* World = GetWorld())
 		{
 			RopeGDF::SetGDFActiveCount(World->Scene, 0);
@@ -725,23 +753,25 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		return;
 	}
 
-	// G4: GPU is the only runtime path. Render possible: GPU if RHI, otherwise CPU fallback (automatic). Detection is also turned on with the GPU.
+	// The GPU is the only runtime path: GPU when the RHI can render, CPU fallback otherwise, chosen automatically. Detection follows the solve.
 	const bool bUseGPU = RopeGpuRuntimeAvailable();
-	// When solving GPU, detection is also performed on GPU (no separate toggle).
+	// Solving on the GPU means detecting on the GPU; there is no separate toggle.
 	const bool bUseGPUContacts = bUseGPU;
 
-	// 'stat DynamicRope' frame Aggregation for dashboard. NumGdfRopes/TotalFrameColliders in GPU/gather loop below
-	// is collected (a value known only to the subsystem), and the remaining phase/solve path counters are counted by RecordFrameStats as a public getter.
+	// Aggregation for the 'stat DynamicRope' frame dashboard. NumGdfRopes and TotalFrameColliders are gathered
+	// in the GPU and gather loops below, since only the subsystem knows them; the remaining phase and solve
+	// path counters are counted by RecordFrameStats through public getters.
 	int32 NumGdfRopes = 0;
 	int32 TotalFrameColliders = 0;
 
-	// GPU resident (M5): Retrieve and cache the latest (approximately 1-2 frame delay) location for each RopeId filled by RT readback. In Phase 2 below
-	// It is reflected in the Sim (render/collision mirror) of the Free/Flight rope. Sequential dependencies are satisfied within the GPU persistent buffer.
+	// GPU resident: pull and cache the latest positions per RopeId that the render-thread readback filled in,
+	// roughly one to two frames behind. Phase 2 below mirrors them into the Sim of a Free or Flight rope for
+	// render and collision. The sequential dependency itself is satisfied inside the GPU's persistent buffer.
 	if (bUseGPU)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_GPUGetLatest);
 		GpuSolver.GetLatest(GpuLatest);
-		// Recovers the simulation time of the replaced step without being consumed by the view expansion (TryBuildResidentStep below returns it).
+		// Reclaim the simulation time of any step that was replaced before a view expansion consumed it (TryBuildResidentStep below hands it back).
 		{
 			TMap<uint32, float> Dropped;
 			GpuSolver.DrainDroppedSimTime(Dropped);
@@ -752,58 +782,66 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		}
 		if (bUseGPUContacts)
 		{
-			// G3: Retrieve contact detection results (attribution before finalize).
+			// Fetch the contact detection results, attributed before Finalize runs.
 			GpuSolver.GetLatestContacts(GpuLatestContacts);
 		}
 	}
 
-	// Delays Ropes transformation of Register/UnregisterRope during rope traversal below (reentrant guard — header comment).
-	// Prepare for rope spawning/destruction by delegate handler fired by ResolvePendingAimThrow/Prepare/Finalize.
+	// Defer Register/UnregisterRope's mutation of Ropes during the traversal below — a reentrancy guard, see
+	// the header comment. It covers ropes spawned or destroyed by a delegate handler fired from
+	// ResolvePendingAimThrow, Prepare or Finalize.
 	bTickingRopes = true;
 
-	// Phase 1a (GT): Collider central collection — Build once per frame from registered provider and fill FrameColliders with rope-specific filters.
-	// (Replaces scanning the world for each rope. The collider pointer is owned by the provider, so it is valid during this frame solve/finalize.)
+	// Phase 1a (game thread): central collider gather — build once per frame from the registered providers and
+	// fill each rope's FrameColliders through its own filter. (This replaces every rope scanning the world for
+	// itself. The collider pointers belong to the provider and stay valid through this frame's solve and finalize.)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_GatherColliders);
 		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Gather);
 		BuildFrameColliders();
-		// rope index = physical region index of the FrameRopeRegions/provider mapping (order pinned after invalid cleanup above).
+		// The rope index is also the physics region index in FrameRopeRegions and the provider mapping — the order was pinned when invalid entries were cleaned up above.
 		for (int32 RopeIndex = 0; RopeIndex < Ropes.Num(); ++RopeIndex)
 		{
-			// Rope destroyed (pending-kill) by re-entry before this frame is skipped. FrameRopeRegions is !IsValid
-			// position is maintained, the index correspondence remains the same (the transformation is delayed and the order is unchanged).
+			// A rope destroyed by re-entry earlier this frame is skipped. Its slot in FrameRopeRegions stays as
+			// an !IsValid box, so the index correspondence is unchanged — the mutation is deferred and nothing reorders.
 			URopeComponent* Rope = Ropes[RopeIndex];
 			if (!IsValid(Rope))
 			{
 				continue;
 			}
 #if WITH_GAMEPLAY_DEBUGGER
-			// The point at which this frame rope is first touched — ResolvePendingAimThrow below can create a Flight transition.
-			// , solidify the frame start phase before that (for “Start→End” indication in the debugger header).
+			// The first point this frame that touches the rope. ResolvePendingAimThrow below can produce a
+			// Flight transition, so the frame-start phase is pinned before that, which is what lets the debugger
+			// header show "start → end".
 			Rope->CaptureDebugFrameStartPhase();
 #endif
 			GatherCollidersForRope(*Rope, RopeIndex, Rope->SimFrame.FrameColliders);
-			// The aiming list is collected separately in a separate region (rope AABB ∪ aim ray) — Bone of the distant aiming target
-			// Separation contract (FRopeSimFrameIO::AimFrameColliders) to prevent colliders from leaking into the physics list above.
+			// The aiming list is gathered into its own region (the rope's AABB ∪ the aim ray), keeping a distant
+			// aim target's bone colliders out of the physics list above — the separation contract on
+			// FRopeSimFrameIO::AimFrameColliders.
 			GatherAimCollidersForRope(*Rope, RopeIndex);
-			// The HUD/preview request registered by Wielder in PrePhysics is also confirmed here. The next Wielder tick produces this result:
-			// is consumed, so there is a delay of up to 1 frame, but BuildFrameColliders is not called again because of the HUD.
+			// The HUD and preview request the Wielder registered in PrePhysics resolves here too. The Wielder's
+			// next tick consumes the result, so it can be up to a frame old, but BuildFrameColliders is never
+			// re-run for the HUD's sake.
 			Rope->ResolvePendingAimQuery();
-			// ③ Actual input does not use the HUD cache. At the moment of input, the ray is prepared in the same frame aiming list.
-			// Confirm, if it is an immediate execution request, it is thrown here. If it is a montage path, the result is stored until notify.
+			// A real input does not use the HUD cache: at the moment of input the ray is resolved against this
+			// same frame's aiming list, and an execute-now request is thrown from here. A montage path stores
+			// the result until its notify.
 			Rope->ResolvePendingGuaranteedAimThrow();
-			// Aim throw is confirmed immediately after collider is collected with pinned ray bounds at the moment of input.
-			// Thanks to this ordering, the hit or FrameForward fallback is determined by the latest aiming list of the same request.
+			// The aim throw resolves right after the colliders are gathered, with the ray bounds pinned at the
+			// moment of input. That ordering is what makes the hit — or the FrameForward fallback — come from
+			// the latest aiming list for that same request.
 			Rope->ResolvePendingAimThrow();
-			// Aim ray locks mesh+bone and removes other bone colliders here.
-			// Actual/predicted contact and Wrapping path always use this result. General solve also uses this list, but
-			// The collision-Free Aim Flight solve intentionally ignores the list to only solve for distance/bend.
+			// The aim ray locks onto one mesh and bone, and other bones' colliders are removed here.
+			// Actual and predicted contact, and the wrapping path, always use that result. An ordinary solve
+			// uses the same list too, though a collision-free aim flight ignores it deliberately and solves only
+			// distance and bending.
 			Rope->FilterFrameCollidersForAimWrapTarget();
 			TotalFrameColliders += Rope->SimFrame.FrameColliders.Num();
 		}
 	}
 
-	// Phase 1b (GT): Preparation — init/pin + logic phase processing (collider already populated above).
+	// Phase 1b (game thread): Prepare — init and pin, plus the logic phases. The colliders were filled above.
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Prepare);
 		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Prepare);
@@ -815,8 +853,9 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			{
 				continue;
 			}
-			// Since all ropes use the same local player camera, only one query per frame is performed on the first rope needed.
-			// Lookup failures are also remembered as resolved and do not iterate as many times as the number of ropes in a world without a server/camera.
+		// Every rope uses the same local player camera, so the query runs once per frame, on the first rope
+		// that needs it. A failed lookup is remembered as resolved too, so a world with no server and no camera
+		// does not repeat it once per rope.
 			if (!bLODCameraResolved && Rope->SolverConfig.bEnableDistanceLOD &&
 				Rope->SolverConfig.LODStartDistance > 0.0f)
 			{
@@ -830,20 +869,22 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		}
 	}
 
-	// Phase 2: solver step (GPU resident / CPU fallback). Solve Free/Flight/Wrapping/Wrapped,
-	// Releasing is override-only, Contacting is not dispatched — check for each rope is in TryBuildResidentStep.
+	// Phase 2: the solver step, GPU resident or CPU fallback. It solves Free, Flight, Wrapping and Wrapped;
+	// Releasing is override-only, and Contacting does not dispatch at all — the per-rope decision is in
+	// TryBuildResidentStep.
 	if (bUseGPU)
 	{
-		// GPU resident path(M5a). Advances the persistent buffer for each rope every frame in-place (no round trip stall/slomo).
-		// whip (G1) and logic phase (G2 — Wrapping/Wrapped/Releasing) are also GPU resident: logic output
-		// (OverrideFrame) into the override pass and apply it in the kernel without reseeding. without integral
-		// logic frame NumSub=0 override-only dispatch. Contact detection is handled by Finalize with a delayed mirror (G3).
+		// The GPU resident path advances each rope's persistent buffer in place every frame, with no round-trip
+		// stall or slow-motion. The whip and the logic phases (Wrapping, Wrapped, Releasing) are GPU-resident
+		// too: their output (OverrideFrame) goes into the override pass and the kernel applies it with no
+		// reseed. A logic frame with no integration dispatches override-only, at NumSub = 0.
+		// Contact detection is handled in Finalize, off the delayed mirror.
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SolveGPU);
 		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Solve);
 
 		TArray<FRopeGPUResidentStep> Steps;
 		Steps.Reserve(Ropes.Num());
-		// Phase 2c: GDF consumer gate — Number of active GDF ropes (Engine build-on-demand signal). NumGdfRopes hoists from the top of the tick.
+		// GDF consumer gate: the count of active GDF ropes, which is the engine's build-on-demand signal. NumGdfRopes was hoisted to the top of the tick.
 		for (URopeComponent* Rope : Ropes)
 		{
 			if (!IsValid(Rope))
@@ -861,25 +902,26 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			}
 			else if (Rope->bPendingGpuCaptureHandoff && Rope->bUseWorldGDF)
 			{
-				// Contacting does not create a new GPU step, but ReadbackNow may have pending Scene GDF pending.
-				// . The GDF demand must be maintained until the handoff is completed before the next view dispatch consumes that step.
+				// Contacting builds no new GPU step, but ReadbackNow may have left a pending step needing the
+				// scene GDF. The demand has to stay up until the next view dispatch consumes that step and the
+				// handoff completes.
 				++NumGdfRopes;
 			}
 		}
-		// If there is an active GDF rope in this scene, the custom FX system requires a GDF → the engine builds it on demand.
+		// With an active GDF rope in this scene, the custom FX system requires a GDF and the engine builds it on demand.
 		if (const UWorld* World = GetWorld())
 		{
 			RopeGDF::SetGDFActiveCount(World->Scene, NumGdfRopes);
 		}
 		if (Steps.Num() > 0)
 		{
-			// Dispatch is deferred to view expansion (scene graph, PreRenderBasePass) — timing when GDF parameters are valid.
+		// Dispatch is deferred to view expansion (the scene graph, PreRenderBasePass), which is when the GDF parameters are valid.
 			GpuSolver.EnqueueSteps(MoveTemp(Steps));
 		}
 	}
 	else
 	{
-		// CPU path (default): ropes are independent from each other + collider snapshot read-only → thread safe.
+		// CPU path (the fallback): ropes are independent of one another and the collider snapshot is read-only, so this is thread-safe.
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_SolveParallel);
 		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Solve);
 		ParallelFor(Ropes.Num(), [this, DeltaTime](int32 Index)
@@ -889,13 +931,13 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			{
 				return;
 			}
-			// CPU path → Do not render resident (M5b).
+		// On the CPU path, nothing renders from the resident buffer.
 			Rope->SimFrame.bGpuSteppedThisFrame = false;
 			Rope->SolveSimFrame(DeltaTime);
 		});
 	}
 
-	// Phase 3 (GT): Finalization — Flight contact detection/capture (UObject·Event) + render dirty.
+	// Phase 3 (game thread): finalize — Flight contact detection and capture (UObjects and events), plus the render dirty flags.
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_Finalize);
 		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Finalize);
@@ -905,10 +947,11 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 			{
 				continue;
 			}
-			// G3: Attribute the GPU detection results and fill Finalize's Flight contact source with GPU candidates.
-			// gate is not global, but per-rope bGpuSteppedThisFrame — Only the rope that actually GPU stepped in this frame
-			// Uses GPU detection. The ropes (node>MaxNodes, etc.) that did not make the GPU step were solved by the CPU, so the GPU candidate is also used here.
-			// is not enforced, so FinalizeSimFrame falls back to CPU sweep detection (otherwise the detection itself will be missed and cannot be captured).
+			// Attribute the GPU detection results and fill Finalize's Flight contact source with the GPU
+			// candidates. The gate is per-rope (bGpuSteppedThisFrame), not global, so only a rope that actually
+			// stepped on the GPU this frame uses GPU detection. A rope that did not — over the node cap, say —
+			// solved on the CPU, and forcing GPU candidates on it would leave detection missing entirely and no
+			// capture possible, so FinalizeSimFrame falls back to the CPU sweep instead.
 			Rope->SimFrame.bGpuContactsThisFrame = false;
 			if (Rope->SimFrame.bGpuSteppedThisFrame && Rope->Phase == ERopePhase::Flight)
 			{
@@ -918,16 +961,17 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 		}
 	}
 
-	// Slip (Free stationary rope solve skip)/distance LOD (iteration damping)/gather distance culling implemented — component
-	// (UpdateSleepState/ComputeSolverLOD) + GatherCollidersForRope. TODO: per-frame total solve cost cap.
+	// Sleep (a still Free rope skips its solve), distance LOD (iteration falloff) and gather distance culling
+	// all live in the component (UpdateSleepState, ComputeSolverLOD) and GatherCollidersForRope. A per-frame
+	// cap on total solve cost is not implemented.
 
-	// 'stat DynamicRope' — update frame load/phase dashboard (helper skips traversal if group not collected).
+	// 'stat DynamicRope' — update the frame load and phase dashboard. The helper skips the traversal when the stat group is not being collected.
 	RopeStats::FRopeFrameCounters FrameCounters;
 	FrameCounters.NumGdfDispatched = NumGdfRopes;
 	FrameCounters.FrameColliders = TotalFrameColliders;
 	RopeStats::RecordFrameStats(Ropes, FrameCounters);
 
-	// End of traversal — The postponed rope registration/deregistration is now reflected (transformation resumes immediately thereafter).
+	// End of the traversal: the deferred rope registrations and unregistrations apply now, and mutation resumes immediately after.
 	bTickingRopes = false;
 	ApplyDeferredRopeChanges();
 }
@@ -953,7 +997,7 @@ FName FRopeSimTickFunction::DiagnosticContext(bool /*bDetailed*/)
 
 bool URopeSimSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
-	// Simulation only in game/PIE (excluding editor preview/inspector world → component also registers as BeginPlay only then).
+	// Simulate in game and PIE only, excluding the editor preview and inspector worlds — which is also why the component only registers from BeginPlay.
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
 }
 
@@ -961,10 +1005,12 @@ void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
 
-	// Register TG_PostPhysics tick function (replaces existing UTickableWorldSubsystem tickable). tickables are engine TickObjects
-	// was implicitly placed at the call location (after TG_PostPhysics/before TG_PostUpdateWork — engine implementation details). express
-	// Group + mesh tick Prerequisites (SetAnimPrerequisites) to contract the "after animation evaluation" order.
-	// bAllowTickOnDedicatedServer: Keep the existing tickable since it also ran on the server (CPU fallback simulation).
+	// Register a TG_PostPhysics tick function, replacing the old UTickableWorldSubsystem tickable. A tickable
+	// was placed implicitly by the engine's TickObject ordering — after TG_PostPhysics and before
+	// TG_PostUpdateWork, an implementation detail — whereas an explicit group plus the mesh tick prerequisites
+	// (SetAnimPrerequisites) makes "after the animation is evaluated" a contract.
+	// bAllowTickOnDedicatedServer keeps the old tickable's behaviour, which also ran on the server through the
+	// CPU fallback simulation.
 	SimTickFunction.Target = this;
 	SimTickFunction.TickGroup = TG_PostPhysics;
 	SimTickFunction.EndTickGroup = TG_PostPhysics;
@@ -973,17 +1019,20 @@ void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	SimTickFunction.bAllowTickOnDedicatedServer = true;
 	SimTickFunction.RegisterTickFunction(InWorld.PersistentLevel);
 
-	// Registers a solver in the scene of this world so that the view expansion can find and dispatch it from scene → solver in the GDF integration path.
-	// (The scene has been created for rendering at this point.) Even if the path is off, registration is harmless (pending is empty, no-op).
+	// Register the solver with this world's scene, so the GDF integration path can find it from the scene at
+	// view expansion time and dispatch it. (The scene exists for rendering by this point.) Registering is
+	// harmless even with that path off — the pending queue is empty and it is a no-op.
 	RopeGDF::RegisterSolver(InWorld.Scene, &GpuSolver);
 
-	// static world collision provider Automatically spawns one host actor per world. The class specified by the settings (default
-	// Spawn an ARopeController, but if None disable auto-spawning (opt-out manual placement). The spawned actor is immediately
-	// Upon receiving BeginPlay, URopeStaticBodyProvider is registered as RegisterColliderProvider. DoesSupportWorldType
-	// It is limited to Game/PIE, so it does not appear in the editor preview world.
-	// Avoid duplication (fragment 1): If there is already a static provider in the world before auto-spawn (manual placement, etc.), give way and not spawn.
-	// does not → "manual placement beats auto-spawn" is a non-static priority. component instead of registry (depending on registration order)
-	// Check for instance existence — The batch actor has already been instantiated before BeginPlay, so it is caught regardless of registration timing.
+	// Auto-spawn one host actor per world for the static world collision provider. The class comes from the
+	// settings (ARopeController by default); setting it to None disables the auto-spawn, for placing one by
+	// hand instead. The spawned actor registers URopeStaticBodyProvider through RegisterColliderProvider as
+	// soon as it receives BeginPlay. DoesSupportWorldType limits this to Game and PIE, so nothing appears in
+	// the editor preview world.
+	// Duplicate avoidance: if the world already holds a static provider — placed by hand, say — the auto-spawn
+	// stands down, which is what makes hand placement beat it. The check looks for a component instance rather
+	// than a registry entry, because that would depend on registration order, and an actor placed in the level
+	// is already instantiated before BeginPlay and so is found whatever the timing.
 	bool bManualProviderPresent = false;
 	for (TObjectIterator<URopeStaticBodyProvider> It; It; ++It)
 	{
@@ -999,7 +1048,7 @@ void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		if (bManualProviderPresent)
 		{
 			UE_LOG(LogRopeCollision, Verbose,
-				TEXT("RopeSimSubsystem: 기존 정적 바디 프로바이더가 있어 자동 스폰을 건너뜁니다(수동 배치 우선)."));
+				TEXT("RopeSimSubsystem: a static body provider already exists, so the auto-spawn is skipped (hand placement wins)."));
 		}
 		else if (!Settings->StaticBodyControllerClass.IsNull())
 		{
@@ -1007,13 +1056,14 @@ void URopeSimSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 			if (ControllerClass)
 			{
 				FActorSpawnParameters SpawnParams;
-				// Runtime Manager — Do not save to level.
+				// A runtime manager — do not save it into the level.
 				SpawnParams.ObjectFlags |= RF_Transient;
-				// Position independent (origin).
+				// Position is irrelevant; spawn at the origin.
 				SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 				SpawnedStaticBodyController = InWorld.SpawnActor<AActor>(ControllerClass, FTransform::Identity, SpawnParams);
-				// collider budget/convex plane cap because the provider reads Project Settings directly from BuildColliders
-				// No need to inject here (single source of truth — no duplicate fields in the component).
+				// The collider budget and the convex plane cap do not need injecting here: the provider reads
+				// them straight from Project Settings in BuildColliders, keeping one source of truth with no
+				// duplicate fields on the component.
 				UE_LOG(LogRopeCollision, Verbose, TEXT("RopeSimSubsystem: spawned static-body controller %s (%s)."),
 					*GetNameSafe(SpawnedStaticBodyController), *GetNameSafe(ControllerClass));
 			}
@@ -1033,8 +1083,9 @@ void URopeSimSubsystem::Deinitialize()
 	}
 	SimTickFunction.Target = nullptr;
 
-	// Auto-spawned manager actor destroyed. world teardown cleans up actors anyway, but explicitly deletes them
-	// Make sure no residue remains when re-initializing (e.g. PIE seamless travel). Defends if already destroyed with IsValid.
+	// Destroy the auto-spawned manager actor. World teardown cleans actors up anyway, but deleting it
+	// explicitly makes sure nothing is left over when the subsystem re-initializes, as it does on a PIE
+	// seamless travel. IsValid guards against it already being gone.
 	if (IsValid(SpawnedStaticBodyController))
 	{
 		SpawnedStaticBodyController->Destroy();
@@ -1043,7 +1094,7 @@ void URopeSimSubsystem::Deinitialize()
 
 	if (const UWorld* World = GetWorld())
 	{
-		// Lower the demand first and then remove the solver (so that no remaining demand remains in the re-Initialize path while the world is alive).
+		// Lower the demand before removing the solver, so a re-Initialize path in a live world cannot leave demand behind.
 		RopeGDF::SetGDFActiveCount(World->Scene, 0);
 		RopeGDF::UnregisterSolver(World->Scene);
 	}
@@ -1057,29 +1108,33 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 	const FRopeResidentContacts* Contacts = GpuLatestContacts.Find(Rope.GetUniqueID());
 	if (!Contacts || Contacts->Generation != Rope.SimFrame.SimGeneration)
 	{
-		// There is no recovery yet or reseeding catch-up is in progress — There is no GPU candidate for this frame (capture is for the next frame).
-		// Source is GPU (empty candidate) — does not return to CPU sweep.
+		// Either nothing has been read back yet, or a reseed catch-up is still in progress, so there are no GPU
+		// candidates this frame and any capture waits for the next one. The source is still GPU, with an empty
+		// candidate list — it does not fall back to the CPU sweep.
 		Rope.SimFrame.bGpuContactsThisFrame = true;
 		return;
 	}
 
-	// collider set response gate (#7): ColliderIndex of delayed contact is based on **dispatch time** set, as shown below.
-	// The attribution table was rebuilt for this frame. Only when the resulting dispatch signature is the same as the current signature.
-	// indices mean the same thing — if different, drop (capture next frame) instead of attribution to another bone.
-	// Signature 0 is not set (warm-up), so it is also dropped.
+	// Collider set correspondence gate: a delayed contact's ColliderIndex refers to the set as it was at
+	// **dispatch** time, while the attribution table below was rebuilt for this frame. The indices only mean
+	// the same thing when the result's dispatch signature matches the current one; when they differ the contact
+	// is dropped, and capture waits a frame, rather than being attributed to the wrong bone.
+	// Signature 0 means unset (warm-up) and is dropped too.
 	if (Contacts->AttribSig == 0 || Contacts->AttribSig != Rope.SimFrame.GpuAttribSig)
 	{
 		Rope.SimFrame.bGpuContactsThisFrame = true;
 		return;
 	}
 
-	// Contacts are processed in slot order (actual first, predictive second), so actual is processed first. CPU AddUniqueCandidate
-	// Merge duplicates (node, bone, mesh) identically (SourceMask OR + Source priority Guided>Actual>Free) —
-	// Prevents the tracker's node duplicate count and matches the check with the CPU.
+	// Contacts arrive in slot order — actual first, predicted second — so the actual one is handled first. The
+	// merge matches the CPU's AddUniqueCandidate exactly, on (node, bone, mesh), OR-ing the SourceMask and
+	// taking the Source priority Guided > Actual > Free. That stops the tracker double-counting a node and
+	// keeps the decision identical to the CPU's.
 	for (const FRopeGPUContactResult& C : Contacts->Contacts)
 	{
-		// collider index → ​​(bone, mesh) attribution. Anything out of range (collider set change) is skipped (self-correction).
-		// Explicit dispatch — Unknown types are dropped into anyone's table without attribution (previously else was an attribution trap with a box).
+		// Attribute the collider index back to a (bone, mesh) pair. Anything out of range — the collider set
+		// changed — is skipped, which is self-correcting. The dispatch is explicit: an unknown type is dropped
+		// rather than attributed, where an else branch once let a box fall into somebody else's table.
 		const TArray<FRopeSimFrameIO::FGpuColliderAttribution>* AttrPtr =
 			(C.ColliderType == 0) ? &Rope.SimFrame.GpuCapsuleAttribution :
 			(C.ColliderType == 1) ? &Rope.SimFrame.GpuSdfAttribution :
@@ -1093,13 +1148,13 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 		const FRopeSimFrameIO::FGpuColliderAttribution& A = (*AttrPtr)[C.ColliderIndex];
 		if (A.Bone.IsNone())
 		{
-			// No attribution (non-skeletal collider) — Not subject to capture.
+			// No attribution (a non-skeletal collider), so it cannot be captured.
 			continue;
 		}
-		// weak — null if destroyed during delay (check proceeds to bone).
+		// Weak, so it is null if the mesh was destroyed during the delay. The decision then proceeds on the bone alone.
 		const USceneComponent* Mesh = A.Mesh.Get();
 
-		// Merge: If there is the same (node, bone, mesh) candidate, update SourceMask OR + Source priority, but do not add new candidate.
+		// Merge: an existing candidate for the same (node, bone, mesh) has its SourceMask and Source priority updated rather than a new one being added.
 		FRopeContactCandidate* Existing = nullptr;
 		for (FRopeContactCandidate& E : Rope.SimFrame.GpuFlightCandidates)
 		{
@@ -1132,7 +1187,7 @@ void URopeSimSubsystem::BuildGpuFlightCandidates(URopeComponent& Rope)
 		Cand.Normal = C.Normal.GetSafeNormal();
 		Cand.Penetration = C.Penetration;
 		Cand.SurfaceVelocity = C.SurfaceVelocity;
-		// Filled by EvaluateRelativeMotion(GT).
+		// Filled in by EvaluateRelativeMotion on the game thread.
 		Cand.WrapDirectionScore = 0.0f;
 		Rope.SimFrame.GpuFlightCandidates.Add(Cand);
 	}
@@ -1143,7 +1198,7 @@ bool URopeSimSubsystem::SyncGpuPositionsForHandoff(URopeComponent& Rope)
 {
 	if (!RopeGpuRuntimeAvailable())
 	{
-		// CPU fallback — Sim is already up to date.
+		// CPU fallback — the Sim is already current.
 		return false;
 	}
 
@@ -1153,18 +1208,18 @@ bool URopeSimSubsystem::SyncGpuPositionsForHandoff(URopeComponent& Rope)
 	uint32 Generation = 0;
 	if (!GpuSolver.ReadbackNow(Rope.GetUniqueID(), Pos, Prev, Generation))
 	{
-		// No resident buffer (never stepped into the GPU) — the mirror is the truth.
+		// No resident buffer, meaning the rope never stepped on the GPU, so the mirror is the truth.
 		return false;
 	}
 	if (Generation != Rope.SimFrame.SimGeneration || Pos.Num() != S.Num() || Prev.Num() != S.Num())
 	{
-		// Reseeding catch-up in progress or node number mismatch — preventing stale application.
+		// A reseed catch-up is in progress, or the node counts disagree, so stale data must not be applied.
 		return false;
 	}
 
 	S.Positions = MoveTemp(Pos);
 	S.PrevPositions = MoveTemp(Prev);
-	// The grabbed end (node ​​0) snaps to the current pin, identical to the mirror convention.
+	// The held end (node 0) snaps to the current pin, following the same convention as the mirror.
 	if (S.bStartPinned && S.Num() > 0)
 	{
 		S.Positions[0] = S.StartPinTarget;
@@ -1177,16 +1232,17 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 {
 	FRopeSimState& S = Rope.Sim;
 
-	// GPU resident target: solve frame (Free/Flight/Wrapping/Wrapped) or Releasing frame with logic output only.
-	// Since bSolveThisFrame/OverrideFrame are authoritatively determined in Prepare, a separate phase check is not required here.
-	// Contacting (no output) does not dispatch itself, so the GPU buffer remains frozen (same as CPU's "no solve").
+	// The GPU resident path takes a solve frame (Free, Flight, Wrapping, Wrapped) or a Releasing frame that
+	// carries logic output only. bSolveThisFrame and OverrideFrame were decided authoritatively in Prepare, so
+	// no separate phase test is needed here. Contacting produces no output and does not dispatch at all,
+	// leaving the GPU buffer frozen — the same as "no solve" on the CPU.
 	const bool bGpuRope = (Rope.SimFrame.bSolveThisFrame || Rope.SimFrame.OverrideFrame.HasAny())
 		&& S.Num() >= 2 && S.Num() <= FRopeGPUSolver::MaxNodes;
-	// M5b: Only ropes that GPU step in this frame render read resident PosBuf directly (or stale → CPU mirror).
+	// Only a rope the GPU stepped this frame may render straight from the resident PosBuf; anything stale falls back to the CPU mirror.
 	Rope.SimFrame.bGpuSteppedThisFrame = bGpuRope;
 	if (!bGpuRope)
 	{
-		// fallback (exceeding number of nodes, etc.): CPU solves Free span of bSolveThisFrame, skips override-only frame.
+		// Fallback (over the node cap, say): the CPU solves the free span when bSolveThisFrame, and skips an override-only frame.
 		if (Rope.SimFrame.bSolveThisFrame)
 		{
 			Rope.SolveSimFrame(DeltaTime);
@@ -1196,8 +1252,9 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 
 	const uint32 RopeId = Rope.GetUniqueID();
 
-	// The previous recovery amount is reflected in the Sim (mirror). Only when generation matches current (= GPU catches up with current seed);
-	// If catch-up is in progress immediately after reseeding, the seed source is preserved by leaving the CPU Sim as is.
+	// Mirror the previous readback into the Sim, but only when the generation matches the current one, meaning
+	// the GPU has caught up with the current seed. While a catch-up is in progress right after a reseed, the
+	// CPU Sim is left alone so it stays the seed source.
 	if (const FRopeResidentLatest* L = GpuLatest.Find(RopeId))
 	{
 		if (L->Generation == Rope.SimFrame.SimGeneration && L->NumNodes == S.Num()
@@ -1205,7 +1262,7 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 		{
 			S.Positions = L->Positions;
 			S.PrevPositions = L->PrevPositions;
-			// tension mirror (only when present — it may be rarer than the position because it is only retrieved in the solve frame. If not, the previous value is maintained).
+			// Mirror the tension too, when there is any — it is only read back on a solve frame, so it can update less often than the positions, and the previous value stands otherwise.
 			if (L->SegmentTension.Num() == S.Num() - 1)
 			{
 				S.SegmentTension = L->SegmentTension;
@@ -1213,33 +1270,34 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 		}
 	}
 
-	// Align the gripped end (node ​​0) exactly with the current pin position — the GPU mirror has a ~1-2 frame delay, so it is misaligned with the hand.
-	// Correction for render/contact (GPU solve itself processes pins at each step as PinTarget, so simulation is not affected).
+	// Snap the held end (node 0) exactly onto the current pin: the GPU mirror lags one to two frames and would
+	// otherwise sit away from the hand. This is a correction for render and contact only — the GPU solve
+	// handles the pin itself each step through PinTarget, so the simulation is unaffected.
 	if (S.bStartPinned && S.Num() > 0)
 	{
 		S.Positions[0] = S.StartPinTarget;
 		S.PrevPositions[0] = S.StartPinPrev;
 	}
 
-	// If the mirror covered the logic output of Prepare (anchor position, etc.), reapply — CPU Sim mirror.
-	// Maintain the best combination of “write the latest bone-based logic + delayed Free span” (G2).
+	// If the mirror overwrote Prepare's logic output — an anchor position, say — reapply it to the CPU Sim
+	// mirror. That keeps the best of both: the latest bone-driven logic written over a delayed free span.
 	if (Rope.SimFrame.OverrideFrame.HasAny())
 	{
 		Rope.SimFrame.OverrideFrame.ApplyToSim(S);
 	}
 
-	// pinned-timestep schedule (CPU accumulator). override-only frame(bSolveThisFrame=false) does not require integration.
-	// Only records override (NumSub=0) — Same time processing as “no solve” in CPU path.
-	// schedule/seed use the same solver settings.
+	// Fixed-timestep schedule from the CPU accumulator. An override-only frame (bSolveThisFrame = false) needs
+	// no integration and records the override alone (NumSub = 0), which is how the CPU path treats "no solve"
+	// as well. The schedule and the seed use the same solver settings.
 	const FRopeSolverConfig& EffSolverCfg = Rope.SolverConfig;
 	FRopeSubstepSchedule Schedule;
 	Schedule.NumSub = 0;
 	Schedule.FixedDt = 0.0f;
 	if (Rope.SimFrame.bSolveThisFrame)
 	{
-		// Return the time of the discarded step that could not be dispatched to the accumulator and make a schedule — so that
-		// The accumulator remains the single truth of the “simulated time”. After reverting, RopeSolverSubsteps immediately below
-		// Because it is clamped to MaxAccum, rushing after a long stationary is limited as is the existing slow-mo policy.
+		// Return the time of a dropped, undispatched step to the accumulator before building the schedule, so
+		// the accumulator stays the single truth of "time simulated". After the return, RopeSolverSubsteps just
+		// below clamps to MaxAccum, so catching up after a long pause is bounded by the existing slow-motion policy.
 		float Refund = 0.0f;
 		if (PendingSimTimeRefund.RemoveAndCopyValue(RopeId, Refund) && Refund > 0.0f)
 		{
@@ -1248,39 +1306,42 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 		Schedule = RopeSolverSubsteps(S, EffSolverCfg, DeltaTime);
 	}
 
-	// Resident step configuration (self-contained). Seed data is provided every frame (RT is uploaded to GPU only when reseeding).
+	// Assemble the resident step, self-contained. The seed data is supplied every frame, and the render thread only uploads it on a reseed.
 	SeedResidentStep(OutStep, RopeId, Rope.SimFrame.SimGeneration, S, EffSolverCfg, Schedule);
-	// Non-stretchable contract per phase, such as CPU SolveSimFrame. The strain-limit in the GPU's latest resident pose is
-	// is applied, so it is more accurate than calibrating the guide target based on a delayed CPU mirror.
+	// The same per-phase inextensibility contract as the CPU SolveSimFrame. The strain limit applies to the
+	// GPU's latest resident pose, which is more accurate than correcting the guide target against a delayed
+	// CPU mirror.
 	OutStep.MaxStretchRatio = Rope.GetEffectiveMaxStretchRatio();
-	// Cover component boundary analysis value: radius auto(0=render Radius) + GDF flag moved directly to component.
+	// Cover what the component boundary resolves: the auto radius (0 = the render Radius) and the GDF flag, both of which live on the component.
 	OutStep.CollisionRadius = Rope.GetEffectiveCollisionRadius();
-	// Solve collision and contact detection are separate contracts. Even if it is false, the PackStepColliders below are used for detect.
-	// Packing continues, and only the number of colliders/GDFs transmitted to the solve kernel becomes 0.
+	// Solve collision and contact detection are separate contracts. Even with solve collision off,
+	// PackStepColliders below still packs for detection; only the collider and GDF counts handed to the solve
+	// kernel go to 0.
 	OutStep.bSolveCollisions = Rope.SimFrame.bSolveCollisionsThisFrame;
 	OutStep.bUseWorldGDF = Rope.bUseWorldGDF && OutStep.bSolveCollisions;
-	// Distance LOD: The far rope has iteration damping (calculated in Prepare). CollisionPasses are clamped to Iterations in Packing.
+	// Distance LOD: a distant rope gets iteration falloff, computed in Prepare. CollisionPasses is clamped to Iterations during packing.
 	OutStep.Iterations = Rope.GetLODScaledIterations();
 
-	// G3: contact detection only on Flight rope (capture only on Flight rope). Since this function is called only on GPU path
-	// GPUContacts are always on — one gate with phase == Flight is enough.
+	// Contact detection runs on a Flight rope only, because only a Flight rope can capture. This function is
+	// reached on the GPU path alone, where GPU contacts are always on, so the single phase == Flight gate is enough.
 	const bool bDetectThisRope = (Rope.Phase == ERopePhase::Flight);
 	if (bDetectThisRope)
 	{
 		RequestContactDetection(Rope, DeltaTime, OutStep);
 	}
 
-	// collision: Classifies this rope's collider as capsule(M2)/SDF(M3) (+ parallel attribution table when detecting).
-	// Only when there is a consumer (solve substep loop / detection kernel) — override-only frame(Wrapped sleep,
-	// For frames with NumSub=0 at high fps, the kernel does not read the collider, so smoothing/uploading is skipped entirely.
-	// (RT packs only place 1 dummy in an empty array). The collider for wake check is separate as FrameColliders (gather).
+	// Collision: classify this rope's colliders into capsules and SDFs, building the attribution table
+	// alongside when detecting. Only when something will consume them — the solve substep loop or the detection
+	// kernel. On an override-only frame (a Wrapped sleep, or a NumSub = 0 frame at high fps) the kernel reads no
+	// colliders at all, so the flattening and upload are skipped entirely; the render-thread packing just puts
+	// one dummy in the empty array. The colliders used for the wake check are separate — FrameColliders, from the gather.
 	if (OutStep.NumSub > 0 || bDetectThisRope)
 	{
 		PackStepColliders(Rope, bDetectThisRope, OutStep);
 	}
 
-	// G2: Inject logic phase output (OverrideFrame) into override — Replaces logic phase reseeding.
-	// Exactly the same data as applied to the CPU Sim (bit mirror guaranteed by static_assert above).
+	// Inject the logic phases' output (OverrideFrame) as an override, in place of a logic-phase reseed.
+	// It is exactly the data applied to the CPU Sim, with the bit mirroring guaranteed by the static_assert above.
 	if (Rope.SimFrame.OverrideFrame.HasAny() && Rope.SimFrame.OverrideFrame.Flags.Num() == S.Num())
 	{
 		OutStep.OverrideFlags = Rope.SimFrame.OverrideFrame.Flags;
@@ -1289,7 +1350,7 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 		OutStep.OverrideInvMass = Rope.SimFrame.OverrideFrame.InvMass;
 	}
 
-	// G1: Inject whip guide target as override (Flight only, applied before integration).
+	// Inject the whip guide targets as an override. Flight only, and applied before integration.
 	PackWhipOverride(Rope, OutStep);
 
 	return true;
@@ -1298,24 +1359,26 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float DeltaTime, FRopeGPUResidentStep& Step) const
 {
 	const FRopeSimState& S = Rope.Sim;
-	// The attribution table (collider index → bone/mesh) is similar to PackStepColliders with Step.Capsules/SDFColliders.
-	// It is filled in the same order, so reset here first.
+	// The attribution table (collider index → bone and mesh) is filled in the same order PackStepColliders
+	// fills Step.Capsules and Step.SDFColliders, so it is reset here first.
 	Step.bDetectContacts = true;
 	Step.ContactRadius = Rope.GetEffectiveContactQueryRadius();
 	Step.PredictionFrames = Rope.WrapConfig.PredictiveContactFrames;
-	// detection sweep resolution (anti-tunneling) — comes from the same stored value as CPU MakeFlightDetectParams.
+	// Detection sweep resolution, the anti-tunnelling value — from the same stored setting the CPU's MakeFlightDetectParams reads.
 	Step.ContactSweepStep = Rope.WrapConfig.ContactSweepStep;
 	Step.ContactMaxSweepSamples = Rope.WrapConfig.ContactMaxSweepSamples;
-	// Substep of prediction contact Free node extrapolation → frame displacement conversion (#8). Step.FixedDt(=Schedule.FixedDt=(1/60)/Substeps) is
-	// Already populated by SeedResidentStep — Same value as FrameDeltaTime/SubstepDeltaTime in CPU MakeFlightDetectParams.
+	// Converts a predicted contact's free-node extrapolation from substep to frame displacement.
+	// Step.FixedDt (= Schedule.FixedDt = (1/60)/Substeps) was already filled by SeedResidentStep, and matches
+	// FrameDeltaTime and SubstepDeltaTime in the CPU's MakeFlightDetectParams.
 	Step.ContactFrameToSubstepRatio = (Step.FixedDt > KINDA_SMALL_NUMBER) ? (DeltaTime / Step.FixedDt) : 1.0f;
 	Rope.SimFrame.GpuCapsuleAttribution.Reset();
 	Rope.SimFrame.GpuSdfAttribution.Reset();
 	Rope.SimFrame.GpuBoxAttribution.Reset();
 	Rope.SimFrame.GpuConvexAttribution.Reset();
 
-	// Predictive contact (G3b): The GPU carries the guide mask/current, previous, and next target in the whip active frame.
-	// Allows extrapolation of the guide node (same input as CPU AddPredictedContactCandidates).
+	// Predicted contact: on a frame where the whip is active, the GPU carries the guide mask and the previous,
+	// current and next targets, so a guided node can be extrapolated. The same input the CPU's
+	// AddPredictedContactCandidates takes.
 	const TArray<uint8>& WhipMask = Rope.WhipGuide.GetGuidedNodeMask();
 	if (Step.PredictionFrames > KINDA_SMALL_NUMBER && WhipMask.Num() == S.Num())
 	{
@@ -1328,9 +1391,10 @@ void URopeSimSubsystem::RequestContactDetection(URopeComponent& Rope, float Delt
 	}
 }
 
-// Ordered (bone, mesh) signature of the GPU attribution set. The ColliderIndex of the delayed contact (1~2 frames) is this frame.
-// Used to check whether it corresponds safely to the attribution table (= invariant set/order) by comparing between frames.
-// See FRopeSimFrameIO::GpuAttribSig comment for detailed contract.
+// Ordered (bone, mesh) signature of the GPU attribution set. A contact delayed one to two frames carries a
+// ColliderIndex, and comparing this signature between frames is what proves that index still lines up with
+// this frame's attribution table — that the set and its order are unchanged.
+// The full contract is on FRopeSimFrameIO::GpuAttribSig.
 static uint32 RopeComputeAttribSig(const TArray<FRopeSimFrameIO::FGpuColliderAttribution>& Attr, uint32 Seed)
 {
 	uint32 H = HashCombine(Seed, static_cast<uint32>(Attr.Num()));
@@ -1344,7 +1408,7 @@ static uint32 RopeComputeAttribSig(const TArray<FRopeSimFrameIO::FGpuColliderAtt
 
 void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThisRope, FRopeGPUResidentStep& Step) const
 {
-	// Upon detection, collider index → ​​bone/mesh attribution is filled in parallel in the same order as Step.Capsules/SDFColliders.
+	// When detecting, the collider index → bone and mesh attribution is filled in the same order as Step.Capsules and Step.SDFColliders.
 	auto MakeAttribution = [](IRopeCollider* Collider)
 		{
 			FRopeSimFrameIO::FGpuColliderAttribution Attr;
@@ -1354,10 +1418,11 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			return Attr;
 		};
 
-	// Reveal silent exclusion of colliders without GPU representation with a one-time warning (once per session — anti-spam latch).
-	// A custom collider that only implements the CPU contract (Query/QuerySwept) works in unit tests/CPU fallback, but
-	// This is excluded from the runtime regular path (GPU solve) — without the warning, "It works in testing, but not in game."
-	// The worst type of trap is that the rope is pierced, so the log is part of the contract (see RopeCollider.h).
+	// Surface the silent exclusion of a collider with no GPU representation, once per session behind an
+	// anti-spam latch. A custom collider that implements only the CPU contract (Query, QuerySwept) works in
+	// unit tests and in the CPU fallback but is excluded from the normal runtime path, the GPU solve. Without
+	// the warning that is the worst kind of trap — it works in testing and the rope goes straight through
+	// things in game — so the log is part of the contract (see RopeCollider.h).
 	auto WarnGpuUnrepresented = [this, &Rope](IRopeCollider* Collider)
 		{
 			if (bWarnedGpuUnrepresentedCollider)
@@ -1376,8 +1441,9 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 				*Rope.GetName(), Collider->IsWorldStatic() ? 1 : 0, *Bone.ToString(), *GetNameSafe(Mesh));
 		};
 
-	// convex packing shared(pass 1 = wrap enabled / pass 2 = static push-out): body-local plane to flat pool
-	// Concatenate and refer to offset/number + rigid body(curr/prev) + InvDt. true on success.
+	// Shared convex packing (pass 1 = wrappable, pass 2 = static push-out): concatenate the body-local planes
+	// into the flat pool and record the offset, the count, the rigid transform (current and previous) and
+	// InvDt. Returns true on success.
 	auto TryPackConvex = [&Step](IRopeCollider* Collider) -> bool
 	{
 		TConstArrayView<FPlane> LocalPlanes;
@@ -1401,17 +1467,18 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		Step.ConvexPlanes.Reserve(Step.ConvexPlanes.Num() + LocalPlanes.Num());
 		for (const FPlane& Pl : LocalPlanes)
 		{
-			// local·unit·outer, PlaneDot=dot(N,p)-W
+			// Local, unit length, outward, with PlaneDot = dot(N, p) - W.
 			Step.ConvexPlanes.Add(FVector4(Pl.X, Pl.Y, Pl.Z, Pl.W));
 		}
 		Step.Convexes.Add(Cv);
 		return true;
 	};
 
-	// FrameColliders are GT gathered snapshots in Prepare. 2-pass: Non-static (skeletal) collider first,
-	// Pack static(world) collider behind. detection(detect) kernel only sets capsule to [0, NumDetectCapsules)
-	// , so the static capsule is automatically excluded from detection — detection leaves only one deepest contact per node, and wall contact is
-	// This is because if the bone contact is obscured, the wrap capture silently fails (the box is not in the detection kernel at all). Solve is all bone.
+	// FrameColliders is the game-thread snapshot gathered in Prepare. Two passes: non-static (skeletal)
+	// colliders first, static (world) ones after. The detection kernel only looks at capsules in
+	// [0, NumDetectCapsules), so a static capsule is excluded from detection automatically — detection keeps
+	// only the single deepest contact per node, and a wall contact masking a bone contact would silently cost
+	// the wrap its capture. (A box is not in the detection kernel at all.) The solve sees all of them.
 	for (IRopeCollider* Collider : Rope.SimFrame.FrameColliders)
 	{
 		if (!Collider || Collider->IsWorldStatic())
@@ -1421,7 +1488,7 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		FRopeGPUCapsule Cap;
 		if (Collider->GetGPUCapsule(Cap.A, Cap.B, Cap.Radius))
 		{
-			// frame motion (prev endpoint + InvDt): surface velocity drag/relative motion CCD. If static, the default value (InvDt 0) is maintained.
+			// Frame motion (previous endpoints plus InvDt) for surface-velocity drag and relative-motion CCD. A static collider keeps the default of InvDt 0.
 			Collider->GetGPUCapsuleMotion(Cap.PrevA, Cap.PrevB, Cap.InvDeltaTime);
 			Step.Capsules.Add(Cap);
 			if (bDetectThisRope)
@@ -1443,7 +1510,7 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		FRopeGPUBox Box;
 		if (Collider->GetGPUBox(Box.Center, Box.Rot, Box.HalfExtents))
 		{
-			// Wrapable box (virtual bone): Fills up to the frame motion (prev + InvDt) and packs in front of the detection range.
+			// A wrappable box, standing in for a bone: fill in the frame motion (previous transform plus InvDt) and pack it inside the detection range.
 			Collider->GetGPUBoxMotion(Box.PrevCenter, Box.PrevRot, Box.InvDeltaTime);
 			Step.Boxes.Add(Box);
 			if (bDetectThisRope)
@@ -1454,26 +1521,27 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		}
 		if (TryPackConvex(Collider))
 		{
-			// wrap possible convex (virtual bone): Packing in front of the detection range.
+			// A wrappable convex, standing in for a bone: packed inside the detection range.
 			if (bDetectThisRope)
 			{
 				Rope.SimFrame.GpuConvexAttribution.Add(MakeAttribution(Collider));
 			}
 			continue;
 		}
-		// Non-static means that only capsule/SDF/box/convex are Loaded on the GPU — all or nothing.
+			// Non-static means only a capsule, an SDF, a box or a convex reaches the GPU — all or nothing.
 		WarnGpuUnrepresented(Collider);
 	}
-	// detection boundary: This is the non-static capsule.
+	// The detection boundary: everything up to here is a non-static capsule.
 	Step.NumDetectCapsules = Step.Capsules.Num();
-	// box detection boundary: The box can wrap up to this point.
+	// The box detection boundary: boxes up to here can be wrapped.
 	Step.NumDetectBoxes = Step.Boxes.Num();
-	// convex detection boundary: Convex can wrap up to this point.
+	// The convex detection boundary: convexes up to here can be wrapped.
 	Step.NumDetectConvexes = Step.Convexes.Num();
 
-	// pass 2: static(world) collider — solve only. capsule (sphere/spiel) appends after the detection border,
-	// box is a private array. The attribution table also fills the static capsule to maintain index alignment (None/null —
-	// Defensive because the detection kernel does not emit out-of-bounds indices.
+	// Pass 2: static world colliders, for the solve only. Capsules (spheres, capsules) are appended after the
+	// detection boundary, and boxes have their own array. The attribution table is filled for static capsules
+	// too, as None and null, to keep the indices aligned — defensive, since the detection kernel never emits an
+	// out-of-range index.
 	for (IRopeCollider* Collider : Rope.SimFrame.FrameColliders)
 	{
 		if (!Collider || !Collider->IsWorldStatic())
@@ -1483,7 +1551,7 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		FRopeGPUCapsule Cap;
 		if (Collider->GetGPUCapsule(Cap.A, Cap.B, Cap.Radius))
 		{
-			// static — No frame motion (InvDt 0 default).
+			// Static, so no frame motion (InvDt stays 0).
 			Step.Capsules.Add(Cap);
 			if (bDetectThisRope)
 			{
@@ -1494,31 +1562,32 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		FRopeGPUBox Box;
 		if (Collider->GetGPUBox(Box.Center, Box.Rot, Box.HalfExtents))
 		{
-			// frame motion (prev center/rot + InvDt): surface velocity drag/relative motion CCD. If static, the default value (InvDt 0) is maintained.
+			// Frame motion (previous centre and rotation plus InvDt) for surface-velocity drag and relative-motion CCD. A static collider keeps the default of InvDt 0.
 			Collider->GetGPUBoxMotion(Box.PrevCenter, Box.PrevRot, Box.InvDeltaTime);
 			Step.Boxes.Add(Box);
 			if (bDetectThisRope)
 			{
-				// static - None (not involved in detection, for index alignment)
+				// Static — None, since it takes no part in detection and is here only to keep the indices aligned.
 				Rope.SimFrame.GpuBoxAttribution.Add(MakeAttribution(Collider));
 			}
 			continue;
 		}
 		if (!TryPackConvex(Collider))
 		{
-			// static means only capsule/box/convex will be Loaded on the GPU — all or nothing.
+			// Static means only a capsule, a box or a convex reaches the GPU — all or nothing.
 			WarnGpuUnrepresented(Collider);
 			continue;
 		}
 		if (bDetectThisRope)
 		{
-			// static - None (not involved in detection, for index alignment)
+			// Static — None, since it takes no part in detection and is here only to keep the indices aligned.
 			Rope.SimFrame.GpuConvexAttribution.Add(MakeAttribution(Collider));
 		}
 	}
 
-	// Prevent delayed GPU contact misattribution (#7): Roll the signature of this frame attribution set (meaning only for detect frames).
-	// BuildGpuFlightCandidates gates delayed contact consumption with the stability of the most recent window (current==Prev1==Prev2).
+	// Guard against misattributing a delayed GPU contact: roll this frame's attribution set signature, which
+	// only means anything on a detect frame. BuildGpuFlightCandidates gates the consumption of a delayed
+	// contact on the recent window being stable (current == Prev1 == Prev2).
 	if (bDetectThisRope)
 	{
 		uint32 Sig = 0x9E3779B9u;
@@ -1526,18 +1595,19 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuSdfAttribution, Sig);
 		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuBoxAttribution, Sig);
 		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuConvexAttribution, Sig);
-		// Signature 0 is reserved for "unset" — if the hash happens to be 0, it is pushed to 1 to distinguish it from a warmup.
+		// Signature 0 is reserved for "unset", so a hash that happens to be 0 is pushed to 1 to keep it distinct from a warm-up.
 		Rope.SimFrame.GpuAttribSig = (Sig == 0) ? 1u : Sig;
-		// Loads the signature of the set used by this dispatch into the step (the detection result is returned as is).
+		// Record the signature of the set this dispatch used into the step; the detection result carries it back unchanged.
 		Step.AttribSig = Rope.SimFrame.GpuAttribSig;
 	}
 }
 
 void URopeSimSubsystem::PackWhipOverride(const URopeComponent& Rope, FRopeGPUResidentStep& Step) const
 {
-	// G1: Load the whip guide target calculated by Advance of Prepare as override (same data as CPU path ApplyToSim).
-	// Flight gate: Prevents application of remaining stale masks in other phases (since Flight does not fill the OverrideFrame)
-	// does not overlap with G2 packing).
+	// Load the whip guide targets Prepare's advance computed as an override — the same data the CPU path's
+	// ApplyToSim applies.
+	// The Flight gate stops a stale mask being applied in another phase, and since Flight does not fill
+	// OverrideFrame there is no overlap with the logic-phase packing.
 	if (Rope.Phase != ERopePhase::Flight)
 	{
 		return;
@@ -1561,7 +1631,7 @@ void URopeSimSubsystem::PackWhipOverride(const URopeComponent& Rope, FRopeGPURes
 		}
 		Step.OverrideFlags[k] = static_cast<uint8>(ERopeGPUOverride::Position | ERopeGPUOverride::Prev);
 		Step.OverridePositions[k] = WhipCur[k];
-		// If there is no previous target (edge ​​case), velocity 0 — CPU fallback ("previous position") and approximation.
+		// With no previous target (an edge case), velocity is 0 — an approximation matching the CPU fallback's "previous position".
 		Step.OverridePrevPositions[k] = WhipPrev.IsValidIndex(k) ? WhipPrev[k] : WhipCur[k];
 	}
 }

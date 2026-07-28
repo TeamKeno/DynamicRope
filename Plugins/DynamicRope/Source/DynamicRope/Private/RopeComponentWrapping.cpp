@@ -1442,7 +1442,7 @@ void URopeComponent::ReleaseKinematicVirtualBridgesToSolver()
 
 // ===== Wrapped ==============================================================
 // The Wrapped case of PrepareSimFrame runs the four helpers below in a fixed order:
-// ① HoldWrappedNodesToBone → ② UpdateWrappedPullSample → ③ ApplyWrappedTraction → ④ CheckWrappedAutoRelease
+// HoldWrappedNodesToBone → UpdateWrappedPullSample → ApplyWrappedTraction → CheckWrappedAutoRelease
 
 bool URopeComponent::HoldWrappedNodesToBone(float DeltaTime)
 {

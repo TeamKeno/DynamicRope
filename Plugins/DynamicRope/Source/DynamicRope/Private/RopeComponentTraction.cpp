@@ -19,8 +19,8 @@
 
 namespace
 {
-	// C1: taut check hysteresis·release grace period is an internal constant that has been ground truth tuned (integrated into a single TautSensitivity,
-	// removed from designer exposure). To adjust the values ​​here.
+	// The taut-check hysteresis and the release grace period are internal constants, settled by measurement
+	// and folded into the single TautSensitivity knob rather than exposed to designers. Adjust them here.
 	constexpr float TautSlackReleaseScaleConst = 2.0f;       // slack/sag gate maintenance multiplier (≥1, entry/release threshold separation)
 	constexpr float TautReleaseGraceTimeConst = 0.1f;        // bChainTaut release grace period (seconds)
 	constexpr float ActivePullTautReleaseRatioConst = 0.5f;  // Active Pull load threshold hysteresis [0..1]
@@ -54,7 +54,7 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	// ApplyWrappedTraction refreshes this again after the current frame's backend has solved.
 	WrapController.State.Tension = GetConstraintTension();
 
-	// Pull sample output (always — debugger/BP observation + shared input from traction/release). direction follows the first straight leg (space).
+	// Always produce the pull sample: the debugger and Blueprint observe it, and traction and release take it as shared input. The direction follows the first straight leg, so it goes around corners.
 	PullDrive.LastPullSample = FRopePullSample();
 	WrapController.ComputePull(ObservationSim, HoldConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
 
@@ -63,10 +63,12 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	// "segment must stretch -> tension appears -> tether may enforce no stretch".
 	FRopeWielderMovementConstraint LiveConstraint;
 	const bool bHasLiveConstraint = BuildWielderMovementConstraint(LiveConstraint);
-	// slack ratio·sag cap is interpreted in a single TautSensitivity (GetEffectiveTaut*), hysteresis is an internal constant.
-	// Because the live material-length path and legacy geometry path must react in the **same direction** (default
-	// The two paths share these values (so that the slider is felt even when bEnforceWielderLengthConstraint=true).
-	// Entry/maintenance hysteresis: Once checked as tight, widens the tolerance to prevent chattering of the threshold boundary (+ grace latch below).
+	// The slack ratio and the sag cap both resolve from the single TautSensitivity knob (GetEffectiveTaut*),
+	// and the hysteresis is an internal constant. The live material-length path and the legacy geometry path
+	// share these values so they react in the **same direction** — otherwise the slider would do nothing with
+	// bEnforceWielderLengthConstraint on, which is the default.
+	// Entry and hold use different thresholds: once taut, the tolerance widens so the decision cannot chatter
+	// at the boundary (the grace latch below covers the rest).
 	const float EffectiveTautMaxSag = GetEffectiveTautMaxSag();
 	const float EffectiveTautSlackRatio = GetEffectiveTautSlackRatio();
 	const float TautHysteresis = PullDrive.bChainTaut ? TautSlackReleaseScaleConst : 1.0f;
@@ -74,8 +76,9 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	const bool bSagTaut =
 		EffectiveTautMaxSag <= 0.0f || PullDrive.LastPullSample.MaxLegSag <= SagLimit;
 
-	// live boundary: Derive the traction start distance slack from TautSensitivity, but LengthConstraintActivationSlop
-	// Maintain at the minimum allowable value for numerical stability (whichever is greater). Also shared is a sag gate for “only when visually unfolded”.
+	// Live boundary: the traction start distance comes from TautSensitivity, floored at
+	// LengthConstraintActivationSlop for numerical stability — whichever is larger wins. The sag gate, which
+	// is what "only once it visibly straightens" means, is shared here too.
 	const float LiveSlackAllowance = FMath::Max(
 		FMath::Max(HoldConfig.LengthConstraintActivationSlop, 0.0f),
 		LiveConstraint.MaxDistance * EffectiveTautSlackRatio * TautHysteresis);
@@ -97,10 +100,13 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 			PullDrive.bChainTaut));
 	const bool bRawChainTaut = PullDrive.LastPullSample.bValid
 		&& (bHasLiveConstraint ? bLiveBoundaryTaut : bLegacyGeometryTaut);
-	// release grace period (time latch): Minimum transfer tension observation is at threshold 0 (default), the entry/maintenance threshold is the same, so hysteresis is
-	// disappears, and in the GPU rope, it is a delayed mirror of 1~2 frames, and in the alert state, the check flutters in units of frames, and "the entire velocity
-	// Cut ↔ Freedom" alternates (wielder excitement). Entry is immediate, only release occurs with a grace period during TautReleaseGraceTime to prevent chattering.
-	// Hang up. sample invalid is immediately false without a grace period (maintaining the above firm contract — it does not extend the observation gap tautologically).
+	// Release grace period, a time latch. With the minimum transmitted tension threshold at its default of 0,
+	// entry and hold use the same threshold and the hysteresis disappears; on a GPU rope, which mirrors one to
+	// two frames late, the decision then flickers frame by frame right at the boundary and the rope alternates
+	// between cutting all velocity and letting it go — which the wielder feels as juddering.
+	// So entry stays immediate and only the release waits out TautReleaseGraceTime. An invalid sample drops to
+	// false immediately with no grace, which keeps the contract above honest: the grace period must not stretch
+	// an observation gap into a claim that the rope is taut.
 	if (bRawChainTaut)
 	{
 		PullDrive.bChainTaut = true;
@@ -121,18 +127,20 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 		PullDrive.bChainTaut = false;
 	}
 
-	// Pull smoothing (stage 2): (1) aiming node fractional smoothing — Discrete hops between frames of integer AimNode (direction jump overall)
-	// + tether excess discontinuity) is eliminated by interpolation between float EMA + node. (2) direction EMA — node location remaining above it
-	// Trim noise (GPU mirror delay, etc.). The first valid frame after the start of wrap is seeded with the measurement value (no lag).
+	// Pull smoothing, stage two. (1) Fractional aim-node smoothing: the integer AimNode hops discretely
+	// between frames — the whole direction jumps and the tether overshoot goes discontinuous — so the index is
+	// smoothed as a float and interpolated between nodes. (2) Direction EMA: trims what noise is left on top
+	// of the node position, such as the GPU mirror's lag. The first valid frame after a wrap begins is seeded
+	// from the measurement, so there is no start-up lag.
 	if (!PullDrive.LastPullSample.bValid)
 	{
 		return;
 	}
 
-	// raw look-ahead before smoothing (integer aiming) — Debugger raw vs smoothed comparison.
+	// Raw look-ahead before smoothing, with the integer aim node — the debugger compares raw against smoothed.
 	PullDrive.LastPullDirRaw = PullDrive.LastPullSample.Direction;
 
-	// (1) Aiming index time smoothing → fractional aiming position interpolation.
+	// (1) Smooth the aim index over time, then interpolate the fractional aim position.
 	const float RawAimF = static_cast<float>(PullDrive.LastPullSample.AimNode);
 	PullDrive.SmoothedAimNodeF = (PullDrive.SmoothedAimNodeF < 0.0f)
 		? RawAimF // The first valid frame is seeded with the measurement value (no lag).
@@ -143,7 +151,7 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	PullDrive.LastPullSample.AimNodeF = AimF;
 	PullDrive.LastPullSample.AimPos = AimPos;
 
-	// (2) After recalculating the direction with continuous aiming, direction EMA. If degenerate(aiming=anchor), the raw direction is maintained.
+	// (2) Recompute the direction from the continuous aim point, then apply the direction EMA. A degenerate case (aim == anchor) keeps the raw direction.
 	const FVector DirF =
 		(AimPos - ObservationSim.Positions[PullDrive.LastPullSample.AnchorNode]).GetSafeNormal();
 	const FVector DirIn = DirF.IsNearlyZero() ? PullDrive.LastPullSample.Direction : DirF;
@@ -154,17 +162,19 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 
 void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 {
-	// The endpoint cache is maintained only during the synchronous call section of this function. Even if virtual ApplyPullForce calls Super
-	// The same target analysis is reused, and ApplyPullForce called separately from the outside does not leak cache.
+	// The endpoint cache lives only for the synchronous span of this function, so a virtual ApplyPullForce
+	// that calls Super reuses the same target resolution, while an ApplyPullForce called from outside cannot
+	// leak a stale cache.
 	WrappedEndpointCache.Reset();
-	// Climbable check: The tether distribution observation (LastTargetShare) and the active Pull's climb-in direction are shared.
+	// Pullability check, shared by the tether's distribution observation (LastTargetShare) and the active pull's climb-in direction.
 	if (PullDrive.LastPullSample.bValid)
 	{
 		UpdateTargetPullable();
 	}
 
-	// ③-1 Automatic traction (tether): single λ impulse constraint + ragdoll physics constraint (Docs/PoC/05). No slack breaks —
-	// The position recovery term of λ is bounded by MaxBiasSpeed, so there is no excess injection left in the ledger (a relic from the legacy servo era).
+	// Automatic traction, part one — the tether: a single λ impulse constraint, plus the physics constraint on
+	// a ragdoll. There is no slack ledger to break, because λ's position recovery term is bounded by
+	// MaxBiasSpeed and so leaves no excess injection behind — that ledger was a relic of the per-end servo era.
 	UpdateConstraintTether(DeltaTime);
 	WrapController.State.Tension = GetConstraintTension();
 
@@ -184,24 +194,29 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 			PullDrive.bPullTaut);
 	}
 
-	// ③-2 Active Pull (constant force): The force given by the user input (SetActivePull/Wielder) is applied only when tension is present.
-	// Tension check is bPullTaut latch updated by ② = previous chain geometry (bChainTaut) ∧ tension threshold
-	// (threshold/hysteresis is HoldConfig — default threshold 0 = tension > ~0).
-	// Ignore tautology 2nd layer: config(bActivePullRequiresTaut=false, rope full policy) / per-call(bActivePullIgnoresTaut,
-	// SetActivePull argument — for animation pull window section). In either case, if it is Wrapped + valid sample, it is approved.
-	// It is a constant unrelated to tension, so there is no feedback runaway.
+	// Active pull, part two — a constant force. The force the user set (SetActivePull, or the Wielder) applies
+	// only while the rope is under tension. The gate is the bPullTaut latch that step 2 updated: the previous
+	// frame's chain geometry (bChainTaut) and the tension threshold together, with the threshold and its
+	// hysteresis in HoldConfig, where a default threshold of 0 means simply tension > ~0.
+	// Two layers can bypass the taut requirement: the config (bActivePullRequiresTaut = false, a rope-wide
+	// policy) and the per-call flag (bActivePullIgnoresTaut, the SetActivePull argument, which is how an
+	// animation pull window marks its span). Either way, a Wrapped rope with a valid sample is authorized.
+	// The force is constant and unrelated to tension, so there is no feedback runaway.
 	const bool bActivePullPassesGate = PullDrive.ActivePullForce > 0.0f && PullDrive.LastPullSample.bValid
 		&& (!HoldConfig.bActivePullRequiresTaut || PullDrive.bActivePullIgnoresTaut || PullDrive.bPullTaut);
 #if WITH_GAMEPLAY_DEBUGGER
-	// The debugger cannot know the actual application from the request value (ActivePullForce) alone — the pull gate and bypass layer 2 are here.
-	// Because it is divided. Whether the gate passes or not is left as is (this is separate from the case where power is discarded at the receiver stage).
+	// The request value (ActivePullForce) alone cannot tell the debugger whether the force was actually
+	// applied, because the taut gate and the two bypass layers are decided here. So whether the gate passed is
+	// recorded as-is — separately from force being discarded later at the receiver.
 	DebugActivePullPassedGate = bActivePullPassesGate;
 #endif
 	if (bActivePullPassesGate)
 	{
-		// If the object is heavy and cannot be pulled (not pullable), put the force on the wielder and pull it towards the anchor (climb-in):
-		// LastPullSample.Direction is the anchor → hand direction, so the sign is reversed = hand → anchor — "If I have to be dragged, I will go."
-		// (pull to wall/heavy ragdoll/dragon = 3D maneuver). If possible, apply it to the target and pull it toward the wielder.
+		// Too heavy to pull (not pullable): put the force on the wielder instead and draw them toward the
+		// anchor — climb-in. LastPullSample.Direction points anchor → hand, so negating it gives hand →
+		// anchor: "if one of us has to move, it is me." That is what pulls the wielder to a wall, a heavy
+		// ragdoll or a dragon, and is the basis of three-dimensional manoeuvring. Otherwise the force goes to
+		// the target and draws it toward the wielder.
 		if (!PullDrive.bTargetPullable)
 		{
 			ApplyPullForceToWielder(-PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, DeltaTime);
@@ -229,10 +244,11 @@ void URopeComponent::SetActivePull(float Force, bool bIgnoreTautGate)
 
 namespace
 {
-	// From bone, go up the parent chain to find the bone of the nearest "physics body being simulated" (or None).
-	// The Wrapped bone may be a bodyless bone in the physics asset, such as a twisted bone — in that case, just look at the bone name.
-	// If you check the non-simulation and fall into the character movement branch, the ragdoll setup has the movement turned off (MOVE_None).
-	// AddForce is silently abandoned. Force/velocity bone is promoted to this function to find it.
+	// Walk up the parent chain from the bone to the nearest bone with a *simulating* physics body, or None.
+	// The wrapped bone can be one without a body in the physics asset — a twist bone, say — and taking the
+	// bone name at face value would find it non-simulating and fall through to the character movement branch,
+	// where a ragdoll setup has movement disabled (MOVE_None) and AddForce is silently dropped. Promoting the
+	// bone here is what avoids that.
 	FName FindNearestSimulatingBone(const USkeletalMeshComponent* Mesh, FName Bone)
 	{
 		while (!Bone.IsNone())
@@ -246,16 +262,19 @@ namespace
 		return NAME_None;
 	}
 
-	// Check if there is a kinematic body on the simulation bone (parent chain) = partial ragdoll. If there is, the restraint will completely cause bone traction.
-	// Absorbed (infinite mass wall) The servo/force applied to the bone is not transmitted to the actor — in this case, the receiver interpretation is not to the bone, but to the bone.
-	// You must go down to the moving object (character). If not (simulate everything, including the root body), it is a Free ragdoll in which the entire body is pulled by the joints.
-	// Bones without bodies (twist/IK) are not constrained, so they are skipped.
+	// Is there a kinematic body anywhere up the parent chain from the simulating bone? That is a partial
+	// ragdoll, and it means the kinematic constraint absorbs the traction completely — an infinite-mass wall —
+	// so no servo or force on the bone reaches the actor. In that case the receiver must resolve past the bone
+	// and down to the moving object, the character. Without one (everything simulating, root body included) it
+	// is a free ragdoll and the whole body is pulled through the joints.
+	// Bones with no body at all (twist, IK) constrain nothing and are skipped.
 	bool IsSimBoneBoundToKinematic(const USkeletalMeshComponent* Mesh, FName SimBone)
 	{
 		for (FName Bone = Mesh->GetParentBone(SimBone); !Bone.IsNone(); Bone = Mesh->GetParentBone(Bone))
 		{
-			// Body Existence + Non-Simulation = Kinematic Constraints. (Simulation status is asked through component API —
-			// FBodyInstance::IsInstanceSimulatingPhysics cannot be linked because it is non-export inline.)
+			// A body that exists but does not simulate is a kinematic constraint. Simulation state is queried
+			// through the component API, because FBodyInstance::IsInstanceSimulatingPhysics is a non-exported
+			// inline and cannot be linked against.
 			if (Mesh->GetBodyInstance(Bone) != nullptr && !Mesh->IsSimulatingPhysics(Bone))
 			{
 				return true;
@@ -264,9 +283,11 @@ namespace
 		return false;
 	}
 
-	// Can the character movement consume power now? If MOVE_None (DisableMovement — ragdoll setup convention)
-	// AddForce is only accumulated and not consumed, so the "fake success" power is lost — in that case it is passed on to another recipient.
-	// Directly receives the target actor for wrap (regardless of whether the target is a skeletal/static/physical prop — check based on the owning actor).
+	// Can the character movement consume force right now? Under MOVE_None (DisableMovement, the ragdoll setup
+	// convention) AddForce only accumulates and is never consumed, so the force is lost to a fake success —
+	// it has to go to another receiver instead.
+	// The wrap target's actor is taken directly, whichever it is: skeletal, static or a physics prop. The
+	// check is on the owning actor.
 	UCharacterMovementComponent* GetForceConsumingMovement(const AActor* Owner)
 	{
 		const ACharacter* Character = Cast<ACharacter>(Owner);
@@ -274,9 +295,11 @@ namespace
 		return (Movement && Movement->MovementMode != MOVE_None) ? Movement : nullptr;
 	}
 
-	// Mass (kg) of the body subject to application: If it is a skeletal bone, then the mass of the body, otherwise (or if there is no body or the mass is 0)
-	// component mass. The physical body mass is a value that the UE automatically maintains as collision volume × density, so no separate setting is required.
-	// (Because it depends on UObject, RopeTraction is not included in pure math — mass is read from here and passed there.)
+	// Mass (kg) of the body force is applied to: for a skeletal bone, that body's mass, otherwise — or when
+	// there is no body, or its mass is 0 — the component's mass. A physics body's mass is maintained by the
+	// engine as collision volume × density, so nothing extra needs setting.
+	// (It depends on a UObject, which is why RopeTraction's pure maths does not include it: the mass is read
+	// here and passed in.)
 	float ResolveBodyMass(const UPrimitiveComponent* Prim, FName BoneName)
 	{
 		float Mass = 0.0f;
@@ -293,34 +316,45 @@ namespace
 		return (Mass > KINDA_SMALL_NUMBER) ? Mass : static_cast<float>(Prim->GetMass());
 	}
 
-	// ===== Tether endpoint (receiver) interpretation — cross the ladder only once =====
-	// “What is received” is checked only once here and the type, application point, and effective mass are confirmed together. In the past, distribution mass and actual
-	// Each ladder with the same application point was duplicated, and on it, the application lambda recast to determine which rung it was.
-	// I inferred backwards — if the order is wrong, it becomes a bug where “mass is seen as an anchor, but force is applied somewhere else” (partial ragdoll in CL 392)
-	// the root gate actually did). If one interpretation is shared, deviation is structurally impossible.
-	// ERopeEndpointKind/FRopeTetherEndpoint is a shared check type in Core/RopeTractionTypes.h. The component is
-	// Target/wielder results are cached within the same Wrapped frame and shared by pullable/tether/basic pull.
+	// ===== Tether endpoint resolution — climb the ladder exactly once =====
+	// "What receives the force" is decided once, here, and the kind, the application point and the effective
+	// mass all come out together. There used to be two ladders — one for the distribution mass, one for the
+	// actual application point — and on top of them the application lambda re-cast the receiver to work out
+	// backwards which rung it had landed on. Get that order wrong and you get a bug where the mass is read as
+	// an anchor while the force lands somewhere else, which is exactly what the partial-ragdoll root gate did.
+	// One shared resolution makes that divergence structurally impossible.
+	// ERopeEndpointKind and FRopeTetherEndpoint are the shared types in Core/RopeTractionTypes.h, and the
+	// component caches the target and wielder results for the Wrapped frame so pullability, tether and the
+	// basic pull all read the same ones.
 
-	// Recipient interpretation (target/wielder shared). Sequence: Skeletal Free ragdoll bone → Simulation primitive → Simulation root → Character → Anchor.
-	// (Partial ragdoll — sim bone tied to upper kinematic body — rung 1 does not pick up and falls through to character/anchor.)
-	//  - MeshComp: State.Mesh if target, nullptr if wielder (automatic skip of skeletal/primitive rung → from root).
-	//  - Physical body mass is a value that the UE automatically maintains as collision volume × density, so no separate setting is required.
-	//  - Character ground is a finite brace (Mass×GroundBraceFactor — stepping resistance), air is Mass, and MOVE_None is an anchor.
+	// Receiver resolution, shared by target and wielder. The ladder runs: skeletal free-ragdoll bone →
+	// simulating primitive → simulating root → character → anchor.
+	// (A partial ragdoll — a simulating bone held by a kinematic body above it — is not taken by rung 1 and
+	// falls through to character or anchor.)
+	//  - MeshComp is State.Mesh for the target and nullptr for the wielder, which skips the skeletal and
+	//    primitive rungs and starts at the root.
+	//  - A physics body's mass is maintained by the engine as collision volume × density; nothing to set.
+	//  - A grounded character braces with a finite mass (Mass × GroundBraceFactor, the resistance of digging
+	//    in), an airborne one is just Mass, and MOVE_None is an anchor.
 	FRopeTetherEndpoint ResolveTetherEndpoint(USceneComponent* MeshComp, AActor* Owner, FName WrappedBone, float GroundBraceFactor)
 	{
 		FRopeTetherEndpoint Out;
 		Out.Actor = Owner;
 
-		// (1) Skeletal **Free Ragdoll** (simulated bone only articulated to the root body): Promoted from a Wrapped bone to the parent chain.
-		// Applies to the nearest *simulation bone* (corresponding to a twist bone without a body). The default mass saved here is **full body
-		// mass is the sum**(GetMass) — the coarse wielder/target share of hard Chaos reaction force and pullability are bone bodies
-		// (3kg forearm) as a “light object”. Compliant analytic solve is the real world
-		// After the attachment is determined, this default value is refined to the translation + rotation point Jacobian of the selected bone.
+		// (1) Skeletal **free ragdoll** — a simulating bone articulated all the way to the root body. The
+		// wrapped bone is promoted up the parent chain to the nearest *simulating* bone, which is what covers
+		// a twist bone with no body of its own. The mass stored here is the **whole body's total** (GetMass),
+		// because the coarse wielder/target split of the hard Chaos reaction and the pullability check would
+		// otherwise read a bone body — a 3 kg forearm — as a light object. A compliant analytic solve refines
+		// this default into the selected bone's translation-plus-rotation point Jacobian once the real
+		// attachment point is known.
 		//
-		// **Partial ragdoll** (kinematic body in the parent chain above the simulated bone) is not received here and falls through downwards: bone
-		// No matter how much you servo, the kinematic restraint absorbs it and only the rope stretches (rung 1 limit, which was put on hold on 2026-07-15 — this fallthrough
-		// That is resolved). The only thing that can actually be dragged is a moving object (character rung — CMC active), or else there is nothing.
-		// (anchor = infinite mass is the physical truth). The visual response of the Wrapped bone (presentation with accompanying arms) follows (Docs/PoC/05 §7).
+		// A **partial ragdoll**, with a kinematic body in the parent chain above the simulating bone, is not
+		// taken here and falls through. No amount of servoing the bone helps: the kinematic constraint absorbs
+		// it and only the rope stretches. The only thing that can actually be dragged is the moving object —
+		// the character rung, with CMC active — and failing that, nothing, because an anchor of infinite mass
+		// is the physical truth. The wrapped bone's visual response, the arm coming along with the pull, still
+		// follows.
 		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
 		{
 			const FName SimBone = FindNearestSimulatingBone(Skel, WrappedBone);
@@ -329,13 +363,13 @@ namespace
 				Out.Kind = ERopeEndpointKind::SimBody;
 				Out.Prim = Skel;
 				Out.Bone = SimBone;
-				// Whole body mass (total body sum). If degenerate (0 due to non-generation of body, etc.), previous bone body → component mass fallback.
+				// Whole-body mass. If that degenerates to 0 — no bodies created, say — fall back to the previous bone's body, then the component mass.
 				const float WholeMass = static_cast<float>(Skel->GetMass());
 				Out.Mass = (WholeMass > KINDA_SMALL_NUMBER) ? WholeMass : ResolveBodyMass(Skel, SimBone);
 				return Out;
 			}
 		}
-		// (2) The target component itself is a primitive being simulated (light physics prop, etc.).
+		// (2) The target component itself is a simulating primitive, such as a light physics prop.
 		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
 		{
 			if (Prim->IsSimulatingPhysics())
@@ -350,7 +384,7 @@ namespace
 		{
 			return Out; // None.
 		}
-		// (3) Owning actor root primitive is simulating (constructing physics actor). The wielder starts here because MeshComp=nullptr.
+		// (3) The owning actor's root primitive is simulating, as a physics actor. The wielder starts here, since its MeshComp is nullptr.
 		if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
 		{
 			if (Root->IsSimulatingPhysics())
@@ -361,7 +395,7 @@ namespace
 				return Out;
 			}
 		}
-		// (4) Character: If MOVE_None (ragdoll setup convention), the movement does not consume force, so it is used as an anchor.
+		// (4) A character. Under MOVE_None — the ragdoll setup convention — the movement cannot consume force, so it is treated as an anchor.
 		if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Owner))
 		{
 			Out.Kind = ERopeEndpointKind::Character;
@@ -370,13 +404,13 @@ namespace
 			Out.Mass = Movement->Mass * BraceScale;
 			return Out;
 		}
-		// (5) static/Kinematic/MOVE_None/Non-simulated Non-character → Anchor (mass 0). Only location fallback is possible.
+		// (5) Static, kinematic, MOVE_None, or a non-simulating non-character → anchor, mass 0. Only a positional fallback can move it.
 		Out.Kind = ERopeEndpointKind::Anchor;
 		return Out;
 	}
 
-	// Moves the interpreted receiver to the request read by the public extension hook (ApplyTractionToReceiver).
-	// Source/Direction/Amount is filled by each application path (units are different for each path — refer to the request type annotation).
+	// Turn the resolved receiver into the request the public extension hook (ApplyTractionToReceiver) reads.
+	// Source, Direction and Amount are filled by each application path — the units differ per path, so see the request type's comment.
 	FRopeTractionRequest MakeTractionRequest(const FRopeTetherEndpoint& Endpoint, ERopeTractionSource Source,
 		const FVector& Dir, float Amount, float DeltaTime, bool bWielderSide)
 	{
@@ -394,7 +428,7 @@ namespace
 		return Req;
 	}
 
-	// Effective inverse mass (w = 1/effective mass) for tether automatic distribution. 0 = anchor (infinite mass).
+	// Effective inverse mass (w = 1 / effective mass) for the tether's automatic distribution. 0 is an anchor, meaning infinite mass.
 	float EndpointInvMass(const FRopeTetherEndpoint& Endpoint)
 	{
 		return RopeTraction::InvMassFromMass(Endpoint.Mass);
@@ -461,21 +495,22 @@ namespace
 	}
 
 
-	// Tether application shared context — both ends receiver interpretation + extension gateway. Observation/λ calculation and state storage are performed by the component.
+	// Shared context for applying the tether: both ends resolved, plus the extension gateway. Observation, the λ solve and storing the state stay with the component.
 	struct FRopeTetherContext
 	{
 		const FRopeTetherEndpoint& Target;
 		const FRopeTetherEndpoint& Wielder;
 		float DeltaTime;
-		// Receiver application extension gateway (delegating to the component's virtual). If true, built-in application is skipped.
+		// Extension gateway for applying to a receiver, delegating to the component's virtual. Returning true skips the built-in application.
 		TFunctionRef<bool(const FRopeTractionRequest&)> TractionGate;
 	};
 
-	// Dispatches application to the interpreted recipient (destination/wielder shared skeleton — Constraint used by two application points on the tether).
-	// The callback already knows what it received (no recasting required). Step/return is this frame axis ΔV (cm/s).
-	//  - SimApply(Prim, Bone, Dir, DeltaV): Physics simulation body.
-	//  - CharacterApply(Movement, Dir, DeltaV): CMC driven character.
-	//  - AnchorApply(Actor, Dir, DeltaV): Anchor(static/MOVE_None) — No action (w=0, so ΔV is 0).
+	// Dispatch the application to the resolved receiver. Target and wielder share this one skeleton, which the
+	// tether uses at both of its application points, and the callback already knows what it received, so
+	// nothing has to be re-cast. Both the step and its return are this frame's axial ΔV in cm/s.
+	//  - SimApply(Prim, Bone, Dir, DeltaV): a simulating physics body.
+	//  - CharacterApply(Movement, Dir, DeltaV): a CMC-driven character.
+	//  - AnchorApply(Actor, Dir, DeltaV): an anchor (static, MOVE_None) — does nothing, since w = 0 makes ΔV 0.
 	float ApplyToTetherEndpoint(
 		const FRopeTetherContext& Ctx, bool bWielderSide, const FVector& Dir, float Step,
 		TFunctionRef<float(UPrimitiveComponent*, FName, const FVector&, float)> SimApply,
@@ -484,9 +519,10 @@ namespace
 	{
 		const FRopeTetherEndpoint& Endpoint = bWielderSide ? Ctx.Wielder : Ctx.Target;
 
-		// Extension gateway (URopeComponent::ApplyTractionToReceiver): Skips built-in application if handled by subclass.
-		// Since all four application points of the tether pass through this skeleton, one line here covers the entire tether path.
-		// return is the same contract as Step(= shortfall 0) — sim-body unapplied branch.
+		// Extension gateway (URopeComponent::ApplyTractionToReceiver): skips the built-in application when a
+		// subclass handled it. All four of the tether's application points come through this skeleton, so this
+		// one line covers the whole tether path.
+		// The return follows Step's contract — a shortfall of 0 — matching the sim-body not-applied branch.
 		if (Ctx.TractionGate(MakeTractionRequest(Endpoint, ERopeTractionSource::Tether, Dir, Step,
 			Ctx.DeltaTime, bWielderSide)))
 		{
@@ -659,25 +695,29 @@ void URopeComponent::PrepareWielderLengthConstraint(
 
 FVector URopeComponent::ComputeSmoothedWielderDir(const FVector& Aim, const FVector& DirToAim, float DeltaTime, bool bInstantaneous)
 {
-	// direction = along the first straight leg of the rope from the hand (node ​​0). Aiming (AimPos) is toward the corner of the wall, and the rope is straight.
-	// If aiming=hand (chord ~0), it falls back to the reverse direction of anchor→aiming (=hand→anchor).
+	// Direction: along the first straight leg of the rope from the hand (node 0). The aim point (AimPos) sits
+	// at the wall's corner, so the rope stays straight up to it. If the aim collapses onto the hand (chord
+	// ≈ 0), it falls back to the reverse of anchor → aim, which is hand → anchor.
 	const FVector HandPos = GetComponentLocation();
 	FVector WielderDirRaw = Aim - HandPos;
 	if (!WielderDirRaw.Normalize(KINDA_SMALL_NUMBER))
 	{
 		WielderDirRaw = -DirToAim;
 	}
-	// Aerial Swing (bInstantaneous): EMA omitted, instantaneous geometry remains — axis lagged while orbiting rapidly (ω·τ ≈
-	// The tangential error component of ten degrees brakes/accelerates the swing of each utterance frame and interferes with AirControl operation. circle of ema
-	// The purpose (to defend the random walk of the servo top-up) is that in the λ single impulse + speed clamp system, only the ground corner noise remains.
-	// state continues to be seeded raw, ensuring continuous EMA re-entry upon landing.
+	// Airborne swing (bInstantaneous): the EMA is skipped and the instantaneous geometry is used. While the
+	// orbit turns quickly the axis lags by ω·τ, on the order of ten degrees, and the tangential component of
+	// that error brakes and accelerates the swing on every frame it fires, fighting AirControl.
+	// What the EMA was for — damping the random walk of the servo top-up — leaves only ground corner noise in
+	// a system built on a single λ impulse and a speed clamp. The state keeps being seeded raw meanwhile, so
+	// re-entering the EMA on landing is continuous.
 	if (bInstantaneous)
 	{
 		PullDrive.SmoothedWielderPullDir = WielderDirRaw;
 		return WielderDirRaw;
 	}
-	// direction EMA (same constant/same function as SmoothedPullDir on target side): Raw with AimPos node noise/edge transition/proximity degenerate
-	// If the direction bounces every frame, the clamp/top-up moves to a different axis each time and the vector increases in a random walk (runaway).
+	// Direction EMA, using the same constant and the same function as the target side's SmoothedPullDir. Raw,
+	// the direction bounces every frame on AimPos node noise, edge transitions and near-degenerate cases, and
+	// the clamp and top-up then act on a different axis each time, growing the vector in a random walk.
 	PullDrive.SmoothedWielderPullDir = RopeTraction::SmoothDirection(
 		PullDrive.SmoothedWielderPullDir, WielderDirRaw, RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
 	return PullDrive.SmoothedWielderPullDir;
@@ -722,8 +762,8 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 	const bool bHardWielderAttempt =
 		LengthConstraintState.HasWielderAttempt(GFrameCounter, ConstraintAnchorNode);
 
-	// Reel/material-length and kinematic anchor rates are sampled from the same live
-	// geometry. Activation tolerance must not add physical cable length.
+	// The reel, the material length and a kinematic anchor's rate are all sampled from the same live geometry.
+	// The activation tolerance must never add physical cable length.
 	float RestRate = 0.0f;
 	if (LengthConstraintState.bPrevGeometryValid &&
 		LengthConstraintState.PrevAnchorNode == ConstraintAnchorNode)
@@ -736,8 +776,9 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 			LengthConstraintState.SmoothedAnchorPointVelocity,
 			RawAnchorVel,
 			RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
-		// hand point (wielder tip) ground truth velocity — Anchor-kind wielder (kinematic carrier: helicopter/mobile platform)
-		// There is no velocity, so it is filled with finite differences. The wielder mirror of SmoothedAnchorPointVelocity on the target side.
+		// Ground-truth velocity of the hand point (the wielder's tip). An anchor-kind wielder — a kinematic
+		// carrier such as a helicopter or a moving platform — reports no velocity, so it is filled in by finite
+		// difference. The wielder's mirror of the target side's SmoothedAnchorPointVelocity.
 		const FVector RawWielderVel =
 			(GetComponentLocation() - LengthConstraintState.PrevWielderWorldPoint) / DeltaTime;
 		LengthConstraintState.SmoothedWielderPointVelocity = FMath::Lerp(
@@ -878,9 +919,10 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 	{
 		return; // degenerate(aiming=anchor) — direction cannot be defined.
 	}
-	// Omit wielder direction EMA during mid-air swing (instantaneous geometry) — while orbit is spinning fast (ω·τ ≈ decimal degrees lag)
-	// The tangential error component of the lag axis brakes/accelerates the swing of each utterance frame and interferes with operation (2026-07-22 PIE,
-	// "A moment of force" where AirControl boost becomes ineffective). Ground maintains EMA due to large corner/node noise.
+	// Skip the wielder's direction EMA during an airborne swing and use the instantaneous geometry. While the
+	// orbit turns quickly the axis lags by a fraction of a degree to a few degrees, and the tangential
+	// component of that error brakes and accelerates the swing on every frame it fires — the moment where an
+	// AirControl boost stops doing anything. On the ground the EMA stays, because corner and node noise are large.
 	const bool bWielderAirborne = (Endpoints->Wielder.Kind == ERopeEndpointKind::Character
 		&& Endpoints->Wielder.Movement && Endpoints->Wielder.Movement->IsFalling());
 	const FVector DirWielder =
@@ -892,10 +934,11 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		return;
 	}
 
-	// Self wrap(owner == target): Since both ends are the same body, the pairing is self-cancelling — the wielder end is treated as an anchor (w=0)
-	// Only the end of the target moves (same as legacy special case).
-	// Opening velocity s = −(vT·dT + vW·dW) − dRest/dt. The terminal velocity is measured at the same rung as the receiver interpretation —
-	// The cruise of a moving anchor (dragon) is carried on vT and is followed without separate feedforward (replaces the legacy anchor velocity EMA).
+	// Self-wrap (owner == target): both ends are the same body, so the impulse pair would cancel itself. The
+	// wielder end is treated as an anchor (w = 0) and only the target end moves, matching the legacy special case.
+	// Opening speed s = −(vT·dT + vW·dW) − dRest/dt. Each end's velocity is measured at the same rung the
+	// receiver resolution chose, so a moving anchor's cruise — a dragon's, say — rides on vT and is followed
+	// without a separate feed-forward. That replaces the legacy anchor velocity EMA.
 	const FVector TargetPoint = Anchor;
 	const FVector WielderPoint = GetComponentLocation();
 	const float InvMassTarget = EndpointPointInvMass(
@@ -913,13 +956,15 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 			? (InvMassTarget / WSum)
 			: 0.0f;
 
-	// ---- Target Hard Projection (Kinematic Character Carry) ----
-	// If the wielder's end is infinite mass (Anchor — kinematic carrier such as a helicopter) and the target is a CMC character, applying λ velocity is not enough.
-	// The number of position errors is capped by the bias cap (TetherMaxBiasSpeed), so when the carrier is faster than that, the rope stretches infinitely.
-	// Target mirror for hard projection (ConstrainWielderLocation) on the wielder side: Move the capsule to the current radius direction by the amount of the shortfall.
-	// to eliminate the position error in the same frame (if blocked by a wall, the remainder remains as C and is received by λ/observation).
-	// If both ends are finite masses, the λ pair permission owns the distribution and therefore does not fire (avoiding double compensation). elastic mode
-	// (TetherCompliance>0) is excluded because it is an intentional elongation.
+	// ---- Target hard projection (kinematic character carry) ----
+	// When the wielder's end has infinite mass — an anchor, such as a helicopter carrying the rope — and the
+	// target is a CMC character, applying λ as a velocity is not enough: the positional error is capped by
+	// TetherMaxBiasSpeed, so a carrier faster than that cap stretches the rope without limit.
+	// This is the target-side mirror of the wielder's hard projection (ConstrainWielderLocation): move the
+	// capsule along the current radial direction by the shortfall, removing the positional error within the
+	// same frame. If a wall blocks it, whatever is left stays as C and is picked up by λ and the observation.
+	// With finite mass at both ends the λ pair already owns the distribution, so this does not fire and cannot
+	// double-correct. Elastic mode (TetherCompliance > 0) is excluded, since the stretch there is deliberate.
 	if (HoldConfig.bEnforceTargetLengthConstraint
 		&& HoldConfig.TetherCompliance <= KINDA_SMALL_NUMBER
 		&& bHasLiveConstraint && !bSelfWrap
@@ -936,8 +981,9 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		C = FMath::Max(
 			C - static_cast<float>(FVector::DotProduct(Applied, LiveOutward)), 0.0f);
 		LengthConstraintState.LastViolation = C;
-		// If the grounded character has been lifted with a significant velocity, it will fall into Falling before the floor snap/Z deletion of Walking is reversed.
-		// (Launch convention). Horizontal towing (Applied.Z ≈ 0) passes below threshold — ground drag behavior is maintained.
+		// A grounded character lifted with real speed has to reach Falling before Walking's floor snap and Z
+		// removal cancel it out — the same convention Launch uses. A horizontal pull (Applied.Z ≈ 0) stays
+		// under the threshold, so dragging along the ground behaves as before.
 		if (Endpoints->Target.Movement->IsMovingOnGround()
 			&& Applied.Z > TetherLiftLaunchSpeedConst * DeltaTime)
 		{
@@ -945,10 +991,11 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		}
 	}
 
-	// Anchor-kind objects (static/kinematic/animated) have no physical velocity, so anchor points are filled with ground truth EMA —
-	// Moving object towing is followed by spread offset regardless of the bias cap (stationary anchors have ≈0 = no effect;
-	// The secondary safety net is ClampInjectedVelocity(TetherMaxSpeed) on the application side). SimBody must be a rope
-	// Reads vCOM+ω×r of the attachment point, and reads the CMC velocity of the character.
+	// An anchor-kind object — static, kinematic or animated — reports no physical velocity, so its anchor
+	// point is filled from a ground-truth EMA. That way a moving object being towed is followed through the
+	// separation offset regardless of the bias cap, while a still anchor contributes ≈ 0 and changes nothing.
+	// The second safety net is ClampInjectedVelocity(TetherMaxSpeed) on the application side.
+	// A SimBody instead reads vCOM + ω×r at the rope's attachment point, and a character reads its CMC velocity.
 	const FVector VelTarget = (Endpoints->Target.Kind == ERopeEndpointKind::Anchor)
 			? (bHasLiveConstraint
 				? LiveConstraint.PivotVelocity
@@ -956,8 +1003,9 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 			: EndpointVelocityAtPoint(
 				Endpoints->Target, TargetPoint);
 	const float SepTarget = -static_cast<float>(FVector::DotProduct(VelTarget, DirTarget));
-	// Anchor-kind wielders (kinematic carriers) also use the ground truth EMA symmetrically — the carrier's departure velocity is λ.
-	// It is subject to gap offset and is followed regardless of the bias cap (TetherMaxBiasSpeed) (≈0 = no effect for stationary owners).
+	// An anchor-kind wielder — a kinematic carrier — uses the same ground-truth EMA symmetrically: the
+	// carrier's departure speed enters λ through the separation offset and is followed regardless of
+	// TetherMaxBiasSpeed. A still owner contributes ≈ 0 and changes nothing.
 	const FVector VelWielder = (Endpoints->Wielder.Kind == ERopeEndpointKind::Anchor)
 		? LengthConstraintState.SmoothedWielderPointVelocity
 		: EndpointVelocityAtPoint(
@@ -1005,20 +1053,23 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 	const float Lambda = SolveResult.Lambda;
 	LengthConstraintState.LastLambda = Lambda;
 
-	// Effective distribution share (wielder gate/debugger compatible) = inverse mass ratio — λ Set to this frame value regardless of utterance.
+	// Effective distribution share, which the wielder gate and the debugger both read, is the inverse-mass ratio. Set to this frame's value whether or not λ fired.
 	if (Lambda <= 0.0f)
 	{
 		return; // Already approaching sufficiently or both ends are anchored.
 	}
 
-	// ---- Approved: ΔV = λ × w(cm/s) for each end, each leg direction ----
-	// All paths only touch the rope axis (+ orthogonal damping) component, so swing/gravity is preserved, and the resulting speed is TetherMaxSpeed.
-	// Secondary clamping is performed. The rigid body simulation target is exclusive to Chaos, and the compliant simulation target and simulation wielder are real.
-	// Receives physical impulse (ΔV × effective mass). Because it passes through the existing dispatch skeleton (ApplyToTetherEndpoint),
-	// The extension gateway (ApplyTractionToReceiver, Amount = ΔV cm/s) is also the same.
+	// ---- Applied: ΔV = λ × w (cm/s) at each end, along that end's leg direction ----
+	// Every path touches only the rope-axis component, plus the orthogonal damping, so swing and gravity
+	// survive, and the resulting speed is clamped a second time at TetherMaxSpeed.
+	// A rigid simulating target belongs exclusively to Chaos; a compliant simulating target and a simulating
+	// wielder take a real physics impulse of ΔV × effective mass. It goes through the existing dispatch
+	// skeleton (ApplyToTetherEndpoint), so the extension gateway sees it identically
+	// (ApplyTractionToReceiver, with Amount as ΔV in cm/s).
 	const float SpeedCap = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
-	// Orthogonal damping dt correction: Setting value is per-frame rate based on 60fps → effective rate = 1−(1−d)^(dt·60). Previously, the ratio
-	// Per-frame was used as is, and the higher the frame rate, the stronger the damping was. It was a frame rate dependent physics.
+	// Orthogonal damping needs a dt correction: the setting is a per-frame rate at 60fps, so the effective
+	// rate is 1 − (1 − d)^(dt·60). Using the per-frame ratio directly made the damping stronger the higher the
+	// frame rate — frame-rate-dependent physics.
 	const float PerpDampCfg = FMath::Clamp(HoldConfig.TetherPerpDamping, 0.0f, 1.0f);
 	const float PerpDamp = (PerpDampCfg > 0.0f && PerpDampCfg < 1.0f)
 		? (1.0f - FMath::Pow(1.0f - PerpDampCfg, DeltaTime * 60.0f))
@@ -1031,11 +1082,13 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		float DeltaV,
 		float PointInvMass) -> float
 	{
-		// Compliant target or physical wielder: with same attachment-point Jacobian as solver
-		// Since ΔV=λ*w was calculated, the actual rope impulse is exactly J=λ*d=(ΔV/w)*d.
-		// AddImpulseAtLocation creates ω×r and torque together, and observation also reads the same point velocity.
-		// (Orthogonal damping is for all axes — the option to exclude the vertical component will be reviewed and returned. Gravity drop is in equilibrium with damping.
-		// The "weightless" look of being trapped at low velocities (≈g·dt/rate) is countered by tuning the magnitude of this value.)
+		// A compliant target, or a physics wielder. ΔV = λ·w was computed with the same attachment-point
+		// Jacobian the solver used, so the real rope impulse is exactly J = λ·d = (ΔV/w)·d.
+		// AddImpulseAtLocation produces the ω×r and the torque along with it, and the observation reads the
+		// velocity at that same point.
+		// (The orthogonal damping covers every axis. Excluding the vertical component is a possible future
+		// option: gravity's fall settles into equilibrium with the damping, and the weightless look of hanging
+		// at a low terminal speed of about g·dt/rate is countered by tuning this magnitude instead.)
 		if (PointInvMass <= KINDA_SMALL_NUMBER)
 		{
 			return DeltaV;
@@ -1122,14 +1175,16 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 	};
 	auto ApplyCharacter = [&](UCharacterMovementComponent* Movement, const FVector& Dir, float DeltaV)
 	{
-		// CMC: Direct addition of velocity (contract to reflect this frame). The position recovery term of λ is bounded by MaxBiasSpeed.
-		// There is no excess injection, and there is no need for a separate ledger/slack break. (The horizontal projection plan during grounding will be reviewed and returned —
-		// Maintain full axis injection.)
+		// CMC: add velocity directly, which is the contract for taking effect this frame. λ's position
+		// recovery term is bounded by MaxBiasSpeed, so there is no excess injection and no separate ledger or
+		// slack break is needed. (Projecting horizontally while grounded is a possible future option; for now
+		// the whole axis is injected.)
 		const FVector OldVel = Movement->Velocity;
 		Movement->Velocity = RopeTraction::ClampInjectedVelocity(OldVel + Dir * DeltaV, OldVel, SpeedCap);
-		// A grounded character whose upward injection exceeds the threshold is Falling — Walking will have Z velocity converted to floor restraint on the next tick.
-		// Because it is discarded (disabling lifting), you must pass the mode using the same convention as Launch for the injection to survive. horizontal towing
-		// Passes because Z injection ≈ 0.
+		// A grounded character whose upward injection passes the threshold becomes Falling, because Walking
+		// would convert the Z velocity into a floor constraint on the next tick and discard it, disabling the
+		// lift. Switching mode with the same convention Launch uses is what lets the injection survive. A
+		// horizontal pull passes through untouched, since its Z injection is ≈ 0.
 		if (static_cast<float>(Movement->Velocity.Z - OldVel.Z) > TetherLiftLaunchSpeedConst
 			&& Movement->IsMovingOnGround())
 		{
@@ -1172,29 +1227,35 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName Bone,
 	const FVector& AnchorWorld, const FVector& CornerWorld, float LegRestLen, float DeltaTime)
 {
-	// (Constraint tether — target half of sim body) Engine physics constraint: [kinematic proxy for corner ↔ anchor for target body
-	// point] to the spherical limit of the leg rest length. GT per-frame velocity impulse is the "whole body size kick" of the joint body →
-	// In addition to the dilemma of “runaway” vs. “bone size λ → traction force collapse” (2026-07-20 Pierce 7th iteration), the air load (suspended prop)
-	// Even floating/pendulum pumping (2026-07-22 PIE) cannot be solved, but Chaos constraint is **together** with gravity, joints, and ground contact in the substep.
-	// is released, resulting in full-body traction without runaway and true pendulum behavior (the standard pattern of "hanging the load in the hands").
-	// The engine solves the alignment torque by holding the constraint frame as the body-local of the anchor (skeletal = bone TM, spear tip lever convention).
+	// The ragdoll half of the constraint tether, as an engine physics constraint: a kinematic proxy at the
+	// corner tied to an anchor point on the target's body, with a spherical limit at the leg's rest length.
+	// A per-frame game-thread velocity impulse cannot do this job. On a jointed body it is trapped between a
+	// whole-body-sized kick, which runs away, and a bone-sized λ, which collapses the traction force; and
+	// under an airborne load such as a suspended prop it cannot stop the floating and the pendulum pumping
+	// either. A Chaos constraint is released **together with** gravity, the joints and ground contact inside
+	// the substep, which gives whole-body traction without runaway and genuine pendulum behaviour — the
+	// standard way to hang a load from a hand.
+	// The constraint frame is held in the anchor's body-local space (a bone's transform for a skeletal target,
+	// following the same tip-lever convention), which is how the engine resolves the alignment torque.
 	AActor* Owner = GetOwner();
 	if (!Owner || !TargetPrim)
 	{
 		return;
 	}
 
-	// Regenerate (promote/rewrap anchor) if target/bone has changed.
+	// Rebuild it when the target or bone changed — a promotion, or a re-wrap of the anchor.
 	if (PhysicalTetherConstraint
 		&& (PhysicalTetherTarget.Get() != TargetPrim || PhysicalTetherBone != Bone))
 	{
 		TeardownPhysicalTether();
 	}
 
-	// Target body - current value of local anchor (constraint Frame2) — skeletal = bone TM (spear tip lever convention), component body =
-	// component TM. It is a value that is pinned upon creation, so when the wrap anchor is relocated within the same (target, bone) (promotion/seed joining)
-	// The rope anchor and constraint anchor are misaligned, resulting in constant violation = vibration — If the drift exceeds the threshold, dismantle and lower
-	// Immediately regenerates from the creation block (a guard that does not fire in normal conditions).
+	// The target body's current local anchor (constraint Frame2): a bone transform for a skeletal target,
+	// following the tip-lever convention, or the component transform for a component body. It is pinned at
+	// creation, so if the wrap anchor is relocated within the same (target, bone) — a promotion, or a seed
+	// joining — the rope's anchor and the constraint's anchor diverge and leave a permanent violation, which
+	// reads as vibration. Past a drift threshold the constraint is torn down and rebuilt immediately by the
+	// creation block below. It does not fire under normal conditions.
 	const USkeletalMeshComponent* SkelBody = Cast<USkeletalMeshComponent>(TargetPrim);
 	FTransform BodyTM = TargetPrim->GetComponentTransform();
 	if (SkelBody && !Bone.IsNone())
@@ -1206,11 +1267,13 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		}
 	}
 	const FVector AnchorLocal = BodyTM.InverseTransformPosition(AnchorWorld);
-	// The instantaneous anchorLocal is the delay difference between the rope Sim (GPU delayed mirror) and the current bone TM, which increases significantly every frame in fast ragdoll.
-	// Shakes — If you place a 5cm guard at the instantaneous value, it regenerates (thrashes) every frame even without real relocation, creating a constraint.
-	// I can't get a warm start and I actually feel trembled (measurement: regeneration 70%, strength 0 89%). So we smooth anchorLocal with EMA
-	// Check with those values: delay noise is averaged out (smoothing value stays near the pinned anchor), and constant
-	// Only relocation (seed joining/promotion) moves the average to exceed the threshold. Raise the threshold to 10cm to leave room.
+	// The instantaneous local anchor shakes hard every frame on a fast ragdoll, because the rope's sim is a
+	// lagging GPU mirror while the bone transform is current. A 5 cm guard on that instantaneous value
+	// rebuilds every frame even with no real relocation — thrashing, so the constraint never gets a warm start
+	// and the shaking becomes real (measured at 70% rebuild rate and 0 strength 89% of the time).
+	// So the local anchor is smoothed with an EMA and the guard reads that instead: the lag noise averages out
+	// and the smoothed value stays near the pinned anchor, while a sustained relocation — a seed joining, a
+	// promotion — moves the average past the threshold. The threshold is 10 cm to leave headroom.
 	if (PhysicalTetherConstraint)
 	{
 		const float SmoothAlpha = RopeTraction::ExpSmoothAlpha(0.12f, DeltaTime); // ≈0.12s time constant.
@@ -1228,18 +1291,20 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		PhysicalTetherProxy->SetupAttachment(this);
 		PhysicalTetherProxy->SetAbsolute(true, true, true); // World layout (regardless of rope component transform).
 		PhysicalTetherProxy->InitSphereRadius(4.0f);
-		// Requires a body (one side of the constraint) and no collisions or queries — PhysicsOnly + ignore all channels.
-		// Why you shouldn't turn on queries: The default object type for USphereComponent is WorldDynamic;
-		// Channel response Ignore only listens to **channel queries** (object type queries only return the shape's object type)
-		// bone). So, if query is on, URopeStaticBodyProvider's OverlapMultiByObjectType scan
-		// is captured, becomes a push-out collider that follows the corner every frame, and pushes the wrap node of my rope.
+		// It needs a body, as one side of the constraint, but no collision and no queries — PhysicsOnly with
+		// every channel ignored.
+		// Why queries must stay off: USphereComponent's default object type is WorldDynamic, and a channel
+		// response of Ignore only affects **channel** queries, since an object-type query returns any shape
+		// whose object type matches. With queries on, URopeStaticBodyProvider's OverlapMultiByObjectType scan
+		// would pick this proxy up, turn it into a push-out collider that follows the corner every frame, and
+		// shove this rope's own wrap nodes around.
 		PhysicalTetherProxy->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
 		PhysicalTetherProxy->SetCollisionResponseToAllChannels(ECR_Ignore);
 		PhysicalTetherProxy->SetSimulatePhysics(false); // Kinematic — Move to corner every frame.
 		PhysicalTetherProxy->SetHiddenInGame(true);
 		PhysicalTetherProxy->RegisterComponent();
 	}
-	// Kinematic movement — Chaos looks at movement velocity and pulls constraints (moving corner/hand tracking).
+	// Kinematic movement — Chaos reads the movement velocity and pulls the constraint with it, so the corner and the hand are tracked.
 	PhysicalTetherProxy->SetWorldLocation(CornerWorld);
 
 	if (!PhysicalTetherConstraint)
@@ -1266,11 +1331,12 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		Profile.LinearLimit.Damping = 0.0f;
 		Profile.LinearLimit.Restitution = 0.0f;
 		PhysicalTetherConstraint->SetConstrainedComponents(PhysicalTetherProxy, NAME_None, TargetPrim, Bone);
-		// constraint frame Origin: proxy side = proxy origin (corner), target side = anchor's body-local (above AnchorLocal —
-		// wrap freezes bone-local anchors (same conventions, including spear tip lever). The distance limit is between these two points.
+		// Constraint frame origins: the proxy side is the proxy's own origin, the corner; the target side is
+		// the anchor in body-local space (AnchorLocal above — the wrap freezes bone-local anchors under the
+		// same convention, tip lever included). The distance limit spans those two points.
 		PhysicalTetherConstraint->ConstraintInstance.SetRefPosition(EConstraintFrame::Frame1, FVector::ZeroVector);
 		PhysicalTetherConstraint->ConstraintInstance.SetRefPosition(EConstraintFrame::Frame2, AnchorLocal);
-		// rope has no rotation constraints — all angles are Free.
+		// The rope constrains no rotation — every angle is free.
 		PhysicalTetherConstraint->SetAngularSwing1Limit(ACM_Free, 0.0f);
 		PhysicalTetherConstraint->SetAngularSwing2Limit(ACM_Free, 0.0f);
 		PhysicalTetherConstraint->SetAngularTwistLimit(ACM_Free, 0.0f);
@@ -1348,17 +1414,20 @@ void URopeComponent::TeardownPhysicalTether()
 
 USkeletalMeshComponent* URopeComponent::GetWrappedMesh() const
 {
-	// State.Mesh is USceneComponent (generalized compared to static wrap). “Skeletal mesh” return agreement maintained —
-	// If the target is static, the cast fails and is null (the target actor response is from caller to GetOwner).
+	// State.Mesh is a USceneComponent, generalized to allow static wraps, while this function still promises a
+	// skeletal mesh: for a static target the cast fails and it returns null. The caller reaches the target
+	// actor through GetOwner instead.
 	return const_cast<USkeletalMeshComponent*>(Cast<USkeletalMeshComponent>(WrapController.State.Mesh.Get()));
 }
 
 void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample& Pull, float DeltaTime)
 {
-	// Wrap target component (cross-actor possible). Contractually, rope only reads the target, so weak is const,
-	// Pull is an intended gameplay intervention (applying force), so it is explicitly pulled as non-const only here.
-	// State.Mesh now supports USceneComponent (generalized over static wrap) — agnostic of the target type as a recipient chain.
-	// Apply force (same logic as skeletal for light physics prop/static objects). Null only occurs when the target disappears (destroys).
+	// The wrap target component, which may belong to another actor. The rope's contract is that it only reads
+	// its target, so the weak pointer is const; a pull is a deliberate gameplay intervention — applying force —
+	// so this is the one place it is pulled back to non-const.
+	// State.Mesh is a USceneComponent now that static wraps are supported, and the receiver chain is agnostic
+	// to the target's type: force is applied to a light physics prop or a static object exactly as to a
+	// skeletal one. Null only happens when the target is destroyed.
 	USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
 	if (!MeshComp)
 	{
@@ -1366,23 +1435,25 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	}
 	AActor* Owner = MeshComp->GetOwner();
 
-	// Force = pulling direction × maximum tension. The physical body is applied with a tension cap velocity drive (ApplyPullVelocityDrive).
+	// Force = the pull direction × the tension cap. A physics body takes it through the tension-capped velocity drive (ApplyPullVelocityDrive).
 	const float MaxTension = static_cast<float>(Force.Size());
 	const FVector Dir = (MaxTension > KINDA_SMALL_NUMBER) ? (Force / MaxTension) : FVector::ZeroVector;
 
-	// Recipient interpretation uses the same ladder as Tether (ResolveTetherEndpoint) — Active Pull does not walk its own ladder separately.
-	// Removed. In the past, the order was different (Pull looked at character movements before sim primitives) and “active CMC characters were
-	// When Wrapping a "owned sim primitive", Pull pulls the movement and Tether pulls the primitive. The movement branch is
-	// Originally, it was a *fallback* that said "It is an animation bone, so it cannot be pushed, so push the moving object", but it is ahead of the simulation test, so it can be pushed.
-	// Interception of the target — unified in the order of specific (physical body) → general (moving body).
-	// (Pull does not use the effective mass that comes with the analysis — the tension cap drive reads the body mass directly.)
+	// The receiver is resolved with the same ladder the tether uses (ResolveTetherEndpoint); the active pull
+	// no longer walks a ladder of its own.
+	// It used to, in a different order — the pull looked at character movement before simulating primitives —
+	// so wrapping a simulating primitive owned by an active CMC character had the pull driving the movement
+	// while the tether drove the primitive. The movement branch was only ever meant as a *fallback*, "this is
+	// an animated bone and cannot be pushed, so push the mover instead", but sitting ahead of the simulation
+	// test it intercepted targets that could be pushed. Unified to specific (physics body) before general (mover).
+	// (The pull does not use the effective mass the resolution carries — the tension-capped drive reads the body mass directly.)
 	const bool bCanReuseWrappedEndpoint = WrappedEndpointCache.bValid &&
 		WrappedEndpointCache.TargetMesh.Get() == MeshComp && WrappedEndpointCache.TargetBone == Pull.Bone;
 	const FRopeTetherEndpoint Endpoint = bCanReuseWrappedEndpoint
 		? WrappedEndpointCache.Target
 		: ResolveTetherEndpoint(MeshComp, Owner, Pull.Bone, HoldConfig.GroundBraceFactor);
 
-	// Extension gateway: If the subclass (custom movement/vehicle) intercepted on a per-receiver basis has processed it, the built-in application is omitted.
+	// Extension gateway: a subclass — custom movement, a vehicle — that intercepted this receiver and handled it skips the built-in application.
 	if (ApplyTractionToReceiver(MakeTractionRequest(Endpoint, ERopeTractionSource::ActivePull, Dir, MaxTension,
 		DeltaTime, /*bWielderSide*/ false)))
 	{
@@ -1392,18 +1463,22 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	switch (Endpoint.Kind)
 	{
 	case ERopeEndpointKind::SimBody:
-		// Simulation body (skeletal promotion bone / simulation primitive / simulation root): tension cap velocity is applied directly to the drive.
-		// (center of gravity impulse, no torque/spin, no overshoot, no dust/slip, if it is heavy, there is a back sag). Suppresses residual spin with angle velocity clamps.
+		// A simulating body (a promoted skeletal bone, a simulating primitive, or a simulating root) takes the
+		// tension-capped velocity drive directly: an impulse at the centre of mass, so no torque and no spin,
+		// no overshoot and no juddering, and a heavy target simply lags. The angular velocity clamp mops up any
+		// residual spin.
 		ApplyPullVelocityDrive(Endpoint.Prim, Endpoint.Bone, Dir, MaxTension, DeltaTime);
 		ClampPulledBodyVelocity(Endpoint.Prim, Endpoint.Bone);
-		// (“bone + moving object dual application” for partial ragdolls has been removed: receiver interpretation no longer rates partial ragdolls as bones
-		// — ResolveTetherEndpoint rung 1 — the bone endpoint that comes here is always
-		// It is a Free ragdoll, and the force is transmitted throughout the body through the joints. Restoring symmetry where the tether and pull see the same recipient.)
+		// (The old "apply to bone and mover both" path for partial ragdolls is gone: the receiver resolution no
+		//  longer classifies a partial ragdoll as a bone — that is rung 1 of ResolveTetherEndpoint — so a bone
+		//  endpoint arriving here is always a free ragdoll, where force travels through the joints to the whole
+		//  body. That restores the symmetry of the tether and the pull seeing the same receiver.)
 		return;
 
 	case ERopeEndpointKind::Character:
-		// Since force cannot be applied to the animation driving bone, the entire moving object is tractioned (PoC 4.2: Even simple force transfer to the bone/root.
-		// limb IK/ragdoll responses follow). If MOVE_None, it does not come here (interpretation is classified as anchor → warning below).
+		// Force cannot be applied to an animation-driven bone, so the whole mover is pulled instead, and the
+		// limb IK or ragdoll response follows from there. Under MOVE_None it never reaches this branch — the
+		// resolution classifies it as an anchor, and the warning below fires.
 		Endpoint.Movement->AddForce(Force);
 		return;
 
@@ -1411,8 +1486,9 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		break;
 	}
 
-	// No recipient (anchor/None = bone chain without sim body, non-simulated component + movement disabled, non-character + non-simulated root):
-	// Notifies once per wrap that the power is quietly disappearing.
+	// No receiver at all (anchor or None: a bone chain with no simulating body, a non-simulating component with
+	// movement disabled, or a non-character with a non-simulating root). Warn once per wrap that the force is
+	// quietly going nowhere.
 	if (!PullDrive.bLoggedPullNoReceiver)
 	{
 		PullDrive.bLoggedPullNoReceiver = true;
@@ -1424,19 +1500,23 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 
 void URopeComponent::ApplyPullVelocityDrive(UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float MaxTension, float DeltaTime) const
 {
-	// tension cap velocity drive (replaces constant force): Drives the target in the pulling direction target velocity (VTarget), but applies this frame.
-	// Clamp impulse to J = min(mass×ΔV, MaxTension×dt).
-	//  - Light target: J = mass×ΔV (tension margin) → *exactly* reaches target velocity (no overshoot). In one frame the constant force is a=F/m
-	//    The problem of bouncing past the target (dust/jaw-jak) disappears.
-	//  - Heavy object: J = MaxTension×dt (tension limit) → accelerates slowly to per-frame ΔV=J/mass → lags behind (realistic).
-	// impulse is the center of gravity (AddImpulse without position), so there is no torque/spin. bVelChange=false = actual impulse (divided by mass).
+	// Tension-capped velocity drive, replacing the old constant force: drive the target along the pull
+	// direction toward VTarget, clamping this frame's impulse to J = min(mass × ΔV, MaxTension × dt).
+	//  - Light target: J = mass × ΔV, within the tension budget, so it reaches the target speed *exactly*
+	//    with no overshoot. That removes the juddering a constant force (a = F/m) produced by blowing past the
+	//    target within one frame.
+	//  - Heavy target: J = MaxTension × dt, at the tension limit, so it accelerates by ΔV = J/mass per frame
+	//    and lags behind, which is the realistic result.
+	// The impulse is at the centre of mass (AddImpulse with no position), so there is no torque and no spin.
+	// bVelChange = false means a real impulse, divided by mass.
 	const float VTarget = FMath::Max(0.0f, HoldConfig.ActivePullMaxLinearSpeed);
 	if (!Prim || VTarget <= 0.0f || MaxTension <= KINDA_SMALL_NUMBER || Dir.IsNearlyZero() || DeltaTime <= 0.0f)
 	{
 		return;
 	}
-	// Acceleration only (no reverse thrust) + accurate arrival (Alpha=1). The cap is impulse (tension × dt) — it is the same framework as the tether reel.
-	// The only difference is whether there is a positive direction (the tether even brakes to settle the boundary, but the active pull only accelerates because the user releases it).
+	// Acceleration only, with no reverse thrust, and exact arrival (Alpha = 1). The cap is on the impulse
+	// (tension × dt), the same framework the tether's reel uses. The one difference is direction: the tether
+	// also brakes to settle on its boundary, while the active pull only accelerates, because the user lets go.
 	const RopeTraction::FRopeAxisServo Servo{ VTarget, /*Alpha*/ 1.0f, /*bBidirectional*/ false, /*bCancelOutward*/ false };
 	const float VAlong = static_cast<float>(FVector::DotProduct(Prim->GetPhysicsLinearVelocity(BoneName), Dir));
 	const float J = RopeTraction::ClampAxisImpulse(RopeTraction::ComputeAxisDeltaV(VAlong, Servo), ResolveBodyMass(Prim, BoneName), MaxTension * DeltaTime);
@@ -1452,8 +1532,9 @@ void URopeComponent::ClampPulledBodyVelocity(UPrimitiveComponent* Prim, FName Bo
 	{
 		return;
 	}
-	// Angular velocity cap (residual spin safety net): The cause of pull torque is removed by applying force to the center of gravity, but the remaining ragdoll joint dynamics
-	// Contains the spin. (Linear traction is handled by the tension cap impulse of ApplyPullVelocityDrive — here, only angular velocity.)
+	// Angular velocity cap, a safety net for residual spin. Applying force at the centre of mass removes the
+	// source of pull torque, but ragdoll joint dynamics still produce some. (Linear traction is
+	// ApplyPullVelocityDrive's tension-capped impulse; this handles angular velocity only.)
 	const float MaxAngDeg = FMath::Max(0.0f, HoldConfig.ActivePullMaxAngularSpeed);
 	if (MaxAngDeg > 0.0f)
 	{
@@ -1468,8 +1549,9 @@ void URopeComponent::ClampPulledBodyVelocity(UPrimitiveComponent* Prim, FName Bo
 
 void URopeComponent::UpdateTargetPullable()
 {
-	// Check(climb-in direction/distribution observation shared) of this Wrapped frame. Calculate each frame regardless of overshoot
-	// Causes tether retrieval (UpdateTether) and active Pull direction (ApplyWrappedTraction) to read the same check.
+	// This Wrapped frame's pullability decision, shared by the climb-in direction and the distribution
+	// observation. Computing it every frame regardless of overshoot is what makes the tether's recovery
+	// (UpdateTether) and the active pull's direction (ApplyWrappedTraction) read the same answer.
 	const FRopeResolvedWrappedEndpoints* Endpoints = GetOrResolveWrappedEndpoints();
 	if (!Endpoints)
 	{
@@ -1481,7 +1563,7 @@ void URopeComponent::UpdateTargetPullable()
 		return;
 	}
 
-	// A rope (owner==object) Wrapped around itself is meaningless in distribution → the target is always pullable.
+	// A rope wrapped around its own owner has no meaningful distribution, so the target is always pullable.
 	const bool bSelfWrap = (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner());
 	bool bPullable;
 	if (bSelfWrap)
@@ -1490,8 +1572,10 @@ void URopeComponent::UpdateTargetPullable()
 	}
 	else
 	{
-		// Effective mass at both ends (ground character reflects ground friction with GroundBraceFactor, MOVE_None/static is anchor = infinite).
-		// Uses the same interpretation (ResolveTetherEndpoint) as for tether application — there is no discrepancy between the attraction check and the actual application point.
+		// Effective mass at both ends: a grounded character folds in ground friction through
+		// GroundBraceFactor, and MOVE_None or static is an anchor of infinite mass. It uses the same
+		// resolution the tether application does (ResolveTetherEndpoint), so the pullability decision and the
+		// real application point cannot disagree.
 		const float WT = EndpointInvMass(Endpoints->Target);
 		const float WW = EndpointInvMass(Endpoints->Wielder);
 		const float InfMass = TNumericLimits<float>::Max();
@@ -1503,8 +1587,9 @@ void URopeComponent::UpdateTargetPullable()
 		}
 		else
 		{
-			// hysteresis is a non-exposed internal constant (stabilizer) — it prevents checks on boundaries from flipping every frame.
-			// There is only one exposure knob that determines the "intersection location", GroundBraceFactor, and this value is just a deadband around that line.
+			// The hysteresis is an unexposed internal constant, a stabilizer that keeps a decision right at the
+			// boundary from flipping every frame. The one exposed knob that sets *where* the crossover lies is
+			// GroundBraceFactor; this is just the deadband around that line.
 			constexpr float PullMassHysteresis = 1.1f;
 			bPullable = DecideTargetPullable(EffMassTarget, EffMassWielder, PullDrive.bTargetPullable, PullMassHysteresis);
 		}
@@ -1519,26 +1604,27 @@ bool URopeComponent::DecideTargetPullable(float EffMassTarget, float EffMassWiel
 	const float Margin = FMath::Max(MarginRatio, 1.0f);
 	if (bPrev)
 	{
-		// Currently "can be dragged": only flips to non-sticky when the target becomes more than Margin times heavier than the wielder.
+		// Currently pullable: it only flips to not-pullable once the target is more than Margin times heavier than the wielder.
 		return !(EffMassTarget > EffMassWielder * Margin);
 	}
-	// Currently "Unable to be dragged": Flipped to possible only when the target becomes lighter than the wielder × (1/Margin).
+	// Currently not pullable: it only flips back once the target is lighter than the wielder × (1/Margin).
 	return (EffMassTarget * Margin <= EffMassWielder);
 }
 
 void URopeComponent::ApplyPullForceToWielder(const FVector& Force, float DeltaTime)
 {
-	// (not pullable) Apply an active Pull force to the wielder (rope owner) — the target is heavy instead.
-	// climb-in, where the wielder is pulled towards the anchor. Mirror the owner side of ApplyPullForce: CharacterMovement → Simulate Root.
+	// Climb-in (target not pullable): apply the active pull force to the wielder, the rope's owner, so they
+	// are drawn toward the anchor instead. Mirrors the owner side of ApplyPullForce: CharacterMovement, then simulating root.
 	AActor* RopeOwner = GetOwner();
 	if (!RopeOwner)
 	{
 		return;
 	}
 
-	// The receiver is **interpreted** first — this is to pass “what almost got stuck” to the expansion gateway as is.
-	// The analysis order is the same as before (CharacterMovement → Simulation Root): from here to ResolveTetherEndpoint ladder.
-	// If you change, the sim route will be ahead of the movement, changing the climb-in action.
+	// The receiver is **resolved** first, so what nearly received the force can be handed to the extension
+	// gateway as-is. The order is the same as before (CharacterMovement, then simulating root) and comes from
+	// here down the ResolveTetherEndpoint ladder. Reordering it would put the sim route ahead of the mover and
+	// change how climb-in behaves.
 	FRopeTetherEndpoint Receiver;
 	Receiver.Actor = RopeOwner;
 	if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(RopeOwner))
@@ -1572,7 +1658,7 @@ void URopeComponent::ApplyPullForceToWielder(const FVector& Force, float DeltaTi
 		Receiver.Prim->AddForce(Force);
 		return;
 	default:
-		// No recipients (non-character + non-sim route): Quiet drop — no climb-in configuration.
+		// No receiver (not a character and no simulating root): drop it quietly — this setup has no climb-in.
 		return;
 	}
 }

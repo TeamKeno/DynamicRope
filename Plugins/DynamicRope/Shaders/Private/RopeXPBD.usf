@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// XPBD rope solver (GPU, M1: physics-only — integrate + distance + bending, no collision).
+// XPBD rope solver on the GPU: integrate, then distance, bending and collision constraints.
 // 1 rope = 1 thread group, node = thread. Run the substep x iteration loop with groupshared + barrier.
 // constraint race is removed by coloring: distance=red-black (2 colors), bending(i,i+2)=stride-3 (3 colors).
 // The formula is the same as CPU FRopeXPBDSolver(SolveDistance/SolveBending) (AlphaTilde=compliance/dt^2).
@@ -40,7 +40,7 @@ struct FRopeGPUParams
 	float BendCompliance;
 	float Damping;
 	int   bStartPinned;
-	// Global index (M2) where this rope's capsule starts
+	// Global index where this rope's capsules start
 	int   CapsuleOffset;
 	// Number of capsules to apply to this rope (if 0, no collision)
 	int   NumCapsules;
@@ -52,9 +52,9 @@ struct FRopeGPUParams
 	float SweepStep;
 	// sample cap per segment
 	int   MaxSweepSamples;
-	// M3: SDF collider global starting index of this rope
+	// Global start index of this rope's SDF colliders
 	int   SDFColliderOffset;
-	// M3: Number of SDF colliders (if 0, no SDF collision)
+	// SDF collider count (0 = no SDF collision)
 	int   NumSDFColliders;
 	// Free end friction multiplier (pinned point=1, end=this value). 1:1 with C++ Pad0 slot.
 	float TipFrictionScale;
@@ -159,9 +159,10 @@ void RopeApplyContactFriction(FRopeGPUParams P, uint i, int N, float3 Normal, fl
 	gPrev[i] += Tangent;
 }
 
-// capsule node collision(M2): substep start (gPrev) → current (gPos) path with capsule sub-pose end point, relative sweep,
-// Push-out at first contact + *Opponent* normal velocity removal + *Opponent* tangential friction. CPU SolveCollisions mirror.
-// s = substep index (for calculating the ratio of collider frame motion divided into substep intervals).
+// Capsule node collision: sweep the substep's path (gPrev → gPos) against the capsule's sub-posed endpoints,
+// relative to the capsule's own motion, then push out at the first contact and remove the *relative* normal
+// velocity and apply *relative* tangential friction. Mirrors the CPU SolveCollisions.
+// s is the substep index, used to work out which slice of the collider's frame motion this substep covers.
 void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
 {
 	const float3 SegA = gPrev[i];
@@ -237,8 +238,9 @@ void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 
 	}
 }
 
-// SDF node collision(M3): Same swept structure as capsule — Move node path to collider local relative frame
-// Include sub-poses in one segment, push-out at first contact after separation heuristic + relative response + tension grip
+// SDF node collision: the same swept structure as the capsule — move the node's path into the collider's
+// local relative frame, cover the sub-poses within one segment, and on the first contact push out after the
+// separation heuristic, then apply the relative response and the tension grip.
 // friction(Coulomb, gLambdaDist consumed). CPU FRopeSDFCollider::QuerySwept/SolveCollisions mirror.
 void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
 {
@@ -525,7 +527,7 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 		if (WEff <= 0.0f) { continue; }
 		const float3 Mid = lerp(gPos[i], gPos[i + 1], T);
 
-		// capsule (M2)
+		// Capsule
 		for (int scap = 0; scap < P.NumCapsules; ++scap)
 		{
 			const FRopeCapsule Cap = Capsules[P.CapsuleOffset + scap];
@@ -579,7 +581,7 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 			}
 		}
 
-		// SDF (M3) — Current pose point query (shared world helper).
+		// SDF — point query against the current pose, through the shared world helper.
 		for (int ssdf = 0; ssdf < P.NumSDFColliders; ++ssdf)
 		{
 			const FRopeSDFCollider Col = SDFColliders[P.SDFColliderOffset + ssdf];
@@ -597,9 +599,9 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 		}
 
 		// GDF (world) — segment chording: Defends when a straight line between two nodes crosses a thin wall.
-		// Same pattern as SDF segment case, only query is GDF. Most small-step node collisions occur, but
-		// Walls thinner than SegmentLength are captured only here because the nodes are outside the sides. static world surfacevelocity 0.
-		// (Merged from CL 221 — After the kernel chord block is moved to this function, only the location is rearranged, the formula is the same.)
+		// The same pattern as the SDF segment case, with the query swapped for the GDF. Most collisions are
+		// caught by the small-step node stage; a wall thinner than SegmentLength is caught only here, because
+		// the nodes on either side of it are outside. Static world geometry has surface velocity 0.
 #if ROPE_USE_GDF && PLATFORM_SUPPORTS_DISTANCE_FIELDS
 		if (bWorldGDFValid != 0)
 		{
@@ -803,7 +805,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			}
 		}
 
-		// --- Collision(M2/M3): node collision stage (the main body is the RopeSolveNode* function at the top of the file).
+		// --- Collision: the node collision stage. The body of it is the RopeSolveNode* functions at the top of this file.
 		// Since it is per-node independent (only own slot i is written), group synchronization is not required — only the gate is applied here.
 			// NodeContact: Unit normal sum (.xyz) + number (.w) of colliders touched by the node in this pass — pinch below
 			// Write to check (thread local register without groupshared, inout passed to each stage).

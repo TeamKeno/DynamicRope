@@ -49,10 +49,12 @@ DECLARE_MEMORY_STAT(TEXT("GPU Mem: Global SDF"), STAT_RopeGPU_MemGlobalSDF, STAT
 DECLARE_MEMORY_STAT(TEXT("GPU Mem: Resident Total"), STAT_RopeGPU_MemTotal, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Resident Ropes (count)"), STAT_RopeGPU_ResidentRopeCount, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU SDF Volumes"), STAT_RopeGPU_SDFVolumes, STATGROUP_DynamicRopeGPU);
-// GPU upload bandwidth per frame (actual transfer bytes) — Accumulated by Wrapping CreateStructuredBuffer uploads in a RopeUploadBuffer.
-// Unlike the resident footprint (GPU Mem above), this is the amount raised to the GPU every frame. Decomposition leaves only two axes: SDF (=CL389 cache
-// If you die, it bounces in MB every frame — for regression monitoring) and Colliders (the only axis that grows proportional to the size of the content). the rest
-// (Detect/Override/Seed) is small and sporadic, so it is buried in total.
+// GPU upload bandwidth per frame, in bytes actually transferred, accumulated by the CreateStructuredBuffer
+// uploads inside RopeUploadBuffer. Unlike the resident footprint (GPU Mem above) this is what goes up to the
+// GPU every frame. Breaking it down leaves only two axes worth watching: SDF, which spikes into the megabytes
+// every frame if the global volume cache stops working, so it is the regression signal; and Colliders, the
+// one axis that scales with the content. The rest — detect, override, seed — is small and sporadic and stays
+// folded into the total.
 DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (total)"), STAT_RopeGPU_UploadTotal, STATGROUP_DynamicRopeGPU);
 DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (SDF Volume)"), STAT_RopeGPU_UploadSDF, STATGROUP_DynamicRopeGPU);
 DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Colliders)"), STAT_RopeGPU_UploadColliders, STATGROUP_DynamicRopeGPU);
@@ -119,7 +121,7 @@ static FRDGBufferRef RopeUploadBuffer(FRDGBuilder& GraphBuilder, const TCHAR* Na
 // groupshared budget: solve 9float/node → 512node=18KB (<32KB). Detect no groupshared (numthreads only).
 static constexpr int32 GRopeNodeBuckets[] = { 64, 128, 256, 512 };
 static_assert(GRopeNodeBuckets[UE_ARRAY_COUNT(GRopeNodeBuckets) - 1] == FRopeGPUSolver::MaxNodes,
-	"최상단 노드 버킷이 FRopeGPUSolver::MaxNodes와 일치해야 한다(서브시스템 GPU 후보 게이트가 MaxNodes를 쓴다).");
+	"The top node bucket must equal FRopeGPUSolver::MaxNodes (the subsystem's GPU eligibility gate uses MaxNodes).");
 
 // Smallest bucket with more than NumNodes. If not (> cap) 0. The caller always receives ≥64 after the MaxNodes gate.
 static int32 RopeNodeBucket(int32 NumNodes)
@@ -144,21 +146,21 @@ struct FRopeGPUParamsGPU
 	float     BendCompliance;
 	float     Damping;
 	int32     bStartPinned;
-	// M2: global start index of this rope's capsule
+	// Global start index of this rope's capsules
 	int32     CapsuleOffset;
-	// M2: Number of capsules (if 0, no collision)
+	// Capsule count (0 = no capsule collision)
 	int32     NumCapsules;
-	// M2: node thickness
+	// Node thickness
 	float     CollisionRadius;
-	// M2: Tangential damping
+	// Tangential damping
 	float     Friction;
-	// M2: swept sample interval
+	// Swept sample spacing
 	float     SweepStep;
-	// M2: sample cap per segment
+	// Sample cap per segment
 	int32     MaxSweepSamples;
-	// M3: SDF collider global starting index of this rope
+	// Global start index of this rope's SDF colliders
 	int32     SDFColliderOffset;
-	// M3: Number of SDF colliders (if 0, no SDF collision)
+	// SDF collider count (0 = no SDF collision)
 	int32     NumSDFColliders;
 	// Free end friction multiplier (pinned point=1, end=this value). Pad0 slot reuse.
 	float     TipFrictionScale = 1.0f;
@@ -429,7 +431,7 @@ struct FRopeResidentRope
 	FRHIGPUBufferReadback* LambdaReadback = nullptr;
 	bool  bLambdaArmed = false;
 	float LambdaFixedDt = 0.0f;
-	// M5b: PosBuf StructuredBuffer<float4> SRV (for render). Invalidated when reseeding.
+	// PosBuf StructuredBuffer<float4> SRV, for the render tube. Invalidated on a reseed.
 	FShaderResourceViewRHIRef PosSRV;
 
 	// (SDF volume grid/header resident moved from per-rope to global FRopeGlobalSDFCache — resident once per VolumeKey.
@@ -516,7 +518,7 @@ bool RopeGPU::IsRuntimeSupported()
 		{
 			bWarned = true;
 			UE_LOG(LogDynamicRopeGPU, Warning,
-				TEXT("GPU 로프 경로 비활성 — feature level이 SM5 미만이다(%s). CPU 솔버/튜브로 폴백한다."),
+				TEXT("GPU rope path disabled — feature level is below SM5 (%s). Falling back to the CPU solver and tube."),
 				*LexToString(GMaxRHIFeatureLevel));
 		}
 		return false;
@@ -611,9 +613,10 @@ void FRopeGPUSolver::GetLatestContacts(TMap<uint32, FRopeResidentContacts>& Out)
 
 bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, TArray<FVector>& OutPrevPositions, uint32& OutGeneration)
 {
-	// GT blocking (M5c): EnqueueSteps only fills the RT pending queue, so a simple resident copy is performed on the immediately preceding Flight.
-	// can return a pose older than the step. Non-GDF pending of this RopeId using RT command ordering
-	// Execute the step first in the dedicated graph, and copy/readback the results in the same command.
+	// Game-thread blocking readback. EnqueueSteps only fills the render thread's pending queue, so a plain
+	// resident copy would return a pose older than the Flight step that just preceded it. Using the render
+	// command ordering, this executes that RopeId's pending non-GDF step first in a dedicated graph, then
+	// copies and reads back the result in the same command.
 	// Because the GDF step requires a valid Scene View/GDF, it is not executed with lean permutation here but is suspended.
 	struct FImmediateReadbackResult
 	{
@@ -1041,7 +1044,7 @@ static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	}
 }
 
-// capsule packing (M2): world capsule of step → GPU layout flattening + upload. Fill Build.CapsulesBuf/NumValidCaps.
+// Capsule packing: flatten the step's world capsules into the GPU layout and upload them, filling Build.CapsulesBuf and NumValidCaps.
 static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step, FRopeStepBuild& Build)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackCapsules);
@@ -1308,9 +1311,10 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 	Cache.bDirty = false;
 }
 
-// SDF collider packing (M3): Shared bind the global volume cache (where RopeEnsureGlobalSDFVolumes are guaranteed to reside), and
-// Only the instance (global VolumeIndex + current/previous bone transform) array is raised every frame. distance dequant/upload here
-// Do not — global cache is performed only once per VolumeKey. Fill in Build.SDF*Buf/NumValidSDFCol.
+// SDF collider packing: bind the shared global volume cache — where RopeEnsureGlobalSDFVolumes guarantees the
+// volumes are resident — and upload only the per-instance array each frame, the global VolumeIndex plus the
+// current and previous bone transforms. No distance dequantization or upload happens here; the global cache
+// does that once per VolumeKey. Fills Build.SDF*Buf and NumValidSDFCol.
 static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step, FRopeStepBuild& Build,
 	const TMap<uint64, int32>& GlobalKeyToIndex, FRDGBufferRef GlobalDistRDG, FRDGBufferRef GlobalVolRDG)
 {
@@ -1475,8 +1479,9 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(float), NumNodes), TEXT("Rope.LambdaDist"));
 	PassParams->OutLambdaDist = GraphBuilder.CreateUAV(LambdaRDG);
 
-	// GDF in-solver(Phase 3): bUseWorldGDF rope + GDF permutation selection when GDF is valid + View/GDF binding.
-	// Otherwise lean (old behavior). As it is an individual AddPass per rope, the permutation can be freely selected on a per-rope basis.
+	// GDF inside the solver: for a rope with bUseWorldGDF and a valid GDF, select the GDF permutation and bind
+	// the view and GDF parameters; otherwise stay lean, as before. Each rope gets its own AddPass, so the
+	// permutation can be chosen per rope.
 	const bool bUseGDFPerm = (View != nullptr) && Resident.bUseWorldGDF && (bGDFSolverValid != 0);
 	if (bUseGDFPerm)
 	{
@@ -1813,11 +1818,13 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		}
 	}
 
-	// --- 2e: External (SRV) access confirmation batch. render raw tube path (M5b/B2) *outside* this graph PosBuf to SRV
-	// Read directly — After the last pass (solve/copy/detect), the SRV transition (barrier) is confirmed every frame. Without this, the graph
-	// The termination status goes back and forth between UAVCompute/CopySrc depending on the presence or absence of readback copy, and the tube is in a frame without a barrier.
-	// The wrap node trembles after reading the previous/incomplete location (CL167 regression). GDF collision occurs in solve CS (substep constraint)
-	// is processed, there is no separate post-solve write, and for ropes without detection, the solve pass is the last write of PosBuf.
+	// --- 2e: batch the external (SRV) access transitions. The raw render tube path reads PosBuf as an SRV
+	// *outside* this graph, so after the last pass — solve, copy or detect — the SRV transition (barrier) is
+	// pinned every frame. Without it the graph's end state alternates between UAVCompute and CopySrc depending
+	// on whether a readback copy ran, and on a frame with no barrier the tube reads a previous or partial
+	// position and the wrap nodes visibly shake.
+	// GDF collision is resolved inside the solve CS as a substep constraint, so there is no separate post-solve
+	// write, and for a rope without detection the solve pass is the last thing that writes PosBuf.
 	for (FRopePreparedStep& Entry : Prepared)
 	{
 		GraphBuilder.UseExternalAccessMode(Entry.Build.PosRDG, ERHIAccess::SRVMask);

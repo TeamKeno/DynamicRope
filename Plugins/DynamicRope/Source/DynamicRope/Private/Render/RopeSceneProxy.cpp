@@ -12,9 +12,9 @@
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveUniformShaderParametersBuilder.h"
 #include "Engine/Engine.h"
-// RopeGPU::BuildTube_RenderThread / BuildTubeFromResident_RenderThread — M5b
+// RopeGPU::BuildTube_RenderThread / BuildTubeFromResident_RenderThread
 #include "RopeTubeBuilder.h"
-// FRopeGPUSolver::GetResidentPositionSRV_RenderThread — M5b B2-lite
+// FRopeGPUSolver::GetResidentPositionSRV_RenderThread — the resident centerline the GPU tube reads directly
 #include "RopeGPUSolver.h"
 #include "Subsystem/RopeSimSubsystem.h"
 // FRHITransitionInfo

@@ -386,8 +386,7 @@ struct FRopeWrappingState
 
 /**
  * The post-wrap data model, expressed as binding semantics. Created at the physics-to-logic handoff.
- * TODO: once the surface anchor rework reaches Wrapped, remove the legacy Latched path and use
- * Anchors alone.
+ * Two binding forms coexist: the Latched nodes and the surface Anchors that supersede them.
  */
 struct FRopeWrapState
 {

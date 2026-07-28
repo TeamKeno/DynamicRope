@@ -8,36 +8,38 @@ FRopeContact FCapsuleCollider::Query(const FVector& WorldPos, float NodeRadius) 
 {
 	FRopeContact Contact;
 
-	// The nearest point and distance from the node center to the capsule segment (A-B).
+	// Nearest point on the capsule segment (A-B) to the node centre, and the distance to it.
 	const float   TSeg = RopeMath::ClosestSegmentParam(WorldPos, A, B);
 	const FVector Closest = FMath::Lerp(A, B, TSeg);
-	// ToNode = segment surface -> node (outward direction). If it is less than MinDist, check for overlap.
+	// ToNode points from the segment surface out to the node. Below MinDist the two overlap.
 	const FVector ToNode = WorldPos - Closest;
 	const float   Dist = ToNode.Size();
 	const float   MinDist = Radius + NodeRadius;
 	if (Dist >= MinDist)
 	{
-		// bHit = false: No overlap -> The remaining fields are meaningless (ignored by the caller).
+	// bHit = false: no overlap, so every other field is meaningless and the caller ignores it.
 		return Contact;
 	}
 
 	Contact.bHit = true;
-	// Normal: Unit length, points to the node side (outside) on the surface = push-out direction.
-	// sign is load-bearing (see FRopeContact contract comments): if flipped, the solver
-	// Suck the rope into the capsule. Even when replacing with SDF, ∇ϕ (always points outward)
-	// Written as is, it conforms to this convention — but pinned the bake as outside-positive.
-	// Since direction is not defined in degenerate (node is on segment axis = Dist≈0), arbitrary
-	// Fallback to the stability vector (+Z). SDF also requires the same fallback in the ∇ϕ≈0 section.
+	// Normal: unit length, pointing from the surface out toward the node — the push-out direction.
+	// The sign is load-bearing (see the FRopeContact contract): flipped, the solver sucks the rope into the
+	// capsule. An SDF collider satisfies the same convention by using ∇ϕ directly, which always points
+	// outward, and its bake pins outside as positive.
+	// In the degenerate case, where the node sits on the segment axis and Dist ≈ 0, no direction is defined,
+	// so it falls back to a fixed vector (+Z). An SDF needs the same fallback where ∇ϕ ≈ 0.
 	Contact.Normal = (Dist > KINDA_SMALL_NUMBER) ? (ToNode / Dist) : FVector::UpVector;
-	// Penetration = Normal direction overlap depth (positive number). SurfacePoint is the closest point on the surface (auxiliary/debug use).
+	// Penetration is the overlap depth along Normal, always positive. SurfacePoint is the nearest point on the surface, kept for diagnostics.
 	Contact.Penetration = MinDist - Dist;
 	Contact.SurfacePoint = Closest + Contact.Normal * Radius;
-	// bone attribution (input to select dominant bone of contact aggregation) and the mesh that owns the bone (wrap follow between actors).
+	// Bone attribution, which is what picks the dominant bone when contacts are aggregated, and the mesh owning that bone, which is what lets a wrap follow across actors.
 	Contact.Bone = Bone;
 	Contact.SourceMesh = SourceMesh;
 
-	// surface velocity (cm/s): (current - previous) / dt of contact material point (segment parameter TSeg). solver is relative tangent
-	// Used to drag and sweep a rope by friction (same contract as SDF collider). 0 if InvDeltaTime==0(static/first frame).
+	// Surface velocity (cm/s): (current − previous) / dt of the contact material point, identified by the
+	// segment parameter TSeg. The solver uses it for relative tangential friction, so a moving capsule drags
+	// and sweeps the rope — the same contract the SDF collider follows. 0 when InvDeltaTime is 0, meaning a
+	// static capsule or the first frame.
 	if (InvDeltaTime > 0.0f)
 	{
 		const FVector PrevClosest = FMath::Lerp(PrevA, PrevB, TSeg);
@@ -48,32 +50,35 @@ FRopeContact FCapsuleCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 FRopeContact FCapsuleCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 {
-	// stationary capsule (including first frame) is the same as the default (current pose static sweep) — early delegation.
+	// A still capsule, the first frame included, behaves exactly as the default static sweep against the current pose, so delegate early.
 	if (InvDeltaTime <= 0.0f || (PrevA.Equals(A) && PrevB.Equals(B)))
 	{
 		return IRopeCollider::QuerySwept(Q, OutHitWorldPos);
 	}
 
 	FRopeContact Contact;
-	// Default value (prevents undefined use when uncontacted).
+	// Defaults, so nothing is left undefined when there is no contact.
 	OutHitWorldPos = Q.WorldEnd;
 
-	// Capsule endpoint of this substep (interpolation of frame motion prev->curr into SubAlpha). Capsule does not have rigid transform.
-	// (Two joint points move separately) Interpolate the end point itself instead of SubPose — Corresponds to SDF QuerySwept's local frame trick.
+	// This substep's capsule endpoints, interpolating the frame motion prev → curr by SubAlpha. A capsule has
+	// no rigid transform — its two joints move independently — so the endpoints themselves are interpolated
+	// rather than a sub-pose, which is the counterpart to the SDF QuerySwept's local-frame trick.
 	const FVector CapAS = FMath::Lerp(PrevA, A, Q.SubAlpha0);
 	const FVector CapBS = FMath::Lerp(PrevB, B, Q.SubAlpha0);
 	const FVector CapAE = FMath::Lerp(PrevA, A, Q.SubAlpha1);
 	const FVector CapBE = FMath::Lerp(PrevB, B, Q.SubAlpha1);
 
-	// Number of samples reflecting relative motion: node movement + maximum of capsule end point movement (safe to overestimate — capped by MaxSamples).
+	// Sample count from the relative motion: the larger of the node's travel and the capsule endpoints' travel. Overestimating is safe, and MaxSamples caps it.
 	const double RelLen = FVector::Dist(Q.WorldStart, Q.WorldEnd)
 		+ FMath::Max(FVector::Dist(CapAS, CapAE), FVector::Dist(CapBS, CapBE));
 	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
 	const float  MinDist = Radius + Q.NodeRadius;
 
-	// Separation Guard (RopeCollision::IsSweptSeparating): Omit re-pin if starting inside the contact skin and separating outside the surface.
-	// The starting material point (TSeg0) is carried over to the start/end pose to check the movement of the contact point, and the end pose segment is checked for end contact.
+	// Separation guard (RopeCollision::IsSweptSeparating): skip the re-pin when the node starts inside the
+	// contact skin and is leaving the surface. The starting material point (TSeg0) is carried through both the
+	// start and end poses to measure how the contact point moved, and the end contact is tested against the
+	// end pose's segment.
 	{
 		const float   TSeg0 = RopeMath::ClosestSegmentParam(Q.WorldStart, CapAS, CapBS);
 		const FVector Closest0 = FMath::Lerp(CapAS, CapBS, TSeg0);
@@ -105,8 +110,9 @@ FRopeContact FCapsuleCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 			continue;
 		}
 
-		// First contact. Carry over the contact material point (TSeg) to the end pose of the substep and move the node along with the surface by the remaining amount of motion.
-		// (correspondence to SDF reconverting the local contact point to the end pose). The normal is a relative direction based on the material point, so it is valid as is.
+		// First contact. Carry the contact material point (TSeg) into the substep's end pose and move the node
+		// with the surface by the motion that remains — the counterpart to the SDF re-projecting its local
+		// contact point into the end pose. The normal is relative to that material point, so it is already correct.
 		Contact.bHit = true;
 		Contact.Normal = (Dist > KINDA_SMALL_NUMBER) ? (ToNode / Dist) : FVector::UpVector;
 		Contact.Penetration = MinDist - Dist;
@@ -116,7 +122,7 @@ FRopeContact FCapsuleCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		Contact.Bone = Bone;
 		Contact.SourceMesh = SourceMesh;
 
-		// surface velocity: Total frame (prev->curr) displacement of material point / dt (same contract as Query).
+		// Surface velocity: the material point's whole-frame (prev → curr) displacement over dt, the same contract as Query.
 		const FVector WCurr = FMath::Lerp(A, B, TSeg);
 		const FVector WPrev = FMath::Lerp(PrevA, PrevB, TSeg);
 		Contact.SurfaceVelocity = (WCurr - WPrev) * InvDeltaTime;
@@ -159,7 +165,7 @@ FBox FCapsuleCollider::GetWorldBounds() const
 
 bool FCapsuleCollider::GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRadius) const
 {
-	// Pass world space segment + radius as is. The GPU solver performs the same segment nearest push-out as the CPU Query.
+	// Pass the world-space segment and radius straight through. The GPU solver runs the same nearest-point-on-segment push-out the CPU Query does.
 	OutA = A;
 	OutB = B;
 	OutRadius = Radius;
@@ -168,7 +174,7 @@ bool FCapsuleCollider::GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRad
 
 bool FCapsuleCollider::GetGPUCapsuleMotion(FVector& OutPrevA, FVector& OutPrevB, float& OutInvDeltaTime) const
 {
-	// previous frame endpoint + InvDt. If InvDeltaTime=0(static/first frame), false so that the caller falls back to prev=current.
+	// Previous endpoints plus InvDt. With InvDeltaTime 0 — static, or the first frame — return false so the caller falls back to prev = current.
 	if (InvDeltaTime <= 0.0f)
 	{
 		return false;

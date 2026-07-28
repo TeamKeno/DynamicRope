@@ -170,9 +170,9 @@ private:
 	// It is decided once when the proxy is created, since the ring count is fixed for its lifetime.
 	bool bUseGpuTube = false;
 	FRopeGpuPositionBuffer GpuPositionBuffer;
-	// B2-full
+	// Tangent basis, generated alongside the positions by the GPU tube
 	FRopeGpuTangentBuffer  GpuTangentBuffer;
-	// B2-full
+	// UVs, generated alongside the positions by the GPU tube
 	FRopeGpuTexCoordBuffer GpuTexCoordBuffer;
 	FRopeCenterlineBuffer  CenterlineBuffer;
 	// Fills the index topology and the constant white colour once on the GPU path.
