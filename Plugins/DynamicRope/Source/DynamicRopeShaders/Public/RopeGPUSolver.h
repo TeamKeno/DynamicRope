@@ -1,18 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// GPU (compute) implementation of the XPBD rope solver — M5: Centerline GPU resident.
-// The position buffer is persisted between frames and advanced in-place on the GPU every frame → Sequential dependency is maintained within the GPU.
-// is satisfied and there is no round-trip stall/slomo (resolving the limitation of M4 asynchronous readback). All readbacks (for render/collision) are
-// Processed in the render thread (every frame step command locks and consumes the previous readback and then rearranges it) → No GT stall.
-// Same formula as CPU FRopeXPBDSolver, but constraints are solved with red-black/stride-3 coloring (parallel safety).
-// This module (DynamicRopeShaders) does not depend on the DynamicRope runtime type → step is a self-contained POD.
-// The caller (runtime subsystem) fills in the steps from FRopeSimState/Config.
+// GPU (compute) implementation of the XPBD rope solver, with the centerline resident on the GPU.
+// The position buffer persists between frames and is advanced in place on the GPU each frame, so the
+// sequential dependency between substeps is satisfied entirely on the GPU and there is no round-trip stall
+// or slow-motion. Every readback — for render and for collision — happens on the render thread, where each
+// frame's step command locks and consumes the previous readback before re-arming it, so the game thread
+// never stalls.
+// The formulation matches the CPU FRopeXPBDSolver, except that constraints are solved with red-black and
+// stride-3 colouring for parallel safety.
+// This module (DynamicRopeShaders) does not depend on the DynamicRope runtime types, so a step is
+// self-contained POD; the runtime subsystem fills it from FRopeSimState and the config.
 
 #pragma once
 
 #include "CoreMinimal.h"
 
-/** Analytical capsule for GPU collision (M2). world space segment(A-B) + radius. The caller extracts and fills the collider.*/
+/** Analytic capsule for GPU collision: a world-space segment (A-B) plus a radius, extracted by the caller from the collider. */
 struct FRopeGPUCapsule
 {
 	FVector A = FVector::ZeroVector;
@@ -20,8 +23,9 @@ struct FRopeGPUCapsule
 	float   Radius = 0.0f;
 
 	/**
-	 * previous frame endpoint + 1/framedt (surface velocity drag/substep for relative motion CCD — PrevBoneToWorld counterpart in SDF).
-	 * If InvDeltaTime=0 (default), static — Packing falls back to prev=current, so even if not filled, it is the same as the existing operation.
+	 * Previous endpoints plus 1 / frame dt, used for surface-velocity drag and substep relative-motion CCD —
+	 * the counterpart to the SDF's PrevBoneToWorld. InvDeltaTime 0, the default, means static: packing falls
+	 * back to prev = current, so leaving these unset behaves exactly as before.
 	 */
 	FVector PrevA = FVector::ZeroVector;
 	FVector PrevB = FVector::ZeroVector;
@@ -29,23 +33,25 @@ struct FRopeGPUCapsule
 };
 
 /**
- * Analytical box (OBB) for GPU collision. Static world geometry (static body simple collision) is the default, and moving
- * Body/wrapable box participates in surface velocity·CCD with the frame motion below (PrevCenter/PrevRot + InvDeltaTime).
- * Reason for the existence of analytical queries that give exact diagonal normals at corners/edges (replaces GDF voxel rounding penetration).
- * caller extracts and fills with IRopeCollider::GetGPUBox(+GetGPUBoxMotion).
+ * Analytic box (OBB) for GPU collision. Static world geometry — a static body's simple collision — is the
+ * common case; a moving or wrappable box takes part in surface velocity and CCD through the frame motion
+ * below (PrevCenter, PrevRot and InvDeltaTime).
+ * It exists because an analytic query gives exact diagonal normals at corners and edges, where GDF voxel
+ * rounding lets the rope sink in. The caller extracts it with IRopeCollider::GetGPUBox and GetGPUBoxMotion.
  */
 struct FRopeGPUBox
 {
-	/** Center of world space box.*/
+	/** World-space box centre. */
 	FVector Center = FVector::ZeroVector;
-	/** world space box rotation.*/
+	/** World-space box rotation. */
 	FQuat   Rot = FQuat::Identity;
-	/** local half-width (after scale reflection).*/
+	/** Local half-extents, with scale already applied. */
 	FVector HalfExtents = FVector::ZeroVector;
 
 	/**
-	 * previous frame center/rot + 1/framedt (moving body surface velocity/substep CCD). If InvDeltaTime=0, static —
-	 * The packing is filled with prev=current, so even if it is not filled, it is the same as the existing operation (corresponding to Prev* of the capsule).
+	 * Previous centre and rotation plus 1 / frame dt, for a moving body's surface velocity and substep CCD.
+	 * InvDeltaTime 0 means static: packing fills prev = current, so leaving these unset behaves as before.
+	 * The counterpart to the capsule's Prev* fields.
 	 */
 	FVector PrevCenter = FVector::ZeroVector;
 	FQuat   PrevRot = FQuat::Identity;
@@ -53,48 +59,52 @@ struct FRopeGPUBox
 };
 
 /**
- * Analytical convex (plane set) for GPU collision. static/dynamic world geometry (convex simple collision + shear box).
- * The plane is stored in Step's ConvexPlanes flat pool [PlaneOffset, PlaneOffset+PlaneCount) (body-local, unit
- * Normal·Outside, PlaneDot(p)=dot(N,p)-W, rigid body not applied). world = local ∘ rigid body(Rot,Trans). LocalBounds is local
- * AABB (vaginal curl). The moving body is processed with surface velocity/CCD using prev rigid body + InvDeltaTime. The caller is extracted with GetGPUConvex.
+ * Analytic convex (plane set) for GPU collision, covering static and dynamic world geometry — convex simple
+ * collision and sheared boxes.
+ * The planes live in the step's flat ConvexPlanes pool over [PlaneOffset, PlaneOffset + PlaneCount): they are
+ * body-local, with unit outward normals and PlaneDot(p) = dot(N, p) - W, before the rigid transform. A world
+ * plane is the local plane composed with the rigid transform (Rot, Trans). LocalBounds is the local AABB, used
+ * to cull. A moving body gets surface velocity and CCD from its prev transform and InvDeltaTime. The caller
+ * extracts all of it with GetGPUConvex.
  */
 struct FRopeGPUConvex
 {
-	/** Starting index within the ConvexPlanes pool.*/
+	/** Start index into the ConvexPlanes pool. */
 	int32   PlaneOffset = 0;
-	/** Number of planes.*/
+	/** Number of planes. */
 	int32   PlaneCount = 0;
-	/** Body-local AABB center.*/
+	/** Body-local AABB centre. */
 	FVector LocalBoundsCenter = FVector::ZeroVector;
-	/** Body-local AABB half size.*/
+	/** Body-local AABB half-extents. */
 	FVector LocalBoundsExtent = FVector::ZeroVector;
-	/** rigid body rotation (curr).*/
+	/** Current rigid rotation. */
 	FQuat   Rot = FQuat::Identity;
-	/** rigid body translation (curr).*/
+	/** Current rigid translation. */
 	FVector Trans = FVector::ZeroVector;
-	/** rigid body rotation (prev).*/
+	/** Previous rigid rotation. */
 	FQuat   PrevRot = FQuat::Identity;
-	/** rigid body translation (prev).*/
+	/** Previous rigid translation. */
 	FVector PrevTrans = FVector::ZeroVector;
-	/** 1/framedt (static if 0).*/
+	/** 1 / frame dt. 0 means static. */
 	float   InvDeltaTime = 0.0f;
 };
 
 /**
- * per-bone SDF collider for GPU collision (M3). bone local distance grid + bone → world transform.
- * Distances is a pointer owned by the caller (asset) (valid during Step calls — copied from GT before moving to the render command).
- * Distances are uint8 quantization codes — during GT flattening, they are dequantized into asymmetric bands and uploaded to the float buffer.
- * If the VolumeKey is the same, GPU upload is shared (dedup) within the same step.
+ * Per-bone SDF collider for GPU collision: a bone-local distance grid plus the bone-to-world transform.
+ * Distances points into storage the caller (the asset) owns and is valid for the duration of the Step call —
+ * it is copied on the game thread before the render command is issued.
+ * The bytes are uint8 quantization codes; the game-thread flattening dequantizes them across the asymmetric
+ * bands and uploads floats. Colliders sharing a VolumeKey share one GPU upload within a step.
  */
 struct FRopeGPUSDFCollider
 {
-	/** Blob of code bytes (BytesPerCode per voxel, row-first, little-endian). Outside +.*/
+	/** Blob of code bytes, BytesPerCode per voxel, row-major, little-endian. Outside is positive. */
 	const uint8* Distances = nullptr;
-	/** Bytes per voxel (1=uint8 max255, 2=uint16 max65535).*/
+	/** Bytes per voxel (1 = uint8, max 255; 2 = uint16, max 65535). */
 	int32        BytesPerCode = 1;
-	/** Inner dequant band (cm). Code 0 → -NarrowBandInner.*/
+	/** Inner dequantization band (cm). Code 0 maps to -NarrowBandInner. */
 	float        NarrowBandInner = 0.0f;
-	/** Outer dequant band (cm). Code max → +NarrowBandOuter.*/
+	/** Outer dequantization band (cm). The maximum code maps to +NarrowBandOuter. */
 	float        NarrowBandOuter = 0.0f;
 	int32        ResX = 0;
 	int32        ResY = 0;
@@ -102,38 +112,42 @@ struct FRopeGPUSDFCollider
 	FVector      LocalMin = FVector::ZeroVector;
 	FVector      LocalSize = FVector::ZeroVector;
 	FTransform   BoneToWorld = FTransform::Identity;
-	/** previous frame bone transform (CCD/surfacevelocity drag).*/
+	/** Previous frame's bone transform, for CCD and surface-velocity drag. */
 	FTransform   PrevBoneToWorld = FTransform::Identity;
-	/** 1/framedt (for surface velocity). If 0, static.*/
+	/** 1 / frame dt, for surface velocity. 0 means static. */
 	float        InvDeltaTime = 0.0f;
 	uint64       VolumeKey = 0;
 };
 
 /**
- * per-node bit (G0) in FRopeGPUResidentStep::OverrideFlags. 1:1 with the override stage of RopeXPBD.usf.
- * "target calculation is GT, application is GPU" — per-node calculated by logic phase (whip/Wrapping/hold/Releasing)
- * This is a passage that records target/mass directly into the resident buffer without reseeding. Application order: Position → Prev →
- * PrevFromPosition → InvMass (PrevFromPosition copies Pos *after* applying Position).
+ * Per-node bits in FRopeGPUResidentStep::OverrideFlags, 1:1 with the override stage of RopeXPBD.usf.
+ * "Targets are computed on the game thread, applied on the GPU": this is how a logic phase (whip, wrapping,
+ * hold, releasing) writes per-node targets and masses straight into the resident buffer without a reseed.
+ * Application order is Position → Prev → PrevFromPosition → InvMass, where PrevFromPosition copies Pos
+ * *after* Position has been applied.
  */
 enum class ERopeGPUOverride : uint8
 {
 	None             = 0,
 	// Pos[i]  = OverridePositions[i]
 	Position         = 1 << 0,
-	// Prev[i] = OverridePrevPositions[i] (Difference from Pos becomes Verlet velocity — whip)
+	// Prev[i] = OverridePrevPositions[i] — the gap from Pos becomes the Verlet velocity, as the whip uses
 	Prev             = 1 << 1,
-	// Prev[i] = Pos[i] — velocity 0 pinned(Wrapping/hold). Based on current Pos on GPU side (not CPU mirror).
+	// Prev[i] = Pos[i] — pinned with zero velocity (wrapping, hold). Reads the GPU's current Pos, not the CPU mirror
 	PrevFromPosition = 1 << 2,
-	// InvMass[i] = OverrideInvMass[i] — persist (mass mask/restore) to resident InvMass buffer
+	// InvMass[i] = OverrideInvMass[i] — persisted into the resident InvMass buffer (mass mask and restore)
 	InvMass          = 1 << 3,
 };
 ENUM_CLASS_FLAGS(ERopeGPUOverride)
 
 /**
- * One frame step input from one resident rope. self-contained (all values/TArray) — Filled from GT and MoveTemp to render thread.
- * RopeId is a stable key that identifies the persistent buffer (e.g. component UniqueID). Generation is a CPU that throws/resizes the Sim.
- * Increases when changed to out-of-band → RT detects generation change/node number change/first and reseeds the GPU buffer.
- * SeedPositions/PrevPositions/InvMass are provided every frame, but RT is actually uploaded only when reseed is needed (ignored in normal times).
+ * One frame's step input for one resident rope. Self-contained — values and TArrays only — filled on the game
+ * thread and moved to the render thread.
+ * RopeId is the stable key identifying the persistent buffer, such as the component's UniqueID. Generation
+ * rises whenever the CPU changes the sim out of band, by throwing or resizing, and the render thread reseeds
+ * the GPU buffer when it sees a generation change, a node count change, or the rope for the first time.
+ * SeedPositions, SeedPrevPositions and InvMass are supplied every frame but only uploaded on a reseed;
+ * otherwise they are ignored.
  */
 struct FRopeGPUResidentStep
 {
@@ -141,198 +155,216 @@ struct FRopeGPUResidentStep
 	uint32 Generation = 0;
 	int32  NumNodes = 0;
 
-	/** Seed data (provided every frame; RT is uploaded to GPU only when reseeding).*/
+	/** Seed data, supplied every frame but uploaded only on a reseed. */
 	TArray<FVector> SeedPositions;
 	TArray<FVector> SeedPrevPositions;
 	TArray<float>   InvMass;
 
-	/** sim/config scalar.*/
+	/** Sim and config scalars. */
 	float   SegmentLength = 0.0f;
 	bool    bStartPinned = false;
 	FVector StartPinPrev = FVector::ZeroVector;
 	FVector StartPinTarget = FVector::ZeroVector;
 	float   StretchCompliance = 0.0f;
-	/** Strain limiting: Hard projection of each segment after substep solve with ≤ this scale × SegmentLength (1.5=default,
-	 *  <1=disabled). Prevents anchor-adjacent overstretching/jitter caused by lack of iteration when a long chain hangs on an anchor pin.*/
+	/** Strain limiting: after each substep solve, hard-project every segment to at most this multiple of
+	 *  SegmentLength (1.5 default; below 1 disables it). It is what stops the segments beside an anchor pin
+	 *  over-stretching and jittering when a long chain hangs off one and the iterations cannot reach them. */
 	float   MaxStretchRatio = 1.5f;
 	float   BendCompliance = 0.0f;
-	/** Angle-allowed bending: If straightness ≤ this value, straightening force is 0 (relaxes corner/wrap boundary angles).*/
+	/** Bend tolerance: at or below this straightness the straightening force is 0, which relaxes the angle at a corner or a wrap boundary. */
 	float   BendReleaseRatio = 0.70f;
-	/** straightness ≥ If this value, the straightening force is 100% (gentle bending straightens as before).*/
+	/** At or above this straightness the straightening force is full, so a gentle bend straightens as before. */
 	float   BendFullRatio = 0.92f;
 	float   Damping = 0.0f;
 	int32   Iterations = 1;
-	/** Number of collision resolution passes per substep (cap in Iterations). 1=End of substep once (existing).*/
+	/** Collision resolve passes per substep, capped at Iterations. 1 resolves once at the end of the substep. */
 	int32   CollisionPasses = 1;
 	FVector Gravity = FVector::ZeroVector;
 
 	/**
-	 * collision(M2/M3). List of colliders to apply to this rope (value copy so valid for the life of the step).
-	 * If false, the solve kernel ignores the collider/GDF, but the detect kernel can use the list below as is.
+	 * Colliders to apply to this rope, copied by value so they stay valid for the life of the step.
+	 * With bSolveCollisions false the solve kernel ignores the colliders and the GDF, but the detect kernel
+	 * still uses the lists below unchanged.
 	 */
 	bool  bSolveCollisions = true;
-	/** rope node thickness (= FRopeSolverConfig::CollisionRadius).*/
+	/** Rope node thickness (= FRopeSolverConfig::CollisionRadius). */
 	float CollisionRadius = 0.0f;
-	/** Tangential damping [0..1](Coulomb μ).*/
+	/** Tangential damping [0..1], the Coulomb μ. */
 	float Friction = 0.0f;
-	/** Free end friction multiplier (pinned point=1, end=this value). Be sure to leave the end node well.*/
+	/** Friction multiplier toward the free end (1 at the pinned end), which lets the end node slide rather than grip. */
 	float TipFrictionScale = 1.0f;
-	/** Swept sample spacing (cm).*/
+	/** Swept sample spacing (cm). */
 	float SweepStep = 2.0f;
-	/** sample cap per segment.*/
+	/** Cap on samples per segment. */
 	int32 MaxSweepSamples = 16;
-	/** Phase 2c: Push static world with engine GDF (only valid for scene graph dispatch).*/
+	/** Push off static world geometry with the engine's Global Distance Field. Only valid on the scene-graph dispatch path. */
 	bool  bUseWorldGDF = false;
 	TArray<FRopeGPUCapsule>     Capsules;
 	TArray<FRopeGPUSDFCollider> SDFColliders;
-	/** Analytical box (OBB). It is used for solving, and the front NumDetectBoxes also participate in contact detection.*/
+	/** Analytic boxes (OBB). All of them are solved against; the first NumDetectBoxes also take part in contact detection. */
 	TArray<FRopeGPUBox>         Boxes;
-	/** Analytical convex (plane set). solve only.*/
+	/** Analytic convexes (plane sets). Solve only. */
 	TArray<FRopeGPUConvex>      Convexes;
-	/** Body-local flat pool of the entire convex ((nx,ny,nz,w), outer direction normal).*/
+	/** Flat body-local pool of every convex's planes, as (nx, ny, nz, w) with outward normals. */
 	TArray<FVector4>            ConvexPlanes;
 
 	/**
-	 * Number of capsules that the contact detection(detect) kernel will see. Only [0, NumDetectCapsules) in front of Capsules participates in detection —
-	 * caller(PackStepColliders) packs the non-static capsule at the front and the static(world) capsule at the back in 2-pass.
-	 * detection leaves only one deepest contact per node, so the wall (static) contact covers the bone (skeletal) contact, so wrap capture is not possible.
-	 * Prevents silent failure. -1 (default) = Participate fully (compatible with existing behavior/tests).
+	 * How many capsules the contact detection kernel sees: only [0, NumDetectCapsules) at the front of
+	 * Capsules take part. The caller (PackStepColliders) packs non-static capsules first and static world
+	 * capsules after, in two passes, because detection keeps only the single deepest contact per node — a wall
+	 * contact masking a bone contact would silently cost that node its wrap capture.
+	 * -1, the default, lets every capsule take part, which is what the existing behaviour and tests expect.
 	 */
 	int32 NumDetectCapsules = -1;
 
 	/**
-	 * Number of wrapable boxes (OBB) seen by the detection kernel. Only [0, NumDetectBoxes) in front of the Boxes participate in detection (same as capsule)
-	 * 2-pass packing: in front of the wrapable box, behind the static box). 0 (default) = No participation in detection (static box only — legacy behavior).
+	 * How many boxes the detection kernel sees: only [0, NumDetectBoxes) at the front of Boxes take part, under
+	 * the same two-pass packing as capsules — wrappable boxes first, static ones after. 0, the default, keeps
+	 * boxes out of detection entirely, which is the static-box-only legacy behaviour.
 	 */
 	int32 NumDetectBoxes = 0;
 
 	/**
-	 * Number of convexes that can be Wrapped by the detection kernel. Only the front of the convexes [0, NumDetectConvexes) participates in detection.
-	 * (same contract as box — static convex is appended after and automatically excluded).
+	 * How many convexes the detection kernel sees: only [0, NumDetectConvexes) at the front of Convexes take
+	 * part, under the same contract as boxes — static convexes are appended after and so excluded automatically.
 	 */
 	int32 NumDetectConvexes = 0;
 
-	/** detection sweep sample interval (cm) and sample number cap — CPU FParams::ContactSweepStep/ContactMaxSweepSamples mirror.*/
+	/** Detection sweep spacing (cm) and sample cap — mirrors the CPU FParams::ContactSweepStep and ContactMaxSweepSamples. */
 	float ContactSweepStep = 2.0f;
 	int32 ContactMaxSweepSamples = 16;
 
 	/**
-	 * Signature (computed by the caller) of the collider attribution set used by this dispatch. It comes back as is in the detection readback,
-	 * This is the basis for checking whether ColliderIndex can be interpreted at the time of consumption (FRopeResidentContacts::AttribSig).
+	 * Signature of the collider attribution set this dispatch used, computed by the caller. It comes back
+	 * unchanged in the detection readback, and comparing it is how the consumer knows a returned ColliderIndex
+	 * can still be resolved (FRopeResidentContacts::AttribSig).
 	 */
 	uint32 AttribSig = 0;
 
-	/** This frame substep schedule (calculated and delivered by caller to RopeSolverSubsteps). If NumSub<=0, keep without integration.*/
+	/** This frame's substep schedule, computed by the caller through RopeSolverSubsteps. NumSub <= 0 holds position without integrating. */
 	int32 NumSub = 0;
 	float FixedDt = 0.0f;
 
 	/**
-	 * --- contact detection (G3): After solving in Flight, sweep PosBuf/PrevBuf to detect the deepest contact per node.
-	 * bDetectContacts runs the detection kernel after solve dispatch and reads back the results (GetLatestContacts).
-	 * ContactRadius is the detection query radius (= FRopeWrapConfig::ContactQueryRadius; separate from the solver's CollisionRadius).
+	 * --- Contact detection. After the solve, sweep PosBuf against PrevBuf to find the deepest contact per node.
+	 * bDetectContacts runs the detection kernel after the solve dispatch and reads the results back
+	 * (GetLatestContacts). ContactRadius is the detection query radius (= FRopeWrapConfig::ContactQueryRadius),
+	 * separate from the solver's CollisionRadius.
 	 */
 	bool  bDetectContacts = false;
 	float ContactRadius = 0.0f;
 
 	/**
-	 * --- Predicted contact (G3b): The path that extrapolates the next location of the node is also swept to detect the contact that will soon be reached. 2 slots per node
-	 * (actual + predictive) output. If PredictionFrames<=0, no predictions. In the whip active frame, the guide node
-	 * Extrapolates to the current/previous/next target (PredictiveGuided), and otherwise extrapolates to frame displacement (PredictiveFree).
-	 * WhipGuided* is filled with NumNodes length only when whip is active (otherwise it is empty → only Free prediction).
+	 * --- Predicted contact. The path extrapolating each node's next position is swept too, so a contact about
+	 * to happen is detected early. That gives two slots per node, actual and predicted. PredictionFrames <= 0
+	 * disables prediction. On a frame where the whip is active, a guided node extrapolates through its
+	 * previous, current and next targets (PredictiveGuided); every other node extrapolates its frame
+	 * displacement (PredictiveFree).
+	 * The WhipGuided* arrays are filled to NumNodes only while the whip is active, and are otherwise empty,
+	 * leaving only the free prediction.
 	 */
 	float           PredictionFrames = 0.0f;
 	/**
-	 * substep→frame displacement conversion factor (= DeltaTime / FixedDt). Free node prediction is rope verlet displacement (last
-	 * Used to increase substep delta) to frame displacement — if 1, no conversion (substep unit reduction bug). guide node
-	 * This coefficient is not used because prediction is a frame-level target difference. Same meaning/value as CPU FParams::FrameDeltaTime path.
+	 * Substep-to-frame displacement conversion factor (= DeltaTime / FixedDt). A free node's prediction uses the
+	 * rope's Verlet displacement, which is the last substep's delta, so this converts it to a frame
+	 * displacement; leaving it at 1 shrinks the prediction to substep scale. A guided node's prediction is a
+	 * frame-level target difference and does not use it. Same meaning and value as the CPU
+	 * FParams::FrameDeltaTime path.
 	 */
 	float           ContactFrameToSubstepRatio = 1.0f;
-	/** Whether to guide per-node (1=guided).*/
+	/** Per-node guided flag (1 = guided). */
 	TArray<uint8>   WhipGuidedMask;
 	TArray<FVector> WhipCurrentTargets;
 	TArray<FVector> WhipPrevTargets;
 	TArray<FVector> WhipNextTargets;
 
 	/**
-	 * --- Override(G0): Write the per-node target calculated by the logic phase (GT) directly to the resident buffer (replaces reseeding).
-	 * If empty, no override. When populating, OverrideFlags is set to exactly NumNodes length (ignore all + warn if mismatch),
-	 * The value array needs to be provided as NumNodes length only when there is a node that writes the corresponding bit.
-	 * Even if NumSub=0, if there is an override, it is dispatched and only recorded without integration (e.g. Wrapping/Releasing frame).
-	 * per-node ERopeGPUOverride bit OR
+	 * --- Override. Write per-node targets computed by a logic phase on the game thread straight into the
+	 * resident buffer, in place of a reseed. Empty means no override.
+	 * When filled, OverrideFlags must be exactly NumNodes long — a mismatch is ignored with a warning — and a
+	 * value array only needs to be NumNodes long when some node actually sets the matching bit.
+	 * An override dispatches even with NumSub = 0, recording the values without integrating, which is what a
+	 * Wrapping or Releasing frame does.
+	 * Holds the per-node OR of ERopeGPUOverride bits.
 	 */
 	TArray<uint8>   OverrideFlags;
-	/** Only Position bit node is valid.*/
+	/** Valid only on nodes with the Position bit. */
 	TArray<FVector> OverridePositions;
-	/** Only Prev bit node is valid.*/
+	/** Valid only on nodes with the Prev bit. */
 	TArray<FVector> OverridePrevPositions;
-	/** Only InvMass bit node is valid.*/
+	/** Valid only on nodes with the InvMass bit. */
 	TArray<float>   OverrideInvMass;
 
 	bool HasOverrides() const { return OverrideFlags.Num() > 0; }
 };
 
-/** The latest (slightly delayed) location of the resident rope as retrieved by GT. RT readback fills in and GT copies under lock.*/
+/** The resident rope's latest, slightly delayed, positions as read by the game thread. The render-thread readback fills it and the game thread copies under lock. */
 struct FRopeResidentLatest
 {
 	TArray<FVector> Positions;
 	TArray<FVector> PrevPositions;
 	/**
-	 * Tension per segment (NumNodes - 1, F = max(0,-λ)/h² — Same units/meaning as FRopeSimState::SegmentTension).
-	 * Since it is armed and recovered only in the solve(NumSub>0) frame, it may be updated more rarely than the position (if empty, not recovered).
+	 * Per-segment tension (NumNodes - 1 entries, F = max(0, -λ)/h², the same units and meaning as
+	 * FRopeSimState::SegmentTension). It is only armed and read back on a solve frame (NumSub > 0), so it can
+	 * update less often than the positions; empty means it was never read back.
 	 */
 	TArray<float>   SegmentTension;
-	/** The seed generation that this location corresponds to (preventing stale application of reseed boundaries).*/
+	/** The seed generation these positions belong to, so a reseed boundary cannot apply stale data. */
 	uint32 Generation = 0;
 	int32  NumNodes = 0;
 };
 
 /**
- * 1 GPU contact detection (G3) result. There can be a maximum of one actual contact and one predicted contact per node.
- * Since the GPU cannot create bone/mesh (FName/pointer, GT concept), it emits only the collider index,
- * caller (runtime) index → (bone, mesh)
- * Restore to the attribution table. 1:1 mirror of HLSL FRopeGPUContact (same layout/semantics).
+ * One GPU contact detection result. There can be at most one actual and one predicted contact per node.
+ * The GPU cannot produce a bone or a mesh — an FName and a pointer are game-thread concepts — so it emits a
+ * collider index instead, and the runtime caller turns that index back into a (bone, mesh) pair through the
+ * attribution table. A 1:1 mirror of the HLSL FRopeGPUContact, in layout and in meaning.
  */
 struct FRopeGPUContactResult
 {
 	int32   NodeIndex = INDEX_NONE;
-	/** 0=capsule, 1=SDF, 2=box (step's Capsules/SDFColliders/Boxes array distinction).*/
+	/** 0 = capsule, 1 = SDF, 2 = box, naming which of the step's Capsules, SDFColliders or Boxes arrays applies. */
 	int32   ColliderType = 0;
-	/** Index within the corresponding array (attribution restoration key).*/
+	/** Index within that array — the key for restoring attribution. */
 	int32   ColliderIndex = 0;
 	/** ERopeContactCandidateSource: 1=Actual, 2=PredictiveFree, 4=PredictiveGuided. */
 	uint8   Source = 1;
 	float   Penetration = 0.0f;
-	/** surface contact point (corresponding to FRopeContact.SurfacePoint).*/
+	/** Contact point on the surface (the counterpart to FRopeContact::SurfacePoint). */
 	FVector WorldPoint = FVector::ZeroVector;
-	/** Outer (collider→node) unit normal.*/
+	/** Unit outward normal, from the collider toward the node. */
 	FVector Normal = FVector::UpVector;
-	/** Contact point surface velocity (cm/s; 0 if static).*/
+	/** Surface velocity at the contact point (cm/s; 0 when static). */
 	FVector SurfaceVelocity = FVector::ZeroVector;
 };
 
-/** The latest (slightly delayed) contact detection result of the resident rope retrieved by GT. Copy to GetLatestContacts.*/
+/** The resident rope's latest, slightly delayed, contact detection results as read by the game thread, copied by GetLatestContacts. */
 struct FRopeResidentContacts
 {
-	/** bHit slots only (valid contacts filled by GPU).*/
+	/** Only the slots the GPU filled with a valid contact. */
 	TArray<FRopeGPUContactResult> Contacts;
-	/** Corresponding seed generation (preventing stale application).*/
+	/** The seed generation these results belong to, so stale data cannot be applied. */
 	uint32 Generation = 0;
 	/**
-	 * Collider attribution signature (as FRopeGPUResidentStep::AttribSig) at the **dispatch point** that created this result.
-	 * ColliderIndex points to the current collation order, so the consumer can compare this value directly with his current signature.
-	 * Check whether the index still has the same meaning — “Nframe has not changed recently” is not an approximation, but an exact correspondence.
+	 * The collider attribution signature (FRopeGPUResidentStep::AttribSig) of the **dispatch** that produced
+	 * this result. ColliderIndex refers to that dispatch's ordering, so a consumer compares this against its
+	 * current signature to know whether the index still means the same thing — an exact correspondence, not the
+	 * approximation "nothing has changed in the last N frames".
 	 */
 	uint32 AttribSig = 0;
 };
 
 /**
- * GPU (compute) implementation of the XPBD rope solver. Centerline GPU resident (M5a).
- *  - Step: Advances the persistent GPU buffer for each rope by one frame in-place every frame (no round trip/stall).
- *                Reseed in CPU Sim when necessary (initial/node number/generation change). Readback consume+rearm at RT.
- *  - GetLatest: Copy the latest position filled by RT readback (about 1-2 frame delay) under lock. For render/collision.
- *  - ReleaseRope: Rope Releases persistent buffer/readback (EndPlay, etc.).
- * The instance state (persistent buffer map) is owned by the render thread — GT methods enqueue render commands or read shared results.
- * Owns 1 world star. CPU solver remains ground-truth.
+ * GPU (compute) implementation of the XPBD rope solver, with the centerline resident on the GPU.
+ *  - Step: advances each rope's persistent GPU buffer one frame in place, with no round trip and no stall,
+ *          reseeding from the CPU sim when it must (first sight, node count change, generation change), and
+ *          consuming then re-arming the readback on the render thread.
+ *  - GetLatest: copies, under lock, the latest positions the render-thread readback filled in (one to two
+ *          frames behind). Used for render and collision.
+ *  - ReleaseRope: frees a rope's persistent buffer and readback, on EndPlay and the like.
+ * The instance state — the persistent buffer map — belongs to the render thread; the game-thread methods
+ * either enqueue render commands or read the shared results. One instance per world. The CPU solver remains
+ * the ground truth.
  */
 class FRHIShaderResourceView;
 class FRDGBuilder;
@@ -342,17 +374,19 @@ class FSceneView;
 namespace RopeGPU
 {
 	/**
-	 * Can GPU path (solver·detection·tube) be used in this runtime? In addition to having a renderable RHI
-	 * It is important to note that **the feature level is SM5 or higher** — the kernel is all compiled with SM5 guard (each CS
-	 * ShouldCompilePermutation) Permutation does not exist in ES3.1/mobile. Just looking at the presence or absence of RHI
-	 * Render requests a shader that does not exist on the mobile and goes to assert/crash/no output.
+	 * Can the GPU path — solver, detection and tube — run in this runtime? Beyond needing a renderable RHI,
+	 * **the feature level must be SM5 or above**: every kernel is guarded by SM5 in its
+	 * ShouldCompilePermutation, so no permutation exists on ES3.1 or mobile, and going only by "is there an
+	 * RHI" would have the renderer ask for a shader that does not exist — an assert, a crash, or nothing drawn.
 	 *
-	 * The check standard is global GMaxRHIFeatureLevel (= the maximum value that this device can actually produce). editor's
-	 * The mobile preview only lowers the scene feature level, and the actual RHI remains SM6, so the GPU path is maintained.
-	 * This is the intended behavior (if the preview to simulation path is changed, the reproduction is out of sync).
+	 * The test reads the global GMaxRHIFeatureLevel, the highest this device can actually produce. The editor's
+	 * mobile preview only lowers the *scene* feature level while the real RHI stays SM6, so the GPU path keeps
+	 * running under preview. That is deliberate: changing the simulation path to follow the preview would make
+	 * what you see stop matching what runs.
 	 *
-	 * The caller is both the solver (URopeSimSubsystem) and the tube (FRopeSceneProxy) — if the two gates are misaligned,
-	 * The solver is a GPU, but the tube is in a half-state like a CPU, so the check is set to a single source of truth.
+	 * Both the solver (URopeSimSubsystem) and the tube (FRopeSceneProxy) call it. Were the two gates to
+	 * disagree, the rope could end up solving on the GPU while its tube built on the CPU, so the decision is
+	 * kept to this single source of truth.
 	 */
 	DYNAMICROPESHADERS_API bool IsRuntimeSupported();
 }
@@ -360,82 +394,97 @@ namespace RopeGPU
 class DYNAMICROPESHADERS_API FRopeGPUSolver
 {
 public:
-	/** Maximum number of nodes per rope (= top compute thread group bucket). The caller must only pass steps within this limit.
-	 *  Must match the top of the node bucket array in RopeGPUSolver.cpp (static_assert there is mandatory).*/
+	/** Maximum nodes per rope, which is the largest compute thread group bucket. Callers must only pass steps
+	 *  within this limit. It must match the top of the node bucket array in RopeGPUSolver.cpp, where a
+	 *  static_assert enforces it. */
 	static constexpr int32 MaxNodes = 512;
 
 	FRopeGPUSolver();
 	~FRopeGPUSolver();
 
 	/**
-	 * render thread. Rope's resident PosBuf (StructuredBuffer<float4>, world position) Returns SRV (null if not present).
-	 * M5b B2-lite: Scene proxy reads this SRV directly and creates a tube on the GPU → no position delay (no render readback).
-	 * If the solver has never stepped on this rope (= GPU solver off), null → the caller falls back to the CPU path.
+	 * Render thread. Returns the SRV of the rope's resident PosBuf (StructuredBuffer<float4> of world
+	 * positions), or null if there is none. The scene proxy reads this SRV directly and builds the tube on the
+	 * GPU, so the tube carries no position lag and needs no render readback.
+	 * If the solver has never stepped this rope — the GPU solver is off — it is null and the caller falls back
+	 * to the CPU path.
 	 *
-	 * OutGeneration is the seed generation contained in this buffer. The caller must compare its generation —
-	 * If you look at the number of nodes, the pose of the previous rope is read as is in the frame that was **reseeded** (rethrowing, etc.) with the same number of nodes.
-	 * One frame ghost appears (the buffer is holding the old generation until that frame is dispatched).
+	 * OutGeneration is the seed generation the buffer currently holds, and the caller must compare it against
+	 * its own. Going by node count alone shows a one-frame ghost of the previous rope's pose on a frame that
+	 * **reseeded** with the same node count, such as a re-throw, because the buffer still holds the old
+	 * generation until that frame's dispatch runs.
 	 */
 	FRHIShaderResourceView* GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes,
 		uint32& OutGeneration);
 
-	/** Pass this frame's resident steps to the render thread and advance in-place on the GPU (no blocks). The step is consumed (MoveTemp).
-	    Execute immediately on a dedicated (self) RDG graph — unit test harness path without a scene renderer (EnqueueSteps at runtime).*/
+	/** Hand this frame's resident steps to the render thread and advance them in place on the GPU, without blocking.
+	    The steps are consumed (moved). This executes immediately on its own RDG graph, which is the unit-test
+	    harness path with no scene renderer; at runtime, use EnqueueSteps. */
 	void Step(TArray<FRopeGPUResidentStep>&& Steps);
 
 	/**
-	 * Runtime dispatch path: Just stacks steps in the render thread pending queue (does not dispatch). View expansion this frame
-	 * In PreRenderBasePass, flush the scene renderer graph with DispatchPending_RenderThread (GDF parameter valid timing).
+	 * The runtime dispatch path: stack the steps on the render thread's pending queue without dispatching.
+	 * This frame's view flushes them onto the scene renderer's graph in PreRenderBasePass through
+	 * DispatchPending_RenderThread, which is when the GDF parameters are valid.
 	 */
 	void EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps);
 
-	/** render thread. The accumulated pending steps are Loaded on the received (scene renderer) GraphBuilder (does not execute itself).
-	    GDF is the Global Distance Field parameter of this view (can be null), PreViewTranslation is world→TranslatedWorld offset.*/
+	/** Render thread. Records the accumulated pending steps onto the GraphBuilder it is given, without executing
+	    it. GDF is this view's Global Distance Field parameters and may be null; PreViewTranslation is the
+	    world-to-translated-world offset. */
 	void DispatchPending_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView* View,
 		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 
 	/**
-	 * Recovers the simulation time of the pending step that was not consumed and replaced in seconds per RopeId (cleared immediately upon call, lock).
+	 * Drain, per RopeId, the simulation time (in seconds) belonging to pending steps that were replaced before
+	 * being consumed. Cleared as it is read, under lock.
 	 *
-	 * EnqueueSteps are replacement semantics, so the steps of a frame that did not have a base pass for view expansion are transferred to the next frame step.
-	 * It is covered and disappears. However, the substep time is already made by cutting the accumulator in GT, so if you leave it alone,
-	 * **Simulation time is permanently lost** (It is not a frame being skipped, but time is lost, so it will not be made up later).
-	 * The caller returns this value to the accumulator before the next schedule calculation — the accumulator then returns to
-	 * becomes the single truth of "simulated time", and the existing cap of RopeSolverSubsteps automatically blocks the rush.
+	 * EnqueueSteps has replace semantics, so a frame whose view never reached the base pass has its steps
+	 * overwritten by the next frame's and they vanish. Their substep time was already drawn out of the
+	 * accumulator on the game thread, so left alone that **simulation time is permanently lost** — not a
+	 * skipped frame that catches up later, but time gone for good.
+	 * The caller returns this value to the accumulator before computing the next schedule, which keeps the
+	 * accumulator the single truth of "time simulated" and lets RopeSolverSubsteps' existing cap absorb any
+	 * resulting catch-up.
 	 */
 	void DrainDroppedSimTime(TMap<uint32, float>& Out);
 
-	/** Copy (lock) the latest position filled by RT readback by RopeId. If nothing new arrives, it can be returned with the previous value maintained.*/
+	/** Copy, under lock, the latest positions the render-thread readback filled per RopeId. With nothing new arrived, it can return the previous values unchanged. */
 	void GetLatest(TMap<uint32, FRopeResidentLatest>& Out);
 
-	/** Copy (lock) the latest contact detection results filled by RT readback by RopeId. Same latency as GetLatest (approximately 1-2 frames).*/
+	/** Copy, under lock, the latest contact detection results per RopeId. Same latency as GetLatest, roughly one to two frames. */
 	void GetLatestContacts(TMap<uint32, FRopeResidentContacts>& Out);
 
 	/**
-	 * GT blocking synchronous readback (M5c): This rope's RT pending non-GDF step is executed first, then resident Pos/Prev.
-	 * Get the value *now* (including waiting for GPU idle). Pending steps that require Scene GDF do not have a valid View.
-	 * Does not execute, returns false, and preserves until the next scene dispatch.
-	 * wrap Only for applications where "up-to-date location is absolutely necessary, once per event" such as handoffs — do not call every frame.
-	 * OutGeneration is the seed generation that the buffer corresponds to (caller rejects stale by comparing it with its own generation).
-	 * @return true if there is a resident buffer and retrieval is successful.
+	 * Game-thread blocking synchronous readback: run this rope's pending non-GDF render-thread steps first, then
+	 * fetch the resident Pos and Prev *now*, waiting for the GPU to go idle.
+	 * A pending step that needs the scene GDF has no valid view, so it is not executed: the call returns false
+	 * and the step is preserved for the next scene dispatch.
+	 * Only for the rare case where the very latest positions are genuinely required once per event, such as the
+	 * wrap handoff — never call it per frame.
+	 * OutGeneration is the seed generation the buffer holds, and the caller rejects stale data by comparing it
+	 * against its own.
+	 * @return true when a resident buffer exists and the fetch succeeded.
 	 */
 	bool ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, TArray<FVector>& OutPrevPositions, uint32& OutGeneration);
 
-	/** Release rope's persistent buffer/readback (in the render thread). Called from component EndPlay/Unregister.*/
+	/** Free a rope's persistent buffer and readback, on the render thread. Called from the component's EndPlay and Unregister. */
 	void ReleaseRope(uint32 RopeId);
 
 private:
 	/**
-	 * Hide resident state (render thread-only persistent buffer map + GT<->RT shared results) with pimpl — RDG/RHI type in header
-	 * is not exposed, and sizeof requirements are also avoided when storing incomplete types by-value as members (pointer members).
+	 * Hide the resident state — the render-thread-only persistent buffer map, plus the results shared between
+	 * game and render threads — behind a pimpl, so no RDG or RHI type appears in this header and no member has
+	 * to be a by-value incomplete type.
 	 */
 	struct FImpl;
 	TUniquePtr<FImpl> Impl;
 
 	void ReleaseAll_RenderThread();
 
-	/** Step()/DispatchPending_RenderThread shared Execution unit: received resident seed/register/dispatch/readback
-	    Loaded on GraphBuilder (Execute is the caller's responsibility). Steps are emptied by the caller after consumption.*/
+	/** Shared execution body of Step and DispatchPending_RenderThread: record the resident seeding, registration,
+	    dispatch and readback onto the GraphBuilder. Executing it is the caller's job, and the caller empties the
+	    steps once they are consumed. */
 	void RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRopeGPUResidentStep>& Steps,
 		const FSceneView* View, const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 };

@@ -1,9 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Position-based (XPBD) rope solver. Since it operates only on FRopeSimState without UObject dependency,
-// Unit testing is possible. The runtime regular path is the GPU port (FRopeGPUSolver, RopeXPBD.usf), and this CPU
-// implementation is fallback (cook/-nullrhi/server/node number exceeded) + parity/unit test reference point. All on Free/Flight,
-// In Wrapping/Wrapped, only Free spans that are not mass masked run (Contacting/Releasing does not solve).
+// Position-based (XPBD) rope solver. It works only on FRopeSimState and has no UObject dependency, which is
+// what keeps it unit-testable and portable to a compute shader. The GPU port (FRopeGPUSolver, RopeXPBD.usf)
+// is the normal runtime path; this CPU implementation is the fallback (cook, -nullrhi, server, or a rope over
+// the node cap) and the parity and unit-test reference. It runs the whole chain in Free and Flight; in
+// Wrapping and Wrapped only the free span survives the mass mask, and Contacting and Releasing do not solve.
 
 #pragma once
 
@@ -13,29 +14,32 @@
 
 class IRopeCollider;
 
-/** One frame pinned timestep substep schedule. Shared by CPU solver and GPU solver.*/
+/** One frame's fixed-timestep substep schedule, shared by the CPU and GPU solvers. */
 struct FRopeSubstepSchedule
 {
-	/** Number of substeps to run in this frame (if 0, skip solving this frame).*/
+	/** Substeps to run this frame. 0 means skip the solve entirely. */
 	int32 NumSub = 0;
 
-	/** pinned dt (seconds) per substep.*/
+	/** Fixed dt per substep (s). */
 	float FixedDt = 0.0f;
 };
 
 /**
- * Accumulate DeltaSeconds in State.TimeAccumulator and consume them in pinned size substep units for this frame.
- * Returns the schedule (including spiral-of-death cap). Since the accumulator is updated (deducted), the State is non-const.
- * Extracted to one place so that both CPU (FRopeXPBDSolver::Step) and GPU (FRopeGPUSolver) use the same schedule.
+ * Accumulate DeltaSeconds into State.TimeAccumulator and hand back how much of it this frame consumes in
+ * fixed-size substeps, capped against the spiral of death. State is non-const because the accumulator is
+ * drawn down. Kept in one place so the CPU path (FRopeXPBDSolver::Step) and the GPU path (FRopeGPUSolver)
+ * cannot schedule differently.
  */
 DYNAMICROPE_API FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverConfig& Config, float DeltaSeconds);
 
 /**
- * Contact constraint status of one node. Whether DetectContacts (swept once per substep, CCD) is active and contact normal/surface
- * Set the velocity, and SolveContacts *fresh* the candidate colliders every iteration to determine the actual position of the current position.
- * Obtain surface distance/normal and reproject → Even in curved/concave Chris, collision occurs without cache plane staleness.
- * Competes equally with distance/bending. Lambda is friction with accumulated normal impulse (= contact normal force)
- * Used in Coulomb limit μ·Lambda·w (XPBD: λ is the constraint force). Normal/SurfaceVel is updated for every material.
+ * One node's contact constraint state. DetectContacts — swept once per substep, so it is continuous — sets
+ * whether the contact is active along with its normal and surface velocity. SolveContacts then re-queries the
+ * candidate colliders *fresh* every iteration for the surface distance and normal at the node's current
+ * position and reprojects, so a curved or concave surface never suffers a stale cached plane and collision
+ * competes on equal terms with the distance and bending constraints.
+ * Lambda accumulates the normal impulse, which is the contact normal force, and friction uses it as the
+ * Coulomb limit μ·Lambda·w (in XPBD, λ is the constraint force). Normal and SurfaceVel refresh each substep.
  */
 struct FRopeContactState
 {
@@ -47,49 +51,51 @@ struct FRopeContactState
 };
 
 /**
- * List of collider candidates for each node/segment selected from one detect pass.
+ * Collider candidates per node and per segment, chosen in a single detect pass.
  *
- * DetectContacts does all the (node × collider) broad-phase box checks anyway, but discards the results.
- * SolveContacts/SolveSegmentContacts was re-scanning the collider before each iteration (CPU fallback frame cost
- * dominant term — especially segment collision where there is no active gate). Do that check only once at the time of detect and then
- * iterations reuse: O(N·C) per iteration is reduced to O(N·candidate number), and does not overlap with any collider.
- * segment skips entering the inner sample loop itself.
+ * DetectContacts already does every (node × collider) broad-phase box test and then threw the results away,
+ * leaving SolveContacts and SolveSegmentContacts to rescan the colliders before every iteration — the
+ * dominant term in the CPU fallback's frame cost, segment collision above all, since it has no active gate.
+ * Doing that test once at detect time and reusing it turns O(N·C) per iteration into O(N · candidate count),
+ * and a segment that overlaps no collider skips its inner sample loop altogether.
  *
- * Candidates are selected by widening node sweep AABB / segment section AABB by Margin (segment rest length) — iteration
- * Even if the distance/bending/segment correction pulls the node, the collider is not missed within that margin.
- * If the collider overlapping with one item exceeds MaxPerItem, only that item falls back to a loop, so in any case,
- * No reduction in detection results (pure cost savings, not behavior change).
+ * Candidates come from the node's sweep AABB and the segment's span AABB, each widened by a margin of one
+ * segment rest length, so a collider stays in the set even when the distance, bending or segment corrections
+ * pull the node within that margin during the iterations.
+ * If one item overlaps more colliders than MaxPerItem, that item alone falls back to the full loop, so no
+ * detection result is ever lost — this is a pure cost saving, not a behaviour change.
  */
 struct DYNAMICROPE_API FRopeColliderCandidates
 {
-	/** candidate cap per item (node/segment). If it exceeds, only that item falls back into the loop.*/
+	/** Candidate cap per item (node or segment). An item over the cap falls back to the full loop. */
 	static constexpr int32 MaxPerItem = 12;
 
-	/** If false, the candidate cannot be created (absence of broad-phase bounds) → The caller loops entirely.*/
+	/** False when candidates could not be built (no broad-phase bounds), and the caller loops over everything. */
 	bool bValid = false;
 
-	/** per-node sweep AABB(Prev→Pos). Fill it once at the front of the detect to avoid creating it again for each collider.*/
+	/** Per-node sweep AABB (Prev → Pos), built once at the top of detect rather than per collider. */
 	TArray<FBox>  NodeBounds;
 
-	/** per-node candidate collider index. stride = MaxPerItem.*/
+	/** Per-node candidate collider indices, stride MaxPerItem. */
 	TArray<int32> NodeIndices;
 	TArray<int32> NodeNum;
 	TArray<bool>  bNodeOverflow;
 
-	/** candidate for each segment k (= node k~k+1). stride = MaxPerItem.*/
+	/** Per-segment candidates (segment k spans node k to k+1), stride MaxPerItem. */
 	TArray<int32> SegIndices;
 	TArray<int32> SegNum;
 	TArray<bool>  bSegOverflow;
 
-	/** Empty this detect pass. Since buffer allocation is maintained, it is not reallocated for each substep.*/
+	/** Clear for this detect pass. Buffer allocations are kept, so nothing reallocates per substep. */
 	void Reset(int32 NumNodes);
 
 	void AddNode(int32 NodeIndex, int32 ColliderIndex);
 	void AddSegment(int32 SegIndex, int32 ColliderIndex);
 
 	/**
-	 * Number of nodes/segment to be traversed when solving one. If bOutAll is true, the candidate cannot be used, so the return value is all
-	 * is the collider number and the slot number is the collider index (fallback). If false, it must be solved with NodeAt/SegAt.
+	 * How many entries to walk when solving one node or segment. With bOutAll true the candidates are
+	 * unusable, so the count is the total collider count and the slot index *is* the collider index — the
+	 * fallback. With it false, walk through NodeAt / SegAt.
 	 */
 	int32 NodeCount(int32 NodeIndex, int32 NumColliders, bool& bOutAll) const;
 	int32 SegCount(int32 SegIndex, int32 NumColliders, bool& bOutAll) const;
@@ -101,7 +107,7 @@ struct DYNAMICROPE_API FRopeColliderCandidates
 class DYNAMICROPE_API FRopeXPBDSolver
 {
 public:
-	/** One frame progress: substep unit integration + distance/bending/collision constraint.*/
+	/** Advance one frame: integrate per substep, then solve distance, bending and collision constraints. */
 	void Step(FRopeSimState& State, const FRopeSolverConfig& Config,
 		const TArray<IRopeCollider*>& Colliders, float DeltaSeconds) const;
 
@@ -109,23 +115,26 @@ private:
 	void Integrate(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt) const;
 
 	/**
-	 * XPBD distance: Enforce segment length with StretchCompliance. Lambda is used throughout the iteration of substeps.
-	 * is cumulative (one item per segment constraint), which makes the stiffness independent of the step/iter number.
+	 * XPBD distance: hold the segment length with StretchCompliance. Lambda accumulates across the substep's
+	 * iterations, one entry per segment constraint, which is what makes the stiffness independent of the
+	 * substep and iteration counts.
 	 */
 	void SolveDistance(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
 		TArray<float>& Lambda) const;
 
-	/** XPBD bending: i<->i+2 "support stick" (rest = 2*SegmentLength) with BendCompliance applied.*/
+	/** XPBD bending: a "support stick" from i to i+2 (rest = 2 × SegmentLength) under BendCompliance. */
 	void SolveBending(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt, bool bReverse,
 		TArray<float>& Lambda) const;
 
 	/**
-	 * contact detection (once per substep or CollisionPasses): Find the first contact of each node using swept query (CCD) and bring it out of the surface.
-	 * Immediately push-out and cache the contact surface as a plane (RestPoint/Normal) (Out Contacts). ColliderBounds is broad-phase
-	 * AABB(+Radius), SubAlpha0/1 is the substep sub-pose section of the moving collider. Afterwards, SolveContacts runs every iteration.
-	 * Forces this cache plane cheaply, and ApplyContactFriction applies Coulomb friction at the end of the substep.
-	 * Here, the broad-phase check, which is running anyway, is left as Out Candidates (colider candidate by node/segment),
-	 * Prevents subsequent iterations from repeating the same check.
+	 * Contact detection, once per substep or per collision pass. A swept (continuous) query finds each node's
+	 * first contact, pushes it out of the surface immediately, and caches the contact surface as a plane —
+	 * RestPoint and Normal — into OutContacts. ColliderBounds is the broad-phase AABB expanded by Radius, and
+	 * SubAlpha0/1 give the substep's slice of a moving collider's pose.
+	 * SolveContacts then enforces that cached plane cheaply on every iteration, and ApplyContactFriction
+	 * applies Coulomb friction at the end of the substep.
+	 * The broad-phase test happens here anyway, so its result is kept in OutCandidates — the per-node and
+	 * per-segment collider shortlist — which is what stops the later iterations repeating it.
 	 */
 	void DetectContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
 		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
@@ -133,41 +142,51 @@ private:
 		FRopeColliderCandidates& Candidates) const;
 
 	/**
-	 * *All* colliders close to the active node are re-projected out of the surface by querying (point querying) each iteration fresh.
-	 * Accumulates normal impulse Lambda (>=0, one-sided contact). rigid(compliance 0). Not just one cache, but all overlapping bones
-	 * defends (fixes a single-cache traversal bug — consistent with the pre-colider loop per node in GPU .usf), such as distance/bending.
-	 * Competition in the Gauss-Seidel sweep → does not fall behind in tension. The traversal target is the node that Candidates selected when detecting.
-	 * is the only candidate (full fallback only when cap is exceeded), and ColliderBounds remain as node-point broad-phase curls within it.
+	 * Re-query *every* collider near an active node afresh each iteration, as a point query, and reproject the
+	 * node out of the surface. It accumulates the normal impulse in Lambda (≥ 0, one-sided contact) and is
+	 * rigid (compliance 0).
+	 * Defending against all overlapping bones rather than a single cached one is what fixed the traversal bug
+	 * where one cache let a node slip past a second bone, and it matches the per-node collider loop in the GPU
+	 * .usf. Competing inside the Gauss-Seidel sweep alongside distance and bending is what keeps collision
+	 * from being overruled under tension.
+	 * The set walked is whatever Candidates shortlisted at detect time — only a shortlist over the cap falls
+	 * back to every collider — and ColliderBounds still culls by node point within it.
 	 */
 	void SolveContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
 		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
 		const FRopeColliderCandidates& Candidates, TArray<FRopeContactState>& Contacts) const;
 
 	/**
-	 * segment (edge) collision: Node point collision is a chording where a straight line between two nodes crosses a thin surface (arm, leg, etc.)
-	 * cannot be blocked (both end nodes are outside the surface, only the straight line between them penetrates). Each segment as an internal sample point (based on length/SweepStep)
-	 * , push the penetrated sample out of the surface and distribute the correction to both end nodes barycentrically ((1-t):t). both ends
-	 * The wrap section with pin(invMass 0) cannot be moved, so skip it. Called each iteration to compete in sweeps such as distance/bending.
-	 * Segments with no candidates in Candidates are skipped entirely before entering the inner sample loop (most segments are
-	 * applies here — without this gate, segment collisions were the biggest source of CPU fallback cost).
+	 * Segment (edge) collision. Point collision at the nodes cannot stop chording, where the straight line
+	 * between two nodes cuts through a thin surface such as an arm or a leg with both end nodes outside it.
+	 * This samples along each segment (spacing from its length and SweepStep), pushes any penetrating sample
+	 * out of the surface, and distributes the correction barycentrically to the two end nodes as (1-t) : t.
+	 * A segment whose ends are both pinned (invMass 0), as in the wrapped span, cannot move and is skipped.
+	 * It runs every iteration so it competes in the sweep with distance and bending.
+	 * A segment with no candidates is skipped before its inner sample loop even begins, which covers most
+	 * segments — without that gate, segment collision was the single biggest cost in the CPU fallback.
 	 */
 	void SolveSegmentContacts(FRopeSimState& State, const FRopeSolverConfig& Config,
 		const TArray<IRopeCollider*>& Colliders, const TArray<FBox>& ColliderBounds,
 		const FRopeColliderCandidates& Candidates, bool bReverse) const;
 
 	/**
-	 * Apply Coulomb friction once at the end of the substep: cap the tangent correction amount as μ (taper)·Lambda·w (Lambda=accumulated normal force). small
-	 * All relative motion is eliminated (stationary friction), excess grip is slip. Convert surface velocity (cm/s) to substep displacement with SubDt.
+	 * Apply Coulomb friction once at the end of the substep: cap the tangential correction at μ (tapered) ×
+	 * Lambda × w, where Lambda is the accumulated normal force. Below the cap all relative motion is removed
+	 * (static friction); above it the rope slips. SubDt converts the surface velocity (cm/s) into a substep
+	 * displacement.
 	 */
 	void ApplyContactFriction(FRopeSimState& State, const FRopeSolverConfig& Config,
 		const TArray<FRopeContactState>& Contacts, float SubDt) const;
 
 	/**
-	 * Strain limiting (maximum elongation clamp): If the XPBD iteration is small, a long chain will be connected to a pinned node (pin/anchor, InvMass 0).
-	 * When hanging, the Gauss-Seidel correction cannot be propagated to the end, causing a burst of elongation in the segment adjacent to the pinned node. sequential
-	 * Hard project each segment with sweep (forward + backward) with ≤ MaxStretchRatio × SegmentLength to the entire chain at once.
-	 * Propagate correction. Position movement is velocity neutral (prev also moves) — the clamp does not inject/remove Verlet velocity.
-	 * If MaxStretchRatio < 1, no-op. Strain-limit stage and mirror in GPU RopeXPBD.usf.
+	 * Strain limiting — the maximum stretch clamp. With few XPBD iterations, a long chain hanging off a pinned
+	 * node (a pin or anchor, InvMass 0) cannot propagate the Gauss-Seidel correction to its far end, and the
+	 * segments beside the pin blow out. A sequential sweep, forward then backward, hard-projects every segment
+	 * to at most MaxStretchRatio × SegmentLength and so propagates the correction along the whole chain at
+	 * once. The move is velocity-neutral because Prev moves with it, so the clamp neither injects nor removes
+	 * Verlet velocity. A MaxStretchRatio below 1 makes it a no-op. Mirrored by the strain-limit stage in the
+	 * GPU RopeXPBD.usf.
 	 */
 	void SolveStrainLimit(FRopeSimState& State, const FRopeSolverConfig& Config) const;
 };

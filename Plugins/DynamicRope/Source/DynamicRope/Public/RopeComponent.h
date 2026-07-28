@@ -1,10 +1,10 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Single UE integration point (Facade). Sim state (FRopeSimState) and solver, logic F-classes for each phase
-// (WhipGuide/WrappingPhase/WrapController) as the value, branching physics and logic
-// Roll the phase state machine (ERopePhase). The actual operation of each phase is in the Logic/ class,
-// In this component, only the orchestration that determines transition and event broadcasting remains.
-// Attach it to the character and use it with Throw().
+// The single UE integration point (Facade). Owns the sim state (FRopeSimState), the solver and the
+// per-phase logic classes (WhipGuide / WrappingPhase / WrapController) by value, and runs the phase
+// state machine (ERopePhase) that decides whether physics or logic governs the rope. The real work of
+// each phase lives in the Logic/ classes; what stays here is the orchestration that drives transitions
+// and broadcasts events. Attach it to an actor and call Throw().
 
 #pragma once
 
@@ -17,7 +17,7 @@
 #include "Core/RopePullDriveState.h"
 // FRopeAimRayHitResult/FRopeAimRayThrowRequest + aiming logic/state.
 #include "Logic/RopeAimTargeting.h"
-// Slip + Distance LOD (solve throttling).
+// Sleep + distance LOD (solve throttling).
 #include "Logic/RopeSolverThrottle.h"
 #include "Solver/RopeXPBDSolver.h"
 #include "Logic/RopeWrapController.h"
@@ -34,45 +34,46 @@ class URopePreset;
 class USkeletalMeshComponent;
 class UStaticMesh;
 class UStaticMeshComponent;
-// Wrap target abstraction (Decision 0): Generalize the wrap target mesh to USceneComponent.
+// Wrap targets are generalized to USceneComponent, so a rope can wrap a static prop as well as a bone.
 class USceneComponent;
 class FRegisterComponentContext;
 struct FRopeDebugSnapshot;
 // Debugger per-node Flight visualization item (Debug/RopeDebugSnapshot.h).
 struct FRopeFlightNodeDebug;
-// Debugger capture scope bit (Debug/RopeDebugSnapshot.h) — Passed to the capture side to only collect views that are turned on.
+// Debugger capture scope bits (Debug/RopeDebugSnapshot.h) — passed to the capture side so only the
+// views that are switched on get collected.
 enum class ERopeDebugCapture : uint8;
 
-// The Wrapped establishment event was expanded from a single bone name to a structure payload (decision G at the meeting on 2026-07-13 —
-// latching/decision value/multiple bones. Existing BP bindings require reconnection, clean break approved).
+// The wrap event carries a struct payload rather than a bare bone name, so the latch set, the decision
+// values and multi-bone wraps all arrive with it.
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnWrapped, const FRopeWrappedEventInfo&, Info);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnCaptured, FName, Bone);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeOnReleased, FName, Bone, ERopeReleaseReason, Reason);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeOnPhaseChanged, ERopePhase, OldPhase, ERopePhase, NewPhase);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeOnPresetApplied, const URopePreset*, Preset);
 
-// (FRopeAimRayHitResult / FRopeAimRayThrowRequest moved to Logic/RopeAimTargeting.h — still exposed as include above.)
+// FRopeAimRayHitResult / FRopeAimRayThrowRequest live in Logic/RopeAimTargeting.h, re-exposed by the include above.
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeComponent : public UMeshComponent
 {
 	GENERATED_BODY()
 
-	// The subsystem sets Sim/SolverConfig/Phase/WhipGuide + SimFrame (frame contract bundle —
-	// (see FRopeSimFrameIO comment) is accessed directly (including GPU placement solve; CPU path uses SolveSimFrame).
+	// The subsystem reaches straight into Sim / SolverConfig / Phase / WhipGuide and into SimFrame, the
+	// per-frame contract bundle (see FRopeSimFrameIO) — both for the GPU step and the CPU SolveSimFrame path.
 	friend class URopeSimSubsystem;
 	// PrePhysics movement authority: the Wielder consumes the CPU constraint and primes the
 	// physical target tether before Chaos without exposing the mutation API to general callers.
 	friend class URopeWielderComponent;
 
 #if WITH_DEV_AUTOMATION_TESTS
-	// test seam: Minimum approach for ApplyPreset phase gate negative test (RopePresetTests) to force SetPhase.
+	// Test seam: forces SetPhase so RopePresetTests can exercise the ApplyPreset phase gate's reject path.
 	friend struct FRopePresetTestSeam;
-	// test seam: Minimal approach to verify anchor invariant of Contacting seed and synthetic latch fallback entry.
+	// Test seam: checks the Contacting seed's anchor invariant and the synthetic latch fallback entry.
 	friend struct FRopeWrappingFallbackTestSeam;
-	// test seam: Minimal approach to verify virtual bridge lifetime and GuidedThrow common entry state.
+	// Test seam: checks virtual bridge lifetime and the shared GuidedThrow entry state.
 	friend struct FRopeComponentRefactorTestSeam;
-	// test seam: A minimal approach to reproducing the Wielder input/pull lifecycle and self-wrap check without worlds.
+	// Test seam: reproduces the Wielder input/pull lifecycle and the self-wrap gate without a world.
 	friend struct FRopeWielderComponentTestSeam;
 #endif
 
@@ -81,64 +82,71 @@ public:
 
 	//~ Setup -------------------------------------------------------
 
-	// This rope's top contract — this value determines what it guarantees, its aiming/preview status, and whether it uses a check gateway.
-	// One decides. **source of truth is rope**: Wielder's aiming/throwing method is derived from here, and BP direct/AI
-	// Completed with this value alone, without Wielder. See the ERopeWrapResolveMode enumerator comment for mode-specific contracts.
+	// The rope's top-level contract: this one value decides what a throw guarantees, whether aiming and
+	// preview run, and whether the wrap goes through the detection gate. **The rope is the source of
+	// truth** — the Wielder derives its aiming and throw behaviour from here, and a Blueprint or AI
+	// caller works off this value alone with no Wielder at all. The per-mode contracts are documented on
+	// the ERopeWrapResolveMode enumerators.
 
-	/** Wrapping resolution (reaching) mode — what is guaranteed from throwing to latching.*/
+	/** How a throw resolves into a wrap — what the rope guarantees between leaving the hand and latching. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (DisplayName = "Wrap Mode"))
 	ERopeWrapResolveMode ResolveMode = ERopeWrapResolveMode::AssistedJudged;
 
-	//~ Tip(tip attachment — spearhead/harpoon/chu) ----------------------------------------
-	// A display-only StaticMesh attached to the rope Free end(GetNodeCount()-1). No mass·collision (reflect tip mass solver
-	// Not — confirmed 2026-07-14). **latching is a common function regardless of model** (2026-07-17): bUseTipMesh with one
-	// On, lifespan is unified for all modes BeginPlay to EndPlay — destroy on EndPlay (only if we spawn),
-	// External components (found by tags) are not destroyed.
-	// The only exception is socket correction (bUseTipMeshSockets) — the concept of aligning the head to the insertion point exists only in ③.
-	// The single source of truth for the active condition is IsTipSocketPlacementActive(), and existence confirmation/reading is handled by HasTipSocket/ReadTipSocketLocal.
+	//~ Tip (attachment on the free end — spearhead, harpoon, weight) ------------------------
+	// A display-only static mesh pinned to the rope's free end (GetNodeCount()-1). It carries no mass and
+	// no collision by default: the solver never reads a tip mass. Latching works the same way in every
+	// resolve mode, so a single bUseTipMesh switch governs the tip from BeginPlay to EndPlay. On EndPlay
+	// only a tip we spawned is destroyed; a component adopted by tag is left alone.
 	//
-	// fallback (when socket compensation is off, not in ③, or there is no head socket): The mesh origin is at the end node of the rope, and the
-	// Placed in the last segment direction — does not compensate if the tip is buried in the target (intended no compensation). Even in Wrapped
-	// Since the end node is a bone-local anchor, the animation continues to follow, and the segment is guided rather than just a rotation-only frozen position.
-	// If there is only a head and no tail, the rope is connected to the mesh origin.
+	// The one mode-specific piece is socket alignment (bUseTipMeshSockets): aligning the head with the
+	// point it pierces only means something in GuaranteedWrap. IsTipSocketPlacementActive() is the single
+	// source of truth for that condition, and HasTipSocket / ReadTipSocketLocal are the only socket readers.
 	//
-	// NOTE: The /** */ below becomes an editor tooltip — keep it short, one line, and write the details in this block.
+	// Fallback placement (socket alignment off, another mode, or no head socket): the mesh origin sits on
+	// the rope's end node, oriented along the last segment. A tip buried in the target is left buried —
+	// that is intended, not a missing correction. It keeps following through Wrapped as well, because the
+	// end node is a bone-local anchor, so the mesh tracks the animation instead of freezing in place.
+	// With a head socket but no tail socket, the rope meets the mesh at its origin.
+	//
+	// NOTE: the /** */ lines below become editor tooltips — keep them to one short line and put the
+	// reasoning in blocks like this one.
 
-	/** Use the tip attachment. When turned off, all Tip settings below are ignored and it becomes a regular rope without a tip.*/
+	/** Attach a mesh to the rope's free end. Off: every Tip setting below is ignored. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip")
 	bool bUseTipMesh = false;
 
-	/** StaticMesh to spawn on the tip. If it's empty and you can't find it with tags, no tip.*/
+	/** Mesh to spawn on the tip. Ignored when a component is adopted by tag instead. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Mesh"))
 	TObjectPtr<UStaticMesh> TipMesh = nullptr;
 
-	/** Reuse the StaticMeshComponent of this tag already attached to the Owner as a tip (takes precedence over spawn, does not destroy).*/
+	/** Adopt an existing static mesh component on the owner with this tag instead of spawning one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Component Tag"))
 	FName TipMeshComponentTag = NAME_None;
 
-	/** Tip placement offset (based on tip node frame).*/
+	/** Tip offset, in the frame of the rope's end node. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Relative Transform"))
 	FTransform TipMeshRelativeTransform = FTransform::Identity;
 
-	// Tip (spearhead/harpoon/weight) is a display-only mesh that follows the Free end every frame, so if the collision body is turned on, the character
-	// Rope behavior bounces when it collides with a capsule/world or interferes with the rope's collision query — **Default off**. If we turn it on, we
-	// The spawned tip captures the entire collision (QueryAndPhysics), and the external component reused as a tag captures the authored collision settings (value at the time of acquisition).
-	// has. The point of application is securing tips (EnsureTipMesh) and editor/PIE editing (PostEditChangeProperty).
+	// The tip follows the free end every frame, so leaving its collision on lets a display-only mesh bump
+	// the character capsule or feed back into the rope's own collision queries — hence **off by default**.
+	// Switching it on gives a spawned tip full QueryAndPhysics; a component adopted by tag gets its
+	// authored setting back instead (captured when we adopted it). Applied when the tip is acquired
+	// (EnsureTipMesh) and when the value is edited in the editor or PIE (PostEditChangeProperty).
 
-	/** Tip Turn on mesh collision. **Default off** — Prevents collisions of display-only tips from interfering with the rope/character.*/
+	/** Give the tip mesh collision. Off by default so a display-only tip cannot disturb the rope or its owner. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Enable Collision"))
 	bool bTipMeshCollision = false;
 
-	// OFF = An extension point that tells the game code to directly drive Free placement with GetTipMeshComponent() (ropes are left untouched).
-	// Phases other than Free (Flight/GuidedThrow/Wrapping/Wrapped/Releasing/Loaded) always follow regardless of this value.
+	// Off is an extension point: game code drives the tip itself through GetTipMeshComponent() while the
+	// rope is Free, and the rope leaves its transform alone. Every other phase follows regardless.
 
-	/** In Free, align the tip with the end of the rope every frame. When turned off, the tip will not be touched during Free.*/
+	/** While Free, keep the tip on the rope's end each frame. Off: game code places the tip itself. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Sync While Free"))
 	bool bSyncTipMeshOnFree = true;
 
-	// Use the default GetLoadedTipTransform() implementation — override its virtual to change the placement convention.
+	// GetLoadedTipTransform() implements this; override that virtual to change the placement convention.
 
-	/** Owner skeletal mesh socket to attach tip to in Loaded(Loaded). If not, component (hand) transform.*/
+	/** Owner skeletal mesh socket the tip is held at while Loaded. Empty: this component's transform. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh"))
 	FName LoadedHandSocket = NAME_None;
 
@@ -148,305 +156,325 @@ public:
 	// applies in every phase and cancels out along the socket/pierce paths, so tuning the grip here
 	// cannot disturb the embed alignment.
 
-	/** Offset applied to the tip while Loaded, expressed in the hand socket's frame. */
+	/** Tip offset while Loaded, in the hand socket's frame. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
 		meta = (EditCondition = "bUseTipMesh", DisplayName = "Loaded Relative Transform"))
 	FTransform LoadedTipRelativeTransform = FTransform::Identity;
 
-	// On = Invert the mesh origin so that the tail is at the end of the rope and the head is at the insertion point, and freeze the posture as bone-local.
-	// Follows the target animation. Off = Do not read the socket at all (fallback above). ①② is meaningless.
+	// On: the mesh is flipped so its tail meets the rope end and its head sits at the pierce point, then
+	// frozen in bone-local space so it follows the target's animation. Off: sockets are not read at all
+	// and the fallback placement above applies.
 
-	/** ③(Guaranteed) only — Precisely place the tip with the Head/Tail socket. When turned off, the mesh origin is placed at the end of the rope.*/
+	/** Place the tip precisely by its Head/Tail sockets. Off: the mesh origin sits on the rope's end node. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
 		meta = (EditCondition = "bUseTipMesh && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap", DisplayName = "Use Sockets"))
 	bool bUseTipMeshSockets = false;
 
-	/** Head socket — The pointed end of the tip. This socket is embedded in the aiming hit point. If not, the above correction is disabled.*/
+	/** Head socket — the tip's point, embedded at the aim hit. Empty: socket placement is disabled. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
 		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap", DisplayName = "Tip Socket"))
 	FName TipSocketName = NAME_None;
 
-	/** Tail socket — The point where the rope Free end will be connected. If not, connect to mesh origin.*/
+	/** Tail socket — where the rope's end attaches. Empty: the rope attaches at the mesh origin. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip",
 		meta = (EditCondition = "bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap", DisplayName = "Rope Socket"))
 	FName TipRopeSocketName = NAME_None;
 
-	// The initialization-only values below (NumParticles/RopeLength/MinRopeLength) are only consumed at InitRope time —
-	// Runtime writes are invalid until reinitialization, so BlueprintReadOnly (trap avoidance). Runtime length change is
-	// Use SetRopeLength/SetReelRate.
+	// The three values below are read once by InitRope, so writing them at runtime does nothing until the
+	// rope is reinitialized — BlueprintReadOnly keeps callers out of that trap. To change length while
+	// playing, use SetRopeLength / SetReelRate.
 
-	// ClampMax 512 = FRopeGPUSolver::MaxNodes(GPU solver thread group cap). CPU solve+tube quietly when exceeded
-	// becomes a fallback and is blocked in the editor due to a performance cliff + no authoring signal (BP/code path is hard clamped by InitRope).
+	// ClampMax 512 is the GPU solver's node cap (FRopeGPUSolver::MaxNodes, one thread group). Above it the
+	// rope silently drops to the CPU solve and CPU tube, which is a performance cliff with no authoring
+	// signal, so the editor blocks it outright; the Blueprint and C++ paths are hard-clamped by InitRope.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "2", ClampMax = "512", DisplayName = "Node Count"))
 	int32 NumParticles = 72;
 
-	/** Initial (maximum) rope length (cm). Runtime current length is GetCurrentRopeLength/SetRopeLength.*/
+	/** Initial, and maximum, rope length (cm). The live length is GetCurrentRopeLength / SetRopeLength. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "1.0", Units = "cm"))
 	float RopeLength = 600.0f;
 
-	/** Minimum length (cm) that can be reduced by Wrapping(reel-in). RopeLength (initial) is cap.*/
+	/** Shortest length reel-in can reach (cm). RopeLength is the upper bound. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "10.0", Units = "cm"))
 	float MinRopeLength = 100.0f;
 
-	/** Default reel velocity (cm/s) used by rewrapping/unwrapping input. The length change is in the rope domain, so it lives here.
-	 *  (2026-07-13 surface Audit A-2 — Moved from Wielder; Wielder Reel action calls SetReelRate with this value).*/
+	/** Default reel speed (cm/s) for reel-in and reel-out input. Length is a rope-domain concern, so it lives
+	 *  here; the Wielder's reel action passes this value to SetReelRate. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float ReelSpeed = 150.0f;
 
-	// rope tube visibility during Loaded(Loaded). This is the value consumed by the default OnEnterLoaded() implementation, so override that hook.
-	// If you enter your own presentation, this value is ignored. Off = Presentation with only the window visible in the hand socket, On = Presentation between hand and window
-	// The rope appears as is (even in Loaded, the solve turns and the rope sags).
-	// Direct assignment is not reflected when Loaded (visibility is applied at the Loaded entry edge), so BlueprintReadOnly +
-	// Use SetShowRopeWhenLoaded/ToggleShowRopeWhenLoaded setters (same reason as RopeMaterial).
+	// Whether the rope tube is visible while Loaded. The default OnEnterLoaded() implementation is what
+	// reads it, so a subclass that overrides that hook with its own presentation ignores this value.
+	// Off shows only the tip held in the hand socket; on also draws the rope between hand and tip, which
+	// keeps solving and therefore sags.
+	// Visibility is applied on the edge into Loaded, so assigning this while already Loaded would not take
+	// effect — BlueprintReadOnly plus SetShowRopeWhenLoaded / ToggleShowRopeWhenLoaded, same as RopeMaterial.
 
-	/** In Loaded (Loaded) state, the rope tube is shown. ③(GuaranteedWrap) Dedicated presentation switch.*/
+	/** Show the rope tube while Loaded. GuaranteedWrap only. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope",
 		meta = (EditCondition = "ResolveMode == ERopeWrapResolveMode::GuaranteedWrap"))
 	bool bShowRopeWhenLoaded = false;
 
-	// All domain-specific setting structures below are exposed as ShowOnlyInnerProperties — Category in the Details panel
-	// The fields are expanded immediately below the header (Rope|Solver / Rope|Throw / …), so "Category → Structure name →
-	// is edited in one step without double expansion of the field. BP/serialization is not affected (the structure remains as a single
-	// BlueprintReadWrite variable). The detailed categories of each field (Rope|Solver|Scaling, etc.) are maintained inside the structure.
+	// The config structs below use ShowOnlyInnerProperties, so the Details panel lists their fields
+	// directly under the category header (Rope|Solver, Rope|Throw, …) instead of behind a second
+	// expander for the struct name. Blueprint and serialization are unaffected — each struct is still one
+	// BlueprintReadWrite variable — and the per-field subcategories (Rope|Solver|Scaling and so on) still apply.
 
-	/** XPBD solver tuning (Free/Flight physics).*/
+	/** XPBD solver tuning (Free and Flight physics). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ShowOnlyInnerProperties))
 	FRopeSolverConfig SolverConfig;
 
-	/** throwing/launch parameters (Flight entry).*/
+	/** Throw and launch parameters (entry into Flight). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ShowOnlyInnerProperties))
 	FRopeThrowParams ThrowParams;
 
-	// ③ (GuaranteedWrap) is preview-based, so there is no Wrapping check/path build → WrapConfig is grayed out in ③.
-	// When EditCondition is placed on a struct *member* (directly under component, you can see ResolveMode), it is set to ShowOnlyInnerProperties.
-	// edit-const is propagated to promoted inline children and they become gray together (unlike category hiding, in the property node tree
-	// Behavior — independent of display promotion). The value is preserved and only edits are prevented (EditConditionHides default false = not hidden).
+	// GuaranteedWrap resolves off a preview, so it runs no wrap detection and builds no path — WrapConfig
+	// is greyed out in that mode. Putting the EditCondition on the struct *member* (where ResolveMode is
+	// visible) propagates edit-const to the inlined children, so they grey out together. The values are
+	// preserved and only editing is blocked (EditConditionHides defaults to false, so nothing is hidden).
 
-	/** physics → logic (wrap) handoff — capture check threshold and *establish* (path build/check/commit) tuning.*/
+	/** Physics-to-logic handoff — capture thresholds and wrap establishment (path build, decision, commit). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap",
 		meta = (ShowOnlyInnerProperties, EditCondition = "ResolveMode != ERopeWrapResolveMode::GuaranteedWrap"))
 	FRopeWrapConfig WrapConfig;
 
-	/** Wrapped *after* (retain/pull/unwind) tuning — Post-Wrap domain separate from check(WrapConfig)
-	 *  (2026-07-13 surface audit B-1; Design Note 01 Common regardless of domain, reach mode, and latching model).*/
+	/** Tuning for what happens *after* the wrap: hold, pull and release. A separate domain from detection
+	 *  (WrapConfig), and shared by every resolve mode and latching model. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ShowOnlyInnerProperties))
 	FRopeHoldConfig HoldConfig;
 
-	//~ Collision (collision domain) -----------------------------------------------
-	// Clustered the scattered collision-related switches into one place (2026-07-13 surface audit CL-4). The radius itself is
-	// in SolverConfig.CollisionRadius / WrapConfig.ContactQueryRadius, 0 (default)=auto — below
-	// GetEffective* helper is derived from render Radius (automatically matching 3 types of radii).
+	//~ Collision -----------------------------------------------------------------
+	// The collision switches live together here. The radii themselves are SolverConfig.CollisionRadius and
+	// WrapConfig.ContactQueryRadius, where 0 (the default) means auto — the GetEffective* helpers below
+	// derive them from the render Radius so all three radii stay in step.
 
 	/**
-	 * By default, the rope collides with all collider providers in the world, excluding its owner's.
-	 * — To prevent the stretched rope from becoming tangled in the thrower's limbs when throwing. cross-actor wrap (grabbing another actor's body)
-	 * It operates automatically because the actor is included in the “whole”.
+	 * By default the rope collides with every collider provider in the world except its owner's, so a rope
+	 * in flight does not tangle in the thrower's own limbs. Cross-actor wrap still works, because another
+	 * actor's provider is part of "every provider".
 	 *
-	 * The exclusion scope is two-pronged:
-	 *  - Skeleton/wrap target provider is **provider unit** (skip the owner's provider entirely).
-	 *  - static world provider (URopeStaticBodyProvider) is **body unit** — source from shapes caught while browsing the world
-	 *    Only removes the actor that is the owner (prevents tether proxy, tip mesh, held weapon, etc. from following the rope and pushing its own rope).
-	 *    The world geometry of other actors such as floors/pillars remains as is.
+	 * The exclusion works at two granularities:
+	 *  - A skeletal or wrap-target provider is skipped whole (the owner's provider never contributes).
+	 *  - The static world provider (URopeStaticBodyProvider) is filtered per body — only shapes whose
+	 *    source actor is the owner drop out, which is what keeps the tether proxy, the tip mesh and a held
+	 *    weapon from shoving the rope around. Floors, pillars and other actors' geometry stay.
 	 *
-	 * **Configurations where a rope is placed on a prop (when a URopeComponent is attached to a column, crane, or anchor actor) must have this value turned on** —
-	 * If you turn it off, the collision of the pedestal is also excluded because it is owned by the owner, and the rope passes through the pedestal.
+	 * **Turn this on when the rope is mounted on a prop** — a URopeComponent attached to a pillar, crane or
+	 * anchor actor. Leaving it off excludes the mount's own collision too, and the rope falls through it.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision",
-		meta = (ToolTip = "끄면(기본) 자기 owner의 콜라이더를 제외합니다 — 정적 월드 provider가 잡은 owner 소유 셰이프(테더 프록시/팁/무기)도 바디 단위로 빠집니다. 로프를 기둥 등 프롭 액터에 붙였다면 켜세요(안 켜면 받침대를 통과).", DisplayName = "Collide With Owner"))
+		meta = (ToolTip = "Off (default) excludes the owner's own colliders, down to individual owner-owned shapes in the static world provider such as the tether proxy, tip or held weapon. Turn it on when the rope is mounted on a prop actor, or it falls through its own mount.", DisplayName = "Collide With Owner"))
 	bool bIncludeOwnerColliders = false;
 
 	/**
-	 * Push the rope on static world geometry (wall/floor) using the engine's Global Distance Field. GPU path (scene graph
-	 * dispatch). Project requires Generate Mesh Distance Fields — silently no-op if GDF is invalid
-	 * **Default On** (Wall/Floor penetration protection is safer; turn off to save on GDF on-demand builds).
-	 * No bone attribution·surfacevelocity (static world wide-area push complement) — Not a replacement for per-bone SDF. While on
-	 * The engine builds the GDF on demand. Push radius/friction shares CollisionRadius/Friction/TipFrictionScale.
-	 * (Moved directly from SolverConfig to component — collision domain aggregation.)
+	 * Push the rope off static world geometry — walls and floors — using the engine's Global Distance
+	 * Field, evaluated on the GPU inside the solve dispatch. The project needs Generate Mesh Distance
+	 * Fields; without a valid field this is silently a no-op. **On by default**, since wall and floor
+	 * penetration is the more expensive failure; switch it off to avoid on-demand GDF builds.
+	 * It reports no bone and no surface velocity, so it complements per-bone SDF colliders for broad
+	 * static geometry rather than replacing them. Push radius and friction come from CollisionRadius,
+	 * Friction and TipFrictionScale.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Collision", meta = (DisplayName = "Use World Distance Field"))
 	bool bUseWorldGDF = true;
 
 
-	/** solved solver collision radius: SolverConfig.CollisionRadius(0=auto → render Radius). Consumed at solve/GPU step boundaries.*/
+	/** Resolved solver collision radius: SolverConfig.CollisionRadius, or the render Radius when it is 0. */
 	float GetEffectiveCollisionRadius() const
 	{
 		return SolverConfig.CollisionRadius > 0.0f ? SolverConfig.CollisionRadius : Radius;
 	}
 
-	/** Maximum elongation multiplier to use for Flight/Wrapping and commit frames in FullSimulation/Assisted.
-	 *  rigid authoritative Wrapped(TetherCompliance=0) also maintains 1.0, and only compliant hold returns to the setting value.*/
+	/** Maximum stretch ratio for Flight, Wrapping and commit frames in FullSimulation and AssistedJudged.
+	 *  A rigid Wrapped hold (TetherCompliance = 0) also stays at 1.0; only a compliant hold uses the setting. */
 	float GetEffectiveMaxStretchRatio() const;
 
-	/** Interpreted contact query radius: WrapConfig.ContactQueryRadius(0=auto → render Radius × 1.5). Consume at detection/wrap path boundary.*/
+	/** Resolved contact query radius: WrapConfig.ContactQueryRadius, or the render Radius × 1.5 when it is 0. */
 	float GetEffectiveContactQueryRadius() const
 	{
 		return WrapConfig.ContactQueryRadius > 0.0f ? WrapConfig.ContactQueryRadius : Radius * 1.5f;
 	}
 
-	/** Interpreted taut slack tolerance ratio: geometric interpolation of HoldConfig.TautSensitivity (0=lax~1=strict)
-	 *  (0→0.09, 0.5→0.03 (old default), 1→0.01). Consumed by chord gate in RopeComponentTraction.cpp.*/
+	/** Resolved taut slack tolerance, as a ratio: HoldConfig.TautSensitivity interpolated geometrically
+	 *  from 0.09 (lax) through 0.03 to 0.01 (strict). Consumed by the chord gate in RopeComponentTraction.cpp. */
 	float GetEffectiveTautSlackRatio() const
 	{
 		return 0.09f * FMath::Pow(0.01f / 0.09f, FMath::Clamp(HoldConfig.TautSensitivity, 0.0f, 1.0f));
 	}
 
-	/** Analyzed tautology maximum allowable sag (cm): Geometric interpolation of HoldConfig.TautSensitivity
-	 *  (0→80, 0.5→20 (old default), 1→5). Consumed by sag gate in RopeComponentTraction.cpp.*/
+	/** Resolved maximum sag a taut rope may carry (cm): HoldConfig.TautSensitivity interpolated
+	 *  geometrically from 80 (lax) through 20 to 5 (strict). Consumed by the sag gate in RopeComponentTraction.cpp. */
 	float GetEffectiveTautMaxSag() const
 	{
 		return 80.0f * FMath::Pow(5.0f / 80.0f, FMath::Clamp(HoldConfig.TautSensitivity, 0.0f, 1.0f));
 	}
 
-	//~ Whip (throwing swing settings) -----------------------------------------------
-	/** Tuning of the whip swing in the early stages of throwing. Runtime state is owned by WhipGuide, and when called
-	 *  Create and pass a snapshot with MakeWhipGuideConfig().*/
-	// ③ (GuaranteedWrap) uses GuidedThrow arch instead of whip Flight, so whip tuning is meaningless → Grayed out in ③
-	// (struct-member EditCondition method like WrapConfig — see WrapConfig comment above).
+	//~ Whip (throw swing) --------------------------------------------------------
+	/** Tuning for the whip swing at the start of a throw. The runtime state belongs to WhipGuide, which
+	 *  receives a snapshot built by MakeWhipGuideConfig(). */
+	// GuaranteedWrap throws a guided arc rather than a whip Flight, so whip tuning means nothing there and
+	// is greyed out in that mode (same struct-member EditCondition trick as WrapConfig above).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip",
 		meta = (ShowOnlyInnerProperties, EditCondition = "ResolveMode != ERopeWrapResolveMode::GuaranteedWrap"))
 	FRopeWhipConfig WhipConfig;
 
-	/** Current whip swing elapsed time (s). 0 when swing is disabled.*/
+	/** Time elapsed in the current whip swing (s). 0 when no swing is running. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Whip")
 	float GetWhipElapsed() const { return WhipGuide.GetElapsed(); }
 
-	//~ Render(render) -------------------------------------------------------
-	// The render values below (Radius/NumSides/TubeSmoothing*) are read once and solidified when creating a scene proxy — runtime writing
-	// BlueprintReadOnly because it is not reflected until proxy regeneration (editor changes are reflected through render state regeneration).
+	//~ Render --------------------------------------------------------------------
+	// The render values below (Radius, NumSides, TubeSmoothing*) are read once when the scene proxy is
+	// built, so a runtime write does nothing until the proxy is rebuilt — hence BlueprintReadOnly. Editor
+	// edits do apply, because changing them recreates the render state.
 
-	/** Visual tube radius (cm).*/
+	/** Visual tube radius (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (ClampMin = "0.1", Units = "cm", DisplayName = "Rope Radius"))
 	float Radius = 2.0f;
 
-	/** Number of sides of tube cross section. The higher it is, the more rounded it is.*/
+	/** Sides in the tube's cross-section. Higher is rounder. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Tuning", meta = (ClampMin = "3", ClampMax = "32", DisplayName = "Sides"))
 	int32 NumSides = 8;
 
-	/** render Tube smoothing: Number of Catmull-Rom subdivisions per segment (1=off). Leave the simulation node as is and only render the center line
-	 *  Estimates curvature with neighboring nodes and smoothes it out (separated from physics — render only). Reason for default 1: interpolation ring is node
-	 *  It can swell outside the polyline (especially the section that touches the wall), so if the nodes are tight, a straight line connection is more accurate.
-	 *  Raise only the sparse ropes to make it look round, and reduce the overshoot with TubeSmoothingAlpha (centripetal).
-	 *  If NumRings=(NumParticles-1)*Subdiv+1 exceeds the GPU tube ring cap, the proxy automatically lowers.*/
+	/** Tube smoothing: Catmull-Rom subdivisions per segment (1 = off). Simulation nodes are left alone; only
+	 *  the render centerline is resampled, estimating curvature from neighbouring nodes. Default 1 because
+	 *  an interpolated ring can bulge outside the node polyline — most visibly where the rope lies against a
+	 *  wall — so with closely spaced nodes a straight connection is the more accurate one. Raise it for
+	 *  sparse ropes that need to look round, and pull the overshoot back in with TubeSmoothingAlpha.
+	 *  If NumRings = (NumParticles-1) × Subdiv + 1 exceeds the GPU tube's ring cap, the proxy lowers it. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Tuning", meta = (ClampMin = "1", ClampMax = "8", DisplayName = "Smoothing Subdivisions"))
 	int32 TubeSmoothingSubdiv = 1;
 
-	/** render Catmull-Rom knot α for tube smoothing: 0=uniform, 0.5=centripetal (tangential overshoot in sharp corners↓ —
-	 *  The middle ring of the section against the wall bulges less outside the wall), 1=chordal. CPU smoothing and GPU resident smoothing
-	 *  The render is consistent by using the same value. If TubeSmoothingSubdiv=1, no effect.*/
+	/** Catmull-Rom knot parameter for tube smoothing: 0 = uniform, 0.5 = centripetal (less tangential
+	 *  overshoot at sharp corners, so the middle ring against a wall bulges through it less), 1 = chordal.
+	 *  The CPU and GPU smoothing paths share this value so they render alike. No effect when Subdiv is 1. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Smoothing Strength"))
 	float TubeSmoothingAlpha = 0.5f;
 
-	/** Material applied to rope tube. If not set, the engine default material is used.
-	 *  Runtime replacement is with SetMaterial(0, M) — the scene proxy captures the material at creation time, so directly assigning
-	 *  There is no MarkRenderStateDirty, so the replacement is not reflected until the next proxy regeneration.
-	 *  BP's direct Set cannot be hooked, so it is not a BlueprintReadWrite — RopeLength is BlueprintReadOnly +
-	 *  Same reason as SetRopeLength. Editor detail panel editing is handled by PostEditChangeProperty.*/
+	/** Material for the rope tube. Falls back to the engine default material when unset.
+	 *  Replace it at runtime with SetMaterial(0, M): the scene proxy captures the material when it is built,
+	 *  and a direct assignment does not mark the render state dirty, so it would not show until the proxy is
+	 *  next rebuilt. Blueprint's direct Set cannot be hooked, which is why this is not BlueprintReadWrite —
+	 *  the same reason RopeLength is read-only with a setter. Editor edits go through PostEditChangeProperty. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render", meta = (DisplayName = "Material"))
 	TObjectPtr<UMaterialInterface> RopeMaterial = nullptr;
 
 	//~ API ---------------------------------------------------------------
 
 	/**
-	 * Apply the entire preset (URopePreset) — Copy (stamp) the value and reinitialize the rope. **Only in Free/Loaded**
-	 * is established, other phases (flying or winding) return false and do not change anything.
-	 * When applied: Sim reseed (InitRope) + render/MID reconfiguration + tip reacquisition + mode-phase matching (if ③, Loaded
-	 * , was Loaded, but returns to Free when ①② is reached).
-	 * Instance wiring values, such as TipMeshComponentTag, are maintained because they are outside the preset — the external tip captured by the tag is maintained.
-	 * bUseTipMesh=false The preset does not hide it (instance responsibility). No replication (local stamp).
+	 * Stamp a whole preset (URopePreset) onto this rope: copy its values and reinitialize.
+	 * **Only accepted in Free or Loaded** — in any other phase (mid-flight, mid-wrap) it changes nothing and
+	 * returns false.
+	 * Applying one reseeds the sim (InitRope), rebuilds the render state and material instance, reacquires
+	 * the tip, and realigns mode and phase: a GuaranteedWrap rope ends up Loaded, and a rope that was Loaded
+	 * returns to Free if the preset switches it to another mode.
+	 * Instance wiring such as TipMeshComponentTag is outside the preset and survives, so a tip adopted by tag
+	 * stays adopted. A preset with bUseTipMesh = false does not hide that tip; that is the instance's business.
+	 * Not replicated — this is a local stamp.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	bool ApplyPreset(const URopePreset* Preset);
 
-	/** Fires a rope. ①② receives the initial tip velocity and becomes a physical Flight, and ③ is established only in Loaded and establishes a confirmed path.
-	 *  Enters GuidedThrow following (the mode determines the path). The actual direction is ThrowParams.FrameMode.
-	 *  Forward is the single source of truth. To specify direction directly, use ThrowWithContext(FRopeThrowContext).*/
+	/** Throw the rope. FullSimulation and AssistedJudged launch the tip at the throw speed and enter a
+	 *  physical Flight; GuaranteedWrap is accepted only from Loaded and follows a resolved path through
+	 *  GuidedThrow. Direction comes from ThrowParams.FrameMode, the single source of truth for the throw
+	 *  frame. To pass a direction explicitly, use ThrowWithContext(FRopeThrowContext). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Throw();
 
-	/** Extended throw entry point where Wielder calculates and passes origin/frame/velocity.*/
+	/** Extended throw entry point: the Wielder computes the origin, frame and velocity and passes them in. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowWithContext(const FRopeThrowContext& ThrowContext);
 
-	/** **Actual sweep radius**, which interprets the request radius (0=unspecified) as the fallback protocol of this rope. Aiming visualization is a query and
-	 *  Used to draw the same dimensions — 0 is the default, so in practice, a fallback almost always occurs.*/
+	/** **Actual sweep radius** for an aim query: resolves a requested radius of 0 to this rope's fallback.
+	 *  The aiming visualization draws the same figure, and since 0 is the default the fallback is the
+	 *  usual case. */
 	float GetAimRayEffectiveQueryRadius(float RequestedRadius) const;
 
-	/** Register the world section to be inspected by the aim ray as the aiming collection region of the collider subsystem.*/
+	/** Register the world span the aim ray inspects as the collider subsystem's aiming gather region. */
 	void SetAimRayColliderQueryBounds(const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius);
-	/** When the aim ray mode ends, the aiming collection region, snapshot, and pending/cache results are cleared together.*/
+	/** Leaving aim mode clears the aiming gather region, its snapshot and any pending or cached result. */
 	void ClearAimRayColliderQueryBounds();
-	/** Register HUD/preview request. It is interpreted immediately after normal subsystem collider gather and does not re-collect immediately.*/
+	/** Queue a HUD or preview query. It resolves right after the subsystem's normal collider gather rather
+	 *  than forcing an immediate re-gather. */
 	void QueueAimRayQuery(const FRopeAimRayThrowRequest& Request);
-	/** Recent HUD/preview results confirmed at normal gather. Since the next Wielder tick is consumed, there is a delay of up to 1 frame.*/
+	/** Latest HUD or preview result, resolved at the last gather. The Wielder consumes it on its next tick,
+	 *  so it can be up to one frame old. */
 	bool GetLatestAimRayQueryResult(FRopeAimRayQueryResult& OutResult) const;
-	/** Legacy API for compatibility. It does not immediately recollect the provider, but switches to QueueAimRayQuery and always returns false.*/
+	/** Compatibility shim. It no longer re-gathers providers: it forwards to QueueAimRayQuery and returns false. */
 	UE_DEPRECATED(5.7, "Use QueueAimRayQuery/GetLatestAimRayQueryResult. Immediate collider refresh was removed.")
 	bool RefreshAimRayQueryColliders(const FRopeAimRayThrowRequest& Request);
-	/** Aim request is interpreted as the current aiming collider list. If there is no hit, OutContext is a BaseContext fallback.*/
+	/** Resolve an aim request against the current aiming collider list. With no hit, OutContext is the
+	 *  base-context fallback. */
 	bool ResolveAimRayThrowContext(const FRopeAimRayThrowRequest& Request, FRopeThrowContext& OutContext,
 		FRopeAimRayHitResult* OutHit = nullptr, FRopeAimRayHitResult* OutBlockedHit = nullptr) const;
-	/** Queue the request to confirm the actual throw immediately after collecting the latest collider.*/
+	/** Queue a request that becomes a real throw as soon as the next collider gather completes. */
 	void QueueAimRayThrow(const FRopeAimRayThrowRequest& Request);
 
 	//~ Wielder contract (C++ only) -----------------------------------------------
-	// Entry point used by the URopeWielderComponent's aiming/GuaranteedWrap preview constraint flow. Not a general user API
-	// BP Not Exposed — Usually not called directly in game code (only when attaching a Wielder or reimplementing the same contract).
-	// The preview target is determined only by the aiming result (aim hit) — there is no alternative search around the throwing direction.
+	// Entry points for the Wielder's aiming and GuaranteedWrap preview flow. Not a general user API and not
+	// exposed to Blueprint — game code normally does not call these, only a Wielder or a reimplementation of
+	// the same contract. The preview target comes solely from the aim hit; nothing searches around the throw
+	// direction for an alternative.
 
-	/** Preview build for GuaranteedWrap. It returns not only the render centerline but also the contact/anchor required for actual GuidedThrow/Wrapped entry.*/
+	/** Build the GuaranteedWrap preview. It returns the contacts and anchors that GuidedThrow and Wrapped
+	 *  need to start, not just a render centerline. */
 	bool BuildPreparedWrappingPreview(const FRopeThrowContext& ThrowContext, FRopePreparedThrowPreview& OutPrepared,
 		FString* OutFailureReason = nullptr) const;
 
-	/** Throw using Prepared preview as the authoritative path. Flight/Contacting Enter GuidedThrow without re-searching.*/
+	/** Throw along a prepared preview as the authoritative path — no Flight, no Contacting, no re-search. */
 	bool ThrowWithPreparedPreview(const FRopePreparedThrowPreview& Prepared);
 
 	/**
-	 * Guaranteed The aim request at the moment of input is confirmed as a prepared path immediately after normal collider gather. Without a montage
-	 * Execute immediately with bExecuteWhenReady=true, queue the montage path with false, then notify.
-	 * Call RequestExecuteQueuedGuaranteedAimThrow. The order is OnPrepared → actual execution → OnResolved.
+	 * Resolve a GuaranteedWrap aim request into a prepared path right after the next normal collider gather.
+	 * With no montage, pass bExecuteWhenReady = true to throw as soon as it resolves; pass false to hold it
+	 * for the montage notify, which then calls RequestExecuteQueuedGuaranteedAimThrow.
+	 * Callback order is OnPrepared → the throw itself → OnResolved.
 	 */
 	bool QueueGuaranteedAimThrow(const FRopeAimRayThrowRequest& Request, bool bExecuteWhenReady);
-	/** If the queue result is ready, it is executed immediately. If it is not yet gathered, it is displayed to be executed immediately after preparation.*/
+	/** Execute the queued request if it has resolved; otherwise mark it to fire the moment it does. */
 	bool RequestExecuteQueuedGuaranteedAimThrow();
-	/** Cancel Montage/Change Mode/EndPlay discards Guaranteed requests that have not yet been executed.*/
+	/** Drop a queued request that never fired — montage cancelled, mode changed, or EndPlay. */
 	void CancelQueuedGuaranteedAimThrow();
 
 	/**
-	 * Enters the throwing ready (Loaded/Loaded) state — the spear (tip) is held in the hand socket (rope tube symbol indicates
-	 * bShowRopeWhenLoaded, default hidden). **③ Only**
-	 * **Only valid in Free/Loaded** (otherwise no-op — cannot be Loaded while flying or plugged in).
-	 * ③ Rope starts with Loaded in BeginPlay. Throwing is only possible in this state (CanThrowNow).
-	 * Loaded Input binding is up to the user (calling this API).
+	 * Enter the Loaded ready state: the tip is held in the hand socket, with the rope tube shown or hidden
+	 * per bShowRopeWhenLoaded (hidden by default). **GuaranteedWrap only.**
+	 * **Accepted only from Free or Loaded** — a rope in flight or already wrapped cannot be loaded, and the
+	 * call is a no-op.
+	 * A GuaranteedWrap rope starts Loaded at BeginPlay, and Loaded is the only phase it can throw from
+	 * (CanThrowNow). Binding this call to input is the caller's job.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void EnterLoaded();
 
-	/** Sets the rope tube display during Loaded(Loaded). If it is Loaded, it is reflected immediately; in other phases,
-	 *  Applies from the next Loaded entry (the visibility of the deployed state is not affected).*/
+	/** Set whether the rope tube is drawn while Loaded. Applied at once if already Loaded, otherwise from the
+	 *  next entry into Loaded — a deployed rope's visibility is untouched. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void SetShowRopeWhenLoaded(bool bShow);
 
-	/** Flips the Loaded rope display (to be attached to the entered key). Return value = value after flipping.*/
+	/** Flip the Loaded rope display, for binding to a key. Returns the value after flipping. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	bool ToggleShowRopeWhenLoaded();
 
-	/** Is it set to show the rope tube during Loaded?*/
+	/** Is the rope tube set to be drawn while Loaded? */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool IsShowRopeWhenLoaded() const { return bShowRopeWhenLoaded; }
 
-	/** Does a throw occur on this rope now (mode × current phase). ③ is only true when Loaded, and ①② is always true.
-	 *  This is a gate shared by throwing entry and aiming HUD. Game rules (stamina, etc.) are separate — Wielder's CanThrow().*/
+	/** Can this rope be thrown right now (mode × current phase)? GuaranteedWrap only from Loaded; the other
+	 *  modes always. Throw entry and the aiming HUD share this gate. Game rules such as stamina are separate —
+	 *  see the Wielder's CanThrow(). */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool CanThrowNow() const { return RopeWrapModes::CanThrowInPhase(ResolveMode, Phase); }
 
-	/** Manually release the Contacting/Wrapping (Contacting/Wrapping/Wrapped) currently in progress (Releasing phase).*/
+	/** Manually release whatever grab or wrap is in progress (Contacting, Wrapping or Wrapped). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ReleaseWrap();
 
 	/**
-	 * Rope cutting (external gameplay — slashing/damaging, etc.): In-progress grab/Wrapping with ERopeReleaseReason::Cut
-	 * Forced release. The flow is the same as ReleaseWrap, but the reason is different so the game can react differently (rope destruction presentation, etc.)
-	 * . Followed by a physical cut to split the rope itself into two pieces (requires simulating length change/splitting).
+	 * Cut the rope from outside gameplay — a sword swing, damage, anything. Force-releases the grab or wrap
+	 * in progress with ERopeReleaseReason::Cut. The flow matches ReleaseWrap; only the reason differs, so the
+	 * game can react to it separately (a snapping presentation, say). It does not physically sever the rope
+	 * into two pieces; that would need runtime length change and splitting.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void CutRope();
@@ -481,23 +509,25 @@ public:
 		bool& bOutWasConstrained) const;
 
 	/**
-	 * segment(SegmentIndex = node i~i+1) tension. Force derived from the solver's XPBD distance λ (F=max(0,-λ)/h²,
-	 * Relative units based on mass 1 node — gravity load of 1 hanging node ≈ 980). Only stretch is positive, slack/compression = 0.
-	 * GPU-resident rope mirrors 1 to 2 frames of delay. Phases without solve (Contacting/Releasing) maintain the previous value.
+	 * Tension in one segment (SegmentIndex spans node i to i+1), derived from the solver's XPBD distance λ
+	 * as F = max(0, -λ)/h². The units are relative to a unit-mass node, so one node hanging under gravity
+	 * reads about 980. Only stretch is positive; slack and compression read 0.
+	 * A GPU-resident rope's mirror lags one to two frames, and phases that do not solve (Contacting,
+	 * Releasing) hold the previous value.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetSegmentTension(int32 SegmentIndex) const;
 
 	/**
-	 * Maximum diagnostic tension among all XPBD segments. Visual solver/debug only, gameplay load,
-	 * Use GetConstraintTension for Pull activation and automatic release.
+	 * Highest tension across all XPBD segments, for diagnostics. This is a solver and debug reading — for
+	 * gameplay load, pull activation and auto-release, use GetConstraintTension.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetMaxTension() const;
 
 	/**
-	 * This frame pull data: first anchor direction and authoritative constraint tension on the hand side.
-	 * Calculated every frame while Wrapped.
+	 * This frame's pull sample: the direction to the first hand-side anchor, and the authoritative
+	 * constraint tension. Recomputed every Wrapped frame.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool GetPullSample(FVector& OutDirection, float& OutTension) const
@@ -508,35 +538,38 @@ public:
 	}
 
 	/**
-	 * Is the rope taut this frame? At the default threshold(0), it is a pure material-length geometry check,
-	 * Only when ActivePullTautTension > 0, authoritative constraint tension is used as an additional load gate.
-	 * XPBD SegmentTension does not participate in this check.
+	 * Is the rope taut this frame? At the default threshold (0) this is a pure material-length geometry
+	 * check; only when ActivePullTautTension > 0 does the authoritative constraint tension act as an extra
+	 * load gate. XPBD SegmentTension plays no part in it.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool IsPullTaut() const { return PullDrive.bPullTaut; }
 
 	/**
-	 * Is the chain geometrically tight before this frame? If there is a live hand/anchor material boundary, use it
-	 * is used as the source of truth, and falls back to sag + chord hysteresis only in the legacy path. SegmentTension is visual
-	 * This is a solver diagnostic value and is not a prerequisite for this gameplay state.
+	 * Was the chain geometrically taut entering this frame? A live hand-to-anchor material boundary is the
+	 * source of truth when one exists, and only the legacy path falls back to sag plus chord hysteresis.
+	 * SegmentTension is a solver diagnostic and is not an input to this gameplay state.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool IsChainTaut() const { return PullDrive.bChainTaut; }
 
-	/** This frame's tether excess (cm): Straight line distance between hand and anchor - available rope length (0 if less than 0). While Wrapped
-	 *  Calculated every frame (calculated even if tether is off). For game reactions such as wielder traction/ground departure check.*/
+	/** This frame's tether overshoot (cm): straight-line hand-to-anchor distance minus the available rope
+	 *  length, clamped at 0. Computed every Wrapped frame even with the tether off. Useful for game
+	 *  reactions such as pulling the wielder or detecting that they have left the ground. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetTetherOvershoot() const { return LengthConstraintState.LastViolation; }
 
-	/** Share of tether target actually used this frame (shareT) [0..1]. Automatic (mass-based)/manual common final value —
-	 *  If it is 1, the wielder's share is 0 (all targets), if it is 0, the entire amount is wielder. For wielder traction active check/debug.*/
+	/** Share of the tether correction the target actually took this frame, 0..1. The final value for both
+	 *  automatic (mass-based) and manual splits: 1 means the wielder took none, 0 means it took all of it.
+	 *  Useful for gating wielder traction and for debugging. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetEffectiveTetherTargetShare() const { return PullDrive.LastTargetShare; }
 
 	/**
-	 * This frame gameplay-authoritative material constraint tension = λ/dt(kg·cm/s²).
-	 * Backends are mutually exclusive: the physical target is a Chaos constraint force, and the hard-projected Pawn is a Chaos constraint force.
-	 * Reaction force of rejection motion before projection, legacy/custom path uses analytic solve.
+	 * This frame's gameplay-authoritative material constraint tension, λ/dt in kg·cm/s².
+	 * The backends are mutually exclusive: a physical target reports the Chaos constraint force, a
+	 * hard-projected pawn reports the reaction of the motion rejected before projection, and the legacy or
+	 * custom path uses the analytic solve.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetConstraintTension() const { return LengthConstraintState.GetTension(); }
@@ -546,91 +579,96 @@ public:
 	float GetTetherTension() const { return GetConstraintTension(); }
 
 	/**
-	 * pullable check(source of truth of active Pull climb-in direction) — Pure function (UObject independent, unit testable).
-	 * “Can be dragged” if target effectivemass EffMassTarget ≤ wielder effectivemass EffMassWielder. bPrev(just before sticky
-	 * check, the mass on the other side must be MarginRatio(≥1) times larger (to prevent boundary flapping).
-	 * Infinite mass (anchor) is transferred to +BIG_NUMBER (infinite target = cannot be attracted, infinite wielder = target can be attracted).
+	 * Can the target be dragged? This is the source of truth for the active pull's climb-in direction, and a
+	 * pure function (no UObject, unit-testable). The target is draggable when its effective mass is at most
+	 * the wielder's. bPrev carries the previous answer for hysteresis: to flip it, the other side must be
+	 * MarginRatio (≥ 1) times heavier, which keeps the decision from flapping at the boundary.
+	 * Infinite mass — an anchor — comes in as +BIG_NUMBER, so an infinite target cannot be dragged and an
+	 * infinite wielder can drag anything.
 	 */
 	static bool DecideTargetPullable(float EffMassTarget, float EffMassWielder, bool bPrev, float MarginRatio);
 
 	/**
-	 * Active Pull force setting — Wrapped + When the rope is taut, a *constant* force of this magnitude is applied every frame.
-	 * is applied to the target (unrelated to tension → no feedback surge). 0 = stationary. Turns on during input hold and turns off when released
-	 * Purpose (URopeWielderComponent's PullAction calls this). The character target is CharacterMovement.
-	 * It is divided into mass and competes with ground friction, so the range felt is tens to hundreds of thousands.
-	 * Check/gate tension with HoldConfig(bActivePullRequiresTaut/ActivePullTautTension) — IsPullTaut().
-	 * If bIgnoreTautGate=true, this Pull is approved regardless of the config, ignoring tautology (per-call bypass —
-	 * For the "Ignore tension" section of the animation pull window, passed by UAnimNotifyState_RopePull).
+	 * Set the active pull force. While Wrapped and taut, a *constant* force of this magnitude is applied to
+	 * the target each frame. It does not scale with tension, so there is no feedback runaway. 0 stops it.
+	 * Intended to be switched on while an input is held and off on release (the Wielder's PullAction does
+	 * exactly that). Against a character target the force is divided by mass and competes with ground
+	 * friction, so useful magnitudes run from tens of thousands upward.
+	 * The taut gate comes from HoldConfig (bActivePullRequiresTaut, ActivePullTautTension) and is readable
+	 * through IsPullTaut(). Passing bIgnoreTautGate = true bypasses that gate for this call alone, which is
+	 * how an animation pull window marks its "ignore tension" span (UAnimNotifyState_RopePull).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void SetActivePull(float Force, bool bIgnoreTautGate = false);
 
-	/** Current (runtime) rope length (cm). Changes to rewrapping/unwrapping — default/cap is RopeLength.*/
+	/** Current rope length (cm). Reeling changes it; RopeLength is both the default and the cap. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetCurrentRopeLength() const { return Sim.RopeLength; }
 
 	/**
-	 * Sets the rope length directly (immediate form of Wrapping/unwrapping). Clamp with [MinRopeLength, RopeLength(initial)].
-	 * The number of nodes is maintained and the segment rest length changes uniformly — to the solver (same CPU/GPU) without reseeding.
-	 * It is reflected from the next frame. If you shorten it while Wrapped, the available rope length decreases and the tether pulls the target.
-	 * If there is no tether, tension rises (can be combined with TensionRelease).
+	 * Set the rope length directly — the immediate form of reeling. Clamped to [MinRopeLength, RopeLength].
+	 * The node count stays fixed and the segment rest lengths shrink uniformly, so it reaches the solver
+	 * (CPU and GPU alike) from the next frame without a reseed.
+	 * Shortening it while Wrapped reduces the available length, so the tether pulls the target in; with no
+	 * tether the tension rises instead, which can be combined with TensionRelease.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void SetRopeLength(float NewLength);
 
 	/**
-	 * Wrapping velocity setting (cm/s). Positive = Wrapping (shortening), negative = unwinding (lengthening, to initial length), 0 = stationary.
-	 * Applies to every frame in Free/Flight/Wrapped (Contacting/Wrapping/Releasing is temporarily on hold —
-	 * path creation depends on SegmentLength). For input hold purposes (URopeWielderComponent's ReelIn/Out actions).
+	 * Set the reel speed (cm/s). Positive reels in (shorter), negative reels out toward the initial length,
+	 * 0 stops. Applied every frame in Free, Flight and Wrapped; held during Contacting, Wrapping and
+	 * Releasing, because path building depends on the segment length. Intended for held input (the
+	 * Wielder's reel-in and reel-out actions).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void SetReelRate(float CmPerSecond);
 
-	/** Is it in sleep (stationary check — solve skip state in Free phase)?*/
+	/** Is the rope asleep — at rest in Free, with the solve skipped? */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool IsSleeping() const { return Throttle.IsAsleep(); }
 
-	/** The iteration multiplier for the current distance LOD (1=full quality). For debug/profile verification purposes.*/
+	/** Iteration multiplier from the current distance LOD (1 = full quality). For debugging and profiling. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetSolverLODScale() const { return Throttle.GetSolverLODScale(); }
 
-	/** Was this rope dispatched to the GPU in this frame? **Does not just mean physics solve** — subsystems
-	 *  Load the solve frame and override-only frame (Wrapping/Releasing/GuidedThrow) equally on the GPU.
-	 *  (bSolveThisFrame in TryBuildResidentStep || OverrideFrame.HasAny()). Therefore, with this value
-	 *  It should not be read as “Solving GPU”, but should be combined with the two getters below. For debug verification.*/
+	/** Was this rope dispatched to the GPU this frame? **This does not mean it solved physics** — the
+	 *  subsystem sends solve frames and override-only frames (Wrapping, Releasing, GuidedThrow) to the GPU
+	 *  alike. Read it together with the two getters below rather than as "the GPU solved". For debugging. */
 	bool IsGpuSteppedThisFrame() const { return SimFrame.bGpuSteppedThisFrame; }
 
-	/** Did this rope (regardless of CPU/GPU) actually perform physics solving steps this frame? Sleep·Contacting·Releasing·
-	 *  Logic override-only frame is false. Combined with IsGpuSteppedThisFrame(), it selects the CPU fallback solve.
-	 *  (WasSolvedThisFrame() && !IsGpuSteppedThisFrame()). For debug/profile.*/
+	/** Did this rope actually run physics solve steps this frame, on either CPU or GPU? Sleep, Contacting,
+	 *  Releasing and logic-override-only frames are false. Combined with IsGpuSteppedThisFrame() it isolates
+	 *  the CPU fallback solve: WasSolvedThisFrame() && !IsGpuSteppedThisFrame(). For debugging and profiling. */
 	bool WasSolvedThisFrame() const { return SimFrame.bSolveThisFrame; }
 
-	/** Did this frame's logic phase (Wrapping/Wrapped/Releasing/GuidedThrow, etc.) result in a node override?
-	 *  = Frame where solve was not performed but the position was updated. Combined with the above two getters, the solve path is divided into 6 types:
-	 *  SLEEP / GPU_SOLVE / GPU_OVERRIDE / CPU_SOLVE / CPU_OVERRIDE / IDLE. GPU path is
-	 *  IsGpuSteppedThisFrame() alone reveals override, but to distinguish between override and idle in the CPU path,
-	 *  This value is required. For debug/profile.*/
+	/** Did a logic phase (Wrapping, Wrapped, Releasing, GuidedThrow, …) override node positions this frame —
+	 *  that is, positions moved without a solve? Together with the two getters above this splits the frame
+	 *  into six paths: SLEEP / GPU_SOLVE / GPU_OVERRIDE / CPU_SOLVE / CPU_OVERRIDE / IDLE. On the GPU path
+	 *  IsGpuSteppedThisFrame() alone cannot tell an override apart from a solve; on the CPU path this value
+	 *  is what separates override from idle. For debugging and profiling. */
 	bool HadLogicOverrideThisFrame() const { return SimFrame.OverrideFrame.HasAny(); }
 
-	/** Name of the currently Wrapped bone (valid while Wrapped, otherwise None). Displayed so that it can be viewed without event parameters.*/
+	/** Name of the bone currently wrapped (valid while Wrapped, None otherwise), readable without the event. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	FName GetWrappedBoneName() const { return WrapController.State.BoneName; }
 
-	/** The original component (skeletal/static shared) currently being wound. null if not Wrapped or the target is lost.*/
+	/** The component currently wrapped, skeletal or static. Null when not Wrapped or the target is gone. */
 	const USceneComponent* GetWrappedComponent() const { return WrapController.State.Mesh.Get(); }
 
-	/** The currently Wrapped skeletal mesh (valid while Wrapped, otherwise null). The target actor response continues with GetOwner().
-	 *  Internal storage is now const USceneComponent weak (generalized over static wrap) — here it only returns a skeletal,
-	 *  If it is a static target, it is null. The body needs Cast and is defined in .cpp (avoiding heavy header include).*/
+	/** The skeletal mesh currently wrapped (valid while Wrapped, null otherwise); GetOwner() on it reaches the
+	 *  target actor. Storage is a weak const USceneComponent now that static targets can be wrapped, so this
+	 *  returns null for a static target. The cast lives in the .cpp to keep a heavy include out of the header. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	USkeletalMeshComponent* GetWrappedMesh() const;
 
-	/** Centerline node number (= NumParticles, after simulation initialization).*/
+	/** Number of centerline nodes (= NumParticles once the sim is initialized). */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	int32 GetNodeCount() const { return Sim.Num(); }
 
-	/** World location of the centerline node (0=hand/anchor, GetNodeCount()-1=end). Out-of-range index is ZeroVector.
-	 *  For BP consumption, such as attaching effects/sounds to the end of a rope — In C++, GetCenterlinePositions() is copy-Free.*/
+	/** World position of a centerline node (0 = hand or anchor, GetNodeCount()-1 = free end). An out-of-range
+	 *  index gives ZeroVector. For Blueprint use such as attaching an effect or sound to the rope's end —
+	 *  in C++, GetCenterlinePositions() avoids the copy. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	FVector GetNodePosition(int32 NodeIndex) const
 	{
@@ -639,10 +677,10 @@ public:
 
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
 
-	// Extension point for game code to directly drive Free placement when bSyncTipMeshOnFree=false — In that case
-	// rope does not touch the transform of this component while it is Free.
+	// Extension point for game code that drives the tip itself while Free (bSyncTipMeshOnFree = false) — in
+	// that case the rope does not touch this component's transform during Free.
 
-	/** Tip attachment component (null if the tip is not used or is not secured).*/
+	/** The tip attachment component. Null when the tip is unused or was never acquired. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Tip")
 	UStaticMeshComponent* GetTipMeshComponent() const { return TipMeshComponent; }
 
@@ -656,34 +694,40 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnReleased OnRopeReleased;
 
-	/** All phase transition notifications (excluding same phase resets). For more detailed state integration (UI/SFX) than Wrapped/Captured/Released.
-	 *  is broadcast during transition processing (inside SetPhase), so calls that change the rope state in the handler (ReleaseWrap, etc.)
-	 *  Not supported — bind such responses to OnRopeWrapped/OnRopeReleased (firing after the transition has finished).*/
+	/** Every phase transition, excluding same-phase resets. Finer-grained than Wrapped/Captured/Released for
+	 *  driving UI and audio. It is broadcast from inside the transition (SetPhase), so a handler must not
+	 *  change the rope's state — calls like ReleaseWrap are not supported here. Bind those to OnRopeWrapped
+	 *  or OnRopeReleased, which fire once the transition has finished. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnPhaseChanged OnRopePhaseChanged;
 
-	/** Fired immediately after ApplyPreset success (not fired if rejected). Wielder on mode driven state (preview/tick) resynchronization
-	 *  You can subscribe, and the game code can also be used for preset conversion reactions (UI updates, etc.).*/
+	/** Fires right after a successful ApplyPreset, and not at all if the preset was rejected. The Wielder
+	 *  subscribes to resync its mode-driven state (preview, tick), and game code can use it for its own
+	 *  reactions such as a UI refresh. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
 	FRopeOnPresetApplied OnPresetApplied;
 
 private:
 	/**
-	 * One simulation frame is divided into three stages and URopeSimSubsystem runs (friend approach;
-	 * component is not ticked directly and is not called by external game code, so it is private).
+	 * One simulation frame runs in three stages, driven by URopeSimSubsystem (hence the friend declaration:
+	 * the component does not tick itself and game code never calls these, so they are private).
 	 *
-	 * Separation contract — Solve in the middle is divided into rope-to-rope parallel (CPU) or GPU dispatch, and is not an arbitrary classification.
-	 * There is only one criterion for checking “which is which”: is the solution result required?
-	 *  Prepare(GT): solve *input* production — advance pin target, calculate whip target, logic phase (Contacting/Wrapping/
-	 *                 Wrapped/Releasing) processing + OverrideFrame calculation, bSolveThisFrame decision. The solve result is
-	 *                 All unnecessary logic goes here (the last point where UObjects/events can be touched before solving).
-	 *                 collider snapshots (FrameColliders) are collected centrally by the subsystem before this call.
-	 *  Solve (Parallel): POD(Sim) + const collider only — when bSolveThisFrame(Free/Flight/Wrapping/Wrapped)
-	 *                 Solver. Step. Prohibit UObject/Event/Transition (thread safe boundary). Wrapped means the latch node is
-	 *                 Since InvMass=0, only the Free span moves physically.
-	 *  Finalize(GT): Solve *output* consumption — Flight contact detection is node movement path (Prev→Pos), i.e. solve output is
-	 *                 Since it is an input, it has no choice but to be here (the basis for the asymmetry of "Prepare logic, Finalize only detection").
-	 *                 Transition/event broadcast + render push + observation (stats/debugger snapshot) also here.
+	 * The split is not arbitrary — the middle stage fans out across ropes in parallel on the CPU, or becomes
+	 * a GPU dispatch, so the only question that decides where code belongs is whether it needs the solve
+	 * result.
+	 *  Prepare (game thread): produces solve *input* — advance the pinned target, compute whip targets, run
+	 *                 the logic phases (Contacting, Wrapping, Wrapped, Releasing), fill OverrideFrame and
+	 *                 decide bSolveThisFrame. Anything that does not need the solve result belongs here; it
+	 *                 is the last point before the solve where UObjects and events may be touched. The
+	 *                 collider snapshot (FrameColliders) is gathered centrally by the subsystem beforehand.
+	 *  Solve (parallel): POD (Sim) and const colliders only — steps the solver when bSolveThisFrame (Free,
+	 *                 Flight, Wrapping, Wrapped). No UObjects, events or transitions; this is the
+	 *                 thread-safety boundary. Under Wrapped the latch nodes have InvMass = 0, so only the
+	 *                 free span moves.
+	 *  Finalize (game thread): consumes solve *output* — Flight contact detection reads the node motion path
+	 *                 (Prev → Pos), which is solve output, so it has nowhere else to live. That asymmetry is
+	 *                 why logic sits in Prepare while detection sits here. Transitions, event broadcasts, the
+	 *                 render push and observation (stats, debugger snapshot) also happen here.
 	 */
 	void PrepareSimFrame(float DeltaTime, const TOptional<FVector>& LODCameraLocation);
 	void SolveSimFrame(float DeltaTime);
@@ -694,12 +738,13 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void SendRenderDynamicData_Concurrent() override;
-	// Editor (no subsystem tick) · Make the rope visible even immediately after spawning: Initialize the Sim upon registration;
-	// Push the center line once immediately after creating the render state (BuildTube runs without a tick, so bHasData=true).
+	// The editor does not tick the subsystem, and a freshly spawned rope should still be visible: initialize
+	// the sim on register, and push the centerline once right after the render state is created so BuildTube
+	// has data without a tick.
 	virtual void OnRegister() override;
 	virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
 #if WITH_EDITOR
-	// Changing NumParticles/RopeLength in the editor reconfigures the Sim with the new values ​​(matching proxy topology).
+	// Changing NumParticles or RopeLength in the editor rebuilds the sim with the new values so the proxy topology matches.
 	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 
@@ -711,143 +756,152 @@ public:
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
 
 protected:
-	//~ Extension hook (for subclass) -------------------------------------------------
-	// They are all called frame by frame (cold pass) in the game thread — there is no hook in the Solve phase that runs in parallel.
-	// The node-level hot loop (solver/logic F-class) is a POD/GPU parity reference point, so it is not a virtual expansion point.
-	// When adding a hook, specifying the calling thread/phase/frequency in the comment is part of the contract.
+	//~ Extension hooks (for subclasses) -------------------------------------------
+	// All of these are called on the game thread on a cold path — there is no hook inside the parallel Solve
+	// stage. The node-level hot loop (the solver and the logic classes) is the POD and GPU parity reference,
+	// so it is deliberately not a virtual extension point.
+	// When adding a hook, stating its calling thread, phase and frequency in the comment is part of the contract.
 
-	/** Called immediately after a phase transition, immediately before broadcasting OnRopePhaseChanged (once per transition, excluding same phase reset).*/
+	/** Called right after a phase transition and right before OnRopePhaseChanged, once per transition (same-phase resets excluded). */
 	virtual void OnPhaseChanged(ERopePhase OldPhase, ERopePhase NewPhase) {}
 
-	//~ Loaded(Loaded) presentation hook — all game threads (cold pass). Customize the presentation by overriding the default implementation.
+	//~ Loaded presentation hooks — game thread, cold path. Override the defaults to customize the presentation.
 
-	/** World transform where to place the window (tip) during Loaded. Default: LoadedHandSocket socket on the Owner skeletal mesh (or component transform if not present).
-	 *  ⚠ Called **twice per frame** while on reel, not per transition (node ​​operation + tip mesh placement) — heavy calculations should be cached.*/
+	/** Where the tip is held while Loaded, in world space. Default: the LoadedHandSocket socket on the owner's
+	 *  skeletal mesh, or this component's transform when there is none.
+	 *  ⚠ Called **twice per frame** while Loaded (once for the pinned node, once for the tip mesh), not once
+	 *  per transition — cache anything expensive. */
 	virtual FTransform GetLoadedTipTransform() const;
 
-	/** Enters Loaded **only at the edge** once (if it is already in Reel, it does not fire again even if EnterLoaded() is called again —
-	 *  This is because applying the preset unconditionally calls EnterLoaded() on ③ rope). Default: Based on bShowRopeWhenLoaded
-	 *  rope Turns tube render on or off. It is paired 1:1 with OnDeployFromLoaded.*/
+	/** Called once **on the edge** into Loaded: calling EnterLoaded() again while already Loaded does not fire
+	 *  it, which matters because applying a preset to a GuaranteedWrap rope always calls EnterLoaded().
+	 *  Default: show or hide the rope tube per bShowRopeWhenLoaded. Pairs 1:1 with OnDeployFromLoaded. */
 	virtual void OnEnterLoaded();
 
-	/** Once when leaving the reel (when the throw is established or ①② is set to preset). Default: Redisplay the rope tube and
-	 *  Restore the entire length(RopeLength).
-	 *  ⚠ At the time of call, GetPhase() is **still Loaded** (phase transition occurs after this hook).*/
+	/** Called once when leaving Loaded — a throw taking hold, or a preset switching the rope to another mode.
+	 *  Default: show the rope tube again and restore the full RopeLength.
+	 *  ⚠ GetPhase() is **still Loaded** at this point; the transition happens after the hook returns. */
 	virtual void OnDeployFromLoaded();
 
 	/**
-	 * wrap target gate. If false, that (Mesh, Bone) candidate is treated as not existing — according to game rules such as team/tag, etc.
-	 * override when limiting what can be wound. Default true (allow all).
+	 * Wrap target gate. Returning false makes that (Mesh, Bone) candidate invisible to the rope — override it
+	 * to restrict what may be wrapped by team, tag or any other game rule. Default true (allow everything).
 	 *
-	 * **All paths that select a target share this one gate** — If aiming/preview/check are different, "aiming is
-	 * It was rejected, but the preview was "selected", resulting in a mismatch. Call point:
-	 *   - Flight candidate calculation (per frame/candidate) + Contacting recollection — RemoveNonWrappableCandidates
-	 *   - aiming ray query — FRopeAimTargeting::FindAimRayBoneHit
-	 *     (Ban target is blocked = no aim hit)
-	 *   - preview arc navigation — FRopeThrowPreviewBuilder::FInput::CanWrapTarget injection
-	 *     (Because the builder is UObject-Free, virtual cannot be called directly, so the caller puts it as a lambda)
-	 *   - prepared throw entry — ThrowWithPreparedPreview (last line of defense)
-	 * If you add a new target selection path, this gate will also be burned.
+	 * **Every path that picks a target goes through this one gate.** Were aiming, preview and detection to
+	 * ask separately, they would disagree — aiming refusing a target the preview had already chosen. The call
+	 * sites are:
+	 *   - Flight candidate selection, per frame and per candidate, plus Contacting re-gather — RemoveNonWrappableCandidates
+	 *   - the aim ray query — FRopeAimTargeting::FindAimRayBoneHit (a barred target reads as no hit)
+	 *   - preview arc search — injected as FRopeThrowPreviewBuilder::FInput::CanWrapTarget (the builder is
+	 *     UObject-free and cannot call the virtual, so the caller passes it as a lambda)
+	 *   - prepared throw entry — ThrowWithPreparedPreview, the last line of defence
+	 * A new target-selection path must route through this gate too.
 	 */
 	virtual bool CanWrapTarget(const USceneComponent* Mesh, FName Bone) const { return true; }
 
-	//~ Event native hook: Called immediately before each delegate broadcast (engine Notify convention). C++ subclass
-	//  You can react without bypassing binding to your delegate.
+	//~ Native event hooks: called right before each delegate broadcast, following the engine's Notify
+	//  convention, so a C++ subclass can react without binding to its own delegate.
 	virtual void NotifyCaptured(FName Bone) {}
 	virtual void NotifyWrapped(const FRopeWrappedEventInfo& Info) {}
 	virtual void NotifyReleased(FName Bone, ERopeReleaseReason Reason) {}
-	/** Called immediately after ApplyPreset success, immediately before broadcasting OnPresetApplied (GT, cold pass — once per application).*/
+	/** Called right after a successful ApplyPreset and right before OnPresetApplied (game thread, cold path, once per apply). */
 	virtual void NotifyPresetApplied(const URopePreset* Preset) {}
 
 	/**
-	 * ③ Interrupt check hook (GT, cold pass — presentation is ~0.2 seconds) called every frame during presentation (GuidedThrow).
-	 * Default is always false = "still guaranteed" (Decision G of meeting 2026-07-13). With game rules like target death/teleportation
-	 * If the guarantee needs to be broken, override it and return true — presentation is aborted and OnRopeReleased(ThrowAborted) is fired.
-	 * (Internal failure can be distinguished by the consumer as Broken). Loss of the target mesh always stops regardless of the hook.
-	 * **Polled only on aiming throwing** — Throwing in the air (no target) is not guaranteed to break and Prepared is a stub.
-	 * Do not call. It is a policy hook, so it is for C++ only (response is OnRopeReleased in BP).
+	 * Abort gate for a GuaranteedWrap presentation, polled every frame while GuidedThrow runs (game thread,
+	 * cold path — the presentation lasts roughly 0.2 s).
+	 * The default always returns false, meaning "the guarantee still holds". Override it and return true when
+	 * a game rule should break the guarantee — the target dying or teleporting away — and the presentation is
+	 * cut short with OnRopeReleased(ThrowAborted). An internal failure is distinguishable as Broken. Losing
+	 * the target mesh always stops the throw, hook or no hook.
+	 * **Polled only for an aimed throw** — a throw into open space has no target, so there is no guarantee to
+	 * break and the prepared preview is a stub. It is a policy hook and therefore C++ only; Blueprint reacts
+	 * through OnRopeReleased.
 	 */
 	virtual bool ShouldAbortGuaranteedThrow(const FRopePreparedThrowPreview& Prepared) const { return false; }
 
 	/**
-	 * throwing context final interpretation — **The only extension hook that can touch the throwing context** (once per throw).
-	 * Reconstruct the frame into orthogonal (right-hand system) (Forward standard, Up orthogonalization, Right = Up×Forward re-induction —
-	 * input Right ignored), velocity·origin fallback. Custom points such as aim assist (if overridden, preview and actual
-	 * throwing is automatically matched).
+	 * Final interpretation of a throw context — **the only extension hook that may touch it**, called once per
+	 * throw. It rebuilds the frame into an orthonormal right-handed basis (Forward is authoritative, Up is
+	 * orthogonalized, Right is re-derived as Up × Forward and any incoming Right is ignored) and fills in the
+	 * velocity and origin fallbacks. Override it for aim assist and similar, and the preview and the real
+	 * throw stay in agreement automatically.
 	 *
-	 * **All throwing passes through this gateway** — whatever the context producer is (the Throw convenience entry point's
-	 * FRopeThrowContext::MakeDefault / URopeWielderComponent::BuildThrowContext / BP direct call)
-	 * Convergence here. ③ The prepared path is passed once at the time of the preview build and the result is reused.
-	 * In the past, there was a hook to "change the aiming protocol" in MakeDefaultThrowContext, but the Wielder path itself
-	 * Even if you override the hook by creating a context, it was invalid → The hook was unified into one here.
+	 * **Every throw passes through this gateway**, whichever producer built the context — the Throw()
+	 * convenience path's FRopeThrowContext::MakeDefault, URopeWielderComponent::BuildThrowContext, or a
+	 * direct Blueprint call. A GuaranteedWrap throw passes through it once when the preview is built, and
+	 * reuses that result.
 	 *
-	 * **override must be pure** — always the same output for the same input, no state changes. ③ is preview
-	 * Throwing reuses the context interpreted at the time of build. Here, if you use random numbers (aiming distribution, etc.)
-	 * The results vary between iteration preview queries, or the trajectory shown by the preview and the actual throwing diverge.
+	 * **An override must be pure** — same input, same output, no state changes. Because a GuaranteedWrap throw
+	 * reuses the context resolved at preview time, randomness here (aim spread, say) makes repeated preview
+	 * queries disagree with one another, and makes the previewed trajectory diverge from the actual throw.
 	 */
 	virtual FRopeThrowContext ResolveThrowContext(const FRopeThrowContext& ThrowContext) const;
 
 	/**
-	 * Pull force application (Wrapped + Tension + Active Pull active for each frame). Default recipient chain:
-	 * Physics simulation bone → CharacterMovement → Physics simulation root. Override for custom movements (Mover, etc.)/vehicles/special targets.
-	 * Force = pulling direction × maximum tension (|Force| = tension cap). The physical body is applied by a tension cap velocity drive.
-	 * (ApplyPullVelocityDrive). DeltaTime is used to calculate impulse cap (tension×dt).
+	 * Apply the active pull force, called every frame while Wrapped, taut and pulling. The default receiver
+	 * chain is: simulating bone → CharacterMovement → simulating root. Override it for a custom movement
+	 * system (Mover and the like), a vehicle, or any special target.
+	 * Force is the pull direction × the tension cap, so |Force| is that cap. A physical body is driven by a
+	 * tension-capped velocity drive (ApplyPullVelocityDrive), and DeltaTime is what turns the cap into an
+	 * impulse limit (tension × dt).
 	 *
-	 * This is an active Pull *policy* (what to pull and how much) hook. To intercept on a per-recipient basis:
-	 * Use ApplyTractionToReceiver — The default implementation of this function also passes through that gate just before actual application.
+	 * This is the *policy* hook for the active pull — what to pull, and how hard. To intercept per receiver
+	 * instead, use ApplyTractionToReceiver; even this default implementation goes through that gate before
+	 * anything is applied.
 	 */
 	virtual void ApplyPullForce(const FVector& Force, const FRopePullSample& Pull, float DeltaTime);
 
 	/**
-	 * **Single gateway** (GT, maximum number of times per-frame — cold pass) just before the rope applies traction to the receiver.
-	 * If true is returned, it is considered “processed by the subclass” and the basic application is omitted. Default false = built-in.
+	 * **The single gateway** the rope passes through before applying traction to any receiver (game thread,
+	 * at most a few calls per frame, cold path). Return true to claim the request as handled by the subclass
+	 * and skip the built-in application; the default returns false and the built-in path runs.
 	 *
-	 * **All force/velocity interventions generated by the rope pass here** — automatic tether (both ends), active pull (target), climb-in
-	 * (wielder), slack break. So, this is the only custom movement (Mover, etc.), vehicle, and special recipient.
-	 * If you override it, you can take all of the rope traction to your own movement system.
+	 * **Every force and velocity the rope injects comes through here** — the automatic tether at both ends,
+	 * the active pull on the target, climb-in on the wielder, and the slack break. So overriding this one
+	 * function is enough to route all rope traction into a custom movement system, a vehicle, or a special
+	 * receiver.
 	 *
-	 * In the past, only active pull hooks (ApplyPullForce) were used, and tether/climb-in/slack breaks were used directly on the receiver.
-	 * Even if impulse·velocity was plugged in and ApplyPullForce was overridden, the tether was still pushing.
-	 *
-	 * The unit of Request.Amount is different for each Request.Source (refer to the FRopeTractionRequest comment).
-	 * returns true, rope's internal observations/state updates still occur — even if subclasses change whether to process it or not.
-	 * This is to prevent the rope state from splitting.
+	 * The unit of Request.Amount depends on Request.Source; see the FRopeTractionRequest comment.
+	 * Returning true still leaves the rope's own observation and state updates in place, on purpose — the
+	 * rope's state must not fork based on whether a subclass handled the request.
 	 */
 	virtual bool ApplyTractionToReceiver(const FRopeTractionRequest& Request) { return false; }
 
-	// Read-only access to simulation state (for subclasses). Changes can only be made through public APIs (Throw·Set series).
+	// Read-only access to the sim state, for subclasses. Changes go through the public API (Throw, the Set* family).
 	const FRopeSimState& GetSimState() const { return Sim; }
 
 private:
-	//~ Tip attachment runtime status -----------------------------------------------
-	// Because it is a UObject, unlike value type sim members, GC tracking is required (Transient UPROPERTY).
-	// EnsureTipMesh secures the throwing entry, and FinalizeSimFrame follows it with a Free end every frame.
+	//~ Tip attachment runtime state -----------------------------------------------
+	// This one is a UObject, unlike the value-type sim members, so it needs GC tracking (Transient UPROPERTY).
+	// EnsureTipMesh acquires it on the way into a throw, and FinalizeSimFrame keeps it on the free end each frame.
 	UPROPERTY(Transient)
 	TObjectPtr<UStaticMeshComponent> TipMeshComponent = nullptr;
 
-	// Did we spawn — Ownership flag to destroy only the spawn in EndPlay (protecting external components).
+	// Did we spawn it? Only a tip we spawned is destroyed in EndPlay; an adopted component is left alone.
 	bool bTipMeshSpawnedByUs = false;
 
-	// Tips for reusing tags StaticMeshComponent's existing world scale. Even if you cover it with SetWorldTransform, the visual size is preserved.
+	// Authored world scale of an adopted tip, so overwriting its transform preserves the visual size.
 	FVector TipMeshAuthoredScale = FVector::OneVector;
 
-	// Point-of-acquisition relative transform for tag reuse tips (original work). When teardown, restore to this value and reacquire
-	// (Preset switching) prevents miscapture (scale accumulation contamination) of the transform overwritten by each frame batch with the authoring baseline.
+	// Authored relative transform of an adopted tip, captured when we adopted it. Teardown restores it, so
+	// re-acquiring (on a preset switch) reads the authored baseline instead of the transform we overwrote
+	// each frame, which would otherwise accumulate scale.
 	FTransform TipMeshAuthoredRelative = FTransform::Identity;
 
-	// Acquisition point collision setting for tag reuse tips (original work). Turn it off with bTipMeshCollision=false and then in Teardown.
-	// Returns this value (respecting ownership of external components). Meaningless for spawning (we made it).
+	// Authored collision setting of an adopted tip. With bTipMeshCollision = false we switch collision off and
+	// teardown puts this back, respecting the external component's ownership. Meaningless for a tip we spawned.
 	TEnumAsByte<ECollisionEnabled::Type> TipMeshAuthoredCollision = ECollisionEnabled::QueryAndPhysics;
 
-	// Lightweight query separated so that branches that only require existence do not read the socket transform.
+	// Split out so branches that only need existence do not pay for reading the socket transform.
 	bool HasTipSocket(FName Socket) const;
 
-	// Secure/destroy/follow the tip attachment in BeginPlay~EndPlay units (operates only when bUseTipMesh is turned on).
+	// Acquire, destroy and follow the tip attachment across BeginPlay..EndPlay (only while bUseTipMesh is on).
 	void EnsureTipMesh();
 	void TeardownSpawnedTipMesh();
 	void UpdateTipMeshTransform();
 
-	// Reflects bTipMeshCollision to the current tip component (no-op if there is no tip). The acquisition time and editing time are called.
+	// Push bTipMeshCollision onto the current tip (no-op without one). Called on acquisition and on edit.
 	void ApplyTipMeshCollision();
 
 	// Single source for where the tip sits while Loaded: LoadedTipRelativeTransform composed onto the
@@ -855,58 +909,61 @@ private:
 	// and the pinned free-end node - must read this, never the raw socket transform.
 	FTransform MakeLoadedTipBaseWorld() const;
 
-	//~ Pierce Embed (Socket-based) Helper --------------------------------------------
-	// **single source of truth** of socket placement active condition = tip usage + socket opt-in + ③(Guaranteed). Place the head at the insertion point
-	// The concept of matching exists only in ③, so ①② does not read even if the socket name is filled in.
-	// (unified by segment tracking). Since HasTipSocket burns this predicate, the entire socket path is turned off as well.
+	//~ Pierce embed (socket-based) helpers ----------------------------------------
+	// **The single source of truth** for whether socket placement is active: tip in use, socket opt-in, and
+	// GuaranteedWrap. Aligning the head with a pierce point only means anything in that mode, so the other
+	// modes ignore the socket names even when they are filled in. HasTipSocket goes through this predicate,
+	// which switches off the whole socket path with it.
 	bool IsTipSocketPlacementActive() const
 	{
 		return bUseTipMesh && bUseTipMeshSockets && ResolveMode == ERopeWrapResolveMode::GuaranteedWrap;
 	}
-	// Tip Read StaticMesh's socket as component-local transform. If socket placement is disabled or there is no socket,
-	// false (caller falls back) — This is the only gateway for socket reads.
+	// Read a tip static mesh socket as a component-local transform. Returns false when socket placement is off
+	// or the socket does not exist, and the caller falls back. This is the only socket read.
 	bool ReadTipSocketLocal(FName Socket, FTransform& OutLocal) const;
-	// Tip placement local containing the existing scale of the tag component and TipMeshRelativeTransform.
+	// Tip placement in local space, including an adopted component's authored scale and TipMeshRelativeTransform.
 	FTransform MakeTipPlacementTransform() const;
-	// "Placement criteria" socket local, including final tip placement. In reality, SetWorldTransform uses MakeTipWorldTransform(BaseWorld).
+	// The "placement reference" socket-local transform. The actual SetWorldTransform uses MakeTipWorldTransform(BaseWorld).
 	FTransform MakeTipPlacementSocketLocal(const FTransform& SocketLocal) const;
 	FTransform MakeTipWorldTransform(const FTransform& BaseWorld) const;
-	// Invert the world transform based on the tip mesh so that the rope attachment point (tail socket, if not present, mesh origin) is in RopeAttachWorld.
+	// Invert the tip mesh transform so the rope attachment point — the tail socket, or the mesh origin — lands on RopeAttachWorld.
 	void ComputeTipFollowTransform(const FVector& RopeAttachWorld, const FVector& ForwardDir,
 		FTransform& OutComponentWorld) const;
-	// Obtains the actual world location (tail socket, if not present, mesh origin) where the rope should be attached from the given standard world transform.
+	// World position where the rope should attach (tail socket, or mesh origin) for a given component transform.
 	FVector ResolveTipRopeAttachWorld(const FTransform& ComponentWorld) const;
-	// The prepared path stored as owner-local is confirmed as a world snapshot at the time of throwing and then reflected in the Pierce socket target.
+	// Resolve the owner-local prepared path into a world snapshot at throw time and write it into the pierce socket targets.
 	void ApplyPierceSocketTargetsToPrepared(FRopePreparedThrowPreview& InOutPrepared) const;
-	// Restore the current world hit points from a single Pierce anchor in Prepared (based on bone-local anchors if possible).
+	// Recover the current world hit point from the single pierce anchor in Prepared, bone-local when possible.
 	bool ResolvePreparedPierceHitPoint(const FRopePreparedThrowPreview& Prepared, FVector& OutHitPoint) const;
-	// Mesh origin (component) world with tip socket at HitPoint and Tail->Head socket vector in pierce direction (PierceDir)
-	// Invert the transform. If there is a tail socket, a rope connection point (world) is also provided (if not, the mesh origin).
-	// TipSocketName false if there is no socket (Pierce embed disabled). Pure placement math is owned by FRopeTipPlacement.
+	// Build the mesh-origin (component) world transform that puts the head socket at HitPoint with the
+	// Tail → Head socket vector along PierceDir. With a tail socket it also reports the rope attachment point
+	// in world space; without one, the mesh origin. Returns false when TipSocketName names no socket (pierce
+	// embed disabled). The pure placement maths belongs to FRopeTipPlacement.
 	bool ComputePierceEmbed(const FVector& HitPoint, const FVector& PierceDir,
 		FTransform& OutComponentWorld, FVector& OutTailWorld) const;
 
-	//~ phase state machine ----------------------------------------------------
+	//~ Phase state machine --------------------------------------------------------
 	ERopePhase Phase = ERopePhase::Free;
-	// The frame that returned to Flight from Contacting, etc. during Prepare did not go through Advance/Solve of Flight.
-	// Finalize contact detection is delayed by one frame to prevent immediate recapture with the stale guide candidate.
+	// A frame that returned to Flight during Prepare (from Contacting, say) never ran Flight's advance and
+	// solve, so contact detection in Finalize is delayed one frame — otherwise a stale guide candidate would
+	// recapture immediately.
 	bool bEnteredFlightDuringPrepareThisFrame = false;
 
 #if WITH_GAMEPLAY_DEBUGGER
-	// frame start point phase. Transitions occur throughout the frame, and only the phase at the end of the frame is “from what to what.”
-	// has gone, a debug snapshot is preserved to include before and after the transition.
+	// The phase at the start of the frame. Transitions happen throughout the frame and the end-of-frame phase
+	// alone cannot say what moved to what, so the debug snapshot keeps both sides of the transition.
 	ERopePhase DebugPhaseAtFrameStart = ERopePhase::Free;
-	// The frame(GFrameCounter) in which the above value was recorded. For writing only once per frame — the subsystem is better than Prepare
-	// **Earlier**, you can run ResolvePendingAimThrow and create a Flight transition with the path to StartFreshThrow.
-	// If you catch it only in Prepare, the transition has already passed.
+	// The frame (GFrameCounter) the value above was recorded in, so it is written once per frame. The
+	// subsystem can run ResolvePendingAimThrow **before** Prepare and transition into Flight through
+	// StartFreshThrow, so capturing only in Prepare would already have missed it.
 	uint64 DebugPhaseFrameStamp = 0;
-	// Was the active pull actually approved through the tension gate in this Wrapped frame? Saved by SetActivePull
-	// Looking at the request value alone, it is indistinguishable from a frame with “input but blocked at the gate”.
+	// Did the active pull actually clear the tension gate this Wrapped frame? The value stored by SetActivePull
+	// cannot tell a gated frame apart from one with no input at all.
 	bool DebugActivePullPassedGate = false;
 
 public:
-	/** At the first contact point of this frame, the frame start phase is established (once per frame, subsequent calls are no-op).
-	 *  Called before the subsystem touches the rope, and also called in Prepare for ropes that do not ride that path.*/
+	/** Pin the frame-start phase at the first contact point of the frame (once per frame; later calls are
+	 *  no-ops). Called before the subsystem touches the rope, and again in Prepare for ropes that skip that path. */
 	void CaptureDebugFrameStartPhase()
 	{
 		if (DebugPhaseFrameStamp != GFrameCounter)
@@ -920,126 +977,132 @@ private:
 #endif
 
 	/**
-	 * Single point of Phase assignment. Unify the transition log ("[Name] Old -> New (Reason)").
-	 * Reason is additional explanation for log (omitted if nullptr). Event broadcasts and transitions
-	 * Cleanup is transition-specific, so it is up to the caller — it is not done implicitly here.
+	 * The single point where Phase is assigned, so every transition logs the same way
+	 * ("[Name] Old -> New (Reason)"). Reason is extra log context and may be null.
+	 * Event broadcasts and transition cleanup differ per transition and stay with the caller — nothing
+	 * implicit happens here.
 	 */
 	void SetPhase(ERopePhase NewPhase, const TCHAR* Reason = nullptr);
 
 	/**
-	 * Resets the set of "work in progress" transient states that must be discarded along with phase transitions:
-	 * ContactTracker / PendingWrapSeed / CaptureTravelFrame / WrappingPhase.State / ContactingElapsed /
-	 * FlightNoContactElapsed / TensionOverTime.
-	 * Only successful Wrapping commits maintain the existing Chaos constraint identity with bPreservePhysicalTether=true.
-	 * It is no-op for members in an idle state, so it is safe to call in any transition.
-	 * (ReleaseCooldown has different values for each transition and is set directly by the caller.)
+	 * Drop the "attempt in progress" transient state that must not outlive a phase transition:
+	 * ContactTracker, PendingWrapSeed, CaptureTravelFrame, WrappingPhase.State, ContactingElapsed,
+	 * FlightNoContactElapsed and TensionOverTime.
+	 * Only a successful wrap commit passes bPreservePhysicalTether = true, which keeps the existing Chaos
+	 * constraint identity alive.
+	 * Members already idle are left alone, so this is safe to call on any transition.
+	 * (ReleaseCooldown differs per transition and is set by the caller.)
 	 */
 	void ResetTransientPhaseState(bool bPreservePhysicalTether = false);
 
-	// Aim-ray aiming logic/state is separated into FRopeAimTargeting (AimTargeting member). Here is a subsystem
-	// Only the frame contract entry point remains — StartFreshThrow transition (orchestration) and SimFrame access are caught.
-	// is owned by the component.
-	// Immediately after the Subsystem fills the AimFrameColliders, the HUD/preview pending query is confirmed as the result cache.
+	// Aim-ray targeting logic and state live in FRopeAimTargeting (the AimTargeting member). What stays here
+	// is the frame contract with the subsystem: the StartFreshThrow transition, which is orchestration, and
+	// SimFrame access, which the component owns.
+	// Resolve the pending HUD/preview query into the result cache, right after the subsystem fills AimFrameColliders.
 	void ResolvePendingAimQuery();
-	// Guaranteed input request is confirmed to the prepared path with the same aiming list, and if it is in the execution standby state, it is immediately thrown.
+	// Resolve a queued GuaranteedWrap request into a prepared path against the same aiming list, and throw at once if it was armed.
 	void ResolvePendingGuaranteedAimThrow();
-	// Called immediately after the Subsystem fills FrameColliders to confirm the pending request as a hit/fallback context.
+	// Resolve a pending request into a hit or fallback context, right after the subsystem fills FrameColliders.
 	void ResolvePendingAimThrow();
-	// Only the mesh+bone specified by aim ray throw is maintained as a contact/wrap candidate.
-	// For collision-Free aim flights, the solver intentionally ignores this list, but
-	// The Wrapping path continues to use the filtered list. The general Flight solver also uses the same list.
+	// Keep only the mesh and bone an aim-ray throw named as contact and wrap candidates.
+	// A collision-free aim flight has the solver ignore this list on purpose, but the wrapping path keeps
+	// using the filtered one. An ordinary Flight solve uses the same list.
 	void FilterFrameCollidersForAimWrapTarget();
-	/** FRopeAimTargeting Context snapshot (collider snapshot + fallback dimensions) to pass to the query.*/
+	/** Snapshot of the context an aim query needs: the collider list plus the fallback dimensions. */
 	FRopeAimTargeting::FQueryContext MakeAimQueryContext() const;
 	/**
-	 * List of colliders to be used for aiming queries (aim ray hit, GuaranteedWrap preview arc search).
-	 * If you are aiming, a snapshot dedicated to aiming (rope AABB ∪ ray area — distant targets are not included in the physics list),
-	 * Physical snapshot when not aiming. The latter is a BP/AI path where Throw() is called directly without Wielder aiming flow —
-	 * There is no ray region, so the rope neighborhood list is the only source.
+	 * Colliders an aiming query may use — the aim ray hit, and the GuaranteedWrap preview arc search.
+	 * While aiming, that is the aiming-specific snapshot (the rope's AABB ∪ the ray's span), since a distant
+	 * target is not in the physics list. When not aiming it is the physics snapshot, which covers the
+	 * Blueprint and AI path where Throw() is called directly with no Wielder aiming flow — there is no ray
+	 * span then, so the list around the rope is the only source.
 	 */
 	const TArray<IRopeCollider*>& GetAimQueryColliders() const;
 
-	//~ Simulation state + logic possession per phase -------------------------------
-	// Non-UObject — Owned by value and not subject to GC tracking (only holds POD/weak references).
-	// The four logics below correspond 1:1 to the rope life order: Throw/Flight → Contacting → Wrapping → Wrapped.
-	/** Single Truth: Particle chain shared by solvers/logic/render.*/
+	//~ Sim state and per-phase logic ----------------------------------------------
+	// None of these are UObjects — held by value, outside GC, carrying only POD and weak references.
+	// The four logic members below follow the rope's life in order: Throw/Flight → Contacting → Wrapping → Wrapped.
+	/** The single source of truth: the particle chain shared by solver, logic and render. */
 	FRopeSimState       Sim;
-	/** Wrapped observation only current-frame view: GT scratch covering latest start pin/anchor override in Sim copy.*/
+	/** Current-frame view used for Wrapped observation only: a game-thread scratch copy of Sim with the latest start pin and anchor overrides applied. */
 	FRopeSimState       PullObservationSim;
 
-	/** XPBD physics (solver-owned Free span of Free/Flight and Wrapping/Wrapped).*/
+	/** XPBD physics. Owns Free and Flight outright, and the free span while Wrapping and Wrapped. */
 	FRopeXPBDSolver     Solver;
 
-	/** Throw/Flight: Whip swing (calculate + apply guide target).*/
+	/** Throw and Flight: the whip swing (computes guide targets, then applies them). */
 	FRopeWhipGuide      WhipGuide;
 
-	/** Flight/Contacting: Tracking the dominant bone of the contact candidate.*/
+	/** Flight and Contacting: tracks which bone dominates the contact candidates. */
 	FRopeContactTracker ContactTracker;
 
-	// Candidate storage used alternately for CPU Flight fallback and Contacting re-detection. Since the detector appends
-	// Reset each path immediately before use. GPU Flight directly consumes SimFrame.GpuFlightCandidates.
+	// Candidate storage shared by the CPU Flight fallback and the Contacting re-gather. The detector appends,
+	// so each path resets it immediately before use. GPU Flight consumes SimFrame.GpuFlightCandidates directly.
 	TArray<FRopeContactCandidate> ContactCandidateScratch;
 
-	// Next frame whip target of CPU Flight predictive contact. The GPU path is the subsystem's dispatch payload.
-	// Do not use this scratch because it carries a separately owned array.
+	// Next frame's whip targets for CPU Flight predictive contact. The GPU path carries its own array in the
+	// subsystem's dispatch payload and does not use this scratch.
 	TArray<FVector> NextGuideTargetScratch;
 
-	/** Contacting: Wrap seed (Wrapping entry material) created during capture.*/
+	/** Contacting: the wrap seed built at capture, which is what the Wrapping phase starts from. */
 	FRopeWrapState      PendingWrapSeed;
-	/** Immediately after capturing GPU Flight, the pending RT step and CPU Sim have not yet been matched authoritatively. During this
-	 *  Hold all Contacting dwell/dismiss/seed checks and retry SyncGpuPositionsForHandoff.*/
+	/** Set right after a GPU Flight capture, while the pending render-thread step and the CPU Sim have not yet
+	 *  been reconciled. Contacting's dwell, dismiss and seed checks are all held off until
+	 *  SyncGpuPositionsForHandoff succeeds. */
 	bool bPendingGpuCaptureHandoff = false;
 
-	/** Contacting~Wrapping: Snapshot of the rope progress coordinate system at the moment of capture (velocity/lying direction/progress plane normal —
-	 *  From Contacting, the node is stationary and can only be measured at this moment). Guide plane fallback for the CaptureTravelPlane axis.*/
+	/** Contacting through Wrapping: the rope's travel frame captured at the moment of capture — velocity,
+	 *  lay direction and travel plane normal. From Contacting onward the nodes are still, so this is the only
+	 *  moment it can be measured. It is the fallback axis for a CaptureTravelPlane guide plane. */
 	FRopeCaptureTravelFrame CaptureTravelFrame;
 
-	/** Wrapping: path incremental creation+front motion+mask (working state is .State).*/
+	/** Wrapping: incremental path build, front motion and mass mask (the working state is .State). */
 	FRopeWrappingPhase  WrappingPhase;
 
-	/** Wrapped: Maintain/release bone-local latch.*/
+	/** Wrapped: holds and releases the bone-local latch. */
 	FRopeWrapController WrapController;
 
 	/**
-	 * Maintains the bounded no-anchor section of the Composite Analytic Helix as a straight line between both actual anchors.
-	 * Component-only runtime state. Rather than attributing to one specific bone, both surface bindings are analyzed together every frame.
+	 * Holds an anchorless span of a composite analytic helix as a straight line between the two real anchors
+	 * on either side of it. Component-only runtime state: rather than attributing the span to one bone, both
+	 * surface bindings are re-resolved together every frame.
 	 */
 	struct FKinematicVirtualBridge
 	{
-		/** Internal projection nodes without anchors due to SDF failure between both actual surface points.*/
+		/** Interior nodes left without an anchor because the SDF projection failed between the two real surface points. */
 		TArray<int32> NodeIndices;
-		/** Left/right actual surface anchors to be reinterpreted as bone-local binding every frame.*/
+		/** The real surface anchors on each side, re-resolved from their bone-local bindings every frame. */
 		FRopeSurfaceAnchor LeftAnchor;
 		FRopeSurfaceAnchor RightAnchor;
-		/** Number of original segments including both end nodes × SegmentLength. This is the standard for diagnosing excessive straight height.*/
+		/** Original segment count across the span, including both end nodes, × SegmentLength. The reference for diagnosing an over-stretched bridge. */
 		float RestSpanLength = 0.0f;
-		/** Path distance to turn on the bridge when the Wrapping front reaches the actual anchor on the right.*/
+		/** Path distance at which the bridge switches on — when the wrapping front reaches the real anchor on the right. */
 		float ActivationFrontDistance = 0.0f;
-		/** Before commit, the incrementally registered bridge waits as false, and becomes true the moment both actual anchors are pinned.*/
+		/** A bridge registered incrementally before commit waits as false, and turns true the moment both real anchors are pinned. */
 		bool bActive = true;
-		/** A one-time log latch that prevents the overextension warning of the same bridge from repeating every frame.*/
+		/** One-shot log latch so one bridge's over-stretch warning does not repeat every frame. */
 		bool bLoggedStretchWarning = false;
 	};
 
-	/** Virtual run with real anchors on both sides. During Wrapping, it is pinned straight from reaching the front to Wrapped.*/
+	/** Spans bridged straight between two real anchors. Pinned straight from the moment the wrapping front reaches them through Wrapped. */
 	TArray<FKinematicVirtualBridge> KinematicVirtualBridges;
-	/** Prefix length synchronized to the component bridge during run calculated once by WrappingPhase.*/
+	/** How far along the runs WrappingPhase has already computed, so the component's bridges stay in step. */
 	int32 KinematicVirtualBridgeRunCursor = 0;
 
-	/** ③ GuidedThrow operation status: confirmed preview path (aiming) or ray end point arch (empty, bFreeThrow).*/
+	/** GuidedThrow state: either the resolved preview path (aimed) or an arc to the ray's endpoint (open space, bFreeThrow). */
 	FRopeGuidedThrowState GuidedThrowState;
 
-	// The whip guide spline plane confirmed at the start of the Flight is normal. When entering Wrapping through Contacting
-	// Reuse as the direction of the virtual Wrapping axis established at the bone location.
+	// Normal of the whip guide's spline plane, fixed at the start of the Flight. Entering Wrapping through
+	// Contacting reuses it as the axis of the virtual wrap plane placed at the bone.
 	bool bHasFlightGuidePlaneNormal = false;
 	FVector FlightGuidePlaneNormal = FVector::RightVector;
 
-	// Aim-ray aiming state (wrap target lock per throw + pending HUD/preview query/result + aim throw cue).
-	// Contains query/lock check logic —
-	// See comment FRopeAimTargeting(Logic/RopeAimTargeting.h).
+	// Aim-ray targeting state: the per-throw wrap target lock, the pending HUD/preview query and its result,
+	// and the aim throw cue. The query and lock logic lives with it — see FRopeAimTargeting
+	// (Logic/RopeAimTargeting.h).
 	FRopeAimTargeting AimTargeting;
 
-	/** ③ exclusive state in which the input ray is confirmed once in normal gather and then executed immediately or stored until montage notify.*/
+	/** GuaranteedWrap only: the input ray is resolved once at the next normal gather, then either thrown at once or held until the montage notify. */
 	struct FPendingGuaranteedAimThrow
 	{
 		FRopeAimRayThrowRequest Request;
@@ -1053,66 +1116,74 @@ private:
 	};
 	FPendingGuaranteedAimThrow PendingGuaranteedAimThrow;
 
-	/** Executes the confirmed ③ request as prepared or Free-arc at the time of input without inquiry and sends a completion/rejection callback.*/
+	/** Throw the resolved request along its prepared path, or as an open-space arc, with no further queries, and fire the completion or rejection callback. */
 	bool ExecutePendingGuaranteedAimThrow();
 
-	//~ phase timer --------------------------------------------------------
-	/** Contacting dwell time (WrapDecisionTime check).*/
+	//~ Phase timers ---------------------------------------------------------------
+	/** Time spent in Contacting, against the WrapDecisionTime threshold. */
 	float ContactingElapsed = 0.0f;
 
-	/** Time spent in Flight without capture after exiting Whip.*/
+	/** Time spent in Flight since the whip ended, with no capture. */
 	float FlightNoContactElapsed = 0.0f;
 
-	/** Time remaining until Releasing → Free return.*/
+	/** Time left before Releasing returns to Free. */
 	float ReleaseCooldown = 0.0f;
 
-	/** The time during which the maximum tension continuously exceeds TensionReleaseForce during Wrapped.*/
+	/** How long the peak tension has stayed above TensionReleaseForce while Wrapped. */
 	float TensionOverTime = 0.0f;
 
-	// Wrapped traction/Smoothing state bundle (Pull sample/EMA 3 types/Active Pull/Tether overflow/Warning latch). Meaning of each member
-	// See FRopePullDriveState(Core/RopePullDriveState.h) comment for reset protocol (what survives) on transition.
+	// Wrapped traction and smoothing state: the pull sample, three EMAs, the active pull, the tether overshoot
+	// and the warning latches. For what each member means and what survives a transition, see
+	// FRopePullDriveState (Core/RopePullDriveState.h).
 	FRopePullDriveState PullDrive;
-	// Passive material-length authority: rejected movement, constraint λ/tension and live
-	// material/anchor history. Never sourced from XPBD SegmentTension.
+	// Passive material-length authority: the rejected movement, the constraint λ and tension, and the live
+	// material and anchor history. Never sourced from XPBD SegmentTension.
 	FRopeLengthConstraintState LengthConstraintState;
 	FRopeResolvedWrappedEndpoints WrappedEndpointCache;
 
-	// Wrapping velocity(cm/s, +Wrapping/-unwrapping, 0=stationary). SetReelRate is set, UpdateReel is applied to each frame.
+	// Reel speed (cm/s; positive reels in, negative reels out, 0 stops). SetReelRate writes it and UpdateReel
+	// applies it each frame.
 	float ReelRate = 0.0f;
 
-	// Applying a rewrapping frame (at the beginning of Prepare): Adjust the length by ReelRate × dt in the allowable phase.
+	// Apply one frame of reeling, at the start of Prepare: change the length by ReelRate × dt in the phases that allow it.
 	void UpdateReel(float DeltaTime);
 
-	//~ Sleep/LOD (Scaling) ---------------------------------------------------
-	// Status and check are separated into FRopeSolverThrottle (Logic/RopeSolverThrottle.h) — The component includes camera access (GT) and
-	// Only the sleep transition log remains.
+	//~ Sleep and LOD --------------------------------------------------------------
+	// The state and the decision live in FRopeSolverThrottle (Logic/RopeSolverThrottle.h); what stays in the
+	// component is the camera access, which is game-thread, and the sleep transition log.
 	FRopeSolverThrottle Throttle;
 
-	// Distance LOD scale calculation (Prepare, GT): The subsystem converts the camera position obtained per-frame into a distance and delegates it to Throttle.
+	// Distance LOD scale (Prepare, game thread): the subsystem hands over the camera position it fetches once
+	// per frame, this turns it into a distance and delegates to Throttle.
 	void ComputeSolverLOD(const TOptional<FVector>& CameraLocation);
-	// LOD reflected valid iteration (CPU solve/GPU step shared — subsystem called).
+	// LOD-scaled iteration count, shared by the CPU solve and the GPU step, called by the subsystem.
 	int32 GetLODScaledIterations() const { return Throttle.LODScaledIterations(SolverConfig.Iterations); }
 
-	// Operation 1 — Automatic traction (Tether, Docs/PoC/05): Observation (entire chain C·opening velocity) → solve λ → apply impulse pairs at both ends.
-	// ApplyWrappedTraction is called every Wrapped frame. The results are recorded as a single unit in LengthConstraintState.
+	// Automatic traction, half one — the tether. Observe the whole chain's chord and opening speed, solve for
+	// λ, then apply an equal and opposite impulse pair at the two ends. Called every Wrapped frame from
+	// ApplyWrappedTraction, and the result is recorded in one place, LengthConstraintState.
 	void UpdateConstraintTether(float DeltaTime);
 
-	// (Constraint tether — ragdoll target half) Engine physics constraint: Kinematic proxy of corner ↔ anchor point of Wrapped bone
-	// Tie with a spherical limit of leg rest length. The target is **all simulated bodies** (skeletal bone + component body):
-	// GT per-frame velocity impulse is the joint body's “whole body size kick → runaway” vs. “bone size λ → traction force collapse” dilemma
-	// (2026-07-20 Pierce actual measurement iteration), it also structurally loses under aerial load (suspended prop) — gravity and swing
-	// During the physics substep, GT only performs post-offset one beat late, so floating, pendulum pumping, orthogonal damping
-	// Dependency is created (2026-07-22 PIE). Chaos constraints are solved together with gravity, joints, and contact in substep (Docs/PoC/05
-	// §3.4-1·§9). If Wielder is present, PrePhysics performs a single drive and PostPhysics only observes force.
-	// Custom mover without Wielder uses UpdateConstraintTether's legacy drive. Dissolution is abort/release,
-	// Change target/bone, performed in EndPlay.
+	// Automatic traction, half two — the ragdoll target. An engine physics constraint ties a kinematic proxy
+	// at the corner to an anchor point on the wrapped bone, with a spherical limit at the leg's rest length.
+	// This covers **every simulating body**: skeletal bones and component bodies alike.
+	// A per-frame game-thread velocity impulse cannot serve them. On a jointed body it is caught between a
+	// whole-body-sized kick, which runs away, and a bone-sized λ, which collapses the traction force; and it
+	// loses structurally under an airborne load such as a suspended prop, where gravity and swing act during
+	// the physics substep while the game thread only corrects a beat late, producing floating, pendulum
+	// pumping and a dependence on orthogonal damping. A Chaos constraint is solved inside the substep
+	// together with gravity, the joints and ground contact, which is what makes it hold.
+	// With a Wielder present, PrePhysics drives it once and PostPhysics only observes the force. A custom
+	// mover without a Wielder falls back to UpdateConstraintTether's drive. It is torn down on abort or
+	// release, on a target or bone change, and in EndPlay.
 	void UpdatePhysicalTether(class UPrimitiveComponent* TargetPrim, FName Bone,
 		const FVector& AnchorWorld, const FVector& CornerWorld, float LegRestLen, float DeltaTime);
-	/** Currently only Chaos constraint force is read. Proxy/limit transform does not change.*/
+	/** Reads the current Chaos constraint force only. The proxy transform and the limit are left alone. */
 	void SamplePhysicalTetherForce(float DeltaTime);
 	/**
-	 * Wielder calls right after movement/right before Chaos. authoritative projection before attempted and actual rejection velocities
-	 * is recorded as a reaction, and if it is a physical target, the same attempt is also delivered to the Chaos proxy.
+	 * Called by the Wielder right after movement and right before Chaos. The attempted move and the velocity
+	 * actually rejected by the authoritative projection are recorded as the reaction, and for a physical
+	 * target the same attempt is forwarded to the Chaos proxy.
 	 */
 	void PrepareWielderLengthConstraint(
 		const FRopeWielderMovementConstraint& Constraint,
@@ -1134,127 +1205,137 @@ private:
 		const FRopeWielderMovementConstraint& Constraint) const;
 	void TeardownPhysicalTether();
 
-	/** Physical constraint Tether's kinematic proxy (corner following) and constraint — runtime only, lives only on the simulation body target.*/
+	/** The physical tether's kinematic proxy, which follows the corner, and its constraint. Runtime only, and only for a simulating-body target. */
 	UPROPERTY(Transient)
 	TObjectPtr<class USphereComponent> PhysicalTetherProxy;
 	UPROPERTY(Transient)
 	TObjectPtr<class UPhysicsConstraintComponent> PhysicalTetherConstraint;
-	// Target/bone (change detection → regeneration) bound by constraint and current limit (cm — for update skip, <0 = not set).
+	// Target and bone the constraint is bound to (a change regenerates it) and the current limit (cm; < 0 means unset, and it skips the update).
 	TWeakObjectPtr<class UPrimitiveComponent> PhysicalTetherTarget;
 	FName PhysicalTetherBone = NAME_None;
 	float PhysicalTetherLimit = -1.0f;
-	/** GFrameCounter: Wielder has already used authoritative proxy/limit in this frame PrePhysics.*/
+	/** GFrameCounter of the frame in which the Wielder already drove the proxy and limit authoritatively in PrePhysics. */
 	uint64 PhysicalTetherPrePhysicsFrame = MAX_uint64;
-	// Body-local anchor pinned during creation (constraint Frame2) — When the wrap anchor is relocated within the same (target, bone)
-	// The reference value of the guard that detects and regenerates drift.
+	// Body-local anchor pinned at creation (constraint Frame2). The reference the drift guard compares against
+	// to notice that the wrap anchor moved within the same (target, bone) and regenerate.
 	FVector PhysicalTetherAnchorLocal = FVector::ZeroVector;
-	// EMA of observation anchorLocal — Prevents thrashing by drift guard regenerating every frame. AnchorWorld is a rope Sim
-	// (GPU 1~2 frame delay mirror), BodyTM comes from the current bone, so the delay difference between the two in the fast ragdoll bone is
-	// Shakes anchorLocal significantly every frame (not true relocation). You should check with this smoothing value, not the instantaneous value.
-	// Delay noise is filtered out and only continuous relocations (seed joining/promotion) are captured.
+	// EMA of the observed local anchor, so the drift guard does not regenerate every frame. AnchorWorld comes
+	// from the rope's Sim, which on the GPU path mirrors one to two frames late, while the body transform
+	// comes from the bone as it is now; on a fast ragdoll bone that lag difference alone shakes the local
+	// anchor every frame without any real relocation. Comparing the smoothed value instead of the instant one
+	// filters the lag noise out and leaves only sustained relocations — a seed joining, or a promotion.
 	FVector PhysicalTetherSmoothedAnchorLocal = FVector::ZeroVector;
 
-	// (Tether) Calculate the wielder traction direction (hand (node0) → rope first leg = anchor side) and use PullDrive.SmoothedWielderPullDir.
-	// Returns EMA smoothing (PullDirSmoothTime) — Prevents the input axis from bouncing due to direction jitter (180° flip degenerate is raw reseed).
-	// If bInstantaneous, omit EMA and use instantaneous geometry (air swing — EMA cannot keep up with orbital rotation)
-	// Tangential error in lag direction interferes with swing operation; The state continues to seed and upon landing, EMA re-entry is continuous).
+	// Tether: compute the wielder's pull direction — hand (node 0) toward the rope's first leg, that is toward
+	// the anchor — and return it smoothed into PullDrive.SmoothedWielderPullDir with an EMA (PullDirSmoothTime),
+	// so direction jitter cannot make the input axis bounce (a degenerate 180° flip reseeds it raw instead).
+	// With bInstantaneous the EMA is skipped for raw geometry: in an airborne swing the EMA cannot keep up with
+	// the orbit, and the tangential error of the lagging direction brakes and accelerates the swing frame by
+	// frame, fighting the player. The state keeps seeding meanwhile, so re-entering the EMA on landing is continuous.
 	FVector ComputeSmoothedWielderDir(const FVector& Aim, const FVector& DirToAim, float DeltaTime, bool bInstantaneous);
 
-	// Updates the pullability check of this Wrapped frame regardless of overshoot — the climb-in direction of the active pull and
-	// Distribution observation (LastTargetShare binary value) shares PullDrive.bTargetPullable. Comparison of effective mass at both ends + hysteresis.
+	// Update this Wrapped frame's pullability decision, independent of overshoot — the active pull's climb-in
+	// direction and the distribution observation (the binary LastTargetShare) share PullDrive.bTargetPullable.
+	// It compares the effective mass at each end, with hysteresis.
 	void UpdateTargetPullable();
 
-	// In the Wrapped traction section, target/wielder is analyzed delayed and shared by check, tether, and basic pull of the same frame.
+	// Resolve target and wielder once per Wrapped traction pass, then share it with that frame's gate, tether and pull.
 	const FRopeResolvedWrappedEndpoints* GetOrResolveWrappedEndpoints();
 
-	// (not pullable) Apply active Pull force to wielder (rope owner) — target is heavy
-	// climb-in, where the wielder is pulled towards the anchor. Mirror the owner side of ApplyPullForce (simulation root → CharacterMovement).
+	// Climb-in (target not pullable): apply the active pull force to the wielder, the rope's owner, so the
+	// wielder is drawn toward the anchor instead. Mirrors ApplyPullForce's owner side (simulating root → CharacterMovement).
 	void ApplyPullForceToWielder(const FVector& Force, float DeltaTime);
 
-	// Active Pull tension cap velocity drive: Pull the target physical body to target velocity (ActivePullMaxLinearSpeed) along direction (Dir).
-	// , clamp the impulse to J = min(mass×ΔV, MaxTension×dt). For light targets, the target velocity is immediate (no overshoot),
-	// Heavy objects lag behind in tension limits (realistic mass dependence). Eliminates overshoot, dust, and bumps of constant force (a=F/m).
+	// Active pull as a tension-capped velocity drive: pull the target body along Dir toward the target speed
+	// (ActivePullMaxLinearSpeed), clamping the impulse to J = min(mass × ΔV, MaxTension × dt). A light target
+	// reaches the target speed at once with no overshoot, and a heavy one lags behind under the tension limit,
+	// which is the mass dependence you want. It removes the overshoot, drift and juddering of a constant force (a = F/m).
 	void ApplyPullVelocityDrive(UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float MaxTension, float DeltaTime) const;
 
-	// Active Pull Clamps the angular velocity of the target physical body with the HoldConfig cap (residual ragdoll spin safety net — forces the force to the center of gravity)
-	// , so there is no pull torque already). ApplyPullForce is called after force application. If BoneName None, component unit.
+	// Clamp the pulled body's angular velocity with the HoldConfig cap — a safety net for residual ragdoll spin,
+	// since the force is applied at the centre of mass and carries no torque of its own. Called after the force
+	// is applied. With BoneName None it acts on the whole component.
 	void ClampPulledBodyVelocity(UPrimitiveComponent* Prim, FName BoneName) const;
 
-	// Shared finalization of all release triggers (phase transition+node return+transient state disposal+cooldown+event).
+	// Shared finalization for every release trigger: phase transition, handing nodes back, dropping transient state, cooldown and event.
 	void FinishWrapRelease(FName Bone, ERopeReleaseReason Reason, const FString& ReasonLog);
 
-	// Shared finalization of departure before establishment (Captured~Wrapping): Per-instance release after Flight transition + temporary state disposal
-	// Notify (post-clearance notification — DispatchReleased reentrant contract). Dismiss/stall/Wrapping-abort shared in 4 places. Bone is
-	// Captured as a value at the time of call (before Reset). Before commit, bWasWrapped=false (per-instance only, no central signal).
+	// Shared finalization for leaving before the wrap was established (Captured through Wrapping): transition
+	// back to Flight, drop the transient state, then send the per-instance release notification — after the
+	// state is clear, per DispatchReleased's reentrancy contract. Shared by four call sites: dismiss, stall and
+	// two wrapping aborts. Bone is captured by value before the reset. Before commit bWasWrapped is false, so
+	// this is per-instance only and raises no central signal.
 	void FinishPreCommitReleaseToFlight(FName Bone, const TCHAR* PhaseLog);
 
-	// ReleaseWrap/CutRope shared Body: Releases an ongoing grab/Wrapping for a given reason (including interpretation of bone attribution).
+	// Shared body of ReleaseWrap and CutRope: release the grab or wrap in progress for the given reason,
+	// including working out which bone to report.
 	void ReleaseWrapAs(ERopeReleaseReason Reason);
 
-	// (ApplyPullForce — Action 2, Apply Pull Force — moves to the protected extension hook.)
-
-	//~ Subsystem frame contract (written/read by RopeSimSubsystem) --------------
-	// Simulation input/output bundle per frame. For meaning/lifetime conventions for each member, refer to the FRopeSimFrameIO (Core/RopeSimFrameIO.h) comment.
-	// The field name is the same as when it was an individual member, so only the access path is SimFrame.X (CL 303).
+	//~ Subsystem frame contract (written and read by RopeSimSubsystem) -------------
+	// Per-frame simulation input/output bundle. For each member's meaning and lifetime see FRopeSimFrameIO
+	// (Core/RopeSimFrameIO.h).
 	FRopeSimFrameIO SimFrame;
 
-	// Last render push status. stationary rope skips dynamic-data/transform dirty, but GPU resident transition and
-	// A component transform change must be compared to push the new WorldToLocal/local centerline.
+	// State of the last render push. A rope at rest skips the dynamic-data and transform dirty flags, but a
+	// switch to or from GPU residency and a change in the component transform both have to be noticed so the
+	// new WorldToLocal and local centerline get pushed.
 	FTransform LastRenderDataComponentTransform = FTransform::Identity;
 	bool bHasLastRenderDataComponentTransform = false;
 	bool bLastRenderDataGpuResident = false;
 
-	//~ Initialization/Utility ----------------------------------------------------------
+	//~ Initialization and utilities ------------------------------------------------
 	void InitRope();
 
-	/** If the Sim is empty, it is initialized once (safety guard at the beginning of OnRegister/Throw/Prepare).*/
+	/** Initialize the sim once if it is empty — the safety guard at the top of OnRegister, Throw and Prepare. */
 	void EnsureRopeInitialized();
 
 #if WITH_GAMEPLAY_DEBUGGER
-	// Populates the centerline/Wrapped/collider common fields into a snapshot when subject to debug capture (called from FinalizeSimFrame).
-	/** Always fill the header summary, and fill the rest of the sections with only what's in the CaptureMask (you don't incur the cost of collecting disabled views).*/
+	// Fill the centerline, Wrapped and collider fields shared by every view into the snapshot, when this rope
+	// is the debug capture target (called from FinalizeSimFrame).
+	/** The header summary is always filled; the remaining sections only when CaptureMask asks for them, so a disabled view costs nothing to collect. */
 	void FillDebugSnapshot(FRopeDebugSnapshot& Snapshot, ERopeDebugCapture CaptureMask) const;
 #endif
 
-	//~ Throw ----------------------------------------------------------------
-	// (MakeDefaultThrowContext/ResolveThrowContext moved to protected extension hook.)
-	/** Creates a guaranteed preview with a context that has already passed ResolveThrowContext.
-	 *  The success/failure path of ThrowWithContext is an internal entry point to share the same analysis result.*/
+	//~ Throw -----------------------------------------------------------------------
+	/** Build a GuaranteedWrap preview from a context that has already been through ResolveThrowContext.
+	 *  The internal entry point that lets ThrowWithContext's success and failure paths share one resolution. */
 	bool BuildPreparedWrappingPreviewFromResolvedContext(const FRopeThrowContext& ResolvedThrowContext,
 		FRopePreparedThrowPreview& OutPrepared, FString* OutFailureReason) const;
 
-	// Throwing startup is read in the pinned order of the helpers in step 4 below (StartFreshThrow is orchestration only).
+	// A throw starts by running the four helpers below in the order they are listed; StartFreshThrow is
+	// orchestration and nothing else.
 	void StartFreshThrow(const FRopeThrowContext& ThrowContext);
 
-	/** ① Common dictionary summary of all throws: active wrap is released with a normal release notification,
-	 *  Allows discarding a bridge/phase transient and starting a new throw without cooldown.*/
+	/** 1) Clear the way for any throw: release an active wrap with a normal release notification, drop the
+	 *  bridges and the phase transients, and start fresh without waiting out a cooldown. */
 	void ResetStateForNewThrow();
 
-	/** Configure Prepared/Free shared GuidedThrow status and starting node pin.*/
+	/** Set up the GuidedThrow state and the start node pin, shared by the prepared and open-space paths. */
 	bool BeginGuidedThrowState(FRopePreparedThrowPreview&& Prepared, bool bFreeThrow);
 
-	/** ② Chain reset: Pin hand (node ​​0) to the origin, all node velocity 0 (Prev=Pos), increase GPU resident buffer reseed generation.*/
+	/** 2) Reset the chain: pin the hand (node 0) at the origin, zero every node's velocity (Prev = Pos), and bump the GPU resident buffer's reseed generation. */
 	void ResetChainForThrow(const FVector& HandOrigin);
 
-	/** ③ Start whip swing: Assemble swing base/inherited velocity in ResolvedThrow and activate WhipGuide + Snap T=0.*/
+	/** 3) Start the whip swing: assemble the swing basis and inherited velocity from the resolved throw, then activate WhipGuide and snap it to T = 0. */
 	void BeginWhipSwingFromThrow(const FRopeThrowContext& ResolvedThrow);
 
-	/** ④ Verlet velocity injection: Inject throwing velocity by pushing PrevPositions in the direction opposite to aiming.
-	 *  (velocity = (Pos-Prev)/dt in Verlet — just pushing Prev injects pure velocity without change in position).
-	 *  Since ③ uses the confirmed aiming direction (WhipGuide.GetAimDir), it must be called after ③.*/
+	/** 4) Inject the throw velocity, Verlet-style, by pushing PrevPositions back along the aim direction.
+	 *  (Verlet velocity is (Pos - Prev)/dt, so moving Prev alone injects velocity without moving anything.)
+	 *  It reads the resolved aim direction from WhipGuide.GetAimDir, so it must run after step 3. */
 	void InjectThrowVelocityIntoVerlet(const FRopeThrowContext& ResolvedThrow);
 
-	/** GuidedThrow phase One frame progresses. Move the node to the preview centerline and turn off the solver.*/
+	/** Advance GuidedThrow by one frame: move the nodes onto the preview centerline with the solver off. */
 	void UpdateGuidedThrow(float DeltaTime);
 
-	/** Upon completion of GuidedThrow, convert the prepared anchor to FRopeWrapState and immediately commit to Wrapped.*/
+	/** On GuidedThrow completing, turn the prepared anchors into an FRopeWrapState and commit straight to Wrapped. */
 	void FinishGuidedThrow();
 
-	/** Single point of Captured notification (native hook → BP delegate). ①② Flight Capture and ③ Reach share —
-	 *  If you place an inline broadcast for each path, it will not be visible even if one side is missing (actually, ③ was like that).*/
+	/** The single point that raises Captured (native hook, then Blueprint delegate). Shared by the Flight
+	 *  capture and the GuaranteedWrap reach — an inline broadcast per path leaves one side silent without
+	 *  anyone noticing, which is exactly what happened to the guaranteed path once. */
 	void DispatchCaptured(FName Bone);
 
-	/** Throwing in the air (no target): Initiates an arch GuidedThrow toward the ray's endpoint (EndpointWorld) (Free if completed without being stuck).*/
+	/** Throw into open space with no target: start an arc GuidedThrow toward EndpointWorld, returning to Free if it lands without catching. */
 	bool StartFreeGuidedThrow(const FRopeThrowContext& ThrowContext, const FVector& EndpointWorld);
 
 	/** The endpoint for a throw into open space: the ray end at rope length, pulled back to just in front
@@ -1283,84 +1364,91 @@ private:
 
 	FVector ComputeThrowInheritedVelocity(const FRopeThrowContext& ThrowContext) const;
 
-	/** throwing strength contract gate: Interpret Context.ThrowSpeed (if 0, ThrowParams.ThrowSpeed fallback)
-	 *  If it is a positive number (≥1cm/s), it is stored in OutThrowSpeed and true, otherwise it is false after logging the warning. **Called before state change**.*/
+	/** Throw-strength gate: resolve Context.ThrowSpeed, falling back to ThrowParams.ThrowSpeed when it is 0.
+	 *  A positive result (≥ 1 cm/s) is written to OutThrowSpeed and returns true; anything else logs a warning
+	 *  and returns false. **Called before any state changes.** */
 	bool TryResolveValidThrowSpeed(const FRopeThrowContext& Context, float& OutThrowSpeed) const;
 
-	/** Create a configuration snapshot to be passed on to WhipGuide from Rope|Whip UPROPERTYs.*/
+	/** Build the config snapshot WhipGuide receives, from the Rope|Whip properties. */
 	FRopeWhipGuide::FConfig MakeWhipGuideConfig() const;
 
-	/** Tail weight of throwing impulse (0→1 smooth from FirstTailNode to end).*/
+	/** Weight of the throw impulse along the tail (smoothly 0 → 1 from FirstTailNode to the last node). */
 	float TailWeightByIndex(int32 NodeIndex, int32 FirstTailNode, int32 LastNode) const;
 
-	//~ Flight ---------------------------------------------------------------
-	// The contact detection pipeline itself is separated into FRopeFlightContactDetector (static, UObject independent).
-	// All that remains here is assembly code that requires a UObject context.
+	//~ Flight ----------------------------------------------------------------------
+	// The detection pipeline itself is FRopeFlightContactDetector (static, no UObject dependency). What stays
+	// here is the assembly that needs UObject context.
 
-	/** Parameter snapshot to be passed to the detector (WrapConfig + tube radius + component front + substep dt + frame dt).
-	 *  SubstepDeltaTime is FixedDt derived from SolverConfig.Substeps and SurfaceVelocity(cm/s→displacement) for relative motion evaluation.
-	 *  conversion, FrameDeltaTime is used to convert substep → frame displacement of predicted contact extrapolation.*/
+	/** Parameter snapshot for the detector: WrapConfig, the tube radius, the component's forward, the substep dt
+	 *  and the frame dt. SubstepDeltaTime is the FixedDt derived from SolverConfig.Substeps, used to turn
+	 *  SurfaceVelocity (cm/s) into a displacement for the relative-motion test; FrameDeltaTime converts a
+	 *  substep displacement into a frame one when extrapolating a predicted contact. */
 	FRopeFlightContactDetector::FParams MakeFlightDetectParams(float DeltaTime) const;
 
-	// FinalizeSimFrame's Flight block is read in the pinned order of the helpers below:
-	// ① candidate calculation → ② capture check/transition → ③ observation (stats/debugger — read-only consumption separate from check).
+	// Finalize's Flight block runs the helpers below in the order they are listed:
+	// 1) build candidates → 2) evaluate the capture and transition → 3) observe (stats and debugger, read-only
+	// consumption kept apart from the decision).
 
-	/** Applies the CanWrapTarget gate to the candidate list (removes prohibited targets). Flight calculation and contact re-collection
-	 *  Puts the filter in one place so that it uses the same check set — fixing the condition causes the two phases to move together.*/
+	/** Apply the CanWrapTarget gate to a candidate list, dropping barred targets. Flight's build and the
+	 *  Contacting re-gather share this one filter, so tightening the condition moves both phases together. */
 	void RemoveNonWrappableCandidates(TArray<FRopeContactCandidate>& Candidates) const;
 
-	/** ① Select/calculate Flight candidate for this frame. GPU results consume the SimFrame array directly without copying it,
-	 *  CPU fallback is created in ContactCandidateScratch in the order of actual→predicted→relative motion.*/
+	/** 1) Select or build this frame's Flight candidates. GPU results are consumed straight out of the SimFrame
+	 *  array without a copy; the CPU fallback fills ContactCandidateScratch in actual → predicted →
+	 *  relative-motion order. */
 	TArray<FRopeContactCandidate>& GetOrBuildFlightContactCandidates(float DeltaTime,
 		const FRopeFlightContactDetector::FParams& DetectParams);
 
-	/** Calculate candidate for CPU Flight fallback only. OutCandidates and NextGuideTargetScratch are reset by the caller in advance.*/
+	/** Build candidates for the CPU Flight fallback only. The caller resets OutCandidates and NextGuideTargetScratch first. */
 	void BuildCpuFlightContactCandidates(float DeltaTime,
 		const FRopeFlightContactDetector::FParams& DetectParams,
 		TArray<FRopeContactCandidate>& OutCandidates);
 
 	/**
-	 * Assisted aim lock-only synchronous supplement: The actual path of the CPU whip target is independent of the GPU asynchronous result.
-	 * Inspect the bone collider that is accurately locked. Readback of middle frame loss and same-mesh deep neighboring bones
-	 * Prevents primary occlusion. In Flight, the predicted path is also included, and in Contacting, it is kept as actual-only.
-	 * No additional costs are added to regular full/non-aiming flights.
+	 * Synchronous top-up for an AssistedJudged aim lock: query the bone collider the aim locked onto directly,
+	 * along the CPU whip's real path, independent of the asynchronous GPU result. That covers a readback lost
+	 * on an intermediate frame, and a nearer bone on the same mesh occluding the locked one. In Flight it
+	 * includes the predicted path as well; in Contacting it stays actual-only.
+	 * An ordinary full-simulation or unaimed flight pays nothing extra for this.
 	 */
 	void AddSynchronousAssistedAimContactCandidates(float DeltaTime,
 		const FRopeFlightContactDetector::FParams& DetectParams,
 		TArray<FRopeContactCandidate>& InOutCandidates);
 
-	/** ②a Aggregate the candidates once to create a frame-local result to be shared between capture check and observation.*/
+	/** 2a) Fold the candidates into one frame-local evaluation, shared by the capture decision and the observation. */
 	FRopeFlightCaptureEvaluation EvaluateFlightCapture(const TArray<FRopeContactCandidate>& Candidates,
 		const FRopeFlightContactDetector::FParams& DetectParams) const;
 
-	/** ②b Apply the evaluation results to the game state. If captured, move the Tracker to ContactTracker and go to Contacting.
-	 *  , otherwise, end the whip and roll the failure timer. Returns whether or not it is actually captured.*/
+	/** 2b) Apply the evaluation to game state: on a capture, move the tracker into ContactTracker and go to
+	 *  Contacting; otherwise end the whip and advance the no-contact timer. Returns whether it captured. */
 	bool ApplyFlightCaptureEvaluation(float DeltaTime, const TArray<FRopeContactCandidate>& Candidates,
 		FRopeFlightCaptureEvaluation& Evaluation);
 
-	/** ③ Observation: stat counter (only when collecting) + debugger snapshot (when OutSnapshot != null — debugger target)
-	 *  only the rope comes over). All read-only consumption that is not involved in check(①②) is trapped here —
-	 *  The purpose is to ensure that no debug/stat code is left in the body of FinalizeSimFrame.*/
+	/** 3) Observation: stat counters, collected only when stats are on, plus the debugger snapshot when
+	 *  OutSnapshot is non-null, which only happens for the rope the debugger is targeting. Every read-only
+	 *  consumer that takes no part in the decision belongs here, which is what keeps debug and stat code out
+	 *  of FinalizeSimFrame's body. */
 	void RecordFlightObservation(const FRopeFlightContactDetector::FParams& DetectParams,
 		const TArray<FRopeContactCandidate>& Candidates, const FRopeContactTracker& FrameTracker,
 		bool bShouldCapture, FRopeDebugSnapshot* OutSnapshot);
 
 #if WITH_GAMEPLAY_DEBUGGER
-	/** ③ Observation assistance (debugger target rope only): Per-node detection input/check visualization data collection. bone pipeline and
-	 *  Query the detector separately (previously node sweep) — Intentional duplication, costing only one target rope.*/
+	/** 3, debugger only: per-node detection input and decision visualization for the targeted rope. It queries
+	 *  the detector separately from the bone pipeline — deliberate duplication, paid for by one rope. */
 	void GatherFlightNodeDebug(const FRopeFlightContactDetector::FParams& DetectParams,
 		TArray<FRopeFlightNodeDebug>& OutNodeDebug) const;
 #endif
 
-	/** When capture is confirmed, the evaluation tracker moves to the owned state and enters the Contacting state.
-	 *  (PendingWrapSeed/CaptureTravelFrame/Timer).*/
+	/** On a confirmed capture, take ownership of the evaluated tracker and set up Contacting
+	 *  (PendingWrapSeed, CaptureTravelFrame, timers). */
 	void BuildContactingState(FRopeContactTracker&& EvaluatedTracker,
 		const TArray<FRopeContactCandidate>& Candidates, float DeltaTime);
 
-	//~ Contacting -----------------------------------------------------------
-	// Re-collect actual contacts every frame and update the tracker dwell: Continuous contact → Wrapping, contact loss →
-	// dismiss(Flight), dwell is less than the threshold → safety net timeout (Flight). The check standard is the total progress
-	// It is not a tracker dwell (reset when the dominant bone changes).
+	//~ Contacting ------------------------------------------------------------------
+	// Re-gather actual contacts each frame and advance the tracker's dwell: sustained contact goes to Wrapping,
+	// lost contact dismisses back to Flight, and a dwell that never reaches the threshold times out to Flight
+	// as a safety net. The decision reads total progress, not the tracker dwell, which resets whenever the
+	// dominant bone changes.
 	void UpdateContacting(float DeltaTime);
 
 	bool ShouldDismissContacting() const;
@@ -1370,56 +1458,61 @@ private:
 	FRopeWrapState BuildWrapSeedFromContactingState(const TArray<FRopeContactCandidate>& Candidates) const;
 
 	/**
-	 * Configure the seed latch/anchor of one (Bone, Mesh) target (dominant/secondary shared by seed multiplexing).
-	 * OutLatch is always filled, and is true if the surface frame is obtained from the contact candidate and an anchor is created.
-	 * OutMesh is the result of falling back to the candidate mesh when there is no tracker mesh (null if both are missing).
+	 * Build the seed latch and anchor for one (Bone, Mesh) target — shared by the dominant target and, when the
+	 * seed is multiplexed, the secondary ones.
+	 * OutLatch is always filled. It returns true when a surface frame was obtained from the contact candidates
+	 * and an anchor was built. OutMesh falls back to the candidate's mesh when the tracker has none, and is
+	 * null when neither does.
 	 */
 	bool BuildSeedLatchForTarget(const TArray<FRopeContactCandidate>& Candidates,
 		FName Bone, const USceneComponent* TrackedMesh, int32 NodeIndex, float RopeDistance,
 		FRopeLatchNode& OutLatch, FRopeSurfaceAnchor& OutAnchor, const USceneComponent*& OutMesh) const;
 
-	//~ Wrapping -------------------------------------------------------------
-	// The actual logic of the Wrapping phase, such as path creation/front motion/mask, is FRopeWrappingPhase(WrappingPhase).
-	// Separated. Here, only the orchestration that determines phase transitions and events remains.
+	//~ Wrapping --------------------------------------------------------------------
+	// The Wrapping phase's real work — path build, front motion, mass mask — is FRopeWrappingPhase
+	// (the WrappingPhase member). What stays here is the orchestration that drives transitions and events.
 
 	void StartWrappingFromContacting();
 
 	void UpdateWrapping(float DeltaTime);
 
-	/** Calling context to pass to WrappingPhase (WrapConfig/collider snapshot/tube radius/log name).*/
+	/** The calling context handed to WrappingPhase: WrapConfig, the collider snapshot, the tube radius and the log name. */
 	FRopeWrappingPhase::FContext MakeWrappingContext() const;
 
 	/**
-	 * Storage of the list of colliders passed by MakeWrappingContext — contains only those that passed the CanWrapTarget gate
-	 * (FContext holds an array *by reference*, so it needs storage that outlives the call).
-	 * It is a gateway that prevents the prohibited object from being raised as a surface/attribution candidate in the Wrapping path build, and is a gate.
-	 * In ropes that are not overridden, the contents are the same as FrameColliders (operation is unchanged).
+	 * Storage behind the collider list MakeWrappingContext hands over — only those that passed the
+	 * CanWrapTarget gate. (FContext holds the array *by reference*, so it needs storage that outlives the call.)
+	 * This is the gate that keeps a barred target from surfacing as a surface or attribution candidate during
+	 * the wrap path build. On a rope that does not override the gate its contents match FrameColliders, so
+	 * behaviour is unchanged.
 	 */
 	mutable TArray<IRopeCollider*> WrappableColliders;
 
 	void CommitWrapping();
 
-	/** Wrapped establishment event payload assembly (commit seed + decision value → NotifyWrapped/OnRopeWrapped shared).*/
+	/** Assemble the wrap event payload from the commit seed and the decision values, shared by NotifyWrapped and OnRopeWrapped. */
 	FRopeWrappedEventInfo MakeWrappedEventInfo(const FRopeWrapState& Seed, float AngleDeg, float CoverageDeg) const;
 
-	/** wrap established Single broadcast: native hook + per-instance BP delegate + subsystem central signal (③/check shared).*/
+	/** The single broadcast for a wrap taking hold: native hook, per-instance Blueprint delegate, and the subsystem's central signal. */
 	void DispatchWrapped(const FRopeWrappedEventInfo& Info);
 
-	/** release Single broadcast. per-instance(NotifyReleased + OnRopeReleased) always fires — engagement
-	 *  Match each pair at the end (including Contacting/Wrapping abort·destroy). Opening the engagement is Captured,
-	 *  Wrapped, **or aimed ③ throwing**(ThrowWithPreparedPreview successful — no start event, but
-	 *  ). **In the air ③ throwing(bFreeThrow) has no target and does not open anything, so release is also
-	 *  None** — Landing is just Free. central OnAnyRopeReleased fires **only when wrap(bWasWrapped) is committed** —
-	 *  If you shoot at abort before establishment, another rope wraps around and incorrectly restores the ragdolled target. WrappedMesh is the central signal
-	 *  Payload (nullptr before establishment).*/
+	/** The single broadcast for a release. The per-instance pair (NotifyReleased, then OnRopeReleased) always
+	 *  fires, so every engagement is closed — including a Contacting or Wrapping abort, and a target being
+	 *  destroyed. An engagement is opened by Captured, by Wrapped, **or by an aimed GuaranteedWrap throw**
+	 *  (a successful ThrowWithPreparedPreview, which raises no start event of its own). **A GuaranteedWrap
+	 *  throw into open space (bFreeThrow) has no target, opens nothing, and therefore closes nothing** — it
+	 *  simply lands in Free. The central OnAnyRopeReleased fires **only for a committed wrap** (bWasWrapped):
+	 *  raising it on an abort before commit would restore a ragdolled target that another rope still has
+	 *  wrapped. WrappedMesh is the central signal's payload, and is null before commit. */
 	void DispatchReleased(const USceneComponent* WrappedMesh, FName Bone, ERopeReleaseReason Reason, bool bWasWrapped);
 
 	/**
-	 * Queue containing release notifications received during Wrapped notifications — The purpose is to **prevent order reversal**.
-	 * If the handler calls ReleaseWrap() within the notification, the release notification will overlap and finish first, so the subscriber
-	 * Received in the order of Released → Wrapped (the ragdoll target ignores recovery first, then receives only Wrapped and is permanently stuck).
-	 * Therefore, the release notification is postponed until the Wrapped notification is completed, ensuring the order **always Wrapped → Released**.
-	 * State changes (ReleaseWrap itself) are not deferred — only notifications are deferred.
+	 * Release notifications received while a Wrapped notification is still running are queued here, to **keep
+	 * them in order**. If a handler calls ReleaseWrap() from inside the notification, the release notification
+	 * would nest and finish first, so subscribers would see Released before Wrapped — and a ragdoll target
+	 * would discard the recovery, then take the Wrapped and stay down for good. Deferring the release
+	 * notification until the Wrapped one has finished guarantees the order is **always Wrapped, then Released**.
+	 * State changes (ReleaseWrap itself) are not deferred; only the notification is.
 	 */
 	struct FDeferredReleaseNotice
 	{
@@ -1429,57 +1522,61 @@ private:
 		bool bWasWrapped = false;
 	};
 
-	/** DispatchWrapped nesting depth (>0 queues release notifications).*/
+	/** Nesting depth of DispatchWrapped; above 0, release notifications are queued. */
 	int32 WrappedDispatchDepth = 0;
 	TArray<FDeferredReleaseNotice> DeferredReleaseNotices;
 
-	/** Sends out queued release notifications in order (called only after Wrapped notifications are completely completed).*/
+	/** Send the queued release notifications in order (called only once the Wrapped notification is fully finished). */
 	void FlushDeferredReleaseNotices();
 
 	void AbortWrapping(ERopeReleaseReason Reason);
 
-	/** ③ Presentation(GuidedThrow) Interruption shared Finalization: Releasing transition + temporary state disposal + cooldown + release event.
-	 *  Only aiming throwing fires events — empty throwing (bFreeThrow) does not have open engagement, so it does not match.*/
+	/** Shared finalization for an interrupted GuaranteedWrap presentation: transition to Releasing, drop the
+	 *  transient state, start the cooldown and raise the release event. Only an aimed throw raises an event —
+	 *  an open-space throw (bFreeThrow) opened no engagement, so there is nothing to close. */
 	void AbortGuidedThrow(ERopeReleaseReason Reason, const TCHAR* ReasonLog);
 
-	//~ Wrapped --------------------------------------------------------------
-	// The Wrapped case of PrepareSimFrame is read in the pinned order of the helper in step 4 below.
+	//~ Wrapped ---------------------------------------------------------------------
+	// Prepare's Wrapped case runs the four helpers below in the order they are listed.
 
-	/** ① bone following: Hold (reposition on skin bone — no velocity injection) + mass mask. If the target mesh is lost
-	 *  After Broken release, false — the caller ends this frame here.*/
+	/** 1) Follow the bone: Hold (reposition on the skinned bone, with no velocity injected) plus the mass mask.
+	 *  Returns false once the target mesh is lost and the rope has been released as Broken — the caller ends
+	 *  the frame there. */
 	bool HoldWrappedNodesToBone(float DeltaTime);
 
-	/** ② Observation calculation: authoritative constraint tension + Pull sample(ComputePull) + 2-stage smoothing (aiming fractional)
-	 *  EMA → direction EMA). traction(③)/release check(④)/debugger/BP creates input that is read as shared.*/
+	/** 2) Compute the observations: the authoritative constraint tension, the pull sample (ComputePull), and
+	 *  two stages of smoothing (a scalar EMA, then a direction EMA). Traction (3), the release check (4), the
+	 *  debugger and Blueprint all read this shared result. */
 	void UpdateWrappedPullSample(float DeltaTime, const FRopeSimState& ObservationSim);
 
-	/** ③ Application of traction: Tether (λ impulse constraint + ragdoll physical constraint) + active Pull (constant force when tense/climb-in).*/
+	/** 3) Apply traction: the tether (λ impulse constraint plus, for a ragdoll, the physics constraint) and the active pull (constant force while taut, or climb-in). */
 	void ApplyWrappedTraction(float DeltaTime);
 
-	/** ④ Automatic release check: Exceeding tension (TensionRelease*) / Exceeding distance (DistanceReleaseSlack —
-	 *  Consumption of excess updated by tether in ③). true if release occurred — caller skips solve.*/
+	/** 4) Auto-release check: tension over threshold (TensionRelease*) or distance over it (DistanceReleaseSlack,
+	 *  reading the overshoot the tether updated in step 3). Returns true if it released, and the caller then
+	 *  skips the solve. */
 	bool CheckWrappedAutoRelease(float DeltaTime);
 
-	/** latch/anchor node InvMass=0, remaining 1 — The solver moves only the Free span among Wrapped.*/
+	/** Mass mask for a wrap: InvMass = 0 on latch and anchor nodes, 1 elsewhere, so the solver moves only the free span. */
 	void ApplyWrappedMassMask(bool bResetDynamicNodeVelocity = false);
-	// The entire mass mask is recreated only when topology/binding changes. Each frame hold updates only the pinned node location/InvMass.
+	// The whole mask is rebuilt only when the topology or the bindings change. Each frame's hold updates just the pinned nodes' positions and InvMass.
 	bool bWrappedMassMaskDirty = true;
 
-	/** WrappingPhase registers the newly calculated run as a bridge only once and activates it when it reaches the front.*/
+	/** Register each run WrappingPhase has newly computed as a bridge, once, and activate it when the front reaches it. */
 	void UpdateWrappingKinematicVirtualBridges(const TArray<FRopeVirtualBridgeRun>& Runs,
 		const TArray<FRopeSurfaceAnchor>& Anchors, float FrontDistance);
 
-	/** Re-verify and update the existing bridge as the final commit anchor and activate it. does not regenerate*/
+	/** Re-verify the existing bridges against the final commit anchors and activate them. Does not rebuild them. */
 	bool FinalizeKinematicVirtualBridges(const TArray<FRopeVirtualBridgeRun>& Runs,
 		const TArray<FRopeSurfaceAnchor>& CommitAnchors);
 
-	/** Evenly arrange bridge nodes between the current world positions of both anchors and use hard kinematic override.*/
+	/** Space the bridge nodes evenly between their two anchors' current world positions, as a hard kinematic override. */
 	void HoldKinematicVirtualBridges();
 
-	/** Discards the previous bridge binding at release/rethrow/non-composite entry.*/
+	/** Drop the previous bridge bindings on release, on a re-throw, or when entering a non-composite path. */
 	void ResetKinematicVirtualBridges();
 
-	/** Return the active bridge node to the solver mass, remove velocity, and discard the binding and scan states.*/
+	/** Hand the active bridge nodes back to the solver: restore their mass, zero their velocity, and drop the bindings and scan state. */
 	void ReleaseKinematicVirtualBridgesToSolver();
 
 };

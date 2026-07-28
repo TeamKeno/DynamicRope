@@ -1,103 +1,110 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// Collider abstraction. The solver just queries the IRopeCollider, whether it is a capsule or a per-bone SDF.
-// Or I have no idea whether it is a world distance field.
+// Collider abstraction. The solver only ever calls IRopeCollider::Query — it never knows whether the
+// collider behind it is a capsule, a per-bone SDF, or a world distance field.
 //
-// [GPU contract — custom collider caution] Runtime solve is GPU single path. CPU contract (Query/QuerySwept) only
-// The custom collider implemented works in unit tests/CPU fallback (cook·-nullrhi·node number exceeded), but GPU
-// step requires one of GetGPUCapsule / GetGPUSDF / GetGPUBox / GetGPUConvex to be implemented — all four.
-// If false, it is excluded from GPU solve and the subsystem (PackStepColliders) leaves a warning once per session.
-// Packing rules: non-static (skeletal) only capsule/SDF, static (IsWorldStatic) only capsule/box/convex.
+// [GPU contract — read this before writing a custom collider] The runtime solve is GPU-only. A custom
+// collider that implements just the CPU contract (Query / QuerySwept) works in unit tests and in the CPU
+// fallback (cook, -nullrhi, or a rope over the node cap), but the GPU step needs one of GetGPUCapsule,
+// GetGPUSDF, GetGPUBox or GetGPUConvex. With all four returning false the collider drops out of the GPU
+// solve, and the subsystem (PackStepColliders) warns once per session.
+// Packing rules: a non-static (skeletal) collider may be a capsule or an SDF; a static one (IsWorldStatic)
+// may be a capsule, a box or a convex.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Core/RopeSimTypes.h"
 
-// wrap target abstraction (Decision 0): Generalize SourceMesh/attribution mesh to USceneComponent (versus static opt-in).
+// Wrap targets are generalized to USceneComponent, so SourceMesh and bone attribution can name a static component too.
 class USceneComponent;
 
 /**
- * SDF collider view for GPU solver (M3). Bone local distance grid + Bone → world transform is exposed without runtime type.
- * Distances is a collider/asset owning pointer (valid for that frame). VolumeKey is a volume stable identifier (given per load, never reused).
- * Distances are uint8 quantization code — consumer dequant(d = code*(range/255) - NBInner,
- * range = NBInner+NBOuter, outer +). The inner/outer bands are different, so the offset is -NBInner.
+ * SDF collider view for the GPU solver: a bone-local distance grid plus the bone-to-world transform, exposed
+ * without a runtime type.
+ * Distances points into storage the collider or asset owns and is valid for that frame only. VolumeKey is a
+ * stable volume identifier, assigned per load and never reused.
+ * Distances holds uint8 quantization codes; the consumer dequantizes as d = code × (range/255) - NBInner,
+ * where range = NBInner + NBOuter and outer is positive. The inner and outer bands differ, which is why the
+ * offset is -NBInner.
  */
 struct FRopeSDFColliderView
 {
-	/** Blob of code bytes (BytesPerCode per voxel, row first). Little endian.*/
+	/** Blob of code bytes, BytesPerCode per voxel, row-major, little-endian. */
 	const uint8* Distances = nullptr;
 
-	/** Bytes per voxel (1=uint8 max255, 2=uint16 max65535).*/
+	/** Bytes per voxel (1 = uint8, max 255; 2 = uint16, max 65535). */
 	int32        BytesPerCode = 1;
 
-	/** Inner dequant band (cm). Code 0 → -NarrowBandInner.*/
+	/** Inner dequantization band (cm). Code 0 maps to -NarrowBandInner. */
 	float        NarrowBandInner = 0.0f;
 
-	/** Outer dequant band (cm). Code max → +NarrowBandOuter.*/
+	/** Outer dequantization band (cm). The maximum code maps to +NarrowBandOuter. */
 	float        NarrowBandOuter = 0.0f;
 
 	int32        ResX = 0;
 	int32        ResY = 0;
 	int32        ResZ = 0;
 
-	/** bone local grid origin (LocalBounds.Min) and size.*/
+	/** Bone-local grid origin (LocalBounds.Min) and size. */
 	FVector      LocalMin = FVector::ZeroVector;
 	FVector      LocalSize = FVector::ZeroVector;
 
 	FTransform   BoneToWorld = FTransform::Identity;
 
-	/** previous frame bone transform (for GPU CCD/surfacevelocity dragging).*/
+	/** Previous frame's bone transform, for GPU CCD and for surface-velocity drag. */
 	FTransform   PrevBoneToWorld = FTransform::Identity;
 
-	/** 1/framedt(surface velocity = (curr-prev)*InvDeltaTime). If 0, static.*/
+	/** 1 / frame dt, so surface velocity is (curr - prev) × InvDeltaTime. 0 means static. */
 	float        InvDeltaTime = 0.0f;
 
-	/** Volume stable identifier (URopeSDFData::GetRuntimeVolumeId()<<16 | bone index). No grant/reuse for each load →
-	 *  The GPU SDF cache does not sample incorrectly even when unloaded and then reused. 0=Not set.*/
+	/** Stable volume identifier (URopeSDFData::GetRuntimeVolumeId() << 16 | bone index). Assigned per load and
+	 *  never reused, so the GPU SDF cache cannot sample the wrong volume after an unload and reload. 0 = unset. */
 	uint64       VolumeKey = 0;
 };
 
 /**
- * Swept (continuous) collision query parameters. While the node moves from WorldStart->WorldEnd in this substep
- * Find the first contact. The moving collider distributes the frame motion (prev->curr) to the substep with SubAlpha0/1.
- * node-collider relative motion is bone (stationary collider ignores alpha). When a fast bone overtakes a stationary rope
- * The purpose is to grab it from the approach (front) side instead of pushing it through the back.
+ * Parameters for a swept (continuous) collision query: find the first contact while the node travels from
+ * WorldStart to WorldEnd within this substep. A moving collider spreads its frame motion (prev → curr) across
+ * the substeps through SubAlpha0/1, so what is measured is the node's motion *relative* to the bone; a static
+ * collider ignores the alphas. The point is that a fast bone overtaking a resting rope catches it on the
+ * approaching side instead of shoving it through from behind.
  */
 struct FRopeSweptQuery
 {
-	/** Substep start/end node location (PrevPos → Pos).*/
+	/** Node position at the start and end of the substep (PrevPos → Pos). */
 	FVector WorldStart = FVector::ZeroVector;
 	FVector WorldEnd   = FVector::ZeroVector;
 
-	/** rope thickness (query radius).*/
+	/** Rope thickness — the query radius. */
 	float   NodeRadius = 0.0f;
 
-	/** Sample interval (cm).*/
+	/** Sample spacing (cm). */
 	float   SweepStep  = 2.0f;
 
-	/** sample cap per section.*/
+	/** Cap on samples for this segment. */
 	int32   MaxSamples = 16;
 
 	/**
-	 * Sub-pose for this substep of the moving collider. The solver blends the prev/curr received through GetFrameMotion into alpha.
-	 * Precalculate once per collider (hoisting outside the node loop → prevent blend recalculation for each node). If bUseSubPose=false
-	 * The collider is a bone (stationary bone/non-SDF) with a single (current) pose. Safe for parallel solving as it does not mutate shared colliders.
+	 * Sub-pose of a moving collider for this substep. The solver blends the prev and curr transforms it got
+	 * from GetFrameMotion by alpha, precomputed once per collider outside the node loop so the blend is not
+	 * redone per node. With bUseSubPose false the collider has a single, current pose — a still bone, or one
+	 * that is not an SDF. Nothing here mutates the shared collider, so a parallel solve stays safe.
 	 */
 	bool       bUseSubPose  = false;
 	FTransform SubPoseStart = FTransform::Identity;
 	FTransform SubPoseEnd   = FTransform::Identity;
 
 	/**
-	 * Frame motion section ratio of this substep (0=previous frame, 1=current frame). The solver always fills in.
-	 * A collider (capsule — two joints move separately) without rigid transform uses its own prev state instead of sub-pose.
-	 * Used for direct interpolation (transform-Free counterpart of SubPoseStart/End).
+	 * Where this substep falls within the frame's motion (0 = previous frame, 1 = current). The solver always
+	 * fills these. A collider with no rigid transform — a capsule, whose two joints move independently — uses
+	 * them to interpolate its own prev state directly, as the transform-free counterpart to SubPoseStart/End.
 	 */
 	float SubAlpha0 = 0.0f;
 	float SubAlpha1 = 1.0f;
 };
 
-/** collider surface projection result. Unlike contact check, it describes the surface point closest to a given point.*/
+/** Result of projecting onto a collider surface. Unlike a contact query, it describes the surface point nearest a given point. */
 struct FRopeSurfaceProjection
 {
 	bool bHit = false;
@@ -109,11 +116,14 @@ struct FRopeSurfaceProjection
 };
 
 /**
- * QuerySwept separation guard shared check (a world-space generalization of what SDF QuerySwept does with local frames). node contacts
- * If you are starting inside the skin and exiting *outside* the surface, do not re-pin — otherwise the contact node will
- * It returns to the starting point of the substep and never falls (it is dragged along the moving bone or the end node of low tension is attached).
- * Only when start contact + end point skin outside + relative displacement (node movement - contact material point movement) is positive in the start outside normal direction
- * true. Penetration (inward movement → outside the skin on the other side) is not filtered out here because the sweep catches it at the first contact.
+ * Shared separation guard for QuerySwept — a world-space generalization of what the SDF QuerySwept does in
+ * local frames. When a node starts the substep inside the contact skin and ends *outside* the surface, it must
+ * not be re-pinned; otherwise the contact node is dragged back to where the substep started and never falls,
+ * so it rides along on a moving bone, or a low-tension end node sticks to it.
+ * It returns true only when the node starts in contact, ends outside the skin, and its displacement relative
+ * to the contact material point is positive along the outward normal at the start.
+ * Penetration — moving inward and coming out the far side of the skin — is deliberately not filtered here,
+ * because the sweep catches that at the first contact instead.
  */
 namespace RopeCollision
 {
@@ -130,22 +140,23 @@ namespace RopeCollision
 	}
 }
 
-/** The abstract collider that the rope solver queries.*/
+/** The abstract collider the rope solver queries. */
 class DYNAMICROPE_API IRopeCollider
 {
 public:
 	virtual ~IRopeCollider() = default;
 
 	/**
-	 * Nearest surface query for the rope node sphere (center WorldPos, radius Radius).
-	 * Fill the FRopeContact according to the FROZEN contract of the corresponding struct. Must be const / no side effects
-	 * (called every node x substep x iteration). Radius == 0 is also valid (solver push-out path).
+	 * Nearest-surface query for the rope node's sphere (centre WorldPos, radius Radius).
+	 * Fill FRopeContact exactly as that struct's frozen contract requires. It must be const and free of side
+	 * effects, since it runs per node × substep × iteration. Radius 0 is valid — that is the solver push-out path.
 	 */
 	virtual FRopeContact Query(const FVector& WorldPos, float Radius) const = 0;
 
 	/**
-	 * Query dedicated to surface projection. Unlike collision Query, it searches for surface points that are close to WorldPos rather than “overlapping.”
-	 * If it is farther than MaxDistance, false can be returned. It is used to continuously attach to the surface, such as creating a Wrapping path.
+	 * Surface projection query. Unlike the collision query it looks for the surface point *nearest* WorldPos
+	 * rather than one overlapping it, and may return false when nothing is within MaxDistance. Used to keep a
+	 * path stuck to a surface, as the wrapping path build does.
 	 */
 	virtual FRopeSurfaceProjection ProjectToSurface(const FVector& WorldPos, float MaxDistance) const
 	{
@@ -166,17 +177,20 @@ public:
 	}
 
 	/**
-	 * Swept query: Finds the first contact along the node's substep path (+ relative motion of the moving collider).
-	 * The default implementation is a static fallback — ignores collider motion (alpha) and takes the WorldStart->WorldEnd straight line to the current pose.
-	 * sample (same as existing solver operation). A moving SDF collider overrides this to reflect relative motion.
-	 * At first contact, bHit=true, OutHitWorldPos = node world location of the contact point. solver
-	 * Place the node with OutHitWorldPos + Normal*Penetration.
+	 * Swept query: find the first contact along the node's substep path, accounting for a moving collider's
+	 * relative motion.
+	 * The default implementation is a static fallback — it ignores collider motion and samples the straight
+	 * WorldStart → WorldEnd line against the current pose. A moving SDF collider overrides it to account for
+	 * the relative motion.
+	 * On a first contact it returns bHit = true with OutHitWorldPos as the node's world position there, and the
+	 * solver places the node at OutHitWorldPos + Normal × Penetration.
 	 */
 	virtual FRopeContact QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 	{
-		// Separation guard (RopeCollision::IsSweptSeparating): Re-pin if the contact starts inside the skin and is separating outside the surface.
-		// Do not. Because it is a static fallback, collider motion is 0 → contact material point movement is 0 (same point transfer, relative displacement=nodedisplacement).
-		// Endpoint query starts only when contact occurs (shortened evaluation).
+		// Separation guard (RopeCollision::IsSweptSeparating): do not re-pin a contact that starts inside the
+		// skin and is leaving the surface. This is the static fallback, so collider motion is zero and the
+		// contact material point does not move, making the relative displacement just the node's.
+		// The end-point query only runs once a start contact exists (short-circuit).
 		const FRopeContact Start = Query(Q.WorldStart, Q.NodeRadius);
 		if (Start.bHit && RopeCollision::IsSweptSeparating(Q.WorldStart, Q.WorldEnd,
 			Start.SurfacePoint, Start.SurfacePoint, Start.Normal,
@@ -201,59 +215,65 @@ public:
 		return FRopeContact();
 	}
 
-	/** world space bounds for broad-phase culling.*/
+	/** World-space bounds for broad-phase culling. */
 	virtual FBox GetWorldBounds() const = 0;
 
 	/**
-	 * Whether this collider is static world geometry (static body). Default false (skeletal/dynamic).
-	 * static collider is not eligible for Wrapping and should be excluded from the contact detection (detect) pipeline —
-	 * detect leaves only the one deepest contact per node, so if the wall contact obscures the bone contact, the node's
-	 * wrap capture fails quietly (2-pass packing of PackStepColliders on GPU, Flight detector on CPU)
-	 * input filter bones this flag). Participates normally in solve (push-out).
+	 * Is this collider static world geometry? Default false, meaning skeletal or otherwise dynamic.
+	 * A static collider cannot be wrapped and must be kept out of the contact detection pipeline: detection
+	 * keeps only the single deepest contact per node, so a wall contact masking a bone contact would silently
+	 * cost that node its wrap capture. The filter runs in PackStepColliders' two-pass packing on the GPU, and
+	 * in the Flight detector's input on the CPU. Static colliders still take part in the solve push-out normally.
 	 */
 	virtual bool IsWorldStatic() const { return false; }
 
 	/**
-	 * For GPU solver (M2): If this collider is an analytic capsule, fill the world space segment (A-B) and radius and return true.
-	 * Default is false (not supported) — RTTI is turned off, so the capsule is identified with this virtual accessor instead of dynamic_cast.
-	 * SDF/other colliders are excluded from the GPU capsule path (processed separately as Texture3D SDF in M3).
+	 * For the GPU solver: if this collider is an analytic capsule, fill the world-space segment (A-B) and
+	 * radius and return true. Default false. RTTI is off, so this virtual accessor is how a capsule is
+	 * identified instead of a dynamic_cast. SDF and other colliders stay off the GPU capsule path and are
+	 * handled separately as a Texture3D SDF.
 	 */
 	virtual bool GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRadius) const { return false; }
 
 	/**
-	 * Frame motion of GPU capsule: previous frame endpoint + 1/framedt. Only colliders with GetGPUCapsule=true are meaningful.
-	 * Default is false (static) — caller falls back to prev=current endpoint, InvDt=0. Capsule does not have rigid transform.
-	 * (Two joint points move separately) Pass the end point pair directly instead of GetFrameMotion. GPU supports surface velocity (drag) and
-	 * substep Relative motion Write to CCD (SDF's PrevBoneToWorld/InvDeltaTime correspondence).
+	 * A GPU capsule's frame motion: previous endpoints plus 1 / frame dt. Meaningful only where GetGPUCapsule
+	 * returns true. Default false, meaning static, and the caller falls back to prev = current with InvDt = 0.
+	 * A capsule has no rigid transform — its two joints move independently — so it passes the endpoint pair
+	 * directly rather than going through GetFrameMotion. The GPU uses it for surface-velocity drag and for
+	 * substep relative-motion CCD, mirroring the SDF's PrevBoneToWorld and InvDeltaTime.
 	 */
 	virtual bool GetGPUCapsuleMotion(FVector& OutPrevA, FVector& OutPrevB, float& OutInvDeltaTime) const { return false; }
 
 	/**
-	 * For GPU solver (M3): If this collider is a per-bone SDF, fill the grid/transform view and return true. The default is false.
-	 * Like capsule, this is a path that identifies the SDF collider without RTTI (mutually exclusive with GetGPUCapsule).
+	 * For the GPU solver: if this collider is a per-bone SDF, fill the grid and transform view and return true.
+	 * Default false. Like the capsule accessor, this identifies the collider without RTTI, and it is mutually
+	 * exclusive with GetGPUCapsule.
 	 */
 	virtual bool GetGPUSDF(FRopeSDFColliderView& OutView) const { return false; }
 
 	/**
-	 * For GPU solvers: If this collider is an analytic box (OBB), fill the world space center/rot/half-extents and return true.
-	 * Default is false. Mutually exclusive with GetGPUCapsule/GetGPUSDF (same RTTI-Free identification pattern). static world
-	 * Because it is for geometry, there is no frame motion — the GPU responds with surface velocity 0 (static).
+	 * For the GPU solver: if this collider is an analytic box (OBB), fill the world-space centre, rotation and
+	 * half-extents and return true. Default false, and mutually exclusive with GetGPUCapsule and GetGPUSDF —
+	 * the same RTTI-free identification pattern.
 	 */
 	virtual bool GetGPUBox(FVector& OutCenter, FQuat& OutRot, FVector& OutHalfExtents) const { return false; }
 
 	/**
-	 * Frame motion of GPU box: previous frame center/rot + 1/framedt. Only colliders with GetGPUBox=true are meaningful.
-	 * Default is false (static) — caller falls back to prev=current, InvDt=0. A moving static body (platform/door)
-	 * Used to drag a rope (surface velocity) and prevent tunneling with a substep CCD (corresponds to capsule's GetGPUCapsuleMotion).
+	 * A GPU box's frame motion: previous centre and rotation plus 1 / frame dt. Meaningful only where GetGPUBox
+	 * returns true. Default false, meaning static, and the caller falls back to prev = current with InvDt = 0.
+	 * It is what lets a moving static body — a platform, a door — drag the rope through surface velocity, and
+	 * what stops it tunnelling under substep CCD. Mirrors the capsule's GetGPUCapsuleMotion.
 	 */
 	virtual bool GetGPUBoxMotion(FVector& OutPrevCenter, FQuat& OutPrevRot, float& OutInvDeltaTime) const { return false; }
 
 	/**
-	 * For GPU solver: If this collider is an analytical convex, body-local plane set (unit normal·outer, PlaneDot(p)=dot(N,p)-W,
-	 * scale reflection/rigid body transform not applied) and local AABB, and the body's rigid body transform (curr rot/trans + prev)
-	 * fills 1/framedt and returns true. The default is false. world plane = local plane ∘ rigid body(rot, trans). The moving body
-	 * prev Process surface velocity/substep CCD with rigid body (if static, prev=curr, InvDt=0). OutLocalPlanes collider
-	 * Owned storage view (valid during that frame).
+	 * For the GPU solver: if this collider is an analytic convex, fill the body-local plane set (unit outward
+	 * normals, with PlaneDot(p) = dot(N, p) - W, before any scale or rigid transform), the local AABB, and the
+	 * body's rigid transform — current rotation and translation, the previous pair, and 1 / frame dt — then
+	 * return true. Default false.
+	 * A world plane is the local plane composed with that rigid transform; a moving body's prev transform gives
+	 * surface velocity and substep CCD, and a static one passes prev = curr with InvDt = 0. OutLocalPlanes is a
+	 * view into storage the collider owns, valid for that frame.
 	 */
 	virtual bool GetGPUConvex(TConstArrayView<FPlane>& OutLocalPlanes, FBox& OutLocalBounds,
 		FQuat& OutRot, FVector& OutTrans, FQuat& OutPrevRot, FVector& OutPrevTrans, float& OutInvDeltaTime) const
@@ -262,16 +282,18 @@ public:
 	}
 
 	/**
-	 * Fills this frame's motion (prev->curr world transform) of the moving collider and sets it to true. The default is false (static/no motion).
-	 * The solver is used to calculate the sub-pose for each substep in swept collision once outside the node loop (relative motion CCD hoisting).
-	 * Must be const (read only) — collider is shared between ropes and solved in parallel.
+	 * Fill this frame's motion for a moving collider — the prev → curr world transform — and return true.
+	 * Default false, meaning static or motionless. The solver uses it to compute each substep's sub-pose for a
+	 * swept collision once, outside the node loop, hoisting the relative-motion CCD setup.
+	 * It must be const and read-only: colliders are shared between ropes and solved in parallel.
 	 */
 	virtual bool GetFrameMotion(FTransform& OutPrev, FTransform& OutCurr) const { return false; }
 
 	/**
-	 * attribution for GPU contact detection (G3): Which bone/mesh this collider belongs to. GPU collider
-	 * emits only the index, so the caller restores the index → (bone, mesh) with this. FRopeContact.Bone/SourceMesh
-	 * Must be the same value (feed to the same check pipeline). The default is None/null.
+	 * Attribution for GPU contact detection: which bone and mesh this collider belongs to. The GPU emits only
+	 * an index, and the caller turns that index back into a (bone, mesh) pair with this. It must report the
+	 * same values as FRopeContact's Bone and SourceMesh, since both feed the same decision pipeline.
+	 * Defaults to None and null.
 	 */
 	virtual void GetGPUAttribution(FName& OutBone, const USceneComponent*& OutMesh) const
 	{
@@ -281,8 +303,8 @@ public:
 };
 
 /**
- * Analytical capsule (swept-sphere segment). v1 bone collider — such as per-bone SDF (FRopeSDFCollider)
- * Selected on a per-provider basis behind the IRopeCollider interface (the solver does not know which one).
+ * Analytic capsule (a swept-sphere segment). The v1 bone collider: it and the per-bone SDF (FRopeSDFCollider)
+ * are chosen per provider behind the IRopeCollider interface, and the solver cannot tell which it has.
  */
 class DYNAMICROPE_API FCapsuleCollider : public IRopeCollider
 {
@@ -293,19 +315,21 @@ public:
 	FName   Bone = NAME_None;
 
 	/**
-	 * previous frame endpoint + 1/framedt. The provider caches and fills the prev endpoints for each bone (the SDF provider's
-	 * PrevBoneToWorld counterpart). If InvDeltaTime=0 (default), static capsule — prev is ignored and the same behavior as before.
-	 * The contact material point is identified by the segment parameter (t): prev position = Lerp(PrevA, PrevB, t). capsule axis itself
-	 * Spin cannot be expressed, but it is a negligible component in bone capsule.
+	 * Previous endpoints plus 1 / frame dt. The provider caches and fills the previous endpoints per bone, as
+	 * the counterpart to the SDF provider's PrevBoneToWorld. InvDeltaTime 0, the default, means a static
+	 * capsule: prev is ignored.
+	 * The contact material point is identified by the segment parameter t, so its previous position is
+	 * Lerp(PrevA, PrevB, t). Spin about the capsule's own axis cannot be represented this way, but on a bone
+	 * capsule that component is negligible.
 	 */
 	FVector PrevA = FVector::ZeroVector;
 	FVector PrevB = FVector::ZeroVector;
 	float   InvDeltaTime = 0.0f;
 
 	/**
-	 * The mesh (skeletal) to which the bone of this capsule belongs. Even if it is delivered to a contact and the wrap exceeds the actor,
-	 * Allows you to follow the *correct* mesh (the mesh that owns the captured bone). The type is USceneComponent.
-	 * Generalization (compared to static opt-in) — capsule only passes skeletal.
+	 * The mesh owning this capsule's bone. Carrying it on the contact is what lets a wrap cross actors and
+	 * follow the *right* mesh — the one that owns the captured bone. The type is USceneComponent so static
+	 * targets fit the same field; a capsule only ever passes a skeletal one.
 	 */
 	const USceneComponent* SourceMesh = nullptr;
 

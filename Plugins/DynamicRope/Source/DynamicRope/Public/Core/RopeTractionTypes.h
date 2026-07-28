@@ -11,23 +11,26 @@ class UCharacterMovementComponent;
 class AActor;
 
 /**
- * Type of traction recipient — single check result of "what receives the rope force" (RopeComponent.cpp ResolveTetherEndpoint).
- * This is the result of combining the tether and active pull's separate ladder steps into one analysis, so the mass distribution and actual application point are
- * It is structurally impossible to misalign. The extension hook (ApplyTractionToReceiver) is also used to describe the receiver.
+ * What kind of thing receives the rope's traction — the single resolution of "who takes the force"
+ * (ResolveTetherEndpoint). Folding the tether's and the active pull's separate ladders into one resolution
+ * is what makes it structurally impossible for the mass distribution and the actual application point to
+ * disagree. The extension hook (ApplyTractionToReceiver) uses it to describe the receiver too.
  */
 enum class ERopeEndpointKind : uint8
 {
-	None,      // No recipient (no owner).
-	SimBody,   // Physics Simulation Body: Skeletal promotion bone / target primitive / owning root.
-	Character, // The character on which the CMC is actually running (except MOVE_None).
-	Anchor,    // static/Kinematic/MOVE_None/Non-simulation Non-character — infinite mass (only positional fallback for movement).
+	None,      // No receiver — there is no owner.
+	SimBody,   // A simulating physics body: a promoted skeletal bone, the target primitive, or the owning root.
+	Character, // A character whose CharacterMovement is actually running (anything but MOVE_None).
+	Anchor,    // Static, kinematic, MOVE_None, or a non-simulating non-character — infinite mass, so only a positional fallback can move it.
 };
 
 /**
- * Receiver interpretation results shared by Tether/Active Pull. A UObject pointer is only consumed for one GT frame and is not owned.
- * Confirm the type, actual application body, and basic effective mass at once so that check and application do not see different endpoints.
- * SimBody's analytic material solver uses this mass after the actual world attachment point and direction are determined.
- * Refine to point Jacobian (translation + rotation).
+ * The endpoint resolution the tether and the active pull share. The UObject pointers are borrowed for one
+ * game-thread frame and never owned.
+ * Resolving the kind, the body force is actually applied to, and the base effective mass all at once is what
+ * keeps the gate and the application from looking at different endpoints.
+ * For a SimBody, the analytic material solver refines this mass into a point Jacobian — translation plus
+ * rotation — once the real world attachment point and direction are known.
  */
 struct FRopeTetherEndpoint
 {
@@ -39,7 +42,7 @@ struct FRopeTetherEndpoint
 	float Mass = 0.0f;
 };
 
-/** Wrapped A non-owning cache that shares target/wielder endpoint resolution for one frame.*/
+/** Non-owning cache that shares one frame's target and wielder endpoint resolution across a Wrapped frame. */
 struct FRopeResolvedWrappedEndpoints
 {
 	FRopeTetherEndpoint Target;
@@ -51,131 +54,139 @@ struct FRopeResolvedWrappedEndpoints
 	void Reset() { *this = FRopeResolvedWrappedEndpoints(); }
 };
 
-/** Which traction path does this permission come from — allows subclasses to react differently depending on the path.*/
+/** Which traction path a request came from, so a subclass can react differently per path. */
 enum class ERopeTractionSource : uint8
 {
-	/** Automatic traction: Number of times the λ impulse constraint is applied to both ends (UpdateConstraintTether).*/
+	/** Automatic traction: the λ impulse constraint applied as a pair at both ends (UpdateConstraintTether). */
 	Tether,
-	/** User input Active Pull (constant force). Includes both target accreditation and climb-in (wielder accreditation).*/
+	/** Active pull from user input, a constant force. Covers both the target and climb-in on the wielder. */
 	ActivePull,
 };
 
 /**
- * Request description (POD, non-owning pointer — valid only during the call) **just before** rope grants traction to the receiver.
- * URopeComponent::ApplyTractionToReceiver is the only type that receives this, and any force/velocity interventions the rope makes are
- * is described as one type (path is classified by Source).
+ * What the rope is about to apply to a receiver (POD; the pointers are borrowed and valid only for the call).
+ * URopeComponent::ApplyTractionToReceiver is its only consumer, and every force or velocity the rope injects
+ * is described by this one type, with Source telling the paths apart.
  */
 struct FRopeTractionRequest
 {
 	ERopeTractionSource Source = ERopeTractionSource::Tether;
 	ERopeEndpointKind ReceiverKind = ERopeEndpointKind::None;
 
-	/** SimBody: Primitive and bone to be approved (if bone is not present, component unit).*/
+	/** SimBody: the primitive and bone to apply to. With no bone, the whole component. */
 	UPrimitiveComponent* Prim = nullptr;
 	FName Bone = NAME_None;
 
-	/** Character: Movement to be approved.*/
+	/** Character: the movement component to apply to. */
 	UCharacterMovementComponent* Movement = nullptr;
 
-	/** Recipient owns actor (Kind irrelevant, filled in if present). Custom movements usually find their components here.*/
+	/** The receiver's owning actor, filled in whenever there is one regardless of kind. Custom movement usually finds its components from here. */
 	AActor* Actor = nullptr;
 
-	/** Is direction (unit vector).*/
+	/** Pull direction (unit vector). */
 	FVector Direction = FVector::ZeroVector;
 
 	/**
-	 * Size by source — The units are different, so be sure to read it together with the source.
-	 *   Tether = Change in axis velocity this frame ΔV = λ×effective inverse mass (cm/s)
-	 *   ActivePull = magnitude of force = tension cap(N)
+	 * Magnitude, whose units depend on Source — always read the two together.
+	 *   Tether     = this frame's change in axial velocity, ΔV = λ × effective inverse mass (cm/s)
+	 *   ActivePull = force magnitude, the tension cap (N)
 	 */
 	float Amount = 0.0f;
 
 	float DeltaTime = 0.0f;
 
-	/** Is it from the wielder (rope owner) side? If false, the wound target side.*/
+	/** Is this the wielder (rope owner) side? False means the wrapped target side. */
 	bool bWielderSide = false;
 };
 
 /**
- * Pull sample: Describes the pull that the wrap anchor receives from the rope as data (Docs/PoC/01_PostWrapModel.md 4.2).
- * FRopeWrapController::ComputePull fills (UObject-Free), and the component converts to force application (character/physics bone).
+ * The pull a wrap anchor takes from the rope, expressed as data. FRopeWrapController::ComputePull fills it
+ * without touching a UObject, and the component turns it into force on a character or a physics bone.
  */
 struct FRopePullSample
 {
 	bool    bValid = false;
 
-	/** First anchor node on the hand side (node ​​at the point of force application).*/
+	/** First anchor node on the hand side — where the force is applied. */
 	int32   AnchorNode = INDEX_NONE;
 
-	/** End of first straight leg (integer node where walk stops) — raw aiming in direction (computePull output; debug/diagnostics).*/
+	/** End of the first straight leg, where the walk stopped. The raw integer aim direction from ComputePull; diagnostic. */
 	int32   AimNode = INDEX_NONE;
 
-	/** Anchored bone (physical bone force application target).*/
+	/** The anchored bone, which is the physics body force is applied to. */
 	FName   Bone = NAME_None;
 
-	/** Anchor node world location (force application point).*/
+	/** World position of the anchor node — the point force is applied at. */
 	FVector WorldPoint = FVector::ZeroVector;
 
-	/** Pull unit direction (aiming side from anchor = following rope path; component when consumed is fractional+EMA smoothing).*/
+	/** Unit pull direction, from the anchor toward the aim node along the rope path. The component smooths it (fractional index, then EMA) before use. */
 	FVector Direction = FVector::ZeroVector;
 
-	/** Anchor-hand side adjacent segment tension (units of FRopeSimState::SegmentTension).*/
+	/** Tension in the segment next to the anchor on the hand side, in FRopeSimState::SegmentTension units. */
 	float   Tension = 0.0f;
 
 	/**
-	 * smoothed fractional aiming index([0, AnchorNode); <0 = not set). With AimPos, consumers (components)
-	 * Fill the AimNode with float time smoothing (ComputePull only yields integer AimNode) — tether/direction is this continuous
-	 * to eliminate discrete hops (direction jump + traction interruption) between frames of the integer aiming node.
+	 * Smoothed fractional aim index, in [0, AnchorNode); below 0 means unset. The component fills this and
+	 * AimPos by smoothing AimNode over time as a float, because ComputePull only yields an integer AimNode.
+	 * This continuous index is what removes the discrete hop between frames — a jumping direction and an
+	 * interrupted traction — that an integer aim node produces.
 	 */
 	float   AimNodeF = -1.0f;
 
-	/** Aiming world position interpolated between nodes (AimNodeF position).*/
+	/** Aim position interpolated between nodes, at AimNodeF. */
 	FVector AimPos = FVector::ZeroVector;
 
 	/**
-	 * Anchor→Hand corner-leg chord sum (cm). Instead of stopping at the first corner, continue walking to the hand (node 0) and walk in a straight line on each leg.
-	 * Accumulated distance — Comparison with FreeRestLen is the observed "total chain tension" check (RopeTraction::
-	 * EvaluateChainTautGate). Sag makes the chord shorter than the rest, and the taut rope hanging at the corner makes the chord for each leg
-	 * It is considered taut because it is close to rest. **Chords for each leg are clamped to the rest length of that leg** — moving
-	 * When the anchor stretches the leg on the anchor side (segment > rest), the chord exceeds the rest, causing slack in the remaining rope.
-	 * Prevents offset and concealment (PIE actual measurement 620/600cm case). However, if the slack is crumpled in a zigzag pattern, the legs are split into small pieces.
-	 * There is still a blind spot attached to rest — that is covered by the MinFreeTension gate.
+	 * Sum of the straight chords of each corner leg from the anchor to the hand (cm). Rather than stopping at
+	 * the first corner, the walk continues to the hand (node 0) and accumulates a straight distance per leg.
+	 * Comparing it against FreeRestLen is the whole-chain taut gate (RopeTraction::EvaluateChainTautGate): sag
+	 * makes a chord shorter than its rest length, while a taut rope hanging over a corner keeps every leg's
+	 * chord close to rest and so reads as taut.
+	 * **Each leg's chord is clamped to that leg's rest length.** Without the clamp, a moving anchor stretching
+	 * the leg beside it (segment beyond rest) pushes that chord past rest, and the excess offsets and hides
+	 * slack elsewhere in the rope — measured at 620 against 600 cm in play.
+	 * A blind spot remains: slack crumpled into a zigzag splits into short legs that each sit near their rest
+	 * length. The MinFreeTension gate is what covers that.
 	 *
-	 * ⚠ The chord defect is only reduced by the **square** of the sag (chord 590 on a 600cm rope = ~45cm visible sag) —
-	 * The checker for “visually stretched” is MaxLegSag (cm, linear), not this ratio. This value corresponds to a moderate large sag and
-	 * remains as a rough backstop for compression (node agglomeration).
+	 * ⚠ The chord deficit only grows with the **square** of the sag — a 590 cm chord on a 600 cm rope is
+	 * roughly 45 cm of visible sag. What actually measures "looks straight" is MaxLegSag, in linear cm, not
+	 * this ratio. This value covers a moderately large sag and stands as a rough backstop against compression,
+	 * where nodes bunch up.
 	 */
 	float   TautChordLen = 0.0f;
 
 	/**
-	 * Anchor→Hand Corner-Leg Chord Sum **Non-Clamp** Value (cm) — Unlike TautChordLen, rest clamp is not performed for each leg.
-	 * No, stretched legs increase the sum. legacy/custom-mover without live movement binding
-	 * remains only as a diagnostic observation for fallback. Authoritative C is live hand↔first-anchor distance − material
-	 * length.
+	 * The same anchor-to-hand corner-leg chord sum **without the per-leg clamp** (cm), so a stretched leg
+	 * inflates it. It survives only as a diagnostic for the legacy and custom-mover fallback, which has no
+	 * live movement binding. The authoritative violation C is the live hand-to-first-anchor distance minus the
+	 * material length.
 	 *
-	 * ⚠ In legacy fallback, C > 0 is not enough: ragdoll bone fluctuation
-	 * If only the leg adjacent to the anchor is stretched to the strain limit, the sum will exceed the rest even if the rest is stretched, causing the slack rope to
-	 * C > 0 (partial stretch contamination). When λ ignites in that false C, a positive return runaway of traction → oscillation → stretch occurs.
-	 * , so only the fallback maintains the geometry/legacy tension contamination guard.
+	 * ⚠ On the legacy fallback, C > 0 alone is not enough. A ragdoll bone jittering can stretch the leg beside
+	 * the anchor to the strain limit on its own, which pushes the sum past rest and reports C > 0 for a rope
+	 * that is actually slack — a partial stretch contaminating the reading. λ igniting on that false C is a
+	 * positive feedback runaway: traction, oscillation, more stretch. That is why the fallback alone keeps the
+	 * geometry and legacy tension contamination guards.
 	 */
 	float   PathChordLen = 0.0f;
 
-	/** Free span (hand~anchor) rest length(cm) = AnchorNode × SegmentLength (automatically reflects rewrapping reduction).*/
+	/** Rest length of the free span from hand to anchor (cm) = AnchorNode × SegmentLength, so reeling shortens it automatically. */
 	float   FreeRestLen = 0.0f;
 
 	/**
-	 * **Minimum value** of Free span (hand~anchor) segment tension (unit of FRopeSimState::SegmentTension). The tight rope is
-	 * Since tension is transmitted to the entire section from the anchor to the hand, the minimum value is a positive number, and if there is slack in even one section,
-	 * (Compression/Creasing — XPBD tension only counts tension) is 0 — Zigzag slack/partial stretch that the chord sum geometry cannot see.
-	 * This is what determines it. If it is not yet solved (array is empty), it is 0 (GPU rope is a 1~2 frame delayed mirror).
+	 * **Lowest** segment tension across the free span from hand to anchor, in FRopeSimState::SegmentTension
+	 * units. A taut rope carries tension along the whole span, so the minimum is positive; a single slack
+	 * stretch — compressed or crumpled, since XPBD counts tension only — drives it to 0. That is what catches
+	 * the zigzag slack and partial stretch the chord-sum geometry cannot see. 0 as well when the rope has
+	 * never solved and the array is empty (a GPU rope mirrors one to two frames late).
 	 */
 	float   MinFreeTension = 0.0f;
 
 	/**
-	 * Maximum sag (cm) for each leg = Maximum vertical distance that the internal node of each corner-leg deviates from the chord straight line of that leg.
-	 * Direct observation of "visually straightened" — **linear** to sag cm, unlike chord rate (which only responds to the square of sag)
-	 * responds (PIE actual measurements: actual sag of rope ~45cm with chord 590/600 (98.3%)). Since it is a leg unit, there is no tension hanging at the corner.
-	 * The rope (straightness of each leg) has a small value, and the gentle catenary sag is revealed as it is in cm.
+	 * Largest sag across the legs (cm): the furthest an interior node of any corner leg strays from that leg's
+	 * chord. This is the direct measure of "looks straight", and unlike the chord ratio — which only responds
+	 * to the square of the sag — it responds **linearly** in cm. Measured in play: a chord ratio of 98.3%
+	 * (590 of 600) alongside about 45 cm of real sag. Being per leg, a taut rope hanging over a corner scores
+	 * low, while a gentle catenary shows up at its true depth in cm.
 	 */
 	float   MaxLegSag = 0.0f;
 };

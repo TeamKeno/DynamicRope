@@ -6,174 +6,196 @@
 #include "RopeConfigTypes.generated.h"
 
 /**
- * Based on which standard to place the Wrapping axis (FRopeWrapConfig::WrappingAxisSource).
- * In both modes, the normal of the rope progress plane is used as the axis direction, but the axis origin and winding standard are different.
- * The back fallback (bone → parent → component base → bone local X) is common — FRopeWrappingPhase::ResolveWrappingAxis.
+ * Where the wrapping axis is placed (FRopeWrapConfig::WrappingAxisSource).
+ * Both modes take the axis direction from the normal of the rope's travel plane; they differ in where the
+ * axis origin sits and what the wrap is measured against.
+ * The fallback chain behind them is shared — bone → parent → component base → bone-local X, in
+ * FRopeWrappingPhase::ResolveWrappingAxis.
  */
 UENUM(BlueprintType)
 enum class ERopeWrappingAxisSource : uint8
 {
 	/**
-	 * Bone center guide plane: The axis origin is based on the latch bone location, and the winding is based on the latch tangent.
-	 * It is suitable for paths that require reinterpretation of the axis for each bone, such as single bone Wrapping in Assisted resolve.
+	 * Bone-centred guide plane: the axis passes through the latch bone, and the wrap is measured against the
+	 * latch tangent. Suited to paths that re-resolve the axis per bone, such as a single-bone wrap under
+	 * AssistedJudged.
 	 */
 	BoneCenteredGuidePlane = 0 UMETA(DisplayName = "Bone-Centered Guide Plane"),
 
 	/**
-	 * Capture progress plane: The normal of the swing plane where the rope flew is used as the axis direction, and the axis origin is the capture contact area and
-	 * Calibrate to the center of the collider cluster. Winding is suitable for Composite Wrapping based on the velocity at the moment of capture.
-	 * If the capture progress plane cannot be created, it falls back to the common bone/component axis fallback.
+	 * Capture travel plane: the axis direction is the normal of the plane the rope swung through, and the
+	 * origin is corrected onto the centre of the contacted collider cluster. Measuring the wrap against the
+	 * velocity at capture suits a composite wrap. If no travel plane can be built, it falls back to the
+	 * shared bone and component chain above.
 	 */
 	CaptureTravelPlane = 1 UMETA(DisplayName = "Capture Travel Plane")
 };
 
-/** XPBD solver tuning (for designers). The saved value is the runtime applied value.*/
+/** XPBD solver tuning, for designers. What is saved here is what the runtime uses. */
 USTRUCT(BlueprintType)
 struct FRopeSolverConfig
 {
 	GENERATED_BODY()
 
-	/** Number of per-frame physics substeps (anti-tunneling; "small steps" are better than increasing iterations).*/
+	/** Physics substeps per frame. More substeps beat more iterations against tunnelling. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "1", ClampMax = "16"))
 	int32 Substeps = 12;
 
-	/** Number of constraint iterations per substep.*/
+	/** Constraint iterations per substep. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "1"))
 	int32 Iterations = 4;
 
-	/** Number of collision resolution passes per substep. 1=Once at the end of the substep (existing behavior, perf no regression). In sharp bends
-	 *  When a single collision cannot overcome the inward pulling force of distance/bending, constraint iteration is performed by this number.
-	 *  Divide and insert collisions in between → Defense up to sharper angles (>1 is stronger, but costs ↑). cap as Iterations.*/
+	// 1 means collisions are resolved once at the end of the substep. Where a bend is sharp enough that a
+	// single pass cannot overcome the inward pull of the distance and bending constraints, splitting the
+	// iterations into this many groups and resolving collisions between them defends steeper angles, at
+	// proportionally higher cost. Capped at Iterations.
+
+	/** Collision resolve passes per substep. Raise it only for very sharp bends. */
 	int32 CollisionPassesPerSubstep = 1;
 
-	/** How many iterations will the contact constraint be solved (CPU fallback only — GPU kernel normally does once per collision pass).
-	 *  1 = Every iteration (default, existing behavior). N = once every N iteration.
-	 *
-	 *  **No matter what value is given, it must be solved in the *last* iteration of each collision pass.** This is the core of the contract —
-	 *  If you don't solve it at the end, there is no chance for distance/bending to push the node back into the surface, so the substep
-	 *  Ends in penetration state. So, if N is given as Iterations or more, “exactly once per pass” = cadence like GPU.
-	 *
-	 *  Solving each iteration is stronger at sharp included angles (collision competes with distance/bending every time, so tension
-	 *  is not pushed). Increasing N reduces the number of competitions, reducing the cost linearly, but reducing the penetration margin.
-	 *  Query is the only handle that directly divides the CPU fallback cost from the expensive SDF collider.
-	 *
-	 *  Non-exposed (BP only): Since there is only one consumer, FRopeXPBDSolver, **only works in CPU fallback**. Single GPU
-	 *  Because it is a runtime path (Cook/-nullrhi/Server/Excess size only CPU), it has no effect in normal play.*/
+	// **Whatever the value, contacts are always solved on the *last* iteration of every collision pass.**
+	// That is the load-bearing half of the contract: without a solve at the end, the distance and bending
+	// constraints get the final word and can push a node back inside the surface, so the substep ends
+	// penetrating. Setting N to Iterations or more therefore means "exactly once per pass" — the same
+	// cadence the GPU kernel uses.
+	// Solving on every iteration holds sharper included angles, because collision competes with distance and
+	// bending each time instead of being overruled. Raising N cuts the number of those contests, reducing
+	// cost linearly and the penetration margin with it. It is the one handle that directly trades CPU
+	// fallback cost against quality when the colliders are expensive SDFs.
+	// Not exposed to the Details panel: FRopeXPBDSolver is the only consumer, so it **only affects the CPU
+	// fallback**. The GPU is the single runtime path in normal play (cook, -nullrhi, server and oversized
+	// ropes are the CPU cases), so this has no effect there.
+
+	/** How often contacts are solved: 1 = every iteration, N = every Nth. CPU fallback only. */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "1"))
 	int32 ContactSolveInterval = 1;
 
-	/** XPBD stretch compliance (reciprocal of stiffness). 0 = inextensible.*/
+	/** Stretch compliance — the inverse of stiffness. 0 is inextensible. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", DisplayName = "Stretch Softness"))
 	float StretchCompliance = 0.0f;
 
-	/** Strain limiting (maximum elongation clamp): After substep solve, walk along the chain at pinned/anchor pinned nodes.
-	 *  Hard projects the segment length to ≤ this multiplier × SegmentLength (velocity neutral — prev is also moved). XPBD Distance
-	 *  constraint is Gauss-Seidel, so if the number of iterations is small, when a long chain (several dozen nodes) hangs on an anchor pin, correction is required until the end.
-	 *  Due to failure to propagate, runaway elongation (6 times+), huge tension, and tangential whip jitter occur in segments adjacent to the anchor. Sequential sweep is
-	 *  propagates throughout the chain at once, confining this runaway into a cap (PBD long-range constraint standard solution).
-	 *  1.5 = Allow up to 50% elongation (default). 1.0 = Fully unstretched (tightest). **0 or <1 = disabled** (strain limit off).*/
+	// A hard projection that walks the chain from the pinned and anchored nodes after each substep solve and
+	// clamps every segment to at most this multiple of SegmentLength, moving Prev with it so the correction
+	// injects no velocity. It exists because the XPBD distance constraint is Gauss-Seidel: with few
+	// iterations the correction never propagates to the far end of a long chain hanging off an anchor pin,
+	// and the segments next to the anchor run away — six times their length and more — with enormous tension
+	// and a tangential whip jitter. A sequential sweep propagates along the whole chain in one go and
+	// confines that runaway under the cap, which is the standard PBD long-range constraint remedy.
+
+	/** Longest a segment may stretch, as a multiple of its rest length. 1.0 is fully inextensible; 0 or below 1 disables the clamp. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", DisplayName = "Max Stretch"))
 	float MaxStretchRatio = 1.5f;
 
-	/** XPBD bending compliance. The bigger it is, the more flaccid it is.*/
+	/** Bending compliance. Higher is limper. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", DisplayName = "Bend Softness"))
 	float BendCompliance = 0.02f;
 
-	/** Angle-allowed bending: The steeper the bend, the more the stretching force is released (alleviating the angular bounce of the Free node at the corner/wrap boundary).
-	 *  decision value r = (i↔i+2 distance)/(2*SegmentLength) = cos(turn angle/2): 1=straight line, the smaller the steeper bend.
-	 *  If r ≤ BendReleaseRatio, the unfolding force is 0 (completely released), if r ≥ BendFullRatio, it is 100% (existing operation), and smoothstep in between.
-	 *  Default 0.70 (≈turn angle 91°). If the corner is still sharp, raise it (allows for sharp bends), and if you set both values ​​to 0, it will always be straightened (turns off angle tolerance).*/
+	// Releases the straightening force as a bend gets steeper, which takes the angular bounce out of a free
+	// node at a corner or a wrap boundary. The measure is r = (distance from node i to i+2) / (2 ×
+	// SegmentLength) = cos(half the turn angle): 1 is straight, and smaller is a steeper bend.
+	// At r ≤ BendReleaseRatio the straightening force is 0, at r ≥ BendFullRatio it is full, and it
+	// smoothsteps between them. Raise BendReleaseRatio if corners are still too stiff; set both to 0 to
+	// straighten always and switch the tolerance off. Lower BendFullRatio if a free rope hangs too limply.
+	// The solver guarantees BendFullRatio stays above BendReleaseRatio.
+
+	/** Bend tolerance floor: at or below this ratio (≈91° turn) the rope is not straightened at all. */
 	float BendReleaseRatio = 0.70f;
 
-	/** Angle-allowed bending: If r ≥ this value, the straightening force is 100% (gentle bending is straightened as before). Default 0.92 (≈turn angle 46°).
-	 *  If the Free rope is too flabby, lower it, and it should always be above BendReleaseRatio (internally guaranteed by the solver).*/
+	/** Bend tolerance ceiling: at or above this ratio (≈46° turn) the rope is straightened fully. */
 	float BendFullRatio = 0.92f;
 
-	/** Tangential direction friction to the collider [0..1] (Coulomb coefficient μ).*/
+	/** Tangential friction against colliders, the Coulomb coefficient μ [0..1]. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Friction = 0.5f;
 
-	/** A multiplier that weakens friction toward the Free end (pinned point=1, end=this value). The end node has the lowest tension.
-	 *  It is easily caught by friction, so lower the grip at the end to let it go. If 1.0, there is no taper (uniform friction).*/
+	// The end node carries the least tension, so friction grips it most easily and it stops sliding; easing
+	// the grip toward the end lets it run.
+
+	/** Friction multiplier toward the free end (1 at the pinned end). 1.0 means uniform friction. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Tip Grip Falloff"))
 	float TipFrictionScale = 1.0f;
 
-	/** collision query radius(cm) — The solver lifts the node this far from the contact surface. **Default 0 = auto: render tube
-	 *  Use Radius as is** (Automatic matching of 3 types of radius — 2026-07-13 surface audit B-2; If you enter a specified value, that value).
-	 *  Analysis is performed once at the component boundary (GetEffectiveCollisionRadius) — The solver/GPU step receives only the interpreted value.
-	 *  NOTE: Auto interpretation is disabled for consumers (unit tests/custom solver calls) who use this structure directly without a component.
-	 *  None — If it is 0, it operates as radius 0, so be sure to enter a specific value.*/
+	// Resolved once at the component boundary (GetEffectiveCollisionRadius); the solver and the GPU step only
+	// ever see the resolved value.
+	// NOTE: a consumer that uses this struct without a component — a unit test, or a direct solver call — has
+	// no auto resolution, and 0 there really does mean radius 0. Set an explicit value in that case.
+
+	/** How far the solver holds nodes off a contact surface (cm). 0 = auto, matching the render tube radius. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Collision Radius (0=Auto)"))
 	float CollisionRadius = 0.0f;
 
-	// NOTE: bUseWorldGDF moved directly under URopeComponent ("Rope|Collision" category)
-	// (2026-07-13 surface audit CL-4 — collision domain agglomeration: one digit with bIncludeOwnerColliders).
 
-	/** Collision sweep sample interval (cm) — The path the node moved in one substep is queried at this interval.
-	 *  The lower it is, the stronger it is against tunneling and the higher the query cost. It moves in pairs with MaxSweepSamples below.*/
+	/** Collision sweep sample spacing (cm) along the path a node travelled in one substep. Lower resists
+	 *  tunnelling better and costs more queries; move it together with MaxSweepSamples. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning",
 		meta = (ClampMin = "0.1", Units = "cm"))
 	float SweepStep = 2.0f;
 
-	/** Number of sweep samples per section cap (cost limit). In very fast nodes, the gap is widened by being pressed against this cap,
-	 *  If lowering the SweepStep has no effect, you must also increase this value.*/
+	/** Cap on sweep samples per segment. A very fast node hits this cap and its samples spread out, so raise
+	 *  it too when lowering SweepStep alone stops helping. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning",
 		meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxSweepSamples = 16;
 
+	/** Gravity applied to the rope (cm/s²). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning")
 	FVector Gravity = FVector(0.0f, 0.0f, -980.0f);
 
-	/** Air resistance. Units are **per-frame velocity reduction rate based on 60fps** (independent of number of substeps — Integrate compensates exponentially).
-	 *  If 0.02, residual rate per second is 0.98^60 ≈ 0.30, effective drag k ≈ 1.2/s → Free fall terminal velocity ≈ g/k ≈ 8m/s.
-	 *  As you raise it, the longitudinal velocity decreases and momentum dies quickly, making it look like a “light ribbon” — lower it if you need more weight.*/
+	// The unit is the per-frame velocity loss at 60fps and is independent of the substep count, because
+	// Integrate compensates exponentially. At 0.02 the survival rate over a second is 0.98^60 ≈ 0.30, an
+	// effective drag of k ≈ 1.2/s, which puts free-fall terminal velocity near 8 m/s.
+	// Raising it bleeds speed and kills momentum quickly, which reads as a light ribbon; lower it for weight.
+
+	/** Air resistance. Higher damping makes the rope feel lighter and lose momentum faster. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Motion Damping"))
 	float Damping = 0.02f;
 
-	//~ Scaling (Sleep/LOD) — Reduces idle/far costs when multiple ropes exist ------------------
+	//~ Scaling (sleep and LOD) — cuts the cost of idle and distant ropes when many are active -----------
+	// Sleep: while Free or Wrapped, if every node's speed stays under SleepVelocityThreshold for SleepDelay,
+	// the solve is skipped. Free then dispatches nothing at all; Wrapped keeps running its logic — bone
+	// follow (Hold), traction and auto-release — and only the free span's solve pauses, so the GPU sees an
+	// override-only dispatch. It wakes on a moving pin, on reeling, on a collider moving nearby, on the
+	// wrapped bone moving the nodes, on an active pull arriving, and on any phase transition.
+	// The other phases (Flight, Contacting, Wrapping, Releasing) never sleep.
 
-	/**
-	 * Sleep: In Free/Wrapped phase, all node velocities are below SleepVelocityThreshold during SleepDelay.
-	 * If held, solve is skipped — Free has no dispatch itself, and Wrapped has bone following(Hold)·traction·automatic release.
-	 * The logic continues to run and only the Free span solve is paused (GPU is override-only dispatch). Pin moving/Wrapping/moving
-	 * Wakes up from collider proximity/Wrapped bone movement (node ​​drift)/Active Pull Loaded/phase transition.
-	 * Other phases (Flight/Contacting/Wrapping/Releasing) are always active.
-	 */
+	/** Let an idle rope stop solving. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling")
 	bool bAllowSleep = true;
 
-	/** Slip entry check velocity (cm/s) — Maximum node displacement / dt between frames must be less than this value.*/
+	/** Speed below which a node counts as idle (cm/s), measured as its per-frame displacement over dt. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.1", DisplayName = "Sleep Speed Threshold"))
 	float SleepVelocityThreshold = 3.0f;
 
-	/** Time (in seconds) that low speed must be maintained before entering slip.*/
+	/** How long every node must stay slow before the rope sleeps (s). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.0", Units = "s"))
 	float SleepDelay = 0.5f;
 
 	/**
-	 * Distance LOD: If the distance to the player camera exceeds LODStartDistance, reduce constraint iteration.
-	 * and decreases linearly from LODEndDistance to LODMinIterationScale (convergence error is not visible from a distance).
-	 * If there is no camera (Dedi server), always full iteration.
+	 * Beyond LODStartDistance from the player camera, constraint iterations fall off linearly, reaching
+	 * LODMinIterationScale at LODEndDistance — convergence error is invisible at that range. With no camera,
+	 * as on a dedicated server, iterations always stay full.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling")
 	bool bEnableDistanceLOD = true;
 
+	/** Distance at which iteration fall-off begins (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "LOD Start"))
 	float LODStartDistance = 3000.0f;
 
+	/** Distance at which fall-off reaches its floor (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "LOD End"))
 	float LODEndDistance = 8000.0f;
 
-	/** Iteration multiplier at the farthest distance (1=no reduction).*/
+	/** Iteration multiplier at maximum distance (1 = no reduction). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.05", ClampMax = "1.0", DisplayName = "LOD Min Iterations"))
 	float LODMinIterationScale = 0.25f;
 };
 
 /**
- * Contact Decision Tuning: When is a draped rope considered “Wrapped” by a limb?
- * Parameter Hierarchy (2026-07-13 Meeting Decision F): Basic Display field = T2 (Balance), AdvancedDisplay field = T3
- * (Advanced — ②AssistedJudged × BareWrap check Mostly dedicated to infrastructure. ③Guaranteed checks/path builds
- * is not used, so T3 is all meaningless). For details, see Docs/PoC/02_WrapResolveModes.md §5~6.
+ * Wrap detection tuning: when does a rope draped over a limb count as wrapped?
+ * The fields shown by default are the balance-level knobs; the AdvancedDisplay ones are for detection
+ * infrastructure, which is mostly specific to AssistedJudged combined with a bare wrap. GuaranteedWrap runs
+ * no detection and builds no path, so none of the advanced fields apply to it.
  */
 USTRUCT(BlueprintType)
 struct FRopeWrapConfig
@@ -181,289 +203,299 @@ struct FRopeWrapConfig
 	GENERATED_BODY()
 
 	/**
-	 * Whether the SurfaceVectorField path point will be passed to the graph candidate bone without being pinned to one latch bone.
-	 * If false, candidate graph depth/cost becomes 0 and only the current bone is evaluated, returning close to the existing single bone operation.
+	 * Whether a SurfaceVectorField path point may move to a neighbouring candidate bone instead of staying
+	 * pinned to the one latch bone. With it off the candidate graph has zero depth and cost, only the current
+	 * bone is evaluated, and the behaviour reduces to a single-bone wrap.
 	 *
-	 * Non-exposed (BP only): This is a fallback switch that deteriorates into a single bone operation when turned off, so there is no reason to turn it off other than debugging.
+	 * Not exposed to the Details panel: switching it off only degrades the wrap, so there is no reason to
+	 * beyond debugging.
 	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap")
 	bool bEnableMultiBoneWrapping = true;
 
 	/**
-	 * contact *query* radius(cm) — As the name suggests, it does not belong to a specific step, but **detection(Flight/Contacting) and
-	 * is the surface query probe radius** shared by the establishment (path build projection/snap cap/DecideWrap).
-	 * **Default 0 = auto: render tube Radius × 1.5** (Automatic matching of 3 types of radius; If you enter a specified value, it will be the value). The interpretation is
-	 * At the component boundary (GetEffectiveContactQueryRadius) — the consumer receives the interpreted value. Note: component
-	 * — you must enter an explicit value.
+	 * The probe radius for surface queries. It belongs to no single step — detection (Flight and Contacting)
+	 * and establishment (path build projection, the snap cap, DecideWrap) all share it.
+	 * Resolved at the component boundary (GetEffectiveContactQueryRadius), so consumers see only the resolved
+	 * value. A consumer without a component must set an explicit value.
 	 *
-	 * Non-exposed (BP only): Auto follows the render tube radius, so the preset fits together just by setting the radius.
-	 * The moment you enter the specified value, the automatic matching is broken.*/
+	 * Not exposed to the Details panel: auto follows the render tube radius, so setting the radius alone
+	 * keeps a preset coherent — and entering an explicit value is exactly what breaks that.
+	 */
+	/** Surface query probe radius (cm). 0 = auto, the render tube radius × 1.5. */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "cm"))
 	float ContactQueryRadius = 0.0f;
 
-	//~ Capture check(detection) --------------------------------------------------------
-	// The threshold for Flight to be considered “caught,” and the contact detection sweep beyond which that check passes. Threshold three is
-	// ①FullSimulation/②AssistedJudged check path only, ③GuaranteedWrap is confirmed by GuidedThrow.
-	// It is only established as an anchor, so it is not viewed (sweep is Flight detection itself, so it has nothing to do with the mode).
+	//~ Capture detection -----------------------------------------------------------
+	// The thresholds that decide a Flight has caught something, and the contact sweep those thresholds read.
+	// The three thresholds are on the FullSimulation and AssistedJudged detection path only; GuaranteedWrap
+	// resolves through GuidedThrow and never consults them. The sweep is Flight detection itself, so it
+	// applies whatever the mode.
 
-	/** Minimum number of rope nodes that must touch a bone to be considered a catch rather than a grazing contact.
-	 *
-	 *  Non-exposure (BP only): The default of 1 is as lenient as possible, and the goal of "not catching stale things" is the angle at the time of commit.
-	 *  gateway(FailedWrapMinAngleDeg/CommitMin*) achieves more accuracy. The only reason left to post is
-	 *  The purpose is to prevent the useless operation of trying to wrap from even starting (to prevent wasted path builds/visual false starts).*/
+	// A default of 1 is as lenient as it goes. Keeping poor wraps out is the job of the commit-time angle
+	// gates (FailedWrapMinAngleDeg, CommitMin*), which measure it far more accurately. What this threshold is
+	// still worth is stopping a hopeless wrap from starting at all, so no path build is wasted and no false
+	// start is visible.
+	// Not exposed to the Details panel for that reason.
+
+	/** Rope nodes that must touch one bone before it counts as a catch rather than a graze. */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "1"))
 	int32 MinLatchNodes = 1;
 
-	/** Contact must last this long (in seconds) on the same bone before confirming the wrap.
-	 *
-	 *  Non-exposure (BP only): Default 0.016 = 60fps 1 frame, so there is virtually no dwell. Such as MinLatchNodes
-	 *  This is the second levera redundancy for the question ("How sure must it be to reach to catch it?").*/
+	// The default of 0.016 is one frame at 60fps, so there is effectively no dwell. Together with
+	// MinLatchNodes this is the second lever on the same question — how sure must a reach be before it counts
+	// as a catch — which is why it is not exposed to the Details panel.
+
+	/** How long contact must persist on one bone before the wrap is confirmed (s). */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "s"))
 	float WrapDecisionTime = 0.016f;
 
-	/** Flight prediction lookahead (frame displacement multiple) to avoid missing thin limb/SDF candidates. If 0, prediction is off.
-	 *
-	 *  Non-exposure (BP only): ContactSweepStep is a more direct solution to the same symptom of "fast throwing passes target".
-	 *  It's a lever, and its comments guide the response sequence.*/
+	// ContactSweepStep is the more direct lever on the same symptom, a fast throw passing through its target;
+	// its comment gives the order to try things in. Not exposed to the Details panel for that reason.
+
+	/** Flight prediction lookahead, in multiples of the frame displacement, so thin limbs are not missed. 0 disables it. */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", ClampMax = "4.0"))
 	float PredictiveContactFrames = 1.0f;
 
 	/**
-	 * Sample interval (cm) of contact detection sweep. The path taken by the node in one frame is interrogated at this interval to determine the deepest contact.
-	 * Look for — **value to prevent tunneling**, so it should be less than the thickness of the thinner side (forearm/handrail) of the object you are trying to grab.
-	 * If a fast throw passes through the target and misses the capture, lower this value. solver collision
-	 * Same idea as FRopeSolverConfig::SweepStep, but detection only runs on Flight and budget is set aside.
+	 * Spacing at which the path a node travelled this frame is sampled for its deepest contact.
+	 * **This is the anti-tunnelling value**, so keep it under the thickness of the thinnest thing worth
+	 * catching — a forearm, a handrail. Lower it when a fast throw passes through its target without
+	 * capturing. Same idea as FRopeSolverConfig::SweepStep, but detection runs during Flight only and has its
+	 * own budget.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "0.1", Units = "cm", DisplayName = "Sweep Step"))
 	float ContactSweepStep = 2.0f;
 
-	/** Sample number cap (cost limit) of the above detection sweep. In very fast nodes, the gap is widened by being pressed against this cap,
-	 *  If lowering ContactSweepStep has no effect, you must also increase this value.*/
+	/** Cap on samples for the detection sweep above. A very fast node hits this cap and its samples spread
+	 *  out, so raise it too when lowering ContactSweepStep alone stops helping. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "1", ClampMax = "64", DisplayName = "Max Sweep Samples"))
 	int32 ContactMaxSweepSamples = 16;
 
 	/**
-	 * Maximum number of wrap seeds (contact targets) that can be adopted in one capture. 1 (default) = Traditional single seed behavior.
-	 * If it is 2 or more, in addition to the dominant target, dwell on a *different* (mesh, bone) on the tail side than the dominant latch.
-	 * The filled contacts are wound together as auxiliary seeds (e.g. both legs – one leg is wound and the contact node on the other leg is also wound together)
-	 * pinned to that bone). A Wrapping path (spiral) is created only for the dominant seed, and the secondary seed uses the contact node as its own.
-	 * It is a method of holding on to the bone — it does not create a path that goes around the auxiliary object.
+	 * How many wrap seeds — contact targets — one capture may adopt. 1, the default, is a single seed.
+	 * At 2 or more, alongside the dominant target, contacts that dwell on a *different* (mesh, bone) further
+	 * toward the tail than the dominant latch are wrapped as secondary seeds. Wrapping both legs is the
+	 * motivating case: one leg is wrapped, and the contact nodes on the other are pinned to that bone too.
+	 * Only the dominant seed gets a wrapping path — a secondary seed holds its bone with the contact nodes it
+	 * already has, and no path is built around it.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 MaxWrapSeeds = 1;
 
 	/**
-	 * Wrapping axis guidance source. BoneCenteredGuidePlane (default) uses latch bone for Assisted single bone Wrapping.
-	 * is used as the axis origin. CaptureTravelPlane supports Composite Wrapping around the contact area/cluster center axis.
+	 * Where the wrapping axis comes from. BoneCenteredGuidePlane, the default, puts the axis on the latch
+	 * bone, which suits an AssistedJudged single-bone wrap; CaptureTravelPlane centres it on the contacted
+	 * cluster, which is what a composite wrap needs.
 	 *
-	 * Maintain exposure because the value must be different for each preset (bola = CaptureTravelPlane, single bone capture =
-	 * BoneCenteredGuidePlane). It is better for users to set presets rather than individually.
+	 * Exposed because the right value differs per preset — a bola wants CaptureTravelPlane, a single-bone
+	 * catch wants BoneCenteredGuidePlane — though setting it through a preset beats setting it per instance.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (DisplayName = "Axis Source"))
 	ERopeWrappingAxisSource WrappingAxisSource = ERopeWrappingAxisSource::BoneCenteredGuidePlane;
 
 	/**
-	 * Maximum distance (cm) that a SurfaceVectorField path can cross in a tangent straight line (chord) through empty space without a surface.
-	 * 0 (default) = Off — If projection is interrupted, the path build fails as before.
-	 * is turned on, two things change (4 stages of wrap based on progress direction, premise of wrap where the object is split in two like a leg of lamb):
-	 *  ① If the projection attempts to pull to a surface that is more than one segment away from the prediction point, it refuses to snap and returns to the chord.
-	 *     goes (if turned off, QueryRadius retains my lenient snap — default behavior unchanged).
-	 *  ② Path points in the chord section do not create anchors — after commit, those nodes remain as Free ropes and the solver
-	 *     Holds a suspended/straight form, and tension is applied when the object is spread (actual physics of binding).
-	 * If it fails to re-enter the surface even after passing this distance, it falls into the same failure processing as before.
+	 * How far a SurfaceVectorField path may cross open space on a tangent chord, with no surface under it.
+	 * 0, the default, is off: an interrupted projection fails the path build outright.
+	 * Switching it on changes two things, and together they are what makes it possible to wrap something
+	 * forked, such as a pair of legs:
+	 *  - a projection that would snap to a surface more than one segment from the predicted point is refused,
+	 *    and the path stays on the chord. (Off, the query radius keeps its lenient snap.)
+	 *  - path points on a chord raise no anchors, so after commit those nodes stay free rope. The solver
+	 *    holds them slung straight, and they take tension when the target's legs spread — which is what
+	 *    binding actually feels like.
+	 * Failing to regain a surface within this distance falls back to the same failure handling as before.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Max Gap Bridge"))
 	float WrappingMaxGapBridgeDistance = 0.0f;
 
-	/**
-	 * Rolling amount cap (degrees): Cumulative Wrapping angle of SurfaceVectorField path build (rolling axis integral —
-	 * FRopeWrappingState::PathAccumulatedAngleRad) reaches this value, the path is closed early with *success*.
-	 * 0 (default) = Unlimited — Proceed until all remaining rope is wound (existing behavior).
-	 * A long rope spirally wraps around the object several times (actual measurement 3000~4400°), and bone conversion reseed is used for the neck/head.
-	 * Prevents “octopus wrap” from spreading to other areas. The remaining rope outside the path finished at the cap is during Wrapping.
-	 * It is frozen and then stretches to Free span after commit (front motion does not drag nodes outside the path).
-	 * If you do a double leg bola, 400~540° (one turn + margin) is natural.
-	 *
-	 * **[Plot] Does not apply to Composite AnalyticHelix** — and it's up to you to decide which strategy to use.
-	 * , but the *target geometry* is determined at runtime: if two or more bones are bound to the same pose-space column,
-	 * Composite (bPathUsesPoseSpaceIsland in path build). One forearm is sequential, so this cap is applied,
-	 * The legs are composite, so they don't get stuck. In other words, multiple bones are most likely to produce the "octopus wrap" that this value is intended to prevent.
-	 * target is actually invalid — in that case overwrapping is CommitMinWrapAngleDeg/CommitMinWrapCoverageDeg
-	 * Must be filtered through the gateway.
-	 */
+	// A long rope spirals around its target several times — 3000° to 4400° in practice — and reseeding onto a
+	// new bone spreads it to the neck and head, an "octopus wrap". Rope left outside the path when the cap
+	// closes it is frozen for the rest of the Wrapping phase and becomes free span after commit; the front
+	// motion does not drag nodes beyond the path. For a two-leg bola, 400° to 540° — one turn plus margin —
+	// reads naturally.
+	// **It does not apply to a composite analytic helix.** The strategy is not chosen by hand: the *target
+	// geometry* decides it at runtime, and two or more bones bound to the same pose-space island make the
+	// wrap composite (bPathUsesPoseSpaceIsland in the path build). A single forearm is sequential and takes
+	// this cap; a pair of legs is composite and does not. Which means the multi-bone case most likely to
+	// produce the octopus wrap this value guards against is exactly the case it cannot reach — filter that
+	// one with CommitMinWrapAngleDeg and CommitMinWrapCoverageDeg instead.
+
+	/** Total wrap angle at which the path build stops early and *succeeds* (deg). 0 = unlimited. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "0.0", Units = "deg", DisplayName = "Max Wrap Angle"))
 	float WrappingMaxWrapAngleDeg = 0.0f;
 
-	/** Wrapping phase must keep the same accumulated latch span stable this long before committing. */
+	/** How long the accumulated latch span must hold steady before Wrapping commits (s). */
 	float WrappingStableTime = 0.10f;
 
 	/**
-	 * **Minimum length** (seconds) of the Wrapping phase — This is not the time taken for Wrapping. The roles are different in the two paths.
+	 * **Floor** on how long the Wrapping phase lasts — not how long wrapping takes. The two paths use it
+	 * differently.
 	 *
-	 * ① Normal (angle mapping) path — Wrapping velocity is determined by WrappingAngularSpeedDegPerSec, and the time required is determined by WrappingAngularSpeedDegPerSec.
-	 *    This is the result. This value only works as a floor: even if the front reaches the target early, it starts Wrapping from the beginning.
-	 *    Do not commit before the time has elapsed. During that waiting period, the rope is **stationary in the already completed wrap position.
-	 *    Yes** (Wrapping is logic-driven, so the solver does not run). In other words, what this value determines is “Wrapping completed” and
-	 *    This is the interval between “tension start (Wrapped entry)” — to eliminate moxibustion, lower it below the actual Wrapping time.
-	 * ② DistanceFallback (angle mapping not possible) path — reversed. This value determines the actual time taken.
-	 *    Calculate front velocity as FullDistance / (this value + tail delay). Each velocity setting is not used here.
+	 * On the normal path, where the wrap angle maps to time, WrappingAngularSpeedDegPerSec sets the speed and
+	 * the duration falls out of it. This value is only a floor: even if the front arrives early, the commit
+	 * waits until it has elapsed, and during that wait the rope **sits still in its finished wrap pose**,
+	 * because Wrapping is logic-driven and the solver is off. So what this value really sets is the gap
+	 * between "the wrap finished" and "tension begins" at the entry into Wrapped — put it below the real
+	 * wrapping time to remove that pause.
+	 *
+	 * On the DistanceFallback path, where no angle mapping is possible, it is the other way round: this value
+	 * sets the actual duration, and the front speed is FullDistance / (this value + the tail delay). The
+	 * angular speed setting is unused there.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap",
 		meta = (ClampMin = "0.01", Units = "s", DisplayName = "Min Wrap Duration"))
 	float WrappingMotionDuration = 0.20f;
 
 	/**
-	 * Standard velocity (deg/s) before applying easing of Wrapping animation.
-	 * For both Single/Composite, FrontWrapAngleRad is performed with this value. 1100deg/s is 3 steps ago
-	 * This is a common default value tailored to the Single actual measurement start policy (baseSpeed approximately 203cm/s / 10.57cm/rad).
+	 * Nominal wrapping speed (deg/s), before the animation's easing is applied. Both the single and composite
+	 * paths advance FrontWrapAngleRad at this rate. The default of 1100 deg/s matches the measured single-bone
+	 * behaviour it replaced, a base speed of roughly 203 cm/s over 10.57 cm/rad.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap",
 		meta = (ClampMin = "1.0", ClampMax = "7200.0", Units = "deg/s", DisplayName = "Wrap Speed"))
 	float WrappingAngularSpeedDegPerSec = 1100.0f;
 
-	/** After the angle mapping front reaches the angle+distance target, there is a short path to be secured before the Wrapped commit.
-	 *  Stabilization time. Prevents frame popping that may occur during the last kinematic node/anchor transition.
-	 *
-	 *  Non-exposed (BP only): This is a policy constant determined by actual measurements, so there is no basis for choosing a different value. The velocity/length of Wrapping is
-	 *  WrappingAngularSpeedDegPerSec and WrappingMotionDuration are determined.*/
+	// A policy constant settled by measurement, so there is no basis for picking a different one — which is
+	// why it is not exposed to the Details panel. Wrapping speed and duration are
+	// WrappingAngularSpeedDegPerSec and WrappingMotionDuration.
+
+	/** Settle time between the front reaching its target and the Wrapped commit (s), which absorbs the pop as the last node hands over to its anchor. */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "0.0", ClampMax = "1.0", Units = "s"))
 	float WrappingPostFrontSettleTime = 0.08f;
 
-	/** Delay time added to each segment to ensure that the tail node settles on the surface path.
-	 *  Applies only to the DistanceFallback path where angle mapping cannot be used due to the commit time limit from step 4.*/
+	/** Extra delay per segment so a tail node settles onto the surface path. DistanceFallback path only,
+	 *  where the commit deadline rules out angle mapping. */
 	float WrappingTailDelayPerSegment = 0.024f;
 
-	/** **Multiple** of the surface path integration step budget to be performed in one frame during Wrapping (not the number of steps itself).
-	 *  The actual budget is a reference value proportional to the rope size multiplied by this value.
-	 *  (FRopeWrappingPhase::ComputePathStepBudget — base 8, so 8 = 1x).
-	 *  If you increase it, the Wrapping path will be completed faster, but the instantaneous cost will increase.
-	 *
-	 *  Not exposed (BP only): The main reason for changing, "path completion on large ropes is slow", is already scaled proportional to size.
-	 *  Process.*/
+	// The real budget is a size-proportional reference figure multiplied by this (FRopeWrappingPhase::
+	// ComputePathStepBudget, whose base is 8 — so 8 is 1×). Raising it finishes the wrapping path sooner at a
+	// higher per-frame cost.
+	// Not exposed to the Details panel: the reason anyone would raise it, "path building is slow on a big
+	// rope", is already handled by scaling the budget with rope size.
+
+	/** Multiplier on the surface path integration budget per frame — a multiple, not a step count. */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "1", ClampMax = "128"))
 	int32 WrappingPathBuildStepsPerFrame = 8;
 
 	/**
-	 * Axis distance advanced per circumference distance for Sequential SurfaceVectorField wrapping.
-	 * Composite Analytic Helix does not use this value but automatically calculates it from the tail slope at the moment of contact.
+	 * Axial distance gained per unit of circumferential travel for a sequential SurfaceVectorField wrap.
+	 * A composite analytic helix ignores it and derives the pitch from the tail's slope at contact.
 	 *
-	 * Non-exposed (BP only): The target geometry determines at runtime which strategy to use (see below).
-	 * Refer to the pose-space island description in the WrappingMaxWrapAngleDeg annotation), and even if you change the value, the response depends on the target.
-	 * You cannot learn cause and effect.
+	 * Not exposed to the Details panel: which strategy runs is decided at runtime by the target's geometry
+	 * (see the pose-space island note on WrappingMaxWrapAngleDeg), so changing the value and watching the
+	 * result teaches nothing about cause and effect.
 	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "-2.0", ClampMax = "2.0"))
 	float WrappingHelixPitchScale = 0.25f;
 
-	// NOTE: The multibone projection scoring details below (12 types of depth/cost/weight/bonus/hysteresis) are based on actual tuning.
-	// Internalized as developer constant (2026-07-13 surface audit B-2 — UPROPERTY removed, adjusted only in code).
-	// The on/off switch is the bEnableMultiBoneWrapping above. The meaning of each value is annotated by field.
+	// The multi-bone projection scoring constants below — depth, cost, weights, bonuses and hysteresis — were
+	// settled by tuning and are developer constants, adjusted in code rather than in the Details panel. The
+	// on/off switch for the whole thing is bEnableMultiBoneWrapping above. Each value is documented in place.
 
 	/**
-	 * How many edges in the current bone are considered candidates.
-	 * For now, only the skeleton parent/child edges are used. Even if you add a designer-specified transition later,
-	 * Since it passes the same depth limit, it is a primary safety device that prevents bridges that are too far away from opening at once.
+	 * How many edges from the current bone stay in the candidate set. Only skeleton parent and child edges
+	 * are used for now; a designer-authored transition added later would pass the same depth limit, which is
+	 * the first safeguard against a distant bridge opening in one step.
 	 */
 	int32 MaxBoneTransitionDepth = 3;
 
 	/**
-	 * candidate graph cumulative cost cap.
-	 * Even if the depth is the same, the cost may vary if the penalty for each edge is different. For now, only parent/child edge costs
-	 * It accumulates, but later plays the role of cutting out candidates before projection when mixing designer edges / edges close to prohibition.
+	 * Cap on a candidate's accumulated graph cost. Two candidates at the same depth can cost differently once
+	 * edges carry different penalties. Only parent and child edge costs accumulate today; the cap earns its
+	 * keep once designer-authored or near-forbidden edges join them, by cutting candidates before projection.
 	 */
 	float MaxBoneTransitionCost = 5.0f;
 
 	/**
-	 * Cost of passing one automatic parent/child edge.
-	 * The larger the value, the greater the graph cost, making it easier to maintain the same bone, and lowering it makes the parent/child chain more active.
+	 * Cost of traversing one automatic parent/child edge. Higher makes staying on the current bone easier;
+	 * lower makes the rope work its way along the parent/child chain more readily.
 	 */
 	float AutoParentChildTransitionPenalty = 1.0f;
 
-	/** projection distance score weight. The farther from the predicted location to the surface, the more disadvantageous it is.*/
+	/** Weight on projection distance. The further the surface is from the predicted point, the worse the score. */
 	float ProjectionDistanceWeight = 0.35f;
 
-	/** Distance weight between the actual rope node location and the projection surface point. Prefer the bone on the side where the rope is actually located.*/
+	/** Weight on the distance from the rope node itself to the projected surface point, favouring the bone the rope is actually beside. */
 	float RopeNodeDistanceWeight = 0.25f;
 
-	/** Weight of the degree to which the old tangent and the new tangent are bent. The larger the value, the smoother progress is preferred.*/
+	/** Weight on the bend between the old and new tangents. Higher prefers smoother progress. */
 	float TangentContinuityWeight = 8.0f;
 
-	/** Weight of the degree to which the old normal and the new normal are bent. The larger the value, the more surface normal continuity is preferred.*/
+	/** Weight on the bend between the old and new normals. Higher prefers continuous surface normals. */
 	float NormalContinuityWeight = 5.0f;
 
-	/** graph cost weight. A candidate who crosses the parent/child line more often is at a disadvantage.*/
+	/** Weight on graph cost, penalizing a candidate that crosses more parent/child edges. */
 	float BoneTransitionPenaltyWeight = 1.0f;
 
-	/** Current bone maintenance bonus. Reduces bone shaking near the tie point.*/
+	/** Bonus for staying on the current bone, which steadies the bone choice near the tie point. */
 	float CurrentBoneBonus = 0.35f;
 
-	/** The new bone must be better than the current bone by this score to switch. Transition hysteresis.*/
+	/** How much better a new bone must score before the wrap moves to it — transition hysteresis. */
 	float BoneTransitionHysteresis = 0.75f;
 
-	/** Penalty added to candidates that return directly to the previous bone. Reduce the round trip from A->B->A.*/
+	/** Penalty on a candidate that returns straight to the previous bone, discouraging A → B → A. */
 	float ImmediateBoneReturnPenalty = 1.5f;
 
-	/** After the last bone transition, more than this distance (cm) must be advanced before the next transition is allowed. If 0, disabled.*/
+	/** Path distance that must pass after a bone transition before the next is allowed (cm). 0 disables it. */
 	float MinBoneTransitionPathDistance = 8.0f;
 
-	/** Upper bound for physics-based wrapping settle before committing the best accumulated anchors. */
+	/** Longest the physics-driven wrapping settle may run before the best accumulated anchors are committed (s). */
 	float WrappingMaxSettleTime = 0.90f;
 
-	/**
-	 * Minimum wrap angle (degrees) of the wrap for which path creation failed. If the angle of winding to failure is less than this value, “Slightly
-	 * Release the commit instead of the “sticky” commit. 0 = Guard off.
-	 * Why it is angle-based (replaces the previous constexpr "at least 1 turn" criterion): One turn requires rope 2πr, so the target
-	 * The bigger it is, the more the absolute length increases — radius 100cm The body is 628cm per turn, which is equivalent to a basic rope (200cm).
-	 * It was physically impossible and the large target wrap was structurally destroyed. Wrapped angle is independent of target size
-	 * This is a measure of “hook quality” (120° = 1/3 turn hook).
-	 */
+	// Why an angle rather than the turn count it replaced: one turn costs 2πr of rope, so the bigger the
+	// target the more absolute length it demands — a body of radius 100 cm needs 628 cm per turn, which a
+	// default 200 cm rope simply cannot pay, and wrapping large targets broke structurally as a result. The
+	// wrapped angle measures hook quality independently of target size (120° is a third of a turn).
+
+	/** Below this wrap angle, a wrap whose path build failed is released instead of committed (deg). 0 disables the guard. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning|Quality",
 		meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg", DisplayName = "Min Angle On Path Failure"))
 	float FailedWrapMinAngleDeg = 120.0f;
 
-	/**
-	 * Commit quality floor: wrap of *all* wraps (regardless of path completion/failure/settle timeout) that are committed as Wrapped.
-	 * If the angle is less than this value, release instead of commit. 0 (default) = Off — Retain existing behavior.
-	 * Difference from FailedWrapMinAngleDeg: that is an early abort for wrap only where "path creation failed", this is a commit.
-	 * The final gateway just before. Even if the path is completed normally, if the latch is near the tip, the path is short (winding angle is small) and it sticks.
-	 * commits can come out, and the settle timeout commit passes even with one anchor — such a poor wrap in the game
-	 * Turn on by opt-in when you want to filter by rule (keep it at 0 if it is a design that allows slight tip overlapping).
-	 */
+	// How it differs from FailedWrapMinAngleDeg: that one aborts early, and only where the path build failed.
+	// This is the last gate before commit and applies to *every* wrap — path completed, path failed, or
+	// settle timed out alike. A path can complete normally and still commit a poor wrap, if the latch landed
+	// near the tip and the path is therefore short; a settle-timeout commit can go through on a single
+	// anchor. Opt in when a game rule should filter those out, and leave it at 0 for a design where a light
+	// hook on the tip is fine.
+
+	/** Below this wrap angle, no wrap commits at all (deg). 0 = off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning|Quality",
 		meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg", DisplayName = "Min Commit Angle"))
 	float CommitMinWrapAngleDeg = 0.0f;
 
-	/**
-	 * Shape-based binding gateway (degrees): Angular coverage around the Wrapping axis of the committed wrap path (aligning path point angles)
-	 * 360° - maximum space) is less than this value, release instead of commit. 0 (default) = Off — Retain existing behavior.
-	 * Difference from CommitMinWrapAngleDeg (accumulated angle): The accumulated angle is the sum of the amount of rotation, so vibration/reciprocation on the surface occurs.
-	 * The value can be inflated and takes several turns to exceed 360°. Coverage refers to “what direction does the rope actually travel around the axis?”
-	 * It is a pure geometric measure of "enclosure" (0-360°) and is immune to vibration — it determines whether the object is truly trapped (like a two-legged bola).
-	 * check to see if there are any spaces to escape. In the CaptureTravelPlane Wrapping the axes are pinned at capture time.
-	 * The meaning is correct (approximation based on the last axis in BoneCenteredGuidePlane's rolling axis).
-	 * Around 300° for double leg locking, or 0 to allow for a loose hook.
-	 */
+	// How it differs from CommitMinWrapAngleDeg, which accumulates: an accumulated angle sums every bit of
+	// rotation, so oscillating back and forth across a surface inflates it, and it can take several turns to
+	// pass 360°. Coverage instead asks which directions around the axis the rope actually occupies — a purely
+	// geometric enclosure measure from 0 to 360°, immune to oscillation. It is what tells you the target is
+	// genuinely trapped, as a two-leg bola is, by checking there is no gap left to slip out through.
+	// It is exact under a CaptureTravelPlane wrap, where the axis is pinned at capture; under
+	// BoneCenteredGuidePlane it approximates, using the last rolling axis.
+	// Around 300° locks a pair of legs; 0 allows a loose hook.
+
+	/** Below this angular coverage around the wrap axis, no wrap commits (deg). 0 = off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning|Quality",
 		meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg", DisplayName = "Min Commit Coverage"))
 	float CommitMinWrapCoverageDeg = 0.0f;
 
-	// NOTE: Previously [unwired] WrappingContactGraceTime has been removed (2026-07-13 surface audit B-2 — consumption code
-	// is dead without any settings). When actually wiring the grace logic, restore the settings in the CL as well.
+	// NOTE: WrappingContactGraceTime was removed — it was never wired to anything. Restore the setting
+	// alongside the logic if grace handling is ever implemented.
 
 };
 
 /**
- * Tuning *after* Wrapped (retention/pull/release) — domain of Design Note 01 (Post-Wrap model), and
- * Consistent with the boundary “Common regardless of arrival mode/latching model” (02 document §3). Previously, FRopeWrapConfig (establishment check)
- * The mixed one was separated (2026-07-13 surface audit B-1 — existing BP tuning non-transferred clean break).
- * Consumer: Wrapping/Movement constraint + Wrapped step 4 of URopeComponent
- * (Hold → Pull sample → Tether/Pull application → automatic release).
+ * Tuning for what happens *after* the wrap — hold, pull and release. It is a separate domain from wrap
+ * detection (FRopeWrapConfig), and applies the same way whatever the resolve mode or latching model.
+ * Consumed by URopeComponent's wrapping and movement constraints, and by the four Wrapped steps: hold, pull
+ * sample, tether and pull application, then auto-release.
  */
 USTRUCT(BlueprintType)
 struct FRopeHoldConfig
@@ -471,236 +503,252 @@ struct FRopeHoldConfig
 	GENERATED_BODY()
 
 	/**
-	 * From the moment Wrapping begins, the Free span of the wielder's hand is forced within the material rest length.
-	 * If true, RopeWielder will determine the final movement of the CharacterMovement (including input/root motion/slide) using the same PrePhysics
-	 * is projected onto the frame as a spherical constraint, and the same safety net is applied to the general Pawn immediately after the movement tick.
+	 * From the moment wrapping begins, keep the free span between the wielder's hand and the rope within its
+	 * material rest length.
+	 * With it on, the Wielder projects CharacterMovement's final movement — input, root motion and sliding
+	 * included — onto a spherical constraint in the same PrePhysics frame, and an ordinary Pawn gets the same
+	 * safety net immediately after its movement tick.
 	 *
-	 * This constraint is a gameplay authority unrelated to SegmentTension/GPU readback. Therefore
-	 * Prevents a rope with TetherCompliance=0 from being stretched first and then recovered later due to kinematic pawn movement.
-	 * If TetherCompliance>0, intentional elasticity is allowed, so hard projection is automatically disabled.
-	 * For custom movement without a Wielder, call URopeComponent::ConstrainWielderLocation before applying the movement.
+	 * This constraint is gameplay authority and owes nothing to SegmentTension or GPU readback, which is what
+	 * stops a rope with TetherCompliance = 0 being stretched by kinematic pawn movement and only recovering a
+	 * frame later. With TetherCompliance > 0 the elasticity is deliberate, so hard projection switches itself
+	 * off. Custom movement without a Wielder should call URopeComponent::ConstrainWielderLocation before
+	 * applying its move.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (DisplayName = "Enforce Rope Length"))
 	bool bEnforceWielderLengthConstraint = true;
 
 	/**
-	 * **Target-side mirror** of the above wielder hard projection: The wound target is a CMC driven character (kinematic capsule) and the wielder ends
-	 * When there is infinite mass (Anchor — helicopter/kinematic carrier), the target capsule is placed within the sphere of the radius of the center of the hand and leg rest length.
-	 * Project the sweep to the same frame. Only works in this combination — if both ends can move, the λ pair is already
-	 * Since it is distributed in the inverse mass ratio, double correction occurs when projection intervenes.
+	 * The **target-side mirror** of the hard projection above. When the wrapped target is a CMC-driven
+	 * character — a kinematic capsule — and the wielder's end has infinite mass, as an anchored or kinematic
+	 * carrier such as a helicopter does, the target's capsule is swept into a sphere centred on the hand with
+	 * the leg's rest length as its radius, in that same frame.
+	 * It works only in that combination. When both ends can move, the λ pair already distributes the
+	 * correction by inverse mass, and adding a projection would apply it twice.
 	 *
-	 * Without this, the only means of tracking carrier movement is location recovery (bias, TetherMaxBiasSpeed cap), so the carrier
-	 * If it is faster than that, the rope will stretch infinitely. Automatically disabled if TetherCompliance>0 (intentional elasticity).
+	 * Without it, the only way to track a moving carrier is positional recovery, capped by TetherMaxBiasSpeed,
+	 * so a carrier faster than that cap stretches the rope without limit. Switches itself off when
+	 * TetherCompliance > 0, where the elasticity is deliberate.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (DisplayName = "Enforce Rope Length (Target)"))
 	bool bEnforceTargetLengthConstraint = true;
 
-	/**
-	 * Material-length constraint activation tolerance(cm). This is a numerical boundary band:
-	 * it allows an outward attempt within this distance to produce a stable reaction, but it is
-	 * never added to rope length and therefore cannot make an inextensible rope longer.
-	 *
-	 * Unexposed (BP only): traction start boundary is `max(this value, MaxDistance × TautSlackRatio × hysteresis)`.
-	 * For ropes of actual length, the latter term always wins (≈18cm vs. 0.5cm for a 600cm rope). moving the border
-	 * The designer knob is TautSensitivity, which is the numerical stability floor underneath it.
-	 */
+	// The traction boundary is max(this value, MaxDistance × TautSlackRatio × hysteresis), and for a rope of
+	// any real length the second term always wins — about 18 cm against 0.5 cm on a 600 cm rope. The designer
+	// knob that moves the boundary is TautSensitivity; this is the numerical stability floor beneath it,
+	// which is why it is not exposed to the Details panel.
+
+	/** Numerical tolerance band for activating the length constraint (cm). It never adds rope length, so an
+	 *  inextensible rope cannot grow through it. */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Hold|Tuning",
 		meta = (ClampMin = "0.0", Units = "cm"))
 	float LengthConstraintActivationSlop = 0.5f;
 
 	/**
-	 * The authoritative material-constraint tension (kg·cm/s²) during Wrapped sets this value during TensionReleaseTime.
-	 * If it is continuously exceeded, it is automatically released (ERopeReleaseReason::Tension). 0 = disabled.
-	 * It is the same unit as GetConstraintTension/MaxTetherTension and is not used together with XPBD SegmentTension.
-	 * (Automatic release is only valid in arrival mode ①② — ③ Guaranteed is only for explicit release.)
+	 * Auto-release (ERopeReleaseReason::Tension) once the authoritative constraint tension stays above this
+	 * value for TensionReleaseTime. 0 disables it.
+	 * Same units as GetConstraintTension and MaxTetherTension; unrelated to XPBD SegmentTension.
+	 * Auto-release applies to FullSimulation and AssistedJudged only — a GuaranteedWrap rope is released
+	 * explicitly.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0", DisplayName = "Release At Tension"))
 	float TensionReleaseForce = 0.0f;
 
-	/** Duration (in seconds) of tension release check. It prevents loosening with an instantaneous spike (impact frame).
-	 *  If TensionReleaseForce = 0 (tension release off), there is no check and it is grayed out.*/
+	/** How long tension must stay over the threshold before releasing (s), so an impact spike does not let go.
+	 *  Greyed out when tension release is off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release",
 		meta = (ClampMin = "0.0", Units = "s", EditCondition = "TensionReleaseForce > 0.0", DisplayName = "Release Delay"))
 	float TensionReleaseTime = 0.05f;
 
-	/**
-	 * (limited to the simulation body of the analytic λ path) Since λ impulse creates only the rope axis component, if the direction changes suddenly, the old direction
-	 * The inertia remains perpendicular and flies (“excessive inertia”). This ratio (0 = preservation, 1 = complete removal) determines how much of that residual inertia is.
-	 * Suppress fling by subtracting across frames. The value is a per-frame rate based on 60fps and is corrected by dt when applied.
-	 * (frame rate independent).
-	 *
-	 * The only recipient is an endpoint that passes ApplySimBody — **when the wielder is a physical actor configuration (sim root)**, and
-	 * **Simulate target for elastic mode with TetherCompliance > 0**. The simulation target is non-stretchable (TetherCompliance = 0).
-	 * Since the Chaos physical constraint is exclusive (bUseChaosBackend branch of UpdateConstraintTether), it does not take advantage of this damping,
-	 * Does not apply to CMC characters.
-	 */
+	// A λ impulse produces only the component along the rope axis, so when the direction swings sharply the
+	// old perpendicular inertia survives and the target flies off. This ratio — 0 keeps it, 1 removes it
+	// entirely — is how much of that residual is subtracted each frame. The rate is per-frame at 60fps and is
+	// corrected by dt when applied, so it is frame-rate independent.
+	// The only receivers are endpoints that go through ApplySimBody: a wielder configured as a physics actor
+	// with a simulating root, and a simulating target in elastic mode with TetherCompliance > 0. An
+	// inextensible simulating target (TetherCompliance = 0) is held by the exclusive Chaos physics constraint
+	// instead and never sees this damping, and neither does a CMC character.
+
+	/** How much sideways inertia is removed from the tether each frame [0..1], which stops a target being flung when the pull direction swings. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Tether Sideways Damping"))
 	float TetherPerpDamping = 0.3f;
 
 	/**
-	 * Tether velocity safety cap (cm/s) — Secondary clamp of injected resulting velocity (ClampInjectedVelocity —
-	 * movement is preserved). 0 = No clamp (not recommended). The position retrieval command cap of λ is a separate knob (TetherMaxBiasSpeed —
-	 * Previously, this value was reused and recovery was virtually cap-Free).
+	 * Safety cap on the velocity the tether injects, clamped after the fact so the direction is preserved
+	 * (ClampInjectedVelocity). 0 removes the clamp, which is not recommended. The cap on λ's positional
+	 * recovery command is a separate knob, TetherMaxBiasSpeed.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Tether Speed Limit"))
 	float TetherMaxSpeed = 1500.0f;
 
-	/**
-	 * λ position recall (bias) command velocity cap (cm/s) — SolveTetherLambda's MaxBiasSpeed. With gap offset (SepSpeed)
-	 * Otherwise, only this term remains as the momentum (since it is a direction constraint, there is no braking after slack conversion — this value is slack coasting)
-	 * cap of velocity). Previously, by reusing TetherMaxSpeed (1500), a light target was accelerated to 15m/s in one or two frames and then
-	 * It flew away (“swish”) with a slack transition — this value is sufficient for the number of landings. Tether is "preventing the spread"
-	 * Since this is the main function and the only thing that dynamically rewinds the excess is the recovery port, this cap determines the winchability of the tether.
-	 * 0 = No retrieval (sealing only - excess is given to rewrapping/natural access only).
-	 */
+	// This is SolveTetherLambda's MaxBiasSpeed. Once the gap closes and the separating speed is gone, this
+	// term is the only momentum left — the constraint is one-directional, so nothing brakes the target after
+	// it goes slack, and this value is the cap on that coasting speed. Reusing TetherMaxSpeed (1500) for it
+	// used to accelerate a light target to 15 m/s within a frame or two, which then went slack and flung it
+	// away; a value in the low hundreds is plenty to reel one in. Since the tether's job is to stop the gap
+	// growing, and recovery is the only thing that ever takes an existing gap back, this cap is what decides
+	// how much of a winch the tether is. 0 means no recovery at all — the tether seals the length and any
+	// existing overshoot comes back only through reeling or the target walking closer.
+
+	/** Cap on the speed at which the tether reels an overshoot back in (cm/s). 0 disables recovery. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Tether Recovery Speed"))
 	float TetherMaxBiasSpeed = 150.0f;
 
-	/**
-	 * How many times the grounded character can withstand friction up to its mass (effective mass = Mass × this value). The bigger the tighter
-	 * Holds It's good at pulling heavy objects, and the smaller it is, the easier it is to be dragged. “How heavy does an object have to be to drag me when I’m grounded?”
-	 * The only tuning knob that determines the intersection point of the “start” — mostly unset by default.
-	 * λ distribution (effective inverse mass) and climbable check (climb-in) are written as shared.
-	 */
+	// It is the one knob that sets where "how heavy must something be to drag me while I am braced" falls,
+	// and it is usually left alone. The same value feeds the λ distribution (as an effective inverse mass)
+	// and the pullability check behind climb-in.
+
+	/** How much friction a grounded character can brace with, as a multiple of its mass. Higher holds firmer and pulls heavier things; lower is dragged more easily. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "1.0"))
 	float GroundBraceFactor = 1.5f;
 
-	// (the hysteresis of the draggable check is an unexposed internal constant — the mass knob is the GroundBraceFactor
-	//  Unified into one. (See PullMassHysteresis in RopeComponent.cpp UpdateTargetPullable.)
+	// (The hysteresis on the pullability check is an internal constant — the mass knob is unified into
+	//  GroundBraceFactor alone. See PullMassHysteresis in RopeComponentTraction.cpp.)
 
 	/**
-	 * Distance release: The amount of authoritative material-length violation during Wrapped is this value (cm).
-	 * is exceeded, it is automatically released (ERopeReleaseReason::Distance).
-	 * 0 = disabled (default). When used with Tether
-	 * becomes "the tether holds on, but if it exceeds this limit, it loses" — if the tether is strong enough, the excess won't build up.
-	 * If not activated and used without a tether, it operates purely as a distance limit.
+	 * Auto-release (ERopeReleaseReason::Distance) once the authoritative material-length violation exceeds
+	 * this much (cm). 0, the default, disables it.
+	 * With a tether it reads as "the tether holds on, but past this it loses" — and a strong enough tether
+	 * never lets the overshoot accumulate that far. Without a tether it is a plain distance limit.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Release At Overstretch"))
 	float DistanceReleaseSlack = 0.0f;
 
-	/**
-	 * Pull direction corner check threshold (degrees). The pulling direction is not from anchor → hand straight (chord), but from the anchor to the hand.
-	 * Hold it so that it faces the end node of the “first straight bridge” you find while walking along → If the rope gets caught on a wall/corner and breaks,
-	 * Stop just before and pull along the first leg (a straight chord penetrates the obstacle). While walking, the next segment so far is
-	 * If it bends more than this angle in the cumulative leg direction, it sees it as a corner and stops — if it is straight, it walks to the hand (node 0) exactly.
-	 * becomes a chord. If you hold it large (ignoring gentle bends), it is closer to a chord, and if you hold it small, it is sensitive to even slight bends.
-	 * The sag/node jitter when tight is below this threshold, and the wall edge is above this threshold (residual jitter is absorbed by SmoothTime).
-	 */
+	// The pull direction is not the straight anchor-to-hand chord. It walks from the anchor toward the hand
+	// and stops at the end node of the first straight leg it finds, so a rope bent around a wall or a corner
+	// pulls along that first leg instead of through the obstacle, which is what a chord would do. While
+	// walking, a segment that bends more than this angle away from the accumulated leg direction counts as a
+	// corner and ends the walk; on a straight rope the walk reaches the hand (node 0) and the direction is
+	// exactly the chord.
+	// Larger ignores gentle bends and stays closer to a chord; smaller reacts to slight ones. The sag and
+	// node jitter of a taut rope sit below this threshold and a wall edge sits above it, and SmoothTime
+	// absorbs whatever jitter is left.
+
+	/** Bend angle at which the pull direction treats the rope as turning a corner (deg). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "1.0", ClampMax = "179.0", Units = "deg", DisplayName = "Pull Corner Angle"))
 	float PullBendThresholdDeg = 30.0f;
 
 	/**
-	 * Pull direction time smoothing constant (seconds, EMA time constant). Inter-frame jitter in look-ahead direction + GPU mirror delay
-	 * Noise is absorbed with an exponential moving average (alpha = 1-exp(-dt/this value), frame rate independent). The bigger the smoother it is
-	 * Slow response, 0 means no smoothing (circle look-ahead). When wrap starts, it is initialized to the measured value.
+	 * Time constant of the EMA that smooths the pull direction (s), absorbing frame-to-frame jitter in the
+	 * look-ahead direction and the GPU mirror's lag. Alpha is 1 - exp(-dt/this), so it is frame-rate
+	 * independent. Larger is smoother and slower to respond; 0 is no smoothing. Seeded from the measured
+	 * value when the wrap begins.
 	 */
 	float PullDirSmoothTime = 0.08f;
 
 	/**
-	 * Pull aiming node time smoothing constant (seconds, EMA time constant). The integer aiming node (AimNode) chosen by walk is rope.
-	 * If shaken, it jumps discretely every frame (the entire direction jumps + tether excess discontinuity = traction is cut off) with direction EMA
-	 * I can't catch it. If you EMA the aiming index as a float and interpolate between nodes, the direction·tether becomes continuous (alpha=1-exp(-dt/
-	 * value), frame rate independent). The larger it is, the smoother it is, but the response is slower, and if it is 0, there is no smoothing. Initializes with measured values ​​when wrap starts.
+	 * Time constant of the EMA that smooths the pull aim node (s). The aim node the walk picks is an integer
+	 * index, so on a shaking rope it jumps discretely each frame — the whole direction jumps with it and the
+	 * tether overshoot goes discontinuous, cutting the traction — and a direction EMA cannot catch that.
+	 * Smoothing the index as a float and interpolating between nodes keeps both direction and tether
+	 * continuous. Alpha is 1 - exp(-dt/this), so it is frame-rate independent. Larger is smoother and slower;
+	 * 0 is no smoothing. Seeded from the measured value when the wrap begins.
 	 */
 	float PullAimSmoothTime = 0.08f;
 
 	/**
-	 * **Maximum tension** (cap of traction force) for Active Pull (input hold) — Default value in SetActivePull. target velocity
-	 * (ActivePullMaxLinearSpeed): Light targets will immediately (overshoot) target velocity within this tension.
-	 * , and heavy objects that cannot be pulled to the target with this tension lag behind (depending on realistic mass — this value starts from "how many kg")
-	 * determines "how hard it is"). The force size is the rope physics domain, so it lives here (Wielder PullAction uses this value).
-	 * Wrapped + Only actually authorized when taut (URopeComponent::SetActivePull contract — tautology check below
-	 * bActivePullRequiresTaut/ActivePullTautTension gate).
+	 * Tension cap on the active pull — the default SetActivePull passes. Together with the target speed
+	 * (ActivePullMaxLinearSpeed) it gives realistic mass dependence: a light target reaches the target speed
+	 * at once within this tension, and one too heavy to pull there lags behind. So the target speed says how
+	 * fast, and this says up to what weight.
+	 * Force magnitude is a rope-physics concern, which is why it lives here; the Wielder's pull action uses
+	 * this value. It is only ever authorized while Wrapped and taut — see URopeComponent::SetActivePull and
+	 * the bActivePullRequiresTaut / ActivePullTautTension gate below.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", DisplayName = "Pull Strength"))
 	float PullForce = 100000.0f;
 
 	/**
-	 * Whether to apply only when the active pull is taut. true (default) = Force is applied only to the frame where the rope is taut (the stretched rope is
-	 * No response when pulled — physically natural). false = Ignore tension: Always approved if Wrapped + valid pull sample
-	 * (for presentation/special gameplay). The pull check itself can always be queried with URopeComponent::IsPullTaut() (this switch and
-	 * Update regardless — for external check such as animation pull window).
+	 * Whether the active pull applies only while the rope is taut. True, the default, applies force only on a
+	 * taut frame, which is what pulling a slack rope should physically do — nothing. False ignores tension and
+	 * authorizes the pull whenever the rope is Wrapped with a valid pull sample, for a presentation or a
+	 * special-case mechanic. URopeComponent::IsPullTaut() reports the taut state either way, independently of
+	 * this switch, so an animation pull window can still gate on it.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (DisplayName = "Pull Requires Taut"))
 	bool bActivePullRequiresTaut = true;
 
 	/**
-	 * Optional load threshold for taut check. 0 (default) = If pure geometry taut, an active Pull can be initiated.
-	 * > 0, the authoritative GetConstraintTension() must exceed this value to be considered load-bearing.
-	 * XPBD SegmentTension is not used.
-	 * If you turn off bActivePullRequiresTaut, the pull check itself is not visible and is grayed out.
+	 * Optional load threshold on the taut check. 0, the default, lets a geometrically taut rope start an
+	 * active pull; above 0, the authoritative GetConstraintTension() must also exceed this value before the
+	 * rope counts as loaded. XPBD SegmentTension takes no part.
+	 * Greyed out with bActivePullRequiresTaut off, where the taut check is not consulted at all.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning",
 		meta = (ClampMin = "0.0", EditCondition = "bActivePullRequiresTaut", DisplayName = "Pull Load Threshold"))
 	float ActivePullTautTension = 0.0f;
 
-	/**
-	 * Sensitivity of entire chain taut check [0..1] — 0=loose (traction starts even with less taut), 1=strict (must be stretched more clearly)
-	 * traction). Scale the slack allowable ratio and maximum allowable sag (cm) together to one value (URopeComponent's
-	 * GetEffectiveTautSlackRatio / GetEffectiveTautMaxSag — geometric interpolation). 0.5 (default) = existing tuning
-	 * (slack 3%, sag 20cm). 0 → slack 9%·sag 80cm, 1 → slack 1%·sag 5cm. check hysteresis·release grace period
-	 * This is an internal constant that has already been tuned (RopeComponentTraction.cpp). A single handle that “only attracts when visually unfolded.”
-	 */
+	// It scales the slack tolerance ratio and the maximum sag together from one number
+	// (URopeComponent::GetEffectiveTautSlackRatio and GetEffectiveTautMaxSag, geometrically interpolated).
+	// 0.5, the default, is 3% slack and 20 cm of sag; 0 gives 9% and 80 cm, 1 gives 1% and 5 cm. The
+	// hysteresis and the release grace period behind the check are already-tuned internal constants
+	// (RopeComponentTraction.cpp).
+
+	/** How taut the whole chain must look before traction starts [0..1]. 0 pulls on a slacker rope; 1 demands it be visibly straight. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Taut Sensitivity"))
 	float TautSensitivity = 0.5f;
 
 	/**
-	 * Contamination prevention threshold for legacy particle-chord analytic fallback. Without field/live material geometry
-	 * path.
-	 * Does not participate in the taut·tension of the normal Pawn hard-constraint/Chaos path. 0 (default) = off. check
-	 * hysteresis is an internal constant (RopeComponentTraction.cpp).
+	 * Floor that keeps the legacy particle-chord analytic fallback from firing on noise. It is the path taken
+	 * with no live material geometry, and it takes no part in the taut or tension decisions of the ordinary
+	 * hard-constraint or Chaos paths. 0, the default, is off; the hysteresis around it is an internal
+	 * constant (RopeComponentTraction.cpp).
 	 *
-	 * Non-exposed (BP only): Reach condition is "Not Chaos backend ∧ No live constraint ∧ hard wielder attempt
-	 * None", so it will not run in Wielder configurations with bEnforceWielderLengthConstraint turned on.
-	 * This is only meaningful if you are writing a custom mover that directly uses this fallback.
+	 * Not exposed to the Details panel: reaching it needs no Chaos backend, no live constraint and no hard
+	 * wielder attempt at once, so a Wielder setup with bEnforceWielderLengthConstraint on never gets there.
+	 * It only matters when writing a custom mover that uses this fallback directly.
 	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0"))
 	float TautMinTension = 0.0f;
 
 	/**
-	 * Position recovery time constant (seconds) of excess C in non-stretch (TetherCompliance=0) constraint.
-	 * Closing every frame C by β = 1−exp(−dt/this value)
-	 * Commands the approach velocity — smaller means firmer (immediate landing), larger means softer tracking. 0 = entire amount of one frame (β=1).
-	 * Frame rate independent. The absolute cap of the recovery command velocity is TetherMaxBiasSpeed ​​(SolveTetherLambda's
-	 * MaxBiasSpeed ​​— Prevents spikes in frames with large C immediately after commit and caps residual slack coasting.
-	 * Elastic mode does not use this value and recovers excess length using TetherCompliance's kC resilience.
+	 * Time constant (s) for recovering the overshoot C on an inextensible tether (TetherCompliance = 0).
+	 * Each frame it commands an approach speed that closes C by β = 1 - exp(-dt/this), so smaller is firmer
+	 * and lands immediately, larger tracks more softly, and 0 takes the whole gap in one frame (β = 1). It is
+	 * frame-rate independent. The absolute cap on that command is TetherMaxBiasSpeed (SolveTetherLambda's
+	 * MaxBiasSpeed), which keeps the frame right after commit from spiking on a large C and caps the coasting
+	 * left in any residual slack.
+	 * Elastic mode ignores this value and recovers the overshoot through TetherCompliance's restoring force.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "s"))
 	float TetherSettleTime = 0.08f;
 
 	/**
-	 * tension limit/overload criterion (kg·cm/s², 0 = unlimited).
-	 * In elastic mode with TetherCompliance>0, λ ≤ this value × dt is the actual force cap.
-	 * In non-stretchable mode with TetherCompliance=0, finite force cap and exact length cannot be satisfied at the same time.
-	 * Prioritize length and report full reaction. At this time, this value is only the debugger's overload baseline,
-	 * The actual release/release is specified by TensionReleaseForce or a separate game rule — so non-stretchable (default)
-	 * , it is grayed out.
+	 * Tension limit, and the overload threshold (kg·cm/s²; 0 is unlimited).
+	 * In elastic mode (TetherCompliance > 0), λ ≤ this × dt is a real force cap.
+	 * In inextensible mode (TetherCompliance = 0) a finite force cap and an exact length cannot both hold, so
+	 * length wins and the full reaction is reported. The value is then only the debugger's overload baseline —
+	 * actual release is TensionReleaseForce's job, or a game rule's — which is why it is greyed out for an
+	 * inextensible rope, the default.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning",
 		meta = (ClampMin = "0.0", EditCondition = "TetherCompliance > 0.0", DisplayName = "Tether Tension Limit"))
 	float MaxTetherTension = 500000.0f;
 
 	/**
-	 * Material compliance α (s²/kg = inverse stiffness). 0 (default) = non-stretchable rope.
-	 * > 0, it is a common game with k=1/α implicit spring + generalized critical damping
-	 * Creates intentional elasticity (bungee, etc.) that is not static even at the frame rate. Example: 0.0005 → k=2000 kg/s².
+	 * Material compliance α (s²/kg, the inverse of stiffness). 0, the default, is an inextensible rope.
+	 * Above 0 it is an implicit spring of stiffness k = 1/α with generalized critical damping, giving
+	 * deliberate elasticity — a bungee — that stays stable across frame rates. For example 0.0005 gives
+	 * k = 2000 kg/s².
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", DisplayName = "Rope Elasticity"))
 	float TetherCompliance = 0.0f;
 
 	/**
-	 * **traction target velocity**(cm/s) of active pull. Active Pull drives the object along the pulling direction at this velocity (tension cap PullForce
-	 * ), clamp the impulse to the target arrival (mass
-	 * a=F/m eliminates the problem of bouncing (dust/jaw) by overshooting the target in one frame. Heavy objects reach this velocity due to the tension limit.
-	 * I can't pull it off and fall behind (depending on realistic mass). 0 = no traction. Applies only during traction.
+	 * Target speed the active pull drives toward. The pull moves the target along the pull direction at this
+	 * speed under the PullForce tension cap, clamping the impulse so the target speed is reached without
+	 * overshoot — which is what removes the juddering and drifting a constant force (a = F/m) produces by
+	 * blowing past the target within one frame. A heavy target cannot be pulled to this speed under the
+	 * tension limit and lags behind, giving realistic mass dependence. 0 means no pull.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold",
 		meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Pull Speed"))
 	float ActivePullMaxLinearSpeed = 300.0f;
 
 	/**
-	 * Velocity cap (deg/s, 0 = unlimited) of the physical body being actively pulled. If force is applied to the center of gravity (AddForce), there is no torque.
-	 * Although most of the causes of spin disappear, this cap suppresses the remaining spin created by ragdoll joint dynamics.
+	 * Spin cap (deg/s; 0 is unlimited) on a body under active pull. Applying force at the centre of mass adds
+	 * no torque, so most sources of spin are already gone; this catches what ragdoll joint dynamics still
+	 * produce.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "deg/s", DisplayName = "Pull Spin Limit"))
 	float ActivePullMaxAngularSpeed = 720.0f;

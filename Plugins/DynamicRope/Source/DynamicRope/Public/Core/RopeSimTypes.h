@@ -7,31 +7,34 @@
 class USceneComponent;
 
 /**
- * narrow-phase contact: one rope node vs one collider, returned by IRopeCollider::Query.
+ * Narrow-phase contact: one rope node against one collider, returned by IRopeCollider::Query.
  *
- * CONTRACT — FROZEN 2026-06-24 (2026-06-27 SurfaceVelocity added: backwards compatible as it is an additive field with default 0).
- * All IRopeColliders (capsule, bone-SDF, world-GDF) must comply with this.
- * Describes a single (node, collider) pair. Aggregation is up to the caller (solver aggregates push-outs,
- * DecideWrap selects the bone with the deepest penetration on a per-node basis).
+ * CONTRACT — FROZEN. Every IRopeCollider (capsule, per-bone SDF, world GDF) must obey it exactly.
+ * Read this block before changing the struct.
+ * It describes a single (node, collider) pair; aggregating them is the caller's job — the solver sums the
+ * push-outs, and DecideWrap picks the bone with the deepest penetration per node.
  *
- *   bHit node The sphere (center = query WorldPos, radius = query Radius) overlaps the collider.
- *                false => All remaining fields are undefined. The caller should ignore this.
- *   Normal UNIT, points outward from the collider toward the node (push-out direction).
- *                Invariant: NodePos += Normal*Penetration places a node on the surface.
- *                *** The sign is load-bearing: the inward-facing normal pulls the rope into the body. ***
- *                degenerate (node is on medial axis) => arbitrary non-static unit vector (capsule: +Z).
- *   Overlap depth according to Penetration Normal, when bHit is > 0. Measured based on QUERY radius:
- *                (ColliderRadius + QueryRadius) - Distance. The caller sets QueryRadius 0 to solver push-out,
- *                Pass WrapConfig.ContactQueryRadius to wrap-decision skin.
- *   Point on the collider surface closest to the SurfacePoint node (auxiliary/debug). It is not required for the solver,
- *                Fill when you can get it cheaply.
- *   In Bone skeletal collider, DecideWrap must be non-None — bone attribution (attribution).
- *                Wrap. Multi-bone SDFs must report the bone that owns the closest surface. world => None.
- *   SourceMesh A skeletal mesh that owns Bone. Passes follow between actors (-> FRopeWrapState::Mesh).
- *                null for non-skeletal colliders.
- *   SurfaceVelocity World velocity (cm/s) of the collider surface at the point of contact. The solver uses the relative tangential velocity friction.
- *                Used to drag a rope (the moving body sweeps the stationary rope left and right).
- *                static/Not supported Collider is set to 0 (= static surface) — Same as existing behavior.
+ *   bHit           The node's sphere (centre = the queried WorldPos, radius = the queried Radius) overlaps
+ *                  the collider. False means every other field is undefined and must be ignored.
+ *   Normal         UNIT length, pointing outward from the collider toward the node — the push-out direction.
+ *                  Invariant: NodePos += Normal * Penetration puts the node on the surface.
+ *                  *** The sign is load-bearing: an inward normal sucks the rope into the body. ***
+ *                  Degenerate case (the node sits on the medial axis): any fixed unit vector; the capsule
+ *                  reports +Z.
+ *   Penetration    Overlap depth along Normal when bHit, always positive. Measured against the QUERY radius:
+ *                  (ColliderRadius + QueryRadius) - Distance. Callers pass QueryRadius 0 for a solver
+ *                  push-out, and WrapConfig.ContactQueryRadius for the wrap-decision skin.
+ *   SurfacePoint   The point on the collider surface closest to the node. Diagnostic only — the solver does
+ *                  not need it, so fill it when it is cheap to obtain.
+ *   Bone           A skeletal collider must report a non-None bone: that is how DecideWrap attributes the
+ *                  wrap. A multi-bone SDF reports the bone owning the closest surface. World colliders
+ *                  report None.
+ *   SourceMesh     The mesh component owning Bone. It propagates into FRopeWrapState::Mesh, which is what
+ *                  lets a rope follow a bone on a different actor. Null for a non-skeletal collider.
+ *   SurfaceVelocity  World velocity (cm/s) of the collider surface at the contact point. The solver uses it
+ *                  for *relative* tangential friction, so a moving body drags and sweeps the rope aside.
+ *                  Leave it 0 for a static surface; the v1 capsule does, and the SDF collider derives it
+ *                  from the bone's per-frame motion.
  */
 struct FRopeContact
 {
@@ -44,7 +47,7 @@ struct FRopeContact
 	FVector SurfaceVelocity = FVector::ZeroVector;
 };
 
-/** rope centerline: The chain of particles. Single source of truth for solver / logic / render.*/
+/** The rope centerline: a chain of particles. The single source of truth for solver, logic and render. */
 struct FRopeSimState
 {
 	TArray<FVector> Positions;
@@ -54,8 +57,8 @@ struct FRopeSimState
 	float           RopeLength = 0.0f;
 
 	/**
-	 * Pinned starting point (hand/socket). The solver sweeps from Prev->Target across substeps.
-	 * Fast anchor jumps absorb energy instead of injecting it (which would explode the chain).
+	 * Pinned start point (hand or socket). The solver sweeps it from Prev to Target across the substeps, so a
+	 * fast anchor jump absorbs energy instead of injecting it and blowing the chain up.
 	 */
 	bool            bStartPinned = false;
 	FVector         StartPinPrev = FVector::ZeroVector;
@@ -65,44 +68,46 @@ struct FRopeSimState
 	float           TimeAccumulator = 0.0f;
 
 	/**
-	 * Tension (force, stretch = positive numbers only) for each segment. Derived from the convergence λ of the XPBD distance constraint: F = max(0, -λ)/h².
-	 * The unit is mass·cm/s² (relative value) based on mass 1 node — the threshold value is tuned to actual measurements. CPU solver at the end of step
-	 * is filled, and the GPU-resident rope is filled by λ readback (1-2 frame delay). Frames without solve maintain the previous value.
-	 * Size = Num()-1 (may be empty — never solved yet).
+	 * Per-segment tension as a force, stretch only and never negative, derived from the converged λ of the
+	 * XPBD distance constraint: F = max(0, -λ)/h². The units are relative to a unit-mass node, so thresholds
+	 * against it are tuned by measurement. The CPU solver fills it at the end of a step; a GPU-resident rope
+	 * fills it from the λ readback, one to two frames late. A frame without a solve keeps the previous value.
+	 * Size is Num()-1, and it may be empty if the rope has never solved.
 	 */
 	TArray<float>   SegmentTension;
 
 	int32 Num() const { return Positions.Num(); }
 	void  Reset() { Positions.Reset(); PrevPositions.Reset(); InvMass.Reset(); SegmentTension.Reset(); TimeAccumulator = 0.0f; }
 
-	//~ Verlet vocabulary (pure inline — no context/policy). Give names to iteration idioms to prevent sign and dimension mistakes.
-	//  The solver integration loop (RopeXPBDSolver) and throwing velocity injection loop intentionally keep the raw representation —
-	//  The former is a 1:1 parity comparison with the .usf kernel, and the latter is a cumulative type (displacement unit impulse), so the form is different.
+	//~ Verlet vocabulary — pure inline helpers, no context and no policy. Naming the idioms is what keeps
+	//  sign and dimension mistakes out. The solver's integration loop (RopeXPBDSolver) and the throw velocity
+	//  injection loop deliberately keep the raw form instead: the first is compared 1:1 against the .usf
+	//  kernel, and the second accumulates in displacement-unit impulses, so its shape differs.
 
-	/** One frame displacement (Pos - Prev) of node i. In Verlet, velocity ∝ displacement (before dividing by dt).*/
+	/** One frame's displacement (Pos - Prev) for node i. In Verlet, velocity is proportional to it, before dividing by dt. */
 	FVector Displacement(int32 i) const { return Positions[i] - PrevPositions[i]; }
 
-	/** Movement distance for one frame of node i (cm/frame). Threshold checks such as “fast nodes” are consumer policies.*/
+	/** How far node i moved this frame (cm/frame). What counts as a "fast" node is the caller's policy. */
 	float NodeSpeed(int32 i) const { return Displacement(i).Size(); }
 
-	/** velocity of node i 0 (Prev = Pos). Seed/reseed path only — Write the position and velocity of the logic phase
-	 *  FRopeNodeOverrideFrame single pass (G2, GPU-resident synchronization).*/
+	/** Zero node i's velocity (Prev = Pos). Seed and reseed paths only — a logic phase writes position and
+	 *  velocity through FRopeNodeOverrideFrame instead, so the GPU-resident rope stays in sync. */
 	void SetStill(int32 i) { PrevPositions[i] = Positions[i]; }
 };
 
 /**
- * per-node bit in FRopeNodeOverrideFrame::Flags. The number should be 1:1 with ERopeGPUOverride (RopeGPUSolver.h)
- * (verified by subsystem) — Core does not depend on the Shaders module, so it mirrors the constants.
+ * Per-node bits in FRopeNodeOverrideFrame::Flags. They must stay 1:1 with ERopeGPUOverride (RopeGPUSolver.h),
+ * which the subsystem asserts — Core does not depend on the Shaders module, so the constants are mirrored.
  */
 namespace RopeNodeOverride
 {
 	/** Pos[i] = Positions[i] */
 	constexpr uint8 Position         = 1 << 0;
 
-	/** Prev[i] = PrevPositions[i] (Verlet velocity injection)*/
+	/** Prev[i] = PrevPositions[i] (Verlet velocity injection) */
 	constexpr uint8 Prev             = 1 << 1;
 
-	/** Prev[i] = Pos[i] (velocity 0; value *after* application of Position)*/
+	/** Prev[i] = Pos[i], zeroing velocity. Applied *after* Position. */
 	constexpr uint8 PrevFromPosition = 1 << 2;
 
 	/** InvMass[i] = InvMass[i] */
@@ -110,17 +115,19 @@ namespace RopeNodeOverride
 }
 
 /**
- * Output of one frame of logic phase (G2): "Target calculation is GT, application is one path".
- * If logic such as Wrapping/Wrapped/Releasing scatters the position/velocity/mass you want to use in the Sim,
- * Applied to CPU Sim once at the end of PrepareSimFrame (ApplyToSim — same result as existing direct write),
- * The same data is Loaded into the GPU-resident rope as an override pass (FRopeGPUResidentStep) without reseeding.
- * Applies to kernel. If you fill the same node multiple times, the last one wins (same as sequential SIM writing).
- * Caution: Do not mix Prev (explicit) and PrevFromPosition in one frame — due to kernel application order
- * PrevFromPosition always wins, making the filling order irrelevant (only PrevFromPosition is used as the logic phase).
+ * One frame of logic-phase output: targets are computed on the game thread, and applied through one path.
+ * Wrapping, Wrapped, Releasing and the rest scatter the positions, velocities and masses they want here
+ * instead of writing Sim directly. It is applied to the CPU Sim once at the end of PrepareSimFrame
+ * (ApplyToSim), and the same data goes to a GPU-resident rope as an override pass (FRopeGPUResidentStep),
+ * so the kernel applies it without a reseed.
+ * Writing the same node twice lets the last write win, matching a sequential write to Sim.
+ * Caution: do not mix explicit Prev with PrevFromPosition in one frame. The kernel applies PrevFromPosition
+ * last, so it always wins regardless of the order they were filled in — which is why the logic phases use
+ * PrevFromPosition only.
  */
 struct FRopeNodeOverrideFrame
 {
-	/** per-node RopeNodeOverride bit OR (if empty, no output this frame).*/
+	/** Per-node OR of RopeNodeOverride bits. Empty means this frame produced no output. */
 	TArray<uint8>   Flags;
 	TArray<FVector> Positions;
 	TArray<FVector> PrevPositions;
@@ -136,7 +143,7 @@ struct FRopeNodeOverrideFrame
 		InvMass.Reset();
 	}
 
-	/** At the first scatter, the number of nodes is secured as 0 (recall within the frame is no-op).*/
+	/** Size to the node count on the first scatter, zeroed. Calling it again within the frame is a no-op. */
 	void EnsureSize(int32 NumNodes)
 	{
 		if (Flags.Num() != NumNodes)
@@ -148,7 +155,7 @@ struct FRopeNodeOverrideFrame
 		}
 	}
 
-	/** Position pinned: Pos=World, bZeroVelocity then Prev=Pos (velocity 0 — standard writing for Wrapping/hold).*/
+	/** Pin a position: Pos = World, and with bZeroVelocity also Prev = Pos — the standard write for wrapping and hold. */
 	void SetPosition(int32 NodeIndex, const FVector& World, bool bZeroVelocity)
 	{
 		if (Flags.IsValidIndex(NodeIndex))
@@ -158,7 +165,7 @@ struct FRopeNodeOverrideFrame
 		}
 	}
 
-	/** mass Overwrite (mask/restore).*/
+	/** Overwrite the mass, for masking and restoring. */
 	void SetInvMass(int32 NodeIndex, float Value)
 	{
 		if (Flags.IsValidIndex(NodeIndex))
@@ -168,7 +175,7 @@ struct FRopeNodeOverrideFrame
 		}
 	}
 
-	/** Only remove velocity (Prev=current Pos — position remains the same). Release series splash prevention.*/
+	/** Remove velocity only (Prev = current Pos, position unchanged). Keeps a release from flinging the nodes. */
 	void SetPrevFromPosition(int32 NodeIndex)
 	{
 		if (Flags.IsValidIndex(NodeIndex))
@@ -177,7 +184,7 @@ struct FRopeNodeOverrideFrame
 		}
 	}
 
-	/** CPU application — Same order as the override stage of the GPU kernel (Pos → Prev → Prev=Pos → InvMass).*/
+	/** CPU application, in the same order as the GPU kernel's override stage: Pos → Prev → Prev=Pos → InvMass. */
 	void ApplyToSim(FRopeSimState& Sim) const
 	{
 		const int32 N = FMath::Min(Flags.Num(), Sim.Num());
