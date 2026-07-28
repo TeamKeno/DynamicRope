@@ -9,7 +9,7 @@
 
 #include "Logic/RopeWrappingPhase.h"
 #include "Collision/RopeCollider.h"
-// FRopeConvexCollider (ShapeExtentAxis 테스트의 통나무 convex)
+// FRopeConvexCollider (Log convex in ShapeExtentAxis test)
 #include "Collision/RopeStaticCollider.h"
 #include "Core/RopeWrapTarget.h"
 #include "Components/SceneComponent.h"

@@ -1,33 +1,33 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// XPBD 로프 솔버(GPU, M1: 물리 전용 — integrate + distance + bending, 충돌 없음).
-// 로프 1개 = 스레드그룹 1개, 노드 = 스레드. substep x iteration 루프를 groupshared + barrier로 돌린다.
-// 제약 경쟁은 컬러링으로 제거: distance=red-black(2색), bending(i,i+2)=stride-3(3색).
-// 수식은 CPU FRopeXPBDSolver(SolveDistance/SolveBending)와 동일(AlphaTilde=compliance/dt^2).
-// red-black은 CPU의 교대-sweep Gauss-Seidel과 비트일치하지 않는다(수렴만 근사) — 의도된 차이.
+// XPBD rope solver (GPU, M1: physics-only — integrate + distance + bending, no collision).
+// 1 rope = 1 thread group, node = thread. Run the substep x iteration loop with groupshared + barrier.
+// constraint race is removed by coloring: distance=red-black (2 colors), bending(i,i+2)=stride-3 (3 colors).
+// The formula is the same as CPU FRopeXPBDSolver(SolveDistance/SolveBending) (AlphaTilde=compliance/dt^2).
+// red-black is not bit-identical to the CPU's alternating-sweep Gauss-Seidel (convergence only approximation) — the difference is intended.
 
 #include "/Engine/Public/Platform.ush"
 
-// GDF 월드 충돌을 substep 제약으로 통합하는 경로(C++ FRopeXPBDSolveCS::FGDFDim). GDF .ush는 View UB(ResolvedView)/
-// LWC/전역 샘플러에 의존하므로 Common.ush + SceneTexturesCommon.ush를 포함하고 View UB를 바인딩한다.
-// off permutation(View 없는 Step 경로 겸용)은 이 include가 없어 View 없이 그대로 컴파일된다.
+// path (C++ FRopeXPBDSolveCS::FGDFDim) that incorporates a GDF world collision into a substep constraint. GDF.ush is View UB(ResolvedView)/
+// Because it depends on the LWC/global sampler, it includes Common.ush + SceneTexturesCommon.ush and binds View UB.
+// off permutation (step path without view) does not have this include, so it is compiled as is without view.
 #if ROPE_USE_GDF
 #include "/Engine/Private/Common.ush"
 #include "/Engine/Private/SceneTexturesCommon.ush"
 #include "/Engine/Private/DistanceField/GlobalDistanceFieldShared.ush"
-// 월드 → TranslatedWorld 오프셋(GDF 좌표계).
+// world → TranslatedWorld offset(GDF coordinate system).
 float3 GDFPreViewTranslation;
-// 1=GDF 유효(클립맵>0). 0이면 GDF 제약 no-op.
+// 1=GDF valid (clipmap>0). If 0, GDF constraint no-op.
 uint   bWorldGDFValid;
 #endif
 
-// ROPE_MAX_NODES / ROPE_THREADS 는 C++ ModifyCompilationEnvironment에서 정의(스레드그룹 크기 == 최대 노드 수).
+// ROPE_MAX_NODES / ROPE_THREADS is defined in C++ ModifyCompilationEnvironment (thread group size == maximum number of nodes).
 
-// 콜라이더 데이터 모델(캡슐/SDF 구조체 + Capsules/SDFDistances/SDFVolumes/SDFColliders 버퍼) +
-// 수학/점질의 헬퍼. 솔브/감지 커널이 공유하고, 다른 로프 셰이더도 재사용할 수 있는 공용 모듈.
+// collider data model (capsule/SDF structure + Capsules/SDFDistances/SDFVolumes/SDFColliders buffer) +
+// Helper for math/point-query. A shared module that is shared by the solve/detection kernel and can also be reused by other rope shaders.
 #include "/Plugin/DynamicRope/Private/RopeColliderCommon.ush"
 
-// FRopeGPUParamsGPU(C++)와 1:1 미러. 레이아웃 변경 시 양쪽 동시 수정. 16바이트 정렬.
+// FRopeGPUParams 1:1 mirror with GPU (C++). Simultaneous modification on both sides when changing layout. 16 byte alignment.
 struct FRopeGPUParams
 {
 	int   NodeOffset;
@@ -40,90 +40,90 @@ struct FRopeGPUParams
 	float BendCompliance;
 	float Damping;
 	int   bStartPinned;
-	// 이 로프의 capsule이 시작하는 글로벌 인덱스(M2)
+	// Global index (M2) where this rope's capsule starts
 	int   CapsuleOffset;
-	// 이 로프에 적용할 capsule 수(0이면 충돌 없음)
+	// Number of capsules to apply to this rope (if 0, no collision)
 	int   NumCapsules;
-	// 로프 노드 두께
+	// rope node thickness
 	float CollisionRadius;
-	// 접선 감쇠 [0..1]
+	// Tangential damping [0..1]
 	float Friction;
-	// swept 샘플 간격(cm)
+	// swept sample spacing (cm)
 	float SweepStep;
-	// 세그먼트당 샘플 상한
+	// sample cap per segment
 	int   MaxSweepSamples;
-	// M3: 이 로프의 SDF collider 글로벌 시작 인덱스
+	// M3: SDF collider global starting index of this rope
 	int   SDFColliderOffset;
-	// M3: SDF collider 수(0이면 SDF 충돌 없음)
+	// M3: Number of SDF colliders (if 0, no SDF collision)
 	int   NumSDFColliders;
-	// 자유단 마찰 배율(고정점=1, 끝=이 값). C++ Pad0 슬롯과 1:1.
+	// Free end friction multiplier (pinned point=1, end=this value). 1:1 with C++ Pad0 slot.
 	float TipFrictionScale;
-	// substep당 충돌 해소 패스 수(Iters로 상한). C++ Pad1 슬롯과 1:1.
+	// Number of collision resolution passes per substep (cap in Iters). 1:1 with C++ Pad1 slot.
 	int   CollisionPasses;
-	// G0: 노드별 override(타깃/질량 주입) 존재 여부.
+	// G0: Whether per-node override (target/mass injection) exists.
 	int   bHasOverrides;
-	// 정적 박스(OBB) 수(0이면 박스 충돌 없음). C++ Pad2 슬롯과 1:1.
+	// Number of static boxes (OBB) (if 0, there is no box collision). 1:1 with C++ Pad2 slot.
 	int   NumBoxes;
-	// 정적 컨벡스(평면 집합) 수(0이면 컨벡스 충돌 없음). C++ Pad3 슬롯과 1:1.
+	// static convex (plane set) number (if 0, no convex collision). 1:1 with C++ Pad3 slot.
 	int   NumConvexes;
-	// 각도-허용 벤딩: straightness ≤ 이 값이면 펴는 힘 0. C++ Pad4 슬롯 재사용.
+	// Angle-allowed bending: If straightness ≤ this value, straightening force is 0. C++ Pad4 slot reuse.
 	float BendReleaseRatio;
-	// straightness ≥ 이 값이면 펴는 힘 100%.
+	// If straightness ≥ this value, the straightening force is 100%.
 	float BendFullRatio;
-	// Strain limiting 최대 신장 배율(<1=비활성). C++ Pad5 슬롯 재사용.
+	// Strain limiting Maximum stretch ratio (<1=disabled). C++ Pad5 slot reuse.
 	float MaxStretchRatio;
 	int   Pad6;
 	int   Pad7;
-	// xyz 사용
+	// use xyz
 	float4 Gravity;
-	// xyz 사용
+	// use xyz
 	float4 PinPrev;
-	// xyz 사용
+	// use xyz
 	float4 PinTarget;
 };
 
 uint NumRopes;
 StructuredBuffer<FRopeGPUParams> Params;
-// --- Override(G0): 로직 페이즈(GT)가 계산한 노드별 타깃/질량. bHasOverrides=0이면 미참조(더미 1개).
-// 비트: 1=Pos, 2=Prev(명시 — Verlet 속도 주입), 4=Prev=Pos(속도 0), 8=InvMass. C++ ERopeGPUOverride와 1:1.
+// --- Override(G0): per-node target/mass calculated by logic phase (GT). If bHasOverrides=0, not referenced (1 dummy).
+// Bits: 1=Pos, 2=Prev (specified — Verlet velocity injection), 4=Prev=Pos(velocity 0), 8=InvMass. 1:1 with C++ ERopeGPUOverride.
 StructuredBuffer<uint>           OverrideFlags;
 StructuredBuffer<float4>         OverridePositions;
 StructuredBuffer<float4>         OverridePrevPositions;
 StructuredBuffer<float>          OverrideInvMass;
-// G0: override가 질량 마스크를 영속시키므로 RW.
+// G0: RW because override persists mass mask.
 RWStructuredBuffer<float>         InvMass;
-// xyz 사용(w=0)
+// use xyz (w=0)
 RWStructuredBuffer<float4>        Positions;
-// xyz 사용(w=0)
+// use xyz (w=0)
 RWStructuredBuffer<float4>        PrevPositions;
-// 장력 리드백: 마지막 substep의 세그먼트별 distance λ(수렴 임펄스). 호출자가 F=max(0,-λ)/h²로 힘 변환.
-// NumSub=0(override-only) 프레임엔 0이 쓰인다(로드 시 0 초기화) — 호출자는 그 프레임 리드백을 무장하지 않는다.
+// tension readback: Distance λ (convergence impulse) for each segment of the last substep. The caller converts the force to F=max(0,-λ)/h².
+// NumSub=0(override-only) 0 is used for frame (initialized to 0 on load) — the caller does not arm the frame readback.
 RWStructuredBuffer<float>         OutLambdaDist;
 
 groupshared float3 gPos[ROPE_MAX_NODES];
 groupshared float3 gPrev[ROPE_MAX_NODES];
 groupshared float  gInvMass[ROPE_MAX_NODES];
-// segment k(노드 k,k+1) 당 1개
+// 1 per segment k(node k,k+1)
 groupshared float  gLambdaDist[ROPE_MAX_NODES];
-// stick k(노드 k,k+2) 당 1개
+// 1 per stick k(node k,k+2)
 groupshared float  gLambdaBend[ROPE_MAX_NODES];
-// strain limit 발동 플래그(substep당 병렬 초과 검사 → thread0 직렬 스윕 게이트). 초과 세그먼트가 없으면
-// 스윕 전체가 no-op(ClampToward가 전부 early-return)이라 스킵해도 결과가 비트 동일하다.
+// Strain limit activation flag (parallel exceedance check per substep → thread0 serial sweep gate). If there are no excess segments
+// The entire sweep is no-op (ClampToward is all early-return), so even if you skip it, the result is bitwise the same.
 groupshared uint   gStrainAny;
 
-// ===== 충돌 스테이지 본체(커널에서 분리) ==============================================================
-// RopeXPBDSolveCS의 collision pass 본체. 게이트(활성/질량/개수)와 배리어는 커널이 소유하고 — 배리어는
-// 균일 실행이 필수라 발산 가능한 함수 안으로 옮기면 안 된다 — 여기는 한 노드의 순차 로직만 담는다.
-// groupshared(gPos/gPrev/gInvMass/gLambdaDist)는 파일 스코프라 직접 접근한다. 노드 스테이지의 쓰기는
-// 자기 슬롯 i에 한정, 세그먼트(chord) 스테이지의 i/i+1 쓰기는 커널의 2색+배리어가 race를 막는다.
+// ===== collision stage body (separated from kernel) ==============================================================================
+// The collision pass body of RopeXPBDSolveCS. Gate (active/mass/number) and barrier are owned by the kernel — barrier
+// Uniform execution is essential, so it should not be moved into a divergible function — this contains only the sequential logic of one node.
+// groupshared(gPos/gPrev/gInvMass/gLambdaDist) accesses file scope directly. Writes in the node stage are
+// Limited to self-slot i, writing i/i+1 of the segment (chord) stage blocks the race due to the kernel's two-color+barrier.
 
-// 접선 마찰(장력-한계 Coulomb): 접선 상대 변위를 μ·(침투 Pen + 인접 장력 법선력)으로 상한 → 그립을 넘으면
-// 슬립한다. 모든 콜라이더(SDF/박스/컨벡스/캡슐/GDF)가 공유하는 단일 모델. gLambdaDist(distance 제약 λ =
-// 로프 장력)로 그립이 장력에 비례하고, 자유단은 MuEff 테이퍼로 잘 놔준다. 예전 정적 경로(박스/컨벡스/캡슐)가
-// 쓰던 무조건 viscous 감쇠(gPrev += Tangent*Friction)는 접촉 중 접선 이동을 조건 없이 죽여 노드가 면/모서리에
-// 눌어붙었다(코너에서 슬라이드로 엣지를 못 돌아 90°에 핀). Coulomb은 가볍게 닿은 노드가 자유롭게 미끄러진다.
-// SurfDisp = 이번 substep 표면 변위(정적이면 0). CPU FRopeXPBDSolver::ApplyContactFriction과 동일 취지(모델은
-// Pen+장력 proxy로 GPU SDF 경로와 1:1 — CC.Lambda 누적을 GPU가 안 들고 있어 proxy를 쓴다).
+// tangential friction(tension-limit Coulomb): When the tangential relative displacement is capped by μ·(penetration Pen + adjacent tension normal force) → beyond the grip,
+// Sleep. A single model shared by all colliders (SDF/box/convex/capsule/GDF). gLambdaDist(distance constraint λ =
+// rope tension), the grip is proportional to the tension, and the Free end is well released with a MuEff taper. The old static path (box/convex/capsule) was
+// Unconditional viscous damping (gPrev += Tangent*Friction) unconditionally kills tangential movement during contact so that the node is not on the face/edge.
+// Stuck (unable to turn the edge with a slide in the corner and pinned at 90°). Coulomb allows lightly touched nodes to slide freely.
+// SurfDisp = This substep surface displacement (0 if static). Same purpose as CPU FRopeXPBDSolver::ApplyContactFriction (the model is
+// 1:1 with GPU SDF path with Pen+tension proxy — CC.Lambda accumulation is not supported by GPU, so proxy is used).
 void RopeApplyContactFriction(FRopeGPUParams P, uint i, int N, float3 Normal, float Pen, float3 SurfDisp)
 {
 	const float Friction = clamp(P.Friction, 0.0f, 1.0f);
@@ -134,7 +134,7 @@ void RopeApplyContactFriction(FRopeGPUParams P, uint i, int N, float3 Normal, fl
 	const float3 RelDelta = (gPos[i] - gPrev[i]) - SurfDisp;
 	float3 Tangent = RelDelta - dot(RelDelta, Normal) * Normal;
 
-	// 법선력 ≈ Pen(외력/무게분) + 인접 distance 제약력(gLambdaDist=장력)의 안쪽 성분. λ×InvMass로 displacement화.
+	// normal force ≈ Pen (external force/weight) + inner component of adjacent distance constraint force (gLambdaDist=tension). Displacement using λ×InvMass.
 	float3 NetPull = (float3)0;
 	if (i > 0)
 	{
@@ -149,45 +149,45 @@ void RopeApplyContactFriction(FRopeGPUParams P, uint i, int N, float3 Normal, fl
 		if (l1 > 1e-4f) { NetPull += abs(gLambdaDist[i]) * (d1 / l1); }
 	}
 	NetPull *= gInvMass[i];
-	// 표면 안쪽 성분만
+	// Only components inside the surface
 	const float TensionNormal = max(0.0f, -dot(NetPull, Normal));
-	// Coulomb 한계
+	// Coulomb limit
 	const float MaxSlip = MuEff * (Pen + TensionNormal);
 	const float TLen = length(Tangent);
-	// 그립 넘으면 슬립
+	// If you go over the grip, it slips.
 	if (TLen > MaxSlip && TLen > 1e-6f) { Tangent *= (MaxSlip / TLen); }
 	gPrev[i] += Tangent;
 }
 
-// 캡슐 노드 충돌(M2): substep 시작(gPrev)→현재(gPos) 경로를 캡슐 sub-포즈 끝점과 함께 상대 스윕,
-// 첫 접촉에서 push-out + *상대* 법선 속도 제거 + *상대* 접선 마찰. CPU SolveCollisions 미러.
-// s = substep 인덱스(콜라이더 프레임 모션을 substep 구간으로 나누는 비율 계산용).
+// capsule node collision(M2): substep start (gPrev) → current (gPos) path with capsule sub-pose end point, relative sweep,
+// Push-out at first contact + *Opponent* normal velocity removal + *Opponent* tangential friction. CPU SolveCollisions mirror.
+// s = substep index (for calculating the ratio of collider frame motion divided into substep intervals).
 void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
 	const int    MaxSamples = max(P.MaxSweepSamples, 1);
-	// 이 substep의 collider 모션 시작 비율
+	// collider motion start rate for this substep
 	const float  CA0 = (float)s / (float)P.NumSub;
-	// 끝 비율
+	// End Ratio
 	const float  CA1 = (float)(s + 1) / (float)P.NumSub;
 
 	for (int c = 0; c < P.NumCapsules; ++c)
 	{
 		const FRopeCapsule Cap = Capsules[P.CapsuleOffset + c];
-		// substep sub-포즈 끝점(prev->curr 선형 보간). 정지 캡슐은 prev==curr(패킹 보장) → 기존과 동일.
+		// substep sub-pose endpoint (prev->curr linear interpolation). Stationary capsule prev==curr (packing guaranteed) → Same as before.
 		const float3 CapAS = lerp(Cap.PrevA.xyz, Cap.A.xyz, CA0);
 		const float3 CapBS = lerp(Cap.PrevB.xyz, Cap.B.xyz, CA0);
 		const float3 CapAE = lerp(Cap.PrevA.xyz, Cap.A.xyz, CA1);
 		const float3 CapBE = lerp(Cap.PrevB.xyz, Cap.B.xyz, CA1);
-		// 앞선 capsule이 밀었을 수 있음
+		// The previous capsule may have been pushed
 		const float3 SegB = gPos[i];
-		// 상대 운동 반영 샘플 수: 노드 이동 + 캡슐 끝점 이동 최대치(과대추정은 안전 — MaxSamples 상한).
+		// Number of samples reflecting relative motion: maximum node movement + capsule end point movement (overestimation is safe — MaxSamples cap).
 		const float  L = distance(SegA, SegB) + max(distance(CapAS, CapAE), distance(CapBS, CapBE));
 		const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
 
-		// 분리 가드(CPU RopeCollision::IsSweptSeparating / SDF 미러): 접촉 스킨 안에서 시작해 표면 바깥으로
-		// 분리 중이면 재-핀 생략. 시작 재질점을 끝 포즈로 이월해 접촉점 이동을, 끝 포즈로 끝 접촉을 판정한다.
+		// Separation Guard (CPU RopeCollision::IsSweptSeparating / SDF Mirror): Start inside the contact skin and move outside the surface.
+		// Skip re-pin if disconnecting. The starting material point is carried over to the end pose to check the contact point movement, and the end pose is checked for end contact.
 		{
 			float3 N0; float Pen0; float TSeg0; float3 C0;
 			if (RopeQueryCapsulePoint(CapAS, CapBS, Cap.B.w, SegA, P.CollisionRadius, N0, Pen0, TSeg0, C0))
@@ -208,47 +208,47 @@ void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 
 			float3 Normal; float Pen; float TSeg; float3 Closest;
 			if (RopeQueryCapsulePoint(CapAT, CapBT, Cap.B.w, Pt, P.CollisionRadius, Normal, Pen, TSeg, Closest))
 			{
-				// 접촉 재질점(TSeg)을 substep 끝 포즈로 이월 — 노드를 표면과 함께 남은 모션만큼 옮겨
-				// 배치한다(SDF가 로컬 접촉점을 끝 포즈로 재환산하는 것의 대응). 정지 캡슐이면 이월량 0.
+				// Carry over the contact material point (TSeg) to the end pose of the substep — move the node along with the surface by the remaining amount of motion.
+				// (corresponding to SDF reconverting the local contact point to the end pose). If it is a stationary capsule, the carryover amount is 0.
 				const float3 ClosestE = lerp(CapAE, CapBE, TSeg);
 				gPos[i] = Pt + (ClosestE - Closest) + Normal * Pen;
 
-				// 재질점의 이번 substep 표면 변위(프레임 전체 prev->curr 변위 * InvDt * FixedDt).
-				// 정지 캡슐은 0. 아래 법선(비탄성)/접선(마찰) 응답이 공용으로 쓴다.
+				// This substep surface displacement of the material point (frame entire prev->curr displacement * InvDt * FixedDt).
+				// stationary capsule is 0. The normal (inelastic)/tangent (friction) response below is written as shared.
 				const float  InvDt = Cap.PrevB.w;
 				const float3 SurfDisp = (lerp(Cap.A.xyz, Cap.B.xyz, TSeg)
 					- lerp(Cap.PrevA.xyz, Cap.PrevB.xyz, TSeg)) * (InvDt * P.FixedDt);
 
-				// 비탄성 접촉: push-out이 gPrev 대비 +N 변위를 만들면 그대로 다음 substep 속도가 된다
-				// (깊은 접촉은 첫 샘플 Pt==gPrev라 매 substep +N*Pen 주입) → 정지 캡슐 위에서도 노드가
-				// 튄다. *상대* 바깥 법선 속도만 제거 — 표면 자신의 법선 운동(본이 미는 것)은 보존.
+				// Inelastic contact: If push-out creates +N displacement compared to gPrev, it becomes the next substep velocity.
+				// (Deep contact is the first sample Pt==gPrev, so every substep +N*Pen is injected) → Even on the stationary capsule, the node
+				// Splash. *Relative* only removes the outer normal velocity — the surface's own normal motion (bone pushing) is preserved.
 				const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, Normal);
 				if (VnOut > 0.0f)
 				{
 					gPrev[i] += Normal * VnOut;
 				}
 				RopeApplyContactFriction(P, i, N, Normal, Pen, SurfDisp);
-				// pinch 감지용 접촉 법선 누적(단위 법선 합·개수 → 커널이 반대 방향 동시 접촉을 판별).
+				// Accumulation of contact normals for pinch detection (sum/number of unit normals → kernel determines simultaneous contacts in opposite directions).
 				Contact.xyz += Normal; Contact.w += 1.0f;
-				// 이 capsule의 첫 접촉에서 종료
+				// Ends at the first contact of this capsule
 				break;
 			}
 		}
 	}
 }
 
-// SDF 노드 충돌(M3): 캡슐과 동일한 swept 구조 — 노드 경로를 collider 로컬 상대 프레임으로 옮겨
-// sub-포즈까지 한 세그먼트에 담고, 분리 휴리스틱 후 첫 접촉에서 push-out + 상대 응답 + 장력 그립
-// 마찰(Coulomb, gLambdaDist 소비). CPU FRopeSDFCollider::QuerySwept/SolveCollisions 미러.
+// SDF node collision(M3): Same swept structure as capsule — Move node path to collider local relative frame
+// Include sub-poses in one segment, push-out at first contact after separation heuristic + relative response + tension grip
+// friction(Coulomb, gLambdaDist consumed). CPU FRopeSDFCollider::QuerySwept/SolveCollisions mirror.
 void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
 	const int    MaxSamples = max(P.MaxSweepSamples, 1);
 	const float  NodeR = P.CollisionRadius;
-	// 이 substep의 collider 모션 시작 비율
+	// collider motion start rate for this substep
 	const float  A0 = (float)s / (float)P.NumSub;
-	// 끝 비율
+	// End Ratio
 	const float  A1 = (float)(s + 1) / (float)P.NumSub;
 
 	for (int sc = 0; sc < P.NumSDFColliders; ++sc)
@@ -256,31 +256,31 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 		const FRopeSDFCollider Col = SDFColliders[P.SDFColliderOffset + sc];
 		const FRopeSDFVolume   Vol = SDFVolumes[Col.VolumeIndex];
 
-		// substep sub-포즈(prev->curr 보간). 정지 본이면 prev==curr라 보간 결과 = 현재 포즈.
+		// substep sub-pose(prev->curr interpolation). If it is a stationary bone, prev==curr and interpolation result = current pose.
 		const float4 RotS = RopeQuatNlerp(Col.PrevRotation, Col.Rotation, A0);
 		const float4 RotE = RopeQuatNlerp(Col.PrevRotation, Col.Rotation, A1);
 		const float3 TrS  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A0);
 		const float3 TrE  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A1);
 		const float3 Scl      = Col.Scale.xyz;
-		// 부호 보존(미러링 액터의 음수 스케일) — RopeColliderCommon.ush의 공용 헬퍼가 단일 소스.
+		// Sign preservation (negative scale of mirroring actors) — RopeColliderCommon.ush's shared helper provides a single source of truth.
 		const float3 InvScale = RopeInvScaleSigned(Scl);
 		const float3 ScaleSgn = RopeScaleSign(Scl);
-		// 로컬(베이크) 거리 ↔ 월드 환산(#3). L0/L1/SDF는 로컬 cm, NodeR/Pen은 월드. 균일 스케일 가정
-		// (스케일 1이면 동작 불변). CPU FRopeSDFCollider::QuerySwept와 동일.
+		// local (baked) distance ↔ world conversion (#3). L0/L1/SDF is local cm, NodeR/Pen is world. Uniform scale assumption
+		// (behavior unchanged at scale 1). Same as CPU FRopeSDFCollider::QuerySwept.
 		const float  ScaleScalar = max(max(abs(Scl.x), abs(Scl.y)), abs(Scl.z));
 		const float  LocalNodeR  = NodeR / max(ScaleScalar, 1e-6f);
 
-		// 노드 substep 경로를 collider 로컬 상대 프레임으로(시작=시작 sub-포즈, 끝=끝 sub-포즈).
-		// 한 세그먼트에 노드+collider 상대 운동을 모두 담는다. InvTransform=(qInv*(P-T))/Scale.
+		// node substep path to collider local relative frame (start=start sub-pose, end=end sub-pose).
+		// Contains all relative motions of node+collider in one segment. InvTransform=(qInv*(P-T))/Scale.
 		const float3 L0 = RopeQuatRotate(float4(-RotS.xyz, RotS.w), SegA    - TrS) * InvScale;
 		const float3 L1 = RopeQuatRotate(float4(-RotE.xyz, RotE.w), gPos[i] - TrE) * InvScale;
 		const float  RelLen = distance(L0, L1);
 		const int    NumSamples = clamp(1 + (int)floor(RelLen / SweepStep), 1, MaxSamples);
 
-		// 분리: 시작 접촉(L0 밴드 내·침투)이고 노드가 표면 *바깥쪽*으로 빠져나가는 중이면 재-핀하지 않고
-		// 놔줌(접촉 노드가 매 substep 시작점으로 다시 핀돼 영영 못 떨어지는 것 방지). CPU QuerySwept 미러.
-		// BUGFIX: 끝점만 보면 관통(L0 안쪽 → L1 반대편 바깥)도 분리로 오판해 몸을 통과한다. L0 바깥
-		// gradient에 대한 변위가 양수일 때만 분리로 인정 → 안쪽(관통)이면 아래 sweep이 첫 접촉에서 막는다.
+		// Separation: If the starting contact (within the L0 band penetration) and the node is exiting *outside* the surface, do not re-pin.
+		// Let go (prevent the contact node from being pinned back to the start of each substep and never dropped). CPU QuerySwept mirror.
+		// BUGFIX: If you only look at the end point, penetration (inside L0 → outside on the other side of L1) is mistaken as separation and passes through the body. Outside L0
+		// Separation is recognized only when the displacement for the gradient is positive → If it is inside (penetrating), the sweep below is blocked at the first contact.
 		{
 			const float3 BMn = Vol.LocalMin.xyz - LocalNodeR;
 			const float3 BMx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + LocalNodeR;
@@ -290,10 +290,10 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 				const bool EndOut = any(L1 < BMn) || any(L1 > BMx) || (RopeSDFTrilinear(Vol, L1) >= LocalNodeR);
 				if (EndOut)
 				{
-					// 바깥 방향 단위(로컬)
-					// 로컬 공간 비교라 부호 보정 불필요(L0/L1도 같은 미러 로컬 공간에 있다).
+					// Outer direction unit (local)
+					// Because it is a local space comparison, sign correction is not required (L0/L1 are also in the same mirror local space).
 					const float3 OutwardLocal = RopeSDFGradient(Vol, L0);
-					// 바깥으로 이동하는 진짜 분리만 생략.
+					// Only true separations that move outward are omitted.
 					if (dot(L1 - L0, OutwardLocal) > 0.0f) { continue; }
 				}
 			}
@@ -303,27 +303,27 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 		{
 			const float  T  = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
 			const float3 Lp = lerp(L0, L1, T);
-			// 밴드 컬 + trilinear + gradient(침투 시) — 공용 로컬 점질의.
+			// Band curl + trilinear + gradient (when penetration) — shared local point query.
 			float Dist; float3 NLocal;
 			if (RopeQuerySDFLocal(Vol, Lp, LocalNodeR, Dist, NLocal))
 			{
-				// 끝 sub-포즈 기준 월드 법선. 미러 축은 함께 뒤집어야 바깥을 향한다(양수 스케일이면 ×1.0).
+				// End sub-pose world normal. The mirror axes must be flipped together to point outward (×1.0 for positive scale).
 				const float3 NWorld = normalize(RopeQuatRotate(RotE, NLocal * ScaleSgn));
-				const float  Pen = NodeR - Dist * ScaleScalar; // 로컬 거리 → 월드 침투(#3)
-				// 끝 sub-포즈 기준 월드 접촉점(노드 배치). World = Rot*(Scale*Local) + Trans.
+				const float  Pen = NodeR - Dist * ScaleScalar; // local distance → world penetration(#3)
+				// World contact point (node placement) based on the end sub-pose. World = Rot*(Scale*Local) + Trans.
 				const float3 HitWorld = RopeQuatRotate(RotE, Lp * Scl) + TrE;
 				gPos[i] = HitWorld + NWorld * Pen;
 
-				// 접촉 물질점 Lp의 이번 substep 표면 변위(prev->curr 포즈 프레임 변위 * InvDt * FixedDt,
-				// 정지 본이면 0). 아래 법선(비탄성)/접선(마찰) 응답이 공용으로 쓴다.
+				// This substep surface displacement of the contact material point Lp (prev->curr pose frame displacement * InvDt * FixedDt,
+				// 0 if stationary bone). The normal (inelastic)/tangent (friction) response below is written as shared.
 				const float  InvDt = Col.PrevTranslation.w;
 				const float3 Wcur  = RopeQuatRotate(Col.Rotation,     Lp * Scl) + Col.Translation.xyz;
 				const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Scl) + Col.PrevTranslation.xyz;
 				const float3 SurfDisp = (Wcur - Wprev) * (InvDt * P.FixedDt);
 
-				// 비탄성 접촉: push-out이 gPrev 대비 +N 변위를 만들면 그대로 다음 substep 속도가 된다
-				// (깊은 접촉은 첫 샘플==gPrev라 매 substep +N*Pen 주입) → 정지 본 위에서도 노드가 튄다.
-				// *상대* 바깥 법선 속도만 제거 — 표면 자신의 법선 운동(본이 미는 것)은 보존.
+				// Inelastic contact: If push-out creates +N displacement compared to gPrev, it becomes the next substep velocity.
+				// (Deep contact is the first sample==gPrev, so every substep +N*Pen is injected) → The node bounces even on the stationary bone.
+				// *Only removes the relative* outer normal velocity — the surface's own normal motion (bone pushing) is preserved.
 				const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, NWorld);
 				if (VnOut > 0.0f)
 				{
@@ -331,46 +331,46 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 				}
 
 				RopeApplyContactFriction(P, i, N, NWorld, Pen, SurfDisp);
-				// pinch 감지용 접촉 법선 누적.
+				// Contact normal accumulation for pinch detection.
 				Contact.xyz += NWorld; Contact.w += 1.0f;
-				// 이 SDF collider의 첫 접촉에서 종료
+				// Terminates at first contact of this SDF collider
 				break;
 			}
 		}
 	}
 }
 
-// 박스 노드 충돌(동적): OBB — 노드 substep 경로(gPrev→gPos)를 박스 sub-포즈(prev->curr 보간)와 함께 스윕,
-// 첫 접촉에서 재질점을 끝 포즈로 이월 + push-out + *상대* 법선 속도 제거 + *상대* 접선 마찰. 정적 박스는
-// prev=curr(패킹 보장)라 보간이 현재 포즈로 축약되고 SurfDisp=0 → 기존 정적 동작과 동일(상위집합).
-// 모서리/엣지 정확 normal(RopeQueryBoxPoint)이 핵심. CPU FRopeBoxCollider::Query/QuerySwept 미러.
+// box node collision(dynamic): OBB — sweep node substep path (gPrev→gPos) with box sub-pose (prev->curr interpolation),
+// Carry over material point from first contact to end pose + push-out + remove *relative* normal velocity + *relative* tangential friction. static box
+// prev=curr (packing guaranteed), so interpolation is abbreviated to the current pose, and SurfDisp=0 → Same as the existing static operation (superset).
+// Corner/edge accuracy normal(RopeQueryBoxPoint) is the key. CPU FRopeBoxCollider::Query/QuerySwept mirror.
 void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
 	const int    MaxSamples = max(P.MaxSweepSamples, 1);
-	// 이 substep의 박스 모션 시작 비율
+	// Box motion start rate for this substep
 	const float  CA0 = (float)s / (float)P.NumSub;
-	// 끝 비율
+	// End Ratio
 	const float  CA1 = (float)(s + 1) / (float)P.NumSub;
 
 	for (int c = 0; c < P.NumBoxes; ++c)
 	{
 		const FRopeBox Box = Boxes[c];
 		const float  InvDt = Box.Center.w;
-		// substep sub-포즈 center/rot(prev->curr 보간). 정적이면 prev==curr → 현재 포즈.
+		// substep sub-pose center/rot(prev->curr interpolation). If static, prev==curr → current pose.
 		const float3 CenterS = lerp(Box.PrevCenter.xyz, Box.Center.xyz, CA0);
 		const float3 CenterE = lerp(Box.PrevCenter.xyz, Box.Center.xyz, CA1);
 		const float4 RotS = RopeQuatNlerp(Box.PrevRot, Box.Rot, CA0);
 		const float4 RotE = RopeQuatNlerp(Box.PrevRot, Box.Rot, CA1);
 
-		// 앞선 콜라이더가 밀었을 수 있음
+		// May have been pushed by the preceding collider
 		const float3 SegB = gPos[i];
 		const float  L = distance(SegA, SegB) + distance(CenterS, CenterE);
 		const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
 
-		// 분리 가드(CPU RopeCollision::IsSweptSeparating / SDF 미러): 접촉 스킨 안에서 시작해 바깥으로 분리
-		// 중이면 재-핀 생략. 시작 포즈 박스로 시작 접촉/재질점을, 끝 포즈 박스로 끝 접촉을 판정한다.
+		// Separation Guard (CPU RopeCollision::IsSweptSeparating / SDF Mirror): Starts inside the contact skin and separates outward.
+		// Omit re-pin if in progress. Check the start contact/material point with the start pose box and the end contact with the end pose box.
 		{
 			FRopeBox BoxS = Box; BoxS.Center = float4(CenterS, 0.0f); BoxS.Rot = RotS;
 			float3 N0; float Pen0; float3 C0;
@@ -389,70 +389,70 @@ void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N, inout float4 Con
 		{
 			const float  T = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
 			const float3 Pt = lerp(SegA, SegB, T);
-			// sub-포즈 박스(center/rot 보간)로 점질의. HalfExtents만 재사용, prev 필드는 미참조.
+			// Point question with sub-pose box (center/rot interpolation). Only HalfExtents are reused, prev fields are not referenced.
 			FRopeBox BoxT = Box;
 			BoxT.Center = float4(lerp(CenterS, CenterE, T), 0.0f);
 			BoxT.Rot = RopeQuatNlerp(RotS, RotE, T);
 			float3 Normal; float Pen; float3 Closest;
 			if (RopeQueryBoxPoint(BoxT, Pt, P.CollisionRadius, Normal, Pen, Closest))
 			{
-				// 접촉 재질점(로컬)을 substep 끝 포즈로 이월 — 표면과 함께 남은 모션만큼 노드를 옮긴다.
+				// Carry over the contact material point (local) to the end pose of the substep — Move the node along with the surface by the amount of remaining motion.
 				const float3 Lp = RopeQuatRotate(float4(-BoxT.Rot.xyz, BoxT.Rot.w), Closest - BoxT.Center.xyz);
 				const float3 ClosestE = RopeQuatRotate(RotE, Lp) + CenterE;
 				gPos[i] = Pt + (ClosestE - Closest) + Normal * Pen;
 
-				// 재질점의 이번 substep 표면 변위(프레임 전체 prev->curr 변위 * InvDt * FixedDt). 정적이면 0.
+				// This substep surface displacement of the material point (frame entire prev->curr displacement * InvDt * FixedDt). 0 if static.
 				const float3 Wcur  = RopeQuatRotate(Box.Rot, Lp) + Box.Center.xyz;
 				const float3 Wprev = RopeQuatRotate(Box.PrevRot, Lp) + Box.PrevCenter.xyz;
 				const float3 SurfDisp = (Wcur - Wprev) * (InvDt * P.FixedDt);
 
-				// *상대* 바깥 법선 속도만 제거 — 표면 자체의 법선 운동(미는 것)은 보존.
+				// *Remove only the relative* outer normal velocity — preserve the normal motion (push) of the surface itself.
 				const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, Normal);
 				if (VnOut > 0.0f)
 				{
 					gPrev[i] += Normal * VnOut;
 				}
 				RopeApplyContactFriction(P, i, N, Normal, Pen, SurfDisp);
-				// pinch 감지용 접촉 법선 누적.
+				// Contact normal accumulation for pinch detection.
 				Contact.xyz += Normal; Contact.w += 1.0f;
-				// 이 박스의 첫 접촉에서 종료
+				// Terminates at first contact of this box
 				break;
 			}
 		}
 	}
 }
 
-// 컨벡스 노드 충돌(동적): 평면 집합 — 박스와 동일 구조(노드 substep 경로를 바디 강체 sub-포즈와 함께 스윕,
-// 첫 접촉에서 재질점을 끝 포즈로 이월 + push-out + *상대* 법선 속도 제거 + *상대* 접선 마찰). 정적 컨벡스는
-// prev=curr(패킹 보장)라 현재 포즈로 축약되고 SurfDisp=0 → 기존 정적 동작과 동일(상위집합).
-// CPU FRopeConvexCollider::Query/QuerySwept 미러.
+// convex node collision(dynamic): plane set — same structure as box (node substep path sweep with body rigid body sub-pose,
+// Carry over material point from first contact to end pose + push-out + remove *relative* normal velocity + *relative* tangential friction). static convex
+// prev=curr (guaranteed packing), which is abbreviated to the current pose and SurfDisp=0 → Same as the existing static action (superset).
+// CPU FRopeConvexCollider::Query/QuerySwept mirror.
 void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
 	const int    MaxSamples = max(P.MaxSweepSamples, 1);
-	// 이 substep의 강체 모션 시작 비율
+	// Rigid body motion start rate for this substep
 	const float  CA0 = (float)s / (float)P.NumSub;
-	// 끝 비율
+	// End Ratio
 	const float  CA1 = (float)(s + 1) / (float)P.NumSub;
 
 	for (int c = 0; c < P.NumConvexes; ++c)
 	{
 		const FRopeConvex Cv = Convexes[c];
 		const float  InvDt = Cv.LocalBoundsExtent.w;
-		// substep sub-포즈 강체(prev->curr 보간). 정적이면 prev==curr → 현재 포즈.
+		// substep sub-pose rigid body(prev->curr interpolation). If static, prev==curr → current pose.
 		const float3 TransS = lerp(Cv.PrevTrans.xyz, Cv.Trans.xyz, CA0);
 		const float3 TransE = lerp(Cv.PrevTrans.xyz, Cv.Trans.xyz, CA1);
 		const float4 RotS = RopeQuatNlerp(Cv.PrevRot, Cv.Rot, CA0);
 		const float4 RotE = RopeQuatNlerp(Cv.PrevRot, Cv.Rot, CA1);
 
-		// 앞선 콜라이더가 밀었을 수 있음
+		// May have been pushed by the preceding collider
 		const float3 SegB = gPos[i];
 		const float  L = distance(SegA, SegB) + distance(TransS, TransE);
 		const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
 
-		// 분리 가드(CPU RopeCollision::IsSweptSeparating / SDF 미러): 접촉 스킨 안에서 시작해 바깥으로 분리
-		// 중이면 재-핀 생략. 시작/끝 sub-포즈 강체로 시작 접촉/재질점·끝 접촉을 판정한다.
+		// Separation Guard (CPU RopeCollision::IsSweptSeparating / SDF Mirror): Starts inside the contact skin and separates outward.
+		// Omit re-pin if in progress. Start/end sub-pose Check the start contact/material point and end contact with the rigid body.
 		{
 			float3 N0; float Pen0; float3 C0; float3 Lp0;
 			if (RopeQueryConvexLocal(Cv, RotS, TransS, SegA, P.CollisionRadius, N0, Pen0, C0, Lp0))
@@ -473,11 +473,11 @@ void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N, inout float4 
 			float3 Normal; float Pen; float3 Closest; float3 Lp;
 			if (RopeQueryConvexLocal(Cv, RotT, TransT, Pt, P.CollisionRadius, Normal, Pen, Closest, Lp))
 			{
-				// 접촉 재질점(로컬 Lp)을 substep 끝 포즈로 이월 — 표면과 함께 남은 모션만큼 노드를 옮긴다.
+				// Carry over the contact material point (local Lp) to the end pose of the substep — Move the node along with the surface by the amount of remaining motion.
 				const float3 ClosestE = RopeQuatRotate(RotE, Lp) + TransE;
 				gPos[i] = Pt + (ClosestE - Closest) + Normal * Pen;
 
-				// 재질점의 이번 substep 표면 변위(프레임 전체 prev->curr * InvDt * FixedDt). 정적이면 0.
+				// This substep surface displacement of the material point (whole frame prev->curr * InvDt * FixedDt). 0 if static.
 				const float3 Wcur  = RopeQuatRotate(Cv.Rot, Lp) + Cv.Trans.xyz;
 				const float3 Wprev = RopeQuatRotate(Cv.PrevRot, Lp) + Cv.PrevTrans.xyz;
 				const float3 SurfDisp = (Wcur - Wprev) * (InvDt * P.FixedDt);
@@ -488,34 +488,34 @@ void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N, inout float4 
 					gPrev[i] += Normal * VnOut;
 				}
 				RopeApplyContactFriction(P, i, N, Normal, Pen, SurfDisp);
-				// pinch 감지용 접촉 법선 누적.
+				// Contact normal accumulation for pinch detection.
 				Contact.xyz += Normal; Contact.w += 1.0f;
-				// 이 컨벡스의 첫 접촉에서 종료
+				// Terminates at the first contact of this convex
 				break;
 			}
 		}
 	}
 }
 
-// 세그먼트(에지/chord) 충돌: 노드 i-i+1 직선의 내부 샘플이 얇은 표면을 가로지르는 것을 방어.
-// 침투 샘플을 표면 밖으로 밀고 (1-T):(T)로 양 끝 노드에 분배 — gPrev 동반 이동(속도 중립, 곡면 위
-// rest 없는 chord가 매 substep 속도를 주입하는 것 차단). i/i+1 동시 쓰기는 커널의 2색+배리어가 보호.
+// segment (edge/chord) collision: Prevents internal samples of the node i-i+1 straight line from crossing a thin surface.
+// Push the penetration sample out of the surface and distribute it to both end nodes with (1-T):(T) — gPrev accompanying movement (velocity neutral, on curved surface)
+// Blocks chords without rest from injecting velocity every substep). i/i+1 simultaneous writing is protected by the kernel's two-color+barrier.
 void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 {
 	const float SW0 = gInvMass[i];
 	const float SW1 = gInvMass[i + 1];
 	if (SW0 + SW1 <= 0.0f)
 	{
-		// 양 끝 모두 pin — 보정 불가.
+		// pin on both ends — no compensation possible.
 		return;
 	}
 
 	const float SegLen  = distance(gPos[i], gPos[i + 1]);
-	// 샘플 간격: config 하한 vs 검출 보장 한계(2×노드 반지름) 중 큰 쪽. 내부 샘플은 반경 CollisionRadius
-	// 점질의라 인접 프로브(양 끝 노드 질의 포함) 간격 ≤ 2×R이면 chord 위 어떤 지점도 프로브에서 R 이내 —
-	// 두께 0의 벽도 못 빠져나간다(삼각부등식; NumInner+1 ≥ SegLen/SegStep이라 간격 ≤ SegStep 보장).
-	// 고정 2cm는 굵은 로프에서 커버리지가 겹치는 과밀 프로브로, 콜라이더 수 × 샘플 수 곱(근접 스파이크의
-	// 주항)을 불필요하게 키웠다. CPU FRopeXPBDSolver::SolveSegmentContacts와 동일 식(파리티).
+	// Sample interval: Larger of config floor vs detection coverage limit (2×node radius). The inner sample is CollisionRadius.
+	// Since it is a point query, if the interval between adjacent probes (including both end node queries) ≤ 2×R, any point on the chord is within R from the probe —
+	// It cannot escape a wall with a thickness of 0 (triangular inequality; NumInner+1 ≥ SegLen/SegStep ensures an interval ≤ SegStep).
+	// pinned 2cm is an overcrowded probe with overlapping coverage on a thick rope, multiplying the number of colliders by the number of samples (the number of nearby spikes)
+	// circumnavigation) was raised unnecessarily. CPU Same expression (parity) as FRopeXPBDSolver::SolveSegmentContacts.
 	const float SegStep = max(max(P.SweepStep, 0.1f), 2.0f * P.CollisionRadius);
 	const int   NumInner = clamp((int)floor(SegLen / SegStep), 1, max(P.MaxSweepSamples, 1));
 	for (int si = 1; si <= NumInner; ++si)
@@ -534,9 +534,9 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 				Nrm, PenC, TSegC, ClosestC))
 			{
 				const float DL = PenC / WEff;
-				// 속도 중립 보정: 현(chord)은 곡면 위 rest에서도 항상 침투해 매 substep 보정이
-				// 발생한다 → gPos만 밀면 그만큼 바깥 속도가 주입돼 정지 콜라이더 위에서도 노드가
-				// 튄다. gPrev도 같이 옮겨 위치만 고치고 속도는 보존(2색 처리라 race 없음).
+				// Velocity neutral correction: Chords always penetrate even at rest on a curved surface, so correction is performed at every substep.
+				// occurs → If you just push gPos, the outer velocity is injected so that the node becomes visible even on the stationary collider.
+				// Splash. gPrev was also moved to fix only the position and preserve velocity (two-color processing, so no race).
 				const float3 D0 = Nrm * ((1.0f - T) * SW0 * DL);
 				const float3 D1 = Nrm * (T * SW1 * DL);
 				gPos[i]      += D0;
@@ -546,7 +546,7 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 			}
 		}
 
-		// box (정적 OBB) — 점질의. 속도 중립 보정(위 capsule 세그먼트와 동일 이유).
+		// box (static OBB) — Inquiry. Velocity neutral correction (same reason as capsule segment above).
 		for (int sbx = 0; sbx < P.NumBoxes; ++sbx)
 		{
 			float3 NrmB; float PenB; float3 ClosestB;
@@ -562,7 +562,7 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 			}
 		}
 
-		// convex (평면 집합) — 현재 포즈 점질의(강체 Rot/Trans). 속도 중립 보정(위 capsule/box 세그먼트와 동일).
+		// convex (plane set) — Current pose point query (rigid body Rot/Trans). Velocity neutral correction (same as capsule/box segment above).
 		for (int scv = 0; scv < P.NumConvexes; ++scv)
 		{
 			const FRopeConvex CvSeg = Convexes[scv];
@@ -579,7 +579,7 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 			}
 		}
 
-		// SDF (M3) — 현재 포즈 점질의(공용 월드 헬퍼).
+		// SDF (M3) — Current pose point query (shared world helper).
 		for (int ssdf = 0; ssdf < P.NumSDFColliders; ++ssdf)
 		{
 			const FRopeSDFCollider Col = SDFColliders[P.SDFColliderOffset + ssdf];
@@ -587,7 +587,7 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 			float3 NWorld; float DistS; float3 Lp;
 			if (!RopeQuerySDFWorld(Col, Vol, Mid, P.CollisionRadius, NWorld, DistS, Lp)) { continue; }
 			const float  DL = (P.CollisionRadius - DistS) / WEff;
-			// 속도 중립 보정(위 capsule 세그먼트와 동일 이유 — gPrev 동반 이동으로 주입 차단).
+			// Velocity neutral correction (same reason as capsule segment above — gPrev entrainment blocks injection).
 			const float3 D0 = NWorld * ((1.0f - T) * SW0 * DL);
 			const float3 D1 = NWorld * (T * SW1 * DL);
 			gPos[i]      += D0;
@@ -596,10 +596,10 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 			gPrev[i + 1] += D1;
 		}
 
-		// GDF (world) — 세그먼트 chording: 얇은 벽을 두 노드 사이 직선이 가로지르는 경우 방어.
-		// SDF 세그먼트 케이스와 동일 패턴, query만 GDF로. small-step 노드 충돌이 대부분 잡지만
-		// SegmentLength보다 얇은 벽은 노드가 양옆 바깥이라 여기서만 잡힌다. 정적 월드라 표면속도 0.
-		// (CL 221에서 병합 — 커널 chord 블록이 이 함수로 이동한 뒤라 위치만 재배치, 수식 동일.)
+		// GDF (world) — segment chording: Defends when a straight line between two nodes crosses a thin wall.
+		// Same pattern as SDF segment case, only query is GDF. Most small-step node collisions occur, but
+		// Walls thinner than SegmentLength are captured only here because the nodes are outside the sides. static world surfacevelocity 0.
+		// (Merged from CL 221 — After the kernel chord block is moved to this function, only the location is rearranged, the formula is the same.)
 #if ROPE_USE_GDF && PLATFORM_SUPPORTS_DISTANCE_FIELDS
 		if (bWorldGDFValid != 0)
 		{
@@ -626,10 +626,10 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 	}
 }
 
-// Strain limit(FTL 지향): 세그먼트가 MaxLen 초과면 *follower만* leader 쪽으로 당겨 길이를 MaxLen으로 맞춘다
-// (leader 불변 → 직전에 맞춘 세그먼트가 안 흐트러져 순차 전파 보존). follower 고정(InvMass 0)이면 스킵. 위치
-// 이동은 gPrev도 같이 옮겨 속도 중립(fling 방지). 커널 strain-limit 스테이지에서 thread 0만 순차 호출 →
-// groupshared 단일 writer라 race 없음. CPU FRopeXPBDSolver::SolveStrainLimit의 ClampToward 미러.
+// Strain limit (FTL-oriented): If the segment exceeds MaxLen, *only the follower* is pulled toward the leader to set the length to MaxLen.
+// (leader remains unchanged → the immediately preceding segment is not disturbed and sequential propagation is preserved). Skip if follower pinned (InvMass 0). location
+// When moving, gPrev is also moved to neutralize velocity (prevent fling). Only thread 0 is sequentially called in the kernel strain-limit stage →
+// groupshared single writer so no race. ClampToward mirror of CPU FRopeXPBDSolver::SolveStrainLimit.
 void RopeClampStretchToward(int Leader, int Follower, float MaxLen)
 {
 	if (gInvMass[Follower] <= 0.0f) { return; }
@@ -656,20 +656,20 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 	const uint i = GroupThreadId.x;
 	const bool bActiveNode = (i < (uint)N);
 
-	// --- groupshared 로드
+	// --- load groupshared
 	if (bActiveNode)
 	{
 		gPos[i]     = Positions[P.NodeOffset + i].xyz;
 		gPrev[i]    = PrevPositions[P.NodeOffset + i].xyz;
 		gInvMass[i] = InvMass[P.NodeOffset + i];
-		// NumSub=0(적분 없는 프레임)에도 write-back이 쓰레기값을 안 내보내게 0 초기화.
+		// Initialize to 0 so that write-back does not output garbage values even when NumSub=0 (frame without integration).
 		gLambdaDist[i] = 0.0f;
 	}
 	GroupMemoryBarrierWithGroupSync();
 
-	// --- Override(G0): 로직 페이즈(GT)가 계산한 노드별 타깃/질량을 적분 *전에* 주입한다.
-	// "타깃 계산은 GT, 적용은 GPU" — whip/wrapping/hold/releasing의 위치·질량 쓰기가 재시드 없이
-	// 이 스테이지를 탄다. 순서: Pos → Prev(명시) → Prev=Pos(속도 0) → InvMass.
+	// --- Override(G0): Inject the per-node target/mass calculated by the logic phase (GT) *before* integration.
+	// "Target calculation is GT, application is GPU" — Position/mass writing of whip/Wrapping/hold/Releasing without reseeding
+	// Take this stage. Order: Pos → Prev (explicit) → Prev=Pos (velocity 0) → InvMass.
 	if (bActiveNode && P.bHasOverrides != 0)
 	{
 		const uint F = OverrideFlags[P.NodeOffset + i];
@@ -681,9 +681,9 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 	GroupMemoryBarrierWithGroupSync();
 
 	const float Dt2     = P.FixedDt * P.FixedDt;
-	// Damping = "60fps 기준 *프레임*당 속도 감소 비율". substep마다 그대로 곱하면 감쇠가 substep 수에 비례해
-	// 쌓여 유효 항력이 수십 배가 된다(종단속도 급락 = 리본처럼 뜨는 낙하). 지수로 substep 크기에 맞춰 나눈다.
-	// CPU FRopeXPBDSolver::Integrate와 동일 식(파리티).
+	// Damping = "Velocity reduction rate per *frame* based on 60fps". If you multiply each substep, damping is proportional to the number of substeps.
+	// As it piles up, the effective drag becomes several tens of times (longitudinal velocity plunge = falling like a ribbon). Divide by exponent according to the substep size.
+	// Same expression (parity) as CPU FRopeXPBDSolver::Integrate.
 	const float Damp    = pow(1.0f - clamp(P.Damping, 0.0f, 1.0f), P.FixedDt * 60.0f);
 	const float Seg     = P.SegmentLength;
 	const float MaxStep = max(Seg * 2.0f, 1.0f);
@@ -691,7 +691,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 	const float AlphaD  = (P.FixedDt > 1e-4f) ? (P.StretchCompliance / Dt2) : 0.0f;
 	const float RestBend = 2.0f * Seg;
 	const float AlphaB  = (P.FixedDt > 1e-4f) ? (P.BendCompliance / Dt2) : 0.0f;
-	// 각도-허용 벤딩 임계(config): Full은 Release보다 커야 smoothstep이 성립하므로 하한을 강제한다.
+	// Angle-allowed bending threshold (config): Full must be greater than Release for a smooth step to be established, so floor is enforced.
 	const float BendRelease = P.BendReleaseRatio;
 	const float BendFull    = max(P.BendFullRatio, BendRelease + 1e-4f);
 
@@ -711,7 +711,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		}
 		GroupMemoryBarrierWithGroupSync();
 
-		// --- pinned start: 이번 frame의 substep들에 걸쳐 Prev->Target sweep(velocity 0).
+		// --- pinned start: Prev->Target sweep(velocity 0) over the substeps of this frame.
 		if (P.bStartPinned != 0 && i == 0)
 		{
 			const float Alpha = (float)(s + 1) / (float)P.NumSub;
@@ -722,7 +722,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		}
 		GroupMemoryBarrierWithGroupSync();
 
-		// --- XPBD lambda는 substep 내 iteration에 걸쳐 누적 → substep 시작에 0.
+		// --- XPBD lambda accumulates across iterations within a substep → 0 at the start of the substep.
 		if (bActiveNode)
 		{
 			gLambdaDist[i] = 0.0f;
@@ -730,18 +730,18 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		}
 		GroupMemoryBarrierWithGroupSync();
 
-		// 충돌 해소 빈도(CollisionPasses): 제약 iteration을 CollPasses개 구간으로 나눠 구간마다 collision을 1회
-		// 끼운다(K=1이면 substep 끝 1회=기존). sharp 굴곡에서 안쪽 장력이 단일 push-out을 이겨 관통하는 걸 막음.
-		// CPU SolveCollisions 미러. 루프 bound가 uniform이라 모든 스레드가 같은 횟수 barrier를 탄다(데드락 없음).
+		// Collision resolution frequency (CollisionPasses): Divide the constraint iteration into CollPasses sections and have one collision per section.
+		// Insert (if K=1, once at the end of substep=existing). In sharp bends, the inner tension overcomes the single push-out and prevents penetration.
+		// CPU SolveCollisions mirror. The loop bound is uniform, so all threads ride the barrier the same number of times (no deadlock).
 		const int CollPasses = clamp(P.CollisionPasses, 1, P.Iters);
 		int ItDone = 0;
 		for (int pass = 0; pass < CollPasses; ++pass)
 		{
-			// 누적 목표(마지막 패스가 Iters 보장)
+			// Cumulative target (last pass is guaranteed to Iters)
 			const int ItTarget = ((pass + 1) * P.Iters) / CollPasses;
 			for (; ItDone < ItTarget; ++ItDone)
 			{
-			// --- Distance: segment k는 노드 {k,k+1}. 충돌은 인접(차이 0/1) → 2색(k%2).
+			// --- Distance: segment k is node {k,k+1}. Collision is adjacent (difference 0/1) → 2 colors (k%2).
 			[unroll(2)]
 			for (int dc = 0; dc < 2; ++dc)
 			{
@@ -768,7 +768,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 				GroupMemoryBarrierWithGroupSync();
 			}
 
-			// --- Bending: stick k는 노드 {k,k+2}. 충돌은 차이 0/2 → 3색(k%3)이면 동색 차이는 3의 배수.
+			// --- Bending: stick k is node {k,k+2}. Collision is a difference of 0/2 → If there are 3 colors (k%3), the difference of the same color is a multiple of 3.
 			[unroll(3)]
 			for (int bc = 0; bc < 3; ++bc)
 			{
@@ -785,12 +785,12 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 						{
 							const float3 Nrm = D / Dist;
 							const float C = Dist - RestBend;
-							// 각도-허용 벤딩: 벤딩은 i↔i+2를 2*SegLen(완전 직선)로 당기는 스프링이라 원래 모든 굽힘을
-							// "펴려" 한다 → 코너/랩 경계처럼 급하게 꺾인 구간에서 노드를 바깥으로 밀어 각지게 튀어나오게
-							// 한다. r=Dist/RestBend=cos(턴각/2)(1=직선, 작을수록 급함)로 급한 굽힘은 펴는 힘을 놔주고
-							// (BendScale→0) 완만한 굽힘만 편다(자유 로프가 사슬처럼 안 보이게). 충돌 패스를 늘리는 것과
-							// 달리 perf 비용이 없다. 임계는 config(FRopeSolverConfig::BendReleaseRatio/BendFullRatio).
-							// r=cos(턴각/2)이므로 0.70≈턴 91°, 0.92≈턴 46°.
+							// Angle-allowed bending: Bending is a spring that pulls i↔i+2 to 2*SegLen (perfectly straight), so all bending is originally possible.
+							// Trying to "unfold" → Push the node outward in a sharply bent section such as a corner/wrap boundary so that it protrudes at an angle.
+							// . r=Dist/RestBend=cos(turn angle/2)(1=straight line, the smaller the steeper). For sharp bends, release the straightening force.
+							// (BendScale→0) Only straighten gentle bends (Free ropes do not look like chains). Increasing collision pass and
+							// Otherwise, there is no perf cost. threshold is config(FRopeSolverConfig::BendReleaseRatio/BendFullRatio).
+							// r=cos(turn angle/2), so 0.70≈turn 91°, 0.92≈turn 46°.
 							const float BendScale = smoothstep(BendRelease, BendFull, Dist / RestBend);
 							const float DL = BendScale * (-C - AlphaB * gLambdaBend[i]) / (WSum + AlphaB);
 							gLambdaBend[i] += DL;
@@ -803,12 +803,12 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			}
 		}
 
-		// --- Collision(M2/M3): 노드 충돌 스테이지(본체는 파일 상단 RopeSolveNode* 함수).
-		// 노드별 독립(자기 슬롯 i만 쓰기)이라 그룹 동기 불필요 — 게이트만 여기서 건다.
-			// NodeContact: 이 pass에서 노드가 닿은 콜라이더들의 단위 법선 합(.xyz)+개수(.w) — 아래 pinch
-			// 판정에 쓴다(groupshared 없이 스레드 로컬 레지스터, 각 스테이지에 inout 전달).
+		// --- Collision(M2/M3): node collision stage (the main body is the RopeSolveNode* function at the top of the file).
+		// Since it is per-node independent (only own slot i is written), group synchronization is not required — only the gate is applied here.
+			// NodeContact: Unit normal sum (.xyz) + number (.w) of colliders touched by the node in this pass — pinch below
+			// Write to check (thread local register without groupshared, inout passed to each stage).
 			float4 NodeContact = float4(0.0f, 0.0f, 0.0f, 0.0f);
-			// 충돌 push-out 직전(거리 제약까지 반영된) 위치 — pinch 시 여기로 되돌려 노드를 얼린다.
+			// Position just before collision push-out (even reflecting the distance constraint) — When pinching, return to here and freeze the node.
 			const float3 NodePrePos = gPos[i];
 		if (bActiveNode && gInvMass[i] > 0.0f && P.NumCapsules > 0)
 		{
@@ -830,9 +830,9 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			RopeSolveNodeConvexes(P, i, s, N, NodeContact);
 		}
 #if ROPE_USE_GDF && PLATFORM_SUPPORTS_DISTANCE_FIELDS
-		// GDF 월드 충돌(정적 벽/바닥) — per-substep 제약. 캡슐/SDF와 같은 충돌 pass 위치·같은 응답 패턴, query만 GDF로
-		// 교체. 정적 월드라 표면속도 0(상대속도 마찰 불필요). small-step이라 부호-뒤집힘/터널링이 구조적으로 없어,
-		// 장력 제약과 같은 solve에서 균형을 이룬다(post-solve 밀어내기가 필요 없음).
+		// GDF world collision(static wall/floor) — per-substep constraint. Same collision pass location as capsule/SDF, same response pattern, only query as GDF
+		// . Since it is a static world, surfacevelocity is 0 (no relative velocity friction required). Because it is a small-step, there is no structural sign-reversal/tunneling,
+		// Balanced in the same solve as the tension constraint (no post-solve extrusion required).
 		if (bActiveNode && gInvMass[i] > 0.0f && bWorldGDFValid != 0)
 		{
 			const float  GdfNodeR = P.CollisionRadius;
@@ -844,46 +844,46 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 				const float  GdfGLen = length(GdfGrad);
 				if (GdfGLen > 1e-4f)
 				{
-					// 표면 바깥(거리 증가) 방향
+					// outside surface (increasing distance) direction
 					const float3 GdfN = GdfGrad / GdfGLen;
-					// 표면 밖으로 투영
+					// Project out of surface
 					gPos[i] += GdfN * (GdfNodeR - GdfDist);
-					// 비탄성: 바깥 법선 속도 제거(정적 월드 — 표면 자체 운동 없음). 캡슐/SDF 응답 미러.
+					// Inelastic: Eliminates external normal velocity (static world — no motion of the surface itself). capsule/SDF response mirror.
 					const float GdfVnOut = dot(gPos[i] - gPrev[i], GdfN);
 					if (GdfVnOut > 0.0f) { gPrev[i] += GdfN * GdfVnOut; }
-					// 마찰: 장력-한계 Coulomb(정적 월드라 SurfDisp=0). 다른 콜라이더와 동일 헬퍼 → 벽에 눌어붙지 않음.
+					// friction: tension-limit Coulomb (static world SurfDisp=0). Same helper as other colliders → Does not stick to walls.
 					RopeApplyContactFriction(P, i, N, GdfN, GdfNodeR - GdfDist, float3(0.0f, 0.0f, 0.0f));
-					// pinch 감지용 접촉 법선 누적(정적 월드도 하나의 접촉으로 계수).
+					// Contact normal accumulation for pinch detection (static world also counts as one contact).
 					NodeContact.xyz += GdfN; NodeContact.w += 1.0f;
 				}
 			}
 		}
 #endif
-			// Pinch 감쇠: 이번 pass에 노드가 서로 마주 보는 콜라이더에 동시에 눌렸으면(단위 법선 합이
-			// 상쇄 = |sum| << 개수) 빠져나갈 위치가 없다. last-wins push-out으로 한쪽 표면에 밀어붙인 채
-			// 두면 다음 substep 거리 제약이 다시 당겨 재관통 → 프레임 간 위치 왕복(지터)/접선 튕김. 그래서
-			// 표면으로 민 결과를 버리고 *충돌 직전 위치(NodePrePos)에 그대로 얼린다* — 빠져나갈 자리가
-			// 없으니 제자리가 최선, 순서 무관해 안정적. 속도도 0(gPrev=gPos=NodePrePos). 임계 0.6*개수는
-			// 두 법선이 ~106° 초과로 벌어졌을 때만(진짜 마주 봄) 발화 — 단일면·완만한 코너엔 무영향.
+			// Pinch damping: If nodes are simultaneously pressed on colliders facing each other in this pass (the unit normal sum is
+			// offset = |sum| << Number) There is no way out. Pushed onto one surface with last-wins push-out
+			// is left, the next substep distance constraint is pulled again and re-penetrated → position round trip (jitter)/tangential bounce between frames. so
+			// Discard the result of pushing to the surface *Freeze it at the position just before the collision (NodePrePos)* — There is no place to escape
+			// , it is best to stay in place, the order is irrelevant. The velocity is also 0 (gPrev=gPos=NodePrePos). threshold 0.6*number is
+			// Fires only when the two normals are separated by more than ~106° (when they are truly facing each other) — no effect on single sides or smooth corners.
 			if (bActiveNode && gInvMass[i] > 0.0f && NodeContact.w > 1.5f
 				&& length(NodeContact.xyz) < 0.6f * NodeContact.w)
 			{
 				gPos[i]  = NodePrePos;
 				gPrev[i] = NodePrePos;
 			}
-			// 충돌 결과 가시화 → 다음 collision pass / 다음 substep
+			// Visualize collision results → Next collision pass / Next substep
 			GroupMemoryBarrierWithGroupSync();
 
-			// --- 세그먼트(에지) 충돌: 두 노드 사이 직선 chording(양 끝은 표면 밖인데 사이 직선이 얇은 표면을
-			// 가로지름) 방어. CPU SolveSegmentContacts 미러. 인접 세그먼트가 노드 i+1을 공유 → 2색(i%2)으로
-			// race 방지(색마다 barrier). 침투 샘플을 표면 밖으로 밀고 (1-T):(T)로 양 끝 노드에 분배. 양 끝 모두
-			// pin(invMass 0)이면 스킵. SDF는 현재 포즈 기준 point query(스윕 아님, CPU Query와 동일).
+			// --- segment (edge) collision: straight chording between two nodes (both ends are outside the surface, but the straight line between them is a thin surface)
+			// Across) Defense. CPU SolveSegmentContacts mirror. Adjacent segments share node i+1 → 2 colors (i%2)
+			// Prevent race (barrier for each color). Push the penetration sample out of the surface and distribute it to both end nodes using (1-T):(T). both ends
+			// Skip if pin(invMass 0). SDF is a point query based on the current pose (not sweep, same as CPU Query).
 			[unroll(2)]
 			for (int sgc = 0; sgc < 2; ++sgc)
 			{
 				if (bActiveNode && i < (uint)(N - 1) && (int)(i % 2) == sgc)
 				{
-					// 본체는 파일 상단 — i/i+1 쓰기는 이 2색+배리어가 보호.
+					// The body is at the top of the file — i/i+1 writing is protected by this two-color + barrier.
 					RopeSolveSegmentChord(P, i, N);
 				}
 				GroupMemoryBarrierWithGroupSync();
@@ -891,14 +891,14 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		// for pass (CollisionPasses)
 		}
 
-		// --- Strain limiting: iteration으로 못 잡은 잔여 과신장(긴 체인이 앵커 핀에 매달릴 때 앵커 인접
-		// 세그먼트가 폭주 → 거대 장력·접선 휩 지터)을 substep 끝에 상한 안으로 가둔다. 순차 sweep(전방+후방)이라
-		// thread 0이 groupshared 전체를 직렬 처리(단일 writer=race 없음), 나머지 스레드는 배리어 대기. 앞뒤
-		// 배리어로 세그먼트 chord 결과 가시화 후 처리 + 결과를 write-back/다음 substep 전에 전파. CPU 미러.
-		// 조기 탈출: 스윕 전에 각 스레드가 자기 세그먼트의 초과를 병렬 검사(gStrainAny) — 초과가 하나도 없으면
-		// 직렬 스윕(세그먼트 63×4회의 의존 사슬, 63스레드 대기)을 통째로 스킵한다. 스윕은 초과가 없으면 전부
-		// early-return이라 스킵 결과가 비트 동일하고, 검사 부호(>)도 ClampToward의 통과 부호(<=)와 정확히 상보.
-		// 평시(침전·완만한 드레이프) 대부분의 substep이 이 경로다. 배리어 +1은 직렬 사슬 제거 대비 미미.
+		// --- Strain limiting: Residual overstretch that cannot be controlled by iteration (when a long chain hangs on an anchor pin, the anchor is adjacent to the anchor pin).
+		// Segment runaway → huge tension/tangential whip jitter) is confined in the cap at the end of the substep. Sequential sweep (front + back)
+		// Thread 0 serially processes the entire groupshare (no single writer=race), and the remaining threads wait at the barrier. back and forth
+		// Process after visualizing segment chord results with barrier + write-back/propagate results before next substep. CPU mirror.
+		// Early escape: Before sweep, each thread parallel checks its segment for excess (gStrainAny) — if there is no excess,
+		// Skips the entire serial sweep (segment 63×4 dependency chain, 63 threads waiting). sweep is everything if there is no excess
+		// Because it is an early-return, the skip result is bitwise identical, and the check sign (>) is exactly complementary to ClampToward's pass sign (<=).
+		// In normal times (settlement/gentle drape), most substeps are this path. barrier +1 is insignificant compared to serial chain removal.
 		const bool  bStrainOn = (P.MaxStretchRatio >= 1.0f && P.SegmentLength > 1e-4f);
 		const float StrainMaxLen = P.MaxStretchRatio * P.SegmentLength;
 		if (i == 0) { gStrainAny = 0u; }
@@ -916,7 +916,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		{
 			[loop] for (int sp = 0; sp < 2; ++sp)
 			{
-				// 전방: leader=kf, follower=kf+1 / 후방: leader=kb+1, follower=kb (CPU와 동일 순서).
+				// Forward: leader=kf, follower=kf+1 / Backward: leader=kb+1, follower=kb (same order as CPU).
 				[loop] for (int kf = 0; kf < N - 1; ++kf)    { RopeClampStretchToward(kf, kf + 1, StrainMaxLen); }
 				[loop] for (int kb = N - 2; kb >= 0; --kb)   { RopeClampStretchToward(kb + 1, kb, StrainMaxLen); }
 			}
@@ -924,13 +924,13 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		GroupMemoryBarrierWithGroupSync();
 	}
 
-	// --- write-back (InvMass는 override가 바꾼 질량 마스크를 상주 버퍼에 영속시키기 위해 함께 기록)
+	// --- write-back (InvMass writes the mass mask changed by override together to persist it to the resident buffer)
 	if (bActiveNode)
 	{
 		Positions[P.NodeOffset + i]     = float4(gPos[i], 0.0f);
 		PrevPositions[P.NodeOffset + i] = float4(gPrev[i], 0.0f);
 		InvMass[P.NodeOffset + i]       = gInvMass[i];
-		// 마지막 substep의 세그먼트 λ(슬롯 N-1은 항상 0).
+		// Segment λ of the last substep (slot N-1 is always 0).
 		OutLambdaDist[P.NodeOffset + i] = gLambdaDist[i];
 	}
 }

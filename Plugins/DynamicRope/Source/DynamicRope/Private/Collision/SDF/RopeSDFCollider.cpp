@@ -27,11 +27,11 @@ namespace
 	}
 
 	/**
-	 * 음수 스케일(레벨에서 미러링한 액터) 대응: 로컬 gradient를 월드로 되돌리기 전에 뒤집힌 축의 부호를
-	 * 되돌린다. 위치는 FTransform::InverseTransformPosition이 부호를 그대로 나눠 미러 로컬 좌표를 주므로
-	 * 이미 맞지만, 법선은 회전만 태우면(TransformVectorNoScale) 그 축이 **안쪽**을 향한다 —
-	 * FRopeContact 계약상 Normal은 outward이고 부호가 load-bearing이다(안쪽 법선은 로프를 몸 안으로 빨아들인다).
-	 * 양수 스케일에서는 곱하는 값이 정확히 1.0이라 기존 결과가 비트 불변이다. GPU의 RopeScaleSign 미러.
+	 * For negative scales (mirroring actors in the level): change the sign of the flipped axis before returning the local gradient to the world.
+	 * Revert. For the position, FTransform::InverseTransformPosition divides the sign as is and gives mirror local coordinates.
+	 * This is already true, but if you only rotate the normal (TransformVectorNoScale), its axis will point **inside** —
+	 * In the FRopeContact contract, the normal is outward and the sign is load-bearing (the inward normal draws the rope into the body).
+	 * On a positive scale, the multiplication value is exactly 1.0, so the existing result is bit-invariant. RopeScaleSign mirror on GPU.
 	 */
 	FVector MirrorLocalNormalForScale(const FVector& NLocal, const FTransform& Xform)
 	{
@@ -44,57 +44,57 @@ namespace
 
 FRopeContact FRopeSDFCollider::Query(const FVector& WorldPos, float NodeRadius) const
 {
-	// 점 query(접촉 감지/wrap 경로). solver 충돌은 QuerySwept 사용.
+	// point query(contact detection/wrap path). Solver collision uses QuerySwept.
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSDF_Query);
 	FRopeContact Contact;
 
 	if (!Volume || !Volume->IsBaked())
 	{
-		// 미베이크/무효 볼륨 → 컨택트 없음.
+		// Unbaked/invalid volume → No contact.
 		return Contact;
 	}
 
-	// 월드 → 본 로컬 공간. grid는 본 로컬(스케일 없는 ref 포즈)에 구워져 있다.
+	// world → bone local space. The grid is baked into bone local (scale-Free ref pose).
 	const FVector LocalPos = BoneToWorld.InverseTransformPosition(WorldPos);
 
-	// 로컬(베이크) 거리 ↔ 월드 거리 환산 스케일(#3). SDF 거리는 스케일 없는 로컬 cm인데 NodeRadius/
-	// Penetration/SurfacePoint는 월드 cm다 — 스케일된 메시에서 접촉 밴드/푸시아웃이 스케일 배수만큼 어긋난다.
-	// 균일 스케일 가정(비균일은 최대 성분 근사 — 캡슐 provider의 GetScaledRadius와 정합). 스케일 1이면
-	// LocalNodeRadius==NodeRadius·WorldDist==Dist라 동작 불변.
+	// local (baked) distance ↔ world distance conversion scale (#3). SDF distance is local cm without scale, NodeRadius/
+	// Penetration/SurfacePoint is world cm — in the scaled mesh the contact band/push-out is offset by a multiple of the scale.
+	// Assume uniform scale (non-uniformity matches GetScaledRadius of maximum component approximation — capsule provider). If scale is 1
+	// LocalNodeRadius==NodeRadius·WorldDist==Dist, so the operation is unchanged.
 	const float LocalToWorldScale = FMath::Max(KINDA_SMALL_NUMBER, static_cast<float>(BoneToWorld.GetScale3D().GetAbsMax()));
 	const float LocalNodeRadius = NodeRadius / LocalToWorldScale;
 
-	// 좁은밴드 밖이면(노드 반지름 여유 포함) 빠르게 컬링(월드 반경을 로컬로 환산).
+	// If it is outside the narrow band (including node radius margin), quickly culling (converting world radius to local).
 	if (!Volume->LocalBounds.ExpandBy(LocalNodeRadius).IsInsideOrOn(LocalPos))
 	{
 		return Contact;
 	}
 
-	// signed distance(바깥 +, 로컬 cm). 샘플링은 시각화와 공유하는 단일 진실 공급원(RopeSDFSampler)에 위임한다.
-	// 노드 구체가 표면에 못 미치면 gradient는 계산조차 않고 빠진다(Query는 node×substep×iteration마다 호출).
+	// signed distance(outer +, local cm). Sampling is delegated to a single source of truth (RopeSDFSampler) shared with the visualization.
+	// If the node sphere does not reach the surface, the gradient is dropped without even being calculated (Query is called every node×substep×iteration).
 	const float Dist = RopeSDFSampler::SampleTrilinear(*Volume, LocalPos);
 	if (Dist >= LocalNodeRadius)
 	{
 		return Contact;
 	}
 
-	// 바깥쪽 단위 법선(샘플러가 축퇴 시 +Z로 폴백). 본 로컬 → 월드(스케일 무시, 단위 유지).
+	// Outer unit normal (fallback to +Z when sampler degenerates). bone local → world (ignore scale, maintain units).
 	const FVector NLocal = RopeSDFSampler::SampleGradient(*Volume, LocalPos);
 
 	const float WorldDist = Dist * LocalToWorldScale;
 	Contact.bHit = true;
 	Contact.Normal = BoneToWorld.TransformVectorNoScale(MirrorLocalNormalForScale(NLocal, BoneToWorld))
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
-	// Penetration = query 반지름 기준 겹침 깊이(양수, 월드). SurfacePoint는 표면 위 최근접점(보조/디버그).
+	// Penetration = Overlap depth based on query radius (positive number, world). SurfacePoint is the closest point on the surface (auxiliary/debug).
 	Contact.Penetration = NodeRadius - WorldDist;
 	Contact.SurfacePoint = WorldPos - Contact.Normal * WorldDist;
-	// 본 귀속(접촉 집계의 dominant bone 입력 — 비-None 필수)과 본을 소유한 메시(액터 간 wrap follow).
+	// bone attribution (enter dominant bone in contact aggregation — non-None required) and the mesh that owns the bone (wrap follow between actors).
 	Contact.Bone = Bone;
 	Contact.SourceMesh = SourceMesh;
 
-	// 표면 속도(cm/s): 지금 WorldPos에 있는 본 위의 물질점은 이전 프레임엔 PrevBoneToWorld 기준 같은
-	// 로컬 좌표(LocalPos)에 있었다. (현재 - 이전) / dt 가 그 점의 월드 속도. solver가 상대 접선 속도
-	// 마찰로 로프를 끌어 좌우로 쓸어내는 데 쓴다. InvDeltaTime==0(첫 프레임/정지)이면 0 → 기존 동작.
+	// surface velocity (cm/s): The material point on the bone in WorldPos is the same as the PrevBoneToWorld standard in the previous frame.
+	// was at local coordinates (LocalPos). (current - previous) / dt is the world velocity of that point. The solver's relative tangential velocity
+	// Used to sweep left and right by dragging the rope with friction. If InvDeltaTime==0(first frame/stationary), 0 → existing operation.
 	if (InvDeltaTime > 0.0f)
 	{
 		const FVector PrevWorld = PrevBoneToWorld.TransformPosition(LocalPos);
@@ -129,8 +129,8 @@ FRopeSurfaceProjection FRopeSDFCollider::ProjectToSurface(const FVector& WorldPo
 		return Projection;
 	}
 
-	// Bounds 밖 query는 가장 가까운 grid 경계에서 시작한다. SDF를 따라 몇 차례 이동하면
-	// narrow-band 안쪽의 실제 표면점으로 수렴하고, 이후 원래 query와의 실제 거리를 검사할 수 있다.
+	// Queries outside Bounds start at the nearest grid boundary. After a few trips along the SDF,
+	// You can convergence with the actual surface points inside the narrow-band and then check the actual distance from the original query.
 	constexpr int32 MaxProjectionIterations = 3;
 	constexpr float ProjectionTolerance = 0.05f;
 	for (int32 Iteration = 0; Iteration < MaxProjectionIterations; ++Iteration)
@@ -204,60 +204,60 @@ FRopeSurfaceProjection FRopeSDFCollider::ProjectToSurface(const FVector& WorldPo
 
 FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 {
-	// solver 충돌의 주 비용 지점(정지 로프 + 접촉 시 여기로 몰린다). 호출당 비용 = 포즈 Blend×2 +
-	// 역변환 + 샘플 루프. 아래 RopeSDF_SweptSampleLoop와의 차이가 transform 셋업 비용이다.
+	// Main cost point of solver collision (stationary rope + contact goes here). Cost per call = Pose Blend×2 +
+	// Inversion + sample loop. The difference with RopeSDF_SweptSampleLoop below is the transform setup cost.
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSDF_QuerySwept);
 	FRopeContact Contact;
-	// 기본값(미접촉 시 미정의 사용 방지).
+	// Default value (prevents undefined use when uncontacted).
 	OutHitWorldPos = Q.WorldEnd;
 	if (!Volume || !Volume->IsBaked())
 	{
 		return Contact;
 	}
 
-	// substep sub-포즈는 solver가 콜라이더당 1회 계산해 넘긴다(노드 루프 밖 호이스팅 → 노드마다 Blend 안 함).
-	// 정지 본(bUseSubPose=false)이면 Blend 없이 단일 현재 포즈로 본다 → 서 있는 캐릭터의 대부분 본이 무비용.
+	// substep The sub-pose is calculated and passed by the solver once per collider (hoisting outside the node loop → not blending for each node).
+	// If stationary bone (bUseSubPose=false), it is boned in a single current pose without blending → Most bones of a standing character are cost-Free.
 	const FTransform& PoseStart = Q.bUseSubPose ? Q.SubPoseStart : BoneToWorld;
 	const FTransform& PoseEnd   = Q.bUseSubPose ? Q.SubPoseEnd   : BoneToWorld;
 
-	// 로컬(베이크) 거리 ↔ 월드 환산 스케일(#3). L0/L1은 스케일 없는 본 로컬이고 Q.NodeRadius/Penetration/
-	// SurfacePoint는 월드다. 접촉 프레임(PoseEnd)의 스케일을 쓴다. 균일 스케일 가정(스케일 1이면 동작 불변).
+	// local (baked) distance ↔ world conversion scale (#3). L0/L1 are scale-Free bone local and Q.NodeRadius/Penetration/
+	// SurfacePoint is the world. Use the scale of the contact frame (PoseEnd). Uniform scale assumption (behavior invariant at scale 1).
 	const float LocalToWorldScale = FMath::Max(KINDA_SMALL_NUMBER, static_cast<float>(PoseEnd.GetScale3D().GetAbsMax()));
 	const float LocalNodeRadius = Q.NodeRadius / LocalToWorldScale;
 
-	// 노드 substep 경로를 collider 로컬 상대 프레임으로: 시작은 시작 sub-포즈, 끝은 끝 sub-포즈 기준.
-	// 이 하나의 로컬 세그먼트가 노드 모션 + collider 모션(상대 운동)을 모두 담는다 → 빠른 본이 노드를
-	// 추월해도 로컬에서는 노드가 표면을 가로지르므로 첫 접촉(앞면)에서 잡힌다.
+	// node substep path to collider local relative frame: start is based on the start sub-pose, end is based on the end sub-pose.
+	// This one local segment contains both node motion + collider motion (relative motion) → the fast bone moves the node
+	// Even if it overtakes, it is caught at the first contact (front) because the node crosses the surface locally.
 	const FVector L0 = PoseStart.InverseTransformPosition(Q.WorldStart);
 	const FVector L1 = PoseEnd.InverseTransformPosition(Q.WorldEnd);
 
-	// 상대 변위 기반 샘플 수(정지 로프 + 빠른 본도 충분히 샘플 → 추월 관통 방지).
+	// Number of samples based on relative displacement (stationary rope + fast bond, enough samples → prevention of overtaking penetration).
 	const double RelLen = FVector::Dist(L0, L1);
 	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
 
 	const FBox Band = Volume->LocalBounds.ExpandBy(LocalNodeRadius);
 
-	// 분리(separation): 노드가 표면에 접촉한 채 시작했고(L0 밴드 내·침투) substep 동안 표면 *바깥쪽*으로
-	// 빠져나가는 중이면 재-핀하지 않고 놔준다. 안 그러면 접촉 노드가 매 substep 시작점으로 다시 핀돼 영영
-	// 못 떨어진다(장력이 낮은 끝 노드에서 특히 심함). 접근(L0 밴드 밖)·정지(L1도 침투)는 영향 없음.
+	// Separation: The node starts in contact with the surface (penetration within the L0 band) and moves *outside* the surface during the substep.
+	// If it is exiting, let it go without re-pinning. Otherwise, the contact node will be pinned again to the starting point of every substep.
+	// It cannot fall off (especially severe in end nodes with low tension). Approach (outside the L0 band) and stationary (L1 penetration) are not affected.
 	//
-	// BUGFIX: 끝점 L1만으로 "표면 밖"을 판정하면 *관통*(L0 안쪽 → L1 몸 반대편 바깥)도 분리로 오판한다 —
-	// L1이 반대편 자유공간이라 dist(L1) >= NodeRadius가 되어 sweep을 통째로 건너뛰고 로프가 몸을 그대로
-	// 통과한다(고장력 시 발생). 진짜 분리는 노드가 표면 바깥 법선 방향으로 움직일 때뿐이므로, L0의 바깥
-	// gradient에 대해 상대 변위가 양수인 경우로 한정한다. 안쪽(관통)이면 early-out하지 않고 아래 sweep이
-	// 첫 접촉에서 잡아 표면 밖으로 민다(= 관통 차단).
+	// BUGFIX: If you check "outside the surface" with only the endpoint L1, *penetration* (inside L0 → outside L1 on the other side of the body) is also misjudged as separation —
+	// Since L1 is the Free space on the other side, dist(L1) >= NodeRadius is set, skipping the sweep entirely, and the rope retains the body as is.
+	// Passes (occurs when tension is high). The only real separation is when the node moves in the normal direction outside the surface, so outside of L0.
+	// Limited to cases where the relative displacement to the gradient is positive. If it is inside (through), the sweep below is not done early-out.
+	// Grab it at the first contact and push it out of the surface (= blocking penetration).
 	const bool bStartInContact = Band.IsInsideOrOn(L0) && RopeSDFSampler::SampleTrilinear(*Volume, L0) < LocalNodeRadius;
 	if (bStartInContact)
 	{
 		const bool bEndOutside = !Band.IsInsideOrOn(L1) || RopeSDFSampler::SampleTrilinear(*Volume, L1) >= LocalNodeRadius;
 		if (bEndOutside)
 		{
-			// L0 바깥 법선(gradient)에 대한 상대 변위 부호로 "진짜 분리 vs 관통"을 가른다.
+			// L0 The displacement sign relative to the outer normal (gradient) determines “true separation vs. penetration.”
 			const FVector OutwardLocal = RopeSDFSampler::SampleGradient(*Volume, L0);
 			if (FVector::DotProduct(L1 - L0, OutwardLocal) > 0.0f)
 			{
-				// bHit=false — 바깥으로 이동하는 진짜 분리만 재-핀 생략.
+				// bHit=false — Omit re-pin only true disconnects moving outward.
 				return Contact;
 			}
 		}
@@ -269,31 +269,31 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		const FVector Lp = FMath::Lerp(L0, L1, T);
 		if (!Band.IsInsideOrOn(Lp))
 		{
-			// 좁은밴드(볼륨 + 노드반경) 밖 → 접촉 없음.
+			// Outside narrow band (volume + node radius) → No contact.
 			continue;
 		}
 
 		const float Dist = RopeSDFSampler::SampleTrilinear(*Volume, Lp);
 		if (Dist >= LocalNodeRadius)
 		{
-			// 아직 표면에 못 미침.
+			// Still not up to the surface.
 			continue;
 		}
 
-		// 첫 접촉. 법선/위치는 substep 끝 포즈(노드가 도달하는 현재 프레임) 기준으로 환산한다.
+		// First contact. Normal/position is converted based on the substep end pose (current frame reached by the node).
 		const FVector NLocal = RopeSDFSampler::SampleGradient(*Volume, Lp);
 		const float WorldDist = Dist * LocalToWorldScale;
 		Contact.bHit = true;
 		Contact.Normal = PoseEnd.TransformVectorNoScale(MirrorLocalNormalForScale(NLocal, PoseEnd))
 			.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
 		Contact.Penetration = Q.NodeRadius - WorldDist;
-		// 노드 배치 기준점(현재 포즈 월드).
+		// Node placement reference point (current pose world).
 		OutHitWorldPos = PoseEnd.TransformPosition(Lp);
 		Contact.SurfacePoint = OutHitWorldPos - Contact.Normal * WorldDist;
 		Contact.Bone = Bone;
 		Contact.SourceMesh = SourceMesh;
 
-		// 표면 속도(드래그): 접촉 물질점(Lp)의 prev->curr 프레임 변위 / dt.
+		// surface velocity (drag): prev->curr frame displacement / dt of contact material point (Lp).
 		if (InvDeltaTime > 0.0f)
 		{
 			const FVector WCurr = BoneToWorld.TransformPosition(Lp);
@@ -318,10 +318,10 @@ bool FRopeSDFCollider::GetGPUSDF(FRopeSDFColliderView& OutView) const
 {
 	if (!Volume || !Volume->IsBaked())
 	{
-		// 미베이크/무효 볼륨은 GPU 충돌에서 제외(CPU Query와 동일 가드).
+		// Unbaked/invalid volumes are excluded from GPU collision (same guard as CPU Query).
 		return false;
 	}
-	// 코드 바이트 블롭(소비자가 비대칭 밴드로 dequant).
+	// Code byte blob (consumer dequantized into asymmetric bands).
 	OutView.Distances    = Volume->Distances.GetData();
 	OutView.BytesPerCode = Volume->BytesPerCode();
 	OutView.NarrowBandInner = Volume->NarrowBandInner;
@@ -332,10 +332,10 @@ bool FRopeSDFCollider::GetGPUSDF(FRopeSDFColliderView& OutView) const
 	OutView.LocalMin     = Volume->LocalBounds.Min;
 	OutView.LocalSize    = Volume->LocalBounds.GetSize();
 	OutView.BoneToWorld  = BoneToWorld;
-	// GPU CCD/표면속도 드래그용(CPU QuerySwept와 동일 소스).
+	// For GPU CCD/surfacevelocity dragging (same source as CPU QuerySwept).
 	OutView.PrevBoneToWorld = PrevBoneToWorld;
 	OutView.InvDeltaTime = InvDeltaTime;
-	// 볼륨 안정 식별자(provider가 심음) — GPU SDF 캐시 키. raw 포인터 미사용(언로드 오샘플 방지).
+	// Volume stable identifier (planted by provider) — GPU SDF cache key. No use of raw pointers (to prevent unload errors).
 	OutView.VolumeKey    = VolumeKey;
 	return true;
 }

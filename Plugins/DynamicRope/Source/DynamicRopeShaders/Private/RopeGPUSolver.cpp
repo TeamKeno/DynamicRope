@@ -11,27 +11,27 @@
 #include "RenderingThread.h"
 // FRHICommandListExecutor, CreateShaderResourceView
 #include "RHICommandList.h"
-// TStaticSamplerState (GDF 샘플러) — Phase 2c
+// TStaticSamplerState (GDF sampler) — Phase 2c
 #include "RHIStaticStates.h"
 // FGlobalDistanceFieldParameters2 / _Minimal — Phase 2c
 #include "GlobalDistanceFieldParameters.h"
 // GBlackVolumeTexture / GBlackUintVolumeTexture — Phase 2c
 #include "GlobalRenderResources.h"
-// FSceneView / FViewUniformShaderParameters (GDF 패스 View UB) — Phase 2c
+// FSceneView / FViewUniformShaderParameters (GDF pass View UB) — Phase 2c
 #include "SceneView.h"
 #include "DataDrivenShaderPlatformInfo.h"
 #include "Misc/ScopeLock.h"
-// TRACE_CPUPROFILER_EVENT_SCOPE — 렌더 스레드 dispatch 경로 실측(Unreal Insights CPU 타임라인).
+// TRACE_CPUPROFILER_EVENT_SCOPE — render thread dispatch path ground truth (Unreal Insights CPU timeline).
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/RealtimeGPUProfiler.h"
 #include "Stats/Stats.h"
 
-// 'stat DynamicRopeGPU' RT 타이밍/메모리/대역폭 — 그룹 선언과 분리 이유는 RopeGPUStatGroup.h 참조(런타임 GT
-// 대시보드 'stat DynamicRope'와 별개 그룹). 아래 CYCLE stat은 각 RopeRT_* 스코프(SCOPE_CYCLE_COUNTER)에서 RT
-// 스레드 시간을 잡는다 — GPU 타임라인 시간이 아니라 RT CPU 시간이다. STATS 꺼진 빌드에선 매크로가 자동 no-op.
-// RunSteps=RT 총량, 나머지는 그 하위 분해(PackSDF=SDF 재업로드 병목 지목용 — memory: sdf-global-volume-cache).
-// HUD에는 프레임 예산에 실제로 잡히는 단계만 둔다 — 서브밀리초 부기(EnsureBuffers/Pack Boxes·Convexes·
-// Overrides/Arm Readbacks)는 RopeRT_* Insights 스코프에 그대로 남아 있으니 필요할 때 거기서 본다.
+// 'stat DynamicRopeGPU' RT timing/memory/bandwidth — see RopeGPUStatGroup.h for group declaration and separation reasons (runtime GT
+// Separate group from dashboard 'stat DynamicRope'). The CYCLE stat below shows RT in each RopeRT_* scope (SCOPE_CYCLE_COUNTER)
+// Capture thread time — RT CPU time, not GPU timeline time. In builds where STATS is turned off, the macro is an automatic no-op.
+// RunSteps=RT total volume, the rest is its sub-decomposition (PackSDF=For pointing out SDF reupload bottlenecks — memory: sdf-global-volume-cache).
+// The HUD only has steps that are actually captured in the frame budget — sub-millisecond bookkeeping (EnsureBuffers/Pack Boxes·Convexes·
+// Overrides/Arm Readbacks) remain in the RopeRT_* Insights scope, so you can bone them there when needed.
 #include "RopeGPUStatGroup.h"
 DECLARE_CYCLE_STAT(TEXT("GPU RunSteps (RT total)"), STAT_RopeGPU_RunSteps, STATGROUP_DynamicRopeGPU);
 DECLARE_CYCLE_STAT(TEXT("GPU Pack Capsules"), STAT_RopeGPU_PackCapsules, STATGROUP_DynamicRopeGPU);
@@ -42,49 +42,49 @@ DECLARE_CYCLE_STAT(TEXT("GPU Add Detect Pass"), STAT_RopeGPU_AddDetectPass, STAT
 DECLARE_CYCLE_STAT(TEXT("GPU Graph Execute"), STAT_RopeGPU_GraphExecute, STATGROUP_DynamicRopeGPU);
 DECLARE_CYCLE_STAT(TEXT("GPU Consume Readbacks"), STAT_RopeGPU_ConsumeReadbacks, STATGROUP_DynamicRopeGPU);
 DECLARE_CYCLE_STAT(TEXT("GPU Dispatch Pending"), STAT_RopeGPU_DispatchPending, STATGROUP_DynamicRopeGPU);
-// GPU 상주 VRAM(프레임 간 유지되는 영속 버퍼) — 로프별 Pos/Prev/InvMass/Contact + 전역 SDF 캐시(Dist/Vol).
-// RunSteps 끝에서 GetSize()(바이트) 합산해 SET. 전송 대역폭이 아니라 상주 풋프린트다(SDF는 캐시 크기).
+// GPU resident VRAM (persistent buffer maintained between frames) — Pos/Prev/InvMass/Contact per rope + global SDF cache (Dist/Vol).
+// Add GetSize() (bytes) at the end of RunSteps and set. It's not the transmission bandwidth, it's the resident footprint (SDF is the cache size).
 DECLARE_MEMORY_STAT(TEXT("GPU Mem: Rope Buffers"), STAT_RopeGPU_MemRopes, STATGROUP_DynamicRopeGPU);
 DECLARE_MEMORY_STAT(TEXT("GPU Mem: Global SDF"), STAT_RopeGPU_MemGlobalSDF, STATGROUP_DynamicRopeGPU);
 DECLARE_MEMORY_STAT(TEXT("GPU Mem: Resident Total"), STAT_RopeGPU_MemTotal, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Resident Ropes (count)"), STAT_RopeGPU_ResidentRopeCount, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU SDF Volumes"), STAT_RopeGPU_SDFVolumes, STATGROUP_DynamicRopeGPU);
-// 프레임별 GPU 업로드 대역폭(실제 전송 바이트) — CreateStructuredBuffer 업로드를 RopeUploadBuffer로 감싸 누산.
-// 상주 풋프린트(위 GPU Mem)와 달리 매 프레임 GPU로 올리는 양이다. 분해는 두 축만 남긴다: SDF(=CL389 캐시가
-// 죽으면 매 프레임 MB 단위로 튄다 — 회귀 감시용)와 Colliders(콘텐츠 규모에 비례해 자라는 유일한 축). 나머지
-// (Detect/Override/Seed)는 작고 산발적이라 total에 묻어 둔다.
+// GPU upload bandwidth per frame (actual transfer bytes) — Accumulated by Wrapping CreateStructuredBuffer uploads in a RopeUploadBuffer.
+// Unlike the resident footprint (GPU Mem above), this is the amount raised to the GPU every frame. Decomposition leaves only two axes: SDF (=CL389 cache
+// If you die, it bounces in MB every frame — for regression monitoring) and Colliders (the only axis that grows proportional to the size of the content). the rest
+// (Detect/Override/Seed) is small and sporadic, so it is buried in total.
 DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (total)"), STAT_RopeGPU_UploadTotal, STATGROUP_DynamicRopeGPU);
 DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (SDF Volume)"), STAT_RopeGPU_UploadSDF, STATGROUP_DynamicRopeGPU);
 DECLARE_MEMORY_STAT(TEXT("GPU Upload/Frame (Colliders)"), STAT_RopeGPU_UploadColliders, STATGROUP_DynamicRopeGPU);
-// GPU→CPU 다운로드 대역폭 + 프레임당 컴퓨트 dispatch/substep 수(솔버 작업량).
+// GPU→CPU download bandwidth + per-frame compute dispatch/substep number (solver workload).
 DECLARE_MEMORY_STAT(TEXT("GPU Readback/Frame (download)"), STAT_RopeGPU_ReadbackBytes, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Dispatches/Frame"), STAT_RopeGPU_Dispatches, STATGROUP_DynamicRopeGPU);
 DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Substeps/Frame"), STAT_RopeGPU_Substeps, STATGROUP_DynamicRopeGPU);
 
-// ── GPU 타임라인 stat — 위 CYCLE stat들과 재는 대상이 다르다 ────────────────────────────────────────
-// 위쪽 'GPU *' CYCLE stat은 전부 **RT CPU 시간**(그래프를 짜는 데 든 시간)이다. 아래 두 개는 GPU가 실제로
-// 커널을 돌린 시간으로, 엔진 GPU 그룹에 들어가 'stat gpu' / GPU Visualizer(ProfileGPU) / Insights GPU 트랙에
-// 뜬다 — 이 그룹('stat DynamicRopeGPU')에는 안 나온다. 로프가 프레임 예산에서 몇 ms를 먹는지는 이쪽 숫자다.
+// ── GPU timeline stat — The measurement target is different from the above CYCLE stat ─────────────────────────────────────────
+// The 'GPU *' CYCLE stat at the top is all **RT CPU time** (the time taken to create the graph). The two below are actually GPUs.
+// The time the kernel was run, go to the engine GPU group and go to 'stat gpu' / GPU Visualizer (ProfileGPU) / Insights GPU track.
+// appears — it does not appear in this group ('stat DynamicRopeGPU'). This number shows how many ms rope takes from the frame budget.
 //
-// [매크로 선택 — 버전 계약] UE 5.7은 RHI_NEW_GPU_PROFILER=1이라 구형 RDG_GPU_STAT_SCOPE/SCOPED_GPU_STAT이
-// **조용히 no-op**이 된다(5.8은 아예 deprecated). 반면 RDG_EVENT_SCOPE_STAT(RDG 경로)와
-// RHI_BREADCRUMB_EVENT_STAT(즉시 RHI 경로)은 이 플러그인이 지원하는 5.5~5.8 전 버전에서 stat id를 실어
-// 나른다. 그래서 RopeRHICompat 게이팅 없이 이 두 형태만 쓴다 — 새 GPU 스코프를 넣을 때도 이걸 따르라.
+// [Macro Selection — Version Agreement] UE 5.7 has RHI_NEW_GPU_PROFILER=1 so the older RDG_GPU_STAT_SCOPE/SCOPED_GPU_STAT
+// **Quietly becomes a no-op** (5.8 was completely deprecated). On the other hand, RDG_EVENT_SCOPE_STAT(RDG path) and
+// RHI_BREADCRUMB_EVENT_STAT (immediate RHI path) carries the stat id from versions 5.5 to 5.8 supported by this plugin.
+// Carry. So we only use these two forms without RopeRHICompat gating — follow this when adding a new GPU scope.
 DECLARE_GPU_STAT_NAMED(RopeGPUSolve, TEXT("DynamicRope Solve"));
 DECLARE_GPU_STAT_NAMED(RopeGPUDetect, TEXT("DynamicRope Detect"));
 
-// RT 전용 프레임 업로드 누산기(RunSteps 시작에서 리셋, 끝에서 SET). RunSteps는 프레임당 1회 실행.
+// RT-only frame upload accumulator (Reset at the start of RunSteps, SET at the end). RunSteps runs once per frame.
 #if STATS
-// 프레임 업로드 누산기(RunSteps 시작 리셋, 끝 SET). 카테고리별로 쪼개 MB 총합을 어디가 지배하는지 본다.
+// frame upload accumulator (RunSteps start reset, end SET). Breaking it down by category, it's the bone that dominates the total MB.
 static uint64 GRopeUploadBytesTotal = 0;
-static uint64 GRopeUploadBytesSDF = 0;        // Rope.GlobalSDF* — 복셀 볼륨 재업로드(정상 상태 ~0; 매 프레임 크면 캐시 미작동)
-static uint64 GRopeUploadBytesColliders = 0;  // Capsules/Boxes/Convex/SDFColliders 인스턴스(매 프레임, 콜라이더 수 비례)
-static uint64 GRopeReadbackBytes = 0;         // GPU→CPU 리드백(다운로드) 바이트 — Pos/Prev/Lambda/Contact
-static uint32 GRopeDispatchCount = 0;         // 이번 프레임 컴퓨트 dispatch 수(솔브+감지)
-static uint32 GRopeSubstepSum = 0;            // 이번 프레임 substep 합(솔버 작업량 프록시)
+static uint64 GRopeUploadBytesSDF = 0;        // Rope.GlobalSDF* — Reupload voxel volume (normal state ~0; cache does not work if each frame is large)
+static uint64 GRopeUploadBytesColliders = 0;  // Capsules/Boxes/Convex/SDFColliders instance (every frame, proportional to the number of colliders)
+static uint64 GRopeReadbackBytes = 0;         // GPU→CPU readback (download) bytes — Pos/Prev/Lambda/Contact
+static uint32 GRopeDispatchCount = 0;         // Number of compute dispatches for this frame (solve+detection)
+static uint32 GRopeSubstepSum = 0;            // This frame substep sum (solver workload proxy)
 
-// 버퍼 이름으로 업로드를 카테고리 버킷에 분류. 감시 대상 두 축(SDF/Colliders)만 떼고 나머지(Detect/Override/
-// 시드/Params)는 total에만 남긴다 — 작고 산발적이라 행을 쓸 값어치가 없다.
+// Classifies uploads into category buckets using the buffer name. Remove only the two axes to be monitored (SDF/Colliders) and the rest (Detect/Override/
+// Seed/Params) are only left in total — they are small and sporadic, so it is not worth using the row.
 static void RopeAccumUploadBucket(const TCHAR* Name, uint64 Bytes)
 {
 	GRopeUploadBytesTotal += Bytes;
@@ -100,8 +100,8 @@ static void RopeAccumUploadBucket(const TCHAR* Name, uint64 Bytes)
 }
 #endif
 
-// CreateStructuredBuffer 업로드 래퍼 — 초기데이터 바이트(InitialDataSize = 실제 GPU 전송량)를 카테고리별로
-// 누산하고 엔진 헬퍼로 그대로 포워드한다. 모든 로프 GPU 업로드가 이 한 곳을 지나 프레임 대역폭이 자동 집계된다.
+// CreateStructuredBuffer upload wrapper — Initial data bytes (InitialDataSize = actual GPU transfer amount) by category
+// Accumulate and forward as is to the engine helper. All rope GPU uploads pass through this one place and frame bandwidth is automatically calculated.
 static FRDGBufferRef RopeUploadBuffer(FRDGBuilder& GraphBuilder, const TCHAR* Name, uint32 BytesPerElement,
 	uint32 NumElements, const void* InitialData, uint64 InitialDataSize)
 {
@@ -111,17 +111,17 @@ static FRDGBufferRef RopeUploadBuffer(FRDGBuilder& GraphBuilder, const TCHAR* Na
 	return ::CreateStructuredBuffer(GraphBuilder, Name, BytesPerElement, NumElements, InitialData, InitialDataSize);
 }
 
-// 노드 버킷(스레드그룹 크기 == groupshared/numthreads 크기). 로프 1개 = 스레드그룹 1개, 노드 = 스레드라,
-// 예전엔 모든 로프가 고정 256 그룹을 잡아 노드 수가 적은 로프는 스레드 대부분이 idle(배리어에는 참여)이었다.
-// 이제 NumNodes 이상인 가장 작은 버킷을 골라(퍼뮤테이션) 그 낭비를 없애고, 최상단 512로 지원 노드 상한을
-// 올린다. numthreads(ROPE_THREADS)/groupshared(ROPE_MAX_NODES)는 버킷 값으로 스케일 — 퍼뮤테이션이
-// ROPE_MAX_NODES를 버킷 값으로 설정하고 ModifyCompilationEnvironment가 ROPE_THREADS=버킷을 맞춘다.
-// groupshared 예산: solve 9float/node → 512노드=18KB(<32KB). detect는 groupshared 없음(numthreads만).
+// node bucket (thread group size == groupshared/numthreads size). 1 rope = 1 thread group, node = thread,
+// In the past, all ropes held pinned 256 groups, and most of the threads of ropes with a small number of nodes were idle (participating in the barrier).
+// Now, select the smallest bucket (permutation) that is more than NumNodes, eliminate that waste, and set the support node cap to 512 at the top.
+// Raise. numthreads(ROPE_THREADS)/groupshared(ROPE_MAX_NODES) scale by bucket value — permutation
+// Set ROPE_MAX_NODES to the bucket value and ModifyCompilationEnvironment adjusts ROPE_THREADS=bucket.
+// groupshared budget: solve 9float/node → 512node=18KB (<32KB). Detect no groupshared (numthreads only).
 static constexpr int32 GRopeNodeBuckets[] = { 64, 128, 256, 512 };
 static_assert(GRopeNodeBuckets[UE_ARRAY_COUNT(GRopeNodeBuckets) - 1] == FRopeGPUSolver::MaxNodes,
 	"최상단 노드 버킷이 FRopeGPUSolver::MaxNodes와 일치해야 한다(서브시스템 GPU 후보 게이트가 MaxNodes를 쓴다).");
 
-// NumNodes 이상인 가장 작은 버킷. 없으면(> 상한) 0. 호출부는 MaxNodes 게이트 뒤라 항상 ≥64를 받는다.
+// Smallest bucket with more than NumNodes. If not (> cap) 0. The caller always receives ≥64 after the MaxNodes gate.
 static int32 RopeNodeBucket(int32 NumNodes)
 {
 	for (int32 Bucket : GRopeNodeBuckets)
@@ -131,7 +131,7 @@ static int32 RopeNodeBucket(int32 NumNodes)
 	return 0;
 }
 
-// HLSL FRopeGPUParams(RopeXPBD.usf)와 1:1 미러. 레이아웃 변경 시 .usf 동시 수정. 16바이트 정렬.
+// 1:1 mirror with HLSL FRopeGPUParams (RopeXPBD.usf). Simultaneous modification of .usf when changing layout. 16 byte alignment.
 struct FRopeGPUParamsGPU
 {
 	int32     NodeOffset;
@@ -144,37 +144,37 @@ struct FRopeGPUParamsGPU
 	float     BendCompliance;
 	float     Damping;
 	int32     bStartPinned;
-	// M2: 이 로프의 capsule 글로벌 시작 인덱스
+	// M2: global start index of this rope's capsule
 	int32     CapsuleOffset;
-	// M2: capsule 수(0이면 충돌 없음)
+	// M2: Number of capsules (if 0, no collision)
 	int32     NumCapsules;
-	// M2: 노드 두께
+	// M2: node thickness
 	float     CollisionRadius;
-	// M2: 접선 감쇠
+	// M2: Tangential damping
 	float     Friction;
-	// M2: swept 샘플 간격
+	// M2: swept sample interval
 	float     SweepStep;
-	// M2: 세그먼트당 샘플 상한
+	// M2: sample cap per segment
 	int32     MaxSweepSamples;
-	// M3: 이 로프의 SDF collider 글로벌 시작 인덱스
+	// M3: SDF collider global starting index of this rope
 	int32     SDFColliderOffset;
-	// M3: SDF collider 수(0이면 SDF 충돌 없음)
+	// M3: Number of SDF colliders (if 0, no SDF collision)
 	int32     NumSDFColliders;
-	// 자유단 마찰 배율(고정점=1, 끝=이 값). Pad0 슬롯 재사용.
+	// Free end friction multiplier (pinned point=1, end=this value). Pad0 slot reuse.
 	float     TipFrictionScale = 1.0f;
-	// substep당 충돌 해소 패스 수(Iters로 상한). Pad1 슬롯 재사용.
+	// Number of collision resolution passes per substep (cap in Iters). Reuse Pad1 slot.
 	int32     CollisionPasses = 1;
-	// G0: 이 로프에 노드별 override(타깃/질량 주입)가 있는가.
+	// G0: Is there per-node override (target/mass injection) on this rope?
 	int32     bHasOverrides = 0;
-	// 박스(OBB) 수(0이면 박스 충돌 없음). Pad2 슬롯 재사용.
+	// Number of box(OBB) (if 0, there is no box collision). Pad2 slot reuse.
 	int32     NumBoxes = 0;
-	// 컨벡스(평면 집합) 수(0이면 컨벡스 충돌 없음). Pad3 슬롯 재사용.
+	// Number of convex (plane set) (if 0, no convex collision). Pad3 slot reuse.
 	int32     NumConvexes = 0;
-	// 각도-허용 벤딩: straightness ≤ 이 값이면 펴는 힘 0. Pad4 슬롯 재사용.
+	// Angle-allowed bending: If straightness ≤ this value, straightening force is 0. Reuse Pad4 slot.
 	float     BendReleaseRatio = 0.70f;
-	// straightness ≥ 이 값이면 펴는 힘 100%.
+	// If straightness ≥ this value, the straightening force is 100%.
 	float     BendFullRatio    = 0.92f;
-	// Strain limiting 최대 신장 배율(<1=비활성). Pad5 슬롯 재사용.
+	// Strain limiting Maximum stretch multiplier (<1=disabled). Pad5 slot reuse.
 	float     MaxStretchRatio  = 1.5f;
 	int32     Pad6 = 0;
 	int32     Pad7 = 0;
@@ -184,36 +184,36 @@ struct FRopeGPUParamsGPU
 };
 static_assert(sizeof(FRopeGPUParamsGPU) % 16 == 0, "FRopeGPUParamsGPU must be 16-byte aligned to match HLSL structured buffer.");
 
-// HLSL FRopeCapsule와 1:1 미러. xyz=세그먼트 끝점, B.w=반지름, PrevB.w=InvDeltaTime(0이면 정적).
+// 1:1 mirror with HLSL FRopeCapsule. xyz=segment endpoint, B.w=radius, PrevB.w=InvDeltaTime (static if 0).
 struct FRopeCapsuleGPU
 {
 	FVector4f A;
 	// w = Radius
 	FVector4f B;
-	// 이전 프레임 끝점(표면 속도 드래그/substep 상대 운동). 정적이면 패킹이 A/B로 채운다.
+	// previous frame endpoint (surface velocity drag/substep relative motion). If static, packing is filled with A/B.
 	FVector4f PrevA;
 	// w = InvDeltaTime
 	FVector4f PrevB;
 };
 static_assert(sizeof(FRopeCapsuleGPU) % 16 == 0, "FRopeCapsuleGPU must be 16-byte aligned to match HLSL structured buffer.");
 
-// HLSL FRopeBox와 1:1 미러. 박스(OBB): 월드 center + quat + 반폭 + 이전 프레임 center/rot(동적 표면 속도).
+// 1:1 mirror with HLSL FRopeBox. box(OBB): world center + quat + half width + previous frame center/rot(dynamic surface velocity).
 struct FRopeBoxGPU
 {
-	// xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
+	// xyz, w = InvDeltaTime(1/framedt; static if 0)
 	FVector4f Center;
 	// quat (x,y,z,w)
 	FVector4f Rot;
 	// xyz
 	FVector4f HalfExtents;
-	// xyz — 이전 프레임 중심(정적이면 패킹이 Center로 채움)
+	// xyz — Center of previous frame (if static, packing is filled with Center)
 	FVector4f PrevCenter;
-	// quat — 이전 프레임 회전
+	// quat — rotate previous frame
 	FVector4f PrevRot;
 };
 static_assert(sizeof(FRopeBoxGPU) % 16 == 0, "FRopeBoxGPU must be 16-byte aligned to match HLSL structured buffer.");
 
-// HLSL FRopeConvex와 1:1 미러. 평면 풀 오프셋/개수 + 로컬 AABB + 강체(curr/prev). 평면은 ConvexPlanes(로컬)에 별도.
+// 1:1 mirror with HLSL FRopeConvex. Flat full offset/count + local AABB + rigid body(curr/prev). Planes are separate in ConvexPlanes(local).
 struct FRopeConvexGPU
 {
 	int32     PlaneOffset;
@@ -235,7 +235,7 @@ struct FRopeConvexGPU
 };
 static_assert(sizeof(FRopeConvexGPU) % 16 == 0, "FRopeConvexGPU must be 16-byte aligned to match HLSL structured buffer.");
 
-// HLSL FRopeSDFVolume와 1:1 미러. 본 로컬 grid 헤더(distance는 SDFDistances 버퍼에 DistOffset부터).
+// 1:1 mirror with HLSL FRopeSDFVolume. bone local grid header (distance from DistOffset in SDFDistances buffer).
 struct FRopeSDFVolumeGPU
 {
 	int32     DistOffset;
@@ -249,22 +249,22 @@ struct FRopeSDFVolumeGPU
 };
 static_assert(sizeof(FRopeSDFVolumeGPU) % 16 == 0, "FRopeSDFVolumeGPU must be 16-byte aligned to match HLSL structured buffer.");
 
-// HLSL FRopeSDFCollider와 1:1 미러. 볼륨 인덱스 + 본→월드 트랜스폼(quat/trans/scale, 행렬 레이아웃 회피).
+// 1:1 mirror with HLSL FRopeSDFCollider. Volume index + bone → world transform (quat/trans/scale, avoiding matrix layout).
 struct FRopeSDFColliderGPU
 {
 	int32     VolumeIndex;
 	int32     Pad0 = 0;
 	int32     Pad1 = 0;
 	int32     Pad2 = 0;
-	// quat (x,y,z,w) — 현재 프레임
+	// quat (x,y,z,w) — current frame
 	FVector4f Rotation;
 	// xyz
 	FVector4f Translation;
 	// xyz
 	FVector4f Scale;
-	// quat (x,y,z,w) — 이전 프레임(CCD 상대 운동/표면속도용)
+	// quat (x,y,z,w) — previous frame (for CCD relative motion/surfacevelocity)
 	FVector4f PrevRotation;
-	// xyz, w = InvDeltaTime(1/프레임dt; 0이면 정적)
+	// xyz, w = InvDeltaTime(1/framedt; static if 0)
 	FVector4f PrevTranslation;
 };
 static_assert(sizeof(FRopeSDFColliderGPU) % 16 == 0, "FRopeSDFColliderGPU must be 16-byte aligned to match HLSL structured buffer.");
@@ -275,10 +275,10 @@ public:
 	DECLARE_GLOBAL_SHADER(FRopeXPBDSolveCS);
 	SHADER_USE_PARAMETER_STRUCT(FRopeXPBDSolveCS, FGlobalShader);
 
-	// 노드 버킷 = numthreads/groupshared 크기. 값이 곧 ROPE_MAX_NODES define으로 .usf에 전달된다.
+	// node bucket = numthreads/groupshared size. The value is soon passed to .usf as ROPE_MAX_NODES define.
 	class FNodeBucket : SHADER_PERMUTATION_SPARSE_INT("ROPE_MAX_NODES", 64, 128, 256, 512);
-	// GDF 월드 충돌을 substep 제약으로 통합하는 permutation. on일 때만 GDF 헤더 include + View/GDF 바인딩.
-	// off(기본, View 없는 Step 경로 겸용)는 GDF 미참조 → View 없이 기존대로 컴파일된다.
+	// A permutation that incorporates GDF world collision as a substep constraint. GDF header include + View/GDF binding only when on.
+	// off (default, step path without view) does not reference GDF → is compiled as before without view.
 	class FGDFDim : SHADER_PERMUTATION_BOOL("ROPE_USE_GDF");
 	using FPermutationDomain = TShaderPermutationDomain<FNodeBucket, FGDFDim>;
 
@@ -289,23 +289,23 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SDFDistances)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFVolume>, SDFVolumes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
-		// 박스 solve 입력. 감지 CS는 별도 파라미터 구조에서 같은 버퍼 형식을 사용한다.
+		// box solve. detection CS uses the same buffer format in a separate parameter structure.
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeBox>, Boxes)
-		// 컨벡스 — solve 전용.
+		// convex — solve only.
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeConvex>, Convexes)
-		// 컨벡스 평면 평탄 풀.
+		// convex plane flat pool.
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConvexPlanes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, OverrideFlags)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, OverridePositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, OverridePrevPositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, OverrideInvMass)
-		// G0: override가 질량 마스크를 영속시키므로 RW.
+		// G0: RW because override persists mass mask.
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, InvMass)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, Positions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, PrevPositions)
-		// 장력 리드백(마지막 substep 세그먼트 λ).
+		// tension readback (last substep segment λ).
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, OutLambdaDist)
-		// --- GDF 통합 경로(FGDFDim on일 때만 셰이더가 참조; off면 미사용 → 언바운드 허용).
+		// --- GDF integration path (only referenced by shader when FGDFDim on; unused when off → unbound allowed).
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FGlobalDistanceFieldParameters2, GDF)
 		SHADER_PARAMETER(FVector3f, GDFPreViewTranslation)
@@ -320,39 +320,39 @@ public:
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
 		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		// ROPE_MAX_NODES(groupshared)는 FNodeBucket 차원이 자동 설정. ROPE_THREADS(numthreads)를 같은 버킷으로 맞춘다.
+		// ROPE_MAX_NODES(groupshared) automatically sets the FNodeBucket dimension. Set ROPE_THREADS(numthreads) to the same bucket.
 		const FPermutationDomain PermutationVector(Parameters.PermutationId);
 		OutEnvironment.SetDefine(TEXT("ROPE_THREADS"), PermutationVector.Get<FNodeBucket>());
 	}
 };
 
-// 파일은 Shaders/Private/RopeXPBD.usf, 가상경로는 /Plugin/DynamicRope -> Shaders 이므로 /Private/ 포함.
+// The file is Shaders/Private/RopeXPBD.usf, and the virtual path is /Plugin/DynamicRope -> Shaders, so /Private/ is included.
 IMPLEMENT_GLOBAL_SHADER(FRopeXPBDSolveCS, "/Plugin/DynamicRope/Private/RopeXPBD.usf", "RopeXPBDSolveCS", SF_Compute);
 
-// HLSL FRopeGPUContact(RopeXPBD.usf)와 1:1 미러. 노드당 2슬롯(actual/predictive). 16바이트 정렬.
-// Penetration은 WorldPoint.W에 팩(정렬 유지).
+// 1:1 mirror with HLSL FRopeGPUContact (RopeXPBD.usf). 2 slots per node (actual/predictive). 16 byte alignment.
+// Penetration packs into WorldPoint.W (maintains alignment).
 struct FRopeGPUContactGPU
 {
 	int32     bHit;
 	int32     ColliderType;
 	int32     ColliderIndex;
 	int32     Source;
-	// xyz 접촉점, w Penetration
+	// xyz contact point, w Penetration
 	FVector4f WorldPoint;
 	FVector4f Normal;
 	FVector4f SurfaceVel;
 };
 static_assert(sizeof(FRopeGPUContactGPU) % 16 == 0, "FRopeGPUContactGPU must be 16-byte aligned to match HLSL structured buffer.");
 
-// 접촉 감지 컴퓨트(G3). 솔브 후 상주 위치를 스윕해 노드당 최심 접촉을 OutContacts에 기록한다.
-// 별도 파일(RopeContactDetect.usf) — 솔브 셰이더와는 콜라이더 모델/질의(RopeColliderCommon.ush)만 공유한다.
+// contact detection compute (G3). After solving, sweep the resident location and record the deepest contact per node in OutContacts.
+// Separate file (RopeContactDetect.usf) — Only the collider model/query (RopeColliderCommon.ush) is shared with the solve shader.
 class FRopeContactDetectCS : public FGlobalShader
 {
 public:
 	DECLARE_GLOBAL_SHADER(FRopeContactDetectCS);
 	SHADER_USE_PARAMETER_STRUCT(FRopeContactDetectCS, FGlobalShader);
 
-	// 노드 버킷 = numthreads 크기(감지 커널은 groupshared 없음 — numthreads만 스케일). 솔브와 동일 버킷 집합.
+	// node bucket = size numthreads (detection kernel is not groupshared — only scales numthreads). Same bucket set as solve.
 	class FNodeBucket : SHADER_PERMUTATION_SPARSE_INT("ROPE_MAX_NODES", 64, 128, 256, 512);
 	using FPermutationDomain = TShaderPermutationDomain<FNodeBucket>;
 
@@ -373,9 +373,9 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SDFDistances)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFVolume>, SDFVolumes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeSDFCollider>, SDFColliders)
-		// 랩 가능 박스 감지(정적 박스는 NumDetectBoxes로 자름).
+		// wrapable box detection (static boxes are truncated with NumDetectBoxes).
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeBox>, Boxes)
-		// 랩 가능 convex 감지(정적 convex는 DetectNumConvexes로 자름).
+		// wrapable convex detection (static convex truncated by DetectNumConvexes).
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRopeConvex>, Convexes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConvexPlanes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DetectPositions)
@@ -395,7 +395,7 @@ public:
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
 		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		// ROPE_MAX_NODES는 FNodeBucket 차원이 자동 설정. ROPE_THREADS(numthreads)를 같은 버킷으로 맞춘다.
+		// ROPE_MAX_NODES is automatically set to FNodeBucket dimension. Set ROPE_THREADS(numthreads) to the same bucket.
 		const FPermutationDomain PermutationVector(Parameters.PermutationId);
 		OutEnvironment.SetDefine(TEXT("ROPE_THREADS"), PermutationVector.Get<FNodeBucket>());
 	}
@@ -404,113 +404,113 @@ public:
 IMPLEMENT_GLOBAL_SHADER(FRopeContactDetectCS, "/Plugin/DynamicRope/Private/RopeContactDetect.usf", "RopeContactDetectCS", SF_Compute);
 
 // ---------------------------------------------------------------------------------------------------
-// 상주 상태 정의
+// Resident State Definitions
 // ---------------------------------------------------------------------------------------------------
 
-// 렌더 스레드 전용. 로프 1개의 영속 GPU 버퍼 + 리드백(단일 in-flight, consume 후 재무장).
+// render thread only. rope 1 persistent GPU buffer + readback (single in-Flight, consume and then rearm).
 struct FRopeResidentRope
 {
 	TRefCountPtr<FRDGPooledBuffer> PosBuf;
 	TRefCountPtr<FRDGPooledBuffer> PrevBuf;
 	TRefCountPtr<FRDGPooledBuffer> InvMassBuf;
 	int32  NumNodes = 0;
-	// 마지막으로 시드한 generation(다르면 재시드)
+	// Last seeded generation (reseeded if different)
 	uint32 Generation = 0xFFFFFFFFu;
-	// GDF permutation 선택(뷰 확장 경로에서 solve-substep GDF 충돌)에 쓰는 플래그. 충돌 파라미터(반경/마찰)는
-	// Params 버퍼(FRopeGPUParams)로 솔브 CS에 직접 전달하므로 여기 상주할 필요 없음.
+	// Flag used for GDF permutation selection (solve-substep GDF collision in view expansion path). The collision parameter (radius/friction) is
+	// It is passed directly to solve CS as a Params buffer (FRopeGPUParams), so it does not need to reside here.
 	bool  bUseWorldGDF = false;
 	FRHIGPUBufferReadback* PosReadback = nullptr;
 	FRHIGPUBufferReadback* PrevReadback = nullptr;
-	// 리드백 copy가 enqueue되어 결과 대기 중인가.
+	// Is the readback copy enqueued and waiting for the result?
 	bool bReadbackArmed = false;
 
-	// 장력(λ) 리드백: 솔브(NumSub>0) 프레임에만 무장(override-only 프레임의 0을 안 내보내 직전 값 유지).
-	// LambdaFixedDt = 무장 당시 substep dt — consume 시 F = max(0,-λ)/h² 변환에 쓴다.
+	// tension(λ) readback: solve(NumSub>0) Armed only in the frame (does not emit 0 in the override-only frame and maintains the previous value).
+	// LambdaFixedDt = substep dt at the time of arming — used for F = max(0,-λ)/h² conversion when consumed.
 	FRHIGPUBufferReadback* LambdaReadback = nullptr;
 	bool  bLambdaArmed = false;
 	float LambdaFixedDt = 0.0f;
-	// M5b: PosBuf StructuredBuffer<float4> SRV(렌더용). 재시드 시 무효화.
+	// M5b: PosBuf StructuredBuffer<float4> SRV (for render). Invalidated when reseeding.
 	FShaderResourceViewRHIRef PosSRV;
 
-	// (SDF 볼륨 그리드/헤더 resident는 per-rope에서 전역 FRopeGlobalSDFCache로 이동 — VolumeKey당 1회 상주.
-	//  로프는 인스턴스(본 트랜스폼) 배열만 매 프레임 올린다. 전역화로 로프별 중복 업로드/집합 churn 재업로드 제거.)
+	// (SDF volume grid/header resident moved from per-rope to global FRopeGlobalSDFCache — resident once per VolumeKey.
+	//  rope only uploads the instance (bone transform) array every frame. Globalization eliminates duplicate upload/collection churn re-upload for each rope.)
 
-	// 접촉 감지(G3): 노드당 actual/predictive 2슬롯 출력 버퍼(resident, 노드 수가 변할 때만 재생성) + 리드백.
+	// contact detection (G3): actual/predictive 2 slot output per node buffer (resident, regenerated only when the number of nodes changes) + readback.
 	TRefCountPtr<FRDGPooledBuffer> ContactBuf;
 	FRHIGPUBufferReadback* ContactReadback = nullptr;
-	// 접촉 리드백을 무장한 dispatch의 귀속 서명 — 소비 시 결과에 실어 보낸다(오귀속 판정의 근거).
+	// Attribution signature of dispatch armed with contact readback — sent in results upon consumption (basis for attribution check).
 	uint32 ContactAttribSig = 0;
 	bool bContactArmed = false;
 };
 
-// GT<->RT 공유 결과. RT가 채우고 GT GetLatest가 락 하에 읽는다.
+// GT<->RT shared results. RT fills and GT GetLatest reads under lock.
 struct FRopeResidentSharedResults
 {
 	FCriticalSection Lock;
 	TMap<uint32, FRopeResidentLatest> Map;
-	// G3: 접촉 감지 결과(GetLatestContacts).
+	// G3: contact detection result (GetLatestContacts).
 	TMap<uint32, FRopeResidentContacts> Contacts;
-	// 소비되지 못하고 교체된 pending step의 시뮬 시간(초). RT가 쌓고 GT가 DrainDroppedSimTime으로 비운다.
+	// Simulation time (seconds) of the pending step that could not be consumed and was replaced. RT stacks and GT drains with DrainDroppedSimTime.
 	TMap<uint32, float> DroppedSimTime;
-	// wrap 핸드오프 동기 리드백의 마지막 권위 스냅샷. ReadbackNow는 앞선 pending step까지 RT에서
-	// 소비한 뒤 이 맵과 Map을 함께 승격한다. 프레임 캐시는 같은 프레임의 새 pending step을 가릴 수 있어
-	// 사용하지 않는다(핸드오프는 드문 이벤트이고 정확성이 우선).
+	// wrap Last authoritative snapshot of handoff synchronous readback. ReadbackNow starts from RT to the previous pending step.
+	// After consumption, this map and Map are promoted together. The frame cache can obscure new pending steps in the same frame.
+	// Do not use (handoff is a rare event and accuracy is a priority).
 	TMap<uint32, FRopeResidentLatest> HandoffSnapshots;
 };
 
-// 전역 SDF 볼륨 캐시(RT 전용). 베이크된 복셀 데이터는 VolumeKey당 정적이라, 로프/프레임 무관하게 딱 한 번만
-// dequant+업로드해 상주시킨다. 로프의 근접 볼륨 집합이 프레임마다 흔들려도(드래곤: 콜라이더 무상한+mesh 단위
-// 브로드페이즈) distance 재업로드가 0이 된다 — 로프는 매 프레임 인스턴스(본 트랜스폼) 배열만 올린다. 인덱스/
-// 오프셋은 프레임 내에서 안정적이라 기존 참조가 안 깨진다(신규 볼륨은 append). 무한 성장은 generational
-// 재빌드로 막는다 — 오래 미참조 볼륨이 쌓이면 캐시를 live 집합만으로 압축 재구성한다(인스턴스 배열은 매
-// 프레임 KeyToIndex 재조회라 인덱스 재배치 안전; 압축은 캐시된 CpuDist 슬라이스 복사라 소스 재-dequant 불필요).
+// global SDF volume cache (RT only). Baked voxel data is static per VolumeKey, so it is used only once regardless of rope/frame.
+// dequant+Upload and reside. Even if the rope's close volume set shakes every frame (Dragon: collider no cap+mesh unit
+// broad phase) distance reupload becomes 0 — rope only uploads the array of instances (bone transform) every frame. index/
+// The offset is not static within the frame, so existing references are not broken (new volumes are appended). Infinite growth is generational
+// Prevent with rebuild — If unreferenced volumes accumulate for a long time, the cache is compressed and rebuilt with only the live set (the instance array is
+// frame KeyToIndex recheck index relocation safe; Compression is a copy of the cached CpuDist slice, so source re-dequant is not required).
 struct FRopeGlobalSDFCache
 {
-	// VolumeKey(안정 식별자) -> 전역 볼륨 인덱스(= SDFVolumes 인덱스; 헤더가 CpuDist 오프셋을 가짐).
+	// VolumeKey (stable identifier) ​​-> global volume index (= SDFVolumes index; header has CpuDist offset).
 	TMap<uint64, int32> KeyToIndex;
-	// VolumeKey -> 마지막으로 참조된 RT 프레임(재빌드 축출 판정용). KeyToIndex와 같은 키 집합.
+	// VolumeKey -> Last referenced RT frame (for rebuild eviction check). A set of keys, such as KeyToIndex.
 	TMap<uint64, uint64> KeyLastUsedFrame;
-	// CPU 원본(연결된 dequant float + 헤더). 신규 볼륨 append / 재빌드 시 live만 남기고 압축.
+	// CPU source (concatenated dequant float + header). When appending/rebuilding a new volume, it is compressed leaving only the live.
 	TArray<float>             CpuDist;
 	TArray<FRopeSDFVolumeGPU> CpuVol;
-	// 상주 GPU 버퍼(external, 프레임 간 유지). dirty(신규 append 또는 재빌드)일 때만 재생성+업로드.
+	// Resident GPU buffer (external, maintained between frames). Recreate+upload only when dirty (new append or rebuild).
 	TRefCountPtr<FRDGPooledBuffer> DistBuf;
 	TRefCountPtr<FRDGPooledBuffer> VolBuf;
 	bool bDirty = false;
-	// RT 프레임 카운터(Ensure가 프레임당 1회 증가). KeyLastUsedFrame 스탬프/축출 판정의 시계.
+	// RT frame counter (Ensure increases by 1 time per frame). KeyLastUsedFrame stamp/eviction check's clock.
 	uint64 FrameCounter = 0;
 };
 
-// pimpl: 영속 버퍼 맵(RT 전용) + 공유 결과(GT<->RT). RDG/RHI 타입을 헤더에서 숨긴다.
+// pimpl: persistent buffer map (RT only) + shared result (GT<->RT). Hide the RDG/RHI type from the header.
 struct FRopeGPUSolver::FImpl
 {
-	// 렌더 스레드에서만 접근.
+	// Accessed only on the render thread.
 	TMap<uint32, FRopeResidentRope>                          RtRopes;
 	TSharedRef<FRopeResidentSharedResults, ESPMode::ThreadSafe> Results
 		= MakeShared<FRopeResidentSharedResults, ESPMode::ThreadSafe>();
 
-	// 전역 SDF 볼륨 상주(모든 로프 공유 — RopeEnsureGlobalSDFVolumes가 프레임당 1회 갱신).
+	// Global SDF volume resident (shared by all ropes — RopeEnsureGlobalSDFVolumes are updated once per-frame).
 	FRopeGlobalSDFCache GlobalSDF;
 
-	// GDF 경로(EnqueueSteps)로 쌓인 이번 프레임 step들. 뷰 확장이 DispatchPending_RenderThread에서 소비. RT 전용.
+	// This frame steps accumulated as GDF path (EnqueueSteps). View extension consumes on DispatchPending_RenderThread. RT only.
 	TArray<FRopeGPUResidentStep> PendingSteps;
-	// ReadbackNow가 View/GDF 없이 실행할 수 없어 보류한 로프. 다음 씬 dispatch 전까지 다른 로프의
-	// EnqueueSteps 교체 시맨틱이 해당 step을 버리지 않도록 보호한다.
+	// rope held because ReadbackNow cannot run without View/GDF. of other ropes until the next scene is dispatched.
+	// EnqueueSteps replacement semantics protect the step from being discarded.
 	TSet<uint32> HandoffGDFBlockedRopes;
 };
 
 bool RopeGPU::IsRuntimeSupported()
 {
-	// 커널이 SM5 가드로만 컴파일되므로(각 CS의 ShouldCompilePermutation) 그 아래 feature level에서는
-	// 퍼뮤테이션 자체가 없다 — RHI 유무만 보던 종전 판정은 모바일에서 없는 셰이더를 요청하게 했다.
-	// 판정 근거와 자세한 배경은 RopeGPUSolver.h 선언부 주석 참고.
+	// Since the kernel is compiled only with SM5 guard (ShouldCompilePermutation of each CS), the feature level below it is
+	// There is no permutation itself — the previous check, which only looked at the presence or absence of RHI, required a shader that was not present on mobile.
+	// For check basis and detailed background, refer to the comments in the RopeGPUSolver.h declaration.
 	if (GDynamicRHI == nullptr || !FApp::CanEverRender())
 	{
 		return false;
 	}
 	if (GMaxRHIFeatureLevel < ERHIFeatureLevel::SM5)
 	{
-		// 조용한 CPU 폴백은 성능 이상으로 오해되기 쉬우므로 런타임에 1회 알린다.
+		// Since quiet CPU fallback can easily be misunderstood as a performance issue, it is notified once at runtime.
 		static bool bWarned = false;
 		if (!bWarned)
 		{
@@ -531,7 +531,7 @@ FRopeGPUSolver::FRopeGPUSolver()
 
 FRopeGPUSolver::~FRopeGPUSolver()
 {
-	// 상주 버퍼/리드백을 만지기 전에 in-flight 렌더 커맨드를 모두 drain → 이후 GT에서 직접 정리 OK.
+	// Drain all in-Flight render commands before touching the resident buffer/readback → Clean up directly in GT afterwards. OK.
 	FlushRenderingCommands();
 	ReleaseAll_RenderThread();
 }
@@ -546,16 +546,16 @@ void FRopeGPUSolver::ReleaseAll_RenderThread()
 		delete Pair.Value.ContactReadback;  Pair.Value.ContactReadback = nullptr;
 	}
 	Impl->RtRopes.Empty();
-	// 소비되지 않은 step도 함께 버린다 — 남으면 다음 dispatch가 방금 비운 상주 맵을 되살린다.
+	// Any unconsumed steps are also discarded — if any, the next dispatch revives the resident map that was just emptied.
 	Impl->PendingSteps.Reset();
 	Impl->HandoffGDFBlockedRopes.Reset();
-	// 전역 SDF 상주 버퍼/캐시 해제(TRefCountPtr auto-release).
+	// global SDF resident buffer/cache release (TRefCountPtr auto-release).
 	Impl->GlobalSDF = FRopeGlobalSDFCache{};
 }
 
 void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 {
-	// 공유 결과는 GT에서 즉시 제거.
+	// Shared results are immediately removed from GT.
 	{
 		FScopeLock SL(&Impl->Results->Lock);
 		Impl->Results->Map.Remove(RopeId);
@@ -563,15 +563,15 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 		Impl->Results->DroppedSimTime.Remove(RopeId);
 		Impl->Results->HandoffSnapshots.Remove(RopeId);
 	}
-	// 영속 버퍼/리드백은 렌더 스레드에서 해제(this 캡처 — destructor가 flush하므로 수명 안전).
+	// Free persistent buffer/readback on render thread (capture this — destructor flushes, so lifetime safe).
 	ENQUEUE_RENDER_COMMAND(RopeGPUReleaseRope)(
 		[this, RopeId](FRHICommandListImmediate&)
 		{
-			// 아직 소비되지 않은 pending step부터 걷어낸다. 남겨두면 뒤이은 뷰 확장 dispatch가
-			// RunSteps_RenderThread의 FindOrAdd로 방금 지운 RopeId를 **되살려** 상주 버퍼/리드백을 다시
-			// 만들고, 그 로프를 해제해 줄 주체는 이미 사라진 뒤라 월드 종료까지 VRAM에 남는다.
-			// (EnqueueSteps는 교체 시맨틱이라 "다음 프레임이면 어차피 사라진다"가 성립하지 않는다 —
-			// 씬 렌더가 없는 프레임에는 교체도 일어나지 않는다.)
+			// Removes pending steps that have not yet been consumed. If left, the subsequent view expansion dispatch will occur.
+			// **Revive** the RopeId just cleared with FindOrAdd in RunSteps_RenderThread and re-create the resident buffer/readback.
+			// The subject who created and released the rope has already disappeared, so it remains in VRAM until the end of the world.
+			// (EnqueueSteps has replacement semantics, so “it disappears anyway in the next frame” does not hold —
+			// Replacement does not occur in frames where there is no scene render.)
 			Impl->PendingSteps.RemoveAll(
 				[RopeId](const FRopeGPUResidentStep& Step) { return Step.RopeId == RopeId; });
 			Impl->HandoffGDFBlockedRopes.Remove(RopeId);
@@ -590,7 +590,7 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 void FRopeGPUSolver::DrainDroppedSimTime(TMap<uint32, float>& Out)
 {
 	FScopeLock SL(&Impl->Results->Lock);
-	// 회수는 1회성이다(같은 시간을 두 번 돌려주면 오히려 앞서 나간다) — 옮기고 비운다.
+	// Retrieval is a one-time use (if you do the same amount of time twice, you'll get ahead) — move and empty.
 	Out = MoveTemp(Impl->Results->DroppedSimTime);
 	Impl->Results->DroppedSimTime.Reset();
 }
@@ -598,23 +598,23 @@ void FRopeGPUSolver::DrainDroppedSimTime(TMap<uint32, float>& Out)
 void FRopeGPUSolver::GetLatest(TMap<uint32, FRopeResidentLatest>& Out)
 {
 	FScopeLock SL(&Impl->Results->Lock);
-	// 작은 데이터 — 매 프레임 복사. (스왑 대신 복사로 호출자가 누적분 유지)
+	// Small data — copy every frame. (The caller maintains the accumulated amount by copying instead of swapping)
 	Out = Impl->Results->Map;
 }
 
 void FRopeGPUSolver::GetLatestContacts(TMap<uint32, FRopeResidentContacts>& Out)
 {
 	FScopeLock SL(&Impl->Results->Lock);
-	// 노드당 actual/predictive 최대 2건이라 작다 — 매 프레임 복사.
+	// Maximum actual/predictive per node is 2, so it is small — copied every frame.
 	Out = Impl->Results->Contacts;
 }
 
 bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, TArray<FVector>& OutPrevPositions, uint32& OutGeneration)
 {
-	// GT 블로킹(M5c): EnqueueSteps는 RT pending 큐만 채우므로 단순 resident copy는 바로 앞 Flight
-	// step보다 오래된 pose를 반환할 수 있다. RT command ordering을 이용해 이 RopeId의 non-GDF pending
-	// step을 먼저 전용 그래프에서 실행하고, 그 결과를 같은 command에서 copy/readback한다.
-	// GDF step은 유효한 Scene View/GDF가 필요한 관계로 여기서 lean permutation으로 실행하지 않고 보류한다.
+	// GT blocking (M5c): EnqueueSteps only fills the RT pending queue, so a simple resident copy is performed on the immediately preceding Flight.
+	// can return a pose older than the step. Non-GDF pending of this RopeId using RT command ordering
+	// Execute the step first in the dedicated graph, and copy/readback the results in the same command.
+	// Because the GDF step requires a valid Scene View/GDF, it is not executed with lean permutation here but is suspended.
 	struct FImmediateReadbackResult
 	{
 		bool bSuccess = false;
@@ -634,7 +634,7 @@ bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, T
 			{
 				if (Impl->PendingSteps[PendingIndex].bUseWorldGDF)
 				{
-					// 다음 씬 graph dispatch가 소비할 때까지 EnqueueSteps의 전역 교체에서 보호한다.
+					// Protects from global replacement of EnqueueSteps until consumed by the next scene graph dispatch.
 					Impl->HandoffGDFBlockedRopes.Add(RopeId);
 					FScopeLock SL(&Impl->Results->Lock);
 					Impl->Results->HandoffSnapshots.Remove(RopeId);
@@ -664,7 +664,7 @@ bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, T
 			TUniquePtr<FRHIGPUBufferReadback> PrevRb =
 				MakeUnique<FRHIGPUBufferReadback>(TEXT("Rope.PrevReadbackNow"));
 			{
-				// SolveGraph가 외부 버퍼로 확정한 뒤 새 그래프에서 register/copy한다.
+				// SolveGraph confirms it as an external buffer and registers/copies it in a new graph.
 				FRDGBuilder CopyGraph(RHICmdList);
 				AddEnqueueCopyPass(CopyGraph, PosRb.Get(), CopyGraph.RegisterExternalBuffer(Resident->PosBuf), NodeBytes);
 				AddEnqueueCopyPass(CopyGraph, PrevRb.Get(), CopyGraph.RegisterExternalBuffer(Resident->PrevBuf), NodeBytes);
@@ -694,9 +694,9 @@ bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, T
 			PosRb->Unlock();
 			PrevRb->Unlock();
 
-			// RunSteps가 기존 async copy를 consume하지 못했거나 새 copy를 재무장했더라도, 위 idle 뒤에는
-			// 전부 안전하게 drain할 수 있다. 플래그를 남기면 다음 step이 이 authoritative snapshot보다
-			// 오래된 pose/contact를 Results에 다시 승격할 수 있다.
+			// Even if RunSteps failed to consume the existing async copy or rearmed a new copy, after the above idle
+			// All can be drained safely. If you leave a flag, the next step will be faster than this authoritative snapshot.
+			// You can promote old poses/contacts back to Results.
 			auto DrainReadback = [](FRHIGPUBufferReadback* Readback, uint32 Bytes)
 			{
 				if (Readback && Readback->IsReady())
@@ -734,7 +734,7 @@ bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, T
 						Snapshot.SegmentTension = Existing->SegmentTension;
 					}
 				}
-				// GetLatest도 같은 권위 pose를 보게 해 다음 GT Tick에서 stale async mirror로 롤백되지 않게 한다.
+				// Make GetLatest see the same authority pose so it doesn't roll back to the stale async mirror on the next GT Tick.
 				Impl->Results->Map.Add(RopeId, Snapshot);
 				Impl->Results->HandoffSnapshots.Add(RopeId, Snapshot);
 				Impl->Results->Contacts.Remove(RopeId);
@@ -742,7 +742,7 @@ bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, T
 			Result->Snapshot = MoveTemp(Snapshot);
 			Result->bSuccess = true;
 		});
-	// RT 커맨드 완료까지 GT 대기(스냅샷 확정).
+	// GT waits until RT command completes (snapshot confirmed).
 	FlushRenderingCommands();
 
 	if (!Result->bSuccess || Result->Snapshot.NumNodes < 2)
@@ -772,7 +772,7 @@ FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint
 
 	if (!Resident->PosSRV.IsValid())
 	{
-		// PosBuf는 StructuredBuffer<float4>(stride 16) — structured SRV로 본다.
+		// PosBuf is boned as StructuredBuffer<float4>(stride 16) — structured SRV.
 		FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
 		Resident->PosSRV = RHICmdList.CreateShaderResourceView(Resident->PosBuf->GetRHI(),
 			FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Structured));
@@ -780,9 +780,9 @@ FRHIShaderResourceView* FRopeGPUSolver::GetResidentPositionSRV_RenderThread(uint
 	return Resident->PosSRV.GetReference();
 }
 
-// Phase 2c: GDF 셰이더 파라미터 구성. 엔진 SetupGlobalDistanceFieldParameters(전체)는 RENDERER_API가 아니라
-// 링크 불가 → inline _Minimal을 쓰고 그것이 빠뜨리는 CoverageAtlas 텍스처 + 샘플러 3개를 직접 보강한다.
-// GDF가 null/클립맵 0이면 검은 볼륨 텍스처를 바인딩하고 OutValid=0(셰이더가 GDF 블록을 건너뛴다).
+// Phase 2c: GDF shader parameter configuration. Engine SetupGlobalDistanceFieldParameters (all) is not RENDERER_API
+// Link not possible → Use inline _Minimal and directly reinforce the 3 CoverageAtlas textures + samplers it omits.
+// If GDF is null/clipmap 0, bind black volume texture and OutValid=0 (shader skips GDF block).
 static void FillGDFShaderParams(const FGlobalDistanceFieldParameterData* GDF, FGlobalDistanceFieldParameters2& Out, uint32& OutValid)
 {
 	if (GDF && GDF->NumGlobalSDFClipmaps > 0)
@@ -801,26 +801,26 @@ static void FillGDFShaderParams(const FGlobalDistanceFieldParameterData* GDF, FG
 		Out.GlobalDistanceFieldMipTexture           = GBlackVolumeTexture->TextureRHI.GetReference();
 		OutValid = 0;
 	}
-	// 샘플러 3개는 _Minimal이 채우지 않는다(미세팅 시 검은 샘플). 항상 세팅.
+	// The 3 samplers are not filled with _Minimal (black samples when not set). Always set.
 	Out.GlobalDistanceFieldPageAtlasTextureSampler     = TStaticSamplerState<SF_Trilinear, AM_Wrap,  AM_Wrap,  AM_Wrap >::GetRHI();
 	Out.GlobalDistanceFieldCoverageAtlasTextureSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap,  AM_Wrap,  AM_Wrap >::GetRHI();
 	Out.GlobalDistanceFieldMipTextureSampler           = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 }
 
-// ===== RunSteps_RenderThread 분해 =====================================================================
-// 아래 헬퍼들은 RunSteps_RenderThread의 단계별 본체다(동작 동일 — 코드 이동). 업로드용 CPU 배열은 전부
-// GraphBuilder.AllocObject<TArray<...>>()로 그래프 수명에 묶는다(Execute까지 생존 + 그래프 해체 시 소멸)
-// — 함수 스코프 keep-alive 컨테이너(구 K* 배열)와 "Reserve로 재할당 방지" 규약이 필요 없다.
+// ===== RunSteps_RenderThread disassembly =========================================================================
+// The helpers below are the step-by-step body of RunSteps_RenderThread (same operation — code movement). CPU arrangement for upload is all
+// Bind to graph lifetime with GraphBuilder.AllocObject<TArray<...>>() (survives until Execute + disappears when graph is torn down)
+// — No need for function-scoped keep-alive containers (formerly K* arrays) and the "prevent reallocation to Reserve" convention.
 
-// 로프 1개의 그래프 빌드 중간 산출물(RDG 핸들 + 유효 개수). 오케스트레이션 루프가 단계 간에 전달한다.
+// rope 1 graph build intermediate output (RDG handle + valid count). The orchestration loop passes between stages.
 struct FRopeStepBuild
 {
 	FRDGBufferRef PosRDG = nullptr;
 	FRDGBufferRef PrevRDG = nullptr;
 	FRDGBufferRef InvMassRDG = nullptr;
-	// 이번 프레임 재시드(최초/노드수·generation 변화) 여부.
+	// Whether to reseed this frame (initial/node number/generation change).
 	bool bSeed = false;
-	// G0 override 유효(플래그 길이 == 노드 수) 여부.
+	// Whether G0 override is valid (flag length == number of nodes).
 	bool bHasOverrides = false;
 
 	FRDGBufferRef CapsulesBuf = nullptr;
@@ -830,7 +830,7 @@ struct FRopeStepBuild
 	FRDGBufferRef BoxesBuf = nullptr;
 	FRDGBufferRef ConvexBuf = nullptr;
 	FRDGBufferRef ConvexPlanesBuf = nullptr;
-	// 더미 패딩 *전* 유효 개수(셰이더 카운트용).
+	// Dummy padding *before* valid count (for shader count).
 	int32 NumValidCaps = 0;
 	int32 NumValidSDFCol = 0;
 	int32 NumValidBoxes = 0;
@@ -842,8 +842,8 @@ struct FRopeStepBuild
 	FRDGBufferRef OvInvBuf = nullptr;
 };
 
-// Loop 1: 직전 프레임 리드백 consume(immediate Lock — RDG 빌더 구성 *전*에 처리해 immediate RHI와
-// 열린 그래프의 인터리브를 피한다. 렌더 스레드라 Lock 합법, IsReady 게이트라 stall 없음).
+// Loop 1: Just before frame readback consume(immediate Lock — Process *before* RDG builder configuration to create immediate RHI and
+// Avoid interleaving of open graphs. Lock is legal because it is a render thread, and there is no stall because it is an IsReady gate).
 static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 	FRopeResidentSharedResults& Results, const TArray<FRopeGPUResidentStep>& Steps)
 {
@@ -859,7 +859,7 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 		FRopeResidentRope& Resident = *ResidentPtr;
 		const bool bWillReseed = !Resident.PosBuf.IsValid() || Resident.NumNodes != Step.NumNodes
 			|| Resident.Generation != Step.Generation;
-		// 재시드 프레임에는 직전 리드백이 stale이라 무시(위치/접촉 모두). 무장 해제해 다음 dispatch가 재무장.
+		// In the reseeding frame, the previous readback is stale, so it is ignored (both location/contact). Disarm and re-arm the next dispatch.
 		if (bWillReseed)
 		{
 			Resident.bReadbackArmed = false;
@@ -870,7 +870,7 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 
 		const int32 NumNodes = Resident.NumNodes;
 
-		// 위치 리드백 consume(무장·준비됐을 때만) — 실패해도 접촉 consume은 독립 진행.
+		// Location readback consume (only when armed/ready) — Even if it fails, contact consume proceeds independently.
 		TArray<FVector> TmpPos, TmpPrev;
 		bool bHavePos = false;
 		if (Resident.bReadbackArmed && Resident.PosReadback && Resident.PrevReadback
@@ -889,12 +889,12 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 				for (int32 k = 0; k < NumNodes; ++k) { TmpPrev[k] = FVector(Src[k].X, Src[k].Y, Src[k].Z); }
 				Resident.PrevReadback->Unlock();
 			}
-			// 소비 완료 — dispatch 블록에서 재무장.
+			// Consumed — rearmed in dispatch block.
 			Resident.bReadbackArmed = false;
 			bHavePos = true;
 		}
 
-		// 장력(λ) 리드백: 위치와 독립 consume(솔브 프레임에만 무장). 무장 당시 dt로 힘 변환.
+		// tension(λ) readback: independent of position consume (armed only in solve frame). Force converted to dt when armed.
 		TArray<float> TmpTension;
 		bool bHaveTension = false;
 		if (Resident.bLambdaArmed && Resident.LambdaReadback && Resident.LambdaReadback->IsReady())
@@ -902,7 +902,7 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 			const uint32 LambdaBytes = (uint32)NumNodes * sizeof(float);
 			if (const float* Src = (const float*)Resident.LambdaReadback->Lock(LambdaBytes))
 			{
-				// 세그먼트 수 = NumNodes-1(마지막 슬롯은 커널이 항상 0). F = max(0,-λ)/h² — CPU Step과 동일 변환.
+				// Number of segments = NumNodes-1 (the last slot in the kernel is always 0). F = max(0,-λ)/h² — Same conversion as CPU Step.
 				const float InvDt2 = (Resident.LambdaFixedDt > 1e-6f)
 					? (1.0f / (Resident.LambdaFixedDt * Resident.LambdaFixedDt)) : 0.0f;
 				TmpTension.SetNumUninitialized(NumNodes - 1);
@@ -913,17 +913,17 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 				Resident.LambdaReadback->Unlock();
 				bHaveTension = true;
 			}
-			// 소비 완료 — dispatch 블록에서 재무장.
+			// Consumed — rearmed in dispatch block.
 			Resident.bLambdaArmed = false;
 		}
 
-		// 접촉 감지 리드백(G3): 위치와 독립 consume(감지는 Flight만 무장하므로 없을 수 있다).
+		// contact detection readback(G3): independent of location consume (detection may not be present since only Flight is armed).
 		TArray<FRopeGPUContactResult> TmpContacts;
 		bool bHaveContacts = false;
 		if (Resident.bContactArmed && Resident.ContactReadback && Resident.ContactReadback->IsReady())
 		{
-			// 노드당 2슬롯: [0..NumNodes) actual, [NumNodes..2*NumNodes) predictive.
-			// 슬롯 인덱스 % NumNodes = 노드 인덱스.
+			// 2 slots per node: [0..NumNodes) actual, [NumNodes..2*NumNodes) predictive.
+			// slot index % NumNodes = node index.
 			const uint32 ContactBytes = (uint32)(2 * NumNodes) * sizeof(FRopeGPUContactGPU);
 			if (const FRopeGPUContactGPU* Src =
 				(const FRopeGPUContactGPU*)Resident.ContactReadback->Lock(ContactBytes))
@@ -939,7 +939,7 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 					Contact.ColliderType    = Src[Slot].ColliderType;
 					Contact.ColliderIndex   = Src[Slot].ColliderIndex;
 					Contact.Source          = (uint8)Src[Slot].Source;
-					// w에 팩된 침투.
+					// penetration packed in w.
 					Contact.Penetration     = Src[Slot].WorldPoint.W;
 					Contact.WorldPoint      = FVector(Src[Slot].WorldPoint.X, Src[Slot].WorldPoint.Y, Src[Slot].WorldPoint.Z);
 					Contact.Normal          = FVector(Src[Slot].Normal.X, Src[Slot].Normal.Y, Src[Slot].Normal.Z);
@@ -949,17 +949,17 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 				Resident.ContactReadback->Unlock();
 				bHaveContacts = true;
 			}
-			// 소비 완료 — dispatch 블록에서 재무장.
+			// Consumed — rearmed in dispatch block.
 			Resident.bContactArmed = false;
 		}
 
 		if (!bHavePos && !bHaveContacts && !bHaveTension)
 		{
-			// 이번 프레임 회수분 없음.
+			// No number of frames this time.
 			continue;
 		}
 
-		// 락 구간은 맵 대입만(리드백 Lock은 위에서 끝냄) → GT GetLatest 블로킹 최소화.
+		// The lock section is only map assignment (readback lock ends at the top) → GT GetLatest blocking is minimized.
 		FScopeLock SL(&Results.Lock);
 		if (bHavePos || bHaveTension)
 		{
@@ -969,13 +969,13 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 				Latest.Positions     = MoveTemp(TmpPos);
 				Latest.PrevPositions = MoveTemp(TmpPrev);
 				Latest.NumNodes      = NumNodes;
-				// generation 승격은 위치와 함께만(재시드 직후 stale 위치 승격 방지).
+				// generation promotion only with position (preventing stale position promotion immediately after reseeding).
 				Latest.Generation    = Resident.Generation;
 			}
 			if (bHaveTension)
 			{
-				// 장력은 entry generation을 건드리지 않는다 — 재시드 직후 위치보다 먼저 도착하면
-				// GT가 (구 generation으로) 한 프레임 거부하고, 위치가 따라잡으면 함께 소비된다.
+				// tension does not touch entry generation — if it arrives before the position immediately after reseeding,
+				// GT rejects one frame (with the old generation), and when the position catches up, it is consumed together.
 				Latest.SegmentTension = MoveTemp(TmpTension);
 			}
 		}
@@ -989,8 +989,8 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 	}
 }
 
-// 상주 Pos/Prev/InvMass 확보: 재시드(최초/노드수·generation 변화)면 시드 업로드 + 외부 버퍼 변환,
-// 아니면 기존 영속 버퍼를 그래프에 등록. Build.PosRDG/PrevRDG/InvMassRDG/bSeed를 채운다.
+// Securing resident Pos/Prev/InvMass: If reseeding (initial/node number/generation change), seed upload + external buffer conversion,
+// Otherwise, register the existing persistent buffer in the graph. Fill in Build.PosRDG/PrevRDG/InvMassRDG/bSeed.
 static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step,
 	FRopeResidentRope& Resident, FRopeStepBuild& Build)
 {
@@ -1028,9 +1028,9 @@ static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUR
 		Resident.InvMassBuf = GraphBuilder.ConvertToExternalBuffer(Build.InvMassRDG);
 		Resident.NumNodes = NumNodes;
 		Resident.Generation = Step.Generation;
-		// 재시드 후 직전 리드백은 stale.
+		// The readback immediately before reseeding is stale.
 		Resident.bReadbackArmed = false;
-		// PosBuf 새로 생성 → 캐시된 SRV 무효(렌더가 다음에 재생성).
+		// New PosBuf creation → Cached SRV invalid (render will be regenerated next time).
 		Resident.PosSRV.SafeRelease();
 	}
 	else
@@ -1041,7 +1041,7 @@ static void RopeEnsureResidentBuffers(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	}
 }
 
-// 캡슐 패킹(M2): step의 월드 캡슐 → GPU 레이아웃 평탄화 + 업로드. Build.CapsulesBuf/NumValidCaps를 채운다.
+// capsule packing (M2): world capsule of step → GPU layout flattening + upload. Fill Build.CapsulesBuf/NumValidCaps.
 static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step, FRopeStepBuild& Build)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackCapsules);
@@ -1052,7 +1052,7 @@ static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 		FRopeCapsuleGPU GpuCapsule;
 		GpuCapsule.A = FVector4f((float)Capsule.A.X, (float)Capsule.A.Y, (float)Capsule.A.Z, 0.0f);
 		GpuCapsule.B = FVector4f((float)Capsule.B.X, (float)Capsule.B.Y, (float)Capsule.B.Z, Capsule.Radius);
-		// 정적(InvDt 0)이면 prev=현재 — 커널이 prev 유효성 분기 없이 항상 lerp/변위 계산 가능.
+		// If static(InvDt 0), prev=current — kernel can always compute lerp/displacement without prev validation branch.
 		const bool bMoving = Capsule.InvDeltaTime > 0.0f;
 		const FVector& PrevA = bMoving ? Capsule.PrevA : Capsule.A;
 		const FVector& PrevB = bMoving ? Capsule.PrevB : Capsule.B;
@@ -1061,7 +1061,7 @@ static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 		CapsFlat.Add(GpuCapsule);
 	}
 
-	// 유효 개수 — 더미 패딩 *전* 확정. 구조화 버퍼는 원소 >=1 — 비면 더미 1개(어느 노드도 참조 안 함).
+	// Valid count — confirmed *before* dummy padding. Structured buffer has elements >=1 — 1 empty dummy (not referenced by any node).
 	Build.NumValidCaps = CapsFlat.Num();
 	if (CapsFlat.Num() == 0) { CapsFlat.AddZeroed(1); }
 
@@ -1069,7 +1069,7 @@ static void RopePackCapsules(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 		sizeof(FRopeCapsuleGPU), CapsFlat.Num(), CapsFlat.GetData(), (uint64)CapsFlat.Num() * sizeof(FRopeCapsuleGPU));
 }
 
-// 박스 패킹: step의 박스(OBB) → GPU 레이아웃 평탄화 + 업로드. Build.BoxesBuf/NumValidBoxes를 채운다.
+// box packing: step's box (OBB) → GPU layout flattening + upload. Fills Build.BoxesBuf/NumValidBoxes.
 static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step, FRopeStepBuild& Build)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackBoxes);
@@ -1081,7 +1081,7 @@ static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep&
 		GpuBox.Center      = FVector4f((float)Box.Center.X, (float)Box.Center.Y, (float)Box.Center.Z, Box.InvDeltaTime);
 		GpuBox.Rot         = FVector4f((float)Box.Rot.X, (float)Box.Rot.Y, (float)Box.Rot.Z, (float)Box.Rot.W);
 		GpuBox.HalfExtents = FVector4f((float)Box.HalfExtents.X, (float)Box.HalfExtents.Y, (float)Box.HalfExtents.Z, 0.0f);
-		// 정적(InvDt 0)이면 prev=현재 — 커널이 prev 유효성 분기 없이 항상 보간 가능(캡슐 패킹과 동일).
+		// If static(InvDt 0), prev=current — kernel can always interpolate without prev validation branch (same as capsule packing).
 		const bool bMoving = Box.InvDeltaTime > 0.0f;
 		const FVector PrevCenter = bMoving ? Box.PrevCenter : Box.Center;
 		const FQuat PrevRotation = bMoving ? Box.PrevRot : Box.Rot;
@@ -1091,7 +1091,7 @@ static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep&
 		BoxesFlat.Add(GpuBox);
 	}
 
-	// 유효 개수 — 더미 패딩 *전* 확정. 구조화 버퍼는 원소 >=1 — 비면 더미 1개(NumBoxes=0이라 미참조).
+	// Valid Count — Confirmed *before* dummy padding. Structured buffer has elements >=1 — 1 empty dummy (not referenced because NumBoxes=0).
 	Build.NumValidBoxes = BoxesFlat.Num();
 	if (BoxesFlat.Num() == 0) { BoxesFlat.AddZeroed(1); }
 
@@ -1099,8 +1099,8 @@ static void RopePackBoxes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep&
 		sizeof(FRopeBoxGPU), BoxesFlat.Num(), BoxesFlat.GetData(), (uint64)BoxesFlat.Num() * sizeof(FRopeBoxGPU));
 }
 
-// 컨벡스 패킹: step의 컨벡스 → 평면 평탄 풀(ConvexPlanes) + 헤더(Convexes) 업로드. 각 컨벡스의 평면을
-// 풀에 이어붙이고 PlaneOffset/PlaneCount로 참조한다. Build.ConvexBuf/ConvexPlanesBuf/NumValidConvexes를 채운다.
+// convex packing: step's convex → plane flat pool (ConvexPlanes) + upload header (Convexes). The plane of each convex is
+// is attached to the pool and referenced with PlaneOffset/PlaneCount. Fill in Build.ConvexBuf/ConvexPlanesBuf/NumValidConvexes.
 static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step, FRopeStepBuild& Build)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackConvexes);
@@ -1108,7 +1108,7 @@ static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 	TArray<FVector4f>&      PlaneFlat = *GraphBuilder.AllocObject<TArray<FVector4f>>();
 	for (const FRopeGPUConvex& Convex : Step.Convexes)
 	{
-		// 정적(InvDt 0)이면 prev=현재 — 커널이 prev 유효성 분기 없이 항상 보간 가능(박스/캡슐 패킹과 동일).
+		// If static(InvDt 0), prev=current — kernel can always interpolate without prev validation branch (same as box/capsule packing).
 		const bool bMoving = Convex.InvDeltaTime > 0.0f;
 		const FQuat PrevRotation = bMoving ? Convex.PrevRot : Convex.Rot;
 		const FVector PrevTranslation = bMoving ? Convex.PrevTrans : Convex.Trans;
@@ -1136,7 +1136,7 @@ static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 		}
 	}
 
-	// 유효 개수 — 더미 패딩 *전* 확정. 구조화 버퍼는 원소 >=1 — 비면 더미 1개(NumConvexes=0이라 미참조).
+	// Valid count — confirmed *before* dummy padding. Structured buffer has elements >=1 — 1 empty dummy (not referenced because NumConvexes=0).
 	Build.NumValidConvexes = ConvFlat.Num();
 	if (ConvFlat.Num() == 0) { ConvFlat.AddZeroed(1); }
 	if (PlaneFlat.Num() == 0) { PlaneFlat.AddZeroed(1); }
@@ -1147,19 +1147,19 @@ static void RopePackConvexes(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 		sizeof(FVector4f), PlaneFlat.Num(), PlaneFlat.GetData(), (uint64)PlaneFlat.Num() * sizeof(FVector4f));
 }
 
-// 전역 SDF 볼륨 상주 보장(프레임당 1회, 로프 루프 *전*). 이번 프레임 모든 Step의 SDF 콜라이더에서 아직
-// 캐시에 없는 VolumeKey만 dequant해 전역 배열에 append하고, 신규 볼륨이 생긴 프레임에만(dirty) 상주 버퍼를
-// 재업로드한다(세션당 볼륨 수만큼, 이후 0). 반환: 이번 프레임 바인딩할 전역 distance/header RDG 버퍼(어느
-// 로프도 SDF가 없으면 더미 1개). 이걸로 로프별·집합-churn 재업로드(구 per-rope VolSig 게이트의 50ms)를 없앤다.
-// generational 재빌드 파라미터.
-//  - EvictAfterFrames: 이만큼 연속 미참조면 축출 대상(히스테리시스 — 컬링 경계 깜빡임에 재빌드 안 터지게).
-//  - RebuildReclaimFrac: 죽은 dist 바이트 비율이 이 이상일 때만 재빌드(자잘한 회수로 MB 재업로드 방지).
+// Guaranteed global SDF volume residency (once per-frame, *before* the rope loop). In this frame, the SDF collider of all steps is still
+// Only VolumeKeys not in the cache are dequantized and appended to the global array, and the resident buffer is stored only in frames where a new volume is created (dirty).
+// Reupload (as many volumes per session, then 0). Return: global distance/header RDG buffer to bind to this frame (which
+// If there is neither rope nor SDF, 1 dummy). This eliminates the per-rope/set-churn reupload (formerly 50ms of per-rope VolSig gate).
+// generational rebuild parameters.
+//  - EvictAfterFrames: If this number of consecutive unreferenced objects are evicted (hysteresis — no rebuild due to culling boundary blinking).
+//  - RebuildReclaimFrac: Rebuild only when dead dist byte ratio is above this (prevent MB reupload with minor recall).
 static constexpr uint64 GRopeSDFEvictAfterFrames = 600;   // ~10s @ 60fps
 static constexpr float  GRopeSDFRebuildReclaimFrac = 0.25f;
 
-// 캐시를 live(최근 EvictAfterFrames 내 참조) 볼륨만으로 압축 재구성. dequant된 CpuDist 슬라이스를 그대로
-// 복사(소스 불필요)하고 인덱스/오프셋을 새로 부여 → bDirty로 상주 버퍼 1회 재업로드. 인스턴스 배열이 매
-// 프레임 KeyToIndex를 재조회하므로 인덱스 재배치는 다음 팩 단계가 자동 반영(참조 무손상).
+// Rebuild cache compressed with only live (see recent EvictAfterFrames) volumes. The dequantized CpuDist slice is intact.
+// Copy (source not required) and give a new index/offset → Re-upload the resident buffer once as bDirty. The instance array is
+// Because frame KeyToIndex is re-queried, index relocation automatically reflects the next pack step (no reference damage).
 static void RopeRebuildGlobalSDFCache(FRopeGlobalSDFCache& Cache, uint64 Frame)
 {
 	TMap<uint64, int32>   NewKeyToIndex;
@@ -1175,7 +1175,7 @@ static void RopeRebuildGlobalSDFCache(FRopeGlobalSDFCache& Cache, uint64 Frame)
 		const uint64* Last = Cache.KeyLastUsedFrame.Find(KV.Key);
 		if (!Last || (Frame - *Last) >= GRopeSDFEvictAfterFrames)
 		{
-			continue;   // 오래 미참조 — 드롭.
+			continue;   // long unreferenced — drop.
 		}
 		const FRopeSDFVolumeGPU& Old = Cache.CpuVol[KV.Value];
 		const int32 VoxN = Old.ResX * Old.ResY * Old.ResZ;
@@ -1192,7 +1192,7 @@ static void RopeRebuildGlobalSDFCache(FRopeGlobalSDFCache& Cache, uint64 Frame)
 	Cache.KeyLastUsedFrame = MoveTemp(NewLastUsed);
 	Cache.CpuVol           = MoveTemp(NewVol);
 	Cache.CpuDist          = MoveTemp(NewDist);
-	Cache.bDirty           = true;   // 아래 업로드 경로가 압축된 버퍼를 1회 재업로드.
+	Cache.bDirty           = true;   // Re-upload the compressed buffer in the upload path below once.
 }
 
 static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<FRopeGPUResidentStep>& Steps,
@@ -1200,7 +1200,7 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_EnsureGlobalSDF);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_EnsureGlobalSDF);
-	const uint64 Frame = ++Cache.FrameCounter;   // 프레임당 1회(Ensure는 RunSteps당 1회).
+	const uint64 Frame = ++Cache.FrameCounter;   // Once per-frame (Ensure once per RunSteps).
 	for (const FRopeGPUResidentStep& Step : Steps)
 	{
 		for (const FRopeGPUSDFCollider& Source : Step.SDFColliders)
@@ -1210,14 +1210,14 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 			{
 				continue;
 			}
-			// 유효 볼륨 — 마지막 사용 프레임 스탬프(신규/기존 공통; 재빌드 축출 판정의 기준).
+			// Effective Volume — Last used frame stamp (common for new/existing; basis for rebuild eviction check).
 			Cache.KeyLastUsedFrame.FindOrAdd(Source.VolumeKey) = Frame;
 			if (Cache.KeyToIndex.Contains(Source.VolumeKey))
 			{
-				// 이미 상주 — dequant/업로드 없음(정적 베이크 데이터라 재-dequant 불필요).
+				// Already resident — no dequant/upload (static bake data, no need to re-dequant).
 				continue;
 			}
-			// 신규 볼륨: 전역 배열에 append(인덱스/오프셋 stable — 기존 참조 불변).
+			// New volume: append to global array (index/offset stable — existing references invariant).
 			Cache.KeyToIndex.Add(Source.VolumeKey, Cache.CpuVol.Num());
 
 			FRopeSDFVolumeGPU Volume;
@@ -1229,8 +1229,8 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 				(float)Source.LocalSize.Z, 0.0f);
 			Cache.CpuVol.Add(Volume);
 
-			// 코드 → float(cm) dequant. 비대칭 밴드: d = code*(range/MaxCode) - NBIn. 코드는 복셀당 BytesPerCode
-			// 바이트(리틀엔디안): 1=uint8(max255), 2=uint16(max65535). 셰이더 SDFDistances는 float 유지(.usf 무변경).
+			// code → float(cm) dequant. Asymmetric band: d = code*(range/MaxCode) - NBIn. Code is BytesPerCode per voxel
+			// Bytes (little-endian): 1=uint8(max255), 2=uint16(max65535). shader SDFDistances remain float (.usf unchanged).
 			const int32 VoxN = (int32)Voxels;
 			const int32 BytesPerCode = Source.BytesPerCode;
 			const float MaxCodeF = (BytesPerCode >= 2) ? 65535.0f : 255.0f;
@@ -1245,14 +1245,14 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 				{
 					Code |= static_cast<uint32>(Source.Distances[Vi * BytesPerCode + 1]) << 8;
 				}
-				// 바깥 +
+				// Outside +
 				Cache.CpuDist.Add(static_cast<float>(Code) * DeqScale - NarrowBandInner);
 			}
 			Cache.bDirty = true;
 		}
 	}
 
-	// generational 축출: 오래 미참조 볼륨이 회수 문턱 이상 쌓였으면 live 집합만으로 캐시 압축 재구성.
+	// generational eviction: If unreferenced volumes have accumulated beyond the recall threshold for a long time, reconfigure cache compression with only the live set.
 	if (Cache.CpuVol.Num() > 0)
 	{
 		int64 DeadFloats = 0;
@@ -1274,11 +1274,11 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 
 	if (Cache.CpuVol.Num() == 0)
 	{
-		// 볼륨이 하나도 없음(최초, 또는 재빌드로 전부 축출) — 상주 버퍼 해제(VRAM 회수) 후 더미 바인딩.
+		// No volumes (first time, or all evicted by rebuild) — Dummy binding after freeing resident buffer (reclaiming VRAM).
 		Cache.DistBuf.SafeRelease();
 		Cache.VolBuf.SafeRelease();
 		Cache.bDirty = false;
-		// 더미 1개(바인딩 유효성; 셰이더는 NumSDFColliders=0이라 미참조).
+		// 1 dummy (binding validity; shader does not reference NumSDFColliders=0).
 		TArray<float>&             DummyDist = *GraphBuilder.AllocObject<TArray<float>>();
 		TArray<FRopeSDFVolumeGPU>& DummyVol  = *GraphBuilder.AllocObject<TArray<FRopeSDFVolumeGPU>>();
 		DummyDist.AddZeroed(1);
@@ -1292,13 +1292,13 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 
 	if (Cache.DistBuf.IsValid() && Cache.VolBuf.IsValid() && !Cache.bDirty)
 	{
-		// 신규 볼륨 없음 → 재사용(업로드 0). 정상 상태 — 로프의 근접 볼륨 집합/순서가 흔들려도 여기로 온다.
+		// No new volume → reuse (upload 0). Steady state — comes here even if the set/order of the rope's adjacent volumes is disturbed.
 		OutDistRDG = GraphBuilder.RegisterExternalBuffer(Cache.DistBuf);
 		OutVolRDG  = GraphBuilder.RegisterExternalBuffer(Cache.VolBuf);
 		return;
 	}
 
-	// 최초 또는 신규 볼륨(dirty) — 전역 버퍼 재생성+업로드(append-only라 grow, 세션당 볼륨 수만큼만 발생).
+	// First or new volume (dirty) — global buffer regeneration + upload (append-only grow, occurs only as many volumes per session).
 	OutDistRDG = RopeUploadBuffer(GraphBuilder, TEXT("Rope.GlobalSDFDist"),
 		sizeof(float), Cache.CpuDist.Num(), Cache.CpuDist.GetData(), (uint64)Cache.CpuDist.Num() * sizeof(float));
 	OutVolRDG = RopeUploadBuffer(GraphBuilder, TEXT("Rope.GlobalSDFVol"),
@@ -1308,15 +1308,15 @@ static void RopeEnsureGlobalSDFVolumes(FRDGBuilder& GraphBuilder, const TArray<F
 	Cache.bDirty = false;
 }
 
-// SDF 콜라이더 패킹(M3): 전역 볼륨 캐시(RopeEnsureGlobalSDFVolumes가 상주 보장)를 공유 바인딩하고, 이 로프의
-// 인스턴스(전역 VolumeIndex + 현재/직전 본 트랜스폼) 배열만 매 프레임 올린다. distance dequant/업로드는 여기서
-// 하지 않는다 — 전역 캐시가 VolumeKey당 1회만 수행. Build.SDF*Buf/NumValidSDFCol을 채운다.
+// SDF collider packing (M3): Shared bind the global volume cache (where RopeEnsureGlobalSDFVolumes are guaranteed to reside), and
+// Only the instance (global VolumeIndex + current/previous bone transform) array is raised every frame. distance dequant/upload here
+// Do not — global cache is performed only once per VolumeKey. Fill in Build.SDF*Buf/NumValidSDFCol.
 static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step, FRopeStepBuild& Build,
 	const TMap<uint64, int32>& GlobalKeyToIndex, FRDGBufferRef GlobalDistRDG, FRDGBufferRef GlobalVolRDG)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackSDF);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_PackSDF);
-	// 전역 distance/header 버퍼를 공유 바인딩(로프별 복사 없음).
+	// Shared binding of global distance/header buffer (no rope-specific copying).
 	Build.SDFDistBuf = GlobalDistRDG;
 	Build.SDFVolBuf = GlobalVolRDG;
 
@@ -1326,7 +1326,7 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 		const int32* VolumeIndex = GlobalKeyToIndex.Find(Source.VolumeKey);
 		if (!VolumeIndex)
 		{
-			// 무효 볼륨(전역 캐시가 dequant 조건으로 걸러 미등록) — 스킵.
+			// invalid volume (unregistered because the global cache filtered it out with dequant conditions) — Skip.
 			continue;
 		}
 		const FQuat Rotation = Source.BoneToWorld.GetRotation();
@@ -1349,15 +1349,15 @@ static void RopePackSDFColliders(FRDGBuilder& GraphBuilder, const FRopeGPUReside
 		SDFCol.Add(GpuCollider);
 	}
 
-	// 유효 개수 — 더미 패딩 *전* 확정. 비면 더미 1개(셰이더는 NumSDFColliders=0이라 미참조).
+	// Valid count — confirmed *before* dummy padding. 1 empty dummy (shader is not referenced because NumSDFColliders=0).
 	Build.NumValidSDFCol = SDFCol.Num();
 	if (SDFCol.Num() == 0) { SDFCol.AddZeroed(1); }
 	Build.SDFColBuf = RopeUploadBuffer(GraphBuilder, TEXT("Rope.SDFColliders"),
 		sizeof(FRopeSDFColliderGPU), SDFCol.Num(), SDFCol.GetData(), (uint64)SDFCol.Num() * sizeof(FRopeSDFColliderGPU));
 }
 
-// Override(G0) 업로드: 노드별 플래그/타깃/질량(transient, 오버라이드 프레임만 실데이터).
-// 없으면 더미 1개 + bHasOverrides=0 → 셰이더가 참조하지 않는다.
+// Override(G0) upload: per-node flag/target/mass (transient, only override frame is real data).
+// If not, 1 dummy + bHasOverrides=0 → shader does not refer to it.
 static void RopePackOverrides(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step, FRopeStepBuild& Build)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_PackOverrides);
@@ -1403,8 +1403,8 @@ static void RopePackOverrides(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 		sizeof(float), OvInv.Num(), OvInv.GetData(), (uint64)OvInv.Num() * sizeof(float));
 }
 
-// 솔브 패스: 파라미터 버퍼 구성 + XPBD CS dispatch(GDF permutation은 로프 단위 선택).
-// 장력(λ) 출력 버퍼(프레임 transient)를 만들어 반환한다 — 리드백 무장(RopeArmReadbacks)이 소비.
+// solve pass: parameter buffer configuration + XPBD CS dispatch (GDF permutation selects rope units).
+// tension(λ) Creates and returns an output buffer (frame transient) — consumed by readback arm (RopeArmReadbacks).
 static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step,
 	const FRopeResidentRope& Resident, const FRopeStepBuild& Build, const FSceneView* View,
 	const FGlobalDistanceFieldParameters2& GDFSolverParams, uint32 bGDFSolverValid,
@@ -1430,7 +1430,7 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	GpuParams.Damping = Step.Damping;
 	GpuParams.bStartPinned = Step.bStartPinned ? 1 : 0;
 	GpuParams.CapsuleOffset = 0;
-	// collision-free Aim Flight는 solve 커널의 형상 개수만 0으로 만든다. 업로드된 버퍼는 detect 커널이 계속 사용한다.
+	// collision-Free aim Flight only sets the number of shapes in the solve kernel to 0. The uploaded buffer continues to be used by the detect kernel.
 	GpuParams.NumCapsules = Step.bSolveCollisions ? Build.NumValidCaps : 0;
 	GpuParams.CollisionRadius = Step.CollisionRadius;
 	GpuParams.Friction = Step.Friction;
@@ -1470,13 +1470,13 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	PassParams->InvMass       = GraphBuilder.CreateUAV(Build.InvMassRDG);
 	PassParams->Positions     = GraphBuilder.CreateUAV(Build.PosRDG);
 	PassParams->PrevPositions = GraphBuilder.CreateUAV(Build.PrevRDG);
-	// 장력(λ) 출력: 프레임 transient(N 슬롯, 커널이 매 dispatch 전체를 다시 쓴다 — 영속 불필요).
+	// output tension(λ): frame transient (N slots, kernel rewrites entire dispatch every time - no persistence required).
 	FRDGBufferRef LambdaRDG = GraphBuilder.CreateBuffer(
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(float), NumNodes), TEXT("Rope.LambdaDist"));
 	PassParams->OutLambdaDist = GraphBuilder.CreateUAV(LambdaRDG);
 
-	// GDF in-solver(Phase 3): bUseWorldGDF 로프 + GDF 유효 시 GDF permutation 선택 + View/GDF 바인딩.
-	// 아니면 lean(기존 동작). 로프당 개별 AddPass라 permutation을 로프 단위로 자유 선택한다.
+	// GDF in-solver(Phase 3): bUseWorldGDF rope + GDF permutation selection when GDF is valid + View/GDF binding.
+	// Otherwise lean (old behavior). As it is an individual AddPass per rope, the permutation can be freely selected on a per-rope basis.
 	const bool bUseGDFPerm = (View != nullptr) && Resident.bUseWorldGDF && (bGDFSolverValid != 0);
 	if (bUseGDFPerm)
 	{
@@ -1486,7 +1486,7 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 		PassParams->bWorldGDFValid        = bGDFSolverValid;
 	}
 	FRopeXPBDSolveCS::FPermutationDomain Permutation;
-	// NumNodes ≤ MaxNodes(호출부 게이트) → 항상 ≥64.
+	// NumNodes ≤ MaxNodes(caller gate) → always ≥64.
 	Permutation.Set<FRopeXPBDSolveCS::FNodeBucket>(RopeNodeBucket(NumNodes));
 	Permutation.Set<FRopeXPBDSolveCS::FGDFDim>(bUseGDFPerm);
 	TShaderMapRef<FRopeXPBDSolveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), Permutation);
@@ -1494,13 +1494,13 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	++GRopeDispatchCount;
 #endif
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeXPBDResident"),
-		// 로프 1개 = 스레드그룹 1개
+		// 1 rope = 1 thread group
 		ComputeShader, PassParams, FIntVector(1, 1, 1));
 
 	return LambdaRDG;
 }
 
-// 리드백 재무장: in-flight가 없을 때만(이번 프레임 stepped 위치를 비동기 copy). consume은 RopeConsumeReadbacks.
+// readback rearmament: only when there is no in-Flight (asynchronous copy of this frame stepped position). consume is RopeConsumeReadbacks.
 static void RopeArmReadbacks(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step,
 	FRopeResidentRope& Resident, const FRopeStepBuild& Build, FRDGBufferRef LambdaRDG)
 {
@@ -1519,8 +1519,8 @@ static void RopeArmReadbacks(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 		Resident.bReadbackArmed = true;
 	}
 
-	// 장력(λ) 리드백 무장: 솔브 프레임(NumSub>0)에만 — override-only 프레임은 λ가 0이라
-	// 무장하지 않고 직전 장력을 유지한다(GT는 갱신분이 있을 때만 덮어씀).
+	// Armed with tension(λ) readback: Only in solve frame (NumSub>0) — in override-only frame, λ is 0
+	// Maintains the previous tension without arming (GT is overwritten only when updated).
 	if (!Resident.bLambdaArmed && Step.NumSub > 0)
 	{
 		if (!Resident.LambdaReadback)
@@ -1537,14 +1537,14 @@ static void RopeArmReadbacks(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 	}
 }
 
-// 접촉 감지(G3): 솔브 뒤 post-solve 위치를 스윕. RDG가 solve(UAV)→detect(SRV) 순서를 보장한다.
-// 노드당 2슬롯(actual+predictive) 출력. 감지가 있을 때만 ContactBuf(resident, 2N슬롯) 확보.
+// contact detection (G3): Sweep the post-solve position after solving. RDG guarantees the solve(UAV)→detect(SRV) order.
+// 2 slots (actual+predictive) output per node. ContactBuf (resident, 2N slot) is secured only when there is detection.
 static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step,
 	FRopeResidentRope& Resident, const FRopeStepBuild& Build)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_AddDetectPass);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_AddDetectPass);
-	// 솔브 스코프 안에 중첩 — 감지 커널 시간은 Solve가 아니라 이쪽으로 귀속된다.
+	// Nested within solve scope — detection kernel time is attributed here, not Solve.
 	RDG_EVENT_SCOPE_STAT(GraphBuilder, RopeGPUDetect, "DynamicRope Detect");
 	const int32 NumNodes = Step.NumNodes;
 
@@ -1555,7 +1555,7 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 		ContactRDG = GraphBuilder.CreateBuffer(
 			FRDGBufferDesc::CreateStructuredDesc(sizeof(FRopeGPUContactGPU), 2 * NumNodes), TEXT("Rope.Contacts"));
 		Resident.ContactBuf = GraphBuilder.ConvertToExternalBuffer(ContactRDG);
-		// 재생성 → 직전 접촉 리드백은 stale.
+		// Regeneration → The previous contact readback is stale.
 		Resident.bContactArmed = false;
 	}
 	else
@@ -1563,7 +1563,7 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 		ContactRDG = GraphBuilder.RegisterExternalBuffer(Resident.ContactBuf);
 	}
 
-	// 예측 접촉용 whip 가이드 버퍼(G3b). whip 활성 시 노드별 마스크/타깃, 아니면 더미 1개.
+	// Whip guide buffer (G3b) for predictive contact. Per-node mask/target when whip active, otherwise 1 dummy.
 	const bool bHasWhip = Step.WhipGuidedMask.Num() == NumNodes && Step.PredictionFrames > 0.0f;
 	TArray<uint32>&    GMask = *GraphBuilder.AllocObject<TArray<uint32>>();
 	TArray<FVector4f>& WCur  = *GraphBuilder.AllocObject<TArray<FVector4f>>();
@@ -1607,15 +1607,15 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 
 	FRopeContactDetectCS::FParameters* DetectParams = GraphBuilder.AllocParameters<FRopeContactDetectCS::FParameters>();
 	DetectParams->DetectNumNodes       = NumNodes;
-	// 감지는 앞쪽 랩 가능 캡슐/박스만 사용한다. 호출자가 정적 월드 형상을 뒤에 붙이고
-	// NumDetectCapsules/NumDetectBoxes로 경계를 전달해 정적 접촉이 랩 후보를 가리지 않게 한다.
-	// NumDetectCapsules=-1은 전체 캡슐 참여(기존 동작).
+	// Detection uses only the front wrappable capsule/box. The caller appends the static world shape to the end.
+	// Pass boundaries to NumDetectCapsules/NumDetectBoxes to ensure that static contacts do not obscure wrap candidates.
+	// NumDetectCapsules=-1 participates in the entire capsule (existing behavior).
 	DetectParams->DetectNumCapsules    = (Step.NumDetectCapsules >= 0)
 		? FMath::Min(Step.NumDetectCapsules, Build.NumValidCaps) : Build.NumValidCaps;
 	DetectParams->DetectNumSDF         = Build.NumValidSDFCol;
-	// 랩 가능 박스만 감지(정적 박스는 뒤라 제외). 박스도 노드당 최심 접촉 슬롯을 캡슐/SDF와 공유한다.
+	// Detects only boxes that can be Wrapped (excluding static boxes). box also shares the deepest contact slot per node with capsule/SDF.
 	DetectParams->DetectNumBoxes       = FMath::Clamp(Step.NumDetectBoxes, 0, Build.NumValidBoxes);
-	// 랩 가능 convex만 감지(정적 convex는 뒤라 제외) — 박스와 동일 계약.
+	// Only detects wrap-capable convexes (excluding static convexes) — Same contract as box.
 	DetectParams->DetectNumConvexes    = FMath::Clamp(Step.NumDetectConvexes, 0, Build.NumValidConvexes);
 	DetectParams->DetectContactRadius  = Step.ContactRadius;
 	DetectParams->DetectSegmentLength  = Step.SegmentLength;
@@ -1640,7 +1640,7 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	DetectParams->OutContacts          = GraphBuilder.CreateUAV(ContactRDG);
 
 	FRopeContactDetectCS::FPermutationDomain Permutation;
-	// NumNodes ≤ MaxNodes → 항상 ≥64.
+	// NumNodes ≤ MaxNodes → always ≥64.
 	Permutation.Set<FRopeContactDetectCS::FNodeBucket>(RopeNodeBucket(NumNodes));
 	TShaderMapRef<FRopeContactDetectCS> DetectShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), Permutation);
 #if STATS
@@ -1657,7 +1657,7 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 		}
 		AddEnqueueCopyPass(GraphBuilder, Resident.ContactReadback, ContactRDG,
 			(uint32)(2 * NumNodes) * sizeof(FRopeGPUContactGPU));
-		// ColliderIndex가 가리키는 집합은 *이* dispatch의 것이다 — 그 서명을 결과까지 들고 간다.
+		// The set pointed to by ColliderIndex belongs to *this* dispatch — it carries its signature with it to the results.
 		Resident.ContactAttribSig = Step.AttribSig;
 #if STATS
 		GRopeReadbackBytes += (uint64)(2 * NumNodes) * sizeof(FRopeGPUContactGPU);
@@ -1666,20 +1666,20 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 	}
 }
 
-// 상주 step들의 공용 실행부(RT). 전용 그래프(Step)든 씬 렌더러 그래프(DispatchPending_RenderThread)든
-// 동일 본체를 전달받은 GraphBuilder에 얹는다(Execute는 호출자). GDF/PreViewTranslation은 GDF 월드 충돌(Phase 2c)에서 사용.
-// 단계 본체는 위 헬퍼들(RopeConsumeReadbacks/RopeEnsureResidentBuffers/RopePack*/RopeAdd*Pass/RopeArmReadbacks)로
-// 분해했고, 여기는 오케스트레이션만 남긴다 — early-out과 외부(SRV) 배리어 계약이 이 함수에서 한눈에 보인다.
+// Shared execution unit (RT) of resident steps. Whether it is a dedicated graph (Step) or a scene renderer graph (DispatchPending_RenderThread)
+// The same body is Loaded on the received GraphBuilder (Execute is caller). GDF/PreViewTranslation is used in GDF world collision (Phase 2c).
+// The main body of the step is the above helpers (RopeConsumeReadbacks/RopeEnsureResidentBuffers/RopePack*/RopeAdd*Pass/RopeArmReadbacks).
+// We've disassembled it, leaving only the orchestration here — the early-out and external (SRV) barrier contracts are visible at a glance in this function.
 void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRopeGPUResidentStep>& Steps,
 	const FSceneView* View, const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_RunSteps);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_RunSteps);
-	// GPU 타임라인 귀속: 이 스코프 안에서 GraphBuilder에 추가되는 모든 패스가 'DynamicRope Solve'로 잡힌다
-	// (감지 패스는 RopeAddDetectPass가 자체 스코프로 다시 떼어간다).
+	// GPU Timeline attribution: All passes added to GraphBuilder within this scope are captured as 'DynamicRope Solve'
+	// (detection pass is taken back by RopeAddDetectPass with its own scope).
 	RDG_EVENT_SCOPE_STAT(GraphBuilder, RopeGPUSolve, "DynamicRope Solve");
 #if STATS
-	// 이번 프레임 업로드 누산 리셋(아래 RopeUploadBuffer들이 카테고리별로 더한다). RunSteps는 프레임당 1회.
+	// Reset the upload accumulation for this frame (RopeUploadBuffers below are added by category). RunSteps once per frame.
 	GRopeUploadBytesTotal = 0;
 	GRopeUploadBytesSDF = 0;
 	GRopeUploadBytesColliders = 0;
@@ -1687,12 +1687,12 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	GRopeDispatchCount = 0;
 	GRopeSubstepSum = 0;
 #endif
-	// --- Loop 1: 직전 프레임 리드백 consume — 그래프 구성 *전*에 immediate Lock으로 처리.
+	// --- Loop 1: Readback consume the previous frame — Processed as immediate Lock *before* graph construction.
 	RopeConsumeReadbacks(Impl->RtRopes, *Impl->Results, Steps);
 
-	// GDF in-solver: View가 있으면(=뷰 확장 경로) GDF permutation으로 솔브해 매 substep 벽을 투영한다.
-	// 프레임 공용 GDF 셰이더 파라미터를 1회 산정(미빌드면 bGDFSolverValid=0 → 로프별 lean 폴백).
-	// View 없는 Step 경로에선 GDF 미사용(정적 월드 충돌은 뷰 확장 경로 전용).
+	// GDF in-solver: If there is a view (=view expansion path), solve it with GDF permutation and project the wall at every substep.
+	// Calculate frame shared GDF shader parameters once (if not built, bGDFSolverValid=0 → lean fallback for each rope).
+	// GDF is not used in step paths without views (static world collision is only for view expansion paths).
 	const bool bGDFInSolver = (View != nullptr);
 	FGlobalDistanceFieldParameters2 GDFSolverParams;
 	uint32 bGDFSolverValid = 0;
@@ -1701,32 +1701,32 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		FillGDFShaderParams(GDF, GDFSolverParams, bGDFSolverValid);
 	}
 
-	// 전역 SDF 볼륨 상주 보장(프레임당 1회, 로프 루프 *전*). 신규 볼륨만 dequant/업로드 → 정상 상태 재업로드 0.
-	// 아래 로프별 RopePackSDFColliders는 이 전역 버퍼를 공유 바인딩하고 인스턴스(본 트랜스폼) 배열만 올린다.
+	// Guaranteed global SDF volume residency (once per-frame, *before* the rope loop). Dequant/upload only new volumes → Steady state reupload 0.
+	// The RopePackSDFColliders for each rope below share-bind this global buffer and upload only the instance (bone transform) array.
 	FRDGBufferRef GlobalSDFDistRDG = nullptr;
 	FRDGBufferRef GlobalSDFVolRDG = nullptr;
 	RopeEnsureGlobalSDFVolumes(GraphBuilder, Steps, Impl->GlobalSDF, GlobalSDFDistRDG, GlobalSDFVolRDG);
 
-	// --- Loop 2(페이즈 배칭): 준비(2a) → 솔브 dispatch 연속(2b) → 리드백 무장(2c) → 감지(2d) → 외부 배리어(2e).
-	// 종전에는 로프마다 [솔브 → 리드백 copy → 감지 → SRV 전이]를 인터리브해, 로프 N의 copy/전이 배리어가
-	// N 솔브 완주를 기다린 뒤에야 N+1 솔브가 발행됐다 — 64스레드(그룹 1개)짜리 dispatch가 로프 수만큼 GPU에서
-	// 직렬화돼 벽시계가 "그룹당 지연 × 로프 수"로 자랐다('DynamicRope Solve'가 로프 수에 비례). 단계별로 묶으면
-	// 솔브 dispatch 사이에 배리어가 없어(로프끼리 버퍼 독립, 전역 SDF는 read-read) GPU가 그룹들을 병렬 실행한다
-	// → 벽시계 ≈ 가장 느린 로프 1개. per-rope 시맨틱(솔브→copy→감지→SRV 전이)은 로프 단위로 그대로고,
-	// 전역 순서만 재배열이다 — 업로드는 어차피 RDG 프롤로그에서 일괄 실행이라 2a에 남는다.
+	// --- Loop 2 (phase batching): preparation (2a) → solve dispatch continuation (2b) → readback arming (2c) → detection (2d) → external barrier (2e).
+	// Previously, [solve → readback copy → detection → SRV transition] was interleaved for each rope, so the copy/transition barrier of rope N was
+	// N+1 solve was issued only after waiting for N solves to be completed — 64 threads (1 group) dispatched as many ropes on the GPU
+	// Serialized so that the wall clock grows to "delay per group x number of ropes" ('DynamicRope Solve' is proportional to the number of ropes). If you tie it down step by step
+	// There is no barrier between solve dispatch (ropes are buffer independent, global SDF is read-read), so the GPU executes groups in parallel.
+	// → Wall clock ≈ 1 slowest rope. Per-rope semantics (solve→copy→detection→SRV transition) remains the same on a rope basis,
+	// Only the global order is rearranged — the upload is executed in batches in the RDG prologue anyway, so it remains in 2a.
 	struct FRopePreparedStep
 	{
 		const FRopeGPUResidentStep* Step = nullptr;
 		FRopeStepBuild Build;
-		// 솔브 패스가 만든 장력(λ) transient 버퍼 — 리드백 무장(2c)이 소비.
+		// tension(λ) transient buffer created by solve pass — consumed by readback arming (2c).
 		FRDGBufferRef LambdaRDG = nullptr;
-		// GDF permutation 여부(2b 정렬 키 — 같은 PSO끼리 연속 배치해 스위치 최소화).
+		// Whether to perform GDF permutation (2b alignment key — minimize switches by placing the same PSOs in a row).
 		bool bGDFPerm = false;
 	};
 	TArray<FRopePreparedStep> Prepared;
 	Prepared.Reserve(Steps.Num());
 
-	// --- 2a: 로프별 seed/register + 콜라이더/오버라이드 패킹.
+	// --- 2a: seed/register + collider/override packing per rope.
 	for (const FRopeGPUResidentStep& Step : Steps)
 	{
 		const int32 NumNodes = Step.NumNodes;
@@ -1741,15 +1741,15 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		}
 
 		FRopeResidentRope& Resident = Impl->RtRopes.FindOrAdd(Step.RopeId);
-		// GDF permutation 선택에 쓰는 플래그를 상주 상태에 기록(충돌 반경/마찰은 Params 버퍼로 CS에 직접 전달).
-		// Aim Flight에서 충돌 solve를 끌 때 GDF push-out도 함께 끄며, 별도 detect 커널에는 영향을 주지 않는다.
+		// Record the flag used for GDF permutation selection in the resident state (collision radius/friction is directly passed to CS as Params buffer).
+		// When you turn off collision solve in Aim Flight, GDF push-out is also turned off, and it does not affect the separate detect kernel.
 		Resident.bUseWorldGDF = Step.bSolveCollisions && Step.bUseWorldGDF;
 
 		FRopePreparedStep Entry;
 		Entry.Step = &Step;
 		RopeEnsureResidentBuffers(GraphBuilder, Step, Resident, Entry.Build);
 
-		// G0: 오버라이드는 적분 없이도(NumSub=0) 기록해야 한다 — 로직 페이즈 프레임(Wrapping/Releasing 등).
+		// G0: Override must be recorded without integration (NumSub=0) — logic phase frame (Wrapping/Releasing, etc.).
 		Entry.Build.bHasOverrides = Step.HasOverrides() && Step.OverrideFlags.Num() == NumNodes;
 		if (Step.HasOverrides() && !Entry.Build.bHasOverrides)
 		{
@@ -1759,8 +1759,8 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 
 		if (Step.NumSub <= 0 && !Entry.Build.bHasOverrides && !Step.bDetectContacts)
 		{
-			// 이번 프레임 적분/기록/감지 없음 — 위치 불변, 리드백도 그대로 둠. 상태만 외부 읽기(SRV)로
-			// 확정한다(시드 업로드 직후 조기 종료 프레임 포함) — 2e의 호출과 동일 목적.
+			// No integration/recording/detection this frame — position unchanged, readback also left as is. External read status only (SRV)
+			// Confirm (including early termination frame immediately after seed upload) — Same purpose as call in 2e.
 			GraphBuilder.UseExternalAccessMode(Entry.Build.PosRDG, ERHIAccess::SRVMask);
 			continue;
 		}
@@ -1772,13 +1772,13 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		RopePackConvexes(GraphBuilder, Step, Entry.Build);
 		RopePackOverrides(GraphBuilder, Step, Entry.Build);
 
-		// RopeAddSolvePass의 bUseGDFPerm 판정과 동일식(여기서는 정렬 키로만 사용 — 실제 선택은 그쪽이 단일 소스).
+		// Same as the bUseGDFPerm check in RopeAddSolvePass (here only the alignment key is used — the actual selection is the single source of truth).
 		Entry.bGDFPerm = bGDFInSolver && Resident.bUseWorldGDF && (bGDFSolverValid != 0);
 		Prepared.Add(MoveTemp(Entry));
 	}
 
-	// 같은 permutation(노드 버킷, GDF)끼리 연속 배치 — 솔브 dispatch 사이 PSO 스위치 최소화.
-	// 안정 정렬이라 같은 키 안에서는 step 순서(= 등록 순서)가 유지된다.
+	// Continuous placement of same permutations (node ​​buckets, GDF) — Minimize PSO switches between solve dispatches.
+	// Because it is a stable alignment, the step order (= registration order) is maintained within the same key.
 	Prepared.StableSort([](const FRopePreparedStep& A, const FRopePreparedStep& B)
 	{
 		const int32 BucketA = RopeNodeBucket(A.Step->NumNodes);
@@ -1787,8 +1787,8 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		return !A.bGDFPerm && B.bGDFPerm;
 	});
 
-	// --- 2b: 솔브 dispatch만 연속 발행 — 이 로프들의 버퍼를 건드리는 copy/감지가 아직 없어 사이에 배리어가
-	// 없다. (2a 이후 RtRopes에 추가가 없으므로 아래 Find 참조는 안정.)
+	// --- 2b: Only solve dispatch is issued continuously — there is no copy/detection touching the buffer of these ropes yet, so there is a barrier between them.
+	// None. (There have been no additions to RtRopes since 2a, so the Find reference below is stable.)
 	for (FRopePreparedStep& Entry : Prepared)
 	{
 		const FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Entry.Step->RopeId);
@@ -1796,14 +1796,14 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 			bGDFInSolver ? View : nullptr, GDFSolverParams, bGDFSolverValid, PreViewTranslation);
 	}
 
-	// --- 2c: 리드백 재무장(비동기 copy). 감지(2d)보다 앞 — Pos가 UAV→CopySrc→SRV로 한 방향만 전이한다.
+	// --- 2c: Readback rearmament (asynchronous copy). Before detection (2d) — Pos transitions in only one direction: UAV → CopySrc → SRV.
 	for (FRopePreparedStep& Entry : Prepared)
 	{
 		FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Entry.Step->RopeId);
 		RopeArmReadbacks(GraphBuilder, *Entry.Step, Resident, Entry.Build, Entry.LambdaRDG);
 	}
 
-	// --- 2d: 접촉 감지(Flight 로프만). 솔브 결과를 SRV로 읽는다 — 순서는 RDG 의존성이 보장.
+	// --- 2d: contact detection (Flight rope only). Solve results are read as SRV — order is guaranteed to be RDG dependent.
 	for (FRopePreparedStep& Entry : Prepared)
 	{
 		if (Entry.Step->bDetectContacts)
@@ -1813,19 +1813,19 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		}
 	}
 
-	// --- 2e: 외부(SRV) 접근 확정 일괄. 렌더 raw 튜브 경로(M5b/B2)가 이 그래프 *밖에서* PosBuf를 SRV로
-	// 직독한다 — 마지막 패스(solve/copy/detect) 뒤 SRV 전이(배리어)를 매 프레임 확정한다. 이게 없으면 그래프
-	// 종료 상태가 리드백 copy 유무에 따라 UAVCompute/CopySrc로 오락가락해, 배리어 없는 프레임에 튜브가
-	// 이전/미완성 위치를 읽어 wrap 노드가 떨린다(CL167 회귀). GDF 충돌은 솔브 CS 안(substep 제약)에서
-	// 처리하므로 별도 post-solve 쓰기가 없고, 감지 없는 로프는 solve 패스가 PosBuf의 마지막 쓰기다.
+	// --- 2e: External (SRV) access confirmation batch. render raw tube path (M5b/B2) *outside* this graph PosBuf to SRV
+	// Read directly — After the last pass (solve/copy/detect), the SRV transition (barrier) is confirmed every frame. Without this, the graph
+	// The termination status goes back and forth between UAVCompute/CopySrc depending on the presence or absence of readback copy, and the tube is in a frame without a barrier.
+	// The wrap node trembles after reading the previous/incomplete location (CL167 regression). GDF collision occurs in solve CS (substep constraint)
+	// is processed, there is no separate post-solve write, and for ropes without detection, the solve pass is the last write of PosBuf.
 	for (FRopePreparedStep& Entry : Prepared)
 	{
 		GraphBuilder.UseExternalAccessMode(Entry.Build.PosRDG, ERHIAccess::SRVMask);
 	}
 
 #if STATS
-	// GPU 상주 VRAM 계측. 영속 버퍼(ConvertToExternalBuffer로 배정, 프레임 간 유지)만 합산 — 프레임 transient
-	// (colliders/params/detect RDG)는 풀 재사용이라 상주 풋프린트가 아니다. GetSize()=Desc 바이트.
+	// GPU-resident VRAM instrumentation. Sum only persistent buffers (assigned with ConvertToExternalBuffer, maintained between frames) — frame transient
+	// (colliders/params/detect RDG) is fully reused, so it is not a resident footprint. GetSize()=Desc bytes.
 	{
 		uint64 RopeBytes = 0;
 		for (const TPair<uint32, FRopeResidentRope>& Pair : Impl->RtRopes)
@@ -1861,15 +1861,15 @@ void FRopeGPUSolver::Step(TArray<FRopeGPUResidentStep>&& Steps)
 	{
 		return;
 	}
-	// 전용(자체) 그래프 경로 — 서브시스템 Tick 트리거(G4 기본). 씬 렌더 타이밍과 무관하게 즉시 실행.
+	// Private (self) graph path — Subsystem Tick trigger (G4 default). Executes immediately regardless of scene render timing.
 	ENQUEUE_RENDER_COMMAND(RopeResidentStep)(
 		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate& RHICmdList) mutable
 		{
 			FRDGBuilder GraphBuilder(RHICmdList);
-			// 전용 그래프 경로 — View/GDF 없음(GDF in-solver는 뷰 확장 경로 전용). View=nullptr → 항상 lean.
+			// Dedicated graph path — No View/GDF (GDF in-solver is for view expansion path only). View=nullptr → always lean.
 			RunSteps_RenderThread(GraphBuilder, Steps, nullptr, nullptr, FVector3f::ZeroVector);
 			{
-				// RDG 컴파일 + RHI 커맨드 기록(렌더 스레드 CPU 비용의 큰 부분일 수 있음).
+				// RDG compilation + RHI command recording (can be a large portion of render thread CPU cost).
 				TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_GraphExecute);
 				SCOPE_CYCLE_COUNTER(STAT_RopeGPU_GraphExecute);
 				GraphBuilder.Execute();
@@ -1883,8 +1883,8 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 	{
 		return;
 	}
-	// 씬 렌더러 그래프 경로(GDF 월드 충돌): dispatch는 안 하고 RT pending 큐에 쌓아둔다. 뷰 확장이 이번
-	// 프레임 PreRenderBasePass에서 씬 그래프로 flush(GDF 파라미터가 유효한 타이밍 + 튜브 무지연).
+	// Scene renderer graph path (GDF world collision): Does not dispatch but accumulates in RT pending queue. This view expansion
+	// frame Flush from PreRenderBasePass to scene graph (timing with valid GDF parameters + no tube delay).
 	ENQUEUE_RENDER_COMMAND(RopeEnqueueSteps)(
 		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate&) mutable
 		{
@@ -1894,11 +1894,11 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 				IncomingRopeIds.Add(Step.RopeId);
 			}
 			TArray<FRopeGPUResidentStep> PreservedHandoffGDFSteps;
-			// 교체 시맨틱: 이번 프레임 step으로 대체한다(직전 프레임분이 뷰 확장에서 소비 안 됐어도 — 씬
-			// 렌더가 없던 프레임 등 — 최신만 유효하므로 누적하지 않는다). 다만 **시간은 버리지 않는다**:
-			// 덮어쓰는 step이 들고 있던 substep 분량을 장부에 적어 GT가 accumulator로 되돌리게 한다
-			// (그냥 버리면 그 시간만큼 시뮬이 영구히 뒤처진다 — DrainDroppedSimTime 주석). 단,
-			// handoff가 Scene GDF를 기다리는 step은 같은 RopeId의 더 최신 step이 오기 전까지 보존한다.
+			// Replacement semantics: Replace with this frame step (even if the previous frame was not consumed in view expansion — scene
+			// Frames that did not render, etc. — Only the latest is valid, so it is not accumulated). Just **don't waste time**:
+			// Write the amount of substeps held by the overwriting step in the ledger and have GT return it to the accumulator.
+			// (If you just discard it, the sim will be permanently behind by that amount of time — DrainDroppedSimTime comment). However,
+			// The step where the handoff waits for the Scene GDF is preserved until a more recent step with the same RopeId arrives.
 			if (Impl->PendingSteps.Num() > 0)
 			{
 				FScopeLock SL(&Impl->Results->Lock);

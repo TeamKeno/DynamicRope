@@ -6,8 +6,8 @@ FRopeContact FRopeBoxCollider::Query(const FVector& WorldPos, float NodeRadius) 
 {
 	FRopeContact Contact;
 
-	// 박스 로컬로 변환해 클램프 — OBB 최근접점. 모서리/엣지 근방에서는 clamp 결과가 모서리/엣지
-	// 자체가 되어 normal이 정확한 대각 방향으로 나온다(GDF 복셀 라운딩이 뭉개던 바로 그 정보).
+	// Convert box local to clamp — OBB closest point. Near corners/edges, the clamp result is closer to the corners/edges.
+	// itself, and the normal comes out in the correct diagonal direction (the very information that GDF voxel rounding crushed).
 	const FVector P = Rot.UnrotateVector(WorldPos - Center);
 	const FVector Clamped(
 		FMath::Clamp(P.X, -HalfExtents.X, HalfExtents.X),
@@ -16,21 +16,21 @@ FRopeContact FRopeBoxCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 	FVector LocalNormal = FVector::UpVector;
 	FVector LocalSurface = Clamped;
-	// 표면까지 부호 거리(바깥 +, 안쪽 -).
+	// Signed distance to surface (outer +, inner -).
 	float   SignedDist = 0.0f;
 
 	const FVector Delta = P - Clamped;
 	const float DistOutside = static_cast<float>(Delta.Size());
 	if (DistOutside > KINDA_SMALL_NUMBER)
 	{
-		// 바깥: 클램프점이 최근접 표면점, normal = 표면 -> 노드(바깥) 방향.
+		// Outside: Clamp point is the nearest surface point, normal = surface -> node (outside) direction.
 		SignedDist = DistOutside;
 		LocalNormal = Delta / DistOutside;
 	}
 	else
 	{
-		// 안쪽(또는 표면 위): 침투가 가장 얕은 면의 바깥 방향으로 밀어낸다.
-		// FaceDist = 각 축 면까지 거리(전부 >= 0).
+		// Inside (or on the surface): Push out in the outer direction of the surface with the shallowest penetration.
+		// FaceDist = Distance to each axis face (all >= 0).
 		const FVector FaceDist = HalfExtents - P.GetAbs();
 		int32 MinAxis = 0;
 		if (FaceDist.Y < FaceDist[MinAxis]) { MinAxis = 1; }
@@ -45,21 +45,21 @@ FRopeContact FRopeBoxCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 	if (SignedDist >= NodeRadius)
 	{
-		// bHit = false: 겹침 없음(캡슐과 동일하게 경계는 미접촉 취급).
+		// bHit = false: No overlap (same as capsule, boundary is treated as non-contact).
 		return Contact;
 	}
 
 	Contact.bHit = true;
-	// Normal: 단위, 표면 -> 노드(바깥) — FRopeContact FROZEN 계약(부호가 load-bearing).
+	// Normal: Unit, surface -> node (outer) — FRopeContact FROZEN contract (signed load-bearing).
 	Contact.Normal = Rot.RotateVector(LocalNormal);
-	// 안쪽이면 SignedDist<0이라 면까지 깊이 + 노드 반지름.
+	// If inside, SignedDist<0, depth to side + node radius.
 	Contact.Penetration = NodeRadius - SignedDist;
 	Contact.SurfacePoint = Rot.RotateVector(LocalSurface) + Center;
-	// 랩 가능 박스면 가상 본(감지 귀속)+대상 컴포넌트. 정적이면 None/null.
+	// If the box can be Wrapped, then virtual bone (detection attribution) + target component. If static, None/null.
 	Contact.Bone = Bone;
 	Contact.SourceMesh = SourceMesh;
-	// 표면 속도: 접촉 재질점(로컬 LocalSurface)의 (현재 포즈 - 이전 포즈) / dt. 움직이는 바디가 로프를
-	// 접선 방향으로 끄는 데 쓴다. InvDeltaTime==0(정적/첫 프레임)이면 0.
+	// surface velocity: (current pose - previous pose) / dt of contact material point (local LocalSurface). A moving body uses a rope
+	// Used to drag in the tangential direction. 0 if InvDeltaTime==0(static/first frame).
 	if (InvDeltaTime > 0.0f)
 	{
 		const FVector PrevWorld = PrevRot.RotateVector(LocalSurface) + PrevCenter;
@@ -70,7 +70,7 @@ FRopeContact FRopeBoxCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 {
-	// 정지 박스(첫 프레임 포함)는 기본(현재 포즈 정적 스윕)과 동일 — 조기 위임.
+	// stationary box (including first frame) is the same as the default (current pose static sweep) — early delegation.
 	if (InvDeltaTime <= 0.0f || (PrevCenter.Equals(Center) && PrevRot.Equals(Rot)))
 	{
 		return IRopeCollider::QuerySwept(Q, OutHitWorldPos);
@@ -79,7 +79,7 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	FRopeContact Contact;
 	OutHitWorldPos = Q.WorldEnd;
 
-	// 이 substep의 박스 sub-포즈(프레임 모션 prev->curr를 SubAlpha로 보간). 노드 경로와 박스 모션을 함께 스윕.
+	// Box sub-pose of this substep (interpolation of frame motion prev->curr with SubAlpha). Sweep node path and box motion together.
 	const FVector CenterS = FMath::Lerp(PrevCenter, Center, Q.SubAlpha0);
 	const FVector CenterE = FMath::Lerp(PrevCenter, Center, Q.SubAlpha1);
 	const FQuat   RotS = FQuat::Slerp(PrevRot, Rot, Q.SubAlpha0);
@@ -89,14 +89,14 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
 
-	// 분리 가드(RopeCollision::IsSweptSeparating): 접촉 스킨 안에서 시작해 바깥으로 분리 중이면 재-핀 생략.
-	// 시작 포즈 박스로 시작 접촉/재질점을, 끝 포즈 박스로 끝 접촉 여부를 판정한다.
+	// Separation Guard (RopeCollision::IsSweptSeparating): Omit re-pin if starting inside the contact skin and separating outwards.
+	// Checks the start contact/material point with the start pose box and the end contact with the end pose box.
 	{
 		const FRopeBoxCollider BoxS(CenterS, RotS, HalfExtents);
 		const FRopeContact Start = BoxS.Query(Q.WorldStart, Q.NodeRadius);
 		if (Start.bHit)
 		{
-			// 시작 재질점(로컬)의 끝 포즈 위치.
+			// End pose position of the starting material point (local).
 			const FVector Lp0 = RotS.UnrotateVector(Start.SurfacePoint - CenterS);
 			const FVector Closest0End = RotE.RotateVector(Lp0) + CenterE;
 			const FRopeBoxCollider BoxE(CenterE, RotE, HalfExtents);
@@ -112,15 +112,15 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	{
 		const float T = (NumSamples <= 1) ? 1.0f : static_cast<float>(k) / static_cast<float>(NumSamples - 1);
 		const FVector Pt = FMath::Lerp(Q.WorldStart, Q.WorldEnd, T);
-		// sub-포즈 박스(center/rot 보간)로 점질의. 임시 collider를 만들어 로컬 clamp 질의를 재사용한다.
+		// Point question with sub-pose box (center/rot interpolation). Create a temporary collider and reuse the local clamp query.
 		FRopeBoxCollider BoxT(FMath::Lerp(CenterS, CenterE, T), FQuat::Slerp(RotS, RotE, T), HalfExtents);
-		// BoxT는 InvDt=0 → 표면 속도 0(여기선 미사용).
+		// BoxT is InvDt=0 → surface velocity 0 (not used here).
 		const FRopeContact C = BoxT.Query(Pt, Q.NodeRadius);
 		if (!C.bHit)
 		{
 			continue;
 		}
-		// 접촉 재질점(로컬)을 substep 끝 포즈로 이월 — 노드를 표면과 함께 남은 모션만큼 옮긴다.
+		// Carry over the contact material point (local) to the end pose of the substep — Move the node along with the surface by the remaining amount of motion.
 		const FVector Lp = BoxT.Rot.UnrotateVector(C.SurfacePoint - BoxT.Center);
 		const FVector ClosestEnd = RotE.RotateVector(Lp) + CenterE;
 		Contact.bHit = true;
@@ -128,10 +128,10 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		Contact.Penetration = C.Penetration;
 		OutHitWorldPos = Pt + (ClosestEnd - C.SurfacePoint);
 		Contact.SurfacePoint = ClosestEnd;
-		// 랩 가능 박스면 가상 본(감지 귀속)+대상 컴포넌트. 정적이면 None/null.
+		// If the box can be Wrapped, then virtual bone (detection attribution) + target component. If static, None/null.
 		Contact.Bone = Bone;
 		Contact.SourceMesh = SourceMesh;
-		// 표면 속도: 재질점의 프레임 전체(prev->curr) 변위 / dt.
+		// surface velocity: entire frame (prev->curr) displacement of material point / dt.
 		const FVector WCurr = Rot.RotateVector(Lp) + Center;
 		const FVector WPrev = PrevRot.RotateVector(Lp) + PrevCenter;
 		Contact.SurfaceVelocity = (WCurr - WPrev) * InvDeltaTime;
@@ -142,7 +142,7 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 
 FBox FRopeBoxCollider::GetWorldBounds() const
 {
-	// OBB -> AABB: 축별 |회전 basis| · 반폭 합.
+	// OBB -> AABB: per axis |rotation basis| · Half width sum.
 	const FVector AxX = Rot.GetAxisX() * HalfExtents.X;
 	const FVector AxY = Rot.GetAxisY() * HalfExtents.Y;
 	const FVector AxZ = Rot.GetAxisZ() * HalfExtents.Z;
@@ -160,21 +160,21 @@ FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadiu
 	{
 		return Contact;
 	}
-	// 월드 -> 바디-로컬(강체 역): Lp = qInv*(p - Trans). 이후 로컬 평면/로컬 bounds로 질의.
+	// world -> body-local (rigid body station): Lp = qInv*(p - Trans). Afterwards, query with local plane/local bounds.
 	const FVector Lp = Rot.UnrotateVector(WorldPos - Trans);
 	if (!LocalBounds.IsValid || !LocalBounds.ExpandBy(NodeRadius).IsInsideOrOn(Lp))
 	{
-		// 로컬 AABB(+NodeRadius) 밖 → 확실히 미접촉.
+		// outside local AABB(+NodeRadius) → definitely not in contact.
 		return Contact;
 	}
 
-	// max-plane(로컬): 점이 가장 많이 위반한 평면(부호 거리 최대)이 표면 근사. 내부는 정확, 외부 엣지 근방은
-	// 과소추정(보수적). 그 평면의 로컬 법선을 월드로 회전한 것이 push-out 방향.
+	// max-plane(local): The plane (maximum sign distance) that the point violates the most is the surface approximation. Accurate on the inside, near the outside edge
+	// Underestimation (conservative). The push-out direction is the rotation of the local normal of the plane to the world.
 	double MaxD = -DBL_MAX;
 	int32 Best = INDEX_NONE;
 	for (int32 i = 0; i < LocalPlanes.Num(); ++i)
 	{
-		// dot(N,p) - W (로컬), N 바깥.
+		// dot(N,p) - W (local), outside N.
 		const double D = LocalPlanes[i].PlaneDot(Lp);
 		if (D > MaxD)
 		{
@@ -184,15 +184,15 @@ FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadiu
 	}
 	if (Best == INDEX_NONE || MaxD >= NodeRadius)
 	{
-		// 어떤 면 밖으로 NodeRadius 이상 → 확실히 컨벡스 밖(미접촉).
+		// Some surface out of the NodeRadius is definitely out of convex → definitely out of contact.
 		return Contact;
 	}
 
 	const FVector LocalNormal(LocalPlanes[Best].X, LocalPlanes[Best].Y, LocalPlanes[Best].Z);
-	// 로컬 표면점(재질점).
+	// local surface point (material point).
 	const FVector LocalSurface = Lp - LocalNormal * MaxD;
 	Contact.bHit = true;
-	// 월드 바깥 법선(FROZEN 계약, 부호 load-bearing).
+	// world outer normal (FROZEN contract, sign load-bearing).
 	// A wrappable convex (virtual bone) carries its attribution so the contact rides the normal
 	// contact-to-wrap decision path. The static default keeps both at None.
 	Contact.Bone = Bone;
@@ -200,7 +200,7 @@ FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadiu
 	Contact.Normal = Rot.RotateVector(LocalNormal);
 	Contact.Penetration = NodeRadius - static_cast<float>(MaxD);
 	Contact.SurfacePoint = Rot.RotateVector(LocalSurface) + Trans;
-	// 표면 속도: 재질점(로컬)의 (현재 포즈 - 이전 포즈) / dt. 움직이는 바디가 로프를 접선 방향으로 끈다.
+	// surface velocity: (current pose - previous pose) / dt of material point (local). A moving body pulls the rope in a tangential direction.
 	if (InvDeltaTime > 0.0f)
 	{
 		const FVector PrevWorld = PrevRot.RotateVector(LocalSurface) + PrevTrans;
@@ -211,7 +211,7 @@ FRopeContact FRopeConvexCollider::Query(const FVector& WorldPos, float NodeRadiu
 
 FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 {
-	// 정지 컨벡스(첫 프레임 포함)는 기본(현재 포즈 정적 스윕)과 동일 — 조기 위임.
+	// stationary convex (with first frame) is the same as basic (current pose static sweep) — early delegation.
 	if (InvDeltaTime <= 0.0f || (PrevTrans.Equals(Trans) && PrevRot.Equals(Rot)))
 	{
 		return IRopeCollider::QuerySwept(Q, OutHitWorldPos);
@@ -220,7 +220,7 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 	FRopeContact Contact;
 	OutHitWorldPos = Q.WorldEnd;
 
-	// substep sub-포즈 강체(prev->curr 보간).
+	// substep sub-pose rigid body(prev->curr interpolation).
 	const FVector TransS = FMath::Lerp(PrevTrans, Trans, Q.SubAlpha0);
 	const FVector TransE = FMath::Lerp(PrevTrans, Trans, Q.SubAlpha1);
 	const FQuat   RotS = FQuat::Slerp(PrevRot, Rot, Q.SubAlpha0);
@@ -230,8 +230,8 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
 
-	// 분리 가드(RopeCollision::IsSweptSeparating): 접촉 스킨 안에서 시작해 바깥으로 분리 중이면 재-핀 생략.
-	// 시작/끝 sub-포즈 강체로 로컬 평면 질의(위 sweep과 동일 로직)를 인라인해 시작 접촉/재질점·끝 접촉을 얻는다.
+	// Separation Guard (RopeCollision::IsSweptSeparating): Omit re-pin if starting inside the contact skin and separating outwards.
+	// Inline the local plane query (same logic as sweep above) with the start/end sub-pose rigid body to obtain the start contact/material point and end contact.
 	{
 		const FVector Lp0 = RotS.UnrotateVector(Q.WorldStart - TransS);
 		double MaxD0 = -DBL_MAX; int32 Best0 = INDEX_NONE;
@@ -248,7 +248,7 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 			const FVector LocalNormal0(LocalPlanes[Best0].X, LocalPlanes[Best0].Y, LocalPlanes[Best0].Z);
 			const FVector LocalSurface0 = Lp0 - LocalNormal0 * MaxD0;
 			const FVector StartSurface = RotS.RotateVector(LocalSurface0) + TransS;
-			const FVector Closest0End = RotE.RotateVector(LocalSurface0) + TransE; // 재질점 끝 포즈
+			const FVector Closest0End = RotE.RotateVector(LocalSurface0) + TransE; // material point end pose
 			const FVector StartNormal = RotS.RotateVector(LocalNormal0);
 			const FVector Lp1 = RotE.UnrotateVector(Q.WorldEnd - TransE);
 			bool bEndInContact = false;
@@ -275,7 +275,7 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 		const FVector Pt = FMath::Lerp(Q.WorldStart, Q.WorldEnd, T);
 		const FVector TransT = FMath::Lerp(TransS, TransE, T);
 		const FQuat   RotT = FQuat::Slerp(RotS, RotE, T);
-		// sub-포즈 로컬 점질의(강체 RotT/TransT로 로컬 변환).
+		// Sub-pose local point query (local transformation to rigid body RotT/TransT).
 		const FVector Lp = RotT.UnrotateVector(Pt - TransT);
 		if (!LocalBounds.ExpandBy(Q.NodeRadius).IsInsideOrOn(Lp))
 		{
@@ -293,7 +293,7 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 		}
 		const FVector LocalNormal(LocalPlanes[Best].X, LocalPlanes[Best].Y, LocalPlanes[Best].Z);
 		const FVector LocalSurface = Lp - LocalNormal * MaxD;
-		// 재질점을 끝 sub-포즈로 이월.
+		// Carry over the material point to the end sub-pose.
 		const FVector ClosestT = RotT.RotateVector(LocalSurface) + TransT;
 		const FVector ClosestEnd = RotE.RotateVector(LocalSurface) + TransE;
 		Contact.bHit = true;
@@ -313,7 +313,7 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 
 FBox FRopeConvexCollider::GetWorldBounds() const
 {
-	// 로컬 AABB를 강체(Rot,Trans)로 변환 → 월드 AABB(브로드페이즈). 무효면 그대로.
+	// Convert local AABB to rigid body (Rot, Trans) → world AABB (broad phase). If invalid, stay as is.
 	if (!LocalBounds.IsValid)
 	{
 		return LocalBounds;

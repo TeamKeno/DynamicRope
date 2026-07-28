@@ -1,27 +1,27 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// GPU 솔버(M1) 패리티/안정성 테스트. CPU FRopeXPBDSolver를 ground-truth로, GPU FRopeGPUSolver가
-// 같은 시나리오에서 (1) 발산/NaN 없이 (2) 비신축 세그먼트 길이를 유지하며 (3) CPU와 "근사" 일치하는지 본다.
-// 주의: red-black/stride-3 컬러링은 CPU의 교대-sweep Gauss-Seidel과 비트일치하지 않는다(수렴만 근사) →
-// 노드별 편차는 허용오차 기반으로만 본다. 또한 GPU 디스패치는 RHI가 필요하므로, 렌더 불가 환경에선 스킵한다.
+// GPU solver (M1) parity/stability test. CPU FRopeXPBDSolver as ground-truth, GPU FRopeGPUSolver as ground-truth
+// In the same scenario, bone is checked to see if (1) there is no divergence/NaN, (2) the non-stretched segment length is maintained, and (3) the "approximation" matches the CPU.
+// Note: red-black/stride-3 coloring is not bit-identical with the alternating-sweep Gauss-Seidel of the CPU (convergence only approximation) →
+// Per-node deviation is bone based on tolerance only. Additionally, GPU dispatch requires RHI, so it is skipped in environments where rendering is not possible.
 
 #include "Misc/AutomationTest.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Solver/RopeXPBDSolver.h"
-// DynamicRopeShaders 모듈
+// DynamicRopeShaders module
 #include "RopeGPUSolver.h"
-// FRHIGPUBufferReadback 완전정의(5.7/5.8은 전이 include, ≤5.6은 명시 필요)
+// FRHIGPUBufferReadback fully defined (5.7/5.8 includes transition, ≤5.6 requires specification)
 #include "RHIGPUReadback.h"
 #include "Collision/RopeCollider.h"
-// FRopeBoxCollider (정적 박스 parity)
+// FRopeBoxCollider (static box parity)
 #include "Collision/RopeStaticCollider.h"
 #include "Collision/SDF/RopeSDFCollider.h"
-// MakeSphere(합성 SDF 볼륨)
+// MakeSphere (synthetic SDF volume)
 #include "RopeSDFSynthetic.h"
 #include "Collision/SDF/RopeSDFData.h"
-// CPU 감지(패리티 ground-truth)
+// CPU detection(parity ground-truth)
 #include "Logic/RopeFlightContactDetector.h"
 #include "RopeTestHelpers.h"
 #include "RHI.h"
@@ -38,7 +38,7 @@ namespace
 		FRopeSolverConfig C;
 		C.Substeps = 8;
 		C.Iterations = 8;
-		// 비신축
+		// Non-expandable
 		C.StretchCompliance = 0.0f;
 		C.BendCompliance = 0.02f;
 		C.Gravity = FVector(0.0f, 0.0f, -980.0f);
@@ -57,14 +57,14 @@ namespace
 	}
 }
 
-// 핀-고정 hanging rope에서 GPU 경로가 안정적이고(NaN/발산 없음, 세그먼트 길이 유지) CPU와 근사 일치하는가.
+// In the pinned hanging rope, is the GPU path static (no NaN/divergence, segment length maintained) and the approximation matches that of the CPU?
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUSolverParityTest,
 	"DynamicRope.Solver.GPUParityHangingRope",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 {
-	// GPU 디스패치는 RHI 필요 — 렌더 불가(헤드리스/널 RHI) 환경에선 스킵(실패가 아님).
+	// GPU dispatch requires RHI — skip (not fail) in render-unable (headless/null RHI) environments.
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
 		AddWarning(TEXT("GPU 솔버 패리티 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
@@ -81,8 +81,8 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	const FRopeXPBDSolver Solver;
 	const TArray<IRopeCollider*> NoColliders;
 
-	// GPU 솔버는 상주(M5): 매 프레임 Step으로 영속 버퍼를 in-place 전진, 결과는 RT 리드백→GetLatest로 회수(지연).
-	// 테스트는 동기 검증이라 매 Step 후 FlushRenderingCommands로 RT를 진행시킨다. generation은 1로 고정(첫 프레임만 시드).
+	// GPU solver is resident (M5): Advances the persistent buffer in-place at every frame step, and retrieves (delays) the result with RT readback → GetLatest.
+	// The test is a synchronous verification, so RT is performed with FlushRenderingCommands after each step. The generation is pinned to 1 (only the first frame is seeded).
 	FRopeGPUSolver GpuSolver;
 	const uint32 RopeId = 1;
 	const uint32 Gen = 1;
@@ -117,18 +117,18 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 		// CPU: ground-truth.
 		Solver.Step(CpuSim, Config, NoColliders, 1.0f / 60.0f);
 
-		// GPU: CPU와 동일한 고정-timestep 스케줄(누적 진화 동일 → 동일 NumSub)로 상주 step 1회.
+		// GPU: One resident step with the same pinned-timestep schedule as the CPU (same cumulative evolution → same NumSub).
 		const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(GpuSim, Config, 1.0f / 60.0f);
 		TArray<FRopeGPUResidentStep> Steps;
 		Steps.Add(MakeStep(GpuSim, Schedule.NumSub, Schedule.FixedDt));
 		GpuSolver.Step(MoveTemp(Steps));
-		// RT가 dispatch + 리드백 copy를 처리하도록 진행.
+		// RT proceeds to handle dispatch + readback copy.
 		FlushRenderingCommands();
 	}
 
-	// 최종 프레임 결과를 결정론적으로 회수: ReadbackNow는 상주 버퍼를 BlockUntilGPUIdle로 동기 리드백한다.
-	// 전용 Step 경로는 PendingSteps에 쌓지 않으므로 추가 solve 없이 마지막 dispatch 상태를 그대로 읽는다
-	// (비동기 GetLatest 미러는 어느 프레임 결과인지 특정할 수 없어 실행 간 비결정적이다).
+	// Retrieve the final frame result deterministically: ReadbackNow synchronously reads back the resident buffer to BlockUntilGPUIdle.
+	// Dedicated step paths are not stacked in PendingSteps, so the last dispatch state is read as is without additional solving.
+	// (The asynchronous GetLatest mirror cannot specify which frame the result is, so it is non-static between executions).
 	FlushRenderingCommands();
 	TArray<FVector> RbPos, RbPrev;
 	uint32 RbGen = 0;
@@ -144,16 +144,16 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 		GpuSim.PrevPositions[i] = RbPrev[i];
 	}
 
-	// (1) 안정성: NaN 없음.
+	// (1) Stability: No NaN.
 	TestFalse(TEXT("CPU no NaN"), RopeTest::AnyNaN(CpuSim));
 	TestFalse(TEXT("GPU no NaN"), RopeTest::AnyNaN(GpuSim));
 
-	// (2) 비신축: GPU 세그먼트 오차가 CPU와 같은 수준으로 bounded.
+	// (2) Non-stretch: GPU segment error is bounded to the same level as CPU.
 	const float GpuSegErr = RopeTest::MaxSegmentError(GpuSim);
 	TestTrue(FString::Printf(TEXT("GPU segment error %.2f cm bounded"), GpuSegErr),
 		GpuSegErr < GpuSim.SegmentLength * 2.0f);
 
-	// (3) 근사 일치: 노드별 최대 편차. 비트일치는 기대하지 않음 — 정착 형상이 가까운지만 본다(허용오차 관대).
+	// (3) approximation matching: per-node maximum deviation. Do not expect bit-identical — the fixed geometry is close, but bone (tolerant).
 	float MaxDev = 0.0f;
 	for (int32 i = 0; i < N; ++i)
 	{
@@ -161,22 +161,22 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	}
 	AddInfo(FString::Printf(TEXT("CPU↔GPU 최대 노드 편차: %.2f cm (RopeLength %.0f)"), MaxDev, Length));
 	TestTrue(FString::Printf(TEXT("CPU↔GPU max node deviation %.2f cm within tolerance"), MaxDev),
-		// 정착 hanging 형상은 가까워야 함(관대한 상한).
+		// Settlement hanging geometry should be close (generous cap).
 		MaxDev < Length * 0.25f);
 
 	return true;
 }
 
-// Override 패스(G0): NumSub=0 오버라이드 dispatch가 위치/질량을 상주 버퍼에 기록하고,
-// InvMass=0으로 고정한 노드가 이후 중력 솔브에서도 타깃에 정확히 남으며(질량 마스크 영속),
-// InvMass 복원 오버라이드 후에는 다시 물리로 돌아오는지 본다. "타깃 계산은 GT, 적용은 GPU" 계약 검증.
+// Override pass(G0): NumSub=0 override dispatch records location/mass in resident buffer,
+// Nodes pinned with InvMass=0 remain exactly in the target in subsequent gravity solves (mass mask is persistent),
+// After InvMass restoration override, the bone returns to physics. “Target calculation is GT, application is GPU” contract verification.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUOverridePassTest,
 	"DynamicRope.Solver.GPUOverridePass",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 {
-	// GPU 디스패치는 RHI 필요 — 렌더 불가(헤드리스/널 RHI) 환경에선 스킵(실패가 아님).
+	// GPU dispatch requires RHI — skip (not fail) in render-unable (headless/null RHI) environments.
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
 		AddWarning(TEXT("GPU override 패스 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
@@ -223,8 +223,8 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 		GpuSolver.Step(MoveTemp(Steps));
 		FlushRenderingCommands();
 	};
-	// GPU idle까지 동기화 — 리드백 IsReady를 결정적으로 만든다(헤드리스 고속 실행에서 GPU가
-	// 뒤처지면 in-flight 복사본이 오래된 프레임 것일 수 있다).
+	// Synchronize until GPU idle — make readback IsReady non-static (in high-speed headless execution, GPU
+	// If you lag behind, the in-Flight copy may be an old frame).
 	auto SyncGPU = []()
 	{
 		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
@@ -234,10 +234,10 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 			});
 		FlushRenderingCommands();
 	};
-	// 최신(최종 상태) 리드백 회수. 주의: 단일 in-flight 리드백은 무장 시점의 버퍼를 복사하므로,
-	// (1) GPU idle 동기화로 기존 복사본을 consume 가능하게 만들고 (2) no-op override dispatch로
-	// 재무장을 유도하는 사이클을 여러 번 돌려야 "마지막 실제 상태"의 복사본이 확실히 도착한다.
-	// (no-op = 플래그 전부 0: 아무 노드도 쓰지 않지만 dispatch는 발생 → consume+재무장.)
+	// Retrieve the latest (final status) readback. NOTE: A single in-Flight readback copies the buffer at arming time, so
+	// (1) Make the existing copy available for consumption with GPU idle synchronization and (2) make it possible to consume with no-op override dispatch.
+	// The cycle leading to rearmament must be repeated several times to ensure that a copy of the "last actual state" arrives.
+	// (no-op = flags all 0: No nodes are used, but dispatch occurs → consume+rearm.)
 	auto Drain = [&](FRopeResidentLatest& OutLatest) -> bool
 	{
 		for (int32 Spin = 0; Spin < 8; ++Spin)
@@ -248,7 +248,7 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 			Pump(MoveTemp(Noop));
 		}
 		SyncGPU();
-		// 마지막 consume(오버라이드 없음 — dispatch 없이 회수만).
+		// last consume(no override — just recall, no dispatch).
 		Pump(MakeStep(0, 1.0f / 60.0f));
 
 		TMap<uint32, FRopeResidentLatest> Latest;
@@ -264,13 +264,13 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 		return false;
 	};
 
-	// 1) 시드 + 정상 솔브 몇 프레임.
+	// 1) Seed + normal solve a few frames.
 	for (int32 Frame = 0; Frame < 4; ++Frame)
 	{
 		Pump(MakeStep(Config.Substeps, (1.0f / 60.0f) / Config.Substeps));
 	}
 
-	// 2) 오버라이드: 노드 3..5를 임의 타깃에 고정(Pos + Prev=Pos + InvMass=0). NumSub=0 — 적분 없이 기록만.
+	// 2) override: pinned node 3..5 to a random target (Pos + Prev=Pos + InvMass=0). NumSub=0 — Record only, no integration.
 	TArray<FVector> Targets;
 	Targets.SetNumZeroed(N);
 	const uint8 FixFlags = static_cast<uint8>(
@@ -290,7 +290,7 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 		Pump(MoveTemp(Ov));
 	}
 
-	// 3) 중력 솔브 20프레임 — 고정 노드는 1mm도 움직이면 안 된다(InvMass 마스크가 영속되는지).
+	// 3) Gravity solve 20 frames — pinned nodes must not move even 1mm (whether the InvMass mask is persistent).
 	for (int32 Frame = 0; Frame < 20; ++Frame)
 	{
 		Pump(MakeStep(Config.Substeps, (1.0f / 60.0f) / Config.Substeps));
@@ -316,7 +316,7 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 		}
 	}
 
-	// 4) 질량 복원(InvMass=1만 오버라이드) 후 중력 솔브 — 노드가 타깃에서 다시 벗어나야 한다.
+	// 4) Solve gravity after restoring mass (override InvMass=1 only) — the node must deviate from the target again.
 	{
 		FRopeGPUResidentStep Restore = MakeStep(0, 1.0f / 60.0f);
 		Restore.OverrideFlags.SetNumZeroed(N);
@@ -343,8 +343,8 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 	TestTrue(FString::Printf(TEXT("restored node resumes physics (moved %.2f cm off target)"), MovedDev),
 		MovedDev > 1.0f);
 
-	// 5) Flight/Wrapping phase policy가 전달하는 MaxStretchRatio=1.0: GT에서 과신장된 guide
-	// override를 넣어도 실제 resident pose는 같은 GPU step 끝에 SegmentLength 안으로 돌아와야 한다.
+	// 5) MaxStretchRatio=1.0 delivered by Flight/Wrapping phase policy: Guide overstretched in GT
+	// Even if override is added, the actual resident pose must return within SegmentLength at the end of the same GPU step.
 	{
 		FRopeGPUResidentStep NonStretch = MakeStep(/*NumSub*/ 1, 1.0f / 60.0f);
 		NonStretch.MaxStretchRatio = 1.0f;
@@ -382,8 +382,8 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 접촉 감지 패리티(G3): GPU 감지 커널이 CPU FRopeFlightContactDetector::DetectContactCandidates와
-// 같은 접촉(히트 노드 집합 + 노드별 침투/법선)을 산출하는가. 정적 로프 + 캡슐로 결정적 비교.
+// contact detection parity(G3): GPU detection kernel compares CPU FRopeFlightContactDetector::DetectContactCandidates
+// Does it calculate the same contact (hit node set + per-node penetration/normal)? Static comparison with static rope + capsule.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUContactParityTest,
 	"DynamicRope.Solver.GPUContactParity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -400,12 +400,12 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 	const float Length = 140.0f;
 	const float ContactRadius = 3.0f;
 
-	// 정적 로프(prev==pos)를 z=15에 둔다. 캡슐: x=60에서 Y축을 따라, 반지름 30 → 노드 2/3/4가 침투.
+	// Place static rope(prev==pos) at z=15. Capsule: Along the Y axis at x=60, radius 30 → node 2/3/4 penetrates.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(N, Length, FVector(0, 0, 15));
 	FCapsuleCollider Capsule(FVector(60, -50, 0), FVector(60, 50, 0), 30.0f, FName("arm"));
 	TArray<IRopeCollider*> Colliders = { &Capsule };
 
-	// --- CPU ground-truth 감지.
+	// --- CPU ground-truth detection.
 	FRopeFlightContactDetector::FParams Params;
 	Params.ContactRadius = ContactRadius;
 	Params.RopeRadius = 2.0f;
@@ -414,7 +414,7 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 	TArray<FRopeContactCandidate> CpuCandidates;
 	FRopeFlightContactDetector::DetectContactCandidates(Sim, Colliders, Params, CpuCandidates);
 
-	// --- GPU 감지: 감지 전용 step(NumSub=0, bDetectContacts). 상주 버퍼를 시드 위치로 채우고 감지.
+	// --- GPU detection: detection-only step(NumSub=0, bDetectContacts). Fill the resident buffer with seed locations and perform detection.
 	FRopeGPUSolver GpuSolver;
 	const uint32 RopeId = 11;
 	const uint32 Gen = 1;
@@ -429,7 +429,7 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 		Step.SeedPrevPositions = Sim.PrevPositions;
 		Step.InvMass           = Sim.InvMass;
 		Step.SegmentLength     = Sim.SegmentLength;
-		// 적분 없음 — 시드 위치 그대로 감지.
+		// No integration — Detection of seed position as is.
 		Step.NumSub            = 0;
 		Step.FixedDt           = 1.0f / 60.0f;
 		Step.bDetectContacts   = true;
@@ -460,7 +460,7 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 		FlushRenderingCommands();
 	};
 
-	// 여러 번 펌프해 감지 리드백이 도착하게 한다(단일 in-flight → sync + 재무장 사이클).
+	// Pumps multiple times to ensure detection readback arrives (single in-Flight → sync + rearmament cycle).
 	FRopeResidentContacts GpuContacts;
 	bool bGot = false;
 	for (int32 Spin = 0; Spin < 16 && !bGot; ++Spin)
@@ -485,7 +485,7 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	// --- 비교: 히트 노드 집합 일치 + 노드별 침투/법선 근사 일치.
+	// --- Comparison: Hit node set matching + per-node penetration/normal approximation matching.
 	TMap<int32, const FRopeContactCandidate*> CpuByNode;
 	for (const FRopeContactCandidate& C : CpuCandidates) { CpuByNode.Add(C.NodeIndex, &C); }
 	TMap<int32, const FRopeGPUContactResult*> GpuByNode;
@@ -514,8 +514,8 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 랩 가능 convex 감지 패리티: 박스형 convex(가상 본)를 CPU 감지와 GPU 감지 커널의 convex 루프가
-// 동일한 히트 집합/침투/법선으로 잡는가(NumDetectConvexes 경계 + ColliderType=3 배선 검증).
+// wrap possible convex detection parity: box-type convex (virtual bone) is used in convex loops of CPU detection and GPU detection kernels.
+// Capture with the same hit set/penetration/normal (NumDetectConvexes boundary + ColliderType=3 wiring verification).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUConvexContactParityTest,
 	"DynamicRope.Solver.GPUConvexContactParity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -532,7 +532,7 @@ bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
 	const float Length = 140.0f;
 	const float ContactRadius = 3.0f;
 
-	// 정적 로프(prev==pos)를 z=15에. 박스형 convex(6평면): x=60 중심, 반폭 (30,50,30) → 노드 2/3/4가 내부.
+	// static rope(prev==pos) at z=15. Box-type convex (6 planes): x=60 center, half width (30,50,30) → nodes 2/3/4 are inside.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(N, Length, FVector(0, 0, 15));
 	TArray<FPlane> Planes;
 	Planes.Add(FPlane(FVector(1, 0, 0), 30.0));
@@ -546,7 +546,7 @@ bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
 	Convex.Bone = FName(TEXT("prop"));
 	TArray<IRopeCollider*> Colliders = { &Convex };
 
-	// --- CPU ground-truth 감지.
+	// --- CPU ground-truth detection.
 	FRopeFlightContactDetector::FParams Params;
 	Params.ContactRadius = ContactRadius;
 	Params.RopeRadius = 2.0f;
@@ -555,7 +555,7 @@ bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
 	TArray<FRopeContactCandidate> CpuCandidates;
 	FRopeFlightContactDetector::DetectContactCandidates(Sim, Colliders, Params, CpuCandidates);
 
-	// --- GPU 감지: 감지 전용 step. convex를 pass-1 규약(평탄 평면 풀 + NumDetectConvexes)으로 패킹.
+	// --- GPU detection: Dedicated step for detection. Packing convexes with pass-1 protocol (smooth plane pool + NumDetectConvexes).
 	FRopeGPUSolver GpuSolver;
 	const uint32 RopeId = 13;
 	const uint32 Gen = 1;
@@ -667,8 +667,8 @@ bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
 }
 
 
-// 예측 접촉 패리티(G3b): 아직 안 닿았지만 외삽 경로가 캡슐을 지나는 tail 노드가 predictive 슬롯에
-// 잡히고, CPU AddPredictedContactCandidates와 침투/소스가 일치하는가. actual 슬롯은 비어야 한다.
+// Predictive contact parity (G3b): The tail node that has not yet been reached but whose extrapolation path passes through the capsule is in the predictive slot.
+// is caught, and does the CPU AddPredictedContactCandidates and penetration/source match? The actual slot must be empty.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUPredictiveParityTest,
 	"DynamicRope.Solver.GPUPredictiveParity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -686,7 +686,7 @@ bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
 	const float ContactRadius = 3.0f;
 	const float PredictionFrames = 3.0f;
 
-	// tail 노드 7만 +X로 이동(prev 120 → pos 140). 캡슐은 x=175(도달 전) → actual 미스, 예측 경로가 관통.
+	// Only tail node 7 moves to +X (prev 120 → pos 140). Capsule is x=175 (before arrival) → actual miss, predicted path penetrates.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(N, Length, FVector(0, 0, 15));
 	Sim.PrevPositions[7] = FVector(120, 0, 15);
 	Sim.Positions[7]     = FVector(140, 0, 15);
@@ -705,7 +705,7 @@ bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
 	FRopeFlightContactDetector::AddPredictedContactCandidates(Sim, Colliders, Params,
 		FRopeFlightContactDetector::FWhipGuideView(), CpuCandidates);
 
-	// CPU: actual 0개, predictive로 노드 7 하나 추가되어야 한다.
+	// CPU: actual 0, one node 7 should be added predictively.
 	TestEqual(TEXT("CPU actual 접촉 없음"), CpuActualCount, 0);
 	const FRopeContactCandidate* CpuPred = nullptr;
 	for (const FRopeContactCandidate& C : CpuCandidates)
@@ -717,7 +717,7 @@ bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	// --- GPU: 예측 포함 감지 step(whip 없음 → free 예측).
+	// --- GPU: Includes prediction detection step (no whip → Free prediction).
 	FRopeGPUSolver GpuSolver;
 	const uint32 RopeId = 13;
 	const uint32 Gen = 1;
@@ -772,7 +772,7 @@ bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	// GPU: 노드 7의 predictive(Source=2) 접촉이 있어야 하고 actual(Source=1)은 없어야 한다.
+	// GPU: There must be a predictive(Source=2) contact on node 7 and no actual(Source=1) contact.
 	const FRopeGPUContactResult* GpuPred = nullptr;
 	bool bAnyActual = false;
 	for (const FRopeGPUContactResult& C : GpuContacts.Contacts)
@@ -795,8 +795,8 @@ bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// SDF 접촉 감지 패리티(G3b): GPU SDF 감지가 CPU FRopeSDFCollider::Query 기반 감지와 같은 접촉을
-// 산출하는가. 합성 구 볼륨 + 정적 로프로 결정적 비교(침투/법선/접촉점).
+// SDF contact detection parity(G3b): GPU SDF detection detects the same contact as CPU FRopeSDFCollider::Query-based detection.
+// calculated? Static comparison of composite sphere volume + static rope (penetration/normal/contact point).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUSDFContactParityTest,
 	"DynamicRope.Solver.GPUSDFContactParity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -811,13 +811,13 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 
 	const float ContactRadius = 3.0f;
 
-	// 반지름 20 구(본 로컬), BoneToWorld=identity. 로프 노드를 표면 근처에 배치해 몇 개가 침투하게 한다.
+	// radius 20 sphere (bone local), BoneToWorld=identity. Place rope nodes near the surface so that several of them penetrate.
 	const FRopeBoneSDFVolume Volume =
 		RopeSDFSynthetic::MakeSphere(FName("arm"), FVector::ZeroVector, 20.0f, FIntVector(31), 10.0f);
 	FRopeSDFCollider Sdf(&Volume, FTransform::Identity, FTransform::Identity, 0.0f, FName("arm"), nullptr);
 	TArray<IRopeCollider*> Colliders = { &Sdf };
 
-	// 정적 로프(prev==pos): x = -25,-21,-19,19,21,25 (z=0). 표면(20)에서 노드 1/2/3/4가 반경 3 이내.
+	// static rope(prev==pos): x = -25,-21,-19,19,21,25 (z=0). In surface(20), nodes 1/2/3/4 are within radius 3.
 	const int32 N = 6;
 	FRopeSimState Sim = RopeTest::MakeStraightRope(N, 100.0f);
 	const float Xs[N] = { -25.0f, -21.0f, -19.0f, 19.0f, 21.0f, 25.0f };
@@ -836,7 +836,7 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 	TArray<FRopeContactCandidate> CpuCandidates;
 	FRopeFlightContactDetector::DetectContactCandidates(Sim, Colliders, Params, CpuCandidates);
 
-	// --- GPU SDF collider 뷰 → step.
+	// --- GPU SDF collider view → step.
 	FRopeSDFColliderView View;
 	if (!Sdf.GetGPUSDF(View))
 	{
@@ -903,7 +903,7 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	// GPU actual 접촉만(정적 → 예측 없음).
+	// GPU actual contact only (static → no prediction).
 	TMap<int32, const FRopeGPUContactResult*> GpuByNode;
 	for (const FRopeGPUContactResult& C : GpuContacts.Contacts)
 	{
@@ -930,9 +930,9 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 정적 박스(OBB) 충돌 parity: 박스 모서리 위로 드레이프된 로프가 GPU 경로에서도 (1) 박스 내부로
-// 파고들지 않고 (2) CPU 솔버(FRopeBoxCollider)와 근사 일치하는가. GDF 복셀 라운딩으로 모서리를
-// 관통하던 버그를 해석적 박스가 GPU에서 막는지 보는 회귀 게이트.
+// static box(OBB) collision parity: The rope draped over the edge of the box goes inside the box (1) in the GPU path as well.
+// Without going into detail, (2) Does the approximation match the CPU solver (FRopeBoxCollider)? Edges with GDF voxel rounding
+// A regression gate that checks whether the analytic box blocks the bug that was penetrating the GPU.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUBoxCornerParityTest,
 	"DynamicRope.Solver.GPUBoxCornerParity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -952,7 +952,7 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 	Config.CollisionRadius = 2.0f;
 	Config.Friction = 0.5f;
 
-	// 박스(반폭 50, 원점) 위 z=55에서 +X/-X 엣지를 가로질러 걸친 자유 로프(핀 없음). 중력 드레이프.
+	// Free rope (no pins) spanning the +X/-X edges at z=55 above the box (half-width 50, origin). Gravity Drape.
 	FRopeBoxCollider Box(FVector::ZeroVector, FQuat::Identity, HalfExtents);
 	TArray<IRopeCollider*> Colliders;
 	Colliders.Add(&Box);
@@ -995,7 +995,7 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 		Step.MaxSweepSamples   = Config.MaxSweepSamples;
 		Step.NumSub            = NumSub;
 		Step.FixedDt           = FixedDt;
-		// 정적 박스: CPU FRopeBoxCollider와 동일 데이터(GetGPUBox 추출과 같은 값).
+		// static box: Same data as CPU FRopeBoxCollider (same value as GetGPUBox extract).
 		FRopeGPUBox GpuBox;
 		Box.GetGPUBox(GpuBox.Center, GpuBox.Rot, GpuBox.HalfExtents);
 		Step.Boxes.Add(GpuBox);
@@ -1025,9 +1025,9 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 		}
 	}
 
-	// 최종 프레임 결과를 결정론적으로 회수: ReadbackNow는 상주 버퍼를 BlockUntilGPUIdle로 동기 리드백한다.
-	// 전용 Step 경로는 PendingSteps에 쌓지 않으므로 추가 solve 없이 마지막 dispatch 상태를 그대로 읽는다
-	// (비동기 GetLatest 미러는 어느 프레임 결과인지 특정할 수 없어 실행 간 비결정적이다).
+	// Retrieve the final frame result deterministically: ReadbackNow synchronously reads back the resident buffer to BlockUntilGPUIdle.
+	// Dedicated step paths are not stacked in PendingSteps, so the last dispatch state is read as is without additional solving.
+	// (The asynchronous GetLatest mirror cannot specify which frame the result is, so it is non-static between executions).
 	FlushRenderingCommands();
 	TArray<FVector> RbPos, RbPrev;
 	uint32 RbGen = 0;
@@ -1046,7 +1046,7 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("CPU no NaN"), RopeTest::AnyNaN(CpuSim));
 	TestFalse(TEXT("GPU no NaN"), RopeTest::AnyNaN(GpuSim));
 
-	// (1) 접촉 구간 관통 없음: 어떤 GPU 노드도 박스 내부에 있으면 안 된다(원래 버그의 회귀 조건).
+	// (1) No contact section penetration: No GPU node must be inside the box (regression condition of the original bug).
 	float MaxInsideDepth = 0.0f;
 	for (const FVector& P : ParityGpuPositions)
 	{
@@ -1060,7 +1060,7 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 	TestTrue(FString::Printf(TEXT("GPU max inside depth %.3f cm should be < 0.5"), MaxInsideDepth),
 		MaxInsideDepth < 0.5f);
 
-	// (2) CPU 근사 일치: 정착 드레이프 형상이 가까운지(비트일치 아님 — 컬러링/샘플 순서 차).
+	// (2) CPU approximation matching: whether the fixation drape geometry is close (not bit-identical — coloring/sample order difference).
 	if (!TestEqual(TEXT("박스 parity CPU 스냅샷 노드 수"), ParityCpuPositions.Num(), N) ||
 		!TestEqual(TEXT("박스 parity GPU 스냅샷 노드 수"), ParityGpuPositions.Num(), N))
 	{
@@ -1092,9 +1092,9 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// 정적 컨벡스(6평면 = 박스) 충돌 parity: 컨벡스 모서리 위로 드레이프된 로프가 GPU 컨벡스 경로에서도
-// (1) 내부로 파고들지 않고 (2) CPU 솔버(FRopeConvexCollider)와 근사 일치하는가. 박스를 6평면 컨벡스로
-// 표현해 두 경로의 max-plane 질의 + 평면 풀 패킹을 검증한다.
+// static convex (6 planes = box) collision parity: The rope draped over the edge of the convex is also in the GPU convex path.
+// (1) Without delving into the internals, (2) does the approximation match the CPU solver (FRopeConvexCollider)? box into 6-plane convex
+// is expressed to verify the max-plane query + plane full packing of the two paths.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUConvexParityTest,
 	"DynamicRope.Solver.GPUConvexParity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1114,7 +1114,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 	Config.CollisionRadius = 2.0f;
 	Config.Friction = 0.5f;
 
-	// 원점 박스(반폭 50)를 6평면 컨벡스로. CPU는 FRopeConvexCollider, GPU는 Step.Convexes/ConvexPlanes.
+	// Origin box (half width 50) as 6-plane convex. FRopeConvexCollider on CPU, Step.Convexes/ConvexPlanes on GPU.
 	auto MakePlanes = [&]() -> TArray<FPlane>
 	{
 		TArray<FPlane> P;
@@ -1164,7 +1164,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		Step.MaxSweepSamples   = Config.MaxSweepSamples;
 		Step.NumSub            = NumSub;
 		Step.FixedDt           = FixedDt;
-		// 6평면 컨벡스: 평면 풀 + 헤더(오프셋 0, 개수 6). 강체 identity → 월드=로컬(평면을 원점에 구성), 정적(InvDt 0).
+		// 6-plane convex: plane pool + header (offset 0, count 6). rigid body identity → world=local (constructs the plane at the origin), static(InvDt 0).
 		FRopeGPUConvex Cv;
 		Cv.PlaneOffset = 0;
 		Cv.PlaneCount = 6;
@@ -1200,9 +1200,9 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		}
 	}
 
-	// 최종 프레임 결과를 결정론적으로 회수: ReadbackNow는 상주 버퍼를 BlockUntilGPUIdle로 동기 리드백한다.
-	// 전용 Step 경로는 PendingSteps에 쌓지 않으므로 추가 solve 없이 마지막 dispatch 상태를 그대로 읽는다
-	// (비동기 GetLatest 미러는 어느 프레임 결과인지 특정할 수 없어 실행 간 비결정적이다).
+	// Retrieve the final frame result deterministically: ReadbackNow synchronously reads back the resident buffer to BlockUntilGPUIdle.
+	// Dedicated step paths are not stacked in PendingSteps, so the last dispatch state is read as is without additional solving.
+	// (The asynchronous GetLatest mirror cannot specify which frame the result is, so it is non-static between executions).
 	FlushRenderingCommands();
 	TArray<FVector> RbPos, RbPrev;
 	uint32 RbGen = 0;
@@ -1221,7 +1221,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("CPU no NaN"), RopeTest::AnyNaN(CpuSim));
 	TestFalse(TEXT("GPU no NaN"), RopeTest::AnyNaN(GpuSim));
 
-	// (1) 접촉 구간 관통 없음: 어떤 GPU 노드도 컨벡스(=박스) 내부에 있으면 안 된다.
+	// (1) No contact section penetration: No GPU node must be inside the convex (=box).
 	float MaxInsideDepth = 0.0f;
 	for (const FVector& P : ParityGpuPositions)
 	{
@@ -1234,7 +1234,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 	TestTrue(FString::Printf(TEXT("GPU convex max inside depth %.3f cm should be < 0.5"), MaxInsideDepth),
 		MaxInsideDepth < 0.5f);
 
-	// (2) CPU 근사 일치.
+	// (2) CPU approximation matching.
 	if (!TestEqual(TEXT("컨벡스 parity CPU 스냅샷 노드 수"), ParityCpuPositions.Num(), N) ||
 		!TestEqual(TEXT("컨벡스 parity GPU 스냅샷 노드 수"), ParityGpuPositions.Num(), N))
 	{
@@ -1315,8 +1315,8 @@ bool FRopeGPUPendingReadbackConsumesStandaloneStepTest::RunTest(const FString& P
 	{
 		TArray<FRopeGPUResidentStep> Steps;
 		Steps.Add(MakeOverrideStep(Target));
-		// 일부러 별도 dispatch/flush 없이 pending에만 넣는다. ReadbackNow가 RT ordering으로 이 step을
-		// 먼저 실행해야 하며, resident가 없던 첫 호출도 성공해야 한다.
+		// It is intentionally placed only in pending without separate dispatch/flush. ReadbackNow performs this step with RT ordering.
+		// must be executed first, and the first call without a resident must also succeed.
 		GpuSolver.EnqueueSteps(MoveTemp(Steps));
 		return GpuSolver.ReadbackNow(RopeId, OutPos, OutPrev, OutGeneration);
 	};
@@ -1339,7 +1339,7 @@ bool FRopeGPUPendingReadbackConsumesStandaloneStepTest::RunTest(const FString& P
 	TestTrue(TEXT("pending override position is authoritative"), FVector::Dist(Pos[2], FirstTarget) < 0.01f);
 	TestTrue(TEXT("PrevFromPosition is included in the same snapshot"), FVector::Dist(Prev[2], FirstTarget) < 0.01f);
 
-	// 같은 GFrameCounter에 새 pending이 들어와도 과거 handoff cache를 반환하면 안 된다.
+	// Even if a new pending message enters the same GFrameCounter, the past handoff cache should not be returned.
 	const FVector SecondTarget(-12.0f, 44.0f, 6.0f);
 	Pos.Reset();
 	Prev.Reset();

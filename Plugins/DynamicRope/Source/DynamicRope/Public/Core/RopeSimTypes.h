@@ -7,31 +7,31 @@
 class USceneComponent;
 
 /**
- * narrow-phase 컨택트: rope 노드 하나 vs collider 하나, IRopeCollider::Query가 반환한다.
+ * narrow-phase contact: one rope node vs one collider, returned by IRopeCollider::Query.
  *
- * CONTRACT — FROZEN 2026-06-24 (2026-06-27 SurfaceVelocity 추가: 기본 0인 가산 필드라 하위호환).
- * 모든 IRopeCollider(capsule, bone-SDF, world-GDF)는 이를 반드시 준수해야 한다.
- * 단일 (node, collider) 쌍을 기술한다. 집계는 호출자의 몫이다(solver는 push-out을 합산하고,
- * DecideWrap은 노드별로 penetration이 가장 깊은 bone을 선택한다).
+ * CONTRACT — FROZEN 2026-06-24 (2026-06-27 SurfaceVelocity added: backwards compatible as it is an additive field with default 0).
+ * All IRopeColliders (capsule, bone-SDF, world-GDF) must comply with this.
+ * Describes a single (node, collider) pair. Aggregation is up to the caller (solver aggregates push-outs,
+ * DecideWrap selects the bone with the deepest penetration on a per-node basis).
  *
- *   bHit         노드 구체(center = query WorldPos, radius = query Radius)가 collider와 겹친다.
- *                false => 나머지 필드는 모두 정의되지 않음. 호출자는 이를 무시해야 한다.
- *   Normal       UNIT, collider에서 노드를 향해 바깥쪽을 가리킨다(push-out 방향).
- *                불변식: NodePos += Normal*Penetration 은 노드를 표면 위에 올려놓는다.
- *                *** 부호가 load-bearing이다: 안쪽을 향하는 normal은 rope를 몸체 안으로 빨아들인다. ***
- *                축퇴(노드가 medial axis 위에 있음) => 임의의 안정적인 단위 벡터(capsule: +Z).
- *   Penetration  Normal을 따른 overlap 깊이, bHit일 때 > 0. QUERY 반지름 기준으로 측정된다:
- *                (ColliderRadius + QueryRadius) - Distance. 호출자는 solver push-out에는 QueryRadius 0을,
- *                wrap-decision skin에는 WrapConfig.ContactQueryRadius를 전달한다.
- *   SurfacePoint 노드에서 가장 가까운 collider 표면 위의 점(보조/디버그). solver에는 필수가 아니며,
- *                저렴하게 구할 수 있을 때 채운다.
- *   Bone         skeletal collider에서는 반드시 non-None — bone 귀속(attribution)으로 DecideWrap이
- *                wrap을 건다. 멀티-bone SDF는 가장 가까운 표면을 소유한 bone을 반드시 보고해야 한다. world => None.
- *   SourceMesh   Bone을 소유한 skeletal mesh. 액터 간 follow를 전달한다(-> FRopeWrapState::Mesh).
- *                비-skeletal collider에서는 null.
- *   SurfaceVelocity 접촉점에서 collider 표면의 월드 속도(cm/s). solver가 상대 접선 속도 마찰로
- *                로프를 끌고 가는 데 쓴다(움직이는 몸이 정지한 로프를 좌우로 쓸어내게 함).
- *                정적/미지원 collider는 0(= 정적 표면)으로 둔다 — 기존 동작과 동일.
+ *   bHit node The sphere (center = query WorldPos, radius = query Radius) overlaps the collider.
+ *                false => All remaining fields are undefined. The caller should ignore this.
+ *   Normal UNIT, points outward from the collider toward the node (push-out direction).
+ *                Invariant: NodePos += Normal*Penetration places a node on the surface.
+ *                *** The sign is load-bearing: the inward-facing normal pulls the rope into the body. ***
+ *                degenerate (node is on medial axis) => arbitrary non-static unit vector (capsule: +Z).
+ *   Overlap depth according to Penetration Normal, when bHit is > 0. Measured based on QUERY radius:
+ *                (ColliderRadius + QueryRadius) - Distance. The caller sets QueryRadius 0 to solver push-out,
+ *                Pass WrapConfig.ContactQueryRadius to wrap-decision skin.
+ *   Point on the collider surface closest to the SurfacePoint node (auxiliary/debug). It is not required for the solver,
+ *                Fill when you can get it cheaply.
+ *   In Bone skeletal collider, DecideWrap must be non-None — bone attribution (attribution).
+ *                Wrap. Multi-bone SDFs must report the bone that owns the closest surface. world => None.
+ *   SourceMesh A skeletal mesh that owns Bone. Passes follow between actors (-> FRopeWrapState::Mesh).
+ *                null for non-skeletal colliders.
+ *   SurfaceVelocity World velocity (cm/s) of the collider surface at the point of contact. The solver uses the relative tangential velocity friction.
+ *                Used to drag a rope (the moving body sweeps the stationary rope left and right).
+ *                static/Not supported Collider is set to 0 (= static surface) — Same as existing behavior.
  */
 struct FRopeContact
 {
@@ -44,7 +44,7 @@ struct FRopeContact
 	FVector SurfaceVelocity = FVector::ZeroVector;
 };
 
-/** rope 중심선: 파티클의 체인. solver / 로직 / 렌더의 단일 진실 공급원(single source of truth). */
+/** rope centerline: The chain of particles. Single source of truth for solver / logic / render.*/
 struct FRopeSimState
 {
 	TArray<FVector> Positions;
@@ -54,8 +54,8 @@ struct FRopeSimState
 	float           RopeLength = 0.0f;
 
 	/**
-	 * 고정된 시작점(hand/socket). solver는 substep에 걸쳐 Prev->Target으로 쓸어 이동시키므로
-	 * 빠른 앵커 점프가 에너지를 주입하는(체인을 폭발시킬) 대신 흡수된다.
+	 * Pinned starting point (hand/socket). The solver sweeps from Prev->Target across substeps.
+	 * Fast anchor jumps absorb energy instead of injecting it (which would explode the chain).
 	 */
 	bool            bStartPinned = false;
 	FVector         StartPinPrev = FVector::ZeroVector;
@@ -65,44 +65,44 @@ struct FRopeSimState
 	float           TimeAccumulator = 0.0f;
 
 	/**
-	 * 세그먼트별 장력(힘, 스트레치=양수만). XPBD distance 제약의 수렴 λ에서 유도: F = max(0, -λ)/h².
-	 * 단위는 질량 1 노드 기준 mass·cm/s²(상대값) — 임계치는 실측으로 튜닝한다. CPU 솔버가 Step 끝에
-	 * 채우고, GPU 상주 로프는 λ 리드백(1~2프레임 지연)이 채운다. 솔브 없는 프레임은 직전 값 유지.
-	 * 크기 = Num()-1(비어 있을 수 있음 — 아직 한 번도 솔브 안 됨).
+	 * Tension (force, stretch = positive numbers only) for each segment. Derived from the convergence λ of the XPBD distance constraint: F = max(0, -λ)/h².
+	 * The unit is mass·cm/s² (relative value) based on mass 1 node — the threshold value is tuned to actual measurements. CPU solver at the end of step
+	 * is filled, and the GPU-resident rope is filled by λ readback (1-2 frame delay). Frames without solve maintain the previous value.
+	 * Size = Num()-1 (may be empty — never solved yet).
 	 */
 	TArray<float>   SegmentTension;
 
 	int32 Num() const { return Positions.Num(); }
 	void  Reset() { Positions.Reset(); PrevPositions.Reset(); InvMass.Reset(); SegmentTension.Reset(); TimeAccumulator = 0.0f; }
 
-	//~ Verlet 어휘(순수 인라인 — 컨텍스트/정책 없음). 반복 관용구에 이름을 붙여 부호·차원 실수를 막는다.
-	//  솔버 적분 루프(RopeXPBDSolver)와 던지기 속도 주입 루프는 의도적으로 raw 표현을 유지한다 —
-	//  전자는 .usf 커널과의 1:1 파리티 대조가 우선, 후자는 누적형(변위 단위 임펄스)이라 형태가 다르다.
+	//~ Verlet vocabulary (pure inline — no context/policy). Give names to iteration idioms to prevent sign and dimension mistakes.
+	//  The solver integration loop (RopeXPBDSolver) and throwing velocity injection loop intentionally keep the raw representation —
+	//  The former is a 1:1 parity comparison with the .usf kernel, and the latter is a cumulative type (displacement unit impulse), so the form is different.
 
-	/** 노드 i의 한 프레임 변위(Pos - Prev). Verlet에서 속도 ∝ 변위(dt 나누기 전). */
+	/** One frame displacement (Pos - Prev) of node i. In Verlet, velocity ∝ displacement (before dividing by dt).*/
 	FVector Displacement(int32 i) const { return Positions[i] - PrevPositions[i]; }
 
-	/** 노드 i의 한 프레임 이동 거리(cm/프레임). "빠른 노드" 등 임계 판정은 소비자의 정책이다. */
+	/** Movement distance for one frame of node i (cm/frame). Threshold checks such as “fast nodes” are consumer policies.*/
 	float NodeSpeed(int32 i) const { return Displacement(i).Size(); }
 
-	/** 노드 i의 속도 0(Prev = Pos). 시드/리시드 경로 전용 — 로직 페이즈의 위치·속도 쓰기는
-	 *  FRopeNodeOverrideFrame 단일 통로를 탄다(G2, GPU 상주 동기화). */
+	/** velocity of node i 0 (Prev = Pos). Seed/reseed path only — Write the position and velocity of the logic phase
+	 *  FRopeNodeOverrideFrame single pass (G2, GPU-resident synchronization).*/
 	void SetStill(int32 i) { PrevPositions[i] = Positions[i]; }
 };
 
 /**
- * FRopeNodeOverrideFrame::Flags의 노드별 비트. ERopeGPUOverride(RopeGPUSolver.h)와 수치 1:1이어야
- * 한다(서브시스템이 검증) — Core는 Shaders 모듈에 의존하지 않으므로 상수를 미러로 둔다.
+ * per-node bit in FRopeNodeOverrideFrame::Flags. The number should be 1:1 with ERopeGPUOverride (RopeGPUSolver.h)
+ * (verified by subsystem) — Core does not depend on the Shaders module, so it mirrors the constants.
  */
 namespace RopeNodeOverride
 {
 	/** Pos[i] = Positions[i] */
 	constexpr uint8 Position         = 1 << 0;
 
-	/** Prev[i] = PrevPositions[i] (Verlet 속도 주입) */
+	/** Prev[i] = PrevPositions[i] (Verlet velocity injection)*/
 	constexpr uint8 Prev             = 1 << 1;
 
-	/** Prev[i] = Pos[i] (속도 0; Position 적용 *후* 값) */
+	/** Prev[i] = Pos[i] (velocity 0; value *after* application of Position)*/
 	constexpr uint8 PrevFromPosition = 1 << 2;
 
 	/** InvMass[i] = InvMass[i] */
@@ -110,17 +110,17 @@ namespace RopeNodeOverride
 }
 
 /**
- * 로직 페이즈의 한 프레임 산출물(G2): "타깃 계산은 GT, 적용은 통로 하나로".
- * Wrapping/Wrapped/Releasing 등 로직이 Sim에 쓰고 싶은 위치·속도·질량을 여기에 scatter하면,
- * PrepareSimFrame 끝에서 CPU Sim에 1회 적용되고(ApplyToSim — 기존 직접 쓰기와 동일한 결과),
- * GPU 상주 로프에는 같은 데이터가 override 패스(FRopeGPUResidentStep)로 실려 재시드 없이
- * 커널에서 적용된다. 같은 노드를 여러 번 채우면 나중 것이 이긴다(순차 Sim 쓰기와 동일).
- * 주의: Prev(명시)와 PrevFromPosition을 한 프레임에 섞어 채우지 말 것 — 커널 적용 순서상
- * PrevFromPosition이 항상 이겨 채운 순서와 무관해진다(로직 페이즈는 PrevFromPosition만 쓴다).
+ * Output of one frame of logic phase (G2): "Target calculation is GT, application is one path".
+ * If logic such as Wrapping/Wrapped/Releasing scatters the position/velocity/mass you want to use in the Sim,
+ * Applied to CPU Sim once at the end of PrepareSimFrame (ApplyToSim — same result as existing direct write),
+ * The same data is Loaded into the GPU-resident rope as an override pass (FRopeGPUResidentStep) without reseeding.
+ * Applies to kernel. If you fill the same node multiple times, the last one wins (same as sequential SIM writing).
+ * Caution: Do not mix Prev (explicit) and PrevFromPosition in one frame — due to kernel application order
+ * PrevFromPosition always wins, making the filling order irrelevant (only PrevFromPosition is used as the logic phase).
  */
 struct FRopeNodeOverrideFrame
 {
-	/** 노드별 RopeNodeOverride 비트 OR(비어 있으면 이번 프레임 산출물 없음). */
+	/** per-node RopeNodeOverride bit OR (if empty, no output this frame).*/
 	TArray<uint8>   Flags;
 	TArray<FVector> Positions;
 	TArray<FVector> PrevPositions;
@@ -136,7 +136,7 @@ struct FRopeNodeOverrideFrame
 		InvMass.Reset();
 	}
 
-	/** 첫 scatter 시 노드 수만큼 0으로 확보(프레임 내 재호출은 no-op). */
+	/** At the first scatter, the number of nodes is secured as 0 (recall within the frame is no-op).*/
 	void EnsureSize(int32 NumNodes)
 	{
 		if (Flags.Num() != NumNodes)
@@ -148,7 +148,7 @@ struct FRopeNodeOverrideFrame
 		}
 	}
 
-	/** 위치 고정: Pos=World, bZeroVelocity면 Prev=Pos(속도 0 — wrapping/hold의 표준 쓰기). */
+	/** Position pinned: Pos=World, bZeroVelocity then Prev=Pos (velocity 0 — standard writing for Wrapping/hold).*/
 	void SetPosition(int32 NodeIndex, const FVector& World, bool bZeroVelocity)
 	{
 		if (Flags.IsValidIndex(NodeIndex))
@@ -158,7 +158,7 @@ struct FRopeNodeOverrideFrame
 		}
 	}
 
-	/** 질량 덮어쓰기(마스크/복원). */
+	/** mass Overwrite (mask/restore).*/
 	void SetInvMass(int32 NodeIndex, float Value)
 	{
 		if (Flags.IsValidIndex(NodeIndex))
@@ -168,7 +168,7 @@ struct FRopeNodeOverrideFrame
 		}
 	}
 
-	/** 속도 제거만(Prev=현재 Pos — 위치는 그대로). release 계열의 튐 방지. */
+	/** Only remove velocity (Prev=current Pos — position remains the same). Release series splash prevention.*/
 	void SetPrevFromPosition(int32 NodeIndex)
 	{
 		if (Flags.IsValidIndex(NodeIndex))
@@ -177,7 +177,7 @@ struct FRopeNodeOverrideFrame
 		}
 	}
 
-	/** CPU 적용 — GPU 커널의 override 스테이지와 같은 순서(Pos → Prev → Prev=Pos → InvMass). */
+	/** CPU application — Same order as the override stage of the GPU kernel (Pos → Prev → Prev=Pos → InvMass).*/
 	void ApplyToSim(FRopeSimState& Sim) const
 	{
 		const int32 N = FMath::Min(Flags.Num(), Sim.Num());

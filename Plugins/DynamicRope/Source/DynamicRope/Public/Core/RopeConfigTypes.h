@@ -6,117 +6,117 @@
 #include "RopeConfigTypes.generated.h"
 
 /**
- * 감김 축을 어느 기준으로 배치할지(FRopeWrapConfig::WrappingAxisSource).
- * 두 모드 모두 로프 진행 평면의 normal을 축 방향으로 쓰되, 축 원점과 winding 기준이 다르다.
- * 뒤쪽 폴백(본→부모 → 컴포넌트 기저 → 본 로컬 X)은 공통이다 — FRopeWrappingPhase::ResolveWrappingAxis.
+ * Based on which standard to place the Wrapping axis (FRopeWrapConfig::WrappingAxisSource).
+ * In both modes, the normal of the rope progress plane is used as the axis direction, but the axis origin and winding standard are different.
+ * The back fallback (bone → parent → component base → bone local X) is common — FRopeWrappingPhase::ResolveWrappingAxis.
  */
 UENUM(BlueprintType)
 enum class ERopeWrappingAxisSource : uint8
 {
 	/**
-	 * 본 중심 가이드 평면: 축 원점은 latch 본 위치, winding은 latch tangent를 기준으로 잡는다.
-	 * Assisted resolve의 단일 본 wrapping처럼 본별로 축을 재해석해야 하는 경로에 적합하다.
+	 * Bone center guide plane: The axis origin is based on the latch bone location, and the winding is based on the latch tangent.
+	 * It is suitable for paths that require reinterpretation of the axis for each bone, such as single bone Wrapping in Assisted resolve.
 	 */
 	BoneCenteredGuidePlane = 0 UMETA(DisplayName = "Bone-Centered Guide Plane"),
 
 	/**
-	 * 캡처 진행 평면: 로프가 날아온 스윙 평면의 normal을 축 방향으로 쓰고, 축 원점은 캡처 접촉 영역과
-	 * collider 군집 중심으로 보정한다. winding은 캡처 순간 속도를 기준으로 잡아 Composite wrapping에 적합하다.
-	 * 캡처 진행 평면을 만들 수 없으면 공통 본/컴포넌트 축 폴백으로 내려간다.
+	 * Capture progress plane: The normal of the swing plane where the rope flew is used as the axis direction, and the axis origin is the capture contact area and
+	 * Calibrate to the center of the collider cluster. Winding is suitable for Composite Wrapping based on the velocity at the moment of capture.
+	 * If the capture progress plane cannot be created, it falls back to the common bone/component axis fallback.
 	 */
 	CaptureTravelPlane = 1 UMETA(DisplayName = "Capture Travel Plane")
 };
 
-/** XPBD solver 튜닝(디자이너용). 저장값이 곧 런타임 적용값이다. */
+/** XPBD solver tuning (for designers). The saved value is the runtime applied value.*/
 USTRUCT(BlueprintType)
 struct FRopeSolverConfig
 {
 	GENERATED_BODY()
 
-	/** 프레임당 물리 substep 수(anti-tunneling; "small steps"가 iteration을 늘리는 것보다 낫다). */
+	/** Number of per-frame physics substeps (anti-tunneling; "small steps" are better than increasing iterations).*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "1", ClampMax = "16"))
 	int32 Substeps = 12;
 
-	/** substep당 constraint iteration 수. */
+	/** Number of constraint iterations per substep.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "1"))
 	int32 Iterations = 4;
 
-	/** substep당 충돌 해소 패스 수. 1=substep 끝에 1회(기존 동작, perf 무회귀). sharp한 굴곡에서
-	 *  distance/bending이 안쪽으로 당기는 힘을 단일 충돌이 못 이겨 관통할 때, 제약 iteration을 이 수만큼
-	 *  나눠 사이사이 충돌을 끼운다 → 더 sharp한 끼인각까지 방어(>1일수록 강하지만 비용↑). Iterations로 상한. */
+	/** Number of collision resolution passes per substep. 1=Once at the end of the substep (existing behavior, perf no regression). In sharp bends
+	 *  When a single collision cannot overcome the inward pulling force of distance/bending, constraint iteration is performed by this number.
+	 *  Divide and insert collisions in between → Defense up to sharper angles (>1 is stronger, but costs ↑). cap as Iterations.*/
 	int32 CollisionPassesPerSubstep = 1;
 
-	/** 접촉 제약을 몇 iteration마다 풀지(CPU 폴백 전용 — GPU 커널은 원래 collision 패스당 1회다).
-	 *  1 = 매 iteration(기본, 기존 동작). N = N iteration마다 1회.
+	/** How many iterations will the contact constraint be solved (CPU fallback only — GPU kernel normally does once per collision pass).
+	 *  1 = Every iteration (default, existing behavior). N = once every N iteration.
 	 *
-	 *  **어떤 값을 줘도 각 collision 패스의 *마지막* iteration에는 반드시 푼다.** 이게 계약의 핵심이다 —
-	 *  마지막에 안 풀면 그 뒤로 distance/bending이 노드를 표면 안으로 당긴 걸 되밀 기회가 없어 substep이
-	 *  관통 상태로 끝난다. 그래서 N을 Iterations 이상으로 주면 "패스당 정확히 1회" = GPU와 같은 cadence가 된다.
+	 *  **No matter what value is given, it must be solved in the *last* iteration of each collision pass.** This is the core of the contract —
+	 *  If you don't solve it at the end, there is no chance for distance/bending to push the node back into the surface, so the substep
+	 *  Ends in penetration state. So, if N is given as Iterations or more, “exactly once per pass” = cadence like GPU.
 	 *
-	 *  매 iteration 푸는 편이 sharp한 끼인각에서 더 강하다(충돌이 distance/bending과 매번 경쟁하므로 장력에
-	 *  안 밀린다). N을 키우면 그 경쟁 횟수를 줄여 비용을 선형으로 깎는 대신 관통 여유가 줄어든다.
-	 *  Query가 비싼 SDF 콜라이더에서 CPU 폴백 비용을 직접 나누는 유일한 손잡이다.
+	 *  Solving each iteration is stronger at sharp included angles (collision competes with distance/bending every time, so tension
+	 *  is not pushed). Increasing N reduces the number of competitions, reducing the cost linearly, but reducing the penetration margin.
+	 *  Query is the only handle that directly divides the CPU fallback cost from the expensive SDF collider.
 	 *
-	 *  비노출(BP 전용): 소비처가 FRopeXPBDSolver 하나뿐이라 **CPU 폴백에서만 작동한다**. GPU가 단일
-	 *  런타임 경로이므로(쿡/-nullrhi/서버/초과 크기에서만 CPU) 정상 플레이에서는 효과가 없다. */
+	 *  Non-exposed (BP only): Since there is only one consumer, FRopeXPBDSolver, **only works in CPU fallback**. Single GPU
+	 *  Because it is a runtime path (Cook/-nullrhi/Server/Excess size only CPU), it has no effect in normal play.*/
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "1"))
 	int32 ContactSolveInterval = 1;
 
-	/** XPBD stretch compliance(stiffness의 역수). 0 = 신장 불가(inextensible). */
+	/** XPBD stretch compliance (reciprocal of stiffness). 0 = inextensible.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", DisplayName = "Stretch Softness"))
 	float StretchCompliance = 0.0f;
 
-	/** Strain limiting(최대 신장 클램프): substep solve 뒤, 핀/앵커 고정 노드에서 체인을 따라 walk하며 각
-	 *  세그먼트 길이를 ≤ 이 배율 × SegmentLength로 하드 투영한다(속도 중립 — prev도 함께 이동). XPBD 거리
-	 *  제약은 Gauss-Seidel이라 iteration이 적으면 긴 체인(수십 노드)이 앵커 핀에 매달릴 때 보정이 끝까지
-	 *  전파되지 못해 앵커 인접 세그먼트에 신장이 폭주(6배+)·거대 장력·접선 휩 지터가 생긴다. 순차 sweep은
-	 *  한 번에 체인 전체로 전파돼 이 폭주를 상한 안으로 가둔다(PBD long-range constraint 표준 해법).
-	 *  1.5 = 최대 50% 신장 허용(기본). 1.0 = 완전 비신축(가장 빡빡). **0 또는 <1 = 비활성**(strain limit 끔). */
+	/** Strain limiting (maximum elongation clamp): After substep solve, walk along the chain at pinned/anchor pinned nodes.
+	 *  Hard projects the segment length to ≤ this multiplier × SegmentLength (velocity neutral — prev is also moved). XPBD Distance
+	 *  constraint is Gauss-Seidel, so if the number of iterations is small, when a long chain (several dozen nodes) hangs on an anchor pin, correction is required until the end.
+	 *  Due to failure to propagate, runaway elongation (6 times+), huge tension, and tangential whip jitter occur in segments adjacent to the anchor. Sequential sweep is
+	 *  propagates throughout the chain at once, confining this runaway into a cap (PBD long-range constraint standard solution).
+	 *  1.5 = Allow up to 50% elongation (default). 1.0 = Fully unstretched (tightest). **0 or <1 = disabled** (strain limit off).*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", DisplayName = "Max Stretch"))
 	float MaxStretchRatio = 1.5f;
 
-	/** XPBD bending compliance. 클수록 더 흐물거린다. */
+	/** XPBD bending compliance. The bigger it is, the more flaccid it is.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", DisplayName = "Bend Softness"))
 	float BendCompliance = 0.02f;
 
-	/** 각도-허용 벤딩: 굽힘이 급할수록 펴는 힘을 놔준다(코너/랩 경계에서 free 노드가 각지게 튀는 것 완화).
-	 *  판정값 r = (i↔i+2 거리)/(2*SegmentLength) = cos(턴각/2): 1=직선, 작을수록 급한 굽힘.
-	 *  r ≤ BendReleaseRatio면 펴는 힘 0(완전히 놔줌), r ≥ BendFullRatio면 100%(기존 동작), 사이는 smoothstep.
-	 *  기본 0.70(≈턴각 91°). 코너가 아직 각지면 올리고(급한 굴곡까지 놔줌), 두 값을 0으로 두면 항상 편다(각도 허용 끔). */
+	/** Angle-allowed bending: The steeper the bend, the more the stretching force is released (alleviating the angular bounce of the Free node at the corner/wrap boundary).
+	 *  decision value r = (i↔i+2 distance)/(2*SegmentLength) = cos(turn angle/2): 1=straight line, the smaller the steeper bend.
+	 *  If r ≤ BendReleaseRatio, the unfolding force is 0 (completely released), if r ≥ BendFullRatio, it is 100% (existing operation), and smoothstep in between.
+	 *  Default 0.70 (≈turn angle 91°). If the corner is still sharp, raise it (allows for sharp bends), and if you set both values ​​to 0, it will always be straightened (turns off angle tolerance).*/
 	float BendReleaseRatio = 0.70f;
 
-	/** 각도-허용 벤딩: r ≥ 이 값이면 펴는 힘 100%(완만한 굽힘은 기존처럼 곧게 편다). 기본 0.92(≈턴각 46°).
-	 *  자유 로프가 너무 흐물거리면 낮추고, 항상 BendReleaseRatio 이상이어야 한다(솔버가 내부적으로 보장). */
+	/** Angle-allowed bending: If r ≥ this value, the straightening force is 100% (gentle bending is straightened as before). Default 0.92 (≈turn angle 46°).
+	 *  If the Free rope is too flabby, lower it, and it should always be above BendReleaseRatio (internally guaranteed by the solver).*/
 	float BendFullRatio = 0.92f;
 
-	/** collider에 대한 접선 방향 friction [0..1](Coulomb 계수 μ). */
+	/** Tangential direction friction to the collider [0..1] (Coulomb coefficient μ).*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Friction = 0.5f;
 
-	/** 자유단(끝)으로 갈수록 friction을 약화시키는 배율(고정점=1, 끝=이 값). 끝 노드는 장력이 가장 낮아
-	 *  마찰에 잘 붙잡히므로, 끝쪽 그립만 낮춰 잘 놔주게 한다. 1.0이면 테이퍼 없음(균일 friction). */
+	/** A multiplier that weakens friction toward the Free end (pinned point=1, end=this value). The end node has the lowest tension.
+	 *  It is easily caught by friction, so lower the grip at the end to let it go. If 1.0, there is no taper (uniform friction).*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Tip Grip Falloff"))
 	float TipFrictionScale = 1.0f;
 
-	/** 충돌 질의 반지름(cm) — 솔버가 노드를 접촉 표면에서 이만큼 띄운다. **기본 0 = auto: 렌더 튜브
-	 *  Radius를 그대로 사용**(반지름 3종 자동 정합 — 2026-07-13 표면 감사 B-2; 명시값을 넣으면 그 값).
-	 *  해석은 컴포넌트 경계(GetEffectiveCollisionRadius)에서 1회 — 솔버/GPU step은 해석된 값만 받는다.
-	 *  주의: 컴포넌트 없이 이 구조체를 직접 쓰는 소비자(유닛 테스트/커스텀 솔버 호출)에는 auto 해석이
-	 *  없다 — 0이면 반지름 0으로 동작하므로 반드시 명시값을 넣을 것. */
+	/** collision query radius(cm) — The solver lifts the node this far from the contact surface. **Default 0 = auto: render tube
+	 *  Use Radius as is** (Automatic matching of 3 types of radius — 2026-07-13 surface audit B-2; If you enter a specified value, that value).
+	 *  Analysis is performed once at the component boundary (GetEffectiveCollisionRadius) — The solver/GPU step receives only the interpreted value.
+	 *  NOTE: Auto interpretation is disabled for consumers (unit tests/custom solver calls) who use this structure directly without a component.
+	 *  None — If it is 0, it operates as radius 0, so be sure to enter a specific value.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Collision Radius (0=Auto)"))
 	float CollisionRadius = 0.0f;
 
-	// NOTE: bUseWorldGDF는 URopeComponent 직속("Rope|Collision" 카테고리)으로 이사했다
-	// (2026-07-13 표면 감사 CL-4 — 충돌 도메인 응집: bIncludeOwnerColliders와 한자리).
+	// NOTE: bUseWorldGDF moved directly under URopeComponent ("Rope|Collision" category)
+	// (2026-07-13 surface audit CL-4 — collision domain agglomeration: one digit with bIncludeOwnerColliders).
 
-	/** 충돌 스윕의 샘플 간격(cm) — 노드가 한 substep에 이동한 경로를 이 간격으로 질의한다.
-	 *  낮출수록 터널링에 강하고 질의 비용이 는다. 아래 MaxSweepSamples와 짝으로 움직인다. */
+	/** Collision sweep sample interval (cm) — The path the node moved in one substep is queried at this interval.
+	 *  The lower it is, the stronger it is against tunneling and the higher the query cost. It moves in pairs with MaxSweepSamples below.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning",
 		meta = (ClampMin = "0.1", Units = "cm"))
 	float SweepStep = 2.0f;
 
-	/** 구간당 스윕 샘플 수 상한(비용 한도). 매우 빠른 노드는 간격이 이 상한에 눌려 넓어지므로,
-	 *  SweepStep을 낮췄는데 효과가 없으면 이 값도 함께 올려야 한다. */
+	/** Number of sweep samples per section cap (cost limit). In very fast nodes, the gap is widened by being pressed against this cap,
+	 *  If lowering the SweepStep has no effect, you must also increase this value.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning",
 		meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxSweepSamples = 16;
@@ -124,36 +124,36 @@ struct FRopeSolverConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning")
 	FVector Gravity = FVector(0.0f, 0.0f, -980.0f);
 
-	/** 공기 저항. 단위는 **60fps 기준 프레임당 속도 감소 비율**(substep 수와 무관 — Integrate가 지수로 보정).
-	 *  0.02면 초당 잔존율 0.98^60 ≈ 0.30, 유효 항력 k ≈ 1.2/s → 자유낙하 종단속도 ≈ g/k ≈ 8m/s.
-	 *  올릴수록 종단속도가 낮아지고 운동량이 빨리 죽어 "가벼운 리본"처럼 보인다 — 무게감이 필요하면 낮춘다. */
+	/** Air resistance. Units are **per-frame velocity reduction rate based on 60fps** (independent of number of substeps — Integrate compensates exponentially).
+	 *  If 0.02, residual rate per second is 0.98^60 ≈ 0.30, effective drag k ≈ 1.2/s → Free fall terminal velocity ≈ g/k ≈ 8m/s.
+	 *  As you raise it, the longitudinal velocity decreases and momentum dies quickly, making it look like a “light ribbon” — lower it if you need more weight.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Motion Damping"))
 	float Damping = 0.02f;
 
-	//~ 스케일링(슬립/LOD) — 다수 로프가 존재할 때 유휴/원거리 비용을 줄인다 ------------------
+	//~ Scaling (Sleep/LOD) — Reduces idle/far costs when multiple ropes exist ------------------
 
 	/**
-	 * 슬립: Free/Wrapped 페이즈에서 모든 노드 속도가 SleepVelocityThreshold 미만으로 SleepDelay 동안
-	 * 유지되면 솔브를 스킵한다 — Free는 dispatch 자체가 없고, Wrapped는 본 추종(Hold)·견인·자동 release
-	 * 로직이 계속 도는 채 자유 구간 솔브만 쉰다(GPU는 override-only dispatch). 핀 이동/되감기/움직이는
-	 * collider 근접/랩 본 이동(노드 드리프트)/능동 Pull 장전/페이즈 전환에서 깨어난다.
-	 * 그 외 페이즈(Flight/Contacting/Wrapping/Releasing)는 항상 활성.
+	 * Sleep: In Free/Wrapped phase, all node velocities are below SleepVelocityThreshold during SleepDelay.
+	 * If held, solve is skipped — Free has no dispatch itself, and Wrapped has bone following(Hold)·traction·automatic release.
+	 * The logic continues to run and only the Free span solve is paused (GPU is override-only dispatch). Pin moving/Wrapping/moving
+	 * Wakes up from collider proximity/Wrapped bone movement (node ​​drift)/Active Pull Loaded/phase transition.
+	 * Other phases (Flight/Contacting/Wrapping/Releasing) are always active.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling")
 	bool bAllowSleep = true;
 
-	/** 슬립 진입 판정 속도(cm/s) — 프레임간 최대 노드 변위 / dt가 이 값 미만이어야 한다. */
+	/** Slip entry check velocity (cm/s) — Maximum node displacement / dt between frames must be less than this value.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.1", DisplayName = "Sleep Speed Threshold"))
 	float SleepVelocityThreshold = 3.0f;
 
-	/** 슬립 진입까지 저속 상태가 유지되어야 하는 시간(초). */
+	/** Time (in seconds) that low speed must be maintained before entering slip.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.0", Units = "s"))
 	float SleepDelay = 0.5f;
 
 	/**
-	 * 거리 LOD: 플레이어 카메라와의 거리가 LODStartDistance를 넘으면 constraint iteration을 줄이기
-	 * 시작해 LODEndDistance에서 LODMinIterationScale까지 선형 감소한다(멀리서는 수렴 오차가 안 보임).
-	 * 카메라가 없으면(데디 서버) 항상 풀 iteration.
+	 * Distance LOD: If the distance to the player camera exceeds LODStartDistance, reduce constraint iteration.
+	 * and decreases linearly from LODEndDistance to LODMinIterationScale (convergence error is not visible from a distance).
+	 * If there is no camera (Dedi server), always full iteration.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling")
 	bool bEnableDistanceLOD = true;
@@ -164,16 +164,16 @@ struct FRopeSolverConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "LOD End"))
 	float LODEndDistance = 8000.0f;
 
-	/** 최원거리에서의 iteration 배율(1=감소 없음). */
+	/** Iteration multiplier at the farthest distance (1=no reduction).*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Solver|Tuning|Scaling", meta = (ClampMin = "0.05", ClampMax = "1.0", DisplayName = "LOD Min Iterations"))
 	float LODMinIterationScale = 0.25f;
 };
 
 /**
- * 컨택트 결정 튜닝: 걸쳐진 rope가 언제 사지(limb)에 "wrapped"된 것으로 간주되는가?
- * 파라미터 계층(2026-07-13 회의 결정 F): 기본 노출 필드 = T2(밸런스), AdvancedDisplay 필드 = T3
- * (고급 — ②AssistedJudged × BareWrap 판정 인프라 전용이 대부분. ③Guaranteed는 판정/경로 빌드를
- * 쓰지 않으므로 T3가 전부 무의미하다). 상세는 Docs/PoC/02_WrapResolveModes.md §5~6.
+ * Contact Decision Tuning: When is a draped rope considered “Wrapped” by a limb?
+ * Parameter Hierarchy (2026-07-13 Meeting Decision F): Basic Display field = T2 (Balance), AdvancedDisplay field = T3
+ * (Advanced — ②AssistedJudged × BareWrap check Mostly dedicated to infrastructure. ③Guaranteed checks/path builds
+ * is not used, so T3 is all meaningless). For details, see Docs/PoC/02_WrapResolveModes.md §5~6.
  */
 USTRUCT(BlueprintType)
 struct FRopeWrapConfig
@@ -181,119 +181,119 @@ struct FRopeWrapConfig
 	GENERATED_BODY()
 
 	/**
-	 * SurfaceVectorField path point가 latch bone 하나에 고정되지 않고 graph 후보 본으로 넘어갈지 여부.
-	 * false면 후보 graph depth/cost가 0이 되어 현재 본만 평가하므로 기존 단일 본 동작에 가깝게 돌아간다.
+	 * Whether the SurfaceVectorField path point will be passed to the graph candidate bone without being pinned to one latch bone.
+	 * If false, candidate graph depth/cost becomes 0 and only the current bone is evaluated, returning close to the existing single bone operation.
 	 *
-	 * 비노출(BP 전용): 끄면 단일 본 동작으로 열화되는 폴백 스위치라 디버깅 외에 끌 이유가 없다.
+	 * Non-exposed (BP only): This is a fallback switch that deteriorates into a single bone operation when turned off, so there is no reason to turn it off other than debugging.
 	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap")
 	bool bEnableMultiBoneWrapping = true;
 
 	/**
-	 * 접촉 *질의* 반지름(cm) — 이름이 말하듯 특정 단계 소유가 아니라 **감지(Flight/Contacting)와
-	 * 성립(경로 빌드 투영/스냅 상한/DecideWrap)이 공유하는 표면 질의 프로브 반경**이다.
-	 * **기본 0 = auto: 렌더 튜브 Radius × 1.5**(반지름 3종 자동 정합; 명시값을 넣으면 그 값). 해석은
-	 * 컴포넌트 경계(GetEffectiveContactQueryRadius)에서 — 소비처는 해석된 값을 받는다. 주의: 컴포넌트
-	 * 없이 직접 쓰는 소비자(유닛 테스트 등)에는 auto 해석이 없다 — 반드시 명시값을 넣을 것.
+	 * contact *query* radius(cm) — As the name suggests, it does not belong to a specific step, but **detection(Flight/Contacting) and
+	 * is the surface query probe radius** shared by the establishment (path build projection/snap cap/DecideWrap).
+	 * **Default 0 = auto: render tube Radius × 1.5** (Automatic matching of 3 types of radius; If you enter a specified value, it will be the value). The interpretation is
+	 * At the component boundary (GetEffectiveContactQueryRadius) — the consumer receives the interpreted value. Note: component
+	 * — you must enter an explicit value.
 	 *
-	 * 비노출(BP 전용): auto가 렌더 튜브 Radius를 따라가므로 프리셋이 Radius만 정하면 함께 맞는다.
-	 * 명시값을 넣는 순간 그 자동 정합이 깨진다. */
+	 * Non-exposed (BP only): Auto follows the render tube radius, so the preset fits together just by setting the radius.
+	 * The moment you enter the specified value, the automatic matching is broken.*/
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "cm"))
 	float ContactQueryRadius = 0.0f;
 
-	//~ 캡처 판정(감지) --------------------------------------------------------
-	// Flight에서 "잡혔다"고 볼 문턱값과, 그 판정이 딛는 접촉 감지 스윕. 문턱값 셋은
-	// ①FullSimulation/②AssistedJudged의 판정 경로 전용이고, ③GuaranteedWrap은 GuidedThrow가 확정한
-	// 앵커로만 성립하므로 보지 않는다(스윕은 Flight 감지 자체라 모드와 무관).
+	//~ Capture check(detection) --------------------------------------------------------
+	// The threshold for Flight to be considered “caught,” and the contact detection sweep beyond which that check passes. Threshold three is
+	// ①FullSimulation/②AssistedJudged check path only, ③GuaranteedWrap is confirmed by GuidedThrow.
+	// It is only established as an anchor, so it is not viewed (sweep is Flight detection itself, so it has nothing to do with the mode).
 
-	/** 스치는 접촉이 아니라 catch로 간주하기 위해 한 bone에 닿아야 하는 최소 rope 노드 수.
+	/** Minimum number of rope nodes that must touch a bone to be considered a catch rather than a grazing contact.
 	 *
-	 *  비노출(BP 전용): 기본 1이 최대한 관대하고, "부실한 걸 안 잡는다"는 목적은 커밋 시점의 각도
-	 *  관문(FailedWrapMinAngleDeg/CommitMin*)이 더 정확하게 달성한다. 올릴 이유가 남는 유일한 경우는
-	 *  감기려다 마는 헛동작 자체를 시작조차 안 하게 하려는 것(경로 빌드 낭비/시각적 false start 방지)이다. */
+	 *  Non-exposure (BP only): The default of 1 is as lenient as possible, and the goal of "not catching stale things" is the angle at the time of commit.
+	 *  gateway(FailedWrapMinAngleDeg/CommitMin*) achieves more accuracy. The only reason left to post is
+	 *  The purpose is to prevent the useless operation of trying to wrap from even starting (to prevent wasted path builds/visual false starts).*/
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "1"))
 	int32 MinLatchNodes = 1;
 
-	/** wrap을 확정하기 전에 컨택트가 같은 bone에서 이만큼 지속되어야 한다(초).
+	/** Contact must last this long (in seconds) on the same bone before confirming the wrap.
 	 *
-	 *  비노출(BP 전용): 기본 0.016 = 60fps 1프레임이라 사실상 dwell이 없다. MinLatchNodes와 같은
-	 *  질문("얼마나 확실히 닿아야 잡히나")에 대한 두 번째 레버라 중복이다. */
+	 *  Non-exposure (BP only): Default 0.016 = 60fps 1 frame, so there is virtually no dwell. Such as MinLatchNodes
+	 *  This is the second levera redundancy for the question ("How sure must it be to reach to catch it?").*/
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "s"))
 	float WrapDecisionTime = 0.016f;
 
-	/** 얇은 사지/SDF 후보를 놓치지 않기 위한 Flight 예측 lookahead(프레임 변위 배수). 0이면 예측 끔.
+	/** Flight prediction lookahead (frame displacement multiple) to avoid missing thin limb/SDF candidates. If 0, prediction is off.
 	 *
-	 *  비노출(BP 전용): "빠른 던지기가 대상을 통과한다"는 같은 증상에 ContactSweepStep이 더 직접적인
-	 *  레버이고 그쪽 주석이 대응 순서를 안내한다. */
+	 *  Non-exposure (BP only): ContactSweepStep is a more direct solution to the same symptom of "fast throwing passes target".
+	 *  It's a lever, and its comments guide the response sequence.*/
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", ClampMax = "4.0"))
 	float PredictiveContactFrames = 1.0f;
 
 	/**
-	 * 접촉 감지 스윕의 샘플 간격(cm). 노드가 한 프레임에 이동한 경로를 이 간격으로 점질의해 최심 접촉을
-	 * 찾는다 — **터널링을 막는 값**이라 잡으려는 대상의 얇은 쪽 두께(팔뚝/난간)보다 작아야 한다.
-	 * 빠른 던지기가 가는 대상을 그냥 통과해 캡처를 놓치면 이 값을 낮춘다. 솔버 충돌의
-	 * FRopeSolverConfig::SweepStep과 같은 사고방식이되, 감지는 Flight에서만 돌아 예산을 따로 둔다.
+	 * Sample interval (cm) of contact detection sweep. The path taken by the node in one frame is interrogated at this interval to determine the deepest contact.
+	 * Look for — **value to prevent tunneling**, so it should be less than the thickness of the thinner side (forearm/handrail) of the object you are trying to grab.
+	 * If a fast throw passes through the target and misses the capture, lower this value. solver collision
+	 * Same idea as FRopeSolverConfig::SweepStep, but detection only runs on Flight and budget is set aside.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "0.1", Units = "cm", DisplayName = "Sweep Step"))
 	float ContactSweepStep = 2.0f;
 
-	/** 위 감지 스윕의 샘플 수 상한(비용 한도). 매우 빠른 노드는 간격이 이 상한에 눌려 넓어지므로,
-	 *  ContactSweepStep을 낮췄는데 효과가 없으면 이 값도 함께 올려야 한다. */
+	/** Sample number cap (cost limit) of the above detection sweep. In very fast nodes, the gap is widened by being pressed against this cap,
+	 *  If lowering ContactSweepStep has no effect, you must also increase this value.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "1", ClampMax = "64", DisplayName = "Max Sweep Samples"))
 	int32 ContactMaxSweepSamples = 16;
 
 	/**
-	 * 한 번의 캡처에서 채택할 수 있는 wrap 시드(접촉 대상) 최대 개수. 1(기본) = 기존 단일 시드 동작.
-	 * 2 이상이면 dominant 대상 외에, dominant latch보다 tail 쪽에서 *다른* (mesh, bone)에 dwell을
-	 * 채운 접촉이 보조 시드로 함께 감긴다(예: 양다리 — 한쪽 다리를 감고 반대쪽 다리 접촉 노드도
-	 * 그 본에 고정). 감김 경로(나선)는 dominant 시드에만 생성되고, 보조 시드는 접촉 노드를 자기
-	 * 본에 hold하는 방식이다 — 보조 대상 둘레를 도는 경로까지 만들지는 않는다.
+	 * Maximum number of wrap seeds (contact targets) that can be adopted in one capture. 1 (default) = Traditional single seed behavior.
+	 * If it is 2 or more, in addition to the dominant target, dwell on a *different* (mesh, bone) on the tail side than the dominant latch.
+	 * The filled contacts are wound together as auxiliary seeds (e.g. both legs – one leg is wound and the contact node on the other leg is also wound together)
+	 * pinned to that bone). A Wrapping path (spiral) is created only for the dominant seed, and the secondary seed uses the contact node as its own.
+	 * It is a method of holding on to the bone — it does not create a path that goes around the auxiliary object.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 MaxWrapSeeds = 1;
 
 	/**
-	 * 감김 축 유도 소스. BoneCenteredGuidePlane(기본)은 Assisted 단일 본 wrapping을 위해 latch 본을
-	 * 축 원점으로 사용한다. CaptureTravelPlane은 접촉 영역/군집 중심 축으로 Composite wrapping을 지원한다.
+	 * Wrapping axis guidance source. BoneCenteredGuidePlane (default) uses latch bone for Assisted single bone Wrapping.
+	 * is used as the axis origin. CaptureTravelPlane supports Composite Wrapping around the contact area/cluster center axis.
 	 *
-	 * 프리셋마다 달라야 하는 값이라 노출을 유지한다(볼라 = CaptureTravelPlane, 단일 본 포획 =
-	 * BoneCenteredGuidePlane). 사용자가 개별로 만지기보다 프리셋이 정해 주는 쪽이 맞다.
+	 * Maintain exposure because the value must be different for each preset (bola = CaptureTravelPlane, single bone capture =
+	 * BoneCenteredGuidePlane). It is better for users to set presets rather than individually.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (DisplayName = "Axis Source"))
 	ERopeWrappingAxisSource WrappingAxisSource = ERopeWrappingAxisSource::BoneCenteredGuidePlane;
 
 	/**
-	 * SurfaceVectorField 경로가 표면 없는 허공을 tangent 직진(chord)으로 건널 수 있는 최대 거리(cm).
-	 * 0(기본) = 끔 — 투영이 끊기면 종전대로 경로 빌드를 실패 처리한다.
-	 * 켜면 두 가지가 달라진다(진행 방향 기반 wrap 4단계, 양다리처럼 대상이 둘로 갈라진 랩의 전제):
-	 *  ① 투영이 예측점에서 한 세그먼트 이상 떨어진 표면으로 끌어당기려 하면 스냅을 거부하고 chord로
-	 *     간다(끄면 QueryRadius 내 관대한 스냅 그대로 — 기본 동작 불변).
-	 *  ② chord 구간의 경로점은 앵커를 만들지 않는다 — 커밋 후 그 노드들은 자유 로프로 남아 solver가
-	 *     현수/직선 형태를 잡고, 대상이 벌어지면 장력이 걸린다(묶임의 실제 물리).
-	 * 이 거리를 넘겨도 표면에 재진입하지 못하면 종전과 같은 실패 처리로 떨어진다.
+	 * Maximum distance (cm) that a SurfaceVectorField path can cross in a tangent straight line (chord) through empty space without a surface.
+	 * 0 (default) = Off — If projection is interrupted, the path build fails as before.
+	 * is turned on, two things change (4 stages of wrap based on progress direction, premise of wrap where the object is split in two like a leg of lamb):
+	 *  ① If the projection attempts to pull to a surface that is more than one segment away from the prediction point, it refuses to snap and returns to the chord.
+	 *     goes (if turned off, QueryRadius retains my lenient snap — default behavior unchanged).
+	 *  ② Path points in the chord section do not create anchors — after commit, those nodes remain as Free ropes and the solver
+	 *     Holds a suspended/straight form, and tension is applied when the object is spread (actual physics of binding).
+	 * If it fails to re-enter the surface even after passing this distance, it falls into the same failure processing as before.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Max Gap Bridge"))
 	float WrappingMaxGapBridgeDistance = 0.0f;
 
 	/**
-	 * 감는 양 상한(도): SurfaceVectorField 경로 빌드의 누적 감싼 각도(rolling axis 적분 —
-	 * FRopeWrappingState::PathAccumulatedAngleRad)가 이 값에 닿으면 경로를 *성공*으로 조기 마감한다.
-	 * 0(기본) = 무제한 — 남은 로프 전량이 감길 때까지 진행(기존 동작).
-	 * 긴 로프가 대상을 여러 바퀴 나선으로 감아 들어가며(실측 3000~4400°) 본 전환 재시드가 목/머리
-	 * 등으로 번지는 "문어발 랩"의 방지책. 상한에서 마감된 경로 밖의 남는 로프는 Wrapping 동안
-	 * 동결됐다가 커밋 후 자유 구간으로 늘어진다(front 모션도 경로 밖 노드는 끌지 않는다).
-	 * 양다리 bola면 400~540°(한 바퀴 + 여유)가 자연스럽다.
+	 * Rolling amount cap (degrees): Cumulative Wrapping angle of SurfaceVectorField path build (rolling axis integral —
+	 * FRopeWrappingState::PathAccumulatedAngleRad) reaches this value, the path is closed early with *success*.
+	 * 0 (default) = Unlimited — Proceed until all remaining rope is wound (existing behavior).
+	 * A long rope spirally wraps around the object several times (actual measurement 3000~4400°), and bone conversion reseed is used for the neck/head.
+	 * Prevents “octopus wrap” from spreading to other areas. The remaining rope outside the path finished at the cap is during Wrapping.
+	 * It is frozen and then stretches to Free span after commit (front motion does not drag nodes outside the path).
+	 * If you do a double leg bola, 400~540° (one turn + margin) is natural.
 	 *
-	 * **[함정] Composite AnalyticHelix에는 적용되지 않는다** — 그리고 어느 전략을 타는지는 설정이
-	 * 아니라 *대상 지오메트리*가 런타임에 정한다: 둘 이상의 본이 같은 pose-space 기둥으로 묶이면
-	 * Composite다(경로 빌드의 bPathUsesPoseSpaceIsland). 팔뚝 하나는 Sequential이라 이 상한이 걸리고,
-	 * 양다리는 Composite라 걸리지 않는다. 즉 이 값이 막으려는 "문어발 랩"이 가장 잘 나는 다중 본
-	 * 대상에서 정작 무효다 — 그 경우의 과다 감김은 CommitMinWrapAngleDeg/CommitMinWrapCoverageDeg
-	 * 관문으로 걸러야 한다.
+	 * **[Plot] Does not apply to Composite AnalyticHelix** — and it's up to you to decide which strategy to use.
+	 * , but the *target geometry* is determined at runtime: if two or more bones are bound to the same pose-space column,
+	 * Composite (bPathUsesPoseSpaceIsland in path build). One forearm is sequential, so this cap is applied,
+	 * The legs are composite, so they don't get stuck. In other words, multiple bones are most likely to produce the "octopus wrap" that this value is intended to prevent.
+	 * target is actually invalid — in that case overwrapping is CommitMinWrapAngleDeg/CommitMinWrapCoverageDeg
+	 * Must be filtered through the gateway.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "0.0", Units = "deg", DisplayName = "Max Wrap Angle"))
@@ -303,167 +303,167 @@ struct FRopeWrapConfig
 	float WrappingStableTime = 0.10f;
 
 	/**
-	 * Wrapping 페이즈의 **최소 길이**(초) — 감김에 걸리는 시간이 아니다. 두 경로에서 역할이 다르다.
+	 * **Minimum length** (seconds) of the Wrapping phase — This is not the time taken for Wrapping. The roles are different in the two paths.
 	 *
-	 * ① 정상(각도 매핑) 경로 — 감김 속도는 WrappingAngularSpeedDegPerSec가 정하고 소요 시간은 그
-	 *    결과다. 이 값은 하한으로만 작동한다: front가 목표에 일찍 도달해도 Wrapping 시작부터 이
-	 *    시간이 지나기 전에는 커밋하지 않는다. 그 대기 동안 로프는 이미 완성된 랩 자세로 **정지해
-	 *    있다**(Wrapping은 logic-driven이라 solver가 돌지 않는다). 즉 이 값이 정하는 건 "감김 완료"와
-	 *    "장력 시작(Wrapped 진입)" 사이의 간(間)이다 — 뜸을 없애려면 실측 감김 시간 이하로 낮춘다.
-	 * ② DistanceFallback(각도 매핑 불가) 경로 — 역전된다. 이 값이 실제 소요 시간을 정하고
-	 *    front 속도를 FullDistance / (이 값 + tail delay)로 역산한다. 여기선 각속도 설정이 쓰이지 않는다.
+	 * ① Normal (angle mapping) path — Wrapping velocity is determined by WrappingAngularSpeedDegPerSec, and the time required is determined by WrappingAngularSpeedDegPerSec.
+	 *    This is the result. This value only works as a floor: even if the front reaches the target early, it starts Wrapping from the beginning.
+	 *    Do not commit before the time has elapsed. During that waiting period, the rope is **stationary in the already completed wrap position.
+	 *    Yes** (Wrapping is logic-driven, so the solver does not run). In other words, what this value determines is “Wrapping completed” and
+	 *    This is the interval between “tension start (Wrapped entry)” — to eliminate moxibustion, lower it below the actual Wrapping time.
+	 * ② DistanceFallback (angle mapping not possible) path — reversed. This value determines the actual time taken.
+	 *    Calculate front velocity as FullDistance / (this value + tail delay). Each velocity setting is not used here.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap",
 		meta = (ClampMin = "0.01", Units = "s", DisplayName = "Min Wrap Duration"))
 	float WrappingMotionDuration = 0.20f;
 
 	/**
-	 * wrapping animation의 easing 적용 전 기준 각속도(deg/s).
-	 * Single/Composite 모두 이 값으로 FrontWrapAngleRad를 진행한다. 1100deg/s는 3단계 전
-	 * Single 실측 시작 정책(baseSpeed 약 203cm/s / 10.57cm/rad)에 맞춘 공통 기본값이다.
+	 * Standard velocity (deg/s) before applying easing of Wrapping animation.
+	 * For both Single/Composite, FrontWrapAngleRad is performed with this value. 1100deg/s is 3 steps ago
+	 * This is a common default value tailored to the Single actual measurement start policy (baseSpeed approximately 203cm/s / 10.57cm/rad).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap",
 		meta = (ClampMin = "1.0", ClampMax = "7200.0", Units = "deg/s", DisplayName = "Wrap Speed"))
 	float WrappingAngularSpeedDegPerSec = 1100.0f;
 
-	/** 각도 매핑 front가 angle+distance 목표에 도달한 뒤 Wrapped commit 전에 확보할 짧은
-	 *  안정화 시간. 마지막 kinematic node/anchor 전환에서 발생할 수 있는 한 프레임 튐을 막는다.
+	/** After the angle mapping front reaches the angle+distance target, there is a short path to be secured before the Wrapped commit.
+	 *  Stabilization time. Prevents frame popping that may occur during the last kinematic node/anchor transition.
 	 *
-	 *  비노출(BP 전용): 실측으로 정해진 폴리시 상수라 다른 값을 고를 근거가 없다. 감김의 속도/길이는
-	 *  WrappingAngularSpeedDegPerSec와 WrappingMotionDuration이 정한다. */
+	 *  Non-exposed (BP only): This is a policy constant determined by actual measurements, so there is no basis for choosing a different value. The velocity/length of Wrapping is
+	 *  WrappingAngularSpeedDegPerSec and WrappingMotionDuration are determined.*/
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "0.0", ClampMax = "1.0", Units = "s"))
 	float WrappingPostFrontSettleTime = 0.08f;
 
-	/** tail node가 surface path에 안착하도록 세그먼트마다 추가하던 지연 시간.
-	 *  4단계부터 commit 제한 시간으로는 각도 매핑을 쓸 수 없는 DistanceFallback 경로에만 적용한다. */
+	/** Delay time added to each segment to ensure that the tail node settles on the surface path.
+	 *  Applies only to the DistanceFallback path where angle mapping cannot be used due to the commit time limit from step 4.*/
 	float WrappingTailDelayPerSegment = 0.024f;
 
-	/** Wrapping 중 한 프레임에 진행할 surface path 적분 step 예산의 **배율**(step 수 자체가 아니다).
-	 *  실제 예산은 로프 크기에 비례한 기준값을 이 값으로 배율한 것이다
-	 *  (FRopeWrappingPhase::ComputePathStepBudget — 기준 8이므로 8 = 1배).
-	 *  높이면 감김 경로가 빨리 완성되지만 순간 비용이 커진다.
+	/** **Multiple** of the surface path integration step budget to be performed in one frame during Wrapping (not the number of steps itself).
+	 *  The actual budget is a reference value proportional to the rope size multiplied by this value.
+	 *  (FRopeWrappingPhase::ComputePathStepBudget — base 8, so 8 = 1x).
+	 *  If you increase it, the Wrapping path will be completed faster, but the instantaneous cost will increase.
 	 *
-	 *  비노출(BP 전용): 바꿀 주된 이유인 "큰 로프에서 경로 완성이 느리다"를 크기 비례 스케일이 이미
-	 *  처리한다. */
+	 *  Not exposed (BP only): The main reason for changing, "path completion on large ropes is slow", is already scaled proportional to size.
+	 *  Process.*/
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
 		meta = (ClampMin = "1", ClampMax = "128"))
 	int32 WrappingPathBuildStepsPerFrame = 8;
 
 	/**
 	 * Axis distance advanced per circumference distance for Sequential SurfaceVectorField wrapping.
-	 * Composite Analytic Helix는 이 값을 사용하지 않고 Contacting 순간 tail 기울기에서 자동 산출한다.
+	 * Composite Analytic Helix does not use this value but automatically calculates it from the tail slope at the moment of contact.
 	 *
-	 * 비노출(BP 전용): 어느 전략을 타는지는 대상 지오메트리가 런타임에 정하므로(아래
-	 * WrappingMaxWrapAngleDeg 주석의 pose-space island 설명 참조), 값을 바꿔도 대상에 따라 반응이
-	 * 갈려 인과를 배울 수 없다.
+	 * Non-exposed (BP only): The target geometry determines at runtime which strategy to use (see below).
+	 * Refer to the pose-space island description in the WrappingMaxWrapAngleDeg annotation), and even if you change the value, the response depends on the target.
+	 * You cannot learn cause and effect.
 	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "-2.0", ClampMax = "2.0"))
 	float WrappingHelixPitchScale = 0.25f;
 
-	// NOTE: 아래 멀티본 투영 스코어링 세부(깊이/비용/가중치/보너스/히스테리시스 12종)는 실측 튜닝이
-	// 끝난 개발자 상수로 내부화됐다(2026-07-13 표면 감사 B-2 — UPROPERTY 제거, 코드에서만 조정).
-	// 켜고 끄는 스위치는 위 bEnableMultiBoneWrapping 하나다. 각 값의 의미는 필드별 주석 유지.
+	// NOTE: The multibone projection scoring details below (12 types of depth/cost/weight/bonus/hysteresis) are based on actual tuning.
+	// Internalized as developer constant (2026-07-13 surface audit B-2 — UPROPERTY removed, adjusted only in code).
+	// The on/off switch is the bEnableMultiBoneWrapping above. The meaning of each value is annotated by field.
 
 	/**
-	 * 현재 본에서 몇 edge까지 후보로 볼지.
-	 * 지금은 skeleton parent/child edge만 사용한다. 이후 디자이너 지정 transition을 추가해도
-	 * 같은 depth 제한을 통과하므로, 너무 먼 bridge가 한 번에 열리는 것을 막는 1차 안전장치다.
+	 * How many edges in the current bone are considered candidates.
+	 * For now, only the skeleton parent/child edges are used. Even if you add a designer-specified transition later,
+	 * Since it passes the same depth limit, it is a primary safety device that prevents bridges that are too far away from opening at once.
 	 */
 	int32 MaxBoneTransitionDepth = 3;
 
 	/**
-	 * 후보 graph 누적 비용 상한.
-	 * depth가 같아도 edge별 penalty가 다르면 비용이 달라질 수 있다. 지금은 parent/child edge 비용만
-	 * 누적하지만, 나중에 designer edge / 금지에 가까운 edge를 섞을 때 projection 전에 후보를 잘라내는 역할을 한다.
+	 * candidate graph cumulative cost cap.
+	 * Even if the depth is the same, the cost may vary if the penalty for each edge is different. For now, only parent/child edge costs
+	 * It accumulates, but later plays the role of cutting out candidates before projection when mixing designer edges / edges close to prohibition.
 	 */
 	float MaxBoneTransitionCost = 5.0f;
 
 	/**
-	 * 자동 parent/child edge 하나를 지날 때의 비용.
-	 * 값이 클수록 graph cost가 커져 같은 본 유지가 쉬워지고, 낮추면 parent/child chain을 더 적극적으로 탄다.
+	 * Cost of passing one automatic parent/child edge.
+	 * The larger the value, the greater the graph cost, making it easier to maintain the same bone, and lowering it makes the parent/child chain more active.
 	 */
 	float AutoParentChildTransitionPenalty = 1.0f;
 
-	/** projection 거리 점수 가중치. 예측 위치에서 표면까지 멀수록 불리하다. */
+	/** projection distance score weight. The farther from the predicted location to the surface, the more disadvantageous it is.*/
 	float ProjectionDistanceWeight = 0.35f;
 
-	/** 실제 rope node 위치와 projection 표면점 사이 거리 가중치. 로프가 실제로 있는 쪽의 본을 선호한다. */
+	/** Distance weight between the actual rope node location and the projection surface point. Prefer the bone on the side where the rope is actually located.*/
 	float RopeNodeDistanceWeight = 0.25f;
 
-	/** 이전 tangent와 새 tangent가 꺾이는 정도의 가중치. 값이 클수록 부드러운 진행을 선호한다. */
+	/** Weight of the degree to which the old tangent and the new tangent are bent. The larger the value, the smoother progress is preferred.*/
 	float TangentContinuityWeight = 8.0f;
 
-	/** 이전 normal과 새 normal이 꺾이는 정도의 가중치. 값이 클수록 표면 normal 연속성을 선호한다. */
+	/** Weight of the degree to which the old normal and the new normal are bent. The larger the value, the more surface normal continuity is preferred.*/
 	float NormalContinuityWeight = 5.0f;
 
-	/** graph 비용 가중치. parent/child를 많이 건너는 후보일수록 불리하게 만든다. */
+	/** graph cost weight. A candidate who crosses the parent/child line more often is at a disadvantage.*/
 	float BoneTransitionPenaltyWeight = 1.0f;
 
-	/** 현재 본 유지 보너스. 동점 근처에서 본이 흔들리는 것을 줄인다. */
+	/** Current bone maintenance bonus. Reduces bone shaking near the tie point.*/
 	float CurrentBoneBonus = 0.35f;
 
-	/** 새 본이 현재 본보다 이 점수만큼 더 좋아야 전환한다. 전환 hysteresis. */
+	/** The new bone must be better than the current bone by this score to switch. Transition hysteresis.*/
 	float BoneTransitionHysteresis = 0.75f;
 
-	/** 직전 본으로 바로 돌아가는 후보에 더하는 penalty. A->B->A 왕복을 줄인다. */
+	/** Penalty added to candidates that return directly to the previous bone. Reduce the round trip from A->B->A.*/
 	float ImmediateBoneReturnPenalty = 1.5f;
 
-	/** 마지막 본 전환 이후 이 거리(cm) 이상 진행해야 다음 전환을 허용한다. 0이면 비활성. */
+	/** After the last bone transition, more than this distance (cm) must be advanced before the next transition is allowed. If 0, disabled.*/
 	float MinBoneTransitionPathDistance = 8.0f;
 
 	/** Upper bound for physics-based wrapping settle before committing the best accumulated anchors. */
 	float WrappingMaxSettleTime = 0.90f;
 
 	/**
-	 * 경로 생성이 실패한 wrap의 최소 감싼 각도(도). 실패 시점까지 감은 각도가 이 값 미만이면 "조금
-	 * 닿았는데 철썩 붙는" 커밋 대신 release한다. 0 = 가드 끔.
-	 * 각도 기준인 이유(이전 constexpr "최소 1바퀴" 기준 대체): 한 바퀴는 로프 2πr을 요구해 대상이
-	 * 클수록 절대 길이가 폭증한다 — 반지름 100cm 몸통은 한 바퀴에 628cm로 기본 로프(200cm)로는
-	 * 물리적으로 불가능해 큰 대상 wrap이 구조적으로 전멸했다. 감싼 각도는 대상 크기와 무관한
-	 * "걸림 품질" 척도다(120° = 1/3바퀴 훅).
+	 * Minimum wrap angle (degrees) of the wrap for which path creation failed. If the angle of winding to failure is less than this value, “Slightly
+	 * Release the commit instead of the “sticky” commit. 0 = Guard off.
+	 * Why it is angle-based (replaces the previous constexpr "at least 1 turn" criterion): One turn requires rope 2πr, so the target
+	 * The bigger it is, the more the absolute length increases — radius 100cm The body is 628cm per turn, which is equivalent to a basic rope (200cm).
+	 * It was physically impossible and the large target wrap was structurally destroyed. Wrapped angle is independent of target size
+	 * This is a measure of “hook quality” (120° = 1/3 turn hook).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning|Quality",
 		meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg", DisplayName = "Min Angle On Path Failure"))
 	float FailedWrapMinAngleDeg = 120.0f;
 
 	/**
-	 * 커밋 품질 하한(도): Wrapped로 커밋되는 *모든* wrap(경로 완료/실패/settle 타임아웃 불문)의 감싼
-	 * 각도가 이 값 미만이면 커밋 대신 release한다. 0(기본) = 끔 — 기존 동작 그대로.
-	 * FailedWrapMinAngleDeg와의 차이: 그쪽은 "경로 생성이 실패한" wrap 전용 조기 abort, 여기는 커밋
-	 * 직전 최종 관문. 경로가 정상 완료돼도 latch가 팁 근처면 경로가 짧아(감은 각도 미미) 철썩 붙는
-	 * 커밋이 나올 수 있고, settle 타임아웃 커밋은 앵커 1개로도 통과한다 — 그런 부실 랩을 게임
-	 * 규칙으로 거르고 싶을 때 opt-in으로 켠다(팁 살짝 걸침도 유효한 디자인이면 0 유지).
+	 * Commit quality floor: wrap of *all* wraps (regardless of path completion/failure/settle timeout) that are committed as Wrapped.
+	 * If the angle is less than this value, release instead of commit. 0 (default) = Off — Retain existing behavior.
+	 * Difference from FailedWrapMinAngleDeg: that is an early abort for wrap only where "path creation failed", this is a commit.
+	 * The final gateway just before. Even if the path is completed normally, if the latch is near the tip, the path is short (winding angle is small) and it sticks.
+	 * commits can come out, and the settle timeout commit passes even with one anchor — such a poor wrap in the game
+	 * Turn on by opt-in when you want to filter by rule (keep it at 0 if it is a design that allows slight tip overlapping).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning|Quality",
 		meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg", DisplayName = "Min Commit Angle"))
 	float CommitMinWrapAngleDeg = 0.0f;
 
 	/**
-	 * 형상 기준 묶임 관문(도): 커밋되는 wrap 경로의 감김 축 둘레 각도 커버리지(경로점 각도들을 정렬해
-	 * 360° − 최대 공백)가 이 값 미만이면 커밋 대신 release한다. 0(기본) = 끔 — 기존 동작 그대로.
-	 * CommitMinWrapAngleDeg(누적 각도)와의 차이: 누적 각도는 걸은 회전량의 합이라 표면 위 진동/왕복이
-	 * 값을 부풀릴 수 있고 여러 바퀴면 360°를 넘는다. 커버리지는 "축 둘레 어느 방향까지 로프가 실제로
-	 * 둘러쌌는가"의 순수 기하 척도(0~360°)라 진동에 면역이다 — 대상이 정말 갇혔는지(양다리 bola처럼
-	 * 빠져나갈 공백이 없는지)를 묻는 판정. 축이 캡처 시점에 고정되는 CaptureTravelPlane 감김에서 가장
-	 * 의미가 정확하다(BoneCenteredGuidePlane의 rolling axis에서는 마지막 축 기준 근사).
-	 * 양다리 잠금 용도면 300° 안팎, 느슨한 훅도 허용하려면 0 유지.
+	 * Shape-based binding gateway (degrees): Angular coverage around the Wrapping axis of the committed wrap path (aligning path point angles)
+	 * 360° - maximum space) is less than this value, release instead of commit. 0 (default) = Off — Retain existing behavior.
+	 * Difference from CommitMinWrapAngleDeg (accumulated angle): The accumulated angle is the sum of the amount of rotation, so vibration/reciprocation on the surface occurs.
+	 * The value can be inflated and takes several turns to exceed 360°. Coverage refers to “what direction does the rope actually travel around the axis?”
+	 * It is a pure geometric measure of "enclosure" (0-360°) and is immune to vibration — it determines whether the object is truly trapped (like a two-legged bola).
+	 * check to see if there are any spaces to escape. In the CaptureTravelPlane Wrapping the axes are pinned at capture time.
+	 * The meaning is correct (approximation based on the last axis in BoneCenteredGuidePlane's rolling axis).
+	 * Around 300° for double leg locking, or 0 to allow for a loose hook.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning|Quality",
 		meta = (ClampMin = "0.0", ClampMax = "360.0", Units = "deg", DisplayName = "Min Commit Coverage"))
 	float CommitMinWrapCoverageDeg = 0.0f;
 
-	// NOTE: 종전의 [미배선] WrappingContactGraceTime은 삭제됐다(2026-07-13 표면 감사 B-2 — 소비 코드가
-	// 없는 죽은 설정). grace 로직을 실제로 배선할 때 그 CL에서 설정도 함께 되살릴 것.
+	// NOTE: Previously [unwired] WrappingContactGraceTime has been removed (2026-07-13 surface audit B-2 — consumption code
+	// is dead without any settings). When actually wiring the grace logic, restore the settings in the CL as well.
 
 };
 
 /**
- * Wrapped *이후*(유지/당김/풀림)의 튜닝 — 설계 노트 01(Post-Wrap 모델)의 도메인이자, "성립 이후는
- * 도달 모드·결착 모델 무관 공통"(02 문서 §3) 경계와 일치한다. 종전에는 FRopeWrapConfig(성립 판정)에
- * 섞여 있던 것을 분리했다(2026-07-13 표면 감사 B-1 — 기존 BP 튜닝 미승계 클린 브레이크).
- * 소비자: Wrapping/운동 제약 + URopeComponent의 Wrapped 4단계
- * (Hold→Pull 샘플→테더/Pull 인가→자동 release).
+ * Tuning *after* Wrapped (retention/pull/release) — domain of Design Note 01 (Post-Wrap model), and
+ * Consistent with the boundary “Common regardless of arrival mode/latching model” (02 document §3). Previously, FRopeWrapConfig (establishment check)
+ * The mixed one was separated (2026-07-13 surface audit B-1 — existing BP tuning non-transferred clean break).
+ * Consumer: Wrapping/Movement constraint + Wrapped step 4 of URopeComponent
+ * (Hold → Pull sample → Tether/Pull application → automatic release).
  */
 USTRUCT(BlueprintType)
 struct FRopeHoldConfig
@@ -471,26 +471,26 @@ struct FRopeHoldConfig
 	GENERATED_BODY()
 
 	/**
-	 * Wrapping이 시작된 순간부터 wielder의 손 쪽 자유 구간을 material rest length 안에 강제한다.
-	 * true면 RopeWielder가 CharacterMovement의 최종 이동(입력/root motion/slide 포함)을 같은 PrePhysics
-	 * 프레임에 구면 제약으로 투영하고, 일반 Pawn은 movement tick 직후 같은 안전망을 적용한다.
+	 * From the moment Wrapping begins, the Free span of the wielder's hand is forced within the material rest length.
+	 * If true, RopeWielder will determine the final movement of the CharacterMovement (including input/root motion/slide) using the same PrePhysics
+	 * is projected onto the frame as a spherical constraint, and the same safety net is applied to the general Pawn immediately after the movement tick.
 	 *
-	 * 이 제약은 SegmentTension/GPU readback과 무관한 gameplay authority다. 따라서
-	 * TetherCompliance=0인 로프가 kinematic Pawn 이동 때문에 먼저 늘어난 뒤 사후 회수되는 것을 막는다.
-	 * TetherCompliance>0이면 의도적 탄성을 허용하므로 hard projection은 자동 비활성화된다.
-	 * Wielder가 없는 custom movement는 URopeComponent::ConstrainWielderLocation을 이동 적용 전에 호출할 것.
+	 * This constraint is a gameplay authority unrelated to SegmentTension/GPU readback. Therefore
+	 * Prevents a rope with TetherCompliance=0 from being stretched first and then recovered later due to kinematic pawn movement.
+	 * If TetherCompliance>0, intentional elasticity is allowed, so hard projection is automatically disabled.
+	 * For custom movement without a Wielder, call URopeComponent::ConstrainWielderLocation before applying the movement.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (DisplayName = "Enforce Rope Length"))
 	bool bEnforceWielderLengthConstraint = true;
 
 	/**
-	 * 위 wielder 하드 투영의 **대상 쪽 거울**: 감긴 대상이 CMC 구동 캐릭터(키네마틱 캡슐)이고 wielder 끝이
-	 * 무한질량(Anchor — 헬기/키네마틱 캐리어)일 때, 대상 캡슐을 손 중심·다리 rest 길이 반경의 구면 안으로
-	 * 같은 프레임에 스윕 투영한다. 이 조합에서만 발동한다 — 양끝이 다 움직일 수 있으면 λ 쌍 인가가 이미
-	 * 역질량비로 분배하므로 투영이 개입하면 이중 보정이 된다.
+	 * **Target-side mirror** of the above wielder hard projection: The wound target is a CMC driven character (kinematic capsule) and the wielder ends
+	 * When there is infinite mass (Anchor — helicopter/kinematic carrier), the target capsule is placed within the sphere of the radius of the center of the hand and leg rest length.
+	 * Project the sweep to the same frame. Only works in this combination — if both ends can move, the λ pair is already
+	 * Since it is distributed in the inverse mass ratio, double correction occurs when projection intervenes.
 	 *
-	 * 이게 없으면 캐리어 이동을 쫓는 수단이 위치 회수(bias, TetherMaxBiasSpeed 상한)뿐이라, 캐리어가
-	 * 그보다 빠르면 로프가 무한히 늘어난다. TetherCompliance>0(의도적 탄성)이면 자동 비활성화.
+	 * Without this, the only means of tracking carrier movement is location recovery (bias, TetherMaxBiasSpeed cap), so the carrier
+	 * If it is faster than that, the rope will stretch infinitely. Automatically disabled if TetherCompliance>0 (intentional elasticity).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (DisplayName = "Enforce Rope Length (Target)"))
 	bool bEnforceTargetLengthConstraint = true;
@@ -500,207 +500,207 @@ struct FRopeHoldConfig
 	 * it allows an outward attempt within this distance to produce a stable reaction, but it is
 	 * never added to rope length and therefore cannot make an inextensible rope longer.
 	 *
-	 * 비노출(BP 전용): 견인 시작 경계는 `max(이 값, MaxDistance × TautSlackRatio × 히스테리시스)`라
-	 * 실사용 길이의 로프에서는 뒤 항이 항상 이긴다(600cm 로프면 ≈18cm 대 0.5cm). 경계를 옮기는
-	 * 디자이너 노브는 TautSensitivity이고, 이 값은 그 아래를 받치는 수치 안정성 바닥이다.
+	 * Unexposed (BP only): traction start boundary is `max(this value, MaxDistance × TautSlackRatio × hysteresis)`.
+	 * For ropes of actual length, the latter term always wins (≈18cm vs. 0.5cm for a 600cm rope). moving the border
+	 * The designer knob is TautSensitivity, which is the numerical stability floor underneath it.
 	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Hold|Tuning",
 		meta = (ClampMin = "0.0", Units = "cm"))
 	float LengthConstraintActivationSlop = 0.5f;
 
 	/**
-	 * Wrapped 중 authoritative material-constraint 장력(kg·cm/s²)이 이 값을 TensionReleaseTime 동안
-	 * 지속해서 넘으면 자동 release한다(ERopeReleaseReason::Tension). 0 = 비활성.
-	 * GetConstraintTension/MaxTetherTension과 같은 단위이며 XPBD SegmentTension과 혼용하지 않는다.
-	 * (자동 release는 도달 모드 ①②에서만 유효 — ③ Guaranteed는 명시 해제만.)
+	 * The authoritative material-constraint tension (kg·cm/s²) during Wrapped sets this value during TensionReleaseTime.
+	 * If it is continuously exceeded, it is automatically released (ERopeReleaseReason::Tension). 0 = disabled.
+	 * It is the same unit as GetConstraintTension/MaxTetherTension and is not used together with XPBD SegmentTension.
+	 * (Automatic release is only valid in arrival mode ①② — ③ Guaranteed is only for explicit release.)
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0", DisplayName = "Release At Tension"))
 	float TensionReleaseForce = 0.0f;
 
-	/** 장력 release 판정의 지속 시간(초). 순간 스파이크(충격 프레임)로 풀리는 것을 막는다.
-	 *  TensionReleaseForce = 0(장력 release 끔)이면 판정 자체가 없어 회색 처리된다. */
+	/** Duration (in seconds) of tension release check. It prevents loosening with an instantaneous spike (impact frame).
+	 *  If TensionReleaseForce = 0 (tension release off), there is no check and it is grayed out.*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release",
 		meta = (ClampMin = "0.0", Units = "s", EditCondition = "TensionReleaseForce > 0.0", DisplayName = "Release Delay"))
 	float TensionReleaseTime = 0.05f;
 
 	/**
-	 * (analytic λ 경로의 시뮬 바디 한정) λ 임펄스는 로프 축 성분만 만드므로, 방향이 급전환하면 옛 방향
-	 * 관성이 직교로 남아 날아간다("관성 과다"). 이 비율(0 = 보존, 1 = 완전 제거)로 그 잔여 관성을 몇
-	 * 프레임에 걸쳐 빼 fling을 억제한다. 값은 60fps 기준 프레임당 비율이고 적용 시 dt로 보정된다
-	 * (프레임률 독립).
+	 * (limited to the simulation body of the analytic λ path) Since λ impulse creates only the rope axis component, if the direction changes suddenly, the old direction
+	 * The inertia remains perpendicular and flies (“excessive inertia”). This ratio (0 = preservation, 1 = complete removal) determines how much of that residual inertia is.
+	 * Suppress fling by subtracting across frames. The value is a per-frame rate based on 60fps and is corrected by dt when applied.
+	 * (frame rate independent).
 	 *
-	 * 수신자는 ApplySimBody를 지나는 끝점뿐이다 — **wielder가 물리 액터 구성(시뮬 루트)일 때**, 그리고
-	 * **TetherCompliance > 0인 탄성 모드의 시뮬 대상**. 비신축(TetherCompliance = 0)인 시뮬 대상은
-	 * Chaos 물리 제약이 독점하므로(UpdateConstraintTether의 bUseChaosBackend 분기) 이 감쇠를 타지 않고,
-	 * CMC 캐릭터에도 적용하지 않는다.
+	 * The only recipient is an endpoint that passes ApplySimBody — **when the wielder is a physical actor configuration (sim root)**, and
+	 * **Simulate target for elastic mode with TetherCompliance > 0**. The simulation target is non-stretchable (TetherCompliance = 0).
+	 * Since the Chaos physical constraint is exclusive (bUseChaosBackend branch of UpdateConstraintTether), it does not take advantage of this damping,
+	 * Does not apply to CMC characters.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Tether Sideways Damping"))
 	float TetherPerpDamping = 0.3f;
 
 	/**
-	 * 테더 속도 안전 상한(cm/s) — 인가 결과 속력의 2차 클램프(ClampInjectedVelocity — 기존에 더 빠른 외부
-	 * 운동은 보존). 0 = 클램프 없음(비권장). λ의 위치 회수 명령 상한은 별도 노브다(TetherMaxBiasSpeed —
-	 * 종전엔 이 값을 재사용해 회수가 사실상 무상한이었다).
+	 * Tether velocity safety cap (cm/s) — Secondary clamp of injected resulting velocity (ClampInjectedVelocity —
+	 * movement is preserved). 0 = No clamp (not recommended). The position retrieval command cap of λ is a separate knob (TetherMaxBiasSpeed —
+	 * Previously, this value was reused and recovery was virtually cap-Free).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Tether Speed Limit"))
 	float TetherMaxSpeed = 1500.0f;
 
 	/**
-	 * λ 위치 회수(bias) 명령 속도의 상한(cm/s) — SolveTetherLambda의 MaxBiasSpeed. 벌어짐 상쇄(SepSpeed)와
-	 * 달리 이 항만 운동량으로 남는다(단방향 제약이라 슬랙 전환 후 제동이 없다 — 이 값이 곧 슬랙 코스팅
-	 * 속도의 상한). 종전엔 TetherMaxSpeed(1500)를 재사용해 가벼운 대상이 한두 프레임에 15m/s로 가속된 뒤
-	 * 슬랙 전환과 함께 그대로 날아갔다("휙") — 안착 회수는 이 값이면 충분하다. 테더는 "벌어짐을 막는 것"이
-	 * 본분이고 초과분을 능동적으로 되감는 건 회수 항뿐이므로, 이 상한이 테더의 윈치성(性)을 정한다.
-	 * 0 = 회수 없음(벌어짐 저지만 — 초과분은 되감기/자연 접근으로만 준다).
+	 * λ position recall (bias) command velocity cap (cm/s) — SolveTetherLambda's MaxBiasSpeed. With gap offset (SepSpeed)
+	 * Otherwise, only this term remains as the momentum (since it is a direction constraint, there is no braking after slack conversion — this value is slack coasting)
+	 * cap of velocity). Previously, by reusing TetherMaxSpeed (1500), a light target was accelerated to 15m/s in one or two frames and then
+	 * It flew away (“swish”) with a slack transition — this value is sufficient for the number of landings. Tether is "preventing the spread"
+	 * Since this is the main function and the only thing that dynamically rewinds the excess is the recovery port, this cap determines the winchability of the tether.
+	 * 0 = No retrieval (sealing only - excess is given to rewrapping/natural access only).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Tether Recovery Speed"))
 	float TetherMaxBiasSpeed = 150.0f;
 
 	/**
-	 * 접지(발 디딘) 캐릭터가 자기 Mass의 몇 배까지 마찰로 버티는가(유효질량 = Mass × 이 값). 클수록 단단히
-	 * 버텨 무거운 대상도 잘 끌고, 작을수록 쉽게 끌려간다. "대상이 얼마나 무거워야 접지한 나를 끌기
-	 * 시작하는가"의 교차점을 정하는 유일한 튜닝 노브 — 기본값으로 대부분 무설정.
-	 * λ 분배(유효 역질량)와 끌림 가능 판정(climb-in)이 공용으로 쓴다.
+	 * How many times the grounded character can withstand friction up to its mass (effective mass = Mass × this value). The bigger the tighter
+	 * Holds It's good at pulling heavy objects, and the smaller it is, the easier it is to be dragged. “How heavy does an object have to be to drag me when I’m grounded?”
+	 * The only tuning knob that determines the intersection point of the “start” — mostly unset by default.
+	 * λ distribution (effective inverse mass) and climbable check (climb-in) are written as shared.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "1.0"))
 	float GroundBraceFactor = 1.5f;
 
-	// (끌림 가능 판정의 히스테리시스는 비노출 내부 상수다 — 질량 노브는 GroundBraceFactor
-	//  하나로 통일. RopeComponent.cpp UpdateTargetPullable의 PullMassHysteresis 참조.)
+	// (the hysteresis of the draggable check is an unexposed internal constant — the mass knob is the GroundBraceFactor
+	//  Unified into one. (See PullMassHysteresis in RopeComponent.cpp UpdateTargetPullable.)
 
 	/**
-	 * 거리 release: Wrapped 중 authoritative material-length 위반량이 이 값(cm)을
-	 * 초과하면 자동 release한다(ERopeReleaseReason::Distance).
-	 * 0 = 비활성(기본). 테더와 함께 쓰면
-	 * "테더가 버티다가 이 한계를 넘으면 놓친다"가 된다 — 테더가 충분히 강하면 초과분이 안 쌓여
-	 * 발동하지 않고, 테더 없이 쓰면 순수 거리 제한으로 동작한다.
+	 * Distance release: The amount of authoritative material-length violation during Wrapped is this value (cm).
+	 * is exceeded, it is automatically released (ERopeReleaseReason::Distance).
+	 * 0 = disabled (default). When used with Tether
+	 * becomes "the tether holds on, but if it exceeds this limit, it loses" — if the tether is strong enough, the excess won't build up.
+	 * If not activated and used without a tether, it operates purely as a distance limit.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning|Release", meta = (ClampMin = "0.0", Units = "cm", DisplayName = "Release At Overstretch"))
 	float DistanceReleaseSlack = 0.0f;
 
 	/**
-	 * Pull 방향 코너 판정 임계(도). 당김 방향을 앵커→손 직선(chord)이 아니라, 앵커에서 손 쪽으로 로프를
-	 * 따라 걸으며 찾은 "첫 직선 다리"의 끝 노드를 향하도록 잡는다 → 로프가 벽/모서리에 걸려 꺾이면 그
-	 * 직전에서 멈춰 첫 다리를 따라 당긴다(직선 chord는 장애물을 관통). 걷는 중 다음 세그먼트가 지금까지의
-	 * 누적 다리 방향에서 이 각도 이상 꺾이면 코너로 보고 멈춘다 — 곧으면 손(노드 0)까지 걸어가 정확히
-	 * chord가 된다. 크게 잡으면(완만한 굴곡 무시) 더 chord에 가깝고, 작게 잡으면 미세한 꺾임에도 민감.
-	 * 팽팽할 때의 처짐/노드 지터는 이 임계 아래이고, 벽 모서리는 위라 구분된다(잔여 지터는 SmoothTime이 흡수).
+	 * Pull direction corner check threshold (degrees). The pulling direction is not from anchor → hand straight (chord), but from the anchor to the hand.
+	 * Hold it so that it faces the end node of the “first straight bridge” you find while walking along → If the rope gets caught on a wall/corner and breaks,
+	 * Stop just before and pull along the first leg (a straight chord penetrates the obstacle). While walking, the next segment so far is
+	 * If it bends more than this angle in the cumulative leg direction, it sees it as a corner and stops — if it is straight, it walks to the hand (node 0) exactly.
+	 * becomes a chord. If you hold it large (ignoring gentle bends), it is closer to a chord, and if you hold it small, it is sensitive to even slight bends.
+	 * The sag/node jitter when tight is below this threshold, and the wall edge is above this threshold (residual jitter is absorbed by SmoothTime).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "1.0", ClampMax = "179.0", Units = "deg", DisplayName = "Pull Corner Angle"))
 	float PullBendThresholdDeg = 30.0f;
 
 	/**
-	 * Pull 방향 시간 스무딩 상수(초, EMA time constant). look-ahead 방향의 프레임 간 지터 + GPU 미러 지연
-	 * 노이즈를 지수이동평균으로 흡수한다(alpha = 1-exp(-dt/이 값), 프레임레이트 독립). 클수록 매끄럽지만
-	 * 반응이 느리고, 0이면 스무딩 없음(원 look-ahead). wrap 시작 시 측정값으로 초기화된다.
+	 * Pull direction time smoothing constant (seconds, EMA time constant). Inter-frame jitter in look-ahead direction + GPU mirror delay
+	 * Noise is absorbed with an exponential moving average (alpha = 1-exp(-dt/this value), frame rate independent). The bigger the smoother it is
+	 * Slow response, 0 means no smoothing (circle look-ahead). When wrap starts, it is initialized to the measured value.
 	 */
 	float PullDirSmoothTime = 0.08f;
 
 	/**
-	 * Pull 조준 노드 시간 스무딩 상수(초, EMA time constant). walk가 고른 정수 조준 노드(AimNode)는 로프가
-	 * 흔들리면 프레임마다 이산적으로 튀어(방향 통째 점프 + tether 초과분 불연속 = 견인 끊김) 방향 EMA로는
-	 * 못 잡는다. 조준 인덱스를 float로 EMA해 노드 사이를 보간하면 방향·tether가 연속이 된다(alpha=1-exp(-dt/이
-	 * 값), 프레임레이트 독립). 클수록 매끄럽지만 반응이 느리고, 0이면 스무딩 없음. wrap 시작 시 측정값으로 초기화.
+	 * Pull aiming node time smoothing constant (seconds, EMA time constant). The integer aiming node (AimNode) chosen by walk is rope.
+	 * If shaken, it jumps discretely every frame (the entire direction jumps + tether excess discontinuity = traction is cut off) with direction EMA
+	 * I can't catch it. If you EMA the aiming index as a float and interpolate between nodes, the direction·tether becomes continuous (alpha=1-exp(-dt/
+	 * value), frame rate independent). The larger it is, the smoother it is, but the response is slower, and if it is 0, there is no smoothing. Initializes with measured values ​​when wrap starts.
 	 */
 	float PullAimSmoothTime = 0.08f;
 
 	/**
-	 * 능동 Pull(입력 홀드)의 **최대 장력**(견인력의 상한) — SetActivePull에 실리는 기본값. 대상을 목표 속도
-	 * (ActivePullMaxLinearSpeed)까지 끌 수 있는 최대 힘이다: 가벼운 대상은 이 장력 안에서 목표 속도에 즉시(오버슛
-	 * 없이) 도달하고, 이 장력으로 목표까지 못 끄는 무거운 대상은 뒤처진다(현실적 질량 의존 — 이 값이 "몇 kg부터
-	 * 버거운가"를 정한다). 힘 크기는 로프 물리 도메인이라 여기 산다(Wielder PullAction이 이 값을 쓴다).
-	 * Wrapped + 팽팽할 때만 실제 인가된다(URopeComponent::SetActivePull 계약 — 팽팽 판정은 아래
-	 * bActivePullRequiresTaut/ActivePullTautTension 게이트).
+	 * **Maximum tension** (cap of traction force) for Active Pull (input hold) — Default value in SetActivePull. target velocity
+	 * (ActivePullMaxLinearSpeed): Light targets will immediately (overshoot) target velocity within this tension.
+	 * , and heavy objects that cannot be pulled to the target with this tension lag behind (depending on realistic mass — this value starts from "how many kg")
+	 * determines "how hard it is"). The force size is the rope physics domain, so it lives here (Wielder PullAction uses this value).
+	 * Wrapped + Only actually authorized when taut (URopeComponent::SetActivePull contract — tautology check below
+	 * bActivePullRequiresTaut/ActivePullTautTension gate).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", DisplayName = "Pull Strength"))
 	float PullForce = 100000.0f;
 
 	/**
-	 * 능동 Pull을 팽팽(taut)할 때만 인가할지. true(기본) = 로프가 팽팽한 프레임에만 힘이 실린다(늘어진 로프를
-	 * 당겨도 반응 없음 — 물리적으로 자연스러움). false = 팽팽함 무시: Wrapped + 유효 Pull 샘플이면 항상 인가
-	 * (연출/특수 게임플레이용). 팽팽 판정 자체는 URopeComponent::IsPullTaut()로 항상 조회 가능하다(이 스위치와
-	 * 무관하게 갱신 — 애니 pull window 등 외부 판단용).
+	 * Whether to apply only when the active pull is taut. true (default) = Force is applied only to the frame where the rope is taut (the stretched rope is
+	 * No response when pulled — physically natural). false = Ignore tension: Always approved if Wrapped + valid pull sample
+	 * (for presentation/special gameplay). The pull check itself can always be queried with URopeComponent::IsPullTaut() (this switch and
+	 * Update regardless — for external check such as animation pull window).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (DisplayName = "Pull Requires Taut"))
 	bool bActivePullRequiresTaut = true;
 
 	/**
-	 * 팽팽(taut) 판정의 선택적 load 임계. 0(기본) = 순수 기하 taut이면 능동 Pull을 시작할 수 있다.
-	 * > 0이면 authoritative GetConstraintTension()이 이 값을 넘어야 load-bearing으로 본다.
-	 * XPBD SegmentTension은 사용하지 않는다.
-	 * bActivePullRequiresTaut를 끄면 팽팽 판정 자체를 안 보므로 회색 처리된다.
+	 * Optional load threshold for taut check. 0 (default) = If pure geometry taut, an active Pull can be initiated.
+	 * > 0, the authoritative GetConstraintTension() must exceed this value to be considered load-bearing.
+	 * XPBD SegmentTension is not used.
+	 * If you turn off bActivePullRequiresTaut, the pull check itself is not visible and is grayed out.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning",
 		meta = (ClampMin = "0.0", EditCondition = "bActivePullRequiresTaut", DisplayName = "Pull Load Threshold"))
 	float ActivePullTautTension = 0.0f;
 
 	/**
-	 * 전 체인 팽팽(taut) 판정 민감도 [0..1] — 0=느슨(적은 팽팽함에도 견인 시작), 1=엄격(더 확실히 펴져야
-	 * 견인). 슬랙 허용 비율과 최대 허용 처짐(cm)을 한 값으로 함께 스케일한다(URopeComponent의
-	 * GetEffectiveTautSlackRatio / GetEffectiveTautMaxSag — 기하 보간). 0.5(기본) = 기존 튜닝
-	 * (슬랙 3%, 처짐 20cm). 0 → 슬랙 9%·처짐 80cm, 1 → 슬랙 1%·처짐 5cm. 판정 히스테리시스·해제 유예는
-	 * 실측 튜닝이 끝난 내부 상수다(RopeComponentTraction.cpp). "시각적으로 펴졌을 때만 끌린다"의 단일 손잡이.
+	 * Sensitivity of entire chain taut check [0..1] — 0=loose (traction starts even with less taut), 1=strict (must be stretched more clearly)
+	 * traction). Scale the slack allowable ratio and maximum allowable sag (cm) together to one value (URopeComponent's
+	 * GetEffectiveTautSlackRatio / GetEffectiveTautMaxSag — geometric interpolation). 0.5 (default) = existing tuning
+	 * (slack 3%, sag 20cm). 0 → slack 9%·sag 80cm, 1 → slack 1%·sag 5cm. check hysteresis·release grace period
+	 * This is an internal constant that has already been tuned (RopeComponentTraction.cpp). A single handle that “only attracts when visually unfolded.”
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Taut Sensitivity"))
 	float TautSensitivity = 0.5f;
 
 	/**
-	 * Legacy particle-chord analytic fallback의 오염 방지 임계. Wielder/live material geometry가 없는
-	 * 경로에서만 자유 구간 XPBD SegmentTension 최솟값을 검사해 부분 스트레치 정귀환을 차단한다.
-	 * 정상 Pawn hard-constraint/Chaos 경로의 taut·장력에는 참여하지 않는다. 0(기본) = 끔. 판정
-	 * 히스테리시스는 내부 상수(RopeComponentTraction.cpp).
+	 * Contamination prevention threshold for legacy particle-chord analytic fallback. Without field/live material geometry
+	 * path.
+	 * Does not participate in the taut·tension of the normal Pawn hard-constraint/Chaos path. 0 (default) = off. check
+	 * hysteresis is an internal constant (RopeComponentTraction.cpp).
 	 *
-	 * 비노출(BP 전용): 도달 조건이 "Chaos 백엔드 아님 ∧ live constraint 없음 ∧ hard wielder attempt
-	 * 없음"이라, bEnforceWielderLengthConstraint가 켜진 Wielder 구성에서는 실행되지 않는다.
-	 * 이 fallback을 직접 타는 custom mover를 짜는 경우에만 의미가 있다.
+	 * Non-exposed (BP only): Reach condition is "Not Chaos backend ∧ No live constraint ∧ hard wielder attempt
+	 * None", so it will not run in Wielder configurations with bEnforceWielderLengthConstraint turned on.
+	 * This is only meaningful if you are writing a custom mover that directly uses this fallback.
 	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0"))
 	float TautMinTension = 0.0f;
 
 	/**
-	 * 비신축(TetherCompliance=0) 제약에서 초과분 C의 위치 회수 시상수(초).
-	 * β = 1−exp(−dt/이 값)만큼 매 프레임 C를 닫는
-	 * 접근 속도를 명령한다 — 작을수록 단단(즉시 안착), 클수록 부드러운 추종. 0 = 한 프레임 전량(β=1).
-	 * 프레임률 독립. 회수 명령 속도의 절대 상한은 TetherMaxBiasSpeed다(SolveTetherLambda의
-	 * MaxBiasSpeed — 커밋 직후 C가 큰 프레임의 스파이크 방지이자 슬랙 코스팅 잔류의 상한).
-	 * 탄성 모드는 이 값을 쓰지 않고 TetherCompliance의 kC 복원력으로 초과 길이를 회수한다.
+	 * Position recovery time constant (seconds) of excess C in non-stretch (TetherCompliance=0) constraint.
+	 * Closing every frame C by β = 1−exp(−dt/this value)
+	 * Commands the approach velocity — smaller means firmer (immediate landing), larger means softer tracking. 0 = entire amount of one frame (β=1).
+	 * Frame rate independent. The absolute cap of the recovery command velocity is TetherMaxBiasSpeed ​​(SolveTetherLambda's
+	 * MaxBiasSpeed ​​— Prevents spikes in frames with large C immediately after commit and caps residual slack coasting.
+	 * Elastic mode does not use this value and recovers excess length using TetherCompliance's kC resilience.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "s"))
 	float TetherSettleTime = 0.08f;
 
 	/**
-	 * 장력 한계/과부하 기준(kg·cm/s², 0 = 무제한).
-	 * TetherCompliance>0인 탄성 모드에서는 λ ≤ 이 값 × dt인 실제 force cap이다.
-	 * TetherCompliance=0인 비신축 모드에서는 유한 force cap과 exact length를 동시에 만족할 수 없으므로
-	 * 길이를 우선하고 full reaction을 보고한다. 이때 이 값은 debugger의 overload 기준선일 뿐이며,
-	 * 실제 끊김/해제는 TensionReleaseForce 또는 별도 게임 규칙으로 명시한다 — 그래서 비신축(기본)
-	 * 에서는 회색 처리된다.
+	 * tension limit/overload criterion (kg·cm/s², 0 = unlimited).
+	 * In elastic mode with TetherCompliance>0, λ ≤ this value × dt is the actual force cap.
+	 * In non-stretchable mode with TetherCompliance=0, finite force cap and exact length cannot be satisfied at the same time.
+	 * Prioritize length and report full reaction. At this time, this value is only the debugger's overload baseline,
+	 * The actual release/release is specified by TensionReleaseForce or a separate game rule — so non-stretchable (default)
+	 * , it is grayed out.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning",
 		meta = (ClampMin = "0.0", EditCondition = "TetherCompliance > 0.0", DisplayName = "Tether Tension Limit"))
 	float MaxTetherTension = 500000.0f;
 
 	/**
-	 * 재료 컴플라이언스 α(s²/kg = 역강성). 0(기본) = 비신축 로프.
-	 * > 0이면 k=1/α인 implicit spring + generalized critical damping으로 common game
-	 * frame rate에서도 안정적인 의도적 탄성(번지 등)을 만든다. 예: 0.0005 → k=2000 kg/s².
+	 * Material compliance α (s²/kg = inverse stiffness). 0 (default) = non-stretchable rope.
+	 * > 0, it is a common game with k=1/α implicit spring + generalized critical damping
+	 * Creates intentional elasticity (bungee, etc.) that is not static even at the frame rate. Example: 0.0005 → k=2000 kg/s².
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", DisplayName = "Rope Elasticity"))
 	float TetherCompliance = 0.0f;
 
 	/**
-	 * 능동 Pull의 **견인 목표 속도**(cm/s). 능동 Pull은 대상을 이 속도로 당김 방향을 따라 몰되(장력 상한 PullForce
-	 * 내에서), 임펄스를 목표 도달분(질량×ΔV)으로 클램프해 **이 속도를 오버슛하지 않는다** — 가벼운 대상이 상수 힘의
-	 * a=F/m로 한 프레임에 목표를 훌쩍 넘겨 튕기던(먼지/턱턱) 문제를 없앤다. 무거운 대상은 장력 한계로 이 속도까지
-	 * 못 끌어 뒤처진다(현실적 질량 의존). 0 = 견인 없음. 견인 중에만 적용.
+	 * **traction target velocity**(cm/s) of active pull. Active Pull drives the object along the pulling direction at this velocity (tension cap PullForce
+	 * ), clamp the impulse to the target arrival (mass
+	 * a=F/m eliminates the problem of bouncing (dust/jaw) by overshooting the target in one frame. Heavy objects reach this velocity due to the tension limit.
+	 * I can't pull it off and fall behind (depending on realistic mass). 0 = no traction. Applies only during traction.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold",
 		meta = (ClampMin = "0.0", Units = "cm/s", DisplayName = "Pull Speed"))
 	float ActivePullMaxLinearSpeed = 300.0f;
 
 	/**
-	 * 능동 Pull 대상 물리 바디의 각속도 상한(deg/s, 0 = 무제한). 힘을 무게중심(AddForce)에 주면 토크가 없어
-	 * 스핀 원인이 대부분 사라지지만, 랙돌 관절 다이내믹이 만드는 잔여 스핀을 이 상한이 마저 억제한다.
+	 * Velocity cap (deg/s, 0 = unlimited) of the physical body being actively pulled. If force is applied to the center of gravity (AddForce), there is no torque.
+	 * Although most of the causes of spin disappear, this cap suppresses the remaining spin created by ragdoll joint dynamics.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hold|Tuning", meta = (ClampMin = "0.0", Units = "deg/s", DisplayName = "Pull Spin Limit"))
 	float ActivePullMaxAngularSpeed = 720.0f;

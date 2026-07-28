@@ -19,13 +19,13 @@
 
 namespace
 {
-	// C1: taut 판정 히스테리시스·해제 유예는 실측 튜닝이 끝난 내부 상수다(단일 TautSensitivity로 통합하며
-	// 디자이너 노출에서 제거). 값을 조정하려면 여기서.
-	constexpr float TautSlackReleaseScaleConst = 2.0f;       // 슬랙/처짐 게이트 유지 배율(≥1, 진입/해제 임계 분리)
-	constexpr float TautReleaseGraceTimeConst = 0.1f;        // bChainTaut 해제 유예(초)
-	constexpr float ActivePullTautReleaseRatioConst = 0.5f;  // 능동 Pull load 임계 히스테리시스 [0..1]
-	constexpr float TautMinTensionReleaseRatioConst = 0.5f;  // 최소 전달 장력 히스테리시스 [0..1]
-	constexpr float TetherLiftLaunchSpeedConst = 100.0f;     // 접지 캐릭터 Walking→Falling 전환 상향 임계(cm/s)
+	// C1: taut check hysteresis·release grace period is an internal constant that has been ground truth tuned (integrated into a single TautSensitivity,
+	// removed from designer exposure). To adjust the values ​​here.
+	constexpr float TautSlackReleaseScaleConst = 2.0f;       // slack/sag gate maintenance multiplier (≥1, entry/release threshold separation)
+	constexpr float TautReleaseGraceTimeConst = 0.1f;        // bChainTaut release grace period (seconds)
+	constexpr float ActivePullTautReleaseRatioConst = 0.5f;  // Active Pull load threshold hysteresis [0..1]
+	constexpr float TautMinTensionReleaseRatioConst = 0.5f;  // Minimum transfer tension hysteresis [0..1]
+	constexpr float TetherLiftLaunchSpeedConst = 100.0f;     // Ground character Walking → Falling transition upward threshold (cm/s)
 }
 
 #pragma region Tension_Query
@@ -54,7 +54,7 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	// ApplyWrappedTraction refreshes this again after the current frame's backend has solved.
 	WrapController.State.Tension = GetConstraintTension();
 
-	// Pull 샘플 산출(항상 — 디버거/BP 관찰 + 견인/release의 공용 입력). 방향은 첫 직선 다리 추종(공간).
+	// Pull sample output (always — debugger/BP observation + shared input from traction/release). direction follows the first straight leg (space).
 	PullDrive.LastPullSample = FRopePullSample();
 	WrapController.ComputePull(ObservationSim, HoldConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
 
@@ -63,10 +63,10 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	// "segment must stretch -> tension appears -> tether may enforce no stretch".
 	FRopeWielderMovementConstraint LiveConstraint;
 	const bool bHasLiveConstraint = BuildWielderMovementConstraint(LiveConstraint);
-	// 슬랙 비율·처짐 상한은 단일 TautSensitivity에서 해석한다(GetEffectiveTaut*), 히스테리시스는 내부 상수.
-	// live material-length 경로와 legacy geometry 경로가 **같은 방향으로** 반응해야 하므로(기본값
-	// bEnforceWielderLengthConstraint=true에서도 슬라이더가 체감되도록) 두 경로가 이 값들을 공유한다.
-	// 진입/유지 히스테리시스: 일단 팽팽으로 판정되면 허용을 넓혀 임계 경계의 채터링을 막는다(+ 아래 grace 래치).
+	// slack ratio·sag cap is interpreted in a single TautSensitivity (GetEffectiveTaut*), hysteresis is an internal constant.
+	// Because the live material-length path and legacy geometry path must react in the **same direction** (default
+	// The two paths share these values (so that the slider is felt even when bEnforceWielderLengthConstraint=true).
+	// Entry/maintenance hysteresis: Once checked as tight, widens the tolerance to prevent chattering of the threshold boundary (+ grace latch below).
 	const float EffectiveTautMaxSag = GetEffectiveTautMaxSag();
 	const float EffectiveTautSlackRatio = GetEffectiveTautSlackRatio();
 	const float TautHysteresis = PullDrive.bChainTaut ? TautSlackReleaseScaleConst : 1.0f;
@@ -74,8 +74,8 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	const bool bSagTaut =
 		EffectiveTautMaxSag <= 0.0f || PullDrive.LastPullSample.MaxLegSag <= SagLimit;
 
-	// live 경계: 견인 시작 거리 slack을 TautSensitivity에서 파생하되, LengthConstraintActivationSlop은
-	// 수치 안정성용 최소 허용치로 유지한다(둘 중 큰 값). "시각적으로 펴졌을 때만"을 위해 sag 게이트도 공유.
+	// live boundary: Derive the traction start distance slack from TautSensitivity, but LengthConstraintActivationSlop
+	// Maintain at the minimum allowable value for numerical stability (whichever is greater). Also shared is a sag gate for “only when visually unfolded”.
 	const float LiveSlackAllowance = FMath::Max(
 		FMath::Max(HoldConfig.LengthConstraintActivationSlop, 0.0f),
 		LiveConstraint.MaxDistance * EffectiveTautSlackRatio * TautHysteresis);
@@ -97,10 +97,10 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 			PullDrive.bChainTaut));
 	const bool bRawChainTaut = PullDrive.LastPullSample.bValid
 		&& (bHasLiveConstraint ? bLiveBoundaryTaut : bLegacyGeometryTaut);
-	// 해제 유예(시간 래치): 최소 전달 장력 관측치는 임계 0(기본)에서 진입/유지 임계가 같아 히스테리시스가
-	// 소멸하고 GPU 로프에선 1~2프레임 지연 미러라, 경계 상태에서 판정이 프레임 단위로 퍼덕이며 "전량 속도
-	// 삭감 ↔ 자유"가 교대한다(wielder 들썩임). 진입은 즉시, 해제만 TautReleaseGraceTime 동안 유예해 채터링을
-	// 끊는다. 샘플 무효는 유예 없이 즉시 false(위 확정 계약 유지 — 관측 공백을 팽팽으로 연장하지 않는다).
+	// release grace period (time latch): Minimum transfer tension observation is at threshold 0 (default), the entry/maintenance threshold is the same, so hysteresis is
+	// disappears, and in the GPU rope, it is a delayed mirror of 1~2 frames, and in the alert state, the check flutters in units of frames, and "the entire velocity
+	// Cut ↔ Freedom" alternates (wielder excitement). Entry is immediate, only release occurs with a grace period during TautReleaseGraceTime to prevent chattering.
+	// Hang up. sample invalid is immediately false without a grace period (maintaining the above firm contract — it does not extend the observation gap tautologically).
 	if (bRawChainTaut)
 	{
 		PullDrive.bChainTaut = true;
@@ -121,21 +121,21 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 		PullDrive.bChainTaut = false;
 	}
 
-	// Pull 스무딩(2단): (1) 조준 노드 fractional 스무딩 — 정수 AimNode의 프레임 간 이산 홉(방향 통째 점프
-	// + tether 초과분 불연속)을 float EMA + 노드 사이 보간으로 없앤다. (2) 방향 EMA — 그 위에 남는 노드 위치
-	// 노이즈(GPU 미러 지연 등)를 다듬는다. wrap 시작 후 첫 유효 프레임은 측정값으로 시드(래그 없음).
+	// Pull smoothing (stage 2): (1) aiming node fractional smoothing — Discrete hops between frames of integer AimNode (direction jump overall)
+	// + tether excess discontinuity) is eliminated by interpolation between float EMA + node. (2) direction EMA — node location remaining above it
+	// Trim noise (GPU mirror delay, etc.). The first valid frame after the start of wrap is seeded with the measurement value (no lag).
 	if (!PullDrive.LastPullSample.bValid)
 	{
 		return;
 	}
 
-	// 스무딩 전 raw look-ahead(정수 조준) — 디버거 raw vs smoothed 비교.
+	// raw look-ahead before smoothing (integer aiming) — Debugger raw vs smoothed comparison.
 	PullDrive.LastPullDirRaw = PullDrive.LastPullSample.Direction;
 
-	// (1) 조준 인덱스 시간 스무딩 → fractional 조준 위치 보간.
+	// (1) Aiming index time smoothing → fractional aiming position interpolation.
 	const float RawAimF = static_cast<float>(PullDrive.LastPullSample.AimNode);
 	PullDrive.SmoothedAimNodeF = (PullDrive.SmoothedAimNodeF < 0.0f)
-		? RawAimF // 첫 유효 프레임은 측정값으로 시드(래그 없음).
+		? RawAimF // The first valid frame is seeded with the measurement value (no lag).
 		: FMath::Lerp(PullDrive.SmoothedAimNodeF, RawAimF, RopeTraction::ExpSmoothAlpha(HoldConfig.PullAimSmoothTime, DeltaTime));
 	const float AimF = FMath::Clamp(PullDrive.SmoothedAimNodeF, 0.0f, static_cast<float>(PullDrive.LastPullSample.AnchorNode));
 	const FVector AimPos = RopeTraction::SampleFractionalAim(
@@ -143,7 +143,7 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	PullDrive.LastPullSample.AimNodeF = AimF;
 	PullDrive.LastPullSample.AimPos = AimPos;
 
-	// (2) 연속 조준으로 방향 재계산 후 방향 EMA. 축퇴(조준=앵커)면 raw 방향 유지.
+	// (2) After recalculating the direction with continuous aiming, direction EMA. If degenerate(aiming=anchor), the raw direction is maintained.
 	const FVector DirF =
 		(AimPos - ObservationSim.Positions[PullDrive.LastPullSample.AnchorNode]).GetSafeNormal();
 	const FVector DirIn = DirF.IsNearlyZero() ? PullDrive.LastPullSample.Direction : DirF;
@@ -154,17 +154,17 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 
 void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 {
-	// 이 함수의 동기 호출 구간에서만 endpoint 캐시를 유지한다. virtual ApplyPullForce가 Super를 호출해도
-	// 같은 target 해석을 재사용하고, 외부에서 별도로 호출한 ApplyPullForce에는 캐시가 새지 않는다.
+	// The endpoint cache is maintained only during the synchronous call section of this function. Even if virtual ApplyPullForce calls Super
+	// The same target analysis is reused, and ApplyPullForce called separately from the outside does not leak cache.
 	WrappedEndpointCache.Reset();
-	// 끌림 가능 판정: 테더 분배 관측(LastTargetShare)과 능동 Pull의 climb-in 방향이 공유한다.
+	// Climbable check: The tether distribution observation (LastTargetShare) and the active Pull's climb-in direction are shared.
 	if (PullDrive.LastPullSample.bValid)
 	{
 		UpdateTargetPullable();
 	}
 
-	// ③-1 자동 견인(테더): 단일 λ 임펄스 제약 + 랙돌 물리 제약(Docs/PoC/05). 슬랙 브레이크는 없다 —
-	// λ의 위치 회수 항은 MaxBiasSpeed로 유계라 장부에 남을 과잉 주입 자체가 없다(레거시 서보 시절 유물).
+	// ③-1 Automatic traction (tether): single λ impulse constraint + ragdoll physics constraint (Docs/PoC/05). No slack breaks —
+	// The position recovery term of λ is bounded by MaxBiasSpeed, so there is no excess injection left in the ledger (a relic from the legacy servo era).
 	UpdateConstraintTether(DeltaTime);
 	WrapController.State.Tension = GetConstraintTension();
 
@@ -184,24 +184,24 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 			PullDrive.bPullTaut);
 	}
 
-	// ③-2 능동 Pull(상수 힘): 사용자 입력(SetActivePull/Wielder)이 준 힘을 팽팽할 때만 인가한다.
-	// 팽팽 판정은 ②가 갱신한 bPullTaut 래치 = 전 체인 기하(bChainTaut) ∧ 장력 임계
-	// (임계/히스테리시스는 HoldConfig — 기본 임계 0 = 장력 > ~0).
-	// 팽팽함 무시 2층: config(bActivePullRequiresTaut=false, 로프 전체 정책) / per-call(bActivePullIgnoresTaut,
-	// SetActivePull 인자 — 애니 pull window 구간용). 어느 쪽이든 Wrapped + 유효 샘플이면 인가.
-	// 장력과 무관한 상수라 피드백 폭주가 없다.
+	// ③-2 Active Pull (constant force): The force given by the user input (SetActivePull/Wielder) is applied only when tension is present.
+	// Tension check is bPullTaut latch updated by ② = previous chain geometry (bChainTaut) ∧ tension threshold
+	// (threshold/hysteresis is HoldConfig — default threshold 0 = tension > ~0).
+	// Ignore tautology 2nd layer: config(bActivePullRequiresTaut=false, rope full policy) / per-call(bActivePullIgnoresTaut,
+	// SetActivePull argument — for animation pull window section). In either case, if it is Wrapped + valid sample, it is approved.
+	// It is a constant unrelated to tension, so there is no feedback runaway.
 	const bool bActivePullPassesGate = PullDrive.ActivePullForce > 0.0f && PullDrive.LastPullSample.bValid
 		&& (!HoldConfig.bActivePullRequiresTaut || PullDrive.bActivePullIgnoresTaut || PullDrive.bPullTaut);
 #if WITH_GAMEPLAY_DEBUGGER
-	// 디버거는 요청값(ActivePullForce)만으로는 실제 인가를 알 수 없다 — 팽팽 게이트와 우회 2층이 여기서
-	// 갈리기 때문이다. 게이트 통과 여부를 그대로 남긴다(수신자 단계에서 힘이 버려지는 경우는 별개다).
+	// The debugger cannot know the actual application from the request value (ActivePullForce) alone — the pull gate and bypass layer 2 are here.
+	// Because it is divided. Whether the gate passes or not is left as is (this is separate from the case where power is discarded at the receiver stage).
 	DebugActivePullPassedGate = bActivePullPassesGate;
 #endif
 	if (bActivePullPassesGate)
 	{
-		// 대상이 무거워 끌 수 없으면(not pullable) 힘을 wielder에 실어 앵커 쪽으로 끌어당긴다(climb-in):
-		// LastPullSample.Direction은 앵커→손 방향이라 부호 반전 = 손→앵커 — "내가 끌려가야 되면 간다"
-		// (벽/무거운 랙돌/드래곤에 pull = 입체기동). 끌림 가능하면 대상에 인가해 wielder 쪽으로 끈다.
+		// If the object is heavy and cannot be pulled (not pullable), put the force on the wielder and pull it towards the anchor (climb-in):
+		// LastPullSample.Direction is the anchor → hand direction, so the sign is reversed = hand → anchor — "If I have to be dragged, I will go."
+		// (pull to wall/heavy ragdoll/dragon = 3D maneuver). If possible, apply it to the target and pull it toward the wielder.
 		if (!PullDrive.bTargetPullable)
 		{
 			ApplyPullForceToWielder(-PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, DeltaTime);
@@ -229,10 +229,10 @@ void URopeComponent::SetActivePull(float Force, bool bIgnoreTautGate)
 
 namespace
 {
-	// 본에서 부모 체인을 올라가 가장 가까운 "시뮬 중인 피직스 바디"의 본을 찾는다(없으면 None).
-	// 감긴 본이 트위스트 본 등 피직스 에셋에 바디가 없는 본일 수 있다 — 그 경우 본 이름만 보고
-	// 비시뮬 판정해 캐릭터 무브먼트 분기로 빠지면, 랙돌 셋업이 무브먼트를 꺼둔 상태(MOVE_None)라
-	// AddForce가 조용히 버려진다. 힘/속도 인가 본은 이 함수로 승격해 찾는다.
+	// From bone, go up the parent chain to find the bone of the nearest "physics body being simulated" (or None).
+	// The Wrapped bone may be a bodyless bone in the physics asset, such as a twisted bone — in that case, just look at the bone name.
+	// If you check the non-simulation and fall into the character movement branch, the ragdoll setup has the movement turned off (MOVE_None).
+	// AddForce is silently abandoned. Force/velocity bone is promoted to this function to find it.
 	FName FindNearestSimulatingBone(const USkeletalMeshComponent* Mesh, FName Bone)
 	{
 		while (!Bone.IsNone())
@@ -246,16 +246,16 @@ namespace
 		return NAME_None;
 	}
 
-	// 시뮬 본 위(부모 체인)에 키네마틱 바디가 있는가 = 부분 랙돌 판정. 있으면 그 구속이 본 견인을 통째로
-	// 흡수해(무한질량 벽) 본에 인가한 서보/힘이 액터에 전달되지 않는다 — 이 경우 수신자 해석은 본이 아니라
-	// 이동체(캐릭터)로 내려가야 한다. 없으면(루트 바디까지 전부 시뮬) 관절로 몸 전체가 끌려오는 자유 랙돌.
-	// 바디 없는 본(트위스트/IK)은 구속이 아니므로 건너뛴다.
+	// Check if there is a kinematic body on the simulation bone (parent chain) = partial ragdoll. If there is, the restraint will completely cause bone traction.
+	// Absorbed (infinite mass wall) The servo/force applied to the bone is not transmitted to the actor — in this case, the receiver interpretation is not to the bone, but to the bone.
+	// You must go down to the moving object (character). If not (simulate everything, including the root body), it is a Free ragdoll in which the entire body is pulled by the joints.
+	// Bones without bodies (twist/IK) are not constrained, so they are skipped.
 	bool IsSimBoneBoundToKinematic(const USkeletalMeshComponent* Mesh, FName SimBone)
 	{
 		for (FName Bone = Mesh->GetParentBone(SimBone); !Bone.IsNone(); Bone = Mesh->GetParentBone(Bone))
 		{
-			// 바디 존재 + 비시뮬 = 키네마틱 구속. (시뮬 상태는 컴포넌트 API로 묻는다 —
-			// FBodyInstance::IsInstanceSimulatingPhysics는 비export 인라인이라 링크 불가.)
+			// Body Existence + Non-Simulation = Kinematic Constraints. (Simulation status is asked through component API —
+			// FBodyInstance::IsInstanceSimulatingPhysics cannot be linked because it is non-export inline.)
 			if (Mesh->GetBodyInstance(Bone) != nullptr && !Mesh->IsSimulatingPhysics(Bone))
 			{
 				return true;
@@ -264,9 +264,9 @@ namespace
 		return false;
 	}
 
-	// 캐릭터 무브먼트가 지금 힘을 소비할 수 있는가. MOVE_None(DisableMovement — 랙돌 셋업 관례)이면
-	// AddForce가 누적만 되고 소비되지 않아 "성공한 척" 힘이 사라진다 — 그 경우 다른 수신자로 넘긴다.
-	// wrap 대상 액터를 직접 받는다(대상이 스켈레탈/정적/물리프랍 무엇이든 무관 — 소유 액터 기준 판정).
+	// Can the character movement consume power now? If MOVE_None (DisableMovement — ragdoll setup convention)
+	// AddForce is only accumulated and not consumed, so the "fake success" power is lost — in that case it is passed on to another recipient.
+	// Directly receives the target actor for wrap (regardless of whether the target is a skeletal/static/physical prop — check based on the owning actor).
 	UCharacterMovementComponent* GetForceConsumingMovement(const AActor* Owner)
 	{
 		const ACharacter* Character = Cast<ACharacter>(Owner);
@@ -274,9 +274,9 @@ namespace
 		return (Movement && Movement->MovementMode != MOVE_None) ? Movement : nullptr;
 	}
 
-	// 인가 대상 바디의 질량(kg): 스켈레탈 본이면 그 바디 질량, 아니면(또는 바디가 없거나 질량이 0이면)
-	// 컴포넌트 질량. 물리 바디 질량은 UE가 콜리전 볼륨×밀도로 자동 유지하는 값이라 별도 세팅이 필요 없다.
-	// (UObject 의존이라 RopeTraction 순수 수학에 넣지 않는다 — 질량은 여기서 읽어 그쪽에 넘긴다.)
+	// Mass (kg) of the body subject to application: If it is a skeletal bone, then the mass of the body, otherwise (or if there is no body or the mass is 0)
+	// component mass. The physical body mass is a value that the UE automatically maintains as collision volume × density, so no separate setting is required.
+	// (Because it depends on UObject, RopeTraction is not included in pure math — mass is read from here and passed there.)
 	float ResolveBodyMass(const UPrimitiveComponent* Prim, FName BoneName)
 	{
 		float Mass = 0.0f;
@@ -293,34 +293,34 @@ namespace
 		return (Mass > KINDA_SMALL_NUMBER) ? Mass : static_cast<float>(Prim->GetMass());
 	}
 
-	// ===== 테더 엔드포인트(수신자) 해석 — 래더를 한 번만 건넌다 =====
-	// "무엇이 받는가"는 여기서 한 번만 판정해 종류·인가점·유효질량을 함께 확정한다. 예전엔 분배용 질량과 실제
-	// 인가 지점이 같은 래더를 각자 복제했고, 그 위에서 인가 람다가 자기가 어느 rung인지 다시 캐스팅으로
-	// 역추론했다 — 순서가 어긋나면 "질량은 앵커로 봤는데 힘은 다른 데 꽂히는" 버그가 된다(CL 392의 부분 랙돌
-	// 루트 게이트가 실제로 그랬다). 한 해석을 공유하면 그 어긋남이 구조적으로 불가능하다.
-	// ERopeEndpointKind/FRopeTetherEndpoint는 Core/RopeTractionTypes.h의 공용 판정 타입이다. 컴포넌트는
-	// target/wielder 결과를 같은 Wrapped 프레임 안에서 캐시해 pullable/테더/기본 Pull이 공유한다.
+	// ===== Tether endpoint (receiver) interpretation — cross the ladder only once =====
+	// “What is received” is checked only once here and the type, application point, and effective mass are confirmed together. In the past, distribution mass and actual
+	// Each ladder with the same application point was duplicated, and on it, the application lambda recast to determine which rung it was.
+	// I inferred backwards — if the order is wrong, it becomes a bug where “mass is seen as an anchor, but force is applied somewhere else” (partial ragdoll in CL 392)
+	// the root gate actually did). If one interpretation is shared, deviation is structurally impossible.
+	// ERopeEndpointKind/FRopeTetherEndpoint is a shared check type in Core/RopeTractionTypes.h. The component is
+	// Target/wielder results are cached within the same Wrapped frame and shared by pullable/tether/basic pull.
 
-	// 수신자 해석(대상/wielder 공용). 순서: 스켈레탈 자유 랙돌 본 → 시뮬 프리미티브 → 시뮬 루트 → 캐릭터 → 앵커.
-	// (부분 랙돌 — 시뮬 본이 위쪽 키네마틱 바디에 묶임 — 은 rung 1이 받지 않고 캐릭터/앵커로 폴스루한다.)
-	//  - MeshComp: 대상이면 State.Mesh, wielder면 nullptr(스켈레탈·프리미티브 rung 자동 skip → 루트부터).
-	//  - 물리 바디 질량은 UE가 콜리전 볼륨×밀도로 자동 유지하는 값이라 별도 세팅이 필요 없다.
-	//  - 캐릭터 접지는 유한 브레이스(Mass×GroundBraceFactor — 발 디딤 저항), 공중은 Mass, MOVE_None은 앵커.
+	// Recipient interpretation (target/wielder shared). Sequence: Skeletal Free ragdoll bone → Simulation primitive → Simulation root → Character → Anchor.
+	// (Partial ragdoll — sim bone tied to upper kinematic body — rung 1 does not pick up and falls through to character/anchor.)
+	//  - MeshComp: State.Mesh if target, nullptr if wielder (automatic skip of skeletal/primitive rung → from root).
+	//  - Physical body mass is a value that the UE automatically maintains as collision volume × density, so no separate setting is required.
+	//  - Character ground is a finite brace (Mass×GroundBraceFactor — stepping resistance), air is Mass, and MOVE_None is an anchor.
 	FRopeTetherEndpoint ResolveTetherEndpoint(USceneComponent* MeshComp, AActor* Owner, FName WrappedBone, float GroundBraceFactor)
 	{
 		FRopeTetherEndpoint Out;
 		Out.Actor = Owner;
 
-		// (1) 스켈레탈 **자유 랙돌**(시뮬 본이 루트 바디까지 관절로만 이어짐): 감긴 본에서 부모 체인으로 승격한
-		// 가장 가까운 *시뮬 본*(바디 없는 트위스트 본 대응)에 인가한다. 여기 저장하는 기본 질량은 **전신 바디
-		// 질량 합**(GetMass)이다 — hard Chaos 반력의 coarse wielder/target 몫과 pullability가 본 바디
-		// (팔뚝 3kg)를 "가벼운 대상"으로 오판하지 않게 한다. Compliant analytic solve는 실제 world
-		// attachment가 정해진 뒤 이 기본값을 선택 본의 병진+회전 point Jacobian으로 정밀화한다.
+		// (1) Skeletal **Free Ragdoll** (simulated bone only articulated to the root body): Promoted from a Wrapped bone to the parent chain.
+		// Applies to the nearest *simulation bone* (corresponding to a twist bone without a body). The default mass saved here is **full body
+		// mass is the sum**(GetMass) — the coarse wielder/target share of hard Chaos reaction force and pullability are bone bodies
+		// (3kg forearm) as a “light object”. Compliant analytic solve is the real world
+		// After the attachment is determined, this default value is refined to the translation + rotation point Jacobian of the selected bone.
 		//
-		// **부분 랙돌**(시뮬 본 위 부모 체인에 키네마틱 바디 존재)은 여기서 받지 않고 아래로 폴스루한다: 본을
-		// 아무리 서보해도 키네마틱 구속이 흡수해 로프만 늘어난다(2026-07-15 보류했던 rung 1 한계 — 이 폴스루가
-		// 그 해소다). 실제로 끌 수 있는 것은 이동체(캐릭터 rung — CMC 활성)거나, 그마저 없으면 아무것도 없다
-		// (앵커 = 무한질량이 물리적 진실). 감긴 본의 시각 반응(팔이 딸려오는 연출)은 후속(Docs/PoC/05 §7).
+		// **Partial ragdoll** (kinematic body in the parent chain above the simulated bone) is not received here and falls through downwards: bone
+		// No matter how much you servo, the kinematic restraint absorbs it and only the rope stretches (rung 1 limit, which was put on hold on 2026-07-15 — this fallthrough
+		// That is resolved). The only thing that can actually be dragged is a moving object (character rung — CMC active), or else there is nothing.
+		// (anchor = infinite mass is the physical truth). The visual response of the Wrapped bone (presentation with accompanying arms) follows (Docs/PoC/05 §7).
 		if (USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(MeshComp))
 		{
 			const FName SimBone = FindNearestSimulatingBone(Skel, WrappedBone);
@@ -329,13 +329,13 @@ namespace
 				Out.Kind = ERopeEndpointKind::SimBody;
 				Out.Prim = Skel;
 				Out.Bone = SimBone;
-				// 전신 질량(전 바디 합). 축퇴(바디 미생성 등으로 0)면 종전 본 바디 → 컴포넌트 질량 폴백.
+				// Whole body mass (total body sum). If degenerate (0 due to non-generation of body, etc.), previous bone body → component mass fallback.
 				const float WholeMass = static_cast<float>(Skel->GetMass());
 				Out.Mass = (WholeMass > KINDA_SMALL_NUMBER) ? WholeMass : ResolveBodyMass(Skel, SimBone);
 				return Out;
 			}
 		}
-		// (2) 대상 컴포넌트 자체가 시뮬 중인 프리미티브(가벼운 물리 프랍 등).
+		// (2) The target component itself is a primitive being simulated (light physics prop, etc.).
 		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(MeshComp))
 		{
 			if (Prim->IsSimulatingPhysics())
@@ -350,7 +350,7 @@ namespace
 		{
 			return Out; // None.
 		}
-		// (3) 소유 액터 루트 프리미티브가 시뮬 중(물리 액터 구성). wielder는 MeshComp=nullptr라 여기서 시작.
+		// (3) Owning actor root primitive is simulating (constructing physics actor). The wielder starts here because MeshComp=nullptr.
 		if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
 		{
 			if (Root->IsSimulatingPhysics())
@@ -361,7 +361,7 @@ namespace
 				return Out;
 			}
 		}
-		// (4) 캐릭터: MOVE_None(랙돌 셋업 관례)이면 무브먼트가 힘을 소비하지 않으니 앵커로 본다.
+		// (4) Character: If MOVE_None (ragdoll setup convention), the movement does not consume force, so it is used as an anchor.
 		if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(Owner))
 		{
 			Out.Kind = ERopeEndpointKind::Character;
@@ -370,13 +370,13 @@ namespace
 			Out.Mass = Movement->Mass * BraceScale;
 			return Out;
 		}
-		// (5) 정적/키네마틱/MOVE_None/비시뮬 비캐릭터 → 앵커(질량 0). 위치 폴백만 가능하다.
+		// (5) static/Kinematic/MOVE_None/Non-simulated Non-character → Anchor (mass 0). Only location fallback is possible.
 		Out.Kind = ERopeEndpointKind::Anchor;
 		return Out;
 	}
 
-	// 해석된 수신자를 공개 확장 훅(ApplyTractionToReceiver)이 읽는 요청으로 옮긴다.
-	// Source/Direction/Amount는 인가 경로가 각자 채운다(단위가 경로마다 다르다 — 요청 타입 주석 참고).
+	// Moves the interpreted receiver to the request read by the public extension hook (ApplyTractionToReceiver).
+	// Source/Direction/Amount is filled by each application path (units are different for each path — refer to the request type annotation).
 	FRopeTractionRequest MakeTractionRequest(const FRopeTetherEndpoint& Endpoint, ERopeTractionSource Source,
 		const FVector& Dir, float Amount, float DeltaTime, bool bWielderSide)
 	{
@@ -394,7 +394,7 @@ namespace
 		return Req;
 	}
 
-	// 테더 자동 분배용 유효 역질량(w = 1/유효질량). 0 = 앵커(무한질량).
+	// Effective inverse mass (w = 1/effective mass) for tether automatic distribution. 0 = anchor (infinite mass).
 	float EndpointInvMass(const FRopeTetherEndpoint& Endpoint)
 	{
 		return RopeTraction::InvMassFromMass(Endpoint.Mass);
@@ -461,21 +461,21 @@ namespace
 	}
 
 
-	// 테더 인가 공용 컨텍스트 — 양끝 수신자 해석 + 확장 관문. 관측/λ 산출·상태 보관은 컴포넌트가 한다.
+	// Tether application shared context — both ends receiver interpretation + extension gateway. Observation/λ calculation and state storage are performed by the component.
 	struct FRopeTetherContext
 	{
 		const FRopeTetherEndpoint& Target;
 		const FRopeTetherEndpoint& Wielder;
 		float DeltaTime;
-		// 수신자 인가 확장 관문(컴포넌트의 virtual로 위임). true면 내장 인가를 건너뛴다.
+		// Receiver application extension gateway (delegating to the component's virtual). If true, built-in application is skipped.
 		TFunctionRef<bool(const FRopeTractionRequest&)> TractionGate;
 	};
 
-	// 해석된 수신자에 인가를 디스패치(대상/wielder 공용 골격 — Constraint 테더의 두 인가 지점이 쓴다).
-	// 콜백은 자기가 무엇을 받았는지 이미 알고 있다(재캐스팅 불필요). Step/반환은 이번 프레임 축 ΔV(cm/s).
-	//  - SimApply(Prim, Bone, Dir, DeltaV): 물리 시뮬 바디.
-	//  - CharacterApply(Movement, Dir, DeltaV): CMC 구동 캐릭터.
-	//  - AnchorApply(Actor, Dir, DeltaV): 앵커(정적/MOVE_None) — 무동작(w=0이라 ΔV도 0).
+	// Dispatches application to the interpreted recipient (destination/wielder shared skeleton — Constraint used by two application points on the tether).
+	// The callback already knows what it received (no recasting required). Step/return is this frame axis ΔV (cm/s).
+	//  - SimApply(Prim, Bone, Dir, DeltaV): Physics simulation body.
+	//  - CharacterApply(Movement, Dir, DeltaV): CMC driven character.
+	//  - AnchorApply(Actor, Dir, DeltaV): Anchor(static/MOVE_None) — No action (w=0, so ΔV is 0).
 	float ApplyToTetherEndpoint(
 		const FRopeTetherContext& Ctx, bool bWielderSide, const FVector& Dir, float Step,
 		TFunctionRef<float(UPrimitiveComponent*, FName, const FVector&, float)> SimApply,
@@ -484,9 +484,9 @@ namespace
 	{
 		const FRopeTetherEndpoint& Endpoint = bWielderSide ? Ctx.Wielder : Ctx.Target;
 
-		// 확장 관문(URopeComponent::ApplyTractionToReceiver): 서브클래스가 처리했으면 내장 인가를 건너뛴다.
-		// 테더의 네 인가 지점이 전부 이 골격을 지나므로, 여기 한 줄이 테더 경로 전체를 덮는다.
-		// 반환은 Step(= 부족분 0) — sim-body 미적용 분기와 같은 계약이다.
+		// Extension gateway (URopeComponent::ApplyTractionToReceiver): Skips built-in application if handled by subclass.
+		// Since all four application points of the tether pass through this skeleton, one line here covers the entire tether path.
+		// return is the same contract as Step(= shortfall 0) — sim-body unapplied branch.
 		if (Ctx.TractionGate(MakeTractionRequest(Endpoint, ERopeTractionSource::Tether, Dir, Step,
 			Ctx.DeltaTime, bWielderSide)))
 		{
@@ -506,7 +506,7 @@ namespace
 		default:
 			break;
 		}
-		return Step; // sim-body 미적용 → 부족분 0.
+		return Step; // sim-body not applied → shortfall 0.
 	}
 
 }
@@ -659,25 +659,25 @@ void URopeComponent::PrepareWielderLengthConstraint(
 
 FVector URopeComponent::ComputeSmoothedWielderDir(const FVector& Aim, const FVector& DirToAim, float DeltaTime, bool bInstantaneous)
 {
-	// 방향 = 손(노드 0)에서 로프의 첫 직선 다리를 따라. 조준(AimPos)이 벽 모서리면 모서리를 향하고, 로프가 곧아
-	// 조준=손이면(chord ~0) 앵커→조준의 역방향(=손→앵커)으로 폴백한다.
+	// direction = along the first straight leg of the rope from the hand (node ​​0). Aiming (AimPos) is toward the corner of the wall, and the rope is straight.
+	// If aiming=hand (chord ~0), it falls back to the reverse direction of anchor→aiming (=hand→anchor).
 	const FVector HandPos = GetComponentLocation();
 	FVector WielderDirRaw = Aim - HandPos;
 	if (!WielderDirRaw.Normalize(KINDA_SMALL_NUMBER))
 	{
 		WielderDirRaw = -DirToAim;
 	}
-	// 공중 스윙(bInstantaneous): EMA 생략, 순간 기하 그대로 — 궤도가 빠르게 도는 동안 래그된 축(ω·τ ≈
-	// 십수도)의 접선 오차 성분이 매 발화 프레임 스윙을 제동/가속해 AirControl 조작을 방해한다. EMA의 원
-	// 목적(서보 톱업의 랜덤워크 방어)은 λ 단발 임펄스+속력 클램프 체제에선 접지 코너 노이즈 쪽만 남았다.
-	// 상태는 raw로 계속 시드해 착지 시 EMA 재진입이 연속이게 한다.
+	// Aerial Swing (bInstantaneous): EMA omitted, instantaneous geometry remains — axis lagged while orbiting rapidly (ω·τ ≈
+	// The tangential error component of ten degrees brakes/accelerates the swing of each utterance frame and interferes with AirControl operation. circle of ema
+	// The purpose (to defend the random walk of the servo top-up) is that in the λ single impulse + speed clamp system, only the ground corner noise remains.
+	// state continues to be seeded raw, ensuring continuous EMA re-entry upon landing.
 	if (bInstantaneous)
 	{
 		PullDrive.SmoothedWielderPullDir = WielderDirRaw;
 		return WielderDirRaw;
 	}
-	// 방향 EMA(대상 쪽 SmoothedPullDir과 동일 상수·동일 함수): AimPos 노드 노이즈/모서리 전환/근접 축퇴로 raw
-	// 방향이 프레임마다 튀면 클램프/톱업이 매번 다른 축으로 들어가 벡터가 랜덤워크로 불어난다(폭주).
+	// direction EMA (same constant/same function as SmoothedPullDir on target side): Raw with AimPos node noise/edge transition/proximity degenerate
+	// If the direction bounces every frame, the clamp/top-up moves to a different axis each time and the vector increases in a random walk (runaway).
 	PullDrive.SmoothedWielderPullDir = RopeTraction::SmoothDirection(
 		PullDrive.SmoothedWielderPullDir, WielderDirRaw, RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
 	return PullDrive.SmoothedWielderPullDir;
@@ -736,8 +736,8 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 			LengthConstraintState.SmoothedAnchorPointVelocity,
 			RawAnchorVel,
 			RopeTraction::ExpSmoothAlpha(HoldConfig.PullDirSmoothTime, DeltaTime));
-		// 손 점(wielder 끝) 실측 속도 — Anchor-kind wielder(키네마틱 캐리어: 헬기/이동 플랫폼)는 물리
-		// 속도가 없어 유한차분으로 채운다. 대상 쪽 SmoothedAnchorPointVelocity의 wielder 거울.
+		// hand point (wielder tip) ground truth velocity — Anchor-kind wielder (kinematic carrier: helicopter/mobile platform)
+		// There is no velocity, so it is filled with finite differences. The wielder mirror of SmoothedAnchorPointVelocity on the target side.
 		const FVector RawWielderVel =
 			(GetComponentLocation() - LengthConstraintState.PrevWielderWorldPoint) / DeltaTime;
 		LengthConstraintState.SmoothedWielderPointVelocity = FMath::Lerp(
@@ -876,11 +876,11 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		(bHasLiveConstraint && !LiveOutward.IsNearlyZero()) ? LiveOutward : LegacyTargetDir;
 	if (DirTarget.IsNearlyZero())
 	{
-		return; // 축퇴(조준=앵커) — 방향 정의 불가.
+		return; // degenerate(aiming=anchor) — direction cannot be defined.
 	}
-	// 공중 스윙 중엔 wielder 방향 EMA를 생략(순간 기하) — 궤도가 빠르게 도는 동안(ω·τ ≈ 십수도 래그)
-	// 래그된 축의 접선 오차 성분이 매 발화 프레임 스윙을 제동/가속해 조작을 방해한다(2026-07-22 PIE,
-	// AirControl 부스트가 무력해지는 "특정 순간의 힘"). 접지는 코너/노드 노이즈가 커 EMA 유지.
+	// Omit wielder direction EMA during mid-air swing (instantaneous geometry) — while orbit is spinning fast (ω·τ ≈ decimal degrees lag)
+	// The tangential error component of the lag axis brakes/accelerates the swing of each utterance frame and interferes with operation (2026-07-22 PIE,
+	// "A moment of force" where AirControl boost becomes ineffective). Ground maintains EMA due to large corner/node noise.
 	const bool bWielderAirborne = (Endpoints->Wielder.Kind == ERopeEndpointKind::Character
 		&& Endpoints->Wielder.Movement && Endpoints->Wielder.Movement->IsFalling());
 	const FVector DirWielder =
@@ -892,10 +892,10 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		return;
 	}
 
-	// 자기 랩(owner == 대상): 양끝이 같은 몸이라 쌍 인가가 자가 상쇄된다 — wielder 끝을 앵커(w=0)로 취급해
-	// 대상 끝만 움직인다(레거시 특례와 동일).
-	// 벌어짐 속도 s = −(vT·dT + vW·dW) − dRest/dt. 끝 속도는 수신자 해석과 같은 rung에서 실측한다 —
-	// 움직이는 앵커(드래곤)의 순항은 vT에 실려 별도 피드포워드 없이 추종된다(레거시의 앵커 속도 EMA 대체).
+	// Self wrap(owner == target): Since both ends are the same body, the pairing is self-cancelling — the wielder end is treated as an anchor (w=0)
+	// Only the end of the target moves (same as legacy special case).
+	// Opening velocity s = −(vT·dT + vW·dW) − dRest/dt. The terminal velocity is measured at the same rung as the receiver interpretation —
+	// The cruise of a moving anchor (dragon) is carried on vT and is followed without separate feedforward (replaces the legacy anchor velocity EMA).
 	const FVector TargetPoint = Anchor;
 	const FVector WielderPoint = GetComponentLocation();
 	const float InvMassTarget = EndpointPointInvMass(
@@ -913,13 +913,13 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 			? (InvMassTarget / WSum)
 			: 0.0f;
 
-	// ---- 대상 하드 투영(키네마틱 캐릭터 캐리) ----
-	// wielder 끝이 무한질량(Anchor — 헬기 등 키네마틱 캐리어)이고 대상이 CMC 캐릭터면, λ 속도 인가만으로는
-	// 위치 오차 회수가 bias 상한(TetherMaxBiasSpeed)에 캡혀 캐리어가 그보다 빠를 때 로프가 무한히 늘어난다.
-	// wielder 쪽 하드 투영(ConstrainWielderLocation)의 대상 거울: 캡슐을 현 반경 방향으로 부족분만큼 손
-	// 쪽으로 스윕 이동해 위치 오차를 같은 프레임에 소거한다(벽에 막히면 잔여가 C로 남아 λ/관측이 받는다).
-	// 양끝이 모두 유한질량이면 λ 쌍 인가가 분배를 소유하므로 발동하지 않는다(이중 보정 방지). 탄성 모드
-	// (TetherCompliance>0)는 의도적 신장이라 제외.
+	// ---- Target Hard Projection (Kinematic Character Carry) ----
+	// If the wielder's end is infinite mass (Anchor — kinematic carrier such as a helicopter) and the target is a CMC character, applying λ velocity is not enough.
+	// The number of position errors is capped by the bias cap (TetherMaxBiasSpeed), so when the carrier is faster than that, the rope stretches infinitely.
+	// Target mirror for hard projection (ConstrainWielderLocation) on the wielder side: Move the capsule to the current radius direction by the amount of the shortfall.
+	// to eliminate the position error in the same frame (if blocked by a wall, the remainder remains as C and is received by λ/observation).
+	// If both ends are finite masses, the λ pair permission owns the distribution and therefore does not fire (avoiding double compensation). elastic mode
+	// (TetherCompliance>0) is excluded because it is an intentional elongation.
 	if (HoldConfig.bEnforceTargetLengthConstraint
 		&& HoldConfig.TetherCompliance <= KINDA_SMALL_NUMBER
 		&& bHasLiveConstraint && !bSelfWrap
@@ -936,8 +936,8 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		C = FMath::Max(
 			C - static_cast<float>(FVector::DotProduct(Applied, LiveOutward)), 0.0f);
 		LengthConstraintState.LastViolation = C;
-		// 접지 캐릭터를 유의미한 속도로 들어올렸으면 Walking의 바닥 스냅/Z 삭제가 되돌리기 전에 Falling으로
-		// 넘긴다(Launch 관례). 수평 towing(Applied.Z ≈ 0)은 임계 미달로 통과 — 지상 끌기 거동 유지.
+		// If the grounded character has been lifted with a significant velocity, it will fall into Falling before the floor snap/Z deletion of Walking is reversed.
+		// (Launch convention). Horizontal towing (Applied.Z ≈ 0) passes below threshold — ground drag behavior is maintained.
 		if (Endpoints->Target.Movement->IsMovingOnGround()
 			&& Applied.Z > TetherLiftLaunchSpeedConst * DeltaTime)
 		{
@@ -945,10 +945,10 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		}
 	}
 
-	// Anchor-kind 대상(정적/키네마틱/애니메이션 구동)은 물리 속도가 없어 앵커 점 실측 EMA로 채운다 —
-	// 움직이는 오브젝트 towing이 bias 상한과 무관하게 벌어짐 상쇄로 추종된다(정지 앵커는 ≈0 = 무영향;
-	// 2차 안전망은 인가 쪽 ClampInjectedVelocity(TetherMaxSpeed) 그대로). SimBody는 반드시 rope
-	// attachment point의 vCOM+ω×r를 읽고, Character는 CMC 속도를 읽는다.
+	// Anchor-kind objects (static/kinematic/animated) have no physical velocity, so anchor points are filled with ground truth EMA —
+	// Moving object towing is followed by spread offset regardless of the bias cap (stationary anchors have ≈0 = no effect;
+	// The secondary safety net is ClampInjectedVelocity(TetherMaxSpeed) on the application side). SimBody must be a rope
+	// Reads vCOM+ω×r of the attachment point, and reads the CMC velocity of the character.
 	const FVector VelTarget = (Endpoints->Target.Kind == ERopeEndpointKind::Anchor)
 			? (bHasLiveConstraint
 				? LiveConstraint.PivotVelocity
@@ -956,8 +956,8 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 			: EndpointVelocityAtPoint(
 				Endpoints->Target, TargetPoint);
 	const float SepTarget = -static_cast<float>(FVector::DotProduct(VelTarget, DirTarget));
-	// Anchor-kind wielder(키네마틱 캐리어)도 대칭으로 손 점 실측 EMA를 쓴다 — 캐리어의 이탈 속도가 λ의
-	// 벌어짐 상쇄에 실려 bias 상한(TetherMaxBiasSpeed)과 무관하게 추종된다(정지 소유자는 ≈0 = 무영향).
+	// Anchor-kind wielders (kinematic carriers) also use the ground truth EMA symmetrically — the carrier's departure velocity is λ.
+	// It is subject to gap offset and is followed regardless of the bias cap (TetherMaxBiasSpeed) (≈0 = no effect for stationary owners).
 	const FVector VelWielder = (Endpoints->Wielder.Kind == ERopeEndpointKind::Anchor)
 		? LengthConstraintState.SmoothedWielderPointVelocity
 		: EndpointVelocityAtPoint(
@@ -1005,20 +1005,20 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 	const float Lambda = SolveResult.Lambda;
 	LengthConstraintState.LastLambda = Lambda;
 
-	// 유효 분배 몫(wielder 게이트/디버거 호환) = 역질량비 — λ 발화와 무관하게 이번 프레임 값으로 확정한다.
+	// Effective distribution share (wielder gate/debugger compatible) = inverse mass ratio — λ Set to this frame value regardless of utterance.
 	if (Lambda <= 0.0f)
 	{
-		return; // 이미 충분히 접근 중이거나 양끝 다 앵커.
+		return; // Already approaching sufficiently or both ends are anchored.
 	}
 
-	// ---- 인가: 끝별 ΔV = λ × w(cm/s), 각자 다리 방향 ----
-	// 모든 경로가 로프 축(+직교 감쇠) 성분만 건드려 스윙/중력은 보존되고, 결과 속력은 TetherMaxSpeed로
-	// 2차 클램프된다. 강체 시뮬 대상은 Chaos가 독점하고, compliant 시뮬 대상과 시뮬 wielder는 실제
-	// 물리 임펄스(ΔV×유효질량)를 받는다. 기존 디스패치 골격(ApplyToTetherEndpoint)을 그대로 지나므로
-	// 확장 관문(ApplyTractionToReceiver, Amount = ΔV cm/s)도 동일하다.
+	// ---- Approved: ΔV = λ × w(cm/s) for each end, each leg direction ----
+	// All paths only touch the rope axis (+ orthogonal damping) component, so swing/gravity is preserved, and the resulting speed is TetherMaxSpeed.
+	// Secondary clamping is performed. The rigid body simulation target is exclusive to Chaos, and the compliant simulation target and simulation wielder are real.
+	// Receives physical impulse (ΔV × effective mass). Because it passes through the existing dispatch skeleton (ApplyToTetherEndpoint),
+	// The extension gateway (ApplyTractionToReceiver, Amount = ΔV cm/s) is also the same.
 	const float SpeedCap = FMath::Max(HoldConfig.TetherMaxSpeed, 0.0f);
-	// 직교 감쇠 dt 보정: 설정값은 60fps 기준 프레임당 비율 → 유효 비율 = 1−(1−d)^(dt·60). 종전엔 비율을
-	// 프레임당 그대로 써 고프레임률일수록 감쇠가 세지는 프레임률 의존 물리였다.
+	// Orthogonal damping dt correction: Setting value is per-frame rate based on 60fps → effective rate = 1−(1−d)^(dt·60). Previously, the ratio
+	// Per-frame was used as is, and the higher the frame rate, the stronger the damping was. It was a frame rate dependent physics.
 	const float PerpDampCfg = FMath::Clamp(HoldConfig.TetherPerpDamping, 0.0f, 1.0f);
 	const float PerpDamp = (PerpDampCfg > 0.0f && PerpDampCfg < 1.0f)
 		? (1.0f - FMath::Pow(1.0f - PerpDampCfg, DeltaTime * 60.0f))
@@ -1031,11 +1031,11 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 		float DeltaV,
 		float PointInvMass) -> float
 	{
-		// Compliant 대상 또는 물리 wielder: solver와 같은 attachment-point Jacobian으로
-		// ΔV=λ*w를 계산했으므로 실제 로프 임펄스는 정확히 J=λ*d=(ΔV/w)*d다.
-		// AddImpulseAtLocation이 ω×r와 토크를 함께 만들며, 관측도 같은 점 속도를 읽는다.
-		// (직교 감쇠는 전 축 대상이다 — 수직 성분 제외안은 검토 후 되돌림. 중력 낙하가 감쇠와 평형을
-		// 이뤄 저속(≈g·dt/비율)에 갇히는 "무중력" 룩은 이 값의 크기 튜닝으로 대응한다.)
+		// Compliant target or physical wielder: with same attachment-point Jacobian as solver
+		// Since ΔV=λ*w was calculated, the actual rope impulse is exactly J=λ*d=(ΔV/w)*d.
+		// AddImpulseAtLocation creates ω×r and torque together, and observation also reads the same point velocity.
+		// (Orthogonal damping is for all axes — the option to exclude the vertical component will be reviewed and returned. Gravity drop is in equilibrium with damping.
+		// The "weightless" look of being trapped at low velocities (≈g·dt/rate) is countered by tuning the magnitude of this value.)
 		if (PointInvMass <= KINDA_SMALL_NUMBER)
 		{
 			return DeltaV;
@@ -1122,14 +1122,14 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 	};
 	auto ApplyCharacter = [&](UCharacterMovementComponent* Movement, const FVector& Dir, float DeltaV)
 	{
-		// CMC: 속도 직접 가산(이번 프레임 반영 계약). λ의 위치 회수 항은 MaxBiasSpeed로 유계라
-		// 과잉 주입이 없고, 별도 장부/슬랙 브레이크도 필요 없다. (접지 중 수평 투영안은 검토 후 되돌림 —
-		// 전 축 주입 유지.)
+		// CMC: Direct addition of velocity (contract to reflect this frame). The position recovery term of λ is bounded by MaxBiasSpeed.
+		// There is no excess injection, and there is no need for a separate ledger/slack break. (The horizontal projection plan during grounding will be reviewed and returned —
+		// Maintain full axis injection.)
 		const FVector OldVel = Movement->Velocity;
 		Movement->Velocity = RopeTraction::ClampInjectedVelocity(OldVel + Dir * DeltaV, OldVel, SpeedCap);
-		// 상향 주입이 임계를 넘는 접지 캐릭터는 Falling으로 — Walking은 다음 틱에 Z 속도를 바닥 구속으로
-		// 버리므로(들어올리기 무력화) Launch와 같은 관례로 모드를 넘겨야 주입이 살아남는다. 수평 towing은
-		// Z 주입 ≈ 0이라 통과.
+		// A grounded character whose upward injection exceeds the threshold is Falling — Walking will have Z velocity converted to floor restraint on the next tick.
+		// Because it is discarded (disabling lifting), you must pass the mode using the same convention as Launch for the injection to survive. horizontal towing
+		// Passes because Z injection ≈ 0.
 		if (static_cast<float>(Movement->Velocity.Z - OldVel.Z) > TetherLiftLaunchSpeedConst
 			&& Movement->IsMovingOnGround())
 		{
@@ -1150,7 +1150,7 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 					P, B, D, TargetPoint, S, InvMassTarget);
 			},
 			[&](UCharacterMovementComponent* M, const FVector& D, float S) { ApplyCharacter(M, D, S); },
-			[&](AActor*, const FVector&, float) { /* 앵커 = w 0이라 ΔV도 0 — 도달 불가 */ });
+			[&](AActor*, const FVector&, float) { /* Anchor = w 0, so ΔV is also 0 — unreachable*/ });
 	}
 	// The hard movement adapter already removed this exact outward velocity from the
 	// Wielder. Applying its analytic share again would create an inward rebound.
@@ -1165,36 +1165,36 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 					P, B, D, WielderPoint, S, InvMassWielder);
 			},
 			[&](UCharacterMovementComponent* M, const FVector& D, float S) { ApplyCharacter(M, D, S); },
-			[&](AActor*, const FVector&, float) { /* 앵커 무동작 */ });
+			[&](AActor*, const FVector&, float) { /* Anchor no operation*/ });
 	}
 }
 
 void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName Bone,
 	const FVector& AnchorWorld, const FVector& CornerWorld, float LegRestLen, float DeltaTime)
 {
-	// (Constraint 테더 — 시뮬 바디 대상 절반) 엔진 물리 제약: [코너의 키네마틱 프록시 ↔ 대상 바디의 앵커
-	// 점]을 다리 rest 길이의 구면 리밋으로 묶는다. GT 프레임당 속도 임펄스는 관절체의 "전신 크기 kick →
-	// 폭주" vs "본 크기 λ → 견인력 붕괴" 딜레마(2026-07-20 Pierce 7회 반복)에 더해 공중 하중(매달린 프랍)의
-	// 부유/진자 펌핑(2026-07-22 PIE)도 못 풀지만, Chaos 제약은 서브스텝에서 중력·관절·지면 접촉과 **함께**
-	// 풀리므로 폭주 없는 전신 견인과 진짜 진자 거동이 나온다("하중을 손에 매달기"의 표준 패턴).
-	// 제약 프레임을 앵커의 바디-로컬(스켈레탈 = 본 TM, 창 끝 레버 규약)로 잡아 정렬 토크까지 엔진이 푼다.
+	// (Constraint tether — target half of sim body) Engine physics constraint: [kinematic proxy for corner ↔ anchor for target body
+	// point] to the spherical limit of the leg rest length. GT per-frame velocity impulse is the "whole body size kick" of the joint body →
+	// In addition to the dilemma of “runaway” vs. “bone size λ → traction force collapse” (2026-07-20 Pierce 7th iteration), the air load (suspended prop)
+	// Even floating/pendulum pumping (2026-07-22 PIE) cannot be solved, but Chaos constraint is **together** with gravity, joints, and ground contact in the substep.
+	// is released, resulting in full-body traction without runaway and true pendulum behavior (the standard pattern of "hanging the load in the hands").
+	// The engine solves the alignment torque by holding the constraint frame as the body-local of the anchor (skeletal = bone TM, spear tip lever convention).
 	AActor* Owner = GetOwner();
 	if (!Owner || !TargetPrim)
 	{
 		return;
 	}
 
-	// 대상/본이 바뀌었으면 재생성(앵커 승격/재랩).
+	// Regenerate (promote/rewrap anchor) if target/bone has changed.
 	if (PhysicalTetherConstraint
 		&& (PhysicalTetherTarget.Get() != TargetPrim || PhysicalTetherBone != Bone))
 	{
 		TeardownPhysicalTether();
 	}
 
-	// 대상 바디-로컬 앵커(제약 Frame2)의 현재값 — 스켈레탈 = 본 TM(창 끝 레버 규약), 컴포넌트 바디 =
-	// 컴포넌트 TM. 생성 시 고정되는 값이라, 같은 (대상,본) 안에서 wrap 앵커가 재배치되면(승격/시드 합류)
-	// 로프 앵커와 제약 앵커가 어긋나 상시 위반 = 진동이 된다 — 드리프트가 임계를 넘으면 해체하고 아래
-	// 생성 블록에서 즉시 재생성한다(정상 상태에선 발화하지 않는 가드).
+	// Target body - current value of local anchor (constraint Frame2) — skeletal = bone TM (spear tip lever convention), component body =
+	// component TM. It is a value that is pinned upon creation, so when the wrap anchor is relocated within the same (target, bone) (promotion/seed joining)
+	// The rope anchor and constraint anchor are misaligned, resulting in constant violation = vibration — If the drift exceeds the threshold, dismantle and lower
+	// Immediately regenerates from the creation block (a guard that does not fire in normal conditions).
 	const USkeletalMeshComponent* SkelBody = Cast<USkeletalMeshComponent>(TargetPrim);
 	FTransform BodyTM = TargetPrim->GetComponentTransform();
 	if (SkelBody && !Bone.IsNone())
@@ -1206,14 +1206,14 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		}
 	}
 	const FVector AnchorLocal = BodyTM.InverseTransformPosition(AnchorWorld);
-	// 순간 anchorLocal은 로프 Sim(GPU 지연 미러)과 현재 본 TM의 지연차로 빠른 랙돌에서 프레임마다 크게
-	// 흔들린다 — 순간값으로 5cm 가드를 대면 진짜 재배치가 없어도 매 프레임 재생성(thrash)돼 제약이
-	// warm start를 못 쌓고 오히려 떨린다(계측: 재생성 70%·힘 0 89%). 그래서 anchorLocal을 EMA로 스무딩해
-	// 그 값으로 판정한다: 지연 노이즈는 평균으로 상쇄되고(스무딩값은 고정 앵커 근처에 머묾), 지속적
-	// 재배치(시드 합류/승격)만 평균을 옮겨 임계를 넘긴다. 임계도 10cm로 올려 여유를 둔다.
+	// The instantaneous anchorLocal is the delay difference between the rope Sim (GPU delayed mirror) and the current bone TM, which increases significantly every frame in fast ragdoll.
+	// Shakes — If you place a 5cm guard at the instantaneous value, it regenerates (thrashes) every frame even without real relocation, creating a constraint.
+	// I can't get a warm start and I actually feel trembled (measurement: regeneration 70%, strength 0 89%). So we smooth anchorLocal with EMA
+	// Check with those values: delay noise is averaged out (smoothing value stays near the pinned anchor), and constant
+	// Only relocation (seed joining/promotion) moves the average to exceed the threshold. Raise the threshold to 10cm to leave room.
 	if (PhysicalTetherConstraint)
 	{
-		const float SmoothAlpha = RopeTraction::ExpSmoothAlpha(0.12f, DeltaTime); // ≈0.12s 시상수.
+		const float SmoothAlpha = RopeTraction::ExpSmoothAlpha(0.12f, DeltaTime); // ≈0.12s time constant.
 		PhysicalTetherSmoothedAnchorLocal = FMath::Lerp(PhysicalTetherSmoothedAnchorLocal, AnchorLocal, SmoothAlpha);
 		if (FVector::DistSquared(PhysicalTetherSmoothedAnchorLocal, PhysicalTetherAnchorLocal) > FMath::Square(10.0f))
 		{
@@ -1226,20 +1226,20 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		PhysicalTetherProxy = NewObject<USphereComponent>(Owner,
 			MakeUniqueObjectName(Owner, USphereComponent::StaticClass(), TEXT("RopeTetherProxy")));
 		PhysicalTetherProxy->SetupAttachment(this);
-		PhysicalTetherProxy->SetAbsolute(true, true, true); // 월드 배치(로프 컴포넌트 트랜스폼 무관).
+		PhysicalTetherProxy->SetAbsolute(true, true, true); // World layout (regardless of rope component transform).
 		PhysicalTetherProxy->InitSphereRadius(4.0f);
-		// 바디는 필요하고(제약의 한쪽) 충돌도 쿼리도 없어야 한다 — PhysicsOnly + 전 채널 무시.
-		// 쿼리를 켜면 안 되는 이유: USphereComponent의 오브젝트 타입 기본값은 WorldDynamic이고,
-		// 채널 응답 Ignore는 **채널 질의**에만 듣는다(오브젝트 타입 질의는 셰이프의 오브젝트 타입만
-		// 본다). 그래서 쿼리가 켜져 있으면 URopeStaticBodyProvider의 OverlapMultiByObjectType 스캔에
-		// 잡혀, 코너를 매 프레임 따라다니는 push-out 콜라이더가 되어 제 로프의 wrap 노드를 민다.
+		// Requires a body (one side of the constraint) and no collisions or queries — PhysicsOnly + ignore all channels.
+		// Why you shouldn't turn on queries: The default object type for USphereComponent is WorldDynamic;
+		// Channel response Ignore only listens to **channel queries** (object type queries only return the shape's object type)
+		// bone). So, if query is on, URopeStaticBodyProvider's OverlapMultiByObjectType scan
+		// is captured, becomes a push-out collider that follows the corner every frame, and pushes the wrap node of my rope.
 		PhysicalTetherProxy->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
 		PhysicalTetherProxy->SetCollisionResponseToAllChannels(ECR_Ignore);
-		PhysicalTetherProxy->SetSimulatePhysics(false); // 키네마틱 — 매 프레임 코너로 이동.
+		PhysicalTetherProxy->SetSimulatePhysics(false); // Kinematic — Move to corner every frame.
 		PhysicalTetherProxy->SetHiddenInGame(true);
 		PhysicalTetherProxy->RegisterComponent();
 	}
-	// 키네마틱 이동 — Chaos가 이동 속도를 보고 제약을 당긴다(움직이는 코너/손 추종).
+	// Kinematic movement — Chaos looks at movement velocity and pulls constraints (moving corner/hand tracking).
 	PhysicalTetherProxy->SetWorldLocation(CornerWorld);
 
 	if (!PhysicalTetherConstraint)
@@ -1266,19 +1266,19 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		Profile.LinearLimit.Damping = 0.0f;
 		Profile.LinearLimit.Restitution = 0.0f;
 		PhysicalTetherConstraint->SetConstrainedComponents(PhysicalTetherProxy, NAME_None, TargetPrim, Bone);
-		// 제약 프레임 오리진: 프록시 쪽 = 프록시 원점(코너), 대상 쪽 = 앵커의 바디-로컬(위 AnchorLocal —
-		// wrap이 얼린 본-로컬 앵커와 같은 규약, 창 끝 레버 포함). 거리 리밋은 이 두 점 사이에 걸린다.
+		// constraint frame Origin: proxy side = proxy origin (corner), target side = anchor's body-local (above AnchorLocal —
+		// wrap freezes bone-local anchors (same conventions, including spear tip lever). The distance limit is between these two points.
 		PhysicalTetherConstraint->ConstraintInstance.SetRefPosition(EConstraintFrame::Frame1, FVector::ZeroVector);
 		PhysicalTetherConstraint->ConstraintInstance.SetRefPosition(EConstraintFrame::Frame2, AnchorLocal);
-		// 로프는 회전을 구속하지 않는다 — 각도 전부 자유.
+		// rope has no rotation constraints — all angles are Free.
 		PhysicalTetherConstraint->SetAngularSwing1Limit(ACM_Free, 0.0f);
 		PhysicalTetherConstraint->SetAngularSwing2Limit(ACM_Free, 0.0f);
 		PhysicalTetherConstraint->SetAngularTwistLimit(ACM_Free, 0.0f);
 		PhysicalTetherTarget = TargetPrim;
 		PhysicalTetherBone = Bone;
 		PhysicalTetherAnchorLocal = AnchorLocal;
-		PhysicalTetherSmoothedAnchorLocal = AnchorLocal; // EMA를 생성 앵커로 시드(첫 프레임 가짜 드리프트 방지).
-		PhysicalTetherLimit = -1.0f; // 아래에서 강제 갱신.
+		PhysicalTetherSmoothedAnchorLocal = AnchorLocal; // Seed EMA as a generating anchor (to prevent first frame spurious drift).
+		PhysicalTetherLimit = -1.0f; // Forced update below.
 		UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] physical tether created: %s/%s"),
 			*GetName(), *GetNameSafe(TargetPrim), *Bone.ToString());
 	}
@@ -1348,17 +1348,17 @@ void URopeComponent::TeardownPhysicalTether()
 
 USkeletalMeshComponent* URopeComponent::GetWrappedMesh() const
 {
-	// State.Mesh는 USceneComponent(정적 랩 대비 일반화). "스켈레탈 메시" 반환 계약 유지 —
-	// 정적 대상이면 Cast 실패로 null(대상 액터 반응은 호출자가 GetOwner로 이어감).
+	// State.Mesh is USceneComponent (generalized compared to static wrap). “Skeletal mesh” return agreement maintained —
+	// If the target is static, the cast fails and is null (the target actor response is from caller to GetOwner).
 	return const_cast<USkeletalMeshComponent*>(Cast<USkeletalMeshComponent>(WrapController.State.Mesh.Get()));
 }
 
 void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample& Pull, float DeltaTime)
 {
-	// wrap 대상 컴포넌트(cross-actor 가능). 계약상 로프는 대상을 읽기만 하므로 weak가 const지만,
-	// Pull은 의도된 게임플레이 개입(힘 인가)이라 여기서만 명시적으로 non-const로 푼다.
-	// State.Mesh는 이제 USceneComponent(정적 랩 대비 일반화) — 대상 타입을 가리지 않고 수신자 체인으로
-	// 힘을 인가한다(가벼운 물리 프랍/정적 대상도 스켈레탈과 동일 로직). null은 대상 소실(파괴)일 때뿐.
+	// Wrap target component (cross-actor possible). Contractually, rope only reads the target, so weak is const,
+	// Pull is an intended gameplay intervention (applying force), so it is explicitly pulled as non-const only here.
+	// State.Mesh now supports USceneComponent (generalized over static wrap) — agnostic of the target type as a recipient chain.
+	// Apply force (same logic as skeletal for light physics prop/static objects). Null only occurs when the target disappears (destroys).
 	USceneComponent* MeshComp = const_cast<USceneComponent*>(WrapController.State.Mesh.Get());
 	if (!MeshComp)
 	{
@@ -1366,23 +1366,23 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	}
 	AActor* Owner = MeshComp->GetOwner();
 
-	// Force = 당김 방향 × 최대 장력. 물리 바디는 장력 상한 속도 드라이브(ApplyPullVelocityDrive)로 인가한다.
+	// Force = pulling direction × maximum tension. The physical body is applied with a tension cap velocity drive (ApplyPullVelocityDrive).
 	const float MaxTension = static_cast<float>(Force.Size());
 	const FVector Dir = (MaxTension > KINDA_SMALL_NUMBER) ? (Force / MaxTension) : FVector::ZeroVector;
 
-	// 수신자 해석은 테더와 같은 래더를 쓴다(ResolveTetherEndpoint) — 능동 Pull이 자기 래더를 따로 걷던 것을
-	// 없앴다. 예전엔 순서가 달라(Pull은 캐릭터 무브먼트를 시뮬 프리미티브보다 먼저 봤다) "활성 CMC 캐릭터가
-	// 소유한 시뮬 프리미티브"에 감기면 Pull은 무브먼트를, 테더는 그 프리미티브를 끌었다. 무브먼트 분기는
-	// 원래 "애니메이션 본이라 밀 수 없으니 이동체를 민다"는 *폴백*인데 시뮬 검사보다 앞서 있어 밀 수 있는
-	// 대상까지 가로챈 것 — 구체적(물리 바디) → 일반적(이동체) 순서로 통일한다.
-	// (해석이 함께 내는 유효질량은 Pull이 쓰지 않는다 — 장력 상한 드라이브가 바디 질량을 직접 읽는다.)
+	// Recipient interpretation uses the same ladder as Tether (ResolveTetherEndpoint) — Active Pull does not walk its own ladder separately.
+	// Removed. In the past, the order was different (Pull looked at character movements before sim primitives) and “active CMC characters were
+	// When Wrapping a "owned sim primitive", Pull pulls the movement and Tether pulls the primitive. The movement branch is
+	// Originally, it was a *fallback* that said "It is an animation bone, so it cannot be pushed, so push the moving object", but it is ahead of the simulation test, so it can be pushed.
+	// Interception of the target — unified in the order of specific (physical body) → general (moving body).
+	// (Pull does not use the effective mass that comes with the analysis — the tension cap drive reads the body mass directly.)
 	const bool bCanReuseWrappedEndpoint = WrappedEndpointCache.bValid &&
 		WrappedEndpointCache.TargetMesh.Get() == MeshComp && WrappedEndpointCache.TargetBone == Pull.Bone;
 	const FRopeTetherEndpoint Endpoint = bCanReuseWrappedEndpoint
 		? WrappedEndpointCache.Target
 		: ResolveTetherEndpoint(MeshComp, Owner, Pull.Bone, HoldConfig.GroundBraceFactor);
 
-	// 확장 관문: 수신자 단위로 가로채는 서브클래스(커스텀 무브먼트/탈것)가 처리했으면 내장 인가를 생략한다.
+	// Extension gateway: If the subclass (custom movement/vehicle) intercepted on a per-receiver basis has processed it, the built-in application is omitted.
 	if (ApplyTractionToReceiver(MakeTractionRequest(Endpoint, ERopeTractionSource::ActivePull, Dir, MaxTension,
 		DeltaTime, /*bWielderSide*/ false)))
 	{
@@ -1392,18 +1392,18 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 	switch (Endpoint.Kind)
 	{
 	case ERopeEndpointKind::SimBody:
-		// 시뮬 바디(스켈레탈 승격 본 / 시뮬 프리미티브 / 시뮬 루트): 장력 상한 속도 드라이브로 직접 인가한다
-		// (무게중심 임펄스라 토크/스핀 없음, 오버슛 없어 먼지/턱턱 없음, 무거우면 뒤처짐). 각속도 클램프로 잔여 스핀 억제.
+		// Simulation body (skeletal promotion bone / simulation primitive / simulation root): tension cap velocity is applied directly to the drive.
+		// (center of gravity impulse, no torque/spin, no overshoot, no dust/slip, if it is heavy, there is a back sag). Suppresses residual spin with angle velocity clamps.
 		ApplyPullVelocityDrive(Endpoint.Prim, Endpoint.Bone, Dir, MaxTension, DeltaTime);
 		ClampPulledBodyVelocity(Endpoint.Prim, Endpoint.Bone);
-		// (부분 랙돌의 "본 + 이동체 이중 인가"는 제거됐다: 수신자 해석이 부분 랙돌을 더 이상 본으로 내리지
-		// 않고 캐릭터 rung으로 폴스루하므로 — ResolveTetherEndpoint rung 1 — 여기 오는 본 endpoint는 항상
-		// 자유 랙돌이고, 힘은 관절로 몸 전체에 전달된다. 테더와 Pull이 같은 수신자를 보는 대칭 복원.)
+		// (“bone + moving object dual application” for partial ragdolls has been removed: receiver interpretation no longer rates partial ragdolls as bones
+		// — ResolveTetherEndpoint rung 1 — the bone endpoint that comes here is always
+		// It is a Free ragdoll, and the force is transmitted throughout the body through the joints. Restoring symmetry where the tether and pull see the same recipient.)
 		return;
 
 	case ERopeEndpointKind::Character:
-		// 애니메이션 구동 본에는 힘을 줄 수 없으므로 이동체 전체를 견인한다(PoC 4.2: 본/루트에 단순 힘 전달까지.
-		// 팔다리 IK/랙돌 반응은 후속). MOVE_None이면 여기로 오지 않는다(해석이 앵커로 분류 → 아래 경고).
+		// Since force cannot be applied to the animation driving bone, the entire moving object is tractioned (PoC 4.2: Even simple force transfer to the bone/root.
+		// limb IK/ragdoll responses follow). If MOVE_None, it does not come here (interpretation is classified as anchor → warning below).
 		Endpoint.Movement->AddForce(Force);
 		return;
 
@@ -1411,8 +1411,8 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 		break;
 	}
 
-	// 수신자 없음(앵커/None = 시뮬 바디 없는 본 체인·비시뮬 컴포넌트 + 무브먼트 비활성·비캐릭터 + 비시뮬 루트):
-	// 힘이 조용히 사라지는 걸 wrap당 1회 알린다.
+	// No recipient (anchor/None = bone chain without sim body, non-simulated component + movement disabled, non-character + non-simulated root):
+	// Notifies once per wrap that the power is quietly disappearing.
 	if (!PullDrive.bLoggedPullNoReceiver)
 	{
 		PullDrive.bLoggedPullNoReceiver = true;
@@ -1424,19 +1424,19 @@ void URopeComponent::ApplyPullForce(const FVector& Force, const FRopePullSample&
 
 void URopeComponent::ApplyPullVelocityDrive(UPrimitiveComponent* Prim, FName BoneName, const FVector& Dir, float MaxTension, float DeltaTime) const
 {
-	// 장력 상한 속도 드라이브(상수 힘 대체): 대상을 당김 방향 목표 속도(VTarget)로 몰되, 이번 프레임 적용할
-	// 임펄스를 J = min(질량×ΔV, MaxTension×dt)로 클램프한다.
-	//  - 가벼운 대상: J = 질량×ΔV(장력 여유) → 목표 속도에 *정확히* 도달(오버슛 없음). 상수 힘이 a=F/m로 한 프레임에
-	//    목표를 훌쩍 넘겨 튕기던(먼지/턱턱) 문제가 사라진다.
-	//  - 무거운 대상: J = MaxTension×dt(장력 한계) → 프레임당 ΔV=J/질량으로 천천히 가속 → 뒤처진다(현실적).
-	// 임펄스는 무게중심(위치 없는 AddImpulse)이라 토크/스핀 없음. bVelChange=false = 실제 임펄스(질량 나눔).
+	// tension cap velocity drive (replaces constant force): Drives the target in the pulling direction target velocity (VTarget), but applies this frame.
+	// Clamp impulse to J = min(mass×ΔV, MaxTension×dt).
+	//  - Light target: J = mass×ΔV (tension margin) → *exactly* reaches target velocity (no overshoot). In one frame the constant force is a=F/m
+	//    The problem of bouncing past the target (dust/jaw-jak) disappears.
+	//  - Heavy object: J = MaxTension×dt (tension limit) → accelerates slowly to per-frame ΔV=J/mass → lags behind (realistic).
+	// impulse is the center of gravity (AddImpulse without position), so there is no torque/spin. bVelChange=false = actual impulse (divided by mass).
 	const float VTarget = FMath::Max(0.0f, HoldConfig.ActivePullMaxLinearSpeed);
 	if (!Prim || VTarget <= 0.0f || MaxTension <= KINDA_SMALL_NUMBER || Dir.IsNearlyZero() || DeltaTime <= 0.0f)
 	{
 		return;
 	}
-	// 가속만(역추진 없음) + 정확 도달(Alpha=1). 상한은 임펄스(장력×dt)가 건다 — 테더 리엘과 같은 골격이고
-	// 양방향 여부만 다르다(테더는 경계 안착을 위해 제동까지 하지만, 능동 Pull은 사용자가 놓으면 그만이라 가속만).
+	// Acceleration only (no reverse thrust) + accurate arrival (Alpha=1). The cap is impulse (tension × dt) — it is the same framework as the tether reel.
+	// The only difference is whether there is a positive direction (the tether even brakes to settle the boundary, but the active pull only accelerates because the user releases it).
 	const RopeTraction::FRopeAxisServo Servo{ VTarget, /*Alpha*/ 1.0f, /*bBidirectional*/ false, /*bCancelOutward*/ false };
 	const float VAlong = static_cast<float>(FVector::DotProduct(Prim->GetPhysicsLinearVelocity(BoneName), Dir));
 	const float J = RopeTraction::ClampAxisImpulse(RopeTraction::ComputeAxisDeltaV(VAlong, Servo), ResolveBodyMass(Prim, BoneName), MaxTension * DeltaTime);
@@ -1452,8 +1452,8 @@ void URopeComponent::ClampPulledBodyVelocity(UPrimitiveComponent* Prim, FName Bo
 	{
 		return;
 	}
-	// 각속도 상한(잔여 스핀 안전망): 힘을 무게중심에 줘 pull 토크 원인은 제거했지만, 랙돌 관절 다이내믹의 잔여
-	// 스핀을 마저 가둔다. (선형 견인은 ApplyPullVelocityDrive의 장력 상한 임펄스가 담당 — 여기선 각속도만.)
+	// Angular velocity cap (residual spin safety net): The cause of pull torque is removed by applying force to the center of gravity, but the remaining ragdoll joint dynamics
+	// Contains the spin. (Linear traction is handled by the tension cap impulse of ApplyPullVelocityDrive — here, only angular velocity.)
 	const float MaxAngDeg = FMath::Max(0.0f, HoldConfig.ActivePullMaxAngularSpeed);
 	if (MaxAngDeg > 0.0f)
 	{
@@ -1468,12 +1468,12 @@ void URopeComponent::ClampPulledBodyVelocity(UPrimitiveComponent* Prim, FName Bo
 
 void URopeComponent::UpdateTargetPullable()
 {
-	// 이번 Wrapped 프레임의 끌림 가능 판정(climb-in 방향/분배 관측 공용). overshoot와 무관하게 매 프레임 산출해
-	// 테더 회수(UpdateTether)와 능동 Pull 방향(ApplyWrappedTraction)이 같은 판정을 읽게 한다.
+	// Check(climb-in direction/distribution observation shared) of this Wrapped frame. Calculate each frame regardless of overshoot
+	// Causes tether retrieval (UpdateTether) and active Pull direction (ApplyWrappedTraction) to read the same check.
 	const FRopeResolvedWrappedEndpoints* Endpoints = GetOrResolveWrappedEndpoints();
 	if (!Endpoints)
 	{
-		return; // 대상 소실(파괴) — Hold가 곧 release. 직전 판정 유지.
+		return; // Target disappears (destroyed) — Hold will release soon. Maintain previous check.
 	}
 	USceneComponent* MeshComp = Endpoints->TargetMesh.Get();
 	if (!MeshComp)
@@ -1481,7 +1481,7 @@ void URopeComponent::UpdateTargetPullable()
 		return;
 	}
 
-	// 자기 자신에 감긴 로프(owner==대상)는 분배 무의미 → 항상 대상 회수(pullable).
+	// A rope (owner==object) Wrapped around itself is meaningless in distribution → the target is always pullable.
 	const bool bSelfWrap = (GetOwner() != nullptr && MeshComp->GetOwner() == GetOwner());
 	bool bPullable;
 	if (bSelfWrap)
@@ -1490,28 +1490,28 @@ void URopeComponent::UpdateTargetPullable()
 	}
 	else
 	{
-		// 양끝 유효질량(접지 캐릭터는 GroundBraceFactor로 접지마찰 반영, MOVE_None/정적은 앵커=무한).
-		// 테더 인가와 같은 해석(ResolveTetherEndpoint)을 쓴다 — 끌림 판정과 실제 인가점이 어긋나지 않는다.
+		// Effective mass at both ends (ground character reflects ground friction with GroundBraceFactor, MOVE_None/static is anchor = infinite).
+		// Uses the same interpretation (ResolveTetherEndpoint) as for tether application — there is no discrepancy between the attraction check and the actual application point.
 		const float WT = EndpointInvMass(Endpoints->Target);
 		const float WW = EndpointInvMass(Endpoints->Wielder);
 		const float InfMass = TNumericLimits<float>::Max();
-		const float EffMassTarget = (WT > KINDA_SMALL_NUMBER) ? (1.0f / WT) : InfMass; // invMass 0 = 앵커(무한).
+		const float EffMassTarget = (WT > KINDA_SMALL_NUMBER) ? (1.0f / WT) : InfMass; // invMass 0 = anchor (infinite).
 		const float EffMassWielder = (WW > KINDA_SMALL_NUMBER) ? (1.0f / WW) : InfMass;
 		if (!PullDrive.bTargetPullableInit)
 		{
-			bPullable = (EffMassTarget <= EffMassWielder); // 첫 유효 프레임: 히스테리시스 없이 순수 비교로 시드.
+			bPullable = (EffMassTarget <= EffMassWielder); // First valid frame: seeded with pure comparison without hysteresis.
 		}
 		else
 		{
-			// 히스테리시스는 비노출 내부 상수(안정화 장치) — 경계에서 판정이 프레임마다 뒤집히는 것을 막는다.
-			// "교차점 위치"를 정하는 노출 노브는 GroundBraceFactor 하나뿐이고, 이 값은 그 선 주변의 데드밴드일 뿐.
+			// hysteresis is a non-exposed internal constant (stabilizer) — it prevents checks on boundaries from flipping every frame.
+			// There is only one exposure knob that determines the "intersection location", GroundBraceFactor, and this value is just a deadband around that line.
 			constexpr float PullMassHysteresis = 1.1f;
 			bPullable = DecideTargetPullable(EffMassTarget, EffMassWielder, PullDrive.bTargetPullable, PullMassHysteresis);
 		}
 	}
 	PullDrive.bTargetPullable = bPullable;
 	PullDrive.bTargetPullableInit = true;
-	PullDrive.LastTargetShare = bPullable ? 1.0f : 0.0f; // wielder 게이트/디버거가 읽는 유효 몫(이진).
+	PullDrive.LastTargetShare = bPullable ? 1.0f : 0.0f; // Effective quotient (binary) read by wielder gate/debugger.
 }
 
 bool URopeComponent::DecideTargetPullable(float EffMassTarget, float EffMassWielder, bool bPrev, float MarginRatio)
@@ -1519,26 +1519,26 @@ bool URopeComponent::DecideTargetPullable(float EffMassTarget, float EffMassWiel
 	const float Margin = FMath::Max(MarginRatio, 1.0f);
 	if (bPrev)
 	{
-		// 현재 "끌림 가능": 대상이 wielder보다 Margin배 넘게 무거워질 때만 불가로 뒤집는다(sticky).
+		// Currently "can be dragged": only flips to non-sticky when the target becomes more than Margin times heavier than the wielder.
 		return !(EffMassTarget > EffMassWielder * Margin);
 	}
-	// 현재 "끌림 불가": 대상이 wielder × (1/Margin) 이하로 가벼워질 때만 가능으로 뒤집는다.
+	// Currently "Unable to be dragged": Flipped to possible only when the target becomes lighter than the wielder × (1/Margin).
 	return (EffMassTarget * Margin <= EffMassWielder);
 }
 
 void URopeComponent::ApplyPullForceToWielder(const FVector& Force, float DeltaTime)
 {
-	// (not pullable) 능동 Pull 힘을 wielder(로프 owner)에 인가 — 대상이 무거워 대신
-	// wielder가 앵커 쪽으로 끌려가는 climb-in. ApplyPullForce의 owner 쪽 미러: CharacterMovement → 시뮬 루트.
+	// (not pullable) Apply an active Pull force to the wielder (rope owner) — the target is heavy instead.
+	// climb-in, where the wielder is pulled towards the anchor. Mirror the owner side of ApplyPullForce: CharacterMovement → Simulate Root.
 	AActor* RopeOwner = GetOwner();
 	if (!RopeOwner)
 	{
 		return;
 	}
 
-	// 수신자를 **먼저 해석**한다 — 확장 관문에 "무엇에 꽂힐 뻔했는지"를 그대로 넘기기 위함이다.
-	// 해석 순서는 기존 그대로(CharacterMovement → 시뮬 루트): 여기서 ResolveTetherEndpoint 래더로
-	// 갈아타면 시뮬 루트가 무브먼트보다 앞서게 되어 climb-in 동작이 바뀐다.
+	// The receiver is **interpreted** first — this is to pass “what almost got stuck” to the expansion gateway as is.
+	// The analysis order is the same as before (CharacterMovement → Simulation Root): from here to ResolveTetherEndpoint ladder.
+	// If you change, the sim route will be ahead of the movement, changing the climb-in action.
 	FRopeTetherEndpoint Receiver;
 	Receiver.Actor = RopeOwner;
 	if (UCharacterMovementComponent* Movement = GetForceConsumingMovement(RopeOwner))
@@ -1572,7 +1572,7 @@ void URopeComponent::ApplyPullForceToWielder(const FVector& Force, float DeltaTi
 		Receiver.Prim->AddForce(Force);
 		return;
 	default:
-		// 수신자 없음(비캐릭터 + 비시뮬 루트): 조용히 드롭 — climb-in 불가한 구성.
+		// No recipients (non-character + non-sim route): Quiet drop — no climb-in configuration.
 		return;
 	}
 }

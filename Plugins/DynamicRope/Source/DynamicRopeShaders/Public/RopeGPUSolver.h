@@ -1,18 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// XPBD 로프 솔버의 GPU(compute) 구현 — M5: 센터라인 GPU 상주(resident).
-// 위치 버퍼를 프레임 간 영속시켜 매 프레임 GPU에서 in-place로 전진한다 → 순차 의존성이 GPU 안에서
-// 충족되어 라운드트립 스톨/슬로모가 없다(M4 비동기 리드백의 한계 해소). 리드백(렌더/충돌용)은 전부
-// 렌더 스레드에서 처리(매 프레임 step 커맨드가 직전 리드백을 Lock·consume 후 재무장) → GT 스톨 없음.
-// CPU FRopeXPBDSolver와 동일 수식이되 제약은 red-black/stride-3 컬러링으로 푼다(병렬 안전).
-// 이 모듈(DynamicRopeShaders)은 DynamicRope 런타임 타입에 의존하지 않는다 → step은 self-contained POD.
-// 호출자(런타임 서브시스템)가 FRopeSimState/Config로부터 step을 채워 넘긴다.
+// GPU (compute) implementation of the XPBD rope solver — M5: Centerline GPU resident.
+// The position buffer is persisted between frames and advanced in-place on the GPU every frame → Sequential dependency is maintained within the GPU.
+// is satisfied and there is no round-trip stall/slomo (resolving the limitation of M4 asynchronous readback). All readbacks (for render/collision) are
+// Processed in the render thread (every frame step command locks and consumes the previous readback and then rearranges it) → No GT stall.
+// Same formula as CPU FRopeXPBDSolver, but constraints are solved with red-black/stride-3 coloring (parallel safety).
+// This module (DynamicRopeShaders) does not depend on the DynamicRope runtime type → step is a self-contained POD.
+// The caller (runtime subsystem) fills in the steps from FRopeSimState/Config.
 
 #pragma once
 
 #include "CoreMinimal.h"
 
-/** GPU 충돌(M2)용 해석적 capsule. 월드 공간 세그먼트(A-B) + 반지름. 호출자가 collider에서 추출해 채운다. */
+/** Analytical capsule for GPU collision (M2). world space segment(A-B) + radius. The caller extracts and fills the collider.*/
 struct FRopeGPUCapsule
 {
 	FVector A = FVector::ZeroVector;
@@ -20,8 +20,8 @@ struct FRopeGPUCapsule
 	float   Radius = 0.0f;
 
 	/**
-	 * 이전 프레임 끝점 + 1/프레임dt(표면 속도 드래그/substep 상대 운동 CCD용 — SDF의 PrevBoneToWorld 대응).
-	 * InvDeltaTime=0(기본)이면 정적 — 패킹이 prev=현재로 폴백하므로 안 채워도 기존 동작과 동일.
+	 * previous frame endpoint + 1/framedt (surface velocity drag/substep for relative motion CCD — PrevBoneToWorld counterpart in SDF).
+	 * If InvDeltaTime=0 (default), static — Packing falls back to prev=current, so even if not filled, it is the same as the existing operation.
 	 */
 	FVector PrevA = FVector::ZeroVector;
 	FVector PrevB = FVector::ZeroVector;
@@ -29,23 +29,23 @@ struct FRopeGPUCapsule
 };
 
 /**
- * GPU 충돌용 해석적 박스(OBB). 정적 월드 지오메트리(스태틱 바디 심플 콜리전)가 기본이고, 움직이는
- * 바디/랩 가능 박스는 아래 프레임 모션(PrevCenter/PrevRot + InvDeltaTime)으로 표면 속도·CCD에 참여한다.
- * 모서리/엣지에서 정확한 대각 normal을 주는 해석적 질의가 존재 이유(GDF 복셀 라운딩 관통 대체).
- * 호출자가 IRopeCollider::GetGPUBox(+GetGPUBoxMotion)로 추출해 채운다.
+ * Analytical box (OBB) for GPU collision. Static world geometry (static body simple collision) is the default, and moving
+ * Body/wrapable box participates in surface velocity·CCD with the frame motion below (PrevCenter/PrevRot + InvDeltaTime).
+ * Reason for the existence of analytical queries that give exact diagonal normals at corners/edges (replaces GDF voxel rounding penetration).
+ * caller extracts and fills with IRopeCollider::GetGPUBox(+GetGPUBoxMotion).
  */
 struct FRopeGPUBox
 {
-	/** 월드 공간 박스 중심. */
+	/** Center of world space box.*/
 	FVector Center = FVector::ZeroVector;
-	/** 월드 공간 박스 회전. */
+	/** world space box rotation.*/
 	FQuat   Rot = FQuat::Identity;
-	/** 로컬 반폭(스케일 반영 후). */
+	/** local half-width (after scale reflection).*/
 	FVector HalfExtents = FVector::ZeroVector;
 
 	/**
-	 * 이전 프레임 center/rot + 1/프레임dt(움직이는 바디 표면 속도/substep CCD). InvDeltaTime=0이면 정적 —
-	 * 패킹이 prev=현재로 채우므로 안 채워도 기존 동작과 동일(캡슐의 Prev* 대응).
+	 * previous frame center/rot + 1/framedt (moving body surface velocity/substep CCD). If InvDeltaTime=0, static —
+	 * The packing is filled with prev=current, so even if it is not filled, it is the same as the existing operation (corresponding to Prev* of the capsule).
 	 */
 	FVector PrevCenter = FVector::ZeroVector;
 	FQuat   PrevRot = FQuat::Identity;
@@ -53,48 +53,48 @@ struct FRopeGPUBox
 };
 
 /**
- * GPU 충돌용 해석적 컨벡스(평면 집합). 정적/동적 월드 지오메트리(convex 심플 콜리전 + 전단 박스).
- * 평면은 Step의 ConvexPlanes 평탄 풀 [PlaneOffset, PlaneOffset+PlaneCount)에 저장(바디-로컬, 단위
- * 법선·바깥, PlaneDot(p)=dot(N,p)-W, 강체 미적용). 월드 = 로컬 ∘ 강체(Rot,Trans). LocalBounds는 로컬
- * AABB(질의 컬). 움직이는 바디는 prev 강체 + InvDeltaTime으로 표면 속도/CCD 처리. 호출자가 GetGPUConvex로 추출.
+ * Analytical convex (plane set) for GPU collision. static/dynamic world geometry (convex simple collision + shear box).
+ * The plane is stored in Step's ConvexPlanes flat pool [PlaneOffset, PlaneOffset+PlaneCount) (body-local, unit
+ * Normal·Outside, PlaneDot(p)=dot(N,p)-W, rigid body not applied). world = local ∘ rigid body(Rot,Trans). LocalBounds is local
+ * AABB (vaginal curl). The moving body is processed with surface velocity/CCD using prev rigid body + InvDeltaTime. The caller is extracted with GetGPUConvex.
  */
 struct FRopeGPUConvex
 {
-	/** ConvexPlanes 풀 내 시작 인덱스. */
+	/** Starting index within the ConvexPlanes pool.*/
 	int32   PlaneOffset = 0;
-	/** 평면 수. */
+	/** Number of planes.*/
 	int32   PlaneCount = 0;
-	/** 바디-로컬 AABB 중심. */
+	/** Body-local AABB center.*/
 	FVector LocalBoundsCenter = FVector::ZeroVector;
-	/** 바디-로컬 AABB 반크기. */
+	/** Body-local AABB half size.*/
 	FVector LocalBoundsExtent = FVector::ZeroVector;
-	/** 강체 회전(curr). */
+	/** rigid body rotation (curr).*/
 	FQuat   Rot = FQuat::Identity;
-	/** 강체 평행이동(curr). */
+	/** rigid body translation (curr).*/
 	FVector Trans = FVector::ZeroVector;
-	/** 강체 회전(prev). */
+	/** rigid body rotation (prev).*/
 	FQuat   PrevRot = FQuat::Identity;
-	/** 강체 평행이동(prev). */
+	/** rigid body translation (prev).*/
 	FVector PrevTrans = FVector::ZeroVector;
-	/** 1/프레임dt(0이면 정적). */
+	/** 1/framedt (static if 0).*/
 	float   InvDeltaTime = 0.0f;
 };
 
 /**
- * GPU 충돌(M3)용 per-bone SDF collider. 본 로컬 distance grid + 본→월드 트랜스폼.
- * Distances는 호출자(에셋) 소유 포인터(Step 호출 동안 유효 — 렌더 커맨드로 옮기기 전 GT에서 복사된다).
- * Distances는 uint8 양자화 코드 — GT 평탄화 시 비대칭 밴드로 dequant해 float 버퍼로 업로드한다.
- * VolumeKey가 같으면 같은 step 내에서 GPU 업로드를 공유(dedup)한다.
+ * per-bone SDF collider for GPU collision (M3). bone local distance grid + bone → world transform.
+ * Distances is a pointer owned by the caller (asset) (valid during Step calls — copied from GT before moving to the render command).
+ * Distances are uint8 quantization codes — during GT flattening, they are dequantized into asymmetric bands and uploaded to the float buffer.
+ * If the VolumeKey is the same, GPU upload is shared (dedup) within the same step.
  */
 struct FRopeGPUSDFCollider
 {
-	/** 코드 바이트 블롭(복셀당 BytesPerCode, 행 우선, 리틀엔디안). 바깥 +. */
+	/** Blob of code bytes (BytesPerCode per voxel, row-first, little-endian). Outside +.*/
 	const uint8* Distances = nullptr;
-	/** 복셀당 바이트(1=uint8 max255, 2=uint16 max65535). */
+	/** Bytes per voxel (1=uint8 max255, 2=uint16 max65535).*/
 	int32        BytesPerCode = 1;
-	/** 안쪽 dequant 밴드(cm). 코드 0 → -NarrowBandInner. */
+	/** Inner dequant band (cm). Code 0 → -NarrowBandInner.*/
 	float        NarrowBandInner = 0.0f;
-	/** 바깥 dequant 밴드(cm). 코드 max → +NarrowBandOuter. */
+	/** Outer dequant band (cm). Code max → +NarrowBandOuter.*/
 	float        NarrowBandOuter = 0.0f;
 	int32        ResX = 0;
 	int32        ResY = 0;
@@ -102,38 +102,38 @@ struct FRopeGPUSDFCollider
 	FVector      LocalMin = FVector::ZeroVector;
 	FVector      LocalSize = FVector::ZeroVector;
 	FTransform   BoneToWorld = FTransform::Identity;
-	/** 이전 프레임 본 트랜스폼(CCD/표면속도 드래그). */
+	/** previous frame bone transform (CCD/surfacevelocity drag).*/
 	FTransform   PrevBoneToWorld = FTransform::Identity;
-	/** 1/프레임dt(표면 속도용). 0이면 정적. */
+	/** 1/framedt (for surface velocity). If 0, static.*/
 	float        InvDeltaTime = 0.0f;
 	uint64       VolumeKey = 0;
 };
 
 /**
- * FRopeGPUResidentStep::OverrideFlags의 노드별 비트(G0). RopeXPBD.usf의 override 스테이지와 1:1.
- * "타깃 계산은 GT, 적용은 GPU" — 로직 페이즈(whip/wrapping/hold/releasing)가 계산한 노드별
- * 타깃/질량을 재시드 없이 상주 버퍼에 직접 기록하는 통로다. 적용 순서: Position → Prev →
- * PrevFromPosition → InvMass (PrevFromPosition은 Position 적용 *후*의 Pos를 복사한다).
+ * per-node bit (G0) in FRopeGPUResidentStep::OverrideFlags. 1:1 with the override stage of RopeXPBD.usf.
+ * "target calculation is GT, application is GPU" — per-node calculated by logic phase (whip/Wrapping/hold/Releasing)
+ * This is a passage that records target/mass directly into the resident buffer without reseeding. Application order: Position → Prev →
+ * PrevFromPosition → InvMass (PrevFromPosition copies Pos *after* applying Position).
  */
 enum class ERopeGPUOverride : uint8
 {
 	None             = 0,
 	// Pos[i]  = OverridePositions[i]
 	Position         = 1 << 0,
-	// Prev[i] = OverridePrevPositions[i] (Pos와의 차이가 Verlet 속도가 된다 — whip)
+	// Prev[i] = OverridePrevPositions[i] (Difference from Pos becomes Verlet velocity — whip)
 	Prev             = 1 << 1,
-	// Prev[i] = Pos[i] — 속도 0 고정(wrapping/hold). GPU측 현재 Pos 기준(CPU 미러 아님).
+	// Prev[i] = Pos[i] — velocity 0 pinned(Wrapping/hold). Based on current Pos on GPU side (not CPU mirror).
 	PrevFromPosition = 1 << 2,
-	// InvMass[i] = OverrideInvMass[i] — 상주 InvMass 버퍼에 영속(질량 마스크/복원)
+	// InvMass[i] = OverrideInvMass[i] — persist (mass mask/restore) to resident InvMass buffer
 	InvMass          = 1 << 3,
 };
 ENUM_CLASS_FLAGS(ERopeGPUOverride)
 
 /**
- * 상주 로프 1개의 한 프레임 step 입력. self-contained(전부 값/TArray) — GT에서 채워 렌더 스레드로 MoveTemp.
- * RopeId는 영속 버퍼를 식별하는 안정 키(예: 컴포넌트 UniqueID). Generation은 throw/리사이즈 등 CPU가 Sim을
- * out-of-band로 바꿨을 때 증가시킨다 → RT가 generation 변화/노드수 변화/최초를 감지해 GPU 버퍼를 재시드한다.
- * SeedPositions/PrevPositions/InvMass는 매 프레임 제공하되 RT는 재시드가 필요할 때만 실제 업로드한다(평시 무시).
+ * One frame step input from one resident rope. self-contained (all values/TArray) — Filled from GT and MoveTemp to render thread.
+ * RopeId is a stable key that identifies the persistent buffer (e.g. component UniqueID). Generation is a CPU that throws/resizes the Sim.
+ * Increases when changed to out-of-band → RT detects generation change/node number change/first and reseeds the GPU buffer.
+ * SeedPositions/PrevPositions/InvMass are provided every frame, but RT is actually uploaded only when reseed is needed (ignored in normal times).
  */
 struct FRopeGPUResidentStep
 {
@@ -141,198 +141,198 @@ struct FRopeGPUResidentStep
 	uint32 Generation = 0;
 	int32  NumNodes = 0;
 
-	/** 시드 데이터(매 프레임 제공; RT는 재시드 시에만 GPU 업로드). */
+	/** Seed data (provided every frame; RT is uploaded to GPU only when reseeding).*/
 	TArray<FVector> SeedPositions;
 	TArray<FVector> SeedPrevPositions;
 	TArray<float>   InvMass;
 
-	/** sim / config 스칼라. */
+	/** sim/config scalar.*/
 	float   SegmentLength = 0.0f;
 	bool    bStartPinned = false;
 	FVector StartPinPrev = FVector::ZeroVector;
 	FVector StartPinTarget = FVector::ZeroVector;
 	float   StretchCompliance = 0.0f;
-	/** Strain limiting: substep solve 뒤 각 세그먼트를 ≤ 이 배율 × SegmentLength로 하드 투영(1.5=기본,
-	 *  <1=비활성). 긴 체인이 앵커 핀에 매달릴 때 iteration 부족으로 생기는 앵커 인접 과신장/지터를 막는다. */
+	/** Strain limiting: Hard projection of each segment after substep solve with ≤ this scale × SegmentLength (1.5=default,
+	 *  <1=disabled). Prevents anchor-adjacent overstretching/jitter caused by lack of iteration when a long chain hangs on an anchor pin.*/
 	float   MaxStretchRatio = 1.5f;
 	float   BendCompliance = 0.0f;
-	/** 각도-허용 벤딩: straightness ≤ 이 값이면 펴는 힘 0(코너/랩 경계 각짐 완화). */
+	/** Angle-allowed bending: If straightness ≤ this value, straightening force is 0 (relaxes corner/wrap boundary angles).*/
 	float   BendReleaseRatio = 0.70f;
-	/** straightness ≥ 이 값이면 펴는 힘 100%(완만한 굽힘은 기존처럼 편다). */
+	/** straightness ≥ If this value, the straightening force is 100% (gentle bending straightens as before).*/
 	float   BendFullRatio = 0.92f;
 	float   Damping = 0.0f;
 	int32   Iterations = 1;
-	/** substep당 충돌 해소 패스 수(Iterations로 상한). 1=substep 끝 1회(기존). */
+	/** Number of collision resolution passes per substep (cap in Iterations). 1=End of substep once (existing).*/
 	int32   CollisionPasses = 1;
 	FVector Gravity = FVector::ZeroVector;
 
 	/**
-	 * 충돌(M2/M3). 이 로프에 적용할 collider 목록(값 복사라 step 수명 동안 유효).
-	 * false면 solve 커널은 collider/GDF를 무시하지만 detect 커널은 아래 목록을 그대로 사용할 수 있다.
+	 * collision(M2/M3). List of colliders to apply to this rope (value copy so valid for the life of the step).
+	 * If false, the solve kernel ignores the collider/GDF, but the detect kernel can use the list below as is.
 	 */
 	bool  bSolveCollisions = true;
-	/** 로프 노드 두께(= FRopeSolverConfig::CollisionRadius). */
+	/** rope node thickness (= FRopeSolverConfig::CollisionRadius).*/
 	float CollisionRadius = 0.0f;
-	/** 접선 감쇠 [0..1](Coulomb μ). */
+	/** Tangential damping [0..1](Coulomb μ).*/
 	float Friction = 0.0f;
-	/** 자유단 마찰 배율(고정점=1, 끝=이 값). 끝 노드를 잘 놔주게 함. */
+	/** Free end friction multiplier (pinned point=1, end=this value). Be sure to leave the end node well.*/
 	float TipFrictionScale = 1.0f;
-	/** swept 샘플 간격(cm). */
+	/** Swept sample spacing (cm).*/
 	float SweepStep = 2.0f;
-	/** 세그먼트당 샘플 상한. */
+	/** sample cap per segment.*/
 	int32 MaxSweepSamples = 16;
-	/** Phase 2c: 엔진 GDF로 정적 월드 밀어내기(씬 그래프 dispatch에서만 유효). */
+	/** Phase 2c: Push static world with engine GDF (only valid for scene graph dispatch).*/
 	bool  bUseWorldGDF = false;
 	TArray<FRopeGPUCapsule>     Capsules;
 	TArray<FRopeGPUSDFCollider> SDFColliders;
-	/** 해석적 박스(OBB). solve에 사용하며 앞쪽 NumDetectBoxes개는 접촉 감지에도 참여한다. */
+	/** Analytical box (OBB). It is used for solving, and the front NumDetectBoxes also participate in contact detection.*/
 	TArray<FRopeGPUBox>         Boxes;
-	/** 해석적 컨벡스(평면 집합). solve 전용. */
+	/** Analytical convex (plane set). solve only.*/
 	TArray<FRopeGPUConvex>      Convexes;
-	/** 전 컨벡스의 바디-로컬 평면 평탄 풀((nx,ny,nz,w), 바깥 방향 법선). */
+	/** Body-local flat pool of the entire convex ((nx,ny,nz,w), outer direction normal).*/
 	TArray<FVector4>            ConvexPlanes;
 
 	/**
-	 * 접촉 감지(detect) 커널이 볼 capsule 수. Capsules 앞쪽 [0, NumDetectCapsules)만 감지에 참여한다 —
-	 * 호출자(PackStepColliders)가 비-정적 캡슐을 앞에, 정적(월드) 캡슐을 뒤에 2-pass로 패킹해 채운다.
-	 * 감지는 노드당 최심 접촉 1개만 남기므로, 벽(정적) 접촉이 본(스켈레탈) 접촉을 가려 랩 캡처가
-	 * 조용히 실패하는 것을 막는다. -1(기본) = 전부 참여(기존 동작/테스트 호환).
+	 * Number of capsules that the contact detection(detect) kernel will see. Only [0, NumDetectCapsules) in front of Capsules participates in detection —
+	 * caller(PackStepColliders) packs the non-static capsule at the front and the static(world) capsule at the back in 2-pass.
+	 * detection leaves only one deepest contact per node, so the wall (static) contact covers the bone (skeletal) contact, so wrap capture is not possible.
+	 * Prevents silent failure. -1 (default) = Participate fully (compatible with existing behavior/tests).
 	 */
 	int32 NumDetectCapsules = -1;
 
 	/**
-	 * 감지 커널이 볼 랩 가능 박스(OBB) 수. Boxes 앞쪽 [0, NumDetectBoxes)만 감지에 참여한다(캡슐과 동일
-	 * 2-pass 패킹: 랩 가능 박스 앞, 정적 박스 뒤). 0(기본) = 감지 미참여(정적 박스 전용 — 기존 동작).
+	 * Number of wrapable boxes (OBB) seen by the detection kernel. Only [0, NumDetectBoxes) in front of the Boxes participate in detection (same as capsule)
+	 * 2-pass packing: in front of the wrapable box, behind the static box). 0 (default) = No participation in detection (static box only — legacy behavior).
 	 */
 	int32 NumDetectBoxes = 0;
 
 	/**
-	 * 감지 커널이 볼 랩 가능 convex 수. Convexes 앞쪽 [0, NumDetectConvexes)만 감지에 참여한다
-	 * (박스와 동일 계약 — 정적 convex는 뒤에 append돼 자동 제외).
+	 * Number of convexes that can be Wrapped by the detection kernel. Only the front of the convexes [0, NumDetectConvexes) participates in detection.
+	 * (same contract as box — static convex is appended after and automatically excluded).
 	 */
 	int32 NumDetectConvexes = 0;
 
-	/** 감지 스윕 샘플 간격(cm)과 샘플 수 상한 — CPU FParams::ContactSweepStep/ContactMaxSweepSamples 미러. */
+	/** detection sweep sample interval (cm) and sample number cap — CPU FParams::ContactSweepStep/ContactMaxSweepSamples mirror.*/
 	float ContactSweepStep = 2.0f;
 	int32 ContactMaxSweepSamples = 16;
 
 	/**
-	 * 이 dispatch가 쓰는 콜라이더 귀속 집합의 서명(호출자가 계산). 감지 리드백에 그대로 실려 돌아와,
-	 * 소비 시점에 ColliderIndex를 해석해도 되는지 판정하는 근거가 된다(FRopeResidentContacts::AttribSig).
+	 * Signature (computed by the caller) of the collider attribution set used by this dispatch. It comes back as is in the detection readback,
+	 * This is the basis for checking whether ColliderIndex can be interpreted at the time of consumption (FRopeResidentContacts::AttribSig).
 	 */
 	uint32 AttribSig = 0;
 
-	/** 이번 프레임 substep 스케줄(호출자가 RopeSolverSubsteps로 계산해 전달). NumSub<=0이면 적분 없이 유지. */
+	/** This frame substep schedule (calculated and delivered by caller to RopeSolverSubsteps). If NumSub<=0, keep without integration.*/
 	int32 NumSub = 0;
 	float FixedDt = 0.0f;
 
 	/**
-	 * --- 접촉 감지(G3): Flight에서 솔브 후 PosBuf/PrevBuf를 스윕해 노드당 최심 접촉을 감지한다.
-	 * bDetectContacts면 솔브 dispatch 뒤에 감지 커널을 돌리고 결과를 리드백한다(GetLatestContacts).
-	 * ContactRadius는 감지 질의 반경(= FRopeWrapConfig::ContactQueryRadius; 솔버의 CollisionRadius와 별개).
+	 * --- contact detection (G3): After solving in Flight, sweep PosBuf/PrevBuf to detect the deepest contact per node.
+	 * bDetectContacts runs the detection kernel after solve dispatch and reads back the results (GetLatestContacts).
+	 * ContactRadius is the detection query radius (= FRopeWrapConfig::ContactQueryRadius; separate from the solver's CollisionRadius).
 	 */
 	bool  bDetectContacts = false;
 	float ContactRadius = 0.0f;
 
 	/**
-	 * --- 예측 접촉(G3b): 노드의 다음 위치를 외삽한 경로도 스윕해 곧 닿을 접촉을 감지한다. 노드당 2슬롯
-	 * (actual + predictive) 출력. PredictionFrames<=0이면 예측 없음. whip 활성 프레임엔 가이드 노드의
-	 * 현재/직전/다음 타깃으로 외삽하고(PredictiveGuided), 그 외엔 프레임 변위로 외삽한다(PredictiveFree).
-	 * WhipGuided*는 whip 활성 시에만 NumNodes 길이로 채운다(아니면 비움 → free 예측만).
+	 * --- Predicted contact (G3b): The path that extrapolates the next location of the node is also swept to detect the contact that will soon be reached. 2 slots per node
+	 * (actual + predictive) output. If PredictionFrames<=0, no predictions. In the whip active frame, the guide node
+	 * Extrapolates to the current/previous/next target (PredictiveGuided), and otherwise extrapolates to frame displacement (PredictiveFree).
+	 * WhipGuided* is filled with NumNodes length only when whip is active (otherwise it is empty → only Free prediction).
 	 */
 	float           PredictionFrames = 0.0f;
 	/**
-	 * substep→프레임 변위 환산 계수(= DeltaTime / FixedDt). free 노드 예측이 로프 Verlet 변위(마지막
-	 * substep 델타)를 프레임 변위로 올리는 데 쓴다 — 1이면 환산 없음(substep 단위 축소 버그). 가이드 노드
-	 * 예측은 프레임 단위 타깃 차분이라 이 계수를 안 쓴다. CPU FParams::FrameDeltaTime 경로와 동일 의미/값.
+	 * substep→frame displacement conversion factor (= DeltaTime / FixedDt). Free node prediction is rope verlet displacement (last
+	 * Used to increase substep delta) to frame displacement — if 1, no conversion (substep unit reduction bug). guide node
+	 * This coefficient is not used because prediction is a frame-level target difference. Same meaning/value as CPU FParams::FrameDeltaTime path.
 	 */
 	float           ContactFrameToSubstepRatio = 1.0f;
-	/** 노드별 가이드 여부(1=guided). */
+	/** Whether to guide per-node (1=guided).*/
 	TArray<uint8>   WhipGuidedMask;
 	TArray<FVector> WhipCurrentTargets;
 	TArray<FVector> WhipPrevTargets;
 	TArray<FVector> WhipNextTargets;
 
 	/**
-	 * --- Override(G0): 로직 페이즈(GT)가 계산한 노드별 타깃을 상주 버퍼에 직접 기록(재시드 대체).
-	 * 비어 있으면 오버라이드 없음. 채울 때 OverrideFlags는 정확히 NumNodes 길이(불일치 시 전체 무시+경고),
-	 * 값 배열은 해당 비트를 쓰는 노드가 있을 때만 NumNodes 길이로 제공하면 된다.
-	 * NumSub=0이어도 오버라이드가 있으면 dispatch되어 적분 없이 기록만 한다(예: Wrapping/Releasing 프레임).
-	 * 노드별 ERopeGPUOverride 비트 OR
+	 * --- Override(G0): Write the per-node target calculated by the logic phase (GT) directly to the resident buffer (replaces reseeding).
+	 * If empty, no override. When populating, OverrideFlags is set to exactly NumNodes length (ignore all + warn if mismatch),
+	 * The value array needs to be provided as NumNodes length only when there is a node that writes the corresponding bit.
+	 * Even if NumSub=0, if there is an override, it is dispatched and only recorded without integration (e.g. Wrapping/Releasing frame).
+	 * per-node ERopeGPUOverride bit OR
 	 */
 	TArray<uint8>   OverrideFlags;
-	/** Position 비트 노드만 유효. */
+	/** Only Position bit node is valid.*/
 	TArray<FVector> OverridePositions;
-	/** Prev 비트 노드만 유효. */
+	/** Only Prev bit node is valid.*/
 	TArray<FVector> OverridePrevPositions;
-	/** InvMass 비트 노드만 유효. */
+	/** Only InvMass bit node is valid.*/
 	TArray<float>   OverrideInvMass;
 
 	bool HasOverrides() const { return OverrideFlags.Num() > 0; }
 };
 
-/** GT가 회수하는 상주 로프의 최신(약간 지연) 위치. RT 리드백이 채우고 GT가 락 하에 복사한다. */
+/** The latest (slightly delayed) location of the resident rope as retrieved by GT. RT readback fills in and GT copies under lock.*/
 struct FRopeResidentLatest
 {
 	TArray<FVector> Positions;
 	TArray<FVector> PrevPositions;
 	/**
-	 * 세그먼트별 장력(NumNodes-1개, F = max(0,-λ)/h² — FRopeSimState::SegmentTension과 동일 단위/의미).
-	 * 솔브(NumSub>0) 프레임에만 무장·회수되므로 위치보다 드물게 갱신될 수 있다(비어 있으면 미회수).
+	 * Tension per segment (NumNodes - 1, F = max(0,-λ)/h² — Same units/meaning as FRopeSimState::SegmentTension).
+	 * Since it is armed and recovered only in the solve(NumSub>0) frame, it may be updated more rarely than the position (if empty, not recovered).
 	 */
 	TArray<float>   SegmentTension;
-	/** 이 위치가 대응하는 시드 generation(재시드 경계의 stale 적용 방지). */
+	/** The seed generation that this location corresponds to (preventing stale application of reseed boundaries).*/
 	uint32 Generation = 0;
 	int32  NumNodes = 0;
 };
 
 /**
- * GPU 접촉 감지(G3) 결과 1건. 실제 접촉과 예측 접촉이 각각 노드당 최대 1개씩 나올 수 있다.
- * GPU는 bone/mesh(FName/포인터, GT 개념)를 만들 수 없으므로 콜라이더 인덱스만 emit하고,
- * 호출자(런타임)가 인덱스 → (bone, mesh)
- * 귀속 테이블로 복원한다. HLSL FRopeGPUContact와 1:1 미러(레이아웃/의미 동일).
+ * 1 GPU contact detection (G3) result. There can be a maximum of one actual contact and one predicted contact per node.
+ * Since the GPU cannot create bone/mesh (FName/pointer, GT concept), it emits only the collider index,
+ * caller (runtime) index → (bone, mesh)
+ * Restore to the attribution table. 1:1 mirror of HLSL FRopeGPUContact (same layout/semantics).
  */
 struct FRopeGPUContactResult
 {
 	int32   NodeIndex = INDEX_NONE;
-	/** 0=capsule, 1=SDF, 2=box (step의 Capsules/SDFColliders/Boxes 배열 구분). */
+	/** 0=capsule, 1=SDF, 2=box (step's Capsules/SDFColliders/Boxes array distinction).*/
 	int32   ColliderType = 0;
-	/** 해당 배열 내 인덱스(귀속 복원 키). */
+	/** Index within the corresponding array (attribution restoration key).*/
 	int32   ColliderIndex = 0;
 	/** ERopeContactCandidateSource: 1=Actual, 2=PredictiveFree, 4=PredictiveGuided. */
 	uint8   Source = 1;
 	float   Penetration = 0.0f;
-	/** 표면 접촉점(FRopeContact.SurfacePoint 대응). */
+	/** surface contact point (corresponding to FRopeContact.SurfacePoint).*/
 	FVector WorldPoint = FVector::ZeroVector;
-	/** 바깥(collider→node) 단위 법선. */
+	/** Outer (collider→node) unit normal.*/
 	FVector Normal = FVector::UpVector;
-	/** 접촉점 표면 속도(cm/s; 정적이면 0). */
+	/** Contact point surface velocity (cm/s; 0 if static).*/
 	FVector SurfaceVelocity = FVector::ZeroVector;
 };
 
-/** GT가 회수하는 상주 로프의 최신(약간 지연) 접촉 감지 결과. GetLatestContacts로 복사. */
+/** The latest (slightly delayed) contact detection result of the resident rope retrieved by GT. Copy to GetLatestContacts.*/
 struct FRopeResidentContacts
 {
-	/** bHit 슬롯만(GPU가 채운 유효 접촉). */
+	/** bHit slots only (valid contacts filled by GPU).*/
 	TArray<FRopeGPUContactResult> Contacts;
-	/** 대응 시드 generation(stale 적용 방지). */
+	/** Corresponding seed generation (preventing stale application).*/
 	uint32 Generation = 0;
 	/**
-	 * 이 결과를 만든 **dispatch 시점**의 콜라이더 귀속 서명(FRopeGPUResidentStep::AttribSig 그대로).
-	 * ColliderIndex는 그때의 집합 순서를 가리키므로, 소비자는 자기 현재 서명과 이 값을 직접 비교해
-	 * 인덱스가 아직 같은 뜻인지 판정한다 — "최근 N프레임이 안 변했다"는 근사가 아니라 정확한 대응이다.
+	 * Collider attribution signature (as FRopeGPUResidentStep::AttribSig) at the **dispatch point** that created this result.
+	 * ColliderIndex points to the current collation order, so the consumer can compare this value directly with his current signature.
+	 * Check whether the index still has the same meaning — “Nframe has not changed recently” is not an approximation, but an exact correspondence.
 	 */
 	uint32 AttribSig = 0;
 };
 
 /**
- * XPBD 로프 솔버의 GPU(compute) 구현. 센터라인 GPU 상주(M5a).
- *  - Step      : 로프별 영속 GPU 버퍼를 매 프레임 in-place로 한 프레임 전진(라운드트립/스톨 없음).
- *                필요 시(최초/노드수·generation 변화) CPU Sim에서 재시드. 리드백은 RT에서 consume+재무장.
- *  - GetLatest : RT 리드백이 채운 최신 위치(약 1~2프레임 지연)를 락 하에 복사. 렌더/충돌용.
- *  - ReleaseRope: 로프 영속 버퍼/리드백 해제(EndPlay 등).
- * 인스턴스 상태(영속 버퍼 맵)는 렌더 스레드 소유 — GT 메서드는 렌더 커맨드를 enqueue하거나 공유 결과를 읽는다.
- * 월드별 1개를 소유한다. CPU 솔버는 ground-truth로 유지.
+ * GPU (compute) implementation of the XPBD rope solver. Centerline GPU resident (M5a).
+ *  - Step: Advances the persistent GPU buffer for each rope by one frame in-place every frame (no round trip/stall).
+ *                Reseed in CPU Sim when necessary (initial/node number/generation change). Readback consume+rearm at RT.
+ *  - GetLatest: Copy the latest position filled by RT readback (about 1-2 frame delay) under lock. For render/collision.
+ *  - ReleaseRope: Rope Releases persistent buffer/readback (EndPlay, etc.).
+ * The instance state (persistent buffer map) is owned by the render thread — GT methods enqueue render commands or read shared results.
+ * Owns 1 world star. CPU solver remains ground-truth.
  */
 class FRHIShaderResourceView;
 class FRDGBuilder;
@@ -342,17 +342,17 @@ class FSceneView;
 namespace RopeGPU
 {
 	/**
-	 * 이 런타임에서 GPU 경로(솔버·감지·튜브)를 쓸 수 있는가. 렌더 가능한 RHI가 있는지에 더해
-	 * **feature level이 SM5 이상인지**까지 본다 — 커널은 전부 SM5 가드로 컴파일되므로(각 CS의
-	 * ShouldCompilePermutation) ES3.1/모바일에서는 퍼뮤테이션이 존재하지 않는다. RHI 유무만 보면
-	 * 렌더는 되는 모바일에서 없는 셰이더를 요청해 assert/크래시/미출력으로 간다.
+	 * Can GPU path (solver·detection·tube) be used in this runtime? In addition to having a renderable RHI
+	 * It is important to note that **the feature level is SM5 or higher** — the kernel is all compiled with SM5 guard (each CS
+	 * ShouldCompilePermutation) Permutation does not exist in ES3.1/mobile. Just looking at the presence or absence of RHI
+	 * Render requests a shader that does not exist on the mobile and goes to assert/crash/no output.
 	 *
-	 * 판정 기준은 전역 GMaxRHIFeatureLevel(= 이 기기가 실제로 낼 수 있는 최대치)이다. 에디터의
-	 * 모바일 프리뷰는 씬 feature level만 낮추고 실 RHI는 SM6 그대로라 GPU 경로가 유지되는데,
-	 * 이는 의도한 동작이다(프리뷰에서 시뮬 경로까지 바뀌면 재현이 어긋난다).
+	 * The check standard is global GMaxRHIFeatureLevel (= the maximum value that this device can actually produce). editor's
+	 * The mobile preview only lowers the scene feature level, and the actual RHI remains SM6, so the GPU path is maintained.
+	 * This is the intended behavior (if the preview to simulation path is changed, the reproduction is out of sync).
 	 *
-	 * 호출자는 솔버(URopeSimSubsystem)와 튜브(FRopeSceneProxy) 둘 다 — 두 게이트가 어긋나면
-	 * 솔버는 GPU인데 튜브는 CPU 같은 반쪽 상태가 되므로 판정을 단일 소스로 둔다.
+	 * The caller is both the solver (URopeSimSubsystem) and the tube (FRopeSceneProxy) — if the two gates are misaligned,
+	 * The solver is a GPU, but the tube is in a half-state like a CPU, so the check is set to a single source of truth.
 	 */
 	DYNAMICROPESHADERS_API bool IsRuntimeSupported();
 }
@@ -360,82 +360,82 @@ namespace RopeGPU
 class DYNAMICROPESHADERS_API FRopeGPUSolver
 {
 public:
-	/** 로프당 최대 노드 수(= 최상단 compute 스레드그룹 버킷). 호출자는 이 한도 내 step만 넘겨야 한다.
-	 *  RopeGPUSolver.cpp의 노드 버킷 배열 최상단과 일치해야 한다(그쪽 static_assert가 강제). */
+	/** Maximum number of nodes per rope (= top compute thread group bucket). The caller must only pass steps within this limit.
+	 *  Must match the top of the node bucket array in RopeGPUSolver.cpp (static_assert there is mandatory).*/
 	static constexpr int32 MaxNodes = 512;
 
 	FRopeGPUSolver();
 	~FRopeGPUSolver();
 
 	/**
-	 * 렌더 스레드. 로프의 resident PosBuf(StructuredBuffer<float4>, 월드 위치) SRV를 반환(없으면 null).
-	 * M5b B2-lite: scene proxy가 이 SRV를 직접 읽어 튜브를 GPU 생성 → 위치 무지연(렌더 리드백 없음).
-	 * 솔버가 이 로프를 step한 적이 없으면(= GPU 솔버 off) null → 호출자는 CPU 경로로 폴백한다.
+	 * render thread. Rope's resident PosBuf (StructuredBuffer<float4>, world position) Returns SRV (null if not present).
+	 * M5b B2-lite: Scene proxy reads this SRV directly and creates a tube on the GPU → no position delay (no render readback).
+	 * If the solver has never stepped on this rope (= GPU solver off), null → the caller falls back to the CPU path.
 	 *
-	 * OutGeneration은 이 버퍼가 담고 있는 시드 generation이다. 호출자는 자기 generation과 대조해야 한다 —
-	 * 노드 수만 보면 **같은 노드 수로 재시드**(재던지기 등)한 프레임에 직전 로프의 포즈를 그대로 읽어
-	 * 한 프레임 유령이 뜬다(버퍼는 그 프레임 dispatch 전까지 옛 세대를 들고 있다).
+	 * OutGeneration is the seed generation contained in this buffer. The caller must compare its generation —
+	 * If you look at the number of nodes, the pose of the previous rope is read as is in the frame that was **reseeded** (rethrowing, etc.) with the same number of nodes.
+	 * One frame ghost appears (the buffer is holding the old generation until that frame is dispatched).
 	 */
 	FRHIShaderResourceView* GetResidentPositionSRV_RenderThread(uint32 RopeId, int32& OutNumNodes,
 		uint32& OutGeneration);
 
-	/** 이번 프레임 상주 step들을 렌더 스레드로 넘겨 GPU에서 in-place 전진(블록 없음). step은 소비된다(MoveTemp).
-	    전용(자체) RDG 그래프에서 즉시 실행 — 씬 렌더러 없이 도는 유닛 테스트 하네스 경로(런타임은 EnqueueSteps). */
+	/** Pass this frame's resident steps to the render thread and advance in-place on the GPU (no blocks). The step is consumed (MoveTemp).
+	    Execute immediately on a dedicated (self) RDG graph — unit test harness path without a scene renderer (EnqueueSteps at runtime).*/
 	void Step(TArray<FRopeGPUResidentStep>&& Steps);
 
 	/**
-	 * 런타임 dispatch 경로: step을 렌더 스레드 pending 큐에 쌓아만 둔다(dispatch 안 함). 뷰 확장이 이번 프레임
-	 * PreRenderBasePass에서 씬 렌더러 그래프에 DispatchPending_RenderThread로 flush한다(GDF 파라미터 유효 타이밍).
+	 * Runtime dispatch path: Just stacks steps in the render thread pending queue (does not dispatch). View expansion this frame
+	 * In PreRenderBasePass, flush the scene renderer graph with DispatchPending_RenderThread (GDF parameter valid timing).
 	 */
 	void EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps);
 
-	/** 렌더 스레드. 쌓인 pending step들을 전달받은 (씬 렌더러) GraphBuilder에 얹는다(자체 Execute 안 함).
-	    GDF는 이 뷰의 Global Distance Field 파라미터(null 가능), PreViewTranslation은 월드→TranslatedWorld 오프셋. */
+	/** render thread. The accumulated pending steps are Loaded on the received (scene renderer) GraphBuilder (does not execute itself).
+	    GDF is the Global Distance Field parameter of this view (can be null), PreViewTranslation is world→TranslatedWorld offset.*/
 	void DispatchPending_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView* View,
 		const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 
 	/**
-	 * 소비되지 못하고 교체된 pending step의 시뮬 시간을 RopeId별 초 단위로 회수한다(호출 즉시 비운다, 락).
+	 * Recovers the simulation time of the pending step that was not consumed and replaced in seconds per RopeId (cleared immediately upon call, lock).
 	 *
-	 * EnqueueSteps는 교체 시맨틱이라, 뷰 확장이 도는 base pass가 없던 프레임의 step은 다음 프레임 step에
-	 * 덮여 그대로 사라진다. 그런데 그 substep 시간은 GT에서 이미 accumulator를 깎고 만든 것이라, 놔두면
-	 * **시뮬 시간이 영구히 없어진다**(프레임을 건너뛴 게 아니라 시간을 잃은 것이라 이후에도 안 메워진다).
-	 * 호출자는 이 값을 다음 스케줄 계산 전에 accumulator로 되돌린다 — 그러면 accumulator가 다시
-	 * "시뮬된 시간"의 단일 진실이 되고, 몰아치기는 RopeSolverSubsteps의 기존 상한이 알아서 막는다.
+	 * EnqueueSteps are replacement semantics, so the steps of a frame that did not have a base pass for view expansion are transferred to the next frame step.
+	 * It is covered and disappears. However, the substep time is already made by cutting the accumulator in GT, so if you leave it alone,
+	 * **Simulation time is permanently lost** (It is not a frame being skipped, but time is lost, so it will not be made up later).
+	 * The caller returns this value to the accumulator before the next schedule calculation — the accumulator then returns to
+	 * becomes the single truth of "simulated time", and the existing cap of RopeSolverSubsteps automatically blocks the rush.
 	 */
 	void DrainDroppedSimTime(TMap<uint32, float>& Out);
 
-	/** RT 리드백이 채운 최신 위치를 RopeId별로 복사(락). 새로 도착한 게 없으면 직전 값을 유지한 채 반환할 수 있다. */
+	/** Copy (lock) the latest position filled by RT readback by RopeId. If nothing new arrives, it can be returned with the previous value maintained.*/
 	void GetLatest(TMap<uint32, FRopeResidentLatest>& Out);
 
-	/** RT 리드백이 채운 최신 접촉 감지 결과를 RopeId별로 복사(락). GetLatest와 같은 지연 특성(약 1~2프레임). */
+	/** Copy (lock) the latest contact detection results filled by RT readback by RopeId. Same latency as GetLatest (approximately 1-2 frames).*/
 	void GetLatestContacts(TMap<uint32, FRopeResidentContacts>& Out);
 
 	/**
-	 * GT 블로킹 동기 리드백(M5c): 이 로프의 RT pending non-GDF step을 먼저 실행한 뒤 상주 Pos/Prev를
-	 * *지금* 값으로 가져온다(GPU idle 대기 포함). Scene GDF가 필요한 pending step은 유효한 View 없이
-	 * 실행하지 않고 false를 반환하며, 다음 scene dispatch까지 보존한다.
-	 * wrap 핸드오프처럼 "이벤트당 1회, 최신 위치가 꼭 필요한" 곳 전용 — 매 프레임 호출 금지.
-	 * OutGeneration은 버퍼가 대응하는 시드 generation(호출자가 자기 generation과 대조해 stale 거부).
-	 * @return 상주 버퍼가 있고 회수에 성공하면 true.
+	 * GT blocking synchronous readback (M5c): This rope's RT pending non-GDF step is executed first, then resident Pos/Prev.
+	 * Get the value *now* (including waiting for GPU idle). Pending steps that require Scene GDF do not have a valid View.
+	 * Does not execute, returns false, and preserves until the next scene dispatch.
+	 * wrap Only for applications where "up-to-date location is absolutely necessary, once per event" such as handoffs — do not call every frame.
+	 * OutGeneration is the seed generation that the buffer corresponds to (caller rejects stale by comparing it with its own generation).
+	 * @return true if there is a resident buffer and retrieval is successful.
 	 */
 	bool ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, TArray<FVector>& OutPrevPositions, uint32& OutGeneration);
 
-	/** 로프의 영속 버퍼/리드백을 해제(렌더 스레드에서). 컴포넌트 EndPlay/Unregister에서 호출. */
+	/** Release rope's persistent buffer/readback (in the render thread). Called from component EndPlay/Unregister.*/
 	void ReleaseRope(uint32 RopeId);
 
 private:
 	/**
-	 * 상주 상태(렌더 스레드 전용 영속 버퍼 맵 + GT<->RT 공유 결과)를 pimpl로 숨긴다 — 헤더에 RDG/RHI 타입을
-	 * 노출하지 않고, 불완전 타입을 멤버로 by-value 보관할 때의 sizeof 요구도 피한다(포인터 멤버).
+	 * Hide resident state (render thread-only persistent buffer map + GT<->RT shared results) with pimpl — RDG/RHI type in header
+	 * is not exposed, and sizeof requirements are also avoided when storing incomplete types by-value as members (pointer members).
 	 */
 	struct FImpl;
 	TUniquePtr<FImpl> Impl;
 
 	void ReleaseAll_RenderThread();
 
-	/** Step()/DispatchPending_RenderThread 공용 실행부: 상주 seed/register/dispatch/리드백을 전달받은
-	    GraphBuilder에 얹는다(Execute는 호출자 책임). Steps는 소비 후 호출자가 비운다. */
+	/** Step()/DispatchPending_RenderThread shared Execution unit: received resident seed/register/dispatch/readback
+	    Loaded on GraphBuilder (Execute is the caller's responsibility). Steps are emptied by the caller after consumption.*/
 	void RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRopeGPUResidentStep>& Steps,
 		const FSceneView* View, const FGlobalDistanceFieldParameterData* GDF, const FVector3f& PreViewTranslation);
 };

@@ -1,43 +1,43 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Collision/RopeCollider.h"
-// RopeMath::ClosestSegmentParam (접촉 재질점 식별)
+// RopeMath::ClosestSegmentParam (identifying contact material point)
 #include "RopeMathHelpers.h"
 
 FRopeContact FCapsuleCollider::Query(const FVector& WorldPos, float NodeRadius) const
 {
 	FRopeContact Contact;
 
-	// 노드 중심에서 캡슐 세그먼트(A-B)까지의 최근접점과 거리.
+	// The nearest point and distance from the node center to the capsule segment (A-B).
 	const float   TSeg = RopeMath::ClosestSegmentParam(WorldPos, A, B);
 	const FVector Closest = FMath::Lerp(A, B, TSeg);
-	// ToNode = 세그먼트 표면 -> 노드(바깥 방향). MinDist 미만이면 겹침으로 판정.
+	// ToNode = segment surface -> node (outward direction). If it is less than MinDist, check for overlap.
 	const FVector ToNode = WorldPos - Closest;
 	const float   Dist = ToNode.Size();
 	const float   MinDist = Radius + NodeRadius;
 	if (Dist >= MinDist)
 	{
-		// bHit = false: 겹침 없음 -> 나머지 필드는 무의미(호출자가 무시).
+		// bHit = false: No overlap -> The remaining fields are meaningless (ignored by the caller).
 		return Contact;
 	}
 
 	Contact.bHit = true;
-	// Normal: 단위 길이, 표면에서 노드 쪽(바깥)을 가리킨다 = push-out 방향.
-	// 부호가 load-bearing이다(FRopeContact 계약 주석 참고): 뒤집으면 솔버가
-	// 로프를 캡슐 안으로 빨아들인다. SDF로 교체할 때도 ∇φ(항상 바깥을 가리킴)를
-	// 그대로 쓰면 이 규약과 일치한다 — 단 베이크를 outside-positive로 고정할 것.
-	// 축퇴(노드가 세그먼트 축 위 = Dist≈0)에서는 방향이 정의되지 않으므로 임의의
-	// 안정 벡터(+Z)로 폴백한다. SDF도 ∇φ≈0 구간에서 동일한 폴백이 필요하다.
+	// Normal: Unit length, points to the node side (outside) on the surface = push-out direction.
+	// sign is load-bearing (see FRopeContact contract comments): if flipped, the solver
+	// Suck the rope into the capsule. Even when replacing with SDF, ∇ϕ (always points outward)
+	// Written as is, it conforms to this convention — but pinned the bake as outside-positive.
+	// Since direction is not defined in degenerate (node is on segment axis = Dist≈0), arbitrary
+	// Fallback to the stability vector (+Z). SDF also requires the same fallback in the ∇ϕ≈0 section.
 	Contact.Normal = (Dist > KINDA_SMALL_NUMBER) ? (ToNode / Dist) : FVector::UpVector;
-	// Penetration = Normal 방향 겹침 깊이(양수). SurfacePoint는 표면 위 최근접점(보조/디버그용).
+	// Penetration = Normal direction overlap depth (positive number). SurfacePoint is the closest point on the surface (auxiliary/debug use).
 	Contact.Penetration = MinDist - Dist;
 	Contact.SurfacePoint = Closest + Contact.Normal * Radius;
-	// 본 귀속(접촉 집계의 dominant bone 선택 입력)과 본을 소유한 메시(액터 간 wrap follow).
+	// bone attribution (input to select dominant bone of contact aggregation) and the mesh that owns the bone (wrap follow between actors).
 	Contact.Bone = Bone;
 	Contact.SourceMesh = SourceMesh;
 
-	// 표면 속도(cm/s): 접촉 재질점(세그먼트 파라미터 TSeg)의 (현재 - 이전) / dt. solver가 상대 접선
-	// 마찰로 로프를 끌어 쓸어내는 데 쓴다(SDF collider와 동일 계약). InvDeltaTime==0(정적/첫 프레임)이면 0.
+	// surface velocity (cm/s): (current - previous) / dt of contact material point (segment parameter TSeg). solver is relative tangent
+	// Used to drag and sweep a rope by friction (same contract as SDF collider). 0 if InvDeltaTime==0(static/first frame).
 	if (InvDeltaTime > 0.0f)
 	{
 		const FVector PrevClosest = FMath::Lerp(PrevA, PrevB, TSeg);
@@ -48,32 +48,32 @@ FRopeContact FCapsuleCollider::Query(const FVector& WorldPos, float NodeRadius) 
 
 FRopeContact FCapsuleCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& OutHitWorldPos) const
 {
-	// 정지 캡슐(첫 프레임 포함)은 기본(현재 포즈 정적 스윕)과 동일 — 조기 위임.
+	// stationary capsule (including first frame) is the same as the default (current pose static sweep) — early delegation.
 	if (InvDeltaTime <= 0.0f || (PrevA.Equals(A) && PrevB.Equals(B)))
 	{
 		return IRopeCollider::QuerySwept(Q, OutHitWorldPos);
 	}
 
 	FRopeContact Contact;
-	// 기본값(미접촉 시 미정의 사용 방지).
+	// Default value (prevents undefined use when uncontacted).
 	OutHitWorldPos = Q.WorldEnd;
 
-	// 이 substep의 캡슐 끝점(프레임 모션 prev->curr를 SubAlpha로 보간). 캡슐은 리지드 트랜스폼이 없어
-	// (두 관절점이 따로 움직임) SubPose 대신 끝점 자체를 보간한다 — SDF QuerySwept의 로컬 프레임 트릭 대응.
+	// Capsule endpoint of this substep (interpolation of frame motion prev->curr into SubAlpha). Capsule does not have rigid transform.
+	// (Two joint points move separately) Interpolate the end point itself instead of SubPose — Corresponds to SDF QuerySwept's local frame trick.
 	const FVector CapAS = FMath::Lerp(PrevA, A, Q.SubAlpha0);
 	const FVector CapBS = FMath::Lerp(PrevB, B, Q.SubAlpha0);
 	const FVector CapAE = FMath::Lerp(PrevA, A, Q.SubAlpha1);
 	const FVector CapBE = FMath::Lerp(PrevB, B, Q.SubAlpha1);
 
-	// 상대 운동 반영 샘플 수: 노드 이동 + 캡슐 끝점 이동의 최대치(과대추정은 안전 — MaxSamples로 상한).
+	// Number of samples reflecting relative motion: node movement + maximum of capsule end point movement (safe to overestimate — capped by MaxSamples).
 	const double RelLen = FVector::Dist(Q.WorldStart, Q.WorldEnd)
 		+ FMath::Max(FVector::Dist(CapAS, CapAE), FVector::Dist(CapBS, CapBE));
 	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
 	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
 	const float  MinDist = Radius + Q.NodeRadius;
 
-	// 분리 가드(RopeCollision::IsSweptSeparating): 접촉 스킨 안에서 시작해 표면 바깥으로 분리 중이면 재-핀 생략.
-	// 시작 재질점(TSeg0)을 시작/끝 포즈로 이월해 접촉점 이동을, 끝 포즈 세그먼트로 끝 접촉 여부를 판정한다.
+	// Separation Guard (RopeCollision::IsSweptSeparating): Omit re-pin if starting inside the contact skin and separating outside the surface.
+	// The starting material point (TSeg0) is carried over to the start/end pose to check the movement of the contact point, and the end pose segment is checked for end contact.
 	{
 		const float   TSeg0 = RopeMath::ClosestSegmentParam(Q.WorldStart, CapAS, CapBS);
 		const FVector Closest0 = FMath::Lerp(CapAS, CapBS, TSeg0);
@@ -105,8 +105,8 @@ FRopeContact FCapsuleCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 			continue;
 		}
 
-		// 첫 접촉. 접촉 재질점(TSeg)을 substep 끝 포즈로 이월해 노드를 표면과 함께 남은 모션만큼 옮긴다
-		// (SDF가 로컬 접촉점을 끝 포즈로 재환산하는 것의 대응). 법선은 재질점 기준 상대 방향이라 그대로 유효.
+		// First contact. Carry over the contact material point (TSeg) to the end pose of the substep and move the node along with the surface by the remaining amount of motion.
+		// (correspondence to SDF reconverting the local contact point to the end pose). The normal is a relative direction based on the material point, so it is valid as is.
 		Contact.bHit = true;
 		Contact.Normal = (Dist > KINDA_SMALL_NUMBER) ? (ToNode / Dist) : FVector::UpVector;
 		Contact.Penetration = MinDist - Dist;
@@ -116,7 +116,7 @@ FRopeContact FCapsuleCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 		Contact.Bone = Bone;
 		Contact.SourceMesh = SourceMesh;
 
-		// 표면 속도: 재질점의 프레임 전체(prev->curr) 변위 / dt (Query와 동일 계약).
+		// surface velocity: Total frame (prev->curr) displacement of material point / dt (same contract as Query).
 		const FVector WCurr = FMath::Lerp(A, B, TSeg);
 		const FVector WPrev = FMath::Lerp(PrevA, PrevB, TSeg);
 		Contact.SurfaceVelocity = (WCurr - WPrev) * InvDeltaTime;
@@ -159,7 +159,7 @@ FBox FCapsuleCollider::GetWorldBounds() const
 
 bool FCapsuleCollider::GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRadius) const
 {
-	// 월드 공간 세그먼트 + 반지름을 그대로 넘긴다. GPU 솔버가 CPU Query와 동일한 segment 최근접 push-out을 수행한다.
+	// Pass world space segment + radius as is. The GPU solver performs the same segment nearest push-out as the CPU Query.
 	OutA = A;
 	OutB = B;
 	OutRadius = Radius;
@@ -168,7 +168,7 @@ bool FCapsuleCollider::GetGPUCapsule(FVector& OutA, FVector& OutB, float& OutRad
 
 bool FCapsuleCollider::GetGPUCapsuleMotion(FVector& OutPrevA, FVector& OutPrevB, float& OutInvDeltaTime) const
 {
-	// 이전 프레임 끝점 + InvDt. InvDeltaTime=0(정적/첫 프레임)이면 호출자가 prev=현재로 폴백하도록 false.
+	// previous frame endpoint + InvDt. If InvDeltaTime=0(static/first frame), false so that the caller falls back to prev=current.
 	if (InvDeltaTime <= 0.0f)
 	{
 		return false;

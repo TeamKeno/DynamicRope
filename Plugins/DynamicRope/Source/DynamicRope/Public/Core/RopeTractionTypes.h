@@ -11,23 +11,23 @@ class UCharacterMovementComponent;
 class AActor;
 
 /**
- * 견인 수신자의 종류 — "무엇이 로프 힘을 받는가"의 단일 판정 결과(RopeComponent.cpp ResolveTetherEndpoint).
- * 테더와 능동 Pull이 각자 래더를 걷던 것을 한 해석으로 합친 결과물이라, 질량 분배와 실제 인가 지점이
- * 어긋나는 일이 구조적으로 불가능하다. 확장 훅(ApplyTractionToReceiver)이 수신자를 기술할 때도 쓴다.
+ * Type of traction recipient — single check result of "what receives the rope force" (RopeComponent.cpp ResolveTetherEndpoint).
+ * This is the result of combining the tether and active pull's separate ladder steps into one analysis, so the mass distribution and actual application point are
+ * It is structurally impossible to misalign. The extension hook (ApplyTractionToReceiver) is also used to describe the receiver.
  */
 enum class ERopeEndpointKind : uint8
 {
-	None,      // 수신자 없음(Owner도 없음).
-	SimBody,   // 물리 시뮬 바디: 스켈레탈 승격 본 / 대상 프리미티브 / 소유 루트.
-	Character, // CMC가 실제로 구동 중인 캐릭터(MOVE_None 제외).
-	Anchor,    // 정적/키네마틱/MOVE_None/비시뮬 비캐릭터 — 무한질량(움직이려면 위치 폴백뿐).
+	None,      // No recipient (no owner).
+	SimBody,   // Physics Simulation Body: Skeletal promotion bone / target primitive / owning root.
+	Character, // The character on which the CMC is actually running (except MOVE_None).
+	Anchor,    // static/Kinematic/MOVE_None/Non-simulation Non-character — infinite mass (only positional fallback for movement).
 };
 
 /**
- * 테더/능동 Pull이 공유하는 수신자 해석 결과. UObject 포인터는 한 GT 프레임 동안만 소비하며 소유하지 않는다.
- * 종류·실제 인가 바디·기본 유효질량을 한 번에 확정해 판정과 인가가 서로 다른 endpoint를 보지 않게 한다.
- * SimBody의 analytic material solve는 실제 world attachment point와 방향이 정해진 뒤 이 Mass를
- * point Jacobian(병진+회전)으로 정밀화한다.
+ * Receiver interpretation results shared by Tether/Active Pull. A UObject pointer is only consumed for one GT frame and is not owned.
+ * Confirm the type, actual application body, and basic effective mass at once so that check and application do not see different endpoints.
+ * SimBody's analytic material solver uses this mass after the actual world attachment point and direction are determined.
+ * Refine to point Jacobian (translation + rotation).
  */
 struct FRopeTetherEndpoint
 {
@@ -39,7 +39,7 @@ struct FRopeTetherEndpoint
 	float Mass = 0.0f;
 };
 
-/** Wrapped 한 프레임 동안 target/wielder endpoint 해석을 공유하는 비소유 캐시. */
+/** Wrapped A non-owning cache that shares target/wielder endpoint resolution for one frame.*/
 struct FRopeResolvedWrappedEndpoints
 {
 	FRopeTetherEndpoint Target;
@@ -51,131 +51,131 @@ struct FRopeResolvedWrappedEndpoints
 	void Reset() { *this = FRopeResolvedWrappedEndpoints(); }
 };
 
-/** 이 인가가 어느 견인 경로에서 왔는가 — 서브클래스가 경로별로 다르게 반응할 수 있게 한다. */
+/** Which traction path does this permission come from — allows subclasses to react differently depending on the path.*/
 enum class ERopeTractionSource : uint8
 {
-	/** 자동 견인: λ 임펄스 제약이 양끝에 나눠 인가하는 회수(UpdateConstraintTether). */
+	/** Automatic traction: Number of times the λ impulse constraint is applied to both ends (UpdateConstraintTether).*/
 	Tether,
-	/** 사용자 입력 능동 Pull(상수 힘). 대상 인가와 climb-in(wielder 인가) 둘 다 포함. */
+	/** User input Active Pull (constant force). Includes both target accreditation and climb-in (wielder accreditation).*/
 	ActivePull,
 };
 
 /**
- * 로프가 수신자에 견인을 인가하기 **직전**의 요청 기술(POD, 비소유 포인터 — 호출 동안만 유효).
- * URopeComponent::ApplyTractionToReceiver가 받는 유일한 타입이며, 로프가 만드는 모든 힘/속도 개입이
- * 이 한 타입으로 기술된다(경로는 Source로 구분).
+ * Request description (POD, non-owning pointer — valid only during the call) **just before** rope grants traction to the receiver.
+ * URopeComponent::ApplyTractionToReceiver is the only type that receives this, and any force/velocity interventions the rope makes are
+ * is described as one type (path is classified by Source).
  */
 struct FRopeTractionRequest
 {
 	ERopeTractionSource Source = ERopeTractionSource::Tether;
 	ERopeEndpointKind ReceiverKind = ERopeEndpointKind::None;
 
-	/** SimBody: 인가할 프리미티브와 본(본 없으면 컴포넌트 단위). */
+	/** SimBody: Primitive and bone to be approved (if bone is not present, component unit).*/
 	UPrimitiveComponent* Prim = nullptr;
 	FName Bone = NAME_None;
 
-	/** Character: 인가할 무브먼트. */
+	/** Character: Movement to be approved.*/
 	UCharacterMovementComponent* Movement = nullptr;
 
-	/** 수신자 소유 액터(Kind 무관, 있으면 채움). 커스텀 무브먼트는 보통 여기서 자기 컴포넌트를 찾는다. */
+	/** Recipient owns actor (Kind irrelevant, filled in if present). Custom movements usually find their components here.*/
 	AActor* Actor = nullptr;
 
-	/** 인가 방향(단위 벡터). */
+	/** Is direction (unit vector).*/
 	FVector Direction = FVector::ZeroVector;
 
 	/**
-	 * Source별 크기 — 단위가 다르니 반드시 Source와 함께 읽을 것.
-	 *   Tether     = 이번 프레임 축 속도 변화 ΔV = λ×유효 역질량(cm/s)
-	 *   ActivePull = 힘의 크기 = 장력 상한(N)
+	 * Size by source — The units are different, so be sure to read it together with the source.
+	 *   Tether = Change in axis velocity this frame ΔV = λ×effective inverse mass (cm/s)
+	 *   ActivePull = magnitude of force = tension cap(N)
 	 */
 	float Amount = 0.0f;
 
 	float DeltaTime = 0.0f;
 
-	/** wielder(로프 소유자) 쪽 인가인가. false면 감긴 대상 쪽. */
+	/** Is it from the wielder (rope owner) side? If false, the wound target side.*/
 	bool bWielderSide = false;
 };
 
 /**
- * Pull(당김) 샘플: wrap 앵커가 로프로부터 받는 당김을 데이터로 기술한다(Docs/PoC/01_PostWrapModel.md 4.2).
- * FRopeWrapController::ComputePull이 채우고(UObject-free), 컴포넌트가 힘 인가(캐릭터/물리 본)로 변환한다.
+ * Pull sample: Describes the pull that the wrap anchor receives from the rope as data (Docs/PoC/01_PostWrapModel.md 4.2).
+ * FRopeWrapController::ComputePull fills (UObject-Free), and the component converts to force application (character/physics bone).
  */
 struct FRopePullSample
 {
 	bool    bValid = false;
 
-	/** 손 쪽 첫 앵커 노드(힘 인가 지점의 노드). */
+	/** First anchor node on the hand side (node ​​at the point of force application).*/
 	int32   AnchorNode = INDEX_NONE;
 
-	/** 첫 직선 다리 끝(walk가 멈춘 정수 노드) — 방향의 raw 조준(ComputePull 산출; 디버그/진단). */
+	/** End of first straight leg (integer node where walk stops) — raw aiming in direction (computePull output; debug/diagnostics).*/
 	int32   AimNode = INDEX_NONE;
 
-	/** 앵커가 붙은 본(물리 본 힘 인가 대상). */
+	/** Anchored bone (physical bone force application target).*/
 	FName   Bone = NAME_None;
 
-	/** 앵커 노드 월드 위치(힘 인가점). */
+	/** Anchor node world location (force application point).*/
 	FVector WorldPoint = FVector::ZeroVector;
 
-	/** 당김 단위 방향(앵커에서 조준 쪽 = 로프 경로 추종; 소비 시 컴포넌트가 fractional+EMA 스무딩). */
+	/** Pull unit direction (aiming side from anchor = following rope path; component when consumed is fractional+EMA smoothing).*/
 	FVector Direction = FVector::ZeroVector;
 
-	/** 앵커-손 쪽 인접 세그먼트 장력(FRopeSimState::SegmentTension 단위). */
+	/** Anchor-hand side adjacent segment tension (units of FRopeSimState::SegmentTension).*/
 	float   Tension = 0.0f;
 
 	/**
-	 * 스무딩된 fractional 조준 인덱스([0, AnchorNode); <0 = 미설정). AimPos와 함께 소비자(컴포넌트)가
-	 * AimNode를 float로 시간 스무딩해 채운다(ComputePull은 정수 AimNode만 산출) — tether/방향이 이 연속
-	 * 값을 써 정수 조준 노드의 프레임 간 이산 홉(방향 점프 + 견인 끊김)을 없앤다.
+	 * smoothed fractional aiming index([0, AnchorNode); <0 = not set). With AimPos, consumers (components)
+	 * Fill the AimNode with float time smoothing (ComputePull only yields integer AimNode) — tether/direction is this continuous
+	 * to eliminate discrete hops (direction jump + traction interruption) between frames of the integer aiming node.
 	 */
 	float   AimNodeF = -1.0f;
 
-	/** 노드 사이 보간된 조준 월드 위치(AimNodeF 위치). */
+	/** Aiming world position interpolated between nodes (AimNodeF position).*/
 	FVector AimPos = FVector::ZeroVector;
 
 	/**
-	 * 앵커→손 코너-다리 chord 합(cm). walk를 첫 코너에서 멈추지 않고 손(노드 0)까지 이어 각 다리의 직선
-	 * 거리를 누적한 값 — FreeRestLen과의 비교가 "전 체인 팽팽" 판정의 관측치다(RopeTraction::
-	 * EvaluateChainTautGate). 처짐은 chord를 rest보다 짧게 만들고, 코너에 걸린 팽팽한 로프는 다리별 chord가
-	 * rest에 근접해 팽팽으로 인정된다. **다리별 chord는 그 다리의 rest 길이로 클램프**한다 — 움직이는
-	 * 앵커가 앵커 쪽 다리를 스트레치시키면(세그먼트 > rest) chord가 rest를 초과해, 나머지 로프의 슬랙을
-	 * 상쇄·은폐하는 것을 막는다(PIE 실측 620/600cm 사례). 단 지그재그로 구겨진 슬랙은 다리가 잘게 쪼개져
-	 * 여전히 rest에 붙는 맹점이 있다 — 그건 MinFreeTension 게이트가 잡는다.
+	 * Anchor→Hand corner-leg chord sum (cm). Instead of stopping at the first corner, continue walking to the hand (node 0) and walk in a straight line on each leg.
+	 * Accumulated distance — Comparison with FreeRestLen is the observed "total chain tension" check (RopeTraction::
+	 * EvaluateChainTautGate). Sag makes the chord shorter than the rest, and the taut rope hanging at the corner makes the chord for each leg
+	 * It is considered taut because it is close to rest. **Chords for each leg are clamped to the rest length of that leg** — moving
+	 * When the anchor stretches the leg on the anchor side (segment > rest), the chord exceeds the rest, causing slack in the remaining rope.
+	 * Prevents offset and concealment (PIE actual measurement 620/600cm case). However, if the slack is crumpled in a zigzag pattern, the legs are split into small pieces.
+	 * There is still a blind spot attached to rest — that is covered by the MinFreeTension gate.
 	 *
-	 * ⚠ chord 결손은 처짐의 **제곱**으로만 줄어든다(600cm 로프의 chord 590 = 눈에 보이는 처짐 ~45cm) —
-	 * "시각적으로 펴졌는가"의 판정자는 이 비율이 아니라 MaxLegSag(cm, 선형)다. 이 값은 완만한 대형 처짐과
-	 * 압축(노드 뭉침)의 거친 백스톱으로 남는다.
+	 * ⚠ The chord defect is only reduced by the **square** of the sag (chord 590 on a 600cm rope = ~45cm visible sag) —
+	 * The checker for “visually stretched” is MaxLegSag (cm, linear), not this ratio. This value corresponds to a moderate large sag and
+	 * remains as a rough backstop for compression (node agglomeration).
 	 */
 	float   TautChordLen = 0.0f;
 
 	/**
-	 * 앵커→손 코너-다리 chord 합의 **비클램프** 값(cm) — TautChordLen과 달리 다리별 rest 클램프를 하지
-	 * 않아, 스트레치된 다리는 그만큼 합을 키운다. Live movement binding이 없는 legacy/custom-mover
-	 * fallback의 진단 관측치로만 남는다. Authoritative C는 live hand↔first-anchor 거리 − material
-	 * length다.
+	 * Anchor→Hand Corner-Leg Chord Sum **Non-Clamp** Value (cm) — Unlike TautChordLen, rest clamp is not performed for each leg.
+	 * No, stretched legs increase the sum. legacy/custom-mover without live movement binding
+	 * remains only as a diagnostic observation for fallback. Authoritative C is live hand↔first-anchor distance − material
+	 * length.
 	 *
-	 * ⚠ legacy fallback에서는 C > 0만으로 충분하지 않다: 랙돌 본 요동이
-	 * 앵커 인접 다리만 strain limit까지 늘리면 나머지가 늘어져 있어도 합이 rest를 넘어 슬랙 로프에서
-	 * C > 0이 된다(부분 스트레치 오염). 그 가짜 C에 λ가 발화하면 견인→요동→스트레치의 정귀환 폭주가
-	 * 되므로 그 fallback만 geometry/legacy tension contamination guard를 유지한다.
+	 * ⚠ In legacy fallback, C > 0 is not enough: ragdoll bone fluctuation
+	 * If only the leg adjacent to the anchor is stretched to the strain limit, the sum will exceed the rest even if the rest is stretched, causing the slack rope to
+	 * C > 0 (partial stretch contamination). When λ ignites in that false C, a positive return runaway of traction → oscillation → stretch occurs.
+	 * , so only the fallback maintains the geometry/legacy tension contamination guard.
 	 */
 	float   PathChordLen = 0.0f;
 
-	/** 자유 구간(손~앵커) rest 길이(cm) = AnchorNode × SegmentLength(되감기 축소 자동 반영). */
+	/** Free span (hand~anchor) rest length(cm) = AnchorNode × SegmentLength (automatically reflects rewrapping reduction).*/
 	float   FreeRestLen = 0.0f;
 
 	/**
-	 * 자유 구간(손~앵커) 세그먼트 장력의 **최솟값**(FRopeSimState::SegmentTension 단위). 팽팽한 로프는
-	 * 장력이 앵커에서 손까지 전 구간으로 전달되므로 최솟값이 양수고, 어딘가 한 구간이라도 슬랙이면
-	 * (압축/구김 — XPBD 장력은 당김만 계상) 0이다 — chord 합 기하가 못 보는 지그재그 슬랙/부분 스트레치를
-	 * 이걸로 판별한다. 아직 솔브 전(배열 비어 있음)이면 0(GPU 로프는 1~2프레임 지연 미러).
+	 * **Minimum value** of Free span (hand~anchor) segment tension (unit of FRopeSimState::SegmentTension). The tight rope is
+	 * Since tension is transmitted to the entire section from the anchor to the hand, the minimum value is a positive number, and if there is slack in even one section,
+	 * (Compression/Creasing — XPBD tension only counts tension) is 0 — Zigzag slack/partial stretch that the chord sum geometry cannot see.
+	 * This is what determines it. If it is not yet solved (array is empty), it is 0 (GPU rope is a 1~2 frame delayed mirror).
 	 */
 	float   MinFreeTension = 0.0f;
 
 	/**
-	 * 다리별 최대 처짐(cm) = 각 코너-다리의 내부 노드가 그 다리 chord 직선에서 벗어난 최대 수직 거리.
-	 * "시각적으로 펴졌는가"의 직접 관측치 — chord 비율(처짐의 제곱에만 반응)과 달리 처짐 cm에 **선형**으로
-	 * 반응한다(PIE 실측: chord 590/600(98.3%)인 로프의 실제 처짐 ~45cm). 다리 단위라 코너에 걸린 팽팽한
-	 * 로프(다리별로 곧음)는 값이 작고, 완만한 catenary 처짐은 그대로 cm로 드러난다.
+	 * Maximum sag (cm) for each leg = Maximum vertical distance that the internal node of each corner-leg deviates from the chord straight line of that leg.
+	 * Direct observation of "visually straightened" — **linear** to sag cm, unlike chord rate (which only responds to the square of sag)
+	 * responds (PIE actual measurements: actual sag of rope ~45cm with chord 590/600 (98.3%)). Since it is a leg unit, there is no tension hanging at the corner.
+	 * The rope (straightness of each leg) has a small value, and the gentle catenary sag is revealed as it is in cm.
 	 */
 	float   MaxLegSag = 0.0f;
 };
