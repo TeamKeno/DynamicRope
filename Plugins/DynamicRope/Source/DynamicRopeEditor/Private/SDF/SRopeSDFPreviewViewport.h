@@ -47,7 +47,7 @@ struct FRopeSDFPreviewDrawOptions
 	/** The number of slice samples along one side of the grid. */
 	int32 SliceResolution = 24;
 	/** The slice colour mapping scale, in centimetres, at which the absolute distance saturates. */
-	float SliceColorScale = 10.0f;
+	float SliceColorScale = 2.5f;
 
 	/** The gradient arrow length, in centimetres. */
 	float GradientLength = 4.0f;
