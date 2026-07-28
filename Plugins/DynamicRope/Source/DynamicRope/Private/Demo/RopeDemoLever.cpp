@@ -94,16 +94,25 @@ void ARopeDemoLever::Tick(float DeltaSeconds)
 		}
 	}
 
-	const float PullRate = ComputePullRate();
+	// The gates ignite a pull, the grace sustains it: the swing itself slackens the rope — the tip
+	// yields towards the hand — so taut and tension flicker off while the handle is moving, and
+	// re-checking them every frame would stall the lever against its own motion.
+	bool bIgnited = false;
+	const float PullRate = ComputePullRate(bIgnited);
+	PullGraceRemaining = bIgnited ? PullGraceTime : FMath::Max(PullGraceRemaining - DeltaSeconds, 0.0f);
+
 	const float PreviousAngle = CurrentAngleDeg;
-	if (PullRate > 0.0f)
+	if (!FMath::IsNearlyZero(PullRate))
 	{
-		CurrentAngleDeg = FMath::Min(CurrentAngleDeg + PullRate * DeltaSeconds, PulledAngleDeg);
+		// Signed drive: a pull from the far side hauls the handle back towards rest, which makes
+		// the lever a two-way crank rather than a one-way trigger.
+		CurrentAngleDeg = FMath::Clamp(CurrentAngleDeg + PullRate * DeltaSeconds, RestAngleDeg, PulledAngleDeg);
 	}
 	else if (!(bHoldAtEnd && bOn))
 	{
-		// Not being pulled: the handle springs back to rest on its own. With bHoldAtEnd, a completed
-		// pull (bOn) pins it at the pulled end instead, until SetOn(false) releases the hold.
+		// Not being pulled: the handle springs back to rest on its own. With bHoldAtEnd, an On
+		// lever instead holds wherever the pull left it, until a reverse pull walks it back to
+		// rest or SetOn(false) drops the hold.
 		CurrentAngleDeg = FMath::FInterpConstantTo(CurrentAngleDeg, RestAngleDeg, DeltaSeconds, ReturnAngularSpeed);
 	}
 
@@ -123,6 +132,16 @@ void ARopeDemoLever::Tick(float DeltaSeconds)
 	else if (!bArmed && CurrentAngleDeg <= RestAngleDeg + Range * 0.25f)
 	{
 		bArmed = true;
+	}
+
+	// A held lever hauled all the way back to rest turns Off: the reverse pull is the deliberate
+	// counterpart of the pull that completed the travel, so it gets the same state transition.
+	if (bOn && bHoldAtEnd && CurrentAngleDeg <= RestAngleDeg + KINDA_SMALL_NUMBER)
+	{
+		bOn = false;
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] demo lever pulled back Off (%d rope(s) attached)"),
+			*GetName(), WrappingRopes.Num());
+		OnLeverStateChanged.Broadcast(this, false);
 	}
 
 	UpdateTargetRotation();
@@ -181,8 +200,10 @@ void ARopeDemoLever::HandleAnyRopeReleased(const URopeComponent* Rope, const USc
 	}
 }
 
-float ARopeDemoLever::ComputePullRate() const
+float ARopeDemoLever::ComputePullRate(bool& bOutIgnited) const
 {
+	bOutIgnited = false;
+
 	const FVector Tip = ComputeTipWorld(CurrentAngleDeg);
 	// The swing arc tangent, taken numerically from two nearby angles. Deriving it from the hinge
 	// axis by hand would have to reproduce the rotator's pitch sign convention; this cannot disagree
@@ -198,7 +219,8 @@ float ARopeDemoLever::ComputePullRate() const
 		DrawDebugDirectionalArrow(GetWorld(), Tip, Tip + Tangent * 80.0f, 20.0f, FColor::Yellow,
 			false, -1.0f, SDPG_Foreground, 2.0f);
 		DrawDebugString(GetWorld(), Tip + FVector(0.0f, 0.0f, 24.0f),
-			FString::Printf(TEXT("ropes=%d"), WrappingRopes.Num()), nullptr, FColor::Yellow, 0.0f, true);
+			FString::Printf(TEXT("ropes=%d grace=%.2f"), WrappingRopes.Num(), PullGraceRemaining),
+			nullptr, FColor::Yellow, 0.0f, true);
 	}
 #endif
 
@@ -207,8 +229,11 @@ float ARopeDemoLever::ComputePullRate() const
 		return 0.0f;
 	}
 
+	const bool bGraceActive = PullGraceRemaining > 0.0f;
+
 	// Several ropes can wrap one handle; the strongest plausible pull wins rather than stacking,
-	// which keeps the swing speed bounded.
+	// which keeps the swing speed bounded — strongest by magnitude, since opposing ropes pull the
+	// handle opposite ways and the harder one should win.
 	float BestRate = 0.0f;
 	int32 RopeIndex = 0;
 	for (const TWeakObjectPtr<URopeComponent>& WeakRope : WrappingRopes)
@@ -227,22 +252,28 @@ float ARopeDemoLever::ComputePullRate() const
 		const float Tension = Rope->GetConstraintTension();
 		const bool bTensionOk = Tension >= PullTensionThreshold;
 
-		// Gate 3: the pull must actually point along the tip's swing arc. Node 0 is the hand end,
-		// so the direction the rope hauls the handle is tip towards hand.
+		// Gate 3: the pull must run along the tip's swing arc. Node 0 is the hand end, so the
+		// direction the rope hauls the handle is tip towards hand. The alignment is signed: the
+		// magnitude gates, the sign picks which way the handle swings.
 		const FVector PullDir = (Rope->GetNodePosition(0) - Tip).GetSafeNormal();
-		const float Alignment = PullDir.IsNearlyZero() ? -1.0f : static_cast<float>(PullDir | Tangent);
-		const bool bAlignOk = Alignment >= MinPullAlignment;
+		const float Alignment = PullDir.IsNearlyZero() ? 0.0f : static_cast<float>(PullDir | Tangent);
+		const bool bAlignOk = FMath::Abs(Alignment) >= MinPullAlignment;
 
-		const bool bPass = bTautOk && bTensionOk && bAlignOk;
+		// The full gates ignite; while the grace runs, taut and tension are bypassed so the slack
+		// transient the swing itself creates cannot stall it. Alignment stays live, so walking
+		// around the lever still stops the drive.
+		const bool bIgnite = bTautOk && bTensionOk && bAlignOk;
+		const bool bPass = bIgnite || (bGraceActive && bAlignOk);
+		bOutIgnited |= bIgnite;
 
 #if ENABLE_DRAW_DEBUG
 		if (bDebugDrawPull)
 		{
-			const FColor Color = bPass ? FColor::Green : FColor::Red;
+			const FColor Color = bIgnite ? FColor::Green : (bPass ? FColor::Cyan : FColor::Red);
 			DrawDebugDirectionalArrow(GetWorld(), Tip, Tip + PullDir * 120.0f, 20.0f, Color,
 				false, -1.0f, SDPG_Foreground, 2.0f);
 			DrawDebugString(GetWorld(), Tip + FVector(0.0f, 0.0f, 44.0f + 18.0f * RopeIndex),
-				FString::Printf(TEXT("%s: taut=%s tension=%.0f/%.0f align=%.2f/%.2f"),
+				FString::Printf(TEXT("%s: taut=%s tension=%.0f/%.0f align=%+.2f/%.2f"),
 					*GetNameSafe(Rope), bTautOk ? TEXT("ok") : TEXT("NO"),
 					Tension, PullTensionThreshold, Alignment, MinPullAlignment),
 				nullptr, Color, 0.0f, true);
@@ -255,9 +286,13 @@ float ARopeDemoLever::ComputePullRate() const
 			continue;
 		}
 
-		// Scaling by the alignment makes the handle follow the pull: square along the arc swings at
-		// full speed, a grazing pull crawls.
-		BestRate = FMath::Max(BestRate, PullAngularSpeed * Alignment);
+		// Scaling by the signed alignment makes the handle follow the pull: square along the arc
+		// swings at full speed, a grazing pull crawls, and a pull from the far side swings back.
+		const float Rate = PullAngularSpeed * Alignment;
+		if (FMath::Abs(Rate) > FMath::Abs(BestRate))
+		{
+			BestRate = Rate;
+		}
 	}
 	return BestRate;
 }
