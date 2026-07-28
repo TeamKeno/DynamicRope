@@ -8,8 +8,10 @@
 #include "RopeGDFViewExtension.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
-// OnPostEngineInit, for the timing of the view extension's creation.
+// The post-engine-init delegate, for the timing of the view extension's creation.
 #include "Misc/CoreDelegates.h"
+// UE_VERSION_OLDER_THAN, the engine version guard, since the delegate's accessor changed in 5.8.
+#include "Misc/EngineVersionComparison.h"
 // FFXSystemInterface::RegisterCustomFXSystem
 #include "FXSystem.h"
 // AddShaderSourceDirectoryMapping
@@ -48,7 +50,12 @@ public:
 			FCreateCustomFXSystemDelegate::CreateStatic(&CreateRopeGDFFXSystem));
 
 		// The view extension needs GEngine, so it is created after engine initialization; PostConfigInit is too early.
+		// In 5.8 the public OnPostEngineInit member was replaced by the GetOnPostEngineInit() accessor, hence the version guard.
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
 		FCoreDelegates::OnPostEngineInit.AddStatic(&FRopeGDFViewExtension::EnsureRegistered);
+#else
+		FCoreDelegates::GetOnPostEngineInit().AddStatic(&FRopeGDFViewExtension::EnsureRegistered);
+#endif
 	}
 
 	virtual void ShutdownModule() override

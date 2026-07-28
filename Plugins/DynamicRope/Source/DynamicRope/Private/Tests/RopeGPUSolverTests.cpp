@@ -27,7 +27,7 @@
 #include "Logic/RopeFlightContactDetector.h"
 #include "RopeTestHelpers.h"
 #include "RHI.h"
-// BlockUntilGPUIdle
+// SubmitAndBlockUntilGPUIdle
 #include "RHICommandList.h"
 // FlushRenderingCommands
 #include "RenderingThread.h"
@@ -128,7 +128,7 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 		FlushRenderingCommands();
 	}
 
-	// Retrieve the final frame result deterministically: ReadbackNow synchronously reads back the resident buffer to BlockUntilGPUIdle.
+	// Retrieve the final frame result deterministically: ReadbackNow synchronously reads back the resident buffer to SubmitAndBlockUntilGPUIdle.
 	// Dedicated step paths are not stacked in PendingSteps, so the last dispatch state is read as is without additional solving.
 	// (The asynchronous GetLatest mirror cannot specify which frame the result is, so it is non-static between executions).
 	FlushRenderingCommands();
@@ -232,7 +232,7 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
 			[](FRHICommandListImmediate& RHICmdList)
 			{
-				RHICmdList.BlockUntilGPUIdle();
+				RHICmdList.SubmitAndBlockUntilGPUIdle();
 			});
 		FlushRenderingCommands();
 	};
@@ -451,7 +451,7 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 	auto SyncGPU = []()
 	{
 		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
-			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.BlockUntilGPUIdle(); });
+			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.SubmitAndBlockUntilGPUIdle(); });
 		FlushRenderingCommands();
 	};
 	auto Pump = [&]()
@@ -603,7 +603,7 @@ bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
 	auto SyncGPU = []()
 	{
 		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
-			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.BlockUntilGPUIdle(); });
+			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.SubmitAndBlockUntilGPUIdle(); });
 		FlushRenderingCommands();
 	};
 
@@ -747,7 +747,7 @@ bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
 	auto SyncGPU = []()
 	{
 		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
-			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.BlockUntilGPUIdle(); });
+			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.SubmitAndBlockUntilGPUIdle(); });
 		FlushRenderingCommands();
 	};
 
@@ -878,7 +878,7 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 	auto SyncGPU = []()
 	{
 		ENQUEUE_RENDER_COMMAND(RopeTestGpuSync)(
-			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.BlockUntilGPUIdle(); });
+			[](FRHICommandListImmediate& RHICmdList) { RHICmdList.SubmitAndBlockUntilGPUIdle(); });
 		FlushRenderingCommands();
 	};
 
@@ -1027,7 +1027,7 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 		}
 	}
 
-	// Retrieve the final frame result deterministically: ReadbackNow synchronously reads back the resident buffer to BlockUntilGPUIdle.
+	// Retrieve the final frame result deterministically: ReadbackNow synchronously reads back the resident buffer to SubmitAndBlockUntilGPUIdle.
 	// Dedicated step paths are not stacked in PendingSteps, so the last dispatch state is read as is without additional solving.
 	// (The asynchronous GetLatest mirror cannot specify which frame the result is, so it is non-static between executions).
 	FlushRenderingCommands();
@@ -1202,7 +1202,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		}
 	}
 
-	// Retrieve the final frame result deterministically: ReadbackNow synchronously reads back the resident buffer to BlockUntilGPUIdle.
+	// Retrieve the final frame result deterministically: ReadbackNow synchronously reads back the resident buffer to SubmitAndBlockUntilGPUIdle.
 	// Dedicated step paths are not stacked in PendingSteps, so the last dispatch state is read as is without additional solving.
 	// (The asynchronous GetLatest mirror cannot specify which frame the result is, so it is non-static between executions).
 	FlushRenderingCommands();

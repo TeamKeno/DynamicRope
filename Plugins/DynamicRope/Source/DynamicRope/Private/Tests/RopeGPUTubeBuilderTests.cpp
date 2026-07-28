@@ -84,13 +84,13 @@ bool FRopeGPUTubeTangentUVTest::RunTest(const FString& Parameters)
 			}
 
 			RopeGPU::BuildTube_RenderThread(RHICmdList, InSRV, PosUAV, TanUAV, UVUAV, NumRings, NumSides, Radius);
-			RHICmdList.BlockUntilGPUIdle();
+			RHICmdList.SubmitAndBlockUntilGPUIdle();
 
 			auto Read = [&](FBufferRHIRef Buf, uint32 Bytes, void* Dst)
 			{
 				FRHIGPUBufferReadback RB(TEXT("TubeTest.RB"));
 				RB.EnqueueCopy(RHICmdList, Buf, Bytes);
-				RHICmdList.BlockUntilGPUIdle();
+				RHICmdList.SubmitAndBlockUntilGPUIdle();
 				if (const void* Src = RB.Lock(Bytes)) { FMemory::Memcpy(Dst, Src, Bytes); RB.Unlock(); }
 			};
 			Read(PosBuf, NumVerts * 3 * sizeof(float),  OutPos.GetData());
@@ -260,13 +260,13 @@ bool FRopeGPUTubeSmoothingTest::RunTest(const FString& Parameters)
 			RopeGPU::BuildTube_RenderThread(RHICmdList, InSRV, PUAVa, TUAVa, UUAVa, NumRings, NumSides, Radius);
 			RopeGPU::BuildTubeFromResident_RenderThread(RHICmdList, ResSRV, PUAVb, TUAVb, UUAVb,
 				NumRings, NumSides, Radius, NumNodes, Subdiv, SmoothParam, FMatrix44f::Identity);
-			RHICmdList.BlockUntilGPUIdle();
+			RHICmdList.SubmitAndBlockUntilGPUIdle();
 
 			auto Read = [&](FBufferRHIRef Buf, uint32 Bytes, void* Dst)
 			{
 				FRHIGPUBufferReadback RB(TEXT("Sm.RB"));
 				RB.EnqueueCopy(RHICmdList, Buf, Bytes);
-				RHICmdList.BlockUntilGPUIdle();
+				RHICmdList.SubmitAndBlockUntilGPUIdle();
 				if (const void* Src = RB.Lock(Bytes)) { FMemory::Memcpy(Dst, Src, Bytes); RB.Unlock(); }
 			};
 			Read(PBufA, NumVerts * 3 * sizeof(float), PosA.GetData());

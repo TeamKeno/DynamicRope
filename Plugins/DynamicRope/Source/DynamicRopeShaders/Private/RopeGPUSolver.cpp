@@ -673,7 +673,7 @@ bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, T
 				AddEnqueueCopyPass(CopyGraph, PrevRb.Get(), CopyGraph.RegisterExternalBuffer(Resident->PrevBuf), NodeBytes);
 				CopyGraph.Execute();
 			}
-			RHICmdList.BlockUntilGPUIdle();
+			RHICmdList.SubmitAndBlockUntilGPUIdle();
 
 			const FVector4f* SrcPos = static_cast<const FVector4f*>(PosRb->Lock(NodeBytes));
 			const FVector4f* SrcPrev = static_cast<const FVector4f*>(PrevRb->Lock(NodeBytes));

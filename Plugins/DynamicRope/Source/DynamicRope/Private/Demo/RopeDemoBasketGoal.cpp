@@ -8,9 +8,16 @@
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
 #include "Materials/MaterialInstanceDynamic.h"
-// FHashedMaterialParameterInfo. MaterialTypes.h is the portable spelling: it declares the alias itself up to
-// 5.6 and forwards to Materials/MaterialParameters.h, where the declaration moved, from 5.7 on.
+// UE_VERSION_OLDER_THAN, the engine version guard for the FHashedMaterialParameterInfo header below.
+#include "Misc/EngineVersionComparison.h"
+// FHashedMaterialParameterInfo. The declaration moved to Materials/MaterialParameters.h in 5.7, and the old
+// MaterialTypes.h spelling only forwards to it while carrying a deprecated-header warning, so take the new
+// path where it exists and keep MaterialTypes.h for 5.6 and older, which is the only place it is declared.
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
 #include "MaterialTypes.h"
+#else
+#include "Materials/MaterialParameters.h"
+#endif
 
 ARopeDemoBasketGoal::ARopeDemoBasketGoal()
 {
