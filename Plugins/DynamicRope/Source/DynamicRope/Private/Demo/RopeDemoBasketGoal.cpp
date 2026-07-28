@@ -8,7 +8,9 @@
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "Materials/MaterialParameters.h"
+// FHashedMaterialParameterInfo. MaterialTypes.h is the portable spelling: it declares the alias itself up to
+// 5.6 and forwards to Materials/MaterialParameters.h, where the declaration moved, from 5.7 on.
+#include "MaterialTypes.h"
 
 ARopeDemoBasketGoal::ARopeDemoBasketGoal()
 {

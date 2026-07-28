@@ -419,7 +419,7 @@ bool FRopePresetLoadedHandSocketOverrideGateTest::RunTest(const FString& Paramet
 	ClearPreset->bUseTipMesh = true;
 	ClearPreset->bOverrideLoadedHandSocket = true;
 	TestTrue(TEXT("a preset opting in with an empty socket applies successfully"), Rope->ApplyPreset(ClearPreset));
-	TestEqual(TEXT("opting in with an empty socket clears it"), Rope->LoadedHandSocket, NAME_None);
+	TestEqual(TEXT("opting in with an empty socket clears it"), Rope->LoadedHandSocket, FName(NAME_None));
 	return true;
 }
 
