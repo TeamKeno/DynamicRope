@@ -1,9 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
-// GPU solver (M1) parity/stability test. CPU FRopeXPBDSolver as ground-truth, GPU FRopeGPUSolver as ground-truth
-// In the same scenario, bone is checked to see if (1) there is no divergence/NaN, (2) the non-stretched segment length is maintained, and (3) the "approximation" matches the CPU.
-// Note: red-black/stride-3 coloring is not bit-identical with the alternating-sweep Gauss-Seidel of the CPU (convergence only approximation) →
-// Per-node deviation is bone based on tolerance only. Additionally, GPU dispatch requires RHI, so it is skipped in environments where rendering is not possible.
+// GPU solver parity and stability test. Running the same scenario through the CPU FRopeXPBDSolver as ground
+// truth and the GPU FRopeGPUSolver, it checks that (1) nothing diverges or produces NaN, (2) an inextensible
+// rope holds its segment lengths, and (3) the GPU result matches the CPU's to within tolerance.
+// Note: red-black and stride-3 colouring is not bit-identical to the CPU's alternating-sweep Gauss-Seidel —
+// they only converge to the same answer — so per-node deviation is judged by tolerance alone. A GPU dispatch
+// also needs an RHI, so these are skipped where rendering is not possible.
 
 #include "Misc/AutomationTest.h"
 
@@ -67,7 +69,7 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	// GPU dispatch requires RHI — skip (not fail) in render-unable (headless/null RHI) environments.
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU 솔버 패리티 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("GPU solver parity test skipped: no renderable RHI (headless)."));
 		return true;
 	}
 
@@ -81,7 +83,7 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	const FRopeXPBDSolver Solver;
 	const TArray<IRopeCollider*> NoColliders;
 
-	// GPU solver is resident (M5): Advances the persistent buffer in-place at every frame step, and retrieves (delays) the result with RT readback → GetLatest.
+	// The GPU solver keeps the centerline resident: each frame's step advances the persistent buffer in place, and the result comes back through the render-thread readback (delayed) via GetLatest.
 	// The test is a synchronous verification, so RT is performed with FlushRenderingCommands after each step. The generation is pinned to 1 (only the first frame is seeded).
 	FRopeGPUSolver GpuSolver;
 	const uint32 RopeId = 1;
@@ -135,7 +137,7 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	if (!GpuSolver.ReadbackNow(RopeId, RbPos, RbPrev, RbGen) ||
 		RbGen != Gen || RbPos.Num() != GpuSim.Num() || RbPrev.Num() != GpuSim.Num())
 	{
-		AddError(TEXT("GPU 상주 결과를 회수하지 못함(ReadbackNow 최종 상태)."));
+		AddError(TEXT("Could not retrieve the GPU resident result (final ReadbackNow state)."));
 		return false;
 	}
 	for (int32 i = 0; i < GpuSim.Num(); ++i)
@@ -159,7 +161,7 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	{
 		MaxDev = FMath::Max(MaxDev, static_cast<float>(FVector::Dist(CpuSim.Positions[i], GpuSim.Positions[i])));
 	}
-	AddInfo(FString::Printf(TEXT("CPU↔GPU 최대 노드 편차: %.2f cm (RopeLength %.0f)"), MaxDev, Length));
+	AddInfo(FString::Printf(TEXT("Largest CPU-to-GPU node deviation: %.2f cm (RopeLength %.0f)"), MaxDev, Length));
 	TestTrue(FString::Printf(TEXT("CPU↔GPU max node deviation %.2f cm within tolerance"), MaxDev),
 		// Settlement hanging geometry should be close (generous cap).
 		MaxDev < Length * 0.25f);
@@ -179,7 +181,7 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 	// GPU dispatch requires RHI — skip (not fail) in render-unable (headless/null RHI) environments.
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU override 패스 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("GPU override pass test skipped: no renderable RHI (headless)."));
 		return true;
 	}
 
@@ -299,7 +301,7 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 	FRopeResidentLatest AfterFix;
 	if (!Drain(AfterFix))
 	{
-		AddError(TEXT("override 후 리드백 drain 실패."));
+		AddError(TEXT("Readback drain failed after the override."));
 		return false;
 	}
 	for (int32 i = 3; i <= 5; ++i)
@@ -311,7 +313,7 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 	{
 		if (P.ContainsNaN())
 		{
-			AddError(TEXT("override 후 NaN 발생."));
+			AddError(TEXT("NaN after the override."));
 			return false;
 		}
 	}
@@ -336,7 +338,7 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 	FRopeResidentLatest AfterRestore;
 	if (!Drain(AfterRestore))
 	{
-		AddError(TEXT("복원 후 리드백 drain 실패."));
+		AddError(TEXT("Readback drain failed after the restore."));
 		return false;
 	}
 	const float MovedDev = static_cast<float>(FVector::Dist(AfterRestore.Positions[4], Targets[4]));
@@ -367,7 +369,7 @@ bool FRopeGPUOverridePassTest::RunTest(const FString& Parameters)
 	FRopeResidentLatest AfterNonStretch;
 	if (!Drain(AfterNonStretch))
 	{
-		AddError(TEXT("비신축 override 후 리드백 drain 실패."));
+		AddError(TEXT("Readback drain failed after the inextensible override."));
 		return false;
 	}
 	for (int32 i = 0; i + 1 < AfterNonStretch.Positions.Num(); ++i)
@@ -392,7 +394,7 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 {
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU 접촉 감지 패리티 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("GPU contact detection parity test skipped: no renderable RHI (headless)."));
 		return true;
 	}
 
@@ -481,7 +483,7 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 	}
 	if (!bGot)
 	{
-		AddError(TEXT("GPU 접촉 감지 결과를 회수하지 못함."));
+		AddError(TEXT("Could not retrieve the GPU contact detection results."));
 		return false;
 	}
 
@@ -491,24 +493,24 @@ bool FRopeGPUContactParityTest::RunTest(const FString& Parameters)
 	TMap<int32, const FRopeGPUContactResult*> GpuByNode;
 	for (const FRopeGPUContactResult& C : GpuContacts.Contacts) { GpuByNode.Add(C.NodeIndex, &C); }
 
-	AddInfo(FString::Printf(TEXT("CPU 접촉 %d개, GPU 접촉 %d개"), CpuCandidates.Num(), GpuContacts.Contacts.Num()));
-	TestTrue(TEXT("적어도 하나의 접촉이 감지됨"), CpuCandidates.Num() > 0);
-	TestEqual(TEXT("히트 노드 수 일치"), GpuContacts.Contacts.Num(), CpuCandidates.Num());
+	AddInfo(FString::Printf(TEXT("CPU contacts %d, GPU contacts %d"), CpuCandidates.Num(), GpuContacts.Contacts.Num()));
+	TestTrue(TEXT("At least one contact was detected"), CpuCandidates.Num() > 0);
+	TestEqual(TEXT("Hit node counts match"), GpuContacts.Contacts.Num(), CpuCandidates.Num());
 
 	for (const TPair<int32, const FRopeContactCandidate*>& Pair : CpuByNode)
 	{
 		const int32 Node = Pair.Key;
 		const FRopeGPUContactResult** GpuC = GpuByNode.Find(Node);
-		if (!TestTrue(FString::Printf(TEXT("GPU도 노드 %d를 히트"), Node), GpuC != nullptr))
+		if (!TestTrue(FString::Printf(TEXT("GPU hit node %d as well"), Node), GpuC != nullptr))
 		{
 			continue;
 		}
 		const float PenDev = FMath::Abs((*GpuC)->Penetration - Pair.Value->Penetration);
-		TestTrue(FString::Printf(TEXT("노드 %d 침투 일치(차 %.3f)"), Node, PenDev), PenDev < 0.1f);
+		TestTrue(FString::Printf(TEXT("Node %d penetration matches (diff %.3f)"), Node, PenDev), PenDev < 0.1f);
 		const float NormalDot = FVector::DotProduct((*GpuC)->Normal.GetSafeNormal(), Pair.Value->Normal.GetSafeNormal());
-		TestTrue(FString::Printf(TEXT("노드 %d 법선 일치(dot %.3f)"), Node, NormalDot), NormalDot > 0.99f);
+		TestTrue(FString::Printf(TEXT("Node %d normal matches (dot %.3f)"), Node, NormalDot), NormalDot > 0.99f);
 		const float PointDev = static_cast<float>(FVector::Dist((*GpuC)->WorldPoint, Pair.Value->WorldPoint));
-		TestTrue(FString::Printf(TEXT("노드 %d 접촉점 일치(차 %.3f cm)"), Node, PointDev), PointDev < 0.5f);
+		TestTrue(FString::Printf(TEXT("Node %d contact point matches (diff %.3f cm)"), Node, PointDev), PointDev < 0.5f);
 	}
 
 	return true;
@@ -524,7 +526,7 @@ bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
 {
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU convex 감지 패리티 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("GPU convex detection parity test skipped: no renderable RHI (headless)."));
 		return true;
 	}
 
@@ -630,7 +632,7 @@ bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
 	}
 	if (!bGot)
 	{
-		AddError(TEXT("GPU convex 접촉 감지 결과를 회수하지 못함."));
+		AddError(TEXT("Could not retrieve the GPU convex contact detection results."));
 		return false;
 	}
 
@@ -639,28 +641,28 @@ bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
 	TMap<int32, const FRopeGPUContactResult*> GpuByNode;
 	for (const FRopeGPUContactResult& C : GpuContacts.Contacts) { GpuByNode.Add(C.NodeIndex, &C); }
 
-	AddInfo(FString::Printf(TEXT("CPU 접촉 %d개, GPU 접촉 %d개"), CpuCandidates.Num(), GpuContacts.Contacts.Num()));
-	TestTrue(TEXT("적어도 하나의 convex 접촉이 감지됨"), CpuCandidates.Num() > 0);
-	TestEqual(TEXT("히트 노드 수 일치"), GpuContacts.Contacts.Num(), CpuCandidates.Num());
+	AddInfo(FString::Printf(TEXT("CPU contacts %d, GPU contacts %d"), CpuCandidates.Num(), GpuContacts.Contacts.Num()));
+	TestTrue(TEXT("At least one convex contact was detected"), CpuCandidates.Num() > 0);
+	TestEqual(TEXT("Hit node counts match"), GpuContacts.Contacts.Num(), CpuCandidates.Num());
 	for (const FRopeGPUContactResult& C : GpuContacts.Contacts)
 	{
-		TestEqual(TEXT("GPU 접촉의 ColliderType은 convex(3)"), C.ColliderType, 3);
+		TestEqual(TEXT("GPU contact ColliderType is convex (3)"), C.ColliderType, 3);
 	}
 
 	for (const TPair<int32, const FRopeContactCandidate*>& Pair : CpuByNode)
 	{
 		const int32 Node = Pair.Key;
 		const FRopeGPUContactResult** GpuC = GpuByNode.Find(Node);
-		if (!TestTrue(FString::Printf(TEXT("GPU도 노드 %d를 히트"), Node), GpuC != nullptr))
+		if (!TestTrue(FString::Printf(TEXT("GPU hit node %d as well"), Node), GpuC != nullptr))
 		{
 			continue;
 		}
 		const float PenDev = FMath::Abs((*GpuC)->Penetration - Pair.Value->Penetration);
-		TestTrue(FString::Printf(TEXT("노드 %d 침투 일치(차 %.3f)"), Node, PenDev), PenDev < 0.1f);
+		TestTrue(FString::Printf(TEXT("Node %d penetration matches (diff %.3f)"), Node, PenDev), PenDev < 0.1f);
 		const float NormalDot = FVector::DotProduct((*GpuC)->Normal.GetSafeNormal(), Pair.Value->Normal.GetSafeNormal());
-		TestTrue(FString::Printf(TEXT("노드 %d 법선 일치(dot %.3f)"), Node, NormalDot), NormalDot > 0.99f);
+		TestTrue(FString::Printf(TEXT("Node %d normal matches (dot %.3f)"), Node, NormalDot), NormalDot > 0.99f);
 		const float PointDev = static_cast<float>(FVector::Dist((*GpuC)->WorldPoint, Pair.Value->WorldPoint));
-		TestTrue(FString::Printf(TEXT("노드 %d 접촉점 일치(차 %.3f cm)"), Node, PointDev), PointDev < 0.5f);
+		TestTrue(FString::Printf(TEXT("Node %d contact point matches (diff %.3f cm)"), Node, PointDev), PointDev < 0.5f);
 	}
 
 	return true;
@@ -677,7 +679,7 @@ bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
 {
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU 예측 접촉 패리티 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("GPU predicted contact parity test skipped: no renderable RHI (headless)."));
 		return true;
 	}
 
@@ -706,13 +708,13 @@ bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
 		FRopeFlightContactDetector::FWhipGuideView(), CpuCandidates);
 
 	// CPU: actual 0, one node 7 should be added predictively.
-	TestEqual(TEXT("CPU actual 접촉 없음"), CpuActualCount, 0);
+	TestEqual(TEXT("No CPU actual contact"), CpuActualCount, 0);
 	const FRopeContactCandidate* CpuPred = nullptr;
 	for (const FRopeContactCandidate& C : CpuCandidates)
 	{
 		if (C.NodeIndex == 7) { CpuPred = &C; }
 	}
-	if (!TestTrue(TEXT("CPU 예측 후보(노드 7) 존재"), CpuPred != nullptr))
+	if (!TestTrue(TEXT("CPU predicted candidate exists (node 7)"), CpuPred != nullptr))
 	{
 		return false;
 	}
@@ -768,7 +770,7 @@ bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
 	}
 	if (!bGot)
 	{
-		AddError(TEXT("GPU 예측 접촉 결과를 회수하지 못함."));
+		AddError(TEXT("Could not retrieve the GPU predicted contact results."));
 		return false;
 	}
 
@@ -780,17 +782,17 @@ bool FRopeGPUPredictiveParityTest::RunTest(const FString& Parameters)
 		if (C.Source == static_cast<uint8>(ERopeContactCandidateSource::Actual)) { bAnyActual = true; }
 		if (C.NodeIndex == 7 && C.Source == static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree)) { GpuPred = &C; }
 	}
-	TestFalse(TEXT("GPU actual 접촉 없음"), bAnyActual);
-	if (!TestTrue(TEXT("GPU 예측 후보(노드 7, PredictiveFree) 존재"), GpuPred != nullptr))
+	TestFalse(TEXT("No GPU actual contact"), bAnyActual);
+	if (!TestTrue(TEXT("GPU predicted candidate exists (node 7, PredictiveFree)"), GpuPred != nullptr))
 	{
 		return false;
 	}
 
 	const float PenDev = FMath::Abs(GpuPred->Penetration - CpuPred->Penetration);
-	AddInfo(FString::Printf(TEXT("예측 침투 CPU %.3f / GPU %.3f"), CpuPred->Penetration, GpuPred->Penetration));
-	TestTrue(FString::Printf(TEXT("예측 침투 일치(차 %.3f)"), PenDev), PenDev < 0.1f);
+	AddInfo(FString::Printf(TEXT("Predicted penetration CPU %.3f / GPU %.3f"), CpuPred->Penetration, GpuPred->Penetration));
+	TestTrue(FString::Printf(TEXT("Predicted penetration matches (diff %.3f)"), PenDev), PenDev < 0.1f);
 	const float PointDev = static_cast<float>(FVector::Dist(GpuPred->WorldPoint, CpuPred->WorldPoint));
-	TestTrue(FString::Printf(TEXT("예측 접촉점 일치(차 %.3f cm)"), PointDev), PointDev < 0.5f);
+	TestTrue(FString::Printf(TEXT("Predicted contact point matches (diff %.3f cm)"), PointDev), PointDev < 0.5f);
 
 	return true;
 }
@@ -805,7 +807,7 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 {
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU SDF 접촉 패리티 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("GPU SDF contact parity test skipped: no renderable RHI (headless)."));
 		return true;
 	}
 
@@ -840,7 +842,7 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 	FRopeSDFColliderView View;
 	if (!Sdf.GetGPUSDF(View))
 	{
-		AddError(TEXT("GetGPUSDF 실패(볼륨 미베이크?)."));
+		AddError(TEXT("GetGPUSDF failed (volume not baked?)."));
 		return false;
 	}
 
@@ -899,7 +901,7 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 	}
 	if (!bGot)
 	{
-		AddError(TEXT("GPU SDF 접촉 결과를 회수하지 못함."));
+		AddError(TEXT("Could not retrieve the GPU SDF contact results."));
 		return false;
 	}
 
@@ -910,21 +912,21 @@ bool FRopeGPUSDFContactParityTest::RunTest(const FString& Parameters)
 		if (C.Source == static_cast<uint8>(ERopeContactCandidateSource::Actual)) { GpuByNode.Add(C.NodeIndex, &C); }
 	}
 
-	AddInfo(FString::Printf(TEXT("CPU SDF 접촉 %d개, GPU %d개"), CpuCandidates.Num(), GpuByNode.Num()));
-	TestTrue(TEXT("적어도 하나의 SDF 접촉"), CpuCandidates.Num() > 0);
-	TestEqual(TEXT("SDF 히트 노드 수 일치"), GpuByNode.Num(), CpuCandidates.Num());
+	AddInfo(FString::Printf(TEXT("CPU SDF contacts %d, GPU %d"), CpuCandidates.Num(), GpuByNode.Num()));
+	TestTrue(TEXT("At least one SDF contact"), CpuCandidates.Num() > 0);
+	TestEqual(TEXT("SDF hit node counts match"), GpuByNode.Num(), CpuCandidates.Num());
 
 	for (const FRopeContactCandidate& Cpu : CpuCandidates)
 	{
 		const FRopeGPUContactResult** GpuC = GpuByNode.Find(Cpu.NodeIndex);
-		if (!TestTrue(FString::Printf(TEXT("GPU도 노드 %d를 히트"), Cpu.NodeIndex), GpuC != nullptr))
+		if (!TestTrue(FString::Printf(TEXT("GPU hit node %d as well"), Cpu.NodeIndex), GpuC != nullptr))
 		{
 			continue;
 		}
 		const float PenDev = FMath::Abs((*GpuC)->Penetration - Cpu.Penetration);
-		TestTrue(FString::Printf(TEXT("노드 %d SDF 침투 일치(차 %.3f)"), Cpu.NodeIndex, PenDev), PenDev < 0.3f);
+		TestTrue(FString::Printf(TEXT("Node %d SDF penetration matches (diff %.3f)"), Cpu.NodeIndex, PenDev), PenDev < 0.3f);
 		const float NormalDot = FVector::DotProduct((*GpuC)->Normal.GetSafeNormal(), Cpu.Normal.GetSafeNormal());
-		TestTrue(FString::Printf(TEXT("노드 %d SDF 법선 일치(dot %.3f)"), Cpu.NodeIndex, NormalDot), NormalDot > 0.98f);
+		TestTrue(FString::Printf(TEXT("Node %d SDF normal matches (dot %.3f)"), Cpu.NodeIndex, NormalDot), NormalDot > 0.98f);
 	}
 
 	return true;
@@ -941,7 +943,7 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 {
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU 박스 parity 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("GPU box parity test skipped: no renderable RHI (headless)."));
 		return true;
 	}
 
@@ -1018,7 +1020,7 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 			if (!GpuSolver.ReadbackNow(RopeId, ParityGpuPositions, SnapshotPrev, SnapshotGen) ||
 				SnapshotGen != Gen || ParityGpuPositions.Num() != CpuSim.Num())
 			{
-				AddError(TEXT("GPU 박스 parity: 접촉 구간 스냅샷을 회수하지 못함."));
+				AddError(TEXT("GPU box parity: could not retrieve the contact span snapshot."));
 				return false;
 			}
 			ParityCpuPositions = CpuSim.Positions;
@@ -1034,7 +1036,7 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 	if (!GpuSolver.ReadbackNow(RopeId, RbPos, RbPrev, RbGen) ||
 		RbGen != Gen || RbPos.Num() != GpuSim.Num() || RbPrev.Num() != GpuSim.Num())
 	{
-		AddError(TEXT("GPU 박스 parity: 상주 결과를 회수하지 못함(ReadbackNow)."));
+		AddError(TEXT("GPU box parity: could not retrieve the resident result (ReadbackNow)."));
 		return false;
 	}
 	for (int32 i = 0; i < GpuSim.Num(); ++i)
@@ -1061,8 +1063,8 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 		MaxInsideDepth < 0.5f);
 
 	// (2) CPU approximation matching: whether the fixation drape geometry is close (not bit-identical — coloring/sample order difference).
-	if (!TestEqual(TEXT("박스 parity CPU 스냅샷 노드 수"), ParityCpuPositions.Num(), N) ||
-		!TestEqual(TEXT("박스 parity GPU 스냅샷 노드 수"), ParityGpuPositions.Num(), N))
+	if (!TestEqual(TEXT("Box parity CPU snapshot node count"), ParityCpuPositions.Num(), N) ||
+		!TestEqual(TEXT("Box parity GPU snapshot node count"), ParityGpuPositions.Num(), N))
 	{
 		return false;
 	}
@@ -1077,11 +1079,11 @@ bool FRopeGPUBoxCornerParityTest::RunTest(const FString& Parameters)
 			MaxDevNode = i;
 		}
 	}
-	AddInfo(FString::Printf(TEXT("박스 접촉 구간(%d frame) CPU↔GPU 최대 노드 편차: %.2f cm"),
+	AddInfo(FString::Printf(TEXT("Box contact span (%d frames), largest CPU-to-GPU node deviation: %.2f cm"),
 		ParitySampleFrame, MaxDev));
 	if (MaxDevNode != INDEX_NONE)
 	{
-		AddInfo(FString::Printf(TEXT("박스 최대 편차 node=%d CPU=%s GPU=%s"),
+		AddInfo(FString::Printf(TEXT("Box largest deviation node=%d CPU=%s GPU=%s"),
 			MaxDevNode,
 			*ParityCpuPositions[MaxDevNode].ToCompactString(),
 			*ParityGpuPositions[MaxDevNode].ToCompactString()));
@@ -1103,7 +1105,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 {
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU 컨벡스 parity 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("GPU convex parity test skipped: no renderable RHI (headless)."));
 		return true;
 	}
 
@@ -1193,7 +1195,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 			if (!GpuSolver.ReadbackNow(RopeId, ParityGpuPositions, SnapshotPrev, SnapshotGen) ||
 				SnapshotGen != Gen || ParityGpuPositions.Num() != CpuSim.Num())
 			{
-				AddError(TEXT("GPU 컨벡스 parity: 접촉 구간 스냅샷을 회수하지 못함."));
+				AddError(TEXT("GPU convex parity: could not retrieve the contact span snapshot."));
 				return false;
 			}
 			ParityCpuPositions = CpuSim.Positions;
@@ -1209,7 +1211,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 	if (!GpuSolver.ReadbackNow(RopeId, RbPos, RbPrev, RbGen) ||
 		RbGen != Gen || RbPos.Num() != GpuSim.Num() || RbPrev.Num() != GpuSim.Num())
 	{
-		AddError(TEXT("GPU 컨벡스 parity: 상주 결과를 회수하지 못함(ReadbackNow)."));
+		AddError(TEXT("GPU convex parity: could not retrieve the resident result (ReadbackNow)."));
 		return false;
 	}
 	for (int32 i = 0; i < GpuSim.Num(); ++i)
@@ -1235,8 +1237,8 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		MaxInsideDepth < 0.5f);
 
 	// (2) CPU approximation matching.
-	if (!TestEqual(TEXT("컨벡스 parity CPU 스냅샷 노드 수"), ParityCpuPositions.Num(), N) ||
-		!TestEqual(TEXT("컨벡스 parity GPU 스냅샷 노드 수"), ParityGpuPositions.Num(), N))
+	if (!TestEqual(TEXT("Convex parity CPU snapshot node count"), ParityCpuPositions.Num(), N) ||
+		!TestEqual(TEXT("Convex parity GPU snapshot node count"), ParityGpuPositions.Num(), N))
 	{
 		return false;
 	}
@@ -1246,7 +1248,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 		MaxDev = FMath::Max(MaxDev,
 			static_cast<float>(FVector::Dist(ParityCpuPositions[i], ParityGpuPositions[i])));
 	}
-	AddInfo(FString::Printf(TEXT("컨벡스 접촉 구간(%d frame) CPU↔GPU 최대 노드 편차: %.2f cm"),
+	AddInfo(FString::Printf(TEXT("Convex contact span (%d frames), largest CPU-to-GPU node deviation: %.2f cm"),
 		ParitySampleFrame, MaxDev));
 	int32 MaxDevNode = INDEX_NONE;
 	for (int32 i = 0; i < N; ++i)
@@ -1259,7 +1261,7 @@ bool FRopeGPUConvexParityTest::RunTest(const FString& Parameters)
 	}
 	if (MaxDevNode != INDEX_NONE)
 	{
-		AddInfo(FString::Printf(TEXT("컨벡스 최대 편차 node=%d CPU=%s GPU=%s"),
+		AddInfo(FString::Printf(TEXT("Convex largest deviation node=%d CPU=%s GPU=%s"),
 			MaxDevNode,
 			*ParityCpuPositions[MaxDevNode].ToCompactString(),
 			*ParityGpuPositions[MaxDevNode].ToCompactString()));
@@ -1278,7 +1280,7 @@ bool FRopeGPUPendingReadbackConsumesStandaloneStepTest::RunTest(const FString& P
 {
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU pending handoff 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("GPU pending handoff test skipped: no renderable RHI (headless)."));
 		return true;
 	}
 
@@ -1371,7 +1373,7 @@ bool FRopeGPUPendingReadbackDoesNotBypassGDFTest::RunTest(const FString& Paramet
 {
 	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
 	{
-		AddWarning(TEXT("GPU GDF handoff 테스트 스킵: 렌더 가능한 RHI가 없음(헤드리스)."));
+		AddWarning(TEXT("GPU GDF handoff test skipped: no renderable RHI (headless)."));
 		return true;
 	}
 

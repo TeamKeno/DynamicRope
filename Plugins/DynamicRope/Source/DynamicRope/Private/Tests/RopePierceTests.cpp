@@ -175,7 +175,7 @@ bool FRopePierceEnterLoadedTest::RunTest(const FString& Parameters)
 	Guaranteed->ResolveMode = ERopeWrapResolveMode::GuaranteedWrap;
 	TestEqual(TEXT("the default phase is Free"), Guaranteed->GetPhase(), ERopePhase::Free);
 	Guaranteed->EnterLoaded();
-	TestEqual(TEXT("③ EnterLoaded → Loaded"), Guaranteed->GetPhase(), ERopePhase::Loaded);
+	TestEqual(TEXT("EnterLoaded moves a GuaranteedWrap rope to Loaded"), Guaranteed->GetPhase(), ERopePhase::Loaded);
 
 	// On an assisted rope EnterLoaded is a no-op and it stays in Free, since Loaded belongs to
 	// GuaranteedWrap alone.

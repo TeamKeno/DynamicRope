@@ -124,9 +124,10 @@ bool FRopeSolverStrainLimitTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Does the CPU contact settle on the stationary collider without backlash (outer normal velocity injection)? — The GPU uses VnOut after push-out.
-// to remove parity. The restitution memory (CL 189) was judged as “CPU SolveContacts have a constraint-type structure, so mirrors are not required”;
-// This test nails the deal and catches regression (rebound/trampoline).
+// Does a CPU contact settle on a stationary collider without bouncing — that is, without injecting outward
+// normal velocity? The GPU removes the parity gap by using VnOut after the push-out. It was once argued that
+// the CPU's SolveContacts is constraint-shaped and therefore needs no mirror of that; this test pins the
+// answer down and catches the regression, where the rope rebounds and trampolines.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverStaticContactNoReboundTest,
 	"DynamicRope.Solver.StaticContactNoRebound",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -389,7 +390,7 @@ bool FRopeSolverColliderCandidateTest::RunTest(const FString& Parameters)
 		// 16 overlapping spheres in the same place. Make the last one bigger, so if you only saw the MaxPerItems before, you'd miss that big sphere.
 		// Fallback operation is determined by whether the node sinks to the small sphere surface (z≈5).
 		constexpr int32 NumSpheres = 16;
-		static_assert(NumSpheres > FRopeColliderCandidates::MaxPerItem, "overflow 경로를 타야 의미가 있는 테스트");
+		static_assert(NumSpheres > FRopeColliderCandidates::MaxPerItem, "the test is only meaningful if it takes the overflow path");
 		TArray<RopeTest::FSphereMockCollider> Spheres;
 		Spheres.Reserve(NumSpheres);
 		for (int32 i = 0; i < NumSpheres; ++i)
