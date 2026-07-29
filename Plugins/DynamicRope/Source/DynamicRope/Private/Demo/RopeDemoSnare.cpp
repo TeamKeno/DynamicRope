@@ -9,6 +9,7 @@
 #include "Core/RopeThrowTypes.h"
 #include "DynamicRopeLog.h"
 
+#include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
@@ -53,6 +54,14 @@ ARopeDemoSnare::ARopeDemoSnare()
 			Ropes.Add(Cable);
 		}
 	}
+
+	// The capture camera. Only used when bSwitchPlayerViewTarget switches a snared player's view
+	// here. The default frames the origin, where the bindings assume the target stands; reframe it
+	// in the Blueprint or level.
+	ViewCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("ViewCamera"));
+	ViewCamera->SetupAttachment(Base);
+	ViewCamera->SetRelativeLocation(FVector(500.0f, 0.0f, 300.0f));
+	ViewCamera->SetRelativeRotation(FRotator(-25.0f, 180.0f, 0.0f));
 
 	// The default fills all four limbs for a full spread. It assumes the target stands at the origin facing
 	// +X, which puts its left on -Y.
@@ -139,6 +148,10 @@ void ARopeDemoSnare::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		TriggerPlate->OnPlatePressedChanged.RemoveDynamic(this, &ARopeDemoSnare::HandleTriggerPlateChanged);
 	}
+
+	// An instant hand-back, so a destroyed or streamed-out snare does not strand the view on a dying
+	// actor. The switcher itself is a no-op during world teardown.
+	ViewSwitcher.Deactivate(0.0f);
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -237,6 +250,14 @@ void ARopeDemoSnare::TriggerSnare()
 	bTriggered = true;
 	FireRetryRemaining = 0.0f; // Fire for the first time on the very next tick.
 
+	// The capture camera engages at the moment of firing, before the forced ragdoll below: the
+	// ragdoll view-target follow only takes a view that is still on the pawn, so switching first
+	// keeps the two from fighting over the camera. An AI target is a quiet no-op inside the switcher.
+	if (bSwitchPlayerViewTarget)
+	{
+		ViewSwitcher.Activate(this, GetEffectiveTargetActor(), ViewBlendInTime);
+	}
+
 	ForceTargetRagdoll();
 }
 
@@ -283,6 +304,10 @@ void ARopeDemoSnare::ReleaseSnare()
 			Response->RecoverFromRagdollIfUnheld();
 		}
 	}
+
+	// The view is handed back after the ragdoll recovery above, so the blend's destination, the pawn
+	// camera, is already back in place.
+	ViewSwitcher.Deactivate(ViewBlendOutTime);
 
 	SetSnared(false);
 	// A trap-mode target's lifetime matches the snare's: releasing clears it so the next press acquires a

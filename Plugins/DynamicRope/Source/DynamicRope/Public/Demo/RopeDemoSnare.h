@@ -23,6 +23,8 @@
 //     URopeRagdollResponseComponent goes limp from the wrap event by itself, but the limbs only
 //     spread freely if it is already limp before the wrap lands, so bForceRagdollOnSnare, on by
 //     default, makes it limp at the moment the ropes fire.
+//   - A player-controlled target's view blends to ViewCamera from the moment the ropes fire until
+//     the release (bSwitchPlayerViewTarget). An AI target keeps its own camera.
 //
 // GuaranteedWrap locks onto the first wrappable bone the aim ray hits, so aiming at hand_l can catch
 // lowerarm_l if that is in the way; either reads fine as a spread-eagle. What was actually caught is
@@ -32,12 +34,14 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Demo/RopeDemoViewTargetSwitcher.h"
 #include "RopeDemoSnare.generated.h"
 
 class URopeComponent;
 class UStaticMeshComponent;
 class USkeletalMeshComponent;
 class ARopeDemoPressurePlate;
+class UCameraComponent;
 
 /** One snare slot: pull this bone towards that anchor. */
 USTRUCT(BlueprintType)
@@ -166,6 +170,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Snare", meta = (ClampMin = "0.0", Units = "s"))
 	float AutoReleaseDelay = 0.0f;
 
+	//~ View camera -------------------------------------------------------------
+
+	/** Blend the player's view to ViewCamera from the moment the ropes fire until the release. Only
+	 *  a player-controlled target switches; an AI target leaves the view alone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Camera")
+	bool bSwitchPlayerViewTarget = true;
+
+	/** Blend time into ViewCamera (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Camera", meta = (ClampMin = "0.0", Units = "s"))
+	float ViewBlendInTime = 0.75f;
+
+	/** Blend time back to the target's own view (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Camera", meta = (ClampMin = "0.0", Units = "s"))
+	float ViewBlendOutTime = 0.75f;
+
 protected:
 	/** The fixed root the anchors are measured from. Slot markers and ropes attach here. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
@@ -178,6 +197,12 @@ protected:
 	/** Four GuaranteedWrap ropes, one per slot. Only as many fire and reel as Bindings fills. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TArray<TObjectPtr<URopeComponent>> Ropes;
+
+	/** Capture camera the target's view blends to while the snare holds it. Reframe it in the
+	 *  Blueprint or level; the default looks back at the origin, where the bindings assume the
+	 *  target stands. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
+	TObjectPtr<UCameraComponent> ViewCamera = nullptr;
 
 private:
 	/** The maximum number of slots, two arms plus two legs. */
@@ -235,4 +260,7 @@ private:
 
 	/** Cooldown before firing again while the snare is not yet established (s). */
 	float FireRetryRemaining = 0.0f;
+
+	/** Blends the target's view to ViewCamera and back. Active between trigger and release. */
+	FRopeDemoViewTargetSwitcher ViewSwitcher;
 };

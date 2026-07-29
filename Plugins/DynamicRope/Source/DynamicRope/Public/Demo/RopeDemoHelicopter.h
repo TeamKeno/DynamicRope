@@ -17,6 +17,8 @@
 //   - If the passenger has a URopeRagdollResponseComponent with bRagdollOnWrapped, it goes limp the
 //     moment the wrap lands. Leave it on for a dangling-cargo look; leave it off to keep the
 //     passenger controllable.
+//   - A player-controlled passenger's view blends to ViewCamera from the moment the cable fires
+//     until it is recalled (bSwitchPlayerViewTarget). An AI passenger keeps its own camera.
 //
 // Lifting a walking character clear of the ground is the combined effect of the reel-in tether and
 // CarryPullForce; raise LiftReelSpeed or CarryPullForce if the passenger stays grounded.
@@ -25,12 +27,14 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Demo/RopeDemoViewTargetSwitcher.h"
 #include "RopeDemoHelicopter.generated.h"
 
 class URopeComponent;
 class UStaticMeshComponent;
 class USphereComponent;
 class USkeletalMeshComponent;
+class UCameraComponent;
 
 /** Fired when a passenger is picked up or set down (wrap established / released). */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FRopeDemoHelicopterCarrySignature,
@@ -47,6 +51,7 @@ public:
 	//~ AActor
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
 	/** Drops the cable towards the given passenger. Only valid while idle; returns true on success.
@@ -142,6 +147,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Carry")
 	bool bReturnHomeAfterRelease = true;
 
+	//~ View camera -------------------------------------------------------------
+
+	/** Blend the player's view to ViewCamera from the moment the cable fires until it is recalled.
+	 *  Only a player-controlled passenger switches; an AI passenger leaves the view alone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Camera")
+	bool bSwitchPlayerViewTarget = true;
+
+	/** Blend time into ViewCamera (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Camera", meta = (ClampMin = "0.0", Units = "s"))
+	float ViewBlendInTime = 0.75f;
+
+	/** Blend time back to the passenger's own view (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Camera", meta = (ClampMin = "0.0", Units = "s"))
+	float ViewBlendOutTime = 0.75f;
+
 	//~ Flight ------------------------------------------------------------------
 
 	/** Cruise speed (cm/s). */
@@ -200,6 +220,11 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<USphereComponent> GrabVolume = nullptr;
 
+	/** Ride camera the passenger's view blends to while grabbed and carried. Reframe it in the
+	 *  Blueprint or level; the default looks down at the hanging cable from behind the body. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
+	TObjectPtr<UCameraComponent> ViewCamera = nullptr;
+
 private:
 	/** Demo state. Transitions are owned by Tick and the public entry points. */
 	enum class EState : uint8 { Idle, Grabbing, Carrying, Returning };
@@ -251,4 +276,7 @@ private:
 
 	/** Whether the pick-up has already been broadcast (guards against duplicates). */
 	bool bCarryBroadcast = false;
+
+	/** Blends the passenger's view to ViewCamera and back. Active between grab fire and recall. */
+	FRopeDemoViewTargetSwitcher ViewSwitcher;
 };

@@ -7,6 +7,7 @@
 #include "Core/RopeThrowTypes.h"
 #include "DynamicRopeLog.h"
 
+#include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -46,6 +47,14 @@ ARopeDemoHelicopter::ARopeDemoHelicopter()
 	GrabVolume->SetCollisionResponseToAllChannels(ECR_Ignore);
 	GrabVolume->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
 	GrabVolume->SetGenerateOverlapEvents(true);
+
+	// The ride camera. Only used when bSwitchPlayerViewTarget switches a grabbed player's view here.
+	// The default looks down at the hanging cable from behind the body; reframe it in the Blueprint
+	// or level.
+	ViewCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("ViewCamera"));
+	ViewCamera->SetupAttachment(Base);
+	ViewCamera->SetRelativeLocation(FVector(-600.0f, 0.0f, 150.0f));
+	ViewCamera->SetRelativeRotation(FRotator(-40.0f, 0.0f, 0.0f));
 }
 
 void ARopeDemoHelicopter::OnConstruction(const FTransform& Transform)
@@ -77,6 +86,15 @@ void ARopeDemoHelicopter::BeginPlay()
 		UE_LOG(LogDynamicRope, Warning, TEXT("[%s] demo helicopter has no rope component — it will never grab."),
 			*GetName());
 	}
+}
+
+void ARopeDemoHelicopter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// An instant hand-back, so a destroyed or streamed-out helicopter does not strand the view on a
+	// dying actor. The switcher itself is a no-op during world teardown.
+	ViewSwitcher.Deactivate(0.0f);
+
+	Super::EndPlay(EndPlayReason);
 }
 
 void ARopeDemoHelicopter::Tick(float DeltaSeconds)
@@ -211,6 +229,12 @@ bool ARopeDemoHelicopter::Grab(AActor* Passenger)
 	State = EState::Grabbing;
 	GrabRetryRemaining = 0.0f; // Fire for the first time on the very next tick.
 	GrabElapsed = 0.0f;
+	// The ride camera engages the moment the grab starts, so the whole cable drop is on screen. An AI
+	// passenger is a quiet no-op inside the switcher.
+	if (bSwitchPlayerViewTarget)
+	{
+		ViewSwitcher.Activate(this, Passenger, ViewBlendInTime);
+	}
 	return true;
 }
 
@@ -254,6 +278,10 @@ bool ARopeDemoHelicopter::IsCarrying() const
 
 void ARopeDemoHelicopter::RecallRope()
 {
+	// Every path out of a grab or a carry recalls the cable, so the view is handed back here: cancel,
+	// timeout, drop-off and mid-flight loss all pass through.
+	ViewSwitcher.Deactivate(ViewBlendOutTime);
+
 	if (!Rope)
 	{
 		return;
