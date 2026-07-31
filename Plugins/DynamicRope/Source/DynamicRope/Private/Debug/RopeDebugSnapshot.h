@@ -9,6 +9,7 @@
 
 #include "CoreMinimal.h"
 #include "Core/RopeContactTrackingTypes.h"
+#include "UObject/ObjectKey.h"
 #include "Core/RopeLifecycleTypes.h"
 #include "Core/RopeSimTypes.h"
 #include "Core/RopeWrappingTypes.h"
