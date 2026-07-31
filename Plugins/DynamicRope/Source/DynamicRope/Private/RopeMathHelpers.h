@@ -63,76 +63,26 @@ namespace RopeMath
 	}
 
 	/**
-	 * Builds the whip guide's time-varying raw centreline.
-	 * An aim hit builds a straight line along the current sweep direction alone, and the caller rotates that
-	 * direction over time through the throw frame and swing plane. An ordinary whip uses the existing spatial and
-	 * temporal interpolation path.
+	 * Builds the whip guide's time-varying straight centreline. The caller rotates SweepDirection over time;
+	 * every sample remains collinear at a fixed normalized time. Throw motion inheritance belongs to the Verlet
+	 * velocity injection, not the guide geometry, because distributing drift non-linearly along the rope curves
+	 * an otherwise straight Flight guide.
 	 */
 	inline void BuildWhipGuideRawPoints(const FVector& Origin, const FVector& SweepDirection,
-		const FVector& AimDirection, bool bHasAimTarget, float NormalizedTime,
-		float GuideLength, const FVector& InheritedDrift, float AimSteerStartAlpha,
-		float AimLockAlpha, float AimDirectionBias, int32 RequestedSampleCount, TArray<FVector>& OutPoints)
+		const FVector& AimDirection, bool /*bHasAimTarget*/, float /*NormalizedTime*/,
+		float GuideLength, const FVector& /*InheritedDrift*/, float /*AimSteerStartAlpha*/,
+		float /*AimLockAlpha*/, float /*AimDirectionBias*/, int32 RequestedSampleCount, TArray<FVector>& OutPoints)
 	{
-		// 1. Establish the defaults.
 		OutPoints.Reset();
 		const int32 SampleCount = FMath::Max(RequestedSampleCount, 4);
 		const float PathLength = FMath::Max(GuideLength, KINDA_SMALL_NUMBER);
-		// Normalize both directions. A degenerate sweep direction falls back to the aim direction, and a degenerate aim direction falls back to the sweep direction.
 		const FVector SweepDir = SafeNormalOr(SweepDirection, AimDirection);
-		const FVector AimDir = SafeNormalOr(AimDirection, SweepDir);
-
-		// Aim-hit keeps each frame's spline straight. SweepDir is computed from the
-		// wielder throw frame and swing plane, so the whole line sweeps an arc over time
-		// and reaches the Origin->Hit direction at the end of the swing.
-		if (bHasAimTarget)
-		{
-			OutPoints.Reserve(SampleCount);
-			for (int32 SampleIndex = 0; SampleIndex < SampleCount; ++SampleIndex)
-			{
-				const float RopeAlpha = static_cast<float>(SampleIndex) /
-					static_cast<float>(SampleCount - 1);
-				OutPoints.Add(Origin + SweepDir * (RopeAlpha * PathLength));
-			}
-			return;
-		}
-
-		// 2. The spatial interpolation ranges: 0% ─── SteerStart ─── FullSteer ─── 100%
-		//    holding the sweep, interpolating towards the hit direction, and the hit direction at full influence.
-		const float SteerStart = FMath::Clamp(AimSteerStartAlpha, 0.0f, 0.95f);
-		const float FullSteer = FMath::Clamp(FMath::Max(AimLockAlpha, SteerStart + 0.01f), 0.01f, 1.0f);
-		const float DirectionBias = FMath::Clamp(AimDirectionBias, 1.0f, 4.0f);
-
-		// 3. The temporal interpolation. The larger the direction bias, the faster the hit direction's influence grows.
-		// The bias brings the turn towards the hit direction forward, but is necessarily zero at T = 0, so there is no jump at the instant of the throw.
-		const float TemporalBase = SmoothStep(NormalizedTime);
-		const float TemporalAimBlend = bHasAimTarget
-			? 1.0f - FMath::Pow(1.0f - TemporalBase, DirectionBias)
-			: 0.0f;
 
 		OutPoints.Reserve(SampleCount);
 		for (int32 SampleIndex = 0; SampleIndex < SampleCount; ++SampleIndex)
 		{
-			// 4. The spatial interpolation per rope position: how far along the rope, as a percentage, each point lies.
 			const float RopeAlpha = static_cast<float>(SampleIndex) / static_cast<float>(SampleCount - 1);
-			const float SpatialBase = SmoothStep(
-				(RopeAlpha - SteerStart) / FMath::Max(FullSteer - SteerStart, KINDA_SMALL_NUMBER));
-			const float SpatialAimBlend = bHasAimTarget
-				? 1.0f - FMath::Pow(1.0f - SpatialBase, DirectionBias)
-				: 0.0f;
-			// 5. The flight's temporal interpolation is always multiplied in, so that spatial interpolation alone
-			//    cannot pin the free end in advance. Even where the free end's spatial interpolation is one, it does
-			//    not stick to the hit direction at the start of the flight.
-			const float AimBlend = SpatialAimBlend * TemporalAimBlend;
-
-			// 6. The final direction.
-			const FVector CurveDirection = SafeNormalOr(FMath::Lerp(SweepDir, AimDir, AimBlend), SweepDir);
-
-			// 7. The inherited movement. Near the hand, where the rope alpha is about zero, there is almost no drift, and towards the free end, where it is about one, the drift's influence grows.
-			const float DriftWeight = SmoothStep(RopeAlpha) * (1.0f - AimBlend);
-
-			// 8. Produce the point.
-			OutPoints.Add(Origin + CurveDirection * (RopeAlpha * PathLength) +
-				InheritedDrift * DriftWeight);
+			OutPoints.Add(Origin + SweepDir * (RopeAlpha * PathLength));
 		}
 	}
 
