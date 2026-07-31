@@ -30,6 +30,7 @@ class USkeletalMeshComponent;
 class UInputAction;
 class UInputMappingContext;
 class UEnhancedInputLocalPlayerSubsystem;
+class UInputComponent;
 class UAnimMontage;
 class UMaterialInstanceDynamic;
 class UMovementComponent;

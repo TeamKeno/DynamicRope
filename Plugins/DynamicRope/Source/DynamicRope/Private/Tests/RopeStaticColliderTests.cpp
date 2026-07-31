@@ -11,6 +11,7 @@
 #include "Collision/RopeStaticCollider.h"
 #include "Collision/RopeBodyColliderExtraction.h"
 #include "PhysicsEngine/BodySetup.h"
+#include "UObject/Package.h"
 #include "Solver/RopeXPBDSolver.h"
 #include "RopeTestHelpers.h"
 
