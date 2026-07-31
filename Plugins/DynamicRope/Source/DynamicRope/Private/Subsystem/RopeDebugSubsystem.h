@@ -18,6 +18,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "Debug/RopeDebugSnapshot.h"
 #include "RopeDebugSubsystem.generated.h"

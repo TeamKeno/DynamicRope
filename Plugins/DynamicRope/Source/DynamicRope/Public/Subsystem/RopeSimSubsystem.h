@@ -9,6 +9,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Subsystems/WorldSubsystem.h"
 // FTickFunction, for the TG_PostPhysics tick.
 #include "Engine/EngineBaseTypes.h"

@@ -49,6 +49,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "GameFramework/Actor.h"
 // FRopeWrappedEventInfo and ERopeReleaseReason, the central signal payloads.
 #include "Core/RopeLifecycleTypes.h"

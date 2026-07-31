@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Components/MeshComponent.h"
 #include "Core/RopeThrowTypes.h"
 #include "RopePreviewComponent.generated.h"

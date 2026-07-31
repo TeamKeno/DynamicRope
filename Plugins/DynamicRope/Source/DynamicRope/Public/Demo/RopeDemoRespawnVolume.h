@@ -22,6 +22,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "GameFramework/Actor.h"
 #include "RopeDemoRespawnVolume.generated.h"
 

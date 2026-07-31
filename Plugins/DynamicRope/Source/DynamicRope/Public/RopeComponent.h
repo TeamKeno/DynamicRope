@@ -9,6 +9,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Components/MeshComponent.h"
 #include "Core/RopeLengthConstraintState.h"
 #include "Core/RopeMovementConstraint.h"

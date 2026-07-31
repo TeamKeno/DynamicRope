@@ -17,6 +17,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Components/ActorComponent.h"
 #include "Collision/RopeColliderProvider.h"
 #include "Collision/RopeStaticCollider.h"

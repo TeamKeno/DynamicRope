@@ -13,6 +13,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "UObject/WeakObjectPtrTemplates.h"
 #include "Core/RopeLifecycleTypes.h"
 #include "Core/RopeThrowTypes.h"

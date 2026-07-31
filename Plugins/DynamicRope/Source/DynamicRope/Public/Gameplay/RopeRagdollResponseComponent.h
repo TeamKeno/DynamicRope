@@ -33,6 +33,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Components/ActorComponent.h"
 // FTimerHandle, for the automatic transition delay member.
 #include "Engine/TimerHandle.h"

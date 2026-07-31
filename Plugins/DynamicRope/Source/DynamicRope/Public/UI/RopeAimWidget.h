@@ -27,6 +27,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Blueprint/UserWidget.h"
 #include "Gameplay/RopeWielderComponent.h"
 #include "RopeAimWidget.generated.h"

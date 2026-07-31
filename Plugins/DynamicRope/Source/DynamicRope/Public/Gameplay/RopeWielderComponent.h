@@ -16,6 +16,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Components/ActorComponent.h"
 #include "Core/RopeTypes.h"
 #include "Engine/EngineTypes.h"

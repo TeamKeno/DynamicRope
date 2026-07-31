@@ -19,6 +19,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Core/RopeLifecycleTypes.h"
 #include "GameFramework/Actor.h"
 #include "RopeDemoPresetVolume.generated.h"

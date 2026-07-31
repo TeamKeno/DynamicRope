@@ -22,6 +22,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "IDetailCustomization.h"
 
 #include "Core/RopeConfigTypes.h"
