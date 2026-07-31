@@ -56,6 +56,16 @@ float AimRootSocketInfluence(float RopeAlpha, const FRopeWhipGuide::FConfig& Con
 		: 0.0f;
 }
 
+// The initial full-rope seed hands ownership back to the solver from the tip towards GuidedEnd.
+// Ownership is deliberately binary: blending each node by a different amount bends an otherwise straight
+// rotating guide into a hill (or an L shape) even before the physics solver runs.
+float OrdinaryGuideOwnership(float RopeAlpha, float NormalizedTime, float GuidedEnd)
+{
+	const float ReleaseAlpha = RopeMath::SmoothStep(NormalizedTime);
+	const float CurrentGuidedEnd = FMath::Lerp(1.0f, GuidedEnd, ReleaseAlpha);
+	return RopeAlpha <= CurrentGuidedEnd + KINDA_SMALL_NUMBER ? 1.0f : 0.0f;
+}
+
 // The raw spline is resampled to the segment length, but the per-node aim envelope and solver blend applied
 // afterwards can stretch the spacing again. The guided run is projected sequentially from the root end, which limits
 // the maximum length of each target edge alone.
@@ -194,9 +204,10 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 		return;
 	}
 
-	// An aim hit snaps the middle hard to the spline and lets the solver take both ends over naturally.
-	const float GuidedEnd = bHasAimTarget ? 1.0f : FMath::Clamp(Config.GuidedLength, 0.05f, 0.95f);
-	const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * GuidedEnd), 1, LastNode);
+	// An ordinary whip starts as one continuous straight guide, including the future solver-owned tail.
+	// This discards the old hanging or wrapped pose once, before the tail is released gradually by Advance.
+	// An aim hit keeps its separate endpoint-envelope contract and blends both ends with the solver.
+	const int32 LastGuidedNode = LastNode;
 	TArray<FVector> GuideTargets;
 	BuildGuideTargets(0.0f, LastGuidedNode, Sim, Config, GuideTargets);
 	PreviousTargets = GuideTargets;
@@ -257,7 +268,9 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 	const float T = FMath::Clamp(Elapsed / Duration, 0.0f, 1.0f);
 	const int32 LastNode = Sim.Num() - 1;
 	const float GuidedEnd = bHasAimTarget ? 1.0f : FMath::Clamp(Config.GuidedLength, 0.05f, 0.95f);
-	const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * GuidedEnd), 1, LastNode);
+	// The ordinary guide builds a target for the whole rope while its initial straight seed is being
+	// released. OrdinaryGuideOwnership moves one hard ownership boundary towards GuidedEnd.
+	const int32 LastGuidedNode = LastNode;
 	TArray<FVector> GuideTargets;
 	BuildGuideTargets(T, LastGuidedNode, Sim, Config, GuideTargets);
 	if (GuideTargets.Num() == 0)
@@ -288,15 +301,12 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 			break;
 		}
 
-	// The root end, near the hand, and the end of the guided span are released from the guide gradually.
-		const float StrongGuideEnd = GuidedEnd * 0.55f;
-		const float GuideFade = (S <= StrongGuideEnd)
-			? 1.0f
-			: 1.0f - RopeMath::SmoothStep((S - StrongGuideEnd) / FMath::Max(GuidedEnd - StrongGuideEnd, KINDA_SMALL_NUMBER));
-		const float RootFade = RopeMath::SmoothStep(S / FMath::Max(StrongGuideEnd, KINDA_SMALL_NUMBER));
+		// Aim-hit owns the middle through its endpoint envelope. An ordinary whip begins fully straight
+		// and moves a hard ownership boundary towards its configured leading span. Hard ownership keeps
+		// every still-guided node on the same straight line.
 		const float GuideWeight = bHasAimTarget
 			? AimGuideEnvelope(S, Config)
-			: GuideFade * FMath::Lerp(0.65f, 1.0f, RootFade);
+			: OrdinaryGuideOwnership(S, T, GuidedEnd);
 		if (GuideWeight <= KINDA_SMALL_NUMBER)
 		{
 			continue;
@@ -315,10 +325,11 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 		}
 		else
 		{
-			CurrentTargetsThisFrame[i] = GuideTargets[i];
-			PrevTargetsThisFrame[i] = PreviousTargets.IsValidIndex(i)
+			const FVector PreviousGuide = PreviousTargets.IsValidIndex(i)
 				? PreviousTargets[i]
-				: Sim.PrevPositions[i];
+				: GuideTargets[i];
+			CurrentTargetsThisFrame[i] = GuideTargets[i];
+			PrevTargetsThisFrame[i] = PreviousGuide;
 		}
 
 		if (GuidedNodesThisFrame.IsValidIndex(i))
@@ -362,7 +373,7 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 
 	const int32 LastNode = Sim.Num() - 1;
 	const float GuidedEnd = bHasAimTarget ? 1.0f : FMath::Clamp(Config.GuidedLength, 0.05f, 0.95f);
-	const int32 LastGuidedNode = FMath::Clamp(FMath::CeilToInt(static_cast<float>(LastNode) * GuidedEnd), 1, LastNode);
+	const int32 LastGuidedNode = LastNode;
 	const float Duration = ResolveGuideDuration(Config, GuideThrowSpeed);
 	const float NextT = FMath::Clamp((Elapsed + DeltaTime) / Duration, 0.0f, 1.0f);
 	TArray<FVector> GuideTargets;
@@ -385,16 +396,9 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 		}
 
 		const float S = static_cast<float>(i) / static_cast<float>(LastNode);
-		const float StrongGuideEnd = GuidedEnd * 0.55f;
-		const float GuideFade = (S <= StrongGuideEnd)
-			? 1.0f
-			: 1.0f - RopeMath::SmoothStep((S - StrongGuideEnd) /
-				FMath::Max(GuidedEnd - StrongGuideEnd, KINDA_SMALL_NUMBER));
-		const float RootFade = RopeMath::SmoothStep(S /
-			FMath::Max(StrongGuideEnd, KINDA_SMALL_NUMBER));
 		const float GuideWeight = bHasAimTarget
 			? AimGuideEnvelope(S, Config)
-			: GuideFade * FMath::Lerp(0.65f, 1.0f, RootFade);
+			: OrdinaryGuideOwnership(S, NextT, GuidedEnd);
 		if (GuideWeight <= KINDA_SMALL_NUMBER)
 		{
 			continue;

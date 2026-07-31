@@ -76,9 +76,11 @@ public:
 		float InAimSteerStartAlpha = 0.25f, float InAimLockAlpha = 0.50f);
 
 	/**
-	 * Snaps the initial pose immediately after a throw, at time zero: an ordinary guide places its
-	 * stretch on the targets, while an aim hit places only the middle firmly and blends the envelopes at
-	 * both ends with the existing solver positions. Called once from StartFreshThrow.
+	 * Snaps the initial pose immediately after a throw, at time zero: an ordinary guide places the whole
+	 * rope on one continuous initial guide so no hanging or previously wrapped tail survives the throw
+	 * boundary. Advance then releases the configured tail gradually over normalized swing time. An aim
+	 * hit keeps its separate endpoint envelopes and blends both ends with the existing solver positions.
+	 * Called once from StartFreshThrow.
 	 */
 	void SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config);
 

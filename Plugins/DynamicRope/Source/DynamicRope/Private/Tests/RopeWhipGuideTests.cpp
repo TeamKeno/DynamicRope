@@ -172,13 +172,13 @@ bool FRopeAimHitGuideSegmentSpacingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// An ordinary FullSimulation whip snaps the leading guide alone. Whether the guided run actually moves far enough and
-// respects the segment length limit, without teleporting the solver-owned tail to correct the spacing.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWhipInitialPoseOwnershipTest,
-	"DynamicRope.Solver.WhipInitialPosePreservesSolverOwnedTail",
+// An ordinary FullSimulation whip seeds the whole rope onto one straight guide at the throw boundary, then releases
+// the future solver-owned tail over normalized swing time instead of preserving a folded pose behind the guide.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWhipInitialStraightSeedAndReleaseTest,
+	"DynamicRope.Solver.WhipInitialStraightSeedAndGradualRelease",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FRopeWhipInitialPoseOwnershipTest::RunTest(const FString& Parameters)
+bool FRopeWhipInitialStraightSeedAndReleaseTest::RunTest(const FString& Parameters)
 {
 	FRopeSimState Sim = RopeTest::MakeStraightRope(21, 200.0f);
 	Sim.bStartPinned = true;
@@ -187,6 +187,8 @@ bool FRopeWhipInitialPoseOwnershipTest::RunTest(const FString& Parameters)
 	Sim.InvMass[0] = 0.0f;
 
 	FRopeWhipGuide::FConfig Config;
+	Config.Duration = 1.0f;
+	Config.ReferenceThrowSpeed = 1500.0f;
 	Config.GuidedLength = 0.65f;
 	Config.SweepAngleDegrees = 180.0f;
 	Config.ComponentRopeLength = Sim.RopeLength;
@@ -194,30 +196,49 @@ bool FRopeWhipInitialPoseOwnershipTest::RunTest(const FString& Parameters)
 	FRopeWhipGuide Guide;
 	Guide.Begin(FVector::ForwardVector, Sim.Positions[0], FVector::ForwardVector,
 		FVector::UpVector, FVector::RightVector, 1500.0f, FVector::ZeroVector);
-	const TArray<FVector> BeforeSnap = Sim.Positions;
-	Guide.SnapToInitialPose(Sim, Config);
-
-	TestFalse(TEXT("free tip remains solver-owned"), Guide.IsGuidedNodeThisFrame(Sim.Num() - 1));
-	float MaxGuidedMotion = 0.0f;
+	// Reproduce the problematic source pose: the chain goes away from the hand and its second half
+	// returns, as after hanging or wrapping. The initial seed must discard this shape completely.
 	for (int32 NodeIndex = 1; NodeIndex < Sim.Num(); ++NodeIndex)
 	{
-		if (!Guide.IsGuidedNodeThisFrame(NodeIndex))
-		{
-			TestTrue(*FString::Printf(TEXT("solver-owned node %d is not teleported"), NodeIndex),
-				Sim.Positions[NodeIndex].Equals(BeforeSnap[NodeIndex], 0.01f));
-			continue;
-		}
-
-		MaxGuidedMotion = FMath::Max(MaxGuidedMotion,
-			FVector::Dist(BeforeSnap[NodeIndex], Sim.Positions[NodeIndex]));
-		const FVector Leader = NodeIndex == 1 ? Sim.StartPinTarget : Sim.Positions[NodeIndex - 1];
-		const float Distance = FVector::Dist(Leader, Sim.Positions[NodeIndex]);
-		TestTrue(*FString::Printf(TEXT("initial guided edge %d-%d stays within spacing (%.3f <= %.3f)"),
-			NodeIndex - 1, NodeIndex, Distance, Sim.SegmentLength),
-			Distance <= Sim.SegmentLength + 0.05f);
+		const float S = static_cast<float>(NodeIndex) / static_cast<float>(Sim.Num() - 1);
+		Sim.Positions[NodeIndex] = FVector(100.0f * FMath::Sin(S * PI), 0.0f, -80.0f * FMath::Sin(S * PI));
+		Sim.PrevPositions[NodeIndex] = Sim.Positions[NodeIndex];
 	}
-	TestTrue(*FString::Printf(TEXT("initial guide still moves the rope meaningfully (%.3f cm)"), MaxGuidedMotion),
-		MaxGuidedMotion > Sim.SegmentLength);
+	Guide.SnapToInitialPose(Sim, Config);
+
+	const int32 LastNode = Sim.Num() - 1;
+	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
+	{
+		const FVector Expected = Sim.StartPinTarget - FVector::ForwardVector *
+			(Sim.SegmentLength * static_cast<float>(NodeIndex));
+		TestTrue(*FString::Printf(TEXT("initial node %d is seeded on the full straight guide"), NodeIndex),
+			Sim.Positions[NodeIndex].Equals(Expected, 0.01f));
+	}
+	TestTrue(TEXT("initial straight seed includes the future solver tail"),
+		Guide.IsGuidedNodeThisFrame(LastNode));
+
+	// Halfway through the swing the ownership boundary has moved from 100% to 82.5%. Nodes on its
+	// guide side must remain exactly collinear; the released tail must remain completely solver-owned.
+	Guide.Advance(0.5f, Sim, Config);
+	const int32 HalfTimeLastGuidedNode = 16; // 16 / 20 = 0.80, below the 0.825 boundary.
+	for (int32 NodeIndex = 1; NodeIndex <= HalfTimeLastGuidedNode; ++NodeIndex)
+	{
+		const FVector Expected = FVector::UpVector *
+			(Sim.SegmentLength * static_cast<float>(NodeIndex));
+		TestTrue(*FString::Printf(TEXT("half-time guided node %d stays on one straight line"), NodeIndex),
+			Guide.GetCurrentTargets()[NodeIndex].Equals(Expected, 0.01f));
+	}
+	TestTrue(TEXT("node below the moving boundary remains guide-owned"),
+		Guide.IsGuidedNodeThisFrame(HalfTimeLastGuidedNode));
+	TestFalse(TEXT("node above the moving boundary is fully solver-owned"),
+		Guide.IsGuidedNodeThisFrame(HalfTimeLastGuidedNode + 1));
+	TestTrue(TEXT("released node is not position-blended with the rotating guide"),
+		Guide.GetCurrentTargets()[HalfTimeLastGuidedNode + 1].Equals(
+			Sim.Positions[HalfTimeLastGuidedNode + 1], 0.01f));
+
+	Guide.Advance(0.5f, Sim, Config);
+	TestFalse(TEXT("tail is fully released when the normalized swing completes"),
+		Guide.IsGuidedNodeThisFrame(LastNode));
 	return true;
 }
 
