@@ -188,7 +188,7 @@ public:
 	// rope silently drops to the CPU solve and CPU tube, which is a performance cliff with no authoring
 	// signal, so the editor blocks it outright; the Blueprint and C++ paths are hard-clamped by InitRope.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "2", ClampMax = "512", DisplayName = "Node Count"))
-	int32 NumParticles = 72;
+	int32 NumParticles = 64;
 
 	/** Initial, and maximum, rope length (cm). The live length is GetCurrentRopeLength / SetRopeLength. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "1.0", Units = "cm"))
@@ -201,7 +201,7 @@ public:
 	/** Default reel speed (cm/s) for reel-in and reel-out input. Length is a rope-domain concern, so it lives
 	 *  here; the Wielder's reel action passes this value to SetReelRate. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float ReelSpeed = 150.0f;
+	float ReelSpeed = 300.0f;
 
 	// Whether the rope tube is visible while Loaded. The default OnEnterLoaded() implementation is what
 	// reads it, so a subclass that overrides that hook with its own presentation ignores this value.

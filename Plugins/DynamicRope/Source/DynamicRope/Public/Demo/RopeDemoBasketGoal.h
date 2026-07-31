@@ -62,7 +62,7 @@ public:
 	/** Count only a ball travelling downwards through the rim, which stops a ball pushed up from
 	 *  below scoring. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo")
-	bool bRequireDownwardEntry = true;
+	bool bRequireDownwardEntry = false;
 
 	/** How fast the ball must be moving down the goal's own down axis to count (cm/s). Raise it if a
 	 *  ball merely resting on the rim slips through and scores. */

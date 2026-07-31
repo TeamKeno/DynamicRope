@@ -67,7 +67,7 @@ public:
 	/** Count only physically simulating bodies as occupants. Turn it off to accept a pawn that walked
 	 *  on as well. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo")
-	bool bRequireSimulatingPhysics = true;
+	bool bRequireSimulatingPhysics = false;
 
 	/** When set, only actors carrying this tag count as occupants; leave it empty to ignore tags. Use
 	 *  it to build a plate that accepts one specific object. */

@@ -127,7 +127,7 @@ public:
 	/** Only count a pull while the rope reports itself taut (IsPullTaut). On by default, which stops
 	 *  a slack rope draped over the handle from moving it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Pull")
-	bool bRequireTautPull = true;
+	bool bRequireTautPull = false;
 
 	/** Minimum authoritative constraint tension (kg*cm/s^2, GetConstraintTension) for a pull to
 	 *  count. 0, the default, accepts any taut pull; raise it to demand a hard yank. */
