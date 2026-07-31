@@ -2,8 +2,10 @@
 #
 # For each requested version this script:
 #   1. Stages the plugin source (5.7 builds straight from the Perforce workspace; other versions
-#      are mirrored into their staging project copy first — 5.5 keeps its own separately-authored
-#      Content and receives everything else).
+#      are mirrored into their staging project copy first). Content is version-sensitive: assets
+#      are stamped by the engine that saved them and only load on that version or newer, so 5.5
+#      keeps its own separately-authored Content, 5.6 receives that same 5.5-authored Content
+#      from Plug55, and 5.8 receives the workspace (5.7-authored) Content.
 #   2. Runs that engine's `RunUAT BuildPlugin` into C:\DynamicRopeVersions\<ver>\DynamicRope.
 #   3. Zips the package for Fab upload into C:\DynamicRopeVersions\DynamicRope_<ver>.zip:
 #      package output minus Binaries / Intermediate / FabURL*, plus the plugin's /Config folder,
@@ -29,13 +31,14 @@ $SourcePlugin = Join-Path $Workspace 'Plugins\DynamicRope'
 $OutRoot     = 'C:\DynamicRopeVersions'
 $EngineRoot  = 'C:\Program Files\Epic Games'
 
-# Per-version staging: which plugin folder is handed to BuildPlugin, and whether Content is
-# mirrored from the workspace (5.5 authors its own Content for older-version asset stamps).
+# Per-version staging: which plugin folder is handed to BuildPlugin, and where its Content
+# comes from ($null = leave the staged copy's Content untouched).
+$Plug55Content = 'C:\MyProjects\Plug55\Plugins\DynamicRope\Content'
 $Stages = @{
-	'5.5' = @{ Plugin = 'C:\MyProjects\Plug55\Plugins\DynamicRope';   SyncContent = $false }
-	'5.6' = @{ Plugin = 'C:\MyProjects\View5_6\Plugins\DynamicRope';  SyncContent = $true }
-	'5.7' = @{ Plugin = $SourcePlugin;                                 SyncContent = $false } # builds in place
-	'5.8' = @{ Plugin = 'C:\MyProjects\Plug58\Plugins\DynamicRope';   SyncContent = $true }
+	'5.5' = @{ Plugin = 'C:\MyProjects\Plug55\Plugins\DynamicRope';   ContentSource = $null }   # own 5.5-authored Content
+	'5.6' = @{ Plugin = 'C:\MyProjects\View5_6\Plugins\DynamicRope';  ContentSource = $Plug55Content }
+	'5.7' = @{ Plugin = $SourcePlugin;                                 ContentSource = $null }   # builds in place
+	'5.8' = @{ Plugin = 'C:\MyProjects\Plug58\Plugins\DynamicRope';   ContentSource = (Join-Path $SourcePlugin 'Content') }
 }
 
 # Robocopy exit codes 0-7 mean success (files copied / already in sync); 8+ is failure.
@@ -48,10 +51,11 @@ function Stage-Plugin([string] $Ver) {
 	$stage = $Stages[$Ver]
 	if ($stage.Plugin -eq $SourcePlugin) { return }   # 5.7: nothing to stage
 
-	$dirs = @('Source', 'Shaders', 'Config', 'Resources', 'Docs')
-	if ($stage.SyncContent) { $dirs += 'Content' }
-	foreach ($d in $dirs) {
+	foreach ($d in @('Source', 'Shaders', 'Config', 'Resources', 'Docs')) {
 		Invoke-Mirror (Join-Path $SourcePlugin $d) (Join-Path $stage.Plugin $d)
+	}
+	if ($stage.ContentSource) {
+		Invoke-Mirror $stage.ContentSource (Join-Path $stage.Plugin 'Content')
 	}
 	foreach ($f in @('DynamicRope.uplugin', 'README.md')) {
 		Copy-Item (Join-Path $SourcePlugin $f) $stage.Plugin -Force
