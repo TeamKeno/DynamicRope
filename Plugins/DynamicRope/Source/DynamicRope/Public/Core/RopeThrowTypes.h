@@ -182,7 +182,7 @@ struct FRopeThrowParams
 	/** Fallback speed used when RopeComponent::Throw is called directly rather than through a
 	 *  wielder. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Throw", meta = (ClampMin = "1.0", UIMin = "100.0", UIMax = "5000.0", Units = "cm/s", DisplayName = "Throw Speed"))
-	float ThrowSpeed = 1500.0f;
+	float ThrowSpeed = 1000.0f;
 
 	/** If nothing is captured within this time after the whip ends, the throw is treated as a failure
 	 *  and the rope returns to Free (s). 0 uses the component's default failure cooldown,
