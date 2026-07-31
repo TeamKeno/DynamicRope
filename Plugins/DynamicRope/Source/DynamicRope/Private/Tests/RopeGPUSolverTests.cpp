@@ -169,6 +169,76 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUPendingStepTimeMergeTest,
+	"DynamicRope.Solver.GPUPendingStepTimeMerge",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUPendingStepTimeMergeTest::RunTest(const FString& Parameters)
+{
+	FRopeGPUResidentStep Incoming;
+	Incoming.RopeId = 17;
+	Incoming.Generation = 4;
+	Incoming.NumNodes = 64;
+	Incoming.NumSub = 12;
+	Incoming.FixedDt = (1.0f / 60.0f) / 12.0f;
+
+	FRopeGPUResidentStep Replaced = Incoming;
+	Replaced.NumSub = 12;
+	TestTrue(TEXT("a compatible pending interval merges immediately"),
+		Incoming.MergeReplacedSimulationTime(Replaced));
+	TestEqual(TEXT("two normal pending frames retain all of their simulation time"), Incoming.NumSub, 24);
+
+	Replaced.NumSub = 20;
+	TestTrue(TEXT("another compatible interval still merges"),
+		Incoming.MergeReplacedSimulationTime(Replaced));
+	TestEqual(TEXT("merged render catch-up work obeys the shader's 32-step cap"), Incoming.NumSub, 32);
+
+	FRopeGPUResidentStep DifferentGeneration = Replaced;
+	DifferentGeneration.Generation = Incoming.Generation + 1;
+	TestFalse(TEXT("simulation time does not cross a reseed boundary"),
+		Incoming.MergeReplacedSimulationTime(DifferentGeneration));
+	TestEqual(TEXT("a rejected merge leaves the scheduled work unchanged"), Incoming.NumSub, 32);
+
+	FRopeGPUResidentStep OverrideOnly = Incoming;
+	OverrideOnly.FixedDt = 0.0f;
+	OverrideOnly.NumSub = 0;
+	TestFalse(TEXT("an override-only step does not absorb physics time"),
+		OverrideOnly.MergeReplacedSimulationTime(Replaced));
+
+	// Exercise the real render-thread replacement queue as well. Two compatible enqueues before a view
+	// dispatch must merge without publishing a delayed refund; a later reseed still takes the refund path.
+	FRopeGPUSolver QueueSolver;
+	auto EnqueueWithoutViewDispatch = [&QueueSolver](FRopeGPUResidentStep Step)
+	{
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(MoveTemp(Step));
+		QueueSolver.EnqueueSteps(MoveTemp(Steps));
+		FlushRenderingCommands();
+	};
+	FRopeGPUResidentStep FirstQueued = Replaced;
+	FirstQueued.NumSub = 6;
+	FRopeGPUResidentStep SecondQueued = FirstQueued;
+	EnqueueWithoutViewDispatch(MoveTemp(FirstQueued));
+	EnqueueWithoutViewDispatch(MoveTemp(SecondQueued));
+	TMap<uint32, float> DroppedTime;
+	QueueSolver.DrainDroppedSimTime(DroppedTime);
+	TestFalse(TEXT("compatible replacement publishes no one-frame-late refund"),
+		DroppedTime.Contains(Replaced.RopeId));
+
+	FRopeGPUResidentStep ReseededQueued = Replaced;
+	ReseededQueued.Generation = Replaced.Generation + 1;
+	EnqueueWithoutViewDispatch(MoveTemp(ReseededQueued));
+	QueueSolver.DrainDroppedSimTime(DroppedTime);
+	const float* ReseedRefund = DroppedTime.Find(Replaced.RopeId);
+	TestNotNull(TEXT("a reseed replacement keeps the safe refund path"), ReseedRefund);
+	if (ReseedRefund)
+	{
+		TestTrue(TEXT("the refund contains the merged pending interval"),
+			FMath::IsNearlyEqual(*ReseedRefund, 12.0f * Replaced.FixedDt));
+	}
+	return true;
+}
+
 // Override pass(G0): NumSub=0 override dispatch records location/mass in resident buffer,
 // Nodes pinned with InvMass=0 remain exactly in the target in subsequent gravity solves (mass mask is persistent),
 // After InvMass restoration override, the bone returns to physics. “Target calculation is GT, application is GPU” contract verification.

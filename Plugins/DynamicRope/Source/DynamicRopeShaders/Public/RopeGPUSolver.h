@@ -296,6 +296,32 @@ struct FRopeGPUResidentStep
 	TArray<float>   OverrideInvMass;
 
 	bool HasOverrides() const { return OverrideFlags.Num() > 0; }
+
+	/**
+	 * Carries the simulation time of a same-rope step that the render graph did not consume into this newer
+	 * step. The newest logic payload remains authoritative, but its next render dispatch integrates the whole
+	 * elapsed interval instead of returning the old interval to the game thread one frame later. Returns false
+	 * across a reseed/topology/timestep boundary, where the caller must keep the ordinary refund path.
+	 */
+	bool MergeReplacedSimulationTime(const FRopeGPUResidentStep& Replaced)
+	{
+		if (RopeId != Replaced.RopeId || Generation != Replaced.Generation ||
+			NumNodes != Replaced.NumNodes || FixedDt <= KINDA_SMALL_NUMBER ||
+			Replaced.FixedDt <= KINDA_SMALL_NUMBER ||
+			!FMath::IsNearlyEqual(FixedDt, Replaced.FixedDt))
+		{
+			return false;
+		}
+
+		// Each game-thread step already obeys the solver's per-frame workload cap. A pending replacement
+		// commonly combines two otherwise valid 12-substep frames, so applying that same 18-step cap again
+		// discards 25% of elapsed time and produces a small visible hitch. The shader supports 32 substeps;
+		// use that separate resident catch-up bound for merged render work.
+		constexpr int32 MaxResidentCatchUpSubsteps = 32;
+		NumSub = FMath::Min(MaxResidentCatchUpSubsteps,
+			FMath::Max(0, NumSub) + FMath::Max(0, Replaced.NumSub));
+		return true;
+	}
 };
 
 /** The resident rope's latest, slightly delayed, positions as read by the game thread. The render-thread readback fills it and the game thread copies under lock. */

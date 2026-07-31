@@ -1895,29 +1895,37 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 	ENQUEUE_RENDER_COMMAND(RopeEnqueueSteps)(
 		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate&) mutable
 		{
-			TSet<uint32> IncomingRopeIds;
-			for (const FRopeGPUResidentStep& Step : Steps)
+			TMap<uint32, int32> IncomingStepIndices;
+			for (int32 StepIndex = 0; StepIndex < Steps.Num(); ++StepIndex)
 			{
-				IncomingRopeIds.Add(Step.RopeId);
+				IncomingStepIndices.Add(Steps[StepIndex].RopeId, StepIndex);
 			}
 			TArray<FRopeGPUResidentStep> PreservedHandoffGDFSteps;
-			// Replacement semantics: Replace with this frame step (even if the previous frame was not consumed in view expansion — scene
-			// Frames that did not render, etc. — Only the latest is valid, so it is not accumulated). Just **don't waste time**:
-			// Write the amount of substeps held by the overwriting step in the ledger and have GT return it to the accumulator.
-			// (If you just discard it, the sim will be permanently behind by that amount of time — DrainDroppedSimTime comment). However,
-			// The step where the handoff waits for the Scene GDF is preserved until a more recent step with the same RopeId arrives.
+			// The newest logic payload replaces an unconsumed one, but its simulation time does not wait for a
+			// game-thread refund: a compatible same-rope step absorbs those substeps and advances the complete
+			// elapsed interval in the next render dispatch. Deferring that interval by another frame produced an
+			// under-step / catch-up-step cadence that was visible as Flight judder. A reseed, topology change or
+			// different fixed dt cannot merge safely and keeps the existing refund path instead. A GDF handoff step
+			// with no newer step for that rope remains preserved until a scene view can consume it.
 			if (Impl->PendingSteps.Num() > 0)
 			{
 				FScopeLock SL(&Impl->Results->Lock);
 				for (FRopeGPUResidentStep& Dropped : Impl->PendingSteps)
 				{
 					if (Impl->HandoffGDFBlockedRopes.Contains(Dropped.RopeId)
-						&& !IncomingRopeIds.Contains(Dropped.RopeId))
+						&& !IncomingStepIndices.Contains(Dropped.RopeId))
 					{
 						PreservedHandoffGDFSteps.Add(MoveTemp(Dropped));
 						continue;
 					}
 					Impl->HandoffGDFBlockedRopes.Remove(Dropped.RopeId);
+					if (const int32* IncomingIndex = IncomingStepIndices.Find(Dropped.RopeId))
+					{
+						if (Steps[*IncomingIndex].MergeReplacedSimulationTime(Dropped))
+						{
+							continue;
+						}
+					}
 					if (Dropped.NumSub > 0 && Dropped.FixedDt > 0.0f)
 					{
 						Impl->Results->DroppedSimTime.FindOrAdd(Dropped.RopeId) +=
