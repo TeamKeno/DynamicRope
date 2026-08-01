@@ -71,8 +71,7 @@ FRopeContact FCapsuleCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	// Sample count from the relative motion: the larger of the node's travel and the capsule endpoints' travel. Overestimating is safe, and MaxSamples caps it.
 	const double RelLen = FVector::Dist(Q.WorldStart, Q.WorldEnd)
 		+ FMath::Max(FVector::Dist(CapAS, CapAE), FVector::Dist(CapBS, CapBE));
-	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
-	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
+	const int32  NumSamples = RopeCollision::SweptSampleCount(RelLen, Q.SweepStep, Q.MaxSamples);
 	const float  MinDist = Radius + Q.NodeRadius;
 
 	// Separation guard (RopeCollision::IsSweptSeparating): skip the re-pin when the node starts inside the

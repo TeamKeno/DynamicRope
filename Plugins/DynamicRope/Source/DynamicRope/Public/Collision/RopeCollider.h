@@ -127,6 +127,17 @@ struct FRopeSurfaceProjection
  */
 namespace RopeCollision
 {
+	/**
+	 * Number of point samples needed to keep the uncapped spacing at or below SweepStep while preserving
+	 * MaxSamples as the existing point-query budget. Using floor here makes a path just shorter than
+	 * 2*SweepStep use only its two endpoints, leaving almost twice the configured gap between them.
+	 */
+	inline int32 SweptSampleCount(double Travel, float SweepStep, int32 MaxSamples)
+	{
+		const double Step = FMath::Max(static_cast<double>(SweepStep), 0.1);
+		return FMath::Clamp(1 + FMath::CeilToInt(Travel / Step), 1, FMath::Max(1, MaxSamples));
+	}
+
 	inline bool IsSweptSeparating(const FVector& NodeStart, const FVector& NodeEnd,
 		const FVector& ContactPointStart, const FVector& ContactPointEnd,
 		const FVector& StartOutwardNormal, bool bStartInContact, bool bEndInContact)
@@ -200,7 +211,7 @@ public:
 			return FRopeContact();
 		}
 		const double L = FVector::Dist(Q.WorldStart, Q.WorldEnd);
-		const int32 NumSamples = FMath::Clamp(1 + FMath::FloorToInt(L / FMath::Max(Q.SweepStep, 0.1f)), 1, FMath::Max(1, Q.MaxSamples));
+		const int32 NumSamples = RopeCollision::SweptSampleCount(L, Q.SweepStep, Q.MaxSamples);
 		for (int32 k = 0; k < NumSamples; ++k)
 		{
 			const double T = (NumSamples <= 1) ? 1.0 : static_cast<double>(k) / static_cast<double>(NumSamples - 1);

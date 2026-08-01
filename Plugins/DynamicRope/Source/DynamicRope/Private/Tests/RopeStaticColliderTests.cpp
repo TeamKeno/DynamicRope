@@ -123,6 +123,30 @@ bool FRopeBoxSweptTunnelingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// The configured SweepStep must be a maximum interval, not merely the divisor used to choose a
+// point count. With the old 1 + floor(Travel / Step) formula, this 3.9 cm path produced only its two
+// endpoints, leaving a 3.9 cm gap in which the thin wall was never queried.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSweepStepMaximumSpacingTest,
+	"DynamicRope.Collision.SweepStepIsMaximumSpacing",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSweepStepMaximumSpacingTest::RunTest(const FString& Parameters)
+{
+	const FRopeBoxCollider ThinWall(FVector::ZeroVector, FQuat::Identity, FVector(0.05, 100.0, 100.0));
+
+	FRopeSweptQuery Q;
+	Q.WorldStart = FVector(-1.95, 0.0, 0.0);
+	Q.WorldEnd = FVector(1.95, 0.0, 0.0);
+	Q.NodeRadius = 0.05f;
+	Q.SweepStep = 2.0f;
+	Q.MaxSamples = 16;
+
+	FVector HitPos = FVector::ZeroVector;
+	const FRopeContact C = ThinWall.QuerySwept(Q, HitPos);
+	TestTrue(TEXT("sweep samples the thin wall between both endpoints"), C.bHit);
+	return true;
+}
+
 namespace
 {
 	// Builds an axis-aligned box, from a centre and half extents, as a six-plane convex. It is the fixture

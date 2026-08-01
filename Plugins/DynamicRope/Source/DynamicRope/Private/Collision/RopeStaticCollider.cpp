@@ -88,8 +88,7 @@ FRopeContact FRopeBoxCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 	const FQuat   RotE = FQuat::Slerp(PrevRot, Rot, Q.SubAlpha1);
 
 	const double RelLen = FVector::Dist(Q.WorldStart, Q.WorldEnd) + FVector::Dist(CenterS, CenterE);
-	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
-	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
+	const int32  NumSamples = RopeCollision::SweptSampleCount(RelLen, Q.SweepStep, Q.MaxSamples);
 
 	// Separation guard (RopeCollision::IsSweptSeparating): skip the re-pin when the node starts inside the
 	// contact skin and is leaving. The start contact and material point are tested against the start pose's
@@ -231,8 +230,7 @@ FRopeContact FRopeConvexCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& 
 	const FQuat   RotE = FQuat::Slerp(PrevRot, Rot, Q.SubAlpha1);
 
 	const double RelLen = FVector::Dist(Q.WorldStart, Q.WorldEnd) + FVector::Dist(TransS, TransE);
-	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
-	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
+	const int32  NumSamples = RopeCollision::SweptSampleCount(RelLen, Q.SweepStep, Q.MaxSamples);
 
 	// Separation guard (RopeCollision::IsSweptSeparating): skip the re-pin when the node starts inside the
 	// contact skin and is leaving. The local plane query is inlined here — the same logic as the sweep above —

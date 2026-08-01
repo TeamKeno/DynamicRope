@@ -246,8 +246,7 @@ FRopeContact FRopeSDFCollider::QuerySwept(const FRopeSweptQuery& Q, FVector& Out
 
 	// Sample count from the relative displacement, so a still rope against a fast bone gets enough samples to stop it being overtaken and penetrated.
 	const double RelLen = FVector::Dist(L0, L1);
-	const float  Step = FMath::Max(Q.SweepStep, 0.1f);
-	const int32  NumSamples = FMath::Clamp(1 + FMath::FloorToInt(RelLen / Step), 1, FMath::Max(1, Q.MaxSamples));
+	const int32  NumSamples = RopeCollision::SweptSampleCount(RelLen, Q.SweepStep, Q.MaxSamples);
 
 	const FBox Band = Volume->LocalBounds.ExpandBy(LocalNodeRadius);
 

@@ -50,7 +50,7 @@ struct FRopeGPUParams
 	float Friction;
 	// swept sample spacing (cm)
 	float SweepStep;
-	// sample cap per segment
+	// point-sample cap per segment
 	int   MaxSweepSamples;
 	// Global start index of this rope's SDF colliders
 	int   SDFColliderOffset;
@@ -159,6 +159,13 @@ void RopeApplyContactFriction(FRopeGPUParams P, uint i, int N, float3 Normal, fl
 	gPrev[i] += Tangent;
 }
 
+// Keep every uncapped point-query gap at or below SweepStep while preserving MaxSamples as the
+// existing point-query budget. floor can leave a gap approaching 2 * SweepStep.
+int RopeSweepSampleCount(float Travel, float SweepStep, int MaxSamples)
+{
+	return clamp(1 + (int)ceil(Travel / max(SweepStep, 0.1f)), 1, max(MaxSamples, 1));
+}
+
 // Capsule node collision: sweep the substep's path (gPrev → gPos) against the capsule's sub-posed endpoints,
 // relative to the capsule's own motion, then push out at the first contact and remove the *relative* normal
 // velocity and apply *relative* tangential friction. Mirrors the CPU SolveCollisions.
@@ -185,7 +192,7 @@ void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 
 		const float3 SegB = gPos[i];
 		// Number of samples reflecting relative motion: maximum node movement + capsule end point movement (overestimation is safe — MaxSamples cap).
 		const float  L = distance(SegA, SegB) + max(distance(CapAS, CapAE), distance(CapBS, CapBE));
-		const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
+		const int    NumSamples = RopeSweepSampleCount(L, SweepStep, MaxSamples);
 
 		// Separation Guard (CPU RopeCollision::IsSweptSeparating / SDF Mirror): Start inside the contact skin and move outside the surface.
 		// Skip re-pin if disconnecting. The starting material point is carried over to the end pose to check the contact point movement, and the end pose is checked for end contact.
@@ -277,7 +284,7 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 		const float3 L0 = RopeQuatRotate(float4(-RotS.xyz, RotS.w), SegA    - TrS) * InvScale;
 		const float3 L1 = RopeQuatRotate(float4(-RotE.xyz, RotE.w), gPos[i] - TrE) * InvScale;
 		const float  RelLen = distance(L0, L1);
-		const int    NumSamples = clamp(1 + (int)floor(RelLen / SweepStep), 1, MaxSamples);
+		const int    NumSamples = RopeSweepSampleCount(RelLen, SweepStep, MaxSamples);
 
 		// Separation: If the starting contact (within the L0 band penetration) and the node is exiting *outside* the surface, do not re-pin.
 		// Let go (prevent the contact node from being pinned back to the start of each substep and never dropped). CPU QuerySwept mirror.
@@ -369,7 +376,7 @@ void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N, inout float4 Con
 		// May have been pushed by the preceding collider
 		const float3 SegB = gPos[i];
 		const float  L = distance(SegA, SegB) + distance(CenterS, CenterE);
-		const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
+		const int    NumSamples = RopeSweepSampleCount(L, SweepStep, MaxSamples);
 
 		// Separation Guard (CPU RopeCollision::IsSweptSeparating / SDF Mirror): Starts inside the contact skin and separates outward.
 		// Omit re-pin if in progress. Check the start contact/material point with the start pose box and the end contact with the end pose box.
@@ -451,7 +458,7 @@ void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N, inout float4 
 		// May have been pushed by the preceding collider
 		const float3 SegB = gPos[i];
 		const float  L = distance(SegA, SegB) + distance(TransS, TransE);
-		const int    NumSamples = clamp(1 + (int)floor(L / SweepStep), 1, MaxSamples);
+		const int    NumSamples = RopeSweepSampleCount(L, SweepStep, MaxSamples);
 
 		// Separation Guard (CPU RopeCollision::IsSweptSeparating / SDF Mirror): Starts inside the contact skin and separates outward.
 		// Omit re-pin if in progress. Start/end sub-pose Check the start contact/material point and end contact with the rigid body.
