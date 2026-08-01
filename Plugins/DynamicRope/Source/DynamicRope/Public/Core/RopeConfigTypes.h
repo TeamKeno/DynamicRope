@@ -242,11 +242,11 @@ struct FRopeWrapConfig
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "1"))
 	int32 MinLatchNodes = 1;
 
-	// The default of 0.016 is one frame at 60fps, so there is effectively no dwell. Together with
-	// MinLatchNodes this is the second lever on the same question — how sure must a reach be before it counts
-	// as a catch — which is why it is not exposed to the Details panel.
-
-	/** How long contact must persist on one bone before the wrap is confirmed (s). */
+	/**
+	 * Legacy serialized value retained for asset and Blueprint compatibility. Wrapping now commits
+	 * immediately after MinLatchNodes real contacts produce a valid seed, so this value has no runtime
+	 * effect.
+	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "0.0", Units = "s"))
 	float WrapDecisionTime = 0.016f;
 

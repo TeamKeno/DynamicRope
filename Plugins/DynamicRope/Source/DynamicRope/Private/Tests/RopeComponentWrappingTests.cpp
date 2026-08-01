@@ -13,6 +13,37 @@
 
 struct FRopeWrappingFallbackTestSeam
 {
+	static FRopeFlightCaptureEvaluation EvaluateFlightCapture(URopeComponent& Rope,
+		const TArray<FRopeContactCandidate>& Candidates, int32 MinLatchNodes = 1)
+	{
+		Rope.Phase = ERopePhase::Flight;
+		Rope.ResolveMode = ERopeWrapResolveMode::FullSimulation;
+		FRopeFlightContactDetector::FParams Params;
+		Params.MinLatchNodes = MinLatchNodes;
+		return Rope.EvaluateFlightCapture(Candidates, Params);
+	}
+
+	static float ApplyFailedFlightCapture(URopeComponent& Rope,
+		const TArray<FRopeContactCandidate>& Candidates,
+		FRopeFlightCaptureEvaluation& Evaluation, float InitialElapsed, float DeltaTime)
+	{
+		Rope.Phase = ERopePhase::Flight;
+		Rope.FlightNoContactElapsed = InitialElapsed;
+		Rope.ThrowParams.FlightNoContactReturnTime = 1.0f;
+		Rope.ApplyFlightCaptureEvaluation(DeltaTime, Candidates, Evaluation);
+		return Rope.FlightNoContactElapsed;
+	}
+
+	static bool HasValidSeedWithoutDwell(URopeComponent& Rope)
+	{
+		Rope.ContactTracker.CandidateBone = FName("arm");
+		Rope.ContactTracker.CandidateNodes = { 1 };
+		Rope.ContactTracker.DwellTime = 0.0f;
+		Rope.PendingWrapSeed.BoneName = FName("arm");
+		Rope.PendingWrapSeed.Latched.AddDefaulted();
+		return Rope.ShouldStartWrapping();
+	}
+
 	static void ConfigureContactingSeed(URopeComponent& Rope, const USceneComponent* Mesh,
 		IRopeCollider& Collider, const TArray<FRopeContactCandidate>& Candidates)
 	{
@@ -141,6 +172,76 @@ struct FRopeWrappingFallbackTestSeam
 		Rope.UpdateReel(DeltaTime);
 	}
 };
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeActualContactRequiredForCaptureTest,
+	"DynamicRope.Component.Wrapping.ActualContactRequiredForCapture",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeActualContactRequiredForCaptureTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* Mesh = NewObject<USceneComponent>();
+	FRopeContactCandidate Candidate;
+	Candidate.bValid = true;
+	Candidate.NodeIndex = 2;
+	Candidate.Mesh = Mesh;
+	Candidate.Bone = FName("arm");
+	Candidate.Source = ERopeContactCandidateSource::PredictiveFree;
+	Candidate.SourceMask = static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree);
+
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	const FRopeFlightCaptureEvaluation PredictiveOnly =
+		FRopeWrappingFallbackTestSeam::EvaluateFlightCapture(*Rope, { Candidate });
+	TestFalse(TEXT("predictive-only candidate does not freeze Flight before touching"), PredictiveOnly.bShouldCapture);
+
+	Candidate.SourceMask |= static_cast<uint8>(ERopeContactCandidateSource::Actual);
+	const FRopeFlightCaptureEvaluation MergedActual =
+		FRopeWrappingFallbackTestSeam::EvaluateFlightCapture(*Rope, { Candidate });
+	TestTrue(TEXT("the same target captures once an actual sweep source is merged"), MergedActual.bShouldCapture);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePredictiveCandidateExtendsFlightTest,
+	"DynamicRope.Component.Wrapping.PredictiveCandidateExtendsFlight",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePredictiveCandidateExtendsFlightTest::RunTest(const FString& Parameters)
+{
+	USceneComponent* Mesh = NewObject<USceneComponent>();
+	FRopeContactCandidate Candidate;
+	Candidate.bValid = true;
+	Candidate.NodeIndex = 2;
+	Candidate.Mesh = Mesh;
+	Candidate.Bone = FName("arm");
+	Candidate.Source = ERopeContactCandidateSource::PredictiveFree;
+	Candidate.SourceMask = static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree);
+
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	FRopeFlightCaptureEvaluation PredictiveEvaluation =
+		FRopeWrappingFallbackTestSeam::EvaluateFlightCapture(*Rope, { Candidate });
+	const float GraceElapsed = FRopeWrappingFallbackTestSeam::ApplyFailedFlightCapture(
+		*Rope, { Candidate }, PredictiveEvaluation, /*InitialElapsed*/ 0.05f, /*DeltaTime*/ 0.016f);
+	TestTrue(TEXT("selected predictive candidate resets the no-contact timeout"),
+		FMath::IsNearlyZero(GraceElapsed));
+
+	FRopeFlightCaptureEvaluation EmptyEvaluation;
+	const float ResumedElapsed = FRopeWrappingFallbackTestSeam::ApplyFailedFlightCapture(
+		*Rope, {}, EmptyEvaluation, /*InitialElapsed*/ 0.0f, /*DeltaTime*/ 0.016f);
+	TestTrue(TEXT("timeout resumes normally after prediction disappears"),
+		FMath::IsNearlyEqual(ResumedElapsed, 0.016f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingStartsWithoutDwellTest,
+	"DynamicRope.Component.Wrapping.ValidActualSeedStartsWithoutDwell",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingStartsWithoutDwellTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	TestTrue(TEXT("a valid actual-contact seed does not wait for WrapDecisionTime"),
+		FRopeWrappingFallbackTestSeam::HasValidSeedWithoutDwell(*Rope));
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSyntheticLatchAnchorFallbackTest,
 	"DynamicRope.Component.Wrapping.SyntheticLatchAnchorFallback",

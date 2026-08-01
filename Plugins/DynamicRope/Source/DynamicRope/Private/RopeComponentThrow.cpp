@@ -1356,6 +1356,30 @@ FRopeFlightCaptureEvaluation URopeComponent::EvaluateFlightCapture(
 		Evaluation = FRopeFlightContactDetector::EvaluateCapture(Candidates, DetectParams, Policy);
 	}
 
+	// Prediction exists to make the next real sweep reliable, not to stop the rope before it reaches the
+	// surface. Contacting has no solve, so entering it from predictive-only candidates freezes the rope
+	// short of the body and the current-centreline recheck immediately dismisses the contact. Require the
+	// configured latch-node count to have an Actual source on the selected target. A merged candidate
+	// keeps the predictive metadata but carries Actual in SourceMask, so real swept contacts still capture
+	// on the same frame.
+	if (Evaluation.bShouldCapture)
+	{
+		const uint8 ActualMask = static_cast<uint8>(ERopeContactCandidateSource::Actual);
+		TSet<int32> ActualNodes;
+		for (const FRopeContactCandidate& Candidate : Candidates)
+		{
+			if (Candidate.bValid
+				&& Candidate.Mesh == Evaluation.Tracker.CandidateMesh
+				&& Candidate.Bone == Evaluation.Tracker.CandidateBone
+				&& (Candidate.SourceMask & ActualMask) != 0)
+			{
+				ActualNodes.Add(Candidate.NodeIndex);
+			}
+		}
+		Evaluation.bShouldCapture =
+			ActualNodes.Num() >= FMath::Max(1, DetectParams.MinLatchNodes);
+	}
+
 	// GuaranteedWrap does not reach Flight on the normal path: ThrowWithContext sends both the aimed
 	// throw, through the prepared preview, and the open-space throw, as an arc to the end of the ray, to
 	// GuidedThrow. Should it reach Flight by any route, capture is forbidden anyway, because a
@@ -1407,10 +1431,35 @@ bool URopeComponent::ApplyFlightCaptureEvaluation(float DeltaTime,
 	}
 
 	// Failing to capture before the whip ends is treated as a failed throw and returns the rope to Free.
-	// The timer is not reset while candidates keep appearing, because failing to meet MinLatchNodes or
-	// the quality conditions could otherwise trap the rope in Flight.
 	if (!WhipGuide.IsActive())
 	{
+		// PREDICTIVE-GRACE BEGIN -- remove only this block to restore the strict no-contact timeout.
+		// Prediction still cannot capture: it only keeps Flight alive while the selected target remains
+		// immediately ahead, giving the real sweep a chance to confirm contact on a following frame.
+		// Actual-only, invalid, and non-selected candidates do not extend the timeout.
+		const uint8 PredictiveMask =
+			static_cast<uint8>(ERopeContactCandidateSource::PredictiveFree) |
+			static_cast<uint8>(ERopeContactCandidateSource::PredictiveGuided);
+		bool bHasSelectedPredictiveCandidate = false;
+		for (const FRopeContactCandidate& Candidate : Candidates)
+		{
+			if (Candidate.bValid
+				&& !Evaluation.Tracker.CandidateBone.IsNone()
+				&& Candidate.Mesh == Evaluation.Tracker.CandidateMesh
+				&& Candidate.Bone == Evaluation.Tracker.CandidateBone
+				&& (Candidate.SourceMask & PredictiveMask) != 0)
+			{
+				bHasSelectedPredictiveCandidate = true;
+				break;
+			}
+		}
+		if (bHasSelectedPredictiveCandidate)
+		{
+			FlightNoContactElapsed = 0.0f;
+			return false;
+		}
+		// PREDICTIVE-GRACE END
+
 		const float FlightReturnTime = ThrowParams.FlightNoContactReturnTime > 0.0f
 			? ThrowParams.FlightNoContactReturnTime
 			: ReleaseCooldownSeconds;

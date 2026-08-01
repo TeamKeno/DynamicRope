@@ -487,10 +487,10 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 	if (ShouldDismissContacting())
 	{
 		UE_LOG(LogRopeWrap, Warning,
-			TEXT("[%s] Contacting dismissed before wrap: reason=ContactTrackerEmpty candidates=%d trackerBone=%s trackerNodes=%d dwell=%.3fs required=%.3fs elapsed=%.3fs colliders=%d"),
+			TEXT("[%s] Contacting dismissed before wrap: reason=ContactTrackerEmpty candidates=%d trackerBone=%s trackerNodes=%d dwell=%.3fs elapsed=%.3fs colliders=%d"),
 			*GetName(), Candidates.Num(), *ContactTracker.CandidateBone.ToString(),
 			ContactTracker.CandidateNodes.Num(), ContactTracker.DwellTime,
-			WrapConfig.WrapDecisionTime, ContactingElapsed, SimFrame.FrameColliders.Num());
+			ContactingElapsed, SimFrame.FrameColliders.Num());
 		// Left before the wrap was established: report per-instance after cleaning up, through
 		// FinishPreCommitReleaseToFlight, which owns the re-entrancy contract.
 		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone, TEXT("contact lost before wrapping"));
@@ -517,22 +517,20 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 		return;
 	}
 
-	// The stall safety net: if contact flickers and the dwell stays below the threshold for a long time,
-	// so the rope neither commits nor dismisses, it is sent back to Flight. Recapturing from Flight is
-	// free, so nothing is lost and only an unbounded stay is prevented.
-	const float StallTimeout = FMath::Max(WrapConfig.WrapDecisionTime * 10.0f, 1.0f);
+	// The stall safety net now covers only malformed/incomplete seeds: real contact commits immediately,
+	// so no user-configured dwell time participates in this timeout.
+	constexpr float StallTimeout = 1.0f;
 	if (ContactingElapsed >= StallTimeout)
 	{
 		UE_LOG(LogRopeWrap, Warning,
-			TEXT("[%s] Contacting stalled before wrap: candidates=%d trackerBone=%s trackerNodes=%d targets=%d dwell=%.3fs required=%.3fs elapsed=%.3fs timeout=%.3fs"),
+			TEXT("[%s] Contacting stalled before wrap: candidates=%d trackerBone=%s trackerNodes=%d targets=%d dwell=%.3fs elapsed=%.3fs timeout=%.3fs"),
 			*GetName(), Candidates.Num(), *ContactTracker.CandidateBone.ToString(),
 			ContactTracker.CandidateNodes.Num(), ContactTracker.Targets.Num(),
-			ContactTracker.DwellTime, WrapConfig.WrapDecisionTime, ContactingElapsed, StallTimeout);
+			ContactTracker.DwellTime, ContactingElapsed, StallTimeout);
 		// Left before the wrap was established: report per-instance after cleaning up, through
 		// FinishPreCommitReleaseToFlight.
 		FinishPreCommitReleaseToFlight(ContactTracker.CandidateBone,
-			*FString::Printf(TEXT("contacting stalled %.2fs (dwell %.2fs < %.2fs)"),
-				ContactingElapsed, ContactTracker.DwellTime, WrapConfig.WrapDecisionTime));
+			*FString::Printf(TEXT("contacting stalled %.2fs with an incomplete seed"), ContactingElapsed));
 	}
 }
 
@@ -543,13 +541,10 @@ bool URopeComponent::ShouldDismissContacting() const
 
 bool URopeComponent::ShouldStartWrapping() const
 {
-	// The decision is based on sustained contact with one bone, that is the tracker's dwell, which
-	// restarts from zero when the dominant bone changes. Using the dwell rather than the total elapsed
-	// time matches the original intent, namely that the nodes stay on one bone for the decision time.
-	// Under stable contact the dwell equals the total elapsed time, so this is unchanged; it only becomes
-	// stricter on transition frames where the bone jumps.
-	return ContactTracker.DwellTime >= WrapConfig.WrapDecisionTime
-		&& PendingWrapSeed.Latched.Num() > 0
+	// URopeComponent::EvaluateFlightCapture already requires a real swept/current contact. Once that
+	// produces a valid seed there is no additional time gate: delaying in a solver-free Contacting phase
+	// can only lose the surface on the following frame.
+	return PendingWrapSeed.Latched.Num() > 0
 		&& !PendingWrapSeed.BoneName.IsNone();
 }
 
@@ -604,7 +599,7 @@ FRopeWrapState URopeComponent::BuildWrapSeedFromContactingState(const TArray<FRo
 		{
 			const bool bDominant = Target.Bone == ContactTracker.CandidateBone &&
 				Target.Mesh == ContactTracker.CandidateMesh;
-			if (!bDominant && Target.DwellTime >= WrapConfig.WrapDecisionTime)
+			if (!bDominant && Target.Nodes.Num() > 0)
 			{
 				Sorted.Add(&Target);
 			}
