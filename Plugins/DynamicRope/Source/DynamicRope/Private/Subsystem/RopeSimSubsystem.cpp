@@ -19,6 +19,7 @@
 #include "Collision/RopeController.h"
 // Inject MaxColliders when spawning base class
 #include "Collision/RopeStaticBodyProvider.h"
+#include "Logic/RopeFlightContactDetector.h"
 #include "Engine/World.h"
 // FSceneInterface (Scene→solver registration key)
 #include "SceneInterface.h"
@@ -378,7 +379,7 @@ void URopeSimSubsystem::SetAnimPrerequisites(const UActorComponent* Source, bool
 	}
 }
 
-FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope, bool bIncludeAimRay)
+FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope, float DeltaTime, bool bIncludeAimRay)
 {
 	const bool bHasAimRayBounds = Rope.SimFrame.AimRayColliderQueryBounds.IsValid != 0;
 	const bool bHasLockedTargetBounds = Rope.AimTargeting.IsLockActive(Rope.Phase) &&
@@ -393,19 +394,34 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope, bool 
 	// region and the per-rope collider culling share this one box, called from both GatherCollidersForRope and
 	// BuildFrameColliders.
 	FBox RopeBounds(ForceInit);
-	// For the predicted-contact margin: this frame's largest node displacement, extrapolated forward.
+	// Predictive contact exists only in Flight. Carrying that extrapolation into Contacting/Wrapping can
+	// gather remote pieces of a composite simple-collision set and change the geometry used to build the
+	// wrap. Pos union Prev already covers actual current motion.
 	float MaxFrameDispSq = 0.0f;
 	for (int32 i = 0; i < Rope.Sim.Num(); ++i)
 	{
 		RopeBounds += Rope.Sim.Positions[i];
 		RopeBounds += Rope.Sim.PrevPositions[i];
-		MaxFrameDispSq = FMath::Max(MaxFrameDispSq,
-			static_cast<float>(FVector::DistSquared(Rope.Sim.Positions[i], Rope.Sim.PrevPositions[i])));
+		if (Rope.Phase == ERopePhase::Flight)
+		{
+			MaxFrameDispSq = FMath::Max(MaxFrameDispSq,
+				static_cast<float>(FVector::DistSquared(Rope.Sim.Positions[i], Rope.Sim.PrevPositions[i])));
+		}
 	}
 	const float BaseMargin = Rope.GetEffectiveCollisionRadius() + Rope.GetEffectiveContactQueryRadius()
 		+ FMath::Max(2.0f * Rope.Sim.SegmentLength, 50.0f);
-	const float PredictiveMotionMargin = FMath::Sqrt(MaxFrameDispSq)
-		* FMath::Max(Rope.WrapConfig.PredictiveContactFrames, 1.0f);
+	float PredictiveMotionMargin = 0.0f;
+	if (Rope.Phase == ERopePhase::Flight)
+	{
+		// Positions - PrevPositions is only the last solver substep, not a whole frame, so convert it
+		// with the exact ratio used by FRopeFlightContactDetector before extrapolating forward.
+		const float SubstepDeltaTime = (1.0f / 60.0f)
+			/ static_cast<float>(FMath::Clamp(Rope.SolverConfig.Substeps, 1, 16));
+		const float FrameToSubstepRatio =
+			FRopeFlightContactDetector::ComputeFrameToSubstepRatio(DeltaTime, SubstepDeltaTime);
+		PredictiveMotionMargin = FMath::Sqrt(MaxFrameDispSq) * FrameToSubstepRatio
+			* FMath::Max(Rope.WrapConfig.PredictiveContactFrames, 1.0f);
+	}
 	const float QueryMargin = BaseMargin + PredictiveMotionMargin;
 	if (RopeBounds.IsValid)
 	{
@@ -439,7 +455,7 @@ FBox URopeSimSubsystem::ComputeRopeQueryBounds(const URopeComponent& Rope, bool 
 	return RopeBounds;
 }
 
-void URopeSimSubsystem::BuildFrameColliders()
+void URopeSimSubsystem::BuildFrameColliders(float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_BuildColliders);
 	FrameProviders.Reset();
@@ -454,11 +470,12 @@ void URopeSimSubsystem::BuildFrameColliders()
 	FrameRopeRegions.Reserve(Ropes.Num() * 2);
 	for (URopeComponent* Rope : Ropes)
 	{
-		FrameRopeRegions.Add(IsValid(Rope) ? ComputeRopeQueryBounds(*Rope) : FBox(ForceInit));
+		FrameRopeRegions.Add(IsValid(Rope) ? ComputeRopeQueryBounds(*Rope, DeltaTime) : FBox(ForceInit));
 	}
 	for (URopeComponent* Rope : Ropes)
 	{
-		FrameRopeRegions.Add(IsValid(Rope) ? ComputeRopeQueryBounds(*Rope, /*bIncludeAimRay*/ true) : FBox(ForceInit));
+		FrameRopeRegions.Add(IsValid(Rope)
+			? ComputeRopeQueryBounds(*Rope, DeltaTime, /*bIncludeAimRay*/ true) : FBox(ForceInit));
 	}
 
 	// Region priority: active ropes first, and a physics region before an aiming one. The global extraction cap
@@ -798,7 +815,7 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(RopeSim_GatherColliders);
 		SCOPE_CYCLE_COUNTER(STAT_RopeSim_Gather);
-		BuildFrameColliders();
+		BuildFrameColliders(DeltaTime);
 		// The rope index is also the physics region index in FrameRopeRegions and the provider mapping — the order was pinned when invalid entries were cleaned up above.
 		for (int32 RopeIndex = 0; RopeIndex < Ropes.Num(); ++RopeIndex)
 		{

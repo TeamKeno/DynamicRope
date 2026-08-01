@@ -75,6 +75,8 @@ struct TStructOpsTypeTraits<FRopeSimTickFunction> : public TStructOpsTypeTraitsB
 	enum { WithCopy = false };
 };
 
+struct FRopeSimSubsystemTestSeam;
+
 UCLASS()
 class DYNAMICROPE_API URopeSimSubsystem : public UWorldSubsystem
 {
@@ -146,6 +148,10 @@ public:
 	virtual void Deinitialize() override;
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FRopeSimSubsystemTestSeam;
+#endif
+
 	/** The TG_PostPhysics tick function, registered between the world's BeginPlay and Deinitialize.
 	 *  Its prerequisites are managed by SetAnimPrerequisites below. */
 	FRopeSimTickFunction SimTickFunction;
@@ -298,7 +304,7 @@ private:
 
 	/** Gathers colliders once from every registered provider, before Prepare. Providers are handed the
 	 *  physics and aim region lists. */
-	void BuildFrameColliders();
+	void BuildFrameColliders(float DeltaTime);
 
 	/**
 	 * Collects one region's colliders from the central build. By default every provider is included
@@ -325,7 +331,8 @@ private:
 	 * aiming, and the ray bounds are invalid, no aim region is needed and an invalid box is returned,
 	 * which gathers nothing and leaves the aim list empty.
 	 */
-	static FBox ComputeRopeQueryBounds(const URopeComponent& Rope, bool bIncludeAimRay = false);
+	static FBox ComputeRopeQueryBounds(const URopeComponent& Rope, float DeltaTime,
+		bool bIncludeAimRay = false);
 
 	/**
 	 * The GPU-resident solver, which advances persistent per-rope buffers in place every frame. It

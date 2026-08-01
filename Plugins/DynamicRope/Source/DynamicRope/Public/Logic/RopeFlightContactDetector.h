@@ -95,6 +95,13 @@ public:
 	float FrameDeltaTime = 1.0f / 60.0f;
 	};
 
+	/**
+	 * Converts the Verlet displacement stored for one solver substep into the displacement for the
+	 * current game frame. Collider broad-phase gathering and predictive narrow-phase detection must
+	 * use the same ratio or the latter can sweep through colliders that the former already discarded.
+	 */
+	static float ComputeFrameToSubstepRatio(float FrameDeltaTime, float SubstepDeltaTime);
+
 	// A view of the whip guide's frame data, which is the input to the guided-node branch of
 	// predictive contact. The pointers are not owned and need only stay valid for the duration of the
 	// call. With the guide inactive, pass the defaults, that is all nullptr.

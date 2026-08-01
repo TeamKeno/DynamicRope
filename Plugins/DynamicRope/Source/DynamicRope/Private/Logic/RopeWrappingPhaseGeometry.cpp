@@ -351,10 +351,10 @@ namespace
 	// shape is longest in, so a log picks its long axis however it is rotated; an end hit rejects
 	// the near-normal long axis and falls to the larger cross axis. Returns false when no attributed
 	// candidate survives (no colliders in the snapshot, or every axis is too close to the normal).
-	// The axis origin is the centre of the attributed colliders' union, not the component pivot: a
-	// prop authored with its pivot at an end or on its resting surface (a log pivoted at ground
-	// level) would otherwise put the winding axis along its edge, and the radial and circumferential
-	// directions the surface walk derives from that axis degenerate near the pivot side.
+	// The axis direction may come from the attributed colliders' union, but its transverse origin comes
+	// from the collider nearest the latch. A single virtual bone can own disconnected convex pieces (the
+	// crossbar and two posts of RopeLog_UE); using their union centre moves the axis off the contacted log
+	// and turns a spiral into an almost straight surface path.
 	bool TryResolveShapeExtentAxis(const FRopeSurfaceAnchor& LatchAnchor,
 		const FRopeWrappingPhase::FContext& Ctx, const USceneComponent* Mesh,
 		const FTransform& BoneXform, FVector& OutAxisOrigin, FVector& OutAxisDirection)
@@ -383,6 +383,10 @@ namespace
 		// union's axes follow the prop's rotation.
 		const FTransform CompRigid(Mesh->GetComponentQuat(), Mesh->GetComponentLocation());
 		FBox LocalUnion(ForceInit);
+		const FVector LatchSurfaceWorld = BoneXform.TransformPosition(LatchAnchor.LocalSurfacePosition);
+		FVector ContactedShapeCenter = BoneXform.GetLocation();
+		float ClosestSurfaceDistance = TNumericLimits<float>::Max();
+		bool bHasContactedShapeCenter = false;
 		for (const IRopeCollider* Collider : Ctx.Colliders)
 		{
 			if (!Collider)
@@ -409,6 +413,20 @@ namespace
 			const FBox WorldBounds = Collider->GetWorldBounds();
 			if (WorldBounds.IsValid)
 			{
+				// Project the latch onto each attributed piece to identify the piece that actually owns
+				// the contact, while still retaining every piece for the overall direction estimate.
+				const float ProjectionRadius = static_cast<float>(
+					FVector::Distance(LatchSurfaceWorld, WorldBounds.GetCenter()) +
+					WorldBounds.GetExtent().Size() + 1.0);
+				const FRopeSurfaceProjection Projection =
+					Collider->ProjectToSurface(LatchSurfaceWorld, ProjectionRadius);
+				if (Projection.bHit && Projection.Distance < ClosestSurfaceDistance)
+				{
+					ClosestSurfaceDistance = Projection.Distance;
+					ContactedShapeCenter = WorldBounds.GetCenter();
+					bHasContactedShapeCenter = true;
+				}
+
 				FVector Corners[8];
 				WorldBounds.GetVertices(Corners);
 				for (const FVector& Corner : Corners)
@@ -428,10 +446,23 @@ namespace
 		{
 			return false;
 		}
-		OutAxisOrigin = LocalUnion.IsValid
-			? CompRigid.TransformPosition(LocalUnion.GetCenter())
-			: BoneXform.GetLocation();
 		OutAxisDirection = BestShapeAxis.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+		if (bHasContactedShapeCenter)
+		{
+			// Translation along an axis does not change its line. Preserve the union's axial coordinate
+			// while taking the two radial coordinates from the actually contacted shape.
+			const FVector UnionCenter = LocalUnion.IsValid
+				? CompRigid.TransformPosition(LocalUnion.GetCenter())
+				: ContactedShapeCenter;
+			OutAxisOrigin = ContactedShapeCenter + OutAxisDirection *
+				FVector::DotProduct(UnionCenter - ContactedShapeCenter, OutAxisDirection);
+		}
+		else
+		{
+			OutAxisOrigin = LocalUnion.IsValid
+				? CompRigid.TransformPosition(LocalUnion.GetCenter())
+				: BoneXform.GetLocation();
+		}
 		return true;
 	}
 }

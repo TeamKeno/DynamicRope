@@ -606,6 +606,58 @@ bool FRopeWrappingShapeExtentAxisTest::RunTest(const FString& Parameters)
 			FMath::Abs(Wrapping.State.PathAxisOrigin.Z - 50.0) < 1.0);
 	}
 
+	// 4) RopeLog-style collision: one horizontal convex plus two remote supports share one virtual bone.
+	// The union still supplies the long Y direction, but its Z centre is far below the contacted bar.
+	// The winding axis must pass through the contacted bar, not through the three-piece union centre.
+	{
+		const auto MakeConvexPiece = [&](const FVector& Extent, const FVector& Translation)
+		{
+			TArray<FPlane> Planes;
+			Planes.Add(FPlane(FVector(1, 0, 0), Extent.X));
+			Planes.Add(FPlane(FVector(-1, 0, 0), Extent.X));
+			Planes.Add(FPlane(FVector(0, 1, 0), Extent.Y));
+			Planes.Add(FPlane(FVector(0, -1, 0), Extent.Y));
+			Planes.Add(FPlane(FVector(0, 0, 1), Extent.Z));
+			Planes.Add(FPlane(FVector(0, 0, -1), Extent.Z));
+			FRopeConvexCollider Piece(MoveTemp(Planes), FBox(-Extent, Extent),
+				FQuat::Identity, Translation);
+			Piece.Bone = LogBone;
+			Piece.SourceMesh = Mesh;
+			return Piece;
+		};
+
+		FRopeConvexCollider Bar = MakeConvexPiece(FVector(30, 150, 30), FVector(0, 0, 100));
+		FRopeConvexCollider LeftSupport = MakeConvexPiece(FVector(20, 20, 100), FVector(0, -120, 0));
+		FRopeConvexCollider RightSupport = MakeConvexPiece(FVector(20, 20, 100), FVector(0, 120, 0));
+		TArray<IRopeCollider*> Colliders = { &Bar, &LeftSupport, &RightSupport };
+		FRopeSimState Sim = RopeTest::MakeStraightRope(9, 160.0f,
+			FVector(0, 0, 131), FVector(1, 0, 0));
+
+		FRopeSurfaceAnchor Latch;
+		Latch.NodeIndex = 0;
+		Latch.Bone = LogBone;
+		Latch.Mesh = Mesh;
+		Latch.LocalSurfacePosition = FVector(0, 0, 130);
+		Latch.LocalNormal = FVector(0, 0, 1);
+		Latch.LocalTangent = FVector(1, 0, 0);
+		Latch.StartWorldPosition = FVector(0, 0, 130);
+		Latch.SurfaceOffset = 1.0f;
+
+		FRopeWrapConfig Config = MakeTestWrapConfig();
+		const FRopeWrappingPhase::FContext Ctx{ Config, Colliders,
+			/*SurfaceOffset*/ 1.0f, TEXT("WrappingTest"), true,
+			/*bHasGuidePlaneNormal*/ false, FVector::ZeroVector };
+
+		FRopeWrappingPhase Wrapping;
+		TestTrue(TEXT("wrapping begins on a multi-piece log"), Wrapping.Begin(Latch, 0.16f, Sim, Ctx));
+		TestTrue(FString::Printf(TEXT("multi-piece log keeps the union long axis (dir=%s)"),
+				*Wrapping.State.PathAxisDirection.ToString()),
+			FMath::Abs(FVector::DotProduct(Wrapping.State.PathAxisDirection, FVector(0, 1, 0))) > 0.99f);
+		TestTrue(FString::Printf(TEXT("axis origin stays on the contacted bar (origin=%s)"),
+				*Wrapping.State.PathAxisOrigin.ToString()),
+			FMath::Abs(Wrapping.State.PathAxisOrigin.Z - 100.0) < 1.0);
+	}
+
 	return true;
 }
 

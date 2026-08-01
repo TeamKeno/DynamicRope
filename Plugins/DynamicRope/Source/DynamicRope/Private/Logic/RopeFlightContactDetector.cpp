@@ -5,6 +5,11 @@
 // TRACE_CPUPROFILER_EVENT_SCOPE (Unreal Insights)
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
+float FRopeFlightContactDetector::ComputeFrameToSubstepRatio(float FrameDeltaTime, float SubstepDeltaTime)
+{
+	return (SubstepDeltaTime > KINDA_SMALL_NUMBER) ? (FrameDeltaTime / SubstepDeltaTime) : 1.0f;
+}
+
 void FRopeFlightContactDetector::DetectContactCandidates(const FRopeSimState& Sim, const TArray<IRopeCollider*>& Colliders,
 	const FParams& Params, TArray<FRopeContactCandidate>& OutCandidates)
 {
@@ -213,8 +218,8 @@ void FRopeFlightContactDetector::AddPredictedContactCandidates(const FRopeSimSta
 	// the velocity times the substep delta, so using it as a per-frame lookahead requires converting it by the ratio
 	// of the frame to the substep. Without that it is applied too weakly by the substep count, twelve by default. The
 	// guided node branch uses a per-frame target difference and does not apply this conversion.
-	const float FrameToSubstepRatio = (Params.SubstepDeltaTime > KINDA_SMALL_NUMBER)
-		? (Params.FrameDeltaTime / Params.SubstepDeltaTime) : 1.0f;
+	const float FrameToSubstepRatio =
+		ComputeFrameToSubstepRatio(Params.FrameDeltaTime, Params.SubstepDeltaTime);
 
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{

@@ -9,6 +9,15 @@
 #include "RopeComponent.h"
 #include "Components/SceneComponent.h"
 #include "RopeTestHelpers.h"
+#include "Subsystem/RopeSimSubsystem.h"
+
+struct FRopeSimSubsystemTestSeam
+{
+	static FBox ComputeRopeQueryBounds(const URopeComponent& Rope, float DeltaTime)
+	{
+		return URopeSimSubsystem::ComputeRopeQueryBounds(Rope, DeltaTime);
+	}
+};
 
 struct FRopeComponentRefactorTestSeam
 {
@@ -20,6 +29,17 @@ struct FRopeComponentRefactorTestSeam
 	static void ConfigureSim(URopeComponent& Rope, int32 NumNodes, float RopeLength)
 	{
 		Rope.Sim = RopeTest::MakeStraightRope(NumNodes, RopeLength);
+	}
+
+	static void ConfigurePredictiveBoundsMotion(URopeComponent& Rope, const FVector& SubstepDisplacement,
+		int32 Substeps, float PredictionFrames)
+	{
+		for (int32 i = 0; i < Rope.Sim.Num(); ++i)
+		{
+			Rope.Sim.PrevPositions[i] = Rope.Sim.Positions[i] - SubstepDisplacement;
+		}
+		Rope.SolverConfig.Substeps = Substeps;
+		Rope.WrapConfig.PredictiveContactFrames = PredictionFrames;
 	}
 
 	static void SyncVirtualBridges(URopeComponent& Rope,
@@ -139,6 +159,48 @@ struct FRopeComponentRefactorTestSeam
 		return Rope.ContactTracker.DwellTime;
 	}
 };
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopePredictiveGatherBoundsFrameScaleTest,
+	"DynamicRope.Collision.Gather.PredictiveBoundsUseFrameDisplacement",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopePredictiveGatherBoundsFrameScaleTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	FRopeComponentRefactorTestSeam::ConfigureSim(*Rope, 3, 20.0f);
+	FRopeComponentRefactorTestSeam::ConfigurePredictiveBoundsMotion(
+		*Rope, FVector(10.0, 0.0, 0.0), /*Substeps*/ 8, /*PredictionFrames*/ 1.0f);
+	FRopeComponentRefactorTestSeam::SetPhase(*Rope, ERopePhase::Flight);
+
+	const float SubstepDeltaTime = (1.0f / 60.0f) / 8.0f;
+	const FBox OneSubstepBounds =
+		FRopeSimSubsystemTestSeam::ComputeRopeQueryBounds(*Rope, SubstepDeltaTime);
+	const FBox OneFrameBounds =
+		FRopeSimSubsystemTestSeam::ComputeRopeQueryBounds(*Rope, 1.0f / 60.0f);
+
+	// The same 10 cm Verlet displacement represents 80 cm over a frame at eight substeps. The common
+	// base margin cancels, leaving exactly 70 cm of additional predictive reach on both AABB sides.
+	TestTrue(TEXT("query bounds are valid"), OneSubstepBounds.IsValid && OneFrameBounds.IsValid);
+	TestTrue(TEXT("positive prediction reach is frame-scaled"),
+		FMath::IsNearlyEqual(OneFrameBounds.Max.X - OneSubstepBounds.Max.X, 70.0, 1e-3));
+	TestTrue(TEXT("negative prediction reach is frame-scaled"),
+		FMath::IsNearlyEqual(OneSubstepBounds.Min.X - OneFrameBounds.Min.X, 70.0, 1e-3));
+
+	FRopeComponentRefactorTestSeam::SetPhase(*Rope, ERopePhase::Contacting);
+	const FBox ContactingBounds =
+		FRopeSimSubsystemTestSeam::ComputeRopeQueryBounds(*Rope, 1.0f / 60.0f);
+	FRopeComponentRefactorTestSeam::SetPhase(*Rope, ERopePhase::Wrapping);
+	const FBox WrappingBounds =
+		FRopeSimSubsystemTestSeam::ComputeRopeQueryBounds(*Rope, 1.0f / 60.0f);
+
+	// Once Flight hands off, only the tight Pos union Prev bounds and base collision margin remain.
+	TestTrue(TEXT("Flight alone receives the predictive reach"),
+		FMath::IsNearlyEqual(OneFrameBounds.Max.X - ContactingBounds.Max.X, 80.0, 1e-3));
+	TestTrue(TEXT("Contacting and Wrapping use the same non-predictive bounds"),
+		ContactingBounds.Min.Equals(WrappingBounds.Min, 1e-3) &&
+		ContactingBounds.Max.Equals(WrappingBounds.Max, 1e-3));
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeVirtualBridgeSingleLifecycleTest,
 	"DynamicRope.Component.Wrapping.VirtualBridgeSingleLifecycle",
