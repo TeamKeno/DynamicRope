@@ -20,6 +20,7 @@
 // FSceneView / FViewUniformShaderParameters (GDF pass View UB) — Phase 2c
 #include "SceneView.h"
 #include "DataDrivenShaderPlatformInfo.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/ScopeLock.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE — render thread dispatch path ground truth (Unreal Insights CPU timeline).
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -74,6 +75,13 @@ DECLARE_DWORD_COUNTER_STAT(TEXT("GPU Substeps/Frame"), STAT_RopeGPU_Substeps, ST
 // Carry. So we only use these two forms without RopeRHICompat gating — follow this when adding a new GPU scope.
 DECLARE_GPU_STAT_NAMED(RopeGPUSolve, TEXT("DynamicRope Solve"));
 DECLARE_GPU_STAT_NAMED(RopeGPUDetect, TEXT("DynamicRope Detect"));
+
+#if WITH_DEV_AUTOMATION_TESTS
+// Test-only gate used to deterministically keep a ready contact copy armed while another graph dispatches.
+static TAutoConsoleVariable<int32> CVarRopeTestHoldContactReadbacks(
+	TEXT("r.DynamicRope.Test.HoldContactReadbacks"), 0,
+	TEXT("Automation-only: defer ready GPU contact readback consumption."), ECVF_Default);
+#endif
 
 // RT-only frame upload accumulator (Reset at the start of RunSteps, SET at the end). RunSteps runs once per frame.
 #if STATS
@@ -346,7 +354,7 @@ struct FRopeGPUContactGPU
 };
 static_assert(sizeof(FRopeGPUContactGPU) % 16 == 0, "FRopeGPUContactGPU must be 16-byte aligned to match HLSL structured buffer.");
 
-// contact detection compute (G3). After solving, sweep the resident location and record the deepest contact per node in OutContacts.
+// contact detection compute (G3). After solving, sweep the resident location and record the earliest contact per node in OutContacts.
 // Separate file (RopeContactDetect.usf) — Only the collider model/query (RopeColliderCommon.ush) is shared with the solve shader.
 class FRopeContactDetectCS : public FGlobalShader
 {
@@ -360,6 +368,7 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(int32, DetectNumNodes)
+		SHADER_PARAMETER(int32, DetectAccumulateContacts)
 		SHADER_PARAMETER(int32, DetectNumCapsules)
 		SHADER_PARAMETER(int32, DetectNumSDF)
 		SHADER_PARAMETER(int32, DetectNumBoxes)
@@ -409,7 +418,18 @@ IMPLEMENT_GLOBAL_SHADER(FRopeContactDetectCS, "/Plugin/DynamicRope/Private/RopeC
 // Resident State Definitions
 // ---------------------------------------------------------------------------------------------------
 
-// render thread only. rope 1 persistent GPU buffer + readback (single in-Flight, consume and then rearm).
+struct FRopeResidentContactSlot
+{
+	TRefCountPtr<FRDGPooledBuffer> Buffer;
+	FRHIGPUBufferReadback* Readback = nullptr;
+	uint32 Generation = 0;
+	uint32 AttribSig = 0;
+	int32 NumNodes = 0;
+	uint64 DispatchSerial = 0;
+	bool bArmed = false;
+};
+
+// render thread only. rope 1 persistent GPU buffer + asynchronous readback state.
 struct FRopeResidentRope
 {
 	TRefCountPtr<FRDGPooledBuffer> PosBuf;
@@ -437,12 +457,11 @@ struct FRopeResidentRope
 	// (SDF volume grid/header resident moved from per-rope to global FRopeGlobalSDFCache — resident once per VolumeKey.
 	//  rope only uploads the instance (bone transform) array every frame. Globalization eliminates duplicate upload/collection churn re-upload for each rope.)
 
-	// contact detection (G3): actual/predictive 2 slot output per node buffer (resident, regenerated only when the number of nodes changes) + readback.
-	TRefCountPtr<FRDGPooledBuffer> ContactBuf;
-	FRHIGPUBufferReadback* ContactReadback = nullptr;
-	// Attribution signature of dispatch armed with contact readback — sent in results upon consumption (basis for attribution check).
-	uint32 ContactAttribSig = 0;
-	bool bContactArmed = false;
+	// Contact detection (G3): two lazy ping-pong slots are the normal path. If both copies are still
+	// in flight, acquisition grows this pool instead of dropping a transient contact observation.
+	TArray<FRopeResidentContactSlot> ContactSlots;
+	int32 NextContactSlot = 0;
+	uint64 NextContactDispatchSerial = 1;
 };
 
 // GT<->RT shared results. RT fills and GT GetLatest reads under lock.
@@ -538,6 +557,16 @@ FRopeGPUSolver::~FRopeGPUSolver()
 	ReleaseAll_RenderThread();
 }
 
+static void RopeReleaseContactSlots(FRopeResidentRope& Resident)
+{
+	for (FRopeResidentContactSlot& Slot : Resident.ContactSlots)
+	{
+		delete Slot.Readback;
+		Slot.Readback = nullptr;
+	}
+	Resident.ContactSlots.Reset();
+}
+
 void FRopeGPUSolver::ReleaseAll_RenderThread()
 {
 	for (TPair<uint32, FRopeResidentRope>& Pair : Impl->RtRopes)
@@ -545,7 +574,7 @@ void FRopeGPUSolver::ReleaseAll_RenderThread()
 		delete Pair.Value.PosReadback;      Pair.Value.PosReadback = nullptr;
 		delete Pair.Value.PrevReadback;     Pair.Value.PrevReadback = nullptr;
 		delete Pair.Value.LambdaReadback;   Pair.Value.LambdaReadback = nullptr;
-		delete Pair.Value.ContactReadback;  Pair.Value.ContactReadback = nullptr;
+		RopeReleaseContactSlots(Pair.Value);
 	}
 	Impl->RtRopes.Empty();
 	// Any unconsumed steps are also discarded — if any, the next dispatch revives the resident map that was just emptied.
@@ -583,7 +612,7 @@ void FRopeGPUSolver::ReleaseRope(uint32 RopeId)
 				delete Resident->PosReadback;
 				delete Resident->PrevReadback;
 				delete Resident->LambdaReadback;
-				delete Resident->ContactReadback;
+				RopeReleaseContactSlots(*Resident);
 				Impl->RtRopes.Remove(RopeId);
 			}
 		});
@@ -740,14 +769,17 @@ bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, T
 			{
 				DrainReadback(Resident->LambdaReadback, static_cast<uint32>(NumNodes) * sizeof(float));
 			}
-			if (Resident->bContactArmed)
+			for (FRopeResidentContactSlot& Slot : Resident->ContactSlots)
 			{
-				DrainReadback(Resident->ContactReadback,
-					static_cast<uint32>(2 * NumNodes) * sizeof(FRopeGPUContactGPU));
+				if (Slot.bArmed)
+				{
+					DrainReadback(Slot.Readback,
+						static_cast<uint32>(2 * Slot.NumNodes) * sizeof(FRopeGPUContactGPU));
+					Slot.bArmed = false;
+				}
 			}
 			Resident->bReadbackArmed = false;
 			Resident->bLambdaArmed = false;
-			Resident->bContactArmed = false;
 
 			{
 				FScopeLock SL(&Impl->Results->Lock);
@@ -868,6 +900,49 @@ struct FRopeStepBuild
 
 // Loop 1: Just before frame readback consume(immediate Lock — Process *before* RDG builder configuration to create immediate RHI and
 // Avoid interleaving of open graphs. Lock is legal because it is a render thread, and there is no stall because it is an IsReady gate).
+static bool RopeCanConsumeContactSlot(const FRopeResidentContactSlot& Slot)
+{
+#if WITH_DEV_AUTOMATION_TESTS
+	if (CVarRopeTestHoldContactReadbacks.GetValueOnRenderThread() != 0)
+	{
+		return false;
+	}
+#endif
+	return Slot.bArmed && Slot.Readback && Slot.Readback->IsReady();
+}
+
+static void RopeTrimIdleContactOverflow(FRopeResidentRope& Resident)
+{
+	constexpr int32 DefaultContactSlots = 2;
+	while (Resident.ContactSlots.Num() > DefaultContactSlots && !Resident.ContactSlots.Last().bArmed)
+	{
+		delete Resident.ContactSlots.Last().Readback;
+		Resident.ContactSlots.Pop(EAllowShrinking::No);
+	}
+	if (Resident.ContactSlots.Num() > 0)
+	{
+		Resident.NextContactSlot %= Resident.ContactSlots.Num();
+	}
+}
+
+static void RopeDiscardReadyContactSlots(FRopeResidentRope& Resident)
+{
+	for (FRopeResidentContactSlot& Slot : Resident.ContactSlots)
+	{
+		if (!RopeCanConsumeContactSlot(Slot))
+		{
+			continue;
+		}
+		const uint32 Bytes = static_cast<uint32>(2 * Slot.NumNodes) * sizeof(FRopeGPUContactGPU);
+		if (Slot.Readback->Lock(Bytes))
+		{
+			Slot.Readback->Unlock();
+		}
+		Slot.bArmed = false;
+	}
+	RopeTrimIdleContactOverflow(Resident);
+}
+
 static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 	FRopeResidentSharedResults& Results, const TArray<FRopeGPUResidentStep>& Steps)
 {
@@ -888,7 +963,9 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 		{
 			Resident.bReadbackArmed = false;
 			Resident.bLambdaArmed = false;
-			Resident.bContactArmed = false;
+			// Old-generation contact slots cannot be reused until their asynchronous copies complete.
+			// Drain only ready copies; acquisition will use another lazy slot for the new generation.
+			RopeDiscardReadyContactSlots(Resident);
 			continue;
 		}
 
@@ -941,41 +1018,66 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 			Resident.bLambdaArmed = false;
 		}
 
-		// contact detection readback(G3): independent of location consume (detection may not be present since only Flight is armed).
+		// Contact readback(G3): drain every ready graph snapshot. A newer no-hit snapshot must not erase
+		// a transient hit that became ready in the same drain, so the newest non-empty snapshot wins.
 		TArray<FRopeGPUContactResult> TmpContacts;
 		bool bHaveContacts = false;
-		if (Resident.bContactArmed && Resident.ContactReadback && Resident.ContactReadback->IsReady())
+		bool bSelectedNonEmptyContacts = false;
+		uint64 SelectedContactSerial = 0;
+		uint32 SelectedContactGeneration = Resident.Generation;
+		uint32 SelectedContactAttribSig = 0;
+		for (FRopeResidentContactSlot& ContactSlot : Resident.ContactSlots)
 		{
-			// 2 slots per node: [0..NumNodes) actual, [NumNodes..2*NumNodes) predictive.
-			// slot index % NumNodes = node index.
-			const uint32 ContactBytes = (uint32)(2 * NumNodes) * sizeof(FRopeGPUContactGPU);
-			if (const FRopeGPUContactGPU* Src =
-				(const FRopeGPUContactGPU*)Resident.ContactReadback->Lock(ContactBytes))
+			if (!RopeCanConsumeContactSlot(ContactSlot))
 			{
-				for (int32 Slot = 0; Slot < 2 * NumNodes; ++Slot)
-				{
-					if (Src[Slot].bHit == 0)
-					{
-						continue;
-					}
-					FRopeGPUContactResult Contact;
-					Contact.NodeIndex       = Slot % NumNodes;
-					Contact.ColliderType    = Src[Slot].ColliderType;
-					Contact.ColliderIndex   = Src[Slot].ColliderIndex;
-					Contact.Source          = (uint8)Src[Slot].Source;
-					// penetration packed in w.
-					Contact.Penetration     = Src[Slot].WorldPoint.W;
-					Contact.WorldPoint      = FVector(Src[Slot].WorldPoint.X, Src[Slot].WorldPoint.Y, Src[Slot].WorldPoint.Z);
-					Contact.Normal          = FVector(Src[Slot].Normal.X, Src[Slot].Normal.Y, Src[Slot].Normal.Z);
-					Contact.SurfaceVelocity = FVector(Src[Slot].SurfaceVel.X, Src[Slot].SurfaceVel.Y, Src[Slot].SurfaceVel.Z);
-					TmpContacts.Add(Contact);
-				}
-				Resident.ContactReadback->Unlock();
-				bHaveContacts = true;
+				continue;
 			}
-			// Consumed — rearmed in dispatch block.
-			Resident.bContactArmed = false;
+
+			TArray<FRopeGPUContactResult> SlotContacts;
+			const int32 SlotNumNodes = ContactSlot.NumNodes;
+			const uint32 ContactBytes = static_cast<uint32>(2 * SlotNumNodes) * sizeof(FRopeGPUContactGPU);
+			if (const FRopeGPUContactGPU* Src =
+				static_cast<const FRopeGPUContactGPU*>(ContactSlot.Readback->Lock(ContactBytes)))
+			{
+				if (ContactSlot.Generation == Resident.Generation && SlotNumNodes == NumNodes)
+				{
+					for (int32 ContactIndex = 0; ContactIndex < 2 * SlotNumNodes; ++ContactIndex)
+					{
+						if (Src[ContactIndex].bHit == 0)
+						{
+							continue;
+						}
+						FRopeGPUContactResult Contact;
+						Contact.NodeIndex       = ContactIndex % SlotNumNodes;
+						Contact.ColliderType    = Src[ContactIndex].ColliderType;
+						Contact.ColliderIndex   = Src[ContactIndex].ColliderIndex;
+						Contact.Source          = static_cast<uint8>(Src[ContactIndex].Source);
+						Contact.Penetration     = Src[ContactIndex].WorldPoint.W;
+						Contact.WorldPoint      = FVector(Src[ContactIndex].WorldPoint.X, Src[ContactIndex].WorldPoint.Y, Src[ContactIndex].WorldPoint.Z);
+						Contact.Normal          = FVector(Src[ContactIndex].Normal.X, Src[ContactIndex].Normal.Y, Src[ContactIndex].Normal.Z);
+						Contact.SurfaceVelocity = FVector(Src[ContactIndex].SurfaceVel.X, Src[ContactIndex].SurfaceVel.Y, Src[ContactIndex].SurfaceVel.Z);
+						SlotContacts.Add(Contact);
+					}
+
+					const bool bSlotHasContacts = SlotContacts.Num() > 0;
+					const bool bSelectSlot =
+						(bSlotHasContacts && (!bSelectedNonEmptyContacts || ContactSlot.DispatchSerial > SelectedContactSerial)) ||
+						(!bSlotHasContacts && !bSelectedNonEmptyContacts && ContactSlot.DispatchSerial > SelectedContactSerial);
+					if (bSelectSlot)
+					{
+						TmpContacts = MoveTemp(SlotContacts);
+						bHaveContacts = true;
+						bSelectedNonEmptyContacts = bSlotHasContacts;
+						SelectedContactSerial = ContactSlot.DispatchSerial;
+						SelectedContactGeneration = ContactSlot.Generation;
+						SelectedContactAttribSig = ContactSlot.AttribSig;
+					}
+				}
+				ContactSlot.Readback->Unlock();
+			}
+			ContactSlot.bArmed = false;
 		}
+		RopeTrimIdleContactOverflow(Resident);
 
 		if (!bHavePos && !bHaveContacts && !bHaveTension)
 		{
@@ -1006,9 +1108,15 @@ static void RopeConsumeReadbacks(TMap<uint32, FRopeResidentRope>& RtRopes,
 		if (bHaveContacts)
 		{
 			FRopeResidentContacts& LatestContacts = Results.Contacts.FindOrAdd(Step.RopeId);
-			LatestContacts.Contacts   = MoveTemp(TmpContacts);
-			LatestContacts.Generation = Resident.Generation;
-			LatestContacts.AttribSig  = Resident.ContactAttribSig;
+			// Once a hit event is published for this generation, a later no-hit snapshot cannot erase it
+			// before the game thread observes it. A newer non-empty event may replace it normally.
+			if (TmpContacts.Num() > 0 || LatestContacts.Generation != SelectedContactGeneration
+				|| LatestContacts.Contacts.Num() == 0)
+			{
+				LatestContacts.Contacts   = MoveTemp(TmpContacts);
+				LatestContacts.Generation = SelectedContactGeneration;
+				LatestContacts.AttribSig  = SelectedContactAttribSig;
+			}
 		}
 	}
 }
@@ -1564,31 +1672,60 @@ static void RopeArmReadbacks(FRDGBuilder& GraphBuilder, const FRopeGPUResidentSt
 	}
 }
 
-// contact detection (G3): Sweep the post-solve position after solving. RDG guarantees the solve(UAV)→detect(SRV) order.
-// 2 slots (actual+predictive) output per node. ContactBuf (resident, 2N slot) is secured only when there is detection.
+// Contact detection (G3): acquire a buffer whose previous asynchronous copy is no longer armed. Two
+// metadata slots cover the normal ping-pong path; delayed GPUs grow the pool lazily rather than dropping
+// this graph's observation. Each acquired buffer is shared only by compatible temporal passes in this graph.
+static int32 RopeAcquireContactSlot(FRDGBuilder& GraphBuilder, FRopeResidentRope& Resident,
+	int32 NumNodes, FRDGBufferRef& OutContactRDG)
+{
+	constexpr int32 DefaultContactSlots = 2;
+	if (Resident.ContactSlots.Num() == 0)
+	{
+		Resident.ContactSlots.SetNum(DefaultContactSlots);
+	}
+
+	int32 SlotIndex = INDEX_NONE;
+	for (int32 Offset = 0; Offset < Resident.ContactSlots.Num(); ++Offset)
+	{
+		const int32 CandidateIndex = (Resident.NextContactSlot + Offset) % Resident.ContactSlots.Num();
+		if (!Resident.ContactSlots[CandidateIndex].bArmed)
+		{
+			SlotIndex = CandidateIndex;
+			break;
+		}
+	}
+	if (SlotIndex == INDEX_NONE)
+	{
+		SlotIndex = Resident.ContactSlots.AddDefaulted();
+		UE_LOG(LogDynamicRopeGPU, Verbose,
+			TEXT("GPU contact readback pool expanded to %d slot(s) for a delayed rope."),
+			Resident.ContactSlots.Num());
+	}
+	Resident.NextContactSlot = (SlotIndex + 1) % Resident.ContactSlots.Num();
+
+	FRopeResidentContactSlot& Slot = Resident.ContactSlots[SlotIndex];
+	if (!Slot.Buffer.IsValid() || Slot.NumNodes != NumNodes)
+	{
+		OutContactRDG = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(FRopeGPUContactGPU), 2 * NumNodes), TEXT("Rope.Contacts"));
+		Slot.Buffer = GraphBuilder.ConvertToExternalBuffer(OutContactRDG);
+		Slot.NumNodes = NumNodes;
+	}
+	else
+	{
+		OutContactRDG = GraphBuilder.RegisterExternalBuffer(Slot.Buffer);
+	}
+	return SlotIndex;
+}
+
 static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step,
-	FRopeResidentRope& Resident, const FRopeStepBuild& Build)
+	const FRopeStepBuild& Build, FRDGBufferRef ContactRDG, bool bAccumulateContacts)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeRT_AddDetectPass);
 	SCOPE_CYCLE_COUNTER(STAT_RopeGPU_AddDetectPass);
 	// Nested within solve scope — detection kernel time is attributed here, not Solve.
 	RDG_EVENT_SCOPE_STAT(GraphBuilder, RopeGPUDetect, "DynamicRope Detect");
 	const int32 NumNodes = Step.NumNodes;
-
-	const bool bContactSeed = !Resident.ContactBuf.IsValid() || Build.bSeed;
-	FRDGBufferRef ContactRDG = nullptr;
-	if (bContactSeed)
-	{
-		ContactRDG = GraphBuilder.CreateBuffer(
-			FRDGBufferDesc::CreateStructuredDesc(sizeof(FRopeGPUContactGPU), 2 * NumNodes), TEXT("Rope.Contacts"));
-		Resident.ContactBuf = GraphBuilder.ConvertToExternalBuffer(ContactRDG);
-		// Regeneration → The previous contact readback is stale.
-		Resident.bContactArmed = false;
-	}
-	else
-	{
-		ContactRDG = GraphBuilder.RegisterExternalBuffer(Resident.ContactBuf);
-	}
 
 	// Whip guide buffer (G3b) for predictive contact. Per-node mask/target when whip active, otherwise 1 dummy.
 	const bool bHasWhip = Step.WhipGuidedMask.Num() == NumNodes && Step.PredictionFrames > 0.0f;
@@ -1634,6 +1771,7 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 
 	FRopeContactDetectCS::FParameters* DetectParams = GraphBuilder.AllocParameters<FRopeContactDetectCS::FParameters>();
 	DetectParams->DetectNumNodes       = NumNodes;
+	DetectParams->DetectAccumulateContacts = bAccumulateContacts ? 1 : 0;
 	// Detection uses only the front wrappable capsule/box. The caller appends the static world shape to the end.
 	// Pass boundaries to NumDetectCapsules/NumDetectBoxes to ensure that static contacts do not obscure wrap candidates.
 	// NumDetectCapsules=-1 participates in the entire capsule (existing behavior).
@@ -1675,22 +1813,29 @@ static void RopeAddDetectPass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 #endif
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RopeContactDetect"),
 		DetectShader, DetectParams, FIntVector(1, 1, 1));
+}
 
-	if (!Resident.bContactArmed)
+static void RopeArmContactReadback(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step,
+	FRopeResidentRope& Resident, int32 SlotIndex, FRDGBufferRef ContactRDG)
+{
+	const int32 NumNodes = Step.NumNodes;
+	check(Resident.ContactSlots.IsValidIndex(SlotIndex));
+	FRopeResidentContactSlot& Slot = Resident.ContactSlots[SlotIndex];
+	check(!Slot.bArmed);
+	if (!Slot.Readback)
 	{
-		if (!Resident.ContactReadback)
-		{
-			Resident.ContactReadback = new FRHIGPUBufferReadback(TEXT("Rope.ContactReadback"));
-		}
-		AddEnqueueCopyPass(GraphBuilder, Resident.ContactReadback, ContactRDG,
-			(uint32)(2 * NumNodes) * sizeof(FRopeGPUContactGPU));
-		// The set pointed to by ColliderIndex belongs to *this* dispatch — it carries its signature with it to the results.
-		Resident.ContactAttribSig = Step.AttribSig;
-#if STATS
-		GRopeReadbackBytes += (uint64)(2 * NumNodes) * sizeof(FRopeGPUContactGPU);
-#endif
-		Resident.bContactArmed = true;
+		Slot.Readback = new FRHIGPUBufferReadback(TEXT("Rope.ContactReadback"));
 	}
+	AddEnqueueCopyPass(GraphBuilder, Slot.Readback, ContactRDG,
+		static_cast<uint32>(2 * NumNodes) * sizeof(FRopeGPUContactGPU));
+	Slot.Generation = Step.Generation;
+	Slot.AttribSig = Step.AttribSig;
+	Slot.NumNodes = NumNodes;
+	Slot.DispatchSerial = Resident.NextContactDispatchSerial++;
+	Slot.bArmed = true;
+#if STATS
+	GRopeReadbackBytes += static_cast<uint64>(2 * NumNodes) * sizeof(FRopeGPUContactGPU);
+#endif
 }
 
 // Shared execution unit (RT) of resident steps. Whether it is a dedicated graph (Step) or a scene renderer graph (DispatchPending_RenderThread)
@@ -1829,16 +1974,44 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	{
 		LastPreparedIndexByRope.Add(Prepared[PreparedIndex].Step->RopeId, PreparedIndex);
 	}
-
-	// --- 2b: Issue solve dispatches continuously before any copy/detection. Different ropes remain independent;
-	// queued steps for the same rope share a UAV, so RDG preserves their original dispatch order.
-	for (FRopePreparedStep& Entry : Prepared)
+	struct FContactBatch
 	{
+		FRDGBufferRef ContactRDG = nullptr;
+		int32 SlotIndex = INDEX_NONE;
+		uint32 AttribSig = 0;
+		int32 LastDetectPreparedIndex = INDEX_NONE;
+		bool bHasDispatch = false;
+	};
+	TMap<uint32, FContactBatch> ContactBatches;
+
+	// --- 2b: Observe every temporal step immediately after its solve. Different ropes still use
+	// independent resources, while repeated steps for one rope are explicitly ordered as
+	// solve(A) -> detect(A) -> solve(B) -> detect(B).
+	for (int32 PreparedIndex = 0; PreparedIndex < Prepared.Num(); ++PreparedIndex)
+	{
+		FRopePreparedStep& Entry = Prepared[PreparedIndex];
 		Entry.LambdaRDG = RopeAddSolvePass(GraphBuilder, *Entry.Step, Entry.Build,
 			bGDFInSolver ? View : nullptr, GDFSolverParams, bGDFSolverValid, PreViewTranslation);
+		if (Entry.Step->bDetectContacts)
+		{
+			FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Entry.Step->RopeId);
+			FContactBatch& Batch = ContactBatches.FindOrAdd(Entry.Step->RopeId);
+			if (!Batch.ContactRDG)
+			{
+				Batch.SlotIndex = RopeAcquireContactSlot(
+					GraphBuilder, Resident, Entry.Step->NumNodes, Batch.ContactRDG);
+			}
+			// ColliderIndex is valid only within one attribution signature. A changed collider set
+			// resets the slots; compatible steps retain the earliest hit in each node/source slot.
+			const bool bAccumulate = Batch.bHasDispatch && Batch.AttribSig == Entry.Step->AttribSig;
+			RopeAddDetectPass(GraphBuilder, *Entry.Step, Entry.Build, Batch.ContactRDG, bAccumulate);
+			Batch.AttribSig = Entry.Step->AttribSig;
+			Batch.LastDetectPreparedIndex = PreparedIndex;
+			Batch.bHasDispatch = true;
+		}
 	}
 
-	// --- 2c: Readback rearmament (asynchronous copy). Before detection (2d) — Pos transitions in only one direction: UAV → CopySrc → SRV.
+	// --- 2c: Position/tension readback rearmament after every temporal solve/detect for the rope.
 	for (int32 PreparedIndex = 0; PreparedIndex < Prepared.Num(); ++PreparedIndex)
 	{
 		FRopePreparedStep& Entry = Prepared[PreparedIndex];
@@ -1850,15 +2023,16 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		RopeArmReadbacks(GraphBuilder, *Entry.Step, Resident, Entry.Build, Entry.LambdaRDG);
 	}
 
-	// --- 2d: contact detection (Flight rope only). Solve results are read as SRV — order is guaranteed to be RDG dependent.
-	for (int32 PreparedIndex = 0; PreparedIndex < Prepared.Num(); ++PreparedIndex)
+	// --- 2d: Copy the accumulated contact slots once, after the last temporal detect pass.
+	for (const TPair<uint32, FContactBatch>& Pair : ContactBatches)
 	{
-		FRopePreparedStep& Entry = Prepared[PreparedIndex];
-		if (LastPreparedIndexByRope.FindRef(Entry.Step->RopeId) == PreparedIndex
-			&& Entry.Step->bDetectContacts)
+		const FContactBatch& Batch = Pair.Value;
+		if (Batch.bHasDispatch && Prepared.IsValidIndex(Batch.LastDetectPreparedIndex))
 		{
-			FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Entry.Step->RopeId);
-			RopeAddDetectPass(GraphBuilder, *Entry.Step, Resident, Entry.Build);
+			FRopePreparedStep& Entry = Prepared[Batch.LastDetectPreparedIndex];
+			FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Pair.Key);
+			RopeArmContactReadback(
+				GraphBuilder, *Entry.Step, Resident, Batch.SlotIndex, Batch.ContactRDG);
 		}
 	}
 
@@ -1889,7 +2063,10 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 			if (Resident.PosBuf.IsValid())     { RopeBytes += Resident.PosBuf->GetSize(); }
 			if (Resident.PrevBuf.IsValid())    { RopeBytes += Resident.PrevBuf->GetSize(); }
 			if (Resident.InvMassBuf.IsValid()) { RopeBytes += Resident.InvMassBuf->GetSize(); }
-			if (Resident.ContactBuf.IsValid()) { RopeBytes += Resident.ContactBuf->GetSize(); }
+			for (const FRopeResidentContactSlot& ContactSlot : Resident.ContactSlots)
+			{
+				if (ContactSlot.Buffer.IsValid()) { RopeBytes += ContactSlot.Buffer->GetSize(); }
+			}
 		}
 		uint64 SdfBytes = 0;
 		if (Impl->GlobalSDF.DistBuf.IsValid()) { SdfBytes += Impl->GlobalSDF.DistBuf->GetSize(); }
@@ -2004,9 +2181,8 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 					Impl->HandoffGDFBlockedRopes.Remove(Dropped.RopeId);
 					if (PreservedTemporalIndices.Contains(PendingIndex))
 					{
-						// Only the newest frame publishes contact/readback observations. The older frame still solves
-						// with its own colliders and overrides before the newer one.
-						Dropped.bDetectContacts = false;
+						// Preserve Flight detection with the temporal solve. RunSteps accumulates compatible
+						// observations so a transient contact cannot disappear behind the newest queued frame.
 						PreservedTemporalSteps.Add(MoveTemp(Dropped));
 						continue;
 					}

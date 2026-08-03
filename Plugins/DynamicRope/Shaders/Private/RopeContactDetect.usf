@@ -1,11 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
 // The contact detection compute shader. After the solve it sweeps the resident positions and finds the
-// deepest contact per node, mirroring the CPU flight contact detector. It writes two slots per node: the
-// first holds the actual contact, swept from the previous to the current position, and the second holds
-// the predictive one, swept from the current position to the predicted one. The GPU cannot produce bones
-// or meshes, so it emits collider indices alone and the game thread restores the attribution and the
-// deduplication.
+// earliest contacting sample per node, mirroring the CPU flight contact detector. Colliders at that sample
+// still compete by penetration, which gives one stable winner without letting a thick target's far side or
+// an internal convex-decomposition face replace the entry contact. It writes two slots per node: the first
+// holds the actual contact, swept from the previous to the current position, and the second holds the
+// predictive one, swept from the current position to the predicted one. The GPU cannot produce bones or
+// meshes, so it emits collider indices alone and the game thread restores the attribution and deduplication.
 //
 // It is a separate pipeline stage from the solve kernel in RopeXPBD.usf, sharing only the collider model
 // and queries in RopeColliderCommon.ush, which is why it lives in its own file. The maximum node count
@@ -37,6 +38,8 @@ struct FRopeGPUContact
 };
 
 int   DetectNumNodes;
+// Zero overwrites all slots; nonzero keeps a hit recorded by an earlier compatible temporal step.
+int   DetectAccumulateContacts;
 int   DetectNumCapsules;
 int   DetectNumSDF;
 // The number of wrappable boxes. Only the leading range of the box buffer takes part in detection, which
@@ -79,8 +82,10 @@ bool RopeDetectIsTail(uint i)
 	return (int)i >= max(1, DetectNumNodes - 4);
 }
 
-// Sweeps the path from A to B at one more than the sample count and returns the deepest contact. It
-// mirrors the CPU sweep.
+// Sweeps the path from A to B at one more than the sample count and returns the first contacting sample.
+// Within that sample the deepest collider wins. Keeping the time ordering is load-bearing for a thick
+// convex: a global deepest search can cross the medial axis and return the exit face as the wrap anchor.
+// It mirrors the CPU sweep.
 FRopeGPUContact RopeDetectSweep(float3 A, float3 B, int SourceFlag)
 {
 	FRopeGPUContact Best;
@@ -97,12 +102,13 @@ FRopeGPUContact RopeDetectSweep(float3 A, float3 B, int SourceFlag)
 	// thickness and a fast node would pass a thin collider between samples. It uses the same expression as
 	// the CPU sweep; letting the two diverge is exactly what parity testing cannot catch.
 	const int SampleCount = clamp((int)ceil(Travel / max(DetectSweepStep, 0.1f)), 1, max(DetectMaxSweepSamples, 1));
-	float BestPen = 0.0f;
-
 	for (int s = 0; s <= SampleCount; ++s)
 	{
 		const float Alpha = (float)s / (float)SampleCount;
 		const float3 P = lerp(A, B, Alpha);
+		// Reset only the score. Best cannot hold an earlier hit because the first hit returns at the end of
+		// this sample; retaining the initialized output fields keeps the no-contact path allocation-free.
+		float BestPen = 0.0f;
 
 		// Capsule, mirroring the CPU capsule query. The surface velocity is the interpolation of the
 		// current and previous endpoints at the material point, scaled by the reciprocal frame delta.
@@ -206,6 +212,13 @@ FRopeGPUContact RopeDetectSweep(float3 A, float3 B, int SourceFlag)
 				Best.SurfaceVel = float4((CClosest - Wprev) * InvDt, 0.0f);
 			}
 		}
+
+		// Do not inspect deeper samples. On a multi-convex body they may expose a decomposition seam or the
+		// opposite side of the target, neither of which is the surface the rope entered through.
+		if (Best.bHit != 0)
+		{
+			return Best;
+		}
 	}
 	return Best;
 }
@@ -223,8 +236,13 @@ void RopeContactDetectCS(uint3 GroupThreadId : SV_GroupThreadID)
 	const float3 PrevP = DetectPrevPositions[i].xyz;
 	const float3 CurP  = DetectPositions[i].xyz;
 
-	// The actual contact: sweep from the previous position to the current one.
-	OutContacts[i] = RopeDetectSweep(PrevP, CurP, /*Actual*/ 1);
+	// The actual contact: sweep from the previous position to the current one. A catch-up graph can
+	// contain several temporal steps for this rope, so compatible later steps keep the earliest hit.
+	FRopeGPUContact Actual = RopeDetectSweep(PrevP, CurP, /*Actual*/ 1);
+	if (DetectAccumulateContacts == 0 || OutContacts[i].bHit == 0)
+	{
+		OutContacts[i] = Actual;
+	}
 
 	// The predictive contact: sweep from the current position to the predicted one. There is none when
 	// the prediction frame count is at or below zero.
@@ -264,5 +282,9 @@ void RopeContactDetectCS(uint3 GroupThreadId : SV_GroupThreadID)
 		}
 	}
 
-	OutContacts[DetectNumNodes + i] = Pred;
+	const uint PredSlot = DetectNumNodes + i;
+	if (DetectAccumulateContacts == 0 || OutContacts[PredSlot].bHit == 0)
+	{
+		OutContacts[PredSlot] = Pred;
+	}
 }

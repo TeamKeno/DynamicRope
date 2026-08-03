@@ -26,12 +26,15 @@
 // CPU detection(parity ground-truth)
 #include "Logic/RopeFlightContactDetector.h"
 #include "RopeTestHelpers.h"
+#include "HAL/IConsoleManager.h"
 #include "RHI.h"
 // SubmitAndBlockUntilGPUIdle
 #include "RHICommandList.h"
+#include "RenderGraphBuilder.h"
 // FlushRenderingCommands
 #include "RenderingThread.h"
 #include "Misc/App.h"
+#include "Misc/ScopeExit.h"
 
 namespace
 {
@@ -705,6 +708,10 @@ bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
 
 	// static rope(prev==pos) at z=15. Box-type convex (6 planes): x=60 center, half width (30,50,30) → nodes 2/3/4 are inside.
 	FRopeSimState Sim = RopeTest::MakeStraightRope(N, Length, FVector(0, 0, 15));
+	// Make the tail cross both faces in one frame; capture must stay on the first face encountered.
+	constexpr int32 SweptNode = N - 1;
+	Sim.PrevPositions[SweptNode] = FVector(-40.0f, 0.0f, 15.0f);
+	Sim.Positions[SweptNode] = FVector(160.0f, 0.0f, 15.0f);
 	TArray<FPlane> Planes;
 	Planes.Add(FPlane(FVector(1, 0, 0), 30.0));
 	Planes.Add(FPlane(FVector(-1, 0, 0), 30.0));
@@ -832,6 +839,214 @@ bool FRopeGPUConvexContactParityTest::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("Node %d normal matches (dot %.3f)"), Node, NormalDot), NormalDot > 0.99f);
 		const float PointDev = static_cast<float>(FVector::Dist((*GpuC)->WorldPoint, Pair.Value->WorldPoint));
 		TestTrue(FString::Printf(TEXT("Node %d contact point matches (diff %.3f cm)"), Node, PointDev), PointDev < 0.5f);
+	}
+
+	const FRopeContactCandidate** CpuEntryPtr = CpuByNode.Find(SweptNode);
+	const FRopeGPUContactResult** GpuEntryPtr = GpuByNode.Find(SweptNode);
+	if (TestNotNull(TEXT("CPU detects the complete thick-convex crossing"), CpuEntryPtr)
+		&& TestNotNull(TEXT("GPU detects the complete thick-convex crossing"), GpuEntryPtr))
+	{
+		TestTrue(TEXT("CPU keeps the negative-X entry normal"), (*CpuEntryPtr)->Normal.X < -0.99f);
+		TestTrue(TEXT("GPU keeps the negative-X entry normal"), (*GpuEntryPtr)->Normal.X < -0.99f);
+		TestTrue(TEXT("GPU entry point stays on the negative-X face"),
+			FMath::IsNearlyEqual((*GpuEntryPtr)->WorldPoint.X, 30.0f, 0.5f));
+	}
+
+	return true;
+}
+
+
+// A catch-up batch can contain a one-frame convex crossing followed by a pose that is already clear of
+// the target. Contact detection must observe and retain the intermediate step instead of sampling only
+// the newest resident pose.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUQueuedIntermediateConvexContactTest,
+	"DynamicRope.Solver.GPUQueuedIntermediateConvexContact",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUQueuedIntermediateConvexContactTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU queued intermediate convex contact test skipped: no renderable RHI (headless)."));
+		return true;
+	}
+
+	constexpr int32 NumNodes = 8;
+	constexpr int32 SweptNode = NumNodes - 1;
+	constexpr uint32 RopeId = 131;
+	constexpr uint32 Generation = 1;
+	constexpr uint32 AttribSig = 0xC0111D3u;
+	constexpr float ContactRadius = 3.0f;
+
+	FRopeSimState Sim = RopeTest::MakeStraightRope(NumNodes, 140.0f, FVector(0, 0, 15));
+	Sim.PrevPositions[SweptNode] = FVector(-40.0f, 0.0f, 15.0f);
+	Sim.Positions[SweptNode] = FVector(160.0f, 0.0f, 15.0f);
+
+	TArray<FPlane> Planes;
+	Planes.Add(FPlane(FVector(1, 0, 0), 30.0));
+	Planes.Add(FPlane(FVector(-1, 0, 0), 30.0));
+	Planes.Add(FPlane(FVector(0, 1, 0), 50.0));
+	Planes.Add(FPlane(FVector(0, -1, 0), 50.0));
+	Planes.Add(FPlane(FVector(0, 0, 1), 30.0));
+	Planes.Add(FPlane(FVector(0, 0, -1), 30.0));
+	FRopeConvexCollider Convex(MoveTemp(Planes),
+		FBox(FVector(-30.0, -50.0, -30.0), FVector(30.0, 50.0, 30.0)),
+		FQuat::Identity, FVector(60.0, 0.0, 0.0));
+
+	auto MakeStep = [&]()
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId = RopeId;
+		Step.Generation = Generation;
+		Step.NumNodes = NumNodes;
+		Step.SeedPositions = Sim.Positions;
+		Step.SeedPrevPositions = Sim.PrevPositions;
+		Step.InvMass = Sim.InvMass;
+		Step.SegmentLength = Sim.SegmentLength;
+		Step.NumSub = 0;
+		Step.FixedDt = 1.0f / 60.0f;
+		Step.bDetectContacts = true;
+		Step.ContactRadius = ContactRadius;
+		Step.AttribSig = AttribSig;
+
+		TConstArrayView<FPlane> LocalPlanes;
+		FBox LocalBounds(ForceInit);
+		FQuat CvRot, CvPrevRot;
+		FVector CvTrans, CvPrevTrans;
+		float CvInvDt = 0.0f;
+		if (Convex.GetGPUConvex(LocalPlanes, LocalBounds, CvRot, CvTrans,
+			CvPrevRot, CvPrevTrans, CvInvDt))
+		{
+			FRopeGPUConvex Cv;
+			Cv.PlaneOffset = 0;
+			Cv.PlaneCount = LocalPlanes.Num();
+			Cv.LocalBoundsCenter = LocalBounds.GetCenter();
+			Cv.LocalBoundsExtent = LocalBounds.GetExtent();
+			Cv.Rot = CvRot;
+			Cv.Trans = CvTrans;
+			Cv.PrevRot = CvPrevRot;
+			Cv.PrevTrans = CvPrevTrans;
+			Cv.InvDeltaTime = CvInvDt;
+			for (const FPlane& Plane : LocalPlanes)
+			{
+				Step.ConvexPlanes.Add(FVector4(Plane.X, Plane.Y, Plane.Z, Plane.W));
+			}
+			Step.Convexes.Add(Cv);
+			Step.NumDetectConvexes = 1;
+		}
+		return Step;
+	};
+
+	FRopeGPUResidentStep CrossingStep = MakeStep();
+	FRopeGPUResidentStep ClearStep = MakeStep();
+	const uint8 PoseFlags = static_cast<uint8>(ERopeGPUOverride::Position | ERopeGPUOverride::Prev);
+	CrossingStep.OverrideFlags.SetNumUninitialized(NumNodes);
+	CrossingStep.OverridePositions.SetNumUninitialized(NumNodes);
+	CrossingStep.OverridePrevPositions.SetNumUninitialized(NumNodes);
+	for (int32 NodeIndex = 0; NodeIndex < NumNodes; ++NodeIndex)
+	{
+		CrossingStep.OverrideFlags[NodeIndex] = PoseFlags;
+		CrossingStep.OverridePositions[NodeIndex] = Sim.Positions[NodeIndex];
+		CrossingStep.OverridePrevPositions[NodeIndex] = Sim.PrevPositions[NodeIndex];
+	}
+	ClearStep.OverrideFlags.SetNumUninitialized(NumNodes);
+	ClearStep.OverridePositions.SetNumUninitialized(NumNodes);
+	ClearStep.OverridePrevPositions.SetNumUninitialized(NumNodes);
+	for (int32 NodeIndex = 0; NodeIndex < NumNodes; ++NodeIndex)
+	{
+		const FVector ClearPosition(NodeIndex * 20.0f, 200.0f, 15.0f);
+		ClearStep.OverrideFlags[NodeIndex] = PoseFlags;
+		ClearStep.OverridePositions[NodeIndex] = ClearPosition;
+		ClearStep.OverridePrevPositions[NodeIndex] = ClearPosition;
+	}
+
+	IConsoleVariable* HoldContactReadbacks =
+		IConsoleManager::Get().FindConsoleVariable(TEXT("r.DynamicRope.Test.HoldContactReadbacks"));
+	if (!TestNotNull(TEXT("Contact readback hold test control is registered"), HoldContactReadbacks))
+	{
+		return false;
+	}
+	HoldContactReadbacks->Set(1, ECVF_SetByCode);
+	ON_SCOPE_EXIT
+	{
+		HoldContactReadbacks->Set(0, ECVF_SetByCode);
+	};
+
+	FRopeGPUSolver GpuSolver;
+	// Arm a no-hit copy in graph A and deliberately keep it in-flight from the consumer's point of view.
+	// Graph B below must use another contact slot or its transient convex hit will be lost.
+	TArray<FRopeGPUResidentStep> InitialClearSteps;
+	InitialClearSteps.Add(ClearStep);
+	GpuSolver.Step(MoveTemp(InitialClearSteps));
+	FlushRenderingCommands();
+
+	TArray<FRopeGPUResidentStep> CrossingEnqueue;
+	CrossingEnqueue.Add(MoveTemp(CrossingStep));
+	GpuSolver.EnqueueSteps(MoveTemp(CrossingEnqueue));
+	FlushRenderingCommands();
+	TArray<FRopeGPUResidentStep> ClearEnqueue;
+	ClearEnqueue.Add(ClearStep);
+	GpuSolver.EnqueueSteps(MoveTemp(ClearEnqueue));
+	FlushRenderingCommands();
+
+	// Flush the pending queue through the same scene-graph entry point used at runtime. The explicit
+	// GPU idle makes the asynchronous contact copy ready before the poll step consumes it.
+	ENQUEUE_RENDER_COMMAND(RopeQueuedContactDispatch)(
+		[&GpuSolver](FRHICommandListImmediate& RHICmdList)
+		{
+			FRDGBuilder GraphBuilder(RHICmdList);
+			GpuSolver.DispatchPending_RenderThread(
+				GraphBuilder, nullptr, nullptr, FVector3f::ZeroVector);
+			GraphBuilder.Execute();
+			RHICmdList.SubmitAndBlockUntilGPUIdle();
+		});
+	FlushRenderingCommands();
+
+	// Keep both copies armed and submit graph C. This forces the lazy third slot and provides a newer
+	// no-hit snapshot, exercising both overflow allocation and hit-preserving drain selection.
+	TArray<FRopeGPUResidentStep> HeldClearSteps;
+	HeldClearSteps.Add(ClearStep);
+	GpuSolver.Step(MoveTemp(HeldClearSteps));
+	FlushRenderingCommands();
+	ENQUEUE_RENDER_COMMAND(RopeQueuedContactOverflowSync)(
+		[](FRHICommandListImmediate& RHICmdList)
+		{
+			RHICmdList.SubmitAndBlockUntilGPUIdle();
+		});
+	FlushRenderingCommands();
+	HoldContactReadbacks->Set(0, ECVF_SetByCode);
+
+	// Submit one clear step so RunSteps drains graph A's no-hit and graph B's hit together. The newer
+	// no-hit observation must not erase the transient hit before the game thread can observe it.
+	TArray<FRopeGPUResidentStep> PollSteps;
+	PollSteps.Add(MoveTemp(ClearStep));
+	GpuSolver.Step(MoveTemp(PollSteps));
+	FlushRenderingCommands();
+
+	TMap<uint32, FRopeResidentContacts> Latest;
+	GpuSolver.GetLatestContacts(Latest);
+	const FRopeResidentContacts* Contacts = Latest.Find(RopeId);
+	if (!TestNotNull(TEXT("Intermediate convex contact readback is published"), Contacts))
+	{
+		return false;
+	}
+	TestEqual(TEXT("Intermediate contact keeps its generation"), Contacts->Generation, Generation);
+	TestEqual(TEXT("Intermediate contact keeps its attribution signature"), Contacts->AttribSig, AttribSig);
+
+	const FRopeGPUContactResult* SweptContact = nullptr;
+	for (const FRopeGPUContactResult& Contact : Contacts->Contacts)
+	{
+		if (Contact.NodeIndex == SweptNode && Contact.Source == 1)
+		{
+			SweptContact = &Contact;
+			break;
+		}
+	}
+	if (TestNotNull(TEXT("One-frame thick-convex crossing survives the newer clear pose"), SweptContact))
+	{
+		TestEqual(TEXT("Retained contact is convex"), SweptContact->ColliderType, 3);
+		TestTrue(TEXT("Retained contact stays on the negative-X entry face"),
+			SweptContact->Normal.X < -0.99f && FMath::IsNearlyEqual(SweptContact->WorldPoint.X, 30.0f, 0.5f));
 	}
 
 	return true;

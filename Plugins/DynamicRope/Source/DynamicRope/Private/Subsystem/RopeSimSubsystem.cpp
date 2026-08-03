@@ -1491,11 +1491,11 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 		return true;
 	};
 
-	// FrameColliders is the game-thread snapshot gathered in Prepare. Two passes: non-static (skeletal)
+	// FrameColliders is the game-thread snapshot gathered in Prepare. Two passes: non-static (wrappable)
 	// colliders first, static (world) ones after. The detection kernel only looks at capsules in
 	// [0, NumDetectCapsules), so a static capsule is excluded from detection automatically — detection keeps
-	// only the single deepest contact per node, and a wall contact masking a bone contact would silently cost
-	// the wrap its capture. (A box is not in the detection kernel at all.) The solve sees all of them.
+	// only one contact per node, and a wall contact masking a wrappable contact would silently cost the wrap
+	// its capture. The solve sees all colliders from both passes.
 	for (IRopeCollider* Collider : Rope.SimFrame.FrameColliders)
 	{
 		if (!Collider || Collider->IsWorldStatic())
@@ -1555,6 +1555,23 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 	// The convex detection boundary: convexes up to here can be wrapped.
 	Step.NumDetectConvexes = Step.Convexes.Num();
 
+	// Guard against misattributing a delayed GPU contact. A detection result can only name colliders in the
+	// prefixes above, so its signature must describe exactly those prefixes. Including the static solve-only
+	// suffix made an unrelated world collider entering or leaving the rope region discard an otherwise valid
+	// wrappable contact one to two frames later, even though every detection index was unchanged.
+	if (bDetectThisRope)
+	{
+		uint32 Sig = 0x9E3779B9u;
+		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuCapsuleAttribution, Sig);
+		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuSdfAttribution, Sig);
+		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuBoxAttribution, Sig);
+		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuConvexAttribution, Sig);
+		// Signature 0 is reserved for "unset", so a hash that happens to be 0 is pushed to 1 to keep it distinct from a warm-up.
+		Rope.SimFrame.GpuAttribSig = (Sig == 0) ? 1u : Sig;
+		// Static colliders appended below cannot invalidate the detectable set recorded on this dispatch.
+		Step.AttribSig = Rope.SimFrame.GpuAttribSig;
+	}
+
 	// Pass 2: static world colliders, for the solve only. Capsules (spheres, capsules) are appended after the
 	// detection boundary, and boxes have their own array. The attribution table is filled for static capsules
 	// too, as None and null, to keep the indices aligned — defensive, since the detection kernel never emits an
@@ -1600,22 +1617,6 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 			// Static — None, since it takes no part in detection and is here only to keep the indices aligned.
 			Rope.SimFrame.GpuConvexAttribution.Add(MakeAttribution(Collider));
 		}
-	}
-
-	// Guard against misattributing a delayed GPU contact: roll this frame's attribution set signature, which
-	// only means anything on a detect frame. BuildGpuFlightCandidates gates the consumption of a delayed
-	// contact on the recent window being stable (current == Prev1 == Prev2).
-	if (bDetectThisRope)
-	{
-		uint32 Sig = 0x9E3779B9u;
-		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuCapsuleAttribution, Sig);
-		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuSdfAttribution, Sig);
-		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuBoxAttribution, Sig);
-		Sig = RopeComputeAttribSig(Rope.SimFrame.GpuConvexAttribution, Sig);
-		// Signature 0 is reserved for "unset", so a hash that happens to be 0 is pushed to 1 to keep it distinct from a warm-up.
-		Rope.SimFrame.GpuAttribSig = (Sig == 0) ? 1u : Sig;
-		// Record the signature of the set this dispatch used into the step; the detection result carries it back unchanged.
-		Step.AttribSig = Rope.SimFrame.GpuAttribSig;
 	}
 }
 

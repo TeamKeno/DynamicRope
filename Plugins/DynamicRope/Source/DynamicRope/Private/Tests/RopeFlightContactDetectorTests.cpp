@@ -10,6 +10,7 @@
 
 #include "Logic/RopeFlightContactDetector.h"
 #include "Collision/RopeCollider.h"
+#include "Collision/RopeStaticCollider.h"
 #include "Components/SceneComponent.h"
 #include "RopeTestHelpers.h"
 
@@ -82,6 +83,39 @@ bool FRopeFlightThinColliderTunnelTest::RunTest(const FString& Parameters)
 	Params.ContactMaxSweepSamples = 4;
 	const FRopeContact Missed = FRopeFlightContactDetector::SweepOrSampleContact(Sim, Prev, Curr, Colliders, Params);
 	TestFalse(TEXT("a 4-sample cap tunnels through it again"), Missed.bHit);
+	return true;
+}
+
+// A thick target must latch on its entry surface instead of a later internal/far-side sample.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeFlightThickConvexEntryContactTest,
+	"DynamicRope.FlightContact.ThickConvexKeepsEarliestEntrySurface",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeFlightThickConvexEntryContactTest::RunTest(const FString& Parameters)
+{
+	const FRopeSimState Sim = RopeTest::MakeStraightRope(2, 20.0f);
+	TArray<FPlane> Planes;
+	Planes.Add(FPlane(FVector(1, 0, 0), 30.0));
+	Planes.Add(FPlane(FVector(-1, 0, 0), 30.0));
+	Planes.Add(FPlane(FVector(0, 1, 0), 30.0));
+	Planes.Add(FPlane(FVector(0, -1, 0), 30.0));
+	Planes.Add(FPlane(FVector(0, 0, 1), 30.0));
+	Planes.Add(FPlane(FVector(0, 0, -1), 30.0));
+	FRopeConvexCollider ThickConvex(MoveTemp(Planes), FBox(FVector(-30.0), FVector(30.0)));
+	ThickConvex.Bone = FName(TEXT("log"));
+	TArray<IRopeCollider*> Colliders = { &ThickConvex };
+
+	FRopeFlightContactDetector::FParams Params = MakeDetectParams(/*MinLatchNodes*/ 1,
+		/*PredictiveFrames*/ 0.0f, /*ContactRadius*/ 3.0f);
+	Params.ContactSweepStep = 2.0f;
+	Params.ContactMaxSweepSamples = 16;
+	const FRopeContact Hit = FRopeFlightContactDetector::SweepOrSampleContact(
+		Sim, FVector(-100.0f, 0.0f, 0.0f), FVector(100.0f, 0.0f, 0.0f), Colliders, Params);
+
+	TestTrue(TEXT("the thick convex is detected"), Hit.bHit);
+	TestTrue(TEXT("the contact normal points back through the entry face"), Hit.Normal.X < -0.99f);
+	TestTrue(TEXT("the contact point stays on the negative-X entry plane"),
+		FMath::IsNearlyEqual(Hit.SurfacePoint.X, -30.0f, 0.1f));
 	return true;
 }
 
@@ -439,8 +473,8 @@ bool FRopeFlightAssistedPrimaryShadowTest::RunTest(const FString& Parameters)
 	TArray<FRopeContactCandidate> Candidates;
 	TArray<IRopeCollider*> AllColliders = { &Primary, &DeeperNeighbor };
 	FRopeFlightContactDetector::DetectContactCandidates(Sim, AllColliders, Params, Candidates);
-	TestTrue(TEXT("the regular deepest-only pass demonstrates the neighboring-bone shadow"),
-		Candidates.Num() == 1 && Candidates[0].Bone == NeighborBone);
+	TestTrue(TEXT("the regular time-ordered pass keeps the first contacting bone"),
+		Candidates.Num() == 1 && Candidates[0].Bone == PrimaryBone);
 
 	TArray<uint8> Mask;
 	Mask.SetNumZeroed(Sim.Num());

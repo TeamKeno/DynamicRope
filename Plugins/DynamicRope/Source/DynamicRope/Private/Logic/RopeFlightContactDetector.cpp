@@ -406,8 +406,8 @@ void FRopeFlightContactDetector::GatherNearbyColliders(const FVector& PrevPositi
 	for (IRopeCollider* Collider : Colliders)
 	{
 		// Static world colliders are excluded from detection: they are not wrap targets, having no bone attribution,
-		// and in the deepest-single-candidate selection a wall contact would hide a bone contact and silently prevent
-		// a capture. The GPU detection kernel excludes static colliders under the same convention.
+		// and the single-candidate selection could otherwise let a wall contact hide a bone contact and silently
+		// prevent a capture. The GPU detection kernel excludes static colliders under the same convention.
 		if (!Collider || Collider->IsWorldStatic())
 		{
 			continue;
@@ -437,6 +437,7 @@ FRopeContact FRopeFlightContactDetector::SweepOrSampleContact(const FRopeSimStat
 	{
 		const float Alpha = static_cast<float>(SampleIdx) / static_cast<float>(SampleCount);
 		const FVector SamplePos = FMath::Lerp(PrevPosition, Position, Alpha);
+		FRopeContact SampleBest;
 		for (const IRopeCollider* Collider : Colliders)
 		{
 			// The static exclusion: internal callers have already been filtered by the gather, but the debug path
@@ -448,10 +449,18 @@ FRopeContact FRopeFlightContactDetector::SweepOrSampleContact(const FRopeSimStat
 			}
 
 			const FRopeContact Contact = Collider->Query(SamplePos, Params.ContactRadius);
-			if (Contact.bHit && (!Best.bHit || Contact.Penetration > Best.Penetration))
+			if (Contact.bHit && (!SampleBest.bHit || Contact.Penetration > SampleBest.Penetration))
 			{
-				Best = Contact;
+				SampleBest = Contact;
 			}
+		}
+
+		// Preserve sweep time ordering. A thick or decomposed convex may have a much deeper sample near its
+		// centre, but using that sample can flip the normal to the exit face or select an internal hull face.
+		// Colliders still compete by penetration at this one sample, giving a deterministic single candidate.
+		if (SampleBest.bHit)
+		{
+			return SampleBest;
 		}
 	}
 
