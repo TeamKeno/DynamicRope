@@ -70,8 +70,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Crosshair")
 	FLinearColor CrosshairTargetColor = FLinearColor(0.2f, 1.0f, 0.4f, 1.0f);
 
-	/** Colour used for the crosshair and ring when the ray hit something that cannot be wrapped,
-	 *  whether static world geometry, a target refused by the gate, or something with no bone. */
+	/** Colour used for the crosshair and ring when the ray hit a wrap target that cannot be wrapped,
+	 *  whether refused by the gate or carrying no bone. A ray stopped by plain level geometry, a floor
+	 *  or a wall, is not shown as blocked and keeps the ordinary crosshair. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD")
 	FLinearColor BlockedColor = FLinearColor(1.0f, 0.2f, 0.15f, 0.9f);
 
@@ -174,8 +175,8 @@ private:
 	bool bHasScreenAim = false;
 	FVector2D AimScreenPos = FVector2D::ZeroVector;
 	bool bHasScreenTarget = false;
-	// Whether this frame's on-screen target cannot be wrapped, which is drawn in the blocked colour.
-	// Only meaningful while bHasScreenTarget is set.
+	// Whether this frame's on-screen target is a wrap target that cannot be wrapped, which is drawn in
+	// the blocked colour. Only meaningful while bHasScreenTarget is set.
 	bool bScreenTargetBlocked = false;
 	FVector2D TargetScreenPos = FVector2D::ZeroVector;
 	float TargetScreenRadius = 0.0f;

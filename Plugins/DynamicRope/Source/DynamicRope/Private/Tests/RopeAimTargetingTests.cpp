@@ -123,6 +123,8 @@ bool FRopeAimRayResolveOutputsTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("a target refused by the gate falls back to the plain context"), bRejected);
 	TestFalse(TEXT("a target refused by the gate is not a valid hit"), Hit.bHit);
 	TestTrue(TEXT("a target refused by the gate is returned as blocked"), Blocked.bHit);
+	// It is a wrap target that was refused, not level geometry, so the HUD shows its blocked colour.
+	TestTrue(TEXT("a target refused by the gate is a wrap candidate"), Blocked.bWrapCandidate);
 	TestFalse(TEXT("the fallback context carries no aim guide"), Resolved.bHasAimGuideHit);
 	return true;
 }

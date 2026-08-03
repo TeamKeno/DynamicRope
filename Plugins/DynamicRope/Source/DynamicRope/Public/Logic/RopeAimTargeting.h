@@ -41,6 +41,11 @@ struct FRopeAimRayHitResult
 	// An approximation of the hit collider's world bounds radius, as the half-diagonal length, used to
 	// size the aiming HUD's highlight ring.
 	float TargetBoundsRadius = 0.0f;
+	// Whether the hit came from a collider that is a wrap target at all, meaning a skeletal bone or a
+	// wrap target component, rather than plain level geometry. On a blocked hit it separates "a target
+	// exists here but cannot be wrapped", which is worth reporting, from a bare floor or wall, which is
+	// not, and which the aiming HUD therefore leaves as an ordinary untargeted crosshair.
+	bool bWrapCandidate = false;
 };
 
 /** Run once a guaranteed prepared throw has been resolved by the normal gather. The callback may
@@ -162,7 +167,9 @@ public:
 	 *  OutBlockedHit is optional: the nearest hit where the ray struck a collider that cannot be
 	 *  wrapped, whether because it has no bone, no source mesh, was refused by the gate, or was cut off
 	 *  by the world blocker. It is independent of the return value, which reports whether a wrappable
-	 *  hit exists, and drives the blocked indication on the aiming HUD. */
+	 *  hit exists, and drives the blocked indication on the aiming HUD. Its bWrapCandidate says whether
+	 *  the blocker was a wrap target refused this frame or merely level geometry, which is what lets the
+	 *  HUD stay neutral on a floor or a wall. */
 	static bool FindAimRayBoneHit(const FQueryContext& Ctx,
 		const FVector& Origin, const FVector& AimDir, float RayLength, float QueryRadius, float SweepStep,
 		TFunctionRef<bool(const USceneComponent*, FName)> CanWrapTarget,

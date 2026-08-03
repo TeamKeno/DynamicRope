@@ -331,6 +331,7 @@ void URopeWielderComponent::UpdateAimHudSample()
 			// The ray hit something that cannot be wrapped, which is shown as blocked. There may be no bone
 			// binding, so the point that was hit is used as the ring centre.
 			AimHudSample.bBlocked = true;
+			AimHudSample.bBlockedByTarget = Blocked.bWrapCandidate;
 			AimHudSample.Bone = Blocked.Bone;
 			AimHudSample.Mesh = const_cast<USceneComponent*>(Blocked.Mesh);
 			AimHudSample.TargetWorldPos = Blocked.HitWorldPos;

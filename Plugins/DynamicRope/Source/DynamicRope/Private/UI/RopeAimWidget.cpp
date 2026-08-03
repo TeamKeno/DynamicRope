@@ -142,8 +142,11 @@ void URopeAimWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 		bHasScreenAim = true;
 	}
 
-	// A wrappable target, in green, or a hit that cannot be wrapped, in red; both are projected to the screen and drawn as a ring.
-	if (!Sample.bHasTarget && !Sample.bBlocked)
+	// A wrappable target, in green, or a wrap target that was refused, in red; both are projected to the screen and
+	// drawn as a ring. A ray merely stopped by level geometry is not a target at all: it draws no ring and keeps the
+	// neutral crosshair, since colouring every floor and wall red reads as the player's aim being broken.
+	const bool bShowBlocked = Sample.bBlocked && Sample.bBlockedByTarget;
+	if (!Sample.bHasTarget && !bShowBlocked)
 	{
 		return;
 	}
@@ -169,7 +172,7 @@ void URopeAimWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	}
 
 	bHasScreenTarget = true;
-	bScreenTargetBlocked = Sample.bBlocked && !Sample.bHasTarget;
+	bScreenTargetBlocked = bShowBlocked && !Sample.bHasTarget;
 	TargetScreenPos = CenterPos;
 	TargetScreenRadius = ScreenRadius;
 }
@@ -188,7 +191,8 @@ int32 URopeAimWidget::NativePaint(const FPaintArgs& Args, const FGeometry& Allot
 	// The crosshair, at the hit or end point of the real ray as decided by AimRayOriginMode, falling back to the centre of the screen only when the projection fails.
 	{
 		const FVector2D Center = bHasScreenAim ? AimScreenPos : AllottedGeometry.GetLocalSize() * 0.5f;
-	// No target uses the default colour, a wrappable target the acquisition colour, and one that cannot be wrapped red.
+	// No target, which includes a ray stopped by level geometry, uses the default colour; a wrappable target the
+	// acquisition colour; and a wrap target that cannot be wrapped red.
 		FLinearColor Color = CrosshairColor;
 		if (bHasScreenTarget)
 		{

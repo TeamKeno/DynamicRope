@@ -355,10 +355,12 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 		return;
 	}
 
-	// The colour convention matches the aiming HUD: green for wrappable, red for hit but not wrappable,
-	// and cyan for a miss.
+	// The colour convention matches the aiming HUD: green for wrappable, red for a wrap target that
+	// cannot be wrapped, and cyan for a miss. A ray stopped by level geometry is coloured as a miss, as
+	// it is on the HUD, while the drawn ray still ends at the blocking point.
 	const bool bAnyHit = Aim.bHasTarget || Aim.bBlocked;
-	const FColor MainColor = Aim.bHasTarget ? FColor::Green : (Aim.bBlocked ? FColor::Red : FColor::Cyan);
+	const bool bBlockedTarget = Aim.bBlocked && Aim.bBlockedByTarget;
+	const FColor MainColor = Aim.bHasTarget ? FColor::Green : (bBlockedTarget ? FColor::Red : FColor::Cyan);
 	const FVector RayDir = Aim.RayDirection.GetSafeNormal();
 	const FVector RayStart = Aim.RayOrigin;
 	const FVector RayEnd = RayStart + RayDir * Aim.RayLength;
@@ -397,11 +399,18 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 		AddTextLine(FString::Printf(TEXT("  {white}aim: {green}%s{white} dist=%.0f radius=%.1f"),
 			*BoneText, Aim.Distance, Aim.QueryRadius));
 	}
-	else if (Aim.bBlocked)
+	else if (bBlockedTarget)
 	{
-	// The ray hit something that cannot be wrapped: no bone, no source mesh, or refused by CanWrapTarget.
+	// The ray hit a wrap target that cannot be wrapped: no bone or refused by CanWrapTarget.
 		AddTextLine(FString::Printf(TEXT("  {white}aim: {red}blocked{white} %s dist=%.0f {grey}(not wrappable)"),
 			*BoneText, Aim.Distance));
+	}
+	else if (Aim.bBlocked)
+	{
+	// Stopped by level geometry. There is no target, so it reads as a miss, but the distance to the floor or
+	// wall the ray ends on is worth seeing while debugging.
+		AddTextLine(FString::Printf(TEXT("  {white}aim: {grey}no target{white} dist=%.0f radius=%.1f {grey}(world geometry)"),
+			Aim.Distance, Aim.QueryRadius));
 	}
 	else
 	{

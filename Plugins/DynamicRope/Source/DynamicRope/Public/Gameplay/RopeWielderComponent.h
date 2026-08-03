@@ -119,6 +119,17 @@ struct FRopeAimHudSample
 	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
 	bool bBlocked = false;
 
+	/**
+	 * Whether the blocking hit is a wrap target that was refused, meaning a skeletal bone or a wrap
+	 * target component, as opposed to plain level geometry such as a floor or a wall. Meaningful only
+	 * while bBlocked.
+	 * The aiming HUD shows its blocked colour only for the former: a red reticle on every floor and
+	 * wall reads as "aiming is broken" rather than "this cannot be wrapped", so bare geometry keeps the
+	 * ordinary untargeted crosshair.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
+	bool bBlockedByTarget = false;
+
 	/** The bone being aimed at, including virtual bones. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope|Aim HUD")
 	FName Bone = NAME_None;

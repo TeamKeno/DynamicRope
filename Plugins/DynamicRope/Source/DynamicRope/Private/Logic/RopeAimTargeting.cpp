@@ -150,9 +150,9 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 		Ctx.TraceWorldBlocker(RayStart, RayEnd, WorldBlockPoint, WorldBlockDistance);
 	if (bWorldBlocked)
 	{
-		// The blocker is itself a blocked candidate, so aiming at a bare wall or floor lights the HUD's
-		// blocked indication rather than showing nothing at all. It carries no bone or mesh, which is
-		// exactly what an unwrappable collider hit reports too.
+		// The blocker is itself a blocked candidate, so the point the ray actually stops at is available
+		// to the HUD and the debugger. It carries no bone or mesh and leaves bWrapCandidate clear, which
+		// marks it as level geometry rather than a target that was refused.
 		BestBlocked = FRopeAimRayHitResult();
 		BestBlocked.bHit = true;
 		BestBlocked.HitWorldPos = WorldBlockPoint;
@@ -207,6 +207,9 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 				BestBlocked.Normal = Contact.Normal;
 				BestBlocked.Distance = Distance;
 				BestBlocked.TargetBoundsRadius = BoundsRadius;
+				// A collider that names a source mesh is a wrap target, so this block is "cannot wrap that",
+				// not "the level is in the way": static body colliders leave SourceMesh unset.
+				BestBlocked.bWrapCandidate = Contact.SourceMesh != nullptr;
 				bFoundBlocked = true;
 			}
 			continue;
@@ -221,6 +224,7 @@ bool FRopeAimTargeting::FindAimRayBoneHit(const FQueryContext& Ctx,
 		Candidate.Normal = Contact.Normal;
 		Candidate.Distance = Distance;
 		Candidate.TargetBoundsRadius = BoundsRadius;
+		Candidate.bWrapCandidate = true;
 		if (!bFoundHit || Candidate.Distance < BestHit.Distance)
 		{
 			BestHit = Candidate;

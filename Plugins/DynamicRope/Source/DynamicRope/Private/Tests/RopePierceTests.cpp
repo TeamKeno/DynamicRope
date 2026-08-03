@@ -357,6 +357,8 @@ bool FRopePierceOccludedAimTargetTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("no hit is reported"), Hit.bHit);
 		TestTrue(TEXT("the wall is reported as blocked"), Blocked.bHit);
 		TestEqual(TEXT("the blocked distance is the wall's"), Blocked.Distance, 100.0f);
+		// Level geometry, not a refused target, so the aiming HUD keeps its neutral crosshair there.
+		TestFalse(TEXT("the wall is not a wrap candidate"), Blocked.bWrapCandidate);
 	}
 
 	// A blocker behind the target does not hide it. Without this the gate would reject every target that has
