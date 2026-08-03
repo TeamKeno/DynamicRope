@@ -351,6 +351,28 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope|Render|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Smoothing Strength"))
 	float TubeSmoothingAlpha = 0.5f;
 
+	// The taut presentation values below are read every frame (not proxy-captured), so they are
+	// BlueprintReadWrite and a runtime change applies immediately.
+
+	/** Render-only shaping of a taut wrapped hold: the hand-side free span is straightened toward its
+	 *  chord and a short thrum plays when the chain snaps taut, so the tension the tether applies is
+	 *  visible on camera. The simulation, tension and gameplay are unaffected. A span bent over a
+	 *  corner or pivot fades the effect out automatically and renders as solved. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render|Tuning", meta = (DisplayName = "Taut Presentation"))
+	bool bTautPresentation = true;
+
+	/** How far the taut free span is straightened toward its chord, from 0 (as solved) to 1 (dead
+	 *  straight). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render|Tuning",
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bTautPresentation", DisplayName = "Taut Straightening"))
+	float TautStraightening = 1.0f;
+
+	/** Peak displacement, in centimetres, of the decaying string thrum played the moment the chain
+	 *  snaps taut. 0 disables the thrum and keeps the straightening. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Render|Tuning",
+		meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bTautPresentation", DisplayName = "Taut Thrum Amplitude"))
+	float TautThrumAmplitude = 2.5f;
+
 	/** Material for the rope tube. Falls back to the engine default material when unset.
 	 *  Replace it at runtime with SetMaterial(0, M): the scene proxy captures the material when it is built,
 	 *  and a direct assignment does not mark the render state dirty, so it would not show until the proxy is
@@ -1326,6 +1348,25 @@ private:
 	FTransform LastRenderDataComponentTransform = FTransform::Identity;
 	bool bHasLastRenderDataComponentTransform = false;
 	bool bLastRenderDataGpuResident = false;
+
+	//~ Taut hold presentation (render only) ----------------------------------------
+	// Oscillator and blend state for the taut straightening/thrum (see RopeTautPresentation.h). Updated
+	// once per frame in FinalizeSimFrame and consumed by SendRenderDynamicData_Concurrent, which shapes
+	// only the copy sent to the renderer — the simulation never sees it. A frame that shapes the
+	// centerline also drops the GPU-resident flag on its dynamic data, so the tube reads the shaped CPU
+	// upload instead of the solver's untouched position buffer.
+	/** Smoothed 0..1 activation, so the shaping fades in and out instead of popping on the taut edge. */
+	float TautPresentationBlend = 0.0f;
+	/** Decaying thrum amplitude (cm), reset to TautThrumAmplitude on the frame the chain snaps taut. */
+	float TautThrumLevel = 0.0f;
+	/** Thrum oscillator phase, radians. */
+	float TautThrumPhase = 0.0f;
+	bool bWasTautPresentationActive = false;
+	/** Advances the blend and the thrum oscillator; called every frame from FinalizeSimFrame. */
+	void UpdateTautPresentation(float DeltaTime);
+	/** The lowest wrapped node index (surface anchors and legacy latches alike), INDEX_NONE without one.
+	 *  The hand-side free span the presentation shapes is (0, this). */
+	int32 GetFirstWrappedNodeIndex() const;
 
 	//~ Initialization and utilities ------------------------------------------------
 	void InitRope();

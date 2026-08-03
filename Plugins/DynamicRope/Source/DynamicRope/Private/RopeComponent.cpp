@@ -13,6 +13,7 @@
 #include "Render/RopeSceneProxy.h"
 #include "RopeComponentInternal.h"
 #include "RopeGPUSolver.h"
+#include "RopeTautPresentation.h"
 #include "Subsystem/RopeDebugSubsystem.h"
 #include "Subsystem/RopeSimSubsystem.h"
 #include "UObject/ConstructorHelpers.h"
@@ -555,6 +556,10 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		RecordFlightObservation(DetectParams, Candidates, FrameTracker, bShouldCapture, FlightSnapshot);
 	}
 
+	// The taut-hold presentation oscillator has to advance even on a sleeping Wrapped frame, so the thrum
+	// decays and the blend releases in real time rather than freezing with the solve.
+	UpdateTautPresentation(DeltaTime);
+
 	// Push render data only on frames where the centerline, the GPU source or the component transform actually
 	// changed. A rope at rest — Free or Contacting, with no solve, no override and an unchanged transform —
 	// issues no render command at all.
@@ -605,6 +610,50 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 		DebugSub->SubmitSnapshot(this, MoveTemp(DebugSnapshot));
 	}
 #endif
+}
+
+int32 URopeComponent::GetFirstWrappedNodeIndex() const
+{
+	int32 First = INDEX_NONE;
+	for (const FRopeSurfaceAnchor& Anchor : WrapController.State.Anchors)
+	{
+		if (Anchor.NodeIndex != INDEX_NONE && (First == INDEX_NONE || Anchor.NodeIndex < First))
+		{
+			First = Anchor.NodeIndex;
+		}
+	}
+	for (const FRopeLatchNode& Latch : WrapController.State.Latched)
+	{
+		if (Latch.NodeIndex != INDEX_NONE && (First == INDEX_NONE || Latch.NodeIndex < First))
+		{
+			First = Latch.NodeIndex;
+		}
+	}
+	return First;
+}
+
+void URopeComponent::UpdateTautPresentation(float DeltaTime)
+{
+	// Active only while a Wrapped hold is taut and there is a shapeable span: at least one interior node
+	// between the hand and the first wrapped node. bChainTaut already carries the whole-chain taut latch
+	// (chord sum against rest plus the leg sag limit), so by construction the span is near its chord and
+	// the straightening moves nodes at most a few centimetres.
+	const bool bActive = bTautPresentation && Phase == ERopePhase::Wrapped
+		&& PullDrive.bChainTaut && GetFirstWrappedNodeIndex() >= 2;
+
+	// The pluck: the frame the chain snaps taut starts the thrum at full amplitude.
+	if (bActive && !bWasTautPresentationActive)
+	{
+		TautThrumLevel = TautThrumAmplitude;
+		TautThrumPhase = 0.0f;
+	}
+	bWasTautPresentationActive = bActive;
+
+	// Engage faster than release: the snap should read immediately, the let-off softly.
+	TautPresentationBlend = FMath::FInterpTo(TautPresentationBlend, bActive ? 1.0f : 0.0f,
+		DeltaTime, bActive ? 10.0f : 6.0f);
+	TautThrumPhase += DeltaTime * 2.0f * UE_PI * RopeTautPresentation::ThrumFrequencyHz;
+	TautThrumLevel *= FMath::Exp(-RopeTautPresentation::ThrumDecayPerSecond * DeltaTime);
 }
 
 #pragma endregion Simulation_Frame_Pipeline
@@ -704,6 +753,31 @@ void URopeComponent::SendRenderDynamicData_Concurrent()
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{
 		DynamicData->Points[i] = Xform.InverseTransformPosition(Sim.Positions[i]);
+	}
+
+	// Taut-hold presentation: shape the copy just built, never Sim itself. The points are already local,
+	// and the shaping is space-agnostic (a chord blend plus a perpendicular offset), but the thrum's
+	// world-up reference matters, so the shaping runs on world positions and is re-localized.
+	// The blend can outlast the phase by a fade-out frame or two, hence the phase and span re-checks.
+	const int32 PresentEndNode = GetFirstWrappedNodeIndex();
+	if (TautPresentationBlend > UE_KINDA_SMALL_NUMBER && Phase == ERopePhase::Wrapped
+		&& PresentEndNode >= 2 && PresentEndNode < Sim.Num())
+	{
+		RopeTautPresentation::FParams Present;
+		Present.EndNode = PresentEndNode;
+		Present.Straighten = TautPresentationBlend * TautStraightening;
+		Present.ThrumOffset = TautPresentationBlend * TautThrumLevel * FMath::Sin(TautThrumPhase);
+		TArray<FVector> ShapedWorld = Sim.Positions;
+		if (RopeTautPresentation::Apply(ShapedWorld, Present))
+		{
+			// A shaped frame must not render from the solver's resident buffer, which still holds the
+			// unshaped pose — dropping the flag routes the tube through this CPU upload instead.
+			DynamicData->bGpuResident = false;
+			for (int32 i = 1; i < PresentEndNode; ++i)
+			{
+				DynamicData->Points[i] = Xform.InverseTransformPosition(ShapedWorld[i]);
+			}
+		}
 	}
 
 	FRopeSceneProxy* Proxy = static_cast<FRopeSceneProxy*>(SceneProxy);
