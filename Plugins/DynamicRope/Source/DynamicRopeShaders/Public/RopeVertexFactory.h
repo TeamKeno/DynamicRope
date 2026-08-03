@@ -2,17 +2,17 @@
 //
 // The rope tube's vertex factory: FLocalVertexFactory under its own vertex factory type.
 //
-// A rope tube rewrites its vertex buffers in place every frame, so the engine can derive its motion
-// vectors only from the component transform, which is wrong for a deforming mesh: temporal
-// upscalers reproject the tube as static geometry (ghosting) and per-object motion blur smears it.
-// LocalVertexFactory.ush already contains the fix - the GPU-skin passthrough branch reads a
-// per-vertex previous position from a loose-parameter buffer and falls back to zero deformation
-// velocity when the buffer's frame number does not match the view - but driving that branch from
-// engine code requires FGPUSkinPassthroughVertexFactory, which is not exported from the Engine
-// module. Everything the branch actually needs is public, though: the loose parameter struct, the
-// shader define hook, and the parameter-binding base class. This factory therefore reproduces the
-// small C++ side under a rope-owned type and reuses the engine .ush unmodified; there is no forked
-// shader to maintain.
+// A rope tube rewrites its vertex buffers in place every frame, so without help the engine can
+// derive its motion vectors only from the component transform, which is wrong for a deforming mesh:
+// temporal upscalers reproject the tube as static geometry (ghosting) and per-object motion blur
+// smears it. LocalVertexFactory.ush already contains the fix - the GPU-skin passthrough branch
+// reads a per-vertex previous position from a loose-parameter buffer and falls back to zero
+// deformation velocity when the buffer's frame number does not match the view - but driving that
+// branch from engine code requires FGPUSkinPassthroughVertexFactory, which is not exported from the
+// Engine module. Everything the branch actually needs is public, though: the loose parameter
+// struct, the shader define hook, and the parameter-binding base class. This factory therefore
+// reproduces the small C++ side under a rope-owned type and reuses the engine .ush unmodified;
+// there is no forked shader to maintain.
 //
 // A dedicated type also means dedicated material shader permutations, so compilation is gated to
 // the materials a rope can actually use; see ShouldCompilePermutation.
@@ -21,12 +21,27 @@
 
 #include "CoreMinimal.h"
 #include "LocalVertexFactory.h"
+// FGPUSkinPassThroughFactoryLooseParameters, the engine-declared loose parameter struct the
+// passthrough branch of LocalVertexFactory.ush reads. Declared ENGINE_API, so a plugin can create
+// and bind uniform buffers of it even though the engine's passthrough vertex factory itself is not
+// exported.
+#include "GPUSkinVertexFactory.h"
 
 /**
- * The vertex factory the rope's scene proxy renders with. It behaves exactly like
- * FLocalVertexFactory: the passthrough branch is compiled in (the type advertises
- * SupportsGPUSkinPassThrough) but the parameter class binds it inactive, with the null loose
- * parameters, until the proxy supplies a previous-position buffer for velocity output.
+ * The vertex factory the rope's scene proxy renders with.
+ *
+ * With the velocity passthrough disabled it behaves exactly like FLocalVertexFactory: the
+ * passthrough branch is compiled in (the type advertises SupportsGPUSkinPassThrough) but the
+ * parameter class binds it inactive, with the null loose parameters.
+ *
+ * With it enabled, the proxy hands the factory the current/previous position SRVs and the
+ * game-thread frame number once per frame through UpdateLooseParameters, and the parameter class
+ * binds the passthrough branch active. The shader then reads the previous position per vertex for
+ * the velocity pass, and degrades to zero deformation velocity on any frame whose number does not
+ * match the view - which makes stale data (the first frame, a reseed, a paused world) safe by
+ * construction. Enablement is decided once, before InitResource, because the shader bindings are
+ * captured into cached mesh draw commands; per-frame data flows only through the uniform buffer,
+ * which is updated in place.
  */
 class FRopeVertexFactory : public FLocalVertexFactory
 {
@@ -43,4 +58,40 @@ public:
 	 * the usage, setting the flag automatically in the editor.
 	 */
 	static bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
+
+	/**
+	 * Enables the velocity passthrough. Must be called before InitResource: the decision is baked
+	 * into the cached mesh draw command bindings, so it is fixed for the factory's lifetime.
+	 * The caller is responsible for checking IsGPUSkinPassThroughSupported for the platform.
+	 */
+	DYNAMICROPESHADERS_API void SetVelocityPassThroughEnabled(bool bEnabled);
+	bool IsVelocityPassThroughEnabled() const { return bVelocityPassThrough; }
+
+	/**
+	 * Render thread, once per frame before the frame's positions are written: points the loose
+	 * parameters at the current and previous position buffers and stamps the frame number.
+	 * Pass MAX_uint32 as the frame number to mark the previous positions invalid for this frame;
+	 * the shader then outputs zero deformation velocity.
+	 * The uniform buffer contents are updated in place, so bindings captured in cached mesh draw
+	 * commands stay valid.
+	 */
+	DYNAMICROPESHADERS_API void UpdateLooseParameters(FRHICommandListBase& RHICmdList, uint32 FrameNumber,
+		FRHIShaderResourceView* PositionSRV, FRHIShaderResourceView* PreviousPositionSRV,
+		FRHIShaderResourceView* PreSkinnedTangentSRV);
+
+	const TUniformBufferRef<FGPUSkinPassThroughFactoryLooseParameters>& GetLooseParametersUniformBuffer() const
+	{
+		return LooseParametersUniformBuffer;
+	}
+
+private:
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	virtual void ReleaseRHI() override;
+
+	// Whether the velocity passthrough is bound active; fixed before InitResource.
+	bool bVelocityPassThrough = false;
+
+	// The loose parameters the passthrough branch reads. Created once in InitRHI, so it exists by
+	// the time the first mesh draw command is cached, and updated in place afterwards.
+	TUniformBufferRef<FGPUSkinPassThroughFactoryLooseParameters> LooseParametersUniformBuffer;
 };

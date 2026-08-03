@@ -41,6 +41,12 @@ struct FRopeDynamicData
 	// the previous frame's value, and a build at frame N-1 drawn with the transform of frame N makes a
 	// world-fixed point, such as a wrap node, jitter by exactly the component's movement.
 	FMatrix44f WorldToLocal = FMatrix44f::Identity;
+	// The game-thread GFrameCounter of the frame that produced this data. The vertex factory stamps it
+	// into the velocity loose parameters, and the shader outputs deformation velocity only when it equals
+	// the view's frame counter, which is captured from the same game-thread counter when the view family
+	// is created. Any mismatch - a skipped update, a scene capture built on another frame - degrades to
+	// zero deformation velocity instead of reading a wrong previous position.
+	uint32 FrameNumber = 0;
 };
 
 /** The dynamic index buffer; the topology is fixed for the lifetime of the proxy. */
@@ -176,6 +182,13 @@ private:
 	// UVs, generated alongside the positions by the GPU tube
 	FRopeGpuTexCoordBuffer GpuTexCoordBuffer;
 	FRopeCenterlineBuffer  CenterlineBuffer;
+	// Last frame's tube positions, for per-vertex velocity: before each frame's positions are written,
+	// the current buffer - GpuPositionBuffer on the GPU tube, the position vertex buffer on the CPU
+	// fallback - is copied here, and the vertex factory's loose parameters point the shader at it as the
+	// previous-position source. Same layout as the position stream, three floats per vertex, read through
+	// the R32_FLOAT SRV; the UAV the shared buffer class also creates goes unused. Initialized only while
+	// bVelocityActive.
+	FRopeGpuPositionBuffer PrevPositionBuffer;
 	// Fills the index topology and the constant white colour once on the GPU path.
 	bool bGpuStaticsBuilt = false;
 
@@ -208,8 +221,18 @@ private:
 	// The Catmull-Rom knot parameter, where 0 is uniform and 0.5 is centripetal, taken from the component
 	// once at creation.
 	float SmoothParam;
-	// Whether to write to the velocity buffer, snapshotted from UDynamicRopeSettings::bWriteVelocity and
-	// read by GetViewRelevance.
-	bool  bWriteVelocity;
+	// Whether the per-vertex velocity path is active: the UDynamicRopeSettings::bWriteVelocity project
+	// setting, snapshotted at creation, and the platform supporting the GPU-skin passthrough shader
+	// branch. Drives the previous-position copy, the loose parameter updates and bVelocityRelevance;
+	// when false the rope writes no velocity at all, as on unsupported platforms there is no correct
+	// motion vector to write.
+	bool  bVelocityActive;
 	bool  bHasData = false;
+	// The seed generation the previous-position buffer was copied under. After a reseed the buffer holds
+	// the pre-reseed pose, so velocity is suppressed for that frame by stamping a stale frame number.
+	uint32 LastVelocitySimGeneration = 0;
+
+	/** Render thread, before the frame's tube build: copies the still-untouched current positions into
+	 *  PrevPositionBuffer and refreshes the vertex factory's velocity loose parameters. */
+	void UpdatePreviousPositions(FRHICommandListImmediate& RHICmdList, const FRopeDynamicData& Data);
 };

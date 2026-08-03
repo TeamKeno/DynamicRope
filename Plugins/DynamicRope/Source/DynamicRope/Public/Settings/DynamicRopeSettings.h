@@ -118,15 +118,15 @@ public:
 	TArray<TSoftObjectPtr<URopePreset>> DemoPresets;
 
 	/**
-	 * Whether the rope tube writes to the velocity buffer. The rope updates its vertices in place
-	 * every frame but has no per-vertex deformation velocity, since only a movable transform velocity
-	 * is written, so per-object motion blur smears the rope into a trail on frames where it moves
-	 * quickly. The default of false writes no velocity and excludes it from motion blur.
-	 * The trade-off is that with it off, temporal super resolution treats those pixels by camera
-	 * reprojection, which can produce mild ghosting with a static camera and a fast-moving rope; turn
-	 * it on to compare. It is read once when the scene proxy is created, so a change takes effect
-	 * after restarting PIE or recreating render state.
+	 * Whether the rope tube outputs per-vertex velocity. The tube keeps last frame's vertex
+	 * positions alongside the current ones, so its motion vectors describe the actual deformation:
+	 * temporal upscalers (TSR/TAA) reproject the rope correctly instead of ghosting it as static
+	 * geometry, and motion blur blurs along the real motion instead of smearing. Requires a platform
+	 * with GPU-skin passthrough shader support; elsewhere, and when disabled, the rope writes no
+	 * velocity and is excluded from motion blur - a transform-only velocity would be wrong for a
+	 * deforming mesh, so there is no in-between mode. It is read once when the scene proxy is
+	 * created, so a change takes effect after restarting PIE or recreating render state.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Rendering", meta = (ToolTip = "Whether the rope tube writes to the velocity buffer. Off (the default) removes motion blur smearing on fast movement; on restores velocity output. Trade-off against TSR ghosting with a static camera and a fast rope."))
-	bool bWriteVelocity = false;
+	UPROPERTY(config, EditAnywhere, Category = "Rendering", meta = (ToolTip = "Whether the rope tube outputs per-vertex velocity (default on). Gives correct motion vectors for the deforming tube: no TSR/TAA ghosting and accurate motion blur. Off, or on platforms without GPU-skin passthrough support, the rope writes no velocity and is excluded from motion blur."))
+	bool bWriteVelocity = true;
 };

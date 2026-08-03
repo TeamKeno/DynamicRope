@@ -696,6 +696,10 @@ void URopeComponent::SendRenderDynamicData_Concurrent()
 	// frame's value as the localized points and matches what is drawn. (The proxy's GetLocalToWorld() is one
 	// frame behind the moment SetDynamicData ran — see the header comment.)
 	DynamicData->WorldToLocal = FMatrix44f(Xform.ToInverseMatrixWithScale());
+	// The game-thread frame counter, which the view family also captures at creation; the velocity
+	// shader compares the two and outputs deformation velocity only when they match (see
+	// FRopeDynamicData::FrameNumber).
+	DynamicData->FrameNumber = static_cast<uint32>(GFrameCounter);
 	DynamicData->Points.SetNumUninitialized(Sim.Num());
 	for (int32 i = 0; i < Sim.Num(); ++i)
 	{

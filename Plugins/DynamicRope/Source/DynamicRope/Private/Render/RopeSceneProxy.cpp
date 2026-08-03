@@ -33,6 +33,8 @@
 #include "RopeRHICompat.h"
 // bWriteVelocity, snapshotted once when the proxy is created.
 #include "Settings/DynamicRopeSettings.h"
+// IsGPUSkinPassThroughSupported, the platform gate for the per-vertex velocity path.
+#include "RenderUtils.h"
 
 // Where the render tuning comes from: the tube smoothing, meaning the subdivision and the knot
 // parameter, is a per-rope property on URopeComponent, while whether velocity is written is a project
@@ -176,8 +178,19 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	, NumSides(FMath::Max(3, Component->NumSides))
 	, Radius(Component->Radius)
 	, SmoothParam(FMath::Clamp(Component->TubeSmoothingAlpha, 0.0f, 1.0f))
-	, bWriteVelocity(UDynamicRopeSettings::Get()->bWriteVelocity)
+	// The per-vertex velocity path needs the passthrough branch compiled into the local vertex factory
+	// shaders, which the engine only does on platforms with GPU-skin passthrough support; elsewhere the
+	// rope simply writes no velocity, as before.
+	, bVelocityActive(UDynamicRopeSettings::Get()->bWriteVelocity && IsGPUSkinPassThroughSupported(GMaxRHIShaderPlatform))
 {
+	// Decided before InitWithDummyData triggers InitResource: the flag is baked into the cached mesh
+	// draw command bindings, so it cannot change for the proxy's lifetime.
+	VertexFactory.SetVelocityPassThroughEnabled(bVelocityActive);
+	// A deforming mesh has per-vertex motion every frame regardless of its transform, so the velocity
+	// pass must include the rope even on frames where the component did not move; without this a rope
+	// whipped from a stationary component drops out of the velocity pass entirely.
+	bAlwaysHasVelocity = bVelocityActive;
+
 	VertexBuffers.InitWithDummyData(&VertexFactory, GetRequiredVertexCount());
 	IndexBuffer.NumIndices = GetRequiredIndexCount();
 
@@ -241,6 +254,14 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 		{
 			IndexBuffer.InitResource(RHICmdList);
 
+			// The previous-position buffer serves both tube paths, so it is sized and initialized
+			// independently of the GPU-tube decision.
+			if (bVelocityActive)
+			{
+				PrevPositionBuffer.NumVertices = GetRequiredVertexCount();
+				PrevPositionBuffer.InitResource(RHICmdList);
+			}
+
 			if (bUseGpuTube)
 			{
 				// Every stream, meaning the positions, tangents and UVs, is replaced by a UAV buffer the
@@ -293,6 +314,7 @@ FRopeSceneProxy::~FRopeSceneProxy()
 	GpuTangentBuffer.ReleaseResource();
 	GpuTexCoordBuffer.ReleaseResource();
 	CenterlineBuffer.ReleaseResource();
+	PrevPositionBuffer.ReleaseResource();
 }
 
 void FRopeSceneProxy::BuildSmoothedCenterline(const TArray<FVector>& Nodes, TArray<FVector>& Out) const
@@ -473,6 +495,13 @@ void FRopeSceneProxy::SetDynamicData_RenderThread(FRHICommandListBase& RHICmdLis
 	check(IsInRenderingThread());
 	if (NewData)
 	{
+		if (bVelocityActive)
+		{
+			// Before the builds overwrite the position buffers: at this point they still hold last
+			// frame's tube, which is exactly the previous-position data the velocity pass needs.
+			UpdatePreviousPositions(FRHICommandListExecutor::GetImmediateCommandList(), *NewData);
+		}
+
 		if (bUseGpuTube)
 		{
 			BuildTubeGPU(RHICmdList, *NewData);
@@ -483,6 +512,47 @@ void FRopeSceneProxy::SetDynamicData_RenderThread(FRHICommandListBase& RHICmdLis
 		}
 		delete NewData;
 	}
+}
+
+void FRopeSceneProxy::UpdatePreviousPositions(FRHICommandListImmediate& RHICmdList, const FRopeDynamicData& Data)
+{
+	FRHIBuffer* Current = bUseGpuTube ? GpuPositionBuffer.VertexBufferRHI : VertexBuffers.PositionVertexBuffer.VertexBufferRHI;
+	FRHIBuffer* Previous = PrevPositionBuffer.VertexBufferRHI;
+	if (!Current || !Previous)
+	{
+		return;
+	}
+
+	{
+		FRHITransitionInfo ToCopy[2] = {
+			FRHITransitionInfo(Current,  ERHIAccess::Unknown, ERHIAccess::CopySrc),
+			FRHITransitionInfo(Previous, ERHIAccess::Unknown, ERHIAccess::CopyDest),
+		};
+		RHICmdList.Transition(MakeArrayView(ToCopy, 2));
+	}
+	RHICmdList.CopyBufferRegion(Previous, 0, Current, 0,
+		static_cast<uint64>(GetRequiredVertexCount()) * sizeof(FVector3f));
+	{
+		// The current buffer returns to its read state; the tube build that follows transitions it
+		// itself on the GPU path, and the CPU path's lock-update manages its own upload copy.
+		FRHITransitionInfo FromCopy[2] = {
+			FRHITransitionInfo(Current,  ERHIAccess::CopySrc,  ERHIAccess::SRVGraphics | ERHIAccess::VertexOrIndexBuffer),
+			FRHITransitionInfo(Previous, ERHIAccess::CopyDest, ERHIAccess::SRVGraphics),
+		};
+		RHICmdList.Transition(MakeArrayView(FromCopy, 2));
+	}
+
+	// The copy is genuinely last frame's pose only if a tube has been built at all and the sim was not
+	// reseeded since; otherwise a stale frame number keeps the shader on zero deformation velocity for
+	// this frame. The position and tangent SRVs come from the factory's data, which resolves the GPU
+	// tube's UAV streams and the CPU fallback's vertex buffers alike.
+	const bool bPrevIsLastPose = bHasData && Data.SimGeneration == LastVelocitySimGeneration;
+	LastVelocitySimGeneration = Data.SimGeneration;
+	VertexFactory.UpdateLooseParameters(RHICmdList,
+		bPrevIsLastPose ? Data.FrameNumber : MAX_uint32,
+		VertexFactory.GetPositionsSRV(),
+		PrevPositionBuffer.SRV,
+		VertexFactory.GetTangentsSRV());
 }
 
 void FRopeSceneProxy::BuildGpuStaticBuffers(FRHICommandListBase& RHICmdList)
@@ -618,7 +688,8 @@ void FRopeSceneProxy::DrawStaticElements(FStaticPrimitiveDrawInterface* PDI)
 {
 	// The cable-style static draw path: a cached mesh draw command against the persistent vertex factory.
 	// BuildTube() updates the vertex buffer in place every frame, so the cached command renders the current
-	// geometry. Static relevance, rather than movable or dynamic, avoids incorrect motion vector ghosting.
+	// geometry. The velocity pass reuses the same cached draw: the per-vertex previous positions flow
+	// through the factory's loose parameter uniform buffer, updated in place, so caching stays valid.
 	if (HasViewDependentDPG())
 	{
 		return;
@@ -717,12 +788,13 @@ FPrimitiveViewRelevance FRopeSceneProxy::GetViewRelevance(const FSceneView* View
 	}
 
 	MaterialRelevance.SetPrimitiveViewRelevance(Result);
-	// Removing motion blur smearing: no velocity is written by default, which excludes the rope from
-	// per-object motion blur.
-	// The project setting UDynamicRopeSettings::bWriteVelocity restores the legacy behaviour of writing
-	// velocity for an A/B comparison. It is snapshotted when the proxy is created rather than read from the
-	// settings object on the render thread.
-	Result.bVelocityRelevance = bWriteVelocity
+	// With the per-vertex velocity path active the rope joins the velocity pass, and its motion vectors
+	// are correct because the vertex factory supplies last frame's vertex positions - temporal upscalers
+	// reproject the rope instead of ghosting it, and motion blur blurs along the real motion. With it
+	// off, whether by the project setting or a platform without the passthrough shader branch, no
+	// velocity is written at all: a transform-only velocity would be wrong for a deforming mesh, smearing
+	// under motion blur without fixing the ghosting.
+	Result.bVelocityRelevance = bVelocityActive
 		&& DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
 	return Result;
 }
