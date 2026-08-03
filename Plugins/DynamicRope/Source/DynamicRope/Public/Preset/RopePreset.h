@@ -116,7 +116,7 @@ public:
 
 	/** The number of nodes, meaning particles. Applying it reinitializes the rope. The limit of 512 is the GPU solver's thread group limit. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "2", ClampMax = "512", DisplayName = "Node Count"))
-	int32 NumParticles = 72;
+	int32 NumParticles = 64;
 
 	/** The initial, and maximum, rope length in centimetres. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "1.0", Units = "cm"))
@@ -128,7 +128,7 @@ public:
 
 	/** The default reel speed, in centimetres per second, used by the reel-in and pay-out inputs. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float ReelSpeed = 150.0f;
+	float ReelSpeed = 300.0f;
 
 	/** Shows the rope tube while Loaded. A presentation switch for GuaranteedWrap alone. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope",
