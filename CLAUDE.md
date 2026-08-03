@@ -51,7 +51,13 @@ To run/iterate behavior, open the `.uproject` in the editor and Play.
     generates position + tangent basis + UV (B2-full), so CPU `BuildTube` runs only on the fallback.
     `FRopeXPBDSolver` + CPU `BuildTube` are kept as that fallback + parity/unit-test reference.
     (The CPU `Sim` mirror is still uploaded per frame as the tube's centerline source under Catmull-Rom
-    smoothing — removing it needs GPU-side smoothing, a later step.)
+    smoothing — removing it needs GPU-side smoothing, a later step.) Also hosts `FRopeVertexFactory`
+    (`RopeVertexFactory.h`), the rope tube's own vertex factory type: FLocalVertexFactory driving the
+    engine's GPU-skin passthrough shader branch with rope-owned buffers, which gives the deforming tube
+    correct per-vertex motion vectors (no TSR/TAA ghosting, no motion blur smearing). It reuses the
+    engine `.ush` unmodified; its material permutations are gated to materials flagged
+    "Used with Skeletal Mesh" (auto-set by the proxy in the editor, default-material fallback in cooked
+    builds).
   - `DynamicRopeEditor` (Editor) — SDF authoring: a nomad tab (`SRopeSDFAuthoringPanel`), the
     `URopeSDFData` baker/factory/asset-definition. **Not** an empty stub.
 - `Source/DynamicRopeProject/` — thin game module (game mode + module boilerplate). Depends only on
@@ -163,4 +169,9 @@ Project-wide defaults live in `UDynamicRopeSettings` (`Settings/`), an `UDevelop
 under Project Settings → Plugins → Dynamic Rope, persisted to `DefaultGame.ini`.
 
 Rendering: `FRopeSceneProxy` (`Render/`) builds the tube mesh from the centerline;
-`URopeComponent::SendRenderDynamicData_Concurrent` pushes updated positions each frame.
+`URopeComponent::SendRenderDynamicData_Concurrent` pushes updated positions each frame. The tube
+draws with `FRopeVertexFactory` and outputs per-vertex velocity: before each frame's build the proxy
+copies the still-untouched positions into a previous-position buffer, and the shader emits
+deformation velocity only when the stamped game-thread frame number matches the view, so stale data
+(first build, reseed, pause) degrades to zero velocity instead of a wrong vector. Gated by
+`UDynamicRopeSettings::bWriteVelocity` (default on) and platform passthrough support.
