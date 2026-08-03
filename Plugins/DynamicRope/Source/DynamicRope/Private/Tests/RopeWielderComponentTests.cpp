@@ -52,6 +52,11 @@ struct FRopeWielderComponentTestSeam
 		return URopeWielderComponent::ComputeHandSwingVelocityWorld(Prev, Cur, Dt, Xform, MaxSpeed);
 	}
 
+	static FVector SampleCenterlineAtArcLength(const TArray<FVector>& Positions, float ArcLength)
+	{
+		return URopeWielderComponent::SampleCenterlineAtArcLength(Positions, ArcLength);
+	}
+
 	static void ForceWrappedTaut(URopeComponent& Rope)
 	{
 		Rope.Phase = ERopePhase::Wrapped;
@@ -1617,6 +1622,48 @@ bool FRopeHandSwingVelocityFrameRateTest::RunTest(const FString& Parameters)
 			FVector::ZeroVector, FVector(10.0f, 0.0f, 0.0f), 0.0f, Identity, MaxSpeed);
 		TestTrue(TEXT("a delta of zero gives zero"), Vel.IsNearlyZero());
 	}
+	return true;
+}
+
+// The grip point sampler behind GetHangAnimSample: an arc-length walk along the centerline from node
+// zero, which is what places the free hand's IK effector on the actual rope curve rather than on a
+// straight-line offset from the hand.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderHangGripSampleTest,
+	"DynamicRope.Wielder.HangGripSampleWalksArcLength",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderHangGripSampleTest::RunTest(const FString& Parameters)
+{
+	// A bent centerline: 50 cm straight down, then 70 cm sideways. Segment lengths differ on purpose so
+	// a walk that assumed uniform spacing would land on the wrong point.
+	const TArray<FVector> Positions = {
+		FVector(0.0f, 0.0f, 0.0f),
+		FVector(0.0f, 0.0f, -50.0f),
+		FVector(70.0f, 0.0f, -50.0f)
+	};
+
+	TestTrue(TEXT("a mid-segment arc length lerps inside the first segment"),
+		FRopeWielderComponentTestSeam::SampleCenterlineAtArcLength(Positions, 25.0f)
+			.Equals(FVector(0.0f, 0.0f, -25.0f), 0.01f));
+	TestTrue(TEXT("an arc length past the first segment continues into the second"),
+		FRopeWielderComponentTestSeam::SampleCenterlineAtArcLength(Positions, 60.0f)
+			.Equals(FVector(10.0f, 0.0f, -50.0f), 0.01f));
+	TestTrue(TEXT("an arc length beyond the rope clamps to the last node"),
+		FRopeWielderComponentTestSeam::SampleCenterlineAtArcLength(Positions, 999.0f)
+			.Equals(Positions.Last(), 0.01f));
+	TestTrue(TEXT("a negative arc length clamps to node zero"),
+		FRopeWielderComponentTestSeam::SampleCenterlineAtArcLength(Positions, -5.0f)
+			.Equals(Positions[0], 0.01f));
+
+	// Degenerate inputs: an empty centerline yields zero, and a chain of coincident nodes returns that
+	// point instead of dividing by a zero segment length.
+	TestTrue(TEXT("an empty centerline yields zero"),
+		FRopeWielderComponentTestSeam::SampleCenterlineAtArcLength({}, 10.0f).IsNearlyZero());
+	const TArray<FVector> Coincident = { FVector(5.0f, 5.0f, 5.0f), FVector(5.0f, 5.0f, 5.0f) };
+	TestTrue(TEXT("coincident nodes return the point itself"),
+		FRopeWielderComponentTestSeam::SampleCenterlineAtArcLength(Coincident, 0.0f)
+			.Equals(Coincident[0], 0.01f));
+
 	return true;
 }
 

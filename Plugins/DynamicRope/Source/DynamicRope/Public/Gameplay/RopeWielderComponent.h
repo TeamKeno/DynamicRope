@@ -185,6 +185,46 @@ struct FRopeAimHudSample
 	FVector AimWorldPos = FVector::ZeroVector;
 };
 
+/**
+ * Per-frame sample of everything a hanging pose needs from the rope, read by an AnimBP through
+ * property access on the wielder. The attached hand already rides the rope — node zero is attached to
+ * Hand Socket — so only the free hand needs an IK effector, which is a grip point on the centerline
+ * OffHandGripDistance of arc above the attached hand. Fetch one per anim update via
+ * GetHangAnimSample(); the fields are world space, so convert to component space inside the AnimBP as
+ * usual for IK effectors.
+ */
+USTRUCT(BlueprintType)
+struct FRopeHangAnimSample
+{
+	GENERATED_BODY()
+
+	/** Whether the owner hangs from the rope this frame (IsHangingOnRope). The pose should blend in and
+	 *  out on this; the remaining fields keep describing the rope while one exists, so the blend-out
+	 *  does not snap. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Hang Anim")
+	bool bHanging = false;
+
+	/** World position of the rope's hand-side end, node zero — where the attached hand holds. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Hang Anim")
+	FVector HandWorld = FVector::ZeroVector;
+
+	/** World grip point for the free hand: the centerline point OffHandGripDistance of arc above the
+	 *  attached hand. The free hand's Two Bone IK effector. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Hang Anim")
+	FVector OffHandGripWorld = FVector::ZeroVector;
+
+	/** Unit direction from the attached hand up along the rope, world space; zero while the rope is
+	 *  degenerate. It spans the whole grip reach rather than the first segment alone, so a jittering
+	 *  first node cannot flip it. Drives grip alignment and a hang lean. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Hang Anim")
+	FVector RopeDirectionWorld = FVector::ZeroVector;
+
+	/** The authoritative gameplay tension (GetConstraintTension), for pose weighting or a strain
+	 *  additive. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Hang Anim")
+	float Tension = 0.0f;
+};
+
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
 class DYNAMICROPE_API URopeWielderComponent : public UActorComponent
 {
@@ -672,6 +712,24 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void RefreshModeDerivedState();
 
+	//~ Hang animation ------------------------------------------------------
+	/**
+	 * Whether the owner is hanging from the rope: airborne, receiving a wielder tether share, and the
+	 * whole chain taut. The same test that boosts air control while swinging, exposed for animation —
+	 * it marks the frames a character should trade the falling pose for a hang pose. Pulling with the
+	 * feet on the ground is deliberately not a hang.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Rope|Hang Anim")
+	bool IsHangingOnRope() const;
+
+	/** Samples the rope data a hanging pose needs, in one call. See FRopeHangAnimSample. */
+	UFUNCTION(BlueprintPure, Category = "Rope|Hang Anim")
+	FRopeHangAnimSample GetHangAnimSample() const;
+
+	/** Arc distance in centimetres above the attached hand at which the free hand grips the rope. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hang Anim", meta = (ClampMin = "1.0", Units = "cm"))
+	float OffHandGripDistance = 35.0f;
+
 	//~ Events ---------------------------------------------------------------
 	/** Fired right after a throw actually executes, on both the immediate and montage notify paths. */
 	UPROPERTY(BlueprintAssignable, Category = "Rope")
@@ -844,6 +902,10 @@ private:
 	 *  seam for the measurement logic. */
 	static FVector ComputeHandSwingVelocityWorld(const FVector& PrevSocketCS, const FVector& CurSocketCS,
 		float DeltaTime, const FTransform& ComponentXform, float MaxSpeed);
+
+	/** Walks the centerline from node zero and returns the point at ArcLength along it, clamped to the
+	 *  last node. Pure, and the unit test seam for the grip point sampling. */
+	static FVector SampleCenterlineAtArcLength(const TArray<FVector>& Positions, float ArcLength);
 
 	/** Resets the hand velocity sample so a stale delta cannot fling the rope after reactivation, a
 	 *  rig change, a teleport or a hitch. */

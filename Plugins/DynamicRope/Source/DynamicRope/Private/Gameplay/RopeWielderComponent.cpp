@@ -529,6 +529,55 @@ void URopeWielderComponent::UpdateGroundExit()
 	}
 }
 
+bool URopeWielderComponent::IsHangingOnRope() const
+{
+	// Hanging means airborne, receiving a wielder tether share, and the whole chain taut. The taut gate
+	// is the same test UpdateGroundExit uses: on a slack chain the tether applies no force, so the
+	// character is falling near a rope, not hanging from one.
+	const ACharacter* Character = Cast<ACharacter>(GetOwner());
+	const UCharacterMovementComponent* Movement = Character ? Character->GetCharacterMovement() : nullptr;
+	return Movement && Movement->IsFalling()
+		&& Rope && IsWielderTetherActive() && Rope->IsChainTaut();
+}
+
+FRopeHangAnimSample URopeWielderComponent::GetHangAnimSample() const
+{
+	FRopeHangAnimSample Sample;
+	if (!Rope || Rope->GetNodeCount() < 2)
+	{
+		return Sample;
+	}
+	const TArray<FVector>& Centerline = Rope->GetCenterlinePositions();
+	Sample.bHanging = IsHangingOnRope();
+	Sample.HandWorld = Centerline[0];
+	Sample.OffHandGripWorld = SampleCenterlineAtArcLength(Centerline, OffHandGripDistance);
+	Sample.RopeDirectionWorld = (Sample.OffHandGripWorld - Sample.HandWorld).GetSafeNormal();
+	Sample.Tension = Rope->GetConstraintTension();
+	return Sample;
+}
+
+FVector URopeWielderComponent::SampleCenterlineAtArcLength(const TArray<FVector>& Positions, float ArcLength)
+{
+	if (Positions.Num() == 0)
+	{
+		return FVector::ZeroVector;
+	}
+	float Remaining = FMath::Max(ArcLength, 0.0f);
+	for (int32 Index = 0; Index + 1 < Positions.Num(); ++Index)
+	{
+		const float SegmentLength = FVector::Dist(Positions[Index], Positions[Index + 1]);
+		if (Remaining <= SegmentLength)
+		{
+			// A zero-length segment cannot be lerped into; its start is the exact answer.
+			return SegmentLength > UE_SMALL_NUMBER
+				? FMath::Lerp(Positions[Index], Positions[Index + 1], Remaining / SegmentLength)
+				: Positions[Index];
+		}
+		Remaining -= SegmentLength;
+	}
+	return Positions.Last();
+}
+
 void URopeWielderComponent::UpdateSwingAirControl()
 {
 	ACharacter* Character = Cast<ACharacter>(GetOwner());
@@ -538,15 +587,11 @@ void URopeWielderComponent::UpdateSwingAirControl()
 		return;
 	}
 
-	// Swinging means airborne, receiving a wielder tether share, and the whole chain taut. When it ends,
-	// on landing, on release, on going slack or on a settings change, the saved original value is
-	// restored. Changing air control externally while the boost is active is overwritten on restore,
-	// which is a demo-level limitation stated here as the contract.
-	// The taut gate is the same test UpdateGroundExit uses: steering is only enabled while the tether is
-	// genuinely pulling the wielder. On a slack chain there is no tether force, so raising air control
-	// would not steer a swing, it would simply let the character float.
-	const bool bSwinging = bBoostAirControlWhileSwinging && Movement->IsFalling()
-		&& IsWielderTetherActive() && Rope->IsChainTaut();
+	// Swinging is the hang test (IsHangingOnRope) with the boost setting on. When it ends, on landing,
+	// on release, on going slack or on a settings change, the saved original value is restored.
+	// Changing air control externally while the boost is active is overwritten on restore, which is a
+	// demo-level limitation stated here as the contract.
+	const bool bSwinging = bBoostAirControlWhileSwinging && IsHangingOnRope();
 	if (bSwinging && !bAirControlBoosted)
 	{
 		SavedAirControl = Movement->AirControl;
