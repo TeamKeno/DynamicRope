@@ -255,7 +255,7 @@ struct FRopeWhipConfig
 
 	/** The fraction of the rope length the guide controls, from 0 to 1, which shapes the swing
 	 *  trajectory. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "0.95"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float GuidedLength = 0.65f;
 
 	/** The angle swept from the starting angle, opposite the aim, round to the aim direction. */

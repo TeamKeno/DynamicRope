@@ -267,7 +267,9 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 	const float Duration = ResolveGuideDuration(Config, GuideThrowSpeed);
 	const float T = FMath::Clamp(Elapsed / Duration, 0.0f, 1.0f);
 	const int32 LastNode = Sim.Num() - 1;
-	const float GuidedEnd = bHasAimTarget ? 1.0f : FMath::Clamp(Config.GuidedLength, 0.05f, 0.95f);
+	// A value of one intentionally keeps the whole rope hard-guided until the flight guide ends.
+	// Do not silently reduce it: doing so creates a moving solver/guide boundary in the tail.
+	const float GuidedEnd = bHasAimTarget ? 1.0f : FMath::Clamp(Config.GuidedLength, 0.05f, 1.0f);
 	// The ordinary guide builds a target for the whole rope while its initial straight seed is being
 	// released. OrdinaryGuideOwnership moves one hard ownership boundary towards GuidedEnd.
 	const int32 LastGuidedNode = LastNode;
@@ -372,7 +374,7 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 	OutTargets.Reset();
 
 	const int32 LastNode = Sim.Num() - 1;
-	const float GuidedEnd = bHasAimTarget ? 1.0f : FMath::Clamp(Config.GuidedLength, 0.05f, 0.95f);
+	const float GuidedEnd = bHasAimTarget ? 1.0f : FMath::Clamp(Config.GuidedLength, 0.05f, 1.0f);
 	const int32 LastGuidedNode = LastNode;
 	const float Duration = ResolveGuideDuration(Config, GuideThrowSpeed);
 	const float NextT = FMath::Clamp((Elapsed + DeltaTime) / Duration, 0.0f, 1.0f);
@@ -479,7 +481,7 @@ void FRopeWhipGuide::BuildGuideTargets(float NormalizedTime, int32 LastGuidedNod
 	}
 
 	const FVector HandPos = Origin;
-	const float GuidedEnd = bHasAimTarget ? 1.0f : FMath::Clamp(Config.GuidedLength, 0.05f, 0.95f);
+	const float GuidedEnd = bHasAimTarget ? 1.0f : FMath::Clamp(Config.GuidedLength, 0.05f, 1.0f);
 	const int32 DesiredPointCount = FMath::Clamp(LastGuidedNode + 1, 1, Sim.Num());
 	const int32 RawSampleCount = FMath::Max(DesiredPointCount * 4, 16);
 	const float GuideLength = FMath::Max(Sim.RopeLength, Config.ComponentRopeLength) * GuidedEnd;

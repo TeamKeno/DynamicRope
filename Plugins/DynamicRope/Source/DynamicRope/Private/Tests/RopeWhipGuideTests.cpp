@@ -242,6 +242,44 @@ bool FRopeWhipInitialStraightSeedAndReleaseTest::RunTest(const FString& Paramete
 	return true;
 }
 
+// GuidedLength=1 is an explicit request to avoid a moving ownership boundary during flight. It must not
+// be silently reduced to 0.95, because even that small reduction releases tail nodes one at a time.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWhipFullGuidedLengthTest,
+	"DynamicRope.Solver.WhipFullGuidedLengthKeepsWholeRopeGuided",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWhipFullGuidedLengthTest::RunTest(const FString& Parameters)
+{
+	FRopeSimState Sim = RopeTest::MakeStraightRope(21, 200.0f);
+	Sim.bStartPinned = true;
+	Sim.StartPinPrev = Sim.Positions[0];
+	Sim.StartPinTarget = Sim.Positions[0];
+	Sim.InvMass[0] = 0.0f;
+
+	FRopeWhipGuide::FConfig Config;
+	Config.Duration = 1.0f;
+	Config.ReferenceThrowSpeed = 1500.0f;
+	Config.GuidedLength = 1.0f;
+	Config.SweepAngleDegrees = 180.0f;
+	Config.ComponentRopeLength = Sim.RopeLength;
+
+	FRopeWhipGuide Guide;
+	Guide.Begin(FVector::ForwardVector, Sim.Positions[0], FVector::ForwardVector,
+		FVector::UpVector, FVector::RightVector, 1500.0f, FVector::ZeroVector);
+	Guide.SnapToInitialPose(Sim, Config);
+
+	for (int32 StepIndex = 0; StepIndex < 4; ++StepIndex)
+	{
+		Guide.Advance(0.2f, Sim, Config);
+		TestTrue(*FString::Printf(TEXT("step %d keeps the tail hard-guided"), StepIndex),
+			Guide.IsGuidedNodeThisFrame(Sim.Num() - 1));
+		TestEqual(*FString::Printf(TEXT("step %d keeps every movable node hard-guided"), StepIndex),
+			Guide.GetGuidedNodeCountThisFrame(), Sim.Num() - 1);
+	}
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimHitSweepingLineGuideTest,
 	"DynamicRope.Solver.AimHitSweepingLineGuide",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

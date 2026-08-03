@@ -405,7 +405,7 @@ void URopeComponent::RecordFlightObservation(const FRopeFlightContactDetector::F
 		return;
 	}
 
-	const float WhipGuidedEnd = FMath::Clamp(WhipConfig.GuidedLength, 0.05f, 0.95f);
+	const float WhipGuidedEnd = FMath::Clamp(WhipConfig.GuidedLength, 0.05f, 1.0f);
 	int32 WhipGuidedNodeCount = 0;
 #if WITH_GAMEPLAY_DEBUGGER
 	if (OutSnapshot)
