@@ -3,7 +3,8 @@
 // Opt-in camera cut for the moment a rope wraps. Add it to the wielder actor, the one holding the rope, and
 // whenever that rope establishes a wrap on a target carrying a URopeWrapCameraComponent it blends the
 // player's view to that marker's shot, holds it for the marker's HoldTime, and blends back. A release, a cut
-// or losing the target ends the shot early.
+// or losing the target ends the shot early. Trigger picks the moment of the cut: the wrap commit
+// (default), or the flight capture, which puts the wrapping motion itself inside the shot.
 //
 // It lives on the wielder rather than on the target because the player's view belongs to the wielder: this
 // component is where the PlayerController is, one wielder can only be watching one shot at a time whatever
@@ -34,6 +35,19 @@ class ARopeWrapCameraRig;
 class URopeComponent;
 class URopeWrapCameraComponent;
 
+/** The rope moment URopeWrapCameraDirectorComponent cuts on. */
+UENUM(BlueprintType)
+enum class ERopeWrapCameraTrigger : uint8
+{
+	/** Cut once the wrap has committed (OnRopeWrapped): the shot opens on the established catch. */
+	WrapCommitted,
+
+	/** Cut the moment the flight capture latches onto the target (OnRopeCaptured), before the wrap
+	 *  commits, so the wrapping motion itself plays inside the shot. Author the marker's HoldTime long
+	 *  enough to cover the wrap; a capture that aborts ends the shot through the release event. */
+	Captured,
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRopeWrapCameraOnBegin, URopeWrapCameraComponent*, Camera);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FRopeWrapCameraOnEnd);
 
@@ -56,6 +70,11 @@ public:
 	 *  that. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap Camera")
 	bool bEnabled = true;
+
+	/** Which rope moment starts the shot. WrapCommitted opens on the established catch; Captured cuts at
+	 *  the touch, so the wrapping motion itself is on screen. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap Camera")
+	ERopeWrapCameraTrigger Trigger = ERopeWrapCameraTrigger::WrapCommitted;
 
 	/** The rope to watch. Left unset, the owner's first URopeComponent is used, which is the normal setup
 	 *  where the wielder owns its rope. */
@@ -92,6 +111,11 @@ protected:
 	 *  on the rope, so it respects the OnRopeWrapped contract of not mutating rope state. */
 	UFUNCTION()
 	void HandleRopeWrapped(const FRopeWrappedEventInfo& Info);
+
+	/** The rope captured a target mid-flight: with Trigger = Captured this is the cut point. The event
+	 *  carries only the bone, so the target is read from the rope's capture tracker. */
+	UFUNCTION()
+	void HandleRopeCaptured(FName Bone);
 
 	/** Any release, including a cut and a pre-commit abort, ends the shot early. */
 	UFUNCTION()

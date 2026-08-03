@@ -28,6 +28,7 @@ void URopeWrapCameraDirectorComponent::BeginPlay()
 	if (URopeComponent* Resolved = ResolveRope())
 	{
 		Resolved->OnRopeWrapped.AddDynamic(this, &URopeWrapCameraDirectorComponent::HandleRopeWrapped);
+		Resolved->OnRopeCaptured.AddDynamic(this, &URopeWrapCameraDirectorComponent::HandleRopeCaptured);
 		Resolved->OnRopeReleased.AddDynamic(this, &URopeWrapCameraDirectorComponent::HandleRopeReleased);
 	}
 	else
@@ -43,6 +44,7 @@ void URopeWrapCameraDirectorComponent::EndPlay(const EEndPlayReason::Type EndPla
 	if (URopeComponent* Resolved = Rope.Get())
 	{
 		Resolved->OnRopeWrapped.RemoveDynamic(this, &URopeWrapCameraDirectorComponent::HandleRopeWrapped);
+		Resolved->OnRopeCaptured.RemoveDynamic(this, &URopeWrapCameraDirectorComponent::HandleRopeCaptured);
 		Resolved->OnRopeReleased.RemoveDynamic(this, &URopeWrapCameraDirectorComponent::HandleRopeReleased);
 	}
 	// Hand the view back. This is what stops a removed component, or a level teardown, from leaving the
@@ -71,6 +73,13 @@ void URopeWrapCameraDirectorComponent::TickComponent(float DeltaTime, ELevelTick
 
 void URopeWrapCameraDirectorComponent::HandleRopeWrapped(const FRopeWrappedEventInfo& Info)
 {
+	// Each trigger acts on its own event only: in Captured mode the cut already happened at the capture,
+	// and cutting here as a fallback would produce a second cut on every wrap whose capture shot has
+	// already run its course.
+	if (Trigger != ERopeWrapCameraTrigger::WrapCommitted)
+	{
+		return;
+	}
 	// A second wrap while a shot is already running is ignored rather than restarting it: recutting mid-blend
 	// reads as a glitch, and the running shot is already showing the same catch.
 	if (!bEnabled || IsPlaying())
@@ -109,6 +118,61 @@ void URopeWrapCameraDirectorComponent::HandleRopeWrapped(const FRopeWrappedEvent
 		UE_LOG(LogDynamicRope, Verbose,
 			TEXT("[%s] RopeWrapCameraDirector: '%s' carries no wrap camera accepting bone '%s' - no cut."),
 			*GetNameSafe(GetOwner()), *GetNameSafe(TargetActor), *Info.Bone.ToString());
+		return;
+	}
+
+	BeginCamera(Marker);
+}
+
+void URopeWrapCameraDirectorComponent::HandleRopeCaptured(FName Bone)
+{
+	if (Trigger != ERopeWrapCameraTrigger::Captured || !bEnabled || IsPlaying())
+	{
+		return;
+	}
+	URopeComponent* Resolved = Rope.Get();
+	if (!Resolved)
+	{
+		return;
+	}
+
+	// The capture tracker names the mesh the attempt latched onto. The GuaranteedWrap path skips
+	// Contacting and fires Captured only after its wrap has already committed, so the wrapped component
+	// is the fallback there.
+	const USceneComponent* CapturedMesh = Resolved->GetContactCandidateMesh();
+	if (!CapturedMesh)
+	{
+		CapturedMesh = Resolved->GetWrappedComponent();
+	}
+	AActor* TargetActor = CapturedMesh ? CapturedMesh->GetOwner() : nullptr;
+	if (!TargetActor)
+	{
+		return;
+	}
+	if (bSkipSelfWrap && TargetActor == GetOwner())
+	{
+		UE_LOG(LogDynamicRope, Verbose,
+			TEXT("[%s] RopeWrapCameraDirector: self capture, no camera cut."), *GetNameSafe(GetOwner()));
+		return;
+	}
+
+	// A capture attributes a single dominant bone; that alone still lets a filtered marker match.
+	TArray<FName> WrappedBones;
+	if (!Bone.IsNone())
+	{
+		WrappedBones.Add(Bone);
+	}
+
+	// GetSocketLocation falls back to the component's own location when the name is not a bone or socket, so
+	// this is the capture position for skeletal and static targets alike.
+	const FVector WrapLocation = CapturedMesh->GetSocketLocation(Bone);
+	URopeWrapCameraComponent* Marker =
+		URopeWrapCameraComponent::SelectForWrap(TargetActor, WrappedBones, WrapLocation);
+	if (!Marker)
+	{
+		UE_LOG(LogDynamicRope, Verbose,
+			TEXT("[%s] RopeWrapCameraDirector: '%s' carries no wrap camera accepting bone '%s' - no cut."),
+			*GetNameSafe(GetOwner()), *GetNameSafe(TargetActor), *Bone.ToString());
 		return;
 	}
 
