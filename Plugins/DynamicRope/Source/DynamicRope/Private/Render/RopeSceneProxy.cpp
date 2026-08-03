@@ -4,8 +4,12 @@
 #include "RopeComponent.h"
 
 #include "Materials/Material.h"
+// CheckMaterialUsage_Concurrent + MATUSAGE_SkeletalMesh, the usage FRopeVertexFactory's material
+// permutations are gated on.
+#include "Materials/MaterialInterface.h"
 #include "Materials/MaterialRenderProxy.h"
 #include "MaterialDomain.h"
+#include "DynamicRopeLog.h"
 #include "SceneInterface.h"
 #include "SceneManagement.h"
 #include "SceneView.h"
@@ -195,6 +199,20 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	if (URopeSimSubsystem* Sub = URopeSimSubsystem::Get(Component->GetWorld()))
 	{
 		SolverPtr = Sub->GetGpuSolver();
+	}
+
+	// FRopeVertexFactory compiles material shader permutations only for materials flagged
+	// "Used with Skeletal Mesh", plus the engine's special materials; see its ShouldCompilePermutation.
+	// Checking the usage here, on the game thread that creates the proxy, sets the flag automatically
+	// in the editor, which triggers that compile. In a cooked game a material shipped without the flag
+	// has no shaders for this factory, the check fails, and the default material is drawn instead of
+	// nothing.
+	if (Material && !Material->CheckMaterialUsage_Concurrent(MATUSAGE_SkeletalMesh))
+	{
+		UE_LOG(LogDynamicRope, Warning,
+			TEXT("%s: material '%s' is not marked 'Used with Skeletal Mesh', which the rope's vertex factory requires; drawing the default material instead."),
+			*GetOwnerName().ToString(), *Material->GetName());
+		Material = nullptr;
 	}
 
 	if (!Material)

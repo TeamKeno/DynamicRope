@@ -2,7 +2,8 @@
 //
 // The rope's render proxy. It builds a tube around the centreline using a parallel-transport frame,
 // which avoids the twist pop of a Frenet frame. It follows the engine's FCableSceneProxy: a persistent
-// FLocalVertexFactory, real vertex and index buffers refreshed each frame, and a proper primitive
+// vertex factory (FRopeVertexFactory, the plugin's FLocalVertexFactory subtype carrying the per-vertex
+// velocity hooks), real vertex and index buffers refreshed each frame, and a proper primitive
 // uniform buffer. That is what integrates correctly with depth, occlusion and velocity, which the
 // one-shot FDynamicMeshBuilder path does not. It is render-thread only and is not exported outside the
 // module.
@@ -13,7 +14,7 @@
 #include "PrimitiveSceneProxy.h"
 #include "MaterialShared.h"
 #include "StaticMeshResources.h"
-#include "LocalVertexFactory.h"
+#include "RopeVertexFactory.h"
 #include "RHIResources.h"
 
 class URopeComponent;
@@ -162,7 +163,7 @@ private:
 	UMaterialInterface* Material;
 	FStaticMeshVertexBuffers VertexBuffers;
 	FRopeIndexBuffer IndexBuffer;
-	FLocalVertexFactory VertexFactory;
+	FRopeVertexFactory VertexFactory;
 	FMaterialRelevance MaterialRelevance;
 
 	// Whether the GPU tube path is used: true automatically when there is a renderable RHI and the ring
