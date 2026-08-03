@@ -337,13 +337,15 @@ void FGameplayDebuggerCategory_Rope::DrawAim(const URopeWielderComponent& Wielde
 	{
 		return;
 	}
-	// The mode does use aiming but the rope cannot be thrown in this phase; GuaranteedWrap only aims from
-	// Loaded. It is a temporary state that resolves on entering that phase, which makes it the answer to
-	// "why is aiming not engaging". It is the very reason the aim view can be on with no ray visible, so
-	// it is reported regardless of the detail setting.
+	// The mode does use aiming but it is not live right now. Both causes are temporary states that resolve
+	// by themselves, which makes this the answer to "why is aiming not engaging", and it is the very
+	// reason the aim view can be on with no ray visible, so it is reported regardless of the detail
+	// setting. Suppressed input is separated out because it also explains why throwing does nothing.
 	if (!Wielder.IsAimActive())
 	{
-		AddTextLine(TEXT("  {white}aim: {grey}inactive — GuaranteedWrap aims from Loaded only"));
+		AddTextLine(Wielder.IsRopeInputSuppressed()
+			? TEXT("  {white}aim: {grey}suppressed — rope input is discarded (ragdoll or game state)")
+			: TEXT("  {white}aim: {grey}inactive — GuaranteedWrap aims from Loaded only"));
 		return;
 	}
 

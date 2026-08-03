@@ -12,7 +12,8 @@
 #include "Gameplay/RopeWielderComponent.h"
 #include "RopeWielderComponentTestTypes.generated.h"
 
-/** A test probe observing whether the real throw path goes through the public virtual BuildThrowContext extension hook. */
+/** A test probe observing whether the real throw path goes through the public virtual BuildThrowContext
+ *  extension hook, and which reason a discarded throw reports. */
 UCLASS(NotBlueprintable, Transient, meta = (Hidden))
 class URopeWielderBuildContextProbe final : public URopeWielderComponent
 {
@@ -20,6 +21,8 @@ class URopeWielderBuildContextProbe final : public URopeWielderComponent
 
 public:
 	mutable int32 BuildContextCalls = 0;
+	int32 ThrowRejectCalls = 0;
+	ERopeThrowRejectReason LastThrowRejectReason = ERopeThrowRejectReason::Gated;
 
 	virtual FRopeThrowContext BuildThrowContext(const FVector& AimDir) const override
 	{
@@ -27,5 +30,11 @@ public:
 		FRopeThrowContext Result = Super::BuildThrowContext(AimDir);
 		Result.ThrowSpeed = 123.0f;
 		return Result;
+	}
+
+	virtual void NotifyThrowRejected(ERopeThrowRejectReason Reason) override
+	{
+		++ThrowRejectCalls;
+		LastThrowRejectReason = Reason;
 	}
 };

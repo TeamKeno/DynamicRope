@@ -54,6 +54,12 @@ class DYNAMICROPE_API URopeRagdollResponseComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
+#if WITH_DEV_AUTOMATION_TESTS
+	// Test seam: drives the limp flag the Wielder's input suppression reads, without a skeletal mesh or a
+	// physics asset, which EnterRagdoll requires.
+	friend struct FRopeWielderComponentTestSeam;
+#endif
+
 public:
 	URopeRagdollResponseComponent();
 

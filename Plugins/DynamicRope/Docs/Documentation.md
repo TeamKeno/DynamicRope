@@ -217,6 +217,26 @@ All of these are also callable directly: `Throw()`, `ThrowNow()`, `ThrowInDirect
 (immediate), `Cut()`, `StartReelIn()` / `StartReelOut()`, `PlayThrowMontage()`,
 `PlayPullMontage()`. `BuildThrowContext(AimDir)` is virtual for custom throw framing.
 
+#### Suppressing input while the wielder cannot act
+
+Enhanced Input keeps being delivered to a limp character, so a player knocked down or held by a
+snare could otherwise still aim, throw, pull and reel. `bSuppressInputWhileRagdolled` (on by
+default) discards rope input whenever the owner's `URopeRagdollResponseComponent` reports
+`IsRagdolled()`, partial ragdolls included. `SetRopeInputSuppressed(bool)` adds the same block for
+game states of your own, such as a cutscene or a stun, and `IsRopeInputSuppressed()` answers for
+both.
+
+While it is on, `IsAimActive()` is false — which hides the aiming HUD and stops the aim ray sweep
+and the throw preview — and the throw entry points report
+`ERopeThrowRejectReason::InputSuppressed`. The stopping half of held input (`StopPull()`,
+`StopPullNow()`, `StopReel()`) always runs, so a key held across the transition can still end its
+own action, and held pull and reel are cancelled the moment suppression begins.
+
+Nothing already committed is undone: a wrap keeps holding, a rope in flight keeps flying, and the
+tether keeps dragging the limp body. `Cut()` is a gameplay event rather than input and is not
+suppressed, so a script or another character can still cut a held player free; to force a release,
+call `ReleaseWrap()` on the rope directly.
+
 ### Aiming & HUD
 
 `AimRayOriginMode` / `AimRayOriginSocketName` control where the aim ray starts;

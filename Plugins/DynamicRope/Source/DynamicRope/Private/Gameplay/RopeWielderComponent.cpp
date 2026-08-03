@@ -7,6 +7,8 @@
 #include "Core/RopeWrapTarget.h"
 #include "DynamicRopeLog.h"
 #include "Render/RopePreviewComponent.h"
+// IsRagdolled, the owner state the automatic input suppression reads.
+#include "Gameplay/RopeRagdollResponseComponent.h"
 // The aiming HUD widget. Its class comes from the project settings and this component manages its lifetime.
 #include "Settings/DynamicRopeSettings.h"
 #include "UI/RopeAimWidget.h"
@@ -178,6 +180,12 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	// a throw.
 	UpdateHandAnimVelocity(DeltaTime);
 
+	// Ahead of UpdatePullEngage, so an armed pull cannot engage and play its montage on the very frame
+	// suppression begins, and ahead of UpdateAimHudSample, so the aiming path sees the settled state.
+	// Hand velocity sampling deliberately stays above this and keeps running while suppressed, so the
+	// sample is not stale on recovery.
+	UpdateInputSuppression();
+
 	// This runs in the same PrePhysics tick, after the movement prerequisite. A delegate inside the
 	// character movement component can fire while the skeletal mesh child update is still scoped or
 	// deferred, which leaves the real hand socket position stale.
@@ -281,8 +289,8 @@ void URopeWielderComponent::UpdateAimHudSample()
 	AimHudSample = FRopeAimHudSample();
 	bHasAimRayFrameThrowContext = false;
 	AimRayFrameContextStamp = GFrameCounter;
-	// In a phase the rope cannot be thrown from, the aiming sweep does not run at all; an empty sample
-	// makes the widgets and the debugger hide themselves.
+	// In a phase the rope cannot be thrown from, or while rope input is suppressed, the aiming sweep does
+	// not run at all; an empty sample makes the widgets and the debugger hide themselves.
 	// For GuaranteedWrap outside Loaded this sweep was the only remaining SDF cost, since
 	// UpdateThrowPreview already builds no prepared preview there.
 	if (IsAimActive())
@@ -567,6 +575,13 @@ void URopeWielderComponent::ResolveRefs()
 	{
 		AttachMesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
 	}
+	if (!RagdollResponse.IsValid())
+	{
+		// Resolved here rather than searched per frame: the suppression check only asks the cached
+		// component whether it is ragdolled. An owner with no ragdoll response leaves this null, which is
+		// the "never suppressed automatically" case.
+		RagdollResponse = Owner->FindComponentByClass<URopeRagdollResponseComponent>();
+	}
 }
 
 // Aiming and throwing behaviour are derived from the rope's ResolveMode. With no rope there is neither
@@ -582,7 +597,10 @@ bool URopeWielderComponent::IsAimActive() const
 	// to Loaded, so the HUD is off in Free, Wrapped and elsewhere.
 	// The rope owns the gate, through CanThrowNow: sharing the predicate with the throw entry point is
 	// what keeps the HUD and actual throwability from diverging.
-	return UsesAimRay() && Rope->CanThrowNow();
+	// Suppressed input turns aiming off through this same call, which takes the HUD widget, the aim ray
+	// sweep and the throw preview with it. UsesAimRay() stays first because it carries the null check
+	// CanThrowNow() relies on.
+	return UsesAimRay() && !IsRopeInputSuppressed() && Rope->CanThrowNow();
 }
 
 bool URopeWielderComponent::UsesLockedPreview() const
@@ -833,6 +851,48 @@ void URopeWielderComponent::BindInput()
 	BoundInputComponent = EIC;
 }
 
+bool URopeWielderComponent::IsRopeInputSuppressed() const
+{
+	if (bRopeInputSuppressedExternally)
+	{
+		return true;
+	}
+	// Any ragdoll counts, partial included: the aim frame and the hand socket both come from a body that
+	// is no longer under animation control.
+	const URopeRagdollResponseComponent* Response = RagdollResponse.Get();
+	return bSuppressInputWhileRagdolled && Response && Response->IsRagdolled();
+}
+
+void URopeWielderComponent::SetRopeInputSuppressed(bool bSuppressed)
+{
+	bRopeInputSuppressedExternally = bSuppressed;
+	// The setter resynchronizes the state derived from the flag instead of waiting for the next tick, the
+	// same arrangement as SetThrowPreviewEnabled.
+	UpdateInputSuppression();
+}
+
+void URopeWielderComponent::UpdateInputSuppression()
+{
+	const bool bSuppressed = IsRopeInputSuppressed();
+	if (bSuppressed == bWasRopeInputSuppressed)
+	{
+		return;
+	}
+	bWasRopeInputSuppressed = bSuppressed;
+	if (!bSuppressed)
+	{
+		// Nothing is restored when suppression ends: a key still held produces no new Started event, so
+		// rope input resumes on the next press, which is what discarding the input has to mean.
+		return;
+	}
+	// Held input is cancelled exactly as an unpossession cancels it, in HandlePawnControllerChanged: the
+	// pull toggle would otherwise stay latched and engage by itself, and a reel key held across the
+	// transition would keep shortening the rope. The wrap itself is deliberately left alone, so the rope
+	// keeps holding and its tether keeps dragging the limp body.
+	StopPull();
+	StopReel();
+}
+
 void URopeWielderComponent::OnThrowInput()
 {
 	// With no release action and toggle mode enabled, one button both throws and releases.
@@ -851,6 +911,10 @@ void URopeWielderComponent::StartPull()
 	// Arming, as a toggle. Neither the force nor the montage starts here: UpdatePullEngage engages once,
 	// the first moment the rope is wrapped and the tension crosses PullEngageTension. Arming before the
 	// wrap lands means it engages by itself the moment the rope goes tight.
+	if (IsRopeInputSuppressed())
+	{
+		return;
+	}
 	SetPullArmed(true);
 	RefreshTickEnabled();
 }
@@ -1027,7 +1091,7 @@ void URopeWielderComponent::Cut()
 
 void URopeWielderComponent::StartReelIn()
 {
-	if (Rope)
+	if (Rope && !IsRopeInputSuppressed())
 	{
 		Rope->SetReelRate(Rope->ReelSpeed);
 	}
@@ -1035,7 +1099,7 @@ void URopeWielderComponent::StartReelIn()
 
 void URopeWielderComponent::StartReelOut()
 {
-	if (Rope)
+	if (Rope && !IsRopeInputSuppressed())
 	{
 		Rope->SetReelRate(-Rope->ReelSpeed);
 	}
@@ -1051,7 +1115,7 @@ void URopeWielderComponent::StopReel()
 
 void URopeWielderComponent::OnReloadInput()
 {
-	if (Rope)
+	if (Rope && !IsRopeInputSuppressed())
 	{
 		Rope->EnterLoaded();
 	}
@@ -1318,6 +1382,15 @@ bool URopeWielderComponent::QueueGuaranteedAimThrow(const FVector& AimDir, bool 
 
 void URopeWielderComponent::Throw()
 {
+	// The plugin's own input gate, tested before the subclass hook so that an override cannot be reached,
+	// and therefore cannot be relied on, to enforce it.
+	if (IsRopeInputSuppressed())
+	{
+		NotifyThrowRejected(ERopeThrowRejectReason::InputSuppressed);
+		OnThrowRejected.Broadcast(ERopeThrowRejectReason::InputSuppressed);
+		return;
+	}
+
 	// The subclass game rule gate, such as stamina or character state. ThrowNow on the montage path is not
 	// re-tested; see the contract in the header.
 	if (!CanThrow())
@@ -1361,6 +1434,17 @@ void URopeWielderComponent::ThrowNow()
 
 void URopeWielderComponent::ThrowInDirection(const FVector& AimDir)
 {
+	// The montage path arrives here through the throw notify, and a ragdoll beginning mid-montage does not
+	// stop that notify from firing. A committed throw is discarded rather than thrown from a limp hand;
+	// GuaranteedWrap would otherwise cast a fresh aim ray right here, since the queued throw was already
+	// cancelled when aiming went inactive.
+	if (IsRopeInputSuppressed())
+	{
+		NotifyThrowRejected(ERopeThrowRejectReason::InputSuppressed);
+		OnThrowRejected.Broadcast(ERopeThrowRejectReason::InputSuppressed);
+		return;
+	}
+
 	if (Rope)
 	{
 		if (UsesLockedPreview())
@@ -1478,7 +1562,7 @@ void URopeWielderComponent::PlayPullMontage()
 
 void URopeWielderComponent::Release()
 {
-	if (Rope)
+	if (Rope && !IsRopeInputSuppressed())
 	{
 		Rope->ReleaseWrap();
 	}

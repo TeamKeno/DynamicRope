@@ -9,6 +9,7 @@
 #include "RopeWielderComponentTestTypes.h"
 
 #include "Gameplay/AnimNotifyState_RopePull.h"
+#include "Gameplay/RopeRagdollResponseComponent.h"
 #include "Gameplay/RopeWielderComponent.h"
 #include "RopeComponent.h"
 #include "RopeTestHelpers.h"
@@ -92,6 +93,18 @@ struct FRopeWielderComponentTestSeam
 	static void HandleUnpossess(URopeWielderComponent& Wielder)
 	{
 		Wielder.HandlePawnControllerChanged(nullptr, nullptr, nullptr);
+	}
+
+	// EnterRagdoll needs a skeletal mesh with a populated physics asset, so the automatic suppression rule
+	// is driven through the flag it ends up setting instead.
+	static void SetRagdolled(URopeRagdollResponseComponent& Response, bool bRagdolled)
+	{
+		Response.bRagdolled = bRagdolled;
+	}
+
+	static void SetRagdollResponse(URopeWielderComponent& Wielder, URopeRagdollResponseComponent* Response)
+	{
+		Wielder.RagdollResponse = Response;
 	}
 
 	static void SetMappedInputSubsystem(URopeWielderComponent& Wielder,
@@ -497,6 +510,153 @@ bool FRopeWielderUnpossessClearsHeldInputTest::RunTest(const FString& Parameters
 		FMath::IsNearlyZero(FRopeWielderComponentTestSeam::GetActivePullForce(*Rope)));
 	TestTrue(TEXT("unpossess clears held Reel rate"),
 		FMath::IsNearlyZero(FRopeWielderComponentTestSeam::GetReelRate(*Rope)));
+	return true;
+}
+
+// Rope input is discarded while suppressed. The gate sits on the public API rather than on the private
+// input handlers, because four of the bindings in BindInput go straight to that API and a game is
+// invited to bind its own keys to it as well.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderSuppressedInputIsDiscardedTest,
+	"DynamicRope.Wielder.Input.SuppressedInputIsDiscarded",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderSuppressedInputIsDiscardedTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	URopeWielderComponent* Wielder = NewObject<URopeWielderComponent>();
+	Wielder->Rope = Rope;
+
+	Wielder->SetRopeInputSuppressed(true);
+	TestTrue(TEXT("the external latch suppresses rope input"), Wielder->IsRopeInputSuppressed());
+
+	Wielder->StartPull();
+	TestFalse(TEXT("suppressed Pull input does not arm"), Wielder->IsPullArmed());
+	Wielder->StartReelIn();
+	TestTrue(TEXT("suppressed Reel input does not start reeling"),
+		FMath::IsNearlyZero(FRopeWielderComponentTestSeam::GetReelRate(*Rope)));
+
+	Wielder->SetRopeInputSuppressed(false);
+	TestFalse(TEXT("clearing the latch resumes rope input"), Wielder->IsRopeInputSuppressed());
+	Wielder->StartReelIn();
+	TestFalse(TEXT("Reel input works again once suppression ends"),
+		FMath::IsNearlyZero(FRopeWielderComponentTestSeam::GetReelRate(*Rope)));
+	return true;
+}
+
+// Held input is cancelled the moment suppression begins, the same way an unpossession cancels it: a pull
+// left armed would engage by itself, and a reel key held across the transition would keep shortening the
+// rope because its Completed event arrives while the input is being discarded.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderSuppressionCancelsHeldInputTest,
+	"DynamicRope.Wielder.Input.SuppressionCancelsHeldInput",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderSuppressionCancelsHeldInputTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	URopeWielderComponent* Wielder = NewObject<URopeWielderComponent>();
+	Wielder->Rope = Rope;
+
+	Wielder->StartPull();
+	Wielder->StartPullNow(/*bIgnoreTautGate*/ true);
+	Wielder->StartReelIn();
+	Wielder->SetRopeInputSuppressed(true);
+
+	TestFalse(TEXT("suppression disarms held Pull input"), Wielder->IsPullArmed());
+	TestTrue(TEXT("suppression clears active Pull force"),
+		FMath::IsNearlyZero(FRopeWielderComponentTestSeam::GetActivePullForce(*Rope)));
+	TestTrue(TEXT("suppression clears held Reel rate"),
+		FMath::IsNearlyZero(FRopeWielderComponentTestSeam::GetReelRate(*Rope)));
+	return true;
+}
+
+// Suppression turns aiming off through IsAimActive, the single gate the HUD widget and the Gameplay
+// Debugger both read, so asserting that one call covers all of them.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderSuppressionDisablesAimTest,
+	"DynamicRope.Wielder.Aim.SuppressionDisablesAim",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderSuppressionDisablesAimTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	// AssistedJudged has no phase gate, so aiming is live from the start and the only thing the assertions
+	// below can be measuring is the suppression term.
+	Rope->ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+	URopeWielderComponent* Wielder = NewObject<URopeWielderComponent>();
+	Wielder->Rope = Rope;
+
+	TestTrue(TEXT("an unsuppressed aim ray mode aims"), Wielder->IsAimActive());
+
+	Wielder->SetRopeInputSuppressed(true);
+	TestFalse(TEXT("suppression stops aiming"), Wielder->IsAimActive());
+	TestTrue(TEXT("suppression does not change the mode's use of an aim ray"), Wielder->UsesAimRay());
+
+	Wielder->SetRopeInputSuppressed(false);
+	TestTrue(TEXT("aiming resumes once suppression ends"), Wielder->IsAimActive());
+	return true;
+}
+
+// The throw path, including the montage entry point. ThrowNow is the regression guard: a throw montage
+// started a frame before the owner goes limp still reaches its notify, and in GuaranteedWrap the queued
+// throw has been cancelled by then, so an ungated ThrowInDirection would cast a fresh aim ray from the
+// limp body instead of doing nothing.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderSuppressedThrowIsDiscardedTest,
+	"DynamicRope.Wielder.Throw.SuppressedThrowIsDiscarded",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderSuppressedThrowIsDiscardedTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	Rope->ResolveMode = ERopeWrapResolveMode::FullSimulation;
+	URopeWielderBuildContextProbe* Wielder = NewObject<URopeWielderBuildContextProbe>();
+	Wielder->Rope = Rope;
+
+	Wielder->SetRopeInputSuppressed(true);
+	Wielder->Throw();
+	TestEqual(TEXT("a suppressed Throw never builds a throw context"), Wielder->BuildContextCalls, 0);
+	TestEqual(TEXT("a suppressed Throw reports the InputSuppressed reason"),
+		Wielder->LastThrowRejectReason, ERopeThrowRejectReason::InputSuppressed);
+
+	Wielder->ThrowNow();
+	TestEqual(TEXT("a committed montage-path throw is discarded too"), Wielder->BuildContextCalls, 0);
+
+	Wielder->SetRopeInputSuppressed(false);
+	Wielder->Throw();
+	TestEqual(TEXT("clearing suppression restores the throw"), Wielder->BuildContextCalls, 1);
+	return true;
+}
+
+// The actual user-facing rule: a wielder whose owner is ragdolled, as a snare leaves it, discards rope
+// input without the game having to call anything.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderRagdollSuppressesRopeInputTest,
+	"DynamicRope.Wielder.Input.RagdollSuppressesRopeInput",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderRagdollSuppressesRopeInputTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	Rope->ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+	URopeWielderComponent* Wielder = NewObject<URopeWielderComponent>();
+	Wielder->Rope = Rope;
+	URopeRagdollResponseComponent* Response = NewObject<URopeRagdollResponseComponent>();
+	FRopeWielderComponentTestSeam::SetRagdollResponse(*Wielder, Response);
+
+	TestFalse(TEXT("an upright owner is not suppressed"), Wielder->IsRopeInputSuppressed());
+
+	FRopeWielderComponentTestSeam::SetRagdolled(*Response, true);
+	TestTrue(TEXT("a ragdolled owner suppresses rope input"), Wielder->IsRopeInputSuppressed());
+	TestFalse(TEXT("a ragdolled owner cannot aim"), Wielder->IsAimActive());
+	Wielder->StartPull();
+	TestFalse(TEXT("a ragdolled owner cannot arm Pull"), Wielder->IsPullArmed());
+
+	// Opting out returns a game that has its own held-state rules to the previous behaviour.
+	Wielder->bSuppressInputWhileRagdolled = false;
+	TestFalse(TEXT("opting out ignores the ragdoll"), Wielder->IsRopeInputSuppressed());
+	TestTrue(TEXT("opting out restores aiming"), Wielder->IsAimActive());
+
+	Wielder->bSuppressInputWhileRagdolled = true;
+	FRopeWielderComponentTestSeam::SetRagdolled(*Response, false);
+	TestFalse(TEXT("recovering from the ragdoll resumes rope input"), Wielder->IsRopeInputSuppressed());
+	TestTrue(TEXT("recovering from the ragdoll resumes aiming"), Wielder->IsAimActive());
 	return true;
 }
 

@@ -12,6 +12,8 @@
 //    rope's ThrowParams.FrameMode.
 //  - Optional Enhanced Input auto-binding: assign ThrowAction / ReleaseAction (and a mapping
 //    context) and they are bound during BeginPlay. Leave them empty and call Throw() directly.
+//  - Rope input is discarded while the wielder cannot act, which covers a ragdolled owner by default;
+//    see IsRopeInputSuppressed().
 
 #pragma once
 
@@ -35,6 +37,7 @@ class UInputComponent;
 class UAnimMontage;
 class UMaterialInstanceDynamic;
 class UMovementComponent;
+class URopeRagdollResponseComponent;
 struct FRopeWielderMovementConstraint;
 
 // Whether aiming uses an aim ray, and whether the throw is locked to a prepared preview, are both
@@ -76,7 +79,10 @@ enum class ERopeThrowRejectReason : uint8
 	/** The rope component refused the prepared preview throw, including the CanWrapTarget gate. */
 	RopeRejected = 3,
 	/** A GuaranteedWrap rope was thrown outside the Loaded phase; EnterLoaded() must come first. */
-	NotLoaded = 4
+	NotLoaded = 4,
+	/** Rope input is being discarded: the owner is ragdolled, or the game called
+	 *  SetRopeInputSuppressed. See IsRopeInputSuppressed(). */
+	InputSuppressed = 5
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FRopeWielderOnThrown);
@@ -288,9 +294,9 @@ public:
 	bool UsesAimRay() const;
 
 	/** Whether aiming means anything right now: UsesAimRay() and the rope is in a throwable phase
-	 *  (CanThrowNow). The per-frame counterpart of UsesAimRay(); GuaranteedWrap is only true while
-	 *  Loaded, and the other modes match UsesAimRay(). The aiming HUD, widgets and debugger
-	 *  visualization all gate on this one call. */
+	 *  (CanThrowNow), and rope input is not suppressed. The per-frame counterpart of UsesAimRay();
+	 *  GuaranteedWrap is only true while Loaded, and the other modes match UsesAimRay(). The aiming
+	 *  HUD, widgets and debugger visualization all gate on this one call. */
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim")
 	bool IsAimActive() const;
 
@@ -372,6 +378,18 @@ public:
 	 *  Loaded phase so it can be thrown. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input")
 	TObjectPtr<UInputAction> ReloadAction = nullptr;
+
+	/**
+	 * Discard rope input while the owner is ragdolled, on by default. Enhanced Input keeps being
+	 * delivered to a limp character, so without this a player held by a snare can still aim, throw,
+	 * pull, reel and load. The state is read from the owner's URopeRagdollResponseComponent, through
+	 * IsRagdolled, so a partial ragdoll counts too and an owner without that component is never
+	 * suppressed by this rule.
+	 * Only input is discarded: a rope already thrown or wrapped is left exactly as it is, so the wrap
+	 * survives and its tether keeps dragging the limp body.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Input", meta = (DisplayName = "Suppress Input While Ragdolled"))
+	bool bSuppressInputWhileRagdolled = true;
 
 	//~ Movement (character response to tether traction) ---------------------
 	// When the tether's wielder share (the inverse-mass ratio in the lambda solve) is above zero, the
@@ -481,11 +499,14 @@ public:
 	 * Starts a throw. With ThrowMontage set this plays the montage and the throw itself happens when
 	 * its UAnimNotify_RopeThrow calls ThrowNow(); otherwise it calls ThrowNow() immediately. This is
 	 * the entry point for input and gameplay code.
+	 * Discarded while IsRopeInputSuppressed(), reporting ERopeThrowRejectReason::InputSuppressed.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Throw();
 
-	/** Throws the rope right now, using the forward vector of the rope's ThrowParams.FrameMode. */
+	/** Throws the rope right now, using the forward vector of the rope's ThrowParams.FrameMode.
+	 *  The suppression gate still applies here, unlike CanThrow(): a throw montage started a frame
+	 *  before the owner went limp still reaches its notify, and the rope must not leave a limp hand. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowNow();
 
@@ -497,7 +518,8 @@ public:
 
 	/** Throws in an explicit direction. A valid AimDir replaces the frame forward and the aim ray is
 	 *  cast the same way; ZeroVector keeps the forward vector of the rope's ThrowParams.FrameMode,
-	 *  which is identical to ThrowNow. */
+	 *  which is identical to ThrowNow. Discarded while IsRopeInputSuppressed(), reporting
+	 *  ERopeThrowRejectReason::InputSuppressed. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void ThrowInDirection(const FVector& AimDir);
 
@@ -509,7 +531,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void PlayPullMontage();
 
-	/** Releases the current wrap. */
+	/** Releases the current wrap. Discarded while IsRopeInputSuppressed(); to force a release
+	 *  regardless, call URopeComponent::ReleaseWrap on the rope directly. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Release();
 
@@ -519,6 +542,8 @@ public:
 	 * in UpdatePullEngage, which either plays the montage once or applies the force immediately.
 	 * Arming before the wrap lands means pull engages by itself as soon as the rope goes tight.
 	 * StopPull disarms.
+	 * Discarded while IsRopeInputSuppressed(); StopPull is not, so an already armed pull is disarmed
+	 * the moment suppression begins.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StartPull();
@@ -562,19 +587,23 @@ public:
 	float GetPullEngageProgress() const;
 
 	/** Cuts the rope, forcing a release with ERopeReleaseReason::Cut. A pass-through for gameplay cut
-	 *  events. */
+	 *  events, so it is not input and keeps working while IsRopeInputSuppressed(): a script or another
+	 *  character can still cut a held player free. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void Cut();
 
-	/** Starts reeling in, shortening the rope at its ReelSpeed. For held input and gameplay code. */
+	/** Starts reeling in, shortening the rope at its ReelSpeed. For held input and gameplay code.
+	 *  Discarded while IsRopeInputSuppressed(). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StartReelIn();
 
-	/** Starts reeling out, lengthening the rope at its ReelSpeed up to its initial length. */
+	/** Starts reeling out, lengthening the rope at its ReelSpeed up to its initial length. Discarded
+	 *  while IsRopeInputSuppressed(). */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StartReelOut();
 
-	/** Stops reeling in or out. */
+	/** Stops reeling in or out. It always runs, even while IsRopeInputSuppressed(): a reel key held
+	 *  across the start of suppression has to be able to end its own action. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void StopReel();
 
@@ -591,6 +620,31 @@ public:
 	 *  already bound. */
 	UFUNCTION(BlueprintCallable, Category = "Rope|Input")
 	void BindInput();
+
+	/**
+	 * Whether rope input is being discarded right now: the game called SetRopeInputSuppressed(true), or
+	 * bSuppressInputWhileRagdolled is set and the owner's URopeRagdollResponseComponent reports a
+	 * ragdoll.
+	 * Every input entry point (Throw, ThrowNow, ThrowInDirection, Release, StartPull, StartReelIn,
+	 * StartReelOut and the load input) returns without doing anything while this is true, and
+	 * IsAimActive() is false, which takes the aiming HUD, the aim ray sweep and the throw preview with
+	 * it. The stopping half of held input (StopPull, StopPullNow, StopReel) always runs, so a key held
+	 * across the transition can still end its own action.
+	 * Committed work is never undone: a wrap, a flight and the tether all continue.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Rope|Input")
+	bool IsRopeInputSuppressed() const;
+
+	/**
+	 * Discards rope input from now on, for game states of the game's own such as a cutscene, a stun or
+	 * an open menu. It is independent of, and ORed with, the automatic bSuppressInputWhileRagdolled
+	 * rule, so clearing it does not resume input while the owner is still ragdolled. Turning it on
+	 * cancels held pull and reel immediately, the same way an unpossession does.
+	 * To force a release or a cut regardless of suppression, call URopeComponent::ReleaseWrap or
+	 * CutRope on the rope directly: Release() here is an input entry point and is discarded.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Rope|Input")
+	void SetRopeInputSuppressed(bool bSuppressed);
 
 	/**
 	 * Whether to display the throw preview, a designer setting. It controls display only: turning it
@@ -666,11 +720,13 @@ protected:
 	// when adding one. The public BuildThrowContext is an extension hook as well.
 
 	/**
-	 * Throw input gate, called once when Throw() is entered. Returning false discards the input and
-	 * reports the Gated reason. Override to restrict throwing by game rules such as stamina or
-	 * character state. Defaults to true.
+	 * Throw input gate, called once when Throw() is entered, after the plugin's own suppression gate
+	 * has passed. Returning false discards the input and reports the Gated reason. Override to restrict
+	 * throwing by game rules such as stamina or character state. Defaults to true.
 	 * ThrowNow() on the montage path, called from the anim notify, is an already-gated committed
-	 * throw and is not re-tested.
+	 * throw and is not re-tested here.
+	 * An override does not need to reimplement IsRopeInputSuppressed(): it is base behaviour, tested
+	 * first precisely so that an override forgetting to call Super cannot remove it.
 	 */
 	virtual bool CanThrow() const { return true; }
 
@@ -711,7 +767,8 @@ private:
 	 *  is ready. */
 	void UpdateAimHudWidget();
 
-	/** Resolves Rope and AttachMesh, searching the owner for anything left unset. */
+	/** Resolves Rope, AttachMesh and the owner's ragdoll response, searching the owner for anything
+	 *  left unset. */
 	void ResolveRefs();
 
 	/** Attaches Rope to HandSocketName on AttachMesh. */
@@ -879,6 +936,9 @@ private:
 	void RemoveMappingContext();
 	/** Removes only this object's action bindings from the input component they were bound to. */
 	void ClearBoundInput();
+	/** Polls the suppression state and, on the frame it turns on, cancels held pull and reel the same
+	 *  way an unpossession does. Called every tick and from SetRopeInputSuppressed. */
+	void UpdateInputSuppression();
 	/** Tries to play PullMontage and reports whether playback actually started. */
 	bool TryPlayPullMontage();
 
@@ -897,6 +957,17 @@ private:
 	// depend on how the subsystem references it internally.
 	UPROPERTY(Transient)
 	TObjectPtr<UInputMappingContext> MappedInputContext = nullptr;
+
+	// The owner's ragdoll response, resolved once by ResolveRefs and held weakly since it is not owned
+	// here. An owner without one leaves this null, and the automatic rule then never suppresses
+	// anything.
+	TWeakObjectPtr<URopeRagdollResponseComponent> RagdollResponse;
+	// The game's own suppression latch, set through SetRopeInputSuppressed and ORed with the ragdoll
+	// rule. It is deliberately not named after IsRopeInputSuppressed(), which answers for both.
+	bool bRopeInputSuppressedExternally = false;
+	// The suppression state observed on the previous tick, which turns the polled state into an edge so
+	// held pull and reel are cancelled exactly once when suppression begins.
+	bool bWasRopeInputSuppressed = false;
 
 	/** The target the hard leash is applied to automatically. The wielder's PrePhysics tick runs after
 	 *  this component. */

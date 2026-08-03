@@ -2,9 +2,10 @@
 //
 // The demo aiming HUD widget for aim ray targeting. It is shown exactly while
 // URopeWielderComponent::IsAimActive(), meaning the rope is in an aim ray mode, that is any resolve
-// mode other than FullSimulation, and is in a phase it can currently be thrown from. GuaranteedWrap
-// is restricted to the Loaded phase, so in Free and elsewhere even the crosshair is hidden; the
-// other modes have no phase gate.
+// mode other than FullSimulation, is in a phase it can currently be thrown from, and rope input is
+// not suppressed. GuaranteedWrap is restricted to the Loaded phase, so in Free and elsewhere even the
+// crosshair is hidden; the other modes have no phase gate. A ragdolled wielder hides it entirely, so
+// a player held by a snare has no reticle.
 // Normally it draws a crosshair in the centre of the screen, and while the aim ray is on a wrappable
 // bone it draws a screen-projected highlight ring around that bone, with an acquisition pop and a
 // pulse.
@@ -166,7 +167,7 @@ private:
 	void ResolveWielder();
 
 	/** Whether the aiming HUD should be drawn: a valid wielder and IsAimActive, meaning an aim ray mode
-	 *  in a phase that can be thrown from. */
+	 *  in a phase that can be thrown from, with rope input not suppressed. */
 	bool IsAimHudActive() const;
 
 	TWeakObjectPtr<URopeWielderComponent> Wielder;
