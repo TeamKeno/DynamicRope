@@ -174,6 +174,17 @@ struct FRopeWielderComponentTestSeam
 		return Rope.PhysicalTetherConstraint != nullptr && Rope.PhysicalTetherProxy != nullptr;
 	}
 
+	// The directly bound hand side: a constraint whose Frame1 is the owner's own body, with no proxy at all.
+	static const UPrimitiveComponent* GetPhysicalTetherWielderBody(const URopeComponent& Rope)
+	{
+		return Rope.PhysicalTetherConstraint ? Rope.PhysicalTetherWielder.Get() : nullptr;
+	}
+
+	static bool HasPhysicalTetherProxy(const URopeComponent& Rope)
+	{
+		return Rope.PhysicalTetherProxy != nullptr;
+	}
+
 	static FVector GetPhysicalTetherProxyWorld(const URopeComponent& Rope)
 	{
 		return Rope.PhysicalTetherProxy
@@ -189,6 +200,13 @@ struct FRopeWielderComponentTestSeam
 	static ERopeLengthConstraintBackend GetLengthConstraintBackend(const URopeComponent& Rope)
 	{
 		return Rope.LengthConstraintState.Backend;
+	}
+
+	// MAX_uint64 while no hard Wielder projection has ever been recorded. Reading the raw stamp rather than
+	// HasWielderAttempt keeps the assertion independent of GFrameCounter inside a hand-driven World->Tick.
+	static uint64 GetWielderAttemptFrame(const URopeComponent& Rope)
+	{
+		return Rope.LengthConstraintState.WielderAttemptFrame;
 	}
 
 	static bool IsPhysicalTetherSoft(const URopeComponent& Rope)
@@ -240,7 +258,8 @@ struct FRopeWielderComponentTestSeam
 			AnchorWorld,
 			ProxyWorld,
 			Limit,
-			DeltaTime);
+			DeltaTime,
+			/*bCornerIsOwnerAttachPoint*/ true);
 	}
 
 	static float GetPhysicalTetherStiffness(const URopeComponent& Rope)
@@ -879,6 +898,102 @@ bool FRopeWielderCharacterHardLeashSameFrameTest::RunTest(const FString& Paramet
 	TestTrue(TEXT("a hard Chaos limit carries no linear-limit stiffness"),
 		FMath::IsNearlyZero(
 			FRopeWielderComponentTestSeam::GetPhysicalTetherStiffness(*Rope)));
+
+	WorldWrapper.DestroyTestWorld(false);
+	WorldWrapper.ForwardErrorMessages(this);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderSimulatedOwnerBindsChaosDirectlyTest,
+	"DynamicRope.Movement.HardLeash.SimulatedOwnerBindsChaosDirectly",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderSimulatedOwnerBindsChaosDirectlyTest::RunTest(const FString& Parameters)
+{
+	// A Wielder whose own root simulates — a Chaos vehicle, a physics prop — is not a movement adapter. The
+	// hard projection must stand down for it (moving a simulated body from the game thread is discarded by the
+	// next physics sync, and recording the attempt would suppress a reaction it never received), and the
+	// tether must bind that body directly instead of hiding behind an infinite-mass kinematic proxy.
+	FTestWorldWrapper WorldWrapper;
+	if (!WorldWrapper.CreateTestWorld(EWorldType::Game) || !WorldWrapper.BeginPlayInTestWorld())
+	{
+		WorldWrapper.ForwardErrorMessages(this);
+		return false;
+	}
+
+	UWorld* World = WorldWrapper.GetTestWorld();
+	AActor* TargetActor = World->SpawnActor<AActor>();
+	APawn* Vehicle = World->SpawnActor<APawn>();
+	if (!TestNotNull(TEXT("simulated-owner fixture spawned target"), TargetActor) ||
+		!TestNotNull(TEXT("simulated-owner fixture spawned pawn"), Vehicle))
+	{
+		WorldWrapper.DestroyTestWorld(false);
+		WorldWrapper.ForwardErrorMessages(this);
+		return false;
+	}
+
+	USphereComponent* TargetRoot = NewObject<USphereComponent>(TargetActor);
+	TargetActor->AddInstanceComponent(TargetRoot);
+	TargetActor->SetRootComponent(TargetRoot);
+	TargetRoot->InitSphereRadius(10.0f);
+	TargetRoot->SetMobility(EComponentMobility::Movable);
+	TargetRoot->RegisterComponent();
+	TargetActor->SetActorLocation(FVector(60.0f, 0.0f, 0.0f));
+	TargetRoot->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
+	TargetRoot->SetSimulatePhysics(true);
+	TargetRoot->SetEnableGravity(false);
+
+	USphereComponent* VehicleRoot = NewObject<USphereComponent>(Vehicle);
+	Vehicle->AddInstanceComponent(VehicleRoot);
+	Vehicle->SetRootComponent(VehicleRoot);
+	VehicleRoot->InitSphereRadius(10.0f);
+	VehicleRoot->SetMobility(EComponentMobility::Movable);
+	VehicleRoot->RegisterComponent();
+	// Start 10 cm outside the 60 cm boundary, so a hard projection would fire on the very first tick.
+	Vehicle->SetActorLocation(FVector(-10.0f, 0.0f, 0.0f));
+	VehicleRoot->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
+	VehicleRoot->SetSimulatePhysics(true);
+	VehicleRoot->SetEnableGravity(false);
+
+	URopeComponent* Rope = NewObject<URopeComponent>(Vehicle);
+	Vehicle->AddInstanceComponent(Rope);
+	Rope->SetupAttachment(VehicleRoot);
+	FRopeWielderComponentTestSeam::ConfigureExternalHardLeash(
+		*Rope, TargetRoot, /*AnchorNode*/ 3, /*RopeLength*/ 60.0f);
+	Rope->RegisterComponent();
+
+	URopeWielderComponent* Wielder = NewObject<URopeWielderComponent>(Vehicle);
+	Vehicle->AddInstanceComponent(Wielder);
+	Wielder->Rope = Rope;
+	Wielder->bAutoBindInput = false;
+	Wielder->bAttachOnBeginPlay = false;
+	Wielder->bShowThrowPreview = false;
+	Wielder->bAutoGroundExitOnUpwardPull = false;
+	Wielder->bBoostAirControlWhileSwinging = false;
+	Wielder->RegisterComponent();
+
+	TestTrue(TEXT("a simulating owner root is recognised as a physical Wielder end"),
+		Rope->IsWielderPhysicallySimulated());
+
+	World->Tick(LEVELTICK_All, 1.0f / 60.0f);
+
+	TestTrue(TEXT("a simulated Wielder is never hard-projected, so no attempt is ever recorded"),
+		FRopeWielderComponentTestSeam::GetWielderAttemptFrame(*Rope) == MAX_uint64);
+	TestTrue(TEXT("the tether's hand side is the owner's own simulating body"),
+		FRopeWielderComponentTestSeam::GetPhysicalTetherWielderBody(*Rope) ==
+			static_cast<const UPrimitiveComponent*>(VehicleRoot));
+	TestFalse(TEXT("a directly bound hand side creates no kinematic proxy"),
+		FRopeWielderComponentTestSeam::HasPhysicalTetherProxy(*Rope));
+	TestTrue(TEXT("the directly bound tether still uses the hard material limit"),
+		FMath::IsNearlyEqual(
+			FRopeWielderComponentTestSeam::GetPhysicalTetherLimit(*Rope), 60.0f, 0.1f));
+	TestEqual(TEXT("a simulated pair resolves through the Chaos backend"),
+		FRopeWielderComponentTestSeam::GetLengthConstraintBackend(*Rope),
+		ERopeLengthConstraintBackend::Chaos);
+	// The point of binding directly: both ends are dynamic, so the owner is drawn in too instead of standing
+	// still while only the target is winched, which is all an infinite-mass proxy could ever produce.
+	TestTrue(TEXT("a directly bound owner is actually pulled toward the anchor"),
+		Vehicle->GetActorLocation().X > -9.99f);
 
 	WorldWrapper.DestroyTestWorld(false);
 	WorldWrapper.ForwardErrorMessages(this);

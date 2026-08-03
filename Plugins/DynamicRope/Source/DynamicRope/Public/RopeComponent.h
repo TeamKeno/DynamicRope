@@ -510,6 +510,20 @@ public:
 		bool& bOutWasConstrained) const;
 
 	/**
+	 * Is the Wielder end — this rope's own owner — a simulating physics body rather than a kinematic movement
+	 * adapter? A Chaos vehicle or a physics prop is one; a Character is not, because its authority is the
+	 * capsule its movement component sweeps.
+	 *
+	 * Such an owner must not be position-projected from the game thread: the solver owns its transform, so the
+	 * move is discarded by the next physics sync (and warns in the editor), and UMovementComponent::Velocity is
+	 * an output mirror it never reads back. The hand-side length boundary is enforced for it by the physical
+	 * tether instead, which binds that body directly as one side of the Chaos constraint. Custom movement
+	 * should consult this before calling ConstrainWielderLocation.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Rope|Hold")
+	bool IsWielderPhysicallySimulated() const;
+
+	/**
 	 * Tension in one segment (SegmentIndex spans node i to i+1), derived from the solver's XPBD distance λ
 	 * as F = max(0, -λ)/h². The units are relative to a unit-mass node, so one node hanging under gravity
 	 * reads about 980. Only stretch is positive; slack and compression read 0.
@@ -656,6 +670,12 @@ public:
 
 	/** The component currently wrapped, skeletal or static. Null when not Wrapped or the target is gone. */
 	const USceneComponent* GetWrappedComponent() const { return WrapController.State.Mesh.Get(); }
+
+	/** The component a Flight capture latched onto — the target the wrap attempt is heading for. Set from
+	 *  the moment OnRopeCaptured fires, through Contacting and Wrapping; null otherwise. The
+	 *  GuaranteedWrap path skips Contacting and commits before its Captured fires, so there the target
+	 *  reads through GetWrappedComponent instead. */
+	const USceneComponent* GetContactCandidateMesh() const { return ContactTracker.CandidateMesh; }
 
 	/** The skeletal mesh currently wrapped (valid while Wrapped, null otherwise); GetOwner() on it reaches the
 	 *  target actor. Storage is a weak const USceneComponent now that static targets can be wrapped, so this
@@ -1165,9 +1185,20 @@ private:
 	// ApplyWrappedTraction, and the result is recorded in one place, LengthConstraintState.
 	void UpdateConstraintTether(float DeltaTime);
 
-	// Automatic traction, half two — the ragdoll target. An engine physics constraint ties a kinematic proxy
-	// at the corner to an anchor point on the wrapped bone, with a spherical limit at the leg's rest length.
+	// Automatic traction, half two — the ragdoll target. An engine physics constraint ties the hand side at the
+	// corner to an anchor point on the wrapped bone, with a spherical limit at the leg's rest length.
 	// This covers **every simulating body**: skeletal bones and component bodies alike.
+	//
+	// The hand side is one of two carriers. Normally it is a kinematic proxy re-placed at the corner every
+	// frame, which is an infinite mass: the target is drawn in and the wielder feels nothing, correct for a
+	// character whose movement adapter owns its own reaction, and correct for a corner that models an external
+	// pulley. When the rope's owner is itself a simulating body — a Chaos vehicle, a physics prop — that is
+	// wrong: nothing absorbs the reaction and the rope can never drag the owner. Such an owner is bound
+	// **directly** as Frame1 (bCornerIsOwnerAttachPoint), with no proxy, so Chaos splits the reaction across
+	// both bodies by inverse mass inside the same substep.
+	// Direct binding requires the corner to be a point genuinely fixed in the owner's body, which is the rope's
+	// own attachment point (node 0). The pull-sample fallback puts the corner at a look-ahead node on the rope
+	// instead, so it passes false and keeps the proxy.
 	// A per-frame game-thread velocity impulse cannot serve them. On a jointed body it is caught between a
 	// whole-body-sized kick, which runs away, and a bone-sized λ, which collapses the traction force; and it
 	// loses structurally under an airborne load such as a suspended prop, where gravity and swing act during
@@ -1178,7 +1209,8 @@ private:
 	// mover without a Wielder falls back to UpdateConstraintTether's drive. It is torn down on abort or
 	// release, on a target or bone change, and in EndPlay.
 	void UpdatePhysicalTether(class UPrimitiveComponent* TargetPrim, FName Bone,
-		const FVector& AnchorWorld, const FVector& CornerWorld, float LegRestLen, float DeltaTime);
+		const FVector& AnchorWorld, const FVector& CornerWorld, float LegRestLen, float DeltaTime,
+		bool bCornerIsOwnerAttachPoint);
 	/** Reads the current Chaos constraint force only. The proxy transform and the limit are left alone. */
 	void SamplePhysicalTetherForce(float DeltaTime);
 	/**
@@ -1206,7 +1238,8 @@ private:
 		const FRopeWielderMovementConstraint& Constraint) const;
 	void TeardownPhysicalTether();
 
-	/** The physical tether's kinematic proxy, which follows the corner, and its constraint. Runtime only, and only for a simulating-body target. */
+	/** The physical tether's kinematic proxy, which follows the corner, and its constraint. Runtime only, and
+	 *  only for a simulating-body target. The proxy is absent while the owner's own body carries Frame1. */
 	UPROPERTY(Transient)
 	TObjectPtr<class USphereComponent> PhysicalTetherProxy;
 	UPROPERTY(Transient)
@@ -1215,6 +1248,16 @@ private:
 	TWeakObjectPtr<class UPrimitiveComponent> PhysicalTetherTarget;
 	FName PhysicalTetherBone = NAME_None;
 	float PhysicalTetherLimit = -1.0f;
+	// Frame1's carrier when the owner's own simulating body is bound directly, and null while the kinematic
+	// proxy carries it. A change either way regenerates the constraint, which is what a runtime
+	// SimulatePhysics toggle on the owner looks like from here.
+	TWeakObjectPtr<class UPrimitiveComponent> PhysicalTetherWielder;
+	FName PhysicalTetherWielderBone = NAME_None;
+	// The attachment point pinned at creation, in the owner actor's space. Unlike the target anchor below this
+	// reads the component transform rather than the lagging Sim mirror, and the rope is rigidly attached to its
+	// owner, so it is constant and an instantaneous guard is enough. It still guards, because re-attaching the
+	// rope to a different socket mid-wrap does relocate it for real and would leave Frame1 stale.
+	FVector PhysicalTetherWielderActorLocal = FVector::ZeroVector;
 	/** GFrameCounter of the frame in which the Wielder already drove the proxy and limit authoritatively in PrePhysics. */
 	uint64 PhysicalTetherPrePhysicsFrame = MAX_uint64;
 	// Body-local anchor pinned at creation (constraint Frame2). The reference the drift guard compares against

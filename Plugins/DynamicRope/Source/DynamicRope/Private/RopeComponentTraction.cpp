@@ -625,6 +625,16 @@ float URopeComponent::ComputeWielderLengthPositionCorrectionShare(
 		: 1.0f;
 }
 
+bool URopeComponent::IsWielderPhysicallySimulated() const
+{
+	// Rung 3 of the receiver ladder, reached because the wielder passes no MeshComp: the owner's root
+	// primitive is simulating. A character whose bones ragdoll is deliberately not included — its root is
+	// still the kinematic capsule, so the movement adapter remains the authority on that end.
+	const FRopeTetherEndpoint Wielder = ResolveTetherEndpoint(
+		nullptr, GetOwner(), NAME_None, HoldConfig.GroundBraceFactor);
+	return Wielder.Kind == ERopeEndpointKind::SimBody && Wielder.Prim != nullptr;
+}
+
 void URopeComponent::PrepareWielderLengthConstraint(
 	const FRopeWielderMovementConstraint& Constraint,
 	const FVector& OutwardNormal,
@@ -682,7 +692,9 @@ void URopeComponent::PrepareWielderLengthConstraint(
 		Constraint.AnchorWorld,
 		ChaosProxyWorld,
 		Constraint.MaxDistance,
-		DeltaTime);
+		DeltaTime,
+		// The hand point itself, so a simulating owner can carry the constraint directly.
+		/*bCornerIsOwnerAttachPoint*/ true);
 	if (PhysicalTetherConstraint)
 	{
 		PhysicalTetherPrePhysicsFrame = GFrameCounter;
@@ -880,7 +892,10 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 				Anchor,
 				ProxyWorld,
 				LegRest,
-				DeltaTime);
+				DeltaTime,
+				// Only the live path's corner is the hand point. Aim is a look-ahead node standing in for an
+				// external pulley, so it must stay on the kinematic proxy even for a simulating owner.
+				/*bCornerIsOwnerAttachPoint*/ bHasLiveConstraint);
 		}
 		return;
 	}
@@ -1225,10 +1240,11 @@ void URopeComponent::UpdateConstraintTether(float DeltaTime)
 }
 
 void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName Bone,
-	const FVector& AnchorWorld, const FVector& CornerWorld, float LegRestLen, float DeltaTime)
+	const FVector& AnchorWorld, const FVector& CornerWorld, float LegRestLen, float DeltaTime,
+	bool bCornerIsOwnerAttachPoint)
 {
-	// The ragdoll half of the constraint tether, as an engine physics constraint: a kinematic proxy at the
-	// corner tied to an anchor point on the target's body, with a spherical limit at the leg's rest length.
+	// The ragdoll half of the constraint tether, as an engine physics constraint: the hand side at the corner
+	// tied to an anchor point on the target's body, with a spherical limit at the leg's rest length.
 	// A per-frame game-thread velocity impulse cannot do this job. On a jointed body it is trapped between a
 	// whole-body-sized kick, which runs away, and a bone-sized λ, which collapses the traction force; and
 	// under an airborne load such as a suspended prop it cannot stop the floating and the pendulum pumping
@@ -1243,9 +1259,33 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		return;
 	}
 
-	// Rebuild it when the target or bone changed — a promotion, or a re-wrap of the anchor.
+	// Which body carries the hand side (Frame1). The kinematic proxy below is an infinite mass: the target is
+	// drawn in and the hand side feels nothing. That is right for a character, whose movement adapter applies
+	// its own reaction, and right for a corner that stands in for an external pulley — but wrong when the
+	// rope's owner is itself simulating, because then nothing absorbs the reaction and the rope can never drag
+	// the owner. A simulating owner is therefore bound directly, and Chaos splits the reaction across the two
+	// bodies by inverse mass inside the same substep.
+	// It needs the corner to be a point genuinely fixed in that body, which is the rope's own attachment point.
+	// The pull-sample fallback places the corner at a look-ahead node on the rope instead, so it stays on the
+	// proxy. Nor may the owner's body *be* the target: a self-wrap would constrain one body to itself.
+	UPrimitiveComponent* WielderPrim = nullptr;
+	FName WielderBone = NAME_None;
+	if (bCornerIsOwnerAttachPoint)
+	{
+		const FRopeTetherEndpoint Wielder = ResolveTetherEndpoint(
+			nullptr, Owner, NAME_None, HoldConfig.GroundBraceFactor);
+		if (Wielder.Kind == ERopeEndpointKind::SimBody && Wielder.Prim && Wielder.Prim != TargetPrim)
+		{
+			WielderPrim = Wielder.Prim;
+			WielderBone = Wielder.Bone;
+		}
+	}
+
+	// Rebuild it when the target or bone changed — a promotion, or a re-wrap of the anchor — or when the hand
+	// side swapped carriers, which is what a runtime SimulatePhysics toggle on the owner looks like from here.
 	if (PhysicalTetherConstraint
-		&& (PhysicalTetherTarget.Get() != TargetPrim || PhysicalTetherBone != Bone))
+		&& (PhysicalTetherTarget.Get() != TargetPrim || PhysicalTetherBone != Bone
+			|| PhysicalTetherWielder.Get() != WielderPrim || PhysicalTetherWielderBone != WielderBone))
 	{
 		TeardownPhysicalTether();
 	}
@@ -1284,45 +1324,79 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		}
 	}
 
-	if (!PhysicalTetherProxy)
+	// The hand attachment in the owner actor's space, for the directly bound case. This reads the component
+	// transform rather than the lagging Sim mirror, and the rope is rigidly attached to its owner, so it is
+	// constant frame to frame and needs no smoothing — but re-attaching the rope to a different socket during
+	// a wrap does relocate it for real, and Frame1 was pinned at creation, so it is guarded all the same.
+	const FVector WielderActorLocal = WielderPrim
+		? Owner->GetActorTransform().InverseTransformPosition(CornerWorld)
+		: FVector::ZeroVector;
+	if (PhysicalTetherConstraint && WielderPrim
+		&& FVector::DistSquared(WielderActorLocal, PhysicalTetherWielderActorLocal) > FMath::Square(10.0f))
 	{
-		PhysicalTetherProxy = NewObject<USphereComponent>(Owner,
-			MakeUniqueObjectName(Owner, USphereComponent::StaticClass(), TEXT("RopeTetherProxy")));
-		PhysicalTetherProxy->SetupAttachment(this);
-		PhysicalTetherProxy->SetAbsolute(true, true, true); // World layout (regardless of rope component transform).
-		PhysicalTetherProxy->InitSphereRadius(4.0f);
-		// It needs a body, as one side of the constraint, but no collision and no queries — PhysicsOnly with
-		// every channel ignored.
-		// Why queries must stay off: USphereComponent's default object type is WorldDynamic, and a channel
-		// response of Ignore only affects **channel** queries, since an object-type query returns any shape
-		// whose object type matches. With queries on, URopeStaticBodyProvider's OverlapMultiByObjectType scan
-		// would pick this proxy up, turn it into a push-out collider that follows the corner every frame, and
-		// shove this rope's own wrap nodes around.
-		PhysicalTetherProxy->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
-		PhysicalTetherProxy->SetCollisionResponseToAllChannels(ECR_Ignore);
-		PhysicalTetherProxy->SetSimulatePhysics(false); // Kinematic — Move to corner every frame.
-		PhysicalTetherProxy->SetHiddenInGame(true);
-		PhysicalTetherProxy->RegisterComponent();
+		TeardownPhysicalTether();
 	}
-	// Kinematic movement — Chaos reads the movement velocity and pulls the constraint with it, so the corner and the hand are tracked.
-	PhysicalTetherProxy->SetWorldLocation(CornerWorld);
+
+	if (WielderPrim)
+	{
+		// Directly bound: there is no corner to carry, so any proxy left over from a previous binding goes.
+		// The carrier change above already tore the constraint down, so this never orphans a live one.
+		if (PhysicalTetherProxy)
+		{
+			PhysicalTetherProxy->DestroyComponent();
+			PhysicalTetherProxy = nullptr;
+		}
+	}
+	else
+	{
+		if (!PhysicalTetherProxy)
+		{
+			PhysicalTetherProxy = NewObject<USphereComponent>(Owner,
+				MakeUniqueObjectName(Owner, USphereComponent::StaticClass(), TEXT("RopeTetherProxy")));
+			PhysicalTetherProxy->SetupAttachment(this);
+			PhysicalTetherProxy->SetAbsolute(true, true, true); // World layout (regardless of rope component transform).
+			PhysicalTetherProxy->InitSphereRadius(4.0f);
+			// It needs a body, as one side of the constraint, but no collision and no queries — PhysicsOnly with
+			// every channel ignored.
+			// Why queries must stay off: USphereComponent's default object type is WorldDynamic, and a channel
+			// response of Ignore only affects **channel** queries, since an object-type query returns any shape
+			// whose object type matches. With queries on, URopeStaticBodyProvider's OverlapMultiByObjectType scan
+			// would pick this proxy up, turn it into a push-out collider that follows the corner every frame, and
+			// shove this rope's own wrap nodes around.
+			PhysicalTetherProxy->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
+			PhysicalTetherProxy->SetCollisionResponseToAllChannels(ECR_Ignore);
+			PhysicalTetherProxy->SetSimulatePhysics(false); // Kinematic — Move to corner every frame.
+			PhysicalTetherProxy->SetHiddenInGame(true);
+			PhysicalTetherProxy->RegisterComponent();
+		}
+		// Kinematic movement — Chaos reads the movement velocity and pulls the constraint with it, so the corner and the hand are tracked.
+		PhysicalTetherProxy->SetWorldLocation(CornerWorld);
+	}
 
 	if (!PhysicalTetherConstraint)
 	{
 		PhysicalTetherConstraint = NewObject<UPhysicsConstraintComponent>(Owner,
 			MakeUniqueObjectName(Owner, UPhysicsConstraintComponent::StaticClass(), TEXT("RopeTetherConstraint")));
-		PhysicalTetherConstraint->SetupAttachment(PhysicalTetherProxy);
+		// The constraint component rides its Frame1 carrier: the proxy, or this rope component, whose own
+		// location *is* the attachment point in the directly bound case. Scale is forced absolute because
+		// UpdateConstraintFrames divides the derived frame origin by the component's scale, and a designer
+		// scaling the rope must not move the constraint's anchor with it.
+		PhysicalTetherConstraint->SetupAttachment(
+			WielderPrim ? static_cast<USceneComponent*>(this) : PhysicalTetherProxy);
+		PhysicalTetherConstraint->SetAbsolute(false, false, true);
 		PhysicalTetherConstraint->RegisterComponent();
 		PhysicalTetherConstraint->SetWorldLocation(CornerWorld);
 		PhysicalTetherConstraint->SetDisableCollision(false);
 		// A single body plus positional projection can snap/rebound at the moving limit, so
-		// component bodies keep projection disabled. This backend is exclusively the
+		// component bodies keep projection disabled. A directly bound owner keeps it disabled too:
+		// projection closes the error by teleporting a body, which on something as heavy as a
+		// vehicle is a visible jump rather than a correction. This backend is exclusively the
 		// inextensible path and must always be a hard Chaos limit. Positive compliance is
 		// owned by the common analytic material solver and never reaches this function.
 		// The profile must be configured before SetConstrainedComponents initializes Chaos.
 		FConstraintProfileProperties& Profile =
 			PhysicalTetherConstraint->ConstraintInstance.ProfileInstance;
-		if (!SkelBody)
+		if (!SkelBody || WielderPrim)
 		{
 			Profile.bEnableProjection = false;
 		}
@@ -1330,11 +1404,23 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		Profile.LinearLimit.Stiffness = 0.0f;
 		Profile.LinearLimit.Damping = 0.0f;
 		Profile.LinearLimit.Restitution = 0.0f;
-		PhysicalTetherConstraint->SetConstrainedComponents(PhysicalTetherProxy, NAME_None, TargetPrim, Bone);
-		// Constraint frame origins: the proxy side is the proxy's own origin, the corner; the target side is
-		// the anchor in body-local space (AnchorLocal above — the wrap freezes bone-local anchors under the
-		// same convention, tip lever included). The distance limit spans those two points.
-		PhysicalTetherConstraint->ConstraintInstance.SetRefPosition(EConstraintFrame::Frame1, FVector::ZeroVector);
+		PhysicalTetherConstraint->SetConstrainedComponents(
+			WielderPrim ? WielderPrim : static_cast<UPrimitiveComponent*>(PhysicalTetherProxy),
+			WielderPrim ? WielderBone : NAME_None,
+			TargetPrim, Bone);
+		// Constraint frame origins: the hand side is the corner, and the target side is the anchor in
+		// body-local space (AnchorLocal above — the wrap freezes bone-local anchors under the same convention,
+		// tip lever included). The distance limit spans those two points.
+		// SetConstrainedComponents has just derived both frames from this component's world position, which is
+		// the corner. Frame1 is therefore already the corner expressed in its carrier's body space, correct for
+		// the proxy (its own origin) and for the owner's body alike, and — unlike SetRefPosition — the engine's
+		// own derivation is the one that accounts for reference scale. Only Frame2 has to be moved off the
+		// corner and onto the anchor. The proxy case still overwrites Frame1 with an exact zero, since its
+		// body origin is the corner by construction and the derived value is that zero up to float error.
+		if (!WielderPrim)
+		{
+			PhysicalTetherConstraint->ConstraintInstance.SetRefPosition(EConstraintFrame::Frame1, FVector::ZeroVector);
+		}
 		PhysicalTetherConstraint->ConstraintInstance.SetRefPosition(EConstraintFrame::Frame2, AnchorLocal);
 		// The rope constrains no rotation — every angle is free.
 		PhysicalTetherConstraint->SetAngularSwing1Limit(ACM_Free, 0.0f);
@@ -1342,11 +1428,15 @@ void URopeComponent::UpdatePhysicalTether(UPrimitiveComponent* TargetPrim, FName
 		PhysicalTetherConstraint->SetAngularTwistLimit(ACM_Free, 0.0f);
 		PhysicalTetherTarget = TargetPrim;
 		PhysicalTetherBone = Bone;
+		PhysicalTetherWielder = WielderPrim;
+		PhysicalTetherWielderBone = WielderBone;
+		PhysicalTetherWielderActorLocal = WielderActorLocal;
 		PhysicalTetherAnchorLocal = AnchorLocal;
 		PhysicalTetherSmoothedAnchorLocal = AnchorLocal; // Seed EMA as a generating anchor (to prevent first frame spurious drift).
 		PhysicalTetherLimit = -1.0f; // Forced update below.
-		UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] physical tether created: %s/%s"),
-			*GetName(), *GetNameSafe(TargetPrim), *Bone.ToString());
+		UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] physical tether created: %s/%s, hand side %s"),
+			*GetName(), *GetNameSafe(TargetPrim), *Bone.ToString(),
+			WielderPrim ? *GetNameSafe(WielderPrim) : TEXT("kinematic proxy"));
 	}
 
 	// Spherical distance limit = material leg length. Node zero is an exact zero-radius
@@ -1407,6 +1497,9 @@ void URopeComponent::TeardownPhysicalTether()
 	}
 	PhysicalTetherTarget = nullptr;
 	PhysicalTetherBone = NAME_None;
+	PhysicalTetherWielder = nullptr;
+	PhysicalTetherWielderBone = NAME_None;
+	PhysicalTetherWielderActorLocal = FVector::ZeroVector;
 	PhysicalTetherLimit = -1.0f;
 	PhysicalTetherPrePhysicsFrame = MAX_uint64;
 	PhysicalTetherAnchorLocal = FVector::ZeroVector;

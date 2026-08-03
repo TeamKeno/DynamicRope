@@ -1785,8 +1785,18 @@ void URopeWielderComponent::EnforceWielderLengthConstraint(float DeltaTime)
 	const RopeMovementConstraint::FProjectionResult Projection =
 		RopeMovementConstraint::ProjectPoint(
 			DesiredPinWorld, Constraint.PivotWorld, Constraint.MaxDistance);
+	// Hard projection is a *movement adapter* correction: it assumes the pawn's authoritative position is the
+	// one the game thread just wrote. A simulating owner — a Chaos vehicle, a physics prop — breaks that
+	// assumption in both directions. Moving it here is discarded by the next physics sync (and warns in the
+	// editor: "Attempting to move a fully simulated skeletal mesh"), and UMovementComponent::Velocity is an
+	// output mirror such a movement component never reads back, so the velocity share below would be lost too.
+	// Worse, recording the attempt would tell the tether that this frame's outward velocity had already been
+	// removed from the Wielder, suppressing the reaction it never actually received.
+	// The boundary for that owner is enforced by the physical tether instead, which PrepareWielderLengthConstraint
+	// binds directly to its body so Chaos resolves both ends together inside the substep.
 	const bool bHardProjectionApplied =
-		Rope->HoldConfig.TetherCompliance <= KINDA_SMALL_NUMBER;
+		Rope->HoldConfig.TetherCompliance <= KINDA_SMALL_NUMBER &&
+		!Rope->IsWielderPhysicallySimulated();
 	const float WielderPositionCorrectionShare =
 		(bHardProjectionApplied && Projection.bConstrained)
 			? Rope->ComputeWielderLengthPositionCorrectionShare(
