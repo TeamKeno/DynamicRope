@@ -103,6 +103,7 @@ RWStructuredBuffer<float>         OutLambdaDist;
 groupshared float3 gPos[ROPE_MAX_NODES];
 groupshared float3 gPrev[ROPE_MAX_NODES];
 groupshared float  gInvMass[ROPE_MAX_NODES];
+groupshared float  gPersistentInvMass[ROPE_MAX_NODES];
 // 1 per segment k(node k,k+1)
 groupshared float  gLambdaDist[ROPE_MAX_NODES];
 // 1 per stick k(node k,k+2)
@@ -671,6 +672,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		gPos[i]     = Positions[P.NodeOffset + i].xyz;
 		gPrev[i]    = PrevPositions[P.NodeOffset + i].xyz;
 		gInvMass[i] = InvMass[P.NodeOffset + i];
+		gPersistentInvMass[i] = gInvMass[i];
 		// Initialize to 0 so that write-back does not output garbage values even when NumSub=0 (frame without integration).
 		gLambdaDist[i] = 0.0f;
 	}
@@ -679,13 +681,21 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 	// --- Override(G0): Inject the per-node target/mass calculated by the logic phase (GT) *before* integration.
 	// "Target calculation is GT, application is GPU" — Position/mass writing of whip/Wrapping/hold/Releasing without reseeding
 	// Take this stage. Order: Pos → Prev (explicit) → Prev=Pos (velocity 0) → InvMass.
+	uint OverrideF = 0u;
 	if (bActiveNode && P.bHasOverrides != 0)
 	{
-		const uint F = OverrideFlags[P.NodeOffset + i];
-		if (F & 1u) { gPos[i]  = OverridePositions[P.NodeOffset + i].xyz; }
-		if (F & 2u) { gPrev[i] = OverridePrevPositions[P.NodeOffset + i].xyz; }
-		if (F & 4u) { gPrev[i] = gPos[i]; }
-		if (F & 8u) { gInvMass[i] = OverrideInvMass[P.NodeOffset + i]; }
+		OverrideF = OverrideFlags[P.NodeOffset + i];
+		if (OverrideF & 1u) { gPos[i]  = OverridePositions[P.NodeOffset + i].xyz; }
+		if (OverrideF & 2u) { gPrev[i] = OverridePrevPositions[P.NodeOffset + i].xyz; }
+		if (OverrideF & 4u) { gPrev[i] = gPos[i]; }
+		if (OverrideF & 8u) { gInvMass[i] = OverrideInvMass[P.NodeOffset + i]; }
+	}
+	if (bActiveNode)
+	{
+		// KinematicPath is a frame-scoped whip constraint. Preserve the resident mass for write-back, while
+		// distance/bending treat the guided node as an immovable target during this dispatch.
+		gPersistentInvMass[i] = gInvMass[i];
+		if (OverrideF & 16u) { gInvMass[i] = 0.0f; }
 	}
 	GroupMemoryBarrierWithGroupSync();
 
@@ -706,6 +716,21 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 
 	for (int s = 0; s < P.NumSub; ++s)
 	{
+		// Sweep a whip target through the frame instead of injecting one frame of guide velocity and then
+		// integrating that displacement again for every substep. At the final substep Pos is exactly the
+		// current guide and Prev is one fixed substep behind, ready for a velocity-continuous release.
+		if (bActiveNode && (OverrideF & 16u))
+		{
+			const float Alpha0 = (float)s / (float)P.NumSub;
+			const float Alpha1 = (float)(s + 1) / (float)P.NumSub;
+			const float3 GuidePrev = OverridePrevPositions[P.NodeOffset + i].xyz;
+			const float3 GuideCurrent = OverridePositions[P.NodeOffset + i].xyz;
+			gPrev[i] = lerp(GuidePrev, GuideCurrent, Alpha0);
+			gPos[i] = lerp(GuidePrev, GuideCurrent, Alpha1);
+			gInvMass[i] = 0.0f;
+		}
+		GroupMemoryBarrierWithGroupSync();
+
 		// --- Integrate (per node)
 		if (bActiveNode && gInvMass[i] > 0.0f)
 		{
@@ -728,6 +753,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			gPos[0]     = Pin;
 			gPrev[0]    = Pin;
 			gInvMass[0] = 0.0f;
+			gPersistentInvMass[0] = 0.0f;
 		}
 		GroupMemoryBarrierWithGroupSync();
 
@@ -938,7 +964,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 	{
 		Positions[P.NodeOffset + i]     = float4(gPos[i], 0.0f);
 		PrevPositions[P.NodeOffset + i] = float4(gPrev[i], 0.0f);
-		InvMass[P.NodeOffset + i]       = gInvMass[i];
+		InvMass[P.NodeOffset + i]       = gPersistentInvMass[i];
 		// Segment λ of the last substep (slot N-1 is always 0).
 		OutLambdaDist[P.NodeOffset + i] = gLambdaDist[i];
 	}

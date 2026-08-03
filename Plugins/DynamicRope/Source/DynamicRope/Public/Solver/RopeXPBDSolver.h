@@ -24,6 +24,20 @@ struct FRopeSubstepSchedule
 	float FixedDt = 0.0f;
 };
 
+/** Optional frame-scoped kinematic path for guided nodes. The solver sweeps each masked node from PrevTargets
+ *  to CurrentTargets across its fixed substeps, treating it as zero-mass only for that frame. */
+struct FRopeKinematicTargetFrame
+{
+	TConstArrayView<uint8> Mask;
+	TConstArrayView<FVector> PrevTargets;
+	TConstArrayView<FVector> CurrentTargets;
+
+	bool IsValidFor(int32 NumNodes) const
+	{
+		return Mask.Num() == NumNodes && PrevTargets.Num() == NumNodes && CurrentTargets.Num() == NumNodes;
+	}
+};
+
 /**
  * Accumulate DeltaSeconds into State.TimeAccumulator and hand back how much of it this frame consumes in
  * fixed-size substeps, capped against the spiral of death. State is non-const because the accumulator is
@@ -109,7 +123,8 @@ class DYNAMICROPE_API FRopeXPBDSolver
 public:
 	/** Advance one frame: integrate per substep, then solve distance, bending and collision constraints. */
 	void Step(FRopeSimState& State, const FRopeSolverConfig& Config,
-		const TArray<IRopeCollider*>& Colliders, float DeltaSeconds) const;
+		const TArray<IRopeCollider*>& Colliders, float DeltaSeconds,
+		const FRopeKinematicTargetFrame* KinematicTargets = nullptr) const;
 
 private:
 	void Integrate(FRopeSimState& State, const FRopeSolverConfig& Config, float SubDt) const;

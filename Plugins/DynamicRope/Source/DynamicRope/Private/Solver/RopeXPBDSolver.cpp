@@ -110,7 +110,8 @@ FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverC
 }
 
 void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config,
-	const TArray<IRopeCollider*>& Colliders, float DeltaSeconds) const
+	const TArray<IRopeCollider*>& Colliders, float DeltaSeconds,
+	const FRopeKinematicTargetFrame* KinematicTargets) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(RopeSolver_Step);
 	if (State.Num() < 2)
@@ -121,8 +122,52 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 	const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(State, Config, DeltaSeconds);
 	const int32 NumSub = Schedule.NumSub;
 	const float FixedDt = Schedule.FixedDt;
+	const bool bHasKinematicTargets = KinematicTargets && KinematicTargets->IsValidFor(State.Num());
+	TArray<float> PersistentInvMass;
+	if (bHasKinematicTargets)
+	{
+		PersistentInvMass = State.InvMass;
+	}
+	const auto ApplyKinematicTargets = [&State, KinematicTargets, bHasKinematicTargets](
+		float PreviousAlpha, float CurrentAlpha)
+	{
+		if (!bHasKinematicTargets)
+		{
+			return;
+		}
+		for (int32 NodeIndex = 0; NodeIndex < State.Num(); ++NodeIndex)
+		{
+			if (KinematicTargets->Mask[NodeIndex] == 0)
+			{
+				continue;
+			}
+			State.PrevPositions[NodeIndex] = FMath::Lerp(
+				KinematicTargets->PrevTargets[NodeIndex],
+				KinematicTargets->CurrentTargets[NodeIndex], PreviousAlpha);
+			State.Positions[NodeIndex] = FMath::Lerp(
+				KinematicTargets->PrevTargets[NodeIndex],
+				KinematicTargets->CurrentTargets[NodeIndex], CurrentAlpha);
+			State.InvMass[NodeIndex] = 0.0f;
+		}
+	};
+	const auto RestoreKinematicMass = [&State, KinematicTargets, bHasKinematicTargets, &PersistentInvMass]()
+	{
+		if (!bHasKinematicTargets)
+		{
+			return;
+		}
+		for (int32 NodeIndex = 0; NodeIndex < State.Num(); ++NodeIndex)
+		{
+			if (KinematicTargets->Mask[NodeIndex] != 0)
+			{
+				State.InvMass[NodeIndex] = PersistentInvMass[NodeIndex];
+			}
+		}
+	};
 	if (NumSub <= 0)
 	{
+		ApplyKinematicTargets(0.0f, 1.0f);
+		RestoreKinematicMass();
 		return;
 	}
 
@@ -161,7 +206,10 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 
 	for (int32 s = 0; s < NumSub; ++s)
 	{
+		const float SubAlpha0 = static_cast<float>(s) / static_cast<float>(NumSub);
+		const float SubAlpha1 = static_cast<float>(s + 1) / static_cast<float>(NumSub);
 		Integrate(State, Config, FixedDt);
+		ApplyKinematicTargets(SubAlpha0, SubAlpha1);
 
 	// Sweep the pinned start toward its target across this frame's substeps, which is what stops an anchor
 	// jump exploding the chain. Velocity at the pin is zeroed so no motion is injected.
@@ -178,10 +226,6 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 		for (float& L : LambdaDist) { L = 0.0f; }
 		for (float& L : LambdaBend) { L = 0.0f; }
 		for (FRopeContactState& C : Contacts) { C.bActive = false; C.Lambda = 0.0f; }
-
-		// Alpha: the slice of the collider's motion this substep covers, spreading the frame motion evenly across the substeps.
-		const float SubAlpha0 = static_cast<float>(s) / static_cast<float>(NumSub);
-		const float SubAlpha1 = static_cast<float>(s + 1) / static_cast<float>(NumSub);
 
 		// CollisionPassesPerSubstep is how many times contacts are *re-detected* within a substep, refreshing
 		// the cached plane. 1, the default, detects once at the start. The swept detection is expensive so it
@@ -227,6 +271,7 @@ void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config
 		// sweep that propagates the correction from the pinned node out to the free end.
 		SolveStrainLimit(State, Config);
 	}
+	RestoreKinematicMass();
 
 	// Tension, from the converged λ of the last substep: F = λ/h² in XPBD. Stretch means C > 0 and so λ < 0,
 	// so only the positive part of -λ is tension and compression or slack reads 0. The units are relative to a

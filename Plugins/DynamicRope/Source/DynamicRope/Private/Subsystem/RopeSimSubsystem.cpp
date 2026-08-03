@@ -1621,8 +1621,9 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 
 void URopeSimSubsystem::PackWhipOverride(const URopeComponent& Rope, FRopeGPUResidentStep& Step) const
 {
-	// Load the whip guide targets Prepare's advance computed as an override — the same data the CPU path's
-	// ApplyToSim applies.
+	// Load the whip guide targets Prepare's advance computed as an override. The ordinary hard guide adds a
+	// substep kinematic flag, matching the CPU fallback's FRopeKinematicTargetFrame. Aim-hit keeps its endpoint
+	// solver-state blend and legacy one-shot override.
 	// The Flight gate stops a stale mask being applied in another phase, and since Flight does not fill
 	// OverrideFrame there is no overlap with the logic-phase packing.
 	if (Rope.Phase != ERopePhase::Flight)
@@ -1640,13 +1641,19 @@ void URopeSimSubsystem::PackWhipOverride(const URopeComponent& Rope, FRopeGPURes
 	Step.OverrideFlags.SetNumZeroed(S.Num());
 	Step.OverridePositions.SetNumZeroed(S.Num());
 	Step.OverridePrevPositions.SetNumZeroed(S.Num());
+	const bool bUseKinematicPath = !Rope.WhipGuide.HasAimTarget();
 	for (int32 k = 0; k < S.Num() && k < WhipMask.Num(); ++k)
 	{
 		if (WhipMask[k] == 0 || !WhipCur.IsValidIndex(k))
 		{
 			continue;
 		}
-		Step.OverrideFlags[k] = static_cast<uint8>(ERopeGPUOverride::Position | ERopeGPUOverride::Prev);
+		ERopeGPUOverride Flags = ERopeGPUOverride::Position | ERopeGPUOverride::Prev;
+		if (bUseKinematicPath)
+		{
+			Flags |= ERopeGPUOverride::KinematicPath;
+		}
+		Step.OverrideFlags[k] = static_cast<uint8>(Flags);
 		Step.OverridePositions[k] = WhipCur[k];
 		// With no previous target (an edge case), velocity is 0 — an approximation matching the CPU fallback's "previous position".
 		Step.OverridePrevPositions[k] = WhipPrev.IsValidIndex(k) ? WhipPrev[k] : WhipCur[k];

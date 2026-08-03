@@ -631,13 +631,21 @@ bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, T
 		{
 			check(IsInRenderingThread());
 
-			const int32 PendingIndex = Impl->PendingSteps.IndexOfByPredicate(
-				[RopeId](const FRopeGPUResidentStep& Step) { return Step.RopeId == RopeId; });
-			if (PendingIndex != INDEX_NONE)
+			bool bHasPendingForRope = false;
+			bool bPendingNeedsSceneGDF = false;
+			for (const FRopeGPUResidentStep& PendingStep : Impl->PendingSteps)
 			{
-				if (Impl->PendingSteps[PendingIndex].bUseWorldGDF)
+				if (PendingStep.RopeId == RopeId)
 				{
-					// Protects from global replacement of EnqueueSteps until consumed by the next scene graph dispatch.
+					bHasPendingForRope = true;
+					bPendingNeedsSceneGDF |= PendingStep.bUseWorldGDF;
+				}
+			}
+			if (bHasPendingForRope)
+			{
+				if (bPendingNeedsSceneGDF)
+				{
+					// Protect every queued temporal step for this rope until a scene graph can supply the GDF.
 					Impl->HandoffGDFBlockedRopes.Add(RopeId);
 					FScopeLock SL(&Impl->Results->Lock);
 					Impl->Results->HandoffSnapshots.Remove(RopeId);
@@ -645,8 +653,21 @@ bool FRopeGPUSolver::ReadbackNow(uint32 RopeId, TArray<FVector>& OutPositions, T
 				}
 
 				TArray<FRopeGPUResidentStep> ImmediateSteps;
-				ImmediateSteps.Add(MoveTemp(Impl->PendingSteps[PendingIndex]));
-				Impl->PendingSteps.RemoveAt(PendingIndex, 1, EAllowShrinking::No);
+				TArray<FRopeGPUResidentStep> RemainingSteps;
+				ImmediateSteps.Reserve(Impl->PendingSteps.Num());
+				RemainingSteps.Reserve(Impl->PendingSteps.Num());
+				for (FRopeGPUResidentStep& PendingStep : Impl->PendingSteps)
+				{
+					if (PendingStep.RopeId == RopeId)
+					{
+						ImmediateSteps.Add(MoveTemp(PendingStep));
+					}
+					else
+					{
+						RemainingSteps.Add(MoveTemp(PendingStep));
+					}
+				}
+				Impl->PendingSteps = MoveTemp(RemainingSteps);
 				Impl->HandoffGDFBlockedRopes.Remove(RopeId);
 
 				FRDGBuilder SolveGraph(RHICmdList);
@@ -1410,7 +1431,7 @@ static void RopePackOverrides(FRDGBuilder& GraphBuilder, const FRopeGPUResidentS
 // solve pass: parameter buffer configuration + XPBD CS dispatch (GDF permutation selects rope units).
 // tension(λ) Creates and returns an output buffer (frame transient) — consumed by readback arm (RopeArmReadbacks).
 static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUResidentStep& Step,
-	const FRopeResidentRope& Resident, const FRopeStepBuild& Build, const FSceneView* View,
+	const FRopeStepBuild& Build, const FSceneView* View,
 	const FGlobalDistanceFieldParameters2& GDFSolverParams, uint32 bGDFSolverValid,
 	const FVector3f& PreViewTranslation)
 {
@@ -1482,7 +1503,8 @@ static FRDGBufferRef RopeAddSolvePass(FRDGBuilder& GraphBuilder, const FRopeGPUR
 	// GDF inside the solver: for a rope with bUseWorldGDF and a valid GDF, select the GDF permutation and bind
 	// the view and GDF parameters; otherwise stay lean, as before. Each rope gets its own AddPass, so the
 	// permutation can be chosen per rope.
-	const bool bUseGDFPerm = (View != nullptr) && Resident.bUseWorldGDF && (bGDFSolverValid != 0);
+	const bool bUseGDFPerm = (View != nullptr) && Step.bSolveCollisions && Step.bUseWorldGDF
+		&& (bGDFSolverValid != 0);
 	if (bUseGDFPerm)
 	{
 		PassParams->View                  = View->ViewUniformBuffer;
@@ -1730,6 +1752,8 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	};
 	TArray<FRopePreparedStep> Prepared;
 	Prepared.Reserve(Steps.Num());
+	TSet<uint32> PreparedRopeIds;
+	bool bHasSequentialSameRopeSteps = false;
 
 	// --- 2a: seed/register + collider/override packing per rope.
 	for (const FRopeGPUResidentStep& Step : Steps)
@@ -1752,6 +1776,8 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 
 		FRopePreparedStep Entry;
 		Entry.Step = &Step;
+		bHasSequentialSameRopeSteps |= PreparedRopeIds.Contains(Step.RopeId);
+		PreparedRopeIds.Add(Step.RopeId);
 		RopeEnsureResidentBuffers(GraphBuilder, Step, Resident, Entry.Build);
 
 		// G0: Override must be recorded without integration (NumSub=0) — logic phase frame (Wrapping/Releasing, etc.).
@@ -1778,40 +1804,58 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		RopePackOverrides(GraphBuilder, Step, Entry.Build);
 
 		// Same as the bUseGDFPerm check in RopeAddSolvePass (here only the alignment key is used — the actual selection is the single source of truth).
-		Entry.bGDFPerm = bGDFInSolver && Resident.bUseWorldGDF && (bGDFSolverValid != 0);
+		Entry.bGDFPerm = bGDFInSolver && Step.bSolveCollisions && Step.bUseWorldGDF
+			&& (bGDFSolverValid != 0);
 		Prepared.Add(MoveTemp(Entry));
 	}
 
 	// Continuous placement of same permutations (node ​​buckets, GDF) — Minimize PSO switches between solve dispatches.
 	// Because it is a stable alignment, the step order (= registration order) is maintained within the same key.
-	Prepared.StableSort([](const FRopePreparedStep& A, const FRopePreparedStep& B)
+	// A catch-up queue may contain more than one temporal step for a rope. Those steps touch the same
+	// resident UAV and must remain in their original frame order. Ordinary frames still take the PSO sort.
+	if (!bHasSequentialSameRopeSteps)
 	{
-		const int32 BucketA = RopeNodeBucket(A.Step->NumNodes);
-		const int32 BucketB = RopeNodeBucket(B.Step->NumNodes);
-		if (BucketA != BucketB) { return BucketA < BucketB; }
-		return !A.bGDFPerm && B.bGDFPerm;
-	});
+		Prepared.StableSort([](const FRopePreparedStep& A, const FRopePreparedStep& B)
+		{
+			const int32 BucketA = RopeNodeBucket(A.Step->NumNodes);
+			const int32 BucketB = RopeNodeBucket(B.Step->NumNodes);
+			if (BucketA != BucketB) { return BucketA < BucketB; }
+			return !A.bGDFPerm && B.bGDFPerm;
+		});
+	}
 
-	// --- 2b: Only solve dispatch is issued continuously — there is no copy/detection touching the buffer of these ropes yet, so there is a barrier between them.
-	// None. (There have been no additions to RtRopes since 2a, so the Find reference below is stable.)
+	TMap<uint32, int32> LastPreparedIndexByRope;
+	for (int32 PreparedIndex = 0; PreparedIndex < Prepared.Num(); ++PreparedIndex)
+	{
+		LastPreparedIndexByRope.Add(Prepared[PreparedIndex].Step->RopeId, PreparedIndex);
+	}
+
+	// --- 2b: Issue solve dispatches continuously before any copy/detection. Different ropes remain independent;
+	// queued steps for the same rope share a UAV, so RDG preserves their original dispatch order.
 	for (FRopePreparedStep& Entry : Prepared)
 	{
-		const FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Entry.Step->RopeId);
-		Entry.LambdaRDG = RopeAddSolvePass(GraphBuilder, *Entry.Step, Resident, Entry.Build,
+		Entry.LambdaRDG = RopeAddSolvePass(GraphBuilder, *Entry.Step, Entry.Build,
 			bGDFInSolver ? View : nullptr, GDFSolverParams, bGDFSolverValid, PreViewTranslation);
 	}
 
 	// --- 2c: Readback rearmament (asynchronous copy). Before detection (2d) — Pos transitions in only one direction: UAV → CopySrc → SRV.
-	for (FRopePreparedStep& Entry : Prepared)
+	for (int32 PreparedIndex = 0; PreparedIndex < Prepared.Num(); ++PreparedIndex)
 	{
+		FRopePreparedStep& Entry = Prepared[PreparedIndex];
+		if (LastPreparedIndexByRope.FindRef(Entry.Step->RopeId) != PreparedIndex)
+		{
+			continue;
+		}
 		FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Entry.Step->RopeId);
 		RopeArmReadbacks(GraphBuilder, *Entry.Step, Resident, Entry.Build, Entry.LambdaRDG);
 	}
 
 	// --- 2d: contact detection (Flight rope only). Solve results are read as SRV — order is guaranteed to be RDG dependent.
-	for (FRopePreparedStep& Entry : Prepared)
+	for (int32 PreparedIndex = 0; PreparedIndex < Prepared.Num(); ++PreparedIndex)
 	{
-		if (Entry.Step->bDetectContacts)
+		FRopePreparedStep& Entry = Prepared[PreparedIndex];
+		if (LastPreparedIndexByRope.FindRef(Entry.Step->RopeId) == PreparedIndex
+			&& Entry.Step->bDetectContacts)
 		{
 			FRopeResidentRope& Resident = Impl->RtRopes.FindChecked(Entry.Step->RopeId);
 			RopeAddDetectPass(GraphBuilder, *Entry.Step, Resident, Entry.Build);
@@ -1825,9 +1869,13 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 	// position and the wrap nodes visibly shake.
 	// GDF collision is resolved inside the solve CS as a substep constraint, so there is no separate post-solve
 	// write, and for a rope without detection the solve pass is the last thing that writes PosBuf.
-	for (FRopePreparedStep& Entry : Prepared)
+	for (int32 PreparedIndex = 0; PreparedIndex < Prepared.Num(); ++PreparedIndex)
 	{
-		GraphBuilder.UseExternalAccessMode(Entry.Build.PosRDG, ERHIAccess::SRVMask);
+		FRopePreparedStep& Entry = Prepared[PreparedIndex];
+		if (LastPreparedIndexByRope.FindRef(Entry.Step->RopeId) == PreparedIndex)
+		{
+			GraphBuilder.UseExternalAccessMode(Entry.Build.PosRDG, ERHIAccess::SRVMask);
+		}
 	}
 
 #if STATS
@@ -1890,28 +1938,63 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 	{
 		return;
 	}
-	// Scene renderer graph path (GDF world collision): Does not dispatch but accumulates in RT pending queue. This view expansion
-	// frame Flush from PreRenderBasePass to scene graph (timing with valid GDF parameters + no tube delay).
+	// Scene renderer graph path (GDF world collision): does not dispatch immediately, but accumulates in the RT
+	// temporal queue. PreRenderBasePass flushes it with valid GDF parameters and no additional tube delay.
 	ENQUEUE_RENDER_COMMAND(RopeEnqueueSteps)(
 		[this, Steps = MoveTemp(Steps)](FRHICommandListImmediate&) mutable
 		{
+			constexpr int32 MaxQueuedFramesPerRope = 4;
+			constexpr int32 MaxQueuedSubstepsPerRope = 32;
 			TMap<uint32, int32> IncomingStepIndices;
+			TMap<uint32, int32> QueuedFrameCounts;
+			TMap<uint32, int32> QueuedSubstepCounts;
 			for (int32 StepIndex = 0; StepIndex < Steps.Num(); ++StepIndex)
 			{
 				IncomingStepIndices.Add(Steps[StepIndex].RopeId, StepIndex);
+				QueuedFrameCounts.FindOrAdd(Steps[StepIndex].RopeId) += 1;
+				QueuedSubstepCounts.FindOrAdd(Steps[StepIndex].RopeId) +=
+					FMath::Max(0, Steps[StepIndex].NumSub);
 			}
+
+			// Select the newest compatible history that fits the bounded catch-up budget. A queued frame keeps
+			// its own guide/pin/override payload and its own substep schedule; combining only NumSub would apply
+			// the newest payload once and extrapolate it across several frames, which overshoots during Flight.
+			TSet<int32> PreservedTemporalIndices;
+			for (int32 PendingIndex = Impl->PendingSteps.Num() - 1; PendingIndex >= 0; --PendingIndex)
+			{
+				const FRopeGPUResidentStep& Pending = Impl->PendingSteps[PendingIndex];
+				const int32* IncomingIndex = IncomingStepIndices.Find(Pending.RopeId);
+				if (!IncomingIndex || !Pending.CanExecuteBefore(Steps[*IncomingIndex]))
+				{
+					continue;
+				}
+
+				int32& FrameCount = QueuedFrameCounts.FindOrAdd(Pending.RopeId);
+				int32& SubstepCount = QueuedSubstepCounts.FindOrAdd(Pending.RopeId);
+				const int32 PendingSubsteps = FMath::Max(0, Pending.NumSub);
+				if (FrameCount >= MaxQueuedFramesPerRope ||
+					SubstepCount + PendingSubsteps > MaxQueuedSubstepsPerRope)
+				{
+					continue;
+				}
+
+				PreservedTemporalIndices.Add(PendingIndex);
+				++FrameCount;
+				SubstepCount += PendingSubsteps;
+			}
+
+			TArray<FRopeGPUResidentStep> PreservedTemporalSteps;
 			TArray<FRopeGPUResidentStep> PreservedHandoffGDFSteps;
-			// The newest logic payload replaces an unconsumed one, but its simulation time does not wait for a
-			// game-thread refund: a compatible same-rope step absorbs those substeps and advances the complete
-			// elapsed interval in the next render dispatch. Deferring that interval by another frame produced an
-			// under-step / catch-up-step cadence that was visible as Flight judder. A reseed, topology change or
-			// different fixed dt cannot merge safely and keeps the existing refund path instead. A GDF handoff step
-			// with no newer step for that rope remains preserved until a scene view can consume it.
+			PreservedTemporalSteps.Reserve(PreservedTemporalIndices.Num());
+			// A reseed/topology boundary or a queue beyond the bounded catch-up budget keeps the existing refund
+			// path. A GDF handoff step with no newer step for that rope remains preserved until a scene view can
+			// consume it.
 			if (Impl->PendingSteps.Num() > 0)
 			{
 				FScopeLock SL(&Impl->Results->Lock);
-				for (FRopeGPUResidentStep& Dropped : Impl->PendingSteps)
+				for (int32 PendingIndex = 0; PendingIndex < Impl->PendingSteps.Num(); ++PendingIndex)
 				{
+					FRopeGPUResidentStep& Dropped = Impl->PendingSteps[PendingIndex];
 					if (Impl->HandoffGDFBlockedRopes.Contains(Dropped.RopeId)
 						&& !IncomingStepIndices.Contains(Dropped.RopeId))
 					{
@@ -1919,12 +2002,13 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 						continue;
 					}
 					Impl->HandoffGDFBlockedRopes.Remove(Dropped.RopeId);
-					if (const int32* IncomingIndex = IncomingStepIndices.Find(Dropped.RopeId))
+					if (PreservedTemporalIndices.Contains(PendingIndex))
 					{
-						if (Steps[*IncomingIndex].MergeReplacedSimulationTime(Dropped))
-						{
-							continue;
-						}
+						// Only the newest frame publishes contact/readback observations. The older frame still solves
+						// with its own colliders and overrides before the newer one.
+						Dropped.bDetectContacts = false;
+						PreservedTemporalSteps.Add(MoveTemp(Dropped));
+						continue;
 					}
 					if (Dropped.NumSub > 0 && Dropped.FixedDt > 0.0f)
 					{
@@ -1933,7 +2017,8 @@ void FRopeGPUSolver::EnqueueSteps(TArray<FRopeGPUResidentStep>&& Steps)
 					}
 				}
 			}
-			Impl->PendingSteps = MoveTemp(Steps);
+			Impl->PendingSteps = MoveTemp(PreservedTemporalSteps);
+			Impl->PendingSteps.Append(MoveTemp(Steps));
 			Impl->PendingSteps.Append(MoveTemp(PreservedHandoffGDFSteps));
 		});
 }

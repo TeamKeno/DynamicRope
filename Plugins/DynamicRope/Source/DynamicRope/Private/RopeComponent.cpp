@@ -281,8 +281,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 	{
 		if (WhipGuide.IsActive())
 		{
-			// Targets and masks only, leaving Sim untouched. Applying them is either the CPU path's
-			// SolveSimFrame (ApplyToSim) or, on the GPU resident path, the override pass the subsystem carries in the step.
+			// Targets and masks only, leaving Sim untouched. The ordinary hard guide is swept across fixed
+			// substeps; aim-hit keeps its endpoint solver-state blend.
 			WhipGuide.Advance(DeltaTime, Sim, MakeWhipGuideConfig());
 		}
 		else
@@ -451,12 +451,26 @@ void URopeComponent::SolveSimFrame(float DeltaTime)
 	}
 	TRACE_CPUPROFILER_EVENT_SCOPE(Rope_Solve);
 
-	// Apply the whip targets (CPU path, POD only, thread-safe): this is where the output Prepare's advance
-	// computed becomes a position. A GPU rope applies the same data through the kernel's override pass instead.
-	// The Flight gate stops a stale mask left over from the previous whip frame being applied in another phase.
+	// Carry the whip as a substep kinematic path on the CPU fallback, matching the GPU KinematicPath override.
+	// Applying Current/Prev once before the loop would integrate one frame of guide displacement again on every
+	// substep, overshoot the guide, and reset on the next frame.
+	FRopeKinematicTargetFrame WhipKinematicTargets;
+	const FRopeKinematicTargetFrame* KinematicTargets = nullptr;
 	if (Phase == ERopePhase::Flight)
 	{
+		// Aim-hit endpoints contain a solver-state blend and retain the legacy one-shot application. The
+		// ordinary guide is analytic and hard-owned, so it can safely become a per-substep kinematic path.
 		WhipGuide.ApplyToSim(Sim);
+		if (!WhipGuide.HasAimTarget())
+		{
+			WhipKinematicTargets.Mask = MakeArrayView(WhipGuide.GetGuidedNodeMask());
+			WhipKinematicTargets.PrevTargets = MakeArrayView(WhipGuide.GetPrevTargets());
+			WhipKinematicTargets.CurrentTargets = MakeArrayView(WhipGuide.GetCurrentTargets());
+			if (WhipKinematicTargets.IsValidFor(Sim.Num()))
+			{
+				KinematicTargets = &WhipKinematicTargets;
+			}
+		}
 	}
 
 	// Distance LOD: fall off the constraint iterations at range only. The substep count is untouched, because stability is dominated by the substeps.
@@ -470,7 +484,7 @@ void URopeComponent::SolveSimFrame(float DeltaTime)
 	const TArray<IRopeCollider*>& SolveColliders = SimFrame.bSolveCollisionsThisFrame
 		? SimFrame.FrameColliders
 		: NoSolveColliders;
-	Solver.Step(Sim, LODConfig, SolveColliders, DeltaTime);
+	Solver.Step(Sim, LODConfig, SolveColliders, DeltaTime, KinematicTargets);
 }
 
 float URopeComponent::GetEffectiveMaxStretchRatio() const

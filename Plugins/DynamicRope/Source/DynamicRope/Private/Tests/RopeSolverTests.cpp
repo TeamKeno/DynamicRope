@@ -54,6 +54,55 @@ bool FRopeSolverDistanceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverKinematicGuideSubstepTest,
+	"DynamicRope.Solver.KinematicGuideSweepsPerSubstep",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSolverKinematicGuideSubstepTest::RunTest(const FString& Parameters)
+{
+	FRopeSimState Sim = RopeTest::MakeStraightRope(5, 400.0f);
+	const TArray<float> OriginalInvMass = Sim.InvMass;
+	TArray<uint8> Mask;
+	TArray<FVector> PreviousTargets = Sim.Positions;
+	TArray<FVector> CurrentTargets = Sim.Positions;
+	Mask.Init(1, Sim.Num());
+	for (FVector& Target : CurrentTargets)
+	{
+		Target.Y += 40.0f;
+	}
+
+	FRopeKinematicTargetFrame KinematicTargets;
+	KinematicTargets.Mask = MakeArrayView(Mask);
+	KinematicTargets.PrevTargets = MakeArrayView(PreviousTargets);
+	KinematicTargets.CurrentTargets = MakeArrayView(CurrentTargets);
+
+	FRopeSolverConfig Config = MakeStiffConfig();
+	Config.Substeps = 4;
+	Config.Iterations = 1;
+	const FRopeXPBDSolver Solver;
+	const TArray<IRopeCollider*> NoColliders;
+	Solver.Step(Sim, Config, NoColliders, 1.0f / 60.0f, &KinematicTargets);
+
+	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
+	{
+		TestTrue(*FString::Printf(TEXT("guided node %d ends exactly at the current target"), NodeIndex),
+			Sim.Positions[NodeIndex].Equals(CurrentTargets[NodeIndex], 0.01f));
+		TestTrue(*FString::Printf(TEXT("guided node %d keeps one substep of release velocity"), NodeIndex),
+			Sim.PrevPositions[NodeIndex].Equals(CurrentTargets[NodeIndex] - FVector(0.0f, 10.0f, 0.0f), 0.01f));
+		TestTrue(*FString::Printf(TEXT("guided node %d restores its resident mass"), NodeIndex),
+			FMath::IsNearlyEqual(Sim.InvMass[NodeIndex], OriginalInvMass[NodeIndex]));
+	}
+
+	// Once the guide disappears, the stored one-substep displacement continues at the same frame velocity.
+	Solver.Step(Sim, Config, NoColliders, 1.0f / 60.0f);
+	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
+	{
+		TestTrue(*FString::Printf(TEXT("released node %d continues without a velocity pop"), NodeIndex),
+			FMath::IsNearlyEqual(Sim.Positions[NodeIndex].Y, 80.0f, 0.05f));
+	}
+	return true;
+}
+
 // Strain limiting: When a long chain hangs on a pin and the segment adjacent to the anchor is overstretched, even if the iteration is insufficient (it=1)
 // End of substep Does the sequential clamp confine all segments to ≤ MaxStretchRatio×SegmentLength? And if disabled(0)
 // Does it exceed the cap under the same conditions (prove by comparison that the clamp is the cause).

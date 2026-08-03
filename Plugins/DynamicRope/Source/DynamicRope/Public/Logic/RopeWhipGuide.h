@@ -6,9 +6,9 @@
 // into the solver's own state towards the hand and the free end. It is active only during Flight.
 //
 // Computing the targets, meaning the sweep angle, the guide curve and the resampling to node
-// spacing, stays on the game thread, while application is done either by ApplyToSim on the CPU or by
-// the GPU resident override pass, both consuming the same frame output. CurrentTargets, PrevTargets
-// and GuidedNodeMask are the data contract shared by the two paths.
+// spacing, stays on the game thread. For the ordinary hard guide, the CPU solver and GPU resident override
+// sweep the same CurrentTargets, PrevTargets and GuidedNodeMask across their substeps as a kinematic path.
+// Aim-hit retains its endpoint solver-state blend and one-shot application.
 
 #pragma once
 
@@ -87,19 +87,16 @@ public:
 	/**
 	 * Called every frame during Flight on the game thread: advances the elapsed time and computes the
 	 * guide targets and mask only, leaving the simulation state untouched.
-	 * The two application paths consume the same output: the CPU solve path calls ApplyToSim, and the
-	 * GPU resident path uses the override pass, with the position and previous-position flags, which
-	 * the subsystem carries on the step.
+	 * The two ordinary-guide application paths consume the same output: the CPU solve path receives a
+	 * FRopeKinematicTargetFrame, and the GPU resident path uses a KinematicPath override carried on the step.
 	 * The guide deactivates itself once the swing ends, that is when the elapsed time reaches the
 	 * duration.
 	 */
 	void Advance(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config);
 
 	/**
-	 * The application half of the CPU path: writes the targets and mask computed by Advance into the
-	 * simulation state, for guided nodes only, setting the position to the current target and the
-	 * previous position to the last one so their difference becomes the Verlet velocity. It is not
-	 * called for GPU ropes.
+	 * Direct target application helper used by focused guide tests and by the aim-hit CPU fallback. The
+	 * ordinary runtime guide additionally supplies the same targets as a substep kinematic path.
 	 */
 	void ApplyToSim(FRopeSimState& Sim) const;
 
@@ -112,6 +109,7 @@ public:
 	void ResetFrameOutputs();
 
 	bool IsActive() const { return bActive; }
+	bool HasAimTarget() const { return bHasAimTarget; }
 	float GetElapsed() const { return Elapsed; }
 
 	/** The normalized aim direction, after any fallback has been applied. It is also used when

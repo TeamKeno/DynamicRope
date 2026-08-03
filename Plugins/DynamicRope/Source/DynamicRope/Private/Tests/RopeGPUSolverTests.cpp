@@ -169,44 +169,40 @@ bool FRopeGPUSolverParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUPendingStepTimeMergeTest,
-	"DynamicRope.Solver.GPUPendingStepTimeMerge",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUPendingStepQueueCompatibilityTest,
+	"DynamicRope.Solver.GPUPendingStepQueueCompatibility",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FRopeGPUPendingStepTimeMergeTest::RunTest(const FString& Parameters)
+bool FRopeGPUPendingStepQueueCompatibilityTest::RunTest(const FString& Parameters)
 {
-	FRopeGPUResidentStep Incoming;
-	Incoming.RopeId = 17;
-	Incoming.Generation = 4;
-	Incoming.NumNodes = 64;
-	Incoming.NumSub = 12;
-	Incoming.FixedDt = (1.0f / 60.0f) / 12.0f;
+	FRopeGPUResidentStep Older;
+	Older.RopeId = 17;
+	Older.Generation = 4;
+	Older.NumNodes = 64;
+	Older.NumSub = 6;
+	Older.FixedDt = (1.0f / 60.0f) / 6.0f;
 
-	FRopeGPUResidentStep Replaced = Incoming;
-	Replaced.NumSub = 12;
-	TestTrue(TEXT("a compatible pending interval merges immediately"),
-		Incoming.MergeReplacedSimulationTime(Replaced));
-	TestEqual(TEXT("two normal pending frames retain all of their simulation time"), Incoming.NumSub, 24);
+	FRopeGPUResidentStep Newer = Older;
+	TestTrue(TEXT("same-generation and same-topology frames share one resident timeline"),
+		Older.CanExecuteBefore(Newer));
 
-	Replaced.NumSub = 20;
-	TestTrue(TEXT("another compatible interval still merges"),
-		Incoming.MergeReplacedSimulationTime(Replaced));
-	TestEqual(TEXT("merged render catch-up work obeys the shader's 32-step cap"), Incoming.NumSub, 32);
+	FRopeGPUResidentStep DifferentTimestep = Newer;
+	DifferentTimestep.FixedDt *= 0.5f;
+	TestTrue(TEXT("each queued frame may retain its own fixed timestep"),
+		Older.CanExecuteBefore(DifferentTimestep));
 
-	FRopeGPUResidentStep DifferentGeneration = Replaced;
-	DifferentGeneration.Generation = Incoming.Generation + 1;
-	TestFalse(TEXT("simulation time does not cross a reseed boundary"),
-		Incoming.MergeReplacedSimulationTime(DifferentGeneration));
-	TestEqual(TEXT("a rejected merge leaves the scheduled work unchanged"), Incoming.NumSub, 32);
+	FRopeGPUResidentStep DifferentGeneration = Newer;
+	DifferentGeneration.Generation = Older.Generation + 1;
+	TestFalse(TEXT("queued execution does not cross a reseed boundary"),
+		Older.CanExecuteBefore(DifferentGeneration));
 
-	FRopeGPUResidentStep OverrideOnly = Incoming;
-	OverrideOnly.FixedDt = 0.0f;
-	OverrideOnly.NumSub = 0;
-	TestFalse(TEXT("an override-only step does not absorb physics time"),
-		OverrideOnly.MergeReplacedSimulationTime(Replaced));
+	FRopeGPUResidentStep DifferentTopology = Newer;
+	DifferentTopology.NumNodes = Older.NumNodes + 1;
+	TestFalse(TEXT("queued execution does not cross a topology boundary"),
+		Older.CanExecuteBefore(DifferentTopology));
 
-	// Exercise the real render-thread replacement queue as well. Two compatible enqueues before a view
-	// dispatch must merge without publishing a delayed refund; a later reseed still takes the refund path.
+	// Exercise the real render-thread pending queue as well. Two compatible enqueues before a view
+	// dispatch must remain queued without publishing a delayed refund; a later reseed still refunds both.
 	FRopeGPUSolver QueueSolver;
 	auto EnqueueWithoutViewDispatch = [&QueueSolver](FRopeGPUResidentStep Step)
 	{
@@ -215,26 +211,129 @@ bool FRopeGPUPendingStepTimeMergeTest::RunTest(const FString& Parameters)
 		QueueSolver.EnqueueSteps(MoveTemp(Steps));
 		FlushRenderingCommands();
 	};
-	FRopeGPUResidentStep FirstQueued = Replaced;
-	FirstQueued.NumSub = 6;
+	FRopeGPUResidentStep FirstQueued = Older;
 	FRopeGPUResidentStep SecondQueued = FirstQueued;
 	EnqueueWithoutViewDispatch(MoveTemp(FirstQueued));
 	EnqueueWithoutViewDispatch(MoveTemp(SecondQueued));
 	TMap<uint32, float> DroppedTime;
 	QueueSolver.DrainDroppedSimTime(DroppedTime);
-	TestFalse(TEXT("compatible replacement publishes no one-frame-late refund"),
-		DroppedTime.Contains(Replaced.RopeId));
+	TestFalse(TEXT("compatible queued frames publish no one-frame-late refund"),
+		DroppedTime.Contains(Older.RopeId));
 
-	FRopeGPUResidentStep ReseededQueued = Replaced;
-	ReseededQueued.Generation = Replaced.Generation + 1;
+	FRopeGPUResidentStep ReseededQueued = Older;
+	ReseededQueued.Generation = Older.Generation + 1;
 	EnqueueWithoutViewDispatch(MoveTemp(ReseededQueued));
 	QueueSolver.DrainDroppedSimTime(DroppedTime);
-	const float* ReseedRefund = DroppedTime.Find(Replaced.RopeId);
+	const float* ReseedRefund = DroppedTime.Find(Older.RopeId);
 	TestNotNull(TEXT("a reseed replacement keeps the safe refund path"), ReseedRefund);
 	if (ReseedRefund)
 	{
-		TestTrue(TEXT("the refund contains the merged pending interval"),
-			FMath::IsNearlyEqual(*ReseedRefund, 12.0f * Replaced.FixedDt));
+		TestTrue(TEXT("the refund contains both pending frame intervals"),
+			FMath::IsNearlyEqual(*ReseedRefund, 12.0f * Older.FixedDt));
+	}
+
+	FRopeGPUSolver BoundedQueueSolver;
+	FRopeGPUResidentStep BoundedStep = Older;
+	BoundedStep.RopeId = Older.RopeId + 1;
+	BoundedStep.NumSub = 1;
+	for (int32 FrameIndex = 0; FrameIndex < 5; ++FrameIndex)
+	{
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(BoundedStep);
+		BoundedQueueSolver.EnqueueSteps(MoveTemp(Steps));
+		FlushRenderingCommands();
+	}
+	BoundedQueueSolver.DrainDroppedSimTime(DroppedTime);
+	const float* QueueLimitRefund = DroppedTime.Find(BoundedStep.RopeId);
+	TestNotNull(TEXT("the bounded queue refunds history beyond four frames"), QueueLimitRefund);
+	if (QueueLimitRefund)
+	{
+		TestTrue(TEXT("only the single oldest frame exceeds the queue bound"),
+			FMath::IsNearlyEqual(*QueueLimitRefund, BoundedStep.FixedDt));
+	}
+	return true;
+}
+
+// A pending frame carries a time-dependent override, not just a number of simulation substeps. Replacing
+// frame A with frame B and adding A's substeps to B applies B once and extrapolates it twice, overshooting
+// the guide. The runtime queue must execute A and B in order when the render thread consumes them together.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeGPUPendingTemporalOverrideOrderTest,
+	"DynamicRope.Solver.GPUPendingTemporalOverrideOrder",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeGPUPendingTemporalOverrideOrderTest::RunTest(const FString& Parameters)
+{
+	if (!FApp::CanEverRender() || GDynamicRHI == nullptr)
+	{
+		AddWarning(TEXT("GPU pending temporal override test skipped: no renderable RHI (headless)."));
+		return true;
+	}
+
+	constexpr int32 NumNodes = 4;
+	constexpr uint32 RopeId = 117;
+	constexpr uint32 Generation = 3;
+	const FRopeSimState Seed = RopeTest::MakeStraightRope(NumNodes, 300.0f);
+	FRopeGPUSolver GpuSolver;
+
+	const auto MakeGuidedStep = [&](float CurrentY, float PreviousY)
+	{
+		FRopeGPUResidentStep Step;
+		Step.RopeId = RopeId;
+		Step.Generation = Generation;
+		Step.NumNodes = NumNodes;
+		Step.SeedPositions = Seed.Positions;
+		Step.SeedPrevPositions = Seed.PrevPositions;
+		Step.InvMass = Seed.InvMass;
+		Step.SegmentLength = Seed.SegmentLength;
+		Step.Iterations = 1;
+		Step.Damping = 0.0f;
+		Step.Gravity = FVector::ZeroVector;
+		Step.NumSub = 4;
+		Step.FixedDt = (1.0f / 60.0f) / 4.0f;
+		Step.OverrideFlags.SetNumUninitialized(NumNodes);
+		Step.OverridePositions.SetNumUninitialized(NumNodes);
+		Step.OverridePrevPositions.SetNumUninitialized(NumNodes);
+		for (int32 NodeIndex = 0; NodeIndex < NumNodes; ++NodeIndex)
+		{
+			Step.OverrideFlags[NodeIndex] = static_cast<uint8>(
+				ERopeGPUOverride::Position | ERopeGPUOverride::Prev |
+				ERopeGPUOverride::KinematicPath);
+			Step.OverridePositions[NodeIndex] = Seed.Positions[NodeIndex] + FVector(0.0f, CurrentY, 0.0f);
+			Step.OverridePrevPositions[NodeIndex] = Seed.Positions[NodeIndex] + FVector(0.0f, PreviousY, 0.0f);
+		}
+		return Step;
+	};
+
+	const auto EnqueueWithoutViewDispatch = [&GpuSolver](FRopeGPUResidentStep Step)
+	{
+		TArray<FRopeGPUResidentStep> Steps;
+		Steps.Add(MoveTemp(Step));
+		GpuSolver.EnqueueSteps(MoveTemp(Steps));
+		FlushRenderingCommands();
+	};
+
+	EnqueueWithoutViewDispatch(MakeGuidedStep(10.0f, 0.0f));
+	EnqueueWithoutViewDispatch(MakeGuidedStep(20.0f, 10.0f));
+
+	TArray<FVector> Positions;
+	TArray<FVector> PrevPositions;
+	uint32 ReadbackGeneration = 0;
+	if (!GpuSolver.ReadbackNow(RopeId, Positions, PrevPositions, ReadbackGeneration))
+	{
+		AddError(TEXT("Could not consume the queued temporal override steps."));
+		return false;
+	}
+
+	TestEqual(TEXT("readback generation remains current"), ReadbackGeneration, Generation);
+	TestEqual(TEXT("readback node count remains current"), Positions.Num(), NumNodes);
+	for (int32 NodeIndex = 0; NodeIndex < Positions.Num(); ++NodeIndex)
+	{
+		TestTrue(*FString::Printf(TEXT("node %d executes A then B without overshoot (Y=%.3f)"),
+			NodeIndex, Positions[NodeIndex].Y),
+			FMath::IsNearlyEqual(Positions[NodeIndex].Y, 20.0f, 0.05f));
+		TestTrue(*FString::Printf(TEXT("node %d stores one substep of release velocity (PrevY=%.3f)"),
+			NodeIndex, PrevPositions[NodeIndex].Y),
+			FMath::IsNearlyEqual(PrevPositions[NodeIndex].Y, 17.5f, 0.05f));
 	}
 	return true;
 }
