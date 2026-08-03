@@ -5,7 +5,6 @@
 #include "Blueprint/WidgetLayoutLibrary.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/CanvasPanel.h"
-#include "Camera/PlayerCameraManager.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Rendering/DrawElements.h"
@@ -142,39 +141,22 @@ void URopeAimWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 		bHasScreenAim = true;
 	}
 
-	// A wrappable target, in green, or a wrap target that was refused, in red; both are projected to the screen and
-	// drawn as a ring. A ray merely stopped by level geometry is not a target at all: it draws no ring and keeps the
-	// neutral crosshair, since colouring every floor and wall red reads as the player's aim being broken.
+	// A wrappable target, in green, or a wrap target that was refused, in red; both draw a ring. A ray merely stopped
+	// by level geometry is not a target at all: it draws no ring and keeps the neutral crosshair, since colouring every
+	// floor and wall red reads as the player's aim being broken.
 	const bool bShowBlocked = Sample.bBlocked && Sample.bBlockedByTarget;
 	if (!Sample.bHasTarget && !bShowBlocked)
 	{
 		return;
 	}
 
-	// From world space to viewport widget space, including the DPI correction. The ring is hidden if it is behind the screen or the projection fails.
-	FVector2D CenterPos = FVector2D::ZeroVector;
-	if (!UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(PC, Sample.TargetWorldPos, CenterPos, /*bPlayerViewportRelative*/ false))
-	{
-		return;
-	}
-
-	// The screen radius: a point displaced to the camera's right by the target's world radius is projected too, and the pixel distance between them is the radius.
-	float ScreenRadius = RingMinScreenRadius;
-	if (const APlayerCameraManager* Camera = PC->PlayerCameraManager)
-	{
-		const FVector CamRight = Camera->GetCameraRotation().RotateVector(FVector::RightVector);
-		const FVector EdgeWorld = Sample.TargetWorldPos + CamRight * FMath::Max(Sample.TargetRadius, 1.0f) * RingRadiusScale;
-		FVector2D EdgePos = FVector2D::ZeroVector;
-		if (UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(PC, EdgeWorld, EdgePos, /*bPlayerViewportRelative*/ false))
-		{
-			ScreenRadius = FMath::Max(RingMinScreenRadius, static_cast<float>(FVector2D::Distance(CenterPos, EdgePos)));
-		}
-	}
-
+	// The ring is a fixed-size marker centred on the crosshair: it signals that the aim is on a wrap target without
+	// tracking the bone's projected position or size. It shares the crosshair's screen-centre fallback so the two
+	// never separate.
 	bHasScreenTarget = true;
 	bScreenTargetBlocked = bShowBlocked && !Sample.bHasTarget;
-	TargetScreenPos = CenterPos;
-	TargetScreenRadius = ScreenRadius;
+	TargetScreenPos = bHasScreenAim ? AimScreenPos : MyGeometry.GetLocalSize() * 0.5;
+	TargetScreenRadius = RingScreenRadius;
 }
 
 int32 URopeAimWidget::NativePaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect,

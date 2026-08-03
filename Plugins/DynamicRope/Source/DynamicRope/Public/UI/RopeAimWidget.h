@@ -7,7 +7,7 @@
 // crosshair is hidden; the other modes have no phase gate. A ragdolled wielder hides it entirely, so
 // a player held by a snare has no reticle.
 // Normally it draws a crosshair in the centre of the screen, and while the aim ray is on a wrappable
-// bone it draws a screen-projected highlight ring around that bone, with an acquisition pop and a
+// bone it draws a fixed-size highlight ring centred on the crosshair, with an acquisition pop and a
 // pulse.
 //
 // It follows the same "C++ base plus Blueprint restyle" arrangement as RopePluginInfoWidget:
@@ -89,15 +89,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring", meta = (ClampMin = "8", ClampMax = "64"))
 	int32 RingSegments = 32;
 
-	/** Multiplier from the target's world radius to the ring radius. Slightly above 1 leaves a little
-	 *  room around the bone. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring", meta = (ClampMin = "0.5"))
-	float RingRadiusScale = 1.15f;
-
-	/** Minimum ring radius on screen (px), which stops the ring collapsing into a dot on a distant
-	 *  target. */
+	/** Ring radius on screen (px). The ring is a fixed-size marker centred on the crosshair, so it
+	 *  should be large enough to clear the crosshair arms. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim HUD|Ring", meta = (ClampMin = "1.0"))
-	float RingMinScreenRadius = 18.0f;
+	float RingScreenRadius = 24.0f;
 
 	/** Duration of the acquisition pop (s), over which the ring starts oversized and contracts to its
 	 *  proper size. 0 disables the pop. */
@@ -124,9 +119,10 @@ public:
 	URopeWielderComponent* GetWielder() const { return Wielder.Get(); }
 
 	/**
-	 * This frame's target position and radius in screen space, meaning viewport widget space, for a
-	 * Blueprint providing its own visuals.
-	 * @return true when a target exists and projects on screen.
+	 * This frame's ring position and radius in screen space, meaning viewport widget space, for a
+	 * Blueprint providing its own visuals. The position is the crosshair centre and the radius the
+	 * fixed RingScreenRadius.
+	 * @return true when a target exists.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope|Aim HUD")
 	bool GetTargetScreenPosition(FVector2D& OutPosition, float& OutRadius) const;
