@@ -720,6 +720,16 @@ public:
 
 	const TArray<FVector>& GetCenterlinePositions() const { return Sim.Positions; }
 
+	/**
+	 * Applies this frame's taut-hold presentation shaping (straightening and thrum, see
+	 * RopeTautPresentation.h) to a world-space copy of the centerline, exactly as the render push
+	 * applies it, and reports whether anything moved. A no-op outside a taut Wrapped hold.
+	 * Anything placed on the *visible* rope — hand IK targets, attached effects — must run its copy
+	 * through this before sampling, or it will sit on the solved pose a few centimetres off the tube
+	 * the player actually sees.
+	 */
+	bool ApplyTautPresentationShaping(TArray<FVector>& WorldPoints) const;
+
 	// Extension point for game code that drives the tip itself while Free (bSyncTipMeshOnFree = false) — in
 	// that case the rope does not touch this component's transform during Free.
 

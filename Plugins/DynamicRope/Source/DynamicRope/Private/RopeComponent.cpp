@@ -632,6 +632,22 @@ int32 URopeComponent::GetFirstWrappedNodeIndex() const
 	return First;
 }
 
+bool URopeComponent::ApplyTautPresentationShaping(TArray<FVector>& WorldPoints) const
+{
+	// The blend can outlast the phase by a fade-out frame or two, hence the phase and span re-checks.
+	const int32 EndNode = GetFirstWrappedNodeIndex();
+	if (TautPresentationBlend <= UE_KINDA_SMALL_NUMBER || Phase != ERopePhase::Wrapped
+		|| EndNode < 2 || EndNode >= WorldPoints.Num())
+	{
+		return false;
+	}
+	RopeTautPresentation::FParams Present;
+	Present.EndNode = EndNode;
+	Present.Straighten = TautPresentationBlend * TautStraightening;
+	Present.ThrumOffset = TautPresentationBlend * TautThrumLevel * FMath::Sin(TautThrumPhase);
+	return RopeTautPresentation::Apply(WorldPoints, Present);
+}
+
 void URopeComponent::UpdateTautPresentation(float DeltaTime)
 {
 	// Active only while a Wrapped hold is taut and there is a shapeable span: at least one interior node
@@ -755,28 +771,18 @@ void URopeComponent::SendRenderDynamicData_Concurrent()
 		DynamicData->Points[i] = Xform.InverseTransformPosition(Sim.Positions[i]);
 	}
 
-	// Taut-hold presentation: shape the copy just built, never Sim itself. The points are already local,
-	// and the shaping is space-agnostic (a chord blend plus a perpendicular offset), but the thrum's
-	// world-up reference matters, so the shaping runs on world positions and is re-localized.
-	// The blend can outlast the phase by a fade-out frame or two, hence the phase and span re-checks.
-	const int32 PresentEndNode = GetFirstWrappedNodeIndex();
-	if (TautPresentationBlend > UE_KINDA_SMALL_NUMBER && Phase == ERopePhase::Wrapped
-		&& PresentEndNode >= 2 && PresentEndNode < Sim.Num())
+	// Taut-hold presentation: shape the copy just sent, never Sim itself. The shaping runs on world
+	// positions (the thrum's world-up reference matters) through the same helper the hang-pose anim
+	// sample uses, so the hand IK targets and the drawn tube stay on the same curve.
+	TArray<FVector> ShapedWorld = Sim.Positions;
+	if (ApplyTautPresentationShaping(ShapedWorld))
 	{
-		RopeTautPresentation::FParams Present;
-		Present.EndNode = PresentEndNode;
-		Present.Straighten = TautPresentationBlend * TautStraightening;
-		Present.ThrumOffset = TautPresentationBlend * TautThrumLevel * FMath::Sin(TautThrumPhase);
-		TArray<FVector> ShapedWorld = Sim.Positions;
-		if (RopeTautPresentation::Apply(ShapedWorld, Present))
+		// A shaped frame must not render from the solver's resident buffer, which still holds the
+		// unshaped pose — dropping the flag routes the tube through this CPU upload instead.
+		DynamicData->bGpuResident = false;
+		for (int32 i = 0; i < ShapedWorld.Num(); ++i)
 		{
-			// A shaped frame must not render from the solver's resident buffer, which still holds the
-			// unshaped pose — dropping the flag routes the tube through this CPU upload instead.
-			DynamicData->bGpuResident = false;
-			for (int32 i = 1; i < PresentEndNode; ++i)
-			{
-				DynamicData->Points[i] = Xform.InverseTransformPosition(ShapedWorld[i]);
-			}
+			DynamicData->Points[i] = Xform.InverseTransformPosition(ShapedWorld[i]);
 		}
 	}
 

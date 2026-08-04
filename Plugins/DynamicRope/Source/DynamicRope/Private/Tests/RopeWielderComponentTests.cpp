@@ -57,6 +57,24 @@ struct FRopeWielderComponentTestSeam
 		return URopeWielderComponent::SampleCenterlineAtArcLength(Positions, ArcLength);
 	}
 
+	static void SetSimPositions(URopeComponent& Rope, const TArray<FVector>& Positions)
+	{
+		Rope.Sim.Positions = Positions;
+		Rope.Sim.PrevPositions = Positions;
+	}
+
+	// The minimal state under which ApplyTautPresentationShaping is live: a taut Wrapped hold with a
+	// wrap anchor bounding the free span, and the presentation blend already faded in.
+	static void SetTautPresentationState(URopeComponent& Rope, int32 AnchorNode, float Blend)
+	{
+		Rope.Phase = ERopePhase::Wrapped;
+		Rope.PullDrive.bChainTaut = true;
+		FRopeSurfaceAnchor Anchor;
+		Anchor.NodeIndex = AnchorNode;
+		Rope.WrapController.State.Anchors = { Anchor };
+		Rope.TautPresentationBlend = Blend;
+	}
+
 	static void ForceWrappedTaut(URopeComponent& Rope)
 	{
 		Rope.Phase = ERopePhase::Wrapped;
@@ -1663,6 +1681,53 @@ bool FRopeWielderHangGripSampleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("coincident nodes return the point itself"),
 		FRopeWielderComponentTestSeam::SampleCenterlineAtArcLength(Coincident, 0.0f)
 			.Equals(Coincident[0], 0.01f));
+
+	return true;
+}
+
+// A taut Wrapped hold renders through the taut presentation shaping (straightening plus thrum), so the
+// hang sample must place the free hand on the shaped curve. Sampling the solved positions instead left
+// the hand hanging visibly short of the tube — off by exactly the straightened sag.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderHangSampleMatchesRenderedRopeTest,
+	"DynamicRope.Wielder.HangSampleMatchesRenderedRope",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderHangSampleMatchesRenderedRopeTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	URopeWielderComponent* Wielder = NewObject<URopeWielderComponent>();
+	Wielder->Rope = Rope;
+
+	// A sagging span from the hand to the anchor at node 4, plus a free tail node. The sag stays under
+	// the corner-guard fade so the straightening runs at full strength.
+	const TArray<FVector> Sagging = {
+		FVector(0.0f, 0.0f, 0.0f),
+		FVector(25.0f, 0.0f, -6.0f),
+		FVector(50.0f, 0.0f, -8.0f),
+		FVector(75.0f, 0.0f, -6.0f),
+		FVector(100.0f, 0.0f, 0.0f),
+		FVector(120.0f, 0.0f, -10.0f)
+	};
+	FRopeWielderComponentTestSeam::SetSimPositions(*Rope, Sagging);
+	const FVector RawGrip = FRopeWielderComponentTestSeam::SampleCenterlineAtArcLength(
+		Sagging, Wielder->OffHandGripDistance);
+
+	// Before the hold: no shaping, the sample rides the solved curve.
+	TestTrue(TEXT("without a taut hold the grip rides the solved curve"),
+		Wielder->GetHangAnimSample().OffHandGripWorld.Equals(RawGrip, 0.01f));
+
+	FRopeWielderComponentTestSeam::SetTautPresentationState(*Rope, /*AnchorNode*/ 4, /*Blend*/ 1.0f);
+	TArray<FVector> Shaped = Sagging;
+	TestTrue(TEXT("the fixture's shaping is active"), Rope->ApplyTautPresentationShaping(Shaped));
+	const FVector ShapedGrip = FRopeWielderComponentTestSeam::SampleCenterlineAtArcLength(
+		Shaped, Wielder->OffHandGripDistance);
+
+	const FRopeHangAnimSample Sample = Wielder->GetHangAnimSample();
+	TestTrue(TEXT("under a taut hold the grip rides the shaped curve"),
+		Sample.OffHandGripWorld.Equals(ShapedGrip, 0.01f));
+	TestTrue(TEXT("the shaped grip actually differs from the solved curve"),
+		!Sample.OffHandGripWorld.Equals(RawGrip, 1.0f));
+	TestTrue(TEXT("the hand end is unmoved by the shaping"), Sample.HandWorld.Equals(Sagging[0], 0.001f));
 
 	return true;
 }

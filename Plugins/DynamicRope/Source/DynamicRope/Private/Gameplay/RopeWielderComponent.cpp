@@ -547,7 +547,12 @@ FRopeHangAnimSample URopeWielderComponent::GetHangAnimSample() const
 	{
 		return Sample;
 	}
-	const TArray<FVector>& Centerline = Rope->GetCenterlinePositions();
+	// Sample the rope as *drawn*, not as solved: a taut Wrapped hold renders through the taut
+	// presentation shaping (straightening plus thrum), and hands placed on the solved curve would sit
+	// visibly off the tube by exactly the straightened sag. The copy is shaped the same way the render
+	// push shapes its own.
+	TArray<FVector> Centerline = Rope->GetCenterlinePositions();
+	Rope->ApplyTautPresentationShaping(Centerline);
 	Sample.bHanging = IsHangingOnRope();
 	Sample.HandWorld = Centerline[0];
 	Sample.OffHandGripWorld = SampleCenterlineAtArcLength(Centerline, OffHandGripDistance);

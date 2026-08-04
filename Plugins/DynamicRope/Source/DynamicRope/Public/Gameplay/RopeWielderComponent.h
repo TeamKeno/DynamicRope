@@ -209,7 +209,9 @@ struct FRopeHangAnimSample
 	FVector HandWorld = FVector::ZeroVector;
 
 	/** World grip point for the free hand: the centerline point OffHandGripDistance of arc above the
-	 *  attached hand. The free hand's Two Bone IK effector. */
+	 *  attached hand, sampled on the rope **as rendered** — the taut-hold presentation shaping is
+	 *  applied first, so the hand lands on the tube the player sees rather than the solved pose a few
+	 *  centimetres off it. The free hand's Two Bone IK effector. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope|Hang Anim")
 	FVector OffHandGripWorld = FVector::ZeroVector;
 
