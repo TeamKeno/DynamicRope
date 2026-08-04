@@ -179,9 +179,11 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	, Radius(Component->Radius)
 	, SmoothParam(FMath::Clamp(Component->TubeSmoothingAlpha, 0.0f, 1.0f))
 	// The per-vertex velocity path needs the passthrough branch compiled into the local vertex factory
-	// shaders, which the engine only does on platforms with GPU-skin passthrough support; elsewhere the
+	// shaders, which the engine only does on platforms with GPU-skin passthrough support, and an engine
+	// version that exports the loose parameters the branch reads, which is 5.6 and up; elsewhere the
 	// rope simply writes no velocity, as before.
-	, bVelocityActive(UDynamicRopeSettings::Get()->bWriteVelocity && IsGPUSkinPassThroughSupported(GMaxRHIShaderPlatform))
+	, bVelocityActive(FRopeVertexFactory::IsVelocityPassThroughAvailable()
+		&& UDynamicRopeSettings::Get()->bWriteVelocity && IsGPUSkinPassThroughSupported(GMaxRHIShaderPlatform))
 {
 	// Decided before InitWithDummyData triggers InitResource: the flag is baked into the cached mesh
 	// draw command bindings, so it cannot change for the proxy's lifetime.
@@ -219,8 +221,10 @@ FRopeSceneProxy::FRopeSceneProxy(URopeComponent* Component)
 	// Checking the usage here, on the game thread that creates the proxy, sets the flag automatically
 	// in the editor, which triggers that compile. In a cooked game a material shipped without the flag
 	// has no shaders for this factory, the check fails, and the default material is drawn instead of
-	// nothing.
-	if (Material && !Material->CheckMaterialUsage_Concurrent(MATUSAGE_SkeletalMesh))
+	// nothing. On 5.5 there is no rope-owned factory type, so the engine's own permutations apply and
+	// the usage is irrelevant; requiring it there would reject materials that draw perfectly well.
+	if (FRopeVertexFactory::RequiresSkeletalMeshUsage()
+		&& Material && !Material->CheckMaterialUsage_Concurrent(MATUSAGE_SkeletalMesh))
 	{
 		UE_LOG(LogDynamicRope, Warning,
 			TEXT("%s: material '%s' is not marked 'Used with Skeletal Mesh', which the rope's vertex factory requires; drawing the default material instead."),

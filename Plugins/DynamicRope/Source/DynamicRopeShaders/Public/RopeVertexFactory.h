@@ -16,11 +16,32 @@
 //
 // A dedicated type also means dedicated material shader permutations, so compilation is gated to
 // the materials a rope can actually use; see ShouldCompilePermutation.
+//
+// All of that needs UE 5.6 or newer; see ROPE_WITH_VELOCITY_PASSTHROUGH below for the 5.5 fallback.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "LocalVertexFactory.h"
+#include "Misc/EngineVersionComparison.h"
+
+// Whether this engine version can host the rope's own vertex factory type.
+//
+// Two things it needs are exported from the Engine module only from 5.6 on:
+// FLocalVertexFactoryShaderParametersBase, which any LocalVertexFactory-derived type outside the
+// Engine module must derive its parameter class from, and FGPUSkinPassThroughFactoryLooseParameters,
+// the struct the passthrough shader branch reads. UE 5.5 exports neither - its parameter base has no
+// ENGINE_API at all and its loose parameters live in the unexported FLocalVertexFactoryLooseParameters
+// - so on 5.5 no plugin can register a type of its own here, whatever it is willing to reimplement.
+//
+// On 5.5 FRopeVertexFactory is therefore a thin FLocalVertexFactory that adds no vertex factory type
+// of its own: the tube renders through the engine's local vertex factory exactly as it did before the
+// velocity path existed, with motion vectors derived from the component transform. Everything below
+// keeps its signature there, so the scene proxy compiles unchanged on every supported version.
+#define ROPE_WITH_VELOCITY_PASSTHROUGH (!UE_VERSION_OLDER_THAN(5, 6, 0))
+
+#if ROPE_WITH_VELOCITY_PASSTHROUGH
+
 // FGPUSkinPassThroughFactoryLooseParameters, the engine-declared loose parameter struct the
 // passthrough branch of LocalVertexFactory.ush reads. Declared ENGINE_API, so a plugin can create
 // and bind uniform buffers of it even though the engine's passthrough vertex factory itself is not
@@ -67,6 +88,12 @@ public:
 	DYNAMICROPESHADERS_API void SetVelocityPassThroughEnabled(bool bEnabled);
 	bool IsVelocityPassThroughEnabled() const { return bVelocityPassThrough; }
 
+	/** Whether this engine version can drive the passthrough at all; see the macro above. */
+	static constexpr bool IsVelocityPassThroughAvailable() { return true; }
+
+	/** Whether the rope's material must carry the skeletal-mesh usage; see ShouldCompilePermutation. */
+	static constexpr bool RequiresSkeletalMeshUsage() { return true; }
+
 	/**
 	 * Render thread, once per frame before the frame's positions are written: points the loose
 	 * parameters at the current and previous position buffers and stamps the frame number.
@@ -95,3 +122,36 @@ private:
 	// the time the first mesh draw command is cached, and updated in place afterwards.
 	TUniformBufferRef<FGPUSkinPassThroughFactoryLooseParameters> LooseParametersUniformBuffer;
 };
+
+#else
+
+/**
+ * UE 5.5: the rope tube renders through the engine's own local vertex factory.
+ *
+ * No vertex factory type is declared here, so GetType stays FLocalVertexFactory's and every engine
+ * path - permutation compilation, cached mesh draw commands, the parameter bindings - behaves as it
+ * does for any other local vertex factory. The velocity entry points are kept so the scene proxy
+ * needs no version branch of its own; they do nothing, and IsVelocityPassThroughAvailable reports
+ * that, which is what keeps the proxy from advertising velocity it cannot write.
+ */
+class FRopeVertexFactory : public FLocalVertexFactory
+{
+public:
+	FRopeVertexFactory(ERHIFeatureLevel::Type InFeatureLevel, const char* InDebugName)
+		: FLocalVertexFactory(InFeatureLevel, InDebugName)
+	{
+	}
+
+	static constexpr bool IsVelocityPassThroughAvailable() { return false; }
+	/** No rope-owned type here, so the engine's own permutations apply and any material draws. */
+	static constexpr bool RequiresSkeletalMeshUsage() { return false; }
+	bool IsVelocityPassThroughEnabled() const { return false; }
+	void SetVelocityPassThroughEnabled(bool) {}
+
+	void UpdateLooseParameters(FRHICommandListBase&, uint32,
+		FRHIShaderResourceView*, FRHIShaderResourceView*, FRHIShaderResourceView*)
+	{
+	}
+};
+
+#endif

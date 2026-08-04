@@ -18,17 +18,20 @@
 		{
 			"Name": "DynamicRopeShaders",
 			"Type": "Runtime",
-			"LoadingPhase": "PostConfigInit"
+			"LoadingPhase": "PostConfigInit",
+			"PlatformAllowList": [ "Win64" ]
 		},
 		{
 			"Name": "DynamicRope",
 			"Type": "Runtime",
-			"LoadingPhase": "Default"
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64" ]
 		},
 		{
 			"Name": "DynamicRopeEditor",
 			"Type": "Editor",
-			"LoadingPhase": "PostEngineInit"
+			"LoadingPhase": "PostEngineInit",
+			"PlatformAllowList": [ "Win64" ]
 		}
 	],
 	"Plugins": [

@@ -68,4 +68,4 @@ built-in replication.
 ## Support
 
 - C++ automation tests included: Session Frontend → Automation, filter `DynamicRope.`
-- Issues and questions: [지원 링크/이메일]
+- Issues and questions: teamkeno0824@gmail.com

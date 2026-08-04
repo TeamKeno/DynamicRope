@@ -5,11 +5,18 @@
 // GNullVertexBuffer, backing the loose parameters while the passthrough is inactive or has no data.
 #include "GlobalRenderResources.h"
 #include "MaterialShared.h"
+// FMeshBatchElement, dereferenced in GetElementShaderBindings for VertexFactoryUserData. Reached only
+// through a unity blob otherwise, so a non-unity build - which is what BuildPlugin runs - fails without it.
+#include "MeshBatch.h"
 #include "MeshDrawShaderBindings.h"
 #include "MeshMaterialShader.h"
 #include "RenderResource.h"
 
-/**
+// Everything below implements the rope's own vertex factory type, which only exists from UE 5.6 on;
+// see ROPE_WITH_VELOCITY_PASSTHROUGH in RopeVertexFactory.h. On 5.5 this file compiles to nothing and
+// the header's fallback class renders through the engine's local vertex factory instead.
+#if ROPE_WITH_VELOCITY_PASSTHROUGH
+/**
  * The always-valid loose parameter binding for factories whose passthrough is disabled. The
  * compiled shader references the uniform buffer whenever the platform supports the passthrough
  * path, even though the runtime branch never takes it, so a binding must always exist.
@@ -176,3 +183,5 @@ IMPLEMENT_VERTEX_FACTORY_TYPE(FRopeVertexFactory, "/Engine/Private/LocalVertexFa
 	| EVertexFactoryFlags::SupportsLumenMeshCards
 	| EVertexFactoryFlags::SupportsTriangleSorting
 );
+
+#endif

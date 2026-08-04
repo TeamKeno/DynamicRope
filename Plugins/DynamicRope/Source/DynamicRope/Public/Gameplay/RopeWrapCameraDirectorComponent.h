@@ -21,6 +21,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Components/ActorComponent.h"
 // FRopeWrappedEventInfo and ERopeReleaseReason, the payloads of the rope events bound below. Dynamic
 // delegates need the full types in the handler signatures.
