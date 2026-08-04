@@ -61,6 +61,15 @@ struct FRopeWielderComponentTestSeam
 	{
 		Rope.Sim.Positions = Positions;
 		Rope.Sim.PrevPositions = Positions;
+		Rope.Sim.InvMass.Init(1.0f, Positions.Num());
+		Rope.Sim.SegmentLength = Positions.Num() >= 2
+			? static_cast<float>(FVector::Dist(Positions[0], Positions[1]))
+			: 0.0f;
+	}
+
+	static void SetSimPrevPositions(URopeComponent& Rope, const TArray<FVector>& Prev)
+	{
+		Rope.Sim.PrevPositions = Prev;
 	}
 
 	// The minimal state under which ApplyTautPresentationShaping is live: a taut Wrapped hold with a
@@ -73,6 +82,30 @@ struct FRopeWielderComponentTestSeam
 		Anchor.NodeIndex = AnchorNode;
 		Rope.WrapController.State.Anchors = { Anchor };
 		Rope.TautPresentationBlend = Blend;
+	}
+
+	static void ApplyHangGripPin(URopeComponent& Rope)
+	{
+		Rope.ApplyHangGripPinOverride();
+	}
+
+	static float GetSegmentLength(const URopeComponent& Rope)
+	{
+		return Rope.Sim.SegmentLength;
+	}
+
+	static float GetOverrideInvMass(const URopeComponent& Rope, int32 Node)
+	{
+		return Rope.SimFrame.OverrideFrame.InvMass.IsValidIndex(Node)
+			? Rope.SimFrame.OverrideFrame.InvMass[Node]
+			: -1.0f;
+	}
+
+	static FVector GetOverridePosition(const URopeComponent& Rope, int32 Node)
+	{
+		return Rope.SimFrame.OverrideFrame.Positions.IsValidIndex(Node)
+			? Rope.SimFrame.OverrideFrame.Positions[Node]
+			: FVector(TNumericLimits<float>::Max());
 	}
 
 	static void ForceWrappedTaut(URopeComponent& Rope)
@@ -1728,6 +1761,130 @@ bool FRopeWielderHangSampleMatchesRenderedRopeTest::RunTest(const FString& Param
 	TestTrue(TEXT("the shaped grip actually differs from the solved curve"),
 		!Sample.OffHandGripWorld.Equals(RawGrip, 1.0f));
 	TestTrue(TEXT("the hand end is unmoved by the shaping"), Sample.HandWorld.Equals(Sagging[0], 0.001f));
+
+	return true;
+}
+
+// The hang sample's one-frame prediction: the anim update runs before the rope's own tick, so the
+// sample extrapolates every node by its last Verlet displacement. Without it the grip hand trails the
+// drawn rope through a swing by exactly one frame of rope motion.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderHangSamplePredictsOneFrameTest,
+	"DynamicRope.Wielder.HangSamplePredictsOneFrame",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderHangSamplePredictsOneFrameTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	URopeWielderComponent* Wielder = NewObject<URopeWielderComponent>();
+	Wielder->Rope = Rope;
+
+	// A straight vertical rope that moved +5 in X over the last frame.
+	const TArray<FVector> Positions = {
+		FVector(0.0f, 0.0f, 0.0f),
+		FVector(0.0f, 0.0f, 25.0f),
+		FVector(0.0f, 0.0f, 50.0f),
+		FVector(0.0f, 0.0f, 75.0f)
+	};
+	FRopeWielderComponentTestSeam::SetSimPositions(*Rope, Positions);
+	TArray<FVector> Prev = Positions;
+	for (FVector& P : Prev)
+	{
+		P.X -= 5.0f;
+	}
+	FRopeWielderComponentTestSeam::SetSimPrevPositions(*Rope, Prev);
+
+	const FRopeHangAnimSample Sample = Wielder->GetHangAnimSample();
+	// Half-strength prediction: half of the 5 cm displacement.
+	TestTrue(TEXT("the hand end is extrapolated half a displacement forward"),
+		Sample.HandWorld.Equals(FVector(2.5f, 0.0f, 0.0f), 0.01f));
+	TestTrue(TEXT("the grip point is extrapolated the same way"),
+		Sample.OffHandGripWorld.Equals(
+			FVector(2.5f, 0.0f, Wielder->OffHandGripDistance), 0.01f));
+
+	// A still rope (Prev == Pos) is sampled exactly — prediction adds nothing at rest.
+	FRopeWielderComponentTestSeam::SetSimPositions(*Rope, Positions);
+	TestTrue(TEXT("a still rope is sampled exactly"),
+		Wielder->GetHangAnimSample().HandWorld.Equals(Positions[0], 0.001f));
+
+	return true;
+}
+
+// The hang grip pin: the rope follows the animated hand rather than the hand chasing simulated nodes,
+// via the same per-frame override the wrapped hold uses. The pinned node also bounds the taut
+// presentation span from below, so the drawn rope keeps passing through the gripping hand.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeHangGripPinFollowsAnimatedHandTest,
+	"DynamicRope.Wielder.HangGripPinFollowsAnimatedHand",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeHangGripPinFollowsAnimatedHandTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	USceneComponent* Hand = NewObject<USceneComponent>();
+	Hand->SetRelativeLocation(FVector(30.0f, 10.0f, 5.0f));
+
+	const TArray<FVector> Sagging = {
+		FVector(0.0f, 0.0f, 0.0f),
+		FVector(25.0f, 0.0f, -6.0f),
+		FVector(50.0f, 0.0f, -8.0f),
+		FVector(75.0f, 0.0f, -6.0f),
+		FVector(100.0f, 0.0f, 0.0f),
+		FVector(120.0f, 0.0f, -10.0f)
+	};
+	FRopeWielderComponentTestSeam::SetSimPositions(*Rope, Sagging);
+	FRopeWielderComponentTestSeam::SetTautPresentationState(*Rope, /*AnchorNode*/ 4, /*Blend*/ 1.0f);
+
+	// Pin node 2: the override carries the hand's socket position with zero inverse mass.
+	Rope->SetHangGripPin(Hand, NAME_None, 2);
+	FRopeWielderComponentTestSeam::ApplyHangGripPin(*Rope);
+	TestEqual(TEXT("the requested node is pinned"), Rope->GetHangGripPinNode(), 2);
+	TestTrue(TEXT("the pinned node is overridden to the hand socket"),
+		FRopeWielderComponentTestSeam::GetOverridePosition(*Rope, 2)
+			.Equals(Hand->GetSocketLocation(NAME_None), 0.01f));
+	TestEqual(TEXT("the pinned node's inverse mass is zero"),
+		FRopeWielderComponentTestSeam::GetOverrideInvMass(*Rope, 2), 0.0f, 0.0001f);
+
+	// The interior between the hands is draped kinematically: on the hand-to-grip chord, dropped by
+	// the slack-derived parabolic sag, with zero inverse mass — not left to the solver.
+	{
+		const FVector HandWorld = Rope->GetComponentLocation();
+		const FVector GripWorld = Hand->GetSocketLocation(NAME_None);
+		const float SpanRest = 2.0f * FRopeWielderComponentTestSeam::GetSegmentLength(*Rope);
+		const float ChordLen = FVector::Dist(HandWorld, GripWorld);
+		const float Sag = FMath::Sqrt(3.0f * ChordLen * FMath::Max(SpanRest - ChordLen, 0.0f) / 8.0f);
+		FVector ExpectedDrape = FMath::Lerp(HandWorld, GripWorld, 0.5f);
+		ExpectedDrape.Z -= Sag;
+		TestTrue(TEXT("the interior node is draped on the sagging chord"),
+			FRopeWielderComponentTestSeam::GetOverridePosition(*Rope, 1).Equals(ExpectedDrape, 0.01f));
+		TestEqual(TEXT("the draped node's inverse mass is zero"),
+			FRopeWielderComponentTestSeam::GetOverrideInvMass(*Rope, 1), 0.0f, 0.0001f);
+	}
+
+	// The shaped span starts at the pin: below it the drape stands, above it the interior node lands
+	// on the pin-to-anchor chord.
+	TArray<FVector> Shaped = Sagging;
+	TestTrue(TEXT("shaping still runs with a pin"), Rope->ApplyTautPresentationShaping(Shaped));
+	TestTrue(TEXT("the node below the pin is untouched by shaping"), Shaped[1].Equals(Sagging[1], 0.001f));
+	TestTrue(TEXT("the pinned node itself is untouched by shaping"), Shaped[2].Equals(Sagging[2], 0.001f));
+	TestTrue(TEXT("the node above the pin lands on the pin-to-anchor chord"),
+		Shaped[3].Equals(FVector(75.0f, 0.0f, -4.0f), 0.01f));
+
+	// An out-of-range request clamps against the wrap; the old span is rewritten as part of the new
+	// one, so node 2 turns from the grip into a draped interior.
+	Rope->SetHangGripPin(Hand, NAME_None, 9);
+	FRopeWielderComponentTestSeam::ApplyHangGripPin(*Rope);
+	TestEqual(TEXT("the request clamps below the first wrapped node"), Rope->GetHangGripPinNode(), 3);
+	TestEqual(TEXT("the old grip node becomes a draped interior"),
+		FRopeWielderComponentTestSeam::GetOverrideInvMass(*Rope, 2), 0.0f, 0.0001f);
+
+	// Clearing hands the whole span back to the solver on the next frame.
+	Rope->ClearHangGripPin();
+	FRopeWielderComponentTestSeam::ApplyHangGripPin(*Rope);
+	TestEqual(TEXT("clearing deactivates the pin"), Rope->GetHangGripPinNode(),
+		static_cast<int32>(INDEX_NONE));
+	TestEqual(TEXT("the cleared interior gets its mass back"),
+		FRopeWielderComponentTestSeam::GetOverrideInvMass(*Rope, 1), 1.0f, 0.0001f);
+	TestEqual(TEXT("the cleared grip gets its mass back"),
+		FRopeWielderComponentTestSeam::GetOverrideInvMass(*Rope, 3), 1.0f, 0.0001f);
 
 	return true;
 }

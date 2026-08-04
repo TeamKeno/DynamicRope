@@ -119,6 +119,12 @@ void URopeWielderComponent::BeginPlay()
 
 void URopeWielderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// A rope can outlive its wielder: leave it on the throw hand, not wherever the hang regrip had it.
+	if (bHangSocketSwapped && IsValid(Rope) && IsValid(AttachMesh))
+	{
+		AttachRopeToSocket();
+	}
+
 	// Clear the input bindings and mapping, which stops delegates dangling after the component is destroyed.
 	if (APawn* Pawn = Cast<APawn>(GetOwner()))
 	{
@@ -197,6 +203,7 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	}
 	UpdateGroundExit();
 	UpdateSwingAirControl();
+	UpdateHangSocketSwap(DeltaTime);
 	UpdatePullEngage();
 	UpdatePullGlowMaterial();
 	UpdatePullGaugeWidget();
@@ -552,12 +559,30 @@ FRopeHangAnimSample URopeWielderComponent::GetHangAnimSample() const
 	// visibly off the tube by exactly the straightened sag. The copy is shaped the same way the render
 	// push shapes its own.
 	TArray<FVector> Centerline = Rope->GetCenterlinePositions();
-	Rope->ApplyTautPresentationShaping(Centerline);
+	// Prediction first: the anim update runs before this frame's rope tick, so an unpredicted sample
+	// trails the drawn rope by a frame — visible as the grip hand chasing the rope through a swing.
+	// Each node advances along its own last Verlet displacement; a resting node contributes zero, so a
+	// still rope is sampled exactly. Half strength, not full: full extrapolation cancels the lag
+	// exactly but doubles any frame-to-frame solver noise, and the elbow of a nearly straight IK arm
+	// turns millimetres of effector noise into visible shaking. Half trades a half-frame of residual
+	// lag for half the amplification.
+	const TArray<FVector>& Prev = Rope->GetSimState().PrevPositions;
+	if (Prev.Num() == Centerline.Num())
+	{
+		for (int32 Index = 0; Index < Centerline.Num(); ++Index)
+		{
+			Centerline[Index] += (Centerline[Index] - Prev[Index]) * 0.5f;
+		}
+	}
+	// Straightening only, no thrum: the gripping hand pins the rope rather than riding its vibration,
+	// and a 12 Hz wave fed into an IK effector reads as the arm shaking.
+	Rope->ApplyTautPresentationShaping(Centerline, /*bIncludeThrum*/ false);
 	Sample.bHanging = IsHangingOnRope();
 	Sample.HandWorld = Centerline[0];
 	Sample.OffHandGripWorld = SampleCenterlineAtArcLength(Centerline, OffHandGripDistance);
 	Sample.RopeDirectionWorld = (Sample.OffHandGripWorld - Sample.HandWorld).GetSafeNormal();
 	Sample.Tension = Rope->GetConstraintTension();
+	Sample.bHangSocketSwapped = bHangSocketSwapped;
 	return Sample;
 }
 
@@ -737,16 +762,68 @@ void URopeWielderComponent::ResolvePreviewComponent(bool bAllowAutoCreate)
 
 void URopeWielderComponent::AttachRopeToSocket()
 {
+	AttachRopeToNamedSocket(HandSocketName);
+	// The canonical back-to-normal path (BeginPlay, regrip exit, phase exit, EndPlay): the throw hand
+	// holds the rope again, so its grip pin goes with the swap.
+	if (Rope)
+	{
+		Rope->ClearHangGripPin();
+	}
+	bHangSocketSwapped = false;
+	HangSwapEnterTime = 0.0f;
+	HangSwapExitTime = 0.0f;
+}
+
+void URopeWielderComponent::AttachRopeToNamedSocket(FName SocketName)
+{
 	if (!Rope || !AttachMesh)
 	{
 		return;
 	}
-	if (!HandSocketName.IsNone() && !AttachMesh->DoesSocketExist(HandSocketName))
+	if (!SocketName.IsNone() && !AttachMesh->DoesSocketExist(SocketName))
 	{
 		UE_LOG(LogDynamicRope, Warning, TEXT("RopeWielder on %s: socket '%s' not found on %s — attaching to component root."),
-			*GetNameSafe(GetOwner()), *HandSocketName.ToString(), *AttachMesh->GetName());
+			*GetNameSafe(GetOwner()), *SocketName.ToString(), *AttachMesh->GetName());
 	}
-	Rope->AttachToComponent(AttachMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, HandSocketName);
+	Rope->AttachToComponent(AttachMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, SocketName);
+}
+
+void URopeWielderComponent::UpdateHangSocketSwap(float DeltaTime)
+{
+	if (HangHandSocketName.IsNone() || !Rope || !AttachMesh)
+	{
+		return;
+	}
+
+	// The hysteresis clocks: how long the hang test has been continuously true or false. The taut gate
+	// inside IsHangingOnRope can flicker at a swing apex, where the chain momentarily goes slack, and
+	// re-attaching the rope is a real 40 cm base jump — it must happen once per hang, not per flicker.
+	const bool bHanging = IsHangingOnRope();
+	HangSwapEnterTime = bHanging ? HangSwapEnterTime + DeltaTime : 0.0f;
+	HangSwapExitTime = bHanging ? 0.0f : HangSwapExitTime + DeltaTime;
+
+	// Entry is quick, so the regrip lands while the catch animation still covers it; exit is slower,
+	// riding out the apex flicker.
+	constexpr float EnterDelay = 0.1f;
+	constexpr float ExitDelay = 0.35f;
+	if (!bHangSocketSwapped && HangSwapEnterTime >= EnterDelay
+		&& AttachMesh->DoesSocketExist(HangHandSocketName))
+	{
+		AttachRopeToNamedSocket(HangHandSocketName);
+		bHangSocketSwapped = true;
+
+		// Pin the throw hand's grip node so the rope follows the animation there: the node
+		// OffHandGripDistance of rope above the attached hand, held to the palm socket (Hand Socket
+		// when no dedicated one is set). The rope component clamps it against the wrap every frame.
+		const float SegmentLength = FMath::Max(Rope->GetSimState().SegmentLength, 1.0f);
+		const int32 GripNode = FMath::Max(FMath::RoundToInt32(OffHandGripDistance / SegmentLength), 1);
+		const FName GripSocket = HangGripSocketName.IsNone() ? HandSocketName : HangGripSocketName;
+		Rope->SetHangGripPin(AttachMesh, GripSocket, GripNode);
+	}
+	else if (bHangSocketSwapped && HangSwapExitTime >= ExitDelay)
+	{
+		AttachRopeToSocket();
+	}
 }
 
 void URopeWielderComponent::HandlePawnControllerChanged(APawn* OwnerPawn, AController* OldController,
@@ -1683,6 +1760,13 @@ bool URopeWielderComponent::ComputeDesiredTickEnabled() const
 void URopeWielderComponent::HandleRopePhaseChanged(
 	ERopePhase /*OldPhase*/, ERopePhase NewPhase)
 {
+	// The hang regrip must not outlive the hold: the tick gate below can switch the wielder's tick off
+	// on this very transition, and then UpdateHangSocketSwap would never run its restore side. A hang
+	// only exists under Wrapped, so leaving that phase restores the throw hand immediately.
+	if (bHangSocketSwapped && NewPhase != ERopePhase::Wrapped)
+	{
+		AttachRopeToSocket();
+	}
 	RefreshTickEnabled();
 	if (Rope &&
 		(NewPhase == ERopePhase::Wrapping ||

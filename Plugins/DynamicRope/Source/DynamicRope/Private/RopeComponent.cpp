@@ -331,6 +331,9 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 			// The target mesh is gone and the release has completed. No solve.
 			break;
 		}
+		// The hang grip rides the same override frame as the hold, so the observation view below and the
+		// GPU packing both see it.
+		ApplyHangGripPinOverride();
 		// Hold records the current bone positions into OverrideFrame only; applying them to Sim is deferred to
 		// the single ApplyToSim at the end of Prepare. So that pull and tether do not read the previous
 		// frame's solved pose, a separate observation view is composed first from the current hand pin plus
@@ -632,20 +635,120 @@ int32 URopeComponent::GetFirstWrappedNodeIndex() const
 	return First;
 }
 
-bool URopeComponent::ApplyTautPresentationShaping(TArray<FVector>& WorldPoints) const
+bool URopeComponent::ApplyTautPresentationShaping(TArray<FVector>& WorldPoints, bool bIncludeThrum) const
 {
 	// The blend can outlast the phase by a fade-out frame or two, hence the phase and span re-checks.
 	const int32 EndNode = GetFirstWrappedNodeIndex();
 	if (TautPresentationBlend <= UE_KINDA_SMALL_NUMBER || Phase != ERopePhase::Wrapped
-		|| EndNode < 2 || EndNode >= WorldPoints.Num())
+		|| EndNode >= WorldPoints.Num())
 	{
 		return false;
 	}
 	RopeTautPresentation::FParams Present;
+	// A hang grip pin bounds the straightened span from below: the rope between the two hands drapes as
+	// solved, and only the leg from the gripping hand up to the wrap is presented taut.
+	Present.StartNode = AppliedHangGripPinNode != INDEX_NONE ? AppliedHangGripPinNode : 0;
 	Present.EndNode = EndNode;
 	Present.Straighten = TautPresentationBlend * TautStraightening;
-	Present.ThrumOffset = TautPresentationBlend * TautThrumLevel * FMath::Sin(TautThrumPhase);
+	Present.ThrumOffset = bIncludeThrum
+		? TautPresentationBlend * TautThrumLevel * FMath::Sin(TautThrumPhase)
+		: 0.0f;
 	return RopeTautPresentation::Apply(WorldPoints, Present);
+}
+
+void URopeComponent::SetHangGripPin(USceneComponent* Target, FName Socket, int32 NodeIndex)
+{
+	// A change of target or node re-pins seamlessly: the override is rewritten from the new source next
+	// frame anyway. Only a previously applied *different* node needs its mass handed back.
+	if (AppliedHangGripPinNode != INDEX_NONE && AppliedHangGripPinNode != NodeIndex)
+	{
+		PendingHangGripUnpinNode = AppliedHangGripPinNode;
+		AppliedHangGripPinNode = INDEX_NONE;
+	}
+	HangGripPinTarget = Target;
+	HangGripPinSocket = Socket;
+	HangGripPinNode = NodeIndex;
+}
+
+void URopeComponent::ClearHangGripPin()
+{
+	if (AppliedHangGripPinNode != INDEX_NONE)
+	{
+		PendingHangGripUnpinNode = AppliedHangGripPinNode;
+	}
+	HangGripPinTarget = nullptr;
+	HangGripPinSocket = NAME_None;
+	HangGripPinNode = INDEX_NONE;
+	AppliedHangGripPinNode = INDEX_NONE;
+}
+
+void URopeComponent::ApplyHangGripPinOverride()
+{
+	// The one-shot restore after a clear mid-Wrapped: hand the whole between-hands span (the draped
+	// interiors plus the grip node) back to the solver with zero velocity, so the release does not
+	// fling it. A release out of Wrapped restores every node's mass anyway. The override frame's own
+	// index guard covers a node count that shrank in between.
+	if (PendingHangGripUnpinNode != INDEX_NONE)
+	{
+		SimFrame.OverrideFrame.EnsureSize(Sim.Num());
+		for (int32 Index = 1; Index <= PendingHangGripUnpinNode; ++Index)
+		{
+			SimFrame.OverrideFrame.SetInvMass(Index, 1.0f);
+			SimFrame.OverrideFrame.SetPrevFromPosition(Index);
+		}
+		PendingHangGripUnpinNode = INDEX_NONE;
+	}
+
+	USceneComponent* Target = HangGripPinTarget.Get();
+	if (!Target || HangGripPinNode == INDEX_NONE)
+	{
+		AppliedHangGripPinNode = INDEX_NONE;
+		return;
+	}
+	// Strictly between the hand and the first wrapped node, or there is nothing to pin. Clamped every
+	// frame because a reel or a re-wrap moves the first wrapped node.
+	const int32 FirstWrapped = GetFirstWrappedNodeIndex();
+	const int32 Node = FMath::Clamp(HangGripPinNode, 1, FirstWrapped - 1);
+	if (FirstWrapped <= 1 || !Sim.Positions.IsValidIndex(Node))
+	{
+		AppliedHangGripPinNode = INDEX_NONE;
+		return;
+	}
+	SimFrame.OverrideFrame.EnsureSize(Sim.Num());
+	// A clamp that lands on a different node than last frame frees the old span first; the new one is
+	// rewritten below in the same frame, so only the difference actually changes hands.
+	if (AppliedHangGripPinNode != INDEX_NONE && AppliedHangGripPinNode != Node)
+	{
+		for (int32 Index = 1; Index <= AppliedHangGripPinNode; ++Index)
+		{
+			SimFrame.OverrideFrame.SetInvMass(Index, 1.0f);
+			SimFrame.OverrideFrame.SetPrevFromPosition(Index);
+		}
+	}
+	const FVector GripWorld = Target->GetSocketLocation(HangGripPinSocket);
+	SimFrame.OverrideFrame.SetPosition(Node, GripWorld, /*bZeroVelocity*/ true);
+	SimFrame.OverrideFrame.SetInvMass(Node, 0.0f);
+
+	// The interiors between the two hands are draped kinematically rather than simulated: a nearly
+	// taut sub-arm's-length chain pinched between two animation-driven ends has no resolvable
+	// dynamics at this node density — the solver only shivers there, and the tube renders every
+	// twitch. Each node sits on the hand-to-grip chord plus a parabolic sag (the hanging-chain
+	// approximation sag = sqrt(3·chord·slack/8)), so the span follows the hands exactly and settles
+	// the moment they do.
+	const FVector HandWorld = GetComponentLocation();
+	const float SpanRest = Node * Sim.SegmentLength;
+	const float ChordLen = FVector::Dist(HandWorld, GripWorld);
+	const float Slack = FMath::Max(SpanRest - ChordLen, 0.0f);
+	const float Sag = FMath::Sqrt(3.0f * ChordLen * Slack / 8.0f);
+	for (int32 Index = 1; Index < Node; ++Index)
+	{
+		const float Frac = static_cast<float>(Index) / static_cast<float>(Node);
+		FVector Draped = FMath::Lerp(HandWorld, GripWorld, Frac);
+		Draped.Z -= Sag * FMath::Sin(UE_PI * Frac);
+		SimFrame.OverrideFrame.SetPosition(Index, Draped, /*bZeroVelocity*/ true);
+		SimFrame.OverrideFrame.SetInvMass(Index, 0.0f);
+	}
+	AppliedHangGripPinNode = Node;
 }
 
 void URopeComponent::UpdateTautPresentation(float DeltaTime)
@@ -665,9 +768,13 @@ void URopeComponent::UpdateTautPresentation(float DeltaTime)
 	}
 	bWasTautPresentationActive = bActive;
 
-	// Engage faster than release: the snap should read immediately, the let-off softly.
+	// Engage faster than release: the snap should read immediately, the let-off softly. The release
+	// rate is also a stability rate: the taut gate flickers off for a tenth of a second at a swing
+	// apex, and everything sitting on the shaped curve — the tube and the hang-pose grip targets —
+	// slides toward the solved curve for exactly as far as the blend falls in that window. 3/s keeps
+	// the dip under a tenth of the sag instead of half of it.
 	TautPresentationBlend = FMath::FInterpTo(TautPresentationBlend, bActive ? 1.0f : 0.0f,
-		DeltaTime, bActive ? 10.0f : 6.0f);
+		DeltaTime, bActive ? 10.0f : 3.0f);
 	TautThrumPhase += DeltaTime * 2.0f * UE_PI * RopeTautPresentation::ThrumFrequencyHz;
 	TautThrumLevel *= FMath::Exp(-RopeTautPresentation::ThrumDecayPerSecond * DeltaTime);
 }

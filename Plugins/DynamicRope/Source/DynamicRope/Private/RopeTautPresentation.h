@@ -33,7 +33,12 @@ namespace RopeTautPresentation
 
 	struct FParams
 	{
-		/** The first wrapped node; the shaped span is the open interval (0, EndNode). */
+		/** Where the shaped span begins. 0 is the hand; a hang grip pin moves it up to the pinned node,
+		 *  because the rope below a gripping hand drapes rather than straightens, and a chord anchored
+		 *  at the lower hand would pull the drawn rope off the pinned one. */
+		int32 StartNode = 0;
+
+		/** The first wrapped node; the shaped span is the open interval (StartNode, EndNode). */
 		int32 EndNode = INDEX_NONE;
 
 		/** 0..1 blend of the span's interior nodes toward the chord. */
@@ -52,11 +57,12 @@ namespace RopeTautPresentation
 	 */
 	inline bool Apply(TArrayView<FVector> Points, const FParams& Params)
 	{
-		if (Params.EndNode < 2 || Params.EndNode >= Points.Num())
+		if (Params.StartNode < 0 || Params.EndNode - Params.StartNode < 2
+			|| Params.EndNode >= Points.Num())
 		{
 			return false;
 		}
-		const FVector P0 = Points[0];
+		const FVector P0 = Points[Params.StartNode];
 		const FVector Chord = Points[Params.EndNode] - P0;
 		const float ChordLen = Chord.Size();
 		if (ChordLen <= UE_SMALL_NUMBER)
@@ -66,7 +72,7 @@ namespace RopeTautPresentation
 		const FVector ChordDir = Chord / ChordLen;
 
 		float MaxDeviationSq = 0.0f;
-		for (int32 Index = 1; Index < Params.EndNode; ++Index)
+		for (int32 Index = Params.StartNode + 1; Index < Params.EndNode; ++Index)
 		{
 			const FVector ToNode = Points[Index] - P0;
 			const FVector OffChord = ToNode - ChordDir * (ToNode | ChordDir);
@@ -91,9 +97,10 @@ namespace RopeTautPresentation
 			Perp.Normalize();
 		}
 
-		for (int32 Index = 1; Index < Params.EndNode; ++Index)
+		for (int32 Index = Params.StartNode + 1; Index < Params.EndNode; ++Index)
 		{
-			const float Frac = static_cast<float>(Index) / static_cast<float>(Params.EndNode);
+			const float Frac = static_cast<float>(Index - Params.StartNode)
+				/ static_cast<float>(Params.EndNode - Params.StartNode);
 			FVector& Point = Points[Index];
 			Point = FMath::Lerp(Point, P0 + Chord * Frac, Straighten);
 			Point += Perp * (Thrum * FMath::Sin(UE_PI * Frac));

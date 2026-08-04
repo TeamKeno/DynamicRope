@@ -727,8 +727,30 @@ public:
 	 * Anything placed on the *visible* rope — hand IK targets, attached effects — must run its copy
 	 * through this before sampling, or it will sit on the solved pose a few centimetres off the tube
 	 * the player actually sees.
+	 * bIncludeThrum = false shapes with the straightening only: right for a *grip* target, since a
+	 * gripping hand pins the rope rather than riding its vibration, and a 12 Hz wave fed into an IK
+	 * effector reads as the arm shaking.
 	 */
-	bool ApplyTautPresentationShaping(TArray<FVector>& WorldPoints) const;
+	bool ApplyTautPresentationShaping(TArray<FVector>& WorldPoints, bool bIncludeThrum = true) const;
+
+	/**
+	 * Pins one interior centerline node to a scene component's socket every Wrapped frame — the hang
+	 * grip: the rope follows the animated hand, instead of the hand chasing simulated nodes that swing
+	 * inertia carries behind the character. The node is held by the same per-frame override the wrapped
+	 * hold uses (position plus zero inverse mass, CPU and GPU alike), and the taut presentation
+	 * straightens from the pinned node upward rather than from the lower hand.
+	 * The interiors between the two hands are draped kinematically too (chord plus slack-derived sag):
+	 * a nearly taut sub-arm's-length chain pinched between two animation-driven ends has no resolvable
+	 * dynamics at rope node density, so simulating it only renders as trembling.
+	 * NodeIndex is clamped each frame to stay strictly between the hand and the first wrapped node.
+	 * Clearing restores the whole span to the solver without a fling. Wrapped only; other phases
+	 * ignore the pin. URopeWielderComponent drives this from its hang regrip.
+	 */
+	void SetHangGripPin(USceneComponent* Target, FName Socket, int32 NodeIndex);
+	void ClearHangGripPin();
+
+	/** The node the hang grip pinned this frame, INDEX_NONE while inactive. */
+	int32 GetHangGripPinNode() const { return AppliedHangGripPinNode; }
 
 	// Extension point for game code that drives the tip itself while Free (bSyncTipMeshOnFree = false) — in
 	// that case the rope does not touch this component's transform during Free.
@@ -1375,8 +1397,22 @@ private:
 	/** Advances the blend and the thrum oscillator; called every frame from FinalizeSimFrame. */
 	void UpdateTautPresentation(float DeltaTime);
 	/** The lowest wrapped node index (surface anchors and legacy latches alike), INDEX_NONE without one.
-	 *  The hand-side free span the presentation shapes is (0, this). */
+	 *  The hand-side free span the presentation shapes ends here. */
 	int32 GetFirstWrappedNodeIndex() const;
+
+	//~ Hang grip pin (see SetHangGripPin) -------------------------------------------
+	/** Writes this frame's grip override into SimFrame.OverrideFrame, and the one-shot restore after a
+	 *  clear. Called from the Wrapped branch of PrepareSimFrame, after the hold's own overrides. */
+	void ApplyHangGripPinOverride();
+	TWeakObjectPtr<USceneComponent> HangGripPinTarget;
+	FName HangGripPinSocket = NAME_None;
+	/** The requested node; clamped each frame against the current first wrapped node. */
+	int32 HangGripPinNode = INDEX_NONE;
+	/** The node actually pinned this frame (the clamped index), INDEX_NONE while inactive. It is also
+	 *  where the taut presentation span starts, so the drawn rope keeps passing through the grip. */
+	int32 AppliedHangGripPinNode = INDEX_NONE;
+	/** A node whose mass must be handed back to the solver next frame, after a clear mid-Wrapped. */
+	int32 PendingHangGripUnpinNode = INDEX_NONE;
 
 	//~ Initialization and utilities ------------------------------------------------
 	void InitRope();

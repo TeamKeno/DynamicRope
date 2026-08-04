@@ -225,6 +225,12 @@ struct FRopeHangAnimSample
 	 *  additive. */
 	UPROPERTY(BlueprintReadOnly, Category = "Rope|Hang Anim")
 	float Tension = 0.0f;
+
+	/** Whether the hang regrip currently holds the rope on Hang Hand Socket (see HangHandSocketName).
+	 *  While true, OffHandGripWorld is the grip target for the ordinary throw hand instead of the free
+	 *  hand. */
+	UPROPERTY(BlueprintReadOnly, Category = "Rope|Hang Anim")
+	bool bHangSocketSwapped = false;
 };
 
 UCLASS(ClassGroup = (DynamicRope), meta = (BlueprintSpawnableComponent))
@@ -728,9 +734,38 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Rope|Hang Anim")
 	FRopeHangAnimSample GetHangAnimSample() const;
 
-	/** Arc distance in centimetres above the attached hand at which the free hand grips the rope. */
+	/** Arc distance in centimetres above the attached hand at which the off hand grips the rope. The
+	 *  default lands between the first and second nodes on a default-density rope — one fist above the
+	 *  attached hand, which keeps the gripping arm inside its comfortable reach. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hang Anim", meta = (ClampMin = "1.0", Units = "cm"))
-	float OffHandGripDistance = 35.0f;
+	float OffHandGripDistance = 15.0f;
+
+	/**
+	 * Optional hang regrip. While the owner hangs (IsHangingOnRope, with a short hysteresis so a swing
+	 * apex cannot flutter the grip), the rope is re-attached from Hand Socket to this socket, and back
+	 * when the hang ends. Set it to the opposite hand — for the default right-handed throw, hand_l —
+	 * and the hang reads naturally: the rope's head sits in the lower hand while the throw hand grips
+	 * the rope OffHandGripDistance further up, matching a hang animation whose upper hand is the
+	 * throw hand. None (the default) disables the regrip and the rope stays on Hand Socket throughout.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hang Anim", meta = (DisplayName = "Hang Hand Socket"))
+	FName HangHandSocketName = NAME_None;
+
+	/** Whether the hang regrip currently holds the rope on Hang Hand Socket. While true, the throw
+	 *  hand's grip node is pinned to Hang Grip Socket, so the rope follows the animated hand — no
+	 *  position IK is needed on it; align its rotation to RopeDirectionWorld at most. */
+	UFUNCTION(BlueprintPure, Category = "Rope|Hang Anim")
+	bool IsHangSocketSwapped() const { return bHangSocketSwapped; }
+
+	/**
+	 * The socket the throw hand's grip node is pinned to while the hang regrip is active — the rope
+	 * follows the animation here, rather than the hand chasing simulated nodes that swing inertia
+	 * carries behind the character. Point it at a palm-centre socket on the throw hand for an exact
+	 * grip; None (the default) falls back to Hand Socket. The pinned node is the one
+	 * OffHandGripDistance of rope above the attached hand.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hang Anim", meta = (DisplayName = "Hang Grip Socket"))
+	FName HangGripSocketName = NAME_None;
 
 	//~ Events ---------------------------------------------------------------
 	/** Fired right after a throw actually executes, on both the immediate and montage notify paths. */
@@ -833,6 +868,23 @@ private:
 
 	/** Attaches Rope to HandSocketName on AttachMesh. */
 	void AttachRopeToSocket();
+
+	/** Attaches Rope to the named socket on AttachMesh, warning once when the socket is missing. The
+	 *  shared body of AttachRopeToSocket and the hang regrip. */
+	void AttachRopeToNamedSocket(FName SocketName);
+
+	/**
+	 * Runs the hang regrip, every tick on the game thread: re-attaches the rope to HangHandSocketName
+	 * while hanging and back to HandSocketName when the hang ends, each side behind a short hysteresis
+	 * so the taut gate flickering at a swing apex cannot flutter the attachment between hands.
+	 */
+	void UpdateHangSocketSwap(float DeltaTime);
+
+	// Hang regrip state: whether the rope currently sits on Hang Hand Socket, and how long the hang
+	// test has held its current value (the hysteresis clocks).
+	bool bHangSocketSwapped = false;
+	float HangSwapEnterTime = 0.0f;
+	float HangSwapExitTime = 0.0f;
 
 	/** Adds MappingContext to the local player's Enhanced Input subsystem. */
 	void AddMappingContext();
