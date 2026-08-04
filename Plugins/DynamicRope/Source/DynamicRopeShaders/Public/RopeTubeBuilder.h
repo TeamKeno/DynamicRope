@@ -70,4 +70,13 @@ namespace RopeGPU
 		int32 NumRings, int32 NumSides, float Radius,
 		int32 NumSrcNodes, int32 Subdiv, float SmoothParam,
 		const FMatrix44f& WorldToLocal);
+
+	/**
+	 * Kicks async compute-PSO precompiles for both tube-build kernels in every ring bucket. Without
+	 * this, a bucket's pipeline is created by the driver at its first dispatch — which, since the bucket
+	 * follows the rope's ring count, lands on the first frame after a preset changes the node count and
+	 * stalls the render/RHI threads. Eight pipelines in total, all warmed up front.
+	 * The module calls it once at PostEngineInit, gated by IsRuntimeSupported(); safe to call again.
+	 */
+	DYNAMICROPESHADERS_API void PrecacheTubeComputePSOs();
 }

@@ -16,8 +16,28 @@
 #include "FXSystem.h"
 // AddShaderSourceDirectoryMapping
 #include "ShaderCore.h"
+// RopeGPU::IsRuntimeSupported / PrecacheSolverComputePSOs / PrecacheTubeComputePSOs
+#include "RopeGPUSolver.h"
+#include "RopeTubeBuilder.h"
 
 DEFINE_LOG_CATEGORY(LogDynamicRopeGPU);
+
+// Warms every compute PSO the rope can dispatch — solver, contact detect and tube build, in all their
+// permutations — as async precompiles at PostEngineInit, when the global shader map and RHI exist.
+// A pipeline missing from the cache is otherwise created by the driver at its first dispatch, inside
+// RDG execution, stalling the render/RHI threads for hundreds of milliseconds; the buckets follow the
+// rope's node count, so that stall surfaces exactly on a preset switch or the first throw after one.
+static void PrecacheRopeComputePSOs()
+{
+	// The same gate as the runtime GPU path: no renderable RHI (cook, -nullrhi, server) or a feature
+	// level below SM5 means none of these kernels can ever dispatch, so there is nothing to warm.
+	if (!RopeGPU::IsRuntimeSupported())
+	{
+		return;
+	}
+	RopeGPU::PrecacheSolverComputePSOs();
+	RopeGPU::PrecacheTubeComputePSOs();
+}
 
 // A thin module whose only responsibility is mapping the shader virtual path before the global shaders are compiled.
 // The global shader types declared through IMPLEMENT_GLOBAL_SHADER are registered by static initialization in
@@ -53,8 +73,10 @@ public:
 		// In 5.8 the public OnPostEngineInit member was replaced by the GetOnPostEngineInit() accessor, hence the version guard.
 #if UE_VERSION_OLDER_THAN(5, 8, 0)
 		FCoreDelegates::OnPostEngineInit.AddStatic(&FRopeGDFViewExtension::EnsureRegistered);
+		FCoreDelegates::OnPostEngineInit.AddStatic(&PrecacheRopeComputePSOs);
 #else
 		FCoreDelegates::GetOnPostEngineInit().AddStatic(&FRopeGDFViewExtension::EnsureRegistered);
+		FCoreDelegates::GetOnPostEngineInit().AddStatic(&PrecacheRopeComputePSOs);
 #endif
 	}
 

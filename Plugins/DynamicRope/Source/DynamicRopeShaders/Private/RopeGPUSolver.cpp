@@ -22,6 +22,8 @@
 #include "DataDrivenShaderPlatformInfo.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/ScopeLock.h"
+// PipelineStateCache::PrecacheComputePipelineState — PrecacheSolverComputePSOs
+#include "PipelineStateCache.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE — render thread dispatch path ground truth (Unreal Insights CPU timeline).
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/RealtimeGPUProfiler.h"
@@ -413,6 +415,43 @@ public:
 };
 
 IMPLEMENT_GLOBAL_SHADER(FRopeContactDetectCS, "/Plugin/DynamicRope/Private/RopeContactDetect.usf", "RopeContactDetectCS", SF_Compute);
+
+void RopeGPU::PrecacheSolverComputePSOs()
+{
+	FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
+	if (!ShaderMap)
+	{
+		return;
+	}
+
+	// bForcePrecache: the PSO precache master switch (r.PSOPrecaching) is off in editor and uncooked
+	// -game runs, where PrecacheComputePipelineState would otherwise no-op — exactly the runs where the
+	// first-dispatch driver compile is felt. The compiles themselves run async on the thread pool.
+	for (const int32 Bucket : GRopeNodeBuckets)
+	{
+		for (const bool bGDF : { false, true })
+		{
+			FRopeXPBDSolveCS::FPermutationDomain SolvePerm;
+			SolvePerm.Set<FRopeXPBDSolveCS::FNodeBucket>(Bucket);
+			SolvePerm.Set<FRopeXPBDSolveCS::FGDFDim>(bGDF);
+			const TShaderRef<FRopeXPBDSolveCS> SolveShader = ShaderMap->GetShader<FRopeXPBDSolveCS>(SolvePerm);
+			if (SolveShader.IsValid())
+			{
+				PipelineStateCache::PrecacheComputePipelineState(
+					SolveShader.GetComputeShader(), TEXT("RopeXPBDSolveCS"), /*bForcePrecache*/ true);
+			}
+		}
+
+		FRopeContactDetectCS::FPermutationDomain DetectPerm;
+		DetectPerm.Set<FRopeContactDetectCS::FNodeBucket>(Bucket);
+		const TShaderRef<FRopeContactDetectCS> DetectShader = ShaderMap->GetShader<FRopeContactDetectCS>(DetectPerm);
+		if (DetectShader.IsValid())
+		{
+			PipelineStateCache::PrecacheComputePipelineState(
+				DetectShader.GetComputeShader(), TEXT("RopeContactDetectCS"), /*bForcePrecache*/ true);
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Resident State Definitions

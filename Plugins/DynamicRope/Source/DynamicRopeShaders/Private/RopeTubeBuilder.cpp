@@ -8,6 +8,8 @@
 #include "RHICommandList.h"
 // FComputeShaderUtils
 #include "RenderGraphUtils.h"
+// PipelineStateCache::PrecacheComputePipelineState — PrecacheTubeComputePSOs
+#include "PipelineStateCache.h"
 #include "DataDrivenShaderPlatformInfo.h"
 // Tube build bandwidth instrumentation for 'stat DynamicRope'. The stat group is declared in the module's shared header.
 #include "RenderingThread.h"
@@ -109,6 +111,39 @@ public:
 };
 
 IMPLEMENT_GLOBAL_SHADER(FRopeBuildTubeResidentCS, "/Plugin/DynamicRope/Private/RopeBuildTube.usf", "RopeBuildTubeResidentCS", SF_Compute);
+
+void RopeGPU::PrecacheTubeComputePSOs()
+{
+	FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
+	if (!ShaderMap)
+	{
+		return;
+	}
+
+	// bForcePrecache: the PSO precache master switch (r.PSOPrecaching) is off in editor and uncooked
+	// -game runs, where PrecacheComputePipelineState would otherwise no-op — exactly the runs where the
+	// first-dispatch driver compile is felt. The compiles themselves run async on the thread pool.
+	for (const int32 Bucket : GRopeTubeRingBuckets)
+	{
+		FRopeBuildTubeCS::FPermutationDomain TubePerm;
+		TubePerm.Set<FRopeBuildTubeCS::FRingBucket>(Bucket);
+		const TShaderRef<FRopeBuildTubeCS> TubeShader = ShaderMap->GetShader<FRopeBuildTubeCS>(TubePerm);
+		if (TubeShader.IsValid())
+		{
+			PipelineStateCache::PrecacheComputePipelineState(
+				TubeShader.GetComputeShader(), TEXT("RopeBuildTubeCS"), /*bForcePrecache*/ true);
+		}
+
+		FRopeBuildTubeResidentCS::FPermutationDomain ResidentPerm;
+		ResidentPerm.Set<FRopeBuildTubeResidentCS::FRingBucket>(Bucket);
+		const TShaderRef<FRopeBuildTubeResidentCS> ResidentShader = ShaderMap->GetShader<FRopeBuildTubeResidentCS>(ResidentPerm);
+		if (ResidentShader.IsValid())
+		{
+			PipelineStateCache::PrecacheComputePipelineState(
+				ResidentShader.GetComputeShader(), TEXT("RopeBuildTubeResidentCS"), /*bForcePrecache*/ true);
+		}
+	}
+}
 
 //~ 'stat DynamicRopeGPU' — GPU tube build bandwidth
 // RopeGPUSolver.cpp instruments the solver and collision uploads under the same "DynamicRopeGPU" group, but the tube

@@ -399,6 +399,17 @@ namespace RopeGPU
 	 * kept to this single source of truth.
 	 */
 	DYNAMICROPESHADERS_API bool IsRuntimeSupported();
+
+	/**
+	 * Kicks async compute-PSO precompiles for every solver and contact-detect permutation — each node
+	 * bucket, and for the solver each with GDF on and off. Without this, each permutation's pipeline is
+	 * created by the driver at its first dispatch, inside RDG execution, which blocks the render/RHI
+	 * threads for hundreds of milliseconds; because the buckets follow the rope's node count and the
+	 * detect kernel only runs during Flight, that cost lands exactly on a preset switch or the first
+	 * throw after one. The full set is small (12 pipelines), so all of it is warmed up front.
+	 * The module calls it once at PostEngineInit, gated by IsRuntimeSupported(); safe to call again.
+	 */
+	DYNAMICROPESHADERS_API void PrecacheSolverComputePSOs();
 }
 
 class DYNAMICROPESHADERS_API FRopeGPUSolver
