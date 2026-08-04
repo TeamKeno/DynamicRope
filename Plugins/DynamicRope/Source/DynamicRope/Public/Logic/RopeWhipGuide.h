@@ -6,9 +6,9 @@
 // into the solver's own state towards the hand and the free end. It is active only during Flight.
 //
 // Computing the targets, meaning the sweep angle, the guide curve and the resampling to node
-// spacing, stays on the game thread. For the ordinary hard guide, the CPU solver and GPU resident override
-// sweep the same CurrentTargets, PrevTargets and GuidedNodeMask across their substeps as a kinematic path.
-// Aim-hit retains its endpoint solver-state blend and one-shot application.
+// spacing, stays on the game thread. The CPU solver and GPU resident override sweep the same CurrentTargets,
+// PrevTargets and GuidedNodeMask across their substeps as a kinematic path. Aim-hit retains its endpoint
+// solver-state blend while using that same temporal application.
 
 #pragma once
 
@@ -87,7 +87,7 @@ public:
 	/**
 	 * Called every frame during Flight on the game thread: advances the elapsed time and computes the
 	 * guide targets and mask only, leaving the simulation state untouched.
-	 * The two ordinary-guide application paths consume the same output: the CPU solve path receives a
+	 * The two runtime application paths consume the same output: the CPU solve path receives a
 	 * FRopeKinematicTargetFrame, and the GPU resident path uses a KinematicPath override carried on the step.
 	 * The guide deactivates itself once the swing ends, that is when the elapsed time reaches the
 	 * duration.
@@ -95,8 +95,8 @@ public:
 	void Advance(float DeltaTime, const FRopeSimState& Sim, const FConfig& Config);
 
 	/**
-	 * Direct target application helper used by focused guide tests and by the aim-hit CPU fallback. The
-	 * ordinary runtime guide additionally supplies the same targets as a substep kinematic path.
+	 * Direct target application helper used by focused guide tests and as the initial CPU mirror update. The
+	 * runtime solve additionally supplies the same targets as a substep kinematic path.
 	 */
 	void ApplyToSim(FRopeSimState& Sim) const;
 

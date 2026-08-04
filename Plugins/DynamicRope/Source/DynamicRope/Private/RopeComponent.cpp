@@ -282,8 +282,8 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 	{
 		if (WhipGuide.IsActive())
 		{
-			// Targets and masks only, leaving Sim untouched. The ordinary hard guide is swept across fixed
-			// substeps; aim-hit keeps its endpoint solver-state blend.
+			// Targets and masks only, leaving Sim untouched. Both ordinary and aim-hit guides preserve their
+			// own target construction, then sweep those targets across the solver's fixed substeps.
 			WhipGuide.Advance(DeltaTime, Sim, MakeWhipGuideConfig());
 		}
 		else
@@ -462,18 +462,16 @@ void URopeComponent::SolveSimFrame(float DeltaTime)
 	const FRopeKinematicTargetFrame* KinematicTargets = nullptr;
 	if (Phase == ERopePhase::Flight)
 	{
-		// Aim-hit endpoints contain a solver-state blend and retain the legacy one-shot application. The
-		// ordinary guide is analytic and hard-owned, so it can safely become a per-substep kinematic path.
+		// Aim-hit keeps its endpoint solver-state blend in the targets themselves. Once built, those targets
+		// follow the same per-substep kinematic path as the ordinary guide, preventing a frame displacement
+		// from being integrated again by every substep.
 		WhipGuide.ApplyToSim(Sim);
-		if (!WhipGuide.HasAimTarget())
+		WhipKinematicTargets.Mask = MakeArrayView(WhipGuide.GetGuidedNodeMask());
+		WhipKinematicTargets.PrevTargets = MakeArrayView(WhipGuide.GetPrevTargets());
+		WhipKinematicTargets.CurrentTargets = MakeArrayView(WhipGuide.GetCurrentTargets());
+		if (WhipKinematicTargets.IsValidFor(Sim.Num()))
 		{
-			WhipKinematicTargets.Mask = MakeArrayView(WhipGuide.GetGuidedNodeMask());
-			WhipKinematicTargets.PrevTargets = MakeArrayView(WhipGuide.GetPrevTargets());
-			WhipKinematicTargets.CurrentTargets = MakeArrayView(WhipGuide.GetCurrentTargets());
-			if (WhipKinematicTargets.IsValidFor(Sim.Num()))
-			{
-				KinematicTargets = &WhipKinematicTargets;
-			}
+			KinematicTargets = &WhipKinematicTargets;
 		}
 	}
 

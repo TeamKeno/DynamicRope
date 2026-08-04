@@ -17,6 +17,19 @@ struct FRopeSimSubsystemTestSeam
 	{
 		return URopeSimSubsystem::ComputeRopeQueryBounds(Rope, DeltaTime);
 	}
+
+	static bool ApplyLatestGpuMirror(URopeSimSubsystem& Subsystem, URopeComponent& Rope,
+		const FRopeResidentLatest& Latest)
+	{
+		Subsystem.GpuLatest.Add(Rope.GetUniqueID(), Latest);
+		return Subsystem.ApplyLatestGpuMirror(Rope);
+	}
+
+	static void PackWhipOverride(const URopeSimSubsystem& Subsystem, const URopeComponent& Rope,
+		FRopeGPUResidentStep& Step)
+	{
+		Subsystem.PackWhipOverride(Rope, Step);
+	}
 };
 
 struct FRopeComponentRefactorTestSeam
@@ -79,6 +92,16 @@ struct FRopeComponentRefactorTestSeam
 		return Rope.Sim;
 	}
 
+	static FRopeSimState& GetMutableSim(URopeComponent& Rope)
+	{
+		return Rope.Sim;
+	}
+
+	static void SetSimGeneration(URopeComponent& Rope, uint32 Generation)
+	{
+		Rope.SimFrame.SimGeneration = Generation;
+	}
+
 	static float GetReleaseCooldown(const URopeComponent& Rope)
 	{
 		return Rope.ReleaseCooldown;
@@ -87,6 +110,45 @@ struct FRopeComponentRefactorTestSeam
 	static void SetPhase(URopeComponent& Rope, ERopePhase Phase)
 	{
 		Rope.Phase = Phase;
+	}
+
+	static void ConfigureAssistedWhipFrame(URopeComponent& Rope)
+	{
+		ConfigureSim(Rope, 21, 200.0f);
+		Rope.ResolveMode = ERopeWrapResolveMode::AssistedJudged;
+		Rope.Phase = ERopePhase::Flight;
+		Rope.Sim.bStartPinned = true;
+		Rope.Sim.StartPinPrev = Rope.Sim.Positions[0];
+		Rope.Sim.StartPinTarget = Rope.Sim.Positions[0];
+		Rope.Sim.InvMass[0] = 0.0f;
+		Rope.SolverConfig.Substeps = 4;
+		Rope.SolverConfig.Iterations = 2;
+		Rope.SolverConfig.Gravity = FVector::ZeroVector;
+		Rope.SolverConfig.Damping = 0.0f;
+		Rope.SimFrame.bSolveThisFrame = true;
+		Rope.SimFrame.bSolveCollisionsThisFrame = false;
+
+		FRopeWhipGuide::FConfig Config;
+		Config.Duration = 0.5f;
+		Config.SweepAngleDegrees = 120.0f;
+		Config.ComponentRopeLength = Rope.Sim.RopeLength;
+		Config.AimHitRootSolverFraction = 0.20f;
+		Config.AimHitTipSolverFraction = 0.25f;
+		Rope.WhipGuide.Begin(FVector::ForwardVector, Rope.Sim.Positions[0], FVector::ForwardVector,
+			FVector::UpVector, FVector::RightVector, 1500.0f, FVector::ZeroVector,
+			/*bHasAimTarget*/ true, FVector(140.0f, 70.0f, 20.0f), 0.25f, 0.50f);
+		Rope.WhipGuide.SnapToInitialPose(Rope.Sim, Config);
+		Rope.WhipGuide.Advance(1.0f / 60.0f, Rope.Sim, Config);
+	}
+
+	static const FRopeWhipGuide& GetWhipGuide(const URopeComponent& Rope)
+	{
+		return Rope.WhipGuide;
+	}
+
+	static void SolvePreparedFrame(URopeComponent& Rope, float DeltaTime)
+	{
+		Rope.SolveSimFrame(DeltaTime);
 	}
 
 	static void ForceNonStretchThisFrame(URopeComponent& Rope, bool bForce)
@@ -349,6 +411,91 @@ bool FRopePhysicalResolveNonStretchPolicyTest::RunTest(const FString& Parameters
 	FRopeComponentRefactorTestSeam::SetPhase(*Rope, ERopePhase::Wrapped);
 	TestTrue(TEXT("GuaranteedWrap obeys the same rigid material hold"),
 		FMath::IsNearlyEqual(Rope->GetEffectiveMaxStretchRatio(), 1.0f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAssistedWhipUsesSubstepKinematicPathTest,
+	"DynamicRope.Component.AssistedAim.WhipUsesSubstepKinematicPath",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeAssistedWhipUsesSubstepKinematicPathTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	URopeSimSubsystem* Subsystem = NewObject<URopeSimSubsystem>();
+	FRopeComponentRefactorTestSeam::ConfigureAssistedWhipFrame(*Rope);
+	const FRopeWhipGuide& Guide = FRopeComponentRefactorTestSeam::GetWhipGuide(*Rope);
+	const int32 MiddleNode = (FRopeComponentRefactorTestSeam::GetSim(*Rope).Num() - 1) / 2;
+	const int32 TipNode = FRopeComponentRefactorTestSeam::GetSim(*Rope).Num() - 1;
+	TestTrue(TEXT("fixture has an aim target"), Guide.HasAimTarget());
+	TestTrue(TEXT("middle fixture node is guided"), Guide.IsGuidedNodeThisFrame(MiddleNode));
+	TestFalse(TEXT("tip remains outside the Assisted guide mask"), Guide.IsGuidedNodeThisFrame(TipNode));
+
+	FRopeGPUResidentStep Step;
+	FRopeSimSubsystemTestSeam::PackWhipOverride(*Subsystem, *Rope, Step);
+	const uint8 KinematicBit = static_cast<uint8>(ERopeGPUOverride::KinematicPath);
+	TestTrue(TEXT("GPU Assisted override sweeps the middle target through the substeps"),
+		Step.OverrideFlags.IsValidIndex(MiddleNode) && (Step.OverrideFlags[MiddleNode] & KinematicBit) != 0);
+	TestTrue(TEXT("GPU Assisted override leaves the exact tip solver-owned"),
+		Step.OverrideFlags.IsValidIndex(TipNode) && Step.OverrideFlags[TipNode] == 0);
+
+	const FVector ExpectedCurrent = Guide.GetCurrentTargets()[MiddleNode];
+	const FVector ExpectedPrevious = FMath::Lerp(
+		Guide.GetPrevTargets()[MiddleNode], ExpectedCurrent, 3.0f / 4.0f);
+	FRopeComponentRefactorTestSeam::SolvePreparedFrame(*Rope, 1.0f / 60.0f);
+	const FRopeSimState& Solved = FRopeComponentRefactorTestSeam::GetSim(*Rope);
+	TestTrue(TEXT("CPU Assisted solve ends exactly at the current guide target"),
+		Solved.Positions[MiddleNode].Equals(ExpectedCurrent, 0.01f));
+	TestTrue(TEXT("CPU Assisted solve leaves Prev one fixed substep behind"),
+		Solved.PrevPositions[MiddleNode].Equals(ExpectedPrevious, 0.01f));
+	TestTrue(TEXT("temporary kinematic ownership restores the middle node mass"),
+		FMath::IsNearlyEqual(Solved.InvMass[MiddleNode], 1.0f));
+	TestTrue(TEXT("the exact tip remains dynamic"), Solved.InvMass[TipNode] > 0.0f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAssistedGpuMirrorGenerationGateTest,
+	"DynamicRope.Component.AssistedAim.LatestGpuMirrorUsesCurrentGeneration",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeAssistedGpuMirrorGenerationGateTest::RunTest(const FString& Parameters)
+{
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	URopeSimSubsystem* Subsystem = NewObject<URopeSimSubsystem>();
+	FRopeComponentRefactorTestSeam::ConfigureSim(*Rope, 4, 60.0f);
+	FRopeComponentRefactorTestSeam::SetSimGeneration(*Rope, 17);
+	FRopeSimState& Sim = FRopeComponentRefactorTestSeam::GetMutableSim(*Rope);
+	Sim.bStartPinned = true;
+	Sim.StartPinTarget = FVector(1.0f, 2.0f, 3.0f);
+	Sim.StartPinPrev = FVector(-1.0f, -2.0f, -3.0f);
+
+	FRopeResidentLatest Latest;
+	Latest.Generation = 17;
+	Latest.NumNodes = Sim.Num();
+	Latest.Positions = Sim.Positions;
+	Latest.PrevPositions = Sim.PrevPositions;
+	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
+	{
+		Latest.Positions[NodeIndex] += FVector(0.0f, 25.0f, 0.0f);
+		Latest.PrevPositions[NodeIndex] += FVector(0.0f, 20.0f, 0.0f);
+	}
+	Latest.SegmentTension.Init(42.0f, Sim.Num() - 1);
+	const FVector ExpectedFreeNode = Latest.Positions[2];
+	TestTrue(TEXT("matching asynchronous snapshot is accepted"),
+		FRopeSimSubsystemTestSeam::ApplyLatestGpuMirror(*Subsystem, *Rope, Latest));
+	TestTrue(TEXT("matching snapshot updates the free-span CPU mirror"),
+		Sim.Positions[2].Equals(ExpectedFreeNode, 0.01f));
+	TestTrue(TEXT("mirror copy retains the live held-end pin"),
+		Sim.Positions[0].Equals(Sim.StartPinTarget, 0.01f) &&
+		Sim.PrevPositions[0].Equals(Sim.StartPinPrev, 0.01f));
+	TestEqual(TEXT("matching tension observation is copied"), Sim.SegmentTension[1], 42.0f);
+
+	FRopeResidentLatest Stale = Latest;
+	Stale.Generation = 16;
+	Stale.Positions[2] = FVector(999.0f, 999.0f, 999.0f);
+	TestFalse(TEXT("stale generation is rejected"),
+		FRopeSimSubsystemTestSeam::ApplyLatestGpuMirror(*Subsystem, *Rope, Stale));
+	TestTrue(TEXT("stale snapshot cannot replace the current CPU seed"),
+		Sim.Positions[2].Equals(ExpectedFreeNode, 0.01f));
 	return true;
 }
 

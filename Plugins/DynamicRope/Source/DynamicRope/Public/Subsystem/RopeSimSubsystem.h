@@ -358,6 +358,11 @@ private:
 	 */
 	void BuildGpuFlightCandidates(URopeComponent& Rope);
 
+	/** Applies an already-available, generation-matched GPU readback to the CPU mirror and snaps its held
+	 *  end to the current pin. This never waits for the render thread. Returns true only when a snapshot was
+	 *  copied; the pin correction is still applied when no matching snapshot exists. */
+	bool ApplyLatestGpuMirror(URopeComponent& Rope);
+
 	/**
 	 * Builds one rope's GPU resident step. Returns true after filling in OutStep when the rope belongs
 	 * on the GPU, adding it to the dispatch list; returns false when it falls back, for example

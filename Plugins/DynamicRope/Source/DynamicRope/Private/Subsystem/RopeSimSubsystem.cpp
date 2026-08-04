@@ -882,6 +882,15 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 					LODCameraLocation = Camera->GetCameraLocation();
 				}
 			}
+			// Assisted targets blend the analytic guide with the CPU solver pose. Feed that calculation the
+			// newest asynchronous mirror we already own instead of waiting until phase 2 to copy it. This removes
+			// one avoidable frame of target lag without a synchronous readback or any render-thread stall. Keep the
+			// early copy narrow: ordinary guides are analytic, and non-Flight phases retain their existing order.
+			if (bUseGPU && Rope->Phase == ERopePhase::Flight && Rope->WhipGuide.IsActive()
+				&& Rope->WhipGuide.HasAimTarget())
+			{
+				ApplyLatestGpuMirror(*Rope);
+			}
 			Rope->PrepareSimFrame(DeltaTime, LODCameraLocation);
 		}
 	}
@@ -1245,6 +1254,39 @@ bool URopeSimSubsystem::SyncGpuPositionsForHandoff(URopeComponent& Rope)
 	return true;
 }
 
+bool URopeSimSubsystem::ApplyLatestGpuMirror(URopeComponent& Rope)
+{
+	FRopeSimState& S = Rope.Sim;
+	bool bAppliedSnapshot = false;
+	if (const FRopeResidentLatest* Latest = GpuLatest.Find(Rope.GetUniqueID()))
+	{
+		// A reseed catch-up may leave an older generation in the readback map. Never let that replace the
+		// current CPU seed, and require every positional array to match the active topology.
+		if (Latest->Generation == Rope.SimFrame.SimGeneration && Latest->NumNodes == S.Num()
+			&& Latest->Positions.Num() == S.Num() && Latest->PrevPositions.Num() == S.Num())
+		{
+			S.Positions = Latest->Positions;
+			S.PrevPositions = Latest->PrevPositions;
+			// Tension is armed only on a solve readback, so an absent array intentionally leaves the prior
+			// observation in place.
+			if (Latest->SegmentTension.Num() == S.Num() - 1)
+			{
+				S.SegmentTension = Latest->SegmentTension;
+			}
+			bAppliedSnapshot = true;
+		}
+	}
+
+	// The delayed mirror must never pull the held end away from the hand. Phase 1's early Assisted copy uses
+	// the previous prepared pin here; Prepare immediately advances it to this frame's component transform.
+	if (S.bStartPinned && S.Num() > 0)
+	{
+		S.Positions[0] = S.StartPinTarget;
+		S.PrevPositions[0] = S.StartPinPrev;
+	}
+	return bAppliedSnapshot;
+}
+
 bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTime, FRopeGPUResidentStep& OutStep)
 {
 	FRopeSimState& S = Rope.Sim;
@@ -1269,32 +1311,10 @@ bool URopeSimSubsystem::TryBuildResidentStep(URopeComponent& Rope, float DeltaTi
 
 	const uint32 RopeId = Rope.GetUniqueID();
 
-	// Mirror the previous readback into the Sim, but only when the generation matches the current one, meaning
-	// the GPU has caught up with the current seed. While a catch-up is in progress right after a reseed, the
-	// CPU Sim is left alone so it stays the seed source.
-	if (const FRopeResidentLatest* L = GpuLatest.Find(RopeId))
-	{
-		if (L->Generation == Rope.SimFrame.SimGeneration && L->NumNodes == S.Num()
-			&& L->Positions.Num() == S.Num() && L->PrevPositions.Num() == S.Num())
-		{
-			S.Positions = L->Positions;
-			S.PrevPositions = L->PrevPositions;
-			// Mirror the tension too, when there is any — it is only read back on a solve frame, so it can update less often than the positions, and the previous value stands otherwise.
-			if (L->SegmentTension.Num() == S.Num() - 1)
-			{
-				S.SegmentTension = L->SegmentTension;
-			}
-		}
-	}
-
-	// Snap the held end (node 0) exactly onto the current pin: the GPU mirror lags one to two frames and would
-	// otherwise sit away from the hand. This is a correction for render and contact only — the GPU solve
-	// handles the pin itself each step through PinTarget, so the simulation is unaffected.
-	if (S.bStartPinned && S.Num() > 0)
-	{
-		S.Positions[0] = S.StartPinTarget;
-		S.PrevPositions[0] = S.StartPinPrev;
-	}
+	// Keep the established phase-2 mirror update for every GPU rope. Assisted Flight may already have
+	// consumed this same snapshot before Prepare; copying it again is idempotent and preserves the render,
+	// contact and pin-correction ordering for every other path.
+	ApplyLatestGpuMirror(Rope);
 
 	// If the mirror overwrote Prepare's logic output — an anchor position, say — reapply it to the CPU Sim
 	// mirror. That keeps the best of both: the latest bone-driven logic written over a delayed free span.
@@ -1622,9 +1642,9 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 
 void URopeSimSubsystem::PackWhipOverride(const URopeComponent& Rope, FRopeGPUResidentStep& Step) const
 {
-	// Load the whip guide targets Prepare's advance computed as an override. The ordinary hard guide adds a
-	// substep kinematic flag, matching the CPU fallback's FRopeKinematicTargetFrame. Aim-hit keeps its endpoint
-	// solver-state blend and legacy one-shot override.
+	// Load the whip guide targets Prepare's advance computed as an override. Both ordinary and aim-hit targets
+	// use the substep kinematic flag, matching the CPU fallback's FRopeKinematicTargetFrame. Aim-hit's endpoint
+	// solver-state blend remains encoded in the target values; temporal application no longer differs by mode.
 	// The Flight gate stops a stale mask being applied in another phase, and since Flight does not fill
 	// OverrideFrame there is no overlap with the logic-phase packing.
 	if (Rope.Phase != ERopePhase::Flight)
@@ -1642,18 +1662,14 @@ void URopeSimSubsystem::PackWhipOverride(const URopeComponent& Rope, FRopeGPURes
 	Step.OverrideFlags.SetNumZeroed(S.Num());
 	Step.OverridePositions.SetNumZeroed(S.Num());
 	Step.OverridePrevPositions.SetNumZeroed(S.Num());
-	const bool bUseKinematicPath = !Rope.WhipGuide.HasAimTarget();
 	for (int32 k = 0; k < S.Num() && k < WhipMask.Num(); ++k)
 	{
 		if (WhipMask[k] == 0 || !WhipCur.IsValidIndex(k))
 		{
 			continue;
 		}
-		ERopeGPUOverride Flags = ERopeGPUOverride::Position | ERopeGPUOverride::Prev;
-		if (bUseKinematicPath)
-		{
-			Flags |= ERopeGPUOverride::KinematicPath;
-		}
+		const ERopeGPUOverride Flags = ERopeGPUOverride::Position | ERopeGPUOverride::Prev |
+			ERopeGPUOverride::KinematicPath;
 		Step.OverrideFlags[k] = static_cast<uint8>(Flags);
 		Step.OverridePositions[k] = WhipCur[k];
 		// With no previous target (an edge case), velocity is 0 — an approximation matching the CPU fallback's "previous position".
