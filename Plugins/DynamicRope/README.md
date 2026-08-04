@@ -43,6 +43,20 @@ tension both ways: drag light targets to you, or zip yourself toward heavy ones.
 No wielder needed for scripted uses — call `Throw()` / `ReleaseWrap()` / `SetActivePull()`
 directly on the RopeComponent, and listen to `OnRopeWrapped` / `OnRopeReleased`.
 
+## Low frame-rate targets
+
+If your game runs at (or dips to) roughly 40 fps or below, enable fixed-tick physics:
+**Project Settings → Physics → Framerate → Tick Physics Async**, with
+**Async Fixed Time Step Size = 0.01667** (60 Hz). Ragdoll targets are held by a hard Chaos
+distance constraint, and at large variable physics ticks that constraint oscillates instead
+of holding — the rope jitters and cannot reel the ragdoll in. A fixed 60 Hz step keeps
+tether behavior identical across frame rates. Standard async-physics trade-offs apply
+(physics interactions see about one step of extra latency).
+
+To see the tether numerically while tuning, use the non-shipping console variable
+`dr.Rope.LiftDebug 15` — it logs each wrapped rope's material length, leg limit, measured
+span, violation, and tension every N frames.
+
 ## Demo content
 
 `Content/Demo/` ships two maps with small, readable gameplay examples wired in Blueprint:
