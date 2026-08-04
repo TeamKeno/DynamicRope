@@ -1217,6 +1217,10 @@ TArray<FRopeContactCandidate>& URopeComponent::GetOrBuildFlightContactCandidates
 	// synchronously against the exact aim primary collider, which gives the same result on the CPU
 	// fallback.
 	AddSynchronousAssistedAimContactCandidates(DeltaTime, DetectParams, Candidates);
+	// The full-simulation counterpart: a whip-guided crossing of a thin isolated target can complete inside
+	// one frame at a low frame rate, and only this synchronous guide-path sweep preserves it as a same-frame
+	// Actual contact (see the declaration).
+	AddSynchronousWhipGuidedContactCandidates(DetectParams, Candidates);
 
 	// The CanWrapTarget gate, through the helper shared with the Contacting re-collection.
 	RemoveNonWrappableCandidates(Candidates);
@@ -1331,6 +1335,45 @@ void URopeComponent::AddSynchronousAssistedAimContactCandidates(float DeltaTime,
 	// ones. Capture does not currently gate on that score, but the tracker's dominant scoring and the
 	// debug observations have to keep the same contract.
 	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, ReliableParams, InOutCandidates);
+}
+
+void URopeComponent::AddSynchronousWhipGuidedContactCandidates(
+	const FRopeFlightContactDetector::FParams& DetectParams,
+	TArray<FRopeContactCandidate>& InOutCandidates)
+{
+	// Contract and rationale on the declaration. AssistedJudged with an active lock keeps its narrowed
+	// exact-primary probe, and GuaranteedWrap never captures from Flight, so both stand down here.
+	if (Phase != ERopePhase::Flight || WhipGuide.GetGuidedNodeMask().Num() == 0 ||
+		ResolveMode == ERopeWrapResolveMode::GuaranteedWrap ||
+		(ResolveMode == ERopeWrapResolveMode::AssistedJudged && AimTargeting.IsLockActive(Phase)))
+	{
+		return;
+	}
+
+	// Every wrappable collider takes part: world-static push-out shapes carry no bone and cannot seed a
+	// wrap, so they are skipped before the sweep rather than per contact.
+	TArray<IRopeCollider*> GuidedSweepColliders;
+	for (IRopeCollider* Collider : SimFrame.FrameColliders)
+	{
+		if (Collider && !Collider->IsWorldStatic())
+		{
+			GuidedSweepColliders.Add(Collider);
+		}
+	}
+	if (GuidedSweepColliders.Num() == 0)
+	{
+		return;
+	}
+
+	FRopeFlightContactDetector::FWhipGuideView WhipView;
+	WhipView.GuidedNodeMask = &WhipGuide.GetGuidedNodeMask();
+	WhipView.CurrentTargets = &WhipGuide.GetCurrentTargets();
+	WhipView.PrevTargets = &WhipGuide.GetPrevTargets();
+	FRopeFlightContactDetector::AddGuidedContactCandidates(
+		Sim, GuidedSweepColliders, DetectParams, WhipView, InOutCandidates);
+	// The same relative-motion contract as every other candidate source, for the tracker's dominant
+	// scoring and the debug observations.
+	FRopeFlightContactDetector::EvaluateRelativeMotion(Sim, DetectParams, InOutCandidates);
 }
 
 FRopeFlightCaptureEvaluation URopeComponent::EvaluateFlightCapture(

@@ -497,6 +497,18 @@ void URopeComponent::UpdateContacting(float DeltaTime)
 		return;
 	}
 
+#if !UE_BUILD_SHIPPING
+	extern TAutoConsoleVariable<int32> CVarRopeFlightDebug;
+	if (CVarRopeFlightDebug.GetValueOnGameThread() > 0)
+	{
+		UE_LOG(LogDynamicRope, Log,
+			TEXT("[%s] CONTACTDBG dt=%.1fms cand=%d tracker=%s nodes=%d dwell=%.3f elapsed=%.3f colliders=%d"),
+			*GetName(), DeltaTime * 1000.0f, Candidates.Num(),
+			*ContactTracker.CandidateBone.ToString(), ContactTracker.CandidateNodes.Num(),
+			ContactTracker.DwellTime, ContactingElapsed, SimFrame.FrameColliders.Num());
+	}
+#endif
+
 	// Refresh the seed so path generation starts from the newest contact geometry on the frame Wrapping
 	// begins.
 	if (Candidates.Num() > 0 && !ContactTracker.CandidateBone.IsNone())

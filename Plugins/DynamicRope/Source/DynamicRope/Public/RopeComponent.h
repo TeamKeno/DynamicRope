@@ -1546,6 +1546,19 @@ private:
 		const FRopeFlightContactDetector::FParams& DetectParams,
 		TArray<FRopeContactCandidate>& InOutCandidates);
 
+	/**
+	 * Synchronous top-up for an ordinary whip-guided flight: sweep the guide path the CPU already holds
+	 * (previous -> current targets) against every wrappable collider, so a crossing that lasted less than one
+	 * frame still lands as a real, same-frame Actual contact. Without it, a low frame rate lets the guided tip
+	 * cross a thin isolated target — a pillar, a lever — entirely between two end-of-frame poses: the GPU
+	 * detector's post-solve difference sees only the last substep, prediction alone is barred from capturing,
+	 * and the throw tunnels. The assisted aim keeps its narrowed exact-primary probe; this is its
+	 * full-simulation counterpart.
+	 */
+	void AddSynchronousWhipGuidedContactCandidates(
+		const FRopeFlightContactDetector::FParams& DetectParams,
+		TArray<FRopeContactCandidate>& InOutCandidates);
+
 	/** 2a) Fold the candidates into one frame-local evaluation, shared by the capture decision and the observation. */
 	FRopeFlightCaptureEvaluation EvaluateFlightCapture(const TArray<FRopeContactCandidate>& Candidates,
 		const FRopeFlightContactDetector::FParams& DetectParams) const;

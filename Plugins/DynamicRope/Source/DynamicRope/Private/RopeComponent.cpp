@@ -20,6 +20,16 @@
 
 using RopeComponentPrivate::PhaseName;
 
+#if !UE_BUILD_SHIPPING
+// Flight/Contacting capture diagnostics: one line per frame while a rope is flying or deciding a wrap —
+// the candidate set, the tracker's dwell, the verdict and the tip's frame travel. The numbers needed to see
+// why a throw that wraps at one frame rate tunnels or misses its capture window at another. Off by default;
+// enable with "dr.Rope.FlightDebug 1". External linkage: RopeComponentWrapping.cpp logs Contacting with it.
+TAutoConsoleVariable<int32> CVarRopeFlightDebug(
+	TEXT("dr.Rope.FlightDebug"), 0,
+	TEXT("Log per-frame Flight/Contacting capture diagnostics (0 = off)."));
+#endif
+
 #pragma region Construction
 
 URopeComponent::URopeComponent()
@@ -555,6 +565,41 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 			: CaptureEvaluation.Tracker;
 		// 3) Observe.
 		RecordFlightObservation(DetectParams, Candidates, FrameTracker, bShouldCapture, FlightSnapshot);
+
+#if !UE_BUILD_SHIPPING
+		if (CVarRopeFlightDebug.GetValueOnGameThread() > 0)
+		{
+			const int32 TipNode = Sim.Num() - 1;
+			const FVector TipPos = Sim.Positions.IsValidIndex(TipNode)
+				? Sim.Positions[TipNode] : FVector::ZeroVector;
+			const FVector TipPrev = Sim.PrevPositions.IsValidIndex(TipNode)
+				? Sim.PrevPositions[TipNode] : TipPos;
+			int32 NumActual = 0;
+			float MaxPen = 0.0f;
+			FName FirstBone = NAME_None;
+			for (const FRopeContactCandidate& Candidate : Candidates)
+			{
+				if (Candidate.Source == ERopeContactCandidateSource::Actual)
+				{
+					++NumActual;
+				}
+				MaxPen = FMath::Max(MaxPen, Candidate.Penetration);
+				if (FirstBone.IsNone())
+				{
+					FirstBone = Candidate.Bone;
+				}
+			}
+			UE_LOG(LogDynamicRope, Log,
+				TEXT("[%s] FLIGHTDBG dt=%.1fms src=%s cand=%d(act %d, first %s) maxPen=%.1f tracker=%s nodes=%d dwell=%.3f capture=%d tip=%s tipSubstepMove=%.1f"),
+				*GetName(), DeltaTime * 1000.0f,
+				SimFrame.bGpuContactsThisFrame ? TEXT("GPU") : TEXT("CPU"),
+				Candidates.Num(), NumActual, *FirstBone.ToString(), MaxPen,
+				*FrameTracker.CandidateBone.ToString(), FrameTracker.CandidateNodes.Num(),
+				FrameTracker.DwellTime, bShouldCapture ? 1 : 0,
+				*TipPos.ToCompactString(),
+				static_cast<float>(FVector::Dist(TipPos, TipPrev)));
+		}
+#endif
 	}
 
 	// The taut-hold presentation oscillator has to advance even on a sleeping Wrapped frame, so the thrum
