@@ -24,6 +24,58 @@ namespace
 	}
 }
 
+// The substep schedule's overload policy: the per-frame substep *count* stays capped (bounded worst-frame
+// cost, the spiral-of-death guard), while overload past the count cap stretches the substep dt so simulated
+// time keeps matching real time. Time is discarded — mild slow motion — only past the ×2 stretch bound.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverSubstepScheduleTest,
+	"DynamicRope.Solver.SubstepScheduleAbsorbsOverloadWithoutTimeLoss",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeSolverSubstepScheduleTest::RunTest(const FString& Parameters)
+{
+	FRopeSolverConfig Config;
+	Config.Substeps = 12; // Reference: FixedDt = (1/60)/12, count cap = 18.
+	const float FixedDt = (1.0f / 60.0f) / 12.0f;
+	const int32 MaxSubsteps = 18;
+
+	// (1) 60fps: exactly the reference count and the fixed dt. The hair of margin on the input keeps the
+	// count off the floor()'s float rounding edge; the corresponding sliver stays banked.
+	FRopeSimState Sim = RopeTest::MakeStraightRope(4, 60.0f);
+	const FRopeSubstepSchedule At60 = RopeSolverSubsteps(Sim, Config, (1.0f / 60.0f) * 1.0001f);
+	TestEqual(TEXT("60fps runs the reference substep count"), At60.NumSub, 12);
+	TestTrue(TEXT("60fps keeps the fixed dt"), FMath::IsNearlyEqual(At60.FixedDt, FixedDt, 1e-6f));
+	TestTrue(TEXT("60fps banks only the input margin"), FMath::IsNearlyZero(Sim.TimeAccumulator, 1e-5f));
+
+	// (2) 40fps with frame jitter: across many frames, simulated time tracks real time exactly — no
+	// accumulating loss — and the count cap is never exceeded. Jittering frame times alternate the schedule
+	// between the fixed-dt path and the stretched path, which is precisely the boundary the old
+	// discard-based cap kept leaking time on.
+	Sim.TimeAccumulator = 0.0f;
+	float Input = 0.0f;
+	float Simulated = 0.0f;
+	for (int32 Frame = 0; Frame < 200; ++Frame)
+	{
+		const float Dt = (Frame & 1) ? 0.026f : 0.025f;
+		Input += Dt;
+		const FRopeSubstepSchedule Schedule = RopeSolverSubsteps(Sim, Config, Dt);
+		TestTrue(TEXT("overloaded frame never exceeds the count cap"), Schedule.NumSub <= MaxSubsteps);
+		TestTrue(TEXT("substeps are never shorter than the fixed dt"), Schedule.FixedDt >= FixedDt - 1e-6f);
+		Simulated += static_cast<float>(Schedule.NumSub) * Schedule.FixedDt;
+	}
+	TestTrue(FString::Printf(TEXT("~40fps simulates real time (in %.4f, sim %.4f)"), Input, Simulated),
+		FMath::IsNearlyEqual(Input, Simulated + Sim.TimeAccumulator, 1e-3f));
+
+	// (3) A 100 ms spike: the count stays capped, the stretch tops out at ×2, and only the remainder beyond
+	// the ×2 bank is discarded (bounded slow motion instead of a runaway frame).
+	Sim.TimeAccumulator = 0.0f;
+	const FRopeSubstepSchedule Spike = RopeSolverSubsteps(Sim, Config, 0.1f);
+	TestEqual(TEXT("spike frame runs exactly the capped count"), Spike.NumSub, MaxSubsteps);
+	TestTrue(TEXT("spike substeps stretch to exactly x2"),
+		FMath::IsNearlyEqual(Spike.FixedDt, FixedDt * 2.0f, 1e-6f));
+	TestTrue(TEXT("spike consumes the whole bank"), FMath::IsNearlyZero(Sim.TimeAccumulator, 1e-6f));
+	return true;
+}
+
 // Does the doubled Free chain converge to the rest segment length after several steps (distance constraint)?
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeSolverDistanceTest,
 	"DynamicRope.Solver.DistanceConvergesToRest",

@@ -84,15 +84,25 @@ FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverC
 	// therefore constant, and collision and tunnelling behaviour does not depend on the frame rate.
 	const int32 SubPerRef = FMath::Clamp(Config.Substeps, 1, 16);
 	const float FixedDt = (1.0f / 60.0f) / static_cast<float>(SubPerRef);
-	// Spiral-of-death cap, which degrades to slow motion under overload. ×1.5 catches up in real time down to
-	// 40fps and goes slow-motion below that. The previous ×2 (catching up to 30fps) could double the substeps
-	// in a frame, so a frame already dropped by solve load asked for even more work next frame — positive
-	// feedback, a spiral. Lowering the cap bounds the worst frame's solve cost to 1.5× the normal one. The
-	// catch-up after a long pause (the MaxAccum clamp) follows the same cap.
+	// Spiral-of-death cap: the substep *count* per frame is bounded at ×1.5 the reference, so the worst
+	// frame's solve cost is bounded and an overloaded frame can never demand even more work the next frame —
+	// that bound is what prevents the positive-feedback spiral. Overload beyond the count cap does not
+	// discard time (see the stretch below).
 	const int32 MaxSubsteps = FMath::Clamp((SubPerRef * 3) / 2, 1, 32);
+	// Overload absorption: past the count cap, the frame's substeps are *stretched* — same count, slightly
+	// larger dt — so simulated time keeps matching real time instead of dropping into slow motion. Discarding
+	// time is worse than stretching: the colliders' prev→curr sweep still spans the full real frame, so a
+	// discard inflates their per-substep relative motion and breaks the constant-displacement premise of the
+	// swept collision. With the stretch, per-substep node *and* collider motion grow together and the sweep
+	// stays consistent. ×2 stretch on top of the ×1.5 count cap holds real time down to ~3 reference frames
+	// (20fps at the 60fps reference); only below that is time discarded — mild slow motion, bounded work.
+	// (Verlet infers velocity from the previous displacement, so a dt change between frames scales the
+	// implicit velocity by the ratio; consecutive overloaded frames stretch by nearly the same factor, and
+	// the ×2 bound keeps the worst transition ripple small enough for damping and constraints to absorb.)
+	constexpr float MaxSubstepStretch = 2.0f;
 
 	State.TimeAccumulator += DeltaSeconds;
-	const float MaxAccum = FixedDt * static_cast<float>(MaxSubsteps);
+	const float MaxAccum = FixedDt * MaxSubstepStretch * static_cast<float>(MaxSubsteps);
 	if (State.TimeAccumulator > MaxAccum)
 	{
 		// Discard the excess: mild slow motion instead of a runaway.
@@ -105,8 +115,15 @@ FRopeSubstepSchedule RopeSolverSubsteps(FRopeSimState& State, const FRopeSolverC
 		// Not even one substep's worth has accumulated (high fps), so carry it into the next frame.
 		return FRopeSubstepSchedule{ 0, FixedDt };
 	}
-	State.TimeAccumulator -= static_cast<float>(NumSub) * FixedDt;
-	return FRopeSubstepSchedule{ NumSub, FixedDt };
+	if (NumSub <= MaxSubsteps)
+	{
+		State.TimeAccumulator -= static_cast<float>(NumSub) * FixedDt;
+		return FRopeSubstepSchedule{ NumSub, FixedDt };
+	}
+	// Overloaded frame: run the capped count of equal, stretched substeps that consume the whole bank.
+	const float StretchedDt = State.TimeAccumulator / static_cast<float>(MaxSubsteps);
+	State.TimeAccumulator = 0.0f;
+	return FRopeSubstepSchedule{ MaxSubsteps, StretchedDt };
 }
 
 void FRopeXPBDSolver::Step(FRopeSimState& State, const FRopeSolverConfig& Config,
