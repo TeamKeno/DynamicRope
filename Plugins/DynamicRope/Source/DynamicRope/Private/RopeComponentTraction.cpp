@@ -17,6 +17,15 @@
 #include "RopeMathHelpers.h"
 #include "Templates/Function.h"
 
+#if !UE_BUILD_SHIPPING
+// Wrapped lift diagnostics: every N frames per rope, one line with the material length, the leg limit, the
+// measured hand-to-anchor span, the violation, the backend and the tether state — the numbers needed to see
+// why a reel-in is (or is not) hoisting its target. Off by default; enable with "dr.Rope.LiftDebug 15".
+static TAutoConsoleVariable<int32> CVarRopeLiftDebug(
+	TEXT("dr.Rope.LiftDebug"), 0,
+	TEXT("Log Wrapped tether/reel lift state every N frames per rope (0 = off)."));
+#endif
+
 namespace
 {
 	// The taut-check hysteresis and the release grace period are internal constants, settled by measurement
@@ -226,6 +235,33 @@ void URopeComponent::ApplyWrappedTraction(float DeltaTime)
 			ApplyPullForce(PullDrive.LastPullSample.Direction * PullDrive.ActivePullForce, PullDrive.LastPullSample, DeltaTime);
 		}
 	}
+
+#if !UE_BUILD_SHIPPING
+	const int32 LiftDebugPeriod = CVarRopeLiftDebug.GetValueOnGameThread();
+	if (LiftDebugPeriod > 0 && (GFrameCounter % static_cast<uint64>(LiftDebugPeriod)) == 0)
+	{
+		FRopeWielderMovementConstraint DbgConstraint;
+		const bool bDbgLive = BuildWielderMovementConstraint(DbgConstraint);
+		const FRopeResolvedWrappedEndpoints* DbgEndpoints = GetOrResolveWrappedEndpoints();
+		UE_LOG(LogDynamicRope, Log,
+			TEXT("[%s.%s] LIFTDBG len=%.1f leg=%.1f req=%.1f C=%.2f backend=%d tension=%.0f chaos=%d limit=%.1f reel=%.1f pull=%.0f tgtKind=%d anchorNode=%d anchorZ=%.0f"),
+			*GetNameSafe(GetOwner()), *GetName(), Sim.RopeLength,
+			bDbgLive ? DbgConstraint.MaxDistance : -1.0f,
+			bDbgLive
+				? static_cast<float>(FVector::Distance(GetComponentLocation(), DbgConstraint.PivotWorld))
+				: -1.0f,
+			LengthConstraintState.LastViolation,
+			static_cast<int32>(LengthConstraintState.Backend),
+			GetConstraintTension(),
+			PhysicalTetherConstraint ? 1 : 0,
+			PhysicalTetherLimit,
+			ReelRate,
+			PullDrive.ActivePullForce,
+			DbgEndpoints ? static_cast<int32>(DbgEndpoints->Target.Kind) : -1,
+			bDbgLive ? DbgConstraint.AnchorNode : -1,
+			bDbgLive ? static_cast<float>(DbgConstraint.PivotWorld.Z) : 0.0f);
+	}
+#endif
 	WrappedEndpointCache.Reset();
 }
 
@@ -1484,6 +1520,15 @@ void URopeComponent::SamplePhysicalTetherForce(float DeltaTime)
 
 void URopeComponent::TeardownPhysicalTether()
 {
+#if !UE_BUILD_SHIPPING
+	// Rebuild-thrash visibility: a teardown per diagnostic line means the constraint never keeps a warm start.
+	if (PhysicalTetherConstraint && CVarRopeLiftDebug.GetValueOnGameThread() > 0)
+	{
+		UE_LOG(LogDynamicRope, Log, TEXT("[%s] LIFTDBG tether teardown (target=%s bone=%s limit=%.1f)"),
+			*GetName(), *GetNameSafe(PhysicalTetherTarget.Get()), *PhysicalTetherBone.ToString(),
+			PhysicalTetherLimit);
+	}
+#endif
 	if (PhysicalTetherConstraint)
 	{
 		PhysicalTetherConstraint->BreakConstraint();

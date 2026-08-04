@@ -1144,25 +1144,34 @@ void URopeComponent::UpdateReel(float DeltaTime)
 		return;
 	}
 	float NewLength = Sim.RopeLength - ReelRate * DeltaTime;
-	// Reel-in stall: an inextensible rope's material length cannot go below the straight-line hand-to-anchor
-	// distance, which is the floor on how much length is needed. Keeping the reel winding against a target too
-	// heavy or too stuck to move would accumulate the violation C without bound, and on a simulating target
-	// the hard Chaos limit would break every substep, fighting the joints to close a gap it cannot close and
-	// shaking the ragdoll — the snare with both arms tied shook exactly that way.
+	// Reel-in stall: an inextensible rope's hand-side leg cannot become shorter than the straight-line
+	// hand-to-anchor distance, which is the floor on how much length is needed. Keeping the reel winding
+	// against a target too heavy or too stuck to move would accumulate the violation C without bound, and on
+	// a simulating target the hard Chaos limit would break every substep, fighting the joints to close a gap
+	// it cannot close and shaking the ragdoll — the snare with both arms tied shook exactly that way.
 	// Instead it winds like a winch stalling under load: only as much as the object actually comes in. The
-	// violation stays bounded to one reel frame step of slack, the pull bias survives, and the fight is gone.
+	// violation stays bounded to two reel frame steps of slack, the pull bias survives, and the fight is gone.
 	// Reeling out, a self-wrap, and a disabled constraint (no live binding) all behave as before.
 	if (ReelRate > 0.0f && Phase == ERopePhase::Wrapped)
 	{
 		FRopeWielderMovementConstraint LiveConstraint;
-		if (BuildWielderMovementConstraint(LiveConstraint))
+		if (BuildWielderMovementConstraint(LiveConstraint) && LiveConstraint.AnchorNode > 0 && Sim.Num() >= 2)
 		{
 			const float RequiredLength = static_cast<float>(
 				FVector::Distance(GetComponentLocation(), LiveConstraint.PivotWorld));
-			// Slack of two reel frame steps, at least 1 cm, so ordinary traction — the target following at reel speed — is untouched.
-			const float StallSlack = FMath::Max(ReelRate * DeltaTime * 2.0f, 1.0f);
+			// The constraint limit spans only the hand-side leg — AnchorNode of the Num()-1 segments
+			// (MaxDistance = AnchorNode × SegmentLength) — while the reel changes the *full* rope length. So
+			// the stall is measured in leg units and converted back: reeling the full length by one step
+			// shortens the leg by only LegFraction × step, and a floor stated as a full length must divide by
+			// the fraction, or a mid-chain anchor keeps reeling until the leg limit sits chronically below the
+			// measured distance — a hard-constraint violation that can never close, felt as shaking.
+			const float LegFraction =
+				static_cast<float>(LiveConstraint.AnchorNode) / static_cast<float>(Sim.Num() - 1);
+			// Slack of two reel frame steps of leg length, at least 1 cm, so ordinary traction — the target following at reel speed — is untouched.
+			const float StallSlack = FMath::Max(ReelRate * DeltaTime * 2.0f * LegFraction, 1.0f);
 			// A floor meaning "no further", not "reel out": it never lengthens the rope when the violation is already large, since the current length is the cap.
-			NewLength = FMath::Max(NewLength, FMath::Min(RequiredLength - StallSlack, Sim.RopeLength));
+			NewLength = FMath::Max(NewLength,
+				FMath::Min((RequiredLength - StallSlack) / LegFraction, Sim.RopeLength));
 		}
 	}
 	SetRopeLength(NewLength);

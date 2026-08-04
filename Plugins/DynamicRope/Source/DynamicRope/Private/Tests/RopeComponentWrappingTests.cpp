@@ -468,6 +468,31 @@ bool FRopeReelFeasibilityStallTest::RunTest(const FString& Parameters)
 	FRopeWrappingFallbackTestSeam::Reel(*Rope, Dt);
 	TestTrue(TEXT("reel-out is not gated"),
 		Rope->GetCurrentRopeLength() > 30.0f - StallSlack + 1.0f);
+
+	// (5) A mid-chain anchor: the constraint limit spans only the hand-side leg (AnchorNode × SegmentLength),
+	// so the stall must measure leg material length, not the full rope. Anchor at node 2 of 3 segments gives a
+	// leg fraction of 2/3; with the hand 40 cm from the anchor, the reel must settle where the *leg* equals
+	// that span minus the slack — a full length of (40 − slack) / (2/3) — instead of winding the whole rope
+	// down toward 40 and leaving the leg limit chronically 16 cm short of the measured distance.
+	USceneComponent* MidTarget = NewObject<USceneComponent>();
+	MidTarget->SetWorldLocation(FVector(20.0f, 0.0f, 0.0f)); // The anchor's world position is 20 + 60 = (80,0,0).
+
+	URopeComponent* MidRope = NewObject<URopeComponent>();
+	FRopeWrappingFallbackTestSeam::ConfigureExternalAnchor(
+		*MidRope, MidTarget, ERopePhase::Wrapped, /*AnchorNode*/ 2);
+	MidRope->RopeLength = 60.0f;
+	MidRope->MinRopeLength = 10.0f;
+	MidRope->SetReelRate(120.0f);
+	MidRope->SetWorldLocation(FVector(40.0f, 0.0f, 0.0f)); // Hand-to-anchor span 40 cm; leg at full length is also 40 cm.
+	for (int32 i = 0; i < 60; ++i)
+	{
+		FRopeWrappingFallbackTestSeam::Reel(*MidRope, Dt);
+	}
+	const float LegFraction = 2.0f / 3.0f;
+	const float MidStallSlack = FMath::Max(120.0f * Dt * 2.0f * LegFraction, 1.0f);
+	TestTrue(TEXT("a mid-chain anchor stalls on leg material length, not the full rope"),
+		FMath::IsNearlyEqual(
+			MidRope->GetCurrentRopeLength(), (40.0f - MidStallSlack) / LegFraction, 0.1f));
 	return true;
 }
 

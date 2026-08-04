@@ -32,7 +32,30 @@
 #include "InputAction.h"
 #include "InputMappingContext.h"
 #include "PhysicsEngine/PhysicsConstraintComponent.h"
+#include "PhysicsEngine/PhysicsSettings.h"
 #include "Tests/AutomationCommon.h"
+
+// The HardLeash Chaos-backend tests assert synchronous same-frame semantics: create the constraint, tick the
+// world once, observe the reaction on that very tick. A project running async fixed-tick physics (the
+// frame-rate-independence setting) defers simulation off the game thread, which breaks that contract by
+// design rather than by bug. These tests specify the synchronous mode, so each pins the setting while its
+// physics scene exists; the project value is restored on scope exit.
+struct FScopedSyncPhysicsForTest
+{
+	bool bSavedTickPhysicsAsync;
+
+	FScopedSyncPhysicsForTest()
+	{
+		UPhysicsSettings* Settings = UPhysicsSettings::Get();
+		bSavedTickPhysicsAsync = Settings->bTickPhysicsAsync;
+		Settings->bTickPhysicsAsync = false;
+	}
+
+	~FScopedSyncPhysicsForTest()
+	{
+		UPhysicsSettings::Get()->bTickPhysicsAsync = bSavedTickPhysicsAsync;
+	}
+};
 
 struct FRopeWielderComponentTestSeam
 {
@@ -841,6 +864,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderCharacterHardLeashSameFrameTest,
 
 bool FRopeWielderCharacterHardLeashSameFrameTest::RunTest(const FString& Parameters)
 {
+	const FScopedSyncPhysicsForTest SyncPhysics;
 	FTestWorldWrapper WorldWrapper;
 	if (!WorldWrapper.CreateTestWorld(EWorldType::Game) || !WorldWrapper.BeginPlayInTestWorld())
 	{
@@ -970,6 +994,7 @@ bool FRopeWielderSimulatedOwnerBindsChaosDirectlyTest::RunTest(const FString& Pa
 	// hard projection must stand down for it (moving a simulated body from the game thread is discarded by the
 	// next physics sync, and recording the attempt would suppress a reaction it never received), and the
 	// tether must bind that body directly instead of hiding behind an infinite-mass kinematic proxy.
+	const FScopedSyncPhysicsForTest SyncPhysics;
 	FTestWorldWrapper WorldWrapper;
 	if (!WorldWrapper.CreateTestWorld(EWorldType::Game) || !WorldWrapper.BeginPlayInTestWorld())
 	{
@@ -1193,6 +1218,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderPhysicalNodeZeroTest,
 
 bool FRopeWielderPhysicalNodeZeroTest::RunTest(const FString& Parameters)
 {
+	const FScopedSyncPhysicsForTest SyncPhysics;
 	FTestWorldWrapper WorldWrapper;
 	if (!WorldWrapper.CreateTestWorld(EWorldType::Game) ||
 		!WorldWrapper.BeginPlayInTestWorld())
