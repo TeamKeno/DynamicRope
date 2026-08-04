@@ -298,6 +298,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.5", Units = "cm", DisplayName = "Ray Sweep Step"))
 	float AimRaySweepStep = 2.0f;
 
+	/** Assisted (Judged) mode only: the fraction of the rope length treated as the aim reach, that is
+	 *  how far the aiming HUD reports a target as catchable and how far the aimed throw resolves one.
+	 *  Below 1 leaves slack for the wrap itself, so a target at the very tip of a fully stretched
+	 *  rope does not read as catchable. Guaranteed (Pierce) ignores this and always resolves against
+	 *  the full rope length, since its committed throw needs no wrap slack. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.1", ClampMax = "1.0", DisplayName = "Assisted Reach Fraction"))
+	float AssistedAimReachFraction = 0.8f;
+
 	/** Radius tested around the ray centreline. 0 uses the larger of the rope radius and the contact
 	 *  radius.
 	 *

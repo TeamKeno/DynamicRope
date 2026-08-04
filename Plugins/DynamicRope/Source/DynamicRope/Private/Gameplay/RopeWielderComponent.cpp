@@ -1327,7 +1327,18 @@ FVector URopeWielderComponent::GetAimRayOrigin() const
 
 float URopeWielderComponent::GetAimReachLength() const
 {
-	return Rope ? FMath::Max(Rope->GetCurrentRopeLength(), Rope->RopeLength) : 0.0f;
+	if (!Rope)
+	{
+		return 0.0f;
+	}
+	const float FullLength = FMath::Max(Rope->GetCurrentRopeLength(), Rope->RopeLength);
+	// The reach fraction is an Assisted-only concession: it keeps a target at the very tip of a fully
+	// stretched rope from reading as catchable when the judged wrap still needs slack. Guaranteed
+	// (Pierce) commits the throw at input time and needs no wrap slack, so it resolves against the
+	// full rope length.
+	return Rope->ResolveMode == ERopeWrapResolveMode::AssistedJudged
+		? FullLength * AssistedAimReachFraction
+		: FullLength;
 }
 
 FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& AimDir) const
