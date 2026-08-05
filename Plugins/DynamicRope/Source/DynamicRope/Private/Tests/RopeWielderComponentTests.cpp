@@ -227,6 +227,24 @@ struct FRopeWielderComponentTestSeam
 		return Wielder.IsWielderTetherActive();
 	}
 
+	// The minimal Wrapped state under which the hang test reaches its direction and load gates: an
+	// external tether share, a latched taut chain and a valid pull sample. DirToHand is the sample's
+	// anchor-to-hand direction, so an anchor straight above the hand is (0, 0, -1).
+	static void ForceExternalWrapHangState(URopeComponent& Rope, const FVector& DirToHand, float Tension)
+	{
+		Rope.Phase = ERopePhase::Wrapped;
+		Rope.PullDrive.LastTargetShare = 0.0f;
+		Rope.PullDrive.bChainTaut = true;
+		Rope.PullDrive.LastPullSample.bValid = true;
+		Rope.PullDrive.LastPullSample.Direction = DirToHand;
+		SetConstraintTension(Rope, Tension);
+	}
+
+	static void UpdateHangLatch(URopeWielderComponent& Wielder, float DeltaTime)
+	{
+		Wielder.UpdateHangLatch(DeltaTime);
+	}
+
 	static void ConfigureExternalHardLeash(
 		URopeComponent& Rope, const USceneComponent* Target, int32 AnchorNode, float RopeLength)
 	{
@@ -1660,6 +1678,96 @@ bool FRopeWielderStaticSelfWrapIsNotTetherTest::RunTest(const FString& Parameter
 
 	TestFalse(TEXT("wrapping any component owned by the wielder is a self-wrap, not an external tether"),
 		FRopeWielderComponentTestSeam::IsWielderTetherActive(*Wielder));
+	return true;
+}
+
+// The hang verdict must enter the instant its gates hold, ride out brief gate flicker (the mid-swing
+// Hang -> Falling -> Hang animation pop), reject the jump-while-dragging false positive at entry, and
+// still end immediately when the character stops falling. The latch is driven directly through the
+// seam; the wielder tick is not simulated here.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderHangLatchTest,
+	"DynamicRope.Wielder.HangEntersInstantlyAndExitsWithGrace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderHangLatchTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper WorldWrapper;
+	if (!WorldWrapper.CreateTestWorld(EWorldType::Game) ||
+		!WorldWrapper.BeginPlayInTestWorld())
+	{
+		WorldWrapper.ForwardErrorMessages(this);
+		return false;
+	}
+
+	UWorld* World = WorldWrapper.GetTestWorld();
+	ACharacter* Character = World->SpawnActor<ACharacter>();
+	if (!TestNotNull(TEXT("hang fixture character spawned"), Character))
+	{
+		WorldWrapper.DestroyTestWorld(false);
+		WorldWrapper.ForwardErrorMessages(this);
+		return false;
+	}
+	URopeComponent* Rope = NewObject<URopeComponent>(Character);
+	Character->AddInstanceComponent(Rope);
+	Rope->RegisterComponent();
+	URopeWielderComponent* Wielder = AddTestWielder(*Character, *Rope);
+	Character->GetCharacterMovement()->SetMovementMode(MOVE_Falling);
+	Wielder->HangExitGraceTime = 0.3f;
+
+	// A taut horizontal leg while airborne is the jump-while-dragging case: never an entry.
+	FRopeWielderComponentTestSeam::ForceExternalWrapHangState(
+		*Rope, /*DirToHand*/ FVector(-1.0f, 0.0f, 0.0f), /*Tension*/ 50000.0f);
+	FRopeWielderComponentTestSeam::UpdateHangLatch(*Wielder, 0.016f);
+	TestFalse(TEXT("a taut horizontal rope does not become a hang when the character jumps"),
+		Wielder->IsHangingOnRope());
+
+	// An upward leg enters on the very first update — the catch of a fall must not lag.
+	FRopeWielderComponentTestSeam::ForceExternalWrapHangState(
+		*Rope, FVector(0.0f, 0.0f, -1.0f), 50000.0f);
+	FRopeWielderComponentTestSeam::UpdateHangLatch(*Wielder, 0.016f);
+	TestTrue(TEXT("airborne under an upward taut rope is a hang, immediately"),
+		Wielder->IsHangingOnRope());
+
+	// A swing extreme dips the direction gate for a moment: inside the grace the verdict holds…
+	FRopeWielderComponentTestSeam::ForceExternalWrapHangState(
+		*Rope, FVector(-1.0f, 0.0f, 0.0f), 50000.0f);
+	FRopeWielderComponentTestSeam::UpdateHangLatch(*Wielder, 0.1f);
+	TestTrue(TEXT("a brief gate dip inside the exit grace keeps the hang"),
+		Wielder->IsHangingOnRope());
+	// …and only a sustained false ends it.
+	FRopeWielderComponentTestSeam::UpdateHangLatch(*Wielder, 0.4f);
+	TestFalse(TEXT("gates false past the exit grace end the hang"),
+		Wielder->IsHangingOnRope());
+
+	// Re-entry after a full exit is again immediate.
+	FRopeWielderComponentTestSeam::ForceExternalWrapHangState(
+		*Rope, FVector(0.0f, 0.0f, -1.0f), 50000.0f);
+	FRopeWielderComponentTestSeam::UpdateHangLatch(*Wielder, 0.016f);
+	TestTrue(TEXT("the hang re-enters immediately after a full exit"),
+		Wielder->IsHangingOnRope());
+
+	// The optional load gate: enabled, an unloaded rope is fallen past, not hung from.
+	Wielder->HangMinTension = 1000.0f;
+	FRopeWielderComponentTestSeam::ForceExternalWrapHangState(
+		*Rope, FVector(0.0f, 0.0f, -1.0f), 0.0f);
+	FRopeWielderComponentTestSeam::UpdateHangLatch(*Wielder, 0.4f);
+	TestFalse(TEXT("with the load gate enabled an unloaded rope is not hung from"),
+		Wielder->IsHangingOnRope());
+	Wielder->HangMinTension = 0.0f;
+
+	// No longer falling ends the hang immediately, with no grace. Flying stands in for a landing:
+	// SetMovementMode(MOVE_Walking) can bounce straight back to Falling without a floor under the capsule.
+	FRopeWielderComponentTestSeam::ForceExternalWrapHangState(
+		*Rope, FVector(0.0f, 0.0f, -1.0f), 50000.0f);
+	FRopeWielderComponentTestSeam::UpdateHangLatch(*Wielder, 0.016f);
+	TestTrue(TEXT("hanging again ahead of the landing check"),
+		Wielder->IsHangingOnRope());
+	Character->GetCharacterMovement()->SetMovementMode(MOVE_Flying);
+	TestFalse(TEXT("leaving Falling ends the hang immediately, with no grace"),
+		Wielder->IsHangingOnRope());
+
+	WorldWrapper.DestroyTestWorld(false);
+	WorldWrapper.ForwardErrorMessages(this);
 	return true;
 }
 

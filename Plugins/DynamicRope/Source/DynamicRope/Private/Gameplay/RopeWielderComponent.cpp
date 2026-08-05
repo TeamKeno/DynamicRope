@@ -202,6 +202,7 @@ void URopeWielderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 		EnforceWielderLengthConstraint(DeltaTime);
 	}
 	UpdateGroundExit();
+	UpdateHangLatch(DeltaTime);
 	UpdateSwingAirControl();
 	UpdateHangSocketSwap(DeltaTime);
 	UpdatePullEngage();
@@ -538,13 +539,72 @@ void URopeWielderComponent::UpdateGroundExit()
 
 bool URopeWielderComponent::IsHangingOnRope() const
 {
-	// Hanging means airborne, receiving a wielder tether share, and the whole chain taut. The taut gate
-	// is the same test UpdateGroundExit uses: on a slack chain the tether applies no force, so the
-	// character is falling near a rope, not hanging from one.
+	// The latch rides over single-frame gate flicker — a swing apex momentarily dropping the taut latch,
+	// a swing extreme dipping the direction past its threshold — so the animation cannot pop
+	// Hang -> Falling -> Hang mid-swing. The structural half is re-checked live so a stale latch can
+	// never claim a hang after landing or release, even if the tick maintaining it was just disabled.
+	return bHangLatched && IsHangStructural();
+}
+
+bool URopeWielderComponent::IsHangStructural() const
+{
+	// Airborne and receiving a wielder tether share. When this breaks, the hang is over as a situation,
+	// not as a measurement, so the latch drops with no grace.
 	const ACharacter* Character = Cast<ACharacter>(GetOwner());
 	const UCharacterMovementComponent* Movement = Character ? Character->GetCharacterMovement() : nullptr;
-	return Movement && Movement->IsFalling()
-		&& Rope && IsWielderTetherActive() && Rope->IsChainTaut();
+	return Movement && Movement->IsFalling() && Rope && IsWielderTetherActive();
+}
+
+bool URopeWielderComponent::ComputeHangGates() const
+{
+	// The measurement half, every part of which can flicker for a frame or two on a real swing; the
+	// caller rides over the dips. The taut gate is the same test UpdateGroundExit uses: on a slack chain
+	// the tether applies no force, so the character is falling near a rope, not hanging from one.
+	if (!Rope->IsChainTaut())
+	{
+		return false;
+	}
+	FVector DirToHand = FVector::ZeroVector;
+	float Tension = 0.0f;
+	if (!Rope->GetPullSample(DirToHand, Tension))
+	{
+		return false;
+	}
+	// The optional load gate, off by default: the constraint tension is backend-dependent (analytic
+	// lambda, pawn projection reaction, Chaos constraint force), and the hang verdict must not hinge on
+	// which backend reports.
+	if (HangMinTension > 0.0f && Tension < HangMinTension)
+	{
+		return false;
+	}
+	// IsFalling alone is also true through a jump's ascent, and the taut latch knows nothing about where
+	// the rope leads — jumping while dragging a target on a taut horizontal rope must not read as a
+	// hang. As in UpdateGroundExit, hand-to-anchor is the reverse of the sample's anchor-to-hand.
+	return -DirToHand.Z >= HangUpDot;
+}
+
+void URopeWielderComponent::UpdateHangLatch(float DeltaTime)
+{
+	if (!IsHangStructural())
+	{
+		bHangLatched = false;
+		HangGateFalseTime = 0.0f;
+		return;
+	}
+	if (ComputeHangGates())
+	{
+		// Entry is immediate: the catch of a fall must swap the pose the frame the rope goes taut.
+		bHangLatched = true;
+		HangGateFalseTime = 0.0f;
+	}
+	else if (bHangLatched)
+	{
+		HangGateFalseTime += DeltaTime;
+		if (HangGateFalseTime >= HangExitGraceTime)
+		{
+			bHangLatched = false;
+		}
+	}
 }
 
 FRopeHangAnimSample URopeWielderComponent::GetHangAnimSample() const
@@ -795,9 +855,10 @@ void URopeWielderComponent::UpdateHangSocketSwap(float DeltaTime)
 		return;
 	}
 
-	// The hysteresis clocks: how long the hang test has been continuously true or false. The taut gate
-	// inside IsHangingOnRope can flicker at a swing apex, where the chain momentarily goes slack, and
-	// re-attaching the rope is a real 40 cm base jump — it must happen once per hang, not per flicker.
+	// The hysteresis clocks: how long the hang test has been continuously true or false. IsHangingOnRope
+	// is already latched against gate flicker, but re-attaching the rope is a real 40 cm base jump, so
+	// the regrip keeps its own slower clocks on top — it must happen once per hang, not per boundary
+	// wobble.
 	const bool bHanging = IsHangingOnRope();
 	HangSwapEnterTime = bHanging ? HangSwapEnterTime + DeltaTime : 0.0f;
 	HangSwapExitTime = bHanging ? 0.0f : HangSwapExitTime + DeltaTime;

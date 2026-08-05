@@ -730,8 +730,14 @@ public:
 
 	//~ Hang animation ------------------------------------------------------
 	/**
-	 * Whether the owner is hanging from the rope: airborne, receiving a wielder tether share, and the
-	 * whole chain taut. The same test that boosts air control while swinging, exposed for animation —
+	 * Whether the owner is hanging from the rope: airborne, receiving a wielder tether share, and holding
+	 * a taut chain whose leg leads upward (HangUpDot). The measurement half is latched with an exit grace
+	 * (HangExitGraceTime): entry is immediate, and single-frame gate flicker — a swing apex dropping the
+	 * taut latch, a swing extreme dipping past the direction threshold — cannot pop the animation
+	 * Hang → Falling → Hang mid-swing. Landing or releasing ends the hang immediately, with no grace.
+	 * The direction gate is what keeps a jump from reading as a hang while dragging a target on a taut
+	 * horizontal rope: IsFalling is true through a jump's ascent, and the taut latch knows nothing about
+	 * where the rope leads. The same test that boosts air control while swinging, exposed for animation —
 	 * it marks the frames a character should trade the falling pose for a hang pose. Pulling with the
 	 * feet on the ground is deliberately not a hang.
 	 */
@@ -747,6 +753,32 @@ public:
 	 *  attached hand, which keeps the gripping arm inside its comfortable reach. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hang Anim", meta = (ClampMin = "1.0", Units = "cm"))
 	float OffHandGripDistance = 15.0f;
+
+	/** Upward threshold of the hang test: the Z component of the pull direction (hand to anchor, unit
+	 *  length) must be at least this value, so a taut rope dragged sideways does not become a hang the
+	 *  moment the character jumps. Laxer than GroundExitUpDot on purpose: a wide swing tilts the rope far
+	 *  from vertical at its extremes, and the hang pose must survive the whole arc.
+	 *
+	 *  Blueprint only: an internal threshold of the hang test with no basis for a user to pick a value. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Hang Anim|Tuning", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float HangUpDot = 0.2f;
+
+	/** Optional load gate of the hang test (GetConstraintTension, kg*cm/s^2): above 0, the rope must
+	 *  carry at least this much load before the pose swaps. 0, the default, disables it — the constraint
+	 *  tension is backend-dependent (analytic lambda, pawn projection reaction, Chaos constraint force),
+	 *  and the hang verdict must not hinge on which backend reports. Enable it per rope where "falling
+	 *  next to a geometrically taut rope" is a real false positive.
+	 *
+	 *  Blueprint only: an internal threshold of the hang test with no basis for a user to pick a value. */
+	UPROPERTY(BlueprintReadWrite, Category = "Rope|Hang Anim|Tuning", meta = (ClampMin = "0.0"))
+	float HangMinTension = 0.0f;
+
+	/** How long the hang test's measurement gates must stay false before the hang ends (s) — the
+	 *  exit-side hysteresis behind IsHangingOnRope. It rides over the taut latch and the direction gate
+	 *  flickering for a frame or two at a swing apex or extreme, which otherwise pops the animation
+	 *  Hang → Falling → Hang mid-swing. Landing and releasing ignore it and end the hang immediately. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Hang Anim", meta = (ClampMin = "0.0", Units = "s"))
+	float HangExitGraceTime = 0.3f;
 
 	/**
 	 * Optional hang regrip. While the owner hangs (IsHangingOnRope, with a short hysteresis so a swing
@@ -939,6 +971,24 @@ private:
 	/** Boosts and restores air control according to the swing test. Called every tick on the game
 	 *  thread. */
 	void UpdateSwingAirControl();
+
+	/** The structural half of the hang test — airborne and receiving a wielder tether share. Checked
+	 *  live by IsHangingOnRope on top of the latch, so a stale latch can never claim a hang after
+	 *  landing or release. */
+	bool IsHangStructural() const;
+
+	/** The measurement half of the hang test — taut chain, valid pull sample, the direction gate and
+	 *  the optional load gate. Every part can flicker for a frame or two on a real swing;
+	 *  UpdateHangLatch rides over the dips. Assumes the structural half already holds (Rope is valid). */
+	bool ComputeHangGates() const;
+
+	/** Maintains the hang latch, every tick on the game thread: enters the instant both halves hold,
+	 *  exits when the gates stay false for HangExitGraceTime, or immediately when the structure breaks. */
+	void UpdateHangLatch(float DeltaTime);
+
+	// Hang latch state: the latched verdict, and how long the gates have been continuously false.
+	bool bHangLatched = false;
+	float HangGateFalseTime = 0.0f;
 
 	/**
 	 * Decides when an armed pull engages, every tick on the game thread. It engages the first moment
