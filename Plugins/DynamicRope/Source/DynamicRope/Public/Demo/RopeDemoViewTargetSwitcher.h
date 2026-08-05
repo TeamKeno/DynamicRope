@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Shared view-target switch for the demo actors. Blends the captured player's view to a camera
 // mounted on the demo actor for the duration of the capture, then hands the view back.

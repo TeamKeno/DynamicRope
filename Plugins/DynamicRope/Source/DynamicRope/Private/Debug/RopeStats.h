@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The 'stat DynamicRope' dashboard group, which gathers the per-frame simulation cost and load onto one
 // screen, serving both performance tracking and a runtime state check. The per-component

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Demo spread-eagle snare. Several ropes each wrap a different limb of the target and pull outwards,
 // holding it spread and immobilized.

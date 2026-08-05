@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The wrap target abstraction. It lifts the assumption that a wrap target is one bone on a skeletal
 // mesh out of the code, providing the common foundation shared by wrapping a static mesh and

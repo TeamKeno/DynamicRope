@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Shared mathematics and utility helpers internal to the module. If several .cpp files each defined the same helper
 // in an anonymous namespace, a unity build, which merges several .cpp files into one translation unit, would merge

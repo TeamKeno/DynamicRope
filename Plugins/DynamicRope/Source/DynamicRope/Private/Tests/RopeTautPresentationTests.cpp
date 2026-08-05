@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for the taut-hold presentation shaping (RopeTautPresentation.h): the render-only
 // straightening of the hand-side free span and the snap-taut thrum.

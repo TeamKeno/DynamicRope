@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for the pierce binding mode, which belongs to GuaranteedWrap alone and establishes a single
 // anchor at the aim hit point.

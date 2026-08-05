@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Helpers for the solver and logic unit tests: a POD FRopeSimState fixture builder and a scripted IRopeCollider mock.
 // They have no UObject dependency, which is what allows pure unit tests with no world, and is why the solver is POD.

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The skeletal collider provider that supplies URopeSDFData as IRopeColliders. It builds an
 // FRopeSDFCollider each frame by transforming the per-bone volumes by their current bone-to-world

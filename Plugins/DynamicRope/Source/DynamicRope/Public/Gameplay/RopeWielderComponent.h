@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Gameplay component that lets a character hold and throw a rope. It attaches a URopeComponent to a
 // hand socket and gathers throw input and aiming in one place, so a character needs only this

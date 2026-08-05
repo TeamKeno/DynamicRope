@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for URopePreset, the data asset, and URopeComponent::ApplyPreset, verified with NewObject and no world.
 // That EnterLoaded and ApplyPreset have no world dependency is the same premise as the phase contract tests in

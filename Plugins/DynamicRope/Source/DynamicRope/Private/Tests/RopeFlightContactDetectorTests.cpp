@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for FRopeFlightContactDetector. They verify the flight contact pipeline, meaning the collection of
 // actual and predicted contacts, the relative motion evaluation and the capture decision, with no world, using a POD

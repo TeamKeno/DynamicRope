@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Collider abstraction. The solver only ever calls IRopeCollider::Query — it never knows whether the
 // collider behind it is a capsule, a per-bone SDF, or a world distance field.

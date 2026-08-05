@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Candidate box selection for the Flight debugger. It is a pure function, so it can be unit tested
 // without a world or any UObject, and is shared by the debugger drawing, under

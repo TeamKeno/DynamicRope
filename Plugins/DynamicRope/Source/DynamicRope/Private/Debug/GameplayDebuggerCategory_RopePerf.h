@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The 'RopePerf' gameplay debugger category, a world-wide overview of rope performance and throttling. Where the
 // 'Rope' category draws one debug actor's ropes in depth, this one walks every active rope in the world and

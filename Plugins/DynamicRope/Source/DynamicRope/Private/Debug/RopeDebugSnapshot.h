@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // One frame's debug snapshot of a rope. The sim tick fills it in on the game thread and submits it to
 // URopeDebugSubsystem, and FGameplayDebuggerCategory_Rope reads it back and draws it through AddShape

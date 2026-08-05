@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for RopeTraction, verifying the traction axis drive maths, covering both the tether and
 // active pull, with no world.

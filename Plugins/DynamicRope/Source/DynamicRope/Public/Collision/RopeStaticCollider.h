@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Analytic colliders for static world geometry, that is the simple collision of static bodies. The
 // global distance field is a voxel clipmap, so its corners are eroded by roughly the voxel size and a

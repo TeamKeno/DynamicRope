@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The throwaway view target behind the wrap camera cut. URopeWrapCameraDirectorComponent spawns one of
 // these, binds it to a URopeWrapCameraComponent on the wrap target, and hands it to the player controller

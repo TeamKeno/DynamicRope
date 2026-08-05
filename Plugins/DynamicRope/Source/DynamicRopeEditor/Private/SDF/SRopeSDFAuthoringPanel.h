@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The content panel of the SDF authoring dock tab. It selects a target URopeSDFData, bakes the per-bone
 // SDFs, and hosts the controls for adjusting the pre-bake settings such as the voxel size.

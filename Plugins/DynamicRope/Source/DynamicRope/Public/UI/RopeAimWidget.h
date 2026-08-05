@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The demo aiming HUD widget for aim ray targeting. It is shown exactly while
 // URopeWielderComponent::IsAimActive(), meaning the rope is in an aim ray mode, that is any resolve

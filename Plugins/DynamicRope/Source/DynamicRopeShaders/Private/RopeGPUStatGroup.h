@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The declaration of the 'stat DynamicRopeGPU' group, owned by the DynamicRopeShaders module. The GPU render-thread
 // timing, VRAM and transfer bandwidth stats are collected here. It is a separate group from the runtime game-thread

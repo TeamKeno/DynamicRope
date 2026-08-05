@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The compute shader that generates tube vertex positions from a centreline. It uses the same
 // expressions as the CPU tube build in FRopeSceneProxy: seed a frame perpendicular to the first tangent

@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Logic for the Wrapping phase. Starting from the latch anchor established during Contacting, it
 // progressively builds the wrap path, either as a composite analytic helix or a sequential surface

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // World subsystem that drives the simulation of every active URopeComponent from one place, instead
 // of each component ticking itself. It is the single orchestration point: it gathers colliders

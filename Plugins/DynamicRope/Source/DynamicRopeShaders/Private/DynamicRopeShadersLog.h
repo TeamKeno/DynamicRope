@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The DynamicRopeShaders module's log category. This module does not depend on DynamicRope, so it has its own category.
 

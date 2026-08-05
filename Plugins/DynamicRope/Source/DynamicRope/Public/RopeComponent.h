@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The single UE integration point (Facade). Owns the sim state (FRopeSimState), the solver and the
 // per-phase logic classes (WhipGuide / WrappingPhase / WrapController) by value, and runs the phase

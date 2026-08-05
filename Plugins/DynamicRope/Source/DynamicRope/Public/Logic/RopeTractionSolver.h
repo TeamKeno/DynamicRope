@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The shared, UObject-free maths of the traction axis drive, covering both the tether and active
 // pull. Every case, that is both tether modes at both ends plus active pull, has the same skeleton:

@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The contact candidate detection pipeline used during Flight. It finds actual contacts along the
 // travel path produced by the solve (Detect), extrapolates the next positions of fast-moving and

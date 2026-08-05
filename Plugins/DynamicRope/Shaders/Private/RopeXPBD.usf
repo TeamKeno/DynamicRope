@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // XPBD rope solver on the GPU: integrate, then distance, bending and collision constraints.
 // 1 rope = 1 thread group, node = thread. Run the substep x iteration loop with groupshared + barrier.

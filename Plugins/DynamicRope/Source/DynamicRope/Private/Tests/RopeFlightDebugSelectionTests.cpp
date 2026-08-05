@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for RopeFlightDebug::SelectCandidateBoxes, verifying the flight debugger's candidate box selection rules
 // with no world. The essentials: the representative of the tracked target is always included even when it falls

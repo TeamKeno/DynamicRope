@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // A class customization that removes tuning made meaningless by a resolve mode of GuaranteedWrap from the details panel.
 // It is registered for both URopeComponent and URopePreset: the preset is a one-to-one mirror of the component's

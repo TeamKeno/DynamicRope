@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The rope manager actor, of which one is spawned per world. It hosts the URopeStaticBodyProvider
 // used for static world collision, and URopeSimSubsystem spawns it, or the subclass named in the

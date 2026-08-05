@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for the ragdoll transition matrix.
 // Going limp happens outside the plugin, in game code, but the contracts the rope has to honour at that

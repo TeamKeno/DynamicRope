@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Demo rope elevator: a rideable platform that grapples the ceiling and reels itself up. It is the
 // physical climb-in demo. A GuaranteedWrap rope attached to the platform, which is a physics body,

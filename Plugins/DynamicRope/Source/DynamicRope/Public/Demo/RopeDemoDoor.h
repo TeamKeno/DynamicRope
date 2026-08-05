@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Demo door. Opens once the pressure plates it is linked to are pressed, either all of them or as
 // many as RequiredPressedCount asks for. It is the backbone of demo progression: clearing a stage

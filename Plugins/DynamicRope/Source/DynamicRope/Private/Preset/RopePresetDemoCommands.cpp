@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Console commands for switching presets in demos and feature tests, in non-shipping builds alone, which reduce
 // switching modes at runtime to cycling through presets. The list comes from the project setting

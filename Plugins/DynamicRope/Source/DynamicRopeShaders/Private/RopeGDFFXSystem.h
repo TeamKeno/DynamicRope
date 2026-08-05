@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // A minimal custom FX system for building the global distance field on demand. Like Niagara it registers as a sibling
 // in the scene's FFXSystemSet, so that the engine's build gate, ShouldPrepareGlobalDistanceField, which reads

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 
 #include "AssetDefinition_RopePreset.h"
 #include "Preset/RopePreset.h"

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The content browser representation of URopePreset, being its name, colour and category. A UAssetDefinition CDO is
 // discovered automatically, so no manual registration in StartupModule is needed. The generic property editor is

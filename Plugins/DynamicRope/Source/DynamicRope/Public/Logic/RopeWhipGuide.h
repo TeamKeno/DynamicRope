@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The whip swing presentation at the start of a throw. It rotates a guide curve over time, sweeping
 // from the side opposite the aim round to the aim direction. An ordinary throw takes hold of the

@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The 3D preview viewport embedded in the SDF authoring panel. It shows the skeletal mesh being baked,
 // URopeSDFData::SourceMesh, in its reference pose over an FAdvancedPreviewScene providing lighting and a floor, for

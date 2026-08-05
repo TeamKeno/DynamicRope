@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for FRopeBoxCollider. The central point is the exact diagonal normal at corners and edges,
 // which is the regression gate for the rope passing through a box corner where the voxel global distance

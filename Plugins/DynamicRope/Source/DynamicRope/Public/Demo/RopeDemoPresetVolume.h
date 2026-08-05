@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Demo preset volume. Applies a URopePreset to the rope held by any actor that enters, so each room
 // can give the rope a different character, whether free simulation, capture, or a grappling hook.

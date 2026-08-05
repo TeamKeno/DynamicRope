@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for the owner exclusion decision in collider gathering, RopeColliderGather::IsExcludedOwnerBody.
 // On paths exempt from per-provider exclusion, such as the static world provider, this decision is what keeps world

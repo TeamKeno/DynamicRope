@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The presentation widget for the plugin's information HUD. The C++ side owns only the content data,
 // namely the key guide, the required components, and the capabilities and limitations, together with

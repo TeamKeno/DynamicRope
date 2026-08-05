@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Regression tests for URopeComponent's virtual bridge lifetime and the shared guided throw entry point.
 

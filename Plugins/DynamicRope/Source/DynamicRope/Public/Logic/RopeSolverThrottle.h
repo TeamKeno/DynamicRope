@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The solve throttle, a class with no UObject dependency. It provides sleep for stationary ropes in
 // the Free and Wrapped phases, which skips the solve and its dispatch, and a distance LOD that

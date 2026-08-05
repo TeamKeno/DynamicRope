@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // DynamicRopeEditor log categories. Include this header in any editor .cpp to use UE_LOG.
 // Definitions (DEFINE) live once in DynamicRopeEditorModule.cpp.

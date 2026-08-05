@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Gameplay-authoritative rope length constraint.  This is deliberately independent from
 // XPBD particles/tension so movement can enforce an inextensible cable before PostPhysics.

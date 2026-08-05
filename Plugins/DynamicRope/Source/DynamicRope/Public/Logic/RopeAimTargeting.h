@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The aim ray targeting logic and state, as a class with no UObject dependency. It provides the
 // swept ray bone query used by the wielder's aiming flow (FindAimRayBoneHit), resolves the aim throw

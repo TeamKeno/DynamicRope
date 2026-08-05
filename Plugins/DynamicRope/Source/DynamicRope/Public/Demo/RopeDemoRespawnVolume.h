@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Demo fall-recovery volume, used in place of Kill Z. Lay it under the level and anything that
 // touches it is returned rather than destroyed:

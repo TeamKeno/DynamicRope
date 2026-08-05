@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Demo rope lever: a wrappable handle that is thrown over with the rope and then physically pulled
 // to toggle On and Off, rotating a linked target actor by a configured offset. It is the "pull to

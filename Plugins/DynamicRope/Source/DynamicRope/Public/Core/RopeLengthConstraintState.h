@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Runtime state for the gameplay-authoritative material-length constraint.  This is
 // intentionally separate from FRopePullDriveState: pull input/direction smoothing and

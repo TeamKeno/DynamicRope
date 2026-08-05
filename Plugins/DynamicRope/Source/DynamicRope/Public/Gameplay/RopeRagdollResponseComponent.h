@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Opt-in ragdoll response for a skeletal target wrapped by a rope. Add it to anything wrappable, a
 // mannequin, an animal, a dragon, or any actor with a skeletal mesh, and it provides:

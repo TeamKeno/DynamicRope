@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The single store for rope debugging. Every debug entry point is FGameplayDebuggerCategory_Rope, and this subsystem
 // relays between that category and the simulation tick: the category registers the actor being debugged through

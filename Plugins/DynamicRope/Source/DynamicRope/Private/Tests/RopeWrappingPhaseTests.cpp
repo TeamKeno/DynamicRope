@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for the wrapping phase. They drive a surface vector field path build to completion with no
 // world, using the static wrap target path, meaning a virtual bone name plus a component transform.

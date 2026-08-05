@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Opt-in camera cut for the moment a rope wraps. Add it to the wielder actor, the one holding the rope, and
 // whenever that rope establishes a wrap on a target carrying a URopeWrapCameraComponent it blends the

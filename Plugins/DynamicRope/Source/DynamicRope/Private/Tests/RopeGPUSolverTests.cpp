@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // GPU solver parity and stability test. Running the same scenario through the CPU FRopeXPBDSolver as ground
 // truth and the GPU FRopeGPUSolver, it checks that (1) nothing diverges or produces NaN, (2) an inextensible

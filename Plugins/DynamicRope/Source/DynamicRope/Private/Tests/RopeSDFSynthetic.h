@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // A helper that fills an FRopeBoneSDFVolume from an analytic SDF. It builds a sphere SDF whose true distances are
 // known on the spot, as the fixture for the regression tests, such as RopeSDFSamplerTests, that compare the

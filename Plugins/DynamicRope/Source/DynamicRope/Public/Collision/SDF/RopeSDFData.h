@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The asset holding a per-bone signed distance field. At runtime the provider transforms each volume
 // by its bone transform and exposes it as an FRopeSDFCollider, behind the same IRopeCollider

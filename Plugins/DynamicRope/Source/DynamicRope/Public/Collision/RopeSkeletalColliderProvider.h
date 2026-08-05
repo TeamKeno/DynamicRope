@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The abstract base for providers that supply per-bone colliders from a skeletal mesh each frame. It
 // gathers the wiring shared by the capsule provider (URopeBoneCapsuleProvider) and the SDF provider

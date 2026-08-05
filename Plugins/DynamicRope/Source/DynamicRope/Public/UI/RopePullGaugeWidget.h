@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The gauge widget showing the pull arming and engagement state. The question this UI has to answer
 // is not "is the toggle on" but "I pressed it, so why is nothing pulling yet". It therefore draws

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The IRopeColliderProvider for static world geometry. Each frame it scans the rope-active area,
 // which is the union AABB of every rope, with an ECC_WorldStatic overlap and extracts the simple

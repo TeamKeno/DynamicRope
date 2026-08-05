@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The scene view extension for world collision against the global distance field. It moves the GPU solve dispatch
 // inside the scene renderer's graph, at PreRenderBasePass, meaning after the global distance field is built and

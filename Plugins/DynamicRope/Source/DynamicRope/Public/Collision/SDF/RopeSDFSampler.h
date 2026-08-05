@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Pure utilities for sampling an FRopeBoneSDFVolume, shared by the visualization and by
 // FRopeSDFCollider::Query. They have no UObject dependency and can be unit tested. Every coordinate

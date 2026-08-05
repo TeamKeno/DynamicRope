@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // A shared helper that extracts the simple collision of a UBodySetup, that is its sphyls, spheres,
 // boxes and convexes, into world-space push-out colliders. It is used both by

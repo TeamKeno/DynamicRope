@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Editor-only drawing helpers for visualizing an SDF volume, based on the PDI. They draw each bone's SDF volume as
 // bounds, a grid, voxels, a slice and gradients, and are what the authoring panel's preview viewport draws with.

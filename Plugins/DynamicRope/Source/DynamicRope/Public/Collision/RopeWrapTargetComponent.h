@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The opt-in for wrapping static meshes. Add it to a wrappable static or movable actor, such as a
 // pillar, a lamppost or a hook, where it acts as both a marker and a collider provider. Each frame it

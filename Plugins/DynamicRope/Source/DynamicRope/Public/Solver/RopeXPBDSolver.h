@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Position-based (XPBD) rope solver. It works only on FRopeSimState and has no UObject dependency, which is
 // what keeps it unit-testable and portable to a compute shader. The GPU port (FRopeGPUSolver, RopeXPBD.usf)

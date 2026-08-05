@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Opt-in camera framing marker for a rope wrap target. Add it to anything wrappable, place it in the
 // Blueprint viewport until the frustum preview shows the shot you want, and URopeWrapCameraDirectorComponent

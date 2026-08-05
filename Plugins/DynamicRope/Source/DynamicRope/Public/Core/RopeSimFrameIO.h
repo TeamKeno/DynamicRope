@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The frame contract between URopeComponent and URopeSimSubsystem. It gathers into one type the
 // per-frame inputs and outputs the subsystem reads or writes through friend access, which makes the

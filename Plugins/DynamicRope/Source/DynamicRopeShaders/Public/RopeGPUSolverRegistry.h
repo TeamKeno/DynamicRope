@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The two pieces of infrastructure supporting global distance field world collision, kept together:
 //  1) The scene-to-solver registry. The GPU solver is per world, as a member of URopeSimSubsystem,

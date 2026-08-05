@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The contact detection compute shader. After the solve it sweeps the resident positions and finds the
 // earliest contacting sample per node, mirroring the CPU flight contact detector. Colliders at that sample

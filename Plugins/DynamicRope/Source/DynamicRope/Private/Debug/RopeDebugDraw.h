@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The entry points for the rope debug stat counters. Visualization, covering the centreline, flight, wrapped state,
 // colliders, labels and screen text, is consolidated into FGameplayDebuggerCategory_Rope, which is the sole debug

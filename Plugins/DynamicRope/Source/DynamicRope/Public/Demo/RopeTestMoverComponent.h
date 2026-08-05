@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Test and debug utility that drives its owning actor back and forth on a sine, optionally rotating
 // it, so the way a rope reacts to a moving body can be seen directly. The static body provider

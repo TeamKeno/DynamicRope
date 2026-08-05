@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Demo pressure plate. It presses down while something is resting on it and returns when the plate
 // clears, which is the smallest unit of a puzzle about moving objects onto plates with the rope.

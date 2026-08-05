@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The traction and smoothing state used while wrapped. It gathers into one type the state that
 // persists between frames and is read and updated by two of the four stages of a wrapped tick:

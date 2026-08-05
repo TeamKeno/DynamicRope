@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The pull window notify state placed in a pull montage. Opening the window arms active pull through
 // StartPullNow and closing it releases it through StopPullNow, so this notify defines the time window

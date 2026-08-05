@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Log categories for the DynamicRope runtime module, split along the boundaries of the architecture:
 // the facade, the solver, the logic, and collision and rendering.

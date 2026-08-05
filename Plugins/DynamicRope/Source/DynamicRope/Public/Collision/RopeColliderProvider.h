@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Components and objects that supply colliders to the rope solver each frame. A skeletal provider
 // builds a per-bone collider, capsule or SDF, for each candidate bone.

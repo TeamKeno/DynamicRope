@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The minimal skeletal collider provider and the first collider source: it builds a capsule per bone
 // from the skeletal mesh each frame, either along the bone-to-parent segment or from the physics

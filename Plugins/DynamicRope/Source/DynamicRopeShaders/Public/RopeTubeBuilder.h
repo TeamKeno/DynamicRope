@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // GPU tube mesh generation. It computes the tube's vertex positions from a centreline position
 // buffer using a parallel-transport frame and writes them straight into the renderer's vertex buffer

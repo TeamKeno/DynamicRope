@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // A collider that wraps a single per-bone SDF volume as an IRopeCollider. It transforms the
 // bone-local grid by the bone's current world transform to answer the solver's node queries. It is

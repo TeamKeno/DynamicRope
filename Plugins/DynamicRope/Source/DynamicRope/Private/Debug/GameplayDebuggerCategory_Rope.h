@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The single entry point for rope debugging. Enabling the gameplay debugger in game and toggling the
 // Rope category displays the URopeComponents of the debugged actor. Registering that actor with

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Isolates the engine version differences in RHI buffer creation in one place. In 5.6 the FRHIBufferCreateDesc
 // builder was introduced and the API became CreateVertex, CreateIndex and CreateStructured followed by CreateBuffer,

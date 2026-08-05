@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The editor-only CPU baker that fills a URopeSDFData with per-bone signed distance volumes.
 // It reads the skeletal mesh's editor source model, assigns triangles to bones by skin weight,

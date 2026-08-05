@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The anim notify placed in a throwing montage. Put it on the frame the rope leaves the hand and it
 // calls URopeWielderComponent::ThrowNow() on the mesh's owner at that instant, which fires the actual

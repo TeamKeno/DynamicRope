@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The plugin's information HUD. It creates a URopePluginInfoWidget, adds it to the viewport, and
 // toggles each panel individually from an input key: the key guide, the required components, and the

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Presentation-only shaping of the rendered centerline while a wrapped hold is taut. The simulation is
 // never touched: the component applies this to the copy of the positions it sends to the renderer, so

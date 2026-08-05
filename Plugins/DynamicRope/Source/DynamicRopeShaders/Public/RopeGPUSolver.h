@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // GPU (compute) implementation of the XPBD rope solver, with the centerline resident on the GPU.
 // The position buffer persists between frames and is advanced in place on the GPU each frame, so the

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The binding semantics layer: everything after a wrap has been decided. This is logic rather than
 // physics. It latches the contacting nodes into bone-local space, holds them against the skinning,

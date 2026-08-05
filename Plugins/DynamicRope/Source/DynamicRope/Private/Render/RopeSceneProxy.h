@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The rope's render proxy. It builds a tube around the centreline using a parallel-transport frame,
 // which avoids the twist pop of a Frenet frame. It follows the engine's FCableSceneProxy: a persistent

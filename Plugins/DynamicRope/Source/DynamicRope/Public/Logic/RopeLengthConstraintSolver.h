@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // UObject-free unilateral material-length constraint math.  Elasticity is compliance
 // of this constraint; tension is the reaction impulse produced by the same solve.

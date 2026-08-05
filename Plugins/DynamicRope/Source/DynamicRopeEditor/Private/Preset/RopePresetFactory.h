@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The factory that creates a URopePreset from the content browser. A UFactory CDO is discovered automatically, so no
 // separate registration is needed; the "Dynamic Rope" category in the Add menu is provided by AssetDefinition_RopePreset.

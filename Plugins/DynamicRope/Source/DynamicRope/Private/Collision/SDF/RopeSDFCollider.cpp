@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 #include "Collision/SDF/RopeSDFCollider.h"
 #include "Components/SceneComponent.h"
 #include "DynamicRopeLog.h"

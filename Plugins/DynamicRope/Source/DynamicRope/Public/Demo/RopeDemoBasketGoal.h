@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Demo basket goal. Place it so its trigger sits just under the rim of a hoop already built in the
 // level, and the hoop's own materials pulse whenever the ball drops through.

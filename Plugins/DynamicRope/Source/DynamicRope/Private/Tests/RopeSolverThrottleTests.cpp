@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Unit tests for the sleep behaviour of FRopeSolverThrottle. They pin the contract of the wrapped rest throttle,
 // which extends the Free sleep, with no world: (1) settling, meaning staying slow, leads to sleep in Wrapped as well;

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The shared rope collider module: the GPU collider data model, meaning the capsule and SDF structures
 // and their buffers, plus the maths and point query helpers.

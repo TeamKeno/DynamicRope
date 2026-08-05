@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // Demo rescue helicopter. Hovers overhead until a passenger enters the grab zone below, drops its
 // cable to wrap the passenger's hand bone (GuaranteedWrap resolve mode), reels them up, flies the

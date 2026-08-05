@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // A rope preset data asset: a bundle of values making up a URopeComponent's behavioural identity, covering its mode,
 // material properties, detection, hold, tip and rendering.

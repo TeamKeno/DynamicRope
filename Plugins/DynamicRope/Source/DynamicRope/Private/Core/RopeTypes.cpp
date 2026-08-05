@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // The out-of-line member functions of the data types in RopeTypes.h. The header concentrates on the type
 // definitions, most of which are POD, and logic that needs engine component includes or has any bulk to it is

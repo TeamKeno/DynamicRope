@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
 // A details panel property type customization for FRopeBoneSDFVolume. It shows the bone name alongside the index on
 // an array element's header row, before it is expanded. The UPROPERTY meta TitleProperty="Bone" is not reflected in
