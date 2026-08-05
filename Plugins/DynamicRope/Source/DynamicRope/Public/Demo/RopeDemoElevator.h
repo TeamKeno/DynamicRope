@@ -85,6 +85,15 @@ public:
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Rope|Demo")
 	TObjectPtr<AActor> AnchorTarget = nullptr;
 
+	/** Optional per-cable aim sockets on the anchor, index-matched to the cables (0-3). Left empty,
+	 *  the anchor's components are searched for sockets (bones are excluded) and each cable is
+	 *  greedily assigned the nearest unclaimed one, so a receiver authored with four sockets spreads
+	 *  the cables with no listing needed. A missing or unmatched entry falls back to the anchor
+	 *  actor's location. The socket only steers the aim ray: the wrap still resolves onto whatever
+	 *  wrappable bone or SDF surface that ray sweeps, so the sockets must sit on or near it. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Rope|Demo")
+	TArray<FName> AnchorSocketNames;
+
 	//~ Trigger (the call button) -----------------------------------------------
 
 	/** Travels up while this pressure plate is pressed and down when it clears, acting as the call
@@ -141,11 +150,34 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Stability", meta = (ClampMin = "0.0", Units = "kg"))
 	float PlatformMass = 0.0f;
 
+	//~ Winch (the visual reel drum) ---------------------------------------------
+
+	/** Spin speed of the winch drum mesh while the elevator is travelling (deg/s). 0 disables the
+	 *  spin. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Winch", meta = (ClampMin = "0.0"))
+	float WinchSpinSpeed = 180.0f;
+
+	/** The local axis, in platform space, that the winch drum spins about. It is normalized before
+	 *  use; a zero vector disables the spin. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Winch")
+	FVector WinchSpinAxis = FVector(0.0f, 1.0f, 0.0f);
+
+	/** Reverses the spin. By default ascending spins the drum forward about the axis and descending
+	 *  spins it backward; this flips both, for when the mesh or its placement reads the other way. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Demo|Winch")
+	bool bReverseWinchSpin = false;
+
 protected:
 	/** The rideable platform, a physics body and the actor root. It is the receiver of the climb-in
 	 *  traction. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
 	TObjectPtr<UStaticMeshComponent> Platform = nullptr;
+
+	/** The visual winch drum above the platform's centre. Purely cosmetic and non-colliding: it spins
+	 *  while the elevator travels, forward when ascending and backward when descending, which sells
+	 *  the reeling that actually moves the platform. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rope|Demo")
+	TObjectPtr<UStaticMeshComponent> Winch = nullptr;
 
 	/** Four GuaranteedWrap ropes that wrap the ceiling anchor, one at each corner of the platform.
 	 *  They wrap and reel together, which spreads the load across the corners and tilts far less than a
@@ -158,17 +190,26 @@ private:
 	static constexpr int32 NumRopes = 4;
 
 	/** Fires a guaranteed throw at the anchor from every rope not yet wrapped, attempting to establish
-	 *  the grapple. */
+	 *  the grapple. Refreshes the per-cable socket assignment first. */
 	void FireGrapples();
 
 	/** Fires a guaranteed throw at the anchor from one rope. True once queued. */
-	bool FireGrappleFor(URopeComponent* InRope);
+	bool FireGrappleFor(URopeComponent* InRope, int32 CableIndex);
 
 	/** Whether all four ropes are wrapped, which completes the grapple. */
 	bool AreAllRopesWrapped() const;
 
-	/** The world position to aim at on the anchor, falling back to the anchor actor's location. */
-	FVector ResolveAnchorAimWorld() const;
+	/** Fills AssignedAnchorSockets for this establishing round: the explicit AnchorSocketNames when
+	 *  given, otherwise each cable's nearest unclaimed socket discovered on the anchor's components. */
+	void AssignAnchorSockets();
+
+	/** The world position one cable aims at on the anchor: its assigned socket when it has one,
+	 *  falling back to the anchor actor's location. */
+	FVector ResolveAnchorAimWorld(int32 CableIndex) const;
+
+	/** The per-cable anchor socket resolved by AssignAnchorSockets, index-matched to Ropes, with
+	 *  NAME_None where a cable aims at the actor's location instead. */
+	TArray<FName> AssignedAnchorSockets;
 
 	/** Applies the stability settings, that is the rotation locks, angular damping and mass, to the
 	 *  platform's physics body during BeginPlay. */
