@@ -22,8 +22,9 @@
 #include "DataDrivenShaderPlatformInfo.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/ScopeLock.h"
-// PipelineStateCache::PrecacheComputePipelineState — PrecacheSolverComputePSOs
-#include "PipelineStateCache.h"
+// RopePSO::PrecacheCompute — PrecacheSolverComputePSOs. The version shim over
+// PipelineStateCache::PrecacheComputePipelineState, whose signature changed in 5.8.
+#include "RopePSOPrecacheCompat.h"
 // TRACE_CPUPROFILER_EVENT_SCOPE — render thread dispatch path ground truth (Unreal Insights CPU timeline).
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/RealtimeGPUProfiler.h"
@@ -437,7 +438,7 @@ void RopeGPU::PrecacheSolverComputePSOs()
 			const TShaderRef<FRopeXPBDSolveCS> SolveShader = ShaderMap->GetShader<FRopeXPBDSolveCS>(SolvePerm);
 			if (SolveShader.IsValid())
 			{
-				PipelineStateCache::PrecacheComputePipelineState(
+				RopePSO::PrecacheCompute(
 					SolveShader.GetComputeShader(), TEXT("RopeXPBDSolveCS"), /*bForcePrecache*/ true);
 			}
 		}
@@ -447,7 +448,7 @@ void RopeGPU::PrecacheSolverComputePSOs()
 		const TShaderRef<FRopeContactDetectCS> DetectShader = ShaderMap->GetShader<FRopeContactDetectCS>(DetectPerm);
 		if (DetectShader.IsValid())
 		{
-			PipelineStateCache::PrecacheComputePipelineState(
+			RopePSO::PrecacheCompute(
 				DetectShader.GetComputeShader(), TEXT("RopeContactDetectCS"), /*bForcePrecache*/ true);
 		}
 	}

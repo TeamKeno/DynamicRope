@@ -8,8 +8,9 @@
 #include "RHICommandList.h"
 // FComputeShaderUtils
 #include "RenderGraphUtils.h"
-// PipelineStateCache::PrecacheComputePipelineState — PrecacheTubeComputePSOs
-#include "PipelineStateCache.h"
+// RopePSO::PrecacheCompute — PrecacheTubeComputePSOs. The version shim over
+// PipelineStateCache::PrecacheComputePipelineState, whose signature changed in 5.8.
+#include "RopePSOPrecacheCompat.h"
 #include "DataDrivenShaderPlatformInfo.h"
 // Tube build bandwidth instrumentation for 'stat DynamicRope'. The stat group is declared in the module's shared header.
 #include "RenderingThread.h"
@@ -130,7 +131,7 @@ void RopeGPU::PrecacheTubeComputePSOs()
 		const TShaderRef<FRopeBuildTubeCS> TubeShader = ShaderMap->GetShader<FRopeBuildTubeCS>(TubePerm);
 		if (TubeShader.IsValid())
 		{
-			PipelineStateCache::PrecacheComputePipelineState(
+			RopePSO::PrecacheCompute(
 				TubeShader.GetComputeShader(), TEXT("RopeBuildTubeCS"), /*bForcePrecache*/ true);
 		}
 
@@ -139,7 +140,7 @@ void RopeGPU::PrecacheTubeComputePSOs()
 		const TShaderRef<FRopeBuildTubeResidentCS> ResidentShader = ShaderMap->GetShader<FRopeBuildTubeResidentCS>(ResidentPerm);
 		if (ResidentShader.IsValid())
 		{
-			PipelineStateCache::PrecacheComputePipelineState(
+			RopePSO::PrecacheCompute(
 				ResidentShader.GetComputeShader(), TEXT("RopeBuildTubeResidentCS"), /*bForcePrecache*/ true);
 		}
 	}
