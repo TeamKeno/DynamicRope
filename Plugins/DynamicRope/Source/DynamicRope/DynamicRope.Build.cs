@@ -56,8 +56,6 @@ public class DynamicRope : ModuleRules
 				"RHI",
 				// The optional automatic input binding of URopeWielderComponent; the public header forward-declares it alone, so this stays private.
 				"EnhancedInput",
-				// FBodyInstance::IsInstanceSimulatingPhysics calls into FBodyInstanceCore.
-				"PhysicsCore",
 				// ... add private dependencies that you statically link with here ...
 			}
 			);
