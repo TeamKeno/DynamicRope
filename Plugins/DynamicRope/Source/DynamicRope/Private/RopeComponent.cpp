@@ -629,7 +629,7 @@ void URopeComponent::FinalizeSimFrame(float DeltaTime)
 	bLastRenderDataGpuResident = SimFrame.bGpuSteppedThisFrame;
 
 	// Follow the tip attachment to the resolved free-end position (still the consume-solve-output step).
-	UpdateTipMeshTransform();
+	UpdateTipMeshTransform(DeltaTime);
 
 	// Wrapped stat counters, independent of the above.
 	if (Phase == ERopePhase::Wrapped)
@@ -1051,6 +1051,10 @@ void URopeComponent::SetPhase(ERopePhase NewPhase, const TCHAR* Reason)
 	// Extension hook, then the Blueprint event. Real transitions only — a same-phase reset notifies nothing.
 	if (OldPhase != NewPhase)
 	{
+		// Every phase boundary invalidates the tip follow latch: the placement-contract branches
+		// (Loaded, the wrapped embed) do not feed the stabilizer, so a latch carried across them
+		// would converge from a stale pose when the follow fallback resumes.
+		TipStabilizer.Reset();
 		OnPhaseChanged(OldPhase, NewPhase);
 		OnRopePhaseChanged.Broadcast(OldPhase, NewPhase);
 	}
@@ -1076,6 +1080,7 @@ void URopeComponent::ResetTransientPhaseState(bool bPreservePhysicalTether)
 	// The pull sample, the three EMAs and the warning latches only. For which fields survive, see FRopePullDriveState.
 	PullDrive.ResetTransient();
 	LengthConstraintState.ResetTransient();
+	TipStabilizer.Reset();
 }
 
 #pragma endregion Phase_State_Machine
@@ -1124,6 +1129,7 @@ void URopeComponent::InitRope()
 	// A full sim rebuild, so the GPU resident buffer must reseed.
 	++SimFrame.SimGeneration;
 	bWrappedMassMaskDirty = true;
+	TipStabilizer.Reset();
 
 	UE_LOG(LogDynamicRope, Verbose, TEXT("[%s] InitRope: %d particles, length=%.1f, segment=%.2f"),
 		*GetName(), N, Sim.RopeLength, Sim.SegmentLength);

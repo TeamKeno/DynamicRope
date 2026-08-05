@@ -20,6 +20,8 @@
 #include "Logic/RopeAimTargeting.h"
 // Sleep + distance LOD (solve throttling).
 #include "Logic/RopeSolverThrottle.h"
+// Deadband + smoothing for the tip mesh's segment-follow placement.
+#include "Logic/RopeTipStabilizer.h"
 #include "Solver/RopeXPBDSolver.h"
 #include "Logic/RopeWrapController.h"
 #include "Logic/RopeWhipGuide.h"
@@ -144,6 +146,34 @@ public:
 	/** While Free, keep the tip on the rope's end each frame. Off: game code places the tip itself. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Tip", meta = (EditCondition = "bUseTipMesh", DisplayName = "Sync While Free"))
 	bool bSyncTipMeshOnFree = true;
+
+	// XPBD leaves millimetre residual motion on a resting rope — the hand pin keeps moving with the
+	// wielder's idle animation, so whole-rope sleep cannot be relied on — and the socket follow
+	// multiplies angular noise by the tail-to-head lever arm, so a raw per-frame follow shivers on the
+	// ground. The stabilizer (FRopeTipStabilizer) deadbands and smooths the follow sample; both fade
+	// out with tip speed, so a flying or dragged tip passes through raw. The placement-contract
+	// branches (Loaded, the wrapped embed, the aimed guided throw) bypass it entirely.
+	// Deliberately not designer-exposed (and absent from URopePreset): one proven tuning covers every
+	// rope, and per-preset knobs here only invite the deadband/smoothing mistuning artefacts (visible
+	// rope-to-tip separation, snap pops). Code that drives the tip itself can still toggle the switch.
+
+	/** Smooth and deadband the tip mesh while it follows the rope's end. Off: raw per-frame follow. */
+	bool bStabilizeTipFollow = true;
+
+	/** Hold the tip against position changes smaller than this while nearly at rest (cm). */
+	float TipStabilizePositionDeadband = 5.0f;
+
+	/** Hold the tip against direction changes smaller than this while nearly at rest (degrees). */
+	float TipStabilizeAngleDeadband = 3.0f;
+
+	/** Half-life of the converge toward a moved tip target (s). 0: snap once past the deadband. */
+	float TipStabilizeHalfLife = 0.03f;
+
+	/** Tip speed (cm/s) above which stabilization is fully bypassed. */
+	float TipStabilizeFadeOutSpeed = 120.0f;
+
+	/** End segments averaged to derive the tip direction. 1: the raw last segment. */
+	int32 TipDirectionSampleCount = 3;
 
 	// GetLoadedTipTransform() implements this; override that virtual to change the placement convention.
 
@@ -974,7 +1004,15 @@ private:
 	// Acquire, destroy and follow the tip attachment across BeginPlay..EndPlay (only while bUseTipMesh is on).
 	void EnsureTipMesh();
 	void TeardownSpawnedTipMesh();
-	void UpdateTipMeshTransform();
+	void UpdateTipMeshTransform(float DeltaTime);
+
+	// Presentation-side filter for the segment-follow fallback. Reset on phase transitions and sim
+	// reseeds; the placement-contract branches (Loaded, the wrapped embed, the aimed guided throw)
+	// never touch it.
+	FRopeTipStabilizer TipStabilizer;
+
+	// Bundles the Rope|Tip stabilizer properties into the stabilizer's per-call params.
+	FRopeTipStabilizer::FParams MakeTipStabilizerParams() const;
 
 	// Push bTipMeshCollision onto the current tip (no-op without one). Called on acquisition and on edit.
 	void ApplyTipMeshCollision();

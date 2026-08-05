@@ -171,7 +171,7 @@ void URopeComponent::ApplyTipMeshCollision()
 	TipMeshComponent->SetCollisionEnabled(Target);
 }
 
-void URopeComponent::UpdateTipMeshTransform()
+void URopeComponent::UpdateTipMeshTransform(float DeltaTime)
 {
 	// The position is the end node, that is the free end, and the rotation puts the last segment's
 	// direction on the X axis. It is placed with a world rather than a relative transform so it matches the
@@ -264,9 +264,13 @@ void URopeComponent::UpdateTipMeshTransform()
 	// The position is the end node, that is the free end, and the rotation puts the last segment's
 	// direction on the X axis. This is the fallback for a non-pierce binding or an unconfigured socket.
 	const FVector TipPos = Sim.Positions[N - 1];
-	const FVector SegDir = (Sim.Positions[N - 1] - Sim.Positions[N - 2])
+	const FVector LastSegDir = (Sim.Positions[N - 1] - Sim.Positions[N - 2])
 		.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
-	FVector FollowDir = SegDir;
+	// Averaging the last few segments attacks the direction noise at its source, before the deadband;
+	// sample count 1 (or the stabilizer off) reproduces the raw last segment exactly.
+	FVector FollowDir = bStabilizeTipFollow
+		? FRopeTipStabilizer::ComputeTailDirection(Sim.Positions, TipDirectionSampleCount, LastSegDir)
+		: LastSegDir;
 	if (Phase == ERopePhase::GuidedThrow && GuidedThrowState.bActive && GuidedThrowState.bFreeThrow)
 	{
 		const FRopePreparedThrowPreview& Prepared = GuidedThrowState.Prepared;
@@ -278,12 +282,34 @@ void URopeComponent::UpdateTipMeshTransform()
 			FreeAimDir = Prepared.ThrowContext.FrameForward.GetSafeNormal(KINDA_SMALL_NUMBER, FVector::ForwardVector);
 		}
 		FollowDir = FRopeTipPlacement::MakeAimYawLockedDirection(
-			SegDir, FreeAimDir, Prepared.ThrowContext.FrameUp);
+			FollowDir, FreeAimDir, Prepared.ThrowContext.FrameUp);
 	}
+
+	// Filter the follow inputs, not the final transform: the tail socket then stays exactly on the
+	// (stabilized) attach point, so the rope and the tip cannot visibly separate while converging.
+	// A flying tip passes through raw via the stabilizer's speed fade, so no phase gate is needed here.
+	FRopeTipStabilizer::FSample Sample{ TipPos, FollowDir };
+	if (bStabilizeTipFollow)
+	{
+		Sample = TipStabilizer.Stabilize(Sample, DeltaTime, MakeTipStabilizerParams());
+	}
+
 	FTransform TipFollow;
-	ComputeTipFollowTransform(TipPos, FollowDir, TipFollow);
+	ComputeTipFollowTransform(Sample.Position, Sample.Direction, TipFollow);
 
 	TipMeshComponent->SetWorldTransform(MakeTipWorldTransform(TipFollow));
+}
+
+FRopeTipStabilizer::FParams URopeComponent::MakeTipStabilizerParams() const
+{
+	FRopeTipStabilizer::FParams Params;
+	Params.PositionDeadband = TipStabilizePositionDeadband;
+	Params.AngleDeadbandDeg = TipStabilizeAngleDeadband;
+	Params.SmoothingHalfLife = TipStabilizeHalfLife;
+	Params.FadeOutSpeed = TipStabilizeFadeOutSpeed;
+	// The teleport reseed distance is an internal guard, not a designer knob.
+	Params.TeleportDistance = 100.0f;
+	return Params;
 }
 
 #pragma endregion Tip_Mesh
