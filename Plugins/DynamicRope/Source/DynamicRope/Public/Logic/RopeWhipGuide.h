@@ -1,9 +1,10 @@
 ﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
-// The whip swing presentation at the start of a throw. It rotates a guide curve over time, sweeping
-// from the side opposite the aim round to the aim direction. An ordinary throw takes hold of the
-// leading stretch of the guide, while an aim-hit throw holds the middle firmly and blends smoothly
-// into the solver's own state towards the hand and the free end. It is active only during Flight.
+// The whip swing presentation at the start of a throw. It rotates one coherent straight guide over
+// time, sweeping from the side opposite the aim round to the aim direction. An aim-hit throw derives
+// that final direction from the live hand to its locked target. Both Full Simulation and aim-hit throws
+// hold the configured GuidedLength span, then crossfade longitudinal influence into the solver-owned tail.
+// Aim-hit additionally relaxes influence at the hand end. It is active only during Flight.
 //
 // Computing the targets, meaning the sweep angle, the guide curve and the resampling to node
 // spacing, stays on the game thread. The CPU solver and GPU resident override sweep the same CurrentTargets,
@@ -28,7 +29,7 @@ public:
 		/** Total swing duration (s). */
 		float Duration = 0.35f;
 
-		/** The fraction of the rope length the guide controls, from 0 to 1. */
+		/** The fraction of the rope length the guide fully controls, from 0 to 1. */
 		float GuidedLength = 0.65f;
 
 		/** The angle swept from the starting angle, opposite the aim, round to the aim direction. */
@@ -40,7 +41,7 @@ public:
 		/** Used when sizing the guide: the larger of Sim.RopeLength and this value. */
 		float ComponentRopeLength = 0.0f;
 
-		/** For an aim hit: the stretches at the hand and free ends where the guide relaxes, and the
+		/** The aim-hit root relaxation range, the shared crossfade length after GuidedLength, and the
 		 *  exponent that brings the hit direction blend forward. */
 		float AimHitRootSolverFraction = 0.20f;
 		float AimHitTipSolverFraction = 0.25f;
@@ -78,8 +79,8 @@ public:
 	/**
 	 * Snaps the initial pose immediately after a throw, at time zero: an ordinary guide places the whole
 	 * rope on one continuous initial guide so no hanging or previously wrapped tail survives the throw
-	 * boundary. Advance then releases the configured tail gradually over normalized swing time. An aim
-	 * hit keeps its separate endpoint envelopes and blends both ends with the existing solver positions.
+	 * boundary. Advance then moves the fully guided boundary towards GuidedLength and smoothly crossfades
+	 * into the solver-owned tail. An aim hit keeps its additional root envelope.
 	 * Called once from StartFreshThrow.
 	 */
 	void SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config);

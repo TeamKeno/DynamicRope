@@ -882,12 +882,11 @@ void URopeSimSubsystem::Tick(float DeltaTime)
 					LODCameraLocation = Camera->GetCameraLocation();
 				}
 			}
-			// Assisted targets blend the analytic guide with the CPU solver pose. Feed that calculation the
-			// newest asynchronous mirror we already own instead of waiting until phase 2 to copy it. This removes
-			// one avoidable frame of target lag without a synchronous readback or any render-thread stall. Keep the
-			// early copy narrow: ordinary guides are analytic, and non-Flight phases retain their existing order.
-			if (bUseGPU && Rope->Phase == ERopePhase::Flight && Rope->WhipGuide.IsActive()
-				&& Rope->WhipGuide.HasAimTarget())
+			// Whip targets blend the analytic guide with the CPU solver pose through their tail envelope in both
+			// Full Simulation and Assisted. Feed that calculation the newest asynchronous mirror we already own
+			// instead of waiting until phase 2 to copy it. This removes one avoidable frame of target lag without
+			// a synchronous readback or render-thread stall. Non-Flight phases retain their existing order.
+			if (bUseGPU && Rope->Phase == ERopePhase::Flight && Rope->WhipGuide.IsActive())
 			{
 				ApplyLatestGpuMirror(*Rope);
 			}
@@ -1643,8 +1642,8 @@ void URopeSimSubsystem::PackStepColliders(URopeComponent& Rope, bool bDetectThis
 void URopeSimSubsystem::PackWhipOverride(const URopeComponent& Rope, FRopeGPUResidentStep& Step) const
 {
 	// Load the whip guide targets Prepare's advance computed as an override. Both ordinary and aim-hit targets
-	// use the substep kinematic flag, matching the CPU fallback's FRopeKinematicTargetFrame. Aim-hit's endpoint
-	// solver-state blend remains encoded in the target values; temporal application no longer differs by mode.
+	// use the substep kinematic flag, matching the CPU fallback's FRopeKinematicTargetFrame. Their longitudinal
+	// solver-state blend remains encoded in the target values; temporal application does not differ by mode.
 	// The Flight gate stops a stale mask being applied in another phase, and since Flight does not fill
 	// OverrideFrame there is no overlap with the logic-phase packing.
 	if (Rope.Phase != ERopePhase::Flight)

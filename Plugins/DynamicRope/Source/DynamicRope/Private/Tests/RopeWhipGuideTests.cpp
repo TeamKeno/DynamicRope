@@ -32,22 +32,70 @@ bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 	Config.AimHitRootSolverFraction = 0.20f;
 	Config.AimHitTipSolverFraction = 0.25f;
 
+	const FVector AimTarget(100.0f, 40.0f, 15.0f);
+	const FVector LockedAimDirection = (AimTarget - Sim.StartPinTarget).GetSafeNormal();
 	FRopeWhipGuide Guide;
 	Guide.Begin(FVector::ForwardVector, Sim.Positions[0], FVector::ForwardVector,
 		FVector::UpVector, FVector::RightVector, 1500.0f, FVector::ZeroVector,
-		/*bHasAimTarget*/ true, FVector(100.0f, 0.0f, 0.0f), 0.25f, 0.50f);
+		/*bHasAimTarget*/ true, AimTarget, 0.25f, 0.50f);
+	const int32 LastNode = Sim.Num() - 1;
+	const int32 FirstBlendedTailNode = FMath::Clamp(
+		FMath::FloorToInt(static_cast<float>(LastNode) * Config.GuidedLength) + 1, 1, LastNode);
+	const float InfluenceEnd = FMath::Clamp(
+		Config.GuidedLength + Config.AimHitTipSolverFraction, 0.05f, 1.0f);
+	const int32 FirstFullySolverTailNode = FMath::Clamp(
+		FMath::FloorToInt(static_cast<float>(LastNode) * InfluenceEnd) + 1, 1, LastNode);
 	const FVector TipBeforeSnap = Sim.Positions.Last();
+	const FVector SolverTailBeforeSnap = Sim.Positions[FirstFullySolverTailNode];
 	Guide.SnapToInitialPose(Sim, Config);
 	TestTrue(TEXT("initial aim snap preserves the solver-owned tip"),
 		Sim.Positions.Last().Equals(TipBeforeSnap, 0.01f));
+	TestTrue(TEXT("Assisted crossfades instead of cutting ownership at GuidedLength"),
+		Guide.IsGuidedNodeThisFrame(FirstBlendedTailNode));
+	TestFalse(TEXT("Assisted releases nodes after the GuidedLength crossfade"),
+		Guide.IsGuidedNodeThisFrame(FirstFullySolverTailNode));
+	TestTrue(TEXT("initial aim snap preserves the tail beyond the Assisted crossfade"),
+		Sim.Positions[FirstFullySolverTailNode].Equals(SolverTailBeforeSnap, 0.01f));
 
-	const int32 LastNode = Sim.Num() - 1;
+	const auto CheckGuidedNodesOnLine = [this, &Guide](const TCHAR* Stage,
+		const TArray<FVector>& Positions, const FVector& LineOrigin, const FVector& LineDirection)
+	{
+		bool bCheckedAny = false;
+		const FVector Direction = LineDirection.GetSafeNormal();
+		for (int32 NodeIndex = 1; NodeIndex < Positions.Num(); ++NodeIndex)
+		{
+			if (!Guide.IsGuidedNodeThisFrame(NodeIndex))
+			{
+				continue;
+			}
+			bCheckedAny = true;
+			const FVector FromOrigin = Positions[NodeIndex] - LineOrigin;
+			const FVector OffLine = FromOrigin - Direction * FVector::DotProduct(FromOrigin, Direction);
+			TestTrue(*FString::Printf(TEXT("%s guided node %d stays on the shared straight line (error %.4f)"),
+				Stage, NodeIndex, OffLine.Size()), OffLine.Size() <= 0.01f);
+		}
+		TestTrue(*FString::Printf(TEXT("%s checks at least one guided node"), Stage), bCheckedAny);
+	};
+
+	const FVector InitialGuideDirection = RopeMath::ArcDirectionAtAlpha(
+		LockedAimDirection, FVector::UpVector, Config.SweepAngleDegrees, 0.0f);
+	CheckGuidedNodesOnLine(TEXT("initial aim snap"), Sim.Positions,
+		Sim.StartPinTarget, InitialGuideDirection);
+
 	const int32 MiddleNode = LastNode / 2;
 	// The free end is moved off the spline to verify that Advance does not overwrite the end node again.
 	const FVector FreeTipBefore(200.0f, 40.0f, -15.0f);
 	Sim.Positions[LastNode] = FreeTipBefore;
 	Sim.PrevPositions[LastNode] = FreeTipBefore;
+	Sim.StartPinPrev = Sim.StartPinTarget;
 	Guide.Advance(1.0f / 60.0f, Sim, Config);
+	const float AdvancedT = (1.0f / 60.0f) / Config.Duration;
+	const FVector CurrentGuideDirection = RopeMath::ArcDirectionAtAlpha(
+		LockedAimDirection, FVector::UpVector, Config.SweepAngleDegrees, AdvancedT);
+	CheckGuidedNodesOnLine(TEXT("advanced current targets"), Guide.GetCurrentTargets(),
+		Sim.StartPinTarget, CurrentGuideDirection);
+	CheckGuidedNodesOnLine(TEXT("advanced previous targets"), Guide.GetPrevTargets(),
+		Sim.StartPinPrev, InitialGuideDirection);
 
 	TestTrue(TEXT("middle node remains spline-guided"), Guide.IsGuidedNodeThisFrame(MiddleNode));
 	TestFalse(TEXT("tip node is released to solver"), Guide.IsGuidedNodeThisFrame(LastNode));
@@ -70,6 +118,12 @@ bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 			Guide.GetCurrentTargets().IsValidIndex(NodeIndex) &&
 			Guide.GetCurrentTargets()[NodeIndex].Equals(DebugTargets[DebugIndex], 0.01f));
 	}
+
+	// The presentation rotates during the throw, but the last Assisted line must land on the explicit
+	// AimTarget even when Begin's fallback aim direction is different.
+	Guide.Advance(Config.Duration, Sim, Config);
+	CheckGuidedNodesOnLine(TEXT("final aim targets"), Guide.GetCurrentTargets(),
+		Sim.StartPinTarget, LockedAimDirection);
 	return true;
 }
 
@@ -126,6 +180,7 @@ bool FRopeAimHitGuideSegmentSpacingTest::RunTest(const FString& Parameters)
 	};
 
 	CheckGuidedSpacing(TEXT("initial snap"), Sim.Positions, Sim.StartPinTarget);
+	Sim.StartPinPrev = Sim.StartPinTarget;
 	Guide.Advance(1.0f / 60.0f, Sim, Config);
 	CheckGuidedSpacing(TEXT("current target"), Guide.GetCurrentTargets(), Sim.StartPinTarget);
 	CheckGuidedSpacing(TEXT("previous target"), Guide.GetPrevTargets(), Sim.StartPinPrev);
@@ -139,7 +194,7 @@ bool FRopeAimHitGuideSegmentSpacingTest::RunTest(const FString& Parameters)
 				FVector::Dist(Sim.Positions[NodeIndex], Guide.GetCurrentTargets()[NodeIndex]));
 		}
 	}
-	TestTrue(*FString::Printf(TEXT("spacing repair keeps meaningful guide motion (%.3f cm)"), MaxGuideMotion),
+	TestTrue(*FString::Printf(TEXT("spacing repair keeps meaningful rotating guide motion (%.3f cm)"), MaxGuideMotion),
 		MaxGuideMotion > 1.0f);
 
 	TArray<FVector> PreviewTargets;
@@ -172,8 +227,8 @@ bool FRopeAimHitGuideSegmentSpacingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// An ordinary FullSimulation whip seeds the whole rope onto one straight guide at the throw boundary, then releases
-// the future solver-owned tail over normalized swing time instead of preserving a folded pose behind the guide.
+// An ordinary FullSimulation whip seeds the whole rope onto one straight guide at the throw boundary, then moves
+// the fully guided boundary over normalized swing time and crossfades into the solver-owned tail.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWhipInitialStraightSeedAndReleaseTest,
 	"DynamicRope.Solver.WhipInitialStraightSeedAndGradualRelease",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -190,6 +245,7 @@ bool FRopeWhipInitialStraightSeedAndReleaseTest::RunTest(const FString& Paramete
 	Config.Duration = 1.0f;
 	Config.ReferenceThrowSpeed = 1500.0f;
 	Config.GuidedLength = 0.65f;
+	Config.AimHitTipSolverFraction = 0.25f;
 	Config.SweepAngleDegrees = 180.0f;
 	Config.ComponentRopeLength = Sim.RopeLength;
 
@@ -217,28 +273,45 @@ bool FRopeWhipInitialStraightSeedAndReleaseTest::RunTest(const FString& Paramete
 	TestTrue(TEXT("initial straight seed includes the future solver tail"),
 		Guide.IsGuidedNodeThisFrame(LastNode));
 
-	// Halfway through the swing the ownership boundary has moved from 100% to 82.5%. Nodes on its
-	// guide side must remain exactly collinear; the released tail must remain completely solver-owned.
+	// Halfway through the swing the fully guided boundary has moved from 100% to 82.5%. The following
+	// nodes remain on that same line while their guide influence falls smoothly towards the tip.
 	Guide.Advance(0.5f, Sim, Config);
-	const int32 HalfTimeLastGuidedNode = 16; // 16 / 20 = 0.80, below the 0.825 boundary.
-	for (int32 NodeIndex = 1; NodeIndex <= HalfTimeLastGuidedNode; ++NodeIndex)
+	const int32 HalfTimeLastFullyGuidedNode = 16; // 16 / 20 = 0.80, below the 0.825 boundary.
+	for (int32 NodeIndex = 1; NodeIndex <= HalfTimeLastFullyGuidedNode; ++NodeIndex)
 	{
 		const FVector Expected = FVector::UpVector *
 			(Sim.SegmentLength * static_cast<float>(NodeIndex));
 		TestTrue(*FString::Printf(TEXT("half-time guided node %d stays on one straight line"), NodeIndex),
 			Guide.GetCurrentTargets()[NodeIndex].Equals(Expected, 0.01f));
 	}
-	TestTrue(TEXT("node below the moving boundary remains guide-owned"),
-		Guide.IsGuidedNodeThisFrame(HalfTimeLastGuidedNode));
-	TestFalse(TEXT("node above the moving boundary is fully solver-owned"),
-		Guide.IsGuidedNodeThisFrame(HalfTimeLastGuidedNode + 1));
-	TestTrue(TEXT("released node is not position-blended with the rotating guide"),
-		Guide.GetCurrentTargets()[HalfTimeLastGuidedNode + 1].Equals(
-			Sim.Positions[HalfTimeLastGuidedNode + 1], 0.01f));
+	TestTrue(TEXT("node below the moving boundary remains fully guide-owned"),
+		Guide.IsGuidedNodeThisFrame(HalfTimeLastFullyGuidedNode));
+	const int32 HalfTimeBlendedNode = HalfTimeLastFullyGuidedNode + 1;
+	const FVector FullGuideTarget = FVector::UpVector *
+		(Sim.SegmentLength * static_cast<float>(HalfTimeBlendedNode));
+	const FVector BlendedTarget = Guide.GetCurrentTargets()[HalfTimeBlendedNode];
+	TestTrue(TEXT("Full Simulation keeps the node after GuidedLength in the smooth crossfade"),
+		Guide.IsGuidedNodeThisFrame(HalfTimeBlendedNode));
+	TestTrue(TEXT("Full Simulation crossfade target stays on the rotating straight line"),
+		FMath::Abs(BlendedTarget.X) <= 0.01f && FMath::Abs(BlendedTarget.Y) <= 0.01f);
+	TestFalse(TEXT("Full Simulation crossfade is not a hard one-weight guide target"),
+		BlendedTarget.Equals(FullGuideTarget, 0.01f));
+	TestFalse(TEXT("Full Simulation crossfade is not a hard zero-weight solver target"),
+		BlendedTarget.Equals(Sim.Positions[HalfTimeBlendedNode], 0.01f));
+	TestFalse(TEXT("the exact tip reaches zero guide influence at the half-time blend end"),
+		Guide.IsGuidedNodeThisFrame(LastNode));
+	TestTrue(TEXT("the exact tip remains fully solver-owned"),
+		Guide.GetCurrentTargets()[LastNode].Equals(Sim.Positions[LastNode], 0.01f));
 
 	Guide.Advance(0.5f, Sim, Config);
-	TestFalse(TEXT("tail is fully released when the normalized swing completes"),
-		Guide.IsGuidedNodeThisFrame(LastNode));
+	const int32 FinalBlendedNode = 14; // 14 / 20 = 0.70, inside the 0.65-0.90 crossfade.
+	const int32 FinalSolverNode = 19; // 19 / 20 = 0.95, after the crossfade.
+	TestTrue(TEXT("Full Simulation keeps a smooth tail crossfade after final GuidedLength"),
+		Guide.IsGuidedNodeThisFrame(FinalBlendedNode));
+	TestFalse(TEXT("Full Simulation releases nodes after the final crossfade"),
+		Guide.IsGuidedNodeThisFrame(FinalSolverNode));
+	TestTrue(TEXT("node after the final crossfade preserves its solver position"),
+		Guide.GetCurrentTargets()[FinalSolverNode].Equals(Sim.Positions[FinalSolverNode], 0.01f));
 	return true;
 }
 

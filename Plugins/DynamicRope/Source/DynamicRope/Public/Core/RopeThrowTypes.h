@@ -253,8 +253,9 @@ struct FRopeWhipConfig
 {
 	GENERATED_BODY()
 
-	/** The fraction of the rope length the guide controls, from 0 to 1, which shapes the swing
-	 *  trajectory. */
+	/** The fraction of the rope length the guide fully controls, from 0 to 1, which shapes the swing
+	 *  trajectory. In Full Simulation and aim-hit flight, Tip Physics Blend crossfades from this point
+	 *  into the solver-owned tail. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float GuidedLength = 0.65f;
 
@@ -265,9 +266,8 @@ struct FRopeWhipConfig
 	/**
 	 * The fraction of the rope length at the hand end handed to the solver during an aim-hit flight.
 	 * At 0 the central spline governs right up to the hand.
-	 * The same value is also the range over which the hand socket offset is blended into the root
-	 * stretch (see AimRootSocketInfluence in FRopeWhipGuide), so at 0 the guide is pinned to the origin
-	 * captured at the moment of the throw and does not follow the hand animation.
+	 * The whole straight guide follows the current hand socket as one coherent line; within this range,
+	 * solver influence changes only the node's longitudinal coordinate on that line.
 	 * Fixed at this default and not exposed to designers. Consumers clamp it to the range 0 to 0.45.
 	 */
 	float AimHitRootSolverFraction = 0.20f;
@@ -281,9 +281,9 @@ struct FRopeWhipConfig
 	 */
 	float AimHitDirectionBias = 2.0f;
 
-	/** The fraction of the rope length at the free end handed to the solver during an aim-hit flight.
-	 *  Larger values make the tip move more freely under its own inertia. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Aim Hit", meta = (ClampMin = "0.0", ClampMax = "0.45", DisplayName = "Tip Physics Blend"))
+	/** The rope-length fraction used to crossfade from GuidedLength into the solver-owned tail during
+	 *  Full Simulation and aim-hit flight. Larger values make the handoff more gradual. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning", meta = (ClampMin = "0.0", ClampMax = "0.45", DisplayName = "Tip Physics Blend"))
 	float AimHitTipSolverFraction = 0.25f;
 
 	/** During an aim-hit flight, keeps the distance, bending and damping solvers but disables collider
