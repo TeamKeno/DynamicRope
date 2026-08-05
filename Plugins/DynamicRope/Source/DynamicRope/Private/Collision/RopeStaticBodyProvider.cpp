@@ -7,6 +7,8 @@
 #include "Settings/DynamicRopeSettings.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/PrimitiveComponent.h"
+// The skeletal exclusion in BuildColliders: skinned components are the bone providers' domain.
+#include "Components/SkinnedMeshComponent.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 #include "PhysicsEngine/BodySetup.h"
@@ -200,11 +202,16 @@ void URopeStaticBodyProvider::BuildColliders(const FRopeColliderGatherContext& G
 	const int32 MaxColliders = Settings ? FMath::Max(1, Settings->StaticBodyMaxColliders) : 128;
 	const int32 MaxConvexPlanes = Settings ? FMath::Max(4, Settings->StaticBodyMaxConvexPlanes) : 32;
 	const bool  bIncludeDynamic = Settings ? Settings->bIncludeWorldDynamic : true;
+	const bool  bIncludePhysics = Settings ? Settings->bIncludePhysicsBodies : false;
 
 	FCollisionObjectQueryParams ObjParams(ECC_WorldStatic);
 	if (bIncludeDynamic)
 	{
 		ObjParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+	}
+	if (bIncludePhysics)
+	{
+		ObjParams.AddObjectTypesToQuery(ECC_PhysicsBody);
 	}
 	const FCollisionQueryParams QueryParams(FName(TEXT("RopeStaticBodyGather")), /*bInTraceComplex*/ false);
 
@@ -260,6 +267,16 @@ void URopeStaticBodyProvider::BuildColliders(const FRopeColliderGatherContext& G
 		{
 			UPrimitiveComponent* Prim = Overlap.Component.Get();
 			if (!Prim)
+			{
+				continue;
+			}
+			// Skeletal meshes are never extracted here, whatever their object type — a ragdoll is
+			// PhysicsBody, but a mesh set to WorldDynamic would slip in too. Their collision belongs to
+			// the bone capsule and SDF providers, which place it per bone; this path would call
+			// GetBodySetup, which on a skeletal component returns only the first bone's setup, and plant
+			// those shapes at the component transform — a phantom collider at the feet, fighting the bone
+			// providers around the very bodies ropes wrap and tether.
+			if (Prim->IsA<USkinnedMeshComponent>())
 			{
 				continue;
 			}

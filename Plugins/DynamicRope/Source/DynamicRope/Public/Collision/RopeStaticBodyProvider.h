@@ -5,7 +5,10 @@
 // collision of the nearby static bodies, meaning their spheres, capsules and boxes, as analytic
 // colliders. The point is to handle box corners exactly through analytic queries, where the global
 // distance field rounds them off; that field remains the far-field fallback for landscapes and huge
-// meshes with no simple collision.
+// meshes with no simple collision. The project settings widen the scan: bIncludeWorldDynamic (on by
+// default) adds WorldDynamic movers such as doors and platforms, and bIncludePhysicsBodies (off by
+// default) adds simulating PhysicsBody props; both get surface velocity from the previous frame's
+// transform. Skeletal meshes are always excluded — their collision is the bone providers' domain.
 //
 // Placement: one per world is enough, on any persistent actor, whether the game mode, a level actor
 // or a rope's own actor. Because ProvidesWorldStaticColliders() is true, attaching it to a rope's

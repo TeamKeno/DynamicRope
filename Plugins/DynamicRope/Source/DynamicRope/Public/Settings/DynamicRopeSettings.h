@@ -83,6 +83,17 @@ public:
 	bool bIncludeWorldDynamic = true;
 
 	/**
+	 * Whether the static body provider also collects PhysicsBody objects: simulating props, crates
+	 * and other rigid bodies. They become push-out colliders exactly like WorldDynamic ones, surface
+	 * velocity included, so the rope drapes over and slides off them. Skeletal meshes are always
+	 * excluded regardless of this setting — their collision belongs to the bone capsule and SDF
+	 * providers. The coupling is one-way: the body pushes the rope, the rope does not push the body.
+	 * Off by default, preserving the previous behaviour where ropes pass through loose physics props.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ToolTip = "Also collect simulating PhysicsBody props as push-out colliders, with surface velocity. One-way: the body pushes the rope only. Skeletal meshes stay excluded either way."))
+	bool bIncludePhysicsBodies = false;
+
+	/**
 	 * The widget class for the aim ray demo HUD, a crosshair plus a highlight ring on the wrappable
 	 * bone, used by the AssistedJudged and GuaranteedWrap modes.
 	 * URopeWielderComponent creates it and adds it to the local player viewport while

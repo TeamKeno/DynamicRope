@@ -473,19 +473,21 @@ void URopeWrapTargetComponent::GatherColliders(FRopeColliderGatherContext& Gathe
 			}
 
 			// Detailed push-out, decided automatically from the channel: when the target sits outside the
-			// static body provider's scan channels, meaning WorldStatic plus WorldDynamic where enabled, as
-			// a physics-body prop made movable and simulating so it can be dragged, that provider cannot see
-			// it, so the target's whole simple collision is extracted here as push-out colliders. Those have
-			// no bone and are excluded from detection, leaving only the single shape above to take part in
-			// wrapping. Where the channel is covered this is skipped and the static body provider handles
-			// it, so nothing is duplicated. The condition reads bIncludeWorldDynamic to mirror the
-			// provider's real scan range, which fills the gap when that setting is off.
+			// static body provider's scan channels — WorldStatic, plus WorldDynamic and PhysicsBody where
+			// enabled — as a physics-body prop made movable and simulating so it can be dragged, that
+			// provider cannot see it, so the target's whole simple collision is extracted here as push-out
+			// colliders. Those have no bone and are excluded from detection, leaving only the single shape
+			// above to take part in wrapping. Where the channel is covered this is skipped and the static
+			// body provider handles it, so nothing is duplicated. The condition reads bIncludeWorldDynamic
+			// and bIncludePhysicsBodies to mirror the provider's real scan range, which fills the gap when
+			// those settings are off.
 			if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Comp))
 			{
 				const UDynamicRopeSettings* Settings = UDynamicRopeSettings::Get();
 				const ECollisionChannel ObjType = Prim->GetCollisionObjectType();
 				const bool bCoveredByStaticProvider = ObjType == ECC_WorldStatic ||
-					(Settings && Settings->bIncludeWorldDynamic && ObjType == ECC_WorldDynamic);
+					(Settings && Settings->bIncludeWorldDynamic && ObjType == ECC_WorldDynamic) ||
+					(Settings && Settings->bIncludePhysicsBodies && ObjType == ECC_PhysicsBody);
 				UBodySetup* Setup = Prim->GetBodySetup();
 				if (!bCoveredByStaticProvider && Setup)
 				{
