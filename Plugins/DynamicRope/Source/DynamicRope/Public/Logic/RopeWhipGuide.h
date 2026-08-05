@@ -2,9 +2,9 @@
 //
 // The whip swing presentation at the start of a throw. It rotates one coherent straight guide over
 // time, sweeping from the side opposite the aim round to the aim direction. An aim-hit throw derives
-// that final direction from the live hand to its locked target. Both Full Simulation and aim-hit throws
-// hold the configured GuidedLength span, then crossfade longitudinal influence into the solver-owned tail.
-// Aim-hit additionally relaxes influence at the hand end. It is active only during Flight.
+// that final direction from the live hand to its locked target. Full Simulation begins on a shallow
+// C-shaped guide whose free end lies opposite the aim and becomes exactly straight halfway through the
+// whip timer. Aim-hit stays straight. Both crossfade after GuidedLength. Active only during Flight.
 //
 // Computing the targets, meaning the sweep angle, the guide curve and the resampling to node
 // spacing, stays on the game thread. The CPU solver and GPU resident override sweep the same CurrentTargets,
@@ -40,6 +40,11 @@ public:
 
 		/** Used when sizing the guide: the larger of Sim.RopeLength and this value. */
 		float ComponentRopeLength = 0.0f;
+
+		/** Full Simulation's initial C-shape amplitude as a fraction of guide length, and the normalized
+		 *  whip time at which that curvature reaches zero. */
+		float FullSimInitialCurveFraction = 0.12f;
+		float FullSimStraightenTimeFraction = 0.50f;
 
 		/** The aim-hit root relaxation range, the shared crossfade length after GuidedLength, and the
 		 *  exponent that brings the hit direction blend forward. */
@@ -77,10 +82,9 @@ public:
 		float InAimSteerStartAlpha = 0.25f, float InAimLockAlpha = 0.50f);
 
 	/**
-	 * Snaps the initial pose immediately after a throw, at time zero: an ordinary guide places the whole
-	 * rope on one continuous initial guide so no hanging or previously wrapped tail survives the throw
-	 * boundary. Advance then moves the fully guided boundary towards GuidedLength and smoothly crossfades
-	 * into the solver-owned tail. An aim hit keeps its additional root envelope.
+	 * Initializes the pose immediately after a throw, at time zero: Full Simulation places it on the
+	 * initial C-shaped guide. Advance removes the curvature by FullSimStraightenTimeFraction, moves the
+	 * fully guided boundary towards GuidedLength, and crossfades into the solver-owned tail. Aim-hit is straight.
 	 * Called once from StartFreshThrow.
 	 */
 	void SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config);

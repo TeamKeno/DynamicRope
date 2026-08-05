@@ -1120,6 +1120,8 @@ FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
 	Config.SweepAngleDegrees = WhipConfig.SweepAngleDegrees;
 	Config.ReferenceThrowSpeed = ReferenceWhipThrowSpeed;
 	Config.ComponentRopeLength = RopeLength;
+	Config.FullSimInitialCurveFraction = WhipConfig.FullSimInitialCurveFraction;
+	Config.FullSimStraightenTimeFraction = WhipConfig.FullSimStraightenTimeFraction;
 	// Pass the component settings through so the CPU, the GPU and the preview all use the same aim-hit
 	// endpoint envelope and direction bias.
 	Config.AimHitRootSolverFraction = WhipConfig.AimHitRootSolverFraction;

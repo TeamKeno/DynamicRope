@@ -263,6 +263,14 @@ struct FRopeWhipConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg", DisplayName = "Sweep Angle"))
 	float SweepAngleDegrees = 180.0f;
 
+	/** Full Simulation only: initial one-sided C-shape amplitude as a fraction of the guide length. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Full Simulation", meta = (ClampMin = "0.0", ClampMax = "0.35", DisplayName = "Initial Curve"))
+	float FullSimInitialCurveFraction = 0.12f;
+
+	/** Full Simulation only: normalized whip time at which the initial C shape becomes exactly straight. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Full Simulation", meta = (ClampMin = "0.05", ClampMax = "1.0", DisplayName = "Straighten At"))
+	float FullSimStraightenTimeFraction = 0.50f;
+
 	/**
 	 * The fraction of the rope length at the hand end handed to the solver during an aim-hit flight.
 	 * At 0 the central spline governs right up to the hand.

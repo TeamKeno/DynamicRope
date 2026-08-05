@@ -73,6 +73,14 @@ float ResolveOrdinaryFullyGuidedEnd(float NormalizedTime, float GuidedEnd)
 	return FMath::Lerp(1.0f, GuidedEnd, RopeMath::SmoothStep(NormalizedTime));
 }
 
+float ResolveFullSimCurveWeight(float NormalizedTime, const FRopeWhipGuide::FConfig& Config)
+{
+	const float StraightenTime = FMath::Clamp(
+		Config.FullSimStraightenTimeFraction, KINDA_SMALL_NUMBER, 1.0f);
+	return 1.0f - RopeMath::SmoothStep(
+		FMath::Clamp(NormalizedTime / StraightenTime, 0.0f, 1.0f));
+}
+
 int32 ResolveLastGuidedNode(int32 LastNode, float InfluenceEnd)
 {
 	if (LastNode < 1)
@@ -250,9 +258,9 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 		return;
 	}
 
-	// An ordinary whip starts as one continuous straight guide, including the future solver-owned tail.
-	// This discards the old hanging or wrapped pose once, before the tail is released gradually by Advance.
-	// An aim hit keeps its separate endpoint-envelope contract and blends both ends with the solver.
+	// Full Simulation starts on its initial C-shaped guide, including the future solver-owned tail.
+	// Advance removes that curvature by the configured normalized time while releasing the tail gradually.
+	// An aim hit keeps its separate straight endpoint-envelope contract.
 	const float GuidedEnd = FMath::Clamp(Config.GuidedLength, 0.05f, 1.0f);
 	const float InfluenceEnd = bHasAimTarget ? ResolveGuideBlendEnd(GuidedEnd, Config) : 1.0f;
 	const int32 LastGuidedNode = ResolveLastGuidedNode(LastNode, InfluenceEnd);
@@ -277,10 +285,12 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 		const float S = static_cast<float>(i) / static_cast<float>(LastNode);
 		const float GuideWeight = bHasAimTarget ? AimGuideEnvelope(S, GuidedEnd, Config) : 1.0f;
 		const FVector Target = GuideTargets[i];
-		const FVector Position = GuideWeight > KINDA_SMALL_NUMBER
-			? BlendOnStraightGuide(
-				Sim.Positions[i], Target, GuideOrigin, GuideDirection, GuideWeight)
-			: Sim.Positions[i];
+		const FVector Position = bHasAimTarget
+			? (GuideWeight > KINDA_SMALL_NUMBER
+				? BlendOnStraightGuide(
+					Sim.Positions[i], Target, GuideOrigin, GuideDirection, GuideWeight)
+				: Sim.Positions[i])
+			: Target;
 		Sim.Positions[i] = Position;
 		Sim.PrevPositions[i] = Position;
 		CurrentTargetsThisFrame[i] = Position;
@@ -319,6 +329,7 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 	Elapsed += DeltaTime;
 	const float Duration = ResolveGuideDuration(Config, GuideThrowSpeed);
 	const float T = FMath::Clamp(Elapsed / Duration, 0.0f, 1.0f);
+	const float PreviousT = FMath::Clamp((Elapsed - DeltaTime) / Duration, 0.0f, 1.0f);
 	const int32 LastNode = Sim.Num() - 1;
 	// A value of one intentionally keeps the whole rope hard-guided until the flight guide ends.
 	// Do not silently reduce it: doing so creates a moving solver/guide boundary in the tail.
@@ -353,6 +364,10 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 	const FVector PreviousGuideOrigin = PreviousTargets.Num() > 0
 		? PreviousTargets[0]
 		: CurrentGuideOrigin;
+	const bool bCurrentFullSimCurve = !bHasAimTarget &&
+		ResolveFullSimCurveWeight(T, Config) > KINDA_SMALL_NUMBER;
+	const bool bPreviousFullSimCurve = !bHasAimTarget &&
+		ResolveFullSimCurveWeight(PreviousT, Config) > KINDA_SMALL_NUMBER;
 
 	// This computes the mask and the debug data alone; the actual write is performed by ApplyToSim on the CPU path or
 	// by the GPU override pass, which consume the same products, meaning the current and previous targets and the mask.
@@ -383,14 +398,19 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 		const FVector PreviousGuide = PreviousTargets.IsValidIndex(i)
 			? PreviousTargets[i]
 			: CurrentGuide;
-		// Preserve the taper as longitudinal influence on one coherent line in both modes. Directly
-		// blending the 3D positions here is what forms a visible hill when the weight varies by node.
-		CurrentTargetsThisFrame[i] = BlendOnStraightGuide(
-			Sim.Positions[i], CurrentGuide,
-			CurrentGuideOrigin, CurrentGuideDirection, GuideWeight);
-		PrevTargetsThisFrame[i] = BlendOnStraightGuide(
-			Sim.PrevPositions[i], PreviousGuide,
-			PreviousGuideOrigin, PreviousGuideDirection, GuideWeight);
+		// Full Simulation follows the actual C target while curvature is active. Once it reaches zero,
+		// switch back to longitudinal-only blending so every guided node is exactly collinear. Assisted
+		// always uses that straight path to preserve its target alignment.
+		CurrentTargetsThisFrame[i] = bCurrentFullSimCurve
+			? FMath::Lerp(Sim.Positions[i], CurrentGuide, GuideWeight)
+			: BlendOnStraightGuide(
+				Sim.Positions[i], CurrentGuide,
+				CurrentGuideOrigin, CurrentGuideDirection, GuideWeight);
+		PrevTargetsThisFrame[i] = bPreviousFullSimCurve
+			? FMath::Lerp(Sim.PrevPositions[i], PreviousGuide, GuideWeight)
+			: BlendOnStraightGuide(
+				Sim.PrevPositions[i], PreviousGuide,
+				PreviousGuideOrigin, PreviousGuideDirection, GuideWeight);
 
 		if (GuidedNodesThisFrame.IsValidIndex(i))
 		{
@@ -452,6 +472,8 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 	PreviewGuidedMask.SetNumZeroed(Sim.Num());
 	const FVector GuideOrigin = GuideTargets[0];
 	const FVector GuideDirection = ResolveStraightGuideDirection(GuideTargets, GuideForward);
+	const bool bFullSimCurve = !bHasAimTarget &&
+		ResolveFullSimCurveWeight(NextT, Config) > KINDA_SMALL_NUMBER;
 	for (int32 i = 1; i <= LastGuidedNode; ++i)
 	{
 		if (!GuideTargets.IsValidIndex(i) ||
@@ -470,8 +492,10 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 		}
 
 		const FVector Target = GuideTargets[i];
-		OutTargets[i] = BlendOnStraightGuide(
-			Sim.Positions[i], Target, GuideOrigin, GuideDirection, GuideWeight);
+		OutTargets[i] = bFullSimCurve
+			? FMath::Lerp(Sim.Positions[i], Target, GuideWeight)
+			: BlendOnStraightGuide(
+				Sim.Positions[i], Target, GuideOrigin, GuideDirection, GuideWeight);
 		PreviewGuidedMask[i] = 1;
 	}
 
@@ -536,9 +560,10 @@ void FRopeWhipGuide::BuildGuideTargets(float NormalizedTime, int32 LastGuidedNod
 		Up = FVector::UpVector;
 	}
 
-	// An Assisted line is rebuilt from the live hand pin. Translating a line that was built at the throw
-	// origin would move it parallel to itself and make it miss the fixed aim hit as the hand animates.
-	const FVector HandPos = bHasAimTarget && Sim.bStartPinned ? Sim.StartPinTarget : Origin;
+	// Rebuild both guide modes from the live hand pin. Keeping Full Simulation at the throw-time Origin
+	// while node zero follows StartPinTarget makes the final spacing clamp bridge two different origins,
+	// bending an otherwise straight guide as the hand animation moves.
+	const FVector HandPos = Sim.bStartPinned ? Sim.StartPinTarget : Origin;
 	const float GuidedEnd = FMath::Clamp(Config.GuidedLength, 0.05f, 1.0f);
 	const int32 DesiredPointCount = FMath::Clamp(LastGuidedNode + 1, 1, Sim.Num());
 	const int32 RawSampleCount = FMath::Max(DesiredPointCount * 4, 16);
@@ -572,6 +597,23 @@ void FRopeWhipGuide::BuildGuideTargets(float NormalizedTime, int32 LastGuidedNod
 	RopeMath::BuildWhipGuideRawPoints(HandPos, GuideDirection, LockedAimDir, bHasAimTarget, T,
 		GuideLength, InheritedDrift, AimSteerStartAlpha, AimLockAlpha,
 		Config.AimHitDirectionBias, RawSampleCount, RawPoints);
+	if (!bHasAimTarget && RawPoints.Num() >= 2)
+	{
+		// A shallow one-sided bow gives Full Simulation a small C silhouette at the throw boundary.
+		// Both endpoints stay on the rotating baseline, so at T=0 the free end remains opposite AimDir.
+		// The bow fades to exactly zero at StraightenTime, after which this is the ordinary straight guide.
+		const float CurveWeight = ResolveFullSimCurveWeight(T, Config);
+		const float CurveAmplitude = GuideLength *
+			FMath::Clamp(Config.FullSimInitialCurveFraction, 0.0f, 0.35f) * CurveWeight;
+		const FVector CurveAxis = ProjectAxisOffAim(SweepUp, GuideDirection, GuideUp);
+		for (int32 SampleIndex = 1; SampleIndex + 1 < RawPoints.Num(); ++SampleIndex)
+		{
+			const float RopeAlpha = static_cast<float>(SampleIndex) /
+				static_cast<float>(RawPoints.Num() - 1);
+			const float Bow = 4.0f * RopeAlpha * (1.0f - RopeAlpha);
+			RawPoints[SampleIndex] += CurveAxis * (CurveAmplitude * Bow);
+		}
+	}
 
 	ResampleGuideByNodeSpacing(RawPoints, Sim.SegmentLength, DesiredPointCount, OutTargets);
 }
