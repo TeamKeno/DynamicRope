@@ -923,6 +923,77 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 		? ResolveAimGuideHitWorld(Prepared.ThrowContext)
 		: FVector::ZeroVector;
 
+	// A throw into open space re-draws its guide line every frame from the live hand toward the
+	// endpoint fixed at the throw. The preview's stored line is anchored at the throw-time origin, and
+	// nodes interpolating toward it while the wielder moves head for a spot the hand has already
+	// passed — the rope reads as being yanked backwards. The endpoint itself never moves: only the
+	// hand end of the line follows.
+	const FVector FreeHandLive = (bFree && Sim.bStartPinned)
+		? Sim.StartPinTarget
+		: Prepared.ThrowContext.Origin;
+
+	// The open-space endpoint is not a fixed point but the rope pulled taut along the aim ray: the
+	// furthest point on the input-frame ray still within rope reach of the live hand, re-resolved
+	// every frame and clamped by the world blocker. A stationary wielder keeps the throw-time
+	// endpoint exactly; running forward extends the flight along the ray, so the thrown rope keeps
+	// its momentum instead of dying at the aimed spot and dropping; and running away shortens it —
+	// the rope simply cannot reach farther than its length from the hand. The line therefore lands
+	// taut, and slack only remains when the ray is blocked, which is exactly when the droop below
+	// takes over.
+	FVector FreeEndpointLive = ArcTipW;
+	if (bFree)
+	{
+		const FVector RayOrigin = Prepared.ThrowContext.Origin;
+		const FVector RayDir = RopeMath::SafeNormalOr(ArcTipW - RayOrigin, Prepared.ThrowContext.FrameForward);
+		float TautDistance = FRopeAimTargeting::ResolveRayLengthForReach(
+			RayOrigin, RayDir, FreeHandLive, Sim.RopeLength);
+		if (TautDistance <= KINDA_SMALL_NUMBER)
+		{
+			// The hand strayed farther from the ray than the rope is long (or the reach degenerated):
+			// no ray point is reachable, so keep the throw-time endpoint and let the landing solve
+			// resolve the overstretch.
+			TautDistance = static_cast<float>((ArcTipW - RayOrigin).Size());
+		}
+		FreeEndpointLive = FRopeAimTargeting::ResolveOpenSpaceThrowEndpoint(MakeAimQueryContext(),
+			RayOrigin, RayDir, TautDistance, FMath::Max(Radius, 1.0f));
+	}
+
+	// Whatever line length the taut endpoint could not restore — it is shorter than the rope only
+	// when the ray was world-blocked — is laid in as a parabolic droop, deepest mid-line and zero at
+	// the hand and the endpoint. A compressed straight line cannot hold its slack: the equality
+	// distance constraints fold the free end back toward the pinned hand as it falls, which reads as
+	// the rope being dragged to the wielder instead of dropping at the guide spot. With the droop the
+	// landed shape is already length-feasible and the tip simply falls from the endpoint.
+	float FreeSagDepth = 0.0f;
+	if (bFree)
+	{
+		FreeSagDepth = RopeMath::ComputeFreeGuideSagDepth(
+			static_cast<float>((FreeEndpointLive - FreeHandLive).Size()), Sim.RopeLength);
+		// Ramped by the eased time once more (the node interpolation applies it again below): the
+		// flight shows only a modest slack and the full drape lays down as the rope arrives, at about
+		// free-fall speed. Without this a running wielder's shrinking line drops a deep droop in
+		// mid-flight, and the floor clamp then holds the rope's belly against the ground for the rest
+		// of the flight — reading as the rope suddenly sticking flat to the floor. At landing the
+		// eased time is one, so the length-feasible landing shape is unchanged.
+		FreeSagDepth *= EasedAlpha;
+		if (FreeSagDepth > KINDA_SMALL_NUMBER)
+		{
+			// The guided flight solves no collisions, so the droop is clamped against the world: one
+			// downward probe from the line midpoint — the deepest point of the parabola — keeps the
+			// mid-rope from dipping through the floor, with the rope's radius of clearance.
+			const FVector LineMid = (FreeHandLive + FreeEndpointLive) * 0.5f;
+			const float SagClearance = FMath::Max(Radius, 1.0f);
+			FVector SagBlockPoint = FVector::ZeroVector;
+			float SagBlockDistance = 0.0f;
+			if (TraceWorldAimBlocker(LineMid,
+				LineMid - FVector::UpVector * (FreeSagDepth + SagClearance),
+				SagBlockPoint, SagBlockDistance))
+			{
+				FreeSagDepth = FMath::Max(SagBlockDistance - SagClearance, 0.0f);
+			}
+		}
+	}
+
 	SimFrame.OverrideFrame.EnsureSize(Sim.Num());
 	for (int32 NodeIndex = 0; NodeIndex < Sim.Num(); ++NodeIndex)
 	{
@@ -940,19 +1011,23 @@ void URopeComponent::UpdateGuidedThrow(float DeltaTime)
 			continue;
 		}
 
-		// Every other node interpolates from its starting position towards the preview result and has the
+		const float NodeFrac = (LastNode > 0) ? static_cast<float>(NodeIndex) / static_cast<float>(LastNode) : 0.0f;
+
+		// Every other node interpolates from its starting position towards the guide and has the
 		// time-based upward arc offset added.
-		// On an aimed throw only the tip node is re-aimed at the live target position; the rest keep their
-		// preview guide points.
-		const FVector Target = (bTrackAimTarget && NodeIndex == LastNode)
-			? AimTargetWorld
-			: Prepared.ResolveGuidePointWorld(NodeIndex);
+		// On an aimed throw only the tip node is re-aimed at the live target position; the rest keep
+		// their preview guide points. A throw into open space takes its point on the live-hand line
+		// instead (see FreeHandLive above).
+		const FVector Target = bFree
+			? FMath::Lerp(FreeHandLive, FreeEndpointLive, NodeFrac)
+				- FVector::UpVector * (FreeSagDepth * 4.0f * NodeFrac * (1.0f - NodeFrac))
+			: ((bTrackAimTarget && NodeIndex == LastNode)
+				? AimTargetWorld
+				: Prepared.ResolveGuidePointWorld(NodeIndex));
 		const FVector Start = GuidedThrowState.StartPositions.IsValidIndex(NodeIndex)
 			? GuidedThrowState.StartPositions[NodeIndex]
 			: Sim.Positions[NodeIndex];
 		FVector Position = FMath::Lerp(Start, Target, EasedAlpha);
-
-		const float NodeFrac = (LastNode > 0) ? static_cast<float>(NodeIndex) / static_cast<float>(LastNode) : 0.0f;
 		Position += FVector::UpVector * (ArcHeight * ArcT * NodeFrac);
 
 		SimFrame.OverrideFrame.SetPosition(NodeIndex, Position, /*bZeroVelocity*/ true);

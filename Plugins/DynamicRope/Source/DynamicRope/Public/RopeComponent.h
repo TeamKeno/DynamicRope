@@ -78,6 +78,8 @@ class DYNAMICROPE_API URopeComponent : public UMeshComponent
 	friend struct FRopeComponentRefactorTestSeam;
 	// Test seam: reproduces the Wielder input/pull lifecycle and the self-wrap gate without a world.
 	friend struct FRopeWielderComponentTestSeam;
+	// Test seam: drives the open-space guided throw against a moving hand pin without a world.
+	friend struct FRopeFreeGuidedThrowTestSeam;
 #endif
 
 public:

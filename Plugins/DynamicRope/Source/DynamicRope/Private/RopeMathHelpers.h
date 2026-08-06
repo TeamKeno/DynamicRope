@@ -105,6 +105,23 @@ namespace RopeMath
 		return HeadNodeIndex;
 	}
 
+	/**
+	 * The downward droop laid into the open-space guide when the hand-to-endpoint line is shorter than
+	 * the rope. Handing the solver a compressed straight line at landing folds the free end back toward
+	 * the pinned hand as the slack collapses, so the surplus length is carried as a parabolic sag whose
+	 * arc length approximates the rope length: L ~ D + 8h^2/(3D), solved for h. Zero when the line
+	 * covers the full rope, and naturally bounded at about 0.31 x rope length.
+	 */
+	inline float ComputeFreeGuideSagDepth(float LineDist, float RopeLength)
+	{
+		const float Slack = RopeLength - LineDist;
+		if (LineDist <= KINDA_SMALL_NUMBER || Slack <= 0.0f)
+		{
+			return 0.0f;
+		}
+		return FMath::Sqrt(3.0f * LineDist * Slack / 8.0f);
+	}
+
 	/** A setter for an optional failure reason out parameter, permitting null. The shared pattern across the preview APIs. */
 	inline void SetPreviewFailureReason(FString* OutFailureReason, const FString& Reason)
 	{
