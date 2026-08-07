@@ -596,7 +596,8 @@ public:
 
 	/**
 	 * This frame's pull sample: the direction to the first hand-side anchor, and the authoritative
-	 * constraint tension. Recomputed every Wrapped frame.
+	 * constraint tension. Recomputed every Wrapping and Wrapped frame — observed from the wrapping
+	 * state's anchors before the commit, and from the wrap controller after it.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool GetPullSample(FVector& OutDirection, float& OutTension) const
@@ -623,8 +624,8 @@ public:
 	bool IsChainTaut() const { return PullDrive.bChainTaut; }
 
 	/** This frame's tether overshoot (cm): straight-line hand-to-anchor distance minus the available rope
-	 *  length, clamped at 0. Computed every Wrapped frame even with the tether off. Useful for game
-	 *  reactions such as pulling the wielder or detecting that they have left the ground. */
+	 *  length, clamped at 0. Computed every Wrapping and Wrapped frame even with the tether off. Useful
+	 *  for game reactions such as pulling the wielder or detecting that they have left the ground. */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	float GetTetherOvershoot() const { return LengthConstraintState.LastViolation; }
 
@@ -1728,9 +1729,21 @@ private:
 	 *  the frame there. */
 	bool HoldWrappedNodesToBone(float DeltaTime);
 
+	/** Composes PullObservationSim: this frame's hand pin plus the override frame applied on top of Sim,
+	 *  so the observations below read the current frame's boundary rather than the previous solved pose.
+	 *  Shared by the Wrapping and Wrapped branches of Prepare. */
+	void ComposePullObservationSim();
+
+	/** The hand-side (minimum-node) anchor of the in-progress wrap, chosen across FRopeWrappingState's
+	 *  anchor sets; null while nothing is bound. The movement constraint and the Wrapping-phase pull
+	 *  observation share it so both resolve the same material boundary. */
+	const FRopeSurfaceAnchor* FindWrappingHandSideAnchor() const;
+
 	/** 2) Compute the observations: the authoritative constraint tension, the pull sample (ComputePull), and
 	 *  two stages of smoothing (a scalar EMA, then a direction EMA). Traction (3), the release check (4), the
-	 *  debugger and Blueprint all read this shared result. */
+	 *  debugger and Blueprint all read this shared result. Despite the name it also runs every Wrapping
+	 *  frame — sample, taut latch and overshoot come from the wrapping-state hand-side anchor there, so the
+	 *  wielder's tether consumers engage before the commit; steps 3 and 4 stay Wrapped-only. */
 	void UpdateWrappedPullSample(float DeltaTime, const FRopeSimState& ObservationSim);
 
 	/** 3) Apply traction: the tether (λ impulse constraint plus, for a ragdoll, the physics constraint) and the active pull (constant force while taut, or climb-in). */

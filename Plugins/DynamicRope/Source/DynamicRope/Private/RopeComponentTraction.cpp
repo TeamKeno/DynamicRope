@@ -57,6 +57,27 @@ float URopeComponent::GetMaxTension() const
 
 #pragma region Wrapped_Pull_Sampling_And_Application
 
+void URopeComponent::ComposePullObservationSim()
+{
+	// The observation view: this frame's hand pin plus the override frame applied on top of Sim, so the
+	// pull and tether observations read the current boundary rather than the previous frame's solved
+	// pose. The free nodes inside it may still be a GPU mirror; the movement hard constraint reads the
+	// live CPU binding rather than this view.
+	PullObservationSim = Sim;
+	if (PullObservationSim.Positions.IsValidIndex(0))
+	{
+		PullObservationSim.Positions[0] = Sim.StartPinTarget;
+		if (PullObservationSim.PrevPositions.IsValidIndex(0))
+		{
+			PullObservationSim.PrevPositions[0] = Sim.StartPinTarget;
+		}
+	}
+	if (SimFrame.OverrideFrame.HasAny())
+	{
+		SimFrame.OverrideFrame.ApplyToSim(PullObservationSim);
+	}
+}
+
 void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimState& ObservationSim)
 {
 	// Gameplay tension is the material-length reaction, not delayed XPBD segment strain.
@@ -65,7 +86,23 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 
 	// Always produce the pull sample: the debugger and Blueprint observe it, and traction and release take it as shared input. The direction follows the first straight leg, so it goes around corners.
 	PullDrive.LastPullSample = FRopePullSample();
-	WrapController.ComputePull(ObservationSim, HoldConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
+	if (Phase == ERopePhase::Wrapping)
+	{
+		// Before the commit the anchors still live in the wrapping state, so the hand-side anchor is
+		// chosen there and fed to the shared walk — the same boundary BuildWielderMovementConstraint
+		// resolves. This is what lets the wielder's tether consumers engage while the rope is winding.
+		if (const FRopeSurfaceAnchor* HandAnchor = FindWrappingHandSideAnchor())
+		{
+			FRopeWrapController::ComputePullFromAnchor(
+				ObservationSim, HandAnchor->NodeIndex,
+				HandAnchor->Bone.IsNone() ? WrappingPhase.State.BoneName : HandAnchor->Bone,
+				HoldConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
+		}
+	}
+	else
+	{
+		WrapController.ComputePull(ObservationSim, HoldConfig.PullBendThresholdDeg, PullDrive.LastPullSample);
+	}
 
 	// Taut is geometry, not a prerequisite XPBD load. Prefer the same live hand/anchor
 	// material boundary used by movement authority. This removes the circular dependency
@@ -96,6 +133,15 @@ void URopeComponent::UpdateWrappedPullSample(float DeltaTime, const FRopeSimStat
 	const bool bLiveBoundaryTaut = bHasLiveConstraint
 		&& LiveDistance >= FMath::Max(0.0f, LiveConstraint.MaxDistance - LiveSlackAllowance)
 		&& bSagTaut;
+
+	// During Wrapping the tether solve (UpdateConstraintTether) does not run, so the overshoot behind
+	// GetTetherOvershoot — which gates the wielder's ground exit — is refreshed here from the same live
+	// boundary. Once Wrapped, the tether solve is the authority and overwrites it every frame.
+	if (Phase == ERopePhase::Wrapping && bHasLiveConstraint)
+	{
+		LengthConstraintState.LastViolation =
+			FMath::Max(LiveDistance - LiveConstraint.MaxDistance, 0.0f);
+	}
 
 	// Legacy/self-wrap fallback still uses sag + chord geometry. SegmentTension is deliberately
 	// excluded from gameplay taut; it remains only as a legacy analytic-path contamination guard.

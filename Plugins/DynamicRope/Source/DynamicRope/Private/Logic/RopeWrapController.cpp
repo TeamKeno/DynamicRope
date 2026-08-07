@@ -234,9 +234,17 @@ bool FRopeWrapController::ComputePull(const FRopeSimState& Sim, float BendThresh
 		}
 	}
 
+	return ComputePullFromAnchor(Sim, AnchorNode, AnchorBone, BendThresholdDeg, Out);
+}
+
+bool FRopeWrapController::ComputePullFromAnchor(
+	const FRopeSimState& Sim, int32 AnchorNode, FName AnchorBone,
+	float BendThresholdDeg, FRopePullSample& Out)
+{
+	Out = FRopePullSample();
 	// An anchor at node 0, which is the hand pin itself, leaves no segment on the hand side and therefore
-	// no pull.
-	if (AnchorNode <= 0)
+	// no pull. The range check guards external callers; the wrap-state path above validated it already.
+	if (AnchorNode <= 0 || !Sim.Positions.IsValidIndex(AnchorNode))
 	{
 		return false;
 	}

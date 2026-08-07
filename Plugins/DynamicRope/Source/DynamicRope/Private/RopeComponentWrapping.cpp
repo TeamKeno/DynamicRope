@@ -79,6 +79,35 @@ namespace
 
 #pragma region Wrapping_Public_API
 
+const FRopeSurfaceAnchor* URopeComponent::FindWrappingHandSideAnchor() const
+{
+	// The lowest node index across every anchor set the wrapping phase maintains — primaries, secondary
+	// seeds and the latch anchor — is the hand-side material boundary of the in-progress wrap. The
+	// movement constraint and the Wrapping-phase pull observation both resolve against it.
+	const FRopeSurfaceAnchor* FirstAnchor = nullptr;
+	auto ConsiderAnchor = [this, &FirstAnchor](const FRopeSurfaceAnchor& Anchor)
+	{
+		if (Anchor.NodeIndex < 0 || !Sim.Positions.IsValidIndex(Anchor.NodeIndex))
+		{
+			return;
+		}
+		if (!FirstAnchor || Anchor.NodeIndex < FirstAnchor->NodeIndex)
+		{
+			FirstAnchor = &Anchor;
+		}
+	};
+	for (const FRopeSurfaceAnchor& Anchor : WrappingPhase.State.Anchors)
+	{
+		ConsiderAnchor(Anchor);
+	}
+	for (const FRopeSurfaceAnchor& Anchor : WrappingPhase.State.SecondarySeedAnchors)
+	{
+		ConsiderAnchor(Anchor);
+	}
+	ConsiderAnchor(WrappingPhase.State.LatchAnchor);
+	return FirstAnchor;
+}
+
 bool URopeComponent::BuildWielderMovementConstraint(
 	FRopeWielderMovementConstraint& OutConstraint,
 	float PendingReelDeltaTime) const
@@ -95,31 +124,11 @@ bool URopeComponent::BuildWielderMovementConstraint(
 	const USceneComponent* StateMesh = nullptr;
 	FName StateBone = NAME_None;
 
-	auto ConsiderAnchor = [this, &FirstAnchor](const FRopeSurfaceAnchor& Anchor)
-	{
-		if (Anchor.NodeIndex < 0 || !Sim.Positions.IsValidIndex(Anchor.NodeIndex))
-		{
-			return;
-		}
-		if (!FirstAnchor || Anchor.NodeIndex < FirstAnchor->NodeIndex)
-		{
-			FirstAnchor = &Anchor;
-		}
-	};
-
 	if (Phase == ERopePhase::Wrapping)
 	{
 		StateMesh = WrappingPhase.State.Mesh.Get();
 		StateBone = WrappingPhase.State.BoneName;
-		for (const FRopeSurfaceAnchor& Anchor : WrappingPhase.State.Anchors)
-		{
-			ConsiderAnchor(Anchor);
-		}
-		for (const FRopeSurfaceAnchor& Anchor : WrappingPhase.State.SecondarySeedAnchors)
-		{
-			ConsiderAnchor(Anchor);
-		}
-		ConsiderAnchor(WrappingPhase.State.LatchAnchor);
+		FirstAnchor = FindWrappingHandSideAnchor();
 	}
 	else
 	{
@@ -127,7 +136,14 @@ bool URopeComponent::BuildWielderMovementConstraint(
 		StateBone = WrapController.State.BoneName;
 		for (const FRopeSurfaceAnchor& Anchor : WrapController.State.Anchors)
 		{
-			ConsiderAnchor(Anchor);
+			if (Anchor.NodeIndex < 0 || !Sim.Positions.IsValidIndex(Anchor.NodeIndex))
+			{
+				continue;
+			}
+			if (!FirstAnchor || Anchor.NodeIndex < FirstAnchor->NodeIndex)
+			{
+				FirstAnchor = &Anchor;
+			}
 		}
 	}
 

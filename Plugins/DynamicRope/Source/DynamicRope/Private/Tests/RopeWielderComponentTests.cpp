@@ -222,6 +222,12 @@ struct FRopeWielderComponentTestSeam
 		Rope.WrapController.State.Mesh = WrappedComponent;
 	}
 
+	static void ForceWrappingPhase(URopeComponent& Rope, const USceneComponent* CandidateMesh)
+	{
+		Rope.Phase = ERopePhase::Wrapping;
+		Rope.ContactTracker.CandidateMesh = CandidateMesh;
+	}
+
 	static bool IsWielderTetherActive(const URopeWielderComponent& Wielder)
 	{
 		return Wielder.IsWielderTetherActive();
@@ -1677,6 +1683,34 @@ bool FRopeWielderStaticSelfWrapIsNotTetherTest::RunTest(const FString& Parameter
 	FRopeWielderComponentTestSeam::ForceStaticSelfWrap(*Rope, StaticWrappedComponent);
 
 	TestFalse(TEXT("wrapping any component owned by the wielder is a self-wrap, not an external tether"),
+		FRopeWielderComponentTestSeam::IsWielderTetherActive(*Wielder));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderWrappingTetherActiveTest,
+	"DynamicRope.Wielder.Movement.WrappingCountsAsExternalTether",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderWrappingTetherActiveTest::RunTest(const FString& Parameters)
+{
+	// An in-progress wrap already clamps the wielder through the hand-side hard boundary, so the
+	// tether gate accepts Wrapping. The target share is a Wrapped-phase observation and stays at its
+	// default of 1 here, which must not block the gate; a wrap forming on the wielder's own actor is
+	// still a self-wrap, read from the capture candidate because the wrap state has not committed.
+	AActor* Owner = NewObject<AActor>();
+	AActor* Other = NewObject<AActor>();
+	URopeComponent* Rope = NewObject<URopeComponent>(Owner);
+	URopeWielderComponent* Wielder = NewObject<URopeWielderComponent>(Owner);
+	Wielder->Rope = Rope;
+
+	USceneComponent* ExternalMesh = NewObject<USceneComponent>(Other);
+	FRopeWielderComponentTestSeam::ForceWrappingPhase(*Rope, ExternalMesh);
+	TestTrue(TEXT("a wrap in progress on another actor is already an external tether"),
+		FRopeWielderComponentTestSeam::IsWielderTetherActive(*Wielder));
+
+	USceneComponent* OwnMesh = NewObject<USceneComponent>(Owner);
+	FRopeWielderComponentTestSeam::ForceWrappingPhase(*Rope, OwnMesh);
+	TestFalse(TEXT("a wrap forming on the wielder's own actor is a self-wrap, not an external tether"),
 		FRopeWielderComponentTestSeam::IsWielderTetherActive(*Wielder));
 	return true;
 }

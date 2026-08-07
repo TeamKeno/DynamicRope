@@ -476,25 +476,36 @@ void URopeWielderComponent::UpdatePullGaugeWidget()
 
 bool URopeWielderComponent::IsWielderTetherActive() const
 {
-	if (!Rope || Rope->GetPhase() != ERopePhase::Wrapped)
+	if (!Rope)
+	{
+		return false;
+	}
+	const ERopePhase RopePhase = Rope->GetPhase();
+	if (RopePhase != ERopePhase::Wrapped && RopePhase != ERopePhase::Wrapping)
 	{
 		return false;
 	}
 	// Only while the wielder actually receives a tether share. If this frame's effective share, whether
 	// the inverse-mass ratio of the lambda solve or the binary result of the drag test, is entirely the
 	// target's, the wielder is a free end and swing and ground-exit responses are meaningless.
-	if (Rope->GetEffectiveTetherTargetShare() >= 1.0f - KINDA_SMALL_NUMBER)
+	// The share is a Wrapped-phase observation — during Wrapping neither the lambda solve nor the drag
+	// test runs, and the hand-side hard boundary always clamps the wielder, so no share is consulted.
+	if (RopePhase == ERopePhase::Wrapped &&
+		Rope->GetEffectiveTetherTargetShare() >= 1.0f - KINDA_SMALL_NUMBER)
 	{
 		return false;
 	}
 	// A self-wrap, where the rope wraps its own owner, never gives the wielder a tether share, whatever
-	// kind of component the target is.
-	if (const USceneComponent* WrappedComponent = Rope->GetWrappedComponent())
+	// kind of component the target is. During Wrapping the wrap state has not committed yet, so the
+	// capture candidate stands in for the wrapped component.
+	const USceneComponent* TetherTarget = Rope->GetWrappedComponent();
+	if (!TetherTarget)
 	{
-		if (WrappedComponent->GetOwner() == GetOwner())
-		{
-			return false;
-		}
+		TetherTarget = Rope->GetContactCandidateMesh();
+	}
+	if (TetherTarget && TetherTarget->GetOwner() == GetOwner())
+	{
+		return false;
 	}
 	return true;
 }

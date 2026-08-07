@@ -323,6 +323,17 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 
 	case ERopePhase::Wrapping:
 		UpdateWrapping(DeltaTime);
+		if (Phase == ERopePhase::Wrapping)
+		{
+			// The same observation step the Wrapped tick makes, minus traction and auto-release: the pull
+			// sample, the chain-taut latch and the tether overshoot are refreshed from the wrapping-state
+			// hand-side anchor, so the wielder's tether consumers (hang pose, ground exit, swing air
+			// control) engage while the rope is still winding. On the commit frame UpdateWrapping has
+			// already moved Phase to Wrapped; the previous frame's sample stands for that one frame and
+			// the Wrapped tick takes over next frame.
+			ComposePullObservationSim();
+			UpdateWrappedPullSample(DeltaTime, PullObservationSim);
+		}
 		// Only the nodes the wrapping path has actually reached are pinned by position override and the mass
 		// mask. The solver keeps working the tail beyond the front, which is what lets the strain left over
 		// from Flight resolve during Wrapping.
@@ -349,19 +360,7 @@ void URopeComponent::PrepareSimFrame(float DeltaTime, const TOptional<FVector>& 
 		// frame's solved pose, a separate observation view is composed first from the current hand pin plus
 		// the Hold override. The free nodes inside it may still be a GPU mirror, but the movement hard
 		// constraint reads the live CPU binding rather than this view.
-		PullObservationSim = Sim;
-		if (PullObservationSim.Positions.IsValidIndex(0))
-		{
-			PullObservationSim.Positions[0] = Sim.StartPinTarget;
-			if (PullObservationSim.PrevPositions.IsValidIndex(0))
-			{
-				PullObservationSim.PrevPositions[0] = Sim.StartPinTarget;
-			}
-		}
-		if (SimFrame.OverrideFrame.HasAny())
-		{
-			SimFrame.OverrideFrame.ApplyToSim(PullObservationSim);
-		}
+		ComposePullObservationSim();
 		UpdateWrappedPullSample(DeltaTime, PullObservationSim);
 		ApplyWrappedTraction(DeltaTime);
 		if (CheckWrappedAutoRelease(DeltaTime))

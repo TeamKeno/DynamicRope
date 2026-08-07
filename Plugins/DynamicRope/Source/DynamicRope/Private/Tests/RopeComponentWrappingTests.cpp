@@ -167,6 +167,11 @@ struct FRopeWrappingFallbackTestSeam
 		return Rope.PullDrive.LastPullSample;
 	}
 
+	static void UpdatePullSample(URopeComponent& Rope, float DeltaTime)
+	{
+		Rope.UpdateWrappedPullSample(DeltaTime, Rope.Sim);
+	}
+
 	static void Reel(URopeComponent& Rope, float DeltaTime)
 	{
 		Rope.UpdateReel(DeltaTime);
@@ -352,6 +357,30 @@ bool FRopeCurrentFrameWrappedGeometryTest::RunTest(const FString& Parameters)
 		Rope->IsChainTaut());
 	TestTrue(TEXT("default pull taut is geometry-only and can start its own load"),
 		Rope->IsPullTaut());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWrappingPullObservationTest,
+	"DynamicRope.Component.Wrapping.PullObservedBeforeCommit",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWrappingPullObservationTest::RunTest(const FString& Parameters)
+{
+	// The Wrapping phase observes the same pull the Wrapped tick does — the sample, the chain-taut
+	// latch and the tether overshoot — from the wrapping-state hand-side anchor, so the wielder's
+	// tether consumers (hang pose, ground exit, swing air control) can engage before the commit.
+	USceneComponent* Target = NewObject<USceneComponent>();
+	Target->SetWorldLocation(FVector(20.0f, 0.0f, 0.0f));
+	URopeComponent* Rope = NewObject<URopeComponent>();
+	FRopeWrappingFallbackTestSeam::ConfigureExternalAnchor(*Rope, Target, ERopePhase::Wrapping);
+
+	FRopeWrappingFallbackTestSeam::UpdatePullSample(*Rope, 1.0f / 60.0f);
+	const FRopePullSample& Pull = FRopeWrappingFallbackTestSeam::GetPullSample(*Rope);
+
+	TestTrue(TEXT("pull sample is valid during Wrapping, before the commit"), Pull.bValid);
+	TestEqual(TEXT("the hand-side wrapping anchor is the sample's anchor"), Pull.AnchorNode, 3);
+	TestTrue(TEXT("chain taut is observed during Wrapping via the live boundary"), Rope->IsChainTaut());
+	TestTrue(TEXT("the tether overshoot is observed during Wrapping"), Rope->GetTetherOvershoot() > 0.0f);
 	return true;
 }
 

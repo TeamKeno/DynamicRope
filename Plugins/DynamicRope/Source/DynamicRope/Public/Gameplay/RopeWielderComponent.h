@@ -960,8 +960,9 @@ private:
 	UFUNCTION()
 	void HandleRopePresetApplied(const URopePreset* Preset);
 
-	/** Whether the wielder actually receives a tether share: wrapped, with a valid target share below
-	 *  1, and not a self-wrap. */
+	/** Whether the wielder actually receives a tether share: wrapping or wrapped, and not a self-wrap.
+	 *  While Wrapped the target share must also be below 1; during Wrapping the share is not observed
+	 *  and the hand-side hard boundary always clamps the wielder. */
 	bool IsWielderTetherActive() const;
 
 	/** Switches a walking character to Falling while the wielder's tether share pulls upwards. Called

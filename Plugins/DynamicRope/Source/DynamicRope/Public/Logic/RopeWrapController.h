@@ -65,6 +65,17 @@ public:
 	 */
 	bool ComputePull(const FRopeSimState& Sim, float BendThresholdDeg, FRopePullSample& Out) const;
 
+	/**
+	 * The anchor-independent body of ComputePull: the same leg walk and taut observations, but for a
+	 * caller-chosen hand-side anchor instead of this controller's wrap state. The Wrapping phase uses
+	 * it to observe the pull before the wrap commits — its anchors still live in FRopeWrappingState,
+	 * so the caller selects the hand-side (minimum-node) anchor there and passes it in. Pure data,
+	 * unit-testable, no controller state involved.
+	 */
+	static bool ComputePullFromAnchor(
+		const FRopeSimState& Sim, int32 AnchorNode, FName AnchorBone,
+		float BendThresholdDeg, FRopePullSample& Out);
+
 	/** Unlatches and returns control to the solver. */
 	void Release(ERopeReleaseReason Reason);
 
