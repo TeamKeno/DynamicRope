@@ -694,6 +694,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void SetReelRate(float CmPerSecond);
 
+	/** Current reel speed (cm/s): positive reels in, negative reels out, 0 is idle. The request as set by
+	 *  SetReelRate — some phases hold reeling (see SetReelRate), so a non-zero rate does not guarantee the
+	 *  length is changing this frame; observe GetCurrentRopeLength for that. */
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	float GetReelRate() const { return ReelRate; }
+
 	/** Is the rope asleep — at rest in Free, with the solve skipped? */
 	UFUNCTION(BlueprintPure, Category = "Rope")
 	bool IsSleeping() const { return Throttle.IsAsleep(); }
