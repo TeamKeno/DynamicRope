@@ -364,7 +364,7 @@ bool FRopeSolverTensionTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("tension array sized to segments"), Sim.SegmentTension.Num() == NumNodes - 1);
 
-	// In static equilibrium, tension of segment k = hanging mass × g = (N-1-k) × 980 (node ​​mass 1).
+	// In static equilibrium, tension of segment k = hanging mass × g = (N-1-k) × 980 (node mass 1).
 	const float TopExpected = static_cast<float>(NumNodes - 1) * Gravity;
 	const float Top = Sim.SegmentTension[0];
 	TestTrue(FString::Printf(TEXT("top tension %.0f should be within 50%% of %.0f"), Top, TopExpected),

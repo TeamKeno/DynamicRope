@@ -62,10 +62,11 @@ To run/iterate behavior, open the `.uproject` in the editor and Play.
     `URopeSDFData` baker/factory/asset-definition. **Not** an empty stub.
 - `Source/DynamicRopeProject/` — thin game module (game mode + module boilerplate). Depends only on
   `DynamicRope`.
-- `Plugins/DynamicRope/Docs/PoC/` — design notes (still Korean) defining the post-wrap behavior model.
-  The throwaway PoC *code* (`Source/DynamicRope/{Public,Private}/PoC/`) has been removed; these notes
-  are kept as production design rationale. Code comments no longer cite them — the reasoning that
-  mattered has been inlined in English at the call sites, so don't add new `Docs/PoC` references.
+- `Plugins/DynamicRope/Docs/Documentation.md` — the shipped technical/user documentation. It is hosted
+  externally on the product page, so `Config/FilterPlugin.ini` excludes `/Docs` from the packaged
+  plugin. The old `Docs/PoC/` design notes are gone, as is the throwaway PoC *code*
+  (`Source/DynamicRope/{Public,Private}/PoC/`) — the reasoning that mattered has been inlined in
+  English at the call sites, so don't add new `Docs/PoC` references.
 
 ## Architecture (the big picture)
 
@@ -84,7 +85,7 @@ Free → Flight → Contacting → Wrapping → Wrapped → Releasing → Free
 ```
 
 The hard split — **"during the wrap = physics, after the wrap = data + constraints"** — is the
-performance core of the design (see `Docs/PoC/01_PostWrapModel.md`).
+performance core of the design.
 
 **Physics side (`FRopeXPBDSolver`, `Solver/`)**: position-based XPBD solver operating *only* on
 `FRopeSimState` (a POD chain of particle positions). It has **no UObject dependency** so it stays
@@ -111,14 +112,14 @@ unit-testable without a world:
   skinned bone each frame so the wrap follows animation (returning `false` if the wrapped mesh was
   destroyed, so the caller releases); `Release` hands the nodes back to the solver. `ComputePull`
   derives the pull on the hand-side head anchor (direction + adjacent-segment tension) as pure data;
-  the component consumes it two ways each Wrapped frame: (1) *tether* — default mode `Constraint`
-  (Docs/PoC/05): one tension impulse λ per frame, solved from the whole-chain violation (unclamped
+  the component consumes it two ways each Wrapped frame: (1) *tether* — default mode `Constraint`:
+  one tension impulse λ per frame, solved from the whole-chain violation (unclamped
   chord sum − rest, gated by the taut latch) and applied as an equal/opposite impulse pair to both
   ends, so distribution follows inverse effective mass and neither end can be winched or blown up;
   **ragdoll targets are instead held by an engine physics constraint** (kinematic corner proxy ↔
   wrapped-bone anchor point, spherical distance limit — `UpdatePhysicalTether`, solved by Chaos
   together with the joints per substep). The legacy per-end-servo modes and their knobs were removed
-  once Constraint was validated (Docs/PoC/05 §6 step F). (2) *active pull*
+  once Constraint was validated. (2) *active pull*
   (`URopeComponent::SetActivePull`; `URopeWielderComponent::PullAction` is an **armed toggle** —
   press to arm, engages the moment tension first crosses `PullEngageTension`, playing `PullMontage`
   once if set) — a constant user-set force; if the target is too heavy/anchored the same force pulls

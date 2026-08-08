@@ -527,7 +527,7 @@ struct FRopeResidentSharedResults
 // frame KeyToIndex recheck index relocation safe; Compression is a copy of the cached CpuDist slice, so source re-dequant is not required).
 struct FRopeGlobalSDFCache
 {
-	// VolumeKey (stable identifier) ​​-> global volume index (= SDFVolumes index; header has CpuDist offset).
+	// VolumeKey (stable identifier) -> global volume index (= SDFVolumes index; header has CpuDist offset).
 	TMap<uint64, int32> KeyToIndex;
 	// VolumeKey -> Last referenced RT frame (for rebuild eviction check). A set of keys, such as KeyToIndex.
 	TMap<uint64, uint64> KeyLastUsedFrame;
@@ -1994,7 +1994,7 @@ void FRopeGPUSolver::RunSteps_RenderThread(FRDGBuilder& GraphBuilder, TArray<FRo
 		Prepared.Add(MoveTemp(Entry));
 	}
 
-	// Continuous placement of same permutations (node ​​buckets, GDF) — Minimize PSO switches between solve dispatches.
+	// Continuous placement of same permutations (node buckets, GDF) — Minimize PSO switches between solve dispatches.
 	// Because it is a stable alignment, the step order (= registration order) is maintained within the same key.
 	// A catch-up queue may contain more than one temporal step for a rope. Those steps touch the same
 	// resident UAV and must remain in their original frame order. Ordinary frames still take the PSO sort.

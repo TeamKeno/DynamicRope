@@ -1,33 +1,36 @@
 // Copyright 2026 TeamKeno. All Rights Reserved.
 //
-// XPBD rope solver on the GPU: integrate, then distance, bending and collision constraints.
-// 1 rope = 1 thread group, node = thread. Run the substep x iteration loop with groupshared + barrier.
-// constraint race is removed by coloring: distance=red-black (2 colors), bending(i,i+2)=stride-3 (3 colors).
-// The formula is the same as CPU FRopeXPBDSolver(SolveDistance/SolveBending) (AlphaTilde=compliance/dt^2).
-// red-black is not bit-identical to the CPU's alternating-sweep Gauss-Seidel (convergence only approximation) — the difference is intended.
+// XPBD rope solver on the GPU: integrate, then solve the distance, bending and collision constraints.
+// One rope per thread group, one node per thread; the substep x iteration loop runs on groupshared memory
+// with barriers. Constraint races are removed by coloring: distance is red-black (2 colors), bending
+// (i, i+2) is stride-3 (3 colors). The math matches CPU FRopeXPBDSolver (SolveDistance / SolveBending),
+// with AlphaTilde = compliance / dt^2. Red-black is not bit-identical to the CPU's alternating-sweep
+// Gauss-Seidel — it matches only in convergence, and that difference is intended.
 
 #include "/Engine/Public/Platform.ush"
 
-// path (C++ FRopeXPBDSolveCS::FGDFDim) that incorporates a GDF world collision into a substep constraint. GDF.ush is View UB(ResolvedView)/
-// Because it depends on the LWC/global sampler, it includes Common.ush + SceneTexturesCommon.ush and binds View UB.
-// off permutation (step path without view) does not have this include, so it is compiled as is without view.
+// GDF world collision folded into the substep constraints (the C++ FRopeXPBDSolveCS::FGDFDim permutation).
+// GlobalDistanceFieldShared.ush depends on the View uniform buffer (ResolvedView), on LWC and on the global
+// samplers, so this permutation also includes Common.ush + SceneTexturesCommon.ush and binds View UB.
+// The "off" permutation omits these includes and compiles with no view bindings at all.
 #if ROPE_USE_GDF
 #include "/Engine/Private/Common.ush"
 #include "/Engine/Private/SceneTexturesCommon.ush"
 #include "/Engine/Private/DistanceField/GlobalDistanceFieldShared.ush"
-// world → TranslatedWorld offset(GDF coordinate system).
+// World → TranslatedWorld offset (the GDF coordinate system).
 float3 GDFPreViewTranslation;
-// 1=GDF valid (clipmap>0). If 0, GDF constraint no-op.
+// 1 = the GDF is valid (at least one clipmap). When 0, the GDF constraint is a no-op.
 uint   bWorldGDFValid;
 #endif
 
-// ROPE_MAX_NODES / ROPE_THREADS is defined in C++ ModifyCompilationEnvironment (thread group size == maximum number of nodes).
+// ROPE_MAX_NODES / ROPE_THREADS come from C++ ModifyCompilationEnvironment (thread group size == max nodes).
 
-// collider data model (capsule/SDF structure + Capsules/SDFDistances/SDFVolumes/SDFColliders buffer) +
-// Helper for math/point-query. A shared module that is shared by the solve/detection kernel and can also be reused by other rope shaders.
+// Collider data model (the capsule/SDF structs plus the Capsules/SDFDistances/SDFVolumes/SDFColliders
+// buffers) and the math / point-query helpers. Shared by the solve and detect kernels, and reusable by any
+// other rope shader.
 #include "/Plugin/DynamicRope/Private/RopeColliderCommon.ush"
 
-// FRopeGPUParams 1:1 mirror with GPU (C++). Simultaneous modification on both sides when changing layout. 16 byte alignment.
+// 1:1 mirror of the C++ FRopeGPUParams. Change both sides together when the layout changes; 16-byte aligned.
 struct FRopeGPUParams
 {
 	int   NodeOffset;
@@ -42,35 +45,35 @@ struct FRopeGPUParams
 	int   bStartPinned;
 	// Global index where this rope's capsules start
 	int   CapsuleOffset;
-	// Number of capsules to apply to this rope (if 0, no collision)
+	// Capsule count for this rope; 0 disables capsule collision
 	int   NumCapsules;
-	// rope node thickness
+	// Rope node thickness
 	float CollisionRadius;
 	// Tangential damping [0..1]
 	float Friction;
-	// swept sample spacing (cm)
+	// Swept sample spacing (cm)
 	float SweepStep;
-	// point-sample cap per segment
+	// Point-sample cap per segment
 	int   MaxSweepSamples;
 	// Global start index of this rope's SDF colliders
 	int   SDFColliderOffset;
 	// SDF collider count (0 = no SDF collision)
 	int   NumSDFColliders;
-	// Free end friction multiplier (pinned point=1, end=this value). 1:1 with C++ Pad0 slot.
+	// Friction multiplier along the rope: 1 at the pinned end, this value at the free tip. Reuses the C++ Pad0 slot.
 	float TipFrictionScale;
-	// Number of collision resolution passes per substep (cap in Iters). 1:1 with C++ Pad1 slot.
+	// Collision resolution passes per substep (clamped to Iters). Reuses the C++ Pad1 slot.
 	int   CollisionPasses;
-	// G0: Whether per-node override (target/mass injection) exists.
+	// G0: whether this rope has per-node overrides (target position / mass injection).
 	int   bHasOverrides;
-	// Number of static boxes (OBB) (if 0, there is no box collision). 1:1 with C++ Pad2 slot.
+	// Box (OBB) count; 0 disables box collision. Reuses the C++ Pad2 slot.
 	int   NumBoxes;
-	// static convex (plane set) number (if 0, no convex collision). 1:1 with C++ Pad3 slot.
+	// Convex (plane set) count; 0 disables convex collision. Reuses the C++ Pad3 slot.
 	int   NumConvexes;
-	// Angle-allowed bending: If straightness ≤ this value, straightening force is 0. C++ Pad4 slot reuse.
+	// Angle-tolerant bending: at or below this straightness the straightening force is 0. Reuses the C++ Pad4 slot.
 	float BendReleaseRatio;
-	// If straightness ≥ this value, the straightening force is 100%.
+	// At or above this straightness the straightening force is at full strength.
 	float BendFullRatio;
-	// Strain limiting Maximum stretch ratio (<1=disabled). C++ Pad5 slot reuse.
+	// Strain limiting: maximum stretch ratio (< 1 disables it). Reuses the C++ Pad5 slot.
 	float MaxStretchRatio;
 	int   Pad6;
 	int   Pad7;
@@ -84,47 +87,56 @@ struct FRopeGPUParams
 
 uint NumRopes;
 StructuredBuffer<FRopeGPUParams> Params;
-// --- Override(G0): per-node target/mass calculated by logic phase (GT). If bHasOverrides=0, not referenced (1 dummy).
-// Bits: 1=Pos, 2=Prev (specified — Verlet velocity injection), 4=Prev=Pos(velocity 0), 8=InvMass. 1:1 with C++ ERopeGPUOverride.
+// --- Override (G0): the per-node target / mass computed by the logic phase on the game thread. When
+// bHasOverrides is 0 these are never read (a single dummy element is bound).
+// Bits: 1 = Pos, 2 = Prev (explicit, injects Verlet velocity), 4 = Prev = Pos (zero velocity), 8 = InvMass,
+// 16 = KinematicPath (zero-mass guided node for this dispatch). 1:1 with the C++ ERopeGPUOverride.
 StructuredBuffer<uint>           OverrideFlags;
 StructuredBuffer<float4>         OverridePositions;
 StructuredBuffer<float4>         OverridePrevPositions;
 StructuredBuffer<float>          OverrideInvMass;
-// G0: RW because override persists mass mask.
+// G0: read-write, because the mass mask an override applies is persisted back into the resident buffer.
 RWStructuredBuffer<float>         InvMass;
 // use xyz (w=0)
 RWStructuredBuffer<float4>        Positions;
 // use xyz (w=0)
 RWStructuredBuffer<float4>        PrevPositions;
-// tension readback: Distance λ (convergence impulse) for each segment of the last substep. The caller converts the force to F=max(0,-λ)/h².
-// NumSub=0(override-only) 0 is used for frame (initialized to 0 on load) — the caller does not arm the frame readback.
+// Tension readback: the distance-constraint λ (accumulated impulse) of every segment on the last substep.
+// The caller turns it into a force with F = max(0, -λ) / h².
+// On an override-only frame (NumSub = 0) this stays 0 (zeroed at load) — the caller does not arm the readback.
 RWStructuredBuffer<float>         OutLambdaDist;
 
 groupshared float3 gPos[ROPE_MAX_NODES];
 groupshared float3 gPrev[ROPE_MAX_NODES];
 groupshared float  gInvMass[ROPE_MAX_NODES];
 groupshared float  gPersistentInvMass[ROPE_MAX_NODES];
-// 1 per segment k(node k,k+1)
+// One per segment k (nodes k, k+1)
 groupshared float  gLambdaDist[ROPE_MAX_NODES];
-// 1 per stick k(node k,k+2)
+// One per bending stick k (nodes k, k+2)
 groupshared float  gLambdaBend[ROPE_MAX_NODES];
-// Strain limit activation flag (parallel exceedance check per substep → thread0 serial sweep gate). If there are no excess segments
-// The entire sweep is no-op (ClampToward is all early-return), so even if you skip it, the result is bitwise the same.
+// Strain-limit gate: each substep every thread checks its own segment in parallel and sets this, which gates
+// thread 0's serial sweep. With nothing over-stretched the whole sweep is a no-op (every ClampToward
+// early-returns), so skipping it is bitwise identical to running it.
 groupshared uint   gStrainAny;
 
-// ===== collision stage body (separated from kernel) ==============================================================================
-// The collision pass body of RopeXPBDSolveCS. Gate (active/mass/number) and barrier are owned by the kernel — barrier
-// Uniform execution is essential, so it should not be moved into a divergible function — this contains only the sequential logic of one node.
-// groupshared(gPos/gPrev/gInvMass/gLambdaDist) accesses file scope directly. Writes in the node stage are
-// Limited to self-slot i, writing i/i+1 of the segment (chord) stage blocks the race due to the kernel's two-color+barrier.
+// ===== Collision stage bodies (split out of the kernel) =========================================================
+// These are the bodies of RopeXPBDSolveCS's collision passes. The kernel keeps the gates (active node, mass,
+// collider count) and the barriers: a barrier has to be reached uniformly, so it can never move into a function
+// that may be entered divergently. What lives here is only the straight-line work for a single node.
+// The groupshared arrays (gPos/gPrev/gInvMass/gLambdaDist) are accessed directly at file scope. The node stage
+// writes only its own slot i; the segment (chord) stage writes i and i+1, and the kernel's two-color split plus
+// barriers keep that race-free.
 
-// tangential friction(tension-limit Coulomb): When the tangential relative displacement is capped by μ·(penetration Pen + adjacent tension normal force) → beyond the grip,
-// Sleep. A single model shared by all colliders (SDF/box/convex/capsule/GDF). gLambdaDist(distance constraint λ =
-// rope tension), the grip is proportional to the tension, and the Free end is well released with a MuEff taper. The old static path (box/convex/capsule) was
-// Unconditional viscous damping (gPrev += Tangent*Friction) unconditionally kills tangential movement during contact so that the node is not on the face/edge.
-// Stuck (unable to turn the edge with a slide in the corner and pinned at 90°). Coulomb allows lightly touched nodes to slide freely.
-// SurfDisp = This substep surface displacement (0 if static). Same purpose as CPU FRopeXPBDSolver::ApplyContactFriction (the model is
-// 1:1 with GPU SDF path with Pen+tension proxy — CC.Lambda accumulation is not supported by GPU, so proxy is used).
+// Tangential friction (Coulomb, limited by tension): the tangential relative displacement is capped at
+// μ·(penetration Pen + the normal force from adjacent tension), and past that cap the node slips. One model
+// shared by every collider (capsule/SDF/box/convex/GDF). Because gLambdaDist is the distance-constraint λ,
+// i.e. the rope tension, the grip scales with tension, and the MuEff taper lets the free tip slide easily.
+// The old static path (box/convex/capsule) applied unconditional viscous damping (gPrev += Tangent*Friction),
+// which killed all tangential motion on contact and welded nodes to a face or an edge — a node could not slide
+// around a corner and stayed pinned at 90°. Coulomb instead lets a lightly loaded node slide freely.
+// SurfDisp is this substep's surface displacement (0 for a static collider). Same role as CPU
+// FRopeXPBDSolver::ApplyContactFriction; the GPU substitutes Pen + tension for the CC.Lambda accumulation it
+// cannot do.
 void RopeApplyContactFriction(FRopeGPUParams P, uint i, int N, float3 Normal, float Pen, float3 SurfDisp)
 {
 	const float Friction = clamp(P.Friction, 0.0f, 1.0f);
@@ -135,7 +147,8 @@ void RopeApplyContactFriction(FRopeGPUParams P, uint i, int N, float3 Normal, fl
 	const float3 RelDelta = (gPos[i] - gPrev[i]) - SurfDisp;
 	float3 Tangent = RelDelta - dot(RelDelta, Normal) * Normal;
 
-	// normal force ≈ Pen (external force/weight) + inner component of adjacent distance constraint force (gLambdaDist=tension). Displacement using λ×InvMass.
+	// Normal force ≈ Pen (external load / weight) plus the inward component of the adjacent distance-constraint
+	// force (gLambdaDist = tension), taken as a displacement through λ × InvMass.
 	float3 NetPull = (float3)0;
 	if (i > 0)
 	{
@@ -150,12 +163,12 @@ void RopeApplyContactFriction(FRopeGPUParams P, uint i, int N, float3 Normal, fl
 		if (l1 > 1e-4f) { NetPull += abs(gLambdaDist[i]) * (d1 / l1); }
 	}
 	NetPull *= gInvMass[i];
-	// Only components inside the surface
+	// Keep only the component pressing into the surface
 	const float TensionNormal = max(0.0f, -dot(NetPull, Normal));
 	// Coulomb limit
 	const float MaxSlip = MuEff * (Pen + TensionNormal);
 	const float TLen = length(Tangent);
-	// If you go over the grip, it slips.
+	// Past the grip limit the node slips.
 	if (TLen > MaxSlip && TLen > 1e-6f) { Tangent *= (MaxSlip / TLen); }
 	gPrev[i] += Tangent;
 }
@@ -176,27 +189,31 @@ void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
 	const int    MaxSamples = max(P.MaxSweepSamples, 1);
-	// collider motion start rate for this substep
+	// Start fraction of the collider's frame motion covered by this substep
 	const float  CA0 = (float)s / (float)P.NumSub;
-	// End Ratio
+	// End fraction
 	const float  CA1 = (float)(s + 1) / (float)P.NumSub;
 
 	for (int c = 0; c < P.NumCapsules; ++c)
 	{
 		const FRopeCapsule Cap = Capsules[P.CapsuleOffset + c];
-		// substep sub-pose endpoint (prev->curr linear interpolation). Stationary capsule prev==curr (packing guaranteed) → Same as before.
+		// Sub-posed endpoints for this substep (prev->curr lerp). A static capsule packs prev == curr, so this
+		// collapses to the current pose.
 		const float3 CapAS = lerp(Cap.PrevA.xyz, Cap.A.xyz, CA0);
 		const float3 CapBS = lerp(Cap.PrevB.xyz, Cap.B.xyz, CA0);
 		const float3 CapAE = lerp(Cap.PrevA.xyz, Cap.A.xyz, CA1);
 		const float3 CapBE = lerp(Cap.PrevB.xyz, Cap.B.xyz, CA1);
-		// The previous capsule may have been pushed
+		// A preceding capsule may already have pushed the node
 		const float3 SegB = gPos[i];
-		// Number of samples reflecting relative motion: maximum node movement + capsule end point movement (overestimation is safe — MaxSamples cap).
+		// Sample count covering the relative motion: node travel plus the larger endpoint travel. Overestimating is
+		// safe — MaxSamples caps it.
 		const float  L = distance(SegA, SegB) + max(distance(CapAS, CapAE), distance(CapBS, CapBE));
 		const int    NumSamples = RopeSweepSampleCount(L, SweepStep, MaxSamples);
 
-		// Separation Guard (CPU RopeCollision::IsSweptSeparating / SDF Mirror): Start inside the contact skin and move outside the surface.
-		// Skip re-pin if disconnecting. The starting material point is carried over to the end pose to check the contact point movement, and the end pose is checked for end contact.
+		// Separation guard (mirrors CPU RopeCollision::IsSweptSeparating and the SDF path): if the node starts inside
+		// the contact skin and is genuinely leaving the surface, skip it instead of re-pinning it. The start material
+		// point is carried to the end pose to measure how far the contact point itself moved, and the end pose is
+		// queried to see whether the node is still in contact.
 		{
 			float3 N0; float Pen0; float TSeg0; float3 C0;
 			if (RopeQueryCapsulePoint(CapAS, CapBS, Cap.B.w, SegA, P.CollisionRadius, N0, Pen0, TSeg0, C0))
@@ -217,29 +234,33 @@ void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 
 			float3 Normal; float Pen; float TSeg; float3 Closest;
 			if (RopeQueryCapsulePoint(CapAT, CapBT, Cap.B.w, Pt, P.CollisionRadius, Normal, Pen, TSeg, Closest))
 			{
-				// Carry over the contact material point (TSeg) to the end pose of the substep — move the node along with the surface by the remaining amount of motion.
-				// (corresponding to SDF reconverting the local contact point to the end pose). If it is a stationary capsule, the carryover amount is 0.
+				// Carry the contact material point (TSeg) to the substep's end pose — the node rides the surface for the
+				// remaining motion. (The SDF path does the same by re-projecting its local contact point onto the end pose.)
+				// For a static capsule the carried offset is 0.
 				const float3 ClosestE = lerp(CapAE, CapBE, TSeg);
 				gPos[i] = Pt + (ClosestE - Closest) + Normal * Pen;
 
-				// This substep surface displacement of the material point (frame entire prev->curr displacement * InvDt * FixedDt).
-				// stationary capsule is 0. The normal (inelastic)/tangent (friction) response below is written as shared.
+				// The material point's surface displacement over this substep (whole-frame prev->curr displacement
+				// * InvDt * FixedDt); 0 for a static capsule. Both the inelastic normal response and the tangential friction
+				// below consume it.
 				const float  InvDt = Cap.PrevB.w;
 				const float3 SurfDisp = (lerp(Cap.A.xyz, Cap.B.xyz, TSeg)
 					- lerp(Cap.PrevA.xyz, Cap.PrevB.xyz, TSeg)) * (InvDt * P.FixedDt);
 
-				// Inelastic contact: If push-out creates +N displacement compared to gPrev, it becomes the next substep velocity.
-				// (Deep contact is the first sample Pt==gPrev, so every substep +N*Pen is injected) → Even on the stationary capsule, the node
-				// Splash. *Relative* only removes the outer normal velocity — the surface's own normal motion (bone pushing) is preserved.
+				// Inelastic contact: the push-out adds displacement along +N relative to gPrev, which would become the next
+				// substep's velocity. (In deep contact the first sample is Pt == gPrev, so +N*Pen is injected every substep
+				// and the node would bounce off even a stationary capsule.) Remove only the *relative* outward normal
+				// velocity — the surface's own normal motion, a bone pushing the rope, is preserved.
 				const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, Normal);
 				if (VnOut > 0.0f)
 				{
 					gPrev[i] += Normal * VnOut;
 				}
 				RopeApplyContactFriction(P, i, N, Normal, Pen, SurfDisp);
-				// Accumulation of contact normals for pinch detection (sum/number of unit normals → kernel determines simultaneous contacts in opposite directions).
+				// Accumulate contact normals for pinch detection (sum and count of unit normals; the kernel uses them to
+				// spot simultaneous contacts from opposing directions).
 				Contact.xyz += Normal; Contact.w += 1.0f;
-				// Ends at the first contact of this capsule
+				// Stop at this capsule's first contact
 				break;
 			}
 		}
@@ -247,18 +268,18 @@ void RopeSolveNodeCapsules(FRopeGPUParams P, uint i, int s, int N, inout float4 
 }
 
 // SDF node collision: the same swept structure as the capsule — move the node's path into the collider's
-// local relative frame, cover the sub-poses within one segment, and on the first contact push out after the
-// separation heuristic, then apply the relative response and the tension grip.
-// friction(Coulomb, gLambdaDist consumed). CPU FRopeSDFCollider::QuerySwept/SolveCollisions mirror.
+// local relative frame so a single segment covers both sub-poses, and on the first contact (after the
+// separation heuristic) push out, then apply the relative response and the tension-limited Coulomb friction
+// that consumes gLambdaDist. Mirrors CPU FRopeSDFCollider::QuerySwept and SolveCollisions.
 void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
 	const int    MaxSamples = max(P.MaxSweepSamples, 1);
 	const float  NodeR = P.CollisionRadius;
-	// collider motion start rate for this substep
+	// Start fraction of the collider's frame motion covered by this substep
 	const float  A0 = (float)s / (float)P.NumSub;
-	// End Ratio
+	// End fraction
 	const float  A1 = (float)(s + 1) / (float)P.NumSub;
 
 	for (int sc = 0; sc < P.NumSDFColliders; ++sc)
@@ -266,31 +287,37 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 		const FRopeSDFCollider Col = SDFColliders[P.SDFColliderOffset + sc];
 		const FRopeSDFVolume   Vol = SDFVolumes[Col.VolumeIndex];
 
-		// substep sub-pose(prev->curr interpolation). If it is a stationary bone, prev==curr and interpolation result = current pose.
+		// Sub-pose for this substep (prev->curr interpolation). A static bone has prev == curr, so the interpolation
+		// resolves to the current pose.
 		const float4 RotS = RopeQuatNlerp(Col.PrevRotation, Col.Rotation, A0);
 		const float4 RotE = RopeQuatNlerp(Col.PrevRotation, Col.Rotation, A1);
 		const float3 TrS  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A0);
 		const float3 TrE  = lerp(Col.PrevTranslation.xyz, Col.Translation.xyz, A1);
 		const float3 Scl      = Col.Scale.xyz;
-		// Sign preservation (negative scale of mirroring actors) — RopeColliderCommon.ush's shared helper provides a single source of truth.
+		// Preserve the sign for mirrored actors (negative scale) — RopeColliderCommon.ush owns the shared helper, so
+		// there is a single source of truth.
 		const float3 InvScale = RopeInvScaleSigned(Scl);
 		const float3 ScaleSgn = RopeScaleSign(Scl);
-		// local (baked) distance ↔ world conversion (#3). L0/L1/SDF is local cm, NodeR/Pen is world. Uniform scale assumption
-		// (behavior unchanged at scale 1). Same as CPU FRopeSDFCollider::QuerySwept.
+		// Local (baked) ↔ world distance conversion. L0/L1 and the SDF are local cm, NodeR/Pen are world cm.
+		// Assumes a uniform scale, so behavior is unchanged at scale 1. Same as CPU FRopeSDFCollider::QuerySwept.
 		const float  ScaleScalar = max(max(abs(Scl.x), abs(Scl.y)), abs(Scl.z));
 		const float  LocalNodeR  = NodeR / max(ScaleScalar, 1e-6f);
 
-		// node substep path to collider local relative frame (start=start sub-pose, end=end sub-pose).
-		// Contains all relative motions of node+collider in one segment. InvTransform=(qInv*(P-T))/Scale.
+		// The node's substep path in the collider's local frame (start against the start sub-pose, end against the
+		// end sub-pose), so one segment carries the full relative motion of node and collider together.
+		// InvTransform = (qInv * (P - T)) / Scale.
 		const float3 L0 = RopeQuatRotate(float4(-RotS.xyz, RotS.w), SegA    - TrS) * InvScale;
 		const float3 L1 = RopeQuatRotate(float4(-RotE.xyz, RotE.w), gPos[i] - TrE) * InvScale;
 		const float  RelLen = distance(L0, L1);
 		const int    NumSamples = RopeSweepSampleCount(RelLen, SweepStep, MaxSamples);
 
-		// Separation: If the starting contact (within the L0 band penetration) and the node is exiting *outside* the surface, do not re-pin.
-		// Let go (prevent the contact node from being pinned back to the start of each substep and never dropped). CPU QuerySwept mirror.
-		// BUGFIX: If you only look at the end point, penetration (inside L0 → outside on the other side of L1) is mistaken as separation and passes through the body. Outside L0
-		// Separation is recognized only when the displacement for the gradient is positive → If it is inside (penetrating), the sweep below is blocked at the first contact.
+		// Separation: when the node starts in contact (penetrating the band at L0) and is moving *out* through the
+		// surface, let it go instead of re-pinning it — otherwise a contacting node is dragged back to the start of
+		// every substep and can never leave. Mirrors CPU QuerySwept.
+		// Testing the end point alone would mistake a pass-through (inside at L0, out the far side at L1) for a
+		// separation and let the rope tunnel through the body. A separation is accepted only when the displacement
+		// projects positively onto the outward gradient at L0; a node heading further in is stopped by the sweep
+		// below at its first contact.
 		{
 			const float3 BMn = Vol.LocalMin.xyz - LocalNodeR;
 			const float3 BMx = Vol.LocalMin.xyz + Vol.LocalSize.xyz + LocalNodeR;
@@ -300,10 +327,10 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 				const bool EndOut = any(L1 < BMn) || any(L1 > BMx) || (RopeSDFTrilinear(Vol, L1) >= LocalNodeR);
 				if (EndOut)
 				{
-					// Outer direction unit (local)
-					// Because it is a local space comparison, sign correction is not required (L0/L1 are also in the same mirror local space).
+					// Outward unit direction (local). No sign correction is needed: this comparison happens in local space,
+					// where L0 and L1 live in the same mirrored frame.
 					const float3 OutwardLocal = RopeSDFGradient(Vol, L0);
-					// Only true separations that move outward are omitted.
+					// Skip only genuine separations, i.e. motion that really heads outward.
 					if (dot(L1 - L0, OutwardLocal) > 0.0f) { continue; }
 				}
 			}
@@ -313,27 +340,30 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 		{
 			const float  T  = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
 			const float3 Lp = lerp(L0, L1, T);
-			// Band curl + trilinear + gradient (when penetration) — shared local point query.
+			// Narrow-band cull + trilinear sample + gradient on penetration — the shared local point query.
 			float Dist; float3 NLocal;
 			if (RopeQuerySDFLocal(Vol, Lp, LocalNodeR, Dist, NLocal))
 			{
-				// End sub-pose world normal. The mirror axes must be flipped together to point outward (×1.0 for positive scale).
+				// World normal at the end sub-pose. Mirrored axes have to be flipped along with it for the normal to point
+				// outward (the multiplier is exactly 1 for a positive scale).
 				const float3 NWorld = normalize(RopeQuatRotate(RotE, NLocal * ScaleSgn));
-				const float  Pen = NodeR - Dist * ScaleScalar; // local distance → world penetration(#3)
-				// World contact point (node placement) based on the end sub-pose. World = Rot*(Scale*Local) + Trans.
+				const float  Pen = NodeR - Dist * ScaleScalar; // Local distance to world penetration.
+				// World contact point at the end sub-pose, which is where the node is placed. World = Rot*(Scale*Local) + Trans.
 				const float3 HitWorld = RopeQuatRotate(RotE, Lp * Scl) + TrE;
 				gPos[i] = HitWorld + NWorld * Pen;
 
-				// This substep surface displacement of the contact material point Lp (prev->curr pose frame displacement * InvDt * FixedDt,
-				// 0 if stationary bone). The normal (inelastic)/tangent (friction) response below is written as shared.
+				// Surface displacement of the contact material point Lp over this substep (whole-frame prev->curr pose
+				// displacement * InvDt * FixedDt; 0 for a static bone). Shared by the inelastic normal response and the
+				// tangential friction below.
 				const float  InvDt = Col.PrevTranslation.w;
 				const float3 Wcur  = RopeQuatRotate(Col.Rotation,     Lp * Scl) + Col.Translation.xyz;
 				const float3 Wprev = RopeQuatRotate(Col.PrevRotation, Lp * Scl) + Col.PrevTranslation.xyz;
 				const float3 SurfDisp = (Wcur - Wprev) * (InvDt * P.FixedDt);
 
-				// Inelastic contact: If push-out creates +N displacement compared to gPrev, it becomes the next substep velocity.
-				// (Deep contact is the first sample==gPrev, so every substep +N*Pen is injected) → The node bounces even on the stationary bone.
-				// *Only removes the relative* outer normal velocity — the surface's own normal motion (bone pushing) is preserved.
+				// Inelastic contact: the push-out adds displacement along +N relative to gPrev, which would become the next
+				// substep's velocity. (In deep contact the first sample is gPrev itself, so +N*Pen is injected every substep
+				// and the node would bounce off even a stationary bone.) Remove only the *relative* outward normal
+				// velocity — the surface's own normal motion, a bone pushing the rope, is preserved.
 				const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, NWorld);
 				if (VnOut > 0.0f)
 				{
@@ -343,44 +373,48 @@ void RopeSolveNodeSDFs(FRopeGPUParams P, uint i, int s, int N, inout float4 Cont
 				RopeApplyContactFriction(P, i, N, NWorld, Pen, SurfDisp);
 				// Contact normal accumulation for pinch detection.
 				Contact.xyz += NWorld; Contact.w += 1.0f;
-				// Terminates at first contact of this SDF collider
+				// Stop at this SDF collider's first contact
 				break;
 			}
 		}
 	}
 }
 
-// box node collision(dynamic): OBB — sweep node substep path (gPrev→gPos) with box sub-pose (prev->curr interpolation),
-// Carry over material point from first contact to end pose + push-out + remove *relative* normal velocity + *relative* tangential friction. static box
-// prev=curr (packing guaranteed), so interpolation is abbreviated to the current pose, and SurfDisp=0 → Same as the existing static operation (superset).
-// Corner/edge accuracy normal(RopeQueryBoxPoint) is the key. CPU FRopeBoxCollider::Query/QuerySwept mirror.
+// Box node collision (dynamic OBB): sweep the node's substep path (gPrev → gPos) against the box sub-pose
+// (prev->curr interpolation); on the first contact carry the material point to the end pose, push out, remove
+// the *relative* normal velocity and apply *relative* tangential friction. A static box packs prev == curr,
+// so the interpolation collapses to the current pose and SurfDisp is 0 — a strict superset of the old static
+// path. The accurate corner/edge normal from RopeQueryBoxPoint is what makes this work.
+// Mirrors CPU FRopeBoxCollider::Query and QuerySwept.
 void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
 	const int    MaxSamples = max(P.MaxSweepSamples, 1);
-	// Box motion start rate for this substep
+	// Start fraction of the box's frame motion covered by this substep
 	const float  CA0 = (float)s / (float)P.NumSub;
-	// End Ratio
+	// End fraction
 	const float  CA1 = (float)(s + 1) / (float)P.NumSub;
 
 	for (int c = 0; c < P.NumBoxes; ++c)
 	{
 		const FRopeBox Box = Boxes[c];
 		const float  InvDt = Box.Center.w;
-		// substep sub-pose center/rot(prev->curr interpolation). If static, prev==curr → current pose.
+		// Sub-posed center and rotation for this substep (prev->curr interpolation). Static: prev == curr, so this is
+		// the current pose.
 		const float3 CenterS = lerp(Box.PrevCenter.xyz, Box.Center.xyz, CA0);
 		const float3 CenterE = lerp(Box.PrevCenter.xyz, Box.Center.xyz, CA1);
 		const float4 RotS = RopeQuatNlerp(Box.PrevRot, Box.Rot, CA0);
 		const float4 RotE = RopeQuatNlerp(Box.PrevRot, Box.Rot, CA1);
 
-		// May have been pushed by the preceding collider
+		// A preceding collider may already have pushed the node
 		const float3 SegB = gPos[i];
 		const float  L = distance(SegA, SegB) + distance(CenterS, CenterE);
 		const int    NumSamples = RopeSweepSampleCount(L, SweepStep, MaxSamples);
 
-		// Separation Guard (CPU RopeCollision::IsSweptSeparating / SDF Mirror): Starts inside the contact skin and separates outward.
-		// Omit re-pin if in progress. Check the start contact/material point with the start pose box and the end contact with the end pose box.
+		// Separation guard (mirrors CPU RopeCollision::IsSweptSeparating and the SDF path): if the node starts inside
+		// the contact skin and is genuinely leaving, skip it instead of re-pinning it. The start-pose box supplies the
+		// start contact and its material point; the end-pose box answers whether the node is still in contact.
 		{
 			FRopeBox BoxS = Box; BoxS.Center = float4(CenterS, 0.0f); BoxS.Rot = RotS;
 			float3 N0; float Pen0; float3 C0;
@@ -399,24 +433,27 @@ void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N, inout float4 Con
 		{
 			const float  T = (NumSamples <= 1) ? 1.0f : (float)k / (float)(NumSamples - 1);
 			const float3 Pt = lerp(SegA, SegB, T);
-			// Point question with sub-pose box (center/rot interpolation). Only HalfExtents are reused, prev fields are not referenced.
+			// Point query against the sub-posed box (interpolated center/rotation). Only HalfExtents is reused; the prev
+			// fields are not read.
 			FRopeBox BoxT = Box;
 			BoxT.Center = float4(lerp(CenterS, CenterE, T), 0.0f);
 			BoxT.Rot = RopeQuatNlerp(RotS, RotE, T);
 			float3 Normal; float Pen; float3 Closest;
 			if (RopeQueryBoxPoint(BoxT, Pt, P.CollisionRadius, Normal, Pen, Closest))
 			{
-				// Carry over the contact material point (local) to the end pose of the substep — Move the node along with the surface by the amount of remaining motion.
+				// Carry the contact material point (local) to the substep's end pose — the node rides the surface for the
+				// remaining motion.
 				const float3 Lp = RopeQuatRotate(float4(-BoxT.Rot.xyz, BoxT.Rot.w), Closest - BoxT.Center.xyz);
 				const float3 ClosestE = RopeQuatRotate(RotE, Lp) + CenterE;
 				gPos[i] = Pt + (ClosestE - Closest) + Normal * Pen;
 
-				// This substep surface displacement of the material point (frame entire prev->curr displacement * InvDt * FixedDt). 0 if static.
+				// The material point's surface displacement over this substep (whole-frame prev->curr * InvDt * FixedDt);
+				// 0 if static.
 				const float3 Wcur  = RopeQuatRotate(Box.Rot, Lp) + Box.Center.xyz;
 				const float3 Wprev = RopeQuatRotate(Box.PrevRot, Lp) + Box.PrevCenter.xyz;
 				const float3 SurfDisp = (Wcur - Wprev) * (InvDt * P.FixedDt);
 
-				// *Remove only the relative* outer normal velocity — preserve the normal motion (push) of the surface itself.
+				// Remove only the *relative* outward normal velocity — the surface's own normal motion, its push, is preserved.
 				const float VnOut = dot((gPos[i] - gPrev[i]) - SurfDisp, Normal);
 				if (VnOut > 0.0f)
 				{
@@ -425,44 +462,47 @@ void RopeSolveNodeBoxes(FRopeGPUParams P, uint i, int s, int N, inout float4 Con
 				RopeApplyContactFriction(P, i, N, Normal, Pen, SurfDisp);
 				// Contact normal accumulation for pinch detection.
 				Contact.xyz += Normal; Contact.w += 1.0f;
-				// Terminates at first contact of this box
+				// Stop at this box's first contact
 				break;
 			}
 		}
 	}
 }
 
-// convex node collision(dynamic): plane set — same structure as box (node substep path sweep with body rigid body sub-pose,
-// Carry over material point from first contact to end pose + push-out + remove *relative* normal velocity + *relative* tangential friction). static convex
-// prev=curr (guaranteed packing), which is abbreviated to the current pose and SurfDisp=0 → Same as the existing static action (superset).
-// CPU FRopeConvexCollider::Query/QuerySwept mirror.
+// Convex node collision (dynamic plane set): the same structure as the box — sweep the node's substep path
+// against the body's rigid sub-pose, then on the first contact carry the material point to the end pose, push
+// out, remove the *relative* normal velocity and apply *relative* tangential friction. A static convex packs
+// prev == curr, so this collapses to the current pose with SurfDisp = 0 — a strict superset of the old static
+// path. Mirrors CPU FRopeConvexCollider::Query and QuerySwept.
 void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N, inout float4 Contact)
 {
 	const float3 SegA = gPrev[i];
 	const float  SweepStep = max(P.SweepStep, 0.1f);
 	const int    MaxSamples = max(P.MaxSweepSamples, 1);
-	// Rigid body motion start rate for this substep
+	// Start fraction of the body's frame motion covered by this substep
 	const float  CA0 = (float)s / (float)P.NumSub;
-	// End Ratio
+	// End fraction
 	const float  CA1 = (float)(s + 1) / (float)P.NumSub;
 
 	for (int c = 0; c < P.NumConvexes; ++c)
 	{
 		const FRopeConvex Cv = Convexes[c];
 		const float  InvDt = Cv.LocalBoundsExtent.w;
-		// substep sub-pose rigid body(prev->curr interpolation). If static, prev==curr → current pose.
+		// Sub-posed rigid transform for this substep (prev->curr interpolation). Static: prev == curr, so this is the
+		// current pose.
 		const float3 TransS = lerp(Cv.PrevTrans.xyz, Cv.Trans.xyz, CA0);
 		const float3 TransE = lerp(Cv.PrevTrans.xyz, Cv.Trans.xyz, CA1);
 		const float4 RotS = RopeQuatNlerp(Cv.PrevRot, Cv.Rot, CA0);
 		const float4 RotE = RopeQuatNlerp(Cv.PrevRot, Cv.Rot, CA1);
 
-		// May have been pushed by the preceding collider
+		// A preceding collider may already have pushed the node
 		const float3 SegB = gPos[i];
 		const float  L = distance(SegA, SegB) + distance(TransS, TransE);
 		const int    NumSamples = RopeSweepSampleCount(L, SweepStep, MaxSamples);
 
-		// Separation Guard (CPU RopeCollision::IsSweptSeparating / SDF Mirror): Starts inside the contact skin and separates outward.
-		// Omit re-pin if in progress. Start/end sub-pose Check the start contact/material point and end contact with the rigid body.
+		// Separation guard (mirrors CPU RopeCollision::IsSweptSeparating and the SDF path): if the node starts inside
+		// the contact skin and is genuinely leaving, skip it instead of re-pinning it. The start sub-pose supplies the
+		// start contact and its material point; the end sub-pose answers whether the node is still in contact.
 		{
 			float3 N0; float Pen0; float3 C0; float3 Lp0;
 			if (RopeQueryConvexLocal(Cv, RotS, TransS, SegA, P.CollisionRadius, N0, Pen0, C0, Lp0))
@@ -483,11 +523,13 @@ void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N, inout float4 
 			float3 Normal; float Pen; float3 Closest; float3 Lp;
 			if (RopeQueryConvexLocal(Cv, RotT, TransT, Pt, P.CollisionRadius, Normal, Pen, Closest, Lp))
 			{
-				// Carry over the contact material point (local Lp) to the end pose of the substep — Move the node along with the surface by the amount of remaining motion.
+				// Carry the contact material point (local Lp) to the substep's end pose — the node rides the surface for the
+				// remaining motion.
 				const float3 ClosestE = RopeQuatRotate(RotE, Lp) + TransE;
 				gPos[i] = Pt + (ClosestE - Closest) + Normal * Pen;
 
-				// This substep surface displacement of the material point (whole frame prev->curr * InvDt * FixedDt). 0 if static.
+				// The material point's surface displacement over this substep (whole-frame prev->curr * InvDt * FixedDt);
+				// 0 if static.
 				const float3 Wcur  = RopeQuatRotate(Cv.Rot, Lp) + Cv.Trans.xyz;
 				const float3 Wprev = RopeQuatRotate(Cv.PrevRot, Lp) + Cv.PrevTrans.xyz;
 				const float3 SurfDisp = (Wcur - Wprev) * (InvDt * P.FixedDt);
@@ -500,32 +542,36 @@ void RopeSolveNodeConvexes(FRopeGPUParams P, uint i, int s, int N, inout float4 
 				RopeApplyContactFriction(P, i, N, Normal, Pen, SurfDisp);
 				// Contact normal accumulation for pinch detection.
 				Contact.xyz += Normal; Contact.w += 1.0f;
-				// Terminates at the first contact of this convex
+				// Stop at this convex's first contact
 				break;
 			}
 		}
 	}
 }
 
-// segment (edge/chord) collision: Prevents internal samples of the node i-i+1 straight line from crossing a thin surface.
-// Push the penetration sample out of the surface and distribute it to both end nodes with (1-T):(T) — gPrev accompanying movement (velocity neutral, on curved surface)
-// Blocks chords without rest from injecting velocity every substep). i/i+1 simultaneous writing is protected by the kernel's two-color+barrier.
+// Segment (chord) collision: stops the interior of the straight line between nodes i and i+1 from crossing a
+// thin surface. A penetrating sample is pushed out and the correction split between the two end nodes as
+// (1-T):(T), with gPrev moved alongside gPos so the fix is velocity-neutral — on a curved surface the chord
+// penetrates even at rest, and without that the correction would inject velocity every substep.
+// Concurrent writes to i and i+1 are protected by the kernel's two-color split plus barriers.
 void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 {
 	const float SW0 = gInvMass[i];
 	const float SW1 = gInvMass[i + 1];
 	if (SW0 + SW1 <= 0.0f)
 	{
-		// pin on both ends — no compensation possible.
+		// Both ends pinned — nothing can absorb the correction.
 		return;
 	}
 
 	const float SegLen  = distance(gPos[i], gPos[i + 1]);
-	// Sample interval: Larger of config floor vs detection coverage limit (2×node radius). The inner sample is CollisionRadius.
-	// Since it is a point query, if the interval between adjacent probes (including both end node queries) ≤ 2×R, any point on the chord is within R from the probe —
-	// It cannot escape a wall with a thickness of 0 (triangular inequality; NumInner+1 ≥ SegLen/SegStep ensures an interval ≤ SegStep).
-	// pinned 2cm is an overcrowded probe with overlapping coverage on a thick rope, multiplying the number of colliders by the number of samples (the number of nearby spikes)
-	// circumnavigation) was raised unnecessarily. CPU Same expression (parity) as FRopeXPBDSolver::SolveSegmentContacts.
+	// Probe spacing: the larger of the configured floor and the coverage limit of the probe itself (2 × the node
+	// radius); each interior probe queries with radius CollisionRadius. Because these are point queries, adjacent
+	// probes no more than 2R apart (counting the two end-node queries) leave every point of the chord within R of
+	// some probe, so not even a zero-thickness wall can slip between them (triangle inequality; NumInner + 1 ≥
+	// SegLen/SegStep guarantees a spacing ≤ SegStep). A fixed 2 cm floor would instead over-sample a thick rope,
+	// piling up overlapping coverage at a cost of colliders × samples for nothing.
+	// Same expression as CPU FRopeXPBDSolver::SolveSegmentContacts (parity).
 	const float SegStep = max(max(P.SweepStep, 0.1f), 2.0f * P.CollisionRadius);
 	const int   NumInner = clamp((int)floor(SegLen / SegStep), 1, max(P.MaxSweepSamples, 1));
 	for (int si = 1; si <= NumInner; ++si)
@@ -544,9 +590,9 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 				Nrm, PenC, TSegC, ClosestC))
 			{
 				const float DL = PenC / WEff;
-				// Velocity neutral correction: Chords always penetrate even at rest on a curved surface, so correction is performed at every substep.
-				// occurs → If you just push gPos, the outer velocity is injected so that the node becomes visible even on the stationary collider.
-				// Splash. gPrev was also moved to fix only the position and preserve velocity (two-color processing, so no race).
+				// Velocity-neutral correction: on a curved surface the chord penetrates even at rest, so a correction runs
+				// every substep. Pushing gPos alone would inject outward velocity and make the node bounce off a stationary
+				// collider, so gPrev moves with it — position is corrected, velocity preserved. (Two-color split, no race.)
 				const float3 D0 = Nrm * ((1.0f - T) * SW0 * DL);
 				const float3 D1 = Nrm * (T * SW1 * DL);
 				gPos[i]      += D0;
@@ -556,7 +602,7 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 			}
 		}
 
-		// box (static OBB) — Inquiry. Velocity neutral correction (same reason as capsule segment above).
+		// Box (static OBB) query. Velocity-neutral correction, for the same reason as the capsule case above.
 		for (int sbx = 0; sbx < P.NumBoxes; ++sbx)
 		{
 			float3 NrmB; float PenB; float3 ClosestB;
@@ -572,7 +618,7 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 			}
 		}
 
-		// convex (plane set) — Current pose point query (rigid body Rot/Trans). Velocity neutral correction (same as capsule/box segment above).
+		// Convex (plane set): point query against the current pose (rigid Rot/Trans). Velocity-neutral, as above.
 		for (int scv = 0; scv < P.NumConvexes; ++scv)
 		{
 			const FRopeConvex CvSeg = Convexes[scv];
@@ -597,7 +643,7 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 			float3 NWorld; float DistS; float3 Lp;
 			if (!RopeQuerySDFWorld(Col, Vol, Mid, P.CollisionRadius, NWorld, DistS, Lp)) { continue; }
 			const float  DL = (P.CollisionRadius - DistS) / WEff;
-			// Velocity neutral correction (same reason as capsule segment above — gPrev entrainment blocks injection).
+			// Velocity-neutral correction, for the same reason as above — carrying gPrev along blocks the injection.
 			const float3 D0 = NWorld * ((1.0f - T) * SW0 * DL);
 			const float3 D1 = NWorld * (T * SW1 * DL);
 			gPos[i]      += D0;
@@ -606,7 +652,7 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 			gPrev[i + 1] += D1;
 		}
 
-		// GDF (world) — segment chording: Defends when a straight line between two nodes crosses a thin wall.
+		// GDF (world) chord test: guards the case where the straight line between two nodes crosses a thin wall.
 		// The same pattern as the SDF segment case, with the query swapped for the GDF. Most collisions are
 		// caught by the small-step node stage; a wall thinner than SegmentLength is caught only here, because
 		// the nodes on either side of it are outside. Static world geometry has surface velocity 0.
@@ -636,10 +682,12 @@ void RopeSolveSegmentChord(FRopeGPUParams P, uint i, int N)
 	}
 }
 
-// Strain limit (FTL-oriented): If the segment exceeds MaxLen, *only the follower* is pulled toward the leader to set the length to MaxLen.
-// (leader remains unchanged → the immediately preceding segment is not disturbed and sequential propagation is preserved). Skip if follower pinned (InvMass 0). location
-// When moving, gPrev is also moved to neutralize velocity (prevent fling). Only thread 0 is sequentially called in the kernel strain-limit stage →
-// groupshared single writer so no race. ClampToward mirror of CPU FRopeXPBDSolver::SolveStrainLimit.
+// Strain limit (FTL-style): when a segment is longer than MaxLen, *only the follower* is pulled toward the
+// leader until the length is MaxLen. Leaving the leader untouched keeps the preceding segment undisturbed and
+// preserves sequential propagation. A pinned follower (InvMass 0) is skipped. gPrev moves with the position so
+// the fix is velocity-neutral and the node cannot be flung. The kernel's strain-limit stage calls this from
+// thread 0 only, serially, so groupshared has a single writer and there is no race.
+// Mirrors ClampToward in CPU FRopeXPBDSolver::SolveStrainLimit.
 void RopeClampStretchToward(int Leader, int Follower, float MaxLen)
 {
 	if (gInvMass[Follower] <= 0.0f) { return; }
@@ -673,14 +721,15 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		gPrev[i]    = PrevPositions[P.NodeOffset + i].xyz;
 		gInvMass[i] = InvMass[P.NodeOffset + i];
 		gPersistentInvMass[i] = gInvMass[i];
-		// Initialize to 0 so that write-back does not output garbage values even when NumSub=0 (frame without integration).
+		// Zeroed so the write-back emits 0 instead of garbage when NumSub = 0 (a frame with no integration).
 		gLambdaDist[i] = 0.0f;
 	}
 	GroupMemoryBarrierWithGroupSync();
 
-	// --- Override(G0): Inject the per-node target/mass calculated by the logic phase (GT) *before* integration.
-	// "Target calculation is GT, application is GPU" — Position/mass writing of whip/Wrapping/hold/Releasing without reseeding
-	// Take this stage. Order: Pos → Prev (explicit) → Prev=Pos (velocity 0) → InvMass.
+	// --- Override (G0): inject the per-node target / mass computed by the logic phase on the game thread,
+	// *before* integration. "Targets are computed on the game thread, applied on the GPU" — the position and mass
+	// writes for whip, Wrapping, Hold and Releasing all come through this stage instead of reseeding the buffers.
+	// Order: Pos → Prev (explicit) → Prev = Pos (zero velocity) → InvMass.
 	uint OverrideF = 0u;
 	if (bActiveNode && P.bHasOverrides != 0)
 	{
@@ -700,9 +749,10 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 	GroupMemoryBarrierWithGroupSync();
 
 	const float Dt2     = P.FixedDt * P.FixedDt;
-	// Damping = "Velocity reduction rate per *frame* based on 60fps". If you multiply each substep, damping is proportional to the number of substeps.
-	// As it piles up, the effective drag becomes several tens of times (longitudinal velocity plunge = falling like a ribbon). Divide by exponent according to the substep size.
-	// Same expression (parity) as CPU FRopeXPBDSolver::Integrate.
+	// Damping is defined as the velocity loss per *frame* at 60 fps. Applying it once per substep would compound
+	// it with the substep count and leave the effective drag tens of times too strong — vertical velocity
+	// collapses and the rope falls like a ribbon. Raise it to the power of the substep size instead.
+	// Same expression as CPU FRopeXPBDSolver::Integrate (parity).
 	const float Damp    = pow(1.0f - clamp(P.Damping, 0.0f, 1.0f), P.FixedDt * 60.0f);
 	const float Seg     = P.SegmentLength;
 	const float MaxStep = max(Seg * 2.0f, 1.0f);
@@ -710,7 +760,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 	const float AlphaD  = (P.FixedDt > 1e-4f) ? (P.StretchCompliance / Dt2) : 0.0f;
 	const float RestBend = 2.0f * Seg;
 	const float AlphaB  = (P.FixedDt > 1e-4f) ? (P.BendCompliance / Dt2) : 0.0f;
-	// Angle-allowed bending threshold (config): Full must be greater than Release for a smooth step to be established, so floor is enforced.
+	// Angle-tolerant bending thresholds (config): smoothstep needs Full above Release, so a floor is enforced here.
 	const float BendRelease = P.BendReleaseRatio;
 	const float BendFull    = max(P.BendFullRatio, BendRelease + 1e-4f);
 
@@ -745,7 +795,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		}
 		GroupMemoryBarrierWithGroupSync();
 
-		// --- pinned start: Prev->Target sweep(velocity 0) over the substeps of this frame.
+		// --- Pinned start: sweep Prev → Target across this frame's substeps (zero velocity).
 		if (P.bStartPinned != 0 && i == 0)
 		{
 			const float Alpha = (float)(s + 1) / (float)P.NumSub;
@@ -757,7 +807,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		}
 		GroupMemoryBarrierWithGroupSync();
 
-		// --- XPBD lambda accumulates across iterations within a substep → 0 at the start of the substep.
+		// --- The XPBD lambdas accumulate across the iterations of a substep, so reset them as the substep starts.
 		if (bActiveNode)
 		{
 			gLambdaDist[i] = 0.0f;
@@ -765,18 +815,21 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		}
 		GroupMemoryBarrierWithGroupSync();
 
-		// Collision resolution frequency (CollisionPasses): Divide the constraint iteration into CollPasses sections and have one collision per section.
-		// Insert (if K=1, once at the end of substep=existing). In sharp bends, the inner tension overcomes the single push-out and prevents penetration.
-		// CPU SolveCollisions mirror. The loop bound is uniform, so all threads ride the barrier the same number of times (no deadlock).
+		// Collision frequency (CollisionPasses): split the constraint iterations into CollPasses chunks and run one
+		// collision pass per chunk (K = 1 gives the original single pass at the end of the substep). In a sharp bend
+		// the inner tension can overpower a single push-out, and the extra passes stop the rope penetrating.
+		// Mirrors CPU SolveCollisions. The loop bound is uniform, so every thread hits the barriers the same number
+		// of times and cannot deadlock.
 		const int CollPasses = clamp(P.CollisionPasses, 1, P.Iters);
 		int ItDone = 0;
 		for (int pass = 0; pass < CollPasses; ++pass)
 		{
-			// Cumulative target (last pass is guaranteed to Iters)
+			// Cumulative iteration target (the last pass is guaranteed to land on Iters)
 			const int ItTarget = ((pass + 1) * P.Iters) / CollPasses;
 			for (; ItDone < ItTarget; ++ItDone)
 			{
-			// --- Distance: segment k is node {k,k+1}. Collision is adjacent (difference 0/1) → 2 colors (k%2).
+			// --- Distance: segment k owns nodes {k, k+1}. Neighboring segments conflict (index difference 0 or 1), so
+			// two colors (k % 2) separate them.
 			[unroll(2)]
 			for (int dc = 0; dc < 2; ++dc)
 			{
@@ -803,7 +856,8 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 				GroupMemoryBarrierWithGroupSync();
 			}
 
-			// --- Bending: stick k is node {k,k+2}. Collision is a difference of 0/2 → If there are 3 colors (k%3), the difference of the same color is a multiple of 3.
+			// --- Bending: stick k owns nodes {k, k+2}. Conflicts are at index difference 0 or 2, so three colors (k % 3)
+			// work — sticks of the same color differ by a multiple of 3.
 			[unroll(3)]
 			for (int bc = 0; bc < 3; ++bc)
 			{
@@ -820,12 +874,13 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 						{
 							const float3 Nrm = D / Dist;
 							const float C = Dist - RestBend;
-							// Angle-allowed bending: Bending is a spring that pulls i↔i+2 to 2*SegLen (perfectly straight), so all bending is originally possible.
-							// Trying to "unfold" → Push the node outward in a sharply bent section such as a corner/wrap boundary so that it protrudes at an angle.
-							// . r=Dist/RestBend=cos(turn angle/2)(1=straight line, the smaller the steeper). For sharp bends, release the straightening force.
-							// (BendScale→0) Only straighten gentle bends (Free ropes do not look like chains). Increasing collision pass and
-							// Otherwise, there is no perf cost. threshold is config(FRopeSolverConfig::BendReleaseRatio/BendFullRatio).
-							// r=cos(turn angle/2), so 0.70≈turn 91°, 0.92≈turn 46°.
+							// Angle-tolerant bending: the bending constraint is a spring pulling i ↔ i+2 toward 2*SegLen, i.e. perfectly
+							// straight, so on its own it tries to unfold every bend — at a corner or a wrap boundary it pushes the node
+							// outward and the rope juts out of the surface. r = Dist/RestBend = cos(turn angle / 2), where 1 is straight
+							// and smaller is sharper. Release the straightening force on sharp bends (BendScale → 0) and straighten only
+							// the gentle ones, so a free rope still does not look like a chain. Unlike raising the collision pass count,
+							// this costs nothing. The thresholds are config (FRopeSolverConfig::BendReleaseRatio / BendFullRatio): with
+							// r = cos(turn angle / 2), 0.70 ≈ a 91° turn and 0.92 ≈ a 46° turn.
 							const float BendScale = smoothstep(BendRelease, BendFull, Dist / RestBend);
 							const float DL = BendScale * (-C - AlphaB * gLambdaBend[i]) / (WSum + AlphaB);
 							gLambdaBend[i] += DL;
@@ -838,12 +893,13 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			}
 		}
 
-		// --- Collision: the node collision stage. The body of it is the RopeSolveNode* functions at the top of this file.
-		// Since it is per-node independent (only own slot i is written), group synchronization is not required — only the gate is applied here.
-			// NodeContact: Unit normal sum (.xyz) + number (.w) of colliders touched by the node in this pass — pinch below
-			// Write to check (thread local register without groupshared, inout passed to each stage).
+		// --- Collision: the node collision stage; the bodies are the RopeSolveNode* functions at the top of this file.
+		// Each node is independent (a thread writes only its own slot i), so no group sync is needed — just the gates.
+			// NodeContact: the sum of unit normals (.xyz) and the count (.w) of colliders this node touched in this pass,
+			// feeding the pinch check below. A thread-local register rather than groupshared, passed to each stage as inout.
 			float4 NodeContact = float4(0.0f, 0.0f, 0.0f, 0.0f);
-			// Position just before collision push-out (even reflecting the distance constraint) — When pinching, return to here and freeze the node.
+			// The position just before the collision push-out, with the distance constraint already applied — a pinched
+			// node is rolled back to here and frozen.
 			const float3 NodePrePos = gPos[i];
 		if (bActiveNode && gInvMass[i] > 0.0f && P.NumCapsules > 0)
 		{
@@ -865,9 +921,11 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 			RopeSolveNodeConvexes(P, i, s, N, NodeContact);
 		}
 #if ROPE_USE_GDF && PLATFORM_SUPPORTS_DISTANCE_FIELDS
-		// GDF world collision(static wall/floor) — per-substep constraint. Same collision pass location as capsule/SDF, same response pattern, only query as GDF
-		// . Since it is a static world, surfacevelocity is 0 (no relative velocity friction required). Because it is a small-step, there is no structural sign-reversal/tunneling,
-		// Balanced in the same solve as the tension constraint (no post-solve extrusion required).
+		// GDF world collision (static walls and floors) as a per-substep constraint: the same place in the collision
+		// pass as the capsule/SDF stages and the same response pattern, with only the query differing. The world is
+		// static, so its surface velocity is 0 and no relative-velocity friction is needed. Small steps mean there is
+		// no structural sign flip or tunneling, and this balances against the tension constraint inside the same
+		// solve, so no post-solve push-out is required.
 		if (bActiveNode && gInvMass[i] > 0.0f && bWorldGDFValid != 0)
 		{
 			const float  GdfNodeR = P.CollisionRadius;
@@ -879,61 +937,71 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 				const float  GdfGLen = length(GdfGrad);
 				if (GdfGLen > 1e-4f)
 				{
-					// outside surface (increasing distance) direction
+					// Direction out of the surface (increasing distance)
 					const float3 GdfN = GdfGrad / GdfGLen;
-					// Project out of surface
+					// Push the node out of the surface
 					gPos[i] += GdfN * (GdfNodeR - GdfDist);
-					// Inelastic: Eliminates external normal velocity (static world — no motion of the surface itself). capsule/SDF response mirror.
+					// Inelastic: remove the outward normal velocity (a static world has no surface motion of its own).
+					// Mirrors the capsule/SDF response.
 					const float GdfVnOut = dot(gPos[i] - gPrev[i], GdfN);
 					if (GdfVnOut > 0.0f) { gPrev[i] += GdfN * GdfVnOut; }
-					// friction: tension-limit Coulomb (static world SurfDisp=0). Same helper as other colliders → Does not stick to walls.
+					// Friction: tension-limited Coulomb with SurfDisp = 0 for the static world. The same helper as every other
+					// collider, so the rope does not stick to walls.
 					RopeApplyContactFriction(P, i, N, GdfN, GdfNodeR - GdfDist, float3(0.0f, 0.0f, 0.0f));
-					// Contact normal accumulation for pinch detection (static world also counts as one contact).
+					// Accumulate the contact normal for pinch detection (the static world counts as one contact too).
 					NodeContact.xyz += GdfN; NodeContact.w += 1.0f;
 				}
 			}
 		}
 #endif
-			// Pinch damping: If nodes are simultaneously pressed on colliders facing each other in this pass (the unit normal sum is
-			// offset = |sum| << Number) There is no way out. Pushed onto one surface with last-wins push-out
-			// is left, the next substep distance constraint is pulled again and re-penetrated → position round trip (jitter)/tangential bounce between frames. so
-			// Discard the result of pushing to the surface *Freeze it at the position just before the collision (NodePrePos)* — There is no place to escape
-			// , it is best to stay in place, the order is irrelevant. The velocity is also 0 (gPrev=gPos=NodePrePos). threshold 0.6*number is
-			// Fires only when the two normals are separated by more than ~106° (when they are truly facing each other) — no effect on single sides or smooth corners.
+			// Pinch damping: when a node is squeezed between colliders facing each other in the same pass, the unit
+			// normals cancel (|sum| << count) and there is nowhere for it to go. Last-wins push-out would leave it on one
+			// surface, the next substep's distance constraint would pull it back into the other, and the node would
+			// oscillate between the two — position jitter plus a tangential twitch from frame to frame. So the push-out is
+			// discarded and the node is frozen at its pre-collision position (NodePrePos): with no way out, staying put is
+			// the best answer and the collider order stops mattering. Velocity goes to zero as well
+			// (gPrev = gPos = NodePrePos). The 0.6 × count threshold fires only when the normals are more than ~106° apart,
+			// i.e. when they genuinely oppose each other — a single surface or a smooth corner is unaffected.
 			if (bActiveNode && gInvMass[i] > 0.0f && NodeContact.w > 1.5f
 				&& length(NodeContact.xyz) < 0.6f * NodeContact.w)
 			{
 				gPos[i]  = NodePrePos;
 				gPrev[i] = NodePrePos;
 			}
-			// Visualize collision results → Next collision pass / Next substep
+			// Publish the collision results to the next collision pass / substep
 			GroupMemoryBarrierWithGroupSync();
 
-			// --- segment (edge) collision: straight chording between two nodes (both ends are outside the surface, but the straight line between them is a thin surface)
-			// Across) Defense. CPU SolveSegmentContacts mirror. Adjacent segments share node i+1 → 2 colors (i%2)
-			// Prevent race (barrier for each color). Push the penetration sample out of the surface and distribute it to both end nodes using (1-T):(T). both ends
-			// Skip if pin(invMass 0). SDF is a point query based on the current pose (not sweep, same as CPU Query).
+			// --- Segment (chord) collision: guards the case where both nodes sit outside a surface but the straight line
+			// between them cuts through a thin one. Mirrors CPU SolveSegmentContacts. Adjacent segments share node i+1, so
+			// two colors (i % 2) with a barrier per color keep it race-free. A penetrating sample is pushed out and the
+			// correction split between the two end nodes as (1-T):(T); a segment with both ends pinned (InvMass 0) is
+			// skipped. The SDF case is a point query against the current pose rather than a sweep — same as the CPU Query.
 			[unroll(2)]
 			for (int sgc = 0; sgc < 2; ++sgc)
 			{
 				if (bActiveNode && i < (uint)(N - 1) && (int)(i % 2) == sgc)
 				{
-					// The body is at the top of the file — i/i+1 writing is protected by this two-color + barrier.
+					// The body is at the top of this file — the writes to i and i+1 are protected by this two-color split
+					// plus barrier.
 					RopeSolveSegmentChord(P, i, N);
 				}
 				GroupMemoryBarrierWithGroupSync();
 			}
-		// for pass (CollisionPasses)
+		// end for pass (CollisionPasses)
 		}
 
-		// --- Strain limiting: Residual overstretch that cannot be controlled by iteration (when a long chain hangs on an anchor pin, the anchor is adjacent to the anchor pin).
-		// Segment runaway → huge tension/tangential whip jitter) is confined in the cap at the end of the substep. Sequential sweep (front + back)
-		// Thread 0 serially processes the entire groupshare (no single writer=race), and the remaining threads wait at the barrier. back and forth
-		// Process after visualizing segment chord results with barrier + write-back/propagate results before next substep. CPU mirror.
-		// Early escape: Before sweep, each thread parallel checks its segment for excess (gStrainAny) — if there is no excess,
-		// Skips the entire serial sweep (segment 63×4 dependency chain, 63 threads waiting). sweep is everything if there is no excess
-		// Because it is an early-return, the skip result is bitwise identical, and the check sign (>) is exactly complementary to ClampToward's pass sign (<=).
-		// In normal times (settlement/gentle drape), most substeps are this path. barrier +1 is insignificant compared to serial chain removal.
+		// --- Strain limiting: caps, at the end of the substep, the residual over-stretch the iterations cannot
+		// remove. With a long chain hanging from an anchor pin the segment next to the pin runs away, producing huge
+		// tension and a tangential whip jitter. The sweep is sequential (forward then backward): thread 0 walks the
+		// whole groupshared chain alone, so there is a single writer and no race, while the other threads wait at the
+		// barrier. It runs after a barrier has published the segment-chord results, and writes its own results back
+		// before the next substep. Mirrors the CPU path.
+		// Early out: before the sweep every thread checks its own segment for over-stretch in parallel (gStrainAny),
+		// and with none found the entire serial sweep is skipped — that chain is 63 segments × 4 passes with 63
+		// threads idle. With nothing over-stretched every ClampToward early-returns anyway, so skipping is bitwise
+		// identical; the check's comparison (>) is exactly the complement of ClampToward's pass condition (<=).
+		// In the common case — a settled rope or a gentle drape — most substeps take this path, and one extra barrier
+		// is nothing next to removing the serial chain.
 		const bool  bStrainOn = (P.MaxStretchRatio >= 1.0f && P.SegmentLength > 1e-4f);
 		const float StrainMaxLen = P.MaxStretchRatio * P.SegmentLength;
 		if (i == 0) { gStrainAny = 0u; }
@@ -959,7 +1027,7 @@ void RopeXPBDSolveCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupT
 		GroupMemoryBarrierWithGroupSync();
 	}
 
-	// --- write-back (InvMass writes the mass mask changed by override together to persist it to the resident buffer)
+	// --- Write-back. InvMass carries the mass mask an override changed, persisting it to the resident buffer.
 	if (bActiveNode)
 	{
 		Positions[P.NodeOffset + i]     = float4(gPos[i], 0.0f);
