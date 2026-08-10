@@ -59,7 +59,7 @@ span, violation, and tension every N frames.
 
 ## Demo content
 
-`Content/Demo/` ships two maps with small, readable gameplay examples wired in Blueprint:
+`Content/DynamicRope/Demo/` ships two maps with small, readable gameplay examples wired in Blueprint:
 snare trap, rescue helicopter grab, crankable lever, pressure plate, basket goal, and AI
 wrap targets.
 

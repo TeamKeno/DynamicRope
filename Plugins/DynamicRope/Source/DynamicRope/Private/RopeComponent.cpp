@@ -45,7 +45,7 @@ URopeComponent::URopeComponent()
 	// instance or in a Blueprint overrides it. If the asset is missing (.Succeeded() == false) it stays null
 	// and the scene proxy falls back to the engine's grey default, which keeps builds and cooks safe.
 	static ConstructorHelpers::FObjectFinder<UMaterialInterface> DefaultRopeMaterial(
-		TEXT("/DynamicRope/Materials/M_RopeDefault.M_RopeDefault"));
+		TEXT("/DynamicRope/DynamicRope/Materials/M_RopeDefault.M_RopeDefault"));
 	if (DefaultRopeMaterial.Succeeded())
 	{
 		RopeMaterial = DefaultRopeMaterial.Object;

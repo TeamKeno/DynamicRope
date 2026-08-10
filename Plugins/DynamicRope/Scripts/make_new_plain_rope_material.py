@@ -6,9 +6,9 @@
 #   Tools -> Execute Python Script... -> make_new_plain_rope_material.py
 #
 # Output:
-#   /DynamicRope/Materials/M_RopePlain
-#   /DynamicRope/Materials/M_RopePlain_01
-#   /DynamicRope/Materials/M_RopePlain_02
+#   /DynamicRope/DynamicRope/Materials/M_RopePlain
+#   /DynamicRope/DynamicRope/Materials/M_RopePlain_01
+#   /DynamicRope/DynamicRope/Materials/M_RopePlain_02
 #   ...
 #
 # Existing assets are never deleted or overwritten.
@@ -16,7 +16,7 @@
 import unreal
 
 
-MAT_DIR = "/DynamicRope/Materials"
+MAT_DIR = "/DynamicRope/DynamicRope/Materials"
 BASE_NAME = "M_RopePlain"
 
 eal = unreal.EditorAssetLibrary

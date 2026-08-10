@@ -12,7 +12,7 @@
 
 import unreal
 
-MAT_DIR = "/DynamicRope/Materials"
+MAT_DIR = "/DynamicRope/DynamicRope/Materials"
 PARENT_PATH = MAT_DIR + "/M_RopeDefault"
 
 eal = unreal.EditorAssetLibrary

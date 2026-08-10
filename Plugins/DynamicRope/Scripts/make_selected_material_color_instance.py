@@ -62,9 +62,9 @@ def get_selected_parent():
 
 def get_asset_directory(asset):
     # Example:
-    #   /DynamicRope/Materials/M_RopeDefault.M_RopeDefault
+    #   /DynamicRope/DynamicRope/Materials/M_RopeDefault.M_RopeDefault
     # becomes:
-    #   /DynamicRope/Materials
+    #   /DynamicRope/DynamicRope/Materials
     object_path = asset.get_path_name()
     package_path = object_path.split(".", 1)[0]
     return package_path.rsplit("/", 1)[0]

@@ -41,6 +41,26 @@ $Stages = @{
 	'5.8' = @{ Plugin = 'C:\MyProjects\Plug58\Plugins\DynamicRope';   ContentSource = (Join-Path $SourcePlugin 'Content') }
 }
 
+# Compress-Archive (Windows PowerShell 5.1) records entry names with backslash separators.
+# Non-Windows unzip tools — including Fab's package validator — only treat '/' as a folder
+# separator, so such a zip reads as a flat pile of oddly-named files and the review fails
+# with "FilterPlugin.ini not found". Zip manually with forward-slash entry names instead.
+function New-ForwardSlashZip([string] $Root, [string] $ZipPath) {
+	Add-Type -AssemblyName System.IO.Compression
+	Add-Type -AssemblyName System.IO.Compression.FileSystem
+	$parentLen = (Split-Path $Root -Parent).Length + 1
+	$archive = [System.IO.Compression.ZipFile]::Open($ZipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+	try {
+		foreach ($file in (Get-ChildItem $Root -Recurse -File)) {
+			$entryName = $file.FullName.Substring($parentLen).Replace('\', '/')
+			[void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+				$archive, $file.FullName, $entryName,
+				[System.IO.Compression.CompressionLevel]::Optimal)
+		}
+	}
+	finally { $archive.Dispose() }
+}
+
 # Robocopy exit codes 0-7 mean success (files copied / already in sync); 8+ is failure.
 function Invoke-Mirror([string] $From, [string] $To) {
 	robocopy $From $To /MIR /A-:R /NJH /NJS /NDL /NP /NFL | Out-Null
@@ -94,7 +114,7 @@ function Zip-Version([string] $Ver, [string] $PkgDir) {
 
 	$zip = Join-Path $OutRoot "DynamicRope_$Ver.zip"
 	if (Test-Path $zip) { Remove-Item $zip -Force }
-	Compress-Archive -Path $stage -DestinationPath $zip
+	New-ForwardSlashZip $stage $zip
 	Remove-Item $stageRoot -Recurse -Force
 	return $zip
 }

@@ -30,7 +30,7 @@
 
 import unreal
 
-MAT_DIR = "/DynamicRope/Materials"
+MAT_DIR = "/DynamicRope/DynamicRope/Materials"
 MAT_NAME = "M_ElevatorMetal"
 FULL = MAT_DIR + "/" + MAT_NAME
 

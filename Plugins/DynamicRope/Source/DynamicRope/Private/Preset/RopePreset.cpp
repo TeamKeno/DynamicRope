@@ -11,7 +11,7 @@ URopePreset::URopePreset()
 	// described in the header. If the asset is missing, meaning the find did not succeed, it stays null and falls back
 	// to the same grey as the component, which is safe for builds and cooking.
 	static ConstructorHelpers::FObjectFinder<UMaterialInterface> DefaultRopeMaterial(
-		TEXT("/DynamicRope/Materials/M_RopeDefault.M_RopeDefault"));
+		TEXT("/DynamicRope/DynamicRope/Materials/M_RopeDefault.M_RopeDefault"));
 	if (DefaultRopeMaterial.Succeeded())
 	{
 		RopeMaterial = DefaultRopeMaterial.Object;
