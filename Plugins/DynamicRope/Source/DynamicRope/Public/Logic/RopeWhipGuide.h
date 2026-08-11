@@ -1,10 +1,12 @@
 ﻿// Copyright 2026 TeamKeno. All Rights Reserved.
 //
-// The whip swing presentation at the start of a throw. It rotates one coherent straight guide over
-// time, sweeping from the side opposite the aim round to the aim direction. An aim-hit throw derives
-// that final direction from the live hand to its locked target. Full Simulation begins on a shallow
-// C-shaped guide whose free end lies opposite the aim and becomes exactly straight halfway through the
-// whip timer. Aim-hit stays straight. Both crossfade after GuidedLength. Active only during Flight.
+// The whip swing presentation at the start of a throw. It rotates one coherent guide from the
+// preserved reference frame's backward direction through the hemisphere selected by SwingPlane. For
+// an aim-hit throw, that continuous spherical path ends at the live hand-to-target direction without
+// replacing the initial direction with the opposite of the target.
+// Full Simulation begins on a shallow C-shaped guide whose free end lies opposite the reference
+// forward and becomes exactly straight halfway through the whip timer. Both crossfade after
+// GuidedLength. Active only during Flight.
 //
 // Computing the targets, meaning the sweep angle, the guide curve and the resampling to node
 // spacing, stays on the game thread. The CPU solver and GPU resident override sweep the same CurrentTargets,
@@ -32,7 +34,8 @@ public:
 		/** The fraction of the rope length the guide fully controls, from 0 to 1. */
 		float GuidedLength = 0.65f;
 
-		/** The angle swept from the starting angle, opposite the aim, round to the aim direction. */
+		/** The untargeted angle swept from the starting direction round to the reference forward. A
+		 *  targeted throw always starts at reference backward and uses SwingPlane as its hemisphere. */
 		float SweepAngleDegrees = 180.0f;
 
 		/** The throw speed at which Duration is used as given. */
@@ -46,9 +49,8 @@ public:
 		float FullSimInitialCurveFraction = 0.12f;
 		float FullSimStraightenTimeFraction = 0.50f;
 
-		/** The aim-hit root relaxation range, the shared crossfade length after GuidedLength, and the
-		 *  exponent that brings the hit direction blend forward. */
-		float AimHitRootSolverFraction = 0.20f;
+		/** The shared crossfade length after GuidedLength. AimHitDirectionBias is retained for serialized
+		 *  compatibility; the current continuous targeted swing does not use directional lerping. */
 		float AimHitTipSolverFraction = 0.25f;
 		float AimHitDirectionBias = 2.0f;
 	};
@@ -70,21 +72,20 @@ public:
 		ERopeSwingPlane SwingPlane, const FVector& CustomPlaneNormal);
 
 	/**
-	 * Called on a throw: builds the guide frame, that is the forward and up axes, about the aim
-	 * direction and activates the swing.
-	 * The fallback vectors are the component axes used in degenerate cases, such as a zero aim or one
-	 * close to vertical.
+	 * Called on a throw: stores the final impulse/target direction separately from the pre-hit reference
+	 * axes that fix the backward start and choose the swing hemisphere.
 	 */
 	void Begin(const FVector& InAimDir, const FVector& InOrigin,
-		const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide,
+		const FVector& InGuideForward, const FVector& FallbackUp, const FVector& FallbackSide,
 		float InThrowSpeed = 0.0f, const FVector& InInheritedVelocity = FVector::ZeroVector,
 		bool bInHasAimTarget = false, const FVector& InAimTarget = FVector::ZeroVector,
 		float InAimSteerStartAlpha = 0.25f, float InAimLockAlpha = 0.50f);
 
 	/**
-	 * Initializes the pose immediately after a throw, at time zero: Full Simulation places it on the
+	 * Initializes the pose immediately after a throw, at time zero: every physical flight uses the same
 	 * initial C-shaped guide. Advance removes the curvature by FullSimStraightenTimeFraction, moves the
-	 * fully guided boundary towards GuidedLength, and crossfades into the solver-owned tail. Aim-hit is straight.
+	 * fully guided boundary towards GuidedLength, and crossfades into the solver-owned tail. An aim hit
+	 * changes only the final forward direction.
 	 * Called once from StartFreshThrow.
 	 */
 	void SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config);
@@ -160,7 +161,7 @@ private:
 	FVector GuideInheritedVelocity = FVector::ZeroVector;
 	float GuideThrowSpeed = 0.0f;
 
-	/** An aim target is kept only as a final direction plus the spatial blend parameters, never as a
+	/** An aim target is kept only as a final direction plus the temporal blend parameters, never as a
 	 *  fixed node position. */
 	bool bHasAimTarget = false;
 	FVector AimTarget = FVector::ZeroVector;

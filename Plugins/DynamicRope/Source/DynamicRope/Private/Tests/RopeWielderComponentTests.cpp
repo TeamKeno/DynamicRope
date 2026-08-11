@@ -612,6 +612,35 @@ bool FRopeWielderAimThrowUsesVirtualContextTest::RunTest(const FString& Paramete
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderExplicitAimPreservesWhipReferenceFrameTest,
+	"DynamicRope.Wielder.Throw.ExplicitAimPreservesWhipReferenceFrame",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRopeWielderExplicitAimPreservesWhipReferenceFrameTest::RunTest(const FString& Parameters)
+{
+	AActor* Owner = NewObject<AActor>();
+	URopeComponent* Rope = NewObject<URopeComponent>(Owner);
+	URopeWielderComponent* Wielder = NewObject<URopeWielderComponent>(Owner);
+	Wielder->Rope = Rope;
+	Rope->ThrowParams.FrameMode = ERopeThrowFrameMode::Owner;
+
+	const FVector OwnerForward = Owner->GetActorForwardVector();
+	const FVector ExplicitAimDir = Owner->GetActorRightVector();
+	const FRopeThrowContext Context = Wielder->BuildThrowContext(ExplicitAimDir);
+
+	TestTrue(TEXT("explicit AimDir remains the runtime ray and final throw forward"),
+		Context.FrameForward.Equals(ExplicitAimDir, 0.01f));
+	TestTrue(TEXT("explicit AimDir captures a separate physical whip reference"),
+		Context.bHasWhipReferenceFrame);
+	TestTrue(TEXT("physical whip reference remains OwnerForward before aim overwrite"),
+		Context.WhipReferenceForward.Equals(OwnerForward, 0.01f));
+	TestTrue(TEXT("physical whip reference keeps OwnerUp"),
+		Context.WhipReferenceUp.Equals(Owner->GetActorUpVector(), 0.01f));
+	TestTrue(TEXT("physical whip reference keeps OwnerRight"),
+		Context.WhipReferenceRight.Equals(Owner->GetActorRightVector(), 0.01f));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeWielderUnpossessClearsHeldInputTest,
 	"DynamicRope.Wielder.Input.UnpossessClearsHeldState",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

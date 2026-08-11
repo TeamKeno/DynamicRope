@@ -387,13 +387,13 @@ struct FRopeWrapConfig
 
 	/**
 	 * Axial distance gained per unit of circumferential travel for a sequential SurfaceVectorField wrap.
-	 * A composite analytic helix ignores it and derives the pitch from the tail's slope at contact.
-	 *
-	 * Not exposed to the Details panel: which strategy runs is decided at runtime by the target's geometry
-	 * (see the pose-space island note on WrappingMaxWrapAngleDeg), so changing the value and watching the
-	 * result teaches nothing about cause and effect.
+	 * For a composite analytic helix its magnitude is the maximum fallback pitch. The actual fallback scales
+	 * from zero to this value with the angle between the rope plane normal and the SDF island's principal axis,
+	 * then blends toward the pitch derived from the contact slope. Its sign breaks an equal-room tie; otherwise
+	 * the composite path chooses the direction with more room inside the SDF island.
 	 */
-	UPROPERTY(BlueprintReadWrite, Category = "Rope|Wrap|Tuning", meta = (ClampMin = "-2.0", ClampMax = "2.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Wrap|Tuning",
+		meta = (ClampMin = "-2.0", ClampMax = "2.0", DisplayName = "Helix Pitch Scale"))
 	float WrappingHelixPitchScale = 0.25f;
 
 	// The multi-bone projection scoring constants below — depth, cost, weights, bonuses and hysteresis — were

@@ -598,22 +598,19 @@ bool FRopeWrappingPhase::ResolveWrappingAxis(const FRopeSurfaceAnchor& LatchAnch
 void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
 	const USceneComponent* Mesh, FVector& InOutAxisDirection) const
 {
-	if (!Mesh || LatchAnchor.Bone.IsNone())
+	if (!Mesh || !Sim.Positions.IsValidIndex(LatchAnchor.NodeIndex) || InOutAxisDirection.IsNearlyZero())
 	{
 		return;
 	}
 
-	const FName ParentBone = RopeWrapTargets::GetParentTargetKey(Mesh, LatchAnchor.Bone);
-	if (ParentBone.IsNone())
-	{
-		return;
-	}
-
-	float ParentScore = 0.0f;
-	float BoneScore = 0.0f;
+	// The sign of a shape or guide-plane axis is arbitrary. Resolve that ambiguity from the rope itself,
+	// measured in the character/component frame: a tail on the character's upper side receives the axis
+	// hemisphere pointing away from CharacterUp, and a lower tail receives the opposite hemisphere. This
+	// remains stable when skeleton parenting does not describe the visual top/bottom of the wrapped island.
+	const FVector CharacterUp = Mesh->GetUpVector().GetSafeNormal(KINDA_SMALL_NUMBER, FVector::UpVector);
+	const FVector LatchWorld = Sim.Positions[LatchAnchor.NodeIndex];
+	float WeightedTailUpDistance = 0.0f;
 	float TotalWeight = 0.0f;
-	const FVector ParentWorld = ResolveBindingWorld(Mesh, ParentBone).GetLocation();
-	const FVector BoneWorld = ResolveBindingWorld(Mesh, LatchAnchor.Bone).GetLocation();
 
 	const auto AddProbe = [&](int32 NodeIndex, float Weight)
 	{
@@ -622,9 +619,8 @@ void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& Latc
 			return;
 		}
 
-		const FVector ProbeWorld = Sim.Positions[NodeIndex];
-		ParentScore += FVector::DistSquared(ProbeWorld, ParentWorld) * Weight;
-		BoneScore += FVector::DistSquared(ProbeWorld, BoneWorld) * Weight;
+		WeightedTailUpDistance += FVector::DotProduct(
+			Sim.Positions[NodeIndex] - LatchWorld, CharacterUp) * Weight;
 		TotalWeight += Weight;
 	};
 
@@ -636,10 +632,10 @@ void FRopeWrappingPhase::OrientWrappingAxisByTail(const FRopeSurfaceAnchor& Latc
 		return;
 	}
 
-	ParentScore /= TotalWeight;
-	BoneScore /= TotalWeight;
-
-	if (ParentScore < BoneScore)
+	const float TailUpDistance = WeightedTailUpDistance / TotalWeight;
+	const float AxisUpAlignment = FVector::DotProduct(InOutAxisDirection, CharacterUp);
+	if (!FMath::IsNearlyZero(TailUpDistance) && !FMath::IsNearlyZero(AxisUpAlignment) &&
+		TailUpDistance * AxisUpAlignment > 0.0f)
 	{
 		InOutAxisDirection *= -1.0f;
 	}

@@ -283,6 +283,17 @@ bool FRopeAimTargeting::ResolveAimRayThrowContext(const FQueryContext& Ctx, cons
 		return false;
 	}
 
+	// Preserve the frame that authored the ordinary physical sweep before replacing the runtime aim
+	// direction. Without this separation a target perpendicular to OwnerForward can make the chosen
+	// swing plane degenerate (for example Right plane normal parallel to HitAimDir), which falls back to
+	// world Up and makes targeted Assisted start above the hand.
+	if (!OutContext.bHasWhipReferenceFrame)
+	{
+		OutContext.bHasWhipReferenceFrame = true;
+		OutContext.WhipReferenceForward = OutContext.FrameForward;
+		OutContext.WhipReferenceUp = OutContext.FrameUp;
+		OutContext.WhipReferenceRight = OutContext.FrameRight;
+	}
 	OutContext.FrameForward = HitAimDir;
 	OutContext.bHasAimGuideHit = true;
 	OutContext.AimGuideBone = Hit.Bone;

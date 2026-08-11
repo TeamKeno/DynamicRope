@@ -586,27 +586,37 @@ FRopeThrowContext URopeComponent::ResolveThrowContext(const FRopeThrowContext& T
 	// parallel.
 	// Right is always re-derived as Up cross Forward and the supplied Right is ignored: swinging to the
 	// other side is expressed through the SwingPlane options, not by flipping Right.
-	Resolved.FrameForward = FRopeWhipGuide::SafeNormalOr(Resolved.FrameForward, GetForwardVector());
-	const FVector Forward = Resolved.FrameForward;
+	const auto ResolveFrame = [this](FVector& InOutForward, FVector& InOutUp, FVector& InOutRight)
+	{
+		InOutForward = FRopeWhipGuide::SafeNormalOr(InOutForward, GetForwardVector());
+		const FVector Forward = InOutForward;
 
-	FVector Up = FVector::ZeroVector;
-	const FVector UpCandidates[] = { ThrowContext.FrameUp, FVector::UpVector, GetUpVector() };
-	for (const FVector& Candidate : UpCandidates)
-	{
-		FVector Projected = Candidate - FVector::DotProduct(Candidate, Forward) * Forward;
-		if (Projected.Normalize(KINDA_SMALL_NUMBER))
+		FVector Up = FVector::ZeroVector;
+		const FVector UpCandidates[] = { InOutUp, FVector::UpVector, GetUpVector() };
+		for (const FVector& Candidate : UpCandidates)
 		{
-			Up = Projected;
-			break;
+			FVector Projected = Candidate - FVector::DotProduct(Candidate, Forward) * Forward;
+			if (Projected.Normalize(KINDA_SMALL_NUMBER))
+			{
+				Up = Projected;
+				break;
+			}
 		}
-	}
-	if (Up.IsNearlyZero())
+		if (Up.IsNearlyZero())
+		{
+			// A vertical throw with a vertical component axis falls back to an arbitrary perpendicular.
+			Up = RopeMath::AnyTangentFromNormal(Forward);
+		}
+		InOutUp = Up;
+		InOutRight = FVector::CrossProduct(Up, Forward);
+	};
+
+	ResolveFrame(Resolved.FrameForward, Resolved.FrameUp, Resolved.FrameRight);
+	if (Resolved.bHasWhipReferenceFrame)
 	{
-		// A vertical throw with a vertical component axis, which falls back to an arbitrary perpendicular.
-		Up = RopeMath::AnyTangentFromNormal(Forward);
+		ResolveFrame(Resolved.WhipReferenceForward, Resolved.WhipReferenceUp,
+			Resolved.WhipReferenceRight);
 	}
-	Resolved.FrameUp = Up;
-	Resolved.FrameRight = FVector::CrossProduct(Up, Forward);
 
 	if (Resolved.ThrowSpeed <= 0.0f)
 	{
@@ -790,15 +800,26 @@ void URopeComponent::BeginWhipSwingFromThrow(const FRopeThrowContext& ResolvedTh
 	// Everything WhipGuide.Begin needs, meaning the aim and guide axes and the inherited velocity, is
 	// derived from the resolved throw. Confining that assembly here leaves the caller, StartFreshThrow,
 	// reading as a list of step names.
+	FRopeThrowContext GuideFrame = ResolvedThrow;
+	if (ResolvedThrow.bHasWhipReferenceFrame)
+	{
+		GuideFrame.FrameForward = ResolvedThrow.WhipReferenceForward;
+		GuideFrame.FrameUp = ResolvedThrow.WhipReferenceUp;
+		GuideFrame.FrameRight = ResolvedThrow.WhipReferenceRight;
+	}
 	const FRopeWhipGuide::FSwingBasis SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
-		ResolvedThrow, ResolvedThrow.SwingPlane, ResolvedThrow.CustomSwingPlaneNormal);
+		GuideFrame, ResolvedThrow.SwingPlane, ResolvedThrow.CustomSwingPlaneNormal);
+	const FVector FinalAimDir = ResolvedThrow.bHasAimGuideHit
+		? (ResolvedThrow.AimGuideHitWorldPos - ResolvedThrow.Origin).GetSafeNormal(
+			KINDA_SMALL_NUMBER, ResolvedThrow.FrameForward)
+		: ResolvedThrow.FrameForward;
 	const FVector InheritedVelocity = ComputeThrowInheritedVelocity(ResolvedThrow);
 	FlightGuidePlaneNormal = SwingBasis.GuideRight.GetSafeNormal();
 	bHasFlightGuidePlaneNormal = !FlightGuidePlaneNormal.IsNearlyZero();
 
 	// Build the whip swing guide frame and activate it; degenerate cases fall back to the component axes.
-	WhipGuide.Begin(SwingBasis.AimDir, ResolvedThrow.Origin,
-		ResolvedThrow.FrameForward, SwingBasis.GuideUp, SwingBasis.GuideRight,
+	WhipGuide.Begin(FinalAimDir, ResolvedThrow.Origin,
+		SwingBasis.AimDir, SwingBasis.GuideUp, SwingBasis.GuideRight,
 		ResolvedThrow.ThrowSpeed, InheritedVelocity,
 		ResolvedThrow.bHasAimGuideHit, ResolvedThrow.AimGuideHitWorldPos,
 		ResolvedThrow.AimGuideSteerStartAlpha, ResolvedThrow.AimGuideLockAlpha);
@@ -1199,7 +1220,6 @@ FRopeWhipGuide::FConfig URopeComponent::MakeWhipGuideConfig() const
 	Config.FullSimStraightenTimeFraction = WhipConfig.FullSimStraightenTimeFraction;
 	// Pass the component settings through so the CPU, the GPU and the preview all use the same aim-hit
 	// endpoint envelope and direction bias.
-	Config.AimHitRootSolverFraction = WhipConfig.AimHitRootSolverFraction;
 	Config.AimHitTipSolverFraction = WhipConfig.AimHitTipSolverFraction;
 	Config.AimHitDirectionBias = WhipConfig.AimHitDirectionBias;
 	return Config;

@@ -132,7 +132,6 @@ struct FRopeComponentRefactorTestSeam
 		Config.Duration = 0.5f;
 		Config.SweepAngleDegrees = 120.0f;
 		Config.ComponentRopeLength = Rope.Sim.RopeLength;
-		Config.AimHitRootSolverFraction = 0.20f;
 		Config.AimHitTipSolverFraction = 0.25f;
 		Rope.WhipGuide.Begin(FVector::ForwardVector, Rope.Sim.Positions[0], FVector::ForwardVector,
 			FVector::UpVector, FVector::RightVector, 1500.0f, FVector::ZeroVector,

@@ -91,6 +91,9 @@ bool FRopeAimRayResolveOutputsTest::RunTest(const FString& Parameters)
 
 	FRopeAimRayThrowRequest Request;
 	Request.BaseContext.Origin = FVector::ZeroVector;
+	Request.BaseContext.FrameForward = FVector::RightVector;
+	Request.BaseContext.FrameUp = FVector::UpVector;
+	Request.BaseContext.FrameRight = FVector::BackwardVector;
 	Request.RayOrigin = FVector::ZeroVector;
 	Request.RayDirection = FVector::ForwardVector;
 	Request.RayLength = 200.0f;
@@ -110,6 +113,11 @@ bool FRopeAimRayResolveOutputsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("it returns the hit from the same sweep"), Hit.bHit);
 	TestFalse(TEXT("a wrappable target is not blocked"), Blocked.bHit);
 	TestTrue(TEXT("the aim guide is set on the context"), Resolved.bHasAimGuideHit);
+	TestTrue(TEXT("the hit direction replaces only the runtime aim forward"),
+		Resolved.FrameForward.Equals(FVector::ForwardVector, 0.01f));
+	TestTrue(TEXT("the pre-hit forward is preserved for the physical whip sweep"),
+		Resolved.bHasWhipReferenceFrame &&
+		Resolved.WhipReferenceForward.Equals(FVector::RightVector, 0.01f));
 	TestTrue(TEXT("the context's mesh matches the hit's"), Resolved.AimGuideMesh.Get() == Hit.Mesh);
 	TestEqual(TEXT("the context's bone matches the hit's"), Resolved.AimGuideBone, Hit.Bone);
 

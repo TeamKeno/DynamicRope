@@ -70,6 +70,14 @@ struct DYNAMICROPE_API FRopeThrowContext
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	FVector FrameRight = FVector::RightVector;
 
+	/** The throw frame before an aim hit replaces FrameForward with the hand-to-target direction.
+	 *  Targeted Assisted uses its backward axis as the hard swing start and its selected SwingPlane
+	 *  direction as the hemisphere leading continuously to the final AimDir. */
+	bool bHasWhipReferenceFrame = false;
+	FVector WhipReferenceForward = FVector::ForwardVector;
+	FVector WhipReferenceUp = FVector::UpVector;
+	FVector WhipReferenceRight = FVector::RightVector;
+
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Throw")
 	FVector OwnerVelocity = FVector::ZeroVector;
 
@@ -135,9 +143,8 @@ struct DYNAMICROPE_API FRopeThrowContext
 	FVector AimGuideNormal = FVector::UpVector;
 
 	/**
-	 * The span along the rope over which the blend towards the hit direction starts and completes.
-	 * The spatial blend is multiplied by the Flight time blend, so no node is locked to the hit
-	 * direction before the throw ends.
+	 * Legacy aim-guide interpolation parameters retained for Blueprint/context compatibility. The
+	 * physical guide now follows one continuous reference-backward-to-target swing for the full Flight time.
 	 */
 	float AimGuideSteerStartAlpha = 0.25f;
 	float AimGuideLockAlpha = 0.50f;
@@ -259,33 +266,22 @@ struct FRopeWhipConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float GuidedLength = 0.65f;
 
-	/** The angle swept from the starting angle, opposite the aim, round to the aim direction. */
+	/** The untargeted angle swept from the starting direction round to reference forward. A targeted
+	 *  throw starts at reference backward and follows the hemisphere selected by SwingPlane. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg", DisplayName = "Sweep Angle"))
 	float SweepAngleDegrees = 180.0f;
 
-	/** Full Simulation only: initial one-sided C-shape amplitude as a fraction of the guide length. */
+	/** Initial one-sided C-shape amplitude as a fraction of the guide length for every physical flight. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Full Simulation", meta = (ClampMin = "0.0", ClampMax = "0.35", DisplayName = "Initial Curve"))
 	float FullSimInitialCurveFraction = 0.12f;
 
-	/** Full Simulation only: normalized whip time at which the initial C shape becomes exactly straight. */
+	/** Normalized whip time at which the initial C shape becomes exactly straight. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Whip|Tuning|Full Simulation", meta = (ClampMin = "0.05", ClampMax = "1.0", DisplayName = "Straighten At"))
 	float FullSimStraightenTimeFraction = 0.50f;
 
 	/**
-	 * The fraction of the rope length at the hand end handed to the solver during an aim-hit flight.
-	 * At 0 the central spline governs right up to the hand.
-	 * The whole straight guide follows the current hand socket as one coherent line; within this range,
-	 * solver influence changes only the node's longitudinal coordinate on that line.
-	 * Fixed at this default and not exposed to designers. Consumers clamp it to the range 0 to 0.45.
-	 */
-	float AimHitRootSolverFraction = 0.20f;
-
-	/**
-	 * Bias of the hit direction blend. 1 is linear; larger values turn the spline towards the hit
-	 * direction sooner at the same point in the flight.
-	 * The aim-hit branch of RopeMath::BuildWhipGuideRawPoints uses a straight spline and does not read
-	 * this value. It is kept as the place to reinstate when curved interpolation is added to that
-	 * branch. Not exposed to designers.
+	 * Legacy hit-direction blend bias retained for serialized compatibility. The physical guide's
+	 * continuous targeted swing does not use directional lerping. Not exposed to designers.
 	 */
 	float AimHitDirectionBias = 2.0f;
 

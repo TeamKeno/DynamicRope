@@ -21,6 +21,55 @@ FVector ProjectAxisOffAim(const FVector& Axis, const FVector& AimDir, const FVec
 	return Projected.GetSafeNormal();
 }
 
+FVector SlerpDirection(const FVector& FromRaw, const FVector& ToRaw, float Alpha,
+	const FVector& OppositeFallback)
+{
+	const FVector From = FRopeWhipGuide::SafeNormalOr(FromRaw, FVector::ForwardVector);
+	const FVector To = FRopeWhipGuide::SafeNormalOr(ToRaw, From);
+	const float T = FMath::Clamp(Alpha, 0.0f, 1.0f);
+	const float Dot = FMath::Clamp(FVector::DotProduct(From, To), -1.0f, 1.0f);
+	if (Dot > 1.0f - KINDA_SMALL_NUMBER)
+	{
+		return From;
+	}
+
+	if (Dot < -1.0f + KINDA_SMALL_NUMBER)
+	{
+		const FVector Tangent = ProjectAxisOffAim(OppositeFallback, From,
+			RopeMath::AnyTangentFromNormal(From));
+		const float Angle = PI * T;
+		return (From * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
+	}
+
+	const float Angle = FMath::Acos(Dot);
+	const float SinAngle = FMath::Sin(Angle);
+	const float FromWeight = FMath::Sin((1.0f - T) * Angle) / SinAngle;
+	const float ToWeight = FMath::Sin(T * Angle) / SinAngle;
+	return (From * FromWeight + To * ToWeight).GetSafeNormal();
+}
+
+// A target may lie outside the authored reference plane, so no single great-circle can generally pass
+// through ReferenceBackward, the selected hemisphere and the target. Spherical De Casteljau keeps the
+// endpoints exact and bends towards the swing-plane direction continuously, without replacing the hard
+// start with -AimDir or snapping from the ordinary sweep onto the target partway through Flight.
+FVector ResolveTargetedSwingDirection(const FVector& ReferenceForwardRaw,
+	const FVector& HemisphereDirectionRaw, const FVector& AimDirectionRaw, float Alpha)
+{
+	const FVector ReferenceForward = FRopeWhipGuide::SafeNormalOr(
+		ReferenceForwardRaw, FVector::ForwardVector);
+	const FVector ReferenceBackward = -ReferenceForward;
+	const FVector HemisphereDirection = ProjectAxisOffAim(
+		HemisphereDirectionRaw, ReferenceForward, FVector::UpVector);
+	const FVector AimDirection = FRopeWhipGuide::SafeNormalOr(AimDirectionRaw, ReferenceForward);
+	const float T = FMath::Clamp(Alpha, 0.0f, 1.0f);
+
+	const FVector StartToHemisphere = SlerpDirection(
+		ReferenceBackward, HemisphereDirection, T, AimDirection);
+	const FVector HemisphereToAim = SlerpDirection(
+		HemisphereDirection, AimDirection, T, ReferenceForward);
+	return SlerpDirection(StartToHemisphere, HemisphereToAim, T, HemisphereDirection);
+}
+
 float ResolveGuideDuration(const FRopeWhipGuide::FConfig& Config, float ThrowSpeed)
 {
 	const float BaseDuration = FMath::Max(Config.Duration, KINDA_SMALL_NUMBER);
@@ -59,16 +108,7 @@ float GuideTailEnvelope(float RopeAlpha, float FullyGuidedEnd, const FRopeWhipGu
 	return Weight;
 }
 
-float AimGuideEnvelope(float RopeAlpha, float GuidedEnd, const FRopeWhipGuide::FConfig& Config)
-{
-	const float RootRange = FMath::Clamp(Config.AimHitRootSolverFraction, 0.0f, 0.45f);
-	const float RootWeight = RootRange > KINDA_SMALL_NUMBER
-		? RopeMath::SmoothStep(RopeAlpha / RootRange)
-		: 1.0f;
-	return FMath::Min(RootWeight, GuideTailEnvelope(RopeAlpha, GuidedEnd, Config));
-}
-
-float ResolveOrdinaryFullyGuidedEnd(float NormalizedTime, float GuidedEnd)
+float ResolveMovingFullyGuidedEnd(float NormalizedTime, float GuidedEnd)
 {
 	return FMath::Lerp(1.0f, GuidedEnd, RopeMath::SmoothStep(NormalizedTime));
 }
@@ -203,17 +243,17 @@ FRopeWhipGuide::FSwingBasis FRopeWhipGuide::ResolveSwingBasis(const FRopeThrowCo
 }
 
 void FRopeWhipGuide::Begin(const FVector& InAimDir, const FVector& InOrigin,
-	const FVector& FallbackAim, const FVector& FallbackUp, const FVector& FallbackSide,
+	const FVector& InGuideForward, const FVector& FallbackUp, const FVector& FallbackSide,
 	float InThrowSpeed, const FVector& InInheritedVelocity, bool bInHasAimTarget,
 	const FVector& InAimTarget, float InAimSteerStartAlpha, float InAimLockAlpha)
 {
 	AimDir = InAimDir.GetSafeNormal();
 	if (AimDir.IsNearlyZero())
 	{
-		AimDir = FallbackAim;
+		AimDir = InGuideForward.GetSafeNormal();
 	}
 	Origin = InOrigin;
-	GuideForward = AimDir;
+	GuideForward = InGuideForward.GetSafeNormal(KINDA_SMALL_NUMBER, AimDir);
 	GuideUp = FallbackUp.GetSafeNormal();
 	if (GuideUp.IsNearlyZero())
 	{
@@ -258,11 +298,12 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 		return;
 	}
 
-	// Full Simulation starts on its initial C-shaped guide, including the future solver-owned tail.
-	// Advance removes that curvature by the configured normalized time while releasing the tail gradually.
-	// An aim hit keeps its separate straight endpoint-envelope contract.
+	// Both physical flight modes begin with the future solver-owned tail on the guide. Advance then moves
+	// the fully guided boundary towards GuidedLength, avoiding an initial discontinuity between the aimed
+	// line and a tail left in its pre-throw solver pose. Full Simulation adds its C shape; aim hit stays straight.
 	const float GuidedEnd = FMath::Clamp(Config.GuidedLength, 0.05f, 1.0f);
-	const float InfluenceEnd = bHasAimTarget ? ResolveGuideBlendEnd(GuidedEnd, Config) : 1.0f;
+	const float FullyGuidedEnd = 1.0f;
+	const float InfluenceEnd = ResolveGuideBlendEnd(FullyGuidedEnd, Config);
 	const int32 LastGuidedNode = ResolveLastGuidedNode(LastNode, InfluenceEnd);
 	TArray<FVector> GuideTargets;
 	// Keep the target array full-sized for the CPU/GPU frame contract; LastGuidedNode controls ownership.
@@ -271,8 +312,6 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 	PrevTargetsThisFrame = GuideTargets;
 	CurrentTargetsThisFrame = GuideTargets;
 	GuidedNodesThisFrame.SetNumZeroed(Sim.Num());
-	const FVector GuideOrigin = GuideTargets[0];
-	const FVector GuideDirection = ResolveStraightGuideDirection(GuideTargets, GuideForward);
 	for (int32 i = 1; i <= LastGuidedNode; ++i)
 	{
 		if (!GuideTargets.IsValidIndex(i))
@@ -280,28 +319,20 @@ void FRopeWhipGuide::SnapToInitialPose(FRopeSimState& Sim, const FConfig& Config
 			break;
 		}
 
-		// The same envelope places the middle on the initial line and relaxes towards both ends. Solver
-		// influence changes only the coordinate along that line, never its transverse shape.
-		const float S = static_cast<float>(i) / static_cast<float>(LastNode);
-		const float GuideWeight = bHasAimTarget ? AimGuideEnvelope(S, GuidedEnd, Config) : 1.0f;
 		const FVector Target = GuideTargets[i];
-		const FVector Position = bHasAimTarget
-			? (GuideWeight > KINDA_SMALL_NUMBER
-				? BlendOnStraightGuide(
-					Sim.Positions[i], Target, GuideOrigin, GuideDirection, GuideWeight)
-				: Sim.Positions[i])
-			: Target;
+		const FVector Position = Target;
 		Sim.Positions[i] = Position;
 		Sim.PrevPositions[i] = Position;
 		CurrentTargetsThisFrame[i] = Position;
 		PrevTargetsThisFrame[i] = Position;
-		if (GuideWeight > KINDA_SMALL_NUMBER && GuidedNodesThisFrame.IsValidIndex(i))
+		if (GuidedNodesThisFrame.IsValidIndex(i))
 		{
 			GuidedNodesThisFrame[i] = 1;
 		}
 	}
 
-	// After the final envelope blend, the guided targets alone are made inextensible again. The free end keeps its existing solver pose.
+	// After the final envelope blend, the guided targets alone are made inextensible again. Any node already
+	// outside the moving influence boundary keeps its existing solver pose.
 	const FVector Root = Sim.bStartPinned ? Sim.StartPinTarget : Sim.Positions[0];
 	ClampGuidedTargetStretch(Root, Sim.SegmentLength, GuidedNodesThisFrame, CurrentTargetsThisFrame);
 	for (int32 i = 1; i <= LastGuidedNode; ++i)
@@ -334,12 +365,10 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 	// A value of one intentionally keeps the whole rope hard-guided until the flight guide ends.
 	// Do not silently reduce it: doing so creates a moving solver/guide boundary in the tail.
 	const float GuidedEnd = FMath::Clamp(Config.GuidedLength, 0.05f, 1.0f);
-	// Full Simulation moves the fully guided boundary from the initially seeded tip towards GuidedLength.
-	// The shared tail envelope adds a smooth handoff after that boundary instead of releasing nodes in a
-	// binary step. Assisted keeps a fixed fully guided boundary at GuidedLength.
-	const float FullyGuidedEnd = bHasAimTarget
-		? GuidedEnd
-		: ResolveOrdinaryFullyGuidedEnd(T, GuidedEnd);
+	// Both physical flight modes move the fully guided boundary from the initially seeded tip towards
+	// GuidedLength. The shared tail envelope adds a smooth handoff after that boundary instead of leaving
+	// Assisted's final span solver-owned from the first frame.
+	const float FullyGuidedEnd = ResolveMovingFullyGuidedEnd(T, GuidedEnd);
 	const float InfluenceEnd = ResolveGuideBlendEnd(FullyGuidedEnd, Config);
 	const int32 LastGuidedNode = ResolveLastGuidedNode(LastNode, InfluenceEnd);
 	TArray<FVector> GuideTargets;
@@ -364,10 +393,8 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 	const FVector PreviousGuideOrigin = PreviousTargets.Num() > 0
 		? PreviousTargets[0]
 		: CurrentGuideOrigin;
-	const bool bCurrentFullSimCurve = !bHasAimTarget &&
-		ResolveFullSimCurveWeight(T, Config) > KINDA_SMALL_NUMBER;
-	const bool bPreviousFullSimCurve = !bHasAimTarget &&
-		ResolveFullSimCurveWeight(PreviousT, Config) > KINDA_SMALL_NUMBER;
+	const bool bCurrentCurve = ResolveFullSimCurveWeight(T, Config) > KINDA_SMALL_NUMBER;
+	const bool bPreviousCurve = ResolveFullSimCurveWeight(PreviousT, Config) > KINDA_SMALL_NUMBER;
 
 	// This computes the mask and the debug data alone; the actual write is performed by ApplyToSim on the CPU path or
 	// by the GPU override pass, which consume the same products, meaning the current and previous targets and the mask.
@@ -384,11 +411,9 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 			break;
 		}
 
-		// Both modes own the middle through a smooth tail envelope. Full Simulation moves the start of that
-		// envelope over time; Assisted keeps it at GuidedLength and additionally relaxes the hand end.
-		const float GuideWeight = bHasAimTarget
-			? AimGuideEnvelope(S, GuidedEnd, Config)
-			: GuideTailEnvelope(S, FullyGuidedEnd, Config);
+		// Target acquisition changes only the time-varying guide direction. Shape ownership is identical
+		// in targeted Assisted, untargeted Assisted and Full Simulation.
+		const float GuideWeight = GuideTailEnvelope(S, FullyGuidedEnd, Config);
 		if (GuideWeight <= KINDA_SMALL_NUMBER)
 		{
 			continue;
@@ -398,15 +423,14 @@ void FRopeWhipGuide::Advance(float DeltaTime, const FRopeSimState& Sim, const FC
 		const FVector PreviousGuide = PreviousTargets.IsValidIndex(i)
 			? PreviousTargets[i]
 			: CurrentGuide;
-		// Full Simulation follows the actual C target while curvature is active. Once it reaches zero,
-		// switch back to longitudinal-only blending so every guided node is exactly collinear. Assisted
-		// always uses that straight path to preserve its target alignment.
-		CurrentTargetsThisFrame[i] = bCurrentFullSimCurve
+		// Every physical flight follows the same C target while curvature is active. Once it reaches zero,
+		// longitudinal-only blending keeps every guided node exactly collinear with its resolved aim.
+		CurrentTargetsThisFrame[i] = bCurrentCurve
 			? FMath::Lerp(Sim.Positions[i], CurrentGuide, GuideWeight)
 			: BlendOnStraightGuide(
 				Sim.Positions[i], CurrentGuide,
 				CurrentGuideOrigin, CurrentGuideDirection, GuideWeight);
-		PrevTargetsThisFrame[i] = bPreviousFullSimCurve
+		PrevTargetsThisFrame[i] = bPreviousCurve
 			? FMath::Lerp(Sim.PrevPositions[i], PreviousGuide, GuideWeight)
 			: BlendOnStraightGuide(
 				Sim.PrevPositions[i], PreviousGuide,
@@ -455,9 +479,7 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 	const float GuidedEnd = FMath::Clamp(Config.GuidedLength, 0.05f, 1.0f);
 	const float Duration = ResolveGuideDuration(Config, GuideThrowSpeed);
 	const float NextT = FMath::Clamp((Elapsed + DeltaTime) / Duration, 0.0f, 1.0f);
-	const float FullyGuidedEnd = bHasAimTarget
-		? GuidedEnd
-		: ResolveOrdinaryFullyGuidedEnd(NextT, GuidedEnd);
+	const float FullyGuidedEnd = ResolveMovingFullyGuidedEnd(NextT, GuidedEnd);
 	const float InfluenceEnd = ResolveGuideBlendEnd(FullyGuidedEnd, Config);
 	const int32 LastGuidedNode = ResolveLastGuidedNode(LastNode, InfluenceEnd);
 	TArray<FVector> GuideTargets;
@@ -472,8 +494,7 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 	PreviewGuidedMask.SetNumZeroed(Sim.Num());
 	const FVector GuideOrigin = GuideTargets[0];
 	const FVector GuideDirection = ResolveStraightGuideDirection(GuideTargets, GuideForward);
-	const bool bFullSimCurve = !bHasAimTarget &&
-		ResolveFullSimCurveWeight(NextT, Config) > KINDA_SMALL_NUMBER;
+	const bool bCurve = ResolveFullSimCurveWeight(NextT, Config) > KINDA_SMALL_NUMBER;
 	for (int32 i = 1; i <= LastGuidedNode; ++i)
 	{
 		if (!GuideTargets.IsValidIndex(i) ||
@@ -483,16 +504,14 @@ void FRopeWhipGuide::PreviewNextTargets(float DeltaTime, const FRopeSimState& Si
 		}
 
 		const float S = static_cast<float>(i) / static_cast<float>(LastNode);
-		const float GuideWeight = bHasAimTarget
-			? AimGuideEnvelope(S, GuidedEnd, Config)
-			: GuideTailEnvelope(S, FullyGuidedEnd, Config);
+		const float GuideWeight = GuideTailEnvelope(S, FullyGuidedEnd, Config);
 		if (GuideWeight <= KINDA_SMALL_NUMBER)
 		{
 			continue;
 		}
 
 		const FVector Target = GuideTargets[i];
-		OutTargets[i] = bFullSimCurve
+		OutTargets[i] = bCurve
 			? FMath::Lerp(Sim.Positions[i], Target, GuideWeight)
 			: BlendOnStraightGuide(
 				Sim.Positions[i], Target, GuideOrigin, GuideDirection, GuideWeight);
@@ -573,34 +592,43 @@ void FRopeWhipGuide::BuildGuideTargets(float NormalizedTime, int32 LastGuidedNod
 	const FVector LockedAimDir = bHasAimTarget
 		? (AimTarget - HandPos).GetSafeNormal(KINDA_SMALL_NUMBER, Forward)
 		: Forward;
-	// Both modes keep the rotating whip presentation. Assisted rotates one coherent straight line around
-	// its locked aim direction, so T=1 passes exactly through the target instead of merely ending parallel
-	// to a line that was built at the old throw origin.
-	const FVector SweepForward = bHasAimTarget ? LockedAimDir : Forward;
+	// Every throw starts from the preserved frame's backward direction. For a target hit, the selected
+	// swing-plane direction is a spherical control direction, not an axis reprojected around AimDir. This
+	// preserves OwnerBackward at T=0 and the authored hemisphere while reaching AimDir continuously at T=1.
+	const FVector SweepForward = Forward;
 	const FVector SweepUp = ProjectAxisOffAim(Up, SweepForward, FVector::UpVector);
 	const float SweepRadians = FMath::DegreesToRadians(
 		FMath::Clamp(Config.SweepAngleDegrees, 1.0f, 180.0f));
-	const float AngleFromAim = SweepRadians * (1.0f - T);
-	FVector GuideDirection = (SweepForward * FMath::Cos(AngleFromAim) +
-		SweepUp * FMath::Sin(AngleFromAim)).GetSafeNormal();
-	if (T <= KINDA_SMALL_NUMBER)
+	FVector GuideDirection = FVector::ZeroVector;
+	if (bHasAimTarget)
 	{
-		GuideDirection = (SweepForward * FMath::Cos(SweepRadians) +
-			SweepUp * FMath::Sin(SweepRadians)).GetSafeNormal();
+		GuideDirection = ResolveTargetedSwingDirection(
+			SweepForward, SweepUp, LockedAimDir, T);
 	}
-	else if (T >= 1.0f - KINDA_SMALL_NUMBER)
+	else
 	{
-		GuideDirection = SweepForward;
+		const float AngleFromAim = SweepRadians * (1.0f - T);
+		GuideDirection = (SweepForward * FMath::Cos(AngleFromAim) +
+			SweepUp * FMath::Sin(AngleFromAim)).GetSafeNormal();
+		if (T <= KINDA_SMALL_NUMBER)
+		{
+			GuideDirection = (SweepForward * FMath::Cos(SweepRadians) +
+				SweepUp * FMath::Sin(SweepRadians)).GetSafeNormal();
+		}
+		else if (T >= 1.0f - KINDA_SMALL_NUMBER)
+		{
+			GuideDirection = SweepForward;
+		}
 	}
 
 	TArray<FVector> RawPoints;
 	RopeMath::BuildWhipGuideRawPoints(HandPos, GuideDirection, LockedAimDir, bHasAimTarget, T,
 		GuideLength, InheritedDrift, AimSteerStartAlpha, AimLockAlpha,
 		Config.AimHitDirectionBias, RawSampleCount, RawPoints);
-	if (!bHasAimTarget && RawPoints.Num() >= 2)
+	if (RawPoints.Num() >= 2)
 	{
-		// A shallow one-sided bow gives Full Simulation a small C silhouette at the throw boundary.
-		// Both endpoints stay on the rotating baseline, so at T=0 the free end remains opposite AimDir.
+		// A shallow one-sided bow gives every physical flight the same C silhouette at the throw boundary.
+		// Both endpoints stay on the rotating baseline, so at T=0 the free end remains ReferenceBackward.
 		// The bow fades to exactly zero at StraightenTime, after which this is the ordinary straight guide.
 		const float CurveWeight = ResolveFullSimCurveWeight(T, Config);
 		const float CurveAmplitude = GuideLength *

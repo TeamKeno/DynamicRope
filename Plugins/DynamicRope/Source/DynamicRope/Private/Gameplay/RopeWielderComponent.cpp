@@ -1497,6 +1497,15 @@ FRopeThrowContext URopeWielderComponent::BuildBaseThrowContext(const FVector& Ai
 	const FVector ExplicitAimDir = AimDir.GetSafeNormal();
 	if (!ExplicitAimDir.IsNearlyZero())
 	{
+		// SetThrowContextForward has to rotate the runtime aim basis so the ray follows an explicit
+		// ThrowInDirection request, but that basis is not the physical swing reference. Capture the
+		// configured Owner/Camera/Socket/Custom frame first. Otherwise a target perpendicular to
+		// OwnerForward can make AimDir parallel to CustomSwingPlaneNormal; ResolveSwingBasis then sees a
+		// zero cross product, falls back to FrameUp, and sends the Assisted tail above the hand.
+		Context.bHasWhipReferenceFrame = true;
+		Context.WhipReferenceForward = Context.FrameForward;
+		Context.WhipReferenceUp = Context.FrameUp;
+		Context.WhipReferenceRight = Context.FrameRight;
 		SetThrowContextForward(Context, ExplicitAimDir);
 	}
 

@@ -439,9 +439,11 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 			float MaxV = -TNumericLimits<float>::Max();
 			int32 CrossSectionContributorCount = 0;
 			TArray<FVector2D, TInlineAllocator<128>> IslandProjectedBoundsPoints;
+			TArray<FVector, TInlineAllocator<128>> IslandSDFAxisSamples;
 			float IslandMinAxisCoordinate = TNumericLimits<float>::Max();
 			float IslandMaxAxisCoordinate = -TNumericLimits<float>::Max();
 			int32 IslandBoundsContributorCount = 0;
+			int32 IslandSDFAxisContributorCount = 0;
 
 			// Projecting the intersections of the twelve edges of the oriented boxes with the latch plane
 			// gives the real outline extent of the cross-section, unbiased by the number of bones or by the
@@ -501,6 +503,14 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 					IslandMaxAxisCoordinate = FMath::Max(
 						IslandMaxAxisCoordinate, AxisCoordinate);
 				}
+				if (Member.bHasOrientedSDFBounds)
+				{
+					for (const FVector& Corner : Corners)
+					{
+						IslandSDFAxisSamples.Add(Corner);
+					}
+					++IslandSDFAxisContributorCount;
+				}
 				++IslandBoundsContributorCount;
 
 				bool bMemberContributed = false;
@@ -541,6 +551,94 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 				}
 
 				CrossSectionContributorCount += bMemberContributed ? 1 : 0;
+			}
+
+			// The island axis is the principal axis of the oriented SDF bounds in their captured world pose.
+			// Sampling every corner preserves both each volume's orientation and the separation between members.
+			// A nearly isotropic covariance has no meaningful axis, so it keeps the configured magnitude rather
+			// than selecting an arbitrary world basis.
+			FVector IslandAxisDirection = FVector::ZeroVector;
+			bool bHasIslandAxis = false;
+			float IslandAxisPrincipalVariance = 0.0f;
+			float IslandAxisOtherVarianceMean = 0.0f;
+			if (IslandSDFAxisSamples.Num() >= 8)
+			{
+				FVector SampleCenter = FVector::ZeroVector;
+				for (const FVector& Sample : IslandSDFAxisSamples)
+				{
+					SampleCenter += Sample;
+				}
+				SampleCenter /= static_cast<double>(IslandSDFAxisSamples.Num());
+
+				double CovXX = 0.0;
+				double CovXY = 0.0;
+				double CovXZ = 0.0;
+				double CovYY = 0.0;
+				double CovYZ = 0.0;
+				double CovZZ = 0.0;
+				for (const FVector& Sample : IslandSDFAxisSamples)
+				{
+					const FVector Delta = Sample - SampleCenter;
+					CovXX += Delta.X * Delta.X;
+					CovXY += Delta.X * Delta.Y;
+					CovXZ += Delta.X * Delta.Z;
+					CovYY += Delta.Y * Delta.Y;
+					CovYZ += Delta.Y * Delta.Z;
+					CovZZ += Delta.Z * Delta.Z;
+				}
+				const double InvSampleCount = 1.0 /
+					static_cast<double>(IslandSDFAxisSamples.Num());
+				CovXX *= InvSampleCount;
+				CovXY *= InvSampleCount;
+				CovXZ *= InvSampleCount;
+				CovYY *= InvSampleCount;
+				CovYZ *= InvSampleCount;
+				CovZZ *= InvSampleCount;
+
+				IslandAxisDirection = FVector::ForwardVector;
+				if (CovYY > CovXX && CovYY >= CovZZ)
+				{
+					IslandAxisDirection = FVector::RightVector;
+				}
+				else if (CovZZ > CovXX && CovZZ > CovYY)
+				{
+					IslandAxisDirection = FVector::UpVector;
+				}
+				for (int32 Iteration = 0; Iteration < 8; ++Iteration)
+				{
+					FVector NextAxis(
+						CovXX * IslandAxisDirection.X + CovXY * IslandAxisDirection.Y +
+							CovXZ * IslandAxisDirection.Z,
+						CovXY * IslandAxisDirection.X + CovYY * IslandAxisDirection.Y +
+							CovYZ * IslandAxisDirection.Z,
+						CovXZ * IslandAxisDirection.X + CovYZ * IslandAxisDirection.Y +
+							CovZZ * IslandAxisDirection.Z);
+					if (!NextAxis.Normalize())
+					{
+						IslandAxisDirection = FVector::ZeroVector;
+						break;
+					}
+					IslandAxisDirection = NextAxis;
+				}
+
+				if (!IslandAxisDirection.IsNearlyZero())
+				{
+					const FVector CovarianceTimesAxis(
+						CovXX * IslandAxisDirection.X + CovXY * IslandAxisDirection.Y +
+							CovXZ * IslandAxisDirection.Z,
+						CovXY * IslandAxisDirection.X + CovYY * IslandAxisDirection.Y +
+							CovYZ * IslandAxisDirection.Z,
+						CovXZ * IslandAxisDirection.X + CovYZ * IslandAxisDirection.Y +
+							CovZZ * IslandAxisDirection.Z);
+					IslandAxisPrincipalVariance = static_cast<float>(FVector::DotProduct(
+						IslandAxisDirection, CovarianceTimesAxis));
+					const float TotalVariance = static_cast<float>(CovXX + CovYY + CovZZ);
+					IslandAxisOtherVarianceMean = FMath::Max(
+						0.0f, (TotalVariance - IslandAxisPrincipalVariance) * 0.5f);
+					constexpr float MinIslandAxisAnisotropyRatio = 1.05f;
+					bHasIslandAxis = IslandAxisPrincipalVariance >
+						IslandAxisOtherVarianceMean * MinIslandAxisAnisotropyRatio;
+				}
 			}
 
 			// Re-centring happens only where the composite cross-section genuinely holds two or more
@@ -636,13 +734,20 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 				KINDA_SMALL_NUMBER, State.PathNormalWorld);
 			State.PathCompositeSweepAngleRad = 0.0f;
 
-			// The pitch of the new independent analytic helix is not a designer constant: it is read from the
-			// tail direction the rope was lying in at the moment of contact. Removing the radial approach
-			// component and decomposing the tangent into circumferential and axial parts gives the pitch as
-			// their ratio. With almost no circumferential component that ratio explodes, so it is set to zero.
+			// The contact span remains the preferred pitch source, but a straight flight guide can put that span
+			// exactly in the wrapping plane and therefore erase its axial component. In that case the configured
+			// pitch supplies a stable helical baseline. Contact evidence is blended in smoothly as its axial
+			// component grows, while the fallback sign uses the side of the SDF island with more axial room.
 			const TCHAR* PitchSource = TEXT("NotUsed");
 			float PitchAxisComponent = 0.0f;
 			float PitchCircumferenceComponent = 0.0f;
+			float ContactPitchScale = 0.0f;
+			float ContactPitchConfidence = 0.0f;
+			float GeometryPitchFactor = 1.0f;
+			float RopePlaneIslandAxisAlignment = 0.0f;
+			float FallbackPitchScale = 0.0f;
+			float PositiveAxisRoom = 0.0f;
+			float NegativeAxisRoom = 0.0f;
 			float UnclampedPitchScale = 0.0f;
 			float AxisLimitedMaxAbsPitch = 0.0f;
 			float PitchAvailableAxisDistance = 0.0f;
@@ -678,8 +783,45 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 				constexpr float MinContactCircumferenceComponent = 0.1f;
 				if (PitchCircumferenceComponent >= MinContactCircumferenceComponent)
 				{
-					UnclampedPitchScale =
+					ContactPitchScale =
 						PitchAxisComponent / PitchCircumferenceComponent;
+
+					const float ConfiguredFallbackSign =
+						Ctx.Config.WrappingHelixPitchScale < 0.0f ? -1.0f : 1.0f;
+					float FallbackPitchSign = ConfiguredFallbackSign;
+					if (State.bPathCompositeAxisRangeValid)
+					{
+						PositiveAxisRoom = FMath::Max(
+							0.0f, State.PathCompositeAxisMaxDistance - CurrentAxisDistance);
+						NegativeAxisRoom = FMath::Max(
+							0.0f, CurrentAxisDistance - State.PathCompositeAxisMinDistance);
+						if (!FMath::IsNearlyEqual(PositiveAxisRoom, NegativeAxisRoom))
+						{
+							FallbackPitchSign = PositiveAxisRoom > NegativeAxisRoom ? 1.0f : -1.0f;
+						}
+					}
+					const FVector RopePlaneNormal = Ctx.bHasGuidePlaneNormal
+						? Ctx.GuidePlaneNormal.GetSafeNormal(
+							KINDA_SMALL_NUMBER, AxisDirection)
+						: AxisDirection;
+					if (bHasIslandAxis)
+					{
+						RopePlaneIslandAxisAlignment = FMath::Clamp(
+							FMath::Abs(static_cast<float>(FVector::DotProduct(
+								RopePlaneNormal, IslandAxisDirection))), 0.0f, 1.0f);
+						GeometryPitchFactor = FMath::Sqrt(FMath::Max(
+							0.0f, 1.0f - FMath::Square(RopePlaneIslandAxisAlignment)));
+					}
+					FallbackPitchScale = FallbackPitchSign *
+						FMath::Abs(Ctx.Config.WrappingHelixPitchScale) * GeometryPitchFactor;
+
+					constexpr float ContactPitchConfidenceStart = 0.02f;
+					constexpr float ContactPitchConfidenceFull = 0.15f;
+					ContactPitchConfidence = FMath::SmoothStep(
+						ContactPitchConfidenceStart, ContactPitchConfidenceFull,
+						FMath::Abs(PitchAxisComponent));
+					UnclampedPitchScale = FMath::Lerp(
+						FallbackPitchScale, ContactPitchScale, ContactPitchConfidence);
 					State.PathCompositeHelixPitchScale = UnclampedPitchScale;
 
 					// The sign and slope of the pitch taken from the contact are preserved, and only its
@@ -738,9 +880,20 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 								FittedAbsPitch + KINDA_SMALL_NUMBER < RawAbsPitch;
 						}
 					}
-					PitchSource = bHasContactSpan
-						? TEXT("ContactSpan")
-						: TEXT("LatchTangentFallback");
+					if (ContactPitchConfidence >= 1.0f - KINDA_SMALL_NUMBER)
+					{
+						PitchSource = bHasContactSpan
+							? TEXT("ContactSpan")
+							: TEXT("LatchTangent");
+					}
+					else if (ContactPitchConfidence <= KINDA_SMALL_NUMBER)
+					{
+						PitchSource = TEXT("ConfiguredFallback");
+					}
+					else
+					{
+						PitchSource = TEXT("ContactFallbackBlend");
+					}
 				}
 				else
 				{
@@ -769,19 +922,30 @@ bool FRopeWrappingPhase::InitializeProgressiveWrapPath(const FRopeSurfaceAnchor&
 					"islandBoundsContributors=%d origin=%s direction=%s radial=%s "
 					"probeRadius=%.2fcm helixRadius=%.2fcm latchRadius=%.2fcm "
 					"axisRange=[%.2f,%.2f]cm winding=%+.0f "
-					"pitch=%.3f rawPitch=%.3f pitchSource=%s axisClamp=%d maxPitch=%.3f "
+					"pitch=%.3f rawPitch=%.3f contactPitch=%.3f fallbackPitch=%.3f "
+					"contactConfidence=%.3f geometryPitchFactor=%.3f pitchSource=%s "
+					"axisClamp=%d maxPitch=%.3f "
 					"axisRoom=%.2fcm usableAxis=%.2fcm safety=%.2fcm plannedBase=%.2fcm "
-					"contactComponents(axis=%.3f circumference=%.3f)"),
+					"contactComponents(axis=%.3f circumference=%.3f) "
+					"fallbackRoom(positive=%.2fcm negative=%.2fcm) "
+					"islandAxis(valid=%d contributors=%d direction=%s alignment=%.3f "
+					"principalVariance=%.3f otherVarianceMean=%.3f)"),
 				*Ctx.OwnerName, CrossSectionContributorCount, IslandBoundsContributorCount,
 				*State.PathAxisOrigin.ToString(), *State.PathAxisDirection.ToString(),
 				*State.PathCompositeSweepRadial.ToString(), State.PathCompositeProbeRadius,
 				State.PathCompositeHelixRadius, CurrentSurfaceRadius,
 				State.PathCompositeAxisMinDistance, State.PathCompositeAxisMaxDistance,
 				State.PathWindingSign, State.PathCompositeHelixPitchScale,
-				UnclampedPitchScale, PitchSource, bPitchClampedByAxisRange ? 1 : 0,
+				UnclampedPitchScale, ContactPitchScale, FallbackPitchScale,
+				ContactPitchConfidence, GeometryPitchFactor, PitchSource,
+				bPitchClampedByAxisRange ? 1 : 0,
 				AxisLimitedMaxAbsPitch, PitchAvailableAxisDistance,
 				PitchUsableAxisDistance, PitchAxisSafetyMargin, PitchPlannedBaseTravel,
-				PitchAxisComponent, PitchCircumferenceComponent);
+				PitchAxisComponent, PitchCircumferenceComponent,
+				PositiveAxisRoom, NegativeAxisRoom,
+				bHasIslandAxis ? 1 : 0, IslandSDFAxisContributorCount,
+				*IslandAxisDirection.ToString(), RopePlaneIslandAxisAlignment,
+				IslandAxisPrincipalVariance, IslandAxisOtherVarianceMean);
 
 			// A composite island owns several contact surfaces by itself. If an older secondary seed cut the
 			// path short before the first secondary node, there would be no length left to trace the

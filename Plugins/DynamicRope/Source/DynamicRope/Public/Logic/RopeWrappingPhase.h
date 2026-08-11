@@ -194,6 +194,8 @@ private:
 	// Verifies the stored coordinates of surface, bridge and virtual path points and the centreline
 	// conversion contract.
 	friend class FRopeWrappingPathPointCoordinateContractTest;
+	// Verifies that the arbitrary wrap-axis sign opposes the tail's side of character/component Up.
+	friend class FRopeWrappingAxisFollowsTailUpTest;
 	// Verifies that a virtual run is produced once and that bridge ownership is handed to the
 	// component.
 	friend struct FRopeComponentRefactorTestSeam;
@@ -305,6 +307,7 @@ private:
 	 *  centre of an SDF's bounds. Used to correct the cluster origin. */
 	static bool GetColliderCenter(const IRopeCollider& Collider, FVector& OutCenter);
 
+	/** Resolves an arbitrary wrap-axis sign so it occupies the opposite character-Up hemisphere from the tail. */
 	void OrientWrappingAxisByTail(const FRopeSurfaceAnchor& LatchAnchor, const FRopeSimState& Sim,
 		const USceneComponent* Mesh, FVector& InOutAxisDirection) const;
 

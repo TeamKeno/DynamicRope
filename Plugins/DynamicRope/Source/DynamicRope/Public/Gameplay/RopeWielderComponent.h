@@ -315,8 +315,8 @@ public:
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.0", Units = "cm"))
 	float AimRayQueryRadius = 0.0f;
 
-	/** Fraction along the rope at which the current swing direction starts blending towards the hit
-	 *  direction.
+	/** Legacy target-steering parameter retained for Blueprint compatibility. The physical guide now
+	 *  uses one continuous target-centred angular sweep.
 	 *
 	 *  Blueprint only: internal guide curve maths paired with LockAlpha below, with no basis for a
 	 *  user to pick a value. To change how aiming looks, use GuidedLength or SweepAngleDegrees on the
@@ -324,8 +324,8 @@ public:
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.0", ClampMax = "0.9"))
 	float AimRayGuideSteerStartAlpha = 0.25f;
 
-	/** Fraction along the rope at which the spatial blend towards the hit direction reaches its
-	 *  maximum. It is not fully locked until the flight-time blend completes.
+	/** Legacy target-lock parameter retained for Blueprint compatibility. The physical guide reaches
+	 *  AimDir only at the end of its continuous angular sweep.
 	 *
 	 *  Blueprint only: paired with SteerStartAlpha above. */
 	UPROPERTY(BlueprintReadWrite, Category = "Rope|Aim|Tuning", meta = (ClampMin = "0.05", ClampMax = "1.0"))
@@ -567,8 +567,9 @@ public:
 	void ThrowNow();
 
 	/** Builds the origin, frame and velocity context captured at the moment of a throw, once per
-	 *  throw on the game thread. A valid AimDir replaces the configured frame forward. Override to
-	 *  change how the context is assembled. */
+	 *  throw on the game thread. A valid AimDir replaces the runtime frame forward while preserving
+	 *  the configured frame separately as the physical whip reference. Override to change how the
+	 *  context is assembled. */
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	virtual FRopeThrowContext BuildThrowContext(const FVector& AimDir) const;
 

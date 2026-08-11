@@ -11,7 +11,8 @@
 #include "Solver/RopeXPBDSolver.h"
 #include "RopeTestHelpers.h"
 
-// Whether an aim-hit guide holds the middle alone and leaves the solver state at both ends.
+// A targeted physical flight starts at reference backward, follows the selected swing hemisphere and
+// reaches the target continuously while sharing the ordinary gradual tail release.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimHitEndpointSolverBlendTest,
 	"DynamicRope.Solver.AimHitEndpointSolverBlend",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -27,16 +28,25 @@ bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 
 	FRopeWhipGuide::FConfig Config;
 	Config.Duration = 0.5f;
-	Config.SweepAngleDegrees = 120.0f;
+	Config.SweepAngleDegrees = 180.0f;
 	Config.ComponentRopeLength = Sim.RopeLength;
-	Config.AimHitRootSolverFraction = 0.20f;
+	Config.FullSimInitialCurveFraction = 0.0f;
+	Config.FullSimStraightenTimeFraction = 0.20f;
 	Config.AimHitTipSolverFraction = 0.25f;
 
-	const FVector AimTarget(100.0f, 40.0f, 15.0f);
+	// Exercise the actual AimAndFrameRight basis with a downward target. Reprojecting FrameRight around
+	// AimDir used to add positive Z and, worse, made the initial direction -AimDir instead of OwnerBackward.
+	FRopeThrowContext ReferenceFrame;
+	ReferenceFrame.FrameForward = FVector::ForwardVector;
+	ReferenceFrame.FrameUp = FVector::UpVector;
+	ReferenceFrame.FrameRight = FVector::RightVector;
+	const FRopeWhipGuide::FSwingBasis SwingBasis = FRopeWhipGuide::ResolveSwingBasis(
+		ReferenceFrame, ERopeSwingPlane::AimAndFrameRight, FVector::RightVector);
+	const FVector AimTarget = Sim.StartPinTarget + FVector(0.0f, 100.0f, -50.0f);
 	const FVector LockedAimDirection = (AimTarget - Sim.StartPinTarget).GetSafeNormal();
 	FRopeWhipGuide Guide;
-	Guide.Begin(FVector::ForwardVector, Sim.Positions[0], FVector::ForwardVector,
-		FVector::UpVector, FVector::RightVector, 1500.0f, FVector::ZeroVector,
+	Guide.Begin(LockedAimDirection, Sim.Positions[0], SwingBasis.AimDir,
+		SwingBasis.GuideUp, SwingBasis.GuideRight, 1500.0f, FVector::ZeroVector,
 		/*bHasAimTarget*/ true, AimTarget, 0.25f, 0.50f);
 	const int32 LastNode = Sim.Num() - 1;
 	const int32 FirstBlendedTailNode = FMath::Clamp(
@@ -46,16 +56,21 @@ bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 	const int32 FirstFullySolverTailNode = FMath::Clamp(
 		FMath::FloorToInt(static_cast<float>(LastNode) * InfluenceEnd) + 1, 1, LastNode);
 	const FVector TipBeforeSnap = Sim.Positions.Last();
-	const FVector SolverTailBeforeSnap = Sim.Positions[FirstFullySolverTailNode];
 	Guide.SnapToInitialPose(Sim, Config);
-	TestTrue(TEXT("initial aim snap preserves the solver-owned tip"),
+	TestTrue(TEXT("initial Assisted snap guides the exact tip like Full Simulation"),
+		Guide.IsGuidedNodeThisFrame(LastNode));
+	TestFalse(TEXT("initial Assisted snap moves the tip out of its pre-throw solver pose"),
 		Sim.Positions.Last().Equals(TipBeforeSnap, 0.01f));
-	TestTrue(TEXT("Assisted crossfades instead of cutting ownership at GuidedLength"),
+	TestTrue(TEXT("initial Assisted snap retains the future tail crossfade nodes"),
 		Guide.IsGuidedNodeThisFrame(FirstBlendedTailNode));
-	TestFalse(TEXT("Assisted releases nodes after the GuidedLength crossfade"),
+	TestTrue(TEXT("initial Assisted snap retains nodes beyond the final tail boundary"),
 		Guide.IsGuidedNodeThisFrame(FirstFullySolverTailNode));
-	TestTrue(TEXT("initial aim snap preserves the tail beyond the Assisted crossfade"),
-		Sim.Positions[FirstFullySolverTailNode].Equals(SolverTailBeforeSnap, 0.01f));
+	TestTrue(TEXT("the hard initial direction is OwnerBackward, not opposite AimDir"),
+		FVector::DotProduct(
+			(Sim.Positions.Last() - Sim.StartPinTarget).GetSafeNormal(),
+			-SwingBasis.AimDir) > 0.999f);
+	TestTrue(TEXT("the Right-plane initial direction has no upward contamination"),
+		(Sim.Positions.Last() - Sim.StartPinTarget).GetSafeNormal().Z <= KINDA_SMALL_NUMBER);
 
 	const auto CheckGuidedNodesOnLine = [this, &Guide](const TCHAR* Stage,
 		const TArray<FVector>& Positions, const FVector& LineOrigin, const FVector& LineDirection)
@@ -77,28 +92,19 @@ bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 		TestTrue(*FString::Printf(TEXT("%s checks at least one guided node"), Stage), bCheckedAny);
 	};
 
-	const FVector InitialGuideDirection = RopeMath::ArcDirectionAtAlpha(
-		LockedAimDirection, FVector::UpVector, Config.SweepAngleDegrees, 0.0f);
-	CheckGuidedNodesOnLine(TEXT("initial aim snap"), Sim.Positions,
-		Sim.StartPinTarget, InitialGuideDirection);
-
 	const int32 MiddleNode = LastNode / 2;
 	// The free end is moved off the spline to verify that Advance does not overwrite the end node again.
 	const FVector FreeTipBefore(200.0f, 40.0f, -15.0f);
 	Sim.Positions[LastNode] = FreeTipBefore;
 	Sim.PrevPositions[LastNode] = FreeTipBefore;
 	Sim.StartPinPrev = Sim.StartPinTarget;
-	Guide.Advance(1.0f / 60.0f, Sim, Config);
-	const float AdvancedT = (1.0f / 60.0f) / Config.Duration;
-	const FVector CurrentGuideDirection = RopeMath::ArcDirectionAtAlpha(
-		LockedAimDirection, FVector::UpVector, Config.SweepAngleDegrees, AdvancedT);
-	CheckGuidedNodesOnLine(TEXT("advanced current targets"), Guide.GetCurrentTargets(),
-		Sim.StartPinTarget, CurrentGuideDirection);
-	CheckGuidedNodesOnLine(TEXT("advanced previous targets"), Guide.GetPrevTargets(),
-		Sim.StartPinPrev, InitialGuideDirection);
+	const float FirstStep = 1.0f / 60.0f;
+	Guide.Advance(FirstStep, Sim, Config);
 
 	TestTrue(TEXT("middle node remains spline-guided"), Guide.IsGuidedNodeThisFrame(MiddleNode));
 	TestFalse(TEXT("tip node is released to solver"), Guide.IsGuidedNodeThisFrame(LastNode));
+	TestTrue(TEXT("Assisted releases its tail boundary gradually instead of on the first frame"),
+		Guide.IsGuidedNodeThisFrame(FirstFullySolverTailNode));
 	TestTrue(TEXT("released tip keeps solver position before solve"),
 		Guide.GetCurrentTargets().IsValidIndex(LastNode) &&
 		Guide.GetCurrentTargets()[LastNode].Equals(FreeTipBefore, 0.01f));
@@ -119,16 +125,41 @@ bool FRopeAimHitEndpointSolverBlendTest::RunTest(const FString& Parameters)
 			Guide.GetCurrentTargets()[NodeIndex].Equals(DebugTargets[DebugIndex], 0.01f));
 	}
 
-	// The presentation rotates during the throw, but the last Assisted line must land on the explicit
-	// AimTarget even when Begin's fallback aim direction is different.
-	Guide.Advance(Config.Duration, Sim, Config);
+	// At half time the path is still travelling through the selected Right hemisphere rather than
+	// snapping onto AimDir. Since both the start and the target are non-rising, the path must not gain Z.
+	Guide.Advance(Config.Duration * 0.50f - FirstStep, Sim, Config);
+	const FVector MidpointDirection = (Guide.GetCurrentTargets()[MiddleNode] -
+		Sim.StartPinTarget).GetSafeNormal();
+	TestTrue(TEXT("half-time path remains on the selected Right hemisphere"),
+		FVector::DotProduct(MidpointDirection, SwingBasis.GuideUp) > 0.5f);
+	TestTrue(TEXT("half-time Right-plane path does not rise above the hand"),
+		MidpointDirection.Z <= KINDA_SMALL_NUMBER);
+	CheckGuidedNodesOnLine(TEXT("half-time continuous targeted swing"), Guide.GetCurrentTargets(),
+		Sim.StartPinTarget, MidpointDirection);
+
+	// The last quarter continues smoothly towards AimDir without changing hemisphere or adding Up.
+	Guide.Advance(Config.Duration * 0.25f, Sim, Config);
+	const FVector ThreeQuarterDirection = (Guide.GetCurrentTargets()[MiddleNode] -
+		Sim.StartPinTarget).GetSafeNormal();
+	TestTrue(TEXT("three-quarter direction advances towards AimDir"),
+		FVector::DotProduct(ThreeQuarterDirection, LockedAimDirection) >
+		FVector::DotProduct(MidpointDirection, LockedAimDirection));
+	TestTrue(TEXT("three-quarter path is continuous"),
+		FVector::DotProduct(MidpointDirection, ThreeQuarterDirection) > 0.5f);
+	TestTrue(TEXT("three-quarter Right-plane path does not add Up"),
+		ThreeQuarterDirection.Z <= KINDA_SMALL_NUMBER);
+	CheckGuidedNodesOnLine(TEXT("three-quarter continuous arc"), Guide.GetCurrentTargets(),
+		Sim.StartPinTarget, ThreeQuarterDirection);
+	Guide.Advance(Config.Duration * 0.25f, Sim, Config);
 	CheckGuidedNodesOnLine(TEXT("final aim targets"), Guide.GetCurrentTargets(),
 		Sim.StartPinTarget, LockedAimDirection);
+	TestFalse(TEXT("final Assisted boundary reaches the configured solver-owned tail"),
+		Guide.IsGuidedNodeThisFrame(FirstFullySolverTailNode));
 	return true;
 }
 
-// Interpolating the aim envelope per node after resampling to the segment length can widen the spacing again across
-// the range where the weight changes. Whether the same inextensibility contract holds all the way to the final
+// Interpolating the shared guide envelope per node after resampling to the segment length can widen the spacing
+// again across the range where the weight changes. Whether the same inextensibility contract holds through the final
 // current, previous and predicted targets carried on the GPU override.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRopeAimHitGuideSegmentSpacingTest,
 	"DynamicRope.Solver.AimHitGuidePreservesSegmentSpacing",
@@ -146,17 +177,15 @@ bool FRopeAimHitGuideSegmentSpacingTest::RunTest(const FString& Parameters)
 	Config.Duration = 0.5f;
 	Config.SweepAngleDegrees = 120.0f;
 	Config.ComponentRopeLength = Sim.RopeLength;
-	Config.AimHitRootSolverFraction = 0.20f;
 	Config.AimHitTipSolverFraction = 0.25f;
 
 	FRopeWhipGuide Guide;
 	Guide.Begin(FVector::ForwardVector, Sim.Positions[0], FVector::ForwardVector,
 		FVector::UpVector, FVector::RightVector, 1500.0f, FVector::ZeroVector,
 		/*bHasAimTarget*/ true, FVector(100.0f, 0.0f, 0.0f), 0.25f, 0.50f);
-	const FVector TipBeforeSnap = Sim.Positions.Last();
 	Guide.SnapToInitialPose(Sim, Config);
-	TestTrue(TEXT("spacing repair does not teleport the solver-owned tip"),
-		Sim.Positions.Last().Equals(TipBeforeSnap, 0.01f));
+	TestTrue(TEXT("initial spacing repair includes the Assisted tip"),
+		Guide.IsGuidedNodeThisFrame(Sim.Num() - 1));
 
 	const auto CheckGuidedSpacing = [this, &Guide, &Sim](
 		const TCHAR* Stage, const TArray<FVector>& Positions, const FVector& Root)
